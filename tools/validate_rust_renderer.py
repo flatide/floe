@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Validate the in-tree Rust render worker contract and real daemon bridge."""
 
+import inspect
+import io
 import os
 import queue
 import subprocess
@@ -18,7 +20,9 @@ sys.path.insert(0, str(ROOT))
 from floe import RENDERD_VERSION, __version__  # noqa: E402
 from floe.rust_render import (  # noqa: E402
     CELL_QUERY_KINDS,
+    DENSITY_PLAN2,
     RustRenderWorker,
+    _density_plan2,
     _parse_wire_line,
     _pattern_fill,
     _RAW_HEADER_LEN,
@@ -207,6 +211,7 @@ class WorkerContractTests(unittest.TestCase):
             _did_fit=True,
             _sync_label_font_capability=lambda: None,
             _sync_abstract_capability=lambda: None,
+            _sync_density_capability=lambda: None,
             fit=lambda: calls.append("fit"),
             redraw=lambda immediate=False: calls.append(
                 ("redraw", immediate)),
@@ -227,6 +232,7 @@ class WorkerContractTests(unittest.TestCase):
             _did_fit=True,
             _sync_label_font_capability=lambda: None,
             _sync_abstract_capability=lambda: None,
+            _sync_density_capability=lambda: None,
             fit=lambda: calls.append("fit"),
             redraw=lambda immediate=False: calls.append(
                 ("redraw", immediate)),
@@ -416,6 +422,482 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         self.assertTrue(viewer.abstract)
         self.assertTrue(item.sensitive)
         self.assertEqual(redraws, [True])
+
+    def test_gui_density_toggle_follows_backend_capability(self):
+        """The viewer's density toggle (user 2026-10-05: "a density on/off
+        option in the viewer"): View > density under the cut / `v` flip it
+        where the renderer has the density stack - the frame identity
+        changes with it (the displayed and the margin frame are redrawn),
+        the status line says it, the job carries it, a forwarded density=
+        sets it; a renderer without it keeps no state, the menu item is
+        insensitive."""
+        import inspect
+        from types import SimpleNamespace
+        from floe import gui
+
+        class Item:
+            sensitive = None
+
+            def set_sensitive(self, value):
+                self.sensitive = bool(value)
+
+        v = gui.Viewer.__new__(gui.Viewer)
+        v.visible = {(1, 0)}
+        v._depth_key = lambda: ("d", 3)
+        v.cut_px = 3.0
+        v.lod_on = False
+        v.frames_on = True
+        v.labels_on = True
+        v._color_epoch = 1
+        v.cache = SimpleNamespace(is_jobdeck=False)
+        v.thin_mode = "auto"
+        v._density_menu_item = Item()
+        v.density_on = False
+        redraws = []
+        v._on_depth = lambda: redraws.append(True)
+        # without the density stack: nothing to toggle
+        v.worker = SimpleNamespace(supports_label_font_px=True)
+        gui.Viewer._sync_density_capability(v)
+        self.assertFalse(v._density_menu_item.sensitive)
+        self.assertIsNone(gui.Viewer._density_key(v))
+        gui.Viewer._toggle_density(v)
+        self.assertFalse(v.density_on)
+        self.assertEqual(redraws, [])
+        # the Rust renderer's
+        v.worker = SimpleNamespace(supports_density=True)
+        gui.Viewer._sync_density_capability(v)
+        self.assertTrue(v._density_menu_item.sensitive)
+        off = gui.Viewer._render_key(v, "live")
+        gui.Viewer._toggle_density(v)
+        self.assertTrue(v.density_on)
+        self.assertEqual(redraws, [True])
+        self.assertNotEqual(gui.Viewer._render_key(v, "live"), off)
+        # the key, the menu, the status line and both render jobs
+        self.assertIn("self._toggle_density()", inspect.getsource(gui.Viewer._on_key))
+        self.assertIn('"density under the cut\\tv"', inspect.getsource(gui.Viewer._build_menubar))
+        self.assertIn("density:%s", inspect.getsource(gui.Viewer._depth_label))
+        self.assertIn('job["density"] = self.density_on', inspect.getsource(gui.Viewer._submit_render))
+        self.assertIn('job["density"] = self.density_on', inspect.getsource(gui.Viewer._submit_margin))
+        # a forwarded density= (and --density through pending_fields)
+
+        class Status:
+            text = None
+
+            def set_text(self, value):
+                self.text = value
+
+        v.detail, v.depth_value, v.label_font_px = 1, 0, 14
+        v._ddlg = v._fontdlg = None
+        v.dstatus = Status()
+        v._depth_label = lambda: "forwarded state"
+        self.assertTrue(gui.Viewer._forwarded_view_options(v, ["density=off"]))
+        self.assertFalse(v.density_on)
+        self.assertFalse(gui.Viewer._forwarded_view_options(v, ["density=off"]))
+        self.assertTrue(gui.Viewer._forwarded_view_options(v, ["density=on"]))
+        self.assertTrue(v.density_on)
+
+    def test_a_dropped_foreground_render_clears_the_pending_state(self):
+        """Review 2026-09-30: the mouse waits on _pending until the pending
+        generation's first frame; a `dropped` answer for that generation
+        (unreachable today - a stale generation is never sent) must clear it
+        rather than leave the viewer waiting for ever; another generation's
+        `dropped` (a margin's) leaves it be."""
+        from floe.gui import Viewer
+
+        texts = []
+        worker = SimpleNamespace(submit=lambda job: None)
+        v = _stub_margin_viewer(worker, True)
+        v._pending_timer = None
+        v._pending = 5
+        v.rstatus = SimpleNamespace(set_text=texts.append)
+        v._set_cursor = lambda cursor: None
+        v._idle_cursor = lambda: "idle"
+        v._margin_debug = lambda message: None
+        Viewer._handle_result(v, {"kind": "dropped", "gen": 4, "reason": "fit"})
+        self.assertEqual(v._pending, 5, "another generation's drop")
+        Viewer._handle_result(v, {"kind": "dropped", "gen": 5, "reason": "stale"})
+        self.assertIsNone(v._pending)
+        self.assertEqual(texts[-1], "render dropped (stale)")
+
+    def _render_wait_viewer(self, worker, pending=5):
+        """A Viewer shell in the middle of a render (gen == _pending)."""
+        v = _stub_margin_viewer(worker, True)
+        v.gen = v._pending = pending
+        v._pending_timer = None
+        v._pending_t0 = 0.0
+        v._debounce = None
+        v._refining = False
+        v._preview_gen = None
+        v.texts = []
+        v.rstatus = SimpleNamespace(set_text=v.texts.append)
+        v._set_cursor = lambda cursor: None
+        v._idle_cursor = lambda: "idle"
+        v._display = lambda: None
+        v._set_live_status = v.texts.append
+        v._margin_debug = lambda message: None
+        v.mode = "normal"
+        v.rulers = [object()]
+        return v
+
+    def test_esc_cancels_the_render_in_flight_before_the_chain(self):
+        """Field 2026-09-30: Esc during "rendering…" did nothing to the
+        render. Now the first Esc moves the daemon's frontier past the
+        pending generation (worker.cancel(before_gen)), bumps the viewer's
+        generation so a late frame of the cancelled one is not shown, and
+        clears the pending state; the rulers and the rest of the chain wait
+        for the next Esc. A worker without cancel still unblocks; the density
+        round being drawn (refining, nothing pending) is cancelled the same
+        way."""
+        from floe.gui import Viewer
+
+        cancelled = []
+        v = self._render_wait_viewer(SimpleNamespace(submit=lambda job: None, cancel=cancelled.append))
+        Viewer._esc(v)
+        self.assertEqual(cancelled, [6], "before_gen = the cancelled generation + 1")
+        self.assertEqual((v._pending, v.gen, v._refining), (None, 6, False))
+        self.assertEqual(v.texts[-1], "render cancelled")
+        self.assertEqual(len(v.rulers), 1, "the chain waits for the next Esc")
+        # the density round being drawn: refining, nothing pending
+        v = self._render_wait_viewer(SimpleNamespace(submit=lambda job: None, cancel=cancelled.append))
+        v._pending = None
+        v._refining = True
+        Viewer._esc(v)
+        self.assertEqual((cancelled[-1], v._refining, v.gen), (6, False, 6))
+        # a worker without cancel (the KLayout service): the state clears anyway
+        v = self._render_wait_viewer(SimpleNamespace(submit=lambda job: None))
+        Viewer._esc(v)
+        self.assertIsNone(v._pending)
+
+    def test_a_wheel_zoom_during_a_render_supersedes_it(self):
+        """The mouse no longer waits for the frame (2026-09-30): a wheel
+        event while a render is pending reaches _zoom_at (the redraw it
+        triggers submits the next generation, which the daemon runs while
+        the old one stops at its next look)."""
+        from floe import gui
+        from floe.gui import Viewer
+
+        # the handler reads Gdk's masks and directions: a stand-in works
+        # without a display (the margin tests' shell has none)
+        fake_gdk = SimpleNamespace(
+            ModifierType=SimpleNamespace(BUTTON1_MASK=1, BUTTON2_MASK=2, BUTTON3_MASK=4),
+            ScrollDirection=SimpleNamespace(UP="up", DOWN="down", SMOOTH="smooth"))
+        zoomed = []
+        v = self._render_wait_viewer(SimpleNamespace(submit=lambda job: None))
+        v._drag = v._zoomdrag = None
+        v._zoom_at = lambda x, y, factor: zoomed.append((x, y, factor))
+        ev = SimpleNamespace(state=0, direction="up", x=10.0, y=20.0)
+        with mock.patch.object(gui, "Gdk", fake_gdk):
+            self.assertTrue(Viewer._on_scroll(v, None, ev))
+        self.assertEqual(len(zoomed), 1)
+        self.assertEqual(zoomed[0][:2], (10.0, 20.0))
+
+    def test_a_settled_frame_of_this_view_does_not_render_again(self):
+        """Field 2026-09-30 ("rendering repeats"): 0.12.251 re-rendered
+        after every settled frame that _covered did not accept - and with the
+        margin off _covered wants comfort around the view that a fresh
+        viewport frame (<= 2 px snap slack) never has. A frame that holds the
+        view tops the margin up; one the view has left renders it; a pending
+        debounce or a pan in progress does neither."""
+        from floe.gui import Viewer
+
+        calls = []
+        v = self._render_wait_viewer(SimpleNamespace(submit=lambda job: None))
+        v._pending = None
+        v._drag = None
+        v.margin_on = False
+        v.redraw = lambda immediate=False: calls.append("redraw")
+        v._schedule_margin = lambda: calls.append("margin")
+        b = v.view_bbox()
+        # the exact viewport frame: the snap grows it by 2 px on one side only
+        v.last_frame = (None, (b[0], b[1] - 2 * v.spp, b[2] + 2 * v.spp, b[3]), v.spp, _MARGIN_KEY)
+        self.assertFalse(Viewer._covered(v, b, "live"), "the reuse test refuses it (margin off)")
+        Viewer._settle_after_frame(v)
+        self.assertEqual(calls, ["margin"], "a frame of this view renders nothing again")
+        # the view moved away while the frame was drawn, nothing submitted
+        v.cx += 500 * v.spp
+        Viewer._settle_after_frame(v)
+        self.assertEqual(calls[-1], "redraw")
+        # a render of the new view already on its way, or a pan in progress
+        n = len(calls)
+        v._debounce = 17
+        Viewer._settle_after_frame(v)
+        v._debounce, v._drag = None, (1.0, 2.0)
+        Viewer._settle_after_frame(v)
+        self.assertEqual(len(calls), n)
+
+    def test_an_older_generations_error_leaves_the_pending_render(self):
+        """An error of a superseded generation (its late failure) must not
+        clear the state of the one now pending; the pending one's, and an
+        adapter failure without a generation, must."""
+        from floe.gui import Viewer
+
+        v = self._render_wait_viewer(SimpleNamespace(submit=lambda job: None))
+        Viewer._handle_result(v, {"kind": "error", "gen": 4, "msg": "late"})
+        self.assertEqual(v._pending, 5)
+        Viewer._handle_result(v, {"kind": "cancelled", "gen": 4, "phase": "render"})
+        self.assertEqual(v._pending, 5, "an older generation's cancellation")
+        Viewer._handle_result(v, {"kind": "cancelled", "gen": 5, "phase": "queued"})
+        self.assertIsNone(v._pending)
+        v = self._render_wait_viewer(SimpleNamespace(submit=lambda job: None))
+        Viewer._handle_result(v, {"kind": "error", "msg": "submit failed"})
+        self.assertIsNone(v._pending, "an adapter failure carries no generation")
+
+    def test_the_bar_shows_the_brief_perf_line_and_the_log_keeps_the_whole(self):
+        """User 2026-10-01: "the log has it all; the bar should show only
+        what is needed now, without an ellipsis". perf_status gives the
+        full line - the terminal log and the bar's tooltip - and the brief
+        one the lower bar shows: the frame's time and its load / draw split,
+        what pass 2 lit and its plan (nodes, reads, the cells' dots; a
+        probe, a fit past one pass with its floor, threads and decoded pages
+        only when there are any), the work bin (with the hierarchy walk when
+        it is off), the cut and its budget fit, and what the picture lacks.
+        Pass 2's shapes under the cut look like dots too but are no cell's:
+        a frame lights them with no cell dot (user 2026-10-01: "two draws
+        and dots, yet dot items 0")."""
+        from floe.gui import Viewer, perf_status
+
+        # the field's frame of 2026-10-01 (renderd 0.12.242)
+        res = {
+            "tiles": 10552, "new": 9172, "ms": 4324, "load_ms": 250,
+            "draw_ms": 3916, "phase_plan": 6, "phase_delta": 152,
+            "phase_apply": 92, "cut_um": 7.56, "plan_ms": 6.1,
+            "frame_rects": 0, "png_ms": 0.0, "publish_ms": 7.3,
+            "frame_format": "raw", "raster_jobs": 4, "render_tiles": 15,
+            "tile_px": 384, "frame_width": 1920, "frame_height": 1080,
+            "work_bin_items": 2196, "member_paints": 686000,
+            "hier_cells_visited": 2007763, "subtrees_pruned": 1735783,
+            "plan_culls": {"shape_cut": 1, "shape_cut_max": 1,
+                           "pages_size": 538, "child_bvh": 31601},
+            "summary": {"none": "off"},
+            "density_stack": {"lit": 619861}, "density_dots": {"items": 589148},
+            "density_block": 4.0, "density_floor": 1.0,
+            "density_us": {"plan2_us": 3494000, "decode2_us": 812000, "raster2_us": 24310000},
+            "density_plan2": {"probe_us": 0, "probes": 0, "fit_us": 3494000,
+                              "passes": 1, "regions": 24, "nodes": 4000000,
+                              "page_nodes": 0, "page_candidates": 19000,
+                              "threads": 1, "reads": 15235408,
+                              "items": 2655158},
+            "density_pages": {"planned": 266, "in_hand": 266, "decoded": 0},
+        }
+        full, brief = perf_status(res, ", depth 3")
+        self.assertEqual(
+            brief,
+            "4324 ms = 250 load + 3916 draw · density: lit 620k px, pass 2"
+            " plan 3494 ms (nodes 4.0M, reads 15.2M, cell dots 2.7M) · bin"
+            " 2196 items · cut<7.56um")
+        # the log line keeps every diagnostic, as before
+        for part in (
+                "live [density: dots, lit 620k px, block 4 px, floor 1 px,"
+                " pass 2 plan 3494 ms (probe 0 ms x0, fit 3494 ms x1 passes"
+                " on 1 threads, 24 regions, nodes 4.0M, page nodes 0, pages"
+                " 19k, reads 15.2M, cell dots 2.7M), 0 pages, pass 2 decode 812"
+                " ms, raster 24310 ms] (10552 tiles,"
+                " +9172 new,"
+                " 4324 ms = 250 load [6 plan+152 delta+92 apply] + 3916 draw"
+                ", depth 3, cut<7.56um (larger side), plan 6.1ms/0 frontier",
+                ", rust 4j 15tiles@384px 1920x1080", ", bin 2196 items",
+                ", paints 686k", ", hier 2.0M/1.7M pruned",
+                ", cut pages 538/", ", summary: none (off))"):
+            self.assertIn(part, full)
+
+        # what the bar adds only when it is there: the bin off with its
+        # walk, a probe, a fit with its floor, threads, decoded pages, the
+        # budget fit, a picture short of pages, partial labels, evictions
+        res.pop("work_bin_items")
+        res.update(work_bin_overflow_items=786433, other_ms=1693,
+                   over_budget_pages=3, labels_truncated=True,
+                   cache_evicted=1200, density_floor=15.0)
+        res["plan_culls"].update(fit_pct=200, fit_over=1)
+        res["density_plan2"].update(probes=1, probe_us=637000, passes=5,
+                                    threads=4, probes_over=1, thinned=1)
+        # where the cells' dot items came from (2026-10-02): the ones there
+        # are, a chunk of a point list one item, in the log line only
+        res["density_plan2"].update(by_nodes=900000, by_placements=1200000, by_arrays=55158,
+                                    by_list_members=470000, by_list_chunks=20000,
+                                    by_chunk_members=5120000, by_array_members=10000,
+                                    by_pages=257, map_updates=12)
+        # pass 2's reserve, what pass 1 left (2026-10-02): the log line's
+        res["density_plan2"].update(reserve_mb=896)
+        # the pages placed by their occupancy grids (design.ovb, 2026-10-02):
+        # after the pages, in the log line
+        res["density_plan2"].update(occ_pages=250, occ_decoded=6)
+        # the point-list chunks passed over in full blocks and those read at
+        # a step (2026-10-03): right after the chunks, with their members
+        res["density_plan2"].update(full_chunks=2900000, full_members=742000000,
+                                    sampled_chunks=60000, sampled_members=15360000)
+        # the free pixels of the cells pass 2 planned (2026-10-03): after the
+        # regions, in the log line
+        res["density_plan2"].update(free_top=1310850, free_others=210000)
+        # zoomed out past the fit view the dots thin (2026-10-04): after the
+        # reserve, in the log line
+        res["density_plan2"].update(dot_gain_milli=640)
+        # a dot block too sparse for the detail is left out (2026-10-04):
+        # after the gain, the dots it needs of a block's pixels and the blocks
+        res["density_plan2"].update(dot_gate_min=2, dot_gated=12000)
+        res["density_pages"].update(decoded=206, over_budget=3)
+        full, brief = perf_status(res)
+        self.assertIn("[density: dots, lit 620k px, block 4 px, floor 15 px, reserve 896 MB, dots x0.64, gate 2/16 px (12k out), pass 2 plan", full)
+        self.assertEqual(full.count("gate 2/16 px"), 1, full)
+        # the brightness (2026-10-05): its gain after the reserve, in place
+        # of the dots' gain and gate
+        bright = dict(res, density_plan2=dict(res["density_plan2"], bright_milli=2000, dot_gain_milli=1000, dot_gate_min=1, dot_gated=0))
+        full_bright, _ = perf_status(bright)
+        self.assertIn("reserve 896 MB, bright x2, cells by box, pass 2 plan", full_bright)
+        # what a cell under the cut stands for (2026-10-05): its shapes'
+        # cover where the index has it
+        covered = dict(bright, density_plan2=dict(bright["density_plan2"], cell_cover=1))
+        self.assertIn("bright x2, cell cover, pass 2 plan", perf_status(covered)[0])
+        patterned = dict(covered, density_plan2=dict(covered["density_plan2"], pattern=1))
+        with mock.patch.dict(os.environ, {"FLOE_RUST_DENSITY_PATTERN": "off"}):
+            full_pattern, _ = perf_status(patterned)
+        self.assertIn("pattern, cover x2, cell cover, pass 2 plan", full_pattern)
+        self.assertNotIn("bright x2", full_pattern)
+        # The result, not the GUI's environment, decides the label. Old
+        # replies and an explicit kill-switch reply keep the legacy label.
+        legacy = dict(covered, density_plan2=dict(covered["density_plan2"], pattern=0))
+        with mock.patch.dict(os.environ, {"FLOE_RUST_DENSITY_PATTERN": "on"}):
+            self.assertIn("bright x2, cell cover", perf_status(legacy)[0])
+        # the pages a budget left out that their occupancy stands in for
+        # (2026-10-05): with what went over the budget
+        stood = dict(res, density_plan2=dict(res["density_plan2"], stood_in=7))
+        full_stood, brief_stood = perf_status(stood)
+        self.assertIn("3 pages left out, 7 pages by occupancy instead", full_stood)
+        self.assertIn("7 pages by occupancy instead", brief_stood)
+        # the density alone (FLOE_RUST_DENSITY_ONLY=on, 2026-10-04): said
+        # first, the viewer and renderd sharing the environment
+        with mock.patch.dict(os.environ, {"FLOE_RUST_DENSITY_ONLY": "on"}):
+            alone, _ = perf_status(res)
+        self.assertIn("[density: dots, density only, lit 620k px, block 4 px", alone)
+        self.assertIn(" passes on 4 threads, 24 regions (free top 1.3M, others 210k px), nodes ", full)
+        # the chunks' members right after the chunks (0.12.268 put them last:
+        # the field's `list chunks 78, array members 57k of 354 members`)
+        self.assertIn(
+            "reads 15.2M, cell dots 2.7M [nodes 900k, placements 1.2M, arrays"
+            " 55k, list members 470k, list chunks 20k of 5.1M members, list"
+            " chunks in full blocks 2.9M of 742.0M members, list chunks sampled"
+            " 60k of 15.4M members, array members 10k, pages 257 (250 by occupancy), pages decoded under the floor 6; hash map 12]), 206 pages", full)
+        # what pass 2's reserve kept out (2026-10-01): in the log line too
+        self.assertIn(", 206 pages, pass 2 over budget: floor probe, thinned, 3 pages left out, pass 2 decode 812 ms, raster 24310 ms]", full)
+        self.assertEqual(
+            brief,
+            "4324 ms = 250 load + 3916 draw + 1693 other · density: lit 620k"
+            " px, pass 2 plan 3494 ms (probe 637 ms x1, 5 passes, floor 15 px,"
+            " 4 threads, nodes 4.0M, reads 15.2M, cell dots 2.7M), 206"
+            " pages decoded, pass 2 over budget: floor probe, thinned, 3 pages"
+            " left out · bin off(cap@786k), hier 2.0M/1.7M pruned"
+            " · cut<7.56um x2 to fit budget, STILL OVER · 3 pages over"
+            " budget (not drawn) · labels partial · evict 1200")
+        # these layers' pages decode larger than the planner estimates
+        # (2026-10-05): the scale its budget was cut by, with the fit
+        scaled = dict(res, plan_culls=dict(res["plan_culls"], fit_scale=1180))
+        self.assertIn("x2 to fit budget, STILL OVER, pages x1.18 their estimate", perf_status(scaled)[0])
+        # pass 1's fit top plane first (0.12.318, the field chip 2026-10-07:
+        # with 7.59 and 14.367 on, 7.59 alone drew): the layers kept whole
+        # from the top, the one it ended in with its classes, those left out
+        ranked = dict(res, plan_culls=dict(res["plan_culls"], fit_pct=100, fit_over=0, fit_thin=1, fit_full_pct=862,
+                                           fit_none_pct=431, fit_ranked=1, fit_layers_whole=225,
+                                           fit_layer_edge="56/3", fit_layers_out=223))
+        self.assertIn("cut<7.56um top 225 whole, 56/3 (1/2 below x8.62, none below x4.31), 223 left out to fit budget",
+                      perf_status(ranked)[1])
+        dropped = dict(res, plan_culls=dict(res["plan_culls"], fit_pct=100, fit_over=0, fit_thin=0, fit_full_pct=0,
+                                            fit_none_pct=0, fit_ranked=1, fit_layers_whole=1,
+                                            fit_layer_edge=None, fit_layers_out=1))
+        self.assertIn("cut<7.56um top 1 whole, 1 left out to fit budget", perf_status(dropped)[1])
+        # the budget fit decided for a new scale before its plan (2026-10-05:
+        # it was part of `other`): its own item from 100 ms, in the log line
+        # whenever there was one
+        probed_full, probed_brief = perf_status(dict(res, fit_probe_ms=1054.2, other_ms=639))
+        self.assertTrue(probed_brief.startswith("4324 ms = 250 load + 3916 draw + 1054 fit probe + 639 other · "), probed_brief)
+        self.assertIn(", fit probe 1054.2ms", probed_full)
+        quick_full, quick_brief = perf_status(dict(res, fit_probe_ms=28.0))
+        self.assertNotIn("fit probe", quick_brief)
+        self.assertIn(", fit probe 28.0ms,", quick_full)
+        # pass 2 drawn from the occupancy density (FLOE_RUST_DENSITY_OCC=on,
+        # 2026-10-06): its time, cell and layers in place of the plans'
+        # breakdown, in the bar and the log line
+        occ_res = dict(res, density_plan2=dict(res["density_plan2"], occ_layers=449, occ_cell_nm=16000),
+                       density_us=dict(res["density_us"], plan2_us=12000))
+        occ_full, occ_brief = perf_status(occ_res)
+        self.assertIn("density: lit 620k px, pass 2 by occupancy 12 ms (16 um cells, 449 layers), 206 pages decoded", occ_brief)
+        self.assertIn(", pass 2 by occupancy 12 ms (16 um cells, 449 layers), 206 pages,", occ_full)
+        self.assertNotIn("pass 2 plan", occ_full + occ_brief)
+        # the layers this frame made, in both; what the cache holds, in the
+        # log line (2026-10-07)
+        made = dict(occ_res, density_plan2=dict(occ_res["density_plan2"], occ_made=12, occ_cache_kb=86016))
+        made_full, made_brief = perf_status(made)
+        self.assertIn("pass 2 by occupancy 12 ms (16 um cells, 449 layers, 12 made)", made_brief)
+        self.assertIn("pass 2 by occupancy 12 ms (16 um cells, 449 layers, 12 made; cache 84.0 MB)", made_full)
+        # nor what a cell under the cut stands for: the plans' alone
+        occ_bright = dict(occ_res, density_plan2=dict(occ_res["density_plan2"], bright_milli=2000, pattern=1))
+        bright_full, _ = perf_status(occ_bright)
+        self.assertIn("pattern, cover x2, dots x0.64, gate 2/16 px (12k out), pass 2 by occupancy 12 ms", bright_full)
+        self.assertNotIn("cells by box", bright_full)
+        self.assertNotIn("cell cover", bright_full)
+        # no hierarchy summary to go by: the probe walked every cell
+        self.assertIn(", fit probe 28.0ms (walk),", perf_status(dict(res, fit_probe_ms=28.0, fit_probe_walk=True))[0])
+        self.assertNotIn("fit probe", full)
+
+        # the synthetic chip at medium, 694 um around (14722, 17090) um: no
+        # cell under the cut, the shapes of 1-3 px drawn from 54 pages
+        _, brief = perf_status({
+            "tiles": 54, "ms": 69, "load_ms": 0, "draw_ms": 63,
+            "cut_um": 2.08, "work_bin_items": 43000,
+            "density_stack": {"lit": 83810, "top": 0, "lower": 78555,
+                              "covered": 24786, "claimed": 83810},
+            "density_dots": {"items": 0, "over": 0},
+            "density_us": {"plan2_us": 1200},
+            "density_plan2": {"probe_us": 0, "probes": 0, "fit_us": 1200,
+                              "passes": 1, "regions": 15, "nodes": 3153,
+                              "page_nodes": 0, "page_candidates": 54,
+                              "threads": 1, "reads": 0, "items": 0},
+            "density_pages": {"planned": 54, "in_hand": 18, "decoded": 36}})
+        self.assertEqual(
+            brief,
+            "69 ms = 0 load + 63 draw · density: lit 84k px, pass 2 plan 1 ms"
+            " (nodes 3153, reads 0, cell dots 0), 36 pages decoded · bin 43k"
+            " items · cut<2.08um")
+
+        # a frame without the density stack, a deck's passes
+        _, brief = perf_status({"tiles": 4, "ms": 52, "load_ms": 2,
+                                "draw_ms": 50, "deck": {
+                                    "passes": 12, "frame_passes": 3,
+                                    "passes_skipped": 1, "unique_pages": 40,
+                                    "pages_summed": 90, "scene_us": 12000,
+                                    "frame_raster_us": 55000,
+                                    "composite_us": 3000,
+                                    "pass_bytes_max": 5e7,
+                                    "summary_passes": 2}})
+        self.assertEqual(
+            brief,
+            "52 ms = 2 load + 50 draw · deck 12 passes, summary 2 passes"
+            " (not pickable)")
+
+        # the bar shows the brief line, its tooltip the whole; a state
+        # without a brief one (a pan, no layers) shows as given
+        shown = {}
+        v = SimpleNamespace(
+            dbu=0.001,
+            vstatus=SimpleNamespace(set_text=lambda t: shown.update(view=t)),
+            pstatus=SimpleNamespace(
+                set_text=lambda t: shown.update(text=t),
+                set_tooltip_text=lambda t: shown.update(tip=t)))
+        Viewer._set_status(v, (0, 0, 1000, 500), full, brief)
+        self.assertEqual((shown["text"], shown["tip"]), (brief, full))
+        Viewer._set_status(v, (0, 0, 1000, 500), "no layers visible")
+        self.assertEqual((shown["text"], shown["tip"]),
+                         ("no layers visible", "no layers visible"))
+
+        # the first frame after a load: the log line splits the load, the
+        # bar says how long it took
+        v._load_marks = {"t0": 100.0, "cache": 101.0, "service": 110.0,
+                         "open": {"renderd_open_ms": 8800}}
+        with mock.patch("floe.gui.time.monotonic", return_value=112.5):
+            load, load_brief = Viewer._load_note(v, {})
+        self.assertEqual(
+            load, "loaded in 12.5 s (cache 1.0 s + service 9.0 s [renderd"
+            " open 8.8 s] + first frame 2.50 s) · ")
+        self.assertEqual(load_brief, "loaded in 12.5 s · ")
+        self.assertEqual(Viewer._load_note(v, {}), ("", ""))
 
     def test_margin_prefetch_is_a_rust_only_reuse_capability(self):
         """P0 review (2026-09-05): the F2R-17 margin prefetch lives in
@@ -767,10 +1249,12 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         # the old floor (the minimap's) and the new start width alike
         self.assertLessEqual(minimum, MINIMAP_PX + 16 - 40, minimum)
         self.assertLess(minimum, LEFT_PANE_PX)
-        # the controls sit in a wrapping row, the build button apart
+        # the controls sit in a wrapping row, the build button apart: the
+        # highlight check and `zoom` (the `root` and `top` buttons went,
+        # user 2026-10-04 - a double-click on a row sets the view root)
         row = v._cellwin._zoom.get_parent().get_parent()
         self.assertIsInstance(row, gui.Gtk.FlowBox)
-        self.assertEqual(len(row.get_children()), 4)
+        self.assertEqual(len(row.get_children()), 2)
         self.assertFalse(v._cellwin._build.get_visible())
         # user call 2026-09-29: thirty nested levels expanded (570 px of
         # indentation) must not widen the page - the tree scrolls
@@ -858,11 +1342,57 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertIsNone(v._minimap_world_point(x0 - MINIMAP_PAD - 1,
                                                      mid_y))
 
+    def test_under_a_view_root_the_depth_counts_to_the_roots_height(self):
+        """User 2026-09-30: under a view root the depth counts from the root
+        (the planner always did) but the viewer kept the file top's height -
+        the label read d/16 and `<` walked through levels that changed
+        nothing. Now the deepest level is the root's height: the label
+        shows d/h (`*` at or past h), the steps clamp to [0, h], and the
+        depth itself is kept so `top` gives the view back."""
+        import types
+        from floe.gui import Viewer
+        v = Viewer.__new__(Viewer)
+        v.meta = {}
+        v.abstract = False
+        v.max_depth = 16
+        v._view_root = None
+        v._ddlg = None
+        v._on_depth = lambda: None
+        v.depth_value = 3
+        self.assertEqual(Viewer._depth_label(v), "depth: 3/16")
+        v._view_root = {"cell": 5, "name": "BLK", "bbox": [0, 0, 5000, 4000], "height": 2}
+        self.assertEqual(Viewer._depth_label(v), "depth: */2", "3 >= 2 levels: the whole root")
+        Viewer._depth_step(v, -1)
+        self.assertEqual((v.depth_value, Viewer._depth_label(v)), (1, "depth: 1/2"))
+        Viewer._depth_step(v, +1)
+        Viewer._depth_step(v, +1)
+        self.assertEqual(v.depth_value, 2, "clamped to the root's height")
+        v.depth_value = 999
+        Viewer._depth_step(v, -1)
+        self.assertEqual(v.depth_value, 1, "full steps down from the root's deepest level")
+        v.depth_value = 7
+        v._view_root = None
+        self.assertEqual(Viewer._depth_label(v), "depth: 7/16", "back at the top, the depth kept")
+        titles, labels = [], []
+        v._minimap_bases, v.last_frame, v._margin_frame, v._frame_anchor = {}, None, None, None
+        v._clear_pending = lambda: None
+        v._job_keys = {}
+        v._cell_hl = v._cell_hl_key = None
+        v._cellwin = None
+        v._title_base = "floe - x"
+        v.window = types.SimpleNamespace(set_title=titles.append)
+        v.dstatus = types.SimpleNamespace(set_text=labels.append)
+        v.fit = lambda: None
+        v._cell_hl_query = lambda: None
+        v._view_root = {"cell": 5, "name": "BLK", "bbox": [0, 0, 5000, 4000], "height": 2}
+        Viewer._root_changed(v)
+        self.assertEqual(labels[-1], "depth: */2", "a root change refreshes the label")
+
     def test_view_root_moves_the_die_the_render_state_and_the_queries(self):
         """SPEC-VIEWER §8c: the selected cell as the view root - the die
         (fit, clamp, minimap) becomes its bbox, the render state and
         every render/clip/cell query carry its index, the stale frame
-        and the margin go, and `top` returns everything."""
+        and the margin go, and back at the top everything returns."""
         import types
         from floe.gui import Viewer
         v = Viewer.__new__(Viewer)
@@ -890,7 +1420,6 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         v._cell_hl_on = True
         # the panel: only what the root path touches
         v._cellwin = types.SimpleNamespace(
-            _top=types.SimpleNamespace(set_sensitive=lambda on: None),
             _info=types.SimpleNamespace(set_text=lambda t: None))
         v._cell_sel = (0, 5, "BLK")
         v._frontier_depths = [[[0, 0, 1, 1, 0]]]
@@ -908,7 +1437,8 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         self.assertIsNone(v._root_ci())
         self.assertEqual(v._die_bbox(), [0, 0, 20000, 12000])
         self.assertEqual(v._minimap_frontier_depth(), 0)
-        # Ctrl+T asks for the selected cell; the answer applies the root
+        # the Cell menu (a double-click on the row alike) asks for the
+        # selected cell; the answer applies the root
         v._cell_set_root()
         self.assertEqual((sent[-1]["kind"], sent[-1]["cell"]), ("cells", 5))
         self.assertEqual(v._cell_pending[sent[-1]["seq"]][0], "root_set")
@@ -957,6 +1487,54 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         v._cell_set_root()
         self.assertEqual(len(sent), n)
         self.assertIn("jobdeck", status[-1])
+
+    def test_a_double_click_in_the_cell_tree_sets_the_view_root(self):
+        """User 2026-10-04: "double-clicking a cell in the cell tree makes
+        it the root (the root button's job); remove the root and top
+        buttons". A double-click (row-activated, Enter alike) on a cell
+        row sets it as the view root - the tree's rows and the find
+        results alike; on the layout's top cell it goes back to the top;
+        a placeholder or a `more` row does nothing; a jobdeck has no view
+        root, its rows zoom as before."""
+        import types
+        from floe import gui
+        gui.import_gtk()
+        Gtk = gui.Gtk
+        store = Gtk.TreeStore(str, str, int, int, bool, str)
+        results = Gtk.ListStore(str, str, int, int)
+        top = store.append(None, ["TOP", "", 0, 0, True, "cell"])
+        blk = store.append(top, ["BLK", "×3", 0, 5, True, "cell"])
+        holder = store.append(blk, ["…", "", 0, 5, False, "placeholder"])
+        more = store.append(top, ["… 2 more (find by name)", "", 0, -1, True, "more"])
+        found = [results.append(["BLK", "3", 0, 5]), results.append(["TOP", "", 0, 0])]
+        v = gui.Viewer.__new__(gui.Viewer)
+        v._cellwin = types.SimpleNamespace(_store=store, _results=results)
+        v._cell_sources = [{"src": 0}]
+        v.cache = types.SimpleNamespace(is_jobdeck=False)
+        v._cell_sel = None
+        calls = []
+        v._cell_set_root = lambda: calls.append(("root", v._cell_sel))
+        v._cell_root_top = lambda: calls.append(("top", v._cell_sel))
+        v._cell_zoom_selected = lambda: calls.append(("zoom", v._cell_sel))
+
+        def click(model, it):
+            gui.Viewer._on_cell_activate(v, types.SimpleNamespace(get_model=lambda: model), model.get_path(it), None)
+
+        click(store, blk)
+        click(store, top)
+        click(store, holder)
+        click(store, more)
+        self.assertEqual(calls, [("root", (0, 5, "BLK")), ("top", (0, 0, "TOP"))])
+        del calls[:]
+        for it in found:
+            click(results, it)
+        self.assertEqual(calls, [("root", (0, 5, "BLK")), ("top", (0, 0, "TOP"))])
+        # a jobdeck: its sources are the roots, a cell row zooms
+        del calls[:]
+        v.cache = types.SimpleNamespace(is_jobdeck=True)
+        v._cell_sources = [{"src": 0}, {"src": 1}]
+        click(store, blk)
+        self.assertEqual(calls, [("zoom", (0, 5, "BLK"))])
 
     def test_menus_and_dialogs_hand_the_keys_back_to_the_canvas(self):
         """Field 2026-09-05: after using a menu, g and the other key
@@ -1191,6 +1769,31 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         self.assertFalse(Viewer._after_allocate(v, (800, 600)))
         self.assertEqual(events[1:], ["redraw", "repaint"], "superseded")
 
+    def test_cancel_sends_the_frontier_and_a_cancelled_render_is_told(self):
+        """The viewer's Esc (2026-09-30): cancel(before_gen) writes
+        `cancel before_gen=N`; the daemon's `cancelled gen=N phase=...` for a
+        render reaches the GUI as a result and drops the job, its
+        `cancelled before_gen=F` ack (no generation) says nothing."""
+        with tempfile.TemporaryDirectory() as directory:
+            binary = os.path.join(directory, "floe-renderd")
+            with open(binary, "w", encoding="ascii") as script:
+                script.write("#!/bin/sh\n")
+            os.chmod(binary, 0o755)
+            with mock.patch.dict(os.environ, {"FLOE_RENDERD_BIN": binary}, clear=False):
+                worker = RustRenderWorker(FakeCache(directory))
+            sent = []
+            worker._send = sent.append
+            worker.alive = lambda: True
+            worker.cancel(7)
+            self.assertEqual(sent, ["cancel before_gen=7"])
+            with worker._jobs_lock:
+                worker._jobs[6] = {"job": {}}
+            worker._handle_line("cancelled", {"gen": "6", "phase": "render"}, "")
+            self.assertEqual(worker.res.get_nowait(), {"kind": "cancelled", "gen": 6, "phase": "render"})
+            self.assertNotIn(6, worker._jobs)
+            worker._handle_line("cancelled", {"before_gen": "7"}, "")
+            self.assertTrue(worker.res.empty(), "the ack of a cancel is not a result")
+
     def test_parses_wire_fields(self):
         kind, fields = _parse_wire_line(
             "frame gen=7 png=/tmp/f.png partial=1 deferred=9")
@@ -1342,6 +1945,27 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             worker._handle_line("styled", {"epoch": "1"}, "")
             self.assertFalse(os.path.exists(style_path))
 
+    def test_density_plan2_accepts_the_optional_fields(self):
+        legacy = "/".join(str(i) for i in range(39))
+        expected = dict(zip(DENSITY_PLAN2[:39], range(39)))
+        expected.update(dict.fromkeys(DENSITY_PLAN2[40:], 0))
+        self.assertEqual(_density_plan2(legacy), dict(expected, pattern=0))
+        self.assertEqual(_density_plan2(legacy + "/1"), dict(expected, pattern=1))
+        self.assertEqual(_density_plan2(legacy + "/0"), dict(expected, pattern=0))
+        self.assertEqual(_density_plan2(legacy + "/1/300/200/4/9"),
+                         dict(expected, pattern=1, mask_tests=300, mask_pruned=200, mask_fallbacks=4, stages=9))
+        # the occupancy density's layers and cell, nm (2026-10-06)
+        self.assertEqual(_density_plan2(legacy + "/1/300/200/4/9/449/16000"),
+                         dict(expected, pattern=1, mask_tests=300, mask_pruned=200, mask_fallbacks=4, stages=9,
+                              occ_layers=449, occ_cell_nm=16000))
+        # and the layers made, the cache's KiB (2026-10-07)
+        self.assertEqual(_density_plan2(legacy + "/1/300/200/4/9/449/16000/12/86016"),
+                         dict(expected, pattern=1, mask_tests=300, mask_pruned=200, mask_fallbacks=4, stages=9,
+                              occ_layers=449, occ_cell_nm=16000, occ_made=12, occ_cache_kb=86016))
+        for malformed in ("-", "", "1/2", legacy + "/bad", legacy + "/1/2", legacy + "/1/300/200/4/9/449",
+                          legacy + "/1/300/200/4/9/449/16000/12"):
+            self.assertIsNone(_density_plan2(malformed), malformed)
+
     def test_render_command_and_frame_result_match_parent_schema(self):
         with tempfile.TemporaryDirectory() as directory:
             binary = os.path.join(directory, "floe-renderd")
@@ -1383,6 +2007,21 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             worker._submit_render(dict(job, gen=98, root=17))
             rooted = commands.pop()
             self.assertTrue(rooted.endswith(" root=17"), rooted)
+            # the viewport travels when the frame is not it (a margin: the
+            # dots' fit view is the viewport's, 2026-10-04); not for itself
+            self.assertNotIn(" vw=", commands[0])
+            worker._submit_render(dict(job, gen=99, view=job["bbox"]))
+            self.assertNotIn(" vw=", commands.pop())
+            worker._submit_render(dict(job, gen=100, bg=True, bbox=(-9.5, -3.5, 30.5, 16.5), w=40, h=20, view=job["bbox"]))
+            self.assertTrue(commands.pop().endswith(" bg=on vw=20 vh=10"))
+            # the viewer's density toggle (2026-10-05) travels when set;
+            # absent, renderd's environment decides
+            self.assertTrue(RustRenderWorker.supports_density)
+            self.assertNotIn(" density=", commands[0])
+            worker._submit_render(dict(job, gen=101, density=True))
+            self.assertTrue(commands.pop().endswith(" density=on"))
+            worker._submit_render(dict(job, gen=102, density=False))
+            self.assertTrue(commands.pop().endswith(" density=off"))
             self.assertIn("frame_cache=1", commands[0])
             self.assertIn("labels=0", commands[0])
             # the page hairline policy rides with every frame; a plain
@@ -1446,6 +2085,11 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "fit_pct": "283", "fit_cull": "1", "fit_over": "0",
                 "fit_thin": "3", "fit_full_pct": "850", "fit_none_pct": "400",
                 "fit_fixed": "1", "fit_redecided": "0",
+                "fit_scale": "1180", "fit_refits": "1",
+                # pass 1's fit top plane first (0.12.318): the layers whole,
+                # the one it ended in, those left out
+                "fit_ranked": "1", "fit_layers_whole": "3",
+                "fit_layer_edge": "7/59", "fit_layers_out": "2",
                 "sub_cut_boxes": "1234", "sub_cut_box_over": "5",
                 "sub_cut_box_level": "1", "sub_cut_box_unsure": "2",
                 "shape_cut": "4392", "shape_cut_max": "1",
@@ -1456,12 +2100,19 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "stored_rep_spans": "100", "stored_rep_painted_pixels": "8000",
                 "once_tiles": "5", "once_passes": "400", "once_items": "77",
                 # the density stack's lit/top/lower/covered/claimed pixels, pass
-                # 2's pages planned/in_hand/decoded/over_budget, its times and bins
+                # 2's pages planned/in_hand/decoded/over_budget, its times and bins,
+                # the sub-cut dots' items/over, floor and block
                 "density_stack": "90/40/30/1000/200", "density_pages": "12/7/4/1",
-                "density_us": "100/20/30/4/50", "density_bin": "600/1/0",
+                "density_us": "100/20/30/4/50/60", "density_bin": "600/1/0",
+                "density_dots": "3500/2", "density_floor": "0.250",
+                "density_block": "8",
+                "density_plan2": "3000/4000/1/3/24/120000/900000/45000/4/700000/90000/1/2"
+                                 "/30000/20000/5000/34860/40/9000/100/3/7/896/2/1/500/128000/60/15360/40000/7000/640/1200/2/2000/9/1/1500/800",
                 # 1.5 ms behind earlier commands, then 60 ms of renderd wall:
-                # its phases above add up to 45.25 ms
+                # its phases above add up to 45.25 ms, and 3 ms went on the
+                # new scale's fit decision before the plan
                 "queue_us": "1500", "wall_us": "60000",
+                "fit_probe_us": "3000", "fit_probe_walk": "1",
             })
             result = worker.res.get_nowait()
             self.assertEqual(result["kind"], "frame")
@@ -1476,6 +2127,9 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 "fit_pct": 283, "fit_cull": 1, "fit_over": 0,
                 "fit_thin": 3, "fit_full_pct": 850, "fit_none_pct": 400,
                 "fit_fixed": 1, "fit_redecided": 0,
+                "fit_scale": 1180, "fit_refits": 1,
+                "fit_ranked": 1, "fit_layers_whole": 3,
+                "fit_layer_edge": "7/59", "fit_layers_out": 2,
                 "sub_cut_boxes": 1234, "sub_cut_box_over": 5,
                 "sub_cut_box_level": 1, "sub_cut_box_unsure": 2,
                 "shape_cut": 4392, "shape_cut_max": 1,
@@ -1505,7 +2159,9 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             # the time no phase covers: renderd's own (other) and the
             # client's beyond renderd's wall (wait = queue + pipe)
             self.assertEqual((result["queue_ms"], result["wall_ms"]), (1.5, 60.0))
-            self.assertEqual(result["other_ms"], 15)
+            # (the fit probe is a phase of its own, no longer `other`)
+            self.assertEqual((result["fit_probe_ms"], result["fit_probe_walk"]), (3.0, True))
+            self.assertEqual(result["other_ms"], 12)
             self.assertTrue(900 <= result["wait_ms"] <= 945, result["wait_ms"])
             self.assertEqual(result["cache_hit"], 14)
             self.assertEqual(result["cache_miss"], 2)
@@ -1535,8 +2191,25 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertEqual(result["density_pages"], {
                 "planned": 12, "in_hand": 7, "decoded": 4, "over_budget": 1})
             self.assertEqual(result["density_us"], {
-                "plan2_us": 100, "scene2_us": 20, "collect_us": 30, "regions_us": 4, "decode2_us": 50})
+                "plan2_us": 100, "scene2_us": 20, "collect_us": 30, "regions_us": 4, "decode2_us": 50, "raster2_us": 60})
             self.assertEqual(result["density_bin"], {"items": 600, "deferred": 1, "overflow": 0})
+            self.assertEqual(result["density_dots"], {"items": 3500, "over": 2})
+            self.assertEqual(result["density_floor"], 0.25)
+            self.assertEqual(result["density_block"], 8.0)
+            self.assertEqual(result["density_plan2"], {
+                "probe_us": 3000, "fit_us": 4000, "probes": 1, "passes": 3, "regions": 24,
+                "nodes": 120000, "page_nodes": 900000, "page_candidates": 45000, "threads": 4,
+                "reads": 700000, "items": 90000, "probes_over": 1, "thinned": 2,
+                "by_nodes": 30000, "by_placements": 20000, "by_arrays": 5000, "by_list_members": 34860,
+                "by_list_chunks": 40, "by_chunk_members": 9000, "by_array_members": 100, "by_pages": 3,
+                "map_updates": 7, "reserve_mb": 896, "occ_pages": 2, "occ_decoded": 1,
+                "full_chunks": 500, "full_members": 128000, "sampled_chunks": 60, "sampled_members": 15360,
+                "free_top": 40000, "free_others": 7000, "dot_gain_milli": 640, "dot_gated": 1200, "dot_gate_min": 2,
+                "bright_milli": 2000, "stood_in": 9,
+                "cell_cover": 1, "cover_cells": 1500, "node_sampled": 800, "pattern": 0,
+                "mask_tests": 0, "mask_pruned": 0, "mask_fallbacks": 0, "stages": 0,
+                # an older reply: the occupancy density's fields read as 0
+                "occ_layers": 0, "occ_cell_nm": 0, "occ_made": 0, "occ_cache_kb": 0})
             self.assertNotIn("labels_truncated", result)
             self.assertNotIn("drawn", result)
             self.assertNotIn("refining", result)
@@ -1568,9 +2241,27 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertIsNone(partial["density_pages"])
             self.assertIsNone(partial["density_us"])
             self.assertIsNone(partial["density_bin"])
+            self.assertIsNone(partial["density_dots"])
+            self.assertIsNone(partial["density_floor"])
+            self.assertIsNone(partial["density_block"])
+            self.assertIsNone(partial["density_plan2"])
             self.assertEqual(partial["refining"], 1)
+            self.assertNotIn("density_round", partial)
             self.assertIn(9, worker._jobs)
             self.assertFalse(os.path.exists(partial_path))
+            # the sub-cut dots' first round (pass 1 alone) says so
+            with open(partial_path, "wb") as frame:
+                frame.write(_RAW_SIGNATURE)
+                frame.write((20).to_bytes(4, "little"))
+                frame.write((10).to_bytes(4, "little"))
+                frame.write(raw_pixels)
+            worker._emit_frame({
+                "gen": "9", "png": partial_path, "format": "raw",
+                "partial": "1", "deferred": "1", "final": "0", "density_round": "1",
+            })
+            first_round = worker.res.get_nowait()
+            self.assertEqual((first_round["refining"], first_round["density_round"]), (1, True))
+            self.assertIn(9, worker._jobs)
 
     def test_raw_frame_kill_switch_restores_png_frames(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2229,6 +2920,96 @@ class IndexOnOpenTests(unittest.TestCase):
                              ["vfs-index", "open"])
         finally:
             del os.environ["FLOE_INDEX_ON_OPEN"]
+
+
+class LayerListTests(unittest.TestCase):
+    """The layer panel lists a layout's pairs that hold something (user
+    2026-10-08, the field's EBEAM files: Calibre listed 3.0 and 3.300
+    where floe listed 3.1 and 3.2 too, nothing drawn on them - pairs only
+    the file's LAYERNAME table names, stored_shapes 0)."""
+
+    @staticmethod
+    def _layout(directory):
+        cache = FakeCache(directory)
+        cache.meta["layers"] = [
+            {"layer": 3, "datatype": 0, "name": "MAIN",
+             "color": "#3fff77", "stored_shapes": 20},
+            {"layer": 3, "datatype": 1, "name": "NAMED1",
+             "color": "#3fff77", "stored_shapes": 0},
+            {"layer": 3, "datatype": 2, "name": "NAMED2",
+             "color": "#3fff77", "stored_shapes": 0},
+            {"layer": 3, "datatype": 300, "name": "3/300",
+             "color": "#3fff77", "stored_shapes": 20},
+            # a text alone is drawn as a label: listed
+            {"layer": 5, "datatype": 0, "name": "5/0",
+             "color": "#ff0000", "stored_shapes": 1},
+            # a table without the count: listed
+            {"layer": 6, "datatype": 0, "name": "6/0", "color": "#00ff00"},
+        ]
+        return cache
+
+    @staticmethod
+    def _keys(meta):
+        return [(l["layer"], l["datatype"]) for l in meta["layers"]]
+
+    def test_a_layouts_pairs_with_nothing_on_them_are_not_listed(self):
+        from floe import gui
+        with tempfile.TemporaryDirectory() as directory:
+            cache = self._layout(directory)
+            with mock.patch.dict(os.environ, {"FLOE_EMPTY_LAYERS": ""}), \
+                    mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+                listed = gui.listed_meta(cache)
+            self.assertEqual(self._keys(listed),
+                             [(3, 0), (3, 300), (5, 0), (6, 0)])
+            self.assertEqual(listed["dbu"], cache.meta["dbu"])
+            # the cache's own table (the renderer's styles) keeps every pair
+            self.assertEqual(len(cache.meta["layers"]), 6)
+            self.assertIn("2 layers not listed", err.getvalue())
+            self.assertIn("3/1, 3/2 (FLOE_EMPTY_LAYERS=show", err.getvalue())
+            # the kill switch lists every pair as before
+            with mock.patch.dict(os.environ, {"FLOE_EMPTY_LAYERS": "show"}):
+                self.assertIs(gui.listed_meta(cache), cache.meta)
+            # a jobdeck's table is the deck's (its level heads hold nothing)
+            cache.is_jobdeck = True
+            with mock.patch.dict(os.environ, {"FLOE_EMPTY_LAYERS": ""}):
+                self.assertIs(gui.listed_meta(cache), cache.meta)
+            # a table whose every pair holds something: as it is, no note
+            full = FakeCache(directory)
+            with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+                self.assertIs(gui.listed_meta(full), full.meta)
+            self.assertEqual(err.getvalue(), "")
+        # the viewer adopts a cache's table through it
+        self.assertIn("self.meta = listed_meta(cache)",
+                      inspect.getsource(gui.Viewer._apply_cache))
+
+    def test_the_panel_and_the_visible_set_hold_the_listed_pairs(self):
+        try:
+            from floe import gui
+            gui.import_gtk()
+        except Exception as exc:  # pragma: no cover - headless hosts
+            self.skipTest("GTK unavailable: %s" % exc)
+        with tempfile.TemporaryDirectory() as directory:
+            cache = self._layout(directory)
+            v = gui.Viewer.__new__(gui.Viewer)
+            v.cache = cache
+            with mock.patch("sys.stderr", new_callable=io.StringIO):
+                v.meta = gui.listed_meta(cache)
+            v.visible = set(self._keys(v.meta))
+            v._layers_box = gui.Gtk.Box(
+                orientation=gui.Gtk.Orientation.VERTICAL)
+            self.addCleanup(v._layers_box.destroy)
+            v._layer_patterns, v._fill_patterns = {}, []
+            v.selections = []
+            v.redraw = lambda **kw: None
+            v._build_layer_panel()
+            self.assertEqual(set(v._layer_rows),
+                             {(3, 0), (3, 300), (5, 0), (6, 0)})
+            # layer 3 as Calibre lists it: 3.0 heading 3.300
+            self.assertEqual(v._layer_groups, {(3, 0): [(3, 300)]})
+            # every listed pair on: the request names no list (all layers)
+            self.assertIsNone(v._layers_arg())
+            v._layer_rows[(5, 0)].set_active(False)
+            self.assertEqual(v._layers_arg(), [(3, 0), (3, 300), (6, 0)])
 
 
 @unittest.skipUnless(os.environ.get("FLOE_INTEGRATION_SOURCE"),

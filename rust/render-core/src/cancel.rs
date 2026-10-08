@@ -34,6 +34,12 @@ impl RenderCancellation {
         generation < self.before_generation()
     }
 
+    /// This cancellation as the planner sees it for a plan of `generation`
+    /// (floe_vfs::hier::HierOpts::stop): tripped once the frontier passes it.
+    pub fn plan_stop(&self, generation: u64) -> floe_vfs::hier::PlanStop {
+        floe_vfs::hier::PlanStop { before: Arc::clone(&self.before_generation), generation }
+    }
+
     /// Runs a final publication step only while `generation` is current.
     /// Frontier changes and this closure are serialized; ordinary render
     /// cancellation checks remain lock-free.

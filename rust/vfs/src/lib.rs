@@ -2,9 +2,12 @@
 //! without touching geometry, keep a working-set session, and build
 //! delta OASIS files by splicing page payload bytes verbatim.
 
+pub mod cover;
 pub mod coverage;
+mod density_mask;
 pub mod hier;
 pub mod hiersum;
+pub mod occ_density;
 pub mod occupancy;
 pub mod representatives;
 pub mod text;
@@ -170,6 +173,12 @@ impl Vfs {
         } else {
             floe_ovm::map_file(&ovt_path)?
         };
+        // design.ovb, the pages' occupancy grids (2026-10-02): optional - a
+        // cache without it, or with one of another build, plans without
+        let mut ovm = ovm;
+        if let Err(e) = ovm.attach_page_occ(&format!("{}/design.ovb", dir)) {
+            eprintln!("[vfs] {}: {} - pages under the floor spread over their boxes", dir, e);
+        }
         Ok(Vfs { ovm, ovp_path, ovt })
     }
 

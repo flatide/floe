@@ -48,6 +48,65 @@
   labels, **color_epoch**) — 팔레트 recolor/repattern이 epoch를 올려
   캐시 프레임 재사용을 무효화.
 - bbox는 끝까지 float dbu(딥줌 스케일 왜곡 방지 — int 라운딩 금지).
+- **하단 상태줄 = 지금 확인할 것만**(0.12.263, `lit`·`cell dots` 0.12.264; 사용자 2026-10-01: "어차피 로그로 나오고
+  있으니 상태줄에는 현재 필요한 부분만 나와야 생략없이 확인이 가능함"). `perf_status(res)`가
+  (전체 줄, 요약 줄)을 만든다.
+  - **전체 줄**은 터미널 로그(`live [density: …] (N tiles, …)  view W x H um`)와 하단 줄의 툴팁에 나온다.
+    0.12.262의 줄과 같은데, 0.12.264부터 밀도 태그에 `lit L px`가 붙고 `dot items`가 `cell dots`로 바뀌었다.
+    0.12.268부터는 로그 줄의 `cell dots N` 뒤에 출처가 붙는다. 형식은 `[nodes …, placements …, arrays …, list
+    members …, list chunks … of … members, array members …, pages …; hash map …]`이고, 0이 아닌 것만 보인다
+    (사용자 2026-10-02, 실칩 `cell dots 87.2M`). 하단 줄에는 붙지 않는다. 0.12.268은 `of … members`를 맨 끝(배열
+    멤버 뒤)에 붙였고, 0.12.269부터 청크 바로 뒤에 붙는다. 0.12.270부터 밀도 태그의 하한 뒤에 2패스의 예약
+    `reserve R MB`가 붙는다(고정 예약 또는 1패스가 남긴 만큼). 0.12.274부터 페이지 점 중 점유 비트(design.ovb)로
+    놓은 것이 있으면 `pages N (M by occupancy)`로 보인다. 캐시에 그 파일이 있는지 이것으로 안다. 0.12.278부터 칸이 너무 커서
+디코드한 하한 아래 페이지가 있으면 `pages decoded under the floor K`가 붙는다. 0.12.279부터 밀도 태그 끝에 2패스의 디코드와
+    래스터 벽시계 시간 `pass 2 decode D ms, raster R ms`가 붙는다(사용자 2026-10-03, 449개 레이어 뷰가 35초 이상 걸림).
+    0.12.280부터 출처의 `list chunks … of … members` 뒤에, 있으면 `list chunks in full blocks C of M members`(읽지 않고
+    건너뛴 청크)와 `list chunks sampled C of M members`(표본으로 읽은 청크)가 붙는다. `list members`는 하나씩 읽은 멤버
+    수다. 0.12.281부터 `N regions` 뒤에, 칸으로 계획했으면 그 칸들의 빈 픽셀 `(free top T, others O px)`가 붙는다(위층,
+    아래층). 0.12.287부터 fit view보다 축소해 점이 성겨지면 예약 뒤에 `dots xG`(그 비율)가 붙는다. 여백 렌더의 명령에는
+    뷰포트 크기 `vw=`/`vh=`가 붙는다(렌더러가 fit view를 뷰포트 기준으로 구한다). 0.12.288부터 detail의 밀도 문턱이 있으면
+    (medium, low) 그 뒤에 `gate D/B px (N out)`이 붙는다: 블록 B px 중 D점 이상이어야 그리고, N은 빠진 블록 수다.
+    0.12.291부터 진단 `FLOE_RUST_DENSITY_ONLY=on`(1패스의 도형을 건너뛰고 밀도만)이면 태그 맨 앞 `dots` 뒤에
+    `density only`가 붙는다(뷰어가 같은 환경 변수를 읽는다). 0.12.297부터 밀도가 밝기로 그려지면(기본; 픽셀이 덮인 면적
+    × g만큼, 원본 색을 넘지 않게) 예약 뒤에 `bright xG`(g: low 1, medium 2, high 4)가 붙고, `dots xG`와 `gate …`는
+    붙지 않는다(밝기가 둘을 대신한다). 킬 스위치 `FLOE_RUST_DENSITY_BRIGHT=off`면 예전처럼 붙는다. 0.12.299부터 예산에서
+    빠진 페이지를 점유 격자가 대신 그렸으면 `pass 2 over budget: …` 안에 `N pages by occupancy instead`가 붙는다
+    (하단 요약 줄에도). 0.12.300부터 `bright xG` 뒤에 컷 아래 셀이 무엇을 대표하는지가 붙는다: `cell cover`(셀의 도형이
+    덮는 면적. design.ovb와 계층 요약이 있을 때)나 `cells by box`(셀 상자. 둘 중 하나가 없거나
+    `FLOE_RUST_DENSITY_CELL_COVER=off`).
+  - **하단 줄**에는 요약 줄만 나온다. 항목은 ` · `로 잇는다.
+    - 시간: `N ms = L load + D draw`. `+ T text`·`+ P fit probe`·`+ O other`·`+ W wait`는 전체 줄과 같은 문턱에서만
+      붙는다. load의 `[plan+delta+apply]`는 빠진다.
+    - 밀도 스택: `density: lit L px, pass 2 plan N ms (nodes …, reads …, cell dots …)`.
+      - `lit`은 2패스가 켠 픽셀이다. 컷 아래 셀을 대신하는 점과, 2패스가 페이지에서 꺼내 면적대로
+        그리는 컷 아래 도형이 모두 들어간다. 둘 다 화면에서는 점처럼 보인다.
+      - `cell dots`는 그중 셀(셀·BVH 노드·배열)을 대신한 점 항목 수다. 0.12.263까지는 `dot items`였다.
+      - 사용자 2026-10-01: "두번 그리고 점들이 찍히는데 dot items가 0". 합성 칩의 694 µm 뷰를 medium으로
+        보면 컷 아래 셀이 없어 cell dots는 0이지만, 1~3 px 도형을 54페이지에서 그려 84k px를 켠다.
+      - 괄호 안에 있을 때만 붙는 것: 탐침(`probe M ms xP`), 두 번 이상의 맞춤과 그것이 올린
+        하한(`Q passes, floor F px`), 스레드.
+      - 디코드한 페이지가 있으면 `P pages decoded`가 따로 붙는다.
+      - 2패스의 예약이 무엇을 막았으면 `pass 2 over budget: floor probe, thinned, N pages left out`이 붙는다(0.12.266).
+        `floor probe`는 하한 탐침이 예약을 넘은 것, `thinned`는 예산 맞춤이 페이지를 솎은 것,
+        `N pages left out`은 디코드가 예약에서 뺀 페이지다. 로그 줄의 태그에도 같은 문구가 붙는다.
+      - 블록·하한·구역 수는 전체 줄에만 있다.
+    - work bin: `bin N items` 또는 `bin off(cap@N), hier V/P pruned`. 넘치면 타일마다 걷는 양을
+      함께 보인다.
+    - 컷: `cut<X um`과 예산 맞춤(`… to fit budget`, `STILL OVER`). `(larger side)`는 빠진다. 0.12.301부터 그 레이어들의
+      페이지가 추정보다 크게 디코드돼 예산을 줄여 계획했으면 `, pages xN their estimate`가 붙는다. 0.12.318부터 1패스의
+      맞춤은 위 plane부터라 `top N whole, L/D (1/M below xF, none below xG), K left out to fit budget`이다(위에서 온전한
+      레이어 수, 예산이 끝난 레이어와 그 등급, 빠진 레이어 수; SPEC-PLANNER). `FLOE_RUST_FIT_TOP_FIRST=off`면 종전
+      `1/M below xF, none below xG to fit budget`이다.
+    - 그림이 모자란 것: `N pages over budget (not drawn)`, `labels partial`, `evict N`,
+      `summary N layers (not pickable)`. `N pages over budget`은 0.12.301부터 단일 레이아웃에서도 나온다(어떤 계획도
+      예산에 들지 않을 때 오류 대신 예산이 담는 만큼 그린다). 여백(margin) 프레임이 예산을 넘으면 오류 대신
+      `dropped`(reason `budget`)이라 상태줄에 아무것도 뜨지 않는다(0.12.300은 `error: decoded generation budget
+      exceeded`를 보였다).
+    - 덱: `deck N passes`.
+  - 로드 직후 첫 프레임은 `loaded in X s · `만 앞에 붙는다. 내역은 로그에 있다.
+  - depth는 위 줄(`depth: d/max · detail: …`)에 있다.
+  - 팬·캐시 프레임(`live (N tiles)`), `no layers visible` 같은 짧은 상태는 그대로 보인다.
 
 ## 3. 스트리밍 라운드 (service._svc_render_vfs)
 
@@ -116,6 +175,18 @@
   센터링(`_minimap_world_point`). 테스트
   `test_minimap_die_outline_keeps_a_margin_from_the_edge_and_the_view_box`. fit/clip·
   open .db…·rules… 버튼은 2026-08-22 메뉴 바로 이전(패널 정보줄만 잔류).
+- **레이어 목록에 넣는 것(2026-10-08, app 0.12.322; 사용자: 현장 EBEAM 파일을 레이아웃 모드로 열면
+  Calibre는 3.0·3.300만, floe는 3.0·3.1·3.2·3.300을 보이고 3.1·3.2에는 도형이 없음).**
+  - 원인: 파일의 LAYERNAME 표가 3/1·3/2를 이름으로 두고 그 위의 도형·텍스트는 없다. 색인은 KLayout처럼 그런 쌍도
+    레이어 표에 두고(`stored_shapes` 0), 뷰어는 표를 그대로 목록에 올렸다. Calibre는 무엇이 놓인 레이어만 보인다.
+  - 이제 레이아웃의 목록은 `gui.listed_meta`가 정한다. `stored_shapes`가 0인 쌍(도형도 텍스트도 없음)은 패널·visible
+    집합·레이어 속성에서 빠진다. 열 때 터미널에 한 줄로 알린다(`[floe2] 2 layers not listed - the file's layer table
+    names them, no shape or text is on them: 3/1, 3/2 (FLOE_EMPTY_LAYERS=show lists them)`).
+  - 그대로인 것: 색인·`floe2 info`(모든 쌍과 stored shapes; 0 = 이름만)·렌더러의 스타일, 텍스트만 있는 레이어(라벨로
+    그려지므로 목록에 있음), 잡덱의 표(level 머리 행은 원래 아무것도 갖지 않음). 모든 레이어를 켜면 요청은 레이어
+    목록 없이(전부) 가므로 그림도 같다.
+  - 킬 스위치 `FLOE_EMPTY_LAYERS=show`: 모든 쌍을 예전처럼 보인다. 게이트: cell_tree C10, rust_renderer
+    `LayerListTests`.
 - 오버레이(픽스버프 직접 스탬프, gui.py 상단 헬퍼): 룰러(흰 1px 실선
   + 화살촉 + 거리 칩 흰 텍스트 + 점선 리더), 러버밴드(흰 1px), 스냅
   마커(흰 십자+사각), DRC 마크(**상태색** — 2026-08-14: not waived
@@ -136,6 +207,35 @@
 상태에서도 하드웨어 키코드로 라틴 키를 복원. 숫자는 `_depth_digit`
 (9-9 1초 내 = full). depth 라벨은 full을 `*`로 표기(`depth: */13`).
 
+- **렌더 중 입력(2026-09-30, 0.12.251; 현장: "rendering… 중에 Esc로 취소가
+  안 되고 새 줌도 안 됨").** 렌더가 진행 중이어도(`_pending`) 마우스는
+  더 이상 기다리지 않는다 — 휠 줌·클릭·드래그가 그대로 동작하고, 새 뷰의
+  렌더가 진행 중인 것을 데몬의 세대 frontier에서 대체한다(키는 원래
+  그랬다; 2c8766c의 "프레임까지 마우스 무시" 관례를 걷음). 커서는 wait 대신
+  progress. **Esc의 첫 단계**는 진행 중인 렌더(또는 그려지는 중인 밀도
+  라운드)의 취소: `_cancel_render` — 디바운스 해제, `gen += 1`(제출 없음:
+  취소된 세대의 늦은 프레임은 이 세대 것이 아니라 버려짐), 어댑터
+  `worker.cancel(gen)` = `cancel before_gen=N`(데몬 입력 스레드가 즉시
+  frontier를 옮기고 진행 중 렌더는 다음 검사에서 멈춤; KLayout 서비스는
+  `latest`로 다음 단계에서 포기), `_refining`·`_pending` 해제, 상태줄
+  "render cancelled", 그림은 얼어 있던 프레임 그대로이고 뷰는 덮이지
+  않은 채라 다음 팬·줌·redraw가 렌더한다. 다음 Esc부터 기존 체인. 늦게
+  도착한 프레임(`_settle_after_frame`): 새 뷰의 렌더가 이미 예약돼 있거나
+  (디바운스) 드래그 중이면 아무것도 안 하고, 프레임이 지금 뷰를 담지 않으면
+  (`_frame_holds_view`: 같은 렌더 키·배율, 뷰가 프레임 상자 안 — 여백 판정
+  `_covered`와 다르다) `redraw()`, 담으면 여백을 채운다. 0.12.251은 여기서
+  `_covered`를 물었는데, margin을 끈 기본 설정에서 `_covered`는 뷰 둘레의
+  여유를 요구해 방금 그린 뷰포트 프레임(스냅 여유 ≤ 2 px)을 한 번도 받지
+  않았다 — 확정 프레임마다 다시 렌더하는 무한 반복(현장 2026-09-30
+  "rendering이 계속 반복", 가상 디스플레이에서 가만히 둔 25초에 157번 →
+  0.12.252에서 1번; 계약 `test_a_settled_frame_of_this_view_does_not_render_again`). 이전 세대의 `error`는
+  지금 세대의 대기를 풀지 않는다(세대 없는 어댑터 오류는 푼다); 데몬의
+  `cancelled gen=N`은 결과로 올라와 대기 중이던 세대면 대기를 푼다.
+  뷰어 계약(validate_rust_renderer): `test_esc_cancels_the_render_in_flight_before_the_chain`,
+  `test_a_wheel_zoom_during_a_render_supersedes_it`,
+  `test_an_older_generations_error_leaves_the_pending_render`, 어댑터
+  `test_cancel_sends_the_frontier_and_a_cancelled_render_is_told`.
+
 - **빈 시작**(2026-08-22): `floe view`(src 생략)와 인자 없는
   `floe`(= view)는 레이아웃 없이 뜬다 — `_apply_cache(None)` =
   meta None·worker None·레이어 패널 빈 상태·타이틀 APP·상태줄
@@ -154,7 +254,7 @@
   clip·copy·quit) /
   View(fit·줌·goto·detail·depth·토글 체크 5종·오버레이 순환) /
   Cell(셀 트리·검색 `t`, 선택 셀로 줌, 인스턴스 하이라이트 체크,
-  하이라이트 해제, 선택 셀을 뷰 루트로 `Ctrl+T`·탑으로 `Ctrl+Shift+T`,
+  하이라이트 해제, 선택 셀을 뷰 루트로(키 없음 — Ctrl+T는 2026-09-30 삭제)·탑으로 `Ctrl+Shift+T`,
   셀 인덱스 빌드 — §8c) /
   Ruler(모드·스냅 체크, 삭제/전체 삭제) / DRC(open .db·SVRF rules·
   n/p·waive·박스선택 체크). 항목은 키와 **같은 핸들러**를 호출하고
@@ -163,6 +263,22 @@
   실상태(frames_on/abstract/coverage_on/_mono/snap_on/mode)를
   반영하며 `_menu_guard`로 set_active의 핸들러 역발화를 차단.
   단, floe2는 density coverage 상태와 메뉴/키 입력 자체를 노출하지 않는다.
+- **밀도 켜기/끄기**(2026-10-05, 0.12.298; 사용자: "뷰어에서 밀도 켜기/끄기 옵션을 추가해줘"): floe2(Rust 렌더러)의
+  View > **density under the cut**(체크, `v`). 컷 아래 도형을 덮인 면적의 밀도로 그리는 renderd의 밀도 스택
+  (CUT_DENSITY_DESIGN §10.12)을 켜고 끈다. `_toggle_density`가 `density_on`을 뒤집고 `_on_depth`(상태줄과 다시
+  그리기)를 부른다.
+  - 시작값은 `floe2 view --density on|off`다. 실행 중인 창에는 `density=`로 넘어가고, 인덱스가 없어 열기를 미룬 경우는
+    pending_fields로 간다. 옵션이 없으면 뷰어와 renderd가 함께 보는 환경 `FLOE_RUST_DENSITY_STACK=top`일 때 켜진다.
+  - 렌더 작업(뷰포트와 여백)에 `density`가 실리고, 어댑터는 렌더 명령에 `density=on|off`를 붙인다.
+    - renderd는 켬이면 스택과 점을 그린다(`FLOE_RUST_DENSITY_DOTS=off`가 아니면 점). 끔이면 2패스가 없다.
+    - 필드가 없는 요청(CLI 내보내기, 게이트)은 예전처럼 환경 변수가 정한다.
+  - 렌더 키(`_render_key`)에 `_density_key()`가 들어간다. 토글하면 화면 프레임과 여백 프레임이 지금 상태를 담지 않은
+    것이 되어 다시 그린다.
+  - renderd도 보관 프레임의 키(`RetainedKey::density`)에 이 설정을 넣는다. 키에 없으면 밀도 없이 그려 보관한 프레임이
+    같은 뷰의 켬 요청을 통째로(라벨만 다시 그리는 경로로) 대신해, 토글한 뷰에 밀도가 나오지 않는다.
+  - 상태줄(깊이 라벨)에 ` · density:on/off`가 붙는다.
+  - stable floe(KLayout)는 `v`가 coverage 오버레이라 이 항목이 없다. 렌더러가 밀도 스택을 갖지 않으면
+    (`supports_density` 없음) 메뉴 항목이 비활성이고 키도 아무 일을 하지 않는다.
   LOD 토글(메뉴 항목·`l` 키·깊이 라벨의 `lod:on/off`·`floe2 view --lod`)은 제거됐다(2026-09-22
   사용자 결정: LOD는 쓰지 않는다 — 토글은 Rust 경로의 renderd에 닿지도 않았다). 실행 중인 창으로
   넘어오는 `lod=` 필드는 받아서 무시하고, renderd의 LOD 교체는 기본 끔이다(SPEC-PLANNER §3).
@@ -415,7 +531,8 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   페이지 최소 폭이 되어 pane이 왼쪽을 잘라 내며 되돌아올 길이 없었다;
   DRC 페이지의 "ellipsize + 가로 스크롤 금지" 규약은 그 페이지의 것으로
   유지) · 컨트롤 행(**FlowBox** — `highlight` 체크 = 기본 켬,
-  `zoom`, `root`, `top`; 좁으면 여러 줄로 감김) · 인덱스가 없을 때만
+  `zoom`; 좁으면 여러 줄로 감김. `root`·`top` 버튼은 0.12.289에서 뺐다 —
+  뷰 루트는 행 더블클릭, 아래 **뷰 루트**) · 인덱스가 없을 때만
   보이는 `build index…` 행 · 정보 줄(줄바꿈 라벨). `_build_cell_panel`,
   위젯 홀더 `_CellPanel`. **페이지 최소 폭 ≤ 156 px**(테스트
   `test_cell_page_fits_the_left_pane_at_its_start_width`): 현장
@@ -464,7 +581,8 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   뷰 키(src, ci, 뷰 박스 반올림)가 바뀌었으면 다시 묻는다
   (`_cell_hl_follow`; 데몬은 대기 중인 더 새 insts 질의가 있으면 옛것을
   `superseded`로 즉시 답한다). Tab 오버레이 숨김 상태에서는 그리지 않음.
-- **줌**(더블클릭·Enter·`zoom`·메뉴): `cell_bbox`의 범위를 DRC 점프와
+- **줌**(`zoom`·검색 박스 Enter·메뉴; 잡덱은 행 더블클릭·Enter도 — 레이아웃의
+  행 더블클릭은 0.12.289부터 뷰 루트): `cell_bbox`의 범위를 DRC 점프와
   같은 규칙으로 프레이밍(양 축 0.8, `CELL_VIEW_FRACTION`). 범위 =
   탑이 **직접 배치한 셀은 그 인스턴스 박스들의 정확한 합집합**, 더 깊은
   셀은 **그 셀을 품은 탑 직계 블록들의 범위**(요약이 엣지별 합집합만
@@ -487,9 +605,16 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   소스 좌표로 들어간다(render-core `DeckXf`). 소스가 여러 곳에 놓이면
   박스도 그만큼.
 - **뷰 루트**(2026-09-29, 0.12.241 / RENDERD 0.12.229 — Calibre 셀
-  트리의 "선택한 셀이 표시되는 탑이 된다"): `Ctrl+T` · Cell 메뉴 ·
-  패널 `root` 버튼이 **선택한 셀을 뷰 루트**로 삼고, `Ctrl+Shift+T` ·
-  메뉴 · `top` 버튼(루트일 때만 활성)이 탑 셀로 돌아온다. 뷰 루트가
+  트리의 "선택한 셀이 표시되는 탑이 된다"): Cell 메뉴 · **트리 행 더블클릭**
+  (Enter도 같다; 찾기 결과 목록의 행도)이 **그 셀을 뷰 루트**로 삼고(Ctrl+T 키는
+  사용자 요청으로 2026-09-30 삭제, 0.12.254 — 눌러도 아무 일 없음, 평문 `t`의
+  트리 포커스로 흘러가지도 않음; 계약 `test_ctrl_t_is_no_shortcut`),
+  `Ctrl+Shift+T` · 메뉴 · **탑 셀 행 더블클릭**이 탑 셀로 돌아온다. 0.12.289
+  (사용자 2026-10-04: "셀 트리에서 셀을 더블클릭하면 해당 cell을 root로
+  변경하도록 해줘(root 버튼 기능). root 버튼과 top 버튼은 제거해줘."): 패널의
+  `root`·`top` 버튼을 뺐고, 더블클릭은 `_on_cell_activate`가 받는다 — 자리표시·
+  `more` 행은 무시, 잡덱의 행은 뷰 루트가 없으므로 전처럼 줌(계약
+  `test_a_double_click_in_the_cell_tree_sets_the_view_root`). 뷰 루트가
   서면 그 셀의 **자기 좌표**가 세계가 된다: 플래너(`ViewReq::root`,
   `PlanRequest::root`, 와이어 `render … root=CI`)가 그 셀에서 출발하고
   depth도 그 셀부터 센다; 라벨 플래너도 같은 루트에서 걷는다; 픽/스냅은
@@ -519,10 +644,34 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   레이어의 같은 처리를 일반화; 잡덱의 "컷 아래 소스 = 건너뛴 패스"는
   루트가 없으므로 그대로). C8: VIA(1/0만)를 루트로 2/0만 켜면 검은
   프레임, 1/0이면 그려짐, density stack 켬 == 끔.
+  **파일이 이름만 둔 빈 레이어(2026-10-04, app 0.12.296 / RENDERD 0.12.273;
+  사용자: "빈 레이어 오류도 고쳐줘"):** 레이어 표에는 있지만 어느 셀에도 없는
+  레이어(라우팅 칩의 BOUNDARY 100/0, LAYERNAME만 있는 레이어)를 그것만 켜면
+  루트가 없어도 계획이 비어 같은 오류가 났다(full depth, 또는 depth 0에서
+  프레임 끔. depth 0에서 프레임을 켜면 depth 밖 셀의 외곽선이 작업 셀을
+  만들어 오류가 없었다).
+  - 이제 뷰어의 프레임 요청은 `PlanRequest::empty_top`을 켠다. 빈 계획은
+    빈 탑 작업 셀을 받아 **빈 그림**이 된다(depth 0·프레임 켬은 그
+    외곽선만).
+  - 잡덱 소스의 요청은 끈다. 빈 계획은 지금처럼 건너뛴 패스다.
+  - C9: 1/0 도형과 이름만 있는 3/0(NOTHING)을 둔 레이아웃에서 3/0만 켠다.
+    - full depth(프레임 켬·끔)와 depth 0·프레임 끔은 검은 프레임이다.
+    - depth 0·프레임 켬은 1/0을 켰을 때와 같은 외곽선 픽셀만 있다.
+    - density stack 점을 켜도 같다. 1/0을 켜면 그려진다.
 - **남은 것**: 깊은 셀의 줌 범위가 블록 범위인 것은 요약에 레코드별
   변환을 두면 정확해진다. 인스턴스 탐색은 뷰를 요약 엣지 범위로 잘라
   BVH를 걷지만 넓은 뷰에서 큰 블록 안의 드문 셀은 예산에 걸릴 수 있다
-  (`more`, 줌인). 루트 상태의 depth 라벨은 여전히 탑 높이(`*/N`) 기준.
+  (`more`, 줌인).
+- **루트의 depth(2026-09-30, 0.12.255; 사용자: "cell이 root가 되면 depth가 달라질
+  수 있는데 고려가 안 된 것 같음").** 플래너는 처음부터 루트에서 depth를 셌지만
+  뷰어는 파일 top의 높이(데몬이 매 프레임 알려 주는 `max_depth`)를 그대로 썼다 —
+  라벨이 `d/16`, `<`/`>`는 루트 높이를 넘는, 그림이 바뀌지 않는 단계를 걸었다.
+  이제 `_max_depth()` = 루트가 서면 루트 셀의 높이(`cells` 답의 `height`), 아니면
+  top의 높이: 라벨 `depth: d/h`(d ≥ h면 `*` — 그 루트 전체), 단계 이동은 [0, h]로
+  제한(전체·h 초과는 h에서 한 단계 내려감), depth 값 자체는 보존해 `top`으로 돌아오면
+  원래 뷰; 루트가 바뀌면 라벨을 바로 갱신, depth 대화상자는 "0 = the view root only".
+  계약 `test_under_a_view_root_the_depth_counts_to_the_roots_height`(이전 코드는
+  `depth: 3/16`으로 실패).
 - **게이트**: `cell_tree`(tools/validate_cell_tree.py — SPEC-VALIDATION),
   렌더 코어 유닛(cells.rs 9종), renderd 파스/워커 유닛, vfs hiersum 유닛,
   워커 와이어 계약(validate_rust_renderer).

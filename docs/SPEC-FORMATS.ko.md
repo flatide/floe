@@ -107,6 +107,8 @@ rect·path뿐인 레이어)는 `empty`(비트맵 없음, 레벨 항목은 0)로 
 ## design.ovh — 계층 요약 (FLOEOVH1, 2026-09-29)
 
 정본: `rust/vfs/src/hiersum.rs`. 뷰어 셀 트리(SPEC-VIEWER §8c)의 색인.
+0.12.300부터 밀도의 셀 덮임(`rust/vfs/src/cover.rs`, SPEC-PLANNER)도 이 파일의
+엣지(자식과 멤버 수)를 읽는다. 파일 형식은 그대로다.
 design.ovm의 배치 레코드는 부모별 BVH 순서(자식별 아님)라 "셀의 서로
 다른 자식과 멤버 수"는 그 셀의 레코드 전부, "셀의 부모"는 레코드 전부를
 읽어야 하므로 한 번 훑어 요약한다. 인덱서가 빌드 끝에 쓰고(`--no-hier`로
@@ -130,6 +132,89 @@ design.ovm의 배치 레코드는 부모별 BVH 순서(자식별 아님)라 "셀
   빌드를 제안). 실측: MAIN01 1/10 합성(35,183셀·8,260만 레코드)
   11.4 s → 188,065 엣지·10.6 MB. 레코드 400만 이하 캐시는 데몬이 메모리
   요약(`HIER_INLINE_PLACES`).
+
+## design.ovb — 페이지 점유 격자 (FLOEOVB1 v2, 2026-10-03)
+
+정본: `rust/ovm/src/lib.rs`(`ovb_header`, `ovb_image`, `occ_cell`/`occ_edge`,
+`occ_level`/`occ_coverage`, `occ_encode`/`occ_decode`, `Ovm::attach_page_occ`), 생성
+`rust/cli/src/vfs.rs`(`page_occupancy`, `page_occupancy_areas`, `occ_axis_lengths`,
+`OvbWriter`). 페이지마다 bbox를 64×64칸(`OCC_GRID`)으로 나눠, 칸마다 도형이 덮는 면적의
+비율을 단계로 남긴다. 2패스 점이 하한 아래 페이지의 점을 그 칸에, 덮인 면적만큼 놓는다
+(SPEC-PLANNER §3, `HierOpts::dot_page_occ`·`dot_occ_cover`).
+
+- v1(0.12.274)은 칸마다 비트 하나(도형 유무)였다. v2 리더는 v1 파일을 붙이지 않는다
+  (stderr 한 줄, 상자 전체 퍼뜨리기). 다시 색인하면 v2가 된다.
+- 인덱서가 페이지를 쓰는 순서대로 `design.ovb.tmp`에 쓰고, 끝에 페이지 표와 머리말을 채워
+  rename한다. design.ovm(마커)보다 먼저 공개하며 재빌드 삭제 목록에 들어 있다.
+  `--no-page-occupancy`(= `floe2 index --no-page-occupancy`)면 만들지 않는다.
+- 머리말 64 B: magic `FLOEOVB1`, version u32(2), grid u32(64), n_pages u32, 단계 수 u32(15),
+  src_size u64, src_mtime u64, ovp_len u64, 페이지 표 위치 u64, 나머지 0.
+- 본문: 페이지 순서대로 각 페이지의 기록(가변 길이), 그다음 페이지 표. 기록은 셋 중 하나다(`occ_record`).
+  - 격자: 칸마다 단계 4비트(행 우선, 짝수 x가 아래 니블)를 raw deflate로 압축한 것이다(`occ_encode`).
+    페이지 범위(긴 변)가 가장 큰 도형(긴 변)의 16배(`OCC_GRID_SHAPE`)보다 넓을 때만 둔다
+    (`occ_wants_grid`).
+  - 합계 8 B: 그보다 큰 도형이 있는 페이지는 도형들이 덮는 면적(dbu², f64)만 둔다(`occ_total`). 이런
+    페이지는 모든 도형이 하한 아래일 때 화면에서 16 px(하한 1 px 기준) 미만이라 격자가 쓸모없다.
+    작은 셀의 레이어 페이지가 대부분 여기 속한다(sample9는 9,760페이지 전부).
+  - 길이 0: 기록 없음(LOD 변종 페이지, 또는 덮인 칸이 없는 페이지)이다.
+  - 페이지 표: (n_pages + 1)개의 u64 시작 위치다. 페이지 i의 격자는 [표[i], 표[i+1])이고, 마지막
+    값은 표 자신의 위치다.
+- 칸과 단계:
+  - 칸 k는 `[lo + ⌊k·ext/64⌋, lo + ⌊(k+1)·ext/64⌋)`(`occ_edge`)이고, 좌표는 그 경계로 칸에
+    넣는다(`occ_cell`).
+  - 단계 0은 도형이 닿지 않은 칸이다. 단계 k(1~15)는 덮인 비율 약 2^(k−15)를 뜻한다(로그 반올림,
+    2배 간격). 2^−14.5보다 작은 것은 1, 1을 넘는 것(겹침)은 15다.
+- 면적: 멤버의 도형 상자가 칸과 겹친 넓이를 더한다. polygon은 넓이(shoelace) / 상자 넓이,
+  path는 (길이 + 연장) × 폭 / 상자 넓이의 비율로 상자에 퍼뜨린다.
+  - 점 리스트는 멤버마다 더한다.
+  - 직교 Grid는 x 구간들과 y 구간들의 곱이므로, 칸의 넓이 = (그 열에 든 x 길이) × (그 행에 든
+    y 길이)다. 축마다 한 모서리 왼쪽에 든 길이를 등차급수 닫힌 식으로 구한다(`occ_axis_lengths`).
+    멤버 수, 겹침(폭 > 간격), 음의 간격과 무관하게 O(64)다.
+  - 비스듬한 Grid는 2^16 멤버까지 멤버마다, 그 이상은 멤버 넓이 합을 레코드 상자에 고르게
+    퍼뜨린다.
+- 출처 검사: `Vfs::open`이 붙인다. 다음 경우에는 붙이지 않는다(stderr 한 줄).
+  - 머리말의 version·grid·n_pages·단계 수·src_size·src_mtime·ovp_len이 design.ovm과 다르다.
+  - 페이지 표가 파일 끝에 맞지 않거나 순서가 어긋난다.
+  - 풀리지 않는 격자는 그 페이지만 기록 없음으로 본다.
+- 크기와 시간: CUT_DENSITY_DESIGN §10.12의 표.
+
+## design.ovs — 점유 밀도 (FLOEOVS1 v3/v4, 2026-10-06)
+
+정본: `rust/vfs/src/occ_density.rs`(`build`, `encode_file`, `OvsFile`), 생성 `rust/cli/src/vfs.rs`(`write_ovs`,
+`write_ovs_after_build`, `remove_cell_ovs`), 그리기 `rust/render-core/src/occ.rs`·`cache.rs`(`occ_density`).
+밀도 스택 2패스를 계획 없이 그리는 레이어 × 배치 depth 평면이다(0.12.317부터 기본, `FLOE_RUST_DENSITY_OCC=off`면
+쓰지 않음; CUT_DENSITY_DESIGN §10.16).
+
+- 파일:
+  - `design.ovs`: 탑의 파일, version 3.
+  - `design.ovs.<셀 번호>`: 탑 바로 아래에서 박스가 탑 박스의 `--roots`(기본 0.25) 이상인 셀의 파일, version 4.
+    그 셀의 root 뷰가 쓴다.
+- 생성:
+  - 색인 끝에 기본으로 만든다(0.12.316). design.ovm(마커) 뒤에 만들며 마커 프로토콜 밖이다(design.ovh와 같음).
+  - `--no-ovs`(= `floe2 index --no-ovs`)면 만들지 않는다. 잡덱 소스도 만들지 않는다.
+  - `floe-index ovs <cache> [--um F] [--jobs N] [--roots F]`가 이전 캐시에 덧붙이거나 다시 만든다.
+    이번에 만들지 않은 셀의 이전 파일은 지운다.
+  - 파일마다 tmp + rename으로 공개한다. 재빌드 때 삭제 목록에 들어 있다(셀 파일 포함).
+- 머리말 80 B:
+  - magic `FLOEOVS1`, version u32(3 또는 4), group u32(8)
+  - src_size u64, src_mtime u64
+  - unit f64(dbu/µm), cell_dbu i64, x0 i64, y0 i64
+  - w u32, h u32(레벨 0 셀 수), n_levels u32, n_layers u32
+- version 4는 머리말 뒤에 24 B를 더 둔다.
+  - 셀 u32, rot u8, flip u8, 예약 2 B, x i64, y i64
+  - 이 값은 그 셀의 (첫) 배치다. 셀 좌표를 탑 좌표로 옮기는 `Xf::place(x, y, rot, flip)`다.
+  - 격자는 탑 좌표다. 탑 격자 중 그 배치 박스를 덮는 부분이고, 시작 셀은 8의 배수다.
+- 표: 레이어마다 다음을 둔다.
+  - 평면 수 u8
+  - 평면마다 depth u8(0 = 그 파일 셀 자신의 도형, 15 = 그 depth와 그 아래 전부)
+  - 레벨마다 (비트 위치, 길이, 평균 위치, 길이) 4×u64
+- 본문: raw deflate로 압축한다. 레벨 L은 셀이 2^L배이고, 셀 수가 64 이하가 될 때까지 둔다.
+  - 비트: 행마다 ⌈w/8⌉ B. 셀 i는 바이트 i/8의 비트 i%8이다.
+  - 평균: 8×8 셀 묶음마다 u8 하나. 비트가 켜진 셀을 덮는 평균 비율이고, 255가 전부다.
+  - 셀이 하나도 없는 레벨은 길이 0이다.
+- 출처 검사(`validate_against`): src_size·src_mtime·n_layers·group이 design.ovm과 같아야 한다. 셀 파일은 셀 번호가
+  그 캐시 안에 있어야 하고, 요청한 root와 같아야 한다. 아니면 "파일 없음"으로 읽혀 계획 경로로 그린다(stderr 한 줄).
+  version 1·2는 거절한다.
 
 ## meta.json (CACHE_VERSION = 8)
 

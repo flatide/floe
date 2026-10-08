@@ -854,6 +854,7 @@ mod tests {
             members,
             index: crate::PageIndex::build(&doc),
             doc,
+            grown_bytes: 0,
         })
     }
 
@@ -869,6 +870,7 @@ mod tests {
                 insts: Vec::new(),
                 frames: Vec::new(),
                 washes: Vec::new(),
+                dot_counts: Vec::new(),
                 reps: Vec::new(),
             }],
             pages: vec![page_id],
@@ -892,6 +894,7 @@ mod tests {
                 insts: Vec::new(),
                 frames: Vec::new(),
                 washes: Vec::new(),
+                dot_counts: Vec::new(),
                 reps: Vec::new(),
             }],
             pages: vec![0, 1],
@@ -1150,6 +1153,7 @@ mod tests {
                 insts: Vec::new(),
                 frames: Vec::new(),
                 washes: Vec::new(),
+                dot_counts: Vec::new(),
                 reps: Vec::new(),
             }],
             pages: vec![0, 1],

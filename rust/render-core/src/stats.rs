@@ -82,6 +82,10 @@ pub struct RenderStats {
     /// Time spent collecting the density scenes' bins and their tiles'
     /// minis at the block boundary (us).
     pub density_collect_us: u64,
+    /// The wall time of pass 2's raster passes - the top plane's density, the
+    /// lower planes' and the frame bands after them - from the collection to
+    /// the frame's last pass (us; 2026-10-03, the field's 449-layer view).
+    pub density_raster_us: u64,
 }
 
 /// RenderStats::density_stack's counts, in order.

@@ -133,8 +133,82 @@ def _density_stack(value):
 
 
 DENSITY_PAGE_COUNTS = ("planned", "in_hand", "decoded", "over_budget")
-DENSITY_TIMES = ("plan2_us", "scene2_us", "collect_us", "regions_us", "decode2_us")
+# (pass 2's raster wall since 2026-10-03, the field's 449-layer view)
+DENSITY_TIMES = ("plan2_us", "scene2_us", "collect_us", "regions_us", "decode2_us", "raster2_us")
 DENSITY_BIN = ("items", "deferred", "overflow")
+# the sub-cut dots (FLOE_RUST_DENSITY_DOTS=on): items planned, items past the cap
+DENSITY_DOTS = ("items", "over")
+# pass 2's plans (diagnostic, 2026-10-01): the floor probes' and the fitted
+# plans' wall time, the probes, the fitted plans' passes, the regions planned
+# over, the final plans' child-BVH nodes, page-BVH nodes and page candidates,
+# the threads its regions were planned on (1: one plan), the final plans'
+# placement reads and dot items
+DENSITY_PLAN2 = ("probe_us", "fit_us", "probes", "passes", "regions", "nodes", "page_nodes", "page_candidates", "threads",
+                 "reads", "items", "probes_over", "thinned",
+                 # the dot items by where they came from, then the dot block updates
+                 # the hash map took past the cells' grids (2026-10-02)
+                 "by_nodes", "by_placements", "by_arrays", "by_list_members", "by_list_chunks", "by_chunk_members",
+                 "by_array_members", "by_pages", "map_updates",
+                 # pass 2's reserve in the frame, MB: the fixed one or what pass 1
+                 # left of the budget (2026-10-02)
+                 "reserve_mb",
+                 # the pages of by_pages placed by their occupancy grids
+                 # (design.ovb, 2026-10-02), the pages under the floor decoded
+                 # as too coarse for theirs (2026-10-03)
+                 "occ_pages", "occ_decoded",
+                 # the point-list chunks passed over unread, their blocks
+                 # full, and their members; the chunks read at a step, and
+                 # their members (2026-10-03)
+                 "full_chunks", "full_members", "sampled_chunks", "sampled_members",
+                 # the free pixels of the cells pass 2 planned, the top
+                 # plane's and the others' (2026-10-03)
+                 "free_top", "free_others",
+                 # the dots' gain past the fit view, thousandths
+                 # (2026-10-04)
+                 "dot_gain_milli",
+                 # the dot blocks left out as too sparse for the detail and
+                 # the dots a block needed (2026-10-04)
+                 "dot_gated", "dot_gate_min",
+                 # the brightness's gain, thousandths: a pixel shows min(1,
+                 # g x the area its density covers) of its colour (2026-10-05;
+                 # 0: the dots as lit pixels)
+                 "bright_milli",
+                 # the pages a budget left out that their occupancy records
+                 # (design.ovb) stand in for (2026-10-05)
+                 "stood_in",
+                 # a sub-cut cell stands for the area its shapes cover (1; 0:
+                 # for its box - no design.ovb or hierarchy summary), the
+                 # cells whose cover the plans worked out, the nodes that
+                 # counted what their placements hold (2026-10-05)
+                 "cell_cover", "cover_cells", "node_sampled",
+                 # the raster's opaque density pattern; older replies omit it
+                 "pattern",
+                 "mask_tests", "mask_pruned", "mask_fallbacks", "stages",
+                 # pass 2 drawn from the occupancy density (design.ovs,
+                 # on unless FLOE_RUST_DENSITY_OCC=off; 2026-10-06): the layers it held,
+                 # the cell it drew at in nm (0, 0: the plans drew it); the
+                 # layers this frame made and what its cache holds, KiB
+                 # (2026-10-07)
+                 "occ_layers", "occ_cell_nm", "occ_made", "occ_cache_kb")
+
+
+def _viewport_px(job, bbox):
+    """The viewport (w, h px) of a job whose `view` is not its frame (a
+    margin: the viewport and the margin around it, at the viewport's
+    scale); None when the frame is the viewport or no view is given."""
+    view = job.get("view")
+    if not view or not bbox:
+        return None
+    w, h = int(job["w"]), int(job["h"])
+    spp_x = (float(bbox[2]) - float(bbox[0])) / max(1, w)
+    spp_y = (float(bbox[3]) - float(bbox[1])) / max(1, h)
+    if not (spp_x > 0 and spp_y > 0):
+        return None
+    vw = int(round((float(view[2]) - float(view[0])) / spp_x))
+    vh = int(round((float(view[3]) - float(view[1])) / spp_y))
+    if vw <= 0 or vh <= 0 or (vw, vh) == (w, h):
+        return None
+    return vw, vh
 
 
 def _wire_counts(value, names):
@@ -148,6 +222,17 @@ def _wire_counts(value, names):
     if len(counts) != len(names):
         return None
     return dict(zip(names, counts))
+
+
+def _density_plan2(value):
+    """Pass-2 diagnostics; older renderers omit the occupancy density's
+    (all four, or its cache's two), the mask and/or the pattern fields."""
+    for size in (len(DENSITY_PLAN2), 46, 44, 40, 39):
+        counts = _wire_counts(value, DENSITY_PLAN2[:size])
+        if counts is not None:
+            counts.update(dict.fromkeys(DENSITY_PLAN2[size:], 0))
+            return counts
+    return None
 
 
 def _density_pages(value):
@@ -302,6 +387,11 @@ class RustRenderWorker:
 
     supports_label_font_px = True
     supports_abstract = False
+    # the density under the cut (renderd's density stack, CUT_DENSITY_DESIGN
+    # §10.12): a render job's `density` turns it on or off for that frame
+    # (the viewer's View > density toggle, 2026-10-05); absent, renderd's
+    # environment decides (FLOE_RUST_DENSITY_STACK / _DOTS)
+    supports_density = True
     # §F2R-17: the GUI's background margin prefetch (an enlarged frame
     # around the view whose crops serve later pans) is a Rust-only
     # optimization: renderd honors bg=True, cancels it at the
@@ -531,6 +621,14 @@ class RustRenderWorker:
         except Exception as exc:
             self.res.put({"kind": "error", "msg": str(exc)})
 
+    def cancel(self, before_gen):
+        """Stop every render older than `before_gen` (the viewer's Esc:
+        the daemon moves its cancellation frontier at once, on its input
+        thread; the render in flight stops at its next look - plan,
+        decode, raster - and answers `cancelled gen=N phase=render`)."""
+        if self.alive():
+            self._send("cancel before_gen=%d" % int(before_gen))
+
     def stop(self):
         with self._lifecycle_lock:
             if self._stopping:
@@ -663,6 +761,7 @@ class RustRenderWorker:
             "started": time.monotonic(), "new": 0,
             "read_us": 0, "decode_us": 0, "scene_us": 0,
             "draw_us": 0, "png_us": 0, "plan_us": 0,
+            "fit_probe_us": 0, "fit_probe_walk": 0,
             "publish_write_us": 0, "publish_sync_us": 0,
             "publish_rename_us": 0, "adapter_read_us": 0,
             "cache_hit": 0, "cache_evicted": 0, "render_tiles": 0,
@@ -689,6 +788,10 @@ class RustRenderWorker:
             "density_pages": None,
             "density_us": None,
             "density_bin": None,
+            "density_dots": None,
+            "density_floor": None,
+            "density_block": None,
+            "density_plan2": None,
         }
         with self._jobs_lock:
             self._jobs[generation] = state
@@ -723,6 +826,15 @@ class RustRenderWorker:
             # the view root (SPEC-VIEWER §8c): the plan starts from this cell
             # in its own coordinates; absent = the top cell
             command += " root=%d" % int(job["root"])
+        viewport = _viewport_px(job, bbox)
+        if viewport is not None:
+            # the viewer's viewport when the frame is not it (a margin): the
+            # fit view the dots thin past is the viewport's (2026-10-04)
+            command += " vw=%d vh=%d" % viewport
+        if job.get("density") is not None:
+            # the viewer's density toggle (2026-10-05): this frame's density
+            # stack, over renderd's environment default
+            command += " density=%s" % ("on" if job["density"] else "off")
         self._send(command)
 
     def _submit_recolor(self, job):
@@ -998,10 +1110,18 @@ class RustRenderWorker:
             generation = _wire_int(fields, "gen", -1)
             with self._jobs_lock:
                 self._jobs.pop(generation, None)
+            if kind == "cancelled" and generation >= 0:
+                # a superseded or cancelled render stopped (phase=queued
+                # | render): the GUI drops its pending state if it was
+                # still waiting for this one; the `before_gen=` ack of a
+                # cancel has no generation and says nothing
+                self.res.put({"kind": "cancelled", "gen": generation,
+                              "phase": fields.get("phase", "")})
             if kind == "dropped":
-                # a margin the budget fit does not hold (reason=fit) or a
-                # stale render: told, so the GUI can log it and a gate can
-                # wait for it; the GUI shows nothing for it
+                # a margin the budget fit does not hold (reason=fit), one
+                # whose pages passed the budget (reason=budget) or a stale
+                # render: told, so the GUI can log it and a gate can wait
+                # for it; the GUI shows nothing for it
                 self.res.put({"kind": "dropped", "gen": generation,
                               "reason": fields.get("reason", "")})
         elif kind == "error":
@@ -1259,6 +1379,11 @@ class RustRenderWorker:
             refining = 0
 
         state["plan_us"] = _wire_int(fields, "plan_us")
+        # the budget fit decided for a new scale before the plan (0.12.302:
+        # its own phase - it was time under none, the status line's `other`)
+        state["fit_probe_us"] = _wire_int(fields, "fit_probe_us")
+        # (it walked every cell of the extent: no hierarchy summary to go by)
+        state["fit_probe_walk"] = _wire_int(fields, "fit_probe_walk")
         state["read_us"] += _wire_int(fields, "read_us")
         state["decode_us"] += _wire_int(fields, "decode_us")
         state["scene_us"] += _wire_int(fields, "scene_us")
@@ -1305,6 +1430,19 @@ class RustRenderWorker:
         state["density_pages"] = _density_pages(fields.get("density_pages", "-"))
         state["density_us"] = _wire_counts(fields.get("density_us", "-"), DENSITY_TIMES)
         state["density_bin"] = _wire_counts(fields.get("density_bin", "-"), DENSITY_BIN)
+        state["density_dots"] = _wire_counts(fields.get("density_dots", "-"), DENSITY_DOTS)
+        state["density_plan2"] = _density_plan2(fields.get("density_plan2", "-"))
+        # the records' cut pass 2 planned at, px (the dots' floor,
+        # FLOE_RUST_DENSITY_FLOOR_PX, or the density cut)
+        try:
+            state["density_floor"] = float(fields.get("density_floor", "-"))
+        except ValueError:
+            state["density_floor"] = None
+        # the sub-cut dots' block, px (FLOE_RUST_DENSITY_BLOCK_PX)
+        try:
+            state["density_block"] = float(fields.get("density_block", "-"))
+        except ValueError:
+            state["density_block"] = None
         state["new"] += _wire_int(fields, "cache_miss")
         state["cache_hit"] += _wire_int(fields, "cache_hit")
         state["cache_evicted"] += _wire_int(fields, "cache_evict")
@@ -1338,6 +1476,7 @@ class RustRenderWorker:
                                    state["adapter_read_us"] / 1000.0))
             if not probe:
                 phases_us = (state["plan_us"] + state["text_plan_us"] +
+                             state["fit_probe_us"] +
                              state["read_us"] + state["decode_us"] +
                              state["scene_us"] + state["draw_us"] +
                              state["png_us"] + state["publish_write_us"] +
@@ -1398,6 +1537,8 @@ class RustRenderWorker:
             "other_ms": other_ms,
             "ms": round(elapsed_ms),
             "plan_ms": state["plan_us"] / 1000.0,
+            "fit_probe_ms": state["fit_probe_us"] / 1000.0,
+            "fit_probe_walk": bool(state["fit_probe_walk"]),
             "wc_cells": _wire_int(fields, "wc_cells"),
             "inst_edges": _wire_int(fields, "inst_edges"),
             "frame_rects": _wire_int(fields, "frame_rects"),
@@ -1452,6 +1593,22 @@ class RustRenderWorker:
                 # did not fit this frame and was decided anew (fit_redecided)
                 "fit_fixed": _wire_int(fields, "fit_fixed"),
                 "fit_redecided": _wire_int(fields, "fit_redecided"),
+                # the fit top plane first (pass 1, 2026-10-07; older renderers
+                # omit it): it ranked the pages by the drawing order, the
+                # layers kept whole above the one it ended in, that layer
+                # (`layer/datatype`, None when it kept nothing) and the layers
+                # left out under it
+                "fit_ranked": _wire_int(fields, "fit_ranked"),
+                "fit_layers_whole": _wire_int(fields, "fit_layers_whole"),
+                "fit_layer_edge": (None if fields.get("fit_layer_edge", "-") == "-"
+                                   else fields.get("fit_layer_edge")),
+                "fit_layers_out": _wire_int(fields, "fit_layers_out"),
+                # the layers' pages decode larger than the planner estimates
+                # (2026-10-05): the scale its budget was cut by, thousandths
+                # (0: none), and how often this frame was planned anew
+                # after its pages passed the budget
+                "fit_scale": _wire_int(fields, "fit_scale"),
+                "fit_refits": _wire_int(fields, "fit_refits"),
                 # sub-cut boxes (thin keep, few layers): what the size cut drops
                 # drawn as boxes from index metadata; boxes beyond the plan cap
                 "sub_cut_boxes": _wire_int(fields, "sub_cut_boxes"),
@@ -1531,6 +1688,10 @@ class RustRenderWorker:
             "density_pages": state["density_pages"],
             "density_us": state["density_us"],
             "density_bin": state["density_bin"],
+            "density_dots": state["density_dots"],
+            "density_floor": state["density_floor"],
+            "density_block": state["density_block"],
+            "density_plan2": state["density_plan2"],
         }
         if frame_format == "raw":
             # tightly packed RGBA rows (the header was consumed on
@@ -1540,6 +1701,10 @@ class RustRenderWorker:
             output["png"] = payload
         if refining:
             output["refining"] = refining
+            # the sub-cut dots' first round: pass 1 alone, the density under
+            # the cut is being drawn (CUT_DENSITY_DESIGN §10.12 step 3)
+            if _wire_int(fields, "density_round"):
+                output["density_round"] = True
         elif deferred:
             # a settled frame that could not decode everything: the
             # jobdeck composite stops a pass at the page budget and

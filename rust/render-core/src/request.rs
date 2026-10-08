@@ -84,6 +84,9 @@ pub struct PlanRequest {
     /// empty = the whole view): the density stack's pass 2 plans the space
     /// the originals left (CUT_DENSITY_DESIGN §10.10).
     pub regions: Vec<ViewBox>,
+    /// Exact density demand at the pass boundary (None for ordinary plans).
+    pub density_mask: Option<std::sync::Arc<floe_vfs::hier::DensityMask>>,
+    pub density_layers: Option<std::sync::Arc<floe_vfs::hier::DensityLayerMemo>>,
     /// Visible layers by cache layer index, in place of `visible_layers`
     /// when Some (the density stack's pass 2: the top plane's layer alone,
     /// then the others).
@@ -96,6 +99,45 @@ pub struct PlanRequest {
     /// (floe_vfs::ViewReq::root; the viewer's view root, SPEC-VIEWER
     /// §8c); None = the top cell.
     pub root: Option<u32>,
+    /// The density stack's sub-cut dots (floe_vfs::hier::HierOpts::
+    /// sub_cut_dots, pass 2 only): `cut_dbu` is the cells' cut - a cell
+    /// under it is a dot item, never walked into or decoded - and pages and
+    /// records take `cut_dbu` times this share. None: one cut for all.
+    pub sub_cut_dots: Option<f64>,
+    /// The sub-cut dots' one walk (floe_vfs::hier::HierOpts::dot_records):
+    /// pages at `cut_dbu`, records at `cut_dbu` times this share, a page all
+    /// under the cut a dot item - no probe, no budget fit. None: as
+    /// `sub_cut_dots` says.
+    pub dot_records: Option<f64>,
+    /// > 0: a probe of whether the plan fits (floe_vfs::hier::HierOpts::
+    /// probe_limit): planned as asked, abandoned once its pages pass this
+    /// many decoded bytes (stats.fit_over). 0: a plan.
+    pub probe_limit: u64,
+    /// Pages the frame holds decoded already, sorted
+    /// (floe_vfs::hier::HierOpts::free_pages): the density stack's pass 1,
+    /// whose pages cost its pass 2's budget nothing.
+    pub free_pages: Option<std::sync::Arc<[u32]>>,
+    /// An empty plan keeps its top working cell, empty: the frame is an
+    /// empty picture (renderd, render-cli; user 2026-10-04: a layer the file
+    /// names and no cell holds, alone on, drew `invalid plan: top is missing`
+    /// - the routing chip's BOUNDARY 100/0). False: an empty plan has no
+    /// working cell - a jobdeck source's, whose empty plan is a skipped pass.
+    pub empty_top: bool,
+    /// The density stack's brightness (floe_vfs HierOpts::dot_bright): Some(g)
+    /// with GeometryRasterRequest::density_bright - pass 2's dots count the
+    /// area they cover. None: the dots as lit pixels.
+    pub dot_bright: Option<f64>,
+    /// The occupancy first (floe_vfs HierOpts::dot_occ_first): Some(share)
+    /// with `sub_cut_dots` at 1 - a page under the cells' cut is spread by a
+    /// fine enough occupancy grid whatever its shapes' size; one without
+    /// such a grid whose largest shape reaches `share` of the cut is decoded.
+    /// None: the pages cut where `sub_cut_dots` says.
+    pub dot_occ_first: Option<f64>,
+    /// The budget fit top plane first (floe_vfs::hier::HierOpts::fit_rank):
+    /// per cache layer index its rank in the drawing order from the top plane
+    /// (0) down, u16::MAX for a layer not drawn - renderd's pass 1 (user
+    /// 2026-10-07). None: by size class alone.
+    pub fit_rank: Option<std::sync::Arc<[u16]>>,
 }
 
 impl PlanRequest {
@@ -146,9 +188,19 @@ mod tests {
             page_wash: true,
             lod_swap: true,
             regions: Vec::new(),
+            density_mask: None,
+            density_layers: None,
             visible_indices: None,
             fixed_fit: None,
             root: None,
+            sub_cut_dots: None,
+            dot_records: None,
+            probe_limit: 0,
+            free_pages: None,
+            empty_top: true,
+            dot_bright: None,
+            dot_occ_first: None,
+            fit_rank: None,
         };
         assert!(req.validate().is_err());
     }

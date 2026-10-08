@@ -90,10 +90,20 @@ pub fn vfs_cmd(args: &[String]) {
     // largely absorbed - and their generation dominates monster-cell
     // build time (150M field: lod was ~half of a 164s cell plan).
     let mut lod = true;
+    // design.ovb, the pages' occupancy grids (2026-10-02): where in its
+    // box a page's shapes lie, for the density stack's dots of a page under
+    // the floor; --no-page-occupancy (the kill switch) builds none
+    let mut page_occ = true;
     // the hierarchy summary design.ovh (the viewer's cell tree,
     // floe_vfs::hiersum): written at the end of every build unless
     // --no-hier; `floe-index hier <cache>` adds it to an older cache
     let mut hier = true;
+    // the occupancy density design.ovs and its big cells' design.ovs.<cell>
+    // (floe_vfs::occ_density): built after the marker from the committed
+    // index unless --no-ovs (user 2026-10-07, ~700 s and ~40 MB on the field
+    // chip: "include ovs in indexing by default"); `floe-index ovs <cache>`
+    // adds or rebuilds it
+    let mut ovs = true;
     // slow-cell log threshold in seconds; 0 logs every cell (the
     // S6/S7 gates use it to observe fanout uptake). CLI state, not
     // an env var - same rule as --kill-at above.
@@ -217,8 +227,16 @@ pub fn vfs_cmd(args: &[String]) {
                 lod = false;
                 i += 1;
             }
+            "--no-page-occupancy" => {
+                page_occ = false;
+                i += 1;
+            }
             "--no-hier" => {
                 hier = false;
+                i += 1;
+            }
+            "--no-ovs" => {
+                ovs = false;
                 i += 1;
             }
             "--frontier-only" => {
@@ -658,6 +676,10 @@ pub fn vfs_cmd(args: &[String]) {
             "design.ovr.tmp",
             "design.ovh",
             "design.ovh.tmp",
+            "design.ovb",
+            "design.ovb.tmp",
+            "design.ovs",
+            "design.ovs.tmp",
             "labels.tsv",
             // legacy (pre-0.10) viewer file: scrub on rebuild so a
             // re-index actually reclaims the skeleton's bytes
@@ -667,6 +689,7 @@ pub fn vfs_cmd(args: &[String]) {
         ] {
             let _ = std::fs::remove_file(format!("{}/{}", outdir, f));
         }
+        let _ = remove_cell_ovs(&outdir, &[]);
         if kill_at.as_deref() == Some("marker-deleted") {
             eprintln!("[vfs] --kill-at marker-deleted");
             std::process::exit(9);
@@ -681,6 +704,7 @@ pub fn vfs_cmd(args: &[String]) {
             plan_batch,
             page_target_bytes,
             lod,
+            page_occ,
             slow_cell_s,
             p2_shard_limit,
         );
@@ -751,6 +775,15 @@ pub fn vfs_cmd(args: &[String]) {
             "[vfs] commit design.ovm ({})",
             fmt_size(ovm_bytes.len() as u64)
         );
+        if ovs {
+            // the occupancy density (additive, outside the marker protocol
+            // like design.ovh), from the committed index: the parse and the
+            // built bytes let go first, a failure costs the file, never the
+            // cache
+            drop(ovm_bytes);
+            drop(doc);
+            write_ovs_after_build(&outdir, jobs, page_occ, hier);
+        }
     }
     eprintln!(
         "[vfs] done in {:.1}s -> {}",
@@ -2166,6 +2199,258 @@ fn write_hier(ovm: &floe_ovm::Ovm, outdir: &str) {
     }
 }
 
+/// `floe-index ovs <cache> [--um F] [--jobs N] [--roots F]` (floe_vfs::occ_density, 2026-10-06):
+/// add (or rebuild) design.ovs - per layer and depth the cells holding
+/// shapes under the cut and their groups' mean cover, what the density
+/// stack's pass 2 draws by (FLOE_RUST_DENSITY_OCC=off: the plans) - from the cache's
+/// index (design.ovm, design.ovb, design.ovh, design.ovp) in one walk; the
+/// cache's other files are untouched. --um: the base cell in microns
+/// (default: the smallest power of two keeping the chip's longer side within
+/// 2,048 cells); --jobs: the threads decoding pages (default: all); --roots:
+/// the cells under the top whose box is this share of the top's or more get
+/// a file of their own, design.ovs.<cell>, their root views' (default 0.25;
+/// 0: none) - made in the same walk (user 2026-10-07).
+pub fn ovs_cmd(args: &[String]) {
+    let mut dir: Option<String> = None;
+    let mut base_um: Option<f64> = None;
+    let mut jobs = 0usize;
+    let mut root_share = floe_vfs::occ_density::OVS_ROOT_SHARE;
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if a == "--jobs" {
+            i += 1;
+            jobs = args
+                .get(i)
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or_else(|| {
+                    eprintln!("--jobs wants a number of threads");
+                    std::process::exit(2);
+                });
+        } else if a == "--um" {
+            i += 1;
+            base_um = args
+                .get(i)
+                .and_then(|v| v.parse::<f64>().ok())
+                .filter(|v| v.is_finite() && *v > 0.0);
+            if base_um.is_none() {
+                eprintln!("--um wants a positive number of microns");
+                std::process::exit(2);
+            }
+        } else if a == "--roots" {
+            i += 1;
+            root_share = args
+                .get(i)
+                .and_then(|v| v.parse::<f64>().ok())
+                .filter(|v| (0.0..=1.0).contains(v))
+                .unwrap_or_else(|| {
+                    eprintln!("--roots wants a share of the top's box from 0 (none) to 1");
+                    std::process::exit(2);
+                });
+        } else if a.starts_with("--") {
+            crate::unknown_option("ovs", a);
+        } else {
+            dir = Some(a.to_string());
+        }
+        i += 1;
+    }
+    let dir = dir.unwrap_or_else(|| {
+        eprintln!("usage: floe-index ovs <cache> [--um F] [--jobs N] [--roots F]");
+        std::process::exit(2);
+    });
+    let started = std::time::Instant::now();
+    // where the build is (user 2026-10-07: "no log while ovs indexes - 11
+    // minutes into the real chip and no telling how far it got")
+    let say = |line: &str| eprintln!("[ovs] {}", line);
+    let w = write_ovs(&dir, base_um, jobs, root_share, &say).unwrap_or_else(|e| {
+        eprintln!("ovs: {}", e);
+        std::process::exit(1);
+    });
+    let (g, stats) = (w.grid, &w.stats);
+    println!(
+        "ovs file={} bytes={} base_um={} grid={}x{} levels={} roots={} root_bytes={} walked={} small={} spread={} small_keys={} small_tiles={} pages={} big_pages={} decoded={} decoded_mb={:.1} decode_s={:.2} decode_jobs={} walk_s={:.2} settle_s={:.2} write_s={:.2} planes={} plane_mb={:.1} plane_levels={} empty={} open_s={:.2} total_s={:.2}",
+        w.path,
+        w.bytes,
+        g.base_um(),
+        g.w,
+        g.h,
+        g.n_levels,
+        w.roots,
+        w.root_bytes,
+        stats.walked,
+        stats.small,
+        stats.spread,
+        stats.small_keys,
+        stats.small_tiles,
+        stats.pages,
+        stats.big_pages,
+        stats.decoded,
+        stats.decoded_bytes as f64 / 1e6,
+        stats.decode_s,
+        stats.decode_jobs,
+        stats.walk_s,
+        stats.settle_s,
+        stats.write_s,
+        stats.grids,
+        stats.grid_bytes as f64 / 1e6,
+        stats.levels,
+        stats.empty_levels,
+        w.open_s,
+        started.elapsed().as_secs_f64()
+    );
+}
+
+/// What write_ovs wrote: the top's design.ovs (its path, bytes and grid),
+/// the big cells' files, and what the build did
+struct OvsWritten {
+    path: String,
+    bytes: usize,
+    grid: floe_vfs::occ_density::OvsGrid,
+    roots: usize,
+    root_bytes: usize,
+    stats: floe_vfs::occ_density::OvsStats,
+    open_s: f64,
+}
+
+/// design.ovs and the big cells' design.ovs.<cell> for the cache at `dir`,
+/// from its index (design.ovm, design.ovb, design.ovh, design.ovp) in one
+/// walk (floe_vfs::occ_density::build), each by tmp + rename - a viewer
+/// reading the old file meanwhile keeps it whole - and an earlier build's
+/// cell files no longer made removed; `say` gets the progress lines. An
+/// error names the file or the step.
+fn write_ovs(
+    dir: &str,
+    base_um: Option<f64>,
+    jobs: usize,
+    root_share: f64,
+    say: &dyn Fn(&str),
+) -> Result<OvsWritten, String> {
+    let started = std::time::Instant::now();
+    let mut ovm = floe_ovm::Ovm::open(&format!("{}/design.ovm", dir))
+        .map_err(|e| format!("design.ovm: {}", e))?;
+    match ovm.attach_page_occ(&format!("{}/design.ovb", dir)) {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(
+                "design.ovb: missing (an index built without the pages' occupancy: index again)"
+                    .into(),
+            )
+        }
+        Err(e) => return Err(format!("design.ovb: {}", e)),
+    }
+    let summary = floe_vfs::hiersum::HierSummary::open(&format!("{}/design.ovh", dir))
+        .and_then(|s| s.validate_against(&ovm).map(|()| s))
+        .map_err(|e| format!("design.ovh: {} (floe-index hier adds it)", e))?;
+    let cover = floe_vfs::cover::CellCover::new(&ovm, std::sync::Arc::new(summary))
+        .ok_or("cell cover: no design.ovb or another summary")?;
+    let open_s = started.elapsed().as_secs_f64();
+    say(&format!("{}: index open ({:.1} s)", dir, open_s));
+    let ovp = format!("{}/design.ovp", dir);
+    let floe_vfs::occ_density::Built { top, roots, stats } =
+        floe_vfs::occ_density::build(&ovm, &cover, &ovp, base_um, jobs, root_share, say)
+            .map_err(|e| format!("build: {}", e))?;
+    let grid = floe_vfs::occ_density::OvsFile::from_bytes(top.clone())
+        .map_err(|e| format!("build: {}", e))?
+        .grid;
+    let write = |path: &str, bytes: &[u8]| -> Result<(), String> {
+        let tmp = format!("{}.tmp", path);
+        std::fs::write(&tmp, bytes).map_err(|e| format!("{}: {}", tmp, e))?;
+        std::fs::rename(&tmp, path).map_err(|e| format!("{}: {}", path, e))
+    };
+    // the big cells' files, and none left of an earlier build's other cells
+    let mut root_bytes = 0usize;
+    for (ci, name, rb) in &roots {
+        let path = format!("{}/design.ovs.{}", dir, ci);
+        floe_vfs::occ_density::OvsFile::from_bytes(rb.clone())
+            .map_err(|e| format!("{}: {}", path, e))?;
+        write(&path, rb)?;
+        root_bytes += rb.len();
+        say(&format!(
+            "{}: cell {}'s root views, {:.1} MB",
+            path,
+            name,
+            rb.len() as f64 / 1e6
+        ));
+    }
+    let kept: Vec<u32> = roots.iter().map(|r| r.0).collect();
+    for removed in remove_cell_ovs(dir, &kept)? {
+        say(&format!("{}: removed (an earlier build's)", removed));
+    }
+    let path = format!("{}/design.ovs", dir);
+    write(&path, &top)?;
+    Ok(OvsWritten {
+        path,
+        bytes: top.len(),
+        grid,
+        roots: roots.len(),
+        root_bytes,
+        stats,
+        open_s,
+    })
+}
+
+/// The cells' design.ovs.<cell> (and their .tmp) in `dir` but those of the
+/// cells `kept`, removed: their paths
+fn remove_cell_ovs(dir: &str, kept: &[u32]) -> Result<Vec<String>, String> {
+    let mut removed = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(removed);
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(rest) = name.strip_prefix("design.ovs.") else {
+            continue;
+        };
+        let (number, tmp) = match rest.strip_suffix(".tmp") {
+            Some(number) => (number, true),
+            None => (rest, false),
+        };
+        let Ok(ci) = number.parse::<u32>() else {
+            continue;
+        };
+        if tmp || !kept.contains(&ci) {
+            let path = format!("{}/{}", dir, name);
+            std::fs::remove_file(entry.path()).map_err(|e| format!("{}: {}", path, e))?;
+            removed.push(path);
+        }
+    }
+    removed.sort();
+    Ok(removed)
+}
+
+/// design.ovs at the end of a build (`floe-index vfs`, unless --no-ovs):
+/// from the committed index, its decode on the build's `jobs` threads; left
+/// out where its inputs were (--no-page-occupancy, --no-hier); a failure
+/// says how to add it later and leaves the cache as it is.
+fn write_ovs_after_build(outdir: &str, jobs: usize, page_occ: bool, hier: bool) {
+    if !page_occ || !hier {
+        eprintln!(
+            "[vfs] ovs: none - design.ovs is made of design.ovb and design.ovh ({} left one out)",
+            if page_occ {
+                "--no-hier"
+            } else {
+                "--no-page-occupancy"
+            }
+        );
+        return;
+    }
+    let started = std::time::Instant::now();
+    let say = |line: &str| eprintln!("[ovs] {}", line);
+    match write_ovs(outdir, None, jobs, floe_vfs::occ_density::OVS_ROOT_SHARE, &say) {
+        Ok(w) => eprintln!(
+            "[vfs] ovs design.ovs: {} and {} cell file(s) of {} ({:.1}s)",
+            fmt_size(w.bytes as u64),
+            w.roots,
+            fmt_size(w.root_bytes as u64),
+            started.elapsed().as_secs_f64()
+        ),
+        Err(e) => eprintln!(
+            "[vfs] ovs: {} - the cache is completed without design.ovs; add it later with `floe-index ovs {}`",
+            e, outdir
+        ),
+    }
+}
+
 /// `floe-index hier <cache> [--check]`: add (or rebuild) design.ovh on an
 /// existing cache; --check reports the file's identity against the cache
 /// instead. The cache's other files are untouched.
@@ -3556,6 +3841,285 @@ fn encode_job(doc: &Doc, job: &PageJob, arenas: &[Arena]) -> (Vec<u8>, u64) {
     floe_oasis::write::write_tree_sized(&[wc], doc.unit).expect("page payload")
 }
 
+/// design.ovb being written (floe_ovm::OVB_MAGIC, ovb_image's bytes): the
+/// pages' stored grids in page order after a header written last, then the
+/// page table; published by tmp + rename before the marker
+struct OvbWriter {
+    w: std::io::BufWriter<std::fs::File>,
+    dir: String,
+    offsets: Vec<u64>,
+    at: u64,
+    secs: f64,
+}
+
+impl OvbWriter {
+    fn create(dir: &str) -> OvbWriter {
+        let f = std::fs::File::create(format!("{}/design.ovb.tmp", dir)).expect("create ovb");
+        let mut w = std::io::BufWriter::new(f);
+        std::io::Write::write_all(&mut w, &[0u8; floe_ovm::OVB_HEADER_LEN]).expect("write ovb");
+        OvbWriter {
+            w,
+            dir: dir.to_string(),
+            offsets: Vec::new(),
+            at: floe_ovm::OVB_HEADER_LEN as u64,
+            secs: 0.0,
+        }
+    }
+
+    /// the next page's stored grid (floe_ovm::occ_encode; empty: none, as
+    /// for an LOD variant)
+    fn put(&mut self, grid: &[u8]) {
+        self.offsets.push(self.at);
+        std::io::Write::write_all(&mut self.w, grid).expect("write ovb");
+        self.at += grid.len() as u64;
+    }
+
+    fn finish(mut self, src_size: u64, src_mtime: u64, ovp_len: u64) {
+        use std::io::{Seek, Write};
+        let pages = narrow_u32(self.offsets.len() as u64, "ovb pages");
+        let table_at = self.at;
+        self.offsets.push(table_at);
+        for at in &self.offsets {
+            self.w.write_all(&at.to_le_bytes()).expect("write ovb");
+        }
+        let header = floe_ovm::ovb_header(pages, src_size, src_mtime, ovp_len, table_at);
+        let mut f = self.w.into_inner().expect("flush ovb");
+        f.seek(std::io::SeekFrom::Start(0)).expect("seek ovb");
+        f.write_all(&header).expect("write ovb header");
+        drop(f);
+        std::fs::rename(
+            format!("{}/design.ovb.tmp", self.dir),
+            format!("{}/design.ovb", self.dir),
+        )
+        .expect("publish ovb");
+        eprintln!(
+            "[vfs] page occupancy design.ovb: {} pages, {} ({:.1}s over the encode workers)",
+            pages,
+            fmt_size(table_at + 8 * self.offsets.len() as u64),
+            self.secs
+        );
+    }
+}
+
+/// The occupancy grid of an exact page (design.ovb): the area its members'
+/// shapes cover in each of floe_ovm::OCC_GRID x OCC_GRID cells over the page
+/// bbox, as a level (floe_ovm::occ_level) - a rectangle's own, a polygon's
+/// and a path's spread over its box. Point lists go member by member, an
+/// orthogonal grid by axis (occ_axis_lengths: O(OCC_GRID) for any count), a
+/// skew one member by member up to LOD_ENUM_CAP and over its box beyond.
+fn page_occupancy(cell: &floe_oasis::doc::Cell, arena: &Arena, job: &PageJob) -> Vec<u8> {
+    let g = floe_ovm::OCC_GRID as usize;
+    let (area, ex, ey) = page_occupancy_areas(cell, arena, job);
+    let mut levels = vec![0u8; floe_ovm::OCC_CELLS];
+    for cy in 0..g {
+        for cx in 0..g {
+            let cell_area = (ex[cx + 1] - ex[cx]) as f64 * (ey[cy + 1] - ey[cy]) as f64;
+            if cell_area > 0.0 {
+                levels[cy * g + cx] = floe_ovm::occ_level(area[cy * g + cx] / cell_area);
+            }
+        }
+    }
+    levels
+}
+
+/// The part of its box a record's shape covers: a rectangle all of it, a
+/// polygon its area (shoelace), a path its length (and extensions) by its width
+fn rec_fill(cell: &floe_oasis::doc::Cell, r: &PRec, boxed: f64) -> f64 {
+    if !(boxed > 0.0) {
+        return 0.0;
+    }
+    match r.kind {
+        0 => 1.0,
+        1 => {
+            let pts = &cell.polys[r.idx as usize].pts;
+            let twice: i128 = pts
+                .iter()
+                .zip(pts.iter().cycle().skip(1))
+                .map(|(a, b)| a.0 as i128 * b.1 as i128 - b.0 as i128 * a.1 as i128)
+                .sum();
+            (twice.unsigned_abs() as f64 / 2.0 / boxed).min(1.0)
+        }
+        _ => {
+            let pa = &cell.paths[r.idx as usize];
+            let length: f64 = pa
+                .pts
+                .windows(2)
+                .map(|w| ((w[1].0 - w[0].0) as f64).hypot((w[1].1 - w[0].1) as f64))
+                .sum();
+            ((length + (pa.es + pa.ee).max(0) as f64) * 2.0 * pa.hw.max(0) as f64 / boxed).min(1.0)
+        }
+    }
+}
+
+/// An exact page's design.ovb record: its grid (page_occupancy) when it is
+/// wide enough for its shapes (floe_ovm::occ_wants_grid), else the area they
+/// cover - its members at their shape's covered area, record by record
+fn page_occupancy_record(cell: &floe_oasis::doc::Cell, arena: &Arena, job: &PageJob) -> Vec<u8> {
+    if floe_ovm::occ_wants_grid(&job.bbox, job.max_w, job.max_h) {
+        return floe_ovm::occ_encode(&page_occupancy(cell, arena, job));
+    }
+    let area: f64 = job
+        .recs
+        .iter()
+        .map(|r| {
+            let sb = rec_shape_box(cell, r);
+            let boxed = (sb.x1 - sb.x0).max(0) as f64 * (sb.y1 - sb.y0).max(0) as f64;
+            r.members as f64 * boxed * rec_fill(cell, r, boxed)
+        })
+        .sum();
+    floe_ovm::occ_total(area)
+}
+
+/// page_occupancy's areas (dbu^2, row by row) and its cells' edges on x and y
+fn page_occupancy_areas(
+    cell: &floe_oasis::doc::Cell,
+    arena: &Arena,
+    job: &PageJob,
+) -> (Vec<f64>, Vec<i64>, Vec<i64>) {
+    let g = floe_ovm::OCC_GRID;
+    let bb = job.bbox;
+    let (bw, bh) = ((bb.x1 - bb.x0).max(1), (bb.y1 - bb.y0).max(1));
+    let ex: Vec<i64> = (0..=g).map(|k| floe_ovm::occ_edge(bb.x0, bw, k)).collect();
+    let ey: Vec<i64> = (0..=g).map(|k| floe_ovm::occ_edge(bb.y0, bh, k)).collect();
+    let mut area = vec![0f64; floe_ovm::OCC_CELLS];
+    // a box [x0, x1) x [y0, y1) whose `fill` of its area is shape: its part
+    // of each cell it meets
+    let add_box = |area: &mut [f64], x0: i64, y0: i64, x1: i64, y1: i64, fill: f64| {
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        let (cx0, cx1) = (
+            floe_ovm::occ_cell(bb.x0, bw, x0),
+            floe_ovm::occ_cell(bb.x0, bw, x1 - 1),
+        );
+        let (cy0, cy1) = (
+            floe_ovm::occ_cell(bb.y0, bh, y0),
+            floe_ovm::occ_cell(bb.y0, bh, y1 - 1),
+        );
+        for cy in cy0..=cy1 {
+            let oy = y1.min(ey[cy as usize + 1]) - y0.max(ey[cy as usize]);
+            if oy <= 0 {
+                continue;
+            }
+            for cx in cx0..=cx1 {
+                let ox = x1.min(ex[cx as usize + 1]) - x0.max(ex[cx as usize]);
+                if ox > 0 {
+                    area[(cy * g + cx) as usize] += ox as f64 * oy as f64 * fill;
+                }
+            }
+        }
+    };
+    for r in &job.recs {
+        let sb = rec_shape_box(cell, r);
+        let boxed = (sb.x1 - sb.x0).max(0) as f64 * (sb.y1 - sb.y0).max(0) as f64;
+        let fill = rec_fill(cell, r, boxed);
+        let member = |area: &mut [f64], ox: i64, oy: i64| {
+            add_box(area, sb.x0 + ox, sb.y0 + oy, sb.x1 + ox, sb.y1 + oy, fill)
+        };
+        match (r.frag, rec_rep(cell, r)) {
+            (Frag::Pts { arena: a, lo, hi }, rep) => {
+                let src = match rep {
+                    Rep::Pts(pl) => pl,
+                    _ => unreachable!("pts frag on non-pts"),
+                };
+                for &slot in &arena[a as usize].order[lo as usize..hi as usize] {
+                    let (ox, oy) = src[slot as usize];
+                    member(&mut area, ox, oy);
+                }
+            }
+            (frag, Rep::Grid { na, nb, va, vb }) => {
+                let (va, vb) = (*va, *vb);
+                let (i0, i1, j0, j1) = match frag {
+                    Frag::Grid { i0, i1, j0, j1 } => (i0 as i64, i1 as i64, j0 as i64, j1 as i64),
+                    _ => (0, *na as i64, 0, *nb as i64),
+                };
+                let (ni, nj) = (i1 - i0, j1 - j0);
+                let ortho = (va.1 == 0 && vb.0 == 0) || (va.0 == 0 && vb.1 == 0);
+                if ortho {
+                    // the members are the x intervals by the y intervals: a
+                    // cell's area is the product of their lengths in it
+                    let (bx0, by0) = (i0 * va.0 + j0 * vb.0, i0 * va.1 + j0 * vb.1);
+                    let (xs_step, xs_n, ys_step, ys_n) = if va.1 == 0 && vb.0 == 0 {
+                        (va.0, ni, vb.1, nj)
+                    } else {
+                        (vb.0, nj, va.1, ni)
+                    };
+                    let lx = occ_axis_lengths(sb.x0 + bx0, sb.x1 + bx0, xs_step, xs_n, &ex);
+                    let ly = occ_axis_lengths(sb.y0 + by0, sb.y1 + by0, ys_step, ys_n, &ey);
+                    for (cy, &h) in ly.iter().enumerate() {
+                        if h > 0.0 {
+                            for (cx, &w) in lx.iter().enumerate() {
+                                area[cy * g as usize + cx] += w * h * fill;
+                            }
+                        }
+                    }
+                } else if (ni as u64).saturating_mul(nj as u64) > LOD_ENUM_CAP {
+                    // a skew mega-grid is never looped: its members' area
+                    // over its box
+                    let rb = (r.bbox.x1 - r.bbox.x0).max(1) as f64
+                        * (r.bbox.y1 - r.bbox.y0).max(1) as f64;
+                    add_box(
+                        &mut area,
+                        r.bbox.x0,
+                        r.bbox.y0,
+                        r.bbox.x1,
+                        r.bbox.y1,
+                        (r.members as f64 * boxed * fill / rb).min(1.0),
+                    );
+                } else {
+                    for i in i0..i1 {
+                        for j in j0..j1 {
+                            member(&mut area, i * va.0 + j * vb.0, i * va.1 + j * vb.1);
+                        }
+                    }
+                }
+            }
+            (Frag::Whole, Rep::One) => member(&mut area, 0, 0),
+            (Frag::Whole, Rep::Pts(pl)) => {
+                for &(ox, oy) in pl.iter() {
+                    member(&mut area, ox, oy);
+                }
+            }
+            (Frag::Grid { .. }, _) => unreachable!("grid frag on non-grid"),
+        }
+    }
+    (area, ex, ey)
+}
+
+/// The lengths of the intervals [lo + m step, hi + m step), m in [0, n), in
+/// each cell between the edges `edges` (floe_ovm::occ_edge): from their
+/// length left of each edge, in closed form for any n
+fn occ_axis_lengths(lo: i64, hi: i64, step: i64, n: i64, edges: &[i64]) -> Vec<f64> {
+    let cells = edges.len() - 1;
+    let w = (hi - lo) as i128;
+    if n <= 0 || w <= 0 {
+        return vec![0.0; cells];
+    }
+    // the first interval leftmost
+    let (lo, step) = if step < 0 {
+        (lo + (n - 1) * step, -step)
+    } else {
+        (lo, step)
+    };
+    let left_of = |x: i64| -> i128 {
+        if step == 0 {
+            return n as i128 * ((x - lo) as i128).clamp(0, w);
+        }
+        // whole left of x: lo + w + m step <= x
+        let whole = (floe_tiler::div_floor(x - lo - w as i64, step) + 1).clamp(0, n);
+        // cut by x: lo + m step < x < lo + w + m step
+        let cut = (floe_tiler::div_ceil(x - lo, step) - 1).min(n - 1);
+        let mut sum = whole as i128 * w;
+        if cut >= whole {
+            let k = (cut - whole + 1) as i128;
+            sum += k * (x - lo) as i128 - step as i128 * (whole as i128 + cut as i128) * k / 2;
+        }
+        sum
+    };
+    let at: Vec<i128> = edges.iter().map(|&x| left_of(x)).collect();
+    (0..cells).map(|k| (at[k + 1] - at[k]) as f64).collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn write_encoded_page(
     b: &mut Builder,
@@ -3565,7 +4129,12 @@ fn write_encoded_page(
     raw: u64,
     ovp_off: &mut u64,
     pages_bytes: &mut u64,
+    ovb: &mut Option<OvbWriter>,
+    occ: &[u8],
 ) {
+    if let Some(ovb) = ovb {
+        ovb.put(occ);
+    }
     std::io::Write::write_all(ovp, payload).expect("write ovp");
     b.page(
         narrow_u32(job.ci as u64, "cell index"),
@@ -3608,6 +4177,7 @@ fn encode_write_pages(
     ovp_off: &mut u64,
     pages_bytes: &mut u64,
     encoded_done: &std::sync::atomic::AtomicUsize,
+    ovb: &mut Option<OvbWriter>,
 ) {
     let ptotal = page_jobs.len();
     if ptotal == 0 {
@@ -3623,25 +4193,46 @@ fn encode_write_pages(
             .expect("page cell after arena batch")
             .as_slice()
     };
+    // design.ovb: an exact page's occupancy grid, worked out and stored
+    // beside its payload (and the seconds it took)
+    let with_occ = ovb.is_some();
+    let occ_of = |job: &PageJob| -> (Vec<u8>, f64) {
+        if !with_occ || job.lod != floe_ovm::LOD_EXACT {
+            return (Vec::new(), 0.0);
+        }
+        let t = std::time::Instant::now();
+        let record = page_occupancy_record(
+            &doc.cells[job.ci],
+            arena_at(arena_for(job), job.arena_slot),
+            job,
+        );
+        (record, t.elapsed().as_secs_f64())
+    };
     if workers <= 1 || ptotal == 1 {
         for job in page_jobs {
             let (payload, raw) = encode_job(doc, job, arena_for(job));
-            write_encoded_page(b, ovp, job, &payload, raw, ovp_off, pages_bytes);
+            let (occ, secs) = occ_of(job);
+            if let Some(ovb) = ovb.as_mut() {
+                ovb.secs += secs;
+            }
+            write_encoded_page(b, ovp, job, &payload, raw, ovp_off, pages_bytes, ovb, &occ);
             encoded_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         return;
     }
 
+    type Encoded = (Vec<u8>, u64, Vec<u8>, f64);
     let result_batch = batch_limit.max(1).min(ptotal);
     std::thread::scope(|s| {
         let (task_tx, task_rx) = std::sync::mpsc::sync_channel::<usize>(result_batch);
         let task_rx = std::sync::Arc::new(std::sync::Mutex::new(task_rx));
         let (result_tx, result_rx) =
-            std::sync::mpsc::sync_channel::<(usize, Vec<u8>, u64)>(result_batch);
+            std::sync::mpsc::sync_channel::<(usize, Encoded)>(result_batch);
         for _ in 0..workers.min(ptotal) {
             let task_rx = task_rx.clone();
             let result_tx = result_tx.clone();
             let arena_for = &arena_for;
+            let occ_of = &occ_of;
             s.spawn(move || loop {
                 let i = match task_rx.lock().unwrap().recv() {
                     Ok(i) => i,
@@ -3649,7 +4240,8 @@ fn encode_write_pages(
                 };
                 let job = &page_jobs[i];
                 let (payload, raw) = encode_job(doc, job, arena_for(job));
-                if result_tx.send((i, payload, raw)).is_err() {
+                let (occ, secs) = occ_of(job);
+                if result_tx.send((i, (payload, raw, occ, secs))).is_err() {
                     return;
                 }
             });
@@ -3660,15 +4252,28 @@ fn encode_write_pages(
             for i in base..end {
                 task_tx.send(i).expect("encode task worker");
             }
-            let mut results: Vec<Option<(Vec<u8>, u64)>> = (base..end).map(|_| None).collect();
+            let mut results: Vec<Option<Encoded>> = (base..end).map(|_| None).collect();
             for _ in base..end {
-                let (i, payload, raw) = result_rx.recv().expect("encode result worker");
+                let (i, encoded) = result_rx.recv().expect("encode result worker");
                 assert!(i >= base && i < end, "encode result outside batch");
-                results[i - base] = Some((payload, raw));
+                results[i - base] = Some(encoded);
             }
             for (i, slot) in (base..end).zip(results) {
-                let (payload, raw) = slot.expect("encode result slot");
-                write_encoded_page(b, ovp, &page_jobs[i], &payload, raw, ovp_off, pages_bytes);
+                let (payload, raw, occ, secs) = slot.expect("encode result slot");
+                if let Some(ovb) = ovb.as_mut() {
+                    ovb.secs += secs;
+                }
+                write_encoded_page(
+                    b,
+                    ovp,
+                    &page_jobs[i],
+                    &payload,
+                    raw,
+                    ovp_off,
+                    pages_bytes,
+                    ovb,
+                    &occ,
+                );
                 encoded_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
@@ -5572,6 +6177,7 @@ fn build(
     plan_batch: usize,
     page_target_bytes: u64,
     lod: bool,
+    page_occ: bool,
     slow_cell_s: f64,
     p2_shard_limit: Option<u64>,
 ) -> (
@@ -5816,6 +6422,8 @@ fn build(
     let ovp_path = format!("{}/design.ovp", outdir);
     let mut ovp = std::io::BufWriter::new(std::fs::File::create(&ovp_path).expect("create ovp"));
     let mut ovp_off = 0u64;
+    // design.ovb: the pages' occupancy grids, beside design.ovp in page order
+    let mut ovb = page_occ.then(|| OvbWriter::create(outdir));
     // design.ovt (v5): text strings + pts pools stream here - the
     // text pass runs serially in cell order inside the batch loop
     // (cheap, source-local), so bytes are jobs-independent
@@ -6237,6 +6845,7 @@ fn build(
                     &mut ovp_off,
                     &mut pages_bytes,
                     &encoded_pages,
+                    &mut ovb,
                 );
                 encode_elapsed += te.elapsed();
                 batch_jobs.clear();
@@ -6319,6 +6928,9 @@ fn build(
     }
 
     ovp.flush().expect("flush ovp");
+    if let Some(ovb) = ovb.take() {
+        ovb.finish(size, mtime, ovp_off);
+    }
     ovt.flush().expect("flush ovt");
     eprintln!(
         "[vfs] build: text index {} records ({} members) in {} \
@@ -6835,6 +7447,18 @@ pub fn plan_cmd(args: &[String]) {
         if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--sub-cut-box-px") {
             popts.sub_cut_box_px = val.parse().expect("sub-cut-box-px");
         }
+        // --sub-cut-dots SHARE: the density stack's pass 2 (HierOpts::
+        // sub_cut_dots) - the cut is the cells', a cell under it a dot item,
+        // and the pages take the cut times SHARE
+        if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--sub-cut-dots") {
+            popts.sub_cut_dots = Some(val.parse().expect("sub-cut-dots"));
+        }
+        // --dot-records SHARE: the dots' one walk (HierOpts::dot_records) -
+        // pages at the cut, records at the cut times SHARE, a page all under
+        // the cut a dot item
+        if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--dot-records") {
+            popts.dot_records = Some(val.parse().expect("dot-records"));
+        }
         // --shape-cut 1: the cut judges every shape by its smaller side
         // (ViewReq::shape_cut; the viewer sets it for thin keep)
         if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--shape-cut") {
@@ -6912,7 +7536,7 @@ pub fn plan_cmd(args: &[String]) {
              \"sub_cut_boxes\": {},\n  \
              \"sub_cut_box_nodes\": {},\n  \
              \"sub_cut_box_over\": {},\n  \
-             \"sub_cut_box_reads\": {},\n  \"sub_cut_box_strided\": {},\n  \"sub_cut_box_unsure\": {},\n  \"sub_cut_box_level\": {},\n  \
+             \"sub_cut_box_reads\": {},\n  \"sub_cut_box_strided\": {},\n  \"sub_cut_box_members\": {},\n  \"sub_cut_dot_items\": {},\n  \"sub_cut_box_unsure\": {},\n  \"sub_cut_box_level\": {},\n  \
              \"washes\": {},\n  \
              \"plan_ms\": {:.2}\n}}",
             plan.pages.len(),
@@ -6968,6 +7592,8 @@ pub fn plan_cmd(args: &[String]) {
             st.sub_cut_box_over,
             st.sub_cut_box_reads,
             st.sub_cut_box_strided,
+            st.sub_cut_box_members,
+            st.sub_cut_dot_items,
             st.sub_cut_box_unsure,
             st.sub_cut_box_level,
             plan.wcells.iter().map(|c| c.washes.len() as u64).sum::<u64>(),
@@ -9660,6 +10286,184 @@ mod split_tests {
         let li = plan.pages[k].lod_page as usize;
         let mems = page_mems(&doc, &plan, li);
         assert_eq!(mems.len(), 90_000, "rep not kept verbatim");
+    }
+
+    /// design.ovb (2026-10-02, v2 2026-10-03): a page's occupancy grid holds
+    /// the area its members' boxes cover in each cell (floe_ovm::occ_edge's
+    /// cells) - point lists member by member, an orthogonal grid by axis in
+    /// closed form, a small skew grid member by member - against the members
+    /// its payload expands to; a cluster apart from the rest leaves the cells
+    /// between empty, and a cell's level is its part covered (occ_level)
+    #[test]
+    fn page_occupancy_holds_the_area_of_every_member_in_its_cells() {
+        const DIE: i64 = 1_000_000;
+        // past a page's MiB (4 bytes a point): the split makes pages
+        let mut far = pts_rec(13, 60_000, DIE / 8, 60);
+        far.x += DIE * 3 / 4;
+        far.y += DIE * 3 / 5;
+        let doc = mini_doc(vec![
+            pts_rec(7, 300_000, DIE / 3, 100),
+            far,
+            // members wider than their step (overlapping) and ones apart
+            RectRec {
+                layer: 1,
+                dt: 0,
+                x: 500,
+                y: 700,
+                w: 120,
+                h: 90,
+                rep: Rep::Grid {
+                    na: 40,
+                    nb: 30,
+                    va: (24_000, 0),
+                    vb: (0, 23_000),
+                },
+            },
+            RectRec {
+                layer: 1,
+                dt: 0,
+                x: 40_000,
+                y: 700_000,
+                w: 9_000,
+                h: 300,
+                rep: Rep::Grid {
+                    na: 50,
+                    nb: 3,
+                    va: (0, 7_000),
+                    vb: (-3_000, 0),
+                },
+            },
+            RectRec {
+                layer: 1,
+                dt: 0,
+                x: 3_000,
+                y: 9_000,
+                w: 80,
+                h: 60,
+                rep: Rep::Grid {
+                    na: 30,
+                    nb: 20,
+                    va: (2_900, 1_150),
+                    vb: (-600, 2_800),
+                },
+            },
+            RectRec {
+                layer: 1,
+                dt: 0,
+                x: 900_000,
+                y: 100_000,
+                w: 5_000,
+                h: 300,
+                rep: Rep::One,
+            },
+        ]);
+        let plan = plan_of(&doc);
+        let g = floe_ovm::OCC_GRID as usize;
+        let (mut pages, mut emptiest) = (0, floe_ovm::OCC_CELLS);
+        for (k, page) in plan.pages.iter().enumerate() {
+            if page.lod != floe_ovm::LOD_EXACT {
+                continue;
+            }
+            let arena = arena_at(plan.arenas.as_slice(), page.arena_slot);
+            let (area, ex, ey) = page_occupancy_areas(&doc.cells[0], arena, page);
+            let mut want = vec![0f64; floe_ovm::OCC_CELLS];
+            for m in page_mems(&doc, &plan, k) {
+                for cy in 0..g {
+                    let oy = m.6.min(ey[cy + 1]) - m.4.max(ey[cy]);
+                    for cx in 0..g {
+                        let ox = m.5.min(ex[cx + 1]) - m.3.max(ex[cx]);
+                        if ox > 0 && oy > 0 {
+                            want[cy * g + cx] += ox as f64 * oy as f64;
+                        }
+                    }
+                }
+            }
+            for (cell, (&got, &want)) in area.iter().zip(&want).enumerate() {
+                assert!(
+                    (got - want).abs() <= 1e-9 * want.max(1.0),
+                    "page {k} cell {cell}: {got} of {want}"
+                );
+            }
+            let levels = page_occupancy(&doc.cells[0], arena, page);
+            for (cell, &level) in levels.iter().enumerate() {
+                let (cx, cy) = (cell % g, cell / g);
+                let part =
+                    want[cell] / ((ex[cx + 1] - ex[cx]) as f64 * (ey[cy + 1] - ey[cy]) as f64);
+                assert_eq!(level, floe_ovm::occ_level(part), "page {k} cell {cell}");
+            }
+            emptiest = emptiest.min(levels.iter().filter(|&&l| l > 0).count());
+            pages += 1;
+        }
+        assert!(pages >= 2, "{pages} pages");
+        assert!(
+            emptiest < floe_ovm::OCC_CELLS / 2,
+            "every page's grid over half full: {emptiest}"
+        );
+        // the record: these pages' grids; a page whose largest shape is past
+        // a sixteenth of it keeps the area its members cover alone
+        for page in plan.pages.iter().filter(|p| p.lod == floe_ovm::LOD_EXACT) {
+            let record = page_occupancy_record(
+                &doc.cells[0],
+                arena_at(plan.arenas.as_slice(), page.arena_slot),
+                page,
+            );
+            assert!(
+                matches!(
+                    floe_ovm::occ_record(&record),
+                    Some(floe_ovm::PageOcc::Grid(_))
+                ),
+                "{:?}",
+                page.bbox
+            );
+        }
+        let wide = mini_doc(vec![
+            RectRec {
+                layer: 1,
+                dt: 0,
+                x: 0,
+                y: 0,
+                w: 200_000,
+                h: 1_000,
+                rep: Rep::One,
+            },
+            RectRec {
+                layer: 1,
+                dt: 0,
+                x: 500,
+                y: 7_000,
+                w: 30,
+                h: 20,
+                rep: Rep::Grid {
+                    na: 300,
+                    nb: 40,
+                    va: (600, 0),
+                    vb: (0, 900),
+                },
+            },
+            pts_rec(5, 1_000, 150_000, 50),
+        ]);
+        let plan = plan_of(&wide);
+        let page = &plan.pages[0];
+        assert!(
+            !floe_ovm::occ_wants_grid(&page.bbox, page.max_w, page.max_h)
+                && plan
+                    .pages
+                    .iter()
+                    .filter(|p| p.lod == floe_ovm::LOD_EXACT)
+                    .count()
+                    == 1
+        );
+        let record = page_occupancy_record(
+            &wide.cells[0],
+            arena_at(plan.arenas.as_slice(), page.arena_slot),
+            page,
+        );
+        assert_eq!(
+            floe_ovm::occ_record(&record),
+            Some(floe_ovm::PageOcc::Total(
+                200_000.0 * 1_000.0 + 12_000.0 * 600.0 + 1_000.0 * 2_500.0
+            ))
+        );
     }
 
     /// v6 max_min: mixed-orientation thin wires keep max_w AND

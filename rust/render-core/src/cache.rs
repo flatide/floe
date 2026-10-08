@@ -112,6 +112,14 @@ pub struct PlanCullCounts {
     /// fit was decided anew (1)
     pub fit_fixed: u64,
     pub fit_redecided: u64,
+    /// the fit top plane first (floe_vfs::hier::HierOpts::fit_rank,
+    /// 2026-10-07): it ranked by the drawing order (1), the layers above the
+    /// one its prefix ends in kept whole, that layer (its index + 1; 0 when
+    /// it kept no page) and the layers under it left out
+    pub fit_ranked: u64,
+    pub fit_layers_whole: u64,
+    pub fit_layer_edge: u64,
+    pub fit_layers_out: u64,
     /// sub-cut boxes (floe_vfs::ViewReq::sub_cut_box): box rects the plan
     /// emitted, boxes dropped beyond the per-plan cap
     pub sub_cut_boxes: u64,
@@ -156,6 +164,10 @@ impl PlanCullCounts {
             fit_none_pct: st.fit_none_pct as u64,
             fit_fixed: st.fit_fixed as u64,
             fit_redecided: st.fit_redecided as u64,
+            fit_ranked: u64::from(st.fit_ranked),
+            fit_layers_whole: u64::from(st.fit_layers_whole),
+            fit_layer_edge: u64::from(st.fit_layer_edge),
+            fit_layers_out: u64::from(st.fit_layers_out),
             sub_cut_boxes: st.sub_cut_boxes,
             sub_cut_box_over: st.sub_cut_box_over,
             sub_cut_box_level: st.sub_cut_box_level as u64,
@@ -197,6 +209,20 @@ impl PlanCullCounts {
         self.fit_none_pct = self.fit_none_pct.max(other.fit_none_pct);
         self.fit_fixed = self.fit_fixed.max(other.fit_fixed);
         self.fit_redecided = self.fit_redecided.max(other.fit_redecided);
+        // (one fit's account: the other's when this has none)
+        if self.fit_ranked == 0 {
+            (
+                self.fit_ranked,
+                self.fit_layers_whole,
+                self.fit_layer_edge,
+                self.fit_layers_out,
+            ) = (
+                other.fit_ranked,
+                other.fit_layers_whole,
+                other.fit_layer_edge,
+                other.fit_layers_out,
+            );
+        }
         self.sub_cut_boxes = self.sub_cut_boxes.saturating_add(other.sub_cut_boxes);
         self.sub_cut_box_over = self.sub_cut_box_over.saturating_add(other.sub_cut_box_over);
         self.sub_cut_box_level = self.sub_cut_box_level.max(other.sub_cut_box_level);
@@ -244,6 +270,7 @@ impl PlannedView {
                     insts: Vec::new(),
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    dot_counts: Vec::new(),
                     reps: prims,
                 });
                 self.summary.wc_cells += 1;
@@ -283,6 +310,15 @@ pub struct PagePayload {
     pub bytes: Vec<u8>,
 }
 
+/// Cache::fit_decision_cancellable's answer: the budget fit a plan of the
+/// request decides (None: no fit), and whether the plan walked every cell -
+/// no hierarchy summary to go by, or the kill switch.
+#[derive(Clone, Copy, Debug)]
+pub struct FitProbe {
+    pub decision: Option<floe_vfs::hier::FixedFit>,
+    pub walked: bool,
+}
+
 pub struct DecodedPage {
     pub page_id: u32,
     pub layer_idx: u32,
@@ -294,14 +330,46 @@ pub struct DecodedPage {
     /// Record-extent index built once per decode and reused by every frame
     /// and raster tile that holds this page (F2R-03b).
     pub index: crate::PageIndex,
+    /// The page's charge as the parser read it - estimated_bytes before its
+    /// record lists were cut to their length (decode_shrink); 0 when they
+    /// were not cut (grown_charge: the charge itself).
+    pub grown_bytes: u64,
 }
 
 impl DecodedPage {
-    /// Conservative charge used by the decoded-page LRU. This is an estimate,
-    /// not allocator telemetry: shared repetition pools may be counted more
-    /// than once, which is preferable to silently exceeding the budget.
+    /// The page's charge as the parser read it, its record lists holding the
+    /// room they grew to - what a page was charged up to 0.12.300. The
+    /// density stack counts its pages by it (renderd density_as_read), so
+    /// what pass 2 has of the budget, and with it a density frame's picture
+    /// and time, did not change when the lists were cut (decode_shrink); a
+    /// jobdeck pass counts its pages by it too (deck.rs: its slices are what
+    /// they were). The frame's own check of the generation budget and the
+    /// page cache go by what the page holds (estimated_bytes).
+    pub fn grown_charge(&self) -> u64 {
+        if self.grown_bytes > 0 {
+            self.grown_bytes
+        } else {
+            self.estimated_bytes()
+        }
+    }
+
+    /// The charge of the decoded-page LRU and of a frame's generation budget:
+    /// the page's records, their point lists and its index, by the lists'
+    /// capacities. A repetition's offsets that several records share
+    /// (floe_oasis Rep::Pts: one Arc for the records that reuse the modal
+    /// repetition) are charged once (charge_shared_once): charged once a
+    /// record, a page of 40 records on one list of 30,000 offsets was 8.7
+    /// times the planner's estimate of it (floe_vfs page_memory, by its
+    /// stored bytes) - and a frame the planner had fitted to the budget
+    /// failed with `decoded generation budget exceeded` (field 2026-10-05).
     pub fn estimated_bytes(&self) -> u64 {
-        let mut bytes = std::mem::size_of::<Self>() as u64;
+        // (less grown_bytes, a count kept beside the page: with the lists as
+        // read the charge is to the byte what 0.12.300's was)
+        let mut bytes = (std::mem::size_of::<Self>() - std::mem::size_of::<u64>()) as u64;
+        let mut lists = SharedLists {
+            once: charge_shared_once(),
+            ..SharedLists::default()
+        };
         bytes = bytes.saturating_add(
             self.doc.cells.capacity() as u64 * std::mem::size_of::<floe_oasis::doc::Cell>() as u64,
         );
@@ -332,26 +400,26 @@ impl DecodedPage {
                     * std::mem::size_of::<floe_oasis::doc::TextRec>() as u64,
             );
             for rect in &cell.rects {
-                bytes = bytes.saturating_add(rep_heap_bytes(&rect.rep));
+                bytes = bytes.saturating_add(lists.heap_bytes(&rect.rep));
             }
             for poly in &cell.polys {
                 bytes = bytes.saturating_add(
                     poly.pts.capacity() as u64 * std::mem::size_of::<(i64, i64)>() as u64,
                 );
-                bytes = bytes.saturating_add(rep_heap_bytes(&poly.rep));
+                bytes = bytes.saturating_add(lists.heap_bytes(&poly.rep));
             }
             for path in &cell.paths {
                 bytes = bytes.saturating_add(
                     path.pts.capacity() as u64 * std::mem::size_of::<(i64, i64)>() as u64,
                 );
-                bytes = bytes.saturating_add(rep_heap_bytes(&path.rep));
+                bytes = bytes.saturating_add(lists.heap_bytes(&path.rep));
             }
             for place in &cell.places {
-                bytes = bytes.saturating_add(rep_heap_bytes(&place.rep));
+                bytes = bytes.saturating_add(lists.heap_bytes(&place.rep));
             }
             for text in &cell.texts {
                 bytes = bytes.saturating_add(text.s.capacity() as u64);
-                bytes = bytes.saturating_add(rep_heap_bytes(&text.rep));
+                bytes = bytes.saturating_add(lists.heap_bytes(&text.rep));
             }
         }
         for name in self.doc.layer_names.values() {
@@ -378,6 +446,68 @@ fn rep_heap_bytes(rep: &Rep) -> u64 {
     }
 }
 
+/// DecodedPage::estimated_bytes: the repetition offset lists of a page's
+/// records, a list that records share charged once. Records share a list by
+/// reusing the modal repetition (floe_oasis read_rep), so they follow one
+/// another - a record without a repetition between them leaves the modal
+/// one as it is: the list of the last record that had one is the one to
+/// know (no table of lists: the charge is taken every frame).
+#[derive(Default)]
+struct SharedLists {
+    once: bool,
+    last: usize,
+}
+
+impl SharedLists {
+    fn heap_bytes(&mut self, rep: &Rep) -> u64 {
+        let Rep::Pts(points) = rep else {
+            return 0;
+        };
+        if !self.once {
+            return rep_heap_bytes(rep);
+        }
+        let at = points.as_ptr() as usize;
+        if at == self.last {
+            return 0;
+        }
+        self.last = at;
+        rep_heap_bytes(rep)
+    }
+}
+
+/// A repetition's offsets shared by several records of a page are charged
+/// once (DecodedPage::estimated_bytes): on; FLOE_RUST_CHARGE_SHARED=off (the
+/// kill switch) charges them once a record, as 0.12.300.
+fn charge_shared_once() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_CHARGE_SHARED").as_deref() != Ok("off"))
+}
+
+/// The probe of a new scale's budget fit goes by the hierarchy summary
+/// (Cache::fit_decision_cancellable): on; FLOE_RUST_FIT_PROBE_SUMMARY=off is
+/// the kill switch.
+fn fit_probe_by_summary() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_FIT_PROBE_SUMMARY").as_deref() != Ok("off"))
+}
+
+/// A decoded page's record lists are cut to their length (decode_payload):
+/// on; FLOE_RUST_DECODE_SHRINK=off (the kill switch) keeps them as the
+/// parser grew them, as 0.12.300. The parser grows the lists as it reads, to
+/// as much as twice what they hold, and the page's charge counts that room:
+/// a page of 33 k rectangles was charged 216 B a record for its 96 and 24 of
+/// index, past the planner's 192 (floe_vfs FIT_RECORD_BYTES) - and a frame
+/// of such pages, fitted to the budget by the planner's estimate, failed
+/// with `decoded generation budget exceeded` (field 2026-10-05). Cut, a
+/// rectangle page is 120-124 B a record, under two thirds of its estimate,
+/// and no page of the synthetic chips is charged past its estimate (the
+/// worst 1.231 -> 0.787 of it). The charge as read is kept
+/// (DecodedPage::grown_bytes) for the density stack's count.
+fn decode_shrink() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_RUST_DECODE_SHRINK").as_deref() != Ok("off"))
+}
+
 /// Read-only cache adapter. All parser and planner behavior comes from the
 /// existing floe crates; only the currently-private OVP byte read is isolated
 /// here.
@@ -391,6 +521,8 @@ pub struct Cache {
     /// mtime changes (a rename publish from --occupancy-only while the
     /// viewer is up; docs/OCCUPANCY_PLAN.ko.md §4)
     occupancy: std::sync::Mutex<OccupancySlot>,
+    /// design.ovs for the density stack's pass 2 (crate::occ)
+    occ_density: std::sync::Mutex<OccDensitySlot>,
     /// per layer index: the longest top-to-cell path (in placement
     /// levels) of any cell holding the layer's own pages - a request
     /// depth at or above it draws every shape of the layer, so the
@@ -401,10 +533,108 @@ pub struct Cache {
     /// record (field 2026-09-22: ~10 s of every layout's open, a plain
     /// layout with no design.ovo included)
     layer_depth: std::sync::OnceLock<Vec<u32>>,
+    /// Cache::layer_held per (cell, levels left, layer), on first use
+    held_layers: std::sync::Mutex<std::collections::HashMap<(u32, u32, u32), bool>>,
     // Immutable for this open cache; reopen after publishing design.ovr.
     representatives: std::sync::OnceLock<Option<std::sync::Arc<floe_vfs::representatives::File>>>,
+    /// The cells' cover (Cache::cell_cover), made on first use
+    cell_cover: std::sync::Mutex<CoverSlot>,
     // Last field: mapped/source state drops before the native reader lease.
     _revision_lease: Option<std::fs::File>,
+}
+
+/// Cache::cell_cover: the table, or when it was last looked for in vain
+#[derive(Default)]
+struct CoverSlot {
+    table: Option<std::sync::Arc<floe_vfs::cover::CellCover>>,
+    missed: Option<Instant>,
+}
+
+/// Cache::cell_cover: how long a cache without a hierarchy summary waits
+/// before it looks for one again
+const COVER_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Cache::layer_held: the most placements one question reads
+const LAYER_HELD_READS: u64 = 1 << 18;
+
+/// Cache::layer_held of (`ci`, `rem`, `layer`) under a budget of `reads`
+/// placements (None: spent), the cells below memoized in `memo`.
+fn layer_held_in(
+    ovm: &floe_ovm::Ovm,
+    ci: u32,
+    rem: u32,
+    layer: u32,
+    reads: &mut u64,
+    memo: &mut std::collections::HashMap<(u32, u32), bool>,
+) -> Option<bool> {
+    let has = |mask: u32| {
+        mask == floe_ovm::LMASK_UNKNOWN
+            || ovm
+                .bitset(mask)
+                .get(layer as usize / 8)
+                .is_some_and(|byte| (byte >> (layer % 8)) & 1 == 1)
+    };
+    if !has(ovm.cell_lmask_rec(ci)) {
+        return Some(false);
+    }
+    if rem == floe_vfs::hier::REM_FULL
+        || rem >= ovm.cell_height(ci)
+        || ovm.cell_lmask_direct(ci) != floe_ovm::LMASK_UNKNOWN && has(ovm.cell_lmask_direct(ci))
+    {
+        return Some(true);
+    }
+    if rem == 0 {
+        return Some(false);
+    }
+    if let Some(&known) = memo.get(&(ci, rem)) {
+        return Some(known);
+    }
+    let (bvh_start, bvh_count) = ovm.cell_bvh(ci);
+    let mut found = false;
+    let mut stack = if bvh_count != 0 {
+        vec![bvh_start]
+    } else {
+        Vec::new()
+    };
+    'walk: while let Some(ni) = stack.pop() {
+        let node = ovm.bvh(ni);
+        if !has(node.lmask_rec) {
+            continue;
+        }
+        // its children with none left below: their own layers
+        if rem == 1 && node.lmask_direct != floe_ovm::LMASK_UNKNOWN {
+            if has(node.lmask_direct) {
+                found = true;
+                break;
+            }
+            continue;
+        }
+        if !node.leaf {
+            stack.extend((0..u32::from(node.count)).map(|k| node.first + k));
+            continue;
+        }
+        for k in 0..u64::from(node.count) {
+            if *reads == 0 {
+                return None;
+            }
+            *reads -= 1;
+            let child = ovm.place_child(u64::from(node.first) + k);
+            if child >= ovm.n_cells {
+                continue;
+            }
+            let below = if rem - 1 >= ovm.cell_height(child) {
+                floe_vfs::hier::REM_FULL
+            } else {
+                rem - 1
+            };
+            if layer_held_in(ovm, child, below, layer, reads, memo)? {
+                found = true;
+                break 'walk;
+            }
+        }
+    }
+    memo.insert((ci, rem), found);
+    Some(found)
 }
 
 /// The longest top-to-cell path of every cell (None = unreachable
@@ -494,6 +724,36 @@ struct OccupancySlot {
     planes: crate::summary::PlaneCache,
 }
 
+/// The threads Cache::occ_density makes a frame's layers on:
+/// FLOE_RUST_DENSITY_OCC_THREADS (1: one at a time, as first built), else the
+/// cores there are, at most 8.
+fn occ_threads() -> usize {
+    std::env::var("FLOE_RUST_DENSITY_OCC_THREADS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map_or(4, |n| n.get())
+                .min(8)
+        })
+}
+
+/// design.ovs (the occupancy density, crate::occ) and the big cells'
+/// design.ovs.<cell>: each looked for once, the file if it will do (None:
+/// the top's); and the layers made per (layer, level, depth key) - one
+/// file's, level's and depth's (`layers_of`: the file's view root)
+#[derive(Default)]
+struct OccDensitySlot {
+    files: std::collections::HashMap<
+        Option<u32>,
+        Option<std::sync::Arc<floe_vfs::occ_density::OvsFile>>,
+    >,
+    layers_of: Option<u32>,
+    layers:
+        std::collections::HashMap<(u32, u32, u32), Option<std::sync::Arc<crate::occ::OccLayer>>>,
+}
+
 impl Cache {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, String> {
         let path = path.as_ref();
@@ -511,10 +771,67 @@ impl Cache {
             dir: dir.to_string(),
             hier,
             occupancy: std::sync::Mutex::new(OccupancySlot::default()),
+            occ_density: std::sync::Mutex::new(OccDensitySlot::default()),
             layer_depth: std::sync::OnceLock::new(),
+            held_layers: std::sync::Mutex::new(std::collections::HashMap::new()),
             representatives: std::sync::OnceLock::new(),
+            cell_cover: std::sync::Mutex::new(CoverSlot::default()),
             _revision_lease: revision_lease,
         })
+    }
+
+    /// The cells' cover (floe_vfs::cover::CellCover; floe_vfs HierOpts::
+    /// cell_cover): the area each cell's shapes cover by layer, worked out
+    /// cell by cell on first use from the pages' occupancy records
+    /// (design.ovb) and the hierarchy summary (design.ovh, or one made in
+    /// memory for a small cache: cells::HierHandle::summary) - what a sub-cut
+    /// placement stands for under the density stack's brightness. None
+    /// without design.ovb, without a summary (looked for again every
+    /// COVER_RETRY: the viewer may build design.ovh while the daemon is up),
+    /// or with FLOE_RUST_DENSITY_CELL_COVER=off (the kill switch).
+    pub fn cell_cover(&self) -> Option<std::sync::Arc<floe_vfs::cover::CellCover>> {
+        if !floe_vfs::hier::dot_cell_cover() || !self.vfs.ovm.has_page_occ() {
+            return None;
+        }
+        let mut slot = match self.cell_cover.lock() {
+            Ok(slot) => slot,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if slot.table.is_none() && !slot.missed.is_some_and(|at| at.elapsed() < COVER_RETRY) {
+            slot.table = self
+                .hier
+                .summary()
+                .ok()
+                .and_then(|summary| floe_vfs::cover::CellCover::new(&self.vfs.ovm, summary))
+                .map(std::sync::Arc::new);
+            slot.missed = if slot.table.is_none() {
+                Some(Instant::now())
+            } else {
+                None
+            };
+            // every cell's areas ahead of the plans that ask, on a thread of
+            // its own: a plan that needs a cell first works it out itself -
+            // the first frame two steps out of fit on the synthetic MAIN01
+            // 1/10 planned 0.33 s longer for it (FLOE_RUST_DENSITY_COVER_WARM=off,
+            // diagnostic: on first use alone)
+            if let Some(table) = slot.table.clone() {
+                if std::env::var("FLOE_RUST_DENSITY_COVER_WARM").as_deref() != Ok("off") {
+                    let vfs = std::sync::Arc::clone(&self.vfs);
+                    let _ = std::thread::Builder::new()
+                        .name("floe-cover-warm".to_string())
+                        .spawn(move || {
+                            let started = Instant::now();
+                            table.warm(&vfs.ovm);
+                            eprintln!(
+                                "[render-core] cells' cover: {} cells worked out in {} ms",
+                                vfs.ovm.n_cells,
+                                started.elapsed().as_millis()
+                            );
+                        });
+                }
+            }
+        }
+        slot.table.clone()
     }
 
     /// The deepest placement level holding pages of layer `idx`.
@@ -526,10 +843,230 @@ impl Cache {
             .unwrap_or(0)
     }
 
+    /// Whether cell `ci` shows shapes of `layer` with `rem` levels left below
+    /// it (floe_vfs::hier::REM_FULL: all) - the planner's cell_bits rule: its
+    /// own, its children's a level down, with none left its own alone (the
+    /// planner draws such a cell's children as outlines), past its height
+    /// its recursive layers. Found through the child-BVH nodes' masks - a
+    /// subtree whose cells lack the layer passed, a level above the last its
+    /// children's own layers at once - and stopped at the first; past
+    /// LAYER_HELD_READS placements read without an answer, held (kept on a
+    /// doubt: a reviewer, 2026-10-03 - reading every placement to the depth
+    /// took the synthetic MAIN01 at depth 4 5.5 s before its first frame).
+    /// Once per (cell, rem, layer) and open cache.
+    pub fn layer_held(&self, ci: u32, rem: u32, layer: u32) -> bool {
+        if let Some(&known) = self
+            .held_layers
+            .lock()
+            .ok()
+            .and_then(|held| held.get(&(ci, rem, layer)).copied())
+            .as_ref()
+        {
+            return known;
+        }
+        let ovm = &self.vfs.ovm;
+        let held = ci >= ovm.n_cells
+            || layer_held_in(
+                ovm,
+                ci,
+                rem,
+                layer,
+                &mut LAYER_HELD_READS.clone(),
+                &mut std::collections::HashMap::new(),
+            )
+            .unwrap_or(true);
+        if let Ok(mut known) = self.held_layers.lock() {
+            known.insert((ci, rem, layer), held);
+        }
+        held
+    }
+
+    /// The layers cell `ci` or any cell below it holds texts of (its
+    /// recursive text mask), a bit per layer index.
+    pub fn layers_texted(&self, ci: u32) -> Vec<u8> {
+        let ovm = &self.vfs.ovm;
+        if ci >= ovm.n_cells {
+            return Vec::new();
+        }
+        ovm.bitset(ovm.cell_tmask_rec(ci)).to_vec()
+    }
+
     /// Whether the per-layer depths have been computed (a plain open must
     /// not pay for them; tests read this).
     pub fn layer_depths_computed(&self) -> bool {
         self.layer_depth.get().is_some()
+    }
+
+    /// The density stack's pass 2 from the occupancy density (crate::occ,
+    /// opt-in): of each of `layer_ids`, the planes `depth` draws (None: all)
+    /// of design.ovs, at its level for a pixel of `px_dbu` and pass 1's cut
+    /// `cut_dbu` (crate::occ::choose_level: the finest whose cut reaches it,
+    /// its cell at most `max_cell_px` pixels, its layers' grids within
+    /// `cap_bytes`). The layers made are kept for the next frame at that
+    /// level and depth, those of others let go - and, where they and those
+    /// to make would pass `cap_bytes`, those this frame does not ask for
+    /// (review 2026-10-07: the cap was the frame's, the layers turned on and
+    /// off at one zoom stayed). The layers are made until `stop` (a newer
+    /// frame): None then, the ones made kept. A view `root` draws by its
+    /// cell's file, design.ovs.<cell> - a big cell's under the top (floe-index
+    /// ovs --roots; user 2026-10-07: two cells under the top drew their root
+    /// views by the plans) -, its layers made in place of the top's. None
+    /// without the file (looked for once per open cache), one built for
+    /// another index, cell or version, where no level will do - or where a
+    /// plane will not read: the file is let go and the plans draw.
+    #[allow(clippy::too_many_arguments)]
+    pub fn occ_density(
+        &self,
+        layer_ids: &[u32],
+        px_dbu: f64,
+        cut_dbu: f64,
+        max_cell_px: f64,
+        cap_bytes: u64,
+        depth: Option<u32>,
+        root: Option<u32>,
+        stop: &(dyn Fn() -> bool + Sync),
+    ) -> Option<std::sync::Arc<crate::occ::OccDensity>> {
+        let mut slot = match self.occ_density.lock() {
+            Ok(slot) => slot,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        // the top as the view root: its own file
+        let root = root.filter(|&ci| ci != self.vfs.ovm.top);
+        let path = match root {
+            Some(ci) => format!("{}/design.ovs.{}", self.dir, ci),
+            None => format!("{}/design.ovs", self.dir),
+        };
+        if !slot.files.contains_key(&root) {
+            let opened = floe_vfs::occ_density::OvsFile::open(&path)
+                .and_then(|f| f.validate_against(&self.vfs.ovm).map(|()| f))
+                .and_then(|f| {
+                    if f.root.map(|r| r.ci) == root {
+                        Ok(f)
+                    } else {
+                        Err("another cell's file".to_string())
+                    }
+                });
+            let file = match opened {
+                Ok(file) => Some(std::sync::Arc::new(file)),
+                // none: an index made before design.ovs came with it, or a
+                // cell without a file of its own (most - said for the top's)
+                Err(_) if !std::path::Path::new(&path).exists() => {
+                    if root.is_none() {
+                        eprintln!("[render-core] occupancy density: no {} - pass 2 plans (`floe-index ovs {}` makes it)", path, self.dir);
+                    }
+                    None
+                }
+                Err(e) => {
+                    eprintln!("[render-core] occupancy density {}: none ({})", path, e);
+                    None
+                }
+            };
+            slot.files.insert(root, file);
+        }
+        let ovs = slot.files.get(&root).cloned().flatten()?;
+        if slot.layers_of != root {
+            slot.layers.clear();
+            slot.layers_of = root;
+        }
+        let grid = ovs.grid;
+        // what the layers asked for would hold at a level at most: their
+        // bits and their groups' means
+        let bytes_at = |lv: u32| {
+            let (w, h) = grid.level_dims(lv);
+            let (w, h) = (u64::from(w), u64::from(h));
+            layer_ids.len() as u64 * (w.div_ceil(8) * h + w.div_ceil(8) * h.div_ceil(8))
+        };
+        let level = crate::occ::choose_level(
+            grid.cell_dbu,
+            grid.n_levels,
+            px_dbu,
+            cut_dbu,
+            max_cell_px,
+            bytes_at,
+            cap_bytes,
+        )?;
+        let (w, h) = grid.level_dims(level);
+        let depth_key = depth.map_or(u32::MAX, |d| d.min(floe_vfs::occupancy::DEPTH_CAP as u32));
+        slot.layers
+            .retain(|&(_, lv, d), _| lv == level && d == depth_key);
+        // the layers this level and depth lack, made on threads, a layer
+        // each at a time (a laptop's first frame of 449 layers took 352 ms on
+        // one; FLOE_RUST_DENSITY_OCC_THREADS=1 makes them so)
+        let mut missing: Vec<u32> = layer_ids
+            .iter()
+            .copied()
+            .filter(|&id| {
+                (id as usize) < ovs.layers.len()
+                    && !slot.layers.contains_key(&(id, level, depth_key))
+            })
+            .collect();
+        missing.sort_unstable();
+        missing.dedup();
+        // what the layers held and those to make would come to: past the
+        // cap, the ones this frame does not ask for go first
+        let per_layer = u64::from(w.div_ceil(8)) * (u64::from(h) + u64::from(h.div_ceil(8)));
+        let held: u64 = slot
+            .layers
+            .values()
+            .flatten()
+            .map(|layer| layer.bytes() as u64)
+            .sum();
+        if held + missing.len() as u64 * per_layer > cap_bytes {
+            let mut asked = layer_ids.to_vec();
+            asked.sort_unstable();
+            slot.layers
+                .retain(|&(id, _, _), _| asked.binary_search(&id).is_ok());
+        }
+        let threads = occ_threads().min(missing.len()).max(1);
+        let (made, stopped) =
+            crate::occ::make_layers(&ovs, &missing, level as usize, depth, threads, stop);
+        let n_made = made.len() as u32;
+        for (id, layer) in made {
+            match layer {
+                Ok(layer) => {
+                    slot.layers.insert((id, level, depth_key), layer);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[render-core] occupancy density {}: {} - the plans draw",
+                        path, e
+                    );
+                    slot.files.insert(root, None);
+                    slot.layers.clear();
+                    return None;
+                }
+            }
+        }
+        if stopped {
+            return None;
+        }
+        let mut layers: Vec<Option<std::sync::Arc<crate::occ::OccLayer>>> =
+            vec![None; ovs.layers.len()];
+        for &id in layer_ids {
+            if let Some(made) = slot.layers.get(&(id, level, depth_key)) {
+                layers[id as usize] = made.clone();
+            }
+        }
+        Some(std::sync::Arc::new(crate::occ::OccDensity {
+            level,
+            to_file: ovs
+                .root
+                .map(|r| floe_tiler::Xf::place(r.x, r.y, r.rot, r.flip)),
+            cell: grid.cell_dbu << level,
+            x0: grid.x0,
+            y0: grid.y0,
+            w,
+            h,
+            layers,
+            cell_um: grid.base_um() * f64::from(1u32 << level.min(31)),
+            made: n_made,
+            held_bytes: slot
+                .layers
+                .values()
+                .flatten()
+                .map(|layer| layer.bytes() as u64)
+                .sum(),
+        }))
     }
 
     /// The cache's design.ovo if present and valid for THIS cache
@@ -811,6 +1348,325 @@ impl Cache {
     /// Encoded (stored) size of one page - what a decode of it will
     /// cost, roughly, before it is decoded (the deck's budget-aware
     /// decode chunking).
+    /// The plans of one view's regions planned apart (renderd's pass 2 of the
+    /// sub-cut dots, its regions split over threads; 2026-10-01) as the one
+    /// plan of all of them: the working cells by key - their pages, instances
+    /// and frames a union, their counted dot items one per block and layer
+    /// (`block_dbu`: the dots' block in the cell's frame; a dot item lies in
+    /// its block) - the one of the most dots: a plan reaches every item of a
+    /// block within a block of its regions, a block further away only through
+    /// the items it met, so the larger count is the whole one - the pages a
+    /// union at their best priority, the walk's counters summed. Equal to the
+    /// plan of every region at once as asked, up to the order of a cell's
+    /// instances and washes, which the raster does not see.
+    pub fn merge_plans(mut plans: Vec<HierPlan>, block_dbu: f64) -> HierPlan {
+        use floe_vfs::hier::{FxMap, FxSet};
+        use std::collections::BTreeMap;
+        let mut out = plans.remove(0);
+        let mut cells: BTreeMap<floe_vfs::hier::WsKey, floe_vfs::hier::WsCell> =
+            out.wcells.drain(..).map(|cell| (cell.key, cell)).collect();
+        let mut pages: BTreeMap<u32, u64> = out
+            .pages
+            .iter()
+            .copied()
+            .zip(out.page_prio.iter().copied())
+            .collect();
+        // per cell merged into, kept over the plans (a cell's maps were made
+        // anew at every plan, from all it held - the top planes' eight plans
+        // went over the top cell's dot items 28 times, 2026-10-05): its
+        // instances, its counted washes by block and layer, its other washes
+        type Placed = FxMap<(floe_vfs::hier::WsKey, i64, i64, u8, bool), Vec<usize>>;
+        type Blocks = FxMap<(u32, i64, i64), usize>;
+        type Seen = FxSet<(u32, floe_ovm::BBox)>;
+        let mut index: FxMap<floe_vfs::hier::WsKey, (Placed, Blocks, Seen)> = FxMap::default();
+        let block_of = |layer: u32, b: &floe_ovm::BBox| {
+            let at = |a: i64, z: i64| ((a as f64 + z as f64) / 2.0 / block_dbu).floor() as i64;
+            (layer, at(b.x0, b.x1), at(b.y0, b.y1))
+        };
+        for plan in plans {
+            for cell in plan.wcells {
+                let Some(have) = cells.get_mut(&cell.key) else {
+                    cells.insert(cell.key, cell);
+                    continue;
+                };
+                // pages, with their levels when the plan has them
+                let mut levels: BTreeMap<u32, u8> = have
+                    .pages
+                    .iter()
+                    .enumerate()
+                    .map(|(at, &page)| (page, have.page_levels.get(at).copied().unwrap_or(0)))
+                    .collect();
+                let levelled = !have.page_levels.is_empty() || !cell.page_levels.is_empty();
+                for (at, &page) in cell.pages.iter().enumerate() {
+                    levels
+                        .entry(page)
+                        .or_insert(cell.page_levels.get(at).copied().unwrap_or(0));
+                }
+                have.pages = levels.keys().copied().collect();
+                have.page_levels = if levelled {
+                    levels.values().copied().collect()
+                } else {
+                    Vec::new()
+                };
+                // washes with their counts (0: none): a counted one per block and
+                // layer, the most dots; the rest once each
+                let counted = !have.dot_counts.is_empty() || !cell.dot_counts.is_empty();
+                if counted {
+                    have.dot_counts.resize(have.washes.len(), 0);
+                }
+                // (the maps here are looked up, never iterated: the Fx hasher,
+                // 2026-10-02 - SipHash and growing were most of a dots merge)
+                let (placed, blocks, seen) = index.entry(cell.key).or_insert_with(|| {
+                    let mut placed: Placed = FxMap::with_capacity_and_hasher(
+                        have.insts.len() + cell.insts.len(),
+                        Default::default(),
+                    );
+                    for (at, inst) in have.insts.iter().enumerate() {
+                        placed
+                            .entry((inst.child, inst.x, inst.y, inst.rot, inst.flip))
+                            .or_default()
+                            .push(at);
+                    }
+                    let mut blocks: Blocks = FxMap::with_capacity_and_hasher(
+                        have.washes.len() + cell.washes.len(),
+                        Default::default(),
+                    );
+                    let mut seen: Seen = FxSet::default();
+                    for (at, &(layer, b)) in have.washes.iter().enumerate() {
+                        if have.dot_counts.get(at).copied().unwrap_or(0) > 0 {
+                            blocks.insert(block_of(layer, &b), at);
+                        } else {
+                            seen.insert((layer, b));
+                        }
+                    }
+                    (placed, blocks, seen)
+                });
+                // instances, once each
+                for inst in cell.insts {
+                    let key = (inst.child, inst.x, inst.y, inst.rot, inst.flip);
+                    if placed
+                        .get(&key)
+                        .is_some_and(|ats| ats.iter().any(|&at| have.insts[at] == inst))
+                    {
+                        continue;
+                    }
+                    placed.entry(key).or_default().push(have.insts.len());
+                    have.insts.push(inst);
+                }
+                for frame in cell.frames {
+                    if !have.frames.contains(&frame) {
+                        have.frames.push(frame);
+                    }
+                }
+                for (at, &(layer, b)) in cell.washes.iter().enumerate() {
+                    let count = cell.dot_counts.get(at).copied().unwrap_or(0);
+                    if count == 0 {
+                        if seen.insert((layer, b)) {
+                            have.washes.push((layer, b));
+                            if counted {
+                                have.dot_counts.push(0);
+                            }
+                        }
+                        continue;
+                    }
+                    match blocks.get(&block_of(layer, &b)) {
+                        Some(&known) => {
+                            if count > have.dot_counts[known] {
+                                have.washes[known] = (layer, b);
+                                have.dot_counts[known] = count;
+                            }
+                        }
+                        None => {
+                            blocks.insert(block_of(layer, &b), have.washes.len());
+                            have.washes.push((layer, b));
+                            have.dot_counts.push(count);
+                        }
+                    }
+                }
+                have.reps.extend(cell.reps);
+            }
+            for (page, prio) in plan.pages.into_iter().zip(plan.page_prio) {
+                pages
+                    .entry(page)
+                    .and_modify(|have| *have = (*have).min(prio))
+                    .or_insert(prio);
+            }
+            let (st, more) = (&mut out.stats, &plan.stats);
+            st.visited_bvh += more.visited_bvh;
+            st.visited_page_bvh += more.visited_page_bvh;
+            st.page_candidates += more.page_candidates;
+            st.sub_cut_boxes += more.sub_cut_boxes;
+            st.sub_cut_box_over += more.sub_cut_box_over;
+            st.sub_cut_box_nodes += more.sub_cut_box_nodes;
+            st.sub_cut_box_reads += more.sub_cut_box_reads;
+            st.sub_cut_box_unsure += more.sub_cut_box_unsure;
+            st.sub_cut_dot_items += more.sub_cut_dot_items;
+            for (have, add) in st.dot_by.iter_mut().zip(more.dot_by.iter()) {
+                *have += add;
+            }
+            st.dot_occ_pages += more.dot_occ_pages;
+            st.dot_occ_decoded += more.dot_occ_decoded;
+            st.dot_full_chunks += more.dot_full_chunks;
+            st.dot_full_members += more.dot_full_members;
+            st.dot_sampled_chunks += more.dot_sampled_chunks;
+            st.dot_sampled_members += more.dot_sampled_members;
+            st.occ_fallback.extend(more.occ_fallback.iter().cloned());
+            st.occ_aside.extend(more.occ_aside.iter().cloned());
+            st.dot_stood_in += more.dot_stood_in;
+            st.dot_mask_tests += more.dot_mask_tests;
+            st.dot_mask_pruned += more.dot_mask_pruned;
+            st.dot_mask_fallbacks += more.dot_mask_fallbacks;
+            st.dot_cover_on |= more.dot_cover_on;
+            st.dot_cover_cells += more.dot_cover_cells;
+            st.dot_node_sampled += more.dot_node_sampled;
+            st.dot_partial += more.dot_partial;
+            st.dot_gated += more.dot_gated;
+            st.dot_gate_min = st.dot_gate_min.max(more.dot_gate_min);
+            st.cancelled |= more.cancelled;
+            st.fit_over |= more.fit_over;
+            st.fit_dropped |= more.fit_dropped;
+        }
+        out.wcells = cells.into_values().collect();
+        out.stats.wc_cells = out.wcells.len() as u64;
+        (out.pages, out.page_prio) = pages.into_iter().unzip();
+        out
+    }
+
+    /// The estimated decoded memory of a plan's pages, each once - what the
+    /// planner's budget fit holds against its budget (floe_vfs page_memory).
+    pub fn plan_page_memory(&self, plan: &HierPlan) -> u64 {
+        plan.pages
+            .iter()
+            .map(|&page| {
+                let p = self.vfs.ovm.page(page);
+                floe_vfs::hier::page_memory(p.records, p.usize_)
+            })
+            .sum()
+    }
+
+    /// The estimated decoded memory of `pages` (floe_vfs page_memory): what
+    /// the planner counted for them - against their decoded charge
+    /// (DecodedPage::estimated_bytes), how far it fell short (renderd
+    /// budget_refit_enabled).
+    pub fn pages_memory(&self, pages: &[u32]) -> u64 {
+        pages
+            .iter()
+            .filter(|&&page| page < self.vfs.ovm.n_pages)
+            .map(|&page| {
+                let p = self.vfs.ovm.page(page);
+                floe_vfs::hier::page_memory(p.records, p.usize_)
+            })
+            .sum()
+    }
+
+    /// `plan_page_memory` past the pages the frame holds already (`free`,
+    /// sorted; floe_vfs HierOpts::free_pages): what a floor probe's pages
+    /// cost pass 2's reserve (floe_vfs page_cost), the plans of its bands
+    /// merged (renderd density_probe_threads).
+    pub fn plan_page_cost(&self, plan: &HierPlan, free: &[u32]) -> u64 {
+        plan.pages
+            .iter()
+            .filter(|page| free.binary_search(page).is_err())
+            .map(|&page| {
+                let p = self.vfs.ovm.page(page);
+                floe_vfs::hier::page_memory(p.records, p.usize_)
+            })
+            .sum()
+    }
+
+    /// The cut a request plans at, dbu (what a budget fit's decision records).
+    pub fn plan_cut_dbu(&self, request: &PlanRequest) -> Result<i64, String> {
+        Ok(self.view_request(request)?.cut_dbu)
+    }
+
+    /// A plan as a density pass that draws `layer` alone reads it (the
+    /// density stack's sub-cut dots plan both of pass 2's sides at once, and
+    /// the top plane's side is its top layer): the pages and dot items of
+    /// that layer. The cells and their placements stay - the walk reaches the
+    /// layer through them, and the scene's layer masks prune the subtrees
+    /// that hold none of it.
+    pub fn plan_layer_only(&self, plan: &HierPlan, layer: u32) -> HierPlan {
+        self.plan_layers_only(plan, &[layer])
+    }
+
+    /// `plan_layer_only` for several layers (the density stack's top planes,
+    /// GeometryRasterRequest::density_top_planes).
+    pub fn plan_layers_only(&self, plan: &HierPlan, layers: &[u32]) -> HierPlan {
+        let of_layer = |page: u32| {
+            self.page_layer(page)
+                .is_some_and(|layer| layers.contains(&layer))
+        };
+        let wcells = plan
+            .wcells
+            .iter()
+            .map(|cell| {
+                let kept: Vec<(u32, u8)> = cell
+                    .pages
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, &page)| of_layer(page))
+                    .map(|(at, &page)| (page, cell.page_levels.get(at).copied().unwrap_or(0)))
+                    .collect();
+                floe_vfs::hier::WsCell {
+                    key: cell.key,
+                    pages: kept.iter().map(|&(page, _)| page).collect(),
+                    page_levels: if cell.page_levels.is_empty() {
+                        Vec::new()
+                    } else {
+                        kept.iter().map(|&(_, level)| level).collect()
+                    },
+                    insts: cell.insts.clone(),
+                    frames: Vec::new(),
+                    washes: cell
+                        .washes
+                        .iter()
+                        .filter(|(wash_layer, _)| layers.contains(wash_layer))
+                        .copied()
+                        .collect(),
+                    // a spread dots plan's counts, with their washes
+                    dot_counts: cell
+                        .washes
+                        .iter()
+                        .zip(&cell.dot_counts)
+                        .filter(|((wash_layer, _), _)| layers.contains(wash_layer))
+                        .map(|(_, &count)| count)
+                        .collect(),
+                    reps: cell
+                        .reps
+                        .iter()
+                        .filter(|(rep_layer, _)| layers.contains(rep_layer))
+                        .cloned()
+                        .collect(),
+                }
+            })
+            .collect();
+        let (pages, page_prio) = plan
+            .pages
+            .iter()
+            .zip(&plan.page_prio)
+            .filter(|(&page, _)| of_layer(page))
+            .map(|(&page, &prio)| (page, prio))
+            .unzip();
+        HierPlan {
+            top: plan.top,
+            wcells,
+            pages,
+            page_prio,
+            stats: plan.stats.clone(),
+            explain: Vec::new(),
+        }
+    }
+
+    /// The layer (cache layer index) of page `page_id`; None outside the index.
+    pub fn page_layer(&self, page_id: u32) -> Option<u32> {
+        (page_id < self.vfs.ovm.n_pages).then(|| self.vfs.ovm.page(page_id).layer_idx)
+    }
+
+    /// whether the index has design.ovb attached (its pages' occupancy records)
+    pub fn has_page_occ(&self) -> bool {
+        self.vfs.ovm.has_page_occ()
+    }
+
     pub fn page_encoded_bytes(&self, page_id: u32) -> u64 {
         if page_id >= self.vfs.ovm.n_pages {
             return 0;
@@ -842,6 +1698,12 @@ impl Cache {
         Ok(self.vfs.ovm.cell(cell_id).name)
     }
 
+    /// The recursive box of cell `cell_id` (its shapes and every cell below);
+    /// None out of range.
+    pub fn cell_rbbox(&self, cell_id: u32) -> Option<BBox> {
+        (cell_id < self.vfs.ovm.n_cells).then(|| self.vfs.ovm.cell_rbbox(cell_id))
+    }
+
     pub(crate) fn cell_bbox(&self, cell_id: u32) -> Result<BBox, String> {
         if cell_id >= self.vfs.ovm.n_cells {
             return Err(format!(
@@ -852,7 +1714,143 @@ impl Cache {
         Ok(self.vfs.ovm.cell_rbbox(cell_id))
     }
 
+    /// The budget fit of `plan`, a complete plan of `request` made as asked
+    /// elsewhere (renderd's pass 2 in bands on threads, merged): as
+    /// `plan_cancellable` would fit the request - held whole, under
+    /// `request.fixed_fit`, or decided anew (floe_vfs::hier::fit_planned).
+    /// None where the fit would plan again; the caller plans it.
+    pub fn fit_plan(
+        &self,
+        request: &PlanRequest,
+        plan: HierPlan,
+    ) -> Result<Option<HierPlan>, String> {
+        let req = self.view_request(request)?;
+        Ok(self.vfs.fit_planned_in(
+            &req,
+            request.fixed_fit,
+            request.free_pages.clone(),
+            plan,
+            request.dot_bright,
+            request.dot_occ_first,
+        ))
+    }
+
+    /// The pages `left` (sorted) of `plan` - a plan of `request` - that the
+    /// caller's budget could not decode after all, drawn by their occupancy
+    /// records instead (floe_vfs HierOpts::dot_stand_in). The pages stood in
+    /// for; none where the plan noted none (no brightness, no design.ovb,
+    /// FLOE_RUST_DENSITY_STAND_IN=off).
+    pub fn stand_in_pages(
+        &self,
+        request: &PlanRequest,
+        plan: &mut HierPlan,
+        left: &[u32],
+    ) -> Result<u64, String> {
+        if left.is_empty() || plan.stats.occ_aside.is_empty() {
+            return Ok(0);
+        }
+        let req = self.view_request(request)?;
+        Ok(self
+            .vfs
+            .stand_in_pages(&req, plan, left, request.dot_bright))
+    }
+
     pub fn plan(&self, request: &PlanRequest) -> Result<PlannedView, String> {
+        self.plan_stopping(request, None)
+    }
+
+    /// `plan` under a render cancellation: a newer generation ends the walk
+    /// at its next look (floe_vfs::hier::HierOpts::stop) and the plan is
+    /// refused as `render cancelled`, like any cancelled render step.
+    pub fn plan_cancellable(
+        &self,
+        request: &PlanRequest,
+        generation: u64,
+        cancellation: &crate::RenderCancellation,
+    ) -> Result<PlannedView, String> {
+        self.plan_stopping(request, Some(cancellation.plan_stop(generation)))
+    }
+
+    /// The budget fit a plan of `request` decides, and nothing else of it:
+    /// renderd's probe of a new scale, over the extent the viewer's margin
+    /// frame would have. The plan is made for its decision alone
+    /// (floe_vfs HierOpts::decide_by): a cell the extent covers whole takes
+    /// its children from the hierarchy summary (design.ovh, or the one the
+    /// daemon made in memory) and its placements are not read - the same
+    /// pages and the same decision as the walk's, without the index of what
+    /// lies inside the extent (field 2026-10-05: the first frame at a scale
+    /// waited for it, the time under no phase; on the synthetic MAIN01 1/10
+    /// with nothing of the index in the page cache 0.77 s zoomed in 4 times
+    /// and 0.34 s zoomed in 16, where the view's own plan took 0.02 s).
+    /// FLOE_RUST_FIT_PROBE_SUMMARY=off is the kill switch: the walk, as
+    /// 0.12.301 - as without a summary (a cache of more than
+    /// HIER_INLINE_PLACES placement records that has no design.ovh:
+    /// `floe-index hier` adds it). FLOE_RUST_FIT_PROBE_CHECK=on (diagnostic)
+    /// walks as well and says where the two differ; the walk's decision is
+    /// then the one taken.
+    pub fn fit_decision_cancellable(
+        &self,
+        request: &PlanRequest,
+        generation: u64,
+        cancellation: &crate::RenderCancellation,
+    ) -> Result<FitProbe, String> {
+        let summary = if fit_probe_by_summary() {
+            self.hier
+                .summary()
+                .ok()
+                .filter(|summary| summary.n_cells == self.vfs.ovm.n_cells)
+        } else {
+            None
+        };
+        let walked = summary.is_none();
+        let checked =
+            summary.is_some() && std::env::var("FLOE_RUST_FIT_PROBE_CHECK").as_deref() == Ok("on");
+        let decided =
+            self.plan_deciding(request, Some(cancellation.plan_stop(generation)), summary)?;
+        if checked {
+            let walked =
+                self.plan_deciding(request, Some(cancellation.plan_stop(generation)), None)?;
+            let same = decided.plan.pages == walked.plan.pages
+                && decided.plan.stats.fit_decision == walked.plan.stats.fit_decision;
+            // (the lines a field run is asked for)
+            eprintln!(
+                "[render-core] fit probe check: {} - by the summary {} pages in {} us ({} cells whole, {} nodes read), by the walk {} pages in {} us ({} nodes read)",
+                if same { "the same" } else { "DIFFERENT" },
+                decided.plan.pages.len(),
+                decided.stats.plan_us,
+                decided.plan.stats.whole_cells,
+                decided.plan.stats.visited_bvh,
+                walked.plan.pages.len(),
+                walked.stats.plan_us,
+                walked.plan.stats.visited_bvh,
+            );
+            return Ok(FitProbe {
+                decision: walked.plan.stats.fit_decision,
+                walked: true,
+            });
+        }
+        Ok(FitProbe {
+            decision: decided.plan.stats.fit_decision,
+            walked,
+        })
+    }
+
+    fn plan_stopping(
+        &self,
+        request: &PlanRequest,
+        stop: Option<floe_vfs::hier::PlanStop>,
+    ) -> Result<PlannedView, String> {
+        self.plan_deciding(request, stop, None)
+    }
+
+    /// plan_stopping; with `decide_by` the plan is for its fit decision alone
+    /// (fit_decision_cancellable).
+    fn plan_deciding(
+        &self,
+        request: &PlanRequest,
+        stop: Option<floe_vfs::hier::PlanStop>,
+        decide_by: Option<std::sync::Arc<floe_vfs::hiersum::HierSummary>>,
+    ) -> Result<PlannedView, String> {
         let req = self.view_request(request)?;
         let started = Instant::now();
         let regions: Vec<floe_ovm::BBox> = request
@@ -860,7 +1858,38 @@ impl Cache {
             .iter()
             .map(|region| region.as_bbox())
             .collect();
-        let mut plan = self.vfs.plan_hier_in(&req, &regions, request.fixed_fit);
+        // the cells' cover: the brightness's dots plans alone ask for it
+        let cover = if request.dot_bright.is_some()
+            && request.sub_cut_dots.is_some()
+            && !request
+                .density_mask
+                .as_ref()
+                .is_some_and(|mask| mask.is_empty())
+        {
+            self.cell_cover()
+        } else {
+            None
+        };
+        let mut plan = self.vfs.plan_hier_in(
+            &req,
+            &regions,
+            request.density_mask.clone(),
+            request.density_layers.clone(),
+            request.fixed_fit,
+            request.sub_cut_dots,
+            request.dot_records,
+            request.probe_limit,
+            request.free_pages.clone(),
+            stop,
+            request.dot_bright,
+            request.dot_occ_first,
+            cover,
+            decide_by,
+            request.fit_rank.clone(),
+        );
+        if plan.stats.cancelled {
+            return Err("render cancelled: the plan's generation is superseded".to_string());
+        }
         let plan_us = elapsed_us(started);
         // All layers off, an empty viewport, or fully summarized geometry
         // legitimately selects no working cells. The renderer still requires
@@ -871,12 +1900,20 @@ impl Cache {
         // empty picture, and the density stack's pass 2, which plans the top
         // plane's layer alone, ran into the same error under most roots).
         // A jobdeck never has a root: its sub-cut source stays a skipped pass.
-        // Normalize only the empty plan; keep real structural frames and
-        // missing-root validation unchanged.
+        // So does pass 2's plan of a side over its regions (they are pass 2's
+        // alone) whose layers the top never holds - a layer of the file no
+        // cell has, the top plane's under the free cells (renderd
+        // density_free_cells; user 2026-10-03, the routing chip at full depth:
+        // its BOUNDARY 100/0 named, empty, the topmost - "the density never
+        // finishes"). And so does any view's plan when the request asks
+        // (PlanRequest::empty_top: the viewer's frames - a layer the file
+        // names and no cell holds, alone on, is an empty picture; user
+        // 2026-10-04) - a jobdeck's source's does not.
         if plan.wcells.is_empty()
-            && (plan.pages.is_empty()
+            && (request.empty_top
                 || !request.summary_layers.is_empty()
-                || request.root.is_some())
+                || request.root.is_some()
+                || !request.regions.is_empty())
         {
             plan.wcells.push(floe_vfs::hier::WsCell {
                 key: plan.top,
@@ -885,6 +1922,7 @@ impl Cache {
                 insts: Vec::new(),
                 frames: Vec::new(),
                 washes: Vec::new(),
+                dot_counts: Vec::new(),
                 reps: Vec::new(),
             });
         }
@@ -1002,6 +2040,7 @@ impl Cache {
                         insts: Vec::new(),
                         frames: Vec::new(),
                         washes: Vec::new(),
+                        dot_counts: Vec::new(),
                         reps: prims,
                     });
                     planned.plan.stats.wc_cells += 1;
@@ -1025,6 +2064,7 @@ impl Cache {
                         insts: Vec::new(),
                         frames: Vec::new(),
                         washes: points,
+                        dot_counts: Vec::new(),
                         reps: Vec::new(),
                     });
                     planned.plan.stats.wc_cells += 1;
@@ -1053,6 +2093,7 @@ impl Cache {
                     insts: Vec::new(),
                     frames: Vec::new(),
                     washes: Vec::new(),
+                    dot_counts: Vec::new(),
                     reps: Vec::new(),
                 }],
                 pages: Vec::new(),
@@ -1584,19 +2625,37 @@ fn decode_payload(
     let index_started = Instant::now();
     let index = crate::PageIndex::build_cancellable(&doc, &mut || check_decode_cancelled(guard))?;
     let index_us = elapsed_us(index_started);
-    Ok((
-        DecodedPage {
-            page_id: payload.page_id,
-            layer_idx: payload.meta.layer_idx,
-            bbox: payload.meta.bbox,
-            encoded_bytes: payload.meta.usize_,
-            records: payload.meta.records,
-            members: payload.meta.members,
-            doc,
-            index,
-        },
-        index_us,
-    ))
+    let mut page = DecodedPage {
+        page_id: payload.page_id,
+        layer_idx: payload.meta.layer_idx,
+        bbox: payload.meta.bbox,
+        encoded_bytes: payload.meta.usize_,
+        records: payload.meta.records,
+        members: payload.meta.members,
+        doc,
+        index,
+        grown_bytes: 0,
+    };
+    // the record lists at their length (decode_shrink), the charge as read
+    // kept for the density stack's count (the index goes by the records'
+    // places in their lists, which stay)
+    if decode_shrink() {
+        let grown = page.estimated_bytes();
+        shrink_records(&mut page.doc);
+        page.grown_bytes = grown;
+    }
+    Ok((page, index_us))
+}
+
+/// decode_shrink: a parsed page's record lists cut to their length.
+fn shrink_records(doc: &mut Doc) {
+    for cell in &mut doc.cells {
+        cell.rects.shrink_to_fit();
+        cell.polys.shrink_to_fit();
+        cell.paths.shrink_to_fit();
+        cell.places.shrink_to_fit();
+        cell.texts.shrink_to_fit();
+    }
 }
 
 fn check_decode_cancelled(guard: Option<(u64, &RenderCancellation)>) -> Result<(), String> {
@@ -1614,6 +2673,212 @@ fn elapsed_us(started: Instant) -> u64 {
 mod tests {
     use super::*;
     use floe_oasis::write::W;
+    use std::sync::Arc;
+
+    /// a decoded page of `rects` (their lists as given)
+    fn page_of(rects: Vec<floe_oasis::doc::RectRec>) -> DecodedPage {
+        let doc = Doc {
+            unit: 1000.0,
+            cells: vec![floe_oasis::doc::Cell {
+                rects,
+                ..Default::default()
+            }],
+            top: 0,
+            layer_order: Vec::new(),
+            norm_s: 0.0,
+            layer_names: std::collections::HashMap::new(),
+            layer_aliases: std::collections::HashMap::new(),
+        };
+        DecodedPage {
+            page_id: 0,
+            layer_idx: 0,
+            bbox: BBox {
+                x0: 0,
+                y0: 0,
+                x1: 10,
+                y1: 10,
+            },
+            encoded_bytes: 1,
+            records: 0,
+            members: 0,
+            index: crate::PageIndex::build(&doc),
+            doc,
+            grown_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn a_repetition_list_shared_by_a_pages_records_is_charged_once() {
+        // DecodedPage::estimated_bytes (field 2026-10-05: 787 and 789 alone
+        // failed most frames with `decoded generation budget exceeded` - the
+        // planner fits the pages by their stored bytes, where a list that
+        // forty records reuse is stored once; charged once a record the page
+        // was 8.7 times its estimate). Forty records on one list of 10,000
+        // offsets are charged the list once; forty lists of their own, forty;
+        // and a record without a repetition between two that share one does
+        // not part them (OASIS: the modal repetition stays).
+        let offsets: Vec<(i64, i64)> = (0..10_000).map(|k| (k * 7, k * 3)).collect();
+        let list: Arc<[(i64, i64)]> = offsets.clone().into();
+        let rect = |rep: Rep| floe_oasis::doc::RectRec {
+            layer: 1,
+            dt: 0,
+            x: 0,
+            y: 0,
+            w: 10,
+            h: 10,
+            rep,
+        };
+        let list_bytes = 10_000 * std::mem::size_of::<(i64, i64)>() as u64;
+        let plain = page_of((0..40).map(|_| rect(Rep::One)).collect()).estimated_bytes();
+        let shared =
+            page_of((0..40).map(|_| rect(Rep::Pts(Arc::clone(&list)))).collect()).estimated_bytes();
+        let apart = page_of(
+            (0..40)
+                .map(|_| rect(Rep::Pts(offsets.clone().into())))
+                .collect(),
+        )
+        .estimated_bytes();
+        // (the lists' chunk index beside them: one table a list)
+        assert!(
+            (plain + list_bytes..plain + list_bytes + list_bytes / 4).contains(&shared),
+            "{shared} for {plain} + {list_bytes}"
+        );
+        assert!(apart >= plain + 40 * list_bytes, "{apart}");
+        let own: Arc<[(i64, i64)]> = offsets.clone().into();
+        let parted = page_of(vec![
+            rect(Rep::Pts(Arc::clone(&list))),
+            rect(Rep::One),
+            rect(Rep::Pts(Arc::clone(&list))),
+            rect(Rep::Pts(Arc::clone(&own))),
+            rect(Rep::Pts(own)),
+        ])
+        .estimated_bytes();
+        assert!(
+            parted >= 2 * list_bytes && parted < 2 * list_bytes + list_bytes / 2,
+            "{parted} for two lists"
+        );
+    }
+
+    #[test]
+    fn a_decoded_pages_record_lists_are_cut_to_their_length() {
+        // decode_shrink: the parser grows a cell's record lists as it reads,
+        // to as much as twice what they hold, and the page's charge counts
+        // what they hold room for (a page of 33 k rectangles: 216 B a record
+        // for its 96, past the planner's 192)
+        let rect = floe_oasis::doc::RectRec {
+            layer: 1,
+            dt: 0,
+            x: 0,
+            y: 0,
+            w: 10,
+            h: 10,
+            rep: Rep::One,
+        };
+        let mut rects = Vec::new();
+        for _ in 0..33_000 {
+            rects.push(rect.clone());
+        }
+        let grown = rects.capacity();
+        assert!(grown > 33_000);
+        let mut doc = page_of(rects).doc;
+        shrink_records(&mut doc);
+        assert_eq!(doc.cells[0].rects.capacity(), 33_000);
+        let (before, after) = (
+            page_of({
+                let mut v = Vec::with_capacity(grown);
+                v.extend((0..33_000).map(|_| rect.clone()));
+                v
+            })
+            .estimated_bytes(),
+            page_of(doc.cells.remove(0).rects).estimated_bytes(),
+        );
+        assert!(
+            after < before && after < 33_000 * 192,
+            "{after} against {before}: under the planner's 192 B a record"
+        );
+    }
+
+    #[test]
+    fn a_decoded_page_keeps_the_charge_it_was_read_at() {
+        // decode_payload: 1,000 rectangles, read into a list grown to 1,024
+        let mut w = W::new();
+        w.out.extend_from_slice(b"%SEMI-OASIS\r\n");
+        w.uint(1);
+        w.string(b"1.0");
+        w.real_f64(1000.0);
+        w.uint(0);
+        for _ in 0..12 {
+            w.uint(0);
+        }
+        w.uint(14);
+        w.string(b"TOP");
+        for at in 0..1_000u64 {
+            w.uint(20);
+            w.byte(0x7b); // layer, datatype, width, height, x, y
+            w.uint(1);
+            w.uint(0);
+            w.uint(10);
+            w.uint(10);
+            w.sint(at as i64 * 20);
+            w.sint(0);
+        }
+        w.uint(2);
+        let payload = PagePayload {
+            page_id: 5,
+            meta: PageV {
+                cell: 0,
+                layer_idx: 0,
+                seq: 0,
+                lod: 0,
+                codec: CODEC_OASIS,
+                bbox: BBox {
+                    x0: 0,
+                    y0: 0,
+                    x1: 20_000,
+                    y1: 10,
+                },
+                file_off: 0,
+                csize: w.out.len() as u32,
+                usize_: w.out.len() as u32,
+                records: 1_000,
+                lod_page: u32::MAX,
+                members: 1_000,
+                max_w: 10,
+                max_h: 10,
+                max_min: 10,
+            },
+            bytes: w.out,
+        };
+        let (page, _) = decode_payload(&payload, None).unwrap();
+        let rects = &page.doc.cells[0].rects;
+        assert_eq!(rects.len(), 1_000);
+        let record = std::mem::size_of::<floe_oasis::doc::RectRec>() as u64;
+        if decode_shrink() {
+            // cut to its length, and the charge as read kept beside it: the
+            // room of the 24 records the list had grown past its length
+            assert_eq!(rects.capacity(), 1_000);
+            assert_eq!(page.grown_bytes, page.estimated_bytes() + 24 * record);
+            assert_eq!(page.grown_charge(), page.grown_bytes);
+        } else {
+            // FLOE_RUST_DECODE_SHRINK=off: as read, one charge
+            assert_eq!(rects.capacity(), 1_024);
+            assert_eq!(
+                (page.grown_bytes, page.grown_charge()),
+                (0, page.estimated_bytes())
+            );
+        }
+        // a page built as it is (a test's, or with the lists as read) is charged as it is
+        let plain = page_of(vec![floe_oasis::doc::RectRec {
+            layer: 1,
+            dt: 0,
+            x: 0,
+            y: 0,
+            w: 10,
+            h: 10,
+            rep: Rep::One,
+        }]);
+        assert_eq!(plain.grown_charge(), plain.estimated_bytes());
+    }
 
     #[test]
     fn corrupt_page_repetition_count_returns_a_decode_error() {

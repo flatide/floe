@@ -136,6 +136,11 @@ fn run(raw: Vec<String>) -> Result<(), String> {
             survivor_list: true,
             place_lattice: false,
             density_stack: false,
+            density_claim_lit: false,
+            density_top_planes: 1,
+            density_shapes_first: false,
+            density_bright: 0.0,
+            density_pattern: false,
         };
         let (mode, raster) = if args.styles.is_empty() {
             (
@@ -238,9 +243,19 @@ fn make_request(args: &Args, unit: f64) -> Result<PlanRequest, String> {
         page_wash: true,
         lod_swap: true,
         regions: Vec::new(),
+        density_mask: None,
+        density_layers: None,
         visible_indices: None,
         fixed_fit: None,
         root: None,
+        sub_cut_dots: None,
+        dot_records: None,
+        probe_limit: 0,
+        free_pages: None,
+        empty_top: true,
+        dot_bright: None,
+        dot_occ_first: None,
+        fit_rank: None,
     })
 }
 

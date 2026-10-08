@@ -12,6 +12,7 @@ mod clip;
 mod deck;
 mod font;
 mod layer_decode;
+pub mod occ;
 mod page_cache;
 mod page_index;
 mod png;
@@ -26,13 +27,14 @@ mod summary;
 mod transform;
 
 pub use cache::{
-    Cache, CacheInfo, CacheLayer, DecodePool, DecodedPage, PagePayload, PlanSummary, PlannedLabels,
-    PlannedView, RenderLabel,
+    Cache, CacheInfo, CacheLayer, DecodePool, DecodedPage, FitProbe, PagePayload, PlanSummary,
+    PlannedLabels, PlannedView, RenderLabel,
 };
 pub use cancel::RenderCancellation;
 pub use cells::{
-    children as cell_children, extent as cell_extent, find as cell_find, instances as cell_instances,
-    CellChildren, CellExtent, ChildRow, DeckXf, FindResult, FindRow, HierError, HierHandle, Instances,
+    children as cell_children, extent as cell_extent, find as cell_find,
+    instances as cell_instances, CellChildren, CellExtent, ChildRow, DeckXf, FindResult, FindRow,
+    HierError, HierHandle, Instances,
 };
 pub use clip::ClipGeometry;
 pub use deck::{
@@ -65,4 +67,9 @@ pub use summary::{
 
 pub use floe_vfs::hier::FixedFit;
 pub use floe_vfs::hier::HierPlan;
+/// the sub-cut dots' block, px (renderd reports it with a density frame)
+pub use floe_vfs::hier::{dot_block_px, dot_block_px_of};
+pub use floe_vfs::hier::{dot_occ_decode, dot_page_occ, dot_page_spread, dot_page_spread_boxes};
 pub use floe_vfs::representatives::TreeOptions as RepresentativeOptions;
+
+pub use floe_vfs::hier::{DensityLayerMemo, DensityMask};

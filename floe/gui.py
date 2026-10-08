@@ -140,7 +140,7 @@ class _DrcPanel(object):
 class _CellPanel(object):
     """Widget refs of the cell tree panel (attribute bag)."""
     __slots__ = ("_search", "_tree", "_store", "_results", "_info",
-                 "_hl", "_zoom", "_build", "_root", "_top")
+                 "_hl", "_zoom", "_build")
 
 MIN_SPP = 0.01     # max zoom-in: 1 px = 0.01 dbu; keeps render bboxes
                    # from collapsing to zero width after int rounding
@@ -710,6 +710,588 @@ def fmt_count(n):
     return str(int(n))
 
 
+def occ_note(res, full=False):
+    """Pass 2 drawn from the occupancy density (design.ovs; 2026-10-06, by
+    default since 0.12.317 - FLOE_RUST_DENSITY_OCC=off the plans): its cell, the layers it held and those this
+    frame made, as the status line says them - the log line (`full`) with
+    what its cache holds (2026-10-07); "" when the plans drew it."""
+    p2 = res.get("density_plan2") or {}
+    if not p2.get("occ_layers"):
+        return ""
+    note = "%g um cells, %d layers" % (p2.get("occ_cell_nm", 0) / 1000.0, p2["occ_layers"])
+    if p2.get("occ_made"):
+        note += ", %d made" % p2["occ_made"]
+    if full and p2.get("occ_cache_kb"):
+        note += "; cache %.1f MB" % (p2["occ_cache_kb"] / 1024.0)
+    return note
+
+
+def perf_status(res, depth_note=""):
+    """The perf line of a settled (or refining) frame: (full, brief). The
+    full line goes to the terminal log and the lower bar's tooltip, every
+    diagnostic in it; the brief one is what the lower bar shows - only what
+    is checked frame by frame, so it fits without being cut off (user
+    2026-10-01: "the log has it all; the bar should show only what is needed
+    now, without an ellipsis")."""
+    split = ""
+    brief_split = ""
+    if res.get("load_ms") is not None:
+        ph = ""
+        if res.get("phase_apply") is not None:
+            # load = plan (rust) + delta (author/IPC)
+            #        + apply (klayout parse + WC build)
+            ph = " [%d plan+%d delta+%d apply]" % (
+                res.get("phase_plan", 0),
+                res.get("phase_delta", 0),
+                res.get("phase_apply", 0))
+        # the label plan is not part of load; shown only
+        # when it is worth a look (2026-09-21)
+        text = res.get("text_plan_ms", 0) or 0
+        split = " = %d load%s%s + %d draw" % (
+            res["load_ms"], ph,
+            " + %d text" % text if text >= 100 else "",
+            res["draw_ms"])
+        # the budget fit decided for a new scale before its
+        # plan (field 2026-10-05: it was part of `other`)
+        probe = res.get("fit_probe_ms", 0) or 0
+        if probe >= 100:
+            split += " + %d fit probe" % round(probe)
+        # renderd time no phase covers, and time spent
+        # waiting behind earlier commands (queue + pipe)
+        if res.get("other_ms", 0) > 200:
+            split += " + %d other" % res["other_ms"]
+        if res.get("wait_ms", 0) > 200:
+            split += " + %d wait" % res["wait_ms"]
+        # the bar: the same without the load's phases
+        brief_split = split.replace(ph, "", 1) if ph else split
+    cut = ""
+    brief_cut = ""
+    if res.get("cut_um"):
+        cut = ", cut<%.3gum" % res["cut_um"]
+        brief_cut = "cut<%.3gum" % res["cut_um"]
+        # thin keep: each shape by its larger side (0.12.214,
+        # the hairlines stay) or, under FLOE_RUST_SHAPE_CUT=min,
+        # by its smaller side (0.12.173..0.12.213)
+        culls = res.get("plan_culls") or {}
+        if culls.get("shape_cut"):
+            cut += " (larger side)" if culls.get("shape_cut_max") else " (min side)"
+    fit = (res.get("plan_culls") or {})
+    if (fit.get("fit_pct") or fit.get("fit_cull") or fit.get("fit_over")
+            or fit.get("fit_thin")):
+        # budget-fitted cut (0.12.162): the planner raised
+        # the cut so the frame fits the decoded budget.
+        # Shown HERE, next to the cut, because the bar is
+        # ellipsized at its end and the long diagnostics
+        # tail hid it (field 2026-09-18)
+        factor = max(100, int(fit.get("fit_pct", 0) or 100)) / 100.0
+        thin = int(fit.get("fit_thin", 0) or 0)
+        full = int(fit.get("fit_full_pct", 0) or 0) / 100.0
+        none = int(fit.get("fit_none_pct", 0) or 0) / 100.0
+        if fit.get("fit_ranked"):
+            # top plane first (pass 1, 2026-10-07: the drawing goes from
+            # the top): the layers above the one the budget ends in
+            # whole, that layer by its size classes as below, the
+            # layers under it left out
+            parts = []
+            if factor > 1:
+                parts.append("x%.3g" % factor)
+            whole_n = int(fit.get("fit_layers_whole", 0) or 0)
+            if whole_n:
+                parts.append("top %d whole" % whole_n)
+            edge = fit.get("fit_layer_edge")
+            if edge:
+                classes = []
+                if thin:
+                    classes.append("1/%d%s" % (1 << min(thin, 30), " below x%.3g" % full if full else ""))
+                if none:
+                    classes.append("none below x%.3g" % none)
+                parts.append(edge + (" (%s)" % ", ".join(classes) if classes else ""))
+            out_n = int(fit.get("fit_layers_out", 0) or 0)
+            if out_n:
+                parts.append("%d left out" % out_n)
+            fitted = " %s to fit budget" % ", ".join(parts)
+        elif thin or none:
+            # budget-fitted density (0.12.169): size classes
+            # largest first - complete from xF up, the class
+            # the budget ends in about 1 in 2^k, nothing
+            # under xG
+            parts = []
+            if factor > 1:
+                parts.append("x%.3g" % factor)
+            if thin:
+                parts.append("1/%d%s" % (1 << min(thin, 30), " below x%.3g" % full if full else ""))
+            if none:
+                parts.append("none below x%.3g" % none)
+            fitted = " %s to fit budget" % ", ".join(parts)
+        else:
+            fitted = " x%.3g to fit budget" % factor
+        fitted += "%s%s%s" % (
+            ", hairlines culled" if fit.get("fit_cull") else "",
+            ", STILL OVER" if fit.get("fit_over") else "",
+            # the fit remembered for this scale did not hold
+            # this frame: decided anew, the picture may have
+            # changed (SPEC-PLANNER 2026-09-27)
+            " (refit)" if fit.get("fit_redecided") else "")
+        # these layers' pages decode larger than the planner
+        # estimates: fitted to the budget over that much
+        # (2026-10-05; a frame that passed the budget is
+        # planned anew, not failed)
+        scale = int(fit.get("fit_scale", 0) or 0)
+        if scale > 1000:
+            fitted += ", pages x%.3g their estimate" % (scale / 1000.0)
+        cut += fitted
+        brief_cut += fitted
+    drawn = ""
+    if res.get("drawn") is not None:
+        drawn = ", ~%s drawn" % fmt_count(res["drawn"])
+    refin = ""
+    if res.get("refining"):
+        refin = ", refining %d" % res["refining"]
+    text = ""
+    if res.get("plan_ms") is not None:
+        # "frontier", not "frames": the planner's
+        # depth-cut record count. floe2 computes it
+        # regardless of the frames toggle (the depth
+        # frontier is plan-integral, +2.4ms measured),
+        # so it stays non-zero with frames off - that
+        # is not geometry being drawn (field question
+        # 2026-09-02).
+        text += ", plan %.1fms/%s frontier" % (
+            res["plan_ms"],
+            fmt_count(res.get("frame_rects", 0)))
+        if res.get("fit_probe_ms"):
+            # "walk": no hierarchy summary to go by (design.ovh,
+            # `floe-index hier`) - every cell of the extent read
+            text += ", fit probe %.1fms%s" % (
+                res["fit_probe_ms"],
+                " (walk)" if res.get("fit_probe_walk") else "")
+    if res.get("text_plan_ms") is not None:
+        text += ", text %.1fms/%s places" % (
+            res["text_plan_ms"],
+            fmt_count(res.get("text_place_records", 0)))
+    if res.get("png_ms") is not None:
+        text += ", %s %.1fms/pub %.1fms" % (
+            "raw" if res.get("frame_format") == "raw"
+            else "png",
+            res["png_ms"], res.get("publish_ms", 0.0))
+        # NNtiles is CUMULATIVE over the refinement
+        # rounds (9 tiles x 5 rounds = 45), not a
+        # thread count - raster threads are the Nj
+        text += ", rust %dj %dtiles@%spx %sx%s" % (
+            res.get("raster_jobs", 0),
+            res.get("render_tiles", 0),
+            res.get("tile_px", 0),
+            res.get("frame_width", 0),
+            res.get("frame_height", 0))
+    # F2R diagnostics: refinement round count, decode
+    # pool shape (sum/max vs wall exposes idle workers
+    # and stragglers, idx = record-index build share),
+    # slowest raster tile, and traversal visit/prune
+    # counts for the 2c work-bin verdict.
+    if res.get("rounds", 0) > 1:
+        text += ", rounds %d" % res["rounds"]
+    if res.get("decode_sum_ms"):
+        text += ", dec sum %.0f/max %.0f/idx %.0fms" % (
+            res["decode_sum_ms"],
+            res.get("decode_max_ms", 0.0),
+            res.get("index_ms", 0.0))
+    if res.get("raster_tile_max_ms"):
+        text += ", tile-max %.0fms" % (
+            res["raster_tile_max_ms"])
+    if res.get("tiles_reused"):
+        # §F2R-16 pan reuse engaged for this frame
+        text += ", pan-reuse %d tiles" % (
+            res["tiles_reused"])
+    if res.get("work_bin_items"):
+        text += ", bin %s items" % fmt_count(
+            res["work_bin_items"])
+        # deferral causes: Nr = repetition edges past
+        # the member-product gate, Ns = single
+        # placements past the item budget (wNNN = the
+        # heaviest such subtree weight) - names the
+        # next 2c lever without a diagnostic build
+        if res.get("work_bin_defer_rep") or \
+                res.get("work_bin_defer_single"):
+            text += " (defer %sr+%ss w%s)" % (
+                fmt_count(res.get(
+                    "work_bin_defer_rep", 0)),
+                fmt_count(res.get(
+                    "work_bin_defer_single", 0)),
+                fmt_count(res.get(
+                    "work_bin_defer_wmax", 0)))
+    elif res.get("work_bin_overflow_items"):
+        # bin hit its item cap and fell back to the
+        # per-tile walk (pixels identical, slower)
+        text += ", bin off(cap@%s)" % fmt_count(
+            res["work_bin_overflow_items"])
+    if res.get("member_paints"):
+        # geometry member paints - the paint-vs-
+        # traversal split for the F2R-03c judgment
+        text += ", paints %s" % fmt_count(
+            res["member_paints"])
+    if res.get("cache_evicted"):
+        # decoded-LRU churn: the working set no longer
+        # fits FLOE_RUST_BUDGET_MB this session (§3.18)
+        text += ", evict %s" % fmt_count(
+            res["cache_evicted"])
+    if res.get("retained_mb"):
+        # §F2R-20: geometry frames renderd holds for
+        # pan reuse (bounded by FLOE_RUST_RETAINED_MB)
+        text += ", retained %dMB" % round(
+            res["retained_mb"])
+    if res.get("hier_cells_visited"):
+        text += ", hier %s/%s pruned" % (
+            fmt_count(res["hier_cells_visited"]),
+            fmt_count(res.get("subtrees_pruned", 0)))
+    if res.get("once_full_tiles") or res.get("once_items_skipped"):
+        # F2R-28 write-once tiles: tiles that filled up (and the
+        # passes they skipped), items skipped as fully covered
+        text += ", once %s tiles/%s passes/%s items" % (
+            fmt_count(res.get("once_full_tiles", 0)),
+            fmt_count(res.get("once_passes_skipped", 0)),
+            fmt_count(res.get("once_items_skipped", 0)))
+    culls = res.get("plan_culls") or {}
+    if any(culls.values()):
+        # planner verdicts (field 2026-09-10): pages
+        # culled by size/hairline, page-BVH nodes,
+        # child-BVH nodes pruned, child cells omitted,
+        # layer skips, washes, thin frames
+        text += (", cut pages %s/pbvh %s/cbvh %s/cells %s"
+                 ", layer %s, washed %s, thin %s"
+                 % tuple(fmt_count(culls.get(k, 0)) for k in (
+                     "pages_size", "page_bvh", "child_bvh",
+                     "children_size", "layer", "washed",
+                     "thin_frames")))
+        if culls.get("thin_pages"):
+            # all-thin pages the page hairline rule
+            # would have dropped (2026-09-10): their
+            # decode / raster cost is what the field
+            # measurement of the lifted rule reads
+            text += ", thin pages %s kept" % fmt_count(
+                culls["thin_pages"])
+        if culls.get("sub_cut_washes") or culls.get("sub_cut_sparse"):
+            # sub-cut pages/nodes washed as footprints
+            # and kept or expanded as sparse (2026-09-16)
+            text += ", sub-cut washes %s/sparse %s" % (
+                fmt_count(culls.get("sub_cut_washes", 0)),
+                fmt_count(culls.get("sub_cut_sparse", 0)))
+        if culls.get("sub_cut_boxes") or culls.get("sub_cut_box_over"):
+            # sub-cut boxes (0.12.168): what the size cut
+            # drops, kept as boxes under thin keep
+            text += ", boxes %s%s%s%s" % (
+                fmt_count(culls.get("sub_cut_boxes", 0)),
+                " x%d coarser" % (1 << culls["sub_cut_box_level"])
+                if culls.get("sub_cut_box_level") else "",
+                " (+%s over)" % fmt_count(culls["sub_cut_box_over"])
+                if culls.get("sub_cut_box_over") else "",
+                " (%s unsure)" % fmt_count(culls["sub_cut_box_unsure"])
+                if culls.get("sub_cut_box_unsure") else "")
+        if culls.get("sub_cut_sparse_over") or culls.get("sub_cut_wash_over"):
+            # dropped by the per-plan sub-cut budgets
+            # (sparse ink / wash area): the frame is
+            # showing less than the rules would
+            text += ", sub-cut over %s/%s" % (
+                fmt_count(culls.get("sub_cut_sparse_over", 0)),
+                fmt_count(culls.get("sub_cut_wash_over", 0)))
+        if (culls.get("rep_kept") or culls.get("rep_washed")
+                or culls.get("rep_children")):
+            # the page frontier (2026-09-17): cut pages
+            # kept (drawn) and cut placements expanded
+            # with thinned members - one in 4^k
+            # (rep_washed stays 0: representatives are
+            # never washed since the field's boxes)
+            text += ", reps %s pages/%s children" % (
+                fmt_count(culls.get("rep_kept", 0)),
+                fmt_count(culls.get("rep_children", 0)))
+            if culls.get("rep_level"):
+                # the item budget's level: one cut item
+                # in 2^L
+                text += " L%d" % culls["rep_level"]
+            if culls.get("rep_page_level"):
+                # the decode budget thinned the pages
+                # themselves (one in 2^P by index)
+                text += " P%d" % culls["rep_page_level"]
+    if culls.get("stored_rep_points") or culls.get("stored_rep_limited"):
+        text += ", stored reps %s/tested %s%s" % (
+            fmt_count(culls.get("stored_rep_points", 0)),
+            fmt_count(culls.get("stored_rep_tested", 0)),
+            " (capped)" if culls.get("stored_rep_limited") else "")
+    summ = res.get("summary") or {}
+    if summ.get("layers"):
+        # occupancy summary (M2): these layers were
+        # drawn from design.ovo, not their pages -
+        # pick/snap do not see them in this view
+        text += (", summary %d layers %s cells (level %d,"
+                 " %g um; not pickable)" % (
+                     summ["layers"], fmt_count(summ["cells"]),
+                     summ["level"], summ["cell_um"]))
+    elif summ.get("none") not in (None, "-", "policy",
+                                  "exact"):
+        # since 2026-09-18 the summary serves cull too,
+        # so its absence is worth a word under either
+        text += ", summary: none (%s)" % summ["none"]
+    if res.get("labels_truncated"):
+        text += ", labels partial"
+    if res.get("over_budget_pages"):
+        text += ", %d pages over budget (not drawn)" % (
+            res["over_budget_pages"])
+    if res.get("deck"):
+        d = res["deck"]
+        # raster/frame ms are SUMS over passes; "wall"
+        # is the batches' real elapsed time, and the
+        # pass parallelism (x tile workers) beside it
+        # (review 2026-09-09 (5th))
+        text += (", deck %d passes (%d frame, %d skipped, "
+                 "%d scene reuses) "
+                 "%d/%d pages, scene %d + frame sum %d + "
+                 "composite %d ms, raster wall %d ms "
+                 "%dp x %dt, %d batches, pass max %dMB, "
+                 "batch max %dMB" % (
+                     d["passes"], d["frame_passes"],
+                     d["passes_skipped"],
+                     d.get("scene_reuses", 0),
+                     d["unique_pages"],
+                     d["pages_summed"],
+                     round(d["scene_us"] / 1000),
+                     round(d["frame_raster_us"] / 1000),
+                     round(d["composite_us"] / 1000),
+                     round(d.get("raster_wall_us", 0)
+                           / 1000),
+                     d.get("pass_workers", 0),
+                     res.get("workers", 0),
+                     d.get("batches", 0),
+                     round(d["pass_bytes_max"] / 1e6),
+                     round(d.get("batch_bytes_max", 0)
+                           / 1e6)))
+        if d.get("streamed_passes"):
+            text += ", %d streamed in %d slices" % (
+                d["streamed_passes"], d["slices"])
+        if d.get("wide_washes"):
+            text += ", %s sub-cut washes" % fmt_count(
+                d["wide_washes"])
+        if d.get("summary_passes"):
+            # passes drawn from their source's design.ovo
+            # (M4); pick/snap do not see those layers
+            text += ", summary %d passes %s cells (not pickable)" % (
+                d["summary_passes"],
+                fmt_count(d.get("summary_cells", 0)))
+        if d.get("summary_none_passes"):
+            text += ", %d passes without summary" % (
+                d["summary_none_passes"])
+    # tiles = plan total (resident pages included);
+    # +new = pages actually shipped for this view
+    # (cache misses, summed over its stream rounds)
+    # the density stack (diagnostic FLOE_RUST_DENSITY_STACK=top,
+    # CUT_DENSITY_DESIGN §10.10): the frame stacked its density.
+    # First in the line - the bar, which showed this line until
+    # 2026-10-01, is ellipsized at its end, and next to the cut
+    # it fell off (field 2026-09-26)
+    stack = ""
+    if res.get("density_stack") is not None:
+        # with the sub-cut dots: their block, the records'
+        # floor pass 2 planned at, its plan time and the pages
+        # it decoded (to compare FLOE_RUST_DENSITY_BLOCK_PX,
+        # 2026-10-01, and FLOE_RUST_DENSITY_FLOOR_PX, 2026-09-30)
+        parts = ["dots" if res.get("density_dots") is not None
+                 else "top + empty"]
+        # pass 1's shapes passed by, the density alone (diagnostic
+        # FLOE_RUST_DENSITY_ONLY=on, 2026-10-04; renderd shares the env)
+        if os.environ.get("FLOE_RUST_DENSITY_ONLY") == "on":
+            parts.append("density only")
+        # what pass 2 lit: the dots standing for the cells under the cut
+        # and the shapes under the cut it draws from pages by their area -
+        # both look like dots on screen, only the cells' count as dot items
+        # (user 2026-10-01: "two draws and dots, yet dot items 0")
+        lit = "lit %s px" % fmt_count(res["density_stack"].get("lit", 0))
+        parts.append(lit)
+        if res.get("density_block") is not None:
+            parts.append("block %g px" % res["density_block"])
+        if res.get("density_floor") is not None:
+            parts.append("floor %.2g px" % res["density_floor"])
+        # pass 2's reserve: the fixed one or what pass 1 left (2026-10-02)
+        if (res.get("density_plan2") or {}).get("reserve_mb"):
+            parts.append("reserve %s MB" % fmt_count(res["density_plan2"]["reserve_mb"]))
+        # The backend reports the display mode; both use the covered-area
+        # gain, while only the legacy mode varies pixel brightness.
+        bright = (res.get("density_plan2") or {}).get("bright_milli")
+        if bright:
+            pattern = (res.get("density_plan2") or {}).get("pattern", 0)
+            parts.append(("pattern, cover x%g" if pattern else "bright x%g") % (bright / 1000.0))
+            # what a cell under the cut stands for (2026-10-05): the area its
+            # shapes cover, or - an index without design.ovb or a hierarchy
+            # summary - its whole box; nothing when the occupancy density drew
+            # pass 2 (its frames reported `cells by box`, user 2026-10-06)
+            if not occ_note(res):
+                parts.append("cell cover" if (res.get("density_plan2") or {}).get("cell_cover") else "cells by box")
+        # zoomed out past the fit view the dots thin (2026-10-04): their gain
+        gain = (res.get("density_plan2") or {}).get("dot_gain_milli")
+        if gain is not None and 0 < gain < 1000:
+            parts.append("dots x%.2f" % (gain / 1000.0))
+        # a dot block too sparse for the detail is left out (2026-10-04):
+        # the dots it needs of its pixels, the blocks left out
+        gate = (res.get("density_plan2") or {}).get("dot_gate_min") or 0
+        if gate > 1:
+            block = res.get("density_block") or 4
+            gated = res["density_plan2"].get("dot_gated") or 0
+            parts.append("gate %d/%d px" % (gate, round(block * block))
+                         + (" (%s out)" % fmt_count(gated) if gated else ""))
+        us = res.get("density_us") or {}
+        # pass 2 drawn from the occupancy density instead of the plans
+        # (2026-10-06; FLOE_RUST_DENSITY_OCC=off: the plans): the time it took, its
+        # cell and layers in place of the plans' breakdown
+        occ = occ_note(res)
+        if us and occ:
+            parts.append("pass 2 by occupancy %d ms (%s)" % (round(us.get("plan2_us", 0) / 1000), occ_note(res, full=True)))
+        elif us:
+            plan = "pass 2 plan %d ms" % round(
+                us.get("plan2_us", 0) / 1000)
+            # where it went (diagnostic, 2026-10-01): the
+            # floor probes, the fitted plans and their passes,
+            # the regions, the final plans' nodes
+            p2 = res.get("density_plan2") or {}
+            if p2:
+                # where the cells' dot items came from (2026-10-02, the
+                # field's `cell dots 87.2M`): the ones there are, a point
+                # list's chunk counted at once one item, and the dot block
+                # updates past the cells' grids
+                # (the chunks' members right after them: 0.12.268 put them
+                # last, after the array members - user 2026-10-02)
+                # (a page's dots placed by its occupancy grid, design.ovb, say
+                # so after the pages: whether the cache has one, 2026-10-02)
+                # (the point-list chunks passed over in full blocks and those
+                # read at a step right after the chunks, with their members:
+                # 2026-10-03)
+                held = {"by_list_chunks": "by_chunk_members", "full_chunks": "full_members",
+                        "sampled_chunks": "sampled_members"}
+                by = ", ".join("%s %s%s" % (name, fmt_count(p2[key]), " of %s members" % fmt_count(
+                    p2.get(held[key], 0)) if key in held else " (%s by occupancy)" % fmt_count(
+                    p2["occ_pages"]) if key == "by_pages" and p2.get("occ_pages") else "") for key, name in (
+                    ("by_nodes", "nodes"), ("by_placements", "placements"), ("by_arrays", "arrays"),
+                    ("by_list_members", "list members"), ("by_list_chunks", "list chunks"),
+                    ("full_chunks", "list chunks in full blocks"), ("sampled_chunks", "list chunks sampled"),
+                    ("by_array_members", "array members"), ("by_pages", "pages"),
+                    # pages under the floor decoded, their occupancy cells too
+                    # coarse on screen for dots (2026-10-03)
+                    ("occ_decoded", "pages decoded under the floor")) if p2.get(key))
+                if p2.get("map_updates"):
+                    by += "; hash map %s" % fmt_count(p2["map_updates"])
+                if p2.get("stages"):
+                    by += "; %d layer stages" % p2["stages"]
+                if p2.get("mask_tests") or p2.get("mask_fallbacks"):
+                    by += "; mask %s/%s pruned, %s fallback" % (
+                        fmt_count(p2.get("mask_pruned", 0)), fmt_count(p2.get("mask_tests", 0)),
+                        fmt_count(p2.get("mask_fallbacks", 0)))
+                by = by.lstrip("; ")
+                plan += (" (probe %d ms x%d, fit %d ms x%d"
+                         " passes on %d threads, %d regions%s,"
+                         " nodes %s, page nodes %s, pages %s,"
+                         " reads %s, cell dots %s%s)") % (
+                    round(p2["probe_us"] / 1000),
+                    p2["probes"],
+                    round(p2["fit_us"] / 1000), p2["passes"],
+                    max(1, p2.get("threads", 1)),
+                    # the free pixels of the cells planned (2026-10-03)
+                    p2["regions"], " (free top %s, others %s px)" % (
+                        fmt_count(p2["free_top"]), fmt_count(p2["free_others"]))
+                    if p2.get("free_top") or p2.get("free_others") else "",
+                    fmt_count(p2["nodes"]),
+                    fmt_count(p2["page_nodes"]),
+                    fmt_count(p2["page_candidates"]),
+                    fmt_count(p2.get("reads", 0)),
+                    fmt_count(p2.get("items", 0)),
+                    " [%s]" % by if by else "")
+            parts.append(plan)
+        pages = res.get("density_pages") or {}
+        if pages:
+            parts.append("%d pages" % pages.get("decoded", 0))
+        # what pass 2's reserve kept out (2026-10-01): a floor probe past it,
+        # a plan its fit thinned, pages its decode left out
+        p2 = res.get("density_plan2") or {}
+        over = [what for what, there in (
+            ("floor probe", p2.get("probes_over")), ("thinned", p2.get("thinned")),
+            ("%d pages left out" % pages.get("over_budget", 0), pages.get("over_budget")),
+            # what the budget left out, drawn by its occupancy records
+            # instead (2026-10-05)
+            ("%d pages by occupancy instead" % p2.get("stood_in", 0), p2.get("stood_in"))) if there]
+        if over:
+            parts.append("pass 2 over budget: %s" % ", ".join(over))
+        # pass 2's decode and raster wall (2026-10-03, the field's 449-layer
+        # view took 35 s): the log line only
+        if us.get("decode2_us") is not None:
+            parts.append("pass 2 decode %d ms%s" % (round(us["decode2_us"] / 1000), ", raster %d ms" % round(us["raster2_us"] / 1000)
+                                                     if us.get("raster2_us") is not None else ""))
+        stack = " [density: %s]" % ", ".join(parts)
+        # the bar: what pass 2 lit, its plan time and what it walked (nodes,
+        # the placements it read, the cells' dot items it made); a floor
+        # probe, a budget fit past one pass (with the floor it raised),
+        # threads and decoded pages only when there are any; the block and
+        # the regions stay in the log line
+        brief = [] if res.get("density_dots") is not None else ["top + empty"]
+        brief.append(lit)
+        if us and occ:
+            brief.append("pass 2 by occupancy %d ms (%s)" % (round(us.get("plan2_us", 0) / 1000), occ))
+        elif us:
+            plan = "pass 2 plan %d ms" % round(us.get("plan2_us", 0) / 1000)
+            if p2:
+                inner = []
+                if p2.get("probes"):
+                    inner.append("probe %d ms x%d" % (round(p2["probe_us"] / 1000), p2["probes"]))
+                if p2.get("passes", 0) > 1:
+                    inner.append("%d passes%s" % (
+                        p2["passes"], ", floor %.2g px" % res["density_floor"]
+                        if res.get("density_floor") is not None else ""))
+                if p2.get("threads", 1) > 1:
+                    inner.append("%d threads" % p2["threads"])
+                inner.append("nodes %s, reads %s, cell dots %s" % (
+                    fmt_count(p2["nodes"]), fmt_count(p2.get("reads", 0)),
+                    fmt_count(p2.get("items", 0))))
+                plan += " (%s)" % ", ".join(inner)
+            brief.append(plan)
+        if pages.get("decoded"):
+            brief.append("%d pages decoded" % pages["decoded"])
+        if over:
+            brief.append("pass 2 over budget: %s" % ", ".join(over))
+        brief_stack = "density: %s" % ", ".join(brief) if brief else "density"
+    mode = "live%s (%d tiles, +%d new, %d ms" \
+           "%s%s%s%s%s%s)" \
+        % (stack, res["tiles"], res.get("new", 0) or 0,
+           res["ms"], split,
+           depth_note, cut, drawn,
+           refin, text)
+    # The lower bar: the frame's time and where it went, the density's
+    # pass 2, the work bin (with the hierarchy walk it falls back to when
+    # it is off), the cut and its budget fit, and what the picture lacks.
+    # The depth sits in the bar above; the rest is in the log line.
+    brief = ["%d ms%s" % (res["ms"], brief_split)]
+    if res.get("deck"):
+        brief.append("deck %d passes%s" % (
+            res["deck"]["passes"],
+            ", summary %d passes (not pickable)" % res["deck"]["summary_passes"]
+            if res["deck"].get("summary_passes") else ""))
+    if stack:
+        brief.append(brief_stack)
+    if res.get("work_bin_items"):
+        brief.append("bin %s items" % fmt_count(res["work_bin_items"]))
+    elif res.get("work_bin_overflow_items"):
+        brief.append("bin off(cap@%s)%s" % (
+            fmt_count(res["work_bin_overflow_items"]),
+            ", hier %s/%s pruned" % (
+                fmt_count(res["hier_cells_visited"]),
+                fmt_count(res.get("subtrees_pruned", 0)))
+            if res.get("hier_cells_visited") else ""))
+    if brief_cut.strip():
+        brief.append(brief_cut.strip())
+    if res.get("over_budget_pages"):
+        brief.append("%d pages over budget (not drawn)" % res["over_budget_pages"])
+    if res.get("labels_truncated"):
+        brief.append("labels partial")
+    if res.get("cache_evicted"):
+        brief.append("evict %s" % fmt_count(res["cache_evicted"]))
+    if summ.get("layers"):
+        brief.append("summary %d layers (not pickable)" % summ["layers"])
+    return mode, " · ".join(brief)
+
+
 def frame_rect(buf, x0, y0, w, h, color):
     """1-px rectangle border (rect_outline is too heavy for the minimap)."""
     fill_rect(buf, x0, y0, w, 1, color)
@@ -860,6 +1442,35 @@ def _remote_x_scroll_repaint(scroller):
         scroller.set_kinetic_scrolling(False)
     except AttributeError:
         pass
+
+
+def listed_meta(cache):
+    """The cache's meta with the layer table the viewer lists (user
+    2026-10-08, the field's EBEAM files: Calibre listed 3.0 and 3.300
+    where floe listed 3.1 and 3.2 too, nothing drawn on them). A
+    layout's pair that holds no shape and no text (stored_shapes 0: only
+    the file's LAYERNAME table names it - KLayout lists it, and so does
+    the index) is left out of the panel, the visible set and the layer
+    properties; the index, `info` and the renderer keep every pair. A
+    jobdeck's table is the deck's (its level heads hold nothing by
+    design). FLOE_EMPTY_LAYERS=show lists every pair as before."""
+    meta = cache.meta
+    if getattr(cache, "is_jobdeck", False) or \
+            os.environ.get("FLOE_EMPTY_LAYERS") == "show":
+        return meta
+    layers = meta.get("layers", [])
+    listed = [l for l in layers if l.get("stored_shapes") != 0]
+    if len(listed) == len(layers):
+        return meta
+    left = ["%d/%d" % (l["layer"], l["datatype"])
+            for l in layers if l.get("stored_shapes") == 0]
+    sys.stderr.write(
+        "[%s] %d layer%s not listed - the file's layer table names "
+        "them, no shape or text is on them: %s%s (FLOE_EMPTY_LAYERS=show "
+        "lists them)\n" % (APP, len(left), "" if len(left) == 1 else "s",
+                           ", ".join(left[:8]),
+                           ", ..." if len(left) > 8 else ""))
+    return dict(meta, layers=listed)
 
 
 class LayerRow(object):
@@ -1160,7 +1771,7 @@ class Viewer:
                  label_font_px=DEFAULT_LABEL_FONT_PX,
                  frame_cache=True, margin=False,
                  stream_kb=None, stream_target_ms=500,
-                 render_debug=False, thin="auto"):
+                 render_debug=False, thin="auto", density=None):
         self.server_sock = server_sock
         self.cx = self.cy = 0
         self.spp = 1.0              # dbu per screen pixel
@@ -1222,6 +1833,14 @@ class Viewer:
         # too; it was cull); "keep" / "cull" explicit
         # (View > keep thin shapes, --thin, a forwarded thin=)
         self.thin_mode = thin if thin in ("auto", "keep", "cull") else "auto"
+        # the density under the cut (renderd's density stack, user
+        # 2026-10-05: "a density on/off option in the viewer"): View >
+        # density under the cut / `v` switch it live, --density (or a
+        # forwarded density=) sets it; unset, the environment the viewer
+        # shares with renderd decides - FLOE_RUST_DENSITY_STACK=top, the
+        # switch the field turned it on with before
+        self.density_on = (os.environ.get("FLOE_RUST_DENSITY_STACK") == "top"
+                           if density is None else bool(density))
         self.frames_on = bool(frames)
         # Frame is the normal UI control for both hierarchy outlines and
         # texts. An explicit --labels off remains available as a startup/
@@ -1817,7 +2436,8 @@ class Viewer:
             self._frontier_depths = []
             self._minimap_bases = {}
         else:
-            self.meta = cache.meta
+            # a layout's pairs with nothing on them stay off the panel
+            self.meta = listed_meta(cache)
             self.dbu = self.meta["dbu"]
             bb = self.meta["bbox"]
             self.cx = (bb[0] + bb[2]) / 2
@@ -1953,6 +2573,7 @@ class Viewer:
         self._worker_starting = False
         self._sync_label_font_capability()
         self._sync_abstract_capability()
+        self._sync_density_capability()
         if cache is not None:
             marks = getattr(self, "_load_marks", None)
             if marks is not None and "cache" not in marks:
@@ -1993,6 +2614,7 @@ class Viewer:
             marks["open"] = getattr(worker, "open_report", None) or {}
         self._sync_label_font_capability()
         self._sync_abstract_capability()
+        self._sync_density_capability()
         if self._fit_after_worker_start:
             # The window was already sized before this layout was attached.
             # Do not key this off _did_fit alone: on a cold initial open GTK
@@ -2458,7 +3080,8 @@ class Viewer:
                 opts[key] = value
         before = (self.detail, self.depth_value, self.lod_on,
                   self.frames_on, self.labels_on, self.label_font_px,
-                  getattr(self, "thin_mode", "auto"))
+                  getattr(self, "thin_mode", "auto"),
+                  getattr(self, "density_on", None))
         detail = opts.get("detail")
         if detail in DETAIL_LEVELS:
             self._set_detail(DETAIL_LEVELS.index(detail), redraw=False)
@@ -2470,6 +3093,9 @@ class Viewer:
                 pass
         if opts.get("thin") in ("auto", "keep", "cull"):
             self._set_thin(opts["thin"], redraw=False)
+        # --density / a forwarded density= (2026-10-05)
+        if opts.get("density") in ("on", "off"):
+            self.density_on = opts["density"] == "on"
         frames = opts.get("frames")
         labels = opts.get("labels")
         if frames in ("on", "off"):
@@ -2492,7 +3118,8 @@ class Viewer:
         changed = before != (
             self.detail, self.depth_value, self.lod_on,
             self.frames_on, self.labels_on, self.label_font_px,
-            getattr(self, "thin_mode", "auto"))
+            getattr(self, "thin_mode", "auto"),
+            getattr(self, "density_on", None))
         if changed:
             self.dstatus.set_text(self._depth_label())
         return changed
@@ -2564,7 +3191,16 @@ class Viewer:
         return (scope, tuple(sorted(self.visible)), self._depth_key(),
                 self._effective_cut_px(), self.lod_on, self.frames_on,
                 self.labels_on, self._color_epoch, self._effective_thin(),
-                self._root_ci())
+                self._root_ci(), self._density_key())
+
+    def _density_key(self):
+        """Render-key component: the density toggle where the renderer
+        has one (the Rust renderer's density stack), None elsewhere - a
+        frame drawn with the density never covers a view without it."""
+        if not getattr(getattr(self, "worker", None), "supports_density",
+                       False):
+            return None
+        return bool(getattr(self, "density_on", False))
 
     def _effective_cut_px(self):
         """Screen-space detail cut is independent of merged LOD."""
@@ -3126,6 +3762,38 @@ class Viewer:
         return (fb[0] <= bbox[0] - pad_x and fb[1] <= bbox[1] - pad_y and
                 fb[2] >= bbox[2] + pad_x and fb[3] >= bbox[3] + pad_y)
 
+    def _frame_holds_view(self, bbox):
+        """The frame on screen shows this view whole: the same render
+        state, the same scale, the view inside its box (float slack only).
+        Unlike _covered - whether a frame may be REUSED instead of a render,
+        which with the margin off wants comfort around the view - a
+        viewport frame that was just drawn for this view always holds it."""
+        lf = self.last_frame
+        if lf is None or lf[3] != self._render_key("live"):
+            return False
+        if abs(lf[2] - self.spp) > 1e-9 * self.spp:
+            return False
+        fb, tol = lf[1], 1e-3 * self.spp
+        return (fb[0] <= bbox[0] + tol and fb[1] <= bbox[1] + tol and
+                fb[2] >= bbox[2] - tol and fb[3] >= bbox[3] - tol)
+
+    def _settle_after_frame(self):
+        """A foreground frame settled. The mouse no longer waits for it
+        (2026-09-30), so the view may have moved while it was drawn: when a
+        render of the new view is already on its way (the debounce) or a pan
+        is in progress (its release renders), nothing to do; when the frame
+        does not hold the view the user is at (a pan inside the old margin
+        submitted nothing), render that view; otherwise top the margin up.
+        0.12.251 asked _covered here, which with the margin off never holds
+        a fresh viewport frame (no comfort around it): every frame rendered
+        again, for ever (field 2026-09-30: "rendering repeats")."""
+        if self._debounce is not None or self._drag is not None:
+            return
+        if self._frame_holds_view(self.view_bbox()):
+            self._schedule_margin()
+        else:
+            self.redraw()
+
     def redraw(self, immediate=False):
         if self.cache is None:
             return   # empty start: nothing to render yet
@@ -3291,7 +3959,7 @@ class Viewer:
         self.gen += 1
         self._job_keys[self.gen] = self._render_key("live")
         self._job_depth[self.gen] = depth
-        self.worker.submit({
+        job = {
             "kind": "render", "gen": self.gen, "scope": "live",
             "bg": True, "t_sub": time.time(),
             "bbox": tuple(float(v) for v in eb),
@@ -3317,7 +3985,11 @@ class Viewer:
             "label_font_px": self.label_font_px,
             "frame_cache": self.frame_cache_on,
             "abstract": self.abstract,
-            "visible": self._layers_arg()})
+            "visible": self._layers_arg()}
+        if self._density_key() is not None:
+            # the margin is the view's: the same density setting
+            job["density"] = self.density_on
+        self.worker.submit(job)
         self._margin_pending = (self.gen, self.cx, self.cy)
         self._margin_debug("submitted gen=%d %dx%d" % (self.gen, mw, mh))
         return False
@@ -3380,12 +4052,15 @@ class Viewer:
             "visible": self._layers_arg()}
         if HAS_DENSITY_COVERAGE:
             job["coverage"] = self.coverage_on
+        if self._density_key() is not None:
+            # the density under the cut, on or off (View > density)
+            job["density"] = self.density_on
         self.worker.submit(job)
         self._pending = self.gen
         self._preview_gen = None   # stop a stale preview ticker
         self._pending_t0 = time.perf_counter()
         self.rstatus.set_text("rendering…")
-        self._set_cursor("wait")  # mouse input is ignored until the frame
+        self._set_cursor("progress")  # busy, but the mouse still works
         if self._pending_timer is None:
             self._pending_timer = GLib.timeout_add(400, self._pending_tick)
         return False  # one-shot timeout
@@ -3397,8 +4072,30 @@ class Viewer:
             return False
         el = time.perf_counter() - self._pending_t0
         self.rstatus.set_text("rendering…" if el < 1.5
-                              else "rendering… %.0fs" % el)
+                              else "rendering… %.0fs (Esc cancels)" % el)
         return True
+
+    def _cancel_render(self):
+        """Esc on a render in flight (field 2026-09-30: a slow render
+        could neither be cancelled nor superseded): the daemon's
+        frontier moves past the generation (`cancel before_gen`), so
+        its plan, decode and raster stop at their next look; the
+        frozen picture stays and the view is left uncovered, so the
+        next pan, zoom or redraw renders it. The generation is bumped
+        without a submit: a late frame or refining round of the
+        cancelled one is not this generation's and is dropped."""
+        if self._debounce is not None:
+            GLib.source_remove(self._debounce)
+            self._debounce = None
+        self.gen += 1
+        cancel = getattr(self.worker, "cancel", None)
+        if cancel is not None:
+            cancel(self.gen)   # before_gen: everything older stops
+        self._refining = False
+        self._preview_gen = None
+        self._clear_pending()
+        self.rstatus.set_text("render cancelled")
+        self._display()
 
     def _preview_tick(self, gen):
         """Elapsed-time ticker while the fat parse behind a preview runs
@@ -3522,6 +4219,8 @@ class Viewer:
                 if res.get("refining"):
                     self._refining = True
                     self.rstatus.set_text(
+                        "drawing the density under the cut..."
+                        if res.get("density_round") else
                         "refining %d pages..." % res["refining"])
                 elif getattr(self, "_refining", False):
                     self._refining = False
@@ -3612,321 +4311,11 @@ class Viewer:
                 self._depth_used = used
                 self.dstatus.set_text(self._depth_label())
                 if True:
-                    split = ""
-                    if res.get("load_ms") is not None:
-                        ph = ""
-                        if res.get("phase_apply") is not None:
-                            # load = plan (rust) + delta (author/IPC)
-                            #        + apply (klayout parse + WC build)
-                            ph = " [%d plan+%d delta+%d apply]" % (
-                                res.get("phase_plan", 0),
-                                res.get("phase_delta", 0),
-                                res.get("phase_apply", 0))
-                        # the label plan is not part of load; shown only
-                        # when it is worth a look (2026-09-21)
-                        text = res.get("text_plan_ms", 0) or 0
-                        split = " = %d load%s%s + %d draw" % (
-                            res["load_ms"], ph,
-                            " + %d text" % text if text >= 100 else "",
-                            res["draw_ms"])
-                        # renderd time no phase covers, and time spent
-                        # waiting behind earlier commands (queue + pipe)
-                        if res.get("other_ms", 0) > 200:
-                            split += " + %d other" % res["other_ms"]
-                        if res.get("wait_ms", 0) > 200:
-                            split += " + %d wait" % res["wait_ms"]
-                    cut = ""
-                    if res.get("cut_um"):
-                        cut = ", cut<%.3gum" % res["cut_um"]
-                        # thin keep: each shape by its larger side (0.12.214,
-                        # the hairlines stay) or, under FLOE_RUST_SHAPE_CUT=min,
-                        # by its smaller side (0.12.173..0.12.213)
-                        culls = res.get("plan_culls") or {}
-                        if culls.get("shape_cut"):
-                            cut += " (larger side)" if culls.get("shape_cut_max") else " (min side)"
-                    fit = (res.get("plan_culls") or {})
-                    if (fit.get("fit_pct") or fit.get("fit_cull") or fit.get("fit_over")
-                            or fit.get("fit_thin")):
-                        # budget-fitted cut (0.12.162): the planner raised
-                        # the cut so the frame fits the decoded budget.
-                        # Shown HERE, next to the cut, because the bar is
-                        # ellipsized at its end and the long diagnostics
-                        # tail hid it (field 2026-09-18)
-                        factor = max(100, int(fit.get("fit_pct", 0) or 100)) / 100.0
-                        thin = int(fit.get("fit_thin", 0) or 0)
-                        full = int(fit.get("fit_full_pct", 0) or 0) / 100.0
-                        none = int(fit.get("fit_none_pct", 0) or 0) / 100.0
-                        if thin or none:
-                            # budget-fitted density (0.12.169): size classes
-                            # largest first - complete from xF up, the class
-                            # the budget ends in about 1 in 2^k, nothing
-                            # under xG
-                            parts = []
-                            if factor > 1:
-                                parts.append("x%.3g" % factor)
-                            if thin:
-                                parts.append("1/%d%s" % (1 << min(thin, 30), " below x%.3g" % full if full else ""))
-                            if none:
-                                parts.append("none below x%.3g" % none)
-                            cut += " %s to fit budget" % ", ".join(parts)
-                        else:
-                            cut += " x%.3g to fit budget" % factor
-                        cut += "%s%s%s" % (
-                            ", hairlines culled" if fit.get("fit_cull") else "",
-                            ", STILL OVER" if fit.get("fit_over") else "",
-                            # the fit remembered for this scale did not hold
-                            # this frame: decided anew, the picture may have
-                            # changed (SPEC-PLANNER 2026-09-27)
-                            " (refit)" if fit.get("fit_redecided") else "")
-                    drawn = ""
-                    if res.get("drawn") is not None:
-                        drawn = ", ~%s drawn" % fmt_count(res["drawn"])
-                    refin = ""
-                    if res.get("refining"):
-                        refin = ", refining %d" % res["refining"]
-                    text = ""
-                    if res.get("plan_ms") is not None:
-                        # "frontier", not "frames": the planner's
-                        # depth-cut record count. floe2 computes it
-                        # regardless of the frames toggle (the depth
-                        # frontier is plan-integral, +2.4ms measured),
-                        # so it stays non-zero with frames off - that
-                        # is not geometry being drawn (field question
-                        # 2026-09-02).
-                        text += ", plan %.1fms/%s frontier" % (
-                            res["plan_ms"],
-                            fmt_count(res.get("frame_rects", 0)))
-                    if res.get("text_plan_ms") is not None:
-                        text += ", text %.1fms/%s places" % (
-                            res["text_plan_ms"],
-                            fmt_count(res.get("text_place_records", 0)))
-                    if res.get("png_ms") is not None:
-                        text += ", %s %.1fms/pub %.1fms" % (
-                            "raw" if res.get("frame_format") == "raw"
-                            else "png",
-                            res["png_ms"], res.get("publish_ms", 0.0))
-                        # NNtiles is CUMULATIVE over the refinement
-                        # rounds (9 tiles x 5 rounds = 45), not a
-                        # thread count - raster threads are the Nj
-                        text += ", rust %dj %dtiles@%spx %sx%s" % (
-                            res.get("raster_jobs", 0),
-                            res.get("render_tiles", 0),
-                            res.get("tile_px", 0),
-                            res.get("frame_width", 0),
-                            res.get("frame_height", 0))
-                    # F2R diagnostics: refinement round count, decode
-                    # pool shape (sum/max vs wall exposes idle workers
-                    # and stragglers, idx = record-index build share),
-                    # slowest raster tile, and traversal visit/prune
-                    # counts for the 2c work-bin verdict.
-                    if res.get("rounds", 0) > 1:
-                        text += ", rounds %d" % res["rounds"]
-                    if res.get("decode_sum_ms"):
-                        text += ", dec sum %.0f/max %.0f/idx %.0fms" % (
-                            res["decode_sum_ms"],
-                            res.get("decode_max_ms", 0.0),
-                            res.get("index_ms", 0.0))
-                    if res.get("raster_tile_max_ms"):
-                        text += ", tile-max %.0fms" % (
-                            res["raster_tile_max_ms"])
-                    if res.get("tiles_reused"):
-                        # §F2R-16 pan reuse engaged for this frame
-                        text += ", pan-reuse %d tiles" % (
-                            res["tiles_reused"])
-                    if res.get("work_bin_items"):
-                        text += ", bin %s items" % fmt_count(
-                            res["work_bin_items"])
-                        # deferral causes: Nr = repetition edges past
-                        # the member-product gate, Ns = single
-                        # placements past the item budget (wNNN = the
-                        # heaviest such subtree weight) - names the
-                        # next 2c lever without a diagnostic build
-                        if res.get("work_bin_defer_rep") or \
-                                res.get("work_bin_defer_single"):
-                            text += " (defer %sr+%ss w%s)" % (
-                                fmt_count(res.get(
-                                    "work_bin_defer_rep", 0)),
-                                fmt_count(res.get(
-                                    "work_bin_defer_single", 0)),
-                                fmt_count(res.get(
-                                    "work_bin_defer_wmax", 0)))
-                    elif res.get("work_bin_overflow_items"):
-                        # bin hit its item cap and fell back to the
-                        # per-tile walk (pixels identical, slower)
-                        text += ", bin off(cap@%s)" % fmt_count(
-                            res["work_bin_overflow_items"])
-                    if res.get("member_paints"):
-                        # geometry member paints - the paint-vs-
-                        # traversal split for the F2R-03c judgment
-                        text += ", paints %s" % fmt_count(
-                            res["member_paints"])
-                    if res.get("cache_evicted"):
-                        # decoded-LRU churn: the working set no longer
-                        # fits FLOE_RUST_BUDGET_MB this session (§3.18)
-                        text += ", evict %s" % fmt_count(
-                            res["cache_evicted"])
-                    if res.get("retained_mb"):
-                        # §F2R-20: geometry frames renderd holds for
-                        # pan reuse (bounded by FLOE_RUST_RETAINED_MB)
-                        text += ", retained %dMB" % round(
-                            res["retained_mb"])
-                    if res.get("hier_cells_visited"):
-                        text += ", hier %s/%s pruned" % (
-                            fmt_count(res["hier_cells_visited"]),
-                            fmt_count(res.get("subtrees_pruned", 0)))
-                    if res.get("once_full_tiles") or res.get("once_items_skipped"):
-                        # F2R-28 write-once tiles: tiles that filled up (and the
-                        # passes they skipped), items skipped as fully covered
-                        text += ", once %s tiles/%s passes/%s items" % (
-                            fmt_count(res.get("once_full_tiles", 0)),
-                            fmt_count(res.get("once_passes_skipped", 0)),
-                            fmt_count(res.get("once_items_skipped", 0)))
-                    culls = res.get("plan_culls") or {}
-                    if any(culls.values()):
-                        # planner verdicts (field 2026-09-10): pages
-                        # culled by size/hairline, page-BVH nodes,
-                        # child-BVH nodes pruned, child cells omitted,
-                        # layer skips, washes, thin frames
-                        text += (", cut pages %s/pbvh %s/cbvh %s/cells %s"
-                                 ", layer %s, washed %s, thin %s"
-                                 % tuple(fmt_count(culls.get(k, 0)) for k in (
-                                     "pages_size", "page_bvh", "child_bvh",
-                                     "children_size", "layer", "washed",
-                                     "thin_frames")))
-                        if culls.get("thin_pages"):
-                            # all-thin pages the page hairline rule
-                            # would have dropped (2026-09-10): their
-                            # decode / raster cost is what the field
-                            # measurement of the lifted rule reads
-                            text += ", thin pages %s kept" % fmt_count(
-                                culls["thin_pages"])
-                        if culls.get("sub_cut_washes") or culls.get("sub_cut_sparse"):
-                            # sub-cut pages/nodes washed as footprints
-                            # and kept or expanded as sparse (2026-09-16)
-                            text += ", sub-cut washes %s/sparse %s" % (
-                                fmt_count(culls.get("sub_cut_washes", 0)),
-                                fmt_count(culls.get("sub_cut_sparse", 0)))
-                        if culls.get("sub_cut_boxes") or culls.get("sub_cut_box_over"):
-                            # sub-cut boxes (0.12.168): what the size cut
-                            # drops, kept as boxes under thin keep
-                            text += ", boxes %s%s%s%s" % (
-                                fmt_count(culls.get("sub_cut_boxes", 0)),
-                                " x%d coarser" % (1 << culls["sub_cut_box_level"])
-                                if culls.get("sub_cut_box_level") else "",
-                                " (+%s over)" % fmt_count(culls["sub_cut_box_over"])
-                                if culls.get("sub_cut_box_over") else "",
-                                " (%s unsure)" % fmt_count(culls["sub_cut_box_unsure"])
-                                if culls.get("sub_cut_box_unsure") else "")
-                        if culls.get("sub_cut_sparse_over") or culls.get("sub_cut_wash_over"):
-                            # dropped by the per-plan sub-cut budgets
-                            # (sparse ink / wash area): the frame is
-                            # showing less than the rules would
-                            text += ", sub-cut over %s/%s" % (
-                                fmt_count(culls.get("sub_cut_sparse_over", 0)),
-                                fmt_count(culls.get("sub_cut_wash_over", 0)))
-                        if (culls.get("rep_kept") or culls.get("rep_washed")
-                                or culls.get("rep_children")):
-                            # the page frontier (2026-09-17): cut pages
-                            # kept (drawn) and cut placements expanded
-                            # with thinned members - one in 4^k
-                            # (rep_washed stays 0: representatives are
-                            # never washed since the field's boxes)
-                            text += ", reps %s pages/%s children" % (
-                                fmt_count(culls.get("rep_kept", 0)),
-                                fmt_count(culls.get("rep_children", 0)))
-                            if culls.get("rep_level"):
-                                # the item budget's level: one cut item
-                                # in 2^L
-                                text += " L%d" % culls["rep_level"]
-                            if culls.get("rep_page_level"):
-                                # the decode budget thinned the pages
-                                # themselves (one in 2^P by index)
-                                text += " P%d" % culls["rep_page_level"]
-                    if culls.get("stored_rep_points") or culls.get("stored_rep_limited"):
-                        text += ", stored reps %s/tested %s%s" % (
-                            fmt_count(culls.get("stored_rep_points", 0)),
-                            fmt_count(culls.get("stored_rep_tested", 0)),
-                            " (capped)" if culls.get("stored_rep_limited") else "")
-                    summ = res.get("summary") or {}
-                    if summ.get("layers"):
-                        # occupancy summary (M2): these layers were
-                        # drawn from design.ovo, not their pages -
-                        # pick/snap do not see them in this view
-                        text += (", summary %d layers %s cells (level %d,"
-                                 " %g um; not pickable)" % (
-                                     summ["layers"], fmt_count(summ["cells"]),
-                                     summ["level"], summ["cell_um"]))
-                    elif summ.get("none") not in (None, "-", "policy",
-                                                  "exact"):
-                        # since 2026-09-18 the summary serves cull too,
-                        # so its absence is worth a word under either
-                        text += ", summary: none (%s)" % summ["none"]
-                    if res.get("labels_truncated"):
-                        text += ", labels partial"
-                    if res.get("over_budget_pages"):
-                        text += ", %d pages over budget (not drawn)" % (
-                            res["over_budget_pages"])
-                    if res.get("deck"):
-                        d = res["deck"]
-                        # raster/frame ms are SUMS over passes; "wall"
-                        # is the batches' real elapsed time, and the
-                        # pass parallelism (x tile workers) beside it
-                        # (review 2026-09-09 (5th))
-                        text += (", deck %d passes (%d frame, %d skipped, "
-                                 "%d scene reuses) "
-                                 "%d/%d pages, scene %d + frame sum %d + "
-                                 "composite %d ms, raster wall %d ms "
-                                 "%dp x %dt, %d batches, pass max %dMB, "
-                                 "batch max %dMB" % (
-                                     d["passes"], d["frame_passes"],
-                                     d["passes_skipped"],
-                                     d.get("scene_reuses", 0),
-                                     d["unique_pages"],
-                                     d["pages_summed"],
-                                     round(d["scene_us"] / 1000),
-                                     round(d["frame_raster_us"] / 1000),
-                                     round(d["composite_us"] / 1000),
-                                     round(d.get("raster_wall_us", 0)
-                                           / 1000),
-                                     d.get("pass_workers", 0),
-                                     res.get("workers", 0),
-                                     d.get("batches", 0),
-                                     round(d["pass_bytes_max"] / 1e6),
-                                     round(d.get("batch_bytes_max", 0)
-                                           / 1e6)))
-                        if d.get("streamed_passes"):
-                            text += ", %d streamed in %d slices" % (
-                                d["streamed_passes"], d["slices"])
-                        if d.get("wide_washes"):
-                            text += ", %s sub-cut washes" % fmt_count(
-                                d["wide_washes"])
-                        if d.get("summary_passes"):
-                            # passes drawn from their source's design.ovo
-                            # (M4); pick/snap do not see those layers
-                            text += ", summary %d passes %s cells (not pickable)" % (
-                                d["summary_passes"],
-                                fmt_count(d.get("summary_cells", 0)))
-                        if d.get("summary_none_passes"):
-                            text += ", %d passes without summary" % (
-                                d["summary_none_passes"])
-                    # tiles = plan total (resident pages included);
-                    # +new = pages actually shipped for this view
-                    # (cache misses, summed over its stream rounds)
-                    # the density stack (diagnostic FLOE_RUST_DENSITY_STACK=top,
-                    # CUT_DENSITY_DESIGN §10.10): the frame stacked its density.
-                    # First in the line - the bar is ellipsized at its end,
-                    # and next to the cut it fell off (field 2026-09-26)
-                    stack = (" [density: top + empty]"
-                             if res.get("density_stack") is not None else "")
-                    mode = "live%s (%d tiles, +%d new, %d ms" \
-                           "%s%s%s%s%s%s)" \
-                        % (stack, res["tiles"], res.get("new", 0) or 0,
-                           res["ms"], split,
-                           self._depth_note(used), cut, drawn,
-                           refin, text)
+                    mode, brief = perf_status(res, self._depth_note(used))
                     # the first frame after a load also says how long the
                     # load took (the frame's own ms is only its render)
-                    mode = self._load_note(res) + mode
+                    load, load_brief = self._load_note(res)
+                    mode, brief = load + mode, load_brief + brief
                 # Also keep a terminal performance log (only the settled
                 # frame prints; refining rounds would spam every ~0.4s).
                 # The same line now remains in the persistent lower bar.
@@ -3935,8 +4324,8 @@ class Viewer:
                     print("%s  view %.1f x %.1f um"
                           % (mode, (b[2] - b[0]) * self.dbu,
                              (b[3] - b[1]) * self.dbu), flush=True)
-                    self._schedule_margin()
-                self._set_status(self.view_bbox(), mode)
+                    self._settle_after_frame()
+                self._set_status(self.view_bbox(), mode, brief)
                 # the cell highlight follows the view the frame shows
                 self._cell_hl_follow()
         elif kind in CELL_QUERY_KINDS:
@@ -3954,8 +4343,19 @@ class Viewer:
                 "clip saved: %s (%.2f MB, %d ms)"
                 % (res["path"], res["size_mb"], res["ms"]))
         elif kind == "error":
-            self._clear_pending()
+            # an older generation's late error (a superseded render)
+            # must not clear the one now pending; an adapter failure
+            # carries no generation and must
+            if res.get("gen", -1) in (-1, self._pending):
+                self._clear_pending()
             self._set_live_status("error: %s" % res.get("msg"))
+        elif kind == "cancelled":
+            # the daemon's word that a generation stopped: nothing to
+            # show (the picture stays), only the pending state to drop
+            # if it was still waited for
+            if res.get("gen") == self._pending:
+                self._clear_pending()
+                self.rstatus.set_text("render cancelled")
         elif kind == "dropped":
             # a margin the scale's budget fit does not hold (renderd,
             # reason=fit): nothing lands, the viewport stays as drawn and
@@ -3965,27 +4365,35 @@ class Viewer:
             if pending is not None and pending[0] == res.get("gen"):
                 self._margin_debug("dropped gen=%d: %s" % (
                     res["gen"], res.get("reason") or "?"))
+            # a foreground render dropped (unreachable today: a stale
+            # generation is never sent) must not leave the mouse waiting
+            # for a frame that never comes (review 2026-09-30)
+            if res.get("gen") == self._pending:
+                self._clear_pending()
+                self.rstatus.set_text("render dropped (%s)" % (
+                    res.get("reason") or "?"))
 
     def _load_note(self, res):
         """The first settled frame after a load: the time from the file's
         selection to this frame, split into the cache and layer panel, the
         render service's open (renderd's own cache open in brackets) and the
         first frame (field 2026-09-22: a 10 s service open showed as the
-        frame's 52 ms). Empty for every other frame."""
+        frame's 52 ms). A pair like perf_status's: the log line's note and
+        the bar's, the total alone; empty for every other frame."""
         marks = getattr(self, "_load_marks", None)
         if not marks or "service" not in marks or res.get("refining"):
-            return ""
+            return "", ""
         self._load_marks = None
         now = time.monotonic()
         service = "service %.1f s" % (marks["service"] - marks["cache"])
         opened = (marks.get("open") or {}).get("renderd_open_ms")
         if opened is not None:
             service += " [renderd open %.1f s]" % (opened / 1000.0)
-        return "loaded in %.1f s (cache %.1f s + %s + first frame %.2f s) · " % (
+        return ("loaded in %.1f s (cache %.1f s + %s + first frame %.2f s) · " % (
             now - marks["t0"], marks["cache"] - marks["t0"], service,
-            now - marks["service"])
+            now - marks["service"]), "loaded in %.1f s · " % (now - marks["t0"]))
 
-    def _set_status(self, bbox, mode):
+    def _set_status(self, bbox, mode, brief=None):
         w_um = (bbox[2] - bbox[0]) * self.dbu
         h_um = (bbox[3] - bbox[1]) * self.dbu
         # CD-zoom views are far below 0.1um: fixed %.1f showed them all
@@ -3993,7 +4401,9 @@ class Viewer:
         fmt = lambda v: ("%.4f" if v < 0.1 else
                          "%.3f" if v < 1 else "%.1f") % v
         self.vstatus.set_text("view %s x %s um" % (fmt(w_um), fmt(h_um)))
-        self.pstatus.set_text(mode)
+        # a frame's bar shows its brief line, the tooltip the full one
+        # (perf_status); other states are short already
+        self.pstatus.set_text(mode if brief is None else brief)
         self.pstatus.set_tooltip_text(mode)
 
     def _loading_show(self, text):
@@ -4223,8 +4633,9 @@ class Viewer:
         if self.cache is None:
             return False
         self._focus_view()
-        if self._pending is not None:
-            return True  # render in flight: mouse input waits
+        # a render in flight no longer holds the mouse (2026-09-30): the
+        # next view supersedes it at the daemon's frontier, as the keys
+        # always did
         if ev.type == Gdk.EventType.DOUBLE_BUTTON_PRESS \
                 and ev.button == 1 \
                 and self.mode not in ("ruler", "esel") \
@@ -4288,7 +4699,8 @@ class Viewer:
             self._drag_origin = None
             self._drag_moved = False
             self._drag_btn = None
-            self._set_cursor(self._idle_cursor())
+            self._set_cursor("progress" if self._pending is not None
+                             else self._idle_cursor())
             if panned:
                 self.redraw()   # pan ended: render the final position
             elif was_drag and ev.button == 1:
@@ -4348,25 +4760,9 @@ class Viewer:
         if self.cache is None:
             return False
         self._update_cursor(ev)
-        if self._pending is not None:
-            # render in flight: the VIEW must not move, but gesture
-            # classification has to continue - otherwise a drag done
-            # while pending never sets _drag_moved and the release
-            # fires a spurious pick; tracking the anchor also stops
-            # the view from jumping once the render clears
-            if self._drag is not None and ev.state & (
-                    Gdk.ModifierType.BUTTON1_MASK |
-                    Gdk.ModifierType.BUTTON2_MASK):
-                if not self._drag_moved \
-                        and self._drag_origin is not None:
-                    ox, oy = self._drag_origin
-                    if self._drag_threshold(ox, oy, ev.x, ev.y):
-                        self._drag_moved = True
-                self._drag = (ev.x, ev.y)
-            elif self._zoomdrag is not None and \
-                    ev.state & Gdk.ModifierType.BUTTON3_MASK:
-                self._track_band(ev)
-            return True
+        # (a render in flight no longer freezes the view, 2026-09-30:
+        # the pan moves it live over the frozen frame, and the render
+        # of the new position supersedes the old one)
         if self._drag is not None and ev.state & (
                 Gdk.ModifierType.BUTTON1_MASK |
                 Gdk.ModifierType.BUTTON2_MASK):
@@ -4425,8 +4821,7 @@ class Viewer:
     def _on_scroll(self, _w, ev):
         if self.cache is None:
             return False
-        if self._pending is not None:
-            return True  # render in flight: mouse input waits
+        # (a render in flight is superseded by the zoom, 2026-09-30)
         # some X setups (libinput button-scroll, Exceed pointer emulation)
         # synthesize wheel events while a button is held down - that must
         # never zoom in the middle of a pan or a rubber-band drag
@@ -4550,8 +4945,6 @@ class Viewer:
             self._jobdeck_toggle_view()         # Ctrl+, level <-> chip
         elif ctrl and name in ("c", "C"):
             self._copy_view()                   # view -> clipboard
-        elif ctrl and name == "t":
-            self._cell_set_root()               # selected cell as view root
         elif ctrl and name == "T":
             self._cell_root_top()               # Ctrl+Shift+T: back to top
         elif name == "f":
@@ -4586,7 +4979,10 @@ class Viewer:
             self._detail_dialog()
         elif name == "g":
             self._goto_dialog()
-        elif name == "t":
+        elif name == "t" and not ctrl:
+            # (Ctrl+T - the view root - was removed, user 2026-09-30: the
+            # Cell menu and a double-click in the cell tree set it; Ctrl+T
+            # does nothing, it does not fall through to the tree's focus)
             self._cell_tree_focus()
         elif name == "less":
             self._depth_step(-1)
@@ -4596,6 +4992,8 @@ class Viewer:
             self._toggle_abstract()
         elif name == "v" and HAS_DENSITY_COVERAGE:
             self._toggle_coverage()
+        elif name == "v":
+            self._toggle_density()
         elif name == "b":
             self._set_mono(not self._mono)
         elif name == "e":
@@ -4645,13 +5043,25 @@ class Viewer:
         """Status-line suffix naming the depth a frame rendered at."""
         return "" if used is None else ", depth %d" % used
 
+    def _max_depth(self):
+        """The deepest level the view holds: the view root's height under
+        a root (depth counts from the root - SPEC-VIEWER §8c; the planner
+        always did, the viewer kept the file top's), else the file top's
+        height the daemon reports; None while unknown."""
+        root = getattr(self, "_view_root", None)
+        if root is not None and isinstance(root.get("height"), int):
+            return max(0, root["height"])
+        return self.max_depth
+
     def _depth_label(self):
         if self.meta is None:
             return "depth: -"
         d = self._depth()
-        current = "*" if d is None else str(d)
-        maximum = ("?" if self.max_depth is None
-                   else str(self.max_depth))
+        cap = self._max_depth()
+        # at or past the deepest level the view is whole: `*`, as full
+        current = "*" if d is None or (cap is not None and d >= cap) \
+            else str(d)
+        maximum = "?" if cap is None else str(cap)
         lbl = "depth: %s/%s" % (current, maximum)
         if self.meta.get("bands") or self.meta.get("vfs"):
             lbl += " · detail: %s" % DETAIL_LEVELS[self.detail]
@@ -4664,18 +5074,23 @@ class Viewer:
             lbl += " · thin:%s" % self._effective_thin()
             lbl += " · frame:%s" % (
                 "on" if self.frames_on else "off")
+            # the density under the cut (View > density, `v`)
+            if self._density_key() is not None:
+                lbl += " · density:%s" % (
+                    "on" if self.density_on else "off")
         if self.abstract:
             lbl += " · abstract"
         return lbl
 
     def _depth_step(self, delta):
-        """< / > step the depth by one, clamped to [0, max_depth].
-        'full' (999) is treated as the deepest explicit level so a
-        step down lands on real geometry rather than jumping to 0."""
-        cap = self.max_depth if self.max_depth is not None else 999
-        cur = self.depth_value
-        if cur >= 999:
-            cur = cap
+        """< / > step the depth by one, clamped to [0, the view's deepest
+        level] (the view root's height under a root, 2026-09-30).
+        'full' (999) - or any depth past that level - is treated as the
+        deepest explicit level so a step down lands on real geometry
+        rather than walking through levels that change nothing."""
+        cap = self._max_depth()
+        cap = cap if cap is not None else 999
+        cur = min(self.depth_value, cap)
         self._set_depth(max(0, min(cap, cur + delta)))
 
     def _set_depth(self, n, redraw=True):
@@ -4715,6 +5130,22 @@ class Viewer:
             return
         self.coverage_on = not self.coverage_on
         self._on_depth()
+
+    def _toggle_density(self):
+        """`v` / View > density under the cut (user 2026-10-05: "a density
+        on/off option in the viewer"): the shapes the detail's cut drops,
+        drawn as the density of the area they cover (renderd's density
+        stack, CUT_DENSITY_DESIGN §10.12) - on or off from the next frame;
+        the status line says which. The Rust renderer only."""
+        if self._density_key() is None:
+            return
+        self.density_on = not self.density_on
+        self._on_depth()
+
+    def _sync_density_capability(self):
+        item = getattr(self, "_density_menu_item", None)
+        if item is not None:
+            item.set_sensitive(self._density_key() is not None)
 
     def _effective_thin(self):
         """The page hairline policy in force: the explicit mode, or
@@ -4885,7 +5316,9 @@ class Viewer:
         box.set_margin_end(14)
         dlg.add(box)
         box.pack_start(Gtk.Label(
-            label="hierarchy depth (0 = top only, 999 = full)"),
+            label="hierarchy depth (0 = %s only, 999 = full)" % (
+                "the view root" if getattr(self, "_view_root", None)
+                else "top")),
             False, False, 0)
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         box.pack_start(row, False, False, 0)
@@ -5305,6 +5738,14 @@ class Viewer:
         check(m, "hierarchy frames\tf",
               lambda: self._set_frames(not self.frames_on),
               lambda: self.frames_on)
+        if not HAS_DENSITY_COVERAGE:
+            # the density under the cut (user 2026-10-05): the Rust
+            # renderer's density stack, on or off live (stable floe's `v`
+            # is its coverage overlay)
+            self._density_menu_item = check(
+                m, "density under the cut\tv", self._toggle_density,
+                lambda: self._density_key() is True)
+            self._density_menu_item.set_sensitive(False)
         self._abstract_menu_item = check(
             m, "abstract cells\ta", self._toggle_abstract,
             lambda: self.abstract)
@@ -5348,7 +5789,7 @@ class Viewer:
               lambda: self._cell_hl_on)
         item(m, "clear highlight\tEsc", self._cell_hl_clear)
         sep(m)
-        item(m, "selected cell as view root\tCtrl+T", self._cell_set_root)
+        item(m, "selected cell as view root", self._cell_set_root)
         item(m, "view root: back to the top cell\tCtrl+Shift+T",
              self._cell_root_top)
         sep(m)
@@ -6079,18 +6520,8 @@ class Viewer:
         zoom = Gtk.Button(label="zoom")
         zoom.connect("clicked", lambda *_: self._cell_zoom_selected())
         row.add(zoom)
-        # the view root (SPEC-VIEWER §8c): draw the selected cell as the
-        # top, in its own coordinates; `top` returns to the file's top
-        root = Gtk.Button(label="root")
-        root.set_tooltip_text("draw the selected cell as the view root "
-                              "(Ctrl+T)")
-        root.connect("clicked", lambda *_: self._cell_set_root())
-        row.add(root)
-        top = Gtk.Button(label="top")
-        top.set_tooltip_text("back to the top cell (Ctrl+Shift+T)")
-        top.connect("clicked", lambda *_: self._cell_root_top())
-        top.set_sensitive(False)
-        row.add(top)
+        # (the view root is a double-click on a row, _on_cell_activate:
+        # the `root` and `top` buttons went, user 2026-10-04)
         for child in row.get_children():
             child.set_can_focus(False)   # the buttons take the focus
         box.pack_start(row, False, False, 0)
@@ -6112,7 +6543,6 @@ class Viewer:
         win._search, win._tree = se, tree
         win._store, win._results = store, results
         win._info, win._hl, win._zoom, win._build = info, hl, zoom, build
-        win._root, win._top = root, top
         self._cellwin = win
         return box
 
@@ -6147,7 +6577,6 @@ class Viewer:
         w = getattr(self, "_cellwin", None)
         if w is None:
             return
-        w._top.set_sensitive(False)
         w._store.clear()
         w._results.clear()
         w._tree.set_model(w._store)
@@ -6352,9 +6781,40 @@ class Viewer:
         self._cell_hl_key = None
         self._cell_hl_query()
 
-    def _on_cell_activate(self, _tree, _path, _col):
-        """Double-click / Enter on a row: zoom to the cell."""
-        self._cell_zoom_selected()
+    def _on_cell_activate(self, tree, path, _col):
+        """Double-click / Enter on a cell row: draw that cell as the view
+        root (SPEC-VIEWER §8c; user 2026-10-04: "double-clicking a cell in
+        the cell tree makes it the root" - the panel's `root` and `top`
+        buttons went); on the layout's top cell, back to the top. A
+        jobdeck has no view root: its rows zoom, as every row did before.
+        A placeholder or a `more` row does nothing."""
+        w = self._cellwin
+        if w is None:
+            return
+        model = tree.get_model()
+        row = model[path]
+        src, ci = row[2], row[3]
+        kind = "cell" if model is w._results else row[5]
+        if ci < 0 or kind not in ("cell", "source"):
+            return
+        self._cell_sel = (src, ci, row[0])
+        if getattr(self.cache, "is_jobdeck", False):
+            self._cell_zoom_selected()
+        elif ci == self._cell_top_ci():
+            self._cell_root_top()
+        else:
+            self._cell_set_root()
+
+    def _cell_top_ci(self):
+        """The layout's top cell as the tree shows it - its one root row -
+        or None (a jobdeck's sources, no tree yet)."""
+        w = self._cellwin
+        if w is None or len(getattr(self, "_cell_sources", None) or ()) != 1:
+            return None
+        it = w._store.get_iter_first()
+        if it is None or w._store[it][5] != "cell":
+            return None
+        return w._store[it][3]
 
     def _cell_info_text(self, res):
         name = self._cell_sel[2] if self._cell_sel else "cell"
@@ -6424,10 +6884,10 @@ class Viewer:
         return None if root is None else root["cell"]
 
     def _cell_set_root(self):
-        """Ctrl+T / Cell menu / `root`: draw the selected cell as the
-        view root (Calibre's cell tree: the selected cell becomes the
-        displayed top). Its recursive bbox comes with a `cells` answer;
-        the root is applied when it lands."""
+        """Cell menu / a double-click on a tree row: draw the selected
+        cell as the view root (Calibre's cell tree: the selected cell
+        becomes the displayed top). Its recursive bbox comes with a
+        `cells` answer; the root is applied when it lands."""
         if self.cache is None:
             self._set_live_status("no layout")
             return
@@ -6464,11 +6924,12 @@ class Viewer:
                            "height": res.get("height", 0)}
         self._root_changed()
         self._set_live_status(
-            "view root: %s (%s, Ctrl+Shift+T = back to the top cell)"
-            % (res["name"], self._depth_label_for_root()))
+            "view root: %s (%s; back to the top: double-click the top cell "
+            "or Ctrl+Shift+T)" % (res["name"], self._depth_label_for_root()))
 
     def _cell_root_top(self):
-        """Ctrl+Shift+T / Cell menu / `top`: back to the file's top cell."""
+        """Ctrl+Shift+T / Cell menu / a double-click on the top cell's row:
+        back to the file's top cell."""
         if self._view_root is None:
             self._set_live_status("the top cell is the view root already")
             return
@@ -6487,13 +6948,15 @@ class Viewer:
         self._job_keys.clear()
         self._cell_hl = None
         self._cell_hl_key = None
-        w = self._cellwin
-        if w is not None:
-            w._top.set_sensitive(self._view_root is not None)
         root = self._view_root
         base = getattr(self, "_title_base", APP)
         self.window.set_title(base if root is None
                               else "%s · root %s" % (base, root["name"]))
+        # the depth counts from the root: its deepest level is the root's
+        # height (the depth itself is kept, so the top restores the view)
+        dstatus = getattr(self, "dstatus", None)
+        if dstatus is not None:
+            dstatus.set_text(self._depth_label())
         self.fit()
         # the highlight follows the selected cell into the new coordinates
         self._cell_hl_query()
@@ -8829,7 +9292,12 @@ class Viewer:
         ruler-related outranks the selection (field reports): with
         an object selected, Esc first cancels the measurement in
         progress, then clears finished rulers, and only then drops
-        the selection."""
+        the selection. Before all of that, a render in flight
+        ("rendering…" or the density round being drawn) is cancelled
+        (field 2026-09-30) - the next Esc runs the chain."""
+        if self._pending is not None or getattr(self, "_refining", False):
+            self._cancel_render()
+            return
         if self.mode == "esel":
             if self._esel_start is not None:
                 self._esel_start = None
@@ -9928,7 +10396,7 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
                frame_cache=True, margin=False,
                stream_kb=None, stream_target_ms=500,
                render_debug=False, pending_open=None, pending_fields=(),
-               thin="auto"):
+               thin="auto", density=None):
     """`pending_open`: a layout/jobdeck given on the command line that
     has no index yet - the viewer starts empty, asks, indexes and
     opens it (user call 2026-09-09), then applies `pending_fields`
@@ -9940,7 +10408,7 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
                     frame_cache=frame_cache, margin=margin,
                     stream_kb=stream_kb,
                     stream_target_ms=stream_target_ms,
-                    render_debug=render_debug, thin=thin)
+                    render_debug=render_debug, thin=thin, density=density)
     smoke_ms = os.environ.get("FLOE_GUI_SMOKE_MS")
     smoke_error = []
     if smoke_ms is not None:

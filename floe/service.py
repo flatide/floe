@@ -925,6 +925,12 @@ class RenderWorker:
             self.latest.value = max(self.latest.value, job["gen"])
         self.req.put(job)
 
+    def cancel(self, before_gen):
+        """The viewer's Esc: every render older than `before_gen` is
+        abandoned at the service's next step (its `newer` check between
+        rounds); the step in progress finishes silently."""
+        self.latest.value = max(self.latest.value, int(before_gen))
+
     def stop(self):
         try:
             self.req.put(None)

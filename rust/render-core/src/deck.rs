@@ -987,10 +987,13 @@ impl Deck {
                         )?;
                         accumulate_decode(&mut stats, &decode_stats);
                         for page in chunk_pages {
+                            // (as the parser read it, DecodedPage::grown_charge:
+                            // a pass's slices and its budget's stop are where
+                            // they were before the pages' lists were cut)
                             pass_bytes =
-                                pass_bytes.checked_add(page.estimated_bytes()).ok_or_else(
-                                    || "decoded generation byte charge overflow".to_string(),
-                                )?;
+                                pass_bytes.checked_add(page.grown_charge()).ok_or_else(|| {
+                                    "decoded generation byte charge overflow".to_string()
+                                })?;
                             unique_pages.insert((source_index, page.page_id));
                             decoded.push(page);
                         }
@@ -1269,6 +1272,11 @@ fn stream_pass(
         survivor_list: true,
         place_lattice: false,
         density_stack: false,
+        density_claim_lit: false,
+        density_top_planes: 1,
+        density_shapes_first: false,
+        density_bright: 0.0,
+        density_pattern: false,
     };
     let mut report = StreamReport {
         pass_bytes_max: first_bytes,
@@ -1386,7 +1394,7 @@ fn stream_pass(
             accumulate_decode(stats, &decode_stats);
             for page in chunk_pages {
                 slice_bytes = slice_bytes
-                    .checked_add(page.estimated_bytes())
+                    .checked_add(page.grown_charge())
                     .ok_or_else(|| "decoded generation byte charge overflow".to_string())?;
                 unique_pages.insert((source_index, page.page_id));
                 slice.push(page);
@@ -1467,6 +1475,11 @@ fn raster_pass(
         survivor_list: true,
         place_lattice: false,
         density_stack: false,
+        density_claim_lit: false,
+        density_top_planes: 1,
+        density_shapes_first: false,
+        density_bright: 0.0,
+        density_pattern: false,
     };
     // a frames-only pass only when this placement's plan holds a
     // hierarchy frame at all (analysis 2026-09-09: the pass ran, and
@@ -1815,9 +1828,21 @@ fn source_plan_request(
         page_wash: true,
         lod_swap: true,
         regions: Vec::new(),
+        density_mask: None,
+        density_layers: None,
         visible_indices: None,
         fixed_fit: None,
         root: None,
+        sub_cut_dots: None,
+        dot_records: None,
+        probe_limit: 0,
+        free_pages: None,
+        // an empty plan is a skipped pass (the planner dropped the source)
+        empty_top: false,
+        dot_bright: None,
+        dot_occ_first: None,
+        // (a deck's sources keep the size classes alone)
+        fit_rank: None,
     };
     plan.validate()?;
     Ok(Some(plan))
