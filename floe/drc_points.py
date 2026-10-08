@@ -1,4 +1,4 @@
-"""Exact DRC centers and bounded pixel rasters for ungrouped markers.
+"""Exact DRC centers and bounded pixel rasters for individual error markers.
 
 The immutable cache holds two integer center sums per original error,
 including half-grid centers. Queries scan it in bounded chunks and retain
@@ -29,7 +29,11 @@ NATIVE_TASK = 1 << 16
 PROGRESS_INTERVAL = 0.5
 RED = 0xFF5252FF
 GREEN = 0x00E676FF
-_WAIVED = np.uint64(1 << 63)
+GOLD = 0xFFD700FF
+# Lexicographic priority: selected first, then not-waived, then original ID.
+_UNSELECTED = np.uint64(1 << 63)
+_WAIVED = np.uint64(1 << 62)
+_ID_MASK = _WAIVED - np.uint64(1)
 _EMPTY = np.uint64((1 << 64) - 1)
 
 
@@ -332,10 +336,15 @@ def _visit_chunks(index, ci, cancelled, consume, progressive):
 def _rgba(ranks, cancelled):
     """Stamp the same solid AA 5px circle through 25 vectorized shifts."""
     height, width = ranks.shape
-    masks = ((ranks != _EMPTY) & (ranks < _WAIVED),
-             (ranks != _EMPTY) & (ranks >= _WAIVED))
-    alphas = []
-    for mask in masks:
+    occupied = ranks != _EMPTY
+    unselected = occupied & (ranks >= _UNSELECTED)
+    masks = ((unselected & ((ranks & _WAIVED) != 0), GREEN),
+             (unselected & ((ranks & _WAIVED) == 0), RED),
+             (occupied & (ranks < _UNSELECTED), GOLD))
+    out = np.zeros((height, width, 4), dtype=np.uint8)
+    for mask, color in masks:
+        if not np.any(mask):
+            continue
         alpha = np.zeros((height, width), dtype=np.uint8)
         sprite = np.frombuffer(circle_rgba(2, RED, solid=True), np.uint8).reshape(5, 5, 4)
         for sy in range(5):
@@ -351,13 +360,9 @@ def _rgba(ranks, cancelled):
                     continue
                 dest = alpha[ya + dy:yb + dy, xa + dx:xb + dx]
                 np.maximum(dest, mask[ya:yb, xa:xb] * coverage, out=dest)
-        alphas.append(alpha)
-    red, green = alphas
-    out = np.zeros((height, width, 4), dtype=np.uint8)
-    # Unwaived pixels win overlaps so dense waived locations cannot conceal
-    # failures. Within each color max coverage avoids drawing duplicates.
-    for alpha, color, keep in ((green, GREEN, (green > 0) & (red == 0)),
-                               (red, RED, red > 0)):
+        # Gold is painted last, including circle fringes, just as the former
+        # selected-error overlay. Red wins remaining mixed-status overlaps.
+        keep = alpha > 0
         out[keep, :3] = ((color >> 24) & 255, (color >> 16) & 255,
                          (color >> 8) & 255)
         out[keep, 3] = alpha[keep]
@@ -365,7 +370,8 @@ def _rgba(ranks, cancelled):
 
 
 def query_points(index, bounds_um, width_px, height_px, checks=None,
-                 members=None, waived=None, cancelled=None, progress=None):
+                 members=None, waived=None, cancelled=None, progress=None,
+                 selected=None):
     """Project complete scopes into a bounded raster, preserving picking IDs.
 
     ``progress`` receives independent cumulative snapshots roughly every
@@ -384,17 +390,17 @@ def query_points(index, bounds_um, width_px, height_px, checks=None,
     ranks = np.full((height, width), _EMPTY, dtype=np.uint64)
     flat = ranks.ravel()
     db = index.db
-    selected = (range(len(db.checks)) if checks is None else sorted(set(map(int, checks))))
-    selected = [ci for ci in selected if 0 <= ci < len(db.checks) and len(db.checks[ci].errors)]
+    checks = (range(len(db.checks)) if checks is None else sorted(set(map(int, checks))))
+    checks = [ci for ci in checks if 0 <= ci < len(db.checks) and len(db.checks[ci].errors)]
     offsets, total = [], 0
-    for ci in selected:
+    for ci in checks:
         offsets.append(total)
         total += len(db.checks[ci].errors)
     if total >= int(_WAIVED):
         raise ValueError('too many DRC errors for marker representatives')
     visible = processed = 0
     bases = np.asarray(offsets, dtype=np.int64)
-    selected_array = np.asarray(selected, dtype=np.int32)
+    check_array = np.asarray(checks, dtype=np.int32)
 
     def snapshot():
         _check(cancelled)
@@ -405,10 +411,10 @@ def query_points(index, bounds_um, width_px, height_px, checks=None,
         error_ids = np.full((height, width), -1, dtype=np.int64)
         check_ids = np.full((height, width), -1, dtype=np.int32)
         if np.any(occupied):
-            ids = (ranks[occupied] & (_WAIVED - np.uint64(1))).astype(np.int64)
+            ids = (ranks[occupied] & _ID_MASK).astype(np.int64)
             rule = np.searchsorted(bases, ids, side='right') - 1
             error_ids[occupied] = ids - bases[rule]
-            check_ids[occupied] = selected_array[rule]
+            check_ids[occupied] = check_array[rule]
         error_ids.flags.writeable = check_ids.flags.writeable = False
         return PointMarkers(width, height, _rgba(ranks, cancelled), error_ids,
                             check_ids, int(visible), int(np.count_nonzero(occupied)),
@@ -426,9 +432,10 @@ def query_points(index, bounds_um, width_px, height_px, checks=None,
 
     x0, y0, x1, y1 = bounds
     if width and height and x0 < x1 and y0 < y1:
-        for ci, base in zip(selected, offsets):
+        for ci, base in zip(checks, offsets):
             _check(cancelled)
             member = members.get(ci) if members is not None else None
+            selection = selected.get(ci) if selected is not None else None
             def consume(start, values, scale):
                 nonlocal visible, processed
                 _check(cancelled)
@@ -458,6 +465,11 @@ def query_points(index, bounds_um, width_px, height_px, checks=None,
                 np.clip(yp, 0, height - 1, out=yp)
                 ids = (local + start + base).astype(np.uint64)
                 ids |= status[local].astype(np.uint64) * _WAIVED
+                if selection is None:
+                    ids |= _UNSELECTED
+                else:
+                    selected_mask = np.asarray(selection.mask(start, count), dtype=bool)
+                    ids |= (~selected_mask[local]).astype(np.uint64) * _UNSELECTED
                 np.minimum.at(flat, yp * width + xp, ids)
                 publish_due()
 

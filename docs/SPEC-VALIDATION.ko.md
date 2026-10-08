@@ -517,13 +517,18 @@ sh tools/validate_rust.sh --only quick path/to.oas
 - `drc_clusters`: `validate_drc_clusters.py`와
   `validate_drc_cluster_spatial.py` — 임의 번호/범위 파일, 10억 번호의
   bounded 조회, 클러스터 상태 카운트 공유, 트리/페이지, cap 전 소속 판정.
-- `drc_markers`: `validate_drc_markers.py`와
-  `validate_drc_marker_gui.py` — 실제 pack의 100만 에러를 빠짐없이 집계,
-  8192 이하 출력, 축소 시 geometry 해독 0회, 정확한 확대/화면 경계/
-  singleton, 클러스터·status 필터, 메모리/캐시 한도, 취소·오래된 결과
-  폐기, 페이지 독립, 동결/리사이즈된 화면 좌표, 묶음 hit 분리,
-  5000개 초과 박스 선택의 비부분 적용. GUI 그리기/이벤트는 headless
-  mock으로 검증하며 GTK 실화면 검증을 대체하지 않는다.
+- `drc_markers`: `validate_drc_points.py`, `validate_drc_marker_gui.py`,
+  `validate_drc_selection.py`, `validate_drc_status_bulk.py`,
+  `validate_drc_spatial.py` — 정확한 bbox 중심의 원형 표시, 같은 화면 중심
+  픽셀 중복 제거, 음수·반 DBU·화면 경계·확대, 클러스터·status 필터,
+  native/Python 중심 캐시 일치와 원자적 공개·취소, 0.5초 누적 프레임의
+  독립성·최종 결과·오래된 응답 폐기, 페이지 독립, 동결/리사이즈 화면 좌표,
+  픽셀별 선택 정보와 개수 제한 없는 박스 선택·취소·실패 시 기존 선택 보존을 검증한다.
+  선택 비트셋의 2억 개 주소 공간·페이지·순번, 5000개 초과 실제 선택,
+  선택 마커의 gold 우선순위, 청크별 waive 쓰기·카운터·실패 복구도 검사한다.
+  공간 인덱스는 독립 pack fixture로 준비·재사용·원본 ID 포스팅·멤버와 상태
+  필터·동일 카운트 상태 교체·취소·identity·실패 시 임시 파일 정리를 검증한다.
+  GUI 그리기/이벤트는 headless mock으로 검증하며 GTK 실화면 검증을 대체하지 않는다.
 
 - `drc_delta`: `validate_drc_delta.py`, `validate_drc_delta_worker.py`,
   `validate_drc_delta_gui.py` — CD/기준/델타의 다섯 자리 정밀도,
@@ -554,7 +559,9 @@ mmap 재사용, 임시 파일 및 상태 스냅샷 격리를 검사한다.
 도형 디코드가 없음을 검사한다. 실제 합성 pack과 child 프로세스를 연결하여
 계산 중 페이지 이동·룰 전환·in-view·필터·상태 재계산의 callback 진행도 확인한다.
 네이티브 GTK/X 서버의 응답 시간은 이 헤드리스 게이트의 측정 범위에 포함하지 않는다.
-선택 실측: `python tools/validate_drc_spatial.py --benchmark-10m`.
+마커 실측: `python tools/bench_drc_points.py --counts 100000000 --progressive`.
+실제 1억 개 도형의 중심 복원·표시·중간 프레임 전달을 측정하며, 파일 생성은
+제외하고 OS 파일 캐시는 유지한다.
 
 ## 3. 러스트 유닛 (핵심만)
 

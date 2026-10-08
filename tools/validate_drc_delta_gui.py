@@ -527,13 +527,13 @@ class DeltaViewerTests(unittest.TestCase):
         viewer._drc_wfilter = "waived"
         viewer._drc_fill(preserve=True)
         self.assertIs(viewer._drc_delta_group, group)
-        self.assertEqual(viewer._drc_sel[1], [2])
+        self.assertEqual(list(viewer._drc_sel[1]), [2])
         viewer._drc_wfilter = "all"
         viewer._drc_fill(preserve=True)
         viewer._drc_select_row(1)
         self.assertIsNone(viewer._drc_delta_group)
         self.assertIsNone(viewer._drc_sel)
-        self.assertEqual(viewer._drc_sels[group_key][1], [2])
+        self.assertEqual(list(viewer._drc_sels[group_key][1]), [2])
         self.assertEqual(viewer._drc_delta_worker.submit.call_args.args[2], 1)
 
     def test_waive_import_refreshes_counts_and_preserves_active_group(self):

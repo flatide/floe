@@ -1,4 +1,4 @@
-"""Benchmark actual ungrouped DRC center decoding, rasterization and delivery.
+"""Benchmark actual individual DRC center decoding, rasterization and delivery.
 
 Usage: .venv/bin/python tools/bench_drc_points.py --counts 10000 1000000
        .venv/bin/python tools/bench_drc_points.py --counts 100000000
@@ -82,7 +82,7 @@ def fixture(path, count):
         if stop == blocks:
             rows['cnt'][-1] = count - (blocks - 1) * 64
             rows['x1'][-1] = x[-1] + (int(rows['cnt'][-1]) - 1) * 8 + 3
-        # Accurate outward qboxes, even though ungrouped queries use exact
+        # Accurate outward qboxes, even though point queries use exact
         # center coordinates rather than this coarse index.
         xs = (x[:, None] + np.arange(64) * 8).ravel()
         ys = np.repeat(y, 64)
@@ -133,7 +133,7 @@ def run(args):
                 cold = time.perf_counter() - began
                 del centers
                 query = dict(bounds_um=bounds, width_px=args.width, height_px=args.height,
-                             checks=(0,), ungrouped=True)
+                             checks=(0,))
                 query_seconds = []
                 for _ in range(2):
                     began = time.perf_counter()
@@ -194,7 +194,7 @@ def progressive_run(db, bounds, args, generation, pack_bytes):
     worker = MarkerWorker()
     disp = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8, args.width, args.height)
     query = dict(bounds_um=bounds, width_px=args.width, height_px=args.height,
-                 checks=(0,), ungrouped=True, progressive=True)
+                 checks=(0,), progressive=True)
     try:
         for phase in ('cold', 'warm'):
             began = last_tick = time.perf_counter()

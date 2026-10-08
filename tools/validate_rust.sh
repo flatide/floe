@@ -278,12 +278,12 @@ if gate drc_ice; then RAN="$RAN drc_ice"
 if gate drc_clusters; then RAN="$RAN drc_clusters"
     .venv/bin/python tools/validate_drc_clusters.py
     .venv/bin/python tools/validate_drc_cluster_spatial.py; fi
-# Whole-rule/cluster adaptive markers and asynchronous viewer interaction.
+# Whole-rule/cluster point markers, unlimited selections and viewer interaction.
 if gate drc_markers; then RAN="$RAN drc_markers"
-    .venv/bin/python tools/validate_drc_markers.py
-    .venv/bin/python tools/validate_drc_marker_layout.py
     .venv/bin/python tools/validate_drc_marker_gui.py
     .venv/bin/python tools/validate_drc_points.py
+    .venv/bin/python tools/validate_drc_selection.py
+    .venv/bin/python tools/validate_drc_status_bulk.py
     .venv/bin/python tools/validate_drc_spatial.py; fi
 # Fixed-precision CD delta groups, worker cancellation, and viewer scopes.
 if gate drc_delta; then RAN="$RAN drc_delta"

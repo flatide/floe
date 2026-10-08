@@ -765,7 +765,7 @@ class ClusterTests(unittest.TestCase):
         self.assertEqual([row[0] for row in store], ["R"])
         self.assertEqual([row[3] for row in store[0].children], [first, second])
         self.assertIs(viewer._drc_cluster, first)
-        self.assertEqual(viewer._drc_sel, selection([0]))
+        self.assertEqual(list(viewer._drc_sel[1]), [0])
         self.assertFalse(viewer._drc_select_row(1, remainder))
         # Parent/child selections overlap: a child review must invalidate
         # the stale parent picks when the parent becomes active again.
@@ -777,8 +777,9 @@ class ClusterTests(unittest.TestCase):
         db.set_status(1, 1, 1)
         clusters.status_changed(1, [1])
         self.assertTrue(viewer._drc_select_row(1))
-        self.assertEqual(viewer._drc_sel, selection([2]))
-        self.assertEqual(viewer._drc_current_target(), (1, [2]))
+        self.assertEqual(list(viewer._drc_sel[1]), [2])
+        self.assertEqual(viewer._drc_current_target()[0], 1)
+        self.assertEqual(list(viewer._drc_current_target()[1]), [2])
         viewer._drc_search = "no matching rule"
         viewer._drc_fill(preserve=True)
         self.assertEqual(list(store), [])

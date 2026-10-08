@@ -1,4 +1,4 @@
-"""Exact-center cache and bounded ungrouped marker regression gate.
+"""Exact-center cache and bounded point marker regression gate.
 
 Usage: python tools/validate_drc_points.py [floe-index-binary]
 """
@@ -18,7 +18,8 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from floe import drc, drc_points
 from floe.drc_marker_style import circle_rgba
-from floe.drc_marker_worker import MarkerWorker, SelectedMembers
+from floe.drc_marker_worker import (MarkerWorker, SelectedMembers,
+                                    export_members, import_members)
 from floe.drc_markers import MarkerIndex, MarkerQueryCancelled
 
 
@@ -66,7 +67,7 @@ class PointTests(unittest.TestCase):
 
     def query(self, **kwargs):
         return self.index.query((-.01, -.01, .01, .01), 100, 100,
-                                checks=[0], ungrouped=True, **kwargs)
+                                checks=[0], **kwargs)
 
     @staticmethod
     def fake_clock(step=.51):
@@ -118,6 +119,114 @@ class PointTests(unittest.TestCase):
         pixel = np.frombuffer(after.rgba, np.uint8).reshape(100, 100, 4)[78, 18]
         np.testing.assert_array_equal(pixel, (0, 230, 118, 255))
 
+    def test_selected_duplicates_are_gold_and_take_picking_priority(self):
+        self.db.set_status(0, 1, drc.STATUS_WAIVED)
+        result = self.query(selected={0: SelectedMembers([1])})
+        self.assertEqual(result.error_ids[78, 18], 1,
+                         'selected waived error must beat unselected unwaived')
+        pixels = np.frombuffer(result.rgba, np.uint8).reshape(100, 100, 4)
+        np.testing.assert_array_equal(pixels[78, 18], (255, 215, 0, 255))
+        self.assertEqual((result.visible_count, result.occupied_count), (6, 4))
+        result = self.query(selected={0: SelectedMembers([1, 2])})
+        self.assertEqual(result.error_ids[78, 18], 2,
+                         'unwaived wins within selected duplicates')
+        result = self.query(selected={0: SelectedMembers([0, 1, 2])})
+        self.assertEqual(result.error_ids[78, 18], 0,
+                         'original order resolves equally selected statuses')
+
+    def test_gold_selection_obeys_scope_review_and_multirule_filters(self):
+        self.db.set_status(0, 1, drc.STATUS_WAIVED)
+        selection = {0: SelectedMembers([1, 4, 6])}
+        member = {0: SelectedMembers([0, 1, 2])}
+        result = self.query(members=member, selected=selection, waived=False)
+        self.assertEqual((result.visible_count, result.occupied_count), (2, 1))
+        self.assertEqual(result.error_ids[78, 18], 0)
+        pixels = np.frombuffer(result.rgba, np.uint8).reshape(100, 100, 4)
+        np.testing.assert_array_equal(pixels[78, 18], (255, 82, 82, 255))
+        result = self.query(members=member, selected=selection, waived=True)
+        self.assertEqual((result.visible_count, result.occupied_count), (1, 1))
+        self.assertEqual(result.error_ids[78, 18], 1)
+        pixels = np.frombuffer(result.rgba, np.uint8).reshape(100, 100, 4)
+        np.testing.assert_array_equal(pixels[78, 18], (255, 215, 0, 255))
+        result = self.index.query((-.01, -.01, .01, .01), 100, 100,
+                                  selected={1: SelectedMembers([0])})
+        self.assertEqual((result.check_ids[50, 50], result.error_ids[50, 50]), (1, 0))
+        self.assertEqual(result.visible_count, 7)
+
+    def test_selected_late_chunk_replaces_red_without_mutating_prior_progress(self):
+        drc_points.prepare_rule(self.index, 0)
+        selection = {0: SelectedMembers([2])}
+        frames = []
+        with mock.patch.object(drc_points, 'CHUNK', 2):
+            with mock.patch.object(drc_points.time, 'monotonic', self.fake_clock()):
+                result = self.query(selected=selection, progress=frames.append)
+        self.assertEqual(frames[0].error_ids[78, 18], 0)
+        self.assertEqual(frames[1].error_ids[78, 18], 2)
+        first = np.frombuffer(frames[0].rgba, np.uint8).reshape(100, 100, 4)
+        second = np.frombuffer(frames[1].rgba, np.uint8).reshape(100, 100, 4)
+        np.testing.assert_array_equal(first[78, 18], (255, 82, 82, 255))
+        np.testing.assert_array_equal(second[78, 18], (255, 215, 0, 255))
+        self.assertEqual(result.rgba, self.query(selected=selection).rgba)
+        self.assertEqual((result.processed_count, result.visible_count), (7, 6))
+
+    def test_large_packed_selection_is_lazy_and_exports_bits_and_intersection(self):
+        class PackedSelection:
+            size = 10_000_003
+            def __init__(self):
+                self.bits = np.zeros((self.size + 7) // 8, dtype=np.uint8)
+                self.ids = np.array([0, 7, 8, 6000, 9_999_999])
+                np.bitwise_or.at(self.bits, self.ids // 8,
+                                 (1 << (self.ids % 8)).astype(np.uint8))
+                self.bits.flags.writeable = False
+            def __iter__(self):
+                raise AssertionError('large selection enumerated')
+            def mask(self, start, count):
+                ids = np.arange(start, start + count)
+                out = np.zeros(count, dtype=bool)
+                valid = (ids >= 0) & (ids < self.size)
+                ids = ids[valid]
+                out[valid] = ((self.bits[ids // 8] >> (ids % 8)) & 1) != 0
+                return out
+        source = PackedSelection()
+        selected = SelectedMembers(source, SelectedMembers([8, 6000, 9_999_999]))
+        self.assertIs(selected._source, source)
+        self.assertFalse(hasattr(selected, 'indices'))
+        with tempfile.TemporaryDirectory() as directory:
+            spec = export_members(selected, directory, source.size)
+            self.assertEqual(spec['kind'], 'intersection')
+            self.assertEqual(spec['parts'][0]['kind'], 'packed-bits')
+            copied = import_members(spec)
+            for start, count in ((-2, 20), (5997, 12), (9_999_995, 15)):
+                np.testing.assert_array_equal(copied.mask(start, count), selected.mask(start, count))
+            ids = np.array([-1, 0, 7, 8, 6000, 9_999_999, source.size])
+            np.testing.assert_array_equal(copied.contains_many(ids),
+                                          [False, False, False, True, True, True, False])
+            self.assertLess(sum(os.path.getsize(os.path.join(directory, f))
+                                for f in os.listdir(directory)), len(source.bits) + 1024)
+
+    def test_marker_process_transfers_lazy_selected_memberships(self):
+        import time
+        worker = MarkerWorker()
+        selection = SelectedMembers(SelectedMembers([1, 2]), SelectedMembers([1]))
+        query = dict(bounds_um=(-.01, -.01, .01, .01), width_px=100, height_px=100,
+                     checks=[0], selected={0: selection})
+        self.db.set_status(0, 1, drc.STATUS_WAIVED)
+        try:
+            with mock.patch('floe.drc_marker_worker.LARGE_RULE', 0):
+                worker.submit('selected', self.db, query)
+                deadline = time.monotonic() + 10
+                reply = None
+                while time.monotonic() < deadline and reply is None:
+                    reply = worker.poll()
+                    time.sleep(.01)
+            self.assertIsNotNone(reply)
+            self.assertIsNone(reply[2])
+            self.assertEqual(reply[1].error_ids[78, 18], 1)
+            self.assertEqual(reply[1].rgba, self.query(selected={0: selection}).rgba)
+        finally:
+            worker.close()
+            worker._thread.join(timeout=5)
+
     def test_scope_filters_original_rule_ids_and_waived_status(self):
         member = SelectedMembers([1, 3, 5, 6])
         self.db.set_status(0, 1, drc.STATUS_WAIVED)
@@ -131,12 +240,12 @@ class PointTests(unittest.TestCase):
     def test_multirule_priority_and_deterministic_original_ids(self):
         self.db.set_status(0, 4, drc.STATUS_WAIVED)
         result = self.index.query((-.01, -.01, .01, .01), 100, 100,
-                                  checks=[1, 0, 1, -1, 99, 2], ungrouped=True)
+                                  checks=[1, 0, 1, -1, 99, 2])
         self.assertEqual(result.visible_count, 7)
         self.assertEqual(result.occupied_count, 4)
         self.assertEqual((result.check_ids[50, 50], result.error_ids[50, 50]), (1, 0))
         self.db.set_status(0, 4, 0)
-        result = self.index.query((-.01, -.01, .01, .01), 100, 100, ungrouped=True)
+        result = self.index.query((-.01, -.01, .01, .01), 100, 100)
         self.assertEqual((result.check_ids[50, 50], result.error_ids[50, 50]), (0, 4))
 
     def test_closed_boundaries_and_outside_center_is_not_dragged_to_edge(self):
@@ -148,7 +257,7 @@ class PointTests(unittest.TestCase):
     def test_subpixel_locations_separate_when_zoomed(self):
         member = SelectedMembers([0, 3])
         coarse = self.index.query((-1, -1, 1, 1), 100, 100, checks=[0],
-                                  members={0: member}, ungrouped=True)
+                                  members={0: member})
         fine = self.query(members={0: member})
         self.assertEqual(coarse.visible_count, 2)
         self.assertEqual(coarse.occupied_count, 1)
@@ -210,23 +319,21 @@ class PointTests(unittest.TestCase):
         self.assertEqual(result.visible_count, 6)
         self.assertEqual(result.occupied_count, 4)
 
-    def test_inmemory_database_and_grouped_default_are_supported(self):
+    def test_inmemory_database_uses_point_markers_by_default(self):
         check = drc.DrcCheck('INMEMORY')
         check.errors = [drc.DrcError('p', 1, [(-.0065, -.0055)]),
                         drc.DrcError('p', 2, [(-.0065, -.0055)])]
         index = MarkerIndex(drc.DrcDb('', 'MAIN', 1000, [check]))
-        result = index.query((-.01, -.01, .01, .01), 100, 100, ungrouped=True)
+        result = index.query((-.01, -.01, .01, .01), 100, 100)
+        self.assertIsInstance(result, drc_points.PointMarkers)
         self.assertEqual(result.visible_count, 2)
         self.assertEqual(result.occupied_count, 1)
-        grouped = index.query((-.01, -.01, .01, .01), 100, 100)
-        self.assertIsInstance(grouped, list)
-        self.assertEqual(sum(marker.count for marker in grouped), 2)
 
     def test_empty_rule_and_small_viewport(self):
-        empty = self.index.query((0, 0, 1, 1), 1, 1, checks=[2], ungrouped=True)
+        empty = self.index.query((0, 0, 1, 1), 1, 1, checks=[2])
         self.assertEqual(empty.visible_count, 0)
         self.assertEqual(empty.rgba, b'\0\0\0\0')
-        point = self.index.query((0, 0, 1, 1), 1, 1, checks=[1], ungrouped=True)
+        point = self.index.query((0, 0, 1, 1), 1, 1, checks=[1])
         self.assertEqual(point.error_ids[0, 0], 0)
         self.assertEqual(point.rgba, bytes((255, 82, 82, 255)))
 

@@ -24,6 +24,8 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from floe import drc, drc_delta, drc_markers, gui  # noqa: E402
+from floe.drc_points import PointMarkers  # noqa: E402
+from floe.drc_selection import Selection  # noqa: E402
 from validate_drc_clusters import TreeStore, TreeView  # noqa: E402
 from validate_drc_delta_gui import GroupStore, fixture, use_auto  # noqa: E402
 
@@ -135,6 +137,17 @@ def forbid_foreground_scans():
 
 
 class LargeRuleViewerTests(unittest.TestCase):
+    @staticmethod
+    def select_every_error(viewer):
+        size = len(viewer._drc.checks[0].errors)
+        bits = np.full((size + 7) // 8, 255, dtype=np.uint8)
+        if size % 8:
+            bits[-1] = (1 << (size % 8)) - 1
+        selected = Selection.from_packed(size, bits)
+        viewer._drc_sel = (0, selected, (), selected)
+        viewer._drc_sels[(0, None)] = viewer._drc_sel
+        return selected
+
     def test_click_pages_only_1000_and_submits_whole_rule_to_workers(self):
         viewer = large_viewer()
         with forbid_foreground_scans():
@@ -151,6 +164,9 @@ class LargeRuleViewerTests(unittest.TestCase):
         query = viewer._drc_marker_worker.submit.call_args.args[2]
         self.assertEqual(query["checks"], (0,))
         self.assertNotIn("cap", query)
+        self.assertTrue(query["progressive"])
+        for removed in ("ungrouped", "cell_px", "declutter"):
+            self.assertNotIn(removed, query)
 
     def test_another_rule_remains_selectable_while_workers_are_pending(self):
         viewer = large_viewer()
@@ -182,7 +198,9 @@ class LargeRuleViewerTests(unittest.TestCase):
         delta_key, marker_key = viewer._drc_delta_key, viewer._drc_marker_key
         viewer._drcwin._rules.set_cursor((1,), None, False)
         viewer._drc_delta_worker.poll.return_value = (delta_key, object(), None)
-        viewer._drc_marker_worker.poll.return_value = (marker_key, [object()], None)
+        stale = PointMarkers(0, 0, b"", np.empty((0, 0), dtype=np.int64),
+                              np.empty((0, 0), dtype=np.int32), 0, 0)
+        viewer._drc_marker_worker.poll.return_value = (marker_key, stale, None)
         with forbid_foreground_scans():
             viewer._drc_delta_poll()
             viewer._drc_marker_poll()
@@ -191,6 +209,146 @@ class LargeRuleViewerTests(unittest.TestCase):
         self.assertIsNone(viewer._drc_marker_result)
         self.assertTrue(viewer._drc_delta_busy)
         self.assertTrue(viewer._drc_marker_busy)
+
+    def test_ten_million_selected_ids_page_only_1000_without_enumeration(self):
+        viewer = large_viewer()
+        viewer._drcwin._rules.set_cursor((0,), None, False)
+        selected = self.select_every_error(viewer)
+        viewer._drc_show_sel = True
+        viewer._drc_page = 4000
+        with forbid_foreground_scans(), patch.object(Selection, "__iter__",
+                side_effect=AssertionError("enumerated the complete selection")):
+            viewer._drc_grid_fill(0)
+            viewer._display()
+            submitted = viewer._drc_marker_worker.submit.call_count
+            viewer._display()
+            viewer._drc_page_step(1)
+        self.assertEqual(len(selected), 10_000_003)
+        self.assertLessEqual(selected.bits.nbytes, 1_250_001)
+        self.assertEqual(viewer._drc_grid_map, list(range(4_001_000, 4_002_000)))
+        self.assertEqual(viewer._drcwin._plabel.set_text.call_args.args[0], "4002 / 10001")
+        self.assertEqual(viewer._drc_marker_worker.submit.call_count, submitted)
+        query = viewer._drc_marker_worker.submit.call_args.args[2]
+        self.assertIs(query["selected"][0], selected)
+        np.testing.assert_array_equal(query["members"][0].mask(123456, 3), [True] * 3)
+        self.assertEqual(viewer._drc.checks[0].errors.reads, [])
+
+    def test_ctrl_click_only_submits_one_id_without_decoding_old_selection(self):
+        viewer = large_viewer()
+        viewer._drcwin._rules.set_cursor((0,), None, False)
+        selected = self.select_every_error(viewer)
+        viewer._drc_selection_worker = Mock()
+        viewer._drc_cell_mark = Mock()
+        viewer._drc_show_detail = Mock()
+        with forbid_foreground_scans(), patch.object(Selection, "__iter__",
+                side_effect=AssertionError("copied previous selection IDs")):
+            viewer._drc_sel_click(0, 0, 5, 5, 5, False)
+        args, kwargs = viewer._drc_selection_worker.submit.call_args
+        self.assertEqual(args[2:], (0, None))
+        self.assertIs(kwargs["previous"], selected)
+        self.assertEqual(kwargs["membership"].page(0, 10), [5])
+        self.assertEqual(kwargs["mode"], "toggle")
+        self.assertIs(viewer._drc_sel[1], selected)
+        self.assertEqual(viewer._drc.checks[0].errors.reads, [])
+
+    def test_cancelled_or_failed_large_saved_revalidation_never_activates_stale_ids(self):
+        for cancelled in (False, True):
+            with self.subTest(cancelled=cancelled):
+                viewer = large_viewer()
+                viewer._drcwin._rules.set_cursor((0,), None, False)
+                selected = self.select_every_error(viewer)
+                saved = viewer._drc_sel
+                viewer._drc_show_sel = True
+                viewer._drc_wfilter = "waived"
+                viewer._drc_selection_worker = worker = Mock()
+                with forbid_foreground_scans(), patch.object(Selection, "__iter__",
+                        side_effect=AssertionError("foreground saved-selection scan")):
+                    viewer._drc_selection_restore()
+                    self.assertIsNone(viewer._drc_sel)
+                    self.assertIs(viewer._drc_sels[(0, None)], saved)
+                    key = worker.submit.call_args.args[0]
+                    self.assertTrue(worker.submit.call_args.kwargs["waived"])
+                    viewer._drc_grid_fill(0)
+                    self.assertEqual(viewer._drc_grid_map, [])
+                    if cancelled:
+                        viewer._drc_selection_cancel()
+                        worker.poll.return_value = key, selected, None
+                    else:
+                        worker.poll.return_value = key, None, "recheck failed"
+                    viewer._drc_selection_poll()
+                    self.assertIsNone(viewer._drc_sel)
+                    self.assertIsNone(viewer._drc_current_target())
+                    self.assertIs(viewer._drc_sels[(0, None)], saved)
+                    self.assertEqual(viewer._drc_grid_map, [])
+
+    def test_bulk_review_runs_off_ui_and_preserves_bounded_paging(self):
+        viewer = large_viewer()
+        viewer._drcwin._rules.set_cursor((0,), None, False)
+        selected = self.select_every_error(viewer)
+        viewer._drc_show_sel = True
+        viewer._drc_clusters = None
+        viewer._drc_waived_refresh = Mock()
+        started, release = threading.Event(), threading.Event()
+        main_thread = threading.get_ident()
+        db = viewer._drc
+        db.set_status = Mock(side_effect=AssertionError("individual status write"))
+
+        def bulk(ci, members, value, progress=None):
+            self.assertNotEqual(threading.get_ident(), main_thread)
+            self.assertEqual((ci, value), (0, 1))
+            self.assertIs(members, selected)
+            progress(65536, selected.size)
+            started.set()
+            self.assertTrue(release.wait(3), "test did not release bulk writer")
+            return len(members)
+
+        db.set_status_members = Mock(side_effect=bulk)
+        try:
+            with forbid_foreground_scans(), patch.object(Selection, "__iter__",
+                    side_effect=AssertionError("review enumerated selected IDs on UI")):
+                viewer._drc_set_waived(0, selected, True)
+                self.assertTrue(started.wait(3))
+                viewer._drc_review_poll()
+                viewer._drc_page = 4000
+                viewer._drc_grid_fill(0)
+                viewer._drc_waived_refresh.assert_not_called()
+                viewer._drc_set_waived(0, selected, False)
+                self.assertEqual(db.set_status_members.call_count, 1,
+                                 "accepted concurrent review writers")
+        finally:
+            release.set()
+        deadline = time.monotonic() + 3
+        while viewer._drc_review_job is not None and time.monotonic() < deadline:
+            viewer._drc_review_poll()
+            threading.Event().wait(.002)
+        self.assertIsNone(viewer._drc_review_job)
+        viewer._drc_waived_refresh.assert_called_once_with(
+            0, selected, True, None, bulk=True, clusters_prepared=False)
+        self.assertEqual(viewer._drc_grid_map, list(range(4_000_000, 4_001_000)))
+        db.set_status.assert_not_called()
+
+    def test_async_note_completion_does_not_replace_another_scope_detail(self):
+        for current_rule in (0, 1):
+            for error in (None, "note save failed"):
+                with self.subTest(current_rule=current_rule, error=error):
+                    viewer = large_viewer()
+                    viewer._drc_open = current_rule
+                    viewer._drc_grid_ci = current_rule
+                    viewer._drc_focus = None
+                    viewer._drc_pos = -1
+                    viewer._drc_grid_fill = Mock()
+                    viewer._drc_show_detail = Mock()
+                    selected = Selection.from_indices(10_000_003, [7, 9017])
+                    viewer._drc_review_job = dict(
+                        done=True, db=viewer._drc, ci=0, targets=selected,
+                        operation="note", error=error)
+                    viewer._drc_review_poll()
+                    viewer._drc_show_detail.assert_not_called()
+                    if current_rule == 0:
+                        viewer._drc_grid_fill.assert_called_once_with(0)
+                    else:
+                        viewer._drc_grid_fill.assert_not_called()
+                    self.assertIsNone(viewer._drc_review_job)
 
 
 class LargeRuleProcessTests(unittest.TestCase):
@@ -262,7 +420,8 @@ class LargeRuleProcessTests(unittest.TestCase):
         heartbeats = 0
         acted = False
         def pending():
-            return (viewer._drc_hl_res is None if kind == "query" else
+            return (viewer._drc_selection_key is not None if kind == "selection" else
+                    viewer._drc_hl_res is None if kind == "query" else
                     getattr(viewer, "_drc_%s_busy" % kind))
 
         while pending():
@@ -306,6 +465,29 @@ class LargeRuleProcessTests(unittest.TestCase):
         self.assertEqual(self.viewer._drc_page, 1)
         self.assertEqual(self.viewer._drc_grid_map, list(range(1000, 2000)))
 
+    def test_full_selection_process_keeps_page_callbacks_active_and_returns_every_id(self):
+        from floe import drc_selection, drc_marker_worker
+        viewer = self.viewer
+        viewer._drcwin._rules.set_cursor((0,), None, False)
+        with patch.object(drc_marker_worker, "LARGE_RULE", 1), \
+                patch.object(drc_selection, "select_rect",
+                          side_effect=AssertionError("selection ran in GUI process")):
+            worker = drc_selection.SelectionWorker()
+            self.workers.append(worker)
+            viewer._drc_selection_worker = worker
+            viewer._drc_selection_submit(0, None, None)
+            self._until_ready("selection", lambda: viewer._drc_page_step(1))
+        selected = viewer._drc_sel[1]
+        self.addCleanup(selected._owner.cleanup)
+        self.assertIsInstance(selected.bits, np.memmap)
+        self.assertEqual(len(selected), 20000)
+        self.assertEqual(selected.page(19997, 1000), [19997, 19998, 19999])
+        self.assertEqual(viewer._drc_sel[2], ())
+        self.assertEqual(viewer._drc_page, 1)
+        viewer._drc_show_sel = True
+        viewer._drc_grid_fill(0)
+        self.assertEqual(viewer._drc_grid_map, list(range(1000, 2000)))
+
     def test_cd_process_rule_switch_cancels_obsolete_result(self):
         from floe import drc_delta_worker as workers
         worker = workers.DeltaWorker()
@@ -335,8 +517,16 @@ class LargeRuleProcessTests(unittest.TestCase):
             self._until_ready("marker", lambda: self.viewer._drc_page_step(1))
         result = self.viewer._drc_marker_result
         self.assertIsNotNone(result)
-        self.assertEqual(sum(marker.count for marker in result[1]), 20000)
-        self.assertLessEqual(len(result[1]), 8192)
+        points = result[1]
+        self.assertIsInstance(points, PointMarkers)
+        self.assertEqual(points.visible_count, 20000)
+        self.assertEqual(points.processed_count, 20000)
+        self.assertEqual(points.total_count, 20000)
+        self.assertGreater(points.occupied_count, 0)
+        self.assertLessEqual(points.occupied_count, points.width * points.height)
+        self.assertEqual(len(points.rgba), points.width * points.height * 4)
+        occupied = points.error_ids >= 0
+        self.assertTrue(np.all(points.check_ids[occupied] == 0))
         self.assertEqual(self.viewer._drc_page, 1)
 
     def test_mapped_delta_group_filters_marker_child_without_parent_scans(self):
@@ -365,9 +555,14 @@ class LargeRuleProcessTests(unittest.TestCase):
             self._until_ready("marker")
         result = self.viewer._drc_marker_result
         self.assertIsNotNone(result)
-        self.assertEqual(sum(marker.count for marker in result[1]), group.total)
+        points = result[1]
+        self.assertIsInstance(points, PointMarkers)
+        self.assertEqual(points.visible_count, group.total)
         self.assertLess(group.total, len(self.db.checks[0].errors))
-        self.assertTrue(all(group.contains(marker.ei) for marker in result[1]))
+        occupied = points.error_ids >= 0
+        self.assertEqual(np.count_nonzero(occupied), points.occupied_count)
+        self.assertTrue(np.all(points.check_ids[occupied] == 0))
+        self.assertTrue(all(group.contains(int(ei)) for ei in points.error_ids[occupied]))
         self.assertTrue(all(group.contains(ei) for ei in self.viewer._drc_grid_map))
 
     def test_in_view_query_is_deferred_and_fills_only_bounded_result_page(self):

@@ -11,23 +11,50 @@ MarkerProgress = namedtuple('MarkerProgress', 'markers')
 
 
 class SelectedMembers:
-    """Immutable, bounded selection snapshot implementing the cluster mask."""
+    """Immutable selection/cluster intersection without expanding large sets.
+
+    Membership objects are already snapshots and remain lazy. Small iterable
+    callers keep the historical sorted-ID representation.
+    """
 
     def __init__(self, indices, cluster=None):
         import numpy as np
-        self.indices = np.asarray(sorted(set(
-            ei for ei in indices if cluster is None or cluster.contains(ei))),
-            dtype=np.int64)
+        self._source = indices if hasattr(indices, 'mask') else None
+        self._cluster = cluster
+        if self._source is None:
+            self.indices = np.asarray(sorted(set(indices)), dtype=np.int64)
+            self.indices.flags.writeable = False
 
     def mask(self, start, count):
         import numpy as np
-        out = np.zeros(count, dtype=bool)
-        lo, hi = np.searchsorted(self.indices, [start, start + count])
-        out[self.indices[lo:hi] - start] = True
+        if self._source is not None:
+            out = np.array(self._source.mask(start, count), dtype=bool, copy=True)
+        else:
+            out = np.zeros(count, dtype=bool)
+            lo, hi = np.searchsorted(self.indices, [start, start + count])
+            out[self.indices[lo:hi] - start] = True
+        if self._cluster is not None:
+            out &= self._cluster.mask(start, count)
+        return out
+
+    def contains(self, ei):
+        return bool(self.mask(int(ei), 1)[0])
+
+    def contains_many(self, indices):
+        import numpy as np
+        indices = np.asarray(indices, dtype=np.int64)
+        out = np.zeros(indices.shape, dtype=bool)
+        # Arbitrary input order needs no population-sized mask. Group only
+        # these requested IDs into bounded source-mask chunks.
+        chunks = indices // (1 << 16)
+        for chunk in np.unique(chunks[indices >= 0]):
+            keep = chunks == chunk
+            start = int(chunk) * (1 << 16)
+            out[keep] = self.mask(start, 1 << 16)[indices[keep] - start]
         return out
 
 
-# Larger packed rules run in a spawned process: Python geometry refinement
+# Larger packed rules run in a spawned process: Python center preparation
 # must never contend for the GTK thread's GIL. Small/in-memory fixtures retain
 # the lightweight thread backend.
 LARGE_RULE = 100_000
@@ -60,6 +87,17 @@ def export_members(member, directory, count=None):
         return dict(path=path, offset=int(mapped.offset), dtype=mapped.dtype.str,
                     shape=list(mapped.shape))
 
+    if isinstance(member, SelectedMembers):
+        source = (export_members(member._source, directory, count)
+                  if member._source is not None else
+                  dict(kind='indices', array=array_spec(member.indices)))
+        if member._cluster is None:
+            return source
+        return dict(kind='intersection', parts=[source,
+                    export_members(member._cluster, directory, count)])
+    if hasattr(member, 'bits') and hasattr(member, 'size'):
+        return dict(kind='packed-bits', array=array_spec(member.bits),
+                    size=int(member.size))
     owner = getattr(member, '_owner', None)
     if owner is not None and hasattr(owner, '_row_for_error'):
         return dict(kind='rows', array=array_spec(owner._row_for_error), row=int(member._row))
@@ -84,6 +122,9 @@ class _MappedMembers:
         import numpy as np
         self.kind, self.row = spec['kind'], spec.get('row')
         self.cache_key = json.dumps(spec, sort_keys=True)
+        if self.kind == 'intersection':
+            self.parts = [import_members(part) for part in spec['parts']]
+            return
 
         def mapped(meta):
             shape = tuple(meta['shape'])
@@ -97,9 +138,26 @@ class _MappedMembers:
             self.starts, self.stops = mapped(spec['starts']), mapped(spec['stops'])
         else:
             self.array = mapped(spec['array'])
+            if self.kind == 'packed-bits':
+                self.size = int(spec['size'])
+                if (self.size < 0 or self.array.dtype != np.dtype('uint8') or
+                        self.array.shape != ((self.size + 7) // 8,)):
+                    raise ValueError('invalid packed selection membership')
 
     def contains_many(self, indices):
         import numpy as np
+        indices = np.asarray(indices, dtype=np.int64)
+        if self.kind == 'intersection':
+            out = np.ones(indices.shape, dtype=bool)
+            for part in self.parts:
+                out &= part.contains_many(indices)
+            return out
+        if self.kind == 'packed-bits':
+            out = np.zeros(indices.shape, dtype=bool)
+            valid = (indices >= 0) & (indices < self.size)
+            ids = indices[valid]
+            out[valid] = ((self.array[ids // 8] >> (ids % 8)) & 1) != 0
+            return out
         if self.kind == 'intervals':
             if not len(self.starts):
                 return np.zeros(len(indices), dtype=bool)
@@ -110,7 +168,10 @@ class _MappedMembers:
                 return np.zeros(len(indices), dtype=bool)
             k = np.searchsorted(self.array, indices)
             return (k < len(self.array)) & (self.array[np.minimum(k, len(self.array)-1)] == indices)
-        return self.array[indices] == (self.row if self.kind == 'rows' else 1)
+        out = np.zeros(indices.shape, dtype=bool)
+        valid = (indices >= 0) & (indices < len(self.array))
+        out[valid] = self.array[indices[valid]] == (self.row if self.kind == 'rows' else 1)
+        return out
 
     def contains(self, ei):
         import numpy as np
@@ -118,6 +179,18 @@ class _MappedMembers:
 
     def mask(self, start, count):
         import numpy as np
+        if self.kind == 'intersection':
+            out = np.ones(count, dtype=bool)
+            for part in self.parts:
+                out &= part.mask(start, count)
+            return out
+        if self.kind == 'packed-bits':
+            out = np.zeros(count, dtype=bool)
+            lo, hi = max(0, start), min(self.size, start + count)
+            if hi > lo:
+                bits = np.unpackbits(self.array[lo // 8:(hi + 7) // 8], bitorder='little')
+                out[lo - start:hi - start] = bits[lo % 8:lo % 8 + hi - lo]
+            return out
         if self.kind in ('rows', 'bitmap'):
             out = np.zeros(count, dtype=bool)
             stop = min(start + count, len(self.array))
@@ -150,14 +223,15 @@ def _process_main(connection, generation, native_pid=None):
                     if db is not None:
                         db.close()
                     db = IcePack(path, review=False, review_path=review_path)
-                    index, identity = MarkerIndex(db, spatial=True), current
+                    index, identity = MarkerIndex(db), current
                     index._point_native_pid = native_pid
                 _check = cancelled()
                 if _check:
                     raise MarkerQueryCancelled()
-                members = query.get('members')
-                if members is not None:
-                    query['members'] = {ci: import_members(spec) for ci, spec in members.items()}
+                for name in ('members', 'selected'):
+                    members = query.get(name)
+                    if members is not None:
+                        query[name] = {ci: import_members(spec) for ci, spec in members.items()}
                 if query.pop('progressive', False):
                     def progress(markers):
                         if cancelled():
@@ -278,9 +352,11 @@ class MarkerWorker:
         if self._snapshot_dir is None:
             self._snapshot_dir = tempfile.TemporaryDirectory(prefix='floe-marker-members-')
         query = dict(query)
-        if query.get('members') is not None:
+        for name in ('members', 'selected'):
+            if query.get(name) is None:
+                continue
             snapshots = {}
-            for ci, member in query['members'].items():
+            for ci, member in query[name].items():
                 entry = self._member_specs.get(id(member))
                 if entry is not None and entry[0]() is member:
                     spec = entry[1]
@@ -293,7 +369,7 @@ class MarkerWorker:
                         pass
                 snapshots[ci] = spec
             self._member_specs = {k: v for k, v in self._member_specs.items() if v[0]() is not None}
-            query['members'] = snapshots
+            query[name] = snapshots
         if cancelled():
             raise MarkerQueryCancelled()
         self._pipe.send((generation, db.path, getattr(db, '_analysis_identity', None),

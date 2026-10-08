@@ -39,6 +39,7 @@ import math
 import os
 import struct
 import sys
+import threading
 import time
 
 from . import cachepath
@@ -409,6 +410,23 @@ _ICE2_BLOCK = 64
 # status scan granularity: rank/page jumps read cached per-chunk
 # waived counts and touch at most ONE chunk of status bytes
 _STATUS_CHUNK = 1 << 22
+# A bulk edit never allocates arrays proportional to the rule/selection.
+_STATUS_WRITE_CHUNK = 1 << 16
+
+
+def _pwrite_all(fd, data, offset):
+    """Complete a positional write, including interrupted/short writes."""
+    view = memoryview(data).cast("B")
+    while view:
+        try:
+            written = os.pwrite(fd, view, offset)
+        except InterruptedError:
+            continue
+        if written <= 0 or written > len(view):
+            raise OSError("incomplete status write")
+        offset += written
+        view = view[written:]
+
 
 # colour of the flateyes text annotation a note contributes (yellow,
 # distinct from the red/green review-status stamps)
@@ -578,6 +596,7 @@ class IcePack(object):
                  "_map", "_blk", "_qbox", "_dir_es", "_dir_bs",
                  "_ecnt", "_cbb", "_cache", "_order",
                  "_status", "_status_off", "_wfd",
+                 "_status_lock", "_status_cache_lock", "_status_generation",
                  "_wcount", "_wcount_off", "_wchunk",
                  "_waive_path", "_waive_hdr",
                  "_notes", "_note_of", "_note_next", "_note_path",
@@ -592,6 +611,9 @@ class IcePack(object):
         """
         self._wfd = None
         self._map = None
+        self._status_lock = threading.RLock()
+        self._status_cache_lock = threading.Lock()
+        self._status_generation = 0
         self._review = bool(review)
         try:
             self._load(path, src_path, verify_src, review_path)
@@ -931,13 +953,22 @@ class IcePack(object):
             a = int(self._dir_es[ci])
             wc[ci] = np.count_nonzero(
                 st[a:a + int(self._ecnt[ci])] == STATUS_WAIVED)
-        if self._wfd is None:
-            self._wfd = os.open(self._waive_path, os.O_RDWR)
-        if n:
-            os.pwrite(self._wfd, st.tobytes(), self._status_off)
-        if ck:
-            os.pwrite(self._wfd, wc.tobytes(), self._wcount_off)
-        self._wchunk = {}
+        with self._status_lock:
+            if self._wfd is None:
+                self._wfd = os.open(self._waive_path, os.O_RDWR)
+            with self._status_cache_lock:
+                self._status_generation += 1
+            try:
+                if n:
+                    _pwrite_all(self._wfd, st, self._status_off)
+                if ck:
+                    _pwrite_all(self._wfd, wc, self._wcount_off)
+                    if self._wcount.flags.writeable:
+                        self._wcount[:] = wc
+            finally:
+                with self._status_cache_lock:
+                    self._wchunk.clear()
+                    self._status_generation += 1
         return int(np.count_nonzero(st == STATUS_WAIVED))
 
     def _block(self, bi):
@@ -990,26 +1021,149 @@ class IcePack(object):
         rule's [wcount] waived counter in sync. Raises OSError if
         the store is not writable."""
         self._require_review()
-        gid = int(self._dir_es[ci]) + ei
-        if not 0 <= gid < self.total:
+        if not 0 <= ci < len(self._ecnt) or not 0 <= ei < int(self._ecnt[ci]):
             raise IndexError((ci, ei))
         value = int(value) & 0xFF
-        old = int(self._status[gid])
-        if old == value:
-            return
+        import numpy as np
+        with self._status_lock:
+            gid = int(self._dir_es[ci]) + ei
+            old = int(self._status[gid])
+            if old != value:
+                self._write_status_span(ci, ei, np.array([old], dtype=np.uint8),
+                                        np.array([value], dtype=np.uint8))
+
+    def _write_status_span(self, ci, start, before, after):
+        """Commit one bounded span; callers hold _status_lock.
+
+        A failed write restores this span where possible. Completed earlier
+        spans remain committed. Even if rollback fails, counts are repaired
+        from the actual mapped bytes, never from the intended update.
+        """
+        import numpy as np
+        gid = int(self._dir_es[ci]) + start
+        offset = self._status_off + gid
+        previous = int(self._wcount[ci])
+        old_waived = int(np.count_nonzero(before == STATUS_WAIVED))
+        new_waived = int(np.count_nonzero(after == STATUS_WAIVED))
+        count = previous + new_waived - old_waived
+        counter = struct.pack("<I", count)  # validate before mutating bytes
+        # Compute bounded chunk deltas before taking the publication lock.
+        deltas = []
+        if old_waived != new_waived:
+            stop = start + len(before)
+            for k in range(start // _STATUS_CHUNK,
+                           (stop - 1) // _STATUS_CHUNK + 1):
+                a = max(start, k * _STATUS_CHUNK) - start
+                b = min(stop, (k + 1) * _STATUS_CHUNK) - start
+                deltas.append((k, int(np.count_nonzero(after[a:b] == STATUS_WAIVED))
+                               - int(np.count_nonzero(before[a:b] == STATUS_WAIVED))))
         if self._wfd is None:
             self._wfd = os.open(self._waive_path, os.O_RDWR)
-        os.pwrite(self._wfd, bytes((value,)),
-                  self._status_off + gid)
-        was = old == STATUS_WAIVED
-        now = value == STATUS_WAIVED
-        if was != now:
-            cur = int(self._wcount[ci]) + (1 if now else -1)
-            os.pwrite(self._wfd, struct.pack("<I", max(0, cur)),
-                      self._wcount_off + 4 * ci)
-            ch = self._wchunk.get(ci)
-            if ch is not None:
-                ch[ei // _STATUS_CHUNK] += 1 if now else -1
+        with self._status_cache_lock:
+            self._status_generation += 1  # odd: status bytes may be in flight
+        committed = False
+        try:
+            _pwrite_all(self._wfd, after, offset)
+            if count != previous or self._wcount.flags.writeable:
+                _pwrite_all(self._wfd, counter, self._wcount_off + 4 * ci)
+            # A persistent device error may previously have forced counts
+            # into a private array. Keep this recovery view coherent too.
+            if self._wcount.flags.writeable:
+                self._wcount[ci] = count
+            committed = True
+        except OSError as error:
+            try:
+                _pwrite_all(self._wfd, before, offset)
+            except OSError:
+                pass
+            actual = self._status[gid:gid + len(before)]
+            repaired = previous + int(np.count_nonzero(
+                actual == STATUS_WAIVED)) - old_waived
+            try:
+                _pwrite_all(self._wfd, struct.pack("<I", repaired),
+                            self._wcount_off + 4 * ci)
+            except OSError as repair_error:
+                # The format has separate status/counter sections, so a
+                # permanently failing device cannot be made crash-atomic.
+                # Keep every in-process count reader correct and report
+                # that the on-disk counter still needs repair explicitly.
+                self._wcount = np.array(self._wcount, copy=True)
+                self._wcount[ci] = repaired
+                raise OSError("status write failed; review counter could not "
+                              "be persisted: %s" % repair_error) from error
+            if self._wcount.flags.writeable:
+                self._wcount[ci] = repaired
+            raise
+        finally:
+            with self._status_cache_lock:
+                if committed:
+                    ch = self._wchunk.get(ci)
+                    if ch is not None:
+                        for k, delta in deltas:
+                            ch[k] += delta
+                else:
+                    self._wchunk.pop(ci, None)
+                self._status_generation += 1  # even: safe to publish new counts
+
+    def set_status_members(self, ci, membership, value, *, cancelled=None,
+                           progress=None):
+        """Edit an arbitrarily large selection using bounded vector chunks.
+
+        `membership.mask(start, count)` supplies rule-local booleans; None
+        selects the entire rule. No selected-ID list or geometry is read.
+        Return the number of changed status bytes. `progress(done, total)`
+        reports scanned rule positions (including unselected positions).
+        Cancellation raises InterruptedError between committed chunks;
+        earlier writes remain applied, with their counters up to date.
+
+        Run this method off the UI thread. Concurrent status edits on this
+        object are serialized. The owner must cancel/join its worker before
+        closing the pack. This existing two-section format is not a durable
+        transaction across process crashes or permanent device failures.
+        """
+        self._require_review()
+        import numpy as np
+        if not 0 <= ci < len(self._ecnt):
+            raise IndexError(ci)
+        size = int(self._ecnt[ci])
+        member_size = getattr(membership, "size", size)
+        if member_size != size:
+            raise ValueError("selection size does not match rule")
+        value = int(value) & 0xFF
+        changed = 0
+        es = int(self._dir_es[ci])
+        with self._status_lock:
+            if cancelled is not None and cancelled():
+                raise InterruptedError("status edit cancelled")
+            if getattr(membership, "total", None) == 0:
+                if progress is not None:
+                    progress(size, size)
+                return 0
+            for start in range(0, size, _STATUS_WRITE_CHUNK):
+                if cancelled is not None and cancelled():
+                    raise InterruptedError("status edit cancelled")
+                count = min(_STATUS_WRITE_CHUNK, size - start)
+                mask = (np.ones(count, dtype=bool) if membership is None else
+                        np.asarray(membership.mask(start, count), dtype=bool))
+                if mask.shape != (count,):
+                    raise ValueError("selection mask has incorrect shape")
+                if not np.any(mask):
+                    if progress is not None:
+                        progress(start + count, size)
+                    continue
+                before = np.array(self._status[es + start:es + start + count],
+                                  copy=True)
+                mask = mask & (before != value)
+                positions = np.flatnonzero(mask)
+                if len(positions):
+                    lo, hi = int(positions[0]), int(positions[-1]) + 1
+                    after = before[lo:hi].copy()
+                    after[mask[lo:hi]] = value
+                    self._write_status_span(ci, start + lo, before[lo:hi], after)
+                    changed += len(positions)
+                if progress is not None:
+                    progress(start + count, size)
+        return changed
 
     def status_counts(self, ci):
         """(waived, total) of one rule - O(1) via [wcount]."""
@@ -1027,7 +1181,9 @@ class IcePack(object):
 
     def get_note_gid(self, gid):
         nid = self._note_of.get(gid)
-        return self._notes[nid]["text"] if nid else None
+        # A background batch edit may detach this note between lookups.
+        record = self._notes.get(nid)
+        return record["text"] if record else None
 
     def set_note(self, gids, text):
         """Attach ONE shared note to `gids` (global ids). Each id is
@@ -1254,9 +1410,14 @@ class IcePack(object):
         jumps read these whole-chunk counts and scan at most ONE
         chunk of status bytes - n/p on a 100M-error rule used to
         re-sum status from index 0 (review 2026-08-18)."""
-        got = self._wchunk.get(ci)
-        if got is not None:
-            return got
+        # Never wait for the full bulk-write lock on this UI read path.
+        # A scan that overlaps a writer may serve this transient request,
+        # but must not publish a stale cache after that writer completes.
+        with self._status_cache_lock:
+            got = self._wchunk.get(ci)
+            if got is not None:
+                return got
+            generation = self._status_generation
         import numpy as np
         es = int(self._dir_es[ci])
         n = int(self._ecnt[ci])
@@ -1268,7 +1429,9 @@ class IcePack(object):
             arr[k] = int(
                 (self._status[es + a:es + b]
                  == STATUS_WAIVED).sum())
-        self._wchunk[ci] = arr
+        with self._status_cache_lock:
+            if generation == self._status_generation and generation % 2 == 0:
+                return self._wchunk.setdefault(ci, arr)
         return arr
 
     def status_page(self, ci, waived, start, limit):
