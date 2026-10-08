@@ -15,6 +15,7 @@ mod drcpack;
 mod drcprepare;
 mod drcmeasure;
 mod drcmeasure_math;
+mod drccenters;
 mod svrf;
 mod vfs;
 
@@ -121,6 +122,9 @@ fn main() {
     if args.len() >= 2 && args[1] == "drc-measure" {
         return drcmeasure::drcmeasure_cmd(&args[2..]);
     }
+    if args.len() >= 2 && args[1] == "drc-centers" {
+        return drccenters::drccenters_cmd(&args[2..]);
+    }
     if args.len() >= 3 && args[1] == "drc" {
         return drcice::drc_cmd(&args[2..]);
     }
@@ -157,6 +161,8 @@ fn main() {
              floe-index drc-prepare <results.db|pack.tray> [--svrf RULES_JSON] [--jobs N] [--rule NAME] [--backend auto|rust|python] [--spatial-only|--delta-only]\n       \
              floe-index drc-measure <pack.tray> --rule-index N --plan PATH --out DIR [--jobs N] [--progress PATH]\n       \
              floe-index drc-measure --protocol\n       \
+             floe-index drc-centers <pack.tray> --rule-index N --out PATH [--jobs N] [--ready PATH]\n       \
+             floe-index drc-centers --protocol\n       \
              floe-index svrf <deck> [-o OUT] [--scan] [-D NAME[=VAL]]... [-I DIR]... \
              [--follow-verbatim] [--no-env-switches]  (SVRF rule deck subset -> <deck>.rules.json)"
         );

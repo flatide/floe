@@ -14,6 +14,7 @@ import tempfile
 import time
 import tracemalloc
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -138,6 +139,43 @@ class MarkerTests(unittest.TestCase):
         marker = markers[0]
         with self.assertRaises((AttributeError, TypeError)):
             marker.count = 0
+
+    def test_progressive_group_snapshots_preserve_final_counts_and_grouping(self):
+        # Advance logical time at each bin update, without slow sleep-based
+        # assertions. The real clock only governs publication, never grouping.
+        clock = iter(i * 0.6 for i in range(10000))
+        frames, populations = [], []
+
+        def progress(markers):
+            frames.append(markers)
+            populations.append(sum(marker.count for marker in markers))
+
+        query = dict(bounds_um=(-1, -1, 1000, 1000), width_px=1024,
+                     height_px=768, checks=[3], cell_px=48, declutter=True)
+        baseline = self.index.query(**query)
+        with patch('floe.drc_markers.time.monotonic', side_effect=lambda: next(clock)):
+            result = self.index.query(**query, progress=progress)
+        self.assertEqual(result, baseline)
+        if self.index.spatial:
+            # A prepared tree can contribute the whole overview in one
+            # bounded summary batch; it need not simulate a population scan.
+            self.assertGreaterEqual(len(frames), 1)
+        else:
+            self.assertGreater(len(frames), 1)
+            self.assertLess(populations[0], 1000000)
+        self.assertEqual(populations, sorted(populations))
+        self.assertEqual(populations, [sum(m.count for m in frame) for frame in frames],
+                         'subsequent scans mutated a published snapshot')
+        self.assertEqual(sum(m.count for m in result), 1000000)
+        self.assertTrue(all(frame is not result for frame in frames))
+
+    def test_short_group_query_skips_intermediate_frame(self):
+        frames = []
+        with patch('floe.drc_markers.time.monotonic', return_value=0.):
+            result = self.index.query((-1, -1, 100, 50), 400, 200,
+                                       checks=[0], progress=frames.append)
+        self.assertEqual(frames, [])
+        self.assertEqual(sum(m.count for m in result), 5000)
 
     def test_coarse_cluster_bbox_contains_every_member_without_decode(self):
         # The arbitrary members do not touch the rule bbox extremes. This

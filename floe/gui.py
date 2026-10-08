@@ -1914,6 +1914,8 @@ class Viewer:
         self._drc_zoom_lock = False  # a user zoom is being kept this session
         self._drc_hits = []         # frame's painted markers:
                                     # (px, py, ci, ei) for hover/pick
+        self._drc_point_hits = None # ungrouped pixel map, never an error list
+        self._drc_ungrouped = False
         self._drc_tip = None        # last tooltip text set
         self.overlay_mode = 0       # Tab cycles (user call
         # 2026-08-21): 0 = everything shown, 1 = OTHER errors
@@ -3310,6 +3312,7 @@ class Viewer:
                       off_x, off_y, scale, scale, interp, 255)
 
     def _draw_overlays(self, disp, obox, ospp):
+        self._drc_point_hits = None
         if self.overlay_mode != 0:
             self._drc_group_reset()
         self._drc_marker_view = (tuple(obox), ospp,
@@ -5024,6 +5027,9 @@ class Viewer:
             self._set_mono(not self._mono)
         elif name == "e":
             self._esel_toggle()
+        elif name in ("u", "U") and not (ev.state & (
+                Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.MOD1_MASK)):
+            self._drc_toggle_grouping()
         elif name == "w":
             self._drc_waive_key()
         elif name == "n":
@@ -5881,6 +5887,8 @@ class Viewer:
         item(m, "open results .db…", self._drc_open_dialog)
         item(m, "load SVRF rules…", self._drc_rules_dialog)
         item(m, "load clusters…", self._drc_clusters_dialog)
+        check(m, "ungroup error markers\tU", self._drc_toggle_grouping,
+              lambda: getattr(self, "_drc_ungrouped", False))
         sep(m)
         item(m, "next error\t.", lambda: self._drc_step(1))
         item(m, "previous error\t,", lambda: self._drc_step(-1))
@@ -7879,12 +7887,25 @@ class Viewer:
             rules = " · svrf %d/%d" % self._drc_rmatch
         if self._drc_clusters is not None:
             rules += " · clusters %d rules" % len(self._drc_clusters.rules)
-        if getattr(self, "_drc_marker_busy", False):
+        if getattr(self, "_drc_ungrouped", False):
+            rules += " · ungrouped (U)"
+        busy = getattr(self, "_drc_marker_busy", False)
+        if busy:
             rules += " · markers…"
-        elif getattr(self, "_drc_marker_result", None) is not None:
+        if getattr(self, "_drc_marker_result", None) is not None:
             markers = self._drc_marker_result[1]
+            from .drc_points import PointMarkers
+            if isinstance(markers, PointMarkers):
+                count, shown = markers.visible_count, markers.occupied_count
+                if busy and markers.total_count:
+                    rules += " %d / %d processed" % (
+                        markers.processed_count, markers.total_count)
+            else:
+                count, shown = sum(m.count for m in markers), len(markers)
             rules += " · %d errors / %d markers in view" % (
-                sum(m.count for m in markers), len(markers))
+                count, shown)
+            if busy:
+                rules += " (partial)"
         win._info.set_text(
             "%s [%s] — cell %s · %d/%d rules · %d errors%s"
             % (os.path.basename(db.path), backend, db.cell,
@@ -9435,6 +9456,16 @@ class Viewer:
             "layer visibility restored (%d on)" % len(saved))
         self.redraw(immediate=True)
 
+    def _drc_toggle_grouping(self):
+        """U: full-scope individual circles / existing aggregate rectangles."""
+        self._drc_ungrouped = not getattr(self, "_drc_ungrouped", False)
+        self._drc_marker_invalidate()
+        self._drc_info_refresh()
+        self._set_live_status("DRC markers: %s (U toggles)" % (
+            "individual circles; coincident centers drawn once"
+            if self._drc_ungrouped else "grouped rectangles"))
+        self._display()
+
     def _drc_marker_invalidate(self, drop_worker=False):
         """Cancel stale scope/status work, including same-count status swaps."""
         self._drc_marker_revision = getattr(self, "_drc_marker_revision", 0) + 1
@@ -9444,6 +9475,7 @@ class Viewer:
         self._drc_marker_busy = False
         self._drc_hits = []
         self._drc_group_hits = []
+        self._drc_point_hits = None
         self._drc_group_reset()
         self._drc_hl_key = None
         self._drc_hl_res = None
@@ -9480,14 +9512,16 @@ class Viewer:
                   (obox[0] + width * ospp) * self.dbu,
                   obox[3] * self.dbu)
         active_members = self._drc_active_members()
+        ungrouped = getattr(self, "_drc_ungrouped", False)
         key = (id(db), ci, active_members, self._drc_wfilter,
                getattr(self, "_drc_marker_revision", 0), selected,
-               bounds, width, height)
+               bounds, width, height, ungrouped)
         if key != getattr(self, "_drc_marker_key", None):
             self._drc_group_reset()
             self._drc_marker_key = key
             self._drc_marker_result = None
             self._drc_marker_overlay = None
+            self._drc_point_hits = None
             self._drc_marker_busy = True
             worker = getattr(self, "_drc_marker_worker", None)
             if worker is None:
@@ -9497,6 +9531,8 @@ class Viewer:
             query = dict(bounds_um=bounds, width_px=width, height_px=height,
                          checks=(ci,), cell_px=marker_cell_px(width, height),
                          declutter=True,
+                         ungrouped=ungrouped,
+                         progressive=True,
                          members=({ci: membership}
                                   if membership is not None else None),
                          waived=(None if self._drc_wfilter == "all" else
@@ -9516,10 +9552,21 @@ class Viewer:
         key, markers, error = reply
         if key != self._drc_marker_key:
             return
-        self._drc_marker_busy = False
+        from .drc_marker_worker import MarkerProgress
+        partial = isinstance(markers, MarkerProgress)
+        self._drc_marker_busy = partial and error is None
         if error is not None:
+            # A preview is never presented as a successfully completed scope.
+            self._drc_marker_result = None
+            self._drc_marker_overlay = None
+            self._drc_point_hits = None
+            self._drc_hits = []
+            self._drc_group_hits = []
+            self._drc_group_reset()
             self._set_live_status("DRC markers failed: %s" % error)
         else:
+            if partial:
+                markers = markers.markers
             self._drc_marker_result = (key, markers)
             self._drc_marker_overlay = None
         self._drc_info_refresh()
@@ -9527,8 +9574,25 @@ class Viewer:
 
     def _drc_stamp_markers(self, disp, obox, ospp):
         """Cache one transparent marker layer; repaint costs one composite."""
+        from .drc_points import PointMarkers
         width, height = disp.get_width(), disp.get_height()
         markers = self._drc_marker_request(obox, ospp, width, height)
+        self._drc_point_hits = None
+        if isinstance(markers, PointMarkers):
+            # Background work has already rasterized every visible center.
+            # One image composite and a bounded pixel hit map replace millions
+            # of Python marker objects and individual GTK drawing operations.
+            key = self._drc_marker_key
+            cached = getattr(self, "_drc_marker_overlay", None)
+            if cached is None or cached[0] != key:
+                layer = GdkPixbuf.Pixbuf.new_from_bytes(
+                    GLib.Bytes.new(markers.rgba), GdkPixbuf.Colorspace.RGB,
+                    True, 8, width, height, width * 4)
+                cached = self._drc_marker_overlay = (key, layer)
+            cached[1].composite(disp, 0, 0, width, height, 0, 0, 1, 1,
+                                GdkPixbuf.InterpType.NEAREST, 255)
+            self._drc_point_hits = markers
+            return
         if not markers:
             return
         key = self._drc_marker_key
@@ -10301,6 +10365,21 @@ class Viewer:
             if d <= r * r and d < bd:
                 bd = d
                 best = (ci, ei)
+        points = getattr(self, "_drc_point_hits", None)
+        if points is not None:
+            # At most (2r+1)^2 cells even for a hundred million errors.
+            # Focus/gold hits above retain priority at equal distances.
+            x0, x1 = max(0, math.ceil(x - r)), min(points.width, math.floor(x + r) + 1)
+            y0, y1 = max(0, math.ceil(y - r)), min(points.height, math.floor(y + r) + 1)
+            for hy in range(y0, y1):
+                for hx in range(x0, x1):
+                    ei = int(points.error_ids[hy, hx])
+                    if ei < 0:
+                        continue
+                    d = (hx - x) ** 2 + (hy - y) ** 2
+                    if d <= r * r and d < bd:
+                        bd = d
+                        best = (int(points.check_ids[hy, hx]), ei)
         return best
 
     def _drc_pick(self, ci, ei):

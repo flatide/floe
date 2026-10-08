@@ -1,8 +1,13 @@
 """Latest-view-only marker queries; GTK never waits for a dense DRC scan."""
 
+import atexit
+from collections import namedtuple
 import threading
 
 from .drc_markers import MarkerIndex, MarkerQueryCancelled
+
+
+MarkerProgress = namedtuple('MarkerProgress', 'markers')
 
 
 class SelectedMembers:
@@ -126,7 +131,7 @@ def import_members(spec):
     return None if spec is None else _MappedMembers(spec)
 
 
-def _process_main(connection, generation):
+def _process_main(connection, generation, native_pid=None):
     from .drc import IcePack
     from .drc_analysis import pack_identity
     db = index = identity = None
@@ -146,18 +151,29 @@ def _process_main(connection, generation):
                         db.close()
                     db = IcePack(path, review=False, review_path=review_path)
                     index, identity = MarkerIndex(db, spatial=True), current
+                    index._point_native_pid = native_pid
                 _check = cancelled()
                 if _check:
                     raise MarkerQueryCancelled()
                 members = query.get('members')
                 if members is not None:
                     query['members'] = {ci: import_members(spec) for ci, spec in members.items()}
+                if query.pop('progressive', False):
+                    def progress(markers):
+                        if cancelled():
+                            raise MarkerQueryCancelled()
+                        connection.send((token, MarkerProgress(markers), None))
+                    query['progress'] = progress
                 markers = index.query(cancelled=cancelled, **query)
                 connection.send((token, markers, None))
             except MarkerQueryCancelled:
                 connection.send((token, None, None))
             except Exception as exc:
                 connection.send((token, None, str(exc)))
+            finally:
+                # send() has serialized the frame; the idle child must not
+                # retain a whole pixel raster until another query completes.
+                markers = None
     except (EOFError, BrokenPipeError, OSError):
         pass
     finally:
@@ -181,11 +197,13 @@ class MarkerWorker:
         self._result = None
         self._closed = False
         self._process = self._pipe = self._process_generation = None
+        self._process_native_pid = None
         self._snapshot_dir = None
         self._member_specs = {}
         self._thread = threading.Thread(target=self._run,
                                         name="drc-markers", daemon=True)
         self._thread.start()
+        atexit.register(self._shutdown)
 
     def submit(self, key, db, query):
         with self._condition:
@@ -221,6 +239,13 @@ class MarkerWorker:
             self._result = None
             self._condition.notify()
 
+    def _shutdown(self):
+        """Give native center decoding time to cancel before daemon teardown."""
+        self.close()
+        if threading.current_thread() is not self._thread:
+            self._thread.join(timeout=2)
+        self._stop_process()
+
     def _large(self, db, query):
         from .drc import IcePack
         if not isinstance(db, IcePack):
@@ -230,7 +255,7 @@ class MarkerWorker:
                    for ci in (range(len(db.checks)) if checks is None else checks)
                    if 0 <= ci < len(db.checks))
 
-    def _process_query(self, generation, db, query, cancelled):
+    def _process_query(self, generation, db, query, cancelled, progress=None):
         import multiprocessing
         import tempfile
         import weakref
@@ -239,11 +264,17 @@ class MarkerWorker:
             context = multiprocessing.get_context('spawn')
             parent, child = context.Pipe()
             shared = context.Value('q', self._generation)
-            process = context.Process(target=_process_main, args=(child, shared),
+            native_pid = context.Value('q', 0)
+            process = context.Process(target=_process_main, args=(child, shared, native_pid),
                                       name='drc-markers-process', daemon=True)
             self._pipe, self._process_generation, self._process = parent, shared, process
+            self._process_native_pid = native_pid
             process.start()
             child.close()
+            # multiprocessing installs its daemon teardown on first import.
+            # Run our cooperative/native cleanup before that parent handler.
+            atexit.unregister(self._shutdown)
+            atexit.register(self._shutdown)
         if self._snapshot_dir is None:
             self._snapshot_dir = tempfile.TemporaryDirectory(prefix='floe-marker-members-')
         query = dict(query)
@@ -271,6 +302,13 @@ class MarkerWorker:
         while True:
             if self._pipe.poll(0.05):
                 token, result, error = self._pipe.recv()
+                if isinstance(result, MarkerProgress):
+                    # Drain superseded jobs through their final reply before
+                    # sending another query on the same pipe. Old partials
+                    # must not be mistaken for the next view's completion.
+                    if not cancelled() and token == generation and progress is not None:
+                        progress(result.markers)
+                    continue
                 if cancelled() or token != generation:
                     raise MarkerQueryCancelled()
                 if error is not None:
@@ -290,6 +328,15 @@ class MarkerWorker:
             # sending the newest request, preserving one in-flight job.
 
     def _stop_process(self):
+        native_pid, self._process_native_pid = self._process_native_pid, None
+        child_pid = native_pid.value if native_pid is not None else 0
+        if child_pid:
+            import os
+            import signal
+            try:
+                os.kill(child_pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
         process, self._process = self._process, None
         if process is not None:
             if process.is_alive():
@@ -315,6 +362,7 @@ class MarkerWorker:
                     self._stop_process()
                     if self._snapshot_dir is not None:
                         self._snapshot_dir.cleanup()
+                    atexit.unregister(self._shutdown)
                     return
                 generation, key, db, query = self._pending
                 self._pending = None
@@ -322,14 +370,23 @@ class MarkerWorker:
             def cancelled():
                 return self._closed or generation != self._generation
 
+            def progress(markers):
+                with self._condition:
+                    if not cancelled():
+                        # One latest snapshot slot; never queue old frames
+                        # while GTK is busy. Final publication replaces this.
+                        self._result = (key, MarkerProgress(markers), None)
+
             result, error = None, None
             try:
                 if self._large(db, query):
-                    result = self._process_query(generation, db, query, cancelled)
+                    result = self._process_query(generation, db, query, cancelled, progress)
                 else:
                     if db is not indexed_db:
                         index = MarkerIndex(db)
                         indexed_db = db
+                    if query.pop('progressive', False):
+                        query['progress'] = progress
                     result = index.query(cancelled=cancelled, **query)
             except MarkerQueryCancelled:
                 continue

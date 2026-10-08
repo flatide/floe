@@ -8,6 +8,7 @@ bboxes with a byte limit, independently of IcePack's DrcError cache.
 """
 
 import math
+import time
 from collections import OrderedDict, namedtuple
 
 import numpy as np
@@ -62,6 +63,7 @@ class _Bins:
         self.ci = np.full(size, -1, dtype=np.int64)
         self.ei = np.full(size, -1, dtype=np.int64)
         self.approximate = np.zeros(size, dtype=bool)
+        self.progress = None
 
     def add(self, ci, indices, boxes, waived, approximate=False):
         if not len(indices):
@@ -91,6 +93,8 @@ class _Bins:
             np.maximum.at(self.bbox[:, col], keys, boxes[:, col])
         if approximate:
             self.approximate[occupied] = True
+        if self.progress is not None:
+            self.progress()
 
 
     def add_aggregates(self, ci, indices, boxes, counts, waived, centers):
@@ -115,6 +119,8 @@ class _Bins:
         for col in (2, 3):
             np.maximum.at(self.bbox[:, col], keys, boxes[:, col])
         self.approximate[occupied] = True
+        if self.progress is not None:
+            self.progress()
 
 
 class MarkerIndex:
@@ -341,7 +347,7 @@ class MarkerIndex:
 
     def query(self, bounds_um, width_px, height_px, checks=None,
               members=None, waived=None, cell_px=16, cancelled=None,
-              declutter=False):
+              declutter=False, ungrouped=False, progress=None):
         """Return at most 8192 immutable ``Marker`` values.
 
         Every selected error whose bbox intersects the view contributes
@@ -355,7 +361,13 @@ class MarkerIndex:
         ``declutter`` additionally merges only these bounded summaries to
         limit screen coverage and separate neighboring markers.  Its merged
         centers are approximate, while counts and bbox unions are retained.
+        ``ungrouped`` instead returns a bounded ``PointMarkers`` raster from
+        exact centers, with duplicate screen centers represented only once.
         """
+        if ungrouped:
+            from .drc_points import query_points
+            return query_points(self, bounds_um, width_px, height_px, checks,
+                                members, waived, cancelled, progress=progress)
         _check_cancelled(cancelled)
         bounds = tuple(float(v) for v in bounds_um)
         if len(bounds) != 4 or not all(math.isfinite(v) for v in bounds):
@@ -367,6 +379,21 @@ class MarkerIndex:
         if not all(math.isfinite(v) for v in (width, height, cell_px)):
             raise ValueError("marker screen dimensions must be finite")
         bins = _Bins(bounds, width, height, cell_px)
+        if progress is not None:
+            last_preview = time.monotonic()
+
+            def preview():
+                nonlocal last_preview
+                now = time.monotonic()
+                if now - last_preview >= 0.5:
+                    last_preview = now
+                    _check_cancelled(cancelled)
+                    result = self._markers_from_bins(
+                        bins, bounds, width, height, cancelled, declutter)
+                    _check_cancelled(cancelled)
+                    progress(result)
+
+            bins.progress = preview
         db = self.db
         selected = (range(len(db.checks)) if checks is None
                     else sorted(set(int(ci) for ci in checks)))
@@ -457,6 +484,12 @@ class MarkerIndex:
                     boxes = self._exact_boxes(ci, indices, cancelled)
                     hit = _intersects(boxes, bounds)
                     bins.add(ci, indices[hit], boxes[hit], status[keep][hit])
+        return self._markers_from_bins(bins, bounds, width, height,
+                                       cancelled, declutter)
+
+    def _markers_from_bins(self, bins, bounds, width, height, cancelled,
+                           declutter):
+        """Independent immutable snapshot; reading bins never changes grouping."""
         out = []
         for k in np.flatnonzero(bins.count):
             _check_cancelled(cancelled)

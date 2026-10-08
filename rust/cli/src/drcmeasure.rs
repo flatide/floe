@@ -35,7 +35,7 @@ fn u32_at(data: &[u8], offset: usize) -> Result<u32, String> {
 fn u64_at(data: &[u8], offset: usize) -> Result<u64, String> {
     Ok(u64::from_le_bytes(bytes(data, offset)?))
 }
-fn size(value: u64) -> Result<usize, String> {
+pub(crate) fn size(value: u64) -> Result<usize, String> {
     usize::try_from(value).map_err(|_| "pack is too large for this host".into())
 }
 fn product(a: u64, b: u64) -> Result<u64, String> {
@@ -145,7 +145,7 @@ fn parse_plan(data: &[u8]) -> Result<Plan, String> {
     })
 }
 
-struct Pack<'a> {
+pub(crate) struct Pack<'a> {
     data: &'a [u8],
     precision: f64,
     blob_start: usize,
@@ -153,16 +153,16 @@ struct Pack<'a> {
     block_table: usize,
     block_total: usize,
     block_start: usize,
-    block_count: usize,
-    errors: usize,
+    pub(crate) block_count: usize,
+    pub(crate) errors: usize,
 }
 impl<'a> Pack<'a> {
-    fn parse(data: &'a [u8], rule: usize) -> Result<Self, String> {
+    pub(crate) fn parse(data: &'a [u8], rule: usize) -> Result<Self, String> {
         if data.len() < HEADER + FOOTER {
             return Err("truncated DRC pack".into());
         }
         if data.get(..8) != Some(MAGIC.as_slice()) || u32_at(data, 8)? != 4 {
-            return Err("drc-measure requires a version 4 DRC pack".into());
+            return Err("native DRC preprocessing requires a version 4 DRC pack".into());
         }
         if u32_at(data, 12)? != 1 {
             return Err("unsupported DRC pack flags".into());
@@ -281,7 +281,7 @@ impl<'a> Pack<'a> {
         Ok(pack)
     }
 
-    fn block(&self, relative: usize) -> Result<(&'a [u8], usize), String> {
+    pub(crate) fn block(&self, relative: usize) -> Result<(&'a [u8], usize), String> {
         if relative >= self.block_count {
             return Err("block index out of range".into());
         }
@@ -312,7 +312,7 @@ impl<'a> Pack<'a> {
     }
 }
 
-fn varint(data: &[u8], pos: &mut usize) -> Result<u64, String> {
+pub(crate) fn varint(data: &[u8], pos: &mut usize) -> Result<u64, String> {
     let mut value = 0u64;
     for byte_index in 0..10 {
         let byte = *data.get(*pos).ok_or("truncated coordinate varint")?;
@@ -330,7 +330,7 @@ fn varint(data: &[u8], pos: &mut usize) -> Result<u64, String> {
 fn unzz(value: u64) -> i64 {
     ((value >> 1) as i64) ^ -((value & 1) as i64)
 }
-fn add_coord(value: i64, delta: u64) -> Result<i64, String> {
+pub(crate) fn add_coord(value: i64, delta: u64) -> Result<i64, String> {
     value
         .checked_add(unzz(delta))
         .ok_or_else(|| "coordinate delta overflow".into())
@@ -625,9 +625,9 @@ pub fn drcmeasure_cmd(args: &[String]) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
-    fn fixture(n: usize) -> Vec<u8> {
+    pub(crate) fn fixture(n: usize) -> Vec<u8> {
         let mut data = MAGIC.to_vec();
         data.extend_from_slice(&4u32.to_le_bytes());
         data.extend_from_slice(&1u32.to_le_bytes());

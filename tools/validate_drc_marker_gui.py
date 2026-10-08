@@ -13,6 +13,7 @@ import threading
 import time
 import unittest
 import weakref
+import numpy as np
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -21,6 +22,7 @@ from floe import drc, gui  # noqa: E402
 from floe import drc_marker_worker as worker_mod  # noqa: E402
 from floe.drc_marker_style import aggregate_radius, circle_rgba, marker_cell_px  # noqa: E402
 from floe.drc_markers import Marker, MarkerQueryCancelled  # noqa: E402
+from floe.drc_points import PointMarkers  # noqa: E402
 
 
 def viewer_fixture():
@@ -52,6 +54,129 @@ def viewer_fixture():
     viewer.mode = "normal"
     viewer.overlay_mode = 0
     return viewer
+
+
+class UngroupedViewerTests(unittest.TestCase):
+    @staticmethod
+    def points(width=100, height=100):
+        error_ids = np.full((height, width), -1, dtype=np.int64)
+        check_ids = np.full((height, width), -1, dtype=np.int32)
+        error_ids[20, 30], check_ids[20, 30] = 15000, 0
+        error_ids[40, 60], check_ids[40, 60] = 90000000, 2
+        return PointMarkers(width, height, bytes(width * height * 4),
+                            error_ids, check_ids, 100000000, 2)
+
+    def test_toggle_cancels_pending_query_without_changing_list_scope(self):
+        viewer = viewer_fixture()
+        viewer._drc_marker_worker = Mock()
+        viewer._drc_cluster = scope = object()
+        viewer._drc_page = 27
+        viewer._drc_marker_result = ('old', [])
+        viewer._drc_marker_overlay = object()
+        viewer._drc_point_hits = self.points()
+        viewer._drc_group_selected = object()
+        viewer._drc_toggle_grouping()
+        self.assertTrue(viewer._drc_ungrouped)
+        self.assertIsNone(viewer._drc_marker_result)
+        self.assertIsNone(viewer._drc_marker_overlay)
+        self.assertIsNone(viewer._drc_point_hits)
+        self.assertIsNone(viewer._drc_group_selected)
+        self.assertIs(viewer._drc_cluster, scope)
+        self.assertEqual(viewer._drc_page, 27)
+        viewer._drc_grid_fill.assert_not_called()
+        viewer._drc_marker_worker.cancel.assert_called_once()
+        viewer._drc_toggle_grouping()
+        self.assertFalse(viewer._drc_ungrouped)
+
+    def test_keyboard_u_preserves_typing_and_modifier_chords(self):
+        viewer = viewer_fixture()
+        viewer._gdlg = None
+        viewer.window = Mock()
+        viewer.window.get_focus.return_value = None
+        viewer._drc_toggle_grouping = Mock()
+        viewer._command_key = Mock()
+        entry = type('Entry', (), {})
+        gdk = SimpleNamespace(ModifierType=SimpleNamespace(
+            CONTROL_MASK=4, SHIFT_MASK=1, MOD1_MASK=8))
+        with patch.object(gui, 'Gtk', SimpleNamespace(Entry=entry)), patch.object(gui, 'Gdk', gdk):
+            for name, state in (('u', 0), ('U', 1)):
+                viewer._command_key.return_value = name
+                self.assertTrue(viewer._on_key(None, SimpleNamespace(state=state)))
+            self.assertEqual(viewer._drc_toggle_grouping.call_count, 2)
+            for state in (4, 8):
+                self.assertFalse(viewer._on_key(None, SimpleNamespace(state=state)))
+            viewer.window.get_focus.return_value = entry()
+            self.assertFalse(viewer._on_key(None, SimpleNamespace(state=0)))
+            self.assertEqual(viewer._drc_toggle_grouping.call_count, 2)
+
+    def test_mode_is_query_identity_and_discards_old_group_reply(self):
+        viewer = viewer_fixture()
+        viewer._drc = object()
+        viewer._drc_marker_worker = Mock()
+        viewer._drc_marker_request((0, 0, 1000, 1000), 10, 100, 100)
+        old_key, _, old_query = viewer._drc_marker_worker.submit.call_args.args
+        self.assertFalse(old_query['ungrouped'])
+        viewer._drc_toggle_grouping()
+        viewer._drc_marker_request((0, 0, 1000, 1000), 10, 100, 100)
+        key, _, query = viewer._drc_marker_worker.submit.call_args.args
+        self.assertNotEqual(key, old_key)
+        self.assertTrue(query['ungrouped'])
+        self.assertEqual(query['checks'], (0,))
+        self.assertNotIn('cap', query)
+        viewer._drc_marker_worker.poll.return_value = (old_key, [], None)
+        viewer._drc_marker_poll()
+        self.assertIsNone(viewer._drc_marker_result)
+
+    def test_point_layer_composites_once_without_per_marker_gui_stamping(self):
+        viewer = viewer_fixture()
+        points = self.points()
+        viewer._drc_marker_key = ('individual',)
+        viewer._drc_marker_request = Mock(return_value=points)
+        layer = Mock()
+        make = Mock(return_value=layer)
+        pixbuf = SimpleNamespace(Pixbuf=SimpleNamespace(new_from_bytes=make),
+                                 Colorspace=SimpleNamespace(RGB=0),
+                                 InterpType=SimpleNamespace(NEAREST=0))
+        disp = Mock()
+        disp.get_width.return_value = disp.get_height.return_value = 100
+        with patch.object(gui, 'GdkPixbuf', pixbuf), \
+                patch.object(gui, 'GLib', SimpleNamespace(Bytes=SimpleNamespace(new=lambda b: b))), \
+                patch.object(gui, 'stamp_drc_circle') as circle:
+            viewer._drc_stamp_markers(disp, (0, 0, 1000, 1000), 10)
+            viewer._drc_stamp_markers(disp, (0, 0, 1000, 1000), 10)
+        make.assert_called_once()
+        self.assertEqual(layer.composite.call_count, 2)
+        circle.assert_not_called()
+        self.assertIs(viewer._drc_point_hits, points)
+        self.assertEqual(viewer._drc_hits, [])
+        self.assertEqual(viewer._drc_group_hits, [])
+
+    def test_point_picking_is_local_and_focus_retains_priority(self):
+        viewer = viewer_fixture()
+        viewer._drc_point_hits = self.points()
+        self.assertEqual(viewer._drc_hit_at(30, 20), (0, 15000))
+        self.assertEqual(viewer._drc_hit_at(65, 40), (2, 90000000))
+        self.assertIsNone(viewer._drc_hit_at(67, 40))
+        self.assertIsNone(viewer._drc_hit_at(-100, -100))
+        viewer._drc_hits = [(30, 20, 0, 42)]
+        self.assertEqual(viewer._drc_hit_at(30, 20), (0, 42))
+        viewer.overlay_mode = 2
+        viewer._zoomdrag = None
+        viewer._draw_overlays(Mock(), (0, 0, 1000, 1000), 10)
+        self.assertIsNone(viewer._drc_hit_at(30, 20))
+
+    def test_point_info_uses_population_and_deduplicated_count(self):
+        viewer = viewer_fixture()
+        viewer._drcwin = SimpleNamespace(_info=Mock())
+        viewer._drc = SimpleNamespace(path='points.db', cell='MAIN', checks=[object()], total=100000000)
+        viewer._drc_rmeta = viewer._drc_clusters = None
+        viewer._drc_shown = 1
+        viewer._drc_ungrouped = True
+        viewer._drc_marker_result = ('points', self.points())
+        gui.Viewer._drc_info_refresh(viewer)
+        text = viewer._drcwin._info.set_text.call_args.args[0]
+        self.assertIn('ungrouped (U)', text)
+        self.assertIn('100000000 errors / 2 markers in view', text)
 
 
 class MarkerCircleStyleTests(unittest.TestCase):
@@ -256,6 +381,145 @@ class MarkerViewerTests(unittest.TestCase):
         self.assertNotIn("cap", query)
         self.assertTrue(query["declutter"], "viewer omitted the worker coverage budget")
         self.assertEqual(query["cell_px"], marker_cell_px(100, 100))
+
+    @staticmethod
+    def progress_points(processed, total=100000000, occupied=2):
+        points = UngroupedViewerTests.points()
+        return PointMarkers(points.width, points.height, points.rgba,
+                            points.error_ids, points.check_ids,
+                            min(processed, 1234567), occupied,
+                            processed_count=processed, total_count=total)
+
+    def test_point_progress_fields_preserve_seven_argument_constructor(self):
+        points = UngroupedViewerTests.points()
+        self.assertEqual((points.processed_count, points.total_count), (0, 0))
+
+    def test_partial_frames_repaint_same_key_until_final_and_keep_busy(self):
+        viewer = self.viewer
+        viewer._drc_ungrouped = True
+        self.request()
+        self.assertTrue(viewer._drc_marker_worker.submit.call_args.args[2]["progressive"])
+        key = viewer._drc_marker_key
+        frames = [self.progress_points(1000000), self.progress_points(27000000),
+                  self.progress_points(100000000)]
+        layers = [Mock(), Mock(), Mock()]
+        create = Mock(side_effect=layers)
+        pixbuf = SimpleNamespace(Pixbuf=SimpleNamespace(new_from_bytes=create),
+                                 Colorspace=SimpleNamespace(RGB=0),
+                                 InterpType=SimpleNamespace(NEAREST=0))
+        disp = Mock()
+        disp.get_width.return_value = disp.get_height.return_value = 100
+        viewer._display.side_effect = lambda: viewer._drc_stamp_markers(
+            disp, self.bounds, 10)
+        with patch.object(gui, "GdkPixbuf", pixbuf), patch.object(
+                gui, "GLib", SimpleNamespace(Bytes=SimpleNamespace(new=lambda value: value))):
+            for number, frame in enumerate(frames):
+                partial = number < 2
+                payload = worker_mod.MarkerProgress(frame) if partial else frame
+                viewer._drc_marker_worker.poll.return_value = key, payload, None
+                viewer._drc_marker_poll()
+                self.assertEqual(viewer._drc_marker_busy, partial)
+                self.assertIs(viewer._drc_marker_result[1], frame)
+                self.assertIs(viewer._drc_point_hits, frame)
+                self.assertEqual(viewer._drc_marker_key, key)
+                self.assertIs(viewer._drc_marker_overlay[1], layers[number])
+                self.assertEqual(create.call_count, number + 1,
+                                 "same-key progress reused an earlier raster")
+        viewer._drc_marker_worker.submit.assert_called_once()
+        self.assertEqual(viewer._display.call_count, 3)
+        self.assertEqual(viewer._drc_info_refresh.call_count, 4)
+
+    def test_grouped_partial_list_is_drawable_without_finishing_query(self):
+        self.request()
+        key = self.viewer._drc_marker_key
+        markers = [Marker(0, 15, 0.4, 0.7, 500, 0,
+                          (0.3, 0.6, 0.5, 0.8), True)]
+        self.viewer._drc_marker_overlay = object()
+        self.viewer._drc_marker_worker.poll.return_value = (
+            key, worker_mod.MarkerProgress(markers), None)
+        self.viewer._drc_marker_poll()
+        self.assertTrue(self.viewer._drc_marker_busy)
+        self.assertIsNone(self.viewer._drc_marker_overlay)
+        self.assertIs(self.request(), markers)
+        self.viewer._display.assert_called_once()
+
+    def test_partial_info_shows_processed_population_and_current_marker_count(self):
+        viewer = self.viewer
+        viewer._drcwin = SimpleNamespace(_info=Mock())
+        viewer._drc.path, viewer._drc.cell, viewer._drc.total = "progress.db", "MAIN", 100000000
+        viewer._drc_rmeta = viewer._drc_clusters = None
+        viewer._drc_shown = 1
+        viewer._drc_ungrouped = True
+        viewer._drc_marker_busy = True
+        viewer._drc_marker_result = ("progress", self.progress_points(27000000, occupied=17))
+        gui.Viewer._drc_info_refresh(viewer)
+        text = viewer._drcwin._info.set_text.call_args.args[0]
+        compact = text.replace(",", "").replace(" ", "")
+        self.assertIn("27000000/100000000", compact)
+        self.assertIn("17 markers", text)
+        self.assertTrue(viewer._drc_marker_busy,
+                        "showing partial counts must not imply completion")
+
+    def test_error_after_partial_clears_raster_and_picks(self):
+        viewer = self.viewer
+        self.request()
+        key = viewer._drc_marker_key
+        partial = self.progress_points(25000000)
+        viewer._drc_marker_worker.poll.return_value = (
+            key, worker_mod.MarkerProgress(partial), None)
+        viewer._drc_marker_poll()
+        viewer._drc_marker_overlay = object()
+        viewer._drc_point_hits = partial
+        viewer._drc_hits = [(30, 20, 0, 15000)]
+        viewer._drc_group_hits = [(10, 10, 20, 20, object())]
+        viewer._drc_marker_worker.poll.return_value = (key, None, "center scan failed")
+        viewer._drc_marker_poll()
+        self.assertFalse(viewer._drc_marker_busy)
+        if viewer._drc_marker_result is not None:
+            self.assertEqual(viewer._drc_marker_result, (key, []))
+        self.assertIsNone(viewer._drc_marker_overlay)
+        self.assertIsNone(viewer._drc_point_hits)
+        self.assertEqual(viewer._drc_hits, [])
+        self.assertEqual(viewer._drc_group_hits, [])
+        self.assertIn("center scan failed", viewer._set_live_status.call_args.args[0])
+        self.assertEqual(viewer._display.call_count, 2)
+
+    def test_rule_view_and_u_changes_ignore_late_partial_frames(self):
+        for change in ("rule", "view", "U"):
+            with self.subTest(change=change):
+                self.setUp()
+                viewer = self.viewer
+                self.request()
+                stale_key = viewer._drc_marker_key
+                old = self.progress_points(1000000)
+                viewer._drc_marker_result = stale_key, old
+                if change == "rule":
+                    viewer._drc.checks.append(SimpleNamespace(name="R2"))
+                    viewer._drc_open = 1
+                elif change == "view":
+                    self.bounds = (1000, 500, 2000, 1500)
+                else:
+                    viewer._drc_toggle_grouping()
+                self.request()
+                current_key = viewer._drc_marker_key
+                self.assertNotEqual(current_key, stale_key)
+                current_frame = self.progress_points(35000000)
+                current_result = current_key, current_frame
+                current_overlay = object()
+                viewer._drc_marker_result = current_result
+                viewer._drc_marker_overlay = current_overlay
+                viewer._drc_point_hits = current_frame
+                viewer._display.reset_mock()
+                viewer._drc_info_refresh.reset_mock()
+                viewer._drc_marker_worker.poll.return_value = (
+                    stale_key, worker_mod.MarkerProgress(old), None)
+                viewer._drc_marker_poll()
+                self.assertIs(viewer._drc_marker_result, current_result)
+                self.assertIs(viewer._drc_marker_overlay, current_overlay)
+                self.assertIs(viewer._drc_point_hits, current_frame)
+                self.assertTrue(viewer._drc_marker_busy)
+                viewer._display.assert_not_called()
+                viewer._drc_info_refresh.assert_not_called()
 
     def test_scope_change_drops_cached_markers_and_stale_worker_reply(self):
         viewer = self.viewer
@@ -809,6 +1073,176 @@ class MarkerWorkerTests(unittest.TestCase):
 
         self.addCleanup(close)
         return worker
+
+    @staticmethod
+    def next_idle(worker):
+        """Observe publication completion without sleeping for a timer tick."""
+        settled = threading.Event()
+        original_wait = worker._condition.wait
+
+        def wait_after_query(timeout=None):
+            settled.set()
+            return original_wait(timeout)
+
+        with worker._condition:
+            worker._condition.wait = wait_after_query
+        return settled
+
+    def test_progress_keeps_one_latest_snapshot_and_final_replaces_pending_preview(self):
+        published, release = threading.Event(), threading.Event()
+        references = []
+
+        class Snapshot(list):
+            pass
+
+        class Index:
+            def __init__(self, database):
+                pass
+
+            def query(self, cancelled, progress):
+                for number in range(8):
+                    snapshot = Snapshot([number])
+                    references.append(weakref.ref(snapshot))
+                    progress(snapshot)
+                del snapshot
+                published.set()
+                if not release.wait(3.0):
+                    raise AssertionError("test did not release progressive query")
+                progress(["unconsumed final preview"])
+                return ["complete"]
+
+        with patch.object(worker_mod, "MarkerIndex", Index):
+            worker = self.worker()
+            self.addCleanup(release.set)
+            worker.submit("view", object(), {"progressive": True})
+            self.assertTrue(published.wait(3.0))
+            result = self.result(worker)
+            self.assertEqual(result[0], "view")
+            self.assertIsInstance(result[1], worker_mod.MarkerProgress)
+            self.assertEqual(result[1].markers, [7])
+            self.assertIsNone(result[2])
+            gc.collect()
+            self.assertTrue(all(reference() is None for reference in references[:-1]),
+                            "worker retained a queue of intermediate frames")
+            self.assertIsNone(worker.poll(), "poll did not consume the latest snapshot")
+            settled = self.next_idle(worker)
+            release.set()
+            self.assertTrue(settled.wait(3.0))
+            self.assertEqual(worker.poll(), ("view", ["complete"], None),
+                             "last preview overwrote or hid the completed result")
+            self.assertIsNone(worker.poll())
+
+    def test_progressive_error_replaces_the_visible_partial(self):
+        published, release = threading.Event(), threading.Event()
+
+        class Index:
+            def __init__(self, database):
+                pass
+
+            def query(self, cancelled, progress):
+                progress(["partial"])
+                published.set()
+                if not release.wait(3.0):
+                    raise AssertionError("test did not release failing query")
+                raise ValueError("center scan failed")
+
+        with patch.object(worker_mod, "MarkerIndex", Index):
+            worker = self.worker()
+            self.addCleanup(release.set)
+            worker.submit("view", object(), {"progressive": True})
+            self.assertTrue(published.wait(3.0))
+            self.assertIsInstance(self.result(worker)[1], worker_mod.MarkerProgress)
+            settled = self.next_idle(worker)
+            release.set()
+            self.assertTrue(settled.wait(3.0))
+            self.assertEqual(worker.poll(), ("view", None, "center scan failed"))
+
+    def test_cancel_rejects_a_backend_that_publishes_progress_after_cancellation(self):
+        published, release, attempted = (threading.Event() for _ in range(3))
+
+        class Index:
+            def __init__(self, database):
+                pass
+
+            def query(self, cancelled, progress):
+                progress(["initial"])
+                published.set()
+                if not release.wait(3.0):
+                    raise AssertionError("test did not release cancelled query")
+                # Deliberately ignore cancelled(): the worker must reject it.
+                try:
+                    progress(["stale after cancellation"])
+                finally:
+                    attempted.set()
+                return ["stale final"]
+
+        with patch.object(worker_mod, "MarkerIndex", Index):
+            worker = self.worker()
+            self.addCleanup(release.set)
+            worker.submit("old", object(), {"progressive": True})
+            self.assertTrue(published.wait(3.0))
+            settled = self.next_idle(worker)
+            worker.cancel()
+            self.assertIsNone(worker.poll(), "cancel retained an already published preview")
+            release.set()
+            self.assertTrue(attempted.wait(3.0))
+            self.assertTrue(settled.wait(3.0))
+            self.assertIsNone(worker.poll(), "cancelled progress escaped its generation")
+
+    def test_replacement_scope_rejects_old_progress_and_keeps_the_new_query(self):
+        entered, release_old, new_entered, release_new = (threading.Event() for _ in range(4))
+        attempted = threading.Event()
+
+        class Index:
+            def __init__(self, database):
+                pass
+
+            def query(self, token, cancelled, progress):
+                if token == "old":
+                    progress(["old initial"])
+                    entered.set()
+                    if not release_old.wait(3.0):
+                        raise AssertionError("test did not release old query")
+                    try:
+                        progress(["old late preview"])
+                    finally:
+                        attempted.set()
+                    return ["old final"]
+                new_entered.set()
+                if not release_new.wait(3.0):
+                    raise AssertionError("test did not release new query")
+                progress(["new preview"])
+                return ["new final"]
+
+        with patch.object(worker_mod, "MarkerIndex", Index):
+            worker = self.worker()
+            self.addCleanup(release_old.set)
+            self.addCleanup(release_new.set)
+            database = object()
+            worker.submit("old-view", database, {"token": "old", "progressive": True})
+            self.assertTrue(entered.wait(3.0))
+            worker.submit("new-view", database, {"token": "new", "progressive": True})
+            release_old.set()
+            self.assertTrue(attempted.wait(3.0))
+            self.assertTrue(new_entered.wait(3.0))
+            self.assertIsNone(worker.poll(), "obsolete preview appeared in the replacement scope")
+            settled = self.next_idle(worker)
+            release_new.set()
+            self.assertTrue(settled.wait(3.0))
+            self.assertEqual(worker.poll(), ("new-view", ["new final"], None))
+
+    def test_explicit_nonprogressive_query_preserves_existing_backend_signature(self):
+        class Index:
+            def __init__(self, database):
+                pass
+
+            def query(self, cancelled):
+                return ["complete"]
+
+        with patch.object(worker_mod, "MarkerIndex", Index):
+            worker = self.worker()
+            worker.submit("view", object(), {"progressive": False})
+            self.assertEqual(self.result(worker), ("view", ["complete"], None))
 
     def test_latest_pending_request_replaces_intermediate_view(self):
         entered, release, cancelled = (threading.Event() for _ in range(3))
