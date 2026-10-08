@@ -44,16 +44,18 @@ def main():
         ev = SimpleNamespace(direction=direction, x=25, y=20, state=0)
         MethodType(scope["_on_scroll"], obj)(None, ev)
         cases.append(dict(name=f"discrete={direction}", event=dict(deltaY=dy), expected=calls))
-    # GTK's pending/drag suppression is independently pinned; app.js has its
-    # own full-client tests for ACK, displayed receipt and decode boundaries.
-    for field in ("_pending", "_drag", "_zoomdrag"):
+    # GTK's drag suppression is independently pinned. A render in flight no
+    # longer holds GTK's wheel (775ea28e, 2026-09-30: the zoom supersedes
+    # it); the web still waits for the displayed frame - app.js has its own
+    # full-client tests for ACK, displayed receipt and decode boundaries.
+    for field, suppressed in (("_pending", False), ("_drag", True), ("_zoomdrag", True)):
         calls = []
         obj = SimpleNamespace(cache=object(), _pending=None, _drag=None, _zoomdrag=None,
                               _zoom_at=lambda *args: calls.append(args))
         setattr(obj, field, object())
         ev = SimpleNamespace(direction=directions.UP, x=25, y=20, state=0)
         MethodType(scope["_on_scroll"], obj)(None, ev)
-        assert not calls, field
+        assert bool(calls) != suppressed, field
     node = shutil.which("node")
     assert node
     with tempfile.TemporaryDirectory(prefix="floe-wheel-oracle-") as td:

@@ -152,9 +152,11 @@ def oracle(work):
                  "GTK CLI startup policy", "exec"), scope)
     viewer = next(n for n in ast.parse((ROOT / "floe/gui.py").read_text()).body
                   if isinstance(n, ast.ClassDef) and n.name == "Viewer")
-    names = {"_fit_spp", "fit", "goto", "view_bbox"}
+    # _die_bbox: the die fit/_fit_spp frame - the view root's box under a
+    # root, else meta's bbox (the oracle object has no root)
+    names = {"_fit_spp", "fit", "goto", "view_bbox", "_die_bbox"}
     methods = [n for n in viewer.body if isinstance(n, ast.FunctionDef) and n.name in names]
-    assert len(methods) == 4
+    assert len(methods) == 5
     gui = {}
     exec(compile(ast.Module(body=methods, type_ignores=[]), "GTK camera oracle", "exec"), gui)
     init = next(n for n in viewer.body if isinstance(n, ast.FunctionDef) and n.name == "__init__")
