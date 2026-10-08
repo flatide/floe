@@ -42,11 +42,12 @@ class Pixels:
 
 def main():
     names = {"fill_rect", "frame_rect", "_minimap_geom", "_minimap_frontier_depth",
-             "_minimap_world_point", "_on_minimap_click", "_minimap_base", "_update_minimap"}
+             "_minimap_world_point", "_on_minimap_click", "_minimap_base", "_update_minimap",
+             "_die_bbox"}
     funcs = [n for n in ast.walk(ast.parse((ROOT / "floe/gui.py").read_text()))
              if isinstance(n, ast.FunctionDef) and n.name in names]
     assert len(funcs) == len(names)
-    scope = dict(MINIMAP_PX=180, MINIMAP_DOT_MIN=6, BLACK=PALETTE[0],
+    scope = dict(MINIMAP_PX=180, MINIMAP_DOT_MIN=6, MINIMAP_PAD=6, BLACK=PALETTE[0],
                  MINIMAP_BG=PALETTE[1], MINIMAP_EDGE=PALETTE[2],
                  MINIMAP_FRONT=PALETTE[3], MINIMAP_VIEW=PALETTE[4],
                  Gdk=SimpleNamespace(EventType=SimpleNamespace(BUTTON_PRESS=1)),

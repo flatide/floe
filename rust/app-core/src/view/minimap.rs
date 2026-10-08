@@ -9,6 +9,10 @@ use std::{
 };
 
 pub const SIZE: usize = 180;
+/// GTK MINIMAP_PAD: the die fits inside this border on every side, so its
+/// outline never lies on the image edge; a click in the border takes the
+/// nearest die edge.
+const PAD: f64 = 6.;
 const DEPTHS: usize = 32;
 const ROWS: usize = 6000;
 const META_BYTES: u64 = 256 * 1024 * 1024;
@@ -83,7 +87,7 @@ impl Geometry {
         if !bbox.iter().all(|v| v.is_finite()) || w <= 0. || h <= 0. {
             return None;
         }
-        let scale = SIZE as f64 / w.max(h);
+        let scale = (SIZE as f64 - 2. * PAD) / w.max(h);
         let mw = (w * scale).round_ties_even().max(2.);
         let mh = (h * scale).round_ties_even().max(2.);
         Some(Self {
@@ -105,10 +109,11 @@ impl Geometry {
     }
     fn point(self, p: [f64; 2]) -> Option<[f64; 2]> {
         let [x, y, w, h] = self.die;
-        (p[0] >= x && p[0] <= x + w - 1. && p[1] >= y && p[1] <= y + h - 1.).then(|| {
+        let (r, b) = (x + w - 1., y + h - 1.);
+        (p[0] >= x - PAD && p[0] <= r + PAD && p[1] >= y - PAD && p[1] <= b + PAD).then(|| {
             [
-                self.bbox[0] + (p[0] - x) / self.scale,
-                self.bbox[3] - (p[1] - y) / self.scale,
+                self.bbox[0] + (p[0].max(x).min(r) - x) / self.scale,
+                self.bbox[3] - (p[1].max(y).min(b) - y) / self.scale,
             ]
         })
     }
@@ -255,18 +260,21 @@ impl Minimap {
             marks: Vec::new(),
         };
         if let Some(g) = Geometry::new(bbox) {
-            let [x, y, w, h] = g.die;
             out.die = Some(g.die.map(|v| v as u16));
             let [a, b, c, d] = v.bbox;
             if (c - a) * g.scale >= 6. && (d - b) * g.scale >= 6. {
+                // As GTK: the box may run into the border - the fit view
+                // overshoots the die, so its box leaves the die outline -
+                // and is clipped one pixel inside the image, where it shows.
+                let (lo, hi) = (1_f64, SIZE as f64 - 2.);
                 let (x0, y0, x1, y1) = (
-                    x.max(g.x(a)),
-                    y.max(g.y(d)),
-                    (x + w - 1.).min(g.x(c)),
-                    (y + h - 1.).min(g.y(b)),
+                    lo.max(g.x(a)),
+                    lo.max(g.y(d)),
+                    hi.min(g.x(c)),
+                    hi.min(g.y(b)),
                 );
-                // Unlike the old GTK helper, do not draw a stray border when
-                // the viewport is entirely outside the die.
+                // Unlike GTK, do not draw a stray border when the viewport
+                // is entirely outside the image.
                 if x1 >= x0 && y1 >= y0 {
                     outline(
                         &mut out.marks,
@@ -366,6 +374,58 @@ mod tests {
         let m = Minimap::plain(bbox);
         let far = Viewport::new([1e18, 1e18, 1e18 + 1024., 1e18 + 1024.], 1024, 1024).unwrap();
         assert!(m.projection(bbox, far, None).marks.is_empty());
+    }
+    #[test]
+    fn die_keeps_the_gtk_margin_and_a_border_click_takes_the_nearest_edge() {
+        for bbox in [[0., 0., 1000., 100.], [0., 0., 100., 1000.]] {
+            let g = Geometry::new(bbox).unwrap();
+            let [x, y, w, h] = g.die;
+            let edge = SIZE as f64 - PAD;
+            assert!(x >= PAD && y >= PAD && x + w <= edge && y + h <= edge);
+            let m = Minimap::plain(bbox);
+            let px = m.base("full").unwrap().as_bytes();
+            for (c, r) in [
+                (x, y + 1.),
+                (x + w - 1., y + 1.),
+                (x + 1., y),
+                (x + 1., y + h - 1.),
+            ] {
+                assert_eq!(
+                    px[r as usize * SIZE + c as usize],
+                    b'2',
+                    "outline at {c},{r}"
+                );
+            }
+            // the fit view (5% over the die's long side) shows in the border
+            let (cx, cy, s) = (bbox[2] / 2., bbox[3] / 2., bbox[2].max(bbox[3]) * 1.05);
+            let fit = Viewport::new(
+                [cx - s / 2., cy - s / 2., cx + s / 2., cy + s / 2.],
+                800,
+                800,
+            )
+            .unwrap();
+            let marks = m.projection(bbox, fit, None).marks;
+            assert!(!marks.is_empty());
+            for [mx, my, mw, mh, _] in &marks {
+                assert!(*mx >= 1 && *my >= 1 && mx + mw <= 179 && my + mh <= 179);
+            }
+            let left = marks
+                .iter()
+                .map(|r| f64::from(r[0]))
+                .fold(f64::MAX, f64::min);
+            let top = marks
+                .iter()
+                .map(|r| f64::from(r[1]))
+                .fold(f64::MAX, f64::min);
+            assert!(left < x || top < y, "the box runs into the border");
+            assert_eq!(g.point([x - PAD, y - PAD]), Some([bbox[0], bbox[3]]));
+            assert_eq!(
+                g.point([x + w - 1. + PAD, y + h - 1. + PAD]),
+                g.point([x + w - 1., y + h - 1.])
+            );
+            assert_eq!(g.point([x - PAD - 1., y]), None);
+            assert_eq!(g.point([x, y + h + PAD]), None);
+        }
     }
     #[test]
     #[ignore = "run tools/validate_minimap.py with actual GTK pixel/navigation cases"]
