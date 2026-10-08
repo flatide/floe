@@ -5,11 +5,16 @@ from functools import lru_cache
 import numpy as np
 
 
+def marker_cell_px(width, height):
+    """Initial screen grouping pitch; the worker coarsens dense views."""
+    return max(32.0, min(64.0, min(width, height) / 16.0))
+
+
 def aggregate_radius(count, width, height):
     """Return a bounded pixel radius for an aggregate's population.
 
     Count bands are 2--9, 10--49, 50--99, 100--999, then decades.
-    Their base diameters are 12, 16, 20, 24, 28, ... pixels. Scaling
+    Their base diameters are 8, 10, 12, 14, 16, ... pixels. Scaling
     with the viewport's shorter dimension keeps these readable on both
     small windows and large displays without growing with layout zoom.
     """
@@ -22,14 +27,13 @@ def aggregate_radius(count, width, height):
         band = 2
     else:
         band, threshold = 3, 1000
-        # Even at the minimum viewport scale, band 19 reaches the cap.
+        # Even at the minimum viewport scale, band 20 reaches the cap.
         # Bound this loop independently of the input integer's size.
-        while count >= threshold and band < 19:
+        while count >= threshold and band < 20:
             band += 1
             threshold *= 10
     scale = max(0.75, min(1.5, min(width, height) / 800.0))
-    diameter = min(64.0, (12 + 4 * band) * scale)
-    return max(2, int(round(diameter / 2.0)))
+    return max(2, int(round(min(18.0, (4 + band) * scale))))
 
 
 @lru_cache(maxsize=96)
@@ -51,7 +55,7 @@ def circle_rgba(radius, color, secondary=None):
     coverage = np.clip(radius + 0.5 - distance, 0.0, 1.0)
     stroke = min(2.0, radius / 2.0)
     outline = distance >= radius - stroke
-    alpha = (120.0 + 135.0 * outline) * coverage
+    alpha = (72.0 + 136.0 * outline) * coverage
 
     def channels(rgba):
         rgba = int(rgba)

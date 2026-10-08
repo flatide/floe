@@ -19,7 +19,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from floe import drc, gui  # noqa: E402
 from floe import drc_marker_worker as worker_mod  # noqa: E402
-from floe.drc_marker_style import aggregate_radius, circle_rgba  # noqa: E402
+from floe.drc_marker_style import aggregate_radius, circle_rgba, marker_cell_px  # noqa: E402
 from floe.drc_markers import Marker, MarkerQueryCancelled  # noqa: E402
 
 
@@ -53,10 +53,10 @@ def viewer_fixture():
 
 class MarkerCircleStyleTests(unittest.TestCase):
     def test_count_bands_have_distinct_sizes_and_no_within_band_jitter(self):
-        bands = ((2, 9, 6), (10, 49, 8), (50, 99, 10),
-                 (100, 999, 12), (1000, 9999, 14),
-                 (10000, 99999, 16), (100000, 999999, 18),
-                 (1000000, 9999999, 20))
+        bands = ((2, 9, 4), (10, 49, 5), (50, 99, 6),
+                 (100, 999, 7), (1000, 9999, 8),
+                 (10000, 99999, 9), (100000, 999999, 10),
+                 (1000000, 9999999, 11))
         for first, last, radius in bands:
             with self.subTest(band=(first, last)):
                 self.assertEqual(aggregate_radius(first, 1200, 800), radius)
@@ -69,17 +69,23 @@ class MarkerCircleStyleTests(unittest.TestCase):
         self.assertLess(aggregate_radius(1000, 600, 600), radius)
         self.assertEqual(aggregate_radius(1000, 600, 600),
                          aggregate_radius(1000, 60, 60))
-        self.assertEqual(aggregate_radius(1000, 1200, 1200), 21)
+        self.assertEqual(aggregate_radius(1000, 1200, 1200), 12)
         self.assertEqual(aggregate_radius(1000, 1200, 1200),
                          aggregate_radius(1000, 12000, 12000))
-        self.assertEqual(aggregate_radius(10 ** 50, 12000, 12000), 32)
+        self.assertEqual(aggregate_radius(10 ** 50, 12000, 12000), 18)
         for count in (2, 10, 50, 100, 1000, 10000, 10 ** 12):
             for width, height in ((1, 1), (800, 800), (10000, 10000)):
                 with self.subTest(count=count, viewport=(width, height)):
                     value = aggregate_radius(count, width, height)
                     self.assertIsInstance(value, int)
                     self.assertGreater(value, 0)
-                    self.assertLessEqual(value, 32)
+                    self.assertLessEqual(value, 18)
+
+    def test_initial_grouping_pitch_scales_with_canvas_without_dense_16px_grid(self):
+        self.assertEqual(marker_cell_px(1200, 800), 50)
+        self.assertEqual(marker_cell_px(800, 1200), 50)
+        self.assertEqual(marker_cell_px(160, 100), 32)
+        self.assertEqual(marker_cell_px(7680, 4320), 64)
 
     def test_circle_is_filled_translucent_with_antialiased_outline(self):
         radius = 12
@@ -94,7 +100,7 @@ class MarkerCircleStyleTests(unittest.TestCase):
         center = pixel(radius, radius)
         self.assertEqual(center[:3], (255, 82, 82))
         self.assertGreater(center[3], 0, "aggregate center was hollow")
-        self.assertLess(center[3], 255, "fill obscured underlying layout")
+        self.assertLessEqual(center[3], 80, "dense fill obscured underlying layout")
         for x, y in ((0, 0), (0, side - 1), (side - 1, 0),
                      (side - 1, side - 1)):
             self.assertEqual(pixel(x, y)[3], 0)
@@ -190,6 +196,8 @@ class MarkerViewerTests(unittest.TestCase):
         self.assertEqual(query["checks"], (0,))
         self.assertIsNone(query["members"])
         self.assertNotIn("cap", query)
+        self.assertTrue(query["declutter"], "viewer omitted the worker coverage budget")
+        self.assertEqual(query["cell_px"], marker_cell_px(100, 100))
 
     def test_scope_change_drops_cached_markers_and_stale_worker_reply(self):
         viewer = self.viewer
@@ -288,6 +296,8 @@ class MarkerViewerTests(unittest.TestCase):
         query = viewer._drc_marker_worker.submit.call_args.args[2]
         self.assertEqual(query["bounds_um"], (0.2, 0.5, 1.7, 1.3))
         self.assertEqual((query["width_px"], query["height_px"]), (150, 80))
+        self.assertTrue(query["declutter"])
+        self.assertEqual(query["cell_px"], marker_cell_px(150, 80))
 
     def test_painter_caches_layer_and_separates_exact_from_group_hits(self):
         viewer = self.viewer

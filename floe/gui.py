@@ -9424,6 +9424,7 @@ class Viewer:
         if db is None or ci is None or width < 1 or height < 1:
             return []
         from .drc_marker_worker import MarkerWorker, SelectedMembers
+        from .drc_marker_style import marker_cell_px
         selected = None
         if self._drc_show_sel:
             sel = self._drc_sel
@@ -9449,7 +9450,8 @@ class Viewer:
             membership = (SelectedMembers(selected, active_members)
                           if selected is not None else active_members)
             query = dict(bounds_um=bounds, width_px=width, height_px=height,
-                         checks=(ci,), cell_px=16,
+                         checks=(ci,), cell_px=marker_cell_px(width, height),
+                         declutter=True,
                          members=({ci: membership}
                                   if membership is not None else None),
                          waived=(None if self._drc_wfilter == "all" else

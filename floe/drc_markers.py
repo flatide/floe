@@ -340,7 +340,8 @@ class MarkerIndex:
         return True
 
     def query(self, bounds_um, width_px, height_px, checks=None,
-              members=None, waived=None, cell_px=16, cancelled=None):
+              members=None, waived=None, cell_px=16, cancelled=None,
+              declutter=False):
         """Return at most 8192 immutable ``Marker`` values.
 
         Every selected error whose bbox intersects the view contributes
@@ -351,6 +352,9 @@ class MarkerIndex:
         locations/bboxes may use the pack lattice (``approximate=True``).
         Singletons always have exact centers/bboxes. A cancelled query
         raises ``MarkerQueryCancelled``, never returns a partial scope.
+        ``declutter`` additionally merges only these bounded summaries to
+        limit screen coverage and separate neighboring markers.  Its merged
+        centers are approximate, while counts and bbox unions are retained.
         """
         _check_cancelled(cancelled)
         bounds = tuple(float(v) for v in bounds_um)
@@ -470,4 +474,7 @@ class MarkerIndex:
             out.append(Marker(ci, ei, float(x), float(y), count,
                               int(bins.waived[k]), tuple(float(v) for v in bb),
                               approximate))
+        if declutter:
+            from .drc_marker_layout import compact_markers
+            return compact_markers(out, bounds, width, height, cancelled)
         return out
