@@ -13,7 +13,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def main():
-    names = {"_depth_step", "_set_depth", "_depth"}
+    # _max_depth: the view root's height under a root, else max_depth (the
+    # oracle object has no root, so the top's semantics are checked)
+    names = {"_depth_step", "_set_depth", "_depth", "_max_depth"}
     funcs = [n for n in ast.walk(ast.parse((ROOT / "floe/gui.py").read_text()))
              if isinstance(n, ast.FunctionDef) and n.name in names]
     assert len(funcs) == len(names)

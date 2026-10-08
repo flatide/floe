@@ -258,10 +258,11 @@ impl Depth {
         if ![-1, 1].contains(&delta) {
             return Err(Error::input("depth step must be -1 or 1"));
         }
-        // GTK treats 999 as full, caps the setter at 999, and uses the real
-        // maximum (when known) before stepping down from full.
+        // GTK treats 999 as full and caps the setter at 999. Any depth past
+        // the real maximum (when known) - full included - steps from that
+        // maximum (gui.py _depth_step since 2026-09-30).
         let cap = maximum.unwrap_or(999);
-        let cur = current.filter(|&n| n < 999).map_or(cap, u64::from);
+        let cur = current.map_or(999, u64::from).min(cap);
         let next = if delta < 0 {
             cur.saturating_sub(1)
         } else {
