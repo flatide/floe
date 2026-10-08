@@ -43,6 +43,23 @@ density(`design.ovs`, 기본 켜짐), pass 1의 top-plane-first budget fit, 아�
   아직 대응이 없어 메뉴 인벤토리에 `open`으로 기록했다(§6). 그래서
   `validate_web_menu_inventory.py --require-complete`는 이 항목 하나로 실패한다.
 
+병합 뒤 배터리 전체를 게이트별로 돌려(짧은 `TMPDIR` — Unix socket 경로 한도 — 와
+`data/m1/valmini.oas`가 있는 scratch worktree) GTK·Python과 맞추는 게이트를 고쳤다.
+
+- `minimap`: 지난 병합(12d77df)부터 실패하던 것. GTK 미니맵은 다이를 6px 여백
+  (`MINIMAP_PAD`, 60ab9190) 안에 그리고, 뷰 박스는 이미지 안쪽 1px까지 잘라 여백에 보이며,
+  여백 클릭은 가장 가까운 다이 경계로 간다. Rust `minimap.rs`가 같은 규칙을 따르고(웹은
+  Rust projection을 그대로 칠한다), oracle이 `_die_bbox`·`MINIMAP_PAD`를 묶는다.
+- `depth_keys`: GTK `<`/`>`(5d386641)는 최대 깊이를 넘은 어떤 깊이든(full만이 아니라)
+  최대 깊이에서 한 단계 움직인다. `Depth::stepped`가 따르고 oracle이 `_max_depth`를 묶는다.
+- `app_captures`, `app_deck_render`: 칩 on/off(c5fe36fb) 뒤 Python 보고서는 샷이 켠 칩의
+  누락 배치만 `skipped`로, 나머지는 `skipped_off`로 나눈다. `captures.rs`가 같은 계산(덱 뷰의
+  소스 행 = 칩 행, `normalize_tc`)으로 샷별 `skipped_placements`·완료 여부·보고서·종료 코드를
+  정한다. 새 케이스: 소스가 빠진 덱에서 METAL1만 켠 캡처는 아무것도 빠뜨리지 않는다.
+- `web_wheel`: GTK 휠은 775ea28e부터 진행 중 렌더를 대체한다(드래그 중에만 막힘). oracle의
+  고정값을 따라 바꿨다. 웹은 여전히 표시된 프레임을 기다린다(§6).
+- `web_startup`: 지난 병합부터 실패하던 것. 카메라 oracle이 `_die_bbox`를 묶는다.
+
 ## 2. 소유자 화면(`index.html`)의 배치
 
 GTK `floe/gui.py`(feature/jobdeck)와 같은 구성이다. 모든 기존 컨트롤 id는 그대로이며
@@ -326,5 +343,22 @@ view root도 WS `view.set`의 `root`로 가며 해결(`root_ticket`)은 같은 �
   재현). 둘 다 진단용 opt-in이라 기본 설정에서는 생기지 않는다. 토글을 구현할 때 이 pass-1
   round를 받아들이는 frame 계약을 함께 정해야 한다.
 - 2026-10-08 병합으로 들어온 GTK 전용 동작 중 웹에 아직 없는 것: 셀 트리 더블클릭이 view
-  root 지정(root/top 버튼 제거, 08d9da35 — 웹은 더블클릭이 줌), view root 아래 depth를
-  root 높이로 셈(5d386641), 도형·텍스트가 없는 레이어를 목록에서 숨김(99519258).
+  root 지정(root/top 버튼 제거, 08d9da35 — 웹은 더블클릭이 줌), view root 아래 depth 상한을
+  root 높이로 셈(5d386641 — 단계 규칙은 §1b에서 옮겼고 root 높이 상한은 아직), 도형·텍스트가
+  없는 레이어를 목록에서 숨김(99519258), 렌더 진행 중에도 휠·마우스를 받아 대체(775ea28e —
+  웹은 표시된 프레임을 기다림).
+- 병합 뒤에도 실패하는 게이트(2026-10-08):
+  - `cache_revision`, `owner_service`의 revision 회수 테스트: revision 파일 목록(`FILES`)에
+    `floe-index vfs`가 기본으로 쓰는 `design.ovh`가 없어 지난 병합부터 실패했고
+    (`cache_revision`의 managed_revisions를 병합 전 f483e7e3에서 같은 메시지 "reclamation
+    contains extra/missing files"로 재현), 이번 병합으로 `design.ovb`·`design.ovs`(큰 셀의
+    `design.ovs.<cell>` 포함)가 더해졌다. `revision.rs`는 다른 작업이 `design.ovh`를 추가하는
+    중이라 이번에 손대지 않았다. ovb/ovs도 목록에 넣거나 managed 빌드가
+    `--no-page-occupancy --no-ovs`로 만들지 정해야 한다.
+  - `web_cli_inventory`: 레거시 CLI에 있고 `floe2-web`에 없는 옵션 — `index --hier-only`
+    (지난 병합부터), `index --no-page-occupancy`/`--no-ovs`, `info --chips`,
+    `render --chip/--chip-off/--fit-chip`, `view --density`.
+  - `web_menu_inventory --require-complete`: density 토글(`open`).
+  - `web_svrf`, `app_svrf`, `svrf_native`: oracle로 쓰던 Python SVRF 파서가 cb634dd4에서
+    `floe-index svrf`(rust/cli)로 옮겨져 지난 병합부터 실패한다. oracle을 `floe-index svrf`로
+    바꾸거나 웹이 그 빌더를 직접 쓰도록 정해야 한다.
