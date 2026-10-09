@@ -13,6 +13,7 @@ headless and the spawned render process never touches GTK.
 """
 
 import bisect
+from collections import deque
 import math
 import os
 import queue
@@ -102,6 +103,59 @@ class _dprof(object):
                                  % (self.tag, dt))
                 sys.stderr.flush()
         return False
+
+
+class _DrcVisitWorker:
+    """Persist accepted visits off GTK; an empty queue ends the thread."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._jobs = deque()
+        self._thread = None
+        self._results = queue.Queue()
+
+    def submit(self, db, ci, ei):
+        self._enqueue((db, ci, ei))
+
+    def barrier(self):
+        """Return an event set after every visit already accepted here."""
+        event = threading.Event()
+        self._enqueue((None, event, None))
+        return event
+
+    def _enqueue(self, job):
+        with self._lock:
+            self._jobs.append(job)
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._run,
+                                                name="drc-visits", daemon=False)
+                self._thread.start()
+
+    def _run(self):
+        while True:
+            with self._lock:
+                if not self._jobs:
+                    self._thread = None
+                    return
+                db, ci, ei = self._jobs.popleft()
+            if db is None:
+                ci.set()  # A barrier waits in the export thread, never GTK.
+                continue
+            error = None
+            try:
+                db.mark_visited(ci, ei)
+            except Exception as exc:
+                error = str(exc)
+                sys.stderr.write("[drc] visit save failed: %s\n" % error)
+            self._results.put((db, ci, ei, error))
+
+    def poll(self):
+        try:
+            return self._results.get_nowait()
+        except queue.Empty:
+            return None
+
+
 DRC_GOLD = 0xFFD700FF      # box-selected errors (canvas marker + grid cell)
 # numbers ON a gold selected cell (user call 2026-09-08): the bright
 # red/green of the dark list are unreadable on gold (contrast ~1.0),
@@ -132,7 +186,7 @@ LEFT_PANE_PX = 260
 
 class _DrcPanel(object):
     """Widget refs of the embedded DRC browser (attribute bag)."""
-    __slots__ = ("_info", "_rules", "_rstore", "_grid", "_gstore",
+    __slots__ = ("_info", "_review_info", "_rules", "_rstore", "_grid", "_gstore",
                  "_detail", "_hl", "_wf", "_selv", "_search",
                  "_tf", "_plabel", "_pprev", "_pnext", "_delta_mode",
                  "_delta_step", "_delta_store", "_delta_tree", "_delta_label",
@@ -1982,6 +2036,8 @@ class Viewer:
         self._drc = None            # drc.DrcDb or drc.IcePack
         self._drcwin = None
         self.drc_mark = None        # {"kind": 'p'|'e', "pts": [(dbu)]}
+        self._drc_visit_worker = None
+        self._drc_review_read_error = None
         # scale right after the last error jump: a zoom the user makes
         # while viewing errors sticks across n/p and clicks (2026-09-08)
         self._drc_jump_spp = None
@@ -2589,6 +2645,7 @@ class Viewer:
             w._gstore.clear()
             w._detail.set_text("")
             w._info.set_text("no results database loaded")
+            self._drc_review_stats_refresh()
             self._drc_types_rebuild()   # empty+disable type combo
         self._cell_state_reset()
         # size + grid live in the WINDOW TITLE (user call
@@ -3466,11 +3523,15 @@ class Viewer:
                 self._drc_fill_translucent(disp, pts, mcol)
                 for a, b in zip(pts, pts[1:] + pts[:1]):
                     stamp_segment(disp, a, b, None, mcol)
+                self._drc_visit_drawn(self.drc_mark, pts,
+                                      disp.get_width(), disp.get_height())
             else:
                 # edge records: consecutive point pairs are segments
                 for j in range(0, len(pts) - 1, 2):
                     stamp_segment(disp, pts[j], pts[j + 1], None,
                                   mcol)
+                self._drc_visit_drawn(self.drc_mark, pts,
+                                      disp.get_width(), disp.get_height())
         if self.overlay_mode == 0 and self._drc is not None \
                 and self._drc_open is not None:
             # All matching errors contribute, independently of list pages.
@@ -5977,6 +6038,9 @@ class Viewer:
              self._drc_waive_key)
         item(m, "save waives as…", self._drc_waive_save_dialog)
         item(m, "load waives…", self._drc_waive_load_dialog)
+        item(m, "mark not for review", lambda: self._drc_not_required_key(True))
+        item(m, "clear not for review", lambda: self._drc_not_required_key(False))
+        item(m, "export review statistics…", self._drc_review_export_stats)
         sep(m)
         item(m, "note (add/edit)\tn", self._drc_note_key)
         item(m, "clear note of selection", self._drc_note_clear)
@@ -6410,6 +6474,16 @@ class Viewer:
         info.set_ellipsize(Pango.EllipsizeMode.START)
         top.pack_start(info, True, True, 2)
         win._info = info
+        review_info = Gtk.Label(label="V visited · X not for review · * note")
+        review_info.set_xalign(0.0)
+        review_info.set_line_wrap(True)
+        review_info.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        review_info.set_max_width_chars(40)
+        box.pack_start(review_info, False, False, 2)
+        win._review_info = review_info
+        export_stats = Gtk.Button(label="export review statistics…")
+        export_stats.connect("clicked", lambda *_: self._drc_review_export_stats())
+        box.pack_start(export_stats, False, False, 0)
         # top pane = rules list (left) | error-number grid (right);
         # bottom pane = per-error detail. Selecting a rule shows its
         # grid alone (one rule at a time = the accordion ask), and
@@ -7985,6 +8059,7 @@ class Viewer:
             "%s [%s] — cell %s · %d/%d rules · %d errors%s"
             % (os.path.basename(db.path), backend, db.cell,
                self._drc_shown, len(db.checks), db.total, rules))
+        self._drc_review_stats_refresh()
 
     def _drc_types_rebuild(self):
         """Classify every rule by its SVRF measurement metrics
@@ -8583,7 +8658,8 @@ class Viewer:
         # the "*" when any cell on the page is noted)
         maxloc = (max(eis) + 1) if eis else 1
         probe = win._grid.create_pango_layout(
-            "0" * (max(2, len(str(maxloc))) + (1 if noted else 0)))
+            "0" * (max(2, len(str(maxloc))) + (1 if noted else 0)
+                   + (3 if hasattr(db, "review_flags") else 0)))
         self._drc_cellw = probe.get_pixel_size()[0] + 18
         avail = win._grid.get_allocation().width
         n = max(1, min(24, avail // max(24, self._drc_cellw)))
@@ -8684,6 +8760,15 @@ class Viewer:
                        lambda _i, o=on, t=targets:
                        self._drc_set_waived(ci, t, o))
             menu.append(it)
+        if hasattr(db, "set_review_members"):
+            menu.append(Gtk.SeparatorMenuItem())
+            for label, on in (("mark not for review: %s" % scope, True),
+                              ("clear not for review: %s" % scope, False)):
+                it = Gtk.MenuItem(label=label)
+                it.connect("activate", lambda _i, o=on, t=targets, d=db:
+                           self._drc_set_not_required(ci, t, o)
+                           if self._drc is d else None)
+                menu.append(it)
         self._drc_menu = menu
 
         def released(_menu):
@@ -8717,6 +8802,266 @@ class Viewer:
             error = str(exc)
         self._drc_waived_refresh(ci, eis, on, error)
 
+    def _drc_visit_drawn(self, mark, points, width, height):
+        """Queue one visit only after individual geometry was painted.
+
+        No review-store access belongs in this paint path. In particular a
+        sparse edge pair's bounding box can cross the view without either
+        edge being visible, so test segments rather than just the bbox.
+        """
+        target = mark.get("review_target")
+        if (mark is not getattr(self, "drc_mark", None) or not target
+                or target[0] is not getattr(self, "_drc", None)
+                or mark.get("review_queued")
+                or getattr(self, "overlay_mode", 0) == 2
+                or width <= 0 or height <= 0 or not points):
+            return
+        xs, ys = zip(*points)
+        if max(xs) - min(xs) < DRC_MARK_PX and max(ys) - min(ys) < DRC_MARK_PX:
+            return
+
+        def rect_visible(x, y, w, h):
+            x, y, w, h = (int(round(v)) for v in (x, y, w, h))
+            return w > 0 and h > 0 and x < width and y < height and x + w > 0 and y + h > 0
+
+        def painted_segment(a, b):
+            ax, ay = a
+            dx, dy = b[0] - ax, b[1] - ay
+            if round(ay) == round(b[1]):
+                return rect_visible(min(ax, b[0]), ay - 1, abs(dx) + 1, 2)
+            if round(ax) == round(b[0]):
+                return rect_visible(ax - 1, min(ay, b[1]), 2, abs(dy) + 1)
+            # stamp_segment samples free-angle lines at most 8,001 times.
+            # A very long diagonal can cross the viewport between dabs and
+            # paint nothing. Clip the possible 2px-core dab centers first,
+            # then test those exact samples with fill_rect's rounding rule.
+            lo, hi = 0.0, 1.0
+            for p, q in ((-dx, ax + 0.5), (dx, width + 0.5 - ax),
+                         (-dy, ay + 0.5), (dy, height + 0.5 - ay)):
+                if p == 0:
+                    if q < 0:
+                        return False
+                    continue
+                t = q / p
+                if p < 0:
+                    lo = max(lo, t)
+                else:
+                    hi = min(hi, t)
+                if lo > hi:
+                    return False
+            steps = min(int(max(abs(dx), abs(dy))) + 1, 8000)
+            first = max(0, int(math.floor(lo * steps)) - 1)
+            last = min(steps, int(math.ceil(hi * steps)) + 1)
+            return any(rect_visible(ax + dx * i / steps - 1,
+                                    ay + dy * i / steps - 1, 2, 2)
+                       for i in range(first, last + 1))
+
+        polygon = mark.get("kind") == "p"
+        segments = (zip(points, points[1:] + points[:1]) if polygon else
+                    ((points[j], points[j + 1]) for j in range(0, len(points) - 1, 2)))
+        visible = any(painted_segment(a, b) for a, b in segments)
+        if not visible and polygon and 3 <= len(points) <= 256:
+            # Match the translucent renderer's actual clipped scanline spans,
+            # including polygons whose off-screen edges surround the view.
+            edges = [(a, b) for a, b in zip(points, points[1:] + points[:1])
+                     if a[1] != b[1]]
+            for y in range(max(0, int(math.floor(min(ys)))),
+                           min(height - 1, int(math.ceil(max(ys)))) + 1):
+                yc = y + 0.5
+                crossings = sorted(ax + (yc - ay) * (bx - ax) / (by - ay)
+                    for (ax, ay), (bx, by) in edges
+                    if (ay <= yc < by) or (by <= yc < ay))
+                if any(min(width, int(math.floor(crossings[i + 1])) + 1)
+                       > max(0, int(math.ceil(crossings[i])))
+                       for i in range(0, len(crossings) - 1, 2)):
+                    visible = True
+                    break
+        if not visible:
+            return
+        db, ci, ei = target
+        if not hasattr(db, "mark_visited"):
+            return
+        worker = getattr(self, "_drc_visit_worker", None)
+        if worker is None:
+            worker = self._drc_visit_worker = _DrcVisitWorker()
+        mark["review_queued"] = True
+        worker.submit(db, ci, ei)
+
+    def _drc_visit_poll(self):
+        worker = getattr(self, "_drc_visit_worker", None)
+        if worker is None:
+            return
+        dirty, errors = set(), []
+        for _ in range(64):
+            reply = worker.poll()
+            if reply is None:
+                break
+            db, ci, _ei, error = reply
+            if db is not getattr(self, "_drc", None):
+                continue  # Accepted writes finish on their original DB.
+            if error:
+                errors.append(error)
+            else:
+                dirty.add(ci)
+        for ci in dirty:
+            self._drc_review_flags_refresh(ci)
+        if errors:
+            self._set_live_status("visit save failed: %s" % errors[-1])
+
+    def _drc_not_required_key(self, on):
+        target = self._drc_current_target()
+        if target is None:
+            self._set_live_status("select or focus errors to change their review requirement")
+            return
+        self._drc_set_not_required(*target, on)
+
+    def _drc_set_not_required(self, ci, targets, on):
+        db = getattr(self, "_drc", None)
+        if db is None or not hasattr(db, "set_review_members"):
+            self._set_live_status("review flags need a packed index: floe-index drc <db>")
+            return
+        # Even one SQLite update runs outside the GTK thread.
+        self._drc_review_submit("not-required", ci, targets, on=bool(on))
+
+    def _drc_review_flags(self, db, ci, ei):
+        if not hasattr(db, "review_flags"):
+            return 0
+        try:
+            return db.review_flags(ci, ei)
+        except Exception as exc:
+            key = (id(db), str(exc))
+            if key != getattr(self, "_drc_review_read_error", None):
+                self._drc_review_read_error = key
+                self._set_live_status("review flags unavailable: %s" % exc)
+            return None
+
+    def _drc_review_flags_refresh(self, ci):
+        """Only repaint this page's labels; flags never change its members."""
+        win, db = getattr(self, "_drcwin", None), getattr(self, "_drc", None)
+        if db is None:
+            return
+        if win is not None and ci == getattr(self, "_drc_grid_ci", None):
+            sel = getattr(self, "_drc_sel", None)
+            selected = sel[3] if sel is not None and sel[0] == ci else ()
+            cols = self._drc_gridw
+            current = getattr(self, "_drc_cell", None)
+            for i, ei in enumerate(self._drc_grid_map):
+                row, col = divmod(i, cols)
+                noted = bool(hasattr(db, "get_note") and db.get_note(ci, ei))
+                win._gstore[row][col] = self._drc_cell_markup(
+                    db, ci, ei, noted, selected, current == (row, col))
+        if ci == getattr(self, "_drc_open", None):
+            focus = getattr(self, "_drc_focus", None)
+            shown = focus[1] if focus is not None and focus[0] == ci else None
+            pos, cumulative = getattr(self, "_drc_pos", -1), getattr(self, "_drc_cum", ())
+            if shown is None and pos >= 0 and cumulative:
+                current_ci = bisect.bisect_right(cumulative, pos) - 1
+                if current_ci == ci:
+                    shown = pos - cumulative[ci]
+            if shown is not None:
+                self._drc_show_detail(ci, shown)
+        self._drc_review_stats_refresh()
+
+    def _drc_review_stats_refresh(self):
+        win = getattr(self, "_drcwin", None)
+        label = getattr(win, "_review_info", None) if win is not None else None
+        if label is None:
+            return
+        db = getattr(self, "_drc", None)
+        legend = "V visited · X not for review · * note"
+        if db is None or not hasattr(db, "review_counts"):
+            label.set_text(legend)
+            return
+
+        def line(scope, counts):
+            return ("%s: total %d · visited %d · not for review %d · unvisited targets %d"
+                    % (scope, counts["total"], counts["visited"],
+                       counts["not_required"], counts["pending"]))
+        try:
+            lines = [legend, line("Whole DB", db.review_counts())]
+            ci = getattr(self, "_drc_open", None)
+            if ci is not None:
+                lines.append(line("Whole rule %s" % db.checks[ci].name,
+                                  db.review_counts(ci)))
+            label.set_text("\n".join(lines))
+        except Exception as exc:
+            label.set_text(legend + "\nReview statistics unavailable: %s" % exc)
+
+    def _drc_review_export_stats(self):
+        if self._drc_review_pending():
+            return
+        db = getattr(self, "_drc", None)
+        if db is None or not hasattr(db, "review_counts"):
+            self._set_live_status("review statistics need a packed index")
+            return
+        dlg = Gtk.FileChooserDialog(title="export review statistics",
+                                    parent=self.window,
+                                    action=Gtk.FileChooserAction.SAVE)
+        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Save", Gtk.ResponseType.OK)
+        dlg.set_do_overwrite_confirmation(True)
+        dlg.set_current_folder(os.path.dirname(os.path.abspath(db.path)))
+        from .cachepath import db_name_of
+        dlg.set_current_name(db_name_of(db.path) + ".review.csv")
+        path = dlg.get_filename() if dlg.run() == Gtk.ResponseType.OK else None
+        dlg.destroy()
+        self._restore_keys()
+        if path and self._drc is not db:
+            self._set_live_status("DRC changed; reopen the review statistics export")
+        elif path:
+            self._drc_review_export_start(path)
+
+    def _drc_review_export_start(self, path):
+        if self._drc_review_pending():
+            return
+        db = getattr(self, "_drc", None)
+        if db is None or not hasattr(db, "review_counts"):
+            return
+        job = dict(db=db, ci=None, targets=None, operation="review-export",
+                   path=path, done=False, error=None, progress=None)
+        visits = getattr(self, "_drc_visit_worker", None)
+        barrier = visits.barrier() if visits is not None else None
+        self._drc_review_job = job
+        self._set_live_status("exporting whole-DB and per-rule review statistics…")
+
+        def run():
+            import csv
+            import tempfile
+            temporary = None
+            try:
+                if barrier is not None:
+                    barrier.wait()
+                keys = ("total", "visited", "not_required", "visited_not_required", "pending")
+                rows, total = [], {key: 0 for key in keys}
+                for ci, check in enumerate(db.checks):
+                    counts = db.review_counts(ci)
+                    rows.append(["rule", ci + 1, check.name] + [counts[key] for key in keys])
+                    for key in keys:
+                        total[key] += counts[key]
+                # Sum the exported rows so a concurrently recorded visit cannot
+                # make the whole-DB row disagree with the per-rule rows.
+                with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="",
+                        dir=os.path.dirname(os.path.abspath(path)),
+                        prefix=".floe-review-", suffix=".csv", delete=False) as stream:
+                    temporary = stream.name
+                    writer = csv.writer(stream)
+                    writer.writerow(("scope", "rule_index", "rule", "total", "visited",
+                                     "not_required", "visited_not_required", "unvisited_targets"))
+                    writer.writerow(["database", "", ""] + [total[key] for key in keys])
+                    writer.writerows(rows)
+                os.replace(temporary, path)
+                temporary = None
+            except Exception as exc:
+                job["error"] = str(exc)
+                sys.stderr.write("[drc] review export failed: %s\n" % exc)
+            finally:
+                if temporary is not None:
+                    try:
+                        os.unlink(temporary)
+                    except OSError:
+                        pass
+                job["done"] = True
+        threading.Thread(target=run, name="drc-review-export", daemon=False).start()
+
     def _drc_review_pending(self):
         if getattr(self, "_drc_selection_key", None) is not None:
             self._set_live_status("error selection is still being updated")
@@ -8736,10 +9081,11 @@ class Viewer:
             targets = Selection.from_indices(len(db.checks[ci].errors), targets)
         if not targets:
             return
-        self._drc_marker_invalidate()
+        if operation != "not-required":
+            self._drc_marker_invalidate()
         job = dict(db=db, ci=ci, targets=targets, operation=operation,
                    on=on, text=text, done=False, error=None, progress=None,
-                   clusters=self._drc_clusters, cluster_counts=None)
+                   clusters=getattr(self, "_drc_clusters", None), cluster_counts=None)
         self._drc_review_job = job
         self._set_live_status("%s: processing %d selected errors…" % (operation, len(targets)))
 
@@ -8781,8 +9127,14 @@ class Viewer:
                     db.set_note((db.error_gid(ci, ei) for ei in targets), text)
                 elif operation == "note-clear":
                     db.clear_note((db.error_gid(ci, ei) for ei in targets))
+                elif operation == "not-required":
+                    db.set_review_members(ci, targets, bool(on),
+                        progress=lambda done, total, changed:
+                            job.update(progress=(done, total), changed=changed))
             except Exception as exc:
                 job["error"] = str(exc)
+                if operation == "not-required":
+                    sys.stderr.write("[drc] review update failed: %s\n" % exc)
             finally:
                 if operation == "waive" and job["clusters"] is not None:
                     try:
@@ -8803,10 +9155,13 @@ class Viewer:
         threading.Thread(target=run, name="drc-review", daemon=False).start()
 
     def _drc_review_poll(self):
+        self._drc_visit_poll()
         job = getattr(self, "_drc_review_job", None)
         if job is None:
             return
         if not job["done"]:
+            if self._drc is not job["db"]:
+                return
             progress = job["progress"]
             if progress is not None and progress != job.get("shown"):
                 job["shown"] = progress
@@ -8818,7 +9173,18 @@ class Viewer:
                 self._set_live_status("previous DRC review update failed: %s" % job["error"])
             return
         ci, targets, operation = job["ci"], job["targets"], job["operation"]
-        if operation == "waive":
+        if operation == "review-export":
+            self._set_live_status(("review export failed: %s" % job["error"])
+                if job["error"] else "review statistics exported: %s" % job["path"])
+        elif operation == "not-required":
+            # A failed batch may have committed earlier chunks. Refresh the
+            # actual flags without invalidating markers, groups or selection.
+            self._drc_review_flags_refresh(ci)
+            self._set_live_status(("review update failed: %s" % job["error"])
+                if job["error"] else "%s on %d errors" % (
+                    "not for review set" if job["on"] else "not for review cleared",
+                    len(targets)))
+        elif operation == "waive":
             prepared = job["clusters"] is self._drc_clusters and job["cluster_counts"] is not None
             if prepared:
                 for original, updated in job["cluster_counts"]:
@@ -9340,6 +9706,14 @@ class Viewer:
         t = "%d" % (ei + 1)          # rule-local numbering
         if noted:
             t = "*" + t              # note present (user call 2026-08-28)
+        flags = self._drc_review_flags(db, ci, ei)
+        if flags is None:
+            t = "? " + t
+        elif flags:
+            from .drc_review import VISITED, NOT_REQUIRED
+            prefix = ("V" if flags & VISITED else "") + ("X" if flags & NOT_REQUIRED else "")
+            if prefix:
+                t = prefix + " " + t
         if current:
             return ("<span background='#3465a4' "
                     "foreground='#ffffff'>%s</span>" % t)
@@ -9458,6 +9832,7 @@ class Viewer:
             lines.append("")
             lines += c.desc.split("\n")
         win._detail.set_text("\n".join(lines))
+        self._drc_review_stats_refresh()
 
     def _drc_show_detail(self, ci, ei):
         """Bottom pane: rule description, kind, coordinates and the
@@ -9474,6 +9849,15 @@ class Viewer:
                       2: "reserved"}.get(s, "status %d" % s)
         lines = ["#%d(%d)  [%s]" % (ei + 1, e.num, status),
                  "rule: %s" % c.name]
+        if hasattr(db, "review_flags"):
+            flags = self._drc_review_flags(db, ci, ei)
+            if flags is None:
+                lines.append("review: unavailable")
+            else:
+                from .drc_review import VISITED, NOT_REQUIRED
+                lines.append("visited: %s · not for review: %s" % (
+                    "yes" if flags & VISITED else "no",
+                    "yes" if flags & NOT_REQUIRED else "no"))
         if hasattr(db, "get_note"):
             note = db.get_note(ci, ei)
             if note:
@@ -9555,6 +9939,7 @@ class Viewer:
                          "color": (DRC_GREEN
                                    if self._drc_waived(db, ci, ei)
                                    else DRC_RED)}
+        self.drc_mark["review_target"] = (db, ci, ei)
         # auto CD rulers: replaced on every jump (hand-drawn rulers
         # stay; k/Esc treat them like any ruler)
         for r in self._drc_ruler:

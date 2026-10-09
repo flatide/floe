@@ -600,7 +600,9 @@ class IcePack(object):
                  "_wcount", "_wcount_off", "_wchunk",
                  "_waive_path", "_waive_hdr",
                  "_notes", "_note_of", "_note_next", "_note_path",
-                 "_note_tag", "_review", "_analysis_identity")
+                 "_note_tag", "_review", "_analysis_identity",
+                 "_review_store", "_review_fingerprint", "_review_store_lock",
+                 "_review_store_error")
 
     def __init__(self, path, src_path=None, verify_src=False, *,
                  review=True, review_path=None):
@@ -615,6 +617,10 @@ class IcePack(object):
         self._status_cache_lock = threading.Lock()
         self._status_generation = 0
         self._review = bool(review)
+        self._review_store = None
+        self._review_store_error = None
+        self._review_fingerprint = None
+        self._review_store_lock = threading.RLock()
         try:
             self._load(path, src_path, verify_src, review_path)
         except (struct.error, IndexError, OverflowError) as exc:
@@ -633,6 +639,9 @@ class IcePack(object):
         (idempotent; the object is unusable afterwards). The
         np.memmap section views hold their own mappings and are
         freed by GC."""
+        store = getattr(self, "_review_store", None)
+        if store is not None:
+            store.close()
         wfd = getattr(self, "_wfd", None)
         self._wfd = None
         if wfd is not None:
@@ -684,11 +693,12 @@ class IcePack(object):
                     "%s: truncated .ice - re-run: floe-index drc "
                     "<db>" % path)
             f.seek(fsize - _ICE2_FOOTER.size)
+            footer = f.read(_ICE2_FOOTER.size)
             (_blob_off, _blob_len, qbox_off, _qbox_len,
              status_off, wcount_off, blk_off, blk_cnt, dir_off,
              check_cnt, descref_off, descref_cnt, str_off, str_len,
              err_total, cell_ref, _resv, fmagic) = \
-                _ICE2_FOOTER.unpack(f.read(_ICE2_FOOTER.size))
+                _ICE2_FOOTER.unpack(footer)
             if fmagic != _ICE_MAGIC:
                 raise ValueError("%s: truncated .ice (bad footer)"
                                  % path)
@@ -713,6 +723,16 @@ class IcePack(object):
             descbuf = f.read(descref_cnt * 4)
             f.seek(str_off)
             strbuf = f.read(str_len)
+            # Durable review identity excludes device/inode/ctime, so copied
+            # results and legacy pack renames retain their flags. Recreated
+            # results change mtime or metadata. Never scan error geometry.
+            import hashlib
+            stat = os.fstat(f.fileno())
+            digest = hashlib.sha256()
+            for part in (head, footer, dirbuf, descbuf, strbuf,
+                         struct.pack("<QQ", stat.st_size, stat.st_mtime_ns)):
+                digest.update(part)
+            self._review_fingerprint = digest.hexdigest()
         if verify_src and src_path is not None:
             st = os.stat(src_path)
             if st.st_size != src_size or int(st.st_mtime) != src_mtime:
@@ -1388,6 +1408,51 @@ class IcePack(object):
     def _require_review(self):
         if not getattr(self, "_review", True):
             raise OSError("analysis pack is read-only")
+
+    def _review_flags_store(self):
+        # Instantiation is lazy and reads do not create an absent sidecar.
+        with self._review_store_lock:
+            if self._review_store is None:
+                failed = self._review_store_error
+                if failed is not None and time.monotonic() < failed[1]:
+                    raise failed[0].with_traceback(None)
+                from .drc_review import ReviewStore
+                try:
+                    self._review_store = ReviewStore(
+                        self.path, self._ecnt, self._review_fingerprint,
+                        writable=self._review)
+                except (OSError, ValueError) as exc:
+                    # Path/HOME permission errors can occur before the store
+                    # creates its own read backoff. Do not retry filesystem
+                    # discovery for every visible row, or treat failure as 0.
+                    self._review_store_error = (exc, time.monotonic() + 1.0)
+                    raise
+                self._review_store_error = None
+            return self._review_store
+
+    @property
+    def review_path(self):
+        """Actual durable visited/not-required sidecar, independent of waives."""
+        return self._review_flags_store().path
+
+    def review_flags(self, ci, ei):
+        return self._review_flags_store().flags(ci, ei)
+
+    def review_counts(self, ci=None):
+        return self._review_flags_store().counts(ci)
+
+    def mark_visited(self, ci, ei):
+        """Record one actually displayed error; no geometry is loaded here."""
+        self._require_review()
+        return self._review_flags_store().mark_visited(ci, ei)
+
+    def set_review_members(self, ci, membership, not_required, *,
+                           cancelled=None, progress=None):
+        """Change independent review exclusion, in bounded transactions."""
+        self._require_review()
+        return self._review_flags_store().set_members(
+            ci, membership, not_required, cancelled=cancelled,
+            progress=progress)
 
     def status_eis(self, ci, waived):
         """Rule-local error indices whose waived-ness matches.

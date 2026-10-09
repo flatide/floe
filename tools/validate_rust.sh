@@ -51,7 +51,7 @@ cd "$(dirname "$0")/.."
 GATES="unit unit_vfs unit_render index_cli vfs_profile floe2 rust_scan \
 rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage \
 occupancy vfs_hier vfs_lifecycle vfs_marker vfs_split vfs_text \
-render_goldens render_speckle render_frames drc_ice drc_clusters drc_markers drc_delta svrf oasis_shapes \
+render_goldens render_speckle render_frames drc_ice drc_review drc_clusters drc_markers drc_delta svrf oasis_shapes \
 jobdeck representatives gen_main01 fit_budget sub_cut_box shape_cut write_once layer_decode area_true density_stack cell_tree rust_renderer klayout"
 # (unit_renderd is unit's renderd part, as unit_vfs and unit_render are)
 GATES=$(echo "$GATES" | sed 's/unit_render /unit_render unit_renderd /')
@@ -62,7 +62,7 @@ alias_gates() {
         occ)      echo "unit_vfs occupancy" ;;
         render)   echo "unit_render unit_renderd rust_renderer representatives fit_budget sub_cut_box shape_cut write_once layer_decode area_true density_stack cell_tree render_goldens render_speckle render_frames klayout" ;;
         indexer)  echo "unit_vfs index_cli rust_scan rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage vfs_split vfs_text vfs_marker representatives cell_tree" ;;
-        python)   echo "index_cli vfs_profile floe2 drc_ice drc_clusters drc_markers drc_delta svrf gen_main01" ;;
+        python)   echo "index_cli vfs_profile floe2 drc_ice drc_review drc_clusters drc_markers drc_delta svrf gen_main01" ;;
         deck)     echo "jobdeck occupancy" ;;
         *)        echo "" ;;
     esac
@@ -80,8 +80,8 @@ PLAN_GATES="unit_vfs $RENDER_GATES vfs_hier vfs_lifecycle vfs_marker \
 vfs_split vfs_text vfs_profile"
 # DRC gates contain several backend/GUI scripts rather than one script
 # matching the gate name. Keep their path mappings ahead of validate_*.py.
-DRC_GATES="drc_ice drc_clusters drc_markers drc_delta svrf"
-DRC_VIEW_GATES="drc_clusters drc_markers drc_delta"
+DRC_GATES="drc_ice drc_review drc_clusters drc_markers drc_delta svrf"
+DRC_VIEW_GATES="drc_review drc_clusters drc_markers drc_delta"
 # only version lines differ in FILE (every push bumps them)
 versions_only() {
     git diff "$CHANGED_BASE" -- "$1" 2>/dev/null | grep '^[+-]' | \
@@ -107,8 +107,10 @@ gates_for() {
         tools/validate_drc_cluster_spatial.py)
             echo drc_clusters ;;
         tools/validate_drc_marker_gui.py)
-            # viewer_fixture is shared by delta GUI tests.
-            echo "drc_markers drc_delta" ;;
+            # viewer_fixture is shared by delta/review GUI tests.
+            echo "drc_review drc_markers drc_delta" ;;
+        tools/validate_drc_review*.py)
+            echo drc_review ;;
         tools/validate_drc_points.py|tools/validate_drc_selection.py|tools/validate_drc_status_bulk.py|tools/validate_drc_spatial.py)
             echo drc_markers ;;
         tools/validate_drc_delta*.py|tools/validate_drc_native.py|tools/validate_drc_analysis.py|tools/validate_drc_prepare_cli.py|tools/validate_drc_large_gui.py)
@@ -184,6 +186,8 @@ gates_for() {
             echo "jobdeck occupancy rust_renderer" ;;
         floe/drc.py|floe/drc_analysis.py)
             echo "$DRC_GATES" ;;
+        floe/drc_review.py)
+            echo drc_review ;;
         floe/drc_clusters.py)
             echo "$DRC_VIEW_GATES" ;;
         floe/drc_delta*.py|floe/drc_prepare.py)
@@ -508,6 +512,10 @@ if gate render_frames; then RAN="$RAN render_frames"; lap render_frames
 # DRC pack (.<db>.tray): reading through the pack == ASCII parse
 if gate drc_ice; then RAN="$RAN drc_ice"; lap drc_ice
     .venv/bin/python tools/validate_drc_ice.py; fi
+# Durable visited/not-for-review flags, counts, and display-only visit tracking.
+if gate drc_review; then RAN="$RAN drc_review"; lap drc_review
+    .venv/bin/python tools/validate_drc_review.py
+    .venv/bin/python tools/validate_drc_review_gui.py; fi
 # Compact user clusters, viewer navigation, and pre-cap spatial membership.
 if gate drc_clusters; then RAN="$RAN drc_clusters"; lap drc_clusters
     .venv/bin/python tools/validate_drc_clusters.py

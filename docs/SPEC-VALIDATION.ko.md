@@ -46,15 +46,17 @@ sh tools/validate_rust.sh --only quick path/to.oas
       `validate_drc_cluster_spatial.py`는 `drc_clusters`, points·marker GUI·selection·status_bulk·spatial은
       `drc_markers`, delta·native·analysis·prepare_cli·large_gui는 `drc_delta`다. 다른 테스트의 GUI 픽스처를
       제공하는 `validate_drc_clusters.py`와 `validate_drc_marker_gui.py`는 `drc_delta`도 실행한다.
+      `validate_drc_review*.py`와 `floe/drc_review.py`는 `drc_review`를 실행하며,
+      marker GUI 픽스처 변경도 방문·검토 제외 GUI 검증을 포함한다.
       새 `validate_drc_*.py`가 표에 없으면 DRC 게이트 전체를 선택하여 조용히 검사를 생략하지 않는다.
     - 버전 줄만 바뀐 `floe/__init__.py`·`Cargo.toml`·`Cargo.lock`(푸시마다 바뀐다): `rust_renderer`, `floe2`,
       `index_cli`. 다른 줄도 바뀌었으면 전체.
     - `floe/gui.py` 등 뷰어: `rust_renderer`, `floe2`, `jobdeck`, `density_stack`.
-      `gui.py`는 DRC GUI가 들어 있는 `drc_clusters`, `drc_markers`, `drc_delta`도 실행한다.
+      `gui.py`는 DRC GUI가 들어 있는 `drc_review`, `drc_clusters`, `drc_markers`, `drc_delta`도 실행한다.
       `service.py`·`fe_embed.py`는 DRC 주석·CLI 이미지 검증인 `drc_ice`, `drc_delta`,
       `hangul.py`는 노트 입력 검증인 `drc_ice`를 추가한다.
     - DRC 공통 reader·캐시 identity(`drc.py`, `drc_analysis.py`)는 DRC 게이트 전체,
-      `drc_clusters.py`는 세 DRC GUI 게이트, delta·prepare 모듈은 `drc_delta`,
+      `drc_clusters.py`는 네 DRC GUI 게이트, delta·prepare 모듈은 `drc_delta`,
       marker·points·spatial·query·selection·native 모듈은 `drc_markers`, `drc_delta`를 실행한다.
       `svrf.py`는 `drc_ice`, `svrf`, `drc_delta`다. `sample.db`·`sample.svrf.rules.json` 변경도
       이 파일을 사용하는 준비 CLI·분석 테스트가 든 `drc_delta`를 실행한다.
@@ -781,6 +783,16 @@ sh tools/validate_rust.sh --only quick path/to.oas
 
 추가 DRC 게이트(2026-10-05):
 
+- `drc_review`: `validate_drc_review.py`, `validate_drc_review_gui.py` —
+  visited·검토 제외·waive 독립성, 재실행 후 복원, 상태 교집합과 미방문 대상
+  카운터, 동시 방문 기록, 희소 대용량 저장과 제한된 청크 메모리, 취소 시
+  기완료 청크 보존, 다른 pack 지문 거부를 검증한다. 실제 overlay 경로에서
+  숨김·화면 밖·축약 마커·선택만으로 방문하지 않는지 확인하며, 수동 지정이
+  백그라운드에서 실행되고 마커 재스캔을 일으키지 않는지 검증한다. CSV는
+  이미 접수한 방문 저장을 기다리고, 룰별 합계와 전체 합계가 일치하며,
+  읽기 실패 시 기존 내보내기 파일을 보존한다.
+  처음 여는 저장소의 외부 독점 잠금·스키마 누락·지문 불일치도 1,000행의
+  반복 대기로 증폭되지 않는지, 잠금 해제 이후 복구되는지 확인한다.
 - `drc_clusters`: `validate_drc_clusters.py`와
   `validate_drc_cluster_spatial.py` — 임의 번호/범위 파일, 10억 번호의
   bounded 조회, 클러스터 상태 카운트 공유, 트리/페이지, cap 전 소속 판정.
