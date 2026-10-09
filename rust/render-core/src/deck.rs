@@ -379,6 +379,9 @@ pub struct Deck {
     layers: BTreeMap<u32, DeckLayer>,
     placements: Vec<Placed>,
     budget_bytes: u64,
+    /// the reader's locks on every source cache (floe_vfs::lock), taken
+    /// together - one registration per folder, however many sources
+    _lock: floe_vfs::lock::ReaderGuard,
 }
 
 /// One source's hierarchy for the cell tree: its cache folder, the
@@ -503,9 +506,14 @@ pub struct DeckRenderReport {
 
 impl Deck {
     pub fn open(spec: DeckSpec, budget_bytes: u64) -> Result<Self, String> {
+        // every source's reader lock first: a source being rebuilt whole
+        // refuses the open (its error starts with floe_vfs::lock::LOCKED)
+        let keys: Vec<floe_vfs::lock::Key> = spec.sources.iter().map(|path| crate::cache::cache_lock_key(path)).collect();
+        let lock = floe_vfs::lock::readers(&keys, &floe_vfs::lock::reader_label("floe-renderd"))
+            .map_err(|busy| format!("{}{}", floe_vfs::lock::LOCKED, busy))?;
         let mut sources = Vec::with_capacity(spec.sources.len());
         for path in &spec.sources {
-            let cache = Cache::open(path).map_err(|error| format!("deck source {path}: {error}"))?;
+            let cache = Cache::open_unlocked(path).map_err(|error| format!("deck source {path}: {error}"))?;
             let info = cache.info();
             let top_bbox = cache.cell_bbox(info.top_cell)?;
             sources.push(DeckSource {
@@ -546,6 +554,7 @@ impl Deck {
             layers: spec.layers.into_iter().map(|layer| (layer.out, layer)).collect(),
             placements,
             budget_bytes,
+            _lock: lock,
         })
     }
 

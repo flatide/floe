@@ -523,6 +523,16 @@ pub struct Cache {
     representatives: std::sync::OnceLock<Option<std::sync::Arc<floe_vfs::representatives::File>>>,
     /// The cells' cover (Cache::cell_cover), made on first use
     cell_cover: std::sync::Mutex<CoverSlot>,
+    /// this reader's lock on the cache (floe_vfs::lock): a run rebuilding
+    /// it whole is refused while the cache is open
+    _lock: floe_vfs::lock::ReaderGuard,
+}
+
+/// A cache folder's lock key, through a symbolic link (the adapter hands
+/// renderd an alias when the real path has whitespace) to the real folder.
+pub(crate) fn cache_lock_key(dir: &str) -> floe_vfs::lock::Key {
+    let real = std::fs::canonicalize(dir).ok().and_then(|p| p.to_str().map(str::to_string)).unwrap_or_else(|| dir.to_string());
+    floe_vfs::lock::key(floe_vfs::lock::Kind::Vfs, &real)
 }
 
 /// Cache::cell_cover: the table, or when it was last looked for in vain
@@ -703,7 +713,23 @@ struct OccDensitySlot {
 }
 
 impl Cache {
+    /// Open a cache as its reader (floe_vfs::lock): refused - the error
+    /// starting with floe_vfs::lock::LOCKED - while a run rebuilds it whole.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, String> {
+        let path = path.as_ref();
+        let dir = path
+            .to_str()
+            .ok_or_else(|| format!("cache path is not UTF-8: {}", path.display()))?;
+        let lock = floe_vfs::lock::readers(&[cache_lock_key(dir)], &floe_vfs::lock::reader_label("floe-renderd"))
+            .map_err(|busy| format!("{}{}", floe_vfs::lock::LOCKED, busy))?;
+        let mut cache = Self::open_unlocked(path)?;
+        cache._lock = lock;
+        Ok(cache)
+    }
+
+    /// Open a cache without taking its lock (a deck takes its sources'
+    /// together: one registration per folder).
+    pub(crate) fn open_unlocked(path: impl AsRef<Path>) -> Result<Self, String> {
         let path = path.as_ref();
         let dir = path
             .to_str()
@@ -720,6 +746,7 @@ impl Cache {
             held_layers: std::sync::Mutex::new(std::collections::HashMap::new()),
             representatives: std::sync::OnceLock::new(),
             cell_cover: std::sync::Mutex::new(CoverSlot::default()),
+            _lock: floe_vfs::lock::ReaderGuard::default(),
         })
     }
 

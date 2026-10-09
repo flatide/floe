@@ -52,7 +52,7 @@ GATES="unit unit_vfs unit_render index_cli vfs_profile floe2 rust_scan \
 rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage \
 occupancy vfs_hier vfs_lifecycle vfs_marker vfs_split vfs_text \
 render_goldens render_speckle render_frames drc_ice svrf oasis_shapes \
-jobdeck representatives gen_main01 fit_budget sub_cut_box shape_cut write_once layer_decode area_true density_stack cell_tree rust_renderer klayout"
+jobdeck representatives gen_main01 fit_budget sub_cut_box shape_cut write_once layer_decode area_true density_stack cell_tree index_lock rust_renderer klayout"
 # (unit_renderd is unit's renderd part, as unit_vfs and unit_render are)
 GATES=$(echo "$GATES" | sed 's/unit_render /unit_render unit_renderd /')
 alias_gates() {
@@ -61,7 +61,7 @@ alias_gates() {
         planner)  echo "unit_vfs occupancy jobdeck rust_renderer vfs_hier vfs_lifecycle fit_budget sub_cut_box shape_cut" ;;
         occ)      echo "unit_vfs occupancy" ;;
         render)   echo "unit_render unit_renderd rust_renderer representatives fit_budget sub_cut_box shape_cut write_once layer_decode area_true density_stack cell_tree render_goldens render_speckle render_frames klayout" ;;
-        indexer)  echo "unit_vfs index_cli rust_scan rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage vfs_split vfs_text vfs_marker representatives cell_tree" ;;
+        indexer)  echo "unit_vfs index_cli rust_scan rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage vfs_split vfs_text vfs_marker representatives cell_tree index_lock" ;;
         python)   echo "index_cli vfs_profile floe2 drc_ice svrf gen_main01" ;;
         deck)     echo "jobdeck occupancy" ;;
         *)        echo "" ;;
@@ -74,7 +74,7 @@ alias_gates() {
 # page budget's refusal at cut 0 among them) and the picture gates.
 RENDER_GATES="unit_render unit_renderd rust_renderer jobdeck occupancy \
 fit_budget sub_cut_box shape_cut write_once layer_decode area_true \
-density_stack cell_tree representatives oasis_shapes floe2 klayout"
+density_stack cell_tree index_lock representatives oasis_shapes floe2 klayout"
 # The planner feeds every one of those, and the plan CLI's gates.
 PLAN_GATES="unit_vfs $RENDER_GATES vfs_hier vfs_lifecycle vfs_marker \
 vfs_split vfs_text vfs_profile"
@@ -140,16 +140,19 @@ gates_for() {
         floe/cache.py|floe/cachepath.py)
             echo ALL ;;
         floe/gui.py|floe/view_policy.py|floe/service.py|floe/viewport.py|floe/hangul.py|floe/fillpat.py|floe/coverage.py|floe/instance.py|floe/shots.py|floe/fe_embed.py|floe/*.def)
-            echo "rust_renderer floe2 jobdeck density_stack" ;;
+            echo "rust_renderer floe2 jobdeck density_stack index_lock" ;;
+        floe/indexlock.py)
+            # the cache locks' Python side (rust/vfs/src/lock.rs's twin)
+            echo "index_lock jobdeck occupancy cell_tree drc_ice rust_renderer index_cli" ;;
         floe/render.py|floe/vfsclient.py)
             # the frozen KLayout shell: the oracle's side
             echo "render_goldens render_speckle render_frames vfs_render vfs_hier vfs_lifecycle floe2 klayout" ;;
         floe/jobdeck/*)
-            echo "jobdeck occupancy rust_renderer" ;;
+            echo "jobdeck occupancy rust_renderer index_lock" ;;
         floe/drc.py|floe/svrf.py)
             echo "drc_ice svrf" ;;
         floe/cli.py|floe/product.py|floe/__main__.py|floe2/*)
-            echo "python jobdeck occupancy cell_tree" ;;
+            echo "python jobdeck occupancy cell_tree index_lock" ;;
         *)
             echo ALL ;;
     esac
@@ -513,6 +516,11 @@ if gate density_stack; then RAN="$RAN density_stack"; lap density_stack
 # the inline / missing-summary / live-pickup contract
 if gate cell_tree; then RAN="$RAN cell_tree"; lap cell_tree
     .venv/bin/python tools/validate_cell_tree.py; fi
+# index locks (rust/vfs/src/lock.rs, floe/indexlock.py): a run writing a
+# cache refuses another (whoever runs it), a whole rebuild refuses its
+# readers and is refused by them, additions go beside readers on one host
+if gate index_lock; then RAN="$RAN index_lock"; lap index_lock
+    .venv/bin/python tools/validate_index_lock.py; fi
 # in-tree CPU renderer: Python queue contract plus independent
 # KLayout pixel oracle at deterministic serial/parallel settings
 if gate rust_renderer; then RAN="$RAN rust_renderer"; lap rust_renderer

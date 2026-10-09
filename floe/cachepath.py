@@ -64,11 +64,28 @@ def migration_enabled():
         "off", "0", "no")
 
 
-def _rename(old, new, what):
+def _rename(old, new, what, kind):
     """Rename a legacy cache/pack in place; the path that holds it
-    afterwards (the legacy one when the rename could not be done)."""
+    afterwards (the legacy one when the rename could not be done). Only
+    with the target's locks free (floe/indexlock.py; the legacy and the
+    current name share one): the rename would move it from under its
+    readers and a run writing it - then the legacy path is used as is."""
     if not migration_enabled():
         return old
+    from . import indexlock
+    lock = indexlock.try_writer(kind, new, full=True,
+                                what="floe (legacy name rename)")
+    if lock is None:
+        if old not in _reported:
+            _reported.add(old)
+            sys.stderr.write("[floe] %s kept at its pre-2026-09-16 name "
+                             "(in use or being indexed): %s\n" % (what, old))
+        return old
+    with lock:
+        return _rename_locked(old, new, what)
+
+
+def _rename_locked(old, new, what):
     try:
         os.rename(old, new)
     except FileNotFoundError:
@@ -93,7 +110,7 @@ def find_vfs_cache(src):
         return new
     old = legacy_vfs_cache_dir(src)
     if os.path.isfile(os.path.join(old, "meta.json")):
-        return _rename(old, new, "VFS cache")
+        return _rename(old, new, "VFS cache", "vfs")
     return None
 
 
@@ -116,7 +133,7 @@ def find_pack(db):
         return new
     old = legacy_pack_path(db)
     if os.path.isfile(old) and _is_pack(old):
-        return _rename(old, new, "DRC pack")
+        return _rename(old, new, "DRC pack", "pack")
     return None
 
 

@@ -62,6 +62,10 @@ pub fn vfs_cmd(args: &[String]) {
     // Gate-only fault injection is still explicit CLI state so test
     // behavior never depends on the caller's shell environment.
     let mut kill_at: Option<String> = None;
+    // Gate-only stop after the cache's locks are taken (`--hold-at
+    // locked:<file>` waits for <file>), so tools/validate_index_lock.py can
+    // race a second run against a real one - CLI state like --kill-at.
+    let mut hold_at: Option<String> = None;
     // coverage bitplanes are optional: off by default (extra build
     // time, and the viewer defaults to coverage off), --coverage to
     // include, --coverage-only to add design.ovc to an existing cache
@@ -256,6 +260,10 @@ pub fn vfs_cmd(args: &[String]) {
                 kill_at = Some(args[i + 1].clone());
                 i += 2;
             }
+            "--hold-at" => {
+                hold_at = Some(args[i + 1].clone());
+                i += 2;
+            }
             "--slow-cell-s" => {
                 slow_cell_s =
                     args[i + 1].parse().expect("slow cell seconds");
@@ -407,6 +415,33 @@ pub fn vfs_cmd(args: &[String]) {
     // 150 MB chip): a heartbeat every 10 s per layer, one line per
     // slow or summary-less layer
     occ_opts.progress = Some(|m: &str| eprintln!("[vfs] occupancy {}", m));
+    // the cache's locks (floe_vfs::lock; user 2026-10-09: a file being
+    // indexed or used is refused to another run), taken before the source
+    // is read so a refused run ends in seconds: a whole build excludes the
+    // readers until its commit marker, an additive run only other writers
+    // (and readers on other hosts). A profile run writes no cache.
+    let mut lock = if profiling {
+        floe_vfs::lock::WriterGuard::default()
+    } else {
+        if let Some(parent) = std::path::Path::new(&outdir).parent().filter(|p| !p.as_os_str().is_empty()) {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let (mode, what) = if coverage_only {
+            (floe_vfs::lock::Mode::Additive, "floe-index vfs --coverage-only")
+        } else if occupancy_only {
+            (floe_vfs::lock::Mode::Additive, "floe-index vfs --occupancy-only")
+        } else if representatives_only {
+            (floe_vfs::lock::Mode::Additive, "floe-index vfs --representatives-only")
+        } else if frontier_only {
+            (floe_vfs::lock::Mode::Additive, "floe-index vfs --frontier-only")
+        } else {
+            (floe_vfs::lock::Mode::Full, "floe-index vfs")
+        };
+        lock_writer(floe_vfs::lock::Kind::Vfs, &outdir, mode, what)
+    };
+    if let Some(spec) = hold_at.as_deref() {
+        gate_hold(spec, "locked");
+    }
     if frontier_only {
         let t0 = std::time::Instant::now();
         let v = floe_vfs::Vfs::open(&outdir).unwrap_or_else(|e| {
@@ -695,6 +730,7 @@ pub fn vfs_cmd(args: &[String]) {
             "design.ovp",
             "design.ovt",
             "design.ovc",
+            "design.ovc.tmp",
             "design.ovo",
             "design.ovo.tmp",
             "design.ovr",
@@ -711,6 +747,7 @@ pub fn vfs_cmd(args: &[String]) {
             "skeleton.oas",
             "texts.tsv",
             "meta.json",
+            "meta.json.tmp",
         ] {
             let _ = std::fs::remove_file(format!("{}/{}", outdir, f));
         }
@@ -794,6 +831,12 @@ pub fn vfs_cmd(args: &[String]) {
             "[vfs] commit design.ovm ({})",
             fmt_size(ovm_bytes.len() as u64)
         );
+        // the cache is whole: readers may open it while the occupancy
+        // density is added (additive - other writers stay out)
+        lock.release_use();
+        if let Some(spec) = hold_at.as_deref() {
+            gate_hold(spec, "committed");
+        }
         if ovs {
             // the occupancy density (additive, outside the marker protocol
             // like design.ovh), from the committed index: the parse and the
@@ -2255,6 +2298,9 @@ pub fn ovs_cmd(args: &[String]) {
         eprintln!("usage: floe-index ovs <cache> [--um F] [--jobs N] [--roots F]");
         std::process::exit(2);
     });
+    // design.ovs and its cells' files are added beside the others
+    // (floe_vfs::lock): other writers stay out
+    let _lock = lock_writer(floe_vfs::lock::Kind::Vfs, &dir, floe_vfs::lock::Mode::Additive, "floe-index ovs");
     let started = std::time::Instant::now();
     // where the build is (user 2026-10-07: "no log while ovs indexes - 11
     // minutes into the real chip and no telling how far it got")
@@ -2432,6 +2478,9 @@ pub fn hier_cmd(args: &[String]) {
         eprintln!("usage: floe-index hier <cache> [--check]");
         std::process::exit(2);
     });
+    // design.ovh is added beside the others (floe_vfs::lock): other writers
+    // stay out; --check only reads
+    let _lock = (!check).then(|| lock_writer(floe_vfs::lock::Kind::Vfs, &dir, floe_vfs::lock::Mode::Additive, "floe-index hier"));
     let ovm_path = format!("{}/design.ovm", dir);
     let ovm = floe_ovm::Ovm::open(&ovm_path).unwrap_or_else(|e| {
         eprintln!("hier: {} (build the cache first)", e);
@@ -2654,8 +2703,8 @@ fn write_coverage(doc: &Doc, outdir: &str, jobs: usize) {
     let tc = std::time::Instant::now();
     let ovc =
         floe_vfs::coverage::write_ovc(doc, &doc.layer_order, jobs);
-    std::fs::write(format!("{}/design.ovc", outdir), &ovc)
-        .expect("write ovc");
+    // replaced whole (--coverage-only adds it while readers may be in)
+    write_replacing(&format!("{}/design.ovc", outdir), &ovc).expect("write ovc");
     eprintln!(
         "[vfs] coverage {} ({:.1}s)",
         fmt_size(ovc.len() as u64),
@@ -2783,7 +2832,20 @@ fn patch_meta_frontier(path: &str, frontier: &str) {
     assert!(end > open, "unbalanced frontier object");
     let out =
         format!("{}{}{}", &meta[..open], frontier, &meta[end..]);
-    std::fs::write(path, out).expect("write meta");
+    // replaced whole: a viewer opening the cache meanwhile reads the old
+    // file or the new, never half of one
+    write_replacing(path, out.as_bytes()).expect("write meta");
+}
+
+/// Write `path` through `<path>.tmp` and a rename (a reader sees the old
+/// file or the new one) - run under the cache's writer lock, which keeps
+/// the temporary name to this run.
+fn write_replacing(path: &str, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = format!("{}.tmp", path);
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
 }
 
 /// meta.json: the viewer-facing summary (dbu/bbox/grid/layers+
@@ -8721,6 +8783,13 @@ pub fn vfsd_cmd(args: &[String]) {
         }
     }
     let dir = dir.expect("ovm dir");
+    // a reader of the cache (floe_vfs::lock): refused while a run rebuilds
+    // it whole; holds it against a rebuild for as long as it serves
+    let _lock = floe_vfs::lock::readers(&[floe_vfs::lock::key(floe_vfs::lock::Kind::Vfs, &dir)], &floe_vfs::lock::reader_label("floe-index vfsd"))
+        .unwrap_or_else(|busy| {
+            eprintln!("[lock] {}", busy);
+            std::process::exit(floe_vfs::lock::BUSY_EXIT);
+        });
     let v = floe_vfs::Vfs::open(&dir).unwrap_or_else(|e| {
         eprintln!("{}", e);
         std::process::exit(1);
@@ -10671,6 +10740,39 @@ mod split_tests {
         assert_eq!(b.members, 2, "right: (495,0) and (1000,0)");
         assert!(a.bbox.x1 <= 504 + 10);
         assert!(b.bbox.x0 >= 495);
+    }
+}
+
+/// A writer's locks on `target` (floe_vfs::lock): a busy target ends this
+/// run with BUSY_EXIT and one line naming who is in the way (a lock that
+/// cannot be taken at all: exit 1 and how to fix it).
+pub(crate) fn lock_writer(
+    kind: floe_vfs::lock::Kind,
+    target: &str,
+    mode: floe_vfs::lock::Mode,
+    what: &str,
+) -> floe_vfs::lock::WriterGuard {
+    match floe_vfs::lock::writer(&floe_vfs::lock::key(kind, target), mode, what) {
+        Ok(guard) => guard,
+        Err(busy) => {
+            eprintln!("[lock] {}", busy);
+            std::process::exit(match busy {
+                floe_vfs::lock::Busy::Error { .. } => 1,
+                _ => floe_vfs::lock::BUSY_EXIT,
+            });
+        }
+    }
+}
+
+/// Gate-only: at stop `point` with `--hold-at <point>:<file>`, wait (at
+/// most two minutes) until <file> exists - the locks held meanwhile.
+pub(crate) fn gate_hold(spec: &str, point: &str) {
+    if let Some(flag) = spec.strip_prefix(point).and_then(|rest| rest.strip_prefix(':')) {
+        eprintln!("[vfs] --hold-at {point}");
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while !std::path::Path::new(flag).exists() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 }
 

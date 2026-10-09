@@ -116,6 +116,9 @@ fn main() -> ExitCode {
     // every run states which build it is (stderr - stdout carries the
     // wire protocol)
     eprintln!("[{}]", version());
+    // a deck holds a lock per source cache (floe_vfs::lock; a field deck
+    // has 667 sources, over the usual soft limit of 1024 files)
+    floe_render_core::lock::raise_open_file_limit();
     if let Err(error) = serve() {
         eprintln!("error: {error}");
         return ExitCode::FAILURE;
@@ -1534,10 +1537,7 @@ fn handle_open(
                     ),
                 );
             }
-            Err(error) => respond(
-                responses,
-                format!("error code=open message={}", wire_escape(&error)),
-            ),
+            Err(error) => respond(responses, open_error(&error)),
         }
         return;
     }
@@ -1586,10 +1586,22 @@ fn handle_open(
                 ),
             );
         }
-        Err(error) => respond(
-            responses,
-            format!("error code=open message={}", wire_escape(&error)),
+        Err(error) => respond(responses, open_error(&error)),
+    }
+}
+
+/// An open's error line: a cache being rebuilt whole by another run is
+/// `error code=locked` with the text also as UTF-8 hex (`text_hex`) - the
+/// message field turns whitespace into `_` and back, which would mangle
+/// names like `ws_kim` and `chip_top.oas` (floe_vfs::lock, user 2026-10-09).
+fn open_error(error: &str) -> String {
+    match error.strip_prefix(floe_render_core::lock::LOCKED) {
+        Some(text) => format!(
+            "error code=locked message={} text_hex={}",
+            wire_escape(text),
+            text.bytes().map(|b| format!("{b:02x}")).collect::<String>()
         ),
+        None => format!("error code=open message={}", wire_escape(error)),
     }
 }
 

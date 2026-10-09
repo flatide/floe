@@ -56,7 +56,8 @@ zip 안의 `dist/`에는 빌드된 바이너리도 들어 있다 — `--version`
 버전을 확인하고, 소스 버전과 다르면 아래처럼 다시 빌드한다.
 
 인터넷 되는 아무 곳에서 standalone 툴체인 두 개를 받아 반입한다
-(버전은 개발기와 맞춘 1.97.1 기준, 다른 stable도 무방):
+(버전은 개발기와 맞춘 1.97.1 기준, 다른 stable도 무방하되 **1.89 이상** — 색인 잠금이
+std `File::try_lock`을 쓴다, 2026-10-09):
 
 ```
 https://static.rust-lang.org/dist/rust-1.97.1-x86_64-unknown-linux-gnu.tar.xz

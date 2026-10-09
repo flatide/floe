@@ -16,6 +16,7 @@ import bisect
 import math
 import os
 import queue
+import signal
 import sys
 import time
 
@@ -23,6 +24,7 @@ from . import __version__
 from . import cache as cache_mod
 from . import drc as drc_mod
 from . import fillpat
+from . import indexlock
 from .hangul import HangulComposer, TextViewEditable
 from .product import name as product_name
 from .rust_render import _env_int, CELL_QUERY_KINDS
@@ -2814,7 +2816,21 @@ class Viewer:
         if _is_deck_path(path):
             from .jobdeck.viewer import deck_ready
             return deck_ready(path, ids=ids)
+        if self._index_busy(path) is not None:
+            return False
         return cache_mod.Cache(path).exists()
+
+    @staticmethod
+    def _index_busy(path):
+        """Why a layout cannot be opened now: another run rebuilds its
+        cache whole (floe/indexlock.py) - the refusal naming who, else
+        None. A jobdeck's sources are judged one by one when it opens."""
+        if _is_deck_path(path):
+            return None
+        from . import cachepath
+        return indexlock.state(indexlock.VFS,
+                               cachepath.vfs_cache_dir(path),
+                               users=False).opening_refusal()
 
     def _jobdeck_pick_levels(self, path, current=None, force=False):
         """Which mask levels to load (user call 2026-09-10: Calibre
@@ -2988,6 +3004,13 @@ class Viewer:
             except Exception as exc:
                 err = "ERR %s" % exc
             after_open(err)
+            return False
+        busy = self._index_busy(path)
+        if busy is not None:
+            # another run builds this cache: no second build (user
+            # 2026-10-09 - it would delete that run's files)
+            self._set_live_status(str(busy))
+            self._restore_keys()
             return False
         name = os.path.basename(path)
         if not self._index_consent(
@@ -6055,6 +6078,14 @@ class Viewer:
             return
         from . import cachepath
         outdir = cachepath.vfs_cache_dir(src)
+        cur = getattr(self, "cache", None)
+        if cur is not None and not getattr(cur, "is_jobdeck", False) and \
+                os.path.abspath(getattr(cur, "src", "") or "") == \
+                os.path.abspath(src):
+            # this viewer has the source open (its cache folder was
+            # removed by hand): its own render service's reader lock
+            # would refuse the rebuild (floe/indexlock.py) - let go first
+            self._apply_cache(None)
 
         def on_success():
             try:
@@ -7304,21 +7335,27 @@ class Viewer:
         self._center_on_parent(dlg)
         dlg.show_all()
         try:
+            # its own process group: a cancel ends what it started too (a
+            # jobdeck's per-source index runs), so their locks go with it
             proc = subprocess.Popen(
                 argv, stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, text=True, bufsize=1)
+                stderr=subprocess.STDOUT, text=True, bufsize=1,
+                start_new_session=True)
         except OSError as exc:
             dlg.destroy()
             self._set_live_status("%s failed: %s" % (fail, exc))
             return
-        state = {"cancelled": False}
+        state = {"cancelled": False, "lock": None}
 
         def on_response(_d, _resp):
             state["cancelled"] = True
             try:
-                proc.terminate()
+                os.killpg(proc.pid, signal.SIGTERM)
             except OSError:
-                pass
+                try:
+                    proc.terminate()
+                except OSError:
+                    pass
 
         dlg.connect("response", on_response)
 
@@ -7344,6 +7381,10 @@ class Viewer:
                                                     self._restore_keys()))
                 self._set_live_status(
                     "%s cancelled" % fail if state["cancelled"]
+                    # refused: another run indexes it, or someone has it
+                    # open - the [lock] line says who
+                    else state["lock"] if (rc == indexlock.BUSY_EXIT
+                                           and state["lock"])
                     else "%s failed (rc %d)" % (fail, rc))
                 if not state["cancelled"] and on_failure is not None:
                     on_failure(rc)
@@ -7355,6 +7396,8 @@ class Viewer:
 
         def pump():
             for line in proc.stdout:
+                if line.startswith("[lock] "):
+                    state["lock"] = line[7:].strip()
                 GLib.idle_add(append, line)
             rc = proc.wait()
             GLib.idle_add(done, rc)

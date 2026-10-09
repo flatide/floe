@@ -10,6 +10,7 @@
 |---|---|---|---|
 | 레이아웃 인덱스 폴더 (VFS 캐시, `floe-index vfs` 산출) | **`.<src>.ice/`** — 소스와 같은 디렉터리의 숨김 폴더 | `chipA.oas` → `.chipA.oas.ice/` | `chipA.oas.floe/` |
 | Calibre DRC 결과 pack (`floe-index drc` 산출) | **`.<db>.tray`** — db와 같은 디렉터리의 숨김 파일 | `results.db` → `.results.db.tray` | `results.db.ice` |
+| 색인 잠금 (2026-10-09, §5) | **`.floe-lock/`** — 대상과 같은 디렉터리의 숨김 폴더, 대상마다 `<키>.build`·`<키>.use` | `.chipA.oas.ice/` → `.floe-lock/chipA.oas.vfs.build` | — |
 | DRC 리뷰 사이드카 (리뷰어별 waive·note) | `.<db>.waive.<user>`, `.<db>.notes.<user>.fe` — **db 이름** 기준 | `.results.db.waive.jkim` | 같음 (pack 이름에서 `.ice`를 벗겨 만들던 것을 db 이름 기준으로 바꿈; 결과는 동일) |
 
 - "숨김"은 기본 이름 앞에 `.`를 붙인 것이다. 별도 폴더로 옮기지 않는다.
@@ -72,3 +73,52 @@
 `grep -rn -E '"\.floe|\.floe/|"\.ice"' floe rust/cli/src tools`로 남은 접미사
 사용을 찾을 수 있다(제품명 'floe'가 든 임시 파일 접두어 `.floe-jobdeck-`,
 `.<name>.floe-shot-`, CSS 클래스 `.floe-*`는 무관).
+
+## 5. 잠금 `.floe-lock/` (2026-10-09, app 0.12.323 / RENDERD 0.12.297)
+
+사용자(2026-10-09): "동일 파일을 먼저 인덱싱하고 있거나 사용하고 있는 경우에는 다른
+사용자가 실행하더라도 리젝될 수 있어야 함."
+
+- **정본 코드:** `rust/vfs/src/lock.rs`(floe-index·renderd)와 `floe/indexlock.py`
+  (Python 쌍둥이). 두 곳은 같은 이름·형식·권한 규칙을 쓴다.
+- **잠금 수단:** 커널 권고 잠금 flock이다. 기다리지 않는다. 쥔 프로세스가 끝나거나
+  kill되면 커널이 푼다. Linux NFS는 flock을 서버의 POSIX 잠금으로 흉내 내므로
+  호스트 사이에서도 맞물린다.
+- **키:** 원본 이름과 종류로 정한다. 구 이름도 같은 키를 쓴다.
+
+  | 대상 | 키 | 같은 키를 쓰는 구 이름 |
+  |---|---|---|
+  | `.X.oas.ice/` | `X.oas.vfs` | `X.oas.floe/` |
+  | `.X.db.tray` | `X.db.pack` | `X.db.ice` |
+  | `deck.cal.rules.json` | `deck.cal.rules` | — |
+
+  명시 outdir·out은 그 이름 뒤에 `.vfs`·`.pack`·`.rules`를 붙인다.
+- **파일:**
+  - `<키>.build`: 그 대상을 쓰는 모든 실행이 배타로 쥔다. 내용은 쥔 사람이다
+    (`who`·`from`·`host`·`pid`·`since`·`what`).
+    - `who`는 `FLOE_REVIEWER`, 없으면 계정이다. 공용 계정이라 계정만으로는 누구인지
+      모른다.
+    - `from`은 DISPLAY 호스트나 SSH 클라이언트다.
+  - `<키>.use`: 읽는 쪽(renderd, vfsd, DRC 팩 리더)이 공유로, 통째로 다시 만드는
+    실행이 배타로 쥔다. 배타는 커밋 표시까지다.
+  - `use.<host>.<pid>.<n>`: 읽는 쪽의 등록이다(프로세스·폴더마다 하나, 쥔 키 목록).
+    - 주인이 배타로 잠근다. 임시 이름으로 쓰고 잠근 뒤 rename한다.
+    - 잠글 수 있는 등록은 죽은 주인의 것이다. 무시하고, 지울 수 있으면 지운다.
+- **지우지 않는다.** `.build`·`.use`를 새로 만들면 두 번째 잠금이 되어, 실행 중인
+  쪽과 서로 못 본다. 운영 규칙: **`.floe-lock`을 지우지 말 것.**
+- **권한:** 놓인 폴더의 group/other 쓰기 비트와 setgid를 따르고, 공유 폴더면 sticky
+  비트를 둔다. 폴더보다 넓히지 않는다(0775 폴더 → 01775 / 0664, 0755 → 0755 /
+  0644).
+  - 배타 잠금은 읽기쓰기로 연다. NFS의 배타 잠금은 쓰기 권한이 필요하다.
+  - 읽는 쪽은 읽기 전용으로 연다.
+- **대비책:**
+  - 읽는 쪽은 잠금을 만들 수 없는 폴더(읽기 전용)이거나 열린 파일 한도를 넘으면
+    잠금 없이 연다.
+  - 쓰는 쪽은 잠금 파일을 읽기쓰기로 열 수 없으면 종료 1과 고치는 법을 알린다.
+  - flock 미지원(ENOLCK·EOPNOTSUPP·ENOSYS)이면 경고 한 줄을 남기고 잠금 없이
+    진행한다.
+  - NFS `nolock`·`local_lock=` 마운트면 처음 한 번 "이 호스트 안에서만"이라고
+    경고한다(`/proc/mounts`).
+  - 킬 스위치 `FLOE_LOCK=off`.
+- 누가 무엇을 쥐는지(명령별)는 SPEC-INDEXER §4.5, 뷰어의 동작은 SPEC-VIEWER를 본다.
+  게이트는 `index_lock`이다.

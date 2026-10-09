@@ -168,22 +168,33 @@ class SourceInfo:
     error: str = ""
     indexed: bool = False      # the VFS cache exists and is not stale
     cache_dir: str = ""
+    # another run rebuilds the cache whole (floe/indexlock.py): who, as
+    # the open's refusal says it - the source is left out, not failed
+    busy: str = ""
 
     def ok(self) -> bool:
         return self.status == STATUS_OK and self.dbu is not None
 
 
 def _cache_state(path: str):
-    """(indexed, cache_dir) for a source, via the floe cache layout."""
+    """(indexed, cache_dir, busy) for a source, via the floe cache
+    layout - a cache another run rebuilds whole is not indexed, and
+    `busy` says who (floe/indexlock.py)."""
     try:
+        from .. import cachepath, indexlock
+        refusal = indexlock.state(indexlock.VFS,
+                                  cachepath.vfs_cache_dir(path),
+                                  users=False).opening_refusal()
+        if refusal is not None:
+            return False, cachepath.vfs_cache_dir(path), str(refusal)
         from ..cache import Cache
         c = Cache(path)
         if not c.exists():
-            return False, c.dir
+            return False, c.dir, ""
         c.load()
-        return bool(c.meta.get("vfs") and not c.is_stale()), c.dir
+        return bool(c.meta.get("vfs") and not c.is_stale()), c.dir, ""
     except Exception:
-        return False, ""
+        return False, "", ""
 
 
 class SourceCatalog:
@@ -225,7 +236,7 @@ class SourceCatalog:
             except Exception as e:
                 info.status = STATUS_UNREADABLE
                 info.error = str(e)
-            info.indexed, info.cache_dir = _cache_state(path)
+            info.indexed, info.cache_dir, info.busy = _cache_state(path)
         info.probe_s = time.time() - t0
         self.infos[tc] = info
         return info

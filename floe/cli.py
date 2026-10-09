@@ -12,6 +12,7 @@ _builtin_print = print
 from . import __version__
 from .product import default_renderer, name as product_name
 from . import cachepath
+from . import indexlock
 
 APP = product_name()
 
@@ -158,6 +159,12 @@ def open_cache(src, args):
                 rec["chip"], rec["idx"], rec["tc"], rec["reason"],
                 rec["detail"]))
         return c
+    # a cache another run rebuilds whole is not there to open (its
+    # meta.json is gone or half-way): say who, not "no VFS cache"
+    busy = indexlock.state(indexlock.VFS,
+                           cachepath.vfs_cache_dir(src)).opening_refusal()
+    if busy is not None:
+        _refuse_busy(busy)
     c = cache_mod.Cache(src)
     c.layout_mode = getattr(args, "layout_mode", None)
     if not c.exists():
@@ -171,6 +178,14 @@ def open_cache(src, args):
         print("[floe][warn] cache is outdated (source changed); "
               "rebuild: floe index --force", file=sys.stderr)
     return c
+
+
+def _refuse_busy(busy):
+    """End the run for a busy target (floe/indexlock.py): one line, as
+    floe-index says it, and exit 75 (the jobdeck index and the viewer read
+    that code as busy, not failed)."""
+    print("[lock] %s" % busy, file=sys.stderr, flush=True)
+    raise SystemExit(indexlock.BUSY_EXIT)
 
 
 def _vfs_region(c, x0, y0, x1, y1, layers):
@@ -310,7 +325,18 @@ def _discard_occupancy_tmp(outdir):
     """An interrupted or failed occupancy build leaves design.ovo.tmp
     (floe-index publishes by rename, so the previous design.ovo is
     intact); the wrapper removes the temp file so a cache never carries
-    a half-written summary (docs/OCCUPANCY_PLAN.ko.md §4)."""
+    a half-written summary (docs/OCCUPANCY_PLAN.ko.md §4). Only under the
+    cache's writer lock (floe/indexlock.py): once the run has ended,
+    another run may be writing the same names - its files are left be."""
+    lock = indexlock.try_writer(indexlock.VFS, outdir, full=False,
+                                what="floe index (temporary file cleanup)")
+    if lock is None:
+        return
+    with lock:
+        _discard_tmp_names(outdir)
+
+
+def _discard_tmp_names(outdir):
     for name in ("design.ovo.tmp", "design.ovr.tmp"):
         tmp = os.path.join(outdir, name)
         try:
@@ -436,7 +462,9 @@ def _run_rust_index(args, binary, coverage_only=False,
     except OSError as exc:
         raise SystemExit(f"floe: cannot run floe-index: {exc}")
     if result.returncode:
-        if not profiling:
+        # refused (another run writes the cache, or readers hold it):
+        # nothing of this run's to clean up
+        if not profiling and result.returncode != indexlock.BUSY_EXIT:
             _discard_occupancy_tmp(outdir)
         raise SystemExit(result.returncode)
 
@@ -574,6 +602,14 @@ def cmd_index(args):
         # reads the source, plans one cell and never names or touches outdir.
         return _run_rust_index(args, binary)
     outdir = cachepath.vfs_cache_dir(src)
+    # another run writing the cache refuses this one at once
+    # (floe/indexlock.py) - before the cache is looked at, where its
+    # half-written files would read as "not current, rerun with --force".
+    # Readers in the way are floe-index's to judge (a current cache's
+    # index is a no-op; a rebuild names them)
+    busy = indexlock.state(indexlock.VFS, outdir)
+    if busy.writing:
+        _refuse_busy(busy.writing_refusal(full=True))
     cachepath.find_vfs_cache(src)   # a pre-rename <src>.floe/ moves to outdir
     current, reason = _current_vfs_cache(src, outdir, binary)
     if representatives_only:
@@ -1195,6 +1231,9 @@ def _cache_ready(src, ids=None):
     if _is_deck(src):
         from .jobdeck.viewer import deck_ready
         return deck_ready(src, ids=ids)
+    if indexlock.state(indexlock.VFS,
+                       cachepath.vfs_cache_dir(src)).building:
+        return False   # the viewer opens empty and says who indexes it
     cache_dir = cachepath.find_vfs_cache(src)
     if cache_dir is None:
         return False
@@ -1780,7 +1819,7 @@ def _jobdeck_index(args, catalog):
                    1 for _, m in todo if m == "occupancy")
     if kept:
         print("[jobdeck] index     : %d source(s) already indexed" % kept)
-    failed = 0
+    failed = busy = 0
     started = time.time()
     for n, (tc, m) in enumerate(todo, 1):
         info = catalog.infos[tc]
@@ -1815,7 +1854,16 @@ def _jobdeck_index(args, catalog):
         elapsed = time.time() - started
         left = elapsed / n * (len(todo) - n)
         pos = "(%d/%d)" % (n, len(todo))
-        if res.returncode != 0:
+        if res.returncode == indexlock.BUSY_EXIT:
+            # another run indexes the source, or (a rebuild) someone has
+            # it open (floe/indexlock.py): not a failure of this deck -
+            # said with who, and the next source goes on
+            busy += 1
+            print("[jobdeck] %s : %s BUSY %s - another run or a viewer "
+                  "holds it (see the [lock] line above; %s elapsed, ~%s "
+                  "left)" % (label, pos, tc, _hms(elapsed), _hms(left)),
+                  flush=True)
+        elif res.returncode != 0:
             failed += 1
             print("[jobdeck] %s : %s FAILED %s (exit %d; %s elapsed, ~%s left)"
                   % (label, pos, tc, res.returncode, _hms(elapsed),
@@ -1824,9 +1872,11 @@ def _jobdeck_index(args, catalog):
             print("[jobdeck] %s : %s ok %s (%.1fs; %s elapsed, ~%s left)"
                   % (label, pos, tc, time.time() - t0, _hms(elapsed),
                      _hms(left)), flush=True)
-    print("[jobdeck] index     : %d built, %d failed, %d kept"
-          % (len(todo) - failed, failed, kept))
-    return 2 if failed else 0
+    # the busy count only when there are some (scripts read this line)
+    print("[jobdeck] index     : %d built, %d failed, %s%d kept"
+          % (len(todo) - failed - busy, failed,
+             "%d busy, " % busy if busy else "", kept))
+    return 2 if failed else indexlock.BUSY_EXIT if busy else 0
 
 
 def main(argv=None, *, prog=None, rust_only=None):
@@ -2460,6 +2510,10 @@ def main(argv=None, *, prog=None, rust_only=None):
             raise SystemExit(
                 "%s: --floe-reviewer must not be empty" % prog)
         os.environ["FLOE_REVIEWER"] = reviewer
+    # what this run's readers say they are in the cache locks
+    # (floe/indexlock.py): `floe2 view`, `floe2 render` - the writers name
+    # themselves
+    os.environ.setdefault("FLOE_LOCK_WHAT", "%s %s" % (prog, args.cmd))
     if rust_only and args.cmd == "index":
         legacy_flags = _legacy_index_options(args)
         if args.legacy or legacy_flags:

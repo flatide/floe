@@ -11,3 +11,4 @@ floe-ovm = { path = "../ovm" }
 floe-tiler = { path = "../tiler" }
 crc32fast = "1.4"
 flate2 = "1"
+libc = "0.2"

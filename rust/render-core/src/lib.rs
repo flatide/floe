@@ -70,3 +70,6 @@ pub use floe_vfs::hier::{dot_occ_decode, dot_page_occ, dot_page_spread, dot_page
 pub use floe_vfs::representatives::TreeOptions as RepresentativeOptions;
 
 pub use floe_vfs::hier::{DensityLayerMemo, DensityMask};
+/// the cross-process locks on caches (renderd answers a busy one as
+/// `error code=locked`)
+pub use floe_vfs::lock;
