@@ -150,7 +150,7 @@ gates_for() {
         floe/jobdeck/*)
             echo "jobdeck occupancy rust_renderer index_lock" ;;
         floe/drc.py|floe/svrf.py)
-            echo "drc_ice svrf" ;;
+            echo "drc_ice svrf index_lock" ;;
         floe/cli.py|floe/product.py|floe/__main__.py|floe2/*)
             echo "python jobdeck occupancy cell_tree index_lock" ;;
         *)

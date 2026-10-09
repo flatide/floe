@@ -2048,6 +2048,9 @@ pub fn svrf_cmd(args: &[String]) {
         return;
     }
     let out = out.unwrap_or_else(|| format!("{}.rules.json", deck));
+    // the sidecar's writer lock (floe_vfs::lock; user 2026-10-09): another
+    // run compiling to it refuses this one (they shared `<out>.tmp`)
+    let _lock = crate::vfs::lock_writer(floe_vfs::lock::Kind::Rules, &out, floe_vfs::lock::Mode::Additive, "floe-index svrf");
     if let Err(e) = write_atomic(&out, &d.to_json().dump()) {
         eprintln!("svrf: {}", e);
         std::process::exit(1);

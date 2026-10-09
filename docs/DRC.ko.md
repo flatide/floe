@@ -75,6 +75,23 @@ python -m floe render chip.oas --drc results.db \
 
 ## 2. pack `.<db>.tray` (v2, 레이아웃 버전 4) — 유일한 인덱스 포맷
 
+- **잠금**(2026-10-09, app 0.12.324; 사용자: "동일 파일을 먼저 인덱싱하고 있거나
+  사용하고 있는 경우에는 다른 사용자가 실행하더라도 리젝"; CACHE-NAMING §5).
+  - `floe-index drc`는 임시 파일을 쓸기 전에 팩의 build·use를 배타로 쥔다. 다른
+    실행이 팩을 만들고 있거나, 누가 리뷰로 팩을 열고 있으면 종료 75와 `[lock] …`
+    한 줄로 거절한다.
+    - 예전에는 두 빌드의 고정 임시 이름(`tmp0..N/tmpw/tmpb/tmpq`)이 겹쳤다.
+    - 시작할 때 쓸기가 상대의 임시 파일을 지웠다.
+    - 리뷰 중 재팩하면 그 리뷰의 waive 사이드카가 옆으로 치워졌다.
+  - 실패한 실행은 자기 임시 파일만 지운다. 게시는 끝의 rename이라 앞의 팩은
+    온전하다. 예전에는 읽을 수 없는 .db 같은 이른 오류에도 게시된 팩을 지웠다.
+  - 리더 `IcePack`은 연 동안 use를 공유로 쥐고 등록한다(`close()`에서 푼다). 팩을
+    통째로 다시 만드는 중이면 `indexlock.Busy`로 거절되고, `floe2 drc`·`render
+    --drc`는 75로 끝난다.
+  - 뷰어는 db를 바꾸거나 새 레이아웃을 열 때 옛 팩을 바로 닫는다(`_drc_release`).
+    IcePack은 순환 참조라 GC를 기다리면 언제 풀릴지 모른다.
+  - 같은 db를 다시 팩해야 하면(DRC를 다시 돌린 경우) 자기 리뷰를 먼저 놓는다.
+  - 다른 실행이 팩을 만드는 중이면 동의 창 대신 "being indexed by …"를 띄운다.
 - **자기완결**: 변환 후 .db 불필요. 크기 실측 원본의 1/3~1/4.5.
 - **좌표**: 파일순 64에러 블록 varint 델타 스트림. 레코드에 서수
   없음 — **에러 번호 = 전역 파일순 순번**(Calibre RVE 동일)이
@@ -211,6 +228,11 @@ python -m floe render chip.oas --drc results.db \
 추가. 좁은 pane에서는 줄바꿈(내용 잘림 금지 규약).
 
 ## 4. SVRF 룰 메타데이터 (.rules.json) — waive 판단 보조
+
+- **잠금**(2026-10-09): `floe-index svrf`는 출력에 쓰기 직전 그 출력의 build를 배타로
+  쥔다(키 `<deck>.rules`, CACHE-NAMING §5). 같은 출력으로 컴파일하는 다른 실행은
+  75로 거절된다. 예전에는 둘이 `<out>.tmp`를 함께 써서 결과가 섞일 수 있었다.
+  읽는 쪽은 한 번 읽고 닫으므로 use는 쥐지 않는다(교체는 rename).
 
 **서브셋 파서**(`floe-index svrf`, `rust/cli/src/svrf.rs` — 2026-09-29
 `floe/svrf.py`에서 이식, 파이썬 쪽은 사이드카 읽기(`load_rules`·

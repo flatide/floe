@@ -326,12 +326,18 @@ def main():
         fail("wild dir_off accepted")
     except ValueError:
         pass
+    # the reviews holding the pack let go before the re-pack: a pack a
+    # review has open refuses it (floe/indexlock.py, 2026-10-09)
+    ice.close()
+    auto.close()
     r = subprocess.run([BIN, "drc", db], capture_output=True, text=True)
     if r.returncode != 0:
         fail("re-index rc=%d" % r.returncode)
     again = drc.load_db(db)
     if not isinstance(again, drc.IcePack):
         fail("rebuilt pack not auto-picked")
+    # the results pack again, for the foreign-pack check below
+    ice = drc.IcePack(side, src_path=db, verify_src=True)
     print("D2 OK: auto-pick fresh, refuse stale + retired v1, "
           "ASCII fallback")
 

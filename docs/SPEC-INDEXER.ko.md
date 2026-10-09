@@ -266,6 +266,8 @@ CACHE-NAMING §5에 있다.
 | `vfs` 본 빌드 | 배타(끝까지) | 배타(원본을 읽기 전부터 `design.ovm` 커밋 직후까지; 뒤의 ovs 단계 동안은 열 수 있다) |
 | `vfs --occupancy-only/--representatives-only/--coverage-only/--frontier-only`, `hier`(`--check` 제외), `ovs` | 배타 | — (다른 호스트의 살아 있는 등록이 있으면 거절) |
 | `vfsd` | — | 공유 + 등록 |
+| `drc <db> [out]`(DRC 팩, 0.12.324) | 배타(임시 파일 쓸기 전부터) | 배타(팩 리더 `IcePack`이 연 동안은 거절) |
+| `svrf <deck> [-o out]`(0.12.324) | 배타(쓰기 직전; `--scan`은 없음) | — |
 
 - 덧붙이는 실행이 다른 호스트의 독자를 거절하는 이유는 다음과 같다. mmap한
   `design.ovh/.ovo/.ovr`을 다른 NFS 클라이언트가 rename으로 바꾸면, 서버가 옛 파일을

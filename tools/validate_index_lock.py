@@ -36,6 +36,13 @@ another user would (FLOE_REVIEWER=ws_kim_01):
       never refuse a writer; a deck of more sources than the open-file
       limit leaves room for opens unlocked; the viewer's index dialog
       runs in its own process group (a cancel ends what it started)
+  K8  a DRC results pack (.<db>.tray): a review holding it (drc.load_db)
+      refuses a re-pack naming it, closed it packs; the pack's build lock
+      held refuses `floe-index drc` and leaves the pack byte for byte, and
+      opening it (`floe2 drc`, the viewer) says "being indexed"; a failed
+      pack (an unreadable .db) leaves the published pack
+  K9  a rule deck's sidecar: its build lock held refuses `floe-index
+      svrf`, the rules file byte for byte
 
 usage: python tools/validate_index_lock.py
 """
@@ -463,6 +470,84 @@ class IndexLockTests(unittest.TestCase):
         source = inspect.getsource(gui.Viewer._index_modal)
         self.assertIn("start_new_session=True", source)
         self.assertIn("os.killpg(proc.pid, signal.SIGTERM)", source)
+
+
+class PackLockTests(unittest.TestCase):
+    """K8/K9: the DRC results pack and the rule deck's sidecar."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = TMP / "drc"
+        cls.dir.mkdir()
+        cls.db = cls.dir / "run.db"
+        run([sys.executable, ROOT / "tools" / "gen_drcdb.py", cls.db,
+             "--checks", "6", "--max-errors", "20", "--seed", "3"], ok=0)
+        floe_index("drc", cls.db, ok=0)
+        cls.pack = Path(cachepath.pack_path(str(cls.db)))
+
+    def setUp(self):
+        os.environ["FLOE_LOCK_RETRY_MS"] = "300"
+
+    def tearDown(self):
+        os.environ.pop("FLOE_LOCK_RETRY_MS", None)
+
+    def test_k8_a_review_holding_the_pack_refuses_a_repack(self):
+        from floe import drc
+        review = drc.load_db(str(self.db))
+        self.assertIsInstance(review, drc.IcePack)
+        try:
+            res = floe_index("drc", self.db)
+            self.assertEqual(res.returncode, 75, res.stderr)
+            line = lock_line(res)
+            self.assertIn("run.db is in use by %s" % HOLDER, line)
+            self.assertIn("pid %d" % os.getpid(), line)
+        finally:
+            review.close()
+        floe_index("drc", self.db, ok=0)
+
+    def test_k8_the_pack_build_lock_refuses_drc_and_its_readers(self):
+        from floe import drc
+        before = self.pack.read_bytes()
+        lock = indexlock.try_writer(indexlock.PACK, str(self.pack), full=True,
+                                    what="gate_holder pack", create=True)
+        self.addCleanup(lock.close)
+        res = floe_index("drc", self.db)
+        self.assertEqual(res.returncode, 75, res.stderr)
+        self.assertIn("run.db is being indexed by %s" % HOLDER, lock_line(res))
+        self.assertEqual(self.pack.read_bytes(), before, "the published pack is kept")
+        with self.assertRaises(indexlock.Busy) as ctx:
+            drc.load_db(str(self.db))
+        self.assertIn("open it when the index is done", str(ctx.exception))
+        res = floe2("drc", self.db)
+        self.assertEqual(res.returncode, 75, res.stderr)
+        self.assertIn("run.db is being indexed by %s" % HOLDER, lock_line(res))
+
+    def test_k8_a_failed_pack_keeps_the_published_one(self):
+        before = self.pack.read_bytes()
+        os.chmod(self.db, 0)
+        self.addCleanup(os.chmod, self.db, 0o644)
+        res = floe_index("drc", self.db)
+        self.assertEqual(res.returncode, 1, res.stderr)
+        self.assertEqual(self.pack.read_bytes(), before)
+        self.assertFalse([p for p in os.listdir(self.dir) if ".tray.tmp" in p])
+
+    def test_k9_the_rules_sidecars_build_lock_refuses_svrf(self):
+        deck = self.dir / "deck.cal"
+        deck.write_text("LAYER M1 31\nM1.W.1 { @ min width\n  INT M1 < 0.1 ABUT<90 SINGULAR REGION\n}\n")
+        floe_index("svrf", deck, ok=0)
+        rules = Path(str(deck) + ".rules.json")
+        before = rules.read_bytes()
+        lock = indexlock.try_writer(indexlock.RULES, str(rules), full=False,
+                                    what="gate_holder rules", create=True)
+        self.addCleanup(lock.close)
+        deck.write_text(deck.read_text() + "LAYER M2 32\n")
+        res = floe_index("svrf", deck)
+        self.assertEqual(res.returncode, 75, res.stderr)
+        self.assertIn("deck.cal.rules.json is being indexed by %s" % HOLDER, lock_line(res))
+        self.assertEqual(rules.read_bytes(), before)
+        lock.close()
+        floe_index("svrf", deck, ok=0)
+        self.assertNotEqual(rules.read_bytes(), before)
 
 
 def main():

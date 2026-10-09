@@ -42,6 +42,7 @@ import sys
 import time
 
 from . import cachepath
+from . import indexlock
 
 
 EDGE_RULER_OFFSET_PX = 14
@@ -577,11 +578,12 @@ class IcePack(object):
                  "_wcount", "_wcount_off", "_wchunk",
                  "_waive_path", "_waive_hdr",
                  "_notes", "_note_of", "_note_next", "_note_path",
-                 "_note_tag")
+                 "_note_tag", "_lock")
 
     def __init__(self, path, src_path=None, verify_src=False):
         self._wfd = None
         self._map = None
+        self._lock = None
         try:
             self._load(path, src_path, verify_src)
         except (struct.error, IndexError, OverflowError) as exc:
@@ -600,6 +602,12 @@ class IcePack(object):
         (idempotent; the object is unusable afterwards). The
         np.memmap section views hold their own mappings and are
         freed by GC."""
+        # the reader's lock on the pack (floe/indexlock.py) goes first: a
+        # re-pack may start the moment the review lets go of it
+        lock = getattr(self, "_lock", None)
+        self._lock = None
+        if lock is not None:
+            lock.close()
         wfd = getattr(self, "_wfd", None)
         self._wfd = None
         if wfd is not None:
@@ -624,6 +632,12 @@ class IcePack(object):
     def _load(self, path, src_path, verify_src):
         import mmap
         import numpy as np
+        # a reader of the pack (floe/indexlock.py; user 2026-10-09): refused
+        # (indexlock.Busy) while a run re-packs it, and holding it against
+        # a re-pack while open - a re-pack would move this review's waive
+        # sidecar aside under it
+        self._lock = indexlock.hold_readers(
+            indexlock.PACK, [path], indexlock.reader_label("floe DRC review"))
         with open(path, "rb") as f:
             head = f.read(_ICE_HEADER.size)
             if len(head) != _ICE_HEADER.size:

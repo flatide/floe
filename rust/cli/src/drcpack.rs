@@ -336,6 +336,25 @@ fn find_sync(data: &[u8], from: usize) -> usize {
     data.len()
 }
 
+/// Remove every `<out>.tmp*` (tmp0..N, tmpq, tmpb, tmpw) - a run's own
+/// temporaries, under the pack's writer lock (floe_vfs::lock): the
+/// start of a run sweeps a killed one's, a failed run its own.
+pub(crate) fn sweep_temps(out: &str) {
+    let p = std::path::Path::new(out);
+    let dir = match p.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => std::path::Path::new("."),
+    };
+    if let (Some(base), Ok(rd)) = (p.file_name(), std::fs::read_dir(dir)) {
+        let prefix = format!("{}.tmp", base.to_string_lossy());
+        for e in rd.flatten() {
+            if e.file_name().to_string_lossy().starts_with(&prefix) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+}
+
 fn temp_path(out: &str, id: usize) -> String {
     format!("{}.tmp{}", out, id)
 }
@@ -396,27 +415,9 @@ pub fn pack(
         .unwrap_or(0);
     // sweep temps a killed/cancelled previous run left behind -
     // they share this run's `<out>.tmp*` namespace (tmp0..N, tmpq,
-    // tmpb, tmpw)
-    {
-        let p = std::path::Path::new(out);
-        let dir = match p.parent() {
-            Some(d) if !d.as_os_str().is_empty() => d,
-            _ => std::path::Path::new("."),
-        };
-        if let (Some(base), Ok(rd)) =
-            (p.file_name(), std::fs::read_dir(dir))
-        {
-            let prefix = format!("{}.tmp", base.to_string_lossy());
-            for e in rd.flatten() {
-                if e.file_name()
-                    .to_string_lossy()
-                    .starts_with(&prefix)
-                {
-                    let _ = std::fs::remove_file(e.path());
-                }
-            }
-        }
-    }
+    // tmpb, tmpw); the pack's writer lock (drcice::drc_cmd) keeps
+    // another run out of it
+    sweep_temps(out);
     let map;
     let empty: [u8; 0] = [];
     let data: &[u8] = if src_size == 0 {

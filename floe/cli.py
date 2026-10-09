@@ -926,7 +926,10 @@ def _render_drc_errors(args, c):
     import queue as _queue
     from . import drc as drc_mod
     from .service import make_render_worker
-    d = drc_mod.load_db(args.drc)
+    try:
+        d = drc_mod.load_db(args.drc)
+    except indexlock.Busy as busy:   # its pack is being re-packed
+        _refuse_busy(busy)
     ci = _drc_rule_index(d, args.drc_rule)
     ch = d.checks[ci]
     idxs = _drc_err_spec(args.drc_err, len(ch.errors))
@@ -1369,7 +1372,10 @@ def _drc_rule_index(d, name):
 def cmd_drc(args):
     """Summarize a Calibre ASCII DRC results database."""
     from . import drc as drc_mod
-    d = drc_mod.load_db(args.db)
+    try:
+        d = drc_mod.load_db(args.db)
+    except indexlock.Busy as busy:   # its pack is being re-packed
+        _refuse_busy(busy)
     if args.rules:
         # scripting surface: JSON array, one object per rule.
         # ProperTee workflow (user call 2026-08-19): redirect to a
