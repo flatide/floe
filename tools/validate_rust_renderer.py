@@ -357,8 +357,11 @@ worker = make_render_worker(Cache())
 assert worker.__class__.__name__ == "RustRenderWorker"
 assert cache.db.__class__.__name__ == "_LazyKLayoutDb"
 assert all(not name.startswith("klayout") for name in sys.modules)
-assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
-                      "src": {"size": 1}}) == (256, 1024)
+# the frozen shell's view policy (the floe2 viewer no longer reads it, P2d)
+from floe.view_policy import live_caps
+assert live_caps({"grid": {"nx": 1, "ny": 1},
+                  "src": {"size": 1}}) == (256, 1024)
+assert not hasattr(gui, "live_caps")
 '''
             environment = os.environ.copy()
             environment.update({

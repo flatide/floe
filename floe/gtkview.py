@@ -13,9 +13,9 @@ os.environ["FLOE_PRODUCT"] = "floe2"
 
 
 def main(argv=None):
-    from .cli import main as cli_main
-    argv = sys.argv[1:] if argv is None else list(argv)
-    return cli_main(["view"] + argv, prog="floe2", rust_only=True)
+    # the product's view front (P2d): not the frozen shell's floe/cli.py
+    from .viewcli import main as view_main
+    return view_main(sys.argv[1:] if argv is None else list(argv))
 
 
 if __name__ == "__main__":

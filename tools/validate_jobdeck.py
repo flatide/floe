@@ -1262,9 +1262,47 @@ class ViewerCacheTests(unittest.TestCase):
             c.close()
 
 
+# What the floe2 viewer must not import (P2d: the GTK viewer is the UI
+# alone; the decisions are floe2 gtk-service's): the frozen shell's and
+# the Python implementations' modules, and KLayout.
+PRODUCT_FORBIDDEN = ("floe.cache", "floe.cachepath", "floe.indexlock",
+                     "floe.drc", "floe.svrf", "floe.jobdeck", "floe.shots",
+                     "floe.fe_embed", "floe.render", "floe.viewport",
+                     "floe.coverage", "floe.view_policy", "floe.cli",
+                     "floe.service", "klayout")
+
+
+def product_blocker(folder):
+    """A sitecustomize that makes any of PRODUCT_FORBIDDEN fail to import:
+    PYTHONPATH=<folder> in the viewer's environment."""
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    # the interpreter's own sitecustomize (Homebrew's adds the
+    # site-packages PyGObject lives in) runs first: this one shadows it
+    (folder / "sitecustomize.py").write_text(
+        "import os, sys\n"
+        "_here = os.path.dirname(os.path.abspath(__file__))\n"
+        "for _d in sys.path:\n"
+        "    _c = os.path.join(_d or '.', 'sitecustomize.py')\n"
+        "    if os.path.abspath(_d or '.') != _here and os.path.isfile(_c):\n"
+        "        exec(compile(open(_c).read(), _c, 'exec'),\n"
+        "             {'__file__': _c, '__name__': 'sitecustomize'})\n"
+        "        break\n"
+        "BLOCK = %r\n"
+        "class _Block:\n"
+        "    def find_spec(self, name, path=None, target=None):\n"
+        "        if any(name == b or name.startswith(b + '.') for b in BLOCK):\n"
+        "            raise ImportError('the floe2 viewer imported %%s' %% name)\n"
+        "        return None\n"
+        "sys.meta_path.insert(0, _Block())\n" % (PRODUCT_FORBIDDEN,))
+    return str(folder)
+
+
 class GuiSmokeTests(unittest.TestCase):
     """`floe2 view deck.jb` really opens: GTK start, deck worker open,
-    first composite frame displayed (FLOE_GUI_SMOKE_MS)."""
+    first composite frame displayed (FLOE_GUI_SMOKE_MS) - and (P2d) with
+    every module of PRODUCT_FORBIDDEN unimportable: the viewer, its deck,
+    its layout and its DRC review run on floe2 gtk-service alone."""
 
     def test_view_smoke(self):
         try:
@@ -1283,7 +1321,11 @@ class GuiSmokeTests(unittest.TestCase):
                "FLOE_GUI_SMOKE_MS": "8000",
                # the Calibre-style level question (user call
                # 2026-09-10) is answered for the gate
-               "FLOE_JOBDECK_LEVELS": "all"}
+               "FLOE_JOBDECK_LEVELS": "all",
+               # the blocker first, the interpreter's own paths kept (gi)
+               "PYTHONPATH": os.pathsep.join(filter(None, (
+                   product_blocker(TMP / "blocker"), str(ROOT),
+                   os.environ.get("PYTHONPATH"))))}
         run_floe2("index", CLI / "test.jb", "--jobs", "2", env=env, ok=0)
         res = run_floe2("view", "--multi", CLI / "test.jb", env=env, ok=0,
                         timeout=120)
@@ -1296,6 +1338,23 @@ class GuiSmokeTests(unittest.TestCase):
         res = run_floe2("view", "--multi", CLI / "test.jb", "--level", "1,3",
                         env=env, ok=0, timeout=120)
         self.assertNotIn("no GUI frame", res.stderr + res.stdout)
+        # a layout with a DRC review open at start
+        db = CLI / "smoke_drc.db"
+        done = subprocess.run(
+            [sys.executable, "-B", str(ROOT / "tools" / "gen_drcdb.py"), db,
+             "--checks", "6", "--max-errors", "20", "--seed", "5"],
+            capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        done = subprocess.run([env["FLOE_INDEX_BIN"], "drc", str(db)],
+                              capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        res = run_floe2("view", "--multi", CLI / "chipA.oas", "--drc", db,
+                        env=dict(env, FLOE_REVIEWER="smoke"), ok=0,
+                        timeout=120)
+        self.assertNotIn("no GUI frame", res.stderr + res.stdout)
+        self.assertNotIn("the floe2 viewer imported", res.stderr + res.stdout)
+        self.assertTrue((CLI / ".smoke_drc.db.waive.smoke").is_file(),
+                        "the review's sidecar is the service's")
 
 
 class JobdeckChipHierarchyTests(unittest.TestCase):
@@ -1526,7 +1585,11 @@ class ViewerIndexArgvTests(unittest.TestCase):
         import inspect
         from floe import gui
         src = inspect.getsource(gui)
-        self.assertIn('"--jobs", "12", "--no-lod"', src)
+        # a layout: floe2 runs its Rust command line, which decides the
+        # cache and its options (P2d); the frozen floe floe-index vfs
+        self.assertIn('argv = [find_floe2(), "index", src, "--jobs", "12"]',
+                      src)
+        self.assertIn('"--no-lod"', src)
         self.assertNotIn('"--occupancy"', src)
         self.assertIn("cachepath.vfs_cache_dir(src)", src)
         # a jobdeck load runs `floe2 index deck.jb`: the Rust command line

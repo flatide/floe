@@ -143,8 +143,17 @@ fi
 # floe2's command line is the Rust runtime/bin/floe2 (step 5b), which
 # starts the viewer through this interpreter
 SITE="$("$PYBIN" -c 'import site;print(site.getsitepackages()[0])')"
-rm -rf "$SITE/floe"; cp -r "$REPO/floe" "$SITE/floe"
-rm -rf "$SITE/floe2"
+# The floe2 bundle carries the viewer alone (P2d): its UI and the client of
+# floe2 gtk-service - every other module is the frozen shell's or a Python
+# implementation kept as the gates' oracle. The KLayout bundle carries all.
+FLOE2_PRODUCT_FILES="__init__.py gtkview.py viewcli.py gui.py gtkservice.py rust_render.py vfsclient.py instance.py product.py hangul.py fillpat.py colornames.def fillpatterns.def"
+rm -rf "$SITE/floe" "$SITE/floe2"
+if [ "$FLOE_PORTABLE_KLAYOUT" = 1 ]; then
+    cp -r "$REPO/floe" "$SITE/floe"
+else
+    mkdir -p "$SITE/floe"
+    for f in $FLOE2_PRODUCT_FILES; do cp "$REPO/floe/$f" "$SITE/floe/$f"; done
+fi
 find "$SITE/floe" -name '__pycache__' -type d -prune -exec rm -rf {} +
 
 # -- 5. slim: build-time payloads never touched at runtime --------------
@@ -274,7 +283,8 @@ for why, p in bad:
     print("FAIL", why, "(> ceiling 2.%d)" % ceiling, os.path.relpath(p, root))
 must = ["lib/libgtk-3.so.0", "lib/girepository-1.0/Gtk-3.0.typelib",
         "lib/python%s/site-packages/gi/__init__.py" % pyver,
-        "lib/python%s/site-packages/floe/cli.py" % pyver,
+        "lib/python%s/site-packages/floe/gui.py" % pyver,
+        "lib/python%s/site-packages/floe/viewcli.py" % pyver,
         "bin/floe2",        # the product command line (Rust)
         "bin/floe-index",   # vfs/index runtime
         "bin/floe-renderd", # default multicore CPU renderer

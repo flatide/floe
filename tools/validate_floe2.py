@@ -341,6 +341,28 @@ print(json.dumps([_renderer_backend(), instance.APP,
     check('"bin/floe2",' in portable_source and
           'cp -r "$REPO/floe2"' not in portable_source,
           "portable does not ship the Rust floe2 in place of the Python one")
+    # the floe2 bundle's Python is the viewer alone (P2d): every module the
+    # viewer loads, none of the oracle's
+    listed = re.search(r'FLOE2_PRODUCT_FILES="([^"]+)"', portable_source)
+    check(listed is not None, "portable does not list the floe2 viewer files")
+    shipped = set(listed.group(1).split())
+    loaded = run(base, "-c", (
+        "import sys; import floe.gtkview, floe.viewcli, floe.gui, "
+        "floe.gtkservice, floe.rust_render, floe.vfsclient, floe.instance, "
+        "floe.hangul, floe.fillpat; print(' '.join(sorted(m for m in "
+        "sys.modules if m.startswith('floe.'))))")).stdout.split()
+    needed = {m.split(".")[1] + ".py" for m in loaded}
+    check(needed <= shipped, "the floe2 bundle lacks %s" % sorted(needed - shipped))
+    oracle = {"cache.py", "cachepath.py", "indexlock.py", "drc.py", "svrf.py",
+              "shots.py", "fe_embed.py", "render.py", "viewport.py",
+              "coverage.py", "view_policy.py", "cli.py", "service.py",
+              "__main__.py"}
+    check(not (shipped & oracle) and not any(f.startswith("jobdeck")
+                                               for f in shipped),
+          "the floe2 bundle ships oracle modules: %s" % sorted(shipped & oracle))
+    check(not {m for m in loaded if m.split(".")[1] + ".py" in oracle
+               or m.startswith("floe.jobdeck")},
+          "the floe2 viewer imports oracle modules: %s" % loaded)
     check("FLOE_INDEX_BIN and FLOE_RENDERD_BIN must be specified together"
           in portable_source,
           "portable permits a mismatched Rust binary override")

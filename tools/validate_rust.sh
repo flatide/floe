@@ -145,7 +145,7 @@ gates_for() {
             # the Rust command line floe2 (P1, docs/SHARED_APP_LAYER.ko.md)
             # and the GTK viewer's service in it (P2)
             echo "unit drc_ice $CLI_GATES" ;;
-        floe/gtkview.py|floe/gtkservice.py)
+        floe/gtkview.py|floe/gtkservice.py|floe/viewcli.py)
             # the GTK viewer's entry and its service client (P2)
             echo "floe2 rust_renderer jobdeck drc_ice" ;;
         rust/render-core/*|rust/renderd/*|rust/render-cli/*|floe/rust_render.py)

@@ -21,16 +21,13 @@ import sys
 import time
 
 from . import __version__
-from . import cache as cache_mod
 from . import gtkservice
 from . import fillpat
-from . import indexlock
 from .hangul import HangulComposer, TextViewEditable
 from .product import name as product_name
 from .rust_render import _env_int, CELL_QUERY_KINDS
-from .service import (make_render_worker, DETAIL_PX, DETAIL_LEVELS,
-                      DEFAULT_DETAIL)
-from .view_policy import live_caps
+from .rust_render import (make_render_worker, DETAIL_PX, DETAIL_LEVELS,
+                          DEFAULT_DETAIL)
 
 
 def _is_deck_path(path):
@@ -1446,6 +1443,8 @@ def _remote_x_scroll_repaint(scroller):
         pass
 
 
+# an index run refused for a busy target (floe_vfs::lock, EX_TEMPFAIL)
+BUSY_EXIT = 75
 # a DRC error's review status byte (floe2 gtk-service; 2 is reserved)
 STATUS_NONE = gtkservice.STATUS_NONE
 STATUS_WAIVED = gtkservice.STATUS_WAIVED
@@ -1919,7 +1918,6 @@ class Viewer:
         # (finer --tile-mb grids allow proportionally more tiles);
         # the real value lands in _apply_cache (cache may be None -
         # empty start, user call 2026-08-22)
-        self._live_cap = 1
         self.dump = bool(dump)      # --dump: save debug frame dumps
         self._quitting = False
         # folder floe was launched from: the load-layout dialog's
@@ -2494,7 +2492,6 @@ class Viewer:
             self._frontier_depths = (self.meta.get("frontier")
                                      or {}).get("depths") or []
             self._minimap_bases = {}
-            self._live_cap = live_caps(cache.meta)[0]
         # fill palette state: user-global edited bitmaps + the
         # effective layerprops (personal, else the design default
         # next to the source - already seeded by Cache.load)
@@ -2507,6 +2504,8 @@ class Viewer:
         elif hasattr(cache, "layer_props"):
             rows = cache.layer_props()
         else:
+            # the frozen floe shell's caches (dev-only)
+            from . import cache as cache_mod
             rows = cache_mod.load_layer_props(
                 getattr(self.cache, "props_src", self.cache.src))[0]
         for key, _color, fill, _name, _f1, f2 in rows:
@@ -2829,6 +2828,7 @@ class Viewer:
             # 2026-09-09 P1-3)
             self._set_depth(999, redraw=False)
         else:
+            from . import cache as cache_mod
             c = cache_mod.Cache(path)
             if not c.exists():
                 return ("ERR no VFS cache for %s; run: %s index %s"
@@ -2856,6 +2856,7 @@ class Viewer:
             return deck_ready(path, ids=ids)
         if self._index_busy(path) is not None:
             return False
+        from . import cache as cache_mod
         return cache_mod.Cache(path).exists()
 
     @staticmethod
@@ -2871,7 +2872,7 @@ class Viewer:
                 return readiness(path)["busy"]
             except ServiceError:
                 return None
-        from . import cachepath
+        from . import cachepath, indexlock
         return indexlock.state(indexlock.VFS,
                                cachepath.vfs_cache_dir(path),
                                users=False).opening_refusal()
@@ -6114,17 +6115,23 @@ class Viewer:
             self._restore_keys()
 
     def _vfs_index_and_load(self, src, after=None):
-        """Build the VFS cache for `src` (floe-index vfs) with its log
-        in a modal dialog, then open it in place; `after(err)` runs
-        once the open settled (err None on success)."""
-        from .vfsclient import find_binary
+        """Build the VFS cache for `src` with its log in a modal dialog,
+        then open it in place; `after(err)` runs once the open settled
+        (err None on success). floe2 runs its command line, `floe2 index
+        SRC` (the Rust one decides the cache, its options and its locks);
+        the frozen floe runs floe-index vfs."""
+        from .vfsclient import find_binary, find_floe2
         try:
-            bin_ = find_binary()
+            if APP == "floe2":
+                argv = [find_floe2(), "index", src, "--jobs", "12"]
+            else:
+                from . import cachepath
+                argv = [find_binary(), "vfs", src,
+                        cachepath.vfs_cache_dir(src), "--jobs", "12",
+                        "--no-lod"]
         except RuntimeError as exc:
             self._set_live_status("VFS indexing failed: %s" % exc)
             return
-        from . import cachepath
-        outdir = cachepath.vfs_cache_dir(src)
         cur = getattr(self, "cache", None)
         if cur is not None and not getattr(cur, "is_jobdeck", False) and \
                 os.path.abspath(getattr(cur, "src", "") or "") == \
@@ -6149,10 +6156,8 @@ class Viewer:
         # no occupancy summary, like `floe2 index` on a layout
         # (2026-09-16; a jobdeck load gets it through `floe2 index
         # deck.jb`, whose sources default to the summary)
-        self._index_modal("indexing layout…",
-                          [bin_, "vfs", src, outdir,
-                           "--jobs", "12", "--no-lod"],
-                          on_success, "VFS indexing")
+        self._index_modal("indexing layout…", argv, on_success,
+                          "VFS indexing")
 
     def _jobdeck_index_and_load(self, path, after=None, ids=None):
         """`<APP> index deck.jb [--level N,..]` (every source the deck's
@@ -7507,7 +7512,7 @@ class Viewer:
                     "%s cancelled" % fail if state["cancelled"]
                     # refused: another run indexes it, or someone has it
                     # open - the [lock] line says who
-                    else state["lock"] if (rc == indexlock.BUSY_EXIT
+                    else state["lock"] if (rc == BUSY_EXIT
                                            and state["lock"])
                     else "%s failed (rc %d)" % (fail, rc))
                 if not state["cancelled"] and on_failure is not None:
@@ -8548,7 +8553,6 @@ class Viewer:
         dlg.set_do_overwrite_confirmation(True)
         dlg.set_current_folder(
             os.path.dirname(os.path.abspath(db.path)))
-        from . import cachepath
         base = gtkservice.db_name_of(db.path)
         dlg.set_current_name(base + ".notes.fe")
         out = dlg.get_filename() \
@@ -8628,7 +8632,6 @@ class Viewer:
         dlg.set_do_overwrite_confirmation(True)
         dlg.set_current_folder(
             os.path.dirname(os.path.abspath(db.path)))
-        from . import cachepath
         base = gtkservice.db_name_of(db.path)
         dlg.set_current_name(base + ".waive")
         out = dlg.get_filename() \

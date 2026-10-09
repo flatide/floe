@@ -44,7 +44,7 @@ python을 사용하지 않도록 변경해줘."
 | P1a | `app-cli`와 `floe2` 실행 파일. Python CLI는 아직 그대로 둔다 | 0.12.327 |
 | P1b | 빠진 기능을 Rust로(G1, G3~G8; §4). G2 밀도 요청·G9 `phase=render`는 `view`만 쓰므로 P2·P4로 미룸 | 0.12.328 |
 | P1c | 게이트·배포·별칭을 Rust `floe2`로 바꾸고 Python `floe2/` 패키지를 지운다(§4) | 0.12.328 |
-| P2 | `floe2 gtk-service`(stdio JSON-lines). GTK 뷰어의 비-UI 판단을 Rust로 옮기고 Python 모듈을 걷어낸다. 푸시 단위(§5): P2a 열기·준비·레벨 행·덱 스펙·레이어 속성 행, P2b DRC·svrf, P2c 레이어 속성 편집·fill, P2d(P3와 함께) 오라클을 떼어 낸 뒤 Python 모듈 삭제 | P2a 0.12.329, P2b 0.12.330, P2c 0.12.331 |
+| P2 | `floe2 gtk-service`(stdio JSON-lines). GTK 뷰어의 비-UI 판단을 Rust로 옮기고 Python 모듈을 걷어낸다. 푸시 단위(§5): P2a 열기·준비·레벨 행·덱 스펙·레이어 속성 행, P2b DRC·svrf, P2c 레이어 속성 편집·fill, P2d(P3와 함께) 오라클을 떼어 낸 뒤 Python 모듈 삭제 | P2a 0.12.329, P2b 0.12.330, P2c 0.12.331, P2d 0.12.332 |
 | P3 | KLayout 레거시를 제품 경로에서 빼고, 동결 `floe` 셸은 개발 전용 오라클로 둔다 | 예정 |
 | P4 | (선택) GTK 렌더 루프를 Rust `ViewController`로 | 별도 승인 |
 
@@ -140,3 +140,17 @@ python을 사용하지 않도록 변경해줘."
   - 저장: 빈 이름은 `l_d`, 공백 이름은 `_` = `fillpat.format_layerprops` 바이트.
   - 게시: 경로와 바이트가 `cache.save_shared_props`와 같다.
 - **차이:** 탭이나 제어 문자가 든 레이어 이름은 Python이 깨진 줄로 썼다. Rust는 쓰기를 거절하고 이유를 상태줄에 보인다.
+
+### P2d (0.12.332) — 제품 경로에 Python 비-UI 코드가 없다
+
+- **뷰어의 import:**
+  - `floe2 view` → `python -m floe.gtkview` → floe/viewcli.py(뷰 인자, 단일 인스턴스 전달, 시작 열기; 동결 셸의 floe/cli.py가 아님) → floe/gui.py.
+  - gui.py가 맨 위에서 import하는 것은 gtkservice, fillpat, hangul, product, rust_render뿐이다. 렌더 워커 생성기와 DETAIL 표는 rust_render.py로 옮겼고, service.py는 그 이름을 다시 내보낸다.
+  - 동결 floe(APP floe)의 경로만 그 분기 안에서 cache·cachepath·indexlock·jobdeck·service(KLayout)를 늦게 import한다.
+  - 쓰이지 않던 `live_caps`는 지웠다.
+- **레이아웃 색인:** 뷰어에서 레이아웃을 색인할 때 floe2는 `floe2 index SRC --jobs 12`(Rust)를 부른다. 캐시 폴더, 옵션, 잠금은 Rust가 정한다. 동결 floe는 floe-index vfs를 직접 부른다.
+- **번들:** 기본 floe2 번들은 뷰어 파일만 싣는다(`FLOE2_PRODUCT_FILES`: `__init__`, gtkview, viewcli, gui, gtkservice, rust_render, vfsclient, instance, product, hangul, fillpat, `.def` 두 개). KLayout 번들(FLOE_PORTABLE_KLAYOUT=1)은 동결 셸까지 모두 싣는다.
+- **강제:**
+  - jobdeck `GuiSmokeTests`: 실제 창(덱 세 번, 레이아웃 + `--drc` 한 번)을 import 차단기 아래에서 연다. 차단기는 cache, cachepath, indexlock, drc, svrf, jobdeck, shots, fe_embed, render, viewport, coverage, view_policy, cli, service, klayout을 import할 수 없게 한다. 리뷰 사이드카는 서비스가 쓴다.
+  - floe2 게이트: 번들 목록이 뷰어가 불러오는 floe 모듈을 모두 담고 오라클 모듈은 하나도 담지 않는다.
+- **남은 것(P3):** 오라클 모듈은 아직 floe/ 안에 있다. 게이트가 KLayout 오라클과 대조 기준으로 쓰기 때문이다. P3에서 개발 전용 패키지로 옮기고 게이트 import를 바꾼다.
