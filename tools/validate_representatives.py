@@ -15,6 +15,9 @@ import time
 import klayout.db as db
 
 ROOT = Path(__file__).resolve().parents[1]
+# the product command line: the Rust `floe2` (rust/floe2; the Python
+# floe2 CLI is gone - docs/SHARED_APP_LAYER.ko.md P1c)
+FLOE2 = os.environ.get("FLOE2_BIN") or str(ROOT / "rust" / "target" / "release" / "floe2")
 # Representatives are compared with the exact (cut 0) picture of the real
 # geometry drawn by the KLayout rule: area-true drawing (FLOE_RUST_AREA_TRUE,
 # its own gate tools/validate_area_true.py) is pinned off for every worker.
@@ -31,7 +34,7 @@ def digest(path):
 
 def index(src, *args, ok=True):
     result = subprocess.run(
-        [sys.executable, '-B', '-m', 'floe2', 'index', str(src), '--jobs', '2', *args],
+        [FLOE2, 'index', str(src), '--jobs', '2', *args],
         cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=60)
     assert (result.returncode == 0) == ok, result.stdout + result.stderr
     return result

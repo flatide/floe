@@ -45,7 +45,7 @@ pub fn run(
             plan.aliases
         );
     }
-    let (mut built, mut failed, mut kept) = (0, 0, plan.kept);
+    let (mut built, mut failed, mut busy, mut kept) = (0, 0, 0, plan.kept);
     let batch_started = Instant::now();
     for (n, entry) in plan.todo.iter().enumerate() {
         check_cancelled(cancelled)?;
@@ -85,24 +85,55 @@ pub fn run(
                     started.elapsed().as_secs_f64()
                 );
             }
+            // another run indexes the source, or (a rebuild) someone has it
+            // open (floe_vfs::lock): not a failure of this deck - said with
+            // who, and the next source goes on
+            Ok((floe_vfs::lock::BUSY_EXIT, _)) => {
+                busy += 1;
+                println!(
+                    "[jobdeck] {label} : {progress} BUSY {} - another run or a viewer holds it (see the [lock] line above; {timing})",
+                    entry.tc
+                );
+            }
+            Err(error) if error.kind == ErrorKind::Busy => {
+                busy += 1;
+                eprintln!("[lock] {}", error.message);
+                println!(
+                    "[jobdeck] {label} : {progress} BUSY {} - another run or a viewer holds it (see the [lock] line above; {timing})",
+                    entry.tc
+                );
+            }
             Ok((code, _)) => {
                 failed += 1;
-                eprintln!(
+                println!(
                     "[jobdeck] {label} : {progress} FAILED {} (exit {code}; {timing})",
                     entry.tc
                 );
             }
             Err(error) => {
                 failed += 1;
-                eprintln!(
+                println!(
                     "[jobdeck] {label} : {progress} FAILED {} ({error}; {timing})",
                     entry.tc
                 );
             }
         }
+        std::io::stdout().flush()?;
     }
-    println!("[jobdeck] index     : {built} built, {failed} failed, {kept} kept");
-    Ok(if failed == 0 { 0 } else { 2 })
+    // the busy count only when there are some (scripts read this line)
+    let busy_text = if busy > 0 {
+        format!("{busy} busy, ")
+    } else {
+        String::new()
+    };
+    println!("[jobdeck] index     : {built} built, {failed} failed, {busy_text}{kept} kept");
+    Ok(if failed > 0 {
+        2
+    } else if busy > 0 {
+        floe_vfs::lock::BUSY_EXIT
+    } else {
+        0
+    })
 }
 
 fn hms(seconds: f64) -> String {

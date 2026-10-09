@@ -44,6 +44,21 @@ pub(crate) fn rename_legacy(
         new.file_name()
             .ok_or_else(|| Error::input("missing new name"))?,
     )?;
+    // only with the target's locks free (floe_vfs::lock; the legacy and the
+    // current name share one key): the rename would move it from under its
+    // readers and a run writing it (floe/cachepath.py _rename). Released
+    // with the rename done - the indexer it precedes takes its own.
+    let kind = if directory {
+        floe_vfs::lock::Kind::Vfs
+    } else {
+        floe_vfs::lock::Kind::Pack
+    };
+    let _lock = floe_vfs::lock::writer(
+        &floe_vfs::lock::key(kind, &new.to_string_lossy()),
+        floe_vfs::lock::Mode::Full,
+        &format!("{} (legacy name rename)", crate::program()),
+    )
+    .map_err(|busy| Error::new(ErrorKind::Busy, busy.to_string()))?;
     let dir = Directory::open(parent)?;
     let file = dir.open_leaf(
         &from,
@@ -271,5 +286,29 @@ mod tests {
         .is_err());
         assert!(!new.exists());
         assert_eq!(fs::read(target).unwrap(), b"target bytes");
+    }
+    #[test]
+    fn a_cache_in_use_keeps_its_legacy_name() {
+        // the legacy `X.oas.floe` and the current `.X.oas.ice` share one
+        // lock key: a reader of either refuses the rename (floe/cachepath.py
+        // _rename), which leaves the cache where it is
+        let root = Root::new();
+        let old = root.0.join("X.oas.floe");
+        let new = root.0.join(".X.oas.ice");
+        fs::create_dir(&old).unwrap();
+        let before = fs::symlink_metadata(&old).unwrap();
+        let key = floe_vfs::lock::key(floe_vfs::lock::Kind::Vfs, &old.to_string_lossy());
+        let reader = floe_vfs::lock::readers(&[key], "viewer").unwrap();
+        let error = rename_legacy(&old, &new, &before, true, &AtomicUsize::new(0)).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Busy, "{}", error.message);
+        assert!(
+            error.message.contains("X.oas is in use by"),
+            "{}",
+            error.message
+        );
+        assert!(old.is_dir() && !new.exists());
+        drop(reader);
+        rename_legacy(&old, &new, &before, true, &AtomicUsize::new(0)).unwrap();
+        assert!(!old.exists() && new.is_dir());
     }
 }

@@ -71,6 +71,9 @@ sys.path.insert(0, str(ROOT))
 os.environ["FLOE_RENDERER"] = "rust"
 BIN = ROOT / "rust" / "target" / "release" / "floe-index"
 RENDERD = ROOT / "rust" / "target" / "release" / "floe-renderd"
+# the product command line: the Rust `floe2` (rust/floe2; the Python
+# floe2 CLI is gone - docs/SHARED_APP_LAYER.ko.md P1c)
+FLOE2 = os.environ.get("FLOE2_BIN") or str(ROOT / "rust" / "target" / "release" / "floe2")
 TMP = Path(tempfile.mkdtemp(prefix="floe-indexlock-"))
 HOLDER = "ws_kim_01"   # an underscore name: the wire must not mangle it
 
@@ -101,7 +104,7 @@ def run(argv, ok=None, env=None, timeout=300):
 
 
 def floe2(*args, ok=None, env=None):
-    return run([sys.executable, "-B", "-m", "floe2", *args], ok=ok, env=env)
+    return run([FLOE2, *args], ok=ok, env=env)
 
 
 def floe_index(*args, ok=None, env=None):
@@ -196,8 +199,8 @@ class IndexLockTests(unittest.TestCase):
             ("frontier-only", [BIN, "vfs", self.src, self.cache, "--frontier-only"]),
             ("hier", [BIN, "hier", self.cache]),
             ("ovs", [BIN, "ovs", self.cache]),
-            ("floe2 index --force", [sys.executable, "-B", "-m", "floe2", "index", self.src, "--force"]),
-            ("floe2 index --occupancy-only", [sys.executable, "-B", "-m", "floe2", "index", self.src, "--occupancy-only"]),
+            ("floe2 index --force", [FLOE2, "index", self.src, "--force"]),
+            ("floe2 index --occupancy-only", [FLOE2, "index", self.src, "--occupancy-only"]),
         ]
         for name, argv in runs:
             started = time.monotonic()
@@ -293,7 +296,7 @@ class IndexLockTests(unittest.TestCase):
             users = indexlock.state(indexlock.VFS, str(self.cache)).users
             self.assertEqual(len(users), 1)
             for argv in ([BIN, "vfs", self.src, "--jobs", "2"],
-                         [sys.executable, "-B", "-m", "floe2", "index", self.src, "--force"]):
+                         [FLOE2, "index", self.src, "--force"]):
                 res = run(argv)
                 self.assertEqual(res.returncode, 75, res.stderr)
                 line = lock_line(res)
@@ -544,8 +547,8 @@ class IndexLockTests(unittest.TestCase):
                         "BX=0.0, BY=0.0, UX=2000.0, UY=2000.0 )\nROWS 0.0/%d.0\n" % (i, i, i * 3000))
         (d / "many.jb").write_text("* many.jb\nMTITLE 1,A\n*PLACE-INFO\n%s*END-PLACE\nEND\n" % "".join(rows))
         floe2("index", d / "many.jb", "--jobs", "2", ok=0)
-        res = run(["/bin/sh", "-c", 'ulimit -n 32 && exec "$0" -B -m floe2 render "$1" --px 200 --out "$2"',
-                   sys.executable, d / "many.jb", d / "many.png"])
+        res = run(["/bin/sh", "-c", 'ulimit -n 32 && exec "$0" render "$1" --px 200 --out "$2"',
+                   FLOE2, d / "many.jb", d / "many.png"])
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertIn("without their locks", res.stderr)
 

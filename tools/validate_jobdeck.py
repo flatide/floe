@@ -30,6 +30,9 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+# the product command line: the Rust `floe2` (rust/floe2; the Python
+# floe2 CLI is gone - docs/SHARED_APP_LAYER.ko.md P1c)
+FLOE2 = os.environ.get("FLOE2_BIN") or str(ROOT / "rust" / "target" / "release" / "floe2")
 # The deck composites are compared with layout renders, and the thin-page
 # policies with lit-pixel floors, all drawn by the KLayout rule: area-true
 # drawing (FLOE_RUST_AREA_TRUE, its own gate tools/validate_area_true.py) is
@@ -459,7 +462,7 @@ def run_cli(*args, env=None, ok=None):
     if env:
         e.update(env)
     res = subprocess.run(
-        [sys.executable, "-B", "-m", "floe2", "jobdeck", *map(str, args)],
+        [FLOE2, "jobdeck", *map(str, args)],
         cwd=ROOT, env=e, capture_output=True, text=True)
     if ok is not None and res.returncode != ok:
         raise AssertionError(
@@ -1074,7 +1077,7 @@ class CompositeTests(unittest.TestCase):
                     p.mag * b.right + p.dx_um, p.mag * b.top + p.dy_um))
         lay.write(str(flat))
         res = subprocess.run(
-            [sys.executable, "-B", "-m", "floe2", "index", str(flat),
+            [FLOE2, "index", str(flat),
              "--jobs", "2"], cwd=ROOT, capture_output=True, text=True,
             env={**os.environ, **self.env, "PYTHONPATH": str(ROOT)})
         self.assertEqual(res.returncode, 0, res.stderr)
@@ -1526,7 +1529,21 @@ class ViewerIndexArgvTests(unittest.TestCase):
         self.assertIn('"--jobs", "12", "--no-lod"', src)
         self.assertNotIn('"--occupancy"', src)
         self.assertIn("cachepath.vfs_cache_dir(src)", src)
-        self.assertIn('"-m", APP, "index", path', src)
+        # a jobdeck load runs `floe2 index deck.jb`: the Rust command line
+        # (P1c; floe/vfsclient.py find_floe2 - FLOE2_BIN, which `floe2
+        # view` passes the viewer), the frozen floe its own Python one
+        self.assertIn("argv = [find_floe2()]", src)
+        self.assertIn('argv += ["index", path, "--jobs", "12"]', src)
+        from floe.vfsclient import find_floe2
+        old = os.environ.get("FLOE2_BIN")
+        os.environ["FLOE2_BIN"] = FLOE2
+        try:
+            self.assertEqual(find_floe2(), os.path.abspath(FLOE2))
+        finally:
+            if old is None:
+                os.environ.pop("FLOE2_BIN", None)
+            else:
+                os.environ["FLOE2_BIN"] = old
 
 
 class JobdeckShortcutTests(unittest.TestCase):
@@ -3902,7 +3919,7 @@ def run_floe2(*args, env=None, ok=None, timeout=600):
     if env:
         e.update(env)
     res = subprocess.run(
-        [sys.executable, "-B", "-m", "floe2", *map(str, args)],
+        [FLOE2, *map(str, args)],
         cwd=ROOT, env=e, capture_output=True, text=True, timeout=timeout)
     if ok is not None and res.returncode != ok:
         raise AssertionError(

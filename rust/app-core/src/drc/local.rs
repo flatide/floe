@@ -173,29 +173,53 @@ pub fn is_packed_source(source: &Path) -> Result<bool> {
         Err(e) => Err(e.into()),
     }
 }
+/// The pack's reader lock (floe_vfs::lock, kind Pack): refused - as
+/// ErrorKind::Busy, with who - while a run re-packs it.
+fn pack_reader(path: &Path) -> Result<floe_vfs::lock::ReaderGuard> {
+    let key = floe_vfs::lock::key(floe_vfs::lock::Kind::Pack, &path.to_string_lossy());
+    floe_vfs::lock::readers(
+        &[key],
+        &floe_vfs::lock::reader_label(&format!("{} drc", crate::program())),
+    )
+    .map_err(|busy| Error::new(ErrorKind::Busy, busy.to_string()))
+}
 fn current_pack(source: &Path, cancelled: &AtomicUsize) -> Result<(Option<Pack>, Option<String>)> {
     crate::check_cancelled(cancelled)?;
     let packed = is_packed_source(source)?;
     let pack = if packed {
-        Pack::open(source, cancelled)?
+        let reader = pack_reader(source)?;
+        let mut pack = Pack::open(source, cancelled)?;
+        pack.hold(reader);
+        pack
     } else {
         let path = cache::pack_path(source)?;
         let candidate = match fs::metadata(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // no pack: one being made whole is said, not parsed around
+                let key = floe_vfs::lock::key(floe_vfs::lock::Kind::Pack, &path.to_string_lossy());
+                if let Some(busy) = floe_vfs::lock::opening_refusal(&key) {
+                    return Err(Error::new(ErrorKind::Busy, busy.to_string()));
+                }
                 return Ok((None, None));
             }
             Err(e) => Err(e.into()),
-            Ok(_) => Pack::open(&path, cancelled).and_then(|p| {
-                if p.source_matches(source)? {
+            Ok(_) => pack_reader(&path)
+                .and_then(|reader| {
+                    let mut p = Pack::open(&path, cancelled)?;
+                    p.hold(reader);
                     Ok(p)
-                } else {
-                    Err(Error::new(ErrorKind::Cache, "stale DRC pack"))
-                }
-            }),
+                })
+                .and_then(|p| {
+                    if p.source_matches(source)? {
+                        Ok(p)
+                    } else {
+                        Err(Error::new(ErrorKind::Cache, "stale DRC pack"))
+                    }
+                }),
         };
         match candidate {
             Ok(p) => p,
-            Err(e) if e.kind == ErrorKind::Cancelled => return Err(e),
+            Err(e) if matches!(e.kind, ErrorKind::Cancelled | ErrorKind::Busy) => return Err(e),
             Err(e) => {
                 let warning = format!(
                     "{}: {e}; parsing ASCII instead (integral-DBU sources can be indexed explicitly: floe-index drc {})",

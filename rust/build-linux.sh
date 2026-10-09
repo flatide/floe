@@ -24,7 +24,7 @@ if command -v rustup >/dev/null 2>&1; then
     rustup target add x86_64-unknown-linux-musl >/dev/null
 fi
 mkdir -p dist
-BINS="floe-index floe-renderd floe-render-cli path-inventory"
+BINS="floe2 floe-index floe-renderd floe-render-cli path-inventory"
 copy_binaries() {
     suffix=$1
     source_dir=$2

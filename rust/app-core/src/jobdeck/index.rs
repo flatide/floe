@@ -108,6 +108,10 @@ impl DeckIndexPlan {
                 current.occupancy =
                     Some(options.occupancy.unwrap_or(true) || options.occupancy_only);
                 current.occupancy_only = false;
+                // a deck's sources need no design.ovs: the deck view never
+                // reads it (a layout's own index makes it; `floe-index ovs`
+                // adds it to a source opened alone)
+                current.ovs = false;
             } else if options.occupancy_only
                 || ((options.occupancy.unwrap_or(true) || options.occupancy_um.is_some())
                     && !info.cache_dir.join("design.ovo").is_file())

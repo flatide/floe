@@ -129,8 +129,12 @@ floe2는 **최초 1회 인덱싱**으로 이 비용을 지불하고, 이후 모�
 관심 영역과 교차하는 타일만 로딩해 ms~초 단위로 응답한다.
 
 ```sh
-alias floe2=".venv/bin/python -m floe2"  # 제품 (Rust renderer)
+# floe2 = Rust 명령줄 (rust/floe2, 2026-10-09 P1c). GTK 뷰어(view)만 Python이다:
+# floe2 view가 체크아웃의 .venv python으로 floe.gtkview를 띄운다.
+(cd rust && cargo build --release)          # floe2, floe-index, floe-renderd
+alias floe2="$PWD/rust/target/release/floe2"  # 제품
 alias floe=".venv/bin/python -m floe"    # 개발 전용: 동결된 KLayout 셸 (oracle·선행 검증)
+# tcsh: alias floe2 /path/to/floe2/rust/target/release/floe2
 
 floe2 index data/testchip_1g5.oas          # 1회: 공유 .<src>.ice/ 생성(소스 옆 숨김 폴더)
 floe2 index data/testchip_1g5.oas --jobs 1 # 병렬 끄기
@@ -976,7 +980,7 @@ payload decode와 2D image tile raster를 worker 여러 개로 병렬 수행한�
 cd rust
 cargo build --release -p floe-renderd -p floe-render-cli
 cd ..
-.venv/bin/python -m floe2 view --multi chip.oas
+rust/target/release/floe2 view --multi chip.oas
 ```
 
 `floe2`의 유일한 backend는 in-tree `floe.rust_render.RustRenderWorker`와

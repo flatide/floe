@@ -3,6 +3,7 @@ use crate::{
     artifact::{self, StagedArtifact},
     check_cancelled,
     dataset::Dataset,
+    jobdeck::chips::{ChipTable, Selection},
     render::{require_complete, RenderOptions, RenderSession},
     shots::{
         batch::{NamedCapture, TILE_NAMES},
@@ -33,6 +34,18 @@ struct Plan<'a> {
     keep: Vec<PathBuf>,
     /// The skipped placements this capture lacks (indices into the ledger).
     lacks: Vec<usize>,
+    /// the chips the capture names, and the default region they frame
+    chips: Option<Selection>,
+    region: [f64; 4],
+}
+/// What a run of captures drew: whether every image is whole, and what
+/// they lack - the skipped placements of the chips some shot had on, the
+/// pages over the decode budget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Summary {
+    pub complete: bool,
+    pub lacking: usize,
+    pub over_budget: u64,
 }
 /// The ledger records a capture drawing `layers` lacks (floe.shots
 /// plan_shots, jobdeck.chips ChipTable.skipped_in): every record with every
@@ -94,8 +107,34 @@ pub fn run(
     options: &ExportOptions,
     render: RenderOptions,
     cancelled: &Arc<AtomicUsize>,
-    mut log: impl FnMut(&str),
+    log: impl FnMut(&str),
 ) -> Result<bool> {
+    run_summary(dataset, shots, options, render, cancelled, log).map(|s| s.complete)
+}
+
+/// A few skipped placements, for one log line (floe.shots `brief`).
+fn brief(records: &[&crate::jobdeck::geom::Skipped]) -> String {
+    let mut text = records
+        .iter()
+        .take(5)
+        .map(|r| format!("CHIP {} ${} {} {}", r.chip, r.idx, r.tc, r.reason))
+        .collect::<Vec<_>>()
+        .join("; ");
+    if records.len() > 5 {
+        text.push_str(" ...");
+    }
+    text
+}
+
+/// `run`, and what the images lack.
+pub fn run_summary(
+    dataset: &Dataset,
+    shots: &[NamedCapture],
+    options: &ExportOptions,
+    render: RenderOptions,
+    cancelled: &Arc<AtomicUsize>,
+    mut log: impl FnMut(&str),
+) -> Result<Summary> {
     check_cancelled(cancelled)?;
     if shots.is_empty() || (!options.batch && shots.len() != 1) {
         return Err(Error::input("invalid capture count"));
@@ -128,19 +167,71 @@ pub fn run(
         }
         Ok(target)
     };
+    // a jobdeck's chip view rows, for chip on/off (jobdeck::chips)
+    let table = match dataset {
+        Dataset::Deck(deck) => Some(ChipTable::new(
+            &deck.analysis.deck,
+            &deck.analysis.model.placements,
+            &deck.metadata.layers,
+        )),
+        Dataset::Layout(_) => None,
+    };
     let mut plans = Vec::new();
+    // every shot's layers, chips and region before the worker starts: a
+    // name that resolves to nothing stops the run here
     for named in shots {
-        let tiles = named.capture.tiles(dataset.bbox_um())?;
+        let capture = &named.capture;
+        let mut selection = None;
+        if capture.names_chips() {
+            let Some(table) = &table else {
+                return Err(Error::input(format!(
+                    "{}: --chip, --chip-off and --fit-chip name a jobdeck's chips; {} is a layout",
+                    named.name,
+                    dataset
+                        .source()
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                )));
+            };
+            selection = Some(table.select(
+                capture.chip.as_deref(),
+                capture.chip_off.as_deref(),
+                capture.fit_chip.as_deref(),
+            )?);
+        }
+        // the chips on are the view's L/D pairs: the visible set
+        let layers = match selection.as_ref().and_then(|s| s.keys.as_ref()) {
+            Some(keys) => Some(
+                keys.iter()
+                    .map(|(l, d)| format!("{l}/{d}"))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+            None => capture.shot.layers.clone(),
+        };
+        let mut region = dataset.bbox_um();
+        if let Some(sel) = &selection {
+            if !capture.explicit_region() {
+                region = sel.region.ok_or_else(|| {
+                    Error::input(format!(
+                        "{}: the chips on have nothing placed (their sources are skipped: see 'skipped' above)",
+                        named.name
+                    ))
+                })?;
+            }
+        }
+        let mut tiles = capture.tiles(region)?;
+        for tile in &mut tiles {
+            tile.layers = layers.clone();
+        }
         if dataset.is_deck() && named.capture.shot.labels {
             return Err(Error::new(
                 ErrorKind::Unsupported,
                 "jobdeck labels are not supported",
             ));
         }
-        let lacks = lacks(
-            dataset,
-            &dataset.resolve_layers(named.capture.shot.layers.as_deref())?,
-        );
+        let lacks = lacks(dataset, &dataset.resolve_layers(layers.as_deref())?);
         for tile in &tiles {
             if tile
                 .bbox
@@ -172,6 +263,8 @@ pub fn run(
             target,
             keep,
             lacks,
+            chips: selection,
+            region,
         });
     }
     let report = options
@@ -220,6 +313,14 @@ pub fn run(
         let result = (|| -> Result<serde_json::Value> {
             let started = Instant::now();
             let capture = &plan.named.capture;
+            if let (Some(sel), Some(table)) = (&plan.chips, &table) {
+                log(&format!(
+                    "[{}] {}: {}",
+                    crate::program(),
+                    plan.named.name,
+                    table.describe(sel)
+                ));
+            }
             let (width, height) = (plan.tiles[0].pixels.0, plan.tiles[0].pixels.1.unwrap());
             let mut canvas = capture
                 .is_mosaic()
@@ -263,6 +364,14 @@ pub fn run(
             let mut row = serde_json::json!({"name":plan.named.name,"out":plan.display,"pixel":[width,height],
                 "layers":capture.shot.layers,"depth":capture.shot.depth,"over_budget_pages":deferred,
                 "skipped_placements":plan.lacks.len(),"complete":all_complete});
+            if let (Some(sel), Some(table)) = (&plan.chips, &table) {
+                row["chips"] = serde_json::json!({
+                    "on": table.labels(sel),
+                    "chip": capture.chip, "chip_off": capture.chip_off,
+                    "fit_chip": capture.fit_chip,
+                    "region_um": if capture.explicit_region() { None } else { Some(plan.region) },
+                    "placements": sel.placements});
+            }
             let staged = if let Some(canvas) = canvas {
                 let (rgba, info) = canvas.finish(capture.line, &capture.line_color, cancelled)?;
                 row["pixel"] = serde_json::json!([width * 2, height * 2]);
@@ -297,18 +406,27 @@ pub fn run(
             row["ms"] = serde_json::json!(
                 (started.elapsed().as_secs_f64() * 1000.).round_ties_even() as u64
             );
-            log(&format!(
-                "[{}] rendered {} ({}x{}, {} ms{})",
-                crate::program(),
-                plan.display.display(),
-                row["pixel"][0],
-                row["pixel"][1],
-                row["ms"],
-                if all_complete { "" } else { ", INCOMPLETE" }
-            ));
             if deferred != 0 {
                 log(&format!(
-                    "[{}] WARNING: {} has {deferred} over-budget page(s)",
+                    "[{}] WARNING: {} stopped at the page budget: {deferred} page(s) not drawn",
+                    crate::program(),
+                    plan.display.display()
+                ));
+            }
+            let seconds = row["ms"].as_u64().unwrap_or(0) as f64 / 1000.;
+            if capture.is_mosaic() {
+                log(&format!(
+                    "[{}] rendered {} ({}x{} mosaic of 4 x {width}x{height}, line {}) in {seconds:.2}s",
+                    crate::program(),
+                    plan.display.display(),
+                    row["pixel"][0],
+                    row["pixel"][1],
+                    row["mosaic"]["line_pixels"].as_str().unwrap_or("")
+                ));
+            } else {
+                let [x0, y0, x1, y1] = plan.tiles[0].bbox.unwrap();
+                log(&format!(
+                    "[{}] rendered {} ({width}x{height}, {x0:.4},{y0:.4},{x1:.4},{y1:.4} um) in {seconds:.2}s",
                     crate::program(),
                     plan.display.display()
                 ));
@@ -337,13 +455,31 @@ pub fn run(
         .partition(|(i, _)| shown.contains(i));
     let lacking: Vec<_> = lacking.into_iter().map(|(_, r)| r).collect();
     let off: Vec<_> = off.into_iter().map(|(_, r)| r).collect();
-    if !off.is_empty() {
+    // a jobdeck that could not draw every placement says so in the report
+    // and the log, and the caller exits non-zero (review 2026-09-09 P1-1: a
+    // thinner PNG must never look complete)
+    if !lacking.is_empty() {
         log(&format!(
-            "[{}] note: {} placement(s) the load skips are in chips no shot had on",
+            "[{}] WARNING: {} jobdeck placement(s) not drawn: {}",
             crate::program(),
-            off.len()
+            lacking.len(),
+            brief(&lacking)
         ));
     }
+    if !off.is_empty() {
+        log(&format!(
+            "[{}] note: {} placement(s) the load skips are in chips no shot had on: {}",
+            crate::program(),
+            off.len(),
+            brief(&off)
+        ));
+    }
+    let over_budget_total = rows
+        .iter()
+        .try_fold(0u64, |n, r| {
+            n.checked_add(r["over_budget_pages"].as_u64().unwrap_or(0))
+        })
+        .ok_or_else(|| Error::input("report page count overflow"))?;
     if let Some(path) = report {
         let mut doc = serde_json::json!({"source":dataset.source(),"dbu":dataset.dbu(),"shots":rows,
             "cut_px":shots[0].capture.shot.detail.cut_px(),"thin":shots[0].capture.shot.thin.name(),"complete":complete});
@@ -366,14 +502,20 @@ pub fn run(
         })();
         result.map_err(|e| Error::new(e.kind, format!("PNG was saved; report failed: {e}")))?;
         log(&format!(
-            "[{}] report {} ({} shot(s))",
+            "[{}] report {} ({} shot(s){})",
             crate::program(),
             path.display(),
-            shots.len()
+            shots.len(),
+            if lacking.is_empty() && over_budget_total == 0 {
+                ""
+            } else {
+                ", INCOMPLETE"
+            }
         ));
     }
-    if !complete {
-        log(&format!("[{}] rendered INCOMPLETE: {} skipped placement(s), see per-shot over-budget counts [exit 3]", crate::program(),lacking.len()));
-    }
-    Ok(complete)
+    Ok(Summary {
+        complete,
+        lacking: lacking.len(),
+        over_budget: over_budget_total,
+    })
 }

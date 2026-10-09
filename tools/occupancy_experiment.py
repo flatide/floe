@@ -57,7 +57,8 @@ sys.path.insert(0, ROOT)
 
 
 def _floe2(*argv, env=None, allow_fail=False):
-    cmd = [sys.executable, "-B", "-m", "floe2"] + [str(a) for a in argv]
+    cmd = [os.environ.get("FLOE2_BIN") or os.path.join(
+        ROOT, "rust", "target", "release", "floe2")] + [str(a) for a in argv]
     t0 = time.perf_counter()
     res = subprocess.run(cmd, cwd=ROOT, env=dict(os.environ, **(env or {})),
                          capture_output=True, text=True)

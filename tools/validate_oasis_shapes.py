@@ -26,6 +26,9 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+# the product command line: the Rust `floe2` (rust/floe2; the Python
+# floe2 CLI is gone - docs/SHARED_APP_LAYER.ko.md P1c)
+FLOE2 = os.environ.get("FLOE2_BIN") or str(ROOT / "rust" / "target" / "release" / "floe2")
 
 
 def uint(v):
@@ -143,7 +146,7 @@ def main():
                    FLOE_RENDERD_BIN=os.environ.get("FLOE_RENDERD_BIN") or str(
                        ROOT / "rust" / "target" / "release" / "floe-renderd"),
                    PYTHONPATH=str(ROOT), PYTHONDONTWRITEBYTECODE="1")
-        res = subprocess.run([sys.executable, "-B", "-m", "floe2", "index",
+        res = subprocess.run([FLOE2, "index",
                               str(src), "--jobs", "2"], cwd=ROOT, env=env,
                              capture_output=True, text=True)
         if res.returncode != 0:
@@ -151,7 +154,7 @@ def main():
                              % (res.stdout, res.stderr))
         clip = Path(td) / "clip.oas"
         # the fixture's shapes span y -100..250 um at most; clip generously
-        res = subprocess.run([sys.executable, "-B", "-m", "floe2", "clip",
+        res = subprocess.run([FLOE2, "clip",
                               str(src), "--bbox", "-1,-1,%d,1" % (extent / 1000 + 1),
                               "--out", str(clip)], cwd=ROOT, env=env,
                              capture_output=True, text=True)

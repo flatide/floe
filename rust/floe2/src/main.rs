@@ -15,6 +15,7 @@ static HOST: Host = Host {
     version: env!("FLOE2_VERSION"),
     usage: "Usage: floe2 view [SOURCE] [VIEW OPTIONS]      (the GTK viewer; floe2 view --help)\n       floe2 [VIEW OPTIONS] SOURCE                (same as view)\n       floe2                                       (the viewer, empty)\n",
     metadata: || vec![("viewer", serde_json::Value::from("gtk"))],
+    input_error_exit: 1,
 };
 
 fn main() {

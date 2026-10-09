@@ -49,6 +49,9 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
+# the product command line: the Rust `floe2` (rust/floe2; the Python
+# floe2 CLI is gone - docs/SHARED_APP_LAYER.ko.md P1c)
+FLOE2 = os.environ.get("FLOE2_BIN") or str(ROOT / "rust" / "target" / "release" / "floe2")
 sys.path.insert(0, str(ROOT))
 from floe.cache import Cache
 from floe.rust_render import RustRenderWorker
@@ -84,7 +87,7 @@ def layout(path, wire_cell=False):
 
 
 def index(src):
-    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+    done = subprocess.run([FLOE2, 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
 

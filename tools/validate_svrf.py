@@ -63,6 +63,9 @@ from floe import drc  # noqa: E402
 from floe import svrf as reader  # noqa: E402
 
 BIN = os.path.join(ROOT, "rust", "target", "release", "floe-index")
+# the product command line: the Rust `floe2` (rust/floe2; the Python
+# floe2 CLI is gone - docs/SHARED_APP_LAYER.ko.md P1c)
+FLOE2 = os.environ.get("FLOE2_BIN") or os.path.join(ROOT, "rust", "target", "release", "floe2")
 
 
 class _Check(object):
@@ -728,7 +731,7 @@ def r5(tmp):
           r.stderr)
     r = run([p, "--frobnicate"])
     check("an unknown option exits 2", r.returncode == 2, r.stderr)
-    r = subprocess.run([sys.executable, "-B", "-m", "floe2", "svrf", p,
+    r = subprocess.run([FLOE2, "svrf", p,
                         "-o", os.path.join(tmp, "old.json"), "-D", "X=1"],
                        capture_output=True, text=True, cwd=ROOT)
     check("floe2 svrf points to floe-index and exits 2",

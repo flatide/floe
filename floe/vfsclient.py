@@ -47,6 +47,29 @@ def find_binary():
         ", ".join(candidates or ["no candidates"]))
 
 
+def find_floe2():
+    """The Rust command line `floe2` (rust/floe2, docs/SHARED_APP_LAYER.ko.md):
+    FLOE2_BIN - its launcher sets it when it starts the viewer - else the
+    development build, the portable slot beside Python, and PATH."""
+    configured = os.environ.get("FLOE2_BIN")
+    if configured and os.path.isfile(configured) and \
+            os.access(configured, os.X_OK):
+        return os.path.abspath(configured)
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidates = [os.path.join(here, "rust", "target", "release", "floe2"),
+                  os.path.join(os.path.dirname(sys.executable), "floe2")]
+    on_path = shutil.which("floe2")
+    if on_path:
+        candidates.append(on_path)
+    for cand in candidates:
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return os.path.abspath(cand)
+    raise RuntimeError(
+        "the floe2 command line (Rust) not found; set FLOE2_BIN or build it "
+        "with 'cd rust && cargo build --release -p floe2' (checked: %s)" %
+        ", ".join(candidates))
+
+
 class VfsClient:
     def __init__(self, floe_dir, budget_mb=1024, binary=None,
                  stream_kb=None):

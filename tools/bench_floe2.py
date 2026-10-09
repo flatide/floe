@@ -530,7 +530,9 @@ def main(argv=None):
         os.environ["FLOE_PRODUCT"] = "floe"
         os.environ["FLOE_RENDERER"] = "klayout"
     else:
-        import floe2  # noqa: F401 - select the Rust-only product
+        # the Rust-only product (floe/product.py), as floe2/__init__.py
+        # said before the Rust command line took its place
+        os.environ["FLOE_PRODUCT"] = "floe2"
     if args.serial:
         args.jobs = [1]
         if args.decode_jobs is None:

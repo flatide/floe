@@ -6091,9 +6091,19 @@ class Viewer:
                     err[4:] if err.startswith("ERR ") else err)
 
         # a source that failed to index is a skipped placement: open
-        # the deck with the rest (the log stays up with the error)
-        argv = [sys.executable, "-B", "-m", APP, "index", path,
-                "--jobs", "12"]
+        # the deck with the rest (the log stays up with the error).
+        # floe2's command line is the Rust `floe2` (rust/floe2); the
+        # frozen floe keeps its Python one
+        if APP == "floe2":
+            from .vfsclient import find_floe2
+            try:
+                argv = [find_floe2()]
+            except RuntimeError as exc:
+                self._set_live_status("jobdeck indexing failed: %s" % exc)
+                return
+        else:
+            argv = [sys.executable, "-B", "-m", APP]
+        argv += ["index", path, "--jobs", "12"]
         if ids:
             argv += ["--level", ",".join(str(i) for i in ids)]
         self._index_modal("indexing jobdeck sources…", argv,

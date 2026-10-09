@@ -138,12 +138,14 @@ if [ "$FLOE_PORTABLE_KLAYOUT" = 1 ]; then
     "$PYBIN" -c 'import klayout; print("== klayout rollback", klayout.__version__)'
 fi
 
-# -- 4. drop the shared implementation + product shell into site-packages
+# -- 4. drop the shared implementation into site-packages: the GTK
+# viewer (floe/gui.py) and, in the KLayout bundle, the frozen floe shell.
+# floe2's command line is the Rust runtime/bin/floe2 (step 5b), which
+# starts the viewer through this interpreter
 SITE="$("$PYBIN" -c 'import site;print(site.getsitepackages()[0])')"
 rm -rf "$SITE/floe"; cp -r "$REPO/floe" "$SITE/floe"
-rm -rf "$SITE/floe2"; cp -r "$REPO/floe2" "$SITE/floe2"
+rm -rf "$SITE/floe2"
 find "$SITE/floe" -name '__pycache__' -type d -prune -exec rm -rf {} +
-find "$SITE/floe2" -name '__pycache__' -type d -prune -exec rm -rf {} +
 
 # -- 5. slim: build-time payloads never touched at runtime --------------
 cd "$WORK/runtime"
@@ -182,16 +184,19 @@ cd "$WORK"
 # host's glibc floor (for example GLIBC_2.35 on Ubuntu 22.04) and cannot satisfy
 # the RHEL8/2.28 deployment ceiling even though the bundled GTK runtime can.
 # Explicit overrides remain available for already-built, compatible binaries,
-# but must be supplied as a pair.
+# but must be supplied as a set (floe2 is the Rust command line, P1c).
 MUSL_TARGET=x86_64-unknown-linux-musl
-if [ -n "${FLOE_INDEX_BIN:-}" ] || [ -n "${FLOE_RENDERD_BIN:-}" ]; then
-    if [ -z "${FLOE_INDEX_BIN:-}" ] || [ -z "${FLOE_RENDERD_BIN:-}" ]; then
-        echo "FLOE_INDEX_BIN and FLOE_RENDERD_BIN must be specified together"
+if [ -n "${FLOE_INDEX_BIN:-}" ] || [ -n "${FLOE_RENDERD_BIN:-}" ] || \
+   [ -n "${FLOE2_BIN:-}" ]; then
+    if [ -z "${FLOE_INDEX_BIN:-}" ] || [ -z "${FLOE_RENDERD_BIN:-}" ] || \
+       [ -z "${FLOE2_BIN:-}" ]; then
+        echo "FLOE_INDEX_BIN and FLOE_RENDERD_BIN must be specified together (with FLOE2_BIN)"
         exit 1
     fi
 else
     FLOE_INDEX_BIN="$REPO/rust/target/$MUSL_TARGET/release/floe-index"
     FLOE_RENDERD_BIN="$REPO/rust/target/$MUSL_TARGET/release/floe-renderd"
+    FLOE2_BIN="$REPO/rust/target/$MUSL_TARGET/release/floe2"
     if command -v cargo >/dev/null; then
         if command -v rustup >/dev/null && \
            ! rustup target list --installed | grep -qx "$MUSL_TARGET"; then
@@ -200,15 +205,17 @@ else
         fi
         echo "== building static Rust runtime ($MUSL_TARGET, release)"
         if ! (cd "$REPO/rust" && cargo build --release \
-            --target "$MUSL_TARGET" -p floe-index -p floe-renderd); then
+            --target "$MUSL_TARGET" -p floe-index -p floe-renderd -p floe2); then
             echo "static Rust build failed; install the $MUSL_TARGET target"
-            echo "or specify both FLOE_INDEX_BIN and FLOE_RENDERD_BIN"
+            echo "or specify FLOE_INDEX_BIN, FLOE_RENDERD_BIN and FLOE2_BIN"
             exit 1
         fi
     elif [ -x "$REPO/rust/dist/floe-index-linux-x86_64" ] && \
-         [ -x "$REPO/rust/dist/floe-renderd-linux-x86_64" ]; then
+         [ -x "$REPO/rust/dist/floe-renderd-linux-x86_64" ] && \
+         [ -x "$REPO/rust/dist/floe2-linux-x86_64" ]; then
         FLOE_INDEX_BIN="$REPO/rust/dist/floe-index-linux-x86_64"
         FLOE_RENDERD_BIN="$REPO/rust/dist/floe-renderd-linux-x86_64"
+        FLOE2_BIN="$REPO/rust/dist/floe2-linux-x86_64"
         echo "== using prebuilt static Rust runtime from rust/dist"
     fi
 fi
@@ -220,9 +227,15 @@ fi
     echo "floe-renderd binary not found ($FLOE_RENDERD_BIN):"
     echo "install cargo + the $MUSL_TARGET target, or point both"
     echo "FLOE_INDEX_BIN and FLOE_RENDERD_BIN at Linux x86_64 builds"; exit 1; }
+[ -x "$FLOE2_BIN" ] || {
+    echo "floe2 binary not found ($FLOE2_BIN):"
+    echo "install cargo + the $MUSL_TARGET target, or point FLOE_INDEX_BIN,"
+    echo "FLOE_RENDERD_BIN and FLOE2_BIN at Linux x86_64 builds"; exit 1; }
 cp "$FLOE_INDEX_BIN" "$WORK/runtime/bin/floe-index"
 cp "$FLOE_RENDERD_BIN" "$WORK/runtime/bin/floe-renderd"
-chmod +x "$WORK/runtime/bin/floe-index" "$WORK/runtime/bin/floe-renderd"
+cp "$FLOE2_BIN" "$WORK/runtime/bin/floe2"
+chmod +x "$WORK/runtime/bin/floe-index" "$WORK/runtime/bin/floe-renderd" \
+    "$WORK/runtime/bin/floe2"
 
 # -- 6. verify: arch, glibc floor <= ceiling, key files -----------------
 # The real host requirement is the MAX GLIBC_2.x any bundled ELF needs
@@ -262,7 +275,7 @@ for why, p in bad:
 must = ["lib/libgtk-3.so.0", "lib/girepository-1.0/Gtk-3.0.typelib",
         "lib/python%s/site-packages/gi/__init__.py" % pyver,
         "lib/python%s/site-packages/floe/cli.py" % pyver,
-        "lib/python%s/site-packages/floe2/cli.py" % pyver,
+        "bin/floe2",        # the product command line (Rust)
         "bin/floe-index",   # vfs/index runtime
         "bin/floe-renderd", # default multicore CPU renderer
         "share/glib-2.0/schemas",
@@ -360,9 +373,8 @@ elif importlib.util.find_spec("klayout") is not None:
     sys.exit(2)
 else:
     print("klayout:      not bundled (expected; Rust default)")
-import floe, floe2
-print("packages:     floe %s, floe2 %s OK" %
-      (floe.__version__, floe2.__version__))
+import floe
+print("packages:     floe %s OK (the GTK viewer)" % floe.__version__)
 PY
 then
     FAILED=1
@@ -470,8 +482,9 @@ cat > "$B/README-PORTABLE.txt" <<EOF
 ${FLOE_PORTABLE_PRODUCT} 포터블 번들 (${FLOE_PORTABLE_PRODUCT} ${VERSION}, ${STAMP} 빌드)
 ====================
 PyGObject(python3-gobject)가 없는 호스트에서 ${FLOE_PORTABLE_PRODUCT}를 실행하기 위한 자체
-포함 런타임. Python + PyGObject + GTK3 + NumPy/Pillow + floe/floe2 패키지 +
-floe-index(러스트 인덱서/VFS daemon)와 floe-renderd(기본 CPU renderer)가
+포함 런타임. Python + PyGObject + GTK3 + NumPy/Pillow + floe 패키지(GTK 뷰어) +
+floe2(러스트 명령: index/info/render/clip/jobdeck/drc…), floe-index(러스트
+인덱서/VFS daemon)와 floe-renderd(기본 CPU renderer)가
 runtime/bin/ 안에 들어
 있으며 시스템에는 아무것도 설치·변경하지 않는다. 시스템에서
 쓰는 것은 X 디스플레이와 (있다면) 시스템 폰트뿐.
@@ -492,10 +505,10 @@ floe(KLayout)와 floe2(Rust) 실행 파일을 모두 제공한다.
 
 편의상 링크: ln -s /opt/${FLOE_PORTABLE_PRODUCT}-portable/floe2 /usr/local/bin/floe2
 
-코드 업데이트: 새 floe/와 floe2/ 패키지를
+코드 업데이트: 새 floe/ 패키지를
     runtime/lib/python*/site-packages/floe
-    runtime/lib/python*/site-packages/floe2
-에 각각 덮어쓰고, 같은 체크아웃에서 빌드한 두 바이너리를
+에 덮어쓰고, 같은 체크아웃에서 빌드한 세 바이너리를
+    runtime/bin/floe2
     runtime/bin/floe-index
     runtime/bin/floe-renderd
 로 함께 교체한다 (chmod +x). 파이썬 패키지와 러스트 바이너리는

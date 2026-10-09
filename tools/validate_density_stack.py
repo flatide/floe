@@ -146,6 +146,9 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
+# the product command line: the Rust `floe2` (rust/floe2; the Python
+# floe2 CLI is gone - docs/SHARED_APP_LAYER.ko.md P1c)
+FLOE2 = os.environ.get("FLOE2_BIN") or str(ROOT / "rust" / "target" / "release" / "floe2")
 sys.path.insert(0, str(ROOT))
 from floe.cache import Cache
 from floe.rust_render import RustRenderWorker
@@ -213,7 +216,7 @@ def dots_layout(path):
 def dots_checks(temp):
     src = Path(temp) / 'dots.oas'
     dots_layout(src)
-    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+    done = subprocess.run([FLOE2, 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
     workers = {
@@ -457,7 +460,7 @@ def history_checks(temp):
     same scale equals the corner drawn first by a fresh worker."""
     src = Path(temp) / 'uneven.oas'
     uneven_layout(src)
-    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+    done = subprocess.run([FLOE2, 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
     # the fixed reserve (FLOE_RUST_DENSITY_RESERVE_LEFT=off): what pass 1
@@ -563,7 +566,7 @@ def held_checks(temp):
     default reserve and reports nothing over budget."""
     src = Path(temp) / 'held.oas'
     held_layout(src)
-    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+    done = subprocess.run([FLOE2, 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
     env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on'}
@@ -612,7 +615,7 @@ def probe_threads_checks(temp):
     on four threads (one with the switch off)."""
     src = Path(temp) / 'probe_lists.oas'
     lists_layout(src)
-    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+    done = subprocess.run([FLOE2, 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
     env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_FLOOR_PX': '0', 'FLOE_RUST_DENSITY_PLAN_THREADS': '4'}
@@ -680,7 +683,7 @@ def lists_checks(temp):
     are one too, from an eighth of the members or fewer."""
     src = Path(temp) / 'lists.oas'
     lists_layout(src)
-    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+    done = subprocess.run([FLOE2, 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
     every = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_LIST_BY_DOT': 'off'}
@@ -769,7 +772,7 @@ def dense_lists_checks(temp):
     it."""
     src = Path(temp) / 'dense_lists.oas'
     dense_lists_layout(src)
-    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+    done = subprocess.run([FLOE2, 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
     env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_LIST_BY_DOT': 'off'}
@@ -881,7 +884,7 @@ def cells_checks(temp):
     drawn."""
     src = Path(temp) / 'cells.oas'
     cells_layout(src)
-    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+    done = subprocess.run([FLOE2, 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
     env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on'}
@@ -994,7 +997,7 @@ def shift_checks(temp):
     pan_src, edge_src, origin_src = Path(temp) / 'pan.oas', Path(temp) / 'edge.oas', Path(temp) / 'origin.oas'
     shift_layouts(pan_src, edge_src, origin_src)
     for src in (pan_src, edge_src, origin_src):
-        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+        done = subprocess.run([FLOE2, 'index', str(src)],
                               cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
         assert done.returncode == 0, done.stdout + done.stderr
     env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on'}
@@ -1068,7 +1071,7 @@ def zoom_out_checks(temp):
     off (main): their VIEW is wider than their dies."""
     src = Path(temp) / 'zoom.oas'
     zoom_layout(src)
-    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+    done = subprocess.run([FLOE2, 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
     env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on'}
@@ -1154,7 +1157,7 @@ def gate_checks(temp):
     the sparse half too, the field alike; high's cut (1 px) gates nothing."""
     src = Path(temp) / 'gate.oas'
     gate_layout(src)
-    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+    done = subprocess.run([FLOE2, 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
     env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on'}
@@ -1224,7 +1227,7 @@ def bright_checks(temp):
     pixels, the gate's frame."""
     src = Path(temp) / 'bright.oas'
     gate_layout(src)
-    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+    done = subprocess.run([FLOE2, 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
     env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_GATE': 'on', 'FLOE_RUST_DENSITY_ZOOM_OUT': 'on',
@@ -1299,7 +1302,7 @@ def bright_checks(temp):
     # pass 1's shapes stay
     src = Path(temp) / 'bright_first.oas'
     shapes_first_layout(src)
-    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+    done = subprocess.run([FLOE2, 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
     env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_TOP_GROUP': 'on', 'FLOE_RUST_DENSITY_SHAPES_FIRST': 'on',
@@ -1327,7 +1330,7 @@ def pattern_checks(temp):
     """
     src = Path(temp) / 'pattern.oas'
     shapes_first_layout(src)
-    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+    done = subprocess.run([FLOE2, 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
     env = {
@@ -1383,7 +1386,7 @@ def toggle_checks(temp):
     first's pixels."""
     src = Path(temp) / 'toggle.oas'
     gate_layout(src)
-    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+    done = subprocess.run([FLOE2, 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
     retained = {'FLOE_RUST_RETAINED_MB': '256'}
@@ -1481,7 +1484,7 @@ def first_checks(temp):
     FLOE_RUST_DENSITY_STAND_IN=off draws nothing, as 0.12.298."""
     src = Path(temp) / 'first.oas'
     first_layout(src)
-    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+    done = subprocess.run([FLOE2, 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
     env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_BRIGHT': 'on',
@@ -1589,7 +1592,7 @@ def sums_checks(temp):
     single, listed = Path(temp) / 'sums_single.oas', Path(temp) / 'sums_list.oas'
     sums_layout(single, listed)
     for src in (single, listed):
-        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+        done = subprocess.run([FLOE2, 'index', str(src)],
                               cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
         assert done.returncode == 0, done.stdout + done.stderr
     env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_BRIGHT': 'on',
@@ -1720,7 +1723,7 @@ def hier_checks(temp):
     paths = {name: Path(temp) / (name + '.oas') for name in names}
     hier_layouts(*(paths[name] for name in names))
     for src in paths.values():
-        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+        done = subprocess.run([FLOE2, 'index', str(src)],
                               cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
         assert done.returncode == 0, done.stdout + done.stderr
     env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_BRIGHT': 'on',
@@ -1836,7 +1839,7 @@ def top_first_checks(temp):
     done = subprocess.run([sys.executable, '-B', str(ROOT / 'tools/gen_route_chip.py'), str(src), '--scale', '0.25'],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
-    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+    done = subprocess.run([FLOE2, 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
     env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_BUDGET_MB': '64'}
@@ -1908,7 +1911,7 @@ def density_only_checks(temp):
     whole budget."""
     src = Path(temp) / 'density_only.oas'
     density_only_layout(src)
-    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+    done = subprocess.run([FLOE2, 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
     env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_BUDGET_MB': '64'}
@@ -1973,7 +1976,7 @@ def top_group_checks(temp):
     shapes_first_checks the default)."""
     src = Path(temp) / 'top_group.oas'
     top_group_layout(src)
-    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+    done = subprocess.run([FLOE2, 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
     env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on'}
@@ -2016,7 +2019,7 @@ def top_group_checks(temp):
         for _ in range(1500):
             top.insert(kdb.DCellInstArray(cell.cell_index(), kdb.DTrans(kdb.DVector(rnd.randrange(39_800) / 1000.0, rnd.randrange(19_800) / 1000.0))))
     ly.write(str(src))
-    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+    done = subprocess.run([FLOE2, 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
     workers = {'on': worker(src, dict(env, FLOE_RUST_DENSITY_TOP_GROUP='on')), 'off': worker(src, dict(env, FLOE_RUST_DENSITY_TOP_GROUP='off'))}
@@ -2068,7 +2071,7 @@ def shapes_first_checks(temp):
     the switch off, where they light over LOW's original as without it."""
     src = Path(temp) / 'shapes_first.oas'
     shapes_first_layout(src)
-    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+    done = subprocess.run([FLOE2, 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
     env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_TOP_GROUP': 'on'}
@@ -2141,7 +2144,7 @@ def full_shapes_first_checks(temp):
         else:
             top.shapes(layer).insert(kdb.Box(-1_000, -1_000, 20_000 if kind == 'half' else 41_000, 21_000))
         ly.write(str(src))
-        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+        done = subprocess.run([FLOE2, 'index', str(src)],
                               cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
         assert done.returncode == 0, done.stdout + done.stderr
         # An edge tile as well as full tiles, and a one-tile frame.
@@ -2219,7 +2222,7 @@ def nearly_full_pattern_checks(temp):
             top.insert(kdb.CellInstArray(leaf.cell_index(), kdb.Trans(hx * 100 - 25, 3075),
                                         kdb.Vector(3200, 0), kdb.Vector(0, 3200), 16, 16))
         ly.write(str(src))
-        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+        done = subprocess.run([FLOE2, 'index', str(src)],
                               cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
         assert done.returncode == 0, done.stdout + done.stderr
         images = []
@@ -2332,7 +2335,7 @@ def planner_mask_checks(temp):
     top.insert(kdb.CellInstArray(leaf.cell_index(), kdb.Trans(1, False, 3125, 9475),
                                 kdb.Vector(3200, 0), kdb.Vector(0, 3200), 4, 2))
     ly.write(str(src))
-    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+    done = subprocess.run([FLOE2, 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
     images = []
@@ -2390,7 +2393,7 @@ def staged_density_checks(temp):
                     shapes.insert(kdb.Box(x * 100 + at, y * 100 + at,
                                           x * 100 + at + 250, y * 100 + at + 250))
         ly.write(str(src))
-        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+        done = subprocess.run([FLOE2, 'index', str(src)],
                               cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
         assert done.returncode == 0, done.stdout + done.stderr
         frames = {}
@@ -2458,7 +2461,7 @@ def left_checks(temp):
     and reports the floor probe over budget."""
     src = Path(temp) / 'own.oas'
     own_layout(src)
-    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+    done = subprocess.run([FLOE2, 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
     env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on', 'FLOE_RUST_DENSITY_FLOOR_PX': '0', 'FLOE_RUST_BUDGET_MB': '32'}
@@ -2545,7 +2548,7 @@ def ladder_checks(temp):
     frame. The default budget decodes the page."""
     src = Path(temp) / 'ladder.oas'
     ladder_layout(src)
-    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+    done = subprocess.run([FLOE2, 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
     env = {'FLOE_RUST_DENSITY_STACK': 'top', 'FLOE_RUST_DENSITY_DOTS': 'on'}
@@ -2631,7 +2634,7 @@ def occ_checks(temp):
     when = src.stat().st_mtime - 3600
     os.utime(bare, (when, when))
     for path, extra in ((src, []), (bare, ['--no-page-occupancy'])):
-        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(path)] + extra,
+        done = subprocess.run([FLOE2, 'index', str(path)] + extra,
                               cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
         assert done.returncode == 0, done.stdout + done.stderr
     ice, bare_ice = Path(temp) / '.occ.oas.ice', Path(temp) / '.occ_bare.oas.ice'
@@ -2779,7 +2782,7 @@ def mixed_checks(temp):
         three times over."""
     src = Path(temp) / 'mixed.oas'
     mixed_layout(src)
-    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+    done = subprocess.run([FLOE2, 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
     # the page spread on by default (0.12.277): the index has design.ovb
@@ -2878,7 +2881,7 @@ def occ_density_checks(temp):
     shutil.copyfile(src, plain)
     said = {}
     for path, extra in ((src, []), (plain, ['--no-page-occupancy'])):
-        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(path)] + extra,
+        done = subprocess.run([FLOE2, 'index', str(path)] + extra,
                               cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
         assert done.returncode == 0, done.stdout + done.stderr
         said[path] = done.stderr
@@ -2889,7 +2892,7 @@ def occ_density_checks(temp):
     assert (ice / 'design.ovs').read_bytes()[:8] == b'FLOEOVS1' and '[vfs] ovs design.ovs: ' in said[src], said[src][-2000:]
     assert not (plain_ice / 'design.ovs').exists() and '[vfs] ovs: none' in said[plain], said[plain][-2000:]
     # indexed again with --no-ovs: the last one gone, none made
-    again = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src), '--force', '--no-ovs'],
+    again = subprocess.run([FLOE2, 'index', str(src), '--force', '--no-ovs'],
                            cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert again.returncode == 0 and not (ice / 'design.ovs').exists() and '[vfs] ovs' not in again.stderr, again.stderr[-2000:]
     index_bin = os.environ['FLOE_INDEX_BIN']
@@ -3131,7 +3134,7 @@ def occ_review_checks(temp, env, occ):
     src, tiny = Path(temp) / 'occcut.oas', Path(temp) / 'occtiny.oas'
     occ_cut_layout(src, tiny)
     for path in (src, tiny):
-        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(path)],
+        done = subprocess.run([FLOE2, 'index', str(path)],
                               cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
         assert done.returncode == 0, done.stdout + done.stderr
     ice, tiny_ice = Path(temp) / '.occcut.oas.ice', Path(temp) / '.occtiny.oas.ice'
@@ -3261,7 +3264,7 @@ def occ_root_checks(temp, env, occ):
     import struct
     src = Path(temp) / 'occroot.oas'
     occ_root_layout(src)
-    done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+    done = subprocess.run([FLOE2, 'index', str(src)],
                           cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
     ice = Path(temp) / '.occroot.oas.ice'
@@ -3269,7 +3272,7 @@ def occ_root_checks(temp, env, occ):
     # the index makes the cells' files with design.ovs; indexed again (here
     # with --no-ovs) they all go first
     assert len(list(ice.glob('design.ovs.*'))) == 2 and "cell BLK's root views" in done.stderr, done.stderr[-2000:]
-    again = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src), '--force', '--no-ovs'],
+    again = subprocess.run([FLOE2, 'index', str(src), '--force', '--no-ovs'],
                            cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
     assert again.returncode == 0 and not list(ice.glob('design.ovs*')), (again.returncode, list(ice.glob('design.ovs*')))
 
@@ -3539,7 +3542,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='floe-density-stack-') as temp:
         src = Path(temp) / 'stack.oas'
         layout(src)
-        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+        done = subprocess.run([FLOE2, 'index', str(src)],
                               cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
         assert done.returncode == 0, done.stdout + done.stderr
         workers = {

@@ -38,6 +38,9 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
+# the product command line: the Rust `floe2` (rust/floe2; the Python
+# floe2 CLI is gone - docs/SHARED_APP_LAYER.ko.md P1c)
+FLOE2 = os.environ.get("FLOE2_BIN") or str(ROOT / "rust" / "target" / "release" / "floe2")
 # Boxes are markers drawn by the KLayout rule and are compared with the
 # members drawn directly: area-true drawing (FLOE_RUST_AREA_TRUE, gate
 # tools/validate_area_true.py) keeps a sub-pixel member by its area, so the
@@ -156,7 +159,7 @@ def review_cases(temp):
     view, size = (0.0, 0.0, 1_000_000.0, 1_000_000.0), (1000, 1000)
     seen = {}
     for name in ('depth', 'array', 'points', 'nodes', 'styles', 'frames'):
-        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(temp / (name + '.oas'))],
+        done = subprocess.run([FLOE2, 'index', str(temp / (name + '.oas'))],
                               cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
         assert done.returncode == 0, done.stdout + done.stderr
         off, on = worker(temp / (name + '.oas'), False), worker(temp / (name + '.oas'), True)
@@ -213,7 +216,7 @@ def main():
         src = Path(temp) / 'chip.oas'
         for argv in ([sys.executable, '-B', str(ROOT / 'tools/gen_main01_like.py'), str(src),
                       '--scale', '0.003', '--jobs', '2', '--geometry', 'chip'],
-                     [sys.executable, '-B', '-m', 'floe2', 'index', str(src), '--jobs', '2']):
+                     [FLOE2, 'index', str(src), '--jobs', '2']):
             done = subprocess.run(argv, cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
             assert done.returncode == 0, done.stdout + done.stderr
         off, on = worker(src, False), worker(src, True)

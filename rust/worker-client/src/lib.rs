@@ -246,6 +246,18 @@ pub struct WorkerClient {
     cells: BTreeMap<u64, ActiveCell>,
 }
 
+/// `text_hex`'s UTF-8 text (renderd's `error code=locked`).
+fn unhex(hex: &str) -> Option<String> {
+    if hex.len() % 2 != 0 {
+        return None;
+    }
+    let bytes = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
+        .collect::<Option<Vec<u8>>>()?;
+    String::from_utf8(bytes).ok()
+}
+
 impl WorkerClient {
     pub fn spawn(config: Config) -> Result<Self> {
         if config
@@ -358,9 +370,29 @@ impl WorkerClient {
                 .spawn(move || {
                     let mut errors = errors;
                     let mut buf = [0; 4096];
+                    // renderd's `[lock]` notes (floe_vfs::lock: a deck's
+                    // caches opened without their locks, a folder that
+                    // cannot hold them) are the user's to read, as the
+                    // Python adapter passed them on; the rest stays in the
+                    // tail an error quotes
+                    let mut line = Vec::new();
                     while let Ok(n) = errors.read(&mut buf) {
                         if n == 0 {
                             break;
+                        }
+                        for &b in &buf[..n] {
+                            if b != b'\n' {
+                                if line.len() < 4096 {
+                                    line.push(b);
+                                }
+                                continue;
+                            }
+                            if line.starts_with(b"[lock]") {
+                                let mut err = std::io::stderr().lock();
+                                let _ = err.write_all(&line);
+                                let _ = err.write_all(b"\n");
+                            }
+                            line.clear();
                         }
                         let mut tail = stderr.lock().unwrap();
                         tail.extend(&buf[..n]);
@@ -771,6 +803,14 @@ impl WorkerClient {
                 return Ok(line.fields);
             }
             if line.kind == "error" {
+                // a cache another run rebuilds (floe_vfs::lock): renderd
+                // sends the text as UTF-8 hex - the message field's
+                // whitespace <-> `_` mangles names like ws_kim
+                if line.fields.get("code") == Some("locked") {
+                    if let Some(text) = line.fields.get("text_hex").and_then(unhex) {
+                        return Err(Error::new(ErrorKind::Busy, text));
+                    }
+                }
                 return Err(Error::new(
                     ErrorKind::Worker,
                     line.fields.required("message")?,

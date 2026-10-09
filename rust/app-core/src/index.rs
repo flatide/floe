@@ -43,6 +43,15 @@ pub struct IndexOptions {
     pub profile_repeat: usize,
     pub profile_snapshot: Option<PathBuf>,
     pub profile_snapshot_refresh: bool,
+    /// `--hier-only`: the cell tree's index (design.ovh) added to, or
+    /// rebuilt on, a current cache by `floe-index hier`; nothing else.
+    pub hier_only: bool,
+    /// The pages' occupancy grids (design.ovb), built by default
+    /// (2026-10-02); `--no-page-occupancy` is the kill switch.
+    pub page_occupancy: bool,
+    /// The occupancy density (design.ovs), built by default (2026-10-07);
+    /// `--no-ovs` leaves it out.
+    pub ovs: bool,
 }
 impl Default for IndexOptions {
     fn default() -> Self {
@@ -67,6 +76,9 @@ impl Default for IndexOptions {
             profile_repeat: 1,
             profile_snapshot: None,
             profile_snapshot_refresh: false,
+            hier_only: false,
+            page_occupancy: true,
+            ovs: true,
         }
     }
 }
@@ -143,6 +155,13 @@ impl IndexOptions {
                 "--profile-snapshot-refresh requires --profile-snapshot",
             ));
         }
+        if self.hier_only
+            && (self.profile_cell.is_some() || self.occupancy_only || self.representatives_only)
+        {
+            return Err(Error::input(
+                "--hier-only adds the cell tree's index alone; it takes no other additive or profile option",
+            ));
+        }
         if self.profile_cell.is_some()
             && (self.force || self.occupancy_only || self.slow_cell_s.is_some())
         {
@@ -171,6 +190,8 @@ pub enum Action {
     OccupancyOnly,
     RepresentativesOnly,
     SummariesOnly,
+    /// `floe-index hier` on a current cache (`--hier-only`)
+    HierOnly,
     Profile,
 }
 
@@ -202,6 +223,15 @@ pub fn decide(
             ));
         }
         return Ok(Action::OccupancyOnly);
+    }
+    if options.hier_only {
+        if *state != CacheState::Current {
+            return Err(Error::new(
+                ErrorKind::Cache,
+                "--hier-only needs a current cache",
+            ));
+        }
+        return Ok(Action::HierOnly);
     }
     if *state == CacheState::Current && !options.force {
         if options.wants_representatives()
@@ -240,6 +270,9 @@ fn arguments(
     o: &IndexOptions,
     action: &Action,
 ) -> Result<Vec<OsString>> {
+    if *action == Action::HierOnly {
+        return Ok(vec!["hier".into(), directory.as_os_str().to_owned()]);
+    }
     let mut a: Vec<OsString> = vec!["vfs".into(), source.as_os_str().to_owned()];
     if *action != Action::Profile {
         a.push(directory.as_os_str().to_owned());
@@ -260,15 +293,7 @@ fn arguments(
     }
     if *action == Action::OccupancyOnly {
         a.push("--occupancy-only".into());
-        if let Some(v) = o.occupancy_balance {
-            add(&mut a, "--occupancy-balance", u8::from(v));
-        }
-        if let Some(v) = o.occupancy_prune {
-            add(&mut a, "--occupancy-prune", u8::from(v));
-        }
-        if let Some(v) = o.occupancy_um {
-            add(&mut a, "--occupancy-um", v);
-        }
+        occupancy_args(&mut a, o);
         return Ok(a);
     }
     if let Some(v) = o.page_target_mb {
@@ -285,18 +310,16 @@ fn arguments(
     }
     if *action != Action::Profile && o.wants_occupancy() {
         a.push("--occupancy".into());
-        if let Some(v) = o.occupancy_prune {
-            add(&mut a, "--occupancy-prune", u8::from(v));
-        }
-        if let Some(v) = o.occupancy_balance {
-            add(&mut a, "--occupancy-balance", u8::from(v));
-        }
-        if let Some(v) = o.occupancy_um {
-            add(&mut a, "--occupancy-um", v);
-        }
+        occupancy_args(&mut a, o);
     }
     if !o.lod {
         a.push("--no-lod".into());
+    }
+    if !o.page_occupancy {
+        a.push("--no-page-occupancy".into());
+    }
+    if !o.ovs && *action != Action::Profile {
+        a.push("--no-ovs".into());
     }
     if let Some(v) = o.slow_cell_s {
         add(&mut a, "--slow-cell-s", v);
@@ -329,6 +352,20 @@ fn arguments(
         a.push("--profile-snapshot-refresh".into());
     }
     Ok(a)
+}
+
+/// The summary's options as the Python CLI gave them (`_occupancy_args`):
+/// the base cell (as Python writes a float: `2.0`), the split, the pruning.
+fn occupancy_args(a: &mut Vec<OsString>, o: &IndexOptions) {
+    if let Some(v) = o.occupancy_um {
+        a.extend(["--occupancy-um".into(), format!("{v:?}").into()]);
+    }
+    if let Some(v) = o.occupancy_balance {
+        a.extend(["--occupancy-balance".into(), u8::from(v).to_string().into()]);
+    }
+    if let Some(v) = o.occupancy_prune {
+        a.extend(["--occupancy-prune".into(), u8::from(v).to_string().into()]);
+    }
 }
 
 pub(crate) struct WriteLease(File);
@@ -407,6 +444,18 @@ impl PreparedIndex {
     pub fn migration(&self) -> Option<cache::Migration> {
         self.migration
     }
+    /// The indexer's command lines this run starts, in order (the second
+    /// is a second summary pass): what a front end shows before it runs.
+    pub fn commands(&self) -> Vec<Vec<OsString>> {
+        std::iter::once(&self.args)
+            .chain(self.next_args.as_ref())
+            .map(|args| {
+                std::iter::once(self.indexer.path().as_os_str().to_owned())
+                    .chain(args.iter().cloned())
+                    .collect()
+            })
+            .collect()
+    }
     pub fn prepare(
         source: &Path,
         options: &IndexOptions,
@@ -429,6 +478,12 @@ impl PreparedIndex {
                 ErrorKind::Unsupported,
                 "jobdeck indexing is not yet ported (M1a-3); use the existing floe2 index",
             ));
+        }
+        if !source.exists() {
+            return Err(Error::input(format!(
+                "source not found: {}",
+                source.display()
+            )));
         }
         cache::fingerprint(&source)?;
         indexer.verify(cancelled)?;
@@ -458,6 +513,16 @@ impl PreparedIndex {
             }
         }
         let profiling = options.profile_cell.is_some();
+        // another run writing the cache refuses this one at once - before
+        // the cache is looked at, where its half-written files would read
+        // as "not current, rerun with --force" (floe/indexlock.py). Readers
+        // in the way are floe-index's to judge.
+        if !profiling {
+            let key = floe_vfs::lock::key(floe_vfs::lock::Kind::Vfs, &directory.to_string_lossy());
+            if let Some(busy) = floe_vfs::lock::writing_refusal(&key) {
+                return Err(Error::new(ErrorKind::Busy, busy.to_string()));
+            }
+        }
         let lease = if profiling {
             Vec::new()
         } else {
@@ -751,6 +816,21 @@ impl IndexJob {
         self.lease.clear();
     }
     fn discard_occupancy_tmp(&self) -> Result<()> {
+        if !(self.cleanup_occupancy || self.cleanup_representatives) {
+            return Ok(());
+        }
+        // only under the cache's writer lock (floe_vfs::lock): once the run
+        // has ended, another run may be writing the same names - its files
+        // are left be (floe/cli.py _discard_occupancy_tmp)
+        let key = floe_vfs::lock::key(floe_vfs::lock::Kind::Vfs, &self.directory.to_string_lossy());
+        let _lock = match floe_vfs::lock::writer(
+            &key,
+            floe_vfs::lock::Mode::Additive,
+            &format!("{} index (temporary file cleanup)", crate::program()),
+        ) {
+            Ok(lock) => lock,
+            Err(_) => return Ok(()),
+        };
         for (enabled, name) in [
             (self.cleanup_occupancy, "design.ovo.tmp"),
             (self.cleanup_representatives, "design.ovr.tmp"),

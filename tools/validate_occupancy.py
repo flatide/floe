@@ -54,6 +54,9 @@ os.environ["FLOE_RUST_OCCUPANCY"] = "on"
 sys.path.insert(0, str(ROOT))
 from floe.cachepath import vfs_cache_dir  # noqa: E402
 BIN = ROOT / "rust" / "target" / "release" / "floe-index"
+# the product command line: the Rust `floe2` (rust/floe2; the Python
+# floe2 CLI is gone - docs/SHARED_APP_LAYER.ko.md P1c)
+FLOE2 = os.environ.get("FLOE2_BIN") or str(ROOT / "rust" / "target" / "release" / "floe2")
 TMP = Path(tempfile.mkdtemp(prefix="floe-occ-"))
 UM = 1000  # dbu per micron in the fixtures (dbu 0.001)
 
@@ -93,8 +96,8 @@ def floe_index(*args, ok=0, env=None):
 
 
 def floe2(*args, ok=0, env=None):
-    res = subprocess.run([sys.executable, "-B", "-m", "floe2",
-                          *map(str, args)], cwd=ROOT, env=env or run_env(),
+    res = subprocess.run([FLOE2, *map(str, args)], cwd=ROOT,
+                         env=env or run_env(),
                          capture_output=True, text=True)
     if ok is not None and res.returncode != ok:
         raise AssertionError("floe2 %s: exit %d, wanted %d\n%s\n%s"
@@ -1016,15 +1019,19 @@ class GenerationContractTests(unittest.TestCase):
         self.assertEqual(read_ovo(self.cache / "design.ovo")["cell"], 3000)
         # a child that dies after writing the tmp: the wrapper removes it
         fake = TMP / "fake-index"
+        # it answers --version as the real one: the Rust command line asks
+        # its indexer's version before it runs it
         fake.write_text("""#!/usr/bin/env python3
-import pathlib, sys
+import os, pathlib, sys
 args = sys.argv[1:]
+if args == ["--version"]:
+    os.execv(%r, [%r, "--version"])
 if args and args[0] == "vfsd":
     sys.exit(0)
 out = pathlib.Path(args[2])
 (out / "design.ovo.tmp").write_bytes(b"half")
 sys.exit(9)
-""")
+""" % (str(BIN), str(BIN)))
         fake.chmod(0o755)
         env = run_env()
         env["FLOE_INDEX_BIN"] = str(fake)

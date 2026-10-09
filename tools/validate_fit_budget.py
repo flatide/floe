@@ -92,6 +92,9 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
+# the product command line: the Rust `floe2` (rust/floe2; the Python
+# floe2 CLI is gone - docs/SHARED_APP_LAYER.ko.md P1c)
+FLOE2 = os.environ.get("FLOE2_BIN") or str(ROOT / "rust" / "target" / "release" / "floe2")
 sys.path.insert(0, str(ROOT))
 from floe.cache import Cache
 from floe.rust_render import RustRenderWorker
@@ -329,7 +332,7 @@ def top_first_checks(temp, src):
     layout_pair(pair)
     layout_over(over)
     for path in (pair, over):
-        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(path), '--jobs', '2'],
+        done = subprocess.run([FLOE2, 'index', str(path), '--jobs', '2'],
                               cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
         assert done.returncode == 0, done.stdout + done.stderr
     from floe.gui import perf_status
@@ -414,7 +417,7 @@ def refit_checks(temp):
     lit = lambda pixels: sum(1 for i in range(0, len(pixels), 4) if pixels[i:i + 3] != b'\x00\x00\x00')
 
     def index(src):
-        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+        done = subprocess.run([FLOE2, 'index', str(src)],
                               cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
         assert done.returncode == 0, done.stdout + done.stderr
 
@@ -631,7 +634,7 @@ def main():
         src = Path(temp) / 'chip.oas'
         for argv in ([sys.executable, '-B', str(ROOT / 'tools/gen_main01_like.py'), str(src),
                       '--scale', '0.003', '--jobs', '2', '--geometry', 'legacy'],
-                     [sys.executable, '-B', '-m', 'floe2', 'index', str(src), '--jobs', '2']):
+                     [FLOE2, 'index', str(src), '--jobs', '2']):
             done = subprocess.run(argv, cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
             assert done.returncode == 0, done.stdout + done.stderr
         tight, tight_off = worker(src, 48), worker(src, 48, fit=False)
@@ -697,7 +700,7 @@ def main():
             # everything), the whole layout as its margin cannot hold that
             uneven = Path(temp) / 'uneven.oas'
             layout_uneven(uneven)
-            done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(uneven), '--jobs', '2'],
+            done = subprocess.run([FLOE2, 'index', str(uneven), '--jobs', '2'],
                                   cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
             assert done.returncode == 0, done.stdout + done.stderr
             # retention on: the corner's frame would serve the whole layout's

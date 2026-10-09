@@ -65,4 +65,12 @@ if [ -n "${FLOE_XQUARTZ:-}" ]; then
     CAIRO_DEBUG=xrender-version=-1
     export CAIRO_DEBUG
 fi
+# floe2 is the Rust command line (runtime/bin/floe2, P1c); it starts the
+# GTK viewer through this runtime's interpreter. The frozen floe (KLayout
+# bundle only) is the Python package's own command line.
+if [ "$PRODUCT" = floe2 ]; then
+    FLOE_GTK_PYTHON="$RT/bin/python3"
+    export FLOE_GTK_PYTHON
+    exec "$RT/bin/floe2" "$@"
+fi
 exec "$RT/bin/python3" -m "$PRODUCT" "$@"

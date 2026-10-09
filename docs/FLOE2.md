@@ -24,8 +24,8 @@ KLayout 경로에서 선행 검증하는 용도. 그 용도의 KLayout 셸은 �
 ## 실행
 
 ```sh
-.venv/bin/python -m floe2 view chip.oas      # 제품
-.venv/bin/python -m floe2 index chip.oas     # 1회: 공유 .<src>.ice/ 생성(숨김 폴더)
+rust/target/release/floe2 view chip.oas      # 제품
+rust/target/release/floe2 index chip.oas     # 1회: 공유 .<src>.ice/ 생성(숨김 폴더)
 
 # 개발 전용: 동결된 KLayout 셸로 같은 cache를 열어 선행 검증/비교
 .venv/bin/python -m floe view chip.oas
@@ -42,7 +42,7 @@ Rust wire/OVM/OVP 버전은 계속 `floe/__init__.py`, `floe/cache.py`, `rust/`�
 종료 타이머를 사용한다. 값은 100..60000ms이며 일반 실행에서는 설정하지 않는다.
 
 ```sh
-FLOE_GUI_SMOKE_MS=8000 .venv/bin/python -m floe2 view --multi chip.oas
+FLOE_GUI_SMOKE_MS=8000 rust/target/release/floe2 view --multi chip.oas
 ```
 
 ## 코드 소유권
@@ -133,7 +133,7 @@ PNG publish는 유지한다. detail/depth/좌표/window는 workload이므로 명
 ```sh
 .venv/bin/python -m floe view chip.oas --multi --goto X,Y,W \
   --detail high --depth 999 --perf-baseline
-.venv/bin/python -m floe2 view chip.oas --multi --goto X,Y,W \
+rust/target/release/floe2 view chip.oas --multi --goto X,Y,W \
   --detail high --depth 999 --perf-baseline
 ```
 

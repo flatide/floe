@@ -342,8 +342,16 @@ pub struct Pack {
     cache: VecDeque<(u64, Arc<Vec<Violation>>, usize)>,
     cache_bytes: usize,
     pub decoded_blocks: u64,
+    /// the pack's reader lock while it is open (floe_vfs::lock, kind Pack):
+    /// a re-pack is refused under a review, and this open was refused
+    /// while one ran (floe/drc.py IcePack)
+    reader: Option<floe_vfs::lock::ReaderGuard>,
 }
 impl Pack {
+    /// Hold `reader` (the pack's reader lock) as long as the pack is open.
+    pub(crate) fn hold(&mut self, reader: floe_vfs::lock::ReaderGuard) {
+        self.reader = Some(reader);
+    }
     /// Opening is read-only, including legacy embedded statuses. Sidecars are
     /// selected by the trusted local caller, never synthesized or overwritten.
     pub fn open(path: &Path, cancelled: &AtomicUsize) -> Result<Self> {
@@ -490,6 +498,7 @@ impl Pack {
             cache: VecDeque::new(),
             cache_bytes: 0,
             decoded_blocks: 0,
+            reader: None,
         };
         // Same check-bbox prepass as the legacy reader, but bounded 192 KiB
         // slabs instead of a resident 48B-per-block table. No coordinate decode.

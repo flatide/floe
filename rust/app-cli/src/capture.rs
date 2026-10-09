@@ -42,6 +42,9 @@ pub fn run(
     levels: Option<BTreeSet<i64>>,
     cancelled: &Arc<AtomicUsize>,
 ) -> Result<i32> {
+    if batch.is_none() {
+        capture.validate()?;
+    }
     let (shots, input) = if let Some(batch) = &batch {
         let text = if batch == "-" {
             stdin_text(cancelled)?
@@ -69,13 +72,22 @@ pub fn run(
     if dataset.source_stale() {
         eprintln!("[{}][warn] source changed; displaying cached geometry. Rebuild with index --force, then reopen.", floe_app_core::program());
     }
+    // what the deck asked for that will not be drawn (a source without
+    // dbu, a cache without the entry's LY/DT): said at every open, and
+    // again by the exit status (floe/cli.py open_cache)
+    for r in dataset.skipped() {
+        println!(
+            "[jobdeck] skipped   : CHIP {} ${} {}: {} ({})",
+            r.chip, r.idx, r.tc, r.reason, r.detail
+        );
+    }
     let options = ExportOptions {
         out,
         report,
         batch: batch.is_some(),
         input,
     };
-    let complete = captures::run(
+    let summary = captures::run_summary(
         &dataset,
         &shots,
         &options,
@@ -83,17 +95,15 @@ pub fn run(
         cancelled,
         |line| println!("{line}"),
     )?;
-    if !complete {
-        for r in dataset.skipped() {
-            eprintln!(
-                "[jobdeck] skipped: CHIP {} ${} {}: {} ({})",
-                r.chip, r.idx, r.tc, r.reason, r.detail
-            );
-        }
+    // what the images lack: the skipped placements of the chips on, the
+    // pages over the decode budget
+    if summary.lacking > 0 || summary.over_budget > 0 {
         eprintln!(
-            "[{}] rendered INCOMPLETE; see per-shot skipped/over-budget counts [exit 3]",
-            floe_app_core::program()
+            "{}: rendered incomplete - {} jobdeck placement(s) missing, {} page(s) over the decode budget (see above)  [exit 3]",
+            floe_app_core::program(),
+            summary.lacking,
+            summary.over_budget
         );
     }
-    Ok(if complete { 0 } else { 3 })
+    Ok(if summary.complete { 0 } else { 3 })
 }

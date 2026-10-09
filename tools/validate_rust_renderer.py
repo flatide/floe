@@ -5,6 +5,7 @@ import inspect
 import io
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -340,7 +341,9 @@ def guarded_import(name, *args, **kwargs):
 builtins.__import__ = guarded_import
 os.environ.pop("FLOE_RENDERER", None)
 
-import floe2
+# the Rust-only product (floe/product.py), as `import floe2` said before
+# the Rust command line took the Python floe2 package's place
+os.environ["FLOE_PRODUCT"] = "floe2"
 from floe import cache
 from floe import gui
 from floe.service import make_render_worker
@@ -3340,35 +3343,24 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             from floe.cachepath import vfs_cache_dir
             cli_source = os.path.join(directory, "CLI source.oas")
             os.symlink(source, cli_source)
-            os.symlink(cache.dir, vfs_cache_dir(cli_source))
-            # sitecustomize runs before `python -m floe2` and turns an
-            # accidental KLayout import anywhere in the CLI startup path
-            # into a hard failure.  The parent test process keeps KLayout as
-            # the independent OASIS/Region oracle.
-            with open(os.path.join(directory, "sitecustomize.py"),
-                      "w", encoding="ascii") as startup:
-                startup.write(
-                    "import builtins\n"
-                    "_real = builtins.__import__\n"
-                    "def _guard(name, *args, **kwargs):\n"
-                    "    if name == 'klayout' or "
-                    "name.startswith('klayout.'):\n"
-                    "        raise ImportError('KLayout unavailable')\n"
-                    "    return _real(name, *args, **kwargs)\n"
-                    "builtins.__import__ = _guard\n")
+            # a copy, not a link: the Rust command line opens a real cache
+            # folder only (the shared app layer's rule, catalog.rs)
+            shutil.copytree(cache.dir, vfs_cache_dir(cli_source))
+            # the Rust `floe2` (rust/floe2) - no Python, so no KLayout, in
+            # its startup path (the Python CLI this guarded is gone, P1c)
+            floe2 = os.environ.get("FLOE2_BIN") or str(
+                ROOT / "rust" / "target" / "release" / "floe2")
             child_env = os.environ.copy()
             child_env.pop("FLOE_RENDERER", None)
-            child_env["PYTHONPATH"] = directory + os.pathsep + \
-                child_env.get("PYTHONPATH", "")
             completed = subprocess.run(
-                [sys.executable, "-B", "-m", "floe2", "info", cli_source],
+                [floe2, "info", cli_source],
                 cwd=str(ROOT), env=child_env, check=True,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, timeout=10)
             self.assertIn("top cell", completed.stdout)
 
             completed = subprocess.run(
-                [sys.executable, "-B", "-m", "floe2", "probe", cli_source],
+                [floe2, "probe", cli_source],
                 cwd=str(ROOT), env=child_env, check=True,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, timeout=30)
@@ -3376,7 +3368,7 @@ class RealDaemonIntegrationTests(unittest.TestCase):
 
             output = os.path.join(directory, "CLI output with spaces.oas")
             completed = subprocess.run(
-                [sys.executable, "-B", "-m", "floe2", "clip", cli_source,
+                [floe2, "clip", cli_source,
                  "--bbox", bbox_um, "--layers", layer_arg,
                  "--cell-name", "CLI 한글", "--out", output],
                 cwd=str(ROOT), env=child_env, check=True,
@@ -3394,7 +3386,7 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             png_path = os.path.join(
                 directory, "CLI rendered labels with spaces.png")
             completed = subprocess.run(
-                [sys.executable, "-B", "-m", "floe2", "render",
+                [floe2, "render",
                  cli_source, "--bbox", bbox_um, "--layers", layer_arg,
                  "--px", "257", "--depth", "999", "--labels",
                  "--label-font-px", "19", "--out", png_path],

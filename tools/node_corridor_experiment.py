@@ -44,6 +44,9 @@ from collections import defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+# the product command line: the Rust `floe2` (rust/floe2; the Python
+# floe2 CLI is gone - docs/SHARED_APP_LAYER.ko.md P1c)
+FLOE2 = os.environ.get("FLOE2_BIN") or str(ROOT / "rust" / "target" / "release" / "floe2")
 sys.path.insert(0, str(ROOT))
 from floe.cachepath import vfs_cache_dir  # noqa: E402
 
@@ -121,7 +124,7 @@ def main(argv=None):
         out.mkdir(parents=True, exist_ok=True)
         src = out / 'corridor.oas'
         places = build(src)
-        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)], cwd=ROOT, env=env,
+        done = subprocess.run([FLOE2, 'index', str(src)], cwd=ROOT, env=env,
                               capture_output=True, text=True, timeout=600)
         assert done.returncode == 0, done.stdout + done.stderr
         ice = vfs_cache_dir(str(src))

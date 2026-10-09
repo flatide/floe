@@ -1,7 +1,4 @@
-use floe_app_core::{
-    svrf::parse::{self, Options},
-    Error, Result,
-};
+use floe_app_core::{svrf::parse::Options, Error, Result};
 use std::{
     path::PathBuf,
     sync::{atomic::AtomicUsize, Arc},
@@ -9,26 +6,13 @@ use std::{
 
 const HELP: &str = "Usage: floe2-web svrf DECK [OPTIONS]
 
-Convert the existing SVRF subset to per-check metadata, without Python.
-  -o, --out FILE          Sidecar (default DECK.rules.json); atomic replacement
-  --scan                 Inventory both IFDEF branches; no output file written
-  -D, --define NAME[=VAL] Switch; repeatable, overrides tested environment names
-  -I, --include-dir DIR   INCLUDE search directory; repeatable
-  --follow-verbatim      Follow INCLUDEs in Tcl wrappers (does NOT run Tcl)
-  --no-env-switches      Disable IFDEF environment fallback (not INCLUDE $VAR/~)
-  -h, --help             Show help; -- ends options; -DNAME/-IDIR/-oFILE supported
-
-DMACRO/CMACRO are NOT expanded; unknown statements and unclosed blocks warn.
-This is rule metadata, NOT a Calibre replacement or a signoff verdict.
-Local CLI only: reads relative/absolute INCLUDE paths and tested environment
-names. No web endpoint, Tcl interpreter, shell command or native worker.
-Limits: 256 MiB expanded input, 4096 file visits, 64 INCLUDE levels, 64 KiB
-line/text, 64 MiB metadata/expansion work, 16M graph steps, 16 MiB sidecar.
-Limits/nonfinite numbers fail, never publish truncated metadata. Missing root
-fails; missing/unreadable INCLUDEs warn. Regular files only; UTF-8 errors replace.
-Source/include/output aliases and cache paths are protected. SIGINT/SIGTERM or
-write failure preserves the old sidecar; inputs are rechecked before commit.
-JSON schema/values match floe; native generated_by and JSON whitespace differ.";
+Moved to floe-index (2026-09-29): the tools that build files from inputs live
+there (`vfs` the layout cache, `drc` the result pack, `svrf` the rule sidecar),
+one SVRF parser for every front end. This command prints the same command for
+floe-index and exits 2, so an old script says where it went:
+  floe-index svrf DECK [-o FILE] [--scan] [-D NAME[=VAL]]... [-I DIR]...
+                       [--follow-verbatim] [--no-env-switches]
+Same options, same <deck>.rules.json; floe-index svrf --help lists them.";
 
 #[derive(Debug)]
 pub enum Command {
@@ -37,10 +21,15 @@ pub enum Command {
         deck: PathBuf,
         out: Option<PathBuf>,
         options: Options,
+        /// the options as given, in order (-D/-I values as written): the
+        /// floe-index command the pointer prints
+        words: Vec<String>,
     },
 }
 pub fn parse(args: &[String]) -> Result<Command> {
-    let (mut options, mut deck, mut out) = (Options::default(), None, None);
+    let (mut options, mut deck, mut out): (Options, Option<PathBuf>, Option<PathBuf>) =
+        (Options::default(), None, None);
+    let (mut defines, mut includes) = (Vec::new(), Vec::new());
     let mut positional = false;
     let mut i = 1;
     while i < args.len() {
@@ -96,6 +85,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
         };
         match flag {
             "-D" | "--define" => {
+                defines.push(value.to_string());
                 let (name, v) = value.split_once('=').unwrap_or((value, ""));
                 if !name.is_empty() {
                     options
@@ -111,6 +101,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
                     return Err(Error::input("too many include directories"));
                 }
                 options.include_dirs.push(value.into());
+                includes.push(value.to_string());
             }
             _ => {
                 if value.is_empty() {
@@ -120,49 +111,48 @@ pub fn parse(args: &[String]) -> Result<Command> {
             }
         }
     }
+    let deck: PathBuf = deck.ok_or_else(|| Error::input("svrf requires DECK"))?;
+    // floe/cli.py cmd_svrf's order
+    let mut words = vec![
+        "floe-index".to_string(),
+        "svrf".into(),
+        deck.to_string_lossy().into_owned(),
+    ];
+    if let Some(out) = &out {
+        words.extend(["-o".into(), out.to_string_lossy().into_owned()]);
+    }
+    if options.scan_all {
+        words.push("--scan".into());
+    }
+    for d in defines {
+        words.extend(["-D".into(), d]);
+    }
+    for d in includes {
+        words.extend(["-I".into(), d]);
+    }
+    if options.follow_verbatim {
+        words.push("--follow-verbatim".into());
+    }
+    if !options.env_switches {
+        words.push("--no-env-switches".into());
+    }
     Ok(Command::Parse {
-        deck: deck.ok_or_else(|| Error::input("svrf requires DECK"))?,
+        deck,
         out,
         options,
+        words,
     })
 }
-pub fn run(command: Command, stop: &Arc<AtomicUsize>) -> Result<i32> {
-    let Command::Parse { deck, out, options } = command else {
+pub fn run(command: Command, _stop: &Arc<AtomicUsize>) -> Result<i32> {
+    let Command::Parse { words, .. } = command else {
         println!("{}", crate::named(HELP));
         return Ok(0);
     };
-    let parsed = parse::parse_deck(&deck, &options, stop)?;
-    if options.scan_all {
-        println!("{}", parsed.format_scan(stop)?);
-        return Ok(0);
-    }
-    let out = out.unwrap_or_else(|| {
-        let mut p = deck.as_os_str().to_owned();
-        p.push(".rules.json");
-        p.into()
-    });
-    parsed.write_json(&out, stop)?;
-    println!(
-        "{}: {} checks, {} derivations, {} layers -> {}",
-        deck.display(),
-        parsed.check_count(),
-        parsed.derivation_count(),
-        parsed.layer_count(),
-        out.display()
+    eprintln!(
+        "svrf moved to floe-index (same options, same <deck>.rules.json) - run:\n  {}",
+        crate::shell_join(&words)
     );
-    if parsed.stat("cmacro") > 0 {
-        eprintln!("[floe][warn] {} CMACRO calls NOT expanded - metadata is incomplete for macro-generated rules",parsed.stat("cmacro"));
-    }
-    if parsed.stat("unknown") > 0 {
-        eprintln!(
-            "[floe] {} unrecognized statements skipped (--scan lists them)",
-            parsed.stat("unknown")
-        );
-    }
-    for w in parsed.warnings().iter().take(10) {
-        eprintln!("[floe][warn] {w}");
-    }
-    Ok(0)
+    Ok(2)
 }
 
 #[cfg(test)]
@@ -173,7 +163,12 @@ mod tests {
     }
     #[test]
     fn cli_option_spellings_and_scan() {
-        let Command::Parse { deck, out, options } = parse(&args(&[
+        let Command::Parse {
+            deck,
+            out,
+            options,
+            words,
+        } = parse(&args(&[
             "svrf",
             "-DA=2",
             "--define=A=3",
@@ -185,7 +180,8 @@ mod tests {
             "--",
             "-deck",
         ]))
-        .unwrap() else {
+        .unwrap()
+        else {
             panic!()
         };
         assert_eq!(deck, PathBuf::from("-deck"));
@@ -193,6 +189,10 @@ mod tests {
         assert_eq!(options.defines["A"], Some("3".into()));
         assert_eq!(options.include_dirs, vec![PathBuf::from("한 글")]);
         assert!(options.scan_all && options.follow_verbatim && !options.env_switches);
+        assert_eq!(
+            crate::shell_join(&words),
+            "floe-index svrf -deck -o out --scan -D A=2 -D A=3 -I '한 글' --follow-verbatim --no-env-switches"
+        );
     }
     #[test]
     fn cli_bad_arguments() {

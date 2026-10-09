@@ -78,6 +78,11 @@ density_stack cell_tree index_lock representatives oasis_shapes floe2 klayout"
 # The planner feeds every one of those, and the plan CLI's gates.
 PLAN_GATES="unit_vfs $RENDER_GATES vfs_hier vfs_lifecycle vfs_marker \
 vfs_split vfs_text vfs_profile"
+# What runs the product command line, the Rust floe2 (P1c): its own gate
+# and every gate that calls it
+CLI_GATES="floe2 jobdeck occupancy cell_tree index_lock svrf oasis_shapes \
+rust_renderer representatives fit_budget sub_cut_box shape_cut write_once \
+layer_decode area_true density_stack"
 # only version lines differ in FILE (every push bumps them)
 versions_only() {
     git diff "$CHANGED_BASE" -- "$1" 2>/dev/null | grep '^[+-]' | \
@@ -132,10 +137,15 @@ gates_for() {
         rust/worker-client/*)
             echo "unit worker_client" ;;
         rust/app-core/*|rust/notices/*)
-            echo "unit cell_index floe2" ;;
-        rust/app-cli/*|rust/floe2/*|floe/gtkview.py)
+            # the application policy under the Rust command line floe2,
+            # which every CLI gate runs (P1c, docs/SHARED_APP_LAYER.ko.md)
+            echo "unit cell_index $CLI_GATES" ;;
+        rust/app-cli/*|rust/floe2/*)
             # the Rust command line floe2 (P1, docs/SHARED_APP_LAYER.ko.md)
-            echo "unit floe2" ;;
+            echo "unit $CLI_GATES" ;;
+        floe/gtkview.py)
+            # the GTK viewer's entry, started by floe2 view
+            echo "floe2 rust_renderer jobdeck" ;;
         rust/render-core/*|rust/renderd/*|rust/render-cli/*|floe/rust_render.py)
             echo "$RENDER_GATES" ;;
         rust/dbg/*)
@@ -158,7 +168,7 @@ gates_for() {
             echo "jobdeck occupancy rust_renderer index_lock" ;;
         floe/drc.py|floe/svrf.py)
             echo "drc_ice svrf index_lock" ;;
-        floe/cli.py|floe/product.py|floe/__main__.py|floe2/*)
+        floe/cli.py|floe/product.py|floe/__main__.py)
             echo "python jobdeck occupancy cell_tree index_lock" ;;
         *)
             echo ALL ;;

@@ -110,6 +110,13 @@ impl Layout {
             ));
         }
         let fingerprint = cache::fingerprint(&source)?;
+        // a cache another run rebuilds whole is not there to open (its
+        // meta.json is gone or half-way): say who, not "no VFS cache"
+        // (floe_vfs::lock; floe/cli.py open_cache)
+        let key = floe_vfs::lock::key(floe_vfs::lock::Kind::Vfs, &directory.to_string_lossy());
+        if let Some(busy) = floe_vfs::lock::opening_refusal(&key) {
+            return Err(Error::new(ErrorKind::Busy, busy.to_string()));
+        }
         if !fs::symlink_metadata(&directory).is_ok_and(|m| m.is_dir()) {
             return Err(Error::new(
                 ErrorKind::Cache,

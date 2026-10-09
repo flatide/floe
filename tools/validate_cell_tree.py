@@ -64,6 +64,9 @@ sys.path.insert(0, str(ROOT))
 os.environ["FLOE_RENDERER"] = "rust"
 BIN = ROOT / "rust" / "target" / "release" / "floe-index"
 RENDERD = ROOT / "rust" / "target" / "release" / "floe-renderd"
+# the product command line: the Rust `floe2` (rust/floe2; the Python
+# floe2 CLI is gone - docs/SHARED_APP_LAYER.ko.md P1c)
+FLOE2 = os.environ.get("FLOE2_BIN") or str(ROOT / "rust" / "target" / "release" / "floe2")
 TMP = Path(tempfile.mkdtemp(prefix="floe-celltree-"))
 
 
@@ -76,7 +79,7 @@ def run_env(**extra):
 
 
 def floe2(*args, ok=0, env=None):
-    res = subprocess.run([sys.executable, "-B", "-m", "floe2", *map(str, args)],
+    res = subprocess.run([FLOE2, *map(str, args)],
                          capture_output=True, text=True, cwd=str(ROOT),
                          env=env or run_env())
     if ok is not None and res.returncode != ok:

@@ -30,7 +30,15 @@ const RENDER_HELP: &str = "Usage: floe2-web render SOURCE [OPTIONS]
   --report FILE             JSON single-shot report
   --batch FILE|-            Named captures; --out is a directory (also for one shot)
   --mosaic-at X,Y;X,Y;X,Y;X,Y  Four points clockwise TL,TR,BR,BL; needs --size
-  --corners X0,Y0,X1,Y1     Four --size rectangles INSIDE this region
+  --corners X0,Y0,X1,Y1     Four --size rectangles INSIDE this region; alone
+                            (or fit): the default region's (the chips' extent)
+  --chip NAME[,NAME...]     Jobdeck: these chips alone on (a NAME is the chip
+                            view's file name, its TC path or a CHIP id; N:NAME
+                            level N alone; wildcards * ? [..]); the region is
+                            then their extent
+  --chip-off NAME[,...]     These chips off, the others on
+  --fit-chip NAME[#K][,...] The region is these chips' extent (on or not); #K
+                            their K-th placement alone, deck order (info --chips)
   --line W --line-color RGB  Separator width (default 2), color (default #ffffff)
   --keep-tiles              Keep mosaic _tl/_tr/_bl/_br PNGs after all renders succeed
   --drc DB --drc-rule NAME   Square per-error PNGs, live style + flateyes metadata
@@ -42,7 +50,7 @@ const RENDER_HELP: &str = "Usage: floe2-web render SOURCE [OPTIONS]
 Lengths: bare/um/µm/μm, nm, mm, cm, m. Fractional DBU is preserved.
 Batch: NAME key=value ...; quotes supported, full-line # comments. Region fields
 override the CLI region. Keys: bbox at size anchor px stretch layers depth mosaic
-corners line linecolor keep_tiles. Limit 16 MiB/4096 shots; no shell expansion.
+corners line linecolor keep_tiles chip chip_off fit_chip; corners=fit. Limit 16 MiB/4096 shots; no shell expansion.
 DRC uses the width from --px even for WxH; frames/labels are on (deck labels off),
 cut=0 by default, non-archival fills. --detail/--thin/--label-font-px are honored.
 No batch/mosaic/region/report with DRC; no implicit indexing. Local/global/path TSV.
@@ -53,7 +61,9 @@ Mosaic final image is four tiles (up to 64 Mpx). Outputs must not collide.
 Cancelled/failed frames never replace an existing PNG. Jobdeck known skipped
 placements/over-budget pages may publish a flagged incomplete PNG (exit 3).
 Other incomplete frames preserve the previous output.";
-const INFO_HELP: &str = "Usage: floe2-web info SOURCE [--level N,N,...] [--json]
+const INFO_HELP: &str = "Usage: floe2-web info SOURCE [--level N,N,...] [--json] [--chips]
+--chips (jobdeck): every chip of the levels loaded - its CHIP blocks,
+placements (#K) and extents, the names render --chip/--fit-chip take.
 Read layout/cache summary. --json emits metadata plus source_stale.
 No indexing is performed. Jobdeck info includes the skip ledger and virtual layers;
 --level is a jobdeck load selection. --json uses cache:null for composites.";
@@ -67,6 +77,7 @@ pub enum Command {
         source: PathBuf,
         json: bool,
         levels: Option<BTreeSet<i64>>,
+        chips: bool,
     },
     Render {
         source: PathBuf,
@@ -92,6 +103,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
     let mut capture_only = false;
     let mut layers_explicit = false;
     let mut json = false;
+    let mut chips = false;
     let mut levels = None;
     let mut positional = false;
     let mut i = 1;
@@ -142,6 +154,11 @@ pub fn parse(args: &[String]) -> Result<Command> {
             json = true;
             continue;
         }
+        if kind == "info" && flag == "--chips" {
+            no_value()?;
+            chips = true;
+            continue;
+        }
         if kind != "probe" && flag == "--level" {
             levels = Some(parse_levels(value()?)?);
             continue;
@@ -160,6 +177,9 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 | "--batch"
                 | "--mosaic-at"
                 | "--corners"
+                | "--chip"
+                | "--chip-off"
+                | "--fit-chip"
                 | "--line"
                 | "--line-color"
                 | "--keep-tiles"
@@ -234,7 +254,33 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 batch = if v.is_empty() { None } else { Some(v.into()) };
             }
             "--mosaic-at" => capture.mosaic = Some(shots::batch::points(value()?)?),
-            "--corners" => capture.corners = Some(shots::lengths(value()?)?),
+            // alone (or `fit`): the corners of the default region - the
+            // chips' extent with chips named, else the whole source
+            "--corners" => {
+                let given = match inline {
+                    Some(v) => Some(v),
+                    None => match args.get(i) {
+                        Some(v) if !v.starts_with('-') => {
+                            i += 1;
+                            Some(v.as_str())
+                        }
+                        _ => None,
+                    },
+                };
+                match given {
+                    Some(v) if !shots::batch::is_fit(v) => {
+                        capture.corners = Some(shots::lengths(v)?);
+                        capture.corners_fit = false;
+                    }
+                    _ => {
+                        capture.corners = None;
+                        capture.corners_fit = true;
+                    }
+                }
+            }
+            "--chip" => capture.chip = Some(value()?.to_string()).filter(|v| !v.is_empty()),
+            "--chip-off" => capture.chip_off = Some(value()?.to_string()).filter(|v| !v.is_empty()),
+            "--fit-chip" => capture.fit_chip = Some(value()?.to_string()).filter(|v| !v.is_empty()),
             "--line" => capture.line = super::number(value()?, flag)?,
             "--line-color" => capture.line_color = value()?.into(),
             "--keep-tiles" => {
@@ -292,12 +338,13 @@ pub fn parse(args: &[String]) -> Result<Command> {
             source,
             json,
             levels,
+            chips,
         }),
         "probe" => Ok(Command::Probe(source)),
         _ => {
-            if batch.is_none() {
-                capture.validate()?;
-            }
+            // the capture's own rules (one region form, --fit-chip against
+            // a region of its own, --layers against --chip) are checked
+            // when it runs: a run its input stops, not a malformed command
             Ok(Command::Render {
                 source,
                 capture: Box::new(capture),
@@ -328,7 +375,14 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
             source,
             json,
             levels,
+            chips,
         } => {
+            if chips && !is_deck(&source) {
+                return Err(Error::input(format!(
+                    "--chips lists a jobdeck's chips; {} is a layout",
+                    source.display()
+                )));
+            }
             let l = dataset(&source, levels, cancelled)?;
             if json {
                 println!(
@@ -338,6 +392,25 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
                 );
             } else {
                 print!("{}", l.summary(cancelled)?);
+            }
+            if let (true, Dataset::Deck(deck)) = (chips, &l) {
+                // what `render --chip / --chip-off / --fit-chip` name: the
+                // chip view's rows, their CHIP blocks and placements
+                let table = floe_app_core::jobdeck::chips::ChipTable::new(
+                    &deck.analysis.deck,
+                    &deck.analysis.model.placements,
+                    &deck.metadata.layers,
+                );
+                let levels = table.levels();
+                println!(
+                    "[jobdeck] chip rows : {} in level{} {} - the chips render --chip / --chip-off / --fit-chip NAME[#K] name",
+                    table.rows.len(),
+                    if levels.len() == 1 { "" } else { "s" },
+                    levels.iter().map(i64::to_string).collect::<Vec<_>>().join(",")
+                );
+                for line in table.listing() {
+                    println!("  {line}");
+                }
             }
         }
         Command::Render {
@@ -428,14 +501,39 @@ mod tests {
     }
     #[test]
     fn read_commands_are_strict() {
-        assert!(parsed(&[
+        // two region forms: a run its input stops (exit 1 for floe2), checked
+        // when it runs, not a malformed command line
+        let Command::Render { capture, .. } = parsed(&[
             "render",
             "a.oas",
             "--bbox=0,0,4,4",
             "--at=1,1",
-            "--size=2,2"
+            "--size=2,2",
         ])
-        .is_err());
+        .unwrap() else {
+            panic!()
+        };
+        assert!(capture.validate().is_err());
+        let Command::Render { capture, .. } = parsed(&[
+            "render",
+            "a.jb",
+            "--chip",
+            "x",
+            "--corners",
+            "--size",
+            "5,5",
+        ])
+        .unwrap() else {
+            panic!()
+        };
+        assert!(capture.corners_fit && capture.corners.is_none());
+        assert_eq!(capture.chip.as_deref(), Some("x"));
+        let Command::Render { capture, .. } =
+            parsed(&["render", "a.jb", "--corners", "1,2,3,4", "--size", "1,1"]).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(capture.corners, Some([1., 2., 3., 4.]));
         assert!(parsed(&["render", "a.oas", "--bbox=0,0,nan,1"]).is_err());
         assert!(parsed(&["info", "a.oas", "--out=a"]).is_err());
         assert!(parsed(&["probe", "a.oas", "b.oas"]).is_err());

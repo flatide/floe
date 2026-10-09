@@ -37,6 +37,11 @@ pub struct Host {
     /// usage lines of the host's own commands, before the shared ones
     pub usage: &'static str,
     pub metadata: fn() -> Vec<(&'static str, serde_json::Value)>,
+    /// The exit status of a run stopped by its input or an unsupported
+    /// request once its arguments parsed (a malformed command line is 2
+    /// whatever this says): floe2-web 2, floe2 1 - the Python CLI's (its
+    /// `SystemExit("...")`), which field scripts and the gates read.
+    pub input_error_exit: i32,
 }
 
 static HOST: std::sync::OnceLock<&'static Host> = std::sync::OnceLock::new();
@@ -45,6 +50,7 @@ static DEFAULT_HOST: Host = Host {
     version: env!("CARGO_PKG_VERSION"),
     usage: "",
     metadata: Vec::new,
+    input_error_exit: 2,
 };
 
 /// The running host (`main`'s; floe2-web's defaults until then).
@@ -104,6 +110,9 @@ const INDEX_HELP: &str = "Usage: floe2-web index SOURCE [OPTIONS]
   --occupancy                Add summary (default on for decks, off for layouts)
   --no-occupancy             Leave/build the cache without adding a summary
   --occupancy-only           Rebuild only summary on a current cache
+  --hier-only                Add/rebuild only the cell tree index (design.ovh)
+  --no-page-occupancy        Leave out the pages' occupancy grids (design.ovb)
+  --no-ovs                   Leave out the occupancy density (design.ovs)
   --occupancy-um UM          Positive base cell; default chip-size adaptive
   --occupancy-balance 0|1    Marking work split; default 1, byte-neutral diagnostic
   --occupancy-prune 0|1      Sub-cell bbox marking; default 1, 0 walks exact geometry
@@ -248,6 +257,18 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
                 no_value()?;
                 options.profile_snapshot_refresh = true;
             }
+            "--hier-only" => {
+                no_value()?;
+                options.hier_only = true;
+            }
+            "--no-page-occupancy" => {
+                no_value()?;
+                options.page_occupancy = false;
+            }
+            "--no-ovs" => {
+                no_value()?;
+                options.ovs = false;
+            }
             "--representatives" => {
                 no_value()?;
                 options.representatives = true;
@@ -325,6 +346,24 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
         return Err(Error::input("profile a jobdeck source OASIS directly"));
     }
     Ok(Cli::Index(source, Box::new(options), levels))
+}
+/// Words as a POSIX shell reads them back (Python's `shlex.join`).
+pub(crate) fn shell_join<S: AsRef<std::ffi::OsStr>>(words: &[S]) -> String {
+    words
+        .iter()
+        .map(|w| {
+            let w = w.as_ref().to_string_lossy();
+            let safe = !w.is_empty()
+                && w.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "@%+=:,./_-".contains(c));
+            if safe {
+                w.into_owned()
+            } else {
+                format!("'{}'", w.replace('\'', "'\"'\"'"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 fn number<T: std::str::FromStr>(s: &str, flag: &str) -> Result<T> {
     s.parse()
@@ -443,13 +482,16 @@ fn execute_index(
         }
         _ => (),
     }
-    // Stderr only: profile stdout must remain native JSON.
-    eprintln!(
-        "[{}] {:?}: {}",
-        floe_app_core::program(),
-        action,
-        prepared.source().display()
-    );
+    // the indexer's command line, as the Python CLI showed it - stderr when
+    // profiling: its stdout is the native JSON
+    for command in prepared.commands() {
+        let line = format!("[{}] {}", floe_app_core::program(), shell_join(&command));
+        if action == Action::Profile {
+            eprintln!("{line}");
+        } else {
+            println!("{line}");
+        }
+    }
     let mut job = prepared.start(cancelled)?;
     loop {
         let signal = cancelled.load(Ordering::Relaxed) as i32;
@@ -468,6 +510,7 @@ pub fn main(host: &'static Host, args: Vec<OsString>) -> ! {
     let _ = HOST.set(host);
     floe_app_core::set_program(host.name);
     let program = floe_app_core::program();
+    let command = args.first().and_then(|a| a.to_str()).map(str::to_string);
     let cli = match parse(args) {
         Ok(v) => v,
         Err(e) => {
@@ -475,6 +518,13 @@ pub fn main(host: &'static Host, args: Vec<OsString>) -> ! {
             std::process::exit(2);
         }
     };
+    // what this run's reader locks say it runs (renderd's registrations:
+    // "floe2 render"), unless the caller named one (floe/cli.py)
+    if std::env::var_os("FLOE_LOCK_WHAT").is_none() {
+        if let Some(command) = &command {
+            std::env::set_var("FLOE_LOCK_WHAT", format!("{program} {command}"));
+        }
+    }
     let signals = match Signals::install() {
         Ok(s) => s,
         Err(e) => {
@@ -484,10 +534,16 @@ pub fn main(host: &'static Host, args: Vec<OsString>) -> ! {
     };
     let code = match run(cli, &signals.flag) {
         Ok(code) => code,
+        // a busy target (floe_vfs::lock): one line, as floe-index says it,
+        // and 75 - the jobdeck index and the viewer read it as busy
+        Err(e) if e.kind == ErrorKind::Busy => {
+            eprintln!("[lock] {}", e.message);
+            floe_vfs::lock::BUSY_EXIT
+        }
         Err(e) => {
             eprintln!("{program}: {e}");
             match e.kind {
-                ErrorKind::InvalidInput | ErrorKind::Unsupported => 2,
+                ErrorKind::InvalidInput | ErrorKind::Unsupported => host.input_error_exit,
                 ErrorKind::Cancelled => {
                     let signal = signals.flag.load(Ordering::Relaxed);
                     128 + if signal == 0 { 2 } else { signal as i32 }

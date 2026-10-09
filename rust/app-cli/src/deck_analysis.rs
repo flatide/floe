@@ -136,7 +136,19 @@ pub fn run(command: Command, cancelled: &AtomicUsize) -> Result<i32> {
     if let Some(path) = &a.colors {
         a.options.scheme = Some(ColorScheme::load(path)?);
     }
-    let analysis = Analysis::open(&a.source, &a.options, cancelled)?;
+    let analysis = match Analysis::open(&a.source, &a.options, cancelled) {
+        // --on-missing fail: a selected entry names a source without a dbu
+        // - said, and 2 (floe/cli.py cmd_jobdeck), not an input error
+        Err(e) if !a.options.skip_missing && e.message.starts_with("no source dbu") => {
+            eprintln!(
+                "{}: {} (a selected entry names a source without a dbu; --on-missing skip lists it instead)  [exit 2]",
+                floe_app_core::program(),
+                e.message
+            );
+            return Ok(2);
+        }
+        result => result?,
+    };
     let inputs: Vec<_> = a.colors.into_iter().collect();
     let report = a
         .report
@@ -236,7 +248,7 @@ pub fn run(command: Command, cancelled: &AtomicUsize) -> Result<i32> {
             .count();
         if n > 0 {
             println!(
-                "[jobdeck] {n} source(s) have no VFS cache yet; run: {} index {}",
+                "[jobdeck] {n} source(s) have no index yet; run: {} index {}",
                 floe_app_core::program(),
                 a.source.display()
             );
