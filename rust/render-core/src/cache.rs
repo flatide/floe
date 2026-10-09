@@ -539,8 +539,26 @@ pub struct Cache {
     representatives: std::sync::OnceLock<Option<std::sync::Arc<floe_vfs::representatives::File>>>,
     /// The cells' cover (Cache::cell_cover), made on first use
     cell_cover: std::sync::Mutex<CoverSlot>,
-    // Last field: mapped/source state drops before the native reader lease.
+    /// this reader's lock on the cache (floe_vfs::lock): a run rebuilding
+    /// it whole is refused while the cache is open
+    _lock: floe_vfs::lock::ReaderGuard,
+    // Last field: mapped/source state and the reader lock drop before the
+    // native reader lease.
     _revision_lease: Option<std::fs::File>,
+}
+
+/// A cache folder's lock key (floe_vfs::lock::key resolves a symbolic link -
+/// the adapter hands renderd an alias when the real path has whitespace).
+pub(crate) fn cache_lock_key(dir: &str) -> floe_vfs::lock::Key {
+    floe_vfs::lock::key(floe_vfs::lock::Kind::Vfs, dir)
+}
+
+/// A sealed revision of the web's revision store (a `revision.json` seal):
+/// never rebuilt in place, so its native lease (crate::revision_lease) is
+/// its reader lock. Taking floe_vfs::lock too would leave a `.floe-lock`
+/// folder inside the store, which its inventory counts as an unknown entry.
+pub(crate) fn is_revision(dir: &str) -> bool {
+    std::fs::symlink_metadata(Path::new(dir).join("revision.json")).is_ok()
 }
 
 /// Cache::cell_cover: the table, or when it was last looked for in vain
@@ -755,9 +773,38 @@ struct OccDensitySlot {
 }
 
 impl Cache {
+    /// Open a cache as its reader (floe_vfs::lock): refused - the error
+    /// starting with floe_vfs::lock::LOCKED - while a run rebuilds it whole.
+    /// A sealed revision takes its native lease instead (is_revision).
     pub fn open(path: impl AsRef<Path>) -> Result<Self, String> {
         let path = path.as_ref();
+        let dir = path
+            .to_str()
+            .ok_or_else(|| format!("cache path is not UTF-8: {}", path.display()))?;
         let revision_lease = crate::revision_lease::open(path)?;
+        let lock = if revision_lease.is_some() {
+            floe_vfs::lock::ReaderGuard::default()
+        } else {
+            floe_vfs::lock::readers(
+                &[cache_lock_key(dir)],
+                &floe_vfs::lock::reader_label("floe-renderd"),
+            )
+            .map_err(|busy| format!("{}{}", floe_vfs::lock::LOCKED, busy))?
+        };
+        let mut cache = Self::open_leased(path, revision_lease)?;
+        cache._lock = lock;
+        Ok(cache)
+    }
+
+    /// Open a cache without taking its lock (a deck takes its sources'
+    /// together: one registration per folder). A sealed revision's native
+    /// lease is taken here either way.
+    pub(crate) fn open_unlocked(path: impl AsRef<Path>) -> Result<Self, String> {
+        let path = path.as_ref();
+        Self::open_leased(path, crate::revision_lease::open(path)?)
+    }
+
+    fn open_leased(path: &Path, revision_lease: Option<std::fs::File>) -> Result<Self, String> {
         let dir = path
             .to_str()
             .ok_or_else(|| format!("cache path is not UTF-8: {}", path.display()))?;
@@ -776,6 +823,7 @@ impl Cache {
             held_layers: std::sync::Mutex::new(std::collections::HashMap::new()),
             representatives: std::sync::OnceLock::new(),
             cell_cover: std::sync::Mutex::new(CoverSlot::default()),
+            _lock: floe_vfs::lock::ReaderGuard::default(),
             _revision_lease: revision_lease,
         })
     }

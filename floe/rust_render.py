@@ -1035,7 +1035,11 @@ class RustRenderWorker:
                 line = raw_line.rstrip("\r\n")
                 self._stderr_tail.append(line)
                 del self._stderr_tail[:-20]
-                if self.debug:
+                if line.startswith("[lock] "):
+                    # the cache locks' notes (an NFS mount without network
+                    # locks, too many files to lock them all): the user's
+                    print(line, file=sys.stderr, flush=True)
+                elif self.debug:
                     print("[rust-render][stderr] " + line,
                           file=sys.stderr, flush=True)
         except OSError:
@@ -1126,6 +1130,15 @@ class RustRenderWorker:
                               "reason": fields.get("reason", "")})
         elif kind == "error":
             message = fields.get("message", line).replace("_", " ")
+            # `code=locked` (a cache another run rebuilds whole) carries
+            # its text verbatim in hex: names keep their underscores
+            text_hex = fields.get("text_hex")
+            if text_hex:
+                try:
+                    message = bytes.fromhex(text_hex).decode(
+                        "utf-8", "replace")
+                except ValueError:
+                    pass
             if fields.get("code") == "clip":
                 sequence = _wire_int(fields, "seq", -1)
                 with self._jobs_lock:

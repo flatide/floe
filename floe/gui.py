@@ -16,6 +16,7 @@ import bisect
 import math
 import os
 import queue
+import signal
 import sys
 import time
 
@@ -23,6 +24,7 @@ from . import __version__
 from . import cache as cache_mod
 from . import drc as drc_mod
 from . import fillpat
+from . import indexlock
 from .hangul import HangulComposer, TextViewEditable
 from .product import name as product_name
 from .rust_render import _env_int, CELL_QUERY_KINDS
@@ -2488,41 +2490,8 @@ class Viewer:
         self._sel_text = ""
         self._pick_px = None
         # a loaded DRC db belongs to the previous layout
-        self.drc_mark = None
-        self._drc = None
-        self._drc_rmeta = None
-        self._drc_rmatch = (0, 0)
-        self._drc_tfilter = "all"
-        self._drc_rtypes = None
         self._drc_lyr_saved = None   # new design = new layer table
-        self._drc_cum = []
-        self._drc_total = 0
-        self._drc_pos = -1
-        self._drc_open = None
-        self._drc_grid_ci = None
-        self._drc_grid_rows = 0
-        self._drc_cell = None
-        self._drc_grid_map = []
-        self._drc_grid_base = None
-        self._drc_page = 0
-        self._drc_page_marks = []
-        self._drc_show_sel = False
-        self._drc_sel = None
-        self._drc_sels = {}
-        self._esel_start = None
-        self._drc_focus = None
-        self._drc_hl = False
-        self._drc_hl_res = None
-        self._mono = False
-        self._mono_saved = False
-        w = self._drcwin
-        if w is not None:
-            w._hl.set_active(False)
-            w._rstore.clear()
-            w._gstore.clear()
-            w._detail.set_text("")
-            w._info.set_text("no results database loaded")
-            self._drc_types_rebuild()   # empty+disable type combo
+        self._drc_release()
         self._cell_state_reset()
         # size + grid live in the WINDOW TITLE (user call
         # 2026-08-22: the side pane's floe/source header is gone)
@@ -2814,7 +2783,21 @@ class Viewer:
         if _is_deck_path(path):
             from .jobdeck.viewer import deck_ready
             return deck_ready(path, ids=ids)
+        if self._index_busy(path) is not None:
+            return False
         return cache_mod.Cache(path).exists()
+
+    @staticmethod
+    def _index_busy(path):
+        """Why a layout cannot be opened now: another run rebuilds its
+        cache whole (floe/indexlock.py) - the refusal naming who, else
+        None. A jobdeck's sources are judged one by one when it opens."""
+        if _is_deck_path(path):
+            return None
+        from . import cachepath
+        return indexlock.state(indexlock.VFS,
+                               cachepath.vfs_cache_dir(path),
+                               users=False).opening_refusal()
 
     def _jobdeck_pick_levels(self, path, current=None, force=False):
         """Which mask levels to load (user call 2026-09-10: Calibre
@@ -2988,6 +2971,13 @@ class Viewer:
             except Exception as exc:
                 err = "ERR %s" % exc
             after_open(err)
+            return False
+        busy = self._index_busy(path)
+        if busy is not None:
+            # another run builds this cache: no second build (user
+            # 2026-10-09 - it would delete that run's files)
+            self._set_live_status(str(busy))
+            self._restore_keys()
             return False
         name = os.path.basename(path)
         if not self._index_consent(
@@ -6055,6 +6045,14 @@ class Viewer:
             return
         from . import cachepath
         outdir = cachepath.vfs_cache_dir(src)
+        cur = getattr(self, "cache", None)
+        if cur is not None and not getattr(cur, "is_jobdeck", False) and \
+                os.path.abspath(getattr(cur, "src", "") or "") == \
+                os.path.abspath(src):
+            # this viewer has the source open (its cache folder was
+            # removed by hand): its own render service's reader lock
+            # would refuse the rebuild (floe/indexlock.py) - let go first
+            self._apply_cache(None)
 
         def on_success():
             try:
@@ -7213,6 +7211,53 @@ class Viewer:
         else:
             dlg.destroy()
 
+    def _drc_release(self):
+        """Drop the loaded DRC db and empty its browser, closing its pack
+        (floe/indexlock.py: the reader's lock goes with it - an IcePack is
+        a reference cycle, so the GC would release it at some later time,
+        and a re-pack of it would be refused meanwhile)."""
+        old = self._drc
+        self.drc_mark = None
+        self._drc = None
+        self._drc_rmeta = None
+        self._drc_rmatch = (0, 0)
+        self._drc_tfilter = "all"
+        self._drc_rtypes = None
+        self._drc_cum = []
+        self._drc_total = 0
+        self._drc_pos = -1
+        self._drc_open = None
+        self._drc_grid_ci = None
+        self._drc_grid_rows = 0
+        self._drc_cell = None
+        self._drc_grid_map = []
+        self._drc_grid_base = None
+        self._drc_page = 0
+        self._drc_page_marks = []
+        self._drc_show_sel = False
+        self._drc_sel = None
+        self._drc_sels = {}
+        self._esel_start = None
+        self._drc_focus = None
+        self._drc_hl = False
+        self._drc_hl_res = None
+        self._mono = False
+        self._mono_saved = False
+        w = self._drcwin
+        if w is not None:
+            w._hl.set_active(False)
+            w._rstore.clear()
+            w._gstore.clear()
+            w._detail.set_text("")
+            w._info.set_text("no results database loaded")
+            self._drc_types_rebuild()   # empty+disable type combo
+        close = getattr(old, "close", None)
+        if close is not None:
+            try:
+                close()
+            except Exception:
+                pass
+
     def _drc_open_db(self, path):
         """Dialog flow (user call 2026-08-14): the user PICKS the
         ASCII .db, floe LOADS only its pack. When no usable
@@ -7220,11 +7265,21 @@ class Viewer:
         ASKS before building one (user call 2026-08-28)."""
         from . import drc as drc_mod
         from . import cachepath
+        # another run packs this db (floe/indexlock.py): say who - no
+        # open of a pack being replaced, no second build beside it
+        busy = indexlock.state(indexlock.PACK, cachepath.pack_path(path),
+                               users=False).opening_refusal()
+        if busy is not None:
+            self._set_live_status(str(busy))
+            return
         side = cachepath.find_pack(path)
         if side is not None:
             try:
                 db = drc_mod.IcePack(side, src_path=path,
                                      verify_src=True)
+            except indexlock.Busy as busy:
+                self._set_live_status(str(busy))
+                return
             except (ValueError, OSError):
                 pass
             else:
@@ -7243,12 +7298,21 @@ class Viewer:
         """Run `floe-index drc <db>` with its log in a MODAL
         dialog, then load the pack."""
         from . import drc as drc_mod
+        from . import cachepath
         from .vfsclient import find_binary
         try:
             bin_ = find_binary()
         except RuntimeError as exc:
             self._set_live_status("DRC indexing failed: %s" % exc)
             return
+        held = getattr(self._drc, "path", None)
+        if held and indexlock.key(indexlock.PACK, held) == indexlock.key(
+                indexlock.PACK, cachepath.pack_path(path)):
+            # this review holds the pack being re-packed (its .db ran
+            # again): let go first - its own reader's lock would refuse
+            # the re-pack (floe/indexlock.py)
+            self._drc_release()
+            self.redraw(immediate=True)
 
         def on_success():
             self.load_drc(path)
@@ -7304,21 +7368,27 @@ class Viewer:
         self._center_on_parent(dlg)
         dlg.show_all()
         try:
+            # its own process group: a cancel ends what it started too (a
+            # jobdeck's per-source index runs), so their locks go with it
             proc = subprocess.Popen(
                 argv, stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, text=True, bufsize=1)
+                stderr=subprocess.STDOUT, text=True, bufsize=1,
+                start_new_session=True)
         except OSError as exc:
             dlg.destroy()
             self._set_live_status("%s failed: %s" % (fail, exc))
             return
-        state = {"cancelled": False}
+        state = {"cancelled": False, "lock": None}
 
         def on_response(_d, _resp):
             state["cancelled"] = True
             try:
-                proc.terminate()
+                os.killpg(proc.pid, signal.SIGTERM)
             except OSError:
-                pass
+                try:
+                    proc.terminate()
+                except OSError:
+                    pass
 
         dlg.connect("response", on_response)
 
@@ -7344,6 +7414,10 @@ class Viewer:
                                                     self._restore_keys()))
                 self._set_live_status(
                     "%s cancelled" % fail if state["cancelled"]
+                    # refused: another run indexes it, or someone has it
+                    # open - the [lock] line says who
+                    else state["lock"] if (rc == indexlock.BUSY_EXIT
+                                           and state["lock"])
                     else "%s failed (rc %d)" % (fail, rc))
                 if not state["cancelled"] and on_failure is not None:
                     on_failure(rc)
@@ -7355,6 +7429,8 @@ class Viewer:
 
         def pump():
             for line in proc.stdout:
+                if line.startswith("[lock] "):
+                    state["lock"] = line[7:].strip()
                 GLib.idle_add(append, line)
             rc = proc.wait()
             GLib.idle_add(done, rc)
@@ -7371,11 +7447,14 @@ class Viewer:
             try:
                 db = drc_mod.load_db(path)
             except Exception as exc:
-                msg = "DRC load failed: %s" % exc
+                # a pack another run re-packs says who (floe/indexlock.py)
+                msg = (str(exc) if isinstance(exc, indexlock.Busy)
+                       else "DRC load failed: %s" % exc)
                 if self._drcwin is not None:
                     self._drcwin._info.set_text(msg)
                 self._set_live_status(msg)
                 return False
+        old = self._drc
         self._drc = db
         # the embedded browser needs elbow room: widen the left
         # pane once a db is loaded (user can still drag it back)
@@ -7412,6 +7491,15 @@ class Viewer:
         self._set_live_status(
             "DRC %s: %d checks, %d errors (n/p = step)"
             % (os.path.basename(path), len(db.checks), db.total))
+        if old is not None and old is not db:
+            # the db it replaces lets go of its pack now, not at some GC
+            # (floe/indexlock.py: its reader's lock goes with it)
+            close = getattr(old, "close", None)
+            if close is not None:
+                try:
+                    close()
+                except Exception:
+                    pass
         return True
 
     def _drc_rules_auto(self, db_path):

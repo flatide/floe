@@ -255,6 +255,60 @@ jobs 1 vs N sha256 비교(스위트), `cell_sink_append_is_byte_identical`.
 지점에서 강제 종료해도 뷰어가 미완성 캐시를 완성으로 오인하지 않음을
 `tools/validate_vfs_marker.py`가 고정.
 
+## 4.5 잠금 (2026-10-09, app 0.12.323 / RENDERD 0.12.297)
+
+같은 캐시를 쓰는 실행은 서로를, 통째로 다시 만드는 실행은 그 캐시를 연 쪽을
+거절한다. 다른 사용자·호스트·공용 계정이어도 같다. 이름·파일·권한은
+CACHE-NAMING §5에 있다.
+
+| 명령 | build | use |
+|---|---|---|
+| `vfs` 본 빌드 | 배타(끝까지) | 배타(원본을 읽기 전부터 `design.ovm` 커밋 직후까지; 뒤의 ovs 단계 동안은 열 수 있다) |
+| `vfs --occupancy-only/--representatives-only/--coverage-only/--frontier-only`, `hier`(`--check` 제외), `ovs` | 배타 | 새 파일을 더하면 — ; 독자가 mmap하는 기존 `design.ovo`(`--occupancy-only`)·`design.ovr`(`--representatives-only`)·`design.ovh`(`hier`)를 바꾸면 배타(0.12.325) |
+| `vfsd` | — | 공유 + 등록 |
+| `drc <db> [out]`(DRC 팩, 0.12.324) | 배타(임시 파일 쓸기 전부터) | 배타(팩 리더 `IcePack`이 연 동안은 거절) |
+| `svrf <deck> [-o out]`(0.12.324) | 배타(쓰기 직전; `--scan`은 없음) | — |
+
+- 독자가 mmap하는 기존 파일(`design.ovh/.ovo/.ovr`)을 바꾸는 실행은 use를 배타로 쥔다
+  (`WriterGuard::exclude_readers`, 0.12.325). 그 파일을 다른 NFS 클라이언트가 rename으로
+  바꾸면, 서버가 옛 파일을 지워 그쪽 프로세스가 SIGBUS로 죽기 때문이다.
+  - 0.12.323~324는 다른 호스트 독자를 등록 파일 목록으로 시작할 때 한 번만 봤다.
+    그래서 도중에 들어온 독자를 놓쳤고, NFS의 디렉터리 캐시는 새 등록을 늦게
+    보였다(리뷰 2026-10-09).
+  - 이제 커널 잠금 하나가 정한다. 독자가 있으면(어느 호스트·계정이든) 거절하고,
+    바꾸는 동안 오는 독자는 "being indexed"로 거절된다.
+  - 새 파일을 만드는 실행은 독자 옆에서 그대로 된다. 그 파일을 매핑한 독자가 없기
+    때문이다. 뷰어 자신의 셀 트리 `hier`(design.ovh가 없을 때)와 잡덱 level 재선택의
+    `--occupancy-only`(design.ovo가 없는 소스)가 여기에 해당한다.
+  - read-whole 파일(`design.ovs`·`.ovs.<cell>`·meta.json·design.ovc)을 바꾸는 실행은
+    build만 쥔다.
+  - 같은 호스트에서 뷰어를 연 채 기존 design.ovo를 다시 만드는 일도 이제 거절된다.
+- 대상의 키는 실제 경로에서 만든다(심볼릭 링크를 풀어서, 0.12.325). 캐시나 그
+  폴더를 링크로 가리켜도 같은 잠금이다. 0.12.324까지는 쓰는 쪽이 받은 경로 그대로
+  키를 만들어, 링크 경로의 재빌드가 열린 뷰어를 비켜 갔다.
+- 잠금은 인자를 확인한 뒤, 원본을 읽기 전에 잡는다. 거절은 몇 초 안에 끝나고
+  (약 1.5 s 재시도로 다른 프로세스의 확인을 넘긴다; `FLOE_LOCK_RETRY_MS`), 종료
+  코드는 75(EX_TEMPFAIL)다. stderr 한 줄이 이유다:
+  - `[lock] X.oas is being indexed by … - try again when it finishes`
+  - `[lock] X.oas is in use by … - re-indexing it would pull it from under them; close it there first`
+  - 잠금 파일을 열 수 없으면 종료 1과 고치는 법을 알린다.
+- 프로파일 실행(`--profile-cell`)은 캐시를 쓰지 않으므로 잡지 않는다.
+- 같은 실행 안에서 그 잠금을 쥔 채 덧붙이는 단계(`write_hier`, ovs)는 함수 호출이라
+  다시 잡지 않는다.
+- 덮어쓰기 두 곳을 임시 파일 + rename으로 바꿨다: `--frontier-only`의 meta.json,
+  `--coverage-only`의 design.ovc. 읽는 쪽은 옛 파일이나 새 파일을 읽고, 반쪽은 읽지
+  않는다. 본 빌드는 시작할 때 `design.ovc.tmp`·`meta.json.tmp`도 지운다.
+- 게이트 전용 정지점 `--hold-at locked:<file>`·`--hold-at committed:<file>`이 있다.
+  `--kill-at`과 같은 CLI 상태다. 잠근 직후나 커밋 직후에 `<file>`이 생길 때까지
+  기다린다(최대 2분). `tools/validate_index_lock.py`가 실제 두 빌드를 겨루고, 커밋
+  뒤에 뷰어가 열리는지 보는 데 쓴다.
+- Python 래퍼 `floe2 index`는 쓰기 잠금을 쥐지 않는다. 시작 전에 확인만 한다
+  (`floe/indexlock.py state`; 쓰는 실행이 있으면 "--force로 다시" 대신 "being indexed
+  by …"와 75).
+  - 실패한 자식의 임시 파일(`design.ovo.tmp` 등)은 build를 잠깐 잡을 수 있을 때만
+    지운다.
+  - 자식이 75면 지우지 않는다.
+
 ## 5. 미니맵 프런티어 굽기 (rev 46b)
 
 design.ovm 커밋 직전, **실제 플래너로** depth별 프레임 집합을 굽는다:

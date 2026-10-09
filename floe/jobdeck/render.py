@@ -130,9 +130,12 @@ def deck_spec_lines(deck, placements, stats, scheme, colormap, catalog):
             key = (p.chip, p.idx, p.tc, SKIP_NOT_INDEXED)
             if key not in seen_skip:
                 seen_skip.add(key)
+                # a source another run is indexing says who
+                # (floe/indexlock.py) instead of asking for an index
+                busy = getattr(info, "busy", "") if info is not None else ""
                 ledger.append(skip_record(
                     p.chip, p.idx, p.tc, -1, 0, SKIP_NOT_INDEXED,
-                    "no fresh index cache (run --index)", "spec",
+                    busy or "no fresh index cache (run --index)", "spec",
                     [(p.jx, p.jy)]))
             continue
         if p.tc not in source_index:
