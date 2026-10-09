@@ -15,8 +15,12 @@ from validate_web_cli import APP, INDEX, RENDERD, Client, read_json, wait
 
 
 def digest(root):
+    # .floe-lock/ holds the index locks' reader registrations (floe_vfs::lock,
+    # feature/jobdeck 54806b4e): a viewer's coordination state, written when
+    # it opens a cache - not source, cache or DRC content.
     return {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
-            for p in root.rglob('*') if p.is_file()}
+            for p in root.rglob('*')
+            if p.is_file() and '.floe-lock' not in p.relative_to(root).parts}
 
 
 def main(fixture):

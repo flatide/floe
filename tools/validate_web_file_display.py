@@ -46,8 +46,16 @@ def main():
               and isinstance(n.value, ast.Name) and n.value.id == "self"}
     stable = {"depth_value", "detail", "thin_mode", "frames_on", "labels_on", "label_font_px"}
     assert not writes & stable, "GTK changed which display preferences survive cache replacement"
-    mono = [n for n in methods["_apply_cache"].body if isinstance(n, ast.Assign)
-            and any(isinstance(t, ast.Attribute) and t.attr in ("_mono", "_mono_saved") for t in n.targets)]
+    def mono_resets(fn):
+        return [n for n in fn.body if isinstance(n, ast.Assign)
+                and any(isinstance(t, ast.Attribute) and t.attr in ("_mono", "_mono_saved") for t in n.targets)]
+    mono = mono_resets(methods["_apply_cache"])
+    # Since feature/jobdeck 9378c6d7 the reset lives in _drc_release(), which
+    # _apply_cache calls unconditionally (top level of its body).
+    if not mono and any(isinstance(s, ast.Expr) and isinstance(s.value, ast.Call)
+                        and isinstance(s.value.func, ast.Attribute) and s.value.func.attr == "_drc_release"
+                        for s in methods["_apply_cache"].body):
+        mono = mono_resets(methods["_drc_release"])
     assert len(mono) == 2
     mono_code = compile(ast.Module(body=mono, type_ignores=[]), "GTK file mono reset", "exec")
     cases = []
