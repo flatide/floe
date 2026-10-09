@@ -14,6 +14,7 @@ pub mod catalog;
 pub mod cell_index;
 pub mod clip;
 pub mod dataset;
+pub mod desktop;
 pub mod drc;
 pub mod exports;
 pub mod index;

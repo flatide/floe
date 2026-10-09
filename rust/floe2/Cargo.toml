@@ -13,3 +13,5 @@ path = "src/main.rs"
 [dependencies]
 floe-app-cli = { path = "../app-cli" }
 serde_json = "=1.0.151"
+floe-app-core = { path = "../app-core" }
+floe-worker-client = { path = "../worker-client" }

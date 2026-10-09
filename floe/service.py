@@ -853,7 +853,7 @@ def make_render_worker(cache, stream_kb=None, stream_target_ms=500,
         if backend != "rust":
             raise RuntimeError(
                 "a jobdeck needs the Rust renderer (floe2)")
-        from .jobdeck.render import DeckRenderWorker
+        from .rust_render import DeckRenderWorker
         return DeckRenderWorker(cache, stream_kb=stream_kb,
                                 stream_target_ms=stream_target_ms,
                                 debug=debug)

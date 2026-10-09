@@ -200,6 +200,15 @@ def validate_rust_cli(base, fixture):
         env = {"PATH": "%s:/usr/bin:/bin" % trap, "HOME": base.get("HOME", td),
                "FLOE_INDEX_BIN": str(indexer), "FLOE_RENDERD_BIN": str(renderer),
                "FLOE_GTK_PYTHON": str(trap / "python3")}
+        # the GTK viewer's service (P2): one JSON line in, one out
+        served = subprocess.run(
+            [str(FLOE2), "gtk-service"], input='{"id": 7, "op": "version"}\n',
+            env=env, capture_output=True, text=True, timeout=30)
+        reply = json.loads(served.stdout)
+        check(served.returncode == 0 and reply["id"] == 7 and
+              reply["result"]["version"] == package_version,
+              "floe2 gtk-service did not answer: %s %s" % (served.stdout,
+                                                            served.stderr))
         version = rust(env, "--version").stdout
         check(version.startswith("floe2 %s " % package_version),
               "floe2 --version is not the app version: %s" % version)

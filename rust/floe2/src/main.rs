@@ -6,6 +6,7 @@
 //! GTK viewer, the only part left in Python.
 #![forbid(unsafe_code)]
 mod gtk;
+mod service;
 
 use floe_app_cli::Host;
 use std::ffi::OsString;
@@ -21,6 +22,10 @@ static HOST: Host = Host {
 fn main() {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let first = args.first().and_then(|a| a.to_str()).unwrap_or("");
+    // the GTK viewer's non-UI answers (P2): spawned by floe/gtkservice.py
+    if first == "gtk-service" {
+        std::process::exit(service::run());
+    }
     if floe_app_cli::COMMANDS.contains(&first) || matches!(first, "--help" | "-h" | "--version") {
         floe_app_cli::main(&HOST, args);
     }

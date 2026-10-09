@@ -1546,6 +1546,158 @@ class ViewerIndexArgvTests(unittest.TestCase):
                 os.environ["FLOE2_BIN"] = old
 
 
+class GtkServiceTests(unittest.TestCase):
+    """floe2 gtk-service (2026-10-09 P2a; rust/floe2/src/service.rs over
+    app-core `desktop`/`dataset`) answers what the viewer's Python modules
+    answered: for every deck, view and level selection the open's meta,
+    composite spec, layerprops source and cell-tree folders are the jobdeck
+    DeckCache's; `ready` is deck_ready (and a layout's cache check);
+    `level_rows` the load dialog's rows; a layout's meta is Cache.load()'s
+    - colours and every key - and its layerprops rows load_layer_props'.
+    The viewer (APP floe2) opens, checks and lists levels through it."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.env = {"FLOE_INDEX_BIN": str(ROOT / "rust/target/release/floe-index"),
+                   "FLOE_RENDERD_BIN": str(ROOT / "rust/target/release/floe-renderd")}
+        os.environ.update(cls.env)
+        for deck in ("test.jb", "test_missing_layer.jb", "dense.jb", "hier.jb"):
+            run_floe2("index", CLI / deck, "--jobs", "2", env=cls.env, ok=0)
+        from floe.gtkservice import Service
+        cls.svc = Service(FLOE2)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.svc.close()
+
+    @staticmethod
+    def plain(value):
+        return json.loads(json.dumps(value))
+
+    @staticmethod
+    def spec(text):
+        """A composite spec's lines as tokens, a number token's value
+        as a float."""
+        def token(t):
+            key, eq, value = t.partition("=")
+            try:
+                return (key, eq, float(value))
+            except ValueError:
+                return (key, eq, value)
+        return [[token(t) for t in line.split()]
+                for line in text.splitlines()]
+
+    def test_decks_open_as_the_python_deck_did(self):
+        from floe.jobdeck.viewer import DeckCache
+        cases = [(deck, mode, None) for deck in ("test.jb", "test_missing_layer.jb",
+                                                  "dense.jb", "hier.jb")
+                 for mode in ("level", "chip", "layer")]
+        cases += [("test.jb", "level", [2]), ("test.jb", "chip", [1, 3])]
+        for deck, mode, ids in cases:
+            with self.subTest(deck=deck, mode=mode, ids=ids):
+                py = DeckCache(str(CLI / deck), mode=mode, ids=ids)
+                py.load()
+                self.addCleanup(py.close)
+                r = self.svc.request("open", source=str(CLI / deck),
+                                     levels=ids, mode=mode)
+                self.addCleanup(self.svc.request, "close", handle=r["handle"])
+                self.assertEqual(r["kind"], "deck")
+                self.assertEqual(r["meta"], self.plain(py.meta))
+                # the same spec, numbers as values (Rust writes 2.5e-5
+                # where Python wrote 2.5e-05; renderd reads both)
+                self.assertEqual(self.spec(Path(r["dir"]).read_text()),
+                                 self.spec(Path(py.dir).read_text()))
+                self.assertEqual(r["props_src"], py.props_src)
+                self.assertEqual(r["source_dirs"], {
+                    tc: str(i.cache_dir) for tc, i in py.catalog.infos.items()})
+        # close removes the spec's folder
+        r = self.svc.request("open", source=str(CLI / "test.jb"))
+        folder = Path(r["dir"]).parent
+        self.assertTrue(folder.is_dir())
+        self.svc.request("close", handle=r["handle"])
+        self.assertFalse(folder.exists())
+
+    def test_ready_and_level_rows(self):
+        from floe.jobdeck import parse_jobdeck
+        from floe.jobdeck.viewer import deck_ready, level_rows
+        fresh = Path(tempfile.mkdtemp(prefix="gtksvc", dir=TMP))
+        for name in ("test.jb", "chipA.oas", "chipB.oas", "mark.oas"):
+            shutil.copy2(CLI / name, fresh / name)
+        for path, ids in ((CLI / "test.jb", None), (CLI / "test.jb", [2]),
+                          (CLI / "test_formats.jb", None),
+                          (fresh / "test.jb", None), (fresh / "test.jb", [2])):
+            with self.subTest(path=path.name, ids=ids):
+                r = self.svc.request("ready", source=str(path), levels=ids)
+                self.assertEqual(r["ready"], deck_ready(str(path), ids=ids))
+                self.assertIsNone(r["busy"])
+        for deck in ("test.jb", "dense.jb", "hier.jb"):
+            self.assertEqual(
+                self.svc.request("level_rows", source=str(CLI / deck)),
+                self.plain(level_rows(parse_jobdeck(str(CLI / deck), strict=True))))
+        with self.assertRaises(RuntimeError):
+            self.svc.request("level_rows", source=str(CLI / "broken.jb"))
+
+    def test_a_layout_opens_as_the_python_cache_did(self):
+        from floe.cache import Cache, load_layer_props
+        work = Path(tempfile.mkdtemp(prefix="gtksvc", dir=TMP))
+        src = work / "chipA.oas"
+        shutil.copy2(CLI / "chipA.oas", src)
+        r = self.svc.request("ready", source=str(src))
+        self.assertEqual((r["ready"], r["current"]), (False, False))
+        run_floe2("index", src, "--jobs", "2", env=self.env, ok=0)
+        r = self.svc.request("ready", source=str(src))
+        self.assertEqual((r["ready"], r["current"]), (True, True))
+        # a design default recolours and fills: both sides read it
+        (work / "chipA.oas.layerprops").write_text(
+            "# test\n123.43 red dots METAL1 1 3\n456.7 #00ff00 solid M2 0 1\n")
+        py = Cache(str(src))
+        py.load()
+        r = self.svc.request("open", source=str(src))
+        self.assertEqual(r["kind"], "layout")
+        self.assertEqual(r["dir"], py.dir)
+        self.assertEqual(r["meta"], self.plain(py.meta))
+        self.assertEqual(
+            [(tuple(p["layer"]), p["color"], p["fill"], p["name"],
+              p["visibility"], p["width"]) for p in r["props"]],
+            load_layer_props(str(src))[0])
+        self.assertFalse(r["stale"])
+        os.utime(src, (1, 1))
+        self.assertEqual(self.svc.request("ready", source=str(src))["current"],
+                         False)
+
+    def test_the_viewer_opens_through_the_service(self):
+        from floe import gui
+        from floe.gtkservice import ServiceCache
+        applied = []
+        v = gui.Viewer.__new__(gui.Viewer)
+        v._apply_cache = applied.append
+        v._restore_keys = lambda: None
+        v._set_depth = lambda depth, redraw=True: applied.append(depth)
+        old = gui.APP
+        gui.APP = "floe2"
+        self.addCleanup(setattr, gui, "APP", old)
+        self.assertIsNone(v._open_file_load(str(CLI / "test.jb"), [2]))
+        cache = applied[-1]
+        self.addCleanup(cache.close)
+        self.assertIsInstance(cache, ServiceCache)
+        self.assertEqual((applied[0], cache.is_jobdeck, cache.ids), (999, True, [2]))
+        self.assertTrue(Path(cache.dir).is_file())
+        self.assertTrue(v._index_ready(str(CLI / "test.jb")))
+        self.assertIsNone(v._index_busy(str(CLI / "chipA.oas")))
+        # a deck with nothing indexed says what to run
+        bare = Path(tempfile.mkdtemp(prefix="gtksvc", dir=TMP))
+        shutil.copy2(CLI / "test.jb", bare / "test.jb")
+        shutil.copy2(CLI / "chipA.oas", bare / "chipA.oas")
+        self.assertFalse(v._index_ready(str(bare / "test.jb")))
+        err = v._open_file_load(str(bare / "test.jb"), None)
+        self.assertTrue(err.startswith("ERR ") and "run: floe2 index" in err, err)
+        # the worker for it renders the deck spec
+        from floe.service import make_render_worker
+        os.environ["FLOE_RENDERER"] = "rust"
+        worker = make_render_worker(cache)
+        self.assertIn("open deck=", worker._open_command())
+
+
 class JobdeckShortcutTests(unittest.TestCase):
     """Ctrl+, (user call 2026-09-10) flips level view <-> chip view; the
     source layer view goes back to the level view; on a plain layout

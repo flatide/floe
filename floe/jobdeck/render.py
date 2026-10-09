@@ -217,75 +217,9 @@ class _DeckCacheShim:
         return os.path.isfile(self.dir)
 
 
-class DeckRenderWorker:
-    """Factory: a RustRenderWorker that opens `open deck=<spec>`.
-
-    `cache` is anything cache-shaped for a deck (`floe.jobdeck.viewer.
-    DeckCache`, or the shim below): `.dir` is the spec path, `.src` the
-    deck, `.meta` carries dbu and the view layers."""
-
-    def __new__(cls, cache, **kw):
-        from ..rust_render import RustRenderWorker
-
-        class _Worker(RustRenderWorker):
-            supports_margin_prefetch = False
-            supports_label_font_px = False
-
-            def __init__(self, *a, **kw):
-                super().__init__(*a, **kw)
-                # a mask deck keeps its all-thin pages (2026-09-11: the
-                # mask policy; a plain layout culls them for speed)
-                self._thin_default = "keep"
-
-            def _init_styles(self):
-                super()._init_styles()
-                heads = {r["layer"] for r in self.cache.meta["layers"]
-                         if r.get("jobdeck_head")}
-                for row in self.cache.meta["layers"]:
-                    key = row["layer"], row["datatype"]
-                    head = key[0], 0
-                    if key[1] and key[0] in heads:
-                        for styles in (self._fills, self._widths):
-                            if head in styles:
-                                styles.setdefault(key, styles[head])
-
-            def submit(self, job):
-                # Public layer selections/styles may name a virtual level
-                # head. The GUI sends leaves only for a partial selection.
-                rows = cache.meta["layers"]
-                heads = {r["layer"] for r in rows if r.get("jobdeck_head")}
-
-                def expand(key):
-                    key = tuple(key)
-                    if key[1] == 0 and key[0] in heads:
-                        return [(r["layer"], r["datatype"]) for r in rows
-                                if r["layer"] == key[0]]
-                    return [key]
-
-                job = dict(job)
-                if job.get("visible") is not None:
-                    job["visible"] = list(dict.fromkeys(
-                        k for key in job["visible"] for k in expand(key)))
-                for field in ("colors", "fills", "widths"):
-                    if field in job:
-                        job[field] = [(k, value) for key, value in job[field]
-                                      for k in expand(key)]
-                return super().submit(job)
-
-            def _open_command(self):
-                return "open deck=%s budget_mb=%d jobs=%d" % (
-                    self._cache_path, self._budget_mb, self._jobs_count)
-
-            def _submit_snap(self, job):
-                raise RuntimeError("snap is not available for a jobdeck yet")
-
-            def _submit_pick(self, job):
-                raise RuntimeError("pick is not available for a jobdeck yet")
-
-            def _submit_clip(self, job):
-                raise RuntimeError("clip is not available for a jobdeck yet")
-
-        return _Worker(cache, **kw)
+# the worker lives with the renderd client now (floe/rust_render.py,
+# 2026-10-09 P2): this name stays for the callers that import it here
+from ..rust_render import DeckRenderWorker  # noqa: E402,F401
 
 
 def render_deck_png(spec_path, deck_path, dbu, layers, bbox_dbu, width,

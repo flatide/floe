@@ -1446,6 +1446,24 @@ def _remote_x_scroll_repaint(scroller):
         pass
 
 
+def _level_row_text(row, keep=3):
+    """(summary, full) for one level row of the load dialog: the summary
+    names at most `keep` sources and counts the rest (review 2026-09-10
+    (9th) P2-2: 250 file names in one label made the dialog 26,000 px
+    wide); `full` lists them all for the tooltip."""
+    names = [os.path.basename(s) for s in row["sources"]]
+    shown = ", ".join(names[:keep])
+    if len(names) > keep:
+        shown += ", +%d more" % (len(names) - keep)
+    summary = "%d CHIP%s · %d instance%s · %d source%s: %s" % (
+        len(row["chips"]), "" if len(row["chips"]) == 1 else "s",
+        row["instances"], "" if row["instances"] == 1 else "s",
+        len(names), "" if len(names) == 1 else "s", shown)
+    full = "CHIPs: %s\nsources:\n  %s" % (
+        ", ".join(row["chips"]), "\n  ".join(names))
+    return summary, full
+
+
 def listed_meta(cache):
     """The cache's meta with the layer table the viewer lists (user
     2026-10-08, the field's EBEAM files: Calibre listed 3.0 and 3.300
@@ -2459,9 +2477,14 @@ class Viewer:
         self._fill_patterns = fillpat.default_patterns()
         self._layer_patterns = {}
         self._layer_widths = {}
-        rows = ([] if cache is None else
-                cache_mod.load_layer_props(
-                    getattr(self.cache, "props_src", self.cache.src))[0])
+        # the service's rows (floe2), else the design default read here
+        if cache is None:
+            rows = []
+        elif hasattr(cache, "layer_props"):
+            rows = cache.layer_props()
+        else:
+            rows = cache_mod.load_layer_props(
+                getattr(self.cache, "props_src", self.cache.src))[0]
         for key, _color, fill, _name, _f1, f2 in rows:
             i = fillpat.fill_index(fill)
             if i is not None:
@@ -2744,7 +2767,25 @@ class Viewer:
     def _open_file_load(self, path, ids):
         """open_file's loading half: the cache (a DeckCache plans the
         deck and writes its spec), then _apply_cache (layer panel,
-        render service); an error string for the known refusals."""
+        render service); an error string for the known refusals.
+        floe2 asks floe2 gtk-service (floe/gtkservice.py, the shared Rust
+        app layer) for both."""
+        if APP == "floe2":
+            from .gtkservice import ServiceCache, ServiceError
+            c = ServiceCache(path, ids=ids)
+            try:
+                c.load()
+            except ServiceError as exc:
+                if c.is_jobdeck and exc.kind in ("input", "cache"):
+                    return "ERR %s; run: %s index %s" % (exc, APP, path)
+                return "ERR %s" % exc
+            if c.is_jobdeck:
+                # the deck is the thing viewed: full depth (review
+                # 2026-09-09 P1-3)
+                self._set_depth(999, redraw=False)
+            self._apply_cache(c)
+            self._restore_keys()
+            return None
         if _is_deck_path(path):
             # a jobdeck (docs/JOBDECK.ko.md M3): every source's
             # VFS cache must exist; renderd composites them
@@ -2780,6 +2821,12 @@ class Viewer:
         """Whether `path` can be opened as is: a layout with a VFS cache,
         or a jobdeck whose sources (of the levels `ids`, None = all)
         all have one."""
+        if APP == "floe2":
+            from .gtkservice import ServiceError, readiness
+            try:
+                return bool(readiness(path, ids)["ready"])
+            except ServiceError:
+                return False
         if _is_deck_path(path):
             from .jobdeck.viewer import deck_ready
             return deck_ready(path, ids=ids)
@@ -2794,6 +2841,12 @@ class Viewer:
         None. A jobdeck's sources are judged one by one when it opens."""
         if _is_deck_path(path):
             return None
+        if APP == "floe2":
+            from .gtkservice import ServiceError, readiness
+            try:
+                return readiness(path)["busy"]
+            except ServiceError:
+                return None
         from . import cachepath
         return indexlock.state(indexlock.VFS,
                                cachepath.vfs_cache_dir(path),
@@ -2820,11 +2873,15 @@ class Viewer:
                         "FLOE_JOBDECK_LEVELS must be all, ask or "
                         "N[,N...]: %r ignored" % policy)
                     return None
-        from .jobdeck import parse_jobdeck
-        from .jobdeck.viewer import level_rows
         try:
-            rows = level_rows(parse_jobdeck(path, strict=True))
-        except (OSError, ValueError) as exc:
+            if APP == "floe2":
+                from .gtkservice import level_rows
+                rows = level_rows(path)
+            else:
+                from .jobdeck import parse_jobdeck
+                from .jobdeck.viewer import level_rows
+                rows = level_rows(parse_jobdeck(path, strict=True))
+        except (OSError, ValueError, RuntimeError) as exc:
             self._set_live_status("jobdeck: %s" % exc)
             return False
         if len(rows) <= 1:
@@ -2836,7 +2893,6 @@ class Viewer:
         (number, MTITLE name, CHIPs, instances, sources), all / none
         buttons, Open / Cancel. Returns the selection (None = all
         levels) or False for Cancel."""
-        from .jobdeck.viewer import level_row_text
         dlg = Gtk.Dialog(title="load jobdeck levels", transient_for=self.window,
                          modal=True)
         dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
@@ -2862,7 +2918,7 @@ class Viewer:
             chk.set_active(want is None or row["level"] in want)
             checks.append((row["level"], chk))
             grid.attach(chk, 0, r, 1, 1)
-            summary, full = level_row_text(row)
+            summary, full = _level_row_text(row)
             info = Gtk.Label(label=summary)
             info.set_xalign(0.0)
             info.set_ellipsize(Pango.EllipsizeMode.END)

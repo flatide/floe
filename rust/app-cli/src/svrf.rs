@@ -17,12 +17,9 @@ Same options, same <deck>.rules.json; floe-index svrf --help lists them.";
 #[derive(Debug)]
 pub enum Command {
     Help,
+    /// the floe-index command the pointer prints: the options as given,
+    /// in order (-D/-I values as written), checked as floe-index takes them
     Parse {
-        deck: PathBuf,
-        out: Option<PathBuf>,
-        options: Options,
-        /// the options as given, in order (-D/-I values as written): the
-        /// floe-index command the pointer prints
         words: Vec<String>,
     },
 }
@@ -136,15 +133,10 @@ pub fn parse(args: &[String]) -> Result<Command> {
     if !options.env_switches {
         words.push("--no-env-switches".into());
     }
-    Ok(Command::Parse {
-        deck,
-        out,
-        options,
-        words,
-    })
+    Ok(Command::Parse { words })
 }
 pub fn run(command: Command, _stop: &Arc<AtomicUsize>) -> Result<i32> {
-    let Command::Parse { words, .. } = command else {
+    let Command::Parse { words } = command else {
         println!("{}", crate::named(HELP));
         return Ok(0);
     };
@@ -163,12 +155,7 @@ mod tests {
     }
     #[test]
     fn cli_option_spellings_and_scan() {
-        let Command::Parse {
-            deck,
-            out,
-            options,
-            words,
-        } = parse(&args(&[
+        let Command::Parse { words } = parse(&args(&[
             "svrf",
             "-DA=2",
             "--define=A=3",
@@ -180,15 +167,9 @@ mod tests {
             "--",
             "-deck",
         ]))
-        .unwrap()
-        else {
+        .unwrap() else {
             panic!()
         };
-        assert_eq!(deck, PathBuf::from("-deck"));
-        assert_eq!(out, Some("out".into()));
-        assert_eq!(options.defines["A"], Some("3".into()));
-        assert_eq!(options.include_dirs, vec![PathBuf::from("한 글")]);
-        assert!(options.scan_all && options.follow_verbatim && !options.env_switches);
         assert_eq!(
             crate::shell_join(&words),
             "floe-index svrf -deck -o out --scan -D A=2 -D A=3 -I '한 글' --follow-verbatim --no-env-switches"

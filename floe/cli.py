@@ -1228,9 +1228,33 @@ def _deck_skipped(cache):
     return list((cache.meta.get("jobdeck") or {}).get("skipped") or [])
 
 
+def _service_open(src):
+    """floe2 view's layout, opened by floe2 gtk-service (the cache the
+    viewer draws; a refusal ends the run as open_cache's did)."""
+    from .gtkservice import ServiceCache, ServiceError
+    c = ServiceCache(src)
+    try:
+        c.load()
+    except ServiceError as exc:
+        if exc.kind == "busy":
+            _refuse_busy(exc)
+        raise SystemExit("%s: %s" % (APP, exc))
+    if c.is_stale():
+        print("[%s][warn] cache is outdated (source changed); "
+              "rebuild: %s index --force" % (APP, APP), file=sys.stderr)
+    return c
+
+
 def _cache_ready(src, ids=None):
     """Lightweight cache check without importing klayout: a VFS
-    cache (floe/cachepath.py) with a matching source fingerprint."""
+    cache (floe/cachepath.py) with a matching source fingerprint.
+    floe2 asks floe2 gtk-service (the shared Rust app layer)."""
+    if APP == "floe2":
+        from .gtkservice import ServiceError, readiness
+        try:
+            return bool(readiness(src, ids)["current"])
+        except ServiceError:
+            return False
     if _is_deck(src):
         from .jobdeck.viewer import deck_ready
         return deck_ready(src, ids=ids)
@@ -1648,6 +1672,8 @@ def cmd_view(args):
                if getattr(args, "density", None) is not None else []))
         c = None
         goto = None
+    elif src and APP == "floe2":
+        c = _service_open(src)
     else:
         c = open_cache(src, args=args) if src else None
     # PyGObject/GTK3 problems are reported inside import_gtk (exit 3)

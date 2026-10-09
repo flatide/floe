@@ -17,6 +17,7 @@ python을 사용하지 않도록 변경해줘."
 | `app-core` | 앱 정책: 데이터셋·잡덱(파서·소스·계획·스펙·뷰)·DRC(팩·ASCII·필터·리뷰 사이드카)·레이어 속성·캡처·clip·색인 판단·셀 인덱스. HTTP·GTK·Python과 무관 | 공유 |
 | `worker-client` | renderd의 Rust 클라이언트(`rust_render.py`와 같은 프로토콜, `scene_gen` 고정 질의) | 공유 |
 | `notices` | 배포 고지 목록 | 공유 |
+| app-core `desktop` | 데스크톱 뷰어가 그리기 전에 묻는 것: 열 수 있는지(`ready`: 준비·현재성·누가 재색인 중인지), 레이아웃 meta(모든 키 + 색), 빈 레이어 목록 규칙(`list_layers`·안내 줄), layerprops 행(P2a) | 공유 |
 | `app-cli` | 웹이 없는 CLI 명령: index·info·render·probe·clip·jobdeck·drc·svrf·fe-embed·selfcheck. webui `rust/app/src`에서 웹 명령을 뺀 것. 프로그램 이름과 입력 오류의 종료 코드는 실행 파일이 정한다(`Host`의 `name`·`input_error_exit`, `floe_app_core::set_program`; 기본 floe2-web·2) | 공유(P1a; webui의 `floe2-web`이 이 크레이트를 쓰도록 바꾸는 일은 webui 쪽에서) |
 | `floe2` | jobdeck의 제품 명령줄(P1c부터 유일한 floe2 CLI): 공유 CLI 명령 + `view`(그리고 인자 없음·소스만)는 GTK 뷰어(`python -m floe.gtkview`). 버전 = `floe/__init__.py`의 `__version__`. 입력 오류 exit 1(Python CLI와 같음) | jobdeck만 |
 | `app`(`floe2-web`), `web`, `packager`, `electron/`, `desktop/` | 웹 CLI·서버·데스크톱 | webui만 |
@@ -42,7 +43,7 @@ python을 사용하지 않도록 변경해줘."
 | P1a | `app-cli`와 `floe2` 실행 파일. Python CLI는 아직 그대로 둔다 | 0.12.327 |
 | P1b | 빠진 기능을 Rust로(G1, G3~G8; §4). G2 밀도 요청·G9 `phase=render`는 `view`만 쓰므로 P2·P4로 미룸 | 0.12.328 |
 | P1c | 게이트·배포·별칭을 Rust `floe2`로 바꾸고 Python `floe2/` 패키지를 지운다(§4) | 0.12.328 |
-| P2 | `floe2 gtk-service`(stdio JSON-lines). GTK 뷰어의 비-UI 판단을 Rust로 옮기고 Python 모듈을 걷어낸다 | 예정 |
+| P2 | `floe2 gtk-service`(stdio JSON-lines). GTK 뷰어의 비-UI 판단을 Rust로 옮기고 Python 모듈을 걷어낸다. 푸시 단위(§5): P2a 열기·준비·레벨 행·덱 스펙·레이어 속성 행, P2b DRC·svrf, P2c 레이어 속성 편집·fill, P2d(P3와 함께) 오라클을 떼어 낸 뒤 Python 모듈 삭제 | P2a 0.12.329 |
 | P3 | KLayout 레거시를 제품 경로에서 빼고, 동결 `floe` 셸은 개발 전용 오라클로 둔다 | 예정 |
 | P4 | (선택) GTK 렌더 루프를 Rust `ViewController`로 | 별도 승인 |
 
@@ -81,3 +82,29 @@ python을 사용하지 않도록 변경해줘."
   - 웹의 DRC 등록 경로(`select_current_source`)에는 팩 리더 잠금을 아직 걸지 않았다(webui 몫).
   - app-core `svrf/parse.rs`는 webui의 `rust/app`(floe2-web svrf)이 app-cli로 옮길 때까지 남긴다.
   - floe/cli.py의 floe2 전용 분기(잡덱 색인·칩 캡처 등)는 동결 floe와 같은 파일이라 지금은 남겼다. 어떤 진입점도 부르지 않으며, P2(서비스)·P3(레거시 정리)에서 모듈째 걷어낸다.
+
+## 5. P2 — GTK 뷰어는 UI만 (`floe2 gtk-service`)
+
+- **서비스:** `floe2 gtk-service`(rust/floe2/src/service.rs)는 stdin에서 요청 한 줄(`{"id":N,"op":…}`)을 받아 stdout에 답 한 줄(`{"id":N,"result":…}` 또는 `{"id":N,"error":{"kind","message"}}`)을 순서대로 쓴다. stdin이 닫히면 끝나며, 그때 덱 스펙 폴더를 지운다. 판단은 app-core(`desktop`·`dataset`·`jobdeck`)가 하고, 서비스는 그 결과를 전달하는 통로다.
+- **클라이언트:** floe/gtkservice.py가 프로세스당 서비스 하나를 띄운다(`find_floe2`, `FLOE2_BIN`). `ServiceCache`는 gui.py·rust_render.py가 읽던 Cache/DeckCache 속성을 그대로 준다: src, dir, meta, is_jobdeck, ids, mode, props_src, exists·load·is_stale·close, layer_props, set_mode·set_levels, 덱 뷰별 보이기 기억, catalog.infos[tc].cache_dir. 어떤 레이어가 켜져 있는지 같은 세션 상태는 GTK에 남는다.
+- **P2a(0.12.329) 요청:**
+  - `version`
+  - `ready {source, levels?}`: 레이아웃은 캐시가 있는지·현재인지·재색인 중이면 누구인지, 덱은 그릴 수 있는 소스가 모두 색인됐는지(deck_ready).
+  - `open {source, levels?, mode?}`
+    - 레이아웃: meta.json 그대로에 색을 반영하고 빈 레이어를 뺀 것, 안내 줄, 캐시 폴더, props 행, stale.
+    - 덱: DeckSnapshot의 meta, 서비스가 쓴 스펙 파일 경로와 handle, props 소스·행, 소스별 캐시 폴더.
+  - `close {handle}`
+  - `level_rows {source}`
+- **floe2 뷰어 쪽:**
+  - gui.py는 floe2일 때 `_open_file_load`·`_index_ready`·`_index_busy`·레벨 대화상자·레이어 속성 행을 서비스로 받는다. 동결 floe(APP floe)는 예전 Python 경로 그대로다.
+  - cli.py `cmd_view`의 시작 열기(`_service_open`)와 `_cache_ready`도 서비스를 쓴다.
+  - `DeckRenderWorker`는 floe/rust_render.py로 옮겼고, rust_render의 스타일은 `cache.layer_props()`를 쓴다.
+  - 레벨 행 문구(`_level_row_text`)는 UI 문구라 gui.py에 있다.
+- **같은 답인지:** jobdeck 게이트 `GtkServiceTests`가 서비스와 Python 구현을 맞대어 본다.
+  - 덱 4개 × 뷰 3개, 레벨 선택 2개: meta, 스펙(숫자는 값으로 비교 — Rust는 `2.5e-5`, Python은 `2.5e-05`), props 소스, 소스 폴더.
+  - `ready` = deck_ready(색인 안 된 복사본, 빠진 소스 포함), `level_rows`.
+  - 레이아웃 meta = `Cache.load()`(layerprops로 색이 바뀌는 경우 포함), props 행 = `load_layer_props`, 소스가 바뀌면 current가 false.
+  - 뷰어가 floe2로 열 때 ServiceCache, 색인 없는 덱은 "run: floe2 index".
+  - 실제 GTK 창(`GuiSmokeTests`)은 Rust `floe2 view` → gtkview → 서비스로 연다.
+- **현장 영향:** floe2 뷰어도 심볼릭 링크인 캐시 폴더를 열지 않는다(§4의 차이가 뷰어까지 옴). 열기가 Rust 쪽에서 더 엄격하다(버전·vfs·design.ovm 확인 — 예전 뷰어는 meta.json만 봤다).
+- **다음:** P2b DRC(팩·상태·노트·waive·가져오기/내보내기 — 마커마다 부르던 상태·노트는 페이지 단위로 받아 GTK가 들고 있는다)와 svrf 사이드카, P2c 레이어 속성 저장·게시와 fill 패턴, P2d는 P3(오라클 분리)와 함께 Python 모듈 삭제.
