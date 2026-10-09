@@ -171,7 +171,11 @@ pub(crate) fn planes_for(
             h: 0,
         };
         if layer.status == STATUS_OK {
-            let Some(entry) = layer.planes.first().and_then(|p| p.levels.get(level as usize)) else {
+            let Some(entry) = layer
+                .planes
+                .first()
+                .and_then(|p| p.levels.get(level as usize))
+            else {
                 continue;
             };
             let cache_key = (k, level, key_depth);
@@ -292,11 +296,34 @@ mod tests {
             work: 3,
             planes: vec![Plane {
                 depth: 0,
-                levels: vec![Level { w: 8, h: 2, bits: vec![0b0000_0101, 0] }, Level { w: 4, h: 1, bits: vec![0b0011] }],
+                levels: vec![
+                    Level {
+                        w: 8,
+                        h: 2,
+                        bits: vec![0b0000_0101, 0],
+                    },
+                    Level {
+                        w: 4,
+                        h: 1,
+                        bits: vec![0b0011],
+                    },
+                ],
             }],
         };
-        let empty = Layer { layer: 2, dt: 0, status: STATUS_EMPTY, work: 0, planes: Vec::new() };
-        let none = Layer { layer: 3, dt: 0, status: STATUS_NONE_WORK, work: 9, planes: Vec::new() };
+        let empty = Layer {
+            layer: 2,
+            dt: 0,
+            status: STATUS_EMPTY,
+            work: 0,
+            planes: Vec::new(),
+        };
+        let none = Layer {
+            layer: 3,
+            dt: 0,
+            status: STATUS_NONE_WORK,
+            work: 9,
+            planes: Vec::new(),
+        };
         let occ = Occupancy {
             unit: 1000.0,
             src_size: 1,
@@ -313,7 +340,10 @@ mod tests {
         let file = Arc::new(OvoFile::from_bytes(write_ovo(&occ)).unwrap());
         let planes = planes_for(&file, 0, [(0u32, 0usize), (1, 1), (2, 2)], None, None);
         // the ok and the empty layer are planes, the none:work layer is not
-        assert_eq!(planes.iter().map(|p| p.layer_idx).collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(
+            planes.iter().map(|p| p.layer_idx).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
         assert!(planes[0].get(0, 0) && planes[0].get(2, 0) && !planes[0].get(1, 0));
         assert_eq!((planes[1].w, planes[1].h), (0, 0));
         assert!(!planes[1].get(0, 0) && planes[1].bits().is_empty() && planes[1].row_bytes() == 0);
@@ -330,8 +360,36 @@ mod tests {
             status: STATUS_OK,
             work: 1,
             planes: vec![
-                Plane { depth: 0, levels: vec![Level { w: 8, h: 1, bits: vec![0b0000_0001] }, Level { w: 4, h: 1, bits: vec![0b0001] }] },
-                Plane { depth: 2, levels: vec![Level { w: 8, h: 1, bits: vec![0b0000_0100] }, Level { w: 4, h: 1, bits: vec![0b0010] }] },
+                Plane {
+                    depth: 0,
+                    levels: vec![
+                        Level {
+                            w: 8,
+                            h: 1,
+                            bits: vec![0b0000_0001],
+                        },
+                        Level {
+                            w: 4,
+                            h: 1,
+                            bits: vec![0b0001],
+                        },
+                    ],
+                },
+                Plane {
+                    depth: 2,
+                    levels: vec![
+                        Level {
+                            w: 8,
+                            h: 1,
+                            bits: vec![0b0000_0100],
+                        },
+                        Level {
+                            w: 4,
+                            h: 1,
+                            bits: vec![0b0010],
+                        },
+                    ],
+                },
             ],
         };
         let deep = Layer {
@@ -339,7 +397,21 @@ mod tests {
             dt: 0,
             status: STATUS_OK,
             work: 1,
-            planes: vec![Plane { depth: 1, levels: vec![Level { w: 8, h: 1, bits: vec![0b1000_0000] }, Level { w: 4, h: 1, bits: vec![0b1000] }] }],
+            planes: vec![Plane {
+                depth: 1,
+                levels: vec![
+                    Level {
+                        w: 8,
+                        h: 1,
+                        bits: vec![0b1000_0000],
+                    },
+                    Level {
+                        w: 4,
+                        h: 1,
+                        bits: vec![0b1000],
+                    },
+                ],
+            }],
         };
         let occ = Occupancy {
             unit: 1000.0,
@@ -356,7 +428,9 @@ mod tests {
         };
         let file = Arc::new(OvoFile::from_bytes(write_ovo(&occ)).unwrap());
         let mut cache = PlaneCache::new();
-        let at = |depth: Option<u32>, cache: &mut PlaneCache| planes_for(&file, 0, [(0u32, 0usize), (1, 1)], depth, Some(cache));
+        let at = |depth: Option<u32>, cache: &mut PlaneCache| {
+            planes_for(&file, 0, [(0u32, 0usize), (1, 1)], depth, Some(cache))
+        };
         let d0 = at(Some(0), &mut cache);
         assert!(d0[0].get(0, 0) && !d0[0].get(2, 0));
         // nothing of the deep layer at depth 0: a plane without cells

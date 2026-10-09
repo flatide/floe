@@ -111,7 +111,8 @@ impl StrTab {
             return r;
         }
         let off = self.bytes.len() as u32;
-        self.bytes.extend_from_slice(&(s.len() as u32).to_le_bytes());
+        self.bytes
+            .extend_from_slice(&(s.len() as u32).to_le_bytes());
         self.bytes.extend_from_slice(s);
         self.refs.insert(s.to_vec(), off);
         off
@@ -147,10 +148,7 @@ pub fn drc_cmd(args: &[String]) {
             "--pack" => {}
             "--jobs" => {
                 i += 1;
-                jobs = args
-                    .get(i)
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
+                jobs = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(0);
             }
             a if a.starts_with("--") => {
                 eprintln!("drc: unknown option {}", a);
@@ -161,9 +159,7 @@ pub fn drc_cmd(args: &[String]) {
         i += 1;
     }
     if pos.is_empty() || pos.len() > 2 {
-        eprintln!(
-            "usage: floe-index drc <results.db> [out.tray] [--jobs N]"
-        );
+        eprintln!("usage: floe-index drc <results.db> [out.tray] [--jobs N]");
         std::process::exit(2);
     }
     let src = &pos[0];

@@ -190,8 +190,12 @@ impl PlanCullCounts {
         self.summary_pages = self.summary_pages.saturating_add(other.summary_pages);
         self.sub_cut_washes = self.sub_cut_washes.saturating_add(other.sub_cut_washes);
         self.sub_cut_sparse = self.sub_cut_sparse.saturating_add(other.sub_cut_sparse);
-        self.sub_cut_sparse_over = self.sub_cut_sparse_over.saturating_add(other.sub_cut_sparse_over);
-        self.sub_cut_wash_over = self.sub_cut_wash_over.saturating_add(other.sub_cut_wash_over);
+        self.sub_cut_sparse_over = self
+            .sub_cut_sparse_over
+            .saturating_add(other.sub_cut_sparse_over);
+        self.sub_cut_wash_over = self
+            .sub_cut_wash_over
+            .saturating_add(other.sub_cut_wash_over);
         self.rep_kept = self.rep_kept.saturating_add(other.rep_kept);
         self.rep_washed = self.rep_washed.saturating_add(other.rep_washed);
         self.rep_children = self.rep_children.saturating_add(other.rep_children);
@@ -207,13 +211,24 @@ impl PlanCullCounts {
         self.fit_redecided = self.fit_redecided.max(other.fit_redecided);
         // (one fit's account: the other's when this has none)
         if self.fit_ranked == 0 {
-            (self.fit_ranked, self.fit_layers_whole, self.fit_layer_edge, self.fit_layers_out) =
-                (other.fit_ranked, other.fit_layers_whole, other.fit_layer_edge, other.fit_layers_out);
+            (
+                self.fit_ranked,
+                self.fit_layers_whole,
+                self.fit_layer_edge,
+                self.fit_layers_out,
+            ) = (
+                other.fit_ranked,
+                other.fit_layers_whole,
+                other.fit_layer_edge,
+                other.fit_layers_out,
+            );
         }
         self.sub_cut_boxes = self.sub_cut_boxes.saturating_add(other.sub_cut_boxes);
         self.sub_cut_box_over = self.sub_cut_box_over.saturating_add(other.sub_cut_box_over);
         self.sub_cut_box_level = self.sub_cut_box_level.max(other.sub_cut_box_level);
-        self.sub_cut_box_unsure = self.sub_cut_box_unsure.saturating_add(other.sub_cut_box_unsure);
+        self.sub_cut_box_unsure = self
+            .sub_cut_box_unsure
+            .saturating_add(other.sub_cut_box_unsure);
         self.shape_cut = self.shape_cut.max(other.shape_cut);
         self.shape_cut_max |= other.shape_cut_max;
     }
@@ -225,7 +240,6 @@ pub struct PlannedView {
     pub summary: PlanSummary,
     pub stats: RenderStats,
 }
-
 
 impl PlannedView {
     /// One bounded representative query round. The renderer publishes a partial
@@ -270,7 +284,6 @@ impl PlannedView {
         Ok(())
     }
 }
-
 /// Display label selected by the parent VFS planner and resolved to the
 /// renderer's stable OVM layer index. Block labels have no design layer.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -353,7 +366,10 @@ impl DecodedPage {
         // (less grown_bytes, a count kept beside the page: with the lists as
         // read the charge is to the byte what 0.12.300's was)
         let mut bytes = (std::mem::size_of::<Self>() - std::mem::size_of::<u64>()) as u64;
-        let mut lists = SharedLists { once: charge_shared_once(), ..SharedLists::default() };
+        let mut lists = SharedLists {
+            once: charge_shared_once(),
+            ..SharedLists::default()
+        };
         bytes = bytes.saturating_add(
             self.doc.cells.capacity() as u64 * std::mem::size_of::<floe_oasis::doc::Cell>() as u64,
         );
@@ -526,12 +542,23 @@ pub struct Cache {
     /// this reader's lock on the cache (floe_vfs::lock): a run rebuilding
     /// it whole is refused while the cache is open
     _lock: floe_vfs::lock::ReaderGuard,
+    // Last field: mapped/source state and the reader lock drop before the
+    // native reader lease.
+    _revision_lease: Option<std::fs::File>,
 }
 
 /// A cache folder's lock key (floe_vfs::lock::key resolves a symbolic link -
 /// the adapter hands renderd an alias when the real path has whitespace).
 pub(crate) fn cache_lock_key(dir: &str) -> floe_vfs::lock::Key {
     floe_vfs::lock::key(floe_vfs::lock::Kind::Vfs, dir)
+}
+
+/// A sealed revision of the web's revision store (a `revision.json` seal):
+/// never rebuilt in place, so its native lease (crate::revision_lease) is
+/// its reader lock. Taking floe_vfs::lock too would leave a `.floe-lock`
+/// folder inside the store, which its inventory counts as an unknown entry.
+pub(crate) fn is_revision(dir: &str) -> bool {
+    std::fs::symlink_metadata(Path::new(dir).join("revision.json")).is_ok()
 }
 
 /// Cache::cell_cover: the table, or when it was last looked for in vain
@@ -550,12 +577,28 @@ const LAYER_HELD_READS: u64 = 1 << 18;
 
 /// Cache::layer_held of (`ci`, `rem`, `layer`) under a budget of `reads`
 /// placements (None: spent), the cells below memoized in `memo`.
-fn layer_held_in(ovm: &floe_ovm::Ovm, ci: u32, rem: u32, layer: u32, reads: &mut u64, memo: &mut std::collections::HashMap<(u32, u32), bool>) -> Option<bool> {
-    let has = |mask: u32| mask == floe_ovm::LMASK_UNKNOWN || ovm.bitset(mask).get(layer as usize / 8).is_some_and(|byte| (byte >> (layer % 8)) & 1 == 1);
+fn layer_held_in(
+    ovm: &floe_ovm::Ovm,
+    ci: u32,
+    rem: u32,
+    layer: u32,
+    reads: &mut u64,
+    memo: &mut std::collections::HashMap<(u32, u32), bool>,
+) -> Option<bool> {
+    let has = |mask: u32| {
+        mask == floe_ovm::LMASK_UNKNOWN
+            || ovm
+                .bitset(mask)
+                .get(layer as usize / 8)
+                .is_some_and(|byte| (byte >> (layer % 8)) & 1 == 1)
+    };
     if !has(ovm.cell_lmask_rec(ci)) {
         return Some(false);
     }
-    if rem == floe_vfs::hier::REM_FULL || rem >= ovm.cell_height(ci) || ovm.cell_lmask_direct(ci) != floe_ovm::LMASK_UNKNOWN && has(ovm.cell_lmask_direct(ci)) {
+    if rem == floe_vfs::hier::REM_FULL
+        || rem >= ovm.cell_height(ci)
+        || ovm.cell_lmask_direct(ci) != floe_ovm::LMASK_UNKNOWN && has(ovm.cell_lmask_direct(ci))
+    {
         return Some(true);
     }
     if rem == 0 {
@@ -566,7 +609,11 @@ fn layer_held_in(ovm: &floe_ovm::Ovm, ci: u32, rem: u32, layer: u32, reads: &mut
     }
     let (bvh_start, bvh_count) = ovm.cell_bvh(ci);
     let mut found = false;
-    let mut stack = if bvh_count != 0 { vec![bvh_start] } else { Vec::new() };
+    let mut stack = if bvh_count != 0 {
+        vec![bvh_start]
+    } else {
+        Vec::new()
+    };
     'walk: while let Some(ni) = stack.pop() {
         let node = ovm.bvh(ni);
         if !has(node.lmask_rec) {
@@ -593,7 +640,11 @@ fn layer_held_in(ovm: &floe_ovm::Ovm, ci: u32, rem: u32, layer: u32, reads: &mut
             if child >= ovm.n_cells {
                 continue;
             }
-            let below = if rem - 1 >= ovm.cell_height(child) { floe_vfs::hier::REM_FULL } else { rem - 1 };
+            let below = if rem - 1 >= ovm.cell_height(child) {
+                floe_vfs::hier::REM_FULL
+            } else {
+                rem - 1
+            };
             if layer_held_in(ovm, child, below, layer, reads, memo)? {
                 found = true;
                 break 'walk;
@@ -619,7 +670,8 @@ fn layer_max_depths(ovm: &floe_ovm::Ovm) -> Vec<u32> {
     let distinct: Vec<Vec<usize>> = (0..n)
         .map(|ci| {
             let c = ovm.cell(ci as u32);
-            let mut kids: Vec<usize> = (c.place_start as u64..c.place_start as u64 + c.place_count as u64)
+            let mut kids: Vec<usize> = (c.place_start as u64
+                ..c.place_start as u64 + c.place_count as u64)
                 .map(|pli| ovm.place_child(pli) as usize)
                 .filter(|&k| k < n)
                 .collect();
@@ -633,7 +685,8 @@ fn layer_max_depths(ovm: &floe_ovm::Ovm) -> Vec<u32> {
     // the reachable cells (edges back into the stack are cycles)
     let mut state = vec![0u8; n]; // 0 new, 1 on the stack, 2 done
     let mut order: Vec<usize> = Vec::new();
-    let mut stack: Vec<(usize, Vec<usize>, usize)> = vec![(ovm.top as usize, children(ovm.top as usize), 0)];
+    let mut stack: Vec<(usize, Vec<usize>, usize)> =
+        vec![(ovm.top as usize, children(ovm.top as usize), 0)];
     state[ovm.top as usize] = 1;
     while let Some(frame) = stack.last_mut() {
         if frame.2 < frame.1.len() {
@@ -697,7 +750,11 @@ fn occ_threads() -> usize {
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
         .filter(|&n| n >= 1)
-        .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()).min(8))
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map_or(4, |n| n.get())
+                .min(8)
+        })
 }
 
 /// design.ovs (the occupancy density, crate::occ) and the big cells'
@@ -706,35 +763,56 @@ fn occ_threads() -> usize {
 /// file's, level's and depth's (`layers_of`: the file's view root)
 #[derive(Default)]
 struct OccDensitySlot {
-    files: std::collections::HashMap<Option<u32>, Option<std::sync::Arc<floe_vfs::occ_density::OvsFile>>>,
+    files: std::collections::HashMap<
+        Option<u32>,
+        Option<std::sync::Arc<floe_vfs::occ_density::OvsFile>>,
+    >,
     layers_of: Option<u32>,
-    layers: std::collections::HashMap<(u32, u32, u32), Option<std::sync::Arc<crate::occ::OccLayer>>>,
+    layers:
+        std::collections::HashMap<(u32, u32, u32), Option<std::sync::Arc<crate::occ::OccLayer>>>,
 }
 
 impl Cache {
     /// Open a cache as its reader (floe_vfs::lock): refused - the error
     /// starting with floe_vfs::lock::LOCKED - while a run rebuilds it whole.
+    /// A sealed revision takes its native lease instead (is_revision).
     pub fn open(path: impl AsRef<Path>) -> Result<Self, String> {
         let path = path.as_ref();
         let dir = path
             .to_str()
             .ok_or_else(|| format!("cache path is not UTF-8: {}", path.display()))?;
-        let lock = floe_vfs::lock::readers(&[cache_lock_key(dir)], &floe_vfs::lock::reader_label("floe-renderd"))
-            .map_err(|busy| format!("{}{}", floe_vfs::lock::LOCKED, busy))?;
-        let mut cache = Self::open_unlocked(path)?;
+        let revision_lease = crate::revision_lease::open(path)?;
+        let lock = if revision_lease.is_some() {
+            floe_vfs::lock::ReaderGuard::default()
+        } else {
+            floe_vfs::lock::readers(
+                &[cache_lock_key(dir)],
+                &floe_vfs::lock::reader_label("floe-renderd"),
+            )
+            .map_err(|busy| format!("{}{}", floe_vfs::lock::LOCKED, busy))?
+        };
+        let mut cache = Self::open_leased(path, revision_lease)?;
         cache._lock = lock;
         Ok(cache)
     }
 
     /// Open a cache without taking its lock (a deck takes its sources'
-    /// together: one registration per folder).
+    /// together: one registration per folder). A sealed revision's native
+    /// lease is taken here either way.
     pub(crate) fn open_unlocked(path: impl AsRef<Path>) -> Result<Self, String> {
         let path = path.as_ref();
+        Self::open_leased(path, crate::revision_lease::open(path)?)
+    }
+
+    fn open_leased(path: &Path, revision_lease: Option<std::fs::File>) -> Result<Self, String> {
         let dir = path
             .to_str()
             .ok_or_else(|| format!("cache path is not UTF-8: {}", path.display()))?;
         let vfs = std::sync::Arc::new(Vfs::open(dir)?);
-        let hier = std::sync::Arc::new(crate::cells::HierHandle::new(std::sync::Arc::clone(&vfs), dir.to_string()));
+        let hier = std::sync::Arc::new(crate::cells::HierHandle::new(
+            std::sync::Arc::clone(&vfs),
+            dir.to_string(),
+        ));
         Ok(Self {
             vfs,
             dir: dir.to_string(),
@@ -746,6 +824,7 @@ impl Cache {
             representatives: std::sync::OnceLock::new(),
             cell_cover: std::sync::Mutex::new(CoverSlot::default()),
             _lock: floe_vfs::lock::ReaderGuard::default(),
+            _revision_lease: revision_lease,
         })
     }
 
@@ -767,8 +846,17 @@ impl Cache {
             Err(poisoned) => poisoned.into_inner(),
         };
         if slot.table.is_none() && !slot.missed.is_some_and(|at| at.elapsed() < COVER_RETRY) {
-            slot.table = self.hier.summary().ok().and_then(|summary| floe_vfs::cover::CellCover::new(&self.vfs.ovm, summary)).map(std::sync::Arc::new);
-            slot.missed = if slot.table.is_none() { Some(Instant::now()) } else { None };
+            slot.table = self
+                .hier
+                .summary()
+                .ok()
+                .and_then(|summary| floe_vfs::cover::CellCover::new(&self.vfs.ovm, summary))
+                .map(std::sync::Arc::new);
+            slot.missed = if slot.table.is_none() {
+                Some(Instant::now())
+            } else {
+                None
+            };
             // every cell's areas ahead of the plans that ask, on a thread of
             // its own: a plan that needs a cell first works it out itself -
             // the first frame two steps out of fit on the synthetic MAIN01
@@ -777,11 +865,17 @@ impl Cache {
             if let Some(table) = slot.table.clone() {
                 if std::env::var("FLOE_RUST_DENSITY_COVER_WARM").as_deref() != Ok("off") {
                     let vfs = std::sync::Arc::clone(&self.vfs);
-                    let _ = std::thread::Builder::new().name("floe-cover-warm".to_string()).spawn(move || {
-                        let started = Instant::now();
-                        table.warm(&vfs.ovm);
-                        eprintln!("[render-core] cells' cover: {} cells worked out in {} ms", vfs.ovm.n_cells, started.elapsed().as_millis());
-                    });
+                    let _ = std::thread::Builder::new()
+                        .name("floe-cover-warm".to_string())
+                        .spawn(move || {
+                            let started = Instant::now();
+                            table.warm(&vfs.ovm);
+                            eprintln!(
+                                "[render-core] cells' cover: {} cells worked out in {} ms",
+                                vfs.ovm.n_cells,
+                                started.elapsed().as_millis()
+                            );
+                        });
                 }
             }
         }
@@ -809,11 +903,26 @@ impl Cache {
     /// took the synthetic MAIN01 at depth 4 5.5 s before its first frame).
     /// Once per (cell, rem, layer) and open cache.
     pub fn layer_held(&self, ci: u32, rem: u32, layer: u32) -> bool {
-        if let Some(&known) = self.held_layers.lock().ok().and_then(|held| held.get(&(ci, rem, layer)).copied()).as_ref() {
+        if let Some(&known) = self
+            .held_layers
+            .lock()
+            .ok()
+            .and_then(|held| held.get(&(ci, rem, layer)).copied())
+            .as_ref()
+        {
             return known;
         }
         let ovm = &self.vfs.ovm;
-        let held = ci >= ovm.n_cells || layer_held_in(ovm, ci, rem, layer, &mut LAYER_HELD_READS.clone(), &mut std::collections::HashMap::new()).unwrap_or(true);
+        let held = ci >= ovm.n_cells
+            || layer_held_in(
+                ovm,
+                ci,
+                rem,
+                layer,
+                &mut LAYER_HELD_READS.clone(),
+                &mut std::collections::HashMap::new(),
+            )
+            .unwrap_or(true);
         if let Ok(mut known) = self.held_layers.lock() {
             known.insert((ci, rem, layer), held);
         }
@@ -876,13 +985,15 @@ impl Cache {
             None => format!("{}/design.ovs", self.dir),
         };
         if !slot.files.contains_key(&root) {
-            let opened = floe_vfs::occ_density::OvsFile::open(&path).and_then(|f| f.validate_against(&self.vfs.ovm).map(|()| f)).and_then(|f| {
-                if f.root.map(|r| r.ci) == root {
-                    Ok(f)
-                } else {
-                    Err("another cell's file".to_string())
-                }
-            });
+            let opened = floe_vfs::occ_density::OvsFile::open(&path)
+                .and_then(|f| f.validate_against(&self.vfs.ovm).map(|()| f))
+                .and_then(|f| {
+                    if f.root.map(|r| r.ci) == root {
+                        Ok(f)
+                    } else {
+                        Err("another cell's file".to_string())
+                    }
+                });
             let file = match opened {
                 Ok(file) => Some(std::sync::Arc::new(file)),
                 // none: an index made before design.ovs came with it, or a
@@ -913,28 +1024,50 @@ impl Cache {
             let (w, h) = (u64::from(w), u64::from(h));
             layer_ids.len() as u64 * (w.div_ceil(8) * h + w.div_ceil(8) * h.div_ceil(8))
         };
-        let level = crate::occ::choose_level(grid.cell_dbu, grid.n_levels, px_dbu, cut_dbu, max_cell_px, bytes_at, cap_bytes)?;
+        let level = crate::occ::choose_level(
+            grid.cell_dbu,
+            grid.n_levels,
+            px_dbu,
+            cut_dbu,
+            max_cell_px,
+            bytes_at,
+            cap_bytes,
+        )?;
         let (w, h) = grid.level_dims(level);
         let depth_key = depth.map_or(u32::MAX, |d| d.min(floe_vfs::occupancy::DEPTH_CAP as u32));
-        slot.layers.retain(|&(_, lv, d), _| lv == level && d == depth_key);
+        slot.layers
+            .retain(|&(_, lv, d), _| lv == level && d == depth_key);
         // the layers this level and depth lack, made on threads, a layer
         // each at a time (a laptop's first frame of 449 layers took 352 ms on
         // one; FLOE_RUST_DENSITY_OCC_THREADS=1 makes them so)
-        let mut missing: Vec<u32> =
-            layer_ids.iter().copied().filter(|&id| (id as usize) < ovs.layers.len() && !slot.layers.contains_key(&(id, level, depth_key))).collect();
+        let mut missing: Vec<u32> = layer_ids
+            .iter()
+            .copied()
+            .filter(|&id| {
+                (id as usize) < ovs.layers.len()
+                    && !slot.layers.contains_key(&(id, level, depth_key))
+            })
+            .collect();
         missing.sort_unstable();
         missing.dedup();
         // what the layers held and those to make would come to: past the
         // cap, the ones this frame does not ask for go first
         let per_layer = u64::from(w.div_ceil(8)) * (u64::from(h) + u64::from(h.div_ceil(8)));
-        let held: u64 = slot.layers.values().flatten().map(|layer| layer.bytes() as u64).sum();
+        let held: u64 = slot
+            .layers
+            .values()
+            .flatten()
+            .map(|layer| layer.bytes() as u64)
+            .sum();
         if held + missing.len() as u64 * per_layer > cap_bytes {
             let mut asked = layer_ids.to_vec();
             asked.sort_unstable();
-            slot.layers.retain(|&(id, _, _), _| asked.binary_search(&id).is_ok());
+            slot.layers
+                .retain(|&(id, _, _), _| asked.binary_search(&id).is_ok());
         }
         let threads = occ_threads().min(missing.len()).max(1);
-        let (made, stopped) = crate::occ::make_layers(&ovs, &missing, level as usize, depth, threads, stop);
+        let (made, stopped) =
+            crate::occ::make_layers(&ovs, &missing, level as usize, depth, threads, stop);
         let n_made = made.len() as u32;
         for (id, layer) in made {
             match layer {
@@ -942,7 +1075,10 @@ impl Cache {
                     slot.layers.insert((id, level, depth_key), layer);
                 }
                 Err(e) => {
-                    eprintln!("[render-core] occupancy density {}: {} - the plans draw", path, e);
+                    eprintln!(
+                        "[render-core] occupancy density {}: {} - the plans draw",
+                        path, e
+                    );
                     slot.files.insert(root, None);
                     slot.layers.clear();
                     return None;
@@ -952,7 +1088,8 @@ impl Cache {
         if stopped {
             return None;
         }
-        let mut layers: Vec<Option<std::sync::Arc<crate::occ::OccLayer>>> = vec![None; ovs.layers.len()];
+        let mut layers: Vec<Option<std::sync::Arc<crate::occ::OccLayer>>> =
+            vec![None; ovs.layers.len()];
         for &id in layer_ids {
             if let Some(made) = slot.layers.get(&(id, level, depth_key)) {
                 layers[id as usize] = made.clone();
@@ -960,7 +1097,9 @@ impl Cache {
         }
         Some(std::sync::Arc::new(crate::occ::OccDensity {
             level,
-            to_file: ovs.root.map(|r| floe_tiler::Xf::place(r.x, r.y, r.rot, r.flip)),
+            to_file: ovs
+                .root
+                .map(|r| floe_tiler::Xf::place(r.x, r.y, r.rot, r.flip)),
             cell: grid.cell_dbu << level,
             x0: grid.x0,
             y0: grid.y0,
@@ -969,7 +1108,12 @@ impl Cache {
             layers,
             cell_um: grid.base_um() * f64::from(1u32 << level.min(31)),
             made: n_made,
-            held_bytes: slot.layers.values().flatten().map(|layer| layer.bytes() as u64).sum(),
+            held_bytes: slot
+                .layers
+                .values()
+                .flatten()
+                .map(|layer| layer.bytes() as u64)
+                .sum(),
         }))
     }
 
@@ -1018,7 +1162,11 @@ impl Cache {
                 }
             }
         }
-        (slot.file.clone(), slot.error.clone(), stat.unwrap_or((0, 0)))
+        (
+            slot.file.clone(),
+            slot.error.clone(),
+            stat.unwrap_or((0, 0)),
+        )
     }
 
     /// Resolves visible-layer specs (names or L/D, as `layer_mask`) to
@@ -1112,13 +1260,26 @@ impl Cache {
         let eligible: Vec<u32> = if per_depth {
             visible.clone()
         } else {
-            visible.iter().copied().filter(|&idx| self.depth_is_full_for(request.depth, idx)).collect()
+            visible
+                .iter()
+                .copied()
+                .filter(|&idx| self.depth_is_full_for(request.depth, idx))
+                .collect()
         };
         if eligible.is_empty() && !visible.is_empty() {
             return Ok(SummarySelection::none(summary::NONE_DEPTH));
         }
-        let depth = if full || !per_depth { None } else { Some(request.depth) };
-        let Some(level) = summary::level_for(file.cell_dbu, request.px_per_dbu, file.n_levels, summary::max_cell_px()) else {
+        let depth = if full || !per_depth {
+            None
+        } else {
+            Some(request.depth)
+        };
+        let Some(level) = summary::level_for(
+            file.cell_dbu,
+            request.px_per_dbu,
+            file.n_levels,
+            summary::max_cell_px(),
+        ) else {
             let mut none = SummarySelection::none(summary::NONE_NEAR);
             none.base_cell_dbu = file.cell_dbu;
             none.unit = file.unit;
@@ -1138,7 +1299,11 @@ impl Cache {
                 Some(&mut slot.planes),
             )
         };
-        let none = if planes.is_empty() { Some(summary::NONE_LAYERS) } else { None };
+        let none = if planes.is_empty() {
+            Some(summary::NONE_LAYERS)
+        } else {
+            None
+        };
         Ok(SummarySelection {
             planes,
             level,
@@ -1204,7 +1369,9 @@ impl Cache {
     /// deepest cell holding the layer's pages - the summary of such a
     /// layer equals its exact render.
     pub fn depth_is_full_for(&self, depth: u32, idx: u32) -> bool {
-        depth == crate::request::FULL_DEPTH || depth >= self.max_depth() || depth >= self.layer_depth(idx)
+        depth == crate::request::FULL_DEPTH
+            || depth >= self.max_depth()
+            || depth >= self.layer_depth(idx)
     }
 
     pub fn unit(&self) -> f64 {
@@ -1244,8 +1411,14 @@ impl Cache {
         use floe_vfs::hier::{FxMap, FxSet};
         use std::collections::BTreeMap;
         let mut out = plans.remove(0);
-        let mut cells: BTreeMap<floe_vfs::hier::WsKey, floe_vfs::hier::WsCell> = out.wcells.drain(..).map(|cell| (cell.key, cell)).collect();
-        let mut pages: BTreeMap<u32, u64> = out.pages.iter().copied().zip(out.page_prio.iter().copied()).collect();
+        let mut cells: BTreeMap<floe_vfs::hier::WsKey, floe_vfs::hier::WsCell> =
+            out.wcells.drain(..).map(|cell| (cell.key, cell)).collect();
+        let mut pages: BTreeMap<u32, u64> = out
+            .pages
+            .iter()
+            .copied()
+            .zip(out.page_prio.iter().copied())
+            .collect();
         // per cell merged into, kept over the plans (a cell's maps were made
         // anew at every plan, from all it held - the top planes' eight plans
         // went over the top cell's dot items 28 times, 2026-10-05): its
@@ -1265,13 +1438,24 @@ impl Cache {
                     continue;
                 };
                 // pages, with their levels when the plan has them
-                let mut levels: BTreeMap<u32, u8> = have.pages.iter().enumerate().map(|(at, &page)| (page, have.page_levels.get(at).copied().unwrap_or(0))).collect();
+                let mut levels: BTreeMap<u32, u8> = have
+                    .pages
+                    .iter()
+                    .enumerate()
+                    .map(|(at, &page)| (page, have.page_levels.get(at).copied().unwrap_or(0)))
+                    .collect();
                 let levelled = !have.page_levels.is_empty() || !cell.page_levels.is_empty();
                 for (at, &page) in cell.pages.iter().enumerate() {
-                    levels.entry(page).or_insert(cell.page_levels.get(at).copied().unwrap_or(0));
+                    levels
+                        .entry(page)
+                        .or_insert(cell.page_levels.get(at).copied().unwrap_or(0));
                 }
                 have.pages = levels.keys().copied().collect();
-                have.page_levels = if levelled { levels.values().copied().collect() } else { Vec::new() };
+                have.page_levels = if levelled {
+                    levels.values().copied().collect()
+                } else {
+                    Vec::new()
+                };
                 // washes with their counts (0: none): a counted one per block and
                 // layer, the most dots; the rest once each
                 let counted = !have.dot_counts.is_empty() || !cell.dot_counts.is_empty();
@@ -1281,11 +1465,20 @@ impl Cache {
                 // (the maps here are looked up, never iterated: the Fx hasher,
                 // 2026-10-02 - SipHash and growing were most of a dots merge)
                 let (placed, blocks, seen) = index.entry(cell.key).or_insert_with(|| {
-                    let mut placed: Placed = FxMap::with_capacity_and_hasher(have.insts.len() + cell.insts.len(), Default::default());
+                    let mut placed: Placed = FxMap::with_capacity_and_hasher(
+                        have.insts.len() + cell.insts.len(),
+                        Default::default(),
+                    );
                     for (at, inst) in have.insts.iter().enumerate() {
-                        placed.entry((inst.child, inst.x, inst.y, inst.rot, inst.flip)).or_default().push(at);
+                        placed
+                            .entry((inst.child, inst.x, inst.y, inst.rot, inst.flip))
+                            .or_default()
+                            .push(at);
                     }
-                    let mut blocks: Blocks = FxMap::with_capacity_and_hasher(have.washes.len() + cell.washes.len(), Default::default());
+                    let mut blocks: Blocks = FxMap::with_capacity_and_hasher(
+                        have.washes.len() + cell.washes.len(),
+                        Default::default(),
+                    );
                     let mut seen: Seen = FxSet::default();
                     for (at, &(layer, b)) in have.washes.iter().enumerate() {
                         if have.dot_counts.get(at).copied().unwrap_or(0) > 0 {
@@ -1299,7 +1492,10 @@ impl Cache {
                 // instances, once each
                 for inst in cell.insts {
                     let key = (inst.child, inst.x, inst.y, inst.rot, inst.flip);
-                    if placed.get(&key).is_some_and(|ats| ats.iter().any(|&at| have.insts[at] == inst)) {
+                    if placed
+                        .get(&key)
+                        .is_some_and(|ats| ats.iter().any(|&at| have.insts[at] == inst))
+                    {
                         continue;
                     }
                     placed.entry(key).or_default().push(have.insts.len());
@@ -1338,7 +1534,10 @@ impl Cache {
                 have.reps.extend(cell.reps);
             }
             for (page, prio) in plan.pages.into_iter().zip(plan.page_prio) {
-                pages.entry(page).and_modify(|have| *have = (*have).min(prio)).or_insert(prio);
+                pages
+                    .entry(page)
+                    .and_modify(|have| *have = (*have).min(prio))
+                    .or_insert(prio);
             }
             let (st, more) = (&mut out.stats, &plan.stats);
             st.visited_bvh += more.visited_bvh;
@@ -1441,7 +1640,10 @@ impl Cache {
     /// `plan_layer_only` for several layers (the density stack's top planes,
     /// GeometryRasterRequest::density_top_planes).
     pub fn plan_layers_only(&self, plan: &HierPlan, layers: &[u32]) -> HierPlan {
-        let of_layer = |page: u32| self.page_layer(page).is_some_and(|layer| layers.contains(&layer));
+        let of_layer = |page: u32| {
+            self.page_layer(page)
+                .is_some_and(|layer| layers.contains(&layer))
+        };
         let wcells = plan
             .wcells
             .iter()
@@ -1456,10 +1658,19 @@ impl Cache {
                 floe_vfs::hier::WsCell {
                     key: cell.key,
                     pages: kept.iter().map(|&(page, _)| page).collect(),
-                    page_levels: if cell.page_levels.is_empty() { Vec::new() } else { kept.iter().map(|&(_, level)| level).collect() },
+                    page_levels: if cell.page_levels.is_empty() {
+                        Vec::new()
+                    } else {
+                        kept.iter().map(|&(_, level)| level).collect()
+                    },
                     insts: cell.insts.clone(),
                     frames: Vec::new(),
-                    washes: cell.washes.iter().filter(|(wash_layer, _)| layers.contains(wash_layer)).copied().collect(),
+                    washes: cell
+                        .washes
+                        .iter()
+                        .filter(|(wash_layer, _)| layers.contains(wash_layer))
+                        .copied()
+                        .collect(),
                     // a spread dots plan's counts, with their washes
                     dot_counts: cell
                         .washes
@@ -1468,7 +1679,12 @@ impl Cache {
                         .filter(|((wash_layer, _), _)| layers.contains(wash_layer))
                         .map(|(_, &count)| count)
                         .collect(),
-                    reps: cell.reps.iter().filter(|(rep_layer, _)| layers.contains(rep_layer)).cloned().collect(),
+                    reps: cell
+                        .reps
+                        .iter()
+                        .filter(|(rep_layer, _)| layers.contains(rep_layer))
+                        .cloned()
+                        .collect(),
                 }
             })
             .collect();
@@ -1479,7 +1695,14 @@ impl Cache {
             .filter(|(&page, _)| of_layer(page))
             .map(|(&page, &prio)| (page, prio))
             .unzip();
-        HierPlan { top: plan.top, wcells, pages, page_prio, stats: plan.stats.clone(), explain: Vec::new() }
+        HierPlan {
+            top: plan.top,
+            wcells,
+            pages,
+            page_prio,
+            stats: plan.stats.clone(),
+            explain: Vec::new(),
+        }
     }
 
     /// The layer (cache layer index) of page `page_id`; None outside the index.
@@ -1544,9 +1767,20 @@ impl Cache {
     /// `plan_cancellable` would fit the request - held whole, under
     /// `request.fixed_fit`, or decided anew (floe_vfs::hier::fit_planned).
     /// None where the fit would plan again; the caller plans it.
-    pub fn fit_plan(&self, request: &PlanRequest, plan: HierPlan) -> Result<Option<HierPlan>, String> {
+    pub fn fit_plan(
+        &self,
+        request: &PlanRequest,
+        plan: HierPlan,
+    ) -> Result<Option<HierPlan>, String> {
         let req = self.view_request(request)?;
-        Ok(self.vfs.fit_planned_in(&req, request.fixed_fit, request.free_pages.clone(), plan, request.dot_bright, request.dot_occ_first))
+        Ok(self.vfs.fit_planned_in(
+            &req,
+            request.fixed_fit,
+            request.free_pages.clone(),
+            plan,
+            request.dot_bright,
+            request.dot_occ_first,
+        ))
     }
 
     /// The pages `left` (sorted) of `plan` - a plan of `request` - that the
@@ -1554,12 +1788,19 @@ impl Cache {
     /// records instead (floe_vfs HierOpts::dot_stand_in). The pages stood in
     /// for; none where the plan noted none (no brightness, no design.ovb,
     /// FLOE_RUST_DENSITY_STAND_IN=off).
-    pub fn stand_in_pages(&self, request: &PlanRequest, plan: &mut HierPlan, left: &[u32]) -> Result<u64, String> {
+    pub fn stand_in_pages(
+        &self,
+        request: &PlanRequest,
+        plan: &mut HierPlan,
+        left: &[u32],
+    ) -> Result<u64, String> {
         if left.is_empty() || plan.stats.occ_aside.is_empty() {
             return Ok(0);
         }
         let req = self.view_request(request)?;
-        Ok(self.vfs.stand_in_pages(&req, plan, left, request.dot_bright))
+        Ok(self
+            .vfs
+            .stand_in_pages(&req, plan, left, request.dot_bright))
     }
 
     pub fn plan(&self, request: &PlanRequest) -> Result<PlannedView, String> {
@@ -1569,7 +1810,12 @@ impl Cache {
     /// `plan` under a render cancellation: a newer generation ends the walk
     /// at its next look (floe_vfs::hier::HierOpts::stop) and the plan is
     /// refused as `render cancelled`, like any cancelled render step.
-    pub fn plan_cancellable(&self, request: &PlanRequest, generation: u64, cancellation: &crate::RenderCancellation) -> Result<PlannedView, String> {
+    pub fn plan_cancellable(
+        &self,
+        request: &PlanRequest,
+        generation: u64,
+        cancellation: &crate::RenderCancellation,
+    ) -> Result<PlannedView, String> {
         self.plan_stopping(request, Some(cancellation.plan_stop(generation)))
     }
 
@@ -1590,14 +1836,30 @@ impl Cache {
     /// `floe-index hier` adds it). FLOE_RUST_FIT_PROBE_CHECK=on (diagnostic)
     /// walks as well and says where the two differ; the walk's decision is
     /// then the one taken.
-    pub fn fit_decision_cancellable(&self, request: &PlanRequest, generation: u64, cancellation: &crate::RenderCancellation) -> Result<FitProbe, String> {
-        let summary = if fit_probe_by_summary() { self.hier.summary().ok().filter(|summary| summary.n_cells == self.vfs.ovm.n_cells) } else { None };
+    pub fn fit_decision_cancellable(
+        &self,
+        request: &PlanRequest,
+        generation: u64,
+        cancellation: &crate::RenderCancellation,
+    ) -> Result<FitProbe, String> {
+        let summary = if fit_probe_by_summary() {
+            self.hier
+                .summary()
+                .ok()
+                .filter(|summary| summary.n_cells == self.vfs.ovm.n_cells)
+        } else {
+            None
+        };
         let walked = summary.is_none();
-        let checked = summary.is_some() && std::env::var("FLOE_RUST_FIT_PROBE_CHECK").as_deref() == Ok("on");
-        let decided = self.plan_deciding(request, Some(cancellation.plan_stop(generation)), summary)?;
+        let checked =
+            summary.is_some() && std::env::var("FLOE_RUST_FIT_PROBE_CHECK").as_deref() == Ok("on");
+        let decided =
+            self.plan_deciding(request, Some(cancellation.plan_stop(generation)), summary)?;
         if checked {
-            let walked = self.plan_deciding(request, Some(cancellation.plan_stop(generation)), None)?;
-            let same = decided.plan.pages == walked.plan.pages && decided.plan.stats.fit_decision == walked.plan.stats.fit_decision;
+            let walked =
+                self.plan_deciding(request, Some(cancellation.plan_stop(generation)), None)?;
+            let same = decided.plan.pages == walked.plan.pages
+                && decided.plan.stats.fit_decision == walked.plan.stats.fit_decision;
             // (the lines a field run is asked for)
             eprintln!(
                 "[render-core] fit probe check: {} - by the summary {} pages in {} us ({} cells whole, {} nodes read), by the walk {} pages in {} us ({} nodes read)",
@@ -1610,37 +1872,81 @@ impl Cache {
                 walked.stats.plan_us,
                 walked.plan.stats.visited_bvh,
             );
-            return Ok(FitProbe { decision: walked.plan.stats.fit_decision, walked: true });
+            return Ok(FitProbe {
+                decision: walked.plan.stats.fit_decision,
+                walked: true,
+            });
         }
-        Ok(FitProbe { decision: decided.plan.stats.fit_decision, walked })
+        Ok(FitProbe {
+            decision: decided.plan.stats.fit_decision,
+            walked,
+        })
     }
 
-    fn plan_stopping(&self, request: &PlanRequest, stop: Option<floe_vfs::hier::PlanStop>) -> Result<PlannedView, String> {
+    fn plan_stopping(
+        &self,
+        request: &PlanRequest,
+        stop: Option<floe_vfs::hier::PlanStop>,
+    ) -> Result<PlannedView, String> {
         self.plan_deciding(request, stop, None)
     }
 
     /// plan_stopping; with `decide_by` the plan is for its fit decision alone
     /// (fit_decision_cancellable).
-    fn plan_deciding(&self, request: &PlanRequest, stop: Option<floe_vfs::hier::PlanStop>, decide_by: Option<std::sync::Arc<floe_vfs::hiersum::HierSummary>>) -> Result<PlannedView, String> {
+    fn plan_deciding(
+        &self,
+        request: &PlanRequest,
+        stop: Option<floe_vfs::hier::PlanStop>,
+        decide_by: Option<std::sync::Arc<floe_vfs::hiersum::HierSummary>>,
+    ) -> Result<PlannedView, String> {
         let req = self.view_request(request)?;
         let started = Instant::now();
-        let regions: Vec<floe_ovm::BBox> = request.regions.iter().map(|region| region.as_bbox()).collect();
+        let regions: Vec<floe_ovm::BBox> = request
+            .regions
+            .iter()
+            .map(|region| region.as_bbox())
+            .collect();
         // the cells' cover: the brightness's dots plans alone ask for it
-        let cover = if request.dot_bright.is_some() && request.sub_cut_dots.is_some() && !request.density_mask.as_ref().is_some_and(|mask| mask.is_empty()) { self.cell_cover() } else { None };
-        let mut plan = self.vfs.plan_hier_in(&req, &regions, request.density_mask.clone(), request.density_layers.clone(), request.fixed_fit, request.sub_cut_dots, request.dot_records, request.probe_limit, request.free_pages.clone(), stop, request.dot_bright, request.dot_occ_first, cover, decide_by, request.fit_rank.clone());
+        let cover = if request.dot_bright.is_some()
+            && request.sub_cut_dots.is_some()
+            && !request
+                .density_mask
+                .as_ref()
+                .is_some_and(|mask| mask.is_empty())
+        {
+            self.cell_cover()
+        } else {
+            None
+        };
+        let mut plan = self.vfs.plan_hier_in(
+            &req,
+            &regions,
+            request.density_mask.clone(),
+            request.density_layers.clone(),
+            request.fixed_fit,
+            request.sub_cut_dots,
+            request.dot_records,
+            request.probe_limit,
+            request.free_pages.clone(),
+            stop,
+            request.dot_bright,
+            request.dot_occ_first,
+            cover,
+            decide_by,
+            request.fit_rank.clone(),
+        );
         if plan.stats.cancelled {
             return Err("render cancelled: the plan's generation is superseded".to_string());
         }
         let plan_us = elapsed_us(started);
-        // a request whose every visible layer is summarized (and
-        // pruned) plans no working cell at all; the scene still needs
-        // the top so the summary planes have a frame to paint into.
-        // So does a view root that holds none of the visible layers, or
-        // lies wholly under the cut (the file's top holds every layer;
-        // a root need not - found 2026-09-30 on the synthetic chip:
-        // `invalid plan: top is missing` instead of an empty picture, and
-        // the density stack's pass 2, which plans the top plane's layer
-        // alone, ran into the same error under most roots).
+        // All layers off, an empty viewport, or fully summarized geometry
+        // legitimately selects no working cells. The renderer still requires
+        // a root, including for summary planes. So does a view root that
+        // holds none of the visible layers, or lies wholly under the cut (the
+        // file's top holds every layer; a root need not - found 2026-09-30 on
+        // the synthetic chip: `invalid plan: top is missing` instead of an
+        // empty picture, and the density stack's pass 2, which plans the top
+        // plane's layer alone, ran into the same error under most roots).
         // A jobdeck never has a root: its sub-cut source stays a skipped pass.
         // So does pass 2's plan of a side over its regions (they are pass 2's
         // alone) whose layers the top never holds - a layer of the file no
@@ -1651,7 +1957,12 @@ impl Cache {
         // (PlanRequest::empty_top: the viewer's frames - a layer the file
         // names and no cell holds, alone on, is an empty picture; user
         // 2026-10-04) - a jobdeck's source's does not.
-        if plan.wcells.is_empty() && (request.empty_top || !request.summary_layers.is_empty() || request.root.is_some() || !request.regions.is_empty()) {
+        if plan.wcells.is_empty()
+            && (request.empty_top
+                || !request.summary_layers.is_empty()
+                || request.root.is_some()
+                || !request.regions.is_empty())
+        {
             plan.wcells.push(floe_vfs::hier::WsCell {
                 key: plan.top,
                 pages: Vec::new(),
@@ -1712,33 +2023,52 @@ impl Cache {
     }
 
     pub fn plan_with_representatives_options(
-        &self, request: &PlanRequest,
+        &self,
+        request: &PlanRequest,
         options: floe_vfs::representatives::TreeOptions,
         cancelled: impl Fn() -> bool,
     ) -> Result<PlannedView, String> {
         let mut planned = self.plan(request)?;
         let req = self.view_request(request)?;
-        if request.exact || req.cut_dbu <= 0 || !req.page_hairline || req.page_reps || req.sub_cut_wash {
+        if request.exact
+            || req.cut_dbu <= 0
+            || !req.page_hairline
+            || req.page_reps
+            || req.sub_cut_wash
+        {
             return Ok(planned);
         }
         // Defer the lazy file open (including its OVM checksum) if occupancy
         // already supplies every visible layer. Keep the OnceLock uninitialised
         // so a later near view can still open the representatives.
-        if req.vis.iter().enumerate().all(|(i, bits)| bits & !req.page_skip.get(i).copied().unwrap_or(0) == 0) {
+        if req
+            .vis
+            .iter()
+            .enumerate()
+            .all(|(i, bits)| bits & !req.page_skip.get(i).copied().unwrap_or(0) == 0)
+        {
             return Ok(planned);
         }
         let plan_us_before_reps = planned.stats.plan_us;
         let started = Instant::now();
         let file = self.representatives.get_or_init(|| {
-            if !Path::new(&self.dir).join("design.ovr").exists() { return None; }
+            if !Path::new(&self.dir).join("design.ovr").exists() {
+                return None;
+            }
             match floe_vfs::representatives::File::open(&self.dir, &self.vfs.ovm) {
                 Ok(file) => Some(std::sync::Arc::new(file)),
-                Err(error) => { eprintln!("[render] ignoring design.ovr: {}", error); None }
+                Err(error) => {
+                    eprintln!("[render] ignoring design.ovr: {}", error);
+                    None
+                }
             }
         });
         if let Some(file) = file.as_ref().filter(|f| f.version() == 3) {
             planned.representative_stream = Some(floe_vfs::representatives::TreeStream::new(
-                std::sync::Arc::clone(file), &req, options));
+                std::sync::Arc::clone(file),
+                &req,
+                options,
+            ));
             planned.advance_representatives(cancelled)?;
         } else if let Some(file) = file.as_ref().filter(|f| f.version() == 2) {
             // OVR2: the samples as shapes, carried apart from the washes
@@ -1752,8 +2082,14 @@ impl Cache {
                     cell.reps.extend(prims);
                 } else {
                     planned.plan.wcells.push(floe_vfs::hier::WsCell {
-                        key: top, pages: Vec::new(), page_levels: Vec::new(), insts: Vec::new(),
-                        frames: Vec::new(), washes: Vec::new(), dot_counts: Vec::new(), reps: prims,
+                        key: top,
+                        pages: Vec::new(),
+                        page_levels: Vec::new(),
+                        insts: Vec::new(),
+                        frames: Vec::new(),
+                        washes: Vec::new(),
+                        dot_counts: Vec::new(),
+                        reps: prims,
                     });
                     planned.plan.stats.wc_cells += 1;
                     planned.summary.wc_cells += 1;
@@ -1770,8 +2106,14 @@ impl Cache {
                     cell.washes.extend(points);
                 } else {
                     planned.plan.wcells.push(floe_vfs::hier::WsCell {
-                        key: top, pages: Vec::new(), page_levels: Vec::new(), insts: Vec::new(),
-                        frames: Vec::new(), washes: points, dot_counts: Vec::new(), reps: Vec::new(),
+                        key: top,
+                        pages: Vec::new(),
+                        page_levels: Vec::new(),
+                        insts: Vec::new(),
+                        frames: Vec::new(),
+                        washes: points,
+                        dot_counts: Vec::new(),
+                        reps: Vec::new(),
                     });
                     planned.plan.stats.wc_cells += 1;
                     planned.summary.wc_cells += 1;
@@ -1805,7 +2147,7 @@ impl Cache {
                 pages: Vec::new(),
                 page_prio: Vec::new(),
                 stats: Default::default(),
-                            explain: Vec::new(),
+                explain: Vec::new(),
             },
             summary: PlanSummary::default(),
             stats: RenderStats::default(),
@@ -2211,7 +2553,12 @@ impl DecodePool<'_> {
                 let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     decode_payload(&payload, self.guard)
                 }))
-                .unwrap_or_else(|_| Err(format!("page decode worker panicked on page {}", payload.page_id)));
+                .unwrap_or_else(|_| {
+                    Err(format!(
+                        "page decode worker panicked on page {}",
+                        payload.page_id
+                    ))
+                });
                 let page_us = elapsed_us(page_started);
                 if let Ok(mut outputs) = self.outputs.lock() {
                     outputs.push((index, decoded, page_us));
@@ -2324,9 +2671,7 @@ fn decode_payload(
     // The build probes the guard every few thousand records so a
     // stale generation stops burning CPU inside a large page.
     let index_started = Instant::now();
-    let index = crate::PageIndex::build_cancellable(&doc, &mut || {
-        check_decode_cancelled(guard)
-    })?;
+    let index = crate::PageIndex::build_cancellable(&doc, &mut || check_decode_cancelled(guard))?;
     let index_us = elapsed_us(index_started);
     let mut page = DecodedPage {
         page_id: payload.page_id,
@@ -2382,14 +2727,32 @@ mod tests {
     fn page_of(rects: Vec<floe_oasis::doc::RectRec>) -> DecodedPage {
         let doc = Doc {
             unit: 1000.0,
-            cells: vec![floe_oasis::doc::Cell { rects, ..Default::default() }],
+            cells: vec![floe_oasis::doc::Cell {
+                rects,
+                ..Default::default()
+            }],
             top: 0,
             layer_order: Vec::new(),
             norm_s: 0.0,
             layer_names: std::collections::HashMap::new(),
             layer_aliases: std::collections::HashMap::new(),
         };
-        DecodedPage { page_id: 0, layer_idx: 0, bbox: BBox { x0: 0, y0: 0, x1: 10, y1: 10 }, encoded_bytes: 1, records: 0, members: 0, index: crate::PageIndex::build(&doc), doc, grown_bytes: 0 }
+        DecodedPage {
+            page_id: 0,
+            layer_idx: 0,
+            bbox: BBox {
+                x0: 0,
+                y0: 0,
+                x1: 10,
+                y1: 10,
+            },
+            encoded_bytes: 1,
+            records: 0,
+            members: 0,
+            index: crate::PageIndex::build(&doc),
+            doc,
+            grown_bytes: 0,
+        }
     }
 
     #[test]
@@ -2404,17 +2767,44 @@ mod tests {
         // not part them (OASIS: the modal repetition stays).
         let offsets: Vec<(i64, i64)> = (0..10_000).map(|k| (k * 7, k * 3)).collect();
         let list: Arc<[(i64, i64)]> = offsets.clone().into();
-        let rect = |rep: Rep| floe_oasis::doc::RectRec { layer: 1, dt: 0, x: 0, y: 0, w: 10, h: 10, rep };
+        let rect = |rep: Rep| floe_oasis::doc::RectRec {
+            layer: 1,
+            dt: 0,
+            x: 0,
+            y: 0,
+            w: 10,
+            h: 10,
+            rep,
+        };
         let list_bytes = 10_000 * std::mem::size_of::<(i64, i64)>() as u64;
         let plain = page_of((0..40).map(|_| rect(Rep::One)).collect()).estimated_bytes();
-        let shared = page_of((0..40).map(|_| rect(Rep::Pts(Arc::clone(&list)))).collect()).estimated_bytes();
-        let apart = page_of((0..40).map(|_| rect(Rep::Pts(offsets.clone().into()))).collect()).estimated_bytes();
+        let shared =
+            page_of((0..40).map(|_| rect(Rep::Pts(Arc::clone(&list)))).collect()).estimated_bytes();
+        let apart = page_of(
+            (0..40)
+                .map(|_| rect(Rep::Pts(offsets.clone().into())))
+                .collect(),
+        )
+        .estimated_bytes();
         // (the lists' chunk index beside them: one table a list)
-        assert!((plain + list_bytes..plain + list_bytes + list_bytes / 4).contains(&shared), "{shared} for {plain} + {list_bytes}");
+        assert!(
+            (plain + list_bytes..plain + list_bytes + list_bytes / 4).contains(&shared),
+            "{shared} for {plain} + {list_bytes}"
+        );
         assert!(apart >= plain + 40 * list_bytes, "{apart}");
         let own: Arc<[(i64, i64)]> = offsets.clone().into();
-        let parted = page_of(vec![rect(Rep::Pts(Arc::clone(&list))), rect(Rep::One), rect(Rep::Pts(Arc::clone(&list))), rect(Rep::Pts(Arc::clone(&own))), rect(Rep::Pts(own))]).estimated_bytes();
-        assert!(parted >= 2 * list_bytes && parted < 2 * list_bytes + list_bytes / 2, "{parted} for two lists");
+        let parted = page_of(vec![
+            rect(Rep::Pts(Arc::clone(&list))),
+            rect(Rep::One),
+            rect(Rep::Pts(Arc::clone(&list))),
+            rect(Rep::Pts(Arc::clone(&own))),
+            rect(Rep::Pts(own)),
+        ])
+        .estimated_bytes();
+        assert!(
+            parted >= 2 * list_bytes && parted < 2 * list_bytes + list_bytes / 2,
+            "{parted} for two lists"
+        );
     }
 
     #[test]
@@ -2423,7 +2813,15 @@ mod tests {
         // to as much as twice what they hold, and the page's charge counts
         // what they hold room for (a page of 33 k rectangles: 216 B a record
         // for its 96, past the planner's 192)
-        let rect = floe_oasis::doc::RectRec { layer: 1, dt: 0, x: 0, y: 0, w: 10, h: 10, rep: Rep::One };
+        let rect = floe_oasis::doc::RectRec {
+            layer: 1,
+            dt: 0,
+            x: 0,
+            y: 0,
+            w: 10,
+            h: 10,
+            rep: Rep::One,
+        };
         let mut rects = Vec::new();
         for _ in 0..33_000 {
             rects.push(rect.clone());
@@ -2433,8 +2831,19 @@ mod tests {
         let mut doc = page_of(rects).doc;
         shrink_records(&mut doc);
         assert_eq!(doc.cells[0].rects.capacity(), 33_000);
-        let (before, after) = (page_of({ let mut v = Vec::with_capacity(grown); v.extend((0..33_000).map(|_| rect.clone())); v }).estimated_bytes(), page_of(doc.cells.remove(0).rects).estimated_bytes());
-        assert!(after < before && after < 33_000 * 192, "{after} against {before}: under the planner's 192 B a record");
+        let (before, after) = (
+            page_of({
+                let mut v = Vec::with_capacity(grown);
+                v.extend((0..33_000).map(|_| rect.clone()));
+                v
+            })
+            .estimated_bytes(),
+            page_of(doc.cells.remove(0).rects).estimated_bytes(),
+        );
+        assert!(
+            after < before && after < 33_000 * 192,
+            "{after} against {before}: under the planner's 192 B a record"
+        );
     }
 
     #[test]
@@ -2470,7 +2879,12 @@ mod tests {
                 seq: 0,
                 lod: 0,
                 codec: CODEC_OASIS,
-                bbox: BBox { x0: 0, y0: 0, x1: 20_000, y1: 10 },
+                bbox: BBox {
+                    x0: 0,
+                    y0: 0,
+                    x1: 20_000,
+                    y1: 10,
+                },
                 file_off: 0,
                 csize: w.out.len() as u32,
                 usize_: w.out.len() as u32,
@@ -2496,10 +2910,21 @@ mod tests {
         } else {
             // FLOE_RUST_DECODE_SHRINK=off: as read, one charge
             assert_eq!(rects.capacity(), 1_024);
-            assert_eq!((page.grown_bytes, page.grown_charge()), (0, page.estimated_bytes()));
+            assert_eq!(
+                (page.grown_bytes, page.grown_charge()),
+                (0, page.estimated_bytes())
+            );
         }
         // a page built as it is (a test's, or with the lists as read) is charged as it is
-        let plain = page_of(vec![floe_oasis::doc::RectRec { layer: 1, dt: 0, x: 0, y: 0, w: 10, h: 10, rep: Rep::One }]);
+        let plain = page_of(vec![floe_oasis::doc::RectRec {
+            layer: 1,
+            dt: 0,
+            x: 0,
+            y: 0,
+            w: 10,
+            h: 10,
+            rep: Rep::One,
+        }]);
         assert_eq!(plain.grown_charge(), plain.estimated_bytes());
     }
 

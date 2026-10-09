@@ -800,6 +800,26 @@ pub fn raise_open_file_limit() {
     }
 }
 
+/// Whether a run rebuilds `key`'s target whole now - its `.build` and its
+/// `.use` both held - said as a refused opening reader is told
+/// (floe/indexlock.py `state(...).opening_refusal()`, which a deck's source
+/// catalog asks of every source): a probe, one non-blocking try on each
+/// file, that creates no file and keeps no lock (FLOE_LOCK=off: none).
+pub fn opening_refusal(key: &Key) -> Option<Busy> {
+    if disabled() {
+        return None;
+    }
+    let held = |path: &Path| match File::open(path) {
+        Ok(file) => matches!(file.try_lock_shared(), Err(TryLockError::WouldBlock)),
+        Err(_) => false,
+    };
+    let build = key.dir.join(format!("{}.build", key.name));
+    if !held(&build) || !held(&key.dir.join(format!("{}.use", key.name))) {
+        return None;
+    }
+    Some(Busy::Indexing { subject: key.subject.clone(), holder: read_holder(&build), opening: true })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -809,6 +829,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn an_opening_refusal_is_probed_without_a_lock_or_a_file() {
+        let dir = scratch("probe");
+        let k = key(Kind::Vfs, dir.join(".Z.oas.ice").to_str().unwrap());
+        // nothing there: no refusal, and the probe made no lock folder
+        assert!(opening_refusal(&k).is_none());
+        assert!(!k.dir.exists());
+        // an addition (.build alone) lets readers open
+        let w = writer(&k, Mode::Additive, "hier").unwrap();
+        assert!(opening_refusal(&k).is_none());
+        drop(w);
+        // a whole rebuild (.build and .use) refuses them, naming the run
+        let w = writer(&k, Mode::Full, "floe-index vfs").unwrap();
+        match opening_refusal(&k) {
+            Some(Busy::Indexing { opening: true, holder: Some(h), .. }) => assert_eq!(h.what, "floe-index vfs"),
+            other => panic!("{other:?}"),
+        }
+        // the probe kept no lock: the run's own readers check still sees it
+        assert!(opening_refusal(&k).is_some());
+        drop(w);
+        assert!(opening_refusal(&k).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

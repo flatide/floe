@@ -222,7 +222,11 @@ fn for_each_visible_offset_impl(
 /// inclusive (i0, i1, j0, j1) - the same `grid_ranges` call, so a subset of it
 /// in the walk's order is a subset of the walk. None for another repetition,
 /// an empty view, or a degenerate 2-D grid (the walk keeps its own guard).
-pub(crate) fn visible_grid_range(rep: &Rep, base_bbox: BBox, local_view: BBox) -> Option<(i64, i64, i64, i64)> {
+pub(crate) fn visible_grid_range(
+    rep: &Rep,
+    base_bbox: BBox,
+    local_view: BBox,
+) -> Option<(i64, i64, i64, i64)> {
     let Rep::Grid { na, nb, va, vb } = rep else {
         return None;
     };

@@ -1,7 +1,5 @@
 use crate::raster::checked_path_outline;
-use crate::repetition::{
-    for_each_visible_offset_query,
-};
+use crate::repetition::for_each_visible_offset_query;
 use crate::scene::FrameScene;
 use crate::transform::OrthoTransform;
 use crate::RenderCancellation;
@@ -19,8 +17,7 @@ const QUERY_STOP: &str = "__floe_query_cap__";
 /// capped. Exhausting it therefore surfaces as a real error (the GUI
 /// shows it) instead of the silent empty result that made dense chips
 /// "no object here" everywhere.
-const QUERY_MEMBER_LIMIT: &str =
-    "query member limit exceeded: overly dense query region";
+const QUERY_MEMBER_LIMIT: &str = "query member limit exceeded: overly dense query region";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SceneQueryRequest {
@@ -99,6 +96,8 @@ pub struct ScenePickCandidate {
     pub bbox: BBox,
     /// KLayout-compatible clockwise, lexicographically anchored hull.
     pub points: Vec<(i64, i64)>,
+    /// A truncated outline is a prefix; never close it as a full polygon.
+    pub points_truncated: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -253,6 +252,7 @@ fn pick_scene_impl(
                     cell_id: shape.cell_id,
                     area,
                     bbox: polygon_bbox(&shape.points).expect("query polygon has a bbox"),
+                    points_truncated: shape.points.len() > 512,
                     points: shape.points.into_iter().take(512).collect(),
                 },
             ));
@@ -545,7 +545,9 @@ fn visit_cell_layer(
 
         for &(wash_layer_idx, wash) in &cell.washes {
             // Zero-area washes encode OVR display points, never query shapes.
-            if wash.x0 == wash.x1 && wash.y0 == wash.y1 { continue; }
+            if wash.x0 == wash.x1 && wash.y0 == wash.y1 {
+                continue;
+            }
             if wash_layer_idx != layer.index {
                 continue;
             }
@@ -874,7 +876,7 @@ mod tests {
             pages: vec![page_id],
             page_prio: vec![0],
             stats: HierStats::default(),
-                    explain: Vec::new(),
+            explain: Vec::new(),
         };
         let mut bounds = BTreeMap::new();
         bounds.insert(top, page.bbox);
@@ -898,7 +900,7 @@ mod tests {
             pages: vec![0, 1],
             page_prio: vec![0, 1],
             stats: HierStats::default(),
-                    explain: Vec::new(),
+            explain: Vec::new(),
         };
         let mut bounds = BTreeMap::new();
         bounds.insert(
@@ -1032,11 +1034,9 @@ mod tests {
         // the current one answers exactly like the plain entry point
         let frontier = RenderCancellation::new();
         frontier.cancel_before(2);
-        let stale = pick_scene_cancellable(&scene, &request(10, 5), 0, 1, &frontier)
-            .unwrap_err();
+        let stale = pick_scene_cancellable(&scene, &request(10, 5), 0, 1, &frontier).unwrap_err();
         assert!(stale.contains("cancelled"), "{stale}");
-        let current =
-            pick_scene_cancellable(&scene, &request(10, 5), 0, 2, &frontier).unwrap();
+        let current = pick_scene_cancellable(&scene, &request(10, 5), 0, 2, &frontier).unwrap();
         assert_eq!(current.count, first.count);
         assert_eq!(current.candidate, first.candidate);
         assert!(snap_scene_cancellable(&scene, &request(1, 1), 1, &frontier)
@@ -1159,7 +1159,7 @@ mod tests {
             pages: vec![0, 1],
             page_prio: vec![0, 1],
             stats: HierStats::default(),
-                    explain: Vec::new(),
+            explain: Vec::new(),
         };
         let mut bounds = BTreeMap::new();
         bounds.insert(

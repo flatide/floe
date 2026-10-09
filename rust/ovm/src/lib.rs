@@ -52,7 +52,10 @@ pub const VERSION: u32 = 8;
 pub const BVH_MASK_MIN_PLACES: u64 = 64;
 
 fn bvh_mask_min_places() -> u64 {
-    std::env::var("FLOE_INDEX_BVH_MASK_MIN").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(BVH_MASK_MIN_PLACES)
+    std::env::var("FLOE_INDEX_BVH_MASK_MIN")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(BVH_MASK_MIN_PLACES)
 }
 
 /// "no layer mask recorded" for a BVH node
@@ -293,15 +296,13 @@ const N_SECTIONS: usize = 14;
 /// field. Builder-side only - the reader uses checked arithmetic
 /// with "corrupt cache" errors instead.
 pub fn narrow_u32(v: u64, field: &str) -> u32 {
-    u32::try_from(v).unwrap_or_else(|_| {
-        panic!("limit exceeded: {} = {} (max {})", field, v, u32::MAX)
-    })
+    u32::try_from(v)
+        .unwrap_or_else(|_| panic!("limit exceeded: {} = {} (max {})", field, v, u32::MAX))
 }
 
 pub fn narrow_u16(v: u64, field: &str) -> u16 {
-    u16::try_from(v).unwrap_or_else(|_| {
-        panic!("limit exceeded: {} = {} (max {})", field, v, u16::MAX)
-    })
+    u16::try_from(v)
+        .unwrap_or_else(|_| panic!("limit exceeded: {} = {} (max {})", field, v, u16::MAX))
 }
 
 /// checked record-counter increment (u32 wrap would silently corrupt
@@ -371,11 +372,7 @@ impl BBox {
         }
     }
     pub fn contains_pt(&self, x: i64, y: i64) -> bool {
-        !self.is_empty()
-            && x >= self.x0
-            && x <= self.x1
-            && y >= self.y0
-            && y <= self.y1
+        !self.is_empty() && x >= self.x0 && x <= self.x1 && y >= self.y0 && y <= self.y1
     }
 }
 
@@ -476,13 +473,7 @@ fn enc_pbvh(
     assert_eq!(out.len() % PBVH_LEN, 0, "pbvh stride");
 }
 
-fn enc_prange(
-    out: &mut Vec<u8>,
-    layer_idx: u32,
-    page_lo: u32,
-    page_count: u32,
-    pbvh_root: u32,
-) {
+fn enc_prange(out: &mut Vec<u8>, layer_idx: u32, page_lo: u32, page_count: u32, pbvh_root: u32) {
     p32(out, layer_idx);
     p32(out, page_lo);
     p32(out, page_count);
@@ -548,28 +539,9 @@ impl CellSink {
         idx
     }
 
-    pub fn place(
-        &mut self,
-        child: u32,
-        x: i64,
-        y: i64,
-        rot: u8,
-        flip: bool,
-        rep: &Rep,
-    ) -> u64 {
+    pub fn place(&mut self, child: u32, x: i64, y: i64, rot: u8, flip: bool, rep: &Rep) -> u64 {
         match rep {
-            Rep::One => self.place_raw(
-                child,
-                x,
-                y,
-                rot,
-                flip,
-                0,
-                1,
-                1,
-                (0, 0),
-                (0, 0),
-            ),
+            Rep::One => self.place_raw(child, x, y, rot, flip, 0, 1, 1, (0, 0), (0, 0)),
             Rep::Grid { na, nb, va, vb } => self.place_raw(
                 child,
                 x,
@@ -599,23 +571,11 @@ impl CellSink {
         prep: &PtsPrepared,
     ) -> u64 {
         let off = self.pts_pool.len() as u64;
-        let off_i64 = i64::try_from(off).unwrap_or_else(|_| {
-            panic!("limit exceeded: pts pool offset = {}", off)
-        });
+        let off_i64 = i64::try_from(off)
+            .unwrap_or_else(|_| panic!("limit exceeded: pts pool offset = {}", off));
         enc_pts_entry(&mut self.pts_pool, prep);
         let count = narrow_u32(prep.pts.len() as u64, "pts count");
-        self.place_raw(
-            child,
-            x,
-            y,
-            rot,
-            flip,
-            2,
-            count,
-            1,
-            (off_i64, 0),
-            (0, 0),
-        )
+        self.place_raw(child, x, y, rot, flip, 2, count, 1, (off_i64, 0), (0, 0))
     }
 
     pub fn bvh_node(
@@ -628,8 +588,7 @@ impl CellSink {
         max_min: u32,
     ) -> u32 {
         let idx = self.n_bvh;
-        enc_bvh(&mut self.bvh, bbox, first, count, leaf, max_dim,
-                max_min);
+        enc_bvh(&mut self.bvh, bbox, first, count, leaf, max_dim, max_min);
         bump(&mut self.n_bvh, "bvh");
         idx
     }
@@ -645,34 +604,14 @@ impl CellSink {
         max_h: u64,
     ) -> u32 {
         let idx = self.n_pbvh;
-        enc_pbvh(
-            &mut self.pbvh,
-            bbox,
-            first,
-            count,
-            leaf,
-            max_w,
-            max_h,
-        );
+        enc_pbvh(&mut self.pbvh, bbox, first, count, leaf, max_w, max_h);
         bump(&mut self.n_pbvh, "pbvh");
         idx
     }
 
-    pub fn prange(
-        &mut self,
-        layer_idx: u32,
-        page_lo: u32,
-        page_count: u32,
-        pbvh_root: u32,
-    ) -> u32 {
+    pub fn prange(&mut self, layer_idx: u32, page_lo: u32, page_count: u32, pbvh_root: u32) -> u32 {
         let idx = self.n_pranges;
-        enc_prange(
-            &mut self.pranges,
-            layer_idx,
-            page_lo,
-            page_count,
-            pbvh_root,
-        );
+        enc_prange(&mut self.pranges, layer_idx, page_lo, page_count, pbvh_root);
         bump(&mut self.n_pranges, "prange");
         idx
     }
@@ -733,7 +672,12 @@ pub fn morton_place(key: u128, min_x: i64, min_y: i64) -> (i64, i64) {
 pub fn prepare_pts(src: &[(i64, i64)]) -> PtsPrepared {
     let mut extent = BBox::EMPTY;
     for &(x, y) in src {
-        extent.grow(&BBox { x0: x, y0: y, x1: x, y1: y });
+        extent.grow(&BBox {
+            x0: x,
+            y0: y,
+            x1: x,
+            y1: y,
+        });
     }
     let mut keyed: Vec<(u128, u32)> = src
         .iter()
@@ -746,19 +690,27 @@ pub fn prepare_pts(src: &[(i64, i64)]) -> PtsPrepared {
         })
         .collect();
     keyed.sort_unstable();
-    let pts: Vec<(i64, i64)> =
-        keyed.iter().map(|&(_, i)| src[i as usize]).collect();
+    let pts: Vec<(i64, i64)> = keyed.iter().map(|&(_, i)| src[i as usize]).collect();
     let chunks = pts
         .chunks(PTS_CHUNK)
         .map(|c| {
             let mut b = BBox::EMPTY;
             for &(x, y) in c {
-                b.grow(&BBox { x0: x, y0: y, x1: x, y1: y });
+                b.grow(&BBox {
+                    x0: x,
+                    y0: y,
+                    x1: x,
+                    y1: y,
+                });
             }
             b
         })
         .collect();
-    PtsPrepared { extent, chunks, pts }
+    PtsPrepared {
+        extent,
+        chunks,
+        pts,
+    }
 }
 
 // ----------------------------------------------------------- builder
@@ -803,12 +755,7 @@ pub struct Builder {
 }
 
 impl Builder {
-    pub fn new(
-        unit: f64,
-        src_size: u64,
-        src_mtime: u64,
-        n_layers_hint: usize,
-    ) -> Builder {
+    pub fn new(unit: f64, src_size: u64, src_mtime: u64, n_layers_hint: usize) -> Builder {
         Builder {
             unit,
             src_size,
@@ -876,10 +823,7 @@ impl Builder {
         if let Some(&i) = self.bs_map.get(bits) {
             return i;
         }
-        let i = narrow_u32(
-            (self.bitsets.len() / self.bs_width) as u64,
-            "bitset count",
-        );
+        let i = narrow_u32((self.bitsets.len() / self.bs_width) as u64, "bitset count");
         self.bitsets.extend_from_slice(bits);
         self.bs_map.insert(bits.to_vec(), i);
         i
@@ -890,11 +834,7 @@ impl Builder {
     /// self-describing - kind/leaf flags select the base). page_base
     /// is the global index the cell's first page WILL get. Returns
     /// the section bases for the caller's cell record.
-    pub fn append_cell_sink(
-        &mut self,
-        sink: &CellSink,
-        page_base: u64,
-    ) -> SinkBases {
+    pub fn append_cell_sink(&mut self, sink: &CellSink, page_base: u64) -> SinkBases {
         let bases = SinkBases {
             place_start: self.n_places,
             bvh_start: self.n_bvh,
@@ -907,25 +847,16 @@ impl Builder {
         let at = self.places.len();
         self.places.extend_from_slice(&sink.places);
         if pool_base != 0 {
-            for rec in
-                self.places[at..].chunks_exact_mut(PLACE_LEN)
-            {
+            for rec in self.places[at..].chunks_exact_mut(PLACE_LEN) {
                 if rec[6] != 2 {
                     continue;
                 }
-                let old = i64::from_le_bytes(
-                    rec[32..40].try_into().unwrap(),
-                );
+                let old = i64::from_le_bytes(rec[32..40].try_into().unwrap());
                 let moved = (old as u64)
                     .checked_add(pool_base)
                     .expect("limit exceeded: pts pool offset");
-                let ni =
-                    i64::try_from(moved).unwrap_or_else(|_| {
-                        panic!(
-                            "limit exceeded: pts pool offset = {}",
-                            moved
-                        )
-                    });
+                let ni = i64::try_from(moved)
+                    .unwrap_or_else(|_| panic!("limit exceeded: pts pool offset = {}", moved));
                 rec[32..40].copy_from_slice(&ni.to_le_bytes());
             }
         }
@@ -935,20 +866,12 @@ impl Builder {
         let at = self.bvh.len();
         self.bvh.extend_from_slice(&sink.bvh);
         for rec in self.bvh[at..].chunks_exact_mut(BVH_LEN) {
-            let first =
-                u32::from_le_bytes(rec[32..36].try_into().unwrap());
-            let leaf =
-                u16::from_le_bytes(rec[38..40].try_into().unwrap());
+            let first = u32::from_le_bytes(rec[32..36].try_into().unwrap());
+            let leaf = u16::from_le_bytes(rec[38..40].try_into().unwrap());
             let nf = if leaf != 0 {
-                narrow_u32(
-                    bases.place_start + first as u64,
-                    "place index",
-                )
+                narrow_u32(bases.place_start + first as u64, "place index")
             } else {
-                narrow_u32(
-                    bases.bvh_start as u64 + first as u64,
-                    "bvh index",
-                )
+                narrow_u32(bases.bvh_start as u64 + first as u64, "bvh index")
             };
             rec[32..36].copy_from_slice(&nf.to_le_bytes());
         }
@@ -956,15 +879,11 @@ impl Builder {
         let at = self.pbvh.len();
         self.pbvh.extend_from_slice(&sink.pbvh);
         for rec in self.pbvh[at..].chunks_exact_mut(PBVH_LEN) {
-            let first =
-                u32::from_le_bytes(rec[32..36].try_into().unwrap());
+            let first = u32::from_le_bytes(rec[32..36].try_into().unwrap());
             let nf = if rec[38] != 0 {
                 narrow_u32(page_base + first as u64, "page index")
             } else {
-                narrow_u32(
-                    bases.pbvh_start as u64 + first as u64,
-                    "pbvh index",
-                )
+                narrow_u32(bases.pbvh_start as u64 + first as u64, "pbvh index")
             };
             rec[32..36].copy_from_slice(&nf.to_le_bytes());
         }
@@ -972,20 +891,13 @@ impl Builder {
         // not PBVH_NONE
         let at = self.pranges.len();
         self.pranges.extend_from_slice(&sink.pranges);
-        for rec in self.pranges[at..].chunks_exact_mut(PRANGE_LEN)
-        {
-            let lo =
-                u32::from_le_bytes(rec[4..8].try_into().unwrap());
-            let nl =
-                narrow_u32(page_base + lo as u64, "page index");
+        for rec in self.pranges[at..].chunks_exact_mut(PRANGE_LEN) {
+            let lo = u32::from_le_bytes(rec[4..8].try_into().unwrap());
+            let nl = narrow_u32(page_base + lo as u64, "page index");
             rec[4..8].copy_from_slice(&nl.to_le_bytes());
-            let root =
-                u32::from_le_bytes(rec[12..16].try_into().unwrap());
+            let root = u32::from_le_bytes(rec[12..16].try_into().unwrap());
             if root != PBVH_NONE {
-                let nr = narrow_u32(
-                    bases.pbvh_start as u64 + root as u64,
-                    "pbvh index",
-                );
+                let nr = narrow_u32(bases.pbvh_start as u64 + root as u64, "pbvh index");
                 rec[12..16].copy_from_slice(&nr.to_le_bytes());
             }
         }
@@ -1039,18 +951,9 @@ impl Builder {
     /// appends one placement; returns its global index. Rep::Pts is
     /// Morton-prepared internally - the parallel build path prepares
     /// ahead and calls place_pts directly.
-    pub fn place(
-        &mut self,
-        child: u32,
-        x: i64,
-        y: i64,
-        rot: u8,
-        flip: bool,
-        rep: &Rep,
-    ) -> u64 {
+    pub fn place(&mut self, child: u32, x: i64, y: i64, rot: u8, flip: bool, rep: &Rep) -> u64 {
         match rep {
-            Rep::One => self
-                .place_raw(child, x, y, rot, flip, 0, 1, 1, (0, 0), (0, 0)),
+            Rep::One => self.place_raw(child, x, y, rot, flip, 0, 1, 1, (0, 0), (0, 0)),
             Rep::Grid { na, nb, va, vb } => self.place_raw(
                 child,
                 x,
@@ -1084,23 +987,11 @@ impl Builder {
         prep: &PtsPrepared,
     ) -> u64 {
         let off = self.pts_pool.len() as u64;
-        let off_i64 = i64::try_from(off).unwrap_or_else(|_| {
-            panic!("limit exceeded: pts pool offset = {}", off)
-        });
+        let off_i64 = i64::try_from(off)
+            .unwrap_or_else(|_| panic!("limit exceeded: pts pool offset = {}", off));
         enc_pts_entry(&mut self.pts_pool, prep);
         let count = narrow_u32(prep.pts.len() as u64, "pts count");
-        self.place_raw(
-            child,
-            x,
-            y,
-            rot,
-            flip,
-            2,
-            count,
-            1,
-            (off_i64, 0),
-            (0, 0),
-        )
+        self.place_raw(child, x, y, rot, flip, 2, count, 1, (off_i64, 0), (0, 0))
     }
 
     /// appends one instance-BVH node; returns its global index.
@@ -1117,8 +1008,7 @@ impl Builder {
         max_min: u32,
     ) -> u32 {
         let idx = self.n_bvh;
-        enc_bvh(&mut self.bvh, bbox, first, count, leaf, max_dim,
-                max_min);
+        enc_bvh(&mut self.bvh, bbox, first, count, leaf, max_dim, max_min);
         bump(&mut self.n_bvh, "bvh");
         idx
     }
@@ -1142,13 +1032,7 @@ impl Builder {
     }
 
     /// appends one (cell,layer) page-run record; returns its index
-    pub fn prange(
-        &mut self,
-        layer_idx: u32,
-        page_lo: u32,
-        page_count: u32,
-        pbvh_root: u32,
-    ) -> u32 {
+    pub fn prange(&mut self, layer_idx: u32, page_lo: u32, page_count: u32, pbvh_root: u32) -> u32 {
         let idx = self.n_pranges;
         enc_prange(&mut self.pranges, layer_idx, page_lo, page_count, pbvh_root);
         bump(&mut self.n_pranges, "prange");
@@ -1223,13 +1107,7 @@ impl Builder {
     }
 
     /// appends one (cell,layer) text-run record; returns its index
-    pub fn trange(
-        &mut self,
-        layer_idx: u32,
-        text_lo: u32,
-        text_count: u32,
-        tbvh_root: u32,
-    ) -> u32 {
+    pub fn trange(&mut self, layer_idx: u32, text_lo: u32, text_count: u32, tbvh_root: u32) -> u32 {
         let idx = self.n_tranges;
         let out = &mut self.tranges;
         p32(out, layer_idx);
@@ -1242,13 +1120,7 @@ impl Builder {
     }
 
     /// appends one text-BVH node; returns its global index
-    pub fn tbvh_node(
-        &mut self,
-        bbox: &BBox,
-        first: u32,
-        count: u16,
-        leaf: bool,
-    ) -> u32 {
+    pub fn tbvh_node(&mut self, bbox: &BBox, first: u32, count: u16, leaf: bool) -> u32 {
         let idx = self.n_tbvh;
         let out = &mut self.tbvh;
         pbox(out, bbox);
@@ -1261,13 +1133,7 @@ impl Builder {
     }
 
     /// appends a text Grid repetition descriptor
-    pub fn trep_grid(
-        &mut self,
-        na: u32,
-        nb: u32,
-        va: (i64, i64),
-        vb: (i64, i64),
-    ) -> u32 {
+    pub fn trep_grid(&mut self, na: u32, nb: u32, va: (i64, i64), vb: (i64, i64)) -> u32 {
         let idx = self.n_treps;
         let out = &mut self.treps;
         out.push(1);
@@ -1291,13 +1157,7 @@ impl Builder {
     /// ordered (i64,i64) pairs live in design.ovt at `pts_off`,
     /// chunk bboxes (PTS_CHUNK offsets each) in TCHUNKS at
     /// [chunk_lo, chunk_lo+chunk_count)
-    pub fn trep_pts(
-        &mut self,
-        count: u32,
-        pts_off: u64,
-        chunk_lo: u32,
-        chunk_count: u32,
-    ) -> u32 {
+    pub fn trep_pts(&mut self, count: u32, pts_off: u64, chunk_lo: u32, chunk_count: u32) -> u32 {
         let idx = self.n_treps;
         let out = &mut self.treps;
         out.push(2);
@@ -1321,11 +1181,7 @@ impl Builder {
     pub fn tchunk(&mut self, bbox: &BBox) -> u32 {
         let idx = self.n_tchunks;
         pbox(&mut self.tchunks, bbox);
-        assert_eq!(
-            self.tchunks.len() % TCHUNK_LEN,
-            0,
-            "tchunk stride"
-        );
+        assert_eq!(self.tchunks.len() % TCHUNK_LEN, 0, "tchunk stride");
         bump(&mut self.n_tchunks, "tchunk");
         idx
     }
@@ -1469,7 +1325,10 @@ impl Builder {
         let mut ranges: Vec<(u32, u32)> = Vec::with_capacity(n_cells);
         for ci in 0..n_cells {
             let rec = &self.cells[ci * CELL_LEN..];
-            cell_masks.push((to_words(&self.bitsets, g32(rec, 108)), to_words(&self.bitsets, g32(rec, 104))));
+            cell_masks.push((
+                to_words(&self.bitsets, g32(rec, 108)),
+                to_words(&self.bitsets, g32(rec, 104)),
+            ));
             ranges.push((g32(rec, 96), g32(rec, 100)));
         }
         struct CellOut {
@@ -1480,10 +1339,12 @@ impl Builder {
         }
         let annotate = |places: &[u8], bvh: &[u8], (start, count): (u32, u32)| -> CellOut {
             let mut table: Vec<Vec<u64>> = Vec::new();
-            let mut index: std::collections::HashMap<Vec<u64>, u32> = std::collections::HashMap::new();
+            let mut index: std::collections::HashMap<Vec<u64>, u32> =
+                std::collections::HashMap::new();
             let mut ids = vec![(LMASK_UNKNOWN, LMASK_UNKNOWN); count as usize];
             // masks and placement counts of the nodes not consumed by their parent yet
-            let mut open: std::collections::HashMap<usize, (Vec<u64>, Vec<u64>, u64)> = std::collections::HashMap::new();
+            let mut open: std::collections::HashMap<usize, (Vec<u64>, Vec<u64>, u64)> =
+                std::collections::HashMap::new();
             let mut intern = |mask: Vec<u64>, table: &mut Vec<Vec<u64>>| -> u32 {
                 if let Some(&id) = index.get(&mask) {
                     return id;
@@ -1496,7 +1357,11 @@ impl Builder {
             // children are appended after their parent: walk backwards
             for local in (0..count as usize).rev() {
                 let node = &bvh[(start as usize + local) * BVH_LEN..];
-                let (first, n, leaf) = (g32(node, 32) as usize, g16(node, 36) as usize, g16(node, 38) != 0);
+                let (first, n, leaf) = (
+                    g32(node, 32) as usize,
+                    g16(node, 36) as usize,
+                    g16(node, 38) != 0,
+                );
                 let (mut rec, mut own, mut below) = (vec![0u64; words], vec![0u64; words], 0u64);
                 for k in first..first + n {
                     if leaf {
@@ -1507,7 +1372,9 @@ impl Builder {
                         }
                         below += 1;
                     } else {
-                        let (r, d, count) = open.remove(&(k - start as usize)).expect("child node before its parent");
+                        let (r, d, count) = open
+                            .remove(&(k - start as usize))
+                            .expect("child node before its parent");
                         for w in 0..words {
                             rec[w] |= r[w];
                             own[w] |= d[w];
@@ -1516,7 +1383,10 @@ impl Builder {
                     }
                 }
                 if below >= min_places {
-                    ids[local] = (intern(rec.clone(), &mut table), intern(own.clone(), &mut table));
+                    ids[local] = (
+                        intern(rec.clone(), &mut table),
+                        intern(own.clone(), &mut table),
+                    );
                 }
                 open.insert(local, (rec, own, below));
             }
@@ -1536,7 +1406,8 @@ impl Builder {
             let outs: Vec<CellOut> = {
                 let (places, bvh) = (&self.places[..], &self.bvh[..]);
                 let next = std::sync::atomic::AtomicUsize::new(at);
-                let slots: Vec<std::sync::Mutex<Option<CellOut>>> = (at..end).map(|_| std::sync::Mutex::new(None)).collect();
+                let slots: Vec<std::sync::Mutex<Option<CellOut>>> =
+                    (at..end).map(|_| std::sync::Mutex::new(None)).collect();
                 std::thread::scope(|scope| {
                     for _ in 0..jobs.min(end - at) {
                         scope.spawn(|| loop {
@@ -1549,14 +1420,21 @@ impl Builder {
                         });
                     }
                 });
-                slots.into_iter().map(|slot| slot.into_inner().unwrap().expect("annotated cell")).collect()
+                slots
+                    .into_iter()
+                    .map(|slot| slot.into_inner().unwrap().expect("annotated cell"))
+                    .collect()
             };
             for (ci, out) in (at..end).zip(outs) {
                 let global: Vec<u32> = out
                     .table
                     .iter()
                     .map(|mask| {
-                        let bytes: Vec<u8> = mask.iter().flat_map(|word| word.to_le_bytes()).take(width).collect();
+                        let bytes: Vec<u8> = mask
+                            .iter()
+                            .flat_map(|word| word.to_le_bytes())
+                            .take(width)
+                            .collect();
                         self.bitset(&bytes)
                     })
                     .collect();
@@ -1573,7 +1451,10 @@ impl Builder {
             }
             at = end;
         }
-        (annotated, (self.bitsets.len() / width.max(1) - before) as u64)
+        (
+            annotated,
+            (self.bitsets.len() / width.max(1) - before) as u64,
+        )
     }
 
     pub fn finish(mut self, ovp_len: u64, ovt_len: u64) -> Vec<u8> {
@@ -1836,8 +1717,18 @@ pub struct TrangeV {
 /// offsets each) live in TCHUNKS.
 #[derive(Debug, Clone, Copy)]
 pub enum TrepV {
-    Grid { na: u32, nb: u32, va: (i64, i64), vb: (i64, i64) },
-    Pts { count: u32, pts_off: u64, chunk_lo: u32, chunk_count: u32 },
+    Grid {
+        na: u32,
+        nb: u32,
+        va: (i64, i64),
+        vb: (i64, i64),
+    },
+    Pts {
+        count: u32,
+        pts_off: u64,
+        chunk_lo: u32,
+        chunk_count: u32,
+    },
 }
 
 impl TrepV {
@@ -1878,8 +1769,7 @@ impl<'a> PtsRef<'a> {
         (lo, (lo + PTS_CHUNK as u32).min(self.count))
     }
     pub fn pt(&self, slot: u32) -> (i64, i64) {
-        let base =
-            40 + self.n_chunks as usize * 32 + slot as usize * 16;
+        let base = 40 + self.n_chunks as usize * 32 + slot as usize * 16;
         (gi64(self.entry, base), gi64(self.entry, base + 8))
     }
 }
@@ -1892,7 +1782,9 @@ pub struct Ovm {
     /// floor(log2) of the placement members below (the frame's item
     /// count, a cut instance being one dot on screen); built lazily
     /// per cell on first use, once per open index
-    pub bvh_member_log2: std::sync::Mutex<std::collections::HashMap<u32, (std::sync::Arc<[u8]>, std::sync::Arc<[u8]>)>>,
+    pub bvh_member_log2: std::sync::Mutex<
+        std::collections::HashMap<u32, (std::sync::Arc<[u8]>, std::sync::Arc<[u8]>)>,
+    >,
     pub data: Backing,
     pub unit: f64,
     pub src_size: u64,
@@ -1954,17 +1846,12 @@ impl std::ops::Deref for Backing {
 /// map to an owned empty buffer - mmap(0) is an error on most
 /// platforms, and a no-text cache is perfectly valid.
 pub fn map_file(path: &str) -> Result<Backing, String> {
-    let f = std::fs::File::open(path)
-        .map_err(|e| format!("open {}: {}", path, e))?;
-    let len = f
-        .metadata()
-        .map_err(|e| format!("{}: {}", path, e))?
-        .len();
+    let f = std::fs::File::open(path).map_err(|e| format!("open {}: {}", path, e))?;
+    let len = f.metadata().map_err(|e| format!("{}: {}", path, e))?.len();
     if len == 0 {
         return Ok(Backing::Vec(Vec::new()));
     }
-    let map = unsafe { memmap2::Mmap::map(&f) }
-        .map_err(|e| format!("mmap {}: {}", path, e))?;
+    let map = unsafe { memmap2::Mmap::map(&f) }.map_err(|e| format!("mmap {}: {}", path, e))?;
     Ok(Backing::Map(map))
 }
 
@@ -2026,7 +1913,10 @@ impl Ovm {
                 }
             }
         }
-        let items_log2: Vec<u8> = items.into_iter().map(|v| v.max(1).ilog2().min(63) as u8).collect();
+        let items_log2: Vec<u8> = items
+            .into_iter()
+            .map(|v| v.max(1).ilog2().min(63) as u8)
+            .collect();
         let t: (std::sync::Arc<[u8]>, std::sync::Arc<[u8]>) = (heaviest.into(), items_log2.into());
         self.bvh_member_log2.lock().unwrap().insert(cell, t.clone());
         t
@@ -2049,10 +1939,8 @@ impl Ovm {
     /// build gates own. Trade-off: reading such damage panics via
     /// accessor asserts instead of failing open cleanly.
     pub fn open(path: &str) -> Result<Ovm, String> {
-        let f = std::fs::File::open(path)
-            .map_err(|e| format!("open {}: {}", path, e))?;
-        let map = unsafe { memmap2::Mmap::map(&f) }
-            .map_err(|e| format!("mmap {}: {}", path, e))?;
+        let f = std::fs::File::open(path).map_err(|e| format!("open {}: {}", path, e))?;
+        let map = unsafe { memmap2::Mmap::map(&f) }.map_err(|e| format!("mmap {}: {}", path, e))?;
         Ovm::validate(Backing::Map(map), false)
     }
 
@@ -2081,10 +1969,9 @@ impl Ovm {
         for (i, s) in secs.iter_mut().enumerate() {
             let o = 88 + i * 16;
             *s = (g64(&data, o), g64(&data, o + 8));
-            let end = s
-                .0
-                .checked_add(s.1)
-                .ok_or_else(|| corrupt(format!("section {} wraps", i)))?;
+            let end =
+                s.0.checked_add(s.1)
+                    .ok_or_else(|| corrupt(format!("section {} wraps", i)))?;
             if end > data.len() as u64 {
                 return Err(corrupt(format!("section {} out of range", i)));
             }
@@ -2119,17 +2006,13 @@ impl Ovm {
         if secs[SEC_PBVH].1 % PBVH_LEN as u64 != 0 {
             return Err(corrupt("pbvh section stride"));
         }
-        let n_pbvh = u32::try_from(secs[SEC_PBVH].1 / PBVH_LEN as u64)
-            .map_err(|_| corrupt("pbvh count"))?;
+        let n_pbvh =
+            u32::try_from(secs[SEC_PBVH].1 / PBVH_LEN as u64).map_err(|_| corrupt("pbvh count"))?;
         let derived = |i: usize, stride: usize, what: &str| {
             if secs[i].1 % stride as u64 != 0 {
-                return Err(corrupt(format!(
-                    "{} section stride",
-                    what
-                )));
+                return Err(corrupt(format!("{} section stride", what)));
             }
-            u32::try_from(secs[i].1 / stride as u64)
-                .map_err(|_| corrupt(format!("{} count", what)))
+            u32::try_from(secs[i].1 / stride as u64).map_err(|_| corrupt(format!("{} count", what)))
         };
         let n_texts = derived(SEC_TEXTS, TEXT_LEN, "text")?;
         let n_tranges = derived(SEC_TRANGES, TRANGE_LEN, "trange")?;
@@ -2180,10 +2063,7 @@ impl Ovm {
             }
             let chk = |s: u32, c: u32, n: u64, what: &str| {
                 if (s as u64) + (c as u64) > n {
-                    return Err(corrupt(format!(
-                        "cell {} {} range",
-                        i, what
-                    )));
+                    return Err(corrupt(format!("cell {} {} range", i, what)));
                 }
                 Ok(())
             };
@@ -2221,28 +2101,19 @@ impl Ovm {
                     if off + 40 > pool_len {
                         return Err(corrupt(format!("place {} pts entry", i)));
                     }
-                    let nch =
-                        g32(&pb[places_need as usize + off as usize..], 32)
-                            as u64;
+                    let nch = g32(&pb[places_need as usize + off as usize..], 32) as u64;
                     let need = 40u64
-                        .checked_add(nch.checked_mul(32).ok_or_else(
-                            || corrupt("pts chunk count wraps"),
-                        )?)
-                        .and_then(|v| {
-                            v.checked_add(count.checked_mul(16)?)
-                        })
+                        .checked_add(
+                            nch.checked_mul(32)
+                                .ok_or_else(|| corrupt("pts chunk count wraps"))?,
+                        )
+                        .and_then(|v| v.checked_add(count.checked_mul(16)?))
                         .ok_or_else(|| corrupt("pts entry wraps"))?;
                     if off + need > pool_len {
-                        return Err(corrupt(format!(
-                            "place {} pts entry range",
-                            i
-                        )));
+                        return Err(corrupt(format!("place {} pts entry range", i)));
                     }
                     if nch != count.div_ceil(PTS_CHUNK as u64) {
-                        return Err(corrupt(format!(
-                            "place {} pts chunk count",
-                            i
-                        )));
+                        return Err(corrupt(format!("place {} pts chunk count", i)));
                     }
                 }
             }
@@ -2273,10 +2144,7 @@ impl Ovm {
         for i in 0..n_pranges as usize {
             let b = &prb[i * PRANGE_LEN..];
             if g32(b, 0) >= n_layers {
-                return Err(corrupt(format!(
-                    "prange {} layer index",
-                    i
-                )));
+                return Err(corrupt(format!("prange {} layer index", i)));
             }
             if g32(b, 4) as u64 + g32(b, 8) as u64 > n_pages as u64 {
                 return Err(corrupt(format!("prange {} page range", i)));
@@ -2293,8 +2161,7 @@ impl Ovm {
             let first = g32(b, 32) as u64;
             let count = g16(b, 36) as u64;
             let leaf = b[38] != 0;
-            let lim =
-                if leaf { n_pages as u64 } else { n_pbvh as u64 };
+            let lim = if leaf { n_pages as u64 } else { n_pbvh as u64 };
             if first + count > lim {
                 return Err(corrupt(format!("pbvh node {} range", i)));
             }
@@ -2309,25 +2176,14 @@ impl Ovm {
             for i in 0..n_tranges as usize {
                 let b = &trb[i * TRANGE_LEN..];
                 if g32(b, 0) >= n_layers {
-                    return Err(corrupt(format!(
-                        "trange {} layer index",
-                        i
-                    )));
+                    return Err(corrupt(format!("trange {} layer index", i)));
                 }
-                if g32(b, 4) as u64 + g32(b, 8) as u64
-                    > n_texts as u64
-                {
-                    return Err(corrupt(format!(
-                        "trange {} text range",
-                        i
-                    )));
+                if g32(b, 4) as u64 + g32(b, 8) as u64 > n_texts as u64 {
+                    return Err(corrupt(format!("trange {} text range", i)));
                 }
                 let root = g32(b, 12);
                 if root != TBVH_NONE && root >= n_tbvh {
-                    return Err(corrupt(format!(
-                        "trange {} tbvh root",
-                        i
-                    )));
+                    return Err(corrupt(format!("trange {} tbvh root", i)));
                 }
             }
             let tvb = sec(SEC_TBVH);
@@ -2335,24 +2191,14 @@ impl Ovm {
                 let b = &tvb[i * TBVH_LEN..];
                 let bb = gbox(b, 0);
                 if bb.x1 < bb.x0 || bb.y1 < bb.y0 {
-                    return Err(corrupt(format!(
-                        "tbvh node {} bbox inverted",
-                        i
-                    )));
+                    return Err(corrupt(format!("tbvh node {} bbox inverted", i)));
                 }
                 let first = g32(b, 32) as u64;
                 let count = g16(b, 36) as u64;
                 let leaf = g16(b, 38) != 0;
-                let lim = if leaf {
-                    n_texts as u64
-                } else {
-                    n_tbvh as u64
-                };
+                let lim = if leaf { n_texts as u64 } else { n_tbvh as u64 };
                 if first + count > lim {
-                    return Err(corrupt(format!(
-                        "tbvh node {} range",
-                        i
-                    )));
+                    return Err(corrupt(format!("tbvh node {} range", i)));
                 }
             }
             let tpb = sec(SEC_TREPS);
@@ -2363,62 +2209,37 @@ impl Ovm {
                 match b[0] {
                     1 => {
                         if na == 0 || nb == 0 {
-                            return Err(corrupt(format!(
-                                "trep {} grid dims",
-                                i
-                            )));
+                            return Err(corrupt(format!("trep {} grid dims", i)));
                         }
                     }
                     2 => {
                         if na == 0 {
-                            return Err(corrupt(format!(
-                                "trep {} pts count",
-                                i
-                            )));
+                            return Err(corrupt(format!("trep {} pts count", i)));
                         }
                         let clo = g32(b, 12) as u64;
                         let ccnt = g32(b, 56) as u64;
                         if clo + ccnt > n_tchunks as u64 {
-                            return Err(corrupt(format!(
-                                "trep {} chunk range",
-                                i
-                            )));
+                            return Err(corrupt(format!("trep {} chunk range", i)));
                         }
                         if ccnt != na.div_ceil(PTS_CHUNK as u64) {
-                            return Err(corrupt(format!(
-                                "trep {} chunk count",
-                                i
-                            )));
+                            return Err(corrupt(format!("trep {} chunk count", i)));
                         }
                         let need = na
                             .checked_mul(16)
                             .and_then(|v| v.checked_add(g64(b, 48)))
-                            .ok_or_else(|| {
-                                corrupt(format!("trep {} pts wraps", i))
-                            })?;
+                            .ok_or_else(|| corrupt(format!("trep {} pts wraps", i)))?;
                         if need > ovt_len {
-                            return Err(corrupt(format!(
-                                "trep {} pts beyond ovt_len",
-                                i
-                            )));
+                            return Err(corrupt(format!("trep {} pts beyond ovt_len", i)));
                         }
                     }
-                    k => {
-                        return Err(corrupt(format!(
-                            "trep {} kind {}",
-                            i, k
-                        )))
-                    }
+                    k => return Err(corrupt(format!("trep {} kind {}", i, k))),
                 }
             }
             let tcb = sec(SEC_TCHUNKS);
             for i in 0..n_tchunks as usize {
                 let bb = gbox(&tcb[i * TCHUNK_LEN..], 0);
                 if bb.x1 < bb.x0 || bb.y1 < bb.y0 {
-                    return Err(corrupt(format!(
-                        "tchunk {} bbox inverted",
-                        i
-                    )));
+                    return Err(corrupt(format!("tchunk {} bbox inverted", i)));
                 }
             }
         }
@@ -2426,8 +2247,7 @@ impl Ovm {
         // pages: owner/layer indexes + payload spans inside the
         // committed ovp
         let pgb = sec(SEC_PAGEDIR);
-        let mut lod_claim =
-            vec![0u8; (n_pages as usize).div_ceil(8)];
+        let mut lod_claim = vec![0u8; (n_pages as usize).div_ceil(8)];
         for i in 0..n_pages as usize {
             let b = &pgb[i * PAGE_LEN..];
             if g32(b, 0) >= n_cells {
@@ -2449,16 +2269,10 @@ impl Ovm {
             // else is a corrupt or future cache, not a silent
             // fallthrough (review finding)
             if b[12] != LOD_EXACT && b[12] != LOD_MERGED {
-                return Err(corrupt(format!(
-                    "page {} lod byte {}",
-                    i, b[12]
-                )));
+                return Err(corrupt(format!("page {} lod byte {}", i, b[12])));
             }
             if b[13] != CODEC_OASIS {
-                return Err(corrupt(format!(
-                    "page {} codec {}",
-                    i, b[13]
-                )));
+                return Err(corrupt(format!("page {} codec {}", i, b[13])));
             }
             // exact -> LOD link: in bounds, target is EXACTLY a
             // MERGED page of the same (cell, layer, seq), claimed
@@ -2469,10 +2283,7 @@ impl Ovm {
             }
             if lp != LOD_PAGE_NONE {
                 if lp >= n_pages {
-                    return Err(corrupt(format!(
-                        "page {} lod link {}",
-                        i, lp
-                    )));
+                    return Err(corrupt(format!("page {} lod link {}", i, lp)));
                 }
                 let t = &pgb[lp as usize * PAGE_LEN..];
                 if t[12] != LOD_MERGED
@@ -2480,18 +2291,12 @@ impl Ovm {
                     || g32(t, 4) != g32(b, 4)
                     || g32(t, 8) != g32(b, 8)
                 {
-                    return Err(corrupt(format!(
-                        "page {} lod link target {}",
-                        i, lp
-                    )));
+                    return Err(corrupt(format!("page {} lod link target {}", i, lp)));
                 }
                 let slot = &mut lod_claim[lp as usize >> 3];
                 let bit = 1u8 << (lp as usize & 7);
                 if *slot & bit != 0 {
-                    return Err(corrupt(format!(
-                        "lod page {} claimed twice",
-                        lp
-                    )));
+                    return Err(corrupt(format!("lod page {} claimed twice", lp)));
                 }
                 *slot |= bit;
             }
@@ -2509,17 +2314,12 @@ impl Ovm {
                 let c = &cb[ci * CELL_LEN..];
                 let (ps, pc) = (g32(c, 120), g32(c, 124));
                 for k in 0..pc {
-                    let pr = &prb[(ps + k) as usize
-                        * PRANGE_LEN..];
+                    let pr = &prb[(ps + k) as usize * PRANGE_LEN..];
                     let pl = g32(pr, 0);
                     let (lo, cnt) = (g32(pr, 4), g32(pr, 8));
                     for pi in lo..lo.saturating_add(cnt) {
-                        let pg =
-                            &pgb[pi as usize * PAGE_LEN..];
-                        if g32(pg, 0) != ci as u32
-                            || g32(pg, 4) != pl
-                            || pg[12] != LOD_EXACT
-                        {
+                        let pg = &pgb[pi as usize * PAGE_LEN..];
+                        if g32(pg, 0) != ci as u32 || g32(pg, 4) != pl || pg[12] != LOD_EXACT {
                             return Err(corrupt(format!(
                                 "cell {} prange {} page {} \
                                  ownership",
@@ -2548,49 +2348,34 @@ impl Ovm {
             for i in 0..n_texts as usize {
                 let b = &txb[i * TEXT_LEN..];
                 if g32(b, 0) >= n_cells {
-                    return Err(corrupt(format!(
-                        "text {} cell index",
-                        i
-                    )));
+                    return Err(corrupt(format!("text {} cell index", i)));
                 }
                 if g32(b, 4) >= n_layers {
-                    return Err(corrupt(format!(
-                        "text {} layer index",
-                        i
-                    )));
+                    return Err(corrupt(format!("text {} layer index", i)));
                 }
                 let send = g64(b, 24)
                     .checked_add(g32(b, 32) as u64)
-                    .ok_or_else(|| {
-                        corrupt(format!("text {} string wraps", i))
-                    })?;
+                    .ok_or_else(|| corrupt(format!("text {} string wraps", i)))?;
                 if send > ovt_len {
-                    return Err(corrupt(format!(
-                        "text {} string beyond ovt_len",
-                        i
-                    )));
+                    return Err(corrupt(format!("text {} string beyond ovt_len", i)));
                 }
                 let rep = g32(b, 36);
                 if rep != TREP_NONE && rep >= n_treps {
-                    return Err(corrupt(format!(
-                        "text {} rep index",
-                        i
-                    )));
+                    return Err(corrupt(format!("text {} rep index", i)));
                 }
                 let bb = gbox(b, 40);
                 if bb.x1 < bb.x0 || bb.y1 < bb.y0 {
-                    return Err(corrupt(format!(
-                        "text {} bbox inverted",
-                        i
-                    )));
+                    return Err(corrupt(format!("text {} bbox inverted", i)));
                 }
                 let (x, y) = (gi64(b, 8), gi64(b, 16));
-                let anchor = BBox { x0: x, y0: y, x1: x, y1: y };
+                let anchor = BBox {
+                    x0: x,
+                    y0: y,
+                    x1: x,
+                    y1: y,
+                };
                 if !contains_box(&bb, &anchor) {
-                    return Err(corrupt(format!(
-                        "text {} bbox misses anchor",
-                        i
-                    )));
+                    return Err(corrupt(format!("text {} bbox misses anchor", i)));
                 }
                 if rep != TREP_NONE {
                     let rb = &tpb[rep as usize * TREP_LEN..];
@@ -2600,25 +2385,12 @@ impl Ovm {
                             let nb = g32(rb, 8) as i128;
                             let va = (gi64(rb, 16), gi64(rb, 24));
                             let vb = (gi64(rb, 32), gi64(rb, 40));
-                            for &(ii, jj) in &[
-                                (0, 0),
-                                (na - 1, 0),
-                                (0, nb - 1),
-                                (na - 1, nb - 1),
-                            ] {
-                                let px = x as i128
-                                    + ii * va.0 as i128
-                                    + jj * vb.0 as i128;
-                                let py = y as i128
-                                    + ii * va.1 as i128
-                                    + jj * vb.1 as i128;
-                                let (Ok(px), Ok(py)) =
-                                    (i64::try_from(px), i64::try_from(py))
+                            for &(ii, jj) in &[(0, 0), (na - 1, 0), (0, nb - 1), (na - 1, nb - 1)] {
+                                let px = x as i128 + ii * va.0 as i128 + jj * vb.0 as i128;
+                                let py = y as i128 + ii * va.1 as i128 + jj * vb.1 as i128;
+                                let (Ok(px), Ok(py)) = (i64::try_from(px), i64::try_from(py))
                                 else {
-                                    return Err(corrupt(format!(
-                                        "text {} grid bbox overflow",
-                                        i
-                                    )));
+                                    return Err(corrupt(format!("text {} grid bbox overflow", i)));
                                 };
                                 let p = BBox {
                                     x0: px,
@@ -2627,10 +2399,7 @@ impl Ovm {
                                     y1: py,
                                 };
                                 if !contains_box(&bb, &p) {
-                                    return Err(corrupt(format!(
-                                        "text {} bbox misses grid",
-                                        i
-                                    )));
+                                    return Err(corrupt(format!("text {} bbox misses grid", i)));
                                 }
                             }
                         }
@@ -2638,34 +2407,19 @@ impl Ovm {
                             let lo = g32(rb, 12);
                             let cnt = g32(rb, 56);
                             for k in 0..cnt {
-                                let cb = gbox(
-                                    &tcb[(lo + k) as usize * TCHUNK_LEN..],
-                                    0,
-                                );
+                                let cb = gbox(&tcb[(lo + k) as usize * TCHUNK_LEN..], 0);
                                 let translated = BBox {
                                     x0: x.checked_add(cb.x0).ok_or_else(|| {
-                                        corrupt(format!(
-                                            "text {} pts bbox overflow",
-                                            i
-                                        ))
+                                        corrupt(format!("text {} pts bbox overflow", i))
                                     })?,
                                     y0: y.checked_add(cb.y0).ok_or_else(|| {
-                                        corrupt(format!(
-                                            "text {} pts bbox overflow",
-                                            i
-                                        ))
+                                        corrupt(format!("text {} pts bbox overflow", i))
                                     })?,
                                     x1: x.checked_add(cb.x1).ok_or_else(|| {
-                                        corrupt(format!(
-                                            "text {} pts bbox overflow",
-                                            i
-                                        ))
+                                        corrupt(format!("text {} pts bbox overflow", i))
                                     })?,
                                     y1: y.checked_add(cb.y1).ok_or_else(|| {
-                                        corrupt(format!(
-                                            "text {} pts bbox overflow",
-                                            i
-                                        ))
+                                        corrupt(format!("text {} pts bbox overflow", i))
                                     })?,
                                 };
                                 if !contains_box(&bb, &translated) {
@@ -2691,8 +2445,7 @@ impl Ovm {
             let tvb = sec(SEC_TBVH);
             let mut trange_owned = 0u64;
             let mut text_owned = 0u64;
-            let mut tr_claim =
-                vec![false; n_tranges as usize];
+            let mut tr_claim = vec![false; n_tranges as usize];
             let mut tx_claim = vec![false; n_texts as usize];
             let mut node_claim = vec![false; n_tbvh as usize];
             for ci in 0..n_cells as usize {
@@ -2701,10 +2454,7 @@ impl Ovm {
                 for k in 0..tc {
                     let tri = (ts + k) as usize;
                     if tr_claim[tri] {
-                        return Err(corrupt(format!(
-                            "trange {} claimed twice",
-                            tri
-                        )));
+                        return Err(corrupt(format!("trange {} claimed twice", tri)));
                     }
                     tr_claim[tri] = true;
                     trange_owned += 1;
@@ -2713,9 +2463,7 @@ impl Ovm {
                     let (lo, cnt) = (g32(tr, 4), g32(tr, 8));
                     for ti in lo..lo.saturating_add(cnt) {
                         let t = &txb[ti as usize * TEXT_LEN..];
-                        if g32(t, 0) != ci as u32
-                            || g32(t, 4) != tl
-                        {
+                        if g32(t, 0) != ci as u32 || g32(t, 4) != tl {
                             return Err(corrupt(format!(
                                 "cell {} trange {} text {} \
                                  ownership",
@@ -2723,10 +2471,7 @@ impl Ovm {
                             )));
                         }
                         if tx_claim[ti as usize] {
-                            return Err(corrupt(format!(
-                                "text {} claimed twice",
-                                ti
-                            )));
+                            return Err(corrupt(format!("text {} claimed twice", ti)));
                         }
                         tx_claim[ti as usize] = true;
                         text_owned += 1;
@@ -2738,10 +2483,7 @@ impl Ovm {
                     let mut stack = vec![root];
                     while let Some(ni) = stack.pop() {
                         if node_claim[ni as usize] {
-                            return Err(corrupt(format!(
-                                "tbvh node {} shared or cyclic",
-                                ni
-                            )));
+                            return Err(corrupt(format!("tbvh node {} shared or cyclic", ni)));
                         }
                         node_claim[ni as usize] = true;
                         let nb = &tvb[ni as usize * TBVH_LEN..];
@@ -2749,9 +2491,7 @@ impl Ovm {
                         let first = g32(nb, 32);
                         let count = g16(nb, 36) as u32;
                         if g16(nb, 38) != 0 {
-                            if first < lo
-                                || first + count > lo + cnt
-                            {
+                            if first < lo || first + count > lo + cnt {
                                 return Err(corrupt(format!(
                                     "tbvh node {} leaf outside \
                                      trange {}",
@@ -2759,10 +2499,7 @@ impl Ovm {
                                 )));
                             }
                             for ti in first..first + count {
-                                let tbb = gbox(
-                                    &txb[ti as usize * TEXT_LEN..],
-                                    40,
-                                );
+                                let tbb = gbox(&txb[ti as usize * TEXT_LEN..], 40);
                                 if !contains_box(&nbb, &tbb) {
                                     return Err(corrupt(format!(
                                         "tbvh node {} bbox misses text {}",
@@ -2773,10 +2510,7 @@ impl Ovm {
                         } else {
                             for k2 in 0..count {
                                 let child = first + k2;
-                                let cbb = gbox(
-                                    &tvb[child as usize * TBVH_LEN..],
-                                    0,
-                                );
+                                let cbb = gbox(&tvb[child as usize * TBVH_LEN..], 0);
                                 if !contains_box(&nbb, &cbb) {
                                     return Err(corrupt(format!(
                                         "tbvh node {} bbox misses child {}",
@@ -2958,8 +2692,7 @@ impl Ovm {
 
     fn nm(&self, off: u32, len: u16) -> String {
         let s = self.sec(SEC_STRINGS);
-        String::from_utf8_lossy(&s[off as usize..off as usize + len as usize])
-            .into_owned()
+        String::from_utf8_lossy(&s[off as usize..off as usize + len as usize]).into_owned()
     }
 
     pub fn layer(&self, i: u32) -> LayerV {
@@ -3078,7 +2811,12 @@ impl Ovm {
         let vb = (gi64(b, 48), gi64(b, 56));
         let rep = match kind {
             0 => Rep::One,
-            1 => Rep::Grid { na: na as u64, nb: nb as u64, va, vb },
+            1 => Rep::Grid {
+                na: na as u64,
+                nb: nb as u64,
+                va,
+                vb,
+            },
             2 => {
                 let r = self.pts_ref(i).expect("kind 2");
                 let mut pts = Vec::with_capacity(na as usize);
@@ -3309,12 +3047,13 @@ mod tests {
     /// so every rebase base is non-zero for the second.
     #[test]
     fn cell_sink_append_is_byte_identical() {
-        let bb = BBox { x0: 0, y0: 0, x1: 100, y1: 50 };
-        let pts = std::sync::Arc::new(vec![
-            (0i64, 0i64),
-            (500, 40),
-            (90, 700),
-        ]);
+        let bb = BBox {
+            x0: 0,
+            y0: 0,
+            x1: 100,
+            y1: 50,
+        };
+        let pts = std::sync::Arc::new(vec![(0i64, 0i64), (500, 40), (90, 700)]);
         let mk_direct = || {
             let mut b = Builder::new(1000.0, 0, 0, 1);
             for c in 0..2u32 {
@@ -3333,32 +3072,11 @@ mod tests {
                         vb: (0, 200),
                     },
                 );
-                b.place(
-                    c,
-                    1,
-                    2,
-                    2,
-                    false,
-                    &Rep::Pts(pts.clone().to_vec().into()),
-                );
-                let l0 = b.bvh_node(
-                    &bb,
-                    narrow_u32(pb, "p"),
-                    3,
-                    true,
-                    500,
-                    200,
-                );
+                b.place(c, 1, 2, 2, false, &Rep::Pts(pts.clone().to_vec().into()));
+                let l0 = b.bvh_node(&bb, narrow_u32(pb, "p"), 3, true, 500, 200);
                 b.bvh_node(&bb, l0, 1, false, 500, 200);
                 let page_base = (c as u32) * 7;
-                let pl = b.pbvh_node(
-                    &bb,
-                    page_base,
-                    2,
-                    true,
-                    11,
-                    22,
-                );
+                let pl = b.pbvh_node(&bb, page_base, 2, true, 11, 22);
                 b.pbvh_node(&bb, pl, 1, false, 33, 44);
                 b.prange(0, page_base, 2, pl + 1);
                 b.prange(1, page_base + 2, 1, PBVH_NONE);
@@ -3383,14 +3101,7 @@ mod tests {
                         vb: (0, 200),
                     },
                 );
-                s.place(
-                    c,
-                    1,
-                    2,
-                    2,
-                    false,
-                    &Rep::Pts(pts.clone().to_vec().into()),
-                );
+                s.place(c, 1, 2, 2, false, &Rep::Pts(pts.clone().to_vec().into()));
                 let l0 = s.bvh_node(&bb, 0, 3, true, 500, 200);
                 s.bvh_node(&bb, l0, 1, false, 500, 200);
                 let pl = s.pbvh_node(&bb, 0, 2, true, 11, 22);
@@ -3429,7 +3140,12 @@ mod tests {
             -20,
             1,
             true,
-            &Rep::Grid { na: 3, nb: 2, va: (5, 0), vb: (0, 7) },
+            &Rep::Grid {
+                na: 3,
+                nb: 2,
+                va: (5, 0),
+                vb: (0, 7),
+            },
         );
         b.place(
             0,
@@ -3439,34 +3155,50 @@ mod tests {
             false,
             &Rep::Pts(vec![(0, 0), (9, 9), (9, 9), (-4, 2)].into()),
         );
-        let bb = BBox { x0: 0, y0: 0, x1: 100, y1: 50 };
+        let bb = BBox {
+            x0: 0,
+            y0: 0,
+            x1: 100,
+            y1: 50,
+        };
         let n0 = b.bvh_node(&bb, p0 as u32, 2, true, 90, 50);
-        b.page(1, 0, 0, &bb, 128, 10, 20, 3, 9, 60, 60, LOD_EXACT, LOD_PAGE_NONE);
-        b.page(1, 0, 70000, &bb, 138, 11, 21, 4, 8, 61, 1 << 40, LOD_EXACT, LOD_PAGE_NONE);
+        b.page(
+            1,
+            0,
+            0,
+            &bb,
+            128,
+            10,
+            20,
+            3,
+            9,
+            60,
+            60,
+            LOD_EXACT,
+            LOD_PAGE_NONE,
+        );
+        b.page(
+            1,
+            0,
+            70000,
+            &bb,
+            138,
+            11,
+            21,
+            4,
+            8,
+            61,
+            1 << 40,
+            LOD_EXACT,
+            LOD_PAGE_NONE,
+        );
         let pv0 = b.pbvh_node(&bb, 0, 2, true, 61, 1 << 40);
         let pr0 = b.prange(0, 0, 2, pv0);
-        b.cell("LEAF", 0, 1, &bb, &bb, 0, 0, 0, 0, 0, 0, 0, 0, m0, m1, 9,
-               0, 0, m0);
         b.cell(
-            "TOP",
-            1,
-            0,
-            &bb,
-            &bb,
-            p0 as u32,
-            2,
-            0,
-            2,
-            n0,
-            1,
-            pr0,
-            1,
-            m0,
-            m1,
-            18,
-            0,
-            0,
-            m0,
+            "LEAF", 0, 1, &bb, &bb, 0, 0, 0, 0, 0, 0, 0, 0, m0, m1, 9, 0, 0, m0,
+        );
+        b.cell(
+            "TOP", 1, 0, &bb, &bb, p0 as u32, 2, 0, 2, n0, 1, pr0, 1, m0, m1, 18, 0, 0, m0,
         );
         b.finish(150, 0)
     }
@@ -3481,13 +3213,24 @@ mod tests {
             for k in 0..10 {
                 b.layer(k, 0, "L", 0, 0);
             }
-            let bb = BBox { x0: 0, y0: 0, x1: 10, y1: 10 };
+            let bb = BBox {
+                x0: 0,
+                y0: 0,
+                x1: 10,
+                y1: 10,
+            };
             let (a_own, a_rec) = (b.bitset(&[0b001, 0]), b.bitset(&[0b011, 0]));
             let b_mask = b.bitset(&[0b100, 0]);
             let c_mask = b.bitset(&[0, 0b10]);
             let none = b.bitset(&[0, 0]);
-            for (name, own, rec) in [("A", a_own, a_rec), ("B", b_mask, b_mask), ("C", c_mask, c_mask)] {
-                b.cell(name, 0, 1, &bb, &bb, 0, 0, 0, 0, 0, 0, 0, 0, own, rec, 0, 0, 0, none);
+            for (name, own, rec) in [
+                ("A", a_own, a_rec),
+                ("B", b_mask, b_mask),
+                ("C", c_mask, c_mask),
+            ] {
+                b.cell(
+                    name, 0, 1, &bb, &bb, 0, 0, 0, 0, 0, 0, 0, 0, own, rec, 0, 0, 0, none,
+                );
             }
             // places 0..3: A A B C; leaves [A A] and [B C] under one root
             let p0 = b.place(0, 0, 0, 0, false, &Rep::One) as u32;
@@ -3498,7 +3241,9 @@ mod tests {
             b.bvh_node(&bb, p0, 2, true, 10, 10);
             b.bvh_node(&bb, p0 + 2, 2, true, 10, 10);
             let all = b.bitset(&[0b111, 0b10]);
-            b.cell("TOP", 1, 0, &bb, &bb, p0, 4, 0, 0, root, 3, 0, 0, none, all, 0, 0, 0, none);
+            b.cell(
+                "TOP", 1, 0, &bb, &bb, p0, 4, 0, 0, root, 3, 0, 0, none, all, 0, 0, 0, none,
+            );
             // inner `first` is a global node index here (no sink rebase)
             let stats = b.annotate_bvh_masks_min(jobs, min_places);
             (b.finish(0, 0), stats)
@@ -3508,22 +3253,39 @@ mod tests {
         let v = Ovm::from_bytes(bytes.clone()).unwrap();
         let masks = |ni: u32| {
             let node = v.bvh(ni);
-            (v.bitset(node.lmask_rec).to_vec(), v.bitset(node.lmask_direct).to_vec())
+            (
+                v.bitset(node.lmask_rec).to_vec(),
+                v.bitset(node.lmask_direct).to_vec(),
+            )
         };
-        assert_eq!(masks(1), (vec![0b011, 0], vec![0b001, 0]), "two placements of A");
+        assert_eq!(
+            masks(1),
+            (vec![0b011, 0], vec![0b001, 0]),
+            "two placements of A"
+        );
         assert_eq!(masks(2), (vec![0b100, 0b10], vec![0b100, 0b10]), "B and C");
-        assert_eq!(masks(0), (vec![0b111, 0b10], vec![0b101, 0b10]), "the root is the union of its children");
+        assert_eq!(
+            masks(0),
+            (vec![0b111, 0b10], vec![0b101, 0b10]),
+            "the root is the union of its children"
+        );
         // the same bytes whatever the thread count
         assert_eq!(build(4, 1).0, bytes);
         // under the threshold a node stays unknown: only the root holds 4 placements
         let (bytes, stats) = build(2, 4);
         let v = Ovm::from_bytes(bytes).unwrap();
         assert_eq!(stats.0, 1);
-        assert_eq!((v.bvh(1).lmask_rec, v.bvh(2).lmask_direct), (LMASK_UNKNOWN, LMASK_UNKNOWN));
+        assert_eq!(
+            (v.bvh(1).lmask_rec, v.bvh(2).lmask_direct),
+            (LMASK_UNKNOWN, LMASK_UNKNOWN)
+        );
         assert_eq!(v.bitset(v.bvh(0).lmask_rec), &[0b111, 0b10]);
         // a builder that never annotates reads back as unknown, and opens
         let plain = Ovm::from_bytes(build_sample()).unwrap();
-        assert_eq!((plain.bvh(0).lmask_rec, plain.bvh(0).lmask_direct), (LMASK_UNKNOWN, LMASK_UNKNOWN));
+        assert_eq!(
+            (plain.bvh(0).lmask_rec, plain.bvh(0).lmask_direct),
+            (LMASK_UNKNOWN, LMASK_UNKNOWN)
+        );
     }
 
     #[test]
@@ -3550,10 +3312,7 @@ mod tests {
             Rep::Pts(p) => {
                 let mut got = p.to_vec();
                 got.sort_unstable();
-                assert_eq!(
-                    got,
-                    vec![(-4, 2), (0, 0), (9, 9), (9, 9)]
-                );
+                assert_eq!(got, vec![(-4, 2), (0, 0), (9, 9), (9, 9)]);
             }
             r => panic!("{:?}", r),
         }
@@ -3625,16 +3384,21 @@ mod tests {
             for c in &prep2.chunks {
                 b.tchunk(c);
             }
-            let rp = b.trep_pts(
-                300,
-                pts_off,
-                chunk_lo,
-                prep2.chunks.len() as u32,
-            );
+            let rp = b.trep_pts(300, pts_off, chunk_lo, prep2.chunks.len() as u32);
             let t0 = b.n_texts();
-            let one = BBox { x0: 5, y0: 6, x1: 5, y1: 6 };
+            let one = BBox {
+                x0: 5,
+                y0: 6,
+                x1: 5,
+                y1: 6,
+            };
             b.text(0, 0, 5, 6, 0, 2, TREP_NONE, &one, 0);
-            let gb = BBox { x0: 0, y0: 0, x1: 30, y1: 40 };
+            let gb = BBox {
+                x0: 0,
+                y0: 0,
+                x1: 30,
+                y1: 40,
+            };
             b.text(0, 0, 0, 0, 2, 5, rg, &gb, 1);
             let mut pb = prep2.extent;
             pb.x0 += 1;
@@ -3651,34 +3415,33 @@ mod tests {
             ub.grow(&pb);
             let root = b.tbvh_node(&ub, r0, 2, false);
             let tr = b.trange(0, t0, 3, root);
-            let bb = BBox { x0: 0, y0: 0, x1: 100, y1: 100 };
-            b.cell("T", 0, 0, &bb, &bb, 0, 0, 0, 0, 0, 0, 0, 0,
-                   m, m, 0, tr, 1, m);
+            let bb = BBox {
+                x0: 0,
+                y0: 0,
+                x1: 100,
+                y1: 100,
+            };
+            b.cell(
+                "T", 0, 0, &bb, &bb, 0, 0, 0, 0, 0, 0, 0, 0, m, m, 0, tr, 1, m,
+            );
             b.finish(0, ovt_len)
         };
         let good = build(ovt.len() as u64);
         let v = Ovm::from_bytes(good.clone()).unwrap();
         assert_eq!(v.ovt_len, ovt.len() as u64);
-        assert_eq!(
-            (v.n_texts, v.n_tranges, v.n_tbvh, v.n_treps),
-            (3, 1, 3, 2)
-        );
+        assert_eq!((v.n_texts, v.n_tranges, v.n_tbvh, v.n_treps), (3, 1, 3, 2));
         assert_eq!(v.n_tchunks, 300u32.div_ceil(PTS_CHUNK as u32));
         let c = v.cell(0);
         assert_eq!((c.trange_start, c.trange_count), (0, 1));
         assert_eq!(v.cell_tranges(0), (0, 1));
         assert_eq!(v.cell_tmask_rec(0), c.tmask_rec);
         let tr = v.trange(0);
-        assert_eq!(
-            (tr.layer_idx, tr.text_lo, tr.text_count),
-            (0, 0, 3)
-        );
+        assert_eq!((tr.layer_idx, tr.text_lo, tr.text_count), (0, 0, 3));
         let t = v.text(0);
         assert_eq!((t.x, t.y, t.seq), (5, 6, 0));
         assert_eq!(t.rep_idx, TREP_NONE);
         assert_eq!(
-            &ovt[t.string_off as usize
-                ..(t.string_off + t.string_len as u64) as usize],
+            &ovt[t.string_off as usize..(t.string_off + t.string_len as u64) as usize],
             b"AB"
         );
         match v.trep(v.text(1).rep_idx) {
@@ -3688,23 +3451,30 @@ mod tests {
             r => panic!("{:?}", r),
         }
         match v.trep(v.text(2).rep_idx) {
-            TrepV::Pts { count, pts_off: po, chunk_lo, chunk_count } => {
+            TrepV::Pts {
+                count,
+                pts_off: po,
+                chunk_lo,
+                chunk_count,
+            } => {
                 assert_eq!(count, 300);
                 assert_eq!(po, pts_off);
                 assert_eq!(chunk_count, v.n_tchunks - chunk_lo);
                 // pool pt via the zero-copy helper == prepared pts
                 for s in [0u32, 150, 299] {
-                    assert_eq!(
-                        ovt_pt(&ovt, po, s),
-                        prep.pts[s as usize]
-                    );
+                    assert_eq!(ovt_pt(&ovt, po, s), prep.pts[s as usize]);
                 }
                 // chunk bboxes cover their slots
                 let cb = v.tchunk(chunk_lo);
                 let (lo, hi) = (0usize, PTS_CHUNK.min(300));
                 let mut want = BBox::EMPTY;
                 for &(x, y) in &prep.pts[lo..hi] {
-                    want.grow(&BBox { x0: x, y0: y, x1: x, y1: y });
+                    want.grow(&BBox {
+                        x0: x,
+                        y0: y,
+                        x1: x,
+                        y1: y,
+                    });
                 }
                 assert_eq!(cb, want);
             }
@@ -3714,9 +3484,7 @@ mod tests {
         assert!(!root.leaf && root.count == 2);
 
         let sec_off = |bytes: &[u8], s: usize| {
-            u64::from_le_bytes(
-                bytes[88 + s * 16..96 + s * 16].try_into().unwrap(),
-            ) as usize
+            u64::from_le_bytes(bytes[88 + s * 16..96 + s * 16].try_into().unwrap()) as usize
         };
         // (a) trange layer index out of range (deep tier)
         let mut c = good.clone();
@@ -3803,7 +3571,12 @@ mod tests {
             let hi = (lo + PTS_CHUNK).min(a.pts.len());
             let mut bb = BBox::EMPTY;
             for &(x, y) in &a.pts[lo..hi] {
-                bb.grow(&BBox { x0: x, y0: y, x1: x, y1: y });
+                bb.grow(&BBox {
+                    x0: x,
+                    y0: y,
+                    x1: x,
+                    y1: y,
+                });
             }
             assert_eq!(*cb, bb);
         }
@@ -3902,23 +3675,26 @@ mod tests {
             b.top = 0;
             b.layer(1, 0, "L", 2, 2);
             let m = b.bitset(&[1]);
-            let pb = BBox { x0: 0, y0: 0, x1: 10, y1: 10 };
+            let pb = BBox {
+                x0: 0,
+                y0: 0,
+                x1: 10,
+                y1: 10,
+            };
             b.page(0, 0, 0, &pb, 0, 0, 0, 1, 1, 1, 1, LOD_EXACT, 2);
             // seq 0 like page 0 (names are a build concern, not
             // an ovm invariant) so a retargeted link reaches the
             // double-claim check instead of the seq gate
-            b.page(0, 0, 0, &pb, 0, 0, 0, 1, 1, 1, 1, LOD_EXACT,
-                   LOD_PAGE_NONE);
-            b.page(0, 0, 0, &pb, 0, 0, 0, 1, 1, 1, 1, LOD_MERGED,
-                   LOD_PAGE_NONE);
+            b.page(0, 0, 0, &pb, 0, 0, 0, 1, 1, 1, 1, LOD_EXACT, LOD_PAGE_NONE);
+            b.page(0, 0, 0, &pb, 0, 0, 0, 1, 1, 1, 1, LOD_MERGED, LOD_PAGE_NONE);
             let pr = b.prange(0, 0, 2, PBVH_NONE);
-            b.cell("T", 0, 0, &pb, &pb, 0, 0, 0, 3, 0, 0, pr, 1,
-                   m, m, 2, 0, 0, m);
+            b.cell(
+                "T", 0, 0, &pb, &pb, 0, 0, 0, 3, 0, 0, pr, 1, m, m, 2, 0, 0, m,
+            );
             let good = b.finish(0, 0);
             assert!(Ovm::from_bytes(good.clone()).is_ok());
             let pg0 = u64::from_le_bytes(
-                good[88 + 16 * SEC_PAGEDIR
-                    ..96 + 16 * SEC_PAGEDIR]
+                good[88 + 16 * SEC_PAGEDIR..96 + 16 * SEC_PAGEDIR]
                     .try_into()
                     .unwrap(),
             ) as usize;
@@ -3929,14 +3705,12 @@ mod tests {
             assert!(e.contains("lod byte"), "{}", e);
             // (b) exact linking to an EXACT page
             let mut c = good.clone();
-            c[pg0 + 68..pg0 + 72]
-                .copy_from_slice(&1u32.to_le_bytes());
+            c[pg0 + 68..pg0 + 72].copy_from_slice(&1u32.to_le_bytes());
             let e = err_of(Ovm::from_bytes(c));
             assert!(e.contains("lod link target"), "{}", e);
             // (c) two exacts claiming one LOD
             let mut c = good.clone();
-            c[pg0 + PAGE_LEN + 68..pg0 + PAGE_LEN + 72]
-                .copy_from_slice(&2u32.to_le_bytes());
+            c[pg0 + PAGE_LEN + 68..pg0 + PAGE_LEN + 72].copy_from_slice(&2u32.to_le_bytes());
             let e = err_of(Ovm::from_bytes(c));
             assert!(e.contains("claimed twice"), "{}", e);
             // (e) prange run extended to swallow the MERGED
@@ -3947,14 +3721,12 @@ mod tests {
                     .try_into()
                     .unwrap(),
             ) as usize;
-            c[pr0 + 8..pr0 + 12]
-                .copy_from_slice(&3u32.to_le_bytes());
+            c[pr0 + 8..pr0 + 12].copy_from_slice(&3u32.to_le_bytes());
             let e = err_of(Ovm::from_bytes(c));
             assert!(e.contains("ownership"), "{}", e);
             // (d) seq mismatch: retarget the MERGED page's seq
             let mut c = good.clone();
-            c[pg0 + 2 * PAGE_LEN + 8..pg0 + 2 * PAGE_LEN + 12]
-                .copy_from_slice(&9u32.to_le_bytes());
+            c[pg0 + 2 * PAGE_LEN + 8..pg0 + 2 * PAGE_LEN + 12].copy_from_slice(&9u32.to_le_bytes());
             let e = err_of(Ovm::from_bytes(c));
             assert!(e.contains("lod link target"), "{}", e);
         }
@@ -3979,18 +3751,36 @@ mod tests {
         b.top = 0;
         b.layer(1, 0, "L", 0, 0);
         let m = b.bitset(&[0]);
-        let bb = BBox { x0: 0, y0: 0, x1: 1, y1: 1 };
-        b.page(0, 0, 0, &bb, 100, 50, 50, 1, 1, 1, 1, LOD_EXACT, LOD_PAGE_NONE);
-        b.cell("A", 0, 0, &bb, &bb, 0, 0, 0, 1, 0, 0, 0, 0, m, m, 1,
-               0, 0, m);
+        let bb = BBox {
+            x0: 0,
+            y0: 0,
+            x1: 1,
+            y1: 1,
+        };
+        b.page(
+            0,
+            0,
+            0,
+            &bb,
+            100,
+            50,
+            50,
+            1,
+            1,
+            1,
+            1,
+            LOD_EXACT,
+            LOD_PAGE_NONE,
+        );
+        b.cell(
+            "A", 0, 0, &bb, &bb, 0, 0, 0, 1, 0, 0, 0, 0, m, m, 1, 0, 0, m,
+        );
         let e = err_of(Ovm::from_bytes(b.finish(120, 0)));
         assert!(e.contains("beyond ovp_len"), "{}", e);
         // corrupt page/prange layer or cell indexes must be an open
         // error, never a later planner panic (review finding)
         let sec_off = |bytes: &[u8], sec: usize| {
-            u64::from_le_bytes(
-                bytes[88 + sec * 16..96 + sec * 16].try_into().unwrap(),
-            ) as usize
+            u64::from_le_bytes(bytes[88 + sec * 16..96 + sec * 16].try_into().unwrap()) as usize
         };
         let mut bytes = build_sample();
         let po = sec_off(&bytes, 6); // pagedir

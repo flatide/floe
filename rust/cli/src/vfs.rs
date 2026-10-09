@@ -49,7 +49,6 @@ const PBVH_LEAF: usize = 8;
 /// texts per text-BVH leaf / linear-scan threshold (v5 text index)
 const TBVH_LEAF: usize = 8;
 
-
 // ------------------------------------------------------------ build
 
 pub fn vfs_cmd(args: &[String]) {
@@ -139,27 +138,15 @@ pub fn vfs_cmd(args: &[String]) {
                 i += 2;
             }
             "--encode-batch" => {
-                encode_batch = Some(
-                    args[i + 1]
-                        .parse::<usize>()
-                        .expect("encode batch")
-                        .max(1),
-                );
+                encode_batch = Some(args[i + 1].parse::<usize>().expect("encode batch").max(1));
                 i += 2;
             }
             "--plan-batch" => {
-                plan_batch = Some(
-                    args[i + 1]
-                        .parse::<usize>()
-                        .expect("plan batch")
-                        .max(1),
-                );
+                plan_batch = Some(args[i + 1].parse::<usize>().expect("plan batch").max(1));
                 i += 2;
             }
             "--page-target-mb" => {
-                let mb = args[i + 1]
-                    .parse::<u64>()
-                    .expect("page target MB");
+                let mb = args[i + 1].parse::<u64>().expect("page target MB");
                 assert!(mb > 0, "page target MB must be positive");
                 page_target_mb = Some(mb);
                 i += 2;
@@ -173,7 +160,11 @@ pub fn vfs_cmd(args: &[String]) {
                 i += 1;
             }
             "--representatives-points" => {
-                representative_points = args.get(i + 1).expect("representatives points").parse().expect("representatives points");
+                representative_points = args
+                    .get(i + 1)
+                    .expect("representatives points")
+                    .parse()
+                    .expect("representatives points");
                 representatives = true;
                 i += 2;
             }
@@ -265,15 +256,12 @@ pub fn vfs_cmd(args: &[String]) {
                 i += 2;
             }
             "--slow-cell-s" => {
-                slow_cell_s =
-                    args[i + 1].parse().expect("slow cell seconds");
+                slow_cell_s = args[i + 1].parse().expect("slow cell seconds");
                 i += 2;
             }
             "--p2-shard-limit-mb" => {
-                let mb: u64 =
-                    args[i + 1].parse().expect("shard limit MB");
-                p2_shard_limit =
-                    Some(mb.checked_mul(MIB).expect("shard limit"));
+                let mb: u64 = args[i + 1].parse().expect("shard limit MB");
+                p2_shard_limit = Some(mb.checked_mul(MIB).expect("shard limit"));
                 i += 2;
             }
             "--profile-cell" => {
@@ -281,11 +269,7 @@ pub fn vfs_cmd(args: &[String]) {
                 i += 2;
             }
             "--profile-cell-ci" => {
-                profile_cell_ci = Some(
-                    args[i + 1]
-                        .parse::<usize>()
-                        .expect("profile cell index"),
-                );
+                profile_cell_ci = Some(args[i + 1].parse::<usize>().expect("profile cell index"));
                 i += 2;
             }
             "--profile-jobs" => {
@@ -356,22 +340,20 @@ pub fn vfs_cmd(args: &[String]) {
             .saturating_mul(ENCODE_BATCH_PER_JOB)
             .min(ENCODE_BATCH_MAX)
     });
-    let plan_batch = plan_batch.unwrap_or_else(|| {
-        jobs.max(1).saturating_mul(PLAN_BATCH_PER_JOB)
-    });
-    let page_target_mb =
-        page_target_mb.unwrap_or(DEFAULT_PAGE_TARGET_MB);
+    let plan_batch = plan_batch.unwrap_or_else(|| jobs.max(1).saturating_mul(PLAN_BATCH_PER_JOB));
+    let page_target_mb = page_target_mb.unwrap_or(DEFAULT_PAGE_TARGET_MB);
     let page_target_bytes = page_target_mb
         .checked_mul(MIB)
         .expect("limit exceeded: page target bytes");
     if representative_points == 0 || representative_points > floe_vfs::representatives::MAX_POINTS {
-        eprintln!("--representatives-points must be in 1..={}", floe_vfs::representatives::MAX_POINTS);
+        eprintln!(
+            "--representatives-points must be in 1..={}",
+            floe_vfs::representatives::MAX_POINTS
+        );
         std::process::exit(2);
     }
     if profile_cell.is_some() && profile_cell_ci.is_some() {
-        eprintln!(
-            "--profile-cell and --profile-cell-ci are mutually exclusive"
-        );
+        eprintln!("--profile-cell and --profile-cell-ci are mutually exclusive");
         std::process::exit(2);
     }
     let profiling = profile_cell.is_some() || profile_cell_ci.is_some();
@@ -403,7 +385,16 @@ pub fn vfs_cmd(args: &[String]) {
         );
         std::process::exit(2);
     }
-    if [coverage_only, occupancy_only, representatives_only, frontier_only].iter().filter(|&&b| b).count() > 1
+    if [
+        coverage_only,
+        occupancy_only,
+        representatives_only,
+        frontier_only,
+    ]
+    .iter()
+    .filter(|&&b| b)
+    .count()
+        > 1
         || (representatives_only && (coverage || occupancy))
         || ((coverage_only || occupancy_only || frontier_only) && representatives)
     {
@@ -423,17 +414,32 @@ pub fn vfs_cmd(args: &[String]) {
     let mut lock = if profiling {
         floe_vfs::lock::WriterGuard::default()
     } else {
-        if let Some(parent) = std::path::Path::new(&outdir).parent().filter(|p| !p.as_os_str().is_empty()) {
+        if let Some(parent) = std::path::Path::new(&outdir)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+        {
             let _ = std::fs::create_dir_all(parent);
         }
         let (mode, what) = if coverage_only {
-            (floe_vfs::lock::Mode::Additive, "floe-index vfs --coverage-only")
+            (
+                floe_vfs::lock::Mode::Additive,
+                "floe-index vfs --coverage-only",
+            )
         } else if occupancy_only {
-            (floe_vfs::lock::Mode::Additive, "floe-index vfs --occupancy-only")
+            (
+                floe_vfs::lock::Mode::Additive,
+                "floe-index vfs --occupancy-only",
+            )
         } else if representatives_only {
-            (floe_vfs::lock::Mode::Additive, "floe-index vfs --representatives-only")
+            (
+                floe_vfs::lock::Mode::Additive,
+                "floe-index vfs --representatives-only",
+            )
         } else if frontier_only {
-            (floe_vfs::lock::Mode::Additive, "floe-index vfs --frontier-only")
+            (
+                floe_vfs::lock::Mode::Additive,
+                "floe-index vfs --frontier-only",
+            )
         } else {
             (floe_vfs::lock::Mode::Full, "floe-index vfs")
         };
@@ -442,7 +448,9 @@ pub fn vfs_cmd(args: &[String]) {
         // them all out, whatever host they are on - a new file goes in beside
         // them (review 2026-10-09 of 9378c6d7, P1)
         let replaces = |name: &str| std::path::Path::new(&format!("{}/{}", outdir, name)).exists();
-        if (occupancy_only && replaces("design.ovo")) || (representatives_only && replaces("design.ovr")) {
+        if (occupancy_only && replaces("design.ovo"))
+            || (representatives_only && replaces("design.ovr"))
+        {
             exclude_readers_or_exit(&mut lock, floe_vfs::lock::Kind::Vfs, &outdir);
         }
         lock
@@ -476,15 +484,10 @@ pub fn vfs_cmd(args: &[String]) {
     };
     if profiling {
         if let Some(path) = profile_snapshot.as_deref() {
-            if std::path::Path::new(path).exists()
-                && !profile_snapshot_refresh
-            {
+            if std::path::Path::new(path).exists() && !profile_snapshot_refresh {
                 eprintln!("[vfs] profile: loading snapshot {}...", path);
                 let ts = std::time::Instant::now();
-                let heartbeat = ProfileIoHeartbeat::start(format!(
-                    "loading snapshot {}",
-                    path
-                ));
+                let heartbeat = ProfileIoHeartbeat::start(format!("loading snapshot {}", path));
                 let loaded = load_profile_snapshot(
                     path,
                     source_fingerprint.as_ref().expect("profile fingerprint"),
@@ -503,9 +506,7 @@ pub fn vfs_cmd(args: &[String]) {
                     std::process::exit(1);
                 }) != *source_fingerprint.as_ref().expect("profile fingerprint")
                 {
-                    eprintln!(
-                        "--profile-snapshot: source changed while snapshot was loading"
-                    );
+                    eprintln!("--profile-snapshot: source changed while snapshot was loading");
                     std::process::exit(1);
                 }
                 drop(heartbeat);
@@ -554,9 +555,7 @@ pub fn vfs_cmd(args: &[String]) {
     let mtime = std::fs::metadata(&src)
         .and_then(|m| m.modified())
         .ok()
-        .and_then(|t| {
-            t.duration_since(std::time::UNIX_EPOCH).ok()
-        })
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let t1 = std::time::Instant::now();
@@ -564,9 +563,7 @@ pub fn vfs_cmd(args: &[String]) {
     // (the build stages tick already; the parser is opaque, so tick
     // elapsed+rss from outside). All progress goes to stderr - the
     // protocol/plan output owns stdout.
-    let parsing = std::sync::Arc::new(
-        std::sync::atomic::AtomicBool::new(true),
-    );
+    let parsing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     {
         let parsing = parsing.clone();
         std::thread::spawn(move || {
@@ -574,36 +571,26 @@ pub fn vfs_cmd(args: &[String]) {
             let t = std::time::Instant::now();
             let mut last = 0u64;
             loop {
-                std::thread::sleep(
-                    std::time::Duration::from_millis(200),
-                );
+                std::thread::sleep(std::time::Duration::from_millis(200));
                 if !parsing.load(Relaxed) {
                     return;
                 }
                 let e = t.elapsed().as_secs();
                 if e >= last + 5 {
                     last = e;
-                    eprintln!(
-                        "[vfs] parsing... ({}s, rss {})",
-                        e,
-                        rss()
-                    );
+                    eprintln!("[vfs] parsing... ({}s, rss {})", e, rss());
                 }
             }
         });
     }
-    let doc = match floe_oasis::doc::parse_doc_parallel_phased(
-        &data,
-        jobs,
-        |_| {
-            eprintln!(
-                "[vfs] syntax parsed in {:.1}s (source still resident, \
+    let doc = match floe_oasis::doc::parse_doc_parallel_phased(&data, jobs, |_| {
+        eprintln!(
+            "[vfs] syntax parsed in {:.1}s (source still resident, \
                  rss {})",
-                t1.elapsed().as_secs_f64(),
-                rss()
-            );
-        },
-    ) {
+            t1.elapsed().as_secs_f64(),
+            rss()
+        );
+    }) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("parse {}: {}", src, e);
@@ -672,22 +659,28 @@ pub fn vfs_cmd(args: &[String]) {
             eprintln!("--representatives-only: {} (build the cache first)", e);
             std::process::exit(1);
         });
-        if ovm.src_size != size || ovm.src_mtime != mtime
+        if ovm.src_size != size
+            || ovm.src_mtime != mtime
             || ovm.cell(ovm.top).name != doc.cells[doc.top].name
         {
             eprintln!("--representatives-only: cache/source identity differs; re-index first");
             std::process::exit(1);
         }
-        if let Err(e) = write_representatives(&doc, &outdir, &ovm, representative_points, representative_format, kill_at.as_deref()) {
+        if let Err(e) = write_representatives(
+            &doc,
+            &outdir,
+            &ovm,
+            representative_points,
+            representative_format,
+            kill_at.as_deref(),
+        ) {
             eprintln!("[vfs] representatives: {}", e);
             std::process::exit(1);
         }
     } else if coverage_only {
         // add design.ovc to an existing cache (additive op, outside
         // the marker protocol): pages/skeleton/meta stay as they are
-        if !std::path::Path::new(&format!("{}/design.ovm", outdir))
-            .exists()
-        {
+        if !std::path::Path::new(&format!("{}/design.ovm", outdir)).exists() {
             eprintln!(
                 "--coverage-only: {}/design.ovm not found (build \
                  the cache first)",
@@ -718,8 +711,7 @@ pub fn vfs_cmd(args: &[String]) {
         if top != doc.cells[doc.top].name {
             eprintln!(
                 "--occupancy-only: cache top {:?} differs from the parsed top {:?}",
-                top,
-                doc.cells[doc.top].name
+                top, doc.cells[doc.top].name
             );
             std::process::exit(1);
         }
@@ -792,12 +784,18 @@ pub fn vfs_cmd(args: &[String]) {
         // validation included - a free extra gate) and move back
         // out for the design.ovm commit below.
         let (frontier, ovm_bytes) = {
-            let ovm = floe_ovm::Ovm::from_bytes(ovm_bytes)
-                .expect("reopen built ovm");
+            let ovm = floe_ovm::Ovm::from_bytes(ovm_bytes).expect("reopen built ovm");
             if representatives {
                 // an optional file never costs the cache: warn, finish
                 // design.ovm + marker, and say how to add it later
-                if let Err(e) = write_representatives(&doc, &outdir, &ovm, representative_points, representative_format, kill_at.as_deref()) {
+                if let Err(e) = write_representatives(
+                    &doc,
+                    &outdir,
+                    &ovm,
+                    representative_points,
+                    representative_format,
+                    kill_at.as_deref(),
+                ) {
                     eprintln!(
                         "[vfs] representatives: {} - the cache is completed without design.ovr; add it later with --representatives-only",
                         e
@@ -816,8 +814,9 @@ pub fn vfs_cmd(args: &[String]) {
                 floe_ovm::Backing::Map(_) => unreachable!(),
             }
         };
-        emit_viewer_side(&doc, &src, size, mtime, &outdir, &rbb,
-                         &lmems, &tstats, &frontier);
+        emit_viewer_side(
+            &doc, &src, size, mtime, &outdir, &rbb, &lmems, &tstats, &frontier,
+        );
         if coverage {
             write_coverage(&doc, &outdir, jobs);
         }
@@ -833,8 +832,7 @@ pub fn vfs_cmd(args: &[String]) {
             eprintln!("[vfs] --kill-at ovm-partial");
             std::process::exit(9);
         }
-        std::fs::write(format!("{}/design.ovm", outdir), &ovm_bytes)
-            .expect("write ovm");
+        std::fs::write(format!("{}/design.ovm", outdir), &ovm_bytes).expect("write ovm");
         eprintln!(
             "[vfs] commit design.ovm ({})",
             fmt_size(ovm_bytes.len() as u64)
@@ -878,10 +876,9 @@ struct SourceFingerprint {
 
 impl SourceFingerprint {
     fn read(path: &str) -> Result<Self, String> {
-        let canonical = std::fs::canonicalize(path)
-            .map_err(|e| format!("cannot resolve source: {e}"))?;
-        let meta = std::fs::metadata(&canonical)
-            .map_err(|e| format!("cannot stat source: {e}"))?;
+        let canonical =
+            std::fs::canonicalize(path).map_err(|e| format!("cannot resolve source: {e}"))?;
+        let meta = std::fs::metadata(&canonical).map_err(|e| format!("cannot stat source: {e}"))?;
         let modified = meta
             .modified()
             .map_err(|e| format!("cannot read source mtime: {e}"))?
@@ -923,8 +920,7 @@ impl ProfileIoHeartbeat {
             let mut last = 0u64;
             loop {
                 match rx.recv_timeout(std::time::Duration::from_millis(200)) {
-                    Ok(())
-                    | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                         return;
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -932,16 +928,14 @@ impl ProfileIoHeartbeat {
                 let elapsed = started.elapsed().as_secs();
                 if elapsed >= last + 5 {
                     last = elapsed;
-                    eprintln!(
-                        "[vfs] profile: {}... ({}s, rss {})",
-                        action,
-                        elapsed,
-                        rss()
-                    );
+                    eprintln!("[vfs] profile: {}... ({}s, rss {})", action, elapsed, rss());
                 }
             }
         });
-        Self { stop, thread: Some(thread) }
+        Self {
+            stop,
+            thread: Some(thread),
+        }
     }
 }
 
@@ -1079,11 +1073,7 @@ fn save_profile_snapshot(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let temp = target.with_file_name(format!(
-        ".{file_name}.tmp.{}.{}",
-        std::process::id(),
-        nonce
-    ));
+    let temp = target.with_file_name(format!(".{file_name}.tmp.{}.{}", std::process::id(), nonce));
     let result = (|| -> Result<u64, String> {
         let mut options = std::fs::OpenOptions::new();
         options.read(true).write(true).create_new(true);
@@ -1097,18 +1087,22 @@ fn save_profile_snapshot(
             .map_err(|e| format!("cannot create temporary snapshot: {e}"))?;
         let buffered = std::io::BufWriter::with_capacity(1 << 20, file);
         let mut out = SnapshotWriter::new(buffered);
-        out.bytes(PROFILE_SNAPSHOT_MAGIC).map_err(|e| e.to_string())?;
-        out.u32(PROFILE_SNAPSHOT_VERSION).map_err(|e| e.to_string())?;
+        out.bytes(PROFILE_SNAPSHOT_MAGIC)
+            .map_err(|e| e.to_string())?;
+        out.u32(PROFILE_SNAPSHOT_VERSION)
+            .map_err(|e| e.to_string())?;
         out.string(&fingerprint.path).map_err(|e| e.to_string())?;
         out.u64(fingerprint.size).map_err(|e| e.to_string())?;
         out.u64(fingerprint.mtime_secs).map_err(|e| e.to_string())?;
-        out.u32(fingerprint.mtime_nanos).map_err(|e| e.to_string())?;
+        out.u32(fingerprint.mtime_nanos)
+            .map_err(|e| e.to_string())?;
         out.u64(doc.cells.len() as u64).map_err(|e| e.to_string())?;
         out.u64(ci as u64).map_err(|e| e.to_string())?;
         out.string(&doc.cells[ci].name).map_err(|e| e.to_string())?;
         out.u64(doc.unit.to_bits()).map_err(|e| e.to_string())?;
 
-        out.u64(doc.layer_order.len() as u64).map_err(|e| e.to_string())?;
+        out.u64(doc.layer_order.len() as u64)
+            .map_err(|e| e.to_string())?;
         for &(layer, datatype) in &doc.layer_order {
             out.u32(layer).map_err(|e| e.to_string())?;
             out.u32(datatype).map_err(|e| e.to_string())?;
@@ -1130,7 +1124,8 @@ fn save_profile_snapshot(
         let cell = &doc.cells[ci];
         let mut pool_ids = std::collections::HashMap::new();
         let mut pools = Vec::new();
-        out.u64(cell.rects.len() as u64).map_err(|e| e.to_string())?;
+        out.u64(cell.rects.len() as u64)
+            .map_err(|e| e.to_string())?;
         for rec in &cell.rects {
             out.u32(rec.layer).map_err(|e| e.to_string())?;
             out.u32(rec.dt).map_err(|e| e.to_string())?;
@@ -1141,7 +1136,8 @@ fn save_profile_snapshot(
             snapshot_write_rep(&mut out, &rec.rep, &mut pool_ids, &mut pools)
                 .map_err(|e| e.to_string())?;
         }
-        out.u64(cell.polys.len() as u64).map_err(|e| e.to_string())?;
+        out.u64(cell.polys.len() as u64)
+            .map_err(|e| e.to_string())?;
         for rec in &cell.polys {
             out.u32(rec.layer).map_err(|e| e.to_string())?;
             out.u32(rec.dt).map_err(|e| e.to_string())?;
@@ -1149,7 +1145,8 @@ fn save_profile_snapshot(
             snapshot_write_rep(&mut out, &rec.rep, &mut pool_ids, &mut pools)
                 .map_err(|e| e.to_string())?;
         }
-        out.u64(cell.paths.len() as u64).map_err(|e| e.to_string())?;
+        out.u64(cell.paths.len() as u64)
+            .map_err(|e| e.to_string())?;
         for rec in &cell.paths {
             out.u32(rec.layer).map_err(|e| e.to_string())?;
             out.u32(rec.dt).map_err(|e| e.to_string())?;
@@ -1160,7 +1157,8 @@ fn save_profile_snapshot(
             snapshot_write_rep(&mut out, &rec.rep, &mut pool_ids, &mut pools)
                 .map_err(|e| e.to_string())?;
         }
-        out.u64(cell.places.len() as u64).map_err(|e| e.to_string())?;
+        out.u64(cell.places.len() as u64)
+            .map_err(|e| e.to_string())?;
         for rec in &cell.places {
             out.u64(rec.cell as u64).map_err(|e| e.to_string())?;
             out.i64(rec.x).map_err(|e| e.to_string())?;
@@ -1201,8 +1199,7 @@ fn save_profile_snapshot(
                 "source changed while snapshot was being written; snapshot not published",
             ));
         }
-        std::fs::rename(&temp, &target)
-            .map_err(|e| format!("publish snapshot: {e}"))?;
+        std::fs::rename(&temp, &target).map_err(|e| format!("publish snapshot: {e}"))?;
         if let Some(parent) = target.parent() {
             if let Ok(dir) = std::fs::File::open(parent) {
                 let _ = dir.sync_all();
@@ -1329,14 +1326,13 @@ fn load_profile_snapshot(
     requested_name: Option<&str>,
     requested_ci: Option<usize>,
 ) -> Result<LoadedProfileSnapshot, String> {
-    let file = std::fs::File::open(path)
-        .map_err(|e| format!("cannot open snapshot: {e}"))?;
+    let file = std::fs::File::open(path).map_err(|e| format!("cannot open snapshot: {e}"))?;
     let bytes = file
         .metadata()
         .map_err(|e| format!("cannot stat snapshot: {e}"))?
         .len();
-    let map = unsafe { memmap2::Mmap::map(&file) }
-        .map_err(|e| format!("cannot map snapshot: {e}"))?;
+    let map =
+        unsafe { memmap2::Mmap::map(&file) }.map_err(|e| format!("cannot map snapshot: {e}"))?;
     if map.len() < PROFILE_SNAPSHOT_MAGIC.len() + PROFILE_SNAPSHOT_TRAILER {
         return Err(String::from("snapshot is truncated"));
     }
@@ -1416,7 +1412,9 @@ fn load_profile_snapshot(
     }
     let bbox_count = cur.count(1, "recursive bbox")?;
     if bbox_count != cell_count {
-        return Err(String::from("recursive bbox count does not match cell count"));
+        return Err(String::from(
+            "recursive bbox count does not match cell count",
+        ));
     }
     let mut rbb = Vec::with_capacity(bbox_count);
     for _ in 0..bbox_count {
@@ -1495,8 +1493,7 @@ fn load_profile_snapshot(
         return Err(String::from("snapshot has trailing record data"));
     }
 
-    let mut cells: Vec<Cell> =
-        (0..cell_count).map(|_| Cell::default()).collect();
+    let mut cells: Vec<Cell> = (0..cell_count).map(|_| Cell::default()).collect();
     cells[ci] = Cell {
         name,
         rects,
@@ -1562,9 +1559,7 @@ fn profile_cell_plan(
             std::process::exit(2);
         };
         if hits.next().is_some() {
-            eprintln!(
-                "--profile-cell: duplicate cell name {name:?}; use --profile-cell-ci"
-            );
+            eprintln!("--profile-cell: duplicate cell name {name:?}; use --profile-cell-ci");
             std::process::exit(2);
         }
         ci
@@ -1606,18 +1601,8 @@ fn profile_cell_plan(
     if let Some((path, fingerprint)) = snapshot_save {
         eprintln!("[vfs] profile: saving snapshot {}...", path);
         let ts = std::time::Instant::now();
-        let heartbeat = ProfileIoHeartbeat::start(format!(
-            "saving snapshot {}",
-            path
-        ));
-        let bytes = save_profile_snapshot(
-            path,
-            fingerprint,
-            doc,
-            ci,
-            &rbb,
-        )
-        .unwrap_or_else(|e| {
+        let heartbeat = ProfileIoHeartbeat::start(format!("saving snapshot {}", path));
+        let bytes = save_profile_snapshot(path, fingerprint, doc, ci, &rbb).unwrap_or_else(|e| {
             eprintln!("--profile-snapshot: {}", e);
             std::process::exit(1);
         });
@@ -1635,8 +1620,7 @@ fn profile_cell_plan(
     // monster cell this walk covers hundreds of millions of records, so do
     // not accidentally charge it once per jobs/repeat combination.
     let tinventory = std::time::Instant::now();
-    let source_records =
-        cell.rects.len() + cell.polys.len() + cell.paths.len();
+    let source_records = cell.rects.len() + cell.polys.len() + cell.paths.len();
     let source_members: u64 = cell
         .rects
         .iter()
@@ -1645,10 +1629,7 @@ fn profile_cell_plan(
         .chain(cell.paths.iter().map(|r| r.rep.members()))
         .sum();
     let inventory_s = tinventory.elapsed().as_secs_f64();
-    eprintln!(
-        "[vfs] profile: common source inventory {:.3}s",
-        inventory_s
-    );
+    eprintln!("[vfs] profile: common source inventory {:.3}s", inventory_s);
     let mut reports = Vec::new();
     let total_runs = plan_jobs.len().saturating_mul(profile_repeat);
     let mut series_index = 0usize;
@@ -1730,12 +1711,8 @@ fn profile_cell_run(
             let t = std::time::Instant::now();
             let mut last = 0u64;
             loop {
-                match stop_rx.recv_timeout(
-                    std::time::Duration::from_millis(200),
-                ) {
-                    Ok(())
-                    | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) =>
-                    {
+                match stop_rx.recv_timeout(std::time::Duration::from_millis(200)) {
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                         return;
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -1758,8 +1735,7 @@ fn profile_cell_run(
     // immediately available to P1/P2/LOD. This measures isolated cell
     // scalability, independently of the full-build commit window.
     let available_helpers = jobs.max(1).saturating_sub(1);
-    let plan_budget =
-        std::sync::atomic::AtomicIsize::new(available_helpers as isize);
+    let plan_budget = std::sync::atomic::AtomicIsize::new(available_helpers as isize);
     let tplan = std::time::Instant::now();
     let plan = build_cell_plan(
         doc,
@@ -1820,8 +1796,7 @@ fn profile_cell_run(
         plan.shard_bytes / MIB,
         arena_bytes / MIB,
     );
-    let mut by_time: Vec<&LayerProfile> =
-        plan.layer_profiles.iter().collect();
+    let mut by_time: Vec<&LayerProfile> = plan.layer_profiles.iter().collect();
     by_time.sort_by(|a, b| {
         b.timing
             .total_s
@@ -2008,14 +1983,28 @@ fn write_representatives(
     let started = std::time::Instant::now();
     let result = (|| -> Result<(), String> {
         if kill_at == Some("representatives-fail") {
-            return Err("--kill-at representatives-fail (gate-only simulated build failure)".into());
+            return Err(
+                "--kill-at representatives-fail (gate-only simulated build failure)".into(),
+            );
         }
-        let mut built = reps::build_with(doc, points, Some(|s| eprintln!("[vfs] representatives {}", s)), format == 2)?;
+        let mut built = reps::build_with(
+            doc,
+            points,
+            Some(|s| eprintln!("[vfs] representatives {}", s)),
+            format == 2,
+        )?;
         let count: usize = built.groups.iter().map(|g| g.points.len()).sum();
         let tmp = format!("{}/design.ovr.tmp", outdir);
         let mut file = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
         let size = if format == 2 {
-            let kinds = |k: u8| built.groups.iter().flat_map(|g| &g.prims).filter(|p| p.kind == k).count();
+            let kinds = |k: u8| {
+                built
+                    .groups
+                    .iter()
+                    .flat_map(|g| &g.prims)
+                    .filter(|p| p.kind == k)
+                    .count()
+            };
             eprintln!("[vfs] representatives format=2 revision=3 rects={} segments={} points={} (no usable edge: {})",
                       kinds(reps::PRIM_RECT), kinds(reps::PRIM_SEGMENT), kinds(reps::PRIM_POINT), built.point_fallbacks);
             reps::write_tree(&mut file, &mut built, ovm)?
@@ -2087,8 +2076,16 @@ fn write_occupancy(
         std::process::exit(9);
     }
     std::fs::rename(&tmp, &path).expect("publish ovo");
-    let ok = built.layers.iter().filter(|l| l.status == occ::STATUS_OK).count();
-    let empty = built.layers.iter().filter(|l| l.status == occ::STATUS_EMPTY).count();
+    let ok = built
+        .layers
+        .iter()
+        .filter(|l| l.status == occ::STATUS_OK)
+        .count();
+    let empty = built
+        .layers
+        .iter()
+        .filter(|l| l.status == occ::STATUS_EMPTY)
+        .count();
     eprintln!(
         "[vfs] occupancy cell={}um ({} dbu{}) grid={}x{} levels={} layers={} ok={} empty={} jobs={} {} ({:.1}s)",
         built.cell_dbu as f64 / built.unit,
@@ -2167,7 +2164,10 @@ pub fn bvh_cmd(args: &[String]) {
     let unit = v.ovm.unit;
     let um = |d: i64| d as f64 / unit;
     let c = v.ovm.cell(ci);
-    println!("bvh\theader\tcell={}\tci={}\tnodes={}\tplacements={}\tunit={}", cell_name, ci, c.bvh_count, c.place_count, unit);
+    println!(
+        "bvh\theader\tcell={}\tci={}\tnodes={}\tplacements={}\tunit={}",
+        cell_name, ci, c.bvh_count, c.place_count, unit
+    );
     if c.bvh_count == 0 {
         return;
     }
@@ -2177,7 +2177,11 @@ pub fn bvh_cmd(args: &[String]) {
         println!(
             "node\t{}\t{}\t{}\t{}\t{}\t{:.4},{:.4},{:.4},{:.4}\t{:.4}\t{:.4}\t{}",
             ni,
-            if parent == u32::MAX { -1 } else { parent as i64 },
+            if parent == u32::MAX {
+                -1
+            } else {
+                parent as i64
+            },
             depth,
             n.leaf as u8,
             n.count,
@@ -2219,7 +2223,13 @@ pub fn bvh_cmd(args: &[String]) {
                         let (lo, hi) = pr.chunk_range(k);
                         println!(
                             "chunk\t{}\t{}\t{:.4},{:.4},{:.4},{:.4}\t{}",
-                            pli, k, um(cb.x0), um(cb.y0), um(cb.x1), um(cb.y1), hi - lo
+                            pli,
+                            k,
+                            um(cb.x0),
+                            um(cb.y0),
+                            um(cb.x1),
+                            um(cb.y1),
+                            hi - lo
                         );
                     }
                     for slot in 0..pr.count {
@@ -2278,23 +2288,33 @@ pub fn ovs_cmd(args: &[String]) {
         let a = &args[i];
         if a == "--jobs" {
             i += 1;
-            jobs = args.get(i).and_then(|v| v.parse::<usize>().ok()).unwrap_or_else(|| {
-                eprintln!("--jobs wants a number of threads");
-                std::process::exit(2);
-            });
+            jobs = args
+                .get(i)
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or_else(|| {
+                    eprintln!("--jobs wants a number of threads");
+                    std::process::exit(2);
+                });
         } else if a == "--um" {
             i += 1;
-            base_um = args.get(i).and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite() && *v > 0.0);
+            base_um = args
+                .get(i)
+                .and_then(|v| v.parse::<f64>().ok())
+                .filter(|v| v.is_finite() && *v > 0.0);
             if base_um.is_none() {
                 eprintln!("--um wants a positive number of microns");
                 std::process::exit(2);
             }
         } else if a == "--roots" {
             i += 1;
-            root_share = args.get(i).and_then(|v| v.parse::<f64>().ok()).filter(|v| (0.0..=1.0).contains(v)).unwrap_or_else(|| {
-                eprintln!("--roots wants a share of the top's box from 0 (none) to 1");
-                std::process::exit(2);
-            });
+            root_share = args
+                .get(i)
+                .and_then(|v| v.parse::<f64>().ok())
+                .filter(|v| (0.0..=1.0).contains(v))
+                .unwrap_or_else(|| {
+                    eprintln!("--roots wants a share of the top's box from 0 (none) to 1");
+                    std::process::exit(2);
+                });
         } else if a.starts_with("--") {
             crate::unknown_option("ovs", a);
         } else {
@@ -2308,7 +2328,12 @@ pub fn ovs_cmd(args: &[String]) {
     });
     // design.ovs and its cells' files are added beside the others
     // (floe_vfs::lock): other writers stay out
-    let _lock = lock_writer(floe_vfs::lock::Kind::Vfs, &dir, floe_vfs::lock::Mode::Additive, "floe-index ovs");
+    let _lock = lock_writer(
+        floe_vfs::lock::Kind::Vfs,
+        &dir,
+        floe_vfs::lock::Mode::Additive,
+        "floe-index ovs",
+    );
     let started = std::time::Instant::now();
     // where the build is (user 2026-10-07: "no log while ovs indexes - 11
     // minutes into the real chip and no telling how far it got")
@@ -2369,24 +2394,40 @@ struct OvsWritten {
 /// reading the old file meanwhile keeps it whole - and an earlier build's
 /// cell files no longer made removed; `say` gets the progress lines. An
 /// error names the file or the step.
-fn write_ovs(dir: &str, base_um: Option<f64>, jobs: usize, root_share: f64, say: &dyn Fn(&str)) -> Result<OvsWritten, String> {
+fn write_ovs(
+    dir: &str,
+    base_um: Option<f64>,
+    jobs: usize,
+    root_share: f64,
+    say: &dyn Fn(&str),
+) -> Result<OvsWritten, String> {
     let started = std::time::Instant::now();
-    let mut ovm = floe_ovm::Ovm::open(&format!("{}/design.ovm", dir)).map_err(|e| format!("design.ovm: {}", e))?;
+    let mut ovm = floe_ovm::Ovm::open(&format!("{}/design.ovm", dir))
+        .map_err(|e| format!("design.ovm: {}", e))?;
     match ovm.attach_page_occ(&format!("{}/design.ovb", dir)) {
         Ok(true) => {}
-        Ok(false) => return Err("design.ovb: missing (an index built without the pages' occupancy: index again)".into()),
+        Ok(false) => {
+            return Err(
+                "design.ovb: missing (an index built without the pages' occupancy: index again)"
+                    .into(),
+            )
+        }
         Err(e) => return Err(format!("design.ovb: {}", e)),
     }
     let summary = floe_vfs::hiersum::HierSummary::open(&format!("{}/design.ovh", dir))
         .and_then(|s| s.validate_against(&ovm).map(|()| s))
         .map_err(|e| format!("design.ovh: {} (floe-index hier adds it)", e))?;
-    let cover = floe_vfs::cover::CellCover::new(&ovm, std::sync::Arc::new(summary)).ok_or("cell cover: no design.ovb or another summary")?;
+    let cover = floe_vfs::cover::CellCover::new(&ovm, std::sync::Arc::new(summary))
+        .ok_or("cell cover: no design.ovb or another summary")?;
     let open_s = started.elapsed().as_secs_f64();
     say(&format!("{}: index open ({:.1} s)", dir, open_s));
     let ovp = format!("{}/design.ovp", dir);
     let floe_vfs::occ_density::Built { top, roots, stats } =
-        floe_vfs::occ_density::build(&ovm, &cover, &ovp, base_um, jobs, root_share, say).map_err(|e| format!("build: {}", e))?;
-    let grid = floe_vfs::occ_density::OvsFile::from_bytes(top.clone()).map_err(|e| format!("build: {}", e))?.grid;
+        floe_vfs::occ_density::build(&ovm, &cover, &ovp, base_um, jobs, root_share, say)
+            .map_err(|e| format!("build: {}", e))?;
+    let grid = floe_vfs::occ_density::OvsFile::from_bytes(top.clone())
+        .map_err(|e| format!("build: {}", e))?
+        .grid;
     let write = |path: &str, bytes: &[u8]| -> Result<(), String> {
         let tmp = format!("{}.tmp", path);
         std::fs::write(&tmp, bytes).map_err(|e| format!("{}: {}", tmp, e))?;
@@ -2396,10 +2437,16 @@ fn write_ovs(dir: &str, base_um: Option<f64>, jobs: usize, root_share: f64, say:
     let mut root_bytes = 0usize;
     for (ci, name, rb) in &roots {
         let path = format!("{}/design.ovs.{}", dir, ci);
-        floe_vfs::occ_density::OvsFile::from_bytes(rb.clone()).map_err(|e| format!("{}: {}", path, e))?;
+        floe_vfs::occ_density::OvsFile::from_bytes(rb.clone())
+            .map_err(|e| format!("{}: {}", path, e))?;
         write(&path, rb)?;
         root_bytes += rb.len();
-        say(&format!("{}: cell {}'s root views, {:.1} MB", path, name, rb.len() as f64 / 1e6));
+        say(&format!(
+            "{}: cell {}'s root views, {:.1} MB",
+            path,
+            name,
+            rb.len() as f64 / 1e6
+        ));
     }
     let kept: Vec<u32> = roots.iter().map(|r| r.0).collect();
     for removed in remove_cell_ovs(dir, &kept)? {
@@ -2407,22 +2454,36 @@ fn write_ovs(dir: &str, base_um: Option<f64>, jobs: usize, root_share: f64, say:
     }
     let path = format!("{}/design.ovs", dir);
     write(&path, &top)?;
-    Ok(OvsWritten { path, bytes: top.len(), grid, roots: roots.len(), root_bytes, stats, open_s })
+    Ok(OvsWritten {
+        path,
+        bytes: top.len(),
+        grid,
+        roots: roots.len(),
+        root_bytes,
+        stats,
+        open_s,
+    })
 }
 
 /// The cells' design.ovs.<cell> (and their .tmp) in `dir` but those of the
 /// cells `kept`, removed: their paths
 fn remove_cell_ovs(dir: &str, kept: &[u32]) -> Result<Vec<String>, String> {
     let mut removed = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else { return Ok(removed) };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(removed);
+    };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(rest) = name.strip_prefix("design.ovs.") else { continue };
+        let Some(rest) = name.strip_prefix("design.ovs.") else {
+            continue;
+        };
         let (number, tmp) = match rest.strip_suffix(".tmp") {
             Some(number) => (number, true),
             None => (rest, false),
         };
-        let Ok(ci) = number.parse::<u32>() else { continue };
+        let Ok(ci) = number.parse::<u32>() else {
+            continue;
+        };
         if tmp || !kept.contains(&ci) {
             let path = format!("{}/{}", dir, name);
             std::fs::remove_file(entry.path()).map_err(|e| format!("{}: {}", path, e))?;
@@ -2441,7 +2502,11 @@ fn write_ovs_after_build(outdir: &str, jobs: usize, page_occ: bool, hier: bool) 
     if !page_occ || !hier {
         eprintln!(
             "[vfs] ovs: none - design.ovs is made of design.ovb and design.ovh ({} left one out)",
-            if page_occ { "--no-hier" } else { "--no-page-occupancy" }
+            if page_occ {
+                "--no-hier"
+            } else {
+                "--no-page-occupancy"
+            }
         );
         return;
     }
@@ -2489,7 +2554,14 @@ pub fn hier_cmd(args: &[String]) {
     // design.ovh is added beside the others (floe_vfs::lock): other writers
     // stay out, and the readers too when one is there to replace (they map
     // it); --check only reads
-    let mut _lock = (!check).then(|| lock_writer(floe_vfs::lock::Kind::Vfs, &dir, floe_vfs::lock::Mode::Additive, "floe-index hier"));
+    let mut _lock = (!check).then(|| {
+        lock_writer(
+            floe_vfs::lock::Kind::Vfs,
+            &dir,
+            floe_vfs::lock::Mode::Additive,
+            "floe-index hier",
+        )
+    });
     if let Some(lock) = _lock.as_mut() {
         if std::path::Path::new(&format!("{}/design.ovh", dir)).exists() {
             exclude_readers_or_exit(lock, floe_vfs::lock::Kind::Vfs, &dir);
@@ -2502,7 +2574,8 @@ pub fn hier_cmd(args: &[String]) {
     });
     let path = format!("{}/design.ovh", dir);
     if check {
-        let status = floe_vfs::hiersum::HierSummary::open(&path).and_then(|s| s.validate_against(&ovm).map(|()| s));
+        let status = floe_vfs::hiersum::HierSummary::open(&path)
+            .and_then(|s| s.validate_against(&ovm).map(|()| s));
         match status {
             Ok(s) => println!(
                 "hier file={} version={} cells={} edges={} top={} identity=ok",
@@ -2580,7 +2653,9 @@ pub fn occupancy_cmd(args: &[String]) {
         }
     }
     let dir = dir.unwrap_or_else(|| {
-        eprintln!("usage: floe-index occupancy <cache> [--layer L/D] [--level N] [--depth N] [--dump]");
+        eprintln!(
+            "usage: floe-index occupancy <cache> [--layer L/D] [--level N] [--depth N] [--dump]"
+        );
         std::process::exit(2);
     });
     let path = format!("{}/design.ovo", dir);
@@ -2620,7 +2695,9 @@ pub fn occupancy_cmd(args: &[String]) {
         // set= counts the flattening of every plane per level;
         // planes= lists the placement depths that hold a shape (a
         // version-1 file: `all`) with each plane's level-0 count
-        let sets: Vec<String> = (0..f.n_levels as usize).map(|lv| f.count(k, lv).to_string()).collect();
+        let sets: Vec<String> = (0..f.n_levels as usize)
+            .map(|lv| f.count(k, lv).to_string())
+            .collect();
         // non-empty 16 x 16-cell tiles per level (review 2026-09-24: what a
         // tiled sparse plane would store, against the set-cell share)
         let tiles: Vec<String> = (0..f.n_levels as usize)
@@ -2634,7 +2711,9 @@ pub fn occupancy_cmd(args: &[String]) {
                             let mut any = false;
                             'rows: for j in tj * 16..((tj + 1) * 16).min(h) {
                                 for i in ti * 16..((ti + 1) * 16).min(w) {
-                                    if (bits[j as usize * rb + (i / 8) as usize] >> (i % 8)) & 1 == 1 {
+                                    if (bits[j as usize * rb + (i / 8) as usize] >> (i % 8)) & 1
+                                        == 1
+                                    {
                                         any = true;
                                         break 'rows;
                                     }
@@ -2648,13 +2727,22 @@ pub fn occupancy_cmd(args: &[String]) {
                 None => "0/0".to_string(),
             })
             .collect();
-        let (w0, h0) = l.planes.first().and_then(|p| p.levels.first()).map(|e| (e.w, e.h)).unwrap_or((0, 0));
+        let (w0, h0) = l
+            .planes
+            .first()
+            .and_then(|p| p.levels.first())
+            .map(|e| (e.w, e.h))
+            .unwrap_or((0, 0));
         let planes: Vec<String> = l
             .planes
             .iter()
             .enumerate()
             .map(|(p, plane)| {
-                let depth = if plane.depth == occ::DEPTH_ALL { "all".to_string() } else { plane.depth.to_string() };
+                let depth = if plane.depth == occ::DEPTH_ALL {
+                    "all".to_string()
+                } else {
+                    plane.depth.to_string()
+                };
                 format!("{}:{}", depth, f.plane_count(k, p, 0))
             })
             .collect();
@@ -2669,7 +2757,11 @@ pub fn occupancy_cmd(args: &[String]) {
             h0,
             sets.join(","),
             tiles.join(","),
-            if planes.is_empty() { "-".to_string() } else { planes.join(",") }
+            if planes.is_empty() {
+                "-".to_string()
+            } else {
+                planes.join(",")
+            }
         );
     }
     if dump {
@@ -2693,8 +2785,14 @@ pub fn occupancy_cmd(args: &[String]) {
             std::process::exit(1);
         };
         match depth {
-            None => println!("dump ld={}/{} level={} w={} h={}", key.0, key.1, level, w, h),
-            Some(d) => println!("dump ld={}/{} level={} depth={} w={} h={}", key.0, key.1, level, d, w, h),
+            None => println!(
+                "dump ld={}/{} level={} w={} h={}",
+                key.0, key.1, level, w, h
+            ),
+            Some(d) => println!(
+                "dump ld={}/{} level={} depth={} w={} h={}",
+                key.0, key.1, level, d, w, h
+            ),
         }
         let rb = occ::Level::row_bytes(w);
         let mut row = String::with_capacity(w as usize);
@@ -2715,8 +2813,7 @@ pub fn occupancy_cmd(args: &[String]) {
 /// coverage bitplanes (V3b): optional density overview
 fn write_coverage(doc: &Doc, outdir: &str, jobs: usize) {
     let tc = std::time::Instant::now();
-    let ovc =
-        floe_vfs::coverage::write_ovc(doc, &doc.layer_order, jobs);
+    let ovc = floe_vfs::coverage::write_ovc(doc, &doc.layer_order, jobs);
     // replaced whole (--coverage-only adds it while readers may be in)
     write_replacing(&format!("{}/design.ovc", outdir), &ovc).expect("write ovc");
     eprintln!(
@@ -2769,23 +2866,19 @@ fn frontier_json_planned(v: &floe_ovm::Ovm) -> String {
             sub_cut_wash: false,
             page_reps: false,
             decode_budget: 0,
-                    page_hairline: true,
-                    page_skip: Vec::new(),
-                    prune_skipped: false,
-                    sub_cut_box: false,
-                    shape_cut: false,
-                    shape_cut_max: false,
-                    frames: true,
-                    root: None,
-                    page_wash: true,
-                    lod_swap: true,
+            page_hairline: true,
+            page_skip: Vec::new(),
+            prune_skipped: false,
+            sub_cut_box: false,
+            shape_cut: false,
+            shape_cut_max: false,
+            frames: true,
+            root: None,
+            page_wash: true,
+            lod_swap: true,
         };
         let plan = floe_vfs::hier::plan_hier(v, &req, &opts);
-        let (boxes, truncated) = floe_vfs::hier::frontier_boxes(
-            v,
-            &plan,
-            FRONTIER_KEEP,
-        );
+        let (boxes, truncated) = floe_vfs::hier::frontier_boxes(v, &plan, FRONTIER_KEEP);
         if truncated {
             eprintln!(
                 "[vfs] frontier: depth {} hit the 8M expansion \
@@ -2795,12 +2888,7 @@ fn frontier_json_planned(v: &floe_ovm::Ovm) -> String {
         }
         let rows: Vec<String> = boxes
             .iter()
-            .map(|(b, band)| {
-                format!(
-                    "[{},{},{},{},{}]",
-                    b[0], b[1], b[2], b[3], band
-                )
-            })
+            .map(|(b, band)| format!("[{},{},{},{},{}]", b[0], b[1], b[2], b[3], band))
             .collect();
         depths.push(format!("[{}]", rows.join(",")));
     }
@@ -2824,7 +2912,8 @@ fn patch_meta_frontier(path: &str, frontier: &str) {
     let meta = std::fs::read_to_string(path).expect("read meta");
     let key = "\"frontier\":";
     let k = meta.find(key).expect("meta has no frontier key");
-    let open = k + key.len()
+    let open = k
+        + key.len()
         + meta[k + key.len()..]
             .find('{')
             .expect("frontier value not an object");
@@ -2844,8 +2933,7 @@ fn patch_meta_frontier(path: &str, frontier: &str) {
         }
     }
     assert!(end > open, "unbalanced frontier object");
-    let out =
-        format!("{}{}{}", &meta[..open], frontier, &meta[end..]);
+    let out = format!("{}{}{}", &meta[..open], frontier, &meta[end..]);
     // replaced whole: a viewer opening the cache meanwhile reads the old
     // file or the new, never half of one
     write_replacing(path, out.as_bytes()).expect("write meta");
@@ -2888,14 +2976,12 @@ fn emit_viewer_side(
     let bbox = rbb[doc.top].unwrap_or((0, 0, 0, 0));
     let dbu = 1.0 / doc.unit;
     let n = {
-        let t = (size as f64 / 6.0e6).sqrt().round_ties_even()
-            as i64;
+        let t = (size as f64 / 6.0e6).sqrt().round_ties_even() as i64;
         t.clamp(4, 96)
     };
     let tw = ((bbox.2 - bbox.0) as f64 / n as f64).ceil() as i64;
     let th = ((bbox.3 - bbox.1) as f64 / n as f64).ceil() as i64;
-    let mut stored: std::collections::HashMap<(u32, u32), u64> =
-        std::collections::HashMap::new();
+    let mut stored: std::collections::HashMap<(u32, u32), u64> = std::collections::HashMap::new();
     for (i, &(l, d)) in doc.layer_order.iter().enumerate() {
         if lmems[i] > 0 {
             stored.insert((l, d), lmems[i]);
@@ -2903,8 +2989,7 @@ fn emit_viewer_side(
     }
     for cell in &doc.cells {
         for t in &cell.texts {
-            *stored.entry((t.layer, t.dt)).or_default() +=
-                t.rep.members();
+            *stored.entry((t.layer, t.dt)).or_default() += t.rep.members();
         }
     }
     let layers_json: Vec<String> = doc
@@ -2992,8 +3077,7 @@ fn emit_viewer_side(
         tstats.string_bytes + tstats.pts_bytes,
         frontier,
     );
-    std::fs::write(format!("{}/meta.json", outdir), meta)
-        .expect("write meta");
+    std::fs::write(format!("{}/meta.json", outdir), meta).expect("write meta");
     eprintln!(
         "[vfs] meta ({:.1}s, rss {})",
         t0.elapsed().as_secs_f64(),
@@ -3036,9 +3120,18 @@ enum Frag {
     /// `arena` indexes the owning ARENA SHARD (#60 P1/P2: one per
     /// serial/P1 layer, one per P2 frontier task) - the page's
     /// arena_slot names which shard that is.
-    Pts { arena: u32, lo: u32, hi: u32 },
+    Pts {
+        arena: u32,
+        lo: u32,
+        hi: u32,
+    },
     /// index sub-rectangle [i0,i1) x [j0,j1) of a Grid rep
-    Grid { i0: u64, i1: u64, j0: u64, j1: u64 },
+    Grid {
+        i0: u64,
+        i1: u64,
+        j0: u64,
+        j1: u64,
+    },
 }
 
 /// Per-record scratch for fragmented Pts reps. The source offsets stay in the
@@ -3110,9 +3203,7 @@ const P2_TASK_CAP: usize = 32;
 /// of CPU-active planning tasks never exceeds `--jobs`. A persistent cell
 /// planner returns its slot while it is stalled beyond the ordered plan window
 /// and must borrow it again before touching the next cell (#76).
-fn try_borrow_plan_slot(
-    free: &std::sync::atomic::AtomicIsize,
-) -> bool {
+fn try_borrow_plan_slot(free: &std::sync::atomic::AtomicIsize) -> bool {
     loop {
         let cur = free.load(std::sync::atomic::Ordering::Relaxed);
         if cur <= 0 {
@@ -3137,10 +3228,7 @@ fn try_borrow_plan_slot(
 /// lends one, so they fix the one-shot #76 borrow without oversubscribing
 /// CPU-active work. A separate cap prevents many concurrent cells from
 /// multiplying the persistent planner thread count without bound.
-fn reserve_late_waiters(
-    free: Option<&std::sync::atomic::AtomicIsize>,
-    want: usize,
-) -> usize {
+fn reserve_late_waiters(free: Option<&std::sync::atomic::AtomicIsize>, want: usize) -> usize {
     let Some(free) = free else { return 0 };
     let mut got = 0usize;
     while got < want && try_borrow_plan_slot(free) {
@@ -3153,8 +3241,7 @@ struct ReturnAtomicPermit<'a>(&'a std::sync::atomic::AtomicIsize);
 
 impl Drop for ReturnAtomicPermit<'_> {
     fn drop(&mut self) {
-        self.0
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -3197,8 +3284,7 @@ struct P2Opts<'a> {
 /// SAME MemAvailable headroom (review 0.11.43 #1). Reserved from
 /// the copy decision until task execution ends - past that the
 /// copies are ordinary plan memory under the window governor.
-static SHARD_RESERVED: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static SHARD_RESERVED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// sharding headroom in bytes: the explicit cap when given, else
 /// half the current MemAvailable above the governor floor;
@@ -3207,10 +3293,7 @@ fn shard_headroom(explicit: Option<u64>) -> u64 {
     match explicit {
         Some(v) => v,
         None => crate::mem_available_gb()
-            .map(|gb| {
-                (((gb - GOVERNOR_MIN_AVAIL_GB).max(0.0) / 2.0)
-                    * (1u64 << 30) as f64) as u64
-            })
+            .map(|gb| (((gb - GOVERNOR_MIN_AVAIL_GB).max(0.0) / 2.0) * (1u64 << 30) as f64) as u64)
             .unwrap_or(u64::MAX),
     }
 }
@@ -3240,27 +3323,49 @@ fn rec_shape_box(cell: &floe_oasis::doc::Cell, r: &PRec) -> BBox {
     match r.kind {
         0 => {
             let x = &cell.rects[r.idx as usize];
-            BBox { x0: x.x, y0: x.y, x1: x.x + x.w, y1: x.y + x.h }
+            BBox {
+                x0: x.x,
+                y0: x.y,
+                x1: x.x + x.w,
+                y1: x.y + x.h,
+            }
         }
         1 => pts_bbox(&cell.polys[r.idx as usize].pts),
         _ => {
             let pa = &cell.paths[r.idx as usize];
             let b = path_bbox(&pa.pts, pa.hw, pa.es, pa.ee);
-            BBox { x0: b.0, y0: b.1, x1: b.2, y1: b.3 }
+            BBox {
+                x0: b.0,
+                y0: b.1,
+                x1: b.2,
+                y1: b.3,
+            }
         }
     }
 }
 
 fn axis_c2(b: &BBox, ax: u8) -> i64 {
-    if ax == 0 { b.x0 + b.x1 } else { b.y0 + b.y1 }
+    if ax == 0 {
+        b.x0 + b.x1
+    } else {
+        b.y0 + b.y1
+    }
 }
 
 fn axis_lo(b: &BBox, ax: u8) -> i64 {
-    if ax == 0 { b.x0 } else { b.y0 }
+    if ax == 0 {
+        b.x0
+    } else {
+        b.y0
+    }
 }
 
 fn axis_hi(b: &BBox, ax: u8) -> i64 {
-    if ax == 0 { b.x1 } else { b.y1 }
+    if ax == 0 {
+        b.x1
+    } else {
+        b.y1
+    }
 }
 
 /// world bbox of a grid index sub-rectangle: the lattice offset is
@@ -3292,8 +3397,7 @@ fn grid_frag_bbox(
 }
 
 fn can_frag(cell: &floe_oasis::doc::Cell, r: &PRec) -> bool {
-    r.members >= 2
-        && matches!(rec_rep(cell, r), Rep::Grid { .. } | Rep::Pts(_))
+    r.members >= 2 && matches!(rec_rep(cell, r), Rep::Grid { .. } | Rep::Pts(_))
 }
 
 /// split r's repetition members along `ax` at `plane2` (doubled
@@ -3310,12 +3414,32 @@ fn frag_split(
     ax: u8,
     plane2: i64,
 ) -> Option<(PRec, PRec)> {
-    let child = |bbox: BBox, members: u64, bytes: u32, frag: Frag| {
-        PRec { bbox, bytes, members, frag, ..*r }
+    let child = |bbox: BBox, members: u64, bytes: u32, frag: Frag| PRec {
+        bbox,
+        bytes,
+        members,
+        frag,
+        ..*r
     };
     match (r.frag, rec_rep(cell, r)) {
-        (Frag::Grid { .. }, Rep::Grid { na: _, nb: _, va, vb })
-        | (Frag::Whole, Rep::Grid { na: _, nb: _, va, vb }) => {
+        (
+            Frag::Grid { .. },
+            Rep::Grid {
+                na: _,
+                nb: _,
+                va,
+                vb,
+            },
+        )
+        | (
+            Frag::Whole,
+            Rep::Grid {
+                na: _,
+                nb: _,
+                va,
+                vb,
+            },
+        ) => {
             let (va, vb) = (*va, *vb);
             let (i0, i1, j0, j1) = match r.frag {
                 Frag::Grid { i0, i1, j0, j1 } => (i0, i1, j0, j1),
@@ -3326,18 +3450,15 @@ fn frag_split(
             };
             // pick the lattice dimension with the larger extent
             // contribution along ax (u128: |v|*(n-1) can pass i64)
-            let cai = (if ax == 0 { va.0 } else { va.1 })
-                .unsigned_abs() as u128
-                * (i1 - i0 - 1) as u128;
-            let caj = (if ax == 0 { vb.0 } else { vb.1 })
-                .unsigned_abs() as u128
-                * (j1 - j0 - 1) as u128;
+            let cai =
+                (if ax == 0 { va.0 } else { va.1 }).unsigned_abs() as u128 * (i1 - i0 - 1) as u128;
+            let caj =
+                (if ax == 0 { vb.0 } else { vb.1 }).unsigned_abs() as u128 * (j1 - j0 - 1) as u128;
             if cai == 0 && caj == 0 {
                 return None; // orthogonal: no reduction along ax
             }
             let sb = rec_shape_box(cell, r);
-            let split_i = (cai >= caj && i1 - i0 >= 2)
-                || j1 - j0 < 2;
+            let split_i = (cai >= caj && i1 - i0 >= 2) || j1 - j0 < 2;
             let (l, rt) = if split_i {
                 if i1 - i0 < 2 {
                     return None;
@@ -3354,26 +3475,26 @@ fn frag_split(
                     grid_frag_bbox(&sb, va, vb, a, b, c, d),
                     (b - a) * (d - c),
                     base.saturating_add(10),
-                    Frag::Grid { i0: a, i1: b, j0: c, j1: d },
+                    Frag::Grid {
+                        i0: a,
+                        i1: b,
+                        j0: c,
+                        j1: d,
+                    },
                 )
             };
             Some((mk(l), mk(rt)))
         }
         (Frag::Pts { .. }, _) | (Frag::Whole, Rep::Pts(_)) => {
             let (a, lo, hi) = match r.frag {
-                Frag::Pts { arena, lo, hi } => {
-                    (arena as usize, lo as usize, hi as usize)
-                }
+                Frag::Pts { arena, lo, hi } => (arena as usize, lo as usize, hi as usize),
                 _ => {
                     let pts = match rec_rep(cell, r) {
                         Rep::Pts(p) => p,
                         _ => unreachable!(),
                     };
                     let sb = rec_shape_box(cell, r);
-                    let count = narrow_u32(
-                        pts.len() as u64,
-                        "fragment pts count",
-                    );
+                    let count = narrow_u32(pts.len() as u64, "fragment pts count");
                     arena.push(PtsArena {
                         shape_box: sb,
                         order: (0..count).collect(),
@@ -3397,10 +3518,8 @@ fn frag_split(
             // into a position k has passed - so the extents equal
             // a rescan of the final slices.
             let mut m = lo;
-            let (mut l0, mut l1) =
-                ((i64::MAX, i64::MAX), (i64::MIN, i64::MIN));
-            let (mut r0, mut r1) =
-                ((i64::MAX, i64::MAX), (i64::MIN, i64::MIN));
+            let (mut l0, mut l1) = ((i64::MAX, i64::MAX), (i64::MIN, i64::MIN));
+            let (mut r0, mut r1) = ((i64::MAX, i64::MAX), (i64::MIN, i64::MIN));
             for k in lo..hi {
                 let (ox, oy) = pts[order[k] as usize];
                 let c = if ax == 0 { ox } else { oy };
@@ -3417,8 +3536,7 @@ fn frag_split(
             if m == lo || m == hi {
                 return None; // coincident pile: one side empty
             }
-            let base =
-                r.bytes.saturating_sub(rep_est_n(r.members));
+            let base = r.bytes.saturating_sub(rep_est_n(r.members));
             let shift = |o0: (i64, i64), o1: (i64, i64)| BBox {
                 x0: sb.x0 + o0.0,
                 y0: sb.y0 + o0.1,
@@ -3433,10 +3551,7 @@ fn frag_split(
                     (e - s) as u64,
                     base.saturating_add(rep_est_n((e - s) as u64)),
                     Frag::Pts {
-                        arena: narrow_u32(
-                            a as u64,
-                            "fragment arena index",
-                        ),
+                        arena: narrow_u32(a as u64, "fragment arena index"),
                         lo: narrow_u32(s as u64, "fragment pts index"),
                         hi: narrow_u32(e as u64, "fragment pts index"),
                     },
@@ -3478,13 +3593,7 @@ struct PageJob {
     lod_rects: Vec<RectRec>,
 }
 
-fn emit_page(
-    ci: usize,
-    li: u32,
-    recs: Vec<PRec>,
-    seq: &mut u32,
-    out: &mut Vec<PageJob>,
-) {
+fn emit_page(ci: usize, li: u32, recs: Vec<PRec>, seq: &mut u32, out: &mut Vec<PageJob>) {
     let mut bb = BBox::EMPTY;
     let mut members = 0u64;
     let (mut max_w, mut max_h, mut max_min) = (0i64, 0i64, 0i64);
@@ -3552,8 +3661,7 @@ fn split_node(
     // a handful of records can be gigabytes, and page decode cost
     // is what the viewer pays. A lone record still splits when its
     // rep can fragment.
-    let splittable = recs.len() >= 2
-        || recs.iter().any(|r| can_frag(cell, r));
+    let splittable = recs.len() >= 2 || recs.iter().any(|r| can_frag(cell, r));
     if bytes <= page_target_bytes || !splittable {
         return NodeStep::Leaf(recs);
     }
@@ -3575,8 +3683,7 @@ fn split_node(
     let mut rv: Vec<PRec> = Vec::with_capacity(recs.len() - mid);
     let mut wide: Vec<PRec> = Vec::new();
     for r in recs {
-        let crosses = axis_lo(&r.bbox, ax) * 2 < plane2
-            && axis_hi(&r.bbox, ax) * 2 > plane2;
+        let crosses = axis_lo(&r.bbox, ax) * 2 < plane2 && axis_hi(&r.bbox, ax) * 2 > plane2;
         if crosses {
             // EVERY crossing rep fragments - a byte floor here let
             // 24-byte two-member scatter records (klayout folding
@@ -3584,9 +3691,7 @@ fn split_node(
             // out to die width. The cost is one duplicated base
             // header per split; the alternative is a poisoned page
             // bbox.
-            if let Some((a, b)) =
-                frag_split(cell, arena, &r, ax, plane2)
-            {
+            if let Some((a, b)) = frag_split(cell, arena, &r, ax, plane2) {
                 st.fragments += 1;
                 lv.push(a);
                 rv.push(b);
@@ -3615,9 +3720,7 @@ fn split_node(
     let mut acc: Vec<PRec> = Vec::new();
     let mut acc_bytes = 0u64;
     for r in wide {
-        if acc_bytes + r.bytes as u64 > page_target_bytes
-            && !acc.is_empty()
-        {
+        if acc_bytes + r.bytes as u64 > page_target_bytes && !acc.is_empty() {
             st.oversize_pages += 1;
             oversize.push(std::mem::take(&mut acc));
             acc_bytes = 0;
@@ -3642,11 +3745,7 @@ fn split_node(
 }
 
 /// count the Grid pieces a page emits (see SplitStats)
-fn count_grid_pieces(
-    cell: &floe_oasis::doc::Cell,
-    recs: &[PRec],
-    st: &mut SplitStats,
-) {
+fn count_grid_pieces(cell: &floe_oasis::doc::Cell, recs: &[PRec], st: &mut SplitStats) {
     for r in recs {
         let Frag::Grid { i0, i1, j0, j1 } = r.frag else {
             continue;
@@ -3734,11 +3833,7 @@ fn split_pages(
 /// base to the (i0,j0) lattice corner; a collapsed i-dimension
 /// swaps the vectors so `na >= 2` holds (the writer's nb==1 arms
 /// encode na-2 as a uint).
-fn frag_rep(
-    rep: &Rep,
-    frag: &Frag,
-    arena: &Arena,
-) -> Option<((i64, i64), Rep)> {
+fn frag_rep(rep: &Rep, frag: &Frag, arena: &Arena) -> Option<((i64, i64), Rep)> {
     match *frag {
         Frag::Whole => None,
         Frag::Pts { arena: a, lo, hi } => {
@@ -3746,8 +3841,7 @@ fn frag_rep(
                 Rep::Pts(p) => p,
                 _ => unreachable!("pts frag on non-pts"),
             };
-            let order = &arena[a as usize].order
-                [lo as usize..hi as usize];
+            let order = &arena[a as usize].order[lo as usize..hi as usize];
             let (bx, by) = src[order[0] as usize];
             if order.len() == 1 {
                 return Some(((bx, by), Rep::One));
@@ -3772,9 +3866,19 @@ fn frag_rep(
             let rep = if ni == 1 && nj == 1 {
                 Rep::One
             } else if ni == 1 {
-                Rep::Grid { na: nj, nb: 1, va: vb, vb: va }
+                Rep::Grid {
+                    na: nj,
+                    nb: 1,
+                    va: vb,
+                    vb: va,
+                }
             } else {
-                Rep::Grid { na: ni, nb: nj, va, vb }
+                Rep::Grid {
+                    na: ni,
+                    nb: nj,
+                    va,
+                    vb,
+                }
             };
             Some(((dx, dy), rep))
         }
@@ -3783,11 +3887,7 @@ fn frag_rep(
 
 /// encode one page job to its OASIS payload (parallel-safe: reads
 /// doc immutably, allocates only its own buffers)
-fn encode_job(
-    doc: &Doc,
-    job: &PageJob,
-    arenas: &[Arena],
-) -> (Vec<u8>, u64) {
+fn encode_job(doc: &Doc, job: &PageJob, arenas: &[Arena]) -> (Vec<u8>, u64) {
     let cell = &doc.cells[job.ci];
     let arena = arena_at(arenas, job.arena_slot);
     let mut rects: Vec<RectRec> = Vec::new();
@@ -3797,9 +3897,7 @@ fn encode_job(
         match r.kind {
             0 => {
                 let mut x = cell.rects[r.idx as usize].clone();
-                if let Some(((dx, dy), rep)) =
-                    frag_rep(&x.rep, &r.frag, arena)
-                {
+                if let Some(((dx, dy), rep)) = frag_rep(&x.rep, &r.frag, arena) {
                     x.x += dx;
                     x.y += dy;
                     x.rep = rep;
@@ -3808,9 +3906,7 @@ fn encode_job(
             }
             1 => {
                 let mut po = cell.polys[r.idx as usize].clone();
-                if let Some(((dx, dy), rep)) =
-                    frag_rep(&po.rep, &r.frag, arena)
-                {
+                if let Some(((dx, dy), rep)) = frag_rep(&po.rep, &r.frag, arena) {
                     for q in po.pts.iter_mut() {
                         q.0 += dx;
                         q.1 += dy;
@@ -3821,9 +3917,7 @@ fn encode_job(
             }
             _ => {
                 let mut pa = cell.paths[r.idx as usize].clone();
-                if let Some(((dx, dy), rep)) =
-                    frag_rep(&pa.rep, &r.frag, arena)
-                {
+                if let Some(((dx, dy), rep)) = frag_rep(&pa.rep, &r.frag, arena) {
                     for q in pa.pts.iter_mut() {
                         q.0 += dx;
                         q.1 += dy;
@@ -3850,8 +3944,7 @@ fn encode_job(
         texts: &[],
         places: Vec::new(),
     };
-    floe_oasis::write::write_tree_sized(&[wc], doc.unit)
-        .expect("page payload")
+    floe_oasis::write::write_tree_sized(&[wc], doc.unit).expect("page payload")
 }
 
 /// design.ovb being written (floe_ovm::OVB_MAGIC, ovb_image's bytes): the
@@ -3870,7 +3963,13 @@ impl OvbWriter {
         let f = std::fs::File::create(format!("{}/design.ovb.tmp", dir)).expect("create ovb");
         let mut w = std::io::BufWriter::new(f);
         std::io::Write::write_all(&mut w, &[0u8; floe_ovm::OVB_HEADER_LEN]).expect("write ovb");
-        OvbWriter { w, dir: dir.to_string(), offsets: Vec::new(), at: floe_ovm::OVB_HEADER_LEN as u64, secs: 0.0 }
+        OvbWriter {
+            w,
+            dir: dir.to_string(),
+            offsets: Vec::new(),
+            at: floe_ovm::OVB_HEADER_LEN as u64,
+            secs: 0.0,
+        }
     }
 
     /// the next page's stored grid (floe_ovm::occ_encode; empty: none, as
@@ -3894,7 +3993,11 @@ impl OvbWriter {
         f.seek(std::io::SeekFrom::Start(0)).expect("seek ovb");
         f.write_all(&header).expect("write ovb header");
         drop(f);
-        std::fs::rename(format!("{}/design.ovb.tmp", self.dir), format!("{}/design.ovb", self.dir)).expect("publish ovb");
+        std::fs::rename(
+            format!("{}/design.ovb.tmp", self.dir),
+            format!("{}/design.ovb", self.dir),
+        )
+        .expect("publish ovb");
         eprintln!(
             "[vfs] page occupancy design.ovb: {} pages, {} ({:.1}s over the encode workers)",
             pages,
@@ -3935,12 +4038,20 @@ fn rec_fill(cell: &floe_oasis::doc::Cell, r: &PRec, boxed: f64) -> f64 {
         0 => 1.0,
         1 => {
             let pts = &cell.polys[r.idx as usize].pts;
-            let twice: i128 = pts.iter().zip(pts.iter().cycle().skip(1)).map(|(a, b)| a.0 as i128 * b.1 as i128 - b.0 as i128 * a.1 as i128).sum();
+            let twice: i128 = pts
+                .iter()
+                .zip(pts.iter().cycle().skip(1))
+                .map(|(a, b)| a.0 as i128 * b.1 as i128 - b.0 as i128 * a.1 as i128)
+                .sum();
             (twice.unsigned_abs() as f64 / 2.0 / boxed).min(1.0)
         }
         _ => {
             let pa = &cell.paths[r.idx as usize];
-            let length: f64 = pa.pts.windows(2).map(|w| ((w[1].0 - w[0].0) as f64).hypot((w[1].1 - w[0].1) as f64)).sum();
+            let length: f64 = pa
+                .pts
+                .windows(2)
+                .map(|w| ((w[1].0 - w[0].0) as f64).hypot((w[1].1 - w[0].1) as f64))
+                .sum();
             ((length + (pa.es + pa.ee).max(0) as f64) * 2.0 * pa.hw.max(0) as f64 / boxed).min(1.0)
         }
     }
@@ -3966,7 +4077,11 @@ fn page_occupancy_record(cell: &floe_oasis::doc::Cell, arena: &Arena, job: &Page
 }
 
 /// page_occupancy's areas (dbu^2, row by row) and its cells' edges on x and y
-fn page_occupancy_areas(cell: &floe_oasis::doc::Cell, arena: &Arena, job: &PageJob) -> (Vec<f64>, Vec<i64>, Vec<i64>) {
+fn page_occupancy_areas(
+    cell: &floe_oasis::doc::Cell,
+    arena: &Arena,
+    job: &PageJob,
+) -> (Vec<f64>, Vec<i64>, Vec<i64>) {
     let g = floe_ovm::OCC_GRID;
     let bb = job.bbox;
     let (bw, bh) = ((bb.x1 - bb.x0).max(1), (bb.y1 - bb.y0).max(1));
@@ -3979,8 +4094,14 @@ fn page_occupancy_areas(cell: &floe_oasis::doc::Cell, arena: &Arena, job: &PageJ
         if x1 <= x0 || y1 <= y0 {
             return;
         }
-        let (cx0, cx1) = (floe_ovm::occ_cell(bb.x0, bw, x0), floe_ovm::occ_cell(bb.x0, bw, x1 - 1));
-        let (cy0, cy1) = (floe_ovm::occ_cell(bb.y0, bh, y0), floe_ovm::occ_cell(bb.y0, bh, y1 - 1));
+        let (cx0, cx1) = (
+            floe_ovm::occ_cell(bb.x0, bw, x0),
+            floe_ovm::occ_cell(bb.x0, bw, x1 - 1),
+        );
+        let (cy0, cy1) = (
+            floe_ovm::occ_cell(bb.y0, bh, y0),
+            floe_ovm::occ_cell(bb.y0, bh, y1 - 1),
+        );
         for cy in cy0..=cy1 {
             let oy = y1.min(ey[cy as usize + 1]) - y0.max(ey[cy as usize]);
             if oy <= 0 {
@@ -3998,7 +4119,9 @@ fn page_occupancy_areas(cell: &floe_oasis::doc::Cell, arena: &Arena, job: &PageJ
         let sb = rec_shape_box(cell, r);
         let boxed = (sb.x1 - sb.x0).max(0) as f64 * (sb.y1 - sb.y0).max(0) as f64;
         let fill = rec_fill(cell, r, boxed);
-        let member = |area: &mut [f64], ox: i64, oy: i64| add_box(area, sb.x0 + ox, sb.y0 + oy, sb.x1 + ox, sb.y1 + oy, fill);
+        let member = |area: &mut [f64], ox: i64, oy: i64| {
+            add_box(area, sb.x0 + ox, sb.y0 + oy, sb.x1 + ox, sb.y1 + oy, fill)
+        };
         match (r.frag, rec_rep(cell, r)) {
             (Frag::Pts { arena: a, lo, hi }, rep) => {
                 let src = match rep {
@@ -4022,7 +4145,11 @@ fn page_occupancy_areas(cell: &floe_oasis::doc::Cell, arena: &Arena, job: &PageJ
                     // the members are the x intervals by the y intervals: a
                     // cell's area is the product of their lengths in it
                     let (bx0, by0) = (i0 * va.0 + j0 * vb.0, i0 * va.1 + j0 * vb.1);
-                    let (xs_step, xs_n, ys_step, ys_n) = if va.1 == 0 && vb.0 == 0 { (va.0, ni, vb.1, nj) } else { (vb.0, nj, va.1, ni) };
+                    let (xs_step, xs_n, ys_step, ys_n) = if va.1 == 0 && vb.0 == 0 {
+                        (va.0, ni, vb.1, nj)
+                    } else {
+                        (vb.0, nj, va.1, ni)
+                    };
                     let lx = occ_axis_lengths(sb.x0 + bx0, sb.x1 + bx0, xs_step, xs_n, &ex);
                     let ly = occ_axis_lengths(sb.y0 + by0, sb.y1 + by0, ys_step, ys_n, &ey);
                     for (cy, &h) in ly.iter().enumerate() {
@@ -4035,8 +4162,16 @@ fn page_occupancy_areas(cell: &floe_oasis::doc::Cell, arena: &Arena, job: &PageJ
                 } else if (ni as u64).saturating_mul(nj as u64) > LOD_ENUM_CAP {
                     // a skew mega-grid is never looped: its members' area
                     // over its box
-                    let rb = (r.bbox.x1 - r.bbox.x0).max(1) as f64 * (r.bbox.y1 - r.bbox.y0).max(1) as f64;
-                    add_box(&mut area, r.bbox.x0, r.bbox.y0, r.bbox.x1, r.bbox.y1, (r.members as f64 * boxed * fill / rb).min(1.0));
+                    let rb = (r.bbox.x1 - r.bbox.x0).max(1) as f64
+                        * (r.bbox.y1 - r.bbox.y0).max(1) as f64;
+                    add_box(
+                        &mut area,
+                        r.bbox.x0,
+                        r.bbox.y0,
+                        r.bbox.x1,
+                        r.bbox.y1,
+                        (r.members as f64 * boxed * fill / rb).min(1.0),
+                    );
                 } else {
                     for i in i0..i1 {
                         for j in j0..j1 {
@@ -4067,7 +4202,11 @@ fn occ_axis_lengths(lo: i64, hi: i64, step: i64, n: i64, edges: &[i64]) -> Vec<f
         return vec![0.0; cells];
     }
     // the first interval leftmost
-    let (lo, step) = if step < 0 { (lo + (n - 1) * step, -step) } else { (lo, step) };
+    let (lo, step) = if step < 0 {
+        (lo + (n - 1) * step, -step)
+    } else {
+        (lo, step)
+    };
     let left_of = |x: i64| -> i128 {
         if step == 0 {
             return n as i128 * ((x - lo) as i128).clamp(0, w);
@@ -4168,7 +4307,11 @@ fn encode_write_pages(
             return (Vec::new(), 0.0);
         }
         let t = std::time::Instant::now();
-        let record = page_occupancy_record(&doc.cells[job.ci], arena_at(arena_for(job), job.arena_slot), job);
+        let record = page_occupancy_record(
+            &doc.cells[job.ci],
+            arena_at(arena_for(job), job.arena_slot),
+            job,
+        );
         (record, t.elapsed().as_secs_f64())
     };
     if workers <= 1 || ptotal == 1 {
@@ -4178,17 +4321,7 @@ fn encode_write_pages(
             if let Some(ovb) = ovb.as_mut() {
                 ovb.secs += secs;
             }
-            write_encoded_page(
-                b,
-                ovp,
-                job,
-                &payload,
-                raw,
-                ovp_off,
-                pages_bytes,
-                ovb,
-                &occ,
-            );
+            write_encoded_page(b, ovp, job, &payload, raw, ovp_off, pages_bytes, ovb, &occ);
             encoded_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         return;
@@ -4197,8 +4330,7 @@ fn encode_write_pages(
     type Encoded = (Vec<u8>, u64, Vec<u8>, f64);
     let result_batch = batch_limit.max(1).min(ptotal);
     std::thread::scope(|s| {
-        let (task_tx, task_rx) =
-            std::sync::mpsc::sync_channel::<usize>(result_batch);
+        let (task_tx, task_rx) = std::sync::mpsc::sync_channel::<usize>(result_batch);
         let task_rx = std::sync::Arc::new(std::sync::Mutex::new(task_rx));
         let (result_tx, result_rx) =
             std::sync::mpsc::sync_channel::<(usize, Encoded)>(result_batch);
@@ -4226,11 +4358,9 @@ fn encode_write_pages(
             for i in base..end {
                 task_tx.send(i).expect("encode task worker");
             }
-            let mut results: Vec<Option<Encoded>> =
-                (base..end).map(|_| None).collect();
+            let mut results: Vec<Option<Encoded>> = (base..end).map(|_| None).collect();
             for _ in base..end {
-                let (i, encoded) =
-                    result_rx.recv().expect("encode result worker");
+                let (i, encoded) = result_rx.recv().expect("encode result worker");
                 assert!(i >= base && i < end, "encode result outside batch");
                 results[i - base] = Some(encoded);
             }
@@ -4250,8 +4380,7 @@ fn encode_write_pages(
                     ovb,
                     &occ,
                 );
-                encoded_done
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                encoded_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
         drop(task_tx);
@@ -4349,7 +4478,7 @@ struct CellPlan {
     /// pre-encoded sections with CELL-LOCAL indexes (built in the
     /// parallel plan phase; the serial commit is memcpy + rebase)
     sink: floe_ovm::CellSink,
-    place_order: Vec<u32>,            // local place idx, leaf order
+    place_order: Vec<u32>, // local place idx, leaf order
     // (bbox, first, count, leaf, max_dim, max_min) -
     // `first` is cell-local; v7 size annotations ride along
     bvh: Vec<(BBox, u32, u16, bool, u32, u32)>,
@@ -4441,21 +4570,16 @@ fn split_pbvh(
         mh = mh.max(*h);
     }
     if items.len() <= PBVH_LEAF {
-        nodes[slot] =
-            (bb, lo as u32, items.len() as u16, true, mw, mh);
+        nodes[slot] = (bb, lo as u32, items.len() as u16, true, mw, mh);
         return;
     }
     let wx = bb.x1 - bb.x0;
     let wy = bb.y1 - bb.y0;
     let mid = items.len() / 2;
     if wx >= wy {
-        items.select_nth_unstable_by_key(mid, |(b, _, _, _)| {
-            b.x0 + b.x1
-        });
+        items.select_nth_unstable_by_key(mid, |(b, _, _, _)| b.x0 + b.x1);
     } else {
-        items.select_nth_unstable_by_key(mid, |(b, _, _, _)| {
-            b.y0 + b.y1
-        });
+        items.select_nth_unstable_by_key(mid, |(b, _, _, _)| b.y0 + b.y1);
     }
     let l = nodes.len();
     nodes.push((BBox::EMPTY, 0, 0, false, 0, 0));
@@ -4491,22 +4615,12 @@ const LOD_ENUM_CAP: u64 = 1 << 16;
 /// [lo + m*step, hi + m*step], m in [0,n) - per-cell existence
 /// test, O(g) for ANY n (the analytic replacement for member
 /// loops on orthogonal grids)
-fn lod_axis_cells(
-    lo: i64,
-    hi: i64,
-    step: i64,
-    n: i64,
-    b0: i64,
-    bext: i64,
-    g: i64,
-) -> Vec<bool> {
+fn lod_axis_cells(lo: i64, hi: i64, step: i64, n: i64, b0: i64, bext: i64, g: i64) -> Vec<bool> {
     let mut out = vec![false; g as usize];
     if n <= 0 || bext <= 0 {
         return out;
     }
-    let cell = |k: i64| -> i64 {
-        b0 + (k as i128 * bext as i128 / g as i128) as i64
-    };
+    let cell = |k: i64| -> i64 { b0 + (k as i128 * bext as i128 / g as i128) as i64 };
     for k in 0..g {
         let (c0, c1) = (cell(k), cell(k + 1));
         let ok = if step == 0 {
@@ -4557,12 +4671,10 @@ fn gen_lod_job(
     let (mut pass_members, mut fused_any) = (0u64, false);
     // cell index of a coordinate (clamped); cells are half-open
     let gx_of = |x: i64| -> i64 {
-        (((x - bb.x0) as i128 * g as i128) / bw as i128)
-            .clamp(0, (g - 1) as i128) as i64
+        (((x - bb.x0) as i128 * g as i128) / bw as i128).clamp(0, (g - 1) as i128) as i64
     };
     let gy_of = |y: i64| -> i64 {
-        (((y - bb.y0) as i128 * g as i128) / bh as i128)
-            .clamp(0, (g - 1) as i128) as i64
+        (((y - bb.y0) as i128 * g as i128) / bh as i128).clamp(0, (g - 1) as i128) as i64
     };
     for r in &exact.recs {
         let sb = rec_shape_box(cell, r);
@@ -4593,8 +4705,7 @@ fn gen_lod_job(
             for y in y0..=y1 {
                 let row = y as usize * words_per_row;
                 for x in x0..=x1 {
-                    bits[row + (x as usize >> 6)] |=
-                        1u64 << (x as usize & 63);
+                    bits[row + (x as usize >> 6)] |= 1u64 << (x as usize & 63);
                 }
             }
         };
@@ -4604,9 +4715,7 @@ fn gen_lod_job(
                     Rep::Pts(pl) => pl,
                     _ => unreachable!("pts frag on non-pts"),
                 };
-                for &slot in &arena[a as usize].order
-                    [lo as usize..hi as usize]
-                {
+                for &slot in &arena[a as usize].order[lo as usize..hi as usize] {
                     let (ox, oy) = src[slot as usize];
                     mark(ox, oy);
                 }
@@ -4614,47 +4723,25 @@ fn gen_lod_job(
             (frag, Rep::Grid { na, nb, va, vb }) => {
                 let (va, vb) = (*va, *vb);
                 let (i0, i1, j0, j1) = match frag {
-                    Frag::Grid { i0, i1, j0, j1 } => {
-                        (i0 as i64, i1 as i64, j0 as i64, j1 as i64)
-                    }
+                    Frag::Grid { i0, i1, j0, j1 } => (i0 as i64, i1 as i64, j0 as i64, j1 as i64),
                     _ => (0, *na as i64, 0, *nb as i64),
                 };
                 let (ni, nj) = (i1 - i0, j1 - j0);
-                let ortho = (va.1 == 0 && vb.0 == 0)
-                    || (va.0 == 0 && vb.1 == 0);
+                let ortho = (va.1 == 0 && vb.0 == 0) || (va.0 == 0 && vb.1 == 0);
                 if ortho {
                     // analytic cell coverage: O(grid) for ANY
                     // member count (review finding: a 10^6 x 10^6
                     // grid record is bytes-tiny and stays in one
                     // page, but a member loop would be 10^12)
-                    let (bx0, by0) =
-                        (i0 * va.0 + j0 * vb.0, i0 * va.1 + j0 * vb.1);
-                    let (xs_step, xs_n, ys_step, ys_n) =
-                        if va.1 == 0 && vb.0 == 0 {
-                            (va.0, ni, vb.1, nj)
-                        } else {
-                            (vb.0, nj, va.1, ni)
-                        };
-                    let xs = lod_axis_cells(
-                        sb.x0 + bx0,
-                        sb.x1 + bx0,
-                        xs_step,
-                        xs_n,
-                        bb.x0,
-                        bw,
-                        g,
-                    );
-                    let ys = lod_axis_cells(
-                        sb.y0 + by0,
-                        sb.y1 + by0,
-                        ys_step,
-                        ys_n,
-                        bb.y0,
-                        bh,
-                        g,
-                    );
-                    let mut rowmask =
-                        vec![0u64; words_per_row];
+                    let (bx0, by0) = (i0 * va.0 + j0 * vb.0, i0 * va.1 + j0 * vb.1);
+                    let (xs_step, xs_n, ys_step, ys_n) = if va.1 == 0 && vb.0 == 0 {
+                        (va.0, ni, vb.1, nj)
+                    } else {
+                        (vb.0, nj, va.1, ni)
+                    };
+                    let xs = lod_axis_cells(sb.x0 + bx0, sb.x1 + bx0, xs_step, xs_n, bb.x0, bw, g);
+                    let ys = lod_axis_cells(sb.y0 + by0, sb.y1 + by0, ys_step, ys_n, bb.y0, bh, g);
+                    let mut rowmask = vec![0u64; words_per_row];
                     for (x, &on) in xs.iter().enumerate() {
                         if on {
                             rowmask[x >> 6] |= 1u64 << (x & 63);
@@ -4679,10 +4766,7 @@ fn gen_lod_job(
                 } else {
                     for i in i0..i1 {
                         for j in j0..j1 {
-                            mark(
-                                i * va.0 + j * vb.0,
-                                i * va.1 + j * vb.1,
-                            );
+                            mark(i * va.0 + j * vb.0, i * va.1 + j * vb.1);
                         }
                     }
                 }
@@ -4734,9 +4818,10 @@ fn gen_lod_job(
         }
         let mut next_open: Vec<(i64, i64, i64)> = Vec::new();
         for &(x0, x1) in &runs {
-            match open.iter().position(|&(ox0, ox1, _)| {
-                ox0 == x0 && ox1 == x1
-            }) {
+            match open
+                .iter()
+                .position(|&(ox0, ox1, _)| ox0 == x0 && ox1 == x1)
+            {
                 Some(k) => next_open.push(open.swap_remove(k)),
                 None => next_open.push((x0, x1, y)),
             }
@@ -4866,8 +4951,17 @@ fn plan_layer(
         vec![arena]
     };
     finish_layer(
-        li, input_records, input_bytes, run, arenas, stats, 0, 0,
-        false, t, timing,
+        li,
+        input_records,
+        input_bytes,
+        run,
+        arenas,
+        stats,
+        0,
+        0,
+        false,
+        t,
+        timing,
     )
 }
 
@@ -4897,14 +4991,7 @@ fn finish_layer(
         let mut items: Vec<(BBox, u64, u64, usize)> = run
             .iter()
             .enumerate()
-            .map(|(k, j)| {
-                (
-                    j.bbox,
-                    j.max_w.max(0) as u64,
-                    j.max_h.max(0) as u64,
-                    k,
-                )
-            })
+            .map(|(k, j)| (j.bbox, j.max_w.max(0) as u64, j.max_h.max(0) as u64, k))
             .collect();
         let mut nodes: Vec<(BBox, u32, u16, bool, u64, u64)> =
             vec![(BBox::EMPTY, 0, 0, false, 0, 0)];
@@ -4912,8 +4999,7 @@ fn finish_layer(
         pbvh = nodes;
         // the run's jobs in leaf order (items order after the
         // split IS the directory order)
-        let mut slots: Vec<Option<PageJob>> =
-            run.into_iter().map(Some).collect();
+        let mut slots: Vec<Option<PageJob>> = run.into_iter().map(Some).collect();
         let mut pages = Vec::with_capacity(slots.len());
         for &(_, _, _, k) in &items {
             pages.push(slots[k].take().expect("pbvh perm"));
@@ -4956,8 +5042,7 @@ fn plan_layer_frontier(
     let input_records = recs.len();
     let total: u64 = recs.iter().map(|r| r.bytes as u64).sum();
     let mut timing = LayerTiming::default();
-    let cutoff =
-        (total / opts.target_tasks.max(1) as u64).max(opts.task_min);
+    let cutoff = (total / opts.target_tasks.max(1) as u64).max(opts.task_min);
     if total / 2 < cutoff {
         // the frontier would be a single task: plain serial is
         // the same work without the sharding copies
@@ -4978,11 +5063,8 @@ fn plan_layer_frontier(
     let mut stack: Vec<(Vec<PRec>, u32)> = vec![(recs, 0)];
     let tprefix = std::time::Instant::now();
     while let Some((recs, depth)) = stack.pop() {
-        let bytes: u64 =
-            recs.iter().map(|r| r.bytes as u64).sum();
-        if bytes <= cutoff
-            || tasks.len() + stack.len() + 1 >= P2_TASK_CAP
-        {
+        let bytes: u64 = recs.iter().map(|r| r.bytes as u64).sum();
+        if bytes <= cutoff || tasks.len() + stack.len() + 1 >= P2_TASK_CAP {
             segs.push(Seg::Task(tasks.len()));
             tasks.push((recs, depth));
             continue;
@@ -5048,8 +5130,7 @@ fn plan_layer_frontier(
     if copy_bytes > 0 {
         let limit = shard_headroom(opts.shard_limit);
         loop {
-            let cur = SHARD_RESERVED
-                .load(std::sync::atomic::Ordering::Relaxed);
+            let cur = SHARD_RESERVED.load(std::sync::atomic::Ordering::Relaxed);
             if copy_bytes > limit.saturating_sub(cur) {
                 break; // no headroom: serial fallback below
             }
@@ -5071,14 +5152,10 @@ fn plan_layer_frontier(
         // memory fallback runs on ONE thread: hand the helper
         // lease back right away so the tail can re-lend it
         if let Some(b) = opts.budget {
-            b.fetch_add(
-                opts.lease as isize,
-                std::sync::atomic::Ordering::Relaxed,
-            );
+            b.fetch_add(opts.lease as isize, std::sync::atomic::Ordering::Relaxed);
         }
         let p2_tasks = tasks.len();
-        let mut outs: Vec<Vec<PageJob>> =
-            Vec::with_capacity(tasks.len());
+        let mut outs: Vec<Vec<PageJob>> = Vec::with_capacity(tasks.len());
         timing.p2_shard_s = tshard.elapsed().as_secs_f64();
         let ttasks = std::time::Instant::now();
         let mut task_sum_s = 0.0f64;
@@ -5135,8 +5212,17 @@ fn plan_layer_frontier(
         }
         timing.p2_merge_s = tmerge.elapsed().as_secs_f64();
         return finish_layer(
-            li, input_records, total, run, arenas, stats, p2_tasks,
-            0, true, t, timing,
+            li,
+            input_records,
+            total,
+            run,
+            arenas,
+            stats,
+            p2_tasks,
+            0,
+            true,
+            t,
+            timing,
         );
     }
     // ---- arena sharding: copy each task's Frag::Pts ranges into
@@ -5165,8 +5251,7 @@ fn plan_layer_frontier(
             }
         }
     }
-    let mut shards: Vec<Arena> =
-        (0..tasks.len()).map(|_| Arena::new()).collect();
+    let mut shards: Vec<Arena> = (0..tasks.len()).map(|_| Arena::new()).collect();
     let mut shard_bytes = 0u64;
     for (a, list) in refs.into_iter().enumerate() {
         if list.is_empty() {
@@ -5174,20 +5259,19 @@ fn plan_layer_frontier(
         }
         let sb = prefix[a].shape_box;
         for (ti, ri, lo, hi) in list {
-            let order =
-                prefix[a].order[lo as usize..hi as usize].to_vec();
+            let order = prefix[a].order[lo as usize..hi as usize].to_vec();
             shard_bytes += 4 * order.len() as u64;
-            let na = narrow_u32(
-                shards[ti].len() as u64,
-                "fragment arena index",
-            );
-            let hi2 = narrow_u32(
-                order.len() as u64,
-                "fragment pts index",
-            );
-            shards[ti].push(PtsArena { shape_box: sb, order });
-            tasks[ti].0[ri].frag =
-                Frag::Pts { arena: na, lo: 0, hi: hi2 };
+            let na = narrow_u32(shards[ti].len() as u64, "fragment arena index");
+            let hi2 = narrow_u32(order.len() as u64, "fragment pts index");
+            shards[ti].push(PtsArena {
+                shape_box: sb,
+                order,
+            });
+            tasks[ti].0[ri].frag = Frag::Pts {
+                arena: na,
+                lo: 0,
+                hi: hi2,
+            };
         }
         if !retained[a] {
             prefix[a].order = Vec::new(); // free promptly
@@ -5199,46 +5283,30 @@ fn plan_layer_frontier(
     let p2_tasks = tasks.len();
     let mut order: Vec<usize> = (0..tasks.len()).collect();
     order.sort_by_key(|&k| {
-        std::cmp::Reverse(
-            tasks[k].0.iter().map(|r| r.bytes as u64).sum::<u64>(),
-        )
+        std::cmp::Reverse(tasks[k].0.iter().map(|r| r.bytes as u64).sum::<u64>())
     });
-    let cells: Vec<
-        std::sync::Mutex<Option<(Vec<PRec>, u32, Arena)>>,
-    > = tasks
+    let cells: Vec<std::sync::Mutex<Option<(Vec<PRec>, u32, Arena)>>> = tasks
         .into_iter()
         .zip(shards)
-        .map(|((recs, depth), shard)| {
-            std::sync::Mutex::new(Some((recs, depth, shard)))
-        })
+        .map(|((recs, depth), shard)| std::sync::Mutex::new(Some((recs, depth, shard))))
         .collect();
-    let done: Vec<
-        std::sync::Mutex<
-            Option<(Vec<PageJob>, SplitStats, Arena, f64)>,
-        >,
-    > = (0..cells.len())
+    let done: Vec<std::sync::Mutex<Option<(Vec<PageJob>, SplitStats, Arena, f64)>>> = (0..cells
+        .len())
         .map(|_| std::sync::Mutex::new(None))
         .collect();
     let nextk = std::sync::atomic::AtomicUsize::new(0);
     let task_active = std::sync::atomic::AtomicUsize::new(0);
     let task_peak = std::sync::atomic::AtomicUsize::new(0);
     let work = || loop {
-        let i =
-            nextk.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let i = nextk.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if i >= order.len() {
             return;
         }
         let k = order[i];
         let tone = std::time::Instant::now();
-        let active = task_active
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            + 1;
-        task_peak.fetch_max(
-            active,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        let (recs, depth, mut arena) =
-            cells[k].lock().unwrap().take().expect("p2 task");
+        let active = task_active.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        task_peak.fetch_max(active, std::sync::atomic::Ordering::Relaxed);
+        let (recs, depth, mut arena) = cells[k].lock().unwrap().take().expect("p2 task");
         let mut st = SplitStats::default();
         let mut out: Vec<PageJob> = Vec::new();
         let mut seq = 0u32;
@@ -5255,56 +5323,39 @@ fn plan_layer_frontier(
             depth,
         );
         task_active.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        *done[k].lock().unwrap() =
-            Some((out, st, arena, tone.elapsed().as_secs_f64()));
+        *done[k].lock().unwrap() = Some((out, st, arena, tone.elapsed().as_secs_f64()));
     };
     let ttasks = std::time::Instant::now();
     if opts.threads <= 1 || p2_tasks <= 1 {
         work();
     } else {
-        let helper_cap = opts
-            .threads
-            .min(p2_tasks)
-            .saturating_sub(1);
+        let helper_cap = opts.threads.min(p2_tasks).saturating_sub(1);
         let leased = opts.lease.min(helper_cap);
-        let late = reserve_late_waiters(
-            opts.late_waiters,
-            helper_cap.saturating_sub(leased),
-        );
+        let late = reserve_late_waiters(opts.late_waiters, helper_cap.saturating_sub(leased));
         let stop = std::sync::atomic::AtomicBool::new(false);
         std::thread::scope(|sc| {
             struct StopOnDrop<'a>(&'a std::sync::atomic::AtomicBool);
             impl Drop for StopOnDrop<'_> {
                 fn drop(&mut self) {
-                    self.0.store(
-                        true,
-                        std::sync::atomic::Ordering::Release,
-                    );
+                    self.0.store(true, std::sync::atomic::Ordering::Release);
                 }
             }
             let _stop_on_drop = StopOnDrop(&stop);
             for _ in 0..leased {
                 sc.spawn(|| {
                     if let Some(used) = opts.helpers_used {
-                        used.fetch_add(
-                            1,
-                            std::sync::atomic::Ordering::Relaxed,
-                        );
+                        used.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                     work();
                 });
             }
             for _ in 0..late {
                 sc.spawn(|| {
-                    let _waiter = ReturnAtomicPermit(
-                        opts.late_waiters.expect("late waiter budget"),
-                    );
+                    let _waiter =
+                        ReturnAtomicPermit(opts.late_waiters.expect("late waiter budget"));
                     loop {
-                        if stop.load(
-                            std::sync::atomic::Ordering::Acquire,
-                        ) || nextk.load(
-                            std::sync::atomic::Ordering::Relaxed,
-                        ) >= order.len()
+                        if stop.load(std::sync::atomic::Ordering::Acquire)
+                            || nextk.load(std::sync::atomic::Ordering::Relaxed) >= order.len()
                         {
                             return;
                         }
@@ -5314,10 +5365,7 @@ fn plan_layer_frontier(
                         if try_borrow_plan_slot(budget) {
                             let _slot = ReturnAtomicPermit(budget);
                             if let Some(used) = opts.helpers_used {
-                                used.fetch_add(
-                                    1,
-                                    std::sync::atomic::Ordering::Relaxed,
-                                );
+                                used.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
                             if let Some(barrier) = opts.join_barrier {
                                 barrier.wait();
@@ -5325,9 +5373,7 @@ fn plan_layer_frontier(
                             work();
                             return;
                         }
-                        std::thread::sleep(
-                            std::time::Duration::from_millis(1),
-                        );
+                        std::thread::sleep(std::time::Duration::from_millis(1));
                     }
                 });
             }
@@ -5339,8 +5385,7 @@ fn plan_layer_frontier(
         });
     }
     timing.p2_tasks_wall_s = ttasks.elapsed().as_secs_f64();
-    timing.p2_task_peak =
-        task_peak.load(std::sync::atomic::Ordering::Relaxed);
+    timing.p2_task_peak = task_peak.load(std::sync::atomic::Ordering::Relaxed);
     let tmerge = std::time::Instant::now();
     // ---- merge: shard slots (prefix first, then task order),
     // pages in segment order, seq over the final run
@@ -5351,13 +5396,11 @@ fn plan_layer_frontier(
     } else {
         None
     };
-    let mut results: Vec<
-        Option<(Vec<PageJob>, SplitStats, Arena, f64)>,
-    > = done.into_iter().map(|m| m.into_inner().unwrap()).collect();
+    let mut results: Vec<Option<(Vec<PageJob>, SplitStats, Arena, f64)>> =
+        done.into_iter().map(|m| m.into_inner().unwrap()).collect();
     let mut task_slot: Vec<Option<u32>> = vec![None; results.len()];
     for (k, r) in results.iter_mut().enumerate() {
-        let (_, st, arena, task_s) =
-            r.as_mut().expect("p2 task result");
+        let (_, st, arena, task_s) = r.as_mut().expect("p2 task result");
         timing.p2_tasks_sum_s += *task_s;
         stats.fragments += st.fragments;
         stats.grid_pieces += st.grid_pieces;
@@ -5368,10 +5411,7 @@ fn plan_layer_frontier(
         stats.lod_pages += st.lod_pages;
         stats.lod_grid_verbatim += st.lod_grid_verbatim;
         if !arena.is_empty() {
-            task_slot[k] = Some(narrow_u32(
-                arenas.len() as u64,
-                "cell arena count",
-            ));
+            task_slot[k] = Some(narrow_u32(arenas.len() as u64, "cell arena count"));
             arenas.push(std::mem::take(arena));
         }
     }
@@ -5386,8 +5426,7 @@ fn plan_layer_frontier(
                 run.append(&mut p);
             }
             Seg::Task(k) => {
-                let (mut out, ..) =
-                    results[k].take().expect("p2 seg result");
+                let (mut out, ..) = results[k].take().expect("p2 seg result");
                 let sl = task_slot[k].unwrap_or(ARENA_NONE);
                 for j in out.iter_mut() {
                     j.arena_slot = sl;
@@ -5400,15 +5439,21 @@ fn plan_layer_frontier(
         j.seq = narrow_u32(i as u64, "page seq");
     }
     if reserved {
-        SHARD_RESERVED.fetch_sub(
-            copy_bytes,
-            std::sync::atomic::Ordering::Relaxed,
-        );
+        SHARD_RESERVED.fetch_sub(copy_bytes, std::sync::atomic::Ordering::Relaxed);
     }
     timing.p2_merge_s = tmerge.elapsed().as_secs_f64();
     finish_layer(
-        li, input_records, total, run, arenas, stats, p2_tasks,
-        shard_bytes, false, t, timing,
+        li,
+        input_records,
+        total,
+        run,
+        arenas,
+        stats,
+        p2_tasks,
+        shard_bytes,
+        false,
+        t,
+        timing,
     )
 }
 
@@ -5447,10 +5492,14 @@ fn build_cell_plan(
             // rotation-invariant pair the cut/hairline test uses)
             let cw = (cb.x1 - cb.x0).max(0);
             let ch = (cb.y1 - cb.y0).max(0);
-            let (md, mn) =
-                (sat32(cw.max(ch)), sat32(cw.min(ch)));
+            let (md, mn) = (sat32(cw.max(ch)), sat32(cw.min(ch)));
             let bb = if cb.is_empty() {
-                BBox { x0: pl.x, y0: pl.y, x1: pl.x, y1: pl.y }
+                BBox {
+                    x0: pl.x,
+                    y0: pl.y,
+                    x1: pl.x,
+                    y1: pl.y,
+                }
             } else {
                 let xf = Xf::place(pl.x, pl.y, pl.rot, pl.flip);
                 let a = xf.apply(cb.x0, cb.y0);
@@ -5470,18 +5519,15 @@ fn build_cell_plan(
     let (place_order, bvh) = if items.is_empty() {
         (Vec::new(), Vec::new())
     } else {
-        let mut nodes: Vec<(BBox, u32, u16, bool, u32, u32)> =
-            Vec::new();
+        let mut nodes: Vec<(BBox, u32, u16, bool, u32, u32)> = Vec::new();
         nodes.push((BBox::EMPTY, 0, 0, false, 0, 0));
         split_bvh(&mut nodes, &mut items, 0, 0);
-        let place_order =
-            items.iter().map(|&(.., pi)| pi as u32).collect();
+        let place_order = items.iter().map(|&(.., pi)| pi as u32).collect();
         (place_order, nodes)
     };
     lap(&mut phase_s[0]);
     // ---- pages per layer, in layer order
-    let mut per_layer: Vec<Vec<PRec>> =
-        (0..nl).map(|_| Vec::new()).collect();
+    let mut per_layer: Vec<Vec<PRec>> = (0..nl).map(|_| Vec::new()).collect();
     for (idx, r) in cell.rects.iter().enumerate() {
         let li = lidx[&(r.layer, r.dt)];
         let (ex, ey) = rep_extent(&r.rep);
@@ -5579,19 +5625,14 @@ fn build_cell_plan(
         .max_by_key(|&(_, &b)| b)
         .map(|(k, &b)| (k, b))
         .unwrap_or((0, 0));
-    let mem_ok = crate::mem_available_gb()
-        .is_none_or(|gb| gb >= GOVERNOR_MIN_AVAIL_GB);
+    let mem_ok = crate::mem_available_gb().is_none_or(|gb| gb >= GOVERNOR_MIN_AVAIL_GB);
     let mode = if !mem_ok {
         SplitMode::Serial
-    } else if max_bytes >= P2_MIN_BYTES
-        && max_bytes * 10 >= split_bytes * 6
-    {
+    } else if max_bytes >= P2_MIN_BYTES && max_bytes * 10 >= split_bytes * 6 {
         // >= 60% of the split input in one layer: P1 cannot beat
         // that layer's serial time - go inside it
         SplitMode::P2
-    } else if layers_active >= 2
-        && split_bytes >= SPLIT_PAR_MIN_BYTES
-    {
+    } else if layers_active >= 2 && split_bytes >= SPLIT_PAR_MIN_BYTES {
         SplitMode::P1
     } else {
         SplitMode::Serial
@@ -5611,9 +5652,7 @@ fn build_cell_plan(
         .max(1);
     let mut split_helpers = 0usize;
     if mode != SplitMode::Serial && desired > 1 {
-        while split_helpers + 1 < desired
-            && try_borrow_plan_slot(plan_budget)
-        {
+        while split_helpers + 1 < desired && try_borrow_plan_slot(plan_budget) {
             split_helpers += 1;
         }
     }
@@ -5627,9 +5666,7 @@ fn build_cell_plan(
         // even if no slot exists yet so late-lent slots can join.
         layer_inputs
             .into_iter()
-            .map(|(li, recs)| {
-                plan_layer(cell, ci, li, recs, page_target_bytes)
-            })
+            .map(|(li, recs)| plan_layer(cell, ci, li, recs, page_target_bytes))
             .collect()
     } else if mode == SplitMode::P2 {
         // the dominant layer fans its subtrees over all borrowed
@@ -5639,8 +5676,7 @@ fn build_cell_plan(
         // time (see shard_headroom), not here.
         let opts = P2Opts {
             threads: desired,
-            target_tasks: (desired * 4)
-                .min(P2_TASK_CAP),
+            target_tasks: (desired * 4).min(P2_TASK_CAP),
             task_min: P2_TASK_MIN_BYTES,
             shard_limit: p2_shard_limit,
             budget: Some(plan_budget),
@@ -5654,52 +5690,33 @@ fn build_cell_plan(
             .enumerate()
             .map(|(k, (li, recs))| {
                 if k == max_k {
-                    plan_layer_frontier(
-                        cell,
-                        ci,
-                        li,
-                        recs,
-                        page_target_bytes,
-                        &opts,
-                    )
+                    plan_layer_frontier(cell, ci, li, recs, page_target_bytes, &opts)
                 } else {
-                    plan_layer(
-                        cell,
-                        ci,
-                        li,
-                        recs,
-                        page_target_bytes,
-                    )
+                    plan_layer(cell, ci, li, recs, page_target_bytes)
                 }
             })
             .collect()
     } else {
         // P1: heaviest-first scheduling, li-order merge - load
         // balance freely, the merge order alone fixes the bytes
-        let mut order: Vec<usize> =
-            (0..layer_inputs.len()).collect();
+        let mut order: Vec<usize> = (0..layer_inputs.len()).collect();
         order.sort_by_key(|&k| std::cmp::Reverse(per_bytes[k]));
-        let tasks: Vec<std::sync::Mutex<Option<(u32, Vec<PRec>)>>> =
-            layer_inputs
-                .into_iter()
-                .map(|t| std::sync::Mutex::new(Some(t)))
-                .collect();
-        let slots: Vec<std::sync::Mutex<Option<LayerPlan>>> =
-            (0..tasks.len())
-                .map(|_| std::sync::Mutex::new(None))
-                .collect();
+        let tasks: Vec<std::sync::Mutex<Option<(u32, Vec<PRec>)>>> = layer_inputs
+            .into_iter()
+            .map(|t| std::sync::Mutex::new(Some(t)))
+            .collect();
+        let slots: Vec<std::sync::Mutex<Option<LayerPlan>>> = (0..tasks.len())
+            .map(|_| std::sync::Mutex::new(None))
+            .collect();
         let nextk = std::sync::atomic::AtomicUsize::new(0);
         let work = || loop {
-            let i = nextk
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let i = nextk.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if i >= order.len() {
                 return;
             }
             let k = order[i];
-            let (li, recs) =
-                tasks[k].lock().unwrap().take().expect("layer task");
-            let lp =
-                plan_layer(cell, ci, li, recs, page_target_bytes);
+            let (li, recs) = tasks[k].lock().unwrap().take().expect("layer task");
+            let lp = plan_layer(cell, ci, li, recs, page_target_bytes);
             *slots[k].lock().unwrap() = Some(lp);
         };
         std::thread::scope(|sc| {
@@ -5710,36 +5727,26 @@ fn build_cell_plan(
         });
         slots
             .into_iter()
-            .map(|s| {
-                s.into_inner().unwrap().expect("layer plan slot")
-            })
+            .map(|s| s.into_inner().unwrap().expect("layer plan slot"))
             .collect()
     };
     // the memory fallback returns the lease inside the frontier
     // (it runs single-threaded) - do not return it twice
     let p2_fallback = layer_plans.iter().any(|lp| lp.p2_fallback);
     if split_helpers > 0 && !p2_fallback {
-        plan_budget.fetch_add(
-            split_helpers as isize,
-            std::sync::atomic::Ordering::Relaxed,
-        );
+        plan_budget.fetch_add(split_helpers as isize, std::sync::atomic::Ordering::Relaxed);
     }
     let split_threads = if p2_fallback {
         1
     } else if mode == SplitMode::P2 {
-        1 + p2_helpers_used.load(
-            std::sync::atomic::Ordering::Relaxed,
-        )
+        1 + p2_helpers_used.load(std::sync::atomic::Ordering::Relaxed)
     } else {
         split_helpers + 1
     };
     // #76b: count a P2 cell only if neither an entry-time lease nor a slot
     // lent while useful frontier work remained actually joined it. jobs=1
     // stays out because no pool could help there.
-    let p2_starved = mode == SplitMode::P2
-        && split_threads == 1
-        && jobs > 1
-        && desired > 1;
+    let p2_starved = mode == SplitMode::P2 && split_threads == 1 && jobs > 1 && desired > 1;
     // merge in li order (this is what fixes the output bytes)
     let mut pages: Vec<PageJob> = Vec::new();
     let mut pranges: Vec<(u32, u32, u32, u32)> = Vec::new();
@@ -5763,13 +5770,11 @@ fn build_cell_plan(
             p2_fallback: lp.p2_fallback,
         });
         let run_lo = narrow_u32(pages.len() as u64, "cell page count");
-        let run_count =
-            narrow_u32(lp.pages.len() as u64, "run page count");
+        let run_count = narrow_u32(lp.pages.len() as u64, "run page count");
         let root = if lp.pbvh.is_empty() {
             PBVH_NONE
         } else {
-            let root_local =
-                narrow_u32(pbvh.len() as u64, "cell pbvh count");
+            let root_local = narrow_u32(pbvh.len() as u64, "cell pbvh count");
             for (bb, first, count, leaf, mw, mh) in lp.pbvh {
                 let f = if leaf {
                     run_lo + first
@@ -5783,8 +5788,7 @@ fn build_cell_plan(
         if !lp.arenas.is_empty() {
             // layer-local shard slots -> cell-local (compact:
             // LayerPlan carries only non-empty shards)
-            let base =
-                narrow_u32(arenas.len() as u64, "cell arena count");
+            let base = narrow_u32(arenas.len() as u64, "cell arena count");
             if base > 0 {
                 for j in lp.pages.iter_mut() {
                     if j.arena_slot != ARENA_NONE {
@@ -5809,9 +5813,7 @@ fn build_cell_plan(
         shard_bytes += lp.shard_bytes;
         top_split.push((layer_key, lp.secs));
     }
-    top_split.sort_by(|a, b| {
-        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-    });
+    top_split.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     top_split.truncate(3);
     lap(&mut phase_s[2]);
     // M7: LOD variants ride at the tail of the cell's page list -
@@ -5841,24 +5843,13 @@ fn build_cell_plan(
         // runnable-task budget. Cell planners blocked on the ordered
         // plan window lend their slots, so this fanout also works for
         // monsters in the middle of a large build (#76).
-        let desired = jobs
-            .max(1)
-            .min(cand.len())
-            .min(16)
-            .max(1);
+        let desired = jobs.max(1).min(cand.len()).min(16).max(1);
         let mut extra = 0usize;
-        while extra + 1 < desired
-            && try_borrow_plan_slot(plan_budget)
-        {
+        while extra + 1 < desired && try_borrow_plan_slot(plan_budget) {
             extra += 1;
         }
-        let late = reserve_late_waiters(
-            late_waiters,
-            desired.saturating_sub(extra + 1),
-        );
-        let slots: Vec<
-            std::sync::Mutex<Option<(PageJob, SplitStats)>>,
-        > = (0..cand.len())
+        let late = reserve_late_waiters(late_waiters, desired.saturating_sub(extra + 1));
+        let slots: Vec<std::sync::Mutex<Option<(PageJob, SplitStats)>>> = (0..cand.len())
             .map(|_| std::sync::Mutex::new(None))
             .collect();
         let nextk = std::sync::atomic::AtomicUsize::new(0);
@@ -5867,10 +5858,7 @@ fn build_cell_plan(
             // slot-merge order (cand index) fixes output bytes at
             // any thread count
             let work = || loop {
-                let i = nextk.fetch_add(
-                    1,
-                    std::sync::atomic::Ordering::Relaxed,
-                );
+                let i = nextk.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if i >= cand.len() {
                     return;
                 }
@@ -5888,64 +5876,43 @@ fn build_cell_plan(
             if extra == 0 && late == 0 {
                 work();
             } else {
-                let helpers_used =
-                    std::sync::atomic::AtomicUsize::new(0);
+                let helpers_used = std::sync::atomic::AtomicUsize::new(0);
                 let stop = std::sync::atomic::AtomicBool::new(false);
                 std::thread::scope(|sc| {
-                    struct StopOnDrop<'a>(
-                        &'a std::sync::atomic::AtomicBool,
-                    );
+                    struct StopOnDrop<'a>(&'a std::sync::atomic::AtomicBool);
                     impl Drop for StopOnDrop<'_> {
                         fn drop(&mut self) {
-                            self.0.store(
-                                true,
-                                std::sync::atomic::Ordering::Release,
-                            );
+                            self.0.store(true, std::sync::atomic::Ordering::Release);
                         }
                     }
                     let _stop_on_drop = StopOnDrop(&stop);
                     for _ in 0..extra {
                         sc.spawn(|| {
-                            helpers_used.fetch_add(
-                                1,
-                                std::sync::atomic::Ordering::Relaxed,
-                            );
+                            helpers_used.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             work();
                         });
                     }
                     for _ in 0..late {
                         sc.spawn(|| {
-                            let _waiter = ReturnAtomicPermit(
-                                late_waiters
-                                    .expect("late waiter budget"),
-                            );
+                            let _waiter =
+                                ReturnAtomicPermit(late_waiters.expect("late waiter budget"));
                             loop {
-                                if stop.load(
-                                    std::sync::atomic::Ordering::Acquire,
-                                ) || nextk.load(
-                                    std::sync::atomic::Ordering::Relaxed,
-                                ) >= cand.len()
+                                if stop.load(std::sync::atomic::Ordering::Acquire)
+                                    || nextk.load(std::sync::atomic::Ordering::Relaxed)
+                                        >= cand.len()
                                 {
                                     return;
                                 }
                                 if try_borrow_plan_slot(plan_budget) {
-                                    let _slot =
-                                        ReturnAtomicPermit(plan_budget);
-                                    helpers_used.fetch_add(
-                                        1,
-                                        std::sync::atomic::Ordering::Relaxed,
-                                    );
-                                    if let Some(barrier) =
-                                        late_join_barrier
-                                    {
+                                    let _slot = ReturnAtomicPermit(plan_budget);
+                                    helpers_used.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    if let Some(barrier) = late_join_barrier {
                                         barrier.wait();
                                     }
                                     work();
                                     return;
                                 }
-                                std::thread::sleep(
-                                    std::time::Duration::from_millis(1),
-                                );
+                                std::thread::sleep(std::time::Duration::from_millis(1));
                             }
                         });
                     }
@@ -5953,24 +5920,14 @@ fn build_cell_plan(
                         barrier.wait();
                     }
                     work();
-                    stop.store(
-                        true,
-                        std::sync::atomic::Ordering::Release,
-                    );
+                    stop.store(true, std::sync::atomic::Ordering::Release);
                 });
-                lod_threads = 1 + helpers_used.load(
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-                plan_budget.fetch_add(
-                    extra as isize,
-                    std::sync::atomic::Ordering::Relaxed,
-                );
+                lod_threads = 1 + helpers_used.load(std::sync::atomic::Ordering::Relaxed);
+                plan_budget.fetch_add(extra as isize, std::sync::atomic::Ordering::Relaxed);
             }
         }
         for (i, &k) in cand.iter().enumerate() {
-            if let Some((job, lst)) =
-                slots[i].lock().unwrap().take()
-            {
+            if let Some((job, lst)) = slots[i].lock().unwrap().take() {
                 split_stats.fragments += lst.fragments;
                 split_stats.grid_pieces += lst.grid_pieces;
                 split_stats.grid_rows += lst.grid_rows;
@@ -5978,12 +5935,8 @@ fn build_cell_plan(
                 split_stats.oversize_pages += lst.oversize_pages;
                 split_stats.depth_capped += lst.depth_capped;
                 split_stats.lod_pages += lst.lod_pages;
-                split_stats.lod_grid_verbatim +=
-                    lst.lod_grid_verbatim;
-                pages[k].lod_page = narrow_u32(
-                    pages.len() as u64,
-                    "cell page count",
-                );
+                split_stats.lod_grid_verbatim += lst.lod_grid_verbatim;
+                pages[k].lod_page = narrow_u32(pages.len() as u64, "cell page count");
                 split_stats.lod_pages += 1;
                 pages.push(job);
             }
@@ -5997,10 +5950,7 @@ fn build_cell_plan(
                 &pages[k],
                 &mut split_stats,
             ) {
-                pages[k].lod_page = narrow_u32(
-                    pages.len() as u64,
-                    "cell page count",
-                );
+                pages[k].lod_page = narrow_u32(pages.len() as u64, "cell page count");
                 split_stats.lod_pages += 1;
                 pages.push(job);
             }
@@ -6024,24 +5974,10 @@ fn build_cell_plan(
         let pl = &cell.places[pi as usize];
         match &pts_prep[pi as usize] {
             Some(prep) => {
-                sink.place_pts(
-                    pl.cell as u32,
-                    pl.x,
-                    pl.y,
-                    pl.rot,
-                    pl.flip,
-                    prep,
-                );
+                sink.place_pts(pl.cell as u32, pl.x, pl.y, pl.rot, pl.flip, prep);
             }
             None => {
-                sink.place(
-                    pl.cell as u32,
-                    pl.x,
-                    pl.y,
-                    pl.rot,
-                    pl.flip,
-                    &pl.rep,
-                );
+                sink.place(pl.cell as u32, pl.x, pl.y, pl.rot, pl.flip, &pl.rep);
             }
         }
     }
@@ -6151,13 +6087,9 @@ fn build_cell_texts(
         .cells
         .checked_add(1)
         .expect("limit exceeded: text-bearing cells");
-    let mut groups: std::collections::BTreeMap<u32, Vec<u32>> =
-        std::collections::BTreeMap::new();
+    let mut groups: std::collections::BTreeMap<u32, Vec<u32>> = std::collections::BTreeMap::new();
     for (ti, t) in cell.texts.iter().enumerate() {
-        let li = narrow_u32(
-            lidx[&(t.layer, t.dt)] as u64,
-            "text layer index",
-        );
+        let li = narrow_u32(lidx[&(t.layer, t.dt)] as u64, "text layer index");
         groups
             .entry(li)
             .or_default()
@@ -6195,8 +6127,7 @@ fn build_cell_texts(
                 .string_bytes
                 .checked_add(t.s.len() as u64)
                 .expect("limit exceeded: text string bytes");
-            let slen =
-                narrow_u32(t.s.len() as u64, "text string length");
+            let slen = narrow_u32(t.s.len() as u64, "text string length");
             let rep = match &t.rep {
                 Rep::One => floe_ovm::TREP_NONE,
                 Rep::Grid { na, nb, va, vb } => {
@@ -6219,10 +6150,8 @@ fn build_cell_texts(
                     let prep = floe_ovm::prepare_pts(p);
                     let pts_off = *ovt_off;
                     for &(px, py) in &prep.pts {
-                        ovt.write_all(&px.to_le_bytes())
-                            .expect("write ovt");
-                        ovt.write_all(&py.to_le_bytes())
-                            .expect("write ovt");
+                        ovt.write_all(&px.to_le_bytes()).expect("write ovt");
+                        ovt.write_all(&py.to_le_bytes()).expect("write ovt");
                     }
                     let pts_bytes = (prep.pts.len() as u64)
                         .checked_mul(16)
@@ -6239,16 +6168,10 @@ fn build_cell_texts(
                         b.tchunk(c);
                     }
                     b.trep_pts(
-                        narrow_u32(
-                            prep.pts.len() as u64,
-                            "text pts count",
-                        ),
+                        narrow_u32(prep.pts.len() as u64, "text pts count"),
                         pts_off,
                         chunk_lo,
-                        narrow_u32(
-                            prep.chunks.len() as u64,
-                            "text pts chunks",
-                        ),
+                        narrow_u32(prep.chunks.len() as u64, "text pts chunks"),
                     )
                 }
             };
@@ -6275,10 +6198,8 @@ fn build_cell_texts(
         // Morton pre-sort over bbox centers, source_seq tie-break
         let center = |r: &TRec| {
             (
-                ((r.bbox.x0 as i128 + r.bbox.x1 as i128) / 2)
-                    as i64,
-                ((r.bbox.y0 as i128 + r.bbox.y1 as i128) / 2)
-                    as i64,
+                ((r.bbox.x0 as i128 + r.bbox.x1 as i128) / 2) as i64,
+                ((r.bbox.y0 as i128 + r.bbox.y1 as i128) / 2) as i64,
             )
         };
         let (mut minx, mut miny) = (i64::MAX, i64::MAX);
@@ -6296,8 +6217,7 @@ fn build_cell_texts(
             )
         });
         let text_lo = b.n_texts();
-        let count =
-            narrow_u32(recs.len() as u64, "trange text count");
+        let count = narrow_u32(recs.len() as u64, "trange text count");
         let root = if recs.len() <= TBVH_LEAF {
             for &i in &order {
                 let r = &recs[i as usize];
@@ -6317,12 +6237,9 @@ fn build_cell_texts(
         } else {
             // BVH partition decides the storage order (leaves are
             // contiguous item ranges); emit texts in that order
-            let mut items: Vec<(BBox, u32)> = order
-                .iter()
-                .map(|&i| (recs[i as usize].bbox, i))
-                .collect();
-            let mut nodes: Vec<(BBox, u32, u16, bool)> =
-                vec![(BBox::EMPTY, 0, 0, false)];
+            let mut items: Vec<(BBox, u32)> =
+                order.iter().map(|&i| (recs[i as usize].bbox, i)).collect();
+            let mut nodes: Vec<(BBox, u32, u16, bool)> = vec![(BBox::EMPTY, 0, 0, false)];
             split_tbvh(&mut nodes, &mut items, 0, 0);
             for &(_, i) in &items {
                 let r = &recs[i as usize];
@@ -6341,15 +6258,9 @@ fn build_cell_texts(
             let base = b.n_tbvh();
             for &(bbb, first, cnt, leaf) in &nodes {
                 let f = if leaf {
-                    narrow_u32(
-                        text_lo as u64 + first as u64,
-                        "text index",
-                    )
+                    narrow_u32(text_lo as u64 + first as u64, "text index")
                 } else {
-                    narrow_u32(
-                        base as u64 + first as u64,
-                        "tbvh index",
-                    )
+                    narrow_u32(base as u64 + first as u64, "tbvh index")
                 };
                 b.tbvh_node(&bbb, f, cnt, leaf);
             }
@@ -6404,9 +6315,8 @@ fn build(
     // were separate single-threaded O(records) sweeps). Texts count
     // into masks/bboxes but not into members or the paged totals.
     let bw = nl.div_ceil(8).max(1);
-    let dslots: Vec<
-        std::sync::OnceLock<(Vec<u8>, Vec<u8>, u64, BBox)>,
-    > = (0..n).map(|_| std::sync::OnceLock::new()).collect();
+    let dslots: Vec<std::sync::OnceLock<(Vec<u8>, Vec<u8>, u64, BBox)>> =
+        (0..n).map(|_| std::sync::OnceLock::new()).collect();
     let (lrecs, lmems) = {
         let td = std::time::Instant::now();
         let next = std::sync::atomic::AtomicUsize::new(0);
@@ -6419,9 +6329,7 @@ fn build(
                     use std::sync::atomic::Ordering::Relaxed;
                     let mut last = td;
                     loop {
-                        std::thread::sleep(
-                            std::time::Duration::from_millis(200),
-                        );
+                        std::thread::sleep(std::time::Duration::from_millis(200));
                         if done.load(Relaxed) >= n {
                             return;
                         }
@@ -6492,9 +6400,7 @@ fn build(
                             }
                             for pa in &cell.paths {
                                 let li = lidx[&(pa.layer, pa.dt)];
-                                let b4 = path_bbox(
-                                    &pa.pts, pa.hw, pa.es, pa.ee,
-                                );
+                                let b4 = path_bbox(&pa.pts, pa.hw, pa.es, pa.ee);
                                 let (ex, ey) = rep_extent(&pa.rep);
                                 floe_ovm::bit_set(&mut mask, li);
                                 bx.grow(&BBox {
@@ -6526,8 +6432,7 @@ fn build(
                                     y1: t.y + ey.1.max(0),
                                 });
                             }
-                            let _ = dslots[ci]
-                                .set((mask, tmask, mems, bx));
+                            let _ = dslots[ci].set((mask, tmask, mems, bx));
                             done.fetch_add(1, Relaxed);
                         }
                         (lr, lm)
@@ -6553,8 +6458,7 @@ fn build(
     let mut dmembers: Vec<u64> = Vec::with_capacity(n);
     let mut dbox: Vec<BBox> = Vec::with_capacity(n);
     for slot in dslots {
-        let (m, tm, mm, bx) =
-            slot.into_inner().expect("direct slot unset");
+        let (m, tm, mm, bx) = slot.into_inner().expect("direct slot unset");
         dmask.push(m);
         dtmask.push(tm);
         dmembers.push(mm);
@@ -6586,12 +6490,12 @@ fn build(
         let mut tmask = dtmask[ci].clone();
         for pl in &doc.cells[ci].places {
             let c = pl.cell;
-            hm = hm.max(height[c].checked_add(1).unwrap_or_else(
-                || panic!("limit exceeded: hierarchy depth"),
-            ));
-            mm = mm.saturating_add(
-                rmembers[c].saturating_mul(pl.rep.members()),
+            hm = hm.max(
+                height[c]
+                    .checked_add(1)
+                    .unwrap_or_else(|| panic!("limit exceeded: hierarchy depth")),
             );
+            mm = mm.saturating_add(rmembers[c].saturating_mul(pl.rep.members()));
             for (a, b) in mask.iter_mut().zip(&rmask[c]) {
                 *a |= *b;
             }
@@ -6622,9 +6526,7 @@ fn build(
     let plan_batch = plan_batch.max(1).min(n.max(1));
     let encode_workers = jobs.max(1);
     let ovp_path = format!("{}/design.ovp", outdir);
-    let mut ovp = std::io::BufWriter::new(
-        std::fs::File::create(&ovp_path).expect("create ovp"),
-    );
+    let mut ovp = std::io::BufWriter::new(std::fs::File::create(&ovp_path).expect("create ovp"));
     let mut ovp_off = 0u64;
     // design.ovb: the pages' occupancy grids, beside design.ovp in page order
     let mut ovb = page_occ.then(|| OvbWriter::create(outdir));
@@ -6632,9 +6534,7 @@ fn build(
     // text pass runs serially in cell order inside the batch loop
     // (cheap, source-local), so bytes are jobs-independent
     let ovt_path = format!("{}/design.ovt", outdir);
-    let mut ovt = std::io::BufWriter::new(
-        std::fs::File::create(&ovt_path).expect("create ovt"),
-    );
+    let mut ovt = std::io::BufWriter::new(std::fs::File::create(&ovt_path).expect("create ovt"));
     let mut ovt_off = 0u64;
     let mut tstats = TextIndexStats::default();
     let mut pages_bytes = 0u64;
@@ -6642,24 +6542,12 @@ fn build(
     let mut lrecs_stored = vec![0u64; nl];
     let mut split_total = SplitStats::default();
     let mut p2_starved_cells = 0usize;
-    let planned_cells = std::sync::Arc::new(
-        std::sync::atomic::AtomicUsize::new(0),
-    );
-    let planned_pages = std::sync::Arc::new(
-        std::sync::atomic::AtomicUsize::new(0),
-    );
-    let encoded_pages = std::sync::Arc::new(
-        std::sync::atomic::AtomicUsize::new(0),
-    );
-    let active_cell_plans = std::sync::Arc::new(
-        std::sync::atomic::AtomicUsize::new(0),
-    );
-    let peak_cell_plans = std::sync::Arc::new(
-        std::sync::atomic::AtomicUsize::new(0),
-    );
-    let pipeline_on = std::sync::Arc::new(
-        std::sync::atomic::AtomicBool::new(true),
-    );
+    let planned_cells = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let planned_pages = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let encoded_pages = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let active_cell_plans = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let peak_cell_plans = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let pipeline_on = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     let pipeline_start = std::time::Instant::now();
     let heartbeat = {
         let planned_cells = planned_cells.clone();
@@ -6672,9 +6560,7 @@ fn build(
             use std::sync::atomic::Ordering::Relaxed;
             let mut last = 0u64;
             loop {
-                std::thread::sleep(
-                    std::time::Duration::from_millis(200),
-                );
+                std::thread::sleep(std::time::Duration::from_millis(200));
                 if !pipeline_on.load(Relaxed) {
                     return;
                 }
@@ -6739,8 +6625,7 @@ fn build(
     impl Drop for DiedFlag<'_> {
         fn drop(&mut self) {
             if std::thread::panicking() {
-                self.0
-                    .store(true, std::sync::atomic::Ordering::Release);
+                self.0.store(true, std::sync::atomic::Ordering::Release);
             }
         }
     }
@@ -6753,15 +6638,11 @@ fn build(
     // parked; only runnable planning tasks are pooled.)
     let slow_s = slow_cell_s;
     let planners = jobs.max(1).min(n.max(1));
-    let plan_budget = std::sync::atomic::AtomicIsize::new(
-        jobs.max(1) as isize - planners as isize,
-    );
+    let plan_budget = std::sync::atomic::AtomicIsize::new(jobs.max(1) as isize - planners as isize);
     // Parked late helpers repair the one-shot #76 race: a P2/LOD phase that
     // starts at budget zero can consume slots lent later. They do not own a
     // CPU slot while parked, and this separate cap bounds extra OS threads.
-    let late_waiters = std::sync::atomic::AtomicIsize::new(
-        jobs.saturating_sub(1).min(16) as isize,
-    );
+    let late_waiters = std::sync::atomic::AtomicIsize::new(jobs.saturating_sub(1).min(16) as isize);
     let window_slot_lends = std::sync::atomic::AtomicUsize::new(0);
     std::thread::scope(|s| {
         // committer side: a panic below (commit/encode) must also
@@ -6781,25 +6662,16 @@ fn build(
             let peak_cell_plans = &peak_cell_plans;
             let window_slot_lends = &window_slot_lends;
             s.spawn(move || loop {
-                let ci = next_cell.fetch_add(
-                    1,
-                    std::sync::atomic::Ordering::Relaxed,
-                );
+                let ci = next_cell.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if ci >= n {
                     // This planner still owns its runnable slot here.
-                    plan_budget.fetch_add(
-                        1,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
+                    plan_budget.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     return;
                 }
                 let admitted = || {
-                    ci < commit_base
-                        .load(std::sync::atomic::Ordering::Acquire)
+                    ci < commit_base.load(std::sync::atomic::Ordering::Acquire)
                         + window
-                            .load(
-                                std::sync::atomic::Ordering::Relaxed,
-                            )
+                            .load(std::sync::atomic::Ordering::Relaxed)
                             .min(ring_cap)
                 };
                 if !admitted() {
@@ -6807,76 +6679,49 @@ fn build(
                     // Lend this planner's runnable slot to a P1/P2/LOD task;
                     // admission alone is not enough to resume because a
                     // helper may still own the slot.
-                    plan_budget.fetch_add(
-                        1,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
-                    window_slot_lends.fetch_add(
-                        1,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
+                    plan_budget.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    window_slot_lends.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     loop {
-                        if died.load(
-                            std::sync::atomic::Ordering::Acquire,
-                        ) {
+                        if died.load(std::sync::atomic::Ordering::Acquire) {
                             // Slot was already returned before this wait.
                             return;
                         }
-                        if admitted()
-                            && try_borrow_plan_slot(plan_budget)
-                        {
+                        if admitted() && try_borrow_plan_slot(plan_budget) {
                             break;
                         }
-                        std::thread::sleep(
-                            std::time::Duration::from_millis(1),
-                        );
+                        std::thread::sleep(std::time::Duration::from_millis(1));
                     }
                 }
                 let t = std::time::Instant::now();
-                let active = active_cell_plans.fetch_add(
-                    1,
-                    std::sync::atomic::Ordering::Relaxed,
-                ) + 1;
-                peak_cell_plans.fetch_max(
-                    active,
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-                struct ActiveCellGuard<'a>(
-                    &'a std::sync::atomic::AtomicUsize,
-                );
+                let active =
+                    active_cell_plans.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                peak_cell_plans.fetch_max(active, std::sync::atomic::Ordering::Relaxed);
+                struct ActiveCellGuard<'a>(&'a std::sync::atomic::AtomicUsize);
                 impl Drop for ActiveCellGuard<'_> {
                     fn drop(&mut self) {
-                        self.0.fetch_sub(
-                            1,
-                            std::sync::atomic::Ordering::Relaxed,
-                        );
+                        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
                 let _active_cell = ActiveCellGuard(active_cell_plans);
-                let plan = match std::panic::catch_unwind(
-                    std::panic::AssertUnwindSafe(|| {
-                        build_cell_plan(
-                            doc,
-                            ci,
-                            rbb,
-                            lidx,
-                            nl,
-                            page_target_bytes,
-                            lod,
-                            plan_budget,
-                            Some(late_waiters),
-                            None,
-                            jobs,
-                            p2_shard_limit,
-                        )
-                    }),
-                ) {
+                let plan = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    build_cell_plan(
+                        doc,
+                        ci,
+                        rbb,
+                        lidx,
+                        nl,
+                        page_target_bytes,
+                        lod,
+                        plan_budget,
+                        Some(late_waiters),
+                        None,
+                        jobs,
+                        p2_shard_limit,
+                    )
+                })) {
                     Ok(p) => p,
                     Err(e) => {
-                        died.store(
-                            true,
-                            std::sync::atomic::Ordering::Release,
-                        );
+                        died.store(true, std::sync::atomic::Ordering::Release);
                         std::panic::resume_unwind(e);
                     }
                 };
@@ -6889,10 +6734,7 @@ fn build(
                     // whether P1 fanout can help (#60)
                     let mut top = String::new();
                     for ((l, d), s) in &plan.top_split {
-                        top.push_str(&format!(
-                            " L{}.{} {:.1}s",
-                            l, d, s
-                        ));
+                        top.push_str(&format!(" L{}.{} {:.1}s", l, d, s));
                     }
                     let p2 = if plan.p2_tasks > 0 {
                         format!(
@@ -6904,11 +6746,7 @@ fn build(
                             } else {
                                 ""
                             },
-                            if plan.p2_starved {
-                                " helpers=0"
-                            } else {
-                                ""
-                            }
+                            if plan.p2_starved { " helpers=0" } else { "" }
                         )
                     } else if plan.p2_starved {
                         String::from(" p2_eligible=1 helpers=0")
@@ -6948,16 +6786,13 @@ fn build(
         // ---- ordered committer (this thread): sink commit + texts
         // + cell records, then encode a chunk and drop its arenas
         let mut batch_jobs: Vec<PageJob> = Vec::new();
-        let mut batch_arenas: Vec<std::sync::Arc<Vec<Arena>>> =
-            Vec::new();
+        let mut batch_arenas: Vec<std::sync::Arc<Vec<Arena>>> = Vec::new();
         let mut chunk_base = 0usize;
         for ci in 0..n {
             if ci % 64 == 0 {
                 if let Some(avail) = crate::mem_available_gb() {
                     if avail < GOVERNOR_MIN_AVAIL_GB {
-                        let cur = window.load(
-                            std::sync::atomic::Ordering::Relaxed,
-                        );
+                        let cur = window.load(std::sync::atomic::Ordering::Relaxed);
                         let nextw = (cur / 2).max(jobs.max(1));
                         if nextw < cur {
                             eprintln!(
@@ -6965,18 +6800,13 @@ fn build(
                                  -> {} (MemAvailable {:.1} GB)",
                                 cur, nextw, avail
                             );
-                            window.store(
-                                nextw,
-                                std::sync::atomic::Ordering::Relaxed,
-                            );
+                            window.store(nextw, std::sync::atomic::Ordering::Relaxed);
                         }
                     }
                 }
             }
             let plan = loop {
-                if let Some(pl) =
-                    ring[ci % ring_cap].lock().unwrap().take()
-                {
+                if let Some(pl) = ring[ci % ring_cap].lock().unwrap().take() {
                     break pl;
                 }
                 if died.load(std::sync::atomic::Ordering::Acquire) {
@@ -6989,14 +6819,9 @@ fn build(
                         ci
                     );
                 }
-                std::thread::sleep(
-                    std::time::Duration::from_micros(200),
-                );
+                std::thread::sleep(std::time::Duration::from_micros(200));
             };
-            commit_base.store(
-                ci + 1,
-                std::sync::atomic::Ordering::Release,
-            );
+            commit_base.store(ci + 1, std::sync::atomic::Ordering::Release);
             let ta = std::time::Instant::now();
             let CellPlan {
                 sink,
@@ -7045,8 +6870,7 @@ fn build(
             let cell = &doc.cells[ci];
             let page_base = pages_total as u64;
             let page_start = narrow_u32(page_base, "page count");
-            let page_count =
-                narrow_u32(pages.len() as u64, "cell page count");
+            let page_count = narrow_u32(pages.len() as u64, "cell page count");
             // one memcpy+rebase commit instead of the old
             // record-at-a-time re-walk (the pipeline's serial
             // bottleneck on placement-heavy chips)
@@ -7061,10 +6885,7 @@ fn build(
             let pr_count = sink.n_pranges;
             for job in pages.iter_mut() {
                 if job.lod_page != floe_ovm::LOD_PAGE_NONE {
-                    job.lod_page = narrow_u32(
-                        page_base + job.lod_page as u64,
-                        "page index",
-                    );
+                    job.lod_page = narrow_u32(page_base + job.lod_page as u64, "page index");
                 }
                 if job.lod != floe_ovm::LOD_EXACT {
                     // LOD variants are derived data: the layer
@@ -7081,10 +6902,8 @@ fn build(
                 .expect("limit exceeded: page count");
             batch_jobs.append(&mut pages);
 
-            let (tr_start, tr_count) = build_cell_texts(
-                doc, ci, &lidx, &mut b, &mut ovt, &mut ovt_off,
-                &mut tstats,
-            );
+            let (tr_start, tr_count) =
+                build_cell_texts(doc, ci, &lidx, &mut b, &mut ovt, &mut ovt_off, &mut tstats);
             let mask_d = b.bitset(&dmask[ci]);
             let mask_r = b.bitset(&rmask[ci]);
             let mask_t = b.bitset(&rtmask[ci]);
@@ -7095,10 +6914,7 @@ fn build(
                 &dbox[ci],
                 &win_to_bbox(rbb[ci]),
                 narrow_u32(place_base, "place count"),
-                narrow_u32(
-                    cell.places.len() as u64,
-                    "cell place count",
-                ),
+                narrow_u32(cell.places.len() as u64, "cell place count"),
                 page_start,
                 page_count,
                 bvh_start,
@@ -7113,14 +6929,8 @@ fn build(
                 mask_t,
             );
             commit_elapsed += ta.elapsed();
-            planned_cells.store(
-                ci + 1,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-            planned_pages.store(
-                pages_total,
-                std::sync::atomic::Ordering::Relaxed,
-            );
+            planned_cells.store(ci + 1, std::sync::atomic::Ordering::Relaxed);
+            planned_pages.store(pages_total, std::sync::atomic::Ordering::Relaxed);
             let flush = ci + 1
                 >= chunk_base
                     + window
@@ -7173,8 +6983,7 @@ fn build(
         peak_cell_plans.load(std::sync::atomic::Ordering::Relaxed),
         rss()
     );
-    let lends =
-        window_slot_lends.load(std::sync::atomic::Ordering::Relaxed);
+    let lends = window_slot_lends.load(std::sync::atomic::Ordering::Relaxed);
     if lends > 0 {
         eprintln!(
             "[vfs] build: plan window lent {} idle slot(s) to the \
@@ -7269,7 +7078,12 @@ fn build(
 fn pts_bbox(pts: &[(i64, i64)]) -> BBox {
     let mut b = BBox::EMPTY;
     for &(x, y) in pts {
-        b.grow(&BBox { x0: x, y0: y, x1: x, y1: y });
+        b.grow(&BBox {
+            x0: x,
+            y0: y,
+            x1: x,
+            y1: y,
+        });
     }
     b
 }
@@ -7291,21 +7105,16 @@ fn split_bvh(
         mn = mn.max(*imn);
     }
     if items.len() <= BVH_LEAF {
-        nodes[slot] =
-            (bb, lo as u32, items.len() as u16, true, md, mn);
+        nodes[slot] = (bb, lo as u32, items.len() as u16, true, md, mn);
         return;
     }
     let wx = bb.x1 - bb.x0;
     let wy = bb.y1 - bb.y0;
     let mid = items.len() / 2;
     if wx >= wy {
-        items.select_nth_unstable_by_key(mid, |(b, ..)| {
-            b.x0 + b.x1
-        });
+        items.select_nth_unstable_by_key(mid, |(b, ..)| b.x0 + b.x1);
     } else {
-        items.select_nth_unstable_by_key(mid, |(b, ..)| {
-            b.y0 + b.y1
-        });
+        items.select_nth_unstable_by_key(mid, |(b, ..)| b.y0 + b.y1);
     }
     let l = nodes.len();
     nodes.push((BBox::EMPTY, 0, 0, false, 0, 0));
@@ -7335,8 +7144,15 @@ fn fmt_size(bytes: u64) -> String {
 
 fn parse_common(
     args: &[String],
-) -> (String, Option<(f64, f64, f64, f64)>, f64, f64, u32,
-      Option<Vec<String>>, Vec<(String, String)>) {
+) -> (
+    String,
+    Option<(f64, f64, f64, f64)>,
+    f64,
+    f64,
+    u32,
+    Option<Vec<String>>,
+    Vec<(String, String)>,
+) {
     let mut dir: Option<String> = None;
     let mut view = None;
     let mut px_per_um = 5.0f64;
@@ -7373,19 +7189,11 @@ fn parse_common(
                 i += 2;
             }
             "--layers" => {
-                layers = Some(
-                    args[i + 1]
-                        .split(',')
-                        .map(|s| s.to_string())
-                        .collect(),
-                );
+                layers = Some(args[i + 1].split(',').map(|s| s.to_string()).collect());
                 i += 2;
             }
             a if a.starts_with("--") => {
-                rest.push((
-                    a.to_string(),
-                    args.get(i + 1).cloned().unwrap_or_default(),
-                ));
+                rest.push((a.to_string(), args.get(i + 1).cloned().unwrap_or_default()));
                 i += 2;
             }
             a => {
@@ -7437,16 +7245,16 @@ fn make_req(
         sub_cut_wash: false,
         page_reps: false,
         decode_budget: 0,
-            page_hairline: true,
-            page_skip: Vec::new(),
-            prune_skipped: false,
-            sub_cut_box: false,
-            shape_cut: false,
-            shape_cut_max: false,
-            frames: true,
-            root: None,
-            page_wash: true,
-            lod_swap: true,
+        page_hairline: true,
+        page_skip: Vec::new(),
+        prune_skipped: false,
+        sub_cut_box: false,
+        shape_cut: false,
+        shape_cut_max: false,
+        frames: true,
+        root: None,
+        page_wash: true,
+        lod_swap: true,
     }
 }
 
@@ -7476,11 +7284,8 @@ fn inspect_plan(
         let p = v.ovm.page(pi);
         let cb = v.ovm.cell_rbbox(p.cell);
         let (cw, ch) = (cb.x1 - cb.x0, cb.y1 - cb.y0);
-        let (pw, ph) =
-            (p.bbox.x1 - p.bbox.x0, p.bbox.y1 - p.bbox.y0);
-        if (cw > 0 && pw * 4 >= cw * 3)
-            || (ch > 0 && ph * 4 >= ch * 3)
-        {
+        let (pw, ph) = (p.bbox.x1 - p.bbox.x0, p.bbox.y1 - p.bbox.y0);
+        if (cw > 0 && pw * 4 >= cw * 3) || (ch > 0 && ph * 4 >= ch * 3) {
             wide_pages += 1;
             wide_members += p.members;
         }
@@ -7490,8 +7295,7 @@ fn inspect_plan(
     let mut f = std::fs::File::open(&ovp).expect("open ovp");
     let (mut n_one, mut n_grid, mut n_pts) = (0u64, 0u64, 0u64);
     let (mut sampled, mut sampled_top) = (0u64, 0u64);
-    let (mut mem_total, mut mem_top, mut mem_vis) =
-        (0u64, 0u64, 0u64);
+    let (mut mem_total, mut mem_top, mut mem_vis) = (0u64, 0u64, 0u64);
     let vis_of = |b: &BBox, rep: &Rep, view: &BBox| -> (u64, u64) {
         let mut t = 0u64;
         let mut vis = 0u64;
@@ -7512,10 +7316,7 @@ fn inspect_plan(
             Rep::Grid { na, nb, va, vb } => {
                 for i in 0..*na as i64 {
                     for j in 0..*nb as i64 {
-                        tally(
-                            i * va.0 + j * vb.0,
-                            i * va.1 + j * vb.1,
-                        );
+                        tally(i * va.0 + j * vb.0, i * va.1 + j * vb.1);
                     }
                 }
             }
@@ -7535,8 +7336,7 @@ fn inspect_plan(
         let mut buf = vec![0u8; p.csize as usize];
         f.seek(SeekFrom::Start(p.file_off)).expect("seek ovp");
         f.read_exact(&mut buf).expect("read ovp");
-        let pd = floe_oasis::doc::parse_doc(&buf)
-            .expect("page payload parse");
+        let pd = floe_oasis::doc::parse_doc(&buf).expect("page payload parse");
         sampled += 1;
         let is_top = p.cell == top_ci;
         if is_top {
@@ -7583,7 +7383,12 @@ fn inspect_plan(
                 Rep::Pts(_) => n_pts += 1,
             }
             let b4 = path_bbox(&pa.pts, pa.hw, pa.es, pa.ee);
-            let b = BBox { x0: b4.0, y0: b4.1, x1: b4.2, y1: b4.3 };
+            let b = BBox {
+                x0: b4.0,
+                y0: b4.1,
+                x1: b4.2,
+                y1: b4.3,
+            };
             let (t, vis) = vis_of(&b, &pa.rep, &req.view);
             mem_total += t;
             if is_top {
@@ -7624,8 +7429,7 @@ fn inspect_plan(
 }
 
 pub fn plan_cmd(args: &[String]) {
-    let (dir, view, px, cut, depth, layers, rest) =
-        parse_common(args);
+    let (dir, view, px, cut, depth, layers, rest) = parse_common(args);
     // M5: hier is the only planner; --mode is accepted and
     // ignored for script compatibility
     let v = floe_vfs::Vfs::open(&dir).unwrap_or_else(|e| {
@@ -7648,9 +7452,7 @@ pub fn plan_cmd(args: &[String]) {
     // planner's rows instead of the geometry JSON. raw = exact
     // pre-declutter candidates (oracle XOR); sel = the budgeted
     // screen-space selection the viewer would show.
-    if let Some((_, mode)) =
-        rest.iter().find(|(k, _)| k == "--labels")
-    {
+    if let Some((_, mode)) = rest.iter().find(|(k, _)| k == "--labels") {
         let mut o = floe_vfs::text::LabelOpts::default();
         if mode == "raw" {
             o.raw = true;
@@ -7658,12 +7460,10 @@ pub fn plan_cmd(args: &[String]) {
             o.member_budget = u64::MAX;
         }
         let t0 = std::time::Instant::now();
-        let lp = v
-            .plan_labels_with(&req, &o)
-            .unwrap_or_else(|e| {
-                eprintln!("{}", e);
-                std::process::exit(1);
-            });
+        let lp = v.plan_labels_with(&req, &o).unwrap_or_else(|e| {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        });
         for r in &lp.rows {
             if r.block {
                 println!(
@@ -7701,23 +7501,17 @@ pub fn plan_cmd(args: &[String]) {
         // --wash-px N overrides the M7-C wash threshold (field
         // tuning; 0 disables the wash entirely)
         let mut popts = floe_vfs::hier::HierOpts::default();
-        if let Some((_, val)) =
-            rest.iter().find(|(k, _)| k == "--wash-px")
-        {
+        if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--wash-px") {
             popts.wash_px = val.parse().expect("wash-px");
         }
         // --hairline-f F: min-side cut factor (0 disables; the
         // threshold is F * cut_dbu)
-        if let Some((_, val)) =
-            rest.iter().find(|(k, _)| k == "--hairline-f")
-        {
+        if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--hairline-f") {
             popts.hairline = val.parse().expect("hairline-f");
         }
         // --thin-um F: rev 45 thin-frame lattice pitch in um (0
         // restores the rev 41 hairline cull for frames)
-        if let Some((_, val)) =
-            rest.iter().find(|(k, _)| k == "--thin-um")
-        {
+        if let Some((_, val)) = rest.iter().find(|(k, _)| k == "--thin-um") {
             popts.thin_lattice_um = val.parse().expect("thin-um");
         }
         // --explain 1: one line per verdict inside the view (field
@@ -7920,11 +7714,15 @@ pub fn plan_cmd(args: &[String]) {
         if probe {
             // --density-storage 1: also scan the whole index for what the
             // summaries would weigh (every cell, page and BVH node)
-            let storage = rest.iter().any(|(k, val)| k == "--density-storage" && val != "0");
+            let storage = rest
+                .iter()
+                .any(|(k, val)| k == "--density-storage" && val != "0");
             // --selection-meta 1: also decode every exact page for the
             // record census a per-record selection meta would cost
             // (ADAPTIVE_CUT_DENSITY_PLAN §4.3 step 2)
-            let meta = rest.iter().any(|(k, val)| k == "--selection-meta" && val != "0");
+            let meta = rest
+                .iter()
+                .any(|(k, val)| k == "--selection-meta" && val != "0");
             density_probe(&v, &req, &plan, ms, storage, meta);
         }
         return;
@@ -7992,32 +7790,76 @@ struct DensityQ {
 
 impl DensityQ {
     fn add(&mut self, o: &DensityQ, k: u64) {
-        self.child_recs = self.child_recs.saturating_add(o.child_recs.saturating_mul(k));
-        self.child_members = self.child_members.saturating_add(o.child_members.saturating_mul(k));
-        self.child_layers = self.child_layers.saturating_add(o.child_layers.saturating_mul(k));
-        self.thin_members = self.thin_members.saturating_add(o.thin_members.saturating_mul(k));
+        self.child_recs = self
+            .child_recs
+            .saturating_add(o.child_recs.saturating_mul(k));
+        self.child_members = self
+            .child_members
+            .saturating_add(o.child_members.saturating_mul(k));
+        self.child_layers = self
+            .child_layers
+            .saturating_add(o.child_layers.saturating_mul(k));
+        self.thin_members = self
+            .thin_members
+            .saturating_add(o.thin_members.saturating_mul(k));
         self.pages = self.pages.saturating_add(o.pages.saturating_mul(k));
-        self.wide_pages = self.wide_pages.saturating_add(o.wide_pages.saturating_mul(k));
-        self.wide16_pages = self.wide16_pages.saturating_add(o.wide16_pages.saturating_mul(k));
-        self.wide64_pages = self.wide64_pages.saturating_add(o.wide64_pages.saturating_mul(k));
-        self.page_members = self.page_members.saturating_add(o.page_members.saturating_mul(k));
+        self.wide_pages = self
+            .wide_pages
+            .saturating_add(o.wide_pages.saturating_mul(k));
+        self.wide16_pages = self
+            .wide16_pages
+            .saturating_add(o.wide16_pages.saturating_mul(k));
+        self.wide64_pages = self
+            .wide64_pages
+            .saturating_add(o.wide64_pages.saturating_mul(k));
+        self.page_members = self
+            .page_members
+            .saturating_add(o.page_members.saturating_mul(k));
         self.pbvh = self.pbvh.saturating_add(o.pbvh.saturating_mul(k));
-        self.pbvh_pages = self.pbvh_pages.saturating_add(o.pbvh_pages.saturating_mul(k));
+        self.pbvh_pages = self
+            .pbvh_pages
+            .saturating_add(o.pbvh_pages.saturating_mul(k));
         self.cbvh = self.cbvh.saturating_add(o.cbvh.saturating_mul(k));
         self.cbvh_recs = self.cbvh_recs.saturating_add(o.cbvh_recs.saturating_mul(k));
-        self.cbvh_members = self.cbvh_members.saturating_add(o.cbvh_members.saturating_mul(k));
-        self.cbvh_masked = self.cbvh_masked.saturating_add(o.cbvh_masked.saturating_mul(k));
-        self.allcut_cells = self.allcut_cells.saturating_add(o.allcut_cells.saturating_mul(k));
-        self.allcut_layers = self.allcut_layers.saturating_add(o.allcut_layers.saturating_mul(k));
-        self.cut_page_bytes = self.cut_page_bytes.saturating_add(o.cut_page_bytes.saturating_mul(k));
-        self.cut_page_usize = self.cut_page_usize.saturating_add(o.cut_page_usize.saturating_mul(k));
-        self.cut_page_records = self.cut_page_records.saturating_add(o.cut_page_records.saturating_mul(k));
-        self.cbvh_page_bytes = self.cbvh_page_bytes.saturating_add(o.cbvh_page_bytes.saturating_mul(k));
-        self.cbvh_page_usize = self.cbvh_page_usize.saturating_add(o.cbvh_page_usize.saturating_mul(k));
-        self.cbvh_page_records = self.cbvh_page_records.saturating_add(o.cbvh_page_records.saturating_mul(k));
-        self.cbvh_pages = self.cbvh_pages.saturating_add(o.cbvh_pages.saturating_mul(k));
-        self.kept_pages = self.kept_pages.saturating_add(o.kept_pages.saturating_mul(k));
-        self.kept_sub_cut_records = self.kept_sub_cut_records.saturating_add(o.kept_sub_cut_records.saturating_mul(k));
+        self.cbvh_members = self
+            .cbvh_members
+            .saturating_add(o.cbvh_members.saturating_mul(k));
+        self.cbvh_masked = self
+            .cbvh_masked
+            .saturating_add(o.cbvh_masked.saturating_mul(k));
+        self.allcut_cells = self
+            .allcut_cells
+            .saturating_add(o.allcut_cells.saturating_mul(k));
+        self.allcut_layers = self
+            .allcut_layers
+            .saturating_add(o.allcut_layers.saturating_mul(k));
+        self.cut_page_bytes = self
+            .cut_page_bytes
+            .saturating_add(o.cut_page_bytes.saturating_mul(k));
+        self.cut_page_usize = self
+            .cut_page_usize
+            .saturating_add(o.cut_page_usize.saturating_mul(k));
+        self.cut_page_records = self
+            .cut_page_records
+            .saturating_add(o.cut_page_records.saturating_mul(k));
+        self.cbvh_page_bytes = self
+            .cbvh_page_bytes
+            .saturating_add(o.cbvh_page_bytes.saturating_mul(k));
+        self.cbvh_page_usize = self
+            .cbvh_page_usize
+            .saturating_add(o.cbvh_page_usize.saturating_mul(k));
+        self.cbvh_page_records = self
+            .cbvh_page_records
+            .saturating_add(o.cbvh_page_records.saturating_mul(k));
+        self.cbvh_pages = self
+            .cbvh_pages
+            .saturating_add(o.cbvh_pages.saturating_mul(k));
+        self.kept_pages = self
+            .kept_pages
+            .saturating_add(o.kept_pages.saturating_mul(k));
+        self.kept_sub_cut_records = self
+            .kept_sub_cut_records
+            .saturating_add(o.kept_sub_cut_records.saturating_mul(k));
     }
 }
 
@@ -8025,7 +7867,12 @@ impl DensityQ {
 /// layers, placements multiplied: (pages, stored bytes, encoded bytes,
 /// records) - what a density pass would read below a child-BVH node the
 /// size cut pruned (§4.3 step 2), memoized per cell.
-fn subtree_pages(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, ci: u32, memo: &mut std::collections::HashMap<u32, (u64, u64, u64, u64)>) -> (u64, u64, u64, u64) {
+fn subtree_pages(
+    v: &floe_vfs::Vfs,
+    req: &floe_vfs::ViewReq,
+    ci: u32,
+    memo: &mut std::collections::HashMap<u32, (u64, u64, u64, u64)>,
+) -> (u64, u64, u64, u64) {
     if let Some(&q) = memo.get(&ci) {
         return q;
     }
@@ -8034,7 +7881,11 @@ fn subtree_pages(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, ci: u32, memo: &mut
     for k in c.prange_start..c.prange_start + c.prange_count {
         let pr = v.ovm.prange(k);
         let li = pr.layer_idx as usize;
-        if req.vis.get(li / 8).map_or(false, |b| b >> (li % 8) & 1 == 1) {
+        if req
+            .vis
+            .get(li / 8)
+            .map_or(false, |b| b >> (li % 8) & 1 == 1)
+        {
             for pi in pr.page_lo..pr.page_lo + pr.page_count {
                 let p = v.ovm.page(pi);
                 if p.lod == 0 {
@@ -8099,9 +7950,15 @@ impl MetaCensus {
     }
 }
 
-fn meta_census(v: &floe_vfs::Vfs, jobs: usize, cut_dbu: i64) -> Result<(MetaCensus, f64, Vec<u32>, Vec<u64>), String> {
+fn meta_census(
+    v: &floe_vfs::Vfs,
+    jobs: usize,
+    cut_dbu: i64,
+) -> Result<(MetaCensus, f64, Vec<u32>, Vec<u64>), String> {
     let t = std::time::Instant::now();
-    let exact: Vec<u32> = (0..v.ovm.n_pages).filter(|&pi| v.ovm.page(pi).lod == 0).collect();
+    let exact: Vec<u32> = (0..v.ovm.n_pages)
+        .filter(|&pi| v.ovm.page(pi).lod == 0)
+        .collect();
     let next = std::sync::atomic::AtomicUsize::new(0);
     let total = std::sync::Mutex::new(MetaCensus::default());
     // per page: records whose min side is under the cut (the per-shape
@@ -8174,7 +8031,8 @@ fn meta_census(v: &floe_vfs::Vfs, jobs: usize, cut_dbu: i64) -> Result<(MetaCens
                                 }
                             };
                             let bbox_min = |pts: &[(i64, i64)]| -> i64 {
-                                let (mut x0, mut y0, mut x1, mut y1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+                                let (mut x0, mut y0, mut x1, mut y1) =
+                                    (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
                                 for &(x, y) in pts {
                                     x0 = x0.min(x);
                                     y0 = y0.min(y);
@@ -8210,7 +8068,12 @@ fn meta_census(v: &floe_vfs::Vfs, jobs: usize, cut_dbu: i64) -> Result<(MetaCens
     if let Some(e) = failed.into_inner().unwrap() {
         return Err(e);
     }
-    Ok((total.into_inner().unwrap(), t.elapsed().as_secs_f64(), under_cut.into_inner().unwrap(), layer_under.into_inner().unwrap()))
+    Ok((
+        total.into_inner().unwrap(),
+        t.elapsed().as_secs_f64(),
+        under_cut.into_inner().unwrap(),
+        layer_under.into_inner().unwrap(),
+    ))
 }
 
 fn place_members(v: &floe_vfs::Vfs, pli: u64) -> u64 {
@@ -8237,7 +8100,12 @@ fn visible_layers_of(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, lmask: u32) -> 
 fn probe_xf_bbox(xf: &Xf, b: &BBox) -> BBox {
     let a = xf.apply(b.x0, b.y0);
     let c = xf.apply(b.x1, b.y1);
-    BBox { x0: a.0.min(c.0), y0: a.1.min(c.1), x1: a.0.max(c.0), y1: a.1.max(c.1) }
+    BBox {
+        x0: a.0.min(c.0),
+        y0: a.1.min(c.1),
+        x1: a.0.max(c.0),
+        y1: a.1.max(c.1),
+    }
 }
 
 fn probe_inside(outer: &BBox, b: &BBox) -> bool {
@@ -8251,12 +8119,23 @@ fn probe_inside(outer: &BBox, b: &BBox) -> bool {
 /// grids clip their index ranges, only the edge members recurse). A row is
 /// counted for every visible instance of its owner (an upper bound: the
 /// planner judged it against the union of those instances' local views).
-fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hier::HierPlan, plan_ms: f64, storage: bool, meta: bool) {
+fn density_probe(
+    v: &floe_vfs::Vfs,
+    req: &floe_vfs::ViewReq,
+    plan: &floe_vfs::hier::HierPlan,
+    plan_ms: f64,
+    storage: bool,
+    meta: bool,
+) {
     use std::collections::{HashMap, HashSet};
     let t0 = std::time::Instant::now();
     let px = req.px_per_dbu;
-    let index: HashMap<(u32, u32), usize> =
-        plan.wcells.iter().enumerate().map(|(i, c)| (c.key, i)).collect();
+    let index: HashMap<(u32, u32), usize> = plan
+        .wcells
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.key, i))
+        .collect();
     let (census, census_s, under_cut, layer_under) = if meta {
         let jobs = std::thread::available_parallelism().map_or(4, |n| n.get());
         match meta_census(v, jobs, req.cut_dbu.max(0)) {
@@ -8276,8 +8155,11 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
     let mut own = vec![DensityQ::default(); plan.wcells.len()];
     for (wi, c) in plan.wcells.iter().enumerate() {
         own[wi].kept_pages = c.pages.len() as u64;
-        own[wi].kept_sub_cut_records =
-            c.pages.iter().map(|&pi| under_cut.get(pi as usize).copied().unwrap_or(0) as u64).sum();
+        own[wi].kept_sub_cut_records = c
+            .pages
+            .iter()
+            .map(|&pi| under_cut.get(pi as usize).copied().unwrap_or(0) as u64)
+            .sum();
     }
     let mut seen: HashSet<((u32, u32), &'static str, u64)> = HashSet::new();
     let mut subtree_memo: HashMap<u32, (u64, u64, u64, u64)> = HashMap::new();
@@ -8289,7 +8171,9 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
     };
     let (mut child_cells, mut cut_pages) = (HashSet::new(), HashSet::new());
     for r in &plan.explain {
-        let Some(&wi) = index.get(&r.owner) else { continue };
+        let Some(&wi) = index.get(&r.owner) else {
+            continue;
+        };
         if !seen.insert((r.owner, r.kind, r.id)) {
             continue;
         }
@@ -8298,7 +8182,8 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
             ("child", "omit_size") | ("child", "fold_size") => {
                 q.child_recs += 1;
                 q.child_members += r.members;
-                q.child_layers += r.members * visible_layers_of(v, req, v.ovm.cell_lmask_rec(r.cell));
+                q.child_layers +=
+                    r.members * visible_layers_of(v, req, v.ovm.cell_lmask_rec(r.cell));
                 child_cells.insert(r.cell);
             }
             ("child", "omit_hair") => q.thin_members += r.members,
@@ -8333,7 +8218,8 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
             }
             ("cbvh", "prune_size") => {
                 q.cbvh += 1;
-                q.cbvh_masked += (v.ovm.bvh(r.id as u32).lmask_rec != floe_ovm::LMASK_UNKNOWN) as u64;
+                q.cbvh_masked +=
+                    (v.ovm.bvh(r.id as u32).lmask_rec != floe_ovm::LMASK_UNKNOWN) as u64;
                 let mut stack = vec![r.id as u32];
                 while let Some(ni) = stack.pop() {
                     let n = v.ovm.bvh(ni);
@@ -8345,9 +8231,12 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
                             let child = v.ovm.place_head(n.first as u64 + k).child;
                             let sub = subtree_pages(v, req, child, &mut subtree_memo);
                             q.cbvh_pages = q.cbvh_pages.saturating_add(sub.0.saturating_mul(m));
-                            q.cbvh_page_bytes = q.cbvh_page_bytes.saturating_add(sub.1.saturating_mul(m));
-                            q.cbvh_page_usize = q.cbvh_page_usize.saturating_add(sub.2.saturating_mul(m));
-                            q.cbvh_page_records = q.cbvh_page_records.saturating_add(sub.3.saturating_mul(m));
+                            q.cbvh_page_bytes =
+                                q.cbvh_page_bytes.saturating_add(sub.1.saturating_mul(m));
+                            q.cbvh_page_usize =
+                                q.cbvh_page_usize.saturating_add(sub.2.saturating_mul(m));
+                            q.cbvh_page_records =
+                                q.cbvh_page_records.saturating_add(sub.3.saturating_mul(m));
                         }
                     } else {
                         stack.extend(n.first..n.first + n.count as u32);
@@ -8391,7 +8280,11 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
     let box_value = |v: &floe_vfs::Vfs, ni: u32, memo: &mut HashMap<u32, f64>| -> f64 {
         let n = v.ovm.bvh(ni);
         let area = (n.bbox.x1 - n.bbox.x0).max(0) as f64 * (n.bbox.y1 - n.bbox.y0).max(0) as f64;
-        if area <= 0.0 { 0.0 } else { (subtree_box_area(v, ni, memo) / area).min(1.0) }
+        if area <= 0.0 {
+            0.0
+        } else {
+            (subtree_box_area(v, ni, memo) / area).min(1.0)
+        }
     };
     for r in &plan.explain {
         if r.kind != "cbvh" || r.verdict != "prune_size" || !fallback_seen.insert((r.cell, r.id)) {
@@ -8416,10 +8309,13 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
             }
             m
         });
-        let Some(&parent) = map.get(&ni) else { continue };
+        let Some(&parent) = map.get(&ni) else {
+            continue;
+        };
         let vn = box_value(v, ni, &mut area_memo);
         let vp = box_value(v, parent, &mut area_memo);
-        let w = ((r.bbox.x1 - r.bbox.x0) as f64 * px).max(0.0) * ((r.bbox.y1 - r.bbox.y0) as f64 * px).max(0.0);
+        let w = ((r.bbox.x1 - r.bbox.x0) as f64 * px).max(0.0)
+            * ((r.bbox.y1 - r.bbox.y0) as f64 * px).max(0.0);
         let d = (vn - vp).abs();
         fallback.0 += 1;
         fallback.1 += w;
@@ -8436,17 +8332,23 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
     }
     // the cut pages once each: what a frame would actually read (a decoded
     // page serves all its instances); the per-instance sums above are the work
-    let (distinct_cut_bytes, distinct_cut_records) = cut_pages.iter().fold((0u64, 0u64), |a, &pi| {
-        let p = v.ovm.page(pi as u32);
-        (a.0 + p.csize as u64, a.1 + p.records as u64)
-    });
+    let (distinct_cut_bytes, distinct_cut_records) =
+        cut_pages.iter().fold((0u64, 0u64), |a, &pi| {
+            let p = v.ovm.page(pi as u32);
+            (a.0 + p.csize as u64, a.1 + p.records as u64)
+        });
     let rows_ms = t0.elapsed().as_secs_f64() * 1e3;
     let t1 = std::time::Instant::now();
     let view = req.view;
     let mut full: Vec<Option<DensityQ>> = vec![None; plan.wcells.len()];
     // one fully visible instance of working-set cell wi
-    fn full_of(plan: &floe_vfs::hier::HierPlan, index: &HashMap<(u32, u32), usize>, own: &[DensityQ],
-               full: &mut Vec<Option<DensityQ>>, wi: usize) -> DensityQ {
+    fn full_of(
+        plan: &floe_vfs::hier::HierPlan,
+        index: &HashMap<(u32, u32), usize>,
+        own: &[DensityQ],
+        full: &mut Vec<Option<DensityQ>>,
+        wi: usize,
+    ) -> DensityQ {
         if let Some(q) = full[wi] {
             return q;
         }
@@ -8487,7 +8389,9 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
         fn partial(&mut self, wi: usize, xf: &Xf, total: &mut DensityQ) {
             total.add(&self.own[wi], 1);
             for inst in &self.plan.wcells[wi].insts {
-                let Some(&ci) = self.index.get(&inst.child) else { continue };
+                let Some(&ci) = self.index.get(&inst.child) else {
+                    continue;
+                };
                 match &inst.rep {
                     Rep::One => {
                         let m = xf.compose(&Xf::place(inst.x, inst.y, inst.rot, inst.flip));
@@ -8495,7 +8399,12 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
                     }
                     Rep::Pts(pts) => {
                         for &(dx, dy) in pts.iter() {
-                            let m = xf.compose(&Xf::place(inst.x + dx, inst.y + dy, inst.rot, inst.flip));
+                            let m = xf.compose(&Xf::place(
+                                inst.x + dx,
+                                inst.y + dy,
+                                inst.rot,
+                                inst.flip,
+                            ));
                             self.member(ci, &m, total);
                         }
                     }
@@ -8529,11 +8438,22 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
                         } else {
                             ((b.0, nb, 1usize), (a.1, na, 0usize))
                         };
-                        let range = |lo: i64, hi: i64, v0: i64, v1: i64, step: i64, n: i64, inside: bool| -> (i64, i64) {
+                        let range = |lo: i64,
+                                     hi: i64,
+                                     v0: i64,
+                                     v1: i64,
+                                     step: i64,
+                                     n: i64,
+                                     inside: bool|
+                         -> (i64, i64) {
                             // indices k with [lo + k*step, hi + k*step] meeting
                             // (or inside) [v0, v1]
                             if step == 0 {
-                                let ok = if inside { v0 <= lo && hi <= v1 } else { hi >= v0 && lo <= v1 };
+                                let ok = if inside {
+                                    v0 <= lo && hi <= v1
+                                } else {
+                                    hi >= v0 && lo <= v1
+                                };
                                 return if ok { (0, n) } else { (0, 0) };
                             }
                             let (mut k0, mut k1) = (0i64, n);
@@ -8559,10 +8479,14 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
                             }
                             (k0.max(0), k1.min(n).max(k0.max(0)))
                         };
-                        let (mx0, mx1) = range(b0.x0, b0.x1, self.view.x0, self.view.x1, sx, nx, false);
-                        let (my0, my1) = range(b0.y0, b0.y1, self.view.y0, self.view.y1, sy, ny, false);
-                        let (fx0, fx1) = range(b0.x0, b0.x1, self.view.x0, self.view.x1, sx, nx, true);
-                        let (fy0, fy1) = range(b0.y0, b0.y1, self.view.y0, self.view.y1, sy, ny, true);
+                        let (mx0, mx1) =
+                            range(b0.x0, b0.x1, self.view.x0, self.view.x1, sx, nx, false);
+                        let (my0, my1) =
+                            range(b0.y0, b0.y1, self.view.y0, self.view.y1, sy, ny, false);
+                        let (fx0, fx1) =
+                            range(b0.x0, b0.x1, self.view.x0, self.view.x1, sx, nx, true);
+                        let (fy0, fy1) =
+                            range(b0.y0, b0.y1, self.view.y0, self.view.y1, sy, ny, true);
                         let inner = ((fx1 - fx0).max(0) * (fy1 - fy0).max(0)) as u64;
                         if inner > 0 {
                             let q = full_of(self.plan, self.index, self.own, &mut self.full, ci);
@@ -8595,7 +8519,15 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
     let visits;
     {
         let top = index.get(&plan.top).copied();
-        let mut w = Walk { v, plan, index: &index, own: &own, full: std::mem::take(&mut full), view, visits: 0 };
+        let mut w = Walk {
+            v,
+            plan,
+            index: &index,
+            own: &own,
+            full: std::mem::take(&mut full),
+            view,
+            visits: 0,
+        };
         if let Some(ti) = top {
             w.member(ti, &Xf::identity(), &mut total);
         }
@@ -8612,7 +8544,12 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
         if lm == floe_ovm::LMASK_UNKNOWN {
             unknown += 1;
         } else {
-            pairs += v.ovm.bitset(lm).iter().map(|b| b.count_ones() as u64).sum::<u64>();
+            pairs += v
+                .ovm
+                .bitset(lm)
+                .iter()
+                .map(|b| b.count_ones() as u64)
+                .sum::<u64>();
         }
         let rb = v.ovm.cell_rbbox(ci);
         if !rb.is_empty() && rb.x1 - rb.x0 < cut && rb.y1 - rb.y0 < cut {
@@ -8621,12 +8558,18 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
     }
     // per child-BVH node: one value per layer below it (small nodes keep no
     // mask - counted with their cell's layers, an upper bound)
-    let (mut bvh_nodes, mut bvh_pairs, mut bvh_unknown, mut bvh_masked_pairs) = (0u64, 0u64, 0u64, 0u64);
+    let (mut bvh_nodes, mut bvh_pairs, mut bvh_unknown, mut bvh_masked_pairs) =
+        (0u64, 0u64, 0u64, 0u64);
     for ci in 0..n_cells {
         let c = v.ovm.cell(ci);
         let cell_layers = match v.ovm.cell_lmask_rec(ci) {
             floe_ovm::LMASK_UNKNOWN => 1,
-            lm => v.ovm.bitset(lm).iter().map(|b| b.count_ones() as u64).sum::<u64>(),
+            lm => v
+                .ovm
+                .bitset(lm)
+                .iter()
+                .map(|b| b.count_ones() as u64)
+                .sum::<u64>(),
         };
         for ni in c.bvh_start..c.bvh_start + c.bvh_count {
             bvh_nodes += 1;
@@ -8636,7 +8579,12 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
                     bvh_pairs += cell_layers;
                 }
                 lm => {
-                    let n = v.ovm.bitset(lm).iter().map(|b| b.count_ones() as u64).sum::<u64>();
+                    let n = v
+                        .ovm
+                        .bitset(lm)
+                        .iter()
+                        .map(|b| b.count_ones() as u64)
+                        .sum::<u64>();
                     bvh_pairs += n;
                     bvh_masked_pairs += n;
                 }
@@ -8657,7 +8605,13 @@ fn density_probe(v: &floe_vfs::Vfs, req: &floe_vfs::ViewReq, plan: &floe_vfs::hi
     let (exact_csize, exact_usize, exact_records) = (0..if storage { v.ovm.n_pages } else { 0 })
         .map(|pi| v.ovm.page(pi))
         .filter(|p| p.lod == 0)
-        .fold((0u64, 0u64, 0u64), |a, p| (a.0 + p.csize as u64, a.1 + p.usize_ as u64, a.2 + p.records as u64));
+        .fold((0u64, 0u64, 0u64), |a, p| {
+            (
+                a.0 + p.csize as u64,
+                a.1 + p.usize_ as u64,
+                a.2 + p.records as u64,
+            )
+        });
     println!(
         "density_probe\tplan_ms={:.1}\twalk_ms={:.1}\twalk_visits={}\tpages_selected={}\t\
          child_recs={}\tchild_members={}\tchild_layers={}\tthin_members={}\t\
@@ -8753,7 +8707,6 @@ fn print_explain(
     }
 }
 
-
 // ------------------------------------------------------------- vfsd
 
 /// stdio daemon for the viewer render service. Line protocol:
@@ -8799,11 +8752,14 @@ pub fn vfsd_cmd(args: &[String]) {
     let dir = dir.expect("ovm dir");
     // a reader of the cache (floe_vfs::lock): refused while a run rebuilds
     // it whole; holds it against a rebuild for as long as it serves
-    let _lock = floe_vfs::lock::readers(&[floe_vfs::lock::key(floe_vfs::lock::Kind::Vfs, &dir)], &floe_vfs::lock::reader_label("floe-index vfsd"))
-        .unwrap_or_else(|busy| {
-            eprintln!("[lock] {}", busy);
-            std::process::exit(floe_vfs::lock::BUSY_EXIT);
-        });
+    let _lock = floe_vfs::lock::readers(
+        &[floe_vfs::lock::key(floe_vfs::lock::Kind::Vfs, &dir)],
+        &floe_vfs::lock::reader_label("floe-index vfsd"),
+    )
+    .unwrap_or_else(|busy| {
+        eprintln!("[lock] {}", busy);
+        std::process::exit(floe_vfs::lock::BUSY_EXIT);
+    });
     let v = floe_vfs::Vfs::open(&dir).unwrap_or_else(|e| {
         eprintln!("{}", e);
         std::process::exit(1);
@@ -8901,21 +8857,14 @@ fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
                 if val == "none" {
                     layers = Some(Vec::new());
                 } else if val != "all" && !val.is_empty() {
-                    layers = Some(
-                        val.split(',')
-                            .map(|s| s.to_string())
-                            .collect(),
-                    );
+                    layers = Some(val.split(',').map(|s| s.to_string()).collect());
                 }
             }
             "out" => out = Some(val.to_string()),
             "mode" => mode = val.to_string(),
             "ack" => ack = val.parse().map_err(|_| "ack")?,
             "reset" => reset = val == "1",
-            "stream" => {
-                stream_kb =
-                    Some(val.parse().map_err(|_| "stream")?)
-            }
+            "stream" => stream_kb = Some(val.parse().map_err(|_| "stream")?),
             // refinement rounds of one view: labels were already
             // delivered with the first round, skip the re-plan
             "nolabels" => nolabels = val == "1",
@@ -8954,8 +8903,7 @@ fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
     let probe = mode == "probe" || mode == "hier_probe";
     let view = view.ok_or("view required")?;
     let out = out.ok_or("out required")?;
-    let mut req =
-        make_req(d.v, view, px, cut, depth, layers.as_deref());
+    let mut req = make_req(d.v, view, px, cut, depth, layers.as_deref());
     // rev 46: session-less minimap frontier - plan at the CANVAS
     // fit scale (px kept: the cut/band/lattice ladder must match
     // the main view), expand the WS frame set to world boxes
@@ -8974,8 +8922,9 @@ fn serve_one(d: &mut Daemon, line: &str) -> Result<String, String> {
         req.px_per_dbu = 0.0;
     }
     let label_px = if nolabels || !labels { 0.0 } else { label_px };
-    serve_hier(d, &req, gen, ack, reset, probe, stream_kb,
-               label_px, frames, lod, hair, thin, &out)
+    serve_hier(
+        d, &req, gen, ack, reset, probe, stream_kb, label_px, frames, lod, hair, thin, &out,
+    )
 }
 
 /// rev 46 minimap frontier: plan_hier at the requested depth/scale
@@ -8995,24 +8944,16 @@ fn serve_frontier(
     opts.hairline = hair;
     opts.thin_lattice_um = thin;
     let plan = floe_vfs::hier::plan_hier(&d.v.ovm, req, &opts);
-    let (boxes, truncated) =
-        floe_vfs::hier::frontier_boxes(&d.v.ovm, &plan, 6000);
+    let (boxes, truncated) = floe_vfs::hier::frontier_boxes(&d.v.ovm, &plan, 6000);
     if truncated {
-        eprintln!(
-            "[vfsd] frontier: gen {} hit the 8M expansion budget",
-            gen
-        );
+        eprintln!("[vfsd] frontier: gen {} hit the 8M expansion budget", gen);
     }
     std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
     let p = format!("{}/frontier_{}.tsv", out, gen);
     let mut w = String::with_capacity(boxes.len() * 40);
     for (bx, band) in &boxes {
         use std::fmt::Write as _;
-        let _ = writeln!(
-            w,
-            "{}\t{}\t{}\t{}\t{}",
-            bx[0], bx[1], bx[2], bx[3], band
-        );
+        let _ = writeln!(w, "{}\t{}\t{}\t{}\t{}", bx[0], bx[1], bx[2], bx[3], band);
     }
     std::fs::write(&p, w).map_err(|e| e.to_string())?;
     Ok(format!(
@@ -9081,16 +9022,9 @@ fn serve_hier(
     } else {
         // per-request override (the client adapts the budget to its
         // measured parse speed); absent = daemon flag default
-        let budget = stream_kb
-            .map(|kb| kb << 10)
-            .unwrap_or(d.stream_budget);
-        d.hier.apply(
-            &v.ovm,
-            &plan.pages,
-            &plan.page_prio,
-            gen,
-            budget,
-        )?
+        let budget = stream_kb.map(|kb| kb << 10).unwrap_or(d.stream_budget);
+        d.hier
+            .apply(&v.ovm, &plan.pages, &plan.page_prio, gen, budget)?
     };
     std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
     let (delta_path, top) = if plan.wcells.is_empty() {
@@ -9100,21 +9034,18 @@ fn serve_hier(
         // committed-in-ledger + this round's new (a reference with
         // no definition anywhere would mint an unevictable empty
         // ghost cell in the viewer)
-        let avail: Option<std::collections::HashSet<u32>> =
-            if upd.partial {
-                let mut a: std::collections::HashSet<u32> =
-                    upd.new.iter().copied().collect();
-                for &pi in &plan.pages {
-                    if !probe && d.hier.is_committed(pi) {
-                        a.insert(pi);
-                    }
+        let avail: Option<std::collections::HashSet<u32>> = if upd.partial {
+            let mut a: std::collections::HashSet<u32> = upd.new.iter().copied().collect();
+            for &pi in &plan.pages {
+                if !probe && d.hier.is_committed(pi) {
+                    a.insert(pi);
                 }
-                Some(a)
-            } else {
-                None
-            };
-        let bytes =
-            v.delta_hier(&plan, &upd.new, gen, avail.as_ref())?;
+            }
+            Some(a)
+        } else {
+            None
+        };
+        let bytes = v.delta_hier(&plan, &upd.new, gen, avail.as_ref())?;
         let p = format!("{}/delta_{}.oas", out, gen);
         std::fs::write(&p, &bytes).map_err(|e| e.to_string())?;
         (p, floe_vfs::hier::ws_name(gen, plan.top))
@@ -9126,19 +9057,14 @@ fn serve_hier(
     } else {
         let mut w = String::new();
         for ci in 0..v.ovm.n_cells {
-            w.push_str(&format!(
-                "{}\t{}\n",
-                ci,
-                v.ovm.cell(ci).name
-            ));
+            w.push_str(&format!("{}\t{}\n", ci, v.ovm.cell(ci).name));
         }
         let p = format!("{}/names_{}.tsv", out, gen);
         std::fs::write(&p, w).map_err(|e| e.to_string())?;
         d.names_sent = true;
         p
     };
-    let evict: Vec<String> =
-        upd.evict.iter().map(|&pi| v.page_name(pi)).collect();
+    let evict: Vec<String> = upd.evict.iter().map(|&pi| v.page_name(pi)).collect();
     // request-scoped labels (v5, VFS_TEXT_PLAN.md par.5.2): a
     // small per-gen TSV, kind-explicit rows (txt = design layer,
     // blk = runtime annotation). View-generation asset: the client
@@ -9189,8 +9115,7 @@ fn serve_hier(
                 }
             }
             let p = format!("{}/labels_{}.tsv", out, gen);
-            std::fs::write(&p, wbuf)
-                .map_err(|e| e.to_string())?;
+            std::fs::write(&p, wbuf).map_err(|e| e.to_string())?;
             (p, lp.rows.len(), ms, lp.stats)
         }
     };
@@ -9294,12 +9219,12 @@ mod split_tests {
         const DIE: i64 = 1_000_000;
         let doc = mini_doc(vec![pts_rec(76, 200_000, DIE, 100)]);
         let rbb = cell_bboxes_full(&doc);
-        let lidx: std::collections::HashMap<(u32, u32), usize> =
-            doc.layer_order
-                .iter()
-                .enumerate()
-                .map(|(i, &k)| (k, i))
-                .collect();
+        let lidx: std::collections::HashMap<(u32, u32), usize> = doc
+            .layer_order
+            .iter()
+            .enumerate()
+            .map(|(i, &k)| (k, i))
+            .collect();
         let budget = std::sync::atomic::AtomicIsize::new(3);
         let plan = build_cell_plan(
             &doc,
@@ -9331,27 +9256,21 @@ mod split_tests {
         const DIE: i64 = 1_000_000;
         let doc = mini_doc(vec![pts_rec(77, 200_000, DIE, 100)]);
         let rbb = cell_bboxes_full(&doc);
-        let lidx: std::collections::HashMap<(u32, u32), usize> =
-            doc.layer_order
-                .iter()
-                .enumerate()
-                .map(|(i, &k)| (k, i))
-                .collect();
+        let lidx: std::collections::HashMap<(u32, u32), usize> = doc
+            .layer_order
+            .iter()
+            .enumerate()
+            .map(|(i, &k)| (k, i))
+            .collect();
         let budget = std::sync::atomic::AtomicIsize::new(0);
         let waiters = std::sync::atomic::AtomicIsize::new(1);
         let join_barrier = std::sync::Barrier::new(2);
         let plan = std::thread::scope(|sc| {
             sc.spawn(|| {
-                while waiters.load(
-                    std::sync::atomic::Ordering::Acquire,
-                ) != 0
-                {
+                while waiters.load(std::sync::atomic::Ordering::Acquire) != 0 {
                     std::thread::yield_now();
                 }
-                budget.fetch_add(
-                    1,
-                    std::sync::atomic::Ordering::Release,
-                );
+                budget.fetch_add(1, std::sync::atomic::Ordering::Release);
             });
             build_cell_plan(
                 &doc,
@@ -9368,10 +9287,7 @@ mod split_tests {
                 None,
             )
         });
-        assert!(
-            plan.lod_threads > 1,
-            "late-lent slot never joined LOD work"
-        );
+        assert!(plan.lod_threads > 1, "late-lent slot never joined LOD work");
         assert_eq!(
             waiters.load(std::sync::atomic::Ordering::Relaxed),
             1,
@@ -9396,15 +9312,9 @@ mod split_tests {
         }
     }
 
-    fn pts_rec(
-        seed: u64,
-        n: usize,
-        die: i64,
-        w: i64,
-    ) -> RectRec {
+    fn pts_rec(seed: u64, n: usize, die: i64, w: i64) -> RectRec {
         let mut g = Lcg(seed);
-        let mut pos: Vec<(i64, i64)> =
-            (0..n).map(|_| (g.next(die), g.next(die))).collect();
+        let mut pos: Vec<(i64, i64)> = (0..n).map(|_| (g.next(die), g.next(die))).collect();
         let first = pos[0];
         for p in pos.iter_mut() {
             *p = (p.0 - first.0, p.1 - first.1);
@@ -9548,16 +9458,9 @@ mod split_tests {
                 join_barrier: None,
             },
         );
-        assert!(
-            b.p2_tasks > 1,
-            "frontier formed {} task(s)",
-            b.p2_tasks
-        );
+        assert!(b.p2_tasks > 1, "frontier formed {} task(s)", b.p2_tasks);
         assert!(b.shard_bytes > 0, "sharding never ran");
-        assert!(
-            a.stats.oversize_pages > 0,
-            "fixture lost its oversize path"
-        );
+        assert!(a.stats.oversize_pages > 0, "fixture lost its oversize path");
         layer_bytes_equal(&doc, &a, &b);
     }
 
@@ -9575,29 +9478,17 @@ mod split_tests {
             .collect();
         let doc = mini_doc(recs);
         let cell = &doc.cells[0];
-        let a = plan_layer(
-            cell,
-            0,
-            0,
-            assemble_rects(cell),
-            16 * 1024,
-        );
+        let a = plan_layer(cell, 0, 0, assemble_rects(cell), 16 * 1024);
         let budget = std::sync::atomic::AtomicIsize::new(0);
         let waiters = std::sync::atomic::AtomicIsize::new(1);
         let used = std::sync::atomic::AtomicUsize::new(0);
         let join_barrier = std::sync::Barrier::new(2);
         let b = std::thread::scope(|sc| {
             sc.spawn(|| {
-                while waiters.load(
-                    std::sync::atomic::Ordering::Acquire,
-                ) != 0
-                {
+                while waiters.load(std::sync::atomic::Ordering::Acquire) != 0 {
                     std::thread::yield_now();
                 }
-                budget.fetch_add(
-                    1,
-                    std::sync::atomic::Ordering::Release,
-                );
+                budget.fetch_add(1, std::sync::atomic::Ordering::Release);
             });
             plan_layer_frontier(
                 cell,
@@ -9678,10 +9569,7 @@ mod split_tests {
         assert_eq!(b.shard_bytes, 0, "fallback still copied");
         // the lease returns AT the fallback decision, not at
         // layer end - the tail can re-lend it immediately
-        assert_eq!(
-            lease.load(std::sync::atomic::Ordering::Relaxed),
-            3
-        );
+        assert_eq!(lease.load(std::sync::atomic::Ordering::Relaxed), 3);
         layer_bytes_equal(&doc, &a, &b);
     }
 
@@ -9737,7 +9625,12 @@ mod split_tests {
             y: 0,
             w: 15,
             h: 5000,
-            rep: Rep::Grid { na: 64, nb: 2, va: (30, 0), vb: (0, 4000) },
+            rep: Rep::Grid {
+                na: 64,
+                nb: 2,
+                va: (30, 0),
+                vb: (0, 4000),
+            },
         });
         let doc = mini_doc(recs);
         let cell = &doc.cells[0];
@@ -9760,9 +9653,7 @@ mod split_tests {
                 join_barrier: None,
             },
         );
-        let counts = |st: &SplitStats| {
-            (st.grid_pieces, st.grid_rows, st.grid_ones)
-        };
+        let counts = |st: &SplitStats| (st.grid_pieces, st.grid_rows, st.grid_ones);
         assert_eq!(counts(&a.stats), (2, 2, 0), "serial");
         // pages, payloads and the three counters agree
         layer_bytes_equal(&doc, &a, &b);
@@ -9787,19 +9678,18 @@ mod split_tests {
             .collect();
         let doc = mini_doc(recs);
         let rbb = cell_bboxes_full(&doc);
-        let lidx: std::collections::HashMap<(u32, u32), usize> =
-            doc.layer_order
-                .iter()
-                .enumerate()
-                .map(|(i, &k)| (k, i))
-                .collect();
+        let lidx: std::collections::HashMap<(u32, u32), usize> = doc
+            .layer_order
+            .iter()
+            .enumerate()
+            .map(|(i, &k)| (k, i))
+            .collect();
         let mut plans = Vec::new();
         for budget in [0isize, 7] {
             let b = std::sync::atomic::AtomicIsize::new(budget);
             let jobs = if budget == 0 { 1 } else { 8 };
             plans.push(build_cell_plan(
-                &doc, 0, &rbb, &lidx, 1, MIB, false, &b, None,
-                None, jobs, None,
+                &doc, 0, &rbb, &lidx, 1, MIB, false, &b, None, None, jobs, None,
             ));
         }
         let (a, b) = (&plans[0], &plans[1]);
@@ -9837,20 +9727,17 @@ mod split_tests {
             .collect();
         let doc = mini_doc(recs);
         let rbb = cell_bboxes_full(&doc);
-        let lidx: std::collections::HashMap<(u32, u32), usize> =
-            doc.layer_order
-                .iter()
-                .enumerate()
-                .map(|(i, &k)| (k, i))
-                .collect();
+        let lidx: std::collections::HashMap<(u32, u32), usize> = doc
+            .layer_order
+            .iter()
+            .enumerate()
+            .map(|(i, &k)| (k, i))
+            .collect();
         let mut plans = Vec::new();
         for budget in [0isize, 1, 3, 7] {
             let b = std::sync::atomic::AtomicIsize::new(budget);
             let t = std::time::Instant::now();
-            let plan = build_cell_plan(
-                &doc, 0, &rbb, &lidx, 1, MIB, true, &b, None,
-                None, 8, None,
-            );
+            let plan = build_cell_plan(&doc, 0, &rbb, &lidx, 1, MIB, true, &b, None, None, 8, None);
             eprintln!(
                 "p2 budget {}: plan {:.2}s (split {:.2}/{}t \
                  p2_tasks={} shard={}MiB lod {:.2}/{}t, pages {})",
@@ -9912,12 +9799,12 @@ mod split_tests {
             layer_aliases: Default::default(),
         };
         let rbb = cell_bboxes_full(&doc);
-        let lidx: std::collections::HashMap<(u32, u32), usize> =
-            doc.layer_order
-                .iter()
-                .enumerate()
-                .map(|(i, &k)| (k, i))
-                .collect();
+        let lidx: std::collections::HashMap<(u32, u32), usize> = doc
+            .layer_order
+            .iter()
+            .enumerate()
+            .map(|(i, &k)| (k, i))
+            .collect();
         let mut plans = Vec::new();
         for budget in [0isize, 7] {
             let b = std::sync::atomic::AtomicIsize::new(budget);
@@ -9980,16 +9867,15 @@ mod split_tests {
 
     fn plan_of(doc: &Doc) -> CellPlan {
         let rbb = cell_bboxes_full(doc);
-        let lidx: std::collections::HashMap<(u32, u32), usize> =
-            doc.layer_order
-                .iter()
-                .enumerate()
-                .map(|(i, &k)| (k, i))
-                .collect();
+        let lidx: std::collections::HashMap<(u32, u32), usize> = doc
+            .layer_order
+            .iter()
+            .enumerate()
+            .map(|(i, &k)| (k, i))
+            .collect();
         let budget = std::sync::atomic::AtomicIsize::new(0);
         build_cell_plan(
-            doc, 0, &rbb, &lidx, 1, MIB, true, &budget, None,
-            None, 1, None,
+            doc, 0, &rbb, &lidx, 1, MIB, true, &budget, None, None, 1, None,
         )
     }
 
@@ -10005,22 +9891,27 @@ mod split_tests {
                 y1: r.y + r.h,
             };
             expand_rep(&r.rep, |ox, oy| {
-                v.push((r.layer, r.dt, 0, b.x0 + ox, b.y0 + oy,
-                        b.x1 + ox, b.y1 + oy));
+                v.push((r.layer, r.dt, 0, b.x0 + ox, b.y0 + oy, b.x1 + ox, b.y1 + oy));
             });
         }
         for p in &c.polys {
             let b = pts_bbox(&p.pts);
             expand_rep(&p.rep, |ox, oy| {
-                v.push((p.layer, p.dt, 1, b.x0 + ox, b.y0 + oy,
-                        b.x1 + ox, b.y1 + oy));
+                v.push((p.layer, p.dt, 1, b.x0 + ox, b.y0 + oy, b.x1 + ox, b.y1 + oy));
             });
         }
         for pa in &c.paths {
             let b4 = path_bbox(&pa.pts, pa.hw, pa.es, pa.ee);
             expand_rep(&pa.rep, |ox, oy| {
-                v.push((pa.layer, pa.dt, 2, b4.0 + ox, b4.1 + oy,
-                        b4.2 + ox, b4.3 + oy));
+                v.push((
+                    pa.layer,
+                    pa.dt,
+                    2,
+                    b4.0 + ox,
+                    b4.1 + oy,
+                    b4.2 + ox,
+                    b4.3 + oy,
+                ));
             });
         }
         v.sort_unstable();
@@ -10055,17 +9946,11 @@ mod split_tests {
         let mut got: Vec<Mem> = Vec::new();
         // conservation is an EXACT-page contract; LOD variants are
         // derived coverage and are gated separately below
-        for job in plan
-            .pages
-            .iter()
-            .filter(|j| j.lod == floe_ovm::LOD_EXACT)
-        {
-            let (payload, _raw) =
-                encode_job(doc, job, plan.arenas.as_slice());
+        for job in plan.pages.iter().filter(|j| j.lod == floe_ovm::LOD_EXACT) {
+            let (payload, _raw) = encode_job(doc, job, plan.arenas.as_slice());
             // page payloads are complete OASIS files (CBLOCKs
             // inflate inside the parser)
-            let pd = floe_oasis::doc::parse_doc(&payload)
-                .expect("page parse");
+            let pd = floe_oasis::doc::parse_doc(&payload).expect("page parse");
             assert_eq!(pd.cells.len(), 1);
             let mems = expand_cell(&pd.cells[0]);
             for m in &mems {
@@ -10118,13 +10003,8 @@ mod split_tests {
         // of the die: 4 pages summed to ~3.6x). LOD variants are
         // derived coverage, not part of the partition.
         let mut area = 0i128;
-        for j in plan
-            .pages
-            .iter()
-            .filter(|j| j.lod == floe_ovm::LOD_EXACT)
-        {
-            area += (j.bbox.x1 - j.bbox.x0) as i128
-                * (j.bbox.y1 - j.bbox.y0) as i128;
+        for j in plan.pages.iter().filter(|j| j.lod == floe_ovm::LOD_EXACT) {
+            area += (j.bbox.x1 - j.bbox.x0) as i128 * (j.bbox.y1 - j.bbox.y0) as i128;
         }
         assert!(
             area <= 2 * (DIE as i128) * (DIE as i128),
@@ -10162,13 +10042,8 @@ mod split_tests {
         let plan = assert_conserved(&doc);
         assert!(plan.pages.len() >= 2);
         let mut area = 0i128;
-        for j in plan
-            .pages
-            .iter()
-            .filter(|j| j.lod == floe_ovm::LOD_EXACT)
-        {
-            area += (j.bbox.x1 - j.bbox.x0) as i128
-                * (j.bbox.y1 - j.bbox.y0) as i128;
+        for j in plan.pages.iter().filter(|j| j.lod == floe_ovm::LOD_EXACT) {
+            area += (j.bbox.x1 - j.bbox.x0) as i128 * (j.bbox.y1 - j.bbox.y0) as i128;
         }
         assert!(
             area <= 2 * (DIE as i128) * (DIE as i128),
@@ -10216,12 +10091,32 @@ mod split_tests {
             y,
             w: 150,
             h: 450,
-            rep: Rep::Grid { na, nb, va: (300, 0), vb },
+            rep: Rep::Grid {
+                na,
+                nb,
+                va: (300, 0),
+                vb,
+            },
         };
         for (name, tall, rec, want) in [
-            ("2 x 64 across y", true, grid(100_000, 499_600, 64, 2, (0, 800)), (2, 2, 0)),
-            ("64 x 1 along x", false, grid(490_400, 100_000, 64, 1, (0, 0)), (2, 0, 0)),
-            ("2 x 1 along x", false, grid(499_700, 100_000, 2, 1, (0, 0)), (2, 0, 2)),
+            (
+                "2 x 64 across y",
+                true,
+                grid(100_000, 499_600, 64, 2, (0, 800)),
+                (2, 2, 0),
+            ),
+            (
+                "64 x 1 along x",
+                false,
+                grid(490_400, 100_000, 64, 1, (0, 0)),
+                (2, 0, 0),
+            ),
+            (
+                "2 x 1 along x",
+                false,
+                grid(499_700, 100_000, 2, 1, (0, 0)),
+                (2, 0, 2),
+            ),
         ] {
             let mut recs = scatter(tall);
             recs.push(rec);
@@ -10283,16 +10178,14 @@ mod split_tests {
     #[test]
     fn conservation_grids_axis_neg_skew() {
         const DIE: i64 = 1_000_000;
-        let g = |va: (i64, i64), vb: (i64, i64), na, nb, x, y| {
-            RectRec {
-                layer: 1,
-                dt: 0,
-                x,
-                y,
-                w: 70,
-                h: 60,
-                rep: Rep::Grid { na, nb, va, vb },
-            }
+        let g = |va: (i64, i64), vb: (i64, i64), na, nb, x, y| RectRec {
+            layer: 1,
+            dt: 0,
+            x,
+            y,
+            w: 70,
+            h: 60,
+            rep: Rep::Grid { na, nb, va, vb },
         };
         let doc = mini_doc(vec![
             // dense axis grid spanning the die
@@ -10316,10 +10209,7 @@ mod split_tests {
         const DIE: i64 = 1_000_000;
         let doc = mini_doc(vec![pts_rec(11, 400_000, DIE, 90)]);
         let plan = assert_conserved(&doc);
-        assert!(
-            plan.pages.len() >= 2,
-            "single huge rep stayed one page"
-        );
+        assert!(plan.pages.len() >= 2, "single huge rep stayed one page");
     }
 
     /// unsplittable wide Rep::One records (die ring / spine) are
@@ -10349,13 +10239,8 @@ mod split_tests {
         // variants of spine-bearing pages fuse the spine into
         // coverage, so the exact partition is what's gated)
         let mut tight = 0;
-        for j in plan
-            .pages
-            .iter()
-            .filter(|j| j.lod == floe_ovm::LOD_EXACT)
-        {
-            let has_spine =
-                j.recs.iter().any(|r| r.w == DIE);
+        for j in plan.pages.iter().filter(|j| j.lod == floe_ovm::LOD_EXACT) {
+            let has_spine = j.recs.iter().any(|r| r.w == DIE);
             if !has_spine {
                 assert!(
                     j.bbox.x1 - j.bbox.x0 <= DIE * 7 / 10,
@@ -10374,12 +10259,10 @@ mod split_tests {
         let g = LOD_GRID;
         let (bw, bh) = (bb.x1 - bb.x0, bb.y1 - bb.y0);
         let gx = |x: i64| -> i64 {
-            (((x - bb.x0) as i128 * g as i128) / bw as i128)
-                .clamp(0, (g - 1) as i128) as i64
+            (((x - bb.x0) as i128 * g as i128) / bw as i128).clamp(0, (g - 1) as i128) as i64
         };
         let gy = |y: i64| -> i64 {
-            (((y - bb.y0) as i128 * g as i128) / bh as i128)
-                .clamp(0, (g - 1) as i128) as i64
+            (((y - bb.y0) as i128 * g as i128) / bh as i128).clamp(0, (g - 1) as i128) as i64
         };
         let mut bits = vec![false; (g * g) as usize];
         for m in mems {
@@ -10400,9 +10283,7 @@ mod split_tests {
                 if !bits[(y * g + x) as usize] {
                     continue;
                 }
-                for (dx, dy) in
-                    [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)]
-                {
+                for (dx, dy) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)] {
                     let (nx, ny) = (x + dx, y + dy);
                     if nx >= 0 && nx < g && ny >= 0 && ny < g {
                         out[(ny * g + nx) as usize] = true;
@@ -10413,15 +10294,9 @@ mod split_tests {
         out
     }
 
-    fn page_mems(
-        doc: &Doc,
-        plan: &CellPlan,
-        k: usize,
-    ) -> Vec<Mem> {
-        let (payload, _raw) =
-            encode_job(doc, &plan.pages[k], plan.arenas.as_slice());
-        let pd = floe_oasis::doc::parse_doc(&payload)
-            .expect("page parse");
+    fn page_mems(doc: &Doc, plan: &CellPlan, k: usize) -> Vec<Mem> {
+        let (payload, _raw) = encode_job(doc, &plan.pages[k], plan.arenas.as_slice());
+        let pd = floe_oasis::doc::parse_doc(&payload).expect("page parse");
         expand_cell(&pd.cells[0])
     }
 
@@ -10440,9 +10315,7 @@ mod split_tests {
         let mut checked = 0;
         for k in 0..plan.pages.len() {
             let e = &plan.pages[k];
-            if e.lod != floe_ovm::LOD_EXACT
-                || e.lod_page == floe_ovm::LOD_PAGE_NONE
-            {
+            if e.lod != floe_ovm::LOD_EXACT || e.lod_page == floe_ovm::LOD_PAGE_NONE {
                 continue;
             }
             let l = &plan.pages[e.lod_page as usize];
@@ -10450,17 +10323,9 @@ mod split_tests {
             assert_eq!((l.li, l.seq), (e.li, e.seq));
             let bb = e.bbox;
             let eb = raster(&page_mems(&doc, &plan, k), &bb);
-            let lb = raster(
-                &page_mems(&doc, &plan, e.lod_page as usize),
-                &bb,
-            );
+            let lb = raster(&page_mems(&doc, &plan, e.lod_page as usize), &bb);
             for i in 0..eb.len() {
-                assert!(
-                    !eb[i] || lb[i],
-                    "LOD hole at cell {} of page {}",
-                    i,
-                    k
-                );
+                assert!(!eb[i] || lb[i], "LOD hole at cell {} of page {}", i, k);
             }
             let ok = dilate(&eb);
             for i in 0..lb.len() {
@@ -10496,17 +10361,12 @@ mod split_tests {
         }]);
         let plan = plan_of(&doc);
         let k = (0..plan.pages.len())
-            .find(|&k| {
-                plan.pages[k].lod_page != floe_ovm::LOD_PAGE_NONE
-            })
+            .find(|&k| plan.pages[k].lod_page != floe_ovm::LOD_PAGE_NONE)
             .expect("no lod page for a 160k-member grid");
         let e = &plan.pages[k];
         let bb = e.bbox;
         let eb = raster(&page_mems(&doc, &plan, k), &bb);
-        let lb = raster(
-            &page_mems(&doc, &plan, e.lod_page as usize),
-            &bb,
-        );
+        let lb = raster(&page_mems(&doc, &plan, e.lod_page as usize), &bb);
         for i in 0..eb.len() {
             assert!(!eb[i] || lb[i], "hole at cell {}", i);
         }
@@ -10537,9 +10397,7 @@ mod split_tests {
         let plan = plan_of(&doc);
         assert!(plan.split_stats.lod_grid_verbatim >= 1);
         let k = (0..plan.pages.len())
-            .find(|&k| {
-                plan.pages[k].lod_page != floe_ovm::LOD_PAGE_NONE
-            })
+            .find(|&k| plan.pages[k].lod_page != floe_ovm::LOD_PAGE_NONE)
             .expect("no lod page");
         let li = plan.pages[k].lod_page as usize;
         let mems = page_mems(&doc, &plan, li);
@@ -10563,10 +10421,57 @@ mod split_tests {
             pts_rec(7, 300_000, DIE / 3, 100),
             far,
             // members wider than their step (overlapping) and ones apart
-            RectRec { layer: 1, dt: 0, x: 500, y: 700, w: 120, h: 90, rep: Rep::Grid { na: 40, nb: 30, va: (24_000, 0), vb: (0, 23_000) } },
-            RectRec { layer: 1, dt: 0, x: 40_000, y: 700_000, w: 9_000, h: 300, rep: Rep::Grid { na: 50, nb: 3, va: (0, 7_000), vb: (-3_000, 0) } },
-            RectRec { layer: 1, dt: 0, x: 3_000, y: 9_000, w: 80, h: 60, rep: Rep::Grid { na: 30, nb: 20, va: (2_900, 1_150), vb: (-600, 2_800) } },
-            RectRec { layer: 1, dt: 0, x: 900_000, y: 100_000, w: 5_000, h: 300, rep: Rep::One },
+            RectRec {
+                layer: 1,
+                dt: 0,
+                x: 500,
+                y: 700,
+                w: 120,
+                h: 90,
+                rep: Rep::Grid {
+                    na: 40,
+                    nb: 30,
+                    va: (24_000, 0),
+                    vb: (0, 23_000),
+                },
+            },
+            RectRec {
+                layer: 1,
+                dt: 0,
+                x: 40_000,
+                y: 700_000,
+                w: 9_000,
+                h: 300,
+                rep: Rep::Grid {
+                    na: 50,
+                    nb: 3,
+                    va: (0, 7_000),
+                    vb: (-3_000, 0),
+                },
+            },
+            RectRec {
+                layer: 1,
+                dt: 0,
+                x: 3_000,
+                y: 9_000,
+                w: 80,
+                h: 60,
+                rep: Rep::Grid {
+                    na: 30,
+                    nb: 20,
+                    va: (2_900, 1_150),
+                    vb: (-600, 2_800),
+                },
+            },
+            RectRec {
+                layer: 1,
+                dt: 0,
+                x: 900_000,
+                y: 100_000,
+                w: 5_000,
+                h: 300,
+                rep: Rep::One,
+            },
         ]);
         let plan = plan_of(&doc);
         let g = floe_ovm::OCC_GRID as usize;
@@ -10590,35 +10495,91 @@ mod split_tests {
                 }
             }
             for (cell, (&got, &want)) in area.iter().zip(&want).enumerate() {
-                assert!((got - want).abs() <= 1e-9 * want.max(1.0), "page {k} cell {cell}: {got} of {want}");
+                assert!(
+                    (got - want).abs() <= 1e-9 * want.max(1.0),
+                    "page {k} cell {cell}: {got} of {want}"
+                );
             }
             let levels = page_occupancy(&doc.cells[0], arena, page);
             for (cell, &level) in levels.iter().enumerate() {
                 let (cx, cy) = (cell % g, cell / g);
-                let part = want[cell] / ((ex[cx + 1] - ex[cx]) as f64 * (ey[cy + 1] - ey[cy]) as f64);
+                let part =
+                    want[cell] / ((ex[cx + 1] - ex[cx]) as f64 * (ey[cy + 1] - ey[cy]) as f64);
                 assert_eq!(level, floe_ovm::occ_level(part), "page {k} cell {cell}");
             }
             emptiest = emptiest.min(levels.iter().filter(|&&l| l > 0).count());
             pages += 1;
         }
         assert!(pages >= 2, "{pages} pages");
-        assert!(emptiest < floe_ovm::OCC_CELLS / 2, "every page's grid over half full: {emptiest}");
+        assert!(
+            emptiest < floe_ovm::OCC_CELLS / 2,
+            "every page's grid over half full: {emptiest}"
+        );
         // the record: these pages' grids; a page whose largest shape is past
         // a sixteenth of it keeps the area its members cover alone
         for page in plan.pages.iter().filter(|p| p.lod == floe_ovm::LOD_EXACT) {
-            let record = page_occupancy_record(&doc.cells[0], arena_at(plan.arenas.as_slice(), page.arena_slot), page);
-            assert!(matches!(floe_ovm::occ_record(&record), Some(floe_ovm::PageOcc::Grid(_))), "{:?}", page.bbox);
+            let record = page_occupancy_record(
+                &doc.cells[0],
+                arena_at(plan.arenas.as_slice(), page.arena_slot),
+                page,
+            );
+            assert!(
+                matches!(
+                    floe_ovm::occ_record(&record),
+                    Some(floe_ovm::PageOcc::Grid(_))
+                ),
+                "{:?}",
+                page.bbox
+            );
         }
         let wide = mini_doc(vec![
-            RectRec { layer: 1, dt: 0, x: 0, y: 0, w: 200_000, h: 1_000, rep: Rep::One },
-            RectRec { layer: 1, dt: 0, x: 500, y: 7_000, w: 30, h: 20, rep: Rep::Grid { na: 300, nb: 40, va: (600, 0), vb: (0, 900) } },
+            RectRec {
+                layer: 1,
+                dt: 0,
+                x: 0,
+                y: 0,
+                w: 200_000,
+                h: 1_000,
+                rep: Rep::One,
+            },
+            RectRec {
+                layer: 1,
+                dt: 0,
+                x: 500,
+                y: 7_000,
+                w: 30,
+                h: 20,
+                rep: Rep::Grid {
+                    na: 300,
+                    nb: 40,
+                    va: (600, 0),
+                    vb: (0, 900),
+                },
+            },
             pts_rec(5, 1_000, 150_000, 50),
         ]);
         let plan = plan_of(&wide);
         let page = &plan.pages[0];
-        assert!(!floe_ovm::occ_wants_grid(&page.bbox, page.max_w, page.max_h) && plan.pages.iter().filter(|p| p.lod == floe_ovm::LOD_EXACT).count() == 1);
-        let record = page_occupancy_record(&wide.cells[0], arena_at(plan.arenas.as_slice(), page.arena_slot), page);
-        assert_eq!(floe_ovm::occ_record(&record), Some(floe_ovm::PageOcc::Total(200_000.0 * 1_000.0 + 12_000.0 * 600.0 + 1_000.0 * 2_500.0)));
+        assert!(
+            !floe_ovm::occ_wants_grid(&page.bbox, page.max_w, page.max_h)
+                && plan
+                    .pages
+                    .iter()
+                    .filter(|p| p.lod == floe_ovm::LOD_EXACT)
+                    .count()
+                    == 1
+        );
+        let record = page_occupancy_record(
+            &wide.cells[0],
+            arena_at(plan.arenas.as_slice(), page.arena_slot),
+            page,
+        );
+        assert_eq!(
+            floe_ovm::occ_record(&record),
+            Some(floe_ovm::PageOcc::Total(
+                200_000.0 * 1_000.0 + 12_000.0 * 600.0 + 1_000.0 * 2_500.0
+            ))
+        );
     }
 
     /// v6 max_min: mixed-orientation thin wires keep max_w AND
@@ -10636,8 +10597,7 @@ mod split_tests {
             h,
             rep: Rep::One,
         };
-        let doc =
-            mini_doc(vec![thin(0, 0, DIE, 90), thin(0, 5000, 80, DIE)]);
+        let doc = mini_doc(vec![thin(0, 0, DIE, 90), thin(0, 5000, 80, DIE)]);
         let plan = plan_of(&doc);
         let j = plan
             .pages
@@ -10646,10 +10606,7 @@ mod split_tests {
             .unwrap();
         assert!(j.max_w >= DIE && j.max_h >= DIE);
         assert_eq!(j.max_min, 90);
-        let doc2 = mini_doc(vec![
-            thin(0, 0, DIE, 90),
-            thin(100, 100, 7000, 7000),
-        ]);
+        let doc2 = mini_doc(vec![thin(0, 0, DIE, 90), thin(100, 100, 7000, 7000)]);
         let plan2 = plan_of(&doc2);
         let j2 = plan2
             .pages
@@ -10670,8 +10627,7 @@ mod split_tests {
         assert!(plan
             .pages
             .iter()
-            .all(|j| j.lod == floe_ovm::LOD_EXACT
-                && j.lod_page == floe_ovm::LOD_PAGE_NONE));
+            .all(|j| j.lod == floe_ovm::LOD_EXACT && j.lod_page == floe_ovm::LOD_PAGE_NONE));
     }
 
     /// records large in BOTH axes ride the LOD payload verbatim -
@@ -10698,11 +10654,11 @@ mod split_tests {
             if e.lod_page == floe_ovm::LOD_PAGE_NONE {
                 continue;
             }
-            let mems =
-                page_mems(&doc, &plan, e.lod_page as usize);
-            if mems.iter().any(|m| {
-                m.5 - m.3 == DIE / 8 && m.6 - m.4 == DIE / 8
-            }) {
+            let mems = page_mems(&doc, &plan, e.lod_page as usize);
+            if mems
+                .iter()
+                .any(|m| m.5 - m.3 == DIE / 8 && m.6 - m.4 == DIE / 8)
+            {
                 found = true;
             }
         }
@@ -10723,18 +10679,26 @@ mod split_tests {
             y: 0,
             w: 10,
             h: 10,
-            rep: Rep::Pts(vec![
-                (0, 0),
-                (495, 0), // center*2 = 1000 == plane2 -> RIGHT
-                (494, 0), // center*2 = 998 < plane2 -> LEFT
-                (1000, 0),
-            ].into()),
+            rep: Rep::Pts(
+                vec![
+                    (0, 0),
+                    (495, 0), // center*2 = 1000 == plane2 -> RIGHT
+                    (494, 0), // center*2 = 998 < plane2 -> LEFT
+                    (1000, 0),
+                ]
+                .into(),
+            ),
         }];
         let doc = mini_doc(c.rects.clone());
         let r = PRec {
             kind: 0,
             idx: 0,
-            bbox: BBox { x0: 0, y0: 0, x1: 1010, y1: 10 },
+            bbox: BBox {
+                x0: 0,
+                y0: 0,
+                x1: 1010,
+                y1: 10,
+            },
             bytes: 32,
             members: 4,
             w: 10,
@@ -10798,7 +10762,10 @@ pub(crate) fn exclude_readers_or_exit(
 /// Gate-only: at stop `point` with `--hold-at <point>:<file>`, wait (at
 /// most two minutes) until <file> exists - the locks held meanwhile.
 pub(crate) fn gate_hold(spec: &str, point: &str) {
-    if let Some(flag) = spec.strip_prefix(point).and_then(|rest| rest.strip_prefix(':')) {
+    if let Some(flag) = spec
+        .strip_prefix(point)
+        .and_then(|rest| rest.strip_prefix(':'))
+    {
         eprintln!("[vfs] --hold-at {point}");
         let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
         while !std::path::Path::new(flag).exists() && std::time::Instant::now() < until {
@@ -10823,9 +10790,7 @@ pub(crate) fn hidden_sibling(path: &str, suffix: &str) -> String {
         .unwrap_or_else(|| path.to_string());
     let hidden = format!(".{}{}", name, suffix);
     match p.parent() {
-        Some(dir) if !dir.as_os_str().is_empty() => {
-            dir.join(hidden).to_string_lossy().into_owned()
-        }
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join(hidden).to_string_lossy().into_owned(),
         _ => hidden,
     }
 }

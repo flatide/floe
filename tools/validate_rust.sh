@@ -52,7 +52,7 @@ GATES="unit unit_vfs unit_render index_cli vfs_profile floe2 rust_scan \
 rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage \
 occupancy vfs_hier vfs_lifecycle vfs_marker vfs_split vfs_text \
 render_goldens render_speckle render_frames drc_ice svrf oasis_shapes \
-jobdeck representatives gen_main01 fit_budget sub_cut_box shape_cut write_once layer_decode area_true density_stack cell_tree index_lock rust_renderer klayout"
+jobdeck representatives gen_main01 fit_budget sub_cut_box shape_cut write_once layer_decode area_true density_stack cell_tree index_lock worker_client cell_index rust_renderer klayout"
 # (unit_renderd is unit's renderd part, as unit_vfs and unit_render are)
 GATES=$(echo "$GATES" | sed 's/unit_render /unit_render unit_renderd /')
 alias_gates() {
@@ -129,6 +129,10 @@ gates_for() {
             echo "unit_render jobdeck occupancy rust_renderer" ;;
         rust/render-core/src/cells.rs)
             echo "unit_render cell_tree fit_budget rust_renderer" ;;
+        rust/worker-client/*)
+            echo "unit worker_client" ;;
+        rust/app-core/*|rust/notices/*)
+            echo "unit cell_index" ;;
         rust/render-core/*|rust/renderd/*|rust/render-cli/*|floe/rust_render.py)
             echo "$RENDER_GATES" ;;
         rust/dbg/*)
@@ -521,6 +525,24 @@ if gate cell_tree; then RAN="$RAN cell_tree"; lap cell_tree
 # readers and is refused by them, additions go beside readers on one host
 if gate index_lock; then RAN="$RAN index_lock"; lap index_lock
     .venv/bin/python tools/validate_index_lock.py; fi
+# the shared Rust app layer (feature/webui's crates, P0 2026-10-09):
+# worker-client - the Rust renderd client - frame for frame against the
+# Python adapter on valmini (raw/PNG, labels, styles, cancel soak); app-core's
+# cell index (design.ovh added beside a live reader, kept on a rerun, stale /
+# missing / busy / cancel refused)
+if gate worker_client; then RAN="$RAN worker_client"; lap worker_client
+    (
+        worker_gate_dir=$(mktemp -d "${TMPDIR:-/tmp}/floe-worker-gate.XXXXXX")
+        trap 'rm -rf "$worker_gate_dir"' EXIT HUP INT TERM
+        rust/target/release/floe-index vfs "$FLOE2_SMOKE_SRC" \
+            "$worker_gate_dir/valmini.floe" --jobs 2 >/dev/null
+        sh tools/validate_worker_client.sh "$FLOE2_SMOKE_SRC" \
+            "$worker_gate_dir/valmini.floe"
+    )
+fi
+if gate cell_index; then RAN="$RAN cell_index"; lap cell_index
+    (cd rust && FLOE_INDEX_BIN="$PWD/target/release/floe-index" cargo test --release --offline -p floe-app-core --lib cell_index &&
+        FLOE_INDEX_BIN="$PWD/target/release/floe-index" cargo test --release --offline -p floe-app-core --test cell_index -- --ignored); fi
 # in-tree CPU renderer: Python queue contract plus independent
 # KLayout pixel oracle at deterministic serial/parallel settings
 if gate rust_renderer; then RAN="$RAN rust_renderer"; lap rust_renderer

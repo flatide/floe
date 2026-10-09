@@ -1,0 +1,1133 @@
+use crate::{
+    cache::{self, CacheState},
+    native::{self, Indexer},
+    Error, ErrorKind, Result,
+};
+use std::ffi::OsString;
+use std::fs::{self, File, OpenOptions};
+use std::os::unix::{
+    fs::{MetadataExt, OpenOptionsExt},
+    process::ExitStatusExt,
+};
+use std::path::{Path, PathBuf};
+use std::process::Child;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
+pub mod revision;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProfileCell {
+    Name(String),
+    Index(usize),
+}
+#[derive(Clone, Debug)]
+pub struct IndexOptions {
+    pub force: bool,
+    pub jobs: usize,
+    pub page_target_mb: Option<u64>,
+    pub lod: bool,
+    /// None resolves to off for layouts and on for jobdeck sources.
+    pub occupancy: Option<bool>,
+    pub occupancy_only: bool,
+    pub occupancy_um: Option<f64>,
+    pub occupancy_balance: Option<bool>,
+    pub occupancy_prune: Option<bool>,
+    pub representatives: bool,
+    pub representatives_only: bool,
+    pub representatives_points: Option<u64>,
+    pub representatives_format: Option<u8>,
+    pub slow_cell_s: Option<f64>,
+    pub p2_shard_limit_mb: Option<u64>,
+    pub profile_cell: Option<ProfileCell>,
+    pub profile_jobs: Option<Vec<usize>>,
+    pub profile_repeat: usize,
+    pub profile_snapshot: Option<PathBuf>,
+    pub profile_snapshot_refresh: bool,
+}
+impl Default for IndexOptions {
+    fn default() -> Self {
+        Self {
+            force: false,
+            jobs: 12,
+            page_target_mb: None,
+            lod: false,
+            occupancy: None,
+            occupancy_only: false,
+            occupancy_um: None,
+            occupancy_balance: None,
+            occupancy_prune: None,
+            representatives: false,
+            representatives_only: false,
+            representatives_points: None,
+            representatives_format: None,
+            slow_cell_s: None,
+            p2_shard_limit_mb: None,
+            profile_cell: None,
+            profile_jobs: None,
+            profile_repeat: 1,
+            profile_snapshot: None,
+            profile_snapshot_refresh: false,
+        }
+    }
+}
+impl IndexOptions {
+    pub fn validate(&self) -> Result<()> {
+        if self
+            .representatives_format
+            .is_some_and(|n| n != 1 && n != 2)
+        {
+            return Err(Error::input("representatives-format must be 1 or 2"));
+        }
+        if self
+            .representatives_points
+            .is_some_and(|n| n == 0 || n > 4_194_304)
+        {
+            return Err(Error::input(
+                "representatives-points must be in 1..=4194304",
+            ));
+        }
+        if self.wants_representatives()
+            && (self.profile_cell.is_some()
+                || self.occupancy_only
+                || (self.representatives_only && self.wants_occupancy()))
+        {
+            return Err(Error::input("representatives cannot be combined with profiling or other additive-only summaries"));
+        }
+        if self.jobs == 0 || self.jobs.checked_mul(8).is_none() || self.profile_repeat == 0 {
+            return Err(Error::input(
+                "jobs/repeat must be positive and representable",
+            ));
+        }
+        if let Some(v) = self.page_target_mb {
+            if v == 0 || v.checked_mul(1 << 20).is_none() {
+                return Err(Error::input("invalid page-target-mb"));
+            }
+        }
+        if self
+            .p2_shard_limit_mb
+            .is_some_and(|n| n.checked_mul(1 << 20).is_none())
+        {
+            return Err(Error::input("p2-shard-limit-mb overflows bytes"));
+        }
+        if self.occupancy_um.is_some_and(|v| !v.is_finite() || v <= 0.)
+            || self.slow_cell_s.is_some_and(|v| !v.is_finite() || v < 0.)
+        {
+            return Err(Error::input(
+                "occupancy-um must be finite/positive; slow-cell-s finite/nonnegative",
+            ));
+        }
+        // Summary-only overrides the ordinary build default. Explicit CLI
+        // mode flags remain mutually exclusive at the parser boundary.
+        if self.profile_jobs.as_ref().is_some_and(|v| {
+            v.is_empty() || v.iter().any(|&n| n == 0 || n.checked_mul(8).is_none())
+        }) {
+            return Err(Error::input(
+                "profile-jobs must be a nonempty positive list",
+            ));
+        }
+        if matches!(&self.profile_cell, Some(ProfileCell::Name(s)) if s.is_empty()) {
+            return Err(Error::input("profile-cell cannot be empty"));
+        }
+        if self.profile_cell.is_none()
+            && (self.profile_jobs.is_some()
+                || self.profile_repeat != 1
+                || self.profile_snapshot.is_some()
+                || self.profile_snapshot_refresh)
+        {
+            return Err(Error::input(
+                "profile jobs/repeat/snapshot options require a profile cell selector",
+            ));
+        }
+        if self.profile_snapshot_refresh && self.profile_snapshot.is_none() {
+            return Err(Error::input(
+                "--profile-snapshot-refresh requires --profile-snapshot",
+            ));
+        }
+        if self.profile_cell.is_some()
+            && (self.force || self.occupancy_only || self.slow_cell_s.is_some())
+        {
+            return Err(Error::input(
+                "cell profiling cannot be combined with force, occupancy or slow-cell-s",
+            ));
+        }
+        Ok(())
+    }
+    fn wants_occupancy(&self) -> bool {
+        self.occupancy.unwrap_or(false) || self.occupancy_um.is_some()
+    }
+    pub fn wants_representatives(&self) -> bool {
+        self.representatives
+            || self.representatives_only
+            || self.representatives_points.is_some()
+            || self.representatives_format.is_some()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Action {
+    Reuse,
+    OccupancyPresent,
+    Build,
+    OccupancyOnly,
+    RepresentativesOnly,
+    SummariesOnly,
+    Profile,
+}
+
+/// Pure policy decision, independently testable without spawning a process.
+pub fn decide(
+    options: &IndexOptions,
+    state: &CacheState,
+    has_occupancy: bool,
+    has_representatives: bool,
+) -> Result<Action> {
+    options.validate()?;
+    if options.profile_cell.is_some() {
+        return Ok(Action::Profile);
+    }
+    if options.representatives_only {
+        if *state != CacheState::Current {
+            return Err(Error::new(
+                ErrorKind::Cache,
+                "--representatives-only needs a current cache",
+            ));
+        }
+        return Ok(Action::RepresentativesOnly);
+    }
+    if options.occupancy_only {
+        if *state != CacheState::Current {
+            return Err(Error::new(
+                ErrorKind::Cache,
+                "--occupancy-only needs a current cache",
+            ));
+        }
+        return Ok(Action::OccupancyOnly);
+    }
+    if *state == CacheState::Current && !options.force {
+        if options.wants_representatives()
+            && (!has_representatives
+                || options.representatives_points.is_some()
+                || options.representatives_format.is_some())
+        {
+            return Ok(if options.wants_occupancy() && !has_occupancy {
+                Action::SummariesOnly
+            } else {
+                Action::RepresentativesOnly
+            });
+        }
+        return Ok(if options.wants_occupancy() {
+            if has_occupancy {
+                Action::OccupancyPresent
+            } else {
+                Action::OccupancyOnly
+            }
+        } else {
+            Action::Reuse
+        });
+    }
+    if *state != CacheState::Missing && !options.force {
+        return Err(Error::new(
+            ErrorKind::Cache,
+            format!("refusing to replace existing cache: {state:?}; rerun with --force"),
+        ));
+    }
+    Ok(Action::Build)
+}
+
+fn arguments(
+    source: &Path,
+    directory: &Path,
+    o: &IndexOptions,
+    action: &Action,
+) -> Result<Vec<OsString>> {
+    let mut a: Vec<OsString> = vec!["vfs".into(), source.as_os_str().to_owned()];
+    if *action != Action::Profile {
+        a.push(directory.as_os_str().to_owned());
+    }
+    fn add(a: &mut Vec<OsString>, flag: &str, value: impl ToString) {
+        a.extend([flag.into(), value.to_string().into()]);
+    }
+    add(&mut a, "--jobs", o.jobs);
+    if matches!(action, Action::RepresentativesOnly | Action::SummariesOnly) {
+        a.push("--representatives-only".into());
+        if let Some(n) = o.representatives_points {
+            add(&mut a, "--representatives-points", n);
+        }
+        if let Some(n) = o.representatives_format {
+            add(&mut a, "--representatives-format", n);
+        }
+        return Ok(a);
+    }
+    if *action == Action::OccupancyOnly {
+        a.push("--occupancy-only".into());
+        if let Some(v) = o.occupancy_balance {
+            add(&mut a, "--occupancy-balance", u8::from(v));
+        }
+        if let Some(v) = o.occupancy_prune {
+            add(&mut a, "--occupancy-prune", u8::from(v));
+        }
+        if let Some(v) = o.occupancy_um {
+            add(&mut a, "--occupancy-um", v);
+        }
+        return Ok(a);
+    }
+    if let Some(v) = o.page_target_mb {
+        add(&mut a, "--page-target-mb", v);
+    }
+    if *action == Action::Build && o.wants_representatives() {
+        a.push("--representatives".into());
+        if let Some(n) = o.representatives_format {
+            add(&mut a, "--representatives-format", n);
+        }
+        if let Some(n) = o.representatives_points {
+            add(&mut a, "--representatives-points", n);
+        }
+    }
+    if *action != Action::Profile && o.wants_occupancy() {
+        a.push("--occupancy".into());
+        if let Some(v) = o.occupancy_prune {
+            add(&mut a, "--occupancy-prune", u8::from(v));
+        }
+        if let Some(v) = o.occupancy_balance {
+            add(&mut a, "--occupancy-balance", u8::from(v));
+        }
+        if let Some(v) = o.occupancy_um {
+            add(&mut a, "--occupancy-um", v);
+        }
+    }
+    if !o.lod {
+        a.push("--no-lod".into());
+    }
+    if let Some(v) = o.slow_cell_s {
+        add(&mut a, "--slow-cell-s", v);
+    }
+    if let Some(v) = o.p2_shard_limit_mb {
+        add(&mut a, "--p2-shard-limit-mb", v);
+    }
+    match &o.profile_cell {
+        Some(ProfileCell::Name(s)) => add(&mut a, "--profile-cell", s),
+        Some(ProfileCell::Index(n)) => add(&mut a, "--profile-cell-ci", n),
+        None => (),
+    }
+    if let Some(v) = &o.profile_jobs {
+        add(
+            &mut a,
+            "--profile-jobs",
+            v.iter().map(usize::to_string).collect::<Vec<_>>().join(","),
+        );
+    }
+    if o.profile_repeat != 1 {
+        add(&mut a, "--profile-repeat", o.profile_repeat);
+    }
+    if let Some(p) = &o.profile_snapshot {
+        a.extend([
+            "--profile-snapshot".into(),
+            cache::absolute(p)?.into_os_string(),
+        ]);
+    }
+    if o.profile_snapshot_refresh {
+        a.push("--profile-snapshot-refresh".into());
+    }
+    Ok(a)
+}
+
+pub(crate) struct WriteLease(File);
+impl WriteLease {
+    pub(crate) fn acquire_aliases(paths: &[PathBuf]) -> Result<Vec<Self>> {
+        // Fixed lexical order and both spellings serialize old/new writers.
+        // Keep stable lock inodes; never remove them after a rename.
+        let ordered: std::collections::BTreeSet<_> = paths.iter().collect();
+        ordered.into_iter().map(|p| Self::acquire(p)).collect()
+    }
+    pub(crate) fn acquire(directory: &Path) -> Result<Self> {
+        Self::open(directory, true)
+    }
+    /// Read-only preparation/reclamation must not invent a missing lock inode.
+    pub(crate) fn acquire_existing(directory: &Path) -> Result<Self> {
+        Self::open(directory, false)
+    }
+    fn open(directory: &Path, create: bool) -> Result<Self> {
+        let mut path = directory.as_os_str().to_owned();
+        path.push(".index.lock");
+        // Persistent zero-byte inode: unlink-on-unlock would allow a second
+        // writer to lock a different inode while the first still holds it.
+        let f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(create)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(PathBuf::from(path))?;
+        let m = f.metadata()?;
+        if !m.is_file() || m.nlink() != 1 {
+            return Err(Error::input("index lock must be a private regular file"));
+        }
+        match f.try_lock() {
+            Ok(()) => Ok(Self(f)),
+            Err(std::fs::TryLockError::WouldBlock) => Err(Error::new(
+                ErrorKind::Busy,
+                "another Rust application is indexing this cache",
+            )),
+            Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
+        }
+    }
+}
+impl Drop for WriteLease {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+pub struct PreparedIndex {
+    action: Action,
+    source: PathBuf,
+    directory: PathBuf,
+    args: Vec<OsString>,
+    indexer: Indexer,
+    lease: Vec<WriteLease>,
+    migration: Option<cache::Migration>,
+    cleanup_occupancy: bool,
+    cleanup_representatives: bool,
+    next_args: Option<Vec<OsString>>,
+}
+impl PreparedIndex {
+    pub fn action(&self) -> &Action {
+        &self.action
+    }
+    pub fn source(&self) -> &Path {
+        &self.source
+    }
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+    pub fn arguments(&self) -> &[OsString] {
+        &self.args
+    }
+    pub fn migration(&self) -> Option<cache::Migration> {
+        self.migration
+    }
+    pub fn prepare(
+        source: &Path,
+        options: &IndexOptions,
+        indexer: Indexer,
+        cancelled: &AtomicUsize,
+    ) -> Result<Self> {
+        options.validate()?;
+        if cancelled.load(Ordering::Relaxed) != 0 {
+            return Err(Error::new(
+                ErrorKind::Cancelled,
+                "index cancelled before preparation",
+            ));
+        }
+        let source = cache::absolute(source)?;
+        if source
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("jb"))
+        {
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                "jobdeck indexing is not yet ported (M1a-3); use the existing floe2 index",
+            ));
+        }
+        cache::fingerprint(&source)?;
+        indexer.verify(cancelled)?;
+        let mut directory = cache::cache_path(&source)?;
+        if let Some(snapshot) = &options.profile_snapshot {
+            let snapshot = cache::absolute(snapshot)?;
+            let name = snapshot
+                .file_name()
+                .ok_or_else(|| Error::input("snapshot must name a file"))?;
+            let resolved = fs::canonicalize(&snapshot)
+                .or_else(|_| {
+                    fs::canonicalize(snapshot.parent().expect("absolute file parent"))
+                        .map(|p| p.join(name))
+                })
+                .unwrap_or_else(|_| snapshot.clone());
+            let mut protected = cache::cache_paths(&source)?.to_vec();
+            protected.push(cache::revision::Store::new(&source)?.path().to_owned());
+            protected.push(cache::revision::set::Store::new(&source)?.path().to_owned());
+            for candidate in protected {
+                let cache_resolved =
+                    fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
+                if snapshot.starts_with(&candidate) || resolved.starts_with(&cache_resolved) {
+                    return Err(Error::input(
+                        "profile snapshot must be outside current, legacy and revision caches",
+                    ));
+                }
+            }
+        }
+        let profiling = options.profile_cell.is_some();
+        let lease = if profiling {
+            Vec::new()
+        } else {
+            WriteLease::acquire_aliases(&cache::cache_paths(&source)?)?
+        };
+        // Resolution must be rechecked under both writer locks. Read-only
+        // profile intentionally acquires neither locks nor migration authority.
+        if !profiling {
+            directory = cache::cache_path(&source)?;
+        }
+        let mut before = None;
+        if !profiling {
+            match fs::symlink_metadata(&directory) {
+                Ok(m) if m.is_dir() && !m.file_type().is_symlink() => before = Some(m),
+                Ok(_) => {
+                    return Err(Error::input(
+                        "cache destination must be a real directory, even with --force",
+                    ))
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                Err(e) => return Err(e.into()),
+            }
+        }
+        let state = if profiling {
+            CacheState::Missing
+        } else {
+            cache::inspect(&source, &directory)?
+        };
+        let action = decide(
+            options,
+            &state,
+            directory.join("design.ovo").is_file(),
+            directory.join("design.ovr").is_file(),
+        )?;
+        if cancelled.load(Ordering::Relaxed) != 0 {
+            return Err(Error::new(
+                ErrorKind::Cancelled,
+                "index cancelled during cache validation",
+            ));
+        }
+        let destination = if profiling {
+            directory.clone()
+        } else {
+            cache::default_cache_path(&source)?
+        };
+        let args = arguments(&source, &destination, options, &action)?;
+        // Both additive passes retain the same locks and migration receipt.
+        // If the second fails, the first publication remains; this is not a
+        // transaction across independent summary files.
+        let next_args = if action == Action::SummariesOnly {
+            Some(arguments(
+                &source,
+                &destination,
+                options,
+                &Action::OccupancyOnly,
+            )?)
+        } else {
+            None
+        };
+        let migration = if directory != destination {
+            Some(cache::rename_legacy(
+                &directory,
+                &destination,
+                before
+                    .as_ref()
+                    .ok_or_else(|| Error::new(ErrorKind::Cache, "legacy cache disappeared"))?,
+                true,
+                cancelled,
+            )?)
+        } else {
+            None
+        };
+        // No fallible preparation after this commit: callers must receive the
+        // name-change receipt even if launching/rebuilding is later cancelled.
+        Ok(Self {
+            action,
+            source,
+            directory: destination,
+            args,
+            indexer,
+            lease,
+            migration,
+            cleanup_occupancy: !profiling && (options.wants_occupancy() || options.occupancy_only),
+            cleanup_representatives: !profiling && options.wants_representatives(),
+            next_args,
+        })
+    }
+    pub fn start(self, cancelled: &AtomicUsize) -> Result<IndexJob> {
+        self.start_io(cancelled, false)
+    }
+    pub fn start_captured(self, cancelled: &AtomicUsize) -> Result<IndexJob> {
+        self.start_io(cancelled, true)
+    }
+    fn start_io(mut self, cancelled: &AtomicUsize, capture: bool) -> Result<IndexJob> {
+        if matches!(self.action, Action::Reuse | Action::OccupancyPresent) {
+            return Err(Error::input("a reused cache does not launch an indexer"));
+        }
+        if cancelled.load(Ordering::Relaxed) != 0 {
+            return Err(Error::new(
+                ErrorKind::Cancelled,
+                "index cancelled before launch",
+            ));
+        }
+        let mut child = self.indexer.spawn(&self.args, capture)?;
+        let capture = if capture {
+            match crate::index_progress::Capture::take(&mut child) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(e);
+                }
+            }
+        } else {
+            None
+        };
+        Ok(IndexJob {
+            child: Some(child),
+            lease: std::mem::take(&mut self.lease),
+            directory: self.directory.clone(),
+            cleanup_occupancy: self.cleanup_occupancy,
+            cleanup_representatives: self.cleanup_representatives,
+            next: self.next_args.take().map(|a| (self.indexer.clone(), a)),
+            finished: None,
+            capture,
+        })
+    }
+}
+
+pub struct IndexJob {
+    child: Option<Child>,
+    lease: Vec<WriteLease>,
+    directory: PathBuf,
+    cleanup_occupancy: bool,
+    cleanup_representatives: bool,
+    next: Option<(Indexer, Vec<OsString>)>,
+    finished: Option<i32>,
+    capture: Option<crate::index_progress::Capture>,
+}
+/// floe-index's own locks (floe_vfs::lock) off, for a run whose target is
+/// private to this build - a revision candidate, a DRC staging directory: no
+/// other run can name it, and the `.floe-lock` folder would land inside the
+/// private directory (a revision store's unknown entry, a staging directory
+/// its cleanup refuses).
+pub(crate) const PRIVATE_TARGET: &[(&str, &str)] = &[("FLOE_LOCK", "off")];
+impl IndexJob {
+    /// Reuse the subprocess/cancel/reap lifecycle for DRC staging. Its caller
+    /// owns publication and the write lease; VFS cleanup is deliberately off.
+    /// `env` is added to the indexer's environment (PRIVATE_TARGET).
+    pub(crate) fn captured(
+        indexer: &Indexer,
+        args: &[OsString],
+        env: &[(&str, &str)],
+    ) -> Result<Self> {
+        let mut child = indexer.spawn_env(args, true, env)?;
+        let capture = match crate::index_progress::Capture::take(&mut child) {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e);
+            }
+        };
+        Ok(Self {
+            child: Some(child),
+            lease: Vec::new(),
+            directory: PathBuf::new(),
+            cleanup_occupancy: false,
+            cleanup_representatives: false,
+            next: None,
+            finished: None,
+            capture: Some(capture),
+        })
+    }
+    pub fn pid(&self) -> Option<u32> {
+        self.child.as_ref().map(Child::id)
+    }
+    pub fn progress(&self) -> Option<&crate::index_progress::Progress> {
+        self.capture.as_ref().map(|c| &c.progress)
+    }
+    pub fn poll(&mut self) -> Result<Option<i32>> {
+        if self.finished.is_some() {
+            return Ok(self.finished);
+        }
+        if let Some(c) = self.capture.as_mut() {
+            c.drain()?;
+        }
+        if let Some(status) = self.child.as_mut().expect("running child").try_wait()? {
+            let code = status
+                .code()
+                .unwrap_or_else(|| 128 + status.signal().unwrap_or(1));
+            if code == 0 {
+                if let Some((indexer, args)) = self.next.take() {
+                    if let Some(c) = self.capture.as_mut() {
+                        let _ = c.finish();
+                    }
+                    let started = (|| {
+                        let mut child = indexer.spawn(&args, self.capture.is_some())?;
+                        let capture = if self.capture.is_some() {
+                            match crate::index_progress::Capture::take(&mut child) {
+                                Ok(mut c) => {
+                                    if let Some(previous) = &self.capture {
+                                        c.progress.output_bytes = previous.progress.output_bytes;
+                                        c.progress.dropped_lines = previous.progress.dropped_lines;
+                                    }
+                                    Some(c)
+                                }
+                                Err(e) => {
+                                    let _ = child.kill();
+                                    let _ = child.wait();
+                                    return Err(e);
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        Ok((child, capture))
+                    })();
+                    match started {
+                        Ok((child, capture)) => {
+                            self.child = Some(child);
+                            self.capture = capture;
+                            return Ok(None);
+                        }
+                        Err(e) => {
+                            self.finish(1);
+                            return Err(e);
+                        }
+                    }
+                }
+            }
+            self.finish(code);
+            return Ok(Some(code));
+        }
+        Ok(None)
+    }
+    pub fn cancel(&mut self, signal: i32) -> Result<i32> {
+        if !matches!(signal, libc::SIGINT | libc::SIGTERM | libc::SIGHUP) {
+            return Err(Error::input("cancel signal must be SIGINT/SIGTERM/SIGHUP"));
+        }
+        if let Some(code) = self.finished {
+            return Ok(code);
+        }
+        // Do not use poll(): it may advance a completed first pass. A pending
+        // second pass makes this cancellation, not whole-operation success.
+        if let Some(status) = self.child.as_mut().expect("running child").try_wait()? {
+            let code = if status.success() && self.next.is_some() {
+                128 + signal
+            } else {
+                status
+                    .code()
+                    .unwrap_or_else(|| 128 + status.signal().unwrap_or(1))
+            };
+            self.finish(code);
+            return Ok(code);
+        }
+        self.next = None;
+        native::signal_child(self.child.as_ref().expect("running child"), signal)?;
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            if self.child.as_mut().unwrap().try_wait()?.is_some() {
+                self.finish(128 + signal);
+                return Ok(128 + signal);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let child = self.child.as_mut().unwrap();
+        child.kill()?;
+        child.wait()?;
+        self.finish(128 + signal);
+        Ok(128 + signal)
+    }
+    fn finish(&mut self, code: i32) {
+        self.next = None;
+        self.child.take();
+        // Telemetry is best-effort. Do not turn the native exit status into a
+        // different result because of a late pipe failure during final drain.
+        if let Some(c) = self.capture.as_mut() {
+            let _ = c.finish();
+        }
+        self.finished = Some(code);
+        // A run the index locks refused (floe_vfs::lock::BUSY_EXIT) wrote
+        // nothing: a summary temp there is the lock holder's, never ours.
+        if code != 0 && code != floe_vfs::lock::BUSY_EXIT {
+            if let Err(e) = self.discard_occupancy_tmp() {
+                // A cleanup problem must not replace the native failure or
+                // cancellation status. Keep the path for explicit recovery.
+                eprintln!("[floe2-web] cannot clean summary temp: {e}");
+            }
+        }
+        self.lease.clear();
+    }
+    fn discard_occupancy_tmp(&self) -> Result<()> {
+        for (enabled, name) in [
+            (self.cleanup_occupancy, "design.ovo.tmp"),
+            (self.cleanup_representatives, "design.ovr.tmp"),
+        ] {
+            if !enabled {
+                continue;
+            }
+            match fs::remove_file(self.directory.join(name)) {
+                Ok(()) => eprintln!(
+                    "[floe2-web] discarded {}",
+                    self.directory.join(name).display()
+                ),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(())
+    }
+}
+impl Drop for IndexJob {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = self.discard_occupancy_tmp();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn cancelling_between_additive_passes_is_not_success() {
+        let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        assert!(child.wait().unwrap().success());
+        let indexer = Indexer::discover(&native::Discovery {
+            override_path: Some(PathBuf::from("/usr/bin/false")),
+            development_root: None,
+            executable: PathBuf::from("/unused"),
+            search_path: None,
+        })
+        .unwrap();
+        let mut job = IndexJob {
+            child: Some(child),
+            lease: Vec::new(),
+            directory: PathBuf::new(),
+            cleanup_occupancy: false,
+            cleanup_representatives: false,
+            next: Some((indexer, Vec::new())),
+            finished: None,
+            capture: None,
+        };
+        assert_eq!(job.cancel(libc::SIGINT).unwrap(), 130);
+        assert_eq!(job.poll().unwrap(), Some(130));
+        assert!(job.child.is_none() && job.next.is_none());
+    }
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("floe-index-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+    #[test]
+    fn a_run_the_index_locks_refuse_keeps_the_summary_temp_it_did_not_write() {
+        let dir = scratch("busy-temp");
+        for (code, kept) in [(floe_vfs::lock::BUSY_EXIT, true), (1, false)] {
+            fs::write(dir.join("design.ovo.tmp"), b"holder").unwrap();
+            let child = std::process::Command::new("/bin/sh")
+                .args(["-c", &format!("exit {code}")])
+                .spawn()
+                .unwrap();
+            let mut job = IndexJob {
+                child: Some(child),
+                lease: Vec::new(),
+                directory: dir.clone(),
+                cleanup_occupancy: true,
+                cleanup_representatives: false,
+                next: None,
+                finished: None,
+                capture: None,
+            };
+            let done = loop {
+                if let Some(code) = job.poll().unwrap() {
+                    break code;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            assert_eq!(done, code);
+            assert_eq!(dir.join("design.ovo.tmp").exists(), kept, "exit {code}");
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn a_private_target_runs_the_indexer_without_its_locks() {
+        let dir = scratch("private-target");
+        let script = dir.join("fake-index");
+        fs::write(&script, "#!/bin/sh\nprintf %s \"$FLOE_LOCK\" > \"$1\"\n").unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let indexer = Indexer::discover(&native::Discovery {
+            override_path: Some(script),
+            development_root: None,
+            executable: PathBuf::from("/unused"),
+            search_path: None,
+        })
+        .unwrap();
+        let seen = dir.join("seen");
+        let mut job =
+            IndexJob::captured(&indexer, &[seen.clone().into_os_string()], PRIVATE_TARGET).unwrap();
+        let done = loop {
+            if let Some(code) = job.poll().unwrap() {
+                break code;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(done, 0);
+        assert_eq!(fs::read_to_string(&seen).unwrap(), "off");
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn representatives_are_explicit_additive_and_bounded() {
+        let mut o = IndexOptions {
+            representatives: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            decide(&o, &CacheState::Missing, false, false).unwrap(),
+            Action::Build
+        );
+        assert_eq!(
+            decide(&o, &CacheState::Current, false, false).unwrap(),
+            Action::RepresentativesOnly
+        );
+        assert_eq!(
+            decide(&o, &CacheState::Current, false, true).unwrap(),
+            Action::Reuse
+        );
+        o.occupancy = Some(true);
+        assert_eq!(
+            decide(&o, &CacheState::Current, false, false).unwrap(),
+            Action::SummariesOnly
+        );
+        assert_eq!(
+            decide(&o, &CacheState::Current, true, false).unwrap(),
+            Action::RepresentativesOnly
+        );
+        assert_eq!(
+            decide(&o, &CacheState::Current, false, true).unwrap(),
+            Action::OccupancyOnly
+        );
+        assert_eq!(
+            decide(&o, &CacheState::Current, true, true).unwrap(),
+            Action::OccupancyPresent
+        );
+        o.representatives_points = Some(64);
+        assert_eq!(
+            decide(&o, &CacheState::Current, true, true).unwrap(),
+            Action::RepresentativesOnly
+        );
+        for (action, expected, excluded) in [
+            (Action::Build, "--representatives", "--representatives-only"),
+            (
+                Action::RepresentativesOnly,
+                "--representatives-only",
+                "--occupancy",
+            ),
+            (
+                Action::SummariesOnly,
+                "--representatives-only",
+                "--occupancy-only",
+            ),
+            (
+                Action::OccupancyOnly,
+                "--occupancy-only",
+                "--representatives",
+            ),
+        ] {
+            let a = arguments(Path::new("/s"), Path::new("/c"), &o, &action).unwrap();
+            assert!(a.contains(&OsString::from(expected)));
+            assert!(!a.contains(&OsString::from(excluded)));
+        }
+        o.representatives_only = true;
+        assert!(o.validate().is_err());
+        o.occupancy = None;
+        assert!(decide(&o, &CacheState::Missing, false, false).is_err());
+        assert_eq!(
+            decide(&o, &CacheState::Current, true, true).unwrap(),
+            Action::RepresentativesOnly
+        );
+        for n in [0, 4_194_305] {
+            o.representatives_points = Some(n);
+            assert!(o.validate().is_err());
+        }
+        o.representatives_points = None;
+        o.profile_cell = Some(ProfileCell::Index(0));
+        assert!(o.validate().is_err());
+    }
+    #[test]
+    fn upstream_summary_controls_preserve_defaults_and_forward_each_pass() {
+        let mut o = IndexOptions::default();
+        for format in [1, 2] {
+            o.representatives_format = Some(format);
+            assert!(o.wants_representatives());
+            assert_eq!(
+                decide(&o, &CacheState::Current, true, true).unwrap(),
+                Action::RepresentativesOnly
+            );
+            for action in [
+                Action::Build,
+                Action::RepresentativesOnly,
+                Action::SummariesOnly,
+            ] {
+                let a = arguments(Path::new("/s"), Path::new("/c"), &o, &action).unwrap();
+                assert!(a.windows(2).any(|w| w
+                    == [
+                        OsString::from("--representatives-format"),
+                        format.to_string().into()
+                    ]));
+            }
+        }
+        for format in [0, 3, 255] {
+            o.representatives_format = Some(format);
+            assert!(o.validate().is_err());
+        }
+        o.representatives_format = None;
+        o.occupancy = Some(true);
+        for prune in [false, true] {
+            o.occupancy_prune = Some(prune);
+            for action in [Action::Build, Action::OccupancyOnly] {
+                let a = arguments(Path::new("/s"), Path::new("/c"), &o, &action).unwrap();
+                assert!(a.windows(2).any(|w| w
+                    == [
+                        OsString::from("--occupancy-prune"),
+                        u8::from(prune).to_string().into()
+                    ]));
+            }
+            assert_eq!(
+                decide(&o, &CacheState::Current, true, true).unwrap(),
+                Action::OccupancyPresent
+            );
+        }
+        let a = arguments(
+            Path::new("/s"),
+            Path::new("/c"),
+            &IndexOptions::default(),
+            &Action::Build,
+        )
+        .unwrap();
+        assert!(!a.contains(&OsString::from("--representatives-format")));
+        assert!(!a.contains(&OsString::from("--occupancy-prune")));
+    }
+    #[test]
+    fn reuse_force_and_additive_policy() {
+        let mut o = IndexOptions {
+            occupancy: Some(false),
+            ..Default::default()
+        };
+        assert_eq!(
+            decide(&o, &CacheState::Missing, false, false).unwrap(),
+            Action::Build
+        );
+        assert_eq!(
+            decide(&o, &CacheState::Current, false, false).unwrap(),
+            Action::Reuse
+        );
+        let stale = CacheState::Unusable("stale".into());
+        assert!(decide(&o, &stale, false, false).is_err());
+        o.occupancy = Some(true);
+        o.occupancy_balance = Some(false);
+        assert_eq!(
+            decide(&o, &CacheState::Current, false, false).unwrap(),
+            Action::OccupancyOnly
+        );
+        assert_eq!(
+            decide(&o, &CacheState::Current, true, false).unwrap(),
+            Action::OccupancyPresent
+        );
+        o.force = true;
+        assert_eq!(decide(&o, &stale, true, false).unwrap(), Action::Build);
+        o.occupancy = Some(false);
+        o.occupancy_only = true;
+        assert!(decide(&o, &stale, true, false).is_err());
+        assert_eq!(
+            decide(&o, &CacheState::Current, true, false).unwrap(),
+            Action::OccupancyOnly
+        );
+    }
+    #[test]
+    fn profile_never_names_cache_and_keeps_job_series_order() {
+        let o = IndexOptions {
+            profile_cell: Some(ProfileCell::Name("TOP 한 글".into())),
+            profile_jobs: Some(vec![16, 1, 16]),
+            profile_repeat: 2,
+            ..Default::default()
+        };
+        let a = arguments(
+            Path::new("/source"),
+            Path::new("/NEVER"),
+            &o,
+            &Action::Profile,
+        )
+        .unwrap();
+        assert!(!a.contains(&OsString::from("/NEVER")));
+        assert!(a.contains(&OsString::from("16,1,16")));
+        assert!(a.contains(&OsString::from("--no-lod")));
+        assert!(!a.contains(&OsString::from("--occupancy")));
+        assert!(o.validate().is_ok());
+    }
+    #[test]
+    fn layout_default_is_no_summary_and_explicit_summary_is_additive() {
+        let mut o = IndexOptions::default();
+        assert_eq!(o.occupancy, None);
+        assert_eq!(
+            decide(&o, &CacheState::Current, false, false).unwrap(),
+            Action::Reuse
+        );
+        o.occupancy = Some(true);
+        o.occupancy_balance = Some(false);
+        assert_eq!(
+            decide(&o, &CacheState::Current, false, false).unwrap(),
+            Action::OccupancyOnly
+        );
+        let a = arguments(
+            Path::new("/source"),
+            Path::new("/cache"),
+            &o,
+            &Action::Build,
+        )
+        .unwrap();
+        assert!(a.contains(&OsString::from("--occupancy")));
+        assert!(a.windows(2).any(|w| w == ["--occupancy-balance", "0"]));
+        o.occupancy_only = true;
+        assert_eq!(
+            decide(&o, &CacheState::Current, true, false).unwrap(),
+            Action::OccupancyOnly
+        );
+        let a = arguments(
+            Path::new("/source"),
+            Path::new("/cache"),
+            &o,
+            &Action::OccupancyOnly,
+        )
+        .unwrap();
+        assert!(a.contains(&OsString::from("--occupancy-only")));
+        assert!(a.windows(2).any(|w| w == ["--occupancy-balance", "0"]));
+        assert!(!a.contains(&OsString::from("--occupancy")));
+        o.occupancy_only = false;
+        o.profile_cell = Some(ProfileCell::Index(0));
+        o.occupancy_um = Some(2.0);
+        o.validate().unwrap();
+        let a = arguments(
+            Path::new("/source"),
+            Path::new("/cache"),
+            &o,
+            &Action::Profile,
+        )
+        .unwrap();
+        assert!(!a.iter().any(|v| v.to_string_lossy().contains("occupancy")));
+    }
+    #[test]
+    fn rejects_invalid_combinations_and_nonfinite_numbers() {
+        let o = IndexOptions {
+            occupancy_um: Some(f64::NAN),
+            ..Default::default()
+        };
+        assert!(o.validate().is_err());
+        let o = IndexOptions {
+            profile_repeat: 2,
+            ..Default::default()
+        };
+        assert!(o.validate().is_err());
+        let o = IndexOptions {
+            profile_cell: Some(ProfileCell::Index(0)),
+            force: true,
+            ..Default::default()
+        };
+        assert!(o.validate().is_err());
+    }
+}

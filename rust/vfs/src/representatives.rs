@@ -12,7 +12,7 @@ use floe_ovm::{BBox, Backing, Ovm};
 use std::collections::{BTreeMap, HashMap};
 
 mod tree;
-pub use tree::{Options as TreeOptions, Stream as TreeStream, write as write_tree};
+pub use tree::{write as write_tree, Options as TreeOptions, Stream as TreeStream};
 
 pub const DEFAULT_POINTS: usize = 262_144;
 pub const MAX_POINTS: usize = 4_194_304;
@@ -142,7 +142,13 @@ const IDENTITY: [i8; 4] = [1, 0, 0, 1];
 // p_parent = R_rot(F_flip(p)) + (pl.x + off.x, pl.y + off.y), composed on the
 // right of the accumulated map (M . T): the same flip, rotate, translate order
 // and i128 arithmetic as applying the placement chain bottom-up.
-fn place_xf(m: [i8; 4], tx: i128, ty: i128, pl: &PlaceRec, off: (i128, i128)) -> ([i8; 4], i128, i128) {
+fn place_xf(
+    m: [i8; 4],
+    tx: i128,
+    ty: i128,
+    pl: &PlaceRec,
+    off: (i128, i128),
+) -> ([i8; 4], i128, i128) {
     let f: i8 = if pl.flip { -1 } else { 1 };
     let (c, s): (i8, i8) = match pl.rot & 3 {
         0 => (1, 0),
@@ -181,7 +187,6 @@ fn add_count(own: &mut BTreeMap<Key, u64>, key: Key, n: u64) -> Result<(), Strin
         .ok_or("representatives: recursive member count exceeds u64")?;
     Ok(())
 }
-
 
 fn members(rep: &Rep) -> Result<u64, String> {
     match rep {
@@ -317,7 +322,12 @@ pub fn build(doc: &Doc, per_group: usize, progress: Option<fn(&str)>) -> Result<
 
 /// `shapes`: also resolve every sample to its Prim (OVR2). The samples,
 /// their order and the points are the same either way.
-pub fn build_with(doc: &Doc, per_group: usize, progress: Option<fn(&str)>, shapes: bool) -> Result<Built, String> {
+pub fn build_with(
+    doc: &Doc,
+    per_group: usize,
+    progress: Option<fn(&str)>,
+    shapes: bool,
+) -> Result<Built, String> {
     if per_group == 0 || per_group > MAX_POINTS {
         return Err(format!(
             "representatives: points must be in 1..={MAX_POINTS}"
@@ -395,7 +405,11 @@ pub fn build_with(doc: &Doc, per_group: usize, progress: Option<fn(&str)>, shape
     let mut pending: Vec<Vec<Req>> = (0..doc.cells.len()).map(|_| Vec::new()).collect();
     let mut out = Out {
         points: Vec::with_capacity(root.len()),
-        prims: if shapes { Some(Vec::with_capacity(root.len())) } else { None },
+        prims: if shapes {
+            Some(Vec::with_capacity(root.len()))
+        } else {
+            None
+        },
         locals: HashMap::new(),
         point_fallbacks: 0,
     };
@@ -459,7 +473,12 @@ pub fn build_with(doc: &Doc, per_group: usize, progress: Option<fn(&str)>, shape
         peak as f64 * 64.0 / 1_048_576.0,
         started.elapsed().as_secs_f64()
     ));
-    let Out { points, prims, point_fallbacks, .. } = out;
+    let Out {
+        points,
+        prims,
+        point_fallbacks,
+        ..
+    } = out;
     let mut prims = prims.map(|p| p.into_iter());
     let mut result = Vec::with_capacity(root.len());
     for (&(key, members), pts) in root.iter().zip(points) {
@@ -469,7 +488,10 @@ pub fn build_with(doc: &Doc, per_group: usize, progress: Option<fn(&str)>, shape
         }
         let mut shaped = Vec::new();
         if let Some(it) = prims.as_mut() {
-            for p in it.next().ok_or("representatives: shape group missing (internal)")? {
+            for p in it
+                .next()
+                .ok_or("representatives: shape group missing (internal)")?
+            {
                 shaped.push(p.ok_or("representatives: sample shape not resolved (internal)")?);
             }
         }
@@ -526,7 +548,11 @@ fn resolve_cell(
             j += 1;
         }
         key_of.insert(key, cursors.len());
-        cursors.push(GroupCursor { next: i, end: j, pos: 0 });
+        cursors.push(GroupCursor {
+            next: i,
+            end: j,
+            pos: 0,
+        });
         i = j;
     }
     let cell = &doc.cells[ci];
@@ -536,12 +562,22 @@ fn resolve_cell(
             hit_shape(doc, ci, 0, ri, &r.rep, &mut cursors[c], &reqs, out, anchors)?;
         }
     }
-    for (ri, p) in cell.polys.iter().enumerate().filter(|(_, p)| !p.pts.is_empty()) {
+    for (ri, p) in cell
+        .polys
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| !p.pts.is_empty())
+    {
         if let Some(&c) = key_of.get(&(p.layer, p.dt, 0)) {
             hit_shape(doc, ci, 1, ri, &p.rep, &mut cursors[c], &reqs, out, anchors)?;
         }
     }
-    for (ri, p) in cell.paths.iter().enumerate().filter(|(_, p)| !p.pts.is_empty()) {
+    for (ri, p) in cell
+        .paths
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| !p.pts.is_empty())
+    {
         if let Some(&c) = key_of.get(&(p.layer, p.dt, 0)) {
             hit_shape(doc, ci, 2, ri, &p.rep, &mut cursors[c], &reqs, out, anchors)?;
         }
@@ -620,13 +656,17 @@ fn hit_shape(
         let req = reqs[cur.next];
         let base = anchor(doc, ci, kind, ri, anchors)?;
         let off = offset(rep, req.rank - cur.pos);
-        let (x, y) = apply_xf(req.m, req.tx, req.ty, base.x as i128 + off.0, base.y as i128 + off.1);
+        let (x, y) = apply_xf(
+            req.m,
+            req.tx,
+            req.ty,
+            base.x as i128 + off.0,
+            base.y as i128 + off.1,
+        );
         out.points[req.group as usize][req.sample as usize] = Some(Point {
-            x: x
-                .try_into()
+            x: x.try_into()
                 .map_err(|_| "representatives: x coordinate overflow")?,
-            y: y
-                .try_into()
+            y: y.try_into()
                 .map_err(|_| "representatives: y coordinate overflow")?,
             max_dim: base.max_dim,
             min_dim: base.min_dim,
@@ -634,10 +674,23 @@ fn hit_shape(
         });
         if out.prims.is_some() {
             let local = local_prim(doc, ci, kind, ri, out)?;
-            let a = apply_xf(req.m, req.tx, req.ty, local.x0 as i128 + off.0, local.y0 as i128 + off.1);
-            let z = apply_xf(req.m, req.tx, req.ty, local.x1 as i128 + off.0, local.y1 as i128 + off.1);
+            let a = apply_xf(
+                req.m,
+                req.tx,
+                req.ty,
+                local.x0 as i128 + off.0,
+                local.y0 as i128 + off.1,
+            );
+            let z = apply_xf(
+                req.m,
+                req.tx,
+                req.ty,
+                local.x1 as i128 + off.0,
+                local.y1 as i128 + off.1,
+            );
             let coord = |v: i128| -> Result<i64, String> {
-                v.try_into().map_err(|_| "representatives: shape coordinate overflow".to_string())
+                v.try_into()
+                    .map_err(|_| "representatives: shape coordinate overflow".to_string())
             };
             let (ax, ay, zx, zy) = (coord(a.0)?, coord(a.1)?, coord(z.0)?, coord(z.1)?);
             // a rect keeps x0 <= x1, y0 <= y1 under any rotation or mirror
@@ -693,9 +746,20 @@ fn local_prim(doc: &Doc, ci: usize, kind: u8, ri: usize, out: &mut Out) -> Resul
     let local = match kind {
         0 => {
             let r = &cell.rects[ri];
-            let x1 = r.x.checked_add(r.w).ok_or("representatives: rect x overflow")?;
-            let y1 = r.y.checked_add(r.h).ok_or("representatives: rect y overflow")?;
-            Local { x0: r.x.min(x1), y0: r.y.min(y1), x1: r.x.max(x1), y1: r.y.max(y1), kind: PRIM_RECT, flags: 0 }
+            let x1 =
+                r.x.checked_add(r.w)
+                    .ok_or("representatives: rect x overflow")?;
+            let y1 =
+                r.y.checked_add(r.h)
+                    .ok_or("representatives: rect y overflow")?;
+            Local {
+                x0: r.x.min(x1),
+                y0: r.y.min(y1),
+                x1: r.x.max(x1),
+                y1: r.y.max(y1),
+                kind: PRIM_RECT,
+                flags: 0,
+            }
         }
         _ => {
             let outline;
@@ -703,15 +767,34 @@ fn local_prim(doc: &Doc, ci: usize, kind: u8, ri: usize, out: &mut Out) -> Resul
                 &cell.polys[ri].pts
             } else {
                 let p = &cell.paths[ri];
-                outline = floe_tiler::path_outline_any(&p.pts, p.hw, p.es, p.ee).unwrap_or_default();
+                outline =
+                    floe_tiler::path_outline_any(&p.pts, p.hw, p.es, p.ee).unwrap_or_default();
                 &outline
             };
             match longest_edge(pts) {
-                Some((a, b)) => Local { x0: a.0, y0: a.1, x1: b.0, y1: b.1, kind: PRIM_SEGMENT, flags: PRIM_PARTIAL },
+                Some((a, b)) => Local {
+                    x0: a.0,
+                    y0: a.1,
+                    x1: b.0,
+                    y1: b.1,
+                    kind: PRIM_SEGMENT,
+                    flags: PRIM_PARTIAL,
+                },
                 None => {
                     fallback = true;
-                    let first = if kind == 1 { cell.polys[ri].pts[0] } else { cell.paths[ri].pts[0] };
-                    Local { x0: first.0, y0: first.1, x1: first.0, y1: first.1, kind: PRIM_POINT, flags: PRIM_PARTIAL }
+                    let first = if kind == 1 {
+                        cell.polys[ri].pts[0]
+                    } else {
+                        cell.paths[ri].pts[0]
+                    };
+                    Local {
+                        x0: first.0,
+                        y0: first.1,
+                        x1: first.0,
+                        y1: first.1,
+                        kind: PRIM_POINT,
+                        flags: PRIM_PARTIAL,
+                    }
                 }
             }
         }
@@ -864,7 +947,16 @@ pub fn encode(built: &mut Built, ovm: &Ovm) -> Vec<u8> {
 }
 
 fn morton_xy(x: i64, y: i64, b: BBox) -> u64 {
-    morton(&Point { x, y, max_dim: 0, min_dim: 0, rank: 0 }, b)
+    morton(
+        &Point {
+            x,
+            y,
+            max_dim: 0,
+            min_dim: 0,
+            rank: 0,
+        },
+        b,
+    )
 }
 
 /// OVR2 step 1: the header and group table of OVR1 (version 2), chunks of
@@ -885,7 +977,9 @@ pub fn encode_v2(built: &mut Built, ovm: &Ovm) -> Result<Vec<u8>, String> {
     put32(&mut out, built.groups.len() as u32);
     for (gi, group) in built.groups.iter_mut().enumerate() {
         if group.prims.len() != group.points.len() {
-            return Err("representatives: OVR2 needs the shapes of every sample (build_with)".into());
+            return Err(
+                "representatives: OVR2 needs the shapes of every sample (build_with)".into(),
+            );
         }
         let centre = |p: &Prim| {
             (
@@ -896,13 +990,23 @@ pub fn encode_v2(built: &mut Built, ovm: &Ovm) -> Result<Vec<u8>, String> {
         let mut bounds = BBox::EMPTY;
         for p in &group.prims {
             let (x, y) = centre(p);
-            bounds.grow(&BBox { x0: x, y0: y, x1: x, y1: y });
+            bounds.grow(&BBox {
+                x0: x,
+                y0: y,
+                x1: x,
+                y1: y,
+            });
         }
         group.prims.sort_unstable_by_key(|p| {
             let (x, y) = centre(p);
             (morton_xy(x, y, bounds), p.rank)
         });
-        for n in [group.key.0, group.key.1, group.key.2, group.prims.len() as u32] {
+        for n in [
+            group.key.0,
+            group.key.1,
+            group.key.2,
+            group.prims.len() as u32,
+        ] {
             put32(&mut out, n);
         }
         put64(&mut out, group.members);
@@ -1020,7 +1124,14 @@ impl Cursor<'_> {
         if tail[0] > PRIM_POINT || tail[1] & !PRIM_PARTIAL != 0 || tail[2..] != [0; 6] {
             return Err("representatives: unknown shape kind or flags".into());
         }
-        Ok((Prim { kind: tail[0], flags: tail[1], ..p }, (uid >> 32) as u32))
+        Ok((
+            Prim {
+                kind: tail[0],
+                flags: tail[1],
+                ..p
+            },
+            (uid >> 32) as u32,
+        ))
     }
 }
 impl File {
@@ -1028,13 +1139,24 @@ impl File {
         Self::from_backing(floe_ovm::map_file(&format!("{dir}/design.ovr"))?, ovm)
     }
     pub fn from_backing(data: Backing, ovm: &Ovm) -> Result<Self, String> {
-        if data.len() >= 12 && &data[..8] == MAGIC2
-            && u32::from_le_bytes(data[8..12].try_into().unwrap()) == 3 {
+        if data.len() >= 12
+            && &data[..8] == MAGIC2
+            && u32::from_le_bytes(data[8..12].try_into().unwrap()) == 3
+        {
             let tree = tree::Tree::parse(&data, ovm)?;
-            return Ok(Self { data, groups: Vec::new(), version: 3, tree: Some(tree) });
+            return Ok(Self {
+                data,
+                groups: Vec::new(),
+                version: 3,
+                tree: Some(tree),
+            });
         }
         // OVR1: 40-byte points (192 MiB); OVR2: 64-byte shapes (384 MiB)
-        let version = if data.len() >= 8 && &data[..8] == MAGIC2 { 2u32 } else { 1 };
+        let version = if data.len() >= 8 && &data[..8] == MAGIC2 {
+            2u32
+        } else {
+            1
+        };
         let cap = if version == 2 { 384 } else { 192 } * 1024 * 1024;
         if data.len() < 52 || data.len() > cap {
             return Err("representatives: invalid file size".into());
@@ -1160,7 +1282,12 @@ impl File {
         if c.pos != end {
             return Err("representatives: trailing data".into());
         }
-        Ok(Self { data, groups, version, tree: None })
+        Ok(Self {
+            data,
+            groups,
+            version,
+            tree: None,
+        })
     }
 
     /// No source page reads, hierarchy expansion, or repetition enumeration.
@@ -1232,7 +1359,10 @@ impl File {
                 if !chunk.bbox.intersects(&req.view) || (shift >= 32 && chunk.min_rank != 0) {
                     continue;
                 }
-                let mut c = Cursor { data: &self.data, pos: chunk.offset };
+                let mut c = Cursor {
+                    data: &self.data,
+                    pos: chunk.offset,
+                };
                 for _ in 0..chunk.len {
                     let (p, _) = c.prim().expect("validated OVR shape");
                     stats.tested += 1;
@@ -1694,7 +1824,11 @@ mod tests {
             Ok(())
         }
 
-        pub fn build(doc: &Doc, per_group: usize, progress: Option<fn(&str)>) -> Result<Vec<Group>, String> {
+        pub fn build(
+            doc: &Doc,
+            per_group: usize,
+            progress: Option<fn(&str)>,
+        ) -> Result<Vec<Group>, String> {
             if per_group == 0 || per_group > MAX_POINTS {
                 return Err(format!(
                     "representatives: points must be in 1..={MAX_POINTS}"
@@ -1947,7 +2081,6 @@ mod tests {
                 .map_err(|_| "representatives: y coordinate overflow")?;
             Ok(point)
         }
-
     }
 
     #[test]
@@ -1958,34 +2091,134 @@ mod tests {
         let leaf = Cell {
             rects: vec![
                 rect(Rep::Pts(Arc::from([(0, 0), (10, 20), (30, 5)]))),
-                RectRec { layer: 2, dt: 0, x: 5, y: 5, w: 4, h: 6,
-                          rep: Rep::Grid { na: 3, nb: 2, va: (10, 0), vb: (0, 12) } },
+                RectRec {
+                    layer: 2,
+                    dt: 0,
+                    x: 5,
+                    y: 5,
+                    w: 4,
+                    h: 6,
+                    rep: Rep::Grid {
+                        na: 3,
+                        nb: 2,
+                        va: (10, 0),
+                        vb: (0, 12),
+                    },
+                },
             ],
-            polys: vec![PolyRec { layer: 1, dt: 0, pts: vec![(1, 1), (9, 1), (9, 5), (1, 5)], rep: Rep::One },
-                        PolyRec { layer: 3, dt: 1, pts: vec![(0, 0), (4, 0), (4, 4)],
-                                  rep: Rep::Grid { na: 2, nb: 2, va: (20, 0), vb: (0, 20) } }],
-            paths: vec![PathRec { layer: 1, dt: 0, pts: vec![(0, 0), (50, 0), (50, 30)], hw: 3, es: 0, ee: 0,
-                                  rep: Rep::Pts(Arc::from([(0, 0), (0, 100)])) }],
+            polys: vec![
+                PolyRec {
+                    layer: 1,
+                    dt: 0,
+                    pts: vec![(1, 1), (9, 1), (9, 5), (1, 5)],
+                    rep: Rep::One,
+                },
+                PolyRec {
+                    layer: 3,
+                    dt: 1,
+                    pts: vec![(0, 0), (4, 0), (4, 4)],
+                    rep: Rep::Grid {
+                        na: 2,
+                        nb: 2,
+                        va: (20, 0),
+                        vb: (0, 20),
+                    },
+                },
+            ],
+            paths: vec![PathRec {
+                layer: 1,
+                dt: 0,
+                pts: vec![(0, 0), (50, 0), (50, 30)],
+                hw: 3,
+                es: 0,
+                ee: 0,
+                rep: Rep::Pts(Arc::from([(0, 0), (0, 100)])),
+            }],
             ..Cell::default()
         };
         let mid = Cell {
-            rects: vec![rect(Rep::Grid { na: 40, nb: 40, va: (8, 0), vb: (0, 8) })],
+            rects: vec![rect(Rep::Grid {
+                na: 40,
+                nb: 40,
+                va: (8, 0),
+                vb: (0, 8),
+            })],
             places: vec![
-                PlaceRec { cell: 0, x: 100, y: 200, rot: 1, flip: true,
-                           rep: Rep::Grid { na: 2, nb: 1, va: (40, 0), vb: (0, 0) } },
-                PlaceRec { cell: 0, x: -7, y: 3, rot: 3, flip: false,
-                           rep: Rep::Pts(Arc::from([(0, 0), (500, 0), (0, 500)])) },
+                PlaceRec {
+                    cell: 0,
+                    x: 100,
+                    y: 200,
+                    rot: 1,
+                    flip: true,
+                    rep: Rep::Grid {
+                        na: 2,
+                        nb: 1,
+                        va: (40, 0),
+                        vb: (0, 0),
+                    },
+                },
+                PlaceRec {
+                    cell: 0,
+                    x: -7,
+                    y: 3,
+                    rot: 3,
+                    flip: false,
+                    rep: Rep::Pts(Arc::from([(0, 0), (500, 0), (0, 500)])),
+                },
             ],
             ..Cell::default()
         };
         let top = Cell {
-            rects: vec![rect(Rep::One), RectRec { layer: 2, dt: 0, x: -3, y: -3, w: 6, h: 6, rep: Rep::One }],
+            rects: vec![
+                rect(Rep::One),
+                RectRec {
+                    layer: 2,
+                    dt: 0,
+                    x: -3,
+                    y: -3,
+                    w: 6,
+                    h: 6,
+                    rep: Rep::One,
+                },
+            ],
             places: vec![
-                PlaceRec { cell: 1, x: -10, y: 30, rot: 2, flip: true, rep: Rep::One },
-                PlaceRec { cell: 1, x: 1000, y: 0, rot: 0, flip: false,
-                           rep: Rep::Grid { na: 2, nb: 2, va: (2000, 0), vb: (0, 2000) } },
-                PlaceRec { cell: 0, x: 7, y: 7, rot: 1, flip: false, rep: Rep::One },
-                PlaceRec { cell: 1, x: 5, y: -5, rot: 3, flip: true, rep: Rep::One },
+                PlaceRec {
+                    cell: 1,
+                    x: -10,
+                    y: 30,
+                    rot: 2,
+                    flip: true,
+                    rep: Rep::One,
+                },
+                PlaceRec {
+                    cell: 1,
+                    x: 1000,
+                    y: 0,
+                    rot: 0,
+                    flip: false,
+                    rep: Rep::Grid {
+                        na: 2,
+                        nb: 2,
+                        va: (2000, 0),
+                        vb: (0, 2000),
+                    },
+                },
+                PlaceRec {
+                    cell: 0,
+                    x: 7,
+                    y: 7,
+                    rot: 1,
+                    flip: false,
+                    rep: Rep::One,
+                },
+                PlaceRec {
+                    cell: 1,
+                    x: 5,
+                    y: -5,
+                    rot: 3,
+                    flip: true,
+                    rep: Rep::One,
+                },
             ],
             ..Cell::default()
         };
@@ -1996,10 +2229,19 @@ mod tests {
             assert_eq!(ours.groups.len(), theirs.len());
             for (a, b) in ours.groups.iter().zip(&theirs) {
                 assert_eq!((a.key, a.members), (b.key, b.members));
-                assert_eq!(a.points, b.points, "group {:?} at {} per group", a.key, per_group);
+                assert_eq!(
+                    a.points, b.points,
+                    "group {:?} at {} per group",
+                    a.key, per_group
+                );
             }
             let ovm = ovm();
-            let mut legacy_built = Built { groups: std::mem::take(&mut theirs), directory: 0, peak_requests: 0, point_fallbacks: 0 };
+            let mut legacy_built = Built {
+                groups: std::mem::take(&mut theirs),
+                directory: 0,
+                peak_requests: 0,
+                point_fallbacks: 0,
+            };
             assert_eq!(encode(&mut ours, &ovm), encode(&mut legacy_built, &ovm));
             assert!(ours.directory >= 3 && ours.peak_requests > 0);
         }
@@ -2016,18 +2258,58 @@ mod tests {
         // base, a path whose outline's longest edge runs along its 50-long
         // spine, and a degenerate polygon that can only be a point
         let leaf = Cell {
-            rects: vec![RectRec { layer: 1, dt: 0, x: 0, y: 0, w: 2, h: 40, rep: Rep::One }],
+            rects: vec![RectRec {
+                layer: 1,
+                dt: 0,
+                x: 0,
+                y: 0,
+                w: 2,
+                h: 40,
+                rep: Rep::One,
+            }],
             polys: vec![
-                PolyRec { layer: 2, dt: 0, pts: vec![(0, 0), (30, 0), (30, 10), (0, 10)], rep: Rep::One },
-                PolyRec { layer: 4, dt: 0, pts: vec![(7, 7), (7, 7), (7, 7)], rep: Rep::One },
+                PolyRec {
+                    layer: 2,
+                    dt: 0,
+                    pts: vec![(0, 0), (30, 0), (30, 10), (0, 10)],
+                    rep: Rep::One,
+                },
+                PolyRec {
+                    layer: 4,
+                    dt: 0,
+                    pts: vec![(7, 7), (7, 7), (7, 7)],
+                    rep: Rep::One,
+                },
             ],
-            paths: vec![PathRec { layer: 3, dt: 0, pts: vec![(0, 0), (50, 0)], hw: 1, es: 0, ee: 0, rep: Rep::One }],
+            paths: vec![PathRec {
+                layer: 3,
+                dt: 0,
+                pts: vec![(0, 0), (50, 0)],
+                hw: 1,
+                es: 0,
+                ee: 0,
+                rep: Rep::One,
+            }],
             ..Cell::default()
         };
         let top = Cell {
             places: vec![
-                PlaceRec { cell: 0, x: 1000, y: 2000, rot: 1, flip: false, rep: Rep::One },
-                PlaceRec { cell: 0, x: -500, y: 300, rot: 0, flip: true, rep: Rep::One },
+                PlaceRec {
+                    cell: 0,
+                    x: 1000,
+                    y: 2000,
+                    rot: 1,
+                    flip: false,
+                    rep: Rep::One,
+                },
+                PlaceRec {
+                    cell: 0,
+                    x: -500,
+                    y: 300,
+                    rot: 0,
+                    flip: true,
+                    rep: Rep::One,
+                },
             ],
             ..Cell::default()
         };
@@ -2045,24 +2327,62 @@ mod tests {
         // the rect under flip (y -> -y) then translate, and under rot 90:
         // its long axis turns from vertical to horizontal
         let rects = shapes(1);
-        assert_eq!((rects[0].kind, rects[0].bbox()), (PRIM_RECT, BBox { x0: -500, y0: 260, x1: -498, y1: 300 }));
-        assert_eq!(rects[1].bbox(), BBox { x0: 960, y0: 2000, x1: 1000, y1: 2002 });
-        assert!(rects.iter().all(|p| p.gate_dim == 4 && p.x0 <= p.x1 && p.y0 <= p.y1));
+        assert_eq!(
+            (rects[0].kind, rects[0].bbox()),
+            (
+                PRIM_RECT,
+                BBox {
+                    x0: -500,
+                    y0: 260,
+                    x1: -498,
+                    y1: 300
+                }
+            )
+        );
+        assert_eq!(
+            rects[1].bbox(),
+            BBox {
+                x0: 960,
+                y0: 2000,
+                x1: 1000,
+                y1: 2002
+            }
+        );
+        assert!(rects
+            .iter()
+            .all(|p| p.gate_dim == 4 && p.x0 <= p.x1 && p.y0 <= p.y1));
         // the polygon's base edge, 30 long, marked partial; gate from its bbox
         let polys = shapes(2);
-        assert!(polys.iter().all(|p| p.kind == PRIM_SEGMENT && p.flags == PRIM_PARTIAL && p.gate_dim == 20));
+        assert!(polys
+            .iter()
+            .all(|p| p.kind == PRIM_SEGMENT && p.flags == PRIM_PARTIAL && p.gate_dim == 20));
         let len = |p: &Prim| (p.x1 - p.x0).abs().max((p.y1 - p.y0).abs());
         assert!(polys.iter().all(|p| len(p) == 30));
         // the path: an outline edge as long as the spine; gate = 2 * its width
         let paths = shapes(3);
-        assert!(paths.iter().all(|p| p.kind == PRIM_SEGMENT && len(p) == 50 && p.gate_dim == 4));
-        assert!(shapes(4).iter().all(|p| p.kind == PRIM_POINT && p.x0 == p.x1 && p.y0 == p.y1));
+        assert!(paths
+            .iter()
+            .all(|p| p.kind == PRIM_SEGMENT && len(p) == 50 && p.gate_dim == 4));
+        assert!(shapes(4)
+            .iter()
+            .all(|p| p.kind == PRIM_POINT && p.x0 == p.x1 && p.y0 == p.y1));
     }
 
     #[test]
     fn ovr2_files_round_trip_and_a_long_shape_is_found_by_its_extent() {
         let long = Cell {
-            rects: vec![RectRec { layer: 1, dt: 0, x: 0, y: 0, w: 100_000, h: 2, rep: Rep::One }, rect(Rep::One)],
+            rects: vec![
+                RectRec {
+                    layer: 1,
+                    dt: 0,
+                    x: 0,
+                    y: 0,
+                    w: 100_000,
+                    h: 2,
+                    rep: Rep::One,
+                },
+                rect(Rep::One),
+            ],
             ..Cell::default()
         };
         let source = doc(vec![long], 0);
@@ -2072,10 +2392,23 @@ mod tests {
         assert_eq!((v1.version(), file.version()), (1, 2));
         // a view far from the long rect's centre (50_000, 1) still meets its extent
         let mut req = request(1000, 0);
-        req.view = BBox { x0: 90_000, y0: -10, x1: 90_100, y1: 10 };
+        req.view = BBox {
+            x0: 90_000,
+            y0: -10,
+            x1: 90_100,
+            y1: 10,
+        };
         let (shapes, stats) = file.query_prims(&req);
         assert_eq!(shapes.len(), 1);
-        assert_eq!(shapes[0].1.bbox(), BBox { x0: 0, y0: 0, x1: 100_000, y1: 2 });
+        assert_eq!(
+            shapes[0].1.bbox(),
+            BBox {
+                x0: 0,
+                y0: 0,
+                x1: 100_000,
+                y1: 2
+            }
+        );
         assert_eq!(stats.points, 1);
         // the point file has nothing there, and each file answers only its own query
         assert!(v1.query(&req).0.is_empty());
@@ -2098,7 +2431,12 @@ mod tests {
     fn ovr2_thins_by_the_same_nested_ranks_as_the_points() {
         let source = doc(
             vec![Cell {
-                rects: vec![rect(Rep::Grid { na: 64, nb: 64, va: (10, 0), vb: (0, 10) })],
+                rects: vec![rect(Rep::Grid {
+                    na: 64,
+                    nb: 64,
+                    va: (10, 0),
+                    vb: (0, 10),
+                })],
                 ..Cell::default()
             }],
             0,
@@ -2108,7 +2446,12 @@ mod tests {
         for cut in [3i64, 6, 12] {
             let mut req = request(cut, 0);
             req.px_per_dbu = 0.75 / cut as f64;
-            let points: BTreeSet<_> = v1.query(&req).0.into_iter().map(|(_, b)| (b.x0, b.y0)).collect();
+            let points: BTreeSet<_> = v1
+                .query(&req)
+                .0
+                .into_iter()
+                .map(|(_, b)| (b.x0, b.y0))
+                .collect();
             let shapes: BTreeSet<_> = v2
                 .query_prims(&req)
                 .0

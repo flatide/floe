@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::io::Read;
 
 pub mod doc;
+pub mod header;
 pub mod write;
 
 #[derive(Debug)]
@@ -97,7 +98,7 @@ impl<'a> Cur<'a> {
         let mut shift = 0u32;
         loop {
             let b = self.byte()?;
-            if shift >= 63 && (b & 0x7f) > 1 {
+            if shift >= 64 || (shift == 63 && (b & 0x7f) > 1) {
                 return err(self.here(), "unsigned integer overflow");
             }
             v |= ((b & 0x7f) as u64) << shift;

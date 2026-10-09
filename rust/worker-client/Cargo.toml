@@ -1,0 +1,18 @@
+[package]
+name = "floe-worker-client"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Bounded Rust client for the floe-renderd process protocol"
+
+[dependencies]
+crc32fast = "1"
+libc = "0.2"
+
+[dev-dependencies]
+floe-render-core = { path = "../render-core" }
+flate2 = "1"
+
+[[test]]
+name = "lifecycle"
+harness = false

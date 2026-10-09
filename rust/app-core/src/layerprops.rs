@@ -1,0 +1,392 @@
+//! Calibre's six-column layer properties, independent of UI/filesystem I/O.
+//! Preserve unknown tokens for round trips; interpreting them is a separate
+//! operation. Limits reject the whole document, never a silently cut prefix.
+use crate::{styles, Error, ErrorKind, Result};
+use floe_worker_client::{Fill, Style};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+use std::fmt::Write;
+
+pub const MAX_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_ROWS: usize = 65536;
+const MAX_FIELD: usize = 4096;
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Row {
+    pub layer: (u32, u32),
+    pub color: String,
+    pub fill: String,
+    pub name: String,
+    pub visibility: String,
+    pub width: String,
+}
+impl Row {
+    pub fn visible(&self) -> Option<bool> {
+        match self.visibility.as_str() {
+            "0" => Some(false),
+            "1" => Some(true),
+            _ => None,
+        }
+    }
+    /// GUI semantics: valid integers <=1 clear a width override, invalid
+    /// tokens leave it alone. The native raster supports widths 1..8 only.
+    pub fn line_width(&self) -> Option<u8> {
+        let digits = self.width.strip_prefix(['+', '-']).unwrap_or(&self.width);
+        if digits.is_empty() || !digits.bytes().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        let n = digits.bytes().fold(0u8, |n, c| (n * 10 + c - b'0').min(8));
+        Some(if self.width.starts_with('-') {
+            1
+        } else {
+            n.max(1)
+        })
+    }
+    pub fn from_style(style: &Style, name: &str, visible: bool) -> Result<Self> {
+        if style.color[3] != 255 || !(1..=8).contains(&style.width) {
+            return Err(Error::input("invalid layer property style"));
+        }
+        if name.len() > MAX_FIELD
+            || name
+                .chars()
+                .any(|c| c.is_control() || (c.is_whitespace() && c != ' '))
+        {
+            return Err(Error::input(
+                "layerprops name is too long or contains unsupported whitespace/control characters",
+            ));
+        }
+        let fill = match &style.fill {
+            Fill::Solid => "solid".into(),
+            Fill::Clear => "clear".into(),
+            Fill::Speckle => "speckle".into(),
+            Fill::Pattern(_) => styles::pattern_name(&style.fill)
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::Unsupported,
+                        "custom bitmap has no Calibre layerprops name; refusing a lossy export",
+                    )
+                })?
+                .into(),
+        };
+        Ok(Self {
+            layer: style.layer,
+            color: styles::color_name(style.color),
+            fill,
+            name: name.into(),
+            visibility: if visible { "1" } else { "0" }.into(),
+            width: style.width.to_string(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Document {
+    pub rows: Vec<Row>,
+    /// Blank/comment lines do not count. Unknown color/fill/flags remain rows.
+    pub malformed: usize,
+}
+/// Lossless floe settings; absence of an assignment means inheritance.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Settings {
+    pub format: String,
+    pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_slots: Option<Vec<FillSlot>>,
+    pub groups: Vec<LayerGroup>,
+    pub rows: Vec<Setting>,
+}
+pub type LayerGroup = ((u32, u32), Vec<(u32, u32)>);
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Setting {
+    pub pair: (u32, u32),
+    pub color: String,
+    #[serde(deserialize_with = "required_optional")]
+    pub fill: Option<Bitmap>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_slot: Option<String>,
+    #[serde(deserialize_with = "required_optional")]
+    pub width: Option<u8>,
+    pub visible: bool,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FillSlot {
+    pub name: String,
+    pub rows: [u16; 16],
+}
+fn required_optional<'de, D, T>(d: D) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(d)
+}
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Bitmap {
+    Solid,
+    Clear,
+    Speckle,
+    Pattern { rows: [u16; 16] },
+}
+impl From<&Fill> for Bitmap {
+    fn from(fill: &Fill) -> Self {
+        match fill {
+            Fill::Solid => Self::Solid,
+            Fill::Clear => Self::Clear,
+            Fill::Speckle => Self::Speckle,
+            Fill::Pattern(rows) => Self::Pattern { rows: *rows },
+        }
+    }
+}
+impl From<&Bitmap> for Fill {
+    fn from(fill: &Bitmap) -> Self {
+        match fill {
+            Bitmap::Solid => Self::Solid,
+            Bitmap::Clear => Self::Clear,
+            Bitmap::Speckle => Self::Speckle,
+            Bitmap::Pattern { rows } => Self::Pattern(*rows),
+        }
+    }
+}
+pub fn parse_settings(text: &str) -> Result<Settings> {
+    if text.len() > MAX_BYTES {
+        return Err(Error::input("settings exceeds 4 MiB"));
+    }
+    let settings: Settings =
+        serde_json::from_str(text).map_err(|_| Error::input("invalid floe layer settings"))?;
+    settings.validate()?;
+    Ok(settings)
+}
+impl Settings {
+    pub fn validate(&self) -> Result<()> {
+        if self.format != "floe.layers"
+            || !matches!(self.version, 1 | 2)
+            || self.rows.len() > MAX_ROWS
+            || self.groups.len() > MAX_ROWS
+            || self
+                .groups
+                .iter()
+                .try_fold(0usize, |n, (_, g)| n.checked_add(g.len()))
+                .is_none_or(|n| n > MAX_ROWS)
+            || self.rows.iter().any(|r| {
+                r.color.len() > 64
+                    || styles::color(&r.color).is_none()
+                    || r.width.is_some_and(|w| !(1..=8).contains(&w))
+            })
+        {
+            return Err(Error::input("invalid floe layer settings"));
+        }
+        if self.version == 1 {
+            if self.fill_slots.is_some() || self.rows.iter().any(|r| r.fill_slot.is_some()) {
+                return Err(Error::input("version 1 cannot contain fill slots"));
+            }
+        } else {
+            let slots = self
+                .fill_slots
+                .as_ref()
+                .ok_or_else(|| Error::input("version 2 requires the complete fill slot table"))?;
+            let defaults = styles::presets::bundled()?;
+            let mut names = BTreeSet::new();
+            if slots.len() != defaults.fills.len() {
+                return Err(Error::input("incomplete fill slot table"));
+            }
+            for slot in slots {
+                let name = styles::pattern_slot(&slot.name)
+                    .filter(|n| *n == slot.name)
+                    .ok_or_else(|| Error::input("invalid fill slot name"))?;
+                if !names.insert(name)
+                    || (matches!(name, "solid" | "clear")
+                        && styles::pattern(name) != Some(Fill::Pattern(slot.rows)))
+                {
+                    return Err(Error::input("duplicate or changed fixed fill slot"));
+                }
+            }
+            if self.rows.iter().any(|r| {
+                r.fill_slot
+                    .as_ref()
+                    .is_some_and(|name| r.fill.is_some() || !names.contains(name.as_str()))
+            }) {
+                return Err(Error::input("invalid or conflicting fill slot assignment"));
+            }
+        }
+        Ok(())
+    }
+    pub fn text(&self) -> Result<String> {
+        self.validate()?;
+        struct Bounded(Vec<u8>);
+        impl std::io::Write for Bounded {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                if data.len() > MAX_BYTES - self.0.len() {
+                    return Err(std::io::Error::other("settings exceeds 4 MiB"));
+                }
+                self.0.extend_from_slice(data);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut out = Bounded(Vec::new());
+        serde_json::to_writer(&mut out, self)
+            .map_err(|_| Error::input("settings exceeds 4 MiB"))?;
+        String::from_utf8(out.0).map_err(|_| Error::input("invalid settings encoding"))
+    }
+}
+pub fn parse(text: &str) -> Result<Document> {
+    if text.len() > MAX_BYTES {
+        return Err(Error::input("layerprops exceeds 4 MiB"));
+    }
+    let mut out = Document {
+        rows: Vec::new(),
+        malformed: 0,
+    };
+    for line in text.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // Extra columns and extra dot components have always been ignored by
+        // floe.fillpat. Do not collect unbounded token vectors for one line.
+        let p: Vec<_> = line.split_whitespace().take(6).collect();
+        let key = p.first().and_then(|s| {
+            let mut ld = s.split('.');
+            Some((
+                ld.next()?.parse::<u32>().ok()?,
+                ld.next().unwrap_or("0").parse::<u32>().ok()?,
+            ))
+        });
+        let Some(key) = key.filter(|_| p.len() >= 3) else {
+            out.malformed += 1;
+            continue;
+        };
+        if p.iter()
+            .any(|v| v.len() > MAX_FIELD || v.chars().any(char::is_control))
+        {
+            return Err(Error::input(
+                "layerprops field exceeds 4096 bytes or contains a control character",
+            ));
+        }
+        if out.rows.len() == MAX_ROWS {
+            return Err(Error::input("layerprops exceeds 65536 rows"));
+        }
+        out.rows.push(Row {
+            layer: key,
+            color: p[1].into(),
+            fill: p[2].into(),
+            name: p.get(3).unwrap_or(&"").to_string(),
+            visibility: p.get(4).unwrap_or(&"1").to_string(),
+            width: p.get(5).unwrap_or(&"1").to_string(),
+        });
+    }
+    Ok(out)
+}
+
+pub fn format(rows: &[Row]) -> Result<String> {
+    if rows.len() > MAX_ROWS {
+        return Err(Error::input("layerprops exceeds 65536 rows"));
+    }
+    let mut out = String::from("# Generated by floe.\n");
+    for row in rows {
+        for token in [&row.color, &row.fill, &row.visibility, &row.width] {
+            if token.is_empty()
+                || token.len() > MAX_FIELD
+                || token.chars().any(|c| c.is_whitespace() || c.is_control())
+            {
+                return Err(Error::input("invalid layerprops output token"));
+            }
+        }
+        if row.name.len() > MAX_FIELD
+            || row
+                .name
+                .chars()
+                .any(|c| c.is_control() || (c.is_whitespace() && c != ' '))
+        {
+            return Err(Error::input(
+                "layerprops name is too long or contains unsupported whitespace/control characters",
+            ));
+        }
+        let (l, d) = row.layer;
+        let pair = if d == 0 {
+            l.to_string()
+        } else {
+            format!("{l}.{d}")
+        };
+        let name = if row.name.is_empty() {
+            format!("{l}_{d}")
+        } else {
+            row.name.replace(' ', "_")
+        };
+        writeln!(
+            out,
+            "{pair} {} {} {name} {} {}",
+            row.color, row.fill, row.visibility, row.width
+        )
+        .unwrap();
+        if out.len() > MAX_BYTES {
+            return Err(Error::input("layerprops exceeds 4 MiB"));
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn six_columns_defaults_duplicates_and_unknown_tokens_are_preserved() {
+        let doc = parse("# comment\n\ninvalid\n7.20 RED solid MASK 0 3 ignored\n7.20 ? custom\n+8.0.tail blue speckle 한글 maybe bad\n-1 red solid\n4294967296 blue clear\n").unwrap();
+        assert_eq!(doc.rows.len(), 3);
+        assert_eq!(doc.malformed, 3);
+        assert_eq!(doc.rows[0].visible(), Some(false));
+        assert_eq!(doc.rows[0].line_width(), Some(3));
+        assert_eq!(doc.rows[1].name, "");
+        assert_eq!(doc.rows[1].visible(), Some(true));
+        assert_eq!(doc.rows[1].line_width(), Some(1));
+        assert_eq!(doc.rows[2].layer, (8, 0));
+        assert_eq!(doc.rows[2].visible(), None);
+        assert_eq!(doc.rows[2].line_width(), None);
+        assert_eq!(format(&doc.rows).unwrap(), "# Generated by floe.\n7.20 RED solid MASK 0 3\n7.20 ? custom 7_20 1 1\n8 blue speckle 한글 maybe bad\n");
+    }
+    #[test]
+    fn fields_and_entire_documents_are_bounded_without_prefix_success() {
+        assert!(parse(&" ".repeat(MAX_BYTES + 1)).is_err());
+        assert!(parse(&"1 r s\n".repeat(MAX_ROWS + 1)).is_err());
+        assert!(parse(&format!("1 {} s", "x".repeat(MAX_FIELD + 1))).is_err());
+        assert!(parse("1 red so\0lid").is_err());
+        let mut row = parse("1 red solid").unwrap().rows.remove(0);
+        row.color = "red\n2".into();
+        assert!(format(&[row.clone()]).is_err());
+        row.color = "red".into();
+        row.name = "name\n2".into();
+        assert!(format(&[row.clone()]).is_err());
+        row.name = "metal one".into();
+        assert!(format(&[row]).unwrap().contains("metal_one"));
+    }
+    #[test]
+    fn named_styles_are_exact_and_unknown_bitmaps_do_not_disappear() {
+        let mut style = Style {
+            layer: (7, 0),
+            color: [255, 255, 0, 255],
+            fill: Fill::Solid,
+            width: 8,
+        };
+        let row = Row::from_style(&style, "", false).unwrap();
+        assert_eq!(row.color, "yellow");
+        assert_eq!(row.fill, "solid");
+        assert_eq!(row.visible(), Some(false));
+        for name in ["clear", "solid", "speckle", "carpet_1", "diagonal_1"] {
+            style.fill = styles::pattern(name).unwrap();
+            assert_eq!(Row::from_style(&style, "", true).unwrap().fill, name);
+        }
+        style.fill = Fill::Pattern([0x1234; 16]);
+        assert_eq!(
+            Row::from_style(&style, "", true).unwrap_err().kind,
+            ErrorKind::Unsupported
+        );
+        style.fill = Fill::Solid;
+        style.color[3] = 1;
+        assert!(Row::from_style(&style, "", true).is_err());
+    }
+}

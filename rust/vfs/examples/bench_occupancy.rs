@@ -12,31 +12,72 @@ fn main() {
         "dense" => (1, 8192, 8192),
         _ => panic!("expected mixed or dense"),
     };
-    let mut leaf = Cell { name: "LEAF".into(), ..Cell::default() };
+    let mut leaf = Cell {
+        name: "LEAF".into(),
+        ..Cell::default()
+    };
     for k in 0..shapes {
         for layer in 1..=layers {
             leaf.rects.push(RectRec {
-                layer, dt: 0, x: (k % 64) * 10, y: (k / 64) * 10,
-                w: 1, h: 200, rep: Rep::One,
+                layer,
+                dt: 0,
+                x: (k % 64) * 10,
+                y: (k / 64) * 10,
+                w: 1,
+                h: 200,
+                rep: Rep::One,
             });
         }
     }
-    let mut top = Cell { name: "TOP".into(), ..Cell::default() };
+    let mut top = Cell {
+        name: "TOP".into(),
+        ..Cell::default()
+    };
     top.places.push(PlaceRec {
-        cell: 1, x: 0, y: 0, rot: 0, flip: false,
-        rep: Rep::Grid { na: members, nb: 1, va: (1, 0), vb: (0, 0) },
+        cell: 1,
+        x: 0,
+        y: 0,
+        rot: 0,
+        flip: false,
+        rep: Rep::Grid {
+            na: members,
+            nb: 1,
+            va: (1, 0),
+            vb: (0, 0),
+        },
     });
     let doc = Doc {
-        unit: 1000.0, cells: vec![top, leaf], top: 0,
-        layer_order: (1..=layers).map(|l| (l, 0)).collect(), norm_s: 0.0,
-        layer_names: Default::default(), layer_aliases: Default::default(),
+        unit: 1000.0,
+        cells: vec![top, leaf],
+        top: 0,
+        layer_order: (1..=layers).map(|l| (l, 0)).collect(),
+        norm_s: 0.0,
+        layer_names: Default::default(),
+        layer_aliases: Default::default(),
     };
     let start = std::time::Instant::now();
-    let occ = build(&doc, 0, 0, &Opts { jobs, base_um: 4.0, ..Opts::default() }).unwrap();
+    let occ = build(
+        &doc,
+        0,
+        0,
+        &Opts {
+            jobs,
+            base_um: 4.0,
+            ..Opts::default()
+        },
+    )
+    .unwrap();
     assert!(occ.layers.iter().all(|l| l.status == STATUS_OK));
-    println!("case={case} jobs={jobs} seconds={:.6} work={} cells={}",
-        start.elapsed().as_secs_f64(), occ.layers.iter().map(|l| l.work).sum::<u64>(),
-        occ.layers.iter().flat_map(|l| &l.planes).map(|p| p.levels[0].count()).sum::<u64>());
+    println!(
+        "case={case} jobs={jobs} seconds={:.6} work={} cells={}",
+        start.elapsed().as_secs_f64(),
+        occ.layers.iter().map(|l| l.work).sum::<u64>(),
+        occ.layers
+            .iter()
+            .flat_map(|l| &l.planes)
+            .map(|p| p.levels[0].count())
+            .sum::<u64>()
+    );
     if let Some(path) = args.get(3) {
         std::fs::write(path, write_ovo(&occ)).unwrap();
     }
