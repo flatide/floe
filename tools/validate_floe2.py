@@ -151,6 +151,82 @@ def validate_runtime(base, fixture):
               "floe2 benchmark report exposed design identity")
 
 
+def validate_rust_cli(base, fixture):
+    """The Rust command line `floe2` (rust/floe2 + the shared floe-app-cli,
+    docs/SHARED_APP_LAYER.ko.md; 2026-10-09 P1a): its version is the app's,
+    index/info/probe/render/clip run with no Python at all (a `python`/
+    `python3` first on PATH that records any call stays unused), and `view`
+    hands its arguments to the GTK viewer's Python entry."""
+    binary = ROOT / "rust" / "target" / "release" / "floe2"
+    indexer = ROOT / "rust" / "target" / "release" / "floe-index"
+    renderer = ROOT / "rust" / "target" / "release" / "floe-renderd"
+    check(binary.is_file(), "release floe2 is not built")
+    package_version = run(
+        base, "-c", "import floe; print(floe.__version__)").stdout.strip()
+
+    def rust(env, *args, ok=True, timeout=90):
+        result = subprocess.run([str(binary), *map(str, args)], cwd=ROOT,
+                                env=env, capture_output=True, text=True,
+                                timeout=timeout)
+        if ok and result.returncode:
+            raise AssertionError("floe2 %r failed (%d)\n%s\n%s" % (
+                args, result.returncode, result.stdout, result.stderr))
+        return result
+
+    with tempfile.TemporaryDirectory(prefix="floe2-rust-cli-") as td:
+        work = Path(td)
+        trap = work / "no-python"
+        trap.mkdir()
+        called = work / "python-called"
+        for name in ("python", "python3"):
+            script = trap / name
+            script.write_text("#!/bin/sh\necho \"$@\" >> %s\nexit 99\n" % called)
+            script.chmod(0o755)
+        env = {"PATH": "%s:/usr/bin:/bin" % trap, "HOME": base.get("HOME", td),
+               "FLOE_INDEX_BIN": str(indexer), "FLOE_RENDERD_BIN": str(renderer),
+               "FLOE_GTK_PYTHON": str(trap / "python3")}
+        version = rust(env, "--version").stdout
+        check(version.startswith("floe2 %s " % package_version),
+              "floe2 --version is not the app version: %s" % version)
+        check("floe-renderd" in version and "viewer gtk" in version,
+              "floe2 --version omitted its native identity: %s" % version)
+        source = work / "rust cli 설계.oas"
+        shutil.copy2(fixture, source)
+        indexed = rust(env, "index", source, "--jobs", "2")
+        check(Path(vfs_cache_dir(source), "design.ovm").is_file(),
+              "floe2 index wrote no cache")
+        info = rust(env, "info", source)
+        check("top cell" in info.stdout and "stored shapes" in info.stdout,
+              "floe2 info lost the cache table")
+        probe = rust(env, "probe", source)
+        check("OK" in probe.stdout + probe.stderr, "floe2 probe did not settle")
+        png = work / "rust cli.png"
+        rust(env, "render", source, "--px", "257", "--out", png)
+        check(png.read_bytes().startswith(b"\x89PNG\r\n\x1a\n"),
+              "floe2 render did not publish a PNG")
+        meta = json.loads(Path(vfs_cache_dir(source), "meta.json").read_text())
+        dbu = float(meta["dbu"])
+        x0, y0, x1, y1 = (float(v) * dbu for v in meta["bbox"])
+        clipped = work / "rust clip.oas"
+        rust(env, "clip", source, "--bbox=%r,%r,%r,%r" % (
+            x0, y0, (x0 + x1) / 2, (y0 + y1) / 2), "--out", clipped)
+        check(clipped.is_file() and clipped.stat().st_size > 0,
+              "floe2 clip wrote nothing")
+        check(not called.exists(),
+              "floe2 ran Python for a non-UI command: %s" % (
+                  called.read_text() if called.exists() else ""))
+        unknown = rust(env, "frobnicate", ok=False)
+        check(unknown.returncode == 99 and called.exists(),
+              "floe2 did not hand an unknown word to the GTK viewer as a source")
+        called.unlink()
+        # view: the GTK entry with the real interpreter takes the arguments
+        view_env = dict(env, FLOE_GTK_PYTHON=sys.executable,
+                        PATH=os.environ.get("PATH", "/usr/bin:/bin"))
+        view = rust(view_env, "view", "--help")
+        check("usage: floe2 view" in view.stdout,
+              "floe2 view did not reach the GTK viewer's entry: %s" % view.stdout[:200])
+
+
 def main(fixture=None):
     base = os.environ.copy()
     base.pop("FLOE_PRODUCT", None)
@@ -337,6 +413,7 @@ print(json.dumps([_renderer_backend(), instance.APP,
 
     if fixture is not None:
         validate_runtime(base, Path(fixture).resolve())
+        validate_rust_cli(base, Path(fixture).resolve())
     print("FLOE2 PRODUCT VALIDATION: ALL OK")
 
 

@@ -1,0 +1,14 @@
+[package]
+name = "floe-app-cli"
+version = "0.1.0"
+rust-version = "1.89"
+edition.workspace = true
+license.workspace = true
+description = "The application CLI shared by floe2 (beside its GTK viewer) and floe2-web"
+
+[dependencies]
+serde_json = "=1.0.151"
+floe-app-core = { path = "../app-core" }
+floe-worker-client = { path = "../worker-client" }
+floe-notices = { path = "../notices" }
+signal-hook = { version = "=0.4.4", default-features = false }

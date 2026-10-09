@@ -113,7 +113,10 @@ impl Layout {
         if !fs::symlink_metadata(&directory).is_ok_and(|m| m.is_dir()) {
             return Err(Error::new(
                 ErrorKind::Cache,
-                "no real VFS cache directory; run floe2-web index SOURCE first",
+                format!(
+                    "no real VFS cache directory; run {} index SOURCE first",
+                    crate::program()
+                ),
             ));
         }
         let f = regular_file(&directory.join("meta.json"))?;

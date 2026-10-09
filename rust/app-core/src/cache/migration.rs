@@ -77,14 +77,16 @@ pub(crate) fn rename_legacy(
     };
     let _ = writeln!(
         std::io::stderr(),
-        "[floe2-web] renamed legacy cache: {} -> {}",
+        "[{}] renamed legacy cache: {} -> {}",
+        crate::program(),
         old.display(),
         new.display()
     );
     if !result.directory_synced {
         let _ = writeln!(
             std::io::stderr(),
-            "[floe2-web] cache renamed, but directory sync failed"
+            "[{}] cache renamed, but directory sync failed",
+            crate::program()
         );
     }
     Ok(result)

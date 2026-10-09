@@ -132,7 +132,10 @@ gates_for() {
         rust/worker-client/*)
             echo "unit worker_client" ;;
         rust/app-core/*|rust/notices/*)
-            echo "unit cell_index" ;;
+            echo "unit cell_index floe2" ;;
+        rust/app-cli/*|rust/floe2/*|floe/gtkview.py)
+            # the Rust command line floe2 (P1, docs/SHARED_APP_LAYER.ko.md)
+            echo "unit floe2" ;;
         rust/render-core/*|rust/renderd/*|rust/render-cli/*|floe/rust_render.py)
             echo "$RENDER_GATES" ;;
         rust/dbg/*)

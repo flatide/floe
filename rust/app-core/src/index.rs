@@ -745,7 +745,7 @@ impl IndexJob {
             if let Err(e) = self.discard_occupancy_tmp() {
                 // A cleanup problem must not replace the native failure or
                 // cancellation status. Keep the path for explicit recovery.
-                eprintln!("[floe2-web] cannot clean summary temp: {e}");
+                eprintln!("[{}] cannot clean summary temp: {e}", crate::program());
             }
         }
         self.lease.clear();
@@ -760,7 +760,8 @@ impl IndexJob {
             }
             match fs::remove_file(self.directory.join(name)) {
                 Ok(()) => eprintln!(
-                    "[floe2-web] discarded {}",
+                    "[{}] discarded {}",
+                    crate::program(),
                     self.directory.join(name).display()
                 ),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),

@@ -13,6 +13,8 @@ members = [
     "worker-client",
     "app-core",
     "notices",
+    "app-cli",
+    "floe2",
 ]
 
 [workspace.package]

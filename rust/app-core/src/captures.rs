@@ -298,7 +298,8 @@ pub fn run(
                 (started.elapsed().as_secs_f64() * 1000.).round_ties_even() as u64
             );
             log(&format!(
-                "[floe2-web] rendered {} ({}x{}, {} ms{})",
+                "[{}] rendered {} ({}x{}, {} ms{})",
+                crate::program(),
                 plan.display.display(),
                 row["pixel"][0],
                 row["pixel"][1],
@@ -307,7 +308,8 @@ pub fn run(
             ));
             if deferred != 0 {
                 log(&format!(
-                    "[floe2-web] WARNING: {} has {deferred} over-budget page(s)",
+                    "[{}] WARNING: {} has {deferred} over-budget page(s)",
+                    crate::program(),
                     plan.display.display()
                 ));
             }
@@ -337,7 +339,8 @@ pub fn run(
     let off: Vec<_> = off.into_iter().map(|(_, r)| r).collect();
     if !off.is_empty() {
         log(&format!(
-            "[floe2-web] note: {} placement(s) the load skips are in chips no shot had on",
+            "[{}] note: {} placement(s) the load skips are in chips no shot had on",
+            crate::program(),
             off.len()
         ));
     }
@@ -363,13 +366,14 @@ pub fn run(
         })();
         result.map_err(|e| Error::new(e.kind, format!("PNG was saved; report failed: {e}")))?;
         log(&format!(
-            "[floe2-web] report {} ({} shot(s))",
+            "[{}] report {} ({} shot(s))",
+            crate::program(),
             path.display(),
             shots.len()
         ));
     }
     if !complete {
-        log(&format!("[floe2-web] rendered INCOMPLETE: {} skipped placement(s), see per-shot over-budget counts [exit 3]",lacking.len()));
+        log(&format!("[{}] rendered INCOMPLETE: {} skipped placement(s), see per-shot over-budget counts [exit 3]", crate::program(),lacking.len()));
     }
     Ok(complete)
 }

@@ -159,7 +159,7 @@ impl Build {
                         s.snapshot.phase = Phase::Succeeded;
                     }
                     Err(e) => {
-                        eprintln!("[floe2-web] DRC build: {e}");
+                        eprintln!("[{}] DRC build: {e}", crate::program());
                         s.snapshot.failure = Some(e.kind);
                         s.snapshot.phase = if e.kind == ErrorKind::Cancelled {
                             Phase::Cancelled
@@ -484,7 +484,8 @@ impl Drop for Staging<'_> {
         if let Err(e) = self.cleanup() {
             self.state.lock().unwrap().snapshot.cleanup_warning = true;
             eprintln!(
-                "[floe2-web] retained DRC staging {}: {e}",
+                "[{}] retained DRC staging {}: {e}",
+                crate::program(),
                 self.path.display()
             );
         }

@@ -64,7 +64,7 @@ impl Discovery {
             candidates.extend(std::env::split_paths(path).map(|p| p.join(name)));
         }
         let p = candidates.into_iter().find(|p| executable(p)).ok_or_else(|| Error::input(
-            format!("{name} not found; set {variable}, build the release binary, or install it beside floe2-web/on PATH")
+            format!("{name} not found; set {variable}, build the release binary, or install it beside {}/on PATH", crate::program())
         ))?;
         Ok(fs::canonicalize(p)?)
     }

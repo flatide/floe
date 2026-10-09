@@ -33,6 +33,21 @@ pub mod styles;
 pub mod svrf;
 pub mod view;
 
+static PROGRAM: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
+/// Name the messages give the running program: `floe2-web` (the web
+/// application, the default) or `floe2` (feature/jobdeck's CLI beside its GTK
+/// viewer, docs/SHARED_APP_LAYER.ko.md). Set once, at start; later calls keep
+/// the first name.
+pub fn set_program(name: &'static str) {
+    let _ = PROGRAM.set(name);
+}
+
+/// The running program's name (`set_program`; `floe2-web` until set).
+pub fn program() -> &'static str {
+    PROGRAM.get().copied().unwrap_or("floe2-web")
+}
+
 /// Legacy `%g` diagnostics (six significant digits), not coordinate wire
 /// serialization. Scientific rounding decides the fixed/scientific switch.
 pub fn format_general(value: f64) -> String {
