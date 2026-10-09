@@ -10200,9 +10200,8 @@ class Viewer:
         if not path:
             return
         try:
-            with open(path) as fh:
-                rows = fillpat.parse_layerprops(fh.read())
-        except OSError as e:
+            rows = gtkservice.layerprops_read(path)
+        except (OSError, gtkservice.ServiceError) as e:
             self._set_live_status(
                 "layer properties load failed: %s" % e)
             return
@@ -10258,12 +10257,10 @@ class Viewer:
         if not path:
             return
         try:
-            with open(path, "w") as fh:
-                fh.write(
-                    fillpat.format_layerprops(self._props_rows()))
+            gtkservice.layerprops_save(path, self._props_rows())
             self._set_live_status(
                 "layer properties saved: %s" % path)
-        except OSError as e:
+        except (OSError, gtkservice.ServiceError) as e:
             self._set_live_status(
                 "layer properties save failed: %s" % e)
 
@@ -10273,12 +10270,12 @@ class Viewer:
         anyone opening the design with no personal palette adopts
         it - and it seeds their personal cache on first open."""
         try:
-            path = cache_mod.save_shared_props(
+            path = gtkservice.layerprops_publish(
                 getattr(self.cache, "props_src", self.cache.src),
-                fillpat.format_layerprops(self._props_rows()))
+                self._props_rows())
             self._set_live_status(
                 "design default layerprops saved: %s" % path)
-        except OSError as e:
+        except (OSError, gtkservice.ServiceError) as e:
             self._set_live_status(
                 "default layerprops save failed: %s" % e)
 

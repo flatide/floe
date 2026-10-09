@@ -234,6 +234,38 @@ class ServiceCache:
         return self.load()
 
 
+# ---- layer properties (P2c) ----------------------------------------------
+
+def _prop_rows(rows):
+    return [{"layer": [int(k[0]), int(k[1])], "color": str(color),
+             "fill": str(fill), "name": str(name or ""),
+             "visibility": str(f1), "width": str(f2)}
+            for k, color, fill, name, f1, f2 in rows]
+
+
+def layerprops_read(path):
+    """A layerprops file's rows: ((layer, datatype), color, fill, name,
+    visibility, width) - floe.fillpat.parse_layerprops' shape."""
+    return [((int(p["layer"][0]), int(p["layer"][1])), p["color"], p["fill"],
+             p["name"], p["visibility"], p["width"])
+            for p in service().request("layerprops_read",
+                                       path=os.path.abspath(path))]
+
+
+def layerprops_save(path, rows):
+    """Write `rows` as a layerprops file at `path`."""
+    service().request("layerprops_save", path=os.path.abspath(path),
+                      rows=_prop_rows(rows))
+
+
+def layerprops_publish(props_src, rows):
+    """Publish `rows` as the design default `<props_src>.layerprops`; its
+    path."""
+    return service().request("layerprops_publish",
+                             props_src=os.path.abspath(props_src),
+                             rows=_prop_rows(rows))
+
+
 # ---- DRC review (P2b: app-core drc::desktop) ----------------------------
 
 STATUS_NONE = 0

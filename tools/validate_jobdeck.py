@@ -1665,6 +1665,37 @@ class GtkServiceTests(unittest.TestCase):
         self.assertEqual(self.svc.request("ready", source=str(src))["current"],
                          False)
 
+    def test_layer_properties_read_write_and_publish_as_python_did(self):
+        """P2c: a layerprops file read, saved and published by the
+        service is floe.fillpat's parse / format and floe.cache's
+        save_shared_props, byte for byte."""
+        from floe import fillpat
+        from floe.cache import save_shared_props
+        from floe import gtkservice
+        old = gtkservice._SERVICE
+        gtkservice._SERVICE = self.svc
+        self.addCleanup(setattr, gtkservice, "_SERVICE", old)
+        work = Path(tempfile.mkdtemp(prefix="gtksvc", dir=TMP))
+        text = ("# a comment\n\n2 red dots M1 1 3\n7.20 #00ff00 solid "
+                "M2_wide 0 1\n7.20.9 blue clear X 1 2 extra cols\n"
+                "8 yellow\nbad red solid\n9 orange stripes\n"
+                "  10.1   white   hatch   with_spaces   1   1  \n")
+        (work / "a.layerprops").write_text(text)
+        rows = gtkservice.layerprops_read(work / "a.layerprops")
+        self.assertEqual(rows, fillpat.parse_layerprops(text))
+        rows += [((3, 0), "#123456", "speckle", "", "1", "1"),
+                 ((4, 2), "red", "solid", "two words", "0", "2")]
+        gtkservice.layerprops_save(work / "b.layerprops", rows)
+        self.assertEqual((work / "b.layerprops").read_text(),
+                         fillpat.format_layerprops(rows))
+        src = work / "chip.oas"
+        src.write_bytes(b"")
+        path = gtkservice.layerprops_publish(src, rows)
+        self.assertEqual(path, str(src) + ".layerprops")
+        published = Path(path).read_text()
+        save_shared_props(str(src), fillpat.format_layerprops(rows))
+        self.assertEqual(published, Path(path).read_text())
+
     def test_the_viewer_opens_through_the_service(self):
         from floe import gui
         from floe.gtkservice import ServiceCache

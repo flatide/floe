@@ -214,6 +214,49 @@ pub fn props_rows(props_source: &Path) -> Result<Vec<layerprops::Row>> {
     Ok(Vec::new())
 }
 
+/// A layerprops file's rows (Layer > load properties): the viewer applies
+/// the colours, fills, widths and visibility it names.
+pub fn read_props(path: &Path) -> Result<Vec<layerprops::Row>> {
+    let f = catalog::regular_file(path)?;
+    let mut text = String::new();
+    f.take(4 * 1024 * 1024 + 1).read_to_string(&mut text)?;
+    if text.len() > 4 * 1024 * 1024 {
+        return Err(Error::input("layerprops exceeds 4 MiB"));
+    }
+    Ok(layerprops::parse(&text)?.rows)
+}
+
+/// Write `rows` as a Calibre layerprops file at `path` (through a temporary
+/// name in its folder and a rename).
+pub fn write_props(path: &Path, rows: &[layerprops::Row]) -> Result<()> {
+    let text = layerprops::format(rows)?;
+    let folder = match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    };
+    let name = path
+        .file_name()
+        .ok_or_else(|| Error::input("layerprops path names no file"))?
+        .to_string_lossy();
+    let tmp = folder.join(format!(".{name}.tmp-{}", std::process::id()));
+    let result = std::fs::write(&tmp, text.as_bytes()).and_then(|_| std::fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    Ok(result?)
+}
+
+/// Publish `rows` as the design default next to the source the layer
+/// properties are keyed by (`<props>.layerprops`, floe/cache.py
+/// save_shared_props): anyone opening the design adopts it. Its path.
+pub fn publish_props(props_source: &Path, rows: &[layerprops::Row]) -> Result<std::path::PathBuf> {
+    let mut path = props_source.as_os_str().to_owned();
+    path.push(".layerprops");
+    let path = std::path::PathBuf::from(path);
+    write_props(&path, rows)?;
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

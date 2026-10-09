@@ -44,7 +44,7 @@ python을 사용하지 않도록 변경해줘."
 | P1a | `app-cli`와 `floe2` 실행 파일. Python CLI는 아직 그대로 둔다 | 0.12.327 |
 | P1b | 빠진 기능을 Rust로(G1, G3~G8; §4). G2 밀도 요청·G9 `phase=render`는 `view`만 쓰므로 P2·P4로 미룸 | 0.12.328 |
 | P1c | 게이트·배포·별칭을 Rust `floe2`로 바꾸고 Python `floe2/` 패키지를 지운다(§4) | 0.12.328 |
-| P2 | `floe2 gtk-service`(stdio JSON-lines). GTK 뷰어의 비-UI 판단을 Rust로 옮기고 Python 모듈을 걷어낸다. 푸시 단위(§5): P2a 열기·준비·레벨 행·덱 스펙·레이어 속성 행, P2b DRC·svrf, P2c 레이어 속성 편집·fill, P2d(P3와 함께) 오라클을 떼어 낸 뒤 Python 모듈 삭제 | P2a 0.12.329, P2b 0.12.330 |
+| P2 | `floe2 gtk-service`(stdio JSON-lines). GTK 뷰어의 비-UI 판단을 Rust로 옮기고 Python 모듈을 걷어낸다. 푸시 단위(§5): P2a 열기·준비·레벨 행·덱 스펙·레이어 속성 행, P2b DRC·svrf, P2c 레이어 속성 편집·fill, P2d(P3와 함께) 오라클을 떼어 낸 뒤 Python 모듈 삭제 | P2a 0.12.329, P2b 0.12.330, P2c 0.12.331 |
 | P3 | KLayout 레거시를 제품 경로에서 빼고, 동결 `floe` 셸은 개발 전용 오라클로 둔다 | 예정 |
 | P4 | (선택) GTK 렌더 루프를 Rust `ViewController`로 | 별도 승인 |
 
@@ -130,3 +130,13 @@ python을 사용하지 않도록 변경해줘."
   - 파일: 노트 파일 바이트 = IcePack 직렬화, 다시 열면 같은 노트, 지우면 파일 없음. waive 내보내기 바이트가 같고 남의 파일은 거절. 리뷰 중 재팩은 75. 남의 사이드카는 옮기고 새로 만듦.
   - svrf: 피연산자와 사이드카.
 - **열린 항목:** Rust 색인(app-core index·cell_index·drc build)은 소스 옆에 `X.oas.floe.index.lock`(숨김 아님)과 `.X.oas.ice.index.lock`을 남긴다. webui의 앱 수준 잠금(리비전·등록 세트·산출물 보호가 이 이름을 안다)이며, 0.12.328부터 `floe2 index`가 Rust라 jobdeck 현장에서도 생긴다. floe_vfs 잠금(`.floe-lock/`)으로 옮기는 일은 webui와 함께 정한다.
+
+### P2c (0.12.331) — 레이어 속성 파일
+
+- **옮긴 것:** layerprops 파일 형식이다. Layer 메뉴의 속성 불러오기(`layerprops_read`), 저장(`layerprops_save`), 디자인 기본값 게시(`layerprops_publish`, `<props_src>.layerprops`)를 app-core `desktop::{read_props, write_props, publish_props}`(layerprops::parse/format)가 한다. 쓰기는 임시 이름을 거쳐 rename으로 한다.
+- **남긴 것:** 팔레트 표(7×7 색 이름, 5×4 fill 비트맵)는 floe/fillpat.py가 읽는 UI 표시 데이터로 GTK에 둔다. Rust(`styles`)와 Python 모두 같은 `floe/colornames.def`·`floe/fillpatterns.def`를 읽는다(Rust는 `include_str!`). 그래서 이 두 파일은 P2d에서 Python 모듈을 지울 때도 남긴다.
+- **같은 답인지:** `GtkServiceTests`가 확인한다.
+  - 읽기: 주석, 빈 줄, `7.20.9` 같은 점 키, 남는 열, 빠진 열, 잘못된 줄 = `fillpat.parse_layerprops`.
+  - 저장: 빈 이름은 `l_d`, 공백 이름은 `_` = `fillpat.format_layerprops` 바이트.
+  - 게시: 경로와 바이트가 `cache.save_shared_props`와 같다.
+- **차이:** 탭이나 제어 문자가 든 레이어 이름은 Python이 깨진 줄로 썼다. Rust는 쓰기를 거절하고 이유를 상태줄에 보인다.

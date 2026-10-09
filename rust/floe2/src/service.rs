@@ -12,6 +12,8 @@
 //!                                        composite spec, layer properties
 //!   close {handle}                       a deck's spec folder goes
 //!   level_rows {source}                  the deck's load dialog rows
+//!   layerprops_read {path}, layerprops_save {path, rows},
+//!   layerprops_publish {props_src, rows} (P2c)
 //!
 //! DRC review (P2b; app-core drc::desktop - floe/drc.py IcePack's files and
 //! autosave), by the handle `drc_open` gives:
@@ -477,6 +479,26 @@ fn handle(request: &Value, specs: &mut Specs, cancelled: &AtomicUsize) -> Result
                 let _ = std::fs::remove_dir_all(folder);
             }
             Ok(Value::Null)
+        }
+        // layer properties (P2c): a chosen file read or written, the
+        // design default published beside the source
+        "layerprops_read" => Ok(serde_json::to_value(desktop::read_props(Path::new(text(
+            request, "path",
+        )?))?)
+        .expect("layerprops rows serialize")),
+        "layerprops_save" | "layerprops_publish" => {
+            let rows: Vec<floe_app_core::layerprops::Row> =
+                serde_json::from_value(request.get("rows").cloned().unwrap_or(Value::Null))
+                    .map_err(|e| Error::input(format!("rows: {e}")))?;
+            if text(request, "op")? == "layerprops_save" {
+                desktop::write_props(Path::new(text(request, "path")?), &rows)?;
+                Ok(Value::Null)
+            } else {
+                Ok(json!(desktop::publish_props(
+                    Path::new(text(request, "props_src")?),
+                    &rows
+                )?))
+            }
         }
         "level_rows" => {
             let deck = JobDeck::read(Path::new(text(request, "source")?), true, cancelled)?;
