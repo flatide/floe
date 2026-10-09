@@ -131,6 +131,11 @@ level L  cell = base_cell_dbu × 2^L, grid (w, h) = ceil(span/cell),
 - **열린 뷰어**: renderd는 요약이 필요한 요청마다 `.ovo`의 (size, mtime)을 stat해
   바뀌었으면 다시 연다(rename 게시라 열려 있던 파일은 옛 내용 그대로). `--occupancy-
   only`로 추가한 요약은 다음 프레임부터 쓰인다.
+  - 색인 잠금(2026-10-09, 0.12.325; CACHE-NAMING §5)부터는 이미 있는 `.ovo`를 바꾸는
+    `--occupancy-only`가 열린 뷰어(어느 호스트든)가 있으면 거절된다. 다른 NFS
+    클라이언트의 rename은 매핑을 끊기 때문이다.
+  - 없는 `.ovo`를 만드는 것은 그대로 되고, 열린 뷰어에 반영된다(게이트
+    `test_a_file_made_while_a_daemon_runs_reaches_it`).
 - **버전**: `CACHE_VERSION`은 올리지 않는다(`is_stale()`이 버전 불일치를 재색인
   대상으로 보므로 "구 캐시 호환"과 충돌 — 리뷰 5). `.ovo`는 자체 형식 버전으로
   관리하는 선택적 sidecar이며, 없거나 무효하면 요약 없음.

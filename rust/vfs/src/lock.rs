@@ -15,11 +15,16 @@
 //!   the target whole.
 //!
 //! Neither file is ever deleted (a new file would be a second lock). A
-//! reader registers in `use.<host>.<pid>.<n>` - who it is and the keys it
-//! holds, the file exclusive-locked by its owner, so one whose lock can be
-//! taken is a dead owner's - and a refused writer names the people in its
-//! way. Locks are never waited for: a busy target is refused (BUSY_EXIT)
-//! after a retry of about RETRY that rides out another process's probe.
+//! run that adds files beside the others holds `.build` alone - unless it
+//! replaces a file the readers map (design.ovh/.ovo/.ovr): then `.use` too
+//! (WriterGuard::exclude_readers), as a reader on another NFS client would
+//! have the file pulled from under it. Only the kernel locks decide; a
+//! reader also registers in `use.<host>.<pid>.<n>` (who it is and the keys
+//! it holds; exclusive-locked by its owner, so one whose lock can be taken
+//! is a dead owner's) so a refused writer can name the people in its way.
+//! A target's key is taken from its real path (symbolic links resolved).
+//! Locks are never waited for: a busy target is refused (BUSY_EXIT) after
+//! a retry of about RETRY that rides out another process's probe.
 //! FLOE_LOCK=off turns it all off.
 
 use std::fmt;
@@ -64,7 +69,8 @@ pub struct Key {
 /// file): the source's name and the kind, so a legacy name (`X.oas.floe`,
 /// `X.db.ice`) shares the lock of the current one (floe/indexlock.py `key`).
 pub fn key(kind: Kind, target: &str) -> Key {
-    let path = Path::new(target);
+    let real = real_path(target);
+    let path = real.as_path();
     let base = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -98,6 +104,25 @@ pub fn key(kind: Kind, target: &str) -> Key {
         }
     };
     Key { dir: folder.join(DIR), name, subject }
+}
+
+/// A target's real path, so a target reached through a symbolic link
+/// locks as itself (review 2026-10-09 of 9378c6d7, P1: a rebuild through a
+/// link to a cache open in a viewer took another key and went ahead): its
+/// folder alone resolved when it is not there yet (a first build).
+fn real_path(target: &str) -> PathBuf {
+    let path = Path::new(target);
+    if let Ok(real) = std::fs::canonicalize(path) {
+        return real;
+    }
+    let folder = match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    match (std::fs::canonicalize(folder), path.file_name()) {
+        (Ok(folder), Some(name)) => folder.join(name),
+        _ => path.to_path_buf(),
+    }
 }
 
 /// Who holds a lock (floe/indexlock.py `holder`): the reviewer (accounts are
@@ -217,9 +242,8 @@ pub enum Busy {
     /// a run writes the target (its `.build` is held); `opening`: a reader
     /// was refused
     Indexing { subject: String, holder: Option<Holder>, opening: bool },
-    /// readers hold the target and the run would pull it from under them;
-    /// `away`: only those on other hosts count (an additive write)
-    InUse { subject: String, users: Vec<Holder>, away: bool },
+    /// readers hold the target and the run would pull it from under them
+    InUse { subject: String, users: Vec<Holder> },
     /// the lock itself could not be taken
     Error { subject: String, message: String },
 }
@@ -248,14 +272,9 @@ impl fmt::Display for Busy {
                     write!(f, "{subject} is being indexed by {by} - try again when it finishes")
                 }
             }
-            Busy::InUse { subject, users, away: false } => write!(
+            Busy::InUse { subject, users } => write!(
                 f,
                 "{subject} is in use by {} - re-indexing it would pull it from under them; close it there first",
-                users_text(users)
-            ),
-            Busy::InUse { subject, users, away: true } => write!(
-                f,
-                "{subject} is in use on another host by {} - adding to its index from this host would pull files from under that host; close it there first, or run this on that host",
                 users_text(users)
             ),
             Busy::Error { subject, message } => write!(
@@ -480,7 +499,17 @@ fn users_of(dir: &Path, name: &str) -> Vec<Holder> {
         .collect();
     paths.sort();
     for path in paths {
-        let Ok(file) = File::open(&path) else { continue };
+        let file = match File::open(&path) {
+            Ok(file) => file,
+            // another account's registration this one cannot read (review
+            // 2026-10-09 of 9378c6d7, P2): a user all the same - who is in
+            // its name
+            Err(e) if e.kind() == ErrorKind::PermissionDenied => {
+                users.push(unreadable_registration(&path));
+                continue;
+            }
+            Err(_) => continue,
+        };
         match file.try_lock_shared() {
             Ok(()) => {
                 drop(file);
@@ -500,8 +529,21 @@ fn users_of(dir: &Path, name: &str) -> Vec<Holder> {
     users
 }
 
+/// A registration this account cannot read: its host and pid from its name
+/// (`use.<host>.<pid>.<n>`).
+fn unreadable_registration(path: &Path) -> Holder {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let parts: Vec<&str> = name.trim_start_matches("use.").rsplitn(3, '.').collect();
+    let (pid, host) = match parts.as_slice() {
+        [_, pid, host] => (pid.parse().unwrap_or(0), host.to_string()),
+        _ => (0, String::new()),
+    };
+    Holder { who: "someone".into(), host, pid, what: "registration not readable by this account".into(), ..Holder::default() }
+}
+
 /// How a run writes a target: whole (its readers must be out), or by adding
-/// files atomically beside the others (readers on this host stay).
+/// files atomically beside the others (WriterGuard::exclude_readers when it
+/// replaces one the readers map).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Full,
@@ -527,6 +569,34 @@ impl WriterGuard {
     /// Whether the run holds its target's `.use` exclusive.
     pub fn holds_use(&self) -> bool {
         self.use_lock.is_some()
+    }
+
+    /// Hold the readers out as well: an additive run about to replace a
+    /// file they map (design.ovh/.ovo/.ovr - replaced by rename from
+    /// another NFS client, it is pulled from under them; review 2026-10-09
+    /// of 9378c6d7, P1). Taken after `.build`, from then on a reader coming
+    /// in is refused as one already in refuses this run - the kernel lock
+    /// decides both, whatever host or account.
+    pub fn exclude_readers(&mut self, key: &Key) -> Result<(), Busy> {
+        if self.build.is_none() || self.use_lock.is_some() {
+            return Ok(()); // no lock taken (FLOE_LOCK=off, none to take) or held
+        }
+        let folder = folder_mode(&key.dir);
+        let use_path = key.dir.join(format!("{}.use", key.name));
+        let error = |message: String| Busy::Error { subject: key.subject.clone(), message };
+        let use_lock = open_rw(&use_path, folder).map_err(|e| error(format!("{}: {e}", use_path.display())))?;
+        match lock_retry(&use_lock, true) {
+            Got::Locked => {
+                self.use_lock = Some(use_lock);
+                Ok(())
+            }
+            Got::Busy => Err(Busy::InUse { subject: key.subject.clone(), users: users_of(&key.dir, &key.name) }),
+            Got::Unsupported => {
+                warn_unsupported(&key.dir);
+                Ok(())
+            }
+            Got::Failed(e) => Err(error(format!("{}: {e}", use_path.display()))),
+        }
     }
 }
 
@@ -568,23 +638,15 @@ pub fn writer(key: &Key, mode: Mode, what: &str) -> Result<WriterGuard, Busy> {
             match lock_retry(&use_lock, true) {
                 Got::Locked => guard.use_lock = Some(use_lock),
                 Got::Busy => {
-                    return Err(Busy::InUse {
-                        subject: key.subject.clone(),
-                        users: users_of(&key.dir, &key.name),
-                        away: false,
-                    })
+                    return Err(Busy::InUse { subject: key.subject.clone(), users: users_of(&key.dir, &key.name) })
                 }
                 Got::Unsupported => warn_unsupported(&key.dir),
                 Got::Failed(e) => return Err(error(format!("{}: {e}", use_path.display()))),
             }
         }
-        Mode::Additive => {
-            let here = hostname();
-            let away: Vec<Holder> = users_of(&key.dir, &key.name).into_iter().filter(|h| h.host != here).collect();
-            if !away.is_empty() {
-                return Err(Busy::InUse { subject: key.subject.clone(), users: away, away: true });
-            }
-        }
+        // files added beside the others: readers stay (exclude_readers when
+        // one they map is replaced)
+        Mode::Additive => {}
     }
     // who holds it, for the runs it refuses (synced: the file stays open)
     let _ = write_over(&mut build, &Holder::me(what).to_text(&[]));
@@ -627,6 +689,9 @@ fn register(dir: &Path, names: &[&str], what: &str) -> Option<(PathBuf, File)> {
     let tmp = dir.join(format!("{base}.tmp"));
     let path = dir.join(&base);
     let mut file = OpenOptions::new().read(true).write(true).create(true).truncate(true).mode(0o644).open(&tmp).ok()?;
+    // readable by every account that may name it, whatever the umask
+    // (review 2026-10-09 of 9378c6d7, P2: umask 077 made it 0600)
+    let _ = file.set_permissions(std::fs::Permissions::from_mode(0o644));
     let done = file.try_lock().is_ok()
         && file.write_all(Holder::me(what).to_text(names).as_bytes()).is_ok()
         && std::fs::rename(&tmp, &path).is_ok();
@@ -758,7 +823,29 @@ mod tests {
         let r = key(Kind::Rules, "/d/deck.cal.rules.json");
         assert_eq!((r.name.as_str(), r.subject.as_str()), ("deck.cal.rules", "deck.cal.rules.json"));
         assert_eq!(key(Kind::Rules, "/d/x.json").name, "x.json.rules");
-        assert_eq!(key(Kind::Vfs, ".X.oas.ice").dir, PathBuf::from("./.floe-lock"));
+        let here = std::env::current_dir().unwrap().canonicalize().unwrap();
+        assert_eq!(key(Kind::Vfs, ".X.oas.ice").dir, here.join(".floe-lock"));
+    }
+
+    #[test]
+    fn a_target_through_a_link_locks_as_itself() {
+        // review 2026-10-09 of 9378c6d7, P1: a rebuild through a link to a
+        // cache took another key than the viewer holding it
+        let dir = scratch("links");
+        std::fs::create_dir_all(dir.join(".L.oas.ice")).unwrap();
+        let real = key(Kind::Vfs, dir.join(".L.oas.ice").to_str().unwrap());
+        assert_eq!(real.name, "L.oas.vfs");
+        std::os::unix::fs::symlink(dir.join(".L.oas.ice"), dir.join("alias")).unwrap();
+        assert_eq!(key(Kind::Vfs, dir.join("alias").to_str().unwrap()), real);
+        // its folder reached through a link: the same lock folder, before
+        // the cache is there too
+        let linked = dir.with_file_name(format!("{}-alias", dir.file_name().unwrap().to_string_lossy()));
+        let _ = std::fs::remove_file(&linked);
+        std::os::unix::fs::symlink(&dir, &linked).unwrap();
+        assert_eq!(key(Kind::Vfs, linked.join(".L.oas.ice").to_str().unwrap()), real);
+        assert_eq!(key(Kind::Vfs, linked.join(".N.oas.ice").to_str().unwrap()).dir, real.dir);
+        let _ = std::fs::remove_file(&linked);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -790,7 +877,7 @@ mod tests {
         // a reader in: a whole rebuild is refused and names it; an
         // addition from this host goes ahead
         match writer(&k, Mode::Full, "rebuild") {
-            Err(Busy::InUse { users, away: false, .. }) => {
+            Err(Busy::InUse { users, .. }) => {
                 assert_eq!(users.len(), 1);
                 assert_eq!((users[0].pid, users[0].what.as_str()), (std::process::id(), "viewer"));
             }
@@ -807,33 +894,63 @@ mod tests {
     }
 
     #[test]
-    fn a_dead_registration_is_not_a_user_and_another_hosts_reader_stops_an_addition() {
-        let dir = scratch("registrations");
+    fn a_replacement_holds_out_every_reader_and_names_even_unreadable_ones() {
+        let dir = scratch("replace");
         let k = key(Kind::Vfs, dir.join(".Y.oas.ice").to_str().unwrap());
         std::fs::create_dir_all(&k.dir).unwrap();
+        std::env::set_var("FLOE_LOCK_RETRY_MS", "100");
         let away = Holder { who: "lee".into(), from: "pc-17".into(), host: "elsewhere".into(), pid: 77, since: "x".into(), what: "floe2 view".into() };
         // no lock on it: its owner is gone
         let dead = k.dir.join("use.elsewhere.77.0");
         std::fs::write(&dead, away.to_text(&[&k.name])).unwrap();
         assert!(users_of(&k.dir, &k.name).is_empty());
         assert!(!dead.exists(), "a dead registration is removed by who may");
-        // locked: alive - another host's reader stops an addition from here
-        let live = k.dir.join("use.elsewhere.78.0");
-        std::fs::write(&live, Holder { pid: 78, ..away.clone() }.to_text(&[&k.name])).unwrap();
-        let owner = File::open(&live).unwrap();
-        owner.try_lock().unwrap();
-        std::env::set_var("FLOE_LOCK_RETRY_MS", "100");
-        match writer(&k, Mode::Additive, "ovs") {
-            Err(Busy::InUse { users, away: true, .. }) => {
-                assert_eq!(users.len(), 1);
-                let text = Busy::InUse { subject: "Y.oas".into(), users, away: true }.to_string();
-                assert!(text.contains("lee (from pc-17) on elsewhere, pid 78"), "{text}");
-            }
+        // a reader in (any host - the kernel lock decides): an addition goes
+        // ahead, the replacement of a file it maps is refused naming it
+        let r = readers(&[k.clone()], "viewer").unwrap();
+        let mut w = writer(&k, Mode::Additive, "hier").expect("an addition beside a reader");
+        match w.exclude_readers(&k) {
+            Err(Busy::InUse { users, .. }) => assert_eq!((users.len(), users[0].what.as_str()), (1, "viewer")),
             other => panic!("{:?}", other.err()),
         }
-        drop(owner);
-        drop(writer(&k, Mode::Additive, "ovs").expect("the reader gone"));
+        drop(w);
+        drop(r);
+        // none in: the replacement holds them out - one coming in later is
+        // refused (review 2026-10-09 of 9378c6d7, P1: it got in)
+        let mut w = writer(&k, Mode::Additive, "occupancy-only").unwrap();
+        w.exclude_readers(&k).expect("no reader in");
+        match readers(&[k.clone()], "late viewer") {
+            Err(Busy::Indexing { opening: true, holder: Some(h), .. }) => assert_eq!(h.what, "occupancy-only"),
+            other => panic!("{:?}", other.err()),
+        }
+        drop(w);
+        // a registration this account cannot read is a user all the same,
+        // named from its file name (P2: it was taken for none)
+        if unsafe { libc::geteuid() } != 0 {
+            let hidden = k.dir.join("use.other.host.4242.3");
+            std::fs::write(&hidden, away.to_text(&[&k.name])).unwrap();
+            std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0)).unwrap();
+            let users = users_of(&k.dir, &k.name);
+            assert_eq!(users.len(), 1);
+            assert_eq!((users[0].who.as_str(), users[0].host.as_str(), users[0].pid), ("someone", "other.host", 4242));
+            std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
         std::env::remove_var("FLOE_LOCK_RETRY_MS");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_registration_is_readable_whatever_the_umask() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = scratch("umask");
+        let k = key(Kind::Vfs, dir.join(".U.oas.ice").to_str().unwrap());
+        std::fs::create_dir_all(&k.dir).unwrap();
+        // the umask of a private account (review 2026-10-09 of 9378c6d7, P2)
+        let before = unsafe { libc::umask(0o077) };
+        let registered = register(&k.dir, &[&k.name], "viewer");
+        unsafe { libc::umask(before) };
+        let (path, _file) = registered.expect("registered");
+        assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, 0o644);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -528,11 +528,10 @@ pub struct Cache {
     _lock: floe_vfs::lock::ReaderGuard,
 }
 
-/// A cache folder's lock key, through a symbolic link (the adapter hands
-/// renderd an alias when the real path has whitespace) to the real folder.
+/// A cache folder's lock key (floe_vfs::lock::key resolves a symbolic link -
+/// the adapter hands renderd an alias when the real path has whitespace).
 pub(crate) fn cache_lock_key(dir: &str) -> floe_vfs::lock::Key {
-    let real = std::fs::canonicalize(dir).ok().and_then(|p| p.to_str().map(str::to_string)).unwrap_or_else(|| dir.to_string());
-    floe_vfs::lock::key(floe_vfs::lock::Kind::Vfs, &real)
+    floe_vfs::lock::key(floe_vfs::lock::Kind::Vfs, dir)
 }
 
 /// Cache::cell_cover: the table, or when it was last looked for in vain

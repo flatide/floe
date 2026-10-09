@@ -264,16 +264,28 @@ CACHE-NAMING §5에 있다.
 | 명령 | build | use |
 |---|---|---|
 | `vfs` 본 빌드 | 배타(끝까지) | 배타(원본을 읽기 전부터 `design.ovm` 커밋 직후까지; 뒤의 ovs 단계 동안은 열 수 있다) |
-| `vfs --occupancy-only/--representatives-only/--coverage-only/--frontier-only`, `hier`(`--check` 제외), `ovs` | 배타 | — (다른 호스트의 살아 있는 등록이 있으면 거절) |
+| `vfs --occupancy-only/--representatives-only/--coverage-only/--frontier-only`, `hier`(`--check` 제외), `ovs` | 배타 | 새 파일을 더하면 — ; 독자가 mmap하는 기존 `design.ovo`(`--occupancy-only`)·`design.ovr`(`--representatives-only`)·`design.ovh`(`hier`)를 바꾸면 배타(0.12.325) |
 | `vfsd` | — | 공유 + 등록 |
 | `drc <db> [out]`(DRC 팩, 0.12.324) | 배타(임시 파일 쓸기 전부터) | 배타(팩 리더 `IcePack`이 연 동안은 거절) |
 | `svrf <deck> [-o out]`(0.12.324) | 배타(쓰기 직전; `--scan`은 없음) | — |
 
-- 덧붙이는 실행이 다른 호스트의 독자를 거절하는 이유는 다음과 같다. mmap한
-  `design.ovh/.ovo/.ovr`을 다른 NFS 클라이언트가 rename으로 바꾸면, 서버가 옛 파일을
-  지워 그쪽 프로세스가 SIGBUS로 죽는다. 같은 호스트에서는 안전하다(로컬 inode 유지,
-  NFS silly rename). 그래서 뷰어 자신의 셀 트리 `hier`와 잡덱 level 재선택의
-  `--occupancy-only`는 그대로 된다.
+- 독자가 mmap하는 기존 파일(`design.ovh/.ovo/.ovr`)을 바꾸는 실행은 use를 배타로 쥔다
+  (`WriterGuard::exclude_readers`, 0.12.325). 그 파일을 다른 NFS 클라이언트가 rename으로
+  바꾸면, 서버가 옛 파일을 지워 그쪽 프로세스가 SIGBUS로 죽기 때문이다.
+  - 0.12.323~324는 다른 호스트 독자를 등록 파일 목록으로 시작할 때 한 번만 봤다.
+    그래서 도중에 들어온 독자를 놓쳤고, NFS의 디렉터리 캐시는 새 등록을 늦게
+    보였다(리뷰 2026-10-09).
+  - 이제 커널 잠금 하나가 정한다. 독자가 있으면(어느 호스트·계정이든) 거절하고,
+    바꾸는 동안 오는 독자는 "being indexed"로 거절된다.
+  - 새 파일을 만드는 실행은 독자 옆에서 그대로 된다. 그 파일을 매핑한 독자가 없기
+    때문이다. 뷰어 자신의 셀 트리 `hier`(design.ovh가 없을 때)와 잡덱 level 재선택의
+    `--occupancy-only`(design.ovo가 없는 소스)가 여기에 해당한다.
+  - read-whole 파일(`design.ovs`·`.ovs.<cell>`·meta.json·design.ovc)을 바꾸는 실행은
+    build만 쥔다.
+  - 같은 호스트에서 뷰어를 연 채 기존 design.ovo를 다시 만드는 일도 이제 거절된다.
+- 대상의 키는 실제 경로에서 만든다(심볼릭 링크를 풀어서, 0.12.325). 캐시나 그
+  폴더를 링크로 가리켜도 같은 잠금이다. 0.12.324까지는 쓰는 쪽이 받은 경로 그대로
+  키를 만들어, 링크 경로의 재빌드가 열린 뷰어를 비켜 갔다.
 - 잠금은 인자를 확인한 뒤, 원본을 읽기 전에 잡는다. 거절은 몇 초 안에 끝나고
   (약 1.5 s 재시도로 다른 프로세스의 확인을 넘긴다; `FLOE_LOCK_RETRY_MS`), 종료
   코드는 75(EX_TEMPFAIL)다. stderr 한 줄이 이유다:

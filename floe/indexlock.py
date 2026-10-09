@@ -14,9 +14,13 @@ beside it, named by its key (``X.oas.vfs``, ``X.db.pack``,
 - ``<key>.use``: shared for the readers, exclusive for a run that
   rebuilds the target whole.
 
-A reader registers in ``use.<host>.<pid>.<n>`` (who, and the keys it
-holds; exclusive-locked by its owner - one whose lock can be taken is a
-dead owner's), so a refused writer can name the people in its way.
+A run adding files beside the others holds ``.build`` alone - unless it
+replaces one the readers map (design.ovh/.ovo/.ovr): then ``.use`` too,
+whatever host the readers are on. Only the kernel locks decide; a reader
+also registers in ``use.<host>.<pid>.<n>`` (who, and the keys it holds;
+exclusive-locked by its owner - one whose lock can be taken is a dead
+owner's) so a refused writer can name the people in its way. A target's
+key is taken from its real path (symbolic links resolved).
 
 The writers are floe-index runs and take their locks themselves. Python
 asks who is in the way before it starts something (``state`` - a probe
@@ -70,12 +74,23 @@ class Key(object):
         return "Key(%r, %r, %r)" % (self.dir, self.name, self.subject)
 
 
+def _real_path(target):
+    """The target's real path, as rust/vfs/src/lock.rs ``real_path``: a
+    target reached through a symbolic link locks as itself (review
+    2026-10-09 of 9378c6d7, P1); its folder alone resolved when it is not
+    there yet (a first build)."""
+    if os.path.exists(target):
+        return os.path.realpath(target)
+    folder, base = os.path.split(target)
+    return os.path.join(os.path.realpath(folder or "."), base)
+
+
 def key(kind, target):
     """The key of the target at ``target`` (a cache folder, a pack, a
     rules file): the source's name and the kind, so a legacy name
     (``X.oas.floe``, ``X.db.ice``) shares the lock of the current one
     (rust/vfs/src/lock.rs ``key``)."""
-    folder, base = os.path.split(target)
+    folder, base = os.path.split(_real_path(target))
     folder = folder or "."
 
     def strip(pre, suf):
@@ -182,13 +197,12 @@ def _users_text(users):
 class Busy(Exception):
     """Why a lock was not taken - worded as the Rust side words it.
     ``what``: "indexing" (a run writes the target; ``opening``: a reader
-    was refused), "in_use" (readers hold it; ``away``: only those on other
-    hosts count), "error"."""
+    was refused), "in_use" (readers hold it), "error"."""
 
     def __init__(self, what, subject, holder=None, users=(), opening=False,
-                 away=False, message=""):
+                 message=""):
         self.what, self.subject, self.holder = what, subject, holder
-        self.users, self.opening, self.away = list(users), opening, away
+        self.users, self.opening = list(users), opening
         self.message = message
         Exception.__init__(self, str(self))
 
@@ -198,14 +212,9 @@ class Busy(Exception):
             return "%s is being indexed by %s - %s" % (
                 self.subject, by, "open it when the index is done"
                 if self.opening else "try again when it finishes")
-        if self.what == "in_use" and not self.away:
+        if self.what == "in_use":
             return ("%s is in use by %s - re-indexing it would pull it from "
                     "under them; close it there first"
-                    % (self.subject, _users_text(self.users)))
-        if self.what == "in_use":
-            return ("%s is in use on another host by %s - adding to its "
-                    "index from this host would pull files from under that "
-                    "host; close it there first, or run this on that host"
                     % (self.subject, _users_text(self.users)))
         return ("%s: cannot take its lock: %s (FLOE_LOCK=off runs without "
                 "the lock)" % (self.subject, self.message))
@@ -267,6 +276,12 @@ def users_of(k):
         path = os.path.join(k.dir, name)
         try:
             fd = os.open(path, os.O_RDONLY)
+        except PermissionError:
+            # another account's registration this one cannot read (review
+            # 2026-10-09 of 9378c6d7, P2): a user all the same, named from
+            # its file name - never taken for none
+            users.append(_unreadable_registration(name))
+            continue
         except OSError:
             continue
         try:
@@ -289,6 +304,19 @@ def users_of(k):
                 if k.name in keys:
                     users.append(h)
     return users
+
+
+def _unreadable_registration(name):
+    """A registration this account cannot read: host and pid from its name
+    (``use.<host>.<pid>.<n>``)."""
+    parts = name[len("use."):].rsplit(".", 2)
+    host, pid = (parts[0], parts[1]) if len(parts) == 3 else ("", "0")
+    try:
+        pid = int(pid)
+    except ValueError:
+        pid = 0
+    return Holder("someone", "", host, pid, "",
+                  "registration not readable by this account")
 
 
 class State(object):
@@ -319,17 +347,14 @@ class State(object):
         return None
 
     def writing_refusal(self, full):
-        """Busy for a run that writes the target (whole when ``full``,
-        else adding files beside the others), or None - what floe-index
-        would refuse, said before it is started."""
+        """Busy for a run that writes the target (whole, or replacing a
+        file the readers map, when ``full``; else adding files beside the
+        others), or None - what floe-index would refuse, said before it is
+        started."""
         if self.writing:
             return Busy("indexing", self.key.subject, self.writer)
         if full and self.users:
             return Busy("in_use", self.key.subject, users=self.users)
-        here = socket.gethostname()
-        away = [u for u in self.users if u.host != here]
-        if not full and away:
-            return Busy("in_use", self.key.subject, users=away, away=True)
         return None
 
 
@@ -469,6 +494,9 @@ def _register(d, names, what):
     except OSError:
         return None
     try:
+        # readable by every account that may name it, whatever the umask
+        # (review 2026-10-09 of 9378c6d7, P2: umask 077 made it 0600)
+        os.fchmod(fd, 0o644)
         if not _try(fd, fcntl.LOCK_EX):
             raise OSError("registration lock")
         os.write(fd, Holder.me(what).text(names).encode("utf-8"))

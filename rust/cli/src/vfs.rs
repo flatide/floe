@@ -437,7 +437,15 @@ pub fn vfs_cmd(args: &[String]) {
         } else {
             (floe_vfs::lock::Mode::Full, "floe-index vfs")
         };
-        lock_writer(floe_vfs::lock::Kind::Vfs, &outdir, mode, what)
+        let mut lock = lock_writer(floe_vfs::lock::Kind::Vfs, &outdir, mode, what);
+        // replacing a file the readers map (design.ovo, design.ovr) holds
+        // them all out, whatever host they are on - a new file goes in beside
+        // them (review 2026-10-09 of 9378c6d7, P1)
+        let replaces = |name: &str| std::path::Path::new(&format!("{}/{}", outdir, name)).exists();
+        if (occupancy_only && replaces("design.ovo")) || (representatives_only && replaces("design.ovr")) {
+            exclude_readers_or_exit(&mut lock, floe_vfs::lock::Kind::Vfs, &outdir);
+        }
+        lock
     };
     if let Some(spec) = hold_at.as_deref() {
         gate_hold(spec, "locked");
@@ -2479,8 +2487,14 @@ pub fn hier_cmd(args: &[String]) {
         std::process::exit(2);
     });
     // design.ovh is added beside the others (floe_vfs::lock): other writers
-    // stay out; --check only reads
-    let _lock = (!check).then(|| lock_writer(floe_vfs::lock::Kind::Vfs, &dir, floe_vfs::lock::Mode::Additive, "floe-index hier"));
+    // stay out, and the readers too when one is there to replace (they map
+    // it); --check only reads
+    let mut _lock = (!check).then(|| lock_writer(floe_vfs::lock::Kind::Vfs, &dir, floe_vfs::lock::Mode::Additive, "floe-index hier"));
+    if let Some(lock) = _lock.as_mut() {
+        if std::path::Path::new(&format!("{}/design.ovh", dir)).exists() {
+            exclude_readers_or_exit(lock, floe_vfs::lock::Kind::Vfs, &dir);
+        }
+    }
     let ovm_path = format!("{}/design.ovm", dir);
     let ovm = floe_ovm::Ovm::open(&ovm_path).unwrap_or_else(|e| {
         eprintln!("hier: {} (build the cache first)", e);
@@ -10761,6 +10775,23 @@ pub(crate) fn lock_writer(
                 _ => floe_vfs::lock::BUSY_EXIT,
             });
         }
+    }
+}
+
+/// Hold `target`'s readers out too (floe_vfs::lock::WriterGuard::
+/// exclude_readers) - a run about to replace a file they map; readers in
+/// the way end this run with BUSY_EXIT and who they are.
+pub(crate) fn exclude_readers_or_exit(
+    guard: &mut floe_vfs::lock::WriterGuard,
+    kind: floe_vfs::lock::Kind,
+    target: &str,
+) {
+    if let Err(busy) = guard.exclude_readers(&floe_vfs::lock::key(kind, target)) {
+        eprintln!("[lock] {}", busy);
+        std::process::exit(match busy {
+            floe_vfs::lock::Busy::Error { .. } => 1,
+            _ => floe_vfs::lock::BUSY_EXIT,
+        });
     }
 }
 

@@ -1552,16 +1552,31 @@ class RenderTests(unittest.TestCase):
             inside = {(x, y) for x in range(125, 135) for y in range(65, 75)}
             self.assertEqual(len(inside & lit), 50)
 
-    def test_a_rebuilt_file_reaches_a_running_daemon(self):
+    def test_a_file_made_while_a_daemon_runs_reaches_it(self):
+        """The index locks (2026-10-09; review of 9378c6d7): replacing the
+        design.ovo the running daemons map is refused while they have the
+        cache open (from another NFS client it would be pulled from under
+        them); a summary MADE while they run (none there) goes in beside
+        them and reaches them at the next summary decision - as a file put
+        back does."""
+        ovo = Path(self.cache) / "design.ovo"
+        kept = ovo.read_bytes()
         _, summ, _ = self._render(self.worker, visible=[(1, 0)])
         self.assertEqual(summ["cell_um"], 8.0)
+        res = floe_index("vfs", self.src, self.cache, "--occupancy-only",
+                         "--occupancy-um", "3", "--occupancy-max-work",
+                         "100000", ok=75)
+        self.assertIn("is in use by", res.stderr)
+        self.assertEqual(ovo.read_bytes(), kept)
+        ovo.unlink()
         floe_index("vfs", self.src, self.cache, "--occupancy-only",
                    "--occupancy-um", "3", "--occupancy-max-work", "100000")
         # the same view again: no stale retained frame, the new file
         _, summ, _ = self._render(self.worker, visible=[(1, 0)])
         self.assertEqual((summ["level"], summ["cell_um"]), (1, 6.0), summ)
-        floe_index("vfs", self.src, self.cache, "--occupancy-only",
-                   "--occupancy-um", "4", "--occupancy-max-work", "100000")
+        tmp = ovo.with_name("design.ovo.gate")
+        tmp.write_bytes(kept)
+        os.replace(tmp, ovo)
         _, summ, _ = self._render(self.worker, visible=[(1, 0)])
         self.assertEqual(summ["cell_um"], 8.0)
 

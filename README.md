@@ -174,8 +174,9 @@ floe view data/testchip_1g5.oas            # 개발용 KLayout 셸 (동결, 비�
   2026-10-09 15:20:11 (floe-index vfs) - try again when it finishes`
   - 누가 뷰어로 연 캐시를 통째로 다시 만드는 색인(`--force`, 원본이 바뀐 캐시)도
     거절된다(`… is in use by …`).
-  - 셀 트리용 `--hier-only`, `--occupancy-only`처럼 파일을 더하는 색인은 같은
-    호스트의 뷰어 옆에서 그대로 된다.
+  - 셀 트리용 `--hier-only`, `--occupancy-only`처럼 없는 파일을 새로 만드는 색인은
+    열린 뷰어 옆에서 그대로 된다. 뷰어가 쓰는 기존 `design.ovh/.ovo/.ovr`을 다시 만드는
+    색인은 누가 열고 있으면(어느 서버든) 거절된다(0.12.325).
   - 다른 사람이 통째로 색인 중인 파일을 열면 "색인 없음" 대신 `being indexed by …`가
     나온다. 그때 뷰어는 두 번째 색인을 시작하지 않는다.
   - 잡덱은 그런 소스를 빼고 열고, 덱 색인은 그 소스를 `BUSY`로 센다.
@@ -183,7 +184,8 @@ floe view data/testchip_1g5.oas            # 개발용 KLayout 셸 (동결, 비�
     재팩이 기존 팩을 지우지 않는다. 룰 덱의 `.rules.json`은 같은 출력으로 두 컴파일이
     겹치지 않게 막는다(0.12.324).
   - 잠금은 소스 옆 숨김 폴더 `.floe-lock/`에 있다. 지우지 않는다
-    (docs/CACHE-NAMING.ko.md §5).
+    (docs/CACHE-NAMING.ko.md §5). 캐시나 폴더를 심볼릭 링크로 가리켜도 같은
+    잠금이다.
   - NFS가 `nolock`으로 마운트돼 있으면 다른 호스트끼리는 막지 못한다. 처음
     한 번 `[lock] … locks hold on this host only` 경고가 나온다.
   - `FLOE_LOCK=off`이면 예전처럼 잠금 없이 동작한다.

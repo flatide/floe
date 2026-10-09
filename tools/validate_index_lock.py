@@ -24,9 +24,13 @@ another user would (FLOE_REVIEWER=ws_kim_01):
   K4  renderd open: a whole rebuild (floe-index vfs, floe2 index --force)
       ends 75 naming the reader; after it quits the rebuild runs; a
       build held after its commit marker lets renderd open
-  K5  renderd open: hier and --occupancy-only go ahead (same host); an
-      addition while another holds the build lock ends 75; a live reader
-      on another host refuses an addition
+  K5  renderd open: hier and --occupancy-only making a file that is not
+      there go ahead; replacing design.ovh / design.ovo (a file readers
+      map) ends 75 naming them, and a reader coming in while a replacement
+      runs is refused; an addition while another holds the build lock ends
+      75; a cache reached through a symbolic link (the cache or its folder)
+      locks as itself; registrations stay 0644 under umask 077, and one
+      this account cannot read still counts as a user
   K6  `floe2 index` on a cache being written says "being indexed", not
       "--force"; the jobdeck index counts a busy source and builds the
       other; the legacy <src>.floe rename waits for the locks
@@ -319,11 +323,24 @@ class IndexLockTests(unittest.TestCase):
         build.stderr.close()
         self.assertEqual(build.wait(timeout=120), 0)
 
-    def test_k5_additions_beside_readers(self):
+    def test_k5_additions_beside_readers_replacements_without_them(self):
+        """A new file goes in beside the readers; replacing one they map
+        (design.ovh/.ovo) holds them all out - any host, the kernel lock
+        decides (review 2026-10-09 of 9378c6d7, P1: a registration checked
+        once at the start let a reader on another host in mid-run)."""
+        floe2("index", self.src, "--occupancy-only", ok=0)   # design.ovo there
         w = open_worker(self.src)
         try:
-            floe_index("hier", self.cache, ok=0)
-            floe2("index", self.src, "--occupancy-only", ok=0)
+            for argv, made in (([BIN, "hier", self.cache], "design.ovh"),
+                               ([BIN, "vfs", self.src, self.cache, "--occupancy-only"], "design.ovo")):
+                self.assertTrue((self.cache / made).is_file(), made)
+                res = run(argv)
+                self.assertEqual(res.returncode, 75, (made, res.stderr))
+                self.assertIn("chip.oas is in use by %s" % HOLDER, lock_line(res))
+                # not there (nobody maps it): made beside the reader
+                (self.cache / made).unlink()
+                run(argv, ok=0)
+                self.assertTrue((self.cache / made).is_file(), made)
             lock = self.hold(full=False)
             res = floe_index("hier", self.cache)
             self.assertEqual(res.returncode, 75)
@@ -331,19 +348,86 @@ class IndexLockTests(unittest.TestCase):
             lock.close()
         finally:
             w.stop()
-        # a live reader on another host: an addition from here would pull
-        # its mapped files from under it
+        # a replacement under way holds a reader coming in out: renderd's
+        # open and a Python reader are refused, "being indexed"
+        flag = TMP / "replace.go"
+        held = subprocess.Popen(
+            [str(BIN), "vfs", str(self.src), str(self.cache), "--occupancy-only",
+             "--hold-at", "locked:%s" % flag],
+            stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True)
+        self.addCleanup(lambda: held.poll() is None and held.kill())
+        line = ""
+        while "--hold-at locked" not in line:
+            line = held.stderr.readline()
+            self.assertTrue(line or held.poll() is None, "the run ended early")
+        from floe.cache import Cache
+        from floe.rust_render import RustRenderWorker
+        c = Cache(str(self.src))
+        c.load()
+        late = RustRenderWorker(c)
+        with self.assertRaises(RuntimeError) as ctx:
+            late.start()
+        self.assertIn("chip.oas is being indexed by %s" % HOLDER, str(ctx.exception))
+        self.assertIn("(floe-index vfs --occupancy-only)", str(ctx.exception))
+        with self.assertRaises(indexlock.Busy):
+            indexlock.hold_readers(indexlock.VFS, [str(self.cache)], "late reader")
+        flag.write_text("go")
+        held.stderr.read()
+        held.stderr.close()
+        self.assertEqual(held.wait(timeout=120), 0)
+
+    def test_k5_a_cache_through_a_link_locks_as_itself(self):
+        """review 2026-10-09 of 9378c6d7, P1: a rebuild through a symbolic
+        link to a cache a viewer has open took another key and ran."""
+        link = self.dir / "linked.cache"
+        link.symlink_to(self.cache.name)
+        self.addCleanup(link.unlink)
+        self.assertEqual(indexlock.key(indexlock.VFS, str(link)),
+                         indexlock.key(indexlock.VFS, str(self.cache)))
+        w = open_worker(self.src)
+        try:
+            for argv in ([BIN, "vfs", self.src, link, "--jobs", "2"],
+                         [BIN, "hier", link]):
+                res = run(argv)
+                self.assertEqual(res.returncode, 75, (argv, res.stderr))
+                self.assertIn("chip.oas is in use by %s" % HOLDER, lock_line(res))
+        finally:
+            w.stop()
+        # a folder reached through a link too
+        folder_link = TMP / "chip.link"
+        folder_link.symlink_to(self.dir)
+        self.addCleanup(folder_link.unlink)
+        self.assertEqual(indexlock.key(indexlock.VFS, str(folder_link / self.cache.name)),
+                         indexlock.key(indexlock.VFS, str(self.cache)))
+
+    def test_k5_registrations_any_account_can_read(self):
+        """review 2026-10-09 of 9378c6d7, P2: under umask 077 a reader's
+        registration was 0600, and one another account cannot read was
+        taken for no reader."""
+        before = os.umask(0o077)
+        try:
+            w = open_worker(self.src)
+            py = indexlock.hold_readers(indexlock.VFS, [str(self.cache)], "python reader")
+        finally:
+            os.umask(before)
         k = indexlock.key(indexlock.VFS, str(self.cache))
-        reg = Path(k.dir) / "use.elsewhere.4242.0"
-        fd = os.open(str(reg), os.O_RDWR | os.O_CREAT, 0o644)
-        self.addCleanup(lambda: (os.close(fd), reg.exists() and reg.unlink()))
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        os.write(fd, indexlock.Holder("lee", "pc-17", "elsewhere", 4242, "x",
-                                      "floe2 view").text([k.name]).encode())
-        res = floe_index("hier", self.cache)
-        self.assertEqual(res.returncode, 75, res.stderr)
-        self.assertIn("chip.oas is in use on another host by lee (from pc-17) on elsewhere, pid 4242",
-                      lock_line(res))
+        try:
+            regs = [p for p in os.listdir(k.dir) if p.startswith("use.") and not p.endswith(".tmp")]
+            self.assertEqual(len(regs), 2, regs)
+            for p in regs:
+                self.assertEqual(stat.S_IMODE(os.stat(os.path.join(k.dir, p)).st_mode), 0o644, p)
+            hidden = Path(k.dir) / "use.other.host.4242.3"
+            hidden.write_text(indexlock.Holder("lee", "", "other.host", 4242, "x", "floe2 view").text([k.name]))
+            os.chmod(hidden, 0)
+            self.addCleanup(lambda: hidden.exists() and (os.chmod(hidden, 0o644), hidden.unlink()))
+            users = indexlock.state(indexlock.VFS, str(self.cache)).users
+            self.assertIn(("someone", "other.host", 4242), [(u.who, u.host, u.pid) for u in users])
+            res = floe_index("vfs", self.src, "--jobs", "2")
+            self.assertEqual(res.returncode, 75, res.stderr)
+            self.assertIn("someone on other.host, pid 4242", lock_line(res))
+        finally:
+            py.close()
+            w.stop()
 
     def test_k6_the_wrapper_and_the_deck_say_busy(self):
         self.hold(full=False)
