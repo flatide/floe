@@ -22,7 +22,7 @@ import time
 
 from . import __version__
 from . import cache as cache_mod
-from . import drc as drc_mod
+from . import gtkservice
 from . import fillpat
 from . import indexlock
 from .hangul import HangulComposer, TextViewEditable
@@ -1444,6 +1444,30 @@ def _remote_x_scroll_repaint(scroller):
         scroller.set_kinetic_scrolling(False)
     except AttributeError:
         pass
+
+
+# a DRC error's review status byte (floe2 gtk-service; 2 is reserved)
+STATUS_NONE = gtkservice.STATUS_NONE
+STATUS_WAIVED = gtkservice.STATUS_WAIVED
+# how far a one-edge CD ruler is drawn off its edge, screen px
+EDGE_RULER_OFFSET_PX = 14
+
+
+def offset_screen_segment(a, b, distance=EDGE_RULER_OFFSET_PX):
+    """Move a screen-space segment along a stable normal: the upper
+    side, the right side as the tie-break for a vertical segment - the
+    rule is independent of endpoint order, so the viewer and a rendered
+    snapshot place a one-edge CD ruler identically."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    length = math.hypot(dx, dy)
+    if length <= 0:
+        return a, b
+    nx, ny = -dy / length, dx / length
+    if ny > 1e-12 or (abs(ny) <= 1e-12 and nx < 0):
+        nx, ny = -nx, -ny
+    ox, oy = nx * distance, ny * distance
+    return ((a[0] + ox, a[1] + oy),
+            (b[0] + ox, b[1] + oy))
 
 
 def _level_row_text(row, keep=3):
@@ -3398,7 +3422,7 @@ class Viewer:
             a, b = (sx(x0), sy(y0)), (sx(x1), sy(y1))
             if isinstance(seg, _DrcOffsetRuler):
                 edge_a, edge_b = a, b
-                a, b = drc_mod.offset_screen_segment(a, b)
+                a, b = offset_screen_segment(a, b)
                 # Extension lines expose the error edge underneath while
                 # tying both endpoints to its parallel dimension line.
                 stamp_dotted(disp, edge_a, a, None, RULER_CORE)
@@ -3673,7 +3697,7 @@ class Viewer:
             a = ((x0 - obox[0]) / ospp, (obox[3] - y0) / ospp)
             b = ((x1 - obox[0]) / ospp, (obox[3] - y1) / ospp)
             if isinstance(seg, _DrcOffsetRuler):
-                a, b = drc_mod.offset_screen_segment(a, b)
+                a, b = offset_screen_segment(a, b)
             mx, my = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
             if -40 <= mx <= w and -20 <= my <= h:
                 vis.append((a, b, mx, my,
@@ -7329,25 +7353,25 @@ class Viewer:
         ASCII .db, floe LOADS only its pack. When no usable
         pack exists (missing, stale or an old layout/v1 sidecar) it
         ASKS before building one (user call 2026-08-28)."""
-        from . import drc as drc_mod
-        from . import cachepath
-        # another run packs this db (floe/indexlock.py): say who - no
-        # open of a pack being replaced, no second build beside it
-        busy = indexlock.state(indexlock.PACK, cachepath.pack_path(path),
-                               users=False).opening_refusal()
+        # another run packs this db (floe_vfs::lock): say who - no open
+        # of a pack being replaced, no second build beside it (the
+        # decisions and the review are floe2 gtk-service's, P2b)
+        try:
+            busy = gtkservice.drc_busy(path)
+            side = None if busy else gtkservice.drc_find(path)
+        except gtkservice.ServiceError as exc:
+            self._set_live_status("DRC: %s" % exc)
+            return
         if busy is not None:
             self._set_live_status(str(busy))
             return
-        side = cachepath.find_pack(path)
         if side is not None:
             try:
-                db = drc_mod.IcePack(side, src_path=path,
-                                     verify_src=True)
-            except indexlock.Busy as busy:
-                self._set_live_status(str(busy))
-                return
-            except (ValueError, OSError):
-                pass
+                db = gtkservice.drc_open_pack(side, source=path)
+            except gtkservice.ServiceError as exc:
+                if exc.kind == "busy":
+                    self._set_live_status(str(exc))
+                    return
             else:
                 self.load_drc(path, db=db)  # adopt the fresh pack
                 return
@@ -7363,8 +7387,6 @@ class Viewer:
     def _drc_pack_and_load(self, path):
         """Run `floe-index drc <db>` with its log in a MODAL
         dialog, then load the pack."""
-        from . import drc as drc_mod
-        from . import cachepath
         from .vfsclient import find_binary
         try:
             bin_ = find_binary()
@@ -7372,8 +7394,11 @@ class Viewer:
             self._set_live_status("DRC indexing failed: %s" % exc)
             return
         held = getattr(self._drc, "path", None)
-        if held and indexlock.key(indexlock.PACK, held) == indexlock.key(
-                indexlock.PACK, cachepath.pack_path(path)):
+        try:
+            side = gtkservice.drc_find(path)
+        except gtkservice.ServiceError:
+            side = None
+        if held and side and os.path.realpath(held) == os.path.realpath(side):
             # this review holds the pack being re-packed (its .db ran
             # again): let go first - its own reader's lock would refuse
             # the re-pack (floe/indexlock.py)
@@ -7382,7 +7407,7 @@ class Viewer:
 
         def on_success():
             self.load_drc(path)
-            if not isinstance(self._drc, drc_mod.IcePack):
+            if not getattr(self._drc, "packed", False):
                 # the indexer that just ran wrote a layout the reader
                 # refuses: it is an OUTDATED binary
                 self._set_live_status(
@@ -7508,13 +7533,12 @@ class Viewer:
         browser. `db` = an already-opened backend to adopt (the
         dialog preflight verifies the pack by opening it - opening
         twice pays the block-table bbox scan twice)."""
-        from . import drc as drc_mod
         if db is None:
             try:
-                db = drc_mod.load_db(path)
+                db = gtkservice.drc_load(path)
             except Exception as exc:
-                # a pack another run re-packs says who (floe/indexlock.py)
-                msg = (str(exc) if isinstance(exc, indexlock.Busy)
+                # a pack another run re-packs says who (floe_vfs::lock)
+                msg = (str(exc) if getattr(exc, "kind", None) == "busy"
                        else "DRC load failed: %s" % exc)
                 if self._drcwin is not None:
                     self._drcwin._info.set_text(msg)
@@ -7599,14 +7623,13 @@ class Viewer:
         """Attach a <deck>.rules.json metadata sidecar to the open
         db; the detail pane then shows constraint / measured /
         source layers per error."""
-        from . import svrf
         db = self._drc
         if db is None:
             if not silent:
                 self._set_live_status("open a DRC .db first")
             return False
         try:
-            data = svrf.load_rules(path)
+            data = gtkservice.svrf_rules(path)
         except (OSError, ValueError) as exc:
             if not silent:
                 self._set_live_status(
@@ -7711,7 +7734,7 @@ class Viewer:
         win, db = self._drcwin, self._drc
         if win is None or db is None:
             return
-        backend = ("pack v4" if isinstance(db, drc_mod.IcePack)
+        backend = ("pack v4" if getattr(db, "packed", False)
                    else "ASCII - NO INDEX")
         rules = ""
         if self._drc_rmeta is not None:
@@ -8195,11 +8218,11 @@ class Viewer:
         db = self._drc
         if db is None or not hasattr(db, "set_status"):
             return
-        val = drc_mod.STATUS_WAIVED if on else drc_mod.STATUS_NONE
+        val = STATUS_WAIVED if on else STATUS_NONE
         try:
-            for ei in eis:
-                db.set_status(ci, ei, val)
-        except OSError as exc:
+            # one request for the selection (floe2 gtk-service)
+            db.set_statuses(ci, list(eis), val)
+        except (OSError, gtkservice.ServiceError) as exc:
             self._set_live_status("waive failed (%s) - is the "
                                   "waive store writable?" % exc)
             return
@@ -8526,7 +8549,7 @@ class Viewer:
         dlg.set_current_folder(
             os.path.dirname(os.path.abspath(db.path)))
         from . import cachepath
-        base = cachepath.db_name_of(db.path)
+        base = gtkservice.db_name_of(db.path)
         dlg.set_current_name(base + ".notes.fe")
         out = dlg.get_filename() \
             if dlg.run() == Gtk.ResponseType.OK else None
@@ -8606,7 +8629,7 @@ class Viewer:
         dlg.set_current_folder(
             os.path.dirname(os.path.abspath(db.path)))
         from . import cachepath
-        base = cachepath.db_name_of(db.path)
+        base = gtkservice.db_name_of(db.path)
         dlg.set_current_name(base + ".waive")
         out = dlg.get_filename() \
             if dlg.run() == Gtk.ResponseType.OK else None
@@ -9037,7 +9060,7 @@ class Viewer:
         have no status: everything counts as not waived)."""
         return (hasattr(db, "get_status")
                 and db.get_status(ci, ei)
-                == drc_mod.STATUS_WAIVED)
+                == STATUS_WAIVED)
 
     def _drc_fill_strip(self, width, color):
         """One-row SOLID strip in `color` at 50% alpha, composited
@@ -9146,7 +9169,6 @@ class Viewer:
         if mc.get("unresolved"):
             lines.append("unresolved: %s"
                          % ", ".join(mc["unresolved"]))
-        from . import svrf
         derived = meta.get("derived", {})
         out, seen, stack = [], set(), list(lays)
         while stack and len(out) < 6:
@@ -9155,7 +9177,7 @@ class Viewer:
                 continue
             seen.add(n)
             out.append("  %s = %s" % (n, derived[n]))
-            stack.extend(svrf.rhs_operands(derived[n]))
+            stack.extend(gtkservice.svrf_operands(derived[n]))
         if out:
             lines.append("derivation:")
             lines += out
@@ -9205,7 +9227,7 @@ class Viewer:
         wrapper only converts um -> dbu."""
         k = self.dbu
         return [(x0 / k, y0 / k, x1 / k, y1 / k)
-                for x0, y0, x1, y1 in drc_mod.cd_segments(e)]
+                for x0, y0, x1, y1 in e.cd_segments()]
 
     def _drc_step(self, delta):
         """n/p: cycle within the VISIBLE list of the open rule

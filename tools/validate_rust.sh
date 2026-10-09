@@ -138,14 +138,16 @@ gates_for() {
             echo "unit worker_client" ;;
         rust/app-core/*|rust/notices/*)
             # the application policy under the Rust command line floe2,
-            # which every CLI gate runs (P1c, docs/SHARED_APP_LAYER.ko.md)
-            echo "unit cell_index $CLI_GATES" ;;
+            # which every CLI gate runs (P1c, docs/SHARED_APP_LAYER.ko.md),
+            # and under the GTK viewer's service (DRC review: drc_ice D12)
+            echo "unit cell_index drc_ice $CLI_GATES" ;;
         rust/app-cli/*|rust/floe2/*)
             # the Rust command line floe2 (P1, docs/SHARED_APP_LAYER.ko.md)
-            echo "unit $CLI_GATES" ;;
+            # and the GTK viewer's service in it (P2)
+            echo "unit drc_ice $CLI_GATES" ;;
         floe/gtkview.py|floe/gtkservice.py)
             # the GTK viewer's entry and its service client (P2)
-            echo "floe2 rust_renderer jobdeck" ;;
+            echo "floe2 rust_renderer jobdeck drc_ice" ;;
         rust/render-core/*|rust/renderd/*|rust/render-cli/*|floe/rust_render.py)
             echo "$RENDER_GATES" ;;
         rust/dbg/*)

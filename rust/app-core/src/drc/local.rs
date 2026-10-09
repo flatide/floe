@@ -18,7 +18,10 @@ pub fn reviewer_tag(explicit: Option<&str>) -> String {
         .or_else(|| env::var("FLOE_REVIEWER").ok())
         .unwrap_or_default();
     let display = env::var("DISPLAY").unwrap_or_default();
-    let host = display.rsplit_once(':').map(|(h, _)| h).unwrap_or("");
+    // no colon: the whole value is the host, as floe/drc.py read it
+    let host = display
+        .rsplit_once(':')
+        .map_or(display.as_str(), |(h, _)| h);
     let ssh = env::var("SSH_CONNECTION")
         .ok()
         .filter(|s| !s.is_empty())
@@ -175,7 +178,7 @@ pub fn is_packed_source(source: &Path) -> Result<bool> {
 }
 /// The pack's reader lock (floe_vfs::lock, kind Pack): refused - as
 /// ErrorKind::Busy, with who - while a run re-packs it.
-fn pack_reader(path: &Path) -> Result<floe_vfs::lock::ReaderGuard> {
+pub(crate) fn pack_reader(path: &Path) -> Result<floe_vfs::lock::ReaderGuard> {
     let key = floe_vfs::lock::key(floe_vfs::lock::Kind::Pack, &path.to_string_lossy());
     floe_vfs::lock::readers(
         &[key],

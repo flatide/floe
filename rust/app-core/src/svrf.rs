@@ -447,6 +447,13 @@ impl Rules {
 
 /// Same ASCII identifier/operator subset as floe.svrf.rhs_operands. This only
 /// follows the already parsed derivation graph for the six-line detail pane.
+/// Operand names of a derivation's right-hand side - operators, options and
+/// numbers dropped (floe/svrf.py rhs_operands; the viewer walks a sidecar's
+/// derivation text with it).
+pub fn rhs_operands(rhs: &str) -> Vec<String> {
+    operands(rhs).map(str::to_string).collect()
+}
+
 fn operands(rhs: &str) -> impl Iterator<Item = &str> {
     let mut i = 0;
     std::iter::from_fn(move || {

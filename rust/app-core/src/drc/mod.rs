@@ -5,6 +5,7 @@ mod ascii;
 pub mod build;
 pub mod capture;
 mod database;
+pub mod desktop;
 mod filters;
 mod local;
 mod measure;

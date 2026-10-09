@@ -232,3 +232,298 @@ class ServiceCache:
     def set_levels(self, ids):
         self.ids = normalize_levels(ids)
         return self.load()
+
+
+# ---- DRC review (P2b: app-core drc::desktop) ----------------------------
+
+STATUS_NONE = 0
+STATUS_WAIVED = 1
+_ERROR_PAGE = 256
+_STATUS_PAGE = 4096
+
+
+class DrcError(object):
+    """One violation as the service sent it: kind 'p' (polygon) or 'e'
+    (edge), its global 1-based number, points in um (floe/drc.py
+    DrcError)."""
+    __slots__ = ("kind", "num", "pts", "_db", "_ci", "_ei")
+
+    def __init__(self, kind, num, pts, db=None, ci=None, ei=None):
+        self.kind = kind
+        self.num = num
+        self.pts = [tuple(p) for p in pts]
+        self._db, self._ci, self._ei = db, ci, ei
+
+    def bbox(self):
+        xs = [p[0] for p in self.pts]
+        ys = [p[1] for p in self.pts]
+        return (min(xs), min(ys), max(xs), max(ys))
+
+    def center(self):
+        x0, y0, x1, y1 = self.bbox()
+        return ((x0 + x1) / 2, (y0 + y1) / 2)
+
+    def cd_segments(self):
+        """The CD ruler segments, um 4-tuples (none for complex shapes)."""
+        if self._db is None:
+            return []
+        return [tuple(s) for s in self._db._request(
+            "drc_cd", check=self._ci, error=self._ei)]
+
+
+class _Errors(object):
+    """A rule's errors, fetched by pages as they are read."""
+    __slots__ = ("_db", "_ci", "_count", "_pages")
+
+    def __init__(self, db, ci, count):
+        self._db, self._ci, self._count = db, ci, count
+        self._pages = {}
+
+    def __len__(self):
+        return self._count
+
+    def _page(self, k):
+        page = self._pages.get(k)
+        if page is None:
+            if len(self._pages) > 64:
+                self._pages.pop(next(iter(self._pages)))
+            rows = self._db._request("drc_errors", check=self._ci,
+                                     start=k * _ERROR_PAGE,
+                                     count=_ERROR_PAGE)
+            page = [DrcError(kind, num, pts, self._db, self._ci,
+                             k * _ERROR_PAGE + j)
+                    for j, (kind, num, pts) in enumerate(rows)]
+            self._pages[k] = page
+        return page
+
+    def __getitem__(self, i):
+        if isinstance(i, slice):
+            return [self[j] for j in range(*i.indices(self._count))]
+        if i < 0:
+            i += self._count
+        if not 0 <= i < self._count:
+            raise IndexError(i)
+        return self._page(i // _ERROR_PAGE)[i % _ERROR_PAGE]
+
+    def __iter__(self):
+        for i in range(self._count):
+            yield self[i]
+
+
+class DrcCheck(object):
+    __slots__ = ("name", "desc", "declared", "errors", "start")
+
+    def __init__(self, db, ci, row):
+        self.name = row["name"]
+        self.desc = row["desc"]
+        self.declared = row["declared"]
+        self.start = row["start"]
+        self.errors = _Errors(db, ci, row["count"])
+
+
+class _Drc(object):
+    """What both kinds of database share: the service handle, the rules
+    and their errors."""
+    packed = False
+
+    def __init__(self, result):
+        self._handle = result["handle"]
+        self.path = result["path"]
+        self.cell = result["cell"]
+        self.total = result["total"]
+        self.precision = result["precision"]
+        self.checks = [DrcCheck(self, ci, row)
+                       for ci, row in enumerate(result["checks"])]
+        for line in result.get("notices") or []:
+            sys.stderr.write(line + "\n")
+
+    def _request(self, op, **fields):
+        if self._handle is None:
+            raise ServiceError("input", "the DRC database is closed")
+        return service().request(op, handle=self._handle, **fields)
+
+    def close(self):
+        """Let the service close it (and the pack's reader lock with it)."""
+        handle, self._handle = self._handle, None
+        if handle is not None:
+            try:
+                service().request("drc_close", handle=handle)
+            except ServiceError:
+                pass
+
+
+class AsciiDrc(_Drc):
+    """An ASCII results file read whole: rules and errors, no review."""
+
+
+class PackDrc(_Drc):
+    """A pack under review (floe/drc.py IcePack's surface): statuses read
+    by pages and written through at once, notes, the waive and note files,
+    spatial queries."""
+    packed = True
+
+    def __init__(self, result):
+        super().__init__(result)
+        self._counts = [tuple(c) for c in result["counts"]]
+        self._status = {}
+        self.waive_path = result.get("waive_path")
+        self.note_path = result.get("note_path")
+        self._set_notes(result.get("notes") or [])
+
+    def _set_notes(self, notes):
+        self._notes = [(n["text"], sorted(n["members"])) for n in notes]
+        self._note_of = {g: text for text, members in self._notes
+                         for g in members}
+
+    def _notes_reply(self, reply):
+        self._set_notes(reply.get("notes") or [])
+        for line in reply.get("notices") or []:
+            sys.stderr.write(line + "\n")
+
+    # ---- statuses ------------------------------------------------------
+    def _status_chunk(self, ci, k):
+        key = (ci, k)
+        got = self._status.get(key)
+        if got is None:
+            if len(self._status) > 256:
+                self._status.pop(next(iter(self._status)))
+            hexed = self._request("drc_status", check=ci,
+                                  start=k * _STATUS_PAGE, count=_STATUS_PAGE)
+            got = bytearray.fromhex(hexed)
+            self._status[key] = got
+        return got
+
+    def get_status(self, ci, ei):
+        return self._status_chunk(ci, ei // _STATUS_PAGE)[ei % _STATUS_PAGE]
+
+    def set_statuses(self, ci, eis, value):
+        """Set the status of rule `ci`'s errors `eis` (written at once)."""
+        eis = [int(e) for e in eis]
+        if not eis:
+            return
+        reply = self._request("drc_set_status", check=ci, errors=eis,
+                              status=int(value) & 0xFF)
+        self._counts[ci] = tuple(reply["counts"])
+        for ei in eis:
+            chunk = self._status.get((ci, ei // _STATUS_PAGE))
+            if chunk is not None:
+                chunk[ei % _STATUS_PAGE] = int(value) & 0xFF
+
+    def set_status(self, ci, ei, value):
+        self.set_statuses(ci, [ei], value)
+
+    def status_counts(self, ci):
+        return self._counts[ci]
+
+    def status_page(self, ci, waived, start, limit):
+        return self._request("drc_status_page", check=ci, waived=bool(waived),
+                             start=int(start), limit=int(limit))
+
+    def status_rank(self, ci, waived, ei):
+        return self._request("drc_status_rank", check=ci,
+                             waived=bool(waived), error=int(ei))
+
+    def query_rect(self, x0_um, y0_um, x1_um, y1_um, cap=2000, checks=None,
+                   waived=None):
+        rows = self._request(
+            "drc_query", bbox=[x0_um, y0_um, x1_um, y1_um], cap=int(cap),
+            checks=None if checks is None else [int(c) for c in checks],
+            waived=waived)
+        return [(ci, ei, DrcError(kind, num, pts, self, ci, ei))
+                for ci, ei, kind, num, pts in rows]
+
+    # ---- notes ---------------------------------------------------------
+    def error_gid(self, ci, ei):
+        return self.checks[ci].start + ei
+
+    def get_note(self, ci, ei):
+        return self._note_of.get(self.error_gid(ci, ei))
+
+    def get_note_gid(self, gid):
+        return self._note_of.get(gid)
+
+    def set_note(self, gids, text):
+        self._notes_reply(self._request("drc_set_note",
+                                        gids=[int(g) for g in gids],
+                                        text=text or ""))
+
+    def clear_note(self, gids):
+        self._notes_reply(self._request("drc_clear_note",
+                                        gids=[int(g) for g in gids]))
+
+    def notes_list(self):
+        return list(self._notes)
+
+    def note_export(self, dst):
+        self._request("drc_note_export", path=os.path.abspath(dst))
+
+    def note_import(self, src):
+        reply = self._request("drc_note_import", path=os.path.abspath(src))
+        self._notes_reply(reply)
+        return reply["count"]
+
+    def waive_export(self, dst):
+        self._request("drc_waive_export", path=os.path.abspath(dst))
+
+    def waive_import(self, src):
+        reply = self._request("drc_waive_import", path=os.path.abspath(src))
+        self._counts = [tuple(c) for c in reply["counts"]]
+        self._status.clear()
+        return reply["waived"]
+
+
+def _drc(result):
+    return PackDrc(result) if result["packed"] else AsciiDrc(result)
+
+
+def drc_busy(db):
+    """Who re-packs `db`'s pack now, or None."""
+    return service().request("drc_busy", db=os.path.abspath(db))
+
+
+def drc_find(db):
+    """`db`'s pack, or None."""
+    return service().request("drc_find", db=os.path.abspath(db))
+
+
+def drc_open_pack(pack, source=None, reviewer=None):
+    """A pack under review; `source` (the .db) must match its fingerprint."""
+    return _drc(service().request(
+        "drc_open", path=os.path.abspath(pack), mode="pack",
+        source=None if source is None else os.path.abspath(source),
+        reviewer=reviewer))
+
+
+def drc_load(path, reviewer=None):
+    """floe/drc.py load_db: a pack given, or the .db's current pack, else
+    the ASCII file."""
+    return _drc(service().request("drc_open", path=os.path.abspath(path),
+                                  mode="load", reviewer=reviewer))
+
+
+def svrf_rules(path):
+    """A `<deck>.rules.json` sidecar as written (ValueError when it is
+    not one)."""
+    try:
+        reply = service().request("svrf_rules", path=os.path.abspath(path))
+    except ServiceError as exc:
+        raise ValueError(str(exc))
+    if reply.get("warning"):
+        sys.stderr.write(reply["warning"] + "\n")
+    return reply["rules"]
+
+
+def svrf_operands(rhs):
+    """Operand names of a derivation's right-hand side."""
+    return service().request("svrf_operands", rhs=rhs)
+
+
+def db_name_of(path):
+    """The results database's name for a pack or .db path (a hidden
+    `.<db>.tray` and a legacy `<db>.ice` both give `<db>`)."""
+    name = os.path.basename(path)
+    if name.startswith(".") and name.endswith(".tray"):
+        return name[1:-len(".tray")] or name
+    if name.endswith(".ice"):
+        return name[:-len(".ice")] or name
+    return name

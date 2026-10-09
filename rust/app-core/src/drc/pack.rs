@@ -352,6 +352,12 @@ impl Pack {
     pub(crate) fn hold(&mut self, reader: floe_vfs::lock::ReaderGuard) {
         self.reader = Some(reader);
     }
+    /// The embedded `[status]` and `[wcount]` sections' offsets (the
+    /// retired in-pack review state: a desktop review's seed and last
+    /// resort, drc::desktop).
+    pub(crate) fn review_sections(&self) -> (u64, u64) {
+        (self.status, self.wcount)
+    }
     /// Opening is read-only, including legacy embedded statuses. Sidecars are
     /// selected by the trusted local caller, never synthesized or overwritten.
     pub fn open(path: &Path, cancelled: &AtomicUsize) -> Result<Self> {

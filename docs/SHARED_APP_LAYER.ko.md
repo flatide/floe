@@ -17,6 +17,7 @@ python을 사용하지 않도록 변경해줘."
 | `app-core` | 앱 정책: 데이터셋·잡덱(파서·소스·계획·스펙·뷰)·DRC(팩·ASCII·필터·리뷰 사이드카)·레이어 속성·캡처·clip·색인 판단·셀 인덱스. HTTP·GTK·Python과 무관 | 공유 |
 | `worker-client` | renderd의 Rust 클라이언트(`rust_render.py`와 같은 프로토콜, `scene_gen` 고정 질의) | 공유 |
 | `notices` | 배포 고지 목록 | 공유 |
+| app-core `drc::desktop` | 데스크톱 뷰어의 DRC 리뷰(P2b): GTK가 써 온 Python IcePack의 리뷰 동작 그대로 — 클릭마다 상태 바이트·규칙 카운터를 제자리에 씀, 다른 실행의 사이드카는 `.stale-<epoch>`로 옮기고 팩의 내장 섹션으로 새로 만듦, 쓸 수 없는 결과 폴더는 임시 폴더(경로 해시 이름), 그것도 안 되면 팩 안, 노트는 고칠 때마다 통째로 쓰고 마지막 노트가 없어지면 파일을 지움, Python이 쓴 줄을 너그럽게 읽음. 팩·ASCII 묶음 `Opened`(load_db 규칙, 검사 행, 오류 페이지, CD 선분) | 공유 |
 | app-core `desktop` | 데스크톱 뷰어가 그리기 전에 묻는 것: 열 수 있는지(`ready`: 준비·현재성·누가 재색인 중인지), 레이아웃 meta(모든 키 + 색), 빈 레이어 목록 규칙(`list_layers`·안내 줄), layerprops 행(P2a) | 공유 |
 | `app-cli` | 웹이 없는 CLI 명령: index·info·render·probe·clip·jobdeck·drc·svrf·fe-embed·selfcheck. webui `rust/app/src`에서 웹 명령을 뺀 것. 프로그램 이름과 입력 오류의 종료 코드는 실행 파일이 정한다(`Host`의 `name`·`input_error_exit`, `floe_app_core::set_program`; 기본 floe2-web·2) | 공유(P1a; webui의 `floe2-web`이 이 크레이트를 쓰도록 바꾸는 일은 webui 쪽에서) |
 | `floe2` | jobdeck의 제품 명령줄(P1c부터 유일한 floe2 CLI): 공유 CLI 명령 + `view`(그리고 인자 없음·소스만)는 GTK 뷰어(`python -m floe.gtkview`). 버전 = `floe/__init__.py`의 `__version__`. 입력 오류 exit 1(Python CLI와 같음) | jobdeck만 |
@@ -43,7 +44,7 @@ python을 사용하지 않도록 변경해줘."
 | P1a | `app-cli`와 `floe2` 실행 파일. Python CLI는 아직 그대로 둔다 | 0.12.327 |
 | P1b | 빠진 기능을 Rust로(G1, G3~G8; §4). G2 밀도 요청·G9 `phase=render`는 `view`만 쓰므로 P2·P4로 미룸 | 0.12.328 |
 | P1c | 게이트·배포·별칭을 Rust `floe2`로 바꾸고 Python `floe2/` 패키지를 지운다(§4) | 0.12.328 |
-| P2 | `floe2 gtk-service`(stdio JSON-lines). GTK 뷰어의 비-UI 판단을 Rust로 옮기고 Python 모듈을 걷어낸다. 푸시 단위(§5): P2a 열기·준비·레벨 행·덱 스펙·레이어 속성 행, P2b DRC·svrf, P2c 레이어 속성 편집·fill, P2d(P3와 함께) 오라클을 떼어 낸 뒤 Python 모듈 삭제 | P2a 0.12.329 |
+| P2 | `floe2 gtk-service`(stdio JSON-lines). GTK 뷰어의 비-UI 판단을 Rust로 옮기고 Python 모듈을 걷어낸다. 푸시 단위(§5): P2a 열기·준비·레벨 행·덱 스펙·레이어 속성 행, P2b DRC·svrf, P2c 레이어 속성 편집·fill, P2d(P3와 함께) 오라클을 떼어 낸 뒤 Python 모듈 삭제 | P2a 0.12.329, P2b 0.12.330 |
 | P3 | KLayout 레거시를 제품 경로에서 빼고, 동결 `floe` 셸은 개발 전용 오라클로 둔다 | 예정 |
 | P4 | (선택) GTK 렌더 루프를 Rust `ViewController`로 | 별도 승인 |
 
@@ -108,3 +109,24 @@ python을 사용하지 않도록 변경해줘."
   - 실제 GTK 창(`GuiSmokeTests`)은 Rust `floe2 view` → gtkview → 서비스로 연다.
 - **현장 영향:** floe2 뷰어도 심볼릭 링크인 캐시 폴더를 열지 않는다(§4의 차이가 뷰어까지 옴). 열기가 Rust 쪽에서 더 엄격하다(버전·vfs·design.ovm 확인 — 예전 뷰어는 meta.json만 봤다).
 - **다음:** P2b DRC(팩·상태·노트·waive·가져오기/내보내기 — 마커마다 부르던 상태·노트는 페이지 단위로 받아 GTK가 들고 있는다)와 svrf 사이드카, P2c 레이어 속성 저장·게시와 fill 패턴, P2d는 P3(오라클 분리)와 함께 Python 모듈 삭제.
+
+### P2b (0.12.330) — DRC 리뷰와 svrf 사이드카
+
+- **결정:** 웹의 리뷰 저장소(`drc::review::store`: snapshot → draft → publish, 팩 inode에 묶임, 처음 쓸 때 확인, 0600, 편집마다 파일 전체 재작성)는 GTK가 써 온 동작과 다르다(조사 2026-10-09).
+  - 파일 형식은 같다.
+  - 그러나 이 저장소를 그대로 쓰면 현장에서 보이는 것이 바뀐다: 1억 오류 팩의 클릭이 수백 MB 재작성이 되고, 같은 .db를 재팩하면 리뷰를 잃고, 읽기 전용 결과 폴더에서 쓸 수 없다.
+  - 그래서 GTK용으로 Python IcePack의 동작을 app-core `drc::desktop`로 옮겼다. 웹 저장소는 webui용으로 그대로다.
+  - 두 방식은 같은 파일을 같은 형식으로 읽고 쓴다. 같은 리뷰를 웹과 GTK가 동시에 고치는 경우의 조정은 webui와 함께 정할 일이다(웹 저장소 주석: GTK 같은 비협조 작성자와 CAS가 아니다).
+- **서비스 요청:** `drc_busy`, `drc_find`, `drc_open`(mode pack|load), `drc_errors`, `drc_status`(hex), `drc_set_status`(선택 한 번에), `drc_status_page`, `drc_status_rank`, `drc_query`, `drc_set_note`·`drc_clear_note`, `drc_note_export`·`drc_note_import`·`drc_waive_export`·`drc_waive_import`, `drc_cd`, `drc_close`, `svrf_rules`, `svrf_operands`.
+- **GTK 쪽:** floe/gtkservice.py `PackDrc`·`AsciiDrc`가 gui.py가 쓰던 IcePack·DrcDb 속성을 그대로 준다.
+  - 오류는 256개씩 받아 두고, 상태는 4096개씩 받아 들고 있다가 쓰면 함께 고친다. 마커마다 묻던 상태와 노트는 왕복 없이 답한다.
+  - waive 선택은 요청 한 번(`set_statuses`)이다.
+  - gui.py는 floe/drc.py·floe/svrf.py를 더 이상 부르지 않는다.
+  - `offset_screen_segment`(화면 기하)와 상태 상수는 gui.py에 있다.
+  - 동결 floe의 GUI도 같은 서비스를 쓴다. DRC는 KLayout과 무관하기 때문이다.
+- **같은 답인지:** DRC 게이트 D12가 같은 팩을 IcePack과 서비스로 열어 대조한다.
+  - 작은 픽스처: 검사·오류·CD 선분, 서비스가 쓴 상태를 Python이 읽고 카운터가 맞음, 페이지·순위, 무작위 사각형 질의(필터 포함).
+  - gen_drcdb 자산(검사 60, 오류 수천): 전체 오류, 무작위 waive 뒤의 카운터·페이지·순위, 상한·필터·검사 부분집합별 질의.
+  - 파일: 노트 파일 바이트 = IcePack 직렬화, 다시 열면 같은 노트, 지우면 파일 없음. waive 내보내기 바이트가 같고 남의 파일은 거절. 리뷰 중 재팩은 75. 남의 사이드카는 옮기고 새로 만듦.
+  - svrf: 피연산자와 사이드카.
+- **열린 항목:** Rust 색인(app-core index·cell_index·drc build)은 소스 옆에 `X.oas.floe.index.lock`(숨김 아님)과 `.X.oas.ice.index.lock`을 남긴다. webui의 앱 수준 잠금(리비전·등록 세트·산출물 보호가 이 이름을 안다)이며, 0.12.328부터 `floe2 index`가 Rust라 jobdeck 현장에서도 생긴다. floe_vfs 잠금(`.floe-lock/`)으로 옮기는 일은 webui와 함께 정한다.

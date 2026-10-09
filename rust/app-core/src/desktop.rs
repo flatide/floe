@@ -152,6 +152,30 @@ pub fn list_layers(meta: &mut Value) -> Vec<String> {
     left
 }
 
+/// A rule deck's sidecar (`<deck>.rules.json`) as the viewer reads it - the
+/// JSON as written, its format checked, a newer version said
+/// (floe/svrf.py load_rules).
+pub fn rules_sidecar(path: &Path) -> Result<(Value, Option<String>)> {
+    let f = catalog::regular_file(path)?;
+    const MAX_RULES_BYTES: u64 = 64 * 1024 * 1024;
+    let data: Value = serde_json::from_reader(BufReader::new(f.take(MAX_RULES_BYTES + 1)))
+        .map_err(|e| Error::input(format!("{}: {e}", path.display())))?;
+    if data.get("format").and_then(Value::as_str) != Some("floe-svrf-rules") {
+        return Err(Error::input(format!(
+            "{} is not a floe-svrf-rules file",
+            path.display()
+        )));
+    }
+    let version = data.get("version").and_then(Value::as_i64).unwrap_or(0);
+    let warning = (version > 1).then(|| {
+        format!(
+            "[floe][warn] {} is a newer rules format (v{version} > v1)",
+            path.display()
+        )
+    });
+    Ok((data, warning))
+}
+
 /// The note a viewer gives for the pairs `list_layers` left out.
 pub fn unlisted_note(left: &[String]) -> Option<String> {
     if left.is_empty() {
