@@ -60,6 +60,48 @@ density(`design.ovs`, 기본 켜짐), pass 1의 top-plane-first budget fit, 아�
   고정값을 따라 바꿨다. 웹은 여전히 표시된 프레임을 기다린다(§6).
 - `web_startup`: 지난 병합부터 실패하던 것. 카메라 oracle이 `_die_bbox`를 묶는다.
 
+## 1c. 2026-10-09 병합(인덱스 잠금)
+
+사용자 요청 "feature/jobdeck에 인덱싱 관련 수정했으니 머지해줘."에 따라 jobdeck
+f4e63891(54806b4e, 9378c6d7, f4e63891)을 병합했다(21396e5). 레이아웃 캐시·DRC pack·SVRF
+sidecar를 쓰거나 읽는 쪽이 커널 advisory lock(flock, `rust/vfs/src/lock.rs`,
+`floe/indexlock.py`)을 대상 옆 `.floe-lock/`에 잡는다. 같은 대상을 쓰는 다른 실행, 읽는 중인
+캐시의 전체 재빌드는 누가 돌리든 거부되고(종료 75, 잡은 사람을 밝히는 `[lock]` 한 줄),
+renderd와 덱은 캐시마다 읽기 잠금을 잡는다. 끄기 스위치는 `FLOE_LOCK=off`.
+
+- 충돌: `cli/drcpack.rs`·`cli/vfs.rs`·`render-core/deck.rs`는 rustfmt 차이뿐이었다.
+  `.gitignore`는 웹 revision 잠금 이름과 `.floe-lock/`를 모두 둔다. `render-core/cache.rs`는
+  읽기 잠금(`_lock`)을 `_revision_lease` 앞에 두고(lease가 여전히 마지막으로 놓인다),
+  jobdeck이 나눈 `open`/`open_unlocked`의 공통 생성자에서 revision lease를 잡아 덱 소스도
+  예전처럼 lease를 갖는다.
+- 봉인된 revision(`revision.json`)은 vfs 읽기 잠금을 잡지 않는다(`Cache::open`,
+  `Deck::open`): 제자리에서 다시 빌드되지 않고 native lease가 읽기 잠금 역할을 하며, 잡으면
+  `.X.oas.ice.revisions/` 안에 `.floe-lock`이 생겨 inventory가 모르는 항목(partial)으로 센다.
+- 웹이 띄우는 `floe-index`(004b77b): 잠금에 거부된 실행은 아무것도 쓰지 않았으므로
+  `design.ovo.tmp`/`.ovr.tmp`(IndexJob)와 `design.ovh.tmp`(셀 인덱스)를 지우지 않는다(잠금을
+  가진 다른 실행의 것). 관리형 제자리 인덱싱과 셀 인덱스는 거부를 `busy`로 알린다. 이번
+  빌드만 쓰는 대상 — revision 후보 `<store>/<revid>`, DRC staging — 은 `FLOE_LOCK=off`로
+  띄운다. 다른 실행이 그 이름을 쓸 수 없고, 잠금 폴더가 그 안에 생기면 DRC staging 정리가
+  거부한다(병합만 한 상태에서 `cache_migration`이 이 때문에 실패했다: 남은 staging의
+  `result.ice`가 게시된 pack과 하드링크로 남아 다음 빌드가 "single-link file" 검사에서
+  멈춤).
+- 덱 소스 카탈로그(14bd94c): Python 카탈로그는 다른 실행이 캐시를 통째로 다시 빌드 중인
+  소스에 `busy`(열려는 쪽이 받는 거부 문구)를 적고 인덱스 없음으로 둔다(실패가 아니라 제외).
+  네이티브 카탈로그와 composite spec의 누락 기록도 같게 했다. 확인은 Python
+  `state(...).opening_refusal()`과 같은 probe `floe_vfs::lock::opening_refusal`(파일을 만들지
+  않고 잠금을 남기지 않음)로 하고, 고정된 revision 세트의 소스는 묻지 않는다.
+- 웹 뷰도 읽기 잠금에 참여한다(사용자 원칙: 쓰고 있는 파일은 누가 돌리든 재빌드 거부).
+  쓰기 가능한 폴더면 서버의 renderd가 캐시 옆 `.floe-lock/`에 등록한다. 그래서 "소스·캐시를
+  쓰지 않는다"를 파일 digest로 확인하는 검사는 `.floe-lock/`을 뺀다(`web_handoff`,
+  `web_browse`; bf0eb74). 같은 이유로 `owner_service`의 `guest_drc` 테스트(`stamp`)도
+  `.floe-lock`을 빼야 하는데, `rust/web/tests/support/guest_drc.rs`는 다른 작업이 수정 중이라
+  이번에 고치지 않았다(§6).
+- `web_file_display`: GTK가 mono 초기화를 `_drc_release()`로 옮겼다(동작 같음). oracle이
+  위임된 초기화를 따라간다.
+- 남은 차이: 웹의 DRC pack 게시(staging → `.X.db.tray` rename)와 웹 리뷰는 GTK·CLI의
+  pack 잠금(`X.db.pack`)에 참여하지 않는다. 병합 전부터 서로 조율이 없던 부분으로, GTK가
+  리뷰 중인 pack을 웹이 다시 게시하는 경우 등은 따로 정해야 한다.
+
 ## 2. 소유자 화면(`index.html`)의 배치
 
 GTK `floe/gui.py`(feature/jobdeck)와 같은 구성이다. 모든 기존 컨트롤 id는 그대로이며
@@ -359,6 +401,9 @@ view root도 WS `view.set`의 `root`로 가며 해결(`root_ticket`)은 같은 �
     (지난 병합부터), `index --no-page-occupancy`/`--no-ovs`, `info --chips`,
     `render --chip/--chip-off/--fit-chip`, `view --density`.
   - `web_menu_inventory --require-complete`: density 토글(`open`).
+  - `owner_service`의 `guest_drc::independent_drc_guests_are_explicit_read_only_and_revision_bound`
+    (2026-10-09 병합부터): 게스트 뷰의 읽기 잠금 등록(`.floe-lock/`)을 쓰기로 센다. 테스트의
+    `stamp`가 `.floe-lock` 디렉터리를 건너뛰면 된다(§1c).
   - `web_svrf`, `app_svrf`, `svrf_native`: oracle로 쓰던 Python SVRF 파서가 cb634dd4에서
     `floe-index svrf`(rust/cli)로 옮겨져 지난 병합부터 실패한다. oracle을 `floe-index svrf`로
     바꾸거나 웹이 그 빌더를 직접 쓰도록 정해야 한다.
