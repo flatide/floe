@@ -113,12 +113,13 @@ pub fn compose(analysis: &Analysis, cancelled: &AtomicUsize) -> Result<Composite
         let info = analysis.catalog.infos.get(&p.tc);
         if info.is_none_or(|i| !i.ok() || !i.indexed) {
             if seen.insert((&p.chip, p.idx, &p.tc, None)) {
-                skipped.push(skip(
-                    p,
-                    "not_indexed",
-                    "no fresh index cache (run --index)".into(),
-                    false,
-                ));
+                // a source another run is indexing says who
+                // (floe/jobdeck/render.py) instead of asking for an index
+                let detail = info
+                    .map(|i| i.busy.as_str())
+                    .filter(|busy| !busy.is_empty())
+                    .unwrap_or("no fresh index cache (run --index)");
+                skipped.push(skip(p, "not_indexed", detail.into(), false));
             }
             continue;
         }

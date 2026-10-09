@@ -145,6 +145,10 @@ pub struct SourceInfo {
     pub error: String,
     pub indexed: bool,
     pub cache_dir: PathBuf,
+    /// Another run rebuilds the cache whole (floe_vfs::lock): who, as an
+    /// opening reader is told - the source is left out, not failed
+    /// (floe/jobdeck/sources.py `busy`).
+    pub busy: String,
 }
 impl SourceInfo {
     pub fn ok(&self) -> bool {
@@ -187,6 +191,7 @@ impl SourceCatalog {
                 error: String::new(),
                 indexed: false,
                 cache_dir: PathBuf::new(),
+                busy: String::new(),
             };
             match std::fs::metadata(&path) {
                 Ok(m) if m.is_file() => {
@@ -235,10 +240,26 @@ impl SourceCatalog {
                     } else {
                         cache::cache_path(&path)?
                     };
-                    info.indexed = matches!(
-                        cache::inspect(&path, &info.cache_dir),
-                        Ok(cache::CacheState::Current)
-                    );
+                    // A pinned revision is never rebuilt in place; a cache
+                    // another run rebuilds whole is not indexed now.
+                    let busy = self
+                        .pinned
+                        .is_none()
+                        .then(|| {
+                            floe_vfs::lock::opening_refusal(&floe_vfs::lock::key(
+                                floe_vfs::lock::Kind::Vfs,
+                                &info.cache_dir.to_string_lossy(),
+                            ))
+                        })
+                        .flatten();
+                    if let Some(busy) = busy {
+                        info.busy = busy.to_string();
+                    } else {
+                        info.indexed = matches!(
+                            cache::inspect(&path, &info.cache_dir),
+                            Ok(cache::CacheState::Current)
+                        );
+                    }
                 }
                 Ok(_) => {
                     info.status = "missing".into();
