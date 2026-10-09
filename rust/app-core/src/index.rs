@@ -597,11 +597,22 @@ pub struct IndexJob {
     finished: Option<i32>,
     capture: Option<crate::index_progress::Capture>,
 }
+/// floe-index's own locks (floe_vfs::lock) off, for a run whose target is
+/// private to this build - a revision candidate, a DRC staging directory: no
+/// other run can name it, and the `.floe-lock` folder would land inside the
+/// private directory (a revision store's unknown entry, a staging directory
+/// its cleanup refuses).
+pub(crate) const PRIVATE_TARGET: &[(&str, &str)] = &[("FLOE_LOCK", "off")];
 impl IndexJob {
     /// Reuse the subprocess/cancel/reap lifecycle for DRC staging. Its caller
     /// owns publication and the write lease; VFS cleanup is deliberately off.
-    pub(crate) fn captured(indexer: &Indexer, args: &[OsString]) -> Result<Self> {
-        let mut child = indexer.spawn(args, true)?;
+    /// `env` is added to the indexer's environment (PRIVATE_TARGET).
+    pub(crate) fn captured(
+        indexer: &Indexer,
+        args: &[OsString],
+        env: &[(&str, &str)],
+    ) -> Result<Self> {
+        let mut child = indexer.spawn_env(args, true, env)?;
         let capture = match crate::index_progress::Capture::take(&mut child) {
             Ok(c) => c,
             Err(e) => {
@@ -728,7 +739,9 @@ impl IndexJob {
             let _ = c.finish();
         }
         self.finished = Some(code);
-        if code != 0 {
+        // A run the index locks refused (floe_vfs::lock::BUSY_EXIT) wrote
+        // nothing: a summary temp there is the lock holder's, never ours.
+        if code != 0 && code != floe_vfs::lock::BUSY_EXIT {
             if let Err(e) = self.discard_occupancy_tmp() {
                 // A cleanup problem must not replace the native failure or
                 // cancellation status. Keep the path for explicit recovery.
@@ -794,6 +807,69 @@ mod tests {
         assert_eq!(job.cancel(libc::SIGINT).unwrap(), 130);
         assert_eq!(job.poll().unwrap(), Some(130));
         assert!(job.child.is_none() && job.next.is_none());
+    }
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("floe-index-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+    #[test]
+    fn a_run_the_index_locks_refuse_keeps_the_summary_temp_it_did_not_write() {
+        let dir = scratch("busy-temp");
+        for (code, kept) in [(floe_vfs::lock::BUSY_EXIT, true), (1, false)] {
+            fs::write(dir.join("design.ovo.tmp"), b"holder").unwrap();
+            let child = std::process::Command::new("/bin/sh")
+                .args(["-c", &format!("exit {code}")])
+                .spawn()
+                .unwrap();
+            let mut job = IndexJob {
+                child: Some(child),
+                lease: Vec::new(),
+                directory: dir.clone(),
+                cleanup_occupancy: true,
+                cleanup_representatives: false,
+                next: None,
+                finished: None,
+                capture: None,
+            };
+            let done = loop {
+                if let Some(code) = job.poll().unwrap() {
+                    break code;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            assert_eq!(done, code);
+            assert_eq!(dir.join("design.ovo.tmp").exists(), kept, "exit {code}");
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn a_private_target_runs_the_indexer_without_its_locks() {
+        let dir = scratch("private-target");
+        let script = dir.join("fake-index");
+        fs::write(&script, "#!/bin/sh\nprintf %s \"$FLOE_LOCK\" > \"$1\"\n").unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let indexer = Indexer::discover(&native::Discovery {
+            override_path: Some(script),
+            development_root: None,
+            executable: PathBuf::from("/unused"),
+            search_path: None,
+        })
+        .unwrap();
+        let seen = dir.join("seen");
+        let mut job =
+            IndexJob::captured(&indexer, &[seen.clone().into_os_string()], PRIVATE_TARGET).unwrap();
+        let done = loop {
+            if let Some(code) = job.poll().unwrap() {
+                break code;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(done, 0);
+        assert_eq!(fs::read_to_string(&seen).unwrap(), "off");
+        fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn representatives_are_explicit_additive_and_bounded() {

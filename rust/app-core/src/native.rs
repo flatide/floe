@@ -171,11 +171,21 @@ impl Indexer {
         Ok(())
     }
     pub(crate) fn spawn(&self, args: &[OsString], capture: bool) -> Result<Child> {
+        self.spawn_env(args, capture, &[])
+    }
+    /// `spawn` with these variables added to the inherited environment.
+    pub(crate) fn spawn_env(
+        &self,
+        args: &[OsString],
+        capture: bool,
+        env: &[(&str, &str)],
+    ) -> Result<Child> {
         cache::utf8(&self.binary)?;
         // CLI output still streams to its descriptors. Managed jobs use two
         // bounded nonblocking pipes, never output() or a shell/Python fallback.
         Ok(Command::new(&self.binary)
             .args(args)
+            .envs(env.iter().copied())
             .stdin(Stdio::null())
             .stdout(if capture {
                 Stdio::piped()

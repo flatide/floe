@@ -65,7 +65,7 @@ impl Build {
             &Action::Build,
         )?;
         check_cancelled(stop)?;
-        let job = IndexJob::captured(&indexer, &args)?;
+        let job = IndexJob::captured(&indexer, &args, super::PRIVATE_TARGET)?;
         Ok(Self {
             job,
             candidate,

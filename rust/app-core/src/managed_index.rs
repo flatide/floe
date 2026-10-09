@@ -299,6 +299,14 @@ fn run(
                     Some(130 | 143) => {
                         return Err(Error::new(ErrorKind::Cancelled, "native index cancelled"))
                     }
+                    // floe-index refused: another run indexes the cache, or
+                    // a whole rebuild has readers (floe_vfs::lock)
+                    Some(floe_vfs::lock::BUSY_EXIT) => {
+                        return Err(Error::new(
+                            ErrorKind::Busy,
+                            "native index refused: the cache is being indexed or used",
+                        ))
+                    }
                     Some(_) => return Err(Error::new(ErrorKind::Worker, "native index failed")),
                     None => thread::sleep(Duration::from_millis(20)),
                 }

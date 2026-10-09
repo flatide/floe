@@ -194,8 +194,11 @@ fn hier(
     check_cancelled(cancelled)?;
     stage(Stage::Building);
     let built = native(indexer, &["hier".into(), dir], cancelled);
+    // A run the index locks refused (floe_vfs::lock::BUSY_EXIT) wrote
+    // nothing: an aside file there is the lock holder's, never ours.
+    let busy = matches!(&built, Ok(f) if f.code == floe_vfs::lock::BUSY_EXIT);
     let failed = !matches!(&built, Ok(f) if f.code == 0);
-    if failed {
+    if failed && !busy {
         // A killed or failed writer can leave its aside file; the lease is ours.
         match fs::remove_file(directory.join("design.ovh.tmp")) {
             Ok(()) => (),
@@ -208,6 +211,12 @@ fn hier(
         let text = String::from_utf8_lossy(&built.stderr);
         if let Some(line) = text.lines().rev().find(|l| !l.trim().is_empty()) {
             eprintln!("[floe2] floe-index hier failed: {}", line.trim());
+        }
+        if busy {
+            return Err(Error::new(
+                ErrorKind::Busy,
+                "floe-index hier refused: the cache is being indexed or used",
+            ));
         }
         return Err(Error::new(ErrorKind::Worker, "floe-index hier failed"));
     }
@@ -385,6 +394,7 @@ mod tests {
              [ \"$1\" = hier ] || exit 2\n\
              if [ \"$3\" = --check ]; then echo \"hier file=$2/design.ovh identity=none\"; [ -f \"$2/design.ovh\" ]; exit $?; fi\n\
              [ -f \"$2/fail\" ] && { echo 'hier: synthetic failure' >&2; : > \"$2/design.ovh.tmp\"; exit 1; }\n\
+             [ -f \"$2/busy\" ] && { echo '[lock] a.oas is being indexed by someone' >&2; exit 75; }\n\
              if [ -f \"$2/hang\" ]; then : > \"$2/design.ovh.tmp\"; exec sleep 30; fi\n\
              : > \"$2/design.ovh\"\n\
              echo \"hier file=$2/design.ovh cells=7 edges=9 records=12 unplaced=1 bytes=640 seconds=0.0\"\n",
@@ -454,6 +464,20 @@ mod tests {
             !cache.join("design.ovh.tmp").exists(),
             "failed writer temp kept"
         );
+        assert!(!cache.join("design.ovh").exists());
+    }
+    #[test]
+    fn a_run_the_index_locks_refuse_is_busy_and_keeps_the_holders_temp() {
+        let r = root("busy");
+        let cache = r.0.join(".a.oas.ice");
+        fs::create_dir(&cache).unwrap();
+        // another run (not this service's lease) is writing its aside file
+        fs::write(cache.join("design.ovh.tmp"), b"theirs").unwrap();
+        fs::write(cache.join("busy"), b"").unwrap();
+        let fake = fake(&r);
+        let e = hier(&fake, &cache, &AtomicUsize::new(0), &mut |_| {}).unwrap_err();
+        assert_eq!(e.kind, ErrorKind::Busy);
+        assert_eq!(fs::read(cache.join("design.ovh.tmp")).unwrap(), b"theirs");
         assert!(!cache.join("design.ovh").exists());
     }
     #[test]

@@ -370,6 +370,8 @@ fn run(
             "--jobs".into(),
             options.jobs.to_string().into(),
         ],
+        // the staging directory is this build's alone
+        crate::index::PRIVATE_TARGET,
     )?;
     state.lock().unwrap().snapshot.native_pid = job.pid();
     loop {
