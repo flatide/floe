@@ -83,6 +83,22 @@ def cache_dir_for(src):
     return os.path.abspath(src) + ".tiles"
 
 
+def _probe_output(cmd):
+    """A probe command's stdout read from a temporary file, not a pipe:
+    the tile pool (maxtasksperchild=1) forks replacement workers from its
+    own thread, and a worker forked while a pipe's write end was still open
+    in the parent kept it - the parent's read never saw EOF and the index
+    hung with every worker idle (the Darwin ps/vm_stat probes, battery
+    2026-10-10)."""
+    import subprocess
+    import tempfile
+    with tempfile.TemporaryFile() as out:
+        subprocess.run(cmd, stdout=out, stderr=subprocess.DEVNULL,
+                       check=True)
+        out.seek(0)
+        return out.read()
+
+
 def _rss_gb(pid):
     """Resident set size of a process in GB (Linux /proc, ps fallback)."""
     try:
@@ -93,8 +109,7 @@ def _rss_gb(pid):
     except OSError:
         pass
     try:
-        import subprocess
-        out = subprocess.check_output(["ps", "-o", "rss=", "-p", str(pid)])
+        out = _probe_output(["ps", "-o", "rss=", "-p", str(pid)])
         return int(out.split()[0]) / 1e6
     except Exception:
         return None
@@ -113,11 +128,15 @@ def _rss_many_gb(pids):
                 out[pid] = r
         return out
     try:
+        # ps exits 1 when one of the pids is gone; the rest still print
         import subprocess
-        txt = subprocess.run(
-            ["ps", "-o", "pid=,rss=", "-p",
-             ",".join(str(p) for p in pids)],
-            capture_output=True).stdout
+        import tempfile
+        with tempfile.TemporaryFile() as f:
+            subprocess.run(["ps", "-o", "pid=,rss=", "-p",
+                            ",".join(str(p) for p in pids)],
+                           stdout=f, stderr=subprocess.DEVNULL)
+            f.seek(0)
+            txt = f.read()
         for ln in txt.decode().splitlines():
             f = ln.split()
             if len(f) == 2:
@@ -134,9 +153,7 @@ def _total_ram_gb():
     except (AttributeError, ValueError, OSError):
         pass
     try:
-        import subprocess
-        return int(subprocess.check_output(
-            ["sysctl", "-n", "hw.memsize"])) / 1e9
+        return int(_probe_output(["sysctl", "-n", "hw.memsize"])) / 1e9
     except Exception:
         return None
 
@@ -152,8 +169,7 @@ def _avail_ram_gb():
     except OSError:
         pass
     try:
-        import subprocess
-        out = subprocess.check_output(["vm_stat"]).decode()
+        out = _probe_output(["vm_stat"]).decode()
         page, pages = 4096, 0
         for ln in out.splitlines():
             if "page size of" in ln:

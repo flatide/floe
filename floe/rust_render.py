@@ -6,6 +6,7 @@ to the renderer's strict line protocol. KLayout remains an independently
 selectable rollback backend while the Rust renderer is stabilized.
 """
 
+import itertools
 import os
 import queue
 import shutil
@@ -52,6 +53,10 @@ _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _RAW_SIGNATURE = b"FLOERAW1"
 _RAW_HEADER_LEN = 16
 _OASIS_SIGNATURE = b"%SEMI-OASIS\r\n"
+# FLOE_RUST_RECORD (RustRenderWorker._record_round): a generation's records
+# share its serial; the workers of a process share the file
+_RECORD_SEQ = itertools.count(1)
+_RECORD_LOCK = threading.Lock()
 
 
 class _PopenCompat:
@@ -476,6 +481,8 @@ class RustRenderWorker:
             1, 24 * 60 * 60)
         self._raw_frames = os.environ.get(
             "FLOE_RUST_RAW_FRAME", "on") != "off"
+        # the perf parity gate's recording of every frame (_record_round)
+        self._record_path = os.environ.get("FLOE_RUST_RECORD") or None
         self._init_styles()
 
     def _init_styles(self):
@@ -1813,10 +1820,55 @@ class RustRenderWorker:
                 "once_items": _wire_int(fields, "once_items"),
                 "bin_items": _wire_int(fields, "bin_items"),
             }
+        # (getattr: a gate's stand-in may skip __init__)
+        if getattr(self, "_record_path", None):
+            self._record_round(state, fields, probe, adapter_read_us,
+                               elapsed_ms, output)
         self.res.put(output)
         if final:
             with self._jobs_lock:
                 self._jobs.pop(generation, None)
+
+    def _record_round(self, state, fields, probe, adapter_read_us,
+                      elapsed_ms, output):
+        """FLOE_RUST_RECORD=<path> (the perf parity gate, P4b of
+        docs/SHARED_APP_LAYER.ko.md §7): one JSON line per emitted frame -
+        the frame line's fields as received, what of the job and of this
+        adapter the result reads, this round's measured times and the
+        result without its pixels - for the shared Rust FrameReport
+        (rust/app-core/src/view/perf.rs) to replay. Off unless set; a
+        record that cannot be written is said on stderr, the frame goes
+        on."""
+        try:
+            import json
+            job = state["job"]
+            try:
+                dbu = float(self.cache.meta["dbu"])
+            except (AttributeError, KeyError, TypeError, ValueError):
+                dbu = None
+            seq = state.get("record_seq")
+            if seq is None:
+                seq = state["record_seq"] = next(_RECORD_SEQ)
+            line = json.dumps({
+                "session": os.getpid(), "state": seq,
+                "fields": fields,
+                "job": {key: job[key] for key in (
+                    "bbox", "w", "h", "scope", "bg", "cut_px") if key in job},
+                "probe": bool(probe),
+                "adapter_read_us": adapter_read_us,
+                "elapsed_ms": elapsed_ms,
+                "raster_jobs": self._raster_jobs_count,
+                "max_depth": self._max_depth,
+                "dbu": dbu,
+                "result": {key: value for key, value in output.items()
+                           if key not in ("rgba", "png")},
+            }) + "\n"
+            with _RECORD_LOCK:
+                with open(self._record_path, "a", encoding="utf-8") as fh:
+                    fh.write(line)
+        except Exception as exc:  # the recording never fails a frame
+            print("[rust-render] FLOE_RUST_RECORD: %s" % exc,
+                  file=sys.stderr, flush=True)
 
     def _set_startup_error(self, message):
         with self._condition:

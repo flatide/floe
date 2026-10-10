@@ -8,6 +8,7 @@ pub mod margin;
 pub mod minimap;
 mod palette;
 mod palette_style;
+pub mod perf;
 mod properties;
 mod query;
 #[cfg(test)]

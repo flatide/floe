@@ -46,7 +46,7 @@ python을 사용하지 않도록 변경해줘."
 | P1c | 게이트·배포·별칭을 Rust `floe2`로 바꾸고 Python `floe2/` 패키지를 지운다(§4) | 0.12.328 |
 | P2 | `floe2 gtk-service`(stdio JSON-lines). GTK 뷰어의 비-UI 판단을 Rust로 옮기고 Python 모듈을 걷어낸다. 푸시 단위(§5): P2a 열기·준비·레벨 행·덱 스펙·레이어 속성 행, P2b DRC·svrf, P2c 레이어 속성 편집·fill, P2d(P3와 함께) 오라클을 떼어 낸 뒤 Python 모듈 삭제 | P2a 0.12.329, P2b 0.12.330, P2c 0.12.331, P2d 0.12.332 |
 | P3 | KLayout 레거시를 제품 경로에서 빼고, 동결 `floe` 셸은 개발 전용 오라클(`tools/oracle/floe_oracle`)로 둔다(§6) | 0.12.333 |
-| P4 | GTK 렌더 루프를 공유 Rust `ViewController`로(§7; 사용자 승인 2026-10-10). P4a 공유 컨트롤러의 데스크톱 정책, P4b perf 줄, P4c 서비스의 뷰 채널, P4d GTK 전환, P4e 질의·미니맵, P4f 정리 | P4a 0.12.334, P4c 0.12.335 |
+| P4 | GTK 렌더 루프를 공유 Rust `ViewController`로(§7; 사용자 승인 2026-10-10). P4a 공유 컨트롤러의 데스크톱 정책, P4b perf 줄, P4c 서비스의 뷰 채널, P4d GTK 전환, P4e 질의·미니맵, P4f 정리 | P4a 0.12.334, P4c 0.12.335, P4b 0.12.336 |
 
 ## 3. 동기 규칙
 
@@ -285,3 +285,23 @@ P4b(perf 줄)는 따로 진행 중이다. 이 단계에서 GTK는 아직 그대�
   - 여백 프레임(`viewport`=[400, 300], 더 넓음)과 그 안의 이동(새 프레임 없음, `crop_hits`)
   - 각 프레임이 같은 상자·크기·정책의 `RustRenderWorker` 프레임과 바이트까지 같다(여백은 `bg`와 뷰포트를 넘겨).
   - 닫으면 폴더가 사라지고, 다음 뷰가 열린다.
+
+### P4b (0.12.336) — 프레임 보고와 perf 줄을 Rust로
+
+현장에서 붙여 주시는 perf 줄(상태줄의 짧은 줄과 툴팁·터미널의 긴 줄)은 형식이 계약이다. 그래서 Python과 바이트까지 같게 옮겼다. 따로 진행해 P4c 다음에 들어왔다.
+
+- **`app-core view::perf`(새 모듈, 공유):**
+  - `FrameReport`: 세대 하나의 누적이다. `floe/rust_render.py`의 `_submit_render` 상태와 `_emit_frame`의 합·최댓값·결과 사전을 그대로 옮겼다.
+    - `round(&fields, probe, &PerfAdapter, PerfTiming)`, `frame(&Frame, ..)`, `is_final`
+    - `PerfJob`(bbox, w, h, scope, bg, cut_px), `PerfAdapter`(raster_jobs, max_depth, dbu), `PerfTiming`(어댑터가 잰 adapter_read_us, elapsed_ms)
+  - `perf_status` / `perf_status_with(.., density_only)`는 (긴 줄, 짧은 줄)을 준다. `fmt_count`, `occ_note`, `load_note`(Viewer._load_note)도 옮겼다.
+  - Python 규칙을 따랐다. `round()`는 짝수 쪽으로 반올림하고, `int / int`는 정확히 반올림하며, `%d`는 버리고, `%g`와 `str(float)`, 같은 값 중 처음 것을 고르는 `max`, 줄 글자의 `int()`(`1_000`, `+5`, ` 7`)도 같게 했다.
+  - 같을 수 없는 경우는 renderd가 내지 않는 값뿐이다. 무한·NaN(JSON null), u64나 2^96을 넘는 정수, 비ASCII 숫자, Python `perf_status` 자신이 거절하는 값이다.
+- **`floe/rust_render.py`:** `FLOE_RUST_RECORD=<경로>`를 주면 내보낸 프레임마다 JSON 한 줄을 남긴다. 받은 필드, 작업·어댑터 값, 잰 시간, 픽셀을 뺀 결과다. 주지 않으면 아무것도 바뀌지 않는다.
+- **게이트 `perf_parity`**(`tools/validate_perf_parity.py`와 무시된 통합 테스트 `rust/app-core/tests/perf_parity.rs`, view::perf 단위 테스트; 따뜻할 때 약 35초):
+  - 합성 perf 줄 17,422개. 전체 프레임을 키마다 경곗값으로 바꾸고, 시드를 고정한 무작위 사전 4,000개를 더했다. `perf_status`·`occ_note`·`fmt_count`의 모든 줄을 지나는지 줄 추적으로 강제한다.
+  - `fmt_count` 1,074개, `occ_note` 9,690개, `_load_note` 108개
+  - 어댑터로 그린 실제 렌더 37가지: MAIN01 비슷한 칩과 잡덱. detail, depth, 라벨·프레임, 타일 재사용, 여백, 밀도(점유와 계획), 48 MB 예산 맞춤, 16페이지 라운드, probe, 덱 합성을 덮는다.
+  - 어댑터 자신의 `_emit_frame`에 넣은 퍼즈 프레임 줄 400세대
+  - 합계 903라운드를 Rust로 다시 돌렸다. 결과 사전은 키·타입·값이 같고, 두 perf 줄이 같다.
+- P4d에서 서비스의 프레임 이벤트가 이 보고와 perf 줄을 싣는다. GTK는 그것을 표시만 한다.

@@ -52,7 +52,7 @@ GATES="unit unit_vfs unit_render index_cli vfs_profile floe2 rust_scan \
 rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage \
 occupancy vfs_hier vfs_lifecycle vfs_marker vfs_split vfs_text \
 render_goldens render_speckle render_frames drc_ice svrf oasis_shapes \
-jobdeck representatives gen_main01 fit_budget sub_cut_box shape_cut write_once layer_decode area_true density_stack cell_tree index_lock worker_client cell_index gtk_view rust_renderer klayout"
+jobdeck representatives gen_main01 fit_budget sub_cut_box shape_cut write_once layer_decode area_true density_stack cell_tree index_lock worker_client cell_index perf_parity gtk_view rust_renderer klayout"
 # (unit_renderd is unit's renderd part, as unit_vfs and unit_render are)
 GATES=$(echo "$GATES" | sed 's/unit_render /unit_render unit_renderd /')
 alias_gates() {
@@ -155,6 +155,10 @@ gates_for() {
             echo "unit_render cell_tree fit_budget rust_renderer" ;;
         rust/worker-client/*)
             echo "unit worker_client gtk_view" ;;
+        rust/app-core/src/view/perf.rs|rust/app-core/tests/perf_parity.rs)
+            # the viewer's frame report and perf line (P4b), held to the
+            # Python's byte for byte; its unit tests run in the gate
+            echo perf_parity ;;
         rust/app-core/*|rust/notices/*)
             # the application policy under the Rust command line floe2,
             # which every CLI gate runs (P1c, docs/SHARED_APP_LAYER.ko.md),
@@ -169,7 +173,9 @@ gates_for() {
             # the GTK viewer's entry and its service client (P2, P4c)
             echo "floe2 rust_renderer jobdeck drc_ice gtk_view" ;;
         rust/render-core/*|rust/renderd/*|rust/render-cli/*|floe/rust_render.py)
-            echo "$RENDER_GATES" ;;
+            # (perf_parity: the frame line's fields and the adapter's result
+            # the shared Rust perf line must reproduce)
+            echo "$RENDER_GATES perf_parity" ;;
         rust/dbg/*)
             echo unit ;;
         rust/*)
@@ -177,8 +183,9 @@ gates_for() {
             # VFS, floe-index, the vendored crates, the workspace
             echo ALL ;;
         floe/gui.py|floe/hangul.py|floe/fillpat.py|floe/instance.py|floe/product.py|floe/*.def)
-            # the GTK viewer (the product's Python, UI alone since P2d)
-            echo "rust_renderer floe2 jobdeck density_stack index_lock" ;;
+            # the GTK viewer (the product's Python, UI alone since P2d); its
+            # perf line is perf_parity's reference
+            echo "rust_renderer floe2 jobdeck density_stack index_lock perf_parity" ;;
         floe/vfsclient.py)
             # where the viewer finds floe-index and floe2
             echo "floe2 jobdeck rust_renderer" ;;
@@ -568,6 +575,14 @@ fi
 if gate cell_index; then RAN="$RAN cell_index"; lap cell_index
     (cd rust && FLOE_INDEX_BIN="$PWD/target/release/floe-index" cargo test --release --offline -p floe-app-core --lib cell_index &&
         FLOE_INDEX_BIN="$PWD/target/release/floe-index" cargo test --release --offline -p floe-app-core --test cell_index -- --ignored); fi
+# the viewer's perf line (P4b, docs/SHARED_APP_LAYER.ko.md §7): the shared
+# Rust frame report and perf_status (rust/app-core/src/view/perf.rs) byte for
+# byte against floe/gui.py perf_status and floe/rust_render.py _emit_frame -
+# synthetic results, real renders recorded through the adapter
+# (FLOE_RUST_RECORD) and fuzzed frame lines, replayed in Rust
+if gate perf_parity; then RAN="$RAN perf_parity"; lap perf_parity
+    (cd rust && PATH="$HOME/.cargo/bin:$PATH" cargo test --release --offline -p floe-app-core --lib view::perf)
+    PYTHONDONTWRITEBYTECODE=1 .venv/bin/python tools/validate_perf_parity.py; fi
 # the GTK viewer's view channel (P4c): floe2 gtk-service over the shared
 # ViewController, frames byte-equal to the viewer's adapter
 if gate gtk_view; then RAN="$RAN gtk_view"; lap gtk_view
