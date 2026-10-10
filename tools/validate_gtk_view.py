@@ -351,24 +351,34 @@ def strike_and_palettes(v):
     pump(v, lambda: row._strike.get_visible() and
          row._strike.get_pixbuf() is not None, "the strike", 30)
     pb = row._strike.get_pixbuf()
-    w, h, rs = pb.get_width(), pb.get_height(), pb.get_rowstride()
-    data = pb.get_pixels()
-    y = max(0, (h - row._row_pad) // 2)
-    line = bytes(gui.LAYER_STRIKE_RGB) + b"\xff"
-    check(pb.get_has_alpha() and data[y * rs:y * rs + 4 * w] == line * w,
-          "the strike is not one line across the row at y=%d" % y)
-    check(all(data[r * rs + 3:r * rs + 4 * w:4] == bytes(w)
-              for r in range(h) if r != y),
-          "the strike image covers more than its line")
     alloc = row.widget.get_allocation()
-    check((w, h) == (alloc.width, alloc.height),
-          "the strike %dx%d is not the row's %dx%d"
-          % (w, h, alloc.width, alloc.height))
+    y = max(0, (alloc.height - row._row_pad) // 2)
+    # an opaque 1 px line the row's width at the line's height: nothing
+    # transparent over the row (an overlay child's own window may paint
+    # an opaque background - a row-sized image hid the row, 2026-10-10)
+    check(not pb.get_has_alpha() and (pb.get_width(), pb.get_height())
+          == (alloc.width, 1) and bytes(pb.get_pixels())[:3 * alloc.width]
+          == bytes(gui.LAYER_STRIKE_RGB) * alloc.width,
+          "the strike is not one opaque line the row's width (%dx%d, alpha %s)"
+          % (pb.get_width(), pb.get_height(), pb.get_has_alpha()))
+    check(row._strike.get_margin_top() == y,
+          "the strike sits at %d, not the row's middle %d"
+          % (row._strike.get_margin_top(), y))
+    salloc = row._strike.get_allocation()
+    check(salloc.height == 1, "the strike covers %d px of the row" % salloc.height)
+    # an overlay child has a GDK window of its own: it must take no input
+    # (the row's clicks; the palette's pick reads the grid's coordinates)
+    check(row._strike.get_window().get_pass_through(),
+          "the strike's window takes the row's clicks")
     row.set_active(True)
     pump(v, lambda: not row._strike.get_visible(), "the strike gone", 30)
     for cell in v._fill_slots:
         check(cell.image.get_pixbuf() is not None,
               "a fill slot has no image")
+        # (the palette tab may not be realized yet: the overlay's word,
+        # which its child window takes when it is)
+        check(cell.widget.get_overlay_pass_through(cell.image),
+              "a fill slot's image takes the palette's clicks")
     print("strike and palettes: drawn without pycairo")
 
 

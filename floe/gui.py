@@ -1343,7 +1343,9 @@ class PixbufCell:
     2026-10-10: the hidden-layer strike and the palettes were). The image
     is an overlay child, so its size never enters the request and the
     cell still shrinks with the pane; it is painted again after a size
-    change (from idle, outside the allocation) and on refresh()."""
+    change (from idle, outside the allocation) and on refresh(). It is
+    opaque and covers its window whole (an overlay child's window may
+    paint an opaque background on some X servers) and takes no input."""
 
     def __init__(self, paint, width, height):
         self._paint = paint
@@ -1356,6 +1358,11 @@ class PixbufCell:
         self.image.set_halign(Gtk.Align.START)
         self.image.set_valign(Gtk.Align.START)
         self.widget.add_overlay(self.image)
+        # an overlay child gets a GDK window of its own: without
+        # pass-through a click lands there, with coordinates of that
+        # window, and the palette's pick (the grid's coordinates) took
+        # the wrong swatch
+        self.widget.set_overlay_pass_through(self.image, True)
         self.widget.connect("size-allocate", self._on_allocate)
 
     def _on_allocate(self, _widget, alloc):
@@ -1686,9 +1693,12 @@ class LayerRow(object):
         # Keep the inter-row padding inside an event window. A click in the
         # gap therefore belongs to this (upper) row instead of falling
         # through the layer palette without selecting anything.
-        # the strike: an image over the row, painted for its size (no
-        # cairo "draw" handler - the hosts have no pycairo, it never
-        # showed there, field 2026-10-10)
+        # the strike: an opaque 1 px image of the line over the row at
+        # the line's height, painted for the row's width (no cairo "draw"
+        # handler - the hosts have no pycairo, it never showed there; and
+        # nothing transparent - an overlay child may get a window of its
+        # own with an opaque background, and a row-sized image with a
+        # transparent rest hid the whole row there, field 2026-10-10)
         row = Gtk.Overlay()
         row.add(row_box)
         self._strike = Gtk.Image()
@@ -1696,6 +1706,8 @@ class LayerRow(object):
         self._strike.set_valign(Gtk.Align.START)
         self._strike.set_no_show_all(True)
         row.add_overlay(self._strike)
+        # its own GDK window takes no input: the row's clicks are the row's
+        row.set_overlay_pass_through(self._strike, True)
         self._strike_size = None
         row.connect("size-allocate", self._on_row_allocate)
         self.widget = Gtk.EventBox()
@@ -1789,20 +1801,19 @@ class LayerRow(object):
 
     def _paint_strike(self, size):
         """Hidden layer: one continuous bright line across the FULL
-        row - text, swatch, margins and trailing space alike - as a
-        transparent row-sized image over it. (The geometry-pick
-        highlight is the yellow id box painted by the number label's
-        Pango background - see _paint, 2026-08-29 - not a row
-        outline.)"""
+        row - text, swatch, margins and trailing space alike - an opaque
+        row-wide, 1 px image at the line's height (nothing else of the
+        row is covered). (The geometry-pick highlight is the yellow id
+        box painted by the number label's Pango background - see _paint,
+        2026-08-29 - not a row outline.)"""
         if size != self._strike_size:
             return False
         width, height = size
         y = max(0, (height - self._row_pad) // 2)
-        pixels = bytearray(width * height * 4)
-        line = bytes(LAYER_STRIKE_RGB) + b"\xff"
-        pixels[y * width * 4:(y + 1) * width * 4] = line * width
-        self._strike.set_from_pixbuf(pixbuf_of(width, height, pixels,
-                                               alpha=True))
+        if self._strike.get_margin_top() != y:
+            self._strike.set_margin_top(y)
+        self._strike.set_from_pixbuf(
+            pixbuf_of(width, 1, bytes(LAYER_STRIKE_RGB) * width))
         return False
 
     def set_marker(self, marker):
