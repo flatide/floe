@@ -46,7 +46,7 @@ python을 사용하지 않도록 변경해줘."
 | P1c | 게이트·배포·별칭을 Rust `floe2`로 바꾸고 Python `floe2/` 패키지를 지운다(§4) | 0.12.328 |
 | P2 | `floe2 gtk-service`(stdio JSON-lines). GTK 뷰어의 비-UI 판단을 Rust로 옮기고 Python 모듈을 걷어낸다. 푸시 단위(§5): P2a 열기·준비·레벨 행·덱 스펙·레이어 속성 행, P2b DRC·svrf, P2c 레이어 속성 편집·fill, P2d(P3와 함께) 오라클을 떼어 낸 뒤 Python 모듈 삭제 | P2a 0.12.329, P2b 0.12.330, P2c 0.12.331, P2d 0.12.332 |
 | P3 | KLayout 레거시를 제품 경로에서 빼고, 동결 `floe` 셸은 개발 전용 오라클(`tools/oracle/floe_oracle`)로 둔다(§6) | 0.12.333 |
-| P4 | (선택) GTK 렌더 루프를 Rust `ViewController`로 | 별도 승인 |
+| P4 | GTK 렌더 루프를 공유 Rust `ViewController`로(§7; 사용자 승인 2026-10-10). P4a 공유 컨트롤러의 데스크톱 정책, P4b perf 줄, P4c 서비스의 뷰 채널, P4d GTK 전환, P4e 질의·미니맵, P4f 정리 | P4a 0.12.334 |
 
 ## 3. 동기 규칙
 
@@ -203,3 +203,53 @@ python을 사용하지 않도록 변경해줘."
 - **공유 크레이트 변경(webui 병합 때 참고):** app-core `Error::opening(e, what, path)` — 열 수 없는 파일의 I/O 오류가 경로를 말한다. 없는 파일이면 `source not found: PATH`(`cache::fingerprint`), `jobdeck not found: PATH`(`JobDeck::read`)다. 종류는 그대로 Io다.
   - 그전에는 `No such file or directory (os error 2)`만 나왔다. `floe2 info`·`render`·`view`, 그리고 floe2 뷰어의 열기(서비스)가 모두 그랬다(P1c·P2a 이후).
   - jobdeck 게이트 `LoadingBannerTests`가 P3에서 floe2 경로로 돌면서 드러났다(전에는 동결 floe 경로가 "no VFS cache"를 말했다).
+
+## 7. P4 — GTK 렌더 루프를 공유 `ViewController`로
+
+사용자 승인(2026-10-10): "P4 진행해줘".
+
+- **출발점:** 공유 app-core에 웹 뷰어의 `view` 모듈이 이미 있다(webui에서 P0로 들어옴, 약 8,800줄).
+  - `ViewController`: 제어 스레드 하나가 renderd 워커 하나를 맡는다. 편집 CAS(`state_rev`), 이전 렌더를 취소하고 비운 뒤 다시 제출, 여백 미리 그리기와 잘라 쓰기, 질의(snap·pick), 셀 트리, 눈금자, 클립 준비를 한다.
+  - `ViewState`·`Patch`·`Navigation`, 미니맵 투영, 팔레트·layerprops·fill 슬롯.
+  - 웹이 GTK 동작을 옮겨 만든 것이라 깊이 단계, 미니맵 6 px 여백, 휠 같은 규칙이 이미 같다.
+- **GTK와의 차이(조사 2026-10-10):** 데스크톱에 필요한데 없는 것, 또는 다르게 동작하는 것.
+  - 컷 아래 밀도 켜고 끄기(`density=`)와 여백 프레임의 `vw`/`vh`가 worker-client 요청에 없었다.
+  - 렌더 오류 하나가 뷰를 닫는다(웹은 다시 연다). GTK는 상태줄에 말하고 계속 쓴다.
+  - 비우기 5초, 렌더 300초, snap·pick 5초를 넘기면 뷰가 실패한다. GTK에는 이런 마감이 없다.
+  - Esc(진행 중인 렌더만 멈추기)가 없다.
+  - 상태줄 perf 줄(`perf_status`, 현장 로그의 형식)이 없다. 컨트롤러는 라운드별 `fields`만 준다.
+  - 프레임 형상: 웹은 뷰포트 그대로 그리고 16 px 단위로 잘라 쓴다. GTK는 프레임을 2 px 격자에 맞추고 2 px 여유를 둔다. 스페클 위상이 프레임 기준이라 연이은 프레임이 짝수 px만큼 움직여야 깜빡이지 않는다. → P4d에서 GTK 끌기를 2 px 단위로 맞춘다(키 이동은 이미 16 px).
+  - GTK 쪽에 남는 것(UI): 프레임 표시와 확대 중 이전 프레임, 덧그림(DRC 마커, 선택, 고무줄, 눈금자, 셀 강조), 위젯.
+- **단계(푸시 단위):**
+
+| 단계 | 내용 |
+|---|---|
+| P4a | 공유 컨트롤러의 데스크톱 정책(아래). GTK는 그대로 |
+| P4b | 라운드를 누적한 프레임 보고와 perf 줄(`perf_status`)의 Rust 이식. Python과 같은 문자열인지 대조 게이트로 확인 |
+| P4c | `floe2 gtk-service`의 뷰 채널(열기·Patch·Esc·프레임 이벤트·raw 파일)과 Python 클라이언트. 같은 프레임인지 게이트로 확인 |
+| P4d | `gui.py`가 그 채널을 쓴다. 입력은 Patch로 보내고 받은 프레임만 표시한다. 여백·`_covered`·확대 범위 제한·정착 로직을 지운다. 렌더 루프 게이트를 새 모델로 다시 쓴다. **현장 확인 필요** |
+| P4e | snap·pick, 셀 트리·루트, 눈금자, 미니맵 투영을 컨트롤러를 거쳐 받는다 |
+| P4f | `rust_render.py`를 제품에서 빼서 게이트용 개발 클라이언트로 옮기고, 번들·문서를 정리한다 |
+
+### P4a (0.12.334) — 공유 컨트롤러의 데스크톱 정책
+
+웹 동작은 바뀌지 않는다. 바뀌는 것은 여백 요청의 `vw`/`vh` 하나이고, renderd가 원래 받는 값이다.
+
+- **worker-client `RenderRequest`:**
+  - `viewport: Option<(u32, u32)>`는 `vw=`/`vh=`다. 프레임이 뷰포트가 아닐 때(여백) 그 뷰포트를 말한다. renderd는 밀도 점을 뷰포트의 fit 보기에 맞춰 솎는다(2026-10-04).
+  - `density: Option<bool>`는 `density=on|off`다.
+  - 둘 다 None이면 줄에 나가지 않는다.
+  - `WorkerClient::set_timeouts(render, query)`와 `RenderSession::set_timeouts`를 더했다.
+- **`ViewState`·`Patch`:** `density: Option<bool>`를 더했다. None이면 renderd 기본값(`FLOE_RUST_DENSITY_STACK`)을 쓴다. 렌더 정책이므로 렌더 키에 들어간다.
+- **`ViewController`:**
+  - **여백 요청:** 뷰포트 크기를 `vw`/`vh`로 함께 보낸다. 웹도 마찬가지다. 여백과 그 뷰포트의 밀도 점이 같아진다.
+  - **`DesktopPolicy`:** 기본값은 웹의 것이다(비우기 5초, worker-client의 마감, 렌더 오류면 뷰 실패). `DesktopPolicy::desktop()`과 `start_desktop(.., ControllerOptions, DesktopPolicy)`가 데스크톱 정책을 쓴다.
+    - 비우기는 걸리는 만큼 기다린다.
+    - 렌더 마감 30일, snap·pick 마감 10분이다.
+    - 전경 렌더 오류는 `Snapshot::render_failure = (render_rev, 이유)`로 남기고 뷰는 계속 쓸 수 있다.
+    - 교체(prepare_replacement)와 fork는 정책을 물려받는다. 웹이 리터럴로 만드는 `ControllerOptions`는 그대로 두었다.
+  - **`cancel_render()`(Esc):** 진행 중인 전경 렌더를 멈추고, 같은 상태는 다시 그리지 않는다. 다음 변경이 다시 그린다. `Snapshot::cancelled_rev`가 그것을 말하고, 이미 보인 프레임은 남는다. 여백만 돌고 있으면 아무것도 하지 않는다.
+- **테스트:**
+  - 단위 테스트 `desktop_esc_stops_the_frame_and_renders_again_on_the_next_change`, `desktop_render_error_is_said_and_the_view_goes_on`(웹 정책은 같은 오류로 뷰가 실패), `desktop_drain_waits_as_long_as_the_frame_takes`, `density_is_a_render_policy_and_goes_on_the_request`
+  - 여백 요청의 `vw`/`vh`(기존 margin 테스트에 더함)
+  - worker-client `viewport_and_density_go_on_the_wire_only_when_given`

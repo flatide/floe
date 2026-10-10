@@ -424,6 +424,14 @@ impl WorkerClient {
     pub fn pending_generations(&self) -> usize {
         self.issued.len()
     }
+    /// The render and pick/snap deadlines for work submitted from now on.
+    /// The desktop viewer waits as long as a frame takes (a field chip's can
+    /// outlast the 300 s default) and a slow pick there must not end the
+    /// worker; the web keeps Config's.
+    pub fn set_timeouts(&mut self, render: Duration, query: Duration) {
+        self.config.render_timeout = render;
+        self.config.query_timeout = query;
+    }
     pub fn work_dir(&self) -> &Path {
         &self.workspace.0
     }

@@ -52,6 +52,50 @@ impl Default for ControllerOptions {
         }
     }
 }
+/// Where a desktop viewer's view differs from the web's (P4: the GTK viewer
+/// through `floe2 gtk-service`): a superseded frame drains as long as it
+/// takes, a frame renderd refuses is said and the view goes on, a slow frame
+/// or pick does not end the worker. The default is the web's.
+#[derive(Clone, Copy, Debug)]
+pub struct DesktopPolicy {
+    /// How long a cancelled frame may take to drain before the view fails;
+    /// None: as long as it takes (renderd stops at its next step).
+    pub drain_timeout: Option<Duration>,
+    /// The worker's render and pick/snap deadlines (None: the worker
+    /// client's, 300 s and 5 s).
+    pub render_timeout: Option<Duration>,
+    pub query_timeout: Option<Duration>,
+    /// A foreground frame renderd refuses (a budget it cannot hold, …) is
+    /// recorded in `Snapshot::render_failure` and the view stays usable.
+    pub keep_view_on_render_error: bool,
+}
+impl Default for DesktopPolicy {
+    fn default() -> Self {
+        Self {
+            drain_timeout: Some(Duration::from_secs(5)),
+            render_timeout: None,
+            query_timeout: None,
+            keep_view_on_render_error: false,
+        }
+    }
+}
+impl DesktopPolicy {
+    /// The GTK viewer's: what floe/rust_render.py did - no deadline on a
+    /// frame or its drain, a refused frame on the status line.
+    pub fn desktop() -> Self {
+        Self {
+            drain_timeout: None,
+            render_timeout: Some(Duration::from_secs(30 * 24 * 3600)),
+            query_timeout: Some(Duration::from_secs(600)),
+            keep_view_on_render_error: true,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Default)]
+struct Configuration {
+    options: ControllerOptions,
+    desktop: DesktopPolicy,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Purpose {
     Foreground,
@@ -112,6 +156,12 @@ pub struct Snapshot {
     pub margin_failure: Option<(ErrorKind, String)>,
     /// Local diagnostics only; web maps the kind to a safe message/code.
     pub failure: Option<(ErrorKind, String)>,
+    /// A foreground frame renderd refused under DesktopPolicy's
+    /// keep_view_on_render_error: (its render_rev, the reason).
+    pub render_failure: Option<(u64, String)>,
+    /// The render_rev whose frame `cancel_render` stopped (Esc); the view
+    /// renders again on its next change.
+    pub cancelled_rev: Option<u64>,
 }
 struct CellTicket {
     id: u64,
@@ -137,6 +187,8 @@ impl Cells {
 }
 struct Shared {
     replacement_pending: bool,
+    /// `cancel_render`'s request: the render_rev to stop.
+    cancel_requested: Option<u64>,
     snapshot: Snapshot,
     latest: Option<Arc<DisplayFrame>>,
     margin: Option<Arc<DisplayFrame>>,
@@ -227,7 +279,7 @@ pub struct ViewController {
     resources: Weak<Resources>,
     reservation: Weak<Permit>,
     native_options: Option<RenderOptions>,
-    configuration: ControllerOptions,
+    configuration: Configuration,
 }
 
 /// One queued cell question (ViewController::cell_ticket). Waiting never
@@ -278,7 +330,7 @@ impl CellWait {
 pub struct ReservedView {
     resources: Arc<Resources>,
     options: RenderOptions,
-    configuration: ControllerOptions,
+    configuration: Configuration,
     permit: Permit,
 }
 impl ReservedView {
@@ -365,6 +417,7 @@ trait Engine: Send {
     fn max_depth(&self) -> Option<u64> {
         None
     }
+    fn set_timeouts(&mut self, _render: Duration, _query: Duration) {}
 }
 impl Engine for RenderSession {
     fn query(&mut self, r: QueryRequest) -> Result<u64> {
@@ -384,6 +437,9 @@ impl Engine for RenderSession {
     }
     fn max_depth(&self) -> Option<u64> {
         Some(self.max_depth())
+    }
+    fn set_timeouts(&mut self, render: Duration, query: Duration) {
+        self.set_timeouts(render, query)
     }
     fn submit(&mut self, r: RenderRequest) -> Result<u64> {
         self.submit(r)
@@ -431,6 +487,20 @@ impl ViewController {
     ) -> Result<Self> {
         Self::reserve(resources, options, configuration)?.start(dataset, initial)
     }
+    /// start_configured with a desktop viewer's DesktopPolicy (P4); its
+    /// replacements and forks keep it.
+    pub fn start_desktop(
+        resources: &Arc<Resources>,
+        dataset: Arc<ManagedDataset>,
+        options: RenderOptions,
+        initial: ViewState,
+        configuration: ControllerOptions,
+        desktop: DesktopPolicy,
+    ) -> Result<Self> {
+        let mut reserved = Self::reserve(resources, options, configuration)?;
+        reserved.configuration.desktop = desktop;
+        reserved.start(dataset, initial)
+    }
     pub fn reserve(
         resources: &Arc<Resources>,
         options: RenderOptions,
@@ -440,7 +510,10 @@ impl ViewController {
         Ok(ReservedView {
             resources: Arc::clone(resources),
             options,
-            configuration,
+            configuration: Configuration {
+                options: configuration,
+                desktop: DesktopPolicy::default(),
+            },
             permit,
         })
     }
@@ -587,7 +660,7 @@ impl ViewController {
         model: Arc<Model>,
         initial: ViewState,
         permit: Permit,
-        configuration: ControllerOptions,
+        configuration: Configuration,
         open: impl FnOnce(Arc<AtomicUsize>) -> Result<(Box<dyn Engine>, Option<Arc<ManagedDataset>>)>
             + Send
             + 'static,
@@ -606,7 +679,7 @@ impl ViewController {
         model: Arc<Model>,
         initial: ViewState,
         permit: Arc<Permit>,
-        configuration: ControllerOptions,
+        configuration: Configuration,
         open: impl FnOnce(Arc<AtomicUsize>) -> Result<(Box<dyn Engine>, Option<Arc<ManagedDataset>>)>
             + Send
             + 'static,
@@ -618,6 +691,7 @@ impl ViewController {
         let stop = Arc::new(AtomicUsize::new(0));
         let shared = Arc::new(Mutex::new(Shared {
             replacement_pending: false,
+            cancel_requested: None,
             snapshot: Snapshot {
                 state: initial,
                 state_rev: 1,
@@ -629,8 +703,8 @@ impl ViewController {
                 submitted: 0,
                 consumed: 0,
                 discarded: 0,
-                margin_enabled: configuration.margin_prefetch
-                    && configuration.frame_cache
+                margin_enabled: configuration.options.margin_prefetch
+                    && configuration.options.frame_cache
                     && !model.deck,
                 margin_working: false,
                 margin_submitted: 0,
@@ -638,6 +712,8 @@ impl ViewController {
                 margin: None,
                 margin_failure: None,
                 failure: None,
+                render_failure: None,
+                cancelled_rev: None,
             },
             latest: None,
             margin: None,
@@ -996,6 +1072,18 @@ impl ViewController {
         }
         Ok(s.snapshot())
     }
+    /// Stop the frame in progress (the desktop viewer's Esc): renderd drops
+    /// it at its next step, its later rounds are discarded, and the view does
+    /// not render the same state again - its next change does. A frame already
+    /// shown stays `latest`. Nothing to stop: nothing happens.
+    pub fn cancel_render(&self) -> Snapshot {
+        let mut s = self.shared.lock().unwrap();
+        // a margin in flight is not the frame in progress: it stays
+        if matches!(s.snapshot.phase, Phase::Rendering | Phase::Cancelling) {
+            s.cancel_requested = Some(s.snapshot.render_rev);
+        }
+        s.snapshot()
+    }
     /// Non-blocking; interrupts ready/open/style and worker polling too.
     pub fn request_close(&self) {
         self.stop.store(1, Ordering::Relaxed);
@@ -1043,7 +1131,7 @@ fn run(
     stop: &AtomicUsize,
     model: &Model,
     resources: &Resources,
-    configuration: ControllerOptions,
+    configuration: Configuration,
 ) -> Result<()> {
     let mut styles = Arc::clone(&model.styles);
     let mut active: Option<Ticket> = None;
@@ -1051,7 +1139,15 @@ fn run(
     let mut draining: Option<Instant> = None;
     let mut margin_attempt: Option<(u64, Viewport)> = None;
     let mut base = engine.base();
-    base.frame_cache = configuration.frame_cache;
+    base.frame_cache = configuration.options.frame_cache;
+    let policy = configuration.desktop;
+    if policy.render_timeout.is_some() || policy.query_timeout.is_some() {
+        let defaults = floe_worker_client::Config::new("");
+        engine.set_timeouts(
+            policy.render_timeout.unwrap_or(defaults.render_timeout),
+            policy.query_timeout.unwrap_or(defaults.query_timeout),
+        );
+    }
     while stop.load(Ordering::Relaxed) == 0 {
         {
             let mut s = shared.lock().unwrap();
@@ -1062,6 +1158,26 @@ fn run(
             pump_cells(engine, &mut s, hold)?;
         }
         let current = shared.lock().unwrap().snapshot();
+        // Esc (cancel_render): this state's frame stops and is not asked
+        // again; a later state's request is moot
+        let cancel = shared.lock().unwrap().cancel_requested.take();
+        if cancel == Some(current.render_rev) {
+            handled_rev = current.render_rev;
+            margin_attempt = Some((current.render_key, current.state.viewport));
+            let pending = engine.pending() > 0;
+            if pending && draining.is_none() {
+                engine.cancel()?;
+                draining = Some(Instant::now());
+            }
+            let mut s = shared.lock().unwrap();
+            s.snapshot.cancelled_rev = Some(current.render_rev);
+            s.snapshot.margin_working = false;
+            s.snapshot.phase = if pending {
+                Phase::Cancelling
+            } else {
+                Phase::Idle
+            };
+        }
         let covered = current.margin.is_some_and(|m| m.crop_safe);
         if current.render_rev != handled_rev && covered {
             handled_rev = current.render_rev;
@@ -1117,6 +1233,12 @@ fn run(
             if waiting_styles {
                 shared.lock().unwrap().snapshot.phase = Phase::Cancelling;
             }
+            if submit.is_none() && !waiting_styles {
+                let mut s = shared.lock().unwrap();
+                if s.snapshot.phase == Phase::Cancelling {
+                    s.snapshot.phase = Phase::Idle;
+                }
+            }
             if let Some((purpose, viewport)) = submit.filter(|_| !waiting_styles) {
                 if current.state.styles != styles {
                     engine.styles(&current.state.styles)?;
@@ -1127,6 +1249,12 @@ fn run(
                 request.width = viewport.width;
                 request.height = viewport.height;
                 request.background = purpose == Purpose::Margin;
+                if purpose == Purpose::Margin {
+                    // the viewport the margin is around: renderd thins the
+                    // density dots for the viewport's fit view (vw/vh)
+                    request.viewport =
+                        Some((current.state.viewport.width, current.state.viewport.height));
+                }
                 let generation = engine.submit(request)?;
                 if purpose == Purpose::Foreground {
                     handled_rev = current.render_rev;
@@ -1144,6 +1272,8 @@ fn run(
                 s.snapshot.submitted += 1;
                 if purpose == Purpose::Foreground {
                     s.snapshot.phase = Phase::Rendering;
+                    s.snapshot.render_failure = None;
+                    s.snapshot.cancelled_rev = None;
                 } else {
                     s.snapshot.margin_submitted += 1;
                     s.snapshot.margin_working = true;
@@ -1151,7 +1281,7 @@ fn run(
                 }
             }
         }
-        if draining.is_some_and(|at| at.elapsed() > Duration::from_secs(5)) {
+        if draining.is_some_and(|at| policy.drain_timeout.is_some_and(|d| at.elapsed() > d)) {
             return Err(Error::new(
                 ErrorKind::Worker,
                 "cancel drain deadline exceeded",
@@ -1237,6 +1367,18 @@ fn run(
                     s.snapshot.margin_working = false;
                     s.snapshot.margin_failure =
                         Some((ErrorKind::Worker, format!("{code}: {message}")));
+                } else if let Some(t) = active.as_ref().filter(|t| {
+                    policy.keep_view_on_render_error
+                        && t.purpose == Purpose::Foreground
+                        && generation == Some(t.generation)
+                }) {
+                    // the desktop's status line says it; the view stays
+                    let mut s = shared.lock().unwrap();
+                    s.snapshot.render_failure =
+                        Some((t.snapshot.render_rev, format!("{code}: {message}")));
+                    if s.snapshot.render_rev == t.snapshot.render_rev {
+                        s.snapshot.phase = Phase::Idle;
+                    }
                 } else {
                     return Err(Error::new(ErrorKind::Worker, format!("{code}: {message}")));
                 }

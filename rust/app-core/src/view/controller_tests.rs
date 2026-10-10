@@ -411,13 +411,26 @@ fn start_configured(
     c: Arc<Control>,
     configuration: ControllerOptions,
 ) -> ViewController {
+    start_policy(r, m, initial, c, configuration, DesktopPolicy::default())
+}
+fn start_policy(
+    r: &Arc<Resources>,
+    m: Arc<Model>,
+    initial: ViewState,
+    c: Arc<Control>,
+    configuration: ControllerOptions,
+    desktop: DesktopPolicy,
+) -> ViewController {
     let deck = m.deck;
     ViewController::spawn(
         r,
         m,
         initial,
         r.render(&options()).unwrap(),
-        configuration,
+        Configuration {
+            options: configuration,
+            desktop,
+        },
         move |stop| {
             while !c.open.load(Ordering::Relaxed) {
                 crate::check_cancelled(&stop)?;
@@ -1215,6 +1228,9 @@ fn complete_margin_crops_pan_without_another_foreground_and_invalidates_policy()
         y: 0.,
         snap: true,
     });
+    // the margin names the viewport it is around (renderd's vw/vh)
+    assert_eq!(margin.frame.request.viewport, Some((800, 640)));
+    assert_eq!(v.latest().unwrap().frame.request.viewport, None);
     let accepted = v.edit(1, p).unwrap();
     assert!(accepted.margin.unwrap().crop_safe);
     wait(|| v.snapshot().crop_hits == 1);
@@ -1634,4 +1650,141 @@ fn a_jobdeck_answers_cell_queries_but_refuses_a_view_root() {
     assert_eq!(c.cell_requests.lock().unwrap().len(), 1);
     assert_eq!(v.snapshot().state_rev, before.state_rev);
     assert!(v.snapshot().state.root.is_none());
+}
+
+fn desktop(c: &Arc<Control>, m: &Arc<Model>, r: &Arc<Resources>) -> ViewController {
+    start_policy(
+        r,
+        Arc::clone(m),
+        ViewState::initial(m, 80, 64).unwrap(),
+        Arc::clone(c),
+        ControllerOptions::default(),
+        DesktopPolicy::desktop(),
+    )
+}
+#[test]
+fn desktop_esc_stops_the_frame_and_renders_again_on_the_next_change() {
+    let r = Resources::new(Limits::default()).unwrap();
+    let m = model(false);
+    let c = Arc::new(Control::default());
+    c.frame.store(false, Ordering::Relaxed);
+    c.drain.store(false, Ordering::Relaxed);
+    let mut v = desktop(&c, &m, &r);
+    wait(|| v.snapshot().phase == Phase::Rendering);
+    let rev = v.snapshot().render_rev;
+    v.cancel_render();
+    wait(|| c.acks.load(Ordering::Relaxed) == 1);
+    assert_eq!(v.snapshot().phase, Phase::Cancelling);
+    c.drain.store(true, Ordering::Relaxed);
+    wait(|| v.snapshot().phase == Phase::Idle);
+    let s = v.snapshot();
+    assert_eq!(s.cancelled_rev, Some(rev));
+    // the same state is not asked again
+    c.frame.store(true, Ordering::Relaxed);
+    thread::sleep(Duration::from_millis(40));
+    assert_eq!(c.requests.lock().unwrap().len(), 1);
+    assert!(v.latest().is_none());
+    // nothing in progress: Esc is nothing
+    assert_eq!(v.cancel_render().phase, Phase::Idle);
+    thread::sleep(Duration::from_millis(20));
+    assert_eq!(c.cancels.load(Ordering::Relaxed), 1);
+    // the next change renders, and says no cancel any more
+    v.edit(s.state_rev, pan()).unwrap();
+    wait(|| v.latest().is_some());
+    assert_eq!(c.requests.lock().unwrap().len(), 2);
+    assert_eq!(v.snapshot().cancelled_rev, None);
+    v.close().unwrap();
+    assert_eq!(r.usage(), Usage::default());
+}
+#[test]
+fn desktop_render_error_is_said_and_the_view_goes_on() {
+    let r = Resources::new(Limits::default()).unwrap();
+    let m = model(false);
+    let c = Arc::new(Control::default());
+    c.fail.store(true, Ordering::Relaxed);
+    let mut v = desktop(&c, &m, &r);
+    wait(|| v.snapshot().render_failure.is_some());
+    let s = v.snapshot();
+    assert_eq!(s.phase, Phase::Idle);
+    assert_eq!(
+        s.render_failure,
+        Some((s.render_rev, "io: ENOSPC test".into()))
+    );
+    assert!(s.failure.is_none());
+    c.fail.store(false, Ordering::Relaxed);
+    v.edit(s.state_rev, pan()).unwrap();
+    wait(|| v.latest().is_some());
+    assert_eq!(v.snapshot().render_failure, None);
+    v.close().unwrap();
+    assert_eq!(r.usage(), Usage::default());
+    // the web's: the same refusal ends the view
+    let c = Arc::new(Control::default());
+    c.fail.store(true, Ordering::Relaxed);
+    let mut v = start(
+        &r,
+        Arc::clone(&m),
+        ViewState::initial(&m, 80, 64).unwrap(),
+        Arc::clone(&c),
+    );
+    wait(|| v.snapshot().phase == Phase::Failed);
+    v.close().unwrap();
+}
+#[test]
+fn desktop_drain_waits_as_long_as_the_frame_takes() {
+    for (drain_timeout, fails) in [(None, false), (Some(Duration::from_millis(50)), true)] {
+        let r = Resources::new(Limits::default()).unwrap();
+        let m = model(false);
+        let c = Arc::new(Control::default());
+        c.frame.store(false, Ordering::Relaxed);
+        c.drain.store(false, Ordering::Relaxed);
+        let mut v = start_policy(
+            &r,
+            Arc::clone(&m),
+            ViewState::initial(&m, 80, 64).unwrap(),
+            Arc::clone(&c),
+            ControllerOptions::default(),
+            DesktopPolicy {
+                drain_timeout,
+                ..DesktopPolicy::desktop()
+            },
+        );
+        wait(|| v.snapshot().submitted == 1);
+        v.edit(1, pan()).unwrap();
+        wait(|| c.acks.load(Ordering::Relaxed) > 0);
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(v.snapshot().phase == Phase::Failed, fails);
+        if !fails {
+            assert_eq!(v.snapshot().phase, Phase::Cancelling);
+            c.drain.store(true, Ordering::Relaxed);
+            c.frame.store(true, Ordering::Relaxed);
+            wait(|| v.latest().is_some());
+            assert_eq!(v.latest().unwrap().state_rev, 2);
+        }
+        v.close().unwrap();
+        assert_eq!(r.usage(), Usage::default());
+    }
+}
+#[test]
+fn density_is_a_render_policy_and_goes_on_the_request() {
+    let r = Resources::new(Limits::default()).unwrap();
+    let m = model(false);
+    let c = Arc::new(Control::default());
+    let mut v = desktop(&c, &m, &r);
+    wait(|| v.latest().is_some());
+    let before = v.snapshot();
+    assert_eq!(c.requests.lock().unwrap()[0].density, None);
+    let after = v
+        .edit(
+            before.state_rev,
+            Patch {
+                density: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_ne!(after.render_key, before.render_key);
+    assert_eq!(after.state.density, Some(true));
+    wait(|| c.requests.lock().unwrap().len() == 2);
+    assert_eq!(c.requests.lock().unwrap()[1].density, Some(true));
+    v.close().unwrap();
 }

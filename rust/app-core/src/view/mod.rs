@@ -326,6 +326,9 @@ pub struct Patch {
     pub labels: Option<bool>,
     pub font_px: Option<u32>,
     pub mono: Option<bool>,
+    /// The density under the cut on or off (the desktop viewer's View >
+    /// density / `v`, 2026-10-05).
+    pub density: Option<bool>,
     pub style_changes: Vec<Style>,
     pub style_deltas: Vec<StyleDelta>,
     pub style_batch: Option<StyleBatch>,
@@ -369,6 +372,10 @@ pub struct ViewState {
     pub labels: bool,
     pub font_px: u32,
     pub mono: bool,
+    /// The density under the cut (renderd's density stack): None leaves
+    /// renderd's default (FLOE_RUST_DENSITY_STACK), Some the viewer's
+    /// choice for every frame.
+    pub density: Option<bool>,
     pub styles: Arc<Vec<Style>>,
     assignments: Arc<properties::Assignments>,
     pub root: Option<Root>,
@@ -609,6 +616,7 @@ impl ViewState {
             labels: !model.deck,
             font_px: 14,
             mono: false,
+            density: None,
             styles: Arc::clone(&model.styles),
             assignments: Arc::clone(&model.assignments),
             root: None,
@@ -710,6 +718,9 @@ impl ViewState {
         }
         if let Some(thin) = patch.thin {
             s.thin = thin;
+        }
+        if let Some(density) = patch.density {
+            s.density = Some(density);
         }
         if let Some(layers) = patch.layers {
             s.layers = model.layers(&layers)?;
@@ -907,6 +918,7 @@ impl ViewState {
             && self.labels == other.labels
             && self.font_px == other.font_px
             && self.mono == other.mono
+            && self.density == other.density
             && self.styles == other.styles
     }
     pub fn request(&self, model: &Model, base: RenderRequest) -> RenderRequest {
@@ -923,6 +935,7 @@ impl ViewState {
             font_px: self.font_px,
             mono: self.mono,
             root: self.root.as_ref().map(|r| r.cell),
+            density: self.density,
             ..base
         }
     }

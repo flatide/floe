@@ -132,6 +132,10 @@ impl RenderSession {
     pub fn pending_generations(&self) -> usize {
         self.worker.pending_generations()
     }
+    /// floe_worker_client::WorkerClient::set_timeouts.
+    pub fn set_timeouts(&mut self, render: Duration, query: Duration) {
+        self.worker.set_timeouts(render, query)
+    }
     pub fn query(&mut self, request: floe_worker_client::QueryRequest) -> Result<u64> {
         self.worker.query(request).map_err(Into::into)
     }
