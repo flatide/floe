@@ -204,12 +204,13 @@ impl Views {
                 let view = self.view(request)?;
                 let (kind, cell_request, src) = cell_request(request)?;
                 let seq = request.get("seq").and_then(Value::as_i64).unwrap_or(-1);
-                let wait = view.controller.cell_ticket(cell_request)?;
                 let (out, id) = (Arc::clone(&self.out), view_id(request)?);
+                let (controller, stop) = (Arc::clone(&view.controller), Arc::clone(&view.stop));
                 thread::Builder::new()
                     .name("floe2-view-cells".into())
                     .spawn(move || {
-                        let outcome = wait.wait(Duration::from_secs(60));
+                        let outcome = cell_ticket(&controller, &stop, cell_request)
+                            .and_then(|wait| wait.wait(CELL_WAIT));
                         out.line(&json!({"event": "cells", "view": id,
                                          "result": cells_json(kind, seq, src, outcome)}));
                     })?;
@@ -693,6 +694,36 @@ fn cell_request(r: &Value) -> Result<(&'static str, CellRequest, Option<i64>)> {
 }
 
 /// A cell-tree answer as floe/rust_render.py `_emit_cell_query` gave it.
+/// How long a cell question may wait for its answer, and for a place in the
+/// controller's queue (MAX_PENDING_CELLS) - a panel expanding rows quickly.
+const CELL_WAIT: Duration = Duration::from_secs(60);
+
+/// The cell question's ticket, taken when the controller can take it: the
+/// view's worker still opening (renderd opening a big cache - main01 took
+/// seconds, 2026-10-10: the panel's first question was refused as `view is
+/// still opening` and the tree stayed at "loading...") is waited for as long
+/// as it takes, a full queue up to CELL_WAIT; a closed view, or any other
+/// refusal, is the answer (a `cells` event the panel shows).
+fn cell_ticket(
+    controller: &ViewController,
+    stop: &AtomicBool,
+    request: CellRequest,
+) -> Result<floe_app_core::view::CellWait> {
+    let started = std::time::Instant::now();
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return Err(Error::new(ErrorKind::Worker, "the view closed"));
+        }
+        let opening = controller.snapshot().phase == Phase::Opening;
+        match controller.cell_ticket(request.clone()) {
+            Err(e) if e.kind == ErrorKind::Busy && (opening || started.elapsed() < CELL_WAIT) => {
+                thread::sleep(Duration::from_millis(20));
+            }
+            other => return other,
+        }
+    }
+}
+
 fn cells_json(kind: &str, seq: i64, src: Option<i64>, outcome: Result<CellOutcome>) -> Value {
     let mut o = Map::new();
     o.insert("kind".into(), json!(kind));

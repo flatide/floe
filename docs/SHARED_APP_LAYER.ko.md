@@ -329,7 +329,7 @@ P4b(perf 줄)는 따로 진행 중이다. 이 단계에서 GTK는 아직 그대�
 - **renderd(0.12.310):** snap·pick이 `incomplete=ok`를 받는다. 없으면 예전처럼 `scene_incomplete`로 거절한다.
 - **`floe2 gtk-service` 뷰 채널:**
   - `view_query {view, frame, kind: snap|pick, x, y, r_px, nth?, layers?}`: x·y는 뷰포트 px, frame은 화면의 프레임 id다. 답은 `query` 이벤트.
-  - `view_cells {view, seq, kind, src?, cell?, pattern?, limit?, box?, cap?, root?}`: 답은 `cells` 이벤트(rust_render의 사전).
+  - `view_cells {view, seq, kind, src?, cell?, pattern?, limit?, box?, cap?, root?}`: 답은 `cells` 이벤트(rust_render의 사전). 뷰의 워커가 아직 열리는 중이면(큰 캐시의 renderd 열기) 열릴 때까지 기다렸다가 묻고, 컨트롤러의 셀 대기열이 차 있으면 60초까지 다시 낸다. 다른 거절도 같은 seq의 `cells` 이벤트로 온다(0.12.340: 전에는 요청 오류로 돌아와 셀 트리가 `loading…`에 멈췄다 — main01, 2026-10-10).
   - `view_clip {view, seq, bbox, layers?, cell_name?, out}`: 쓰고 나면 `clip` 이벤트.
   - 프레임 이벤트에 `report`(Python 결과 사전 모양), `perf`([긴 줄, 짧은 줄]), `depth`가 붙는다.
   - 처음 상태도 데스크톱 범위로 자른다.

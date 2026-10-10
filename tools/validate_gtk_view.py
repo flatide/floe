@@ -496,6 +496,33 @@ def gui_legacy(src):
         os.environ.pop("FLOE_GTK_LOOP", None)
 
 
+def cells_while_opening(src, temp):
+    """The cell tree's first question comes as soon as the view exists,
+    while its worker still opens (renderd on a big cache takes seconds):
+    the service waits for the open and answers (2026-10-10: main01's tree
+    stayed at "loading..." on `view is still opening`)."""
+    slow = temp / "slow-renderd"
+    slow.write_text('#!/bin/sh\nsleep 1\nexec "%s" "$@"\n'
+                    % os.environ["FLOE_RENDERD_BIN"])
+    slow.chmod(0o755)
+    saved = os.environ["FLOE_RENDERD_BIN"]
+    os.environ["FLOE_RENDERD_BIN"] = str(slow)
+    svc = gtkservice.Service(FLOE2)
+    try:
+        s = gtkservice.ViewSession(src, W, H, svc=svc)
+        check(s.snapshot["phase"] == "opening",
+              "the slow worker was open at once: %s" % s.snapshot["phase"])
+        s.cells("cell_sources", 1)
+        s.cells("cells", 2, src=0)
+        got = answer(s, "cells", lambda v: v["seq"] == 2, 60)
+        check(got.get("found"), "a cell question while the view opened: %s" % got)
+        s.close()
+    finally:
+        os.environ["FLOE_RENDERD_BIN"] = saved
+        svc.close()
+    print("cells while opening: answered once the view opened")
+
+
 def same(a, b, what):
     if a == b:
         return
@@ -527,6 +554,7 @@ def main():
                   "first frame: %s" % {k: first[k] for k in ("width", "height", "format")})
             same(first["pixels"], ref.frame(first), "the open")
             queries_and_cells(s, ref, first, Path(temp))
+            cells_while_opening(src, Path(temp))
             # the density under the cut: its first round, then the frame
             on = s.edit(density=True)
             rev = on["state_rev"]
