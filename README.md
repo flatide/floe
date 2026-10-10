@@ -828,8 +828,11 @@ tar xzf floe2-portable-*.tar.gz -C /opt     # 위치 자유
 conda-forge가 GTK 스택 전체를 재배치 가능하게 묶어주므로 (GIR 타입립·
 gdk-pixbuf 로더·스키마·폰트 포함) gi를 시스템에 얹을 필요가 없다. 런처가
 첫 실행 시 호스트별 캐시(GSettings 스키마, pixbuf 로더 목록)를 자동
-생성한다. 코드를 갱신할 때는 새 `floe/`와 `floe2/` 패키지를 번들의
-`runtime/lib/python*/site-packages/`에 함께 덮어쓴다.
+생성한다. 갱신은 번들을 새로 만드는 것이 기본이다. Python 뷰어만 바뀐
+판이면 새 `floe/` 패키지를 번들의 `runtime/lib/python*/site-packages/`에
+통째로 덮어써도 되지만, Rust 쪽(`floe2`, `floe-index`, `floe-renderd`)이
+바뀐 판은 `runtime/bin/`의 세 실행 파일도 함께 바꿔야 한다(셋과
+`floe/`는 같은 판이어야 한다). Python `floe2/` 패키지는 0.12.328부터 없다.
 `floe-portable`은 KLayout과 Rust renderer를 모두 포함하므로 루트의 `floe`는
 안정판 KLayout 제품, `floe2`는 Rust-only 제품으로 같은 cache를 공유한다. 기본
 `floe2-portable`은 KLayout이 없으므로 `floe2` launcher만 제공한다.

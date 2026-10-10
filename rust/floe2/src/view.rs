@@ -21,6 +21,10 @@
 //!   view_cells {view, seq, kind: cell_sources|cells|cell_find|cell_bbox|
 //!               cell_insts, src?, cell?, pattern?, limit?, box?, cap?, root?}
 //!                                      -> null; the answer is a `cells` event
+//!   view_minimap {view, depth?, bbox?} -> {size, key, base, bbox, die, scale}:
+//!                                         the overview's base image (palette
+//!                                         digits, size x size) and the die's
+//!                                         place in it; bbox = a view root's
 //!   view_clip {view, seq, bbox (dbu, the root's coordinates), layers?,
 //!              cell_name?, out}       -> null; a `clip` event when written
 //!
@@ -45,9 +49,9 @@ use floe_app_core::{
     render::RenderOptions,
     shots::{Detail, Thin},
     view::{
-        perf, CellOutcome, CellReply, CellRequest, ControllerOptions, Depth, DesktopPolicy,
-        DisplayFrame, Model, Navigation, Patch, Phase, Purpose, QueryOperation, RootEdit, Snapshot,
-        StyleDelta, ViewController, ViewQuery, ViewQueryResult, ViewState,
+        minimap, perf, CellOutcome, CellReply, CellRequest, ControllerOptions, Depth,
+        DesktopPolicy, DisplayFrame, Model, Navigation, Patch, Phase, Purpose, QueryOperation,
+        RootEdit, Snapshot, StyleDelta, ViewController, ViewQuery, ViewQueryResult, ViewState,
     },
     Error, ErrorKind, Result,
 };
@@ -146,6 +150,10 @@ impl Views {
                 &self.view(request)?.controller.cancel_render(),
             )),
             "view_snapshot" => Ok(snapshot_json(&self.view(request)?.controller.snapshot())),
+            "view_minimap" => {
+                let view = self.view(request)?;
+                minimap_json(&view.controller, request)
+            }
             "view_close" => {
                 let id = view_id(request)?;
                 self.views.remove(&id);
@@ -464,6 +472,45 @@ fn pump(id: u64, controller: &ViewController, stop: &AtomicBool, folder: &PathBu
         thread::sleep(PUMP);
     }
     out.line(&json!({"event": "closed", "view": id}));
+}
+
+/// The overview's base image for a depth and the die's place in it (P4e,
+/// app-core `view::minimap` - the bake the web shows too): `bbox` given (a
+/// view root's, its coordinates) the plain base of that die - the baked
+/// frontiers are the top's -, else the top's with its frontier at `depth`
+/// (none, or past the baked depths: the plain one). The viewer draws the
+/// live view box on it itself.
+fn minimap_json(controller: &ViewController, request: &Value) -> Result<Value> {
+    let model = &controller.model;
+    let root = request
+        .get("bbox")
+        .filter(|b| !b.is_null())
+        .map(|b| f64s::<4>(b, "minimap bbox"))
+        .transpose()?;
+    let depth = match request.get("depth") {
+        None | Some(Value::Null) => None,
+        Some(d) => Some(
+            d.as_u64()
+                .and_then(|d| u32::try_from(d).ok())
+                .ok_or_else(|| Error::input("minimap depth"))?,
+        ),
+    };
+    let (overview, bbox, depth) = match root {
+        Some(b) => (Arc::new(minimap::Minimap::plain(b)), b, None),
+        None => (Arc::clone(&model.minimap), model.bbox, depth),
+    };
+    let key = overview
+        .projection(bbox, controller.snapshot().state.viewport, depth)
+        .base;
+    let placement = minimap::placement(bbox);
+    Ok(json!({
+        "size": minimap::SIZE,
+        "key": key,
+        "base": overview.base(&key),
+        "bbox": bbox,
+        "die": placement.map(|(die, _)| die),
+        "scale": placement.map(|(_, scale)| scale),
+    }))
 }
 
 /// The frame's bytes as a file the viewer takes: written under a temporary

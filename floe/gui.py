@@ -3482,6 +3482,12 @@ class Viewer:
         """(scale, panel x0, panel y0, die px w, die px h) or None."""
         if self.meta is None:
             return None
+        got = self._ctl_minimap(None)
+        if got is not None:
+            if got["die"] is None:
+                return None
+            x, y, w, h = got["die"]
+            return (got["scale"], int(x), int(y), int(w), int(h))
         bb = self._die_bbox()
         bw, bh = bb[2] - bb[0], bb[3] - bb[1]
         if bw <= 0 or bh <= 0:
@@ -3550,6 +3556,10 @@ class Viewer:
         point = self._minimap_world_point(event.x - ox, event.y - oy)
         if point is None:
             return True
+        if self._ctl_navigate({"kind": "minimap",
+                               "point": [float(event.x - ox),
+                                         float(event.y - oy)]}):
+            return True
         # §F2R-16: the minimap keeps the zoom, so round the jump onto
         # the 16-device-px grid of the current view - a same-scale
         # move within a viewport's reach then reuses the previous
@@ -3569,6 +3579,20 @@ class Viewer:
         base = self._minimap_bases.get(d)
         if base is not None:
             return base
+        got = self._ctl_minimap(d)
+        if got is not None:
+            # the service's bake (palette digits): this panel's colours
+            size = int(got["size"])
+            colours = {ord(str(i)): bytes.fromhex("%06X" % (rgba >> 8))
+                       for i, rgba in enumerate((BLACK, MINIMAP_BG,
+                                                 MINIMAP_EDGE, MINIMAP_FRONT,
+                                                 MINIMAP_VIEW))}
+            data = b"".join(colours[c] for c in got["base"].encode("ascii"))
+            disp = GdkPixbuf.Pixbuf.new_from_bytes(
+                GLib.Bytes.new(data), GdkPixbuf.Colorspace.RGB, False, 8,
+                size, size, size * 3)
+            self._minimap_bases[d] = disp
+            return disp
         disp = GdkPixbuf.Pixbuf.new(
             GdkPixbuf.Colorspace.RGB, False, 8, MINIMAP_PX, MINIMAP_PX)
         disp.fill(BLACK)
@@ -3974,16 +3998,53 @@ class Viewer:
         self.cy = (b[1] + b[3]) / 2
         self.spp = (b[2] - b[0]) / v["width"]
 
+    def _ctl_navigate(self, nav):
+        """Under the view controller a navigation is its own (P4e: the
+        shared view maths, Viewport::navigate - the web's too): the viewer
+        takes the view it made and shows it. False when the viewer moves
+        the view itself - the Python loop, the view still opening, a drag
+        in progress, or the edit refused (said on the status line)."""
+        if not self._ctl() or self.worker.snapshot is None \
+                or self._drag is not None:
+            return False
+        # with what else changed (the size first: the controller applies
+        # pixels, then the root, then the navigation); the viewer's own view
+        # is not sent - the navigation moves the controller's
+        policy, patch = self._ctl_policy_diff()
+        patch["navigation"] = nav
+        reply = self.worker.edit(**patch)
+        if reply is None:
+            return False        # the redraw after the viewer's maths resends
+        self._ctl_sent = policy
+        self._ctl_adopt(reply)
+        self.redraw()
+        return True
+
+    def _ctl_minimap(self, d):
+        """The overview from the view's service (P4e, app-core
+        view::minimap - the bake the web shows): {base, die, scale, ...}
+        for depth d (None: plain), kept with the bases (a cache or root
+        change drops them); None to bake it here."""
+        if not self._ctl() or self.worker.snapshot is None:
+            return None
+        key = ("ctl", d)
+        got = self._minimap_bases.get(key)
+        if got is None:
+            root = getattr(self, "_view_root", None)
+            got = self.worker.minimap(d, None if root is None
+                                      else root["bbox"])
+            if got is None:
+                return None
+            self._minimap_bases[key] = got
+        return got
+
     def _ctl_sync(self):
         """Send what changed since the last edit: the policy fields that
         differ, and the view as a goto when it moved."""
         snap = self.worker.snapshot
         if snap is None:
             return              # the view still opens; its patch is sent
-        sent = self._ctl_sent if self._ctl_sent is not None else {}
-        policy = self._ctl_policy()
-        patch = {k: v for k, v in policy.items()
-                 if k not in sent or sent[k] != v}
+        policy, patch = self._ctl_policy_diff()
         if not self._ctl_same_view(snap["state"]["viewport"]):
             patch["navigation"] = self._ctl_goto(self._viewport_size()[0])
         if not patch:
@@ -4008,6 +4069,13 @@ class Viewer:
         dy = (fb[3] - vb[3]) / self.spp
         self.cx += (2 * round(dx / 2) - dx) * self.spp
         self.cy -= (2 * round(dy / 2) - dy) * self.spp
+
+    def _ctl_policy_diff(self):
+        """(the policy now, its fields that differ from the last sent)."""
+        sent = self._ctl_sent if self._ctl_sent is not None else {}
+        policy = self._ctl_policy()
+        return policy, {k: v for k, v in policy.items()
+                        if k not in sent or sent[k] != v}
 
     def _ctl_redraw(self):
         """redraw() under the controller: the edit, then the frame on
@@ -4744,6 +4812,8 @@ class Viewer:
         if self.cache is None:
             return
         self._fit_after_worker_start = False
+        if self._ctl_navigate({"kind": "fit"}):
+            return
         bb = self._die_bbox()
         self.cx = (bb[0] + bb[2]) / 2
         self.cy = (bb[1] + bb[3]) / 2
@@ -5029,6 +5099,16 @@ class Viewer:
                 self._set_live_status("zoom band cancelled")
             self._display()
             return True
+        w, h = self._viewport_size()
+        # the controller's band: fractions of the view from its top-left,
+        # the axes the gesture spanned, its direction (at most a view away)
+        start = [min(1.0, max(0.0, x0 / w)), min(1.0, max(0.0, y0 / h))]
+        end = [min(start[0] + 1.0, max(start[0] - 1.0, ev.x / w)),
+               min(start[1] + 1.0, max(start[1] - 1.0, ev.y / h))]
+        if self._ctl_navigate({"kind": "band", "start": start, "end": end,
+                               "axes": [dx >= 5, dy >= 5],
+                               "outward": not forward}):
+            return True
         bbox = self.view_bbox()
         lx0 = bbox[0] + min(x0, ev.x) * self.spp
         lx1 = bbox[0] + max(x0, ev.x) * self.spp
@@ -5142,6 +5222,10 @@ class Viewer:
         return True
 
     def _zoom_at(self, x, y, factor):
+        w, h = self._viewport_size()
+        if self._ctl_navigate({"kind": "zoom", "factor": factor, "anchor": [
+                min(1.0, max(0.0, x / w)), min(1.0, max(0.0, y / h))]}):
+            return
         bbox = self.view_bbox()
         px = bbox[0] + x * self.spp
         py = bbox[3] - y * self.spp
@@ -5152,6 +5236,9 @@ class Viewer:
         self.redraw()
 
     def _zoom_center(self, factor):
+        if self._ctl_navigate({"kind": "zoom", "factor": factor,
+                               "anchor": [0.5, 0.5]}):
+            return
         self.spp *= factor
         self.redraw()
 
@@ -5167,8 +5254,18 @@ class Viewer:
         (arrows: half; Shift+arrows: the fine tenth - user call
         2026-09-04, moved off Ctrl)."""
         width, height = self._viewport_size()
-        dx = self._snap_pan_px(width * frac) * self.spp
-        dy = self._snap_pan_px(height * frac) * self.spp
+        px = self._snap_pan_px(width * frac)
+        py = self._snap_pan_px(height * frac)
+        # the controller's pan takes the step as a fraction of the view
+        # (snap: the 16 px period - this one is on it already)
+        step = {"Left": (-px / width, 0.0), "Right": (px / width, 0.0),
+                "Up": (0.0, py / height), "Down": (0.0, -py / height)}
+        if direction in step and self._ctl_navigate({
+                "kind": "pan", "x": step[direction][0],
+                "y": step[direction][1], "snap": True}):
+            return
+        dx = px * self.spp
+        dy = py * self.spp
         if direction == "Left":
             self.cx -= dx
         elif direction == "Right":
@@ -5848,6 +5945,11 @@ class Viewer:
         # A user/CLI target always wins over the deferred auto-fit used when a
         # new layout is attached to an already allocated window.
         self._fit_after_worker_start = False
+        if self._ctl_navigate({
+                "kind": "goto", "center_um": [float(x_um), float(y_um)],
+                "width_um": float(window_um)
+                if window_um and window_um > 0 else None}):
+            return
         self.cx = x_um / self.dbu
         self.cy = y_um / self.dbu
         if window_um and window_um > 0:

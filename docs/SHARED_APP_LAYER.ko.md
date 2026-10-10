@@ -46,7 +46,7 @@ python을 사용하지 않도록 변경해줘."
 | P1c | 게이트·배포·별칭을 Rust `floe2`로 바꾸고 Python `floe2/` 패키지를 지운다(§4) | 0.12.328 |
 | P2 | `floe2 gtk-service`(stdio JSON-lines). GTK 뷰어의 비-UI 판단을 Rust로 옮기고 Python 모듈을 걷어낸다. 푸시 단위(§5): P2a 열기·준비·레벨 행·덱 스펙·레이어 속성 행, P2b DRC·svrf, P2c 레이어 속성 편집·fill, P2d(P3와 함께) 오라클을 떼어 낸 뒤 Python 모듈 삭제 | P2a 0.12.329, P2b 0.12.330, P2c 0.12.331, P2d 0.12.332 |
 | P3 | KLayout 레거시를 제품 경로에서 빼고, 동결 `floe` 셸은 개발 전용 오라클(`tools/oracle/floe_oracle`)로 둔다(§6) | 0.12.333 |
-| P4 | GTK 렌더 루프를 공유 Rust `ViewController`로(§7; 사용자 승인 2026-10-10). P4a 공유 컨트롤러의 데스크톱 정책, P4b perf 줄, P4c 서비스의 뷰 채널, P4d GTK 전환, P4e 질의·미니맵, P4f 정리 | P4a 0.12.334, P4c 0.12.335, P4b 0.12.336, P4d 0.12.337(현장 확인 필요) |
+| P4 | GTK 렌더 루프를 공유 Rust `ViewController`로(§7; 사용자 승인 2026-10-10). P4a 공유 컨트롤러의 데스크톱 정책, P4b perf 줄, P4c 서비스의 뷰 채널, P4d GTK 전환, P4e 질의·미니맵, P4f 정리 | P4a 0.12.334, P4c 0.12.335, P4b 0.12.336, P4d 0.12.337(현장 확인 필요), P4e 0.12.338 |
 
 ## 3. 동기 규칙
 
@@ -228,7 +228,7 @@ python을 사용하지 않도록 변경해줘."
 | P4b | 라운드를 누적한 프레임 보고와 perf 줄(`perf_status`)의 Rust 이식. Python과 같은 문자열인지 대조 게이트로 확인 |
 | P4c | `floe2 gtk-service`의 뷰 채널(열기·Patch·Esc·프레임 이벤트·raw 파일)과 Python 클라이언트. 같은 프레임인지 게이트로 확인 |
 | P4d | `gui.py`가 그 채널을 쓴다. 입력은 Patch로 보내고 받은 프레임만 표시한다. 예전 Python 루프는 `FLOE_GTK_LOOP=legacy`로 남겨 두고, 현장 확인 뒤 P4f에서 지운다. **현장 확인 필요** |
-| P4e | snap·pick, 셀 트리·루트, 눈금자, 미니맵 투영을 컨트롤러를 거쳐 받는다 |
+| P4e | 내비게이션(확대·이동·밴드·미니맵 클릭·goto·fit)과 미니맵 바탕을 컨트롤러에서 받는다. snap·pick·셀 트리·루트·클립은 P4d에서 이미 채널을 탄다. 눈금자와 미니맵의 뷰 상자 그리기는 UI로 남긴다 |
 | P4f | 예전 루프(여백·`_covered`·정착 로직)를 지우고, `rust_render.py`를 제품에서 빼서 게이트용 개발 클라이언트로 옮기고, 번들·문서를 정리한다 |
 
 ### P4a (0.12.334) — 공유 컨트롤러의 데스크톱 정책
@@ -340,3 +340,21 @@ P4b(perf 줄)는 따로 진행 중이다. 이 단계에서 GTK는 아직 그대�
   - `gtk_view`(약 7초): 채널의 snap·pick·셀 트리·클립이 어댑터와 같다. 실제 창의 `Viewer`가 컨트롤러 루프로 열고 확대·이동·밀도·회색조마다 어댑터와 바이트가 같은 프레임을 보이며, perf 줄은 Python `perf_status`와 같다. 밀도를 켠 채 snap이 같은 답을 준다. 여백 안 이동은 잘라 쓴다. `FLOE_GTK_LOOP=legacy`는 예전 루프로 그린다.
   - jobdeck: `GuiSmokeTests`가 컨트롤러 루프로 창을 열고(덱 세 번, 레이아웃 + DRC) 덱 한 번은 legacy로 연다. 실제 뷰어의 모드 전환 테스트는 두 루프에서 돈다(legacy는 전환 전 debounce, 컨트롤러는 레이어가 바로 편집으로 가고 새 뷰가 그 레이어와 자리를 가진다). `DeckViewChannelTests`는 덱의 레벨 헤드 색·무늬·선 굵기와 레벨 일부를 어댑터와 바이트로 비교한다.
   - 단위: `desktop_frames_carry_their_report_and_the_web_s_do_not`, `desktop_queries_answer_from_an_incomplete_frame`, `desktop_clamp_keeps_the_gtk_zoom_range_and_the_die_in_reach`, `desktop_settle_renders_a_pan_burst_once_and_a_policy_edit_at_once`, worker-client `an_incomplete_scene_answers_only_when_the_query_allowed_it`, renderd `incomplete=ok` 파싱·거절.
+
+### P4e (0.12.338) — 내비게이션과 미니맵을 컨트롤러에서
+
+P4d처럼 컨트롤러 루프에서만 바뀐다. `FLOE_GTK_LOOP=legacy`는 예전 Python 계산 그대로다.
+
+- **내비게이션:** 뷰어의 확대·이동이 컨트롤러의 `Navigation` 편집이 된다. 계산은 공유 `Viewport::navigate`(웹과 같은 것)가 하고, 뷰어는 결과 뷰를 받아 그린다.
+  - 휠과 Ctrl+Z / Shift+Z, +/−: `Zoom {factor, anchor}`. anchor는 커서(또는 가운데)의 뷰 비율이다.
+  - 화살표(Shift = 1/10): `Pan {x, y, snap}`. 걸음은 뷰어가 예전처럼 16 px 단위로 맞춘 값이다(최소 16 px).
+  - 오른쪽 버튼 밴드: `Band {start, end, axes, outward}`. 방향(전체 움직임에서 우세한 쪽)과 5 px 넘게 움직인 축은 뷰어가 정한다(입력 판정).
+  - 미니맵 클릭: `Minimap {point}`(미니맵 px). 다이 밖 테두리 처리와 16 px 단위 반올림은 컨트롤러가 한다.
+  - goto, fit: `Goto {center_um, width_um}`, `Fit`.
+  - 바뀐 정책(크기 등)과 같은 편집으로 보낸다. 뷰어 자신의 뷰는 보내지 않는다(내비게이션이 컨트롤러의 뷰를 옮긴다).
+  - 끌기는 그대로다. 움직이는 동안 뷰어가 옮기고, 놓을 때 짝수 px로 맞춘 뷰를 `goto`로 보낸다.
+  - 뷰가 아직 열리는 중이거나 편집이 거절되면 뷰어의 계산으로 옮긴다.
+- **미니맵:** `view_minimap {view, depth?, bbox?}`가 바탕 이미지(다이, 테두리, 깊이별 경계 상자; 팔레트 숫자 180×180)와 다이의 자리(`placement`: 픽셀 상자와 배율)를 준다. app-core `view::minimap`의 굽기(웹과 같은 것)다. 루트 아래에서는 그 다이의 기본 바탕이다(구운 경계는 맨 위 셀의 것). 뷰어는 깊이마다 한 번 받아 두고, 움직이는 뷰 상자는 매 프레임 직접 그린다(서비스 왕복을 그리기마다 하지 않는다).
+- **UI로 남는 것:** 눈금자(점, 거리 글자, 겹침 배치), 미니맵의 뷰 상자, 끌기 중 미리보기. 웹의 `ruler` 모듈은 HTTP 문자열 좌표용이라 GTK에 맞지 않는다.
+- **app-core:** `minimap::placement(bbox)`를 더했다(공개 함수 추가, 웹 영향 없음).
+- **게이트 `gtk_view`:** 실제 창의 뷰어에서 내비게이션 13가지(Ctrl+Z, 커서 위치 휠 확대·축소, 화살표, 1/10 화살표, 밴드 확대·가는 밴드·밴드 축소, 미니맵 클릭, 창 크기를 준 goto와 확대 유지 goto, fit)가 컨트롤러로 가고, 뷰어의 Python 계산과 같은 뷰가 된다. 미니맵의 자리와 바탕(전체 + 깊이별)이 뷰어의 굽기와 바이트까지 같다. 단위 `placement_is_the_projection_s_die_and_its_scale`.

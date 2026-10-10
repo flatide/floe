@@ -650,6 +650,16 @@ class ViewSession:
             x=float(x), y=float(y), r_px=float(r_px), nth=int(nth),
             layers=[list(l) for l in layers] if layers else None)["id"]
 
+    def minimap(self, depth=None, bbox=None):
+        """The overview's base image for `depth` (None: full) and the die's
+        place in it: {size, key, base (size x size palette digits: 0 the
+        panel, 1 the die, 2 its edge, 3 a frontier box), bbox, die [x, y,
+        w, h], scale (px per dbu)}; `bbox` = a view root's die (the plain
+        base: the baked frontiers are the top's)."""
+        return self._svc.request(
+            "view_minimap", view=self.view, depth=depth,
+            bbox=None if bbox is None else [float(v) for v in bbox])
+
     def cells(self, kind, seq, **fields):
         """A cell-tree question (cell_sources, cells, cell_find, cell_bbox,
         cell_insts - floe/rust_render.py's fields; cell_insts' view box is
@@ -828,6 +838,17 @@ class ViewWorker:
             else:
                 out.append((kind, value))
         return out
+
+    def minimap(self, depth=None, bbox=None):
+        """ViewSession.minimap; None while the view opens or when refused
+        (the viewer bakes its own then)."""
+        if self.session is None:
+            return None
+        try:
+            return self.session.minimap(depth, bbox)
+        except ServiceError as exc:
+            self.res.put({"kind": "error", "msg": "minimap: %s" % exc})
+            return None
 
     def _viewport_px(self, x, y):
         """World (dbu) -> the controller's viewport pixel, and its scale."""

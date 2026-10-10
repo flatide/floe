@@ -172,6 +172,111 @@ def queries_and_cells(s, ref, frame, temp):
           % (len(a), len(b)))
 
 
+class Event:
+    """A stand-in GDK event (the attributes the handlers read)."""
+
+    def __init__(self, **fields):
+        self.__dict__.update(fields)
+
+
+def band(v, start, end):
+    """A right-button band from `start` to `end` (viewport px), released."""
+    v._zoomdrag = start
+    v._band_cur = end
+    v._band_ext = (min(start[0], end[0]), max(start[0], end[0]))
+    v._on_release(None, Event(button=3, x=end[0], y=end[1]))
+
+
+def minimap_click(v, fx, fy):
+    """A click on the minimap at a fraction of the die's box there."""
+    from floe import gui
+    _scale, x0, y0, mw, mh = v._minimap_geom()
+    off = v._minimap_image.translate_coordinates(v._minimap_event, 0, 0)
+    ox, oy = off if off else (0, 0)
+    v._on_minimap_click(None, Event(
+        type=gui.Gdk.EventType.BUTTON_PRESS, button=1,
+        x=x0 + mw * fx + ox, y=y0 + mh * fy + oy))
+
+
+def navigation_parity(v):
+    """P4e: every navigation of the viewer is the view controller's (the
+    shared Viewport::navigate) and lands where the viewer's own maths - the
+    Python loop's, kept for FLOE_GTK_LOOP=legacy - put it."""
+    from floe import gui
+    w, h = v._viewport_size()
+    bb = v._die_bbox()
+    um = lambda fx, fy: ((bb[0] + fx * (bb[2] - bb[0])) * v.dbu,
+                         (bb[1] + fy * (bb[3] - bb[1])) * v.dbu)
+    ops = (
+        ("Ctrl+Z", lambda: v._zoom_center(gui.CAL_ZOOM_IN)),
+        ("the wheel in at a point",
+         lambda: v._zoom_at(w * 0.3, h * 0.7, gui.WHEEL_ZOOM_STEP)),
+        ("the wheel out at a point",
+         lambda: v._zoom_at(w * 0.8, h * 0.2, 1 / gui.WHEEL_ZOOM_STEP)),
+        ("Ctrl+Z again", lambda: v._zoom_center(gui.CAL_ZOOM_IN)),
+        ("an arrow right", lambda: v._pan_view("Right")),
+        ("a fine arrow up",
+         lambda: v._pan_view("Up", gui.KEY_PAN_FRACTION_FINE)),
+        ("a band in", lambda: band(v, (0.2 * w, 0.3 * h), (0.5 * w, 0.45 * h))),
+        ("a thin band", lambda: band(v, (0.1 * w, 0.5 * h), (0.7 * w, 0.5 * h + 2))),
+        ("a band out", lambda: band(v, (0.6 * w, 0.5 * h), (0.4 * w, 0.6 * h))),
+        ("a minimap click", lambda: minimap_click(v, 0.3, 0.6)),
+        ("goto with a window", lambda: v.goto(*um(0.4, 0.55),
+                                              (bb[2] - bb[0]) * v.dbu * 0.05)),
+        ("goto at the zoom", lambda: v.goto(*um(0.6, 0.45))),
+        ("fit", v.fit),
+    )
+    for what, op in ops:
+        before = (v.cx, v.cy, v.spp)
+        # the viewer's own maths, not drawn
+        v._ctl_navigate = lambda nav: False
+        v.redraw = lambda **kw: None
+        try:
+            op()
+        finally:
+            del v._ctl_navigate
+            del v.redraw
+        v._clamp_view()
+        want = (v.cx, v.cy, v.spp)
+        v.cx, v.cy, v.spp = before
+        rev = v.worker.snapshot["state_rev"]
+        op()
+        got = (v.cx, v.cy, v.spp)
+        check(v.worker.snapshot["state_rev"] != rev,
+              "%s did not reach the controller" % what)
+        check(abs(got[2] / want[2] - 1) < 1e-9
+              and abs(got[0] - want[0]) < 1e-4 * want[2]
+              and abs(got[1] - want[1]) < 1e-4 * want[2],
+              "%s: the controller's view %r, the viewer's maths %r"
+              % (what, got, want))
+        check(v._ctl_same_view(v.worker.snapshot["state"]["viewport"]),
+              "%s: the viewer did not take the controller's view" % what)
+    print("navigation: %d moves as the viewer's maths" % len(ops))
+
+
+def minimap_parity(v):
+    """P4e: the minimap's bases and the die's place come from the service
+    (app-core view::minimap) and are the viewer's own bake byte for byte."""
+    depths = [None] + list(range(len(v._frontier_depths)))
+    v._minimap_bases = {}
+    geom = v._minimap_geom()
+    check(("ctl", None) in v._minimap_bases, "the minimap did not ask the service")
+    ours = {d: bytes(v._minimap_base(d).get_pixels()) for d in depths}
+    v._ctl_minimap = lambda d: None
+    try:
+        v._minimap_bases = {}
+        mine = v._minimap_geom()
+        check(geom[1:] == mine[1:] and abs(geom[0] / mine[0] - 1) < 1e-12,
+              "minimap geometry: service %r, viewer %r" % (geom, mine))
+        for d in depths:
+            check(ours[d] == bytes(v._minimap_base(d).get_pixels()),
+                  "minimap base at depth %s differs from the viewer's bake" % d)
+    finally:
+        del v._ctl_minimap
+        v._minimap_bases = {}
+    print("minimap: %d base(s) as the viewer's bake" % len(depths))
+
+
 def gtk_ready():
     """Whether the viewer's windows can open here (GuiSmokeTests' rule)."""
     try:
@@ -259,6 +364,9 @@ def gui_viewer(src, ref):
         check(not missing, "the report lacks the adapter's keys %s" % sorted(missing))
         check(last["perf"][1] in v.pstatus.get_text(),
               "the lower bar %r is not the frame's %r" % (v.pstatus.get_text(), last["perf"][1]))
+        minimap_parity(v)
+        navigation_parity(v)
+        pump(v, lambda: settled(v, frames), "the fit after the moves")
         steps = (("a zoom", lambda: v._zoom_center(0.25), {}),
                  ("a pan", lambda: v._pan_view("Right"), {}),
                  ("the density", v._toggle_density, {"density": True}),

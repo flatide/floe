@@ -294,6 +294,12 @@ impl Minimap {
         out
     }
 }
+/// The die's place in the overview for `bbox` (GTK `_minimap_geom`): its
+/// pixel box `[x, y, w, h]` and the scale in px per dbu - for a client that
+/// draws the live view box on a base itself (the GTK viewer, per frame).
+pub fn placement(bbox: [f64; 4]) -> Option<([f64; 4], f64)> {
+    Geometry::new(bbox).map(|g| (g.die, g.scale))
+}
 pub(super) fn navigate(v: Viewport, bbox: [f64; 4], p: [f64; 2]) -> Result<Viewport> {
     if !p
         .iter()
@@ -319,6 +325,17 @@ pub(super) fn navigate(v: Viewport, bbox: [f64; 4], p: [f64; 2]) -> Result<Viewp
 mod tests {
     use super::*;
     use serde_json::{json, Value};
+    #[test]
+    fn placement_is_the_projection_s_die_and_its_scale() {
+        // the GTK viewer draws its view box with it (P4e)
+        let bbox = [-100., -200., 900., 400.];
+        let (die, scale) = placement(bbox).unwrap();
+        let v = Viewport::new(bbox, 1000, 600).unwrap();
+        let p = Minimap::plain(bbox).projection(bbox, v, None);
+        assert_eq!(p.die, Some(die.map(|v| v as u16)));
+        assert_eq!(scale, (SIZE as f64 - 2. * PAD) / 1000.);
+        assert!(placement([0., 0., 0., 10.]).is_none());
+    }
     #[test]
     fn baked_depths_plain_fallback_and_bounded_metadata() {
         let bbox = [-100., -200., 900., 800.];
