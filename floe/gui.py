@@ -1308,6 +1308,72 @@ def frame_rect(buf, x0, y0, w, h, color):
     fill_rect(buf, x0 + w - 1, y0, 1, h, color)
 
 
+def pixbuf_of(width, height, pixels, alpha=False):
+    """A pixbuf over packed RGB (or RGBA) bytes, the bytes kept by it."""
+    channels = 4 if alpha else 3
+    return GdkPixbuf.Pixbuf.new_from_bytes(
+        GLib.Bytes.new(bytes(pixels)), GdkPixbuf.Colorspace.RGB, alpha, 8,
+        width, height, width * channels)
+
+
+def outlined_pixbuf(width, height, inner_row, outline=(102, 102, 102)):
+    """width x height RGB with a 1 px outline (the palette swatches and
+    fill slots); inner_row(y, n) -> the RGB bytes of the n pixels inside
+    it on row y (x = 1 .. n)."""
+    edge = bytes(outline)
+    if width < 3 or height < 3:
+        return pixbuf_of(width, height, edge * (width * height))
+    rows = [edge * width]
+    for y in range(1, height - 1):
+        rows.append(edge + inner_row(y, width - 2) + edge)
+    rows.append(edge * width)
+    return pixbuf_of(width, height, b"".join(rows))
+
+
+def tiled_row(bits, n, on=b"\x00\x00\x00", off=b"\xff\xff\xff"):
+    """n pixels from x = 1 of a 16-wide `*`/`.` bitmap row tiled 1:1."""
+    tile = b"".join(on if c == "*" else off for c in bits[:16].ljust(16, "."))
+    return (tile * (n // 16 + 2))[3:3 + 3 * n]
+
+
+class PixbufCell:
+    """A widget showing paint(width, height) -> pixbuf at the size it is
+    given, with no GTK "draw" handler: the target hosts have no pycairo
+    (module docstring), and a cairo-drawn widget stays blank there (field
+    2026-10-10: the hidden-layer strike and the palettes were). The image
+    is an overlay child, so its size never enters the request and the
+    cell still shrinks with the pane; it is painted again after a size
+    change (from idle, outside the allocation) and on refresh()."""
+
+    def __init__(self, paint, width, height):
+        self._paint = paint
+        self._size = None
+        self.widget = Gtk.Overlay()
+        base = Gtk.Box()
+        base.set_size_request(width, height)
+        self.widget.add(base)
+        self.image = Gtk.Image()
+        self.image.set_halign(Gtk.Align.START)
+        self.image.set_valign(Gtk.Align.START)
+        self.widget.add_overlay(self.image)
+        self.widget.connect("size-allocate", self._on_allocate)
+
+    def _on_allocate(self, _widget, alloc):
+        size = (alloc.width, alloc.height)
+        if size != self._size and size[0] > 0 and size[1] > 0:
+            self._size = size
+            GLib.idle_add(self._repaint, size)
+
+    def _repaint(self, size):
+        if size == self._size:
+            self.image.set_from_pixbuf(self._paint(*size))
+        return False
+
+    def refresh(self):
+        if self._size is not None:
+            self.image.set_from_pixbuf(self._paint(*self._size))
+
+
 def _panel_debug_hook(scroller, box, rows_getter):
     """FLOE_PANEL_DEBUG=1: log palette geometry on every scroll tick
     and size change - allocation vs GdkWindow vs mapped state for the
@@ -1607,8 +1673,8 @@ class LayerRow(object):
         nbox.add(content)
         nbox.connect("button-press-event", self._on_name_click)
         # input-only sub-boxes: the hidden-layer strike is ONE line
-        # cairo-drawn across the whole row AFTER the children, and a
-        # child with a visible window would composite over it (the
+        # across the whole row OVER the children (an overlay image), and
+        # a child with a visible window would composite over it (the
         # gaps were exactly where the old per-span strike vanished)
         mbox.set_visible_window(False)
         nbox.set_visible_window(False)
@@ -1620,9 +1686,20 @@ class LayerRow(object):
         # Keep the inter-row padding inside an event window. A click in the
         # gap therefore belongs to this (upper) row instead of falling
         # through the layer palette without selecting anything.
+        # the strike: an image over the row, painted for its size (no
+        # cairo "draw" handler - the hosts have no pycairo, it never
+        # showed there, field 2026-10-10)
+        row = Gtk.Overlay()
+        row.add(row_box)
+        self._strike = Gtk.Image()
+        self._strike.set_halign(Gtk.Align.START)
+        self._strike.set_valign(Gtk.Align.START)
+        self._strike.set_no_show_all(True)
+        row.add_overlay(self._strike)
+        self._strike_size = None
+        row.connect("size-allocate", self._on_row_allocate)
         self.widget = Gtk.EventBox()
-        self.widget.add(row_box)
-        self.widget.connect_after("draw", self._draw_strike)
+        self.widget.add(row)
         self.widget.connect("button-press-event", self._on_row_click)
         self.widget.set_tooltip_text(tooltip)
         self._paint()
@@ -1701,21 +1778,31 @@ class LayerRow(object):
             % (fg, GLib.markup_escape_text(
                 self._name + (" [partial]" if self._partial else ""))))
         self._clbl.set_from_pixbuf(self._swatch_on)
+        self._strike.set_visible(not self._active)
         self.widget.queue_draw()
 
-    def _draw_strike(self, widget, cr):
+    def _on_row_allocate(self, _widget, alloc):
+        size = (alloc.width, alloc.height)
+        if size != self._strike_size and size[0] > 0 and size[1] > 0:
+            self._strike_size = size
+            GLib.idle_add(self._paint_strike, size)
+
+    def _paint_strike(self, size):
         """Hidden layer: one continuous bright line across the FULL
-        row - text, swatch, margins and trailing space alike. (The
-        geometry-pick highlight is the yellow id box painted by the
-        number label's Pango background - see _paint, 2026-08-29 -
-        not a row outline.)"""
-        alloc = widget.get_allocation()
-        if self._active:
+        row - text, swatch, margins and trailing space alike - as a
+        transparent row-sized image over it. (The geometry-pick
+        highlight is the yellow id box painted by the number label's
+        Pango background - see _paint, 2026-08-29 - not a row
+        outline.)"""
+        if size != self._strike_size:
             return False
-        y = max(0, (alloc.height - self._row_pad) // 2)
-        cr.set_source_rgb(*(c / 255.0 for c in LAYER_STRIKE_RGB))
-        cr.rectangle(0, y, alloc.width, 1)
-        cr.fill()
+        width, height = size
+        y = max(0, (height - self._row_pad) // 2)
+        pixels = bytearray(width * height * 4)
+        line = bytes(LAYER_STRIKE_RGB) + b"\xff"
+        pixels[y * width * 4:(y + 1) * width * 4] = line * width
+        self._strike.set_from_pixbuf(pixbuf_of(width, height, pixels,
+                                               alpha=True))
         return False
 
     def set_marker(self, marker):
@@ -2240,24 +2327,14 @@ class Viewer:
         pal.set_hexpand(True)
         pal_cells = []   # (swatch DrawingArea, color) for the pick
         for i, (col, cname) in enumerate(PALETTE_COLORS):
-            rgb = tuple(int(col[j:j + 2], 16) / 255.0
-                        for j in (1, 3, 5))
+            rgb = tuple(int(col[j:j + 2], 16) for j in (1, 3, 5))
 
-            def _draw_swatch(w, cr, rgb=rgb):
-                a = w.get_allocation()
-                cr.set_source_rgb(*rgb)
-                cr.rectangle(0, 0, a.width, a.height)
-                cr.fill()
-                cr.set_source_rgb(0.4, 0.4, 0.4)  # outline: reads
-                cr.set_line_width(1)              # on black too
-                cr.rectangle(0.5, 0.5, a.width - 1, a.height - 1)
-                cr.stroke()
-                return False
-
-            da = Gtk.DrawingArea()
-            da.set_size_request(12, 14)
+            # the colour inside a grey outline (reads on black too)
+            cell = PixbufCell(
+                lambda w, h, rgb=bytes(rgb): outlined_pixbuf(
+                    w, h, lambda _y, n: rgb * n), 12, 14)
+            da = cell.widget
             da.set_hexpand(True)
-            da.connect("draw", _draw_swatch)
             da.set_tooltip_text(
                 "%s (%s) - recolor the selected layer(s)"
                 % (cname, col))
@@ -2291,33 +2368,17 @@ class Viewer:
         patg_cells = []   # (slot DrawingArea, index) for the pick
         for i, fname in enumerate(fillpat.FILL_NAMES):
 
-            def _draw_slot(w, cr, i=i):
-                a = w.get_allocation()
-                # white paper, black dots (user call 2026-08-11)
-                cr.set_source_rgb(1.0, 1.0, 1.0)
-                cr.rectangle(0, 0, a.width, a.height)
-                cr.fill()
+            def _paint_slot(width, height, i=i):
+                # white paper, black dots (user call 2026-08-11): the
+                # 16x16 bitmap tiled 1:1 across the box (no stretching)
                 rows = self._fill_patterns[i].split("\n")
-                # tile the 16x16 bitmap 1:1 across the box (no
-                # stretching - user call 2026-08-11)
-                cr.set_source_rgb(0.0, 0.0, 0.0)
-                for y in range(a.height):
-                    r = rows[y % 16]
-                    for x in range(a.width):
-                        if r[x % 16] == "*":
-                            cr.rectangle(x, y, 1, 1)
-                cr.fill()
-                cr.set_source_rgb(0.4, 0.4, 0.4)
-                cr.set_line_width(1)
-                cr.rectangle(0.5, 0.5, a.width - 1, a.height - 1)
-                cr.stroke()
-                return False
+                return outlined_pixbuf(
+                    width, height, lambda y, n: tiled_row(rows[y % 16], n))
 
-            da = Gtk.DrawingArea()
-            da.set_size_request(12, 20)
+            cell = PixbufCell(_paint_slot, 12, 20)
+            da = cell.widget
             da.set_hexpand(True)
-            da.connect("draw", _draw_slot)
-            self._fill_slots.append(da)
+            self._fill_slots.append(cell)
             da.set_tooltip_text(
                 "%s - click: fill selected layer(s)" % fname)
             patg.attach(da, i % 5, i // 5, 1, 1)
@@ -2516,7 +2577,7 @@ class Viewer:
             except ValueError:
                 pass
         for w in self._fill_slots:
-            w.queue_draw()
+            w.refresh()
         self._refresh_row_fills()
         self.last_frame = None
         self._margin_frame = None
@@ -10384,28 +10445,28 @@ class Viewer:
         dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
         dlg.add_button("Apply", Gtk.ResponseType.OK)
         cell = 18
-        da = Gtk.DrawingArea()
-        da.set_size_request(16 * cell + 1, 16 * cell + 1)
+        side = 16 * cell + 1
+        # an image of the grid, painted again after each change (no
+        # cairo "draw" handler: the hosts have no pycairo)
+        grid = Gtk.Image()
+        da = Gtk.EventBox()
+        da.add(grid)
         da.set_halign(Gtk.Align.CENTER)
         paint = {"v": None}
 
-        def draw(_w, cr):
-            for y in range(16):
-                for x in range(16):
-                    on = rows[y][x] == "*"
-                    cr.set_source_rgb(*((0.0, 0.0, 0.0) if on
-                                        else (1.0, 1.0, 1.0)))
-                    cr.rectangle(x * cell, y * cell, cell, cell)
-                    cr.fill()
-            cr.set_source_rgb(0.6, 0.6, 0.6)
-            cr.set_line_width(1)
-            for i in range(17):
-                cr.move_to(i * cell + 0.5, 0)
-                cr.line_to(i * cell + 0.5, 16 * cell)
-                cr.move_to(0, i * cell + 0.5)
-                cr.line_to(16 * cell, i * cell + 0.5)
-            cr.stroke()
-            return False
+        def draw():
+            line = b"\x99\x99\x99"            # the grid lines
+            out = []
+            for r in rows:
+                cells = b"".join(
+                    line + (b"\x00\x00\x00" if c == "*"
+                            else b"\xff\xff\xff") * (cell - 1) for c in r)
+                out.append(line * side)
+                out.extend([cells + line] * (cell - 1))
+            out.append(line * side)
+            grid.set_from_pixbuf(pixbuf_of(side, side, b"".join(out)))
+
+        draw()
 
         def cell_at(ev):
             return int(ev.x) // cell, int(ev.y) // cell
@@ -10415,7 +10476,7 @@ class Viewer:
             if 0 <= x < 16 and 0 <= y < 16:
                 paint["v"] = "." if rows[y][x] == "*" else "*"
                 rows[y][x] = paint["v"]
-                da.queue_draw()
+                draw()
             return True
 
         def motion(_w, ev):
@@ -10425,13 +10486,12 @@ class Viewer:
             if 0 <= x < 16 and 0 <= y < 16 \
                     and rows[y][x] != paint["v"]:
                 rows[y][x] = paint["v"]
-                da.queue_draw()
+                draw()
             return True
 
         da.add_events(Gdk.EventMask.BUTTON_PRESS_MASK
                       | Gdk.EventMask.BUTTON1_MOTION_MASK
                       | Gdk.EventMask.BUTTON_RELEASE_MASK)
-        da.connect("draw", draw)
         da.connect("button-press-event", press)
         da.connect("motion-notify-event", motion)
         da.connect("button-release-event",
@@ -10452,14 +10512,14 @@ class Viewer:
                            fillpat.pattern(name).split("\n")]
             else:
                 break
-            da.queue_draw()
+            draw()
         ok = r == Gtk.ResponseType.OK
         dlg.destroy()
         if not ok:
             return
         self._fill_patterns[slot] = "\n".join(
             "".join(rr) for rr in rows)
-        self._fill_slots[slot].queue_draw()
+        self._fill_slots[slot].refresh()
         self._refresh_row_fills()
         if slot in self._layer_patterns.values():
             self._push_fills()

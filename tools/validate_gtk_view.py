@@ -330,9 +330,52 @@ def settled(viewer, frames=None):
         and fg[-1]["final"]
 
 
+class NoCairo:
+    """pycairo unimportable, as on the target hosts (floe/gui.py's module
+    docstring): a GTK "draw" handler gets no cairo context there and its
+    widget stays blank (field 2026-10-10)."""
+
+    def find_spec(self, name, path=None, target=None):
+        if name in ("cairo", "gi._gi_cairo") or name.startswith("cairo."):
+            raise ImportError("no pycairo on the viewer's hosts: %s" % name)
+        return None
+
+
+def strike_and_palettes(v):
+    """A hidden layer's row shows the strike - one line across the row -
+    and the colour and fill palettes have their images, without pycairo."""
+    from floe import gui
+    key = sorted(v._layer_rows)[0]
+    row = v._layer_rows[key]
+    row.set_active(False)
+    pump(v, lambda: row._strike.get_visible() and
+         row._strike.get_pixbuf() is not None, "the strike", 30)
+    pb = row._strike.get_pixbuf()
+    w, h, rs = pb.get_width(), pb.get_height(), pb.get_rowstride()
+    data = pb.get_pixels()
+    y = max(0, (h - row._row_pad) // 2)
+    line = bytes(gui.LAYER_STRIKE_RGB) + b"\xff"
+    check(pb.get_has_alpha() and data[y * rs:y * rs + 4 * w] == line * w,
+          "the strike is not one line across the row at y=%d" % y)
+    check(all(data[r * rs + 3:r * rs + 4 * w:4] == bytes(w)
+              for r in range(h) if r != y),
+          "the strike image covers more than its line")
+    alloc = row.widget.get_allocation()
+    check((w, h) == (alloc.width, alloc.height),
+          "the strike %dx%d is not the row's %dx%d"
+          % (w, h, alloc.width, alloc.height))
+    row.set_active(True)
+    pump(v, lambda: not row._strike.get_visible(), "the strike gone", 30)
+    for cell in v._fill_slots:
+        check(cell.image.get_pixbuf() is not None,
+              "a fill slot has no image")
+    print("strike and palettes: drawn without pycairo")
+
+
 def gui_viewer(src, ref):
     """floe/gui.py's Viewer on the controller's loop (the default)."""
     os.environ.pop("FLOE_GTK_LOOP", None)
+    sys.meta_path.insert(0, NoCairo())
     from floe import gui
     gui.import_gtk()
     cache = gtkservice.ServiceCache(str(src))
@@ -407,6 +450,7 @@ def gui_viewer(src, ref):
             got.get(k) == want.get(k) for k in ("found", "x", "y", "snap")),
             "snap: viewer %r, adapter %r" % (got, want))
         print("viewer: %d frame(s), perf %r" % (len(frames), last["perf"][1]))
+        strike_and_palettes(v)
     finally:
         v._quit()
         v.window.destroy()

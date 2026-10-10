@@ -403,6 +403,17 @@ print(json.dumps([instance.APP, instance.socket_address(":77"),
             continue
         tree = ast.parse((ROOT / "floe" / f).read_text(encoding="utf-8"))
         for node in ast.walk(tree):
+            # no GTK "draw" handler: the hosts have no pycairo, so its
+            # cairo context never reaches Python and the widget stays
+            # blank (field 2026-10-10: the hidden-layer strike, the
+            # palettes) - the viewer draws pixbufs
+            if isinstance(node, ast.Call) and isinstance(
+                    node.func, ast.Attribute) and node.func.attr in (
+                    "connect", "connect_after") and node.args and \
+                    isinstance(node.args[0], ast.Constant) and \
+                    node.args[0].value == "draw":
+                check(False, "floe/%s:%d connects a GTK draw handler "
+                      "(needs pycairo)" % (f, node.lineno))
             if isinstance(node, ast.ImportFrom):
                 names = ([node.module or ""] if node.level == 0 else
                          ["floe." + (node.module or "")])
@@ -416,7 +427,7 @@ print(json.dumps([instance.APP, instance.socket_address(":77"),
                 continue
             for name in names:
                 top = name.split(".")
-                check(top[0] != "floe_oracle" and top[0] != "klayout",
+                check(top[0] not in ("floe_oracle", "klayout", "cairo"),
                       "floe/%s:%d imports %s" % (f, node.lineno, name))
                 if top[0] == "floe" and len(top) > 1:
                     check(top[1] in product_modules or top[1] in (
