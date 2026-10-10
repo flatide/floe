@@ -137,15 +137,17 @@ D1~D3(DRC .ice 인덱스 == ASCII 파스 동치).
 floe/            GTK 뷰어 (floe2의 Python은 이것뿐, P2d/P3)
   gtkview.py     진입점 (`floe2 view`·`floe2 gtktest`가 띄움)
   viewcli.py     뷰 옵션, 단일 인스턴스 전달, gtktest
-  gui.py         GTK 셸 (키맵·패널·미니맵·팔레트·상태줄)
-  gtkservice.py  `floe2 gtk-service` 클라이언트 (열기·준비·DRC 리뷰·layerprops)
-  rust_render.py floe-renderd 어댑터 (프레임·질의)
-  vfsclient.py   floe-index·floe2 실행 파일 찾기
+  gui.py         GTK 셸 (키맵·패널·미니맵·팔레트·상태줄; 프레임 표시)
+  gtkservice.py  `floe2 gtk-service` 클라이언트 (열기·준비·DRC 리뷰·layerprops,
+                 뷰 채널: ViewSession·ViewWorker - 렌더 루프는 Rust ViewController)
+  vfsclient.py   floe-index·floe2·floe-renderd 실행 파일 찾기
   fillpat.py     색테이블/fill 표 (colornames.def / fillpatterns.def)
   instance.py hangul.py product.py
 tools/oracle/floe_oracle/   개발 전용 오라클 (동결 floe 셸, `python -m floe_oracle`)
   cli.py         동결 CLI (index/info/render/clip/probe/profile/drc/svrf/jobdeck)
   service.py     KLayout RenderWorker (잡 루프, 스트리밍 라운드, [perf])
+  rust_render.py floe-renderd Python 어댑터 (P4f 전 뷰어의 것; 게이트의 기준)
+  perf_line.py   예전 Python perf 줄 (perf_parity의 기준)
   viewport.py    VfsMosaic (WC apply, 프레임 레이어 키, 원장)
   vfsclient.py   vfsd 라인 프로토콜 클라이언트
   render.py      klayout Renderer (스페클/프레임 플레인/fill 오버라이드)

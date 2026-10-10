@@ -44,6 +44,32 @@ def find_binary():
         ", ".join(candidates or ["no candidates"]))
 
 
+def find_renderd():
+    """The floe-renderd the view service launches (Help > About probes
+    it): FLOE_RENDERD_BIN, else the development build, a dist build, the
+    portable slot beside Python, and PATH."""
+    candidates = []
+    configured = os.environ.get("FLOE_RENDERD_BIN")
+    if configured:
+        candidates.append(configured)
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidates.extend((
+        os.path.join(here, "rust", "target", "release", "floe-renderd"),
+        os.path.join(here, "rust", "dist", "floe-renderd-linux-gnu"),
+        os.path.join(here, "rust", "dist", "floe-renderd-linux-x86_64"),
+        os.path.join(os.path.dirname(sys.executable), "floe-renderd"),
+    ))
+    on_path = shutil.which("floe-renderd")
+    if on_path:
+        candidates.append(on_path)
+    for cand in candidates:
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return os.path.abspath(cand)
+    raise RuntimeError(
+        "floe-renderd not found; set FLOE_RENDERD_BIN (checked: %s)" %
+        ", ".join(candidates))
+
+
 def find_floe2():
     """The Rust command line `floe2` (rust/floe2, docs/SHARED_APP_LAYER.ko.md):
     FLOE2_BIN - its launcher sets it when it starts the viewer - else the

@@ -61,7 +61,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (P3)
 from floe_oracle.cache import Cache
-from floe.rust_render import RustRenderWorker
+from floe_oracle.rust_render import RustRenderWorker
 from floe import RENDERD_VERSION
 
 

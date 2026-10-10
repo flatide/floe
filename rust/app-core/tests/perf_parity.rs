@@ -2,7 +2,7 @@
 //! docs/SHARED_APP_LAYER.ko.md §7): tools/validate_perf_parity.py (gate
 //! `perf_parity`) writes a corpus - synthetic result dicts with Python's
 //! `perf_status` / `fmt_count` / `occ_note` / `_load_note` strings, and real
-//! frame rounds recorded through floe/rust_render.py (FLOE_RUST_RECORD) with
+//! frame rounds recorded through floe_oracle/rust_render.py (FLOE_RUST_RECORD) with
 //! the result `_emit_frame` emitted - and this replays it through
 //! `floe_app_core::view::perf`: every string byte for byte, every result equal
 //! in keys, value types and values. FLOE_PERF_OUT gets what Rust made.

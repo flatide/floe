@@ -1,25 +1,29 @@
 #!/usr/bin/env python3
 """The GTK viewer's view channel (docs/SHARED_APP_LAYER.ko.md §7, P4c):
 `floe2 gtk-service`'s view_open / view_edit / view_cancel / view_close over
-the shared Rust ViewController, driven as the viewer will drive it
+the shared Rust ViewController, driven as the viewer drives it
 (floe/gtkservice.py ViewSession), against a real floe-renderd.
 
 Checked: every frame the channel hands over is byte-equal to the frame the
-viewer's current adapter (floe/rust_render.py RustRenderWorker) draws for
-the same box, size and policy - a plain open, a snapped pan, the density
-under the cut (its first round, then the frame), a margin around the
-viewport (vw/vh) and a pan the margin covers (no new frame); the state the
-service says (revisions, phase, density); a closed view's files go and the
-service opens the next one.
+Python renderd adapter (tools/oracle/floe_oracle/rust_render.py
+RustRenderWorker, the viewer's until P4f) draws for the same box, size and
+policy - a plain open, a snapped pan, the density under the cut (its first
+round, then the frame), a margin around the viewport (vw/vh) and a pan the
+margin covers (no new frame); the state the service says (revisions, phase,
+density); a closed view's files go and the service opens the next one.
 
-P4d: snap, pick, the cell tree and a clip through the channel = the
-adapter's answers; the viewer itself (floe/gui.py Viewer, in process) on
-the controller's loop - its first frame, a pan, a zoom, the density, the
+P4d-P4f: snap, pick, the cell tree and a clip through the channel = the
+adapter's answers, cell questions while the view still opens answered once
+it is open; the viewer itself (floe/gui.py Viewer, in process, pycairo
+blocked as on its hosts) - its first frame, a pan, a zoom, the density, the
 grayscale, each frame byte-equal to the adapter's for the view the viewer
-shows, the perf line the service sends = floe/gui.py perf_status over the
-frame's report (the adapter's result keys), a snap answered, a margin's pan
-a crop - and on FLOE_GTK_LOOP=legacy the Python loop still draws.
+shows, the perf line the service sends = the Python perf_status
+(floe_oracle/perf_line.py) over the frame's report (the adapter's result
+keys), a snap answered, a margin's pan a crop, its navigations the
+controller's = its own maths, its minimap the service's bake, the hidden
+layer's strike and the palettes drawn as images.
 """
+
 
 import os
 from pathlib import Path
@@ -34,8 +38,9 @@ FLOE2 = os.environ.get("FLOE2_BIN") or str(
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (P3)
 from floe import gtkservice  # noqa: E402
-from floe.rust_render import RustRenderWorker  # noqa: E402
+from floe_oracle.rust_render import RustRenderWorker  # noqa: E402
 from floe_oracle.cache import Cache  # noqa: E402
+from floe_oracle.perf_line import perf_status  # noqa: E402
 
 W, H = 400, 300
 
@@ -201,7 +206,7 @@ def minimap_click(v, fx, fy):
 def navigation_parity(v):
     """P4e: every navigation of the viewer is the view controller's (the
     shared Viewport::navigate) and lands where the viewer's own maths - the
-    Python loop's, kept for FLOE_GTK_LOOP=legacy - put it."""
+    Python loop's, kept as its fallback while the view opens - put it."""
     from floe import gui
     w, h = v._viewport_size()
     bb = v._die_bbox()
@@ -384,7 +389,6 @@ def strike_and_palettes(v):
 
 def gui_viewer(src, ref):
     """floe/gui.py's Viewer on the controller's loop (the default)."""
-    os.environ.pop("FLOE_GTK_LOOP", None)
     sys.meta_path.insert(0, NoCairo())
     from floe import gui
     gui.import_gtk()
@@ -410,9 +414,9 @@ def gui_viewer(src, ref):
         last = [f for f in frames if f["purpose"] == "foreground"][-1]
         report = last["report"]
         note = "" if last.get("depth") is None else ", depth %d" % last["depth"]
-        check(tuple(last["perf"]) == gui.perf_status(report, note),
+        check(tuple(last["perf"]) == perf_status(report, note),
               "perf line: service %r, Python %r" % (last["perf"],
-                                                   gui.perf_status(report, note)))
+                                                   perf_status(report, note)))
         missing = set(ref.result) - set(report) - {"rgba", "png", "gen"}
         check(not missing, "the report lacks the adapter's keys %s" % sorted(missing))
         check(last["perf"][1] in v.pstatus.get_text(),
@@ -483,27 +487,6 @@ def gui_viewer(src, ref):
         m._quit()
         m.window.destroy()
     cache.close()
-
-
-def gui_legacy(src):
-    """FLOE_GTK_LOOP=legacy: the Python loop (floe/rust_render.py) draws."""
-    os.environ["FLOE_GTK_LOOP"] = "legacy"
-    try:
-        from floe import gui
-        cache = gtkservice.ServiceCache(str(src))
-        cache.load()
-        v = gui.Viewer(cache, detail=2)
-        try:
-            pump(v, lambda: v.last_frame is not None and v._pending is None,
-                 "legacy frame")
-            check(not getattr(v.worker, "controller", False),
-                  "FLOE_GTK_LOOP=legacy still took the controller")
-        finally:
-            v._quit()
-            v.window.destroy()
-            cache.close()
-    finally:
-        os.environ.pop("FLOE_GTK_LOOP", None)
 
 
 def cells_while_opening(src, temp):
@@ -639,7 +622,6 @@ def main():
             check(not stay, "closed views left their folders: %s" % stay)
             if gtk_ready():
                 gui_viewer(src, ref)
-                gui_legacy(src)
         finally:
             ref.stop()
             svc.close()

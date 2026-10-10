@@ -35,11 +35,11 @@
 //!       pixels in `path` (FLOERAW1 header + RGBA, or a PNG) - the viewer
 //!       reads and removes it; the service removes the files it is not given
 //!       time for; `report` (its generation's rounds added up, the dict
-//!       floe/rust_render.py's `_emit_frame` gave) and `perf` ([the log
+//!       floe_oracle/rust_render.py's `_emit_frame` gave) and `perf` ([the log
 //!       line, the lower bar's], view::perf::perf_status) - the perf line
 //!   {"event": "closed", "view": N}
 //!   {"event": "query" | "cells" | "clip", "view": N, "result": {...}} - the
-//!       answers in the dicts floe/rust_render.py gave the viewer
+//!       answers in the dicts floe_oracle/rust_render.py gave the viewer
 use floe_app_core::{
     artifact,
     clip::{self, ClipOptions},
@@ -561,7 +561,7 @@ fn frame_json(frame: &DisplayFrame, path: &PathBuf) -> Value {
     })
 }
 
-/// A snap or pick answer as floe/rust_render.py gave it (`id` is the
+/// A snap or pick answer as floe_oracle/rust_render.py gave it (`id` is the
 /// controller's query id; `seq` stays the viewer's to set).
 fn query_json(kind: &str, r: &ViewQueryResult) -> Value {
     use floe_worker_client::QueryStatus;
@@ -625,7 +625,7 @@ fn query_json(kind: &str, r: &ViewQueryResult) -> Value {
     Value::Object(o)
 }
 
-/// The viewer's cell-tree request (floe/rust_render.py's cell jobs): its
+/// The viewer's cell-tree request (floe_oracle/rust_render.py's cell jobs): its
 /// kind, the controller's request, and the source it names (echoed).
 fn cell_request(r: &Value) -> Result<(&'static str, CellRequest, Option<i64>)> {
     let kind = r.get("kind").and_then(Value::as_str).unwrap_or("");
@@ -693,7 +693,7 @@ fn cell_request(r: &Value) -> Result<(&'static str, CellRequest, Option<i64>)> {
     })
 }
 
-/// A cell-tree answer as floe/rust_render.py `_emit_cell_query` gave it.
+/// A cell-tree answer as floe_oracle/rust_render.py `_emit_cell_query` gave it.
 /// How long a cell question may wait for its answer, and for a place in the
 /// controller's queue (MAX_PENDING_CELLS) - a panel expanding rows quickly.
 const CELL_WAIT: Duration = Duration::from_secs(60);

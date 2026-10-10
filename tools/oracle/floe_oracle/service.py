@@ -41,11 +41,11 @@ _PICK_CAP = 64    # max candidates per pick query
 # drawing everything at a wide view has no realistic performance
 # and exposed the frame-cap throttle artifact, so the coarsest
 # reachable level is "low".
-# the viewer's detail levels are the product's (floe/rust_render.py, P2d);
+# the viewer's detail levels are the product's (floe/gui.py since P4f);
 # named here for the frozen shell's callers (make_render_worker below
-# picks KLayout or the product's Rust worker)
-from floe.rust_render import (DETAIL_LEVELS, DETAIL_PX,  # noqa: E402,F401
-                              DEFAULT_DETAIL)
+# picks KLayout or the Python Rust adapter, floe_oracle/rust_render.py)
+from floe.gui import (DETAIL_LEVELS, DETAIL_PX,  # noqa: E402,F401
+                      DEFAULT_DETAIL)
 CUT_PX = DETAIL_PX[DEFAULT_DETAIL]
 
 # a streamed view completes within this many rounds: the last one
@@ -857,7 +857,7 @@ def make_render_worker(cache, stream_kb=None, stream_target_ms=500,
         raise RuntimeError(
             "FLOE_RENDERER must be klayout or rust, got %r" % backend)
     # FLOE_RENDERER is rust or unset here, as the product's factory takes it
-    from floe.rust_render import make_render_worker as rust_worker
+    from floe_oracle.rust_render import make_render_worker as rust_worker
     return rust_worker(cache, stream_kb=stream_kb,
                        stream_target_ms=stream_target_ms, debug=debug)
 

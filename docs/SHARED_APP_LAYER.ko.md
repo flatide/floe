@@ -46,7 +46,7 @@ python을 사용하지 않도록 변경해줘."
 | P1c | 게이트·배포·별칭을 Rust `floe2`로 바꾸고 Python `floe2/` 패키지를 지운다(§4) | 0.12.328 |
 | P2 | `floe2 gtk-service`(stdio JSON-lines). GTK 뷰어의 비-UI 판단을 Rust로 옮기고 Python 모듈을 걷어낸다. 푸시 단위(§5): P2a 열기·준비·레벨 행·덱 스펙·레이어 속성 행, P2b DRC·svrf, P2c 레이어 속성 편집·fill, P2d(P3와 함께) 오라클을 떼어 낸 뒤 Python 모듈 삭제 | P2a 0.12.329, P2b 0.12.330, P2c 0.12.331, P2d 0.12.332 |
 | P3 | KLayout 레거시를 제품 경로에서 빼고, 동결 `floe` 셸은 개발 전용 오라클(`tools/oracle/floe_oracle`)로 둔다(§6) | 0.12.333 |
-| P4 | GTK 렌더 루프를 공유 Rust `ViewController`로(§7; 사용자 승인 2026-10-10). P4a 공유 컨트롤러의 데스크톱 정책, P4b perf 줄, P4c 서비스의 뷰 채널, P4d GTK 전환, P4e 질의·미니맵, P4f 정리 | P4a 0.12.334, P4c 0.12.335, P4b 0.12.336, P4d 0.12.337(현장 확인 필요), P4e 0.12.338 |
+| P4 | GTK 렌더 루프를 공유 Rust `ViewController`로(§7; 사용자 승인 2026-10-10). P4a 공유 컨트롤러의 데스크톱 정책, P4b perf 줄, P4c 서비스의 뷰 채널, P4d GTK 전환, P4e 질의·미니맵, P4f 정리 | P4a 0.12.334, P4c 0.12.335, P4b 0.12.336, P4d 0.12.337, P4e 0.12.338, P4f 0.12.342 |
 
 ## 3. 동기 규칙
 
@@ -308,7 +308,7 @@ P4b(perf 줄)는 따로 진행 중이다. 이 단계에서 GTK는 아직 그대�
 
 ### P4d (0.12.337) — GTK 뷰어가 컨트롤러의 렌더 루프를 쓴다
 
-**현장 확인이 필요하다.** 이상하면 `setenv FLOE_GTK_LOOP legacy`로 예전 Python 루프(`floe/rust_render.py`)로 돌아간다. 확인이 끝나면 P4f에서 예전 루프를 지운다.
+**현장 확인이 필요했다.** 이상하면 `setenv FLOE_GTK_LOOP legacy`로 예전 Python 루프(`floe/rust_render.py`)로 돌아갔다. 회사 Linux 확인(2026-10-10, 0.12.341) 뒤 P4f(0.12.342)에서 예전 루프와 이 스위치를 지웠다.
 
 - **뷰어(`floe/gui.py`, `controller_loop()`):**
   - 렌더 워커 자리에 `gtkservice.ViewWorker`가 들어간다. 뷰어는 정책(크기, depth, detail, thin, 레이어, frames, labels, 글꼴, 회색조, 밀도, 루트)과 뷰를 편집으로 보내고, 받은 프레임을 그린다. 바뀐 항목만 보낸다.
@@ -358,3 +358,22 @@ P4d처럼 컨트롤러 루프에서만 바뀐다. `FLOE_GTK_LOOP=legacy`는 예�
 - **UI로 남는 것:** 눈금자(점, 거리 글자, 겹침 배치), 미니맵의 뷰 상자, 끌기 중 미리보기. 웹의 `ruler` 모듈은 HTTP 문자열 좌표용이라 GTK에 맞지 않는다.
 - **app-core:** `minimap::placement(bbox)`를 더했다(공개 함수 추가, 웹 영향 없음).
 - **게이트 `gtk_view`:** 실제 창의 뷰어에서 내비게이션 13가지(Ctrl+Z, 커서 위치 휠 확대·축소, 화살표, 1/10 화살표, 밴드 확대·가는 밴드·밴드 축소, 미니맵 클릭, 창 크기를 준 goto와 확대 유지 goto, fit)가 컨트롤러로 가고, 뷰어의 Python 계산과 같은 뷰가 된다. 미니맵의 자리와 바탕(전체 + 깊이별)이 뷰어의 굽기와 바이트까지 같다. 단위 `placement_is_the_projection_s_die_and_its_scale`.
+
+### P4f (0.12.342) — 예전 Python 렌더 루프를 지우고 `rust_render.py`를 제품에서 뺀다
+
+사용자 확인(2026-10-10, 회사 Linux, 0.12.341): 셀 트리, 숨긴 레이어 취소선, 색·fill 팔레트가 동작한다. 사용자: "P4f 진행해줘".
+
+- **뷰어(`floe/gui.py`):**
+  - 렌더 루프는 컨트롤러의 것뿐이다. `FLOE_GTK_LOOP`와 `controller_loop()`를 지웠다.
+  - 지운 것: `_submit_render`·`_submit_margin`·`_schedule_margin`·`_covered`·`_frame_holds_view`·`_settle_after_frame`·`_margin_enabled`·`_preview_tick`, 세대 번호(`gen`, `_job_keys`)와 debounce, `dropped`·`cancelled`·프레임 결과 처리, `FLOE_MARGIN_MAX_MPIX`(컨트롤러의 여백도 16 Mpx로 묶인다: `margin::grow`의 `MAX_PIXELS`).
+  - `redraw`는 뷰를 보이고 바뀐 것을 컨트롤러에 보낸다. Esc는 `ViewWorker.cancel()`이다.
+  - 뷰어 자신의 뷰 계산(확대·이동·밴드·미니맵·goto·fit)은 뷰가 아직 열리는 동안의 대체로 남는다. 열린 뒤에는 컨트롤러의 계산이다(P4e).
+  - `--stream-kb`·`--stream-target-ms`·`--render-debug`는 명령줄 호환으로 받기만 한다.
+  - detail 표(`DETAIL_LEVELS`·`DETAIL_PX`·`DEFAULT_DETAIL`)는 gui.py로, 셀 질문 종류(`CELL_QUERY_KINDS`)는 gtkservice.py로, About 창의 renderd 찾기는 `vfsclient.find_renderd()`로 옮겼다.
+- **`rust_render.py`는 개발 전용 오라클로:** `git mv floe/rust_render.py tools/oracle/floe_oracle/rust_render.py`. 게이트 20여 개와 벤치가 기준 어댑터(`RustRenderWorker`, `DeckRenderWorker`, `make_render_worker`)로 쓴다. 예전 Python perf 줄(`perf_status`, `occ_note`)도 `floe_oracle/perf_line.py`로 옮겼다. perf_parity의 Python 기준이다.
+- **`floe/`는 12개 파일이다:** `__init__`, gtkview, viewcli, gui, gtkservice, vfsclient, instance, product, hangul, fillpat, `colornames.def`, `fillpatterns.def`. 번들 `FLOE2_PRODUCT_FILES`와 같다(floe2 게이트가 `git ls-files floe`와 맞춰 본다). floe2 게이트는 `rust_render.py`·`perf_line.py`를 오라클 모듈로 보고 번들과 뷰어 import에서 막는다.
+- **번들:** 기본 floe2 번들에는 pip 휠이 없다. 뷰어가 NumPy·Pillow를 쓰지 않는다. KLayout 개발 번들만 NumPy·Pillow·KLayout을 넣는다. selfcheck도 그에 맞췄다. `make_portable.sh`는 x86_64 Linux에서만 돌아서 이 Mac에서는 `bash -n`까지만 확인했다. **회사 Linux에서 번들을 한 번 만들어 확인해야 한다.**
+- **게이트:**
+  - `rust_renderer`: 예전 루프 전용 테스트(정착 판단, 마진 미리 그리기와 그 픽셀 상한, 세대별 오류, 여백 안 이동의 즉시 제출)를 지웠다. 이 동작은 컨트롤러 단위 테스트(마진, 정착, Esc, render_failure)와 `gtk_view`가 맡는다. 새 루프에 맞게 고친 것: thin·밀도·루트는 컨트롤러 패치(`_ctl_policy`)에, `--margin`·`--frame-cache`는 `ViewWorker`의 margin·frame_cache로 간다; 거절된 프레임(render_failure)과 Esc 취소는 한 번 말하고 대기 상태를 푼다; Esc는 `worker.cancel()`을 부른다. perf 줄 문자열 테스트는 `floe_oracle.perf_line`을 쓴다.
+  - `gtk_view`: legacy 확인을 지웠다. 기준 어댑터는 오라클의 것이다.
+  - jobdeck: GuiSmoke의 legacy 덱 실행을 지웠다. 모드 전환 테스트는 컨트롤러 루프만 본다.

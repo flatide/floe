@@ -172,7 +172,7 @@ gates_for() {
         floe/gtkview.py|floe/gtkservice.py|floe/viewcli.py)
             # the GTK viewer's entry and its service client (P2, P4c)
             echo "floe2 rust_renderer jobdeck drc_ice gtk_view" ;;
-        rust/render-core/*|rust/renderd/*|rust/render-cli/*|floe/rust_render.py)
+        rust/render-core/*|rust/renderd/*|rust/render-cli/*|tools/oracle/floe_oracle/rust_render.py|tools/oracle/floe_oracle/perf_line.py)
             # (perf_parity: the frame line's fields and the adapter's result
             # the shared Rust perf line must reproduce)
             echo "$RENDER_GATES perf_parity" ;;

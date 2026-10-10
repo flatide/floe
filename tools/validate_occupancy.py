@@ -1270,7 +1270,7 @@ class RenderTests(unittest.TestCase):
     def _start_worker(cls):
         sys.path.insert(0, str(ROOT))
         from floe_oracle.cache import Cache
-        from floe.rust_render import RustRenderWorker
+        from floe_oracle.rust_render import RustRenderWorker
         cache = Cache(str(cls.src))
         cache.load()
         worker = RustRenderWorker(cache)
@@ -1500,7 +1500,7 @@ class RenderTests(unittest.TestCase):
         os.environ["FLOE_RUST_OCCUPANCY"] = "on"
         sys.path.insert(0, str(ROOT))
         from floe_oracle.cache import Cache
-        from floe.rust_render import RustRenderWorker
+        from floe_oracle.rust_render import RustRenderWorker
         c = Cache(str(src))
         c.load()
         worker = RustRenderWorker(c)
@@ -2028,7 +2028,7 @@ class SubCutTests(unittest.TestCase):
     @classmethod
     def _worker(cls):
         from floe_oracle.cache import Cache
-        from floe.rust_render import RustRenderWorker
+        from floe_oracle.rust_render import RustRenderWorker
         cache = Cache(str(cls.src))
         cache.load()
         worker = RustRenderWorker(cache)
@@ -2243,7 +2243,7 @@ class DeckRenderTests(unittest.TestCase):
         from floe_oracle.jobdeck.viewer import DeckCache
         from floe_oracle.jobdeck import render as jrender
         from floe_oracle.cache import Cache
-        from floe.rust_render import RustRenderWorker
+        from floe_oracle.rust_render import RustRenderWorker
         dc = DeckCache(str(cls.dir / "wide.jb"), mode="level")
         dc.load()
         deck = jrender.DeckRenderWorker(dc)

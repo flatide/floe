@@ -150,11 +150,10 @@ floe view data/testchip_1g5.oas            # 개발용 KLayout 셸 (동결, 비�
 
 - `--bbox`는 µm 단위 `X0,Y0,X1,Y1`. `--layers`는 이름 또는 `layer/datatype` 목록.
 - 뷰어의 렌더 루프(무엇을 언제 그릴지, 이동이 멈춘 뒤 그리기, 이전 렌더 취소,
-  여백, Esc)는 0.12.337부터 웹과 같은 Rust 컨트롤러가 정한다
-  (docs/SHARED_APP_LAYER.ko.md §7 P4d). 화면·perf 줄이 예전과 달라 보이면 예전
-  Python 루프로 돌아가 비교하고 알려 주시면 된다(현장 확인 중; 확인 뒤 예전 루프는
-  지운다):
-  `setenv FLOE_GTK_LOOP legacy` (tcsh) / `export FLOE_GTK_LOOP=legacy` (sh).
+  여백, Esc)와 내비게이션·미니맵은 웹과 같은 Rust 컨트롤러가 정한다
+  (0.12.337~0.12.338, docs/SHARED_APP_LAYER.ko.md §7 P4d·P4e). 예전 Python 루프와
+  `FLOE_GTK_LOOP=legacy`는 회사 Linux 확인 뒤 0.12.342에서 지웠다(P4f). 남은 Python은
+  GTK 화면(위젯, 프레임 표시, 덧그림, 입력)뿐이다.
 - `floe2 index`와 `floe index`는 같은 `floe-index vfs`를 실행한다. 같은 source
   fingerprint의 정상 캐시는 재사용하며 기존·불완전·stale 캐시 교체는 명시적
   `--force`가 있어야 한다. `--page-target-mb`, `--no-lod`, `--slow-cell-s`,
@@ -751,24 +750,20 @@ klayout은 서브픽셀 도형도 전부 순회하며 그리므로(멤버당 비
 
 ## 폐쇄망 리눅스 배포
 
-기본 경로의 Python 의존성은 `numpy`, `pillow` 휠이고 GUI는
-PyGObject/GTK3 (**RHEL 계열 GNOME 호스트에 기본 탑재** — flateyes와 동일하게
-추가 설치 없음). 인덱싱/렌더용 Rust 바이너리 두 개를 함께 배포한다.
-KLayout wheel은 legacy indexer/renderer와 개발 oracle에서만 선택적으로 필요하다.
+제품은 Rust 실행 파일 세 개(`floe2`·`floe-index`·`floe-renderd`)와 GTK 뷰어
+`floe/`이다. 뷰어의 Python 의존성은 PyGObject/GTK3 하나다(**RHEL 계열 GNOME
+호스트에 기본 탑재** — flateyes와 동일하게 추가 설치 없음; pycairo도 쓰지 않는다).
+NumPy·Pillow는 0.12.342부터 뷰어에 필요 없다(P4f) - 게이트와 동결 KLayout
+셸(개발 전용 오라클)만 쓴다. `view`를 뺀 명령(index·info·render·clip·drc …)은
+Python 없이 돈다.
 
 ```sh
-# 1) 인터넷 PC에서 휠 수집 (타겟 파이썬 버전에 맞춰)
-pip download numpy pillow -d wheels/ \
-    --platform manylinux2014_x86_64 --only-binary=:all: \
-    --python-version 311        # 예: 타겟이 python3.11
-
-# 2) 폐쇄망 호스트에서 - 반드시 시스템 PyGObject가 보이는 파이썬으로
+# 폐쇄망 호스트에서 - 시스템 PyGObject가 보이는 파이썬이면 그대로
 python3 -c 'import gi; gi.require_version("Gtk", "3.0")'   # GUI 사전 확인
-python3 -m venv --system-site-packages .venv               # gi가 보이게
-.venv/bin/pip install --no-index --find-links wheels/ numpy pillow
-# rollback/oracle 환경만 별도로 klayout wheel을 설치
-# floe/(GTK 뷰어)와 Rust 바이너리(floe2·floe-index·floe-renderd) 복사 후:
-#   FLOE_GTK_PYTHON=$PWD/.venv/bin/python floe2 view ...
+# floe/(GTK 뷰어)와 Rust 바이너리(floe2·floe-index·floe-renderd)를 같은
+# 폴더 아래에 두고(floe2가 위쪽 폴더의 floe/gui.py를 찾는다):
+#   setenv FLOE_GTK_PYTHON /usr/bin/python3     # tcsh; 없으면 PATH의 python3
+#   floe2 view chip.oas
 ```
 
 **주의 — PyGObject/pycairo를 pip으로 설치하지 말 것.** pip은 meson 소스
@@ -791,13 +786,14 @@ python3 -m venv --system-site-packages .venv               # gi가 보이게
 
 호스트에 `python3-gobject`(gi)조차 없거나 파이썬 버전이 안 맞는 경우,
 flateyes-portable과 동일하게 필요한 걸 전부 싸서 가져간다. Python +
-PyGObject + GTK3 (conda-forge, 재배치 가능) + NumPy/Pillow + floe/floe2 +
-`floe-index`/`floe-renderd`가 한 tar에 들어가고, 호스트엔 아무것도
+PyGObject + GTK3 (conda-forge, 재배치 가능) + floe(GTK 뷰어) + `floe2`·
+`floe-index`·`floe-renderd`가 한 tar에 들어가고, 호스트엔 아무것도
 설치·변경하지 않는다 (쓰는 것은 X 디스플레이와 시스템 폰트뿐).
 기본 floe2 번들은 KLayout을 포함하지 않는다.
 
-NumPy/Pillow Linux 휠과 네이티브 바이너리를 런타임에 넣으므로 번들은
-**x86_64 Linux 빌드 머신**에서 만든다. Rust 바이너리는 빌드 호스트의 glibc
+번들의 런타임 Python을 빌드 중에 실행해 확인하므로(KLayout 개발 번들은 그
+pip로 NumPy·Pillow·KLayout 휠도 넣는다) 번들은 **x86_64 Linux 빌드 머신**에서
+만든다. 기본 floe2 번들에는 pip 휠이 하나도 들어가지 않는다(0.12.342~). Rust 바이너리는 빌드 호스트의 glibc
 버전을 끌고 들어오지 않도록 기본적으로 `x86_64-unknown-linux-musl` 정적
 타깃으로 빌드한다(`rustup target`이 없으면 자동 설치). 빌드 시 verify가 모든
 ELF의 실제 glibc floor를 출력한다. `tools/make_portable.sh`가 flateyes의
@@ -805,8 +801,8 @@ ELF의 실제 glibc floor를 출력한다. `tools/make_portable.sh`가 flateyes�
 
 ```sh
 tools/make_portable.sh                     # -> floe2-portable-<ver>-<date>.tar.gz
-# 폐쇄망 미러만 되는 빌드 머신이면 numpy/pillow 휠을 미리 받아두고:
-WHEELS=./wheels tools/make_portable.sh
+# KLayout 번들을 폐쇄망 미러만 되는 빌드 머신에서 만들면 휠을 미리 받아두고:
+WHEELS=./wheels FLOE_PORTABLE_KLAYOUT=1 tools/make_portable.sh
 # KLayout 포함 번들(기본 배포 아님): floe와 floe2 실행 파일을 함께 제공
 FLOE_PORTABLE_KLAYOUT=1 tools/make_portable.sh
 ```
@@ -838,7 +834,7 @@ gdk-pixbuf 로더·스키마·폰트 포함) gi를 시스템에 얹을 필요가
 `floe2-portable`은 KLayout이 없으므로 `floe2` launcher만 제공한다.
 
 **뷰어 문제 진단 순서** (창이 검게 나오는 등):
-1. `selfcheck` — 스택(gi/GTK/pixbuf/NumPy/Pillow/Rust binaries) 검증,
+1. `selfcheck` — 스택(gi/GTK/pixbuf/Rust binaries; KLayout 번들은 NumPy/Pillow/KLayout도) 검증,
    창 없이. 기본 번들은 KLayout 부재도 확인한다.
 2. `floe2 render <src> --bbox ... --out t.png` — 캐시·렌더 엔진 검증, GUI 없이.
 3. `floe2 probe <src>` — **뷰어의 렌더 서비스 경로**(spawn 자식 + 큐 + 프레임)

@@ -1,8 +1,9 @@
 #!/bin/bash
 # Build a self-contained floe2 runtime bundle for hosts without PyGObject.
 # Adapted from flateyes' make_portable.sh - the GTK3 stack is pulled from
-# conda-forge (relocatable) exactly as flateyes does; floe additionally
-# needs NumPy + Pillow wheels. The product (release artifact) is Rust-only
+# conda-forge (relocatable) exactly as flateyes does; no pip wheel goes in
+# (the GTK viewer uses neither NumPy nor Pillow since P4f - only the KLayout
+# development bundle adds them, with KLayout). The product (release artifact) is Rust-only
 # floe2. FLOE_PORTABLE_KLAYOUT=1 builds the DEVELOPMENT bundle with the
 # frozen KLayout shell `floe` next to `floe2` - oracle / pre-validation use
 # on closed networks only, never a release (floe is frozen since
@@ -12,7 +13,7 @@
 #   ./make_portable.sh [output-dir]     # -> floe2-portable-<ver>-<date>.tar.gz
 #   ./make_portable.sh --print-name     # print the artifact name and stop
 #
-# The bundle holds python + PyGObject + GTK3 (conda-forge) + NumPy/Pillow +
+# The bundle holds python + PyGObject + GTK3 (conda-forge) +
 # the shared floe implementation, floe2 shell, and matched Rust binaries,
 # plus a launcher that builds
 # the machine-local GTK caches on first run. Target: x86_64 Linux; verify
@@ -82,8 +83,8 @@ fi
 
 case "$(uname -s)-$(uname -m)" in
     Linux-x86_64) : ;;
-    *) echo "floe's bundle needs numpy/pillow Linux wheels installed by the"
-       echo "runtime's pip, so build on an x86_64 Linux machine (got"
+    *) echo "the bundle's runtime python runs here (its checks, the KLayout"
+       echo "bundle's wheels), so build on an x86_64 Linux machine (got"
        echo "$(uname -s)-$(uname -m))."; exit 1 ;;
 esac
 
@@ -120,23 +121,28 @@ PYBIN="$(ls "$WORK"/runtime/bin/python3.[0-9]* 2>/dev/null | head -1)"
 PYVER="$("$PYBIN" -c 'import sys;print("%d.%d"%sys.version_info[:2])')"
 echo "== runtime python $PYVER"
 
-# -- 3. add NumPy/Pillow; KLayout only for an opt-in rollback bundle ---
-"$PYBIN" -m pip install --upgrade pip >/dev/null
-PIP_PACKAGES=(numpy pillow)
+# -- 3. wheels: none for the floe2 bundle (the GTK viewer needs PyGObject
+#       alone since P4f); the KLayout development bundle adds NumPy, Pillow
+#       and KLayout (the frozen shell, floe_oracle, uses them)
+PIP_PACKAGES=""
 if [ "$FLOE_PORTABLE_KLAYOUT" = 1 ]; then
-    PIP_PACKAGES+=(klayout)
+    PIP_PACKAGES="numpy pillow klayout"
     echo "== KLayout rollback bundle requested"
 fi
-if [ -n "$WHEELS" ]; then
-    echo "== installing runtime wheels from local directory: $WHEELS"
-    "$PYBIN" -m pip install --no-index --find-links "$WHEELS" \
-        --only-binary=:all: "${PIP_PACKAGES[@]}"
-else
-    "$PYBIN" -m pip install --only-binary=:all: "${PIP_PACKAGES[@]}"
-fi
-"$PYBIN" -c 'import numpy, PIL; print("== numpy", numpy.__version__, "pillow", PIL.__version__)'
-if [ "$FLOE_PORTABLE_KLAYOUT" = 1 ]; then
+if [ -n "$PIP_PACKAGES" ]; then
+    "$PYBIN" -m pip install --upgrade pip >/dev/null
+    # shellcheck disable=SC2086  # a word list on purpose
+    if [ -n "$WHEELS" ]; then
+        echo "== installing runtime wheels from local directory: $WHEELS"
+        "$PYBIN" -m pip install --no-index --find-links "$WHEELS" \
+            --only-binary=:all: $PIP_PACKAGES
+    else
+        "$PYBIN" -m pip install --only-binary=:all: $PIP_PACKAGES
+    fi
+    "$PYBIN" -c 'import numpy, PIL; print("== numpy", numpy.__version__, "pillow", PIL.__version__)'
     "$PYBIN" -c 'import klayout; print("== klayout rollback", klayout.__version__)'
+else
+    echo "== no wheels (the floe2 bundle: PyGObject + GTK3 + Python alone)"
 fi
 
 # -- 4. drop the GTK viewer (floe/) into site-packages and, in the KLayout
@@ -147,7 +153,7 @@ SITE="$("$PYBIN" -c 'import site;print(site.getsitepackages()[0])')"
 # The floe package is the viewer alone (P2d/P3): its UI and the client of
 # floe2 gtk-service. The list is what ships - a file left in floe/ by
 # mistake does not.
-FLOE2_PRODUCT_FILES="__init__.py gtkview.py viewcli.py gui.py gtkservice.py rust_render.py vfsclient.py instance.py product.py hangul.py fillpat.py colornames.def fillpatterns.def"
+FLOE2_PRODUCT_FILES="__init__.py gtkview.py viewcli.py gui.py gtkservice.py vfsclient.py instance.py product.py hangul.py fillpat.py colornames.def fillpatterns.def"
 rm -rf "$SITE/floe" "$SITE/floe2" "$SITE/floe_oracle"
 mkdir -p "$SITE/floe"
 for f in $FLOE2_PRODUCT_FILES; do cp "$REPO/floe/$f" "$SITE/floe/$f"; done
@@ -374,9 +380,12 @@ print("pixbuf:       %s, %s" % (png, svg))
 if "png" not in fmts:
     sys.exit(2)
 import importlib.util
-import numpy, PIL
-print("numpy:        %s OK" % numpy.__version__)
-print("pillow:       %s OK" % PIL.__version__)
+if "$FLOE_PORTABLE_KLAYOUT" == "1":
+    import numpy, PIL
+    print("numpy:        %s OK" % numpy.__version__)
+    print("pillow:       %s OK" % PIL.__version__)
+else:
+    print("numpy/pillow: not bundled (the viewer needs neither)")
 if "$FLOE_PORTABLE_KLAYOUT" == "1":
     klayout = importlib.import_module("klayout")
     importlib.import_module("klayout.db")
@@ -502,7 +511,7 @@ cat > "$B/README-PORTABLE.txt" <<EOF
 ${FLOE_PORTABLE_PRODUCT} 포터블 번들 (${FLOE_PORTABLE_PRODUCT} ${VERSION}, ${STAMP} 빌드)
 ====================
 PyGObject(python3-gobject)가 없는 호스트에서 ${FLOE_PORTABLE_PRODUCT}를 실행하기 위한 자체
-포함 런타임. Python + PyGObject + GTK3 + NumPy/Pillow + floe 패키지(GTK 뷰어) +
+포함 런타임. Python + PyGObject + GTK3 + floe 패키지(GTK 뷰어) +
 floe2(러스트 명령: index/info/render/clip/jobdeck/drc…), floe-index(러스트
 인덱서/VFS daemon)와 floe-renderd(기본 CPU renderer)가
 runtime/bin/ 안에 들어

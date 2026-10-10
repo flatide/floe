@@ -5,7 +5,7 @@ a deck's plan and composite spec, its layer properties - is the shared
 Rust app layer's, asked over one JSON line per request. The viewer keeps
 its widgets and its own session state (which layers are on).
 
-`ServiceCache` is what floe/gui.py and floe/rust_render.py read of an
+`ServiceCache` is what floe/gui.py and floe_oracle/rust_render.py read of an
 open source, the attributes floe.cache.Cache and the jobdeck DeckCache
 gave them: src, dir (the cache folder, or the spec renderd opens), meta,
 is_jobdeck, ids, mode, props_src, exists(), load(), is_stale(), close().
@@ -602,6 +602,10 @@ def db_name_of(path):
 # --- the view channel (P4c, docs/SHARED_APP_LAYER.ko.md §7): a source
 # drawn through the shared Rust ViewController
 
+# the cell tree's questions (view_cells kinds)
+CELL_QUERY_KINDS = ("cell_sources", "cells", "cell_find", "cell_bbox",
+                    "cell_insts")
+
 RAW_SIGNATURE = b"FLOERAW1"
 RAW_HEADER_LEN = 16
 
@@ -662,7 +666,7 @@ class ViewSession:
 
     def cells(self, kind, seq, **fields):
         """A cell-tree question (cell_sources, cells, cell_find, cell_bbox,
-        cell_insts - floe/rust_render.py's fields; cell_insts' view box is
+        cell_insts - floe_oracle/rust_render.py's fields; cell_insts' view box is
         `box`); the answer is a ("cells", result) event with `seq`."""
         self._svc.request("view_cells", view=self.view, kind=kind,
                           seq=int(seq), **fields)
@@ -716,12 +720,12 @@ class ViewSession:
 
 class ViewWorker:
     """The viewer's render worker when the shared Rust ViewController draws
-    (P4d, docs/SHARED_APP_LAYER.ko.md §7) - floe/rust_render.py's place in
+    (P4d, docs/SHARED_APP_LAYER.ko.md §7) - floe_oracle/rust_render.py's place in
     floe/gui.py: the view's frames and states come as `events()`, the
     viewer's edits go to `edit()`. The jobs the viewer still submits - snap,
     pick, the cell tree, clip, recolor, repattern, mono - become the view
     channel's requests and edits; their answers are the dicts
-    floe/rust_render.py put on `res`. `cache` is the ServiceCache the panel
+    floe_oracle/rust_render.py put on `res`. `cache` is the ServiceCache the panel
     reads (its layers, a deck's levels and mode)."""
 
     supports_abstract = False
@@ -883,8 +887,7 @@ class ViewWorker:
                         return      # the frame shown is not this state's
                     raise
                 self._queries[qid] = (kind, int(job.get("seq", -1)))
-            elif kind in ("cell_sources", "cells", "cell_find", "cell_bbox",
-                          "cell_insts"):
+            elif kind in CELL_QUERY_KINDS:
                 fields = {k: job[k] for k in ("src", "cell", "pattern",
                                               "limit", "cap", "root")
                           if job.get(k) is not None}
@@ -913,7 +916,7 @@ class ViewWorker:
 
 
 def repattern_deltas(rows, fills, widths):
-    """floe/rust_render.py's `repattern` (every layer's fill and width
+    """floe_oracle/rust_render.py's `repattern` (every layer's fill and width
     replaced whole: a layer not named goes back to the plain speckle and
     width 1; a deck's level head names its datatypes) as the view
     channel's style deltas, one per drawn layer."""
@@ -949,7 +952,7 @@ def repattern_deltas(rows, fills, widths):
 
 def fill_dto(rows):
     """floe's 16x16 `*`/`.` bitmap as the view channel's fill (the renderd
-    style rule floe/rust_render.py's _pattern_fill had)."""
+    style rule floe_oracle/rust_render.py's _pattern_fill had)."""
     if not isinstance(rows, str):
         raise ValueError("fill bitmap must be a string")
     lines = rows.splitlines()

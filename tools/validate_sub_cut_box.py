@@ -49,7 +49,7 @@ os.environ["FLOE_RUST_AREA_TRUE"] = "off"
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (P3)
 from floe_oracle.cache import Cache
-from floe.rust_render import RustRenderWorker
+from floe_oracle.rust_render import RustRenderWorker
 
 W, H = 1280, 720
 VIA = (4, 2)        # layer index 14: role via (index mod 6 == 2)

@@ -372,7 +372,7 @@ print(json.dumps([instance.APP, instance.socket_address(":77"),
     shipped = set(listed.group(1).split())
     loaded = run(base, "-c", (
         "import sys; import floe.gtkview, floe.viewcli, floe.gui, "
-        "floe.gtkservice, floe.rust_render, floe.vfsclient, floe.instance, "
+        "floe.gtkservice, floe.vfsclient, floe.instance, "
         "floe.hangul, floe.fillpat; print(' '.join(sorted(m for m in "
         "sys.modules if m.startswith('floe.'))))")).stdout.split()
     needed = {m.split(".")[1] + ".py" for m in loaded}
@@ -380,7 +380,9 @@ print(json.dumps([instance.APP, instance.socket_address(":77"),
     oracle = {"cache.py", "cachepath.py", "indexlock.py", "drc.py", "svrf.py",
               "shots.py", "fe_embed.py", "render.py", "viewport.py",
               "coverage.py", "view_policy.py", "cli.py", "service.py",
-              "__main__.py"}
+              "__main__.py",
+              # the Python renderd adapter and perf line (P4f: the gates')
+              "rust_render.py", "perf_line.py"}
     check(not (shipped & oracle) and not any(f.startswith("jobdeck")
                                                for f in shipped),
           "the floe2 bundle ships oracle modules: %s" % sorted(shipped & oracle))

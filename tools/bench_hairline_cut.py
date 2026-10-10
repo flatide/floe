@@ -65,7 +65,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (P3)
 from floe_oracle.cache import Cache  # noqa: E402
 from floe_oracle.cachepath import vfs_cache_dir  # noqa: E402
-from floe.rust_render import RustRenderWorker  # noqa: E402
+from floe_oracle.rust_render import RustRenderWorker  # noqa: E402
 
 BLACK = bytes((0, 0, 0, 255))
 # one letter a mode on the `type this` lines (min and max share an initial)

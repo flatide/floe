@@ -25,29 +25,23 @@ from . import gtkservice
 from . import fillpat
 from .hangul import HangulComposer, TextViewEditable
 from .product import name as product_name
-from .rust_render import _env_int, CELL_QUERY_KINDS
-from .rust_render import (make_render_worker, DETAIL_PX, DETAIL_LEVELS,
-                          DEFAULT_DETAIL)
+from .gtkservice import CELL_QUERY_KINDS
+
+# DETAIL level: the user sees the name; the screen-px size cut behind each
+# is the shared app layer's (app-core shots::Detail::cut_px)
+DETAIL_LEVELS = ("low", "medium", "high")
+DETAIL_PX = (5.0, 3.0, 1.0)
+DEFAULT_DETAIL = 1              # medium
 
 
 def _is_deck_path(path):
     return bool(path) and str(path).lower().endswith(".jb")
 
 
-def controller_loop():
-    """The render loop is the shared Rust ViewController's (P4d, docs/
-    SHARED_APP_LAYER.ko.md §7): floe2 gtk-service's view channel decides
-    what is drawn and when - the settle after a pan, a superseded frame
-    cancelled, the margin and its crops, Esc - and the viewer shows the
-    frames it is given. FLOE_GTK_LOOP=legacy keeps the Python loop
-    (floe/rust_render.py) while the field checks the new one."""
-    return os.environ.get("FLOE_GTK_LOOP", "controller") != "legacy"
-
 Gtk = Gdk = GdkPixbuf = GLib = Pango = None
 
 APP = product_name()
 POLL_MS = 25
-DEBOUNCE_MS = 120
 # LOD starts ON (rev 31): the skeleton is gone, so the first fit
 # view is a live working set - merged variants must engage there
 # without a keypress. The planner's fidelity/worth gates and the
@@ -224,12 +218,6 @@ PANEL_CSS = (
     b"color: #f0f0f0; padding: 4px 10px; border-radius: 4px; "
     b"font-size: 12px; }"
 )
-# §F2R-20: a margin frame (§F2R-17) is at most this many megapixels
-# (RGBA: 16 Mpx = 64 MiB). Windows up to ~2560x1440 keep the full
-# one-step-per-side margin; a 4K window's margin shrinks so renderd's
-# retained set, the publish file and the GUI pixbuf stay bounded on
-# shared hosts. FLOE_MARGIN_MAX_MPIX overrides.
-MARGIN_MAX_MPIX = 16
 
 # Help > Open Source Licenses (license names surveyed 2026-08-22;
 # the full texts travel with each component's own distribution -
@@ -632,7 +620,7 @@ def component_versions(worker):
     answer "which one is this" without a terminal. The running
     daemon's handshake stamp wins over probing the binary on disk -
     the two can differ after an in-place binary swap."""
-    from . import rust_render, vfsclient
+    from . import vfsclient
     lines = []
     try:
         lines.append(_probe_binary_version(vfsclient.find_binary))
@@ -645,7 +633,7 @@ def component_versions(worker):
         lines.append("floe-renderd %s [running]" % build)
     else:
         try:
-            lines.append(_probe_binary_version(rust_render.find_binary))
+            lines.append(_probe_binary_version(vfsclient.find_renderd))
         except Exception as exc:
             lines.append("floe-renderd unavailable: %s" %
                          str(exc).splitlines()[0][:60])
@@ -716,588 +704,6 @@ def fmt_count(n):
     if n >= 10e3:
         return "%.0fk" % (n / 1e3)
     return str(int(n))
-
-
-def occ_note(res, full=False):
-    """Pass 2 drawn from the occupancy density (design.ovs; 2026-10-06, by
-    default since 0.12.317 - FLOE_RUST_DENSITY_OCC=off the plans): its cell, the layers it held and those this
-    frame made, as the status line says them - the log line (`full`) with
-    what its cache holds (2026-10-07); "" when the plans drew it."""
-    p2 = res.get("density_plan2") or {}
-    if not p2.get("occ_layers"):
-        return ""
-    note = "%g um cells, %d layers" % (p2.get("occ_cell_nm", 0) / 1000.0, p2["occ_layers"])
-    if p2.get("occ_made"):
-        note += ", %d made" % p2["occ_made"]
-    if full and p2.get("occ_cache_kb"):
-        note += "; cache %.1f MB" % (p2["occ_cache_kb"] / 1024.0)
-    return note
-
-
-def perf_status(res, depth_note=""):
-    """The perf line of a settled (or refining) frame: (full, brief). The
-    full line goes to the terminal log and the lower bar's tooltip, every
-    diagnostic in it; the brief one is what the lower bar shows - only what
-    is checked frame by frame, so it fits without being cut off (user
-    2026-10-01: "the log has it all; the bar should show only what is needed
-    now, without an ellipsis")."""
-    split = ""
-    brief_split = ""
-    if res.get("load_ms") is not None:
-        ph = ""
-        if res.get("phase_apply") is not None:
-            # load = plan (rust) + delta (author/IPC)
-            #        + apply (klayout parse + WC build)
-            ph = " [%d plan+%d delta+%d apply]" % (
-                res.get("phase_plan", 0),
-                res.get("phase_delta", 0),
-                res.get("phase_apply", 0))
-        # the label plan is not part of load; shown only
-        # when it is worth a look (2026-09-21)
-        text = res.get("text_plan_ms", 0) or 0
-        split = " = %d load%s%s + %d draw" % (
-            res["load_ms"], ph,
-            " + %d text" % text if text >= 100 else "",
-            res["draw_ms"])
-        # the budget fit decided for a new scale before its
-        # plan (field 2026-10-05: it was part of `other`)
-        probe = res.get("fit_probe_ms", 0) or 0
-        if probe >= 100:
-            split += " + %d fit probe" % round(probe)
-        # renderd time no phase covers, and time spent
-        # waiting behind earlier commands (queue + pipe)
-        if res.get("other_ms", 0) > 200:
-            split += " + %d other" % res["other_ms"]
-        if res.get("wait_ms", 0) > 200:
-            split += " + %d wait" % res["wait_ms"]
-        # the bar: the same without the load's phases
-        brief_split = split.replace(ph, "", 1) if ph else split
-    cut = ""
-    brief_cut = ""
-    if res.get("cut_um"):
-        cut = ", cut<%.3gum" % res["cut_um"]
-        brief_cut = "cut<%.3gum" % res["cut_um"]
-        # thin keep: each shape by its larger side (0.12.214,
-        # the hairlines stay) or, under FLOE_RUST_SHAPE_CUT=min,
-        # by its smaller side (0.12.173..0.12.213)
-        culls = res.get("plan_culls") or {}
-        if culls.get("shape_cut"):
-            cut += " (larger side)" if culls.get("shape_cut_max") else " (min side)"
-    fit = (res.get("plan_culls") or {})
-    if (fit.get("fit_pct") or fit.get("fit_cull") or fit.get("fit_over")
-            or fit.get("fit_thin")):
-        # budget-fitted cut (0.12.162): the planner raised
-        # the cut so the frame fits the decoded budget.
-        # Shown HERE, next to the cut, because the bar is
-        # ellipsized at its end and the long diagnostics
-        # tail hid it (field 2026-09-18)
-        factor = max(100, int(fit.get("fit_pct", 0) or 100)) / 100.0
-        thin = int(fit.get("fit_thin", 0) or 0)
-        full = int(fit.get("fit_full_pct", 0) or 0) / 100.0
-        none = int(fit.get("fit_none_pct", 0) or 0) / 100.0
-        if fit.get("fit_ranked"):
-            # top plane first (pass 1, 2026-10-07: the drawing goes from
-            # the top): the layers above the one the budget ends in
-            # whole, that layer by its size classes as below, the
-            # layers under it left out
-            parts = []
-            if factor > 1:
-                parts.append("x%.3g" % factor)
-            whole_n = int(fit.get("fit_layers_whole", 0) or 0)
-            if whole_n:
-                parts.append("top %d whole" % whole_n)
-            edge = fit.get("fit_layer_edge")
-            if edge:
-                classes = []
-                if thin:
-                    classes.append("1/%d%s" % (1 << min(thin, 30), " below x%.3g" % full if full else ""))
-                if none:
-                    classes.append("none below x%.3g" % none)
-                parts.append(edge + (" (%s)" % ", ".join(classes) if classes else ""))
-            out_n = int(fit.get("fit_layers_out", 0) or 0)
-            if out_n:
-                parts.append("%d left out" % out_n)
-            fitted = " %s to fit budget" % ", ".join(parts)
-        elif thin or none:
-            # budget-fitted density (0.12.169): size classes
-            # largest first - complete from xF up, the class
-            # the budget ends in about 1 in 2^k, nothing
-            # under xG
-            parts = []
-            if factor > 1:
-                parts.append("x%.3g" % factor)
-            if thin:
-                parts.append("1/%d%s" % (1 << min(thin, 30), " below x%.3g" % full if full else ""))
-            if none:
-                parts.append("none below x%.3g" % none)
-            fitted = " %s to fit budget" % ", ".join(parts)
-        else:
-            fitted = " x%.3g to fit budget" % factor
-        fitted += "%s%s%s" % (
-            ", hairlines culled" if fit.get("fit_cull") else "",
-            ", STILL OVER" if fit.get("fit_over") else "",
-            # the fit remembered for this scale did not hold
-            # this frame: decided anew, the picture may have
-            # changed (SPEC-PLANNER 2026-09-27)
-            " (refit)" if fit.get("fit_redecided") else "")
-        # these layers' pages decode larger than the planner
-        # estimates: fitted to the budget over that much
-        # (2026-10-05; a frame that passed the budget is
-        # planned anew, not failed)
-        scale = int(fit.get("fit_scale", 0) or 0)
-        if scale > 1000:
-            fitted += ", pages x%.3g their estimate" % (scale / 1000.0)
-        cut += fitted
-        brief_cut += fitted
-    drawn = ""
-    if res.get("drawn") is not None:
-        drawn = ", ~%s drawn" % fmt_count(res["drawn"])
-    refin = ""
-    if res.get("refining"):
-        refin = ", refining %d" % res["refining"]
-    text = ""
-    if res.get("plan_ms") is not None:
-        # "frontier", not "frames": the planner's
-        # depth-cut record count. floe2 computes it
-        # regardless of the frames toggle (the depth
-        # frontier is plan-integral, +2.4ms measured),
-        # so it stays non-zero with frames off - that
-        # is not geometry being drawn (field question
-        # 2026-09-02).
-        text += ", plan %.1fms/%s frontier" % (
-            res["plan_ms"],
-            fmt_count(res.get("frame_rects", 0)))
-        if res.get("fit_probe_ms"):
-            # "walk": no hierarchy summary to go by (design.ovh,
-            # `floe-index hier`) - every cell of the extent read
-            text += ", fit probe %.1fms%s" % (
-                res["fit_probe_ms"],
-                " (walk)" if res.get("fit_probe_walk") else "")
-    if res.get("text_plan_ms") is not None:
-        text += ", text %.1fms/%s places" % (
-            res["text_plan_ms"],
-            fmt_count(res.get("text_place_records", 0)))
-    if res.get("png_ms") is not None:
-        text += ", %s %.1fms/pub %.1fms" % (
-            "raw" if res.get("frame_format") == "raw"
-            else "png",
-            res["png_ms"], res.get("publish_ms", 0.0))
-        # NNtiles is CUMULATIVE over the refinement
-        # rounds (9 tiles x 5 rounds = 45), not a
-        # thread count - raster threads are the Nj
-        text += ", rust %dj %dtiles@%spx %sx%s" % (
-            res.get("raster_jobs", 0),
-            res.get("render_tiles", 0),
-            res.get("tile_px", 0),
-            res.get("frame_width", 0),
-            res.get("frame_height", 0))
-    # F2R diagnostics: refinement round count, decode
-    # pool shape (sum/max vs wall exposes idle workers
-    # and stragglers, idx = record-index build share),
-    # slowest raster tile, and traversal visit/prune
-    # counts for the 2c work-bin verdict.
-    if res.get("rounds", 0) > 1:
-        text += ", rounds %d" % res["rounds"]
-    if res.get("decode_sum_ms"):
-        text += ", dec sum %.0f/max %.0f/idx %.0fms" % (
-            res["decode_sum_ms"],
-            res.get("decode_max_ms", 0.0),
-            res.get("index_ms", 0.0))
-    if res.get("raster_tile_max_ms"):
-        text += ", tile-max %.0fms" % (
-            res["raster_tile_max_ms"])
-    if res.get("tiles_reused"):
-        # §F2R-16 pan reuse engaged for this frame
-        text += ", pan-reuse %d tiles" % (
-            res["tiles_reused"])
-    if res.get("work_bin_items"):
-        text += ", bin %s items" % fmt_count(
-            res["work_bin_items"])
-        # deferral causes: Nr = repetition edges past
-        # the member-product gate, Ns = single
-        # placements past the item budget (wNNN = the
-        # heaviest such subtree weight) - names the
-        # next 2c lever without a diagnostic build
-        if res.get("work_bin_defer_rep") or \
-                res.get("work_bin_defer_single"):
-            text += " (defer %sr+%ss w%s)" % (
-                fmt_count(res.get(
-                    "work_bin_defer_rep", 0)),
-                fmt_count(res.get(
-                    "work_bin_defer_single", 0)),
-                fmt_count(res.get(
-                    "work_bin_defer_wmax", 0)))
-    elif res.get("work_bin_overflow_items"):
-        # bin hit its item cap and fell back to the
-        # per-tile walk (pixels identical, slower)
-        text += ", bin off(cap@%s)" % fmt_count(
-            res["work_bin_overflow_items"])
-    if res.get("member_paints"):
-        # geometry member paints - the paint-vs-
-        # traversal split for the F2R-03c judgment
-        text += ", paints %s" % fmt_count(
-            res["member_paints"])
-    if res.get("cache_evicted"):
-        # decoded-LRU churn: the working set no longer
-        # fits FLOE_RUST_BUDGET_MB this session (§3.18)
-        text += ", evict %s" % fmt_count(
-            res["cache_evicted"])
-    if res.get("retained_mb"):
-        # §F2R-20: geometry frames renderd holds for
-        # pan reuse (bounded by FLOE_RUST_RETAINED_MB)
-        text += ", retained %dMB" % round(
-            res["retained_mb"])
-    if res.get("hier_cells_visited"):
-        text += ", hier %s/%s pruned" % (
-            fmt_count(res["hier_cells_visited"]),
-            fmt_count(res.get("subtrees_pruned", 0)))
-    if res.get("once_full_tiles") or res.get("once_items_skipped"):
-        # F2R-28 write-once tiles: tiles that filled up (and the
-        # passes they skipped), items skipped as fully covered
-        text += ", once %s tiles/%s passes/%s items" % (
-            fmt_count(res.get("once_full_tiles", 0)),
-            fmt_count(res.get("once_passes_skipped", 0)),
-            fmt_count(res.get("once_items_skipped", 0)))
-    culls = res.get("plan_culls") or {}
-    if any(culls.values()):
-        # planner verdicts (field 2026-09-10): pages
-        # culled by size/hairline, page-BVH nodes,
-        # child-BVH nodes pruned, child cells omitted,
-        # layer skips, washes, thin frames
-        text += (", cut pages %s/pbvh %s/cbvh %s/cells %s"
-                 ", layer %s, washed %s, thin %s"
-                 % tuple(fmt_count(culls.get(k, 0)) for k in (
-                     "pages_size", "page_bvh", "child_bvh",
-                     "children_size", "layer", "washed",
-                     "thin_frames")))
-        if culls.get("thin_pages"):
-            # all-thin pages the page hairline rule
-            # would have dropped (2026-09-10): their
-            # decode / raster cost is what the field
-            # measurement of the lifted rule reads
-            text += ", thin pages %s kept" % fmt_count(
-                culls["thin_pages"])
-        if culls.get("sub_cut_washes") or culls.get("sub_cut_sparse"):
-            # sub-cut pages/nodes washed as footprints
-            # and kept or expanded as sparse (2026-09-16)
-            text += ", sub-cut washes %s/sparse %s" % (
-                fmt_count(culls.get("sub_cut_washes", 0)),
-                fmt_count(culls.get("sub_cut_sparse", 0)))
-        if culls.get("sub_cut_boxes") or culls.get("sub_cut_box_over"):
-            # sub-cut boxes (0.12.168): what the size cut
-            # drops, kept as boxes under thin keep
-            text += ", boxes %s%s%s%s" % (
-                fmt_count(culls.get("sub_cut_boxes", 0)),
-                " x%d coarser" % (1 << culls["sub_cut_box_level"])
-                if culls.get("sub_cut_box_level") else "",
-                " (+%s over)" % fmt_count(culls["sub_cut_box_over"])
-                if culls.get("sub_cut_box_over") else "",
-                " (%s unsure)" % fmt_count(culls["sub_cut_box_unsure"])
-                if culls.get("sub_cut_box_unsure") else "")
-        if culls.get("sub_cut_sparse_over") or culls.get("sub_cut_wash_over"):
-            # dropped by the per-plan sub-cut budgets
-            # (sparse ink / wash area): the frame is
-            # showing less than the rules would
-            text += ", sub-cut over %s/%s" % (
-                fmt_count(culls.get("sub_cut_sparse_over", 0)),
-                fmt_count(culls.get("sub_cut_wash_over", 0)))
-        if (culls.get("rep_kept") or culls.get("rep_washed")
-                or culls.get("rep_children")):
-            # the page frontier (2026-09-17): cut pages
-            # kept (drawn) and cut placements expanded
-            # with thinned members - one in 4^k
-            # (rep_washed stays 0: representatives are
-            # never washed since the field's boxes)
-            text += ", reps %s pages/%s children" % (
-                fmt_count(culls.get("rep_kept", 0)),
-                fmt_count(culls.get("rep_children", 0)))
-            if culls.get("rep_level"):
-                # the item budget's level: one cut item
-                # in 2^L
-                text += " L%d" % culls["rep_level"]
-            if culls.get("rep_page_level"):
-                # the decode budget thinned the pages
-                # themselves (one in 2^P by index)
-                text += " P%d" % culls["rep_page_level"]
-    if culls.get("stored_rep_points") or culls.get("stored_rep_limited"):
-        text += ", stored reps %s/tested %s%s" % (
-            fmt_count(culls.get("stored_rep_points", 0)),
-            fmt_count(culls.get("stored_rep_tested", 0)),
-            " (capped)" if culls.get("stored_rep_limited") else "")
-    summ = res.get("summary") or {}
-    if summ.get("layers"):
-        # occupancy summary (M2): these layers were
-        # drawn from design.ovo, not their pages -
-        # pick/snap do not see them in this view
-        text += (", summary %d layers %s cells (level %d,"
-                 " %g um; not pickable)" % (
-                     summ["layers"], fmt_count(summ["cells"]),
-                     summ["level"], summ["cell_um"]))
-    elif summ.get("none") not in (None, "-", "policy",
-                                  "exact"):
-        # since 2026-09-18 the summary serves cull too,
-        # so its absence is worth a word under either
-        text += ", summary: none (%s)" % summ["none"]
-    if res.get("labels_truncated"):
-        text += ", labels partial"
-    if res.get("over_budget_pages"):
-        text += ", %d pages over budget (not drawn)" % (
-            res["over_budget_pages"])
-    if res.get("deck"):
-        d = res["deck"]
-        # raster/frame ms are SUMS over passes; "wall"
-        # is the batches' real elapsed time, and the
-        # pass parallelism (x tile workers) beside it
-        # (review 2026-09-09 (5th))
-        text += (", deck %d passes (%d frame, %d skipped, "
-                 "%d scene reuses) "
-                 "%d/%d pages, scene %d + frame sum %d + "
-                 "composite %d ms, raster wall %d ms "
-                 "%dp x %dt, %d batches, pass max %dMB, "
-                 "batch max %dMB" % (
-                     d["passes"], d["frame_passes"],
-                     d["passes_skipped"],
-                     d.get("scene_reuses", 0),
-                     d["unique_pages"],
-                     d["pages_summed"],
-                     round(d["scene_us"] / 1000),
-                     round(d["frame_raster_us"] / 1000),
-                     round(d["composite_us"] / 1000),
-                     round(d.get("raster_wall_us", 0)
-                           / 1000),
-                     d.get("pass_workers", 0),
-                     res.get("workers", 0),
-                     d.get("batches", 0),
-                     round(d["pass_bytes_max"] / 1e6),
-                     round(d.get("batch_bytes_max", 0)
-                           / 1e6)))
-        if d.get("streamed_passes"):
-            text += ", %d streamed in %d slices" % (
-                d["streamed_passes"], d["slices"])
-        if d.get("wide_washes"):
-            text += ", %s sub-cut washes" % fmt_count(
-                d["wide_washes"])
-        if d.get("summary_passes"):
-            # passes drawn from their source's design.ovo
-            # (M4); pick/snap do not see those layers
-            text += ", summary %d passes %s cells (not pickable)" % (
-                d["summary_passes"],
-                fmt_count(d.get("summary_cells", 0)))
-        if d.get("summary_none_passes"):
-            text += ", %d passes without summary" % (
-                d["summary_none_passes"])
-    # tiles = plan total (resident pages included);
-    # +new = pages actually shipped for this view
-    # (cache misses, summed over its stream rounds)
-    # the density stack (diagnostic FLOE_RUST_DENSITY_STACK=top,
-    # CUT_DENSITY_DESIGN §10.10): the frame stacked its density.
-    # First in the line - the bar, which showed this line until
-    # 2026-10-01, is ellipsized at its end, and next to the cut
-    # it fell off (field 2026-09-26)
-    stack = ""
-    if res.get("density_stack") is not None:
-        # with the sub-cut dots: their block, the records'
-        # floor pass 2 planned at, its plan time and the pages
-        # it decoded (to compare FLOE_RUST_DENSITY_BLOCK_PX,
-        # 2026-10-01, and FLOE_RUST_DENSITY_FLOOR_PX, 2026-09-30)
-        parts = ["dots" if res.get("density_dots") is not None
-                 else "top + empty"]
-        # pass 1's shapes passed by, the density alone (diagnostic
-        # FLOE_RUST_DENSITY_ONLY=on, 2026-10-04; renderd shares the env)
-        if os.environ.get("FLOE_RUST_DENSITY_ONLY") == "on":
-            parts.append("density only")
-        # what pass 2 lit: the dots standing for the cells under the cut
-        # and the shapes under the cut it draws from pages by their area -
-        # both look like dots on screen, only the cells' count as dot items
-        # (user 2026-10-01: "two draws and dots, yet dot items 0")
-        lit = "lit %s px" % fmt_count(res["density_stack"].get("lit", 0))
-        parts.append(lit)
-        if res.get("density_block") is not None:
-            parts.append("block %g px" % res["density_block"])
-        if res.get("density_floor") is not None:
-            parts.append("floor %.2g px" % res["density_floor"])
-        # pass 2's reserve: the fixed one or what pass 1 left (2026-10-02)
-        if (res.get("density_plan2") or {}).get("reserve_mb"):
-            parts.append("reserve %s MB" % fmt_count(res["density_plan2"]["reserve_mb"]))
-        # The backend reports the display mode; both use the covered-area
-        # gain, while only the legacy mode varies pixel brightness.
-        bright = (res.get("density_plan2") or {}).get("bright_milli")
-        if bright:
-            pattern = (res.get("density_plan2") or {}).get("pattern", 0)
-            parts.append(("pattern, cover x%g" if pattern else "bright x%g") % (bright / 1000.0))
-            # what a cell under the cut stands for (2026-10-05): the area its
-            # shapes cover, or - an index without design.ovb or a hierarchy
-            # summary - its whole box; nothing when the occupancy density drew
-            # pass 2 (its frames reported `cells by box`, user 2026-10-06)
-            if not occ_note(res):
-                parts.append("cell cover" if (res.get("density_plan2") or {}).get("cell_cover") else "cells by box")
-        # zoomed out past the fit view the dots thin (2026-10-04): their gain
-        gain = (res.get("density_plan2") or {}).get("dot_gain_milli")
-        if gain is not None and 0 < gain < 1000:
-            parts.append("dots x%.2f" % (gain / 1000.0))
-        # a dot block too sparse for the detail is left out (2026-10-04):
-        # the dots it needs of its pixels, the blocks left out
-        gate = (res.get("density_plan2") or {}).get("dot_gate_min") or 0
-        if gate > 1:
-            block = res.get("density_block") or 4
-            gated = res["density_plan2"].get("dot_gated") or 0
-            parts.append("gate %d/%d px" % (gate, round(block * block))
-                         + (" (%s out)" % fmt_count(gated) if gated else ""))
-        us = res.get("density_us") or {}
-        # pass 2 drawn from the occupancy density instead of the plans
-        # (2026-10-06; FLOE_RUST_DENSITY_OCC=off: the plans): the time it took, its
-        # cell and layers in place of the plans' breakdown
-        occ = occ_note(res)
-        if us and occ:
-            parts.append("pass 2 by occupancy %d ms (%s)" % (round(us.get("plan2_us", 0) / 1000), occ_note(res, full=True)))
-        elif us:
-            plan = "pass 2 plan %d ms" % round(
-                us.get("plan2_us", 0) / 1000)
-            # where it went (diagnostic, 2026-10-01): the
-            # floor probes, the fitted plans and their passes,
-            # the regions, the final plans' nodes
-            p2 = res.get("density_plan2") or {}
-            if p2:
-                # where the cells' dot items came from (2026-10-02, the
-                # field's `cell dots 87.2M`): the ones there are, a point
-                # list's chunk counted at once one item, and the dot block
-                # updates past the cells' grids
-                # (the chunks' members right after them: 0.12.268 put them
-                # last, after the array members - user 2026-10-02)
-                # (a page's dots placed by its occupancy grid, design.ovb, say
-                # so after the pages: whether the cache has one, 2026-10-02)
-                # (the point-list chunks passed over in full blocks and those
-                # read at a step right after the chunks, with their members:
-                # 2026-10-03)
-                held = {"by_list_chunks": "by_chunk_members", "full_chunks": "full_members",
-                        "sampled_chunks": "sampled_members"}
-                by = ", ".join("%s %s%s" % (name, fmt_count(p2[key]), " of %s members" % fmt_count(
-                    p2.get(held[key], 0)) if key in held else " (%s by occupancy)" % fmt_count(
-                    p2["occ_pages"]) if key == "by_pages" and p2.get("occ_pages") else "") for key, name in (
-                    ("by_nodes", "nodes"), ("by_placements", "placements"), ("by_arrays", "arrays"),
-                    ("by_list_members", "list members"), ("by_list_chunks", "list chunks"),
-                    ("full_chunks", "list chunks in full blocks"), ("sampled_chunks", "list chunks sampled"),
-                    ("by_array_members", "array members"), ("by_pages", "pages"),
-                    # pages under the floor decoded, their occupancy cells too
-                    # coarse on screen for dots (2026-10-03)
-                    ("occ_decoded", "pages decoded under the floor")) if p2.get(key))
-                if p2.get("map_updates"):
-                    by += "; hash map %s" % fmt_count(p2["map_updates"])
-                if p2.get("stages"):
-                    by += "; %d layer stages" % p2["stages"]
-                if p2.get("mask_tests") or p2.get("mask_fallbacks"):
-                    by += "; mask %s/%s pruned, %s fallback" % (
-                        fmt_count(p2.get("mask_pruned", 0)), fmt_count(p2.get("mask_tests", 0)),
-                        fmt_count(p2.get("mask_fallbacks", 0)))
-                by = by.lstrip("; ")
-                plan += (" (probe %d ms x%d, fit %d ms x%d"
-                         " passes on %d threads, %d regions%s,"
-                         " nodes %s, page nodes %s, pages %s,"
-                         " reads %s, cell dots %s%s)") % (
-                    round(p2["probe_us"] / 1000),
-                    p2["probes"],
-                    round(p2["fit_us"] / 1000), p2["passes"],
-                    max(1, p2.get("threads", 1)),
-                    # the free pixels of the cells planned (2026-10-03)
-                    p2["regions"], " (free top %s, others %s px)" % (
-                        fmt_count(p2["free_top"]), fmt_count(p2["free_others"]))
-                    if p2.get("free_top") or p2.get("free_others") else "",
-                    fmt_count(p2["nodes"]),
-                    fmt_count(p2["page_nodes"]),
-                    fmt_count(p2["page_candidates"]),
-                    fmt_count(p2.get("reads", 0)),
-                    fmt_count(p2.get("items", 0)),
-                    " [%s]" % by if by else "")
-            parts.append(plan)
-        pages = res.get("density_pages") or {}
-        if pages:
-            parts.append("%d pages" % pages.get("decoded", 0))
-        # what pass 2's reserve kept out (2026-10-01): a floor probe past it,
-        # a plan its fit thinned, pages its decode left out
-        p2 = res.get("density_plan2") or {}
-        over = [what for what, there in (
-            ("floor probe", p2.get("probes_over")), ("thinned", p2.get("thinned")),
-            ("%d pages left out" % pages.get("over_budget", 0), pages.get("over_budget")),
-            # what the budget left out, drawn by its occupancy records
-            # instead (2026-10-05)
-            ("%d pages by occupancy instead" % p2.get("stood_in", 0), p2.get("stood_in"))) if there]
-        if over:
-            parts.append("pass 2 over budget: %s" % ", ".join(over))
-        # pass 2's decode and raster wall (2026-10-03, the field's 449-layer
-        # view took 35 s): the log line only
-        if us.get("decode2_us") is not None:
-            parts.append("pass 2 decode %d ms%s" % (round(us["decode2_us"] / 1000), ", raster %d ms" % round(us["raster2_us"] / 1000)
-                                                     if us.get("raster2_us") is not None else ""))
-        stack = " [density: %s]" % ", ".join(parts)
-        # the bar: what pass 2 lit, its plan time and what it walked (nodes,
-        # the placements it read, the cells' dot items it made); a floor
-        # probe, a budget fit past one pass (with the floor it raised),
-        # threads and decoded pages only when there are any; the block and
-        # the regions stay in the log line
-        brief = [] if res.get("density_dots") is not None else ["top + empty"]
-        brief.append(lit)
-        if us and occ:
-            brief.append("pass 2 by occupancy %d ms (%s)" % (round(us.get("plan2_us", 0) / 1000), occ))
-        elif us:
-            plan = "pass 2 plan %d ms" % round(us.get("plan2_us", 0) / 1000)
-            if p2:
-                inner = []
-                if p2.get("probes"):
-                    inner.append("probe %d ms x%d" % (round(p2["probe_us"] / 1000), p2["probes"]))
-                if p2.get("passes", 0) > 1:
-                    inner.append("%d passes%s" % (
-                        p2["passes"], ", floor %.2g px" % res["density_floor"]
-                        if res.get("density_floor") is not None else ""))
-                if p2.get("threads", 1) > 1:
-                    inner.append("%d threads" % p2["threads"])
-                inner.append("nodes %s, reads %s, cell dots %s" % (
-                    fmt_count(p2["nodes"]), fmt_count(p2.get("reads", 0)),
-                    fmt_count(p2.get("items", 0))))
-                plan += " (%s)" % ", ".join(inner)
-            brief.append(plan)
-        if pages.get("decoded"):
-            brief.append("%d pages decoded" % pages["decoded"])
-        if over:
-            brief.append("pass 2 over budget: %s" % ", ".join(over))
-        brief_stack = "density: %s" % ", ".join(brief) if brief else "density"
-    mode = "live%s (%d tiles, +%d new, %d ms" \
-           "%s%s%s%s%s%s)" \
-        % (stack, res["tiles"], res.get("new", 0) or 0,
-           res["ms"], split,
-           depth_note, cut, drawn,
-           refin, text)
-    # The lower bar: the frame's time and where it went, the density's
-    # pass 2, the work bin (with the hierarchy walk it falls back to when
-    # it is off), the cut and its budget fit, and what the picture lacks.
-    # The depth sits in the bar above; the rest is in the log line.
-    brief = ["%d ms%s" % (res["ms"], brief_split)]
-    if res.get("deck"):
-        brief.append("deck %d passes%s" % (
-            res["deck"]["passes"],
-            ", summary %d passes (not pickable)" % res["deck"]["summary_passes"]
-            if res["deck"].get("summary_passes") else ""))
-    if stack:
-        brief.append(brief_stack)
-    if res.get("work_bin_items"):
-        brief.append("bin %s items" % fmt_count(res["work_bin_items"]))
-    elif res.get("work_bin_overflow_items"):
-        brief.append("bin off(cap@%s)%s" % (
-            fmt_count(res["work_bin_overflow_items"]),
-            ", hier %s/%s pruned" % (
-                fmt_count(res["hier_cells_visited"]),
-                fmt_count(res.get("subtrees_pruned", 0)))
-            if res.get("hier_cells_visited") else ""))
-    if brief_cut.strip():
-        brief.append(brief_cut.strip())
-    if res.get("over_budget_pages"):
-        brief.append("%d pages over budget (not drawn)" % res["over_budget_pages"])
-    if res.get("labels_truncated"):
-        brief.append("labels partial")
-    if res.get("cache_evicted"):
-        brief.append("evict %s" % fmt_count(res["cache_evicted"]))
-    if summ.get("layers"):
-        brief.append("summary %d layers (not pickable)" % summ["layers"])
-    return mode, " · ".join(brief)
 
 
 def frame_rect(buf, x0, y0, w, h, color):
@@ -1927,16 +1333,12 @@ class Viewer:
         self.spp = 1.0              # dbu per screen pixel
         self._start_goto = goto     # [x_um, y_um(, window_um)] from the CLI
         self.visible = set()
-        self.gen = 0
         self.last_frame = None      # (pixbuf, bbox, dbu_per_px, key)
         self._frame_anchor = None   # view center the frame was shown at
         # §F2R-21: the last landed margin (label-free geometry) as a
         # display base for the strip a pan uncovers before the fresh
         # frame lands; (pixbuf, bbox, dbu_per_px, key) like last_frame
         self._margin_frame = None
-        self._job_keys = {}         # gen -> render key of submitted job
-        self._job_depth = {}        # gen -> depth the job rendered at
-        self._pending_scope = "live"
         self._drag = None
         self._drag_origin = None
         self._drag_moved = False
@@ -1944,7 +1346,6 @@ class Viewer:
         self._zoomdrag = None       # rubber-band anchor (view px)
         self._band_cur = None
         self._band_ext = None       # (min x, max x) of the band drag
-        self._debounce = None
         self._did_fit = False
         self.worker = None
         self._worker_starting = False
@@ -2002,8 +1403,9 @@ class Viewer:
         # margin prefetch alone; pan reuse stays either way. Off, every pan
         # and zoom renders a viewport frame and nothing lands after it.
         self.margin_on = bool(margin)
-        self._margin_max_px = _env_int(
-            "FLOE_MARGIN_MAX_MPIX", MARGIN_MAX_MPIX, 1, 4096) << 20
+        # the Python render loop's adapter options (--stream-kb,
+        # --stream-target-ms, --render-debug): accepted for the command
+        # line, unused since the view controller draws (P4f)
         self.stream_kb = stream_kb
         self.stream_target_ms = int(stream_target_ms)
         self.render_debug = bool(render_debug)
@@ -2529,9 +1931,6 @@ class Viewer:
         # A layer toggle may have queued a render immediately before a
         # jobdeck mode switch. It must not fire against the replacement
         # worker before its open/style handshake (style_epoch=0).
-        if self._debounce is not None:
-            GLib.source_remove(self._debounce)
-            self._debounce = None
         # Initial construction is fitted/goto'd by _on_allocate.  An in-place
         # layout load happens after allocation and needs a deferred fit unless
         # its caller immediately supplies a goto (goto() cancels this flag).
@@ -2594,7 +1993,6 @@ class Viewer:
         self._margin_frame = None
         self._frame_anchor = None
         self._depth_used = "?"
-        self._job_keys.clear()
         self._clear_pending()
         self.rulers = []
         self._ruler_start = None
@@ -2663,13 +2061,7 @@ class Viewer:
             if marks is not None and "cache" not in marks:
                 # the cache, the layer panel: done; the service opens next
                 marks["cache"] = time.monotonic()
-            if controller_loop():
-                self.worker = self._make_view_worker(cache)
-            else:
-                self.worker = make_render_worker(
-                    cache, stream_kb=self.stream_kb,
-                    stream_target_ms=self.stream_target_ms,
-                    debug=self.render_debug)
+            self.worker = self._make_view_worker(cache)
             if hasattr(self.worker, "start_async"):
                 worker = self.worker
                 self._worker_starting = True
@@ -3281,19 +2673,11 @@ class Viewer:
         return None
 
     # ---- display composition (no cairo: pixbuf ops only) -------------------
-    def _render_key(self, scope):
-        """Identity of a frame: what state it was rendered for. The
-        thin policy is part of it (review 2026-09-11 P1-1: toggling
-        View > keep thin shapes changed only the status label while
-        _covered() kept the old frame; margin frames share the key).
-        Under the view controller its render key (the frames carry it)."""
-        if self._ctl():
-            snap = self.worker.snapshot
-            return ("ctl", None if snap is None else snap["render_key"])
-        return (scope, tuple(sorted(self.visible)), self._depth_key(),
-                self._effective_cut_px(), self.lod_on, self.frames_on,
-                self.labels_on, self._color_epoch, self._effective_thin(),
-                self._root_ci(), self._density_key())
+    def _render_key(self, scope="live"):
+        """Identity of a frame: what state it was rendered for - the view
+        controller's render key (its frames carry it)."""
+        snap = self.worker.snapshot if self._ctl() else None
+        return ("ctl", None if snap is None else snap["render_key"])
 
     def _density_key(self):
         """Render-key component: the density toggle where the renderer
@@ -3844,83 +3228,11 @@ class Viewer:
         panel.show()
 
     # ---- drawing / rendering ------------------------------------------------
-    def _margin_enabled(self):
-        """§F2R-17 margin prefetch is a Rust-only reuse optimization:
-        the backend must declare it (stable floe/KLayout would render
-        the enlarged frame as ~4.8x plain foreground work per settled
-        view and could not cancel it), and --frame-cache off /
-        --perf-baseline switch every frame-reuse path off together so
-        backend-neutral timings stay comparable."""
-        return bool(self.frame_cache_on) and bool(self.margin_on) and bool(
-            getattr(self.worker, "supports_margin_prefetch", False))
-
-    def _covered(self, bbox, scope):
-        """True when the current frame still serves this view: same
-        render state AND the viewport sits inside the frame with some
-        comfort left, so no re-render is needed (Calibre-style margin
-        panning)."""
-        lf = self.last_frame
-        if lf is None or lf[3] != self._render_key(scope):
-            return False
-        if abs(lf[2] - self.spp) > 1e-9 * self.spp:
-            return False  # zoom changed: frame is scaled preview only
-        fb = lf[1]
-        vw, vh = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        if self._margin_enabled():
-            # §F2R-17: the margin is sized to EXACTLY one snapped 50%
-            # arrow step per side (user call 2026-09-05: the earlier
-            # step+10% pad felt wasteful), so a view whose edge lands
-            # on the frame edge is still a pure crop. No comfort pad:
-            # the proactive re-margin in _schedule_margin (leading room
-            # < 0.35 viewport) replaced its role. The tolerance only
-            # absorbs float rounding of the pan arithmetic (1e-3 px).
-            pad_x = pad_y = -1e-3 * self.spp
-        else:
-            # reuse is off (baseline timing) or the backend has no
-            # margin: only an exact viewport frame (<= 2 px snap slack
-            # per axis, see _submit_render) may serve - never a crop
-            # of some oversize frame
-            slack = 4.0 * self.spp
-            if (fb[2] - fb[0]) > vw + slack or (fb[3] - fb[1]) > vh + slack:
-                return False
-            pad_x = min(0.1 * vw, 0.25 * max(0.0, (fb[2] - fb[0]) - vw))
-            pad_y = min(0.1 * vh, 0.25 * max(0.0, (fb[3] - fb[1]) - vh))
-        return (fb[0] <= bbox[0] - pad_x and fb[1] <= bbox[1] - pad_y and
-                fb[2] >= bbox[2] + pad_x and fb[3] >= bbox[3] + pad_y)
-
-    def _frame_holds_view(self, bbox):
-        """The frame on screen shows this view whole: the same render
-        state, the same scale, the view inside its box (float slack only).
-        Unlike _covered - whether a frame may be REUSED instead of a render,
-        which with the margin off wants comfort around the view - a
-        viewport frame that was just drawn for this view always holds it."""
-        lf = self.last_frame
-        if lf is None or lf[3] != self._render_key("live"):
-            return False
-        if abs(lf[2] - self.spp) > 1e-9 * self.spp:
-            return False
-        fb, tol = lf[1], 1e-3 * self.spp
-        return (fb[0] <= bbox[0] + tol and fb[1] <= bbox[1] + tol and
-                fb[2] >= bbox[2] - tol and fb[3] >= bbox[3] - tol)
-
-    def _settle_after_frame(self):
-        """A foreground frame settled. The mouse no longer waits for it
-        (2026-09-30), so the view may have moved while it was drawn: when a
-        render of the new view is already on its way (the debounce) or a pan
-        is in progress (its release renders), nothing to do; when the frame
-        does not hold the view the user is at (a pan inside the old margin
-        submitted nothing), render that view; otherwise top the margin up.
-        0.12.251 asked _covered here, which with the margin off never holds
-        a fresh viewport frame (no comfort around it): every frame rendered
-        again, for ever (field 2026-09-30: "rendering repeats")."""
-        if self._debounce is not None or self._drag is not None:
-            return
-        if self._frame_holds_view(self.view_bbox()):
-            self._schedule_margin()
-        else:
-            self.redraw()
-
     def redraw(self, immediate=False):
+        """Show the view and send what changed of it to the view
+        controller, which decides what is drawn and when (docs/
+        SHARED_APP_LAYER.ko.md §7; `immediate` is the controller's call
+        now - a policy edit renders at once, a move once it settles)."""
         if self.cache is None:
             return   # empty start: nothing to render yet
         if self._worker_starting:
@@ -3932,50 +3244,9 @@ class Viewer:
             self._set_live_status("render service is not available")
             return
         self._clamp_view()
-        if self._ctl():
-            self._ctl_redraw()
-            return
-        bbox = self.view_bbox()
-        span = self.tiles_spanned(bbox)
-        # skeleton retired (rev 24): every view renders live; wide floe2
-        # views use the hierarchy cut/wash/LOD ladder.
-        scope = "live"
-        self._display()
-        if not self.visible and not self._structure_visible():
-            if self._debounce is not None:
-                GLib.source_remove(self._debounce)
-                self._debounce = None
-            self._clear_pending()
-            self._set_status(bbox, "no layers visible")
-            return
-        mode = ("hierarchy depth %d" % self._depth()
-                if not self.visible else "live (%d tiles)" % span)
-        if self._drag is not None:
-            # mid-pan: track visually with the frozen frame only; the
-            # render fires once on button release (a brief motion pause
-            # used to let the debounce submit mid-drag)
-            if self._debounce is not None:
-                GLib.source_remove(self._debounce)
-                self._debounce = None
-            self._set_status(bbox, mode)
-            return
-        if self._covered(bbox, scope):
-            if self._debounce is not None:
-                GLib.source_remove(self._debounce)
-                self._debounce = None
-            self._set_status(bbox, mode)
-            # §F2R-17: roaming inside the margin - top the margin up
-            # once the view drifts off its center
-            self._schedule_margin()
-            return
-        if self._debounce is not None:
-            GLib.source_remove(self._debounce)
-        self._pending_scope = scope
-        self._debounce = GLib.timeout_add(
-            1 if immediate else DEBOUNCE_MS, self._submit_render)
-        self._set_status(bbox, mode)
+        self._ctl_redraw()
 
-    # ---- the view controller's loop (P4d, controller_loop) -----------------
+    # ---- the view controller's loop (P4d; the only one since P4f) ------
     def _ctl(self):
         """The render loop is the shared Rust ViewController's."""
         return bool(getattr(getattr(self, "worker", None), "controller",
@@ -4283,219 +3554,6 @@ class Viewer:
         if os.environ.get("FLOE_MARGIN_DEBUG"):
             sys.stderr.write("[margin] %s\n" % message)
 
-    def _schedule_margin(self):
-        """§F2R-17: after a settled live frame, prefetch a 2wx2h frame
-        around the view in the background so pans inside +-50% become
-        pure crops (_covered) or full tile reuse. Any user render that
-        follows preempts it through the generation frontier - renderd
-        cancels the margin raster mid-flight."""
-        if self.cache is None or self._drag is not None:
-            return
-        if not self._margin_enabled():
-            return  # KLayout backend or --frame-cache off / --perf-baseline
-        if self._pending is not None:
-            self._margin_debug("skip: render pending")
-            return  # a user render is in flight; its settle reschedules
-        lf = self.last_frame
-        if lf is None or lf[3] != self._render_key("live"):
-            self._margin_debug("skip: no frame or key mismatch")
-            return
-        bbox = self.view_bbox()
-        vw, vh = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        fb = lf[1]
-        # Already margined and roughly centered: nothing to do. "Roughly"
-        # is relative to the frame's OWN extension (>= 70% of it left on
-        # both sides) so a pixel-capped narrower margin (§F2R-20) is not
-        # topped up after every pan; an axis without a real margin
-        # (under one 16 px period, e.g. the exact viewport frame) never
-        # counts as margined.
-        period = 16.0 * self.spp
-        axes = ((bbox[0] - fb[0], fb[2] - bbox[2], ((fb[2] - fb[0]) - vw) / 2.0),
-                (bbox[1] - fb[1], fb[3] - bbox[3], ((fb[3] - fb[1]) - vh) / 2.0))
-        if any(ext >= period for _, _, ext in axes) and all(
-                ext < period or (lo >= 0.7 * ext and hi >= 0.7 * ext)
-                for lo, hi, ext in axes):
-            self._margin_debug("skip: already margined")
-            return
-        # §F2R-17 (user call 2026-09-04): submit IMMEDIATELY - any user
-        # render cancels the margin mid-flight anyway, and an instant
-        # margin is what keeps continuous stepping silent. The in-flight
-        # guard stops a pan burst from superseding its own margins
-        # forever (a livelock where none ever completes).
-        pending = getattr(self, "_margin_pending", None)
-        if pending is not None and abs(self.cx - pending[1]) <= 0.35 * vw \
-                and abs(self.cy - pending[2]) <= 0.35 * vh:
-            self._margin_debug("skip: margin in flight for this area")
-            return
-        # §F2R-21: with labels on the landed margin is not last_frame
-        # (never shown), yet renderd retains its geometry - a settle
-        # inside it (a full-reuse pan) must not prefetch again until
-        # the view drifts off the margin's center
-        landed = getattr(self, "_margin_landed", None)
-        if landed is not None and landed[0] == lf[3] \
-                and landed[4] is self.cache \
-                and abs(landed[1] - self.spp) <= 1e-9 * self.spp \
-                and abs(self.cx - landed[2]) <= 0.35 * vw \
-                and abs(self.cy - landed[3]) <= 0.35 * vh:
-            self._margin_debug("skip: margin retained for this area")
-            return
-        self._submit_margin()
-
-    def _submit_margin(self):
-        if (self.cache is None or self.worker is None
-                or not self.worker.alive() or self._drag is not None
-                or self._pending is not None or not self._margin_enabled()):
-            self._margin_debug("submit skipped")
-            return False
-        bbox = self.view_bbox()
-        vw, vh = self._viewport_size()
-        spp2 = 2.0 * self.spp
-        rx0 = math.floor(bbox[0] / spp2) * spp2
-        ry1 = math.ceil(bbox[3] / spp2) * spp2
-        w, h = int(vw) + 2, int(vh) + 2
-        # Margin offsets snap to the 16px fill-phase grid so the
-        # margin render reuses the just-drawn viewport as its center
-        # and later pans reuse the margin (§F2R-16 contract). Each side
-        # holds EXACTLY one arrow step (50%, snapped by the same
-        # _snap_pan_px the arrow keys use), so any pan up to a single
-        # half-viewport step is a pure crop and nothing more is drawn
-        # (user call 2026-09-05: the earlier step+10% pad was ~20% more
-        # raster than needed; _covered() no longer wants comfort room
-        # in margin mode, which is what made the pad necessary).
-        ex = self._snap_pan_px(vw * KEY_PAN_FRACTION)
-        ey = self._snap_pan_px(vh * KEY_PAN_FRACTION)
-        cap = getattr(self, "_margin_max_px", MARGIN_MAX_MPIX << 20)
-        if (w + 2 * ex) * (h + 2 * ey) > cap:
-            # §F2R-20: shrink both extensions by one factor s so the
-            # margin holds at most `cap` pixels: (w+2s.ex)(h+2s.ey)=cap,
-            # then floor each to the 16 px period (area stays <= cap).
-            qa = 4.0 * ex * ey
-            qb = 2.0 * (w * ey + h * ex)
-            qc = float(w * h - cap)
-            s = 0.0 if qc >= 0 else \
-                (-qb + math.sqrt(qb * qb - 4.0 * qa * qc)) / (2.0 * qa)
-            ex, ey = (int(math.floor(s * ex / 16.0)) * 16,
-                      int(math.floor(s * ey / 16.0)) * 16)
-            if ex == 0 and ey == 0:
-                self._margin_debug(
-                    "skip: viewport %dx%d leaves no room under the "
-                    "%d Mpx margin cap" % (w, h, cap >> 20))
-                return False
-            self._margin_debug("capped margin to +%d/+%d px per side"
-                               % (ex, ey))
-        mw, mh = w + 2 * ex, h + 2 * ey
-        eb = (rx0 - ex * self.spp,
-              ry1 - (h + ey) * self.spp,
-              rx0 + (w + ex) * self.spp,
-              ry1 + ey * self.spp)
-        depth = self._depth()
-        self.gen += 1
-        self._job_keys[self.gen] = self._render_key("live")
-        self._job_depth[self.gen] = depth
-        job = {
-            "kind": "render", "gen": self.gen, "scope": "live",
-            "bg": True, "t_sub": time.time(),
-            "bbox": tuple(float(v) for v in eb),
-            "view": tuple(float(v) for v in bbox),
-            "w": int(mw), "h": int(mh),
-            "depth": depth,
-            "root": self._root_ci(),
-            "cut_px": self._effective_cut_px(),
-            "lod": self.lod_on,
-            "thin": self._effective_thin(),
-            "frames": self.frames_on,
-            # §F2R-21 (user call 2026-09-05): the margin carries its
-            # labels, planned over the margin box, so a pan inside it
-            # is a pure crop WITH labels - nothing is drawn late. The
-            # display convention that buys this: a label anchored
-            # outside the viewport but inside the margin shows the
-            # part of its glyphs that reaches in and may overlap other
-            # labels, as overlapping labels already can; the selection
-            # is bin-aligned, so the same spot always shows the same
-            # labels. A margin whose label plan hit a budget is never
-            # cropped (reuse-only, geometry base under the pan strip).
-            "labels": self.labels_on,
-            "label_font_px": self.label_font_px,
-            "frame_cache": self.frame_cache_on,
-            "abstract": self.abstract,
-            "visible": self._layers_arg()}
-        if self._density_key() is not None:
-            # the margin is the view's: the same density setting
-            job["density"] = self.density_on
-        self.worker.submit(job)
-        self._margin_pending = (self.gen, self.cx, self.cy)
-        self._margin_debug("submitted gen=%d %dx%d" % (self.gen, mw, mh))
-        return False
-
-    def _submit_render(self):
-        self._debounce = None
-        if self.cache is None or self._worker_starting:
-            return False  # the successful open callback submits the view
-        # a user render supersedes any in-flight margin (the generation
-        # frontier cancels its raster) - forget it so the next settle
-        # schedules a fresh one
-        self._margin_pending = None
-        scope = self._pending_scope
-        bbox = self.view_bbox()
-        w, h = self._viewport_size()
-        # Render the viewport snapped to the SPECKLE PERIOD. The 2x2
-        # checkerboard fill is anchored to the frame's device grid, so
-        # two renders whose origins differ by an ODD pixel count show
-        # inverted fill patterns - panning visibly "reshuffled" the
-        # image (field report 2026-08-09; measured 5.3% of pixels).
-        # Landing x0/left and y1/top on even-pixel boundaries of the
-        # layout-anchored grid makes the phase a pure function of the
-        # layout, so re-renders match across any pan (Calibre
-        # behavior). The frame grows by <= 2 px per axis to keep
-        # covering the exact viewport. (The old 50%-per-side overdraw
-        # margin stays retired - user call, 2026-07-31.)
-        spp2 = 2.0 * self.spp
-        rx0 = math.floor(bbox[0] / spp2) * spp2
-        ry1 = math.ceil(bbox[3] / spp2) * spp2
-        w, h = int(w) + 2, int(h) + 2
-        eb = (rx0, ry1 - h * self.spp, rx0 + w * self.spp, ry1)
-        depth = self._depth()
-        self.gen += 1
-        self._job_keys[self.gen] = self._render_key(scope)
-        self._job_depth[self.gen] = depth
-        for g in [g for g in self._job_keys if g < self.gen - 8]:
-            del self._job_keys[g]
-            self._job_depth.pop(g, None)
-        # bboxes stay FLOAT dbu end to end: at deep zoom one dbu spans
-        # ~100 screen px (spp bottoms out at 0.01), so int-rounding the
-        # request skewed the frame's effective scale by whole percents -
-        # the anchor logic then treated every frame as a zoom mismatch
-        # and pans stopped tracking (the "weird panning at 0.01um" bug)
-        job = {
-            "kind": "render", "gen": self.gen, "scope": scope,
-            "t_sub": time.time(),
-            "bbox": tuple(float(v) for v in eb),
-            "view": tuple(float(v) for v in bbox),
-            "w": int(w), "h": int(h),
-            "depth": depth,
-            "root": self._root_ci(),
-            "cut_px": self._effective_cut_px(),
-            "lod": self.lod_on,
-            "thin": self._effective_thin(),
-            "frames": self.frames_on,
-            "labels": self.labels_on,
-            "label_font_px": self.label_font_px,
-            "frame_cache": self.frame_cache_on,
-            "abstract": self.abstract,
-            "visible": self._layers_arg()}
-        if self._density_key() is not None:
-            # the density under the cut, on or off (View > density)
-            job["density"] = self.density_on
-        self.worker.submit(job)
-        self._pending = self.gen
-        self._preview_gen = None   # stop a stale preview ticker
-        self._pending_t0 = time.perf_counter()
-        self.rstatus.set_text("rendering…")
-        self._set_cursor("progress")  # busy, but the mouse still works
-        if self._pending_timer is None:
-            self._pending_timer = GLib.timeout_add(400, self._pending_tick)
-        return False  # one-shot timeout
-
     def _pending_tick(self):
         if self._pending is None:
             self._pending_timer = None
@@ -4508,36 +3566,17 @@ class Viewer:
 
     def _cancel_render(self):
         """Esc on a render in flight (field 2026-09-30: a slow render
-        could neither be cancelled nor superseded): the daemon's
-        frontier moves past the generation (`cancel before_gen`), so
-        its plan, decode and raster stop at their next look; the
-        frozen picture stays and the view is left uncovered, so the
-        next pan, zoom or redraw renders it. The generation is bumped
-        without a submit: a late frame or refining round of the
-        cancelled one is not this generation's and is dropped."""
-        if self._debounce is not None:
-            GLib.source_remove(self._debounce)
-            self._debounce = None
-        self.gen += 1
+        could neither be cancelled nor superseded): the view controller
+        stops the frame in progress (renderd drops it at its next step);
+        the frozen picture stays, and the next pan, zoom or change renders
+        (the controller does not draw the cancelled state again)."""
         cancel = getattr(self.worker, "cancel", None)
         if cancel is not None:
-            cancel(self.gen)   # before_gen: everything older stops
+            cancel()
         self._refining = False
-        self._preview_gen = None
         self._clear_pending()
         self.rstatus.set_text("render cancelled")
         self._display()
-
-    def _preview_tick(self, gen):
-        """Elapsed-time ticker while the fat parse behind a preview runs
-        (without it the preview read as "done" and the eventual real
-        frame surprised the user)."""
-        if getattr(self, "_preview_gen", None) != gen:
-            return False  # real frame landed or a newer render started
-        self.rstatus.set_text(
-            "preview - loading tiles… %.0fs"
-            % (time.perf_counter() - self._preview_t0))
-        return True
 
     def _clear_pending(self):
         self._pending = None
@@ -4602,7 +3641,7 @@ class Viewer:
                     "versions in the bundle? overwrite the WHOLE floe/ "
                     "and floe2/ packages, not single files\n" % (APP, exc))
         if self._ctl():
-            self._ctl_events()
+            self._ctl_events()   # the view's frames and states
         try:
             while self.worker is not None:
                 res = self.worker.res.get_nowait()
@@ -4635,133 +3674,11 @@ class Viewer:
         return True
 
     def _handle_result(self, res):
+        """An answer of the view channel (floe/gtkservice.py ViewWorker):
+        the cell tree's, a snap, a pick, a clip, or a refusal. The frames
+        and the view's state come as events (_ctl_events)."""
         kind = res.get("kind")
-        if kind == "frame":
-            preview = bool(res.get("preview"))
-            if res["gen"] == self._pending and not preview:
-                # FIRST frame of this gen: content is on screen, so
-                # UNBLOCK input immediately (mouse handlers gate on
-                # _pending) - a streamed refinement keeps painting
-                # behind it, and any interaction simply supersedes
-                # the job (the service aborts between rounds and the
-                # daemon rolls back the un-acked round, par.3.7)
-                self._clear_pending()
-                if not res.get("refining"):
-                    self.rstatus.set_text("rendering done.")
-            if res["gen"] == self.gen and not preview:
-                if res.get("refining"):
-                    self._refining = True
-                    self.rstatus.set_text(
-                        "drawing the density under the cut..."
-                        if res.get("density_round") else
-                        "refining %d pages..." % res["refining"])
-                elif getattr(self, "_refining", False):
-                    self._refining = False
-                    self.rstatus.set_text("rendering done.")
-            if res["gen"] == self.gen:
-                if res.get("rgba") is not None:
-                    # raw RGBA handoff (F2R-13): neither side runs a PNG
-                    # codec on the interactive path. new_from_bytes keeps
-                    # its own reference on the GBytes copy.
-                    fw = int(res.get("frame_width", 0))
-                    fh = int(res.get("frame_height", 0))
-                    pix = GdkPixbuf.Pixbuf.new_from_bytes(
-                        GLib.Bytes.new(res["rgba"]),
-                        GdkPixbuf.Colorspace.RGB, True, 8,
-                        fw, fh, fw * 4)
-                else:
-                    loader = GdkPixbuf.PixbufLoader.new_with_type("png")
-                    loader.write(res["png"])
-                    loader.close()
-                    pix = loader.get_pixbuf()
-                if self.dump:
-                    # diagnosis: the frame as received from the service
-                    pix.savev("/tmp/%s_frame.png" % APP, "png", [], [])
-                fb = res["bbox"]
-                fspp = (fb[2] - fb[0]) / max(1, pix.get_width())
-                key = self._job_keys.get(res["gen"])
-                used = self._job_depth.get(res["gen"])
-                if isinstance(res.get("max_depth"), int):
-                    self.max_depth = max(0, res["max_depth"])
-                if preview:
-                    # LOD preview while fat full tiles parse. The
-                    # sentinel key displays (non-None) yet never matches
-                    # a render key, so _covered() keeps re-rendering
-                    # until the real frame (same gen) replaces this.
-                    # Crucially UNBLOCK input: mouse handlers gate on
-                    # _pending, and a fat parse can run for minutes - the
-                    # user must be able to pan/zoom away (the service
-                    # skips the stale fat load when newer work queues).
-                    self.last_frame = (pix, fb, fspp, "preview")
-                    self._display()
-                    if res["gen"] == self._pending:
-                        self._clear_pending()
-                        self._preview_gen = res["gen"]
-                        self._preview_t0 = time.perf_counter()
-                        GLib.timeout_add(500, self._preview_tick,
-                                         res["gen"])
-                    self.rstatus.set_text("preview - loading tiles…")
-                    return
-                if res["gen"] == getattr(self, "_preview_gen", None):
-                    # the fat parse behind an input-unblocking preview
-                    # finished: close out its status line
-                    self._preview_gen = None
-                    self.rstatus.set_text("rendering done.")
-                if res.get("bg"):
-                    pending = getattr(self, "_margin_pending", None)
-                    if pending is not None and pending[0] == res["gen"]:
-                        self._margin_pending = None
-                        center = (pending[1], pending[2])
-                    else:
-                        center = ((fb[0] + fb[2]) / 2.0,
-                                  (fb[1] + fb[3]) / 2.0)
-                    # remember the retained margin so settles inside
-                    # it do not re-prefetch (renderd keeps its geometry
-                    # for full-reuse pans whether or not it is shown)
-                    self._margin_landed = (key, fspp, center[0],
-                                           center[1], self.cache)
-                    # kept for display either way: the base under a
-                    # pan's incoming strip (see _display)
-                    self._margin_frame = (pix, fb, fspp, key)
-                    if res.get("labels_truncated"):
-                        # §F2R-21: a margin whose label plan hit a
-                        # budget is not crop-safe - the same budgets
-                        # as a viewport mean a complete margin plan
-                        # implies complete viewport plans, and only
-                        # then does a crop show what a direct render
-                        # would. Keep it as the geometry base and for
-                        # renderd's tile reuse; pans render (fast path).
-                        self._margin_debug(
-                            "landed gen=%d: labels truncated - reuse "
-                            "only" % res["gen"])
-                        return
-                    self.last_frame = (pix, fb, fspp, key)
-                    self._display()
-                    self._margin_debug("landed gen=%d" % res["gen"])
-                    return  # silent margin upgrade
-                self.last_frame = (pix, fb, fspp, key)
-                self._display()
-                self._depth_used = used
-                self.dstatus.set_text(self._depth_label())
-                if True:
-                    mode, brief = perf_status(res, self._depth_note(used))
-                    # the first frame after a load also says how long the
-                    # load took (the frame's own ms is only its render)
-                    load, load_brief = self._load_note(res)
-                    mode, brief = load + mode, load_brief + brief
-                # Also keep a terminal performance log (only the settled
-                # frame prints; refining rounds would spam every ~0.4s).
-                # The same line now remains in the persistent lower bar.
-                if not res.get("refining"):
-                    b = self.view_bbox()
-                    print("%s  view %.1f x %.1f um"
-                          % (mode, (b[2] - b[0]) * self.dbu,
-                             (b[3] - b[1]) * self.dbu), flush=True)
-                    self._settle_after_frame()
-                self._set_status(self.view_bbox(), mode, brief)
-                # the cell highlight follows the view the frame shows
-                self._cell_hl_follow()
-        elif kind in CELL_QUERY_KINDS:
+        if kind in CELL_QUERY_KINDS:
             self._on_cell_result(res)
         elif kind == "snap":
             if res["seq"] == self._snap_seq \
@@ -4776,35 +3693,9 @@ class Viewer:
                 "clip saved: %s (%.2f MB, %d ms)"
                 % (res["path"], res["size_mb"], res["ms"]))
         elif kind == "error":
-            # an older generation's late error (a superseded render)
-            # must not clear the one now pending; an adapter failure
-            # carries no generation and must
-            if res.get("gen", -1) in (-1, self._pending):
-                self._clear_pending()
+            # an edit or request the view channel refused
+            self._clear_pending()
             self._set_live_status("error: %s" % res.get("msg"))
-        elif kind == "cancelled":
-            # the daemon's word that a generation stopped: nothing to
-            # show (the picture stays), only the pending state to drop
-            # if it was still waited for
-            if res.get("gen") == self._pending:
-                self._clear_pending()
-                self.rstatus.set_text("render cancelled")
-        elif kind == "dropped":
-            # a margin the scale's budget fit does not hold (renderd,
-            # reason=fit): nothing lands, the viewport stays as drawn and
-            # pans here render; _margin_pending keeps the in-flight guard
-            # until the next user render, as for a superseded margin
-            pending = getattr(self, "_margin_pending", None)
-            if pending is not None and pending[0] == res.get("gen"):
-                self._margin_debug("dropped gen=%d: %s" % (
-                    res["gen"], res.get("reason") or "?"))
-            # a foreground render dropped (unreachable today: a stale
-            # generation is never sent) must not leave the mouse waiting
-            # for a frame that never comes (review 2026-09-30)
-            if res.get("gen") == self._pending:
-                self._clear_pending()
-                self.rstatus.set_text("render dropped (%s)" % (
-                    res.get("reason") or "?"))
 
     def _load_note(self, res):
         """The first settled frame after a load: the time from the file's
@@ -5346,16 +4237,7 @@ class Viewer:
             self.cy += dy
         elif direction == "Down":
             self.cy -= dy
-        # §F2R-21: inside a landed margin the render is the label
-        # re-synthesis fast path (memcpy + labels), so skip the pan
-        # debounce - the geometry shows at once from the margin base
-        # and the labels follow as soon as renderd answers
-        base = self._margin_base()
-        bbox = self.view_bbox()
-        inside = base is not None and (
-            base[1][0] <= bbox[0] and base[1][1] <= bbox[1]
-            and base[1][2] >= bbox[2] and base[1][3] >= bbox[3])
-        self.redraw(immediate=inside)
+        self.redraw()
 
     # ---- keys ----------------------------------------------------------------
     def _command_key(self, ev):
@@ -7411,7 +6293,6 @@ class Viewer:
         self._margin_frame = None
         self._frame_anchor = None
         self._clear_pending()
-        self._job_keys.clear()
         self._cell_hl = None
         self._cell_hl_key = None
         root = self._view_root

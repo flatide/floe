@@ -22,7 +22,7 @@ PYTHONDONTWRITEBYTECODE=1 "$worker_python" - <<'PY'
 import os
 from pathlib import Path
 from floe_oracle.cache import Cache
-from floe.rust_render import RustRenderWorker
+from floe_oracle.rust_render import RustRenderWorker
 
 cache = Cache(os.environ['FLOE_WORKER_TEST_SOURCE'])
 cache.dir = os.environ['FLOE_WORKER_TEST_CACHE']

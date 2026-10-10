@@ -82,7 +82,7 @@ pub struct DesktopPolicy {
     /// debounce). A policy edit (layers, depth, styles …) renders at once.
     pub settle: Option<Duration>,
     /// Each frame's report kept beside it (`ViewController::frame_report`):
-    /// its generation's rounds added up as floe/rust_render.py's
+    /// its generation's rounds added up as floe_oracle/rust_render.py's
     /// `_emit_frame` did - the perf line's source (P4b, `view::perf`).
     pub report: bool,
     /// Snap and pick on a frame whose geometry is not complete (the density
@@ -106,7 +106,7 @@ impl Default for DesktopPolicy {
     }
 }
 impl DesktopPolicy {
-    /// The GTK viewer's: what floe/rust_render.py did - no deadline on a
+    /// The GTK viewer's: what floe_oracle/rust_render.py did - no deadline on a
     /// frame or its drain, a refused frame on the status line.
     pub fn desktop() -> Self {
         Self {
@@ -833,7 +833,7 @@ impl ViewController {
         self.shared.lock().unwrap().latest.clone()
     }
     /// The report of a frame shown (DesktopPolicy::report): the result
-    /// floe/rust_render.py's `_emit_frame` gave for it - its generation's
+    /// floe_oracle/rust_render.py's `_emit_frame` gave for it - its generation's
     /// rounds so far added up, `ms` from the frame's submission (the perf
     /// line, `view::perf::perf_status`). None without the policy or once
     /// newer frames pushed it out; kept from the moment the frame is.

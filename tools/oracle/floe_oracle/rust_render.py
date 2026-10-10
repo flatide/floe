@@ -1,9 +1,13 @@
-"""The viewer's render worker: the adapter for `floe-renderd` (the
-frame/query protocol the frozen floe's KLayout `RenderWorker` spoke).
+"""The Python adapter for `floe-renderd` - the GTK viewer's render worker
+until the shared Rust ViewController took its loop (docs/SHARED_APP_LAYER.ko.md
+§7; the product's since P4f is floe/gtkservice.py ViewWorker over floe2
+gtk-service). Kept here, dev-only, as the gates' reference: byte-equal frames
+(gtk_view), the frame report and perf line's Python side (perf_parity), the
+renderd protocol's client in the Python gates.
 
-The adapter translates the existing queue-shaped Python job/result contract
-to the renderer's strict line protocol. KLayout remains an independently
-selectable rollback backend while the Rust renderer is stabilized.
+The adapter translates the queue-shaped Python job/result contract to the
+renderer's strict line protocol (the frame/query protocol the frozen floe's
+KLayout `RenderWorker` spoke).
 """
 
 import itertools
@@ -17,7 +21,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import RENDERD_VERSION
+from floe import RENDERD_VERSION
 
 
 _DEFAULT_JOBS = max(1, min(8, os.cpu_count() or 1))
@@ -279,8 +283,7 @@ def _wire_hex(fields, name):
         raise ValueError("invalid UTF-8 hex field: %s" % name) from exc
 
 
-CELL_QUERY_KINDS = ("cell_sources", "cells", "cell_find", "cell_bbox",
-                    "cell_insts")
+from floe.gtkservice import CELL_QUERY_KINDS  # noqa: E402 - the viewer's
 # the daemon's own caps (renderd CELL_FIND_CAP / CELL_INSTS_CAP); a job
 # may ask for less
 CELL_FIND_LIMIT = 5000
@@ -363,29 +366,11 @@ def _layer_key(value):
 
 
 def find_binary():
-    """Find the floe-renderd the worker would launch (vfsclient.
-    find_binary sibling; Help > About probes the same path)."""
-    configured = os.environ.get("FLOE_RENDERD_BIN")
-    candidates = []
-    if configured:
-        candidates.append(configured)
-    root = Path(__file__).resolve().parents[1]
-    candidates.extend((
-        str(root / "rust" / "target" / "release" / "floe-renderd"),
-        str(root / "rust" / "dist" / "floe-renderd-linux-gnu"),
-        str(root / "rust" / "dist" / "floe-renderd-linux-x86_64"),
-    ))
-    adjacent = Path(sys.executable).resolve().parent / "floe-renderd"
-    candidates.append(str(adjacent))
-    on_path = shutil.which("floe-renderd")
-    if on_path:
-        candidates.append(on_path)
-    for candidate in candidates:
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return os.path.abspath(candidate)
-    raise RuntimeError(
-        "floe-renderd not found; set FLOE_RENDERD_BIN (checked: %s)" %
-        ", ".join(candidates))
+    """The floe-renderd the adapter launches: the viewer's own lookup
+    (floe/vfsclient.py find_renderd - FLOE_RENDERD_BIN, the development
+    build, dist builds, beside Python, PATH)."""
+    from floe.vfsclient import find_renderd
+    return find_renderd()
 
 
 class RustRenderWorker:
@@ -1886,9 +1871,8 @@ class RustRenderWorker:
 
 # the viewer's detail levels: the size cut in px per level (low = the
 # coarsest cut, high = the finest)
-DETAIL_LEVELS = ("low", "medium", "high")
-DETAIL_PX = (5.0, 3.0, 1.0)
-DEFAULT_DETAIL = 1              # medium
+from floe.gui import (DETAIL_LEVELS, DETAIL_PX,  # noqa: E402,F401 - the viewer's
+                      DEFAULT_DETAIL)
 
 
 def make_render_worker(cache, stream_kb=None, stream_target_ms=500,
@@ -1910,7 +1894,7 @@ def make_render_worker(cache, stream_kb=None, stream_target_ms=500,
                                 debug=debug)
     target = os.environ.get(
         "FLOE_RUST_WORKER",
-        "floe.rust_render:RustRenderWorker")
+        "floe_oracle.rust_render:RustRenderWorker")
     module_name, separator, type_name = target.partition(":")
     if not separator or not module_name or not type_name:
         raise RuntimeError(

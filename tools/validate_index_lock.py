@@ -140,7 +140,7 @@ def snapshot(folder):
 
 def open_worker(src):
     from floe_oracle.cache import Cache
-    from floe.rust_render import RustRenderWorker
+    from floe_oracle.rust_render import RustRenderWorker
     c = Cache(str(src))
     c.load()
     w = RustRenderWorker(c)
@@ -253,7 +253,7 @@ class IndexLockTests(unittest.TestCase):
     def test_k3_a_whole_rebuild_refuses_its_readers(self):
         self.hold(full=True)
         from floe_oracle.cache import Cache
-        from floe.rust_render import RustRenderWorker
+        from floe_oracle.rust_render import RustRenderWorker
         c = Cache(str(self.src))
         c.load()
         w = RustRenderWorker(c)
@@ -365,7 +365,7 @@ class IndexLockTests(unittest.TestCase):
             line = held.stderr.readline()
             self.assertTrue(line or held.poll() is None, "the run ended early")
         from floe_oracle.cache import Cache
-        from floe.rust_render import RustRenderWorker
+        from floe_oracle.rust_render import RustRenderWorker
         c = Cache(str(self.src))
         c.load()
         late = RustRenderWorker(c)

@@ -98,7 +98,7 @@ FLOE2 = os.environ.get("FLOE2_BIN") or str(ROOT / "rust" / "target" / "release" 
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (P3)
 from floe_oracle.cache import Cache
-from floe.rust_render import RustRenderWorker
+from floe_oracle.rust_render import RustRenderWorker
 
 PX = 1920       # at this size keep + cut 1 px of the whole chip decodes ~110 MB
 
@@ -336,7 +336,7 @@ def top_first_checks(temp, src):
         done = subprocess.run([FLOE2, 'index', str(path), '--jobs', '2'],
                               cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
         assert done.returncode == 0, done.stdout + done.stderr
-    from floe.gui import perf_status
+    from floe_oracle.perf_line import perf_status
     low, up = (7, 59), (14, 367)
     top, old = top_first_worker(pair, 1), top_first_worker(pair, 1, on=False)
     try:

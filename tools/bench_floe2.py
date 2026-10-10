@@ -390,7 +390,7 @@ def benchmark_session(cache, trace, args, jobs, run_number):
         os.environ["FLOE_RUST_OPEN_TIMEOUT_S"] = str(args.timeout)
         if args.renderd:
             os.environ["FLOE_RENDERD_BIN"] = os.path.abspath(args.renderd)
-        from floe.rust_render import RustRenderWorker
+        from floe_oracle.rust_render import RustRenderWorker
         worker = RustRenderWorker(cache)
     monitor = None
     try:

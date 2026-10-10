@@ -1,12 +1,14 @@
 //! The desktop viewer's frame report and perf line (step P4b of moving the GTK
 //! render loop onto the shared `ViewController`, docs/SHARED_APP_LAYER.ko.md §7).
 //!
-//! [`FrameReport`] is floe/rust_render.py's `_emit_frame` ported: it adds a
+//! [`FrameReport`] is floe_oracle/rust_render.py's `_emit_frame` ported: it adds a
 //! generation's refinement rounds - renderd's `frame` lines, which the
 //! controller hands over as `floe_worker_client::Frame::fields` - into the
 //! result the viewer reads, a JSON object with the Python dict's keys, value
 //! types and values. [`perf_status`], [`fmt_count`], [`occ_note`] and
-//! [`load_note`] are floe/gui.py's, over that object. The perf line is what
+//! [`load_note`] are the viewer's Python ones (floe_oracle/perf_line.py since
+//! P4f - floe/gui.py's before -, floe/gui.py `fmt_count` and
+//! `Viewer._load_note`), over that object. The perf line is what
 //! field engineers paste, a user contract: these give Python's strings byte for
 //! byte, Python's arithmetic and formatting included - `round()` half to even,
 //! int / int division correctly rounded, `%d` truncating a float, `%g`, `str()`
@@ -43,7 +45,7 @@ pub const DENSITY_TIMES: [&str; 6] = [
 pub const DENSITY_BIN: [&str; 3] = ["items", "deferred", "overflow"];
 /// `density_dots=` (the sub-cut dots: items planned, items past the cap).
 pub const DENSITY_DOTS: [&str; 2] = ["items", "over"];
-/// `density_plan2=` (pass 2's plans; floe/rust_render.py DENSITY_PLAN2 says
+/// `density_plan2=` (pass 2's plans; floe_oracle/rust_render.py DENSITY_PLAN2 says
 /// what each is). Older renderers send the first 46, 44, 40 or 39.
 pub const DENSITY_PLAN2: [&str; 48] = [
     "probe_us",
@@ -1395,7 +1397,8 @@ pub fn load_note(marks: Option<&LoadMarks>, res: &Value, now: f64) -> (String, S
     )
 }
 
-/// floe/gui.py `perf_status`: the perf line of a settled (or refining) frame,
+/// The viewer's `perf_status` (floe_oracle/perf_line.py): the perf line of a
+/// settled (or refining) frame,
 /// (the log line and tooltip with every diagnostic, the lower bar's brief
 /// one). FLOE_RUST_DENSITY_ONLY=on (renderd's diagnostic) adds `density only`.
 pub fn perf_status(res: &Value, depth_note: &str) -> (String, String) {

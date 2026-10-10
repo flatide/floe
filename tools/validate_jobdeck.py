@@ -1083,7 +1083,7 @@ class CompositeTests(unittest.TestCase):
              "--jobs", "2"], cwd=ROOT, capture_output=True, text=True,
             env={**os.environ, **self.env, "PYTHONPATH": str(ROOT)})
         self.assertEqual(res.returncode, 0, res.stderr)
-        from floe.rust_render import RustRenderWorker
+        from floe_oracle.rust_render import RustRenderWorker
         c = Cache(str(flat))
         self.assertTrue(c.exists())
         c.load()
@@ -1301,7 +1301,7 @@ def product_blocker(folder):
 class GuiSmokeTests(unittest.TestCase):
     """`floe2 view deck.jb` really opens: GTK start, deck worker open,
     first composite frame displayed (FLOE_GUI_SMOKE_MS) - on the view
-    controller's loop, and once on FLOE_GTK_LOOP=legacy (P4d) - and (P2d) with
+    controller's loop (P4d; the only one since P4f) - and (P2d) with
     every module of PRODUCT_FORBIDDEN unimportable: the viewer, its deck,
     its layout and its DRC review run on floe2 gtk-service alone."""
 
@@ -1340,11 +1340,6 @@ class GuiSmokeTests(unittest.TestCase):
         res = run_floe2("view", "--multi", CLI / "test.jb", "--level", "1,3",
                         env=env, ok=0, timeout=120)
         self.assertNotIn("no GUI frame", res.stderr + res.stdout)
-        # the Python render loop kept for the field check (P4d)
-        res = run_floe2("view", "--multi", CLI / "test.jb",
-                        env=dict(env, FLOE_GTK_LOOP="legacy"), ok=0,
-                        timeout=120)
-        self.assertNotIn("no GUI frame", res.stderr + res.stdout)
         # a layout with a DRC review open at start
         db = CLI / "smoke_drc.db"
         done = subprocess.run(
@@ -1376,7 +1371,8 @@ class DeckViewChannelTests(unittest.TestCase):
                "FLOE_RENDERD_BIN": str(ROOT / "rust/target/release/floe-renderd")}
         os.environ.update(env)
         run_floe2("index", CLI / "test.jb", "--jobs", "2", env=env, ok=0)
-        from floe import gtkservice, rust_render
+        from floe import gtkservice
+        from floe_oracle import rust_render
         cache = gtkservice.ServiceCache(str(CLI / "test.jb"), mode="level")
         cache.load()
         self.addCleanup(cache.close)
@@ -1592,26 +1588,21 @@ class JobdeckChipHierarchyTests(unittest.TestCase):
         self.assertTrue(v._layer_rows[(2, 0)]._partial)
 
     def test_real_viewer_switch_cancels_queued_render(self):
-        """A pre-switch debounce must not submit with style_epoch=0
-        while the new worker is still opening (kills its handshake).
-        Exercise _apply_cache too, not just the panel/state helpers.
-        On the view controller's loop (P4d) there is no debounce: the
-        layers go as an edit at once and the new view opens with them and
-        the kept pose."""
-        for loop in ("controller", "legacy"):
-            with self.subTest(loop=loop):
-                self._switch(loop)
+        """A colour-mode switch while the old view still renders: the new
+        view opens with the layers and the pose the viewer had (the Python
+        loop's pre-switch debounce once killed the new worker's handshake;
+        on the view controller's loop the layers go as an edit at once).
+        Exercises _apply_cache too, not just the panel/state helpers."""
+        self._switch()
 
-    def _switch(self, loop):
+    def _switch(self):
         import time
         from unittest.mock import patch
         from floe import gui
         gui.import_gtk()
         c = self._cache()
-        with patch.dict(os.environ, {"FLOE_RENDERER": "rust",
-                                     "FLOE_GTK_LOOP": loop}):
+        with patch.dict(os.environ, {"FLOE_RENDERER": "rust"}):
             v = gui.Viewer(c, depth=999, frames=False, labels=False)
-            controller = loop == "controller"
             try:
                 def landed():
                     end = time.monotonic() + 15
@@ -1619,25 +1610,19 @@ class JobdeckChipHierarchyTests(unittest.TestCase):
                         while gui.Gtk.events_pending():
                             gui.Gtk.main_iteration_do(False)
                         if v.last_frame is not None and not v._worker_starting \
-                                and (not controller or (
-                                    v.worker.snapshot is not None
-                                    and v._ctl_shown_rev
-                                    == v.worker.snapshot["render_rev"])):
+                                and v.worker.snapshot is not None \
+                                and v._ctl_shown_rev \
+                                == v.worker.snapshot["render_rev"]:
                             return
                         time.sleep(0.01)
                     self.fail("no frame after jobdeck mode switch")
 
                 landed()
-                self.assertEqual(bool(getattr(v.worker, "controller", False)),
-                                 controller)
+                self.assertTrue(v.worker.controller)
                 v._layer_rows[(1, 0)].set_active(False)
                 v._layer_rows[(2, 1)].set_active(False)
                 wanted = set(v.visible)
                 pose = v.cx, v.cy, v.spp
-                if controller:
-                    self.assertIsNone(v._debounce)
-                else:
-                    self.assertIsNotNone(v._debounce)
                 shown = []
                 orig_show = v._loading_show
 
@@ -1647,7 +1632,6 @@ class JobdeckChipHierarchyTests(unittest.TestCase):
                 v._loading_show = show
                 for mode in ("level", "chip"):
                     v._jobdeck_set_mode(mode)
-                    self.assertIsNone(v._debounce)
                     # the loading banner (user call 2026-09-15) is up
                     # from the re-plan until the render service opened
                     self.assertTrue(v._loading.get_visible(), mode)
@@ -1659,13 +1643,12 @@ class JobdeckChipHierarchyTests(unittest.TestCase):
                     self.assertEqual((v.cx, v.cy, v.spp), pose)
                     self.assertTrue(v._layer_rows[(2, 0)]._partial)
                     self.assertTrue(v.worker.alive())
-                    if controller:
-                        state = v.worker.snapshot["state"]
-                        self.assertEqual(
-                            state["layers"],
-                            [list(k) for k in v._layers_arg()], mode)
-                        self.assertTrue(
-                            v._ctl_same_view(state["viewport"]), mode)
+                    state = v.worker.snapshot["state"]
+                    self.assertEqual(
+                        state["layers"],
+                        [list(k) for k in v._layers_arg()], mode)
+                    self.assertTrue(
+                        v._ctl_same_view(state["viewport"]), mode)
             finally:
                 v._quit()
                 v.window.destroy()
@@ -2825,7 +2808,7 @@ class ReviewFixTests(unittest.TestCase):
             c.close()
 
     def test_p1_2_deck_pass_is_charged_against_the_page_budget(self):
-        from floe.rust_render import RustRenderWorker
+        from floe_oracle.rust_render import RustRenderWorker
         from floe_oracle.jobdeck.viewer import DeckCache
         os.environ["FLOE_RUST_BUDGET_MB"] = "1"
         try:
@@ -3042,7 +3025,7 @@ class ReviewFixTests2(unittest.TestCase):
     def test_p2_3_saved_colours_come_back_per_view(self):
         from floe import fillpat
         from floe_oracle.jobdeck.viewer import DeckCache
-        from floe.rust_render import RustRenderWorker
+        from floe_oracle.rust_render import RustRenderWorker
         props = CLI / "test.jb.layerprops"
         props.write_text(fillpat.format_layerprops(
             [((1, 0), "#123456", "solid", "$1 METAL1", "1", "3")]))
@@ -3689,7 +3672,7 @@ class ThinPageTests(unittest.TestCase):
             self.assertTrue((out / name).is_file(), name)
 
     def test_kept_thin_pages_are_counted(self):
-        from floe.rust_render import RustRenderWorker
+        from floe_oracle.rust_render import RustRenderWorker
         # under cull the all-thin page is culled and counted as a size
         # cull only with the page frontier off (FLOE_RUST_PAGE_REPS=off);
         # by default it is a representative (the first of its run,

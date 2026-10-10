@@ -3,8 +3,10 @@
 shared Rust ViewController, docs/SHARED_APP_LAYER.ko.md §7).
 
 The viewer's status bar and terminal log show a perf line that field
-engineers paste: floe/gui.py `perf_status` over the result dict that
-floe/rust_render.py `_emit_frame` adds up over a generation's refinement
+engineers paste: `perf_status` (floe/gui.py's until P4f, now
+tools/oracle/floe_oracle/perf_line.py - the product's is the Rust port, sent
+by floe2 gtk-service with each frame) over the result dict that
+floe_oracle/rust_render.py `_emit_frame` adds up over a generation's refinement
 rounds. rust/app-core/src/view/perf.rs ports both - `FrameReport` (the
 result, a JSON object) and `perf_status` / `fmt_count` / `occ_note` /
 `load_note` - and this gate holds the port to the Python, exactly:
@@ -68,7 +70,7 @@ sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (P3)
 # perf_status reads it (renderd's diagnostic); unset unless a case sets it
 os.environ.pop("FLOE_RUST_DENSITY_ONLY", None)
 import floe.gui as gui  # noqa: E402  (headless-safe: GTK loads lazily)
-from floe import rust_render  # noqa: E402
+from floe_oracle import perf_line, rust_render  # noqa: E402
 
 SEED = 20261010
 # the fuzzed frame lines' generations (the renders' count from 1)
@@ -414,7 +416,7 @@ def python_status(res, depth_note, density_only):
     if density_only:
         os.environ["FLOE_RUST_DENSITY_ONLY"] = "on"
     try:
-        return gui.perf_status(res, depth_note)
+        return perf_line.perf_status(res, depth_note)
     finally:
         os.environ.pop("FLOE_RUST_DENSITY_ONLY", None)
 
@@ -441,7 +443,7 @@ def synthetic_cases():
         results.append(rand_result(rng))
     status, refused = [], 0
     occ_cases = []
-    trace = LineTrace(gui.perf_status, gui.occ_note, gui.fmt_count)
+    trace = LineTrace(perf_line.perf_status, perf_line.occ_note, gui.fmt_count)
     for i, res in enumerate(results):
         try:
             res = roundtrip(res)
@@ -461,7 +463,7 @@ def synthetic_cases():
         for full_note in (False, True):
             try:
                 with trace:
-                    note = gui.occ_note(res, full=full_note)
+                    note = perf_line.occ_note(res, full=full_note)
             except (TypeError, KeyError, ValueError, AttributeError):
                 continue
             if note or i % 7 == 0:
@@ -924,7 +926,7 @@ def recorded_rounds(record_path):
         record["depth_note"] = "" if i % 3 else ", depth %d" % (i % 16)
         result = roundtrip(record["result"])
         try:
-            record["full"], record["brief"] = gui.perf_status(result, record["depth_note"])
+            record["full"], record["brief"] = perf_line.perf_status(result, record["depth_note"])
         except (TypeError, ValueError, OverflowError, MemoryError):
             # a fuzzed value Python itself refuses (a sub-cut box level past
             # 4300 digits of 1 << N, a negative shift): no line to compare
