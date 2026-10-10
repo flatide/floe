@@ -578,3 +578,33 @@ fn departing_consumer_cannot_cancel_another_consumers_newer_query() {
     v.close().unwrap();
     assert_eq!(r.usage(), Usage::default());
 }
+
+#[test]
+fn desktop_queries_answer_from_an_incomplete_frame() {
+    // the web refuses a snap on partial geometry (above); the desktop asks
+    // renderd with incomplete=ok and answers from what was drawn
+    let r = Resources::new(Limits::default()).unwrap();
+    let m = model(false);
+    let mut initial = ViewState::initial(&m, 800, 640).unwrap();
+    initial.viewport = Viewport::new(m.bbox, 800, 640).unwrap();
+    initial.labels = false;
+    let c = Arc::new(Control::default());
+    c.geometry_partial.store(true, Ordering::Relaxed);
+    let mut v = start_policy(
+        &r,
+        Arc::clone(&m),
+        initial,
+        Arc::clone(&c),
+        ControllerOptions::default(),
+        DesktopPolicy::desktop(),
+    );
+    wait(|| v.latest().is_some_and(|f| f.frame.partial));
+    assert!(c.incomplete_queries.load(Ordering::Relaxed));
+    let id = v.query(input(&v, QueryOperation::Snap)).unwrap();
+    assert_eq!(
+        result(&v, id, QueryKind::Snap).reply.status,
+        QueryStatus::Ok
+    );
+    v.close().unwrap();
+    assert_eq!(r.usage(), Usage::default());
+}

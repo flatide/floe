@@ -136,6 +136,10 @@ impl RenderSession {
     pub fn set_timeouts(&mut self, render: Duration, query: Duration) {
         self.worker.set_timeouts(render, query)
     }
+    /// floe_worker_client::WorkerClient::set_incomplete_queries.
+    pub fn set_incomplete_queries(&mut self, on: bool) {
+        self.worker.set_incomplete_queries(on)
+    }
     pub fn query(&mut self, request: floe_worker_client::QueryRequest) -> Result<u64> {
         self.worker.query(request).map_err(Into::into)
     }

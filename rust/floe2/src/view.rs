@@ -14,6 +14,15 @@
 //!                                         progress stops)
 //!   view_snapshot {view}               -> snapshot
 //!   view_close {view}                  -> null
+//!   view_query {view, frame, kind: snap|pick, x, y, r_px, nth?, layers?}
+//!                                      -> {id}; the answer is a `query` event
+//!                                         (x, y in viewport px from its
+//!                                         top-left; frame = the frame shown)
+//!   view_cells {view, seq, kind: cell_sources|cells|cell_find|cell_bbox|
+//!               cell_insts, src?, cell?, pattern?, limit?, box?, cap?, root?}
+//!                                      -> null; the answer is a `cells` event
+//!   view_clip {view, seq, bbox (dbu, the root's coordinates), layers?,
+//!              cell_name?, out}       -> null; a `clip` event when written
 //!
 //! Events, between replies, one JSON object per line:
 //!   {"event": "view", "view": N, "snapshot": {...}}   the state, phase,
@@ -21,20 +30,28 @@
 //!   {"event": "frame", "view": N, "frame": {...}}     a frame to show: its
 //!       pixels in `path` (FLOERAW1 header + RGBA, or a PNG) - the viewer
 //!       reads and removes it; the service removes the files it is not given
-//!       time for
+//!       time for; `report` (its generation's rounds added up, the dict
+//!       floe/rust_render.py's `_emit_frame` gave) and `perf` ([the log
+//!       line, the lower bar's], view::perf::perf_status) - the perf line
 //!   {"event": "closed", "view": N}
+//!   {"event": "query" | "cells" | "clip", "view": N, "result": {...}} - the
+//!       answers in the dicts floe/rust_render.py gave the viewer
 use floe_app_core::{
+    artifact,
+    clip::{self, ClipOptions},
+    dataset::Dataset,
     jobdeck::color::Mode,
     managed::{Limits, ManagedDataset, Resources},
     render::RenderOptions,
     shots::{Detail, Thin},
     view::{
-        ControllerOptions, Depth, DesktopPolicy, DisplayFrame, Model, Navigation, Patch, Phase,
-        Purpose, RootEdit, Snapshot, StyleDelta, ViewController, ViewState,
+        perf, CellOutcome, CellReply, CellRequest, ControllerOptions, Depth, DesktopPolicy,
+        DisplayFrame, Model, Navigation, Patch, Phase, Purpose, QueryOperation, RootEdit, Snapshot,
+        StyleDelta, ViewController, ViewQuery, ViewQueryResult, ViewState,
     },
     Error, ErrorKind, Result,
 };
-use floe_worker_client::{Fill, FrameFormat, Layers};
+use floe_worker_client::{ClipRequest, Fill, FrameFormat, Layers, QueryHit, SnapKind};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::Write;
@@ -43,7 +60,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The service's stdout: replies and events, a whole line at a time.
 pub struct Out(Mutex<std::io::Stdout>);
@@ -134,6 +151,136 @@ impl Views {
                 self.views.remove(&id);
                 Ok(Value::Null)
             }
+            "view_query" => {
+                let view = self.view(request)?;
+                let frame = request
+                    .get("frame")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| Error::input("frame must be a number"))?;
+                let anchor = view.controller.query_anchor(frame)?;
+                let viewport = view.controller.snapshot().state.viewport;
+                let num = |k: &str| {
+                    request
+                        .get(k)
+                        .and_then(Value::as_f64)
+                        .ok_or_else(|| Error::input(format!("{k} must be a number")))
+                };
+                let operation = match request.get("kind").and_then(Value::as_str) {
+                    Some("snap") => QueryOperation::Snap,
+                    Some("pick") => QueryOperation::Pick {
+                        nth: request.get("nth").and_then(Value::as_i64).unwrap_or(0),
+                    },
+                    _ => return Err(Error::input("kind must be snap or pick")),
+                };
+                let layers = match request.get("layers") {
+                    None | Some(Value::Null) => Layers::All,
+                    Some(Value::Array(a)) if a.is_empty() => Layers::All,
+                    Some(Value::Array(a)) => {
+                        Layers::Only(a.iter().map(pair).collect::<Result<_>>()?)
+                    }
+                    Some(_) => return Err(Error::input("layers must be a list")),
+                };
+                let id = view.controller.query(ViewQuery {
+                    anchor,
+                    operation,
+                    position: [
+                        num("x")? / f64::from(viewport.width),
+                        num("y")? / f64::from(viewport.height),
+                    ],
+                    radius_px: num("r_px")?,
+                    layers,
+                })?;
+                Ok(json!({"id": id}))
+            }
+            "view_cells" => {
+                let view = self.view(request)?;
+                let (kind, cell_request, src) = cell_request(request)?;
+                let seq = request.get("seq").and_then(Value::as_i64).unwrap_or(-1);
+                let wait = view.controller.cell_ticket(cell_request)?;
+                let (out, id) = (Arc::clone(&self.out), view_id(request)?);
+                thread::Builder::new()
+                    .name("floe2-view-cells".into())
+                    .spawn(move || {
+                        let outcome = wait.wait(Duration::from_secs(60));
+                        out.line(&json!({"event": "cells", "view": id,
+                                         "result": cells_json(kind, seq, src, outcome)}));
+                    })?;
+                Ok(Value::Null)
+            }
+            "view_clip" => {
+                let view = self.view(request)?;
+                let dataset = view.controller.pin_dataset()?;
+                let root = view.controller.snapshot().state.root.map(|r| r.cell);
+                let bbox = request
+                    .get("bbox")
+                    .and_then(Value::as_array)
+                    .filter(|a| a.len() == 4)
+                    .and_then(|a| a.iter().map(Value::as_i64).collect::<Option<Vec<_>>>())
+                    .ok_or_else(|| Error::input("bbox must be four integers"))?;
+                let layers = match request.get("layers") {
+                    None | Some(Value::Null) => Layers::All,
+                    Some(Value::Array(a)) if a.is_empty() => Layers::All,
+                    Some(Value::Array(a)) => {
+                        Layers::Only(a.iter().map(pair).collect::<Result<_>>()?)
+                    }
+                    Some(_) => return Err(Error::input("layers must be a list")),
+                };
+                let cell_name = request
+                    .get("cell_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("FLOE_CLIP")
+                    .to_string();
+                let out_path = PathBuf::from(
+                    request
+                        .get("out")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| Error::input("out must be a path"))?,
+                );
+                let seq = request.get("seq").and_then(Value::as_i64).unwrap_or(-1);
+                let (out, id) = (Arc::clone(&self.out), view_id(request)?);
+                thread::Builder::new()
+                    .name("floe2-view-clip".into())
+                    .spawn(move || {
+                        let started = Instant::now();
+                        let cancelled = Arc::new(AtomicUsize::new(0));
+                        let result = (|| -> Result<(PathBuf, u64)> {
+                            let Dataset::Layout(layout) = &dataset.dataset else {
+                                return Err(Error::new(
+                                    ErrorKind::Unsupported,
+                                    "a jobdeck has no clip",
+                                ));
+                            };
+                            let options = ClipOptions::local()?;
+                            let request = ClipRequest {
+                                bbox: [bbox[0], bbox[1], bbox[2], bbox[3]],
+                                layers,
+                                jobs: options.jobs,
+                                cell_name,
+                                root,
+                            };
+                            request.validate()?;
+                            let output = artifact::output_path(&out_path, layout)?;
+                            let mut clip =
+                                clip::collect(layout, &request, &options, &cancelled, |_, _| {})?;
+                            artifact::publish_reader(
+                                &output,
+                                &mut clip.file,
+                                clip.size_bytes,
+                                &cancelled,
+                            )?;
+                            Ok((output, clip.size_bytes))
+                        })();
+                        let result = match result {
+                            Ok((path, size)) => json!({"kind": "clip", "seq": seq, "path": path,
+                                "size_mb": size as f64 / 1e6,
+                                "ms": started.elapsed().as_millis() as u64}),
+                            Err(e) => json!({"kind": "error", "seq": seq,
+                                "msg": format!("clip: {}", e.message)}),
+                        };
+                        out.line(&json!({"event": "clip", "view": id, "result": result}));
+                    })?;
+                Ok(Value::Null)
+            }
             other => Err(Error::new(
                 ErrorKind::Unsupported,
                 format!("unknown request: {other}"),
@@ -183,6 +330,8 @@ impl Views {
         if let Some(p) = request.get("patch").filter(|p| !p.is_null()) {
             state = state.edit(&model, patch(p)?)?;
         }
+        // the desktop's bounds from the first view on (DesktopPolicy::clamp)
+        state.viewport = state.viewport.clamped(state.die(&model))?;
         let model_json = json!({
             "dbu": model.dbu,
             "bbox": model.bbox,
@@ -251,6 +400,7 @@ fn dimension(request: &Value, key: &str) -> Result<u32> {
 fn pump(id: u64, controller: &ViewController, stop: &AtomicBool, folder: &PathBuf, out: &Out) {
     let mut said: Option<Value> = None;
     let mut shown = (0u64, 0u64);
+    let mut answered = (0u64, 0u64);
     let mut files: VecDeque<PathBuf> = VecDeque::new();
     while !stop.load(Ordering::Relaxed) {
         let snapshot = controller.snapshot();
@@ -274,11 +424,33 @@ fn pump(id: u64, controller: &ViewController, stop: &AtomicBool, folder: &PathBu
                     while files.len() > KEPT_FRAMES {
                         let _ = std::fs::remove_file(files.pop_front().unwrap());
                     }
-                    out.line(&json!({"event": "frame", "view": id,
-                                     "frame": frame_json(&frame, &path)}));
+                    let mut json = frame_json(&frame, &path);
+                    if let Some(report) = controller.frame_report(frame.id) {
+                        // the perf line (P4b): the log line and tooltip, the
+                        // lower bar's brief one
+                        let note = frame
+                            .frame
+                            .request
+                            .depth
+                            .map_or(String::new(), |d| format!(", depth {d}"));
+                        let (line, brief) = perf::perf_status(&report, &note);
+                        json["perf"] = json!([line, brief]);
+                        json["report"] = report;
+                    }
+                    out.line(&json!({"event": "frame", "view": id, "frame": json}));
                 }
                 Err(e) => out.line(&json!({"event": "frame_error", "view": id,
                                            "message": e.to_string()})),
+            }
+        }
+        let queries = controller.query_snapshot();
+        for (kind, result, last) in [
+            ("snap", queries.snap, &mut answered.0),
+            ("pick", queries.pick, &mut answered.1),
+        ] {
+            if let Some(r) = result.filter(|r| r.id != *last) {
+                *last = r.id;
+                out.line(&json!({"event": "query", "view": id, "result": query_json(kind, &r)}));
             }
         }
         let now = snapshot_json(&snapshot);
@@ -327,6 +499,7 @@ fn frame_json(frame: &DisplayFrame, path: &PathBuf) -> Value {
         "labels_truncated": f.labels_truncated,
         "complete": f.complete(),
         "bbox": f.request.view,
+        "depth": f.request.depth,
         "width": f.request.width,
         "height": f.request.height,
         "viewport": f.request.viewport.map(|(w, h)| [w, h]),
@@ -338,6 +511,250 @@ fn frame_json(frame: &DisplayFrame, path: &PathBuf) -> Value {
         "deck_skipped": frame.deck_skipped,
         "fields": f.fields.0,
     })
+}
+
+/// A snap or pick answer as floe/rust_render.py gave it (`id` is the
+/// controller's query id; `seq` stays the viewer's to set).
+fn query_json(kind: &str, r: &ViewQueryResult) -> Value {
+    use floe_worker_client::QueryStatus;
+    let mut o = Map::new();
+    o.insert("kind".into(), json!(kind));
+    o.insert("id".into(), json!(r.id));
+    o.insert("found".into(), json!(false));
+    // the world point and radius the controller asked (dbu, the root's)
+    o.insert(
+        "request".into(),
+        json!({"x": r.reply.request.x, "y": r.reply.request.y, "r": r.reply.request.radius}),
+    );
+    if r.reply.status != QueryStatus::Ok {
+        o.insert(
+            "err".into(),
+            json!(r
+                .reply
+                .error
+                .clone()
+                .unwrap_or_else(|| format!("{:?}", r.reply.status).to_lowercase())),
+        );
+    }
+    match &r.reply.hit {
+        Some(QueryHit::Snap(h)) => {
+            o.insert("found".into(), json!(true));
+            o.insert("x".into(), json!(h.x));
+            o.insert("y".into(), json!(h.y));
+            o.insert(
+                "snap".into(),
+                json!(match h.kind {
+                    SnapKind::Vertex => "vertex",
+                    SnapKind::Edge => "edge",
+                }),
+            );
+        }
+        Some(QueryHit::Pick(p)) => {
+            o.insert("found".into(), json!(true));
+            o.insert("count".into(), json!(p.count));
+            o.insert("index".into(), json!(p.index));
+            o.insert("layer".into(), json!(p.layer.0));
+            o.insert("datatype".into(), json!(p.layer.1));
+            o.insert("lname".into(), json!(p.layer_name));
+            o.insert("cell".into(), json!(p.cell_name));
+            o.insert("area".into(), json!(p.area));
+            o.insert("bbox".into(), json!(p.bbox));
+            o.insert(
+                "points".into(),
+                json!(p.points.iter().map(|(x, y)| [*x, *y]).collect::<Vec<_>>()),
+            );
+            o.insert("points_truncated".into(), json!(p.points_truncated));
+        }
+        None if kind == "snap" => {
+            o.insert("x".into(), json!(0));
+            o.insert("y".into(), json!(0));
+            o.insert("snap".into(), json!(""));
+        }
+        None => {
+            o.insert("count".into(), json!(0));
+        }
+    }
+    Value::Object(o)
+}
+
+/// The viewer's cell-tree request (floe/rust_render.py's cell jobs): its
+/// kind, the controller's request, and the source it names (echoed).
+fn cell_request(r: &Value) -> Result<(&'static str, CellRequest, Option<i64>)> {
+    let kind = r.get("kind").and_then(Value::as_str).unwrap_or("");
+    let src = r.get("src").and_then(Value::as_i64);
+    let source = || -> Result<usize> {
+        usize::try_from(src.unwrap_or(0)).map_err(|_| Error::input("src must be a source"))
+    };
+    let cell = |k: &str| -> Result<Option<u32>> {
+        match r.get(k) {
+            None | Some(Value::Null) => Ok(None),
+            Some(v) => v
+                .as_u64()
+                .and_then(|c| u32::try_from(c).ok())
+                .map(Some)
+                .ok_or_else(|| Error::input(format!("{k} must be a cell"))),
+        }
+    };
+    Ok(match kind {
+        "cell_sources" => ("cell_sources", CellRequest::Sources, src),
+        "cells" => (
+            "cells",
+            CellRequest::Children {
+                source: source()?,
+                cell: cell("cell")?,
+            },
+            src,
+        ),
+        "cell_find" => (
+            "cell_find",
+            CellRequest::Find {
+                source: match src {
+                    Some(s) if s >= 0 => Some(s as usize),
+                    _ => None,
+                },
+                pattern: r
+                    .get("pattern")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                limit: r.get("limit").and_then(Value::as_u64).unwrap_or(200) as usize,
+            },
+            src,
+        ),
+        "cell_bbox" => (
+            "cell_bbox",
+            CellRequest::Bbox {
+                source: source()?,
+                cell: cell("cell")?.ok_or_else(|| Error::input("cell_bbox needs a cell"))?,
+                root: cell("root")?,
+            },
+            src,
+        ),
+        "cell_insts" => (
+            "cell_insts",
+            CellRequest::Insts {
+                source: source()?,
+                cell: cell("cell")?.ok_or_else(|| Error::input("cell_insts needs a cell"))?,
+                view: f64s(r.get("box").unwrap_or(&Value::Null), "box")?,
+                cap: r.get("cap").and_then(Value::as_u64).unwrap_or(4096) as usize,
+                root: cell("root")?,
+            },
+            src,
+        ),
+        _ => return Err(Error::input("unknown cell query kind")),
+    })
+}
+
+/// A cell-tree answer as floe/rust_render.py `_emit_cell_query` gave it.
+fn cells_json(kind: &str, seq: i64, src: Option<i64>, outcome: Result<CellOutcome>) -> Value {
+    let mut o = Map::new();
+    o.insert("kind".into(), json!(kind));
+    o.insert("seq".into(), json!(seq));
+    let reply = match outcome {
+        Ok(Ok(reply)) => reply,
+        Ok(Err(failure)) => {
+            o.insert("found".into(), json!(false));
+            o.insert("code".into(), json!(failure.code.wire()));
+            o.insert("err".into(), json!(failure.message));
+            return Value::Object(o);
+        }
+        Err(e) => {
+            o.insert("found".into(), json!(false));
+            o.insert(
+                "code".into(),
+                json!(if e.kind == ErrorKind::Busy {
+                    "superseded"
+                } else {
+                    "state"
+                }),
+            );
+            o.insert("err".into(), json!(e.message));
+            return Value::Object(o);
+        }
+    };
+    o.insert("found".into(), json!(true));
+    match reply {
+        CellReply::Sources(sources) => {
+            o.insert(
+                "sources".into(),
+                json!(sources
+                    .iter()
+                    .map(|s| json!({"src": s.source, "placements": s.placements, "path": s.path}))
+                    .collect::<Vec<_>>()),
+            );
+        }
+        CellReply::Children {
+            source,
+            cell,
+            name,
+            insts,
+            height,
+            unit,
+            bbox,
+            total,
+            children,
+        } => {
+            o.insert("src".into(), json!(source));
+            o.insert("cell".into(), json!(cell));
+            o.insert("name".into(), json!(name));
+            o.insert("insts".into(), json!(insts));
+            o.insert("height".into(), json!(height));
+            o.insert("unit".into(), json!(unit));
+            o.insert("bbox".into(), json!(bbox));
+            o.insert("total".into(), json!(total));
+            o.insert(
+                "children".into(),
+                json!(children
+                    .iter()
+                    .map(
+                        |c| json!({"cell": c.cell, "members": c.members, "leaf": c.leaf,
+                                    "name": c.name})
+                    )
+                    .collect::<Vec<_>>()),
+            );
+        }
+        CellReply::Find { total, matches } => {
+            o.insert("src".into(), json!(src.unwrap_or(-1)));
+            o.insert("total".into(), json!(total));
+            o.insert(
+                "matches".into(),
+                json!(matches
+                    .iter()
+                    .map(
+                        |m| json!({"src": m.source, "cell": m.cell, "insts": m.insts,
+                                    "name": m.name})
+                    )
+                    .collect::<Vec<_>>()),
+            );
+        }
+        CellReply::Bbox {
+            source,
+            cell,
+            insts,
+            approx,
+            bbox,
+        } => {
+            o.insert("src".into(), json!(source));
+            o.insert("cell".into(), json!(cell));
+            o.insert("insts".into(), json!(insts));
+            o.insert("approx".into(), json!(approx));
+            o.insert("bbox".into(), json!(bbox));
+        }
+        CellReply::Insts {
+            source,
+            cell,
+            more,
+            visited,
+            boxes,
+        } => {
+            o.insert("src".into(), json!(source));
+            o.insert("cell".into(), json!(cell));
+            o.insert("more".into(), json!(more));
+            o.insert("visited".into(), json!(visited));
+            o.insert("boxes".into(), json!(boxes));
+        }
+    }
+    Value::Object(o)
 }
 
 fn detail_name(d: Detail) -> &'static str {

@@ -184,8 +184,9 @@ gates_for() {
             echo ALL ;;
         floe/gui.py|floe/hangul.py|floe/fillpat.py|floe/instance.py|floe/product.py|floe/*.def)
             # the GTK viewer (the product's Python, UI alone since P2d); its
-            # perf line is perf_parity's reference
-            echo "rust_renderer floe2 jobdeck density_stack index_lock perf_parity" ;;
+            # perf line is perf_parity's reference; its loop is the view
+            # controller's (gtk_view, P4d)
+            echo "rust_renderer floe2 jobdeck density_stack index_lock perf_parity gtk_view" ;;
         floe/vfsclient.py)
             # where the viewer finds floe-index and floe2
             echo "floe2 jobdeck rust_renderer" ;;

@@ -46,7 +46,7 @@ python을 사용하지 않도록 변경해줘."
 | P1c | 게이트·배포·별칭을 Rust `floe2`로 바꾸고 Python `floe2/` 패키지를 지운다(§4) | 0.12.328 |
 | P2 | `floe2 gtk-service`(stdio JSON-lines). GTK 뷰어의 비-UI 판단을 Rust로 옮기고 Python 모듈을 걷어낸다. 푸시 단위(§5): P2a 열기·준비·레벨 행·덱 스펙·레이어 속성 행, P2b DRC·svrf, P2c 레이어 속성 편집·fill, P2d(P3와 함께) 오라클을 떼어 낸 뒤 Python 모듈 삭제 | P2a 0.12.329, P2b 0.12.330, P2c 0.12.331, P2d 0.12.332 |
 | P3 | KLayout 레거시를 제품 경로에서 빼고, 동결 `floe` 셸은 개발 전용 오라클(`tools/oracle/floe_oracle`)로 둔다(§6) | 0.12.333 |
-| P4 | GTK 렌더 루프를 공유 Rust `ViewController`로(§7; 사용자 승인 2026-10-10). P4a 공유 컨트롤러의 데스크톱 정책, P4b perf 줄, P4c 서비스의 뷰 채널, P4d GTK 전환, P4e 질의·미니맵, P4f 정리 | P4a 0.12.334, P4c 0.12.335, P4b 0.12.336 |
+| P4 | GTK 렌더 루프를 공유 Rust `ViewController`로(§7; 사용자 승인 2026-10-10). P4a 공유 컨트롤러의 데스크톱 정책, P4b perf 줄, P4c 서비스의 뷰 채널, P4d GTK 전환, P4e 질의·미니맵, P4f 정리 | P4a 0.12.334, P4c 0.12.335, P4b 0.12.336, P4d 0.12.337(현장 확인 필요) |
 
 ## 3. 동기 규칙
 
@@ -227,9 +227,9 @@ python을 사용하지 않도록 변경해줘."
 | P4a | 공유 컨트롤러의 데스크톱 정책(아래). GTK는 그대로 |
 | P4b | 라운드를 누적한 프레임 보고와 perf 줄(`perf_status`)의 Rust 이식. Python과 같은 문자열인지 대조 게이트로 확인 |
 | P4c | `floe2 gtk-service`의 뷰 채널(열기·Patch·Esc·프레임 이벤트·raw 파일)과 Python 클라이언트. 같은 프레임인지 게이트로 확인 |
-| P4d | `gui.py`가 그 채널을 쓴다. 입력은 Patch로 보내고 받은 프레임만 표시한다. 여백·`_covered`·확대 범위 제한·정착 로직을 지운다. 렌더 루프 게이트를 새 모델로 다시 쓴다. **현장 확인 필요** |
+| P4d | `gui.py`가 그 채널을 쓴다. 입력은 Patch로 보내고 받은 프레임만 표시한다. 예전 Python 루프는 `FLOE_GTK_LOOP=legacy`로 남겨 두고, 현장 확인 뒤 P4f에서 지운다. **현장 확인 필요** |
 | P4e | snap·pick, 셀 트리·루트, 눈금자, 미니맵 투영을 컨트롤러를 거쳐 받는다 |
-| P4f | `rust_render.py`를 제품에서 빼서 게이트용 개발 클라이언트로 옮기고, 번들·문서를 정리한다 |
+| P4f | 예전 루프(여백·`_covered`·정착 로직)를 지우고, `rust_render.py`를 제품에서 빼서 게이트용 개발 클라이언트로 옮기고, 번들·문서를 정리한다 |
 
 ### P4a (0.12.334) — 공유 컨트롤러의 데스크톱 정책
 
@@ -305,3 +305,38 @@ P4b(perf 줄)는 따로 진행 중이다. 이 단계에서 GTK는 아직 그대�
   - 어댑터 자신의 `_emit_frame`에 넣은 퍼즈 프레임 줄 400세대
   - 합계 903라운드를 Rust로 다시 돌렸다. 결과 사전은 키·타입·값이 같고, 두 perf 줄이 같다.
 - P4d에서 서비스의 프레임 이벤트가 이 보고와 perf 줄을 싣는다. GTK는 그것을 표시만 한다.
+
+### P4d (0.12.337) — GTK 뷰어가 컨트롤러의 렌더 루프를 쓴다
+
+**현장 확인이 필요하다.** 이상하면 `setenv FLOE_GTK_LOOP legacy`로 예전 Python 루프(`floe/rust_render.py`)로 돌아간다. 확인이 끝나면 P4f에서 예전 루프를 지운다.
+
+- **뷰어(`floe/gui.py`, `controller_loop()`):**
+  - 렌더 워커 자리에 `gtkservice.ViewWorker`가 들어간다. 뷰어는 정책(크기, depth, detail, thin, 레이어, frames, labels, 글꼴, 회색조, 밀도, 루트)과 뷰를 편집으로 보내고, 받은 프레임을 그린다. 바뀐 항목만 보낸다.
+  - 뷰 계산(휠·키 이동·끌기·밴드·미니맵·goto·fit, `_clamp_view`)은 뷰어에 남고, 뷰는 `goto`(중심·폭 µm)로 간다. 컨트롤러의 뷰가 다르면(데스크톱 범위로 자름) 뷰어가 그것을 받는다. 끌기 중에는 보내지 않고 놓을 때 보낸다.
+  - 컨트롤러가 정한다: 뷰가 120 ms 멈춘 뒤 그리기(정착), 이전 렌더 취소, 여백과 잘라 쓰기, Esc, 렌더 오류를 상태줄에.
+  - 끌기를 놓으면 화면의 프레임에서 짝수 px 떨어지게 맞춘다. 스페클 위상이 프레임 기준이라 홀수면 새 프레임이 왔을 때 무늬가 뒤집힌다. 예전 루프는 프레임마다 2 px 격자에 맞췄다.
+  - 상태줄과 터미널의 perf 줄은 서비스가 프레임에 실어 보낸 것이다(P4b의 Rust `perf_status`).
+  - snap, pick, 셀 트리, 클립, 색·무늬 바꾸기, 회색조는 `ViewWorker.submit`가 뷰 채널 요청이나 편집으로 바꾼다. 답은 예전 어댑터와 같은 사전으로 온다.
+  - 덱의 색 모드 전환은 새 뷰를 지금 자리에서 연다. 컨트롤러가 fit을 먼저 그렸다 버리지 않는다.
+  - GUI 스모크가 실패하면 워커가 죽은 이유를 함께 말한다.
+- **공유 컨트롤러(app-core):**
+  - `DesktopPolicy::clamp`: 편집마다 뷰를 `Viewport::clamped`(GTK `_clamp_view`: 확대 0.01 dbu/px~fit의 16배, 다이와 그 10% 바깥)로 자른다.
+  - `DesktopPolicy::settle`: 뷰만 바뀐 편집(이동·확대·크기)은 120 ms 동안 멈춘 뒤 그린다. 휠이나 끌기 한 번이 렌더 한 번이다. 정책 편집은 바로 그린다.
+  - `DesktopPolicy::report`: 세대마다 `FrameReport`를 두고, 받아들인 프레임마다 보고를 남긴다(`ViewController::frame_report(id)`). `ms`는 제출부터 잰다.
+  - `DesktopPolicy::incomplete_queries`: 그린 장면이 완전하지 않아도(컷 아래 밀도, 예산 맞춤의 부분 프레임, 미뤄진 페이지) snap·pick이 그린 것으로 답한다. GTK 어댑터가 그렇게 했다. 웹은 그대로 거절한다.
+  - 넷 다 웹 기본값에서는 꺼져 있다. 웹 동작은 바뀌지 않는다.
+- **worker-client:** `WorkerClient::set_incomplete_queries`(`RenderSession`도)가 snap·pick 줄에 `incomplete=ok`를 붙이고, 그 답(`scene_complete=0`인 ok)을 받는다. 웹이 리터럴로 만드는 `QueryRequest`는 그대로 두었다.
+- **renderd(0.12.310):** snap·pick이 `incomplete=ok`를 받는다. 없으면 예전처럼 `scene_incomplete`로 거절한다.
+- **`floe2 gtk-service` 뷰 채널:**
+  - `view_query {view, frame, kind: snap|pick, x, y, r_px, nth?, layers?}`: x·y는 뷰포트 px, frame은 화면의 프레임 id다. 답은 `query` 이벤트.
+  - `view_cells {view, seq, kind, src?, cell?, pattern?, limit?, box?, cap?, root?}`: 답은 `cells` 이벤트(rust_render의 사전).
+  - `view_clip {view, seq, bbox, layers?, cell_name?, out}`: 쓰고 나면 `clip` 이벤트.
+  - 프레임 이벤트에 `report`(Python 결과 사전 모양), `perf`([긴 줄, 짧은 줄]), `depth`가 붙는다.
+  - 처음 상태도 데스크톱 범위로 자른다.
+- **예전 루프와 다른 점(현장에서 보일 수 있는 것):**
+  - 여백 안에서 끝난 끌기가 16 px 단위가 아니면 새 프레임을 그린다(renderd 타일 재사용으로 빠르다). 예전 루프는 잘라 썼다. 키 이동은 16 px 단위라 그대로 잘라 쓴다.
+  - 화면의 프레임이 지금 상태의 것이 아니면(이동 직후 그리는 중) snap·pick은 답하지 않는다.
+- **게이트:**
+  - `gtk_view`(약 7초): 채널의 snap·pick·셀 트리·클립이 어댑터와 같다. 실제 창의 `Viewer`가 컨트롤러 루프로 열고 확대·이동·밀도·회색조마다 어댑터와 바이트가 같은 프레임을 보이며, perf 줄은 Python `perf_status`와 같다. 밀도를 켠 채 snap이 같은 답을 준다. 여백 안 이동은 잘라 쓴다. `FLOE_GTK_LOOP=legacy`는 예전 루프로 그린다.
+  - jobdeck: `GuiSmokeTests`가 컨트롤러 루프로 창을 열고(덱 세 번, 레이아웃 + DRC) 덱 한 번은 legacy로 연다. 실제 뷰어의 모드 전환 테스트는 두 루프에서 돈다(legacy는 전환 전 debounce, 컨트롤러는 레이어가 바로 편집으로 가고 새 뷰가 그 레이어와 자리를 가진다). `DeckViewChannelTests`는 덱의 레벨 헤드 색·무늬·선 굵기와 레벨 일부를 어댑터와 바이트로 비교한다.
+  - 단위: `desktop_frames_carry_their_report_and_the_web_s_do_not`, `desktop_queries_answer_from_an_incomplete_frame`, `desktop_clamp_keeps_the_gtk_zoom_range_and_the_die_in_reach`, `desktop_settle_renders_a_pan_burst_once_and_a_policy_edit_at_once`, worker-client `an_incomplete_scene_answers_only_when_the_query_allowed_it`, renderd `incomplete=ok` 파싱·거절.

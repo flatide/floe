@@ -218,6 +218,38 @@ impl Viewport {
             height,
         )
     }
+    /// The desktop viewer's bounds (floe/gui.py `_clamp_view`, user call
+    /// 2026-08-18): the scale between 0.01 dbu per pixel and 16x the fit
+    /// view's, the viewport inside the die grown by 10% per side - centred
+    /// on an axis it is wider than. A viewport already inside is itself.
+    pub fn clamped(&self, die: [f64; 4]) -> Result<Self> {
+        const MIN_SPP: f64 = 0.01;
+        const FIT_ZOOM_OUT: f64 = 16.;
+        let [dx0, dy0, dx1, dy1] = die;
+        let (mx, my) = ((dx1 - dx0) * 0.10, (dy1 - dy0) * 0.10);
+        let bb = [dx0 - mx, dy0 - my, dx1 + mx, dy1 + my];
+        let (w, h) = (f64::from(self.width), f64::from(self.height));
+        let fit = ((dx1 - dx0) / w).max((dy1 - dy0) / h) * 1.05;
+        let [x0, y0, x1, y1] = self.bbox;
+        let spp0 = (x1 - x0) / w;
+        let spp = spp0.max(MIN_SPP).min(fit * FIT_ZOOM_OUT);
+        let (cx0, cy0) = (x0 + (x1 - x0) / 2., y0 + (y1 - y0) / 2.);
+        let (hx, hy) = (w / 2. * spp, h / 2. * spp);
+        let cx = if 2. * hx >= bb[2] - bb[0] {
+            (bb[0] + bb[2]) / 2.
+        } else {
+            cx0.max(bb[0] + hx).min(bb[2] - hx)
+        };
+        let cy = if 2. * hy >= bb[3] - bb[1] {
+            (bb[1] + bb[3]) / 2.
+        } else {
+            cy0.max(bb[1] + hy).min(bb[3] - hy)
+        };
+        if spp == spp0 && cx == cx0 && cy == cy0 {
+            return Ok(*self);
+        }
+        Self::centered(cx, cy, spp * w, self.width, self.height)
+    }
 }
 #[derive(Clone, Copy, Debug)]
 pub enum Navigation {

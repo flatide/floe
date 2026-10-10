@@ -149,6 +149,12 @@ floe view data/testchip_1g5.oas            # 개발용 KLayout 셸 (동결, 비�
 ```
 
 - `--bbox`는 µm 단위 `X0,Y0,X1,Y1`. `--layers`는 이름 또는 `layer/datatype` 목록.
+- 뷰어의 렌더 루프(무엇을 언제 그릴지, 이동이 멈춘 뒤 그리기, 이전 렌더 취소,
+  여백, Esc)는 0.12.337부터 웹과 같은 Rust 컨트롤러가 정한다
+  (docs/SHARED_APP_LAYER.ko.md §7 P4d). 화면·perf 줄이 예전과 달라 보이면 예전
+  Python 루프로 돌아가 비교하고 알려 주시면 된다(현장 확인 중; 확인 뒤 예전 루프는
+  지운다):
+  `setenv FLOE_GTK_LOOP legacy` (tcsh) / `export FLOE_GTK_LOOP=legacy` (sh).
 - `floe2 index`와 `floe index`는 같은 `floe-index vfs`를 실행한다. 같은 source
   fingerprint의 정상 캐시는 재사용하며 기존·불완전·stale 캐시 교체는 명시적
   `--force`가 있어야 한다. `--page-target-mb`, `--no-lod`, `--slow-cell-s`,

@@ -15,9 +15,11 @@ import atexit
 import collections
 import json
 import os
+import queue
 import subprocess
 import sys
 import threading
+import time
 import types
 
 
@@ -639,6 +641,30 @@ class ViewSession:
         self.snapshot = self._svc.request("view_cancel", view=self.view)
         return self.snapshot
 
+    def query(self, frame, kind, x, y, r_px, nth=0, layers=None):
+        """A snap or pick at viewport pixel (x, y) of the frame shown
+        (its id); the controller's query id - the answer is a ("query",
+        result) event carrying it."""
+        return self._svc.request(
+            "view_query", view=self.view, frame=int(frame), kind=kind,
+            x=float(x), y=float(y), r_px=float(r_px), nth=int(nth),
+            layers=[list(l) for l in layers] if layers else None)["id"]
+
+    def cells(self, kind, seq, **fields):
+        """A cell-tree question (cell_sources, cells, cell_find, cell_bbox,
+        cell_insts - floe/rust_render.py's fields; cell_insts' view box is
+        `box`); the answer is a ("cells", result) event with `seq`."""
+        self._svc.request("view_cells", view=self.view, kind=kind,
+                          seq=int(seq), **fields)
+
+    def clip(self, seq, bbox, out, layers=None, cell_name="FLOE_CLIP"):
+        """Save the box (dbu, the root's coordinates) as an OASIS file; a
+        ("clip", result) event when it is written or refused."""
+        self._svc.request("view_clip", view=self.view, seq=int(seq),
+                          bbox=[int(v) for v in bbox], out=os.path.abspath(out),
+                          layers=[list(l) for l in layers] if layers else None,
+                          cell_name=cell_name)
+
     def close(self):
         if not self.closed:
             self.closed = True
@@ -649,7 +675,8 @@ class ViewSession:
 
     def events(self):
         """This view's events since the last call: ("view", snapshot),
-        ("frame", frame), ("closed", None), ("frame_error", message). A
+        ("frame", frame), ("query" | "cells" | "clip", result), ("closed",
+        None), ("frame_error", message). A
         frame of another (closed) view is removed unread."""
         out = []
         for event in self._svc.events():
@@ -670,9 +697,258 @@ class ViewSession:
             elif kind == "closed":
                 self.closed = True
                 out.append(("closed", None))
+            elif kind in ("query", "cells", "clip"):
+                out.append((kind, event["result"]))
             else:
                 out.append((kind, event.get("message")))
         return out
+
+
+class ViewWorker:
+    """The viewer's render worker when the shared Rust ViewController draws
+    (P4d, docs/SHARED_APP_LAYER.ko.md §7) - floe/rust_render.py's place in
+    floe/gui.py: the view's frames and states come as `events()`, the
+    viewer's edits go to `edit()`. The jobs the viewer still submits - snap,
+    pick, the cell tree, clip, recolor, repattern, mono - become the view
+    channel's requests and edits; their answers are the dicts
+    floe/rust_render.py put on `res`. `cache` is the ServiceCache the panel
+    reads (its layers, a deck's levels and mode)."""
+
+    supports_abstract = False
+    supports_density = True
+    controller = True
+
+    def __init__(self, cache, width, height, patch=None, margin=False,
+                 frame_cache=True, svc=None):
+        self.cache = cache
+        self.deck = bool(getattr(cache, "is_jobdeck", False))
+        # no margin and no label font for a deck (the controller's and
+        # renderd's rule, as the deck adapter had it)
+        self.supports_margin_prefetch = not self.deck
+        self.supports_label_font_px = not self.deck
+        self.res = queue.Queue()
+        self.session = None
+        self.open_report = {}
+        self.error = None
+        self.shown = None        # the frame on screen (the queries' anchor)
+        self._args = (int(width), int(height), patch, bool(margin),
+                      bool(frame_cache))
+        self._svc = svc or service()
+        self._queries = {}       # the controller's query id -> (kind, seq)
+        self._lock = threading.Lock()
+        self._backlog = []       # jobs submitted while the view opens
+
+    # ---- life ---------------------------------------------------------------
+    def _open(self):
+        w, h, patch, margin, frame_cache = self._args
+        started = time.monotonic()
+        session = ViewSession(
+            self.cache.src, w, h, ids=getattr(self.cache, "ids", None),
+            mode=(getattr(self.cache, "mode", None) or "level")
+            if self.deck else "level",
+            patch=patch, margin=margin, frame_cache=frame_cache,
+            svc=self._svc)
+        self.open_report = {"service_open_ms":
+                            round((time.monotonic() - started) * 1000)}
+        with self._lock:
+            self.session = session
+            backlog, self._backlog = self._backlog, []
+        for job in backlog:
+            self.submit(job)
+
+    def start(self):
+        self._open()
+
+    def start_async(self, done):
+        def run():
+            error = None
+            try:
+                self._open()
+            except (ServiceError, OSError, RuntimeError) as exc:
+                self.error = error = exc
+            done(error)
+        threading.Thread(target=run, daemon=True,
+                         name="floe2-view-open").start()
+
+    @property
+    def snapshot(self):
+        return None if self.session is None else self.session.snapshot
+
+    def alive(self):
+        if self.session is None:
+            return self.error is None
+        return not self.session.closed and \
+            (self.session.snapshot or {}).get("phase") != "failed"
+
+    def exitcode(self):
+        failure = (self.session.snapshot or {}).get("failure") \
+            if self.session is not None else None
+        return (failure or {}).get("message") or self.error
+
+    def stop(self):
+        if self.session is not None:
+            self.session.close()
+
+    def cancel(self, _before_gen=None):
+        """Esc: the frame in progress stops (the controller's rule: the
+        same state is not drawn again, its next change is)."""
+        if self.session is not None:
+            try:
+                self.session.cancel()
+            except ServiceError as exc:
+                self.res.put({"kind": "error", "msg": str(exc)})
+
+    # ---- edits and answers ----------------------------------------------------
+    def edit(self, **patch):
+        """One edit; the state it made (None when refused - said on res)."""
+        if self.session is None:
+            return None
+        try:
+            return self.session.edit(**patch)
+        except ServiceError as exc:
+            self.res.put({"kind": "error", "msg": str(exc)})
+            return None
+
+    def events(self):
+        """The view's frames and states, oldest first: ("frame", frame),
+        ("view", snapshot), ("closed", None); the answers go to res."""
+        if self.session is None:
+            return []
+        out = []
+        for kind, value in self.session.events():
+            if kind == "query":
+                seq_kind = self._queries.pop(value.get("id"), None)
+                if seq_kind is not None:
+                    self.res.put(dict(value, kind=seq_kind[0],
+                                      seq=seq_kind[1]))
+            elif kind in ("cells", "clip"):
+                self.res.put(value)
+            elif kind == "frame_error":
+                self.res.put({"kind": "error", "msg": "frame: %s" % value})
+            else:
+                out.append((kind, value))
+        return out
+
+    def _viewport_px(self, x, y):
+        """World (dbu) -> the controller's viewport pixel, and its scale."""
+        v = self.session.snapshot["state"]["viewport"]
+        b = v["bbox"]
+        spp = (b[2] - b[0]) / max(1, v["width"])
+        return (x - b[0]) / spp, (b[3] - y) / spp, spp
+
+    def _layer_rows(self):
+        return (getattr(self.cache, "meta", None) or {}).get("layers", [])
+
+    def submit(self, job):
+        with self._lock:
+            if self.session is None:
+                self._backlog.append(job)
+                return
+        kind = job.get("kind")
+        try:
+            if kind in ("snap", "pick"):
+                if self.shown is None:
+                    return          # nothing on screen to ask about yet
+                px, py, spp = self._viewport_px(float(job["x"]),
+                                                float(job["y"]))
+                r_px = float(job.get("r_px", float(job["r"]) / spp))
+                try:
+                    qid = self.session.query(
+                        self.shown, kind, px, py, r_px,
+                        nth=int(job.get("nth", 0)),
+                        layers=job.get("layers"))
+                except ServiceError as exc:
+                    if exc.kind == "busy":
+                        return      # the frame shown is not this state's
+                    raise
+                self._queries[qid] = (kind, int(job.get("seq", -1)))
+            elif kind in ("cell_sources", "cells", "cell_find", "cell_bbox",
+                          "cell_insts"):
+                fields = {k: job[k] for k in ("src", "cell", "pattern",
+                                              "limit", "cap", "root")
+                          if job.get(k) is not None}
+                if job.get("view") is not None:
+                    fields["box"] = [float(v) for v in job["view"]]
+                self.session.cells(kind, int(job.get("seq", -1)), **fields)
+            elif kind == "clip":
+                self.session.clip(0, job["bbox"], job["out"],
+                                  layers=job.get("layers"),
+                                  cell_name=job.get("cell_name", "FLOE_CLIP"))
+            elif kind == "recolor":
+                self.edit(style_deltas=[
+                    {"pair": [int(v) for v in key], "color": str(color)}
+                    for key, color in job.get("colors", [])])
+            elif kind == "repattern":
+                self.edit(style_deltas=repattern_deltas(
+                    self._layer_rows(), job.get("fills", []),
+                    job.get("widths", [])))
+            elif kind == "mono":
+                self.edit(mono=bool(job.get("on")))
+            else:
+                raise ValueError("%s jobs belong to the view controller"
+                                 % kind)
+        except (ServiceError, ValueError, KeyError, TypeError) as exc:
+            self.res.put({"kind": "error", "msg": "%s: %s" % (kind, exc)})
+
+
+def repattern_deltas(rows, fills, widths):
+    """floe/rust_render.py's `repattern` (every layer's fill and width
+    replaced whole: a layer not named goes back to the plain speckle and
+    width 1; a deck's level head names its datatypes) as the view
+    channel's style deltas, one per drawn layer."""
+    heads = {int(r["layer"]) for r in rows if r.get("jobdeck_head")}
+
+    def expand(key):
+        key = (int(key[0]), int(key[1]))
+        if key[1] == 0 and key[0] in heads:
+            return [(int(r["layer"]), int(r["datatype"])) for r in rows
+                    if int(r["layer"]) == key[0]]
+        return [key]
+
+    fill_of, width_of = {}, {}
+    for key, bitmap in fills:
+        for k in expand(key):
+            fill_of[k] = fill_dto(bitmap)
+    for key, width in widths:
+        width = int(width)
+        if width < 1 or width > 8:
+            raise ValueError("line width must be in 1..8")
+        for k in expand(key):
+            width_of[k] = width
+    out = []
+    for r in rows:
+        if r.get("jobdeck_head"):
+            continue
+        key = (int(r["layer"]), int(r["datatype"]))
+        out.append({"pair": list(key),
+                    "fill": fill_of.get(key, {"kind": "speckle"}),
+                    "width": width_of.get(key, 1)})
+    return out
+
+
+def fill_dto(rows):
+    """floe's 16x16 `*`/`.` bitmap as the view channel's fill (the renderd
+    style rule floe/rust_render.py's _pattern_fill had)."""
+    if not isinstance(rows, str):
+        raise ValueError("fill bitmap must be a string")
+    lines = rows.splitlines()
+    if len(lines) != 16 or any(len(line) != 16 for line in lines):
+        raise ValueError("fill bitmap must contain 16 rows of 16 pixels")
+    if any(ch not in ".*" for line in lines for ch in line):
+        raise ValueError("fill bitmap pixels must be '.' or '*'")
+    words = []
+    for line in lines:
+        word = 0
+        for ch in line:
+            word = (word << 1) | (ch == "*")
+        words.append(word)
+    if all(word == 0xFFFF for word in words):
+        return {"kind": "solid"}
+    if all(word == 0 for word in words):
+        return {"kind": "clear"}
+    if words == [0xAAAA if row % 2 == 0 else 0x5555 for row in range(16)]:
+        return {"kind": "speckle"}
+    return {"kind": "pattern", "rows": words}
 
 
 def read_frame(frame):

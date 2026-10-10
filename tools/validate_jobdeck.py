@@ -26,6 +26,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -1299,7 +1300,8 @@ def product_blocker(folder):
 
 class GuiSmokeTests(unittest.TestCase):
     """`floe2 view deck.jb` really opens: GTK start, deck worker open,
-    first composite frame displayed (FLOE_GUI_SMOKE_MS) - and (P2d) with
+    first composite frame displayed (FLOE_GUI_SMOKE_MS) - on the view
+    controller's loop, and once on FLOE_GTK_LOOP=legacy (P4d) - and (P2d) with
     every module of PRODUCT_FORBIDDEN unimportable: the viewer, its deck,
     its layout and its DRC review run on floe2 gtk-service alone."""
 
@@ -1338,6 +1340,11 @@ class GuiSmokeTests(unittest.TestCase):
         res = run_floe2("view", "--multi", CLI / "test.jb", "--level", "1,3",
                         env=env, ok=0, timeout=120)
         self.assertNotIn("no GUI frame", res.stderr + res.stdout)
+        # the Python render loop kept for the field check (P4d)
+        res = run_floe2("view", "--multi", CLI / "test.jb",
+                        env=dict(env, FLOE_GTK_LOOP="legacy"), ok=0,
+                        timeout=120)
+        self.assertNotIn("no GUI frame", res.stderr + res.stdout)
         # a layout with a DRC review open at start
         db = CLI / "smoke_drc.db"
         done = subprocess.run(
@@ -1355,6 +1362,93 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertNotIn("the floe2 viewer imported", res.stderr + res.stdout)
         self.assertTrue((CLI / ".smoke_drc.db.waive.smoke").is_file(),
                         "the review's sidecar is the service's")
+
+
+class DeckViewChannelTests(unittest.TestCase):
+    """The viewer's deck on the view controller's loop (P4d, floe/
+    gtkservice.py ViewWorker): the first frame, a level head recoloured, a
+    head's fill and another's width, a partial level - each frame byte-equal
+    to the product adapter's (floe/rust_render.py, whose deck worker
+    expands a head to its level's datatypes) for the same box and policy."""
+
+    def test_level_heads_draw_as_the_adapter_draws_them(self):
+        env = {"FLOE_INDEX_BIN": str(ROOT / "rust/target/release/floe-index"),
+               "FLOE_RENDERD_BIN": str(ROOT / "rust/target/release/floe-renderd")}
+        os.environ.update(env)
+        run_floe2("index", CLI / "test.jb", "--jobs", "2", env=env, ok=0)
+        from floe import gtkservice, rust_render
+        cache = gtkservice.ServiceCache(str(CLI / "test.jb"), mode="level")
+        cache.load()
+        self.addCleanup(cache.close)
+        heads = [(r["layer"], r["datatype"]) for r in cache.meta["layers"]
+                 if r.get("jobdeck_head")]
+        self.assertGreaterEqual(len(heads), 2, heads)
+        adapter = rust_render.make_render_worker(cache)
+        adapter.start()
+        self.addCleanup(adapter.stop)
+        view = gtkservice.ViewWorker(
+            cache, 240, 180, patch={"detail": "high", "thin": "keep",
+                                    "frames": False, "density": False})
+        view.start()
+        self.addCleanup(view.stop)
+
+        def settled():
+            deadline = time.monotonic() + 120
+            last = None
+            while time.monotonic() < deadline:
+                for kind, value in view.events():
+                    if kind == "frame":
+                        data = gtkservice.read_frame(value)[0]
+                        if value["purpose"] == "foreground":
+                            last = (value, data)
+                snap = view.snapshot
+                if last and last[0]["final"] and snap["phase"] == "idle" \
+                        and last[0]["render_rev"] == snap["render_rev"]:
+                    return last
+                self.assertTrue(view.res.empty() or view.res.queue[0].get(
+                    "kind") != "error", list(view.res.queue))
+                time.sleep(0.005)
+            self.fail("deck view: no settled frame")
+
+        def compare(what, visible=None):
+            frame, data = settled()
+            gen = next(_GEN)
+            adapter.submit({
+                "kind": "render", "gen": gen, "scope": "live",
+                "bbox": tuple(frame["bbox"]), "view": None,
+                "w": frame["width"], "h": frame["height"], "depth": None,
+                "cut_px": 1.0, "lod": False, "frames": False, "labels": False,
+                "abstract": False, "visible": visible, "thin": "keep",
+                "density": False, "frame_format": "raw"})
+            while True:
+                res = adapter.res.get(timeout=120)
+                self.assertNotEqual(res.get("kind"), "error", res)
+                if res.get("kind") == "frame" and res.get("gen") == gen \
+                        and not res.get("refining"):
+                    break
+            self.assertEqual(bytes(data), bytes(res["rgba"]), what)
+            return data
+
+        first = compare("the open")
+        # a level head recoloured: every datatype of the level
+        job = {"kind": "recolor", "colors": [(heads[0], "#ff0000")]}
+        view.submit(job)
+        adapter.submit(job)
+        red = compare("a head recoloured")
+        self.assertNotEqual(first, red)
+        # a head's fill and another head's width (repattern: the rest back
+        # to the speckle and width 1)
+        job = {"kind": "repattern",
+               "fills": [(heads[0], "\n".join(["*" * 16] * 16))],
+               "widths": [(heads[1], 3)]}
+        view.submit(job)
+        adapter.submit(job)
+        compare("a head's fill and width")
+        # a partial level: the viewer sends leaves (its _layers_arg)
+        leaves = [(r["layer"], r["datatype"]) for r in cache.meta["layers"]
+                  if r["layer"] == heads[0][0] and not r.get("jobdeck_head")]
+        view.edit(layers=[list(k) for k in leaves[:1]])
+        compare("a partial level", visible=leaves[:1])
 
 
 class JobdeckChipHierarchyTests(unittest.TestCase):
@@ -1501,31 +1595,49 @@ class JobdeckChipHierarchyTests(unittest.TestCase):
         """A pre-switch debounce must not submit with style_epoch=0
         while the new worker is still opening (kills its handshake).
         Exercise _apply_cache too, not just the panel/state helpers.
-        """
+        On the view controller's loop (P4d) there is no debounce: the
+        layers go as an edit at once and the new view opens with them and
+        the kept pose."""
+        for loop in ("controller", "legacy"):
+            with self.subTest(loop=loop):
+                self._switch(loop)
+
+    def _switch(self, loop):
         import time
         from unittest.mock import patch
         from floe import gui
         gui.import_gtk()
         c = self._cache()
-        with patch.dict(os.environ, {"FLOE_RENDERER": "rust"}):
+        with patch.dict(os.environ, {"FLOE_RENDERER": "rust",
+                                     "FLOE_GTK_LOOP": loop}):
             v = gui.Viewer(c, depth=999, frames=False, labels=False)
+            controller = loop == "controller"
             try:
                 def landed():
                     end = time.monotonic() + 15
                     while time.monotonic() < end:
                         while gui.Gtk.events_pending():
                             gui.Gtk.main_iteration_do(False)
-                        if v.last_frame is not None and not v._worker_starting:
+                        if v.last_frame is not None and not v._worker_starting \
+                                and (not controller or (
+                                    v.worker.snapshot is not None
+                                    and v._ctl_shown_rev
+                                    == v.worker.snapshot["render_rev"])):
                             return
                         time.sleep(0.01)
                     self.fail("no frame after jobdeck mode switch")
 
                 landed()
+                self.assertEqual(bool(getattr(v.worker, "controller", False)),
+                                 controller)
                 v._layer_rows[(1, 0)].set_active(False)
                 v._layer_rows[(2, 1)].set_active(False)
                 wanted = set(v.visible)
                 pose = v.cx, v.cy, v.spp
-                self.assertIsNotNone(v._debounce)
+                if controller:
+                    self.assertIsNone(v._debounce)
+                else:
+                    self.assertIsNotNone(v._debounce)
                 shown = []
                 orig_show = v._loading_show
 
@@ -1547,6 +1659,13 @@ class JobdeckChipHierarchyTests(unittest.TestCase):
                     self.assertEqual((v.cx, v.cy, v.spp), pose)
                     self.assertTrue(v._layer_rows[(2, 0)]._partial)
                     self.assertTrue(v.worker.alive())
+                    if controller:
+                        state = v.worker.snapshot["state"]
+                        self.assertEqual(
+                            state["layers"],
+                            [list(k) for k in v._layers_arg()], mode)
+                        self.assertTrue(
+                            v._ctl_same_view(state["viewport"]), mode)
             finally:
                 v._quit()
                 v.window.destroy()

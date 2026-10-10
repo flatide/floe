@@ -33,6 +33,16 @@ from .rust_render import (make_render_worker, DETAIL_PX, DETAIL_LEVELS,
 def _is_deck_path(path):
     return bool(path) and str(path).lower().endswith(".jb")
 
+
+def controller_loop():
+    """The render loop is the shared Rust ViewController's (P4d, docs/
+    SHARED_APP_LAYER.ko.md §7): floe2 gtk-service's view channel decides
+    what is drawn and when - the settle after a pan, a superseded frame
+    cancelled, the margin and its crops, Esc - and the viewer shows the
+    frames it is given. FLOE_GTK_LOOP=legacy keeps the Python loop
+    (floe/rust_render.py) while the field checks the new one."""
+    return os.environ.get("FLOE_GTK_LOOP", "controller") != "legacy"
+
 Gtk = Gdk = GdkPixbuf = GLib = Pango = None
 
 APP = product_name()
@@ -2581,10 +2591,13 @@ class Viewer:
             if marks is not None and "cache" not in marks:
                 # the cache, the layer panel: done; the service opens next
                 marks["cache"] = time.monotonic()
-            self.worker = make_render_worker(
-                cache, stream_kb=self.stream_kb,
-                stream_target_ms=self.stream_target_ms,
-                debug=self.render_debug)
+            if controller_loop():
+                self.worker = self._make_view_worker(cache)
+            else:
+                self.worker = make_render_worker(
+                    cache, stream_kb=self.stream_kb,
+                    stream_target_ms=self.stream_target_ms,
+                    debug=self.render_debug)
             if hasattr(self.worker, "start_async"):
                 worker = self.worker
                 self._worker_starting = True
@@ -3200,7 +3213,11 @@ class Viewer:
         """Identity of a frame: what state it was rendered for. The
         thin policy is part of it (review 2026-09-11 P1-1: toggling
         View > keep thin shapes changed only the status label while
-        _covered() kept the old frame; margin frames share the key)."""
+        _covered() kept the old frame; margin frames share the key).
+        Under the view controller its render key (the frames carry it)."""
+        if self._ctl():
+            snap = self.worker.snapshot
+            return ("ctl", None if snap is None else snap["render_key"])
         return (scope, tuple(sorted(self.visible)), self._depth_key(),
                 self._effective_cut_px(), self.lod_on, self.frames_on,
                 self.labels_on, self._color_epoch, self._effective_thin(),
@@ -3819,6 +3836,9 @@ class Viewer:
             self._set_live_status("render service is not available")
             return
         self._clamp_view()
+        if self._ctl():
+            self._ctl_redraw()
+            return
         bbox = self.view_bbox()
         span = self.tiles_spanned(bbox)
         # skeleton retired (rev 24): every view renders live; wide floe2
@@ -3858,6 +3878,266 @@ class Viewer:
         self._debounce = GLib.timeout_add(
             1 if immediate else DEBOUNCE_MS, self._submit_render)
         self._set_status(bbox, mode)
+
+    # ---- the view controller's loop (P4d, controller_loop) -----------------
+    def _ctl(self):
+        """The render loop is the shared Rust ViewController's."""
+        return bool(getattr(getattr(self, "worker", None), "controller",
+                            False))
+
+    def _make_view_worker(self, cache):
+        """The view channel's worker for `cache`, opened with the viewer's
+        policy (and its view when it has one) so the first frame is the
+        one asked for, not the controller's default."""
+        self._ctl_shown_rev = None
+        self._ctl_said = None
+        w, h = self._viewport_size()
+        deck = bool(getattr(cache, "is_jobdeck", False))
+        patch = self._ctl_policy(deck=deck)
+        if patch.get("root") is not None:
+            # a root is resolved by the live view: the first sync sends it
+            del patch["root"]
+        self._ctl_sent = dict(patch)
+        kept = getattr(self, "_ctl_open_view", None)
+        if kept is not None:
+            # a deck's mode switch keeps the view (_jobdeck_set_mode)
+            dbu = self.dbu
+            patch["navigation"] = {
+                "kind": "goto", "center_um": [kept[0] * dbu, kept[1] * dbu],
+                "width_um": kept[2] * w * dbu}
+        elif self._did_fit and not self._fit_after_worker_start:
+            patch["navigation"] = self._ctl_goto(w)
+        return gtkservice.ViewWorker(
+            cache, w, h, patch=patch,
+            margin=bool(self.frame_cache_on) and bool(self.margin_on),
+            frame_cache=bool(self.frame_cache_on))
+
+    def _ctl_policy(self, deck=None):
+        """What the viewer draws, as the controller's patch fields: the
+        size, depth, detail, thin policy, layers, frames, labels, font,
+        grayscale, density and root."""
+        if deck is None:
+            deck = bool(getattr(self.cache, "is_jobdeck", False))
+        w, h = self._viewport_size()
+        depth = self._depth()
+        visible = self._layers_arg()
+        cut = self._effective_cut_px()
+        detail = min(zip(DETAIL_PX, DETAIL_LEVELS),
+                     key=lambda d: abs(d[0] - cut))[1] if cut > 0 else "exact"
+        patch = {
+            "pixels": [int(w), int(h)],
+            "depth": "full" if depth is None else int(depth),
+            "detail": detail,
+            "thin": self._effective_thin(),
+            "layers": "all" if visible is None else
+            ([[int(k[0]), int(k[1])] for k in visible] if visible
+             else "none"),
+            "frames": bool(self.frames_on),
+            # a deck's composite has no labels (renderd's rule)
+            "labels": bool(self.labels_on) and not deck,
+            "mono": bool(self._mono),
+            "density": bool(getattr(self, "density_on", False)),
+        }
+        if not deck:
+            # a deck has no label font and no root (renderd's rule)
+            patch["font_px"] = int(self.label_font_px)
+            root = getattr(self, "_view_root", None)
+            patch["root"] = None if root is None else {
+                "src": 0, "cell": int(root["cell"])}
+        return patch
+
+    def _ctl_goto(self, w):
+        dbu = self.dbu
+        return {"kind": "goto", "center_um": [self.cx * dbu, self.cy * dbu],
+                "width_um": self.spp * w * dbu}
+
+    def _ctl_same_view(self, viewport):
+        """The controller's viewport is the viewer's (float noise aside:
+        the goto's um round trip)."""
+        w, h = self._viewport_size()
+        if (viewport["width"], viewport["height"]) != (w, h):
+            return False
+        b = viewport["bbox"]
+        spp = (b[2] - b[0]) / w
+        return (abs(spp / self.spp - 1.0) < 1e-9
+                and abs((b[0] + b[2]) / 2 - self.cx) < 1e-3 * self.spp
+                and abs((b[1] + b[3]) / 2 - self.cy) < 1e-3 * self.spp)
+
+    def _ctl_adopt(self, snapshot):
+        """The view the controller holds becomes the viewer's when it is
+        not the same (its clamp is the viewer's own; a root it fitted)."""
+        v = snapshot["state"]["viewport"]
+        if self._ctl_same_view(v):
+            return
+        b = v["bbox"]
+        self.cx = (b[0] + b[2]) / 2
+        self.cy = (b[1] + b[3]) / 2
+        self.spp = (b[2] - b[0]) / v["width"]
+
+    def _ctl_sync(self):
+        """Send what changed since the last edit: the policy fields that
+        differ, and the view as a goto when it moved."""
+        snap = self.worker.snapshot
+        if snap is None:
+            return              # the view still opens; its patch is sent
+        sent = self._ctl_sent if self._ctl_sent is not None else {}
+        policy = self._ctl_policy()
+        patch = {k: v for k, v in policy.items()
+                 if k not in sent or sent[k] != v}
+        if not self._ctl_same_view(snap["state"]["viewport"]):
+            patch["navigation"] = self._ctl_goto(self._viewport_size()[0])
+        if not patch:
+            return
+        # said once: a refused edit (on the status line) is not sent again
+        self._ctl_sent = policy
+        reply = self.worker.edit(**patch)
+        if reply is not None:
+            self._ctl_adopt(reply)
+
+    def _ctl_snap_drag(self):
+        """A drag ends an even number of pixels from the frame on screen:
+        the fill speckle's 2x2 phase is the frame's own (the controller
+        draws the viewport as it is, where the Python loop snapped each
+        frame to a 2 px layout grid), so an odd step would flip it when
+        the new frame lands (field 2026-08-09). Keys step 16 px."""
+        lf = self.last_frame
+        if lf is None or abs(lf[2] / self.spp - 1.0) > 1e-9:
+            return              # zoomed since: a new frame anyway
+        fb, vb = lf[1], self.view_bbox()
+        dx = (vb[0] - fb[0]) / self.spp
+        dy = (fb[3] - vb[3]) / self.spp
+        self.cx += (2 * round(dx / 2) - dx) * self.spp
+        self.cy -= (2 * round(dy / 2) - dy) * self.spp
+
+    def _ctl_redraw(self):
+        """redraw() under the controller: the edit, then the frame on
+        screen recomposed at the view (the controller settles a pan,
+        renders and supersedes); mid-drag the view is sent on release."""
+        if self.worker.snapshot is None:
+            self._display()
+            return
+        if self._drag is None:
+            self._ctl_sync()
+        bbox = self.view_bbox()
+        self._display()
+        if not self.visible and not self._structure_visible():
+            self._set_status(bbox, "no layers visible")
+            return
+        self._set_status(bbox, "hierarchy depth %d" % self._depth()
+                         if not self.visible else
+                         "live (%d tiles)" % self.tiles_spanned(bbox))
+
+    def _ctl_events(self):
+        worker = self.worker
+        for kind, value in worker.events():
+            if worker is not self.worker:
+                break           # a frame handler replaced the worker
+            try:
+                if kind == "frame":
+                    self._ctl_frame(value)
+                elif kind == "view":
+                    self._ctl_view(value)
+            except Exception as exc:
+                import traceback
+                traceback.print_exc()
+                self._clear_pending()
+                self._set_live_status(
+                    "error: %s event failed: %s (see terminal)"
+                    % (kind, exc))
+
+    def _ctl_frame(self, frame):
+        data, fw, fh, fmt = gtkservice.read_frame(frame)
+        if fmt == "raw":
+            pix = GdkPixbuf.Pixbuf.new_from_bytes(
+                GLib.Bytes.new(data), GdkPixbuf.Colorspace.RGB, True, 8,
+                fw, fh, fw * 4)
+        else:
+            loader = GdkPixbuf.PixbufLoader.new_with_type("png")
+            loader.write(data)
+            loader.close()
+            pix = loader.get_pixbuf()
+        if self.dump:
+            pix.savev("/tmp/%s_frame.png" % APP, "png", [], [])
+        fb = frame["bbox"]
+        fspp = (fb[2] - fb[0]) / max(1, pix.get_width())
+        key = ("ctl", frame["render_key"])
+        report = frame.get("report") or {}
+        if isinstance(report.get("max_depth"), int):
+            self.max_depth = max(0, report["max_depth"])
+        if frame["purpose"] == "margin":
+            # the base under a pan's incoming strip (_display); with its
+            # labels whole it is the frame shown too, and pans inside it
+            # are crops (the controller draws nothing)
+            self._margin_frame = (pix, fb, fspp, key)
+            if not frame.get("labels_truncated"):
+                self.last_frame = (pix, fb, fspp, key)
+                self.worker.shown = frame["id"]
+            self._display()
+            self._margin_debug("landed frame %d" % frame["id"])
+            return
+        first = frame["render_rev"] != self._ctl_shown_rev
+        self._ctl_shown_rev = frame["render_rev"]
+        self.last_frame = (pix, fb, fspp, key)
+        self.worker.shown = frame["id"]
+        self._display()
+        if first:
+            # content is on screen: the mouse no longer waits
+            self._clear_pending()
+        self._depth_used = frame.get("depth")
+        self.dstatus.set_text(self._depth_label())
+        mode, brief = frame.get("perf") or ("", "")
+        load, load_brief = self._load_note(report)
+        mode, brief = load + mode, load_brief + brief
+        if frame["final"]:
+            if getattr(self, "_refining", False) or first:
+                self.rstatus.set_text("rendering done.")
+            self._refining = False
+            b = self.view_bbox()
+            print("%s  view %.1f x %.1f um"
+                  % (mode, (b[2] - b[0]) * self.dbu,
+                     (b[3] - b[1]) * self.dbu), flush=True)
+        else:
+            self._refining = True
+            self.rstatus.set_text(
+                "drawing the density under the cut..."
+                if (frame.get("fields") or {}).get("density_round") else
+                "refining %d pages..." % (report.get("refining") or 1))
+        self._set_status(self.view_bbox(), mode, brief)
+        self._cell_hl_follow()
+
+    def _ctl_view(self, snap):
+        """The controller's state: rendering (the busy cursor, the
+        ticker), a frame renderd refused, Esc's cancel."""
+        if isinstance(snap.get("max_depth"), int):
+            self.max_depth = max(0, snap["max_depth"])
+        rev = snap["render_rev"]
+        busy = (snap["phase"] in ("rendering", "cancelling")
+                and rev != self._ctl_shown_rev
+                and snap.get("cancelled_rev") != rev)
+        if busy and self._pending is None:
+            self._pending = rev
+            self._pending_t0 = time.perf_counter()
+            self.rstatus.set_text("rendering…")
+            self._set_cursor("progress")
+            if self._pending_timer is None:
+                self._pending_timer = GLib.timeout_add(
+                    400, self._pending_tick)
+        elif not busy and self._pending is not None \
+                and snap["phase"] != "rendering":
+            self._clear_pending()
+        failure = snap.get("render_failure")
+        if failure and failure["render_rev"] == rev \
+                and self._ctl_said != ("failure", rev):
+            self._ctl_said = ("failure", rev)
+            self._refining = False
+            self._clear_pending()
+            self._set_live_status("error: %s" % failure["message"])
+        if snap.get("cancelled_rev") == rev \
+                and self._ctl_said != ("cancelled", rev):
+            self._ctl_said = ("cancelled", rev)
+            self._refining = False
+            self._clear_pending()
+            self.rstatus.set_text("render cancelled")
 
     def _margin_debug(self, message):
         if os.environ.get("FLOE_MARGIN_DEBUG"):
@@ -4181,6 +4461,8 @@ class Viewer:
                     "%s: watchdog check failed (%s) - mixed product "
                     "versions in the bundle? overwrite the WHOLE floe/ "
                     "and floe2/ packages, not single files\n" % (APP, exc))
+        if self._ctl():
+            self._ctl_events()
         try:
             while self.worker is not None:
                 res = self.worker.res.get_nowait()
@@ -4713,6 +4995,8 @@ class Viewer:
             self._set_cursor("progress" if self._pending is not None
                              else self._idle_cursor())
             if panned:
+                if self._ctl():
+                    self._ctl_snap_drag()
                 self.redraw()   # pan ended: render the final position
             elif was_drag and ev.button == 1:
                 # A stationary left click keeps its mode-specific action;
@@ -6172,7 +6456,13 @@ class Viewer:
             self._set_live_status("jobdeck colour mode: %s" % exc)
             self._restore_keys()
             return
-        self._apply_cache(cache)
+        # the view controller opens the new spec at this view, not at a fit
+        # it would draw first and then drop
+        self._ctl_open_view = view
+        try:
+            self._apply_cache(cache)
+        finally:
+            self._ctl_open_view = None
         self.cx, self.cy, self.spp = view
         self._fit_after_worker_start = False
         self._set_live_status("jobdeck %s view" % mode)
@@ -10513,7 +10803,9 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
                 elif viewer._worker_starting:
                     smoke_error.append("Rust render cache is still opening")
                 elif viewer.worker is None or not viewer.worker.alive():
-                    smoke_error.append("Rust render worker is not alive")
+                    smoke_error.append("Rust render worker is not alive%s" % (
+                        "" if viewer.worker is None
+                        else " (%s)" % viewer.worker.exitcode()))
                 elif viewer.last_frame is None:
                     smoke_error.append("no GUI frame was displayed")
             if drc and not smoke_error and viewer._drc_total == 0:

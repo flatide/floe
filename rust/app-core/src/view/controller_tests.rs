@@ -8,6 +8,7 @@ use floe_worker_client::{
     CellFailure, CellFailureCode, CellReply, CellRequest, Fields, Fill, FrameFormat, Layers,
     QueryScene, QueryStatus,
 };
+use serde_json::json;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::atomic::AtomicBool,
@@ -45,6 +46,8 @@ struct Control {
     cell_nohier: AtomicBool,
     cell_busy: AtomicBool,
     cell_reply: AtomicBool,
+    /// set_incomplete_queries reached the engine (DesktopPolicy).
+    incomplete_queries: AtomicBool,
 }
 impl Default for Control {
     fn default() -> Self {
@@ -77,6 +80,7 @@ impl Default for Control {
             cell_nohier: AtomicBool::new(false),
             cell_busy: AtomicBool::new(false),
             cell_reply: AtomicBool::new(true),
+            incomplete_queries: AtomicBool::new(false),
         }
     }
 }
@@ -95,6 +99,9 @@ struct Fake {
     cells: BTreeMap<u64, CellRequest>,
 }
 impl Engine for Fake {
+    fn set_incomplete_queries(&mut self, on: bool) {
+        self.control.incomplete_queries.store(on, Ordering::Relaxed);
+    }
     fn cell_query(&mut self, r: CellRequest) -> Result<u64> {
         assert!(
             !(self.deck && r.root().is_some()),
@@ -298,6 +305,8 @@ impl Engine for Fake {
                                 .into(),
                             ),
                             ("scene_summary".into(), "0".into()),
+                            // renderd's frame line says it (FrameReport reads it)
+                            ("final".into(), "1".into()),
                             (
                                 "style_epoch".into(),
                                 (1 + self.control.styles.lock().unwrap().len()).to_string(),
@@ -1787,4 +1796,168 @@ fn density_is_a_render_policy_and_goes_on_the_request() {
     wait(|| c.requests.lock().unwrap().len() == 2);
     assert_eq!(c.requests.lock().unwrap()[1].density, Some(true));
     v.close().unwrap();
+}
+#[test]
+fn desktop_clamp_keeps_the_gtk_zoom_range_and_the_die_in_reach() {
+    let r = Resources::new(Limits::default()).unwrap();
+    let m = model(false);
+    let c = Arc::new(Control::default());
+    let mut v = desktop(&c, &m, &r);
+    wait(|| v.latest().is_some());
+    let spp = |s: &Snapshot| (s.state.viewport.bbox[2] - s.state.viewport.bbox[0]) / 80.;
+    let zoom = |v: &ViewController, factor: f64| {
+        let base = v.snapshot().state_rev;
+        v.edit(
+            base,
+            Patch {
+                navigation: Some(Navigation::Zoom {
+                    factor,
+                    anchor: [0.5, 0.5],
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    };
+    // the fit view is 10.5 dbu/px (800x640 die in 80x64, 5% room)
+    let fit = spp(&v.snapshot());
+    assert!((fit - 10.5).abs() < 1e-9, "{fit}");
+    for _ in 0..6 {
+        zoom(&v, 0.125);
+    }
+    assert!((spp(&v.snapshot()) - 0.01).abs() < 1e-12);
+    for _ in 0..8 {
+        zoom(&v, 8.);
+    }
+    assert!((spp(&v.snapshot()) - fit * 16.).abs() < 1e-9);
+    // far away: back to the die grown by 10% (the view is wider: centred)
+    let base = v.snapshot().state_rev;
+    let s = v
+        .edit(
+            base,
+            Patch {
+                navigation: Some(Navigation::Goto {
+                    center_um: [1e6, -1e6],
+                    width_um: Some(0.08),
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let b = s.state.viewport.bbox;
+    assert!(b[0] >= -80. - 1e-9 && b[2] <= 880. + 1e-9, "{b:?}");
+    assert!(b[1] >= -64. - 1e-9 && b[3] <= 704. + 1e-9, "{b:?}");
+    v.close().unwrap();
+    // the web's: no bounds
+    let c = Arc::new(Control::default());
+    let mut w = start(
+        &r,
+        Arc::clone(&m),
+        ViewState::initial(&m, 80, 64).unwrap(),
+        Arc::clone(&c),
+    );
+    wait(|| w.latest().is_some());
+    for _ in 0..6 {
+        zoom(&w, 0.125);
+    }
+    assert!(spp(&w.snapshot()) < 0.01);
+    w.close().unwrap();
+}
+#[test]
+fn desktop_settle_renders_a_pan_burst_once_and_a_policy_edit_at_once() {
+    let r = Resources::new(Limits::default()).unwrap();
+    let m = model(false);
+    let c = Arc::new(Control::default());
+    let mut v = start_policy(
+        &r,
+        Arc::clone(&m),
+        ViewState::initial(&m, 80, 64).unwrap(),
+        Arc::clone(&c),
+        ControllerOptions::default(),
+        DesktopPolicy {
+            settle: Some(Duration::from_millis(300)),
+            ..DesktopPolicy::desktop()
+        },
+    );
+    wait(|| v.latest().is_some());
+    assert_eq!(c.requests.lock().unwrap().len(), 1);
+    for _ in 0..5 {
+        let base = v.snapshot().state_rev;
+        v.edit(base, pan()).unwrap();
+        thread::sleep(Duration::from_millis(20));
+    }
+    // still moving (well inside the settle): nothing asked yet
+    thread::sleep(Duration::from_millis(60));
+    assert_eq!(c.requests.lock().unwrap().len(), 1);
+    assert_eq!(v.snapshot().phase, Phase::Rendering);
+    wait(|| c.requests.lock().unwrap().len() == 2);
+    wait(|| {
+        v.latest()
+            .is_some_and(|f| f.state_rev == v.snapshot().state_rev)
+    });
+    // a policy edit renders at once
+    let base = v.snapshot().state_rev;
+    let at = Instant::now();
+    v.edit(
+        base,
+        Patch {
+            thin: Some(Thin::Cull),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    wait(|| c.requests.lock().unwrap().len() == 3);
+    assert!(
+        at.elapsed() < Duration::from_millis(250),
+        "{:?}",
+        at.elapsed()
+    );
+    v.close().unwrap();
+    assert_eq!(r.usage(), Usage::default());
+}
+
+#[test]
+fn desktop_frames_carry_their_report_and_the_web_s_do_not() {
+    let r = Resources::new(Limits::default()).unwrap();
+    let m = model(false);
+    for (policy, reports) in [
+        (DesktopPolicy::desktop(), true),
+        (DesktopPolicy::default(), false),
+    ] {
+        let c = Arc::new(Control::default());
+        let mut v = start_policy(
+            &r,
+            Arc::clone(&m),
+            ViewState::initial(&m, 80, 64).unwrap(),
+            Arc::clone(&c),
+            ControllerOptions::default(),
+            policy,
+        );
+        wait(|| v.latest().is_some());
+        let f = v.latest().unwrap();
+        let report = v.frame_report(f.id);
+        assert_eq!(report.is_some(), reports);
+        if let Some(report) = report {
+            // the frame's job as _emit_frame read it, the elapsed time
+            assert_eq!(
+                (
+                    report["frame_width"].clone(),
+                    report["frame_height"].clone()
+                ),
+                (json!(80), json!(64))
+            );
+            // a final round says no refining (the Python result has no key)
+            assert!(report.get("refining").is_none(), "{report}");
+            assert!(report["ms"].is_i64(), "{report}");
+            let (line, brief) = super::super::perf::perf_status(&report, "");
+            assert!(
+                line.contains(" ms") && brief.contains(" ms"),
+                "{line} / {brief}"
+            );
+            // a frame's report is its own: another frame's id has none
+            assert!(v.frame_report(f.id + 1_000).is_none());
+        }
+        v.close().unwrap();
+    }
+    assert_eq!(r.usage(), Usage::default());
 }

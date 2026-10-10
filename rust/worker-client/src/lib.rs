@@ -214,6 +214,7 @@ struct Active {
 struct ActiveQuery {
     request: QueryRequest,
     deadline: Instant,
+    incomplete_ok: bool,
 }
 struct ActiveQueryCancel {
     before_sequence: u64,
@@ -244,6 +245,8 @@ pub struct WorkerClient {
     queries: BTreeMap<u64, ActiveQuery>,
     query_cancels: BTreeMap<QueryKind, ActiveQueryCancel>,
     cells: BTreeMap<u64, ActiveCell>,
+    /// set_incomplete_queries: snap/pick answer an incomplete scene too.
+    incomplete_queries: bool,
 }
 
 /// `text_hex`'s UTF-8 text (renderd's `error code=locked`).
@@ -335,6 +338,7 @@ impl WorkerClient {
             queries: BTreeMap::new(),
             query_cancels: BTreeMap::new(),
             cells: BTreeMap::new(),
+            incomplete_queries: false,
         };
         let tx = response_tx.clone();
         client.threads.push(
@@ -431,6 +435,14 @@ impl WorkerClient {
     pub fn set_timeouts(&mut self, render: Duration, query: Duration) {
         self.config.render_timeout = render;
         self.config.query_timeout = query;
+    }
+    /// Snap and pick on a scene that is not complete (a density picture, a
+    /// budget-fit partial frame, deferred pages) are answered from the
+    /// geometry it holds (`incomplete=ok`, renderd 0.12.310) instead of
+    /// refused as `scene_incomplete`: the desktop viewer answered what it
+    /// drew; the web keeps the refusal (no promise of exact geometry).
+    pub fn set_incomplete_queries(&mut self, on: bool) {
+        self.incomplete_queries = on;
     }
     pub fn work_dir(&self) -> &Path {
         &self.workspace.0
@@ -594,13 +606,18 @@ impl WorkerClient {
             .query_sequence
             .checked_add(1)
             .ok_or_else(|| Error::input("query sequence exhausted"))?;
-        self.send(request.command(sequence)?)?;
+        let mut command = request.command(sequence)?;
+        if self.incomplete_queries {
+            command.push_str(" incomplete=ok");
+        }
+        self.send(command)?;
         self.query_sequence = sequence;
         self.queries.insert(
             sequence,
             ActiveQuery {
                 request,
                 deadline: Instant::now() + self.config.query_timeout,
+                incomplete_ok: self.incomplete_queries,
             },
         );
         Ok(sequence)
@@ -915,10 +932,11 @@ impl WorkerClient {
                     .queries
                     .remove(&sequence)
                     .ok_or_else(|| Error::protocol("unissued query response"))?;
-                Ok(Some(Event::Query(query::parse_reply(
+                Ok(Some(Event::Query(query::parse_reply_with(
                     &line.kind,
                     f,
                     pending.request,
+                    pending.incomplete_ok,
                 )?)))
             }
             "frame" => {

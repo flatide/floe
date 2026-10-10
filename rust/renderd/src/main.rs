@@ -538,6 +538,11 @@ struct RenderCommand {
 #[derive(Debug, PartialEq, Eq)]
 struct SnapCommand {
     expected_scene: Option<SceneId>,
+    /// `incomplete=ok`: a pinned scene that is not complete (a density
+    /// picture, a budget-fit partial frame, deferred pages) is still
+    /// answered from the geometry it holds - the desktop viewer's rule (P4d);
+    /// without it such a scene is refused (`scene_incomplete`), the web's.
+    incomplete_ok: bool,
     sequence: i64,
     x: i64,
     y: i64,
@@ -548,6 +553,8 @@ struct SnapCommand {
 #[derive(Debug, PartialEq, Eq)]
 struct PickCommand {
     expected_scene: Option<SceneId>,
+    /// As SnapCommand's.
+    incomplete_ok: bool,
     sequence: i64,
     x: i64,
     y: i64,
@@ -769,10 +776,20 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
         "snap" => {
             reject_unknown(
                 &fields,
-                &["seq", "x", "y", "r", "layers", "scene_gen", "scene_round"],
+                &[
+                    "seq",
+                    "x",
+                    "y",
+                    "r",
+                    "layers",
+                    "scene_gen",
+                    "scene_round",
+                    "incomplete",
+                ],
             )?;
             Ok(Some(InputCommand::Snap(SnapCommand {
                 expected_scene: SceneId::parse(&fields)?,
+                incomplete_ok: incomplete_ok(&fields)?,
                 sequence: optional_parse(&fields, "seq")?.unwrap_or(-1),
                 x: required_parse(&fields, "x")?,
                 y: required_parse(&fields, "y")?,
@@ -792,10 +809,12 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                     "layers",
                     "scene_gen",
                     "scene_round",
+                    "incomplete",
                 ],
             )?;
             Ok(Some(InputCommand::Pick(PickCommand {
                 expected_scene: SceneId::parse(&fields)?,
+                incomplete_ok: incomplete_ok(&fields)?,
                 sequence: optional_parse(&fields, "seq")?.unwrap_or(-1),
                 x: required_parse(&fields, "x")?,
                 y: required_parse(&fields, "y")?,
@@ -2061,6 +2080,15 @@ fn superseded(error: String) -> String {
     }
 }
 
+/// A query's `incomplete=ok` (the only value; absent = false).
+fn incomplete_ok(fields: &BTreeMap<String, String>) -> Result<bool, String> {
+    match fields.get("incomplete").map(String::as_str) {
+        None => Ok(false),
+        Some("ok") => Ok(true),
+        Some(other) => Err(format!("invalid incomplete={other}")),
+    }
+}
+
 fn handle_snap(
     shared: &SharedPublishedScene,
     command: SnapCommand,
@@ -2075,7 +2103,7 @@ fn handle_snap(
         .map_or(QueryContext::default(), |p| p.context);
     let refusal = command
         .expected_scene
-        .and_then(|id| context.rejection(id, 0));
+        .and_then(|id| context.rejection_with(id, 0, command.incomplete_ok));
     let mut requested_summaries = 0;
     let result: Result<Option<floe_render_core::SceneSnap>, String> = (|| {
         if let Some(code) = refusal {
@@ -2164,7 +2192,7 @@ fn handle_pick(
         .map_or(QueryContext::default(), |p| p.context);
     let refusal = command
         .expected_scene
-        .and_then(|id| context.rejection(id, 0));
+        .and_then(|id| context.rejection_with(id, 0, command.incomplete_ok));
     let mut requested_summaries = 0;
     let result: Result<Option<PickWireResponse>, String> = (|| {
         if let Some(code) = refusal {
@@ -6558,6 +6586,7 @@ mod tests {
         });
         tx.send(QueryCommand::Pick(PickCommand {
             expected_scene: None,
+            incomplete_ok: false,
             sequence: 5,
             x: 1,
             y: 2,
@@ -6568,6 +6597,7 @@ mod tests {
         .unwrap();
         tx.send(QueryCommand::Snap(SnapCommand {
             expected_scene: None,
+            incomplete_ok: false,
             sequence: 6,
             x: 1,
             y: 2,
@@ -6858,6 +6888,7 @@ mod tests {
             ),
             SnapCommand {
                 expected_scene: None,
+                incomplete_ok: false,
                 sequence: 4,
                 x: -2,
                 y: 7,
@@ -6873,6 +6904,7 @@ mod tests {
             ),
             PickCommand {
                 expected_scene: None,
+                incomplete_ok: false,
                 sequence: 5,
                 x: 1,
                 y: 2,
@@ -6881,6 +6913,15 @@ mod tests {
                 visible_layers: None,
             }
         );
+        assert!(
+            snap(
+                parse_command("snap seq=4 x=1 y=2 r=3 scene_gen=7 scene_round=2 incomplete=ok")
+                    .unwrap()
+                    .unwrap()
+            )
+            .incomplete_ok
+        );
+        assert!(parse_command("pick seq=4 x=1 y=2 r=3 incomplete=yes").is_err());
         assert!(parse_command("snap x=1 y=2 r=3 unknown=4").is_err());
         assert_eq!(wire_hex("TOP 한글"), "544f5020ed959ceab880");
         assert_eq!(
