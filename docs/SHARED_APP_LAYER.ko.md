@@ -46,7 +46,7 @@ python을 사용하지 않도록 변경해줘."
 | P1c | 게이트·배포·별칭을 Rust `floe2`로 바꾸고 Python `floe2/` 패키지를 지운다(§4) | 0.12.328 |
 | P2 | `floe2 gtk-service`(stdio JSON-lines). GTK 뷰어의 비-UI 판단을 Rust로 옮기고 Python 모듈을 걷어낸다. 푸시 단위(§5): P2a 열기·준비·레벨 행·덱 스펙·레이어 속성 행, P2b DRC·svrf, P2c 레이어 속성 편집·fill, P2d(P3와 함께) 오라클을 떼어 낸 뒤 Python 모듈 삭제 | P2a 0.12.329, P2b 0.12.330, P2c 0.12.331, P2d 0.12.332 |
 | P3 | KLayout 레거시를 제품 경로에서 빼고, 동결 `floe` 셸은 개발 전용 오라클(`tools/oracle/floe_oracle`)로 둔다(§6) | 0.12.333 |
-| P4 | GTK 렌더 루프를 공유 Rust `ViewController`로(§7; 사용자 승인 2026-10-10). P4a 공유 컨트롤러의 데스크톱 정책, P4b perf 줄, P4c 서비스의 뷰 채널, P4d GTK 전환, P4e 질의·미니맵, P4f 정리 | P4a 0.12.334 |
+| P4 | GTK 렌더 루프를 공유 Rust `ViewController`로(§7; 사용자 승인 2026-10-10). P4a 공유 컨트롤러의 데스크톱 정책, P4b perf 줄, P4c 서비스의 뷰 채널, P4d GTK 전환, P4e 질의·미니맵, P4f 정리 | P4a 0.12.334, P4c 0.12.335 |
 
 ## 3. 동기 규칙
 
@@ -253,3 +253,35 @@ python을 사용하지 않도록 변경해줘."
   - 단위 테스트 `desktop_esc_stops_the_frame_and_renders_again_on_the_next_change`, `desktop_render_error_is_said_and_the_view_goes_on`(웹 정책은 같은 오류로 뷰가 실패), `desktop_drain_waits_as_long_as_the_frame_takes`, `density_is_a_render_policy_and_goes_on_the_request`
   - 여백 요청의 `vw`/`vh`(기존 margin 테스트에 더함)
   - worker-client `viewport_and_density_go_on_the_wire_only_when_given`
+
+### P4c (0.12.335) — `floe2 gtk-service`의 뷰 채널
+
+P4b(perf 줄)는 따로 진행 중이다. 이 단계에서 GTK는 아직 그대로다.
+
+- **요청**(`rust/floe2/src/view.rs`):
+  - `view_open {source, levels?, mode?, width, height, patch?, margin?, frame_cache?}`는 `{view, snapshot, model}`을 돌려준다.
+    - `ManagedDataset::open`, `ViewState::initial`, 첫 패치를 거쳐 `ViewController::start_desktop(.., DesktopPolicy::desktop())`로 연다.
+    - 자원 한도는 `RenderOptions::local()`(`FLOE_RUST_*`)이 요구하는 만큼이다. 데스크톱에는 함께 쓰는 사용자가 없다.
+  - `view_edit {view, patch, base?}`: base가 없으면 현재 `state_rev`를 쓴다. 뷰를 고치는 쪽은 뷰어 하나뿐이다.
+  - `view_cancel`(Esc), `view_snapshot`, `view_close`.
+  - 패치 JSON은 웹 `PatchDto`의 이름을 그대로 쓰고 `density`를 더했다. 항목은 navigation(fit·pan·zoom·goto·minimap·band), pixels, depth·depth_step, detail, thin, layers, layer_change, frames, labels, font_px, mono, density, style_deltas, root이고, 모르는 필드는 거절한다.
+- **이벤트**(응답 사이에 한 줄씩, stdout은 줄 단위로 잠근다):
+  - 뷰마다 펌프 스레드가 5 ms 간격으로 컨트롤러를 본다.
+  - `{"event":"frame"}`: 새 전경·여백 프레임이다. 바이트(FLOERAW1 헤더 + RGBA, 또는 PNG)를 뷰 폴더(`$TMP/floe2-view-<pid>-<n>`, 0700)에 임시 이름으로 쓰고 이름을 바꾼 뒤 그 경로를 보낸다. 뷰어가 읽고 지운다. 넘기지 못한 파일은 4개까지만 남긴다.
+  - `{"event":"view"}`: 스냅숏이 바뀌었다. 상태, 단계, 카운터, `render_failure`, `cancelled_rev`가 든다.
+  - `{"event":"closed"}`.
+- **Python**(`floe/gtkservice.py`):
+  - `Service`에 읽기 스레드를 두었다. 응답은 기다리는 요청에게, 이벤트는 `events()`로 간다.
+  - `ViewSession(source, w, h, ids?, mode?, patch?, margin?, frame_cache?)`는 `edit(**patch)`, `cancel()`, `close()`, `events()`를 준다. `events()`는 다른(닫힌) 뷰의 프레임 파일을 읽지 않고 지운다.
+  - `read_frame(frame)`은 (RGBA 또는 PNG 바이트, w, h, format)을 돌려주고 파일을 지운다.
+- **renderd 수정**(공유 크레이트, 0.12.308):
+  - 컷 아래 밀도의 첫 라운드(pass 1을 먼저 보이는 `density_round=1`)의 줄에 `style_epoch`, `labels_truncated`, 그 라운드 자신의 미완료 질의 장면(`scene_gen=gen scene_round=n scene_complete=0`)을 더했다. 그전에는 프레임 줄 형식이 아니어서 공유 worker-client가 그 줄을 거절했다(`missing style_epoch`, 뷰 실패).
+  - 뒤따르는 라운드 번호도 하나씩 올라간다(전에는 두 줄 모두 `round=1`이었다).
+  - 웹은 밀도를 보낸 적이 없어 이 경로를 지나지 않았다. Python 어댑터는 라운드 번호를 읽지 않는다.
+- **게이트 `gtk_view`**(`tools/validate_gtk_view.py`, 약 3초): valmini를 `floe2 index`한 뒤 `ViewSession`으로 확인한다.
+  - 처음 열기
+  - 16 px 단위로 맞춘 이동
+  - 밀도 켜기(첫 라운드가 최종 아님 + `density_round=1`, 이어서 최종 프레임, 라운드 증가, 픽셀 6,611개가 바뀜)
+  - 여백 프레임(`viewport`=[400, 300], 더 넓음)과 그 안의 이동(새 프레임 없음, `crop_hits`)
+  - 각 프레임이 같은 상자·크기·정책의 `RustRenderWorker` 프레임과 바이트까지 같다(여백은 `bg`와 뷰포트를 넘겨).
+  - 닫으면 폴더가 사라지고, 다음 뷰가 열린다.

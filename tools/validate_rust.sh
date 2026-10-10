@@ -52,7 +52,7 @@ GATES="unit unit_vfs unit_render index_cli vfs_profile floe2 rust_scan \
 rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage \
 occupancy vfs_hier vfs_lifecycle vfs_marker vfs_split vfs_text \
 render_goldens render_speckle render_frames drc_ice svrf oasis_shapes \
-jobdeck representatives gen_main01 fit_budget sub_cut_box shape_cut write_once layer_decode area_true density_stack cell_tree index_lock worker_client cell_index rust_renderer klayout"
+jobdeck representatives gen_main01 fit_budget sub_cut_box shape_cut write_once layer_decode area_true density_stack cell_tree index_lock worker_client cell_index gtk_view rust_renderer klayout"
 # (unit_renderd is unit's renderd part, as unit_vfs and unit_render are)
 GATES=$(echo "$GATES" | sed 's/unit_render /unit_render unit_renderd /')
 alias_gates() {
@@ -74,7 +74,8 @@ alias_gates() {
 # page budget's refusal at cut 0 among them) and the picture gates.
 RENDER_GATES="unit_render unit_renderd rust_renderer jobdeck occupancy \
 fit_budget sub_cut_box shape_cut write_once layer_decode area_true \
-density_stack cell_tree index_lock representatives oasis_shapes floe2 klayout"
+density_stack cell_tree index_lock representatives oasis_shapes floe2 klayout \
+gtk_view"
 # The planner feeds every one of those, and the plan CLI's gates.
 PLAN_GATES="unit_vfs $RENDER_GATES vfs_hier vfs_lifecycle vfs_marker \
 vfs_split vfs_text vfs_profile"
@@ -153,19 +154,20 @@ gates_for() {
         rust/render-core/src/cells.rs)
             echo "unit_render cell_tree fit_budget rust_renderer" ;;
         rust/worker-client/*)
-            echo "unit worker_client" ;;
+            echo "unit worker_client gtk_view" ;;
         rust/app-core/*|rust/notices/*)
             # the application policy under the Rust command line floe2,
             # which every CLI gate runs (P1c, docs/SHARED_APP_LAYER.ko.md),
-            # and under the GTK viewer's service (DRC review: drc_ice D12)
-            echo "unit cell_index drc_ice $CLI_GATES" ;;
+            # and under the GTK viewer's service (DRC review: drc_ice D12;
+            # the view channel over the shared ViewController: gtk_view, P4c)
+            echo "unit cell_index drc_ice gtk_view $CLI_GATES" ;;
         rust/app-cli/*|rust/floe2/*)
             # the Rust command line floe2 (P1, docs/SHARED_APP_LAYER.ko.md)
-            # and the GTK viewer's service in it (P2)
-            echo "unit drc_ice $CLI_GATES" ;;
+            # and the GTK viewer's service in it (P2) with its view channel
+            echo "unit drc_ice gtk_view $CLI_GATES" ;;
         floe/gtkview.py|floe/gtkservice.py|floe/viewcli.py)
-            # the GTK viewer's entry and its service client (P2)
-            echo "floe2 rust_renderer jobdeck drc_ice" ;;
+            # the GTK viewer's entry and its service client (P2, P4c)
+            echo "floe2 rust_renderer jobdeck drc_ice gtk_view" ;;
         rust/render-core/*|rust/renderd/*|rust/render-cli/*|floe/rust_render.py)
             echo "$RENDER_GATES" ;;
         rust/dbg/*)
@@ -566,6 +568,10 @@ fi
 if gate cell_index; then RAN="$RAN cell_index"; lap cell_index
     (cd rust && FLOE_INDEX_BIN="$PWD/target/release/floe-index" cargo test --release --offline -p floe-app-core --lib cell_index &&
         FLOE_INDEX_BIN="$PWD/target/release/floe-index" cargo test --release --offline -p floe-app-core --test cell_index -- --ignored); fi
+# the GTK viewer's view channel (P4c): floe2 gtk-service over the shared
+# ViewController, frames byte-equal to the viewer's adapter
+if gate gtk_view; then RAN="$RAN gtk_view"; lap gtk_view
+    PYTHONDONTWRITEBYTECODE=1 .venv/bin/python tools/validate_gtk_view.py; fi
 # in-tree CPU renderer: Python queue contract plus independent
 # KLayout pixel oracle at deterministic serial/parallel settings
 if gate rust_renderer; then RAN="$RAN rust_renderer"; lap rust_renderer

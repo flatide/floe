@@ -12,6 +12,7 @@ is_jobdeck, ids, mode, props_src, exists(), load(), is_stale(), close().
 """
 
 import atexit
+import collections
 import json
 import os
 import subprocess
@@ -31,12 +32,16 @@ class ServiceError(RuntimeError):
 
 class Service:
     """One `floe2 gtk-service` process, started on the first request and
-    again if it ended; requests are answered in order."""
+    again if it ended. A reader thread takes its stdout: replies go to the
+    request waiting for them, the views' events (P4c) to `events()`."""
 
     def __init__(self, binary=None):
         self._binary = binary
         self._proc = None
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()       # one request on the wire at a time
+        self._cond = threading.Condition()  # replies and the reader's end
+        self._replies = {}
+        self._events = collections.deque()
         self._seq = 0
 
     def _start(self):
@@ -44,33 +49,64 @@ class Service:
         if binary is None:
             from .vfsclient import find_floe2
             binary = find_floe2()
-        self._proc = subprocess.Popen(
+        proc = subprocess.Popen(
             [binary, "gtk-service"], stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, text=True, bufsize=1)
+        self._proc = proc
+        threading.Thread(target=self._read, args=(proc,), daemon=True,
+                         name="floe2-gtk-service").start()
+
+    def _read(self, proc):
+        try:
+            for line in proc.stdout:
+                try:
+                    message = json.loads(line)
+                except ValueError:
+                    continue
+                with self._cond:
+                    if "event" in message:
+                        self._events.append(message)
+                    else:
+                        self._replies[message.get("id")] = message
+                    self._cond.notify_all()
+        except (OSError, ValueError):
+            pass
+        with self._cond:
+            self._cond.notify_all()
 
     def request(self, op, **fields):
         with self._lock:
             if self._proc is None or self._proc.poll() is not None:
                 self._start()
+            proc = self._proc
             self._seq += 1
-            fields["id"] = self._seq
+            seq = fields["id"] = self._seq
             fields["op"] = op
             try:
-                self._proc.stdin.write(json.dumps(fields) + "\n")
-                self._proc.stdin.flush()
-                line = self._proc.stdout.readline()
+                proc.stdin.write(json.dumps(fields) + "\n")
+                proc.stdin.flush()
             except OSError as exc:
                 self._proc = None
                 raise ServiceError("worker", "gtk-service: %s" % exc)
-            if not line:
-                self._proc = None
-                raise ServiceError("worker", "gtk-service ended")
-            reply = json.loads(line)
+            with self._cond:
+                while seq not in self._replies:
+                    if proc.poll() is not None:
+                        self._proc = None
+                        raise ServiceError("worker", "gtk-service ended")
+                    self._cond.wait(0.5)
+                reply = self._replies.pop(seq)
             error = reply.get("error")
             if error is not None:
                 raise ServiceError(error.get("kind", "worker"),
                                    error.get("message", "gtk-service error"))
             return reply.get("result")
+
+    def events(self):
+        """The events received since the last call, oldest first."""
+        with self._cond:
+            out = list(self._events)
+            self._events.clear()
+        return out
 
     def close(self):
         with self._lock:
@@ -559,3 +595,106 @@ def db_name_of(path):
     if name.endswith(".ice"):
         return name[:-len(".ice")] or name
     return name
+
+
+# --- the view channel (P4c, docs/SHARED_APP_LAYER.ko.md §7): a source
+# drawn through the shared Rust ViewController
+
+RAW_SIGNATURE = b"FLOERAW1"
+RAW_HEADER_LEN = 16
+
+
+class ViewSession:
+    """A source viewed through `floe2 gtk-service`'s view channel: the
+    controller decides what is drawn and when; this sends the viewer's edits
+    and hands back the frames and state changes the service announces.
+
+    `snapshot` is the latest state the service said (its `state` holds the
+    viewport, depth, detail, layers ...); `model` the source's dbu, bbox,
+    whether it is a deck, its skipped placements."""
+
+    def __init__(self, source, width, height, ids=None, mode="level",
+                 patch=None, margin=False, frame_cache=True, svc=None):
+        self._svc = svc or service()
+        result = self._svc.request(
+            "view_open", source=os.path.abspath(source), width=int(width),
+            height=int(height), levels=normalize_levels(ids), mode=mode,
+            patch=patch or None, margin=bool(margin),
+            frame_cache=bool(frame_cache))
+        self.view = result["view"]
+        self.snapshot = result["snapshot"]
+        self.model = result["model"]
+        self.closed = False
+
+    def edit(self, **patch):
+        """One edit (the controller's Patch: navigation, pixels, depth,
+        detail, thin, layers, layer_change, frames, labels, font_px, mono,
+        density, style_deltas, root); the state it made."""
+        self.snapshot = self._svc.request("view_edit", view=self.view,
+                                          patch=patch)
+        return self.snapshot
+
+    def cancel(self):
+        """Esc: the frame in progress stops."""
+        self.snapshot = self._svc.request("view_cancel", view=self.view)
+        return self.snapshot
+
+    def close(self):
+        if not self.closed:
+            self.closed = True
+            try:
+                self._svc.request("view_close", view=self.view)
+            except ServiceError:
+                pass
+
+    def events(self):
+        """This view's events since the last call: ("view", snapshot),
+        ("frame", frame), ("closed", None), ("frame_error", message). A
+        frame of another (closed) view is removed unread."""
+        out = []
+        for event in self._svc.events():
+            kind = event.get("event")
+            if event.get("view") != self.view:
+                frame = event.get("frame") or {}
+                if frame.get("path"):
+                    try:
+                        os.unlink(frame["path"])
+                    except OSError:
+                        pass
+                continue
+            if kind == "view":
+                self.snapshot = event["snapshot"]
+                out.append(("view", event["snapshot"]))
+            elif kind == "frame":
+                out.append(("frame", event["frame"]))
+            elif kind == "closed":
+                self.closed = True
+                out.append(("closed", None))
+            else:
+                out.append((kind, event.get("message")))
+        return out
+
+
+def read_frame(frame):
+    """A frame event's pixels, the file removed: (bytes, width, height,
+    format) - raw: tightly packed top-down RGBA without the header; png:
+    the file's bytes."""
+    path = frame["path"]
+    try:
+        with open(path, "rb") as f:
+            if frame.get("format") == "raw":
+                header = f.read(RAW_HEADER_LEN)
+                if not header.startswith(RAW_SIGNATURE):
+                    raise ValueError("not a raw frame")
+                w = int.from_bytes(header[8:12], "little")
+                h = int.from_bytes(header[12:16], "little")
+                data = f.read()
+                if len(data) != w * h * 4:
+                    raise ValueError("raw frame is truncated")
+                return data, w, h, "raw"
+            return f.read(), int(frame["width"]), int(frame["height"]), "png"
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass

@@ -32,6 +32,10 @@
 //!   drc_cd {handle, check, error}       CD ruler segments, um
 //!   drc_close {handle}
 //!   svrf_rules {path}, svrf_operands {rhs}
+//!
+//! The view channel (P4c; rust/floe2/src/view.rs - the shared
+//! ViewController): view_open, view_edit, view_cancel, view_snapshot,
+//! view_close, and the `{"event": ...}` lines a view sends between replies.
 use floe_app_core::{
     dataset::Dataset,
     desktop,
@@ -41,7 +45,7 @@ use floe_app_core::{
 };
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{BufRead, Write};
+use std::io::BufRead;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
@@ -517,7 +521,9 @@ pub fn run() -> i32 {
     let cancelled = AtomicUsize::new(0);
     let mut specs = Specs::default();
     let stdin = std::io::stdin();
-    let mut out = std::io::stdout().lock();
+    // replies and the views' events share stdout a line at a time
+    let out = std::sync::Arc::new(crate::view::Out::new());
+    let mut views = crate::view::Views::new(std::sync::Arc::clone(&out));
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
         if line.trim().is_empty() {
@@ -526,7 +532,13 @@ pub fn run() -> i32 {
         let reply = match serde_json::from_str::<Value>(&line) {
             Ok(request) => {
                 let id = request.get("id").cloned().unwrap_or(Value::Null);
-                match handle(&request, &mut specs, &cancelled) {
+                let op = request.get("op").and_then(Value::as_str).unwrap_or("");
+                let result = if op.starts_with("view_") {
+                    views.handle(op, &request, &cancelled)
+                } else {
+                    handle(&request, &mut specs, &cancelled)
+                };
+                match result {
                     Ok(result) => json!({"id": id, "result": result}),
                     Err(e) => {
                         json!({"id": id, "error": {"kind": kind_name(e.kind), "message": e.message}})
@@ -537,9 +549,9 @@ pub fn run() -> i32 {
                 json!({"id": null, "error": {"kind": "input", "message": format!("not a JSON request: {e}")}})
             }
         };
-        if writeln!(out, "{reply}").and_then(|_| out.flush()).is_err() {
-            break;
-        }
+        out.line(&reply);
     }
+    // the views' workers end with the service
+    drop(views);
     0
 }

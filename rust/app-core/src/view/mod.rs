@@ -20,7 +20,7 @@ use crate::{
     Error, ErrorKind, Result,
 };
 pub use controller::{
-    cell_failure, CellWait, ControllerOptions, DisplayFrame, MarginStatus, Phase,
+    cell_failure, CellWait, ControllerOptions, DesktopPolicy, DisplayFrame, MarginStatus, Phase,
     PreparedReplacement, Purpose, ReservedView, Snapshot, ViewController,
 };
 pub use fill_slots::FillSlotEdit;

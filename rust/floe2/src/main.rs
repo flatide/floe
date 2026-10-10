@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 mod gtk;
 mod service;
+mod view;
 
 use floe_app_cli::Host;
 use std::ffi::OsString;
