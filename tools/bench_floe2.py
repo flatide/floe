@@ -23,13 +23,14 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (P3)
 
 # Product/backend selection happens in main() before any worker spawns:
 # --backend rust imports floe2 (Rust-only product), --backend klayout keeps
 # the stable floe product so the same trace drives the KLayout service.
 from floe import __version__  # noqa: E402
-from floe.cache import Cache  # noqa: E402
-from floe.service import DEFAULT_DETAIL, DETAIL_LEVELS, DETAIL_PX  # noqa: E402
+from floe_oracle.cache import Cache  # noqa: E402
+from floe_oracle.service import DEFAULT_DETAIL, DETAIL_LEVELS, DETAIL_PX  # noqa: E402
 
 
 PHASE_FIELDS = (
@@ -378,7 +379,7 @@ def benchmark_session(cache, trace, args, jobs, run_number):
     if args.backend == "klayout":
         # The stable service runs its pinned single C++ raster; the jobs
         # sweep only labels the session.
-        from floe.service import make_render_worker
+        from floe_oracle.service import make_render_worker
         worker = make_render_worker(cache)
     else:
         os.environ["FLOE_RUST_JOBS"] = str(decode_jobs)

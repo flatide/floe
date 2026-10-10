@@ -1,6 +1,7 @@
 #!/bin/sh
 # Shared floe/floe2 portable launcher. The installed basename selects the
-# product; make_portable.sh only installs floe where KLayout is bundled.
+# product; make_portable.sh only installs floe where KLayout is bundled (the
+# development bundle: floe is the frozen shell, the floe_oracle package).
 PRODUCT=${0##*/}
 case "$PRODUCT" in
     floe | floe2) ;;
@@ -67,10 +68,10 @@ if [ -n "${FLOE_XQUARTZ:-}" ]; then
 fi
 # floe2 is the Rust command line (runtime/bin/floe2, P1c); it starts the
 # GTK viewer through this runtime's interpreter. The frozen floe (KLayout
-# bundle only) is the Python package's own command line.
+# bundle only) is the dev-only oracle's command line (floe_oracle, P3).
 if [ "$PRODUCT" = floe2 ]; then
     FLOE_GTK_PYTHON="$RT/bin/python3"
     export FLOE_GTK_PYTHON
     exec "$RT/bin/floe2" "$@"
 fi
-exec "$RT/bin/python3" -m "$PRODUCT" "$@"
+exec "$RT/bin/python3" -m floe_oracle "$@"

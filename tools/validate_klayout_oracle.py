@@ -188,7 +188,7 @@ def _save_klayout_style(source, output, view, width, height, visible,
                         mono, fills, widths):
     import klayout.db as db
 
-    from floe.render import Renderer
+    from floe_oracle.render import Renderer
 
     layout = db.Layout(False)
     layout.read(str(source))
@@ -438,6 +438,7 @@ def main():
     _require_executable(indexer, "floe-index")
     _require_executable(renderer, "floe-render-cli")
     sys.path.insert(0, str(parent))
+    sys.path.insert(0, str(parent / "tools" / "oracle"))  # floe_oracle (P3)
     parent_oracle = _load_parent_goldens(parent)
 
     ephemeral = args.workdir is None

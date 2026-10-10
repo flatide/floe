@@ -20,7 +20,7 @@ python을 사용하지 않도록 변경해줘."
 | app-core `drc::desktop` | 데스크톱 뷰어의 DRC 리뷰(P2b): GTK가 써 온 Python IcePack의 리뷰 동작 그대로 — 클릭마다 상태 바이트·규칙 카운터를 제자리에 씀, 다른 실행의 사이드카는 `.stale-<epoch>`로 옮기고 팩의 내장 섹션으로 새로 만듦, 쓸 수 없는 결과 폴더는 임시 폴더(경로 해시 이름), 그것도 안 되면 팩 안, 노트는 고칠 때마다 통째로 쓰고 마지막 노트가 없어지면 파일을 지움, Python이 쓴 줄을 너그럽게 읽음. 팩·ASCII 묶음 `Opened`(load_db 규칙, 검사 행, 오류 페이지, CD 선분) | 공유 |
 | app-core `desktop` | 데스크톱 뷰어가 그리기 전에 묻는 것: 열 수 있는지(`ready`: 준비·현재성·누가 재색인 중인지), 레이아웃 meta(모든 키 + 색), 빈 레이어 목록 규칙(`list_layers`·안내 줄), layerprops 행(P2a) | 공유 |
 | `app-cli` | 웹이 없는 CLI 명령: index·info·render·probe·clip·jobdeck·drc·svrf·fe-embed·selfcheck. webui `rust/app/src`에서 웹 명령을 뺀 것. 프로그램 이름과 입력 오류의 종료 코드는 실행 파일이 정한다(`Host`의 `name`·`input_error_exit`, `floe_app_core::set_program`; 기본 floe2-web·2) | 공유(P1a; webui의 `floe2-web`이 이 크레이트를 쓰도록 바꾸는 일은 webui 쪽에서) |
-| `floe2` | jobdeck의 제품 명령줄(P1c부터 유일한 floe2 CLI): 공유 CLI 명령 + `view`(그리고 인자 없음·소스만)는 GTK 뷰어(`python -m floe.gtkview`). 버전 = `floe/__init__.py`의 `__version__`. 입력 오류 exit 1(Python CLI와 같음) | jobdeck만 |
+| `floe2` | jobdeck의 제품 명령줄(P1c부터 유일한 floe2 CLI): 공유 CLI 명령 + `view`(그리고 인자 없음·소스만)·`gtktest`는 GTK 뷰어(`python -m floe.gtkview`). 버전 = `floe/__init__.py`의 `__version__`. 입력 오류 exit 1(Python CLI와 같음) | jobdeck만 |
 | `app`(`floe2-web`), `web`, `packager`, `electron/`, `desktop/` | 웹 CLI·서버·데스크톱 | webui만 |
 
 - **공용 크레이트의 webui 변경 가운데 jobdeck이 새로 받은 것(P0):**
@@ -45,7 +45,7 @@ python을 사용하지 않도록 변경해줘."
 | P1b | 빠진 기능을 Rust로(G1, G3~G8; §4). G2 밀도 요청·G9 `phase=render`는 `view`만 쓰므로 P2·P4로 미룸 | 0.12.328 |
 | P1c | 게이트·배포·별칭을 Rust `floe2`로 바꾸고 Python `floe2/` 패키지를 지운다(§4) | 0.12.328 |
 | P2 | `floe2 gtk-service`(stdio JSON-lines). GTK 뷰어의 비-UI 판단을 Rust로 옮기고 Python 모듈을 걷어낸다. 푸시 단위(§5): P2a 열기·준비·레벨 행·덱 스펙·레이어 속성 행, P2b DRC·svrf, P2c 레이어 속성 편집·fill, P2d(P3와 함께) 오라클을 떼어 낸 뒤 Python 모듈 삭제 | P2a 0.12.329, P2b 0.12.330, P2c 0.12.331, P2d 0.12.332 |
-| P3 | KLayout 레거시를 제품 경로에서 빼고, 동결 `floe` 셸은 개발 전용 오라클로 둔다 | 예정 |
+| P3 | KLayout 레거시를 제품 경로에서 빼고, 동결 `floe` 셸은 개발 전용 오라클(`tools/oracle/floe_oracle`)로 둔다(§6) | 0.12.333 |
 | P4 | (선택) GTK 렌더 루프를 Rust `ViewController`로 | 별도 승인 |
 
 ## 3. 동기 규칙
@@ -153,4 +153,53 @@ python을 사용하지 않도록 변경해줘."
 - **강제:**
   - jobdeck `GuiSmokeTests`: 실제 창(덱 세 번, 레이아웃 + `--drc` 한 번)을 import 차단기 아래에서 연다. 차단기는 cache, cachepath, indexlock, drc, svrf, jobdeck, shots, fe_embed, render, viewport, coverage, view_policy, cli, service, klayout을 import할 수 없게 한다. 리뷰 사이드카는 서비스가 쓴다.
   - floe2 게이트: 번들 목록이 뷰어가 불러오는 floe 모듈을 모두 담고 오라클 모듈은 하나도 담지 않는다.
-- **남은 것(P3):** 오라클 모듈은 아직 floe/ 안에 있다. 게이트가 KLayout 오라클과 대조 기준으로 쓰기 때문이다. P3에서 개발 전용 패키지로 옮기고 게이트 import를 바꾼다.
+- **남은 것(P3):** 오라클 모듈은 아직 floe/ 안에 있다. 게이트가 KLayout 오라클과 대조 기준으로 쓰기 때문이다. → P3(§6)에서 개발 전용 패키지로 옮겼다.
+
+## 6. P3 (0.12.333) — 동결 floe 셸은 개발 전용 오라클 패키지로
+
+- **옮긴 것:** `floe/`에 남아 있던 동결 셸과 Python 기준 구현을 `tools/oracle/floe_oracle/`로 옮겼다(`git mv`라 이력이 이어진다).
+  - 대상: `__main__`, cli, cache, cachepath, indexlock, drc, svrf, shots, fe_embed, render, viewport, coverage, view_policy, service, `jobdeck/*`
+  - vfsd 클라이언트(`VfsClient`)는 `floe_oracle/vfsclient.py`로 갔다. 실행 파일 찾기(`find_binary`, `find_floe2`)는 제품의 `floe/vfsclient.py`에 남는다.
+- **`floe/`에 남은 것:** 뷰어 파일 13개다.
+  - `__init__`, gtkview, viewcli, gui, gtkservice, rust_render, vfsclient, instance, product, hangul, fillpat, `colornames.def`, `fillpatterns.def`
+  - 번들의 `FLOE2_PRODUCT_FILES`와 같다. floe2 게이트가 `git ls-files floe`와 맞춰 본다.
+- **제품 코드에서 지운 것:**
+  - gui.py의 동결 floe 분기: Python 캐시·덱 열기, 색인 잠금 확인, 레벨 행, `floe-index vfs` 직접 색인, KLayout 밀도 커버리지(`v`, `cov:`)
+  - rust_render.py의 KLayout 워커 선택: `make_render_worker`는 Rust만 쓰고, `FLOE_RENDERER`가 rust가 아니면 거절한다.
+  - `floe.cache`로 layerprops를 읽던 대체 경로: 캐시가 `layer_props()`를 준다. 오라클의 `Cache`·`DeckCache`도 같은 메서드를 갖는다.
+  - product.py는 floe2만 안다. `FLOE_PRODUCT`는 제품에서 아무것도 고르지 않는다(값이 floe여도 창·소켓은 floe2).
+- **오라클 실행:** `python -m floe_oracle CMD`는 옛 `python -m floe CMD`다. `PYTHONPATH`에 `tools/oracle`과 체크아웃을 둔다.
+  - 명령: index(`--legacy` `.tiles` 포함), info, render, clip, probe, profile, drc, svrf, jobdeck
+  - KLayout과 Rust 중 무엇으로 그릴지는 `floe_oracle.service.make_render_worker`가 정한다. 동결 셸의 기본은 KLayout이고, Rust를 고르면 제품의 워커를 쓴다.
+  - 버전은 제품의 것을 쓴다.
+- **오라클에서 뺀 것 — 뷰어(`view`)와 `gtktest`:**
+  - 뷰어는 제품의 것(`floe2 view`) 하나다. 계획에 적었던 "KLayout 비교용 gui 사본"은 만들지 않았다.
+  - 이유: 어떤 게이트도 그 사본을 돌리지 않는다. 그러면 10,600줄 사본이 제품 gui·rust_render와 따로 놀다 소리 없이 깨진다.
+  - KLayout 대조는 다음으로 계속한다: `python -m floe_oracle render`(KLayout) 대 `floe2 render`(Rust)의 PNG, 그리고 게이트의 KLayout 픽셀 오라클(render_goldens, render_speckle, render_frames, klayout, rust_renderer).
+  - 동결 KLayout 뷰어는 floe-legacy 브랜치에 있다.
+- **`floe2 gtktest [PNG]`:** 동결 셸의 GTK 표시 점검(검은 화면 진단)을 뷰어 진입점(floe/viewcli.py)으로 옮겼다.
+  - P1c 뒤로 Rust floe2는 이 단어를 소스 이름으로 뷰어에 넘겼다. README가 안내하던 명령이 사라져 있었던 것을 되살린 것이다.
+  - `floe2 --help`에도 적었다.
+- **게이트:**
+  - 오라클을 쓰는 게이트 24개(validate_*)와 벤치·실험 도구 8개가 `floe_oracle`을 import한다(`tools/oracle`을 경로에 더함).
+  - `-m floe`를 쓰던 곳은 `-m floe_oracle`로 바꿨다: index_cli, drc_ice의 `--floe-reviewer`, bench_warm, validate_rust.sh의 레거시 `.tiles` 빌드.
+  - rust_renderer의 view 테스트는 제품의 floe/viewcli.py를 부른다.
+  - jobdeck `GuiSmokeTests`: 오라클을 `PYTHONPATH`에 둔 채 차단기가 `floe_oracle`과 `klayout` 전체를 막는다.
+  - floe2 게이트가 새로 확인하는 것:
+    - 제품 패키지가 `python -m floe`로 실행되지 않는다.
+    - 뷰어의 정체성이 `FLOE_PRODUCT`가 없거나 floe·floe2여도 floe2다.
+    - floe/ 파일이 번들 목록과 같다.
+    - floe/의 모든 import(함수 안 지연 import 포함, AST)가 뷰어 모듈·오라클·KLayout 밖을 가리키지 않는다.
+    - `floe2 gtktest`가 뷰어 진입점에 닿는다.
+  - validate_rust.sh `--changed` 매핑은 오라클 경로를 따른다. 오라클의 cache·cachepath를 바꾸면 전체 배터리가 돈다.
+- **번들:**
+  - 기본 floe2 번들은 그대로다(뷰어 파일만). 기본 번들에 `floe_oracle`이 들어 있으면 검증이 실패한다.
+  - 개발용 KLayout 번들(`FLOE_PORTABLE_KLAYOUT=1`)은 `floe_oracle`을 함께 싣는다. `floe` 런처는 `python -m floe_oracle`을 부르고(명령만), selfcheck가 이를 확인한다.
+- **다른 문서의 경로:** `floe/cache.py`, `floe/drc.py`, `floe/jobdeck/…` 같은 경로는 쓰인 때의 위치다. 지금은 `tools/oracle/floe_oracle/` 아래에 있다. 뷰어 파일(gui.py, rust_render.py 등)은 그대로 floe/에 있다.
+- **현장 영향:**
+  - 제품(`floe2`·`floe-index`·`floe-renderd`와 GTK 뷰어)의 명령·출력·종료 코드는 바뀌지 않았다.
+  - `floe2 gtktest`가 다시 동작한다.
+  - 개발 체크아웃의 `python -m floe`는 `python -m floe_oracle`(뷰어 없음)이 됐다.
+- **공유 크레이트 변경(webui 병합 때 참고):** app-core `Error::opening(e, what, path)` — 열 수 없는 파일의 I/O 오류가 경로를 말한다. 없는 파일이면 `source not found: PATH`(`cache::fingerprint`), `jobdeck not found: PATH`(`JobDeck::read`)다. 종류는 그대로 Io다.
+  - 그전에는 `No such file or directory (os error 2)`만 나왔다. `floe2 info`·`render`·`view`, 그리고 floe2 뷰어의 열기(서비스)가 모두 그랬다(P1c·P2a 이후).
+  - jobdeck 게이트 `LoadingBannerTests`가 P3에서 floe2 경로로 돌면서 드러났다(전에는 동결 floe 경로가 "no VFS cache"를 말했다).

@@ -187,6 +187,12 @@ class DeckCache:
         except OSError:
             return True
 
+    def layer_props(self):
+        """The view's design-default layerprops rows (the product's
+        renderer reads them; floe/gtkservice.py ServiceCache's)."""
+        from ..cache import load_layer_props
+        return load_layer_props(self.props_src)[0]
+
     @property
     def props_src(self) -> str:
         """The path layerprops are keyed by. Each view has its own key

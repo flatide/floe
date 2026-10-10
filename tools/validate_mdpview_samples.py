@@ -14,8 +14,9 @@ import klayout.db as db
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from floe.jobdeck.parser import parse_jobdeck
-from floe.jobdeck.plan import plan_deck
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (P3)
+from floe_oracle.jobdeck.parser import parse_jobdeck
+from floe_oracle.jobdeck.plan import plan_deck
 from gen_mdpview_samples import generate
 
 

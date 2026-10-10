@@ -1,6 +1,6 @@
 """`floe2 view`: the GTK viewer's command line (docs/SHARED_APP_LAYER.ko.md
-P2d). The Rust `floe2 view` starts it (`python -m floe.gtkview`); the frozen
-floe shell keeps its own in floe/cli.py. Every decision about a source -
+P2d). The Rust `floe2 view` starts it (`python -m floe.gtkview`), and
+`floe2 gtktest`, the GTK display check. Every decision about a source -
 whether it opens as it is, its cache, a deck's plan - is floe2
 gtk-service's (floe/gtkservice.py); this parses the options, forwards to a
 running window or starts one."""
@@ -390,14 +390,84 @@ def parser():
     return p
 
 
+def gtktest(argv):
+    """`floe2 gtktest [PNG]`: a minimal pixbuf-display matrix for
+    diagnosing a black view. Three panels: (a) pixbuf loaded from a PNG
+    file, (b) pixbuf synthesized in memory the way the viewer composes
+    frames, (c) the synthesized pixbuf inside the viewer's
+    Overlay/ScrolledWindow containment. Report which panels show content."""
+    ap = argparse.ArgumentParser(
+        prog="floe2 gtktest",
+        description="minimal pixbuf display test (diagnoses a black view)")
+    ap.add_argument("png", nargs="?", default=None,
+                    help="optional PNG to show as the from-file panel")
+    args = ap.parse_args(argv)
+    from . import gui as g
+    g.import_gtk()
+    Gtk, GdkPixbuf = g.Gtk, g.GdkPixbuf
+    print("[gtktest] GTK %d.%d.%d" % (Gtk.MAJOR_VERSION, Gtk.MINOR_VERSION,
+                                      Gtk.MICRO_VERSION))
+
+    def synth():
+        pb = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8,
+                                  360, 160)
+        pb.fill(0x000000FF)
+        for i, col in enumerate((0xFF3333FF, 0x33FF33FF, 0x3333FFFF,
+                                 0xFFFF33FF)):
+            g.fill_rect(pb, 20 + i * 85, 30, 70, 100, col)
+        return pb
+
+    win = Gtk.Window(title="floe2 gtktest")
+    win.connect("delete-event", Gtk.main_quit)
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+    win.add(box)
+    box.pack_start(Gtk.Label(label="(text) if you can read this, "
+                             "widget/text rendering works"),
+                   False, False, 4)
+
+    def panel(title, widget):
+        box.pack_start(Gtk.Label(label=title), False, False, 0)
+        box.pack_start(widget, False, False, 0)
+
+    if args.png and os.path.isfile(args.png):
+        img_a = Gtk.Image()
+        img_a.set_from_pixbuf(
+            GdkPixbuf.Pixbuf.new_from_file(args.png)
+            .scale_simple(360, 160, GdkPixbuf.InterpType.BILINEAR))
+        panel("(a) pixbuf loaded from file:", img_a)
+    img_b = Gtk.Image()
+    img_b.set_from_pixbuf(synth())
+    panel("(b) pixbuf synthesized in memory (4 color bars):", img_b)
+    overlay = Gtk.Overlay()
+    sc = Gtk.ScrolledWindow()
+    sc.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+    img_c = Gtk.Image()
+    img_c.set_halign(Gtk.Align.START)
+    img_c.set_valign(Gtk.Align.START)
+    img_c.set_from_pixbuf(synth())
+    sc.add(img_c)
+    overlay.add(sc)
+    overlay.set_size_request(380, 170)
+    panel("(c) same bars inside Overlay+ScrolledWindow (viewer's tree):",
+          overlay)
+    win.show_all()
+    print("[gtktest] window up - report which of (a)/(b)/(c) show "
+          "content; close the window to exit")
+    Gtk.main()
+
+
 def main(argv=None):
-    """`floe2 view ARGS`."""
+    """`floe2 view ARGS`; `floe2 gtktest [PNG]` (the Rust floe2 passes a
+    word it does not know to this entry as it is)."""
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ["gtktest"]:
+        return gtktest(argv[1:])
     backend = os.environ.get("FLOE_RENDERER", "rust").strip().lower() or "rust"
     if backend != "rust":
         raise SystemExit("floe2 is Rust-only; FLOE_RENDERER=%r is not "
                          "supported" % backend)
     os.environ["FLOE_RENDERER"] = "rust"
-    args = parser().parse_args(sys.argv[1:] if argv is None else argv)
+    args = parser().parse_args(argv)
     reviewer = getattr(args, "floe_reviewer", None)
     if reviewer is not None:
         reviewer = reviewer.strip()

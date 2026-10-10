@@ -59,8 +59,9 @@ import tempfile
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path.insert(0, ROOT)
-from floe import drc  # noqa: E402
-from floe import svrf as reader  # noqa: E402
+sys.path.insert(0, os.path.join(ROOT, "tools", "oracle"))  # floe_oracle (P3)
+from floe_oracle import drc  # noqa: E402
+from floe_oracle import svrf as reader  # noqa: E402
 
 BIN = os.path.join(ROOT, "rust", "target", "release", "floe-index")
 # the product command line: the Rust `floe2` (rust/floe2; the Python

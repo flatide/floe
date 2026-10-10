@@ -23,8 +23,9 @@ FLOE2 = os.environ.get("FLOE2_BIN") or str(ROOT / "rust" / "target" / "release" 
 # its own gate tools/validate_area_true.py) is pinned off for every worker.
 os.environ["FLOE_RUST_AREA_TRUE"] = "off"
 sys.path.insert(0, str(ROOT))
-from floe.cachepath import vfs_cache_dir
-from floe.cache import Cache
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (P3)
+from floe_oracle.cachepath import vfs_cache_dir
+from floe_oracle.cache import Cache
 from floe.rust_render import RustRenderWorker
 
 

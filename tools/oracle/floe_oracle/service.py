@@ -41,10 +41,11 @@ _PICK_CAP = 64    # max candidates per pick query
 # drawing everything at a wide view has no realistic performance
 # and exposed the frame-cap throttle artifact, so the coarsest
 # reachable level is "low".
-# the viewer's detail levels and the worker factory are the product's
-# (floe/rust_render.py, P2d); named here for the frozen shell's callers
-from .rust_render import (DETAIL_LEVELS, DETAIL_PX,  # noqa: E402,F401
-                          DEFAULT_DETAIL, make_render_worker)
+# the viewer's detail levels are the product's (floe/rust_render.py, P2d);
+# named here for the frozen shell's callers (make_render_worker below
+# picks KLayout or the product's Rust worker)
+from floe.rust_render import (DETAIL_LEVELS, DETAIL_PX,  # noqa: E402,F401
+                              DEFAULT_DETAIL)
 CUT_PX = DETAIL_PX[DEFAULT_DETAIL]
 
 # a streamed view completes within this many rounds: the last one
@@ -653,7 +654,7 @@ def _apply_personal_fills(cache, renderer):
     (if a file sits next to the source) so the first frame
     already matches."""
     try:
-        from .fillpat import fill_index, default_patterns
+        from floe.fillpat import fill_index, default_patterns
         rows, _ = cache_mod.load_layer_props(cache.src)
         if not rows:
             return
@@ -836,7 +837,30 @@ def _render_service(src, req, res, latest=None, options=None):
             vc.stop()
 
 
-# moved to floe/rust_render.py (P2d): the product's worker factory
+def make_render_worker(cache, stream_kb=None, stream_target_ms=500,
+                       debug=False):
+    """The frozen shell's render backend: FLOE_RENDERER, else its product's
+    default (product.py: KLayout for floe, Rust for floe2). The Rust worker
+    is the product's (floe/rust_render.py); a jobdeck - a renderd composite
+    - draws with Rust alone."""
+    from .product import default_renderer
+    backend = os.environ.get(
+        "FLOE_RENDERER", default_renderer()).strip().lower()
+    backend = backend or default_renderer()
+    if backend == "klayout":
+        if getattr(cache, "is_jobdeck", False):
+            raise RuntimeError(
+                "a jobdeck needs the Rust renderer (floe2)")
+        return RenderWorker(cache, stream_kb=stream_kb,
+                            stream_target_ms=stream_target_ms, debug=debug)
+    if backend != "rust":
+        raise RuntimeError(
+            "FLOE_RENDERER must be klayout or rust, got %r" % backend)
+    # FLOE_RENDERER is rust or unset here, as the product's factory takes it
+    from floe.rust_render import make_render_worker as rust_worker
+    return rust_worker(cache, stream_kb=stream_kb,
+                       stream_target_ms=stream_target_ms, debug=debug)
+
 
 class RenderWorker:
     """Runs the klayout render service in a separate process."""

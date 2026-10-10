@@ -133,7 +133,7 @@ floe2는 **최초 1회 인덱싱**으로 이 비용을 지불하고, 이후 모�
 # floe2 view가 체크아웃의 .venv python으로 floe.gtkview를 띄운다.
 (cd rust && cargo build --release)          # floe2, floe-index, floe-renderd
 alias floe2="$PWD/rust/target/release/floe2"  # 제품
-alias floe=".venv/bin/python -m floe"    # 개발 전용: 동결된 KLayout 셸 (oracle·선행 검증)
+alias floe="env PYTHONPATH=$PWD/tools/oracle:$PWD .venv/bin/python -m floe_oracle"  # 개발 전용: 동결 KLayout 셸(오라클, 명령만 - P3)
 # tcsh: alias floe2 /path/to/floe2/rust/target/release/floe2
 
 floe2 index data/testchip_1g5.oas          # 1회: 공유 .<src>.ice/ 생성(소스 옆 숨김 폴더)
@@ -371,7 +371,7 @@ Calibre가 `DRC RESULTS DATABASE "out.db" ASCII`로 쓰는 **ASCII 결과
   edge = 선분 + 끝점 표시). `Esc` 로 마커 삭제.
 - **`n` / `p`** = 다음/이전 에러로 순차 이동 (창의 prev/next 버튼과 동일,
   전체 에러를 룰 순서로 순회하며 트리 선택도 따라온다).
-- 파서(`floe/drc.py`)는 순수 파이썬으로 포맷 오차에 관대하다: CRLF/빈 줄
+- 파서(Rust app-core `drc`; 동결 Python 구현은 오라클 `tools/oracle/floe_oracle/drc.py`)는 포맷 오차에 관대하다: CRLF/빈 줄
   무시, 선언 카운트는 참고만, 모르는 레코드 문자는 건너뜀, 잘린 파일은
   파싱된 부분까지 사용. 포맷: `p <n> <꼭짓점수>` + 줄당 `x y`,
   `e <n> <엣지수>` + 줄당 `x1 y1 x2 y2` (정수, um = 값/precision).
@@ -761,7 +761,8 @@ python3 -c 'import gi; gi.require_version("Gtk", "3.0")'   # GUI 사전 확인
 python3 -m venv --system-site-packages .venv               # gi가 보이게
 .venv/bin/pip install --no-index --find-links wheels/ numpy pillow
 # rollback/oracle 환경만 별도로 klayout wheel을 설치
-# floe/ 디렉토리 복사 후: .venv/bin/python -m floe ...
+# floe/(GTK 뷰어)와 Rust 바이너리(floe2·floe-index·floe-renderd) 복사 후:
+#   FLOE_GTK_PYTHON=$PWD/.venv/bin/python floe2 view ...
 ```
 
 **주의 — PyGObject/pycairo를 pip으로 설치하지 말 것.** pip은 meson 소스

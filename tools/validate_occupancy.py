@@ -52,7 +52,8 @@ os.environ["FLOE_RUST_AREA_TRUE"] = "off"
 # switch workers still set =off, and RenderTests checks the default.
 os.environ["FLOE_RUST_OCCUPANCY"] = "on"
 sys.path.insert(0, str(ROOT))
-from floe.cachepath import vfs_cache_dir  # noqa: E402
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (P3)
+from floe_oracle.cachepath import vfs_cache_dir  # noqa: E402
 BIN = ROOT / "rust" / "target" / "release" / "floe-index"
 # the product command line: the Rust `floe2` (rust/floe2; the Python
 # floe2 CLI is gone - docs/SHARED_APP_LAYER.ko.md P1c)
@@ -1268,7 +1269,7 @@ class RenderTests(unittest.TestCase):
     @classmethod
     def _start_worker(cls):
         sys.path.insert(0, str(ROOT))
-        from floe.cache import Cache
+        from floe_oracle.cache import Cache
         from floe.rust_render import RustRenderWorker
         cache = Cache(str(cls.src))
         cache.load()
@@ -1498,7 +1499,7 @@ class RenderTests(unittest.TestCase):
         cache = index_with_occupancy(src, 4)
         os.environ["FLOE_RUST_OCCUPANCY"] = "on"
         sys.path.insert(0, str(ROOT))
-        from floe.cache import Cache
+        from floe_oracle.cache import Cache
         from floe.rust_render import RustRenderWorker
         c = Cache(str(src))
         c.load()
@@ -2026,7 +2027,7 @@ class SubCutTests(unittest.TestCase):
 
     @classmethod
     def _worker(cls):
-        from floe.cache import Cache
+        from floe_oracle.cache import Cache
         from floe.rust_render import RustRenderWorker
         cache = Cache(str(cls.src))
         cache.load()
@@ -2239,9 +2240,9 @@ class DeckRenderTests(unittest.TestCase):
 
     @classmethod
     def _workers(cls):
-        from floe.jobdeck.viewer import DeckCache
-        from floe.jobdeck import render as jrender
-        from floe.cache import Cache
+        from floe_oracle.jobdeck.viewer import DeckCache
+        from floe_oracle.jobdeck import render as jrender
+        from floe_oracle.cache import Cache
         from floe.rust_render import RustRenderWorker
         dc = DeckCache(str(cls.dir / "wide.jb"), mode="level")
         dc.load()

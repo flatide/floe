@@ -68,6 +68,7 @@ import klayout.db as db
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (P3)
 os.environ["FLOE_RENDERER"] = "rust"
 BIN = ROOT / "rust" / "target" / "release" / "floe-index"
 RENDERD = ROOT / "rust" / "target" / "release" / "floe-renderd"
@@ -83,7 +84,7 @@ os.environ["FLOE_REVIEWER"] = HOLDER
 os.environ.pop("FLOE_LOCK", None)
 os.environ.pop("FLOE_LOCK_WHAT", None)
 
-from floe import cachepath, indexlock  # noqa: E402
+from floe_oracle import cachepath, indexlock  # noqa: E402
 
 
 def run_env(**extra):
@@ -138,7 +139,7 @@ def snapshot(folder):
 
 
 def open_worker(src):
-    from floe.cache import Cache
+    from floe_oracle.cache import Cache
     from floe.rust_render import RustRenderWorker
     c = Cache(str(src))
     c.load()
@@ -213,7 +214,7 @@ class IndexLockTests(unittest.TestCase):
             self.assertIn("pid %d" % os.getpid(), line, name)
             self.assertIn("(gate_holder run)", line, name)
         # the wrapper's clean-up of a failed run leaves another run's file
-        from floe import cli
+        from floe_oracle import cli
         cli._discard_occupancy_tmp(str(self.cache))
         self.assertTrue(ovo_tmp.exists())
         lock.close()
@@ -251,7 +252,7 @@ class IndexLockTests(unittest.TestCase):
 
     def test_k3_a_whole_rebuild_refuses_its_readers(self):
         self.hold(full=True)
-        from floe.cache import Cache
+        from floe_oracle.cache import Cache
         from floe.rust_render import RustRenderWorker
         c = Cache(str(self.src))
         c.load()
@@ -277,7 +278,7 @@ class IndexLockTests(unittest.TestCase):
         (d / "lock.jb").write_text(DECK)
         floe2("index", d / "lock.jb", "--jobs", "2", ok=0)
         self.hold(full=True, target=cachepath.vfs_cache_dir(str(d / "srcB.oas")))
-        from floe.jobdeck.viewer import DeckCache
+        from floe_oracle.jobdeck.viewer import DeckCache
         deck = DeckCache(str(d / "lock.jb"))
         deck.load()
         self.addCleanup(deck.close)
@@ -285,7 +286,7 @@ class IndexLockTests(unittest.TestCase):
         self.assertTrue(busy, deck.ledger)
         self.assertIn("srcB.oas is being indexed by %s" % HOLDER, busy[0]["detail"])
         self.assertFalse([r for r in deck.ledger if r["tc"] == "srcA.oas"])
-        from floe.service import make_render_worker
+        from floe_oracle.service import make_render_worker
         w = make_render_worker(deck)
         w.start()
         w.stop()
@@ -363,7 +364,7 @@ class IndexLockTests(unittest.TestCase):
         while "--hold-at locked" not in line:
             line = held.stderr.readline()
             self.assertTrue(line or held.poll() is None, "the run ended early")
-        from floe.cache import Cache
+        from floe_oracle.cache import Cache
         from floe.rust_render import RustRenderWorker
         c = Cache(str(self.src))
         c.load()
@@ -579,7 +580,7 @@ class PackLockTests(unittest.TestCase):
         os.environ.pop("FLOE_LOCK_RETRY_MS", None)
 
     def test_k8_a_review_holding_the_pack_refuses_a_repack(self):
-        from floe import drc
+        from floe_oracle import drc
         review = drc.load_db(str(self.db))
         self.assertIsInstance(review, drc.IcePack)
         try:
@@ -593,7 +594,7 @@ class PackLockTests(unittest.TestCase):
         floe_index("drc", self.db, ok=0)
 
     def test_k8_the_pack_build_lock_refuses_drc_and_its_readers(self):
-        from floe import drc
+        from floe_oracle import drc
         before = self.pack.read_bytes()
         lock = indexlock.try_writer(indexlock.PACK, str(self.pack), full=True,
                                     what="gate_holder pack", create=True)

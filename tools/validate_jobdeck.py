@@ -39,14 +39,15 @@ FLOE2 = os.environ.get("FLOE2_BIN") or str(ROOT / "rust" / "target" / "release" 
 # pinned off for every worker of this gate.
 os.environ["FLOE_RUST_AREA_TRUE"] = "off"
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (P3)
 
-from floe import jobdeck as jd                       # noqa: E402
-from floe.jobdeck import color as jcolor             # noqa: E402
-from floe.jobdeck import geom as jgeom               # noqa: E402
-from floe.jobdeck.sources import file_header         # noqa: E402
-from floe.cache import Cache                         # noqa: E402
-from floe.cachepath import vfs_cache_dir, pack_path  # noqa: E402
-from floe.jobdeck import render as jrender           # noqa: E402
+from floe_oracle import jobdeck as jd  # noqa: E402
+from floe_oracle.jobdeck import color as jcolor             # noqa: E402
+from floe_oracle.jobdeck import geom as jgeom               # noqa: E402
+from floe_oracle.jobdeck.sources import file_header         # noqa: E402
+from floe_oracle.cache import Cache                         # noqa: E402
+from floe_oracle.cachepath import vfs_cache_dir, pack_path  # noqa: E402
+from floe_oracle.jobdeck import render as jrender           # noqa: E402
 
 EXPECTED = json.loads((ROOT / "tools" / "jobdeck_expected.json").read_text())
 
@@ -1133,7 +1134,7 @@ class CompositeTests(unittest.TestCase):
         # a deck with missing / unsupported sources OPENS once its
         # OASIS sources are indexed (field 2026-09-09: three 'file not
         # found' sources kept a fully indexed deck closed)
-        from floe.jobdeck.viewer import DeckCache, deck_ready
+        from floe_oracle.jobdeck.viewer import DeckCache, deck_ready
         self.assertTrue(deck_ready(str(CLI / "test_formats.jb")))
         c = DeckCache(str(CLI / "test_formats.jb"))
         self.assertEqual(c.unindexed(), [])
@@ -1165,7 +1166,7 @@ class ViewerCacheTests(unittest.TestCase):
                   ok=0)
 
     def test_meta_and_modes(self):
-        from floe.jobdeck.viewer import DeckCache, deck_ready, is_deck_path
+        from floe_oracle.jobdeck.viewer import DeckCache, deck_ready, is_deck_path
         self.assertTrue(is_deck_path("a/b.JB"))
         self.assertFalse(is_deck_path("a/b.oas"))
         self.assertTrue(deck_ready(str(CLI / "test.jb")))
@@ -1249,8 +1250,8 @@ class ViewerCacheTests(unittest.TestCase):
         self.assertFalse(os.path.exists(c.dir))
 
     def test_worker_factory_routes_a_deck(self):
-        from floe.jobdeck.viewer import DeckCache
-        from floe.service import make_render_worker
+        from floe_oracle.jobdeck.viewer import DeckCache
+        from floe_oracle.service import make_render_worker
         c = DeckCache(str(CLI / "test.jb"))
         c.load()
         try:
@@ -1263,13 +1264,11 @@ class ViewerCacheTests(unittest.TestCase):
 
 
 # What the floe2 viewer must not import (P2d: the GTK viewer is the UI
-# alone; the decisions are floe2 gtk-service's): the frozen shell's and
-# the Python implementations' modules, and KLayout.
-PRODUCT_FORBIDDEN = ("floe.cache", "floe.cachepath", "floe.indexlock",
-                     "floe.drc", "floe.svrf", "floe.jobdeck", "floe.shots",
-                     "floe.fe_embed", "floe.render", "floe.viewport",
-                     "floe.coverage", "floe.view_policy", "floe.cli",
-                     "floe.service", "klayout")
+# alone; the decisions are floe2 gtk-service's): the frozen shell and the
+# Python implementations (the dev-only oracle, its own package since P3 -
+# the smoke puts it on the viewer's path, so only this refuses it), and
+# KLayout.
+PRODUCT_FORBIDDEN = ("floe_oracle", "klayout")
 
 
 def product_blocker(folder):
@@ -1325,6 +1324,7 @@ class GuiSmokeTests(unittest.TestCase):
                # the blocker first, the interpreter's own paths kept (gi)
                "PYTHONPATH": os.pathsep.join(filter(None, (
                    product_blocker(TMP / "blocker"), str(ROOT),
+                   str(ROOT / "tools" / "oracle"),
                    os.environ.get("PYTHONPATH"))))}
         run_floe2("index", CLI / "test.jb", "--jobs", "2", env=env, ok=0)
         res = run_floe2("view", "--multi", CLI / "test.jb", env=env, ok=0,
@@ -1370,7 +1370,7 @@ class JobdeckChipHierarchyTests(unittest.TestCase):
         run_floe2("index", CLI / "test.jb", "--jobs", "2", env=cls.env, ok=0)
 
     def _cache(self, mode="chip"):
-        from floe.jobdeck.viewer import DeckCache
+        from floe_oracle.jobdeck.viewer import DeckCache
         c = DeckCache(str(CLI / "test.jb"), mode=mode)
         c.load()
         self.addCleanup(c.close)
@@ -1565,38 +1565,46 @@ class LoadingBannerTests(unittest.TestCase):
         v.cache = None
         v._loading_show = lambda text: calls.append(("show", text))
         v._loading_hide = lambda: calls.append(("hide",))
-        missing = os.path.join(tempfile.mkdtemp(prefix="floe-banner-"),
-                               "nothing.oas")
+        folder = tempfile.mkdtemp(prefix="floe-banner-")
+        missing = os.path.join(folder, "nothing.oas")
         err = v.open_file(missing)
-        self.assertTrue(err and err.startswith("ERR no VFS cache"), err)
+        # floe2 gtk-service's refusal names the file (P3: it said "No such
+        # file or directory (os error 2)" alone)
+        self.assertEqual(err, "ERR source not found: %s" % missing)
         self.assertEqual([c[0] for c in calls], ["show", "hide"])
         self.assertIn("loading nothing.oas", calls[0][1])
+        # a source without its cache: what to run
+        Path(missing).write_bytes(b"%SEMI-OASIS\r\n")
+        del calls[:]
+        err = v.open_file(missing)
+        self.assertTrue(err and err.startswith("ERR ") and
+                        "floe2 index" in err, err)
+        self.assertEqual([c[0] for c in calls], ["show", "hide"])
 
 
 class ViewerIndexArgvTests(unittest.TestCase):
-    """The viewer's own indexing (File > load layout on a layout
-    without a cache) calls the raw floe-index binary with the same
-    argv shape as `floe2 index` on a layout: no occupancy summary
-    (2026-09-16; a jobdeck load goes through `floe2 index deck.jb`,
-    whose sources default to the summary) and the cache path from
-    floe/cachepath.py (the hidden .<src>.ice sibling)."""
+    """The viewer's own indexing (File > load layout on a layout without
+    a cache, a jobdeck's sources) runs the Rust command line, `floe2 index
+    SRC` - it decides the cache, its options (a layout: no occupancy
+    summary, 2026-09-16; a deck's sources: the summary) and its locks
+    (P2d). Since P3 the viewer has no other way: the frozen floe's
+    `floe-index vfs` call went with its branch."""
 
     def test_the_layout_index_matches_floe2_index(self):
         import inspect
         from floe import gui
         src = inspect.getsource(gui)
-        # a layout: floe2 runs its Rust command line, which decides the
-        # cache and its options (P2d); the frozen floe floe-index vfs
+        # a layout and a jobdeck: the Rust command line (P1c;
+        # floe/vfsclient.py find_floe2 - FLOE2_BIN, which `floe2 view`
+        # passes the viewer)
         self.assertIn('argv = [find_floe2(), "index", src, "--jobs", "12"]',
                       src)
-        self.assertIn('"--no-lod"', src)
+        self.assertIn('argv = [find_floe2(), "index", path, "--jobs", "12"]',
+                      src)
+        # nothing else builds a cache: no floe-index vfs, no Python CLI
+        self.assertNotIn('"vfs", src', src)
         self.assertNotIn('"--occupancy"', src)
-        self.assertIn("cachepath.vfs_cache_dir(src)", src)
-        # a jobdeck load runs `floe2 index deck.jb`: the Rust command line
-        # (P1c; floe/vfsclient.py find_floe2 - FLOE2_BIN, which `floe2
-        # view` passes the viewer), the frozen floe its own Python one
-        self.assertIn("argv = [find_floe2()]", src)
-        self.assertIn('argv += ["index", path, "--jobs", "12"]', src)
+        self.assertNotIn('"-m", APP', src)
         from floe.vfsclient import find_floe2
         old = os.environ.get("FLOE2_BIN")
         os.environ["FLOE2_BIN"] = FLOE2
@@ -1651,7 +1659,7 @@ class GtkServiceTests(unittest.TestCase):
                 for line in text.splitlines()]
 
     def test_decks_open_as_the_python_deck_did(self):
-        from floe.jobdeck.viewer import DeckCache
+        from floe_oracle.jobdeck.viewer import DeckCache
         cases = [(deck, mode, None) for deck in ("test.jb", "test_missing_layer.jb",
                                                   "dense.jb", "hier.jb")
                  for mode in ("level", "chip", "layer")]
@@ -1681,8 +1689,8 @@ class GtkServiceTests(unittest.TestCase):
         self.assertFalse(folder.exists())
 
     def test_ready_and_level_rows(self):
-        from floe.jobdeck import parse_jobdeck
-        from floe.jobdeck.viewer import deck_ready, level_rows
+        from floe_oracle.jobdeck import parse_jobdeck
+        from floe_oracle.jobdeck.viewer import deck_ready, level_rows
         fresh = Path(tempfile.mkdtemp(prefix="gtksvc", dir=TMP))
         for name in ("test.jb", "chipA.oas", "chipB.oas", "mark.oas"):
             shutil.copy2(CLI / name, fresh / name)
@@ -1701,7 +1709,7 @@ class GtkServiceTests(unittest.TestCase):
             self.svc.request("level_rows", source=str(CLI / "broken.jb"))
 
     def test_a_layout_opens_as_the_python_cache_did(self):
-        from floe.cache import Cache, load_layer_props
+        from floe_oracle.cache import Cache, load_layer_props
         work = Path(tempfile.mkdtemp(prefix="gtksvc", dir=TMP))
         src = work / "chipA.oas"
         shutil.copy2(CLI / "chipA.oas", src)
@@ -1733,7 +1741,7 @@ class GtkServiceTests(unittest.TestCase):
         service is floe.fillpat's parse / format and floe.cache's
         save_shared_props, byte for byte."""
         from floe import fillpat
-        from floe.cache import save_shared_props
+        from floe_oracle.cache import save_shared_props
         from floe import gtkservice
         old = gtkservice._SERVICE
         gtkservice._SERVICE = self.svc
@@ -1786,7 +1794,7 @@ class GtkServiceTests(unittest.TestCase):
         err = v._open_file_load(str(bare / "test.jb"), None)
         self.assertTrue(err.startswith("ERR ") and "run: floe2 index" in err, err)
         # the worker for it renders the deck spec
-        from floe.service import make_render_worker
+        from floe_oracle.service import make_render_worker
         os.environ["FLOE_RENDERER"] = "rust"
         worker = make_render_worker(cache)
         self.assertIn("open deck=", worker._open_command())
@@ -1901,8 +1909,8 @@ class LevelSelectTests(unittest.TestCase):
                   ok=0)
 
     def test_deck_cache_loads_the_selected_levels(self):
-        from floe.jobdeck.viewer import DeckCache, level_rows, normalize_levels
-        from floe.jobdeck import parse_jobdeck
+        from floe_oracle.jobdeck.viewer import DeckCache, level_rows, normalize_levels
+        from floe_oracle.jobdeck import parse_jobdeck
         self.assertEqual(normalize_levels((3, "1", 3)), [1, 3])
         self.assertIsNone(normalize_levels([]))
         rows = level_rows(parse_jobdeck(str(CLI / "test.jb"), strict=True))
@@ -1962,7 +1970,7 @@ class LevelSelectTests(unittest.TestCase):
         # blue with level 3 alone); a LOAD selection keeps the full
         # deck's colours in every view - the analysis CLI's --level
         # (floe2 jobdeck) keeps its splice rule (CliTests)
-        from floe.jobdeck.viewer import DeckCache
+        from floe_oracle.jobdeck.viewer import DeckCache
         for mode in ("level", "chip", "layer"):
             full = DeckCache(str(CLI / "test.jb"), mode=mode)
             full.load()
@@ -1984,7 +1992,7 @@ class LevelSelectTests(unittest.TestCase):
     def test_load_dialog_rows_are_bounded(self):
         # review 2026-09-10 (9th) P2-2: 250 source names in one label
         # made the dialog 26,000 px wide
-        from floe.jobdeck.viewer import level_row_text
+        from floe_oracle.jobdeck.viewer import level_row_text
         row = {"level": 7, "name": "M7", "chips": ["A", "B"],
                "instances": 12,
                "sources": ["/d/src%03d.oas" % i for i in range(250)]}
@@ -1999,7 +2007,7 @@ class LevelSelectTests(unittest.TestCase):
         self.assertEqual(summary, "1 CHIP · 1 instance · 1 source: mark.oas")
 
     def test_selected_levels_index_and_open_their_sources_only(self):
-        from floe.jobdeck.viewer import DeckCache, deck_ready
+        from floe_oracle.jobdeck.viewer import DeckCache, deck_ready
         fresh = CLI / "levels"
         fresh.mkdir(exist_ok=True)
         for name in ("chipA.oas", "chipB.oas", "mark.oas", "test.jb"):
@@ -2147,7 +2155,7 @@ class ShotTests(unittest.TestCase):
                   ok=0)
 
     def test_units_regions_and_aspect(self):
-        from floe import shots as sh
+        from floe_oracle import shots as sh
         self.assertEqual(sh.parse_length("8mm"), 8000.0)
         self.assertEqual(sh.parse_length("500nm"), 0.5)
         self.assertEqual(sh.parse_length("32µm"), 32.0)
@@ -2202,7 +2210,7 @@ class ShotTests(unittest.TestCase):
             sh.Shot("x", at=(0, 0))
 
     def test_mosaic_lines_and_png(self):
-        from floe import shots as sh
+        from floe_oracle import shots as sh
         self.assertEqual(sh.line_spans(100, 2, 200), [(99, 1.0), (100, 1.0)])
         self.assertEqual(sh.line_spans(100, 3, 200),
                          [(99, 1.0), (100, 1.0), (98, 0.5), (101, 0.5)])
@@ -2234,7 +2242,7 @@ class ShotTests(unittest.TestCase):
         self.assertEqual(raw[1:5], bytes([255, 0, 0, 255]))
 
     def test_batch_parsing(self):
-        from floe import shots as sh
+        from floe_oracle import shots as sh
         text = """
         # comment
         left  at=40mm,85mm size=8000,6000 px=400x300 layers="$1 METAL1"
@@ -2394,7 +2402,7 @@ class ChipShotTests(unittest.TestCase):
                 max(b[2] for b in boxes), max(b[3] for b in boxes))
 
     def table(self, ids=None):
-        from floe.jobdeck.viewer import DeckCache
+        from floe_oracle.jobdeck.viewer import DeckCache
         c = DeckCache(str(self.dir / "test.jb"), ids=ids)
         c.load()
         self.addCleanup(c.close)
@@ -2478,7 +2486,7 @@ class ChipShotTests(unittest.TestCase):
                          h([("ID001", 2, 1)]))
 
     def test_cli_capture_is_the_layers_and_region_it_names(self):
-        from floe.jobdeck.chips import box_text
+        from floe_oracle.jobdeck.chips import box_text
         from PIL import Image
         out = self.out
         region = self.h([("ID002", i, r) for i in (2, 5) for r in range(3)])
@@ -2574,7 +2582,7 @@ class ChipShotTests(unittest.TestCase):
                     ok=3)
 
     def test_batch_chip_keys(self):
-        from floe import shots as sh
+        from floe_oracle import shots as sh
         a, b, c, d, e = sh.parse_batch(
             "a corners=fit size=500,500\n"
             "b bbox=1,2,3,4\n"
@@ -2623,7 +2631,7 @@ class ChipShotTests(unittest.TestCase):
                          (self.out / "b2.png").read_bytes())
 
     def test_info_lists_the_chips(self):
-        from floe.jobdeck.chips import box_text
+        from floe_oracle.jobdeck.chips import box_text
         res = run_floe2("info", self.dir / "test.jb", "--chips",
                         env=self.env, ok=0)
         self.assertIn("chip rows : 5 in levels 1,2,3,5", res.stdout)
@@ -2687,7 +2695,7 @@ class ReviewFixTests(unittest.TestCase):
                         out, "--report", rep, env=self.env, ok=0)
         self.assertNotIn("WARNING", res.stdout)
         self.assertTrue(json.loads(rep.read_text())["jobdeck"]["complete"])
-        from floe.jobdeck.viewer import DeckCache
+        from floe_oracle.jobdeck.viewer import DeckCache
         c = DeckCache(str(CLI / "test_missing_layer.jb"))
         c.load()
         try:
@@ -2699,7 +2707,7 @@ class ReviewFixTests(unittest.TestCase):
 
     def test_p1_2_deck_pass_is_charged_against_the_page_budget(self):
         from floe.rust_render import RustRenderWorker
-        from floe.jobdeck.viewer import DeckCache
+        from floe_oracle.jobdeck.viewer import DeckCache
         os.environ["FLOE_RUST_BUDGET_MB"] = "1"
         try:
             # the plain layout is refused at 1 MiB ...
@@ -2761,7 +2769,7 @@ class ReviewFixTests(unittest.TestCase):
         self.assertEqual(small, rgba, "streamed slices = the whole scene")
 
     def test_p1_3_hierarchical_source_shows_at_the_defaults(self):
-        from floe.jobdeck.viewer import DeckCache
+        from floe_oracle.jobdeck.viewer import DeckCache
         c = DeckCache(str(CLI / "hier.jb"))
         c.load()
         try:
@@ -2848,7 +2856,7 @@ class ReviewFixTests2(unittest.TestCase):
             run_floe2("index", CLI / deck, "--jobs", "2", env=cls.env, ok=0)
 
     def test_p1_1_frame_order_is_kept_across_placements(self):
-        from floe.jobdeck.viewer import DeckCache
+        from floe_oracle.jobdeck.viewer import DeckCache
         c = DeckCache(str(CLI / "frames.jb"))
         c.load()
         try:
@@ -2876,7 +2884,7 @@ class ReviewFixTests2(unittest.TestCase):
         self.assertGreater(_lit(both), _lit(a_only))
 
     def test_p2_2_group_names_select_their_chips(self):
-        from floe.jobdeck.viewer import DeckCache
+        from floe_oracle.jobdeck.viewer import DeckCache
         c = DeckCache(str(CLI / "test.jb"), mode="chip")
         c.load()
         try:
@@ -2914,7 +2922,7 @@ class ReviewFixTests2(unittest.TestCase):
 
     def test_p2_3_saved_colours_come_back_per_view(self):
         from floe import fillpat
-        from floe.jobdeck.viewer import DeckCache
+        from floe_oracle.jobdeck.viewer import DeckCache
         from floe.rust_render import RustRenderWorker
         props = CLI / "test.jb.layerprops"
         props.write_text(fillpat.format_layerprops(
@@ -2948,7 +2956,7 @@ class ReviewFixTests2(unittest.TestCase):
 
     def test_p3_5_render_deck_png_keys_every_row(self):
         from PIL import Image
-        from floe.jobdeck.viewer import DeckCache
+        from floe_oracle.jobdeck.viewer import DeckCache
         c = DeckCache(str(CLI / "test.jb"), mode="chip")
         c.load()
         try:
@@ -3006,7 +3014,7 @@ class ReviewFixTests3(unittest.TestCase):
         it is a gray band: with no design over it the gray shows
         (hier.jb: the child alone), with BLACK design over it the gray
         must be hidden exactly as a coloured design hides it."""
-        from floe.jobdeck.viewer import DeckCache
+        from floe_oracle.jobdeck.viewer import DeckCache
         c = DeckCache(str(CLI / "hier.jb"))
         c.load()
         try:
@@ -3047,7 +3055,7 @@ class ReviewFixTests3(unittest.TestCase):
         self.assertEqual(_gray(black), 0, "a black box must hide it too")
 
     def test_p2_2_source_layer_dt0_is_a_layer_not_a_head(self):
-        from floe.jobdeck.viewer import DeckCache
+        from floe_oracle.jobdeck.viewer import DeckCache
         c = DeckCache(str(CLI / "dt.jb"), mode="layer")
         c.load()
         try:
@@ -3101,7 +3109,7 @@ class PerfAnalysisTests(unittest.TestCase):
             run_floe2("index", CLI / deck, "--jobs", "2", env=cls.env, ok=0)
 
     def _deck_counters(self, deck, depth, frames):
-        from floe.jobdeck.viewer import DeckCache
+        from floe_oracle.jobdeck.viewer import DeckCache
         c = DeckCache(str(CLI / deck))
         c.load()
         try:
@@ -3181,7 +3189,7 @@ class SubwindowTests(unittest.TestCase):
 
     def _frames(self, deck, switch, size, fill, width_px, frames, depth,
                 bbox=None):
-        from floe.jobdeck.viewer import DeckCache
+        from floe_oracle.jobdeck.viewer import DeckCache
         os.environ["FLOE_RUST_DECK_SUBWINDOW"] = switch
         try:
             c = DeckCache(str(CLI / deck))
@@ -3220,7 +3228,7 @@ class SubwindowTests(unittest.TestCase):
                              % (deck, size, fill[:8], width_px, frames))
             self.assertGreater(_lit(sub), 0)
         # a zoomed view where placements lie partly outside the frame
-        from floe.jobdeck.viewer import DeckCache
+        from floe_oracle.jobdeck.viewer import DeckCache
         c = DeckCache(str(CLI / "test.jb"))
         c.load()
         bb = c.meta["bbox"]
@@ -3255,7 +3263,7 @@ class ReuseAndBatchTests(unittest.TestCase):
 
     def _render(self, deck, size, jobs, fill="speckle", frames=False,
                 depth=None, subwindow="on", bbox=None):
-        from floe.jobdeck.viewer import DeckCache
+        from floe_oracle.jobdeck.viewer import DeckCache
         os.environ["FLOE_RUST_RASTER_JOBS"] = str(jobs)
         os.environ["FLOE_RUST_JOBS"] = str(jobs)
         os.environ["FLOE_RUST_DECK_SUBWINDOW"] = subwindow
@@ -3319,7 +3327,7 @@ class StreamTests(unittest.TestCase):
                   ok=0)
 
     def _render(self, env, size, bbox=None, **kw):
-        from floe.jobdeck.viewer import DeckCache
+        from floe_oracle.jobdeck.viewer import DeckCache
         for k, v in env.items():
             os.environ[k] = v
         try:
@@ -3380,7 +3388,7 @@ class StreamTests(unittest.TestCase):
             self.assertEqual(streamed, whole, kw)
             self.assertGreater(_lit(whole), 0)
         # a zoomed view: the pass streams on its sub-window
-        from floe.jobdeck.viewer import DeckCache
+        from floe_oracle.jobdeck.viewer import DeckCache
         c = DeckCache(str(CLI / "dense.jb"))
         c.load()
         bb = c.meta["bbox"]
@@ -3602,7 +3610,7 @@ class ThinPageTests(unittest.TestCase):
             self.assertEqual(culls["thin_pages"], thin_pages, (thin, wash, reps, culls))
             self.assertEqual(culls["pages_size"], culled, (thin, wash, reps, culls))
         # the deck worker's default is keep
-        from floe.jobdeck.viewer import DeckCache
+        from floe_oracle.jobdeck.viewer import DeckCache
         d = DeckCache(str(CLI / "thin.jb"))
         d.load()
         try:
@@ -3651,7 +3659,7 @@ class WideViewTests(unittest.TestCase):
         os.environ.pop("FLOE_RUST_OCCUPANCY", None)
 
     def _render(self, deck, env, visible, cut_px, size=(200, 200)):
-        from floe.jobdeck.viewer import DeckCache
+        from floe_oracle.jobdeck.viewer import DeckCache
         for k, v in env.items():
             os.environ[k] = v
         try:
@@ -3803,7 +3811,7 @@ class ReviewFixTests8(unittest.TestCase):
                   ok=0)
 
     def _render(self, env, decode_pages):
-        from floe.jobdeck.viewer import DeckCache
+        from floe_oracle.jobdeck.viewer import DeckCache
         for k, v in env.items():
             os.environ[k] = v
         try:
@@ -3889,7 +3897,7 @@ class ReviewFixTests5(unittest.TestCase):
                 os.environ.pop(k, None)
 
     def _deck(self):
-        from floe.jobdeck.viewer import DeckCache
+        from floe_oracle.jobdeck.viewer import DeckCache
         c = DeckCache(str(CLI / "test.jb"))
         c.load()
         self.addCleanup(c.close)
@@ -4067,8 +4075,8 @@ class KLayoutOracleTests(unittest.TestCase):
         import klayout.db as db
         import numpy as np
         from PIL import Image
-        from floe.render import Renderer
-        from floe.jobdeck.viewer import DeckCache
+        from floe_oracle.render import Renderer
+        from floe_oracle.jobdeck.viewer import DeckCache
         goldens = self._goldens_module()
 
         cache = DeckCache(str(CLI / "test.jb"))

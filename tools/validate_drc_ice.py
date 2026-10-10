@@ -64,8 +64,9 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from floe import drc  # noqa: E402
-from floe import cachepath  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "oracle"))  # P3
+from floe_oracle import drc  # noqa: E402
+from floe_oracle import cachepath  # noqa: E402
 
 BIN = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
     os.path.dirname(__file__), "..", "rust", "target", "release",
@@ -238,7 +239,8 @@ def validate_service(tmp):
     operands and the rules sidecar read as floe/svrf.py read them."""
     import json
     import random
-    from floe import gtkservice, svrf
+    from floe import gtkservice
+    from floe_oracle import svrf
     floe2 = os.environ.get("FLOE2_BIN") or os.path.join(
         os.path.dirname(__file__), "..", "rust", "target", "release", "floe2")
     gtkservice._SERVICE = gtkservice.Service(floe2)
@@ -794,10 +796,13 @@ def main():
     # the --floe-reviewer CLI parameter keys the autosave (launcher
     # scripts pass an argument instead of exporting FLOE_REVIEWER)
     root = os.path.join(os.path.dirname(__file__), "..")
+    # the frozen floe shell's drc (dev-only oracle, P3)
     r = subprocess.run(
-        [sys.executable, "-m", "floe", "drc", db, "--rules",
+        [sys.executable, "-m", "floe_oracle", "drc", db, "--rules",
          "--floe-reviewer", "gatecli"],
-        capture_output=True, text=True, cwd=root)
+        capture_output=True, text=True, cwd=root,
+        env=dict(os.environ, PYTHONPATH=os.pathsep.join(
+            (os.path.join(root, "tools", "oracle"), root))))
     if r.returncode != 0:
         fail("floe drc --floe-reviewer rc=%d: %s"
              % (r.returncode, r.stderr.strip()))
@@ -916,7 +921,7 @@ def main():
     # D10: per-reviewer error notes (flateyes .fe sidecar) - a shared
     # note across errors, single/group clear, reopen persistence,
     # flateyes readability, export/import round-trip + foreign refusal
-    from floe import fe_embed
+    from floe_oracle import fe_embed
     os.environ["FLOE_REVIEWER"] = "gate"
     try:
         npk = drc.IcePack(gp)

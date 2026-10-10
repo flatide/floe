@@ -106,6 +106,19 @@ impl Error {
     pub fn input(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::InvalidInput, message)
     }
+    /// An I/O error opening `path` that names it: a missing one is "`what`
+    /// not found: PATH" (the bare "No such file or directory (os error
+    /// 2)" said neither which file nor what it was). The kind stays Io.
+    pub fn opening(e: std::io::Error, what: &str, path: &std::path::Path) -> Self {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            Self::new(
+                ErrorKind::Io,
+                format!("{what} not found: {}", path.display()),
+            )
+        } else {
+            Self::new(ErrorKind::Io, format!("{}: {e}", path.display()))
+        }
+    }
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

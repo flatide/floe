@@ -114,6 +114,24 @@ gates_for() {
             echo jobdeck ;;
         tools/gen_drcdb.py|tools/gen_drc_db.py)
             echo "drc_ice svrf" ;;
+        # the dev-only oracle (P3, tools/oracle/floe_oracle): the frozen
+        # floe shell and the Python references the gates hold Rust to
+        tools/oracle/floe_oracle/cache.py|tools/oracle/floe_oracle/cachepath.py)
+            echo ALL ;;
+        tools/oracle/floe_oracle/service.py|tools/oracle/floe_oracle/view_policy.py|tools/oracle/floe_oracle/viewport.py|tools/oracle/floe_oracle/coverage.py|tools/oracle/floe_oracle/render.py|tools/oracle/floe_oracle/vfsclient.py)
+            # the frozen KLayout shell: the pixel oracle's side
+            echo "render_goldens render_speckle render_frames vfs_render vfs_hier vfs_lifecycle klayout rust_renderer jobdeck density_stack index_lock" ;;
+        tools/oracle/floe_oracle/shots.py|tools/oracle/floe_oracle/fe_embed.py)
+            echo "jobdeck drc_ice" ;;
+        tools/oracle/floe_oracle/indexlock.py)
+            # the cache locks' Python side (rust/vfs/src/lock.rs's twin)
+            echo "index_lock jobdeck occupancy cell_tree drc_ice rust_renderer index_cli" ;;
+        tools/oracle/floe_oracle/jobdeck/*)
+            echo "jobdeck occupancy rust_renderer index_lock" ;;
+        tools/oracle/floe_oracle/drc.py|tools/oracle/floe_oracle/svrf.py)
+            echo "drc_ice svrf index_lock" ;;
+        tools/oracle/floe_oracle/cli.py|tools/oracle/floe_oracle/product.py|tools/oracle/floe_oracle/__main__.py|tools/oracle/floe_oracle/__init__.py)
+            echo "python jobdeck occupancy cell_tree index_lock rust_renderer floe2" ;;
         tools/*)
             # benches, experiments and generators no gate runs
             echo "" ;;
@@ -156,22 +174,12 @@ gates_for() {
             # the parser, the index format, the tiler, the rest of the
             # VFS, floe-index, the vendored crates, the workspace
             echo ALL ;;
-        floe/cache.py|floe/cachepath.py)
-            echo ALL ;;
-        floe/gui.py|floe/view_policy.py|floe/service.py|floe/viewport.py|floe/hangul.py|floe/fillpat.py|floe/coverage.py|floe/instance.py|floe/shots.py|floe/fe_embed.py|floe/*.def)
+        floe/gui.py|floe/hangul.py|floe/fillpat.py|floe/instance.py|floe/product.py|floe/*.def)
+            # the GTK viewer (the product's Python, UI alone since P2d)
             echo "rust_renderer floe2 jobdeck density_stack index_lock" ;;
-        floe/indexlock.py)
-            # the cache locks' Python side (rust/vfs/src/lock.rs's twin)
-            echo "index_lock jobdeck occupancy cell_tree drc_ice rust_renderer index_cli" ;;
-        floe/render.py|floe/vfsclient.py)
-            # the frozen KLayout shell: the oracle's side
-            echo "render_goldens render_speckle render_frames vfs_render vfs_hier vfs_lifecycle floe2 klayout" ;;
-        floe/jobdeck/*)
-            echo "jobdeck occupancy rust_renderer index_lock" ;;
-        floe/drc.py|floe/svrf.py)
-            echo "drc_ice svrf index_lock" ;;
-        floe/cli.py|floe/product.py|floe/__main__.py)
-            echo "python jobdeck occupancy cell_tree index_lock" ;;
+        floe/vfsclient.py)
+            # where the viewer finds floe-index and floe2
+            echo "floe2 jobdeck rust_renderer" ;;
         *)
             echo ALL ;;
     esac
@@ -341,7 +349,7 @@ if [ "$SRC" = "$FLOE2_SMOKE_SRC" ] && [ $NEEDS_TILES = 1 ]; then
     # layer-palette change tripped this once - stale colors failed
     # validate_rust_meta on every host with an old cached .tiles)
     if [ ! -f "$SRC.tiles/meta.json" ] || \
-       [ floe/cache.py -nt "$SRC.tiles/meta.json" ]; then
+       [ tools/oracle/floe_oracle/cache.py -nt "$SRC.tiles/meta.json" ]; then
         rm -rf "$SRC.tiles"
         # the legacy indexer refuses to build .tiles beside a VFS cache
         # of the same source (.<src>.ice since 2026-09-16, <src>.floe
@@ -350,7 +358,7 @@ if [ "$SRC" = "$FLOE2_SMOKE_SRC" ] && [ $NEEDS_TILES = 1 ]; then
         for c in "$VFSC" "$SRC.floe"; do
             if [ -e "$c" ]; then mv "$c" "$c.aside"; fi
         done
-        PYTHONPATH=. .venv/bin/python -m floe index --legacy "$SRC" \
+        PYTHONPATH=tools/oracle:. .venv/bin/python -m floe_oracle index --legacy "$SRC" \
             >/dev/null || {
             for c in "$VFSC" "$SRC.floe"; do
                 if [ -e "$c.aside" ]; then mv "$c.aside" "$c"; fi
@@ -535,7 +543,7 @@ if gate density_stack; then RAN="$RAN density_stack"; lap density_stack
 # the inline / missing-summary / live-pickup contract
 if gate cell_tree; then RAN="$RAN cell_tree"; lap cell_tree
     .venv/bin/python tools/validate_cell_tree.py; fi
-# index locks (rust/vfs/src/lock.rs, floe/indexlock.py): a run writing a
+# index locks (rust/vfs/src/lock.rs; the oracle's floe_oracle/indexlock.py): a run writing a
 # cache refuses another (whoever runs it), a whole rebuild refuses its
 # readers and is refused by them, additions go beside readers on one host
 if gate index_lock; then RAN="$RAN index_lock"; lap index_lock

@@ -96,7 +96,8 @@ ROOT = Path(__file__).resolve().parents[1]
 # floe2 CLI is gone - docs/SHARED_APP_LAYER.ko.md P1c)
 FLOE2 = os.environ.get("FLOE2_BIN") or str(ROOT / "rust" / "target" / "release" / "floe2")
 sys.path.insert(0, str(ROOT))
-from floe.cache import Cache
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (P3)
+from floe_oracle.cache import Cache
 from floe.rust_render import RustRenderWorker
 
 PX = 1920       # at this size keep + cut 1 px of the whole chip decodes ~110 MB

@@ -18,8 +18,10 @@ import klayout.db as db
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(
+    os.path.abspath(__file__)), "oracle"))  # floe_oracle (P3)
 
-from floe.render import Renderer
+from floe_oracle.render import Renderer
 
 
 W = H = 100
@@ -95,7 +97,7 @@ def main():
         # other position, and none of them may be repainted
         import numpy as np
         from PIL import Image
-        from floe.coverage import composite
+        from floe_oracle.coverage import composite
         renderer.set_visible(designs)
         with tempfile.NamedTemporaryFile(suffix=".png") as f:
             renderer.render_png(f.name, 0, 0, W, H, W, H,

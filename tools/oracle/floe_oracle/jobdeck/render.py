@@ -219,7 +219,7 @@ class _DeckCacheShim:
 
 # the worker lives with the renderd client now (floe/rust_render.py,
 # 2026-10-09 P2): this name stays for the callers that import it here
-from ..rust_render import DeckRenderWorker  # noqa: E402,F401
+from floe.rust_render import DeckRenderWorker  # noqa: E402,F401
 
 
 def render_deck_png(spec_path, deck_path, dbu, layers, bbox_dbu, width,

@@ -24,9 +24,11 @@ import klayout.db as db
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
-from floe.vfsclient import VfsClient           # noqa: E402
-from floe.viewport import VfsMosaic            # noqa: E402
-from floe import cache as cm                   # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(
+    os.path.abspath(__file__)), "oracle"))  # floe_oracle (P3)
+from floe_oracle.vfsclient import VfsClient           # noqa: E402
+from floe_oracle.viewport import VfsMosaic            # noqa: E402
+from floe_oracle import cache as cm  # noqa: E402
 
 print = functools.partial(print, flush=True)
 FRAME_LAYER = (255, 0)

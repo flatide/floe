@@ -27,13 +27,14 @@ KLayout 경로에서 선행 검증하는 용도. 그 용도의 KLayout 셸은 �
 rust/target/release/floe2 view chip.oas      # 제품
 rust/target/release/floe2 index chip.oas     # 1회: 공유 .<src>.ice/ 생성(숨김 폴더)
 
-# 개발 전용: 동결된 KLayout 셸로 같은 cache를 열어 선행 검증/비교
-.venv/bin/python -m floe view chip.oas
+# 개발 전용: 동결된 KLayout 셸(오라클, P3부터 명령만)로 같은 cache의 KLayout 그림
+PYTHONPATH=tools/oracle:. .venv/bin/python -m floe_oracle render chip.oas \
+  --bbox X0,Y0,X1,Y1 --out klayout.png
 ```
 
 두 GUI는 socket identity가 달라 같은 DISPLAY에서 동시에 실행할 수 있다. 캐시는
 source 옆의 동일한 `.<src>.ice`를 읽으므로 복사하거나 변환하지 않는다. cache와
-Rust wire/OVM/OVP 버전은 계속 `floe/__init__.py`, `floe/cache.py`, `rust/`에서 한
+Rust wire/OVM/OVP 버전은 계속 `floe/__init__.py`, `tools/oracle/floe_oracle/cache.py`, `rust/`에서 한
 번만 올린다. 공유 cache에 과거 `design.ovc`가 있어도 floe2 `info`와 Rust worker는
 이를 무시한다. sample09 detail-high refinement 실측에서 화면 변화 없이
 350ms→980ms로 느려져 제품 경로에서 제거했다.
@@ -136,6 +137,9 @@ PNG publish는 유지한다. detail/depth/좌표/window는 workload이므로 명
 rust/target/release/floe2 view chip.oas --multi --goto X,Y,W \
   --detail high --depth 999 --perf-baseline
 ```
+
+P3(2026-10-10)부터 이 체크아웃의 동결 셸(`python -m floe_oracle`)에는 뷰어가 없다. 위 KLayout 쪽 줄은
+floe-legacy 브랜치의 floe에서 돌린다.
 
 개별 제어는 `--refinement on|off`, `--frame-cache on|off`, `--margin on|off`(여백
 준비만, **기본 off**(사용자 결정 2026-09-27: 그려진 뒤 무엇도 덧그려지지 않게); 팬 재사용은 유지;

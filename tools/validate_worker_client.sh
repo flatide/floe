@@ -17,10 +17,11 @@ worker_oracle=$(mktemp -d "${TMPDIR:-/tmp}/floe-worker-oracle.XXXXXX")
 trap 'rm -rf "$worker_oracle"' EXIT HUP INT TERM
 FLOE_WORKER_TEST_SOURCE="$worker_source" FLOE_WORKER_TEST_CACHE="$worker_cache" \
 FLOE_WORKER_TEST_ORACLE="$worker_oracle" FLOE_RENDERD_BIN="$worker_renderd" \
+PYTHONPATH="$PWD/tools/oracle${PYTHONPATH:+:$PYTHONPATH}" \
 PYTHONDONTWRITEBYTECODE=1 "$worker_python" - <<'PY'
 import os
 from pathlib import Path
-from floe.cache import Cache
+from floe_oracle.cache import Cache
 from floe.rust_render import RustRenderWorker
 
 cache = Cache(os.environ['FLOE_WORKER_TEST_SOURCE'])

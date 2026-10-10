@@ -244,7 +244,7 @@ def load_layer_props(src):
     persistence is EXPLICIT via the viewer's load/save layer
     properties menu (user call 2026-08-13). Returns
     (rows, path or None) - rows per floe.fillpat.parse_layerprops."""
-    from . import fillpat
+    from floe import fillpat
     for sp in shared_props_paths(src):
         try:
             with open(sp) as f:
@@ -268,7 +268,7 @@ def apply_personal_colors(meta, src):
     layer table (AFTER normalize_layer_colors). Rows name colors
     from the 7x7 table (or literal #hex); fills/visibility/width
     are applied by the viewer/renderer, not here."""
-    from . import fillpat
+    from floe import fillpat
     rows, _ = load_layer_props(src)
     if not rows:
         return meta
@@ -342,6 +342,11 @@ class Cache:
 
     def exists(self):
         return os.path.isfile(self.meta_path)
+
+    def layer_props(self):
+        """The design-default layerprops rows (load_layer_props) - what
+        floe/gtkservice.py ServiceCache gives the product's renderer."""
+        return load_layer_props(getattr(self, "props_src", self.src))[0]
 
     def load(self):
         with open(self.meta_path) as f:

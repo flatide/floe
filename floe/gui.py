@@ -36,7 +36,6 @@ def _is_deck_path(path):
 Gtk = Gdk = GdkPixbuf = GLib = Pango = None
 
 APP = product_name()
-HAS_DENSITY_COVERAGE = APP != "floe2"
 POLL_MS = 25
 DEBOUNCE_MS = 120
 # LOD starts ON (rev 31): the skeleton is gone, so the first fit
@@ -1864,10 +1863,6 @@ class Viewer:
             depth = 999 if goto is not None else 0
         self.depth_value = max(0, min(999, int(depth)))
         self.abstract = False       # `a` key: klayout abstract mode
-        # Stable floe keeps the optional KLayout density overlay. floe2
-        # intentionally has no coverage state or OVC render path.
-        if HAS_DENSITY_COVERAGE:
-            self.coverage_on = False
         # Explicit request controls; no shell environment is consulted.
         # retired (2026-09-22): the `lod` argument is accepted and ignored
         self.lod_on = False
@@ -2498,16 +2493,8 @@ class Viewer:
         self._fill_patterns = fillpat.default_patterns()
         self._layer_patterns = {}
         self._layer_widths = {}
-        # the service's rows (floe2), else the design default read here
-        if cache is None:
-            rows = []
-        elif hasattr(cache, "layer_props"):
-            rows = cache.layer_props()
-        else:
-            # the frozen floe shell's caches (dev-only)
-            from . import cache as cache_mod
-            rows = cache_mod.load_layer_props(
-                getattr(self.cache, "props_src", self.cache.src))[0]
+        # the design-default rows floe2 gtk-service read
+        rows = [] if cache is None else cache.layer_props()
         for key, _color, fill, _name, _f1, f2 in rows:
             i = fillpat.fill_index(fill)
             if i is not None:
@@ -2791,49 +2778,21 @@ class Viewer:
         """open_file's loading half: the cache (a DeckCache plans the
         deck and writes its spec), then _apply_cache (layer panel,
         render service); an error string for the known refusals.
-        floe2 asks floe2 gtk-service (floe/gtkservice.py, the shared Rust
-        app layer) for both."""
-        if APP == "floe2":
-            from .gtkservice import ServiceCache, ServiceError
-            c = ServiceCache(path, ids=ids)
-            try:
-                c.load()
-            except ServiceError as exc:
-                if c.is_jobdeck and exc.kind in ("input", "cache"):
-                    return "ERR %s; run: %s index %s" % (exc, APP, path)
-                return "ERR %s" % exc
-            if c.is_jobdeck:
-                # the deck is the thing viewed: full depth (review
-                # 2026-09-09 P1-3)
-                self._set_depth(999, redraw=False)
-            self._apply_cache(c)
-            self._restore_keys()
-            return None
-        if _is_deck_path(path):
-            # a jobdeck (docs/JOBDECK.ko.md M3): every source's
-            # VFS cache must exist; renderd composites them
-            from .jobdeck.viewer import DeckCache
-            # sources without a cache (an index that failed, a
-            # container floe-index cannot read) are skipped placements
-            # the title and status report - never a reason to stay
-            # closed (field 2026-09-09: three missing files kept a
-            # fully indexed deck from opening)
-            c = DeckCache(path, ids=ids)
-            try:
-                c.load()
-            except ValueError as exc:
-                return "ERR %s; run: %s index %s" % (exc, APP, path)
-            # the deck is the thing viewed: full depth, or a source
-            # whose shapes live in child cells shows nothing (review
-            # 2026-09-09 P1-3)
-            self._set_depth(999, redraw=False)
-        else:
-            from . import cache as cache_mod
-            c = cache_mod.Cache(path)
-            if not c.exists():
-                return ("ERR no VFS cache for %s; run: %s index %s"
-                        % (path, APP, path))
+        floe2 gtk-service (floe/gtkservice.py, the shared Rust app layer)
+        answers both."""
+        from .gtkservice import ServiceCache, ServiceError
+        c = ServiceCache(path, ids=ids)
+        try:
             c.load()
+        except ServiceError as exc:
+            if c.is_jobdeck and exc.kind in ("input", "cache"):
+                return "ERR %s; run: %s index %s" % (exc, APP, path)
+            return "ERR %s" % exc
+        if c.is_jobdeck:
+            # the deck is the thing viewed: full depth, or a source whose
+            # shapes live in child cells shows nothing (review 2026-09-09
+            # P1-3)
+            self._set_depth(999, redraw=False)
         self._apply_cache(c)
         # the rebuilt layer panel and the restarted worker must not
         # leave the keyboard parked away from the canvas (field
@@ -2844,38 +2803,26 @@ class Viewer:
     def _index_ready(self, path, ids=None):
         """Whether `path` can be opened as is: a layout with a VFS cache,
         or a jobdeck whose sources (of the levels `ids`, None = all)
-        all have one."""
-        if APP == "floe2":
-            from .gtkservice import ServiceError, readiness
-            try:
-                return bool(readiness(path, ids)["ready"])
-            except ServiceError:
-                return False
-        if _is_deck_path(path):
-            from .jobdeck.viewer import deck_ready
-            return deck_ready(path, ids=ids)
-        if self._index_busy(path) is not None:
+        all have one (floe2 gtk-service's answer)."""
+        from .gtkservice import ServiceError, readiness
+        try:
+            return bool(readiness(path, ids)["ready"])
+        except ServiceError:
             return False
-        from . import cache as cache_mod
-        return cache_mod.Cache(path).exists()
 
     @staticmethod
     def _index_busy(path):
         """Why a layout cannot be opened now: another run rebuilds its
-        cache whole (floe/indexlock.py) - the refusal naming who, else
-        None. A jobdeck's sources are judged one by one when it opens."""
+        cache whole (the index locks, floe_vfs::lock) - the refusal naming
+        who, else None. A jobdeck's sources are judged one by one when it
+        opens."""
         if _is_deck_path(path):
             return None
-        if APP == "floe2":
-            from .gtkservice import ServiceError, readiness
-            try:
-                return readiness(path)["busy"]
-            except ServiceError:
-                return None
-        from . import cachepath, indexlock
-        return indexlock.state(indexlock.VFS,
-                               cachepath.vfs_cache_dir(path),
-                               users=False).opening_refusal()
+        from .gtkservice import ServiceError, readiness
+        try:
+            return readiness(path)["busy"]
+        except ServiceError:
+            return None
 
     def _jobdeck_pick_levels(self, path, current=None, force=False):
         """Which mask levels to load (user call 2026-09-10: Calibre
@@ -2899,13 +2846,8 @@ class Viewer:
                         "N[,N...]: %r ignored" % policy)
                     return None
         try:
-            if APP == "floe2":
-                from .gtkservice import level_rows
-                rows = level_rows(path)
-            else:
-                from .jobdeck import parse_jobdeck
-                from .jobdeck.viewer import level_rows
-                rows = level_rows(parse_jobdeck(path, strict=True))
+            from .gtkservice import level_rows
+            rows = level_rows(path)
         except (OSError, ValueError, RuntimeError) as exc:
             self._set_live_status("jobdeck: %s" % exc)
             return False
@@ -4121,8 +4063,6 @@ class Viewer:
             "frame_cache": self.frame_cache_on,
             "abstract": self.abstract,
             "visible": self._layers_arg()}
-        if HAS_DENSITY_COVERAGE:
-            job["coverage"] = self.coverage_on
         if self._density_key() is not None:
             # the density under the cut, on or off (View > density)
             job["density"] = self.density_on
@@ -5061,8 +5001,6 @@ class Viewer:
             self._depth_step(1)
         elif name == "a":
             self._toggle_abstract()
-        elif name == "v" and HAS_DENSITY_COVERAGE:
-            self._toggle_coverage()
         elif name == "v":
             self._toggle_density()
         elif name == "b":
@@ -5137,9 +5075,6 @@ class Viewer:
         if self.meta.get("bands") or self.meta.get("vfs"):
             lbl += " · detail: %s" % DETAIL_LEVELS[self.detail]
         if self.meta.get("vfs"):
-            if HAS_DENSITY_COVERAGE:
-                lbl += " · cov:%s" % (
-                    "on" if self.coverage_on else "off")
             # the page hairline policy in force: cull = thin shapes
             # may be omitted at wide views (plain layout default)
             lbl += " · thin:%s" % self._effective_thin()
@@ -5191,15 +5126,6 @@ class Viewer:
             self.abstract = False
             return
         self.abstract = not self.abstract
-        self._on_depth()
-
-    def _toggle_coverage(self):
-        # `v`: density-coverage fill at cut/wide views (VFS caches).
-        # Off = the cut just drops small features (they vanish) with
-        # no density stand-in - useful to see exactly what is real.
-        if not HAS_DENSITY_COVERAGE:
-            return
-        self.coverage_on = not self.coverage_on
         self._on_depth()
 
     def _toggle_density(self):
@@ -5809,21 +5735,16 @@ class Viewer:
         check(m, "hierarchy frames\tf",
               lambda: self._set_frames(not self.frames_on),
               lambda: self.frames_on)
-        if not HAS_DENSITY_COVERAGE:
-            # the density under the cut (user 2026-10-05): the Rust
-            # renderer's density stack, on or off live (stable floe's `v`
-            # is its coverage overlay)
-            self._density_menu_item = check(
-                m, "density under the cut\tv", self._toggle_density,
-                lambda: self._density_key() is True)
-            self._density_menu_item.set_sensitive(False)
+        # the density under the cut (user 2026-10-05): the Rust
+        # renderer's density stack, on or off live
+        self._density_menu_item = check(
+            m, "density under the cut\tv", self._toggle_density,
+            lambda: self._density_key() is True)
+        self._density_menu_item.set_sensitive(False)
         self._abstract_menu_item = check(
             m, "abstract cells\ta", self._toggle_abstract,
             lambda: self.abstract)
         self._abstract_menu_item.set_sensitive(False)
-        if HAS_DENSITY_COVERAGE:
-            check(m, "density coverage\tv", self._toggle_coverage,
-                  lambda: self.coverage_on)
         # the page hairline policy (review 2026-09-11): a plain layout
         # may omit thin shapes at wide views for speed; the mask
         # policy keeps them (a jobdeck's default)
@@ -6117,18 +6038,11 @@ class Viewer:
     def _vfs_index_and_load(self, src, after=None):
         """Build the VFS cache for `src` with its log in a modal dialog,
         then open it in place; `after(err)` runs once the open settled
-        (err None on success). floe2 runs its command line, `floe2 index
-        SRC` (the Rust one decides the cache, its options and its locks);
-        the frozen floe runs floe-index vfs."""
-        from .vfsclient import find_binary, find_floe2
+        (err None on success): `floe2 index SRC`, the Rust command line,
+        decides the cache, its options and its locks."""
+        from .vfsclient import find_floe2
         try:
-            if APP == "floe2":
-                argv = [find_floe2(), "index", src, "--jobs", "12"]
-            else:
-                from . import cachepath
-                argv = [find_binary(), "vfs", src,
-                        cachepath.vfs_cache_dir(src), "--jobs", "12",
-                        "--no-lod"]
+            argv = [find_floe2(), "index", src, "--jobs", "12"]
         except RuntimeError as exc:
             self._set_live_status("VFS indexing failed: %s" % exc)
             return
@@ -6177,18 +6091,13 @@ class Viewer:
 
         # a source that failed to index is a skipped placement: open
         # the deck with the rest (the log stays up with the error).
-        # floe2's command line is the Rust `floe2` (rust/floe2); the
-        # frozen floe keeps its Python one
-        if APP == "floe2":
-            from .vfsclient import find_floe2
-            try:
-                argv = [find_floe2()]
-            except RuntimeError as exc:
-                self._set_live_status("jobdeck indexing failed: %s" % exc)
-                return
-        else:
-            argv = [sys.executable, "-B", "-m", APP]
-        argv += ["index", path, "--jobs", "12"]
+        # The command line is the Rust `floe2` (rust/floe2)
+        from .vfsclient import find_floe2
+        try:
+            argv = [find_floe2(), "index", path, "--jobs", "12"]
+        except RuntimeError as exc:
+            self._set_live_status("jobdeck indexing failed: %s" % exc)
+            return
         if ids:
             argv += ["--level", ",".join(str(i) for i in ids)]
         self._index_modal("indexing jobdeck sources…", argv,

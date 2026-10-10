@@ -61,6 +61,7 @@ import klayout.db as db
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (P3)
 os.environ["FLOE_RENDERER"] = "rust"
 BIN = ROOT / "rust" / "target" / "release" / "floe-index"
 RENDERD = ROOT / "rust" / "target" / "release" / "floe-renderd"
@@ -188,8 +189,8 @@ class Daemon:
     """The viewer's render worker over the fixture's cache."""
 
     def __init__(self, src, env=None):
-        from floe.cache import Cache
-        from floe.service import make_render_worker
+        from floe_oracle.cache import Cache
+        from floe_oracle.service import make_render_worker
         saved = dict(os.environ)
         os.environ.update(env or run_env())
         try:
@@ -265,7 +266,7 @@ class CellTreeTests(unittest.TestCase):
         cls.ly = write_fixture(cls.src)
         cls.oracle = Oracle(cls.ly)
         floe2("index", cls.src, "--jobs", "2")
-        from floe.cachepath import vfs_cache_dir
+        from floe_oracle.cachepath import vfs_cache_dir
         cls.cache_dir = Path(vfs_cache_dir(str(cls.src)))
         cls.daemon = Daemon(cls.src)
 
@@ -299,7 +300,7 @@ class CellTreeTests(unittest.TestCase):
         c.shapes(ly.layer(db.LayerInfo(1, 0))).insert(db.Box(0, 0, 10, 10))
         ly.write(str(other))
         floe2("index", other, "--jobs", "1")
-        from floe.cachepath import vfs_cache_dir
+        from floe_oracle.cachepath import vfs_cache_dir
         other_dir = Path(vfs_cache_dir(str(other)))
         keep = ovh.read_bytes()
         try:
@@ -556,7 +557,8 @@ class CellTreeTests(unittest.TestCase):
         named ones with stored_shapes 0, a text alone counted; the viewer
         lists the pairs that hold something (a text is drawn as a label),
         FLOE_EMPTY_LAYERS=show every pair."""
-        from floe import cache as cache_mod, gui
+        from floe import gui
+        from floe_oracle import cache as cache_mod
         src = TMP / "named_list.oas"
         ly = db.Layout(True)
         ly.dbu = 0.001

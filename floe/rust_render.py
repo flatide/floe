@@ -1,4 +1,5 @@
-"""`floe.service.RenderWorker` compatible adapter for `floe-renderd`.
+"""The viewer's render worker: the adapter for `floe-renderd` (the
+frame/query protocol the frozen floe's KLayout `RenderWorker` spoke).
 
 The adapter translates the existing queue-shaped Python job/result contract
 to the renderer's strict line protocol. KLayout remains an independently
@@ -484,13 +485,11 @@ class RustRenderWorker:
             self._colors[key] = str(layer.get("color") or "#ffffff")
         try:
             from floe import fillpat
-            if hasattr(self.cache, "layer_props"):
-                # the rows floe2 gtk-service read (floe/gtkservice.py)
-                rows = self.cache.layer_props()
-            else:
-                from floe import cache as cache_mod
-                rows, _path = cache_mod.load_layer_props(
-                    getattr(self.cache, "props_src", self.cache.src))
+            # the rows floe2 gtk-service read (floe/gtkservice.py; the
+            # oracle's caches answer the same); a cache without them (a
+            # gate's stand-in) draws solid fills
+            layer_props = getattr(self.cache, "layer_props", None)
+            rows = layer_props() if layer_props is not None else []
             patterns = fillpat.default_patterns()
             for key, _color, fill, _name, _f1, width in rows:
                 key = _layer_key(key)
@@ -1842,50 +1841,39 @@ DEFAULT_DETAIL = 1              # medium
 
 def make_render_worker(cache, stream_kb=None, stream_target_ms=500,
                        debug=False):
-    """Create the selected render backend without changing GUI callers.
-
-    The stable floe shell defaults to KLayout.  The floe2 shell is Rust-only;
-    an explicit environment override remains available to floe A/B runs.
-    Backend-specific modules stay unloaded until the selected worker starts.
-    """
-    from .product import default_renderer
-    backend = os.environ.get(
-        "FLOE_RENDERER", default_renderer()).strip().lower()
-    backend = backend or default_renderer()
+    """The viewer's render worker: floe-renderd, the Rust renderer - floe2
+    renders with nothing else (the frozen floe's KLayout worker is the
+    dev-only oracle's since P3, tools/oracle/floe_oracle/service.py). A
+    jobdeck's cache is a renderd composite opened by its spec.
+    FLOE_RUST_WORKER = MODULE:TYPE swaps the worker class (the gates'
+    stand-ins)."""
+    backend = os.environ.get("FLOE_RENDERER", "rust").strip().lower()
+    if backend not in ("", "rust"):
+        raise RuntimeError(
+            "floe2 renders with Rust alone; FLOE_RENDERER=%r is not "
+            "supported" % backend)
     if getattr(cache, "is_jobdeck", False):
-        # a jobdeck (floe.jobdeck.viewer.DeckCache) is a renderd
-        # composite of several caches: Rust only, opened by spec
-        if backend != "rust":
-            raise RuntimeError(
-                "a jobdeck needs the Rust renderer (floe2)")
         return DeckRenderWorker(cache, stream_kb=stream_kb,
                                 stream_target_ms=stream_target_ms,
                                 debug=debug)
-    if backend == "klayout":
-        # the frozen floe shell's KLayout worker (dev-only, P3)
-        from .service import RenderWorker as worker_type
-    elif backend == "rust":
-        target = os.environ.get(
-            "FLOE_RUST_WORKER",
-            "floe.rust_render:RustRenderWorker")
-        module_name, separator, type_name = target.partition(":")
-        if not separator or not module_name or not type_name:
-            raise RuntimeError(
-                "FLOE_RUST_WORKER must be MODULE:TYPE, got %r" % target)
-        try:
-            import importlib
-            module = importlib.import_module(module_name)
-            worker_type = getattr(module, type_name)
-        except (ImportError, AttributeError) as exc:
-            raise RuntimeError(
-                "cannot load Rust render worker %r: %s" %
-                (target, exc)) from exc
-        if not callable(worker_type):
-            raise RuntimeError(
-                "Rust render worker %r is not callable" % target)
-    else:
+    target = os.environ.get(
+        "FLOE_RUST_WORKER",
+        "floe.rust_render:RustRenderWorker")
+    module_name, separator, type_name = target.partition(":")
+    if not separator or not module_name or not type_name:
         raise RuntimeError(
-            "FLOE_RENDERER must be klayout or rust, got %r" % backend)
+            "FLOE_RUST_WORKER must be MODULE:TYPE, got %r" % target)
+    try:
+        import importlib
+        module = importlib.import_module(module_name)
+        worker_type = getattr(module, type_name)
+    except (ImportError, AttributeError) as exc:
+        raise RuntimeError(
+            "cannot load Rust render worker %r: %s" %
+            (target, exc)) from exc
+    if not callable(worker_type):
+        raise RuntimeError(
+            "Rust render worker %r is not callable" % target)
     return worker_type(cache, stream_kb=stream_kb,
                        stream_target_ms=stream_target_ms, debug=debug)
 

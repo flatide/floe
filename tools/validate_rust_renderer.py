@@ -17,6 +17,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (P3)
 
 from floe import RENDERD_VERSION, __version__  # noqa: E402
 from floe.rust_render import (  # noqa: E402
@@ -85,7 +86,9 @@ def _stub_margin_viewer(worker, frame_cache, viewport=(858, 802)):
 
 class WorkerContractTests(unittest.TestCase):
     def test_single_instance_forwards_effective_detail_and_depth(self):
-        from floe import cli, instance
+        from floe import instance
+        # the product's view front (floe/viewcli.py, P2d)
+        from floe import viewcli as cli
 
         def forward(detail, depth, thin=None):
             args = SimpleNamespace(
@@ -244,7 +247,7 @@ class WorkerContractTests(unittest.TestCase):
         self.assertFalse(viewer._fit_after_worker_start)
 
     def test_common_perf_baseline_disables_optional_render_work(self):
-        from floe import cli
+        from floe import viewcli as cli
 
         args = SimpleNamespace(
             src=None, hairline=None, thin_um=None, goto=None,
@@ -269,7 +272,7 @@ class WorkerContractTests(unittest.TestCase):
         self.assertEqual(options["depth"], 999)
 
     def test_refinement_off_rejects_nonzero_stable_stream_budget(self):
-        from floe import cli
+        from floe import viewcli as cli
 
         args = SimpleNamespace(
             src=None, hairline=None, thin_um=None, goto=None,
@@ -287,7 +290,7 @@ class WorkerContractTests(unittest.TestCase):
         prefetch alone stays off - retained-frame pan reuse (frame_cache)
         stays on - so a margin's landing can be told apart from the frame
         itself. It is a process option (an independent instance)."""
-        from floe import cli
+        from floe import viewcli as cli
         from floe.gui import Viewer
 
         args = SimpleNamespace(
@@ -344,9 +347,9 @@ os.environ.pop("FLOE_RENDERER", None)
 # the Rust-only product (floe/product.py), as `import floe2` said before
 # the Rust command line took the Python floe2 package's place
 os.environ["FLOE_PRODUCT"] = "floe2"
-from floe import cache
+from floe_oracle import cache
 from floe import gui
-from floe.service import make_render_worker
+from floe_oracle.service import make_render_worker
 
 class Cache:
     src = "/tmp/source.oas"
@@ -358,7 +361,7 @@ assert worker.__class__.__name__ == "RustRenderWorker"
 assert cache.db.__class__.__name__ == "_LazyKLayoutDb"
 assert all(not name.startswith("klayout") for name in sys.modules)
 # the frozen shell's view policy (the floe2 viewer no longer reads it, P2d)
-from floe.view_policy import live_caps
+from floe_oracle.view_policy import live_caps
 assert live_caps({"grid": {"nx": 1, "ny": 1},
                   "src": {"size": 1}}) == (256, 1024)
 assert not hasattr(gui, "live_caps")
@@ -367,6 +370,9 @@ assert not hasattr(gui, "live_caps")
             environment.update({
                 "FLOE_RENDERD_BIN": binary,
                 "PYTHONDONTWRITEBYTECODE": "1",
+                # the frozen shell's modules (dev-only oracle, P3)
+                "PYTHONPATH": os.pathsep.join(
+                    (str(ROOT / "tools" / "oracle"), str(ROOT))),
             })
             environment.pop("FLOE_RENDERER", None)
             completed = subprocess.run(
@@ -376,8 +382,8 @@ assert not hasattr(gui, "live_caps")
             self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_klayout_is_an_explicit_abstract_capable_rollback(self):
-        from floe import service
-        from floe.cli import _renderer_backend
+        from floe_oracle import service
+        from floe_oracle.cli import _renderer_backend
 
         sentinel = object()
         with tempfile.TemporaryDirectory() as directory, \
@@ -913,7 +919,7 @@ assert not hasattr(gui, "live_caps")
         bg flag). The GUI now gates on the worker capability AND on
         --frame-cache (off under --perf-baseline), and _covered() only
         crops an oversize frame while the margin is enabled."""
-        from floe import service
+        from floe_oracle import service
         from floe.gui import Viewer
 
         self.assertTrue(RustRenderWorker.supports_margin_prefetch)
@@ -3024,8 +3030,8 @@ class RealDaemonIntegrationTests(unittest.TestCase):
     maxDiff = None
 
     def test_parent_cache_progressive_style_and_shutdown(self):
-        from floe.cache import Cache
-        from floe.service import make_render_worker
+        from floe_oracle.cache import Cache
+        from floe_oracle.service import make_render_worker
 
         source = os.path.abspath(os.environ["FLOE_INTEGRATION_SOURCE"])
         cache = Cache(source)
@@ -3343,7 +3349,7 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             # .<source>.ice sibling (floe/cachepath.py).  Give the
             # subprocess a conventional source/cache pair while retaining
             # the same files and metadata.
-            from floe.cachepath import vfs_cache_dir
+            from floe_oracle.cachepath import vfs_cache_dir
             cli_source = os.path.join(directory, "CLI source.oas")
             os.symlink(source, cli_source)
             # a copy, not a link: the Rust command line opens a real cache
@@ -3458,13 +3464,13 @@ class RealDaemonIntegrationTests(unittest.TestCase):
     def _assert_query_parity(self, cache, worker, bbox):
         """Use the legacy KLayout service only as a query oracle."""
         import klayout.db as db
-        from floe.service import (
+        from floe_oracle.service import (
             _iter_global_polys,
             _svc_pick,
             _svc_snap,
         )
-        from floe.vfsclient import VfsClient
-        from floe.viewport import VfsMosaic
+        from floe_oracle.vfsclient import VfsClient
+        from floe_oracle.viewport import VfsMosaic
 
         box = db.Box(*(int(value) for value in bbox))
         cache.vfs_client = VfsClient(cache.dir)
@@ -3496,8 +3502,8 @@ class RealDaemonIntegrationTests(unittest.TestCase):
     def _assert_clip_parity(self, cache, worker, bbox):
         """Exact Rust export must be Region-identical to parent KLayout."""
         import klayout.db as db
-        from floe.service import _svc_clip
-        from floe.vfsclient import VfsClient
+        from floe_oracle.service import _svc_clip
+        from floe_oracle.vfsclient import VfsClient
 
         layers = [
             (int(layer["layer"]), int(layer["datatype"]))

@@ -6,6 +6,12 @@
 
 현재 버전: floe-index **0.11.29**, ovm 포맷 **v7**, meta CACHE_VERSION 8.
 
+> **주의(2026-10-10):** §1~§5는 KLayout 시절(동결 floe) 구조다. 지금 제품 floe2는 Rust 명령줄
+> (`rust/floe2`)과 GTK 뷰어(`floe/`)이고, 뷰어는 `floe-renderd`로 그리며 비-UI 판단은
+> `floe2 gtk-service`에 묻는다(docs/SHARED_APP_LAYER.ko.md, docs/FLOE2.md). 여기 나오는
+> `floe/cli.py`·`service.py`·`viewport.py`·`render.py`·`cache.py`·`drc.py`와 vfsd 클라이언트는
+> P3부터 `tools/oracle/floe_oracle/`에 있는 개발 전용 오라클이다(§9).
+
 ## 1. 3-프로세스 구조
 
 ```
@@ -128,18 +134,24 @@ D1~D3(DRC .ice 인덱스 == ASCII 파스 동치).
 ## 9. 디렉토리 지도
 
 ```
-floe/            파이썬 앱
-  cli.py         CLI 디스패치 (view/index/render/clip/probe/drc/…)
-  gui.py         GTK 셸 (키맵·패널·미니맵·팔레트·상태줄)  ~3.9k줄
-  service.py     RenderWorker 프로세스 (잡 루프, 스트리밍 라운드, [perf])
+floe/            GTK 뷰어 (floe2의 Python은 이것뿐, P2d/P3)
+  gtkview.py     진입점 (`floe2 view`·`floe2 gtktest`가 띄움)
+  viewcli.py     뷰 옵션, 단일 인스턴스 전달, gtktest
+  gui.py         GTK 셸 (키맵·패널·미니맵·팔레트·상태줄)
+  gtkservice.py  `floe2 gtk-service` 클라이언트 (열기·준비·DRC 리뷰·layerprops)
+  rust_render.py floe-renderd 어댑터 (프레임·질의)
+  vfsclient.py   floe-index·floe2 실행 파일 찾기
+  fillpat.py     색테이블/fill 표 (colornames.def / fillpatterns.def)
+  instance.py hangul.py product.py
+tools/oracle/floe_oracle/   개발 전용 오라클 (동결 floe 셸, `python -m floe_oracle`)
+  cli.py         동결 CLI (index/info/render/clip/probe/profile/drc/svrf/jobdeck)
+  service.py     KLayout RenderWorker (잡 루프, 스트리밍 라운드, [perf])
   viewport.py    VfsMosaic (WC apply, 프레임 레이어 키, 원장)
   vfsclient.py   vfsd 라인 프로토콜 클라이언트
   render.py      klayout Renderer (스페클/프레임 플레인/fill 오버라이드)
   cache.py       캐시 로딩, layerprops 개인화, 레거시 .tiles
-  drc.py         Calibre DRC .db 파서 + .ice 인덱스 mmap 리더
-  fillpat.py     색테이블/fill 로더, layerprops 파서, hex 변환
-  colornames.def / fillpatterns.def   팔레트 단일 소스
-  coverage.py drc.py instance.py …
+  drc.py         Calibre DRC .db 파서 + 팩 리더 (Python 기준 구현)
+  jobdeck/ shots.py svrf.py indexlock.py fe_embed.py coverage.py …
 rust/            Cargo 워크스페이스 (vendored deps, 오프라인 빌드)
   oasis/         OASIS 파서/라이터 (doc.rs: Rep{One,Grid,Pts})
   ovm/           .ovm v7 포맷 (lib.rs: Builder/Ovm/CellSink)

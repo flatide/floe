@@ -14,7 +14,7 @@ use std::ffi::OsString;
 static HOST: Host = Host {
     name: "floe2",
     version: env!("FLOE2_VERSION"),
-    usage: "Usage: floe2 view [SOURCE] [VIEW OPTIONS]      (the GTK viewer; floe2 view --help)\n       floe2 [VIEW OPTIONS] SOURCE                (same as view)\n       floe2                                       (the viewer, empty)\n",
+    usage: "Usage: floe2 view [SOURCE] [VIEW OPTIONS]      (the GTK viewer; floe2 view --help)\n       floe2 [VIEW OPTIONS] SOURCE                (same as view)\n       floe2                                       (the viewer, empty)\n       floe2 gtktest [PNG]                         (a GTK display check: a black view's diagnosis)\n",
     metadata: || vec![("viewer", serde_json::Value::from("gtk"))],
     input_error_exit: 1,
 };
@@ -29,7 +29,8 @@ fn main() {
     if floe_app_cli::COMMANDS.contains(&first) || matches!(first, "--help" | "-h" | "--version") {
         floe_app_cli::main(&HOST, args);
     }
-    // the viewer: `view ARGS`, or the arguments as they are
+    // the viewer: `view ARGS`, or the arguments as they are (`gtktest`,
+    // the GTK display check, is the viewer entry's too: floe/viewcli.py)
     let rest = if first == "view" {
         args[1..].to_vec()
     } else {

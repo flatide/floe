@@ -6,7 +6,8 @@
 # floe2. FLOE_PORTABLE_KLAYOUT=1 builds the DEVELOPMENT bundle with the
 # frozen KLayout shell `floe` next to `floe2` - oracle / pre-validation use
 # on closed networks only, never a release (floe is frozen since
-# 2026-09-08, branch floe-legacy).
+# 2026-09-08, branch floe-legacy; here it is the gates' oracle,
+# tools/oracle/floe_oracle, its command line without a viewer since P3).
 #
 #   ./make_portable.sh [output-dir]     # -> floe2-portable-<ver>-<date>.tar.gz
 #   ./make_portable.sh --print-name     # print the artifact name and stop
@@ -138,23 +139,23 @@ if [ "$FLOE_PORTABLE_KLAYOUT" = 1 ]; then
     "$PYBIN" -c 'import klayout; print("== klayout rollback", klayout.__version__)'
 fi
 
-# -- 4. drop the shared implementation into site-packages: the GTK
-# viewer (floe/gui.py) and, in the KLayout bundle, the frozen floe shell.
-# floe2's command line is the Rust runtime/bin/floe2 (step 5b), which
-# starts the viewer through this interpreter
+# -- 4. drop the GTK viewer (floe/) into site-packages and, in the KLayout
+# bundle, the frozen floe shell (tools/oracle/floe_oracle). floe2's command
+# line is the Rust runtime/bin/floe2 (step 5b), which starts the viewer
+# through this interpreter
 SITE="$("$PYBIN" -c 'import site;print(site.getsitepackages()[0])')"
-# The floe2 bundle carries the viewer alone (P2d): its UI and the client of
-# floe2 gtk-service - every other module is the frozen shell's or a Python
-# implementation kept as the gates' oracle. The KLayout bundle carries all.
+# The floe package is the viewer alone (P2d/P3): its UI and the client of
+# floe2 gtk-service. The list is what ships - a file left in floe/ by
+# mistake does not.
 FLOE2_PRODUCT_FILES="__init__.py gtkview.py viewcli.py gui.py gtkservice.py rust_render.py vfsclient.py instance.py product.py hangul.py fillpat.py colornames.def fillpatterns.def"
-rm -rf "$SITE/floe" "$SITE/floe2"
+rm -rf "$SITE/floe" "$SITE/floe2" "$SITE/floe_oracle"
+mkdir -p "$SITE/floe"
+for f in $FLOE2_PRODUCT_FILES; do cp "$REPO/floe/$f" "$SITE/floe/$f"; done
 if [ "$FLOE_PORTABLE_KLAYOUT" = 1 ]; then
-    cp -r "$REPO/floe" "$SITE/floe"
-else
-    mkdir -p "$SITE/floe"
-    for f in $FLOE2_PRODUCT_FILES; do cp "$REPO/floe/$f" "$SITE/floe/$f"; done
+    cp -r "$REPO/tools/oracle/floe_oracle" "$SITE/floe_oracle"
 fi
-find "$SITE/floe" -name '__pycache__' -type d -prune -exec rm -rf {} +
+find "$SITE/floe" "$SITE/floe_oracle" -name '__pycache__' -type d -prune \
+    -exec rm -rf {} + 2>/dev/null || true
 
 # -- 5. slim: build-time payloads never touched at runtime --------------
 cd "$WORK/runtime"
@@ -291,11 +292,14 @@ must = ["lib/libgtk-3.so.0", "lib/girepository-1.0/Gtk-3.0.typelib",
         "share/glib-2.0/schemas",
         "fonts"]  # bundled sans fallback (fonts.conf lists it first)
 klayout_dir = "lib/python%s/site-packages/klayout" % pyver
+oracle_dir = "lib/python%s/site-packages/floe_oracle" % pyver
 if with_klayout:
-    must.append(klayout_dir)
-elif os.path.exists(os.path.join(root, klayout_dir)):
-    print("FAIL unexpected KLayout in default bundle", klayout_dir)
-    bad.append(("unexpected KLayout", os.path.join(root, klayout_dir)))
+    must.extend((klayout_dir, oracle_dir))
+else:
+    for extra in (klayout_dir, oracle_dir):
+        if os.path.exists(os.path.join(root, extra)):
+            print("FAIL unexpected in the default bundle", extra)
+            bad.append(("unexpected dev-only package", os.path.join(root, extra)))
 missing = [m for m in must if not os.path.exists(os.path.join(root, m))]
 for m in missing:
     print("MISSING", m)
@@ -327,9 +331,9 @@ B="$WORK/${FLOE_PORTABLE_PRODUCT}-portable"
 rm -rf "$B"; mkdir -p "$B"
 mv "$WORK/runtime" "$B/runtime"
 
-# The KLayout-enabled floe bundle can run both products from the same shared
-# packages/runtime. The Rust-only floe2 bundle intentionally omits a `floe`
-# launcher because stable floe requires KLayout.
+# The KLayout-enabled development bundle runs both from the same runtime:
+# floe2 and the frozen floe shell (floe_oracle). The Rust-only floe2 bundle
+# omits a `floe` launcher - the frozen shell needs KLayout.
 PORTABLE_LAUNCHERS="floe2"
 if [ "$FLOE_PORTABLE_KLAYOUT" = 1 ]; then
     PORTABLE_LAUNCHERS="floe floe2"
@@ -385,6 +389,12 @@ else:
     print("klayout:      not bundled (expected; Rust default)")
 import floe
 print("packages:     floe %s OK (the GTK viewer)" % floe.__version__)
+if "$FLOE_PORTABLE_KLAYOUT" == "1":
+    import floe_oracle
+    print("oracle:       floe_oracle OK (the frozen floe shell)")
+elif importlib.util.find_spec("floe_oracle") is not None:
+    print("oracle:       UNEXPECTED in default bundle")
+    sys.exit(2)
 PY
 then
     FAILED=1
@@ -499,9 +509,11 @@ runtime/bin/ 안에 들어
 있으며 시스템에는 아무것도 설치·변경하지 않는다. 시스템에서
 쓰는 것은 X 디스플레이와 (있다면) 시스템 폰트뿐.
 
-기본 floe2 번들은 KLayout을 포함하지 않는다. 안정판 floe/KLayout 번들은
+기본 floe2 번들은 KLayout을 포함하지 않는다. 개발용 KLayout 번들은
 FLOE_PORTABLE_KLAYOUT=1로 별도 빌드하며, 이 번들은 같은 runtime에서
-floe(KLayout)와 floe2(Rust) 실행 파일을 모두 제공한다.
+floe2(Rust)와 동결 floe 셸(KLayout, 개발 전용 오라클 floe_oracle: index/
+info/render/clip/probe/drc/jobdeck 명령만 - 뷰어는 floe2 view, KLayout
+뷰어는 floe-legacy 브랜치)을 함께 제공한다.
 
 요구: x86_64 리눅스, glibc ${FLOOR}+, X 디스플레이.
 
@@ -510,12 +522,12 @@ floe(KLayout)와 floe2(Rust) 실행 파일을 모두 제공한다.
     /opt/${FLOE_PORTABLE_PRODUCT}-portable/selfcheck
     /opt/${FLOE_PORTABLE_PRODUCT}-portable/floe2 view /path/to/chip.oas
     /opt/${FLOE_PORTABLE_PRODUCT}-portable/floe2 index /path/to/chip.oas
-    # KLayout 포함 floe-portable에서만:
-    /opt/floe-portable/floe view /path/to/chip.oas
+    # KLayout 포함 floe-portable에서만 (동결 floe 셸, 명령만):
+    /opt/floe-portable/floe render /path/to/chip.oas --out frame.png
 
 편의상 링크: ln -s /opt/${FLOE_PORTABLE_PRODUCT}-portable/floe2 /usr/local/bin/floe2
 
-코드 업데이트: 새 floe/ 패키지를
+코드 업데이트: 새 floe/ 패키지(GTK 뷰어)를
     runtime/lib/python*/site-packages/floe
 에 덮어쓰고, 같은 체크아웃에서 빌드한 세 바이너리를
     runtime/bin/floe2
