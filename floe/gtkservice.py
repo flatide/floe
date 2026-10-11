@@ -465,6 +465,7 @@ class _Drc(object):
 
     def __init__(self, result):
         self._slots = {}
+        self._visits = collections.deque()
         self._handle = result["handle"]
         self.path = result["path"]
         self.cell = result["cell"]
@@ -510,6 +511,10 @@ class _Drc(object):
         if self._handle is None:
             return
         for e in service().drc_events(self._handle):
+            if e.get("kind") == "visit":
+                # the session's visit thread (no job slot)
+                self._visits.append(e)
+                continue
             slot = self._slots.get(e.get("kind"))
             if slot is None or e.get("job") != slot[0]:
                 _discard_files([e])
@@ -567,8 +572,13 @@ class PackDrc(_Drc):
         super().__init__(result)
         self._counts = [tuple(c) for c in result["counts"]]
         self._status = {}
+        self._cache_lock = threading.Lock()
         self.waive_path = result.get("waive_path")
+        self._waive_path = self.waive_path
         self.note_path = result.get("note_path")
+        self._reviewer = result.get("reviewer")
+        self.read_only = bool(result.get("read_only"))
+        self._flags = {}
         self._set_notes(result.get("notes") or [])
 
     def _set_notes(self, notes):
@@ -583,15 +593,19 @@ class PackDrc(_Drc):
 
     # ---- statuses ------------------------------------------------------
     def _status_chunk(self, ci, k):
+        # the reviewers windows read statuses on their worker threads too:
+        # the caches change under a lock (never held over a request)
         key = (ci, k)
-        got = self._status.get(key)
+        with self._cache_lock:
+            got = self._status.get(key)
         if got is None:
-            if len(self._status) > 256:
-                self._status.pop(next(iter(self._status)))
             hexed = self._request("drc_status", check=ci,
                                   start=k * _STATUS_PAGE, count=_STATUS_PAGE)
             got = bytearray.fromhex(hexed)
-            self._status[key] = got
+            with self._cache_lock:
+                if len(self._status) > 256:
+                    self._status.pop(next(iter(self._status)))
+                self._status[key] = got
         return got
 
     def get_status(self, ci, ei):
@@ -605,10 +619,11 @@ class PackDrc(_Drc):
         reply = self._request("drc_set_status", check=ci, errors=eis,
                               status=int(value) & 0xFF)
         self._counts[ci] = tuple(reply["counts"])
-        for ei in eis:
-            chunk = self._status.get((ci, ei // _STATUS_PAGE))
-            if chunk is not None:
-                chunk[ei % _STATUS_PAGE] = int(value) & 0xFF
+        with self._cache_lock:
+            for ei in eis:
+                chunk = self._status.get((ci, ei // _STATUS_PAGE))
+                if chunk is not None:
+                    chunk[ei % _STATUS_PAGE] = int(value) & 0xFF
 
     def set_status(self, ci, ei, value):
         self.set_statuses(ci, [ei], value)
@@ -674,15 +689,77 @@ class PackDrc(_Drc):
 
     def statuses_changed(self, ci=None, counts=None):
         """A service job rewrote statuses: drop what was read of them."""
-        self._status.clear()
+        with self._cache_lock:
+            self._status.clear()
         if ci is not None and counts is not None:
             self._counts[ci] = tuple(counts)
 
     def waive_import(self, src):
         reply = self._request("drc_waive_import", path=os.path.abspath(src))
         self._counts = [tuple(c) for c in reply["counts"]]
-        self._status.clear()
+        with self._cache_lock:
+            self._status.clear()
         return reply["waived"]
+
+    def counts_refresh(self):
+        """Every rule's (waived, total) again (a team job rewrote them)."""
+        self._counts = [tuple(c) for c in self._request("drc_counts")]
+        with self._cache_lock:
+            self._status.clear()
+
+    # ---- visited / not-required (app-core drc::team::flags) -------------
+    def review_flags(self, ci, ei):
+        """VISITED | NOT_REQUIRED of one error; a 4096-error chunk asked at
+        a time; ServiceError when the flags cannot be read."""
+        key = (ci, ei // _STATUS_PAGE)
+        with self._cache_lock:
+            got = self._flags.get(key)
+        if got is None:
+            n = len(self.checks[ci].errors)
+            start = key[1] * _STATUS_PAGE
+            got = self._request("drc_review_flags", check=ci, errors=list(
+                range(start, min(n, start + _STATUS_PAGE))))
+            with self._cache_lock:
+                if len(self._flags) > 256:
+                    self._flags.pop(next(iter(self._flags)))
+                self._flags[key] = got
+        return got[ei % _STATUS_PAGE]
+
+    def review_flags_changed(self, ci=None):
+        with self._cache_lock:
+            if ci is None:
+                self._flags.clear()
+            else:
+                for key in [k for k in self._flags if k[0] == ci]:
+                    del self._flags[key]
+
+    def review_counts(self, ci=None):
+        return self._request("drc_review_counts",
+                             check=None if ci is None else int(ci))
+
+    @property
+    def review_path(self):
+        reply = self._request("drc_review_path")
+        for line in reply.get("notices") or []:
+            sys.stderr.write(line + "\n")
+        return reply["path"]
+
+    def mark_visited(self, ci, ei):
+        """Queue one visit (written in order on the service's thread; the
+        outcome comes back through `visit_events`)."""
+        self._request("drc_visit", check=int(ci), error=int(ei))
+
+    def visit_events(self):
+        """(ci, ei, error message or None) of the visits written since."""
+        self._pump()
+        out = []
+        while self._visits:
+            e = self._visits.popleft()
+            ci = e.get("check")
+            self.review_flags_changed(ci)
+            out.append((ci, e.get("error"),
+                        e.get("message") if e.get("state") == "error" else None))
+        return out
 
 
 # ---- DRC analysis: the viewer's objects over the service's (feature/
@@ -722,6 +799,37 @@ class DrcScope(object):
 
     def contains(self, ei):
         return bool(self.contains_many([ei])[0])
+
+    __contains__ = contains
+
+
+class EmptyScope(DrcScope):
+    """No error of a rule (the viewer's `Selection.empty`)."""
+    __slots__ = ()
+
+    def __init__(self, db, ci):
+        super().__init__(db, ci, {"empty": True})
+
+    def __len__(self):
+        return 0
+
+    def __bool__(self):
+        return False
+
+    def count(self, waived=None):
+        return 0
+
+    def page(self, start, limit, waived=None):
+        return []
+
+    def rank(self, ei, waived=None):
+        return None
+
+    def contains_many(self, eis):
+        return [False for _ in eis]
+
+    def contains(self, ei):
+        return False
 
     __contains__ = contains
 
@@ -1608,3 +1716,312 @@ def read_frame(frame):
             os.unlink(path)
         except OSError:
             pass
+
+
+# ---- the team's shared review (feature/jobdeck-drc's drc_team /
+# drc_migrate; app-core drc::team over the service). The functions block
+# until their service job ends - call them from worker threads.
+
+VISITED = 1
+NOT_REQUIRED = 2
+ReviewState = collections.namedtuple("ReviewState", "visited waived not_required")
+TeamState = collections.namedtuple("TeamState", "visited waived not_required conflict")
+
+
+def _job(db, kind, op, cancelled=None, progress=None, **fields):
+    """Run service job `kind` (`op`) to its end: its done event; progress
+    (done, total[, phase]); InterruptedError when `cancelled()` turns
+    true; ValueError with the service's message on failure."""
+    db._start(kind, op, **fields)
+    while True:
+        if cancelled is not None and cancelled():
+            db.cancel(kind)
+            raise InterruptedError("review operation cancelled")
+        event = db.poll(kind)
+        if event is None:
+            time.sleep(0.01)
+            continue
+        state = event.get("state")
+        if state == "progress":
+            if progress is not None:
+                progress(event.get("done", 0), event.get("total", 0),
+                         event.get("phase", ""))
+            continue
+        if state == "done":
+            return event
+        if state == "cancelled" or event.get("cancelled"):
+            raise InterruptedError(event.get("message") or "review operation cancelled")
+        raise ValueError(event.get("message") or "review operation failed")
+
+
+class SnapshotMembers(object):
+    """One plane of one rule of a snapshot or plan (count, pages)."""
+
+    def __init__(self, owner, op, key, ci, kind):
+        self.owner, self.op, self.key, self.ci, self.kind = owner, op, key, ci, kind
+        self._total = None
+
+    def _page(self, start, limit):
+        return self.owner.db._request(
+            "drc_%s_page" % self.op, check=int(self.ci), kind=self.kind,
+            start=int(start), limit=int(limit), **{self.op: self.key})
+
+    def count(self, waived=None):
+        if self._total is None:
+            self._total = self._page(0, 0)["count"]
+        return self._total
+
+    __len__ = count
+
+    def __bool__(self):
+        return self.count() > 0
+
+    def page(self, start, limit, waived=None):
+        reply = self._page(start, limit)
+        self._total = reply["count"]
+        return reply["ids"]
+
+    def contains_many(self, eis):
+        eis = [int(e) for e in eis]
+        if not eis:
+            return []
+        return self.owner.db._request(
+            "drc_%s_contains" % self.op, check=int(self.ci), kind=self.kind,
+            errors=eis, **{self.op: self.key})
+
+    def contains(self, ei):
+        return bool(self.contains_many([ei])[0])
+
+    __contains__ = contains
+
+
+class ReviewSnapshot(object):
+    """A reviewer snapshot, converted peer file or team aggregate kept by
+    the service (drc_team ReviewSnapshot / ReviewAggregate's surface)."""
+
+    def __init__(self, db, info):
+        self.db = db
+        self.sid = info["snapshot"]
+        self.reviewer = info["reviewer"]
+        self.path = info["path"]
+        self.original_path = info.get("original_path") or info["path"]
+        self.snapshot_id = info["snapshot_id"]
+        self.exported_ns = info["exported_ns"]
+        self.visited_known = info["visited_known"]
+        self.waive_known = info["waive_known"]
+        self.not_required_known = info["not_required_known"]
+        self.aggregate = bool(info.get("aggregate"))
+        self.metadata = {"aggregate": self.aggregate,
+                         "source_path": info.get("source_path"),
+                         "source_waive_path": info.get("source_waive_path")}
+        self._closed = False
+        self._leases = 0
+        self._lock = threading.Lock()
+
+    def counts(self, ci=None):
+        return self.db._request("drc_snapshot_counts", snapshot=self.sid,
+                                check=None if ci is None else int(ci))
+
+    def members(self, ci, kind="work"):
+        return SnapshotMembers(self, "snapshot", self.sid, ci, kind)
+
+    def page(self, ci, start, limit, kind="work"):
+        return self.members(ci, kind).page(start, limit)
+
+    def get_many(self, ci, eis):
+        rows = self.db._request("drc_snapshot_get", snapshot=self.sid,
+                                check=int(ci), errors=[int(e) for e in eis])
+        if self.aggregate:
+            return [TeamState(*r) for r in rows]
+        return [ReviewState(*r[:3]) for r in rows]
+
+    def get(self, ci, ei):
+        return self.get_many(ci, [ei])[0]
+
+    def lease(self):
+        with self._lock:
+            if self._closed:
+                raise OSError("review snapshot is closed")
+            self._leases += 1
+        return _Lease(self)
+
+    def _release(self):
+        with self._lock:
+            self._leases -= 1
+            drop = self._closed and self._leases == 0
+        if drop:
+            self._drop()
+
+    def close(self):
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            drop = self._leases == 0
+        if drop:
+            self._drop()
+
+    def _drop(self):
+        handle = getattr(self.db, "_handle", None)
+        if handle is not None:
+            _DROPS.append((handle, "drc_snapshot_drop", "snapshot", self.sid))
+
+
+class _Lease(object):
+    """A snapshot kept open while a job reads it."""
+
+    def __init__(self, source):
+        self._source = source
+        self._closed = False
+
+    def __getattr__(self, name):
+        return getattr(self._source, name)
+
+    def lease(self):
+        return self._source.lease()
+
+    def close(self):
+        if not self._closed:
+            self._closed = True
+            self._source._release()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        self.close()
+
+
+def open_review(db, path, cancelled=None, progress=None):
+    """A peer's snapshot, working review file or waive file, read."""
+    event = _job(db, "team", "drc_team_load", cancelled, progress,
+                 paths=[os.path.abspath(path)])
+    if event.get("errors"):
+        raise ValueError(event["errors"][0].split(": ", 1)[-1])
+    return ReviewSnapshot(db, event["loaded"][0])
+
+
+def aggregate_reviews(db, sources, cancelled=None, progress=None):
+    """One's own review and the peers', combined (conflicts marked)."""
+    event = _job(db, "team", "drc_team_aggregate", cancelled, progress,
+                 sources=[s.sid for s in sources])
+    return ReviewSnapshot(db, event["info"])
+
+
+def import_conflicts(db, source, cancelled=None, progress=None):
+    event = _job(db, "team", "drc_team_import", cancelled, progress,
+                 source=source.sid)
+    return ReviewSnapshot(db, dict(snapshot=event["snapshot"], reviewer="import-conflicts",
+                                   path="", snapshot_id="", exported_ns=0,
+                                   visited_known=True, waive_known=True,
+                                   not_required_known=True, aggregate=True))
+
+
+def export_review(db, path, cancelled=None, progress=None):
+    _job(db, "team-write", "drc_team_export", cancelled, progress,
+         path=os.path.abspath(path))
+    return types.SimpleNamespace(close=lambda: None, path=os.path.abspath(path))
+
+
+def team_csv(db, sources, path, cancelled=None, progress=None):
+    """The aggregate's statistics, whole database and per rule, as CSV."""
+    _job(db, "team-write", "drc_team_csv", cancelled, progress,
+         sources=[s.sid for s in sources], path=os.path.abspath(path))
+
+
+def apply_review(db, source, ci=None, errors=None, force=False, cancelled=None,
+                 progress=None):
+    """Apply a peer's decisions (safe, or forced on rule `ci`'s `errors`);
+    the counts of what changed."""
+    try:
+        event = _job(db, "team-write", "drc_team_apply", cancelled, progress,
+                     source=source.sid, check=ci,
+                     errors=None if errors is None else [int(e) for e in errors],
+                     force=bool(force))
+    finally:
+        db.counts_refresh()
+        db.review_flags_changed()
+    return event["result"]
+
+
+def set_members(db, ci, errors, field, on, cancelled=None, progress=None):
+    """One's own waive or not-required on rule `ci`'s `errors`."""
+    try:
+        _job(db, "review", "drc_review", cancelled, progress, check=int(ci),
+             action="waive" if field == "waive" else "not-required",
+             errors=[int(e) for e in errors], on=bool(on))
+    finally:
+        db.counts_refresh()
+        db.review_flags_changed(ci)
+
+
+def prepare_conflict_selection(db, aggregate, ci, membership=None, waived=None,
+                               cancelled=None, progress=None):
+    """The aggregate's conflicts in rule `ci` within `membership` (a scope)
+    and the waive filter, as a service selection."""
+    fields = dict(aggregate=aggregate.sid, check=int(ci), waived=waived)
+    if membership is not None:
+        fields["scope"] = membership.spec
+    event = _job(db, "conflicts", "drc_team_conflicts", cancelled, progress, **fields)
+    return DrcSelection(db, ci, event["selection"], len(db.checks[ci].errors),
+                        event["total"])
+
+
+class MigrationPlan(object):
+    """A prepared review migration kept by the service."""
+
+    def __init__(self, db, event):
+        self.db = db
+        self.pid = event["plan"]
+        self.summary = dict(event["summary"])
+        self.source_path = self.summary.get("source_path")
+        self.state_path = self.summary.get("state_path")
+        self.reviewer = self.summary.get("reviewer")
+
+    def rule_counts(self, ci=None):
+        return self.db._request("drc_plan_counts", plan=self.pid,
+                                check=None if ci is None else int(ci))
+
+    def members(self, ci, kind="matched"):
+        return SnapshotMembers(self, "plan", self.pid, ci, kind)
+
+    def page(self, ci, start, limit, kind="matched"):
+        return self.members(ci, kind).page(start, limit)
+
+    def get_many(self, ci, eis):
+        rows = self.db._request("drc_plan_get", plan=self.pid, check=int(ci),
+                                errors=[int(e) for e in eis])
+        return [None if r is None else ReviewState(*r) for r in rows]
+
+    def get(self, ci, ei):
+        return self.get_many(ci, [ei])[0]
+
+    def close(self):
+        handle = getattr(self.db, "_handle", None)
+        if handle is not None and self.pid is not None:
+            _DROPS.append((handle, "drc_plan_drop", "plan", self.pid))
+        self.pid = None
+
+
+def prepare_migration(db, old_path, state_path=None, cancelled=None, progress=None):
+    event = _job(db, "migrate", "drc_migrate_prepare", cancelled, progress,
+                 previous=os.path.abspath(old_path),
+                 state=None if not state_path else os.path.abspath(state_path))
+    return MigrationPlan(db, event)
+
+
+def apply_migration(db, plan, cancelled=None, progress=None):
+    try:
+        event = _job(db, "migrate-write", "drc_migrate_apply", cancelled, progress,
+                     plan=plan.pid)
+    finally:
+        db.counts_refresh()
+        db.review_flags_changed()
+    plan.summary = dict(event.get("summary") or plan.summary)
+    return event["result"]
+
+
+def review_stats_export(db, path, cancelled=None, progress=None):
+    """One's own review statistics (database and rules) as CSV."""
+    _job(db, "review", "drc_review_stats", cancelled, progress,
+         path=os.path.abspath(path))

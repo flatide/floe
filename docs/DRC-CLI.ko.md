@@ -79,6 +79,25 @@ waive/notes는 변경하지 않는다. pack이 없거나 낡으면 중단하며 
 다시 연 뒤 0.02초(캐시), 중심 캐시를 만들며 그린 첫 마커 0.33초. OS 파일 캐시는
 따뜻한 상태였다. 실제 형상과 조건 수, 저장장치에 따라 달라진다.
 
+### 이전 실행과의 도형 대응 (`drc-match`)
+
+```bash
+floe2 drc-match OLD.tray NEW.tray --plan pairs.json --states flags.u8 \
+    --out records.bin --work-dir /tmp/match [--jobs 4] [--memory-mib 64] \
+    [--progress progress.json] [--report report.json]
+floe2 drc-match --protocol        # 2
+```
+
+뷰어의 `review from previous run…`은 app-core `drc::matcher`를 직접 부른다. 이
+명령은 같은 매처를 스크립트와 기준 구현(`tools/oracle/floe_oracle/drc_migrate.py`)에
+내준다(2026-10-11; 브랜치의 `floe-index drc-match`를 app-core로 옮겼다).
+`pairs.json`은 `[[이전 룰, 새 룰], ...]`(양쪽에서 유일한 같은 이름),
+`flags.u8`은 이전 pack 전역 에러당 1바이트(V=1, W=2, NR=4)다. `records.bin`은
+16바이트 레코드를 (룰, 에러) 순으로 쓴다(SPEC-FORMATS `.floereview` 절). 출력은 모두
+새 파일이어야 하고 입력과 달라야 한다. 해시 그룹의 바이트 비교는 pack을 읽기 전용으로
+매핑해 대상 에러까지만 디코딩하고 작업자들이 나눠 한다. Apple M4에서 작업 상태가 모두
+있는 2백만 에러 룰이 4개 작업자로 2.7초(1개 6.6초)였다.
+
 ## 1. 룰 목록: `floe drc <db> --rules`
 
 ```bash

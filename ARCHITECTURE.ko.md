@@ -153,6 +153,8 @@ tools/oracle/floe_oracle/   개발 전용 오라클 (동결 floe 셸, `python -m
   render.py      klayout Renderer (스페클/프레임 플레인/fill 오버라이드)
   cache.py       캐시 로딩, layerprops 개인화, 레거시 .tiles
   drc.py         Calibre DRC .db 파서 + 팩 리더 (Python 기준 구현)
+  drc_review.py drc_team.py drc_migrate.py  DRC 방문·공동 검토·재수행 승계
+                 (feature/jobdeck-drc; app-core drc::team의 기준, 게이트 drc_review)
   jobdeck/ shots.py svrf.py indexlock.py fe_embed.py coverage.py …
 rust/            Cargo 워크스페이스 (vendored deps, 오프라인 빌드)
   oasis/         OASIS 파서/라이터 (doc.rs: Rep{One,Grid,Pts})
@@ -161,6 +163,9 @@ rust/            Cargo 워크스페이스 (vendored deps, 오프라인 빌드)
   tiler/         Xf 변환, 레거시 타일러
   cli/           floe-index 바이너리 (vfs.rs: 빌드+vfsd+plan,
                  drcice.rs: DRC .ice 인덱스 빌더)
+  app-core/      공유 앱 계층 (floe2·웹): drc::{analysis, team, matcher}
+                 - 분석, 방문·공동 검토(SQLite, 기능 review-sqlite), 도형 대응
+  app-cli/ floe2/  공유 CLI, floe2 (gtk-service: drc.rs·drc_team.rs)
   VFS_HIER.md    플래너 설계 정본 (rev 1~46b)
 tools/           gen_*(자산 생성) validate_*(게이트) make_portable.sh
 docs/            SPEC-*.ko.md (본 문서 세트)

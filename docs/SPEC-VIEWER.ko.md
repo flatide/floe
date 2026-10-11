@@ -317,6 +317,47 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
 
 ## 8b. DRC 브라우저 (대용량 규약)
 
+- **검토 통계**(2026-10-09 feature/jobdeck-drc, 2026-10-11 서비스 이식 —
+  floe2 gtk-service `drc_team.rs`, app-core `drc::team`): 개별 에러를 열어 그
+  도형이 실제로 캔버스에 그려졌을 때 `visited`를 기록한다(`_drc_visit_drawn`:
+  선분·채움 스캔라인이 화면 안에 찍혔는지). 숨긴 오버레이(Tab), 화면 밖의 도형,
+  원형 마커로 축약된 도형, 마커 표시와 다중 선택은 방문이 아니다. 숨겼던 오버레이를
+  다시 보이면 그때 그려진 현재 에러가 방문이다. paint에서는 서비스 요청을 하지 않고
+  다음 idle에 `drc_visit`를 보낸다. 서비스는 세션의 방문 스레드에서 순서대로 쓰고
+  `{"kind": "visit"}` 이벤트로 알린다. 같은 마크의 반복 프레임은 한 번만 보낸다.
+  `검토대상 아님`은 에러 번호 우클릭(현재/선택 전체)과 DRC 메뉴
+  `mark/clear not for review`로 지정·해제한다(서비스 review 작업, 마커·그룹·선택은
+  그대로). 목록은 번호 앞에 `V`/`X`(읽기 실패는 `?`)를 붙이고 waive·선택 색은 그대로다.
+  상세에 `visited: … · not for review: …` 줄, 패널에 전체 DB·현재 룰 전체 통계와
+  `export review statistics…`(CSV, 서비스가 접수한 방문을 쓴 뒤 작성)를 둔다.
+- **공동 검토**(DRC 메뉴 `reviewers…`; `load waives…`도 이 창의 불러오기로 간다 —
+  내 상태를 갈아끼우지 않는다): 다른 리뷰어의 `.floereview`, 작업 review SQLite,
+  waive 파일을 읽기 전용으로 불러와(`drc_team_load`) 내 상태와 비교한다. 리뷰어마다
+  최신 스냅숏 하나만 남는다. `Refresh`는 내 최신 작업과 불러온 자료를 집계한다
+  (`drc_team_aggregate`, 서비스가 접수한 방문을 쓴 뒤). 목록은 선택한 동료의 작업,
+  방문한 리뷰어 사이의 conflict, 선택한 동료와의 import conflict를 1,000개씩 보이며
+  각 행에 내·동료의 V/W/NR과 conflict 이유를 쓴다. 더블클릭은 내 도형을 연다.
+  `Apply all peer work safely`는 내 방문 에러의 다른 판단을 건너뛰고,
+  `Use peer judgement on selected rows`는 선택한 행에 강제로 적용한다. 수동
+  버튼(Waive/Unwaive/Exclude/Require selected)은 내 상태를 바꾼다. 상대 visited는
+  복사하지 않는다. `Export my review…`, `Statistics CSV…`(전체 DB·룰별, conflicts·
+  reviewers 열). 모든 불러오기·집계·페이지·저장·적용은 창의 작업 스레드에서 서비스
+  작업을 기다리며, 창을 닫으면 읽기 작업은 취소하고 쓰기는 끝까지 간다.
+  메인 목록의 `Conflict only`는 마지막 집계의 conflict를 클러스터·CD 그룹·waive
+  필터와 교집합으로 서비스 선택(`drc_team_conflicts`)으로 만들고, 목록·마커·박스
+  선택·in view의 조건으로 쓴다. 준비 중에는 전체를 대신 보이지 않으며 룰·조건·DB가
+  바뀐 뒤 도착한 결과는 버린다. 룰/그룹 제목의 개수는 기존 범위의 개수다. 내 판단을
+  바꾸면 다음 `Refresh`까지 conflict 집합은 그대로이고 waive 필터만 다시 계산한다.
+  Reviewers 창을 닫아도 마지막 집계와 필터는 남고, 다른 DB를 열면 초기화한다.
+- **이전 DRC 실행의 검토 승계**(DRC 메뉴 `review from previous run…`): 이전 `.db`나
+  `.tray`와(선택) 검토 파일을 고르고 `Compare geometry`(`drc_migrate_prepare`,
+  진행률·단계·취소)로 정확한 도형 대응을 본 뒤 `Apply exact matches`
+  (`drc_migrate_apply`)로 적용한다. 목록은 일치, conflict(모호·보호), 모호한 이전
+  상태를 1,000개씩 보이고, 각 행에 현재와 이전의 V/W/NR(불일치 항목 `—`), 결과
+  (exact match / partial consensus / current judgement protected / geometry match
+  unverified)를 쓴다. 통계 줄은 일치(부분)·미대응·모호·conflict와 제외된 도형·
+  이름이 없거나 중복인 룰의 이전 작업 수, 적용 결과를 보인다. 입력을 바꾸면 준비
+  결과를 버리고, DB가 바뀌면 창을 닫는다.
 - `drc.load_db`가 소스: 신선한 pack(`.<db>.tray`)이면 IcePack(mmap, 블록
   단위 lazy 디코드), 아니면 ASCII 전체 파스(v1 오프셋 사이드카는
   2026-08-19 폐기 — 잔존 파일은 stderr 안내 후 ASCII 폴백).

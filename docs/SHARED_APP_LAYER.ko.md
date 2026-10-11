@@ -385,8 +385,25 @@ P4d처럼 컨트롤러 루프에서만 바뀐다. `FLOE_GTK_LOOP=legacy`는 예�
 - **D0 머지 커밋:** 이력, 샘플(`sample.*`), 문서, `rust/cli/src/svrf.rs`의 치수 분류(두 레이어 INTERNAL = overlap, 한 레이어 EXTERNAL NOTCH = notch), drc_ice D8(중점 배치가 최소값을 바꾸지 않음, app-core `drc::measure`에도 적용). 브랜치의 `drc_delta`·`drc_clusters`·`drc_points`·`drc_markers`·`drc_marker_style`·`drc_selection`·`drc_analysis`는 `tools/oracle/floe_oracle/`의 기준 구현이 되고, 작업자·캐시·native 프로토콜(`floe-index drc-measure`/`drc-centers`)·Python `drc-prepare`·쿼드트리·브랜치 게이트 16개는 가져오지 않았다(경우는 새 게이트로).
 - **D1 (app-core `drc::analysis::{ticks, measure}`):** 다섯 자리 HALF_UP(`Decimal(str(value))`), 규칙 조건에 따른 CD 선택(MeasurementSelector), 사각형 룰러 방향, AREA 라벨. 산술은 CPython의 `math.hypot`(vector_norm)·`math.fsum`을 따라 경계에서도 기준과 같다(무작위 대조: hypot·ticks 100만, 선택 20만). svrf `constraint_metric`은 제품 사이드카 읽기와 웹의 Rules에 적용한다. 캡처(`floe2 render --drc`)도 같은 룰러와 면적 텍스트를 넣는다.
 - **D2~D5 (`clusters`, `scope`, `source`, `store`, `delta`, `points`, `select`):** `.clusters` 검증·구간·상태별 수/페이지/순위, 소속(구간·그룹 행·비트셋 선택과 교집합), 작업 스레드의 pack 블록 읽기, `.<db>.analysis/`(또는 `FLOE_DRC_ANALYSIS_ROOT`) 캐시 — pack identity, 이름 바꾸기 공개, 빌더 순번, 쓸 수 없으면 메모리 —, 측정표(병렬, 10만 건부터 캐시)·자동 스텝·그룹(캐시)·그룹 리뷰 수, 정확한 중심 캐시와 마커 그림(0.5초 중간 그림), 박스 선택. Review에 `query_scoped`, 청크 단위 대량 상태 기록.
-- **서비스(`rust/floe2/src/drc.rs`):** `drc_clusters_load`, `drc_cluster_counts`, `drc_scope_*`, `drc_delta`(+rows/find/drop), `drc_markers`, `drc_select`(+page/drop), `drc_review`, `drc_inview`, `drc_cancel`, `drc_parse_step`, `drc_cd_info`. 긴 작업은 종류·DB마다 하나인 작업 스레드에서 돌고 `{"event": "drc", ...}` 줄로 알린다.
+- **서비스(`rust/floe2/src/drc.rs`):** `drc_clusters_load`, `drc_cluster_counts`, `drc_scope_*`, `drc_delta`(+rows/find/drop), `drc_markers`, `drc_select`(+page/drop), `drc_team`, `drc_inview`, `drc_cancel`, `drc_parse_step`, `drc_cd_info`. 긴 작업은 종류·DB마다 하나인 작업 스레드에서 돌고 `{"event": "drc", ...}` 줄로 알린다.
 - **뷰어:** 브랜치의 UI(룰 트리의 클러스터 자식, 델타 컨트롤, 마커 합성과 픽셀 hit map, 박스 선택, 대량 waive/note 작업, 큰 룰의 in-view 작업)를 서비스 위에 얹었다. `floe/gtkservice.py`가 브랜치의 객체 모양(ClusterFile, DeltaGroups, 선택, 작업자)을 준다.
 - **D6:** `floe2 drc-prepare`(공유 CLI; `floe-index drc-prepare`는 옆의 floe2에 넘긴다).
 - **게이트 `drc_analysis`:** 서비스 = 기준 구현(sample.db 전부, 15만 에러 룰), 캐시 재사용, 잘못된 clusters 파일, drc-prepare, 뷰어.
 - **웹과의 조율(나중):** `drc::analysis`는 웹도 쓸 수 있는 공유 모듈이다. 웹 UI에 같은 기능을 붙일 때 서비스 요청을 HTTP로 옮기면 된다.
+
+## 9. feature/jobdeck-drc 두 번째 머지 (2026-10-11) — 방문·공동 검토·재수행 승계를 공유 Rust로
+
+사용자: "feature/jobdeck-drc에 커밋하지 않았던 것도 마저 커밋했으니 가져와서 머지해줘". 로컬 브랜치의 새 커밋 세 개(1eee6ffb 방문·검토 제외, 142e5bda feature/jobdeck 0.12.344 머지, c70b2e88 공동 검토·재수행 승계; origin에는 아직 없다)를 가져왔다. 저장 형식은 사용자가 **SQLite 유지**로 정했다(브랜치의 `.<db>.review.<리뷰어>.sqlite3`·`.floereview`를 그대로 읽고 쓴다).
+
+- **머지 커밋:** 제품은 그대로 둔다. 142e5bda가 `floe/`에 되살린 Python DRC 실행부(drc.py, cachepath, indexlock, svrf, fe_embed, drc_*)와 NumPy 번들은 가져오지 않았다. 브랜치의 `drc_review.py`·`drc_team.py`·`drc_migrate.py`와 갱신된 `drc.py`(리뷰 지문, 열 때 고정한 리뷰어, 읽기 전용 내장 상태)는 `tools/oracle/floe_oracle/`의 기준 구현이다. `rust/cli`의 drcmatch·drcmeasure·drccenters는 가져오지 않았다(매처는 app-core로 옮겼다). 브랜치의 Python 단위 테스트는 그 Python 모듈을 시험하는 것이라 새 게이트로 대신한다.
+- **SQLite:** app-core 기능 `review-sqlite`(floe2가 켠다; 웹은 아직 끄고 쓴다)로 rusqlite 0.40.2 bundled를 쓴다. `rust/vendor/`에 넣었다(libsqlite3-sys의 쓰지 않는 sqlcipher 사본과 vcpkg 테스트 데이터는 뺐다). C 컴파일러가 필요해져 musl 정적 빌드는 `cargo zigbuild`(zig cc)나 musl-gcc로 한다(`tools/make_portable.sh`, `rust/build-linux.sh`, rust/BUILD.md). macOS에서 `cargo zigbuild --target x86_64-unknown-linux-musl`로 정적 floe2가 나오는 것을 확인했다.
+- **app-core `drc::team`:**
+  - `flags`: 방문·검토 제외 저장소. 스키마·메타데이터 문자열·위치(`FLOE_DRC_REVIEW_ROOT`, XDG 폴백)·읽기 50ms·실패 1초 반복·쓰기 연결 분리가 기준과 같다.
+  - `snapshot`: `.floereview` 쓰기(임시 파일, fsync, 이름 바꾸기)·읽기(카운터·페이지 인덱스 검사)·내보내기·변환(작업 SQLite + 짝 waive, waive 전용)·집계(k-way 병합, conflict)·import conflict·conflict 선택(`Selection`)·적용(안전/강제).
+  - `migrate`: 이전 결과의 원천(지정 파일, 내 작업 파일, pack 내장 waive), `VACUUM INTO` 고정 사본, 매처, 매핑·모호·자격 스냅숏, 보호 conflict, 적용(16청크 묶음).
+  - `Pack::review_fingerprint`(sha256), `Review`의 읽기 전용 내장 상태(waive 거절)·`write_status_span`·상태 세대.
+- **app-core `drc::matcher`**(기능과 무관하게 항상): 브랜치의 floe-index drc-match를 app-core pack 위로. 해시 그룹 검증은 pack을 읽기 전용으로 매핑해 대상 에러까지만 디코딩하고, 작은 그룹은 메모리에서 묶어 작업자들이 검증한다(2백만 에러 22초 → 2.7초, 출력 바이트 동일). `floe2 drc-match`(protocol 2)가 같은 매처를 내준다.
+- **서비스(`rust/floe2/src/drc_team.rs`):** `drc_visit`(세션의 방문 스레드, `visit` 이벤트), `drc_review_flags/counts/path/stats`, `drc_snapshot_*`, `drc_team_load/aggregate/import/export/apply/csv/conflicts`, `drc_migrate_prepare/apply`, `drc_plan_*`, `drc_counts`; `drc_team`에 `not-required`. 팀 작업은 시작 전에 접수된 방문을 기다린다. 세션을 닫을 때 쓰기 작업(`review`·`team-write`·`migrate-write`)은 끝까지 가고 방문도 쓴다.
+- **뷰어:** 브랜치 UI(방문 기록, V/X, 통계·CSV, 검토 제외 메뉴, Reviewers 창, Conflict only, 이전 실행 창)를 `floe/gtkservice.py`의 래퍼(`ReviewSnapshot`, `MigrationPlan`, `open_review` 등 브랜치 함수 모양) 위로 옮겼다. 방문 요청은 paint 밖 idle에서 보낸다.
+- **게이트 `drc_team`:** R1~R7(SPEC-VALIDATION). 같은 pack에서 리뷰어 "py"(참조)와 "rs"(서비스)의 파일이 행 단위로 같다.
+- **웹과의 조율(나중):** `drc::team`과 `drc::matcher`는 공유 모듈이다. 웹이 쓰려면 app-core의 `review-sqlite`를 켜고(C 컴파일러 필요) 서비스 요청을 HTTP로 옮긴다.

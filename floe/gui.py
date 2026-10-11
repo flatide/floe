@@ -22,6 +22,7 @@ import signal
 import sys
 import threading
 import time
+from types import SimpleNamespace
 
 from . import __version__
 from . import gtkservice
@@ -138,11 +139,801 @@ LEFT_PANE_PX = 260
 
 class _DrcPanel(object):
     """Widget refs of the embedded DRC browser (attribute bag)."""
-    __slots__ = ("_info", "_rules", "_rstore", "_grid", "_gstore",
+    __slots__ = ("_info", "_review_info", "_conflict", "_conflict_info",
+                 "_rules", "_rstore", "_grid", "_gstore",
                  "_detail", "_hl", "_wf", "_selv", "_search",
                  "_tf", "_plabel", "_pprev", "_pnext", "_delta_mode",
                  "_delta_step", "_delta_store", "_delta_tree", "_delta_label",
                  "_delta_prev", "_delta_next")
+
+
+class _DrcTeamWindow:
+    """Read-only peer snapshots; every action keeps the viewer's own DB."""
+
+    def __init__(self, viewer):
+        self.viewer, self.db = viewer, viewer._drc
+        self.sources, self.aggregate = [], None
+        self.import_conflicts, self.import_source = None, None
+        self.job, self.closed, self.page = None, False, 0
+        self._guard = False
+        self.window = Gtk.Window(title="DRC reviewers")
+        self.window.set_transient_for(viewer.window)
+        self.window.set_default_size(970, 650)
+        viewer._only_close_button(self.window)
+        viewer._center_on_parent(self.window)
+        self.window.connect("destroy", self._destroy)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_border_width(8)
+        self.window.add(box)
+        self.controls = []
+
+        def row():
+            widget = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
+            box.pack_start(widget, False, False, 0)
+            return widget
+
+        def button(parent, label, callback):
+            widget = Gtk.Button(label=label)
+            widget.connect("clicked", lambda *_: callback())
+            parent.pack_start(widget, False, False, 0)
+            self.controls.append(widget)
+            return widget
+
+        top = row()
+        button(top, "Load peer work…", self._load_dialog)
+        button(top, "Export my review…", self._export)
+        button(top, "Refresh", self._refresh)
+        button(top, "Statistics CSV…", self._csv)
+        self.peer = Gtk.ComboBoxText()
+        self.peer.set_hexpand(True)
+        top.pack_start(self.peer, True, True, 0)
+        self.controls.append(self.peer)
+        self.peer.connect("changed", lambda *_: self._changed())
+        self.source_label = Gtk.Label(label="No peer loaded. Peer originals remain read-only.")
+        self.source_label.set_xalign(0)
+        self.source_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        box.pack_start(self.source_label, False, False, 0)
+        self.stats = Gtk.Label(label="Statistics have not been refreshed.")
+        self.stats.set_xalign(0)
+        self.stats.set_line_wrap(True)
+        self.stats.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        box.pack_start(self.stats, False, False, 0)
+        filters = row()
+        self.rule = Gtk.ComboBoxText()
+        for ci, check in enumerate(self.db.checks):
+            self.rule.append(str(ci), check.name)
+        self.rule.set_active(viewer._drc_open if viewer._drc_open is not None else 0)
+        self.rule.set_hexpand(True)
+        filters.pack_start(self.rule, True, True, 0)
+        self.controls.append(self.rule)
+        self.rule.connect("changed", lambda *_: self._changed())
+        self.mode = Gtk.ComboBoxText()
+        self.mode.append("work", "Selected peer's work")
+        self.mode.append("conflict", "Conflicts among visited reviewers")
+        self.mode.append("import", "Import conflicts with selected peer")
+        self.mode.set_active(0)
+        self.mode.connect("changed", lambda *_: self._changed())
+        filters.pack_start(self.mode, False, False, 0)
+        self.controls.append(self.mode)
+        self.store = Gtk.ListStore(int, int, str, str, str, str)
+        self.tree = Gtk.TreeView(model=self.store)
+        for j, title in ((2, "Error"), (3, "Mine: V / W / NR"),
+                         (4, "Peer: V / W / NR"), (5, "Conflict")):
+            column = Gtk.TreeViewColumn(title, Gtk.CellRendererText(), text=j)
+            column.set_expand(True)
+            self.tree.append_column(column)
+        self.tree.get_selection().set_mode(Gtk.SelectionMode.MULTIPLE)
+        self.tree.connect("row-activated", self._jump)
+        scroll = Gtk.ScrolledWindow()
+        scroll.add(self.tree)
+        box.pack_start(scroll, True, True, 0)
+        pages = row()
+        self.prev = button(pages, "Previous", lambda: self._turn(-1))
+        self.page_label = Gtk.Label(label="0 errors")
+        pages.pack_start(self.page_label, True, True, 0)
+        self.next = button(pages, "Next", lambda: self._turn(1))
+        apply_row = row()
+        button(apply_row, "Apply all peer work safely", self._apply)
+        button(apply_row, "Use peer judgement on selected rows", lambda: self._apply(True))
+        manual = row()
+        for label, field, on in (("Waive selected", "waive", True),
+                                 ("Unwaive selected", "waive", False),
+                                 ("Exclude selected", "not-required", True),
+                                 ("Require selected", "not-required", False)):
+            button(manual, label, lambda f=field, v=on: self._manual(f, v))
+        help_label = Gtk.Label(label=("V = visited · W = waived · NR = not for review. "
+            "Double-click opens my error geometry.\n"
+            "Safe apply preserves different judgements on my visited errors; "
+            "peer visits are never copied. Selected-row actions are explicit overrides.\n"
+            "Refresh includes my latest work. Reload peer files to receive their newer work."))
+        help_label.set_xalign(0)
+        help_label.set_line_wrap(True)
+        box.pack_start(help_label, False, False, 0)
+        self.status = Gtk.Label(label="Load peer work to compare reviews.")
+        self.status.set_xalign(0)
+        self.status.set_line_wrap(True)
+        self.status.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        self.status.set_max_width_chars(100)
+        box.pack_start(self.status, False, False, 0)
+        self.window.show_all()
+
+    def _valid(self):
+        return not self.closed and self.viewer._drc is self.db
+
+    def _source(self):
+        index = self.peer.get_active()
+        return self.sources[index] if 0 <= index < len(self.sources) else None
+
+    def _ci(self):
+        value = self.rule.get_active_id()
+        return int(value) if value is not None else None
+
+    def _destroy(self, *_):
+        self.closed = True
+        if self.job is not None and not self.job["write"]:
+            self.job["cancel"].set()
+        if getattr(self.viewer, "_drc_team", None) is self:
+            self.viewer._drc_team = None
+        if self.job is None:
+            self._close_sources()
+
+    def _close_sources(self):
+        for source in self.sources + [item for item in
+                (self.aggregate, self.import_conflicts) if item is not None]:
+            source.close()
+        self.sources, self.aggregate = [], None
+        self.import_conflicts, self.import_source = None, None
+
+    def _start(self, label, work, complete, *, write=False, changed=False):
+        if not self._valid():
+            return False
+        if self.job is not None or self.viewer._drc_review_pending():
+            self.status.set_text("An operation is running; wait for it to finish.")
+            return False
+        cancel = threading.Event()
+        # the service writes the visits it accepted before a team job
+        # (drc_team.rs wait_visits): no barrier here
+        job = dict(db=self.db, label=label, cancel=cancel, done=False, result=None,
+                   error=None, progress=None, write=write, changed=changed,
+                   complete=complete, waive_changed=bool(changed and changed != "flags"))
+        self.job = job
+        self.viewer._drc_team_busy = job
+        if write:
+            self.viewer._drc_team_write = job
+        for widget in self.controls:
+            widget.set_sensitive(False)
+        self.tree.set_sensitive(False)
+        self.status.set_text(label + "…")
+
+        def run():
+            try:
+                job["result"] = work(cancel.is_set,
+                    lambda done, total, *_: job.update(progress=(done, total)))
+                if isinstance(job["result"], dict) and "changed_waived" in job["result"]:
+                    job["waive_changed"] = bool(job["result"]["changed_waived"])
+            except Exception as exc:
+                job["error"] = str(exc)
+            finally:
+                job["done"] = True
+        # Accepted writes finish even when a window closes. Read scans cancel.
+        threading.Thread(target=run, name="drc-team", daemon=not write).start()
+        GLib.timeout_add(POLL_MS, self._poll)
+        return True
+
+    def _poll(self):
+        job = self.job
+        if job is None:
+            return False
+        if not self._valid() and not job["write"]:
+            job["cancel"].set()
+        if not job["done"]:
+            if self._valid() and job["progress"] is not None:
+                self.status.set_text("%s: %d / %d" % (job["label"], *job["progress"]))
+            return True
+        self.job = None
+        if getattr(self.viewer, "_drc_team_busy", None) is job:
+            self.viewer._drc_team_busy = None
+        if getattr(self.viewer, "_drc_team_write", None) is job:
+            self.viewer._drc_team_write = None
+        if job["changed"] and self.viewer._drc is self.db:
+            # A failed batch may already have committed earlier chunks.
+            self.viewer._drc_team_changed(self.db, waived=job["waive_changed"])
+        if not self._valid():
+            result = job["result"]
+            if hasattr(result, "close"):
+                result.close()
+            elif isinstance(result, tuple) and result and isinstance(result[0], list):
+                for source in result[0]:
+                    source.close()
+            if job["error"] and job["write"]:
+                self.viewer._set_live_status("Previous review operation failed: " + job["error"])
+            if self.closed:
+                self._close_sources()
+            else:
+                self.status.set_text("The DRC database changed. Reopen Reviewers for the new database.")
+            return False
+        for widget in self.controls:
+            widget.set_sensitive(True)
+        self.tree.set_sensitive(True)
+        if job["error"]:
+            self.status.set_text(job["label"] + " failed: " + job["error"])
+            if job["changed"]:
+                self.stats.set_text("Review changed partially; refresh statistics before continuing.")
+        else:
+            self.status.set_text(job["label"] + " complete")
+            job["complete"](job["result"])
+        if self.job is None and getattr(self, "_open_load_when_ready", False):
+            self._open_load_when_ready = False
+            self._load_dialog()
+        return False
+
+    def _choose(self, title, save=False, multiple=False, default=None):
+        if not self._valid() or self.job is not None:
+            return None
+        dialog = Gtk.FileChooserDialog(title=title, parent=self.window,
+            action=Gtk.FileChooserAction.SAVE if save else Gtk.FileChooserAction.OPEN)
+        dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                           "Save" if save else "Open", Gtk.ResponseType.OK)
+        dialog.set_current_folder(os.path.dirname(os.path.abspath(self.db.path)))
+        if save:
+            dialog.set_do_overwrite_confirmation(True)
+            if default:
+                dialog.set_current_name(default)
+        else:
+            dialog.set_select_multiple(multiple)
+        answer = None
+        if dialog.run() == Gtk.ResponseType.OK:
+            answer = dialog.get_filenames() if multiple else dialog.get_filename()
+        dialog.destroy()
+        self.window.present()
+        return answer if self._valid() else None
+
+    def _load_dialog(self):
+        paths = self._choose("Load peer review bundles or waiver files", multiple=True)
+        if paths:
+            self._load_paths(paths)
+
+    def _load_paths(self, paths):
+        from .gtkservice import open_review
+        paths = tuple(paths)
+
+        def work(cancelled, progress):
+            loaded, errors = [], []
+            for path in paths:
+                if cancelled():
+                    break
+                try:
+                    loaded.append(open_review(self.db, path,
+                        cancelled=cancelled, progress=progress))
+                except Exception as exc:
+                    errors.append("%s: %s" % (os.path.basename(path), exc))
+            return loaded, errors
+
+        def complete(result):
+            loaded, errors = result
+            self._guard = True
+            try:
+                for source in loaded:
+                    # A reviewer has one active snapshot, never two votes.
+                    old = next((s for s in self.sources if s.reviewer == source.reviewer), None)
+                    if old is not None:
+                        if ((old.exported_ns, old.snapshot_id) >=
+                                (source.exported_ns, source.snapshot_id)):
+                            source.close()
+                            errors.append("%s: kept the newer loaded snapshot" % source.reviewer)
+                            continue
+                        self.sources.remove(old)
+                        old.close()
+                    self.sources.append(source)
+                self.peer.remove_all()
+                for source in self.sources:
+                    self.peer.append_text(source.reviewer)
+                self.peer.set_active(len(self.sources) - 1)
+            finally:
+                self._guard = False
+            self._load_errors = "; ".join(errors)
+            self.page = 0
+            if loaded:
+                self._refresh()
+            else:
+                self.status.set_text("No peer loaded: " + self._load_errors)
+        self._start("Load peer work", work, complete)
+
+    def _refresh(self):
+        from .gtkservice import aggregate_reviews
+        sources = tuple(self.sources)
+
+        def complete(result):
+            if self.aggregate is not None:
+                self.aggregate.close()
+            if self.import_conflicts is not None:
+                self.import_conflicts.close()
+            self.import_conflicts, self.import_source = None, None
+            self.aggregate = result
+            self.refreshed_at = time.strftime("%H:%M:%S")
+            publish = getattr(self.viewer, "_drc_conflict_publish", None)
+            if publish is not None:
+                publish(result, self.refreshed_at)
+            self._page_load()
+        self._start("Refresh reviewer statistics",
+            lambda cancel, progress: aggregate_reviews(self.db, sources,
+                cancelled=cancel, progress=progress), complete)
+
+    @staticmethod
+    def _state(value, source=None):
+        fields = (("visited", value.visited), ("waive", value.waived),
+                  ("not_required", value.not_required))
+        return " / ".join("—" if source is not None and not getattr(source, name + "_known", True)
+                          else "yes" if flag else "no" for name, flag in fields)
+
+    @staticmethod
+    def _stats_line(scope, counts):
+        return ("%s: total %d · visited (any reviewer) %d · waived %d · "
+                "not for review %d · unvisited targets %d · conflicts %d" %
+                (scope, counts["total"], counts["visited"], counts["waived"],
+                 counts["not_required"], counts["pending"], counts["conflicts"]))
+
+    def _changed(self):
+        if not self._guard:
+            self.page = 0
+            self._page_load()
+
+    def _page_load(self):
+        ci, source, aggregate = self._ci(), self._source(), self.aggregate
+        if aggregate is None:
+            return
+        if ci is None:
+            def complete_empty(counts):
+                self.store.clear()
+                self.stats.set_text(self._stats_line("Whole DB", counts) + "\nNo rules in this database.")
+                self.page_label.set_text("0 errors")
+                self.prev.set_sensitive(False)
+                self.next.set_sensitive(False)
+            self._start("Read reviewer statistics", lambda *_: aggregate.counts(), complete_empty)
+            return
+        if source is not None and self.import_source is not source:
+            from .gtkservice import import_conflicts
+
+            def complete(result):
+                if self.import_conflicts is not None:
+                    self.import_conflicts.close()
+                self.import_conflicts, self.import_source = result, source
+                self._page_load()
+            self._start("Compare safe-import judgements",
+                lambda cancel, progress: import_conflicts(self.db, source,
+                    cancelled=cancel, progress=progress), complete)
+            return
+        kind = self.mode.get_active_id()
+        provider = (aggregate if kind == "conflict" else
+                    self.import_conflicts if kind == "import" else source)
+        query_kind = "conflict" if kind in ("conflict", "import") else "work"
+        imports = self.import_conflicts if self.import_source is source else None
+        page = self.page
+
+        def work(cancelled, progress):
+            from .gtkservice import VISITED, NOT_REQUIRED
+            count = provider.members(ci, query_kind).count() if provider is not None else 0
+            actual_page = min(page, max(0, (count - 1) // DRC_PAGE))
+            ids = provider.page(ci, actual_page * DRC_PAGE, DRC_PAGE, kind=query_kind) if provider else ()
+            peers = source.get_many(ci, ids) if source else [None] * len(ids)
+            teams = aggregate.get_many(ci, ids)
+            rows = []
+            for ei, peer_value, team in zip(ids, peers, teams):
+                if cancelled():
+                    raise InterruptedError("page cancelled")
+                flags = self.db.review_flags(ci, ei)
+                own_waived = self.db.get_status(ci, ei) == gtkservice.STATUS_WAIVED
+                mine = "%s / %s / %s" % tuple("yes" if value else "no" for value in
+                    (flags & VISITED, own_waived, flags & NOT_REQUIRED))
+                peer = self._state(peer_value, source) if source else "—"
+                conflict = "reviewers" if team.conflict else ""
+                if (source is not None and flags & VISITED and
+                        ((source.waive_known and peer_value.waived != own_waived) or
+                         (source.not_required_known and peer_value.not_required != bool(flags & NOT_REQUIRED))) and
+                        (peer_value.visited or peer_value.waived or peer_value.not_required)):
+                    conflict = (conflict + "; " if conflict else "") + "import protected"
+                rows.append((ci, ei, "#%d" % (ei + 1), mine, peer, conflict))
+            return (rows, count, actual_page, aggregate.counts(), aggregate.counts(ci),
+                    imports.counts()["conflicts"] if imports is not None else 0,
+                    imports.counts(ci)["conflicts"] if imports is not None else 0)
+
+        def complete(result):
+            rows, count, self.page, total, rule, import_total, import_rule = result
+            self.store.clear()
+            for data in rows:
+                self.store.append(data)
+            self.page_label.set_text("%d errors · page %d / %d · %d per page" %
+                (count, self.page + 1, max(1, (count + DRC_PAGE - 1) // DRC_PAGE), DRC_PAGE))
+            self.prev.set_sensitive(self.page > 0)
+            self.next.set_sensitive((self.page + 1) * DRC_PAGE < count)
+            self.stats.set_text("Snapshot %s · Mine + loaded peers (%d reviewers) · Refresh after further edits/visits\n%s\n%s\n"
+                "Import conflicts with selected peer: Whole DB %d · Whole rule %d" %
+                (self.refreshed_at, total["reviewers"], self._stats_line("Whole DB", total),
+                 self._stats_line("Whole rule " + self.db.checks[ci].name, rule), import_total, import_rule))
+            self.source_label.set_text(("Peer %s — %s" %
+                (source.reviewer, getattr(source, "original_path", source.path)))
+                if source else "No peer selected; aggregate includes my review.")
+            error = getattr(self, "_load_errors", "")
+            if error:
+                self.status.set_text("Some sources were not loaded: " + error)
+                self._load_errors = ""
+            elif getattr(self, "_notice", ""):
+                self.status.set_text(self._notice)
+        self._start("Read reviewer page", work, complete)
+
+    def _turn(self, delta):
+        self.page = max(0, self.page + delta)
+        self._page_load()
+
+    def _jump(self, _tree, path, _column):
+        if not self._valid() or self.job is not None:
+            return
+        row = self.store[path]
+        ci, ei = int(row[0]), int(row[1])
+        # _drc_jump sets the global position and own review_target itself.
+        self.viewer._drc_jump(ci, ei, isolate=True)
+        self.status.set_text("Opened my error geometry; Refresh updates the review comparison.")
+
+    def _selection(self):
+        model, paths = self.tree.get_selection().get_selected_rows()
+        ci = self._ci()
+        if ci is None:
+            return None, []
+        return ci, sorted({int(model[path][1]) for path in paths})
+
+    def _apply(self, force=False):
+        from .gtkservice import apply_review
+        source = self._source()
+        if source is None:
+            self.status.set_text("Load and select a peer first.")
+            return
+        ci, membership = self._selection() if force else (None, None)
+        if force and not membership:
+            self.status.set_text("Select rows whose judgement should be replaced with this peer's.")
+            return
+
+        def complete(result):
+            self._load_errors = ""
+            self._notice = ("Applied %d errors; preserved %d conflicting visited errors. "
+                "Changed waives %d; review exclusions %d." %
+                (result["applied"], result["conflicts_skipped"],
+                 result["changed_waived"], result["changed_not_required"]))
+            self._refresh()
+            self.status.set_text(self._notice + " Refreshing…")
+        self._start("Apply selected peer judgement" if force else "Apply peer work safely",
+            lambda cancel, progress: apply_review(self.db, source, ci=ci,
+                errors=membership, force=force, progress=progress),
+            complete, write=True, changed=True)
+
+    def _manual(self, field, on):
+        ci, members = self._selection()
+        if not members:
+            self.status.set_text("Select rows to change my judgement.")
+            return
+
+        def work(cancelled, progress):
+            from .gtkservice import set_members
+            set_members(self.db, ci, members, field, on, progress=progress)
+        self._start("Change my " + field, work, lambda _result: self._refresh(),
+                    write=True, changed="flags" if field == "not-required" else "waive")
+
+    def _export(self):
+        from .gtkservice import export_review
+        from .gtkservice import db_name_of
+        reviewer = str(getattr(self.db, "_reviewer", "reviewer"))
+        reviewer = "".join(char if char.isalnum() or char in "._-" else "_" for char in reviewer)
+        path = self._choose("Export my review (visited, waived, not for review)",
+                            save=True, default="%s.%s.floereview" %
+                            (db_name_of(self.db.path), reviewer))
+        if path and self._output_allowed(path):
+            self._start("Export my review", lambda cancel, progress:
+                export_review(self.db, path, progress=progress),
+                lambda snapshot: snapshot.close(), write=True)
+
+    def _output_allowed(self, path):
+        try:
+            review_path = getattr(self.db, "review_path", None)
+        except Exception as exc:
+            self.status.set_text("Cannot verify my review path: %s" % exc)
+            return False
+        protected = [self.db.path, getattr(self.db, "_waive_path", None), review_path]
+        for source in self.sources:
+            protected.extend((source.path, getattr(source, "original_path", None),
+                              source.metadata.get("source_path"),
+                              source.metadata.get("source_waive_path")))
+        target = os.path.realpath(path)
+        if any(value and os.path.realpath(value) == target for value in protected):
+            self.status.set_text("Choose another output file; DRC inputs and loaded peer originals are read-only here.")
+            return False
+        return True
+
+    def _csv(self):
+        path = self._choose("Export all reviewer statistics", save=True,
+                            default="reviewers.csv")
+        if not path or not self._output_allowed(path):
+            return
+        sources = tuple(self.sources)
+
+        def work(cancelled, progress):
+            # aggregated and written by the service (drc_team_csv)
+            from .gtkservice import team_csv
+            team_csv(self.db, sources, path, cancelled=cancelled, progress=progress)
+        self._start("Export reviewer statistics", work, lambda _result: None, write=True)
+
+
+
+class _DrcMigrationWindow(_DrcTeamWindow):
+    """Compare a prior run by exact geometry before transferring own work."""
+
+    def __init__(self, viewer):
+        self.viewer, self.db = viewer, viewer._drc
+        self.plan, self.job, self.closed = None, None, False
+        self.page, self._guard, self._applied = 0, False, None
+        self.controls = []
+        self.window = Gtk.Window(title="DRC review from previous run")
+        self.window.set_transient_for(viewer.window)
+        self.window.set_default_size(980, 620)
+        viewer._only_close_button(self.window)
+        viewer._center_on_parent(self.window)
+        self.window.connect("destroy", self._destroy)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_border_width(8)
+        self.window.add(box)
+
+        def row():
+            widget = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
+            box.pack_start(widget, False, False, 0)
+            return widget
+
+        def button(parent, label, callback):
+            widget = Gtk.Button(label=label)
+            widget.connect("clicked", lambda *_: callback())
+            parent.pack_start(widget, False, False, 0)
+            self.controls.append(widget)
+            return widget
+
+        inputs = row()
+        self.previous = Gtk.Entry()
+        self.previous.set_placeholder_text("Previous results (.db or .tray)")
+        inputs.pack_start(self.previous, True, True, 0)
+        button(inputs, "Previous results…", lambda: self._browse(self.previous,
+            "Choose previous DRC results (.db or .tray)"))
+        inputs = row()
+        self.review_file = Gtk.Entry()
+        self.review_file.set_placeholder_text("Automatic: my saved review for the previous results")
+        inputs.pack_start(self.review_file, True, True, 0)
+        button(inputs, "Review file…", lambda: self._browse(self.review_file,
+            "Choose previous review (.floereview, review SQLite, or waiver file)"))
+        button(inputs, "Automatic", lambda: self.review_file.set_text(""))
+        for entry in (self.previous, self.review_file):
+            self.controls.append(entry)
+            entry.connect("changed", lambda *_: self._inputs_changed())
+        actions = row()
+        button(actions, "Compare geometry", self._prepare)
+        self.apply_button = button(actions, "Apply exact matches", self._apply)
+        self.apply_button.set_sensitive(False)
+        self.cancel_button = Gtk.Button(label="Cancel operation")
+        self.cancel_button.connect("clicked", lambda *_: self._cancel_operation())
+        self.cancel_button.set_sensitive(False)
+        actions.pack_start(self.cancel_button, False, False, 0)
+        self.stats = Gtk.Label(label="Choose the previous results, then compare geometry.")
+        self.stats.set_xalign(0)
+        self.stats.set_line_wrap(True)
+        self.stats.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        box.pack_start(self.stats, False, False, 0)
+        filters = row()
+        self.rule = Gtk.ComboBoxText()
+        for ci, check in enumerate(self.db.checks):
+            self.rule.append(str(ci), check.name)
+        self.rule.set_active(viewer._drc_open if viewer._drc_open is not None else 0)
+        filters.pack_start(self.rule, True, True, 0)
+        self.rule.connect("changed", lambda *_: self._changed())
+        self.mode = Gtk.ComboBoxText()
+        for key, title in (("matched", "Exact matches"), ("conflict", "Conflicts only"),
+                           ("ambiguous", "Ambiguous previous states")):
+            self.mode.append(key, title)
+        self.mode.set_active(0)
+        filters.pack_start(self.mode, False, False, 0)
+        self.mode.connect("changed", lambda *_: self._changed())
+        self.controls.extend((self.rule, self.mode))
+        self.store = Gtk.ListStore(int, int, str, str, str, str)
+        self.tree = Gtk.TreeView(model=self.store)
+        for index, title in ((2, "New error"), (3, "Current: V / W / NR"),
+                              (4, "Previous: V / W / NR"), (5, "Result")):
+            column = Gtk.TreeViewColumn(title, Gtk.CellRendererText(), text=index)
+            column.set_expand(True)
+            self.tree.append_column(column)
+        self.tree.connect("row-activated", self._jump)
+        scroll = Gtk.ScrolledWindow()
+        scroll.add(self.tree)
+        box.pack_start(scroll, True, True, 0)
+        pages = row()
+        self.prev = button(pages, "Previous", lambda: self._turn(-1))
+        self.page_label = Gtk.Label(label="0 errors")
+        pages.pack_start(self.page_label, True, True, 0)
+        self.next = button(pages, "Next", lambda: self._turn(1))
+        self.prev.set_sensitive(False)
+        self.next.set_sensitive(False)
+        help_label = Gtk.Label(label=("Only the same rule name and exactly identical geometry can carry review state forward.\n"
+            "Duplicate visits are combined; waived and not-for-review are transferred only where each field agrees. "
+            "Disputed fields (—) keep their current values. Different decisions on already visited new errors are protected.\n"
+            "Double-click opens the new error. Previous result and review files remain read-only."))
+        help_label.set_xalign(0)
+        help_label.set_line_wrap(True)
+        help_label.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        box.pack_start(help_label, False, False, 0)
+        self.status = Gtk.Label(label="No comparison prepared.")
+        self.status.set_xalign(0)
+        self.status.set_line_wrap(True)
+        self.status.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        self.status.set_max_width_chars(100)
+        box.pack_start(self.status, False, False, 0)
+        self.window.show_all()
+
+    def _destroy(self, *_):
+        if getattr(self.viewer, "_drc_migration", None) is self:
+            self.viewer._drc_migration = None
+        super()._destroy()
+
+    def _close_sources(self):
+        plan, self.plan = self.plan, None
+        if plan is not None:
+            plan.close()
+
+    def _browse(self, entry, title):
+        path = self._choose(title)
+        if path:
+            entry.set_text(path)
+
+    def _inputs_changed(self):
+        if self.job is not None:
+            return
+        self._close_sources()
+        self._applied = None
+        self.store.clear()
+        self.apply_button.set_sensitive(False)
+        self.prev.set_sensitive(False)
+        self.next.set_sensitive(False)
+        self.page_label.set_text("0 errors")
+        self.stats.set_text("Inputs changed. Compare geometry before applying review state.")
+
+    def _poll(self):
+        again = super()._poll()
+        if self._valid():
+            self.apply_button.set_sensitive(self.job is None and self.plan is not None)
+            self.cancel_button.set_sensitive(self.job is not None)
+            if self.job is not None and self.job.get("phase") and self.job.get("progress"):
+                self.status.set_text("%s: %s · %d / %d" %
+                    (self.job["label"], self.job["phase"], *self.job["progress"]))
+        return again
+
+    def _progress_callback(self, callback):
+        job = self.job
+        def update(done, total, phase=""):
+            callback(done, total)
+            if job is not None:
+                job["phase"] = str(phase)
+        return update
+
+    def _start(self, *args, **kwargs):
+        started = super()._start(*args, **kwargs)
+        self.cancel_button.set_sensitive(self.job is not None)
+        return started
+
+    def _cancel_operation(self):
+        if self.job is not None:
+            self.job["cancel"].set()
+            self.cancel_button.set_sensitive(False)
+            self.status.set_text("Cancelling… Already applied chunks are retained.")
+
+    def _jump(self, _tree, path, _column):
+        if not self._valid() or self.job is not None:
+            return
+        row = self.store[path]
+        self.viewer._drc_jump(int(row[0]), int(row[1]), isolate=True)
+        self.status.set_text("Opened the new error. Apply rechecks current judgements before transfer.")
+
+    def _prepare(self):
+        from .gtkservice import prepare_migration
+        old_path = self.previous.get_text().strip()
+        state_path = self.review_file.get_text().strip() or None
+        if not old_path:
+            self.status.set_text("Choose the previous DRC results first.")
+            return
+
+        def complete(plan):
+            self._close_sources()
+            self.plan, self.page, self._applied = plan, 0, None
+            self._page_load()
+
+        self._start("Compare previous geometry", lambda cancel, progress:
+            prepare_migration(self.db, old_path, state_path=state_path, cancelled=cancel,
+                progress=self._progress_callback(progress)), complete)
+
+    @staticmethod
+    def _flags(state):
+        if state is None:
+            return "ambiguous"
+        return " / ".join("—" if flag is None else "yes" if flag else "no"
+                          for flag in (state.visited, state.waived, state.not_required))
+
+    def _page_load(self):
+        ci, plan = self._ci(), self.plan
+        if ci is None or plan is None or not self._valid() or self.job is not None:
+            return
+        mode, requested = self.mode.get_active_id() or "matched", self.page
+
+        def work(cancel, progress):
+            from .gtkservice import VISITED, NOT_REQUIRED
+            count = len(plan.members(ci, mode))
+            pages = max(1, (count + DRC_PAGE - 1) // DRC_PAGE)
+            page = max(0, min(requested, pages - 1))
+            rows = []
+            ids = plan.page(ci, page * DRC_PAGE, DRC_PAGE, kind=mode)
+            ambiguous = plan.members(ci, "ambiguous").contains_many(ids)
+            protected = plan.members(ci, "protected").contains_many(ids)
+            carried = plan.get_many(ci, ids)
+            for ei, is_ambiguous, is_protected, previous in zip(ids, ambiguous, protected, carried):
+                if cancel():
+                    raise InterruptedError("comparison page cancelled")
+                flags = self.db.review_flags(ci, ei)
+                mine = SimpleNamespace(visited=bool(flags & VISITED),
+                    waived=self.db.get_status(ci, ei) == 1, not_required=bool(flags & NOT_REQUIRED))
+                if previous is None:
+                    status = "geometry match unverified"
+                elif is_protected:
+                    status = "current judgement protected"
+                    if is_ambiguous:
+                        status += "; partial prior consensus"
+                elif is_ambiguous:
+                    status = "partial consensus; differing fields retained"
+                else:
+                    status = "exact match"
+                rows.append((ci, ei, "#%d" % (ei + 1), self._flags(mine),
+                             self._flags(previous), status))
+            return page, pages, count, rows, plan.rule_counts(ci), dict(plan.summary)
+
+        def complete(result):
+            page, pages, count, rows, counts, summary = result
+            self.page = page
+            self.store.clear()
+            for row in rows:
+                self.store.append(row)
+            self.page_label.set_text("%d / %d · %d errors" % (page + 1, pages, count))
+            self.prev.set_sensitive(page > 0)
+            self.next.set_sensitive(page + 1 < pages)
+            def line(label, values):
+                return ("%s: matched review %d (partial %d) · no transferable match %d · ambiguous %d · conflicts %d" %
+                    (label, values.get("matched", 0), values.get("partial", 0), values.get("unmatched", 0),
+                     values.get("ambiguous", 0), values.get("conflict", 0)))
+            text = line("Whole new DB", summary) + "\n" + line(self.db.checks[ci].name, counts)
+            if summary.get("invalid_old", 0) or summary.get("invalid_new", 0):
+                text += ("\nGeometry excluded (invalid or too large): previous %d · new %d" %
+                         (summary.get("invalid_old", 0), summary.get("invalid_new", 0)))
+            if summary.get("no_rule_match_source_work", 0):
+                text += ("\nPrevious review skipped (missing or duplicate rule names): %d" %
+                         summary["no_rule_match_source_work"])
+            if self._applied is not None:
+                text += ("\nApplied: visited %d · waived %d · not for review %d · protected %d" %
+                    tuple(self._applied.get(key, 0) for key in
+                        ("changed_visited", "changed_waived", "changed_not_required", "conflicts_skipped")))
+            self.stats.set_text(text)
+        self._start("Read geometry matches", work, complete)
+
+    def _apply(self):
+        from .gtkservice import apply_migration
+        plan = self.plan
+        if plan is None:
+            self.status.set_text("Compare geometry first.")
+            return
+
+        def complete(result):
+            self._applied = result
+            self._page_load()
+        self._start("Apply previous review to exact matches", lambda cancel, progress:
+            apply_migration(self.db, plan, cancelled=cancel,
+                progress=self._progress_callback(progress)),
+            complete, write=True, changed=True)
 
 
 class _CellPanel(object):
@@ -1657,6 +2448,22 @@ class Viewer:
         self._mono_saved = False    # mono state before highlight
         self._drc_hl_res = None     # (view key, [(kind, pts dbu)])
         self._drc_marker_worker = None
+        # the review flags and the team's shared review (feature/jobdeck-
+        # drc 2026-10-09..11; floe2 gtk-service drc_team.rs)
+        self._drc_review_read_error = None
+        self._drc_team = None
+        self._drc_migration = None
+        self._drc_team_write = None
+        self._drc_team_busy = None
+        self._drc_conflict_only = False
+        self._drc_conflict_source = None
+        self._drc_conflict_members = None
+        self._drc_conflict_key = None
+        self._drc_conflict_job = None
+        self._drc_conflict_retired = []
+        self._drc_conflict_revision = 0
+        self._drc_conflict_error = None
+        self._drc_conflict_stamp = ""
         self._drc_marker_revision = 0
         self._drc_marker_key = None
         self._drc_marker_result = None
@@ -3019,11 +3826,15 @@ class Viewer:
                 self._drc_fill_translucent(disp, pts, mcol)
                 for a, b in zip(pts, pts[1:] + pts[:1]):
                     stamp_segment(disp, a, b, None, mcol)
+                self._drc_visit_drawn(self.drc_mark, pts,
+                                      disp.get_width(), disp.get_height())
             else:
                 # edge records: consecutive point pairs are segments
                 for j in range(0, len(pts) - 1, 2):
                     stamp_segment(disp, pts[j], pts[j + 1], None,
                                   mcol)
+                self._drc_visit_drawn(self.drc_mark, pts,
+                                      disp.get_width(), disp.get_height())
         if self.overlay_mode == 0 and self._drc is not None \
                 and self._drc_open is not None:
             # All matching errors of the rule, cluster or delta group,
@@ -3806,6 +4617,7 @@ class Viewer:
         # the DRC analysis jobs' answers (gtk-service; feature/jobdeck-drc)
         for name, poll in (("marker", self._drc_marker_poll),
                            ("delta", self._drc_delta_poll),
+                           ("conflict", self._drc_conflict_poll),
                            ("selection", self._drc_selection_poll),
                            ("review", self._drc_review_poll),
                            ("in-view", self._drc_query_poll)):
@@ -5158,7 +5970,8 @@ class Viewer:
         self._drc_selection_key = None
 
     def _drc_selection_submit(self, ci, bounds, membership, mode="replace"):
-        if getattr(self, "_drc_review_job", None) is not None:
+        if (getattr(self, "_drc_review_job", None) is not None or
+                getattr(self, "_drc_team_write", None) is not None):
             self._set_live_status("review update in progress; select after it finishes")
             return
         if mode != "replace" and getattr(self, "_drc_selection_key", None) is not None:
@@ -5167,6 +5980,16 @@ class Viewer:
         db = self._drc
         if db is None or ci != self._drc_sel_check():
             return
+        conflict_only = getattr(self, "_drc_conflict_only", False)
+        if conflict_only:
+            active = self._drc_active_members()
+            if active is None or not active:
+                self._set_live_status("Conflict only: no prepared matching errors to select.")
+                return
+            if membership is None:
+                membership = active
+            elif membership is not active:
+                membership = gtkservice.intersect(membership, active)
         sel = self._drc_sel
         previous = sel[1] if sel is not None and sel[0] == ci else None
         worker = getattr(self, "_drc_selection_worker", None)
@@ -5175,7 +5998,7 @@ class Viewer:
         key = (object(), id(db), self._drc_scope_key(), self._drc_wfilter)
         self._drc_selection_key = key
         worker.submit(key, db, ci, bounds, membership=membership,
-                      waived=(None if self._drc_wfilter == "all" else
+                      waived=(None if conflict_only or self._drc_wfilter == "all" else
                               self._drc_wfilter == "waived"),
                       previous=previous, mode=mode)
         self._set_live_status("error select: selecting… (Esc cancels)")
@@ -5210,11 +6033,12 @@ class Viewer:
     def _drc_selection_restore(self):
         """Recheck a saved selection against the current scope and waive
         filter in the service; until then it is not the active one."""
+        members = self._drc_active_members()
         sel = self._drc_sel
         if sel is None:
             return
-        members = self._drc_active_members()
-        want = None if self._drc_wfilter == "all" else self._drc_wfilter == "waived"
+        want = (None if getattr(self, "_drc_conflict_only", False)
+                or self._drc_wfilter == "all" else self._drc_wfilter == "waived")
         if members is None and want is None:
             return
         # A saved status snapshot is not a valid active selection until
@@ -5366,6 +6190,11 @@ class Viewer:
              self._drc_waive_key)
         item(m, "save waives as…", self._drc_waive_save_dialog)
         item(m, "load waives…", self._drc_waive_load_dialog)
+        item(m, "reviewers…", self._drc_team_dialog)
+        item(m, "review from previous run…", self._drc_migration_dialog)
+        item(m, "mark not for review", lambda: self._drc_not_required_key(True))
+        item(m, "clear not for review", lambda: self._drc_not_required_key(False))
+        item(m, "export review statistics…", self._drc_review_export_stats)
         sep(m)
         item(m, "note (add/edit)\tn", self._drc_note_key)
         item(m, "clear note of selection", self._drc_note_clear)
@@ -5815,6 +6644,23 @@ class Viewer:
         info.set_ellipsize(Pango.EllipsizeMode.START)
         top.pack_start(info, True, True, 2)
         win._info = info
+        review_info = Gtk.Label(label="V visited · X not for review · * note")
+        review_info.set_xalign(0.0)
+        review_info.set_line_wrap(True)
+        review_info.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        review_info.set_max_width_chars(40)
+        box.pack_start(review_info, False, False, 2)
+        win._review_info = review_info
+        export_stats = Gtk.Button(label="export review statistics…")
+        export_stats.connect("clicked", lambda *_: self._drc_review_export_stats())
+        box.pack_start(export_stats, False, False, 0)
+        conflict_info = Gtk.Label()
+        conflict_info.set_xalign(0)
+        conflict_info.set_line_wrap(True)
+        conflict_info.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        conflict_info.set_max_width_chars(40)
+        box.pack_start(conflict_info, False, False, 0)
+        win._conflict_info = conflict_info
         # top pane = rules list (left) | error-number grid (right);
         # bottom pane = per-error detail. Selecting a rule shows its
         # grid alone (one rule at a time = the accordion ask), and
@@ -6047,6 +6893,12 @@ class Viewer:
         selv.connect("toggled", self._on_drc_selview)
         nav.add(selv)
         win._selv = selv
+        conflict = Gtk.CheckButton(label="Conflict only")
+        conflict.set_tooltip_text("Global judgement conflicts among visited reviewers in the last Reviewers snapshot. "
+            "Intersects the current cluster, CD group and waive filter; rule/group counts remain unfiltered.")
+        conflict.connect("toggled", self._on_drc_conflict)
+        nav.add(conflict)
+        win._conflict = conflict
         tf = Gtk.ComboBoxText()
         tf.append("all", "all types")
         tf.set_active_id("all")
@@ -6790,6 +7642,10 @@ class Viewer:
         cached = self._drc_hl_res
         if cached is not None and cached[0] == key:
             return cached[1]
+        conflict_only = getattr(self, "_drc_conflict_only", False)
+        if conflict_only and (membership is None or not membership):
+            self._drc_hl_res = (key, [])
+            return []
         if ci is None:
             self._drc_hl_res = (key, [])
             self._set_live_status(
@@ -6809,14 +7665,14 @@ class Viewer:
                         gtkservice.ExactQueryWorker()
                 worker.submit(key, self._drc, ci, tuple(v * k for v in bb),
                               DRC_HL_CAP, membership,
-                              None if self._drc_wfilter == "all"
+                              None if conflict_only or self._drc_wfilter == "all"
                               else self._drc_wfilter == "waived")
                 self._set_live_status("DRC filter: querying errors in view…")
             return []
         kw = {}
         if membership is not None:
             kw["members"] = {ci: membership}
-        if self._drc_wfilter != "all" \
+        if not conflict_only and self._drc_wfilter != "all" \
                 and hasattr(self._drc, "get_status"):
             # the waive filter runs INSIDE the query, before the
             # cap: a post-filter over a capped result dropped every
@@ -6898,6 +7754,11 @@ class Viewer:
         a reference cycle, so the GC would release it at some later time,
         and a re-pack of it would be refused meanwhile)."""
         old = self._drc
+        for window in (getattr(self, "_drc_team", None),
+                       getattr(self, "_drc_migration", None)):
+            if window is not None:
+                window.window.destroy()
+        self._drc_conflict_reset(drop_source=True)
         self.drc_mark = None
         self._drc = None
         self._drc_marker_invalidate(drop_worker=True)
@@ -6935,6 +7796,7 @@ class Viewer:
             w._gstore.clear()
             w._detail.set_text("")
             w._info.set_text("no results database loaded")
+            self._drc_review_stats_refresh()
             self._drc_types_rebuild()   # empty+disable type combo
         close = getattr(old, "close", None)
         if close is not None:
@@ -7140,6 +8002,11 @@ class Viewer:
                 self._set_live_status(msg)
                 return False
         old = self._drc
+        for window in (getattr(self, "_drc_team", None),
+                       getattr(self, "_drc_migration", None)):
+            if window is not None and window.db is not db:
+                window.window.destroy()
+        self._drc_conflict_reset(drop_source=True)
         self._drc = db
         self._drc_marker_invalidate(drop_worker=True)
         self._drc_clusters = None
@@ -7479,6 +8346,7 @@ class Viewer:
             "%s [%s] — cell %s · %d/%d rules · %d errors%s"
             % (os.path.basename(db.path), backend, db.cell,
                self._drc_shown, len(db.checks), db.total, rules))
+        self._drc_review_stats_refresh()
 
     def _drc_types_rebuild(self):
         """Classify every rule by its SVRF measurement metrics
@@ -7587,9 +8455,9 @@ class Viewer:
             self._drc_sels.pop(key, None)
 
     def _drc_active_members(self):
-        """A delta group already intersects the selected file cluster."""
-        group = getattr(self, "_drc_delta_group", None)
-        return group if group is not None else self._drc_cluster
+        if getattr(self, "_drc_conflict_only", False):
+            return self._drc_conflict_sync()
+        return self._drc_base_members()
 
     def _drc_scope_key(self):
         key = (self._drc_open, self._drc_cluster)
@@ -7597,6 +8465,9 @@ class Viewer:
         if group is not None:
             key += (id(self._drc_rmeta), self._drc_delta_mode,
                     self._drc_delta_step, group.key)
+        if getattr(self, "_drc_conflict_only", False):
+            key += ("conflict", id(getattr(self, "_drc_conflict_source", None)),
+                    getattr(self, "_drc_conflict_revision", 0), self._drc_wfilter)
         return key
 
     def _drc_delta_write_step(self, step):
@@ -8007,6 +8878,8 @@ class Viewer:
         c = db.checks[ci]
         # the visible list = cluster ∧ selected ∧ in-view ∧ waive filter
         # (each stage narrows; None = every error of the rule)
+        cluster = self._drc_active_members()
+        conflict_only = getattr(self, "_drc_conflict_only", False)
         base = None
         sel = self._drc_sel
         selected = sel[1] if sel is not None and sel[0] == ci else None
@@ -8025,14 +8898,13 @@ class Viewer:
                         if selected is not None else [])
             else:
                 base = inview
-        cluster = self._drc_active_members()
         if cluster is not None and base is None:
-            want = None if self._drc_wfilter == "all" else self._drc_wfilter == "waived"
+            want = None if conflict_only or self._drc_wfilter == "all" else self._drc_wfilter == "waived"
             base = ("cluster", cluster, want)
         elif cluster is not None and isinstance(base, list):
             # one service question for the page, not one per error
             base = [ei for ei, ok in zip(base, cluster.contains_many(base)) if ok]
-        if self._drc_wfilter != "all" and not isinstance(base, tuple):
+        if not conflict_only and self._drc_wfilter != "all" and not isinstance(base, tuple):
             if base is None:
                 base = self._drc_wf_base(db, ci)
             elif hasattr(db, "get_status"):
@@ -8075,7 +8947,8 @@ class Viewer:
         # the "*" when any cell on the page is noted)
         maxloc = (max(eis) + 1) if eis else 1
         probe = win._grid.create_pango_layout(
-            "0" * (max(2, len(str(maxloc))) + (1 if noted else 0)))
+            "0" * (max(2, len(str(maxloc))) + (1 if noted else 0)
+                   + (3 if hasattr(db, "review_flags") else 0)))
         self._drc_cellw = probe.get_pixel_size()[0] + 18
         avail = win._grid.get_allocation().width
         n = max(1, min(24, avail // max(24, self._drc_cellw)))
@@ -8176,6 +9049,15 @@ class Viewer:
                        lambda _i, o=on, t=targets:
                        self._drc_set_waived(ci, t, o))
             menu.append(it)
+        if hasattr(db, "review_flags"):
+            menu.append(Gtk.SeparatorMenuItem())
+            for label, on in (("mark not for review: %s" % scope, True),
+                              ("clear not for review: %s" % scope, False)):
+                it = Gtk.MenuItem(label=label)
+                it.connect("activate", lambda _i, o=on, t=targets, d=db:
+                           self._drc_set_not_required(ci, t, o)
+                           if self._drc is d else None)
+                menu.append(it)
         self._drc_menu = menu
 
         def released(_menu):
@@ -8211,12 +9093,516 @@ class Viewer:
             error = "%s - is the waive store writable?" % exc
         self._drc_waived_refresh(ci, eis, on, error)
 
+    def _drc_visit_drawn(self, mark, points, width, height):
+        """Queue one visit only after individual geometry was painted.
+
+        No review-store access belongs in this paint path. In particular a
+        sparse edge pair's bounding box can cross the view without either
+        edge being visible, so test segments rather than just the bbox.
+        """
+        target = mark.get("review_target")
+        if (mark is not getattr(self, "drc_mark", None) or not target
+                or target[0] is not getattr(self, "_drc", None)
+                or mark.get("review_queued")
+                or getattr(self, "overlay_mode", 0) == 2
+                or width <= 0 or height <= 0 or not points):
+            return
+        xs, ys = zip(*points)
+        if max(xs) - min(xs) < DRC_MARK_PX and max(ys) - min(ys) < DRC_MARK_PX:
+            return
+
+        def rect_visible(x, y, w, h):
+            x, y, w, h = (int(round(v)) for v in (x, y, w, h))
+            return w > 0 and h > 0 and x < width and y < height and x + w > 0 and y + h > 0
+
+        def painted_segment(a, b):
+            ax, ay = a
+            dx, dy = b[0] - ax, b[1] - ay
+            if round(ay) == round(b[1]):
+                return rect_visible(min(ax, b[0]), ay - 1, abs(dx) + 1, 2)
+            if round(ax) == round(b[0]):
+                return rect_visible(ax - 1, min(ay, b[1]), 2, abs(dy) + 1)
+            # stamp_segment samples free-angle lines at most 8,001 times.
+            # A very long diagonal can cross the viewport between dabs and
+            # paint nothing. Clip the possible 2px-core dab centers first,
+            # then test those exact samples with fill_rect's rounding rule.
+            lo, hi = 0.0, 1.0
+            for p, q in ((-dx, ax + 0.5), (dx, width + 0.5 - ax),
+                         (-dy, ay + 0.5), (dy, height + 0.5 - ay)):
+                if p == 0:
+                    if q < 0:
+                        return False
+                    continue
+                t = q / p
+                if p < 0:
+                    lo = max(lo, t)
+                else:
+                    hi = min(hi, t)
+                if lo > hi:
+                    return False
+            steps = min(int(max(abs(dx), abs(dy))) + 1, 8000)
+            first = max(0, int(math.floor(lo * steps)) - 1)
+            last = min(steps, int(math.ceil(hi * steps)) + 1)
+            return any(rect_visible(ax + dx * i / steps - 1,
+                                    ay + dy * i / steps - 1, 2, 2)
+                       for i in range(first, last + 1))
+
+        polygon = mark.get("kind") == "p"
+        segments = (zip(points, points[1:] + points[:1]) if polygon else
+                    ((points[j], points[j + 1]) for j in range(0, len(points) - 1, 2)))
+        visible = any(painted_segment(a, b) for a, b in segments)
+        if not visible and polygon and 3 <= len(points) <= 256:
+            # Match the translucent renderer's actual clipped scanline spans,
+            # including polygons whose off-screen edges surround the view.
+            edges = [(a, b) for a, b in zip(points, points[1:] + points[:1])
+                     if a[1] != b[1]]
+            for y in range(max(0, int(math.floor(min(ys)))),
+                           min(height - 1, int(math.ceil(max(ys)))) + 1):
+                yc = y + 0.5
+                crossings = sorted(ax + (yc - ay) * (bx - ax) / (by - ay)
+                    for (ax, ay), (bx, by) in edges
+                    if (ay <= yc < by) or (by <= yc < ay))
+                if any(min(width, int(math.floor(crossings[i + 1])) + 1)
+                       > max(0, int(math.ceil(crossings[i])))
+                       for i in range(0, len(crossings) - 1, 2)):
+                    visible = True
+                    break
+        if not visible:
+            return
+        db, ci, ei = target
+        if not hasattr(db, "mark_visited"):
+            return
+        mark["review_queued"] = True
+        # no service request in the paint path: the next idle sends it
+        GLib.idle_add(self._drc_visit_send, db, ci, ei)
+
+    def _drc_visit_send(self, db, ci, ei):
+        try:
+            db.mark_visited(ci, ei)
+        except gtkservice.ServiceError as exc:
+            if db is getattr(self, "_drc", None):
+                self._set_live_status("visit save failed: %s" % exc)
+        return False
+
+    def _drc_visit_poll(self):
+        db = getattr(self, "_drc", None)
+        if db is None or not hasattr(db, "visit_events"):
+            return
+        dirty, errors = set(), []
+        for ci, _ei, error in db.visit_events():
+            if error:
+                errors.append(error)
+            else:
+                dirty.add(ci)
+        for ci in dirty:
+            self._drc_review_flags_refresh(ci)
+        if errors:
+            self._set_live_status("visit save failed: %s" % errors[-1])
+
+    def _drc_not_required_key(self, on):
+        target = self._drc_current_target()
+        if target is None:
+            self._set_live_status("select or focus errors to change their review requirement")
+            return
+        self._drc_set_not_required(*target, on)
+
+    def _drc_set_not_required(self, ci, targets, on):
+        db = getattr(self, "_drc", None)
+        if db is None or not hasattr(db, "review_flags"):
+            self._set_live_status("review flags need a packed index: floe-index drc <db>")
+            return
+        # Even one SQLite update runs outside the GTK thread.
+        self._drc_review_submit("not-required", ci, targets, on=bool(on))
+
+    def _drc_review_flags(self, db, ci, ei):
+        if not hasattr(db, "review_flags"):
+            return 0
+        try:
+            return db.review_flags(ci, ei)
+        except Exception as exc:
+            key = (id(db), str(exc))
+            if key != getattr(self, "_drc_review_read_error", None):
+                self._drc_review_read_error = key
+                self._set_live_status("review flags unavailable: %s" % exc)
+            return None
+
+    def _drc_review_flags_refresh(self, ci):
+        """Only repaint this page's labels; flags never change its members."""
+        win, db = getattr(self, "_drcwin", None), getattr(self, "_drc", None)
+        if db is None:
+            return
+        if win is not None and ci == getattr(self, "_drc_grid_ci", None):
+            sel = getattr(self, "_drc_sel", None)
+            selected = sel[3] if sel is not None and sel[0] == ci else ()
+            cols = self._drc_gridw
+            current = getattr(self, "_drc_cell", None)
+            for i, ei in enumerate(self._drc_grid_map):
+                row, col = divmod(i, cols)
+                noted = bool(hasattr(db, "get_note") and db.get_note(ci, ei))
+                win._gstore[row][col] = self._drc_cell_markup(
+                    db, ci, ei, noted, selected, current == (row, col))
+        if ci == getattr(self, "_drc_open", None):
+            focus = getattr(self, "_drc_focus", None)
+            shown = focus[1] if focus is not None and focus[0] == ci else None
+            pos, cumulative = getattr(self, "_drc_pos", -1), getattr(self, "_drc_cum", ())
+            if shown is None and pos >= 0 and cumulative:
+                current_ci = bisect.bisect_right(cumulative, pos) - 1
+                if current_ci == ci:
+                    shown = pos - cumulative[ci]
+            if shown is not None:
+                self._drc_show_detail(ci, shown)
+        self._drc_review_stats_refresh()
+
+    def _drc_review_stats_refresh(self):
+        win = getattr(self, "_drcwin", None)
+        label = getattr(win, "_review_info", None) if win is not None else None
+        if label is None:
+            return
+        db = getattr(self, "_drc", None)
+        legend = "V visited · X not for review · * note"
+        if db is None or not hasattr(db, "review_counts"):
+            label.set_text(legend)
+            return
+
+        def line(scope, counts):
+            return ("%s: total %d · visited %d · not for review %d · unvisited targets %d"
+                    % (scope, counts["total"], counts["visited"],
+                       counts["not_required"], counts["pending"]))
+        try:
+            lines = [legend, line("Whole DB", db.review_counts())]
+            ci = getattr(self, "_drc_open", None)
+            if ci is not None:
+                lines.append(line("Whole rule %s" % db.checks[ci].name,
+                                  db.review_counts(ci)))
+            label.set_text("\n".join(lines))
+        except Exception as exc:
+            label.set_text(legend + "\nReview statistics unavailable: %s" % exc)
+
+    def _drc_review_export_stats(self):
+        if self._drc_review_pending():
+            return
+        db = getattr(self, "_drc", None)
+        if db is None or not hasattr(db, "review_counts"):
+            self._set_live_status("review statistics need a packed index")
+            return
+        dlg = Gtk.FileChooserDialog(title="export review statistics",
+                                    parent=self.window,
+                                    action=Gtk.FileChooserAction.SAVE)
+        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Save", Gtk.ResponseType.OK)
+        dlg.set_do_overwrite_confirmation(True)
+        dlg.set_current_folder(os.path.dirname(os.path.abspath(db.path)))
+        from .gtkservice import db_name_of
+        dlg.set_current_name(db_name_of(db.path) + ".review.csv")
+        path = dlg.get_filename() if dlg.run() == Gtk.ResponseType.OK else None
+        dlg.destroy()
+        self._restore_keys()
+        if path and self._drc is not db:
+            self._set_live_status("DRC changed; reopen the review statistics export")
+        elif path:
+            self._drc_review_export_start(path)
+
+    def _drc_review_export_start(self, path):
+        """The statistics CSV, written by the service's review job after
+        the visits it accepted (drc_review_stats)."""
+        if self._drc_review_pending():
+            return
+        db = getattr(self, "_drc", None)
+        if db is None or not hasattr(db, "review_counts"):
+            return
+        try:
+            db._start("review", "drc_review_stats", path=os.path.abspath(path))
+        except gtkservice.ServiceError as exc:
+            self._set_live_status("review export failed: %s" % exc)
+            return
+        self._drc_review_job = dict(db=db, ci=None, targets=(), operation="review-export",
+                                    on=None, path=path)
+        self._set_live_status("exporting whole-DB and per-rule review statistics…")
+
+    def _drc_conflict_retired_jobs(self):
+        """Keep canceled readers alive until their final pack access finishes."""
+        jobs = [job for job in getattr(self, "_drc_conflict_retired", ())
+                if not job.get("done", False)]
+        self._drc_conflict_retired = jobs
+        return jobs
+
+    def _drc_conflict_reset(self, drop_source=False):
+        retired = self._drc_conflict_retired_jobs()
+        job = getattr(self, "_drc_conflict_job", None)
+        if job is not None:
+            job["cancel"].set()
+            if not job.get("done", False) and not any(old is job for old in retired):
+                retired.append(job)
+        self._drc_conflict_job = None
+        self._drc_conflict_key = None
+        self._drc_conflict_members = None
+        self._drc_conflict_error = None
+        if drop_source:
+            source = getattr(self, "_drc_conflict_source", None)
+            self._drc_conflict_source = None
+            self._drc_conflict_only = False
+            self._drc_conflict_stamp = ""
+            if source is not None:
+                source.close()
+            button = getattr(getattr(self, "_drcwin", None), "_conflict", None)
+            if button is not None:
+                self._drc_conflict_guard = True
+                try:
+                    button.set_active(False)
+                finally:
+                    self._drc_conflict_guard = False
+        self._drc_conflict_label()
+
+    def _drc_conflict_clear_scope(self):
+        """A new conflict scope must never inherit all-rule picks or hits."""
+        self._drc_selection_cancel()
+        self._drc_sel, self._drc_sels = None, {}
+        self._drc_page, self._drc_focus = 0, None
+        self.drc_mark, self._drc_pos = None, -1
+        for ruler in getattr(self, "_drc_ruler", ()):
+            if ruler in getattr(self, "rulers", ()):
+                self.rulers.remove(ruler)
+        self._drc_ruler = []
+        self._drc_hl_res = None
+        self._drc_hl_key = None
+        query = getattr(self, "_drc_query_worker", None)
+        if query is not None:
+            query.cancel()
+        self._drc_marker_invalidate()
+
+    def _drc_conflict_label(self):
+        label = getattr(getattr(self, "_drcwin", None), "_conflict_info", None)
+        if label is None:
+            return
+        if not getattr(self, "_drc_conflict_only", False):
+            label.set_text("")
+            return
+        error = getattr(self, "_drc_conflict_error", None)
+        job = getattr(self, "_drc_conflict_job", None)
+        if error:
+            state = "Conflict filter failed: " + error
+        elif getattr(self, "_drc_conflict_source", None) is None:
+            state = "Conflict only: load peer work and Refresh in Reviewers."
+        elif job is not None:
+            progress = job.get("progress")
+            state = "Conflict only: preparing…" if progress is None else "Conflict only: %d / %d processed" % progress
+        elif self._drc_open is None:
+            state = "Conflict only: select a rule."
+        else:
+            members = getattr(self, "_drc_conflict_members", None)
+            state = "Conflict only: %d errors in this scope" % (len(members) if members is not None else 0)
+        label.set_text(state + "\nSnapshot %s · Refresh in Reviewers after edits/visits. "
+            "Rule and CD-group counts are unfiltered." %
+            (getattr(self, "_drc_conflict_stamp", "") or "not loaded"))
+
+    def _on_drc_conflict(self, button):
+        if getattr(self, "_drc_conflict_guard", False):
+            return
+        on = bool(button.get_active())
+        if on == getattr(self, "_drc_conflict_only", False):
+            return
+        self._drc_conflict_only = on
+        self._drc_conflict_reset()
+        self._drc_conflict_clear_scope()
+        if self._drc_open is not None:
+            self._drc_grid_fill(self._drc_open)
+        self._display()
+        if on and getattr(self, "_drc_conflict_source", None) is None:
+            self._set_live_status("Conflict only needs a reviewer snapshot: load peer work, then Refresh.")
+            self._drc_waive_load_dialog()
+
+    def _drc_conflict_publish(self, aggregate, stamp):
+        """Retain the last published comparison independently of its window."""
+        source = aggregate.lease()
+        previous = getattr(self, "_drc_conflict_source", None)
+        self._drc_conflict_reset()
+        self._drc_conflict_source = source
+        self._drc_conflict_stamp = stamp
+        if previous is not None:
+            previous.close()
+        if getattr(self, "_drc_conflict_only", False):
+            self._drc_conflict_clear_scope()
+            if self._drc_open is not None:
+                self._drc_grid_fill(self._drc_open)
+            self._display()
+        self._drc_conflict_label()
+
+    def _drc_conflict_status_changed(self):
+        if not getattr(self, "_drc_conflict_only", False):
+            return
+        # Conflict votes remain the labelled snapshot; the live waive filter
+        # must be resolved again after a completed local waiver batch.
+        self._drc_conflict_revision = getattr(self, "_drc_conflict_revision", 0) + 1
+        self._drc_conflict_reset()
+        self._drc_conflict_clear_scope()
+
+    def _drc_conflict_sync(self):
+        db = self._drc
+        ci = self._drc_open
+        if ci is None and getattr(self, "_drc_pos", -1) >= 0 and getattr(self, "_drc_cum", ()):
+            ci = bisect.bisect_right(self._drc_cum, self._drc_pos) - 1
+        if db is None or ci is None:
+            if (getattr(self, "_drc_conflict_job", None) is not None or
+                    getattr(self, "_drc_conflict_key", None) is not None):
+                self._drc_conflict_reset()
+            if getattr(self, "_drc_conflict_members", None) is None:
+                self._drc_conflict_members = gtkservice.EmptyScope(db, ci)
+            return self._drc_conflict_members
+        source = getattr(self, "_drc_conflict_source", None)
+        base = self._drc_base_members()
+        # Retain the source membership: a rebuilt CD group may otherwise
+        # reuse a released object's id and accidentally reuse its old mask.
+        key = (id(db), id(source), ci, base, self._drc_wfilter,
+               getattr(self, "_drc_conflict_revision", 0))
+        if key == getattr(self, "_drc_conflict_key", None):
+            return self._drc_conflict_members
+        self._drc_conflict_reset()
+        self._drc_conflict_key = key
+        self._drc_conflict_members = gtkservice.EmptyScope(db, ci)
+        self._drc_conflict_clear_scope()
+        if source is None:
+            self._drc_conflict_label()
+            return self._drc_conflict_members
+        cancel = threading.Event()
+        job = dict(key=key, db=db, ci=ci, cancel=cancel, done=False,
+                   result=None, error=None, progress=None)
+        try:
+            lease = source.lease()
+        except Exception as exc:
+            self._drc_conflict_error = str(exc)
+            self._drc_conflict_label()
+            return self._drc_conflict_members
+        self._drc_conflict_job = job
+        want = None if self._drc_wfilter == "all" else self._drc_wfilter == "waived"
+
+        def run():
+            try:
+                from .gtkservice import prepare_conflict_selection
+                job["result"] = prepare_conflict_selection(db, lease, ci,
+                    membership=base, waived=want, cancelled=cancel.is_set,
+                    progress=lambda done, total, *_: job.update(progress=(done, total)))
+            except Exception as exc:
+                job["error"] = str(exc)
+            finally:
+                lease.close()
+                job["done"] = True
+        threading.Thread(target=run, name="drc-conflict-filter", daemon=True).start()
+        self._drc_conflict_label()
+        return self._drc_conflict_members
+
+    def _drc_conflict_poll(self):
+        self._drc_conflict_retired_jobs()
+        if not getattr(self, "_drc_conflict_only", False):
+            return
+        # Rule/group changes may occur while the preparation thread runs.
+        self._drc_conflict_sync()
+        job = getattr(self, "_drc_conflict_job", None)
+        if job is None:
+            return
+        if not job["done"]:
+            self._drc_conflict_label()
+            return
+        if (job["cancel"].is_set() or job["db"] is not self._drc or
+                job["key"] != self._drc_conflict_key):
+            return
+        self._drc_conflict_job = None
+        self._drc_conflict_error = job["error"]
+        if job["error"]:
+            self._set_live_status("Conflict filter failed: " + job["error"])
+        else:
+            self._drc_conflict_members = job["result"]
+        self._drc_hl_res, self._drc_hl_key = None, None
+        self._drc_marker_invalidate()
+        if self._drc_open == job["ci"]:
+            self._drc_grid_fill(job["ci"])
+        self._drc_conflict_label()
+        self._display()
+
+    def _drc_base_members(self):
+        """A delta group already intersects the selected file cluster."""
+        group = getattr(self, "_drc_delta_group", None)
+        return group if group is not None else self._drc_cluster
+
+    def _drc_migration_dialog(self):
+        db = getattr(self, "_drc", None)
+        if db is None or not hasattr(db, "review_counts"):
+            self._set_live_status("review migration needs a packed index: floe-index drc <db>")
+            return None
+        window = getattr(self, "_drc_migration", None)
+        if window is not None and (window.closed or window.db is not db):
+            if not window.closed:
+                window.window.destroy()
+            window = None
+        if window is None:
+            window = _DrcMigrationWindow(self)
+            self._drc_migration = window
+        window.window.present()
+        return window
+
+    def _drc_team_dialog(self):
+        db = getattr(self, "_drc", None)
+        if db is None or not hasattr(db, "review_counts"):
+            self._set_live_status("review sharing needs a packed index: floe-index drc <db>")
+            return None
+        window = getattr(self, "_drc_team", None)
+        if window is not None and (window.closed or window.db is not db):
+            if not window.closed:
+                window.window.destroy()
+            window = None
+        if window is None:
+            window = _DrcTeamWindow(self)
+            self._drc_team = window
+        window.window.present()
+        return window
+
+    def _drc_team_changed(self, db, waived=True):
+        """Publish completed peer edits without switching the marker source."""
+        if self._drc is not db:
+            return
+        ci = self._drc_open
+        jump = None
+        if (not getattr(self, "_drc_conflict_only", False) and
+                self.drc_mark is not None and self._drc_pos >= 0):
+            jump = (self.drc_mark, self._drc_pos, tuple(self._drc_ruler))
+        if waived:
+            self._drc_conflict_status_changed()
+            self._drc_marker_invalidate()
+            self._drc_delta_status_changed(ci)
+            self._drc_hl_res = None
+            if self.drc_mark is not None and self._drc_pos >= 0 and self._drc_cum:
+                mci = bisect.bisect_right(self._drc_cum, self._drc_pos) - 1
+                mei = self._drc_pos - self._drc_cum[mci]
+                self.drc_mark["color"] = (DRC_GREEN if self._drc_waived(db, mci, mei) else DRC_RED)
+            if self._drc_sel is not None and self._drc_wfilter != "all":
+                self._drc_selection_restore()
+            if self._drcwin is not None:
+                self._drc_fill(preserve=True)
+                if jump is not None:
+                    # Rebuilding the rule tree clears a jump even when the
+                    # peer browser owns navigation. Keep the already viewed
+                    # shape/rulers without changing filters or reframing it.
+                    self.drc_mark, self._drc_pos = jump[:2]
+                    self._drc_focus = None
+                    self._drc_ruler = list(jump[2])
+                    for ruler in self._drc_ruler:
+                        if ruler not in self.rulers:
+                            self.rulers.append(ruler)
+                    mci = bisect.bisect_right(self._drc_cum, self._drc_pos) - 1
+                    self._drc_show_detail(mci, self._drc_pos - self._drc_cum[mci])
+        if ci is not None:
+            self._drc_review_flags_refresh(ci)
+        else:
+            self._drc_review_stats_refresh()
+        self._display()
+
     def _drc_review_pending(self):
         if getattr(self, "_drc_selection_key", None) is not None:
             self._set_live_status("error selection is still being updated")
             return True
         if getattr(self, "_drc_review_job", None) is not None:
             self._set_live_status("review update is still running")
+            return True
+        if getattr(self, "_drc_team_busy", None) is not None:
+            self._set_live_status("review sharing operation is still running")
             return True
         return False
 
@@ -8228,7 +9614,8 @@ class Viewer:
         db = self._drc
         if not targets:
             return
-        self._drc_marker_invalidate()
+        if operation != "not-required":
+            self._drc_marker_invalidate()
         fields = dict(check=int(ci), action=operation, on=on, text=text)
         if getattr(targets, "sid", None) is not None:
             fields["selection"] = targets.sid
@@ -8245,6 +9632,7 @@ class Viewer:
                               % (operation, len(targets)))
 
     def _drc_review_poll(self):
+        self._drc_visit_poll()
         job = getattr(self, "_drc_review_job", None)
         if job is None:
             return
@@ -8263,7 +9651,19 @@ class Viewer:
             return
         ci, targets, operation = job["ci"], job["targets"], job["operation"]
         db = self._drc
-        if operation == "waive":
+        if operation == "review-export":
+            self._set_live_status(("review export failed: %s" % error)
+                                  if error else "review statistics exported: %s" % job["path"])
+        elif operation == "not-required":
+            # a failed batch may have committed earlier chunks: show the
+            # flags as they are, markers, groups and selection untouched
+            db.review_flags_changed(ci)
+            self._drc_review_flags_refresh(ci)
+            self._set_live_status(("review update failed: %s" % error)
+                if error else "%s on %d errors" % (
+                    "not for review set" if event.get("on", job["on"]) else "not for review cleared",
+                    len(targets)))
+        elif operation == "waive":
             db.statuses_changed(ci, event.get("counts"))
             if self._drc_clusters is not None:
                 self._drc_clusters.status_changed(ci)
@@ -8285,6 +9685,7 @@ class Viewer:
 
     def _drc_waived_refresh(self, ci, eis, on, error=None, bulk=False):
         db = self._drc
+        self._drc_conflict_status_changed()
         self._drc_marker_invalidate()
         self._drc_hl_res = None
         if self._drc_clusters is not None:
@@ -8711,68 +10112,15 @@ class Viewer:
         self._set_live_status("waives saved: %s" % out)
 
     def _drc_waive_load_dialog(self):
-        """DRC > load waives… (user call 2026-08-28): REPLACE the
-        current review state with a saved waive file (save your own
-        first to keep it). Refused when the file was recorded
-        against a different pack."""
-        if self._drc_review_pending():
-            return
-        db = self._drc
-        if db is None or not hasattr(db, "waive_import"):
-            self._set_live_status(
-                "waive load needs a packed index: "
-                "floe-index drc <db>")
-            return
-        dlg = Gtk.FileChooserDialog(title="load waives",
-                                    parent=self.window,
-                                    action=Gtk.FileChooserAction.OPEN)
-        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
-                        "Open", Gtk.ResponseType.OK)
-        self._only_close_button(dlg)
-        self._center_on_parent(dlg)
-        dlg.set_current_folder(
-            os.path.dirname(os.path.abspath(db.path)))
-        for name, pats in (("floe waives (*.waive)", ("*.waive",)),
-                           ("all files", ("*",))):
-            ff = Gtk.FileFilter()
-            ff.set_name(name)
-            for p in pats:
-                ff.add_pattern(p)
-            dlg.add_filter(ff)
-        path = dlg.get_filename() \
-            if dlg.run() == Gtk.ResponseType.OK else None
-        dlg.destroy()
-        self.window.present()
-        if not path:
-            return
-        try:
-            waived = db.waive_import(path)
-        except (OSError, ValueError) as exc:
-            self._set_live_status("waive load failed: %s" % exc)
-            return
-        if self._drc_clusters is not None:
-            self._drc_clusters.reset_status()
-        self._drc_delta_status_changed(self._drc_open)
-        self._drc_marker_invalidate()
-        # the whole status array changed: reset every dependent
-        # surface, exactly like a waive-filter switch
-        self._drc_hl_res = None
-        self._drc_sel = None
-        self._drc_sels = {}
-        self._drc_focus = None
-        if self.drc_mark is not None and self._drc_pos >= 0 \
-                and self._drc_cum:
-            mci = bisect.bisect_right(self._drc_cum,
-                                      self._drc_pos) - 1
-            mei = self._drc_pos - self._drc_cum[mci]
-            self.drc_mark["color"] = (
-                DRC_GREEN if self._drc_waived(db, mci, mei)
-                else DRC_RED)
-        self._drc_fill(preserve=True)
-        self._display()
-        self._set_live_status(
-            "waives loaded: %d waived (%s)"
-            % (waived, os.path.basename(path)))
+        """Load an external snapshot for comparison; never replace my state."""
+        window = self._drc_team_dialog()
+        if window is not None:
+            # A comparison may still be running. Queue the chooser after it
+            # so the legacy menu always reaches the non-destructive loader.
+            if window.job is None:
+                window._load_dialog()
+            else:
+                window._open_load_when_ready = True
 
     @staticmethod
     def _rgb_hex(rgba):
@@ -8789,6 +10137,14 @@ class Viewer:
         t = "%d" % (ei + 1)          # rule-local numbering
         if noted:
             t = "*" + t              # note present (user call 2026-08-28)
+        flags = self._drc_review_flags(db, ci, ei)
+        if flags is None:
+            t = "? " + t
+        elif flags:
+            prefix = (("V" if flags & gtkservice.VISITED else "")
+                      + ("X" if flags & gtkservice.NOT_REQUIRED else ""))
+            if prefix:
+                t = prefix + " " + t
         if current:
             return ("<span background='#3465a4' "
                     "foreground='#ffffff'>%s</span>" % t)
@@ -8907,6 +10263,7 @@ class Viewer:
             lines.append("")
             lines += c.desc.split("\n")
         win._detail.set_text("\n".join(lines))
+        self._drc_review_stats_refresh()
 
     def _drc_show_detail(self, ci, ei):
         """Bottom pane: rule description, kind, coordinates and the
@@ -8923,6 +10280,14 @@ class Viewer:
                       2: "reserved"}.get(s, "status %d" % s)
         lines = ["#%d(%d)  [%s]" % (ei + 1, e.num, status),
                  "rule: %s" % c.name]
+        if hasattr(db, "review_flags"):
+            flags = self._drc_review_flags(db, ci, ei)
+            if flags is None:
+                lines.append("review: unavailable")
+            else:
+                lines.append("visited: %s · not for review: %s" % (
+                    "yes" if flags & gtkservice.VISITED else "no",
+                    "yes" if flags & gtkservice.NOT_REQUIRED else "no"))
         if hasattr(db, "get_note"):
             note = db.get_note(ci, ei)
             if note:
@@ -9004,6 +10369,8 @@ class Viewer:
                          "color": (DRC_GREEN
                                    if self._drc_waived(db, ci, ei)
                                    else DRC_RED)}
+        # visited once its own geometry is drawn (_drc_visit_drawn)
+        self.drc_mark["review_target"] = (db, ci, ei)
         # auto CD rulers: replaced on every jump (hand-drawn rulers
         # stay; k/Esc treat them like any ruler)
         for r in self._drc_ruler:
@@ -9103,6 +10470,10 @@ class Viewer:
         db, ci = self._drc, self._drc_open
         if db is None or ci is None or width < 1 or height < 1:
             return []
+        active_members = self._drc_active_members()
+        conflict_only = getattr(self, "_drc_conflict_only", False)
+        if conflict_only and (active_members is None or not active_members):
+            return []
         sel = self._drc_sel
         selected = sel[1] if sel is not None and sel[0] == ci else None
         # obox/ospp may describe a frozen base while the widget resizes.
@@ -9111,7 +10482,6 @@ class Viewer:
                   (obox[3] - height * ospp) * self.dbu,
                   (obox[0] + width * ospp) * self.dbu,
                   obox[3] * self.dbu)
-        active_members = self._drc_active_members()
         key = (id(db), ci,
                None if active_members is None
                else tuple(sorted(active_members.spec.items())),
@@ -9138,7 +10508,7 @@ class Viewer:
                          progressive=True,
                          members=({ci: membership}
                                   if membership is not None else None),
-                         waived=(None if self._drc_wfilter == "all" else
+                         waived=(None if conflict_only or self._drc_wfilter == "all" else
                                  self._drc_wfilter == "waived"))
             worker.submit(key, db, query)
             self._drc_info_refresh()
@@ -10763,6 +12133,11 @@ class Viewer:
         if self._quitting:
             return
         self._quitting = True
+        for window in (getattr(self, "_drc_team", None),
+                       getattr(self, "_drc_migration", None)):
+            if window is not None:
+                window.window.destroy()
+        self._drc_conflict_reset(drop_source=True)
         self._drc_selection_cancel(close=True)
         marker_worker = getattr(self, "_drc_marker_worker", None)
         if marker_worker is not None:

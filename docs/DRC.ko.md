@@ -123,18 +123,19 @@ python -m floe render chip.oas --drc results.db \
   IP(`SSH_CONNECTION` — 포워딩이어도 자리 머신 IP는 안정) >
   계정명(단일 사용자 환경) 순으로 안정 신호를 채택.
   pack은 다시는 쓰지 않으므로 **공유/읽기 전용 pack도 사용자마다
-  독립 리뷰** 가능. **영속 기록은 명시적**: DRC 메뉴 `save waives
-  as…`/`load waives…`가 같은 포맷의 스냅숏 저장/불러오기(리뷰
-  공유·라운드 기록용) — load는 전체 대체(내 리뷰는 먼저 save)이고
-  다른 pack에서 기록된 파일은 거부, wcount는 파일을 믿지 않고
-  재계산. 파일 = 헤더(매직+버전+pack 지문: 소스
+  독립 리뷰** 가능. `save waives as…`는 waive 전용 파일을 저장한다.
+  `load waives…`는 2026-10-11부터 내 상태를 갈아끼우지 않고 공동 검토 창
+  (`reviewers…`)의 불러오기로 간다 — waive 전용 파일에는 방문·검토 제외가
+  없으므로 전체 공동 검토 기록은 `.floereview`로 나눈다. 다른 pack에서 기록된
+  파일은 거부한다. 파일 = 헤더(매직+버전+pack 지문: 소스
   size/mtime·err_total·check_cnt) + status + wcount. 같은 DB의
   재-pack에는 리뷰가 유지되고, 지문 불일치(DRC 재실행 = 에러 번호
   재부여)면 기존 자동 저장을 `.stale-<시각>`로 옆에 치우고 새로
   시작(리뷰 기록을 지우지 않음). 첫 생성 시 pack에 남은 구-방식
   내장 status는 시드로 승계. 결과 폴더가 읽기 전용이면 시스템 임시
   디렉터리로 폴백(stderr 안내 — 이때는 save as로 남길 것), 그마저
-  안 되면 구-방식(pack 제자리 기록) 최후 폴백.
+  안 되면 pack에 내장된 상태를 읽기만 하고 waive는 거부한다 — 한 리뷰어를 위해
+  공유 결과를 고치지 않는다(2026-10-09 브랜치, Rust 서비스 2026-10-11).
 - **에러 note = 리뷰어별 flateyes `.fe` 사이드카**(2026-08-28,
   D10): `n`으로 선택/현재 에러에 **공유 note** 입력. 저장 위치 =
   pack 옆 `.<db>.notes.<리뷰어>.fe`(waive와 같은 siting·리뷰어
@@ -159,6 +160,54 @@ python -m floe render chip.oas --drc results.db \
   `.fe` 포맷, load=전체 대체·타-pack 거부). `notes_list()`가 미래
   note-list 조회 표면(각 note의 텍스트+멤버 gid). drawing 기능
   추가 시 같은 `.fe`에 flateyes 주석으로 합류.
+- **방문·검토 대상 통계**(2026-10-09 feature/jobdeck-drc; 2026-10-11 Rust 이식 —
+  app-core `drc::team::flags`, floe2 gtk-service `rust/floe2/src/drc_team.rs`):
+  `visited`는 개별 에러를 열어 그 도형이 실제로 화면에 그려졌다는 기록이다
+  (더블클릭·열린 에러의 n/p 이동; 마커만 보이거나 박스·Ctrl 선택만 한 것은 아니다).
+  `검토대상 아님`(`not_required`)은 별도 플래그로 에러 번호 우클릭이나 DRC 메뉴에서
+  현재 에러 또는 선택 전체에 지정·해제한다. 두 플래그는 함께 켜질 수 있고
+  waive·waiver criteria와 **독립**이다. 검토 제외를 풀어도 방문 기록은 남고, 도형을
+  봤다는 것이 승인·waive를 뜻하지 않는다. 목록 번호 앞 `V`/`X`, 패널의 전체 DB·현재
+  **룰 전체** 통계와 룰별 CSV(`export review statistics…`). 미방문 검토 대상 =
+  전체 − 검토 제외 − visited + 둘 다. 저장은 pack 옆 리뷰어별
+  `.<db>.review.<리뷰어>.sqlite3`(4,096개 단위 두 비트맵과 증분 카운터; 도형을 읽지
+  않고 에러 수만큼 메모리를 쓰지 않는다. SPEC-FORMATS). waive/note 파일은 이 상태를
+  담지 않는다. 결과 폴더에 쓸 수 없으면 `$XDG_DATA_HOME/floe/review/`로 간다.
+- **여러 리뷰어의 공동 검토**(DRC 메뉴 `reviewers…`; app-core `drc::team::snapshot`):
+  각자 자기 waive·방문·검토 제외 파일을 지키면서 다른 사람의 작업을 따로 불러와 비교한다.
+  남의 원본은 바꾸지 않고, 적용한 waive·검토 제외 판단만 내 작업에 기록한다. 내
+  `visited`는 실제 도형 표시로만 기록하며 가져온 방문 이력으로 바꾸지 않는다.
+  내 미방문 에러에는 불러온 판단을 적용한다. 내가 방문한 에러의 판단이 다르면
+  안전 적용(`Apply all peer work safely`)은 건너뛰고 충돌로 남긴다. 도형과 양쪽
+  판단을 본 뒤 선택한 행에 `Use peer judgement on selected rows`로 적용하거나 내
+  판단을 직접 고친다. 전체 `visited`는 리뷰어별 방문 집합의 합집합이다.
+  **두 명 이상이 방문한 같은 에러의 (waived, 검토대상 아님)이 다르면 conflict**이며,
+  방문 여부의 차이나 미방문자의 기본 상태만으로는 conflict가 아니다. 같은 에러는
+  한 번만 센다. `Export my review…`로 `.floereview`를 나누고 `Load peer work…`로
+  하나 이상을 불러온다(작업 review SQLite는 옆의 같은 이름 waive 파일과 함께, waive
+  전용 파일은 방문·검토 제외를 모름으로). 통계 범위는 **나와 불러온 리뷰어들**이며
+  `Refresh`로 갱신하고 `Statistics CSV…`로 저장한다. 상대 파일은 불러온 시점의
+  스냅숏이므로 새 작업은 다시 불러온다. 메인 목록의 `Conflict only`는 마지막
+  집계의 conflict만 보이며 클러스터·CD 그룹·waive·selected·in view와 교집합이고,
+  마커와 박스 선택도 같은 범위를 쓴다. import protected(구형 파일의 보호만으로
+  생긴 항목)는 포함하지 않는다. 룰 트리·CD 그룹 제목의 개수는 기존 범위의 개수다.
+- **DRC 재수행 후 검토 승계**(DRC 메뉴 `review from previous run…`; app-core
+  `drc::team::migrate`·`drc::matcher`): 새 결과를 연 뒤 이전 `.db` 또는 `.tray`를
+  고른다. 이전 결과의 내 검토 파일(review SQLite·waive)을 자동으로 찾으며, 보관한
+  `.floereview`·검토 SQLite·waive 파일은 `Review file…`로 지정한다. 이전 결과의
+  정상 `.tray`가 필요하다(없으면 pack에 내장된 waive라도 읽는다). `Compare
+  geometry`로 대응을 확인한 뒤 `Apply exact matches`로 적용한다. 원본은 읽기
+  전용이고 비교는 새 결과의 상태도 바꾸지 않는다. 에러 번호·순서가 아니라 **같은
+  룰 이름과 도형 종류·절대좌표·연결 구조**로 대응한다(polygon의 시작점·방향, edge의
+  끝점·선분 순서만 다른 것은 같다; 반올림·허용 오차 없음, precision 변경은 허용).
+  이름이 겹치는 룰은 대응하지 않는다. 같은 도형의 이전 중복은 visited를 합치고
+  waived·검토 제외는 항목마다 모든 중복이 같을 때만 옮긴다(모두 해제면 해제로).
+  값이 다른 항목은 새 DB의 값을 두고 `—`로 보인다. 새 결과에서 이미 visited이고
+  합의된 이전 판단과 다르면 현재 판단을 보호하고 충돌로 남긴다. 비교는 이전 `.tray`
+  도형을 Rust로 읽고 메모리를 제한한 디스크 정렬을 쓰므로 룰 에러 수에 비례하는
+  임시 디스크가 든다. 손상되었거나 작업 메모리 한도를 넘는 도형은 옮기지 않고
+  제외 수를 보인다. 공선 꼭짓점의 추가·삭제는 정규화하지 않는다. 비교 취소에는
+  변경이 없고, 적용 취소에는 완료된 청크가 남는다.
 - **손상 방어**: 절단·오염 pack은 전부 "corrupt pack → 재-pack
   안내" ValueError로 정규화(섹션 경계·체크 범위 검증), 사이드
   pack이면 ASCII 폴백. 인덱서는 시작 시 잔존 `<out>.tmp*` 청소.
@@ -463,6 +512,13 @@ area와 치수 검사가 섞인 룰은 면적 라벨과 기존 길이 룰러를 
   저장소를 지정할 수 있다. 원형 마커 중심 캐시는 사용한 룰에 별도로 생성하며,
   전체 14억 건을 모두 표시한 경우 추가로 약 22.4GB가 필요하다.
 
+- 방문·공동 검토·승계(2026-10-11 Rust 이식): 개인 플래그는 SQLite 청크 단위라 도형을
+  읽지 않는다. Apple M4에서 2백만 에러 룰 전체의 검토 제외 지정 0.02초, 내보내기
+  0.02초, 집계 0.04초, 안전 적용 0.01초. 승계 비교는 해시 그룹을 작업자들이 바이트로
+  검증하며(pack을 읽기 전용으로 매핑, 대상 에러까지만 디코딩) 작업 상태가 모두 있는
+  2백만 에러가 2.4초, 적용 0.04초였다(Python 참조 경로와 같은 시간 - 같은 매처를
+  쓴다).
+
 - 일반 목록의 카운트/페이지에는 **O(룰 크기) 경로 금지**: 카운트 = [wcount]
   O(1), 상태 필터 그리드 = lazy 서술자(`status_page`/`status_rank`
   — 전수 리스트 실체화 없음), 공간 필터 = query_rect 스트리밍.
@@ -509,6 +565,11 @@ rust/target/release/floe-index drc sample.db
 샘플과 15만 에러 룰의 `gen_drcdb` pack으로 서비스(app-core `drc::analysis`)를
 브랜치의 Python 모듈(`tools/oracle/floe_oracle/drc_delta.py`, `drc_clusters.py`,
 `drc_points.py`, `drc_selection.py`)과 대조하고, `drc-prepare`와 뷰어 연결까지 본다.
+팀 리뷰 게이트 `drc_team`(`tools/validate_drc_team.py`, 2026-10-11)는 합성 두 실행
+(이동·중복·순서·이름이 바뀐 룰)과 sample.db로 방문·검토 제외 파일, `.floereview`,
+집계·conflict, 적용, 이전 실행 승계, `floe2 drc-match`를 브랜치의 Python 모듈
+(`drc_review.py`, `drc_team.py`, `drc_migrate.py`)과 파일 행 단위로 대조하고 뷰어의
+V/X·리뷰어 창·승계 창을 띄워 본다.
 
 ```sh
 # 실디자인 정렬 세트 (testchip_1g5.oas, 레이어 격리까지 검증)

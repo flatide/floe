@@ -51,7 +51,7 @@ cd "$(dirname "$0")/.."
 GATES="unit unit_vfs unit_render index_cli vfs_profile floe2 rust_scan \
 rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage \
 occupancy vfs_hier vfs_lifecycle vfs_marker vfs_split vfs_text \
-render_goldens render_speckle render_frames drc_ice drc_analysis svrf oasis_shapes \
+render_goldens render_speckle render_frames drc_ice drc_analysis drc_team svrf oasis_shapes \
 jobdeck representatives gen_main01 fit_budget sub_cut_box shape_cut write_once layer_decode area_true density_stack cell_tree index_lock worker_client cell_index perf_parity gtk_view rust_renderer klayout"
 # (unit_renderd is unit's renderd part, as unit_vfs and unit_render are)
 GATES=$(echo "$GATES" | sed 's/unit_render /unit_render unit_renderd /')
@@ -62,7 +62,7 @@ alias_gates() {
         occ)      echo "unit_vfs occupancy" ;;
         render)   echo "unit_render unit_renderd rust_renderer representatives fit_budget sub_cut_box shape_cut write_once layer_decode area_true density_stack cell_tree render_goldens render_speckle render_frames klayout" ;;
         indexer)  echo "unit_vfs index_cli rust_scan rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage vfs_split vfs_text vfs_marker representatives cell_tree index_lock" ;;
-        python)   echo "index_cli vfs_profile floe2 drc_ice drc_analysis svrf gen_main01" ;;
+        python)   echo "index_cli vfs_profile floe2 drc_ice drc_analysis drc_team svrf gen_main01" ;;
         deck)     echo "jobdeck occupancy" ;;
         *)        echo "" ;;
     esac
@@ -103,6 +103,8 @@ gates_for() {
             echo ALL ;;
         tools/validate_klayout_oracle.py)
             echo klayout ;;
+        tools/validate_drc_team_gui.py)
+            echo drc_team ;;
         tools/validate_*.py)
             gate_name=${1#tools/validate_}; gate_name=${gate_name%.py}
             for g in $GATES; do
@@ -118,7 +120,7 @@ gates_for() {
         # feature/jobdeck-drc's samples (docs/DRC.ko.md §6): the analysis
         # gate's fixture
         sample.db|sample.db.clusters|sample.svrf|sample.svrf.rules.json|sample.oas|sample.gds)
-            echo drc_analysis ;;
+            echo "drc_analysis drc_team" ;;
         # the dev-only oracle (P3, tools/oracle/floe_oracle): the frozen
         # floe shell and the Python references the gates hold Rust to
         tools/oracle/floe_oracle/cache.py|tools/oracle/floe_oracle/cachepath.py)
@@ -134,7 +136,10 @@ gates_for() {
         tools/oracle/floe_oracle/jobdeck/*)
             echo "jobdeck occupancy rust_renderer index_lock" ;;
         tools/oracle/floe_oracle/drc.py|tools/oracle/floe_oracle/svrf.py)
-            echo "drc_ice drc_analysis svrf index_lock" ;;
+            echo "drc_ice drc_analysis drc_team svrf index_lock" ;;
+        tools/oracle/floe_oracle/drc_review.py|tools/oracle/floe_oracle/drc_team.py|tools/oracle/floe_oracle/drc_migrate.py)
+            # feature/jobdeck-drc's review sharing: the team gate's reference
+            echo drc_team ;;
         tools/oracle/floe_oracle/drc_*.py)
             # feature/jobdeck-drc's Python modules: the analysis's reference
             echo drc_analysis ;;
@@ -171,14 +176,14 @@ gates_for() {
             # which every CLI gate runs (P1c, docs/SHARED_APP_LAYER.ko.md),
             # and under the GTK viewer's service (DRC review: drc_ice D12;
             # the view channel over the shared ViewController: gtk_view, P4c)
-            echo "unit cell_index drc_ice drc_analysis gtk_view $CLI_GATES" ;;
+            echo "unit cell_index drc_ice drc_analysis drc_team gtk_view $CLI_GATES" ;;
         rust/app-cli/*|rust/floe2/*)
             # the Rust command line floe2 (P1, docs/SHARED_APP_LAYER.ko.md)
             # and the GTK viewer's service in it (P2) with its view channel
-            echo "unit drc_ice drc_analysis gtk_view $CLI_GATES" ;;
+            echo "unit drc_ice drc_analysis drc_team gtk_view $CLI_GATES" ;;
         floe/gtkview.py|floe/gtkservice.py|floe/viewcli.py)
             # the GTK viewer's entry and its service client (P2, P4c)
-            echo "floe2 rust_renderer jobdeck drc_ice drc_analysis gtk_view" ;;
+            echo "floe2 rust_renderer jobdeck drc_ice drc_analysis drc_team gtk_view" ;;
         rust/render-core/*|rust/renderd/*|rust/render-cli/*|tools/oracle/floe_oracle/rust_render.py|tools/oracle/floe_oracle/perf_line.py)
             # (perf_parity: the frame line's fields and the adapter's result
             # the shared Rust perf line must reproduce)
@@ -193,7 +198,7 @@ gates_for() {
             # the GTK viewer (the product's Python, UI alone since P2d); its
             # perf line is perf_parity's reference; its loop is the view
             # controller's (gtk_view, P4d)
-            echo "rust_renderer floe2 jobdeck density_stack index_lock perf_parity gtk_view drc_analysis" ;;
+            echo "rust_renderer floe2 jobdeck density_stack index_lock perf_parity gtk_view drc_analysis drc_team" ;;
         floe/vfsclient.py)
             # where the viewer finds floe-index and floe2
             echo "floe2 jobdeck rust_renderer" ;;
@@ -509,6 +514,8 @@ if gate drc_ice; then RAN="$RAN drc_ice"; lap drc_ice
 # the viewer showing them
 if gate drc_analysis; then RAN="$RAN drc_analysis"; lap drc_analysis
     .venv/bin/python tools/validate_drc_analysis.py; fi
+if gate drc_team; then RAN="$RAN drc_team"; lap drc_team
+    .venv/bin/python tools/validate_drc_team.py; fi
 # SVRF subset parser: preprocessing / derivation closure / check
 # extraction / end-to-end vs gen_drcdb --svrf
 if gate svrf; then RAN="$RAN svrf"; lap svrf
