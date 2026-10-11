@@ -33,6 +33,9 @@ must match row for row (snapshots: all but the reviewer, id and time).
       review from the list's menu, the statistics CSV; the reviewers
       window (load a peer, refresh, pages, safe apply, conflict only);
       the review from previous run window (compare, pages, apply).
+  R8  tools/gen_drc_samples.py (the manual-test samples): its files, the
+      layout indexed, the reviewers' conflicts and the previous run's
+      matches it promises.
 
 usage: .venv/bin/python tools/validate_drc_team.py
 """
@@ -788,9 +791,48 @@ def timed(f):
     return run
 
 
+def r8(temp):
+    print("[R8] tools/gen_drc_samples.py: the manual-test samples")
+    out = temp / "samples"
+    r = run([sys.executable, str(ROOT / "tools/gen_drc_samples.py"), "--out", str(out),
+             "--heavy", "1000", "--me", "gate"])
+    check(r.returncode == 0, "the generator", r.stderr[-800:])
+    if r.returncode:
+        return
+    names = ["chip.oas", "deck.svrf", "GUIDE.ko.md", "run1/results.db", "run1/.results.db.tray",
+             "run1/deck.svrf.rules.json", "run1/my-review.floereview", "run1/my-waives.waive",
+             "run2/results.db", "run2/.results.db.tray", "run2/results.db.clusters",
+             "run2/peers/alice.floereview", "run2/peers/results.db.review.bob.sqlite3",
+             "run2/peers/results.db.waive.bob", "run2/peers/results.db.waive.carol"]
+    missing = [n for n in names if not (out / n).exists()]
+    check(not missing, "its files", missing)
+    check(not (out / "run2/.results.db.waive.gate").exists(), "my current review left empty")
+    got = json.loads((out / "expected.json").read_text())
+    rules = {x["name"]: x for x in got["rules"]}
+    s1, w1, s2 = rules["M1.S.1"], rules["M1.W.1"], rules["M2.S.1"]
+    check((s1["team"]["conflicts"], s1["team"]["visited"], s2["team"]["conflicts"])
+          == (175, 1300, 100), "the reviewers' conflicts (M1.S.1 175, M2.S.1 100)",
+          (s1["team"], s2["team"]))
+    check((s1["migration"]["matched"], s1["migration"]["partial"], s1["migration"]["ambiguous"],
+           w1["migration"]["matched"], got["migration"]["no_rule_match_source_work"])
+          == (1200, 5, 5, 150, 12), "the previous run's matches (exact, partial, renamed)",
+          (s1["migration"], w1["migration"], got["migration"].get("no_rule_match_source_work")))
+    check(got["team"]["reviewers"] == 4, "four reviewers (me + three peers)", got["team"])
+    oas = (out / "chip.oas").read_bytes()
+    check(oas.startswith(b"%SEMI-OASIS\r\n") and len(oas) > 100000, "the layout")
+    r = run([FLOE2, "info", str(out / "chip.oas"), "--json"])
+    try:
+        info = json.loads(r.stdout)
+    except ValueError:
+        info = {}
+    layers = sorted((x["layer"], x["datatype"]) for x in info.get("metadata", {}).get("layers", []))
+    check(r.returncode == 0 and layers == [(31, 0), (32, 0), (51, 0)],
+          "the layout indexed: M1, M2, VIA1", (r.stderr[-300:], layers))
+
+
 def main():
-    global r1, r1_identity, r2, r3, r4, r5, r6
-    r1, r1_identity, r2, r3, r4, r5, r6 = map(timed, (r1, r1_identity, r2, r3, r4, r5, r6))
+    global r1, r1_identity, r2, r3, r4, r5, r6, r8
+    r1, r1_identity, r2, r3, r4, r5, r6, r8 = map(timed, (r1, r1_identity, r2, r3, r4, r5, r6, r8))
     temp = Path(tempfile.mkdtemp(prefix="floe-drc-team-"))
     try:
         d = temp / "runs"
@@ -807,6 +849,7 @@ def main():
             svc.close()
         r5(d)
         r6(temp)
+        r8(temp)
         if "--no-gui" not in sys.argv:
             from validate_drc_team_gui import r7
             timed(r7)(temp, check)

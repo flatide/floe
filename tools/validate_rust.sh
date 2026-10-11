@@ -115,6 +115,8 @@ gates_for() {
             echo "gen_main01 fit_budget" ;;
         tools/gen_mdpview_samples.py|tools/jobdeck_expected.json)
             echo jobdeck ;;
+        tools/gen_drc_samples.py)
+            echo drc_team ;;
         tools/gen_drcdb.py|tools/gen_drc_db.py)
             echo "drc_ice drc_analysis svrf" ;;
         # feature/jobdeck-drc's samples (docs/DRC.ko.md §6): the analysis

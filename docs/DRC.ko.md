@@ -547,6 +547,32 @@ rust/target/release/floe-index drc sample.db
 룰 메타데이터와 클러스터는 자동으로 연결된다. 수동으로 메타데이터를
 열 때는 `sample.svrf.rules.json`을 선택한다.
 
+**전 기능 수동 확인 세트**(2026-10-12, `tools/gen_drc_samples.py`): 대용량·공동 검토·
+재수행 승계까지 손으로 확인할 샘플을 만든다. 리뷰 파일은 pack 지문(mtime 포함)에
+묶이므로 저장소에 넣지 않고, 확인할 머신에서 만든다(Python 3.6+와 빌드한 floe2·
+floe-index만; KLayout·NumPy 불필요, 기본 크기 약 4초).
+
+```sh
+python3 tools/gen_drc_samples.py                    # -> data/drc_samples/
+python3 tools/gen_drc_samples.py --heavy 2000000    # 큰 룰 2백만 건(약 30초, 426MB)
+python3 tools/gen_drc_samples.py --out /tmp/s --force --me kim
+floe2 view data/drc_samples/chip.oas --drc data/drc_samples/run2/results.db
+```
+
+- `chip.oas`: 에러 자리의 실제 도형(M1 31/0, M2 32/0, VIA1 51/0; 순수 Python OASIS).
+- `deck.svrf`와 `run*/deck.svrf.rules.json`(덱 이름으로 자동 연결).
+- `run2/results.db`(현재): spacing 3,000(간격 20단계 - CD 델타), width 1,500(가로/세로),
+  큰 spacing 룰(기본 20만 - 마커·박스 선택·대량 waive·`drc-prepare`), enclosure 800,
+  area 400(사각형·삼각형·L), notch 300, 두 레이어 overlap 200, 이름 중복 룰 1쌍,
+  이번에만 있는 룰, 결과 0인 룰. `results.db.clusters`.
+- `run2/peers/`: alice의 `.floereview`, bob의 review SQLite + 짝 waive, carol의 waive만
+  (리뷰어 창의 세 가지 불러오기; conflict는 alice·bob이 함께 본 범위).
+- `run1/results.db`(이전): 그대로·순서만 바뀐·이동한·고쳐진·중복된 에러와 이름이 바뀐 룰,
+  내 리뷰어 태그로 만든 이전 리뷰(자동 탐색)와 따로 보관한 `my-review.floereview`,
+  `my-waives.waive`.
+- `GUIDE.ko.md`: 확인 순서와 서비스로 잰 기대값(리뷰어 창의 conflict, 승계의 일치·부분
+  합의·모호 수), `expected.json`: 같은 값. 게이트 `drc_team` R8이 생성기를 지킨다.
+
 | 룰 | 에러 수 | 확인할 동작 |
 |---|---:|---|
 | M1.SPACE.1 | 20 | 다섯 자리 CD, 절대/비율 델타, 임의 번호 클러스터 |
