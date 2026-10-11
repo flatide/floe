@@ -488,7 +488,7 @@ def _waive_user():
                    for c in tag) or "user"
 
 
-def waive_autosave_path(pack_path):
+def waive_autosave_path(pack_path, reviewer=None):
     """Working review state beside the pack: .<db>.waive.<user>
     (the directory itself disambiguates equal db names; the name comes
     from the .db the pack belongs to, so a hidden `.<db>.tray` pack
@@ -496,10 +496,10 @@ def waive_autosave_path(pack_path):
     name = cachepath.db_name_of(pack_path)
     return os.path.join(
         os.path.dirname(os.path.abspath(pack_path)),
-        ".%s.waive.%s" % (name, _waive_user()))
+        ".%s.waive.%s" % (name, _waive_user() if reviewer is None else reviewer))
 
 
-def _waive_tmp_fallback(pack_path):
+def _waive_tmp_fallback(pack_path, reviewer=None):
     """When the results folder is not writable: same file in the
     system temp dir, with a path hash (one shared dir now holds
     autosaves of equal-named dbs from different folders)."""
@@ -511,7 +511,7 @@ def _waive_tmp_fallback(pack_path):
         .hexdigest()[:12]
     return os.path.join(
         tempfile.gettempdir(),
-        ".%s.waive.%s-%s" % (name, _waive_user(), tag))
+        ".%s.waive.%s-%s" % (name, _waive_user() if reviewer is None else reviewer, tag))
 
 
 # ---- per-reviewer error notes (flateyes .fe sidecar) --------------------
@@ -601,14 +601,17 @@ class IcePack(object):
                  "_wcount", "_wcount_off", "_wchunk",
                  "_waive_path", "_waive_hdr",
                  "_notes", "_note_of", "_note_next", "_note_path",
-                 "_note_tag", "_lock", "_review", "_analysis_identity")
+                 "_note_tag", "_review", "_analysis_identity",
+                 "_review_store", "_review_fingerprint", "_review_store_lock",
+                 "_review_store_error", "_lock", "_reviewer")
 
     def __init__(self, path, src_path=None, verify_src=False, *,
-                 review=True, review_path=None):
+                 review=True, review_path=None, cache_write=True):
         """Open the pack; analysis children use review=False without writes.
 
         An explicit review_path maps an existing, matching review sidecar
         read-only. Without it analysis reads the embedded initial statuses.
+        cache_write=False also prevents publishing a derived bounds cache.
         """
         self._wfd = None
         self._map = None
@@ -617,8 +620,13 @@ class IcePack(object):
         self._status_cache_lock = threading.Lock()
         self._status_generation = 0
         self._review = bool(review)
+        self._reviewer = _waive_user()
+        self._review_store = None
+        self._review_store_error = None
+        self._review_fingerprint = None
+        self._review_store_lock = threading.RLock()
         try:
-            self._load(path, src_path, verify_src, review_path)
+            self._load(path, src_path, verify_src, review_path, cache_write)
         except (struct.error, IndexError, OverflowError) as exc:
             # every parse mishap on a damaged file normalizes to
             # ONE catchable story: corrupt pack -> rebuild
@@ -635,12 +643,9 @@ class IcePack(object):
         (idempotent; the object is unusable afterwards). The
         np.memmap section views hold their own mappings and are
         freed by GC."""
-        # the reader's lock on the pack (floe/indexlock.py) goes first: a
-        # re-pack may start the moment the review lets go of it
-        lock = getattr(self, "_lock", None)
-        self._lock = None
-        if lock is not None:
-            lock.close()
+        store = getattr(self, "_review_store", None)
+        if store is not None:
+            store.close()
         wfd = getattr(self, "_wfd", None)
         self._wfd = None
         if wfd is not None:
@@ -655,6 +660,12 @@ class IcePack(object):
                 m.close()
             except (OSError, ValueError):
                 pass
+        # Release the reader only after this review has closed its stores
+        # and coordinate map; a re-pack may move its sidecars immediately.
+        lock = getattr(self, "_lock", None)
+        self._lock = None
+        if lock is not None:
+            lock.close()
 
     def __del__(self):
         try:
@@ -662,16 +673,14 @@ class IcePack(object):
         except Exception:
             pass
 
-    def _load(self, path, src_path, verify_src, review_path=None):
+    def _load(self, path, src_path, verify_src, review_path=None, cache_write=True):
         import mmap
         import numpy as np
-        # a reader of the pack (floe/indexlock.py; user 2026-10-09): refused
-        # (indexlock.Busy) while a run re-packs it, and holding it against
-        # a re-pack while open - a re-pack would move this review's waive
-        # sidecar aside under it
+        from .drc_analysis import pack_identity
+        # A re-pack can replace geometry and move review sidecars aside.
+        # Analysis workers hold the same reader lease as interactive views.
         self._lock = indexlock.hold_readers(
             indexlock.PACK, [path], indexlock.reader_label("floe DRC review"))
-        from .drc_analysis import pack_identity
         self._analysis_identity = pack_identity(path)
         with open(path, "rb") as f:
             head = f.read(_ICE_HEADER.size)
@@ -698,11 +707,12 @@ class IcePack(object):
                     "%s: truncated .ice - re-run: floe-index drc "
                     "<db>" % path)
             f.seek(fsize - _ICE2_FOOTER.size)
+            footer = f.read(_ICE2_FOOTER.size)
             (_blob_off, _blob_len, qbox_off, _qbox_len,
              status_off, wcount_off, blk_off, blk_cnt, dir_off,
              check_cnt, descref_off, descref_cnt, str_off, str_len,
              err_total, cell_ref, _resv, fmagic) = \
-                _ICE2_FOOTER.unpack(f.read(_ICE2_FOOTER.size))
+                _ICE2_FOOTER.unpack(footer)
             if fmagic != _ICE_MAGIC:
                 raise ValueError("%s: truncated .ice (bad footer)"
                                  % path)
@@ -727,6 +737,16 @@ class IcePack(object):
             descbuf = f.read(descref_cnt * 4)
             f.seek(str_off)
             strbuf = f.read(str_len)
+            # Durable review identity excludes device/inode/ctime, so copied
+            # results and legacy pack renames retain their flags. Recreated
+            # results change mtime or metadata. Never scan error geometry.
+            import hashlib
+            stat = os.fstat(f.fileno())
+            digest = hashlib.sha256()
+            for part in (head, footer, dirbuf, descbuf, strbuf,
+                         struct.pack("<QQ", stat.st_size, stat.st_mtime_ns)):
+                digest.update(part)
+            self._review_fingerprint = digest.hexdigest()
         if verify_src and src_path is not None:
             st = os.stat(src_path)
             if st.st_size != src_size or int(st.st_mtime) != src_mtime:
@@ -760,8 +780,9 @@ class IcePack(object):
         # (the pack itself is never written again - shared and
         # read-only packs stay reviewable, each user keeps their
         # own working state). Results folder not writable -> same
-        # file in the system temp dir; that too unusable -> legacy
-        # in-pack sections so the viewer still opens.
+        # file in the system temp dir; that too unusable -> read-only
+        # embedded sections so the viewer still opens without changing a
+        # shared result on behalf of one reviewer.
         self._waive_hdr = _WAIVE_HEADER.pack(
             _WAIVE_MAGIC, _WAIVE_VERSION, src_size, src_mtime,
             err_total, check_cnt)
@@ -782,12 +803,12 @@ class IcePack(object):
         else:
             try:
                 wpath = self._ensure_waive_autosave(
-                    waive_autosave_path(path), path, err_total,
+                    waive_autosave_path(path, self._reviewer), path, err_total,
                     check_cnt, status_off, wcount_off)
             except OSError:
                 try:
                     wpath = self._ensure_waive_autosave(
-                        _waive_tmp_fallback(path), path, err_total,
+                        _waive_tmp_fallback(path, self._reviewer), path, err_total,
                         check_cnt, status_off, wcount_off)
                     sys.stderr.write(
                         "[drc] results folder not writable; waive "
@@ -796,8 +817,8 @@ class IcePack(object):
                 except OSError as exc:
                     sys.stderr.write(
                         "[drc] waive autosave unavailable (%s); "
-                        "statuses fall back INTO the pack (shared, "
-                        "needs write permission)\n" % exc)
+                        "embedded statuses are read-only; no shared "
+                        "pack changes will be made\n" % exc)
                     wpath, wstatus_off, wwcount_off = \
                         path, status_off, wcount_off
         self._waive_path = wpath
@@ -866,7 +887,7 @@ class IcePack(object):
         self._cbb = cbb
         if pack_identity(path) != self._analysis_identity:
             raise ValueError("DRC pack changed while opening; reopen the results")
-        if not cached_bounds:
+        if not cached_bounds and cache_write:
             save_rule_bounds(path, cbb, self._analysis_identity)
         self._cache = {}       # block idx -> [DrcError]; tiny LRU
         self._order = []
@@ -949,7 +970,7 @@ class IcePack(object):
         errors, so old statuses must not silently apply. wcount is
         recomputed from the imported statuses (never trusted).
         Returns the waived-error count."""
-        self._require_review()
+        self._require_status_write()
         import numpy as np
         with open(src, "rb") as f:
             data = f.read()
@@ -1034,7 +1055,7 @@ class IcePack(object):
         waive sidecar; the read mapping is coherent) and keep the
         rule's [wcount] waived counter in sync. Raises OSError if
         the store is not writable."""
-        self._require_review()
+        self._require_status_write()
         if not 0 <= ci < len(self._ecnt) or not 0 <= ei < int(self._ecnt[ci]):
             raise IndexError((ci, ei))
         value = int(value) & 0xFF
@@ -1053,6 +1074,7 @@ class IcePack(object):
         spans remain committed. Even if rollback fails, counts are repaired
         from the actual mapped bytes, never from the intended update.
         """
+        self._require_status_write()
         import numpy as np
         gid = int(self._dir_es[ci]) + start
         offset = self._status_off + gid
@@ -1135,7 +1157,7 @@ class IcePack(object):
         closing the pack. This existing two-section format is not a durable
         transaction across process crashes or permanent device failures.
         """
-        self._require_review()
+        self._require_status_write()
         import numpy as np
         if not 0 <= ci < len(self._ecnt):
             raise IndexError(ci)
@@ -1402,6 +1424,57 @@ class IcePack(object):
     def _require_review(self):
         if not getattr(self, "_review", True):
             raise OSError("analysis pack is read-only")
+
+    def _require_status_write(self):
+        self._require_review()
+        path = getattr(self, "path", None)
+        if path is not None and os.path.abspath(self._waive_path) == os.path.abspath(path):
+            raise OSError("per-reviewer waive storage unavailable; shared pack is read-only")
+
+    def _review_flags_store(self):
+        # Instantiation is lazy and reads do not create an absent sidecar.
+        with self._review_store_lock:
+            if self._review_store is None:
+                failed = self._review_store_error
+                if failed is not None and time.monotonic() < failed[1]:
+                    raise failed[0].with_traceback(None)
+                from .drc_review import ReviewStore
+                try:
+                    self._review_store = ReviewStore(
+                        self.path, self._ecnt, self._review_fingerprint,
+                        writable=self._review, reviewer=self._reviewer)
+                except (OSError, ValueError) as exc:
+                    # Path/HOME permission errors can occur before the store
+                    # creates its own read backoff. Do not retry filesystem
+                    # discovery for every visible row, or treat failure as 0.
+                    self._review_store_error = (exc, time.monotonic() + 1.0)
+                    raise
+                self._review_store_error = None
+            return self._review_store
+
+    @property
+    def review_path(self):
+        """Actual durable visited/not-required sidecar, independent of waives."""
+        return self._review_flags_store().path
+
+    def review_flags(self, ci, ei):
+        return self._review_flags_store().flags(ci, ei)
+
+    def review_counts(self, ci=None):
+        return self._review_flags_store().counts(ci)
+
+    def mark_visited(self, ci, ei):
+        """Record one actually displayed error; no geometry is loaded here."""
+        self._require_review()
+        return self._review_flags_store().mark_visited(ci, ei)
+
+    def set_review_members(self, ci, membership, not_required, *,
+                           cancelled=None, progress=None):
+        """Change independent review exclusion, in bounded transactions."""
+        self._require_review()
+        return self._review_flags_store().set_members(
+            ci, membership, not_required, cancelled=cancelled,
+            progress=progress)
 
     def status_eis(self, ci, waived):
         """Rule-local error indices whose waived-ness matches.
