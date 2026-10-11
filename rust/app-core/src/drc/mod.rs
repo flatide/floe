@@ -1,6 +1,7 @@
 //! DRC sources: bounded layout-4 pack queries and a streaming ASCII fallback.
 //! Reads never implicitly write; build is a separate, explicitly approved job.
 //! No mmap: truncation of a shared file is an I/O error rather than SIGBUS.
+pub mod analysis;
 mod ascii;
 pub mod build;
 pub mod capture;

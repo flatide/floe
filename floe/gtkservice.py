@@ -316,13 +316,14 @@ class DrcError(object):
     """One violation as the service sent it: kind 'p' (polygon) or 'e'
     (edge), its global 1-based number, points in um (floe/drc.py
     DrcError)."""
-    __slots__ = ("kind", "num", "pts", "_db", "_ci", "_ei")
+    __slots__ = ("kind", "num", "pts", "_db", "_ci", "_ei", "_cd")
 
     def __init__(self, kind, num, pts, db=None, ci=None, ei=None):
         self.kind = kind
         self.num = num
         self.pts = [tuple(p) for p in pts]
         self._db, self._ci, self._ei = db, ci, ei
+        self._cd = None
 
     def bbox(self):
         xs = [p[0] for p in self.pts]
@@ -339,6 +340,24 @@ class DrcError(object):
             return []
         return [tuple(s) for s in self._db._request(
             "drc_cd", check=self._ci, error=self._ei)]
+
+    def cd_info(self, constraints=()):
+        """The rule-aware answer for this violation (app-core
+        drc::analysis): {rulers: [[x0, y0, x1, y1], ...] um, area: [x, y,
+        text] | None, pick: {constraint, cd, estimated, reason, candidates,
+        candidate_ticks, ticks: [measured, bound, delta] | None, ratio} |
+        None}; the last one kept per constraint list."""
+        constraints = list(constraints or ())
+        key = json.dumps(constraints, sort_keys=True)
+        if self._cd is not None and self._cd[0] == key:
+            return self._cd[1]
+        if self._db is not None and self._ci is not None:
+            info = self._db._request("drc_cd_info", check=self._ci,
+                                     error=self._ei, constraints=constraints)
+        else:
+            info = drc_cd_markers(constraints, [(self.kind, self.pts)])[0]
+        self._cd = (key, info)
+        return info
 
 
 class _Errors(object):
@@ -569,6 +588,13 @@ def drc_load(path, reviewer=None):
     the ASCII file."""
     return _drc(service().request("drc_open", path=os.path.abspath(path),
                                   mode="load", reviewer=reviewer))
+
+
+def drc_cd_markers(constraints, markers):
+    """drc_cd_info for markers given as (kind, [(x, y), ...]) um."""
+    return service().request(
+        "drc_cd_info", constraints=list(constraints or ()),
+        markers=[[kind, [list(p) for p in pts]] for kind, pts in markers])
 
 
 def svrf_rules(path):

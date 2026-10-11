@@ -166,6 +166,28 @@ pub fn rules_sidecar(path: &Path) -> Result<(Value, Option<String>)> {
             path.display()
         )));
     }
+    // an older v1 sidecar's width/space read as a new one is written
+    // (floe_oracle/svrf.py load_rules: notch, overlap from the statement)
+    let mut data = data;
+    if let Some(checks) = data.get_mut("checks").and_then(Value::as_object_mut) {
+        for check in checks.values_mut() {
+            let Some(cons) = check.get_mut("constraints").and_then(Value::as_array_mut) else {
+                continue;
+            };
+            for con in cons {
+                let (Some(metric), Some(text)) = (
+                    con.get("metric").and_then(Value::as_str),
+                    con.get("text").and_then(Value::as_str),
+                ) else {
+                    continue;
+                };
+                let refined = crate::svrf::constraint_metric(metric, text);
+                if refined != metric {
+                    con["metric"] = Value::from(refined);
+                }
+            }
+        }
+    }
     let version = data.get("version").and_then(Value::as_i64).unwrap_or(0);
     let warning = (version > 1).then(|| {
         format!(

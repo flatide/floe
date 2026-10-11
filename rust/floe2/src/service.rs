@@ -30,6 +30,9 @@
 //!   drc_set_note / drc_clear_note {handle, gids[, text]}
 //!   drc_note_export / drc_note_import / drc_waive_export / drc_waive_import {handle, path}
 //!   drc_cd {handle, check, error}       CD ruler segments, um
+//!   drc_cd_info {constraints, handle+check+error | markers: [[kind, pts], ...]}
+//!                                        the rule-aware rulers, an AREA rule's label
+//!                                        and the CD pick (app-core drc::analysis)
 //!   drc_close {handle}
 //!   svrf_rules {path}, svrf_operands {rhs}
 //!
@@ -39,6 +42,10 @@
 use floe_app_core::{
     dataset::Dataset,
     desktop,
+    drc::analysis::{
+        measure::{area_label, measurement_ticks, Selector},
+        ticks,
+    },
     drc::desktop::{query_rows, ErrorRow, Opened, Review},
     jobdeck::{color::Mode, dataset::props_source, parser::JobDeck, view::level_rows},
     Error, ErrorKind, Result,
@@ -230,6 +237,49 @@ fn counts(review: &Review) -> Result<Value> {
     ))
 }
 
+/// A marker given as `[kind, [[x, y], ...]]` (um).
+fn marker(m: &Value) -> Result<(char, Vec<[f64; 2]>)> {
+    let bad = || Error::input("a marker is [kind, [[x, y], ...]]");
+    let kind = m
+        .get(0)
+        .and_then(Value::as_str)
+        .and_then(|k| k.chars().next())
+        .ok_or_else(bad)?;
+    let pts = m
+        .get(1)
+        .and_then(Value::as_array)
+        .ok_or_else(bad)?
+        .iter()
+        .map(|p| match (p.get(0).and_then(Value::as_f64), p.get(1).and_then(Value::as_f64)) {
+            (Some(x), Some(y)) => Ok([x, y]),
+            _ => Err(bad()),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok((kind, pts))
+}
+
+/// The detail pane's and the rulers' answer for one marker: its rulers, an
+/// AREA rule's label, the CD the rule flagged with its ticks (measured,
+/// bound, delta), the ratio and the candidates' ticks.
+fn cd_info(selector: &Selector, kind: char, pts: &[[f64; 2]]) -> Value {
+    let rulers = selector.ruler_segments(kind, pts);
+    let area = area_label(kind, pts, selector.constraints()).map(|(x, y, t)| json!([x, y, t]));
+    let pick = selector.pick(kind, pts).map(|p| {
+        let ticks = measurement_ticks(&p).ok();
+        json!({
+            "constraint": p.constraint,
+            "cd": p.cd,
+            "estimated": p.estimated,
+            "reason": p.reason,
+            "candidates": p.candidates,
+            "candidate_ticks": p.candidates.iter().map(|c| ticks::value_ticks(*c).ok()).collect::<Vec<_>>(),
+            "ticks": ticks.map(|(m, b, d)| json!([m, b, d])),
+            "ratio": ticks.and_then(|(_, b, d)| ticks::percent_ticks(d, b)),
+        })
+    });
+    json!({"rulers": rulers, "area": area, "pick": pick})
+}
+
 fn drc_handle(
     op: &str,
     request: &Value,
@@ -315,6 +365,37 @@ fn drc_handle(
                 number(request, "error")?,
             );
             Ok(json!(drc(specs, request)?.cd(check, error, cancelled)?))
+        }
+        "drc_cd_info" => {
+            let constraints = match request.get("constraints") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(Value::Array(c)) => c.clone(),
+                Some(_) => return Err(Error::input("constraints must be a list")),
+            };
+            let selector = Selector::new(&constraints);
+            if let Some(markers) = request.get("markers") {
+                let markers = markers
+                    .as_array()
+                    .ok_or_else(|| Error::input("markers must be a list"))?;
+                return markers
+                    .iter()
+                    .map(|m| {
+                        let (kind, pts) = marker(m)?;
+                        Ok(cd_info(&selector, kind, &pts))
+                    })
+                    .collect::<Result<Vec<_>>>()
+                    .map(Value::from);
+            }
+            let (check, error) = (
+                number(request, "check")? as usize,
+                number(request, "error")?,
+            );
+            let row = drc(specs, request)?
+                .errors(check, error, 1, cancelled)?
+                .into_iter()
+                .next()
+                .ok_or_else(|| Error::input("DRC error index out of range"))?;
+            Ok(cd_info(&selector, row.kind, &row.points))
         }
         "drc_status" => {
             let (check, start, count) = (

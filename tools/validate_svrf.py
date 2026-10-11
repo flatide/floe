@@ -690,6 +690,23 @@ def r3c(tmp):
     check("old v1 reader refines only evidenced width/space",
           [c["metric"] for c in reader.load_rules(p)["checks"]["old"]["constraints"]]
           == ["overlap", "notch", "space", "enclosure", "extension", "space"])
+    # the product's reader (floe2 gtk-service svrf_rules, the GTK viewer's;
+    # app-core svrf::constraint_metric) refines the same way, and its
+    # operand split drops the new option words too
+    svc = subprocess.run(
+        [FLOE2, "gtk-service"], capture_output=True, text=True, timeout=60,
+        input="\n".join(json.dumps(r) for r in (
+            {"id": 1, "op": "svrf_rules", "path": p},
+            {"id": 2, "op": "svrf_operands",
+             "rhs": "EXT a b < .1 OVERLAP INTERSECTING ONLY OPPOSITE EXTENDED"},
+        )) + "\n")
+    replies = {r["id"]: r for r in map(json.loads, svc.stdout.splitlines())}
+    check("product reader refines only evidenced width/space",
+          [c["metric"] for c in replies[1]["result"]["rules"]["checks"]["old"]["constraints"]]
+          == ["overlap", "notch", "space", "enclosure", "extension", "space"],
+          str(replies.get(1)))
+    check("product operand split drops OVERLAP / INTERSECTING / EXTENDED",
+          replies[2]["result"] == ["a", "b"], str(replies.get(2)))
     p = os.path.join(tmp, "not-heads.svrf")
     w(p, "LAYER a 1\nX {\n NOTCH a < .1\n OVERLAP a < .1\n EXTENSION a < .1\n}\n")
     d = svrf.parse_deck(p)

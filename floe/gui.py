@@ -13,6 +13,8 @@ headless and the spawned render process never touches GTK.
 """
 
 import bisect
+import decimal
+import functools
 import math
 import os
 import queue
@@ -71,14 +73,15 @@ DRC_HL_CAP = 1000          # highlight-in-view marker budget
 DRC_SEL_CAP = 5000         # box-select budget ('e' mode)
 DRC_GREEN = 0x00E676FF     # WAIVED errors (geometry+numbers;
                            # cyan->green, user call 2026-08-17)
-DRC_MARK_PX = 5            # collapsed-marker square side; geometry
+DRC_MARK_PX = 5            # collapsed-marker circle diameter; geometry
                            # whose screen span shrinks BELOW this
                            # paints as the marker (no gap where the
                            # shape draws smaller than the marker)
 # canonical order of the rule-type combo (SVRF measurement metrics
 # from the rules.json sidecar; "other" = no parsed measurement)
-DRC_METRICS = ("width", "space", "enclosure", "area", "density",
-               "length", "angle", "perimeter", "vertex", "other")
+DRC_METRICS = ("width", "space", "notch", "enclosure", "overlap",
+               "extension", "area", "density", "length", "angle",
+               "perimeter", "vertex", "other")
 
 # FLOE_DRC_PROF=1: print a per-stage timing breakdown of the DRC
 # browser paths to stderr - for machine-specific slowness reports
@@ -388,6 +391,107 @@ def stamp_dotted(buf, a, b, casing, core):
         if casing is not None:
             fill_rect(buf, x - 1, y - 1, 3, 3, casing)
         fill_rect(buf, x - 1, y - 1, 2, 2, core)
+
+
+@functools.lru_cache(maxsize=96)
+def circle_rgba(radius, color, secondary=None, solid=False):
+    """A filled, antialiased circle sprite as packed RGBA bytes,
+    (2 * radius + 1) px square (feature/jobdeck-drc floe/drc_marker_style.py,
+    without NumPy): colours 0xRRGGBBAA, `secondary` on the right half, a
+    translucent middle with a ~2 px outline, or opaque when `solid`."""
+    radius = int(radius)
+    if radius < 1:
+        raise ValueError("circle radius must be positive")
+    size = radius * 2 + 1
+    stroke = min(2.0, radius / 2.0)
+
+    def channels(rgba):
+        rgba = int(rgba)
+        return ((rgba >> 24) & 255, (rgba >> 16) & 255,
+                (rgba >> 8) & 255, rgba & 255)
+
+    left = channels(color)
+    right = channels(secondary) if secondary is not None else left
+    out = bytearray(size * size * 4)
+    for row, yy in enumerate(range(-radius, radius + 1)):
+        for col, xx in enumerate(range(-radius, radius + 1)):
+            distance = math.sqrt(xx * xx + yy * yy)
+            coverage = min(1.0, max(0.0, radius + 0.5 - distance))
+            if coverage == 0:
+                continue
+            outline = distance >= radius - stroke
+            alpha = (255.0 if solid else 72.0 + 136.0 * outline) * coverage
+            c = right if xx >= 0 else left
+            i = (row * size + col) * 4
+            out[i:i + 4] = bytes((c[0], c[1], c[2],
+                                  int(round(alpha * c[3] / 255.0))))
+    return bytes(out)
+
+
+def stamp_drc_circle(buf, x, y, radius, color, secondary=None, sprites=None,
+                     solid=False):
+    """Composite a circle sprite centred at (x, y), clipped at the edges."""
+    if sprites is None:
+        sprites = {}
+    key = (radius, color, secondary, solid)
+    sprite = sprites.get(key)
+    side = 2 * radius + 1
+    if sprite is None:
+        sprite = GdkPixbuf.Pixbuf.new_from_bytes(
+            GLib.Bytes.new(circle_rgba(radius, color, secondary, solid)),
+            GdkPixbuf.Colorspace.RGB, True, 8, side, side, side * 4)
+        sprites[key] = sprite
+    origin_x, origin_y = int(round(x)) - radius, int(round(y)) - radius
+    left, top = max(0, origin_x), max(0, origin_y)
+    right = min(buf.get_width(), origin_x + side)
+    bottom = min(buf.get_height(), origin_y + side)
+    if right > left and bottom > top:
+        sprite.composite(buf, left, top, right - left, bottom - top,
+                         origin_x, origin_y, 1, 1,
+                         GdkPixbuf.InterpType.NEAREST, 255)
+
+
+def drc_ticks(value):
+    """A length or area in 0.00001 ticks as the DRC details and rulers show
+    it: the value's shortest digits rounded half up (Python
+    Decimal(str(value)) - the service's ticks, app-core drc::analysis)."""
+    d = decimal.Decimal(str(value))
+    if not d.is_finite():
+        raise ValueError("measurement must be finite")
+    if d.is_zero() or d.adjusted() < -6:
+        return 0
+    with decimal.localcontext() as ctx:
+        ctx.prec = max(40, len(d.as_tuple().digits) + 8)
+        return int((d * 100000).to_integral_value(
+            rounding=decimal.ROUND_HALF_UP))
+
+
+def format_ticks(ticks, signed=False):
+    """[-]whole.fffff of a tick count."""
+    ticks = int(ticks)
+    sign = "-" if ticks < 0 else "+" if signed else ""
+    whole, fractional = divmod(abs(ticks), 100000)
+    return "%s%d.%05d" % (sign, whole, fractional)
+
+
+def format_um5(value):
+    """`value` to five decimals, half up (rulers, the measuring status)."""
+    try:
+        return format_ticks(drc_ticks(value))
+    except (ValueError, decimal.DecimalException):
+        return "%.5f" % value
+
+
+class _DrcAreaLabel(object):
+    """An AREA rule's readout at a point: shown as a distance chip, kept
+    with the auto rulers (Tab/Esc/k/the next jump), drawn without a line."""
+    __slots__ = ("point", "text")
+
+    def __init__(self, x, y, text):
+        self.point, self.text = (x, y), text
+
+    def __iter__(self):
+        return iter(self.point * 2)
 
 
 class _DrcOffsetRuler(object):
@@ -2834,6 +2938,8 @@ class Viewer:
         if self.mode == "ruler" and self._ruler_start is not None:
             segs.append((*self._ruler_start, *self._ruler_end_preview()))
         for seg in segs:
+            if isinstance(seg, _DrcAreaLabel):
+                continue  # a text chip alone: no line, no arrowheads
             x0, y0, x1, y1 = seg
             a, b = (sx(x0), sy(y0)), (sx(x1), sy(y1))
             if isinstance(seg, _DrcOffsetRuler):
@@ -2874,9 +2980,8 @@ class Viewer:
                     and max(mys) - min(mys) < DRC_MARK_PX):
                 cxp = (min(mxs) + max(mxs)) / 2.0
                 cyp = (min(mys) + max(mys)) / 2.0
-                fill_rect(disp, cxp - DRC_MARK_PX // 2,
-                          cyp - DRC_MARK_PX // 2,
-                          DRC_MARK_PX, DRC_MARK_PX, mcol)
+                stamp_drc_circle(disp, cxp, cyp, DRC_MARK_PX // 2,
+                                 mcol, solid=True)
             elif self.drc_mark["kind"] == "p":
                 self._drc_fill_translucent(disp, pts, mcol)
                 for a, b in zip(pts, pts[1:] + pts[:1]):
@@ -3140,8 +3245,11 @@ class Viewer:
                 a, b = offset_screen_segment(a, b)
             mx, my = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
             if -40 <= mx <= w and -20 <= my <= h:
-                vis.append((a, b, mx, my,
+                # five decimals, half up (an area label carries its text)
+                text = (seg.text if isinstance(seg, _DrcAreaLabel) else
+                        "%s um" % format_um5(
                             math.hypot(x1 - x0, y1 - y0) * self.dbu))
+                vis.append((a, b, mx, my, text))
         while len(self._labels) < len(vis):
             lbl = Gtk.Label()
             lbl.set_halign(Gtk.Align.START)
@@ -3152,11 +3260,11 @@ class Viewer:
         lines = [(a, b) for a, b, _, _, _ in vis]
         placed = []    # chip rects already positioned this pass
         leaders = []   # leader segments already claimed
-        for idx, (a, b, mx, my, d_um) in enumerate(vis):
+        for idx, (a, b, mx, my, text) in enumerate(vis):
             lbl = self._labels[idx]
             lbl.set_markup('<span background="#101010" foreground='
                            '"#ffffff"> %s </span>'
-                           % GLib.markup_escape_text("%.4f um" % d_um))
+                           % GLib.markup_escape_text(text))
             lbl.show()   # a hidden label measures as zero
             # preferred size folds in the margins, which still hold
             # the previous position; subtract for the chip itself
@@ -8195,7 +8303,7 @@ class Viewer:
         for r in self._drc_ruler:
             if r in self.rulers:
                 self.rulers.remove(r)
-        self._drc_ruler = self._drc_cd_ruler(e)
+        self._drc_ruler = self._drc_cd_ruler(e, check.name)
         if e.kind == "e" and len(e.pts) == 2 and self._drc_ruler:
             # A ruler painted directly over a one-edge violation hides the
             # red error. Tag it for a constant screen-space parallel offset;
@@ -8267,9 +8375,9 @@ class Viewer:
         green). ONLY the jumped error (double-click / n-p - the one
         drc_mark points at) draws its real shape, collapsing to a
         marker when its screen span is below the marker size; every
-        OTHER error is a DRC_MARK_PX square at ANY zoom (user call
+        OTHER error is a DRC_MARK_PX circle at ANY zoom (user call
         2026-08-18 - shape soup at wide views; the focused one:
-        9x9). A 20k segment budget bounds pathological frames."""
+        9 px). A 20k segment budget bounds pathological frames."""
         db = self._drc
         focus = self._drc_focus
         jci = jei = -1
@@ -8279,6 +8387,7 @@ class Viewer:
                                       self._drc_pos) - 1
             jei = self._drc_pos - self._drc_cum[jci]
         budget = 20000
+        sprites = {}
         for ci_, ei_, kind, spts in items:
             col = color
             if col is None:
@@ -8296,8 +8405,8 @@ class Viewer:
                 s_px = 9 if (focus is not None
                              and focus[0] == ci_
                              and focus[1] == ei_) else DRC_MARK_PX
-                fill_rect(disp, cxp - s_px // 2, cyp - s_px // 2,
-                          s_px, s_px, col)
+                stamp_drc_circle(disp, cxp, cyp, s_px // 2, col,
+                                 sprites=sprites, solid=True)
                 self._drc_hits.append((cxp, cyp, ci_, ei_))
                 budget -= 1
             else:
@@ -8393,28 +8502,33 @@ class Viewer:
         for t in dict.fromkeys(c.get("text", "") for c in cons):
             if t:
                 lines.append("constraint: %s" % t)
-        cands = []
-        for con in cons:
-            v = con.get("value")
-            if v is None:
-                continue
-            mv = self._drc_measured(e, con.get("metric"))
-            if mv is not None:
-                cands.append((con, v, mv))
-        if cands:
-            # prefer the UPPER bound: "> 0 < v" chains flag by the
-            # upper limit - the lower bound reads as a meaningless
-            # positive delta (real decks use zero-lower ranges)
-            pick = next((c for c in cands
-                         if c[0].get("op") in ("<", "<=", "==")),
-                        cands[0])
-            con, v, mv = pick
-            pct = (" (%+.1f%%)" % ((mv - v) / v * 100.0)) if v else ""
+        # the CD the rule's condition flagged on this marker, its bound and
+        # their difference in five-decimal ticks (app-core drc::analysis -
+        # the delta groups' numbers; feature/jobdeck-drc 2026-10-06)
+        pick = self._drc_cd_info(e, name).get("pick")
+        ticks = pick.get("ticks") if pick else None
+        if ticks:
+            mv, v, delta = ticks
+            con = cons[pick["constraint"]]
+            ratio = pick.get("ratio")
+            pct = (" (%s%%)" % format_ticks(ratio) if ratio is not None
+                   else " (ratio unavailable)")
             unit = "um2" if con.get("metric") == "area" else "um"
-            lines.append("measured: %.4f %s vs %s %.4f · "
-                         "Δ %+.4f%s"
-                         % (mv, unit, con.get("op", "?"), v,
-                            mv - v, pct))
+            label = "estimated CD" if pick.get("estimated") else "measured"
+            lines.append("%s: %s %s vs %s %s · Δ %s%s"
+                         % (label, format_ticks(mv), unit, con.get("op", "?"),
+                            format_ticks(v), format_ticks(delta), pct))
+            if pick.get("estimated"):
+                cticks = pick.get("candidate_ticks") or []
+                if len(cticks) > 1:
+                    lines.append("CD candidates: %s %s" % (", ".join(
+                        format_ticks(t) if t is not None else "?"
+                        for t in cticks), unit))
+                if pick.get("reason"):
+                    lines.append("CD selection: %s" % pick["reason"])
+        elif cons:
+            lines.append("CD unavailable: geometry or rule condition "
+                         "unresolved")
         lays = mc.get("layers") or []
         if lays:
             lines.append("layers: %s" % ", ".join(lays))
@@ -8442,49 +8556,31 @@ class Viewer:
                 lines.append("  …")
         return lines
 
-    def _drc_measured(self, e, metric):
-        """This violation's own dimension for a sidecar constraint
-        metric - only shapes whose measurement is unambiguous (the
-        same ones that get auto CD rulers). Returns um (um^2 for
-        area) or None."""
-        pts = e.pts   # um
-        if metric == "area":
-            if e.kind != "p" or len(pts) < 3:
-                return None
-            s = 0.0
-            for i in range(len(pts)):
-                x0, y0 = pts[i]
-                x1, y1 = pts[(i + 1) % len(pts)]
-                s += x0 * y1 - x1 * y0
-            return abs(s) / 2.0
-        if metric in ("width", "space", "enclosure"):
-            # rect region -> min span; facing edge pair -> the gap
-            if e.kind == "p" or (e.kind == "e" and len(pts) == 4):
-                segs = self._drc_cd_ruler(e)   # dbu 4-tuples
-                if not segs:
-                    return None
-                # cd_segments keeps the true closest edge-pair gap first;
-                # later entries can be its horizontal/vertical diagnostics.
-                if e.kind == "e":
-                    x0, y0, x1, y1 = segs[0]
-                    return math.hypot(x1 - x0, y1 - y0) * self.dbu
-                return min(math.hypot(x1 - x0, y1 - y0)
-                           for x0, y0, x1, y1 in segs) * self.dbu
-            return None
-        if metric == "length" and e.kind == "e" and len(pts) == 2:
-            return math.hypot(pts[1][0] - pts[0][0],
-                              pts[1][1] - pts[0][1])
-        return None
+    def _drc_cd_info(self, e, name):
+        """The rule-aware rulers, an AREA rule's label and the CD pick of
+        one violation (gtk-service drc_cd_info), with the rule's sidecar
+        constraints; none when the service refuses."""
+        meta = self._drc_rmeta or {}
+        cons = ((meta.get("checks", {}).get(name) or {}).get("constraints")
+                or [])
+        try:
+            return e.cd_info(cons)
+        except gtkservice.ServiceError as exc:
+            self._set_live_status("DRC CD: %s" % exc)
+            return {"rulers": [], "area": None, "pick": None}
 
-    def _drc_cd_ruler(self, e):
-        """CD rulers of a violation as dbu 4-tuples - the geometry
-        (single edge / facing gap and optional axis components /
-        rect spans) lives in
-        drc.cd_segments, SHARED with the CLI snapshot embeds; this
-        wrapper only converts um -> dbu."""
+    def _drc_cd_ruler(self, e, name=None):
+        """Auto CD rulers as dbu 4-tuples, an AREA rule's readout as a
+        _DrcAreaLabel - the rectangle directions the rule flags (both
+        when it cannot tell), SHARED with the CLI snapshot embeds."""
+        info = self._drc_cd_info(e, name)
         k = self.dbu
-        return [(x0 / k, y0 / k, x1 / k, y1 / k)
-                for x0, y0, x1, y1 in e.cd_segments()]
+        rulers = [(x0 / k, y0 / k, x1 / k, y1 / k)
+                  for x0, y0, x1, y1 in info.get("rulers") or []]
+        if info.get("area"):
+            x, y, text = info["area"]
+            rulers.append(_DrcAreaLabel(x / k, y / k, text))
+        return rulers
 
     def _drc_step(self, delta):
         """n/p: cycle within the VISIBLE list of the open rule
@@ -8608,9 +8704,10 @@ class Viewer:
                 x1, y1 = self._ruler_end_preview()
                 x0, y0 = self._ruler_start
                 d = math.hypot(x1 - x0, y1 - y0) * self.dbu
-                parts.append("measure %.4f um (dx %.4f, dy %.4f)"
-                             % (d, (x1 - x0) * self.dbu,
-                                (y1 - y0) * self.dbu))
+                parts.append("measure %s um (dx %s, dy %s)"
+                             % tuple(format_um5(v) for v in
+                                     (d, (x1 - x0) * self.dbu,
+                                      (y1 - y0) * self.dbu)))
             else:
                 parts.append("ruler: click 1st point"
                              + (" [snap]" if self.snap_on else ""))

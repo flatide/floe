@@ -21,7 +21,10 @@ const MAX_TEXT: usize = 65536;
 pub const METRICS: &[&str] = &[
     "width",
     "space",
+    "notch",
     "enclosure",
+    "overlap",
+    "extension",
     "area",
     "density",
     "length",
@@ -319,8 +322,14 @@ impl Rules {
                 ));
             }
         }
+        let mut checks = w.checks;
+        for rule in checks.values_mut() {
+            for c in &mut rule.constraints {
+                c.metric = constraint_metric(&c.metric, &c.text);
+            }
+        }
         Ok(Self {
-            checks: w.checks,
+            checks,
             derived: w.derived,
         })
     }
@@ -478,10 +487,94 @@ fn operands(rhs: &str) -> impl Iterator<Item = &str> {
 }
 
 fn keyword(name: &str) -> bool {
-    const KEYWORDS: &str = "INTERNAL INT EXTERNAL EXT ENCLOSURE ENC AREA DENSITY LENGTH ANGLE PERIMETER VERTEX AND OR NOT XOR INTERACT INSIDE OUTSIDE TOUCH CUT ENCLOSE BY SIZE GROW SHRINK EXTENT EXTENTS HOLES WITH EDGE CONVEX OPPOSITE ABUT SINGULAR REGION PROJECTING PARALLEL PERPENDICULAR ONLY ALSO OVER UNDER UNDEROVER COPY NET RATIO WINDOW STEP TRUNCATE INNER OUTER MEASURE ALL PRINT RECTANGLE SQUARE COUNT COINCIDENT EXPAND TOP LEFT RIGHT BOTTOM GOOD BAD MAX MIN EVEN ODD MULTI ORTHOGONAL POLYGON CORNER CENTERLINE SPACE WIDTH NOTCH";
+    const KEYWORDS: &str = "INTERNAL INT EXTERNAL EXT ENCLOSURE ENC AREA DENSITY LENGTH ANGLE PERIMETER VERTEX AND OR NOT XOR INTERACT INSIDE OUTSIDE TOUCH CUT ENCLOSE BY SIZE GROW SHRINK EXTENT EXTENTS HOLES WITH EDGE CONVEX OPPOSITE ABUT SINGULAR REGION PROJECTING PARALLEL PERPENDICULAR ONLY ALSO OVER UNDER UNDEROVER COPY NET RATIO WINDOW STEP TRUNCATE INNER OUTER MEASURE ALL PRINT RECTANGLE SQUARE COUNT COINCIDENT EXPAND TOP LEFT RIGHT BOTTOM GOOD BAD MAX MIN EVEN ODD MULTI ORTHOGONAL POLYGON CORNER CENTERLINE SPACE WIDTH NOTCH OVERLAP INTERSECTING EXTENDED";
     KEYWORDS
         .split_ascii_whitespace()
         .any(|k| name.eq_ignore_ascii_case(k))
+}
+
+/// The metric a rules.json constraint measures, refined where its statement
+/// text shows it (floe_oracle/svrf.py `constraint_metric`, kept in step with
+/// the builder, rust/cli/src/svrf.rs `statement_metric`): a two-layer
+/// INTERNAL is an overlap, a one-layer EXTERNAL with the NOTCH option a
+/// notch; nothing else changes - an older v1 sidecar reads as a new one
+/// would be written.
+pub fn constraint_metric(metric: &str, text: &str) -> String {
+    use crate::drc::analysis::ticks::py_space;
+    if !matches!(metric, "width" | "space") {
+        return metric.to_string();
+    }
+    let t = text.trim_start_matches(py_space);
+    let split = t.find(py_space).unwrap_or(t.len());
+    let (head, rest) = (&t[..split], t[split..].trim_start_matches(py_space));
+    let head_metric = match head.to_uppercase().as_str() {
+        "INTERNAL" | "INT" => "width",
+        "EXTERNAL" | "EXT" => "space",
+        _ => "",
+    };
+    if rest.is_empty() || head_metric != metric {
+        return metric.to_string();
+    }
+    let cs: Vec<char> = rest.chars().collect();
+    let word_start = |c: char| c.is_ascii_alphabetic() || c == '_';
+    let word_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-');
+    // `(?<![A-Za-z_])(?:<=|>=|==|!=|<|>)`
+    let op_at = |i: usize| -> bool {
+        (i == 0 || !word_start(cs[i - 1]))
+            && match (cs.get(i), cs.get(i + 1)) {
+                (Some('<' | '>' | '=' | '!'), Some('=')) => true,
+                (Some('<' | '>'), _) => true,
+                _ => false,
+            }
+    };
+    let first = (0..cs.len()).find(|&i| op_at(i));
+    let operands: String = cs[..first.unwrap_or(cs.len())].iter().collect();
+    let names: Vec<&str> = operands.split(py_space).filter(|w| !w.is_empty()).collect();
+    for name in &names {
+        let name = if (name.starts_with('[') && name.ends_with(']'))
+            || (name.starts_with('(') && name.ends_with(')'))
+        {
+            &name[1..name.len() - 1]
+        } else {
+            name
+        };
+        let mut chars = name.chars();
+        let ok = chars.next().is_some_and(word_start) && chars.all(word_char);
+        if !ok || keyword(name) {
+            return metric.to_string();
+        }
+    }
+    if metric == "width" && names.len() == 2 {
+        return "overlap".into();
+    }
+    if let (true, Some(start)) = (metric == "space" && names.len() == 1, first) {
+        // past the comparator chain (`_BOUND_RX` matches and their spaces)
+        let mut end = start;
+        while let Some(e) = crate::drc::analysis::measure::bound_at(&cs, end) {
+            end = e;
+            while end < cs.len() && py_space(cs[end]) {
+                end += 1;
+            }
+        }
+        let tail: Vec<char> = cs[end..].to_vec();
+        let mut i = 0;
+        while i < tail.len() {
+            if word_start(tail[i]) {
+                let s = i;
+                i += 1;
+                while i < tail.len() && word_char(tail[i]) {
+                    i += 1;
+                }
+                let word: String = tail[s..i].iter().collect();
+                if word.to_uppercase() == "NOTCH" {
+                    return "notch".into();
+                }
+            } else {
+                i += 1;
+            }
+        }
+    }
+    metric.to_string()
 }
 
 #[cfg(test)]
