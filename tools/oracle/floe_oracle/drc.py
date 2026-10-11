@@ -39,6 +39,7 @@ import math
 import os
 import struct
 import sys
+import threading
 import time
 
 from . import cachepath
@@ -162,26 +163,30 @@ def cd_segments(e):
             return []   # edges properly cross: gap is zero
         cand = [(p, foot(p, b0, b1)) for p in (a0, a1)]
         cand += [(foot(p, a0, a1), p) for p in (b0, b1)]
-        dmin = min(dist(p, q) for p, q in cand)
+        p, q = min(cand, key=lambda c: dist(c[0], c[1]))
+        dmin = dist(p, q)
         if dmin <= 0:
             return []   # touching edges: no gap
-        mid = ((a0[0] + a1[0]) / 2.0, (a0[1] + a1[1]) / 2.0)
-        fm = foot(mid, b0, b1)
-        if dist(mid, fm) <= dmin * 1.0001:
-            return [seg(mid, fm)]
-        p, q = min(cand, key=lambda c: dist(c[0], c[1]))
-        out = [seg(p, q)]
-
-        # Disjoint projections of parallel edges produce a diagonal
-        # endpoint-to-endpoint minimum.  Keep that true minimum first,
-        # then expose its X/Y components as an L between the same points.
-        # The sorted endpoints make the elbow independent of record order.
         adx, ady = a1[0] - a0[0], a1[1] - a0[1]
         bdx, bdy = b1[0] - b0[0], b1[1] - b0[1]
         al2, bl2 = adx * adx + ady * ady, bdx * bdx + bdy * bdy
         cross = adx * bdy - ady * bdx
         parallel = (al2 > 0 and bl2 > 0
                     and abs(cross) <= 1e-12 * math.sqrt(al2 * bl2))
+        mid = ((a0[0] + a1[0]) / 2.0, (a0[1] + a1[1]) / 2.0)
+        fm = foot(mid, b0, b1)
+        # Centering is only a drawing choice: it must not change the
+        # numeric minimum consumed by CD details and delta grouping.
+        # A relative tolerance admitted skew edges and even disjoint
+        # parallel projections, changing the displayed five-decimal CD.
+        if parallel and dist(mid, fm) == dmin:
+            return [seg(mid, fm)]
+        out = [seg(p, q)]
+
+        # Disjoint projections of parallel edges produce a diagonal
+        # endpoint-to-endpoint minimum.  Keep that true minimum first,
+        # then expose its X/Y components as an L between the same points.
+        # The sorted endpoints make the elbow independent of record order.
         if parallel and p[0] != q[0] and p[1] != q[1]:
             lo, hi = sorted((p, q))
             elbow = (hi[0], lo[1])
@@ -406,6 +411,23 @@ _ICE2_BLOCK = 64
 # status scan granularity: rank/page jumps read cached per-chunk
 # waived counts and touch at most ONE chunk of status bytes
 _STATUS_CHUNK = 1 << 22
+# A bulk edit never allocates arrays proportional to the rule/selection.
+_STATUS_WRITE_CHUNK = 1 << 16
+
+
+def _pwrite_all(fd, data, offset):
+    """Complete a positional write, including interrupted/short writes."""
+    view = memoryview(data).cast("B")
+    while view:
+        try:
+            written = os.pwrite(fd, view, offset)
+        except InterruptedError:
+            continue
+        if written <= 0 or written > len(view):
+            raise OSError("incomplete status write")
+        offset += written
+        view = view[written:]
+
 
 # colour of the flateyes text annotation a note contributes (yellow,
 # distinct from the red/green review-status stamps)
@@ -575,17 +597,28 @@ class IcePack(object):
                  "_map", "_blk", "_qbox", "_dir_es", "_dir_bs",
                  "_ecnt", "_cbb", "_cache", "_order",
                  "_status", "_status_off", "_wfd",
+                 "_status_lock", "_status_cache_lock", "_status_generation",
                  "_wcount", "_wcount_off", "_wchunk",
                  "_waive_path", "_waive_hdr",
                  "_notes", "_note_of", "_note_next", "_note_path",
-                 "_note_tag", "_lock")
+                 "_note_tag", "_lock", "_review", "_analysis_identity")
 
-    def __init__(self, path, src_path=None, verify_src=False):
+    def __init__(self, path, src_path=None, verify_src=False, *,
+                 review=True, review_path=None):
+        """Open the pack; analysis children use review=False without writes.
+
+        An explicit review_path maps an existing, matching review sidecar
+        read-only. Without it analysis reads the embedded initial statuses.
+        """
         self._wfd = None
         self._map = None
         self._lock = None
+        self._status_lock = threading.RLock()
+        self._status_cache_lock = threading.Lock()
+        self._status_generation = 0
+        self._review = bool(review)
         try:
-            self._load(path, src_path, verify_src)
+            self._load(path, src_path, verify_src, review_path)
         except (struct.error, IndexError, OverflowError) as exc:
             # every parse mishap on a damaged file normalizes to
             # ONE catchable story: corrupt pack -> rebuild
@@ -629,7 +662,7 @@ class IcePack(object):
         except Exception:
             pass
 
-    def _load(self, path, src_path, verify_src):
+    def _load(self, path, src_path, verify_src, review_path=None):
         import mmap
         import numpy as np
         # a reader of the pack (floe/indexlock.py; user 2026-10-09): refused
@@ -638,6 +671,8 @@ class IcePack(object):
         # sidecar aside under it
         self._lock = indexlock.hold_readers(
             indexlock.PACK, [path], indexlock.reader_label("floe DRC review"))
+        from .drc_analysis import pack_identity
+        self._analysis_identity = pack_identity(path)
         with open(path, "rb") as f:
             head = f.read(_ICE_HEADER.size)
             if len(head) != _ICE_HEADER.size:
@@ -732,26 +767,39 @@ class IcePack(object):
             err_total, check_cnt)
         wstatus_off = _WAIVE_HEADER.size
         wwcount_off = _WAIVE_HEADER.size + err_total
-        try:
-            wpath = self._ensure_waive_autosave(
-                waive_autosave_path(path), path, err_total,
-                check_cnt, status_off, wcount_off)
-        except OSError:
+        if not self._review:
+            if review_path is None or os.path.abspath(review_path) == os.path.abspath(path):
+                wpath, wstatus_off, wwcount_off = path, status_off, wcount_off
+            else:
+                wpath = review_path
+                with open(wpath, "rb") as stream:
+                    head = stream.read(_WAIVE_HEADER.size)
+                    stream.seek(0, os.SEEK_END)
+                    valid = (head == self._waive_hdr and stream.tell() ==
+                             _WAIVE_HEADER.size + err_total + 4 * check_cnt)
+                if not valid:
+                    raise ValueError("analysis review snapshot does not match pack")
+        else:
             try:
                 wpath = self._ensure_waive_autosave(
-                    _waive_tmp_fallback(path), path, err_total,
+                    waive_autosave_path(path), path, err_total,
                     check_cnt, status_off, wcount_off)
-                sys.stderr.write(
-                    "[drc] results folder not writable; waive "
-                    "autosave in %s (save waives as… to keep the "
-                    "review)\n" % wpath)
-            except OSError as exc:
-                sys.stderr.write(
-                    "[drc] waive autosave unavailable (%s); "
-                    "statuses fall back INTO the pack (shared, "
-                    "needs write permission)\n" % exc)
-                wpath, wstatus_off, wwcount_off = \
-                    path, status_off, wcount_off
+            except OSError:
+                try:
+                    wpath = self._ensure_waive_autosave(
+                        _waive_tmp_fallback(path), path, err_total,
+                        check_cnt, status_off, wcount_off)
+                    sys.stderr.write(
+                        "[drc] results folder not writable; waive "
+                        "autosave in %s (save waives as… to keep the "
+                        "review)\n" % wpath)
+                except OSError as exc:
+                    sys.stderr.write(
+                        "[drc] waive autosave unavailable (%s); "
+                        "statuses fall back INTO the pack (shared, "
+                        "needs write permission)\n" % exc)
+                    wpath, wstatus_off, wwcount_off = \
+                        path, status_off, wcount_off
         self._waive_path = wpath
         # shared read mapping stays coherent with in-place pwrite
         # updates (set_status)
@@ -777,11 +825,16 @@ class IcePack(object):
         self._note_of = {}    # gid -> note_id
         self._note_next = 1
         self._note_path = notes_autosave_path(path)
-        self._load_notes(err_total)
+        if self._review:
+            self._load_notes(err_total)
         self.checks = []
         drefs = struct.unpack("<%dI" % descref_cnt, descbuf)
         es, bs, ec = [], [], []
-        cbb = np.zeros((check_cnt, 4), dtype=np.int64)
+        from .drc_analysis import load_rule_bounds, save_rule_bounds
+        cbb = load_rule_bounds(path, check_cnt, self._analysis_identity)
+        cached_bounds = cbb is not None
+        if not cached_bounds:
+            cbb = np.zeros((check_cnt, 4), dtype=np.int64)
         for ci in range(check_cnt):
             (name_ref, dstart, dcnt, _pad, estart, ecnt, declared,
              _orig, bstart, bcnt) = _ICE2_CHECK.unpack_from(
@@ -796,7 +849,9 @@ class IcePack(object):
             es.append(estart)
             bs.append(bstart)
             ec.append(ecnt)
-            if bcnt:
+            if cached_bounds:
+                pass
+            elif bcnt:
                 sl = self._blk[bstart:bstart + bcnt]
                 cbb[ci] = (sl["x0"].min(), sl["y0"].min(),
                            sl["x1"].max(), sl["y1"].max())
@@ -809,6 +864,10 @@ class IcePack(object):
         self._dir_bs = np.array(bs, dtype=np.int64)
         self._ecnt = np.array(ec, dtype=np.int64)
         self._cbb = cbb
+        if pack_identity(path) != self._analysis_identity:
+            raise ValueError("DRC pack changed while opening; reopen the results")
+        if not cached_bounds:
+            save_rule_bounds(path, cbb, self._analysis_identity)
         self._cache = {}       # block idx -> [DrcError]; tiny LRU
         self._order = []
         self._wchunk = {}      # ci -> per-chunk waived counts
@@ -836,21 +895,27 @@ class IcePack(object):
                 "(DRC re-run?); moved aside: %s\n" % aside)
         except FileNotFoundError:
             pass
-        with open(path, "rb") as f:
-            f.seek(status_off)
-            st = f.read(err_total)
-            f.seek(wcount_off)
-            wc = f.read(4 * check_cnt)
-        if len(st) != err_total or len(wc) != 4 * check_cnt:
-            raise OSError("pack status sections truncated")
         tmp = "%s.tmp-%d" % (side, os.getpid())
-        with open(tmp, "wb") as f:
-            f.write(want)
-            f.write(st)
-            f.write(wc)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, side)
+        try:
+            with open(path, "rb") as source, open(tmp, "wb") as target:
+                target.write(want)
+                for offset, length in ((status_off, err_total),
+                                       (wcount_off, 4 * check_cnt)):
+                    source.seek(offset)
+                    while length:
+                        block = source.read(min(length, 1 << 20))
+                        if not block:
+                            raise OSError("pack status sections truncated")
+                        target.write(block)
+                        length -= len(block)
+                target.flush()
+                os.fsync(target.fileno())
+            os.replace(tmp, side)
+        finally:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
         return side
 
     def waive_export(self, dst):
@@ -884,6 +949,7 @@ class IcePack(object):
         errors, so old statuses must not silently apply. wcount is
         recomputed from the imported statuses (never trusted).
         Returns the waived-error count."""
+        self._require_review()
         import numpy as np
         with open(src, "rb") as f:
             data = f.read()
@@ -901,13 +967,22 @@ class IcePack(object):
             a = int(self._dir_es[ci])
             wc[ci] = np.count_nonzero(
                 st[a:a + int(self._ecnt[ci])] == STATUS_WAIVED)
-        if self._wfd is None:
-            self._wfd = os.open(self._waive_path, os.O_RDWR)
-        if n:
-            os.pwrite(self._wfd, st.tobytes(), self._status_off)
-        if ck:
-            os.pwrite(self._wfd, wc.tobytes(), self._wcount_off)
-        self._wchunk = {}
+        with self._status_lock:
+            if self._wfd is None:
+                self._wfd = os.open(self._waive_path, os.O_RDWR)
+            with self._status_cache_lock:
+                self._status_generation += 1
+            try:
+                if n:
+                    _pwrite_all(self._wfd, st, self._status_off)
+                if ck:
+                    _pwrite_all(self._wfd, wc, self._wcount_off)
+                    if self._wcount.flags.writeable:
+                        self._wcount[:] = wc
+            finally:
+                with self._status_cache_lock:
+                    self._wchunk.clear()
+                    self._status_generation += 1
         return int(np.count_nonzero(st == STATUS_WAIVED))
 
     def _block(self, bi):
@@ -959,26 +1034,150 @@ class IcePack(object):
         waive sidecar; the read mapping is coherent) and keep the
         rule's [wcount] waived counter in sync. Raises OSError if
         the store is not writable."""
-        gid = int(self._dir_es[ci]) + ei
-        if not 0 <= gid < self.total:
+        self._require_review()
+        if not 0 <= ci < len(self._ecnt) or not 0 <= ei < int(self._ecnt[ci]):
             raise IndexError((ci, ei))
         value = int(value) & 0xFF
-        old = int(self._status[gid])
-        if old == value:
-            return
+        import numpy as np
+        with self._status_lock:
+            gid = int(self._dir_es[ci]) + ei
+            old = int(self._status[gid])
+            if old != value:
+                self._write_status_span(ci, ei, np.array([old], dtype=np.uint8),
+                                        np.array([value], dtype=np.uint8))
+
+    def _write_status_span(self, ci, start, before, after):
+        """Commit one bounded span; callers hold _status_lock.
+
+        A failed write restores this span where possible. Completed earlier
+        spans remain committed. Even if rollback fails, counts are repaired
+        from the actual mapped bytes, never from the intended update.
+        """
+        import numpy as np
+        gid = int(self._dir_es[ci]) + start
+        offset = self._status_off + gid
+        previous = int(self._wcount[ci])
+        old_waived = int(np.count_nonzero(before == STATUS_WAIVED))
+        new_waived = int(np.count_nonzero(after == STATUS_WAIVED))
+        count = previous + new_waived - old_waived
+        counter = struct.pack("<I", count)  # validate before mutating bytes
+        # Compute bounded chunk deltas before taking the publication lock.
+        deltas = []
+        if old_waived != new_waived:
+            stop = start + len(before)
+            for k in range(start // _STATUS_CHUNK,
+                           (stop - 1) // _STATUS_CHUNK + 1):
+                a = max(start, k * _STATUS_CHUNK) - start
+                b = min(stop, (k + 1) * _STATUS_CHUNK) - start
+                deltas.append((k, int(np.count_nonzero(after[a:b] == STATUS_WAIVED))
+                               - int(np.count_nonzero(before[a:b] == STATUS_WAIVED))))
         if self._wfd is None:
             self._wfd = os.open(self._waive_path, os.O_RDWR)
-        os.pwrite(self._wfd, bytes((value,)),
-                  self._status_off + gid)
-        was = old == STATUS_WAIVED
-        now = value == STATUS_WAIVED
-        if was != now:
-            cur = int(self._wcount[ci]) + (1 if now else -1)
-            os.pwrite(self._wfd, struct.pack("<I", max(0, cur)),
-                      self._wcount_off + 4 * ci)
-            ch = self._wchunk.get(ci)
-            if ch is not None:
-                ch[ei // _STATUS_CHUNK] += 1 if now else -1
+        with self._status_cache_lock:
+            self._status_generation += 1  # odd: status bytes may be in flight
+        committed = False
+        try:
+            _pwrite_all(self._wfd, after, offset)
+            if count != previous or self._wcount.flags.writeable:
+                _pwrite_all(self._wfd, counter, self._wcount_off + 4 * ci)
+            # A persistent device error may previously have forced counts
+            # into a private array. Keep this recovery view coherent too.
+            if self._wcount.flags.writeable:
+                self._wcount[ci] = count
+            committed = True
+        except OSError as error:
+            try:
+                _pwrite_all(self._wfd, before, offset)
+            except OSError:
+                pass
+            actual = self._status[gid:gid + len(before)]
+            repaired = previous + int(np.count_nonzero(
+                actual == STATUS_WAIVED)) - old_waived
+            try:
+                _pwrite_all(self._wfd, struct.pack("<I", repaired),
+                            self._wcount_off + 4 * ci)
+            except OSError as repair_error:
+                # The format has separate status/counter sections, so a
+                # permanently failing device cannot be made crash-atomic.
+                # Keep every in-process count reader correct and report
+                # that the on-disk counter still needs repair explicitly.
+                self._wcount = np.array(self._wcount, copy=True)
+                self._wcount[ci] = repaired
+                raise OSError("status write failed; review counter could not "
+                              "be persisted: %s" % repair_error) from error
+            if self._wcount.flags.writeable:
+                self._wcount[ci] = repaired
+            raise
+        finally:
+            with self._status_cache_lock:
+                if committed:
+                    ch = self._wchunk.get(ci)
+                    if ch is not None:
+                        for k, delta in deltas:
+                            ch[k] += delta
+                else:
+                    self._wchunk.pop(ci, None)
+                self._status_generation += 1  # even: safe to publish new counts
+
+    def set_status_members(self, ci, membership, value, *, cancelled=None,
+                           progress=None):
+        """Edit an arbitrarily large selection using bounded vector chunks.
+
+        `membership.mask(start, count)` supplies rule-local booleans; None
+        selects the entire rule. No selected-ID list or geometry is read.
+        Return the number of changed status bytes. `progress(done, total)`
+        reports scanned rule positions (including unselected positions).
+        Cancellation raises InterruptedError between committed chunks;
+        earlier writes remain applied, with their counters up to date.
+
+        Run this method off the UI thread. Concurrent status edits on this
+        object are serialized. The owner must cancel/join its worker before
+        closing the pack. This existing two-section format is not a durable
+        transaction across process crashes or permanent device failures.
+        """
+        self._require_review()
+        import numpy as np
+        if not 0 <= ci < len(self._ecnt):
+            raise IndexError(ci)
+        size = int(self._ecnt[ci])
+        member_size = getattr(membership, "size", size)
+        if member_size != size:
+            raise ValueError("selection size does not match rule")
+        value = int(value) & 0xFF
+        changed = 0
+        es = int(self._dir_es[ci])
+        with self._status_lock:
+            if cancelled is not None and cancelled():
+                raise InterruptedError("status edit cancelled")
+            if getattr(membership, "total", None) == 0:
+                if progress is not None:
+                    progress(size, size)
+                return 0
+            for start in range(0, size, _STATUS_WRITE_CHUNK):
+                if cancelled is not None and cancelled():
+                    raise InterruptedError("status edit cancelled")
+                count = min(_STATUS_WRITE_CHUNK, size - start)
+                mask = (np.ones(count, dtype=bool) if membership is None else
+                        np.asarray(membership.mask(start, count), dtype=bool))
+                if mask.shape != (count,):
+                    raise ValueError("selection mask has incorrect shape")
+                if not np.any(mask):
+                    if progress is not None:
+                        progress(start + count, size)
+                    continue
+                before = np.array(self._status[es + start:es + start + count],
+                                  copy=True)
+                mask = mask & (before != value)
+                positions = np.flatnonzero(mask)
+                if len(positions):
+                    lo, hi = int(positions[0]), int(positions[-1]) + 1
+                    after = before[lo:hi].copy()
+                    after[mask[lo:hi]] = value
+                    self._write_status_span(ci, start + lo, before[lo:hi], after)
+                    changed += len(positions)
+                if progress is not None:
+                    progress(start + count, size)
+        return changed
 
     def status_counts(self, ci):
         """(waived, total) of one rule - O(1) via [wcount]."""
@@ -996,12 +1195,15 @@ class IcePack(object):
 
     def get_note_gid(self, gid):
         nid = self._note_of.get(gid)
-        return self._notes[nid]["text"] if nid else None
+        # A background batch edit may detach this note between lookups.
+        record = self._notes.get(nid)
+        return record["text"] if record else None
 
     def set_note(self, gids, text):
         """Attach ONE shared note to `gids` (global ids). Each id is
         detached from any prior note first, so a new selection forms a
         fresh shared note; empty text just clears. Autosaves the .fe."""
+        self._require_review()
         gids = [g for g in gids if 0 <= g < self.total]
         self._note_detach(gids)
         text = (text or "").strip()
@@ -1016,6 +1218,7 @@ class IcePack(object):
     def clear_note(self, gids):
         """Remove `gids` from their notes (a note with no members left
         disappears). Autosaves the .fe."""
+        self._require_review()
         self._note_detach([g for g in gids if 0 <= g < self.total])
         self._note_write()
 
@@ -1186,6 +1389,7 @@ class IcePack(object):
         """REPLACE the notes from a saved .fe. Refuses a file recorded
         against a different pack (mismatched fingerprint). Returns the
         note count."""
+        self._require_review()
         with open(src, "r", encoding="utf-8") as f:
             text = f.read()
         if not self._parse_notes(text, self.total):
@@ -1194,6 +1398,10 @@ class IcePack(object):
                 "(different DRC run / re-packed db?)" % src)
         self._note_write()
         return len(self._notes)
+
+    def _require_review(self):
+        if not getattr(self, "_review", True):
+            raise OSError("analysis pack is read-only")
 
     def status_eis(self, ci, waived):
         """Rule-local error indices whose waived-ness matches.
@@ -1216,9 +1424,14 @@ class IcePack(object):
         jumps read these whole-chunk counts and scan at most ONE
         chunk of status bytes - n/p on a 100M-error rule used to
         re-sum status from index 0 (review 2026-08-18)."""
-        got = self._wchunk.get(ci)
-        if got is not None:
-            return got
+        # Never wait for the full bulk-write lock on this UI read path.
+        # A scan that overlaps a writer may serve this transient request,
+        # but must not publish a stale cache after that writer completes.
+        with self._status_cache_lock:
+            got = self._wchunk.get(ci)
+            if got is not None:
+                return got
+            generation = self._status_generation
         import numpy as np
         es = int(self._dir_es[ci])
         n = int(self._ecnt[ci])
@@ -1230,7 +1443,9 @@ class IcePack(object):
             arr[k] = int(
                 (self._status[es + a:es + b]
                  == STATUS_WAIVED).sum())
-        self._wchunk[ci] = arr
+        with self._status_cache_lock:
+            if generation == self._status_generation and generation % 2 == 0:
+                return self._wchunk.setdefault(ci, arr)
         return arr
 
     def status_page(self, ci, waived, start, limit):
@@ -1297,7 +1512,7 @@ class IcePack(object):
         return self._block(bi)[rel % _ICE2_BLOCK]
 
     def query_rect(self, x0_um, y0_um, x1_um, y1_um, cap=2000,
-                   checks=None, waived=None):
+                   checks=None, waived=None, members=None):
         """Errors intersecting the um rect -> [(ci, ei, DrcError)].
 
         STREAMING with early exit (2026-08-14): per check the BLOCK
@@ -1311,7 +1526,12 @@ class IcePack(object):
         `checks` restricts the query to those rules; None = all.
         `waived` = None/True/False filters by review status INSIDE
         the query, before the cap - a caller-side post-filter over
-        a capped result silently drops matches past the cap."""
+        a capped result silently drops matches past the cap.
+        `members` maps rule indices to cluster memberships exposing
+        mask(start, count), a boolean mask over a rule-local range.
+        Missing rules are unrestricted. Membership is intersected
+        with the spatial/status mask before geometry decode and the
+        cap, without materializing all indices of a large cluster."""
         import math as _math
         import numpy as np
         prec = self.precision
@@ -1331,6 +1551,7 @@ class IcePack(object):
         out = []
         for ci in hitc:
             ci = int(ci)
+            membership = members.get(ci) if members is not None else None
             if waived is True and int(self._wcount[ci]) == 0:
                 continue   # O(1) skip: rule has no waived errors
             cx0, cy0, cx1, cy1 = (int(v) for v in cbb[ci])
@@ -1372,6 +1593,8 @@ class IcePack(object):
                               (qs[:, 2] >= qlx) &
                               (qs[:, 1] <= qhy) &
                               (qs[:, 3] >= qly))
+                        if membership is not None:
+                            qm &= membership.mask(base, rcnt)
                         if waived is not None:
                             ssl = self._status[es + base:
                                                es + base + rcnt]
@@ -1398,6 +1621,8 @@ class IcePack(object):
                 qs = self._qbox[es + r0:es + r0 + rcnt]
                 qm = ((qs[:, 0] <= qhx) & (qs[:, 2] >= qlx) &
                       (qs[:, 1] <= qhy) & (qs[:, 3] >= qly))
+                if membership is not None:
+                    qm &= membership.mask(r0, rcnt)
                 if waived is not None:
                     ssl = self._status[es + r0:es + r0 + rcnt]
                     qm &= ((ssl == STATUS_WAIVED) if waived

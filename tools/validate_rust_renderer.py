@@ -1469,7 +1469,7 @@ assert not hasattr(gui, "live_caps")
         v.dbu, v.spp = 0.001, 1.0
         v._viewport_size = lambda: (800, 400)
         v.rulers, v._drc_ruler = [], []
-        v._drc_cd_ruler = lambda e: []
+        v._drc_cd_ruler = lambda e, name=None: []
         v._drc_waived = lambda db_, ci, ei: False
         v._drc_isolate_layers = lambda name: None
         v._drc_show_detail = lambda ci, ei: None

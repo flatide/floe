@@ -55,18 +55,21 @@ fn simple(kind: char, p: &[Point]) -> Vec<Segment> {
             if dmin <= 0. {
                 return vec![];
             }
-            let mid = [(a0[0] + a1[0]) * 0.5, (a0[1] + a1[1]) * 0.5];
-            let fm = foot(mid, *b0, *b1);
-            if distance(mid, fm) <= dmin * 1.0001 {
-                return vec![[mid, fm]];
-            }
-            let mut out = vec![best];
             let [adx, ady] = [a1[0] - a0[0], a1[1] - a0[1]];
             let [bdx, bdy] = [b1[0] - b0[0], b1[1] - b0[1]];
             let al2 = adx * adx + ady * ady;
             let bl2 = bdx * bdx + bdy * bdy;
             let parallel =
                 al2 > 0. && bl2 > 0. && (adx * bdy - ady * bdx).abs() <= 1e-12 * (al2 * bl2).sqrt();
+            let mid = [(a0[0] + a1[0]) * 0.5, (a0[1] + a1[1]) * 0.5];
+            let fm = foot(mid, *b0, *b1);
+            // Centring is a drawing choice only: it must not change the
+            // minimum (feature/jobdeck-drc 2026-10-06 - the old dmin*1.0001
+            // allowance took skew edges and disjoint parallel projections).
+            if parallel && distance(mid, fm) == dmin {
+                return vec![[mid, fm]];
+            }
+            let mut out = vec![best];
             if parallel && best[0][0] != best[1][0] && best[0][1] != best[1][1] {
                 let [lo, hi] = if best[0] <= best[1] {
                     best
