@@ -115,7 +115,7 @@ gates_for() {
         tools/validate_drc_marker_gui.py)
             # viewer_fixture is shared by delta/review GUI tests.
             echo "drc_review drc_markers drc_delta" ;;
-        tools/validate_drc_review*.py)
+        tools/validate_drc_review*.py|tools/validate_drc_team*.py)
             echo drc_review ;;
         tools/validate_drc_points.py|tools/validate_drc_selection.py|tools/validate_drc_status_bulk.py|tools/validate_drc_spatial.py)
             echo drc_markers ;;
@@ -182,7 +182,9 @@ gates_for() {
             echo "unit drc_delta" ;;
         rust/cli/src/drcmeasure.rs|rust/cli/src/drccenters.rs)
             # drccenters shares the packed decoder in drcmeasure.
-            echo "unit drc_markers drc_delta" ;;
+            echo "unit drc_review drc_markers drc_delta" ;;
+        rust/cli/src/drcmatch.rs)
+            echo "unit drc_review" ;;
         rust/cli/src/svrf.rs)
             echo "unit svrf drc_delta" ;;
         rust/worker-client/*)
@@ -237,7 +239,7 @@ gates_for() {
             echo "jobdeck occupancy rust_renderer" ;;
         floe/drc.py|floe/drc_analysis.py)
             echo "$DRC_GATES" ;;
-        floe/drc_review.py)
+        floe/drc_review.py|floe/drc_team.py|floe/drc_migrate.py)
             echo drc_review ;;
         floe/drc_clusters.py)
             echo "$DRC_VIEW_GATES" ;;
@@ -568,7 +570,10 @@ if gate drc_ice; then RAN="$RAN drc_ice"; lap drc_ice
 # Durable visited/not-for-review flags, counts, and display-only visit tracking.
 if gate drc_review; then RAN="$RAN drc_review"; lap drc_review
     .venv/bin/python tools/validate_drc_review.py
-    .venv/bin/python tools/validate_drc_review_gui.py; fi
+    .venv/bin/python tools/validate_drc_review_gui.py
+    .venv/bin/python tools/validate_drc_team.py
+    .venv/bin/python tools/validate_drc_team_migrate.py
+    .venv/bin/python tools/validate_drc_team_gui.py; fi
 # Compact user clusters, viewer navigation, and pre-cap spatial membership.
 if gate drc_clusters; then RAN="$RAN drc_clusters"; lap drc_clusters
     .venv/bin/python tools/validate_drc_clusters.py

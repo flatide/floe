@@ -488,7 +488,7 @@ def _waive_user():
                    for c in tag) or "user"
 
 
-def waive_autosave_path(pack_path):
+def waive_autosave_path(pack_path, reviewer=None):
     """Working review state beside the pack: .<db>.waive.<user>
     (the directory itself disambiguates equal db names; the name comes
     from the .db the pack belongs to, so a hidden `.<db>.tray` pack
@@ -496,10 +496,10 @@ def waive_autosave_path(pack_path):
     name = cachepath.db_name_of(pack_path)
     return os.path.join(
         os.path.dirname(os.path.abspath(pack_path)),
-        ".%s.waive.%s" % (name, _waive_user()))
+        ".%s.waive.%s" % (name, _waive_user() if reviewer is None else reviewer))
 
 
-def _waive_tmp_fallback(pack_path):
+def _waive_tmp_fallback(pack_path, reviewer=None):
     """When the results folder is not writable: same file in the
     system temp dir, with a path hash (one shared dir now holds
     autosaves of equal-named dbs from different folders)."""
@@ -511,7 +511,7 @@ def _waive_tmp_fallback(pack_path):
         .hexdigest()[:12]
     return os.path.join(
         tempfile.gettempdir(),
-        ".%s.waive.%s-%s" % (name, _waive_user(), tag))
+        ".%s.waive.%s-%s" % (name, _waive_user() if reviewer is None else reviewer, tag))
 
 
 # ---- per-reviewer error notes (flateyes .fe sidecar) --------------------
@@ -603,14 +603,15 @@ class IcePack(object):
                  "_notes", "_note_of", "_note_next", "_note_path",
                  "_note_tag", "_review", "_analysis_identity",
                  "_review_store", "_review_fingerprint", "_review_store_lock",
-                 "_review_store_error", "_lock")
+                 "_review_store_error", "_lock", "_reviewer")
 
     def __init__(self, path, src_path=None, verify_src=False, *,
-                 review=True, review_path=None):
+                 review=True, review_path=None, cache_write=True):
         """Open the pack; analysis children use review=False without writes.
 
         An explicit review_path maps an existing, matching review sidecar
         read-only. Without it analysis reads the embedded initial statuses.
+        cache_write=False also prevents publishing a derived bounds cache.
         """
         self._wfd = None
         self._map = None
@@ -619,12 +620,13 @@ class IcePack(object):
         self._status_cache_lock = threading.Lock()
         self._status_generation = 0
         self._review = bool(review)
+        self._reviewer = _waive_user()
         self._review_store = None
         self._review_store_error = None
         self._review_fingerprint = None
         self._review_store_lock = threading.RLock()
         try:
-            self._load(path, src_path, verify_src, review_path)
+            self._load(path, src_path, verify_src, review_path, cache_write)
         except (struct.error, IndexError, OverflowError) as exc:
             # every parse mishap on a damaged file normalizes to
             # ONE catchable story: corrupt pack -> rebuild
@@ -671,7 +673,7 @@ class IcePack(object):
         except Exception:
             pass
 
-    def _load(self, path, src_path, verify_src, review_path=None):
+    def _load(self, path, src_path, verify_src, review_path=None, cache_write=True):
         import mmap
         import numpy as np
         from .drc_analysis import pack_identity
@@ -778,8 +780,9 @@ class IcePack(object):
         # (the pack itself is never written again - shared and
         # read-only packs stay reviewable, each user keeps their
         # own working state). Results folder not writable -> same
-        # file in the system temp dir; that too unusable -> legacy
-        # in-pack sections so the viewer still opens.
+        # file in the system temp dir; that too unusable -> read-only
+        # embedded sections so the viewer still opens without changing a
+        # shared result on behalf of one reviewer.
         self._waive_hdr = _WAIVE_HEADER.pack(
             _WAIVE_MAGIC, _WAIVE_VERSION, src_size, src_mtime,
             err_total, check_cnt)
@@ -800,12 +803,12 @@ class IcePack(object):
         else:
             try:
                 wpath = self._ensure_waive_autosave(
-                    waive_autosave_path(path), path, err_total,
+                    waive_autosave_path(path, self._reviewer), path, err_total,
                     check_cnt, status_off, wcount_off)
             except OSError:
                 try:
                     wpath = self._ensure_waive_autosave(
-                        _waive_tmp_fallback(path), path, err_total,
+                        _waive_tmp_fallback(path, self._reviewer), path, err_total,
                         check_cnt, status_off, wcount_off)
                     sys.stderr.write(
                         "[drc] results folder not writable; waive "
@@ -814,8 +817,8 @@ class IcePack(object):
                 except OSError as exc:
                     sys.stderr.write(
                         "[drc] waive autosave unavailable (%s); "
-                        "statuses fall back INTO the pack (shared, "
-                        "needs write permission)\n" % exc)
+                        "embedded statuses are read-only; no shared "
+                        "pack changes will be made\n" % exc)
                     wpath, wstatus_off, wwcount_off = \
                         path, status_off, wcount_off
         self._waive_path = wpath
@@ -884,7 +887,7 @@ class IcePack(object):
         self._cbb = cbb
         if pack_identity(path) != self._analysis_identity:
             raise ValueError("DRC pack changed while opening; reopen the results")
-        if not cached_bounds:
+        if not cached_bounds and cache_write:
             save_rule_bounds(path, cbb, self._analysis_identity)
         self._cache = {}       # block idx -> [DrcError]; tiny LRU
         self._order = []
@@ -967,7 +970,7 @@ class IcePack(object):
         errors, so old statuses must not silently apply. wcount is
         recomputed from the imported statuses (never trusted).
         Returns the waived-error count."""
-        self._require_review()
+        self._require_status_write()
         import numpy as np
         with open(src, "rb") as f:
             data = f.read()
@@ -1052,7 +1055,7 @@ class IcePack(object):
         waive sidecar; the read mapping is coherent) and keep the
         rule's [wcount] waived counter in sync. Raises OSError if
         the store is not writable."""
-        self._require_review()
+        self._require_status_write()
         if not 0 <= ci < len(self._ecnt) or not 0 <= ei < int(self._ecnt[ci]):
             raise IndexError((ci, ei))
         value = int(value) & 0xFF
@@ -1071,6 +1074,7 @@ class IcePack(object):
         spans remain committed. Even if rollback fails, counts are repaired
         from the actual mapped bytes, never from the intended update.
         """
+        self._require_status_write()
         import numpy as np
         gid = int(self._dir_es[ci]) + start
         offset = self._status_off + gid
@@ -1153,7 +1157,7 @@ class IcePack(object):
         closing the pack. This existing two-section format is not a durable
         transaction across process crashes or permanent device failures.
         """
-        self._require_review()
+        self._require_status_write()
         import numpy as np
         if not 0 <= ci < len(self._ecnt):
             raise IndexError(ci)
@@ -1421,6 +1425,12 @@ class IcePack(object):
         if not getattr(self, "_review", True):
             raise OSError("analysis pack is read-only")
 
+    def _require_status_write(self):
+        self._require_review()
+        path = getattr(self, "path", None)
+        if path is not None and os.path.abspath(self._waive_path) == os.path.abspath(path):
+            raise OSError("per-reviewer waive storage unavailable; shared pack is read-only")
+
     def _review_flags_store(self):
         # Instantiation is lazy and reads do not create an absent sidecar.
         with self._review_store_lock:
@@ -1432,7 +1442,7 @@ class IcePack(object):
                 try:
                     self._review_store = ReviewStore(
                         self.path, self._ecnt, self._review_fingerprint,
-                        writable=self._review)
+                        writable=self._review, reviewer=self._reviewer)
                 except (OSError, ValueError) as exc:
                     # Path/HOME permission errors can occur before the store
                     # creates its own read backoff. Do not retry filesystem

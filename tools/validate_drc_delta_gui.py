@@ -538,26 +538,25 @@ class DeltaViewerTests(unittest.TestCase):
         self.assertEqual(list(viewer._drc_sels[group_key][1]), [2])
         self.assertEqual(viewer._drc_delta_worker.submit.call_args.args[2], 1)
 
-    def test_waive_import_refreshes_counts_and_preserves_active_group(self):
+    def test_peer_load_preserves_my_state_and_explicit_apply_refreshes_active_group(self):
         viewer = rule_tree_fixture()
         group = viewer._drc_delta_groups[1]
         viewer._drc_delta_choose(group)
         viewer._drc.path = "/tmp/delta-review.tray"
-        viewer._drc.waive_import = Mock(side_effect=lambda _path:
-            (viewer._drc._status.__setitem__(slice(None), [1, 0, 1, 0, 0]) or 2))
-        viewer.window = Mock()
-        viewer._only_close_button = Mock()
-        viewer._center_on_parent = Mock()
-        dialog = Mock()
-        dialog.run.return_value = 1
-        dialog.get_filename.return_value = "/tmp/import.waive"
-        gtk = SimpleNamespace(FileChooserDialog=Mock(return_value=dialog),
-                              FileChooserAction=SimpleNamespace(OPEN=0),
-                              ResponseType=SimpleNamespace(CANCEL=0, OK=1),
-                              FileFilter=Mock())
-        with patch.object(gui, "Gtk", gtk):
-            viewer._drc_waive_load_dialog()
-        viewer._drc.waive_import.assert_called_once_with("/tmp/import.waive")
+        viewer._drc.waive_import = Mock()
+        initial = list(viewer._drc._status)
+        dialog = SimpleNamespace(job=None, _load_dialog=Mock())
+        viewer._drc_team_dialog = Mock(return_value=dialog)
+        viewer._drc_waive_load_dialog()
+        dialog._load_dialog.assert_called_once()
+        viewer._drc.waive_import.assert_not_called()
+        self.assertEqual(list(viewer._drc._status), initial)
+        self.assertIs(viewer._drc_delta_group, group)
+        # Loading does not change personal judgements. A later explicit
+        # peer application publishes the actual changed status counters.
+        viewer._drc._status[:] = [1, 0, 1, 0, 0]
+        viewer._drc_review_flags_refresh = Mock()
+        viewer._drc_team_changed(viewer._drc)
         self.assertIs(viewer._drc_delta_group, group)
         self.assertEqual(group.status_counts(), (2, 2))
 

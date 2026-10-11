@@ -173,6 +173,28 @@ class PackedReviewTests(unittest.TestCase):
             self.assertEqual(alice.review_flags(0, 8), 0)
             self.assertEqual(alice.review_counts(), expected_counts(134, 1, 1))
 
+    def test_lazy_review_store_retains_reviewer_captured_when_pack_opened(self):
+        with patch.object(drc, "_waive_user", return_value="captured-alice"):
+            alice = self.open()
+        with patch.object(drc, "_waive_user", return_value="captured-bob"):
+            bob = self.open()
+            alice.mark_visited(0, 7)
+            alice.set_status(0, 7, drc.STATUS_WAIVED)
+            self.assertEqual(alice._reviewer, "captured-alice")
+            self.assertIn("captured-alice", alice.review_path)
+            self.assertEqual(bob.review_flags(0, 7), 0)
+            self.assertEqual(bob.get_status(0, 7), drc.STATUS_NONE)
+
+    def test_missing_personal_waive_storage_keeps_shared_pack_read_only(self):
+        original = self.path.read_bytes()
+        with patch.object(drc.IcePack, "_ensure_waive_autosave",
+                          side_effect=PermissionError("reviewer storage denied")):
+            readonly = self.open()
+        self.assertEqual(readonly.get_status(0, 7), drc.STATUS_NONE)
+        with self.assertRaisesRegex(OSError, "shared pack is read-only"):
+            readonly.set_status(0, 7, drc.STATUS_WAIVED)
+        self.assertEqual(self.path.read_bytes(), original)
+
     def test_empty_rule_and_empty_selection_are_noops(self):
         db = self.db
         self.assertEqual(db.set_review_members(2, None, True), 0)

@@ -375,7 +375,8 @@ print(json.dumps([instance.APP, instance.socket_address(":77"),
         "drc_analysis.py", "drc_clusters.py", "drc_delta.py", "drc_delta_cache.py",
         "drc_delta_worker.py", "drc_marker_style.py", "drc_marker_worker.py",
         "drc_markers.py", "drc_native.py", "drc_points.py", "drc_prepare.py",
-        "drc_query_worker.py", "drc_review.py", "drc_selection.py", "drc_spatial.py",
+        "drc_query_worker.py", "drc_review.py", "drc_team.py", "drc_migrate.py",
+        "drc_selection.py", "drc_spatial.py",
     }
     check(drc_product <= shipped,
           "the floe2 bundle lacks DRC runtime modules: %s" % sorted(drc_product - shipped))
@@ -406,7 +407,7 @@ print(json.dumps([instance.APP, instance.socket_address(":77"),
     # floe/ is the viewer and DRC backend - exactly the files the bundle ships -
     # and no import in it, lazy ones included, reaches past them
     tracked = subprocess.run(
-        ["git", "ls-files", "floe"], cwd=ROOT, capture_output=True,
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "floe"], cwd=ROOT, capture_output=True,
         text=True).stdout.split()
     check({Path(f).relative_to("floe").as_posix() for f in tracked}
           == shipped,

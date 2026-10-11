@@ -117,7 +117,7 @@ class ReviewStore:
             self.path = self._fallback
             sys.stderr.write("[drc] using durable review flags in %s (results-folder fallback)\n" % self.path)
         self._lock = threading.RLock()
-        self._write_lock = threading.Lock()
+        self._write_lock = threading.RLock()
         self._conn = None
         self._writer = None
         self._closed = False

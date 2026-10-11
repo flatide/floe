@@ -46,7 +46,8 @@ sh tools/validate_rust.sh --only quick path/to.oas
       `validate_drc_cluster_spatial.py`는 `drc_clusters`, points·marker GUI·selection·status_bulk·spatial은
       `drc_markers`, delta·native·analysis·prepare_cli·large_gui는 `drc_delta`다. 다른 테스트의 GUI 픽스처를
       제공하는 `validate_drc_clusters.py`와 `validate_drc_marker_gui.py`는 `drc_delta`도 실행한다.
-      `validate_drc_review*.py`와 `floe/drc_review.py`는 `drc_review`를 실행하며,
+      `validate_drc_review*.py`, `validate_drc_team*.py`, `floe/drc_review.py`,
+      `floe/drc_team.py`, `floe/drc_migrate.py`는 `drc_review`를 실행하며,
       marker GUI 픽스처 변경도 방문·검토 제외 GUI 검증을 포함한다.
       새 `validate_drc_*.py`가 표에 없으면 DRC 게이트 전체를 선택하여 조용히 검사를 생략하지 않는다.
     - 버전 줄만 바뀐 `floe/__init__.py`·`Cargo.toml`·`Cargo.lock`(푸시마다 바뀐다): `rust_renderer`, `floe2`,
@@ -60,8 +61,8 @@ sh tools/validate_rust.sh --only quick path/to.oas
       `svrf.py`는 `drc_ice`, `svrf`, `drc_delta`다. `sample.db`·`sample.svrf.rules.json` 변경도
       이 파일을 사용하는 준비 CLI·분석 테스트가 든 `drc_delta`를 실행한다.
     - DRC 전용 Rust 모듈은 `unit`과 관련 DRC 게이트를 고른다. pack·ice는 DRC 전체,
-      CD 수식·prepare는 `drc_delta`, 공유 decoder·centers는 `drc_markers`, `drc_delta`,
-      SVRF 파서는 `svrf`, `drc_delta`다.
+      CD 수식·prepare는 `drc_delta`, 공유 decoder·centers는 `drc_review`, `drc_markers`, `drc_delta`,
+      도형 매칭(`drcmatch.rs`)은 `drc_review`, SVRF 파서는 `svrf`, `drc_delta`다.
     - 뷰어 perf 줄의 Rust 이식(`rust/app-core/src/view/perf.rs`, `rust/app-core/tests/perf_parity.rs`, P4b): `perf_parity`.
     - 개발 전용 오라클 `tools/oracle/floe_oracle/`(동결 floe 셸과 Python 기준 구현, P3 2026-10-10):
       - `indexlock.py`(색인 잠금의 Python 쪽): `index_lock`, `jobdeck`, `occupancy`, `cell_tree`, `drc_ice`,
@@ -814,6 +815,21 @@ sh tools/validate_rust.sh --only quick path/to.oas
   읽기 실패 시 기존 내보내기 파일을 보존한다.
   처음 여는 저장소의 외부 독점 잠금·스키마 누락·지문 불일치도 1,000행의
   반복 대기로 증폭되지 않는지, 잠금 해제 이후 복구되는지 확인한다.
+  `validate_drc_team.py`, `validate_drc_team_gui.py`는 리뷰어별 스냅숏 왕복,
+  원본 보존, 방문 합집합, 방문자 간 판단 충돌, 같은 리뷰어 중복 제거,
+  unknown인 구형 정보 보존, 내 방문 판단의 안전 적용 보호와 명시적 선택
+  적용을 검증한다. 1억 개 희소 데이터의 내보내기·집계·적용, 1,000개
+  페이지/청크 경계, 비동기 작업·방문 저장 대기·DB 교체 가드도 검사한다.
+  메인 `Conflict only` 필터는 희소 비트맵 준비, 기존 조건과의 교집합,
+  마커/박스 선택/뷰 쿼리의 범위 일치, 원래 에러 번호와 페이지 경계,
+  n/p 순환 및 준비 중·실패·취소·스냅숏 수명도 검증한다.
+  `validate_drc_team_migrate.py`와 native matcher 테스트는 DRC 재수행 후
+  에러/룰 순서 변경, 도형의 순환·역방향 표현, 다른 연결 구조/위치/종류,
+  precision 변경과 큰 정수 좌표, 이전 중복 V 합집합과 W/NR별 합의,
+  합의 false와 unknown 구분, 부분 합의 목록 및 집계, 새 DB의 방문 판단
+  보호, 비교 후 상태 변경, 원본 무변경, 읽기 실패·취소·청크 적용을 검증한다.
+  개인 waive 파일을 만들 수 없을 때 공유 pack 쓰기를 거부하는 회귀 검증은
+  `validate_drc_review.py`와 `validate_drc_status_bulk.py`에 포함된다.
 - `drc_clusters`: `validate_drc_clusters.py`와
   `validate_drc_cluster_spatial.py` — 임의 번호/범위 파일, 10억 번호의
   bounded 조회, 클러스터 상태 카운트 공유, 트리/페이지, cap 전 소속 판정.

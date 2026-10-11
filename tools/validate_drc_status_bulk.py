@@ -141,6 +141,19 @@ class BulkStatusTests(unittest.TestCase):
             with self.assertRaisesRegex(OSError, "read-only"):
                 self.db.set_status_members(0, None, 1)
 
+    def test_unavailable_reviewer_store_cannot_write_shared_pack(self):
+        self.db.path = str(self.path)
+        with patch.object(os, "pwrite", side_effect=AssertionError("shared pack written")):
+            with self.assertRaisesRegex(OSError, "shared pack is read-only"):
+                self.db.set_status(0, 0, 1)
+            with self.assertRaisesRegex(OSError, "shared pack is read-only"):
+                self.db.set_status_members(0, None, 1)
+            with self.assertRaisesRegex(OSError, "shared pack is read-only"):
+                self.db.waive_import("must-not-be-opened.waive")
+            with self.assertRaisesRegex(OSError, "shared pack is read-only"):
+                self.db._write_status_span(0, 0, self.initial[:1], np.array([1], dtype=np.uint8))
+        self.assert_consistent(self.initial)
+
     def test_short_and_interrupted_writes_are_completed(self):
         original_write = os.pwrite
         calls = 0

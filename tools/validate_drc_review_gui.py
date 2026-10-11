@@ -434,6 +434,31 @@ class ReviewPackLifetimeTests(unittest.TestCase):
         self.assertTrue(closed.wait(2))
         old.close.assert_called_once()
 
+    def test_release_waits_for_canceled_and_replacement_conflict_jobs(self):
+        viewer = self.load_fixture()
+        old = viewer._drc = SimpleNamespace(path="/tmp/old.tray", close=Mock())
+        first = viewer._drc_conflict_job = dict(db=old, done=False,
+                                                cancel=threading.Event())
+        viewer._drc_conflict_reset()
+        self.assertTrue(first["cancel"].is_set())
+        second = viewer._drc_conflict_job = dict(db=old, done=False,
+                                                 cancel=threading.Event())
+        closed = viewer._drc_release()
+        try:
+            self.assertTrue(second["cancel"].is_set())
+            self.assertFalse(closed.is_set())
+            second["done"] = True
+            # The replacement has finished, but the older canceled reader
+            # still owns the pack even though the active slot is now empty.
+            self.assertFalse(closed.wait(0.05))
+            old.close.assert_not_called()
+        finally:
+            first["done"] = second["done"] = True
+        self.assertTrue(closed.wait(2))
+        old.close.assert_called_once()
+        viewer._drc_conflict_poll()
+        self.assertEqual(viewer._drc_conflict_retired, [])
+
     def test_repack_starts_only_after_the_previous_reader_releases_its_lock(self):
         viewer = viewer_fixture()
         viewer._drc = SimpleNamespace(path="/tmp/old.tray")

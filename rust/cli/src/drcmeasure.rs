@@ -147,7 +147,7 @@ fn parse_plan(data: &[u8]) -> Result<Plan, String> {
 
 pub(crate) struct Pack<'a> {
     data: &'a [u8],
-    precision: f64,
+    pub(crate) precision: f64,
     blob_start: usize,
     blob_end: usize,
     block_table: usize,
@@ -155,6 +155,7 @@ pub(crate) struct Pack<'a> {
     block_start: usize,
     pub(crate) block_count: usize,
     pub(crate) errors: usize,
+    pub(crate) error_start: usize,
 }
 impl<'a> Pack<'a> {
     pub(crate) fn parse(data: &'a [u8], rule: usize) -> Result<Self, String> {
@@ -272,6 +273,7 @@ impl<'a> Pack<'a> {
             block_start: selected.0,
             block_count: selected.1,
             errors: selected.2,
+            error_start: size(u64_at(data, directory + rule * CHECK_RECORD + 16)?)?,
         };
         // Validate target blocks before any output is created. Other rules'
         // block rows need not be paged in for a single-rule preprocessing job.
