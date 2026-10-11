@@ -238,7 +238,8 @@ elif [ "$FLOE_PORTABLE_RUST" = gnu ]; then
         exit 1
     fi
     if ! command -v zig >/dev/null && ! python3 -c "import ziglang" 2>/dev/null; then
-        echo "FLOE_PORTABLE_RUST=gnu needs zig: pip install ziglang (or zig on PATH)"
+        echo "FLOE_PORTABLE_RUST=gnu needs zig: python3 -m venv ~/zig && ~/zig/bin/pip install ziglang,"
+        echo "then PATH=~/zig/bin:\$PATH (or a zig release on PATH)"
         exit 1
     fi
     if command -v rustup >/dev/null && \

@@ -15,7 +15,9 @@
 
   ```sh
   cargo install cargo-zigbuild      # 한 번 (crates.io 접속 필요)
-  pip install --user ziglang         # 또는 zig를 PATH에
+  # zig: venv에 ziglang (Ubuntu 24.04는 시스템 pip --user를 막는다, PEP 668)
+  python3 -m venv ~/zig && ~/zig/bin/pip install ziglang
+  export PATH=~/zig/bin:$PATH        # 또는 zig 배포판을 PATH에
   GNU_GLIBC=2.28 sh build-linux.sh   # -> dist/*-linux-gnu (glibc >= 2.28)
   strings dist/floe-index-linux-gnu | grep -oE '^GLIBC_[0-9.]+$' | sort -V | tail -1
   ```

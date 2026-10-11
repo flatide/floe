@@ -807,8 +807,10 @@ WHEELS=./wheels FLOE_PORTABLE_KLAYOUT=1 tools/make_portable.sh
 FLOE_PORTABLE_KLAYOUT=1 tools/make_portable.sh
 # Rust 실행 파일을 glibc(GNU) 빌드로: 병렬 색인이 ~40% 빠르다(rust/BUILD.md).
 # 빌드 머신의 glibc와 무관하게 glibc 2.28(GLIBC_CEILING) 기준으로 링크하므로
-# RHEL 8 이상 현장에서 돈다. cargo-zigbuild와 zig가 필요하다:
-#   cargo install cargo-zigbuild; pip install --user ziglang
+# RHEL 8 이상 현장에서 돈다. cargo-zigbuild와 zig가 필요하다(한 번):
+#   cargo install cargo-zigbuild
+#   python3 -m venv ~/zig && ~/zig/bin/pip install ziglang   # Ubuntu 24.04는
+#   export PATH=~/zig/bin:$PATH     # 시스템 pip --user를 막는다(PEP 668)
 FLOE_PORTABLE_RUST=gnu tools/make_portable.sh   # -> ...-gnu.tar.gz
 ```
 기본(`FLOE_PORTABLE_RUST=musl`)은 정적 musl이라 어느 x86_64 Linux에서나 돈다.
