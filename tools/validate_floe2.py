@@ -362,6 +362,12 @@ print(json.dumps([instance.APP, instance.socket_address(":77"),
           '--target "$MUSL_TARGET" -p floe-index -p floe-renderd -p floe2' in
           portable_source,
           "portable defaults to host-glibc Rust binaries instead of musl")
+    # floe2's SQLite (the DRC review files, 0.12.346) is C: the static
+    # build compiles it with zig cc, else musl-gcc - never rust-lld alone
+    check('MUSL_BUILD="cargo zigbuild"' in portable_source and
+          'CC_x86_64_unknown_linux_musl=musl-gcc' in portable_source and
+          '$MUSL_BUILD --release' in portable_source,
+          "the static build has no C compiler for floe2's SQLite")
     check('"bin/floe2",' in portable_source and
           'cp -r "$REPO/floe2"' not in portable_source,
           "portable does not ship the Rust floe2 in place of the Python one")

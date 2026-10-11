@@ -133,17 +133,38 @@ def _compatible(path, size, mtime_ns, ctime_ns):
 
 
 def _binary():
-    from .vfsclient import find_binary
-    path = find_binary()
+    # The branch's floe-index drc-match moved to app-core (drc::review::matcher);
+    # `floe2 drc-match` speaks the same protocol 2 for this reference.
+    path = os.environ.get("FLOE2_BIN") or os.path.join(
+        os.path.dirname(__file__), "..", "..", "..", "rust", "target", "release", "floe2")
+    path = os.path.abspath(path)
     st = os.stat(path)
     if not _compatible(path, st.st_size, st.st_mtime_ns, st.st_ctime_ns):
-        raise RuntimeError("floe-index lacks exact DRC review migration; rebuild the Rust binaries")
+        raise RuntimeError("floe2 lacks exact DRC review migration; rebuild the Rust binaries")
     return path
 
 
+def _worker_count():
+    jobs = os.environ.get("FLOE_DRC_JOBS")
+    if jobs is None:
+        return min(4, os.cpu_count() or 1)
+    value = int(jobs)
+    if not 1 <= value <= 256:
+        raise ValueError("DRC worker count must be an integer from 1 to 256")
+    return value
+
+
+def _stop_child(process):
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+
 def _match(old, target, pairs, states, folder, cancelled, report):
-    from .drc_native import worker_count
-    from .drc_delta_cache import _CHILDREN, _CHILD_LOCK, _stop_child
     pairs_path = os.path.join(folder, "pairs.json")
     with open(pairs_path, "w", encoding="utf-8") as stream:
         json.dump(pairs, stream)
@@ -152,13 +173,11 @@ def _match(old, target, pairs, states, folder, cancelled, report):
     report_path = os.path.join(folder, "native-report.json")
     command = [_binary(), "drc-match", os.fspath(old.path), os.fspath(target.path),
         "--plan", pairs_path, "--states", states, "--out", output,
-        "--work-dir", os.path.join(folder, "sort"), "--jobs", str(worker_count()),
+        "--work-dir", os.path.join(folder, "sort"), "--jobs", str(_worker_count()),
         "--progress", progress_path, "--report", report_path]
     _check(cancelled)
     with open(os.path.join(folder, "native.log"), "w+b") as log:
         process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=log)
-        with _CHILD_LOCK:
-            _CHILDREN.add(process)
         try:
             while process.poll() is None:
                 _check(cancelled)
@@ -182,8 +201,6 @@ def _match(old, target, pairs, states, folder, cancelled, report):
             return output, metadata
         finally:
             _stop_child(process)
-            with _CHILD_LOCK:
-                _CHILDREN.discard(process)
 
 
 def _write_states(old, source, path, cancelled, report):

@@ -9,10 +9,13 @@ mod database;
 pub mod desktop;
 mod filters;
 mod local;
+pub mod matcher;
 mod measure;
 mod pack;
 pub mod review;
 mod selection;
+#[cfg(feature = "review-sqlite")]
+pub mod team;
 pub use ascii::{Ascii, AsciiCheck, AsciiViolation};
 pub use database::{
     Database, ReadCheck, ReadHit, ReadInfo, ReadInfoHit, ReadPage, ReadPointPage, ReadPoints,

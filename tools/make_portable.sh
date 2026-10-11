@@ -264,8 +264,24 @@ else
             echo "== installing Rust target $MUSL_TARGET"
             rustup target add "$MUSL_TARGET"
         fi
-        echo "== building static Rust runtime ($MUSL_TARGET, release)"
-        if ! (cd "$REPO/rust" && cargo build --release \
+        # floe2 carries SQLite (the DRC review files, compiled from the
+        # bundled amalgamation): a C compiler for musl - zig cc through
+        # cargo-zigbuild, else musl-gcc (rust/BUILD.md)
+        if command -v cargo-zigbuild >/dev/null && \
+           { command -v zig >/dev/null || python3 -c "import ziglang" 2>/dev/null; }; then
+            MUSL_BUILD="cargo zigbuild"
+        elif command -v musl-gcc >/dev/null; then
+            MUSL_BUILD="cargo build"
+            CC_x86_64_unknown_linux_musl=musl-gcc
+            export CC_x86_64_unknown_linux_musl
+        else
+            echo "the static Rust build compiles SQLite: it needs cargo-zigbuild and zig"
+            echo "(cargo install cargo-zigbuild; python3 -m venv ~/zig && ~/zig/bin/pip install"
+            echo "ziglang, then PATH=~/zig/bin:\$PATH) or musl-gcc (musl-tools)"
+            exit 1
+        fi
+        echo "== building static Rust runtime ($MUSL_TARGET, release, $MUSL_BUILD)"
+        if ! (cd "$REPO/rust" && $MUSL_BUILD --release \
             --target "$MUSL_TARGET" -p floe-index -p floe-renderd -p floe2); then
             echo "static Rust build failed; install the $MUSL_TARGET target"
             echo "or specify FLOE_INDEX_BIN, FLOE_RENDERD_BIN and FLOE2_BIN"

@@ -814,7 +814,10 @@ FLOE_PORTABLE_KLAYOUT=1 tools/make_portable.sh
 FLOE_PORTABLE_RUST=gnu tools/make_portable.sh   # -> ...-gnu.tar.gz
 ```
 기본(`FLOE_PORTABLE_RUST=musl`)은 정적 musl이라 어느 x86_64 Linux에서나 돈다.
-`selfcheck`의 `rust:` 줄이 번들이 어느 쪽인지 말한다.
+`selfcheck`의 `rust:` 줄이 번들이 어느 쪽인지 말한다. 0.12.346부터 floe2가 DRC
+검토 파일용 SQLite(C, 동봉 소스)를 컴파일하므로 musl 빌드에도 C 컴파일러가 필요하다:
+위의 cargo-zigbuild + zig가 있으면 그것으로(`cargo zigbuild --target
+x86_64-unknown-linux-musl`), 없으면 musl-gcc(`musl-tools`)로 빌드한다.
 
 호스트에서는 **풀고 실행만** (설치·권한 불필요):
 
@@ -1092,6 +1095,7 @@ sh rust/build-linux.sh
 #                                   빠름; 타깃 glibc >= 빌드 머신이면 OK)
 #  -> dist/floe-index-linux-x86_64  musl 완전 정적 - 어떤 x86_64 리눅스든
 #                                   실행되는 이식성 폴백 (+ .sha256)
+#     (floe2의 SQLite는 C: musl 빌드는 zig cc(cargo-zigbuild)나 musl-gcc로)
 ```
 
 - 소스 트리 밖의 바이너리는 `FLOE_INDEX_BIN`으로 지정하거나 Python 실행

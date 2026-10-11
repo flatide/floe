@@ -1,13 +1,17 @@
 # Cross-build for the closed-network Linux hosts: fully static musl
 # binary (no glibc version coupling), linked with rustc's bundled
-# rust-lld so no external C toolchain is needed - the dependency tree
-# is pure Rust (flate2 uses the miniz_oxide backend).
+# rust-lld. The tree is pure Rust (flate2 uses the miniz_oxide backend)
+# but for SQLite, which floe2's DRC review files need (rusqlite's bundled
+# amalgamation, app-core feature review-sqlite): its C is compiled by the
+# target's C compiler - `cargo zigbuild` (zig cc, which then links too) or
+# CC_x86_64_unknown_linux_musl=musl-gcc (rust/BUILD.md).
 [target.x86_64-unknown-linux-musl]
 linker = "rust-lld"
 rustflags = ["-C", "target-feature=+crt-static"]
 
-# Dependencies are vendored into rust/vendor/ (1.2 MB, 6 pure-Rust
-# crates): builds never touch crates.io - only rustup needs internet,
+# Dependencies are vendored into rust/vendor/ (libsqlite3-sys without
+# its unused sqlcipher copy, vcpkg without its test data): builds never
+# touch crates.io - only rustup needs internet,
 # and a standalone toolchain tarball covers even that (see BUILD.md).
 [source.crates-io]
 replace-with = "vendored-sources"

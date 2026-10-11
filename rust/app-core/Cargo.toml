@@ -19,6 +19,16 @@ memmap2 = "0.9"
 sha1 = "=0.10.7"
 getrandom = "=0.3.4"
 socket2 = "=0.6.5"
+sha2 = "=0.10.9"
+# the DRC review files of the GTK viewer (`.<db>.review.<reviewer>.sqlite3`,
+# `.floereview`): SQLite compiled from the bundled amalgamation (needs a C
+# compiler - zig cc for the Linux bundles, rust/BUILD.md)
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"], optional = true }
+
+[features]
+# drc::review_state: per-reviewer visited/not-required, team snapshots and
+# migration from a previous run (floe2 turns it on)
+review-sqlite = ["dep:rusqlite"]
 
 [[test]]
 name = "instance_lifecycle"

@@ -11,7 +11,9 @@
 //!   (`.stale-<epoch>`) and a fresh one seeded from the pack's embedded
 //!   sections; the first open creates it;
 //! - a results folder that cannot be written keeps the review in the system
-//!   temp folder (path-hashed names), and when that fails too, in the pack;
+//!   temp folder (path-hashed names); when that fails too the pack's own
+//!   embedded statuses are shown read-only - one reviewer never changes a
+//!   shared result (feature/jobdeck-drc 2026-10-09);
 //! - notes are rewritten whole on every edit and the file removed when the
 //!   last note goes; the reader takes what Python wrote (lenient lines).
 //!
@@ -67,6 +69,12 @@ pub struct Review {
     note_tag: String,
     /// what the open had to say (floe/drc.py wrote these to stderr)
     pub notices: Vec<String>,
+    /// the reviewer tag the sidecars are named by (drc::team names the
+    /// visited/not-required store and snapshots by it too)
+    pub reviewer: String,
+    /// bumped on every status write (a worker reading statuses apart
+    /// knows whether they moved under it)
+    generation: u64,
 }
 
 fn io(e: Error) -> std::io::Error {
@@ -212,7 +220,7 @@ impl Review {
                 }
                 Err(e) => {
                     notices.push(format!(
-                        "[drc] waive autosave unavailable ({e}); statuses fall back INTO the pack (shared, needs write permission)"
+                        "[drc] waive autosave unavailable ({e}); embedded statuses are read-only; no shared pack changes will be made"
                     ));
                     (pack.path.clone(), status_section, wcount_section)
                 }
@@ -244,6 +252,8 @@ impl Review {
             note_temp,
             note_tag,
             notices,
+            reviewer: tag,
+            generation: 0,
         };
         review.load_notes();
         Ok(review)
@@ -302,7 +312,30 @@ impl Review {
         Ok((u64::from(self.wcount[check]), n))
     }
 
+    /// The waive store is the pack's embedded sections, shown read-only
+    /// (no sidecar could be made).
+    pub fn read_only(&self) -> bool {
+        self.waive_path == self.pack.path
+    }
+
+    /// The 40-byte header of this pack's waive files (FLOEWAIV v1).
+    pub fn waive_header(&self) -> [u8; 40] {
+        self.header
+    }
+
+    /// Bumped by every status write.
+    pub fn status_generation(&self) -> u64 {
+        self.generation
+    }
+
     fn writer(&mut self) -> Result<&File> {
+        if self.read_only() {
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                "per-reviewer waive storage unavailable; shared pack is read-only",
+            ));
+        }
+        self.generation += 1;
         if self.writer.is_none() {
             self.writer = Some(
                 OpenOptions::new()
@@ -429,6 +462,43 @@ impl Review {
             progress(a, n);
         }
         Ok(changed)
+    }
+
+    /// Write rule `check`'s statuses `start..start+after.len()` from
+    /// `before` (as read) to `after` in one span, the counters in step
+    /// (floe_oracle drc.py `_write_status_span`).
+    pub fn write_status_span(
+        &mut self,
+        check: usize,
+        start: u64,
+        before: &[u8],
+        after: &[u8],
+    ) -> Result<()> {
+        let (first, n) = self.check(check)?;
+        if before.len() != after.len() || start + after.len() as u64 > n {
+            return Err(Error::input("status span outside its rule"));
+        }
+        let waived = |s: &[u8]| s.iter().filter(|&&v| v == STATUS_WAIVED).count() as i64;
+        let delta = waived(after) - waived(before);
+        let (status_off, wcount_off) = (self.status_off, self.wcount_off);
+        self.writer()?.write_all_at(after, status_off + first + start)?;
+        if delta != 0 {
+            let cur = (i64::from(self.wcount[check]) + delta).max(0) as u32;
+            self.writer()?
+                .write_all_at(&cur.to_le_bytes(), wcount_off + 4 * check as u64)?;
+            self.wcount[check] = cur;
+            if let Some(chunks) = self.chunks.get_mut(&check) {
+                for (j, (b, a)) in before.iter().zip(after).enumerate() {
+                    let k = ((start + j as u64) / STATUS_CHUNK) as usize;
+                    if *a == STATUS_WAIVED && *b != STATUS_WAIVED {
+                        chunks[k] += 1;
+                    } else if *b == STATUS_WAIVED && *a != STATUS_WAIVED {
+                        chunks[k] = chunks[k].saturating_sub(1);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Per-chunk waived counts of one rule: built on the first filtered

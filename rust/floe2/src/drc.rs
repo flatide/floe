@@ -11,6 +11,7 @@
 //!   drc_busy {db}, drc_find {db}, drc_open {path, source?, reviewer?, mode: pack|load}
 //!   drc_errors {handle, check, start, count}
 //!   drc_status {handle, check, start, count}   status bytes, hex
+//!   drc_counts {handle}                        [[waived, total], ...] of every rule
 //!   drc_set_status {handle, check, errors, status}
 //!   drc_status_page / drc_status_rank {handle, check, waived, start, limit | error}
 //!   drc_query {handle, bbox, cap, checks?, waived?, check?, scope?}
@@ -32,6 +33,10 @@
 //!   drc_inview {handle, check, bbox, cap, scope?, waived?}                 job "inview"
 //!   drc_cancel {handle, kind}; drc_close {handle}; drc_parse_step {text}
 //!   svrf_rules {path}, svrf_operands {rhs}
+//! and drc_team.rs's (review flags, snapshots, team, migration).
+#[path = "drc_team.rs"]
+mod team;
+
 use crate::view::Out;
 use floe_app_core::{
     desktop,
@@ -194,6 +199,10 @@ struct Shared {
     tables: Mutex<Vec<Arc<Table>>>,
     /// rules whose statuses a worker changed wholesale (counts to redo)
     dirty: Mutex<BTreeSet<usize>>,
+    /// a pack review's flags and team context (drc_team.rs)
+    team: Option<team::TeamCtx>,
+    snapshots: Mutex<BTreeMap<u64, Arc<floe_app_core::drc::team::snapshot::Snapshot>>>,
+    plans: Mutex<BTreeMap<u64, Arc<Mutex<floe_app_core::drc::team::migrate::Plan>>>>,
     out: Arc<Out>,
     handle: u64,
     ids: Arc<AtomicUsize>,
@@ -341,12 +350,15 @@ impl Session {
     fn close(mut self) {
         // a review edit in progress finishes; the rest stop
         for (kind, job) in self.jobs.drain() {
-            if kind != "review" {
+            if !matches!(kind, "review" | "team-write" | "migrate-write") {
                 job.cancel();
             }
             if let Some(t) = job.thread {
                 let _ = t.join();
             }
+        }
+        if let Some(t) = &self.shared.team {
+            t.wait_visits();
         }
     }
 }
@@ -465,9 +477,18 @@ impl Drcs {
             "precision": opened.precision(),
             "checks": opened.checks(),
         });
+        let team = match &opened {
+            Opened::Pack(r) => Some(team::TeamCtx::new(r)?),
+            Opened::Ascii(_) => None,
+        };
+        if let Some(t) = &team {
+            notices.extend(std::mem::take(&mut *t.flags.notices.lock().unwrap()));
+        }
         let (source, statuses, cache): (Arc<dyn Source>, Statuses, Option<Cache>) = match &mut opened {
             Opened::Pack(r) => {
                 result["counts"] = counts(r)?;
+                result["reviewer"] = json!(r.reviewer);
+                result["read_only"] = json!(r.read_only());
                 result["waive_path"] = json!(r.waive_path);
                 result["note_path"] = json!(r.note_path);
                 let n = notes(r);
@@ -504,6 +525,9 @@ impl Drcs {
                     selections: Mutex::new(BTreeMap::new()),
                     tables: Mutex::new(Vec::new()),
                     dirty: Mutex::new(BTreeSet::new()),
+                    team,
+                    snapshots: Mutex::new(BTreeMap::new()),
+                    plans: Mutex::new(BTreeMap::new()),
                     out: Arc::clone(&self.out),
                     handle,
                     ids: Arc::clone(&self.ids),
@@ -680,6 +704,7 @@ impl Session {
                 self.settle(cancelled)?;
                 Ok(json!({"waived": waived, "counts": all}))
             }
+            "drc_counts" => counts(review(&mut shared.opened.lock().unwrap())?),
             "drc_clusters_load" => self.clusters_load(request),
             "drc_cluster_counts" => {
                 let check = number(request, "check")? as usize;
@@ -757,6 +782,15 @@ impl Session {
                 Ok(Value::Null)
             }
             "drc_review" => self.review_job(request),
+            op if op == "drc_visit"
+                || op.starts_with("drc_review_")
+                || op.starts_with("drc_snapshot_")
+                || op.starts_with("drc_team_")
+                || op.starts_with("drc_migrate_")
+                || op.starts_with("drc_plan_") =>
+            {
+                self.team_request(op, request)
+            }
             "drc_inview" => self.inview(request),
             "drc_cancel" => {
                 let kind = text(request, "kind")?;
@@ -1119,8 +1153,10 @@ impl Session {
             None => Arc::new(Selection::from_indices(n, numbers(request, "errors")?)),
         };
         let op = text(request, "action")?.to_string();
-        if !matches!(op.as_str(), "waive" | "note" | "note-clear" | "note-read") {
-            return Err(Error::input("review action is waive, note, note-clear or note-read"));
+        if !matches!(op.as_str(), "waive" | "note" | "note-clear" | "note-read" | "not-required") {
+            return Err(Error::input(
+                "review action is waive, note, note-clear, note-read or not-required",
+            ));
         }
         let on = request.get("on").and_then(Value::as_bool);
         let note = request.get("text").and_then(Value::as_str).unwrap_or("").to_string();
@@ -1180,6 +1216,25 @@ impl Session {
                             }
                         };
                         Ok(json!({"on": on, "changed": changed, "counts": counts}))
+                    }
+                    "not-required" => {
+                        let t = shared.team.as_ref().ok_or_else(|| {
+                            Error::new(ErrorKind::Unsupported, "review flags need a packed index: floe-index drc <db>")
+                        })?;
+                        let mut last = std::time::Instant::now();
+                        let changed = t.flags.set_members(
+                            check,
+                            Some(&*targets),
+                            on.unwrap_or(true),
+                            &stop,
+                            &mut |done, total, _changed| {
+                                if last.elapsed().as_millis() >= 500 {
+                                    last = std::time::Instant::now();
+                                    shared.event(id, "review", "progress", json!({"done": done, "total": total}));
+                                }
+                            },
+                        )?;
+                        Ok(json!({"on": on.unwrap_or(true), "changed": changed}))
                     }
                     "note-read" => {
                         let o = shared.opened.lock().unwrap();

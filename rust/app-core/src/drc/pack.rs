@@ -472,6 +472,16 @@ pub struct Pack {
 }
 impl Pack {
     /// Hold `reader` (the pack's reader lock) as long as the pack is open.
+    /// (blocks section offset, block count, coordinate blob end, each
+    /// rule's first block) - the matcher's view of the blob (drc::matcher).
+    pub(crate) fn block_layout(&self) -> (u64, u64, u64, Vec<u64>) {
+        (
+            self.blocks,
+            self.block_count,
+            self.blob_end,
+            self.checks.iter().map(|c| c.block_start).collect(),
+        )
+    }
     pub(crate) fn hold(&mut self, reader: floe_vfs::lock::ReaderGuard) {
         self.reader = Some(reader);
     }
@@ -680,6 +690,36 @@ impl Pack {
         p.unchanged()?;
         Ok(p)
     }
+    /// The review identity of the pack (floe_oracle drc.py
+    /// `_review_fingerprint`): sha256 over its header, footer, rule
+    /// directory, description references and strings, then its size and
+    /// mtime in ns (`<QQ`), as hex. Copies and renames keep it (no device,
+    /// inode or ctime); a re-run changes it. No geometry is read.
+    pub fn review_fingerprint(&self) -> Result<String> {
+        use sha2::{Digest, Sha256};
+        let len = self.input.stamp.len;
+        let end = len - 136;
+        let mut foot = [0; 136];
+        self.input.read(end, &mut foot)?;
+        let f = |i: usize| u64at(&foot, i * 8);
+        let mut head = [0; 40];
+        self.input.read(0, &mut head)?;
+        let mut digest = Sha256::new();
+        digest.update(head);
+        digest.update(foot);
+        for (off, n) in [(f(8), f(9) * 64), (f(10), f(11) * 4), (f(12), f(13))] {
+            digest.update(self.input.bytes(off, usize_of(n)?, META_BYTES)?);
+        }
+        let (s, ns) = self.input.stamp.modified;
+        let mtime_ns = i128::from(s) * 1_000_000_000 + i128::from(ns);
+        digest.update(len.to_le_bytes());
+        digest.update((mtime_ns as u64).to_le_bytes());
+        Ok(digest
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect())
+    }
     /// The coordinate blocks, for worker threads (drc::analysis).
     pub fn blocks(&self) -> Result<Blocks> {
         Ok(Blocks {
@@ -845,6 +885,28 @@ impl Pack {
         self.review = Some(r);
         self.review_counts = None;
         Ok(())
+    }
+    /// Rule `check`'s embedded `[status]` bytes `start..start+count`
+    /// (clamped): the retired in-pack review of an old run, read-only.
+    pub fn embedded_statuses(&self, check: usize, start: u64, count: u64) -> Result<Vec<u8>> {
+        let c = self
+            .checks
+            .get(check)
+            .ok_or_else(|| crate::Error::input("DRC check index out of range"))?;
+        let start = start.min(c.count);
+        let count = count.min(c.count - start);
+        let mut out = vec![0u8; usize_of(count)?];
+        self.input.read(add(self.status, c.start + start)?, &mut out)?;
+        Ok(out)
+    }
+    /// Rule `check`'s embedded waived counter.
+    pub fn embedded_waived(&self, check: usize) -> Result<u64> {
+        if check >= self.checks.len() {
+            return Err(crate::Error::input("DRC check index out of range"));
+        }
+        let mut b = [0; 4];
+        self.input.read(add(self.wcount, mul(check as u64, 4)?)?, &mut b)?;
+        Ok(u32at(&b, 0) as u64)
     }
     pub fn waived_count(&self, check: usize) -> Result<u64> {
         if check >= self.checks.len() {
