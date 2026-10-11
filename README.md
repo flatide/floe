@@ -805,7 +805,14 @@ tools/make_portable.sh                     # -> floe2-portable-<ver>-<date>.tar.
 WHEELS=./wheels FLOE_PORTABLE_KLAYOUT=1 tools/make_portable.sh
 # KLayout 포함 번들(기본 배포 아님): floe와 floe2 실행 파일을 함께 제공
 FLOE_PORTABLE_KLAYOUT=1 tools/make_portable.sh
+# Rust 실행 파일을 glibc(GNU) 빌드로: 병렬 색인이 ~40% 빠르다(rust/BUILD.md).
+# 빌드 머신의 glibc와 무관하게 glibc 2.28(GLIBC_CEILING) 기준으로 링크하므로
+# RHEL 8 이상 현장에서 돈다. cargo-zigbuild와 zig가 필요하다:
+#   cargo install cargo-zigbuild; pip install --user ziglang
+FLOE_PORTABLE_RUST=gnu tools/make_portable.sh   # -> ...-gnu.tar.gz
 ```
+기본(`FLOE_PORTABLE_RUST=musl`)은 정적 musl이라 어느 x86_64 Linux에서나 돈다.
+`selfcheck`의 `rust:` 줄이 번들이 어느 쪽인지 말한다.
 
 호스트에서는 **풀고 실행만** (설치·권한 불필요):
 

@@ -36,6 +36,21 @@ CONDA_GLIBC=${CONDA_GLIBC:-2.27}                # conda solver target
 GLIBC_CEILING=${GLIBC_CEILING:-28}              # verify guard (RHEL8=2.28)
 WHEELS=${WHEELS:-}                              # local wheel dir (closed net)
 FLOE_PORTABLE_KLAYOUT=${FLOE_PORTABLE_KLAYOUT:-0}
+# How the three Rust binaries (floe2, floe-index, floe-renderd) are built:
+#   musl (default) - fully static, run on any x86_64 Linux;
+#   gnu            - glibc, dynamically linked against glibc 2.$GLIBC_CEILING
+#                    whatever the build host's (cargo-zigbuild + zig: the
+#                    link takes that glibc's symbols only) - parallel indexing
+#                    ~40% faster (glibc's memcpy and malloc arenas, MAIN09
+#                    60 s vs 97 s, rust/BUILD.md); the hosts need glibc >=
+#                    2.$GLIBC_CEILING (RHEL 8 = 2.28). Needs `cargo install
+#                    cargo-zigbuild` and zig (`pip install ziglang` or zig on
+#                    PATH) on the build machine.
+FLOE_PORTABLE_RUST=${FLOE_PORTABLE_RUST:-musl}
+case "$FLOE_PORTABLE_RUST" in
+    musl | gnu) ;;
+    *) echo "FLOE_PORTABLE_RUST must be musl or gnu"; exit 1 ;;
+esac
 case "$FLOE_PORTABLE_KLAYOUT" in
     0 | 1) ;;
     *) echo "FLOE_PORTABLE_KLAYOUT must be 0 or 1"; exit 1 ;;
@@ -74,6 +89,9 @@ STAMP=$(date +%Y%m%d)
 FLAVOR=""
 if [ "$FLOE_PORTABLE_KLAYOUT" = 1 ]; then
     FLAVOR="-klayout"
+fi
+if [ "$FLOE_PORTABLE_RUST" = gnu ]; then
+    FLAVOR="$FLAVOR-gnu"
 fi
 NAME="${FLOE_PORTABLE_PRODUCT}-portable-${VERSION}-${STAMP}${FLAVOR}"
 if [ "$PRINT_NAME" = 1 ]; then
@@ -207,6 +225,32 @@ if [ -n "${FLOE_INDEX_BIN:-}" ] || [ -n "${FLOE_RENDERD_BIN:-}" ] || \
     if [ -z "${FLOE_INDEX_BIN:-}" ] || [ -z "${FLOE_RENDERD_BIN:-}" ] || \
        [ -z "${FLOE2_BIN:-}" ]; then
         echo "FLOE_INDEX_BIN and FLOE_RENDERD_BIN must be specified together (with FLOE2_BIN)"
+        exit 1
+    fi
+elif [ "$FLOE_PORTABLE_RUST" = gnu ]; then
+    GNU_TARGET=x86_64-unknown-linux-gnu
+    GNU_GLIBC="2.$GLIBC_CEILING"
+    FLOE_INDEX_BIN="$REPO/rust/target/$GNU_TARGET/release/floe-index"
+    FLOE_RENDERD_BIN="$REPO/rust/target/$GNU_TARGET/release/floe-renderd"
+    FLOE2_BIN="$REPO/rust/target/$GNU_TARGET/release/floe2"
+    if ! command -v cargo-zigbuild >/dev/null; then
+        echo "FLOE_PORTABLE_RUST=gnu needs cargo-zigbuild: cargo install cargo-zigbuild"
+        exit 1
+    fi
+    if ! command -v zig >/dev/null && ! python3 -c "import ziglang" 2>/dev/null; then
+        echo "FLOE_PORTABLE_RUST=gnu needs zig: pip install ziglang (or zig on PATH)"
+        exit 1
+    fi
+    if command -v rustup >/dev/null && \
+       ! rustup target list --installed | grep -qx "$GNU_TARGET"; then
+        echo "== installing Rust target $GNU_TARGET"
+        rustup target add "$GNU_TARGET"
+    fi
+    echo "== building glibc Rust runtime ($GNU_TARGET against glibc $GNU_GLIBC, release)"
+    if ! (cd "$REPO/rust" && cargo zigbuild --release \
+        --target "$GNU_TARGET.$GNU_GLIBC" -p floe-index -p floe-renderd -p floe2); then
+        echo "glibc $GNU_GLIBC Rust build failed (cargo-zigbuild/zig);"
+        echo "or specify FLOE_INDEX_BIN, FLOE_RENDERD_BIN and FLOE2_BIN"
         exit 1
     fi
 else
@@ -359,6 +403,7 @@ LOADERS="\$RT/lib/gdk-pixbuf-2.0/2.10.0/loaders"
 FAILED=0
 echo "host glibc:   \$(ldd --version 2>/dev/null | head -1)"
 echo "arch:         \$(uname -m)   (needs x86_64, glibc >= ${FLOOR})"
+echo "rust:         ${FLOE_PORTABLE_RUST} (musl: static, any x86_64 Linux; gnu: glibc ${FLOOR}+, faster indexing)"
 # build the pixbuf loader cache exactly as the launcher does, so the png
 # decoder used for render frames is exercised (a broken cache = black view)
 CACHE=\$(mktemp)

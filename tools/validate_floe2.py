@@ -470,6 +470,24 @@ print(json.dumps([instance.APP, instance.socket_address(":77"),
           "#" not in portable_name.stdout,
           "portable artifact name contains the __version__ line comment: %s"
           % portable_name.stdout.strip())
+    # the Rust runtime's flavour (2026-10-11): gnu = glibc builds linked
+    # against the deployment glibc (cargo-zigbuild), named apart
+    gnu_name = subprocess.run(
+        ["bash", str(portable), "--print-name"], cwd=ROOT,
+        env=dict(base, FLOE_PORTABLE_RUST="gnu"), capture_output=True,
+        text=True, timeout=10)
+    check(gnu_name.returncode == 0 and gnu_name.stdout.strip() ==
+          portable_name.stdout.strip() + "-gnu",
+          "FLOE_PORTABLE_RUST=gnu is not named apart: %s" % gnu_name.stdout)
+    bad_flavour = subprocess.run(
+        ["bash", str(portable), "--print-name"], cwd=ROOT,
+        env=dict(base, FLOE_PORTABLE_RUST="glibc"), capture_output=True,
+        text=True, timeout=10)
+    check(bad_flavour.returncode != 0,
+          "make_portable.sh took FLOE_PORTABLE_RUST=glibc")
+    check('cargo zigbuild --release' in portable_source and
+          '--target "$GNU_TARGET.$GNU_GLIBC"' in portable_source,
+          "the gnu flavour does not link against the deployment glibc")
     launcher_source = launcher.read_text(encoding="utf-8")
     check('exec "$RT/bin/python3" -m floe_oracle "$@"' in
           launcher_source and 'exec "$RT/bin/floe2" "$@"' in
