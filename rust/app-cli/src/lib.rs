@@ -9,6 +9,7 @@ mod clip;
 mod deck_analysis;
 mod deck_index;
 mod drc;
+mod drc_prepare;
 mod fe_embed;
 mod read;
 pub mod selfcheck;
@@ -73,6 +74,7 @@ pub const COMMANDS: &[&str] = &[
     "clip",
     "jobdeck",
     "drc",
+    "drc-prepare",
     "fe-embed",
     "svrf",
     "selfcheck",
@@ -87,6 +89,7 @@ Usage: floe2-web index SOURCE [OPTIONS]
        floe2-web probe SOURCE
        floe2-web jobdeck DECK.jb [OPTIONS]
        floe2-web drc RESULTS.db|PACK.ice [OPTIONS]
+       floe2-web drc-prepare RESULTS.db|PACK [--svrf RULES_JSON] [OPTIONS]
        floe2-web fe-embed [OPTIONS] PNG...
        floe2-web svrf DECK [OPTIONS]
        floe2-web selfcheck [--adjacent] [--metadata-only]
@@ -149,6 +152,7 @@ enum Cli {
     Clip(Box<clip::Command>),
     Jobdeck(Box<deck_analysis::Command>),
     Drc(Box<drc::Command>),
+    DrcPrepare(Box<drc_prepare::Command>),
     FeEmbed(Box<fe_embed::Command>),
     Svrf(Box<svrf::Command>),
     SelfCheck(selfcheck::Options),
@@ -172,6 +176,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
         "info" | "render" | "probe" => return read::parse(&args).map(|c| Cli::Read(Box::new(c))),
         "jobdeck" => return deck_analysis::parse(&args).map(|c| Cli::Jobdeck(Box::new(c))),
         "drc" => return drc::parse(&args).map(|c| Cli::Drc(Box::new(c))),
+        "drc-prepare" => return drc_prepare::parse(&args).map(|c| Cli::DrcPrepare(Box::new(c))),
         "clip" => return clip::parse(&args).map(|c| Cli::Clip(Box::new(c))),
         "fe-embed" => return fe_embed::parse(&args).map(|c| Cli::FeEmbed(Box::new(c))),
         "svrf" => return svrf::parse(&args).map(|c| Cli::Svrf(Box::new(c))),
@@ -405,6 +410,7 @@ fn run(cli: Cli, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
     match cli {
         Cli::SelfCheck(options) => return selfcheck::run(options, cancelled),
         Cli::Drc(command) => return drc::run(*command, cancelled),
+        Cli::DrcPrepare(command) => return drc_prepare::run(*command, cancelled),
         Cli::FeEmbed(command) => return fe_embed::run(*command, cancelled),
         Cli::Svrf(command) => return svrf::run(*command, cancelled),
         Cli::Read(command) => return read::run(*command, cancelled),

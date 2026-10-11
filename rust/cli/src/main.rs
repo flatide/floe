@@ -78,6 +78,35 @@ fn exit_quietly_on_broken_pipe() {
 #[cfg(not(unix))]
 fn exit_quietly_on_broken_pipe() {}
 
+/// `floe-index drc-prepare` (feature/jobdeck-drc's command): the DRC
+/// analysis is the shared Rust app layer's (app-core drc::analysis), so the
+/// floe2 beside this binary - the bundle's runtime/bin/floe2, the build's
+/// target/release/floe2 - runs it; its exit status is ours.
+fn drc_prepare_handover(rest: &[String]) {
+    let beside = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("floe2")))
+        .filter(|p| p.is_file());
+    let floe2 = std::env::var_os("FLOE2_BIN")
+        .map(std::path::PathBuf::from)
+        .or(beside)
+        .unwrap_or_else(|| std::path::PathBuf::from("floe2"));
+    match std::process::Command::new(&floe2)
+        .arg("drc-prepare")
+        .args(rest)
+        .status()
+    {
+        Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+        Err(e) => {
+            eprintln!(
+                "floe-index drc-prepare: {} could not run ({e}); drc-prepare is `floe2 drc-prepare`",
+                floe2.display()
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
 fn main() {
     exit_quietly_on_broken_pipe();
     let args: Vec<String> = std::env::args().collect();
@@ -115,6 +144,9 @@ fn main() {
     if args.len() >= 3 && args[1] == "vfsd" {
         return vfs::vfsd_cmd(&args[2..]);
     }
+    if args.len() >= 2 && args[1] == "drc-prepare" {
+        return drc_prepare_handover(&args[2..]);
+    }
     if args.len() >= 3 && args[1] == "drc" {
         return drcice::drc_cmd(&args[2..]);
     }
@@ -149,6 +181,7 @@ fn main() {
              floe-index ovs <outdir> [--um F] [--jobs N] [--roots F]  (add design.ovs, the occupancy density pass 2 draws by - FLOE_RUST_DENSITY_OCC=off: the plans; --roots: the cells under the top this share of its box or more get design.ovs.<cell>, default 0.25)\n       \
              floe-index drc <results.db> [out.tray] \
              [--pack] [--jobs N]\n       \
+             floe-index drc-prepare <results.db|pack> [--svrf RULES_JSON] ...  (runs floe2 drc-prepare)\n       \
              floe-index svrf <deck> [-o OUT] [--scan] [-D NAME[=VAL]]... [-I DIR]... \
              [--follow-verbatim] [--no-env-switches]  (SVRF rule deck subset -> <deck>.rules.json)"
         );

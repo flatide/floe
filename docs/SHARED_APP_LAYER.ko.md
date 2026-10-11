@@ -377,3 +377,16 @@ P4d처럼 컨트롤러 루프에서만 바뀐다. `FLOE_GTK_LOOP=legacy`는 예�
   - `rust_renderer`: 예전 루프 전용 테스트(정착 판단, 마진 미리 그리기와 그 픽셀 상한, 세대별 오류, 여백 안 이동의 즉시 제출)를 지웠다. 이 동작은 컨트롤러 단위 테스트(마진, 정착, Esc, render_failure)와 `gtk_view`가 맡는다. 새 루프에 맞게 고친 것: thin·밀도·루트는 컨트롤러 패치(`_ctl_policy`)에, `--margin`·`--frame-cache`는 `ViewWorker`의 margin·frame_cache로 간다; 거절된 프레임(render_failure)과 Esc 취소는 한 번 말하고 대기 상태를 푼다; Esc는 `worker.cancel()`을 부른다. perf 줄 문자열 테스트는 `floe_oracle.perf_line`을 쓴다.
   - `gtk_view`: legacy 확인을 지웠다. 기준 어댑터는 오라클의 것이다.
   - jobdeck: GuiSmoke의 legacy 덱 실행을 지웠다. 모드 전환 테스트는 컨트롤러 루프만 본다.
+
+## 8. feature/jobdeck-drc 머지 (2026-10-11) — DRC 분석을 공유 Rust로
+
+사용자: "feature/jobdeck-drc 최신 내용을 여기로 머지해줘". 그 브랜치(2026-10-06~08, Python 뷰어 0.12.322 기준 11커밋)는 클러스터, CD 델타 그룹, 전체 범위 원형 마커, 개수 제한 없는 선택, `drc-prepare`를 Python(NumPy) 모듈과 자식 프로세스로 만들었다. 이 브랜치는 그 사이 UI 말고는 Python을 쓰지 않게 되었으므로(P0~P4f), 머지는 이력과 기준 구현을 가져오고 기능은 Rust로 옮겼다.
+
+- **D0 머지 커밋:** 이력, 샘플(`sample.*`), 문서, `rust/cli/src/svrf.rs`의 치수 분류(두 레이어 INTERNAL = overlap, 한 레이어 EXTERNAL NOTCH = notch), drc_ice D8(중점 배치가 최소값을 바꾸지 않음, app-core `drc::measure`에도 적용). 브랜치의 `drc_delta`·`drc_clusters`·`drc_points`·`drc_markers`·`drc_marker_style`·`drc_selection`·`drc_analysis`는 `tools/oracle/floe_oracle/`의 기준 구현이 되고, 작업자·캐시·native 프로토콜(`floe-index drc-measure`/`drc-centers`)·Python `drc-prepare`·쿼드트리·브랜치 게이트 16개는 가져오지 않았다(경우는 새 게이트로).
+- **D1 (app-core `drc::analysis::{ticks, measure}`):** 다섯 자리 HALF_UP(`Decimal(str(value))`), 규칙 조건에 따른 CD 선택(MeasurementSelector), 사각형 룰러 방향, AREA 라벨. 산술은 CPython의 `math.hypot`(vector_norm)·`math.fsum`을 따라 경계에서도 기준과 같다(무작위 대조: hypot·ticks 100만, 선택 20만). svrf `constraint_metric`은 제품 사이드카 읽기와 웹의 Rules에 적용한다. 캡처(`floe2 render --drc`)도 같은 룰러와 면적 텍스트를 넣는다.
+- **D2~D5 (`clusters`, `scope`, `source`, `store`, `delta`, `points`, `select`):** `.clusters` 검증·구간·상태별 수/페이지/순위, 소속(구간·그룹 행·비트셋 선택과 교집합), 작업 스레드의 pack 블록 읽기, `.<db>.analysis/`(또는 `FLOE_DRC_ANALYSIS_ROOT`) 캐시 — pack identity, 이름 바꾸기 공개, 빌더 순번, 쓸 수 없으면 메모리 —, 측정표(병렬, 10만 건부터 캐시)·자동 스텝·그룹(캐시)·그룹 리뷰 수, 정확한 중심 캐시와 마커 그림(0.5초 중간 그림), 박스 선택. Review에 `query_scoped`, 청크 단위 대량 상태 기록.
+- **서비스(`rust/floe2/src/drc.rs`):** `drc_clusters_load`, `drc_cluster_counts`, `drc_scope_*`, `drc_delta`(+rows/find/drop), `drc_markers`, `drc_select`(+page/drop), `drc_review`, `drc_inview`, `drc_cancel`, `drc_parse_step`, `drc_cd_info`. 긴 작업은 종류·DB마다 하나인 작업 스레드에서 돌고 `{"event": "drc", ...}` 줄로 알린다.
+- **뷰어:** 브랜치의 UI(룰 트리의 클러스터 자식, 델타 컨트롤, 마커 합성과 픽셀 hit map, 박스 선택, 대량 waive/note 작업, 큰 룰의 in-view 작업)를 서비스 위에 얹었다. `floe/gtkservice.py`가 브랜치의 객체 모양(ClusterFile, DeltaGroups, 선택, 작업자)을 준다.
+- **D6:** `floe2 drc-prepare`(공유 CLI; `floe-index drc-prepare`는 옆의 floe2에 넘긴다).
+- **게이트 `drc_analysis`:** 서비스 = 기준 구현(sample.db 전부, 15만 에러 룰), 캐시 재사용, 잘못된 clusters 파일, drc-prepare, 뷰어.
+- **웹과의 조율(나중):** `drc::analysis`는 웹도 쓸 수 있는 공유 모듈이다. 웹 UI에 같은 기능을 붙일 때 서비스 요청을 HTTP로 옮기면 된다.

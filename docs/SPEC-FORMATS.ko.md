@@ -382,8 +382,10 @@ pack 및 waive/note 파일은 변경하지 않는다.
   룰 이름과 번호 범위가 그대로면 이를 감지할 수 없으므로, 해당 결과와
   함께 생성·보관하고 재실행 시 다시 작성해야 한다.
 
+읽기와 조회는 app-core `drc::analysis::clusters`(2026-10-11 Rust 이식, gtk-service
+`drc_clusters_load`; 기준 구현 `tools/oracle/floe_oracle/drc_clusters.py`)다.
 저장/조회: 정규화한 불연속 구간과 누적 개수를 보관한다. 에러마다
-Python 객체나 소속 비트맵을 만들지 않으며, 일반 페이지와 rank는 구간
+객체나 소속 비트맵을 만들지 않으며, 일반 페이지와 rank는 구간
 누적합을 이진 탐색한다. 메모리는 에러 수가 아닌 **구간 수**에 비례한다.
 status 카운트 초기화만 해당 상태 바이트를 읽고, 이후 카운트는 캐시한다.
 한 룰의 여러 클러스터는 청크 누적합을 공유하여 같은 상태 바이트를 반복해서
@@ -392,9 +394,8 @@ waive 페이지/rank/변경은 최대 1M 에러 단위 청크를 사용하며 �
 않는다. 공간 조회의 소속 마스크는 bounded 쿼리 청크에만 만들고,
 지오메트리 디코딩 및 cap **이전**에 적용한다.
 
-검증: `tools/validate_drc_clusters.py`,
-`tools/validate_drc_cluster_spatial.py`
-(`sh tools/validate_rust.sh --only drc_clusters`).
+검증: `tools/validate_drc_analysis.py` A1·A3·A5
+(`sh tools/validate_rust.sh --only drc_analysis`).
 
 ## <deck>.rules.json — SVRF 룰 메타데이터 사이드카 (v1)
 

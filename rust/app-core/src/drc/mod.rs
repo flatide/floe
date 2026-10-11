@@ -41,6 +41,11 @@ pub const CACHE_BYTES: usize = 32 * 1024 * 1024;
 pub const PAGE_ITEMS: usize = 2000;
 pub const SCAN_ITEMS: u64 = 262_144;
 
+/// Hold `pack` as a reader (a re-pack waits, as for a review).
+pub fn pack_reader_lock(pack: &std::path::Path) -> crate::Result<floe_vfs::lock::ReaderGuard> {
+    local::pack_reader(pack)
+}
+
 fn corrupt(what: &str) -> Error {
     Error::new(
         ErrorKind::Cache,

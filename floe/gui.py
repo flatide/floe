@@ -8021,7 +8021,8 @@ class Viewer:
         if self._drc_hl and hasattr(db, "query_rect"):
             inview = [ei for rci, ei, _k, _p in self._drc_hl_list() if rci == ci]
             if self._drc_show_sel:
-                base = [ei for ei in inview if selected is not None and ei in selected]
+                base = ([ei for ei, ok in zip(inview, selected.contains_many(inview)) if ok]
+                        if selected is not None else [])
             else:
                 base = inview
         cluster = self._drc_active_members()
@@ -8029,7 +8030,8 @@ class Viewer:
             want = None if self._drc_wfilter == "all" else self._drc_wfilter == "waived"
             base = ("cluster", cluster, want)
         elif cluster is not None and isinstance(base, list):
-            base = [ei for ei in base if cluster.contains(ei)]
+            # one service question for the page, not one per error
+            base = [ei for ei, ok in zip(base, cluster.contains_many(base)) if ok]
         if self._drc_wfilter != "all" and not isinstance(base, tuple):
             if base is None:
                 base = self._drc_wf_base(db, ci)

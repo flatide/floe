@@ -387,9 +387,11 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   `abs(CD - bound)`, 비율 차이는 `abs(CD - bound) / abs(bound) × 100`이며
   둘 다 0 이상의 위반 크기를 표시한다(2026-10-06).
   상세의 델타·비율과 그룹 구간에는 양수의 `+` 부호를 붙이지 않는다.
-  `floe/drc_delta.py`의 공통 측정/제약
-  선택 함수를 상세 창과 그룹 계산이 함께 사용한다.
-  CD와 bound를 `Decimal(str(value))`로 받아 소수 다섯 자리
+  공통 측정/제약 선택(app-core `drc::analysis::measure` Selector, 2026-10-11
+  Rust 이식 - 기준 구현은 `tools/oracle/floe_oracle/drc_delta.py`)을 상세 창
+  (gtk-service `drc_cd_info`)과 그룹 계산이 함께 사용한다. 산술은 CPython의
+  `math.hypot`·`math.fsum`과 같은 방식이라 비교·다섯 자리 경계에서도 기준과 같다.
+  CD와 bound를 `Decimal(str(value))`(float는 가장 짧은 왕복 자릿수)로 받아 소수 다섯 자리
   `ROUND_HALF_UP`으로 먼저 정수화한다. 비율은 이 정수값의 정확한
   비로 계산한 뒤 다섯 자리로 반올림한다. CD 룰러 라벨도 같은 다섯
   자리 정밀도로 표시한다. 간격은 다섯 자리보다 유효
@@ -422,9 +424,11 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   피하고, 그룹 디렉터리와 소속도 수치 배열로 유지한다. 그룹 행은
   요청한 페이지에 대해서만 생성하며, 구형 결과는 새 범위에 설치하지
   않는다. waive 갱신은 그룹 카운트와 상태별 page/rank를 함께 갱신한다.
-  10만 건 이상 packed 룰은 별도 프로세스에서 측정/그룹을 만들며 완료본을
-  `.analysis` 디렉터리에 저장해 룰 왕복과 재시작에서 재사용한다.
-  큰 룰의 마커 계산과 in-view 조회도 프로세스로 분리하고, 그리드 채우기는
+  측정·그룹·마커·in-view(큰 룰)·박스 선택·대량 waive/note는 floe2 gtk-service의
+  작업 스레드(종류·DB마다 하나, 새 요청이 이전 것을 취소)에서 실행하고
+  `{"event": "drc", …}` 줄로 진행·중간·완료를 알린다(`rust/floe2/src/drc.rs`).
+  10만 건 이상 룰의 측정표와 그룹은 `.analysis` 디렉터리에 저장해 룰 왕복과
+  재시작에서 재사용한다. 그리드 채우기는
   사용되지 않는 페이지 geometry를 디코딩하지 않는다. 대규모 전처리,
   공간 인덱스와 중심·측정 캐시 저장 비용은 [DRC.ko.md §5](DRC.ko.md#5-성능-경로와-검증) 참고.
 - **룰 유형 필터**(2026-08-17, rules.json 필요): nav 행 콤보 —
@@ -525,8 +529,9 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
 - **룰/클러스터 전체 마커**(2026-10-08): 선택한 룰·클러스터·CD 델타
   그룹의 **전체 에러** 중 중심이 화면에 포함된 에러를 개별 원으로 표시한다.
   그리드 페이지는 마커 조회 키에 포함하지 않는다. waive/selected 필터는
-  적용하며, `in view`는 목록만 좁힌다. `MarkerIndex.query()`는
-  `drc_points.query_points`에 위임해 `PointMarkers`를 반환한다.
+  적용하며, `in view`는 목록만 좁힌다. gtk-service `drc_markers` 작업이
+  app-core `drc::analysis::points::query`로 그림을 만들고 GUI는
+  `gtkservice.PointMarkers`로 받는다(기준: `floe_oracle/drc_points.py`).
   **에러를 개수 상한으로 잘라내지 않는다**. 같은 중심은 한 번만 그리며,
   서로 다른 중심도 현재 화면의 같은 픽셀에 투영되면 중복 표시를 생략한다.
   같은 픽셀에서는 첫 not waived 에러(없으면 첫 waived)를 선택 대상으로
@@ -536,24 +541,23 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   포커스/선택(gold)은 그 위에 개별 마커로 강조한다.
   **실도형은 점프된 에러(drc_mark 대상) 하나만** 표시하며, 화면 스팬이
   DRC_MARK_PX보다 작으면 원형 마커로 표시한다.
-  `.tray`는 `drc-centers` 프로토콜2로 정확한 bbox 극값의 합을 원본 에러
-  순서의 little-endian int64 Nx2로 저장한다(단위는 1/(2×precision) µm).
-  음수·반 DBU 중심을 유지하며 qbox 근사 위치를 사용하지 않는다.
+  `.tray`의 정확한 bbox 극값의 합을 원본 에러 순서의 little-endian int64
+  Nx2(`centers-r1-<identity>-<rule>/centers.bin`, 단위 1/(2×precision) µm)로
+  저장한다. 음수·반 DBU 중심을 유지하며 qbox 근사 위치를 사용하지 않는다.
   룰별 16B/에러 파일은 pack identity에 연결해 원자적으로 공개하고 mmap한다.
-  native는 block별 병렬 복원, 구버전/누락 바이너리는 취소 가능한 Python
-  복원이다. 캐시 생성과 조회는 대형 룰에서 별도 프로세스로 실행하며,
-  취소/종료는 실행 중인 native 자식도 정리한다.
-  캐시 조회는 262144개 청크 단위로 정확한 중심의 화면 포함 여부·소속·상태를
+  처음에는 블록을 작업자들이 병렬로 복원하면서 바로 그림에 쓰고, 끝나면
+  캐시를 공개한다(폴더에 쓸 수 없으면 캐시 없이 그린다). 취소는 작업 단위마다 확인한다.
+  조회는 65536개 단위로 정확한 중심의 화면 포함 여부·소속·상태를
   확인한다. 중심이 화면 밖이면 가장자리로 끌어오지 않는다. 단, 닫힌 경계
   위의 중심은 마지막 픽셀에 포함한다. ASCII DB는 정확한 bbox 중심을
   청크 단위로 순회하여 동일한 원형 마커를 만든다.
-  출력 `PointMarkers`는 RGBA 이미지와 H×W error/check ID 배열이다.
-  Python 마커 리스트나 에러당 GTK 호출을 생성하지 않는다. GUI는 마커
+  출력은 RGBA 이미지와 H×W 에러 ID 배열을 담은 임시 파일(`FLOEMRK1`)이다.
+  마커 리스트나 에러당 GTK 호출을 생성하지 않는다. GUI는 마커
   레이어를 캐시하고 프레임마다 한 번 합성한다. 포인터 주변 13×13 픽셀만
   확인해 선택하며 같은 거리에서는 포커스/gold를 우선한다. Tab 숨김은
   픽셀 hit map도 비운다. 정보줄은 원본 에러 수와 실제 표시 중심 수를 구분한다.
-  `drc_marker_worker.py`의 단일 daemon thread는 마지막 요청만 유지하고
-  새 요청에 앞선 작업을 취소한다. 뷰/캔버스 크기/DB/룰/클러스터/CD 그룹/
+  마커 작업은 DB마다 하나이며 새 요청이 앞선 작업을 취소한다(GUI의
+  `gtkservice.MarkerWorker`가 마지막 요청만 기다린다). 뷰/캔버스 크기/DB/룰/클러스터/CD 그룹/
   status revision/selected 소속이 키이며, 현재 키와 다른 결과는 버린다.
   좌표는 실제 표시한 obox/ospp를 사용하며, 박스 선택도 렌더 대기 중
   동결된 표시 좌표와 일치시킨다. in-view 목록의 뷰 추적 호출은 유지한다.
@@ -565,17 +569,14 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   pick으로 이어진다. 룰을 전환하면 이전 점프 마크·자동 CD 룰러를 지우고
   수동 룰러는 유지한다. Esc로 격리 레이어를 복원할 때 점프 마크와 자동
   CD 룰러도 지우며 현재 위치·포커스는 유지한다.
-  **0.5초 진행 표시**: `progressive=True` 작업은 `MarkerProgress(markers)`를
-  같은 query key로 주기적으로 전달한다. `PointMarkers`는 processed/total
-  카운트와 독립된 불변 ID 배열을 가지며, 매 프레임 마커 레이어를 교체한다.
+  **0.5초 진행 표시**: 마커 작업은 약 0.5초마다 `partial` 그림을 보내고
+  GUI는 `MarkerProgress(markers)`로 받는다. 그림마다 processed/total
+  카운트와 독립된 ID 배열을 가지며, 매 프레임 마커 레이어를 교체한다.
   GUI는 중간 결과에도 busy 상태를 유지하고 `(partial)`과 처리 건수를 표시한다.
   최종 응답은 즉시 busy를 해제하며 오류 응답은 미완성 결과/픽 정보를 지운다.
-  백그라운드 작업자의 결과 슬롯은 최신 프레임 하나만 보관한다. 취소된
-  프로세스의 중간 응답은 최종 응답까지 비우고 다음 요청을 전송한다.
-  native `--ready PATH`는 65536행 좌표 쓰기가 완료된 뒤에만 해당 task의
-  바이트를 1로 기록한다. Python은 완료된 구간만 한 번씩 읽어 첫 캐시 생성
-  중에도 표시하며, 이후 전체 파일을 재스캔하지 않는다. Python 복원도 64에러
-  블록 경계에서 경과 시간을 확인해 준비된 데이터를 전달한다.
+  GUI 쪽 결과 슬롯은 최신 그림 하나만 보관하고(밀린 파일은 지운다) 다른
+  작업의 응답은 버린다. 첫 캐시 생성 중에도 완료된 작업 단위가 바로 그림에
+  들어가며, 이후 전체 파일을 재스캔하지 않는다.
   **그리드 숫자도 상태색**(waived green / not-waived red; gold 선택
   배경 위에도 상태색 유지, 현재 셀은 파랑 배경+흰 글자).
 - **mono(그레이스케일)**: `b` 키 토글(독립 — 필터와 연동 없음),
@@ -586,17 +587,18 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   **Esc(또는 e 재입력)까지 유지** — 박스 완료 후에도 다음 박스
   대기(룰러와 동일 계열). 두 클릭이 박스를 정의 → **페이지와 독립적인
   전체 룰/클러스터 중 박스와 화면에 걸치는 실제 에러**를 선택한다.
-  `SelectionWorker`가 status/소속을 교차하여 개수 상한 없이 조회한다.
-  pack의 포함된 블록은 일괄 선택하고 경계 후보만 정확한 bbox를 복원한다.
-  대형 pack은 별도 프로세스를 사용한다. 선택은 불변 numeric ID/비트셋과
-  블록별 prefix로 저장해 count·contains·1000개 page를 전체 열거 없이 처리한다.
+  gtk-service `drc_select` 작업(app-core `drc::analysis::select`)이 status/소속을
+  교차하여 개수 상한 없이 조회한다. pack의 블록이 박스 밖이면 건너뛰고 박스 안이면
+  일괄 선택하며, 나머지만 정확한 bbox를 복원한다. 선택은 서비스에 남는
+  비트셋(에러당 1비트)과 65536개 단위 prefix로 저장해 count·contains·1000개 page를
+  전체 열거 없이 처리하고, GUI는 그 번호(`gtkservice.DrcSelection`)만 가진다.
   완료된 결과만 적용하며 취소·실패·룰 전환 뒤의 오래된 결과는 이전 선택을
   덮어쓰지 않는다. 조회 중 Esc는 작업만 취소한다. 마커 숨김 상태에서는 선택하지 않는다. 두 번째
   클릭 수식키: 무수식=대체(빈 박스는 해제), **Shift=추가,
   Ctrl=박스 내 토글** — 그리드 Ctrl/Shift와 동일 계열. 선택은 목록을 **대체하지 않는다**(2026-08-14 수정):
   그리드는 기존 내용(전체 또는 hl in-view)을 유지하고 선택된
   번호만 **gold 배경**으로 마킹(현재 셀 파랑이 우선). 캔버스는
-  선택 에러를 **gold 원형 마커**로 표시한다. worker의 픽셀 raster에
+  선택 에러를 **gold 원형 마커**로 표시한다. 서비스의 마커 그림에
   직접 합성하므로 GTK가 선택된 모든 도형을 보관하거나 순회하지 않는다.
   동일 픽셀은 선택된 에러를 우선하고 그 안에서 not waived·원본 순서를 따른다.
   **화면 스팬이 마커 크기(DRC_MARK_PX=5) 미만인 에러는 어느
@@ -645,13 +647,13 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   각각 적용하여 해당 방향만 표시한다(2026-10-06). 양쪽이 조건에 맞거나
   미해석 옵션/비치수 제약·메타 부재·조건 불일치로 방향을 정할 수 없으면 두 개를
   유지한다. 구간은 CD 선택과 같은 AND 조건·부동소수점 경계 비교를 쓴다.
-  `drc_delta.ruler_segments`를 CLI 스냅샷과 공유하고, 그룹용 CD를 하나
+  Selector의 `ruler_segments`를 CLI 스냅샷(app-core drc::capture)과 공유하고, 그룹용 CD를 하나
   고르는 것만으로 다른 유효한 방향의 룰러를 숨기지 않는다.
   notch/overlap/extension metric도 거리 측정 대상으로 처리한다.
   EXTERNAL의 `NOTCH`/`SPACE` 분류 옵션은 방향 판정을 허용하며,
   그 외 평가하지 않은 옵션이 있으면 두 방향을 유지한다.
   **area 전용 룰은 길이 룰러 없이 면적 라벨만 표시한다.**
-  `drc_delta.area_label`이 상세·그룹과 같은 폴리곤 면적을 다섯 자리
+  `area_label`(app-core drc::analysis::measure)이 상세·그룹과 같은 폴리곤 면적을 다섯 자리
   `area … µm²`로 만든다. bbox는 위치 앵커에만 사용한다. 혼합 검사면
   면적 라벨과 치수 룰러를 병행하며 에지 레코드는 면적 라벨이 없다.
   `_DrcAreaLabel`은 선·화살표 없이 기존 거리 칩으로 표시하고 자동
