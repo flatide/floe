@@ -19,8 +19,10 @@ import klayout.db as db
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(
+    os.path.abspath(__file__)), "oracle"))  # floe_oracle (P3)
 
-from floe.render import Renderer
+from floe_oracle.render import Renderer
 
 
 W = H = 100

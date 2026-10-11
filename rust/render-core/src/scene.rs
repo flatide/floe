@@ -387,8 +387,7 @@ impl SceneMasks {
                 let cell = &cells[index];
                 if let Some(instance) = cell.insts.get(edge) {
                     stack.last_mut().expect("stack is non-empty").1 += 1;
-                    let Ok(child) =
-                        cells.binary_search_by_key(&instance.child, |cell| cell.key)
+                    let Ok(child) = cells.binary_search_by_key(&instance.child, |cell| cell.key)
                     else {
                         continue;
                     };
@@ -427,7 +426,10 @@ impl SceneMasks {
         for &index in &post_order {
             let cell = &cells[index];
             let own = u64::from(
-                !cell.pages.is_empty() || !cell.washes.is_empty() || !cell.reps.is_empty() || !cell.frames.is_empty(),
+                !cell.pages.is_empty()
+                    || !cell.washes.is_empty()
+                    || !cell.reps.is_empty()
+                    || !cell.frames.is_empty(),
             );
             let mut weight = own;
             for instance in &cell.insts {
@@ -435,8 +437,7 @@ impl SceneMasks {
                     .binary_search_by_key(&instance.child, |cell| cell.key)
                     .map(|child| weights[child])
                     .unwrap_or(0);
-                weight = weight
-                    .saturating_add(instance.rep.members().saturating_mul(child_weight));
+                weight = weight.saturating_add(instance.rep.members().saturating_mul(child_weight));
             }
             weights[index] = weight;
         }
@@ -607,7 +608,8 @@ impl FrameScene {
         labels: Arc<[RenderLabel]>,
         label_font_px: f32,
     ) -> Result<Self, String> {
-        let mut scene = Self::new_shared_with_labels(source, plan, Vec::new(), labels, label_font_px)?;
+        let mut scene =
+            Self::new_shared_with_labels(source, plan, Vec::new(), labels, label_font_px)?;
         let mut meta = PageMeta {
             layer: Vec::with_capacity(scene.plan.pages.len()),
             bbox: Vec::with_capacity(scene.plan.pages.len()),
@@ -618,7 +620,8 @@ impl FrameScene {
             meta.layer.push(layer);
             meta.bbox.push(bbox);
         }
-        meta.late.resize_with(scene.plan.pages.len(), Default::default);
+        meta.late
+            .resize_with(scene.plan.pages.len(), Default::default);
         scene.masks = SceneMasks::build(&scene.plan, &scene.pages, Some(&meta));
         scene.deferred_pages = Vec::new();
         scene.meta = Some(meta);
@@ -768,11 +771,7 @@ impl FrameScene {
         if self.masks.full {
             return true;
         }
-        let Ok(index) = self
-            .plan
-            .wcells
-            .binary_search_by_key(&key, |cell| cell.key)
-        else {
+        let Ok(index) = self.plan.wcells.binary_search_by_key(&key, |cell| cell.key) else {
             return true;
         };
         let Some(bit) = bit else {
@@ -807,11 +806,7 @@ impl FrameScene {
         if self.masks.full {
             return true;
         }
-        let Ok(index) = self
-            .plan
-            .wcells
-            .binary_search_by_key(&key, |cell| cell.key)
-        else {
+        let Ok(index) = self.plan.wcells.binary_search_by_key(&key, |cell| cell.key) else {
             return true;
         };
         if want_frames && self.masks.frames[index] {
@@ -831,11 +826,7 @@ impl FrameScene {
         if self.masks.full {
             return u64::MAX;
         }
-        match self
-            .plan
-            .wcells
-            .binary_search_by_key(&key, |cell| cell.key)
-        {
+        match self.plan.wcells.binary_search_by_key(&key, |cell| cell.key) {
             Ok(index) => self.masks.weights[index],
             Err(_) => u64::MAX,
         }
@@ -846,11 +837,7 @@ impl FrameScene {
         if self.masks.full {
             return true;
         }
-        match self
-            .plan
-            .wcells
-            .binary_search_by_key(&key, |cell| cell.key)
-        {
+        match self.plan.wcells.binary_search_by_key(&key, |cell| cell.key) {
             Ok(index) => self.masks.frames[index],
             Err(_) => true,
         }
@@ -956,7 +943,7 @@ mod tests {
             pages: vec![2, 4],
             page_prio: vec![0, 1],
             stats: HierStats::default(),
-                    explain: Vec::new(),
+            explain: Vec::new(),
         }
     }
 
@@ -1045,15 +1032,17 @@ mod tests {
             pages: vec![2, 4],
             page_prio: vec![0, 1],
             stats: HierStats::default(),
-                    explain: Vec::new(),
+            explain: Vec::new(),
         };
         let bounds = BTreeMap::from([(top, bbox), (child, bbox)]);
-        let scene =
-            FrameScene::from_test_parts(plan, vec![layer_page(2, 3)], bounds).unwrap();
+        let scene = FrameScene::from_test_parts(plan, vec![layer_page(2, 3)], bounds).unwrap();
 
         let decoded_bit = scene.layer_mask_bit(3);
         assert!(decoded_bit.is_some());
-        assert!(scene.subtree_paints(top, decoded_bit), "child content unions up");
+        assert!(
+            scene.subtree_paints(top, decoded_bit),
+            "child content unions up"
+        );
         assert!(scene.subtree_paints(child, decoded_bit));
 
         let wash_bit = scene.layer_mask_bit(5);
@@ -1081,8 +1070,11 @@ mod tests {
         assert!(capped.bits.is_empty());
         scene.masks = capped;
         assert_eq!(scene.mask_bytes(), 0);
-        assert_eq!(scene.layer_mask_bit(9), Some(usize::MAX),
-                   "full masks never declare a layer absent");
+        assert_eq!(
+            scene.layer_mask_bit(9),
+            Some(usize::MAX),
+            "full masks never declare a layer absent"
+        );
         assert!(scene.subtree_paints(child, None), "full masks never prune");
         assert!(scene.subtree_has_frames(top));
     }

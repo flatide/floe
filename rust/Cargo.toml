@@ -10,6 +10,11 @@ members = [
     "render-core",
     "render-cli",
     "renderd",
+    "worker-client",
+    "app-core",
+    "notices",
+    "app-cli",
+    "floe2",
 ]
 
 [workspace.package]

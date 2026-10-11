@@ -10,6 +10,11 @@ waive 리뷰를 floe 뷰어 안에서 끝내는 것.
 - 뷰어 계약: `SPEC-VIEWER.ko.md` §8b (DRC 브라우저 대용량 규약)
 - 검증: `SPEC-VALIDATION.ko.md` (D1~D7, R1~R4+R3b)
 
+제품 GTK 뷰어는 `floe/drc.py`와 `drc_*.py`의 클러스터·대용량 마커·CD 델타·검토
+기능을 사용한다. 레이아웃 렌더링은 공유 Rust `ViewController`가 맡는다.
+기본 번들은 이 DRC 백엔드와 NumPy를 포함하며, `tools/oracle/floe_oracle`은
+개발 검증용 비교 구현으로만 사용한다.
+
 ## 1. 파이프라인 한눈에
 
 ```
@@ -19,7 +24,7 @@ results.db (Calibre ASCII, 정본)          deck.cal (SVRF 룰덱)
 .results.db.tray (자기완결 pack, 숨김)   deck.cal.rules.json (룰 메타)
       └───────────────┬─────────────────────────┘
                       ▼
-        floe view chip.oas --drc results.db
+        floe2 view chip.oas --drc results.db
         (브라우저 + 캔버스 오버레이 + waive 리뷰)
 ```
 
@@ -30,7 +35,7 @@ rust/target/release/floe-index drc results.db [--jobs N]
 rust/target/release/floe-index svrf deck.cal --scan
 rust/target/release/floe-index svrf deck.cal -D SWITCH...
 # 실행
-.venv/bin/python -m floe view chip.oas --drc results.db
+rust/target/release/floe2 view chip.oas --drc results.db
 ```
 
 **셸 스크립팅 표면**(2026-08-19): 룰 목록·에러 목록은 JSON,
@@ -41,10 +46,10 @@ rust/target/release/floe-index svrf deck.cal -D SWITCH...
 
 ```sh
 # 룰 목록: [{"name","errors","waived"}, ...]
-python -m floe drc results.db --rules > rules.json
+floe2 drc results.db --rules > rules.json
 # 한 룰의 에러 목록(스트리밍 배열):
 #   [{"local","global","kind","status","bbox":[x0,y0,x1,y1 um]},...]
-python -m floe drc results.db --errs M1.SPACE.1 > errs.json
+floe2 drc results.db --errs M1.SPACE.1 > errs.json
 # 에러 스냅샷 PNG (--drc-err N | A-B | all; cap 200은
 # 'all'에만 적용 — 명시 범위는 전량 렌더):
 # 에러가 프레임의 30%(--drc-frac)를 차지하게 정사각 렌더
@@ -72,7 +77,7 @@ python -m floe drc results.db --errs M1.SPACE.1 > errs.json
 # rules.json 사이드카가 발견되면(뷰어와 같은 자동 탐색, 또는
 # --drc-rules 지정) 그 룰의 원천 GDS 레이어만 켜고 렌더 —
 # 뷰어 더블클릭 격리와 동일; --layers 명시가 우선
-python -m floe render chip.oas --drc results.db \
+floe2 render chip.oas --drc results.db \
     --drc-rule M1.SPACE.1 --drc-err 1-50 --px 800 --out snap.png
 ```
 
@@ -97,6 +102,26 @@ python -m floe render chip.oas --drc results.db \
   4,096개 ID 단위 두 비트맵과 증분 카운터를 사용하므로 도형을 읽거나
   전체 에러 수만큼 메모리를 할당하지 않는다. 상세 저장 계약은
   `SPEC-FORMATS.ko.md`의 검토 통계 사이드카 절을 따른다.
+
+- **잠금**(2026-10-09, app 0.12.324; 사용자: "동일 파일을 먼저 인덱싱하고 있거나
+  사용하고 있는 경우에는 다른 사용자가 실행하더라도 리젝"; CACHE-NAMING §5).
+  - `floe-index drc`는 임시 파일을 쓸기 전에 팩의 build·use를 배타로 쥔다. 다른
+    실행이 팩을 만들고 있거나, 누가 리뷰로 팩을 열고 있으면 종료 75와 `[lock] …`
+    한 줄로 거절한다.
+    - 예전에는 두 빌드의 고정 임시 이름(`tmp0..N/tmpw/tmpb/tmpq`)이 겹쳤다.
+    - 시작할 때 쓸기가 상대의 임시 파일을 지웠다.
+    - 리뷰 중 재팩하면 그 리뷰의 waive 사이드카가 옆으로 치워졌다.
+  - 실패한 실행은 자기 임시 파일만 지운다. 게시는 끝의 rename이라 앞의 팩은
+    온전하다. 예전에는 읽을 수 없는 .db 같은 이른 오류에도 게시된 팩을 지웠다.
+  - 리더 `IcePack`은 연 동안 use를 공유로 쥐고 등록한다(`close()`에서 푼다). 팩을
+    통째로 다시 만드는 중이면 `indexlock.Busy`로 거절되고, `floe2 drc`·`render
+    --drc`는 75로 끝난다.
+  - 뷰어는 db를 바꾸거나 새 레이아웃을 열 때 옛 팩을 해제한다(`_drc_release`).
+    진행 중인 검토 쓰기와 분석 워커 종료를 백그라운드에서 기다린 뒤 닫으므로
+    화면 전환을 막지 않으며, 순환 참조의 GC 시점에 잠금 해제를 맡기지 않는다.
+  - 같은 db를 다시 팩해야 하면(DRC를 다시 돌린 경우) 자기 리더들이 모두
+    종료된 뒤 인덱싱한다. 그 사이 다른 DB나 레이아웃을 열면 대기 요청은 취소한다.
+  - 다른 실행이 팩을 만드는 중이면 동의 창 대신 "being indexed by …"를 띄운다.
 - **자기완결**: 변환 후 .db 불필요. 크기 실측 원본의 1/3~1/4.5.
 - **좌표**: 파일순 64에러 블록 varint 델타 스트림. 레코드에 서수
   없음 — **에러 번호 = 전역 파일순 순번**(Calibre RVE 동일)이
@@ -306,6 +331,11 @@ GTK 이미지 합성을 포함한 시간이다.
 
 ## 4. SVRF 룰 메타데이터 (.rules.json) — waive 판단 보조
 
+- **잠금**(2026-10-09): `floe-index svrf`는 출력에 쓰기 직전 그 출력의 build를 배타로
+  쥔다(키 `<deck>.rules`, CACHE-NAMING §5). 같은 출력으로 컴파일하는 다른 실행은
+  75로 거절된다. 예전에는 둘이 `<out>.tmp`를 함께 써서 결과가 섞일 수 있었다.
+  읽는 쪽은 한 번 읽고 닫으므로 use는 쥐지 않는다(교체는 rename).
+
 **서브셋 파서**(`floe-index svrf`, `rust/cli/src/svrf.rs` — 2026-09-29
 `floe/svrf.py`에서 이식, 파이썬 쪽은 사이드카 읽기(`load_rules`·
 `rhs_operands`)만 남음): 지오메트리 연산 의미는 구현하지
@@ -479,7 +509,7 @@ area와 치수 검사가 섞인 룰은 면적 라벨과 기존 길이 룰러를 
 `sample.svrf.rules.json`과 `sample.db.clusters`도 함께 둔다.
 
 ```sh
-python -m floe2 view sample.oas --multi --drc sample.db
+rust/target/release/floe2 view sample.oas --multi --drc sample.db
 # SVRF 또는 DB를 수정한 경우 재생성:
 rust/target/release/floe-index svrf sample.svrf
 rust/target/release/floe-index drc sample.db

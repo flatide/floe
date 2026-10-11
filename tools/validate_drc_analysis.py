@@ -15,6 +15,7 @@ from unittest.mock import patch
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
+BIN = ROOT / "rust/target/release/floe-index"
 sys.path.insert(0, str(ROOT))
 from floe import cachepath, drc, drc_analysis, drc_prepare  # noqa: E402
 from floe import drc_delta, drc_delta_cache, drc_spatial, svrf  # noqa: E402
@@ -88,8 +89,9 @@ class AnalysisTests(unittest.TestCase):
             drc_prepare.open_pack(self.source)
 
     def test_prepare_cli_builds_reusable_indices_without_review_sidecar(self):
-        env = dict(os.environ, FLOE_DRC_ANALYSIS_ROOT=os.path.join(self.temp.name, "analysis"))
-        command = [sys.executable, "-m", "floe2", "drc-prepare", str(self.source),
+        env = dict(os.environ, FLOE_PYTHON_BIN=sys.executable,
+                   FLOE_DRC_ANALYSIS_ROOT=os.path.join(self.temp.name, "analysis"))
+        command = [str(BIN), "drc-prepare", str(self.source),
                    "--svrf", str(ROOT / "sample.svrf.rules.json"), "--rule", "M1.SPACE.1"]
         result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -202,8 +204,9 @@ class EmptyPreparationTests(unittest.TestCase):
                                 selected=(self.names[0], "MISSING"), report=lambda _: None)
 
     def test_empty_prepare_cli_cold_and_warm_stay_without_per_rule_cache(self):
-        env = dict(os.environ, FLOE_DRC_ANALYSIS_ROOT=str(self.folder / "analysis"))
-        command = [sys.executable, "-m", "floe2", "drc-prepare", str(self.empty),
+        env = dict(os.environ, FLOE_PYTHON_BIN=sys.executable,
+                   FLOE_DRC_ANALYSIS_ROOT=str(self.folder / "analysis"))
+        command = [str(BIN), "drc-prepare", str(self.empty),
                    "--svrf", str(self.rules)]
         elapsed = []
         for _ in range(2):

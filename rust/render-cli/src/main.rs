@@ -1,7 +1,8 @@
 use floe_render_core::{
-    render_geometry_occupancy, render_geometry_styled, render_geometry_styled_unbinned, Cache, CacheLayer, DecodedPageCache,
-    FrameScene, GeometryRasterRequest, LayerFill, LayerStyle, PlanRequest, RasterViewBox,
-    StyledGeometryRasterRequest, ViewBox, DEFAULT_TILE_SIZE, MAX_TILE_SIZE,
+    render_geometry_occupancy, render_geometry_styled, render_geometry_styled_unbinned, Cache,
+    CacheLayer, DecodedPageCache, FrameScene, GeometryRasterRequest, LayerFill, LayerStyle,
+    PlanRequest, RasterViewBox, StyledGeometryRasterRequest, ViewBox, DEFAULT_TILE_SIZE,
+    MAX_TILE_SIZE,
 };
 use std::env;
 use std::process::ExitCode;

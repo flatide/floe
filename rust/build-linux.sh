@@ -12,6 +12,8 @@
 #       coupling, runs on ANY x86_64 Linux. The portability fallback.
 #
 #   sh rust/build-linux.sh
+#   GNU_GLIBC=2.28 sh rust/build-linux.sh   # the glibc variant for RHEL 8+
+#                                            # hosts from any build machine
 #
 # Carry a binary in, `chmod +x`, verify with the checksum, smoke:
 #   ./floe-index-linux-gnu scan some.oas 16
@@ -24,7 +26,7 @@ if command -v rustup >/dev/null 2>&1; then
     rustup target add x86_64-unknown-linux-musl >/dev/null
 fi
 mkdir -p dist
-BINS="floe-index floe-renderd floe-render-cli path-inventory"
+BINS="floe2 floe-index floe-renderd floe-render-cli path-inventory"
 copy_binaries() {
     suffix=$1
     source_dir=$2
@@ -37,7 +39,21 @@ copy_binaries() {
             > "$binary-$suffix.sha256")
     done
 }
-if [ "$(uname -s)" = "Linux" ]; then
+# GNU_GLIBC=2.28: the glibc variant is linked against that glibc whatever
+# the build machine's (cargo-zigbuild + zig take that glibc's symbols only;
+# any build OS) - it runs on hosts with that glibc or newer (RHEL 8 = 2.28).
+# Unset, the glibc variant is the Linux build machine's own (its glibc floor).
+if [ -n "${GNU_GLIBC:-}" ]; then
+    command -v cargo-zigbuild >/dev/null || {
+        echo "GNU_GLIBC needs cargo-zigbuild: cargo install cargo-zigbuild"; exit 1; }
+    command -v zig >/dev/null || python3 -c "import ziglang" 2>/dev/null || {
+        echo "GNU_GLIBC needs zig: pip install ziglang (or zig on PATH)"; exit 1; }
+    if command -v rustup >/dev/null 2>&1; then
+        rustup target add x86_64-unknown-linux-gnu >/dev/null
+    fi
+    cargo zigbuild --release --target "x86_64-unknown-linux-gnu.$GNU_GLIBC"
+    copy_binaries linux-gnu target/x86_64-unknown-linux-gnu/release
+elif [ "$(uname -s)" = "Linux" ]; then
     cargo build --release
     copy_binaries linux-gnu target/release
 fi

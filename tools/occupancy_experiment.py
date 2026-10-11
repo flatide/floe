@@ -54,10 +54,12 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, "tools", "oracle"))  # floe_oracle (P3)
 
 
 def _floe2(*argv, env=None, allow_fail=False):
-    cmd = [sys.executable, "-B", "-m", "floe2"] + [str(a) for a in argv]
+    cmd = [os.environ.get("FLOE2_BIN") or os.path.join(
+        ROOT, "rust", "target", "release", "floe2")] + [str(a) for a in argv]
     t0 = time.perf_counter()
     res = subprocess.run(cmd, cwd=ROOT, env=dict(os.environ, **(env or {})),
                          capture_output=True, text=True)
@@ -136,7 +138,7 @@ def main():
     args = ap.parse_args()
     import numpy as np
     from PIL import Image
-    from floe.cache import Cache
+    from floe_oracle.cache import Cache
 
     os.makedirs(args.out, exist_ok=True)
     c = Cache(args.src)

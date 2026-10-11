@@ -114,9 +114,13 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
+# the product command line: the Rust `floe2` (rust/floe2; the Python
+# floe2 CLI is gone - docs/SHARED_APP_LAYER.ko.md P1c)
+FLOE2 = os.environ.get("FLOE2_BIN") or str(ROOT / "rust" / "target" / "release" / "floe2")
 sys.path.insert(0, str(ROOT))
-from floe.cache import Cache
-from floe.rust_render import RustRenderWorker
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (P3)
+from floe_oracle.cache import Cache
+from floe_oracle.rust_render import RustRenderWorker
 
 W, H = 1000, 400
 PX_UM = 0.1                                   # the view: 0.1 um a pixel
@@ -493,7 +497,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='floe-area-true-') as temp:
         src = Path(temp) / 'bars.oas'
         layout(src)
-        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+        done = subprocess.run([FLOE2, 'index', str(src)],
                               cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
         assert done.returncode == 0, done.stdout + done.stderr
         on, off = worker(src, True), worker(src, False)
@@ -701,7 +705,7 @@ def main():
                 for i in range(120):
                     top.shapes(li).insert(kdb.DBox(i * 0.1, j * 0.1, i * 0.1 + 0.05, j * 0.1 + 0.05))
             ly.write(str(dense))
-            done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(dense), '--lod'],
+            done = subprocess.run([FLOE2, 'index', str(dense), '--lod'],
                                   cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
             assert done.returncode == 0, done.stdout + done.stderr
             swaps = {}
@@ -767,7 +771,7 @@ def main():
             split_layout(whole_src)
             shutil.copy(whole_src, split_src)
             for src, mb in ((whole_src, 16), (split_src, 1)):
-                done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src), '--page-target-mb', str(mb)],
+                done = subprocess.run([FLOE2, 'index', str(src), '--page-target-mb', str(mb)],
                                       cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
                 assert done.returncode == 0, done.stdout + done.stderr
                 pieces = 'rep-split 1 fragments (2 grid pieces: 0 one-row of a 2-D grid, 0 one-member)'
@@ -804,7 +808,7 @@ def main():
             split_layout(rows_src, rows=True)
             shutil.copy(rows_src, uncut_src)
             for src, mb in ((rows_src, 1), (uncut_src, 16)):
-                done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src), '--page-target-mb', str(mb)],
+                done = subprocess.run([FLOE2, 'index', str(src), '--page-target-mb', str(mb)],
                                       cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
                 assert done.returncode == 0, done.stdout + done.stderr
                 pieces = 'rep-split 1 fragments (2 grid pieces: 2 one-row of a 2-D grid, 0 one-member)'

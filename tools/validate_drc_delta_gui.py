@@ -17,7 +17,9 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from floe import cli, drc, drc_delta as delta, fe_embed, gui, service  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "oracle"))
+from floe import drc, drc_delta as delta, gui  # noqa: E402
+from floe_oracle import cli, drc as oracle_drc, fe_embed, service  # noqa: E402
 from validate_drc_delta import Database, area_cases, constraint, edge, rect  # noqa: E402
 from validate_drc_marker_gui import viewer_fixture  # noqa: E402
 from validate_drc_clusters import StatusDb, TreeStore, TreeView  # noqa: E402
@@ -368,7 +370,7 @@ class DeltaViewerTests(unittest.TestCase):
             args = SimpleNamespace(drc=path, drc_rule="R", drc_err="1", drc_cap=200,
                                    drc_rules=None, layers="99/0", depth=None,
                                    drc_frac=0.5, out=output, px="1000")
-            with patch.object(drc, "load_db", return_value=db), \
+            with patch.object(oracle_drc, "load_db", return_value=db), \
                     patch.object(service, "make_render_worker", return_value=worker), \
                     patch.object(cli, "_drc_layer_legend", return_value=None), \
                     patch.object(cli, "print"):

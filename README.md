@@ -42,8 +42,8 @@ ls /opt/homebrew/lib | grep python
 
 # 반드시 그 버전의 Homebrew 파이썬으로 venv 생성
 /opt/homebrew/bin/python3.14 -m venv --system-site-packages .venv
-.venv/bin/pip install numpy pillow
-# 안정판 floe 또는 개발 oracle을 쓸 때: .venv/bin/pip install klayout
+.venv/bin/pip install numpy  # DRC 분석·검토
+# 개발 oracle을 쓸 때: .venv/bin/pip install pillow klayout
 .venv/bin/python -c "import gi; gi.require_version('Gtk', '3.0'); print(gi.__file__)"
 ```
 
@@ -62,8 +62,8 @@ sudo dnf install python3-gobject gtk3      # Debian/Ubuntu: python3-gi gir1.2-gt
 
 python3 -c 'import gi; gi.require_version("Gtk", "3.0")'   # 사전 확인
 python3 -m venv --system-site-packages .venv
-.venv/bin/pip install numpy pillow
-# 안정판 floe 또는 개발 oracle을 쓸 때: .venv/bin/pip install klayout
+.venv/bin/pip install numpy  # DRC 분석·검토
+# 개발 oracle을 쓸 때: .venv/bin/pip install pillow klayout
 ```
 
 폐쇄망 호스트는 아래 [폐쇄망 리눅스 배포](#폐쇄망-리눅스-배포) 절차를 따른다.
@@ -129,8 +129,12 @@ floe2는 **최초 1회 인덱싱**으로 이 비용을 지불하고, 이후 모�
 관심 영역과 교차하는 타일만 로딩해 ms~초 단위로 응답한다.
 
 ```sh
-alias floe2=".venv/bin/python -m floe2"  # 제품 (Rust renderer)
-alias floe=".venv/bin/python -m floe"    # 개발 전용: 동결된 KLayout 셸 (oracle·선행 검증)
+# floe2 = Rust 명령줄 (rust/floe2, 2026-10-09 P1c). GTK 뷰어(view)만 Python이다:
+# floe2 view가 체크아웃의 .venv python으로 floe.gtkview를 띄운다.
+(cd rust && cargo build --release)          # floe2, floe-index, floe-renderd
+alias floe2="$PWD/rust/target/release/floe2"  # 제품
+alias floe="env PYTHONPATH=$PWD/tools/oracle:$PWD .venv/bin/python -m floe_oracle"  # 개발 전용: 동결 KLayout 셸(오라클, 명령만 - P3)
+# tcsh: alias floe2 /path/to/floe2/rust/target/release/floe2
 
 floe2 index data/testchip_1g5.oas          # 1회: 공유 .<src>.ice/ 생성(소스 옆 숨김 폴더)
 floe2 index data/testchip_1g5.oas --jobs 1 # 병렬 끄기
@@ -145,6 +149,13 @@ floe view data/testchip_1g5.oas            # 개발용 KLayout 셸 (동결, 비�
 ```
 
 - `--bbox`는 µm 단위 `X0,Y0,X1,Y1`. `--layers`는 이름 또는 `layer/datatype` 목록.
+- 뷰어의 렌더 루프(무엇을 언제 그릴지, 이동이 멈춘 뒤 그리기, 이전 렌더 취소,
+  여백, Esc)와 내비게이션·미니맵은 웹과 같은 Rust 컨트롤러가 정한다
+  (0.12.337~0.12.338, docs/SHARED_APP_LAYER.ko.md §7 P4d·P4e). 예전 Python 루프와
+  `FLOE_GTK_LOOP=legacy`는 회사 Linux 확인 뒤 0.12.342에서 지웠다(P4f). 남은 Python은
+  GTK 화면(위젯, 프레임 표시, 덧그림, 입력)과 DRC 분석·검토 백엔드다.
+  클러스터·대용량 마커·CD 델타·방문/검토 제외는 `floe/drc*.py`를 사용하며,
+  레이아웃 렌더링과 내비게이션은 Rust 컨트롤러가 처리한다.
 - `floe2 index`와 `floe index`는 같은 `floe-index vfs`를 실행한다. 같은 source
   fingerprint의 정상 캐시는 재사용하며 기존·불완전·stale 캐시 교체는 명시적
   `--force`가 있어야 한다. `--page-target-mb`, `--no-lod`, `--slow-cell-s`,
@@ -168,6 +179,27 @@ floe view data/testchip_1g5.oas            # 개발용 KLayout 셸 (동결, 비�
   그 아래로 내려가지 않는다 — 정확 마킹의 1셀 이내 상위집합이며 인스턴스 수에 묶이지
   않는다. `--occupancy-prune 0`이 정확 경로다. 형식·규칙은
   docs/OCCUPANCY_PLAN.ko.md, 뷰어 적용은 M2~M5(완료).
+- **동시 색인과 사용(2026-10-09).** 같은 파일을 누가 색인 중이면 다른 색인은
+  누가 실행하든 바로 거절된다(종료 코드 75). 다음 한 줄이 쥔 사람을 알린다:
+  `[lock] X.oas is being indexed by kim (from 10.1.2.3) on srv02, pid 4242, since
+  2026-10-09 15:20:11 (floe-index vfs) - try again when it finishes`
+  - 누가 뷰어로 연 캐시를 통째로 다시 만드는 색인(`--force`, 원본이 바뀐 캐시)도
+    거절된다(`… is in use by …`).
+  - 셀 트리용 `--hier-only`, `--occupancy-only`처럼 없는 파일을 새로 만드는 색인은
+    열린 뷰어 옆에서 그대로 된다. 뷰어가 쓰는 기존 `design.ovh/.ovo/.ovr`을 다시 만드는
+    색인은 누가 열고 있으면(어느 서버든) 거절된다(0.12.325).
+  - 다른 사람이 통째로 색인 중인 파일을 열면 "색인 없음" 대신 `being indexed by …`가
+    나온다. 그때 뷰어는 두 번째 색인을 시작하지 않는다.
+  - 잡덱은 그런 소스를 빼고 열고, 덱 색인은 그 소스를 `BUSY`로 센다.
+  - DRC db의 `.tray` 팩도 같다. 누가 리뷰로 연 팩은 다시 팩하지 못하고, 실패한
+    재팩이 기존 팩을 지우지 않는다. 룰 덱의 `.rules.json`은 같은 출력으로 두 컴파일이
+    겹치지 않게 막는다(0.12.324).
+  - 잠금은 소스 옆 숨김 폴더 `.floe-lock/`에 있다. 지우지 않는다
+    (docs/CACHE-NAMING.ko.md §5). 캐시나 폴더를 심볼릭 링크로 가리켜도 같은
+    잠금이다.
+  - NFS가 `nolock`으로 마운트돼 있으면 다른 호스트끼리는 막지 못한다. 처음
+    한 번 `[lock] … locks hold on this host only` 경고가 나온다.
+  - `FLOE_LOCK=off`이면 예전처럼 잠금 없이 동작한다.
 
 ### Jobdeck (Calibre MDPView `.jb`)
 
@@ -346,7 +378,7 @@ Calibre가 `DRC RESULTS DATABASE "out.db" ASCII`로 쓰는 **ASCII 결과
   edge = 선분 + 끝점 표시). `Esc` 로 마커 삭제.
 - **`n` / `p`** = 다음/이전 에러로 순차 이동 (창의 prev/next 버튼과 동일,
   전체 에러를 룰 순서로 순회하며 트리 선택도 따라온다).
-- 파서(`floe/drc.py`)는 순수 파이썬으로 포맷 오차에 관대하다: CRLF/빈 줄
+- 파서(제품 GTK DRC는 `floe/drc.py`, Rust CLI는 app-core `drc`; 비교 기준은 `tools/oracle/floe_oracle/drc.py`)는 포맷 오차에 관대하다: CRLF/빈 줄
   무시, 선언 카운트는 참고만, 모르는 레코드 문자는 건너뜀, 잘린 파일은
   파싱된 부분까지 사용. 포맷: `p <n> <꼭짓점수>` + 줄당 `x y`,
   `e <n> <엣지수>` + 줄당 `x1 y1 x2 y2` (정수, um = 값/precision).
@@ -720,23 +752,20 @@ klayout은 서브픽셀 도형도 전부 순회하며 그리므로(멤버당 비
 
 ## 폐쇄망 리눅스 배포
 
-기본 경로의 Python 의존성은 `numpy`, `pillow` 휠이고 GUI는
-PyGObject/GTK3 (**RHEL 계열 GNOME 호스트에 기본 탑재** — flateyes와 동일하게
-추가 설치 없음). 인덱싱/렌더용 Rust 바이너리 두 개를 함께 배포한다.
-KLayout wheel은 legacy indexer/renderer와 개발 oracle에서만 선택적으로 필요하다.
+제품은 Rust 실행 파일 세 개(`floe2`·`floe-index`·`floe-renderd`)와 GTK 뷰어·DRC 백엔드
+`floe/`이다. 뷰어는 시스템 PyGObject/GTK3와 DRC 분석용 NumPy를 사용한다.
+GTK는 **RHEL 계열 GNOME 호스트에 기본 탑재**되어 있으며 pycairo는 필요 없다.
+Pillow·KLayout은 게이트와 동결 KLayout 셸(개발 전용 오라클)에만 필요하다.
+Rust CLI의 index·info·render·clip·drc 명령은 Python 없이 돈다. 별도 DRC 분석
+준비 명령 `floe-index drc-prepare`는 제품 Python 분석 워커를 실행한다.
 
 ```sh
-# 1) 인터넷 PC에서 휠 수집 (타겟 파이썬 버전에 맞춰)
-pip download numpy pillow -d wheels/ \
-    --platform manylinux2014_x86_64 --only-binary=:all: \
-    --python-version 311        # 예: 타겟이 python3.11
-
-# 2) 폐쇄망 호스트에서 - 반드시 시스템 PyGObject가 보이는 파이썬으로
+# 폐쇄망 호스트에서 - 시스템 PyGObject가 보이는 파이썬이면 그대로
 python3 -c 'import gi; gi.require_version("Gtk", "3.0")'   # GUI 사전 확인
-python3 -m venv --system-site-packages .venv               # gi가 보이게
-.venv/bin/pip install --no-index --find-links wheels/ numpy pillow
-# rollback/oracle 환경만 별도로 klayout wheel을 설치
-# floe/ 디렉토리 복사 후: .venv/bin/python -m floe ...
+# floe/(GTK 뷰어)와 Rust 바이너리(floe2·floe-index·floe-renderd)를 같은
+# 폴더 아래에 두고(floe2가 위쪽 폴더의 floe/gui.py를 찾는다):
+#   setenv FLOE_GTK_PYTHON /usr/bin/python3     # tcsh; 없으면 PATH의 python3
+#   floe2 view chip.oas
 ```
 
 **주의 — PyGObject/pycairo를 pip으로 설치하지 말 것.** pip은 meson 소스
@@ -759,13 +788,14 @@ python3 -m venv --system-site-packages .venv               # gi가 보이게
 
 호스트에 `python3-gobject`(gi)조차 없거나 파이썬 버전이 안 맞는 경우,
 flateyes-portable과 동일하게 필요한 걸 전부 싸서 가져간다. Python +
-PyGObject + GTK3 (conda-forge, 재배치 가능) + NumPy/Pillow + floe/floe2 +
-`floe-index`/`floe-renderd`가 한 tar에 들어가고, 호스트엔 아무것도
+PyGObject + GTK3 (conda-forge, 재배치 가능) + NumPy + floe(GTK 뷰어·DRC 분석) + `floe2`·
+`floe-index`·`floe-renderd`가 한 tar에 들어가고, 호스트엔 아무것도
 설치·변경하지 않는다 (쓰는 것은 X 디스플레이와 시스템 폰트뿐).
 기본 floe2 번들은 KLayout을 포함하지 않는다.
 
-NumPy/Pillow Linux 휠과 네이티브 바이너리를 런타임에 넣으므로 번들은
-**x86_64 Linux 빌드 머신**에서 만든다. Rust 바이너리는 빌드 호스트의 glibc
+번들의 런타임 Python을 빌드 중에 실행해 확인하며, pip로 DRC 분석용 NumPy 휠을 넣는다.
+KLayout 개발 번들에는 Pillow·KLayout도 추가한다. 번들은 **x86_64 Linux 빌드 머신**에서
+만든다. Rust 바이너리는 빌드 호스트의 glibc
 버전을 끌고 들어오지 않도록 기본적으로 `x86_64-unknown-linux-musl` 정적
 타깃으로 빌드한다(`rustup target`이 없으면 자동 설치). 빌드 시 verify가 모든
 ELF의 실제 glibc floor를 출력한다. `tools/make_portable.sh`가 flateyes의
@@ -773,11 +803,20 @@ ELF의 실제 glibc floor를 출력한다. `tools/make_portable.sh`가 flateyes�
 
 ```sh
 tools/make_portable.sh                     # -> floe2-portable-<ver>-<date>.tar.gz
-# 폐쇄망 미러만 되는 빌드 머신이면 numpy/pillow 휠을 미리 받아두고:
-WHEELS=./wheels tools/make_portable.sh
+# 폐쇄망 미러만 되는 빌드 머신에서는 NumPy(개발 번들은 Pillow·KLayout도) 휠을 미리 받아두고:
+WHEELS=./wheels FLOE_PORTABLE_KLAYOUT=1 tools/make_portable.sh
 # KLayout 포함 번들(기본 배포 아님): floe와 floe2 실행 파일을 함께 제공
 FLOE_PORTABLE_KLAYOUT=1 tools/make_portable.sh
+# Rust 실행 파일을 glibc(GNU) 빌드로: 병렬 색인이 ~40% 빠르다(rust/BUILD.md).
+# 빌드 머신의 glibc와 무관하게 glibc 2.28(GLIBC_CEILING) 기준으로 링크하므로
+# RHEL 8 이상 현장에서 돈다. cargo-zigbuild와 zig가 필요하다(한 번):
+#   cargo install cargo-zigbuild
+#   python3 -m venv ~/zig && ~/zig/bin/pip install ziglang   # Ubuntu 24.04는
+#   export PATH=~/zig/bin:$PATH     # 시스템 pip --user를 막는다(PEP 668)
+FLOE_PORTABLE_RUST=gnu tools/make_portable.sh   # -> ...-gnu.tar.gz
 ```
+기본(`FLOE_PORTABLE_RUST=musl`)은 정적 musl이라 어느 x86_64 Linux에서나 돈다.
+`selfcheck`의 `rust:` 줄이 번들이 어느 쪽인지 말한다.
 
 호스트에서는 **풀고 실행만** (설치·권한 불필요):
 
@@ -796,14 +835,17 @@ tar xzf floe2-portable-*.tar.gz -C /opt     # 위치 자유
 conda-forge가 GTK 스택 전체를 재배치 가능하게 묶어주므로 (GIR 타입립·
 gdk-pixbuf 로더·스키마·폰트 포함) gi를 시스템에 얹을 필요가 없다. 런처가
 첫 실행 시 호스트별 캐시(GSettings 스키마, pixbuf 로더 목록)를 자동
-생성한다. 코드를 갱신할 때는 새 `floe/`와 `floe2/` 패키지를 번들의
-`runtime/lib/python*/site-packages/`에 함께 덮어쓴다.
+생성한다. 갱신은 번들을 새로 만드는 것이 기본이다. Python 뷰어만 바뀐
+판이면 새 `floe/` 패키지를 번들의 `runtime/lib/python*/site-packages/`에
+통째로 덮어써도 되지만, Rust 쪽(`floe2`, `floe-index`, `floe-renderd`)이
+바뀐 판은 `runtime/bin/`의 세 실행 파일도 함께 바꿔야 한다(셋과
+`floe/`는 같은 판이어야 한다). Python `floe2/` 패키지는 0.12.328부터 없다.
 `floe-portable`은 KLayout과 Rust renderer를 모두 포함하므로 루트의 `floe`는
 안정판 KLayout 제품, `floe2`는 Rust-only 제품으로 같은 cache를 공유한다. 기본
 `floe2-portable`은 KLayout이 없으므로 `floe2` launcher만 제공한다.
 
 **뷰어 문제 진단 순서** (창이 검게 나오는 등):
-1. `selfcheck` — 스택(gi/GTK/pixbuf/NumPy/Pillow/Rust binaries) 검증,
+1. `selfcheck` — 스택(gi/GTK/pixbuf/NumPy/DRC 모듈/Rust binaries; 개발 번들은 Pillow/KLayout도) 검증,
    창 없이. 기본 번들은 KLayout 부재도 확인한다.
 2. `floe2 render <src> --bbox ... --out t.png` — 캐시·렌더 엔진 검증, GUI 없이.
 3. `floe2 probe <src>` — **뷰어의 렌더 서비스 경로**(spawn 자식 + 큐 + 프레임)
@@ -955,7 +997,7 @@ payload decode와 2D image tile raster를 worker 여러 개로 병렬 수행한�
 cd rust
 cargo build --release -p floe-renderd -p floe-render-cli
 cd ..
-.venv/bin/python -m floe2 view --multi chip.oas
+rust/target/release/floe2 view --multi chip.oas
 ```
 
 `floe2`의 유일한 backend는 in-tree `floe.rust_render.RustRenderWorker`와

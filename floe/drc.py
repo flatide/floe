@@ -43,6 +43,7 @@ import threading
 import time
 
 from . import cachepath
+from . import indexlock
 
 
 EDGE_RULER_OFFSET_PX = 14
@@ -602,7 +603,7 @@ class IcePack(object):
                  "_notes", "_note_of", "_note_next", "_note_path",
                  "_note_tag", "_review", "_analysis_identity",
                  "_review_store", "_review_fingerprint", "_review_store_lock",
-                 "_review_store_error")
+                 "_review_store_error", "_lock")
 
     def __init__(self, path, src_path=None, verify_src=False, *,
                  review=True, review_path=None):
@@ -613,6 +614,7 @@ class IcePack(object):
         """
         self._wfd = None
         self._map = None
+        self._lock = None
         self._status_lock = threading.RLock()
         self._status_cache_lock = threading.Lock()
         self._status_generation = 0
@@ -656,6 +658,12 @@ class IcePack(object):
                 m.close()
             except (OSError, ValueError):
                 pass
+        # Release the reader only after this review has closed its stores
+        # and coordinate map; a re-pack may move its sidecars immediately.
+        lock = getattr(self, "_lock", None)
+        self._lock = None
+        if lock is not None:
+            lock.close()
 
     def __del__(self):
         try:
@@ -667,6 +675,10 @@ class IcePack(object):
         import mmap
         import numpy as np
         from .drc_analysis import pack_identity
+        # A re-pack can replace geometry and move review sidecars aside.
+        # Analysis workers hold the same reader lease as interactive views.
+        self._lock = indexlock.hold_readers(
+            indexlock.PACK, [path], indexlock.reader_label("floe DRC review"))
         self._analysis_identity = pack_identity(path)
         with open(path, "rb") as f:
             head = f.read(_ICE_HEADER.size)

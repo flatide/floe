@@ -2220,7 +2220,7 @@ pages, pass 2 over budget: thinned`였다.
 - **재현되지 않는 것:** 실칩의 시간(75 s, 2.7 s)이다. 이 칩의 프레임은 0.2~0.5 s다. 실칩은 9.8 GB 색인, 449
   레이어, 깊이 15이고 첫 읽기가 디스크에서 온다.
 - **만들기:** `.venv/bin/python tools/gen_route_chip.py data/synthetic/route_chip.oas`, 그다음
-  `.venv/bin/python -m floe2 index data/synthetic/route_chip.oas`.
+  `rust/target/release/floe2 index data/synthetic/route_chip.oas`.
 
 **하한 아래 페이지의 점유 비트(2026-10-02, 0.12.274 / renderd 0.12.252).** 사용자가 실칩에서 퍼뜨리기를 켜 보고
 "실제로는 없는 곳이 채워지는 현상"을 보았다. 원인(페이지 상자 전체에 고르게 뿌림)은 예상한 대로였고, 결정은 "점유 비트

@@ -104,7 +104,10 @@ static PHASE_NS: [std::sync::atomic::AtomicU64; 4] = [
 ];
 
 fn phase_add(k: usize, since: std::time::Instant) {
-    PHASE_NS[k].fetch_add(since.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+    PHASE_NS[k].fetch_add(
+        since.elapsed().as_nanos() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
 
 /// (group, prepare, mark, pyramid) seconds of the last build, and reset
@@ -214,7 +217,14 @@ struct Prune<'a> {
 /// relative-depth masks of one layer, bottom-up over the cells that
 /// hold it (`has`)
 fn layer_depth_masks(doc: &Doc, shapes: &[CellShapes<'_>], has: &[bool]) -> Vec<u32> {
-    fn go(doc: &Doc, ci: usize, shapes: &[CellShapes<'_>], has: &[bool], memo: &mut Vec<Option<u32>>, open: &mut Vec<bool>) -> u32 {
+    fn go(
+        doc: &Doc,
+        ci: usize,
+        shapes: &[CellShapes<'_>],
+        has: &[bool],
+        memo: &mut Vec<Option<u32>>,
+        open: &mut Vec<bool>,
+    ) -> u32 {
         if let Some(m) = memo[ci] {
             return m;
         }
@@ -263,7 +273,12 @@ fn placed_bbox(b: Win, xf: &Xf, pl: &PlaceRec, dx: i64, dy: i64) -> (i128, i128,
     let t = xf.compose(&Xf::place(pl.x + dx, pl.y + dy, pl.rot, pl.flip));
     let a = t.apply(b.0, b.1);
     let z = t.apply(b.2, b.3);
-    (a.0.min(z.0) as i128, a.1.min(z.1) as i128, a.0.max(z.0) as i128, a.1.max(z.1) as i128)
+    (
+        a.0.min(z.0) as i128,
+        a.1.min(z.1) as i128,
+        a.0.max(z.0) as i128,
+        a.1.max(z.1) as i128,
+    )
 }
 
 /// how many plain placements deep the balanced split descends looking
@@ -385,7 +400,9 @@ impl Layer {
             if !plane_drawn_at(plane.depth, depth) {
                 continue;
             }
-            let Some(level) = plane.levels.get(lv) else { continue };
+            let Some(level) = plane.levels.get(lv) else {
+                continue;
+            };
             match &mut out {
                 None => out = Some(level.clone()),
                 Some(acc) => acc.or_with(level),
@@ -491,7 +508,9 @@ impl SharedBits {
             w,
             h,
             stride,
-            words: (0..stride * h as usize).map(|_| std::sync::atomic::AtomicU64::new(0)).collect(),
+            words: (0..stride * h as usize)
+                .map(|_| std::sync::atomic::AtomicU64::new(0))
+                .collect(),
         }
     }
 
@@ -534,7 +553,11 @@ impl SharedBits {
                 }
             }
         }
-        Level { w: self.w, h: self.h, bits }
+        Level {
+            w: self.w,
+            h: self.h,
+            bits,
+        }
     }
 }
 
@@ -547,7 +570,9 @@ struct Planes {
 impl Planes {
     fn new(w: u32, h: u32, max_depth: u32) -> Planes {
         let n = (max_depth.min(DEPTH_CAP as u32) + 1) as usize;
-        Planes { by_depth: (0..n).map(|_| SharedBits::new(w, h)).collect() }
+        Planes {
+            by_depth: (0..n).map(|_| SharedBits::new(w, h)).collect(),
+        }
     }
 
     /// the plane of a placement depth (the cap and anything deeper,
@@ -581,19 +606,41 @@ fn index_shapes(doc: &Doc) -> ShapeIndex<'_> {
     let mut index: ShapeIndex<'_> = HashMap::new();
     for (ci, cell) in doc.cells.iter().enumerate() {
         for r in &cell.rects {
-            index.entry((r.layer, r.dt)).or_default().entry(ci).or_default().rects.push(r);
+            index
+                .entry((r.layer, r.dt))
+                .or_default()
+                .entry(ci)
+                .or_default()
+                .rects
+                .push(r);
         }
         for p in &cell.polys {
-            index.entry((p.layer, p.dt)).or_default().entry(ci).or_default().polys.push(p);
+            index
+                .entry((p.layer, p.dt))
+                .or_default()
+                .entry(ci)
+                .or_default()
+                .polys
+                .push(p);
         }
         for p in &cell.paths {
-            index.entry((p.layer, p.dt)).or_default().entry(ci).or_default().paths.push(p);
+            index
+                .entry((p.layer, p.dt))
+                .or_default()
+                .entry(ci)
+                .or_default()
+                .paths
+                .push(p);
         }
     }
     index
 }
 
-fn take_layer_shapes<'a>(index: &mut ShapeIndex<'a>, key: (u32, u32), cells: usize) -> Vec<CellShapes<'a>> {
+fn take_layer_shapes<'a>(
+    index: &mut ShapeIndex<'a>,
+    key: (u32, u32),
+    cells: usize,
+) -> Vec<CellShapes<'a>> {
     let mut out: Vec<_> = (0..cells).map(|_| CellShapes::default()).collect();
     if let Some(layer) = index.remove(&key) {
         for (ci, shapes) in layer {
@@ -644,7 +691,13 @@ fn layer_presence(doc: &Doc, shapes: &[CellShapes<'_>]) -> Vec<bool> {
 /// its own (0 = the top cell's), which is how many planes the marking
 /// keeps; a cycle never extends a path
 fn layer_max_depth(doc: &Doc, shapes: &[CellShapes<'_>], has: &[bool]) -> u32 {
-    fn reach(doc: &Doc, ci: usize, shapes: &[CellShapes<'_>], has: &[bool], memo: &mut Vec<Option<Option<u32>>>) -> Option<u32> {
+    fn reach(
+        doc: &Doc,
+        ci: usize,
+        shapes: &[CellShapes<'_>],
+        has: &[bool],
+        memo: &mut Vec<Option<Option<u32>>>,
+    ) -> Option<u32> {
         if let Some(done) = memo[ci] {
             return done;
         }
@@ -703,13 +756,23 @@ impl<'a> Marker<'a> {
         let a = xf.apply(b.0, b.1);
         let z = xf.apply(b.2, b.3);
         self.mark_world_rect_at_depths(
-            (a.0.min(z.0) as i128, a.1.min(z.1) as i128, a.0.max(z.0) as i128, a.1.max(z.1) as i128),
+            (
+                a.0.min(z.0) as i128,
+                a.1.min(z.1) as i128,
+                a.0.max(z.0) as i128,
+                a.1.max(z.1) as i128,
+            ),
             p.depth_mask[ci],
             depth,
         )
     }
 
-    fn mark_world_rect_at_depths(&mut self, r: (i128, i128, i128, i128), mask: u32, depth: u32) -> bool {
+    fn mark_world_rect_at_depths(
+        &mut self,
+        r: (i128, i128, i128, i128),
+        mask: u32,
+        depth: u32,
+    ) -> bool {
         let saved = self.depth;
         let mut bit = 0u32;
         let mut ok = true;
@@ -728,8 +791,12 @@ impl<'a> Marker<'a> {
     /// at most the cell: the footprint in one fill (see grid_prunable)
     fn mark_grid_footprint(&mut self, pl: &PlaceRec, xf: &Xf, depth: u32) -> bool {
         let Some(p) = self.prune else { return true };
-        let Some(b) = p.bboxes[pl.cell] else { return true };
-        let Rep::Grid { na, nb, va, vb } = &pl.rep else { return true };
+        let Some(b) = p.bboxes[pl.cell] else {
+            return true;
+        };
+        let Rep::Grid { na, nb, va, vb } = &pl.rep else {
+            return true;
+        };
         let (la, lb) = (*na as i64 - 1, *nb as i64 - 1);
         let first = placed_bbox(b, xf, pl, 0, 0);
         let last = placed_bbox(b, xf, pl, la * va.0 + lb * vb.0, la * va.1 + lb * vb.1);
@@ -737,7 +804,12 @@ impl<'a> Marker<'a> {
             return false;
         }
         self.mark_world_rect_at_depths(
-            (first.0.min(last.0), first.1.min(last.1), first.2.max(last.2), first.3.max(last.3)),
+            (
+                first.0.min(last.0),
+                first.1.min(last.1),
+                first.2.max(last.2),
+                first.3.max(last.3),
+            ),
             p.depth_mask[pl.cell],
             depth.saturating_add(1),
         )
@@ -761,7 +833,9 @@ impl<'a> Marker<'a> {
     /// marks count against the same budget
     fn flush(&mut self, shared: &std::sync::atomic::AtomicU64) {
         use std::sync::atomic::Ordering::Relaxed;
-        let total = shared.fetch_add(self.unflushed, Relaxed).saturating_add(self.unflushed);
+        let total = shared
+            .fetch_add(self.unflushed, Relaxed)
+            .saturating_add(self.unflushed);
         self.unflushed = 0;
         if total > self.max_work {
             self.over = true;
@@ -779,7 +853,12 @@ impl<'a> Marker<'a> {
         }
         let cell = &self.shapes[u.ci];
         match &u.kind {
-            UnitKind::Shapes { rects, polys, paths, split_above } => {
+            UnitKind::Shapes {
+                rects,
+                polys,
+                paths,
+                split_above,
+            } => {
                 self.depth = u.depth;
                 let (split, c) = (*split_above, self.c);
                 for r in &cell.rects[rects.0..rects.1] {
@@ -821,7 +900,11 @@ impl<'a> Marker<'a> {
                 // Grid/Pts members are charged one each, exactly as the
                 // walk charges them; a plain placement is not charged
                 if let Some(p) = self.prune {
-                    if p.small[pl.cell] && grid_prunable(&pl.rep, self.c) && *m0 == 0 && *m1 == rep_members(&pl.rep) {
+                    if p.small[pl.cell]
+                        && grid_prunable(&pl.rep, self.c)
+                        && *m0 == 0
+                        && *m1 == rep_members(&pl.rep)
+                    {
                         return self.mark_grid_footprint(pl, &u.xf, u.depth);
                     }
                 }
@@ -831,7 +914,8 @@ impl<'a> Marker<'a> {
                         return false;
                     }
                     let (dx, dy) = rep_member(&pl.rep, k);
-                    let base = u.xf.compose(&Xf::place(pl.x + dx, pl.y + dy, pl.rot, pl.flip));
+                    let base =
+                        u.xf.compose(&Xf::place(pl.x + dx, pl.y + dy, pl.rot, pl.flip));
                     if !self.walk(pl.cell, &base, u.depth + 1) {
                         return false;
                     }
@@ -1034,13 +1118,19 @@ impl<'a> Marker<'a> {
                         return false;
                     }
                     for j in j0..=j1 {
-                        self.planes.plane(self.depth).set_span(j, i as u32, i as u32);
+                        self.planes
+                            .plane(self.depth)
+                            .set_span(j, i as u32, i as u32);
                     }
                 }
                 continue;
             }
             // general edge, oriented so dy > 0
-            let ((x0, y0), (x1, y1)) = if ay < by { ((ax, ay), (bx, by)) } else { ((bx, by), (ax, ay)) };
+            let ((x0, y0), (x1, y1)) = if ay < by {
+                ((ax, ay), (bx, by))
+            } else {
+                ((bx, by), (ax, ay))
+            };
             let (dx, dy) = (x1 - x0, y1 - y0);
             let j0 = floor_div(y0 - oy, c).max(0);
             let j1 = (ceil_div(y1 - oy, c) - 1).min(h - 1);
@@ -1123,7 +1213,14 @@ impl<'a> Marker<'a> {
         self.mark_poly_pts_range(local, rep, xf, 0, u64::MAX)
     }
 
-    fn mark_poly_pts_range(&mut self, local: &[(i64, i64)], rep: &Rep, xf: &Xf, m0: u64, m1: u64) -> bool {
+    fn mark_poly_pts_range(
+        &mut self,
+        local: &[(i64, i64)],
+        rep: &Rep,
+        xf: &Xf,
+        m0: u64,
+        m1: u64,
+    ) -> bool {
         let world: Vec<(i128, i128)> = local
             .iter()
             .map(|&(x, y)| {
@@ -1231,7 +1328,8 @@ impl<'a> Marker<'a> {
                                 return false;
                             }
                             let (dx, dy) = (i * va.0 + j * vb.0, i * va.1 + j * vb.1);
-                            let base = xf.compose(&Xf::place(pl.x + dx, pl.y + dy, pl.rot, pl.flip));
+                            let base =
+                                xf.compose(&Xf::place(pl.x + dx, pl.y + dy, pl.rot, pl.flip));
                             if !self.walk(pl.cell, &base, depth + 1) {
                                 return false;
                             }
@@ -1280,10 +1378,24 @@ enum UnitKind {
     /// slices of the cell's record lists; records with more members
     /// than `split_above` on the per-member path are skipped here and
     /// marked by their Members units (u64::MAX: none are)
-    Shapes { rects: (usize, usize), polys: (usize, usize), paths: (usize, usize), split_above: u64 },
+    Shapes {
+        rects: (usize, usize),
+        polys: (usize, usize),
+        paths: (usize, usize),
+        split_above: u64,
+    },
     /// members m0..m1 of one record (shape 0 rect / 1 poly / 2 path)
-    Members { shape: u8, idx: usize, m0: u64, m1: u64 },
-    Place { pi: usize, m0: u64, m1: u64 },
+    Members {
+        shape: u8,
+        idx: usize,
+        m0: u64,
+        m1: u64,
+    },
+    Place {
+        pi: usize,
+        m0: u64,
+        m1: u64,
+    },
 }
 
 fn rep_members(rep: &Rep) -> u64 {
@@ -1407,14 +1519,29 @@ fn collect_units(
     let cell = &doc.cells[ci];
     let pieces = pieces.max(1);
     if !shapes[ci].is_empty() {
-        let (nr, np, nq) = (shapes[ci].rects.len(), shapes[ci].polys.len(), shapes[ci].paths.len());
+        let (nr, np, nq) = (
+            shapes[ci].rects.len(),
+            shapes[ci].polys.len(),
+            shapes[ci].paths.len(),
+        );
         let slice = |n: usize, t: usize| (n * t / pieces, n * (t + 1) / pieces);
         for t in 0..pieces {
             let (rects, polys, paths) = (slice(nr, t), slice(np, t), slice(nq, t));
             if rects.0 == rects.1 && polys.0 == polys.1 && paths.0 == paths.1 {
                 continue;
             }
-            out.push(Unit { ci, xf, depth: depth as u32, extra: 0, kind: UnitKind::Shapes { rects, polys, paths, split_above: u64::MAX } });
+            out.push(Unit {
+                ci,
+                xf,
+                depth: depth as u32,
+                extra: 0,
+                kind: UnitKind::Shapes {
+                    rects,
+                    polys,
+                    paths,
+                    split_above: u64::MAX,
+                },
+            });
         }
     }
     for (pi, pl) in cell.places.iter().enumerate() {
@@ -1423,7 +1550,19 @@ fn collect_units(
         }
         if matches!(pl.rep, Rep::One) && depth < expand && !small.is_some_and(|s| s[pl.cell]) {
             let base = xf.compose(&Xf::place(pl.x, pl.y, pl.rot, pl.flip));
-            collect_units(doc, has, shapes, pl.cell, base, depth + 1, expand, pieces, small, c, out);
+            collect_units(
+                doc,
+                has,
+                shapes,
+                pl.cell,
+                base,
+                depth + 1,
+                expand,
+                pieces,
+                small,
+                c,
+                out,
+            );
             continue;
         }
         let members = rep_members(&pl.rep);
@@ -1432,14 +1571,30 @@ fn collect_units(
         }
         if small.is_some_and(|s| s[pl.cell]) && grid_prunable(&pl.rep, c) {
             // one fill (Marker::mark_grid_footprint): never split
-            out.push(Unit { ci, xf, depth: depth as u32, extra: 0, kind: UnitKind::Place { pi, m0: 0, m1: members } });
+            out.push(Unit {
+                ci,
+                xf,
+                depth: depth as u32,
+                extra: 0,
+                kind: UnitKind::Place {
+                    pi,
+                    m0: 0,
+                    m1: members,
+                },
+            });
             continue;
         }
         let chunk = ((members + pieces as u64 - 1) / pieces as u64).max(1);
         let mut m0 = 0u64;
         while m0 < members {
             let m1 = (m0 + chunk).min(members);
-            out.push(Unit { ci, xf, depth: depth as u32, extra: 0, kind: UnitKind::Place { pi, m0, m1 } });
+            out.push(Unit {
+                ci,
+                xf,
+                depth: depth as u32,
+                extra: 0,
+                kind: UnitKind::Place { pi, m0, m1 },
+            });
             m0 = m1;
         }
     }
@@ -1449,9 +1604,24 @@ fn collect_units(
 /// records on the layer (repetition members counted) plus every
 /// placement's members times the child's weight; a cycle adds nothing
 /// with the prune a small cell is one bbox mark and a prunable grid of one is one fill
-fn layer_weights(doc: &Doc, shapes: &[CellShapes<'_>], has: &[bool], small: Option<&[bool]>, c: i64) -> Vec<u64> {
+fn layer_weights(
+    doc: &Doc,
+    shapes: &[CellShapes<'_>],
+    has: &[bool],
+    small: Option<&[bool]>,
+    c: i64,
+) -> Vec<u64> {
     #[allow(clippy::too_many_arguments)]
-    fn weight(doc: &Doc, ci: usize, shapes: &[CellShapes<'_>], has: &[bool], small: Option<&[bool]>, c: i64, memo: &mut Vec<Option<u64>>, open: &mut Vec<bool>) -> u64 {
+    fn weight(
+        doc: &Doc,
+        ci: usize,
+        shapes: &[CellShapes<'_>],
+        has: &[bool],
+        small: Option<&[bool]>,
+        c: i64,
+        memo: &mut Vec<Option<u64>>,
+        open: &mut Vec<bool>,
+    ) -> u64 {
         if let Some(w) = memo[ci] {
             return w;
         }
@@ -1549,7 +1719,11 @@ fn collect_units_weighted(
     }
     if own > 0 {
         let pieces = ((own + budget - 1) / budget).clamp(1, 4096) as usize;
-        let (nr, np, nq) = (shapes[ci].rects.len(), shapes[ci].polys.len(), shapes[ci].paths.len());
+        let (nr, np, nq) = (
+            shapes[ci].rects.len(),
+            shapes[ci].polys.len(),
+            shapes[ci].paths.len(),
+        );
         let slice = |n: usize, t: usize| (n * t / pieces, n * (t + 1) / pieces);
         for t in 0..pieces {
             let (rects, polys, paths) = (slice(nr, t), slice(np, t), slice(nq, t));
@@ -1561,16 +1735,29 @@ fn collect_units_weighted(
                 xf,
                 depth: d,
                 extra: 0,
-                kind: UnitKind::Shapes { rects, polys, paths, split_above: budget },
+                kind: UnitKind::Shapes {
+                    rects,
+                    polys,
+                    paths,
+                    split_above: budget,
+                },
             });
         }
     }
     for (shape, idx, members) in giants {
-        let per = budget.max((members + MEMBERS_UNITS_MAX - 1) / MEMBERS_UNITS_MAX).max(1);
+        let per = budget
+            .max((members + MEMBERS_UNITS_MAX - 1) / MEMBERS_UNITS_MAX)
+            .max(1);
         let mut m0 = 0u64;
         while m0 < members {
             let m1 = (m0 + per).min(members);
-            out.push(Unit { ci, xf, depth: d, extra: 0, kind: UnitKind::Members { shape, idx, m0, m1 } });
+            out.push(Unit {
+                ci,
+                xf,
+                depth: d,
+                extra: 0,
+                kind: UnitKind::Members { shape, idx, m0, m1 },
+            });
             m0 = m1;
         }
     }
@@ -1586,19 +1773,51 @@ fn collect_units_weighted(
         let small_child = small.is_some_and(|s| s[pl.cell]);
         if small_child && grid_prunable(&pl.rep, c) {
             // one fill (Marker::mark_grid_footprint): never split
-            out.push(Unit { ci, xf, depth: d, extra: 0, kind: UnitKind::Place { pi, m0: 0, m1: members } });
+            out.push(Unit {
+                ci,
+                xf,
+                depth: d,
+                extra: 0,
+                kind: UnitKind::Place {
+                    pi,
+                    m0: 0,
+                    m1: members,
+                },
+            });
             continue;
         }
         if matches!(pl.rep, Rep::One) {
             if child > budget && depth < MAX_EXPAND_DEPTH && !small_child {
                 let base = xf.compose(&Xf::place(pl.x, pl.y, pl.rot, pl.flip));
-                collect_units_weighted(doc, has, shapes, pl.cell, base, depth + 1, budget, weights, c, small, out);
+                collect_units_weighted(
+                    doc,
+                    has,
+                    shapes,
+                    pl.cell,
+                    base,
+                    depth + 1,
+                    budget,
+                    weights,
+                    c,
+                    small,
+                    out,
+                );
                 continue;
             }
-            out.push(Unit { ci, xf, depth: d, extra: 0, kind: UnitKind::Place { pi, m0: 0, m1: 1 } });
+            out.push(Unit {
+                ci,
+                xf,
+                depth: d,
+                extra: 0,
+                kind: UnitKind::Place { pi, m0: 0, m1: 1 },
+            });
             continue;
         }
-        if child > budget && members <= EXPAND_MEMBERS_MAX && depth < MAX_EXPAND_DEPTH && !small_child {
+        if child > budget
+            && members <= EXPAND_MEMBERS_MAX
+            && depth < MAX_EXPAND_DEPTH
+            && !small_child
+        {
             // a few members of a heavy child: each member's units of
             // its own, so a giant record inside reaches its Members
             // units; the member's charge (the walk charges each Grid/
@@ -1607,11 +1826,33 @@ fn collect_units_weighted(
                 let (dx, dy) = rep_member(&pl.rep, k);
                 let base = xf.compose(&Xf::place(pl.x + dx, pl.y + dy, pl.rot, pl.flip));
                 let start = out.len();
-                collect_units_weighted(doc, has, shapes, pl.cell, base, depth + 1, budget, weights, c, small, out);
+                collect_units_weighted(
+                    doc,
+                    has,
+                    shapes,
+                    pl.cell,
+                    base,
+                    depth + 1,
+                    budget,
+                    weights,
+                    c,
+                    small,
+                    out,
+                );
                 if out.len() > start {
                     out[start].extra += 1;
                 } else {
-                    out.push(Unit { ci, xf, depth: d, extra: 0, kind: UnitKind::Place { pi, m0: k, m1: k + 1 } });
+                    out.push(Unit {
+                        ci,
+                        xf,
+                        depth: d,
+                        extra: 0,
+                        kind: UnitKind::Place {
+                            pi,
+                            m0: k,
+                            m1: k + 1,
+                        },
+                    });
                 }
             }
             continue;
@@ -1620,7 +1861,13 @@ fn collect_units_weighted(
         let mut m0 = 0u64;
         while m0 < members {
             let m1 = (m0 + per).min(members);
-            out.push(Unit { ci, xf, depth: d, extra: 0, kind: UnitKind::Place { pi, m0, m1 } });
+            out.push(Unit {
+                ci,
+                xf,
+                depth: d,
+                extra: 0,
+                kind: UnitKind::Place { pi, m0, m1 },
+            });
             m0 = m1;
         }
     }
@@ -1635,20 +1882,52 @@ fn collect_units_weighted(
 /// for minutes). Count-based (`balanced` false): the top cell's own
 /// units, then one level deeper through plain placements (at most
 /// four) while there are fewer than 4 x jobs of them.
-fn units_for(doc: &Doc, has: &[bool], shapes: &[CellShapes<'_>], jobs: usize, balanced: bool, c: i64, small: Option<&[bool]>) -> Vec<Unit> {
+fn units_for(
+    doc: &Doc,
+    has: &[bool],
+    shapes: &[CellShapes<'_>],
+    jobs: usize,
+    balanced: bool,
+    c: i64,
+    small: Option<&[bool]>,
+) -> Vec<Unit> {
     let target = jobs.max(1) * 4;
     let mut units = Vec::new();
     if balanced {
         let weights = layer_weights(doc, shapes, has, small, c);
         let budget = (weights[doc.top] / target as u64).max(1);
-        collect_units_weighted(doc, has, shapes, doc.top, Xf::identity(), 0, budget, &weights, c, small, &mut units);
+        collect_units_weighted(
+            doc,
+            has,
+            shapes,
+            doc.top,
+            Xf::identity(),
+            0,
+            budget,
+            &weights,
+            c,
+            small,
+            &mut units,
+        );
         if !units.is_empty() {
             return units;
         }
     }
     for expand in 0..=4 {
         units.clear();
-        collect_units(doc, has, shapes, doc.top, Xf::identity(), 0, expand, target, small, c, &mut units);
+        collect_units(
+            doc,
+            has,
+            shapes,
+            doc.top,
+            Xf::identity(),
+            0,
+            expand,
+            target,
+            small,
+            c,
+            &mut units,
+        );
         if units.len() >= target {
             break;
         }
@@ -1676,14 +1955,32 @@ fn build_layer(
     balanced: bool,
     prune: Option<(&[Option<Win>], &[bool])>,
 ) -> (Layer, u64) {
-    let layer_with = |status: u8, work: u64, planes: Vec<Plane>| Layer { layer: key.0, dt: key.1, status, work, planes };
+    let layer_with = |status: u8, work: u64, planes: Vec<Plane>| Layer {
+        layer: key.0,
+        dt: key.1,
+        status,
+        work,
+        planes,
+    };
     if !has[doc.top] {
         return (layer_with(STATUS_EMPTY, 0, Vec::new()), 0);
     }
     let prepared = std::time::Instant::now();
     let depth_mask = prune.map(|_| layer_depth_masks(doc, shapes, has));
-    let prune = prune.map(|(bboxes, small)| Prune { bboxes, small, depth_mask: depth_mask.as_deref().unwrap_or(&[]) });
-    let units = units_for(doc, has, shapes, jobs, balanced, cell_dbu, prune.map(|p| p.small));
+    let prune = prune.map(|(bboxes, small)| Prune {
+        bboxes,
+        small,
+        depth_mask: depth_mask.as_deref().unwrap_or(&[]),
+    });
+    let units = units_for(
+        doc,
+        has,
+        shapes,
+        jobs,
+        balanced,
+        cell_dbu,
+        prune.map(|p| p.small),
+    );
     let planes = Planes::new(w, h, layer_max_depth(doc, shapes, has));
     phase_add(1, prepared);
     let threads = jobs.max(1).min(units.len()).max(1);
@@ -1692,8 +1989,14 @@ fn build_layer(
     let completed = std::sync::atomic::AtomicUsize::new(0);
     if let Some(log) = progress {
         if prepared.elapsed().as_secs_f64() >= 0.5 {
-            log(&format!("{}/{} prepared: {} units workers={} ({:.3}s)",
-                key.0, key.1, units.len(), threads, prepared.elapsed().as_secs_f64()));
+            log(&format!(
+                "{}/{} prepared: {} units workers={} ({:.3}s)",
+                key.0,
+                key.1,
+                units.len(),
+                threads,
+                prepared.elapsed().as_secs_f64()
+            ));
         }
     }
     let marking = std::time::Instant::now();
@@ -1708,9 +2011,10 @@ fn build_layer(
             s.spawn(move || {
                 use std::sync::atomic::Ordering::Relaxed;
                 let t0 = std::time::Instant::now();
-                while matches!(finish.recv_timeout(std::time::Duration::from_secs(PROGRESS_EVERY_S)),
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout))
-                {
+                while matches!(
+                    finish.recv_timeout(std::time::Duration::from_secs(PROGRESS_EVERY_S)),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                ) {
                     let work = if threads > 1 {
                         format!(" work {:.2}G", shared.load(Relaxed) as f64 / 1e9)
                     } else {
@@ -1718,15 +2022,21 @@ fn build_layer(
                     };
                     log(&format!(
                         "{}/{} marking: {}/{} units workers={}{} ({}s)",
-                        key.0, key.1, completed.load(Relaxed), units.len(),
-                        threads, work, t0.elapsed().as_secs()
+                        key.0,
+                        key.1,
+                        completed.load(Relaxed),
+                        units.len(),
+                        threads,
+                        work,
+                        t0.elapsed().as_secs()
                     ));
                 }
             });
         }
         let handles: Vec<_> = (0..threads)
             .map(|_| {
-                let (units, next, shared, planes, completed) = (&units, &next, &shared, &planes, &completed);
+                let (units, next, shared, planes, completed) =
+                    (&units, &next, &shared, &planes, &completed);
                 std::thread::Builder::new()
                     .stack_size(64 << 20)
                     .spawn_scoped(s, move || {
@@ -1765,7 +2075,10 @@ fn build_layer(
                     .expect("occupancy worker")
             })
             .collect();
-        let markers: Vec<Marker> = handles.into_iter().map(|h| h.join().expect("occupancy worker")).collect();
+        let markers: Vec<Marker> = handles
+            .into_iter()
+            .map(|h| h.join().expect("occupancy worker"))
+            .collect();
         let _ = finished.send(());
         markers
     });
@@ -1777,13 +2090,19 @@ fn build_layer(
         m.over |= other.over;
     }
     if m.over || m.work > max_work {
-        return (layer_with(STATUS_NONE_WORK, m.work, Vec::new()), m.paths_skipped);
+        return (
+            layer_with(STATUS_NONE_WORK, m.work, Vec::new()),
+            m.paths_skipped,
+        );
     }
     if m.paths_skipped > 0 {
         // a shape the summary cannot represent: no summary for the
         // layer (the page path draws it, or refuses it loudly), never
         // a summary with the shape missing
-        return (layer_with(STATUS_NONE_UNSUPPORTED, m.work, Vec::new()), m.paths_skipped);
+        return (
+            layer_with(STATUS_NONE_UNSUPPORTED, m.work, Vec::new()),
+            m.paths_skipped,
+        );
     }
     phase_add(2, marking);
     let pyramid = std::time::Instant::now();
@@ -1798,7 +2117,10 @@ fn build_layer(
             let next = levels.last().unwrap().pool();
             levels.push(next);
         }
-        out.push(Plane { depth: depth as u8, levels });
+        out.push(Plane {
+            depth: depth as u8,
+            levels,
+        });
     }
     phase_add(3, pyramid);
     if out.is_empty() {
@@ -1814,7 +2136,10 @@ fn build_layer(
 /// depth of the layer being marked)
 pub fn build(doc: &Doc, src_size: u64, src_mtime: u64, opts: &Opts) -> Result<Occupancy, String> {
     if opts.base_um < 0.0 || !opts.base_um.is_finite() {
-        return Err(format!("occupancy: base cell must be positive or 0 (auto), got {}", opts.base_um));
+        return Err(format!(
+            "occupancy: base cell must be positive or 0 (auto), got {}",
+            opts.base_um
+        ));
     }
     let bboxes = cell_bboxes(doc);
     let bbox = bboxes[doc.top].unwrap_or((0, 0, 0, 0));
@@ -1847,7 +2172,13 @@ pub fn build(doc: &Doc, src_size: u64, src_mtime: u64, opts: &Opts) -> Result<Oc
         occ.layers = doc
             .layer_order
             .iter()
-            .map(|&(l, d)| Layer { layer: l, dt: d, status: STATUS_NONE_CELLS, work: 0, planes: Vec::new() })
+            .map(|&(l, d)| Layer {
+                layer: l,
+                dt: d,
+                status: STATUS_NONE_CELLS,
+                work: 0,
+                planes: Vec::new(),
+            })
             .collect();
         return Ok(occ);
     }
@@ -1856,7 +2187,11 @@ pub fn build(doc: &Doc, src_size: u64, src_mtime: u64, opts: &Opts) -> Result<Oc
     occ.h = h;
     occ.n_levels = level_count(w, h);
     let per_layer = layer_bytes(w, h);
-    let fit = if per_layer == 0 { doc.layer_order.len() } else { (opts.max_bytes / per_layer) as usize };
+    let fit = if per_layer == 0 {
+        doc.layer_order.len()
+    } else {
+        (opts.max_bytes / per_layer) as usize
+    };
     // layers one after another, each marked by `jobs` threads; the
     // byte limit counts the pyramids written (one per plane; empty
     // and none:* layers take no room)
@@ -1891,16 +2226,45 @@ pub fn build(doc: &Doc, src_size: u64, src_mtime: u64, opts: &Opts) -> Result<Oc
         let has = layer_presence(doc, &shapes);
         phase_add(0, grouping);
         if !has[doc.top] {
-            layers.push(Layer { layer: key.0, dt: key.1, status: STATUS_EMPTY, work: 0, planes: Vec::new() });
+            layers.push(Layer {
+                layer: key.0,
+                dt: key.1,
+                status: STATUS_EMPTY,
+                work: 0,
+                planes: Vec::new(),
+            });
             continue;
         }
         if slot >= fit {
-            layers.push(Layer { layer: key.0, dt: key.1, status: STATUS_NONE_SIZE, work: 0, planes: Vec::new() });
+            layers.push(Layer {
+                layer: key.0,
+                dt: key.1,
+                status: STATUS_NONE_SIZE,
+                work: 0,
+                planes: Vec::new(),
+            });
             continue;
         }
         let t0 = std::time::Instant::now();
-        let (layer, sk) = build_layer(doc, key, &shapes, &has, (bbox.0, bbox.1), cell_dbu, w, h, opts.max_work, opts.jobs, opts.progress, opts.balanced_units,
-            if opts.prune { Some((bboxes.as_slice(), small.as_slice())) } else { None });
+        let (layer, sk) = build_layer(
+            doc,
+            key,
+            &shapes,
+            &has,
+            (bbox.0, bbox.1),
+            cell_dbu,
+            w,
+            h,
+            opts.max_work,
+            opts.jobs,
+            opts.progress,
+            opts.balanced_units,
+            if opts.prune {
+                Some((bboxes.as_slice(), small.as_slice()))
+            } else {
+                None
+            },
+        );
         skipped += sk;
         if layer.status == STATUS_OK {
             slot += layer.planes.len();
@@ -1908,8 +2272,13 @@ pub fn build(doc: &Doc, src_size: u64, src_mtime: u64, opts: &Opts) -> Result<Oc
         if let Some(log) = opts.progress {
             let secs = t0.elapsed().as_secs_f64();
             if layer.status == STATUS_OK && secs >= 0.5 {
-                let cells: u64 = layer.planes.iter().map(|p| p.levels.first().map_or(0, |l| l.count())).sum();
-                let depths: Vec<String> = layer.planes.iter().map(|p| p.depth.to_string()).collect();
+                let cells: u64 = layer
+                    .planes
+                    .iter()
+                    .map(|p| p.levels.first().map_or(0, |l| l.count()))
+                    .sum();
+                let depths: Vec<String> =
+                    layer.planes.iter().map(|p| p.depth.to_string()).collect();
                 log(&format!(
                     "{}/{} ok planes={} cells={} work={} ({:.1}s)",
                     key.0,
@@ -1920,7 +2289,14 @@ pub fn build(doc: &Doc, src_size: u64, src_mtime: u64, opts: &Opts) -> Result<Oc
                     secs
                 ));
             } else if layer.status != STATUS_OK && layer.status != STATUS_EMPTY {
-                log(&format!("{}/{} {} work={} ({:.1}s)", key.0, key.1, status_text(layer.status), layer.work, secs));
+                log(&format!(
+                    "{}/{} {} work={} ({:.1}s)",
+                    key.0,
+                    key.1,
+                    status_text(layer.status),
+                    layer.work,
+                    secs
+                ));
             }
         }
         layers.push(layer);
@@ -2157,7 +2533,10 @@ impl OvoFile {
             (m, 2) if m == MAGIC => false,
             (m, 1) if m == MAGIC_V1 => true,
             (m, v) if m == MAGIC || m == MAGIC_V1 => {
-                return Err(format!("occupancy version {} (this build reads 1 and {})", v, VERSION));
+                return Err(format!(
+                    "occupancy version {} (this build reads 1 and {})",
+                    v, VERSION
+                ));
             }
             _ => return Err("not an occupancy file (bad magic)".to_string()),
         };
@@ -2210,16 +2589,19 @@ impl OvoFile {
                 return Err("truncated occupancy file (layer table)".to_string());
             }
             let status = b[cursor + 8];
-            let n_planes = if v1 {
-                1
-            } else {
-                b[cursor + 17] as usize
-            };
+            let n_planes = if v1 { 1 } else { b[cursor + 17] as usize };
             if !v1 && (status == STATUS_OK) != (n_planes > 0) {
-                return Err(format!("corrupt occupancy layer {}: status {} with {} planes", k, status, n_planes));
+                return Err(format!(
+                    "corrupt occupancy layer {}: status {} with {} planes",
+                    k, status, n_planes
+                ));
             }
             cursor += fixed;
-            let per_plane = if v1 { level_block } else { PLANE_FIXED + level_block };
+            let per_plane = if v1 {
+                level_block
+            } else {
+                PLANE_FIXED + level_block
+            };
             let planes_len = n_planes
                 .checked_mul(per_plane)
                 .ok_or_else(|| "corrupt occupancy header (layer table)".to_string())?;
@@ -2250,14 +2632,22 @@ impl OvoFile {
                 };
                 if !v1 {
                     if depth > DEPTH_CAP || last_depth.is_some_and(|last| depth <= last) {
-                        return Err(format!("corrupt occupancy layer {}: plane {} depth {}", k, p, depth));
+                        return Err(format!(
+                            "corrupt occupancy layer {}: plane {} depth {}",
+                            k, p, depth
+                        ));
                     }
                     last_depth = Some(depth);
                 }
                 let mut levels = Vec::with_capacity(n_levels as usize);
                 let (mut ew, mut eh) = (gw, gh);
                 for lv in 0..n_levels as usize {
-                    let e = LevelEntry { w: g32(b, o), h: g32(b, o + 4), off: g64(b, o + 8), len: g64(b, o + 16) };
+                    let e = LevelEntry {
+                        w: g32(b, o),
+                        h: g32(b, o + 4),
+                        off: g64(b, o + 8),
+                        len: g64(b, o + 16),
+                    };
                     o += LEVEL_ENTRY;
                     if status == STATUS_OK {
                         if e.w as i128 != ew || e.h as i128 != eh {
@@ -2275,10 +2665,9 @@ impl OvoFile {
                                 k, p, lv, e.len, need
                             ));
                         }
-                        let end = e
-                            .off
-                            .checked_add(e.len)
-                            .ok_or_else(|| "corrupt occupancy level (offset overflow)".to_string())?;
+                        let end = e.off.checked_add(e.len).ok_or_else(|| {
+                            "corrupt occupancy level (offset overflow)".to_string()
+                        })?;
                         if end > len as u64 {
                             return Err(format!(
                                 "truncated occupancy file: layer {} plane {} level {} ends at {} of {} bytes",
@@ -2302,7 +2691,10 @@ impl OvoFile {
                             h = e.h;
                         }
                     } else if e.len != 0 || e.off != 0 {
-                        return Err(format!("corrupt occupancy layer {}: status {} with data", k, status));
+                        return Err(format!(
+                            "corrupt occupancy layer {}: status {} with data",
+                            k, status
+                        ));
                     }
                     ew = (ew + 1) / 2;
                     eh = (eh + 1) / 2;
@@ -2312,13 +2704,32 @@ impl OvoFile {
                     planes.push(PlaneEntry { depth, levels });
                 }
             }
-            layers.push(LayerEntry { layer, dt, status, work, planes });
+            layers.push(LayerEntry {
+                layer,
+                dt,
+                status,
+                work,
+                planes,
+            });
         }
         if w == 0 && h == 0 && gw <= u32::MAX as i128 && gh <= u32::MAX as i128 {
             w = gw as u32;
             h = gh as u32;
         }
-        Ok(OvoFile { data, version, unit, src_size, src_mtime, cell_dbu, bbox, w, h, n_levels, top, layers })
+        Ok(OvoFile {
+            data,
+            version,
+            unit,
+            src_size,
+            src_mtime,
+            cell_dbu,
+            bbox,
+            w,
+            h,
+            n_levels,
+            top,
+            layers,
+        })
     }
 
     /// whether the file holds one plane per placement depth (version
@@ -2341,7 +2752,11 @@ impl OvoFile {
             return Err(format!("occupancy top {:?}, cache top {:?}", self.top, top));
         }
         if self.layers.len() != ovm.n_layers as usize {
-            return Err(format!("occupancy has {} layers, cache {}", self.layers.len(), ovm.n_layers));
+            return Err(format!(
+                "occupancy has {} layers, cache {}",
+                self.layers.len(),
+                ovm.n_layers
+            ));
         }
         for (k, e) in self.layers.iter().enumerate() {
             let l = ovm.layer(k as u32);
@@ -2376,7 +2791,12 @@ impl OvoFile {
     /// when one plane is drawn, owned when several, `(0, 0, empty)`
     /// when none is (nothing of the layer at that depth); None unless
     /// the layer's status is ok and the level exists
-    pub fn level_at_depth(&self, k: usize, lv: usize, depth: Option<u32>) -> Option<(u32, u32, std::borrow::Cow<'_, [u8]>)> {
+    pub fn level_at_depth(
+        &self,
+        k: usize,
+        lv: usize,
+        depth: Option<u32>,
+    ) -> Option<(u32, u32, std::borrow::Cow<'_, [u8]>)> {
         let layer = self.layers.get(k)?;
         if layer.status != STATUS_OK || !layer.planes.iter().any(|p| p.levels.len() > lv) {
             return None;
@@ -2386,7 +2806,9 @@ impl OvoFile {
             if !plane_drawn_at(plane.depth, depth) {
                 continue;
             }
-            let Some((w, h, bits)) = self.plane_level(k, p, lv) else { continue };
+            let Some((w, h, bits)) = self.plane_level(k, p, lv) else {
+                continue;
+            };
             match &mut acc {
                 None => acc = Some((w, h, std::borrow::Cow::Borrowed(bits))),
                 Some((_, _, cow)) => {
@@ -2450,15 +2872,30 @@ mod tests {
     }
 
     fn rect(l: u32, x: i64, y: i64, w: i64, h: i64, rep: Rep) -> RectRec {
-        RectRec { layer: l, dt: 0, x, y, w, h, rep }
+        RectRec {
+            layer: l,
+            dt: 0,
+            x,
+            y,
+            w,
+            h,
+            rep,
+        }
     }
 
     fn cell(name: &str) -> Cell {
-        Cell { name: name.to_string(), ..Default::default() }
+        Cell {
+            name: name.to_string(),
+            ..Default::default()
+        }
     }
 
     fn opts(base_um: f64) -> Opts {
-        Opts { base_um, jobs: 2, ..Opts::default() }
+        Opts {
+            base_um,
+            jobs: 2,
+            ..Opts::default()
+        }
     }
 
     /// brute oracle: the open cell box meets the polygon interior with
@@ -2560,17 +2997,39 @@ mod tests {
     #[test]
     fn polygon_scan_matches_the_clip_oracle_on_l_ring_and_diagonals() {
         // L shape with an empty corner larger than a cell
-        assert_poly_matches_oracle(&[(0, 0), (90, 0), (90, 20), (30, 20), (30, 80), (0, 80)], 10, 10, 10);
+        assert_poly_matches_oracle(
+            &[(0, 0), (90, 0), (90, 20), (30, 20), (30, 80), (0, 80)],
+            10,
+            10,
+            10,
+        );
         // ring as KLayout writes a hole: outer contour, cut, inner contour
         assert_poly_matches_oracle(
             &[
-                (0, 0), (100, 0), (100, 100), (0, 100), (0, 50), (20, 50), (20, 80), (80, 80),
-                (80, 20), (20, 20), (20, 50), (0, 50),
+                (0, 0),
+                (100, 0),
+                (100, 100),
+                (0, 100),
+                (0, 50),
+                (20, 50),
+                (20, 80),
+                (80, 80),
+                (80, 20),
+                (20, 20),
+                (20, 50),
+                (0, 50),
             ],
-            10, 12, 12,
+            10,
+            12,
+            12,
         );
         // diagonal band and a triangle whose vertices sit on grid lines
-        assert_poly_matches_oracle(&[(0, 0), (15, 0), (100, 85), (100, 100), (85, 100), (0, 15)], 10, 11, 11);
+        assert_poly_matches_oracle(
+            &[(0, 0), (15, 0), (100, 85), (100, 100), (85, 100), (0, 15)],
+            10,
+            11,
+            11,
+        );
         assert_poly_matches_oracle(&[(0, 0), (60, 0), (0, 60)], 10, 8, 8);
         // edges exactly on grid lines mark no cell outside the shape
         assert_poly_matches_oracle(&[(10, 10), (30, 10), (30, 30), (10, 30)], 10, 5, 5);
@@ -2583,8 +3042,28 @@ mod tests {
         // reviewer's counterexample (2026-09-11): cell 10, member 1x1,
         // 100x2 members along (4,4) and (4,-4) - bbox fill would light
         // 1,681 cells, the members touch 81
-        let diag = rect(1, 0, 0, 1, 1, Rep::Grid { na: 100, nb: 2, va: (4, 4), vb: (4, -4) });
-        let d = doc_with(vec![Cell { name: "T".into(), rects: vec![diag], ..Default::default() }], 0, vec![(1, 0)]);
+        let diag = rect(
+            1,
+            0,
+            0,
+            1,
+            1,
+            Rep::Grid {
+                na: 100,
+                nb: 2,
+                va: (4, 4),
+                vb: (4, -4),
+            },
+        );
+        let d = doc_with(
+            vec![Cell {
+                name: "T".into(),
+                rects: vec![diag],
+                ..Default::default()
+            }],
+            0,
+            vec![(1, 0)],
+        );
         let occ = build(&d, 0, 0, &opts(0.01)).unwrap();
         assert_eq!(occ.cell_dbu, 10);
         let l0 = occ.layers[0].level(0).unwrap();
@@ -2600,25 +3079,78 @@ mod tests {
             })
             .collect();
         let expanded = doc_with(
-            vec![Cell { name: "T".into(), rects: members, ..Default::default() }],
+            vec![Cell {
+                name: "T".into(),
+                rects: members,
+                ..Default::default()
+            }],
             0,
             vec![(1, 0)],
         );
         let oe = build(&expanded, 0, 0, &opts(0.01)).unwrap();
         assert_eq!(oe.layers[0].level(0).unwrap(), l0);
         // axis grid with gaps narrower than a cell: closed form == members
-        let tight = rect(1, 5, 5, 6, 6, Rep::Grid { na: 7, nb: 5, va: (9, 0), vb: (0, 8) });
-        let loose = rect(1, 5, 5, 6, 6, Rep::Grid { na: 7, nb: 5, va: (20, 0), vb: (0, 30) });
+        let tight = rect(
+            1,
+            5,
+            5,
+            6,
+            6,
+            Rep::Grid {
+                na: 7,
+                nb: 5,
+                va: (9, 0),
+                vb: (0, 8),
+            },
+        );
+        let loose = rect(
+            1,
+            5,
+            5,
+            6,
+            6,
+            Rep::Grid {
+                na: 7,
+                nb: 5,
+                va: (20, 0),
+                vb: (0, 30),
+            },
+        );
         for r in [tight, loose] {
             let members: Vec<RectRec> = (0..35)
                 .map(|k| {
                     let (i, j) = (k % 7, k / 7);
-                    let Rep::Grid { va, vb, .. } = r.rep.clone() else { unreachable!() };
-                    rect(1, r.x + i * va.0 + j * vb.0, r.y + i * va.1 + j * vb.1, r.w, r.h, Rep::One)
+                    let Rep::Grid { va, vb, .. } = r.rep.clone() else {
+                        unreachable!()
+                    };
+                    rect(
+                        1,
+                        r.x + i * va.0 + j * vb.0,
+                        r.y + i * va.1 + j * vb.1,
+                        r.w,
+                        r.h,
+                        Rep::One,
+                    )
                 })
                 .collect();
-            let a = doc_with(vec![Cell { name: "T".into(), rects: vec![r.clone()], ..Default::default() }], 0, vec![(1, 0)]);
-            let b = doc_with(vec![Cell { name: "T".into(), rects: members, ..Default::default() }], 0, vec![(1, 0)]);
+            let a = doc_with(
+                vec![Cell {
+                    name: "T".into(),
+                    rects: vec![r.clone()],
+                    ..Default::default()
+                }],
+                0,
+                vec![(1, 0)],
+            );
+            let b = doc_with(
+                vec![Cell {
+                    name: "T".into(),
+                    rects: members,
+                    ..Default::default()
+                }],
+                0,
+                vec![(1, 0)],
+            );
             let oa = build(&a, 0, 0, &opts(0.01)).unwrap();
             let ob = build(&b, 0, 0, &opts(0.01)).unwrap();
             assert_eq!(oa.layers[0].level(0), ob.layers[0].level(0));
@@ -2630,14 +3162,54 @@ mod tests {
         let mut child = cell("C");
         child.rects.push(rect(1, 0, 0, 30, 10, Rep::One)); // wide bar
         let mut top = cell("T");
-        top.places.push(PlaceRec { cell: 1, x: 0, y: 0, rot: 0, flip: false, rep: Rep::One });
-        top.places.push(PlaceRec { cell: 1, x: 100, y: 100, rot: 1, flip: false, rep: Rep::One });
-        top.places.push(PlaceRec { cell: 1, x: 200, y: 0, rot: 0, flip: true, rep: Rep::Pts(Arc::from(vec![(0, 0), (0, 60)])) });
-        top.places.push(PlaceRec { cell: 1, x: 0, y: 200, rot: 0, flip: false, rep: Rep::Grid { na: 3, nb: 1, va: (50, 0), vb: (0, 0) } });
+        top.places.push(PlaceRec {
+            cell: 1,
+            x: 0,
+            y: 0,
+            rot: 0,
+            flip: false,
+            rep: Rep::One,
+        });
+        top.places.push(PlaceRec {
+            cell: 1,
+            x: 100,
+            y: 100,
+            rot: 1,
+            flip: false,
+            rep: Rep::One,
+        });
+        top.places.push(PlaceRec {
+            cell: 1,
+            x: 200,
+            y: 0,
+            rot: 0,
+            flip: true,
+            rep: Rep::Pts(Arc::from(vec![(0, 0), (0, 60)])),
+        });
+        top.places.push(PlaceRec {
+            cell: 1,
+            x: 0,
+            y: 200,
+            rot: 0,
+            flip: false,
+            rep: Rep::Grid {
+                na: 3,
+                nb: 1,
+                va: (50, 0),
+                vb: (0, 0),
+            },
+        });
         let d = doc_with(vec![top, child], 0, vec![(1, 0)]);
         let occ = build(&d, 7, 9, &opts(0.01)).unwrap();
         // every placement is one level down: a single plane of depth 1
-        assert_eq!(occ.layers[0].planes.iter().map(|p| p.depth).collect::<Vec<_>>(), vec![1]);
+        assert_eq!(
+            occ.layers[0]
+                .planes
+                .iter()
+                .map(|p| p.depth)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
         let l0 = occ.layers[0].level(0).unwrap();
         assert_eq!(occ.cell_dbu, 10);
         // the grid is anchored at the bbox corner (the mirrored bar
@@ -2654,12 +3226,17 @@ mod tests {
         // 3-member x grid at y=200
         assert!(cellf(5, 205) && cellf(55, 205) && cellf(105, 205) && !cellf(35, 205));
         // pyramid: every set level-0 cell lights its parent, and only those
-        let levels: Vec<Level> = (0..occ.n_levels as usize).map(|lv| occ.layers[0].level(lv).unwrap()).collect();
+        let levels: Vec<Level> = (0..occ.n_levels as usize)
+            .map(|lv| occ.layers[0].level(lv).unwrap())
+            .collect();
         for (lv, pair) in levels.windows(2).enumerate() {
             let (a, b) = (&pair[0], &pair[1]);
             for j in 0..b.h {
                 for i in 0..b.w {
-                    let any = a.get(2 * i, 2 * j) || a.get(2 * i + 1, 2 * j) || a.get(2 * i, 2 * j + 1) || a.get(2 * i + 1, 2 * j + 1);
+                    let any = a.get(2 * i, 2 * j)
+                        || a.get(2 * i + 1, 2 * j)
+                        || a.get(2 * i, 2 * j + 1)
+                        || a.get(2 * i + 1, 2 * j + 1);
                     assert_eq!(b.get(i, j), any, "level {} cell {},{}", lv + 1, i, j);
                 }
             }
@@ -2671,11 +3248,40 @@ mod tests {
     #[test]
     fn paths_take_the_raster_hull_and_zero_area_shapes_mark_nothing() {
         let mut top = cell("T");
-        top.paths.push(PathRec { layer: 1, dt: 0, pts: vec![(0, 5), (50, 5)], hw: 3, es: 0, ee: 0, rep: Rep::One });
-        top.paths.push(PathRec { layer: 1, dt: 0, pts: vec![(0, 50), (30, 80)], hw: 2, es: 0, ee: 0, rep: Rep::One });
-        top.paths.push(PathRec { layer: 1, dt: 0, pts: vec![(80, 80), (90, 80)], hw: 0, es: 0, ee: 0, rep: Rep::One });
+        top.paths.push(PathRec {
+            layer: 1,
+            dt: 0,
+            pts: vec![(0, 5), (50, 5)],
+            hw: 3,
+            es: 0,
+            ee: 0,
+            rep: Rep::One,
+        });
+        top.paths.push(PathRec {
+            layer: 1,
+            dt: 0,
+            pts: vec![(0, 50), (30, 80)],
+            hw: 2,
+            es: 0,
+            ee: 0,
+            rep: Rep::One,
+        });
+        top.paths.push(PathRec {
+            layer: 1,
+            dt: 0,
+            pts: vec![(80, 80), (90, 80)],
+            hw: 0,
+            es: 0,
+            ee: 0,
+            rep: Rep::One,
+        });
         top.rects.push(rect(1, 80, 0, 0, 20, Rep::One));
-        top.polys.push(PolyRec { layer: 1, dt: 0, pts: vec![(60, 60), (70, 70), (65, 65)], rep: Rep::One });
+        top.polys.push(PolyRec {
+            layer: 1,
+            dt: 0,
+            pts: vec![(60, 60), (70, 70), (65, 65)],
+            rep: Rep::One,
+        });
         let d = doc_with(vec![top], 0, vec![(1, 0)]);
         let occ = build(&d, 0, 0, &opts(0.01)).unwrap();
         let l0 = occ.layers[0].level(0).unwrap();
@@ -2703,20 +3309,59 @@ mod tests {
             y: 0,
             rot: 0,
             flip: false,
-            rep: Rep::Grid { na: 100_000, nb: 100_000, va: (1, 0), vb: (0, 0) },
+            rep: Rep::Grid {
+                na: 100_000,
+                nb: 100_000,
+                va: (1, 0),
+                vb: (0, 0),
+            },
         });
         let d = doc_with(vec![top, child], 0, vec![(1, 0)]);
         let budget = 5_000u64;
-        let occ = build(&d, 0, 0, &Opts { base_um: 0.01, max_work: budget, prune: false, ..Opts::default() }).unwrap();
+        let occ = build(
+            &d,
+            0,
+            0,
+            &Opts {
+                base_um: 0.01,
+                max_work: budget,
+                prune: false,
+                ..Opts::default()
+            },
+        )
+        .unwrap();
         assert_eq!(occ.layers[0].status, STATUS_NONE_WORK);
-        assert!(occ.layers[0].work <= budget + 2, "charged {} for a budget of {}", occ.layers[0].work, budget);
+        assert!(
+            occ.layers[0].work <= budget + 2,
+            "charged {} for a budget of {}",
+            occ.layers[0].work,
+            budget
+        );
         let pts: Vec<(i64, i64)> = (0..20_000).map(|k| (k * 10, 0)).collect();
         let mut top = cell("T");
-        top.places.push(PlaceRec { cell: 1, x: 0, y: 0, rot: 0, flip: false, rep: Rep::Pts(Arc::from(pts)) });
+        top.places.push(PlaceRec {
+            cell: 1,
+            x: 0,
+            y: 0,
+            rot: 0,
+            flip: false,
+            rep: Rep::Pts(Arc::from(pts)),
+        });
         let mut child = cell("C");
         child.rects.push(rect(1, 0, 0, 5, 5, Rep::One));
         let d = doc_with(vec![top, child], 0, vec![(1, 0)]);
-        let occ = build(&d, 0, 0, &Opts { base_um: 0.01, max_work: budget, prune: false, ..Opts::default() }).unwrap();
+        let occ = build(
+            &d,
+            0,
+            0,
+            &Opts {
+                base_um: 0.01,
+                max_work: budget,
+                prune: false,
+                ..Opts::default()
+            },
+        )
+        .unwrap();
         assert_eq!(occ.layers[0].status, STATUS_NONE_WORK);
         assert!(occ.layers[0].work <= budget + 2);
     }
@@ -2730,18 +3375,74 @@ mod tests {
         let make_child = || {
             let mut child = cell("C");
             child.rects.push(rect(1, 0, 0, 4, 4, Rep::One));
-            child.rects.push(rect(1, 0, 0, 1, 1, Rep::Grid { na: 5, nb: 5, va: (30, 0), vb: (0, 30) }));
-            child.polys.push(PolyRec { layer: 1, dt: 0, pts: vec![(10, 0), (30, 0), (30, 25)], rep: Rep::One });
+            child.rects.push(rect(
+                1,
+                0,
+                0,
+                1,
+                1,
+                Rep::Grid {
+                    na: 5,
+                    nb: 5,
+                    va: (30, 0),
+                    vb: (0, 30),
+                },
+            ));
+            child.polys.push(PolyRec {
+                layer: 1,
+                dt: 0,
+                pts: vec![(10, 0), (30, 0), (30, 25)],
+                rep: Rep::One,
+            });
             child
         };
         let mut top = cell("T");
         top.rects.push(rect(1, 900, 900, 50, 50, Rep::One));
-        top.places.push(PlaceRec { cell: 1, x: 100, y: 100, rot: 0, flip: false, rep: Rep::Grid { na: 37, nb: 11, va: (20, 0), vb: (0, 20) } });
+        top.places.push(PlaceRec {
+            cell: 1,
+            x: 100,
+            y: 100,
+            rot: 0,
+            flip: false,
+            rep: Rep::Grid {
+                na: 37,
+                nb: 11,
+                va: (20, 0),
+                vb: (0, 20),
+            },
+        });
         let pts: Vec<(i64, i64)> = (0..23).map(|k| (k * 15, (k % 3) * 40)).collect();
-        top.places.push(PlaceRec { cell: 1, x: 0, y: 700, rot: 2, flip: true, rep: Rep::Pts(Arc::from(pts)) });
+        top.places.push(PlaceRec {
+            cell: 1,
+            x: 0,
+            y: 700,
+            rot: 2,
+            flip: true,
+            rep: Rep::Pts(Arc::from(pts)),
+        });
         let d = doc_with(vec![top, make_child()], 0, vec![(1, 0)]);
-        let one = build(&d, 1, 2, &Opts { base_um: 0.01, jobs: 1, ..Opts::default() }).unwrap();
-        let many = build(&d, 1, 2, &Opts { base_um: 0.01, jobs: 3, ..Opts::default() }).unwrap();
+        let one = build(
+            &d,
+            1,
+            2,
+            &Opts {
+                base_um: 0.01,
+                jobs: 1,
+                ..Opts::default()
+            },
+        )
+        .unwrap();
+        let many = build(
+            &d,
+            1,
+            2,
+            &Opts {
+                base_um: 0.01,
+                jobs: 3,
+                ..Opts::default()
+            },
+        )
+        .unwrap();
         assert_eq!(one.layers[0].status, STATUS_OK);
         assert!(one.layers[0].work > 37 * 11 + 23);
         assert_eq!(one.layers[0].work, many.layers[0].work);
@@ -2754,21 +3455,70 @@ mod tests {
         let mut leaf = cell("B");
         leaf.rects.push(rect(1, 0, 0, 7, 3, Rep::One));
         leaf.rects.push(rect(1, 50, 50, 7, 3, Rep::One));
-        leaf.places.push(PlaceRec { cell: 3, x: 200, y: 0, rot: 0, flip: false, rep: Rep::Grid { na: 9, nb: 2, va: (40, 0), vb: (0, 40) } });
+        leaf.places.push(PlaceRec {
+            cell: 3,
+            x: 200,
+            y: 0,
+            rot: 0,
+            flip: false,
+            rep: Rep::Grid {
+                na: 9,
+                nb: 2,
+                va: (40, 0),
+                vb: (0, 40),
+            },
+        });
         let mut die = cell("A");
-        die.places.push(PlaceRec { cell: 2, x: 5, y: 5, rot: 1, flip: false, rep: Rep::One });
+        die.places.push(PlaceRec {
+            cell: 2,
+            x: 5,
+            y: 5,
+            rot: 1,
+            flip: false,
+            rep: Rep::One,
+        });
         let mut top = cell("T");
-        top.places.push(PlaceRec { cell: 1, x: 0, y: 0, rot: 0, flip: false, rep: Rep::One });
+        top.places.push(PlaceRec {
+            cell: 1,
+            x: 0,
+            y: 0,
+            rot: 0,
+            flip: false,
+            rep: Rep::One,
+        });
         let d = doc_with(vec![top, die, leaf, make_child()], 0, vec![(1, 0)]);
         let shapes = take_layer_shapes(&mut index_shapes(&d), (1, 0), d.cells.len());
         let has = layer_presence(&d, &shapes);
         for balanced in [false, true] {
             let units = units_for(&d, &has, &shapes, 3, balanced, 10, None);
-            assert!(units.iter().all(|u| u.ci == 2), "units should sit in the leaf");
+            assert!(
+                units.iter().all(|u| u.ci == 2),
+                "units should sit in the leaf"
+            );
             assert!(units.len() >= 3, "{} units", units.len());
         }
-        let one = build(&d, 1, 2, &Opts { base_um: 0.01, jobs: 1, ..Opts::default() }).unwrap();
-        let many = build(&d, 1, 2, &Opts { base_um: 0.01, jobs: 3, ..Opts::default() }).unwrap();
+        let one = build(
+            &d,
+            1,
+            2,
+            &Opts {
+                base_um: 0.01,
+                jobs: 1,
+                ..Opts::default()
+            },
+        )
+        .unwrap();
+        let many = build(
+            &d,
+            1,
+            2,
+            &Opts {
+                base_um: 0.01,
+                jobs: 3,
+                ..Opts::default()
+            },
+        )
+        .unwrap();
         assert_eq!(write_ovo(&one), write_ovo(&many));
         assert!(one.layers[0].level(0).unwrap().count() > 20);
     }
@@ -2778,13 +3528,15 @@ mod tests {
         // Simultaneous first writes and repeated saturated writes, including
         // complete interior words, partial end words and row padding.
         let bits = SharedBits::new(259, 7);
-        let spans: Vec<_> = (0..12u32).flat_map(|t| {
-            (0..40u32).map(move |k| {
-                let row = (t + k) % 7;
-                let lo = (t * 13 + k * 7) % 190;
-                (row, lo, (lo + k * 3).min(250))
+        let spans: Vec<_> = (0..12u32)
+            .flat_map(|t| {
+                (0..40u32).map(move |k| {
+                    let row = (t + k) % 7;
+                    let lo = (t * 13 + k * 7) % 190;
+                    (row, lo, (lo + k * 3).min(250))
+                })
             })
-        }).collect();
+            .collect();
         let mut expected = vec![false; 259 * 7];
         for &(row, lo, hi) in &spans {
             for x in lo..=hi {
@@ -2809,7 +3561,10 @@ mod tests {
                 assert_eq!(level.get(x, row), expected[(row * 259 + x) as usize]);
             }
         }
-        assert_eq!(level.count(), expected.iter().filter(|&&b| b).count() as u64);
+        assert_eq!(
+            level.count(),
+            expected.iter().filter(|&&b| b).count() as u64
+        );
     }
 
     #[test]
@@ -2828,57 +3583,184 @@ mod tests {
         let c = 10i64; // the 0.01 um cell at unit 1000
         let mut leaf = cell("LEAF");
         // per-member rect grid: 6 x 6 on a 40 pitch (gap 34 > cell)
-        leaf.rects.push(rect(1, 0, 0, 6, 6, Rep::Grid { na: 400, nb: 400, va: (40, 0), vb: (0, 40) }));
+        leaf.rects.push(rect(
+            1,
+            0,
+            0,
+            6,
+            6,
+            Rep::Grid {
+                na: 400,
+                nb: 400,
+                va: (40, 0),
+                vb: (0, 40),
+            },
+        ));
         // closed-form rect grid: 6 x 6 on a 12 pitch (gap 6 < cell)
-        leaf.rects.push(rect(1, 17000, 0, 6, 6, Rep::Grid { na: 150, nb: 150, va: (12, 0), vb: (0, 12) }));
+        leaf.rects.push(rect(
+            1,
+            17000,
+            0,
+            6,
+            6,
+            Rep::Grid {
+                na: 150,
+                nb: 150,
+                va: (12, 0),
+                vb: (0, 12),
+            },
+        ));
         // a zero-area rect with a giant repetition: nothing, no charge
-        leaf.rects.push(rect(1, 0, 17000, 0, 6, Rep::Grid { na: 300, nb: 300, va: (40, 0), vb: (0, 40) }));
-        let pts: Vec<(i64, i64)> = (0..50_000i64).map(|k| ((k % 250) * 40, 17000 + (k / 250) * 40)).collect();
-        leaf.polys.push(PolyRec { layer: 1, dt: 0, pts: vec![(0, 0), (8, 0), (0, 8)], rep: Rep::Pts(pts.into()) });
-        leaf.paths.push(PathRec {
-            layer: 1, dt: 0, pts: vec![(17000, 17000), (17030, 17000)], hw: 3, es: 0, ee: 0,
-            rep: Rep::Grid { na: 250, nb: 250, va: (40, 0), vb: (0, 40) },
+        leaf.rects.push(rect(
+            1,
+            0,
+            17000,
+            0,
+            6,
+            Rep::Grid {
+                na: 300,
+                nb: 300,
+                va: (40, 0),
+                vb: (0, 40),
+            },
+        ));
+        let pts: Vec<(i64, i64)> = (0..50_000i64)
+            .map(|k| ((k % 250) * 40, 17000 + (k / 250) * 40))
+            .collect();
+        leaf.polys.push(PolyRec {
+            layer: 1,
+            dt: 0,
+            pts: vec![(0, 0), (8, 0), (0, 8)],
+            rep: Rep::Pts(pts.into()),
         });
         leaf.paths.push(PathRec {
-            layer: 1, dt: 0, pts: vec![(0, 0), (30, 0)], hw: 0, es: 0, ee: 0,
+            layer: 1,
+            dt: 0,
+            pts: vec![(17000, 17000), (17030, 17000)],
+            hw: 3,
+            es: 0,
+            ee: 0,
+            rep: Rep::Grid {
+                na: 250,
+                nb: 250,
+                va: (40, 0),
+                vb: (0, 40),
+            },
+        });
+        leaf.paths.push(PathRec {
+            layer: 1,
+            dt: 0,
+            pts: vec![(0, 0), (30, 0)],
+            hw: 0,
+            es: 0,
+            ee: 0,
             rep: Rep::Pts((0..3000i64).map(|k| (k * 7, k * 3)).collect()),
         });
         let mut heavy = cell("HEAVY");
-        heavy.rects.push(rect(1, 0, 0, 6, 6, Rep::Grid { na: 400, nb: 400, va: (40, 0), vb: (0, 40) }));
+        heavy.rects.push(rect(
+            1,
+            0,
+            0,
+            6,
+            6,
+            Rep::Grid {
+                na: 400,
+                nb: 400,
+                va: (40, 0),
+                vb: (0, 40),
+            },
+        ));
         heavy.polys.push(PolyRec {
-            layer: 1, dt: 0, pts: vec![(0, 0), (8, 0), (4, 8)],
-            rep: Rep::Grid { na: 80, nb: 80, va: (0, 40), vb: (40, 0) },
+            layer: 1,
+            dt: 0,
+            pts: vec![(0, 0), (8, 0), (4, 8)],
+            rep: Rep::Grid {
+                na: 80,
+                nb: 80,
+                va: (0, 40),
+                vb: (40, 0),
+            },
         });
         let mut top = cell("T");
-        top.places.push(PlaceRec { cell: 1, x: 5000, y: 7000, rot: 1, flip: true, rep: Rep::One });
         top.places.push(PlaceRec {
-            cell: 1, x: 40000, y: 40000, rot: 2, flip: false,
+            cell: 1,
+            x: 5000,
+            y: 7000,
+            rot: 1,
+            flip: true,
+            rep: Rep::One,
+        });
+        top.places.push(PlaceRec {
+            cell: 1,
+            x: 40000,
+            y: 40000,
+            rot: 2,
+            flip: false,
             rep: Rep::Pts(vec![(0, 0), (30000, 0), (0, 30000)].into()),
         });
         top.places.push(PlaceRec {
-            cell: 2, x: 90000, y: 0, rot: 3, flip: true,
-            rep: Rep::Grid { na: 2, nb: 2, va: (30000, 0), vb: (0, 30000) },
+            cell: 2,
+            x: 90000,
+            y: 0,
+            rot: 3,
+            flip: true,
+            rep: Rep::Grid {
+                na: 2,
+                nb: 2,
+                va: (30000, 0),
+                vb: (0, 30000),
+            },
         });
         let d = doc_with(vec![top, leaf, heavy], 0, vec![(1, 0)]);
         let shapes = take_layer_shapes(&mut index_shapes(&d), (1, 0), d.cells.len());
         let has = layer_presence(&d, &shapes);
         let units = units_for(&d, &has, &shapes, 12, true, c, None);
         let members = |shape: u8| {
-            units.iter().filter(|u| matches!(u.kind, UnitKind::Members { shape: s, .. } if s == shape)).count()
+            units
+                .iter()
+                .filter(|u| matches!(u.kind, UnitKind::Members { shape: s, .. } if s == shape))
+                .count()
         };
-        assert!(members(0) >= 16 && members(1) >= 4 && members(2) >= 4,
-            "rect {} poly {} path {} Members units of {}", members(0), members(1), members(2), units.len());
+        assert!(
+            members(0) >= 16 && members(1) >= 4 && members(2) >= 4,
+            "rect {} poly {} path {} Members units of {}",
+            members(0),
+            members(1),
+            members(2),
+            units.len()
+        );
         // the closed-form grid (the leaf's rect 1) and the zero-area
         // rect (rect 2) are never split; the array's child reaches its
         // Members units through the member-wise expansion
-        assert!(!units.iter().any(|u| u.ci == 1 && matches!(u.kind, UnitKind::Members { shape: 0, idx: 1 | 2, .. })));
-        assert!(units.iter().any(|u| u.ci == 2 && matches!(u.kind, UnitKind::Members { .. })));
+        assert!(!units.iter().any(|u| u.ci == 1
+            && matches!(
+                u.kind,
+                UnitKind::Members {
+                    shape: 0,
+                    idx: 1 | 2,
+                    ..
+                }
+            )));
+        assert!(units
+            .iter()
+            .any(|u| u.ci == 2 && matches!(u.kind, UnitKind::Members { .. })));
         // the heavy child's Pts (3 members) and 2 x 2 Grid placements
         // are expanded member by member, each member's charge on its
         // first unit: 7 charges, as the walk charges them
         assert_eq!(units.iter().map(|u| u.extra).sum::<u64>(), 7);
         let mk = |jobs, balanced| {
-            build(&d, 0, 0, &Opts { base_um: 0.01, jobs, balanced_units: balanced, ..Opts::default() }).unwrap()
+            build(
+                &d,
+                0,
+                0,
+                &Opts {
+                    base_um: 0.01,
+                    jobs,
+                    balanced_units: balanced,
+                    ..Opts::default()
+                },
+            )
+            .unwrap()
         };
         let (a, b, cnt) = (mk(4, true), mk(1, true), mk(4, false));
         assert_eq!(a.layers[0].status, STATUS_OK);
@@ -2887,16 +3769,37 @@ mod tests {
         assert_eq!(write_ovo(&a), write_ovo(&cnt));
         assert_eq!(a.layers[0].work, cnt.layers[0].work);
         // every shape sits at placement depth 1: one plane
-        assert_eq!(a.layers[0].planes.iter().map(|p| p.depth).collect::<Vec<_>>(), vec![1]);
+        assert_eq!(
+            a.layers[0]
+                .planes
+                .iter()
+                .map(|p| p.depth)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
         // over the work budget the verdict is the same on every cut
         // (the work value at the trip point is not pinned)
         let over = |jobs, balanced| {
-            build(&d, 0, 0, &Opts { base_um: 0.01, jobs, balanced_units: balanced, max_work: 50_000, ..Opts::default() })
-                .unwrap()
-                .layers[0]
+            build(
+                &d,
+                0,
+                0,
+                &Opts {
+                    base_um: 0.01,
+                    jobs,
+                    balanced_units: balanced,
+                    max_work: 50_000,
+                    ..Opts::default()
+                },
+            )
+            .unwrap()
+            .layers[0]
                 .status
         };
-        assert_eq!((over(4, true), over(1, true), over(4, false)), (STATUS_NONE_WORK, STATUS_NONE_WORK, STATUS_NONE_WORK));
+        assert_eq!(
+            (over(4, true), over(1, true), over(4, false)),
+            (STATUS_NONE_WORK, STATUS_NONE_WORK, STATUS_NONE_WORK)
+        );
     }
 
     #[test]
@@ -2913,10 +3816,25 @@ mod tests {
             y: 0,
             rot: 0,
             flip: false,
-            rep: Rep::Grid { na: 100_000, nb: 100_000, va: (1, 0), vb: (0, 0) },
+            rep: Rep::Grid {
+                na: 100_000,
+                nb: 100_000,
+                va: (1, 0),
+                vb: (0, 0),
+            },
         });
         let d = doc_with(vec![top, child], 0, vec![(1, 0)]);
-        let occ = build(&d, 0, 0, &Opts { base_um: 0.01, max_work: 50_000, ..Opts::default() }).unwrap();
+        let occ = build(
+            &d,
+            0,
+            0,
+            &Opts {
+                base_um: 0.01,
+                max_work: 50_000,
+                ..Opts::default()
+            },
+        )
+        .unwrap();
         assert_eq!(occ.layers[0].status, STATUS_OK);
         assert!(occ.layers[0].work < 50_000, "work {}", occ.layers[0].work);
         // the fill is the members' footprint: x 0..100_004, y 0..5 in 10 dbu cells
@@ -2940,11 +3858,28 @@ mod tests {
             y: 0,
             rot: 0,
             flip: false,
-            rep: Rep::Grid { na: 100_000, nb: 100_000, va: (1, 0), vb: (0, 0) },
+            rep: Rep::Grid {
+                na: 100_000,
+                nb: 100_000,
+                va: (1, 0),
+                vb: (0, 0),
+            },
         });
         let d = doc_with(vec![top, child], 0, vec![(1, 0)]);
         let budget = 50_000u64;
-        let occ = build(&d, 0, 0, &Opts { base_um: 0.01, max_work: budget, jobs: 4, prune: false, ..Opts::default() }).unwrap();
+        let occ = build(
+            &d,
+            0,
+            0,
+            &Opts {
+                base_um: 0.01,
+                max_work: budget,
+                jobs: 4,
+                prune: false,
+                ..Opts::default()
+            },
+        )
+        .unwrap();
         assert_eq!(occ.layers[0].status, STATUS_NONE_WORK);
         assert!(occ.layers[0].work > budget);
         assert!(
@@ -2960,17 +3895,43 @@ mod tests {
         let mut top = cell("T");
         top.rects.push(rect(1, 0, 0, 1000, 1000, Rep::One));
         // zero-width rects only, repeated
-        top.rects.push(RectRec { layer: 2, dt: 0, x: 0, y: 0, w: 0, h: 500, rep: Rep::Grid { na: 3, nb: 1, va: (10, 0), vb: (0, 0) } });
+        top.rects.push(RectRec {
+            layer: 2,
+            dt: 0,
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 500,
+            rep: Rep::Grid {
+                na: 3,
+                nb: 1,
+                va: (10, 0),
+                vb: (0, 0),
+            },
+        });
         // layer 3 is in the table without a record
         let d = doc_with(vec![top], 0, vec![(2, 0), (1, 0), (3, 0)]);
         let occ = build(&d, 0, 0, &opts(0.01)).unwrap();
         assert_eq!(occ.layers[0].status, STATUS_EMPTY);
         assert!(occ.layers[0].planes.is_empty());
         assert_eq!(occ.layers[1].status, STATUS_OK);
-        assert_eq!((occ.layers[2].status, occ.layers[2].work), (STATUS_EMPTY, 0));
+        assert_eq!(
+            (occ.layers[2].status, occ.layers[2].work),
+            (STATUS_EMPTY, 0)
+        );
         // empty layers take no room: a byte limit of one pyramid still
         // fits the ok layer that follows an empty one
-        let tight = build(&d, 0, 0, &Opts { base_um: 0.01, max_bytes: layer_bytes(occ.w, occ.h), ..Opts::default() }).unwrap();
+        let tight = build(
+            &d,
+            0,
+            0,
+            &Opts {
+                base_um: 0.01,
+                max_bytes: layer_bytes(occ.w, occ.h),
+                ..Opts::default()
+            },
+        )
+        .unwrap();
         assert_eq!(tight.layers[1].status, STATUS_OK);
         // the file holds only the ok layer's bitmaps; empty reads as nothing
         let bytes = write_ovo(&occ);
@@ -2980,7 +3941,10 @@ mod tests {
         assert!(f.count(1, 0) > 0);
         // three layer entries, one plane (the ok layer's depth 0)
         let table = 3 * LAYER_FIXED + PLANE_FIXED + occ.n_levels as usize * LEVEL_ENTRY;
-        assert_eq!(bytes.len(), HEADER_FIXED + 1 + table + layer_bytes(occ.w, occ.h) as usize);
+        assert_eq!(
+            bytes.len(),
+            HEADER_FIXED + 1 + table + layer_bytes(occ.w, occ.h) as usize
+        );
         assert_eq!(status_text(STATUS_EMPTY), "empty");
     }
 
@@ -2990,9 +3954,25 @@ mod tests {
         // dropped, and the layer published as ok - a summary with a
         // shape missing. The layer is none:unsupported instead.
         let mut top = cell("T");
-        top.paths.push(PathRec { layer: 1, dt: 0, pts: vec![(0, 0), (100, 0), (0, 0)], hw: 5, es: 0, ee: 0, rep: Rep::One });
+        top.paths.push(PathRec {
+            layer: 1,
+            dt: 0,
+            pts: vec![(0, 0), (100, 0), (0, 0)],
+            hw: 5,
+            es: 0,
+            ee: 0,
+            rep: Rep::One,
+        });
         top.rects.push(rect(1, 0, 50, 40, 40, Rep::One));
-        top.rects.push(RectRec { layer: 2, dt: 0, x: 0, y: 0, w: 40, h: 40, rep: Rep::One });
+        top.rects.push(RectRec {
+            layer: 2,
+            dt: 0,
+            x: 0,
+            y: 0,
+            w: 40,
+            h: 40,
+            rep: Rep::One,
+        });
         let d = doc_with(vec![top], 0, vec![(1, 0), (2, 0)]);
         let occ = build(&d, 0, 0, &opts(0.01)).unwrap();
         assert_eq!(occ.layers[0].status, STATUS_NONE_UNSUPPORTED);
@@ -3021,10 +4001,14 @@ mod tests {
         let level0_off = u64::from_le_bytes(bytes[off0..off0 + 8].try_into().unwrap());
         let mut header = bytes.clone();
         header[off0..off0 + 8].copy_from_slice(&0u64.to_le_bytes());
-        assert!(OvoFile::from_bytes(header).unwrap_err().contains("inside the header"));
+        assert!(OvoFile::from_bytes(header)
+            .unwrap_err()
+            .contains("inside the header"));
         let mut overlap = bytes.clone();
         overlap[off1..off1 + 8].copy_from_slice(&level0_off.to_le_bytes());
-        assert!(OvoFile::from_bytes(overlap).unwrap_err().contains("overlaps"));
+        assert!(OvoFile::from_bytes(overlap)
+            .unwrap_err()
+            .contains("overlaps"));
         assert!(OvoFile::from_bytes(bytes).is_ok());
     }
 
@@ -3032,13 +4016,54 @@ mod tests {
     fn limits_record_none_statuses_instead_of_approximations() {
         let mut top = cell("T");
         top.rects.push(rect(1, 0, 0, 1000, 1000, Rep::One));
-        top.rects.push(RectRec { layer: 2, dt: 0, x: 0, y: 0, w: 1000, h: 1000, rep: Rep::One });
+        top.rects.push(RectRec {
+            layer: 2,
+            dt: 0,
+            x: 0,
+            y: 0,
+            w: 1000,
+            h: 1000,
+            rep: Rep::One,
+        });
         let d = doc_with(vec![top], 0, vec![(1, 0), (2, 0)]);
-        let cells = build(&d, 0, 0, &Opts { base_um: 0.01, max_cells: 100, ..Opts::default() }).unwrap();
-        assert!(cells.layers.iter().all(|l| l.status == STATUS_NONE_CELLS && l.planes.is_empty()));
-        let work = build(&d, 0, 0, &Opts { base_um: 0.01, max_work: 100, ..Opts::default() }).unwrap();
+        let cells = build(
+            &d,
+            0,
+            0,
+            &Opts {
+                base_um: 0.01,
+                max_cells: 100,
+                ..Opts::default()
+            },
+        )
+        .unwrap();
+        assert!(cells
+            .layers
+            .iter()
+            .all(|l| l.status == STATUS_NONE_CELLS && l.planes.is_empty()));
+        let work = build(
+            &d,
+            0,
+            0,
+            &Opts {
+                base_um: 0.01,
+                max_work: 100,
+                ..Opts::default()
+            },
+        )
+        .unwrap();
         assert!(work.layers.iter().all(|l| l.status == STATUS_NONE_WORK));
-        let size = build(&d, 0, 0, &Opts { base_um: 0.01, max_bytes: layer_bytes(100, 100), ..Opts::default() }).unwrap();
+        let size = build(
+            &d,
+            0,
+            0,
+            &Opts {
+                base_um: 0.01,
+                max_bytes: layer_bytes(100, 100),
+                ..Opts::default()
+            },
+        )
+        .unwrap();
         assert_eq!(size.layers[0].status, STATUS_OK);
         assert_eq!(size.layers[1].status, STATUS_NONE_SIZE);
         // every variant still serializes and reads back
@@ -3059,15 +4084,41 @@ mod tests {
         let mut light = cell("L");
         light.rects.push(rect(1, 0, 0, 3, 3, Rep::One));
         let mut heavy = cell("H");
-        heavy.rects.push(rect(1, 0, 0, 1, 1, Rep::Grid { na: 300, nb: 300, va: (4, 0), vb: (0, 4) }));
+        heavy.rects.push(rect(
+            1,
+            0,
+            0,
+            1,
+            1,
+            Rep::Grid {
+                na: 300,
+                nb: 300,
+                va: (4, 0),
+                vb: (0, 4),
+            },
+        ));
         for k in 0..64 {
             heavy.rects.push(rect(1, 2000 + k * 5, 0, 2, 2, Rep::One));
         }
         let mut top = cell("T");
         for k in 0..60 {
-            top.places.push(PlaceRec { cell: 1, x: k * 10, y: 5000, rot: 0, flip: false, rep: Rep::One });
+            top.places.push(PlaceRec {
+                cell: 1,
+                x: k * 10,
+                y: 5000,
+                rot: 0,
+                flip: false,
+                rep: Rep::One,
+            });
         }
-        top.places.push(PlaceRec { cell: 2, x: 0, y: 0, rot: 0, flip: false, rep: Rep::One });
+        top.places.push(PlaceRec {
+            cell: 2,
+            x: 0,
+            y: 0,
+            rot: 0,
+            flip: false,
+            rep: Rep::One,
+        });
         let d = doc_with(vec![top, light, heavy], 0, vec![(1, 0)]);
         let shapes = take_layer_shapes(&mut index_shapes(&d), (1, 0), d.cells.len());
         let has = layer_presence(&d, &shapes);
@@ -3075,14 +4126,56 @@ mod tests {
         assert_eq!((weights[1], weights[2]), (1, 90_000 + 64));
         assert_eq!(weights[0], 60 + 90_064);
         let by_count = units_for(&d, &has, &shapes, 4, false, 10, None);
-        assert_eq!(by_count.iter().filter(|u| u.ci == 2).count(), 0, "count split leaves the block one unit");
+        assert_eq!(
+            by_count.iter().filter(|u| u.ci == 2).count(),
+            0,
+            "count split leaves the block one unit"
+        );
         let balanced = units_for(&d, &has, &shapes, 4, true, 10, None);
         let in_block = balanced.iter().filter(|u| u.ci == 2).count();
-        assert!(in_block >= 8, "{} units in the block of {}", in_block, balanced.len());
+        assert!(
+            in_block >= 8,
+            "{} units in the block of {}",
+            in_block,
+            balanced.len()
+        );
         // the split changes nothing in the file
-        let a = build(&d, 0, 0, &Opts { base_um: 0.01, jobs: 4, balanced_units: true, ..Opts::default() }).unwrap();
-        let b = build(&d, 0, 0, &Opts { base_um: 0.01, jobs: 4, balanced_units: false, ..Opts::default() }).unwrap();
-        let c = build(&d, 0, 0, &Opts { base_um: 0.01, jobs: 1, balanced_units: true, ..Opts::default() }).unwrap();
+        let a = build(
+            &d,
+            0,
+            0,
+            &Opts {
+                base_um: 0.01,
+                jobs: 4,
+                balanced_units: true,
+                ..Opts::default()
+            },
+        )
+        .unwrap();
+        let b = build(
+            &d,
+            0,
+            0,
+            &Opts {
+                base_um: 0.01,
+                jobs: 4,
+                balanced_units: false,
+                ..Opts::default()
+            },
+        )
+        .unwrap();
+        let c = build(
+            &d,
+            0,
+            0,
+            &Opts {
+                base_um: 0.01,
+                jobs: 1,
+                balanced_units: true,
+                ..Opts::default()
+            },
+        )
+        .unwrap();
         assert_eq!(write_ovo(&a), write_ovo(&b));
         assert_eq!(write_ovo(&a), write_ovo(&c));
         assert_eq!(a.layers[0].work, b.layers[0].work);
@@ -3104,18 +4197,58 @@ mod tests {
         // through build: BASE_AUTO picks by the top's longer side, an
         // explicit cell is taken as given
         let mut top = cell("T");
-        top.rects.push(rect(1, 0, 0, 10_000_000, 3_000_000, Rep::One)); // 10 x 3 mm at unit 1000
+        top.rects
+            .push(rect(1, 0, 0, 10_000_000, 3_000_000, Rep::One)); // 10 x 3 mm at unit 1000
         let d = doc_with(vec![top], 0, vec![(1, 0)]);
-        let auto = build(&d, 0, 0, &Opts { base_um: BASE_AUTO, jobs: 2, ..Opts::default() }).unwrap();
+        let auto = build(
+            &d,
+            0,
+            0,
+            &Opts {
+                base_um: BASE_AUTO,
+                jobs: 2,
+                ..Opts::default()
+            },
+        )
+        .unwrap();
         assert_eq!(auto.cell_dbu, 4000);
-        let given = build(&d, 0, 0, &Opts { base_um: 2.0, jobs: 2, ..Opts::default() }).unwrap();
+        let given = build(
+            &d,
+            0,
+            0,
+            &Opts {
+                base_um: 2.0,
+                jobs: 2,
+                ..Opts::default()
+            },
+        )
+        .unwrap();
         assert_eq!(given.cell_dbu, 2000);
         let mut small = cell("S");
         small.rects.push(rect(1, 0, 0, 3_000, 2_000, Rep::One)); // 3 x 2 um
         let d = doc_with(vec![small], 0, vec![(1, 0)]);
-        let auto = build(&d, 0, 0, &Opts { base_um: BASE_AUTO, jobs: 1, ..Opts::default() }).unwrap();
+        let auto = build(
+            &d,
+            0,
+            0,
+            &Opts {
+                base_um: BASE_AUTO,
+                jobs: 1,
+                ..Opts::default()
+            },
+        )
+        .unwrap();
         assert_eq!((auto.cell_dbu, auto.w, auto.h), (250, 12, 8));
-        assert!(build(&d, 0, 0, &Opts { base_um: -1.0, ..Opts::default() }).is_err());
+        assert!(build(
+            &d,
+            0,
+            0,
+            &Opts {
+                base_um: -1.0,
+                ..Opts::default()
+            }
+        )
+        .is_err());
     }
 
     #[test]
@@ -3126,12 +4259,35 @@ mod tests {
         }
         let mut top = cell("T");
         top.rects.push(rect(1, 0, 0, 1000, 1000, Rep::One));
-        top.rects.push(RectRec { layer: 2, dt: 0, x: 0, y: 0, w: 50, h: 50, rep: Rep::One });
+        top.rects.push(RectRec {
+            layer: 2,
+            dt: 0,
+            x: 0,
+            y: 0,
+            w: 50,
+            h: 50,
+            rep: Rep::One,
+        });
         let d = doc_with(vec![top], 0, vec![(1, 0), (2, 0)]);
-        let occ = build(&d, 0, 0, &Opts { base_um: 0.01, max_work: 100, progress: Some(collect), ..Opts::default() }).unwrap();
+        let occ = build(
+            &d,
+            0,
+            0,
+            &Opts {
+                base_um: 0.01,
+                max_work: 100,
+                progress: Some(collect),
+                ..Opts::default()
+            },
+        )
+        .unwrap();
         assert_eq!(occ.layers[0].status, STATUS_NONE_WORK);
         let lines = LINES.lock().unwrap().clone();
-        assert!(lines.iter().any(|l| l.starts_with("1/0 none:work work=")), "{:?}", lines);
+        assert!(
+            lines.iter().any(|l| l.starts_with("1/0 none:work work=")),
+            "{:?}",
+            lines
+        );
         // a quick ok layer is not worth a line
         assert!(!lines.iter().any(|l| l.starts_with("2/0")), "{:?}", lines);
     }
@@ -3144,7 +4300,10 @@ mod tests {
         let occ = build(&d, 123, 456, &opts(0.01)).unwrap();
         let bytes = write_ovo(&occ);
         let f = OvoFile::from_bytes(bytes.clone()).unwrap();
-        assert_eq!((f.src_size, f.src_mtime, f.top.as_str(), f.cell_dbu), (123, 456, "TOP", 10));
+        assert_eq!(
+            (f.src_size, f.src_mtime, f.top.as_str(), f.cell_dbu),
+            (123, 456, "TOP", 10)
+        );
         assert_eq!(f.n_levels, occ.n_levels);
         assert_eq!((f.w, f.h), (occ.w, occ.h));
         for (k, layer) in occ.layers.iter().enumerate() {
@@ -3161,8 +4320,12 @@ mod tests {
             }
         }
         assert!(f.depth_aware());
-        assert!(OvoFile::from_bytes(bytes[..bytes.len() - 1].to_vec()).unwrap_err().contains("truncated"));
-        assert!(OvoFile::from_bytes(bytes[..40].to_vec()).unwrap_err().contains("truncated"));
+        assert!(OvoFile::from_bytes(bytes[..bytes.len() - 1].to_vec())
+            .unwrap_err()
+            .contains("truncated"));
+        assert!(OvoFile::from_bytes(bytes[..40].to_vec())
+            .unwrap_err()
+            .contains("truncated"));
         let mut bad = bytes.clone();
         bad[0] = b'X';
         assert!(OvoFile::from_bytes(bad).unwrap_err().contains("magic"));
@@ -3170,7 +4333,9 @@ mod tests {
         // first level entry's len sits after the layer and plane fixed parts
         let o = HEADER_FIXED + 3 + LAYER_FIXED + PLANE_FIXED + 16;
         wrong_len[o..o + 8].copy_from_slice(&1u64.to_le_bytes());
-        assert!(OvoFile::from_bytes(wrong_len).unwrap_err().contains("expected"));
+        assert!(OvoFile::from_bytes(wrong_len)
+            .unwrap_err()
+            .contains("expected"));
     }
 
     #[test]
@@ -3179,24 +4344,73 @@ mod tests {
         // depth 1 and B (inside A) holds 1/0 and 3/0 at depth 2
         let mut b_cell = cell("B");
         b_cell.rects.push(rect(1, 0, 0, 20, 20, Rep::One));
-        b_cell.rects.push(RectRec { layer: 3, dt: 0, x: 30, y: 0, w: 20, h: 20, rep: Rep::One });
+        b_cell.rects.push(RectRec {
+            layer: 3,
+            dt: 0,
+            x: 30,
+            y: 0,
+            w: 20,
+            h: 20,
+            rep: Rep::One,
+        });
         let mut a_cell = cell("A");
         a_cell.rects.push(rect(1, 0, 0, 20, 20, Rep::One));
-        a_cell.rects.push(RectRec { layer: 2, dt: 0, x: 30, y: 0, w: 20, h: 20, rep: Rep::One });
-        a_cell.places.push(PlaceRec { cell: 2, x: 0, y: 100, rot: 0, flip: false, rep: Rep::One });
+        a_cell.rects.push(RectRec {
+            layer: 2,
+            dt: 0,
+            x: 30,
+            y: 0,
+            w: 20,
+            h: 20,
+            rep: Rep::One,
+        });
+        a_cell.places.push(PlaceRec {
+            cell: 2,
+            x: 0,
+            y: 100,
+            rot: 0,
+            flip: false,
+            rep: Rep::One,
+        });
         let mut top = cell("T");
         top.rects.push(rect(1, 0, 0, 20, 20, Rep::One));
-        top.places.push(PlaceRec { cell: 1, x: 200, y: 0, rot: 0, flip: false, rep: Rep::One });
-        top.places.push(PlaceRec { cell: 1, x: 400, y: 0, rot: 0, flip: false, rep: Rep::One });
+        top.places.push(PlaceRec {
+            cell: 1,
+            x: 200,
+            y: 0,
+            rot: 0,
+            flip: false,
+            rep: Rep::One,
+        });
+        top.places.push(PlaceRec {
+            cell: 1,
+            x: 400,
+            y: 0,
+            rot: 0,
+            flip: false,
+            rep: Rep::One,
+        });
         let d = doc_with(vec![top, a_cell, b_cell], 0, vec![(1, 0), (2, 0), (3, 0)]);
         let shapes = take_layer_shapes(&mut index_shapes(&d), (1, 0), d.cells.len());
         let has = layer_presence(&d, &shapes);
         assert_eq!(layer_max_depth(&d, &shapes, &has), 2);
         let second = take_layer_shapes(&mut index_shapes(&d), (2, 0), d.cells.len());
-        assert_eq!(layer_max_depth(&d, &second, &layer_presence(&d, &second)), 1);
+        assert_eq!(
+            layer_max_depth(&d, &second, &layer_presence(&d, &second)),
+            1
+        );
         let occ = build(&d, 0, 0, &opts(0.01)).unwrap();
-        let depths = |k: usize| occ.layers[k].planes.iter().map(|p| p.depth).collect::<Vec<_>>();
-        assert_eq!((depths(0), depths(1), depths(2)), (vec![0, 1, 2], vec![1], vec![2]));
+        let depths = |k: usize| {
+            occ.layers[k]
+                .planes
+                .iter()
+                .map(|p| p.depth)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            (depths(0), depths(1), depths(2)),
+            (vec![0, 1, 2], vec![1], vec![2])
+        );
         let (ox, oy) = (occ.bbox.0, occ.bbox.1);
         let at = |k: usize, depth: Option<u32>, x: i64, y: i64| {
             occ.layers[k]
@@ -3206,7 +4420,12 @@ mod tests {
         };
         // depth 0: the top's own rect only; depth 1 adds A's; depth 2 B's
         assert!(at(0, Some(0), 5, 5) && !at(0, Some(0), 205, 5) && !at(0, Some(0), 205, 105));
-        assert!(at(0, Some(1), 5, 5) && at(0, Some(1), 205, 5) && at(0, Some(1), 405, 5) && !at(0, Some(1), 205, 105));
+        assert!(
+            at(0, Some(1), 5, 5)
+                && at(0, Some(1), 205, 5)
+                && at(0, Some(1), 405, 5)
+                && !at(0, Some(1), 205, 105)
+        );
         assert!(at(0, Some(2), 205, 105) && at(0, None, 205, 105) && at(0, Some(9), 405, 105));
         // 2/0 has nothing at depth 0: a plane without cells, not None
         assert_eq!(occ.layers[1].level_at_depth(0, Some(0)), None);
@@ -3214,12 +4433,21 @@ mod tests {
         // the file round-trips the planes and answers the same depths
         let f = OvoFile::from_bytes(write_ovo(&occ)).unwrap();
         assert!(f.depth_aware());
-        assert_eq!(f.layers[0].planes.iter().map(|p| p.depth).collect::<Vec<_>>(), vec![0, 1, 2]);
+        assert_eq!(
+            f.layers[0]
+                .planes
+                .iter()
+                .map(|p| p.depth)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
         let cell_of = |x: i64, y: i64| (((x - ox) / 10) as u32, ((y - oy) / 10) as u32);
         let fat = |k: usize, depth: Option<u32>, x: i64, y: i64| {
             let (w, h, bits) = f.level_at_depth(k, 0, depth).unwrap();
             let (i, j) = cell_of(x, y);
-            i < w && j < h && (bits[j as usize * Level::row_bytes(w) + (i / 8) as usize] >> (i % 8)) & 1 == 1
+            i < w
+                && j < h
+                && (bits[j as usize * Level::row_bytes(w) + (i / 8) as usize] >> (i % 8)) & 1 == 1
         };
         assert!(fat(0, Some(0), 5, 5) && !fat(0, Some(0), 205, 5));
         assert!(fat(0, Some(1), 205, 5) && !fat(0, Some(1), 205, 105));
@@ -3242,7 +4470,14 @@ mod tests {
         // a chain of 17 placements: the leaf's rect sits at depth 17
         let mut cells = vec![cell("T")];
         for k in 1..=17 {
-            cells[k - 1].places.push(PlaceRec { cell: k, x: 10, y: 0, rot: 0, flip: false, rep: Rep::One });
+            cells[k - 1].places.push(PlaceRec {
+                cell: k,
+                x: 10,
+                y: 0,
+                rot: 0,
+                flip: false,
+                rep: Rep::One,
+            });
             cells.push(cell(&format!("C{}", k)));
         }
         cells[17].rects.push(rect(1, 0, 0, 5, 5, Rep::One));
@@ -3251,7 +4486,14 @@ mod tests {
         let d = doc_with(cells, 0, vec![(1, 0)]);
         let occ = build(&d, 0, 0, &opts(0.01)).unwrap();
         assert_eq!(occ.layers[0].status, STATUS_OK);
-        assert_eq!(occ.layers[0].planes.iter().map(|p| p.depth).collect::<Vec<_>>(), vec![DEPTH_CAP]);
+        assert_eq!(
+            occ.layers[0]
+                .planes
+                .iter()
+                .map(|p| p.depth)
+                .collect::<Vec<_>>(),
+            vec![DEPTH_CAP]
+        );
         assert_eq!(occ.layers[0].level_at_depth(0, Some(14)), None);
         assert!(occ.layers[0].level_at_depth(0, Some(15)).unwrap().count() == 2);
         assert!(occ.layers[0].level_at_depth(0, Some(40)).unwrap().count() == 2);
@@ -3265,7 +4507,14 @@ mod tests {
         child.rects.push(rect(1, 0, 0, 20, 20, Rep::One));
         let mut top = cell("T");
         top.rects.push(rect(1, 100, 0, 20, 20, Rep::One));
-        top.places.push(PlaceRec { cell: 1, x: 0, y: 0, rot: 0, flip: false, rep: Rep::One });
+        top.places.push(PlaceRec {
+            cell: 1,
+            x: 0,
+            y: 0,
+            rot: 0,
+            flip: false,
+            rep: Rep::One,
+        });
         let d = doc_with(vec![top, child], 0, vec![(1, 0)]);
         let occ = build(&d, 0, 0, &opts(0.01)).unwrap();
         assert_eq!(occ.layers[0].planes.len(), 2);

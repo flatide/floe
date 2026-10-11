@@ -633,7 +633,7 @@ KLayout, while both products share this renderer implementation, the canonical
 separate, so both screens can run on one display for comparison.
 
 ```sh
-.venv/bin/python -m floe2 view --multi design.oas
+rust/target/release/floe2 view --multi design.oas
 ```
 
 `floe2` rejects `FLOE_RENDERER=klayout` instead of falling back. Stable `floe`

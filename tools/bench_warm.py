@@ -20,8 +20,11 @@ PY = sys.executable
 
 def run(args):
     t0 = time.perf_counter()
-    r = subprocess.run([PY, "-m", "floe"] + args, cwd=ROOT,
-                       capture_output=True, text=True)
+    # the frozen floe shell (dev-only oracle, docs/SHARED_APP_LAYER.ko.md P3)
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(
+        (os.path.join(ROOT, "tools", "oracle"), ROOT)))
+    r = subprocess.run([PY, "-m", "floe_oracle"] + args, cwd=ROOT,
+                       capture_output=True, text=True, env=env)
     dt = time.perf_counter() - t0
     if r.returncode != 0:
         print(r.stdout, r.stderr)

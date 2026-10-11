@@ -331,5 +331,192 @@ class ReviewActionTests(unittest.TestCase):
             self.assertEqual(os.listdir(folder), ["stats.csv"])
 
 
+class ReviewPackLifetimeTests(unittest.TestCase):
+    @staticmethod
+    def load_fixture():
+        viewer = viewer_fixture()
+        viewer._lpaned = Mock()
+        viewer._lpaned.get_position.return_value = 420
+        viewer._left_show = Mock()
+        viewer._drc_rules_auto = Mock()
+        viewer._drc_clusters_auto = Mock(return_value=None)
+        viewer._drc_types_rebuild = Mock()
+        viewer.redraw = Mock()
+        viewer._index_modal = Mock()
+        return viewer
+
+    def test_release_load_and_quit_wait_for_all_readers_without_blocking_ui(self):
+        names = ("_drc_marker_worker", "_drc_delta_worker",
+                 "_drc_query_worker", "_drc_selection_worker")
+        for action in ("release", "load", "quit"):
+            with self.subTest(action=action):
+                viewer = self.load_fixture()
+                viewer._drc = old = SimpleNamespace(path="/tmp/old.tray", close=Mock())
+                workers, releases = [], []
+                for name in names:
+                    stopped, release, finished = (threading.Event() for _ in range(3))
+                    def run(stopped=stopped, release=release, finished=finished):
+                        if stopped.wait(5) and release.wait(5):
+                            finished.set()  # child reader lock cleanup has completed
+                    thread = threading.Thread(target=run)
+                    worker = SimpleNamespace(_thread=thread, close=Mock(side_effect=stopped.set),
+                                             finished=finished)
+                    setattr(viewer, name, worker)
+                    workers.append(worker)
+                    releases.append(release)
+                    thread.start()
+                try:
+                    if action == "release":
+                        closed = viewer._drc_release()
+                        self.assertIsNone(viewer._drc)
+                    elif action == "load":
+                        new = SimpleNamespace(checks=[], total=0, close=Mock())
+                        self.assertTrue(viewer.load_drc("/tmp/new.db", db=new))
+                        self.assertIs(viewer._drc, new)
+                    else:
+                        viewer._quitting = False
+                        viewer.server_sock = viewer.worker = None
+                        with patch.object(gui, "Gtk", SimpleNamespace(main_level=lambda: 0)):
+                            viewer._quit()
+                    closed = viewer._drc_closing[os.path.realpath(old.path)][0]
+                    self.assertFalse(closed.is_set())
+                    old.close.assert_not_called()
+                    for worker in workers:
+                        worker.close.assert_called_once()
+                    if action != "quit":
+                        for name in names:
+                            self.assertIsNone(getattr(viewer, name))
+                    for worker, release in zip(workers[:-1], releases[:-1]):
+                        release.set()
+                        self.assertTrue(worker.finished.wait(2))
+                    self.assertFalse(closed.is_set())
+                    old.close.assert_not_called()
+                finally:
+                    for release in releases:
+                        release.set()
+                    for worker in workers:
+                        worker._thread.join(2)
+                self.assertTrue(closed.wait(2))
+                self.assertTrue(all(worker.finished.is_set() for worker in workers))
+                old.close.assert_called_once()
+
+    def test_replaced_pack_waits_for_accepted_visits_without_blocking_ui(self):
+        viewer = viewer_fixture()
+        viewer._drc_visit_worker = worker = gui._DrcVisitWorker()
+        entered, release = threading.Event(), threading.Event()
+        def visit(*_args):
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError("test did not release visit")
+        old = SimpleNamespace(mark_visited=visit, close=Mock())
+        worker.submit(old, 0, 0)
+        self.assertTrue(entered.wait(2))
+        try:
+            closed = viewer._drc_close_when_idle(old)
+            self.assertFalse(closed.is_set())
+            old.close.assert_not_called()
+        finally:
+            release.set()
+        self.assertTrue(closed.wait(2))
+        old.close.assert_called_once()
+
+    def test_replaced_pack_waits_for_its_review_job_only(self):
+        viewer = viewer_fixture()
+        old = SimpleNamespace(close=Mock())
+        job = viewer._drc_review_job = dict(db=old, done=False)
+        viewer._drc_team_busy = dict(db=object(), done=False)
+        closed = viewer._drc_close_when_idle(old)
+        try:
+            self.assertFalse(closed.is_set())
+            old.close.assert_not_called()
+        finally:
+            job["done"] = True
+        self.assertTrue(closed.wait(2))
+        old.close.assert_called_once()
+
+    def test_repack_starts_only_after_the_previous_reader_releases_its_lock(self):
+        viewer = viewer_fixture()
+        viewer._drc = SimpleNamespace(path="/tmp/old.tray")
+        viewer._drc_release = Mock(return_value=threading.Event())
+        viewer._index_modal = Mock()
+        viewer.redraw = Mock()
+        glib = SimpleNamespace(timeout_add=Mock())
+        with patch("floe.vfsclient.find_binary", return_value="floe-index"), \
+                patch.object(gui.gtkservice, "drc_find", return_value="/tmp/old.tray"), \
+                patch.object(gui, "GLib", glib):
+            viewer._drc_pack_and_load("/tmp/old.db")
+        viewer._index_modal.assert_not_called()
+        callback = glib.timeout_add.call_args.args[1]
+        self.assertTrue(callback())
+        viewer._drc_release.return_value.set()
+        self.assertFalse(callback())
+        viewer._index_modal.assert_called_once()
+
+    def test_repeated_repack_keeps_waiting_for_the_detached_readers(self):
+        viewer = self.load_fixture()
+        old = viewer._drc = SimpleNamespace(path="/tmp/old.tray", close=Mock())
+        job = viewer._drc_review_job = dict(db=old, done=False)
+        glib = SimpleNamespace(timeout_add=Mock())
+        try:
+            with patch("floe.vfsclient.find_binary", return_value="floe-index"), \
+                    patch.object(gui.gtkservice, "drc_find", return_value=old.path), \
+                    patch.object(gui, "GLib", glib):
+                viewer._drc_pack_and_load("/tmp/old.db")
+                first = glib.timeout_add.call_args.args[1]
+                self.assertIsNone(viewer._drc)
+                viewer._drc_pack_and_load("/tmp/old.db")
+                second = glib.timeout_add.call_args.args[1]
+            self.assertFalse(first())  # superseded request cannot launch
+            self.assertTrue(second())  # still waits for the original close
+            viewer._index_modal.assert_not_called()
+        finally:
+            job["done"] = True
+        closed = viewer._drc_closing[os.path.realpath(old.path)][0]
+        self.assertTrue(closed.wait(2))
+        self.assertFalse(second())
+        viewer._index_modal.assert_called_once()
+
+    def test_queued_repack_is_discarded_after_db_or_layout_switch(self):
+        for action in ("db", "layout"):
+            with self.subTest(action=action):
+                viewer = self.load_fixture()
+                old = viewer._drc = SimpleNamespace(path="/tmp/old.tray", close=Mock())
+                job = viewer._drc_review_job = dict(db=old, done=False)
+                glib = SimpleNamespace(timeout_add=Mock())
+                try:
+                    with patch("floe.vfsclient.find_binary", return_value="floe-index"), \
+                            patch.object(gui.gtkservice, "drc_find", return_value=old.path), \
+                            patch.object(gui, "GLib", glib):
+                        viewer._drc_pack_and_load("/tmp/old.db")
+                    callback = glib.timeout_add.call_args.args[1]
+                    if action == "db":
+                        viewer.load_drc("/tmp/new.db", db=SimpleNamespace(checks=[], total=0))
+                    else:
+                        # _apply_cache releases the previous layout's DRC scope.
+                        viewer._drc_release()
+                    self.assertFalse(callback())
+                    viewer._index_modal.assert_not_called()
+                finally:
+                    job["done"] = True
+                closed = viewer._drc_closing[os.path.realpath(old.path)][0]
+                self.assertTrue(closed.wait(2))
+                self.assertFalse(callback())
+                viewer._index_modal.assert_not_called()
+
+    def test_completed_repack_cannot_load_over_a_newer_db(self):
+        viewer = self.load_fixture()
+        viewer._drc = None
+        with patch("floe.vfsclient.find_binary", return_value="floe-index"), \
+                patch.object(gui.gtkservice, "drc_find", return_value=None):
+            viewer._drc_pack_and_load("/tmp/old.db")
+        complete = viewer._index_modal.call_args.args[2]
+        new = SimpleNamespace(checks=[], total=0)
+        viewer.load_drc("/tmp/new.db", db=new)
+        viewer.load_drc = Mock()
+        complete()
+        viewer.load_drc.assert_not_called()
+        self.assertIs(viewer._drc, new)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

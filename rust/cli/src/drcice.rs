@@ -111,7 +111,8 @@ impl StrTab {
             return r;
         }
         let off = self.bytes.len() as u32;
-        self.bytes.extend_from_slice(&(s.len() as u32).to_le_bytes());
+        self.bytes
+            .extend_from_slice(&(s.len() as u32).to_le_bytes());
         self.bytes.extend_from_slice(s);
         self.refs.insert(s.to_vec(), off);
         off
@@ -147,10 +148,7 @@ pub fn drc_cmd(args: &[String]) {
             "--pack" => {}
             "--jobs" => {
                 i += 1;
-                jobs = args
-                    .get(i)
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
+                jobs = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(0);
             }
             a if a.starts_with("--") => {
                 eprintln!("drc: unknown option {}", a);
@@ -161,9 +159,7 @@ pub fn drc_cmd(args: &[String]) {
         i += 1;
     }
     if pos.is_empty() || pos.len() > 2 {
-        eprintln!(
-            "usage: floe-index drc <results.db> [out.tray] [--jobs N]"
-        );
+        eprintln!("usage: floe-index drc <results.db> [out.tray] [--jobs N]");
         std::process::exit(2);
     }
     let src = &pos[0];
@@ -173,6 +169,11 @@ pub fn drc_cmd(args: &[String]) {
         // the hidden sibling .<db>.tray (floe/cachepath.py; 2026-09-16)
         crate::vfs::hidden_sibling(src, ".tray")
     };
+    // the pack's locks (floe_vfs::lock; user 2026-10-09): another run
+    // packing it, or a reader holding it open (the viewer maps it for its
+    // whole session; a re-pack moves its waive sidecar aside), refuses this
+    // run - before the temporaries are swept
+    let _lock = crate::vfs::lock_writer(floe_vfs::lock::Kind::Pack, &out, floe_vfs::lock::Mode::Full, "floe-index drc");
     let t0 = std::time::Instant::now();
     if jobs == 0 {
         jobs = std::thread::available_parallelism()
@@ -195,9 +196,11 @@ pub fn drc_cmd(args: &[String]) {
         }
         Err(e) => {
             eprintln!("drc {}: {}", src, e);
-            // never leave a half-written pack that a later run
-            // would trust
-            let _ = std::fs::remove_file(&out);
+            // the pack is published by a rename at its very end, so a
+            // failed run leaves the one before it whole: only this run's
+            // temporaries go (it used to delete the published pack - even
+            // for an unreadable .db, with readers on it)
+            crate::drcpack::sweep_temps(&out);
             std::process::exit(1);
         }
     }

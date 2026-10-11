@@ -120,7 +120,15 @@ pub fn place_walks_wire(walks: &[(u64, u64); 32]) -> String {
         .iter()
         .enumerate()
         .filter(|(_, (count, _))| *count > 0)
-        .map(|(k, (count, members))| format!("{}{}:{}/{}", PLACE_WALK_OUTCOMES[k % n], 1 + k / n, count, members))
+        .map(|(k, (count, members))| {
+            format!(
+                "{}{}:{}/{}",
+                PLACE_WALK_OUTCOMES[k % n],
+                1 + k / n,
+                count,
+                members
+            )
+        })
         .collect();
     if parts.is_empty() {
         "-".to_string()

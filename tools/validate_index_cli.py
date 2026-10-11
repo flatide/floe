@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""KLayout-free contract checks for ``floe index`` Rust delegation."""
+"""KLayout-free contract checks for the frozen floe shell's ``index`` Rust
+delegation (``python -m floe_oracle index``, the dev-only oracle since P3)."""
 
 import json
 import os
@@ -12,7 +13,10 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from floe.cachepath import vfs_cache_dir, legacy_vfs_cache_dir  # noqa: E402
+# the frozen floe shell this gate drives (dev-only oracle, P3)
+ORACLE = ROOT / "tools" / "oracle"
+sys.path.insert(0, str(ORACLE))
+from floe_oracle.cachepath import vfs_cache_dir, legacy_vfs_cache_dir  # noqa: E402
 
 
 def check(condition, message):
@@ -22,7 +26,7 @@ def check(condition, message):
 
 def run(env, *args, ok=True):
     result = subprocess.run(
-        [sys.executable, "-B", "-m", "floe", "index", *map(str, args)],
+        [sys.executable, "-B", "-m", "floe_oracle", "index", *map(str, args)],
         cwd=ROOT, env=env, capture_output=True, text=True)
     if ok and result.returncode != 0:
         raise AssertionError(
@@ -55,7 +59,7 @@ def validate_real_marker():
         env.update({
             "FLOE_INDEX_BIN": str(binary),
             "PYTHONDONTWRITEBYTECODE": "1",
-            "PYTHONPATH": str(ROOT),
+            "PYTHONPATH": os.pathsep.join((str(ORACLE), str(ROOT))),
         })
         run(env, src, "--jobs", "2")
         (Path(vfs_cache_dir(src)) / "design.ovm").write_bytes(b"x")
@@ -117,7 +121,8 @@ if "--occupancy" in args or "--occupancy-only" in args:
             "FLOE_INDEX_BIN": str(binary),
             "FLOE_INDEX_TEST_LOG": str(log),
             "PYTHONDONTWRITEBYTECODE": "1",
-            "PYTHONPATH": os.pathsep.join((str(blocker), str(ROOT))),
+            "PYTHONPATH": os.pathsep.join(
+                (str(blocker), str(ORACLE), str(ROOT))),
         })
 
         src = work / "design.oas"

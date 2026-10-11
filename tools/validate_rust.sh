@@ -52,7 +52,7 @@ GATES="unit unit_vfs unit_render index_cli vfs_profile floe2 rust_scan \
 rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage \
 occupancy vfs_hier vfs_lifecycle vfs_marker vfs_split vfs_text \
 render_goldens render_speckle render_frames drc_ice drc_review drc_clusters drc_markers drc_delta svrf oasis_shapes \
-jobdeck representatives gen_main01 fit_budget sub_cut_box shape_cut write_once layer_decode area_true density_stack cell_tree rust_renderer klayout"
+jobdeck representatives gen_main01 fit_budget sub_cut_box shape_cut write_once layer_decode area_true density_stack cell_tree index_lock worker_client cell_index perf_parity gtk_view rust_renderer klayout"
 # (unit_renderd is unit's renderd part, as unit_vfs and unit_render are)
 GATES=$(echo "$GATES" | sed 's/unit_render /unit_render unit_renderd /')
 alias_gates() {
@@ -61,7 +61,7 @@ alias_gates() {
         planner)  echo "unit_vfs occupancy jobdeck rust_renderer vfs_hier vfs_lifecycle fit_budget sub_cut_box shape_cut" ;;
         occ)      echo "unit_vfs occupancy" ;;
         render)   echo "unit_render unit_renderd rust_renderer representatives fit_budget sub_cut_box shape_cut write_once layer_decode area_true density_stack cell_tree render_goldens render_speckle render_frames klayout" ;;
-        indexer)  echo "unit_vfs index_cli rust_scan rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage vfs_split vfs_text vfs_marker representatives cell_tree" ;;
+        indexer)  echo "unit_vfs index_cli rust_scan rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage vfs_split vfs_text vfs_marker representatives cell_tree index_lock" ;;
         python)   echo "index_cli vfs_profile floe2 drc_ice drc_review drc_clusters drc_markers drc_delta svrf gen_main01" ;;
         deck)     echo "jobdeck occupancy" ;;
         *)        echo "" ;;
@@ -74,7 +74,8 @@ alias_gates() {
 # page budget's refusal at cut 0 among them) and the picture gates.
 RENDER_GATES="unit_render unit_renderd rust_renderer jobdeck occupancy \
 fit_budget sub_cut_box shape_cut write_once layer_decode area_true \
-density_stack cell_tree representatives oasis_shapes floe2 klayout"
+density_stack cell_tree index_lock representatives oasis_shapes floe2 klayout \
+gtk_view"
 # The planner feeds every one of those, and the plan CLI's gates.
 PLAN_GATES="unit_vfs $RENDER_GATES vfs_hier vfs_lifecycle vfs_marker \
 vfs_split vfs_text vfs_profile"
@@ -82,6 +83,11 @@ vfs_split vfs_text vfs_profile"
 # matching the gate name. Keep their path mappings ahead of validate_*.py.
 DRC_GATES="drc_ice drc_review drc_clusters drc_markers drc_delta svrf"
 DRC_VIEW_GATES="drc_review drc_clusters drc_markers drc_delta"
+# What runs the product command line, the Rust floe2 (P1c): its own gate
+# and every gate that calls it
+CLI_GATES="floe2 jobdeck occupancy cell_tree index_lock svrf oasis_shapes \
+rust_renderer representatives fit_budget sub_cut_box shape_cut write_once \
+layer_decode area_true density_stack"
 # only version lines differ in FILE (every push bumps them)
 versions_only() {
     git diff "$CHANGED_BASE" -- "$1" 2>/dev/null | grep '^[+-]' | \
@@ -132,6 +138,24 @@ gates_for() {
             echo jobdeck ;;
         tools/gen_drcdb.py|tools/gen_drc_db.py)
             echo "drc_ice svrf" ;;
+        # the dev-only oracle (P3, tools/oracle/floe_oracle): the frozen
+        # floe shell and the Python references the gates hold Rust to
+        tools/oracle/floe_oracle/cache.py|tools/oracle/floe_oracle/cachepath.py)
+            echo ALL ;;
+        tools/oracle/floe_oracle/service.py|tools/oracle/floe_oracle/view_policy.py|tools/oracle/floe_oracle/viewport.py|tools/oracle/floe_oracle/coverage.py|tools/oracle/floe_oracle/render.py|tools/oracle/floe_oracle/vfsclient.py)
+            # the frozen KLayout shell: the pixel oracle's side
+            echo "render_goldens render_speckle render_frames vfs_render vfs_hier vfs_lifecycle klayout rust_renderer jobdeck density_stack index_lock" ;;
+        tools/oracle/floe_oracle/shots.py|tools/oracle/floe_oracle/fe_embed.py)
+            echo "jobdeck drc_ice" ;;
+        tools/oracle/floe_oracle/indexlock.py)
+            # the cache locks' Python side (rust/vfs/src/lock.rs's twin)
+            echo "index_lock jobdeck occupancy cell_tree drc_ice rust_renderer index_cli" ;;
+        tools/oracle/floe_oracle/jobdeck/*)
+            echo "jobdeck occupancy rust_renderer index_lock" ;;
+        tools/oracle/floe_oracle/drc.py|tools/oracle/floe_oracle/svrf.py)
+            echo "drc_ice svrf index_lock" ;;
+        tools/oracle/floe_oracle/cli.py|tools/oracle/floe_oracle/product.py|tools/oracle/floe_oracle/__main__.py|tools/oracle/floe_oracle/__init__.py)
+            echo "python jobdeck occupancy cell_tree index_lock rust_renderer floe2" ;;
         tools/*)
             # benches, experiments and generators no gate runs
             echo "" ;;
@@ -152,10 +176,8 @@ gates_for() {
             echo "unit_render jobdeck occupancy rust_renderer" ;;
         rust/render-core/src/cells.rs)
             echo "unit_render cell_tree fit_budget rust_renderer" ;;
-        rust/render-core/*|rust/renderd/*|rust/render-cli/*|floe/rust_render.py)
-            echo "$RENDER_GATES" ;;
         rust/cli/src/drcpack.rs|rust/cli/src/drcice.rs)
-            echo "unit $DRC_GATES" ;;
+            echo "unit $DRC_GATES index_lock" ;;
         rust/cli/src/drcmeasure_math.rs|rust/cli/src/drcprepare.rs)
             echo "unit drc_delta" ;;
         rust/cli/src/drcmeasure.rs|rust/cli/src/drccenters.rs)
@@ -163,6 +185,29 @@ gates_for() {
             echo "unit drc_markers drc_delta" ;;
         rust/cli/src/svrf.rs)
             echo "unit svrf drc_delta" ;;
+        rust/worker-client/*)
+            echo "unit worker_client gtk_view" ;;
+        rust/app-core/src/view/perf.rs|rust/app-core/tests/perf_parity.rs)
+            # the viewer's frame report and perf line (P4b), held to the
+            # Python's byte for byte; its unit tests run in the gate
+            echo perf_parity ;;
+        rust/app-core/*|rust/notices/*)
+            # the application policy under the Rust command line floe2,
+            # which every CLI gate runs (P1c, docs/SHARED_APP_LAYER.ko.md),
+            # and under the GTK viewer's service (DRC review: drc_ice D12;
+            # the view channel over the shared ViewController: gtk_view, P4c)
+            echo "unit cell_index drc_ice gtk_view $CLI_GATES" ;;
+        rust/app-cli/*|rust/floe2/*)
+            # the Rust command line floe2 (P1, docs/SHARED_APP_LAYER.ko.md)
+            # and the GTK viewer's service in it (P2) with its view channel
+            echo "unit drc_ice gtk_view $CLI_GATES" ;;
+        floe/gtkview.py|floe/gtkservice.py|floe/viewcli.py)
+            # the GTK viewer's entry and its service client (P2, P4c)
+            echo "floe2 rust_renderer jobdeck drc_ice gtk_view $DRC_VIEW_GATES" ;;
+        rust/render-core/*|rust/renderd/*|rust/render-cli/*|floe/rust_render.py|tools/oracle/floe_oracle/rust_render.py|tools/oracle/floe_oracle/perf_line.py)
+            # (perf_parity: the frame line's fields and the adapter's result
+            # the shared Rust perf line must reproduce)
+            echo "$RENDER_GATES perf_parity" ;;
         rust/dbg/*)
             echo unit ;;
         rust/*)
@@ -172,16 +217,22 @@ gates_for() {
         floe/cache.py|floe/cachepath.py)
             echo ALL ;;
         floe/gui.py)
-            echo "rust_renderer floe2 jobdeck density_stack $DRC_VIEW_GATES" ;;
+            echo "rust_renderer floe2 jobdeck density_stack index_lock perf_parity gtk_view $DRC_VIEW_GATES" ;;
         floe/service.py|floe/fe_embed.py)
             echo "rust_renderer floe2 jobdeck density_stack drc_ice drc_delta" ;;
         floe/hangul.py)
-            echo "rust_renderer floe2 jobdeck density_stack drc_ice" ;;
-        floe/view_policy.py|floe/viewport.py|floe/fillpat.py|floe/coverage.py|floe/instance.py|floe/shots.py|floe/*.def)
+            echo "rust_renderer floe2 jobdeck density_stack index_lock perf_parity gtk_view drc_ice" ;;
+        floe/fillpat.py|floe/instance.py|floe/*.def)
+            # GTK-only UI code also exercises the shared view channel.
+            echo "rust_renderer floe2 jobdeck density_stack index_lock perf_parity gtk_view" ;;
+        floe/view_policy.py|floe/viewport.py|floe/coverage.py|floe/shots.py)
             echo "rust_renderer floe2 jobdeck density_stack" ;;
-        floe/render.py|floe/vfsclient.py)
+        floe/render.py)
             # the frozen KLayout shell: the oracle's side
             echo "render_goldens render_speckle render_frames vfs_render vfs_hier vfs_lifecycle floe2 klayout" ;;
+        floe/vfsclient.py)
+            # Native binary discovery and the existing adapter contracts.
+            echo "floe2 jobdeck rust_renderer render_goldens render_speckle render_frames vfs_render vfs_hier vfs_lifecycle klayout" ;;
         floe/jobdeck/*)
             echo "jobdeck occupancy rust_renderer" ;;
         floe/drc.py|floe/drc_analysis.py)
@@ -203,7 +254,9 @@ gates_for() {
             echo "svrf drc_delta" ;;
         sample.db.clusters)
             echo drc_clusters ;;
-        floe/cli.py|floe/product.py|floe/__main__.py|floe2/*)
+        floe/product.py)
+            echo "python jobdeck occupancy cell_tree rust_renderer floe2 density_stack index_lock perf_parity gtk_view" ;;
+        floe/cli.py|floe/__main__.py|floe2/*)
             echo "python jobdeck occupancy cell_tree" ;;
         *)
             echo ALL ;;
@@ -374,7 +427,7 @@ if [ "$SRC" = "$FLOE2_SMOKE_SRC" ] && [ $NEEDS_TILES = 1 ]; then
     # layer-palette change tripped this once - stale colors failed
     # validate_rust_meta on every host with an old cached .tiles)
     if [ ! -f "$SRC.tiles/meta.json" ] || \
-       [ floe/cache.py -nt "$SRC.tiles/meta.json" ]; then
+       [ tools/oracle/floe_oracle/cache.py -nt "$SRC.tiles/meta.json" ]; then
         rm -rf "$SRC.tiles"
         # the legacy indexer refuses to build .tiles beside a VFS cache
         # of the same source (.<src>.ice since 2026-09-16, <src>.floe
@@ -383,7 +436,7 @@ if [ "$SRC" = "$FLOE2_SMOKE_SRC" ] && [ $NEEDS_TILES = 1 ]; then
         for c in "$VFSC" "$SRC.floe"; do
             if [ -e "$c" ]; then mv "$c" "$c.aside"; fi
         done
-        PYTHONPATH=. .venv/bin/python -m floe index --legacy "$SRC" \
+        PYTHONPATH=tools/oracle:. .venv/bin/python -m floe_oracle index --legacy "$SRC" \
             >/dev/null || {
             for c in "$VFSC" "$SRC.floe"; do
                 if [ -e "$c.aside" ]; then mv "$c.aside" "$c"; fi
@@ -593,6 +646,41 @@ if gate density_stack; then RAN="$RAN density_stack"; lap density_stack
 # the inline / missing-summary / live-pickup contract
 if gate cell_tree; then RAN="$RAN cell_tree"; lap cell_tree
     .venv/bin/python tools/validate_cell_tree.py; fi
+# index locks (rust/vfs/src/lock.rs; the oracle's floe_oracle/indexlock.py): a run writing a
+# cache refuses another (whoever runs it), a whole rebuild refuses its
+# readers and is refused by them, additions go beside readers on one host
+if gate index_lock; then RAN="$RAN index_lock"; lap index_lock
+    .venv/bin/python tools/validate_index_lock.py; fi
+# the shared Rust app layer (feature/webui's crates, P0 2026-10-09):
+# worker-client - the Rust renderd client - frame for frame against the
+# Python adapter on valmini (raw/PNG, labels, styles, cancel soak); app-core's
+# cell index (design.ovh added beside a live reader, kept on a rerun, stale /
+# missing / busy / cancel refused)
+if gate worker_client; then RAN="$RAN worker_client"; lap worker_client
+    (
+        worker_gate_dir=$(mktemp -d "${TMPDIR:-/tmp}/floe-worker-gate.XXXXXX")
+        trap 'rm -rf "$worker_gate_dir"' EXIT HUP INT TERM
+        rust/target/release/floe-index vfs "$FLOE2_SMOKE_SRC" \
+            "$worker_gate_dir/valmini.floe" --jobs 2 >/dev/null
+        sh tools/validate_worker_client.sh "$FLOE2_SMOKE_SRC" \
+            "$worker_gate_dir/valmini.floe"
+    )
+fi
+if gate cell_index; then RAN="$RAN cell_index"; lap cell_index
+    (cd rust && FLOE_INDEX_BIN="$PWD/target/release/floe-index" cargo test --release --offline -p floe-app-core --lib cell_index &&
+        FLOE_INDEX_BIN="$PWD/target/release/floe-index" cargo test --release --offline -p floe-app-core --test cell_index -- --ignored); fi
+# the viewer's perf line (P4b, docs/SHARED_APP_LAYER.ko.md §7): the shared
+# Rust frame report and perf_status (rust/app-core/src/view/perf.rs) byte for
+# byte against floe/gui.py perf_status and floe/rust_render.py _emit_frame -
+# synthetic results, real renders recorded through the adapter
+# (FLOE_RUST_RECORD) and fuzzed frame lines, replayed in Rust
+if gate perf_parity; then RAN="$RAN perf_parity"; lap perf_parity
+    (cd rust && PATH="$HOME/.cargo/bin:$PATH" cargo test --release --offline -p floe-app-core --lib view::perf)
+    PYTHONDONTWRITEBYTECODE=1 .venv/bin/python tools/validate_perf_parity.py; fi
+# the GTK viewer's view channel (P4c): floe2 gtk-service over the shared
+# ViewController, frames byte-equal to the viewer's adapter
+if gate gtk_view; then RAN="$RAN gtk_view"; lap gtk_view
+    PYTHONDONTWRITEBYTECODE=1 .venv/bin/python tools/validate_gtk_view.py; fi
 # in-tree CPU renderer: Python queue contract plus independent
 # KLayout pixel oracle at deterministic serial/parallel settings
 if gate rust_renderer; then RAN="$RAN rust_renderer"; lap rust_renderer

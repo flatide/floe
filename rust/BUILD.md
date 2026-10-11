@@ -7,6 +7,20 @@
   AVX memcpy·per-thread malloc arena 덕). 타깃 호스트의 glibc가
   빌드 머신과 같거나 새 버전이어야 한다 — 빌드/운영이 같은 배포판
   계열이면 보통 충족. 링크에 시스템 `cc`(gcc)가 필요하다.
+  빌드 머신의 glibc가 현장보다 새로우면(예: Ubuntu 24.04 = 2.39, 현장
+  RHEL 8 = 2.28) `GNU_GLIBC=2.28 sh build-linux.sh`로 그 glibc 기준으로
+  링크한다(cargo-zigbuild + zig, gcc 불필요, 어느 OS에서든; 2026-10-11).
+  결과는 GLIBC_2.28까지의 심볼만 쓰고, 실행 때는 현장의 glibc를 쓰므로
+  속도 이점은 그대로다:
+
+  ```sh
+  cargo install cargo-zigbuild      # 한 번 (crates.io 접속 필요)
+  # zig: venv에 ziglang (Ubuntu 24.04는 시스템 pip --user를 막는다, PEP 668)
+  python3 -m venv ~/zig && ~/zig/bin/pip install ziglang
+  export PATH=~/zig/bin:$PATH        # 또는 zig 배포판을 PATH에
+  GNU_GLIBC=2.28 sh build-linux.sh   # -> dist/*-linux-gnu (glibc >= 2.28)
+  strings dist/floe-index-linux-gnu | grep -oE '^GLIBC_[0-9.]+$' | sort -V | tail -1
+  ```
 - `dist/floe-index-linux-x86_64` — **완전 정적 musl ELF, 이식성
   폴백.** glibc 버전과 무관하게 어떤 x86_64 리눅스에서든 실행된다.
   rustc 내장 rust-lld가 링크하므로 gcc 등 시스템 패키지가 전혀
@@ -56,7 +70,8 @@ zip 안의 `dist/`에는 빌드된 바이너리도 들어 있다 — `--version`
 버전을 확인하고, 소스 버전과 다르면 아래처럼 다시 빌드한다.
 
 인터넷 되는 아무 곳에서 standalone 툴체인 두 개를 받아 반입한다
-(버전은 개발기와 맞춘 1.97.1 기준, 다른 stable도 무방):
+(버전은 개발기와 맞춘 1.97.1 기준, 다른 stable도 무방하되 **1.89 이상** — 색인 잠금이
+std `File::try_lock`을 쓴다, 2026-10-09):
 
 ```
 https://static.rust-lang.org/dist/rust-1.97.1-x86_64-unknown-linux-gnu.tar.xz

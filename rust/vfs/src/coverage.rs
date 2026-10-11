@@ -12,8 +12,8 @@
 //!     so a dense array folds to one density region, O(records +
 //!     texels), no member expansion.
 
-use floe_ovm::BBox;
 use floe_oasis::doc::{Doc, Rep};
+use floe_ovm::BBox;
 use floe_tiler::hier::{cell_bboxes, rep_extent};
 use floe_tiler::Xf;
 
@@ -62,18 +62,15 @@ fn recursive_area(
     for (ci, cell) in doc.cells.iter().enumerate() {
         for r in &cell.rects {
             let li = lidx[&(r.layer, r.dt)];
-            direct[ci][li] +=
-                (r.w * r.h) as f64 * r.rep.members() as f64;
+            direct[ci][li] += (r.w * r.h) as f64 * r.rep.members() as f64;
         }
         for p in &cell.polys {
             let li = lidx[&(p.layer, p.dt)];
-            direct[ci][li] +=
-                poly_area(&p.pts) * p.rep.members() as f64;
+            direct[ci][li] += poly_area(&p.pts) * p.rep.members() as f64;
         }
         for pa in &cell.paths {
             let li = lidx[&(pa.layer, pa.dt)];
-            direct[ci][li] +=
-                path_area(&pa.pts, pa.hw) * pa.rep.members() as f64;
+            direct[ci][li] += path_area(&pa.pts, pa.hw) * pa.rep.members() as f64;
         }
     }
     let mut area = direct.clone();
@@ -110,22 +107,22 @@ pub struct Coverage {
 
 impl Coverage {
     /// world -> finest texel scale
-    fn build(
-        doc: &Doc,
-        layer_order: &[(u32, u32)],
-        jobs: usize,
-    ) -> Coverage {
+    fn build(doc: &Doc, layer_order: &[(u32, u32)], jobs: usize) -> Coverage {
         let nl = layer_order.len();
-        let lidx: std::collections::HashMap<(u32, u32), usize> =
-            layer_order
-                .iter()
-                .enumerate()
-                .map(|(i, &k)| (k, i))
-                .collect();
+        let lidx: std::collections::HashMap<(u32, u32), usize> = layer_order
+            .iter()
+            .enumerate()
+            .map(|(i, &k)| (k, i))
+            .collect();
         let bboxes = cell_bboxes(doc);
         let die = match bboxes[doc.top] {
             Some((x0, y0, x1, y1)) => BBox { x0, y0, x1, y1 },
-            None => BBox { x0: 0, y0: 0, x1: 1, y1: 1 },
+            None => BBox {
+                x0: 0,
+                y0: 0,
+                x1: 1,
+                y1: 1,
+            },
         };
         let dw = (die.x1 - die.x0).max(1) as f64;
         let dh = (die.y1 - die.y0).max(1) as f64;
@@ -180,9 +177,7 @@ impl Coverage {
                         use std::sync::atomic::Ordering::Relaxed;
                         let mut last = t0;
                         loop {
-                            std::thread::sleep(
-                                std::time::Duration::from_millis(200),
-                            );
+                            std::thread::sleep(std::time::Duration::from_millis(200));
                             if done.load(Relaxed) >= total {
                                 return;
                             }
@@ -213,9 +208,7 @@ impl Coverage {
                                 if i >= total {
                                     break;
                                 }
-                                w.splat_place(
-                                    ctx, &places[i], &id,
-                                );
+                                w.splat_place(ctx, &places[i], &id);
                                 done.fetch_add(1, Relaxed);
                             }
                             w
@@ -235,29 +228,16 @@ impl Coverage {
     }
 
     /// add `density` over the world rect [wx0,wy0,wx1,wy1] on layer
-    fn splat_rect(
-        &mut self,
-        layer: usize,
-        w: &BBox,
-        density: f32,
-        texw: f64,
-        texh: f64,
-    ) {
+    fn splat_rect(&mut self, layer: usize, w: &BBox, density: f32, texw: f64, texh: f64) {
         if density <= 0.0 || w.is_empty() {
             return;
         }
-        let cx0 = ((w.x0 - self.die.x0) as f64 / texw)
-            .floor()
-            .max(0.0) as u32;
-        let cy0 = ((w.y0 - self.die.y0) as f64 / texh)
-            .floor()
-            .max(0.0) as u32;
-        let cx1 = (((w.x1 - self.die.x0) as f64 / texw).ceil()
-            as i64)
-            .clamp(0, self.res_x as i64) as u32;
-        let cy1 = (((w.y1 - self.die.y0) as f64 / texh).ceil()
-            as i64)
-            .clamp(0, self.res_y as i64) as u32;
+        let cx0 = ((w.x0 - self.die.x0) as f64 / texw).floor().max(0.0) as u32;
+        let cy0 = ((w.y0 - self.die.y0) as f64 / texh).floor().max(0.0) as u32;
+        let cx1 =
+            (((w.x1 - self.die.x0) as f64 / texw).ceil() as i64).clamp(0, self.res_x as i64) as u32;
+        let cy1 =
+            (((w.y1 - self.die.y0) as f64 / texh).ceil() as i64).clamp(0, self.res_y as i64) as u32;
         if cx1 <= cx0 || cy1 <= cy0 {
             return;
         }
@@ -296,16 +276,9 @@ impl Coverage {
         }
     }
 
-    fn splat_uniform_cell(
-        &mut self,
-        ctx: &SplatCtx,
-        ci: usize,
-        wb: &BBox,
-        mult: f64,
-    ) {
+    fn splat_uniform_cell(&mut self, ctx: &SplatCtx, ci: usize, wb: &BBox, mult: f64) {
         // distribute each layer's recursive area uniformly over wb
-        let a = (wb.x1 - wb.x0).max(1) as f64
-            * (wb.y1 - wb.y0).max(1) as f64;
+        let a = (wb.x1 - wb.x0).max(1) as f64 * (wb.y1 - wb.y0).max(1) as f64;
         let (texw, texh) = (ctx.texw, ctx.texh);
         for l in 0..self.n_layers {
             let area = ctx.area[ci][l] * mult;
@@ -329,10 +302,8 @@ impl Coverage {
     /// cover the die are Rep::Grid with many members, and are kept).
     fn is_boundary(&self, rep: &Rep, wb: &BBox) -> bool {
         matches!(rep, Rep::One)
-            && (wb.x1 - wb.x0) as f64
-                >= 0.6 * (self.die.x1 - self.die.x0) as f64
-            && (wb.y1 - wb.y0) as f64
-                >= 0.6 * (self.die.y1 - self.die.y0) as f64
+            && (wb.x1 - wb.x0) as f64 >= 0.6 * (self.die.x1 - self.die.x0) as f64
+            && (wb.y1 - wb.y0) as f64 >= 0.6 * (self.die.y1 - self.die.y0) as f64
     }
 
     /// direct (own-layer) records of a cell into their world bboxes
@@ -352,8 +323,7 @@ impl Coverage {
             if self.is_boundary(&r.rep, &wb) {
                 continue;
             }
-            let a = (wb.x1 - wb.x0).max(1) as f64
-                * (wb.y1 - wb.y0).max(1) as f64;
+            let a = (wb.x1 - wb.x0).max(1) as f64 * (wb.y1 - wb.y0).max(1) as f64;
             let area = (r.w * r.h) as f64 * r.rep.members() as f64;
             self.splat_rect(l, &wb, (area / a) as f32, texw, texh);
         }
@@ -367,14 +337,17 @@ impl Coverage {
                 lb.3 = lb.3.max(y);
             }
             let (ex, ey) = rep_extent(&p.rep);
-            let lb = (lb.0 + ex.0.min(0), lb.1 + ey.0.min(0),
-                      lb.2 + ex.1.max(0), lb.3 + ey.1.max(0));
+            let lb = (
+                lb.0 + ex.0.min(0),
+                lb.1 + ey.0.min(0),
+                lb.2 + ex.1.max(0),
+                lb.3 + ey.1.max(0),
+            );
             let wb = Coverage::world_bbox(xf, lb);
             if self.is_boundary(&p.rep, &wb) {
                 continue;
             }
-            let a = (wb.x1 - wb.x0).max(1) as f64
-                * (wb.y1 - wb.y0).max(1) as f64;
+            let a = (wb.x1 - wb.x0).max(1) as f64 * (wb.y1 - wb.y0).max(1) as f64;
             let area = poly_area(&p.pts) * p.rep.members() as f64;
             self.splat_rect(l, &wb, (area / a) as f32, texw, texh);
         }
@@ -382,25 +355,22 @@ impl Coverage {
             let l = ctx.lidx[&(pa.layer, pa.dt)];
             let b4 = floe_tiler::path_bbox(&pa.pts, pa.hw, pa.es, pa.ee);
             let (ex, ey) = rep_extent(&pa.rep);
-            let lb = (b4.0 + ex.0.min(0), b4.1 + ey.0.min(0),
-                      b4.2 + ex.1.max(0), b4.3 + ey.1.max(0));
+            let lb = (
+                b4.0 + ex.0.min(0),
+                b4.1 + ey.0.min(0),
+                b4.2 + ex.1.max(0),
+                b4.3 + ey.1.max(0),
+            );
             let wb = Coverage::world_bbox(xf, lb);
-            let a = (wb.x1 - wb.x0).max(1) as f64
-                * (wb.y1 - wb.y0).max(1) as f64;
-            let area = path_area(&pa.pts, pa.hw)
-                * pa.rep.members() as f64;
+            let a = (wb.x1 - wb.x0).max(1) as f64 * (wb.y1 - wb.y0).max(1) as f64;
+            let area = path_area(&pa.pts, pa.hw) * pa.rep.members() as f64;
             self.splat_rect(l, &wb, (area / a) as f32, texw, texh);
         }
     }
 
     /// one placement: descend (One, big enough) or fold to uniform
     /// density (array, or a subtree below texel granularity)
-    fn splat_place(
-        &mut self,
-        ctx: &SplatCtx,
-        pl: &floe_oasis::doc::PlaceRec,
-        xf: &Xf,
-    ) {
+    fn splat_place(&mut self, ctx: &SplatCtx, pl: &floe_oasis::doc::PlaceRec, xf: &Xf) {
         let (texw, texh) = (ctx.texw, ctx.texh);
         let cb = match ctx.bboxes[pl.cell] {
             Some(b) => b,
@@ -408,8 +378,7 @@ impl Coverage {
         };
         match &pl.rep {
             Rep::One => {
-                let base =
-                    xf.compose(&Xf::place(pl.x, pl.y, pl.rot, pl.flip));
+                let base = xf.compose(&Xf::place(pl.x, pl.y, pl.rot, pl.flip));
                 let wb = Coverage::world_bbox(&base, cb);
                 if self.small(&wb, texw, texh) {
                     self.splat_uniform_cell(ctx, pl.cell, &wb, 1.0);
@@ -421,8 +390,7 @@ impl Coverage {
                 // whole array footprint in world; fold to uniform
                 // density = members * recursive area / footprint
                 let base = Xf::place(pl.x, pl.y, pl.rot, pl.flip);
-                let cw =
-                    Coverage::world_bbox(&xf.compose(&base), cb);
+                let cw = Coverage::world_bbox(&xf.compose(&base), cb);
                 let (rx, ry) = rep_extent(rep);
                 let wb = grow_rep(xf, &cw, &rx, &ry);
                 let members = rep.members() as f64;
@@ -451,12 +419,9 @@ impl Coverage {
                 continue;
             }
             if self.planes[l].is_empty() {
-                self.planes[l] =
-                    vec![0.0; (self.res_x * self.res_y) as usize];
+                self.planes[l] = vec![0.0; (self.res_x * self.res_y) as usize];
             }
-            for (a, b) in
-                self.planes[l].iter_mut().zip(&other.planes[l])
-            {
+            for (a, b) in self.planes[l].iter_mut().zip(&other.planes[l]) {
                 *a += *b;
             }
         }
@@ -469,19 +434,12 @@ impl Coverage {
 }
 
 /// grow a base world bbox by a repetition's world-space offset extent
-fn grow_rep(
-    xf: &Xf,
-    base: &BBox,
-    rx: &(i64, i64),
-    ry: &(i64, i64),
-) -> BBox {
+fn grow_rep(xf: &Xf, base: &BBox, rx: &(i64, i64), ry: &(i64, i64)) -> BBox {
     let mut wx0 = 0i64;
     let mut wx1 = 0i64;
     let mut wy0 = 0i64;
     let mut wy1 = 0i64;
-    for &(ox, oy) in
-        &[(rx.0, ry.0), (rx.1, ry.0), (rx.0, ry.1), (rx.1, ry.1)]
-    {
+    for &(ox, oy) in &[(rx.0, ry.0), (rx.1, ry.0), (rx.0, ry.1), (rx.1, ry.1)] {
         let (dx, dy) = xf.apply_vec(ox, oy);
         wx0 = wx0.min(dx);
         wx1 = wx1.max(dx);
@@ -501,11 +459,7 @@ fn grow_rep(
 /// pack to design.ovc bytes: finest planes downsampled into a mip
 /// pyramid, only non-empty (layer, level) planes stored (8-bit,
 /// density clamped to 1.0 -> 255).
-pub fn write_ovc(
-    doc: &Doc,
-    layer_order: &[(u32, u32)],
-    jobs: usize,
-) -> Vec<u8> {
+pub fn write_ovc(doc: &Doc, layer_order: &[(u32, u32)], jobs: usize) -> Vec<u8> {
     let cov = Coverage::build(doc, layer_order, jobs);
     let nl = cov.n_layers;
     // build mip levels (halving) down to <=8 on the longer axis
@@ -526,8 +480,7 @@ pub fn write_ovc(
     };
     let mut cur: Vec<Vec<f32>> = cov.planes;
     loop {
-        let planes8: Vec<Vec<u8>> =
-            cur.iter().map(|p| quant(p, cur_rx, cur_ry)).collect();
+        let planes8: Vec<Vec<u8>> = cur.iter().map(|p| quant(p, cur_rx, cur_ry)).collect();
         levels.push((cur_rx, cur_ry, planes8));
         if cur_rx <= 8 && cur_ry <= 8 {
             break;
@@ -551,14 +504,12 @@ pub fn write_ovc(
                             let sx = x * 2 + dx;
                             let sy = y * 2 + dy;
                             if sx < cur_rx && sy < cur_ry {
-                                s += cur[l]
-                                    [(sy * cur_rx + sx) as usize];
+                                s += cur[l][(sy * cur_rx + sx) as usize];
                                 c += 1.0;
                             }
                         }
                     }
-                    dn[(y * nrx + x) as usize] =
-                        if c > 0.0 { s / c } else { 0.0 };
+                    dn[(y * nrx + x) as usize] = if c > 0.0 { s / c } else { 0.0 };
                 }
             }
             nxt[l] = dn;

@@ -250,6 +250,29 @@
   창이 이미 실현돼 있으면(_did_fit) 즉시 fit. 인스턴스 포워딩 경로
   자체는 여전히 인덱스 필수(다이얼로그만 인덱싱 제안). 실행 중
   인스턴스에 빈 요청("")이 포워딩되면 창만 present(옵션 무시).
+- **색인 잠금**(2026-10-09, app 0.12.323 / RENDERD 0.12.297; CACHE-NAMING §5,
+  SPEC-INDEXER §4.5).
+  - **열기 전 확인:** 다른 실행이 레이아웃 캐시를 통째로 색인 중이면 상태줄에
+    `X.oas is being indexed by … - open it when the index is done`이 뜬다. 동의 창을
+    띄우거나 경쟁 빌드를 시작하지 않는다(`_index_busy`; 그동안 `_index_ready`는
+    False, CLI `_cache_ready`도 같다). 예전에는 빌드 중 meta.json이 없어 "No VFS
+    index"로 보고, raw `floe-index vfs`로 그 실행의 파일을 지웠다.
+  - **renderd의 거절:** renderd는 `Cache::open`에서 읽는 쪽 잠금을 잡는다(잡덱은
+    소스 전부를 한 번에, 폴더마다 등록 하나). 거절하면 `error code=locked
+    message=… text_hex=<UTF-8 hex>`를 보내고, 어댑터는 hex 원문을 쓴다
+    (`message`의 공백↔`_` 변환이 `ws_kim` 같은 이름을 깨므로).
+    - 상태줄은 `render service open failed: <원문>`이다.
+    - renderd stderr의 `[lock]` 경고 줄(NFS nolock, 열린 파일 한도)은 어댑터가
+      그대로 stderr로 넘긴다.
+    - renderd는 시작할 때 열린 파일 soft 한도를 hard로 올린다.
+  - **자기 잠금:** 같은 소스를 연 자기 worker가 있는데 다시 색인해야 하면(캐시 폴더를
+    손으로 지운 경우) 먼저 worker를 내린다(`_apply_cache(None)`). 자기 독자 잠금이
+    그 빌드를 거절하기 때문이다.
+  - **`_index_modal`:** 자기 프로세스 그룹으로 띄우고(`start_new_session`), 취소는
+    `killpg`다. 잡덱 색인이 띄운 소스별 floe-index까지 끝나야 잠금이 풀린다.
+    종료 코드가 75면 로그의 `[lock]` 줄을 상태줄에 띄운다.
+  - **잡덱:** 통째로 색인 중인 소스는 ledger에 `not_indexed`와 "being indexed by …"로
+    빠지고, 나머지 소스로 열린다(`jobdeck/sources._cache_state`).
 - **메뉴 바**(2026-08-22, `_build_menubar`): File(**load layout**·
   clip·copy·quit) /
   View(fit·줌·goto·detail·depth·토글 체크 5종·오버레이 순환) /
@@ -293,6 +316,11 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
 적용. 시작 시 service `_apply_personal_fills`가 layerprops로 복원.
 
 ## 8b. DRC 브라우저 (대용량 규약)
+
+- **실행 경계**: DRC 팩·클러스터·마커·CD 델타·방문/검토 제외는 제품
+  `floe/drc.py` 및 `drc_*.py`가 처리한다. 레이아웃 프레임·내비게이션은
+  `gtkservice`를 통한 Rust `ViewController`가 처리하며, DRC 오버레이는
+  GTK에서 합성한다. 기본 배포에는 Python DRC 워커와 NumPy가 필요하다.
 
 - **검토 통계**(2026-10-09): 개별 에러를 열어 실도형이 캔버스에
   그려졌을 때 `visited`를 기록한다. 숨긴 오버레이, 화면 밖의 도형,

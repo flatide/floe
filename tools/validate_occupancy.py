@@ -52,8 +52,12 @@ os.environ["FLOE_RUST_AREA_TRUE"] = "off"
 # switch workers still set =off, and RenderTests checks the default.
 os.environ["FLOE_RUST_OCCUPANCY"] = "on"
 sys.path.insert(0, str(ROOT))
-from floe.cachepath import vfs_cache_dir  # noqa: E402
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (P3)
+from floe_oracle.cachepath import vfs_cache_dir  # noqa: E402
 BIN = ROOT / "rust" / "target" / "release" / "floe-index"
+# the product command line: the Rust `floe2` (rust/floe2; the Python
+# floe2 CLI is gone - docs/SHARED_APP_LAYER.ko.md P1c)
+FLOE2 = os.environ.get("FLOE2_BIN") or str(ROOT / "rust" / "target" / "release" / "floe2")
 TMP = Path(tempfile.mkdtemp(prefix="floe-occ-"))
 UM = 1000  # dbu per micron in the fixtures (dbu 0.001)
 
@@ -93,8 +97,8 @@ def floe_index(*args, ok=0, env=None):
 
 
 def floe2(*args, ok=0, env=None):
-    res = subprocess.run([sys.executable, "-B", "-m", "floe2",
-                          *map(str, args)], cwd=ROOT, env=env or run_env(),
+    res = subprocess.run([FLOE2, *map(str, args)], cwd=ROOT,
+                         env=env or run_env(),
                          capture_output=True, text=True)
     if ok is not None and res.returncode != ok:
         raise AssertionError("floe2 %s: exit %d, wanted %d\n%s\n%s"
@@ -1016,15 +1020,19 @@ class GenerationContractTests(unittest.TestCase):
         self.assertEqual(read_ovo(self.cache / "design.ovo")["cell"], 3000)
         # a child that dies after writing the tmp: the wrapper removes it
         fake = TMP / "fake-index"
+        # it answers --version as the real one: the Rust command line asks
+        # its indexer's version before it runs it
         fake.write_text("""#!/usr/bin/env python3
-import pathlib, sys
+import os, pathlib, sys
 args = sys.argv[1:]
+if args == ["--version"]:
+    os.execv(%r, [%r, "--version"])
 if args and args[0] == "vfsd":
     sys.exit(0)
 out = pathlib.Path(args[2])
 (out / "design.ovo.tmp").write_bytes(b"half")
 sys.exit(9)
-""")
+""" % (str(BIN), str(BIN)))
         fake.chmod(0o755)
         env = run_env()
         env["FLOE_INDEX_BIN"] = str(fake)
@@ -1261,8 +1269,8 @@ class RenderTests(unittest.TestCase):
     @classmethod
     def _start_worker(cls):
         sys.path.insert(0, str(ROOT))
-        from floe.cache import Cache
-        from floe.rust_render import RustRenderWorker
+        from floe_oracle.cache import Cache
+        from floe_oracle.rust_render import RustRenderWorker
         cache = Cache(str(cls.src))
         cache.load()
         worker = RustRenderWorker(cache)
@@ -1491,8 +1499,8 @@ class RenderTests(unittest.TestCase):
         cache = index_with_occupancy(src, 4)
         os.environ["FLOE_RUST_OCCUPANCY"] = "on"
         sys.path.insert(0, str(ROOT))
-        from floe.cache import Cache
-        from floe.rust_render import RustRenderWorker
+        from floe_oracle.cache import Cache
+        from floe_oracle.rust_render import RustRenderWorker
         c = Cache(str(src))
         c.load()
         worker = RustRenderWorker(c)
@@ -1552,16 +1560,31 @@ class RenderTests(unittest.TestCase):
             inside = {(x, y) for x in range(125, 135) for y in range(65, 75)}
             self.assertEqual(len(inside & lit), 50)
 
-    def test_a_rebuilt_file_reaches_a_running_daemon(self):
+    def test_a_file_made_while_a_daemon_runs_reaches_it(self):
+        """The index locks (2026-10-09; review of 9378c6d7): replacing the
+        design.ovo the running daemons map is refused while they have the
+        cache open (from another NFS client it would be pulled from under
+        them); a summary MADE while they run (none there) goes in beside
+        them and reaches them at the next summary decision - as a file put
+        back does."""
+        ovo = Path(self.cache) / "design.ovo"
+        kept = ovo.read_bytes()
         _, summ, _ = self._render(self.worker, visible=[(1, 0)])
         self.assertEqual(summ["cell_um"], 8.0)
+        res = floe_index("vfs", self.src, self.cache, "--occupancy-only",
+                         "--occupancy-um", "3", "--occupancy-max-work",
+                         "100000", ok=75)
+        self.assertIn("is in use by", res.stderr)
+        self.assertEqual(ovo.read_bytes(), kept)
+        ovo.unlink()
         floe_index("vfs", self.src, self.cache, "--occupancy-only",
                    "--occupancy-um", "3", "--occupancy-max-work", "100000")
         # the same view again: no stale retained frame, the new file
         _, summ, _ = self._render(self.worker, visible=[(1, 0)])
         self.assertEqual((summ["level"], summ["cell_um"]), (1, 6.0), summ)
-        floe_index("vfs", self.src, self.cache, "--occupancy-only",
-                   "--occupancy-um", "4", "--occupancy-max-work", "100000")
+        tmp = ovo.with_name("design.ovo.gate")
+        tmp.write_bytes(kept)
+        os.replace(tmp, ovo)
         _, summ, _ = self._render(self.worker, visible=[(1, 0)])
         self.assertEqual(summ["cell_um"], 8.0)
 
@@ -2004,8 +2027,8 @@ class SubCutTests(unittest.TestCase):
 
     @classmethod
     def _worker(cls):
-        from floe.cache import Cache
-        from floe.rust_render import RustRenderWorker
+        from floe_oracle.cache import Cache
+        from floe_oracle.rust_render import RustRenderWorker
         cache = Cache(str(cls.src))
         cache.load()
         worker = RustRenderWorker(cache)
@@ -2217,10 +2240,10 @@ class DeckRenderTests(unittest.TestCase):
 
     @classmethod
     def _workers(cls):
-        from floe.jobdeck.viewer import DeckCache
-        from floe.jobdeck import render as jrender
-        from floe.cache import Cache
-        from floe.rust_render import RustRenderWorker
+        from floe_oracle.jobdeck.viewer import DeckCache
+        from floe_oracle.jobdeck import render as jrender
+        from floe_oracle.cache import Cache
+        from floe_oracle.rust_render import RustRenderWorker
         dc = DeckCache(str(cls.dir / "wide.jb"), mode="level")
         dc.load()
         deck = jrender.DeckRenderWorker(dc)
