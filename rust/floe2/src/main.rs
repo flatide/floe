@@ -5,6 +5,7 @@
 //! floe2-web's); `view` - and a bare source or nothing at all - starts the
 //! GTK viewer, the only part left in Python.
 #![forbid(unsafe_code)]
+mod drc;
 mod gtk;
 mod service;
 mod view;

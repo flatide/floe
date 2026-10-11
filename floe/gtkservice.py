@@ -44,6 +44,7 @@ class Service:
         self._cond = threading.Condition()  # replies and the reader's end
         self._replies = {}
         self._events = collections.deque()
+        self._drc = {}      # DRC database handle -> its jobs' events
         self._seq = 0
 
     def _start(self):
@@ -66,7 +67,13 @@ class Service:
                 except ValueError:
                     continue
                 with self._cond:
-                    if "event" in message:
+                    if message.get("event") == "drc":
+                        q = self._drc.get(message.get("handle"))
+                        if q is not None:
+                            q.append(message)
+                        else:
+                            _discard_files([message])
+                    elif "event" in message:
                         self._events.append(message)
                     else:
                         self._replies[message.get("id")] = message
@@ -110,6 +117,21 @@ class Service:
             self._events.clear()
         return out
 
+    def drc_watch(self, handle):
+        """Keep the DRC jobs' events of database `handle`."""
+        with self._cond:
+            self._drc.setdefault(handle, collections.deque())
+
+    def drc_events(self, handle, forget=False):
+        """Database `handle`'s DRC job events since the last call."""
+        with self._cond:
+            q = self._drc.pop(handle, None) if forget else self._drc.get(handle)
+            if q is None:
+                return []
+            out = list(q)
+            q.clear()
+        return out
+
     def close(self):
         with self._lock:
             proc, self._proc = self._proc, None
@@ -119,6 +141,32 @@ class Service:
                 proc.wait(timeout=5)
             except (OSError, subprocess.TimeoutExpired):
                 proc.kill()
+
+
+# selections and groupings the viewer let go of, released at the next
+# request: a finalizer must not talk to the service (a garbage collection
+# can run inside a request, whose lock is not reentrant)
+_DROPS = collections.deque()
+
+
+def _flush_drops():
+    while _DROPS:
+        handle, op, key, value = _DROPS.popleft()
+        try:
+            service().request(op, handle=handle, **{key: value})
+        except ServiceError:
+            pass
+
+
+def _discard_files(events):
+    """Remove the marker files of events nobody will read."""
+    for e in events:
+        path = e.get("path")
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
 
 _SERVICE = None
@@ -416,6 +464,7 @@ class _Drc(object):
     packed = False
 
     def __init__(self, result):
+        self._slots = {}
         self._handle = result["handle"]
         self.path = result["path"]
         self.cell = result["cell"]
@@ -429,16 +478,79 @@ class _Drc(object):
     def _request(self, op, **fields):
         if self._handle is None:
             raise ServiceError("input", "the DRC database is closed")
+        _flush_drops()
         return service().request(op, handle=self._handle, **fields)
 
     def close(self):
         """Let the service close it (and the pack's reader lock with it)."""
         handle, self._handle = self._handle, None
         if handle is not None:
+            _discard_files(service().drc_events(handle, forget=True))
+            for slot in self._slots.values():
+                _discard_files([slot[1]] if slot[1] else [])
+            self._slots = {}
             try:
                 service().request("drc_close", handle=handle)
             except ServiceError:
                 pass
+
+    # ---- analysis jobs (feature/jobdeck-drc; app-core drc::analysis) ----
+    def _start(self, kind, request_op, **fields):
+        """Start the service's `kind` job (the earlier one of the kind is
+        cancelled there); its events reach `poll(kind)`."""
+        service().drc_watch(self._handle)
+        job = self._request(request_op, **fields)["job"]
+        old = self._slots.get(kind)
+        if old is not None and old[1] is not None:
+            _discard_files([old[1]])
+        self._slots[kind] = [job, None]
+        return job
+
+    def _pump(self):
+        if self._handle is None:
+            return
+        for e in service().drc_events(self._handle):
+            slot = self._slots.get(e.get("kind"))
+            if slot is None or e.get("job") != slot[0]:
+                _discard_files([e])
+                continue
+            if slot[1] is not None:
+                _discard_files([slot[1]])
+            slot[1] = e
+
+    def poll(self, kind):
+        """The latest event of the current `kind` job, once."""
+        self._pump()
+        slot = self._slots.get(kind)
+        if slot is None or slot[1] is None:
+            return None
+        event, slot[1] = slot[1], None
+        if event.get("state") in ("done", "error", "cancelled"):
+            self._slots.pop(kind, None)
+        return event
+
+    def cancel(self, kind):
+        slot = self._slots.pop(kind, None)
+        if slot is not None:
+            if slot[1] is not None:
+                _discard_files([slot[1]])
+            try:
+                self._request("drc_cancel", kind=kind)
+            except ServiceError:
+                pass
+
+    def load_clusters(self, path=None):
+        """The `<db>.clusters` sidecar (beside the db when `path` is None:
+        None when there is none); ValueError naming the file and line."""
+        try:
+            reply = self._request("drc_clusters_load",
+                                  path=None if path is None
+                                  else os.path.abspath(path))
+        except ServiceError as exc:
+            raise ValueError(str(exc))
+        if reply is None:
+            return None
+        return ClusterFile(self, reply)
 
 
 class AsciiDrc(_Drc):
@@ -513,11 +625,17 @@ class PackDrc(_Drc):
                              waived=bool(waived), error=int(ei))
 
     def query_rect(self, x0_um, y0_um, x1_um, y1_um, cap=2000, checks=None,
-                   waived=None):
+                   waived=None, members=None):
+        """Errors meeting the um rect; `members` {ci: scope} limits the one
+        rule the query is limited to (a cluster, group or selection)."""
+        fields = {}
+        if members:
+            (ci, scope), = members.items()
+            fields = dict(check=int(ci), scope=scope.spec)
         rows = self._request(
             "drc_query", bbox=[x0_um, y0_um, x1_um, y1_um], cap=int(cap),
             checks=None if checks is None else [int(c) for c in checks],
-            waived=waived)
+            waived=waived, **fields)
         return [(ci, ei, DrcError(kind, num, pts, self, ci, ei))
                 for ci, ei, kind, num, pts in rows]
 
@@ -554,11 +672,477 @@ class PackDrc(_Drc):
     def waive_export(self, dst):
         self._request("drc_waive_export", path=os.path.abspath(dst))
 
+    def statuses_changed(self, ci=None, counts=None):
+        """A service job rewrote statuses: drop what was read of them."""
+        self._status.clear()
+        if ci is not None and counts is not None:
+            self._counts[ci] = tuple(counts)
+
     def waive_import(self, src):
         reply = self._request("drc_waive_import", path=os.path.abspath(src))
         self._counts = [tuple(c) for c in reply["counts"]]
         self._status.clear()
         return reply["waived"]
+
+
+# ---- DRC analysis: the viewer's objects over the service's (feature/
+# jobdeck-drc's drc_clusters / drc_delta / drc_points / drc_selection
+# surfaces; the work is app-core drc::analysis)
+
+class DrcScope(object):
+    """Errors of one rule the service resolves: `spec` is the service's
+    scope - {"cluster": k}, {"group": g, "row": r}, {"selection": s}, their
+    union of keys an intersection, {"empty": True} none."""
+    __slots__ = ("db", "ci", "spec", "__weakref__")
+
+    def __init__(self, db, ci, spec):
+        self.db, self.ci, self.spec = db, ci, dict(spec)
+
+    def _scope(self, op, **fields):
+        return self.db._request(op, check=self.ci, scope=self.spec, **fields)
+
+    def count(self, waived=None):
+        return self._scope("drc_scope_count", waived=waived)
+
+    def status_counts(self):
+        return self.count(True), self.count(None)
+
+    def page(self, start, limit, waived=None):
+        return self._scope("drc_scope_page", start=int(start),
+                           limit=int(limit), waived=waived)
+
+    def rank(self, ei, waived=None):
+        return self._scope("drc_scope_rank", error=int(ei), waived=waived)
+
+    def contains_many(self, eis):
+        eis = [int(e) for e in eis]
+        if not eis:
+            return []
+        return self._scope("drc_scope_contains", errors=eis)
+
+    def contains(self, ei):
+        return bool(self.contains_many([ei])[0])
+
+    __contains__ = contains
+
+
+def intersect(*parts):
+    """The intersection of scopes (None parts are the whole rule)."""
+    parts = [p for p in parts if p is not None]
+    if not parts:
+        return None
+    spec = {}
+    for p in parts:
+        if p.spec.get("empty"):
+            return DrcScope(p.db, p.ci, {"empty": True})
+        for key in ("cluster", "group", "row", "selection"):
+            if key in p.spec:
+                spec[key] = p.spec[key]
+    return DrcScope(parts[0].db, parts[0].ci, spec)
+
+
+class DrcCluster(DrcScope):
+    """One cluster of a `<db>.clusters` file; its status counts as last
+    asked (ClusterFile.prepare_counts)."""
+    __slots__ = ("name", "total", "index", "_counts")
+
+    def __init__(self, db, ci, index, name, total):
+        super().__init__(db, ci, {"cluster": index})
+        self.index, self.name, self.total = index, name, total
+        self._counts = None
+
+    def status_counts(self):
+        if self._counts is None:
+            self._counts = super().status_counts()
+        return self._counts
+
+    def _reset_status(self):
+        self._counts = None
+
+
+class ClusterFile(object):
+    """A loaded clusters file: `rules` {ci: [DrcCluster, ...]}."""
+
+    def __init__(self, db, reply):
+        self.path = reply["path"]
+        self.rules = {
+            int(ci): [DrcCluster(db, int(ci), k, c["name"], c["total"])
+                      for k, c in enumerate(clusters)]
+            for ci, clusters in reply["rules"].items()}
+        self._db = db
+
+    def prepare_counts(self, ci):
+        clusters = self.rules.get(ci)
+        if not clusters:
+            return
+        counts = self._db._request("drc_cluster_counts", check=ci)
+        for cluster, (waived, total) in zip(clusters, counts):
+            cluster._counts = (waived, total)
+
+    def status_changed(self, ci, eis=None):
+        for cluster in self.rules.get(ci, ()):
+            cluster._reset_status()
+
+    def reset_status(self):
+        for clusters in self.rules.values():
+            for cluster in clusters:
+                cluster._reset_status()
+
+
+class DrcSelection(DrcScope):
+    """A complete selection of one rule, kept by the service (any size):
+    count, contains, pages and ranks are asked of it."""
+    __slots__ = ("sid", "size", "total", "_seen")
+
+    def __init__(self, db, ci, sid, size, total):
+        super().__init__(db, ci, {"selection": sid})
+        self.sid, self.size, self.total = sid, size, total
+        self._seen = {}
+
+    def __len__(self):
+        return self.total
+
+    def __bool__(self):
+        return self.total > 0
+
+    def count(self, waived=None):
+        return self.total
+
+    def page(self, start, limit, waived=None):
+        return self.db._request("drc_selection_page", selection=self.sid,
+                                start=int(start), limit=int(limit))
+
+    def contains(self, ei):
+        ei = int(ei)
+        got = self._seen.get(ei)
+        if got is None:
+            if len(self._seen) > 4096:
+                self._seen.clear()
+            got = self._seen[ei] = super().contains(ei)
+        return got
+
+    __contains__ = contains
+
+    def __getitem__(self, i):
+        if isinstance(i, slice):
+            start, stop, step = i.indices(self.total)
+            return self.page(start, stop - start)[::step]
+        if i < 0:
+            i += self.total
+        got = self.page(i, 1) if 0 <= i < self.total else []
+        if not got:
+            raise IndexError(i)
+        return got[0]
+
+    def __iter__(self):
+        for start in range(0, self.total, 65536):
+            for ei in self.page(start, 65536):
+                yield ei
+
+    def __del__(self):
+        handle = getattr(self.db, "_handle", None)
+        if handle is not None:
+            _DROPS.append((handle, "drc_selection_drop", "selection", self.sid))
+
+
+class ListMembers(object):
+    """Explicit rule-local errors (grid edits) as a selection request."""
+    __slots__ = ("indices",)
+
+    def __init__(self, indices):
+        self.indices = sorted(set(int(i) for i in indices))
+
+    def __len__(self):
+        return len(self.indices)
+
+
+SelectionProgress = collections.namedtuple("SelectionProgress",
+                                           "processed total count")
+MarkerProgress = collections.namedtuple("MarkerProgress", "markers")
+
+
+class PointMarkers(object):
+    """A marker picture the service drew (app-core drc::analysis::points):
+    RGBA bytes, and per pixel the error drawn there."""
+    __slots__ = ("width", "height", "rgba", "_ids", "check", "visible_count",
+                 "occupied_count", "processed_count", "total_count")
+
+    def __init__(self, event, check):
+        path = event["path"]
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        if data[:8] != b"FLOEMRK1":
+            raise ValueError("not a marker picture")
+        w = int.from_bytes(data[8:12], "little")
+        h = int.from_bytes(data[12:16], "little")
+        counts = [int.from_bytes(data[16 + 8 * i:24 + 8 * i], "little")
+                  for i in range(4)]
+        if len(data) != 48 + w * h * 12:
+            raise ValueError("marker picture is truncated")
+        self.width, self.height, self.check = w, h, check
+        (self.visible_count, self.occupied_count, self.processed_count,
+         self.total_count) = counts
+        self.rgba = data[48:48 + w * h * 4]
+        self._ids = memoryview(data)[48 + w * h * 4:].cast("q")
+
+    def error_id(self, x, y):
+        """The rule-local error drawn at pixel (x, y), -1 none."""
+        return self._ids[y * self.width + x]
+
+
+def parse_step(text):
+    """A grouping step typed by the user in 0.00001 ticks (ValueError)."""
+    try:
+        return service().request("drc_parse_step", text=str(text))
+    except ServiceError as exc:
+        raise ValueError(str(exc))
+
+
+class _Worker(object):
+    """The viewer's latest-request worker of one job kind: submit / poll /
+    cancel / close over the service's job (feature/jobdeck-drc's worker
+    threads and processes are the service's threads now)."""
+    kind = None
+
+    def __init__(self):
+        self._db = None
+        self._key = None
+        self.progress = None
+
+    def _submit(self, key, db, request_op, **fields):
+        if self._db is not None and self._db is not db:
+            self._db.cancel(self.kind)
+        self._db, self._key = db, key
+        self.progress = None
+        try:
+            db._start(self.kind, request_op, **fields)
+        except ServiceError as exc:
+            self._failed = (key, str(exc))
+            return
+        self._failed = None
+
+    def _event(self):
+        failed = getattr(self, "_failed", None)
+        if failed is not None:
+            self._failed = None
+            return failed, None
+        if self._db is None:
+            return None, None
+        return None, self._db.poll(self.kind)
+
+    def cancel(self):
+        if self._db is not None:
+            self._db.cancel(self.kind)
+        self._key = None
+        self.progress = None
+
+    def close(self):
+        self.cancel()
+        self._db = None
+
+
+class SelectionWorker(_Worker):
+    kind = "select"
+
+    def submit(self, key, db, ci, bounds_um=None, membership=None,
+               waived=None, previous=None, mode="replace"):
+        fields = dict(check=int(ci), mode=mode, waived=waived,
+                      bounds=None if bounds_um is None
+                      else [float(v) for v in bounds_um])
+        if isinstance(membership, ListMembers):
+            fields["errors"] = membership.indices
+        elif membership is not None:
+            fields["scope"] = membership.spec
+        if previous is not None and getattr(previous, "sid", None) is not None:
+            fields["previous"] = previous.sid
+        self._ci = ci
+        self._submit(key, db, "drc_select", **fields)
+
+    def poll(self):
+        failed, e = self._event()
+        if failed is not None:
+            return failed[0], None, failed[1]
+        if e is None:
+            return None
+        key = self._key
+        if e["state"] == "progress":
+            return key, SelectionProgress(e["processed"], e["total"],
+                                          e["count"]), None
+        if e["state"] == "done":
+            sel = DrcSelection(self._db, self._ci, e["selection"],
+                               len(self._db.checks[self._ci].errors),
+                               e["count"])
+            return key, sel, None
+        if e["state"] == "error":
+            return key, None, e.get("message")
+        return None
+
+
+class MarkerWorker(_Worker):
+    kind = "markers"
+
+    def submit(self, key, db, query):
+        (ci,) = tuple(query.get("checks") or ())
+        fields = dict(check=int(ci),
+                      bounds=[float(v) for v in query["bounds_um"]],
+                      width=int(query["width_px"]),
+                      height=int(query["height_px"]),
+                      waived=query.get("waived"))
+        members = (query.get("members") or {}).get(ci)
+        if members is not None:
+            fields["scope"] = members.spec
+        selected = (query.get("selected") or {}).get(ci)
+        if selected is not None and getattr(selected, "sid", None) is not None:
+            fields["selection"] = selected.sid
+        self._ci = ci
+        self._submit(key, db, "drc_markers", **fields)
+
+    def poll(self):
+        failed, e = self._event()
+        if failed is not None:
+            return failed[0], None, failed[1]
+        if e is None:
+            return None
+        key = self._key
+        if e["state"] in ("partial", "done"):
+            try:
+                markers = PointMarkers(e, self._ci)
+            except (OSError, ValueError) as exc:
+                return key, None, str(exc)
+            if e["state"] == "partial":
+                return key, MarkerProgress(markers), None
+            return key, markers, None
+        if e["state"] == "error":
+            return key, None, e.get("message")
+        return None
+
+
+class DeltaGroup(DrcScope):
+    """One CD delta group row."""
+    __slots__ = ("row", "key", "name", "total", "estimated_count", "_count")
+
+    def __init__(self, db, ci, gid, row, waived=None):
+        super().__init__(db, ci, {"group": gid, "row": row["row"]})
+        self.row = row["row"]
+        self.key = tuple(row["key"])
+        self.name = row["name"]
+        self.total = row["total"]
+        self.estimated_count = row["estimated"]
+        self._count = (waived, row["count"])
+
+    def count(self, waived=None):
+        if waived is None:
+            return self.total
+        if self._count[0] == waived:
+            return self._count[1]
+        return super().count(waived)
+
+
+class DeltaGroups(object):
+    """A rule's (or cluster's) delta groups the service built."""
+
+    def __init__(self, db, ci, event):
+        self._db, self.ci = db, ci
+        self.gid = event["group"]
+        self.step_ticks = event["step"]
+        self.auto_step = event["auto"]
+        self.total = event["total"]
+        self.estimated_total = event["estimated_total"]
+        self._len = event["groups"]
+
+    def __len__(self):
+        return self._len
+
+    def page(self, start, limit, waived=None):
+        rows = self._db._request("drc_delta_rows", group=self.gid,
+                                 start=int(start), limit=int(limit),
+                                 waived=waived)
+        return [DeltaGroup(self._db, self.ci, self.gid, r, waived)
+                for r in rows]
+
+    def __getitem__(self, row):
+        got = self.page(row, 1)
+        if not got:
+            raise IndexError(row)
+        return got[0]
+
+    def find(self, key):
+        return self._db._request("drc_delta_find", group=self.gid,
+                                 key=[int(v) for v in key])
+
+    def status_changed(self, eis=None):
+        pass
+
+    def reset_status(self):
+        pass
+
+    def __del__(self):
+        handle = getattr(self._db, "_handle", None)
+        if handle is not None:
+            _DROPS.append((handle, "drc_delta_drop", "group", self.gid))
+
+
+class DeltaWorker(_Worker):
+    kind = "delta"
+
+    def submit(self, key, db, ci, constraints, step, mode="absolute",
+               cluster=None):
+        fields = dict(check=int(ci), constraints=list(constraints or ()),
+                      basis=mode, step=step)
+        if cluster is not None:
+            fields["cluster"] = cluster.index
+        self._ci = ci
+        self._submit(key, db, "drc_delta", **fields)
+
+    def poll(self):
+        failed, e = self._event()
+        if failed is not None:
+            return failed[0], None, failed[1]
+        if e is None:
+            return None
+        if e["state"] == "progress":
+            self.progress = e.get("text")
+            return None
+        key = self._key
+        self.progress = None
+        if e["state"] == "done":
+            if not e.get("measurable"):
+                return key, None, None
+            return key, DeltaGroups(self._db, self._ci, e), None
+        if e["state"] == "error":
+            return key, None, e.get("message")
+        return None
+
+
+class ExactQueryWorker(_Worker):
+    kind = "inview"
+
+    def submit(self, key, db, ci, bounds, cap, membership=None, waived=None):
+        fields = dict(check=int(ci), bbox=[float(v) for v in bounds],
+                      cap=int(cap), waived=waived)
+        if membership is not None:
+            fields["scope"] = membership.spec
+        self._submit(key, db, "drc_inview", **fields)
+
+    def poll(self):
+        failed, e = self._event()
+        if failed is not None:
+            return failed[0], None, failed[1]
+        if e is None or e["state"] == "progress":
+            return None
+        key = self._key
+        if e["state"] == "done":
+            return key, [(ci, ei, kind, pts)
+                         for ci, ei, kind, _num, pts in e["rows"]], None
+        if e["state"] == "error":
+            return key, None, e.get("message")
+        return None
 
 
 def _drc(result):

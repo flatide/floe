@@ -20,6 +20,7 @@ import os
 import queue
 import signal
 import sys
+import threading
 import time
 
 from . import __version__
@@ -70,7 +71,7 @@ DRC_PAGE = 1000            # error-grid cells per page
 DRC_GRID_W = 5             # error numbers per browser grid row
 DRC_VIEW_FRACTION = 0.3    # error extent ~30% of the view on a jump
 DRC_HL_CAP = 1000          # highlight-in-view marker budget
-DRC_SEL_CAP = 5000         # box-select budget ('e' mode)
+DRC_LARGE_RULE = 100000    # in-view lists of rules this large: a service job
 DRC_GREEN = 0x00E676FF     # WAIVED errors (geometry+numbers;
                            # cyan->green, user call 2026-08-17)
 DRC_MARK_PX = 5            # collapsed-marker circle diameter; geometry
@@ -139,7 +140,9 @@ class _DrcPanel(object):
     """Widget refs of the embedded DRC browser (attribute bag)."""
     __slots__ = ("_info", "_rules", "_rstore", "_grid", "_gstore",
                  "_detail", "_hl", "_wf", "_selv", "_search",
-                 "_tf", "_plabel", "_pprev", "_pnext")
+                 "_tf", "_plabel", "_pprev", "_pnext", "_delta_mode",
+                 "_delta_step", "_delta_store", "_delta_tree", "_delta_label",
+                 "_delta_prev", "_delta_next")
 
 
 class _CellPanel(object):
@@ -1602,6 +1605,7 @@ class Viewer:
         self._drc_zoom_lock = False  # a user zoom is being kept this session
         self._drc_hits = []         # frame's painted markers:
                                     # (px, py, ci, ei) for hover/pick
+        self._drc_point_hits = None # pixel hit map, never an error list
         self._drc_tip = None        # last tooltip text set
         self.overlay_mode = 0       # Tab cycles (user call
         # 2026-08-21): 0 = everything shown, 1 = OTHER errors
@@ -1614,6 +1618,8 @@ class Viewer:
         self._drc_total = 0
         self._drc_pos = -1
         self._drc_open = None       # the one open (selected) rule
+        self._drc_clusters = None   # optional user-authored cluster sidecar
+        self._drc_cluster = None    # selected child; None = entire rule
         self._drc_grid_ci = None    # rule the number grid shows
         self._drc_grid_rows = 0
         self._drc_cell = None       # marked grid cell (row, col)
@@ -1636,11 +1642,11 @@ class Viewer:
         self._drc_lyr_saved = None  # visibility snapshot before a
                                     # double-click layer isolation
         self._drc_show_sel = False  # 'selected' list filter
-        self._drc_sel = None        # OPEN rule's selection: (ci,
-                                    # [ei], [(ei, kind, pts dbu)],
-                                    # frozenset(ei))
-        self._drc_sels = {}         # ci -> selection (kept across
-                                    # rule switches, 2026-08-15)
+        self._drc_sel = None        # (ci, immutable Selection, (), Selection)
+        self._drc_selection_worker = None
+        self._drc_selection_key = None
+        self._drc_review_job = None
+        self._drc_sels = {}         # (ci, cluster) -> selection
         self._esel_start = None     # pending first box corner (dbu)
         self._drc_grid_map = []     # the grid PAGE's ei list
         self._drc_focus = None      # single-clicked error (ci, ei,
@@ -1650,6 +1656,29 @@ class Viewer:
         self._mono = False          # grayscale layers (b key)
         self._mono_saved = False    # mono state before highlight
         self._drc_hl_res = None     # (view key, [(kind, pts dbu)])
+        self._drc_marker_worker = None
+        self._drc_marker_revision = 0
+        self._drc_marker_key = None
+        self._drc_marker_result = None
+        self._drc_marker_overlay = None
+        self._drc_marker_busy = False
+        self._drc_query_worker = None
+        self._drc_hl_key = None
+        self._drc_delta_worker = None
+        self._drc_delta_key = None
+        self._drc_delta_groups = None
+        self._drc_delta_group = None
+        self._drc_delta_busy = False
+        self._drc_delta_ui_busy = False
+        self._drc_delta_revision = 0
+        self._drc_delta_mode = "absolute"
+        self._drc_delta_step = None  # resolved interval; None while automatic is pending
+        self._drc_delta_steps = {}   # (rule index, mode) -> manual interval in ticks
+        self._drc_delta_auto_steps = {}  # whole-rule automatic intervals
+        self._drc_delta_step_scope = None
+        self._drc_delta_step_text = "auto"
+        self._drc_delta_page = 0    # group pages are separate from error pages
+        self._drc_delta_error = None
         self._labels = []           # Gtk.Label pool for ruler distances
         self._note_panel = None     # top-left translucent DRC note panel
 
@@ -2907,6 +2936,10 @@ class Viewer:
                       off_x, off_y, scale, scale, interp, 255)
 
     def _draw_overlays(self, disp, obox, ospp):
+        self._drc_point_hits = None
+        self._drc_marker_view = (tuple(obox), ospp,
+                                 disp.get_width(), disp.get_height())
+
         def sx(v):
             return (v - obox[0]) / ospp
 
@@ -2991,32 +3024,26 @@ class Viewer:
                 for j in range(0, len(pts) - 1, 2):
                     stamp_segment(disp, pts[j], pts[j + 1], None,
                                   mcol)
-        if self.mode == "esel" and self._esel_start is not None:
-            ax, ay = self._esel_start
-            bx, by = self._cursor
-            rect_outline(disp, sx(ax), sy(ay), sx(bx), sy(by),
-                         None, RULER_CORE, px=1)
         if self.overlay_mode == 0 and self._drc is not None \
                 and self._drc_open is not None:
-            # the canvas shows the CURRENT GRID PAGE's errors (user
-            # call 2026-08-15: page flips must move the markers) -
-            # geometry prebuilt by _drc_grid_fill. Tab state 1
-            # hides these (and the gold set below): only the jumped
-            # error above stays (user call 2026-08-21); _drc_hits
-            # then stays empty so hidden markers cannot be picked.
+            # All matching errors of the rule, cluster or delta group,
+            # independently of list pages (feature/jobdeck-drc
+            # 2026-10-08): the service paints individual centres into
+            # one bounded picture. Tab state 1 hides these: only the
+            # jumped error above stays (user call 2026-08-21); the pixel
+            # hit map then stays empty so hidden markers cannot be picked.
             if self._drc_hl and hasattr(self._drc, "query_rect"):
                 # keeps the in-view filter grid following the view
                 self._drc_hl_list()
             with _dprof("paint: rule errors"):
-                self._drc_stamp_errs(disp, sx, sy,
-                                     self._drc_page_marks)
-        if self.overlay_mode == 0 and self._drc_sel is not None:
-            # box selection ('e'): GOLD on top of the status colors
-            sci, _seis, marks, _eset = self._drc_sel
-            self._drc_stamp_errs(
-                disp, sx, sy,
-                [(sci, ei_, kind, spts)
-                 for ei_, kind, spts in marks], DRC_GOLD)
+                self._drc_stamp_markers(disp, obox, ospp)
+            # Focus remains visible above the full-scope marker image.
+            focus = self._drc_focus
+            if focus is not None and focus[0] == self._drc_open:
+                sel = self._drc_sel
+                color = (DRC_GOLD if sel is not None and sel[0] == focus[0]
+                         and focus[1] in sel[3] else None)
+                self._drc_stamp_errs(disp, sx, sy, [focus], color)
         if self.overlay_mode == 0 and self._cell_hl is not None \
                 and self._cell_hl_on:
             # the cell tree's selected cell: its instances in the view
@@ -3033,6 +3060,13 @@ class Viewer:
                               CELL_MARK_PX, CELL_MARK_PX, CELL_HL)
                 else:
                     rect_outline(disp, ax, ay, bx, by, None, CELL_HL)
+        if self.mode == "esel" and self._esel_start is not None:
+            # Keep the live selection boundary above dense marker rasters,
+            # focused errors and cell highlights, with contrast on either.
+            ax, ay = self._esel_start
+            bx, by = self._cursor
+            rect_outline(disp, sx(ax), sy(ay), sx(bx), sy(by),
+                         BLACK, RULER_CORE, px=1)
         if self._zoomdrag is not None and self._band_cur is not None:
             x0, y0 = self._zoomdrag
             x1, y1 = self._band_cur
@@ -3769,6 +3803,16 @@ class Viewer:
                         % (res.get("kind"), exc))
         except queue.Empty:
             pass
+        # the DRC analysis jobs' answers (gtk-service; feature/jobdeck-drc)
+        for name, poll in (("marker", self._drc_marker_poll),
+                           ("delta", self._drc_delta_poll),
+                           ("selection", self._drc_selection_poll),
+                           ("review", self._drc_review_poll),
+                           ("in-view", self._drc_query_poll)):
+            try:
+                poll()
+            except Exception as exc:
+                sys.stderr.write("[drc] %s result failed: %s\n" % (name, exc))
         # push buffered X output to the server: with cairo's core-protocol
         # fallback (CAIRO_DEBUG=xrender-version=-1, the XQuartz black-image
         # workaround) drawn updates otherwise sit in Xlib's output buffer
@@ -4237,7 +4281,7 @@ class Viewer:
         #local(global) number and waive status (user call
         2026-08-18)."""
         tip = None
-        if self._drc is not None and self._drc_hits:
+        if self._drc is not None:
             hit = self._drc_hit_at(ev.x, ev.y)
             if hit is not None:
                 ci, ei = hit
@@ -5054,15 +5098,19 @@ class Viewer:
             % db.checks[ci].name)
 
     def _esel_click(self, ev):
+        # Use the same transform as the displayed markers, including a
+        # frozen base while a new zoom frame is still being rendered.
+        bounds, spp = self._drc_display_view()
+        point = (bounds[0] + ev.x * spp, bounds[3] - ev.y * spp)
         if self._esel_start is None:
-            self._esel_start = self._cursor
+            self._esel_start = point
             self._set_live_status(
                 "error select: click the opposite corner "
                 "(Shift = add, Ctrl = toggle)")
             self._display()
             return
         a = self._esel_start
-        b = self._cursor
+        b = point
         self._esel_start = None
         # like ruler mode the tool STAYS ARMED for the next box
         # until Esc (or 'e') leaves it - user call 2026-08-15
@@ -5073,46 +5121,108 @@ class Viewer:
         self._esel_apply(a, b, mode)
 
     def _esel_apply(self, a, b, mode="replace"):
-        """Box done: the VISIBLE errors inside it - only what is
-        currently painted (the filtered list's page) can be picked
-        up. mode: replace (plain), add (Shift), toggle (Ctrl) -
-        same second-click modifiers as the grid (user call
-        2026-08-15)."""
+        """Select every exact bbox hit in the displayed scope - the whole
+        rule, cluster or delta group, not a list page - with no count
+        limit (feature/jobdeck-drc 2026-10-08; the service's select job).
+        mode: replace (plain), add (Shift), toggle (Ctrl) - the grid's
+        second-click modifiers (user call 2026-08-15)."""
         db, ci = self._drc, self._drc_sel_check()
         if db is None or ci is None:
             return
-        x0, x1 = sorted((a[0], b[0]))    # dbu, like the marks
+        if self.overlay_mode != 0:
+            self._set_live_status("show DRC markers before selecting errors")
+            return
+        x0, x1 = sorted((a[0], b[0]))
         y0, y1 = sorted((a[1], b[1]))
-        hits = []
-        for mci, ei, kind, pts in self._drc_page_marks:
-            if mci != ci:
-                continue
-            xs = [p[0] for p in pts]
-            ys = [p[1] for p in pts]
-            if min(xs) <= x1 and max(xs) >= x0 \
-                    and min(ys) <= y1 and max(ys) >= y0:
-                hits.append((ei, kind, pts))
+        view, _spp = self._drc_display_view()
+        bounds = (max(x0, view[0]), max(y0, view[1]),
+                  min(x1, view[2]), min(y1, view[3]))
+        membership = self._drc_active_members()
+        if self._drc_show_sel:
+            sel = self._drc_sel
+            membership = gtkservice.intersect(
+                sel[1] if sel is not None and sel[0] == ci
+                else gtkservice.DrcScope(db, ci, {"empty": True}),
+                membership)
+        self._drc_selection_submit(ci, tuple(v * self.dbu for v in bounds),
+                                   membership, mode)
+
+    def _drc_selection_cancel(self, close=False):
+        worker = getattr(self, "_drc_selection_worker", None)
+        if worker is not None:
+            if close:
+                worker.close()
+                self._drc_selection_worker = None
+            else:
+                worker.cancel()
+        self._drc_selection_key = None
+
+    def _drc_selection_submit(self, ci, bounds, membership, mode="replace"):
+        if getattr(self, "_drc_review_job", None) is not None:
+            self._set_live_status("review update in progress; select after it finishes")
+            return
+        if mode != "replace" and getattr(self, "_drc_selection_key", None) is not None:
+            self._set_live_status("error selection is still being updated (Esc cancels)")
+            return
+        db = self._drc
+        if db is None or ci != self._drc_sel_check():
+            return
         sel = self._drc_sel
-        if mode == "replace" or sel is None or sel[0] != ci:
-            m = {ei: (kind, pts) for ei, kind, pts in hits}
-        else:
-            m = {ei: (kind, pts) for ei, kind, pts in sel[2]}
-            for ei, kind, pts in hits:
-                if mode == "toggle" and ei in m:
-                    del m[ei]
-                else:
-                    m[ei] = (kind, pts)
-        eis = sorted(m)
-        marks = [(ei,) + m[ei] for ei in eis]
-        self._drc_set_sel((ci, eis, marks, frozenset(eis))
-                          if eis else None)
+        previous = sel[1] if sel is not None and sel[0] == ci else None
+        worker = getattr(self, "_drc_selection_worker", None)
+        if worker is None:
+            worker = self._drc_selection_worker = gtkservice.SelectionWorker()
+        key = (object(), id(db), self._drc_scope_key(), self._drc_wfilter)
+        self._drc_selection_key = key
+        worker.submit(key, db, ci, bounds, membership=membership,
+                      waived=(None if self._drc_wfilter == "all" else
+                              self._drc_wfilter == "waived"),
+                      previous=previous, mode=mode)
+        self._set_live_status("error select: selecting… (Esc cancels)")
+
+    def _drc_selection_poll(self):
+        worker = getattr(self, "_drc_selection_worker", None)
+        reply = worker.poll() if worker is not None else None
+        if reply is None:
+            return
+        key, selected, error = reply
+        if key != getattr(self, "_drc_selection_key", None):
+            return
+        if (key[1:] != (id(self._drc), self._drc_scope_key(), self._drc_wfilter)):
+            self._drc_selection_cancel()
+            return
+        if isinstance(selected, gtkservice.SelectionProgress):
+            self._set_live_status("error select: %d / %d processed · %d matches (Esc cancels)"
+                                  % (selected.processed, selected.total, selected.count))
+            return
+        self._drc_selection_key = None
+        if error:
+            self._set_live_status("error selection failed: %s" % error)
+            return
+        ci = self._drc_sel_check()
+        self._drc_set_sel((ci, selected, (), selected) if selected else None)
         self._drc_focus = None
         self._drc_grid_fill(ci)
-        self._set_live_status(
-            "error select %s [%s]: %d selected - next box ready "
-            "(Shift add / Ctrl toggle, Esc exits)"
-            % (db.checks[ci].name, mode, len(eis)))
+        self._set_live_status("error select %s: %d selected"
+                              % (self._drc.checks[ci].name, len(selected)))
         self._display()
+
+    def _drc_selection_restore(self):
+        """Recheck a saved selection against the current scope and waive
+        filter in the service; until then it is not the active one."""
+        sel = self._drc_sel
+        if sel is None:
+            return
+        members = self._drc_active_members()
+        want = None if self._drc_wfilter == "all" else self._drc_wfilter == "waived"
+        if members is None and want is None:
+            return
+        # A saved status snapshot is not a valid active selection until
+        # rechecked. Keep its scope entry for later retries, but don't page
+        # or review stale IDs if the recheck is cancelled or fails.
+        self._drc_sel = None
+        self._drc_selection_submit(sel[0], None,
+                                   gtkservice.intersect(sel[1], members))
 
     def _build_menubar(self):
         """Top menu bar (user call 2026-08-22): the key-bound
@@ -5248,6 +5358,7 @@ class Viewer:
         m = top("DRC")
         item(m, "open results .db…", self._drc_open_dialog)
         item(m, "load SVRF rules…", self._drc_rules_dialog)
+        item(m, "load clusters…", self._drc_clusters_dialog)
         sep(m)
         item(m, "next error\t.", lambda: self._drc_step(1))
         item(m, "previous error\t,", lambda: self._drc_step(-1))
@@ -5709,7 +5820,9 @@ class Viewer:
         # grid alone (one rule at a time = the accordion ask), and
         # the grid's own equal columns keep the numbers aligned
         # regardless of rule-title widths.
-        rstore = Gtk.ListStore(str, str, int)  # name, count, ci
+        # A rule with a cluster sidecar has selectable children. Parent
+        # rows retain the complete rule, including unclassified errors.
+        rstore = Gtk.TreeStore(str, str, int, object)  # name, count, ci, cluster
         rules = Gtk.TreeView(model=rstore)
         for j, expand in ((0, True), (1, False)):
             cell = Gtk.CellRendererText()
@@ -5790,6 +5903,71 @@ class Viewer:
         pbar.pack_start(pnext, False, False, 0)
         gbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
                        spacing=2)
+        # Keep the group browser bounded as well as the 1,000-error grid.
+        # A tiny step may produce one distinct group per error.
+        delta_controls = Gtk.FlowBox()
+        delta_controls.set_selection_mode(Gtk.SelectionMode.NONE)
+        delta_controls.set_min_children_per_line(1)
+        delta_controls.set_max_children_per_line(3)
+        delta_mode = Gtk.ComboBoxText()
+        for mid, label in (("absolute", "Δ absolute"),
+                           ("percent", "Δ ratio (%)"), ("off", "no grouping")):
+            delta_mode.append(mid, label)
+        delta_mode.set_active_id(self._drc_delta_mode)
+        delta_mode.set_tooltip_text(
+            "|CD − bound|, or |CD − bound| / |bound| × 100; "
+            "group intervals start at zero")
+        delta_mode.connect("changed", self._on_drc_delta_mode)
+        delta_controls.add(delta_mode)
+        delta_step = Gtk.Entry()
+        delta_step.set_width_chars(9)
+        delta_step.set_text(self._drc_delta_step_text)
+        delta_step.set_tooltip_text(
+            "Automatic interval targets 10 groups from this rule's full delta range. "
+            "Enter a positive value (up to 5 decimal places) to override for this rule, "
+            "or auto / an empty value to reset. Absolute: um (area: um²); "
+            "ratio: percentage points. Enter to apply.")
+        delta_step.connect("activate", self._on_drc_delta_step)
+        delta_controls.add(delta_step)
+        delta_apply = Gtk.Button(label="set step")
+        delta_apply.connect("clicked", self._on_drc_delta_step)
+        delta_controls.add(delta_apply)
+        gbox.pack_start(delta_controls, False, False, 0)
+        delta_store = Gtk.ListStore(str, str, object)
+        delta_tree = Gtk.TreeView(model=delta_store)
+        for j in (0, 1):
+            cell = Gtk.CellRendererText()
+            if j == 0:
+                cell.set_property("ellipsize", Pango.EllipsizeMode.END)
+            col = Gtk.TreeViewColumn("", cell, text=j)
+            col.set_expand(j == 0)
+            delta_tree.append_column(col)
+        delta_tree.set_headers_visible(False)
+        delta_tree.set_enable_search(False)
+        delta_tree.set_tooltip_column(0)
+        delta_tree.get_selection().connect("changed", self._on_drc_delta_sel)
+        delta_sc = Gtk.ScrolledWindow()
+        delta_sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        delta_sc.set_size_request(-1, 86)
+        delta_sc.add(delta_tree)
+        _remote_x_scroll_repaint(delta_sc)
+        gbox.pack_start(delta_sc, False, False, 0)
+        delta_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        delta_label = Gtk.Label(label="select a rule for CD groups")
+        delta_label.set_ellipsize(Pango.EllipsizeMode.END)
+        delta_prev, delta_next = Gtk.Button(label="◀"), Gtk.Button(label="▶")
+        for button, direction in ((delta_prev, -1), (delta_next, 1)):
+            button.set_sensitive(False)
+            button.connect("clicked", lambda _w, d=direction:
+                           self._drc_delta_page_step(d))
+        delta_bar.pack_start(delta_prev, False, False, 0)
+        delta_bar.pack_start(delta_label, True, True, 0)
+        delta_bar.pack_start(delta_next, False, False, 0)
+        gbox.pack_start(delta_bar, False, False, 0)
+        win._delta_mode, win._delta_step = delta_mode, delta_step
+        win._delta_store, win._delta_tree = delta_store, delta_tree
+        win._delta_label = delta_label
+        win._delta_prev, win._delta_next = delta_prev, delta_next
         gbox.pack_start(pbar, False, False, 0)
         gbox.pack_start(gsc, True, True, 0)
         hsplit = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
@@ -5896,7 +6074,7 @@ class Viewer:
         # ScrolledWindow subtree - retina clip note) and their
         # scrollers share the layer pane's scrollbar look; the detail
         # text and the controls keep the theme (user call 2026-09-08)
-        for tv, sc in ((rules, rsc), (grid, gsc)):
+        for tv, sc in ((rules, rsc), (grid, gsc), (delta_tree, delta_sc)):
             tv.get_style_context().add_class("floe-drc-list")
             sc.get_style_context().add_class("floe-layers-frame")
         self._drcwin = win
@@ -6606,7 +6784,9 @@ class Viewer:
         # AND canvas size (cx/cy/spp alone served a stale list
         # after a window resize)
         bb = self.view_bbox()
-        key = (bb, id(self._drc), ci, self._drc_wfilter)
+        membership = self._drc_active_members()
+        key = (bb, id(self._drc), ci, self._drc_wfilter,
+               None if membership is None else tuple(sorted(membership.spec.items())))
         cached = self._drc_hl_res
         if cached is not None and cached[0] == key:
             return cached[1]
@@ -6616,7 +6796,26 @@ class Viewer:
                 "DRC filter: select a rule in the browser first")
             return []
         k = self.dbu
+        if getattr(self._drc, "packed", False) and \
+                len(self._drc.checks[ci].errors) >= DRC_LARGE_RULE:
+            # a large rule's capped query runs as a service job: the
+            # GTK thread never waits for its scan
+            if key != getattr(self, "_drc_hl_key", None):
+                self._drc_hl_key = key
+                self._drc_hl_res = None
+                worker = getattr(self, "_drc_query_worker", None)
+                if worker is None:
+                    worker = self._drc_query_worker = \
+                        gtkservice.ExactQueryWorker()
+                worker.submit(key, self._drc, ci, tuple(v * k for v in bb),
+                              DRC_HL_CAP, membership,
+                              None if self._drc_wfilter == "all"
+                              else self._drc_wfilter == "waived")
+                self._set_live_status("DRC filter: querying errors in view…")
+            return []
         kw = {}
+        if membership is not None:
+            kw["members"] = {ci: membership}
         if self._drc_wfilter != "all" \
                 and hasattr(self._drc, "get_status"):
             # the waive filter runs INSIDE the query, before the
@@ -6643,6 +6842,31 @@ class Viewer:
         if self._drc_hl and self._drc_grid_ci == ci:
             GLib.idle_add(self._drc_grid_fill, ci)
         return lst
+
+    def _drc_query_poll(self):
+        worker = getattr(self, "_drc_query_worker", None)
+        result = worker.poll() if worker is not None else None
+        if result is None:
+            return
+        key, values, error = result
+        if key != getattr(self, "_drc_hl_key", None):
+            return
+        # Only an in-flight query owns this key. Notes/toggle paths can
+        # invalidate the completed result without changing the viewport.
+        self._drc_hl_key = None
+        # Coordinates are converted only for the bounded returned page.
+        k = self.dbu
+        items = [(ci, ei, kind, [(x / k, y / k) for x, y in points])
+                 for ci, ei, kind, points in (values or ())]
+        self._drc_hl_res = (key, items)
+        if error:
+            self._set_live_status("DRC in-view query failed: %s" % error)
+        elif self._drc_hl:
+            self._set_live_status("DRC filter: %d in view%s" % (
+                len(items), " (capped)" if len(items) >= DRC_HL_CAP else ""))
+        if self._drc_hl and self._drc_open is not None:
+            self._drc_grid_fill(self._drc_open)
+            self._display()
 
     def _drc_open_dialog(self):
         dlg = Gtk.FileChooserDialog(title="open DRC results (.db)",
@@ -6676,6 +6900,10 @@ class Viewer:
         old = self._drc
         self.drc_mark = None
         self._drc = None
+        self._drc_marker_invalidate(drop_worker=True)
+        self._drc_delta_reset(drop_worker=True)
+        self._drc_clusters = None
+        self._drc_cluster = None
         self._drc_rmeta = None
         self._drc_rmatch = (0, 0)
         self._drc_tfilter = "all"
@@ -6913,6 +7141,11 @@ class Viewer:
                 return False
         old = self._drc
         self._drc = db
+        self._drc_marker_invalidate(drop_worker=True)
+        self._drc_clusters = None
+        self._drc_cluster = None
+        self._drc_open = None
+        self._drc_delta_reset(drop_worker=True)
         # the embedded browser needs elbow room: widen the left
         # pane once a db is loaded (user can still drag it back)
         if self._lpaned.get_position() < 420:
@@ -6932,6 +7165,7 @@ class Viewer:
         self._esel_start = None
         self._drc_tfilter = "all"   # new db = new type census
         self._drc_rules_auto(path)
+        cluster_error = self._drc_clusters_auto(path)
         self._drc_types_rebuild()   # no-sidecar case: combo empties
         if self._drcwin is not None:
             self._drc_fill()
@@ -6945,9 +7179,9 @@ class Viewer:
                 self._drcwin._rules.get_selection().unselect_all()
             finally:
                 self._drc_rules_busy = False
-        self._set_live_status(
-            "DRC %s: %d checks, %d errors (n/p = step)"
-            % (os.path.basename(path), len(db.checks), db.total))
+        self._set_live_status(cluster_error or
+            ("DRC %s: %d checks, %d errors (. / , = step)"
+             % (os.path.basename(path), len(db.checks), db.total)))
         if old is not None and old is not db:
             # the db it replaces lets go of its pack now, not at some GC
             # (floe/indexlock.py: its reader's lock goes with it)
@@ -6958,6 +7192,58 @@ class Viewer:
                 except Exception:
                     pass
         return True
+
+    def _drc_clusters_auto(self, db_path):
+        """A visible <results.db>.clusters file also follows a direct pack
+        (the service finds it by the database's name)."""
+        try:
+            self._drc_clusters = self._drc.load_clusters()
+        except ValueError as exc:
+            msg = "DRC clusters load failed: %s" % exc
+            sys.stderr.write("[floe] %s\n" % msg)
+            return msg
+        return None
+
+    def _drc_clusters_dialog(self):
+        if self._drc is None:
+            self._set_live_status("open a DRC .db first")
+            return
+        dlg = Gtk.FileChooserDialog(title="load DRC clusters",
+                                    parent=self.window,
+                                    action=Gtk.FileChooserAction.OPEN)
+        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                        "Open", Gtk.ResponseType.OK)
+        self._only_close_button(dlg)
+        self._center_on_parent(dlg)
+        dlg.set_current_folder(os.path.dirname(os.path.abspath(self._drc.path)))
+        for name, pattern in (("DRC clusters (*.clusters)", "*.clusters"),
+                              ("all files", "*")):
+            ff = Gtk.FileFilter()
+            ff.set_name(name)
+            ff.add_pattern(pattern)
+            dlg.add_filter(ff)
+        path = (dlg.get_filename()
+                if dlg.run() == Gtk.ResponseType.OK else None)
+        dlg.destroy()
+        self.window.present()
+        if not path:
+            return
+        try:
+            data = self._drc.load_clusters(path)
+        except ValueError as exc:
+            self._set_live_status("DRC clusters load failed: %s" % exc)
+            return
+        keep = self._drc_open
+        self._drc_clusters = data
+        self._drc_cluster = None
+        self._drc_sel = None
+        self._drc_sels = {}
+        self._drc_hl_res = None
+        self._drc_fill()
+        self._drc_select_row(keep)
+        self._display()
+        self._set_live_status("DRC clusters loaded: %d rules (%s)"
+                              % (len(data.rules), os.path.basename(path)))
 
     def _drc_rules_auto(self, db_path):
         """Auto-pick the `floe-index svrf` rule-metadata sidecar: the
@@ -7006,6 +7292,14 @@ class Viewer:
         matched = sum(1 for c in db.checks if c.name in meta)
         self._drc_rmeta = data
         self._drc_rmatch = (matched, len(db.checks))
+        # A replaced deck may define different bounds under the same name.
+        # Preserve parent/file-cluster picks, discard obsolete delta scopes.
+        self._drc_sels = {key: value for key, value in self._drc_sels.items()
+                          if len(key) == 2}
+        self._drc_delta_reset(drop_worker=True)
+        self._drc_delta_sync()
+        if self._drc_open is not None:
+            self._drc_delta_scope_refresh()
         self._drc_types_rebuild()
         self._drc_info_refresh()
         if not silent or matched:
@@ -7039,7 +7333,27 @@ class Viewer:
         else:
             dlg.destroy()
 
-    def _drc_fill(self):
+    def _drc_select_row(self, ci, cluster=None):
+        """Reselect a rule or a specific cluster after a model rebuild."""
+        win = self._drcwin
+        if ci is None or win is None:
+            return False
+        for row in win._rstore:
+            if row[2] != ci:
+                continue
+            target = row if cluster is None else next(
+                (child for child in row.iterchildren()
+                 if child[3] is cluster), None)
+            if target is None:
+                return False
+            if cluster is not None:
+                win._rules.expand_row(row.path, False)
+            win._rules.set_cursor(target.path, None, False)
+            win._rules.scroll_to_cell(target.path, None, False, 0.0, 0.0)
+            return True
+        return False
+
+    def _drc_fill(self, preserve=False):
         """Rules list: NAME + total/waived counts (user call
         2026-08-18); under a waive filter rules with no matching
         errors are hidden (2026-08-14). No waived state exists in
@@ -7047,16 +7361,24 @@ class Viewer:
         Calibre's notation is known."""
         win, db = self._drcwin, self._drc
         rstore = win._rstore
+        keep = (self._drc_open, self._drc_cluster)
+        if self._drc_open is not None and self._drc_sel is not None:
+            self._drc_sels[self._drc_scope_key()] = self._drc_sel
+        expanded = {row[2] for row in rstore
+                    if win._rules.row_expanded(row.path)}
         _t0 = time.perf_counter()
         self._drc_rules_busy = True
         win._rules.set_model(None)   # detach: clear/append without
         rstore.clear()               # per-row view+selection work
         win._gstore.clear()
         self._drc_open = None
+        self._drc_cluster = None
+        self._drc_sel = None
         self._drc_grid_ci = None
         self._drc_grid_rows = 0
         self._drc_grid_map = []
         self._drc_grid_base = None
+        self._drc_page_marks = []
         self._drc_cell = None
         self._drc_page = 0
         _t1 = time.perf_counter()
@@ -7081,11 +7403,43 @@ class Viewer:
             # both are O(1) ([wcount] table - the perf contract)
             wv = (db.status_counts(ci)[0]
                   if hasattr(db, "status_counts") else 0)
-            rstore.append([c.name,
-                           "%d/%d" % (len(c.errors), wv), ci])
+            parent = rstore.append(None, [c.name,
+                           "%d/%d" % (len(c.errors), wv), ci, None])
+            clusters = (self._drc_clusters.rules.get(ci, ())
+                        if self._drc_clusters is not None else ())
+            if clusters:
+                self._drc_clusters.prepare_counts(ci)
+            for cluster in clusters:
+                cw, ct = cluster.status_counts()
+                matching = (ct if self._drc_wfilter == "all" else
+                            cw if self._drc_wfilter == "waived" else ct - cw)
+                if matching or self._drc_wfilter == "all":
+                    rstore.append(parent, [cluster.name, "%d/%d" % (ct, cw),
+                                           ci, cluster])
             shown += 1
         win._rules.set_model(rstore)
+        win._rules.get_selection().unselect_all()
+        for row in rstore:
+            if row[2] in expanded:
+                win._rules.expand_row(row.path, False)
         self._drc_rules_busy = False
+        if preserve:
+            self._drc_select_row(*keep)
+        if self._drc_open is None:
+            self._drc_marker_invalidate()
+            self._drc_delta_reset()
+            self._drc_focus = None
+            self._drc_pos = -1
+            self.drc_mark = None
+            self._drc_hl_res = None
+            for ruler in self._drc_ruler:
+                if ruler in self.rulers:
+                    self.rulers.remove(ruler)
+            self._drc_ruler = []
+            win._detail.set_text("")
+            win._plabel.set_text("")
+            win._pprev.set_sensitive(False)
+            win._pnext.set_sensitive(False)
         if _DRC_PROF:
             sys.stderr.write(
                 "[drcprof] rules_fill rules=%d shown=%d clear=%.1f "
@@ -7106,6 +7460,21 @@ class Viewer:
         rules = ""
         if self._drc_rmeta is not None:
             rules = " · svrf %d/%d" % self._drc_rmatch
+        if self._drc_clusters is not None:
+            rules += " · clusters %d rules" % len(self._drc_clusters.rules)
+        busy = getattr(self, "_drc_marker_busy", False)
+        if busy:
+            rules += " · markers…"
+        if getattr(self, "_drc_marker_result", None) is not None:
+            markers = self._drc_marker_result[1]
+            count, shown = markers.visible_count, markers.occupied_count
+            if busy and markers.total_count:
+                rules += " %d / %d processed" % (
+                    markers.processed_count, markers.total_count)
+            rules += " · %d errors / %d markers in view" % (
+                count, shown)
+            if busy:
+                rules += " (partial)"
         win._info.set_text(
             "%s [%s] — cell %s · %d/%d rules · %d errors%s"
             % (os.path.basename(db.path), backend, db.cell,
@@ -7162,14 +7531,7 @@ class Viewer:
         self._drc_tfilter = tid
         # per-rule selections stay valid (the filter only hides
         # RULES); the open rule may vanish from the list, though
-        keep = self._drc_open
-        self._drc_fill()
-        if keep is not None:
-            for r in self._drcwin._rstore:
-                if r[2] == keep:
-                    self._drcwin._rules.set_cursor(r.path, None,
-                                                   False)
-                    break
+        self._drc_fill(preserve=True)
         self._display()
 
     def _drc_wf_count(self, db, ci):
@@ -7198,11 +7560,9 @@ class Viewer:
             return
         if _DRC_PROF:
             import platform
-            import numpy
             sys.stderr.write(
-                "[drcprof] == filter -> %s | py %s %s numpy %s\n"
-                % (wid, sys.version.split()[0], platform.machine(),
-                   numpy.__version__))
+                "[drcprof] == filter -> %s | py %s %s\n"
+                % (wid, sys.version.split()[0], platform.machine()))
         self._drc_wfilter = wid
         self._drc_hl_res = None
         # a waive-filter switch RESETS the selections (user call
@@ -7210,41 +7570,310 @@ class Viewer:
         self._drc_sel = None
         self._drc_sels = {}
         self._drc_focus = None
-        keep = self._drc_open
         with _dprof("wfilter: rules refill"):
-            self._drc_fill()
-        with _dprof("wfilter: reselect rule"):
-            if keep is not None:
-                for r in self._drcwin._rstore:
-                    if r[2] == keep:
-                        self._drcwin._rules.set_cursor(
-                            r.path, None, False)
-                        break
+            self._drc_fill(preserve=True)
         with _dprof("wfilter: display"):
             self._display()
 
     def _drc_set_sel(self, selobj):
-        """Set the open rule's selection and keep the per-rule
-        store in sync (None clears the open rule's entry)."""
+        """Keep selections separate for each rule/cluster scope."""
+        self._drc_selection_cancel()
         self._drc_sel = selobj
+        self._drc_marker_invalidate()
+        key = self._drc_scope_key()
         if selobj is not None:
-            self._drc_sels[selobj[0]] = selobj
+            self._drc_sels[key] = selobj
         elif self._drc_open is not None:
-            self._drc_sels.pop(self._drc_open, None)
+            self._drc_sels.pop(key, None)
+
+    def _drc_active_members(self):
+        """A delta group already intersects the selected file cluster."""
+        group = getattr(self, "_drc_delta_group", None)
+        return group if group is not None else self._drc_cluster
+
+    def _drc_scope_key(self):
+        key = (self._drc_open, self._drc_cluster)
+        group = getattr(self, "_drc_delta_group", None)
+        if group is not None:
+            key += (id(self._drc_rmeta), self._drc_delta_mode,
+                    self._drc_delta_step, group.key)
+        return key
+
+    def _drc_delta_write_step(self, step):
+        text = "auto" if step is None else format_ticks(step)
+        self._drc_delta_step_text = text
+        win = self._drcwin
+        if win is not None and hasattr(win, "_delta_step"):
+            win._delta_step.set_text(text)
+
+    def _drc_delta_reset(self, drop_worker=False):
+        worker = getattr(self, "_drc_delta_worker", None)
+        if worker is not None:
+            if drop_worker:
+                worker.close()
+                self._drc_delta_worker = None
+            else:
+                worker.cancel()
+        if drop_worker:
+            self._drc_delta_steps = {}
+            self._drc_delta_auto_steps = {}
+            self._drc_delta_step_scope = None
+            self._drc_delta_step = None
+            self._drc_delta_write_step(None)
+        self._drc_delta_key = None
+        self._drc_delta_groups = self._drc_delta_group = None
+        self._drc_delta_busy = False
+        self._drc_delta_restore = None
+        self._drc_delta_progress = None
+        self._drc_delta_error = None
+        self._drc_delta_page = 0
+        self._drc_delta_refresh()
+
+    def _drc_delta_sync(self, force=False):
+        """Request grouping once per rule/cluster, basis and interval."""
+        db, ci = self._drc, self._drc_open
+        mode = getattr(self, "_drc_delta_mode", "absolute")
+        meta = self._drc_rmeta
+        cons = ((meta.get("checks", {}).get(db.checks[ci].name, {})
+                 .get("constraints") or [])
+                if db is not None and ci is not None and meta else [])
+        setting = (ci, mode)
+        requested_step = self._drc_delta_steps.get(setting)
+        self._drc_delta_step = (requested_step if requested_step is not None
+                                else self._drc_delta_auto_steps.get(setting))
+        scope = (id(db), id(meta), ci, mode)
+        if scope != self._drc_delta_step_scope:
+            self._drc_delta_step_scope = scope
+            self._drc_delta_write_step(self._drc_delta_step)
+        key = (id(db), ci, id(meta), self._drc_cluster, mode,
+               requested_step,
+               getattr(self, "_drc_delta_revision", 0))
+        if not force and key == getattr(self, "_drc_delta_key", None):
+            self._drc_delta_refresh()
+            return False
+        self._drc_delta_key = key
+        self._drc_delta_restore = None
+        self._drc_delta_progress = None
+        self._drc_delta_groups = self._drc_delta_group = None
+        self._drc_delta_page = 0
+        self._drc_delta_error = None
+        self._drc_delta_busy = bool(ci is not None and cons and mode != "off")
+        worker = getattr(self, "_drc_delta_worker", None)
+        if self._drc_delta_busy:
+            from .gtkservice import DeltaWorker
+            if worker is None:
+                worker = self._drc_delta_worker = DeltaWorker()
+            worker.submit(key, db, ci, cons, requested_step, mode,
+                          self._drc_cluster)
+        elif worker is not None:
+            worker.cancel()
+        self._drc_delta_refresh()
+        return True
+
+    def _drc_delta_refresh(self):
+        """Only 50 group adapters and GTK rows, regardless of group count."""
+        win = self._drcwin
+        if win is None or not hasattr(win, "_delta_store"):
+            return
+        groups = getattr(self, "_drc_delta_groups", None)
+        total = len(groups) if groups is not None else 0
+        pages = max(1, (total + 49) // 50)
+        page = max(0, min(getattr(self, "_drc_delta_page", 0), pages - 1))
+        self._drc_delta_page = page
+        want = None if self._drc_wfilter == "all" else self._drc_wfilter == "waived"
+        count = 0
+        if self._drc is not None and self._drc_open is not None:
+            count = (self._drc_cluster.count(want) if self._drc_cluster is not None
+                     else self._drc_wf_count(self._drc, self._drc_open))
+        self._drc_delta_ui_busy = True
+        try:
+            store = win._delta_store
+            store.clear()
+            selected = store.append(["All errors", str(count), None])
+            active = getattr(self, "_drc_delta_group", None)
+            if groups is not None:
+                for group in groups.page(page * 50, 50, want):
+                    it = store.append([group.name, str(group.count(want)), group])
+                    if active is not None and active.key == group.key:
+                        selected = it
+            # Paging the group directory does not change the selected scope.
+            win._delta_tree.get_selection().unselect_all()
+            if active is None or store.get_value(selected, 2) is not None:
+                win._delta_tree.get_selection().select_iter(selected)
+        finally:
+            self._drc_delta_ui_busy = False
+        message = getattr(self, "_drc_delta_error", None)
+        if not message:
+            if getattr(self, "_drc_delta_busy", False):
+                progress = getattr(getattr(self, "_drc_delta_worker", None), "progress", None)
+                message = progress if isinstance(progress, str) and progress else "measuring CD / grouping…"
+            elif getattr(self, "_drc_delta_mode", "absolute") == "off":
+                message = "grouping off"
+            elif self._drc_open is None:
+                message = "select a rule for CD groups"
+            elif groups is None:
+                message = "load matching SVRF metadata for CD groups"
+            else:
+                message = "groups %d / %d · %d groups" % (page + 1, pages, total)
+                if getattr(groups, "auto_step", False):
+                    message += " · auto step %s" % format_ticks(groups.step_ticks)
+                estimated = getattr(groups, "estimated_total", 0)
+                if estimated:
+                    message += " · %d estimated (all statuses)" % estimated
+        win._delta_label.set_text(message)
+        win._delta_label.set_tooltip_text(message)
+        win._delta_prev.set_sensitive(page > 0)
+        win._delta_next.set_sensitive(page + 1 < pages)
+        win._delta_step.set_sensitive(self._drc_open is not None and
+                                     getattr(self, "_drc_delta_mode", "absolute") != "off")
+
+    def _drc_delta_page_step(self, delta):
+        self._drc_delta_page = max(0, self._drc_delta_page + delta)
+        self._drc_delta_refresh()
+
+    def _drc_delta_poll(self):
+        worker = getattr(self, "_drc_delta_worker", None)
+        result = worker.poll() if worker is not None else None
+        if result is None:
+            progress = getattr(worker, "progress", None)
+            if (getattr(self, "_drc_delta_busy", False) and isinstance(progress, str)
+                    and progress != getattr(self, "_drc_delta_progress", None)):
+                self._drc_delta_progress = progress
+                self._drc_delta_refresh()
+            return
+        key, groups, error = result
+        if key != getattr(self, "_drc_delta_key", None):
+            return
+        self._drc_delta_busy = False
+        self._drc_delta_groups = groups
+        self._drc_delta_error = "CD grouping failed: %s" % error if error else None
+        if groups is not None:
+            self._drc_delta_step = groups.step_ticks
+            if groups.auto_step:
+                setting = (self._drc_open, self._drc_delta_mode)
+                self._drc_delta_auto_steps[setting] = groups.step_ticks
+            win = self._drcwin
+            if (win is not None and hasattr(win, "_delta_step") and
+                    win._delta_step.get_text() == self._drc_delta_step_text):
+                # Preserve a draft typed while the worker was measuring.
+                self._drc_delta_write_step(groups.step_ticks)
+            restore = getattr(self, "_drc_delta_restore", None)
+            if restore is not None and restore[0] == key:
+                row = groups.find(restore[1])
+                self._drc_delta_group = groups[row] if row is not None else None
+                self._drc_delta_restore = None
+                self._drc_delta_scope_refresh()
+        self._drc_delta_refresh()
+        if error:
+            self._set_live_status(self._drc_delta_error)
+
+    def _drc_delta_scope_refresh(self):
+        """A new scope starts at page one, with only its own saved picks."""
+        ci = self._drc_open
+        self._drc_focus = None
+        self._drc_pos = -1
+        self.drc_mark = None
+        self._drc_hl_res = None
+        for ruler in self._drc_ruler:
+            if ruler in self.rulers:
+                self.rulers.remove(ruler)
+        self._drc_ruler = []
+        self._drc_sel = self._drc_sels.get(self._drc_scope_key())
+        self._drc_page = 0
+        self._drc_marker_invalidate()
+        self._drc_selection_restore()
+        self._drc_delta_refresh()
+        if ci is not None:
+            self._drc_grid_fill(ci)
+            self._drc_show_rule(ci)
+        self._display()
+
+    def _drc_delta_choose(self, group):
+        if group is getattr(self, "_drc_delta_group", None):
+            return
+        if self._drc_sel is not None:
+            self._drc_sels[self._drc_scope_key()] = self._drc_sel
+        self._drc_delta_group = group
+        self._drc_delta_scope_refresh()
+
+    def _on_drc_delta_sel(self, selection):
+        if getattr(self, "_drc_delta_ui_busy", False):
+            return
+        model, it = selection.get_selected()
+        if it is not None:
+            self._drc_delta_choose(model.get_value(it, 2))
+
+    def _on_drc_delta_mode(self, combo):
+        mode = combo.get_active_id() or "absolute"
+        if mode == self._drc_delta_mode:
+            return
+        if self._drc_sel is not None:
+            self._drc_sels[self._drc_scope_key()] = self._drc_sel
+        self._drc_delta_mode = mode
+        self._drc_delta_sync()
+        self._drc_delta_scope_refresh()
+
+    def _on_drc_delta_step(self, _widget=None):
+        from .gtkservice import parse_step
+        if self._drc_delta_mode == "off" or self._drc_open is None:
+            return
+        text = self._drcwin._delta_step.get_text().strip()
+        try:
+            step = None if text.lower() in ("", "auto") else parse_step(text)
+        except ValueError as exc:
+            self._drc_delta_error = str(exc)
+            self._drc_delta_refresh()
+            self._set_live_status("CD group step: %s" % exc)
+            return
+        setting = (self._drc_open, self._drc_delta_mode)
+        previous = self._drc_delta_steps.get(setting)
+        resolved = step if step is not None else self._drc_delta_auto_steps.get(setting)
+        self._drc_delta_write_step(resolved)
+        if step == previous:
+            self._drc_delta_error = None
+            self._drc_delta_refresh()
+            return
+        if self._drc_sel is not None:
+            self._drc_sels[self._drc_scope_key()] = self._drc_sel
+        if step is None:
+            self._drc_delta_steps.pop(setting, None)
+        else:
+            self._drc_delta_steps[setting] = step
+        self._drc_delta_sync()
+        self._drc_delta_scope_refresh()
+
+    def _drc_delta_status_changed(self, ci, eis=None):
+        if ci != self._drc_open:
+            return
+        groups = getattr(self, "_drc_delta_groups", None)
+        if groups is not None:
+            if eis is None:
+                if getattr(groups, "_persistent", False):
+                    active = getattr(self, "_drc_delta_group", None)
+                    if self._drc_sel is not None:
+                        self._drc_sels[self._drc_scope_key()] = self._drc_sel
+                    self._drc_delta_revision = getattr(self, "_drc_delta_revision", 0) + 1
+                    self._drc_delta_sync(force=True)
+                    if active is not None:
+                        self._drc_delta_restore = (self._drc_delta_key, active.key)
+                    return
+                groups.reset_status()
+            else:
+                groups.status_changed(eis)
+        if getattr(self, "_drc_delta_busy", False):
+            # A result's status snapshot may precede this write. Re-bin with
+            # current statuses in the worker, reusing the measured CDs.
+            self._drc_delta_revision = getattr(self, "_drc_delta_revision", 0) + 1
+            self._drc_delta_sync()
+        self._drc_delta_refresh()
 
     def _on_drc_search(self, entry):
         txt = entry.get_text().strip().lower()
         if txt == self._drc_search or self._drc is None:
             return
         self._drc_search = txt
-        keep = self._drc_open
-        self._drc_fill()
-        if keep is not None:
-            for r in self._drcwin._rstore:
-                if r[2] == keep:
-                    self._drcwin._rules.set_cursor(r.path, None,
-                                                   False)
-                    break
+        self._drc_fill(preserve=True)
+        self._display()
 
     def _on_drc_selview(self, btn):
         self._drc_show_sel = btn.get_active()
@@ -7261,7 +7890,7 @@ class Viewer:
             return
         self._drc_page = p       # the fill clamps to the last page
         self._drc_grid_fill(ci)
-        self._display()          # the canvas markers show THIS page
+        self._display()          # refresh focus; marker population stays fixed
 
     def _on_drc_rule_sel(self, sel):
         """Selecting a rule shows ITS error grid alone (the
@@ -7278,11 +7907,18 @@ class Viewer:
         if it is None or self._drc is None:
             return
         ci = model.get_value(it, 2)
-        if ci == self._drc_open:
+        cluster = model.get_value(it, 3)
+        if ci == self._drc_open and cluster is self._drc_cluster:
             return
-        if self._drc_sel is not None:
-            self._drc_sels[self._drc_sel[0]] = self._drc_sel
+        if self._drc_sel is not None and self._drc_open is not None:
+            self._drc_sels[self._drc_scope_key()] = self._drc_sel
+        self._drc_marker_invalidate()
         self._drc_open = ci
+        self._drc_cluster = cluster
+        self._drc_delta_sync()
+        self._drc_focus = None
+        self._drc_pos = -1
+        self._drc_hl_res = None
         # a live jump belongs to the PREVIOUS rule: drop its mark,
         # position and auto CD rulers or they linger on the canvas
         # over the new rule's errors (user call 2026-08-18)
@@ -7293,9 +7929,10 @@ class Viewer:
                 if r in self.rulers:
                     self.rulers.remove(r)
             self._drc_ruler = []
-        # selections are PER RULE and survive switches (user call
-        # 2026-08-15: 'selected' must keep applying)
-        self._drc_sel = self._drc_sels.get(ci)
+        # Each rule/cluster keeps its own selection. A batch waive or
+        # note action must never include another cluster's hidden picks.
+        self._drc_sel = self._drc_sels.get(self._drc_scope_key())
+        self._drc_selection_restore()
         self._drc_page = 0
         with _dprof("rule_sel: grid fill"):
             self._drc_grid_fill(ci)
@@ -7360,7 +7997,7 @@ class Viewer:
         with 'filter errors in view' on, the viewport;
         _drc_grid_map always holds the page's ei list."""
         win, db = self._drcwin, self._drc
-        if win is None or db is None:
+        if win is None or db is None or ci != self._drc_open:
             return
         _t0 = time.perf_counter()
         gstore = win._gstore
@@ -7368,36 +8005,44 @@ class Viewer:
         self._drc_cell = None
         self._drc_grid_ci = ci
         c = db.checks[ci]
-        # the visible list = selected ∧ in-view ∧ waive filter
+        # the visible list = cluster ∧ selected ∧ in-view ∧ waive filter
         # (each stage narrows; None = every error of the rule)
         base = None
         sel = self._drc_sel
+        selected = sel[1] if sel is not None and sel[0] == ci else None
         if self._drc_show_sel:
-            if sel is not None and sel[0] == ci and sel[1]:
-                base = list(sel[1])
+            if selected:
+                if hasattr(selected, "page"):
+                    base = ("cluster", selected, None)
+                else:
+                    base = list(selected)  # legacy bounded selection fixture
             else:
-                base = []   # 'selected' with no selection = empty
+                base = []
         if self._drc_hl and hasattr(db, "query_rect"):
-            inview = [ei for rci, ei, _k, _p in self._drc_hl_list()
-                      if rci == ci]
-            if base is None:
-                base = inview
+            inview = [ei for rci, ei, _k, _p in self._drc_hl_list() if rci == ci]
+            if self._drc_show_sel:
+                base = [ei for ei in inview if selected is not None and ei in selected]
             else:
-                iv = set(inview)
-                base = [ei for ei in base if ei in iv]
-        if self._drc_wfilter != "all":
+                base = inview
+        cluster = self._drc_active_members()
+        if cluster is not None and base is None:
+            want = None if self._drc_wfilter == "all" else self._drc_wfilter == "waived"
+            base = ("cluster", cluster, want)
+        elif cluster is not None and isinstance(base, list):
+            base = [ei for ei in base if cluster.contains(ei)]
+        if self._drc_wfilter != "all" and not isinstance(base, tuple):
             if base is None:
                 base = self._drc_wf_base(db, ci)
             elif hasattr(db, "get_status"):
                 want = self._drc_wfilter == "waived"
-                base = [ei for ei in base
-                        if (db.get_status(ci, ei) == 1) == want]
+                base = [ei for ei in base if (db.get_status(ci, ei) == 1) == want]
             elif self._drc_wfilter == "waived":
                 base = []
         if base is None:
             count = len(c.errors)
         elif isinstance(base, tuple):
-            count = self._drc_wf_count(db, ci)   # O(1) via wcount
+            count = (base[1].count(base[2]) if base[0] == "cluster" else
+                     self._drc_wf_count(db, ci))
         else:
             count = len(base)
         self._drc_grid_base = base
@@ -7408,7 +8053,9 @@ class Viewer:
         if base is None:
             eis = list(range(start, stop))
         elif isinstance(base, tuple):
-            eis = db.status_page(ci, base[1], start, stop - start)
+            eis = (base[1].page(start, stop - start, base[2])
+                   if base[0] == "cluster" else
+                   db.status_page(ci, base[1], start, stop - start))
         else:
             eis = base[start:stop]
         self._drc_grid_map = eis
@@ -7450,26 +8097,9 @@ class Viewer:
         elif f is not None and f[1] in eis:
             idx = eis.index(f[1])
             self._drc_cell_mark(idx // W, idx % W)
-        # the canvas paints THIS page (user call 2026-08-15):
-        # geometry built once per fill; the in-view filter already
-        # decoded its pts, other modes decode the page's blocks
-        k = self.dbu
-        marks = []
-        if self._drc_hl and hasattr(db, "query_rect"):
-            have = {rei: (k2, p2)
-                    for rci, rei, k2, p2 in self._drc_hl_list()
-                    if rci == ci}
-            for ei in eis:
-                kp = have.get(ei)
-                if kp is not None:
-                    marks.append((ci, ei, kp[0], kp[1]))
-        else:
-            errs = c.errors
-            for ei in eis:
-                e = errs[ei]
-                marks.append((ci, ei, e.kind,
-                              [(x / k, y / k) for x, y in e.pts]))
-        self._drc_page_marks = marks
+        # Grid rows only need IDs/statuses. Geometry is decoded on an
+        # explicit jump or by the marker worker, never eagerly on a click.
+        self._drc_page_marks = []
         if _DRC_PROF:
             dt = (time.perf_counter() - _t0) * 1e3
             if dt >= 1.0:
@@ -7483,41 +8113,20 @@ class Viewer:
                 sys.stderr.flush()
 
     def _drc_sel_click(self, ci, row, j, idx, ei, is_range):
-        """Grid selection editing (user call 2026-08-14):
-        Ctrl+click toggles ONE error in/out of the selection,
-        Shift+click ADDS the visual range from the current cell.
-        No pan/zoom change."""
-        db = self._drc
-        sel = self._drc_sel
-        eset = (set(sel[3]) if sel is not None and sel[0] == ci
-                else set())
+        """Edit a bounded grid page without expanding the saved selection."""
+        from .gtkservice import ListMembers
         if is_range:
             aidx = idx
             if self._drc_cell is not None:
-                aidx = (self._drc_cell[0] * self._drc_gridw
-                        + self._drc_cell[1])
+                aidx = self._drc_cell[0] * self._drc_gridw + self._drc_cell[1]
             lo, hi = sorted((aidx, idx))
-            gmap = self._drc_grid_map
-            for k2 in range(lo, min(hi + 1, len(gmap))):
-                eset.add(gmap[k2])
-        elif ei in eset:
-            eset.discard(ei)
+            indices = self._drc_grid_map[lo:hi + 1]
         else:
-            eset.add(ei)
-        eis = sorted(eset)
-        k = self.dbu
-        errs = db.checks[ci].errors
-        marks = [(e2, errs[e2].kind,
-                  [(x / k, y / k) for x, y in errs[e2].pts])
-                 for e2 in eis]
-        self._drc_set_sel((ci, eis, marks, frozenset(eset))
-                          if eis else None)
-        self._drc_grid_fill(ci)   # repaint the gold marks
+            indices = [ei]
+        self._drc_selection_submit(ci, None, ListMembers(indices),
+                                   "add" if is_range else "toggle")
         self._drc_cell_mark(row, j)
         self._drc_show_detail(ci, ei)
-        self._set_live_status(
-            "error select %s: %d selected"
-            % (db.checks[ci].name, len(eis)))
         self._display()
 
     def _on_drc_grid_menu(self, tree, ev):
@@ -7552,7 +8161,7 @@ class Viewer:
         self._drc_show_detail(ci, ei)
         sel = self._drc_sel
         if sel is not None and sel[0] == ci and sel[1]:
-            targets = list(sel[1])
+            targets = sel[1]
             scope = "%d selected" % len(targets)
         else:
             targets = [ei]
@@ -7580,75 +8189,145 @@ class Viewer:
         return True
 
     def _drc_set_waived(self, ci, eis, on):
-        """Write the status byte for the targets and refresh every
-        dependent surface (rule counts, grid, detail, canvas)."""
+        """Write the status of the targets and refresh every dependent
+        surface (rule counts, grid, detail, canvas); a selection past a
+        page is one service job (feature/jobdeck-drc)."""
         db = self._drc
         if db is None or not hasattr(db, "set_status"):
             return
+        if self._drc_review_pending():
+            return
+        if len(eis) > DRC_PAGE:
+            self._drc_review_submit("waive", ci, eis, on=on)
+            return
         val = STATUS_WAIVED if on else STATUS_NONE
+        error = None
         try:
             # one request for the selection (floe2 gtk-service)
             db.set_statuses(ci, list(eis), val)
         except (OSError, gtkservice.ServiceError) as exc:
-            self._set_live_status("waive failed (%s) - is the "
-                                  "waive store writable?" % exc)
+            error = "%s - is the waive store writable?" % exc
+        self._drc_waived_refresh(ci, eis, on, error)
+
+    def _drc_review_pending(self):
+        if getattr(self, "_drc_selection_key", None) is not None:
+            self._set_live_status("error selection is still being updated")
+            return True
+        if getattr(self, "_drc_review_job", None) is not None:
+            self._set_live_status("review update is still running")
+            return True
+        return False
+
+    def _drc_review_submit(self, operation, ci, targets, on=None, text=None):
+        """One review writer (the service's review job); the request keeps
+        its database and targets - a selection of any size."""
+        if self._drc_review_pending():
             return
+        db = self._drc
+        if not targets:
+            return
+        self._drc_marker_invalidate()
+        fields = dict(check=int(ci), action=operation, on=on, text=text)
+        if getattr(targets, "sid", None) is not None:
+            fields["selection"] = targets.sid
+        else:
+            fields["errors"] = [int(e) for e in targets]
+        try:
+            db._start("review", "drc_review", **fields)
+        except gtkservice.ServiceError as exc:
+            self._set_live_status("%s failed: %s" % (operation, exc))
+            return
+        self._drc_review_job = dict(db=db, ci=ci, targets=targets,
+                                    operation=operation, on=on)
+        self._set_live_status("%s: processing %d selected errors…"
+                              % (operation, len(targets)))
+
+    def _drc_review_poll(self):
+        job = getattr(self, "_drc_review_job", None)
+        if job is None:
+            return
+        event = job["db"].poll("review")
+        if event is None:
+            return
+        if event["state"] == "progress":
+            self._set_live_status("%s: %d / %d processed"
+                                  % (job["operation"], event["done"], event["total"]))
+            return
+        self._drc_review_job = None
+        error = event.get("message") if event["state"] != "done" else None
+        if self._drc is not job["db"]:
+            if error:
+                self._set_live_status("previous DRC review update failed: %s" % error)
+            return
+        ci, targets, operation = job["ci"], job["targets"], job["operation"]
+        db = self._drc
+        if operation == "waive":
+            db.statuses_changed(ci, event.get("counts"))
+            if self._drc_clusters is not None:
+                self._drc_clusters.status_changed(ci)
+            self._drc_waived_refresh(ci, targets, event.get("on", job["on"]),
+                                     error, bulk=True)
+        elif error:
+            if operation in ("note", "note-clear"):
+                self._drc_note_refresh(ci, targets, fallback=False)
+            self._set_live_status("%s failed: %s" % (operation, error))
+        elif operation == "note-read":
+            prefill = event.get("prefill") or ""
+            text = self._drc_note_dialog(prefill, len(targets))
+            if text is not None and not (prefill and text == prefill):
+                self._drc_review_submit("note", ci, targets, text=text)
+        else:
+            db._notes_reply(event)
+            self._drc_note_refresh(ci, targets, fallback=False)
+            self._set_live_status("%s: %d errors updated" % (operation, len(targets)))
+
+    def _drc_waived_refresh(self, ci, eis, on, error=None, bulk=False):
+        db = self._drc
+        self._drc_marker_invalidate()
         self._drc_hl_res = None
+        if self._drc_clusters is not None:
+            self._drc_clusters.status_changed(ci)
+            self._drc_clusters.prepare_counts(ci)
+        self._drc_delta_status_changed(ci, None if bulk else eis)
         # the jump mark stores a RESOLVED color: re-derive it for
         # the marked error or a toggle leaves the old status color
-        if self.drc_mark is not None and self._drc_pos >= 0 \
-                and self._drc_cum:
-            mci = bisect.bisect_right(self._drc_cum,
-                                      self._drc_pos) - 1
+        if self.drc_mark is not None and self._drc_pos >= 0 and self._drc_cum:
+            mci = bisect.bisect_right(self._drc_cum, self._drc_pos) - 1
             mei = self._drc_pos - self._drc_cum[mci]
-            self.drc_mark["color"] = (
-                DRC_GREEN if self._drc_waived(db, mci, mei)
-                else DRC_RED)
+            self.drc_mark["color"] = (DRC_GREEN if self._drc_waived(db, mci, mei)
+                                      else DRC_RED)
         # under a waive filter the toggled errors leave the list -
-        # purge them from the gold selection too, or their markers
-        # linger on the canvas (user report 2026-08-15)
+        # the selection is rechecked against it (user report 2026-08-15)
         sel = self._drc_sel
-        if sel is not None and sel[0] == ci \
-                and self._drc_wfilter != "all" \
-                and hasattr(db, "get_status"):
-            want = self._drc_wfilter == "waived"
-            keep = [(e2, k2, p2) for e2, k2, p2 in sel[2]
-                    if (db.get_status(ci, e2) == 1) == want]
-            eis2 = [m[0] for m in keep]
-            self._drc_set_sel((ci, eis2, keep, frozenset(eis2))
-                              if eis2 else None)
-            f = self._drc_focus
-            if f is not None and f[0] == ci \
-                    and (db.get_status(ci, f[1]) == 1) != want:
+        if sel is not None and sel[0] == ci and self._drc_wfilter != "all":
+            self._drc_selection_restore()
+            focus = self._drc_focus
+            if focus is not None and focus[0] == ci and \
+                    (db.get_status(ci, focus[1]) == 1) != (self._drc_wfilter == "waived"):
                 self._drc_focus = None
-        if self._drc_wfilter == "all":
-            # membership is unchanged but the row's total/waived
-            # text is not: refresh that one row in place
-            for r in self._drcwin._rstore:
-                if r[2] == ci:
-                    wv = (db.status_counts(ci)[0]
-                          if hasattr(db, "status_counts") else 0)
-                    r[1] = "%d/%d" % (len(db.checks[ci].errors), wv)
-                    break
-            self._drc_grid_fill(ci)
-        else:
-            # counts and membership changed under a waive filter:
-            # rebuild the rule list and reselect the open rule
-            keep = self._drc_open
-            self._drc_fill()
-            if keep is not None:
-                for r in self._drcwin._rstore:
-                    if r[2] == keep:
-                        self._drcwin._rules.set_cursor(
-                            r.path, None, False)
+        if self._drcwin is not None:
+            if self._drc_wfilter == "all":
+                # membership is unchanged but the row's total/waived
+                # text is not: refresh that row (and its clusters) in place
+                for row in self._drcwin._rstore:
+                    if row[2] == ci:
+                        waived = db.status_counts(ci)[0] if hasattr(db, "status_counts") else 0
+                        row[1] = "%d/%d" % (len(db.checks[ci].errors), waived)
+                        for child in row.iterchildren():
+                            cw, ct = child[3].status_counts()
+                            child[1] = "%d/%d" % (ct, cw)
                         break
-        f = self._drc_focus
-        if f is not None and f[0] == ci:
-            self._drc_show_detail(ci, f[1])
-        self._set_live_status(
-            "%s %d error(s) in %s"
-            % ("waived" if on else "unwaived", len(eis),
-               db.checks[ci].name))
+                self._drc_grid_fill(ci)
+            else:
+                # counts and membership changed under a waive filter:
+                # rebuild the rule list and reselect the open rule
+                self._drc_fill(preserve=True)
+        focus = self._drc_focus
+        if focus is not None and focus[0] == ci:
+            self._drc_show_detail(ci, focus[1])
+        self._set_live_status(("waive failed: %s" % error) if error else
+            "%s %d error(s) in %s" % ("waived" if on else "unwaived", len(eis),
+                                       db.checks[ci].name))
         self._display()
 
     def _drc_waive_key(self):
@@ -7671,9 +8350,12 @@ class Viewer:
             return
         sel = self._drc_sel
         if sel is not None and sel[1]:
-            ci, eis = sel[0], list(sel[1])
-            on = not all(self._drc_waived(db, ci, e) for e in eis)
-            self._drc_set_waived(ci, eis, on)
+            ci, eis = sel[0], sel[1]
+            if len(eis) > DRC_PAGE:
+                self._drc_review_submit("waive", ci, eis)
+            else:
+                on = not all(self._drc_waived(db, ci, e) for e in eis)
+                self._drc_set_waived(ci, eis, on)
             return
         ci = ei = None
         f = self._drc_focus
@@ -7696,7 +8378,7 @@ class Viewer:
         jumped error, else None - the target of note/waive actions."""
         sel = self._drc_sel
         if sel is not None and sel[1]:
-            return sel[0], list(sel[1])
+            return sel[0], sel[1]
         db = self._drc
         ci = ei = None
         f = self._drc_focus
@@ -7721,12 +8403,17 @@ class Viewer:
             self._set_live_status(
                 "note needs a packed index: floe-index drc <db>")
             return
+        if self._drc_review_pending():
+            return
         target = self._drc_current_target()
         if target is None:
             self._set_live_status(
                 "note는 선택/현재 에러 대상입니다: 먼저 선택·클릭·점프하세요")
             return
         ci, eis = target
+        if len(eis) > DRC_PAGE:
+            self._drc_review_submit("note-read", ci, eis)
+            return
         texts = set(db.get_note(ci, e) for e in eis)
         prefill = (texts.pop() if len(texts) == 1 and None not in texts
                    else "")
@@ -7745,16 +8432,21 @@ class Viewer:
         db = self._drc
         if db is None or not hasattr(db, "clear_note"):
             return
+        if self._drc_review_pending():
+            return
         target = self._drc_current_target()
         if target is None:
             self._set_live_status("먼저 note 있는 에러를 선택하세요")
             return
         ci, eis = target
+        if len(eis) > DRC_PAGE:
+            self._drc_review_submit("note-clear", ci, eis)
+            return
         db.clear_note([db.error_gid(ci, e) for e in eis])
         self._drc_note_refresh(ci, eis)
         self._set_live_status("note cleared on %d error(s)" % len(eis))
 
-    def _drc_note_refresh(self, ci, eis):
+    def _drc_note_refresh(self, ci, eis, fallback=True):
         """Repaint after a note change: the grid (the "*" prefix), the
         detail pane if it shows one of these errors, and the canvas.
         Note membership never changes the list, so the grid keeps its
@@ -7771,7 +8463,8 @@ class Viewer:
             c2 = bisect.bisect_right(self._drc_cum, self._drc_pos) - 1
             if c2 == ci:
                 shown = self._drc_pos - self._drc_cum[ci]
-        self._drc_show_detail(ci, shown if shown is not None else eis[0])
+        if ci == self._drc_open and (shown is not None or fallback):
+            self._drc_show_detail(ci, shown if shown is not None else eis[0])
         self._display()
 
     def _drc_note_dialog(self, prefill, count):
@@ -7900,6 +8593,8 @@ class Viewer:
     def _drc_note_save_dialog(self):
         """DRC > save notes as… : snapshot the per-reviewer note state
         to a picked flateyes .fe (share a review / keep a record)."""
+        if self._drc_review_pending():
+            return
         db = self._drc
         if db is None or not hasattr(db, "note_export"):
             self._set_live_status(
@@ -7933,6 +8628,8 @@ class Viewer:
     def _drc_note_load_dialog(self):
         """DRC > load notes… : REPLACE the notes from a saved .fe
         (save your own first). Files from a different pack are refused."""
+        if self._drc_review_pending():
+            return
         db = self._drc
         if db is None or not hasattr(db, "note_import"):
             self._set_live_status(
@@ -7978,6 +8675,8 @@ class Viewer:
         the auto-saved per-user waive state (~/.cache/floe/waive)
         to a picked file - for sharing a review or keeping a
         round's record. Same format as the auto sidecar."""
+        if self._drc_review_pending():
+            return
         db = self._drc
         if db is None or not hasattr(db, "waive_export"):
             self._set_live_status(
@@ -8014,6 +8713,8 @@ class Viewer:
         current review state with a saved waive file (save your own
         first to keep it). Refused when the file was recorded
         against a different pack."""
+        if self._drc_review_pending():
+            return
         db = self._drc
         if db is None or not hasattr(db, "waive_import"):
             self._set_live_status(
@@ -8047,6 +8748,10 @@ class Viewer:
         except (OSError, ValueError) as exc:
             self._set_live_status("waive load failed: %s" % exc)
             return
+        if self._drc_clusters is not None:
+            self._drc_clusters.reset_status()
+        self._drc_delta_status_changed(self._drc_open)
+        self._drc_marker_invalidate()
         # the whole status array changed: reset every dependent
         # surface, exactly like a waive-filter switch
         self._drc_hl_res = None
@@ -8061,14 +8766,7 @@ class Viewer:
             self.drc_mark["color"] = (
                 DRC_GREEN if self._drc_waived(db, mci, mei)
                 else DRC_RED)
-        keep = self._drc_open
-        self._drc_fill()
-        if keep is not None:
-            for r in self._drcwin._rstore:
-                if r[2] == keep:
-                    self._drcwin._rules.set_cursor(r.path, None,
-                                                   False)
-                    break
+        self._drc_fill(preserve=True)
         self._display()
         self._set_live_status(
             "waives loaded: %d waived (%s)"
@@ -8197,6 +8895,12 @@ class Viewer:
         lines = ["rule: %s" % c.name,
                  "errors: %d (declared %d)"
                  % (len(c.errors), c.declared)]
+        if self._drc_cluster is not None:
+            lines.append("cluster: %s (%d errors)"
+                         % (self._drc_cluster.name, self._drc_cluster.total))
+        group = getattr(self, "_drc_delta_group", None)
+        if group is not None:
+            lines.append("delta group: %s (%d errors)" % (group.name, group.total))
         if c.desc:
             lines.append("")
             lines += c.desc.split("\n")
@@ -8368,6 +9072,133 @@ class Viewer:
         self._set_live_status(
             "layer visibility restored (%d on)" % len(saved))
         self.redraw(immediate=True)
+
+    def _drc_marker_invalidate(self, drop_worker=False):
+        """Cancel stale scope/status work, including same-count status swaps."""
+        self._drc_selection_cancel(close=drop_worker)
+        self._drc_marker_revision = getattr(self, "_drc_marker_revision", 0) + 1
+        self._drc_marker_key = None
+        self._drc_marker_result = None
+        self._drc_marker_overlay = None
+        self._drc_marker_busy = False
+        self._drc_hits = []
+        self._drc_point_hits = None
+        self._drc_hl_key = None
+        self._drc_hl_res = None
+        for name in ("_drc_query_worker", "_drc_marker_worker"):
+            worker = getattr(self, name, None)
+            if worker is not None:
+                if drop_worker:
+                    worker.close()
+                    setattr(self, name, None)
+                else:
+                    worker.cancel()
+
+    def _drc_marker_request(self, obox, ospp, width, height):
+        """Query the whole rule/cluster/group at the DISPLAYED frame's
+        transform (a service job; its partial pictures arrive while it
+        runs)."""
+        db, ci = self._drc, self._drc_open
+        if db is None or ci is None or width < 1 or height < 1:
+            return []
+        sel = self._drc_sel
+        selected = sel[1] if sel is not None and sel[0] == ci else None
+        # obox/ospp may describe a frozen base while the widget resizes.
+        # Query the actual canvas corners under the same sx/sy transform.
+        bounds = (obox[0] * self.dbu,
+                  (obox[3] - height * ospp) * self.dbu,
+                  (obox[0] + width * ospp) * self.dbu,
+                  obox[3] * self.dbu)
+        active_members = self._drc_active_members()
+        key = (id(db), ci,
+               None if active_members is None
+               else tuple(sorted(active_members.spec.items())),
+               self._drc_wfilter,
+               getattr(self, "_drc_marker_revision", 0),
+               None if selected is None else selected.sid, self._drc_show_sel,
+               bounds, width, height)
+        if key != getattr(self, "_drc_marker_key", None):
+            self._drc_marker_key = key
+            self._drc_marker_result = None
+            self._drc_marker_overlay = None
+            self._drc_point_hits = None
+            self._drc_marker_busy = True
+            worker = getattr(self, "_drc_marker_worker", None)
+            if worker is None:
+                worker = self._drc_marker_worker = gtkservice.MarkerWorker()
+            membership = (gtkservice.intersect(
+                selected if selected is not None
+                else gtkservice.DrcScope(db, ci, {"empty": True}),
+                active_members) if self._drc_show_sel else active_members)
+            query = dict(bounds_um=bounds, width_px=width, height_px=height,
+                         checks=(ci,),
+                         selected={ci: selected} if selected is not None else None,
+                         progressive=True,
+                         members=({ci: membership}
+                                  if membership is not None else None),
+                         waived=(None if self._drc_wfilter == "all" else
+                                 self._drc_wfilter == "waived"))
+            worker.submit(key, db, query)
+            self._drc_info_refresh()
+        result = getattr(self, "_drc_marker_result", None)
+        return result[1] if result is not None and result[0] == key else []
+
+    def _drc_marker_poll(self):
+        worker = getattr(self, "_drc_marker_worker", None)
+        if worker is None:
+            return
+        reply = worker.poll()
+        if reply is None:
+            return
+        key, markers, error = reply
+        if key != self._drc_marker_key:
+            return
+        partial = isinstance(markers, gtkservice.MarkerProgress)
+        self._drc_marker_busy = partial and error is None
+        if error is not None:
+            # A preview is never presented as a successfully completed scope.
+            self._drc_marker_result = None
+            self._drc_marker_overlay = None
+            self._drc_point_hits = None
+            self._drc_hits = []
+            self._set_live_status("DRC markers failed: %s" % error)
+        else:
+            if partial:
+                markers = markers.markers
+            self._drc_marker_result = (key, markers)
+            self._drc_marker_overlay = None
+        self._drc_info_refresh()
+        self._display()
+
+    def _drc_stamp_markers(self, disp, obox, ospp):
+        """Composite the service's full-scope circle picture and keep its
+        pixel hit map."""
+        width, height = disp.get_width(), disp.get_height()
+        markers = self._drc_marker_request(obox, ospp, width, height)
+        self._drc_point_hits = None
+        if not isinstance(markers, gtkservice.PointMarkers):
+            return  # no picture for this view yet
+        if markers.width != width or markers.height != height:
+            return
+        key = self._drc_marker_key
+        cached = getattr(self, "_drc_marker_overlay", None)
+        if cached is None or cached[0] != key:
+            layer = GdkPixbuf.Pixbuf.new_from_bytes(
+                GLib.Bytes.new(markers.rgba), GdkPixbuf.Colorspace.RGB,
+                True, 8, width, height, width * 4)
+            cached = self._drc_marker_overlay = (key, layer)
+        cached[1].composite(disp, 0, 0, width, height, 0, 0, 1, 1,
+                            GdkPixbuf.InterpType.NEAREST, 255)
+        self._drc_point_hits = markers
+
+    def _drc_display_view(self):
+        """World bounds and scale of the pixels currently on the canvas."""
+        view = getattr(self, "_drc_marker_view", None)
+        if view is None:
+            return self.view_bbox(), self.spp
+        box, spp, width, height = view
+        return (box[0], box[3] - height * spp,
+                box[0] + width * spp, box[3]), spp
 
     def _drc_stamp_errs(self, disp, sx, sy, items, color=None):
         """Error painter: geometry in `color`, or per-status when
@@ -8596,12 +9427,7 @@ class Viewer:
         # sync the browser FIRST so the grid base belongs to ci
         if win is not None and self._drc_grid_ci != ci:
             self._drc_page = 0
-            for r in win._rstore:   # the list may be filtered
-                if r[2] == ci:
-                    win._rules.set_cursor(r.path, None, False)
-                    win._rules.scroll_to_cell(
-                        r.path, None, False, 0.0, 0.0)
-                    break
+            self._drc_select_row(ci, self._drc_cluster)
         n_all = len(db.checks[ci].errors)
         lo = self._drc_cum[ci]
         cur = (self._drc_pos - lo
@@ -8643,6 +9469,16 @@ class Viewer:
                 return 0 if delta > 0 else n - 1
             return (cur + delta) % n
         if isinstance(base, tuple):     # lazy waive filter
+            if base[0] == "cluster":
+                cluster, waived = base[1:]
+                cnt = cluster.count(waived)
+                if not cnt:
+                    return None
+                rank = (cluster.rank(cur, waived) if cur is not None else None)
+                nrank = ((rank + delta) % cnt if rank is not None
+                         else (0 if delta > 0 else cnt - 1))
+                page = cluster.page(nrank, 1, waived)
+                return page[0] if page else None
             waived = base[1]
             cnt = self._drc_wf_count(db, ci)
             if not cnt:
@@ -8669,7 +9505,8 @@ class Viewer:
         if base is None:
             bidx = ei
         elif isinstance(base, tuple):
-            bidx = self._drc.status_rank(ci, base[1], ei)
+            bidx = (base[1].rank(ei, base[2]) if base[0] == "cluster" else
+                    self._drc.status_rank(ci, base[1], ei))
             if bidx is None:
                 return
         elif ei in base:
@@ -8689,9 +9526,10 @@ class Viewer:
 
     # ---- ruler / snap / pick -----------------------------------------------
     def _update_cursor(self, ev):
-        bbox = self.view_bbox()
-        self._cursor = (bbox[0] + ev.x * self.spp,
-                        bbox[3] - ev.y * self.spp)
+        bbox, spp = (self._drc_display_view() if self.mode == "esel" else
+                     (self.view_bbox(), self.spp))
+        self._cursor = (bbox[0] + ev.x * spp,
+                        bbox[3] - ev.y * spp)
 
     def _hover(self, ev):
         x, y = self._cursor
@@ -8827,6 +9665,10 @@ class Viewer:
         (field 2026-09-30) - the next Esc runs the chain."""
         if self._pending is not None or getattr(self, "_refining", False):
             self._cancel_render()
+            return
+        if getattr(self, "_drc_selection_key", None) is not None:
+            self._drc_selection_cancel()
+            self._set_live_status("error selection cancelled")
             return
         if self.mode == "esel":
             if self._esel_start is not None:
@@ -9014,6 +9856,21 @@ class Viewer:
             if d <= r * r and d < bd:
                 bd = d
                 best = (ci, ei)
+        points = getattr(self, "_drc_point_hits", None)
+        if points is not None:
+            # At most (2r+1)^2 cells even for a hundred million errors.
+            # Focus/gold hits above retain priority at equal distances.
+            x0, x1 = max(0, math.ceil(x - r)), min(points.width, math.floor(x + r) + 1)
+            y0, y1 = max(0, math.ceil(y - r)), min(points.height, math.floor(y + r) + 1)
+            for hy in range(y0, y1):
+                for hx in range(x0, x1):
+                    ei = points.error_id(hx, hy)
+                    if ei < 0:
+                        continue
+                    d = (hx - x) ** 2 + (hy - y) ** 2
+                    if d <= r * r and d < bd:
+                        bd = d
+                        best = (points.check, ei)
         return best
 
     def _drc_pick(self, ci, ei):
@@ -9904,6 +10761,16 @@ class Viewer:
         if self._quitting:
             return
         self._quitting = True
+        self._drc_selection_cancel(close=True)
+        marker_worker = getattr(self, "_drc_marker_worker", None)
+        if marker_worker is not None:
+            marker_worker.close()
+        delta_worker = getattr(self, "_drc_delta_worker", None)
+        if delta_worker is not None:
+            delta_worker.close()
+        query_worker = getattr(self, "_drc_query_worker", None)
+        if query_worker is not None:
+            query_worker.close()
         if self.server_sock is not None:
             try:
                 self.server_sock.close()

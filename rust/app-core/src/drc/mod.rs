@@ -25,7 +25,7 @@ pub use local::{
 };
 pub use measure::{cd_segments, cd_segments_um, measured, measured_um, CdSegment};
 pub use pack::{
-    Check, Cursor, Hit, InfoHit, InfoPage, Pack, Page, PointPage, RecordInfo, StepCursor, StepPage,
+    Blocks, Check, Cursor, Hit, InfoHit, InfoPage, Pack, Page, PointPage, RecordInfo, StepCursor, StepPage,
     StepRequest, Violation,
 };
 pub use selection::{SelectionMode, Selections, SELECTION_INPUT, SELECTION_ITEMS};

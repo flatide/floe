@@ -284,6 +284,18 @@ impl Review {
         Ok(b[0])
     }
 
+    /// A status reader of its own for worker threads (drc::analysis): the
+    /// same store, positional reads; the review's writes are seen as made.
+    pub fn status_reader(&self) -> Result<StatusReader> {
+        Ok(StatusReader {
+            file: std::sync::Arc::new(self.reader.try_clone()?),
+            status_off: self.status_off,
+            checks: std::sync::Arc::new(
+                self.pack.checks.iter().map(|c| (c.start, c.count)).collect(),
+            ),
+        })
+    }
+
     /// (waived, total) of one rule, from the stored counters.
     pub fn status_counts(&self, check: usize) -> Result<(u64, u64)> {
         let (_, n) = self.check(check)?;
@@ -336,6 +348,87 @@ impl Review {
             }
         }
         Ok(())
+    }
+
+    /// One chunk of `set_status_members`: errors `a..a+len` of rule `check`;
+    /// the changed count.
+    pub fn set_status_range(
+        &mut self,
+        check: usize,
+        members: &dyn super::analysis::scope::Membership,
+        value: u8,
+        a: u64,
+        len: u64,
+    ) -> Result<u64> {
+        let (start, n) = self.check(check)?;
+        let len = len.min(n.saturating_sub(a));
+        let mut mask = vec![false; len as usize];
+        members.mask(a, &mut mask);
+        if !mask.iter().any(|&m| m) {
+            return Ok(0);
+        }
+        let before = self.statuses(check, a, len)?;
+        let positions: Vec<usize> = (0..len as usize)
+            .filter(|&j| mask[j] && before[j] != value)
+            .collect();
+        let (Some(&lo), Some(&hi)) = (positions.first(), positions.last()) else {
+            return Ok(0);
+        };
+        let mut after = before[lo..=hi].to_vec();
+        for &j in &positions {
+            after[j - lo] = value;
+        }
+        let delta: i64 = positions
+            .iter()
+            .map(|&j| i64::from(value == STATUS_WAIVED) - i64::from(before[j] == STATUS_WAIVED))
+            .sum();
+        let (status_off, wcount_off) = (self.status_off, self.wcount_off);
+        self.writer()?
+            .write_all_at(&after, status_off + start + a + lo as u64)?;
+        if delta != 0 {
+            let cur = (i64::from(self.wcount[check]) + delta).max(0) as u32;
+            self.writer()?
+                .write_all_at(&cur.to_le_bytes(), wcount_off + 4 * check as u64)?;
+            self.wcount[check] = cur;
+        }
+        if let Some(chunks) = self.chunks.get_mut(&check) {
+            for &j in &positions {
+                let k = ((a + j as u64) / STATUS_CHUNK) as usize;
+                if value == STATUS_WAIVED {
+                    chunks[k] += 1;
+                } else if before[j] == STATUS_WAIVED {
+                    chunks[k] = chunks[k].saturating_sub(1);
+                }
+            }
+        }
+        Ok(positions.len() as u64)
+    }
+
+    /// Set the status of every member of `members` in rule `check` to
+    /// `value`, a 65536-error chunk at a time (feature/jobdeck-drc
+    /// `set_status_members`): each chunk's changed span written in place,
+    /// the counter after it; `progress(done, total)` after each chunk;
+    /// cancelling leaves the chunks written so far. The changed count.
+    pub fn set_status_members(
+        &mut self,
+        check: usize,
+        members: &dyn super::analysis::scope::Membership,
+        value: u8,
+        cancelled: &AtomicUsize,
+        progress: &mut dyn FnMut(u64, u64),
+    ) -> Result<u64> {
+        const CHUNK: u64 = 1 << 16;
+        let (_, n) = self.check(check)?;
+        let mut changed = 0u64;
+        let mut a = 0;
+        while a < n {
+            check_cancelled(cancelled)?;
+            let len = (n - a).min(CHUNK);
+            changed += self.set_status_range(check, members, value, a, len)?;
+            a += len;
+            progress(a, n);
+        }
+        Ok(changed)
     }
 
     /// Per-chunk waived counts of one rule: built on the first filtered
@@ -418,6 +511,47 @@ impl Review {
         } else {
             (a - before) + (error - a - w_in)
         }))
+    }
+
+    /// `query` restricted to `members` too (a cluster, a delta group, a
+    /// selection - of the rule the query is limited to), before the cap.
+    pub fn query_scoped(
+        &mut self,
+        bbox_um: [f64; 4],
+        cap: usize,
+        checks: Option<&BTreeSet<usize>>,
+        waived: Option<bool>,
+        members: Option<&dyn super::analysis::scope::Membership>,
+        cancelled: &AtomicUsize,
+    ) -> Result<Vec<(usize, u64, Violation)>> {
+        let Some(members) = members else {
+            return self.query(bbox_um, cap, checks, waived, cancelled);
+        };
+        let mut out = Vec::new();
+        let mut cursor = super::Cursor::default();
+        while out.len() < cap {
+            check_cancelled(cancelled)?;
+            let page = self.pack.query(bbox_um, checks, None, cursor, super::PAGE_ITEMS, cancelled)?;
+            for hit in page.hits {
+                if !members.contains(hit.local) {
+                    continue;
+                }
+                if let Some(w) = waived {
+                    if (self.status(hit.check, hit.local)? == STATUS_WAIVED) != w {
+                        continue;
+                    }
+                }
+                out.push((hit.check, hit.local, hit.violation));
+                if out.len() >= cap {
+                    break;
+                }
+            }
+            match page.next {
+                Some(next) => cursor = next,
+                None => break,
+            }
+        }
+        Ok(out)
     }
 
     /// Errors of `checks` (None: all) whose geometry meets the um rect, at
@@ -779,6 +913,29 @@ impl Review {
     }
 }
 
+/// Status bytes read apart from the review (worker threads).
+#[derive(Clone)]
+pub struct StatusReader {
+    file: std::sync::Arc<File>,
+    status_off: u64,
+    checks: std::sync::Arc<Vec<(u64, u64)>>,
+}
+impl StatusReader {
+    /// Check `check`'s status bytes `start..start+count` (clamped).
+    pub fn statuses(&self, check: usize, start: u64, count: u64) -> Result<Vec<u8>> {
+        let &(first, n) = self
+            .checks
+            .get(check)
+            .ok_or_else(|| Error::input("DRC check index out of range"))?;
+        let start = start.min(n);
+        let count = count.min(n - start);
+        let mut out = vec![0u8; count as usize];
+        self.file
+            .read_exact_at(&mut out, self.status_off + first + start)?;
+        Ok(out)
+    }
+}
+
 /// One rule as the viewer lists it.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct CheckRow {
@@ -816,7 +973,7 @@ fn row(v: &Violation, precision: f64) -> ErrorRow {
 /// whole (no review state, no spatial query - as floe/drc.py DrcDb).
 pub enum Opened {
     Pack(Box<Review>),
-    Ascii(Box<super::Ascii>),
+    Ascii(std::sync::Arc<super::Ascii>),
 }
 
 impl Opened {
@@ -851,7 +1008,7 @@ impl Opened {
             }
         }
         Ok((
-            Self::Ascii(Box::new(super::Ascii::open(path, cancelled)?)),
+            Self::Ascii(std::sync::Arc::new(super::Ascii::open(path, cancelled)?)),
             warnings,
         ))
     }

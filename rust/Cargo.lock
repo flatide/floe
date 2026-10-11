@@ -113,6 +113,7 @@ dependencies = [
  "floe-worker-client",
  "getrandom",
  "libc",
+ "memmap2",
  "serde",
  "serde_json",
  "sha1",
