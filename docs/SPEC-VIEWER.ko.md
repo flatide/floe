@@ -291,7 +291,11 @@
   (CUT_DENSITY_DESIGN §10.12)을 켜고 끈다. `_toggle_density`가 `density_on`을 뒤집고 `_on_depth`(상태줄과 다시
   그리기)를 부른다.
   - 시작값은 `floe2 view --density on|off`다. 실행 중인 창에는 `density=`로 넘어가고, 인덱스가 없어 열기를 미룬 경우는
-    pending_fields로 간다. 옵션이 없으면 뷰어와 renderd가 함께 보는 환경 `FLOE_RUST_DENSITY_STACK=top`일 때 켜진다.
+    pending_fields로 간다. 옵션이 없으면 켜진다(0.12.351, 사용자 2026-10-12: "밀도는 기본으로 켜지게 해줘"; 그전에는
+    뷰어와 renderd가 함께 보는 환경 `FLOE_RUST_DENSITY_STACK=top`일 때만). 그 환경이 `FLOE_RUST_DENSITY_STACK=off`면 꺼진
+    채 시작한다(되돌리는 스위치). `floe2 render`의 기본도 같은 규칙이다(app-core `shots::density_default`).
+  - 컷이 없는 프레임(cut 0)과 jobdeck 프레임에는 켜 두어도 `density`를 끔으로 보낸다. 컷 0에서 켜면 그릴 것은 없고
+    2패스 예약만큼 1패스 예산만 줄어든다. 덱 패스는 밀도를 그리지 않는다. `floe2 render`도 같다.
   - 렌더 작업(뷰포트와 여백)에 `density`가 실리고, 어댑터는 렌더 명령에 `density=on|off`를 붙인다.
     - renderd는 켬이면 스택과 점을 그린다(`FLOE_RUST_DENSITY_DOTS=off`가 아니면 점). 끔이면 2패스가 없다.
     - 필드가 없는 요청(CLI 내보내기, 게이트)은 예전처럼 환경 변수가 정한다.

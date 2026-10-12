@@ -325,8 +325,8 @@ def parser():
                        help="start with the density under the cut on or off "
                             "- the shapes the detail's cut drops, drawn by "
                             "the area they cover; View > density under the "
-                            "cut (`v`) switches it live. Default: on when "
-                            "FLOE_RUST_DENSITY_STACK=top, else off. "
+                            "cut (`v`) switches it live. Default: on "
+                            "(FLOE_RUST_DENSITY_STACK=off: off). "
                             "Forwarded to a running instance")
     p.add_argument("--refinement", choices=("on", "off"), default="on",
                    help="publish progressive intermediate frames (default "

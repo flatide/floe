@@ -397,7 +397,9 @@ def gui_viewer(src, ref):
     gui.import_gtk()
     cache = gtkservice.ServiceCache(str(src))
     cache.load()
-    v = gui.Viewer(cache, detail=2)
+    # the density starts off here so `v` turns it on below (the viewer's
+    # own start, on since 2026-10-12, is capture_parity's)
+    v = gui.Viewer(cache, detail=2, density=False)
     frames, answers = [], []
     take, handle = v._ctl_frame, v._handle_result
     v._ctl_frame = lambda f: (frames.append(f), take(f))
@@ -533,10 +535,11 @@ def capture_parity(src, temp):
     2026-10-12: "the viewer's default mode has thin keep, the density and so
     on; a capture must come out the same"): floe/gui.py's Viewer as `floe2
     view` starts it (detail medium, thin keep, frames and labels on, the
-    density off without FLOE_RUST_DENSITY_STACK=top), and for each view it
-    settles on - the plain open (depth 0), a zoom, full depth, a zoom out,
-    the density turned on (`v`) - the capture of its box at its size, its
-    depth and, for the last, --density on: the same RGB, pixel for pixel."""
+    density under the cut on - user 2026-10-12: "turn the density on by
+    default"), and for each view it settles on - the plain open (depth 0), a
+    zoom, full depth, a zoom out, the density turned off (`v`) - the capture
+    of its box at its size, its depth and, for the last, --density off: the
+    same RGB, pixel for pixel."""
     from PIL import Image
     from floe import gui
     cache = gtkservice.ServiceCache(str(src))
@@ -567,14 +570,14 @@ def capture_parity(src, temp):
 
     try:
         pump(v, lambda: settled(v, frames), "first frame")
-        check(not v.density_on and v.detail == 1 and v._effective_thin() == "keep",
+        check(v.density_on and v.detail == 1 and v._effective_thin() == "keep",
               "the viewer's start: density %s, detail %s, thin %s"
               % (v.density_on, v.detail, v._effective_thin()))
         compare("the open")
         steps = (("a zoom", lambda: v._zoom_center(0.25), ()),
                  ("full depth", lambda: v._set_depth(999), ()),
                  ("a zoom out", lambda: v._zoom_center(4.0), ()),
-                 ("the density", v._toggle_density, ("--density", "on")))
+                 ("the density off", v._toggle_density, ("--density", "off")))
         for what, step, extra in steps:
             rev = v.worker.snapshot["render_rev"]
             step()
@@ -582,7 +585,7 @@ def capture_parity(src, temp):
                  and v.worker.snapshot["render_rev"] != rev, what)
             compare(what, *extra)
         print("capture parity: floe2 render's defaults = the viewer's pixels "
-              "(open, zoom, full depth, zoom out, density)")
+              "(open, zoom, full depth, zoom out with the density on; density off)")
     finally:
         v._quit()
         v.window.destroy()

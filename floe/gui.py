@@ -2281,10 +2281,11 @@ class Viewer:
         # the density under the cut (renderd's density stack, user
         # 2026-10-05: "a density on/off option in the viewer"): View >
         # density under the cut / `v` switch it live, --density (or a
-        # forwarded density=) sets it; unset, the environment the viewer
-        # shares with renderd decides - FLOE_RUST_DENSITY_STACK=top, the
-        # switch the field turned it on with before
-        self.density_on = (os.environ.get("FLOE_RUST_DENSITY_STACK") == "top"
+        # forwarded density=) sets it; unset it starts on (user 2026-10-12:
+        # "turn the density on by default"; floe2 render's start, app-core
+        # shots::density_default) - FLOE_RUST_DENSITY_STACK=off, in the
+        # environment the viewer shares with renderd, is the kill switch
+        self.density_on = (os.environ.get("FLOE_RUST_DENSITY_STACK") != "off"
                            if density is None else bool(density))
         self.frames_on = bool(frames)
         # Frame is the normal UI control for both hierarchy outlines and
@@ -4256,7 +4257,11 @@ class Viewer:
             # a deck's composite has no labels (renderd's rule)
             "labels": bool(self.labels_on) and not deck,
             "mono": bool(self._mono),
-            "density": bool(getattr(self, "density_on", False)),
+            # the density is of what a cut drops: none at exact (it would
+            # only take pass 2's reserve from pass 1's budget) and none in a
+            # deck's frames (renderd's deck pass) - floe2 render's rule too
+            "density": bool(getattr(self, "density_on", False))
+            and cut > 0 and not deck,
         }
         if not deck:
             # a deck has no label font and no root (renderd's rule)

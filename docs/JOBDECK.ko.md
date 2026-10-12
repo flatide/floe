@@ -386,10 +386,11 @@ floe2 render deck.jb --batch shots.txt --out shots/ --report shots/report.json
     - 합성 MAIN01 1/10의 칩 전체를 1 GiB·high로 찍으면 449개 레이어 중 206개만 그려졌는데, 예전에는 아무 표시가 없었다.
 - `--density on|off`(레이아웃, 2026-10-12): 뷰어의 `--density`와 같다.
   - 켜면 컷이 버린 도형을 밀도로 그린다. 그래서 `--detail low|medium|high`가 필요하다.
-  - 기본은 `FLOE_RUST_DENSITY_STACK=top`일 때만 켜짐이다.
+  - 기본은 켜짐이다(0.12.351, 사용자 2026-10-12: "밀도는 기본으로 켜지게 해줘"; 그전에는 `FLOE_RUST_DENSITY_STACK=top`일 때만).
+    - `--detail exact`, `--archival`, jobdeck은 꺼짐이다. `FLOE_RUST_DENSITY_STACK=off`면 뷰어와 함께 기본이 꺼짐이다.
   - jobdeck에서 `--density on`은 거부한다. 덱 패스는 밀도를 그리지 않는다.
 - 그림 모양(0.12.350, 사용자 2026-10-12: "캡쳐도 동일한 결과가 나와야 함"):
-  - 기본은 뷰어를 같은 영역으로 연 그림이다. detail medium, thin keep, 뷰어의 밀도 규칙, 뷰어의 채움·layerprops, 셀 프레임과 라벨(덱은 라벨 없음).
+  - 기본은 뷰어를 같은 영역으로 연 그림이다. detail medium, thin keep, 밀도 켬(뷰어의 시작값), 뷰어의 채움·layerprops, 셀 프레임과 라벨(덱은 라벨 없음).
   - 예전 기본인 보관용 모양(solid 채움, 컷 0, 프레임·라벨 없음; 참조 툴 cli-spec)은 `--archival`이다. `FLOE_RENDER_DEFAULTS=archival`이면 그것이 기본이 된다.
   - 이 문서의 M4 검사들(jobdeck 게이트의 `run_floe2`)은 그 변수로 보관용 모양에서 돈다.
 - 단일 shot은 renderd의 PNG 그대로, mosaic은 raw 타일을 stdlib zlib으로 PNG 인코딩(Pillow 불필요).

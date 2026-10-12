@@ -15,9 +15,9 @@ use std::time::Instant;
 
 const RENDER_HELP: &str = "Usage: floe2-web render SOURCE [OPTIONS]
 Draws what the viewer shows at the same view (floe2 view --goto: full depth):
-detail medium, thin keep, the density as the viewer starts it, the viewer's
-fills and layer properties, cell frames and labels. --archival: the export
-look (cut 0, solid fills, no frames or labels; FLOE_RENDER_DEFAULTS=archival
+detail medium, thin keep, the density under the cut on, the viewer's fills
+and layer properties, cell frames and labels. --archival: the export look
+(cut 0, solid fills, no density, frames or labels; FLOE_RENDER_DEFAULTS=archival
 makes it the default, as before 0.12.350).
   --bbox X0,Y0,X1,Y1          Region (default whole source)
   --at X,Y --size W,H         Alternative region form
@@ -33,7 +33,8 @@ makes it the default, as before 0.12.350).
   --density on|off           The density under the cut, as the viewer's: the
                             shapes the --detail cut drops, drawn by the area
                             they cover; needs --detail low|medium|high; layouts
-                            (default on when FLOE_RUST_DENSITY_STACK=top)
+                            (default on, as the viewer starts; off for --archival;
+                            FLOE_RUST_DENSITY_STACK=off makes it off)
   --frames[=on|off] --labels[=on|off]  Cell frames, design text (default on,
                             as the viewer; jobdeck labels unsupported)
   --archival                The export look; the options given still win

@@ -241,6 +241,8 @@ python을 사용하지 않도록 변경해줘."
   - 둘 다 None이면 줄에 나가지 않는다.
   - `WorkerClient::set_timeouts(render, query)`와 `RenderSession::set_timeouts`를 더했다.
 - **`ViewState`·`Patch`:** `density: Option<bool>`를 더했다. None이면 renderd 기본값(`FLOE_RUST_DENSITY_STACK`)을 쓴다. 렌더 정책이므로 렌더 키에 들어간다.
+  - GTK 뷰어는 늘 보내며 0.12.351부터 시작값이 켬이다(`FLOE_RUST_DENSITY_STACK=off`면 끔; 컷 0·덱 프레임은 끔으로 보냄). `floe2 render`도 같다(`shots::density_default`).
+  - 웹은 아직 보내지 않아 renderd 기본(꺼짐)으로 그린다. 웹으로 옮길 때 같은 시작값을 맞춰야 한다.
 - **`ViewController`:**
   - **여백 요청:** 뷰포트 크기를 `vw`/`vh`로 함께 보낸다. 웹도 마찬가지다. 여백과 그 뷰포트의 밀도 점이 같아진다.
   - **`DesktopPolicy`:** 기본값은 웹의 것이다(비우기 5초, worker-client의 마감, 렌더 오류면 뷰 실패). `DesktopPolicy::desktop()`과 `start_desktop(.., ControllerOptions, DesktopPolicy)`가 데스크톱 정책을 쓴다.

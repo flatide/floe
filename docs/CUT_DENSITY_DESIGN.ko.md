@@ -3061,6 +3061,7 @@ detail medium과 high에서 차이가 나는 밀도 디테일 표현으로 mediu
 
 - floe2 View > **density under the cut**(`v`)로 켜고 끈다. 시작값은 `floe2 view --density on|off`이고, 없으면
   `FLOE_RUST_DENSITY_STACK=top`일 때 켜진다. 상태줄에 `density:on/off`가 붙는다.
+  - 0.12.351(2026-10-12)부터 없으면 켜진다. `FLOE_RUST_DENSITY_STACK=off`가 되돌리는 스위치다(SPEC-VIEWER §7).
 - 렌더 명령의 `density=on|off`가 프레임마다 renderd의 환경 기본을 대신한다. 켬은 스택과 점(밝기 포함)이고, 끔은
   2패스가 없다. 환경 변수 없이도 뷰어에서 바로 켤 수 있다.
 - 보관 프레임 키에 이 설정을 넣었다. 키에 없으면 같은 뷰에서 밀도를 켰을 때 밀도 없이 보관된 프레임이 통째로

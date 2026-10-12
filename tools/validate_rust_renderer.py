@@ -505,6 +505,16 @@ assert not hasattr(gui, "live_caps")
         p.density_on = v.density_on
         self.assertTrue(gui.Viewer._ctl_policy(p)["density"],
                         "the view controller's patch carries it")
+        # none where nothing is under a cut (exact) or in a deck's frames -
+        # floe2 render's rule (app-core shots::density_on, render.rs)
+        p.cut_px = 0.0
+        self.assertFalse(gui.Viewer._ctl_policy(p)["density"])
+        p.cut_px = 3.0
+        self.assertFalse(gui.Viewer._ctl_policy(p, deck=True)["density"])
+        # unsaid it starts on (user 2026-10-12); FLOE_RUST_DENSITY_STACK=off
+        # is the kill switch
+        start = inspect.getsource(gui.Viewer.__init__)
+        self.assertIn('os.environ.get("FLOE_RUST_DENSITY_STACK") != "off"', start)
         # the key, the menu, the status line and both render jobs
         self.assertIn("self._toggle_density()", inspect.getsource(gui.Viewer._on_key))
         self.assertIn('"density under the cut\\tv"', inspect.getsource(gui.Viewer._build_menubar))

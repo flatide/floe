@@ -248,10 +248,12 @@ mosaic, `--batch`는 레이아웃(.oas/.gds)에도 그대로 쓰인다. 칩 on/o
 
 `--density on|off`(2026-10-12)는 뷰어의 `--density`와 같다.
 - 켜면 컷이 버린 도형을 덮는 면적만큼의 밝기로 그린다(renderd의 density stack).
-  - 컷이 있어야 한다(`--detail low|medium|high`; 기본 medium). `--detail exact`나 `--archival`과 쓰면 거부한다.
+  - 컷이 있어야 한다(`--detail low|medium|high`; 기본 medium). `--detail exact`(`--archival`의 기본 detail 포함)와 쓰면 거부한다.
   - 레이아웃 전용이다. jobdeck은 프레임에 밀도를 그리지 않으므로 거부한다.
   - 배치·mosaic·DRC 캡처에도 같이 적용된다.
-- 주지 않으면 뷰어가 시작할 때와 같다. `FLOE_RUST_DENSITY_STACK=top`이면 켜지고, 아니면 꺼진다.
+- 주지 않으면 뷰어가 시작할 때처럼 켜진다(0.12.351, 사용자 2026-10-12: "밀도는 기본으로 켜지게 해줘"; 0.12.350까지는 `FLOE_RUST_DENSITY_STACK=top`일 때만 켬).
+  - 컷이 없는 `--detail exact`, 보관용 모양 `--archival`, jobdeck에서는 꺼진다. `--archival --detail high --density on`처럼 주면 켜진다.
+  - `FLOE_RUST_DENSITY_STACK=off`이면 뷰어와 캡처 모두 기본이 꺼짐이다(되돌리는 스위치).
 - report 맨 위의 `density`에 켜졌는지가 남는다.
 - 예산 때문에 도형으로 못 그린 레이어도 밀도에는 나온다. 그래서 경고가 `left out` 대신 `as density only`라고 쓴다.
 
@@ -604,7 +606,7 @@ GUI는 **GTK3/PyGObject** 셸이다. flateyes와 같은 폐쇄망 호스트
   `n`/`p` 다음/이전 DRC 에러, `0`-`9` depth, `Esc` 단계 해제,
   `q` 종료 (확인 다이얼로그). `v`는 floe2에서 컷 아래 밀도(View > density
   under the cut) 켜기/끄기이고(2026-10-05; 시작값 `floe2 view --density
-  on|off`, 없으면 `FLOE_RUST_DENSITY_STACK=top`일 때 켬), 안정판 floe에서는
+  on|off`, 없으면 켬 - 0.12.351부터, `FLOE_RUST_DENSITY_STACK=off`면 끔), 안정판 floe에서는
   density coverage 토글이다.
 - 마우스: 왼쪽 드래그는 패닝(짧은 클릭은 객체 선택), 오른쪽 드래그는
   영역 줌(오른쪽 방향은 확대, 왼쪽 방향은 축소)이다. 휠은 커서 위치를

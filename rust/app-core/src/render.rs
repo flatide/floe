@@ -240,7 +240,8 @@ impl RenderSession {
             labels: shot.labels,
             font_px: shot.font_px,
             thin: shot.thin.effective(dataset.is_deck()),
-            density: Some(shot.density_on()),
+            // a jobdeck's frames draw no density (renderd's deck pass): off
+            density: Some(!dataset.is_deck() && shot.density_on()),
             format: FrameFormat::Png,
             ..self.base_request()
         })
