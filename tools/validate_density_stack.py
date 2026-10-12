@@ -137,6 +137,7 @@ another index's spread it over its box (occ_checks).
 
     .venv/bin/python tools/validate_density_stack.py
 """
+import json
 import os
 from pathlib import Path
 import math
@@ -3446,6 +3447,59 @@ def zoom_during_pass2(w, gen_a, gen_b, visible):
     raise AssertionError('zoom during pass 2: no final frame for gen %d' % gen_b)
 
 
+def cli_checks(temp):
+    """`floe2 render --density on|off` (user 2026-10-12: a density option for
+    --detail high captures): the viewer's --density on the command line. On
+    the dots die at the gate's 0.1 um a pixel and --detail high (a 1 px cut):
+    TOP's 0.05 um specks, under the cut, are black with the density off and
+    lit with it on; no --density is the viewer's start (off here, and
+    FLOE_RUST_DENSITY_STACK=top alone the same bytes as --density on: the
+    dots its brightness is made of come with it); the report says which;
+    --density on at --detail exact (nothing under a cut) or on a jobdeck
+    (its frames draw no density) is refused. The product's own defaults -
+    none of main()'s diagnostic switches."""
+    from PIL import Image
+    src = Path(temp) / 'cli_dots.oas'
+    dots_layout(src)
+    done = subprocess.run([FLOE2, 'index', str(src)],
+                          cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    base = {k: v for k, v in os.environ.items() if not k.startswith('FLOE_RUST_DENSITY_')}
+
+    def render(name, *extra, env=None):
+        out, report = Path(temp) / (name + '.png'), Path(temp) / (name + '.json')
+        done = subprocess.run([FLOE2, 'render', str(src), '--bbox', '0,0,%g,%g' % (VIEW[2], VIEW[3]),
+                               '--px', str(W), '--out', str(out), '--report', str(report), *extra],
+                              cwd=ROOT, env={**base, **(env or {})}, capture_output=True, text=True, timeout=600)
+        return done, out, (json.loads(report.read_text()) if report.exists() else None)
+
+    def specks(out):
+        img = Image.open(out).convert('RGB')
+        assert img.size == (W, H), img.size
+        return sum(1 for x in range(300, 360) for y in range(50, 80) if img.getpixel((x, y)) != (0, 0, 0))
+
+    shots = {}
+    for name, extra, env in (('off', ('--detail', 'high', '--density', 'off'), None),
+                             ('on', ('--detail', 'high', '--density', 'on'), None),
+                             ('default', ('--detail', 'high'), None),
+                             ('env_top', ('--detail', 'high'), {'FLOE_RUST_DENSITY_STACK': 'top'})):
+        done, out, report = render('cli_' + name, *extra, env=env)
+        assert done.returncode == 0, (name, done.stdout, done.stderr)
+        shots[name] = (out.read_bytes(), specks(out), report['density'])
+    assert shots['off'][1] == 0 and shots['off'][2] is False, shots['off'][1:]
+    assert shots['on'][1] > 0 and shots['on'][2] is True, shots['on'][1:]
+    assert shots['default'][0] == shots['off'][0] and shots['default'][2] is False
+    assert shots['env_top'][0] == shots['on'][0] and shots['env_top'][2] is True
+    done, out, _ = render('cli_exact', '--density', 'on')
+    assert done.returncode == 2 and '--detail low, medium or high' in done.stderr and not out.exists(), done.stderr
+    deck = subprocess.run([FLOE2, 'render', str(Path(temp) / 'none.jb'), '--detail', 'high', '--density', 'on'],
+                          cwd=ROOT, env=base, capture_output=True, text=True, timeout=60)
+    assert deck.returncode == 2 and 'for layouts' in deck.stderr, deck.stderr
+    print('density stack: floe2 render --density - the specks under the 1 px cut: off 0 px, on %d px; '
+          'no --density = off, FLOE_RUST_DENSITY_STACK=top alone = on (same bytes); exact and a jobdeck refused'
+          % shots['on'][1])
+
+
 def worker(src, env):
     saved = {name: os.environ.get(name) for name in env}
     for name, value in env.items():
@@ -3651,6 +3705,7 @@ def main():
         ladder_checks(temp)
         occ_checks(temp)
         occ_density_checks(temp)
+        cli_checks(temp)
     print('density stack gate: OK')
 
 

@@ -131,6 +131,12 @@ pub struct Shot {
     pub frames: bool,
     pub labels: bool,
     pub font_px: u32,
+    /// The density under the cut (`--density on|off`, user 2026-10-12: "a
+    /// --density option for --detail high" - the viewer's --density / View >
+    /// density under the cut): the shapes the detail's cut drops, drawn by
+    /// the area they cover (renderd's density stack). None: as the viewer
+    /// starts, on when FLOE_RUST_DENSITY_STACK=top (density_on).
+    pub density: Option<bool>,
 }
 impl Default for Shot {
     fn default() -> Self {
@@ -148,10 +154,18 @@ impl Default for Shot {
             frames: false,
             labels: false,
             font_px: 14,
+            density: None,
         }
     }
 }
 impl Shot {
+    /// The density under the cut this shot asks renderd for - always said,
+    /// as the viewer does (gui.py density_on), so the sub-cut dots its
+    /// brightness is made of come with it.
+    pub fn density_on(&self) -> bool {
+        self.density
+            .unwrap_or_else(|| std::env::var("FLOE_RUST_DENSITY_STACK").as_deref() == Ok("top"))
+    }
     pub fn validate(&self) -> Result<()> {
         if self.bbox.is_some() && self.at.is_some() {
             return Err(Error::input("--bbox and --at are mutually exclusive"));

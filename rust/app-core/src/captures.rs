@@ -440,7 +440,7 @@ pub fn run_summary(
                         } else {
                             String::new()
                         },
-                        budget_fit_brief(fit)
+                        budget_fit_brief(fit, !dataset.is_deck() && capture.shot.density_on())
                     ));
                 }
             }
@@ -513,7 +513,9 @@ pub fn run_summary(
         .ok_or_else(|| Error::input("report page count overflow"))?;
     if let Some(path) = report {
         let mut doc = serde_json::json!({"source":dataset.source(),"dbu":dataset.dbu(),"shots":rows,
-            "cut_px":shots[0].capture.shot.detail.cut_px(),"thin":shots[0].capture.shot.thin.name(),"complete":complete});
+            "cut_px":shots[0].capture.shot.detail.cut_px(),"thin":shots[0].capture.shot.thin.name(),
+            // the density under the cut drawn (--density; a jobdeck draws none)
+            "density":!dataset.is_deck() && shots[0].capture.shot.density_on(),"complete":complete});
         if let Dataset::Deck(deck) = dataset {
             let over_budget = doc["shots"]
                 .as_array()

@@ -384,6 +384,10 @@ floe2 render deck.jb --batch shots.txt --out shots/ --report shots/report.json
   - 컷이 있는 detail은 뷰어처럼 예산에 맞춰 성기게 그린다.
     - 그랬으면 로그(stdout)의 WARNING과 report의 `budget_fit`(mosaic은 타일별)으로 알린다.
     - 합성 MAIN01 1/10의 칩 전체를 1 GiB·high로 찍으면 449개 레이어 중 206개만 그려졌는데, 예전에는 아무 표시가 없었다.
+- `--density on|off`(레이아웃, 2026-10-12): 뷰어의 `--density`와 같다.
+  - 켜면 컷이 버린 도형을 밀도로 그린다. 그래서 `--detail low|medium|high`가 필요하다.
+  - 기본은 `FLOE_RUST_DENSITY_STACK=top`일 때만 켜짐이다.
+  - jobdeck에서 `--density on`은 거부한다. 덱 패스는 밀도를 그리지 않는다.
 - 출력은 보관용이므로 solid 채움(뷰어의 speckle은 표시용). 단일 shot은 renderd의
   PNG 그대로, mosaic은 raw 타일을 stdlib zlib으로 PNG 인코딩(Pillow 불필요).
 

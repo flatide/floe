@@ -240,6 +240,7 @@ impl RenderSession {
             labels: shot.labels,
             font_px: shot.font_px,
             thin: shot.thin.effective(dataset.is_deck()),
+            density: Some(shot.density_on()),
             format: FrameFormat::Png,
             ..self.base_request()
         })
@@ -343,8 +344,12 @@ pub fn budget_fit(frame: &Frame) -> Option<serde_json::Value> {
 }
 
 /// budget_fit in words, as the viewer's status says it (view::perf):
-/// `206 layer(s) whole, 243 layer(s) left out`.
-pub fn budget_fit_brief(fit: &serde_json::Value) -> String {
+/// `206 layer(s) whole, 243 layer(s) left out`. With the density under the
+/// cut on, the layers the fit leaves out of its shapes are still in the
+/// density (pass 2 keeps its own order: on the routing chip's four metal
+/// layers under 160 MB, the three left out drew 36,146 density pixels where
+/// they had none, 2026-10-12): `as density only`.
+pub fn budget_fit_brief(fit: &serde_json::Value, density: bool) -> String {
     let n = |key: &str| fit.get(key).and_then(serde_json::Value::as_u64).unwrap_or(0);
     let times = |pct: u64| format!("{:.2}", pct as f64 / 100.0);
     let mut parts = Vec::new();
@@ -382,7 +387,11 @@ pub fn budget_fit_brief(fit: &serde_json::Value) -> String {
             });
         }
         if n("fit_layers_out") != 0 {
-            parts.push(format!("{} layer(s) left out", n("fit_layers_out")));
+            parts.push(format!(
+                "{} layer(s) {}",
+                n("fit_layers_out"),
+                if density { "as density only" } else { "left out" }
+            ));
         }
     } else {
         parts.extend(classes);
@@ -470,7 +479,7 @@ mod tests {
         assert_eq!(fit["fit_thin"], 2);
         assert_eq!(fit["fit_layer_edge"], "M1");
         assert!(fit.get("pages").is_none());
-        assert_eq!(budget_fit_brief(&fit), "1 in 4 shapes under x2.50 the cut");
+        assert_eq!(budget_fit_brief(&fit, false), "1 in 4 shapes under x2.50 the cut");
         let ranked = frame(&[
             ("fit_pct", "100"),
             ("fit_ranked", "1"),
@@ -482,7 +491,7 @@ mod tests {
             ("fit_layers_out", "410"),
         ]);
         assert_eq!(
-            budget_fit_brief(&budget_fit(&ranked).unwrap()),
+            budget_fit_brief(&budget_fit(&ranked).unwrap(), false),
             "38 layer(s) whole, layer 103/2 thinned (1 in 2 shapes under x2.16 the cut, \
              none under x1.08 the cut), 410 layer(s) left out"
         );
@@ -494,10 +503,14 @@ mod tests {
             ("fit_layers_out", "243"),
         ]);
         assert_eq!(
-            budget_fit_brief(&budget_fit(&out).unwrap()),
+            budget_fit_brief(&budget_fit(&out).unwrap(), false),
             "206 layer(s) whole, 243 layer(s) left out"
         );
+        assert_eq!(
+            budget_fit_brief(&budget_fit(&out).unwrap(), true),
+            "206 layer(s) whole, 243 layer(s) as density only"
+        );
         let cut = frame(&[("fit_pct", "141"), ("fit_cull", "1")]);
-        assert_eq!(budget_fit_brief(&budget_fit(&cut).unwrap()), "cut x1.41, hairlines culled");
+        assert_eq!(budget_fit_brief(&budget_fit(&cut).unwrap(), false), "cut x1.41, hairlines culled");
     }
 }

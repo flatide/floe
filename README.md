@@ -211,6 +211,7 @@ floe2 view   deck.jb --level 1,3        # 묻지 않고 level 1,3만 로드(스�
 floe2 info   deck.jb                    # 덱 요약 + 뷰 레이어 표
 floe2 render deck.jb --bbox 40000,80000,60000,95000 --px 1200 --out deck.png
 floe2 render chip.oas --bbox 0,0,2000,2000 --px 800 --out a.png --detail high   # 뷰어와 같은 1 px cut으로 캡처(기본 exact = cut 없음; low/medium/high = 5/3/1 px)
+floe2 render chip.oas --px 1600 --out d.png --detail high --density on        # 컷 아래 도형을 밀도로(뷰어의 --density / View > density)
 floe2 render deck.jb --at 53.02mm,92.61mm --size 32mm,25.6mm --px 1200x900 --out a.png
 floe2 render deck.jb --corners 40000,80000,60000,95000 --size 4mm,3mm --px 600x450 --out quad.png  # 영역 안쪽 네 꼭짓점 4장 mosaic
 floe2 info   deck.jb --level 2 --chips      # 레벨 2의 칩(칩뷰 행): CHIP, 배치 #K, 범위
@@ -232,6 +233,15 @@ mosaic, `--batch`는 레이아웃(.oas/.gds)에도 그대로 쓰인다. 칩 on/o
 - 컷이 있는 detail(`high`/`medium`/`low`)은 뷰어처럼 예산에 맞춰 성기게 그린다.
   - 그랬으면 로그(stdout, `[floe2] rendered`와 같은 곳)에 `WARNING: … thinned to fit the render budget: …`이 나온다. 예: `206 layer(s) whole, 243 layer(s) left out`.
   - report의 shot에는 `budget_fit`(renderd의 `fit_*`, mosaic은 타일별)이 붙는다.
+
+`--density on|off`(2026-10-12)는 뷰어의 `--density`와 같다.
+- 켜면 컷이 버린 도형을 덮는 면적만큼의 밝기로 그린다(renderd의 density stack).
+  - 컷이 있어야 하므로 `--detail low|medium|high`와 함께 쓴다. `--detail exact`와 쓰면 거부한다.
+  - 레이아웃 전용이다. jobdeck은 프레임에 밀도를 그리지 않으므로 거부한다.
+  - 배치·mosaic·DRC 캡처에도 같이 적용된다.
+- 주지 않으면 뷰어가 시작할 때와 같다. `FLOE_RUST_DENSITY_STACK=top`이면 켜지고, 아니면 꺼진다.
+- report 맨 위의 `density`에 켜졌는지가 남는다.
+- 예산 때문에 도형으로 못 그린 레이어도 밀도에는 나온다. 그래서 경고가 `left out` 대신 `as density only`라고 쓴다.
 
 renderd가 소스 캐시들을 그대로 열어 합성하며(배율은 씬 루트에만), 포맷의
 확정/미확정 사항과 단계별 설계는 `docs/JOBDECK.ko.md`에 있다. 실제 jobdeck과

@@ -543,6 +543,7 @@ pub fn run(
                 labels: !dataset.is_deck(),
                 font_px: shot.font_px,
                 thin: shot.thin.effective(dataset.is_deck()),
+                density: Some(shot.density_on()),
                 format: FrameFormat::Png,
                 ..session.base_request()
             };
@@ -554,7 +555,7 @@ pub fn run(
                 eprintln!(
                     "[drc][warn] {} thinned to fit the render budget: {}; FLOE_RUST_BUDGET_MB raises it",
                     display.display(),
-                    crate::render::budget_fit_brief(&fit)
+                    crate::render::budget_fit_brief(&fit, shot.density_on())
                 );
             }
             let stage = annotations::png::stage(&path, &frame.bytes, &doc, stop)?;

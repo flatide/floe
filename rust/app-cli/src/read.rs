@@ -24,6 +24,10 @@ const RENDER_HELP: &str = "Usage: floe2-web render SOURCE [OPTIONS]
   --depth N                  0=top, 999/omit=full
   --detail exact|low|medium|high  Size cut 0/5/3/1 px (default exact)
   --thin auto|keep|cull       Auto=keep for both layouts and jobdecks
+  --density on|off           The density under the cut, as the viewer's: the
+                            shapes the --detail cut drops, drawn by the area
+                            they cover; needs --detail low|medium|high; layouts
+                            (default on when FLOE_RUST_DENSITY_STACK=top)
   --frames --labels          Enable these overlays (default off)
   --label-font-px N          6..96 (default 14)
   --out FILE                Default view.png; atomic PNG publication
@@ -229,6 +233,13 @@ pub fn parse(args: &[String]) -> Result<Command> {
                     _ => return Err(Error::input("invalid detail")),
                 }
             }
+            "--density" => {
+                shot.density = Some(match value()? {
+                    "on" => true,
+                    "off" => false,
+                    _ => return Err(Error::input("--density must be on or off")),
+                })
+            }
             "--thin" => {
                 shot.thin = match value()? {
                     "auto" => Thin::Auto,
@@ -331,6 +342,21 @@ pub fn parse(args: &[String]) -> Result<Command> {
         return Err(Error::new(
             ErrorKind::Unsupported,
             "jobdeck labels are not supported",
+        ));
+    }
+    // the density is of what a cut drops: none at exact, and a jobdeck's
+    // frames draw none (renderd's deck pass; its wide views come from the
+    // sources' occupancy summary)
+    if shot.density == Some(true) && shot.detail == Detail::Exact {
+        return Err(Error::input(
+            "--density on draws the shapes the size cut drops: give --detail low, medium or high \
+             (exact drops none)",
+        ));
+    }
+    if shot.density == Some(true) && is_deck(&source) {
+        return Err(Error::new(
+            ErrorKind::Unsupported,
+            "--density is for layouts: a jobdeck's frames draw no density under the cut",
         ));
     }
     match kind {
@@ -572,5 +598,27 @@ mod tests {
             assert!(parsed(&a).is_err(), "{a:?}");
         }
         assert!(parsed(&["render", "a.oas", "--drc-rule=R"]).is_err());
+    }
+    #[test]
+    fn density_is_asked_with_a_cut_on_a_layout() {
+        let density = |args: &[&str]| match parsed(args) {
+            Ok(Command::Render { capture, .. }) => Ok(capture.shot.density),
+            Ok(_) => panic!(),
+            Err(e) => Err(e.to_string()),
+        };
+        assert_eq!(density(&["render", "a.oas", "--detail", "high"]), Ok(None));
+        assert_eq!(density(&["render", "a.oas", "--detail=high", "--density=on"]), Ok(Some(true)));
+        assert_eq!(density(&["render", "a.oas", "--density", "off"]), Ok(Some(false)));
+        // a DRC capture asks it the same way
+        assert_eq!(
+            density(&["render", "a.oas", "--drc=db", "--drc-rule=R", "--detail=low", "--density=on"]),
+            Ok(Some(true))
+        );
+        assert!(density(&["render", "a.oas", "--detail=high", "--density=yes"]).is_err());
+        let exact = density(&["render", "a.oas", "--density=on"]).unwrap_err();
+        assert!(exact.contains("--detail low, medium or high"), "{exact}");
+        let deck = density(&["render", "a.jb", "--detail=high", "--density=on"]).unwrap_err();
+        assert!(deck.contains("for layouts"), "{deck}");
+        assert_eq!(density(&["render", "a.jb", "--density=off"]), Ok(Some(false)));
     }
 }
