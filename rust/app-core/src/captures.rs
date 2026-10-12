@@ -4,7 +4,7 @@ use crate::{
     check_cancelled,
     dataset::Dataset,
     jobdeck::chips::{ChipTable, Selection},
-    render::{require_complete, RenderOptions, RenderSession},
+    render::{budget_fit, budget_fit_brief, require_complete, RenderOptions, RenderSession},
     shots::{
         batch::{NamedCapture, TILE_NAMES},
         mosaic::{self, Mosaic},
@@ -330,12 +330,17 @@ pub fn run_summary(
             let mut png = None;
             let mut deferred = 0u64;
             let mut all_complete = plan.lacks.is_empty();
+            // the tiles the budget fit thinned (render::budget_fit)
+            let mut fits = Vec::new();
             for (i, tile) in plan.tiles.iter().enumerate() {
                 let mut request = session.shot_request(dataset, tile)?;
                 if canvas.is_some() {
                     request.format = FrameFormat::Raw;
                 }
                 let frame = session.capture(request)?;
+                if let Some(fit) = budget_fit(&frame) {
+                    fits.push((i, fit));
+                }
                 if !dataset.is_deck()
                     || frame.labels_truncated
                     || (frame.partial && frame.deferred == 0)
@@ -412,6 +417,32 @@ pub fn run_summary(
                     crate::program(),
                     plan.display.display()
                 ));
+            }
+            // thinned to the budget: the report's budget_fit (a mosaic's by
+            // tile) and a warning - the picture has fewer small shapes than
+            // the cut asked for
+            if !fits.is_empty() {
+                row["budget_fit"] = if capture.is_mosaic() {
+                    fits.iter()
+                        .map(|(i, fit)| (TILE_NAMES[*i].to_string(), fit.clone()))
+                        .collect::<serde_json::Map<_, _>>()
+                        .into()
+                } else {
+                    fits[0].1.clone()
+                };
+                for (i, fit) in &fits {
+                    log(&format!(
+                        "[{}] WARNING: {}{} thinned to fit the render budget: {}; FLOE_RUST_BUDGET_MB raises it",
+                        crate::program(),
+                        plan.display.display(),
+                        if capture.is_mosaic() {
+                            format!(" tile {}", TILE_NAMES[*i])
+                        } else {
+                            String::new()
+                        },
+                        budget_fit_brief(fit)
+                    ));
+                }
             }
             let seconds = row["ms"].as_u64().unwrap_or(0) as f64 / 1000.;
             if capture.is_mosaic() {

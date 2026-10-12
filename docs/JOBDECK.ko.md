@@ -377,6 +377,13 @@ floe2 render deck.jb --batch shots.txt --out shots/ --report shots/report.json
   stretch layers depth mosaic corners line linecolor keep_tiles; 빈 키는 명령행
   값). 워커를 한 번만 열고 모두 찍는다(`--out`은 디렉터리). `--report`는 shot별
   영역·픽셀·시간(mosaic은 타일 영역과 선 규칙) JSON.
+- 디코드 예산(레이아웃 소스, 2026-10-12 현장):
+  - 기본 `--detail exact`(컷 0)는 모든 도형을 그리거나 실패한다.
+    - 실패하면 에러에 필요한 양·예산·길이 나온다. 길은 `--detail high`, 좁은 영역이나 `--layers`, `FLOE_RUST_BUDGET_MB`이다.
+    - 예전에는 `render: decoded_generation_budget_exceeded:_N_>_M_bytes`만 나왔다.
+  - 컷이 있는 detail은 뷰어처럼 예산에 맞춰 성기게 그린다.
+    - 그랬으면 로그(stdout)의 WARNING과 report의 `budget_fit`(mosaic은 타일별)으로 알린다.
+    - 합성 MAIN01 1/10의 칩 전체를 1 GiB·high로 찍으면 449개 레이어 중 206개만 그려졌는데, 예전에는 아무 표시가 없었다.
 - 출력은 보관용이므로 solid 채움(뷰어의 speckle은 표시용). 단일 shot은 renderd의
   PNG 그대로, mosaic은 raw 타일을 stdlib zlib으로 PNG 인코딩(Pillow 불필요).
 

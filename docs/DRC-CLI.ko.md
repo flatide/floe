@@ -166,6 +166,9 @@ floe render chip.oas --drc results.db --drc-rule M1.SPACE.1 \
   세션 + detail medium 컷/헤어라인/LOD/커버리지) 그대로, depth만
   full. 첫 에러가 콜드 스타트(수 초, 타임아웃 300s)를 내고 이후
   에러당 ms급.
+- **디코드 예산**(`FLOE_RUST_BUDGET_MB`, 2026-10-12): 레이아웃 캡처와 같다(README Jobdeck 절 아래).
+  - 컷 0 프레임이 예산을 넘으면 필요한 양과 길(`--detail high`, `--layers`, 예산 올리기)을 말하며 실패한다.
+  - `--detail`로 컷을 줬을 때 예산 때문에 성기게 그렸으면 `[drc][warn] … thinned to fit the render budget: …`으로 알린다.
 - **레이어 격리**: rules.json 사이드카가 발견되면(탐색 순서 =
   db 옆 덱 basename → 기록된 덱 경로 → `<db>.rules.json`, 또는
   `--drc-rules`) 그 룰의 원천 GDS 레이어만 켠다 — 뷰어 더블클릭

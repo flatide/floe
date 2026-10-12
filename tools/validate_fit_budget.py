@@ -80,10 +80,19 @@ chip (tools/gen_main01_like.py) under a small budget:
     of its own - are the same pixels, pages and fit with the summary and
     with FLOE_RUST_FIT_PROBE_SUMMARY=off (the walk), both report the probe's
     time (fit_probe_ms; fit_probe_walk says which), and a scale decided
-    before is not probed again.
+    before is not probed again;
+  * the command line's captures say what the budget did (field 2026-10-12:
+    a whole-chip `floe2 render` failed with `render: decoded_generation_
+    budget_exceeded:_3967202112_>_1073741824_bytes`; --detail exact, the
+    capture's default, is every shape or none): under 48 MB the whole chip
+    at --detail exact fails in words - what the region needs, the budget,
+    --detail high and FLOE_RUST_BUDGET_MB - and saves nothing; at --detail
+    high it is drawn, thinned, with a WARNING in the log (stdout, as the
+    jobdeck's) and the report's `budget_fit`; with the budget roomy neither.
 
     .venv/bin/python tools/validate_fit_budget.py
 """
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -624,6 +633,39 @@ def probe_checks(src):
         walked.stop()
 
 
+def cli_checks(temp, src):
+    """`floe2 render` over the budget: the exact capture's error in words,
+    the thinned capture said (module doc)."""
+    env = {k: v for k, v in os.environ.items() if k != 'FLOE_RUST_FIT_TOP_FIRST'}
+
+    def render(name, budget_mb, *extra):
+        out, report = Path(temp) / (name + '.png'), Path(temp) / (name + '.json')
+        done = subprocess.run(
+            [FLOE2, 'render', str(src), '--px', str(PX), '--out', str(out), '--report', str(report), *extra],
+            cwd=ROOT, env={**env, 'FLOE_RUST_BUDGET_MB': str(budget_mb)},
+            capture_output=True, text=True, timeout=600)
+        shot = json.loads(report.read_text())['shots'][0] if report.exists() else None
+        return done, out, shot
+
+    done, out, shot = render('cli_exact', 48)
+    assert done.returncode != 0 and not out.exists() and shot is None, (done.returncode, done.stderr)
+    err = done.stderr
+    for words in ('decoded generation budget exceeded - the region needs at least',
+                  'the render budget is 48 MiB', '--detail high', 'FLOE_RUST_BUDGET_MB='):
+        assert words in err, (words, err)
+    assert '_>_' not in err, err
+    done, out, shot = render('cli_high', 48, '--detail', 'high')
+    assert done.returncode == 0 and out.exists(), done.stderr
+    assert 'WARNING' in done.stdout and 'thinned to fit the render budget: ' in done.stdout, done.stdout
+    fit = shot.get('budget_fit')
+    assert fit and (fit.get('fit_thin') or fit.get('fit_layers_out') or fit.get('fit_pct')), shot
+    warning = next(line for line in done.stdout.splitlines() if 'thinned to fit' in line)
+    done, out, shot = render('cli_roomy', 1024, '--detail', 'high')
+    assert done.returncode == 0 and 'WARNING' not in done.stdout + done.stderr and 'budget_fit' not in shot, (done.stdout, shot)
+    print('fit budget: floe2 render - exact over 48 MB fails in words, nothing saved; --detail high drawn and said (%s); '
+          'roomy budget silent' % warning.split(': ', 2)[-1])
+
+
 def main():
     os.environ['FLOE_INDEX_BIN'] = str(ROOT / 'rust/target/release/floe-index')
     os.environ['FLOE_RENDERD_BIN'] = str(ROOT / 'rust/target/release/floe-renderd')
@@ -765,6 +807,7 @@ def main():
         refit_checks(temp)
         probe_checks(src)
         top_first_checks(temp, src)
+        cli_checks(temp, src)
     print('FIT BUDGET: ALL OK')
 
 

@@ -194,6 +194,7 @@ impl RenderSession {
     }
     fn capture_inner(&mut self, request: RenderRequest) -> Result<Frame> {
         check_cancelled(&self.cancelled)?;
+        let cut_px = request.cut_px;
         let generation = self.worker.render(request)?;
         loop {
             check_cancelled(&self.cancelled)?;
@@ -204,7 +205,10 @@ impl RenderSession {
                     return Ok(frame)
                 }
                 Some(Event::Failed { code, message, .. }) => {
-                    return Err(Error::new(ErrorKind::Worker, format!("{code}: {message}")))
+                    return Err(Error::new(
+                        ErrorKind::Worker,
+                        failure_text(&code, &message, cut_px),
+                    ))
                 }
                 Some(Event::Cancelled { generation: gen }) if gen == generation => {
                     return Err(Error::new(ErrorKind::Cancelled, "render cancelled"))
@@ -256,6 +260,145 @@ impl RenderSession {
         }
     }
 }
+/// A worker's failure as a capture's error. renderd's `decoded generation
+/// budget exceeded: NEXT > BUDGET bytes` (its wire turns spaces into `_`) is
+/// said in words, with the ways out (field 2026-10-12, a whole-chip capture:
+/// `render: decoded_generation_budget_exceeded:_3967202112_>_1073741824_bytes`).
+/// A frame at cut 0 - `--detail exact`, the capture's default - is every
+/// page or none: an export must not come out short of shapes, where a cut
+/// lets the planner thin the frame to the budget (renderd run_render_attempt).
+fn failure_text(code: &str, message: &str, cut_px: f64) -> String {
+    let Some((need, budget)) = budget_exceeded(message) else {
+        return format!("{code}: {message}");
+    };
+    let size = |bytes: u64| match bytes >> 30 {
+        0 => format!("{} MiB", bytes.div_ceil(1 << 20)),
+        _ => format!("{:.2} GiB", bytes as f64 / f64::from(1u32 << 30)),
+    };
+    // the charge when the pages passed the budget: the least the frame needs;
+    // a quarter more, in 512 MB steps
+    let suggest = (need.saturating_add(need / 4) >> 20)
+        .div_ceil(512)
+        .saturating_mul(512)
+        .max(1024);
+    let ways = if cut_px == 0.0 {
+        "--detail exact (no size cut) draws every shape or fails: use --detail high \
+         (the viewer's 1 px cut, thinned to fit the budget when needed), a smaller \
+         region or fewer --layers, or"
+    } else {
+        "use a smaller region or fewer --layers, or"
+    };
+    format!(
+        "{code}: decoded generation budget exceeded - the region needs at least {} \
+         of decoded shapes, the render budget is {}; {ways} \
+         FLOE_RUST_BUDGET_MB={suggest} if this host has the memory",
+        size(need),
+        size(budget)
+    )
+}
+
+/// renderd checked_generation_bytes's message off the wire: (charge, budget).
+fn budget_exceeded(message: &str) -> Option<(u64, u64)> {
+    let rest = message.strip_prefix("decoded_generation_budget_exceeded:_")?;
+    let (need, rest) = rest.split_once("_>_")?;
+    let budget = rest.strip_suffix("_bytes")?;
+    Some((need.parse().ok()?, budget.parse().ok()?))
+}
+
+/// What a frame's budget fit did to it - renderd's `fit_*` frame fields, the
+/// viewer's `... to fit budget` - or None when it drew the plan as asked. A
+/// capture thinned to the budget says so: `--detail high` is the way past an
+/// exact capture's budget error (failure_text), and on the synthetic MAIN01
+/// 1/10 its whole chip at 1 GiB drew 206 of the 449 layers, with nothing
+/// said (2026-10-12).
+pub fn budget_fit(frame: &Frame) -> Option<serde_json::Value> {
+    const KEYS: [&str; 12] = [
+        "fit_pct",
+        "fit_thin",
+        "fit_full_pct",
+        "fit_none_pct",
+        "fit_cull",
+        "fit_over",
+        "fit_ranked",
+        "fit_layers_whole",
+        "fit_layer_edge",
+        "fit_layers_out",
+        "fit_scale",
+        "fit_refits",
+    ];
+    let set = |key: &str| frame.fields.get(key).is_some_and(|v| !v.is_empty() && v != "0");
+    if !["fit_pct", "fit_thin", "fit_cull", "fit_over"].iter().any(|k| set(k)) {
+        return None;
+    }
+    let mut fit = serde_json::Map::new();
+    for key in KEYS {
+        if let Some(value) = frame.fields.get(key) {
+            let value = value
+                .parse::<u64>()
+                .map_or_else(|_| serde_json::Value::from(value), serde_json::Value::from);
+            fit.insert(key.to_string(), value);
+        }
+    }
+    Some(fit.into())
+}
+
+/// budget_fit in words, as the viewer's status says it (view::perf):
+/// `206 layer(s) whole, 243 layer(s) left out`.
+pub fn budget_fit_brief(fit: &serde_json::Value) -> String {
+    let n = |key: &str| fit.get(key).and_then(serde_json::Value::as_u64).unwrap_or(0);
+    let times = |pct: u64| format!("{:.2}", pct as f64 / 100.0);
+    let mut parts = Vec::new();
+    if n("fit_pct") > 100 {
+        parts.push(format!("cut x{}", times(n("fit_pct"))));
+    }
+    // the size classes the fit thinned: one shape in 2^thin below `full`
+    // times the cut, none below `none` times it
+    let mut classes = Vec::new();
+    if n("fit_thin") != 0 {
+        classes.push(format!(
+            "1 in {} shapes{}",
+            1u64 << n("fit_thin").min(30),
+            match n("fit_full_pct") {
+                0 => String::new(),
+                full => format!(" under x{} the cut", times(full)),
+            }
+        ));
+    }
+    if n("fit_none_pct") != 0 {
+        classes.push(format!("none under x{} the cut", times(n("fit_none_pct"))));
+    }
+    if n("fit_ranked") != 0 {
+        // top planes first: these layers whole, one at the edge thinned, the
+        // rest left out
+        if n("fit_layers_whole") != 0 {
+            parts.push(format!("{} layer(s) whole", n("fit_layers_whole")));
+        }
+        let edge = fit.get("fit_layer_edge").and_then(serde_json::Value::as_str);
+        if let Some(edge) = edge.filter(|e| !e.is_empty() && *e != "-") {
+            parts.push(if classes.is_empty() {
+                format!("layer {edge} thinned")
+            } else {
+                format!("layer {edge} thinned ({})", classes.join(", "))
+            });
+        }
+        if n("fit_layers_out") != 0 {
+            parts.push(format!("{} layer(s) left out", n("fit_layers_out")));
+        }
+    } else {
+        parts.extend(classes);
+    }
+    if n("fit_cull") != 0 {
+        parts.push("hairlines culled".to_string());
+    }
+    if n("fit_over") != 0 {
+        parts.push("still over".to_string());
+    }
+    if parts.is_empty() {
+        parts.push("fitted".to_string());
+    }
+    parts.join(", ")
+}
+
 pub fn require_complete(frame: &Frame) -> Result<()> {
     if !frame.complete() {
         return Err(Error::new(ErrorKind::Incomplete,
@@ -263,4 +406,98 @@ pub fn require_complete(frame: &Frame) -> Result<()> {
                 frame.final_frame, frame.partial, frame.deferred, frame.labels_truncated)));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_budget_failure_is_said_with_the_ways_out() {
+        let wire = "decoded_generation_budget_exceeded:_3967202112_>_1073741824_bytes";
+        let exact = failure_text("render", wire, 0.0);
+        assert!(
+            exact.starts_with(
+                "render: decoded generation budget exceeded - the region needs at least 3.69 GiB"
+            ),
+            "{exact}"
+        );
+        assert!(exact.contains("the render budget is 1.00 GiB"), "{exact}");
+        assert!(exact.contains("--detail high"), "{exact}");
+        assert!(exact.ends_with("FLOE_RUST_BUDGET_MB=5120 if this host has the memory"), "{exact}");
+        let cut = failure_text("render", wire, 1.0);
+        assert!(!cut.contains("--detail") && cut.contains("FLOE_RUST_BUDGET_MB=5120"), "{cut}");
+        // a small charge still suggests no less than the default budget
+        let small = failure_text("render", "decoded_generation_budget_exceeded:_49297004_>_1048576_bytes", 0.0);
+        assert!(
+            small.contains("needs at least 48 MiB of decoded shapes, the render budget is 1 MiB;")
+                && small.contains("FLOE_RUST_BUDGET_MB=1024"),
+            "{small}"
+        );
+        // anything else as it came
+        assert_eq!(failure_text("open", "no_such_cache", 0.0), "open: no_such_cache");
+        let odd = "decoded_generation_budget_exceeded:_x_>_1_bytes";
+        assert_eq!(failure_text("render", odd, 0.0), format!("render: {odd}"));
+    }
+
+    #[test]
+    fn a_thinned_frame_says_how() {
+        let frame = |pairs: &[(&str, &str)]| Frame {
+            generation: 1,
+            round: 0,
+            final_frame: true,
+            partial: false,
+            deferred: 0,
+            labels_truncated: false,
+            request: RenderRequest::default(),
+            bytes: Vec::new(),
+            fields: floe_worker_client::Fields(
+                pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            ),
+        };
+        let asked = frame(&[("fit_pct", "0"), ("fit_thin", "0"), ("fit_cull", "0"), ("fit_over", "0")]);
+        assert!(budget_fit(&asked).is_none());
+        let thinned = frame(&[
+            ("fit_pct", "0"),
+            ("fit_thin", "2"),
+            ("fit_full_pct", "250"),
+            ("fit_cull", "0"),
+            ("fit_over", "0"),
+            ("fit_layer_edge", "M1"),
+            ("pages", "7"),
+        ]);
+        let fit = budget_fit(&thinned).unwrap();
+        assert_eq!(fit["fit_thin"], 2);
+        assert_eq!(fit["fit_layer_edge"], "M1");
+        assert!(fit.get("pages").is_none());
+        assert_eq!(budget_fit_brief(&fit), "1 in 4 shapes under x2.50 the cut");
+        let ranked = frame(&[
+            ("fit_pct", "100"),
+            ("fit_ranked", "1"),
+            ("fit_layers_whole", "38"),
+            ("fit_layer_edge", "103/2"),
+            ("fit_thin", "1"),
+            ("fit_full_pct", "216"),
+            ("fit_none_pct", "108"),
+            ("fit_layers_out", "410"),
+        ]);
+        assert_eq!(
+            budget_fit_brief(&budget_fit(&ranked).unwrap()),
+            "38 layer(s) whole, layer 103/2 thinned (1 in 2 shapes under x2.16 the cut, \
+             none under x1.08 the cut), 410 layer(s) left out"
+        );
+        let out = frame(&[
+            ("fit_pct", "100"),
+            ("fit_ranked", "1"),
+            ("fit_layers_whole", "206"),
+            ("fit_layer_edge", "-"),
+            ("fit_layers_out", "243"),
+        ]);
+        assert_eq!(
+            budget_fit_brief(&budget_fit(&out).unwrap()),
+            "206 layer(s) whole, 243 layer(s) left out"
+        );
+        let cut = frame(&[("fit_pct", "141"), ("fit_cull", "1")]);
+        assert_eq!(budget_fit_brief(&budget_fit(&cut).unwrap()), "cut x1.41, hairlines culled");
+    }
 }

@@ -549,6 +549,14 @@ pub fn run(
             let frame = session.capture(request)?;
             require_complete(&frame)?;
             let (display, path) = target(local)?;
+            // (a --detail cut lets the budget fit thin the frame: said)
+            if let Some(fit) = crate::render::budget_fit(&frame) {
+                eprintln!(
+                    "[drc][warn] {} thinned to fit the render budget: {}; FLOE_RUST_BUDGET_MB raises it",
+                    display.display(),
+                    crate::render::budget_fit_brief(&fit)
+                );
+            }
             let stage = annotations::png::stage(&path, &frame.bytes, &doc, stop)?;
             db.unchanged()?;
             stage.commit(stop)?;

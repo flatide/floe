@@ -225,6 +225,14 @@ mosaic, `--batch`는 레이아웃(.oas/.gds)에도 그대로 쓰인다. 칩 on/o
 (`--chip/--chip-off/--fit-chip`, 이름·`N:이름`·CHIP id·와일드카드)는 덱
 전용이다(`docs/JOBDECK.ko.md` §7).
 
+레이아웃 캡처의 디코드 예산(`FLOE_RUST_BUDGET_MB`, 기본 1024)은 뷰어와 같다.
+- 기본 `--detail exact`는 모든 도형을 그리거나 실패한다(내보내기가 도형을 빠뜨리면 안 되므로).
+  - 넓은 영역이 예산을 넘으면 실패하고, 에러에 필요한 양과 길이 함께 나온다.
+  - 길: `--detail high`, 더 좁은 영역이나 `--layers`, 또는 예산을 올린 `FLOE_RUST_BUDGET_MB=…`.
+- 컷이 있는 detail(`high`/`medium`/`low`)은 뷰어처럼 예산에 맞춰 성기게 그린다.
+  - 그랬으면 로그(stdout, `[floe2] rendered`와 같은 곳)에 `WARNING: … thinned to fit the render budget: …`이 나온다. 예: `206 layer(s) whole, 243 layer(s) left out`.
+  - report의 shot에는 `budget_fit`(renderd의 `fit_*`, mosaic은 타일별)이 붙는다.
+
 renderd가 소스 캐시들을 그대로 열어 합성하며(배율은 씬 루트에만), 포맷의
 확정/미확정 사항과 단계별 설계는 `docs/JOBDECK.ko.md`에 있다. 실제 jobdeck과
 마스크 데이터는 저장소에 넣지 않는다 (`jobdecks_klayout/`는 gitignore). 덱의 소스는 plain OASIS여야
