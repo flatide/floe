@@ -306,7 +306,10 @@ pub fn run_summary(
     if let Some(r) = &report {
         dataset.output_path(r)?;
     }
-    let mut session = RenderSession::open(dataset, render, true, Arc::clone(cancelled))?;
+    // the viewer's fills, or the export's solid ones (Shot::archival; every
+    // shot of a run has the command line's)
+    let archival = shots[0].capture.shot.archival;
+    let mut session = RenderSession::open(dataset, render, archival, Arc::clone(cancelled))?;
     let mut rows = Vec::new();
     let mut artifact_count = 0usize;
     for (index, plan) in plans.iter().enumerate() {
@@ -515,7 +518,8 @@ pub fn run_summary(
         let mut doc = serde_json::json!({"source":dataset.source(),"dbu":dataset.dbu(),"shots":rows,
             "cut_px":shots[0].capture.shot.detail.cut_px(),"thin":shots[0].capture.shot.thin.name(),
             // the density under the cut drawn (--density; a jobdeck draws none)
-            "density":!dataset.is_deck() && shots[0].capture.shot.density_on(),"complete":complete});
+            "density":!dataset.is_deck() && shots[0].capture.shot.density_on(),
+            "archival":archival,"complete":complete});
         if let Dataset::Deck(deck) = dataset {
             let over_budget = doc["shots"]
                 .as_array()

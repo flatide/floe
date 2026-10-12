@@ -210,8 +210,9 @@ floe2 view   deck.jb                    # 뷰어에서 열기(File > load jobdec
 floe2 view   deck.jb --level 1,3        # 묻지 않고 level 1,3만 로드(스크립트는 FLOE_JOBDECK_LEVELS=all|N,N… 로 답할 수도 있다)
 floe2 info   deck.jb                    # 덱 요약 + 뷰 레이어 표
 floe2 render deck.jb --bbox 40000,80000,60000,95000 --px 1200 --out deck.png
-floe2 render chip.oas --bbox 0,0,2000,2000 --px 800 --out a.png --detail high   # 뷰어와 같은 1 px cut으로 캡처(기본 exact = cut 없음; low/medium/high = 5/3/1 px)
-floe2 render chip.oas --px 1600 --out d.png --detail high --density on        # 컷 아래 도형을 밀도로(뷰어의 --density / View > density)
+floe2 render chip.oas --bbox 0,0,2000,2000 --px 800 --out a.png               # 뷰어가 그 영역에서 보여 주는 그림 그대로(detail medium, thin keep, 채움·프레임·라벨)
+floe2 render chip.oas --px 1600 --out d.png --detail high --density on        # detail high + 컷 아래 도형을 밀도로(뷰어의 --density / View > density)
+floe2 render chip.oas --bbox 0,0,2000,2000 --px 800 --out x.png --archival    # 내보내기용: cut 없음(exact), solid 채움, 프레임·라벨 없음
 floe2 render deck.jb --at 53.02mm,92.61mm --size 32mm,25.6mm --px 1200x900 --out a.png
 floe2 render deck.jb --corners 40000,80000,60000,95000 --size 4mm,3mm --px 600x450 --out quad.png  # 영역 안쪽 네 꼭짓점 4장 mosaic
 floe2 info   deck.jb --level 2 --chips      # 레벨 2의 칩(칩뷰 행): CHIP, 배치 #K, 범위
@@ -226,8 +227,19 @@ mosaic, `--batch`는 레이아웃(.oas/.gds)에도 그대로 쓰인다. 칩 on/o
 (`--chip/--chip-off/--fit-chip`, 이름·`N:이름`·CHIP id·와일드카드)는 덱
 전용이다(`docs/JOBDECK.ko.md` §7).
 
+**캡처 기본값 = 뷰어**(0.12.350, 2026-10-12 사용자: "캡쳐도 동일한 결과가 나와야 함")
+- `floe2 render`는 뷰어를 같은 영역으로 연 그림(`floe2 view --goto`, depth full)을 그대로 그린다.
+  - detail medium, thin keep, 밀도는 뷰어가 시작할 때와 같은 규칙이다.
+  - 뷰어의 채움(speckle·layerprops 패턴), 셀 프레임, 라벨을 그린다. jobdeck은 라벨이 없다.
+  - 확인 방법: 뷰어(`gui.Viewer`)가 그린 화면과 같은 영역·크기·depth의 캡처를 비교했다. 처음 열기·확대·전체 depth·축소·밀도 on 화면 모두 픽셀이 같았다(gtk_view 게이트 capture_parity).
+  - 뷰어는 같은 배율에서 정한 예산 맞춤을 기억하므로, 이동한 뒤의 화면은 처음 그 배율로 연 화면과 다를 수 있다. 캡처는 그 배율의 첫 화면과 같다.
+- `--archival`은 0.12.349까지의 기본값인 내보내기 모양이다: cut 없음(exact), solid 채움, 프레임·라벨 없음.
+  - 함께 준 옵션이 우선한다. 예: `--archival --detail high`.
+  - `FLOE_RENDER_DEFAULTS=archival`이면 이것이 기본값이 된다(예전 스크립트용).
+- `--frames`/`--labels`는 뷰어처럼 `on|off`를 받는다(값 없이 쓰면 on).
+
 레이아웃 캡처의 디코드 예산(`FLOE_RUST_BUDGET_MB`, 기본 1024)은 뷰어와 같다.
-- 기본 `--detail exact`는 모든 도형을 그리거나 실패한다(내보내기가 도형을 빠뜨리면 안 되므로).
+- `--detail exact`(`--archival`의 기본)는 모든 도형을 그리거나 실패한다(내보내기가 도형을 빠뜨리면 안 되므로).
   - 넓은 영역이 예산을 넘으면 실패하고, 에러에 필요한 양과 길이 함께 나온다.
   - 길: `--detail high`, 더 좁은 영역이나 `--layers`, 또는 예산을 올린 `FLOE_RUST_BUDGET_MB=…`.
 - 컷이 있는 detail(`high`/`medium`/`low`)은 뷰어처럼 예산에 맞춰 성기게 그린다.
@@ -236,7 +248,7 @@ mosaic, `--batch`는 레이아웃(.oas/.gds)에도 그대로 쓰인다. 칩 on/o
 
 `--density on|off`(2026-10-12)는 뷰어의 `--density`와 같다.
 - 켜면 컷이 버린 도형을 덮는 면적만큼의 밝기로 그린다(renderd의 density stack).
-  - 컷이 있어야 하므로 `--detail low|medium|high`와 함께 쓴다. `--detail exact`와 쓰면 거부한다.
+  - 컷이 있어야 한다(`--detail low|medium|high`; 기본 medium). `--detail exact`나 `--archival`과 쓰면 거부한다.
   - 레이아웃 전용이다. jobdeck은 프레임에 밀도를 그리지 않으므로 거부한다.
   - 배치·mosaic·DRC 캡처에도 같이 적용된다.
 - 주지 않으면 뷰어가 시작할 때와 같다. `FLOE_RUST_DENSITY_STACK=top`이면 켜지고, 아니면 꺼진다.

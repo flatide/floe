@@ -22,6 +22,9 @@ shows, the perf line the service sends = the Python perf_status
 keys), a snap answered, a margin's pan a crop, its navigations the
 controller's = its own maths, its minimap the service's bake, the hidden
 layer's strike and the palettes drawn as images.
+
+`floe2 render` with its defaults = the viewer's pixels for the views it
+settles on (capture_parity, 2026-10-12).
 """
 
 
@@ -525,6 +528,66 @@ def same(a, b, what):
                          % (what, diff, len(a) // 4, len(a), len(b)))
 
 
+def capture_parity(src, temp):
+    """`floe2 render` with its defaults draws what the viewer shows (user
+    2026-10-12: "the viewer's default mode has thin keep, the density and so
+    on; a capture must come out the same"): floe/gui.py's Viewer as `floe2
+    view` starts it (detail medium, thin keep, frames and labels on, the
+    density off without FLOE_RUST_DENSITY_STACK=top), and for each view it
+    settles on - the plain open (depth 0), a zoom, full depth, a zoom out,
+    the density turned on (`v`) - the capture of its box at its size, its
+    depth and, for the last, --density on: the same RGB, pixel for pixel."""
+    from PIL import Image
+    from floe import gui
+    cache = gtkservice.ServiceCache(str(src))
+    cache.load()
+    dbu = float(cache.meta["dbu"])
+    v = gui.Viewer(cache)
+    frames = []
+    take = v._ctl_frame
+    v._ctl_frame = lambda f: (frames.append(f), take(f))
+
+    def compare(what, *extra):
+        on_screen, f = shown(v)
+        out = Path(temp) / ("capture %s.png" % what)
+        argv = [FLOE2, "render", str(src), "--bbox",
+                ",".join("%.17g" % (c * dbu) for c in f["bbox"]),
+                "--px", "%dx%d" % (f["width"], f["height"]), "--stretch",
+                "--out", str(out), *extra]
+        if v._depth() is not None:
+            argv += ["--depth", str(v._depth())]
+        done = subprocess.run(argv, cwd=ROOT, capture_output=True, text=True, timeout=300)
+        check(done.returncode == 0, "capture %s: %s" % (what, done.stdout + done.stderr))
+        captured = Image.open(out).convert("RGBA").tobytes()
+        differ = sum(1 for i in range(0, len(on_screen), 4)
+                     if on_screen[i:i + 3] != captured[i:i + 3])
+        check(len(captured) == len(on_screen) and differ == 0,
+              "%s: the capture differs from the viewer in %d of %d pixels"
+              % (what, differ, len(on_screen) // 4))
+
+    try:
+        pump(v, lambda: settled(v, frames), "first frame")
+        check(not v.density_on and v.detail == 1 and v._effective_thin() == "keep",
+              "the viewer's start: density %s, detail %s, thin %s"
+              % (v.density_on, v.detail, v._effective_thin()))
+        compare("the open")
+        steps = (("a zoom", lambda: v._zoom_center(0.25), ()),
+                 ("full depth", lambda: v._set_depth(999), ()),
+                 ("a zoom out", lambda: v._zoom_center(4.0), ()),
+                 ("the density", v._toggle_density, ("--density", "on")))
+        for what, step, extra in steps:
+            rev = v.worker.snapshot["render_rev"]
+            step()
+            pump(v, lambda: settled(v, frames)
+                 and v.worker.snapshot["render_rev"] != rev, what)
+            compare(what, *extra)
+        print("capture parity: floe2 render's defaults = the viewer's pixels "
+              "(open, zoom, full depth, zoom out, density)")
+    finally:
+        v._quit()
+        v.window.destroy()
+
+
 def main():
     os.environ["FLOE_INDEX_BIN"] = str(ROOT / "rust/target/release/floe-index")
     os.environ["FLOE_RENDERD_BIN"] = str(ROOT / "rust/target/release/floe-renderd")
@@ -622,6 +685,7 @@ def main():
             check(not stay, "closed views left their folders: %s" % stay)
             if gtk_ready():
                 gui_viewer(src, ref)
+                capture_parity(src, temp)
         finally:
             ref.stop()
             svc.close()

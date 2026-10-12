@@ -953,7 +953,9 @@ class GenerationContractTests(unittest.TestCase):
 
         def lit(detail, thin, env=None):
             out = d / ("corner-%s-%s.png" % (detail, thin))
-            floe2("render", src, "--bbox", "17300,-17309,17919,-16700",
+            # (--archival: solid fills, no frames - the lit pixels as
+            # these checks were made, before the viewer's look, 0.12.350)
+            floe2("render", src, "--archival", "--bbox", "17300,-17309,17919,-16700",
                   "--px", "300", "--detail", detail, "--thin", thin,
                   "--layers", "3/0", "--out", out, env=env)
             im = Image.open(out).convert("RGB")

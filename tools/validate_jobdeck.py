@@ -2460,6 +2460,37 @@ class ShotTests(unittest.TestCase):
         self.assertEqual(self._png_size(out), (200, 255))
 
 
+    def test_captures_default_to_the_viewers_look(self):
+        """floe2 render's defaults are the viewer's (0.12.350, user
+        2026-10-12: a capture must come out as the viewer shows it): detail
+        medium (3 px), the viewer's fills, a deck's labels off and its
+        density none; --archival - and FLOE_RENDER_DEFAULTS=archival, which
+        run_floe2 sets for the checks above - is the export look of before:
+        cut 0, solid fills. The two pictures differ; the flag and the
+        variable are the same capture."""
+        viewer = dict(self.env, FLOE_RENDER_DEFAULTS="viewer")
+        out, rep = CLI / "look-viewer.png", CLI / "look-viewer.json"
+        run_floe2("render", CLI / "test.jb", "--px", "320", "--out", out,
+                  "--report", rep, env=viewer, ok=0)
+        doc = json.loads(rep.read_text())
+        self.assertEqual((doc["cut_px"], doc["archival"], doc["density"],
+                          doc["thin"]), (3.0, False, False, "auto"))
+        aout, arep = CLI / "look-archival.png", CLI / "look-archival.json"
+        run_floe2("render", CLI / "test.jb", "--archival", "--px", "320",
+                  "--out", aout, "--report", arep, env=viewer, ok=0)
+        adoc = json.loads(arep.read_text())
+        self.assertEqual((adoc["cut_px"], adoc["archival"]), (0.0, True))
+        self.assertNotEqual(out.read_bytes(), aout.read_bytes())
+        eout = CLI / "look-env.png"
+        run_floe2("render", CLI / "test.jb", "--px", "320", "--out", eout,
+                  env=dict(self.env, FLOE_RENDER_DEFAULTS="archival"), ok=0)
+        self.assertEqual(eout.read_bytes(), aout.read_bytes())
+        # a deck draws no labels: not asked for, none; asked for, refused
+        res = run_floe2("render", CLI / "test.jb", "--labels", "--px", "32",
+                        "--out", CLI / "look-labels.png", env=viewer)
+        self.assertEqual(res.returncode, 2, res.stderr)
+
+
 class ChipShotTests(unittest.TestCase):
     """Chip on/off in captures (user 2026-10-06: "a capture names a level
     and a chip"; "several chips - chip on/off"): the chip view's rows
@@ -4272,6 +4303,11 @@ class KLayoutOracleTests(unittest.TestCase):
 def run_floe2(*args, env=None, ok=None, timeout=600):
     e = os.environ.copy()
     e.update({"PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": str(ROOT)})
+    # captures as these checks were made: the export look (cut 0, solid
+    # fills, no frames) that was floe2 render's default before 0.12.350 -
+    # the viewer's look is the default now (test_captures_default_to_the_
+    # viewers_look asks for it)
+    e.setdefault("FLOE_RENDER_DEFAULTS", "archival")
     if env:
         e.update(env)
     res = subprocess.run(

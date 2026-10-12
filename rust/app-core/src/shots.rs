@@ -137,6 +137,9 @@ pub struct Shot {
     /// the area they cover (renderd's density stack). None: as the viewer
     /// starts, on when FLOE_RUST_DENSITY_STACK=top (density_on).
     pub density: Option<bool>,
+    /// Solid fills, no layer-property patterns - the export look
+    /// (Dataset::styles(archival)); false: the viewer's fills.
+    pub archival: bool,
 }
 impl Default for Shot {
     fn default() -> Self {
@@ -155,10 +158,28 @@ impl Default for Shot {
             labels: false,
             font_px: 14,
             density: None,
+            archival: true,
         }
     }
 }
 impl Shot {
+    /// The command line's capture: what the viewer draws at the same view
+    /// (user 2026-10-12: "the viewer's default mode has thin keep, the
+    /// density and so on; a capture must come out the same") - floe2 view
+    /// --goto's start: detail medium, full depth, thin keep (auto), the
+    /// density as the viewer starts it (density_on), the viewer's fills and
+    /// layer properties, cell frames and labels. Default stays the export
+    /// look (`floe2 render --archival`, FLOE_RENDER_DEFAULTS=archival): cut
+    /// 0, solid fills, no frames or labels.
+    pub fn viewer() -> Self {
+        Self {
+            detail: Detail::Medium,
+            frames: true,
+            labels: true,
+            archival: false,
+            ..Self::default()
+        }
+    }
     /// The density under the cut this shot asks renderd for - always said,
     /// as the viewer does (gui.py density_on), so the sub-cut dots its
     /// brightness is made of come with it.

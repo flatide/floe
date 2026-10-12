@@ -169,7 +169,8 @@ floe render chip.oas --drc results.db --drc-rule M1.SPACE.1 \
 - **디코드 예산**(`FLOE_RUST_BUDGET_MB`, 2026-10-12): 레이아웃 캡처와 같다(README Jobdeck 절 아래).
   - 컷 0 프레임이 예산을 넘으면 필요한 양과 길(`--detail high`, `--layers`, 예산 올리기)을 말하며 실패한다.
   - `--detail`로 컷을 줬을 때 예산 때문에 성기게 그렸으면 `[drc][warn] … thinned to fit the render budget: …`으로 알린다.
-- **`--density on`**(2026-10-12): `--detail low|medium|high`와 함께 주면 컷 아래 도형을 뷰어처럼 밀도로 그린다.
+- **`--detail`·`--density`**(2026-10-12): detail 기본은 뷰어와 같은 medium이다(0.12.349까지는 컷 0; `--archival`이면 컷 0).
+  - `--density on`이면 컷 아래 도형을 뷰어처럼 밀도로 그린다.
 - **레이어 격리**: rules.json 사이드카가 발견되면(탐색 순서 =
   db 옆 덱 basename → 기록된 덱 경로 → `<db>.rules.json`, 또는
   `--drc-rules`) 그 룰의 원천 GDS 레이어만 켠다 — 뷰어 더블클릭

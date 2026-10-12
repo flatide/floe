@@ -5,7 +5,7 @@ use floe_app_core::{
         index::{is_deck, parse_levels},
     },
     render::{require_complete, RenderOptions, RenderSession},
-    shots::{self, batch::Capture, Anchor, Detail, Thin},
+    shots::{self, batch::Capture, Anchor, Detail, Shot, Thin},
     Error, ErrorKind, Result,
 };
 use std::collections::BTreeSet;
@@ -14,6 +14,11 @@ use std::sync::{atomic::AtomicUsize, Arc};
 use std::time::Instant;
 
 const RENDER_HELP: &str = "Usage: floe2-web render SOURCE [OPTIONS]
+Draws what the viewer shows at the same view (floe2 view --goto: full depth):
+detail medium, thin keep, the density as the viewer starts it, the viewer's
+fills and layer properties, cell frames and labels. --archival: the export
+look (cut 0, solid fills, no frames or labels; FLOE_RENDER_DEFAULTS=archival
+makes it the default, as before 0.12.350).
   --bbox X0,Y0,X1,Y1          Region (default whole source)
   --at X,Y --size W,H         Alternative region form
   --anchor center|lb          Aspect/position anchor (default center)
@@ -22,13 +27,16 @@ const RENDER_HELP: &str = "Usage: floe2-web render SOURCE [OPTIONS]
   --layers NAME,L/D,...       Layer names/aliases or pairs (default all)
   --level N,N,...             Jobdeck: load these mask levels only
   --depth N                  0=top, 999/omit=full
-  --detail exact|low|medium|high  Size cut 0/5/3/1 px (default exact)
+  --detail exact|low|medium|high  Size cut 0/5/3/1 px (default medium, the
+                            viewer's; --archival: exact)
   --thin auto|keep|cull       Auto=keep for both layouts and jobdecks
   --density on|off           The density under the cut, as the viewer's: the
                             shapes the --detail cut drops, drawn by the area
                             they cover; needs --detail low|medium|high; layouts
                             (default on when FLOE_RUST_DENSITY_STACK=top)
-  --frames --labels          Enable these overlays (default off)
+  --frames[=on|off] --labels[=on|off]  Cell frames, design text (default on,
+                            as the viewer; jobdeck labels unsupported)
+  --archival                The export look; the options given still win
   --label-font-px N          6..96 (default 14)
   --out FILE                Default view.png; atomic PNG publication
   --report FILE             JSON single-shot report
@@ -56,7 +64,7 @@ Batch: NAME key=value ...; quotes supported, full-line # comments. Region fields
 override the CLI region. Keys: bbox at size anchor px stretch layers depth mosaic
 corners line linecolor keep_tiles chip chip_off fit_chip; corners=fit. Limit 16 MiB/4096 shots; no shell expansion.
 DRC uses the width from --px even for WxH; frames/labels are on (deck labels off),
-cut=0 by default, non-archival fills. --detail/--thin/--label-font-px are honored.
+the viewer's fills. --detail/--thin/--density/--label-font-px are honored.
 No batch/mosaic/region/report with DRC; no implicit indexing. Local/global/path TSV.
 Only complete DRC frames are saved; all-layer shots omit the layer legend.
 Annotate existing PNGs with fe-embed. Jobdeck labels unsupported.
@@ -97,7 +105,17 @@ pub enum Command {
 pub fn parse(args: &[String]) -> Result<Command> {
     let kind = args[0].as_str();
     let mut capture = Capture::default();
+    // what the viewer draws (Shot::viewer); FLOE_RENDER_DEFAULTS=archival:
+    // the export look, as before 0.12.350
+    capture.shot = if std::env::var("FLOE_RENDER_DEFAULTS").as_deref() == Ok("archival") {
+        Shot::default()
+    } else {
+        Shot::viewer()
+    };
     let shot = &mut capture.shot;
+    // the options given, which --archival leaves as they are
+    let (mut detail_given, mut frames_given, mut labels_given, mut archival) =
+        (false, false, false, false);
     let mut source = None;
     let mut out = PathBuf::from("view.png");
     let mut report = None;
@@ -225,6 +243,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 };
             }
             "--detail" => {
+                detail_given = true;
                 shot.detail = match value()? {
                     "exact" => Detail::Exact,
                     "low" => Detail::Low,
@@ -302,13 +321,35 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 no_value()?;
                 shot.stretch = true;
             }
-            "--frames" => {
-                no_value()?;
-                shot.frames = true;
+            // `--frames` alone is on; `--frames off` / `--frames=off` (the
+            // viewer's --frames on|off) - a following on|off is the value
+            "--frames" | "--labels" => {
+                let given = match inline {
+                    Some(v) => Some(v),
+                    None => match args.get(i).map(String::as_str) {
+                        Some(v @ ("on" | "off")) => {
+                            i += 1;
+                            Some(v)
+                        }
+                        _ => None,
+                    },
+                };
+                let on = match given {
+                    None | Some("on") => true,
+                    Some("off") => false,
+                    Some(_) => return Err(Error::input(format!("{flag} takes on or off"))),
+                };
+                if flag == "--frames" {
+                    frames_given = true;
+                    shot.frames = on;
+                } else {
+                    labels_given = true;
+                    shot.labels = on;
+                }
             }
-            "--labels" => {
+            "--archival" => {
                 no_value()?;
-                shot.labels = true;
+                archival = true;
             }
             _ => {
                 return Err(Error::new(
@@ -321,6 +362,24 @@ pub fn parse(args: &[String]) -> Result<Command> {
         }
     }
     let source = source.ok_or_else(|| Error::input(format!("{kind} requires SOURCE")))?;
+    // the export look: cut 0, solid fills, no overlays - what the options
+    // given do not say otherwise
+    if archival {
+        shot.archival = true;
+        if !detail_given {
+            shot.detail = Detail::Exact;
+        }
+        if !frames_given {
+            shot.frames = false;
+        }
+        if !labels_given {
+            shot.labels = false;
+        }
+    }
+    // a jobdeck draws no labels: off unless asked for (refused below)
+    if is_deck(&source) && !labels_given {
+        shot.labels = false;
+    }
     let drc = if drc_requested {
         drc.validate()?;
         if capture_only {
@@ -615,10 +674,54 @@ mod tests {
             Ok(Some(true))
         );
         assert!(density(&["render", "a.oas", "--detail=high", "--density=yes"]).is_err());
-        let exact = density(&["render", "a.oas", "--density=on"]).unwrap_err();
+        let exact = density(&["render", "a.oas", "--detail=exact", "--density=on"]).unwrap_err();
         assert!(exact.contains("--detail low, medium or high"), "{exact}");
         let deck = density(&["render", "a.jb", "--detail=high", "--density=on"]).unwrap_err();
         assert!(deck.contains("for layouts"), "{deck}");
         assert_eq!(density(&["render", "a.jb", "--density=off"]), Ok(Some(false)));
+        // the viewer's detail is the default: on asks for no more
+        assert_eq!(density(&["render", "a.oas", "--density=on"]), Ok(Some(true)));
+        let archival = density(&["render", "a.oas", "--archival", "--density=on"]).unwrap_err();
+        assert!(archival.contains("--detail low, medium or high"), "{archival}");
+    }
+    #[test]
+    fn captures_start_as_the_viewer_and_archival_is_the_export_look() {
+        let shot = |args: &[&str]| match parsed(args) {
+            Ok(Command::Render { capture, .. }) => capture.shot,
+            _ => panic!("{args:?}"),
+        };
+        let s = shot(&["render", "a.oas"]);
+        assert_eq!(
+            (s.detail, s.frames, s.labels, s.archival, s.density, s.thin, s.depth),
+            (Detail::Medium, true, true, false, None, Thin::Auto, None)
+        );
+        // a jobdeck has no labels to draw
+        let s = shot(&["render", "a.jb"]);
+        assert!(s.frames && !s.labels);
+        // the export look, where the options given do not say otherwise
+        let s = shot(&["render", "a.oas", "--archival"]);
+        assert_eq!(
+            (s.detail, s.frames, s.labels, s.archival),
+            (Detail::Exact, false, false, true)
+        );
+        let s = shot(&["render", "--archival", "a.oas", "--detail", "high", "--labels"]);
+        assert_eq!(
+            (s.detail, s.frames, s.labels, s.archival),
+            (Detail::High, false, true, true)
+        );
+        // the viewer's --frames/--labels on|off; a bare flag is on
+        let s = shot(&["render", "a.oas", "--frames", "off", "--labels=off"]);
+        assert!(!s.frames && !s.labels);
+        let s = shot(&["render", "a.oas", "--frames", "--labels", "on"]);
+        assert!(s.frames && s.labels);
+        // a source named after the flag's word is still the source
+        let Command::Render { source, capture, .. } =
+            parsed(&["render", "--frames", "--", "off"]).unwrap()
+        else {
+            panic!()
+        };
+        assert!(capture.shot.frames && source == PathBuf::from("off"));
+        assert!(parsed(&["render", "a.oas", "--frames=yes"]).is_err());
+        assert!(parsed(&["render", "a.oas", "--archival=on"]).is_err());
     }
 }

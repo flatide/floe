@@ -378,7 +378,7 @@ floe2 render deck.jb --batch shots.txt --out shots/ --report shots/report.json
   값). 워커를 한 번만 열고 모두 찍는다(`--out`은 디렉터리). `--report`는 shot별
   영역·픽셀·시간(mosaic은 타일 영역과 선 규칙) JSON.
 - 디코드 예산(레이아웃 소스, 2026-10-12 현장):
-  - 기본 `--detail exact`(컷 0)는 모든 도형을 그리거나 실패한다.
+  - `--detail exact`(컷 0, `--archival`의 기본)는 모든 도형을 그리거나 실패한다.
     - 실패하면 에러에 필요한 양·예산·길이 나온다. 길은 `--detail high`, 좁은 영역이나 `--layers`, `FLOE_RUST_BUDGET_MB`이다.
     - 예전에는 `render: decoded_generation_budget_exceeded:_N_>_M_bytes`만 나왔다.
   - 컷이 있는 detail은 뷰어처럼 예산에 맞춰 성기게 그린다.
@@ -388,8 +388,11 @@ floe2 render deck.jb --batch shots.txt --out shots/ --report shots/report.json
   - 켜면 컷이 버린 도형을 밀도로 그린다. 그래서 `--detail low|medium|high`가 필요하다.
   - 기본은 `FLOE_RUST_DENSITY_STACK=top`일 때만 켜짐이다.
   - jobdeck에서 `--density on`은 거부한다. 덱 패스는 밀도를 그리지 않는다.
-- 출력은 보관용이므로 solid 채움(뷰어의 speckle은 표시용). 단일 shot은 renderd의
-  PNG 그대로, mosaic은 raw 타일을 stdlib zlib으로 PNG 인코딩(Pillow 불필요).
+- 그림 모양(0.12.350, 사용자 2026-10-12: "캡쳐도 동일한 결과가 나와야 함"):
+  - 기본은 뷰어를 같은 영역으로 연 그림이다. detail medium, thin keep, 뷰어의 밀도 규칙, 뷰어의 채움·layerprops, 셀 프레임과 라벨(덱은 라벨 없음).
+  - 예전 기본인 보관용 모양(solid 채움, 컷 0, 프레임·라벨 없음; 참조 툴 cli-spec)은 `--archival`이다. `FLOE_RENDER_DEFAULTS=archival`이면 그것이 기본이 된다.
+  - 이 문서의 M4 검사들(jobdeck 게이트의 `run_floe2`)은 그 변수로 보관용 모양에서 돈다.
+- 단일 shot은 renderd의 PNG 그대로, mosaic은 raw 타일을 stdlib zlib으로 PNG 인코딩(Pillow 불필요).
 
 ### 칩 on/off 캡처 (사용자 2026-10-06)
 

@@ -3490,7 +3490,7 @@ def cli_checks(temp):
     assert shots['on'][1] > 0 and shots['on'][2] is True, shots['on'][1:]
     assert shots['default'][0] == shots['off'][0] and shots['default'][2] is False
     assert shots['env_top'][0] == shots['on'][0] and shots['env_top'][2] is True
-    done, out, _ = render('cli_exact', '--density', 'on')
+    done, out, _ = render('cli_exact', '--detail', 'exact', '--density', 'on')
     assert done.returncode == 2 and '--detail low, medium or high' in done.stderr and not out.exists(), done.stderr
     deck = subprocess.run([FLOE2, 'render', str(Path(temp) / 'none.jb'), '--detail', 'high', '--density', 'on'],
                           cwd=ROOT, env=base, capture_output=True, text=True, timeout=60)

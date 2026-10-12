@@ -83,8 +83,8 @@ chip (tools/gen_main01_like.py) under a small budget:
     before is not probed again;
   * the command line's captures say what the budget did (field 2026-10-12:
     a whole-chip `floe2 render` failed with `render: decoded_generation_
-    budget_exceeded:_3967202112_>_1073741824_bytes`; --detail exact, the
-    capture's default, is every shape or none): under 48 MB the whole chip
+    budget_exceeded:_3967202112_>_1073741824_bytes`; --detail exact, then
+    the capture's default, is every shape or none): under 48 MB the whole chip
     at --detail exact fails in words - what the region needs, the budget,
     --detail high and FLOE_RUST_BUDGET_MB - and saves nothing; at --detail
     high it is drawn, thinned, with a WARNING in the log (stdout, as the
@@ -647,7 +647,7 @@ def cli_checks(temp, src):
         shot = json.loads(report.read_text())['shots'][0] if report.exists() else None
         return done, out, shot
 
-    done, out, shot = render('cli_exact', 48)
+    done, out, shot = render('cli_exact', 48, '--detail', 'exact')
     assert done.returncode != 0 and not out.exists() and shot is None, (done.returncode, done.stderr)
     err = done.stderr
     for words in ('decoded generation budget exceeded - the region needs at least',
