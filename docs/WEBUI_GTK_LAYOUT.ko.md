@@ -102,6 +102,66 @@ renderd와 덱은 캐시마다 읽기 잠금을 잡는다. 끄기 스위치는 `
   pack 잠금(`X.db.pack`)에 참여하지 않는다. 병합 전부터 서로 조율이 없던 부분으로, GTK가
   리뷰 중인 pack을 웹이 다시 게시하는 경우 등은 따로 정해야 한다.
 
+## 1d. 2026-10-13 병합(Python 제거 프로그램 P0~P4, jobdeck-drc 이식)
+
+사용자 요청 "feature/jobdeck 브랜치의 ui를 제외한 부분에서 python을 모두 제거하고 rust로 전환한
+부분에 대해 여기에 잘 머지되었는지 확인하고 최신 내용들도 머지해줘."에 따라 확인했다: 그
+프로그램(P0 e2f0b30e 0.12.326 ~ 0.12.354, [SHARED_APP_LAYER](SHARED_APP_LAYER.ko.md))은 모두
+지난 병합(f4e63891, 0.12.325) **뒤**의 커밋이라 이 브랜치에 하나도 들어와 있지 않았다. jobdeck
+83b7ab45(49커밋)를 병합했다(8d4e7e05).
+
+- **병합 기준점.** P0는 이 브랜치의 Rust 앱 크레이트(app-core·worker-client·notices)와 공용
+  크레이트의 webui 판을 단일 부모 커밋으로 복사해 넣었다. 그래서 git은 양쪽이 같은 파일을
+  추가한 것으로 보지만(add/add 충돌 36개), P0의 복사본은 이 브랜치의 d9437b67과 바이트까지 같다
+  (floe-index·renderd 버전 줄만 다름). 따라서 add/add 충돌은 전부 jobdeck 판이 정답이다.
+  직접 푼 것: `rust/Cargo.toml`(웹 멤버 app·web·packager와 app-cli·floe2를 모두),
+  `rust/Cargo.lock`(jobdeck 판에 cargo가 웹 크레이트의 패키지를 다시 더함 — 양쪽이 함께 vendor한
+  크레이트는 파일까지 같았고, 중복 버전 없음), `floe/__init__.py`(0.12.354, renderd 0.12.322),
+  `tools/validate_rust.sh`(아래).
+- **컴파일 수정(병합 커밋).** `PatchDto.density`(P4a가 공유 `Patch`에 더한 컷 아래 밀도;
+  None이면 renderd 기본) — HTTP PATCH가 받지만 웹 UI 토글은 아직 보내지 않는다. floe2-web의
+  옛 capture 명령에 `legend: false`.
+- **floe2-web이 공유 CLI 위로.** SHARED_APP_LAYER §1의 약속("webui의 floe2-web이 app-cli를
+  쓰도록 바꾸는 일은 webui 쪽에서")대로 `rust/app`은 `floe_app_cli::Host`(이름 floe2-web,
+  입력 오류 exit 2, `--version`·selfcheck의 `web_bundle`)가 되고 웹 명령 `view`·`server`·
+  `displaytest`만 직접 가진다. 중복이던 `src/{capture,clip,deck_analysis,deck_index,drc,
+  fe_embed,read,selfcheck,svrf}.rs`를 지웠다(app-cli 판 = 그 복사본 + jobdeck의 개선:
+  `--legend`·`--density`·`--layer-colors`·`--chip`·`info --chips`, 덱 색인의 BUSY 집계, 프로그램
+  이름 치환). 공유 크레이트에 더한 것 하나: `floe_app_cli::exit_with`(호스트 자신의 명령을 공유
+  CLI의 시그널 처리·종료 코드로 돌림 — jobdeck이 다음 동기 때 가져갈 것).
+  현장에서 보이는 차이: `floe2-web --help`의 첫 줄과 구성(호스트 usage 뒤에 공유 usage),
+  `--version`의 `web_bundle` 표기, 잠금에 막힌 실행은 `[lock] …` 한 줄과 **exit 75**(전에는 1),
+  `floe2-web svrf`는 `floe-index svrf`를 가리키고 exit 2, `render`의 기본값이 뷰어의 것
+  (0.12.350: detail medium·thin keep·밀도 켬·프레임·라벨; `--archival`이 예전 내보내기 모양).
+- **게이트가 오라클 패키지를 본다.** P3가 `floe/*.py`의 비-UI 모듈을
+  `tools/oracle/floe_oracle/`로 옮겼고 P1c가 Python `floe2/` 패키지를 지웠다. webui 전용
+  게이트 21개의 import를 `floe_oracle`로 바꾸고(`sys.path`에 `tools/oracle`), 자식 프로세스의
+  `PYTHONPATH`에도 더했다. `python -m floe2`로 돌리던 오라클(app_cli·app_render·app_captures·
+  app_jobdeck_sources)은 새 `tools/oracle/floe_oracle/floe2.py`(`FLOE_PRODUCT=floe2`로 옛
+  floe2 CLI 그대로)를 `-m floe_oracle.floe2`로 부른다. gui.py를 AST로 읽는 GTK 오라클
+  게이트는 그대로 `floe/gui.py`를 본다.
+- **`tools/validate_rust.sh`.** 레거시 `.tiles` 오라클은 이 브랜치의 순차 빌드(`--jobs 1`)를
+  유지하되 `python -m floe_oracle index --legacy`로. `worker_client`·`cell_index`는 jobdeck의
+  공유 목록에 한 번만 두고 블록은 웹 섹션의 것(worker_client는 valmini일 때 `$VOUT` 재사용).
+  `--changed`에서 app-core·app-cli·floe2·worker-client 변경은 jobdeck의 게이트에 더해
+  `$WEB_APP_GATES`도 돌린다. 오라클 `cli.py` 등은 웹 app 게이트도 고른다.
+- **아직 정하지 않은 것(jobdeck 문서가 webui 몫으로 적은 것 포함).**
+  - 웹 뷰의 밀도 시작값: GTK 뷰어와 `floe2 render`는 0.12.351부터 켬으로 시작하고 웹은 보내지
+    않아 renderd 기본(끔)이다(SHARED_APP_LAYER §7 P4a "웹으로 옮길 때 같은 시작값을 맞춰야
+    한다"). 켜면 프레임을 어댑터와 비교하는 웹 게이트의 기준도 함께 바꿔야 한다. 메뉴 토글
+    (`_toggle_density`, web_menu_inventory의 open 항목)도 남아 있다.
+  - Rust 색인(app-core index·cell_index·drc build)이 소스 옆에 남기는 앱 수준 잠금 이름
+    `X.oas.floe.index.lock`·`.X.oas.ice.index.lock`(P2b 열린 항목): `.floe-lock/`로 옮길지는
+    webui와 함께 정할 일이다.
+  - 웹의 DRC 등록 경로(`select_current_source`)의 팩 리더 잠금(§4), 웹 DRC 게시의 pack 잠금
+    (§1c)은 그대로 남았다.
+  - `drc::analysis`·`drc::team`(jobdeck-drc 이식)은 공유 모듈이다. 웹 UI에 같은 기능(클러스터,
+    CD 델타 그룹, 공동 검토)을 붙일 때 서비스 요청을 HTTP로 옮기면 된다. `review-sqlite`
+    기능은 웹에서 끈 채 쓴다(C 컴파일러 — musl은 zig cc; `rust/.cargo/config.toml`).
+  - svrf 게이트 3종(§6): Python 오라클 `floe_oracle.svrf`는 남았지만 `floe2-web svrf`가
+    `floe-index svrf`를 가리키게 되어 비교 전제가 바뀌었다. 기준을 `floe-index svrf`로 다시
+    세워야 한다.
+
 ## 2. 소유자 화면(`index.html`)의 배치
 
 GTK `floe/gui.py`(feature/jobdeck)와 같은 구성이다. 모든 기존 컨트롤 id는 그대로이며
@@ -389,6 +449,31 @@ view root도 WS `view.set`의 `root`로 가며 해결(`root_ticket`)은 같은 �
   root 높이로 셈(5d386641 — 단계 규칙은 §1b에서 옮겼고 root 높이 상한은 아직), 도형·텍스트가
   없는 레이어를 목록에서 숨김(99519258), 렌더 진행 중에도 휠·마우스를 받아 대체(775ea28e —
   웹은 표시된 프레임을 기다림).
+- 2026-10-13 병합 뒤 게이트(§1d; 113개 중 jobdeck 쪽 — unit·jobdeck·index_lock·drc_analysis·
+  drc_team·gtk_view·perf_parity·floe2·klayout 포함 — 전부 통과, 웹 쪽은 아래 7개만 빨강 —
+  병합 전과 같은 집합):
+  - 웹 게이트가 바뀐 뷰어·오라클을 따라간 것(함께 커밋): GTK 오라클 게이트(zoom_band·minimap·
+    web_startup)는 컨트롤러의 내비게이션(`_ctl_navigate`)·미니맵(`_ctl_minimap`)이 거절했을 때의
+    뷰어 자체 계산을 오라클로 쓴다(실제 GTK 경로는 웹과 같은 app-core `Viewport::navigate`·
+    `view::minimap` — 구성상 같음). web_startup은 `floe/viewcli.py`의 `parser()`·`cmd_view`를,
+    display_test는 `viewcli.gtktest`를, layerprops는 서비스 `layerprops_read` 자리에 참조 구현
+    `fillpat.parse_layerprops`를, web_file_display는 `ServiceCache` 자리에 합성 캐시를,
+    bitmap_slots는 pycairo 없는 `Gtk.Image` 편집기를 흉내 낸다. 렌더 비교 게이트(app_render·
+    app_deck_render·app_captures·drc_captures)는 `FLOE_RENDER_DEFAULTS=archival`로 돌린다(Python
+    floe2가 그리던 내보내기 모양; 뷰어 기본값은 jobdeck gtk_view가 뷰어에 대조). 레이어 색은
+    기본(row)이 floe-index meta.json·오라클과 같다(`group`은 뷰어의 옛 팔레트, 다른 것). app_cli는
+    `svrf`의 floe-index 포인터·busy exit 75·`--occupancy-um 4.0`(Python 표기)을 읽는다.
+    app_drc의 지문은 `.floe-lock/`(pack 리더 등록)을 뺀다. desktop/vendor는 bitflags 2를 공유
+    링크로, smallvec 1.16.3으로 맞췄다. 메뉴 인벤토리는 jobdeck-drc의 항목 5개를 `open`으로
+    적고(`_drc_clusters_dialog`·`_drc_not_required_key`·`_drc_team_dialog`·`_drc_migration_dialog`·
+    `_drc_review_export_stats`) `_toggle_coverage`(P3에서 삭제)를 뺐다.
+  - 남은 빨강 7개: `cache_revision`·`owner_service`(revision 3 + guest_drc; 아래 10-08·10-09 항목
+    그대로), `web_menu_inventory --require-complete`(density + 위 5개), `web_cli_inventory`
+    (레거시 Python CLI를 표면의 기준으로 삼는데 P1c·P3 뒤 오라클 cli에는 `view`·`gtktest`가
+    없다 — 기준을 app-cli·floe2-web의 `--help`로 다시 세워야 함; 옵션 차이 8개 중 `view
+    --density` 말고는 이번 병합의 app-cli에 다 있다), `web_svrf`·`app_svrf`·`svrf_native`
+    (오라클 `floe_oracle.svrf`에 `parse_deck`이 없고 `floe2-web svrf`는 포인터 — 기준을
+    `floe-index svrf`로).
 - 병합 뒤에도 실패하는 게이트(2026-10-08):
   - `cache_revision`, `owner_service`의 revision 회수 테스트: revision 파일 목록(`FILES`)에
     `floe-index vfs`가 기본으로 쓰는 `design.ovh`가 없어 지난 병합부터 실패했고
