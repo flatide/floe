@@ -43,6 +43,10 @@ makes it the default, as before 0.12.350).
                             differ (default); group = one colour per layer
                             number, its datatypes alike (before 0.12.352);
                             FLOE_LAYER_COLORS sets the default; layouts
+  --legend                  Each image carries the legend of the layers it
+                            draws (colour, fill, name L/D; every layer on: the
+                            layer panel's rows) as flateyes metadata - the
+                            pixels stay as drawn; fe-embed --dump prints it
   --archival                The export look; the options given still win
   --label-font-px N          6..96 (default 14)
   --out FILE                Default view.png; atomic PNG publication
@@ -73,7 +77,8 @@ corners line linecolor keep_tiles chip chip_off fit_chip; corners=fit. Limit 16 
 DRC uses the width from --px even for WxH; frames/labels are on (deck labels off),
 the viewer's fills. --detail/--thin/--density/--label-font-px are honored.
 No batch/mosaic/region/report with DRC; no implicit indexing. Local/global/path TSV.
-Only complete DRC frames are saved; all-layer shots omit the layer legend.
+Only complete DRC frames are saved; all-layer shots omit the layer legend
+unless --legend.
 Annotate existing PNGs with fe-embed. Jobdeck labels unsupported.
 Frames exceeding 16 Mpx are rejected, not silently rescaled.
 Mosaic final image is four tiles (up to 64 Mpx). Outputs must not collide.
@@ -107,6 +112,7 @@ pub enum Command {
         levels: Option<BTreeSet<i64>>,
         drc: Option<Box<floe_app_core::drc::capture::Options>>,
         layer_colors: Option<LayerColors>,
+        legend: bool,
     },
     Probe(PathBuf),
 }
@@ -138,6 +144,8 @@ pub fn parse(args: &[String]) -> Result<Command> {
     // --layer-colors (a layout's default layer colours; the open's
     // FLOE_LAYER_COLORS without it)
     let mut layer_colors = None;
+    // --legend (each image's layer legend as flateyes metadata)
+    let mut legend = false;
     let mut positional = false;
     let mut i = 1;
     while i < args.len() {
@@ -362,6 +370,10 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 no_value()?;
                 archival = true;
             }
+            "--legend" => {
+                no_value()?;
+                legend = true;
+            }
             "--layer-colors" => {
                 layer_colors = Some(LayerColors::parse(value()?).ok_or_else(|| {
                     Error::input("--layer-colors must be row or group")
@@ -406,6 +418,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
         if layers_explicit {
             drc.layers = Some(shot.layers.clone().unwrap_or_else(|| "all".into()));
         }
+        drc.legend = legend;
         Some(Box::new(drc))
     } else {
         None
@@ -461,6 +474,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 levels,
                 drc,
                 layer_colors,
+                legend,
             })
         }
     }
@@ -530,6 +544,7 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
             levels,
             drc,
             layer_colors,
+            legend,
         } => {
             if let Some(drc) = drc {
                 let mut dataset = dataset(&source, levels, cancelled)?;
@@ -555,6 +570,7 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
                 batch,
                 levels,
                 layer_colors,
+                legend,
                 cancelled,
             );
         }
@@ -785,5 +801,32 @@ mod tests {
         assert!(bad.contains("row or group"), "{bad}");
         let deck = colors(&["render", "a.jb", "--layer-colors=group"]).unwrap_err();
         assert!(deck.contains("for layouts"), "{deck}");
+    }
+    #[test]
+    fn a_legend_is_asked_with_a_flag() {
+        let legend = |args: &[&str]| match parsed(args) {
+            Ok(Command::Render { legend, drc, .. }) => Ok((legend, drc.map(|d| d.legend))),
+            Ok(_) => panic!(),
+            Err(e) => Err(e.to_string()),
+        };
+        assert_eq!(legend(&["render", "a.oas"]), Ok((false, None)));
+        assert_eq!(legend(&["render", "a.oas", "--legend"]), Ok((true, None)));
+        // a jobdeck's levels and a batch take it too
+        assert_eq!(legend(&["render", "a.jb", "--legend"]), Ok((true, None)));
+        assert_eq!(
+            legend(&["render", "a.oas", "--legend", "--batch", "-", "--out", "d"]),
+            Ok((true, None))
+        );
+        // a DRC capture: every layer's legend too
+        assert_eq!(
+            legend(&["render", "a.oas", "--drc=db", "--drc-rule=R", "--legend"]),
+            Ok((true, Some(true)))
+        );
+        assert_eq!(
+            legend(&["render", "a.oas", "--drc=db", "--drc-rule=R"]),
+            Ok((false, Some(false)))
+        );
+        assert!(legend(&["render", "a.oas", "--legend=on"]).is_err());
+        assert!(parsed(&["info", "a.oas", "--legend"]).is_err());
     }
 }

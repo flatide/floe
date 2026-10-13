@@ -188,7 +188,9 @@ floe render chip.oas --drc results.db --drc-rule M1.SPACE.1 \
   레이어의 legend(색 + fill 패턴 **이름**, 예 `speckle`)가
   **flateyes embed**(iTXt 청크)로 실린다 — flateyes(1.16+)로
   열면 주석·범례 표시/편집, 다른 도구에선 평범한 PNG.
-  스크립트에서 주석만 뽑으려면 `python fe_embed.py --dump x.png`.
+  모든 레이어를 그린 캡처는 legend가 없고, `--legend`(2026-10-13)를 주면 레이어 패널 줄 순서로 모든 레이어의
+  legend가 실린다. legend는 그림을 그린 스타일에서 만든다(app-core `legend.rs`, 일반 캡처의 `--legend`와 같은 코드).
+  스크립트에서 주석만 뽑으려면 `floe2 fe-embed --dump x.png`.
 - 사각형 룰러는 뷰어와 같은 SVRF 오류 방향 선택을 사용한다. 한 방향만
   해당하면 하나, 양쪽 해당/판단 불가이면 둘을 임베드한다. `--layers`를
   지정해도 룰러 판단용 사이드카를 읽는다. 룰러의 표시 자릿수는 외부

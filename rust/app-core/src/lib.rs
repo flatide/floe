@@ -23,6 +23,7 @@ pub mod instance;
 pub mod jobdeck;
 pub mod layer_defaults;
 pub mod layerprops;
+pub mod legend;
 pub mod managed;
 pub mod managed_index;
 pub mod native;

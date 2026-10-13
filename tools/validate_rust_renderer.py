@@ -2990,6 +2990,110 @@ class PaletteTests(unittest.TestCase):
             self.assertIn("for layouts", refused.stderr)
 
 
+class LegendTests(unittest.TestCase):
+    """floe2 render --legend (user 2026-10-13: "a command to include a
+    legend in a capture" - (가), the DRC captures' way): each image carries
+    the legend of the layers it draws as flateyes metadata - `box COLOUR FILL
+    NAME L/D` from the styles the frame is drawn with (app-core legend.rs):
+    every layer on, the layer panel's rows (no LAYERNAME-only pair); --layers,
+    its pairs in its order; --archival, solid; a layerprops pattern by name,
+    clear as none; --layer-colors group, the group colours; each batch shot
+    its own; a mosaic's final image. The pixels stay as drawn: stripped of
+    the metadata, the PNG is the capture without --legend byte for byte."""
+
+    PAIRS = [(2, 0), (2, 1), (2, 2), (2, 32), (3, 0), (3, 1), (5, 0)]
+
+    def test_each_image_carries_the_legend_of_the_layers_it_draws(self):
+        import json
+        import klayout.db as db
+        from floe_oracle.cache import layer_color
+
+        release = ROOT / "rust" / "target" / "release"
+        floe2 = os.environ.get("FLOE2_BIN") or str(release / "floe2")
+        env = dict(os.environ, FLOE_INDEX_BIN=str(release / "floe-index"),
+                   FLOE_RENDERD_BIN=str(release / "floe-renderd"))
+        for name in ("FLOE_EMPTY_LAYERS", "FLOE_RENDER_DEFAULTS", "FLOE_LAYER_COLORS"):
+            env.pop(name, None)
+
+        def floe(*args, ok=True):
+            done = subprocess.run([floe2, *map(str, args)], env=env, capture_output=True,
+                                  text=True, timeout=120)
+            if ok:
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+            return done
+
+        def legend(png):
+            dump = floe("fe-embed", "--dump", png).stdout
+            return [line.split("=", 1)[1] for line in dump.splitlines()
+                    if line.startswith("legend=")]
+
+        def rows(pairs, fill="speckle", colour=None):
+            colour = colour or (lambda key: layer_color(self.PAIRS.index(key)))
+            return ["box %s %s L%dD%d %d/%d" % (colour(key), fill, key[0], key[1], *key)
+                    for key in pairs]
+
+        with tempfile.TemporaryDirectory() as directory:
+            d = Path(directory)
+            src = d / "groups.oas"
+            layout = db.Layout()
+            layout.dbu = 0.001
+            top = layout.create_cell("TOP")
+            for i, (layer, datatype) in enumerate(self.PAIRS):
+                li = layout.layer(db.LayerInfo(layer, datatype, "L%dD%d" % (layer, datatype)))
+                top.shapes(li).insert(db.Box(i * 12000, 0, i * 12000 + 10000, 10000))
+            layout.layer(db.LayerInfo(2, 5, "NAMED"))
+            layout.write(str(src))
+            floe("index", src, "--jobs", "1")
+
+            def capture(name, *extra):
+                out, report = d / (name + ".png"), d / (name + ".json")
+                floe("render", src, "--px", "300", "--out", out, "--report", report, *extra)
+                return out, json.loads(report.read_text())
+
+            # every layer on: the panel's rows, the empty 2/5 left out
+            out, report = capture("all", "--legend")
+            self.assertEqual(legend(out), rows(self.PAIRS))
+            self.assertIs(report["legend"], True)
+            self.assertEqual(report["shots"][0]["legend"], rows(self.PAIRS))
+            # the pixels as drawn: stripped, the capture without --legend
+            plain, plain_report = capture("plain")
+            self.assertEqual(legend(plain), [])
+            self.assertIs(plain_report["legend"], False)
+            self.assertNotIn("legend", plain_report["shots"][0])
+            floe("fe-embed", "--strip", out)
+            self.assertEqual(out.read_bytes(), plain.read_bytes())
+            # --layers: its pairs in its order
+            out, _ = capture("some", "--legend", "--layers", "3/0,2/1")
+            self.assertEqual(legend(out), rows([(3, 0), (2, 1)]))
+            # --archival draws solid; --layer-colors group, one colour a layer
+            out, _ = capture("archival", "--legend", "--archival")
+            self.assertEqual(legend(out), rows(self.PAIRS, "solid"))
+            out, _ = capture("group", "--legend", "--layer-colors", "group")
+            self.assertEqual(legend(out), rows(self.PAIRS, colour=lambda key: layer_color(key[0])))
+            # a layerprops pattern by name, clear as none, the colours named
+            (d / "groups.oas.layerprops").write_text(
+                "2.1 #ffffff diagonal_right_wide PINNED 1 1\n3 orange clear OUTLINE 1 2\n")
+            out, _ = capture("props", "--legend", "--layers", "2/1,3/0,5/0")
+            self.assertEqual(legend(out), [
+                "box #ffffff diagonal_right_wide L2D1 2/1",
+                "box #ffa500 none L3D0 3/0",
+                "box %s speckle L5D0 5/0" % layer_color(6)])
+            (d / "groups.oas.layerprops").unlink()
+            # each batch shot its own layers'; a mosaic's final image
+            (d / "shots.txt").write_text("wide\nnarrow layers=5/0,2/32\n")
+            floe("render", src, "--px", "200", "--legend", "--batch", d / "shots.txt",
+                 "--out", d / "batch")
+            self.assertEqual(legend(d / "batch" / "wide.png"), rows(self.PAIRS))
+            self.assertEqual(legend(d / "batch" / "narrow.png"), rows([(5, 0), (2, 32)]))
+            mosaic = d / "mosaic.png"
+            floe("render", src, "--corners", "--size", "30,30", "--px", "100", "--legend",
+                 "--layers", "2/0,3/1", "--out", mosaic)
+            self.assertEqual(legend(mosaic), rows([(2, 0), (3, 1)]))
+            # a flag, no value
+            self.assertEqual(floe("render", src, "--legend=on", "--out", d / "x.png",
+                                  ok=False).returncode, 2)
+
+
 @unittest.skipUnless(os.environ.get("FLOE_INTEGRATION_SOURCE"),
                      "set FLOE_INTEGRATION_SOURCE for the real daemon test")
 class RealDaemonIntegrationTests(unittest.TestCase):

@@ -2490,6 +2490,42 @@ class ShotTests(unittest.TestCase):
                         "--out", CLI / "look-labels.png", env=viewer)
         self.assertEqual(res.returncode, 2, res.stderr)
 
+    def test_a_legend_names_the_levels_drawn(self):
+        """floe2 render --legend on a deck (2026-10-13, app-core legend.rs):
+        the levels the capture draws as the level view lists them - each
+        level's head, its level colour (the chips' rows stand under it) -
+        as flateyes metadata; --layers '$2,ALIGN', those levels in that
+        order; the pixels as drawn: stripped, the capture without it."""
+        info = json.loads(run_floe2("info", CLI / "test.jb", "--json",
+                                    env=self.env, ok=0).stdout)
+        rows = info["metadata"]["layers"]
+        heads = sorted((r["layer"], r["datatype"], r["name"], r["color"])
+                       for r in rows if not r["jobdeck_hidden"])
+        self.assertTrue(any(r["jobdeck_hidden"] for r in rows))
+        want = ["box %s solid %s %d/%d" % (c, n, l, d) for l, d, n, c in heads]
+
+        def legend(png):
+            dump = run_floe2("fe-embed", "--dump", png, ok=0).stdout
+            return [x.split("=", 1)[1] for x in dump.splitlines()
+                    if x.startswith("legend=")]
+
+        out = CLI / "legend-deck.png"
+        run_floe2("render", CLI / "test.jb", "--legend", "--px", "320",
+                  "--out", out, env=self.env, ok=0)
+        self.assertEqual(legend(out), want)
+        self.assertEqual([x.split()[3] for x in want],
+                         ["METAL1", "VIA1", "ALIGN", "LEVEL5"])
+        some = CLI / "legend-deck-some.png"
+        run_floe2("render", CLI / "test.jb", "--legend", "--layers",
+                  "$2,ALIGN", "--px", "320", "--out", some, env=self.env, ok=0)
+        self.assertEqual(legend(some), [want[1], want[2]])
+        plain = CLI / "legend-deck-plain.png"
+        run_floe2("render", CLI / "test.jb", "--px", "320", "--out", plain,
+                  env=self.env, ok=0)
+        self.assertEqual(legend(plain), [])
+        run_floe2("fe-embed", "--strip", out, ok=0)
+        self.assertEqual(out.read_bytes(), plain.read_bytes())
+
 
 class ChipShotTests(unittest.TestCase):
     """Chip on/off in captures (user 2026-10-06: "a capture names a level

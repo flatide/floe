@@ -391,6 +391,9 @@ floe2 render deck.jb --batch shots.txt --out shots/ --report shots/report.json
   - jobdeck에서 `--density on`은 거부한다. 덱 패스는 밀도를 그리지 않는다.
 - `--layer-colors row|group`(레이아웃, 2026-10-13): 레이어 기본 색을 패널 줄마다(row, 기본) 또는 layer 번호마다(group,
   예전 방식) 정한다. `FLOE_LAYER_COLORS`가 기본값이다. jobdeck은 자기 색 체계를 쓰므로 거부한다.
+- `--legend`(2026-10-13): 그린 레이어의 레전드(`box 색 fill 이름 L/D`)를 이미지마다 flateyes 메타데이터로 넣는다.
+  - 덱은 레벨 보기처럼 레벨마다 한 줄(머리 행, 레벨 색)이다. 칩 행은 그 레벨 아래에 묶인다. `--layers '$2,ALIGN'`이면 그 레벨들만 준 순서로 넣는다.
+  - 픽셀은 그대로다. `floe2 fe-embed --dump`로 읽고, flateyes로 열면 보인다.
 - 그림 모양(0.12.350, 사용자 2026-10-12: "캡쳐도 동일한 결과가 나와야 함"):
   - 기본은 뷰어를 같은 영역으로 연 그림이다. detail medium, thin keep, 밀도 켬(뷰어의 시작값), 뷰어의 채움·layerprops, 셀 프레임과 라벨(덱은 라벨 없음).
   - 예전 기본인 보관용 모양(solid 채움, 컷 0, 프레임·라벨 없음; 참조 툴 cli-spec)은 `--archival`이다. `FLOE_RENDER_DEFAULTS=archival`이면 그것이 기본이 된다.

@@ -8,14 +8,13 @@ use crate::{
     dataset::Dataset,
     render::{require_complete, RenderOptions, RenderSession},
     shots::{Shot, MAX_PIXELS},
-    styles::{self, LayerProps},
+    styles::LayerProps,
     svrf::Rules,
     Error, ErrorKind, Result,
 };
 use floe_worker_client::{FrameFormat, Layers, RenderRequest};
 use serde_json::json;
 use std::{
-    collections::BTreeMap,
     fs,
     ops::Range,
     os::unix::fs::MetadataExt,
@@ -34,6 +33,9 @@ pub struct Options {
     pub rules: Option<PathBuf>,
     /// None discovers SVRF isolation; Some("all") explicitly bypasses it.
     pub layers: Option<String>,
+    /// `--legend` (2026-10-13): the layers' legend for an all-layer capture
+    /// too (an isolated one always carries it)
+    pub legend: bool,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -46,6 +48,7 @@ impl Default for Options {
             reviewer: None,
             rules: None,
             layers: None,
+            legend: false,
         }
     }
 }
@@ -387,39 +390,6 @@ fn layers(o: &Options, dataset: &Dataset, rules: Option<&Rules>) -> Result<Layer
         Ok(Layers::Only(keys))
     }
 }
-fn legend(dataset: &Dataset, layers: &Layers) -> Result<Option<Vec<String>>> {
-    let Layers::Only(keys) = layers else {
-        return Ok(None);
-    };
-    let (rows, props) = rows(dataset)?;
-    let rows: BTreeMap<_, _> = rows
-        .into_iter()
-        .map(|(key, name, color)| (key, (name, color)))
-        .collect();
-    let mut fills = BTreeMap::new();
-    for p in props {
-        let value = p.fill.trim().to_lowercase();
-        if matches!(value.as_str(), "solid" | "clear") || styles::pattern(&value).is_some() {
-            fills.insert(p.layer, value);
-        }
-    }
-    let mut lines = Vec::new();
-    for key in keys {
-        let Some((name, color)) = rows.get(key) else {
-            continue;
-        };
-        let fill = fills.get(key).map_or("speckle", String::as_str);
-        lines.push(annotations::legend_line(&format!(
-            "box {} {fill} {} {}/{}",
-            if color.is_empty() { "#808080" } else { color },
-            name.trim(),
-            key.0,
-            key.1
-        ))?);
-    }
-    Ok((!lines.is_empty()).then_some(lines))
-}
-
 pub fn run(
     dataset: &Dataset,
     shot: &Shot,
@@ -485,7 +455,14 @@ pub fn run(
         })
         .unwrap_or_default();
     let selector = Selector::new(&constraints);
-    let legend = legend(dataset, &visible)?;
+    // the layers' legend (crate::legend, from the styles the frames are
+    // drawn with): an isolated capture's, every layer's with --legend
+    let legend = if options.legend || matches!(visible, Layers::Only(_)) {
+        let lines = crate::legend::lines(dataset, &dataset.styles(false)?, &visible)?;
+        (!lines.is_empty()).then_some(lines)
+    } else {
+        None
+    };
     let mut protected = candidates;
     protected.extend([options.database.clone(), db.path().to_owned()]);
     protected.extend(crate::cache::pack_paths(&options.database)?);

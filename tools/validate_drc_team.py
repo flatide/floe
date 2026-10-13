@@ -828,6 +828,32 @@ def r8(temp):
     layers = sorted((x["layer"], x["datatype"]) for x in info.get("metadata", {}).get("layers", []))
     check(r.returncode == 0 and layers == [(31, 0), (32, 0), (51, 0)],
           "the layout indexed: M1, M2, VIA1", (r.stderr[-300:], layers))
+    # a DRC capture's layer legend (crate::legend, 2026-10-13): the rule's
+    # isolated layers (its sidecar), none for an all-layer shot, every
+    # layer's with --legend - as flateyes metadata, in the panel's order
+    colours = {(x["layer"], x["datatype"]): (x["name"], x["color"].lower())
+               for x in info.get("metadata", {}).get("layers", [])}
+
+    def legend(*extra):
+        png = temp / "drc_legend.png"
+        if png.exists():
+            png.unlink()
+        r = run([FLOE2, "render", str(out / "chip.oas"), "--drc", str(out / "run1/results.db"),
+                 "--drc-rule", "M1.S.1", "--drc-err", "1", "--px", "200",
+                 "--out", str(temp / "drc_legend"), *extra])
+        dump = run([FLOE2, "fe-embed", "--dump", str(png)])
+        return r.returncode, [x.split("=", 1)[1] for x in dump.stdout.splitlines()
+                              if x.startswith("legend=")]
+
+    def rows(keys):
+        return ["box %s speckle %s %d/%d" % (colours[k][1], colours[k][0], *k) for k in keys]
+
+    if len(colours) == 3:
+        check(legend() == (0, rows([(31, 0)])), "a DRC capture's legend: its isolated layer",
+              legend())
+        check(legend("--layers", "all") == (0, []), "an all-layer DRC capture: no legend")
+        check(legend("--layers", "all", "--legend") == (0, rows([(31, 0), (32, 0), (51, 0)])),
+              "--legend: every layer's", legend("--layers", "all", "--legend"))
 
 
 def main():

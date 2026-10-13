@@ -42,6 +42,7 @@ pub fn run(
     batch: Option<String>,
     levels: Option<BTreeSet<i64>>,
     layer_colors: Option<LayerColors>,
+    legend: bool,
     cancelled: &Arc<AtomicUsize>,
 ) -> Result<i32> {
     if batch.is_none() {
@@ -92,6 +93,7 @@ pub fn run(
         report,
         batch: batch.is_some(),
         input,
+        legend,
     };
     let summary = captures::run_summary(
         &dataset,

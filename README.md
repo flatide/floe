@@ -241,6 +241,12 @@ mosaic, `--batch`는 레이아웃(.oas/.gds)에도 그대로 쓰인다. 칩 on/o
   - 주지 않으면 `FLOE_LAYER_COLORS`(없으면 row)를 따른다. 뷰어의 `--layer-colors`와 같은 규칙이다.
   - layerprops의 색이 여전히 먼저다. report 맨 위의 `layer_colors`에 어느 쪽인지 남는다.
   - jobdeck은 자기 색 체계를 쓰므로 거부한다.
+- `--legend`(2026-10-13): 그린 레이어의 레전드를 이미지마다 flateyes 메타데이터로 넣는다(DRC 캡처와 같은 방식).
+  - 한 줄은 `box 색 fill 이름 L/D`다. 그림을 그린 스타일에서 만든다(layerprops 색·패턴, `--layer-colors`, `--archival`의 solid, jobdeck 레벨 색).
+  - 모든 레이어를 켜면 레이어 패널의 줄(빈 LAYERNAME 쌍 제외)이고, `--layers`면 그 레이어들을 준 순서로 넣는다. jobdeck은 레벨(머리 행)을 넣는다.
+  - batch는 샷마다 자기 레이어의 레전드, mosaic은 합친 최종 이미지에 넣는다. report의 shot에 `legend` 줄들이 남는다.
+  - 픽셀은 그대로다(`floe2 fe-embed --strip`으로 지우면 `--legend` 없는 캡처와 바이트가 같다). flateyes로 열면 보이고, `floe2 fe-embed --dump x.png`로 읽는다.
+  - DRC 캡처는 격리된 레이어면 원래 레전드를 넣고, `--legend`면 전체 레이어 캡처에도 넣는다.
 
 레이아웃 캡처의 디코드 예산(`FLOE_RUST_BUDGET_MB`, 기본 1024)은 뷰어와 같다.
 - `--detail exact`(`--archival`의 기본)는 모든 도형을 그리거나 실패한다(내보내기가 도형을 빠뜨리면 안 되므로).

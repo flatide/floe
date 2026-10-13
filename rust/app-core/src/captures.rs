@@ -1,5 +1,6 @@
 //! Headless named captures, one native worker, per-artifact atomic commit.
 use crate::{
+    annotations::{self, Document},
     artifact::{self, StagedArtifact},
     check_cancelled,
     dataset::Dataset,
@@ -25,6 +26,9 @@ pub struct ExportOptions {
     pub report: Option<PathBuf>,
     pub batch: bool,
     pub input: Option<PathBuf>,
+    /// `--legend` (2026-10-13): each image carries the legend of the layers
+    /// it draws (crate::legend) as flateyes metadata
+    pub legend: bool,
 }
 struct Plan<'a> {
     named: &'a NamedCapture,
@@ -310,6 +314,8 @@ pub fn run_summary(
     // shot of a run has the command line's)
     let archival = shots[0].capture.shot.archival;
     let mut session = RenderSession::open(dataset, render, archival, Arc::clone(cancelled))?;
+    // the styles the frames are drawn with, for --legend
+    let legend_styles = options.legend.then(|| dataset.styles(archival)).transpose()?;
     let mut rows = Vec::new();
     let mut artifact_count = 0usize;
     for (index, plan) in plans.iter().enumerate() {
@@ -325,6 +331,21 @@ pub fn run_summary(
                 ));
             }
             let (width, height) = (plan.tiles[0].pixels.0, plan.tiles[0].pixels.1.unwrap());
+            // --legend: the layers this shot draws, as the picture paints them
+            let legend = legend_styles
+                .as_ref()
+                .map(|styles| {
+                    crate::legend::lines(
+                        dataset,
+                        styles,
+                        &dataset.resolve_layers(capture.shot.layers.as_deref())?,
+                    )
+                })
+                .transpose()?;
+            let legend_doc = legend.as_ref().filter(|l| !l.is_empty()).map(|l| Document {
+                legend: Some(l.clone()),
+                ..Document::default()
+            });
             let mut canvas = capture
                 .is_mosaic()
                 .then(|| Mosaic::new(width, height))
@@ -390,20 +411,40 @@ pub fn run_summary(
                     .map(|(tag, tile)| (tag.to_string(), serde_json::json!(tile.bbox.unwrap())))
                     .collect::<serde_json::Map<_, _>>()
                     .into();
-                StagedArtifact::write(&plan.target, cancelled, |out| {
-                    mosaic::encode_png(out, width * 2, height * 2, &rgba, cancelled)
-                })?
+                if let Some(doc) = &legend_doc {
+                    let mut bytes = std::io::Cursor::new(Vec::new());
+                    mosaic::encode_png(&mut bytes, width * 2, height * 2, &rgba, cancelled)?;
+                    annotations::png::stage(&plan.target, &bytes.into_inner(), doc, cancelled)?
+                } else {
+                    StagedArtifact::write(&plan.target, cancelled, |out| {
+                        mosaic::encode_png(out, width * 2, height * 2, &rgba, cancelled)
+                    })?
+                }
             } else {
                 row["bbox_um"] = serde_json::json!(plan.tiles[0].bbox.unwrap());
-                StagedArtifact::write(&plan.target, cancelled, |out| {
-                    use std::io::Write;
-                    for chunk in png.as_ref().unwrap().chunks(1024 * 1024) {
-                        check_cancelled(cancelled)?;
-                        out.write_all(chunk)?;
-                    }
-                    Ok(())
-                })?
+                if let Some(doc) = &legend_doc {
+                    annotations::png::stage(&plan.target, png.as_ref().unwrap(), doc, cancelled)?
+                } else {
+                    StagedArtifact::write(&plan.target, cancelled, |out| {
+                        use std::io::Write;
+                        for chunk in png.as_ref().unwrap().chunks(1024 * 1024) {
+                            check_cancelled(cancelled)?;
+                            out.write_all(chunk)?;
+                        }
+                        Ok(())
+                    })?
+                }
             };
+            if let Some(lines) = &legend {
+                row["legend"] = serde_json::json!(lines);
+                if lines.is_empty() {
+                    log(&format!(
+                        "[{}] note: {}: no layer to list - no legend",
+                        crate::program(),
+                        plan.display.display()
+                    ));
+                }
+            }
             for target in std::iter::once(&plan.target).chain(&plan.keep) {
                 dataset.output_path(target)?;
             }
@@ -521,6 +562,8 @@ pub fn run_summary(
             "density":!dataset.is_deck() && shots[0].capture.shot.density_on(),
             // a layout's default layer colours (--layer-colors; a jobdeck: null)
             "layer_colors":dataset.layer_colors().map(crate::styles::LayerColors::name),
+            // each image's layer legend embedded (--legend; the shots' `legend`)
+            "legend":options.legend,
             "archival":archival,"complete":complete});
         if let Dataset::Deck(deck) = dataset {
             let over_budget = doc["shots"]
