@@ -24,7 +24,7 @@ PARTS = ("design.ovm", "design.ovp", "design.ovt")
 
 
 def run(*args, env=None, code=0, python=False):
-    command = ([str(PYTHON), "-B", "-m", "floe2"] if python else [str(APP)])
+    command = ([str(PYTHON), "-B", "-m", "floe_oracle.floe2"] if python else [str(APP)])
     result = subprocess.run(command + list(map(str, args)), cwd=ROOT,
                             env=env, capture_output=True, text=True, timeout=40)
     assert result.returncode == code, (command, args, result.returncode,
@@ -128,7 +128,7 @@ def main(fixture):
         assert digest(cache) == before, "reuse changed data or mtime"
 
         # Reads keep legacy names; explicit Index alone migrates them.
-        from floe.cachepath import legacy_vfs_cache_dir
+        from floe_oracle.cachepath import legacy_vfs_cache_dir
         old_cache = Path(legacy_vfs_cache_dir(source))
         cache.rename(old_cache)
         old_stamp = digest(old_cache)

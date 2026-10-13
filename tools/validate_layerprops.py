@@ -20,6 +20,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (docs/SHARED_APP_LAYER.ko.md P3)
 from floe import fillpat
 
 NATIVE_TIMEOUT_SECONDS = 30
@@ -90,9 +91,9 @@ def visible_layers(metadata, rows):
 
 def live_properties(cache, directory):
     """Actual GTK load + actual adapter expansion; only UI/pipe I/O mocked."""
-    from floe import cache as cache_mod
-    from floe.rust_render import RustRenderWorker, _pattern_fill
-    from floe.jobdeck.render import DeckRenderWorker
+    from floe_oracle import cache as cache_mod
+    from floe_oracle.rust_render import RustRenderWorker, _pattern_fill
+    from floe_oracle.jobdeck.render import DeckRenderWorker
     directory.mkdir()
     props = cache_mod.load_layer_props(getattr(cache, "props_src", cache.src))[0]
     gui = gtk_view(copy.deepcopy(cache.meta), props)
@@ -217,7 +218,7 @@ def main(fixture):
             else:
                 source.with_suffix(".layerprops").write_text("0 red solid ignored 1 1\n")
                 Path(str(source) + ".layerprops").write_text(text)
-            from floe.cache import Cache
+            from floe_oracle.cache import Cache
             cache = Cache(str(source))
             cache.load()
             views.append(dict(source=str(source), visible=visible_layers(meta, fillpat.parse_layerprops(text)),

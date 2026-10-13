@@ -20,7 +20,8 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from floe import drc, svrf
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (docs/SHARED_APP_LAYER.ko.md P3)
+from floe_oracle import drc, svrf
 from validate_app_drc import fingerprint
 
 APP = ROOT / "rust/target/release/floe2-web"

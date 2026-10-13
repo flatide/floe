@@ -19,7 +19,7 @@ from validate_app_render import APP, INDEX, RENDERD, ROOT, digest, wait_marker
 
 
 def invoke(args, env, code=0, python=False, stdin=None, cwd=ROOT):
-    binary = [sys.executable, "-B", "-m", "floe2"] if python else [str(APP)]
+    binary = [sys.executable, "-B", "-m", "floe_oracle.floe2"] if python else [str(APP)]
     p = subprocess.run(binary + list(map(str, args)), env=env, cwd=cwd,
                        input=stdin, capture_output=True, text=True, timeout=60)
     assert p.returncode == code, (args, p.returncode, p.stdout, p.stderr)
@@ -242,7 +242,8 @@ def main(fixture):
         (work / "oracle-temp").mkdir()
         env = {k:v for k,v in os.environ.items() if not k.startswith("FLOE_")}
         env.update(PATH="", FLOE_INDEX_BIN=str(INDEX), FLOE_RENDERD_BIN=str(RENDERD), FLOE_PRODUCT="floe2",
-                   PYTHONPATH=str(ROOT), PYTHONDONTWRITEBYTECODE="1", TMPDIR=str(temp))
+                   PYTHONPATH=os.pathsep.join([str(ROOT / "tools" / "oracle"), str(ROOT)]),
+                   PYTHONDONTWRITEBYTECODE="1", TMPDIR=str(temp))
         invoke(["index", source, "--jobs=2"], env)
         for name,dbu,w,h,layers in (("chipA.oas",5e-5,2000,2550,[(123,43),(456,0)]),
                                    ("chipB.oas",.001,1000,1000,[(456,0),(7,2)]), ("mark.oas",.002,100,100,[(999,0)])):

@@ -109,9 +109,10 @@ def refinement_oracle():
     precedence rather than reimplementing them in the native test driver.
     """
     sys.path.insert(0, str(ROOT))
-    from floe import cli, rust_render
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (docs/SHARED_APP_LAYER.ko.md P3)
+    from floe_oracle import cli, rust_render
     parser = legacy_parsers()["view"]
-    tree = ast.parse((ROOT / "floe/cli.py").read_text())
+    tree = ast.parse((ROOT / "tools/oracle/floe_oracle/cli.py").read_text())
     method = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "cmd_view")
     cut = next(i for i, n in enumerate(method.body) if isinstance(n, ast.Assign)
                and any(isinstance(t, ast.Name) and t.id == "server" for t in n.targets))
@@ -120,7 +121,7 @@ def refinement_oracle():
     scope = dict(vars(cli))
     exec(compile(ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[])),
                  "GTK refinement CLI prefix", "exec"), scope)
-    tree = ast.parse((ROOT / "floe/rust_render.py").read_text())
+    tree = ast.parse((ROOT / "tools/oracle/floe_oracle/rust_render.py").read_text())
     worker = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "RustRenderWorker")
     init = next(n for n in worker.body if isinstance(n, ast.FunctionDef) and n.name == "__init__")
     assignment, = [n for n in init.body if isinstance(n, ast.Assign)
@@ -140,8 +141,9 @@ def oracle(work):
     # Execute the real policy prefix, stopping before sockets, GUI or indexing.
     # Only test-owned empty paths are inspected; no monkey-patched policy math.
     sys.path.insert(0, str(ROOT))
-    from floe import cli
-    tree = ast.parse((ROOT / "floe/cli.py").read_text())
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (docs/SHARED_APP_LAYER.ko.md P3)
+    from floe_oracle import cli
+    tree = ast.parse((ROOT / "tools/oracle/floe_oracle/cli.py").read_text())
     method = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "cmd_view")
     cut = next(i for i, n in enumerate(method.body) if isinstance(n, ast.Assign)
                and any(isinstance(t, ast.Name) and t.id == "server" for t in n.targets))

@@ -15,8 +15,9 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from floe.jobdeck import parser, geom, color, render
-from floe.jobdeck.viewer import DeckCache, level_rows
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (docs/SHARED_APP_LAYER.ko.md P3)
+from floe_oracle.jobdeck import parser, geom, color, render
+from floe_oracle.jobdeck.viewer import DeckCache, level_rows
 import validate_jobdeck as fixtures
 
 

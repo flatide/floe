@@ -9,7 +9,7 @@ import json
 import os
 from pathlib import Path
 from cache_test_paths import drc_pack
-from floe.cachepath import db_name_of, db_path_of
+from floe_oracle.cachepath import db_name_of, db_path_of
 import random
 import shutil
 import signal
@@ -20,7 +20,8 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from floe import drc
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (docs/SHARED_APP_LAYER.ko.md P3)
+from floe_oracle import drc
 from validate_drc_ice import DB
 
 
@@ -62,7 +63,8 @@ def ascii_cli(cli, sources, work, env):
         for flags in ([], ["--list"]):
             got = subprocess.run([str(cli), "drc", str(source), *flags], env=env,
                                  capture_output=True, text=True, timeout=15)
-            want = subprocess.run([sys.executable, "-m", "floe", "drc", str(source), *flags], cwd=ROOT,
+            want = subprocess.run([sys.executable, "-m", "floe_oracle", "drc", str(source), *flags], cwd=ROOT,
+                                  env=dict(os.environ, PYTHONPATH=os.pathsep.join([str(ROOT / "tools" / "oracle"), str(ROOT)])),
                                   capture_output=True, text=True, timeout=15)
             assert got.returncode == want.returncode == 0, (got.stderr, want.stderr)
             assert got.stdout == want.stdout, (source, flags, got.stdout[:500], want.stdout[:500])

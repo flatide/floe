@@ -17,13 +17,14 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from floe.cache import save_shared_props, shared_props_paths
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (docs/SHARED_APP_LAYER.ko.md P3)
+from floe_oracle.cache import save_shared_props, shared_props_paths
 from floe.fillpat import format_layerprops
-from floe.jobdeck.color import MODE_LEVEL
+from floe_oracle.jobdeck.color import MODE_LEVEL
 
 
 def props_source(source, mode):
-    tree = ast.parse((ROOT / "floe/jobdeck/viewer.py").read_text())
+    tree = ast.parse((ROOT / "tools/oracle/floe_oracle/jobdeck/viewer.py").read_text())
     functions = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "props_src"]
     assert len(functions) == 1
     functions[0].decorator_list = []

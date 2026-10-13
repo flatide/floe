@@ -19,8 +19,10 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from floe import fillpat, rust_render
-from floe.jobdeck.render import DeckRenderWorker
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (docs/SHARED_APP_LAYER.ko.md P3)
+from floe import fillpat
+from floe_oracle import rust_render
+from floe_oracle.jobdeck.render import DeckRenderWorker
 
 
 def cases():

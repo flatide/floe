@@ -15,7 +15,8 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from floe.jobdeck.sources import SourceCatalog, file_header
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (docs/SHARED_APP_LAYER.ko.md P3)
+from floe_oracle.jobdeck.sources import SourceCatalog, file_header
 from validate_jobdeck import DECK, FORMAT_DECK, build_oas, build_thin_oas
 from validate_vfs import read_ovm
 
@@ -26,7 +27,7 @@ NAMES = ("chipA.oas", "chipB.oas", "mark.oas")
 
 
 def run(args, env, code=0, python=False):
-    command = [sys.executable, "-B", "-m", "floe2"] if python else [str(APP)]
+    command = [sys.executable, "-B", "-m", "floe_oracle.floe2"] if python else [str(APP)]
     p = subprocess.run(command + list(map(str, args)), cwd=ROOT, env=env,
                        text=True, capture_output=True, timeout=60)
     assert p.returncode == code, (args, p.returncode, p.stdout, p.stderr)
@@ -262,7 +263,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="floe-app-deck sources 한 글 ") as td:
         work = Path(td)
         env = {k: v for k, v in os.environ.items() if not k.startswith("FLOE_")}
-        env.update(FLOE_INDEX_BIN=str(INDEX), PATH="", PYTHONPATH=str(ROOT), PYTHONDONTWRITEBYTECODE="1")
+        env.update(FLOE_INDEX_BIN=str(INDEX), PATH="", PYTHONPATH=os.pathsep.join([str(ROOT / "tools" / "oracle"), str(ROOT)]), PYTHONDONTWRITEBYTECODE="1")
         header_gate(work / "headers", env)
         index_gate(work, env)
         signal_gate(work, env)

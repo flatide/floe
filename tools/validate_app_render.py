@@ -17,7 +17,8 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from floe.cache import Cache
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (docs/SHARED_APP_LAYER.ko.md P3)
+from floe_oracle.cache import Cache
 
 APP = ROOT / "rust/target/release/floe2-web"
 INDEX = ROOT / "rust/target/release/floe-index"
@@ -25,7 +26,7 @@ RENDERD = ROOT / "rust/target/release/floe-renderd"
 
 
 def run(args, env, code=0, python=False):
-    cmd = ([sys.executable, "-B", "-m", "floe2"] if python else [str(APP)])
+    cmd = ([sys.executable, "-B", "-m", "floe_oracle.floe2"] if python else [str(APP)])
     p = subprocess.run(cmd + list(map(str, args)), cwd=ROOT, env=env,
                        text=True, capture_output=True, timeout=50)
     assert p.returncode == code, (cmd, args, p.returncode, p.stdout, p.stderr)
@@ -159,7 +160,7 @@ def main(fixture):
         temp.mkdir()
         env = {k: v for k, v in os.environ.items() if not k.startswith("FLOE_")}
         env.update(FLOE_INDEX_BIN=str(INDEX), FLOE_RENDERD_BIN=str(RENDERD),
-                   PATH="", PYTHONPATH=str(ROOT), PYTHONDONTWRITEBYTECODE="1",
+                   PATH="", PYTHONPATH=os.pathsep.join([str(ROOT / "tools" / "oracle"), str(ROOT)]), PYTHONDONTWRITEBYTECODE="1",
                    TMPDIR=str(temp))
         for command in ("info", "render", "probe"):
             assert "Usage:" in run([command, "--help"], env).stdout

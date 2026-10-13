@@ -22,7 +22,8 @@ from validate_app_render import APP, INDEX, RENDERD, ROOT, digest, wait_marker
 from validate_app_captures import fake_worker, invoke
 
 sys.path.insert(0, str(ROOT))
-from floe import drc, fe_embed as fe
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (docs/SHARED_APP_LAYER.ko.md P3)
+from floe_oracle import drc, fe_embed as fe
 
 RULE = "RULE / 한글"
 
@@ -212,7 +213,7 @@ def main():
         (work / "oracle-temp").mkdir()
         source = work / "한 글.oas"
         shutil.copyfile(sys.argv[1], source)
-        env = dict(os.environ, PATH="", PYTHONPATH=str(ROOT), FLOE_REVIEWER="drc-capture-test",
+        env = dict(os.environ, PATH="", PYTHONPATH=os.pathsep.join([str(ROOT / "tools" / "oracle"), str(ROOT)]), FLOE_REVIEWER="drc-capture-test",
                    FLOE_RENDERD_BIN=str(RENDERD), FLOE_INDEX_BIN=str(INDEX),
                    FLOE_RUST_JOBS="1", FLOE_RUST_RASTER_JOBS="4", FLOE_RUST_ROUND_PAGES=str(1 << 30),
                    TMPDIR=str(runtime), PYTHONDONTWRITEBYTECODE="1")

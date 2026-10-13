@@ -116,7 +116,8 @@ def legacy_parsers():
     # Capture the actual rust_only constructor, stopping before dispatch. This
     # keeps helper-defined flags and conditional exclusions in the inventory.
     sys.path.insert(0, str(ROOT))
-    from floe.cli import main
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (docs/SHARED_APP_LAYER.ko.md P3)
+    from floe_oracle.cli import main
     class Captured(BaseException):
         pass
     found = []
@@ -134,7 +135,7 @@ def legacy_parsers():
         ("-h", "--help"), ("--version",)}
     parsers = dict(next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction)).choices)
     assert set(parsers) == set(SURFACE) - {"fe-embed"}, "Public command set changed"
-    from floe.fe_embed import build_parser
+    from floe_oracle.fe_embed import build_parser
     parsers["fe-embed"] = build_parser()
     return parsers
 

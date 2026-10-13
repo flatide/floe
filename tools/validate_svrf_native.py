@@ -18,7 +18,8 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from floe import svrf
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (docs/SHARED_APP_LAYER.ko.md P3)
+from floe_oracle import svrf
 import validate_svrf as original_gate
 
 APP = ROOT / "rust/target/release/floe2-web"

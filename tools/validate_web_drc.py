@@ -17,7 +17,7 @@ from validate_app_drc import fingerprint
 from validate_drc_ice import DB
 from validate_web_drc_selection import validate_selection
 from validate_web_drc_filters import validate_filters
-from floe import drc
+from floe_oracle import drc
 
 
 def main(fixture, ascii=False):

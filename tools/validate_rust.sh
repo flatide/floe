@@ -158,7 +158,10 @@ gates_for() {
             # feature/jobdeck-drc's Python modules: the analysis's reference
             echo drc_analysis ;;
         tools/oracle/floe_oracle/cli.py|tools/oracle/floe_oracle/product.py|tools/oracle/floe_oracle/__main__.py|tools/oracle/floe_oracle/__init__.py)
-            echo "python jobdeck occupancy cell_tree index_lock rust_renderer floe2" ;;
+            echo "python jobdeck occupancy cell_tree index_lock rust_renderer floe2 app_cli app_render app_captures app_jobdeck_sources" ;;
+        tools/oracle/floe_oracle/floe2.py)
+            # the Python floe2 command line as the web's app gates' reference
+            echo "app_cli app_render app_captures app_jobdeck_sources" ;;
         tools/*)
             # benches, experiments and generators no gate runs
             echo "" ;;

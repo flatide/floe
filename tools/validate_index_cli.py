@@ -73,7 +73,8 @@ def main():
     # Stub the writer: no source/cache or KLayout runtime is touched here.
     from unittest.mock import patch
     sys.path.insert(0, str(ROOT))
-    from floe import cli
+    sys.path.insert(0, str(ORACLE))  # floe_oracle (P3)
+    from floe_oracle import cli
     with patch.object(cli, "_cmd_index_legacy", return_value=0) as legacy:
         cli.main(["index", "/synthetic/unused.oas", "--legacy"], rust_only=False)
         assert legacy.call_count == 1 and legacy.call_args.args[0].occupancy is False

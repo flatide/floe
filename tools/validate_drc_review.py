@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 from cache_test_paths import drc_pack
-from floe.cachepath import db_name_of
+from floe_oracle.cachepath import db_name_of
 import shutil
 import subprocess
 import sys
@@ -13,7 +13,8 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from floe import drc
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (docs/SHARED_APP_LAYER.ko.md P3)
+from floe_oracle import drc
 from validate_drc_ice import DB
 
 

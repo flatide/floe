@@ -15,7 +15,7 @@ import tempfile
 from validate_web_cli import APP, INDEX, RENDERD, ROOT, Client, read_json, wait
 from validate_app_svrf import custom_fixture, METRICS, run
 from validate_app_drc import fingerprint
-from floe import drc, svrf
+from floe_oracle import drc, svrf
 
 
 def fixtures(work, ascii=False):

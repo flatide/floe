@@ -23,7 +23,8 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parent.parent
 APP = ROOT / "rust/target/release/floe2-web"
 sys.path.insert(0, str(ROOT))
-from floe import fe_embed as fe
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (docs/SHARED_APP_LAYER.ko.md P3)
+from floe_oracle import fe_embed as fe
 
 
 def chunk(kind, data):
@@ -62,7 +63,7 @@ def rich_png():
 
 
 def run(args, env, code=0, stdin=None, python=False, **kwargs):
-    command = [sys.executable, "-B", "-m", "floe.fe_embed"] if python else [str(APP), "fe-embed"]
+    command = [sys.executable, "-B", "-m", "floe_oracle.fe_embed"] if python else [str(APP), "fe-embed"]
     result = subprocess.run(command + list(map(str, args)), cwd=ROOT, env=env,
                             input=stdin, capture_output=True, text=True, timeout=30, **kwargs)
     assert result.returncode == code, (args, result.returncode, result.stdout, result.stderr)

@@ -14,9 +14,9 @@ from validate_app_jobdeck_plan import difference
 from validate_jobdeck import (DECK, DENSE_DECK, FRAMES_DECK, MISSING_LAYER_DECK,
                              THIN_DECK, build_dense_oas, build_hier2_oas,
                              build_oas, build_thin_oas)
-from floe.jobdeck.viewer import DeckCache
-from floe.jobdeck.render import DeckRenderWorker
-from floe.shots import ShotRunner
+from floe_oracle.jobdeck.viewer import DeckCache
+from floe_oracle.jobdeck.render import DeckRenderWorker
+from floe_oracle.shots import ShotRunner
 from floe import fillpat
 from validate_layerprops import visible_layers, live_properties, gtk_view
 
@@ -95,7 +95,7 @@ def main():
         env = {k: v for k, v in os.environ.items() if not k.startswith("FLOE_")}
         env.update(PATH="", FLOE_INDEX_BIN=str(INDEX), FLOE_RENDERD_BIN=str(RENDERD),
                    FLOE_PRODUCT="floe2",
-                   PYTHONPATH=str(ROOT), PYTHONDONTWRITEBYTECODE="1", TMPDIR=str(temp))
+                   PYTHONPATH=os.pathsep.join([str(ROOT / "tools" / "oracle"), str(ROOT)]), PYTHONDONTWRITEBYTECODE="1", TMPDIR=str(temp))
         for name, dbu, w, h, layers in [
                 ("chipA.oas", 5e-5, 2000, 2550, [(123, 43), (456, 0)]),
                 ("chipB.oas", .001, 1000, 1000, [(456, 0), (7, 2)]),

@@ -5,8 +5,9 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (docs/SHARED_APP_LAYER.ko.md P3)
 
-from floe.cachepath import pack_path, vfs_cache_dir
+from floe_oracle.cachepath import pack_path, vfs_cache_dir
 
 
 def vfs_cache(source):

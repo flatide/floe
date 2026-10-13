@@ -12,8 +12,9 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from floe.jobdeck import color, plan, render
-from floe.jobdeck.viewer import DeckCache, level_rows
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (docs/SHARED_APP_LAYER.ko.md P3)
+from floe_oracle.jobdeck import color, plan, render
+from floe_oracle.jobdeck.viewer import DeckCache, level_rows
 from validate_jobdeck import DECK, FORMAT_DECK, MISSING_LAYER_DECK, build_oas
 
 APP = ROOT / "rust/target/release/floe2-web"
@@ -99,7 +100,7 @@ def main():
         index_env = dict(os.environ, PATH="", FLOE_INDEX_BIN=str(INDEX))
         env = dict(index_env, FLOE_INDEX_BIN="/invalid/index/must/not/run",
                    FLOE_RENDERD_BIN="/invalid/renderd/must/not/run",
-                   PYTHONDONTWRITEBYTECODE="1", PYTHONPATH=str(ROOT))
+                   PYTHONDONTWRITEBYTECODE="1", PYTHONPATH=os.pathsep.join([str(ROOT / "tools" / "oracle"), str(ROOT)]))
         for name in ("chipA.oas", "chipB.oas", "mark.oas"):
             run(["index", sources / name, "--jobs", "2"], index_env)
         saved = work / "palette.json"
