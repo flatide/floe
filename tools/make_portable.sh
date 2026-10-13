@@ -224,7 +224,10 @@ if [ -n "${FLOE_INDEX_BIN:-}" ] || [ -n "${FLOE_RENDERD_BIN:-}" ] || \
    [ -n "${FLOE2_BIN:-}" ]; then
     if [ -z "${FLOE_INDEX_BIN:-}" ] || [ -z "${FLOE_RENDERD_BIN:-}" ] || \
        [ -z "${FLOE2_BIN:-}" ]; then
-        echo "FLOE_INDEX_BIN and FLOE_RENDERD_BIN must be specified together (with FLOE2_BIN)"
+        # optional: none of them = build here (running floe2 needs none)
+        echo "FLOE2_BIN, FLOE_INDEX_BIN and FLOE_RENDERD_BIN go together: all three"
+        echo "to bundle binaries built elsewhere, or none (unset) to build them here"
+        echo "(now: FLOE2_BIN=${FLOE2_BIN:-} FLOE_INDEX_BIN=${FLOE_INDEX_BIN:-} FLOE_RENDERD_BIN=${FLOE_RENDERD_BIN:-})"
         exit 1
     fi
 elif [ "$FLOE_PORTABLE_RUST" = gnu ]; then
@@ -599,14 +602,20 @@ info/render/clip/probe/drc/jobdeck 명령만 - 뷰어는 floe2 view, KLayout
 
 편의상 링크: ln -s /opt/${FLOE_PORTABLE_PRODUCT}-portable/floe2 /usr/local/bin/floe2
 
+실행은 번들 최상위의 floe2(런처)로 한다: 런처가 번들의 Python·GTK
+환경을 잡는다. runtime/bin/floe2를 직접 실행해도 뷰어는 런처를 거쳐
+뜬다. FLOE2_BIN·FLOE_INDEX_BIN·FLOE_RENDERD_BIN은 설정하지 않는다 -
+floe2와 뷰어가 runtime/bin에서 찾고, 설정돼 있으면 그 경로가 이긴다.
+
 코드 업데이트: 새 floe/ 패키지(GTK 뷰어)를
     runtime/lib/python*/site-packages/floe
 에 덮어쓰고, 같은 체크아웃에서 빌드한 세 바이너리를
     runtime/bin/floe2
     runtime/bin/floe-index
     runtime/bin/floe-renderd
-로 함께 교체한다 (chmod +x). 파이썬 패키지와 러스트 바이너리는
-포맷 버전이 한 쌍이라 항상 같이 움직여야 한다. 런타임은 재사용.
+로 함께 교체한다 (열린 뷰어를 닫고 install -m 755). 파이썬 패키지와
+러스트 바이너리는 포맷 버전이 한 쌍이라 항상 같이 움직여야 한다.
+런타임은 재사용.
 
 문제 해결:
 - "GLIBC_x.xx not found": 호스트 glibc가 ${FLOOR} 미만 → 사용 불가 (selfcheck 확인)

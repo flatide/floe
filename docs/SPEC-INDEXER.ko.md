@@ -36,10 +36,14 @@ jobdeck은 `floe2 index deck.jb`라 기본이 그대로 적용)로 실행한다.
 교체할 권한이다. 현재 cache에 `--coverage`를 지정하면 `--coverage-only`로
 `design.ovc`만 비파괴 추가한다.
 
-binary 검색 순서는 `FLOE_INDEX_BIN`, 개발 트리
-`rust/target/release/floe-index`, Python 실행 파일 인접 `floe-index`, PATH다.
-명시한 `FLOE_INDEX_BIN`이 실행 불가하면 다른 후보로 폴스루하지 않고 hard
-error다. 전체 누락도 빌드/설치 지침을 포함한 hard error다. 동결된 Python/KLayout `.tiles`
+binary 검색 순서는 `FLOE_INDEX_BIN`, (floe2가 `rust/target/<profile>/`에서
+돌면) 그 개발 트리의 `rust/target/release/floe-index`, floe2 인접
+`floe-index`(번들의 `runtime/bin`, 교차 빌드의 `target/<triple>/release`),
+PATH다(app-core `native::Discovery`). GTK 뷰어는 자기를 띄운 floe2
+(`FLOE2_BIN`)를 기준으로 같은 후보를 먼저 보고, 그 뒤 자기 체크아웃의
+`rust/target/release`, Python 실행 파일 인접, PATH를 본다(`floe/vfsclient.py`,
+0.12.354). 명시한 `FLOE_INDEX_BIN`이 실행 불가하면 다른 후보로 폴스루하지
+않고 hard error다. 전체 누락도 빌드/설치 지침을 포함한 hard error다. 동결된 Python/KLayout `.tiles`
 인덱서는 명시적 `--legacy`에서만 사용하며 그 전용 옵션을 기본 Rust 경로와
 섞으면 hard error다.
 

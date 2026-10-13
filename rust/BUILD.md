@@ -114,7 +114,7 @@ sha256sum -c dist/floe-index-linux-x86_64.sha256
 ./dist/floe-index-linux-gnu scan some.oas 16      # 스모크
 ```
 
-`floe-renderd-linux-*`는 Python runtime 옆에 `floe-renderd` 이름으로 배치하거나 `FLOE_RENDERD_BIN`으로 지정한다.
+`floe2-linux-*`·`floe-index-linux-*`·`floe-renderd-linux-*`는 같은 suffix 것끼리 suffix를 떼고 한 폴더(portable의 `runtime/bin`)에 둔다 — floe2와 GTK 뷰어가 floe2 옆에서 floe-index·floe-renderd를 찾는다. `FLOE_INDEX_BIN`·`FLOE_RENDERD_BIN`은 다른 위치를 강제할 때만 쓴다(설정하면 그 경로가 이긴다).
 
 반입한 바이너리가 어떤 빌드인지는 실행 시 첫 줄 스탬프로 확인한다:
 `[floe-index <버전> [<git>] (gnu)]` / `(musl-static)`. gnu 바이너리가

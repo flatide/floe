@@ -73,20 +73,34 @@ FLOE_PORTABLE_KLAYOUT=1 tools/make_portable.sh
 # 개발·oracle 전용 번들(릴리즈 아님): floe(KLayout)와 floe2 launcher 동봉
 ```
 
-기본 bundle에는 두 Python 패키지가 함께 들어간다. `floe2`가 공통 구현인 `floe`를
-import하기 때문이며, KLayout wheel은 포함하지 않는다. Python 패키지와
-`floe-index`/`floe-renderd`는 항상 같은 checkout의 조합으로 배포한다.
-Python 패키지, `floe-index`, `floe-renderd`의 버전도 모두 동일해야 한다.
-adapter는 daemon의 `ready version=...` 응답을 `floe.RENDERD_VERSION`과
-비교하고, 다르면 첫 open/render 전에 선택된 바이너리 경로와 함께 명시 오류를
-낸다. 따라서 이전에 설치한 `0.1.0` renderd가 탐색 순서에서 잡혀 새 repetition
-처리 코드를 우회하는 상태는 첫 화면의 도형 오류로 위장하지 않는다.
+기본 bundle에는 GTK 뷰어인 Python 패키지 `floe`와 Rust 바이너리 셋(`floe2`,
+`floe-index`, `floe-renderd`)이 들어가며, KLayout wheel은 포함하지 않는다.
+Python 패키지와 세 바이너리는 항상 같은 checkout의 조합으로 배포한다.
+`floe2`는 renderd의 `ready version=...` 응답을 자기가 빌드될 때의 renderd
+버전(`floe.RENDERD_VERSION`과 같은 값)과 비교하고, 다르면 첫 open/render
+전에 `expected renderd X, got Y`로 멈춘다. 따라서 이전에 설치한 renderd가
+탐색 순서에서 잡혀 새 처리 코드를 우회하는 상태는 첫 화면의 도형 오류로
+위장하지 않는다.
 `__version__`은 매 push마다 오르고 `RENDERD_VERSION`은 Rust 재빌드 push에만
 오른다; `validate_floe2.py`가 `RENDERD_VERSION == 두 Cargo 버전`과
 `__version__ >= RENDERD_VERSION`을 고정한다.
 Rust 바이너리는 portable의 glibc 하한이 빌드 호스트 버전으로 상승하지 않도록
-기본적으로 `x86_64-unknown-linux-musl` 정적 타깃으로 빌드한다. 별도 바이너리를
-쓸 때는 `FLOE_INDEX_BIN`과 `FLOE_RENDERD_BIN`을 반드시 함께 지정한다.
+기본적으로 `x86_64-unknown-linux-musl` 정적 타깃으로 빌드한다
+(`FLOE_PORTABLE_RUST=gnu`는 glibc 2.28 기준 링크). 다른 곳에서 빌드한
+바이너리를 넣을 때만 `FLOE2_BIN`·`FLOE_INDEX_BIN`·`FLOE_RENDERD_BIN` 셋을
+함께 지정한다(그때 빌드를 건너뛴다; 일부만 있으면 거부).
+실행할 때는 이 변수들을 설정하지 않는다. `floe2`는 자기 옆(번들의
+`runtime/bin`)의 `floe-index`·`floe-renderd`를 쓰고(app-core
+`native::Discovery`), 뷰어도 자기를 띄운 `floe2` 기준으로 같은 곳을 본다
+(Help > About, 셀 트리 계층 색인, DRC pack; `floe/vfsclient.py`
+`beside_floe2`). 설정해 두면 그 경로가 이겨, 번들을 갱신한 뒤에도 옛
+바이너리를 가리킬 수 있다. 번들은 최상위 `./floe2`(런처)로 실행한다 —
+런처가 번들의 Python·GTK 환경을 잡는다. `runtime/bin/floe2`를 직접
+실행해도 뷰어는 그 런처를 거쳐 뜬다(0.12.354; 그 전에는 호스트의
+`python3`로 떠서 RHEL 8의 Python 3.6에서 About이 실패했다). 번들을
+체크아웃 안에 풀어도(tarball이 저장소 루트에 생긴다) 번들의 뷰어는 번들
+자신의 floe 패키지다 — 그 전에는 체크아웃의 `floe/`가 섞였다. 뷰어는
+Python 3.7 미만이면 그 인터프리터를 밝히고 멈춘다.
 빌드 스크립트는 조립된 runtime의 `selfcheck`가 성공해야만 tar를 생성한다.
 KLayout을 포함한 `floe-portable`은 두 renderer가 모두 있으므로 `./floe`와
 `./floe2`를 함께 제공한다. Rust-only 기본 `floe2-portable`은 `./floe2`만 제공한다.

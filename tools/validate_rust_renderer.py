@@ -1759,6 +1759,45 @@ assert not hasattr(gui, "live_caps")
                 lines[0].startswith("floe-index unavailable:"), lines)
             self.assertTrue(
                 lines[1].startswith("floe-renderd unavailable:"), lines)
+            # no override: the binaries beside the floe2 that started the
+            # viewer (FLOE2_BIN) - floe2's own - win over this checkout's
+            # build (user 2026-10-13: About found none of the bundle's)
+            env = {"FLOE2_BIN": os.path.join(directory, "floe2")}
+            with mock.patch.dict(os.environ, env, clear=False):
+                os.environ.pop("FLOE_INDEX_BIN", None)
+                os.environ.pop("FLOE_RENDERD_BIN", None)
+                self.assertEqual(gui.component_versions(None), [
+                    "floe-index 9.9.9 abc (native)",
+                    "floe-renderd 0.12.11",
+                ])
+
+    def test_the_viewer_finds_the_binaries_floe2_runs(self):
+        """floe/vfsclient.py beside_floe2 = app-core native::Discovery: a
+        rust/target/<profile> floe2 takes its checkout's release build, a
+        cross build (target/<triple>/release) the one beside it."""
+        from floe import vfsclient
+        with tempfile.TemporaryDirectory() as directory:
+            target = os.path.join(directory, "rust", "target")
+
+            def stub(*parts):
+                path = os.path.join(target, *parts)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="ascii") as script:
+                    script.write("#!/bin/sh\n")
+                os.chmod(path, 0o755)
+                return path
+
+            release = stub("release", "floe-index")
+            stub("debug", "floe-index")
+            triple = stub("x86_64-unknown-linux-gnu", "release", "floe-index")
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("FLOE_INDEX_BIN", None)
+                for floe2, want in (
+                        (os.path.join(target, "debug", "floe2"), release),
+                        (os.path.join(target, "x86_64-unknown-linux-gnu",
+                                      "release", "floe2"), triple)):
+                    os.environ["FLOE2_BIN"] = floe2
+                    self.assertEqual(vfsclient.find_binary(), want)
 
     def test_converts_patterns_and_preserves_special_fills(self):
         solid = "\n".join(["*" * 16] * 16)

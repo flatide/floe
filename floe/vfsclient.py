@@ -11,12 +11,34 @@ import shutil
 import sys
 
 
+def beside_floe2(name):
+    """Where the floe2 that started this viewer (FLOE2_BIN, set by
+    rust/floe2/src/gtk.rs) finds its `name`, as app-core native::Discovery
+    looks: its checkout's rust/target/release when it is a
+    rust/target/<profile> build, else beside it - the bundle's runtime/bin,
+    a cross build's target/<triple>/release. So the viewer runs and Help >
+    About names the binaries floe2 runs, however floe2 was started."""
+    floe2 = os.environ.get("FLOE2_BIN")
+    if not floe2:
+        return []
+    floe2 = os.path.abspath(floe2)
+    root = floe2
+    for _ in range(4):
+        root = os.path.dirname(root)
+    candidates = []
+    if floe2.startswith(os.path.join(root, "rust", "target") + os.sep):
+        candidates.append(os.path.join(root, "rust", "target", "release", name))
+    candidates.append(os.path.join(os.path.dirname(floe2), name))
+    return candidates
+
+
 def find_binary():
     """Find the matched floe-index used by indexing and VFS clients.
 
-    An explicit override wins, followed by the development build, the
-    portable slot beside Python, and PATH.  Keeping PATH last prevents an
-    older system binary from silently taking precedence over the package.
+    An explicit override wins, followed by floe2's own (beside_floe2), the
+    development build, the portable slot beside Python, and PATH.  Keeping
+    PATH last prevents an older system binary from silently taking
+    precedence over the package.
     """
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     candidates = []
@@ -27,6 +49,7 @@ def find_binary():
         raise RuntimeError(
             "FLOE_INDEX_BIN is set but is not an executable file: %s" %
             configured)
+    candidates.extend(beside_floe2("floe-index"))
     candidates.extend((
         os.path.join(here, "rust", "target", "release", "floe-index"),
         os.path.join(os.path.dirname(sys.executable), "floe-index"),
@@ -40,18 +63,20 @@ def find_binary():
     raise RuntimeError(
         "floe-index binary not found; set FLOE_INDEX_BIN, build it with "
         "'cd rust && cargo build --release -p floe-index', or install it "
-        "beside Python/on PATH (checked: %s)" %
+        "beside floe2 or Python/on PATH (checked: %s)" %
         ", ".join(candidates or ["no candidates"]))
 
 
 def find_renderd():
     """The floe-renderd the view service launches (Help > About probes
-    it): FLOE_RENDERD_BIN, else the development build, a dist build, the
-    portable slot beside Python, and PATH."""
+    it): FLOE_RENDERD_BIN, else floe2's own (beside_floe2), the
+    development build, a dist build, the portable slot beside Python, and
+    PATH."""
     candidates = []
     configured = os.environ.get("FLOE_RENDERD_BIN")
     if configured:
         candidates.append(configured)
+    candidates.extend(beside_floe2("floe-renderd"))
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     candidates.extend((
         os.path.join(here, "rust", "target", "release", "floe-renderd"),

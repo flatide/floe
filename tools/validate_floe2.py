@@ -442,7 +442,7 @@ print(json.dumps([instance.APP, instance.socket_address(":77"),
                         "__version__", "RENDERD_VERSION"),
                           "floe/%s:%d imports %s, not a viewer module"
                           % (f, node.lineno, name))
-    check("FLOE_INDEX_BIN and FLOE_RENDERD_BIN must be specified together"
+    check("FLOE2_BIN, FLOE_INDEX_BIN and FLOE_RENDERD_BIN go together"
           in portable_source,
           "portable permits a mismatched Rust binary override")
     package_version = run(
@@ -537,6 +537,76 @@ print(json.dumps([instance.APP, instance.socket_address(":77"),
         check(linked.returncode == 0 and
               linked.stdout.strip() == "rust --version python=%s" % python3,
               "portable floe2 convenience symlink lost its runtime")
+    # the bundle's runtime/bin/floe2 run by hand (user 2026-10-13: Help >
+    # About failed on the host's Python 3.6): the viewer goes through the
+    # launcher - its Python and GTK environment - once; the shared
+    # commands run as they are. Unpacked in a checkout (make_portable.sh
+    # leaves the tarball in the repo root), the bundle's floe2 still runs
+    # the bundle's floe package, not the checkout's (no PYTHONPATH)
+    with tempfile.TemporaryDirectory(prefix="floe2-runtime-bin-") as td:
+        checkout = Path(td).resolve()
+        (checkout / "floe").mkdir()
+        (checkout / "floe" / "gui.py").write_text("")
+        bundle = checkout / "floe2-portable"
+        bin_dir = bundle / "runtime" / "bin"
+        bin_dir.mkdir(parents=True)
+        inner = bin_dir / "floe2"
+        shutil.copy2(FLOE2, inner)
+        (bin_dir / "python3").write_text(
+            '#!/bin/sh\necho "bundle python $* home=$PYTHONHOME '
+            'path=$PYTHONPATH"\n')
+        host = bundle / "host"
+        host.mkdir()
+        (host / "python3").write_text(
+            '#!/bin/sh\necho "host python $* path=$PYTHONPATH"\n')
+        for script in (bin_dir / "python3", host / "python3"):
+            script.chmod(0o755)
+        shutil.copy2(launcher, bundle / "floe2")
+        (bundle / "floe2").chmod(0o755)
+        inner_env = {"PATH": "%s:/usr/bin:/bin" % host,
+                     "HOME": base.get("HOME", td),
+                     "XDG_CACHE_HOME": str(bundle / "cache")}
+
+        def by_hand(*args, **extra):
+            return subprocess.run(
+                [str(inner), *args], cwd=bundle, env=dict(inner_env, **extra),
+                capture_output=True, text=True, timeout=60)
+
+        for args in (("view", "chip.oas"), ("chip.oas",)):
+            through = by_hand(*args)
+            check(through.returncode == 0 and through.stdout.strip() ==
+                  "bundle python -B -m floe.gtkview chip.oas home=%s path="
+                  % (bundle / "runtime"),
+                  "runtime/bin/floe2 %s did not start the bundle's viewer "
+                  "through its launcher: %s %s"
+                  % (" ".join(args), through.stdout, through.stderr))
+        preset = by_hand("view", "chip.oas",
+                         FLOE_GTK_PYTHON=str(host / "python3"))
+        check(preset.stdout.strip() ==
+              "host python -B -m floe.gtkview chip.oas path=",
+              "floe2 went through the launcher with FLOE_GTK_PYTHON set, "
+              "or took the checkout around the bundle: %s" % preset.stdout)
+        version = by_hand("--version")
+        check(version.returncode == 0 and version.stdout.startswith("floe2 "),
+              "runtime/bin/floe2 --version did not run as it is: %s %s"
+              % (version.stdout, version.stderr))
+        # a launcher that sets no FLOE_GTK_PYTHON: one pass, no loop
+        (bundle / "floe2").write_text(
+            '#!/bin/sh\nexec "$(dirname "$0")/runtime/bin/floe2" "$@"\n')
+        once = by_hand("view", "chip.oas")
+        check(once.stdout.strip() ==
+              "host python -B -m floe.gtkview chip.oas path=",
+              "floe2 relaunched more than once: %s %s"
+              % (once.stdout, once.stderr))
+    # the viewer on a Python too old for it says so before anything else
+    old = run(base, "-c", (
+        "import sys; sys.version_info = (3, 6, 8, 'final', 0); "
+        "from floe import gtkview; sys.exit(gtkview.main(['--help']))"),
+        ok=False)
+    check(old.returncode == 2 and "needs Python 3.7 or newer" in old.stderr
+          and "FLOE_GTK_PYTHON" in old.stderr,
+          "the viewer did not refuse Python 3.6 by name: %s %s"
+          % (old.stdout, old.stderr))
     conflict_env = dict(base, FLOE_PORTABLE_PRODUCT="floe2",
                         FLOE_PORTABLE_KLAYOUT="1")
     conflict = subprocess.run(

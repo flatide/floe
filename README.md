@@ -1152,8 +1152,12 @@ sh rust/build-linux.sh
 #     (floe2의 SQLite는 C: musl 빌드는 zig cc(cargo-zigbuild)나 musl-gcc로)
 ```
 
-- 소스 트리 밖의 바이너리는 `FLOE_INDEX_BIN`으로 지정하거나 Python 실행
-  파일 옆/`PATH`에 둔다. portable은 `runtime/bin/floe-index`에 동봉한다.
+- floe2와 GTK 뷰어는 floe-index·floe-renderd를 floe2 옆에서 찾는다(개발
+  트리의 `rust/target/release`, portable의 `runtime/bin` - 세 바이너리를
+  한 폴더에). 다른 위치는 `PATH`에 두거나 `FLOE_INDEX_BIN`·`FLOE_RENDERD_BIN`
+  으로 강제한다(설정하면 그 경로가 이긴다 - 평소에는 비워 둔다).
+  portable은 최상위 `floe2`(런처)로 실행한다; `runtime/bin/floe2`를 직접
+  실행해도 뷰어는 런처를 거쳐 뜬다.
 - musl 정적 빌드에는 musl malloc의 전역 락(전 스레드 수가 ~190초로
   수렴하는 병목)을 우회하는 스레드 캐시 allocator가 내장된다. glibc/
   macOS 빌드는 순수 시스템 allocator를 쓴다 (자체 per-thread 캐시 보유).
