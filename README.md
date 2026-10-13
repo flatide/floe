@@ -237,6 +237,10 @@ mosaic, `--batch`는 레이아웃(.oas/.gds)에도 그대로 쓰인다. 칩 on/o
   - 함께 준 옵션이 우선한다. 예: `--archival --detail high`.
   - `FLOE_RENDER_DEFAULTS=archival`이면 이것이 기본값이 된다(예전 스크립트용).
 - `--frames`/`--labels`는 뷰어처럼 `on|off`를 받는다(값 없이 쓰면 on).
+- `--layer-colors row|group`(레이아웃, 2026-10-13): 레이어 기본 색. `row`(기본)는 패널의 줄마다 다른 색, `group`은 layer 번호마다 한 색(0.12.351까지의 방식)이다.
+  - 주지 않으면 `FLOE_LAYER_COLORS`(없으면 row)를 따른다. 뷰어의 `--layer-colors`와 같은 규칙이다.
+  - layerprops의 색이 여전히 먼저다. report 맨 위의 `layer_colors`에 어느 쪽인지 남는다.
+  - jobdeck은 자기 색 체계를 쓰므로 거부한다.
 
 레이아웃 캡처의 디코드 예산(`FLOE_RUST_BUDGET_MB`, 기본 1024)은 뷰어와 같다.
 - `--detail exact`(`--archival`의 기본)는 모든 도형을 그리거나 실패한다(내보내기가 도형을 빠뜨리면 안 되므로).
@@ -629,6 +633,18 @@ GUI는 **GTK3/PyGObject** 셸이다. flateyes와 같은 폐쇄망 호스트
   터미널에 `N layers not listed …` 한 줄). `floe2 info`는 모든 쌍을
   stored shapes와 함께 보이며(0이 그런 쌍), `FLOE_EMPTY_LAYERS=show`이면
   패널도 예전처럼 모두 보인다. 잡덱의 레이어 표는 그대로다.
+  레이어의 기본 색(layerprops가 색을 정하지 않은 레이어)은 패널의 줄 순서로
+  매긴다(2026-10-13, 사용자: "연속되는 레이어는 다른 색을 가지도록"). 도형이나
+  텍스트가 있는 쌍을 (layer, datatype) 순으로 세운 순번마다 색상(hue)을
+  황금각(137.5°)씩 돌린다. 그래서 한 layer 번호의 datatype들(`2.0 2.1 2.2 2.32`)도,
+  이웃한 줄도 서로 다른 색이다. 2026-08-04부터는 layer 번호로 정해 한 그룹이 한
+  색이었다. 뷰어와 `floe2 render` 캡처(DRC 포함)가 같은 색을 쓰고, 기존 캐시도
+  다시 색인하지 않고 열 때 적용된다. 잡덱은 자기 색 규칙(레벨 색)을 그대로 쓴다.
+  그룹 안이 한 색이어야 할 때는 실행 옵션 `--layer-colors group`을 준다
+  (`floe2 view`·`floe2 render` 모두; 예전처럼 layer 번호마다 한 색). `row`가
+  기본이고, 환경 변수 `FLOE_LAYER_COLORS=row|group`으로 둘의 기본값을 함께
+  정할 수 있다. 뷰어는 이 옵션을 주면 따로 창을 연다(이미 떠 있는 창은 제 색을
+  유지한다).
   그룹이 접혀 있을 때 부모를 온/오프하면 자식도 함께 바뀐다. 그룹을
   펼치면 부모와 각 자식 datatype이 모두 개별적으로 토글된다.
   자식 없는 레이어는 마커 자리가 공백이라 모든 이름이 좌측 정렬된다.

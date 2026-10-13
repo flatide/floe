@@ -234,9 +234,11 @@ design.ovm의 배치 레코드는 부모별 BVH 순서(자식별 아님)라 "셀
 }
 ```
 
-- `layers[].color`는 로딩 시 `normalize_layer_colors`(레이어 번호 팔레트)
-  후 layerprops 오버레이(`apply_personal_colors`)를 거친다 — meta 파일
-  자체는 불변.
+- `layers[].color`는 로딩 시 `normalize_layer_colors`(패널 줄 순서 팔레트,
+  2026-10-13; 그전에는 레이어 번호 팔레트) 후 layerprops 오버레이
+  (`apply_personal_colors`)를 거친다 — meta 파일 자체는 불변. floe-index도
+  0.12.320부터 같은 팔레트로 쓰지만, 읽는 쪽(app-core catalog, 오라클)이 다시
+  매기므로 예전 캐시도 그대로 맞다.
 - frontier의 정준 파라미터(px_per_um/cut_px)는 L9 게이트가 vfsd
   `mode=frontier`로 재생해 굽기와 박스 단위 일치를 검증하는 키다.
 

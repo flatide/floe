@@ -6,6 +6,7 @@ use floe_app_core::{
     },
     render::{require_complete, RenderOptions, RenderSession},
     shots::{self, batch::Capture, Anchor, Detail, Shot, Thin},
+    styles::LayerColors,
     Error, ErrorKind, Result,
 };
 use std::collections::BTreeSet;
@@ -37,6 +38,11 @@ makes it the default, as before 0.12.350).
                             FLOE_RUST_DENSITY_STACK=off makes it off)
   --frames[=on|off] --labels[=on|off]  Cell frames, design text (default on,
                             as the viewer; jobdeck labels unsupported)
+  --layer-colors row|group  A layout's default layer colours: row = every row
+                            of the layer panel its own colour, neighbours
+                            differ (default); group = one colour per layer
+                            number, its datatypes alike (before 0.12.352);
+                            FLOE_LAYER_COLORS sets the default; layouts
   --archival                The export look; the options given still win
   --label-font-px N          6..96 (default 14)
   --out FILE                Default view.png; atomic PNG publication
@@ -100,6 +106,7 @@ pub enum Command {
         batch: Option<String>,
         levels: Option<BTreeSet<i64>>,
         drc: Option<Box<floe_app_core::drc::capture::Options>>,
+        layer_colors: Option<LayerColors>,
     },
     Probe(PathBuf),
 }
@@ -128,6 +135,9 @@ pub fn parse(args: &[String]) -> Result<Command> {
     let mut json = false;
     let mut chips = false;
     let mut levels = None;
+    // --layer-colors (a layout's default layer colours; the open's
+    // FLOE_LAYER_COLORS without it)
+    let mut layer_colors = None;
     let mut positional = false;
     let mut i = 1;
     while i < args.len() {
@@ -352,6 +362,11 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 no_value()?;
                 archival = true;
             }
+            "--layer-colors" => {
+                layer_colors = Some(LayerColors::parse(value()?).ok_or_else(|| {
+                    Error::input("--layer-colors must be row or group")
+                })?);
+            }
             _ => {
                 return Err(Error::new(
                     ErrorKind::Unsupported,
@@ -419,6 +434,12 @@ pub fn parse(args: &[String]) -> Result<Command> {
             "--density is for layouts: a jobdeck's frames draw no density under the cut",
         ));
     }
+    if layer_colors.is_some() && is_deck(&source) {
+        return Err(Error::new(
+            ErrorKind::Unsupported,
+            "--layer-colors is for layouts: a jobdeck's colours are its colour scheme's",
+        ));
+    }
     match kind {
         "info" => Ok(Command::Info {
             source,
@@ -439,6 +460,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 batch,
                 levels,
                 drc,
+                layer_colors,
             })
         }
     }
@@ -507,9 +529,13 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
             batch,
             levels,
             drc,
+            layer_colors,
         } => {
             if let Some(drc) = drc {
-                let dataset = dataset(&source, levels, cancelled)?;
+                let mut dataset = dataset(&source, levels, cancelled)?;
+                if let Some(mode) = layer_colors {
+                    dataset.set_layer_colors(mode);
+                }
                 floe_app_core::drc::capture::run(
                     &dataset,
                     &capture.shot,
@@ -521,7 +547,16 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
                 )?;
                 return Ok(0);
             }
-            return crate::capture::run(source, *capture, out, report, batch, levels, cancelled);
+            return crate::capture::run(
+                source,
+                *capture,
+                out,
+                report,
+                batch,
+                levels,
+                layer_colors,
+                cancelled,
+            );
         }
         Command::Probe(source) => {
             let l = dataset(&source, None, cancelled)?;
@@ -724,5 +759,31 @@ mod tests {
         assert!(capture.shot.frames && source == PathBuf::from("off"));
         assert!(parsed(&["render", "a.oas", "--frames=yes"]).is_err());
         assert!(parsed(&["render", "a.oas", "--archival=on"]).is_err());
+    }
+    #[test]
+    fn layer_colors_are_asked_for_a_layout() {
+        let colors = |args: &[&str]| match parsed(args) {
+            Ok(Command::Render { layer_colors, .. }) => Ok(layer_colors),
+            Ok(_) => panic!(),
+            Err(e) => Err(e.to_string()),
+        };
+        assert_eq!(colors(&["render", "a.oas"]), Ok(None));
+        assert_eq!(
+            colors(&["render", "a.oas", "--layer-colors", "group"]),
+            Ok(Some(LayerColors::Group))
+        );
+        assert_eq!(
+            colors(&["render", "a.oas", "--layer-colors=row"]),
+            Ok(Some(LayerColors::Row))
+        );
+        // a DRC capture asks it the same way
+        assert_eq!(
+            colors(&["render", "a.oas", "--drc=db", "--drc-rule=R", "--layer-colors=group"]),
+            Ok(Some(LayerColors::Group))
+        );
+        let bad = colors(&["render", "a.oas", "--layer-colors=groups"]).unwrap_err();
+        assert!(bad.contains("row or group"), "{bad}");
+        let deck = colors(&["render", "a.jb", "--layer-colors=group"]).unwrap_err();
+        assert!(deck.contains("for layouts"), "{deck}");
     }
 }

@@ -519,6 +519,8 @@ pub fn run_summary(
             "cut_px":shots[0].capture.shot.detail.cut_px(),"thin":shots[0].capture.shot.thin.name(),
             // the density under the cut drawn (--density; a jobdeck draws none)
             "density":!dataset.is_deck() && shots[0].capture.shot.density_on(),
+            // a layout's default layer colours (--layer-colors; a jobdeck: null)
+            "layer_colors":dataset.layer_colors().map(crate::styles::LayerColors::name),
             "archival":archival,"complete":complete});
         if let Dataset::Deck(deck) = dataset {
             let over_budget = doc["shots"]

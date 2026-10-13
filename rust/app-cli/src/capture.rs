@@ -5,6 +5,7 @@ use floe_app_core::{
     jobdeck::color::Mode,
     render::RenderOptions,
     shots::batch::{self, Capture, NamedCapture},
+    styles::LayerColors,
     Error, Result,
 };
 use std::{
@@ -40,6 +41,7 @@ pub fn run(
     report: Option<PathBuf>,
     batch: Option<String>,
     levels: Option<BTreeSet<i64>>,
+    layer_colors: Option<LayerColors>,
     cancelled: &Arc<AtomicUsize>,
 ) -> Result<i32> {
     if batch.is_none() {
@@ -68,7 +70,11 @@ pub fn run(
             .to_string();
         (vec![NamedCapture { name, capture }], None)
     };
-    let dataset = Dataset::open(&source, levels, Mode::Level, cancelled)?;
+    let mut dataset = Dataset::open(&source, levels, Mode::Level, cancelled)?;
+    // --layer-colors over FLOE_LAYER_COLORS (the open's)
+    if let Some(mode) = layer_colors {
+        dataset.set_layer_colors(mode);
+    }
     if dataset.source_stale() {
         eprintln!("[{}][warn] source changed; displaying cached geometry. Rebuild with index --force, then reopen.", floe_app_core::program());
     }

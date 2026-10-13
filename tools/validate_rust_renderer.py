@@ -145,6 +145,39 @@ class WorkerContractTests(unittest.TestCase):
         self.assertIn("\tthin=auto", forward("high", 7, "auto"))
         self.assertIn("\tthin=keep", forward("high", 7, "keep"))
 
+    def test_layer_colors_open_a_window_of_their_own(self):
+        """--layer-colors row|group (user 2026-10-13): a choice made when
+        a layout opens - the flag sets FLOE_LAYER_COLORS for the service
+        the viewer starts and opens an independent window (a running one
+        keeps its colours); unset, the request is forwarded as before."""
+        from floe import instance
+        from floe import viewcli as cli
+        args = SimpleNamespace(
+            src="/tmp/colours.oas", hairline=None, thin_um=None, goto=None,
+            stream_kb=None, stream_target_ms=500, label_font_px=14,
+            perf_baseline=False, lod="on", frames="on", labels="on",
+            refinement="on", frame_cache="on", margin="off",
+            render_debug=False, multi=False, drc=None, detail=None,
+            depth=None, dump=False, thin=None, layer_colors="group")
+        with mock.patch.dict(os.environ), \
+                mock.patch.object(cli.os.path, "isfile", return_value=True), \
+                mock.patch.object(cli, "_cache_ready", return_value=True), \
+                mock.patch.object(cli, "_service_open", return_value=None), \
+                mock.patch.object(instance, "try_forward") as try_forward, \
+                mock.patch("floe.gui.run_viewer") as run_viewer:
+            os.environ.pop("FLOE_LAYER_COLORS", None)
+            cli.cmd_view(args)
+            self.assertEqual(os.environ.get("FLOE_LAYER_COLORS"), "group")
+        try_forward.assert_not_called()
+        run_viewer.assert_called_once()
+        self.assertEqual(
+            cli.parser().parse_args(["--layer-colors", "group", "x.oas"]).layer_colors,
+            "group")
+        self.assertIsNone(cli.parser().parse_args(["x.oas"]).layer_colors)
+        with mock.patch("sys.stderr", new_callable=io.StringIO), \
+                self.assertRaises(SystemExit):
+            cli.parser().parse_args(["--layer-colors", "groups", "x.oas"])
+
     def test_render_key_carries_the_thin_policy(self):
         """Review 2026-09-11 P1-1: toggling View > keep thin shapes must
         invalidate the displayed frame (and the margin frame, which
@@ -2834,6 +2867,127 @@ class LayerListTests(unittest.TestCase):
             self.assertIsNone(v._layers_arg())
             v._layer_rows[(5, 0)].set_active(False)
             self.assertEqual(v._layers_arg(), [(3, 0), (3, 300), (6, 0)])
+
+
+class PaletteTests(unittest.TestCase):
+    """A layout's default layer colours follow the layer panel's rows (user
+    2026-10-13: "a group shows one colour - 2.0 2.1 2.2 2.32 - give
+    consecutive layers different colours, in the viewer and in captures";
+    the layer number keyed them from 2026-08-04): the pairs holding shapes
+    in (layer, datatype) order take golden-angle steps of hue - app-core
+    styles::palette_ranks when a cache opens, floe-index's meta.json and the
+    oracle's normalisation alike; a LAYERNAME-only pair goes after them; a
+    layerprops colour still wins and moves no other row's. `group` (user
+    2026-10-13: "a group's colours sometimes have to be one too - a run
+    option"): floe2 render --layer-colors group, or FLOE_LAYER_COLORS=group
+    for the viewer's service and captures alike, gives one colour per layer
+    number; the option beats the environment; the report says which."""
+
+    PAIRS = [(2, 0), (2, 1), (2, 2), (2, 32), (3, 0), (3, 1), (5, 0)]
+
+    def test_neighbouring_rows_differ_in_the_viewer_and_in_captures(self):
+        import copy
+        import json
+        import klayout.db as db
+        from PIL import Image
+        from floe import gtkservice
+        from floe_oracle.cache import layer_color, normalize_layer_colors
+        from floe_oracle.cachepath import vfs_cache_dir
+
+        release = ROOT / "rust" / "target" / "release"
+        floe2 = os.environ.get("FLOE2_BIN") or str(release / "floe2")
+        env = dict(os.environ, FLOE_INDEX_BIN=str(release / "floe-index"),
+                   FLOE_RENDERD_BIN=str(release / "floe-renderd"))
+        env.pop("FLOE_EMPTY_LAYERS", None)
+        env.pop("FLOE_RENDER_DEFAULTS", None)
+        with tempfile.TemporaryDirectory() as directory:
+            src = os.path.join(directory, "groups.oas")
+            layout = db.Layout()
+            layout.dbu = 0.001
+            top = layout.create_cell("TOP")
+            for i, (layer, datatype) in enumerate(self.PAIRS):
+                li = layout.layer(db.LayerInfo(layer, datatype))
+                top.shapes(li).insert(
+                    db.Box(i * 12000, 0, i * 12000 + 10000, 10000))
+            # named by the layer table alone: nothing on it
+            layout.layer(db.LayerInfo(2, 5, "NAMED"))
+            layout.write(src)
+            subprocess.run([floe2, "index", src, "--jobs", "1"], env=env,
+                           check=True, capture_output=True, timeout=120)
+            rows = {key: layer_color(n) for n, key in enumerate(self.PAIRS)}
+            groups = {key: layer_color(key[0]) for key in self.PAIRS}
+            colours = [rows[key] for key in self.PAIRS]
+            self.assertEqual(len(set(colours)), len(colours))
+            # floe-index's meta.json: the empty pair after the drawn ones
+            with open(os.path.join(vfs_cache_dir(src), "meta.json")) as f:
+                meta = json.load(f)
+            written = {(l["layer"], l["datatype"]): l["color"]
+                       for l in meta["layers"]}
+            self.assertEqual(written, {**rows, (2, 5): layer_color(len(self.PAIRS))})
+            # the oracle's normalisation of it (an old cache) is the same
+            def keyed(layers):
+                return {(l["layer"], l["datatype"]): l["color"] for l in layers}
+
+            normal = normalize_layer_colors(copy.deepcopy(meta))
+            self.assertEqual(keyed(normal["layers"]), written)
+            with mock.patch.dict(os.environ, {"FLOE_LAYER_COLORS": "group"}):
+                normal = normalize_layer_colors(copy.deepcopy(meta))
+            self.assertEqual(keyed(normal["layers"]),
+                             {**groups, (2, 5): layer_color(2)})
+
+            def panel(**environ):
+                # the viewer's service, as `floe2 view` starts it
+                with mock.patch.dict(os.environ, environ):
+                    svc = gtkservice.Service(floe2)
+                    try:
+                        opened = svc.request("open", source=src, levels=None,
+                                             mode="level")
+                    finally:
+                        svc.close()
+                return keyed(opened["meta"]["layers"])
+
+            def captured(*extra, **environ):
+                out = os.path.join(directory, "capture.png")
+                report = os.path.join(directory, "capture.json")
+                subprocess.run(
+                    [floe2, "render", src, "--bbox", "0,0,84,10",
+                     "--px", "840x100", "--stretch", "--archival",
+                     "--out", out, "--report", report, *extra],
+                    env={**env, **environ}, check=True, capture_output=True,
+                    timeout=120)
+                image = Image.open(out).convert("RGB")
+                with open(report) as f:
+                    said = json.load(f)["layer_colors"]
+                return {key: "#%02x%02x%02x" % image.getpixel(
+                    ((12 * i + 5) * 10, 50))
+                    for i, key in enumerate(self.PAIRS)}, said
+
+            # the viewer's rows (gtk-service open: app-core's catalog) and a
+            # capture's solid fills draw them so
+            self.assertEqual(panel(), rows)
+            self.assertEqual(captured(), (rows, "row"))
+            # one colour per layer number, asked for: the option, or the
+            # environment the viewer's service and captures share
+            self.assertEqual(captured("--layer-colors", "group"), (groups, "group"))
+            self.assertEqual(panel(FLOE_LAYER_COLORS="group"), groups)
+            self.assertEqual(captured(FLOE_LAYER_COLORS="group"), (groups, "group"))
+            self.assertEqual(captured("--layer-colors", "row", FLOE_LAYER_COLORS="group"),
+                             (rows, "row"))
+            # a layerprops colour wins; the other rows keep their colours
+            with open(src + ".layerprops", "w") as f:
+                f.write("2.1 #ffffff solid PINNED 1 1\n")
+            pinned = {**rows, (2, 1): "#ffffff"}
+            self.assertEqual(panel(), pinned)
+            self.assertEqual(captured(), (pinned, "row"))
+            self.assertEqual(captured("--layer-colors=group"),
+                             ({**groups, (2, 1): "#ffffff"}, "group"))
+            # a jobdeck keeps its colour scheme: the option is refused
+            refused = subprocess.run(
+                [floe2, "render", os.path.join(directory, "none.jb"),
+                 "--layer-colors", "group"],
+                env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(refused.returncode, 2, refused.stderr)
+            self.assertIn("for layouts", refused.stderr)
 
 
 @unittest.skipUnless(os.environ.get("FLOE_INTEGRATION_SOURCE"),

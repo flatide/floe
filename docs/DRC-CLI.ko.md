@@ -171,6 +171,8 @@ floe render chip.oas --drc results.db --drc-rule M1.SPACE.1 \
   - `--detail`로 컷을 줬을 때 예산 때문에 성기게 그렸으면 `[drc][warn] … thinned to fit the render budget: …`으로 알린다.
 - **`--detail`·`--density`**(2026-10-12): detail 기본은 뷰어와 같은 medium이다(0.12.349까지는 컷 0; `--archival`이면 컷 0).
   - 밀도는 뷰어처럼 기본으로 켜져 컷 아래 도형을 밀도로 그린다(0.12.351). `--density off`나 `FLOE_RUST_DENSITY_STACK=off`로 끈다.
+- **`--layer-colors row|group`**(2026-10-13): 레이어 기본 색. row(기본)는 패널 줄마다 다른 색, group은 layer 번호마다 한 색이다.
+  범례(fe-embed) 색도 같다. `FLOE_LAYER_COLORS`가 기본값이다.
 - **레이어 격리**: rules.json 사이드카가 발견되면(탐색 순서 =
   db 옆 덱 basename → 기록된 덱 경로 → `<db>.rules.json`, 또는
   `--drc-rules`) 그 룰의 원천 GDS 레이어만 켠다 — 뷰어 더블클릭

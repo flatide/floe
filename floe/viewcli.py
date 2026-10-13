@@ -133,6 +133,15 @@ def cmd_view(args):
         os.environ["FLOE_HAIRLINE"] = "%g" % args.hairline
     if args.thin_um is not None:
         os.environ["FLOE_THIN_UM"] = "%g" % args.thin_um
+    # a layout's default layer colours (user 2026-10-13: row = every row
+    # of the layer panel its own colour, group = one per layer number):
+    # the service this viewer starts opens layouts by FLOE_LAYER_COLORS
+    # (app-core styles::LayerColors), so the flag sets it - a choice made
+    # when a layout opens, so it opens a window of its own
+    # (process_options; a running one keeps its colours)
+    layer_colors = getattr(args, "layer_colors", None)
+    if layer_colors is not None:
+        os.environ["FLOE_LAYER_COLORS"] = layer_colors
     goto = parse_goto(args.goto) if args.goto else None
     if args.stream_kb is not None and args.stream_kb < 0:
         raise SystemExit("floe2: --stream-kb must be >= 0")
@@ -183,7 +192,8 @@ def cmd_view(args):
                        or args.stream_target_ms != 500
                        or args.render_debug
                        or args.frame_cache == "off"
-                       or args.margin == "on")
+                       or args.margin == "on"
+                       or layer_colors is not None)
     server = None
     if not args.multi and not process_options:
         # flateyes-style single instance per (uid, DISPLAY)
@@ -328,6 +338,15 @@ def parser():
                             "cut (`v`) switches it live. Default: on "
                             "(FLOE_RUST_DENSITY_STACK=off: off). "
                             "Forwarded to a running instance")
+    # a layout's default layer colours (user 2026-10-13)
+    p.add_argument("--layer-colors", choices=("row", "group"), default=None,
+                   help="a layout's default layer colours (where no layer "
+                        "property names one): row = every row of the layer "
+                        "panel its own colour, neighbours differ (default); "
+                        "group = one colour per layer number, its datatypes "
+                        "alike (as before 0.12.352). FLOE_LAYER_COLORS sets "
+                        "the default for the viewer and floe2 render. Given, "
+                        "opens an independent instance")
     p.add_argument("--refinement", choices=("on", "off"), default="on",
                    help="publish progressive intermediate frames (default "
                         "on); off waits for one settled frame in both floe "

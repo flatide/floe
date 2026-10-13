@@ -32,9 +32,15 @@
 둘 다 없으면 빈 목록(자동 배색 유지). `~/.cache` 자동 저장은 제거;
 지속은 명시적 메뉴(load/save layer properties…, 발행)로만.
 
-색 적용은 `Cache.load()`에서 `normalize_layer_colors`(레이어 번호
-자동 팔레트) 후 `apply_personal_colors`(layerprops 오버레이) — GUI와
+색 적용은 `Cache.load()`에서 `normalize_layer_colors`(자동 팔레트) 후
+`apply_personal_colors`(layerprops 오버레이) — GUI와
 렌더 서비스(별도 프로세스)가 같은 경로를 지나므로 양쪽 일치.
+자동 팔레트는 2026-10-13(0.12.352)부터 패널 줄 순서다(도형이 있는 쌍의
+(layer, datatype) 순번마다 황금각 색상; 그전에는 layer 번호라 한 번호의
+datatype이 같은 색). 제품은 app-core `styles::palette_ranks`(catalog가
+열 때), 오라클은 `floe_oracle.cache.palette_ranks`로 같다(SPEC-VIEWER §7).
+`--layer-colors group`(뷰어·캡처) 또는 `FLOE_LAYER_COLORS=group`이면 예전처럼
+layer 번호 팔레트다.
 fill 적용은 뷰어 상태(`_layer_patterns`) + 서비스 기동 시
 `_apply_personal_fills`.
 

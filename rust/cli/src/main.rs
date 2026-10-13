@@ -600,11 +600,10 @@ fn jesc(s: &str) -> String {
     out
 }
 
-/// colorsys.hsv_to_rgb + int(x*255) truncation, bit-for-bit. Key the
-/// palette by the OASIS layer number so every datatype of one layer
-/// shares a color and independent caches agree.
-fn layer_color(layer: usize) -> String {
-    let h = ((layer as f64) * 137.508) % 360.0 / 360.0;
+/// colorsys.hsv_to_rgb + int(x*255) truncation, bit-for-bit: the colour at
+/// palette place `n` (palette_places), a golden-angle step of hue each.
+fn layer_color(n: usize) -> String {
+    let h = ((n as f64) * 137.508) % 360.0 / 360.0;
     let (s, v) = (0.75f64, 1.0f64);
     let i6 = (h * 6.0) as i64;
     let f = h * 6.0 - i6 as f64;
@@ -625,6 +624,28 @@ fn layer_color(layer: usize) -> String {
         (g * 255.0) as u8,
         (b * 255.0) as u8
     )
+}
+
+/// Each pair's palette place (user 2026-10-13: "consecutive layers get
+/// different colours" - it was the layer number, so 2.0 2.1 2.2 2.32 shared
+/// one): the pairs holding shapes or text in (layer, datatype) order - the
+/// viewer's layer panel - then the empty ones (LAYERNAME only), as app-core
+/// styles::palette_ranks places them when it opens the cache.
+fn palette_places(
+    pairs: &[(u32, u32)],
+    stored: &std::collections::HashMap<(u32, u32), u64>,
+) -> std::collections::HashMap<(u32, u32), usize> {
+    let mut order: Vec<_> = pairs
+        .iter()
+        .map(|key| (stored.get(key).copied().unwrap_or(0) == 0, *key))
+        .collect();
+    order.sort_unstable();
+    order.dedup();
+    order
+        .into_iter()
+        .enumerate()
+        .map(|(n, (_, key))| (key, n))
+        .collect()
 }
 
 /// /proc metrics (Linux); None elsewhere - the governor is inert
@@ -1161,6 +1182,7 @@ fn index_cmd(args: &[String]) {
             *stored.entry((t.layer, t.dt)).or_default() += t.rep.members();
         }
     }
+    let places = palette_places(&doc.layer_order, &stored);
     let layers_json: Vec<String> = doc
         .layer_order
         .iter()
@@ -1190,7 +1212,7 @@ fn index_cmd(args: &[String]) {
                 d,
                 jesc(&name),
                 aliases,
-                layer_color(l as usize),
+                layer_color(places[&(l, d)]),
                 stored.get(&(l, d)).copied().unwrap_or(0)
             )
         })

@@ -187,6 +187,31 @@
     목록 없이(전부) 가므로 그림도 같다.
   - 킬 스위치 `FLOE_EMPTY_LAYERS=show`: 모든 쌍을 예전처럼 보인다. 게이트: cell_tree C10, rust_renderer
     `LayerListTests`.
+- **레이어 기본 색: 패널의 줄 순서(2026-10-13, app 0.12.352; 사용자: "각 레이어에 대해 별도의 지정이 없을 경우
+  같은 그룹은 같은 색으로 표시되는데(예를들어 2.0 2.1 2.2 2.32... 등) 연속되는 레이어는 다른 색을 가지도록
+  변경해줘. 뷰어와 캡쳐 모두 적용해줘.").**
+  - 예전(2026-08-04 b3ce5dd6부터): 색상이 layer 번호의 황금각 배수여서 한 번호의 datatype이 모두 같은 색이었다.
+  - 이제 app-core `styles::palette_ranks`가 순번을 정한다. 도형·텍스트가 있는 쌍을 (layer, datatype) 순(패널의 줄)으로
+    세우고, 빈 쌍(LAYERNAME만, `FLOE_EMPTY_LAYERS=show`일 때만 목록에 나옴)은 그 뒤에 둔다. 순번 n의 색은
+    `styles::layer_color(n)`이다. 색상(hue)은 n × 137.508°, 채도 0.75, 명도 1이고 계산은 예전과 같다.
+  - 패널에서 이웃한 줄은 색상이 137.5° 떨어진다. 둘 건너는 85°, 셋 건너는 52.5°다.
+  - layerprops의 색이 여전히 먼저다. 캐시를 열 때(catalog) 정하므로 뷰어(gtk-service `open`의 meta)·렌더 스타일·
+    `floe2 render`·DRC 캡처가 같은 색이고, 기존 캐시는 다시 색인할 필요가 없다. floe-index도 meta.json에 같은 색을
+    쓰고, 오라클(`floe_oracle.cache.normalize_layer_colors`)도 같은 규칙이다.
+  - 같은 쌍도 레이아웃마다 다른 색일 수 있다(순번이 그 파일의 레이어 집합에 달림). KLayout의 기본 배색과 같은 방식이다.
+  - 잡덱은 자기 색 규칙(색 체계·레벨 머리 색)을 그대로 쓴다.
+  - **실행 옵션(같은 날 사용자: "그룹내에서는 색이 같아야 하기도 하니 실행 옵션으로 색을 다르게 할지 기존처럼 할지
+    정할 수 있게 해줘").** `floe2 view --layer-colors row|group`, `floe2 render --layer-colors row|group`이다.
+    - `row`가 기본(패널 줄 순서)이고, `group`은 예전처럼 layer 번호마다 한 색이다(app-core `styles::LayerColors`).
+    - 환경 `FLOE_LAYER_COLORS=row|group`이 두 쪽의 기본값이다. catalog가 열 때 읽으므로 웹도 같다. 다른 값은 한 번
+      경고하고 row를 쓴다.
+    - 뷰어: 옵션은 그 환경을 자기가 띄우는 gtk-service에 물려주고, 독립 창으로 연다(`process_options`). 레이아웃을
+      열 때 정하는 값이라 이미 떠 있는 창에 넘기지 않는다. 그 창은 제 색을 유지한다.
+    - 캡처: 옵션이 환경보다 먼저다(`Dataset::set_layer_colors`). report에 `layer_colors`가 남는다. jobdeck은 거부한다.
+    - 오라클(`normalize_layer_colors`)도 `FLOE_LAYER_COLORS=group`을 따른다.
+  - 테스트: app-core `neighbouring_rows_take_neighbouring_places`·`a_group_shares_its_layer_numbers_colour_when_asked`,
+    app-cli `layer_colors_are_asked_for_a_layout`, 게이트 rust_renderer `PaletteTests`·
+    `test_layer_colors_open_a_window_of_their_own`.
 - 오버레이(픽스버프 직접 스탬프, gui.py 상단 헬퍼): 룰러(흰 1px 실선
   + 화살촉 + 거리 칩 흰 텍스트 + 점선 리더), 러버밴드(흰 1px), 스냅
   마커(흰 십자+사각), DRC 마크(**상태색** — 2026-08-14: not waived

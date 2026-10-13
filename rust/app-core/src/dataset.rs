@@ -99,6 +99,19 @@ impl Dataset {
     pub fn source_stale(&self) -> bool {
         matches!(self,Self::Layout(l) if l.source_stale)
     }
+    /// A layout's default layer colours (styles::LayerColors); a jobdeck
+    /// keeps its own colour scheme.
+    pub fn set_layer_colors(&mut self, mode: styles::LayerColors) {
+        if let Self::Layout(l) = self {
+            l.set_layer_colors(mode);
+        }
+    }
+    pub fn layer_colors(&self) -> Option<styles::LayerColors> {
+        match self {
+            Self::Layout(l) => Some(l.layer_colors),
+            Self::Deck(_) => None,
+        }
+    }
     pub fn skipped(&self) -> &[Skipped] {
         match self {
             Self::Deck(d) => d.skipped(),

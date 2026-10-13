@@ -2992,6 +2992,7 @@ fn emit_viewer_side(
             *stored.entry((t.layer, t.dt)).or_default() += t.rep.members();
         }
     }
+    let places = crate::palette_places(&doc.layer_order, &stored);
     let layers_json: Vec<String> = doc
         .layer_order
         .iter()
@@ -3021,7 +3022,7 @@ fn emit_viewer_side(
                 d,
                 crate::jesc(&name),
                 aliases,
-                crate::layer_color(l as usize),
+                crate::layer_color(places[&(l, d)]),
                 stored.get(&(l, d)).copied().unwrap_or(0)
             )
         })

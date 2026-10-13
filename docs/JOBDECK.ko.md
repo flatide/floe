@@ -389,6 +389,8 @@ floe2 render deck.jb --batch shots.txt --out shots/ --report shots/report.json
   - 기본은 켜짐이다(0.12.351, 사용자 2026-10-12: "밀도는 기본으로 켜지게 해줘"; 그전에는 `FLOE_RUST_DENSITY_STACK=top`일 때만).
     - `--detail exact`, `--archival`, jobdeck은 꺼짐이다. `FLOE_RUST_DENSITY_STACK=off`면 뷰어와 함께 기본이 꺼짐이다.
   - jobdeck에서 `--density on`은 거부한다. 덱 패스는 밀도를 그리지 않는다.
+- `--layer-colors row|group`(레이아웃, 2026-10-13): 레이어 기본 색을 패널 줄마다(row, 기본) 또는 layer 번호마다(group,
+  예전 방식) 정한다. `FLOE_LAYER_COLORS`가 기본값이다. jobdeck은 자기 색 체계를 쓰므로 거부한다.
 - 그림 모양(0.12.350, 사용자 2026-10-12: "캡쳐도 동일한 결과가 나와야 함"):
   - 기본은 뷰어를 같은 영역으로 연 그림이다. detail medium, thin keep, 밀도 켬(뷰어의 시작값), 뷰어의 채움·layerprops, 셀 프레임과 라벨(덱은 라벨 없음).
   - 예전 기본인 보관용 모양(solid 채움, 컷 0, 프레임·라벨 없음; 참조 툴 cli-spec)은 `--archival`이다. `FLOE_RENDER_DEFAULTS=archival`이면 그것이 기본이 된다.

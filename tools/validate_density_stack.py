@@ -1742,8 +1742,9 @@ def hier_checks(temp):
     try:
         w0 = workers['flat']
         dbu = float(w0.cache.meta['dbu'])
-        colour = layer_colour(w0, MID)
-        k = max(range(3), key=lambda i: colour[i])
+        # 2/0's colour in each layout: the palette follows a layout's own
+        # layer rows (0.12.352), and these four hold different layers
+        colours = {key: layer_colour(w, MID) for key, w in workers.items()}
 
         def view(w):
             box = (0.0, 0.0, float(W), float(H))
@@ -1759,7 +1760,9 @@ def hier_checks(temp):
             raise AssertionError('hier frame timeout')
 
         # (rows count from the top: y um from the bottom is row H - y)
-        def alphas(pixels, x, y):
+        def alphas(key, x, y):
+            pixels, colour = got[key], colours[key]
+            k = max(range(3), key=lambda i: colour[i])
             return [px(pixels, c, H - 1 - r)[k] / colour[k] for r in range(*y) for c in range(*x)]
 
         got, plan2 = {}, {}
@@ -1769,7 +1772,7 @@ def hier_checks(temp):
         # a node counts what its placements hold
         want = 2 * 160 * 160 * 0.05 ** 2
         field = ((5, 55), (5, 55))
-        flat, cells, boxed = (sum(alphas(got[key], *field)) for key in ('flat', 'cells', 'cells_off'))
+        flat, cells, boxed = (sum(alphas(key, *field)) for key in ('flat', 'cells', 'cells_off'))
         assert abs(flat - want) < 0.12 * want, ('the squares as shapes', flat, want)
         assert abs(cells - want) < 0.2 * want, ('the squares as cells', cells, want)
         assert plan2['cells'].get('by_nodes', 0) > 0 and plan2['cells'].get('node_sampled', 0) > 0, plan2['cells']
@@ -1783,7 +1786,7 @@ def hier_checks(temp):
         said = []
         for name, region in regions.items():
             want = 2 * members[name] * 0.2 ** 2
-            on, off = sum(alphas(got['cover'], *region)), sum(alphas(got['cover_off'], *region))
+            on, off = sum(alphas('cover', *region)), sum(alphas('cover_off', *region))
             assert abs(on - want) < 0.15 * want, (name, on, want)
             assert off > 4 * want, (name, 'the switch off', off, want)
             said.append('%s %.0f for %.0f (off %.0f)' % (name, on, want, off))
@@ -1792,7 +1795,7 @@ def hier_checks(temp):
         print('density stack: a cell stands for its shapes\' cover - a 2/0 square of 0.04 px^2 in a 1 px cell: %s' % ', '.join(said))
         # an item across a block boundary is shared between the blocks
         inner = ((14, 54), (14, 54))
-        on, off = alphas(got['even'], *inner), alphas(got['even_off'], *inner)
+        on, off = alphas('even', *inner), alphas('even_off', *inner)
         mean_on, mean_off = sum(on) / len(on), sum(off) / len(off)
         dev_on = (sum((v - mean_on) ** 2 for v in on) / len(on)) ** 0.5 / mean_on
         dev_off = (sum((v - mean_off) ** 2 for v in off) / len(off)) ** 0.5 / mean_off
@@ -1802,14 +1805,14 @@ def hier_checks(temp):
               'of it, %.2f to %.2f - the switch off %.2f, deviation %.2f, %.2f to %.2f (blocks at the colour beside dark ones)'
               % (mean_on, dev_on, min(on), max(on), mean_off, dev_off, min(off), max(off)))
         # an array every 1.5 px: by 4 px blocks (the frame's own: the view starts at a block's corner)
-        def by_blocks(pixels):
+        def by_blocks(key):
             cells = []
             for by in range(4, 13):
                 for bx in range(26, 39):
-                    cells.append(sum(alphas(pixels, (bx * 4, bx * 4 + 4), (by * 4, by * 4 + 4))) / 16.0)
+                    cells.append(sum(alphas(key, (bx * 4, bx * 4 + 4), (by * 4, by * 4 + 4))) / 16.0)
             mean = sum(cells) / len(cells)
             return mean, (sum((v - mean) ** 2 for v in cells) / len(cells)) ** 0.5 / mean
-        (mean_on, dev_on), (mean_off, dev_off) = by_blocks(got['even']), by_blocks(got['even_off'])
+        (mean_on, dev_on), (mean_off, dev_off) = by_blocks('even'), by_blocks('even_off')
         assert abs(mean_on - 0.32) < 0.03 and dev_on < 0.12, ('the array', mean_on, dev_on)
         assert abs(mean_off - 0.32) < 0.03 and dev_off > 0.18, ('the array, the switch off', mean_off, dev_off)
         print('density stack: an array every 1.5 px takes its members\' parts in a block by their area - alpha %.2f for 0.32, its 4 px blocks '

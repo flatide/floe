@@ -220,9 +220,10 @@ class _phase_monitor:
         return False
 
 
-def layer_color(layer):
-    """Stable color keyed by OASIS layer number, not datatype."""
-    h = (int(layer) * 137.508) % 360.0 / 360.0
+def layer_color(n):
+    """The palette's colour at place `n` (palette_ranks): a golden-angle
+    step of hue per place - app-core styles::layer_color, bit for bit."""
+    h = (int(n) * 137.508) % 360.0 / 360.0
     r, g, b = colorsys.hsv_to_rgb(h, 0.75, 1.0)
     return "#%02x%02x%02x" % (int(r * 255), int(g * 255), int(b * 255))
 
@@ -233,15 +234,34 @@ def _layer_aliases(name):
         part.strip() for part in (name or "").split(";") if part.strip()))
 
 
-def normalize_layer_colors(meta):
-    """Apply the layer-number palette to new and existing caches.
+def palette_ranks(layers):
+    """Each layer's place in the palette (user 2026-10-13: "consecutive
+    layers get different colours" - from 2026-08-04 it was the layer
+    number, so 2.0 2.1 2.2 2.32 shared one): the pairs holding shapes or
+    text in (layer, datatype) order - the viewer's panel rows - then the
+    empty ones (LAYERNAME only); app-core styles::palette_ranks."""
+    def place(entry):
+        return (entry.get("stored_shapes", 1) == 0,
+                int(entry["layer"]), int(entry["datatype"]))
+    order = sorted({place(e) for e in layers})
+    return {(layer, datatype): n
+            for n, (_empty, layer, datatype) in enumerate(order)}
 
-    Older metadata assigned colors by (layer, datatype) row order, so
-    e.g. 15/0 and 15/192 appeared unrelated. Keep metadata compatible
-    and normalize in memory; no cache rebuild is required.
-    """
-    for entry in (meta or {}).get("layers", []):
-        entry["color"] = layer_color(entry["layer"])
+
+def normalize_layer_colors(meta):
+    """Apply the palette (palette_ranks) to new and existing caches in
+    memory, as app-core does when it opens one; no cache rebuild is
+    required. FLOE_LAYER_COLORS=group: one colour per layer number, as
+    before 0.12.352 (app-core styles::LayerColors)."""
+    layers = (meta or {}).get("layers", [])
+    if os.environ.get("FLOE_LAYER_COLORS") == "group":
+        places = {(int(e["layer"]), int(e["datatype"])): int(e["layer"])
+                  for e in layers}
+    else:
+        places = palette_ranks(layers)
+    for entry in layers:
+        entry["color"] = layer_color(
+            places[(int(entry["layer"]), int(entry["datatype"]))])
     return meta
 
 
@@ -1976,8 +1996,9 @@ def build_index(src, tile_bytes=TILE_TARGET_BYTES, log=print, jobs=None,
                        "name": aliases[-1] if aliases else
                        f"{info.layer}/{info.datatype}",
                        "aliases": aliases,
-                       "color": layer_color(info.layer),
+                       "color": None,
                        "stored_shapes": counts[li]})
+    normalize_layer_colors({"layers": layers})
     log(f"[index] layer scan done ({time.perf_counter() - t0:.1f}s, "
         f"{len(text_layer_lis)} text layers)")
 
