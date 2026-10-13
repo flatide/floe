@@ -78,11 +78,21 @@ pub(crate) struct QueryContext {
 }
 impl QueryContext {
     pub fn rejection(&self, expected: SceneId, requested_summaries: usize) -> Option<&'static str> {
+        self.rejection_with(expected, requested_summaries, false)
+    }
+    /// `incomplete_ok`: an incomplete scene is answered from what it holds
+    /// (the desktop viewer's `incomplete=ok`).
+    pub fn rejection_with(
+        &self,
+        expected: SceneId,
+        requested_summaries: usize,
+        incomplete_ok: bool,
+    ) -> Option<&'static str> {
         if self.id.is_none() {
             Some("scene_unavailable")
         } else if self.id != Some(expected) {
             Some("scene_mismatch")
-        } else if !self.complete {
+        } else if !self.complete && !incomplete_ok {
             Some("scene_incomplete")
         } else if requested_summaries != 0 {
             Some("scene_summary")
@@ -228,6 +238,7 @@ mod tests {
         assert_eq!(c.rejection(id, 0), Some("scene_mismatch"));
         c.id = Some(id);
         assert_eq!(c.rejection(id, 0), Some("scene_incomplete"));
+        assert_eq!(c.rejection_with(id, 0, true), None);
         c.complete = true;
         c.summary_layers = 1;
         assert_eq!(c.rejection(id, 1), Some("scene_summary"));

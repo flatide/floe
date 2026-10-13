@@ -24,16 +24,17 @@ KLayout 경로에서 선행 검증하는 용도. 그 용도의 KLayout 셸은 �
 ## 실행
 
 ```sh
-.venv/bin/python -m floe2 view chip.oas      # 제품
-.venv/bin/python -m floe2 index chip.oas     # 1회: 공유 .<src>.ice/ 생성(숨김 폴더)
+rust/target/release/floe2 view chip.oas      # 제품
+rust/target/release/floe2 index chip.oas     # 1회: 공유 .<src>.ice/ 생성(숨김 폴더)
 
-# 개발 전용: 동결된 KLayout 셸로 같은 cache를 열어 선행 검증/비교
-.venv/bin/python -m floe view chip.oas
+# 개발 전용: 동결된 KLayout 셸(오라클, P3부터 명령만)로 같은 cache의 KLayout 그림
+PYTHONPATH=tools/oracle:. .venv/bin/python -m floe_oracle render chip.oas \
+  --bbox X0,Y0,X1,Y1 --out klayout.png
 ```
 
 두 GUI는 socket identity가 달라 같은 DISPLAY에서 동시에 실행할 수 있다. 캐시는
 source 옆의 동일한 `.<src>.ice`를 읽으므로 복사하거나 변환하지 않는다. cache와
-Rust wire/OVM/OVP 버전은 계속 `floe/__init__.py`, `floe/cache.py`, `rust/`에서 한
+Rust wire/OVM/OVP 버전은 계속 `floe/__init__.py`, `tools/oracle/floe_oracle/cache.py`, `rust/`에서 한
 번만 올린다. 공유 cache에 과거 `design.ovc`가 있어도 floe2 `info`와 Rust worker는
 이를 무시한다. sample09 detail-high refinement 실측에서 화면 변화 없이
 350ms→980ms로 느려져 제품 경로에서 제거했다.
@@ -42,7 +43,7 @@ Rust wire/OVM/OVP 버전은 계속 `floe/__init__.py`, `floe/cache.py`, `rust/`�
 종료 타이머를 사용한다. 값은 100..60000ms이며 일반 실행에서는 설정하지 않는다.
 
 ```sh
-FLOE_GUI_SMOKE_MS=8000 .venv/bin/python -m floe2 view --multi chip.oas
+FLOE_GUI_SMOKE_MS=8000 rust/target/release/floe2 view --multi chip.oas
 ```
 
 ## 코드 소유권
@@ -72,20 +73,34 @@ FLOE_PORTABLE_KLAYOUT=1 tools/make_portable.sh
 # 개발·oracle 전용 번들(릴리즈 아님): floe(KLayout)와 floe2 launcher 동봉
 ```
 
-기본 bundle에는 두 Python 패키지가 함께 들어간다. `floe2`가 공통 구현인 `floe`를
-import하기 때문이며, KLayout wheel은 포함하지 않는다. Python 패키지와
-`floe-index`/`floe-renderd`는 항상 같은 checkout의 조합으로 배포한다.
-Python 패키지, `floe-index`, `floe-renderd`의 버전도 모두 동일해야 한다.
-adapter는 daemon의 `ready version=...` 응답을 `floe.RENDERD_VERSION`과
-비교하고, 다르면 첫 open/render 전에 선택된 바이너리 경로와 함께 명시 오류를
-낸다. 따라서 이전에 설치한 `0.1.0` renderd가 탐색 순서에서 잡혀 새 repetition
-처리 코드를 우회하는 상태는 첫 화면의 도형 오류로 위장하지 않는다.
+기본 bundle에는 GTK 뷰어인 Python 패키지 `floe`와 Rust 바이너리 셋(`floe2`,
+`floe-index`, `floe-renderd`)이 들어가며, KLayout wheel은 포함하지 않는다.
+Python 패키지와 세 바이너리는 항상 같은 checkout의 조합으로 배포한다.
+`floe2`는 renderd의 `ready version=...` 응답을 자기가 빌드될 때의 renderd
+버전(`floe.RENDERD_VERSION`과 같은 값)과 비교하고, 다르면 첫 open/render
+전에 `expected renderd X, got Y`로 멈춘다. 따라서 이전에 설치한 renderd가
+탐색 순서에서 잡혀 새 처리 코드를 우회하는 상태는 첫 화면의 도형 오류로
+위장하지 않는다.
 `__version__`은 매 push마다 오르고 `RENDERD_VERSION`은 Rust 재빌드 push에만
 오른다; `validate_floe2.py`가 `RENDERD_VERSION == 두 Cargo 버전`과
 `__version__ >= RENDERD_VERSION`을 고정한다.
 Rust 바이너리는 portable의 glibc 하한이 빌드 호스트 버전으로 상승하지 않도록
-기본적으로 `x86_64-unknown-linux-musl` 정적 타깃으로 빌드한다. 별도 바이너리를
-쓸 때는 `FLOE_INDEX_BIN`과 `FLOE_RENDERD_BIN`을 반드시 함께 지정한다.
+기본적으로 `x86_64-unknown-linux-musl` 정적 타깃으로 빌드한다
+(`FLOE_PORTABLE_RUST=gnu`는 glibc 2.28 기준 링크). 다른 곳에서 빌드한
+바이너리를 넣을 때만 `FLOE2_BIN`·`FLOE_INDEX_BIN`·`FLOE_RENDERD_BIN` 셋을
+함께 지정한다(그때 빌드를 건너뛴다; 일부만 있으면 거부).
+실행할 때는 이 변수들을 설정하지 않는다. `floe2`는 자기 옆(번들의
+`runtime/bin`)의 `floe-index`·`floe-renderd`를 쓰고(app-core
+`native::Discovery`), 뷰어도 자기를 띄운 `floe2` 기준으로 같은 곳을 본다
+(Help > About, 셀 트리 계층 색인, DRC pack; `floe/vfsclient.py`
+`beside_floe2`). 설정해 두면 그 경로가 이겨, 번들을 갱신한 뒤에도 옛
+바이너리를 가리킬 수 있다. 번들은 최상위 `./floe2`(런처)로 실행한다 —
+런처가 번들의 Python·GTK 환경을 잡는다. `runtime/bin/floe2`를 직접
+실행해도 뷰어는 그 런처를 거쳐 뜬다(0.12.354; 그 전에는 호스트의
+`python3`로 떠서 RHEL 8의 Python 3.6에서 About이 실패했다). 번들을
+체크아웃 안에 풀어도(tarball이 저장소 루트에 생긴다) 번들의 뷰어는 번들
+자신의 floe 패키지다 — 그 전에는 체크아웃의 `floe/`가 섞였다. 뷰어는
+Python 3.7 미만이면 그 인터프리터를 밝히고 멈춘다.
 빌드 스크립트는 조립된 runtime의 `selfcheck`가 성공해야만 tar를 생성한다.
 KLayout을 포함한 `floe-portable`은 두 renderer가 모두 있으므로 `./floe`와
 `./floe2`를 함께 제공한다. Rust-only 기본 `floe2-portable`은 `./floe2`만 제공한다.
@@ -133,9 +148,12 @@ PNG publish는 유지한다. detail/depth/좌표/window는 workload이므로 명
 ```sh
 .venv/bin/python -m floe view chip.oas --multi --goto X,Y,W \
   --detail high --depth 999 --perf-baseline
-.venv/bin/python -m floe2 view chip.oas --multi --goto X,Y,W \
+rust/target/release/floe2 view chip.oas --multi --goto X,Y,W \
   --detail high --depth 999 --perf-baseline
 ```
+
+P3(2026-10-10)부터 이 체크아웃의 동결 셸(`python -m floe_oracle`)에는 뷰어가 없다. 위 KLayout 쪽 줄은
+floe-legacy 브랜치의 floe에서 돌린다.
 
 개별 제어는 `--refinement on|off`, `--frame-cache on|off`, `--margin on|off`(여백
 준비만, **기본 off**(사용자 결정 2026-09-27: 그려진 뒤 무엇도 덧그려지지 않게); 팬 재사용은 유지;

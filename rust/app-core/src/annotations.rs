@@ -175,7 +175,7 @@ pub fn legend_line(s: &str) -> Result<String> {
     ))
 }
 /// Python %.10g, including its exponent switch after rounding and signed zero.
-fn coord(v: f64) -> String {
+pub(crate) fn coord(v: f64) -> String {
     let scientific = format!("{v:.9e}");
     let (mantissa, exp) = scientific.split_once('e').expect("finite float exponent");
     let exp: i32 = exp.parse().expect("formatted exponent");

@@ -131,6 +131,28 @@ pub struct Shot {
     pub frames: bool,
     pub labels: bool,
     pub font_px: u32,
+    /// The density under the cut (`--density on|off`, user 2026-10-12: "a
+    /// --density option for --detail high" - the viewer's --density / View >
+    /// density under the cut): the shapes the detail's cut drops, drawn by
+    /// the area they cover (renderd's density stack). None: as the viewer
+    /// starts - on wherever a cut drops shapes (user 2026-10-12: "turn the
+    /// density on by default"), off for the export look (density_on).
+    pub density: Option<bool>,
+    /// Solid fills, no layer-property patterns - the export look
+    /// (Dataset::styles(archival)); false: the viewer's fills.
+    pub archival: bool,
+}
+/// The density's start where no one said (user 2026-10-12: "turn the density
+/// on by default"; gui.py density_on, the same rule): on, but off for the
+/// export look (`--archival`, as before 0.12.351). FLOE_RUST_DENSITY_STACK, the
+/// environment the viewer shares with renderd: `off` is the kill switch, `top`
+/// (how the field turned it on before) on for the export look too.
+pub fn density_default(stack: Option<&str>, archival: bool) -> bool {
+    match stack {
+        Some("off") => false,
+        Some("top") => true,
+        _ => !archival,
+    }
 }
 impl Default for Shot {
     fn default() -> Self {
@@ -148,10 +170,43 @@ impl Default for Shot {
             frames: false,
             labels: false,
             font_px: 14,
+            density: None,
+            archival: true,
         }
     }
 }
 impl Shot {
+    /// The command line's capture: what the viewer draws at the same view
+    /// (user 2026-10-12: "the viewer's default mode has thin keep, the
+    /// density and so on; a capture must come out the same") - floe2 view
+    /// --goto's start: detail medium, full depth, thin keep (auto), the
+    /// density as the viewer starts it (density_on), the viewer's fills and
+    /// layer properties, cell frames and labels. Default stays the export
+    /// look (`floe2 render --archival`, FLOE_RENDER_DEFAULTS=archival): cut
+    /// 0, solid fills, no frames or labels.
+    pub fn viewer() -> Self {
+        Self {
+            detail: Detail::Medium,
+            frames: true,
+            labels: true,
+            archival: false,
+            ..Self::default()
+        }
+    }
+    /// The density under the cut this shot asks renderd for - always said,
+    /// as the viewer does (gui.py density_on), so the sub-cut dots its
+    /// brightness is made of come with it. Unsaid, the viewer's start
+    /// (density_default) wherever the detail cuts: exact drops nothing, and
+    /// a density there would only take pass 2's reserve from pass 1's budget.
+    pub fn density_on(&self) -> bool {
+        self.density.unwrap_or_else(|| {
+            self.detail != Detail::Exact
+                && density_default(
+                    std::env::var("FLOE_RUST_DENSITY_STACK").ok().as_deref(),
+                    self.archival,
+                )
+        })
+    }
     pub fn validate(&self) -> Result<()> {
         if self.bbox.is_some() && self.at.is_some() {
             return Err(Error::input("--bbox and --at are mutually exclusive"));
@@ -232,6 +287,24 @@ mod tests {
             assert_eq!(Thin::Keep.effective(deck), P::Keep);
             assert_eq!(Thin::Cull.effective(deck), P::Cull);
         }
+    }
+    #[test]
+    fn the_density_starts_on_where_a_cut_drops_shapes() {
+        assert!(density_default(None, false));
+        assert!(!density_default(None, true));
+        assert!(!density_default(Some("off"), false));
+        assert!(density_default(Some("top"), true));
+        assert!(density_default(Some("anything"), false));
+        // said, it is what was said; exact cuts nothing: no density unsaid
+        let mut s = Shot::viewer();
+        s.density = Some(false);
+        assert!(!s.density_on());
+        s.density = Some(true);
+        assert!(s.density_on());
+        s.density = None;
+        s.detail = Detail::Exact;
+        assert!(!s.density_on());
+        assert!(!Shot::default().density_on());
     }
     #[test]
     fn units_aspect_anchor_and_ties() {

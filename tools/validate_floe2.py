@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Product-boundary checks for the Rust-only ``floe2`` shell."""
+"""Product-boundary checks for ``floe2``: the Rust command line
+(rust/floe2 over the shared floe-app-cli) and its GTK viewer, the one part
+left in Python (docs/SHARED_APP_LAYER.ko.md; the Python floe2 CLI is gone,
+P1c). The frozen ``floe`` shell is the development oracle, outside the
+product package since P3 (tools/oracle/floe_oracle)."""
+
+import ast
 
 import json
 import os
@@ -13,7 +19,8 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from floe.cachepath import vfs_cache_dir  # noqa: E402
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (P3)
+from floe_oracle.cachepath import vfs_cache_dir  # noqa: E402
 
 
 def check(condition, message):
@@ -49,6 +56,27 @@ def run(env, *args, ok=True, timeout=20):
     return result
 
 
+FLOE2 = Path(os.environ.get("FLOE2_BIN") or
+             ROOT / "rust" / "target" / "release" / "floe2")
+
+
+def rust(env, *args, ok=True, timeout=90):
+    """The Rust `floe2`: ok=True wants 0, False any failure, an int that
+    status."""
+    result = subprocess.run([str(FLOE2), *map(str, args)], cwd=ROOT,
+                            env=env, capture_output=True, text=True,
+                            timeout=timeout)
+    if ok is True and result.returncode:
+        raise AssertionError("floe2 %r failed (%d)\n%s\n%s" % (
+            args, result.returncode, result.stdout, result.stderr))
+    if ok is False and not result.returncode:
+        raise AssertionError("floe2 %r unexpectedly succeeded" % (args,))
+    if not isinstance(ok, bool) and result.returncode != ok:
+        raise AssertionError("floe2 %r: exit %d, wanted %d\n%s\n%s" % (
+            args, result.returncode, ok, result.stdout, result.stderr))
+    return result
+
+
 def install_import_blocker(directory):
     blocker = Path(directory) / "blocker"
     blocker.mkdir()
@@ -64,11 +92,13 @@ def install_import_blocker(directory):
 
 
 def validate_runtime(base, fixture):
-    """Run the complete floe2 CLI lifecycle with KLayout imports blocked."""
+    """Run the complete floe2 lifecycle - the Rust command line, and the
+    Python benchmark tool with KLayout imports blocked."""
     indexer = ROOT / "rust" / "target" / "release" / "floe-index"
     renderer = ROOT / "rust" / "target" / "release" / "floe-renderd"
     check(indexer.is_file(), "release floe-index is not built")
     check(renderer.is_file(), "release floe-renderd is not built")
+    check(FLOE2.is_file(), "release floe2 is not built")
     check(fixture.is_file(), "integration fixture is missing: %s" % fixture)
 
     with tempfile.TemporaryDirectory(prefix="floe2-runtime-") as td:
@@ -80,8 +110,7 @@ def validate_runtime(base, fixture):
                    FLOE_RENDERD_BIN=str(renderer), FLOE_RUST_ROUND_PAGES="4")
         env["PYTHONPATH"] = os.pathsep.join((str(blocker), str(ROOT)))
 
-        indexed = run(env, "-m", "floe2", "index", source,
-                      "--jobs", "2", timeout=60)
+        indexed = rust(env, "index", source, "--jobs", "2", timeout=60)
         check("[floe2]" in indexed.stdout,
               "floe2 index output kept the shared floe product prefix")
         cache = Path(vfs_cache_dir(source))
@@ -89,11 +118,11 @@ def validate_runtime(base, fixture):
         bbox = meta["bbox"]
         dbu = float(meta["dbu"])
 
-        info = run(env, "-m", "floe2", "info", source)
+        info = rust(env, "info", source)
         check("top cell" in info.stdout, "floe2 info omitted cache identity")
         check("design.ovc" not in info.stdout,
               "floe2 info exposed retired density coverage")
-        probe = run(env, "-m", "floe2", "probe", source, timeout=90)
+        probe = rust(env, "probe", source, timeout=90)
         check("[probe] OK" in probe.stdout,
               "floe2 probe did not settle a Rust frame")
 
@@ -104,8 +133,8 @@ def validate_runtime(base, fixture):
             return ",".join("%.12g" % (value * dbu) for value in values)
 
         png = work / "floe2 labels with spaces.png"
-        rendered = run(
-            env, "-m", "floe2", "render", source,
+        rendered = rust(
+            env, "render", source,
             "--bbox", bbox_arg(0), "--px", "257", "--depth", "999",
             "--frames", "--labels", "--label-font-px", "17",
             "--out", png, timeout=90)
@@ -116,12 +145,12 @@ def validate_runtime(base, fixture):
 
         cell_name = "FLOE2_한글"
         clipped = work / "UTF-8 clip with spaces.oas"
-        clip_result = run(
-            env, "-m", "floe2", "clip", source,
+        clip_result = rust(
+            env, "clip", source,
             "--bbox", bbox_arg(0.2), "--cell-name", cell_name,
             "--out", clipped, timeout=90)
-        check("[floe2] clip saved" in clip_result.stdout,
-              "floe2 clip output kept the shared floe product prefix")
+        check("clip saved" in clip_result.stdout,
+              "floe2 clip did not report its file")
         check(cell_name.encode("utf-8") in clipped.read_bytes(),
               "UTF-8 clip cell name was not serialized")
         scanned = subprocess.run(
@@ -151,6 +180,81 @@ def validate_runtime(base, fixture):
               "floe2 benchmark report exposed design identity")
 
 
+def validate_rust_cli(base, fixture):
+    """The Rust command line `floe2` (rust/floe2 + the shared floe-app-cli,
+    docs/SHARED_APP_LAYER.ko.md; 2026-10-09 P1a): its version is the app's,
+    index/info/probe/render/clip run with no Python at all (a `python`/
+    `python3` first on PATH that records any call stays unused), and `view`
+    hands its arguments to the GTK viewer's Python entry."""
+    indexer = ROOT / "rust" / "target" / "release" / "floe-index"
+    renderer = ROOT / "rust" / "target" / "release" / "floe-renderd"
+    check(FLOE2.is_file(), "release floe2 is not built")
+    package_version = run(
+        base, "-c", "import floe; print(floe.__version__)").stdout.strip()
+
+    with tempfile.TemporaryDirectory(prefix="floe2-rust-cli-") as td:
+        work = Path(td)
+        trap = work / "no-python"
+        trap.mkdir()
+        called = work / "python-called"
+        for name in ("python", "python3"):
+            script = trap / name
+            script.write_text("#!/bin/sh\necho \"$@\" >> %s\nexit 99\n" % called)
+            script.chmod(0o755)
+        env = {"PATH": "%s:/usr/bin:/bin" % trap, "HOME": base.get("HOME", td),
+               "FLOE_INDEX_BIN": str(indexer), "FLOE_RENDERD_BIN": str(renderer),
+               "FLOE_GTK_PYTHON": str(trap / "python3")}
+        # the GTK viewer's service (P2): one JSON line in, one out
+        served = subprocess.run(
+            [str(FLOE2), "gtk-service"], input='{"id": 7, "op": "version"}\n',
+            env=env, capture_output=True, text=True, timeout=30)
+        reply = json.loads(served.stdout)
+        check(served.returncode == 0 and reply["id"] == 7 and
+              reply["result"]["version"] == package_version,
+              "floe2 gtk-service did not answer: %s %s" % (served.stdout,
+                                                            served.stderr))
+        version = rust(env, "--version").stdout
+        check(version.startswith("floe2 %s " % package_version),
+              "floe2 --version is not the app version: %s" % version)
+        check("floe-renderd" in version and "viewer gtk" in version,
+              "floe2 --version omitted its native identity: %s" % version)
+        source = work / "rust cli 설계.oas"
+        shutil.copy2(fixture, source)
+        indexed = rust(env, "index", source, "--jobs", "2")
+        check(Path(vfs_cache_dir(source), "design.ovm").is_file(),
+              "floe2 index wrote no cache")
+        info = rust(env, "info", source)
+        check("top cell" in info.stdout and "stored shapes" in info.stdout,
+              "floe2 info lost the cache table")
+        probe = rust(env, "probe", source)
+        check("OK" in probe.stdout + probe.stderr, "floe2 probe did not settle")
+        png = work / "rust cli.png"
+        rust(env, "render", source, "--px", "257", "--out", png)
+        check(png.read_bytes().startswith(b"\x89PNG\r\n\x1a\n"),
+              "floe2 render did not publish a PNG")
+        meta = json.loads(Path(vfs_cache_dir(source), "meta.json").read_text())
+        dbu = float(meta["dbu"])
+        x0, y0, x1, y1 = (float(v) * dbu for v in meta["bbox"])
+        clipped = work / "rust clip.oas"
+        rust(env, "clip", source, "--bbox=%r,%r,%r,%r" % (
+            x0, y0, (x0 + x1) / 2, (y0 + y1) / 2), "--out", clipped)
+        check(clipped.is_file() and clipped.stat().st_size > 0,
+              "floe2 clip wrote nothing")
+        check(not called.exists(),
+              "floe2 ran Python for a non-UI command: %s" % (
+                  called.read_text() if called.exists() else ""))
+        unknown = rust(env, "frobnicate", ok=False)
+        check(unknown.returncode == 99 and called.exists(),
+              "floe2 did not hand an unknown word to the GTK viewer as a source")
+        called.unlink()
+        # view: the GTK entry with the real interpreter takes the arguments
+        view_env = dict(env, FLOE_GTK_PYTHON=sys.executable,
+                        PATH=os.environ.get("PATH", "/usr/bin:/bin"))
+        view = rust(view_env, "view", "--help")
+        check("usage: floe2 view" in view.stdout,
+              "floe2 view did not reach the GTK viewer's entry: %s" % view.stdout[:200])
+
+
 def main(fixture=None):
     base = os.environ.copy()
     base.pop("FLOE_PRODUCT", None)
@@ -158,58 +262,81 @@ def main(fixture=None):
     base["PYTHONDONTWRITEBYTECODE"] = "1"
     base["PYTHONPATH"] = str(ROOT)
 
-    floe = run(base, "-m", "floe", "--help")
+    # the frozen floe shell is the dev-only oracle (P3): its own package,
+    # not the product's
+    oracle_env = dict(base, PYTHONPATH=os.pathsep.join(
+        (str(ROOT / "tools" / "oracle"), str(ROOT))))
+    floe = run(oracle_env, "-m", "floe_oracle", "--help")
     check("stable KLayout" in floe.stdout, "floe product description drifted")
-    floe2 = run(base, "-m", "floe2", "--help")
-    check("Rust-only" in floe2.stdout, "floe2 is not identified as Rust-only")
-    check("profile" not in floe2.stdout,
+    check(run(base, "-m", "floe", "--help", ok=False).returncode != 0,
+          "the product package still runs as the frozen floe shell")
+    help_text = rust(base, "--help").stdout
+    check("floe2 view" in help_text and "floe2 index" in help_text,
+          "floe2 --help lost the viewer or the shared commands")
+    check("floe2 profile" not in help_text,
           "floe2 exposed the legacy tile-cache profile command")
-    index_help = run(base, "-m", "floe2", "index", "--help")
-    for legacy in ("--legacy", "--tile-mb", "--read-mode", "KLayout",
-                   "--coverage", "--coverage-only", "design.ovc"):
-        check(legacy not in index_help.stdout,
+    index_help = rust(base, "index", "--help").stdout
+    for legacy in ("--legacy", "--tile-mb", "--read-mode", "--coverage",
+                   "design.ovc"):
+        check(legacy not in index_help,
               "floe2 index help exposed %s" % legacy)
-    stable_view_help = run(base, "-m", "floe", "view", "--help")
-    rust_view_help = run(base, "-m", "floe2", "view", "--help")
+    gtk = dict(base, FLOE_GTK_PYTHON=sys.executable)
+    rust_view_help = rust(gtk, "view", "--help")
+    check("usage: floe2 view" in rust_view_help.stdout,
+          "floe2 view did not reach the GTK viewer's entry")
     for option in ("--refinement", "--frame-cache", "--perf-baseline"):
-        check(option in stable_view_help.stdout,
-              "floe view omitted common performance option %s" % option)
         check(option in rust_view_help.stdout,
               "floe2 view omitted common performance option %s" % option)
-    for command in ("probe", "view"):
-        command_help = run(base, "-m", "floe2", command, "--help")
-        check("--layout-mode" not in command_help.stdout,
-              "floe2 %s help exposed a KLayout worker option" % command)
+    # the GTK display check (the frozen shell's gtktest, the viewer's since
+    # P3): the Rust floe2 hands the word to the viewer entry
+    gtktest_help = rust(gtk, "gtktest", "--help")
+    check("usage: floe2 gtktest" in gtktest_help.stdout,
+          "floe2 gtktest did not reach the viewer entry: %s"
+          % (gtktest_help.stdout + gtktest_help.stderr)[:300])
+    check("floe2 gtktest" in help_text,
+          "floe2 --help does not name gtktest")
+    check("--layout-mode" not in rust_view_help.stdout,
+          "floe2 view help exposed a KLayout worker option")
+    check("--layout-mode" not in rust(base, "probe", "--help").stdout,
+          "floe2 probe help exposed a KLayout worker option")
 
-    rejected_env = dict(base, FLOE_RENDERER="klayout")
-    rejected = run(rejected_env, "-m", "floe2", "--version", ok=False)
-    check("Rust-only" in rejected.stderr,
-          "floe2 accepted or obscured a KLayout renderer override")
-    legacy = run(base, "-m", "floe2", "index", "missing.oas",
-                 "--legacy", ok=False)
-    check("legacy indexing belongs to floe" in legacy.stderr,
+    # the viewer is Rust-rendered whatever the environment says: the
+    # launcher sets FLOE_RENDERER=rust (a KLayout override reached the
+    # Python entry, which refuses it)
+    klayout_env = dict(gtk, FLOE_RENDERER="klayout")
+    check("usage: floe2 view" in rust(klayout_env, "view", "--help").stdout,
+          "floe2 view let a KLayout renderer override through")
+    legacy = rust(base, "index", "missing.oas", "--legacy", ok=2)
+    check("unsupported index option: --legacy" in legacy.stderr,
           "floe2 legacy indexing did not fail at the product boundary")
-    coverage = run(base, "-m", "floe2", "index", "missing.oas",
-                   "--coverage", ok=False)
-    check("unrecognized arguments: --coverage" in coverage.stderr,
+    coverage = rust(base, "index", "missing.oas", "--coverage", ok=2)
+    check("unsupported index option: --coverage" in coverage.stderr,
           "floe2 still accepted retired density coverage")
 
-    identity = r'''import json, os
-from floe.cli import _renderer_backend
-from floe import instance
-from floe.gui import HAS_DENSITY_COVERAGE
-print(json.dumps([_renderer_backend(), instance.APP,
-                  instance.socket_address(":77"), HAS_DENSITY_COVERAGE]))
+    # the product package is floe2's alone: its identity whatever
+    # FLOE_PRODUCT says, no KLayout coverage state; the oracle keeps the
+    # frozen shell's KLayout/floe identity
+    identity = r'''import json
+from floe import instance, gui
+print(json.dumps([instance.APP, instance.socket_address(":77"),
+                  hasattr(gui.Viewer, "_toggle_coverage")]))
 '''
-    stable = json.loads(run(base, "-c", identity).stdout)
-    rust = json.loads(run(base, "-c", "import floe2\n" + identity).stdout)
-    check(stable[0:2] == ["klayout", "floe"],
-          "stable floe no longer owns the KLayout/floe identity")
-    check(rust[0:2] == ["rust", "floe2"],
-          "floe2 did not select the Rust/floe2 identity")
-    check(stable[2] != rust[2], "floe and floe2 share an instance socket")
-    check(stable[3] is True and rust[3] is False,
-          "floe2 still advertises density coverage UI state")
+    for product_env in (None, "floe", "floe2"):
+        env = dict(base)
+        if product_env is not None:
+            env["FLOE_PRODUCT"] = product_env
+        viewer = json.loads(run(env, "-c", identity).stdout)
+        check(viewer[0] == "floe2" and "floe2" in viewer[1],
+              "the viewer left the floe2 identity (FLOE_PRODUCT=%s): %s"
+              % (product_env, viewer))
+        check(viewer[2] is False,
+              "the floe2 viewer still has the KLayout density coverage")
+    stable = run(dict(oracle_env, FLOE_PRODUCT="floe"), "-c", (
+        "from floe_oracle.cli import _renderer_backend, APP; "
+        "print(_renderer_backend(), APP)")).stdout.split()
+    check(stable == ["klayout", "floe"],
+          "the frozen floe shell no longer owns the KLayout/floe identity: %s"
+          % stable)
 
     portable = ROOT / "tools" / "make_portable.sh"
     launcher = ROOT / "tools" / "portable_launcher.sh"
@@ -226,13 +353,96 @@ print(json.dumps([_renderer_backend(), instance.APP,
     portable_source = portable.read_text(encoding="utf-8")
     check('PORTABLE_LAUNCHERS="floe floe2"' in portable_source and
           'cp "$REPO/tools/portable_launcher.sh" "$B/$PRODUCT"' in
+          portable_source and
+          'cp -r "$REPO/tools/oracle/floe_oracle" "$SITE/floe_oracle"' in
           portable_source,
-          "KLayout floe-portable does not install both product launchers")
+          "KLayout floe-portable does not install both launchers and the "
+          "frozen shell")
     check("MUSL_TARGET=x86_64-unknown-linux-musl" in portable_source and
-          '--target "$MUSL_TARGET" -p floe-index -p floe-renderd' in
+          '--target "$MUSL_TARGET" -p floe-index -p floe-renderd -p floe2' in
           portable_source,
           "portable defaults to host-glibc Rust binaries instead of musl")
-    check("FLOE_INDEX_BIN and FLOE_RENDERD_BIN must be specified together"
+    # floe2's SQLite (the DRC review files, 0.12.346) is C: the static
+    # build compiles it with zig cc, else musl-gcc - never rust-lld alone
+    check('MUSL_BUILD="cargo zigbuild"' in portable_source and
+          'CC_x86_64_unknown_linux_musl=musl-gcc' in portable_source and
+          '$MUSL_BUILD --release' in portable_source,
+          "the static build has no C compiler for floe2's SQLite")
+    check('"bin/floe2",' in portable_source and
+          'cp -r "$REPO/floe2"' not in portable_source,
+          "portable does not ship the Rust floe2 in place of the Python one")
+    # the floe2 bundle's Python is the viewer alone (P2d): every module the
+    # viewer loads, none of the oracle's
+    listed = re.search(r'FLOE2_PRODUCT_FILES="([^"]+)"', portable_source)
+    check(listed is not None, "portable does not list the floe2 viewer files")
+    shipped = set(listed.group(1).split())
+    loaded = run(base, "-c", (
+        "import sys; import floe.gtkview, floe.viewcli, floe.gui, "
+        "floe.gtkservice, floe.vfsclient, floe.instance, "
+        "floe.hangul, floe.fillpat; print(' '.join(sorted(m for m in "
+        "sys.modules if m.startswith('floe.'))))")).stdout.split()
+    needed = {m.split(".")[1] + ".py" for m in loaded}
+    check(needed <= shipped, "the floe2 bundle lacks %s" % sorted(needed - shipped))
+    oracle = {"cache.py", "cachepath.py", "indexlock.py", "drc.py", "svrf.py",
+              "shots.py", "fe_embed.py", "render.py", "viewport.py",
+              "coverage.py", "view_policy.py", "cli.py", "service.py",
+              "__main__.py",
+              # the Python renderd adapter and perf line (P4f: the gates')
+              "rust_render.py", "perf_line.py"}
+    check(not (shipped & oracle) and not any(f.startswith("jobdeck")
+                                               for f in shipped),
+          "the floe2 bundle ships oracle modules: %s" % sorted(shipped & oracle))
+    check(not {m for m in loaded if m.split(".")[1] + ".py" in oracle
+               or m.startswith("floe.jobdeck")},
+          "the floe2 viewer imports oracle modules: %s" % loaded)
+    # P3: floe/ is the viewer alone - exactly the files the bundle ships -
+    # and no import in it, lazy ones included, reaches past them
+    tracked = subprocess.run(
+        ["git", "ls-files", "floe"], cwd=ROOT, capture_output=True,
+        text=True).stdout.split()
+    check({Path(f).relative_to("floe").as_posix() for f in tracked}
+          == shipped,
+          "floe/ holds other files than the viewer's: %s" % sorted(
+              {Path(f).relative_to("floe").as_posix() for f in tracked}
+              ^ shipped))
+    product_modules = {f[:-3] for f in shipped if f.endswith(".py")}
+    for f in sorted(shipped):
+        if not f.endswith(".py"):
+            continue
+        tree = ast.parse((ROOT / "floe" / f).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            # no GTK "draw" handler: the hosts have no pycairo, so its
+            # cairo context never reaches Python and the widget stays
+            # blank (field 2026-10-10: the hidden-layer strike, the
+            # palettes) - the viewer draws pixbufs
+            if isinstance(node, ast.Call) and isinstance(
+                    node.func, ast.Attribute) and node.func.attr in (
+                    "connect", "connect_after") and node.args and \
+                    isinstance(node.args[0], ast.Constant) and \
+                    node.args[0].value == "draw":
+                check(False, "floe/%s:%d connects a GTK draw handler "
+                      "(needs pycairo)" % (f, node.lineno))
+            if isinstance(node, ast.ImportFrom):
+                names = ([node.module or ""] if node.level == 0 else
+                         ["floe." + (node.module or "")])
+                if node.level and not node.module:
+                    names = ["floe." + a.name for a in node.names]
+                elif node.module == "floe" and node.level == 0:
+                    names = ["floe." + a.name for a in node.names]
+            elif isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            else:
+                continue
+            for name in names:
+                top = name.split(".")
+                check(top[0] not in ("floe_oracle", "klayout", "cairo"),
+                      "floe/%s:%d imports %s" % (f, node.lineno, name))
+                if top[0] == "floe" and len(top) > 1:
+                    check(top[1] in product_modules or top[1] in (
+                        "__version__", "RENDERD_VERSION"),
+                          "floe/%s:%d imports %s, not a viewer module"
+                          % (f, node.lineno, name))
+    check("FLOE2_BIN, FLOE_INDEX_BIN and FLOE_RENDERD_BIN go together"
           in portable_source,
           "portable permits a mismatched Rust binary override")
     package_version = run(
@@ -266,8 +476,27 @@ print(json.dumps([_renderer_backend(), instance.APP,
           "#" not in portable_name.stdout,
           "portable artifact name contains the __version__ line comment: %s"
           % portable_name.stdout.strip())
+    # the Rust runtime's flavour (2026-10-11): gnu = glibc builds linked
+    # against the deployment glibc (cargo-zigbuild), named apart
+    gnu_name = subprocess.run(
+        ["bash", str(portable), "--print-name"], cwd=ROOT,
+        env=dict(base, FLOE_PORTABLE_RUST="gnu"), capture_output=True,
+        text=True, timeout=10)
+    check(gnu_name.returncode == 0 and gnu_name.stdout.strip() ==
+          portable_name.stdout.strip() + "-gnu",
+          "FLOE_PORTABLE_RUST=gnu is not named apart: %s" % gnu_name.stdout)
+    bad_flavour = subprocess.run(
+        ["bash", str(portable), "--print-name"], cwd=ROOT,
+        env=dict(base, FLOE_PORTABLE_RUST="glibc"), capture_output=True,
+        text=True, timeout=10)
+    check(bad_flavour.returncode != 0,
+          "make_portable.sh took FLOE_PORTABLE_RUST=glibc")
+    check('cargo zigbuild --release' in portable_source and
+          '--target "$GNU_TARGET.$GNU_GLIBC"' in portable_source,
+          "the gnu flavour does not link against the deployment glibc")
     launcher_source = launcher.read_text(encoding="utf-8")
-    check('exec "$RT/bin/python3" -m "$PRODUCT" "$@"' in
+    check('exec "$RT/bin/python3" -m floe_oracle "$@"' in
+          launcher_source and 'exec "$RT/bin/floe2" "$@"' in
           launcher_source,
           "portable launcher does not dispatch by floe/floe2 basename")
     with tempfile.TemporaryDirectory(
@@ -277,7 +506,15 @@ print(json.dumps([_renderer_backend(), instance.APP,
         echo = shutil.which("echo")
         check(echo is not None, "portable launcher test needs echo")
         os.symlink(echo, bundle / "runtime" / "bin" / "python3")
-        for product in ("floe", "floe2"):
+        # the Rust floe2 stand-in says what it was given and which
+        # interpreter it would start the viewer with
+        fake = bundle / "runtime" / "bin" / "floe2"
+        fake.write_text('#!/bin/sh\necho "rust $* python=$FLOE_GTK_PYTHON"\n')
+        fake.chmod(0o755)
+        python3 = bundle / "runtime" / "bin" / "python3"
+        for product, want in (
+                ("floe", "-m floe_oracle view chip.oas"),
+                ("floe2", "rust view chip.oas python=%s" % python3)):
             target = bundle / product
             shutil.copy2(launcher, target)
             target.chmod(0o755)
@@ -287,8 +524,7 @@ print(json.dumps([_renderer_backend(), instance.APP,
                 # a loaded host (the battery, load 6+) took over 10 s
                 capture_output=True, text=True, timeout=30)
             check(launched.returncode == 0 and
-                  launched.stdout.strip() ==
-                  "-m %s view chip.oas" % product,
+                  launched.stdout.strip() == want,
                   "portable %s launcher dispatched incorrectly: %s %s" %
                   (product, launched.stdout, launched.stderr))
         link_dir = bundle / "links"
@@ -299,8 +535,78 @@ print(json.dumps([_renderer_backend(), instance.APP,
             env=dict(base, XDG_CACHE_HOME=str(bundle / "cache")),
             capture_output=True, text=True, timeout=10)
         check(linked.returncode == 0 and
-              linked.stdout.strip() == "-m floe2 --version",
+              linked.stdout.strip() == "rust --version python=%s" % python3,
               "portable floe2 convenience symlink lost its runtime")
+    # the bundle's runtime/bin/floe2 run by hand (user 2026-10-13: Help >
+    # About failed on the host's Python 3.6): the viewer goes through the
+    # launcher - its Python and GTK environment - once; the shared
+    # commands run as they are. Unpacked in a checkout (make_portable.sh
+    # leaves the tarball in the repo root), the bundle's floe2 still runs
+    # the bundle's floe package, not the checkout's (no PYTHONPATH)
+    with tempfile.TemporaryDirectory(prefix="floe2-runtime-bin-") as td:
+        checkout = Path(td).resolve()
+        (checkout / "floe").mkdir()
+        (checkout / "floe" / "gui.py").write_text("")
+        bundle = checkout / "floe2-portable"
+        bin_dir = bundle / "runtime" / "bin"
+        bin_dir.mkdir(parents=True)
+        inner = bin_dir / "floe2"
+        shutil.copy2(FLOE2, inner)
+        (bin_dir / "python3").write_text(
+            '#!/bin/sh\necho "bundle python $* home=$PYTHONHOME '
+            'path=$PYTHONPATH"\n')
+        host = bundle / "host"
+        host.mkdir()
+        (host / "python3").write_text(
+            '#!/bin/sh\necho "host python $* path=$PYTHONPATH"\n')
+        for script in (bin_dir / "python3", host / "python3"):
+            script.chmod(0o755)
+        shutil.copy2(launcher, bundle / "floe2")
+        (bundle / "floe2").chmod(0o755)
+        inner_env = {"PATH": "%s:/usr/bin:/bin" % host,
+                     "HOME": base.get("HOME", td),
+                     "XDG_CACHE_HOME": str(bundle / "cache")}
+
+        def by_hand(*args, **extra):
+            return subprocess.run(
+                [str(inner), *args], cwd=bundle, env=dict(inner_env, **extra),
+                capture_output=True, text=True, timeout=60)
+
+        for args in (("view", "chip.oas"), ("chip.oas",)):
+            through = by_hand(*args)
+            check(through.returncode == 0 and through.stdout.strip() ==
+                  "bundle python -B -m floe.gtkview chip.oas home=%s path="
+                  % (bundle / "runtime"),
+                  "runtime/bin/floe2 %s did not start the bundle's viewer "
+                  "through its launcher: %s %s"
+                  % (" ".join(args), through.stdout, through.stderr))
+        preset = by_hand("view", "chip.oas",
+                         FLOE_GTK_PYTHON=str(host / "python3"))
+        check(preset.stdout.strip() ==
+              "host python -B -m floe.gtkview chip.oas path=",
+              "floe2 went through the launcher with FLOE_GTK_PYTHON set, "
+              "or took the checkout around the bundle: %s" % preset.stdout)
+        version = by_hand("--version")
+        check(version.returncode == 0 and version.stdout.startswith("floe2 "),
+              "runtime/bin/floe2 --version did not run as it is: %s %s"
+              % (version.stdout, version.stderr))
+        # a launcher that sets no FLOE_GTK_PYTHON: one pass, no loop
+        (bundle / "floe2").write_text(
+            '#!/bin/sh\nexec "$(dirname "$0")/runtime/bin/floe2" "$@"\n')
+        once = by_hand("view", "chip.oas")
+        check(once.stdout.strip() ==
+              "host python -B -m floe.gtkview chip.oas path=",
+              "floe2 relaunched more than once: %s %s"
+              % (once.stdout, once.stderr))
+    # the viewer on a Python too old for it says so before anything else
+    old = run(base, "-c", (
+        "import sys; sys.version_info = (3, 6, 8, 'final', 0); "
+        "from floe import gtkview; sys.exit(gtkview.main(['--help']))"),
+        ok=False)
+    check(old.returncode == 2 and "needs Python 3.7 or newer" in old.stderr
+          and "FLOE_GTK_PYTHON" in old.stderr,
+          "the viewer did not refuse Python 3.6 by name: %s %s"
+          % (old.stdout, old.stderr))
     conflict_env = dict(base, FLOE_PORTABLE_PRODUCT="floe2",
                         FLOE_PORTABLE_KLAYOUT="1")
     conflict = subprocess.run(
@@ -309,34 +615,37 @@ print(json.dumps([_renderer_backend(), instance.APP,
     check(conflict.returncode != 0 and "Rust-only" in conflict.stdout,
           "portable allowed a floe2/KLayout product mixture")
 
+    real_index = ROOT / "rust" / "target" / "release" / "floe-index"
     with tempfile.TemporaryDirectory(prefix="floe2-cli-") as td:
         work = Path(td)
-        blocker = install_import_blocker(work)
         log = work / "calls.json"
         binary = work / "floe-index"
+        # it answers --version as the real one: the Rust command line asks
+        # its indexer's version before it runs it
         binary.write_text(
             "#!/usr/bin/env python3\n"
             "import json, os, pathlib, sys\n"
+            "if sys.argv[1:] == ['--version']:\n"
+            "    os.execv(%r, [%r, '--version'])\n"
             "pathlib.Path(os.environ['FLOE2_CALL']).write_text("
-            "json.dumps(sys.argv[1:]))\n",
+            "json.dumps(sys.argv[1:]))\n" % (str(real_index),
+                                              str(real_index)),
             encoding="utf-8")
         binary.chmod(0o755)
         source = work / "design with spaces.oas"
         source.write_bytes(b"fixture")
         env = dict(base, FLOE_INDEX_BIN=str(binary), FLOE2_CALL=str(log))
-        env["PYTHONPATH"] = os.pathsep.join((str(blocker), str(ROOT)))
-        delegated = run(env, "-m", "floe2", "index", source,
-                        "--jobs", "2")
-        check(delegated.returncode == 0, "floe2 Rust index delegation failed")
+        rust(env, "index", source, "--jobs", "2")
         # a layout indexes without the occupancy summary into the
         # hidden sibling .<src>.ice (2026-09-16)
         check(json.loads(log.read_text()) == [
             "vfs", str(source), vfs_cache_dir(source), "--jobs", "2",
             "--no-lod",
-        ], "floe2 changed the canonical Rust index argv")
+        ], "floe2 changed the canonical Rust index argv: %s" % log.read_text())
 
     if fixture is not None:
         validate_runtime(base, Path(fixture).resolve())
+        validate_rust_cli(base, Path(fixture).resolve())
     print("FLOE2 PRODUCT VALIDATION: ALL OK")
 
 

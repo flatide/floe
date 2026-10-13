@@ -1,5 +1,6 @@
 //! Error-sheet PNGs: live design style + editable flateyes metadata. No review
 //! writes, automatic indexing, Python fallback or browser download endpoint.
+use super::analysis::measure::{area_label, Selector};
 use super::{open_current, reviewer_tag, waive_paths, Database, ReadHit};
 use crate::{
     annotations::{self, Annotation, Document},
@@ -7,14 +8,13 @@ use crate::{
     dataset::Dataset,
     render::{require_complete, RenderOptions, RenderSession},
     shots::{Shot, MAX_PIXELS},
-    styles::{self, LayerProps},
+    styles::LayerProps,
     svrf::Rules,
     Error, ErrorKind, Result,
 };
 use floe_worker_client::{FrameFormat, Layers, RenderRequest};
 use serde_json::json;
 use std::{
-    collections::BTreeMap,
     fs,
     ops::Range,
     os::unix::fs::MetadataExt,
@@ -33,6 +33,9 @@ pub struct Options {
     pub rules: Option<PathBuf>,
     /// None discovers SVRF isolation; Some("all") explicitly bypasses it.
     pub layers: Option<String>,
+    /// `--legend` (2026-10-13): the layers' legend for an all-layer capture
+    /// too (an isolated one always carries it)
+    pub legend: bool,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -45,6 +48,7 @@ impl Default for Options {
             reviewer: None,
             rules: None,
             layers: None,
+            legend: false,
         }
     }
 }
@@ -123,6 +127,7 @@ fn document(
     px: u32,
     rule: &str,
     legend: Option<Vec<String>>,
+    selector: &Selector,
     stop: &AtomicUsize,
 ) -> Result<Document> {
     let e = &hit.violation;
@@ -182,12 +187,17 @@ fn document(
                 "b":pair[1], "color":color, "width":2, "casing":false}))?);
         }
     }
-    for segment in super::cd_segments_um(e.kind, &points, stop)? {
-        let [mut a, mut b] = segment.endpoints_um.map(project);
+    // the viewer's rulers: a rectangle's directions its rule condition
+    // flags, an AREA rule's area as a text note (floe_oracle cli.py
+    // _embed_error_png, feature/jobdeck-drc)
+    let offset = e.kind == 'e' && points.len() == 2;
+    for s in selector.ruler_segments(e.kind, &points) {
+        check_cancelled(stop)?;
+        let (mut a, mut b) = (project([s[0], s[1]]), project([s[2], s[3]]));
         if a == b {
             continue;
         }
-        if segment.offset {
+        if offset {
             let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
             let length = dx.hypot(dy);
             let (mut nx, mut ny) = (-dy / length, dx / length);
@@ -202,6 +212,11 @@ fn document(
         }
         doc.annotations.push(Annotation::from_json(
             json!({"kind":"ruler", "a":a, "b":b}),
+        )?);
+    }
+    if let Some((x, y, text)) = area_label(e.kind, &points, selector.constraints()) {
+        doc.annotations.push(Annotation::from_json(
+            json!({"kind":"text", "at":project([x, y]), "text":text}),
         )?);
     }
     // Fail before rendering, not after publishing an unannotated image.
@@ -317,15 +332,9 @@ fn sidecars(o: &Options, db: &Database) -> Result<Vec<PathBuf>> {
     )));
     Ok(paths)
 }
-fn layers(
-    o: &Options,
-    dataset: &Dataset,
-    candidates: &[PathBuf],
-    stop: &AtomicUsize,
-) -> Result<Layers> {
-    if let Some(layers) = &o.layers {
-        return dataset.resolve_layers(Some(layers));
-    }
+/// The rules.json sidecar the capture reads: for the layer isolation and the
+/// rulers alike - an explicit --layers still takes the rulers' constraints.
+fn rules(o: &Options, candidates: &[PathBuf], stop: &AtomicUsize) -> Result<Option<Rules>> {
     let path = if o.rules.is_some() {
         candidates.first()
     } else {
@@ -334,18 +343,26 @@ fn layers(
             .find(|p| fs::metadata(p).is_ok_and(|m| m.is_file()))
     };
     let Some(path) = path else {
-        eprintln!("[drc] no rules.json sidecar found - rendering all layers");
-        return Ok(Layers::All);
+        eprintln!("[drc] no rules.json sidecar found - geometry-only rulers");
+        return Ok(None);
     };
-    let rules = match Rules::load(path, stop) {
-        Ok(rules) => rules,
-        Err(e) if e.kind == ErrorKind::Cancelled => return Err(e),
+    match Rules::load(path, stop) {
+        Ok(rules) => Ok(Some(rules)),
+        Err(e) if e.kind == ErrorKind::Cancelled => Err(e),
         Err(e) => {
-            eprintln!("[drc][warn] rules sidecar unusable ({e}) - all layers");
-            return Ok(Layers::All);
+            eprintln!("[drc][warn] rules sidecar unusable ({e}) - geometry-only rulers");
+            Ok(None)
         }
-    };
-    let Some(rule) = rules.rule(&o.rule).filter(|r| !r.source_gds.is_empty()) else {
+    }
+}
+fn layers(o: &Options, dataset: &Dataset, rules: Option<&Rules>) -> Result<Layers> {
+    if let Some(layers) = &o.layers {
+        return dataset.resolve_layers(Some(layers));
+    }
+    let Some(rule) = rules
+        .and_then(|r| r.rule(&o.rule))
+        .filter(|r| !r.source_gds.is_empty())
+    else {
         eprintln!(
             "[drc] rule {:?} has no svrf layer metadata - all layers",
             o.rule
@@ -373,39 +390,6 @@ fn layers(
         Ok(Layers::Only(keys))
     }
 }
-fn legend(dataset: &Dataset, layers: &Layers) -> Result<Option<Vec<String>>> {
-    let Layers::Only(keys) = layers else {
-        return Ok(None);
-    };
-    let (rows, props) = rows(dataset)?;
-    let rows: BTreeMap<_, _> = rows
-        .into_iter()
-        .map(|(key, name, color)| (key, (name, color)))
-        .collect();
-    let mut fills = BTreeMap::new();
-    for p in props {
-        let value = p.fill.trim().to_lowercase();
-        if matches!(value.as_str(), "solid" | "clear") || styles::pattern(&value).is_some() {
-            fills.insert(p.layer, value);
-        }
-    }
-    let mut lines = Vec::new();
-    for key in keys {
-        let Some((name, color)) = rows.get(key) else {
-            continue;
-        };
-        let fill = fills.get(key).map_or("speckle", String::as_str);
-        lines.push(annotations::legend_line(&format!(
-            "box {} {fill} {} {}/{}",
-            if color.is_empty() { "#808080" } else { color },
-            name.trim(),
-            key.0,
-            key.1
-        ))?);
-    }
-    Ok((!lines.is_empty()).then_some(lines))
-}
-
 pub fn run(
     dataset: &Dataset,
     shot: &Shot,
@@ -458,8 +442,27 @@ pub fn run(
         eprintln!("[drc][warn] {count} errors - rendering the first {} (--drc-cap; explicit ranges render in full)",options.cap);
     }
     let candidates = sidecars(options, &db)?;
-    let visible = layers(options, dataset, &candidates, stop)?;
-    let legend = legend(dataset, &visible)?;
+    let rules = rules(options, &candidates, stop)?;
+    let visible = layers(options, dataset, rules.as_ref())?;
+    let constraints: Vec<serde_json::Value> = rules
+        .as_ref()
+        .and_then(|r| r.rule(&options.rule))
+        .map(|r| {
+            r.constraints
+                .iter()
+                .map(|c| serde_json::to_value(c).expect("a constraint serializes"))
+                .collect()
+        })
+        .unwrap_or_default();
+    let selector = Selector::new(&constraints);
+    // the layers' legend (crate::legend, from the styles the frames are
+    // drawn with): an isolated capture's, every layer's with --legend
+    let legend = if options.legend || matches!(visible, Layers::Only(_)) {
+        let lines = crate::legend::lines(dataset, &dataset.styles(false)?, &visible)?;
+        (!lines.is_empty()).then_some(lines)
+    } else {
+        None
+    };
     let mut protected = candidates;
     protected.extend([options.database.clone(), db.path().to_owned()]);
     protected.extend(crate::cache::pack_paths(&options.database)?);
@@ -505,7 +508,7 @@ pub fn run(
                 .filter(|h| h.local == local)
                 .ok_or_else(|| Error::input("missing DRC capture record"))?;
             let (bbox, view) = region(hit.violation.bbox_um, options.fraction, dataset.dbu())?;
-            let doc = document(&hit, bbox, px, &options.rule, legend.clone(), stop)?;
+            let doc = document(&hit, bbox, px, &options.rule, legend.clone(), &selector, stop)?;
             let request = RenderRequest {
                 view,
                 width: px,
@@ -517,12 +520,21 @@ pub fn run(
                 labels: !dataset.is_deck(),
                 font_px: shot.font_px,
                 thin: shot.thin.effective(dataset.is_deck()),
+                density: Some(!dataset.is_deck() && shot.density_on()),
                 format: FrameFormat::Png,
                 ..session.base_request()
             };
             let frame = session.capture(request)?;
             require_complete(&frame)?;
             let (display, path) = target(local)?;
+            // (a --detail cut lets the budget fit thin the frame: said)
+            if let Some(fit) = crate::render::budget_fit(&frame) {
+                eprintln!(
+                    "[drc][warn] {} thinned to fit the render budget: {}; FLOE_RUST_BUDGET_MB raises it",
+                    display.display(),
+                    crate::render::budget_fit_brief(&fit, !dataset.is_deck() && shot.density_on())
+                );
+            }
             let stage = annotations::png::stage(&path, &frame.bytes, &doc, stop)?;
             db.unchanged()?;
             stage.commit(stop)?;

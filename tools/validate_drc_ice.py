@@ -37,7 +37,8 @@ pack; D2 keeps the retirement honest.)
       sync across toggles made after it is built.
   D8  diagonal closest endpoints of a parallel edge pair retain the
       true minimum first and add deterministic horizontal + vertical
-      component rulers; facing and non-parallel pairs stay single.
+      component rulers; midpoint placement never changes the numeric
+      minimum, and facing/non-parallel pairs stay single.
   D9  waive autosave (user calls 2026-08-28: per-reviewer dotfile
       BESIDE the pack - server-side floe forwards the display, so
       $HOME may be absent; durable records = explicit save-as; the
@@ -57,6 +58,7 @@ pack; D2 keeps the retirement honest.)
 usage: .venv/bin/python tools/validate_drc_ice.py [floe-index-bin]
 """
 
+import math
 import os
 import struct
 import subprocess
@@ -64,8 +66,9 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from floe import drc  # noqa: E402
-from floe import cachepath  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "oracle"))  # P3
+from floe_oracle import drc  # noqa: E402
+from floe_oracle import cachepath  # noqa: E402
 
 BIN = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
     os.path.dirname(__file__), "..", "rust", "target", "release",
@@ -223,6 +226,190 @@ def validate_names(tmp, db, side):
         del os.environ["FLOE_CACHE_MIGRATE"]
     pk.close() if hasattr(pk, "close") else None
     os.rename(legacy, side)
+
+
+def validate_service(tmp):
+    """D12 (2026-10-09 P2b): the GTK viewer's review through floe2
+    gtk-service (app-core drc::desktop) is IcePack's - the same files,
+    bytes and answers: checks, errors (kind/num/pts) and CD segments; a
+    status the service writes is in the sidecar Python reads (counters
+    in step), status pages/ranks and spatial queries (waived filters
+    too) equal; notes the service writes are the .fe Python serializes
+    and reloads, cleared the file goes; a waive export is byte-equal and
+    a foreign one refused; another run's sidecar is moved aside; the
+    service's reader lock refuses a re-pack until it closes; svrf
+    operands and the rules sidecar read as floe/svrf.py read them."""
+    import json
+    import random
+    from floe import gtkservice
+    from floe_oracle import svrf
+    floe2 = os.environ.get("FLOE2_BIN") or os.path.join(
+        os.path.dirname(__file__), "..", "rust", "target", "release", "floe2")
+    gtkservice._SERVICE = gtkservice.Service(floe2)
+    d = os.path.join(tmp, "svc")
+    os.makedirs(d)
+    db = os.path.join(d, "results.db")
+    with open(db, "w") as f:
+        f.write(DB)
+    r = subprocess.run([BIN, "drc", db], capture_output=True, text=True)
+    if r.returncode != 0:
+        fail("D12 indexer rc=%d: %s" % (r.returncode, r.stderr.strip()))
+    side = cachepath.pack_path(db)
+    os.environ["FLOE_REVIEWER"] = "gatesvc"
+    try:
+        eq(gtkservice.drc_busy(db), None, "D12 busy")
+        eq(os.path.realpath(gtkservice.drc_find(db)), os.path.realpath(side),
+           "D12 find")
+        sdb = gtkservice.drc_load(db)
+        if not sdb.packed:
+            fail("D12 the service did not open the pack")
+        eq(os.path.realpath(sdb.waive_path),
+           os.path.realpath(drc.waive_autosave_path(side)), "D12 waive path")
+        py = drc.IcePack(side, src_path=db, verify_src=True)
+        eq(len(sdb.checks), len(py.checks), "D12 check count")
+        for ci, (a, b) in enumerate(zip(py.checks, sdb.checks)):
+            eq((a.name, a.desc, a.declared, len(a.errors)),
+               (b.name, b.desc, b.declared, len(b.errors)),
+               "D12 check %d" % ci)
+            for ei in range(len(a.errors)):
+                ea, eb = a.errors[ei], b.errors[ei]
+                eq((ea.kind, ea.num, [tuple(p) for p in ea.pts]),
+                   (eb.kind, eb.num, eb.pts), "D12 error %d/%d" % (ci, ei))
+                eq([tuple(s) for s in drc.cd_segments(ea)], eb.cd_segments(),
+                   "D12 cd %d/%d" % (ci, ei))
+        ci = max(range(len(py.checks)), key=lambda c: len(py.checks[c].errors))
+        n = len(py.checks[ci].errors)
+        sdb.set_statuses(ci, [0, n - 1], drc.STATUS_WAIVED)
+        sdb.set_status(ci, 0, drc.STATUS_WAIVED)          # idempotent
+        eq([py.get_status(ci, e) for e in range(n)],
+           [sdb.get_status(ci, e) for e in range(n)], "D12 statuses")
+        eq(py.get_status(ci, 0), drc.STATUS_WAIVED, "D12 written status")
+        eq(py.status_counts(ci), sdb.status_counts(ci), "D12 counts")
+        for waived in (True, False):
+            eq(sdb.status_page(ci, waived, 0, n), py.status_page(ci, waived, 0, n),
+               "D12 status page %s" % waived)
+            for e in range(n):
+                eq(sdb.status_rank(ci, waived, e), py.status_rank(ci, waived, e),
+                   "D12 rank %s %d" % (waived, e))
+        rng = random.Random(12)
+        for _ in range(40):
+            x0, x1 = sorted(rng.uniform(-60, 6) for _ in range(2))
+            y0, y1 = sorted(rng.uniform(-90, 6) for _ in range(2))
+            for waived in (None, True, False):
+                got = [(c, e, (er.kind, er.num, er.pts)) for c, e, er in
+                       sdb.query_rect(x0, y0, x1, y1, cap=3, waived=waived)]
+                want = [(c, e, (er.kind, er.num, [tuple(p) for p in er.pts]))
+                        for c, e, er in
+                        py.query_rect(x0, y0, x1, y1, cap=3, waived=waived)]
+                eq(got, want, "D12 query %r %s" % ((x0, y0, x1, y1), waived))
+        # notes: the service writes what Python serializes and reloads
+        gid = sdb.error_gid(ci, 0)
+        sdb.set_note([gid, gid + 1], "  first line\nsecond 한글 \\ ")
+        note = drc.notes_autosave_path(side)
+        text = open(note, encoding="utf-8").read()
+        py2 = drc.IcePack(side, src_path=db, verify_src=True)
+        eq(py2.notes_list(), sdb.notes_list(), "D12 notes reload")
+        eq(py2._serialize_notes(), text, "D12 notes bytes")
+        eq(sdb.get_note(ci, 1), "first line\nsecond 한글 \\", "D12 note text")
+        py2.close()
+        sdb.clear_note([gid, gid + 1])
+        if os.path.exists(note):
+            fail("D12 the notes file stayed with no note left")
+        # waive files
+        a, b = os.path.join(d, "svc.waive"), os.path.join(d, "py.waive")
+        sdb.waive_export(a)
+        py.waive_export(b)
+        eq(open(a, "rb").read(), open(b, "rb").read(), "D12 waive export")
+        eq(sdb.waive_import(a), 2, "D12 waive import")
+        bad = bytearray(open(a, "rb").read())
+        bad[12] ^= 1
+        with open(os.path.join(d, "bad.waive"), "wb") as f:
+            f.write(bytes(bad))
+        try:
+            sdb.waive_import(os.path.join(d, "bad.waive"))
+            fail("D12 a foreign waive file was taken")
+        except gtkservice.ServiceError as exc:
+            if "does not match this pack" not in str(exc):
+                fail("D12 foreign waive file: %s" % exc)
+        # the reader lock: a re-pack is refused while the service holds it
+        py.close()
+        r = subprocess.run([BIN, "drc", db], capture_output=True, text=True)
+        eq(r.returncode, 75, "D12 re-pack under the service's review")
+        sdb.close()
+        # another run's sidecar is moved aside, a fresh one seeded
+        with open(sdb.waive_path, "r+b") as f:
+            f.write(b"XXXXXXXX")
+        sdb = gtkservice.drc_load(db)
+        if not [x for x in os.listdir(d) if ".waive.gatesvc.stale-" in x]:
+            fail("D12 a foreign sidecar was not moved aside")
+        eq(sdb.get_status(ci, 0), 0, "D12 fresh sidecar")
+        sdb.close()
+        # a bigger asset: every error, pages and ranks after random waives,
+        # queries at several caps
+        gdb = os.path.join(d, "gen.db")
+        r = subprocess.run(
+            [sys.executable, os.path.join(os.path.dirname(__file__),
+                                          "gen_drcdb.py"),
+             gdb, "--checks", "60", "--max-errors", "150", "--seed", "12"],
+            capture_output=True, text=True)
+        if r.returncode != 0:
+            fail("D12 gen_drcdb rc=%d: %s" % (r.returncode, r.stderr))
+        r = subprocess.run([BIN, "drc", gdb], capture_output=True, text=True)
+        if r.returncode != 0:
+            fail("D12 gen pack rc=%d: %s" % (r.returncode, r.stderr))
+        gside = cachepath.pack_path(gdb)
+        gs = gtkservice.drc_load(gdb)
+        gp = drc.IcePack(gside, src_path=gdb, verify_src=True)
+        rng = random.Random(7)
+        for ci, (a, b) in enumerate(zip(gp.checks, gs.checks)):
+            eq([(e.kind, e.num, [tuple(p) for p in e.pts]) for e in a.errors],
+               [(e.kind, e.num, e.pts) for e in b.errors], "D12 gen check %d" % ci)
+            picks = [e for e in range(len(a.errors)) if rng.random() < 0.3]
+            gs.set_statuses(ci, picks, drc.STATUS_WAIVED)
+        xs, ys = [], []
+        for c in gp.checks:
+            for e in c.errors:
+                for x, y in e.pts:
+                    xs.append(x)
+                    ys.append(y)
+        for ci in range(len(gp.checks)):
+            n = len(gp.checks[ci].errors)
+            eq(gs.status_counts(ci), gp.status_counts(ci), "D12 gen counts %d" % ci)
+            for waived in (True, False):
+                eq(gs.status_page(ci, waived, 3, 40), gp.status_page(ci, waived, 3, 40),
+                   "D12 gen page %d %s" % (ci, waived))
+                for e in range(0, n, 7):
+                    eq(gs.status_rank(ci, waived, e), gp.status_rank(ci, waived, e),
+                       "D12 gen rank %d %d" % (ci, e))
+        for _ in range(30):
+            x0, x1 = sorted(rng.uniform(min(xs), max(xs)) for _ in range(2))
+            y0, y1 = sorted(rng.uniform(min(ys), max(ys)) for _ in range(2))
+            only = sorted(rng.sample(range(len(gp.checks)), 5))
+            for cap, checks, waived in ((50, None, None), (2000, None, True),
+                                        (2000, only, False), (7, only, None)):
+                got = [(c, e, er.num) for c, e, er in gs.query_rect(
+                    x0, y0, x1, y1, cap=cap, checks=checks, waived=waived)]
+                want = [(c, e, er.num) for c, e, er in gp.query_rect(
+                    x0, y0, x1, y1, cap=cap, checks=checks, waived=waived)]
+                eq(got, want, "D12 gen query cap=%d %s" % (cap, waived))
+        gp.close()
+        gs.close()
+        # svrf
+        for rhs in ("(a AND L3) SIZE BY 0.01 NOT x.y", "M1 INTERACT VIA_1",
+                    "INT m1 < 0.05 ABUT<90 SINGULAR REGION"):
+            eq(gtkservice.svrf_operands(rhs), svrf.rhs_operands(rhs),
+               "D12 operands %r" % rhs)
+        rules = os.path.join(d, "deck.rules.json")
+        with open(rules, "w") as f:
+            json.dump({"format": svrf.FORMAT, "version": svrf.VERSION,
+                       "checks": {"M1.S": {"constraints": []}}}, f)
+        eq(gtkservice.svrf_rules(rules), svrf.load_rules(rules), "D12 rules")
+    finally:
+        os.environ.pop("FLOE_REVIEWER", None)
+        gtkservice._SERVICE.close()
+        gtkservice._SERVICE = None
+    print("D12 OK: floe2 gtk-service review == IcePack (files, bytes, "
+          "answers)")
 
 
 def main():
@@ -575,7 +762,34 @@ def main():
                          (2.0, 1.0), (3.0, 2.0)])
     if len(drc.cd_segments(skew)) != 1:
         fail("non-parallel pair gained component rulers")
-    print("D8 OK: diagonal parallel gap + X/Y component rulers")
+    eq(drc.cd_segments(facing), [(1.5, 0.0, 1.5, 1.0)],
+       "facing parallel ruler lost its midpoint placement")
+
+    # The former dmin * 1.0001 midpoint allowance turned this exact
+    # 1.00000 minimum into 1.00005, despite the edges not being parallel.
+    near_parallel = [(0.0, 0.0), (2.0, 0.0),
+                     (0.0, 1.0), (2.0, 1.0001)]
+    # Parallel alone is not sufficient: with disjoint projections, a
+    # remote midpoint used to pass the same relative tolerance too.
+    far_parallel = [(0.0, 0.0), (2.0, 0.0),
+                    (3.0, 1000.0), (4.0, 1000.0)]
+    for pts, expected, component_count in (
+            (near_parallel, 1.0, 1),
+            (far_parallel, math.hypot(1.0, 1000.0), 3)):
+        for reverse_a in (False, True):
+            for reverse_b in (False, True):
+                a = pts[:2][::-1] if reverse_a else pts[:2]
+                b = pts[2:][::-1] if reverse_b else pts[2:]
+                for edges in (a + b, b + a):
+                    segments = drc.cd_segments(drc.DrcError("e", 5, edges))
+                    eq(len(segments), component_count,
+                       "edge reversal changed minimum/component classification")
+                    x0, y0, x1, y1 = segments[0]
+                    distance = math.hypot(x1 - x0, y1 - y0)
+                    eq(distance, expected, "midpoint changed the numeric minimum")
+                    eq("%.5f" % distance, "%.5f" % expected,
+                       "minimum CD changed at five decimal places")
+    print("D8 OK: exact minima + safe midpoint + endpoint-invariant components")
 
     # D9: waive autosave - save-as/load, refusal, read-only pack,
     # corrupt-aside, in-pack seed migration
@@ -611,10 +825,13 @@ def main():
     # the --floe-reviewer CLI parameter keys the autosave (launcher
     # scripts pass an argument instead of exporting FLOE_REVIEWER)
     root = os.path.join(os.path.dirname(__file__), "..")
+    # the frozen floe shell's drc (dev-only oracle, P3)
     r = subprocess.run(
-        [sys.executable, "-m", "floe", "drc", db, "--rules",
+        [sys.executable, "-m", "floe_oracle", "drc", db, "--rules",
          "--floe-reviewer", "gatecli"],
-        capture_output=True, text=True, cwd=root)
+        capture_output=True, text=True, cwd=root,
+        env=dict(os.environ, PYTHONPATH=os.pathsep.join(
+            (os.path.join(root, "tools", "oracle"), root))))
     if r.returncode != 0:
         fail("floe drc --floe-reviewer rc=%d: %s"
              % (r.returncode, r.stderr.strip()))
@@ -733,7 +950,7 @@ def main():
     # D10: per-reviewer error notes (flateyes .fe sidecar) - a shared
     # note across errors, single/group clear, reopen persistence,
     # flateyes readability, export/import round-trip + foreign refusal
-    from floe import fe_embed
+    from floe_oracle import fe_embed
     os.environ["FLOE_REVIEWER"] = "gate"
     try:
         npk = drc.IcePack(gp)
@@ -839,6 +1056,7 @@ def main():
         fail("hangul backspace decomposition wrong")
     print("D11 OK: bundled hangul composer (compose + backspace)")
 
+    validate_service(tempfile.mkdtemp(prefix="floe-drcsvc-"))
     print("DRC ICE VALIDATION: ALL OK")
 
 

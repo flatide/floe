@@ -73,6 +73,8 @@ pub struct Layout {
     pub metadata: Metadata,
     pub source_stale: bool,
     pub layer_props: Vec<styles::LayerProps>,
+    /// how the layers' default colours were given (set_layer_colors)
+    pub layer_colors: styles::LayerColors,
 }
 
 pub(crate) fn regular_file(path: &Path) -> Result<File> {
@@ -110,10 +112,20 @@ impl Layout {
             ));
         }
         let fingerprint = cache::fingerprint(&source)?;
+        // a cache another run rebuilds whole is not there to open (its
+        // meta.json is gone or half-way): say who, not "no VFS cache"
+        // (floe_vfs::lock; floe/cli.py open_cache)
+        let key = floe_vfs::lock::key(floe_vfs::lock::Kind::Vfs, &directory.to_string_lossy());
+        if let Some(busy) = floe_vfs::lock::opening_refusal(&key) {
+            return Err(Error::new(ErrorKind::Busy, busy.to_string()));
+        }
         if !fs::symlink_metadata(&directory).is_ok_and(|m| m.is_dir()) {
             return Err(Error::new(
                 ErrorKind::Cache,
-                "no real VFS cache directory; run floe2-web index SOURCE first",
+                format!(
+                    "no real VFS cache directory; run {} index SOURCE first",
+                    crate::program()
+                ),
             ));
         }
         let f = regular_file(&directory.join("meta.json"))?;
@@ -123,7 +135,7 @@ impl Layout {
         if f.metadata()?.len() > MAX_META_BYTES {
             return Err(Error::new(ErrorKind::Cache, "metadata exceeds 256 MiB"));
         }
-        let mut metadata: Metadata =
+        let metadata: Metadata =
             serde_json::from_reader(BufReader::new(f.take(MAX_META_BYTES + 1))).map_err(|e| {
                 Error::new(ErrorKind::Cache, format!("invalid cache metadata: {e}"))
             })?;
@@ -162,18 +174,8 @@ impl Layout {
         }
         drop(vfs);
         let layer_props = styles::load_props(&source)?;
-        for layer in &mut metadata.layers {
-            layer.color = styles::color_text(styles::layer_color(layer.layer));
-            let key = layer.key();
-            for prop in layer_props.iter().filter(|p| p.layer == key) {
-                if let Some(color) = prop.color {
-                    layer.color = styles::color_text(color);
-                }
-            }
-        }
-        check_cancelled(cancelled)?;
         let source_stale = fingerprint != (metadata.src.size, metadata.src.mtime);
-        Ok(Self {
+        let mut layout = Self {
             minimap: std::sync::OnceLock::new(),
             revision_pin: None,
             source,
@@ -181,7 +183,27 @@ impl Layout {
             metadata,
             source_stale,
             layer_props,
-        })
+            layer_colors: styles::LayerColors::default(),
+        };
+        layout.set_layer_colors(styles::LayerColors::from_env());
+        check_cancelled(cancelled)?;
+        Ok(layout)
+    }
+    /// The layers' default colours by `mode` (styles::LayerColors: the
+    /// panel's rows, so neighbours differ - 2026-10-13 - or one per layer
+    /// number), the layer properties' colours over them.
+    pub fn set_layer_colors(&mut self, mode: styles::LayerColors) {
+        let places = mode.places(self.metadata.layers.iter().map(|l| (l.key(), l.stored_shapes)));
+        for layer in &mut self.metadata.layers {
+            let key = layer.key();
+            layer.color = styles::color_text(styles::layer_color(places[&key]));
+            for prop in self.layer_props.iter().filter(|p| p.layer == key) {
+                if let Some(color) = prop.color {
+                    layer.color = styles::color_text(color);
+                }
+            }
+        }
+        self.layer_colors = mode;
     }
 
     pub fn bbox_um(&self) -> [f64; 4] {

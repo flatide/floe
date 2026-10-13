@@ -92,7 +92,8 @@ impl JobDeck {
         let mut f = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NONBLOCK)
-            .open(path)?;
+            .open(path)
+            .map_err(|e| Error::opening(e, "jobdeck", path))?;
         let meta = f.metadata()?;
         if !meta.is_file() || meta.len() > MAX_DECK_BYTES as u64 {
             return Err(Error::input(

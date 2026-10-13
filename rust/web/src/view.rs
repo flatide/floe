@@ -298,6 +298,9 @@ pub struct PatchDto {
     pub labels: Field<bool>,
     pub font_px: Field<u32>,
     pub mono: Field<bool>,
+    /// The density under the cut on or off (the shared Patch's `density`,
+    /// the desktop viewer's View > density; None leaves renderd's default).
+    pub density: Field<bool>,
     pub styles: Field<Vec<StyleDto>>,
     pub style_deltas: Field<Vec<StyleDeltaDto>>,
     pub style_batch: Field<StyleBatchDto>,
@@ -412,6 +415,7 @@ impl PatchDto {
             labels: self.labels.optional(),
             font_px: self.font_px.optional(),
             mono: self.mono.optional(),
+            density: self.density.optional(),
             style_changes,
             style_batch: self
                 .style_batch

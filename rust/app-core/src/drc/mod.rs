@@ -1,16 +1,21 @@
 //! DRC sources: bounded layout-4 pack queries and a streaming ASCII fallback.
 //! Reads never implicitly write; build is a separate, explicitly approved job.
 //! No mmap: truncation of a shared file is an I/O error rather than SIGBUS.
+pub mod analysis;
 mod ascii;
 pub mod build;
 pub mod capture;
 mod database;
+pub mod desktop;
 mod filters;
 mod local;
+pub mod matcher;
 mod measure;
 mod pack;
 pub mod review;
 mod selection;
+#[cfg(feature = "review-sqlite")]
+pub mod team;
 pub use ascii::{Ascii, AsciiCheck, AsciiViolation};
 pub use database::{
     Database, ReadCheck, ReadHit, ReadInfo, ReadInfoHit, ReadPage, ReadPointPage, ReadPoints,
@@ -23,7 +28,7 @@ pub use local::{
 };
 pub use measure::{cd_segments, cd_segments_um, measured, measured_um, CdSegment};
 pub use pack::{
-    Check, Cursor, Hit, InfoHit, InfoPage, Pack, Page, PointPage, RecordInfo, StepCursor, StepPage,
+    Blocks, Check, Cursor, Hit, InfoHit, InfoPage, Pack, Page, PointPage, RecordInfo, StepCursor, StepPage,
     StepRequest, Violation,
 };
 pub use selection::{SelectionMode, Selections, SELECTION_INPUT, SELECTION_ITEMS};
@@ -38,6 +43,11 @@ pub const RECORD_POINTS: usize = 262_144;
 pub const CACHE_BYTES: usize = 32 * 1024 * 1024;
 pub const PAGE_ITEMS: usize = 2000;
 pub const SCAN_ITEMS: u64 = 262_144;
+
+/// Hold `pack` as a reader (a re-pack waits, as for a review).
+pub fn pack_reader_lock(pack: &std::path::Path) -> crate::Result<floe_vfs::lock::ReaderGuard> {
+    local::pack_reader(pack)
+}
 
 fn corrupt(what: &str) -> Error {
     Error::new(

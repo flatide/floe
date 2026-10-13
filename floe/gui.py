@@ -13,35 +13,39 @@ headless and the spawned render process never touches GTK.
 """
 
 import bisect
+import decimal
+import functools
 import math
 import os
 import queue
 import signal
 import sys
+import threading
 import time
+from types import SimpleNamespace
 
 from . import __version__
-from . import cache as cache_mod
-from . import drc as drc_mod
+from . import gtkservice
 from . import fillpat
-from . import indexlock
 from .hangul import HangulComposer, TextViewEditable
 from .product import name as product_name
-from .rust_render import _env_int, CELL_QUERY_KINDS
-from .service import (make_render_worker, DETAIL_PX, DETAIL_LEVELS,
-                      DEFAULT_DETAIL)
-from .view_policy import live_caps
+from .gtkservice import CELL_QUERY_KINDS
+
+# DETAIL level: the user sees the name; the screen-px size cut behind each
+# is the shared app layer's (app-core shots::Detail::cut_px)
+DETAIL_LEVELS = ("low", "medium", "high")
+DETAIL_PX = (5.0, 3.0, 1.0)
+DEFAULT_DETAIL = 1              # medium
 
 
 def _is_deck_path(path):
     return bool(path) and str(path).lower().endswith(".jb")
 
+
 Gtk = Gdk = GdkPixbuf = GLib = Pango = None
 
 APP = product_name()
-HAS_DENSITY_COVERAGE = APP != "floe2"
 POLL_MS = 25
-DEBOUNCE_MS = 120
 # LOD starts ON (rev 31): the skeleton is gone, so the first fit
 # view is a live working set - merged variants must engage there
 # without a keypress. The planner's fidelity/worth gates and the
@@ -68,17 +72,18 @@ DRC_PAGE = 1000            # error-grid cells per page
 DRC_GRID_W = 5             # error numbers per browser grid row
 DRC_VIEW_FRACTION = 0.3    # error extent ~30% of the view on a jump
 DRC_HL_CAP = 1000          # highlight-in-view marker budget
-DRC_SEL_CAP = 5000         # box-select budget ('e' mode)
+DRC_LARGE_RULE = 100000    # in-view lists of rules this large: a service job
 DRC_GREEN = 0x00E676FF     # WAIVED errors (geometry+numbers;
                            # cyan->green, user call 2026-08-17)
-DRC_MARK_PX = 5            # collapsed-marker square side; geometry
+DRC_MARK_PX = 5            # collapsed-marker circle diameter; geometry
                            # whose screen span shrinks BELOW this
                            # paints as the marker (no gap where the
                            # shape draws smaller than the marker)
 # canonical order of the rule-type combo (SVRF measurement metrics
 # from the rules.json sidecar; "other" = no parsed measurement)
-DRC_METRICS = ("width", "space", "enclosure", "area", "density",
-               "length", "angle", "perimeter", "vertex", "other")
+DRC_METRICS = ("width", "space", "notch", "enclosure", "overlap",
+               "extension", "area", "density", "length", "angle",
+               "perimeter", "vertex", "other")
 
 # FLOE_DRC_PROF=1: print a per-stage timing breakdown of the DRC
 # browser paths to stderr - for machine-specific slowness reports
@@ -134,9 +139,801 @@ LEFT_PANE_PX = 260
 
 class _DrcPanel(object):
     """Widget refs of the embedded DRC browser (attribute bag)."""
-    __slots__ = ("_info", "_rules", "_rstore", "_grid", "_gstore",
+    __slots__ = ("_info", "_review_info", "_conflict", "_conflict_info",
+                 "_rules", "_rstore", "_grid", "_gstore",
                  "_detail", "_hl", "_wf", "_selv", "_search",
-                 "_tf", "_plabel", "_pprev", "_pnext")
+                 "_tf", "_plabel", "_pprev", "_pnext", "_delta_mode",
+                 "_delta_step", "_delta_store", "_delta_tree", "_delta_label",
+                 "_delta_prev", "_delta_next")
+
+
+class _DrcTeamWindow:
+    """Read-only peer snapshots; every action keeps the viewer's own DB."""
+
+    def __init__(self, viewer):
+        self.viewer, self.db = viewer, viewer._drc
+        self.sources, self.aggregate = [], None
+        self.import_conflicts, self.import_source = None, None
+        self.job, self.closed, self.page = None, False, 0
+        self._guard = False
+        self.window = Gtk.Window(title="DRC reviewers")
+        self.window.set_transient_for(viewer.window)
+        self.window.set_default_size(970, 650)
+        viewer._only_close_button(self.window)
+        viewer._center_on_parent(self.window)
+        self.window.connect("destroy", self._destroy)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_border_width(8)
+        self.window.add(box)
+        self.controls = []
+
+        def row():
+            widget = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
+            box.pack_start(widget, False, False, 0)
+            return widget
+
+        def button(parent, label, callback):
+            widget = Gtk.Button(label=label)
+            widget.connect("clicked", lambda *_: callback())
+            parent.pack_start(widget, False, False, 0)
+            self.controls.append(widget)
+            return widget
+
+        top = row()
+        button(top, "Load peer work…", self._load_dialog)
+        button(top, "Export my review…", self._export)
+        button(top, "Refresh", self._refresh)
+        button(top, "Statistics CSV…", self._csv)
+        self.peer = Gtk.ComboBoxText()
+        self.peer.set_hexpand(True)
+        top.pack_start(self.peer, True, True, 0)
+        self.controls.append(self.peer)
+        self.peer.connect("changed", lambda *_: self._changed())
+        self.source_label = Gtk.Label(label="No peer loaded. Peer originals remain read-only.")
+        self.source_label.set_xalign(0)
+        self.source_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        box.pack_start(self.source_label, False, False, 0)
+        self.stats = Gtk.Label(label="Statistics have not been refreshed.")
+        self.stats.set_xalign(0)
+        self.stats.set_line_wrap(True)
+        self.stats.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        box.pack_start(self.stats, False, False, 0)
+        filters = row()
+        self.rule = Gtk.ComboBoxText()
+        for ci, check in enumerate(self.db.checks):
+            self.rule.append(str(ci), check.name)
+        self.rule.set_active(viewer._drc_open if viewer._drc_open is not None else 0)
+        self.rule.set_hexpand(True)
+        filters.pack_start(self.rule, True, True, 0)
+        self.controls.append(self.rule)
+        self.rule.connect("changed", lambda *_: self._changed())
+        self.mode = Gtk.ComboBoxText()
+        self.mode.append("work", "Selected peer's work")
+        self.mode.append("conflict", "Conflicts among visited reviewers")
+        self.mode.append("import", "Import conflicts with selected peer")
+        self.mode.set_active(0)
+        self.mode.connect("changed", lambda *_: self._changed())
+        filters.pack_start(self.mode, False, False, 0)
+        self.controls.append(self.mode)
+        self.store = Gtk.ListStore(int, int, str, str, str, str)
+        self.tree = Gtk.TreeView(model=self.store)
+        for j, title in ((2, "Error"), (3, "Mine: V / W / NR"),
+                         (4, "Peer: V / W / NR"), (5, "Conflict")):
+            column = Gtk.TreeViewColumn(title, Gtk.CellRendererText(), text=j)
+            column.set_expand(True)
+            self.tree.append_column(column)
+        self.tree.get_selection().set_mode(Gtk.SelectionMode.MULTIPLE)
+        self.tree.connect("row-activated", self._jump)
+        scroll = Gtk.ScrolledWindow()
+        scroll.add(self.tree)
+        box.pack_start(scroll, True, True, 0)
+        pages = row()
+        self.prev = button(pages, "Previous", lambda: self._turn(-1))
+        self.page_label = Gtk.Label(label="0 errors")
+        pages.pack_start(self.page_label, True, True, 0)
+        self.next = button(pages, "Next", lambda: self._turn(1))
+        apply_row = row()
+        button(apply_row, "Apply all peer work safely", self._apply)
+        button(apply_row, "Use peer judgement on selected rows", lambda: self._apply(True))
+        manual = row()
+        for label, field, on in (("Waive selected", "waive", True),
+                                 ("Unwaive selected", "waive", False),
+                                 ("Exclude selected", "not-required", True),
+                                 ("Require selected", "not-required", False)):
+            button(manual, label, lambda f=field, v=on: self._manual(f, v))
+        help_label = Gtk.Label(label=("V = visited · W = waived · NR = not for review. "
+            "Double-click opens my error geometry.\n"
+            "Safe apply preserves different judgements on my visited errors; "
+            "peer visits are never copied. Selected-row actions are explicit overrides.\n"
+            "Refresh includes my latest work. Reload peer files to receive their newer work."))
+        help_label.set_xalign(0)
+        help_label.set_line_wrap(True)
+        box.pack_start(help_label, False, False, 0)
+        self.status = Gtk.Label(label="Load peer work to compare reviews.")
+        self.status.set_xalign(0)
+        self.status.set_line_wrap(True)
+        self.status.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        self.status.set_max_width_chars(100)
+        box.pack_start(self.status, False, False, 0)
+        self.window.show_all()
+
+    def _valid(self):
+        return not self.closed and self.viewer._drc is self.db
+
+    def _source(self):
+        index = self.peer.get_active()
+        return self.sources[index] if 0 <= index < len(self.sources) else None
+
+    def _ci(self):
+        value = self.rule.get_active_id()
+        return int(value) if value is not None else None
+
+    def _destroy(self, *_):
+        self.closed = True
+        if self.job is not None and not self.job["write"]:
+            self.job["cancel"].set()
+        if getattr(self.viewer, "_drc_team", None) is self:
+            self.viewer._drc_team = None
+        if self.job is None:
+            self._close_sources()
+
+    def _close_sources(self):
+        for source in self.sources + [item for item in
+                (self.aggregate, self.import_conflicts) if item is not None]:
+            source.close()
+        self.sources, self.aggregate = [], None
+        self.import_conflicts, self.import_source = None, None
+
+    def _start(self, label, work, complete, *, write=False, changed=False):
+        if not self._valid():
+            return False
+        if self.job is not None or self.viewer._drc_review_pending():
+            self.status.set_text("An operation is running; wait for it to finish.")
+            return False
+        cancel = threading.Event()
+        # the service writes the visits it accepted before a team job
+        # (drc_team.rs wait_visits): no barrier here
+        job = dict(db=self.db, label=label, cancel=cancel, done=False, result=None,
+                   error=None, progress=None, write=write, changed=changed,
+                   complete=complete, waive_changed=bool(changed and changed != "flags"))
+        self.job = job
+        self.viewer._drc_team_busy = job
+        if write:
+            self.viewer._drc_team_write = job
+        for widget in self.controls:
+            widget.set_sensitive(False)
+        self.tree.set_sensitive(False)
+        self.status.set_text(label + "…")
+
+        def run():
+            try:
+                job["result"] = work(cancel.is_set,
+                    lambda done, total, *_: job.update(progress=(done, total)))
+                if isinstance(job["result"], dict) and "changed_waived" in job["result"]:
+                    job["waive_changed"] = bool(job["result"]["changed_waived"])
+            except Exception as exc:
+                job["error"] = str(exc)
+            finally:
+                job["done"] = True
+        # Accepted writes finish even when a window closes. Read scans cancel.
+        threading.Thread(target=run, name="drc-team", daemon=not write).start()
+        GLib.timeout_add(POLL_MS, self._poll)
+        return True
+
+    def _poll(self):
+        job = self.job
+        if job is None:
+            return False
+        if not self._valid() and not job["write"]:
+            job["cancel"].set()
+        if not job["done"]:
+            if self._valid() and job["progress"] is not None:
+                self.status.set_text("%s: %d / %d" % (job["label"], *job["progress"]))
+            return True
+        self.job = None
+        if getattr(self.viewer, "_drc_team_busy", None) is job:
+            self.viewer._drc_team_busy = None
+        if getattr(self.viewer, "_drc_team_write", None) is job:
+            self.viewer._drc_team_write = None
+        if job["changed"] and self.viewer._drc is self.db:
+            # A failed batch may already have committed earlier chunks.
+            self.viewer._drc_team_changed(self.db, waived=job["waive_changed"])
+        if not self._valid():
+            result = job["result"]
+            if hasattr(result, "close"):
+                result.close()
+            elif isinstance(result, tuple) and result and isinstance(result[0], list):
+                for source in result[0]:
+                    source.close()
+            if job["error"] and job["write"]:
+                self.viewer._set_live_status("Previous review operation failed: " + job["error"])
+            if self.closed:
+                self._close_sources()
+            else:
+                self.status.set_text("The DRC database changed. Reopen Reviewers for the new database.")
+            return False
+        for widget in self.controls:
+            widget.set_sensitive(True)
+        self.tree.set_sensitive(True)
+        if job["error"]:
+            self.status.set_text(job["label"] + " failed: " + job["error"])
+            if job["changed"]:
+                self.stats.set_text("Review changed partially; refresh statistics before continuing.")
+        else:
+            self.status.set_text(job["label"] + " complete")
+            job["complete"](job["result"])
+        if self.job is None and getattr(self, "_open_load_when_ready", False):
+            self._open_load_when_ready = False
+            self._load_dialog()
+        return False
+
+    def _choose(self, title, save=False, multiple=False, default=None):
+        if not self._valid() or self.job is not None:
+            return None
+        dialog = Gtk.FileChooserDialog(title=title, parent=self.window,
+            action=Gtk.FileChooserAction.SAVE if save else Gtk.FileChooserAction.OPEN)
+        dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                           "Save" if save else "Open", Gtk.ResponseType.OK)
+        dialog.set_current_folder(os.path.dirname(os.path.abspath(self.db.path)))
+        if save:
+            dialog.set_do_overwrite_confirmation(True)
+            if default:
+                dialog.set_current_name(default)
+        else:
+            dialog.set_select_multiple(multiple)
+        answer = None
+        if dialog.run() == Gtk.ResponseType.OK:
+            answer = dialog.get_filenames() if multiple else dialog.get_filename()
+        dialog.destroy()
+        self.window.present()
+        return answer if self._valid() else None
+
+    def _load_dialog(self):
+        paths = self._choose("Load peer review bundles or waiver files", multiple=True)
+        if paths:
+            self._load_paths(paths)
+
+    def _load_paths(self, paths):
+        from .gtkservice import open_review
+        paths = tuple(paths)
+
+        def work(cancelled, progress):
+            loaded, errors = [], []
+            for path in paths:
+                if cancelled():
+                    break
+                try:
+                    loaded.append(open_review(self.db, path,
+                        cancelled=cancelled, progress=progress))
+                except Exception as exc:
+                    errors.append("%s: %s" % (os.path.basename(path), exc))
+            return loaded, errors
+
+        def complete(result):
+            loaded, errors = result
+            self._guard = True
+            try:
+                for source in loaded:
+                    # A reviewer has one active snapshot, never two votes.
+                    old = next((s for s in self.sources if s.reviewer == source.reviewer), None)
+                    if old is not None:
+                        if ((old.exported_ns, old.snapshot_id) >=
+                                (source.exported_ns, source.snapshot_id)):
+                            source.close()
+                            errors.append("%s: kept the newer loaded snapshot" % source.reviewer)
+                            continue
+                        self.sources.remove(old)
+                        old.close()
+                    self.sources.append(source)
+                self.peer.remove_all()
+                for source in self.sources:
+                    self.peer.append_text(source.reviewer)
+                self.peer.set_active(len(self.sources) - 1)
+            finally:
+                self._guard = False
+            self._load_errors = "; ".join(errors)
+            self.page = 0
+            if loaded:
+                self._refresh()
+            else:
+                self.status.set_text("No peer loaded: " + self._load_errors)
+        self._start("Load peer work", work, complete)
+
+    def _refresh(self):
+        from .gtkservice import aggregate_reviews
+        sources = tuple(self.sources)
+
+        def complete(result):
+            if self.aggregate is not None:
+                self.aggregate.close()
+            if self.import_conflicts is not None:
+                self.import_conflicts.close()
+            self.import_conflicts, self.import_source = None, None
+            self.aggregate = result
+            self.refreshed_at = time.strftime("%H:%M:%S")
+            publish = getattr(self.viewer, "_drc_conflict_publish", None)
+            if publish is not None:
+                publish(result, self.refreshed_at)
+            self._page_load()
+        self._start("Refresh reviewer statistics",
+            lambda cancel, progress: aggregate_reviews(self.db, sources,
+                cancelled=cancel, progress=progress), complete)
+
+    @staticmethod
+    def _state(value, source=None):
+        fields = (("visited", value.visited), ("waive", value.waived),
+                  ("not_required", value.not_required))
+        return " / ".join("—" if source is not None and not getattr(source, name + "_known", True)
+                          else "yes" if flag else "no" for name, flag in fields)
+
+    @staticmethod
+    def _stats_line(scope, counts):
+        return ("%s: total %d · visited (any reviewer) %d · waived %d · "
+                "not for review %d · unvisited targets %d · conflicts %d" %
+                (scope, counts["total"], counts["visited"], counts["waived"],
+                 counts["not_required"], counts["pending"], counts["conflicts"]))
+
+    def _changed(self):
+        if not self._guard:
+            self.page = 0
+            self._page_load()
+
+    def _page_load(self):
+        ci, source, aggregate = self._ci(), self._source(), self.aggregate
+        if aggregate is None:
+            return
+        if ci is None:
+            def complete_empty(counts):
+                self.store.clear()
+                self.stats.set_text(self._stats_line("Whole DB", counts) + "\nNo rules in this database.")
+                self.page_label.set_text("0 errors")
+                self.prev.set_sensitive(False)
+                self.next.set_sensitive(False)
+            self._start("Read reviewer statistics", lambda *_: aggregate.counts(), complete_empty)
+            return
+        if source is not None and self.import_source is not source:
+            from .gtkservice import import_conflicts
+
+            def complete(result):
+                if self.import_conflicts is not None:
+                    self.import_conflicts.close()
+                self.import_conflicts, self.import_source = result, source
+                self._page_load()
+            self._start("Compare safe-import judgements",
+                lambda cancel, progress: import_conflicts(self.db, source,
+                    cancelled=cancel, progress=progress), complete)
+            return
+        kind = self.mode.get_active_id()
+        provider = (aggregate if kind == "conflict" else
+                    self.import_conflicts if kind == "import" else source)
+        query_kind = "conflict" if kind in ("conflict", "import") else "work"
+        imports = self.import_conflicts if self.import_source is source else None
+        page = self.page
+
+        def work(cancelled, progress):
+            from .gtkservice import VISITED, NOT_REQUIRED
+            count = provider.members(ci, query_kind).count() if provider is not None else 0
+            actual_page = min(page, max(0, (count - 1) // DRC_PAGE))
+            ids = provider.page(ci, actual_page * DRC_PAGE, DRC_PAGE, kind=query_kind) if provider else ()
+            peers = source.get_many(ci, ids) if source else [None] * len(ids)
+            teams = aggregate.get_many(ci, ids)
+            rows = []
+            for ei, peer_value, team in zip(ids, peers, teams):
+                if cancelled():
+                    raise InterruptedError("page cancelled")
+                flags = self.db.review_flags(ci, ei)
+                own_waived = self.db.get_status(ci, ei) == gtkservice.STATUS_WAIVED
+                mine = "%s / %s / %s" % tuple("yes" if value else "no" for value in
+                    (flags & VISITED, own_waived, flags & NOT_REQUIRED))
+                peer = self._state(peer_value, source) if source else "—"
+                conflict = "reviewers" if team.conflict else ""
+                if (source is not None and flags & VISITED and
+                        ((source.waive_known and peer_value.waived != own_waived) or
+                         (source.not_required_known and peer_value.not_required != bool(flags & NOT_REQUIRED))) and
+                        (peer_value.visited or peer_value.waived or peer_value.not_required)):
+                    conflict = (conflict + "; " if conflict else "") + "import protected"
+                rows.append((ci, ei, "#%d" % (ei + 1), mine, peer, conflict))
+            return (rows, count, actual_page, aggregate.counts(), aggregate.counts(ci),
+                    imports.counts()["conflicts"] if imports is not None else 0,
+                    imports.counts(ci)["conflicts"] if imports is not None else 0)
+
+        def complete(result):
+            rows, count, self.page, total, rule, import_total, import_rule = result
+            self.store.clear()
+            for data in rows:
+                self.store.append(data)
+            self.page_label.set_text("%d errors · page %d / %d · %d per page" %
+                (count, self.page + 1, max(1, (count + DRC_PAGE - 1) // DRC_PAGE), DRC_PAGE))
+            self.prev.set_sensitive(self.page > 0)
+            self.next.set_sensitive((self.page + 1) * DRC_PAGE < count)
+            self.stats.set_text("Snapshot %s · Mine + loaded peers (%d reviewers) · Refresh after further edits/visits\n%s\n%s\n"
+                "Import conflicts with selected peer: Whole DB %d · Whole rule %d" %
+                (self.refreshed_at, total["reviewers"], self._stats_line("Whole DB", total),
+                 self._stats_line("Whole rule " + self.db.checks[ci].name, rule), import_total, import_rule))
+            self.source_label.set_text(("Peer %s — %s" %
+                (source.reviewer, getattr(source, "original_path", source.path)))
+                if source else "No peer selected; aggregate includes my review.")
+            error = getattr(self, "_load_errors", "")
+            if error:
+                self.status.set_text("Some sources were not loaded: " + error)
+                self._load_errors = ""
+            elif getattr(self, "_notice", ""):
+                self.status.set_text(self._notice)
+        self._start("Read reviewer page", work, complete)
+
+    def _turn(self, delta):
+        self.page = max(0, self.page + delta)
+        self._page_load()
+
+    def _jump(self, _tree, path, _column):
+        if not self._valid() or self.job is not None:
+            return
+        row = self.store[path]
+        ci, ei = int(row[0]), int(row[1])
+        # _drc_jump sets the global position and own review_target itself.
+        self.viewer._drc_jump(ci, ei, isolate=True)
+        self.status.set_text("Opened my error geometry; Refresh updates the review comparison.")
+
+    def _selection(self):
+        model, paths = self.tree.get_selection().get_selected_rows()
+        ci = self._ci()
+        if ci is None:
+            return None, []
+        return ci, sorted({int(model[path][1]) for path in paths})
+
+    def _apply(self, force=False):
+        from .gtkservice import apply_review
+        source = self._source()
+        if source is None:
+            self.status.set_text("Load and select a peer first.")
+            return
+        ci, membership = self._selection() if force else (None, None)
+        if force and not membership:
+            self.status.set_text("Select rows whose judgement should be replaced with this peer's.")
+            return
+
+        def complete(result):
+            self._load_errors = ""
+            self._notice = ("Applied %d errors; preserved %d conflicting visited errors. "
+                "Changed waives %d; review exclusions %d." %
+                (result["applied"], result["conflicts_skipped"],
+                 result["changed_waived"], result["changed_not_required"]))
+            self._refresh()
+            self.status.set_text(self._notice + " Refreshing…")
+        self._start("Apply selected peer judgement" if force else "Apply peer work safely",
+            lambda cancel, progress: apply_review(self.db, source, ci=ci,
+                errors=membership, force=force, progress=progress),
+            complete, write=True, changed=True)
+
+    def _manual(self, field, on):
+        ci, members = self._selection()
+        if not members:
+            self.status.set_text("Select rows to change my judgement.")
+            return
+
+        def work(cancelled, progress):
+            from .gtkservice import set_members
+            set_members(self.db, ci, members, field, on, progress=progress)
+        self._start("Change my " + field, work, lambda _result: self._refresh(),
+                    write=True, changed="flags" if field == "not-required" else "waive")
+
+    def _export(self):
+        from .gtkservice import export_review
+        from .gtkservice import db_name_of
+        reviewer = str(getattr(self.db, "_reviewer", "reviewer"))
+        reviewer = "".join(char if char.isalnum() or char in "._-" else "_" for char in reviewer)
+        path = self._choose("Export my review (visited, waived, not for review)",
+                            save=True, default="%s.%s.floereview" %
+                            (db_name_of(self.db.path), reviewer))
+        if path and self._output_allowed(path):
+            self._start("Export my review", lambda cancel, progress:
+                export_review(self.db, path, progress=progress),
+                lambda snapshot: snapshot.close(), write=True)
+
+    def _output_allowed(self, path):
+        try:
+            review_path = getattr(self.db, "review_path", None)
+        except Exception as exc:
+            self.status.set_text("Cannot verify my review path: %s" % exc)
+            return False
+        protected = [self.db.path, getattr(self.db, "_waive_path", None), review_path]
+        for source in self.sources:
+            protected.extend((source.path, getattr(source, "original_path", None),
+                              source.metadata.get("source_path"),
+                              source.metadata.get("source_waive_path")))
+        target = os.path.realpath(path)
+        if any(value and os.path.realpath(value) == target for value in protected):
+            self.status.set_text("Choose another output file; DRC inputs and loaded peer originals are read-only here.")
+            return False
+        return True
+
+    def _csv(self):
+        path = self._choose("Export all reviewer statistics", save=True,
+                            default="reviewers.csv")
+        if not path or not self._output_allowed(path):
+            return
+        sources = tuple(self.sources)
+
+        def work(cancelled, progress):
+            # aggregated and written by the service (drc_team_csv)
+            from .gtkservice import team_csv
+            team_csv(self.db, sources, path, cancelled=cancelled, progress=progress)
+        self._start("Export reviewer statistics", work, lambda _result: None, write=True)
+
+
+
+class _DrcMigrationWindow(_DrcTeamWindow):
+    """Compare a prior run by exact geometry before transferring own work."""
+
+    def __init__(self, viewer):
+        self.viewer, self.db = viewer, viewer._drc
+        self.plan, self.job, self.closed = None, None, False
+        self.page, self._guard, self._applied = 0, False, None
+        self.controls = []
+        self.window = Gtk.Window(title="DRC review from previous run")
+        self.window.set_transient_for(viewer.window)
+        self.window.set_default_size(980, 620)
+        viewer._only_close_button(self.window)
+        viewer._center_on_parent(self.window)
+        self.window.connect("destroy", self._destroy)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_border_width(8)
+        self.window.add(box)
+
+        def row():
+            widget = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
+            box.pack_start(widget, False, False, 0)
+            return widget
+
+        def button(parent, label, callback):
+            widget = Gtk.Button(label=label)
+            widget.connect("clicked", lambda *_: callback())
+            parent.pack_start(widget, False, False, 0)
+            self.controls.append(widget)
+            return widget
+
+        inputs = row()
+        self.previous = Gtk.Entry()
+        self.previous.set_placeholder_text("Previous results (.db or .tray)")
+        inputs.pack_start(self.previous, True, True, 0)
+        button(inputs, "Previous results…", lambda: self._browse(self.previous,
+            "Choose previous DRC results (.db or .tray)"))
+        inputs = row()
+        self.review_file = Gtk.Entry()
+        self.review_file.set_placeholder_text("Automatic: my saved review for the previous results")
+        inputs.pack_start(self.review_file, True, True, 0)
+        button(inputs, "Review file…", lambda: self._browse(self.review_file,
+            "Choose previous review (.floereview, review SQLite, or waiver file)"))
+        button(inputs, "Automatic", lambda: self.review_file.set_text(""))
+        for entry in (self.previous, self.review_file):
+            self.controls.append(entry)
+            entry.connect("changed", lambda *_: self._inputs_changed())
+        actions = row()
+        button(actions, "Compare geometry", self._prepare)
+        self.apply_button = button(actions, "Apply exact matches", self._apply)
+        self.apply_button.set_sensitive(False)
+        self.cancel_button = Gtk.Button(label="Cancel operation")
+        self.cancel_button.connect("clicked", lambda *_: self._cancel_operation())
+        self.cancel_button.set_sensitive(False)
+        actions.pack_start(self.cancel_button, False, False, 0)
+        self.stats = Gtk.Label(label="Choose the previous results, then compare geometry.")
+        self.stats.set_xalign(0)
+        self.stats.set_line_wrap(True)
+        self.stats.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        box.pack_start(self.stats, False, False, 0)
+        filters = row()
+        self.rule = Gtk.ComboBoxText()
+        for ci, check in enumerate(self.db.checks):
+            self.rule.append(str(ci), check.name)
+        self.rule.set_active(viewer._drc_open if viewer._drc_open is not None else 0)
+        filters.pack_start(self.rule, True, True, 0)
+        self.rule.connect("changed", lambda *_: self._changed())
+        self.mode = Gtk.ComboBoxText()
+        for key, title in (("matched", "Exact matches"), ("conflict", "Conflicts only"),
+                           ("ambiguous", "Ambiguous previous states")):
+            self.mode.append(key, title)
+        self.mode.set_active(0)
+        filters.pack_start(self.mode, False, False, 0)
+        self.mode.connect("changed", lambda *_: self._changed())
+        self.controls.extend((self.rule, self.mode))
+        self.store = Gtk.ListStore(int, int, str, str, str, str)
+        self.tree = Gtk.TreeView(model=self.store)
+        for index, title in ((2, "New error"), (3, "Current: V / W / NR"),
+                              (4, "Previous: V / W / NR"), (5, "Result")):
+            column = Gtk.TreeViewColumn(title, Gtk.CellRendererText(), text=index)
+            column.set_expand(True)
+            self.tree.append_column(column)
+        self.tree.connect("row-activated", self._jump)
+        scroll = Gtk.ScrolledWindow()
+        scroll.add(self.tree)
+        box.pack_start(scroll, True, True, 0)
+        pages = row()
+        self.prev = button(pages, "Previous", lambda: self._turn(-1))
+        self.page_label = Gtk.Label(label="0 errors")
+        pages.pack_start(self.page_label, True, True, 0)
+        self.next = button(pages, "Next", lambda: self._turn(1))
+        self.prev.set_sensitive(False)
+        self.next.set_sensitive(False)
+        help_label = Gtk.Label(label=("Only the same rule name and exactly identical geometry can carry review state forward.\n"
+            "Duplicate visits are combined; waived and not-for-review are transferred only where each field agrees. "
+            "Disputed fields (—) keep their current values. Different decisions on already visited new errors are protected.\n"
+            "Double-click opens the new error. Previous result and review files remain read-only."))
+        help_label.set_xalign(0)
+        help_label.set_line_wrap(True)
+        help_label.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        box.pack_start(help_label, False, False, 0)
+        self.status = Gtk.Label(label="No comparison prepared.")
+        self.status.set_xalign(0)
+        self.status.set_line_wrap(True)
+        self.status.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        self.status.set_max_width_chars(100)
+        box.pack_start(self.status, False, False, 0)
+        self.window.show_all()
+
+    def _destroy(self, *_):
+        if getattr(self.viewer, "_drc_migration", None) is self:
+            self.viewer._drc_migration = None
+        super()._destroy()
+
+    def _close_sources(self):
+        plan, self.plan = self.plan, None
+        if plan is not None:
+            plan.close()
+
+    def _browse(self, entry, title):
+        path = self._choose(title)
+        if path:
+            entry.set_text(path)
+
+    def _inputs_changed(self):
+        if self.job is not None:
+            return
+        self._close_sources()
+        self._applied = None
+        self.store.clear()
+        self.apply_button.set_sensitive(False)
+        self.prev.set_sensitive(False)
+        self.next.set_sensitive(False)
+        self.page_label.set_text("0 errors")
+        self.stats.set_text("Inputs changed. Compare geometry before applying review state.")
+
+    def _poll(self):
+        again = super()._poll()
+        if self._valid():
+            self.apply_button.set_sensitive(self.job is None and self.plan is not None)
+            self.cancel_button.set_sensitive(self.job is not None)
+            if self.job is not None and self.job.get("phase") and self.job.get("progress"):
+                self.status.set_text("%s: %s · %d / %d" %
+                    (self.job["label"], self.job["phase"], *self.job["progress"]))
+        return again
+
+    def _progress_callback(self, callback):
+        job = self.job
+        def update(done, total, phase=""):
+            callback(done, total)
+            if job is not None:
+                job["phase"] = str(phase)
+        return update
+
+    def _start(self, *args, **kwargs):
+        started = super()._start(*args, **kwargs)
+        self.cancel_button.set_sensitive(self.job is not None)
+        return started
+
+    def _cancel_operation(self):
+        if self.job is not None:
+            self.job["cancel"].set()
+            self.cancel_button.set_sensitive(False)
+            self.status.set_text("Cancelling… Already applied chunks are retained.")
+
+    def _jump(self, _tree, path, _column):
+        if not self._valid() or self.job is not None:
+            return
+        row = self.store[path]
+        self.viewer._drc_jump(int(row[0]), int(row[1]), isolate=True)
+        self.status.set_text("Opened the new error. Apply rechecks current judgements before transfer.")
+
+    def _prepare(self):
+        from .gtkservice import prepare_migration
+        old_path = self.previous.get_text().strip()
+        state_path = self.review_file.get_text().strip() or None
+        if not old_path:
+            self.status.set_text("Choose the previous DRC results first.")
+            return
+
+        def complete(plan):
+            self._close_sources()
+            self.plan, self.page, self._applied = plan, 0, None
+            self._page_load()
+
+        self._start("Compare previous geometry", lambda cancel, progress:
+            prepare_migration(self.db, old_path, state_path=state_path, cancelled=cancel,
+                progress=self._progress_callback(progress)), complete)
+
+    @staticmethod
+    def _flags(state):
+        if state is None:
+            return "ambiguous"
+        return " / ".join("—" if flag is None else "yes" if flag else "no"
+                          for flag in (state.visited, state.waived, state.not_required))
+
+    def _page_load(self):
+        ci, plan = self._ci(), self.plan
+        if ci is None or plan is None or not self._valid() or self.job is not None:
+            return
+        mode, requested = self.mode.get_active_id() or "matched", self.page
+
+        def work(cancel, progress):
+            from .gtkservice import VISITED, NOT_REQUIRED
+            count = len(plan.members(ci, mode))
+            pages = max(1, (count + DRC_PAGE - 1) // DRC_PAGE)
+            page = max(0, min(requested, pages - 1))
+            rows = []
+            ids = plan.page(ci, page * DRC_PAGE, DRC_PAGE, kind=mode)
+            ambiguous = plan.members(ci, "ambiguous").contains_many(ids)
+            protected = plan.members(ci, "protected").contains_many(ids)
+            carried = plan.get_many(ci, ids)
+            for ei, is_ambiguous, is_protected, previous in zip(ids, ambiguous, protected, carried):
+                if cancel():
+                    raise InterruptedError("comparison page cancelled")
+                flags = self.db.review_flags(ci, ei)
+                mine = SimpleNamespace(visited=bool(flags & VISITED),
+                    waived=self.db.get_status(ci, ei) == 1, not_required=bool(flags & NOT_REQUIRED))
+                if previous is None:
+                    status = "geometry match unverified"
+                elif is_protected:
+                    status = "current judgement protected"
+                    if is_ambiguous:
+                        status += "; partial prior consensus"
+                elif is_ambiguous:
+                    status = "partial consensus; differing fields retained"
+                else:
+                    status = "exact match"
+                rows.append((ci, ei, "#%d" % (ei + 1), self._flags(mine),
+                             self._flags(previous), status))
+            return page, pages, count, rows, plan.rule_counts(ci), dict(plan.summary)
+
+        def complete(result):
+            page, pages, count, rows, counts, summary = result
+            self.page = page
+            self.store.clear()
+            for row in rows:
+                self.store.append(row)
+            self.page_label.set_text("%d / %d · %d errors" % (page + 1, pages, count))
+            self.prev.set_sensitive(page > 0)
+            self.next.set_sensitive(page + 1 < pages)
+            def line(label, values):
+                return ("%s: matched review %d (partial %d) · no transferable match %d · ambiguous %d · conflicts %d" %
+                    (label, values.get("matched", 0), values.get("partial", 0), values.get("unmatched", 0),
+                     values.get("ambiguous", 0), values.get("conflict", 0)))
+            text = line("Whole new DB", summary) + "\n" + line(self.db.checks[ci].name, counts)
+            if summary.get("invalid_old", 0) or summary.get("invalid_new", 0):
+                text += ("\nGeometry excluded (invalid or too large): previous %d · new %d" %
+                         (summary.get("invalid_old", 0), summary.get("invalid_new", 0)))
+            if summary.get("no_rule_match_source_work", 0):
+                text += ("\nPrevious review skipped (missing or duplicate rule names): %d" %
+                         summary["no_rule_match_source_work"])
+            if self._applied is not None:
+                text += ("\nApplied: visited %d · waived %d · not for review %d · protected %d" %
+                    tuple(self._applied.get(key, 0) for key in
+                        ("changed_visited", "changed_waived", "changed_not_required", "conflicts_skipped")))
+            self.stats.set_text(text)
+        self._start("Read geometry matches", work, complete)
+
+    def _apply(self):
+        from .gtkservice import apply_migration
+        plan = self.plan
+        if plan is None:
+            self.status.set_text("Compare geometry first.")
+            return
+
+        def complete(result):
+            self._applied = result
+            self._page_load()
+        self._start("Apply previous review to exact matches", lambda cancel, progress:
+            apply_migration(self.db, plan, cancelled=cancel,
+                progress=self._progress_callback(progress)),
+            complete, write=True, changed=True)
 
 
 class _CellPanel(object):
@@ -218,12 +1015,6 @@ PANEL_CSS = (
     b"color: #f0f0f0; padding: 4px 10px; border-radius: 4px; "
     b"font-size: 12px; }"
 )
-# §F2R-20: a margin frame (§F2R-17) is at most this many megapixels
-# (RGBA: 16 Mpx = 64 MiB). Windows up to ~2560x1440 keep the full
-# one-step-per-side margin; a 4K window's margin shrinks so renderd's
-# retained set, the publish file and the GUI pixbuf stay bounded on
-# shared hosts. FLOE_MARGIN_MAX_MPIX overrides.
-MARGIN_MAX_MPIX = 16
 
 # Help > Open Source Licenses (license names surveyed 2026-08-22;
 # the full texts travel with each component's own distribution -
@@ -394,6 +1185,107 @@ def stamp_dotted(buf, a, b, casing, core):
         if casing is not None:
             fill_rect(buf, x - 1, y - 1, 3, 3, casing)
         fill_rect(buf, x - 1, y - 1, 2, 2, core)
+
+
+@functools.lru_cache(maxsize=96)
+def circle_rgba(radius, color, secondary=None, solid=False):
+    """A filled, antialiased circle sprite as packed RGBA bytes,
+    (2 * radius + 1) px square (feature/jobdeck-drc floe/drc_marker_style.py,
+    without NumPy): colours 0xRRGGBBAA, `secondary` on the right half, a
+    translucent middle with a ~2 px outline, or opaque when `solid`."""
+    radius = int(radius)
+    if radius < 1:
+        raise ValueError("circle radius must be positive")
+    size = radius * 2 + 1
+    stroke = min(2.0, radius / 2.0)
+
+    def channels(rgba):
+        rgba = int(rgba)
+        return ((rgba >> 24) & 255, (rgba >> 16) & 255,
+                (rgba >> 8) & 255, rgba & 255)
+
+    left = channels(color)
+    right = channels(secondary) if secondary is not None else left
+    out = bytearray(size * size * 4)
+    for row, yy in enumerate(range(-radius, radius + 1)):
+        for col, xx in enumerate(range(-radius, radius + 1)):
+            distance = math.sqrt(xx * xx + yy * yy)
+            coverage = min(1.0, max(0.0, radius + 0.5 - distance))
+            if coverage == 0:
+                continue
+            outline = distance >= radius - stroke
+            alpha = (255.0 if solid else 72.0 + 136.0 * outline) * coverage
+            c = right if xx >= 0 else left
+            i = (row * size + col) * 4
+            out[i:i + 4] = bytes((c[0], c[1], c[2],
+                                  int(round(alpha * c[3] / 255.0))))
+    return bytes(out)
+
+
+def stamp_drc_circle(buf, x, y, radius, color, secondary=None, sprites=None,
+                     solid=False):
+    """Composite a circle sprite centred at (x, y), clipped at the edges."""
+    if sprites is None:
+        sprites = {}
+    key = (radius, color, secondary, solid)
+    sprite = sprites.get(key)
+    side = 2 * radius + 1
+    if sprite is None:
+        sprite = GdkPixbuf.Pixbuf.new_from_bytes(
+            GLib.Bytes.new(circle_rgba(radius, color, secondary, solid)),
+            GdkPixbuf.Colorspace.RGB, True, 8, side, side, side * 4)
+        sprites[key] = sprite
+    origin_x, origin_y = int(round(x)) - radius, int(round(y)) - radius
+    left, top = max(0, origin_x), max(0, origin_y)
+    right = min(buf.get_width(), origin_x + side)
+    bottom = min(buf.get_height(), origin_y + side)
+    if right > left and bottom > top:
+        sprite.composite(buf, left, top, right - left, bottom - top,
+                         origin_x, origin_y, 1, 1,
+                         GdkPixbuf.InterpType.NEAREST, 255)
+
+
+def drc_ticks(value):
+    """A length or area in 0.00001 ticks as the DRC details and rulers show
+    it: the value's shortest digits rounded half up (Python
+    Decimal(str(value)) - the service's ticks, app-core drc::analysis)."""
+    d = decimal.Decimal(str(value))
+    if not d.is_finite():
+        raise ValueError("measurement must be finite")
+    if d.is_zero() or d.adjusted() < -6:
+        return 0
+    with decimal.localcontext() as ctx:
+        ctx.prec = max(40, len(d.as_tuple().digits) + 8)
+        return int((d * 100000).to_integral_value(
+            rounding=decimal.ROUND_HALF_UP))
+
+
+def format_ticks(ticks, signed=False):
+    """[-]whole.fffff of a tick count."""
+    ticks = int(ticks)
+    sign = "-" if ticks < 0 else "+" if signed else ""
+    whole, fractional = divmod(abs(ticks), 100000)
+    return "%s%d.%05d" % (sign, whole, fractional)
+
+
+def format_um5(value):
+    """`value` to five decimals, half up (rulers, the measuring status)."""
+    try:
+        return format_ticks(drc_ticks(value))
+    except (ValueError, decimal.DecimalException):
+        return "%.5f" % value
+
+
+class _DrcAreaLabel(object):
+    """An AREA rule's readout at a point: shown as a distance chip, kept
+    with the auto rulers (Tab/Esc/k/the next jump), drawn without a line."""
+    __slots__ = ("point", "text")
+
+    def __init__(self, x, y, text):
+        self.point, self.text = (x, y), text
+
+    def __iter__(self):
+        return iter(self.point * 2)
 
 
 class _DrcOffsetRuler(object):
@@ -626,7 +1518,7 @@ def component_versions(worker):
     answer "which one is this" without a terminal. The running
     daemon's handshake stamp wins over probing the binary on disk -
     the two can differ after an in-place binary swap."""
-    from . import rust_render, vfsclient
+    from . import vfsclient
     lines = []
     try:
         lines.append(_probe_binary_version(vfsclient.find_binary))
@@ -639,7 +1531,7 @@ def component_versions(worker):
         lines.append("floe-renderd %s [running]" % build)
     else:
         try:
-            lines.append(_probe_binary_version(rust_render.find_binary))
+            lines.append(_probe_binary_version(vfsclient.find_renderd))
         except Exception as exc:
             lines.append("floe-renderd unavailable: %s" %
                          str(exc).splitlines()[0][:60])
@@ -712,594 +1604,85 @@ def fmt_count(n):
     return str(int(n))
 
 
-def occ_note(res, full=False):
-    """Pass 2 drawn from the occupancy density (design.ovs; 2026-10-06, by
-    default since 0.12.317 - FLOE_RUST_DENSITY_OCC=off the plans): its cell, the layers it held and those this
-    frame made, as the status line says them - the log line (`full`) with
-    what its cache holds (2026-10-07); "" when the plans drew it."""
-    p2 = res.get("density_plan2") or {}
-    if not p2.get("occ_layers"):
-        return ""
-    note = "%g um cells, %d layers" % (p2.get("occ_cell_nm", 0) / 1000.0, p2["occ_layers"])
-    if p2.get("occ_made"):
-        note += ", %d made" % p2["occ_made"]
-    if full and p2.get("occ_cache_kb"):
-        note += "; cache %.1f MB" % (p2["occ_cache_kb"] / 1024.0)
-    return note
-
-
-def perf_status(res, depth_note=""):
-    """The perf line of a settled (or refining) frame: (full, brief). The
-    full line goes to the terminal log and the lower bar's tooltip, every
-    diagnostic in it; the brief one is what the lower bar shows - only what
-    is checked frame by frame, so it fits without being cut off (user
-    2026-10-01: "the log has it all; the bar should show only what is needed
-    now, without an ellipsis")."""
-    split = ""
-    brief_split = ""
-    if res.get("load_ms") is not None:
-        ph = ""
-        if res.get("phase_apply") is not None:
-            # load = plan (rust) + delta (author/IPC)
-            #        + apply (klayout parse + WC build)
-            ph = " [%d plan+%d delta+%d apply]" % (
-                res.get("phase_plan", 0),
-                res.get("phase_delta", 0),
-                res.get("phase_apply", 0))
-        # the label plan is not part of load; shown only
-        # when it is worth a look (2026-09-21)
-        text = res.get("text_plan_ms", 0) or 0
-        split = " = %d load%s%s + %d draw" % (
-            res["load_ms"], ph,
-            " + %d text" % text if text >= 100 else "",
-            res["draw_ms"])
-        # the budget fit decided for a new scale before its
-        # plan (field 2026-10-05: it was part of `other`)
-        probe = res.get("fit_probe_ms", 0) or 0
-        if probe >= 100:
-            split += " + %d fit probe" % round(probe)
-        # renderd time no phase covers, and time spent
-        # waiting behind earlier commands (queue + pipe)
-        if res.get("other_ms", 0) > 200:
-            split += " + %d other" % res["other_ms"]
-        if res.get("wait_ms", 0) > 200:
-            split += " + %d wait" % res["wait_ms"]
-        # the bar: the same without the load's phases
-        brief_split = split.replace(ph, "", 1) if ph else split
-    cut = ""
-    brief_cut = ""
-    if res.get("cut_um"):
-        cut = ", cut<%.3gum" % res["cut_um"]
-        brief_cut = "cut<%.3gum" % res["cut_um"]
-        # thin keep: each shape by its larger side (0.12.214,
-        # the hairlines stay) or, under FLOE_RUST_SHAPE_CUT=min,
-        # by its smaller side (0.12.173..0.12.213)
-        culls = res.get("plan_culls") or {}
-        if culls.get("shape_cut"):
-            cut += " (larger side)" if culls.get("shape_cut_max") else " (min side)"
-    fit = (res.get("plan_culls") or {})
-    if (fit.get("fit_pct") or fit.get("fit_cull") or fit.get("fit_over")
-            or fit.get("fit_thin")):
-        # budget-fitted cut (0.12.162): the planner raised
-        # the cut so the frame fits the decoded budget.
-        # Shown HERE, next to the cut, because the bar is
-        # ellipsized at its end and the long diagnostics
-        # tail hid it (field 2026-09-18)
-        factor = max(100, int(fit.get("fit_pct", 0) or 100)) / 100.0
-        thin = int(fit.get("fit_thin", 0) or 0)
-        full = int(fit.get("fit_full_pct", 0) or 0) / 100.0
-        none = int(fit.get("fit_none_pct", 0) or 0) / 100.0
-        if fit.get("fit_ranked"):
-            # top plane first (pass 1, 2026-10-07: the drawing goes from
-            # the top): the layers above the one the budget ends in
-            # whole, that layer by its size classes as below, the
-            # layers under it left out
-            parts = []
-            if factor > 1:
-                parts.append("x%.3g" % factor)
-            whole_n = int(fit.get("fit_layers_whole", 0) or 0)
-            if whole_n:
-                parts.append("top %d whole" % whole_n)
-            edge = fit.get("fit_layer_edge")
-            if edge:
-                classes = []
-                if thin:
-                    classes.append("1/%d%s" % (1 << min(thin, 30), " below x%.3g" % full if full else ""))
-                if none:
-                    classes.append("none below x%.3g" % none)
-                parts.append(edge + (" (%s)" % ", ".join(classes) if classes else ""))
-            out_n = int(fit.get("fit_layers_out", 0) or 0)
-            if out_n:
-                parts.append("%d left out" % out_n)
-            fitted = " %s to fit budget" % ", ".join(parts)
-        elif thin or none:
-            # budget-fitted density (0.12.169): size classes
-            # largest first - complete from xF up, the class
-            # the budget ends in about 1 in 2^k, nothing
-            # under xG
-            parts = []
-            if factor > 1:
-                parts.append("x%.3g" % factor)
-            if thin:
-                parts.append("1/%d%s" % (1 << min(thin, 30), " below x%.3g" % full if full else ""))
-            if none:
-                parts.append("none below x%.3g" % none)
-            fitted = " %s to fit budget" % ", ".join(parts)
-        else:
-            fitted = " x%.3g to fit budget" % factor
-        fitted += "%s%s%s" % (
-            ", hairlines culled" if fit.get("fit_cull") else "",
-            ", STILL OVER" if fit.get("fit_over") else "",
-            # the fit remembered for this scale did not hold
-            # this frame: decided anew, the picture may have
-            # changed (SPEC-PLANNER 2026-09-27)
-            " (refit)" if fit.get("fit_redecided") else "")
-        # these layers' pages decode larger than the planner
-        # estimates: fitted to the budget over that much
-        # (2026-10-05; a frame that passed the budget is
-        # planned anew, not failed)
-        scale = int(fit.get("fit_scale", 0) or 0)
-        if scale > 1000:
-            fitted += ", pages x%.3g their estimate" % (scale / 1000.0)
-        cut += fitted
-        brief_cut += fitted
-    drawn = ""
-    if res.get("drawn") is not None:
-        drawn = ", ~%s drawn" % fmt_count(res["drawn"])
-    refin = ""
-    if res.get("refining"):
-        refin = ", refining %d" % res["refining"]
-    text = ""
-    if res.get("plan_ms") is not None:
-        # "frontier", not "frames": the planner's
-        # depth-cut record count. floe2 computes it
-        # regardless of the frames toggle (the depth
-        # frontier is plan-integral, +2.4ms measured),
-        # so it stays non-zero with frames off - that
-        # is not geometry being drawn (field question
-        # 2026-09-02).
-        text += ", plan %.1fms/%s frontier" % (
-            res["plan_ms"],
-            fmt_count(res.get("frame_rects", 0)))
-        if res.get("fit_probe_ms"):
-            # "walk": no hierarchy summary to go by (design.ovh,
-            # `floe-index hier`) - every cell of the extent read
-            text += ", fit probe %.1fms%s" % (
-                res["fit_probe_ms"],
-                " (walk)" if res.get("fit_probe_walk") else "")
-    if res.get("text_plan_ms") is not None:
-        text += ", text %.1fms/%s places" % (
-            res["text_plan_ms"],
-            fmt_count(res.get("text_place_records", 0)))
-    if res.get("png_ms") is not None:
-        text += ", %s %.1fms/pub %.1fms" % (
-            "raw" if res.get("frame_format") == "raw"
-            else "png",
-            res["png_ms"], res.get("publish_ms", 0.0))
-        # NNtiles is CUMULATIVE over the refinement
-        # rounds (9 tiles x 5 rounds = 45), not a
-        # thread count - raster threads are the Nj
-        text += ", rust %dj %dtiles@%spx %sx%s" % (
-            res.get("raster_jobs", 0),
-            res.get("render_tiles", 0),
-            res.get("tile_px", 0),
-            res.get("frame_width", 0),
-            res.get("frame_height", 0))
-    # F2R diagnostics: refinement round count, decode
-    # pool shape (sum/max vs wall exposes idle workers
-    # and stragglers, idx = record-index build share),
-    # slowest raster tile, and traversal visit/prune
-    # counts for the 2c work-bin verdict.
-    if res.get("rounds", 0) > 1:
-        text += ", rounds %d" % res["rounds"]
-    if res.get("decode_sum_ms"):
-        text += ", dec sum %.0f/max %.0f/idx %.0fms" % (
-            res["decode_sum_ms"],
-            res.get("decode_max_ms", 0.0),
-            res.get("index_ms", 0.0))
-    if res.get("raster_tile_max_ms"):
-        text += ", tile-max %.0fms" % (
-            res["raster_tile_max_ms"])
-    if res.get("tiles_reused"):
-        # §F2R-16 pan reuse engaged for this frame
-        text += ", pan-reuse %d tiles" % (
-            res["tiles_reused"])
-    if res.get("work_bin_items"):
-        text += ", bin %s items" % fmt_count(
-            res["work_bin_items"])
-        # deferral causes: Nr = repetition edges past
-        # the member-product gate, Ns = single
-        # placements past the item budget (wNNN = the
-        # heaviest such subtree weight) - names the
-        # next 2c lever without a diagnostic build
-        if res.get("work_bin_defer_rep") or \
-                res.get("work_bin_defer_single"):
-            text += " (defer %sr+%ss w%s)" % (
-                fmt_count(res.get(
-                    "work_bin_defer_rep", 0)),
-                fmt_count(res.get(
-                    "work_bin_defer_single", 0)),
-                fmt_count(res.get(
-                    "work_bin_defer_wmax", 0)))
-    elif res.get("work_bin_overflow_items"):
-        # bin hit its item cap and fell back to the
-        # per-tile walk (pixels identical, slower)
-        text += ", bin off(cap@%s)" % fmt_count(
-            res["work_bin_overflow_items"])
-    if res.get("member_paints"):
-        # geometry member paints - the paint-vs-
-        # traversal split for the F2R-03c judgment
-        text += ", paints %s" % fmt_count(
-            res["member_paints"])
-    if res.get("cache_evicted"):
-        # decoded-LRU churn: the working set no longer
-        # fits FLOE_RUST_BUDGET_MB this session (§3.18)
-        text += ", evict %s" % fmt_count(
-            res["cache_evicted"])
-    if res.get("retained_mb"):
-        # §F2R-20: geometry frames renderd holds for
-        # pan reuse (bounded by FLOE_RUST_RETAINED_MB)
-        text += ", retained %dMB" % round(
-            res["retained_mb"])
-    if res.get("hier_cells_visited"):
-        text += ", hier %s/%s pruned" % (
-            fmt_count(res["hier_cells_visited"]),
-            fmt_count(res.get("subtrees_pruned", 0)))
-    if res.get("once_full_tiles") or res.get("once_items_skipped"):
-        # F2R-28 write-once tiles: tiles that filled up (and the
-        # passes they skipped), items skipped as fully covered
-        text += ", once %s tiles/%s passes/%s items" % (
-            fmt_count(res.get("once_full_tiles", 0)),
-            fmt_count(res.get("once_passes_skipped", 0)),
-            fmt_count(res.get("once_items_skipped", 0)))
-    culls = res.get("plan_culls") or {}
-    if any(culls.values()):
-        # planner verdicts (field 2026-09-10): pages
-        # culled by size/hairline, page-BVH nodes,
-        # child-BVH nodes pruned, child cells omitted,
-        # layer skips, washes, thin frames
-        text += (", cut pages %s/pbvh %s/cbvh %s/cells %s"
-                 ", layer %s, washed %s, thin %s"
-                 % tuple(fmt_count(culls.get(k, 0)) for k in (
-                     "pages_size", "page_bvh", "child_bvh",
-                     "children_size", "layer", "washed",
-                     "thin_frames")))
-        if culls.get("thin_pages"):
-            # all-thin pages the page hairline rule
-            # would have dropped (2026-09-10): their
-            # decode / raster cost is what the field
-            # measurement of the lifted rule reads
-            text += ", thin pages %s kept" % fmt_count(
-                culls["thin_pages"])
-        if culls.get("sub_cut_washes") or culls.get("sub_cut_sparse"):
-            # sub-cut pages/nodes washed as footprints
-            # and kept or expanded as sparse (2026-09-16)
-            text += ", sub-cut washes %s/sparse %s" % (
-                fmt_count(culls.get("sub_cut_washes", 0)),
-                fmt_count(culls.get("sub_cut_sparse", 0)))
-        if culls.get("sub_cut_boxes") or culls.get("sub_cut_box_over"):
-            # sub-cut boxes (0.12.168): what the size cut
-            # drops, kept as boxes under thin keep
-            text += ", boxes %s%s%s%s" % (
-                fmt_count(culls.get("sub_cut_boxes", 0)),
-                " x%d coarser" % (1 << culls["sub_cut_box_level"])
-                if culls.get("sub_cut_box_level") else "",
-                " (+%s over)" % fmt_count(culls["sub_cut_box_over"])
-                if culls.get("sub_cut_box_over") else "",
-                " (%s unsure)" % fmt_count(culls["sub_cut_box_unsure"])
-                if culls.get("sub_cut_box_unsure") else "")
-        if culls.get("sub_cut_sparse_over") or culls.get("sub_cut_wash_over"):
-            # dropped by the per-plan sub-cut budgets
-            # (sparse ink / wash area): the frame is
-            # showing less than the rules would
-            text += ", sub-cut over %s/%s" % (
-                fmt_count(culls.get("sub_cut_sparse_over", 0)),
-                fmt_count(culls.get("sub_cut_wash_over", 0)))
-        if (culls.get("rep_kept") or culls.get("rep_washed")
-                or culls.get("rep_children")):
-            # the page frontier (2026-09-17): cut pages
-            # kept (drawn) and cut placements expanded
-            # with thinned members - one in 4^k
-            # (rep_washed stays 0: representatives are
-            # never washed since the field's boxes)
-            text += ", reps %s pages/%s children" % (
-                fmt_count(culls.get("rep_kept", 0)),
-                fmt_count(culls.get("rep_children", 0)))
-            if culls.get("rep_level"):
-                # the item budget's level: one cut item
-                # in 2^L
-                text += " L%d" % culls["rep_level"]
-            if culls.get("rep_page_level"):
-                # the decode budget thinned the pages
-                # themselves (one in 2^P by index)
-                text += " P%d" % culls["rep_page_level"]
-    if culls.get("stored_rep_points") or culls.get("stored_rep_limited"):
-        text += ", stored reps %s/tested %s%s" % (
-            fmt_count(culls.get("stored_rep_points", 0)),
-            fmt_count(culls.get("stored_rep_tested", 0)),
-            " (capped)" if culls.get("stored_rep_limited") else "")
-    summ = res.get("summary") or {}
-    if summ.get("layers"):
-        # occupancy summary (M2): these layers were
-        # drawn from design.ovo, not their pages -
-        # pick/snap do not see them in this view
-        text += (", summary %d layers %s cells (level %d,"
-                 " %g um; not pickable)" % (
-                     summ["layers"], fmt_count(summ["cells"]),
-                     summ["level"], summ["cell_um"]))
-    elif summ.get("none") not in (None, "-", "policy",
-                                  "exact"):
-        # since 2026-09-18 the summary serves cull too,
-        # so its absence is worth a word under either
-        text += ", summary: none (%s)" % summ["none"]
-    if res.get("labels_truncated"):
-        text += ", labels partial"
-    if res.get("over_budget_pages"):
-        text += ", %d pages over budget (not drawn)" % (
-            res["over_budget_pages"])
-    if res.get("deck"):
-        d = res["deck"]
-        # raster/frame ms are SUMS over passes; "wall"
-        # is the batches' real elapsed time, and the
-        # pass parallelism (x tile workers) beside it
-        # (review 2026-09-09 (5th))
-        text += (", deck %d passes (%d frame, %d skipped, "
-                 "%d scene reuses) "
-                 "%d/%d pages, scene %d + frame sum %d + "
-                 "composite %d ms, raster wall %d ms "
-                 "%dp x %dt, %d batches, pass max %dMB, "
-                 "batch max %dMB" % (
-                     d["passes"], d["frame_passes"],
-                     d["passes_skipped"],
-                     d.get("scene_reuses", 0),
-                     d["unique_pages"],
-                     d["pages_summed"],
-                     round(d["scene_us"] / 1000),
-                     round(d["frame_raster_us"] / 1000),
-                     round(d["composite_us"] / 1000),
-                     round(d.get("raster_wall_us", 0)
-                           / 1000),
-                     d.get("pass_workers", 0),
-                     res.get("workers", 0),
-                     d.get("batches", 0),
-                     round(d["pass_bytes_max"] / 1e6),
-                     round(d.get("batch_bytes_max", 0)
-                           / 1e6)))
-        if d.get("streamed_passes"):
-            text += ", %d streamed in %d slices" % (
-                d["streamed_passes"], d["slices"])
-        if d.get("wide_washes"):
-            text += ", %s sub-cut washes" % fmt_count(
-                d["wide_washes"])
-        if d.get("summary_passes"):
-            # passes drawn from their source's design.ovo
-            # (M4); pick/snap do not see those layers
-            text += ", summary %d passes %s cells (not pickable)" % (
-                d["summary_passes"],
-                fmt_count(d.get("summary_cells", 0)))
-        if d.get("summary_none_passes"):
-            text += ", %d passes without summary" % (
-                d["summary_none_passes"])
-    # tiles = plan total (resident pages included);
-    # +new = pages actually shipped for this view
-    # (cache misses, summed over its stream rounds)
-    # the density stack (diagnostic FLOE_RUST_DENSITY_STACK=top,
-    # CUT_DENSITY_DESIGN §10.10): the frame stacked its density.
-    # First in the line - the bar, which showed this line until
-    # 2026-10-01, is ellipsized at its end, and next to the cut
-    # it fell off (field 2026-09-26)
-    stack = ""
-    if res.get("density_stack") is not None:
-        # with the sub-cut dots: their block, the records'
-        # floor pass 2 planned at, its plan time and the pages
-        # it decoded (to compare FLOE_RUST_DENSITY_BLOCK_PX,
-        # 2026-10-01, and FLOE_RUST_DENSITY_FLOOR_PX, 2026-09-30)
-        parts = ["dots" if res.get("density_dots") is not None
-                 else "top + empty"]
-        # pass 1's shapes passed by, the density alone (diagnostic
-        # FLOE_RUST_DENSITY_ONLY=on, 2026-10-04; renderd shares the env)
-        if os.environ.get("FLOE_RUST_DENSITY_ONLY") == "on":
-            parts.append("density only")
-        # what pass 2 lit: the dots standing for the cells under the cut
-        # and the shapes under the cut it draws from pages by their area -
-        # both look like dots on screen, only the cells' count as dot items
-        # (user 2026-10-01: "two draws and dots, yet dot items 0")
-        lit = "lit %s px" % fmt_count(res["density_stack"].get("lit", 0))
-        parts.append(lit)
-        if res.get("density_block") is not None:
-            parts.append("block %g px" % res["density_block"])
-        if res.get("density_floor") is not None:
-            parts.append("floor %.2g px" % res["density_floor"])
-        # pass 2's reserve: the fixed one or what pass 1 left (2026-10-02)
-        if (res.get("density_plan2") or {}).get("reserve_mb"):
-            parts.append("reserve %s MB" % fmt_count(res["density_plan2"]["reserve_mb"]))
-        # The backend reports the display mode; both use the covered-area
-        # gain, while only the legacy mode varies pixel brightness.
-        bright = (res.get("density_plan2") or {}).get("bright_milli")
-        if bright:
-            pattern = (res.get("density_plan2") or {}).get("pattern", 0)
-            parts.append(("pattern, cover x%g" if pattern else "bright x%g") % (bright / 1000.0))
-            # what a cell under the cut stands for (2026-10-05): the area its
-            # shapes cover, or - an index without design.ovb or a hierarchy
-            # summary - its whole box; nothing when the occupancy density drew
-            # pass 2 (its frames reported `cells by box`, user 2026-10-06)
-            if not occ_note(res):
-                parts.append("cell cover" if (res.get("density_plan2") or {}).get("cell_cover") else "cells by box")
-        # zoomed out past the fit view the dots thin (2026-10-04): their gain
-        gain = (res.get("density_plan2") or {}).get("dot_gain_milli")
-        if gain is not None and 0 < gain < 1000:
-            parts.append("dots x%.2f" % (gain / 1000.0))
-        # a dot block too sparse for the detail is left out (2026-10-04):
-        # the dots it needs of its pixels, the blocks left out
-        gate = (res.get("density_plan2") or {}).get("dot_gate_min") or 0
-        if gate > 1:
-            block = res.get("density_block") or 4
-            gated = res["density_plan2"].get("dot_gated") or 0
-            parts.append("gate %d/%d px" % (gate, round(block * block))
-                         + (" (%s out)" % fmt_count(gated) if gated else ""))
-        us = res.get("density_us") or {}
-        # pass 2 drawn from the occupancy density instead of the plans
-        # (2026-10-06; FLOE_RUST_DENSITY_OCC=off: the plans): the time it took, its
-        # cell and layers in place of the plans' breakdown
-        occ = occ_note(res)
-        if us and occ:
-            parts.append("pass 2 by occupancy %d ms (%s)" % (round(us.get("plan2_us", 0) / 1000), occ_note(res, full=True)))
-        elif us:
-            plan = "pass 2 plan %d ms" % round(
-                us.get("plan2_us", 0) / 1000)
-            # where it went (diagnostic, 2026-10-01): the
-            # floor probes, the fitted plans and their passes,
-            # the regions, the final plans' nodes
-            p2 = res.get("density_plan2") or {}
-            if p2:
-                # where the cells' dot items came from (2026-10-02, the
-                # field's `cell dots 87.2M`): the ones there are, a point
-                # list's chunk counted at once one item, and the dot block
-                # updates past the cells' grids
-                # (the chunks' members right after them: 0.12.268 put them
-                # last, after the array members - user 2026-10-02)
-                # (a page's dots placed by its occupancy grid, design.ovb, say
-                # so after the pages: whether the cache has one, 2026-10-02)
-                # (the point-list chunks passed over in full blocks and those
-                # read at a step right after the chunks, with their members:
-                # 2026-10-03)
-                held = {"by_list_chunks": "by_chunk_members", "full_chunks": "full_members",
-                        "sampled_chunks": "sampled_members"}
-                by = ", ".join("%s %s%s" % (name, fmt_count(p2[key]), " of %s members" % fmt_count(
-                    p2.get(held[key], 0)) if key in held else " (%s by occupancy)" % fmt_count(
-                    p2["occ_pages"]) if key == "by_pages" and p2.get("occ_pages") else "") for key, name in (
-                    ("by_nodes", "nodes"), ("by_placements", "placements"), ("by_arrays", "arrays"),
-                    ("by_list_members", "list members"), ("by_list_chunks", "list chunks"),
-                    ("full_chunks", "list chunks in full blocks"), ("sampled_chunks", "list chunks sampled"),
-                    ("by_array_members", "array members"), ("by_pages", "pages"),
-                    # pages under the floor decoded, their occupancy cells too
-                    # coarse on screen for dots (2026-10-03)
-                    ("occ_decoded", "pages decoded under the floor")) if p2.get(key))
-                if p2.get("map_updates"):
-                    by += "; hash map %s" % fmt_count(p2["map_updates"])
-                if p2.get("stages"):
-                    by += "; %d layer stages" % p2["stages"]
-                if p2.get("mask_tests") or p2.get("mask_fallbacks"):
-                    by += "; mask %s/%s pruned, %s fallback" % (
-                        fmt_count(p2.get("mask_pruned", 0)), fmt_count(p2.get("mask_tests", 0)),
-                        fmt_count(p2.get("mask_fallbacks", 0)))
-                by = by.lstrip("; ")
-                plan += (" (probe %d ms x%d, fit %d ms x%d"
-                         " passes on %d threads, %d regions%s,"
-                         " nodes %s, page nodes %s, pages %s,"
-                         " reads %s, cell dots %s%s)") % (
-                    round(p2["probe_us"] / 1000),
-                    p2["probes"],
-                    round(p2["fit_us"] / 1000), p2["passes"],
-                    max(1, p2.get("threads", 1)),
-                    # the free pixels of the cells planned (2026-10-03)
-                    p2["regions"], " (free top %s, others %s px)" % (
-                        fmt_count(p2["free_top"]), fmt_count(p2["free_others"]))
-                    if p2.get("free_top") or p2.get("free_others") else "",
-                    fmt_count(p2["nodes"]),
-                    fmt_count(p2["page_nodes"]),
-                    fmt_count(p2["page_candidates"]),
-                    fmt_count(p2.get("reads", 0)),
-                    fmt_count(p2.get("items", 0)),
-                    " [%s]" % by if by else "")
-            parts.append(plan)
-        pages = res.get("density_pages") or {}
-        if pages:
-            parts.append("%d pages" % pages.get("decoded", 0))
-        # what pass 2's reserve kept out (2026-10-01): a floor probe past it,
-        # a plan its fit thinned, pages its decode left out
-        p2 = res.get("density_plan2") or {}
-        over = [what for what, there in (
-            ("floor probe", p2.get("probes_over")), ("thinned", p2.get("thinned")),
-            ("%d pages left out" % pages.get("over_budget", 0), pages.get("over_budget")),
-            # what the budget left out, drawn by its occupancy records
-            # instead (2026-10-05)
-            ("%d pages by occupancy instead" % p2.get("stood_in", 0), p2.get("stood_in"))) if there]
-        if over:
-            parts.append("pass 2 over budget: %s" % ", ".join(over))
-        # pass 2's decode and raster wall (2026-10-03, the field's 449-layer
-        # view took 35 s): the log line only
-        if us.get("decode2_us") is not None:
-            parts.append("pass 2 decode %d ms%s" % (round(us["decode2_us"] / 1000), ", raster %d ms" % round(us["raster2_us"] / 1000)
-                                                     if us.get("raster2_us") is not None else ""))
-        stack = " [density: %s]" % ", ".join(parts)
-        # the bar: what pass 2 lit, its plan time and what it walked (nodes,
-        # the placements it read, the cells' dot items it made); a floor
-        # probe, a budget fit past one pass (with the floor it raised),
-        # threads and decoded pages only when there are any; the block and
-        # the regions stay in the log line
-        brief = [] if res.get("density_dots") is not None else ["top + empty"]
-        brief.append(lit)
-        if us and occ:
-            brief.append("pass 2 by occupancy %d ms (%s)" % (round(us.get("plan2_us", 0) / 1000), occ))
-        elif us:
-            plan = "pass 2 plan %d ms" % round(us.get("plan2_us", 0) / 1000)
-            if p2:
-                inner = []
-                if p2.get("probes"):
-                    inner.append("probe %d ms x%d" % (round(p2["probe_us"] / 1000), p2["probes"]))
-                if p2.get("passes", 0) > 1:
-                    inner.append("%d passes%s" % (
-                        p2["passes"], ", floor %.2g px" % res["density_floor"]
-                        if res.get("density_floor") is not None else ""))
-                if p2.get("threads", 1) > 1:
-                    inner.append("%d threads" % p2["threads"])
-                inner.append("nodes %s, reads %s, cell dots %s" % (
-                    fmt_count(p2["nodes"]), fmt_count(p2.get("reads", 0)),
-                    fmt_count(p2.get("items", 0))))
-                plan += " (%s)" % ", ".join(inner)
-            brief.append(plan)
-        if pages.get("decoded"):
-            brief.append("%d pages decoded" % pages["decoded"])
-        if over:
-            brief.append("pass 2 over budget: %s" % ", ".join(over))
-        brief_stack = "density: %s" % ", ".join(brief) if brief else "density"
-    mode = "live%s (%d tiles, +%d new, %d ms" \
-           "%s%s%s%s%s%s)" \
-        % (stack, res["tiles"], res.get("new", 0) or 0,
-           res["ms"], split,
-           depth_note, cut, drawn,
-           refin, text)
-    # The lower bar: the frame's time and where it went, the density's
-    # pass 2, the work bin (with the hierarchy walk it falls back to when
-    # it is off), the cut and its budget fit, and what the picture lacks.
-    # The depth sits in the bar above; the rest is in the log line.
-    brief = ["%d ms%s" % (res["ms"], brief_split)]
-    if res.get("deck"):
-        brief.append("deck %d passes%s" % (
-            res["deck"]["passes"],
-            ", summary %d passes (not pickable)" % res["deck"]["summary_passes"]
-            if res["deck"].get("summary_passes") else ""))
-    if stack:
-        brief.append(brief_stack)
-    if res.get("work_bin_items"):
-        brief.append("bin %s items" % fmt_count(res["work_bin_items"]))
-    elif res.get("work_bin_overflow_items"):
-        brief.append("bin off(cap@%s)%s" % (
-            fmt_count(res["work_bin_overflow_items"]),
-            ", hier %s/%s pruned" % (
-                fmt_count(res["hier_cells_visited"]),
-                fmt_count(res.get("subtrees_pruned", 0)))
-            if res.get("hier_cells_visited") else ""))
-    if brief_cut.strip():
-        brief.append(brief_cut.strip())
-    if res.get("over_budget_pages"):
-        brief.append("%d pages over budget (not drawn)" % res["over_budget_pages"])
-    if res.get("labels_truncated"):
-        brief.append("labels partial")
-    if res.get("cache_evicted"):
-        brief.append("evict %s" % fmt_count(res["cache_evicted"]))
-    if summ.get("layers"):
-        brief.append("summary %d layers (not pickable)" % summ["layers"])
-    return mode, " · ".join(brief)
-
-
 def frame_rect(buf, x0, y0, w, h, color):
     """1-px rectangle border (rect_outline is too heavy for the minimap)."""
     fill_rect(buf, x0, y0, w, 1, color)
     fill_rect(buf, x0, y0 + h - 1, w, 1, color)
     fill_rect(buf, x0, y0, 1, h, color)
     fill_rect(buf, x0 + w - 1, y0, 1, h, color)
+
+
+def pixbuf_of(width, height, pixels, alpha=False):
+    """A pixbuf over packed RGB (or RGBA) bytes, the bytes kept by it."""
+    channels = 4 if alpha else 3
+    return GdkPixbuf.Pixbuf.new_from_bytes(
+        GLib.Bytes.new(bytes(pixels)), GdkPixbuf.Colorspace.RGB, alpha, 8,
+        width, height, width * channels)
+
+
+def outlined_pixbuf(width, height, inner_row, outline=(102, 102, 102)):
+    """width x height RGB with a 1 px outline (the palette swatches and
+    fill slots); inner_row(y, n) -> the RGB bytes of the n pixels inside
+    it on row y (x = 1 .. n)."""
+    edge = bytes(outline)
+    if width < 3 or height < 3:
+        return pixbuf_of(width, height, edge * (width * height))
+    rows = [edge * width]
+    for y in range(1, height - 1):
+        rows.append(edge + inner_row(y, width - 2) + edge)
+    rows.append(edge * width)
+    return pixbuf_of(width, height, b"".join(rows))
+
+
+def tiled_row(bits, n, on=b"\x00\x00\x00", off=b"\xff\xff\xff"):
+    """n pixels from x = 1 of a 16-wide `*`/`.` bitmap row tiled 1:1."""
+    tile = b"".join(on if c == "*" else off for c in bits[:16].ljust(16, "."))
+    return (tile * (n // 16 + 2))[3:3 + 3 * n]
+
+
+class PixbufCell:
+    """A widget showing paint(width, height) -> pixbuf at the size it is
+    given, with no GTK "draw" handler: the target hosts have no pycairo
+    (module docstring), and a cairo-drawn widget stays blank there (field
+    2026-10-10: the hidden-layer strike and the palettes were). The image
+    is an overlay child, so its size never enters the request and the
+    cell still shrinks with the pane; it is painted again after a size
+    change (from idle, outside the allocation) and on refresh(). It is
+    opaque and covers its window whole (an overlay child's window may
+    paint an opaque background on some X servers) and takes no input."""
+
+    def __init__(self, paint, width, height):
+        self._paint = paint
+        self._size = None
+        self.widget = Gtk.Overlay()
+        base = Gtk.Box()
+        base.set_size_request(width, height)
+        self.widget.add(base)
+        self.image = Gtk.Image()
+        self.image.set_halign(Gtk.Align.START)
+        self.image.set_valign(Gtk.Align.START)
+        self.widget.add_overlay(self.image)
+        # an overlay child gets a GDK window of its own: without
+        # pass-through a click lands there, with coordinates of that
+        # window, and the palette's pick (the grid's coordinates) took
+        # the wrong swatch
+        self.widget.set_overlay_pass_through(self.image, True)
+        self.widget.connect("size-allocate", self._on_allocate)
+
+    def _on_allocate(self, _widget, alloc):
+        size = (alloc.width, alloc.height)
+        if size != self._size and size[0] > 0 and size[1] > 0:
+            self._size = size
+            GLib.idle_add(self._repaint, size)
+
+    def _repaint(self, size):
+        if size == self._size:
+            self.image.set_from_pixbuf(self._paint(*size))
+        return False
+
+    def refresh(self):
+        if self._size is not None:
+            self.image.set_from_pixbuf(self._paint(*self._size))
 
 
 def _panel_debug_hook(scroller, box, rows_getter):
@@ -1446,6 +1829,50 @@ def _remote_x_scroll_repaint(scroller):
         pass
 
 
+# an index run refused for a busy target (floe_vfs::lock, EX_TEMPFAIL)
+BUSY_EXIT = 75
+# a DRC error's review status byte (floe2 gtk-service; 2 is reserved)
+STATUS_NONE = gtkservice.STATUS_NONE
+STATUS_WAIVED = gtkservice.STATUS_WAIVED
+# how far a one-edge CD ruler is drawn off its edge, screen px
+EDGE_RULER_OFFSET_PX = 14
+
+
+def offset_screen_segment(a, b, distance=EDGE_RULER_OFFSET_PX):
+    """Move a screen-space segment along a stable normal: the upper
+    side, the right side as the tie-break for a vertical segment - the
+    rule is independent of endpoint order, so the viewer and a rendered
+    snapshot place a one-edge CD ruler identically."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    length = math.hypot(dx, dy)
+    if length <= 0:
+        return a, b
+    nx, ny = -dy / length, dx / length
+    if ny > 1e-12 or (abs(ny) <= 1e-12 and nx < 0):
+        nx, ny = -nx, -ny
+    ox, oy = nx * distance, ny * distance
+    return ((a[0] + ox, a[1] + oy),
+            (b[0] + ox, b[1] + oy))
+
+
+def _level_row_text(row, keep=3):
+    """(summary, full) for one level row of the load dialog: the summary
+    names at most `keep` sources and counts the rest (review 2026-09-10
+    (9th) P2-2: 250 file names in one label made the dialog 26,000 px
+    wide); `full` lists them all for the tooltip."""
+    names = [os.path.basename(s) for s in row["sources"]]
+    shown = ", ".join(names[:keep])
+    if len(names) > keep:
+        shown += ", +%d more" % (len(names) - keep)
+    summary = "%d CHIP%s · %d instance%s · %d source%s: %s" % (
+        len(row["chips"]), "" if len(row["chips"]) == 1 else "s",
+        row["instances"], "" if row["instances"] == 1 else "s",
+        len(names), "" if len(names) == 1 else "s", shown)
+    full = "CHIPs: %s\nsources:\n  %s" % (
+        ", ".join(row["chips"]), "\n  ".join(names))
+    return summary, full
+
+
 def listed_meta(cache):
     """The cache's meta with the layer table the viewer lists (user
     2026-10-08, the field's EBEAM files: Calibre listed 3.0 and 3.300
@@ -1557,8 +1984,8 @@ class LayerRow(object):
         nbox.add(content)
         nbox.connect("button-press-event", self._on_name_click)
         # input-only sub-boxes: the hidden-layer strike is ONE line
-        # cairo-drawn across the whole row AFTER the children, and a
-        # child with a visible window would composite over it (the
+        # across the whole row OVER the children (an overlay image), and
+        # a child with a visible window would composite over it (the
         # gaps were exactly where the old per-span strike vanished)
         mbox.set_visible_window(False)
         nbox.set_visible_window(False)
@@ -1570,9 +1997,25 @@ class LayerRow(object):
         # Keep the inter-row padding inside an event window. A click in the
         # gap therefore belongs to this (upper) row instead of falling
         # through the layer palette without selecting anything.
+        # the strike: an opaque 1 px image of the line over the row at
+        # the line's height, painted for the row's width (no cairo "draw"
+        # handler - the hosts have no pycairo, it never showed there; and
+        # nothing transparent - an overlay child may get a window of its
+        # own with an opaque background, and a row-sized image with a
+        # transparent rest hid the whole row there, field 2026-10-10)
+        row = Gtk.Overlay()
+        row.add(row_box)
+        self._strike = Gtk.Image()
+        self._strike.set_halign(Gtk.Align.START)
+        self._strike.set_valign(Gtk.Align.START)
+        self._strike.set_no_show_all(True)
+        row.add_overlay(self._strike)
+        # its own GDK window takes no input: the row's clicks are the row's
+        row.set_overlay_pass_through(self._strike, True)
+        self._strike_size = None
+        row.connect("size-allocate", self._on_row_allocate)
         self.widget = Gtk.EventBox()
-        self.widget.add(row_box)
-        self.widget.connect_after("draw", self._draw_strike)
+        self.widget.add(row)
         self.widget.connect("button-press-event", self._on_row_click)
         self.widget.set_tooltip_text(tooltip)
         self._paint()
@@ -1651,21 +2094,30 @@ class LayerRow(object):
             % (fg, GLib.markup_escape_text(
                 self._name + (" [partial]" if self._partial else ""))))
         self._clbl.set_from_pixbuf(self._swatch_on)
+        self._strike.set_visible(not self._active)
         self.widget.queue_draw()
 
-    def _draw_strike(self, widget, cr):
+    def _on_row_allocate(self, _widget, alloc):
+        size = (alloc.width, alloc.height)
+        if size != self._strike_size and size[0] > 0 and size[1] > 0:
+            self._strike_size = size
+            GLib.idle_add(self._paint_strike, size)
+
+    def _paint_strike(self, size):
         """Hidden layer: one continuous bright line across the FULL
-        row - text, swatch, margins and trailing space alike. (The
-        geometry-pick highlight is the yellow id box painted by the
-        number label's Pango background - see _paint, 2026-08-29 -
-        not a row outline.)"""
-        alloc = widget.get_allocation()
-        if self._active:
+        row - text, swatch, margins and trailing space alike - an opaque
+        row-wide, 1 px image at the line's height (nothing else of the
+        row is covered). (The geometry-pick highlight is the yellow id
+        box painted by the number label's Pango background - see _paint,
+        2026-08-29 - not a row outline.)"""
+        if size != self._strike_size:
             return False
-        y = max(0, (alloc.height - self._row_pad) // 2)
-        cr.set_source_rgb(*(c / 255.0 for c in LAYER_STRIKE_RGB))
-        cr.rectangle(0, y, alloc.width, 1)
-        cr.fill()
+        width, height = size
+        y = max(0, (height - self._row_pad) // 2)
+        if self._strike.get_margin_top() != y:
+            self._strike.set_margin_top(y)
+        self._strike.set_from_pixbuf(
+            pixbuf_of(width, 1, bytes(LAYER_STRIKE_RGB) * width))
         return False
 
     def set_marker(self, marker):
@@ -1779,16 +2231,12 @@ class Viewer:
         self.spp = 1.0              # dbu per screen pixel
         self._start_goto = goto     # [x_um, y_um(, window_um)] from the CLI
         self.visible = set()
-        self.gen = 0
         self.last_frame = None      # (pixbuf, bbox, dbu_per_px, key)
         self._frame_anchor = None   # view center the frame was shown at
         # §F2R-21: the last landed margin (label-free geometry) as a
         # display base for the strip a pan uncovers before the fresh
         # frame lands; (pixbuf, bbox, dbu_per_px, key) like last_frame
         self._margin_frame = None
-        self._job_keys = {}         # gen -> render key of submitted job
-        self._job_depth = {}        # gen -> depth the job rendered at
-        self._pending_scope = "live"
         self._drag = None
         self._drag_origin = None
         self._drag_moved = False
@@ -1796,7 +2244,6 @@ class Viewer:
         self._zoomdrag = None       # rubber-band anchor (view px)
         self._band_cur = None
         self._band_ext = None       # (min x, max x) of the band drag
-        self._debounce = None
         self._did_fit = False
         self.worker = None
         self._worker_starting = False
@@ -1823,10 +2270,6 @@ class Viewer:
             depth = 999 if goto is not None else 0
         self.depth_value = max(0, min(999, int(depth)))
         self.abstract = False       # `a` key: klayout abstract mode
-        # Stable floe keeps the optional KLayout density overlay. floe2
-        # intentionally has no coverage state or OVC render path.
-        if HAS_DENSITY_COVERAGE:
-            self.coverage_on = False
         # Explicit request controls; no shell environment is consulted.
         # retired (2026-09-22): the `lod` argument is accepted and ignored
         self.lod_on = False
@@ -1838,10 +2281,11 @@ class Viewer:
         # the density under the cut (renderd's density stack, user
         # 2026-10-05: "a density on/off option in the viewer"): View >
         # density under the cut / `v` switch it live, --density (or a
-        # forwarded density=) sets it; unset, the environment the viewer
-        # shares with renderd decides - FLOE_RUST_DENSITY_STACK=top, the
-        # switch the field turned it on with before
-        self.density_on = (os.environ.get("FLOE_RUST_DENSITY_STACK") == "top"
+        # forwarded density=) sets it; unset it starts on (user 2026-10-12:
+        # "turn the density on by default"; floe2 render's start, app-core
+        # shots::density_default) - FLOE_RUST_DENSITY_STACK=off, in the
+        # environment the viewer shares with renderd, is the kill switch
+        self.density_on = (os.environ.get("FLOE_RUST_DENSITY_STACK") != "off"
                            if density is None else bool(density))
         self.frames_on = bool(frames)
         # Frame is the normal UI control for both hierarchy outlines and
@@ -1858,8 +2302,9 @@ class Viewer:
         # margin prefetch alone; pan reuse stays either way. Off, every pan
         # and zoom renders a viewport frame and nothing lands after it.
         self.margin_on = bool(margin)
-        self._margin_max_px = _env_int(
-            "FLOE_MARGIN_MAX_MPIX", MARGIN_MAX_MPIX, 1, 4096) << 20
+        # the Python render loop's adapter options (--stream-kb,
+        # --stream-target-ms, --render-debug): accepted for the command
+        # line, unused since the view controller draws (P4f)
         self.stream_kb = stream_kb
         self.stream_target_ms = int(stream_target_ms)
         self.render_debug = bool(render_debug)
@@ -1877,7 +2322,6 @@ class Viewer:
         # (finer --tile-mb grids allow proportionally more tiles);
         # the real value lands in _apply_cache (cache may be None -
         # empty start, user call 2026-08-22)
-        self._live_cap = 1
         self.dump = bool(dump)      # --dump: save debug frame dumps
         self._quitting = False
         # folder floe was launched from: the load-layout dialog's
@@ -1953,6 +2397,7 @@ class Viewer:
         self._drc_zoom_lock = False  # a user zoom is being kept this session
         self._drc_hits = []         # frame's painted markers:
                                     # (px, py, ci, ei) for hover/pick
+        self._drc_point_hits = None # pixel hit map, never an error list
         self._drc_tip = None        # last tooltip text set
         self.overlay_mode = 0       # Tab cycles (user call
         # 2026-08-21): 0 = everything shown, 1 = OTHER errors
@@ -1965,6 +2410,8 @@ class Viewer:
         self._drc_total = 0
         self._drc_pos = -1
         self._drc_open = None       # the one open (selected) rule
+        self._drc_clusters = None   # optional user-authored cluster sidecar
+        self._drc_cluster = None    # selected child; None = entire rule
         self._drc_grid_ci = None    # rule the number grid shows
         self._drc_grid_rows = 0
         self._drc_cell = None       # marked grid cell (row, col)
@@ -1987,11 +2434,11 @@ class Viewer:
         self._drc_lyr_saved = None  # visibility snapshot before a
                                     # double-click layer isolation
         self._drc_show_sel = False  # 'selected' list filter
-        self._drc_sel = None        # OPEN rule's selection: (ci,
-                                    # [ei], [(ei, kind, pts dbu)],
-                                    # frozenset(ei))
-        self._drc_sels = {}         # ci -> selection (kept across
-                                    # rule switches, 2026-08-15)
+        self._drc_sel = None        # (ci, immutable Selection, (), Selection)
+        self._drc_selection_worker = None
+        self._drc_selection_key = None
+        self._drc_review_job = None
+        self._drc_sels = {}         # (ci, cluster) -> selection
         self._esel_start = None     # pending first box corner (dbu)
         self._drc_grid_map = []     # the grid PAGE's ei list
         self._drc_focus = None      # single-clicked error (ci, ei,
@@ -2001,6 +2448,45 @@ class Viewer:
         self._mono = False          # grayscale layers (b key)
         self._mono_saved = False    # mono state before highlight
         self._drc_hl_res = None     # (view key, [(kind, pts dbu)])
+        self._drc_marker_worker = None
+        # the review flags and the team's shared review (feature/jobdeck-
+        # drc 2026-10-09..11; floe2 gtk-service drc_team.rs)
+        self._drc_review_read_error = None
+        self._drc_team = None
+        self._drc_migration = None
+        self._drc_team_write = None
+        self._drc_team_busy = None
+        self._drc_conflict_only = False
+        self._drc_conflict_source = None
+        self._drc_conflict_members = None
+        self._drc_conflict_key = None
+        self._drc_conflict_job = None
+        self._drc_conflict_retired = []
+        self._drc_conflict_revision = 0
+        self._drc_conflict_error = None
+        self._drc_conflict_stamp = ""
+        self._drc_marker_revision = 0
+        self._drc_marker_key = None
+        self._drc_marker_result = None
+        self._drc_marker_overlay = None
+        self._drc_marker_busy = False
+        self._drc_query_worker = None
+        self._drc_hl_key = None
+        self._drc_delta_worker = None
+        self._drc_delta_key = None
+        self._drc_delta_groups = None
+        self._drc_delta_group = None
+        self._drc_delta_busy = False
+        self._drc_delta_ui_busy = False
+        self._drc_delta_revision = 0
+        self._drc_delta_mode = "absolute"
+        self._drc_delta_step = None  # resolved interval; None while automatic is pending
+        self._drc_delta_steps = {}   # (rule index, mode) -> manual interval in ticks
+        self._drc_delta_auto_steps = {}  # whole-rule automatic intervals
+        self._drc_delta_step_scope = None
+        self._drc_delta_step_text = "auto"
+        self._drc_delta_page = 0    # group pages are separate from error pages
+        self._drc_delta_error = None
         self._labels = []           # Gtk.Label pool for ruler distances
         self._note_panel = None     # top-left translucent DRC note panel
 
@@ -2195,24 +2681,14 @@ class Viewer:
         pal.set_hexpand(True)
         pal_cells = []   # (swatch DrawingArea, color) for the pick
         for i, (col, cname) in enumerate(PALETTE_COLORS):
-            rgb = tuple(int(col[j:j + 2], 16) / 255.0
-                        for j in (1, 3, 5))
+            rgb = tuple(int(col[j:j + 2], 16) for j in (1, 3, 5))
 
-            def _draw_swatch(w, cr, rgb=rgb):
-                a = w.get_allocation()
-                cr.set_source_rgb(*rgb)
-                cr.rectangle(0, 0, a.width, a.height)
-                cr.fill()
-                cr.set_source_rgb(0.4, 0.4, 0.4)  # outline: reads
-                cr.set_line_width(1)              # on black too
-                cr.rectangle(0.5, 0.5, a.width - 1, a.height - 1)
-                cr.stroke()
-                return False
-
-            da = Gtk.DrawingArea()
-            da.set_size_request(12, 14)
+            # the colour inside a grey outline (reads on black too)
+            cell = PixbufCell(
+                lambda w, h, rgb=bytes(rgb): outlined_pixbuf(
+                    w, h, lambda _y, n: rgb * n), 12, 14)
+            da = cell.widget
             da.set_hexpand(True)
-            da.connect("draw", _draw_swatch)
             da.set_tooltip_text(
                 "%s (%s) - recolor the selected layer(s)"
                 % (cname, col))
@@ -2246,33 +2722,17 @@ class Viewer:
         patg_cells = []   # (slot DrawingArea, index) for the pick
         for i, fname in enumerate(fillpat.FILL_NAMES):
 
-            def _draw_slot(w, cr, i=i):
-                a = w.get_allocation()
-                # white paper, black dots (user call 2026-08-11)
-                cr.set_source_rgb(1.0, 1.0, 1.0)
-                cr.rectangle(0, 0, a.width, a.height)
-                cr.fill()
+            def _paint_slot(width, height, i=i):
+                # white paper, black dots (user call 2026-08-11): the
+                # 16x16 bitmap tiled 1:1 across the box (no stretching)
                 rows = self._fill_patterns[i].split("\n")
-                # tile the 16x16 bitmap 1:1 across the box (no
-                # stretching - user call 2026-08-11)
-                cr.set_source_rgb(0.0, 0.0, 0.0)
-                for y in range(a.height):
-                    r = rows[y % 16]
-                    for x in range(a.width):
-                        if r[x % 16] == "*":
-                            cr.rectangle(x, y, 1, 1)
-                cr.fill()
-                cr.set_source_rgb(0.4, 0.4, 0.4)
-                cr.set_line_width(1)
-                cr.rectangle(0.5, 0.5, a.width - 1, a.height - 1)
-                cr.stroke()
-                return False
+                return outlined_pixbuf(
+                    width, height, lambda y, n: tiled_row(rows[y % 16], n))
 
-            da = Gtk.DrawingArea()
-            da.set_size_request(12, 20)
+            cell = PixbufCell(_paint_slot, 12, 20)
+            da = cell.widget
             da.set_hexpand(True)
-            da.connect("draw", _draw_slot)
-            self._fill_slots.append(da)
+            self._fill_slots.append(cell)
             da.set_tooltip_text(
                 "%s - click: fill selected layer(s)" % fname)
             patg.attach(da, i % 5, i // 5, 1, 1)
@@ -2412,9 +2872,6 @@ class Viewer:
         # A layer toggle may have queued a render immediately before a
         # jobdeck mode switch. It must not fire against the replacement
         # worker before its open/style handshake (style_epoch=0).
-        if self._debounce is not None:
-            GLib.source_remove(self._debounce)
-            self._debounce = None
         # Initial construction is fitted/goto'd by _on_allocate.  An in-place
         # layout load happens after allocation and needs a deferred fit unless
         # its caller immediately supplies a goto (goto() cancels this flag).
@@ -2452,16 +2909,14 @@ class Viewer:
             self._frontier_depths = (self.meta.get("frontier")
                                      or {}).get("depths") or []
             self._minimap_bases = {}
-            self._live_cap = live_caps(cache.meta)[0]
         # fill palette state: user-global edited bitmaps + the
         # effective layerprops (personal, else the design default
         # next to the source - already seeded by Cache.load)
         self._fill_patterns = fillpat.default_patterns()
         self._layer_patterns = {}
         self._layer_widths = {}
-        rows = ([] if cache is None else
-                cache_mod.load_layer_props(
-                    getattr(self.cache, "props_src", self.cache.src))[0])
+        # the design-default rows floe2 gtk-service read
+        rows = [] if cache is None else cache.layer_props()
         for key, _color, fill, _name, _f1, f2 in rows:
             i = fillpat.fill_index(fill)
             if i is not None:
@@ -2473,13 +2928,12 @@ class Viewer:
             except ValueError:
                 pass
         for w in self._fill_slots:
-            w.queue_draw()
+            w.refresh()
         self._refresh_row_fills()
         self.last_frame = None
         self._margin_frame = None
         self._frame_anchor = None
         self._depth_used = "?"
-        self._job_keys.clear()
         self._clear_pending()
         self.rulers = []
         self._ruler_start = None
@@ -2548,10 +3002,7 @@ class Viewer:
             if marks is not None and "cache" not in marks:
                 # the cache, the layer panel: done; the service opens next
                 marks["cache"] = time.monotonic()
-            self.worker = make_render_worker(
-                cache, stream_kb=self.stream_kb,
-                stream_target_ms=self.stream_target_ms,
-                debug=self.render_debug)
+            self.worker = self._make_view_worker(cache)
             if hasattr(self.worker, "start_async"):
                 worker = self.worker
                 self._worker_starting = True
@@ -2744,31 +3195,22 @@ class Viewer:
     def _open_file_load(self, path, ids):
         """open_file's loading half: the cache (a DeckCache plans the
         deck and writes its spec), then _apply_cache (layer panel,
-        render service); an error string for the known refusals."""
-        if _is_deck_path(path):
-            # a jobdeck (docs/JOBDECK.ko.md M3): every source's
-            # VFS cache must exist; renderd composites them
-            from .jobdeck.viewer import DeckCache
-            # sources without a cache (an index that failed, a
-            # container floe-index cannot read) are skipped placements
-            # the title and status report - never a reason to stay
-            # closed (field 2026-09-09: three missing files kept a
-            # fully indexed deck from opening)
-            c = DeckCache(path, ids=ids)
-            try:
-                c.load()
-            except ValueError as exc:
-                return "ERR %s; run: %s index %s" % (exc, APP, path)
-            # the deck is the thing viewed: full depth, or a source
-            # whose shapes live in child cells shows nothing (review
-            # 2026-09-09 P1-3)
-            self._set_depth(999, redraw=False)
-        else:
-            c = cache_mod.Cache(path)
-            if not c.exists():
-                return ("ERR no VFS cache for %s; run: %s index %s"
-                        % (path, APP, path))
+        render service); an error string for the known refusals.
+        floe2 gtk-service (floe/gtkservice.py, the shared Rust app layer)
+        answers both."""
+        from .gtkservice import ServiceCache, ServiceError
+        c = ServiceCache(path, ids=ids)
+        try:
             c.load()
+        except ServiceError as exc:
+            if c.is_jobdeck and exc.kind in ("input", "cache"):
+                return "ERR %s; run: %s index %s" % (exc, APP, path)
+            return "ERR %s" % exc
+        if c.is_jobdeck:
+            # the deck is the thing viewed: full depth, or a source whose
+            # shapes live in child cells shows nothing (review 2026-09-09
+            # P1-3)
+            self._set_depth(999, redraw=False)
         self._apply_cache(c)
         # the rebuilt layer panel and the restarted worker must not
         # leave the keyboard parked away from the canvas (field
@@ -2779,25 +3221,26 @@ class Viewer:
     def _index_ready(self, path, ids=None):
         """Whether `path` can be opened as is: a layout with a VFS cache,
         or a jobdeck whose sources (of the levels `ids`, None = all)
-        all have one."""
-        if _is_deck_path(path):
-            from .jobdeck.viewer import deck_ready
-            return deck_ready(path, ids=ids)
-        if self._index_busy(path) is not None:
+        all have one (floe2 gtk-service's answer)."""
+        from .gtkservice import ServiceError, readiness
+        try:
+            return bool(readiness(path, ids)["ready"])
+        except ServiceError:
             return False
-        return cache_mod.Cache(path).exists()
 
     @staticmethod
     def _index_busy(path):
         """Why a layout cannot be opened now: another run rebuilds its
-        cache whole (floe/indexlock.py) - the refusal naming who, else
-        None. A jobdeck's sources are judged one by one when it opens."""
+        cache whole (the index locks, floe_vfs::lock) - the refusal naming
+        who, else None. A jobdeck's sources are judged one by one when it
+        opens."""
         if _is_deck_path(path):
             return None
-        from . import cachepath
-        return indexlock.state(indexlock.VFS,
-                               cachepath.vfs_cache_dir(path),
-                               users=False).opening_refusal()
+        from .gtkservice import ServiceError, readiness
+        try:
+            return readiness(path)["busy"]
+        except ServiceError:
+            return None
 
     def _jobdeck_pick_levels(self, path, current=None, force=False):
         """Which mask levels to load (user call 2026-09-10: Calibre
@@ -2820,11 +3263,10 @@ class Viewer:
                         "FLOE_JOBDECK_LEVELS must be all, ask or "
                         "N[,N...]: %r ignored" % policy)
                     return None
-        from .jobdeck import parse_jobdeck
-        from .jobdeck.viewer import level_rows
         try:
-            rows = level_rows(parse_jobdeck(path, strict=True))
-        except (OSError, ValueError) as exc:
+            from .gtkservice import level_rows
+            rows = level_rows(path)
+        except (OSError, ValueError, RuntimeError) as exc:
             self._set_live_status("jobdeck: %s" % exc)
             return False
         if len(rows) <= 1:
@@ -2836,7 +3278,6 @@ class Viewer:
         (number, MTITLE name, CHIPs, instances, sources), all / none
         buttons, Open / Cancel. Returns the selection (None = all
         levels) or False for Cancel."""
-        from .jobdeck.viewer import level_row_text
         dlg = Gtk.Dialog(title="load jobdeck levels", transient_for=self.window,
                          modal=True)
         dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
@@ -2862,7 +3303,7 @@ class Viewer:
             chk.set_active(want is None or row["level"] in want)
             checks.append((row["level"], chk))
             grid.attach(chk, 0, r, 1, 1)
-            summary, full = level_row_text(row)
+            summary, full = _level_row_text(row)
             info = Gtk.Label(label=summary)
             info.set_xalign(0.0)
             info.set_ellipsize(Pango.EllipsizeMode.END)
@@ -3173,15 +3614,11 @@ class Viewer:
         return None
 
     # ---- display composition (no cairo: pixbuf ops only) -------------------
-    def _render_key(self, scope):
-        """Identity of a frame: what state it was rendered for. The
-        thin policy is part of it (review 2026-09-11 P1-1: toggling
-        View > keep thin shapes changed only the status label while
-        _covered() kept the old frame; margin frames share the key)."""
-        return (scope, tuple(sorted(self.visible)), self._depth_key(),
-                self._effective_cut_px(), self.lod_on, self.frames_on,
-                self.labels_on, self._color_epoch, self._effective_thin(),
-                self._root_ci(), self._density_key())
+    def _render_key(self, scope="live"):
+        """Identity of a frame: what state it was rendered for - the view
+        controller's render key (its frames carry it)."""
+        snap = self.worker.snapshot if self._ctl() else None
+        return ("ctl", None if snap is None else snap["render_key"])
 
     def _density_key(self):
         """Render-key component: the density toggle where the renderer
@@ -3307,6 +3744,10 @@ class Viewer:
                       off_x, off_y, scale, scale, interp, 255)
 
     def _draw_overlays(self, disp, obox, ospp):
+        self._drc_point_hits = None
+        self._drc_marker_view = (tuple(obox), ospp,
+                                 disp.get_width(), disp.get_height())
+
         def sx(v):
             return (v - obox[0]) / ospp
 
@@ -3338,11 +3779,13 @@ class Viewer:
         if self.mode == "ruler" and self._ruler_start is not None:
             segs.append((*self._ruler_start, *self._ruler_end_preview()))
         for seg in segs:
+            if isinstance(seg, _DrcAreaLabel):
+                continue  # a text chip alone: no line, no arrowheads
             x0, y0, x1, y1 = seg
             a, b = (sx(x0), sy(y0)), (sx(x1), sy(y1))
             if isinstance(seg, _DrcOffsetRuler):
                 edge_a, edge_b = a, b
-                a, b = drc_mod.offset_screen_segment(a, b)
+                a, b = offset_screen_segment(a, b)
                 # Extension lines expose the error edge underneath while
                 # tying both endpoints to its parallel dimension line.
                 stamp_dotted(disp, edge_a, a, None, RULER_CORE)
@@ -3378,44 +3821,41 @@ class Viewer:
                     and max(mys) - min(mys) < DRC_MARK_PX):
                 cxp = (min(mxs) + max(mxs)) / 2.0
                 cyp = (min(mys) + max(mys)) / 2.0
-                fill_rect(disp, cxp - DRC_MARK_PX // 2,
-                          cyp - DRC_MARK_PX // 2,
-                          DRC_MARK_PX, DRC_MARK_PX, mcol)
+                stamp_drc_circle(disp, cxp, cyp, DRC_MARK_PX // 2,
+                                 mcol, solid=True)
             elif self.drc_mark["kind"] == "p":
                 self._drc_fill_translucent(disp, pts, mcol)
                 for a, b in zip(pts, pts[1:] + pts[:1]):
                     stamp_segment(disp, a, b, None, mcol)
+                self._drc_visit_drawn(self.drc_mark, pts,
+                                      disp.get_width(), disp.get_height())
             else:
                 # edge records: consecutive point pairs are segments
                 for j in range(0, len(pts) - 1, 2):
                     stamp_segment(disp, pts[j], pts[j + 1], None,
                                   mcol)
-        if self.mode == "esel" and self._esel_start is not None:
-            ax, ay = self._esel_start
-            bx, by = self._cursor
-            rect_outline(disp, sx(ax), sy(ay), sx(bx), sy(by),
-                         None, RULER_CORE, px=1)
+                self._drc_visit_drawn(self.drc_mark, pts,
+                                      disp.get_width(), disp.get_height())
         if self.overlay_mode == 0 and self._drc is not None \
                 and self._drc_open is not None:
-            # the canvas shows the CURRENT GRID PAGE's errors (user
-            # call 2026-08-15: page flips must move the markers) -
-            # geometry prebuilt by _drc_grid_fill. Tab state 1
-            # hides these (and the gold set below): only the jumped
-            # error above stays (user call 2026-08-21); _drc_hits
-            # then stays empty so hidden markers cannot be picked.
+            # All matching errors of the rule, cluster or delta group,
+            # independently of list pages (feature/jobdeck-drc
+            # 2026-10-08): the service paints individual centres into
+            # one bounded picture. Tab state 1 hides these: only the
+            # jumped error above stays (user call 2026-08-21); the pixel
+            # hit map then stays empty so hidden markers cannot be picked.
             if self._drc_hl and hasattr(self._drc, "query_rect"):
                 # keeps the in-view filter grid following the view
                 self._drc_hl_list()
             with _dprof("paint: rule errors"):
-                self._drc_stamp_errs(disp, sx, sy,
-                                     self._drc_page_marks)
-        if self.overlay_mode == 0 and self._drc_sel is not None:
-            # box selection ('e'): GOLD on top of the status colors
-            sci, _seis, marks, _eset = self._drc_sel
-            self._drc_stamp_errs(
-                disp, sx, sy,
-                [(sci, ei_, kind, spts)
-                 for ei_, kind, spts in marks], DRC_GOLD)
+                self._drc_stamp_markers(disp, obox, ospp)
+            # Focus remains visible above the full-scope marker image.
+            focus = self._drc_focus
+            if focus is not None and focus[0] == self._drc_open:
+                sel = self._drc_sel
+                color = (DRC_GOLD if sel is not None and sel[0] == focus[0]
+                         and focus[1] in sel[3] else None)
+                self._drc_stamp_errs(disp, sx, sy, [focus], color)
         if self.overlay_mode == 0 and self._cell_hl is not None \
                 and self._cell_hl_on:
             # the cell tree's selected cell: its instances in the view
@@ -3432,6 +3872,13 @@ class Viewer:
                               CELL_MARK_PX, CELL_MARK_PX, CELL_HL)
                 else:
                     rect_outline(disp, ax, ay, bx, by, None, CELL_HL)
+        if self.mode == "esel" and self._esel_start is not None:
+            # Keep the live selection boundary above dense marker rasters,
+            # focused errors and cell highlights, with contrast on either.
+            ax, ay = self._esel_start
+            bx, by = self._cursor
+            rect_outline(disp, sx(ax), sy(ay), sx(bx), sy(by),
+                         BLACK, RULER_CORE, px=1)
         if self._zoomdrag is not None and self._band_cur is not None:
             x0, y0 = self._zoomdrag
             x1, y1 = self._band_cur
@@ -3442,6 +3889,12 @@ class Viewer:
         """(scale, panel x0, panel y0, die px w, die px h) or None."""
         if self.meta is None:
             return None
+        got = self._ctl_minimap(None)
+        if got is not None:
+            if got["die"] is None:
+                return None
+            x, y, w, h = got["die"]
+            return (got["scale"], int(x), int(y), int(w), int(h))
         bb = self._die_bbox()
         bw, bh = bb[2] - bb[0], bb[3] - bb[1]
         if bw <= 0 or bh <= 0:
@@ -3510,6 +3963,10 @@ class Viewer:
         point = self._minimap_world_point(event.x - ox, event.y - oy)
         if point is None:
             return True
+        if self._ctl_navigate({"kind": "minimap",
+                               "point": [float(event.x - ox),
+                                         float(event.y - oy)]}):
+            return True
         # §F2R-16: the minimap keeps the zoom, so round the jump onto
         # the 16-device-px grid of the current view - a same-scale
         # move within a viewport's reach then reuses the previous
@@ -3529,6 +3986,20 @@ class Viewer:
         base = self._minimap_bases.get(d)
         if base is not None:
             return base
+        got = self._ctl_minimap(d)
+        if got is not None:
+            # the service's bake (palette digits): this panel's colours
+            size = int(got["size"])
+            colours = {ord(str(i)): bytes.fromhex("%06X" % (rgba >> 8))
+                       for i, rgba in enumerate((BLACK, MINIMAP_BG,
+                                                 MINIMAP_EDGE, MINIMAP_FRONT,
+                                                 MINIMAP_VIEW))}
+            data = b"".join(colours[c] for c in got["base"].encode("ascii"))
+            disp = GdkPixbuf.Pixbuf.new_from_bytes(
+                GLib.Bytes.new(data), GdkPixbuf.Colorspace.RGB, False, 8,
+                size, size, size * 3)
+            self._minimap_bases[d] = disp
+            return disp
         disp = GdkPixbuf.Pixbuf.new(
             GdkPixbuf.Colorspace.RGB, False, 8, MINIMAP_PX, MINIMAP_PX)
         disp.fill(BLACK)
@@ -3617,11 +4088,14 @@ class Viewer:
             a = ((x0 - obox[0]) / ospp, (obox[3] - y0) / ospp)
             b = ((x1 - obox[0]) / ospp, (obox[3] - y1) / ospp)
             if isinstance(seg, _DrcOffsetRuler):
-                a, b = drc_mod.offset_screen_segment(a, b)
+                a, b = offset_screen_segment(a, b)
             mx, my = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
             if -40 <= mx <= w and -20 <= my <= h:
-                vis.append((a, b, mx, my,
+                # five decimals, half up (an area label carries its text)
+                text = (seg.text if isinstance(seg, _DrcAreaLabel) else
+                        "%s um" % format_um5(
                             math.hypot(x1 - x0, y1 - y0) * self.dbu))
+                vis.append((a, b, mx, my, text))
         while len(self._labels) < len(vis):
             lbl = Gtk.Label()
             lbl.set_halign(Gtk.Align.START)
@@ -3632,11 +4106,11 @@ class Viewer:
         lines = [(a, b) for a, b, _, _, _ in vis]
         placed = []    # chip rects already positioned this pass
         leaders = []   # leader segments already claimed
-        for idx, (a, b, mx, my, d_um) in enumerate(vis):
+        for idx, (a, b, mx, my, text) in enumerate(vis):
             lbl = self._labels[idx]
             lbl.set_markup('<span background="#101010" foreground='
                            '"#ffffff"> %s </span>'
-                           % GLib.markup_escape_text("%.4f um" % d_um))
+                           % GLib.markup_escape_text(text))
             lbl.show()   # a hidden label measures as zero
             # preferred size folds in the margins, which still hold
             # the previous position; subtract for the chip itself
@@ -3708,83 +4182,11 @@ class Viewer:
         panel.show()
 
     # ---- drawing / rendering ------------------------------------------------
-    def _margin_enabled(self):
-        """§F2R-17 margin prefetch is a Rust-only reuse optimization:
-        the backend must declare it (stable floe/KLayout would render
-        the enlarged frame as ~4.8x plain foreground work per settled
-        view and could not cancel it), and --frame-cache off /
-        --perf-baseline switch every frame-reuse path off together so
-        backend-neutral timings stay comparable."""
-        return bool(self.frame_cache_on) and bool(self.margin_on) and bool(
-            getattr(self.worker, "supports_margin_prefetch", False))
-
-    def _covered(self, bbox, scope):
-        """True when the current frame still serves this view: same
-        render state AND the viewport sits inside the frame with some
-        comfort left, so no re-render is needed (Calibre-style margin
-        panning)."""
-        lf = self.last_frame
-        if lf is None or lf[3] != self._render_key(scope):
-            return False
-        if abs(lf[2] - self.spp) > 1e-9 * self.spp:
-            return False  # zoom changed: frame is scaled preview only
-        fb = lf[1]
-        vw, vh = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        if self._margin_enabled():
-            # §F2R-17: the margin is sized to EXACTLY one snapped 50%
-            # arrow step per side (user call 2026-09-05: the earlier
-            # step+10% pad felt wasteful), so a view whose edge lands
-            # on the frame edge is still a pure crop. No comfort pad:
-            # the proactive re-margin in _schedule_margin (leading room
-            # < 0.35 viewport) replaced its role. The tolerance only
-            # absorbs float rounding of the pan arithmetic (1e-3 px).
-            pad_x = pad_y = -1e-3 * self.spp
-        else:
-            # reuse is off (baseline timing) or the backend has no
-            # margin: only an exact viewport frame (<= 2 px snap slack
-            # per axis, see _submit_render) may serve - never a crop
-            # of some oversize frame
-            slack = 4.0 * self.spp
-            if (fb[2] - fb[0]) > vw + slack or (fb[3] - fb[1]) > vh + slack:
-                return False
-            pad_x = min(0.1 * vw, 0.25 * max(0.0, (fb[2] - fb[0]) - vw))
-            pad_y = min(0.1 * vh, 0.25 * max(0.0, (fb[3] - fb[1]) - vh))
-        return (fb[0] <= bbox[0] - pad_x and fb[1] <= bbox[1] - pad_y and
-                fb[2] >= bbox[2] + pad_x and fb[3] >= bbox[3] + pad_y)
-
-    def _frame_holds_view(self, bbox):
-        """The frame on screen shows this view whole: the same render
-        state, the same scale, the view inside its box (float slack only).
-        Unlike _covered - whether a frame may be REUSED instead of a render,
-        which with the margin off wants comfort around the view - a
-        viewport frame that was just drawn for this view always holds it."""
-        lf = self.last_frame
-        if lf is None or lf[3] != self._render_key("live"):
-            return False
-        if abs(lf[2] - self.spp) > 1e-9 * self.spp:
-            return False
-        fb, tol = lf[1], 1e-3 * self.spp
-        return (fb[0] <= bbox[0] + tol and fb[1] <= bbox[1] + tol and
-                fb[2] >= bbox[2] - tol and fb[3] >= bbox[3] - tol)
-
-    def _settle_after_frame(self):
-        """A foreground frame settled. The mouse no longer waits for it
-        (2026-09-30), so the view may have moved while it was drawn: when a
-        render of the new view is already on its way (the debounce) or a pan
-        is in progress (its release renders), nothing to do; when the frame
-        does not hold the view the user is at (a pan inside the old margin
-        submitted nothing), render that view; otherwise top the margin up.
-        0.12.251 asked _covered here, which with the margin off never holds
-        a fresh viewport frame (no comfort around it): every frame rendered
-        again, for ever (field 2026-09-30: "rendering repeats")."""
-        if self._debounce is not None or self._drag is not None:
-            return
-        if self._frame_holds_view(self.view_bbox()):
-            self._schedule_margin()
-        else:
-            self.redraw()
-
     def redraw(self, immediate=False):
+        """Show the view and send what changed of it to the view
+        controller, which decides what is drawn and when (docs/
+        SHARED_APP_LAYER.ko.md §7; `immediate` is the controller's call
+        now - a policy edit renders at once, a move once it settles)."""
         if self.cache is None:
             return   # empty start: nothing to render yet
         if self._worker_starting:
@@ -3796,264 +4198,319 @@ class Viewer:
             self._set_live_status("render service is not available")
             return
         self._clamp_view()
+        self._ctl_redraw()
+
+    # ---- the view controller's loop (P4d; the only one since P4f) ------
+    def _ctl(self):
+        """The render loop is the shared Rust ViewController's."""
+        return bool(getattr(getattr(self, "worker", None), "controller",
+                            False))
+
+    def _make_view_worker(self, cache):
+        """The view channel's worker for `cache`, opened with the viewer's
+        policy (and its view when it has one) so the first frame is the
+        one asked for, not the controller's default."""
+        self._ctl_shown_rev = None
+        self._ctl_said = None
+        w, h = self._viewport_size()
+        deck = bool(getattr(cache, "is_jobdeck", False))
+        patch = self._ctl_policy(deck=deck)
+        if patch.get("root") is not None:
+            # a root is resolved by the live view: the first sync sends it
+            del patch["root"]
+        self._ctl_sent = dict(patch)
+        kept = getattr(self, "_ctl_open_view", None)
+        if kept is not None:
+            # a deck's mode switch keeps the view (_jobdeck_set_mode)
+            dbu = self.dbu
+            patch["navigation"] = {
+                "kind": "goto", "center_um": [kept[0] * dbu, kept[1] * dbu],
+                "width_um": kept[2] * w * dbu}
+        elif self._did_fit and not self._fit_after_worker_start:
+            patch["navigation"] = self._ctl_goto(w)
+        return gtkservice.ViewWorker(
+            cache, w, h, patch=patch,
+            margin=bool(self.frame_cache_on) and bool(self.margin_on),
+            frame_cache=bool(self.frame_cache_on))
+
+    def _ctl_policy(self, deck=None):
+        """What the viewer draws, as the controller's patch fields: the
+        size, depth, detail, thin policy, layers, frames, labels, font,
+        grayscale, density and root."""
+        if deck is None:
+            deck = bool(getattr(self.cache, "is_jobdeck", False))
+        w, h = self._viewport_size()
+        depth = self._depth()
+        visible = self._layers_arg()
+        cut = self._effective_cut_px()
+        detail = min(zip(DETAIL_PX, DETAIL_LEVELS),
+                     key=lambda d: abs(d[0] - cut))[1] if cut > 0 else "exact"
+        patch = {
+            "pixels": [int(w), int(h)],
+            "depth": "full" if depth is None else int(depth),
+            "detail": detail,
+            "thin": self._effective_thin(),
+            "layers": "all" if visible is None else
+            ([[int(k[0]), int(k[1])] for k in visible] if visible
+             else "none"),
+            "frames": bool(self.frames_on),
+            # a deck's composite has no labels (renderd's rule)
+            "labels": bool(self.labels_on) and not deck,
+            "mono": bool(self._mono),
+            # the density is of what a cut drops: none at exact (it would
+            # only take pass 2's reserve from pass 1's budget) and none in a
+            # deck's frames (renderd's deck pass) - floe2 render's rule too
+            "density": bool(getattr(self, "density_on", False))
+            and cut > 0 and not deck,
+        }
+        if not deck:
+            # a deck has no label font and no root (renderd's rule)
+            patch["font_px"] = int(self.label_font_px)
+            root = getattr(self, "_view_root", None)
+            patch["root"] = None if root is None else {
+                "src": 0, "cell": int(root["cell"])}
+        return patch
+
+    def _ctl_goto(self, w):
+        dbu = self.dbu
+        return {"kind": "goto", "center_um": [self.cx * dbu, self.cy * dbu],
+                "width_um": self.spp * w * dbu}
+
+    def _ctl_same_view(self, viewport):
+        """The controller's viewport is the viewer's (float noise aside:
+        the goto's um round trip)."""
+        w, h = self._viewport_size()
+        if (viewport["width"], viewport["height"]) != (w, h):
+            return False
+        b = viewport["bbox"]
+        spp = (b[2] - b[0]) / w
+        return (abs(spp / self.spp - 1.0) < 1e-9
+                and abs((b[0] + b[2]) / 2 - self.cx) < 1e-3 * self.spp
+                and abs((b[1] + b[3]) / 2 - self.cy) < 1e-3 * self.spp)
+
+    def _ctl_adopt(self, snapshot):
+        """The view the controller holds becomes the viewer's when it is
+        not the same (its clamp is the viewer's own; a root it fitted)."""
+        v = snapshot["state"]["viewport"]
+        if self._ctl_same_view(v):
+            return
+        b = v["bbox"]
+        self.cx = (b[0] + b[2]) / 2
+        self.cy = (b[1] + b[3]) / 2
+        self.spp = (b[2] - b[0]) / v["width"]
+
+    def _ctl_navigate(self, nav):
+        """Under the view controller a navigation is its own (P4e: the
+        shared view maths, Viewport::navigate - the web's too): the viewer
+        takes the view it made and shows it. False when the viewer moves
+        the view itself - the Python loop, the view still opening, a drag
+        in progress, or the edit refused (said on the status line)."""
+        if not self._ctl() or self.worker.snapshot is None \
+                or self._drag is not None:
+            return False
+        # with what else changed (the size first: the controller applies
+        # pixels, then the root, then the navigation); the viewer's own view
+        # is not sent - the navigation moves the controller's
+        policy, patch = self._ctl_policy_diff()
+        patch["navigation"] = nav
+        reply = self.worker.edit(**patch)
+        if reply is None:
+            return False        # the redraw after the viewer's maths resends
+        self._ctl_sent = policy
+        self._ctl_adopt(reply)
+        self.redraw()
+        return True
+
+    def _ctl_minimap(self, d):
+        """The overview from the view's service (P4e, app-core
+        view::minimap - the bake the web shows): {base, die, scale, ...}
+        for depth d (None: plain), kept with the bases (a cache or root
+        change drops them); None to bake it here."""
+        if not self._ctl() or self.worker.snapshot is None:
+            return None
+        key = ("ctl", d)
+        got = self._minimap_bases.get(key)
+        if got is None:
+            root = getattr(self, "_view_root", None)
+            got = self.worker.minimap(d, None if root is None
+                                      else root["bbox"])
+            if got is None:
+                return None
+            self._minimap_bases[key] = got
+        return got
+
+    def _ctl_sync(self):
+        """Send what changed since the last edit: the policy fields that
+        differ, and the view as a goto when it moved."""
+        snap = self.worker.snapshot
+        if snap is None:
+            return              # the view still opens; its patch is sent
+        policy, patch = self._ctl_policy_diff()
+        if not self._ctl_same_view(snap["state"]["viewport"]):
+            patch["navigation"] = self._ctl_goto(self._viewport_size()[0])
+        if not patch:
+            return
+        # said once: a refused edit (on the status line) is not sent again
+        self._ctl_sent = policy
+        reply = self.worker.edit(**patch)
+        if reply is not None:
+            self._ctl_adopt(reply)
+
+    def _ctl_snap_drag(self):
+        """A drag ends an even number of pixels from the frame on screen:
+        the fill speckle's 2x2 phase is the frame's own (the controller
+        draws the viewport as it is, where the Python loop snapped each
+        frame to a 2 px layout grid), so an odd step would flip it when
+        the new frame lands (field 2026-08-09). Keys step 16 px."""
+        lf = self.last_frame
+        if lf is None or abs(lf[2] / self.spp - 1.0) > 1e-9:
+            return              # zoomed since: a new frame anyway
+        fb, vb = lf[1], self.view_bbox()
+        dx = (vb[0] - fb[0]) / self.spp
+        dy = (fb[3] - vb[3]) / self.spp
+        self.cx += (2 * round(dx / 2) - dx) * self.spp
+        self.cy -= (2 * round(dy / 2) - dy) * self.spp
+
+    def _ctl_policy_diff(self):
+        """(the policy now, its fields that differ from the last sent)."""
+        sent = self._ctl_sent if self._ctl_sent is not None else {}
+        policy = self._ctl_policy()
+        return policy, {k: v for k, v in policy.items()
+                        if k not in sent or sent[k] != v}
+
+    def _ctl_redraw(self):
+        """redraw() under the controller: the edit, then the frame on
+        screen recomposed at the view (the controller settles a pan,
+        renders and supersedes); mid-drag the view is sent on release."""
+        if self.worker.snapshot is None:
+            self._display()
+            return
+        if self._drag is None:
+            self._ctl_sync()
         bbox = self.view_bbox()
-        span = self.tiles_spanned(bbox)
-        # skeleton retired (rev 24): every view renders live; wide floe2
-        # views use the hierarchy cut/wash/LOD ladder.
-        scope = "live"
         self._display()
         if not self.visible and not self._structure_visible():
-            if self._debounce is not None:
-                GLib.source_remove(self._debounce)
-                self._debounce = None
-            self._clear_pending()
             self._set_status(bbox, "no layers visible")
             return
-        mode = ("hierarchy depth %d" % self._depth()
-                if not self.visible else "live (%d tiles)" % span)
-        if self._drag is not None:
-            # mid-pan: track visually with the frozen frame only; the
-            # render fires once on button release (a brief motion pause
-            # used to let the debounce submit mid-drag)
-            if self._debounce is not None:
-                GLib.source_remove(self._debounce)
-                self._debounce = None
-            self._set_status(bbox, mode)
+        self._set_status(bbox, "hierarchy depth %d" % self._depth()
+                         if not self.visible else
+                         "live (%d tiles)" % self.tiles_spanned(bbox))
+
+    def _ctl_events(self):
+        worker = self.worker
+        for kind, value in worker.events():
+            if worker is not self.worker:
+                break           # a frame handler replaced the worker
+            try:
+                if kind == "frame":
+                    self._ctl_frame(value)
+                elif kind == "view":
+                    self._ctl_view(value)
+            except Exception as exc:
+                import traceback
+                traceback.print_exc()
+                self._clear_pending()
+                self._set_live_status(
+                    "error: %s event failed: %s (see terminal)"
+                    % (kind, exc))
+
+    def _ctl_frame(self, frame):
+        data, fw, fh, fmt = gtkservice.read_frame(frame)
+        if fmt == "raw":
+            pix = GdkPixbuf.Pixbuf.new_from_bytes(
+                GLib.Bytes.new(data), GdkPixbuf.Colorspace.RGB, True, 8,
+                fw, fh, fw * 4)
+        else:
+            loader = GdkPixbuf.PixbufLoader.new_with_type("png")
+            loader.write(data)
+            loader.close()
+            pix = loader.get_pixbuf()
+        if self.dump:
+            pix.savev("/tmp/%s_frame.png" % APP, "png", [], [])
+        fb = frame["bbox"]
+        fspp = (fb[2] - fb[0]) / max(1, pix.get_width())
+        key = ("ctl", frame["render_key"])
+        report = frame.get("report") or {}
+        if isinstance(report.get("max_depth"), int):
+            self.max_depth = max(0, report["max_depth"])
+        if frame["purpose"] == "margin":
+            # the base under a pan's incoming strip (_display); with its
+            # labels whole it is the frame shown too, and pans inside it
+            # are crops (the controller draws nothing)
+            self._margin_frame = (pix, fb, fspp, key)
+            if not frame.get("labels_truncated"):
+                self.last_frame = (pix, fb, fspp, key)
+                self.worker.shown = frame["id"]
+            self._display()
+            self._margin_debug("landed frame %d" % frame["id"])
             return
-        if self._covered(bbox, scope):
-            if self._debounce is not None:
-                GLib.source_remove(self._debounce)
-                self._debounce = None
-            self._set_status(bbox, mode)
-            # §F2R-17: roaming inside the margin - top the margin up
-            # once the view drifts off its center
-            self._schedule_margin()
-            return
-        if self._debounce is not None:
-            GLib.source_remove(self._debounce)
-        self._pending_scope = scope
-        self._debounce = GLib.timeout_add(
-            1 if immediate else DEBOUNCE_MS, self._submit_render)
-        self._set_status(bbox, mode)
+        first = frame["render_rev"] != self._ctl_shown_rev
+        self._ctl_shown_rev = frame["render_rev"]
+        self.last_frame = (pix, fb, fspp, key)
+        self.worker.shown = frame["id"]
+        self._display()
+        if first:
+            # content is on screen: the mouse no longer waits
+            self._clear_pending()
+        self._depth_used = frame.get("depth")
+        self.dstatus.set_text(self._depth_label())
+        mode, brief = frame.get("perf") or ("", "")
+        load, load_brief = self._load_note(report)
+        mode, brief = load + mode, load_brief + brief
+        if frame["final"]:
+            if getattr(self, "_refining", False) or first:
+                self.rstatus.set_text("rendering done.")
+            self._refining = False
+            b = self.view_bbox()
+            print("%s  view %.1f x %.1f um"
+                  % (mode, (b[2] - b[0]) * self.dbu,
+                     (b[3] - b[1]) * self.dbu), flush=True)
+        else:
+            self._refining = True
+            self.rstatus.set_text(
+                "drawing the density under the cut..."
+                if (frame.get("fields") or {}).get("density_round") else
+                "refining %d pages..." % (report.get("refining") or 1))
+        self._set_status(self.view_bbox(), mode, brief)
+        self._cell_hl_follow()
+
+    def _ctl_view(self, snap):
+        """The controller's state: rendering (the busy cursor, the
+        ticker), a frame renderd refused, Esc's cancel."""
+        if isinstance(snap.get("max_depth"), int):
+            self.max_depth = max(0, snap["max_depth"])
+        rev = snap["render_rev"]
+        busy = (snap["phase"] in ("rendering", "cancelling")
+                and rev != self._ctl_shown_rev
+                and snap.get("cancelled_rev") != rev)
+        if busy and self._pending is None:
+            self._pending = rev
+            self._pending_t0 = time.perf_counter()
+            self.rstatus.set_text("rendering…")
+            self._set_cursor("progress")
+            if self._pending_timer is None:
+                self._pending_timer = GLib.timeout_add(
+                    400, self._pending_tick)
+        elif not busy and self._pending is not None \
+                and snap["phase"] != "rendering":
+            self._clear_pending()
+        failure = snap.get("render_failure")
+        if failure and failure["render_rev"] == rev \
+                and self._ctl_said != ("failure", rev):
+            self._ctl_said = ("failure", rev)
+            self._refining = False
+            self._clear_pending()
+            self._set_live_status("error: %s" % failure["message"])
+        if snap.get("cancelled_rev") == rev \
+                and self._ctl_said != ("cancelled", rev):
+            self._ctl_said = ("cancelled", rev)
+            self._refining = False
+            self._clear_pending()
+            self.rstatus.set_text("render cancelled")
 
     def _margin_debug(self, message):
         if os.environ.get("FLOE_MARGIN_DEBUG"):
             sys.stderr.write("[margin] %s\n" % message)
-
-    def _schedule_margin(self):
-        """§F2R-17: after a settled live frame, prefetch a 2wx2h frame
-        around the view in the background so pans inside +-50% become
-        pure crops (_covered) or full tile reuse. Any user render that
-        follows preempts it through the generation frontier - renderd
-        cancels the margin raster mid-flight."""
-        if self.cache is None or self._drag is not None:
-            return
-        if not self._margin_enabled():
-            return  # KLayout backend or --frame-cache off / --perf-baseline
-        if self._pending is not None:
-            self._margin_debug("skip: render pending")
-            return  # a user render is in flight; its settle reschedules
-        lf = self.last_frame
-        if lf is None or lf[3] != self._render_key("live"):
-            self._margin_debug("skip: no frame or key mismatch")
-            return
-        bbox = self.view_bbox()
-        vw, vh = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        fb = lf[1]
-        # Already margined and roughly centered: nothing to do. "Roughly"
-        # is relative to the frame's OWN extension (>= 70% of it left on
-        # both sides) so a pixel-capped narrower margin (§F2R-20) is not
-        # topped up after every pan; an axis without a real margin
-        # (under one 16 px period, e.g. the exact viewport frame) never
-        # counts as margined.
-        period = 16.0 * self.spp
-        axes = ((bbox[0] - fb[0], fb[2] - bbox[2], ((fb[2] - fb[0]) - vw) / 2.0),
-                (bbox[1] - fb[1], fb[3] - bbox[3], ((fb[3] - fb[1]) - vh) / 2.0))
-        if any(ext >= period for _, _, ext in axes) and all(
-                ext < period or (lo >= 0.7 * ext and hi >= 0.7 * ext)
-                for lo, hi, ext in axes):
-            self._margin_debug("skip: already margined")
-            return
-        # §F2R-17 (user call 2026-09-04): submit IMMEDIATELY - any user
-        # render cancels the margin mid-flight anyway, and an instant
-        # margin is what keeps continuous stepping silent. The in-flight
-        # guard stops a pan burst from superseding its own margins
-        # forever (a livelock where none ever completes).
-        pending = getattr(self, "_margin_pending", None)
-        if pending is not None and abs(self.cx - pending[1]) <= 0.35 * vw \
-                and abs(self.cy - pending[2]) <= 0.35 * vh:
-            self._margin_debug("skip: margin in flight for this area")
-            return
-        # §F2R-21: with labels on the landed margin is not last_frame
-        # (never shown), yet renderd retains its geometry - a settle
-        # inside it (a full-reuse pan) must not prefetch again until
-        # the view drifts off the margin's center
-        landed = getattr(self, "_margin_landed", None)
-        if landed is not None and landed[0] == lf[3] \
-                and landed[4] is self.cache \
-                and abs(landed[1] - self.spp) <= 1e-9 * self.spp \
-                and abs(self.cx - landed[2]) <= 0.35 * vw \
-                and abs(self.cy - landed[3]) <= 0.35 * vh:
-            self._margin_debug("skip: margin retained for this area")
-            return
-        self._submit_margin()
-
-    def _submit_margin(self):
-        if (self.cache is None or self.worker is None
-                or not self.worker.alive() or self._drag is not None
-                or self._pending is not None or not self._margin_enabled()):
-            self._margin_debug("submit skipped")
-            return False
-        bbox = self.view_bbox()
-        vw, vh = self._viewport_size()
-        spp2 = 2.0 * self.spp
-        rx0 = math.floor(bbox[0] / spp2) * spp2
-        ry1 = math.ceil(bbox[3] / spp2) * spp2
-        w, h = int(vw) + 2, int(vh) + 2
-        # Margin offsets snap to the 16px fill-phase grid so the
-        # margin render reuses the just-drawn viewport as its center
-        # and later pans reuse the margin (§F2R-16 contract). Each side
-        # holds EXACTLY one arrow step (50%, snapped by the same
-        # _snap_pan_px the arrow keys use), so any pan up to a single
-        # half-viewport step is a pure crop and nothing more is drawn
-        # (user call 2026-09-05: the earlier step+10% pad was ~20% more
-        # raster than needed; _covered() no longer wants comfort room
-        # in margin mode, which is what made the pad necessary).
-        ex = self._snap_pan_px(vw * KEY_PAN_FRACTION)
-        ey = self._snap_pan_px(vh * KEY_PAN_FRACTION)
-        cap = getattr(self, "_margin_max_px", MARGIN_MAX_MPIX << 20)
-        if (w + 2 * ex) * (h + 2 * ey) > cap:
-            # §F2R-20: shrink both extensions by one factor s so the
-            # margin holds at most `cap` pixels: (w+2s.ex)(h+2s.ey)=cap,
-            # then floor each to the 16 px period (area stays <= cap).
-            qa = 4.0 * ex * ey
-            qb = 2.0 * (w * ey + h * ex)
-            qc = float(w * h - cap)
-            s = 0.0 if qc >= 0 else \
-                (-qb + math.sqrt(qb * qb - 4.0 * qa * qc)) / (2.0 * qa)
-            ex, ey = (int(math.floor(s * ex / 16.0)) * 16,
-                      int(math.floor(s * ey / 16.0)) * 16)
-            if ex == 0 and ey == 0:
-                self._margin_debug(
-                    "skip: viewport %dx%d leaves no room under the "
-                    "%d Mpx margin cap" % (w, h, cap >> 20))
-                return False
-            self._margin_debug("capped margin to +%d/+%d px per side"
-                               % (ex, ey))
-        mw, mh = w + 2 * ex, h + 2 * ey
-        eb = (rx0 - ex * self.spp,
-              ry1 - (h + ey) * self.spp,
-              rx0 + (w + ex) * self.spp,
-              ry1 + ey * self.spp)
-        depth = self._depth()
-        self.gen += 1
-        self._job_keys[self.gen] = self._render_key("live")
-        self._job_depth[self.gen] = depth
-        job = {
-            "kind": "render", "gen": self.gen, "scope": "live",
-            "bg": True, "t_sub": time.time(),
-            "bbox": tuple(float(v) for v in eb),
-            "view": tuple(float(v) for v in bbox),
-            "w": int(mw), "h": int(mh),
-            "depth": depth,
-            "root": self._root_ci(),
-            "cut_px": self._effective_cut_px(),
-            "lod": self.lod_on,
-            "thin": self._effective_thin(),
-            "frames": self.frames_on,
-            # §F2R-21 (user call 2026-09-05): the margin carries its
-            # labels, planned over the margin box, so a pan inside it
-            # is a pure crop WITH labels - nothing is drawn late. The
-            # display convention that buys this: a label anchored
-            # outside the viewport but inside the margin shows the
-            # part of its glyphs that reaches in and may overlap other
-            # labels, as overlapping labels already can; the selection
-            # is bin-aligned, so the same spot always shows the same
-            # labels. A margin whose label plan hit a budget is never
-            # cropped (reuse-only, geometry base under the pan strip).
-            "labels": self.labels_on,
-            "label_font_px": self.label_font_px,
-            "frame_cache": self.frame_cache_on,
-            "abstract": self.abstract,
-            "visible": self._layers_arg()}
-        if self._density_key() is not None:
-            # the margin is the view's: the same density setting
-            job["density"] = self.density_on
-        self.worker.submit(job)
-        self._margin_pending = (self.gen, self.cx, self.cy)
-        self._margin_debug("submitted gen=%d %dx%d" % (self.gen, mw, mh))
-        return False
-
-    def _submit_render(self):
-        self._debounce = None
-        if self.cache is None or self._worker_starting:
-            return False  # the successful open callback submits the view
-        # a user render supersedes any in-flight margin (the generation
-        # frontier cancels its raster) - forget it so the next settle
-        # schedules a fresh one
-        self._margin_pending = None
-        scope = self._pending_scope
-        bbox = self.view_bbox()
-        w, h = self._viewport_size()
-        # Render the viewport snapped to the SPECKLE PERIOD. The 2x2
-        # checkerboard fill is anchored to the frame's device grid, so
-        # two renders whose origins differ by an ODD pixel count show
-        # inverted fill patterns - panning visibly "reshuffled" the
-        # image (field report 2026-08-09; measured 5.3% of pixels).
-        # Landing x0/left and y1/top on even-pixel boundaries of the
-        # layout-anchored grid makes the phase a pure function of the
-        # layout, so re-renders match across any pan (Calibre
-        # behavior). The frame grows by <= 2 px per axis to keep
-        # covering the exact viewport. (The old 50%-per-side overdraw
-        # margin stays retired - user call, 2026-07-31.)
-        spp2 = 2.0 * self.spp
-        rx0 = math.floor(bbox[0] / spp2) * spp2
-        ry1 = math.ceil(bbox[3] / spp2) * spp2
-        w, h = int(w) + 2, int(h) + 2
-        eb = (rx0, ry1 - h * self.spp, rx0 + w * self.spp, ry1)
-        depth = self._depth()
-        self.gen += 1
-        self._job_keys[self.gen] = self._render_key(scope)
-        self._job_depth[self.gen] = depth
-        for g in [g for g in self._job_keys if g < self.gen - 8]:
-            del self._job_keys[g]
-            self._job_depth.pop(g, None)
-        # bboxes stay FLOAT dbu end to end: at deep zoom one dbu spans
-        # ~100 screen px (spp bottoms out at 0.01), so int-rounding the
-        # request skewed the frame's effective scale by whole percents -
-        # the anchor logic then treated every frame as a zoom mismatch
-        # and pans stopped tracking (the "weird panning at 0.01um" bug)
-        job = {
-            "kind": "render", "gen": self.gen, "scope": scope,
-            "t_sub": time.time(),
-            "bbox": tuple(float(v) for v in eb),
-            "view": tuple(float(v) for v in bbox),
-            "w": int(w), "h": int(h),
-            "depth": depth,
-            "root": self._root_ci(),
-            "cut_px": self._effective_cut_px(),
-            "lod": self.lod_on,
-            "thin": self._effective_thin(),
-            "frames": self.frames_on,
-            "labels": self.labels_on,
-            "label_font_px": self.label_font_px,
-            "frame_cache": self.frame_cache_on,
-            "abstract": self.abstract,
-            "visible": self._layers_arg()}
-        if HAS_DENSITY_COVERAGE:
-            job["coverage"] = self.coverage_on
-        if self._density_key() is not None:
-            # the density under the cut, on or off (View > density)
-            job["density"] = self.density_on
-        self.worker.submit(job)
-        self._pending = self.gen
-        self._preview_gen = None   # stop a stale preview ticker
-        self._pending_t0 = time.perf_counter()
-        self.rstatus.set_text("rendering…")
-        self._set_cursor("progress")  # busy, but the mouse still works
-        if self._pending_timer is None:
-            self._pending_timer = GLib.timeout_add(400, self._pending_tick)
-        return False  # one-shot timeout
 
     def _pending_tick(self):
         if self._pending is None:
@@ -4067,36 +4524,17 @@ class Viewer:
 
     def _cancel_render(self):
         """Esc on a render in flight (field 2026-09-30: a slow render
-        could neither be cancelled nor superseded): the daemon's
-        frontier moves past the generation (`cancel before_gen`), so
-        its plan, decode and raster stop at their next look; the
-        frozen picture stays and the view is left uncovered, so the
-        next pan, zoom or redraw renders it. The generation is bumped
-        without a submit: a late frame or refining round of the
-        cancelled one is not this generation's and is dropped."""
-        if self._debounce is not None:
-            GLib.source_remove(self._debounce)
-            self._debounce = None
-        self.gen += 1
+        could neither be cancelled nor superseded): the view controller
+        stops the frame in progress (renderd drops it at its next step);
+        the frozen picture stays, and the next pan, zoom or change renders
+        (the controller does not draw the cancelled state again)."""
         cancel = getattr(self.worker, "cancel", None)
         if cancel is not None:
-            cancel(self.gen)   # before_gen: everything older stops
+            cancel()
         self._refining = False
-        self._preview_gen = None
         self._clear_pending()
         self.rstatus.set_text("render cancelled")
         self._display()
-
-    def _preview_tick(self, gen):
-        """Elapsed-time ticker while the fat parse behind a preview runs
-        (without it the preview read as "done" and the eventual real
-        frame surprised the user)."""
-        if getattr(self, "_preview_gen", None) != gen:
-            return False  # real frame landed or a newer render started
-        self.rstatus.set_text(
-            "preview - loading tiles… %.0fs"
-            % (time.perf_counter() - self._preview_t0))
-        return True
 
     def _clear_pending(self):
         self._pending = None
@@ -4160,6 +4598,8 @@ class Viewer:
                     "%s: watchdog check failed (%s) - mixed product "
                     "versions in the bundle? overwrite the WHOLE floe/ "
                     "and floe2/ packages, not single files\n" % (APP, exc))
+        if self._ctl():
+            self._ctl_events()   # the view's frames and states
         try:
             while self.worker is not None:
                 res = self.worker.res.get_nowait()
@@ -4179,6 +4619,17 @@ class Viewer:
                         % (res.get("kind"), exc))
         except queue.Empty:
             pass
+        # the DRC analysis jobs' answers (gtk-service; feature/jobdeck-drc)
+        for name, poll in (("marker", self._drc_marker_poll),
+                           ("delta", self._drc_delta_poll),
+                           ("conflict", self._drc_conflict_poll),
+                           ("selection", self._drc_selection_poll),
+                           ("review", self._drc_review_poll),
+                           ("in-view", self._drc_query_poll)):
+            try:
+                poll()
+            except Exception as exc:
+                sys.stderr.write("[drc] %s result failed: %s\n" % (name, exc))
         # push buffered X output to the server: with cairo's core-protocol
         # fallback (CAIRO_DEBUG=xrender-version=-1, the XQuartz black-image
         # workaround) drawn updates otherwise sit in Xlib's output buffer
@@ -4192,133 +4643,11 @@ class Viewer:
         return True
 
     def _handle_result(self, res):
+        """An answer of the view channel (floe/gtkservice.py ViewWorker):
+        the cell tree's, a snap, a pick, a clip, or a refusal. The frames
+        and the view's state come as events (_ctl_events)."""
         kind = res.get("kind")
-        if kind == "frame":
-            preview = bool(res.get("preview"))
-            if res["gen"] == self._pending and not preview:
-                # FIRST frame of this gen: content is on screen, so
-                # UNBLOCK input immediately (mouse handlers gate on
-                # _pending) - a streamed refinement keeps painting
-                # behind it, and any interaction simply supersedes
-                # the job (the service aborts between rounds and the
-                # daemon rolls back the un-acked round, par.3.7)
-                self._clear_pending()
-                if not res.get("refining"):
-                    self.rstatus.set_text("rendering done.")
-            if res["gen"] == self.gen and not preview:
-                if res.get("refining"):
-                    self._refining = True
-                    self.rstatus.set_text(
-                        "drawing the density under the cut..."
-                        if res.get("density_round") else
-                        "refining %d pages..." % res["refining"])
-                elif getattr(self, "_refining", False):
-                    self._refining = False
-                    self.rstatus.set_text("rendering done.")
-            if res["gen"] == self.gen:
-                if res.get("rgba") is not None:
-                    # raw RGBA handoff (F2R-13): neither side runs a PNG
-                    # codec on the interactive path. new_from_bytes keeps
-                    # its own reference on the GBytes copy.
-                    fw = int(res.get("frame_width", 0))
-                    fh = int(res.get("frame_height", 0))
-                    pix = GdkPixbuf.Pixbuf.new_from_bytes(
-                        GLib.Bytes.new(res["rgba"]),
-                        GdkPixbuf.Colorspace.RGB, True, 8,
-                        fw, fh, fw * 4)
-                else:
-                    loader = GdkPixbuf.PixbufLoader.new_with_type("png")
-                    loader.write(res["png"])
-                    loader.close()
-                    pix = loader.get_pixbuf()
-                if self.dump:
-                    # diagnosis: the frame as received from the service
-                    pix.savev("/tmp/%s_frame.png" % APP, "png", [], [])
-                fb = res["bbox"]
-                fspp = (fb[2] - fb[0]) / max(1, pix.get_width())
-                key = self._job_keys.get(res["gen"])
-                used = self._job_depth.get(res["gen"])
-                if isinstance(res.get("max_depth"), int):
-                    self.max_depth = max(0, res["max_depth"])
-                if preview:
-                    # LOD preview while fat full tiles parse. The
-                    # sentinel key displays (non-None) yet never matches
-                    # a render key, so _covered() keeps re-rendering
-                    # until the real frame (same gen) replaces this.
-                    # Crucially UNBLOCK input: mouse handlers gate on
-                    # _pending, and a fat parse can run for minutes - the
-                    # user must be able to pan/zoom away (the service
-                    # skips the stale fat load when newer work queues).
-                    self.last_frame = (pix, fb, fspp, "preview")
-                    self._display()
-                    if res["gen"] == self._pending:
-                        self._clear_pending()
-                        self._preview_gen = res["gen"]
-                        self._preview_t0 = time.perf_counter()
-                        GLib.timeout_add(500, self._preview_tick,
-                                         res["gen"])
-                    self.rstatus.set_text("preview - loading tiles…")
-                    return
-                if res["gen"] == getattr(self, "_preview_gen", None):
-                    # the fat parse behind an input-unblocking preview
-                    # finished: close out its status line
-                    self._preview_gen = None
-                    self.rstatus.set_text("rendering done.")
-                if res.get("bg"):
-                    pending = getattr(self, "_margin_pending", None)
-                    if pending is not None and pending[0] == res["gen"]:
-                        self._margin_pending = None
-                        center = (pending[1], pending[2])
-                    else:
-                        center = ((fb[0] + fb[2]) / 2.0,
-                                  (fb[1] + fb[3]) / 2.0)
-                    # remember the retained margin so settles inside
-                    # it do not re-prefetch (renderd keeps its geometry
-                    # for full-reuse pans whether or not it is shown)
-                    self._margin_landed = (key, fspp, center[0],
-                                           center[1], self.cache)
-                    # kept for display either way: the base under a
-                    # pan's incoming strip (see _display)
-                    self._margin_frame = (pix, fb, fspp, key)
-                    if res.get("labels_truncated"):
-                        # §F2R-21: a margin whose label plan hit a
-                        # budget is not crop-safe - the same budgets
-                        # as a viewport mean a complete margin plan
-                        # implies complete viewport plans, and only
-                        # then does a crop show what a direct render
-                        # would. Keep it as the geometry base and for
-                        # renderd's tile reuse; pans render (fast path).
-                        self._margin_debug(
-                            "landed gen=%d: labels truncated - reuse "
-                            "only" % res["gen"])
-                        return
-                    self.last_frame = (pix, fb, fspp, key)
-                    self._display()
-                    self._margin_debug("landed gen=%d" % res["gen"])
-                    return  # silent margin upgrade
-                self.last_frame = (pix, fb, fspp, key)
-                self._display()
-                self._depth_used = used
-                self.dstatus.set_text(self._depth_label())
-                if True:
-                    mode, brief = perf_status(res, self._depth_note(used))
-                    # the first frame after a load also says how long the
-                    # load took (the frame's own ms is only its render)
-                    load, load_brief = self._load_note(res)
-                    mode, brief = load + mode, load_brief + brief
-                # Also keep a terminal performance log (only the settled
-                # frame prints; refining rounds would spam every ~0.4s).
-                # The same line now remains in the persistent lower bar.
-                if not res.get("refining"):
-                    b = self.view_bbox()
-                    print("%s  view %.1f x %.1f um"
-                          % (mode, (b[2] - b[0]) * self.dbu,
-                             (b[3] - b[1]) * self.dbu), flush=True)
-                    self._settle_after_frame()
-                self._set_status(self.view_bbox(), mode, brief)
-                # the cell highlight follows the view the frame shows
-                self._cell_hl_follow()
-        elif kind in CELL_QUERY_KINDS:
+        if kind in CELL_QUERY_KINDS:
             self._on_cell_result(res)
         elif kind == "snap":
             if res["seq"] == self._snap_seq \
@@ -4333,35 +4662,9 @@ class Viewer:
                 "clip saved: %s (%.2f MB, %d ms)"
                 % (res["path"], res["size_mb"], res["ms"]))
         elif kind == "error":
-            # an older generation's late error (a superseded render)
-            # must not clear the one now pending; an adapter failure
-            # carries no generation and must
-            if res.get("gen", -1) in (-1, self._pending):
-                self._clear_pending()
+            # an edit or request the view channel refused
+            self._clear_pending()
             self._set_live_status("error: %s" % res.get("msg"))
-        elif kind == "cancelled":
-            # the daemon's word that a generation stopped: nothing to
-            # show (the picture stays), only the pending state to drop
-            # if it was still waited for
-            if res.get("gen") == self._pending:
-                self._clear_pending()
-                self.rstatus.set_text("render cancelled")
-        elif kind == "dropped":
-            # a margin the scale's budget fit does not hold (renderd,
-            # reason=fit): nothing lands, the viewport stays as drawn and
-            # pans here render; _margin_pending keeps the in-flight guard
-            # until the next user render, as for a superseded margin
-            pending = getattr(self, "_margin_pending", None)
-            if pending is not None and pending[0] == res.get("gen"):
-                self._margin_debug("dropped gen=%d: %s" % (
-                    res["gen"], res.get("reason") or "?"))
-            # a foreground render dropped (unreachable today: a stale
-            # generation is never sent) must not leave the mouse waiting
-            # for a frame that never comes (review 2026-09-30)
-            if res.get("gen") == self._pending:
-                self._clear_pending()
-                self.rstatus.set_text("render dropped (%s)" % (
-                    res.get("reason") or "?"))
 
     def _load_note(self, res):
         """The first settled frame after a load: the time from the file's
@@ -4441,6 +4744,8 @@ class Viewer:
         if self.cache is None:
             return
         self._fit_after_worker_start = False
+        if self._ctl_navigate({"kind": "fit"}):
+            return
         bb = self._die_bbox()
         self.cx = (bb[0] + bb[2]) / 2
         self.cy = (bb[1] + bb[3]) / 2
@@ -4692,6 +4997,8 @@ class Viewer:
             self._set_cursor("progress" if self._pending is not None
                              else self._idle_cursor())
             if panned:
+                if self._ctl():
+                    self._ctl_snap_drag()
                 self.redraw()   # pan ended: render the final position
             elif was_drag and ev.button == 1:
                 # A stationary left click keeps its mode-specific action;
@@ -4723,6 +5030,16 @@ class Viewer:
             if max(bmax - x0, x0 - bmin) >= 5:
                 self._set_live_status("zoom band cancelled")
             self._display()
+            return True
+        w, h = self._viewport_size()
+        # the controller's band: fractions of the view from its top-left,
+        # the axes the gesture spanned, its direction (at most a view away)
+        start = [min(1.0, max(0.0, x0 / w)), min(1.0, max(0.0, y0 / h))]
+        end = [min(start[0] + 1.0, max(start[0] - 1.0, ev.x / w)),
+               min(start[1] + 1.0, max(start[1] - 1.0, ev.y / h))]
+        if self._ctl_navigate({"kind": "band", "start": start, "end": end,
+                               "axes": [dx >= 5, dy >= 5],
+                               "outward": not forward}):
             return True
         bbox = self.view_bbox()
         lx0 = bbox[0] + min(x0, ev.x) * self.spp
@@ -4781,7 +5098,7 @@ class Viewer:
         #local(global) number and waive status (user call
         2026-08-18)."""
         tip = None
-        if self._drc is not None and self._drc_hits:
+        if self._drc is not None:
             hit = self._drc_hit_at(ev.x, ev.y)
             if hit is not None:
                 ci, ei = hit
@@ -4837,6 +5154,10 @@ class Viewer:
         return True
 
     def _zoom_at(self, x, y, factor):
+        w, h = self._viewport_size()
+        if self._ctl_navigate({"kind": "zoom", "factor": factor, "anchor": [
+                min(1.0, max(0.0, x / w)), min(1.0, max(0.0, y / h))]}):
+            return
         bbox = self.view_bbox()
         px = bbox[0] + x * self.spp
         py = bbox[3] - y * self.spp
@@ -4847,6 +5168,9 @@ class Viewer:
         self.redraw()
 
     def _zoom_center(self, factor):
+        if self._ctl_navigate({"kind": "zoom", "factor": factor,
+                               "anchor": [0.5, 0.5]}):
+            return
         self.spp *= factor
         self.redraw()
 
@@ -4862,8 +5186,18 @@ class Viewer:
         (arrows: half; Shift+arrows: the fine tenth - user call
         2026-09-04, moved off Ctrl)."""
         width, height = self._viewport_size()
-        dx = self._snap_pan_px(width * frac) * self.spp
-        dy = self._snap_pan_px(height * frac) * self.spp
+        px = self._snap_pan_px(width * frac)
+        py = self._snap_pan_px(height * frac)
+        # the controller's pan takes the step as a fraction of the view
+        # (snap: the 16 px period - this one is on it already)
+        step = {"Left": (-px / width, 0.0), "Right": (px / width, 0.0),
+                "Up": (0.0, py / height), "Down": (0.0, -py / height)}
+        if direction in step and self._ctl_navigate({
+                "kind": "pan", "x": step[direction][0],
+                "y": step[direction][1], "snap": True}):
+            return
+        dx = px * self.spp
+        dy = py * self.spp
         if direction == "Left":
             self.cx -= dx
         elif direction == "Right":
@@ -4872,16 +5206,7 @@ class Viewer:
             self.cy += dy
         elif direction == "Down":
             self.cy -= dy
-        # §F2R-21: inside a landed margin the render is the label
-        # re-synthesis fast path (memcpy + labels), so skip the pan
-        # debounce - the geometry shows at once from the margin base
-        # and the labels follow as soon as renderd answers
-        base = self._margin_base()
-        bbox = self.view_bbox()
-        inside = base is not None and (
-            base[1][0] <= bbox[0] and base[1][1] <= bbox[1]
-            and base[1][2] >= bbox[2] and base[1][3] >= bbox[3])
-        self.redraw(immediate=inside)
+        self.redraw()
 
     # ---- keys ----------------------------------------------------------------
     def _command_key(self, ev):
@@ -4980,8 +5305,6 @@ class Viewer:
             self._depth_step(1)
         elif name == "a":
             self._toggle_abstract()
-        elif name == "v" and HAS_DENSITY_COVERAGE:
-            self._toggle_coverage()
         elif name == "v":
             self._toggle_density()
         elif name == "b":
@@ -5056,9 +5379,6 @@ class Viewer:
         if self.meta.get("bands") or self.meta.get("vfs"):
             lbl += " · detail: %s" % DETAIL_LEVELS[self.detail]
         if self.meta.get("vfs"):
-            if HAS_DENSITY_COVERAGE:
-                lbl += " · cov:%s" % (
-                    "on" if self.coverage_on else "off")
             # the page hairline policy in force: cull = thin shapes
             # may be omitted at wide views (plain layout default)
             lbl += " · thin:%s" % self._effective_thin()
@@ -5110,15 +5430,6 @@ class Viewer:
             self.abstract = False
             return
         self.abstract = not self.abstract
-        self._on_depth()
-
-    def _toggle_coverage(self):
-        # `v`: density-coverage fill at cut/wide views (VFS caches).
-        # Off = the cut just drops small features (they vanish) with
-        # no density stand-in - useful to see exactly what is real.
-        if not HAS_DENSITY_COVERAGE:
-            return
-        self.coverage_on = not self.coverage_on
         self._on_depth()
 
     def _toggle_density(self):
@@ -5557,6 +5868,11 @@ class Viewer:
         # A user/CLI target always wins over the deferred auto-fit used when a
         # new layout is attached to an already allocated window.
         self._fit_after_worker_start = False
+        if self._ctl_navigate({
+                "kind": "goto", "center_um": [float(x_um), float(y_um)],
+                "width_um": float(window_um)
+                if window_um and window_um > 0 else None}):
+            return
         self.cx = x_um / self.dbu
         self.cy = y_um / self.dbu
         if window_um and window_um > 0:
@@ -5599,15 +5915,19 @@ class Viewer:
             % db.checks[ci].name)
 
     def _esel_click(self, ev):
+        # Use the same transform as the displayed markers, including a
+        # frozen base while a new zoom frame is still being rendered.
+        bounds, spp = self._drc_display_view()
+        point = (bounds[0] + ev.x * spp, bounds[3] - ev.y * spp)
         if self._esel_start is None:
-            self._esel_start = self._cursor
+            self._esel_start = point
             self._set_live_status(
                 "error select: click the opposite corner "
                 "(Shift = add, Ctrl = toggle)")
             self._display()
             return
         a = self._esel_start
-        b = self._cursor
+        b = point
         self._esel_start = None
         # like ruler mode the tool STAYS ARMED for the next box
         # until Esc (or 'e') leaves it - user call 2026-08-15
@@ -5618,46 +5938,120 @@ class Viewer:
         self._esel_apply(a, b, mode)
 
     def _esel_apply(self, a, b, mode="replace"):
-        """Box done: the VISIBLE errors inside it - only what is
-        currently painted (the filtered list's page) can be picked
-        up. mode: replace (plain), add (Shift), toggle (Ctrl) -
-        same second-click modifiers as the grid (user call
-        2026-08-15)."""
+        """Select every exact bbox hit in the displayed scope - the whole
+        rule, cluster or delta group, not a list page - with no count
+        limit (feature/jobdeck-drc 2026-10-08; the service's select job).
+        mode: replace (plain), add (Shift), toggle (Ctrl) - the grid's
+        second-click modifiers (user call 2026-08-15)."""
         db, ci = self._drc, self._drc_sel_check()
         if db is None or ci is None:
             return
-        x0, x1 = sorted((a[0], b[0]))    # dbu, like the marks
+        if self.overlay_mode != 0:
+            self._set_live_status("show DRC markers before selecting errors")
+            return
+        x0, x1 = sorted((a[0], b[0]))
         y0, y1 = sorted((a[1], b[1]))
-        hits = []
-        for mci, ei, kind, pts in self._drc_page_marks:
-            if mci != ci:
-                continue
-            xs = [p[0] for p in pts]
-            ys = [p[1] for p in pts]
-            if min(xs) <= x1 and max(xs) >= x0 \
-                    and min(ys) <= y1 and max(ys) >= y0:
-                hits.append((ei, kind, pts))
+        view, _spp = self._drc_display_view()
+        bounds = (max(x0, view[0]), max(y0, view[1]),
+                  min(x1, view[2]), min(y1, view[3]))
+        membership = self._drc_active_members()
+        if self._drc_show_sel:
+            sel = self._drc_sel
+            membership = gtkservice.intersect(
+                sel[1] if sel is not None and sel[0] == ci
+                else gtkservice.DrcScope(db, ci, {"empty": True}),
+                membership)
+        self._drc_selection_submit(ci, tuple(v * self.dbu for v in bounds),
+                                   membership, mode)
+
+    def _drc_selection_cancel(self, close=False):
+        worker = getattr(self, "_drc_selection_worker", None)
+        if worker is not None:
+            if close:
+                worker.close()
+                self._drc_selection_worker = None
+            else:
+                worker.cancel()
+        self._drc_selection_key = None
+
+    def _drc_selection_submit(self, ci, bounds, membership, mode="replace"):
+        if (getattr(self, "_drc_review_job", None) is not None or
+                getattr(self, "_drc_team_write", None) is not None):
+            self._set_live_status("review update in progress; select after it finishes")
+            return
+        if mode != "replace" and getattr(self, "_drc_selection_key", None) is not None:
+            self._set_live_status("error selection is still being updated (Esc cancels)")
+            return
+        db = self._drc
+        if db is None or ci != self._drc_sel_check():
+            return
+        conflict_only = getattr(self, "_drc_conflict_only", False)
+        if conflict_only:
+            active = self._drc_active_members()
+            if active is None or not active:
+                self._set_live_status("Conflict only: no prepared matching errors to select.")
+                return
+            if membership is None:
+                membership = active
+            elif membership is not active:
+                membership = gtkservice.intersect(membership, active)
         sel = self._drc_sel
-        if mode == "replace" or sel is None or sel[0] != ci:
-            m = {ei: (kind, pts) for ei, kind, pts in hits}
-        else:
-            m = {ei: (kind, pts) for ei, kind, pts in sel[2]}
-            for ei, kind, pts in hits:
-                if mode == "toggle" and ei in m:
-                    del m[ei]
-                else:
-                    m[ei] = (kind, pts)
-        eis = sorted(m)
-        marks = [(ei,) + m[ei] for ei in eis]
-        self._drc_set_sel((ci, eis, marks, frozenset(eis))
-                          if eis else None)
+        previous = sel[1] if sel is not None and sel[0] == ci else None
+        worker = getattr(self, "_drc_selection_worker", None)
+        if worker is None:
+            worker = self._drc_selection_worker = gtkservice.SelectionWorker()
+        key = (object(), id(db), self._drc_scope_key(), self._drc_wfilter)
+        self._drc_selection_key = key
+        worker.submit(key, db, ci, bounds, membership=membership,
+                      waived=(None if conflict_only or self._drc_wfilter == "all" else
+                              self._drc_wfilter == "waived"),
+                      previous=previous, mode=mode)
+        self._set_live_status("error select: selecting… (Esc cancels)")
+
+    def _drc_selection_poll(self):
+        worker = getattr(self, "_drc_selection_worker", None)
+        reply = worker.poll() if worker is not None else None
+        if reply is None:
+            return
+        key, selected, error = reply
+        if key != getattr(self, "_drc_selection_key", None):
+            return
+        if (key[1:] != (id(self._drc), self._drc_scope_key(), self._drc_wfilter)):
+            self._drc_selection_cancel()
+            return
+        if isinstance(selected, gtkservice.SelectionProgress):
+            self._set_live_status("error select: %d / %d processed · %d matches (Esc cancels)"
+                                  % (selected.processed, selected.total, selected.count))
+            return
+        self._drc_selection_key = None
+        if error:
+            self._set_live_status("error selection failed: %s" % error)
+            return
+        ci = self._drc_sel_check()
+        self._drc_set_sel((ci, selected, (), selected) if selected else None)
         self._drc_focus = None
         self._drc_grid_fill(ci)
-        self._set_live_status(
-            "error select %s [%s]: %d selected - next box ready "
-            "(Shift add / Ctrl toggle, Esc exits)"
-            % (db.checks[ci].name, mode, len(eis)))
+        self._set_live_status("error select %s: %d selected"
+                              % (self._drc.checks[ci].name, len(selected)))
         self._display()
+
+    def _drc_selection_restore(self):
+        """Recheck a saved selection against the current scope and waive
+        filter in the service; until then it is not the active one."""
+        members = self._drc_active_members()
+        sel = self._drc_sel
+        if sel is None:
+            return
+        want = (None if getattr(self, "_drc_conflict_only", False)
+                or self._drc_wfilter == "all" else self._drc_wfilter == "waived")
+        if members is None and want is None:
+            return
+        # A saved status snapshot is not a valid active selection until
+        # rechecked. Keep its scope entry for later retries, but don't page
+        # or review stale IDs if the recheck is cancelled or fails.
+        self._drc_sel = None
+        self._drc_selection_submit(sel[0], None,
+                                   gtkservice.intersect(sel[1], members))
 
     def _build_menubar(self):
         """Top menu bar (user call 2026-08-22): the key-bound
@@ -5728,21 +6122,16 @@ class Viewer:
         check(m, "hierarchy frames\tf",
               lambda: self._set_frames(not self.frames_on),
               lambda: self.frames_on)
-        if not HAS_DENSITY_COVERAGE:
-            # the density under the cut (user 2026-10-05): the Rust
-            # renderer's density stack, on or off live (stable floe's `v`
-            # is its coverage overlay)
-            self._density_menu_item = check(
-                m, "density under the cut\tv", self._toggle_density,
-                lambda: self._density_key() is True)
-            self._density_menu_item.set_sensitive(False)
+        # the density under the cut (user 2026-10-05): the Rust
+        # renderer's density stack, on or off live
+        self._density_menu_item = check(
+            m, "density under the cut\tv", self._toggle_density,
+            lambda: self._density_key() is True)
+        self._density_menu_item.set_sensitive(False)
         self._abstract_menu_item = check(
             m, "abstract cells\ta", self._toggle_abstract,
             lambda: self.abstract)
         self._abstract_menu_item.set_sensitive(False)
-        if HAS_DENSITY_COVERAGE:
-            check(m, "density coverage\tv", self._toggle_coverage,
-                  lambda: self.coverage_on)
         # the page hairline policy (review 2026-09-11): a plain layout
         # may omit thin shapes at wide views for speed; the mask
         # policy keeps them (a jobdeck's default)
@@ -5798,6 +6187,7 @@ class Viewer:
         m = top("DRC")
         item(m, "open results .db…", self._drc_open_dialog)
         item(m, "load SVRF rules…", self._drc_rules_dialog)
+        item(m, "load clusters…", self._drc_clusters_dialog)
         sep(m)
         item(m, "next error\t.", lambda: self._drc_step(1))
         item(m, "previous error\t,", lambda: self._drc_step(-1))
@@ -5805,6 +6195,11 @@ class Viewer:
              self._drc_waive_key)
         item(m, "save waives as…", self._drc_waive_save_dialog)
         item(m, "load waives…", self._drc_waive_load_dialog)
+        item(m, "reviewers…", self._drc_team_dialog)
+        item(m, "review from previous run…", self._drc_migration_dialog)
+        item(m, "mark not for review", lambda: self._drc_not_required_key(True))
+        item(m, "clear not for review", lambda: self._drc_not_required_key(False))
+        item(m, "export review statistics…", self._drc_review_export_stats)
         sep(m)
         item(m, "note (add/edit)\tn", self._drc_note_key)
         item(m, "clear note of selection", self._drc_note_clear)
@@ -6034,17 +6429,16 @@ class Viewer:
             self._restore_keys()
 
     def _vfs_index_and_load(self, src, after=None):
-        """Build the VFS cache for `src` (floe-index vfs) with its log
-        in a modal dialog, then open it in place; `after(err)` runs
-        once the open settled (err None on success)."""
-        from .vfsclient import find_binary
+        """Build the VFS cache for `src` with its log in a modal dialog,
+        then open it in place; `after(err)` runs once the open settled
+        (err None on success): `floe2 index SRC`, the Rust command line,
+        decides the cache, its options and its locks."""
+        from .vfsclient import find_floe2
         try:
-            bin_ = find_binary()
+            argv = [find_floe2(), "index", src, "--jobs", "12"]
         except RuntimeError as exc:
             self._set_live_status("VFS indexing failed: %s" % exc)
             return
-        from . import cachepath
-        outdir = cachepath.vfs_cache_dir(src)
         cur = getattr(self, "cache", None)
         if cur is not None and not getattr(cur, "is_jobdeck", False) and \
                 os.path.abspath(getattr(cur, "src", "") or "") == \
@@ -6069,10 +6463,8 @@ class Viewer:
         # no occupancy summary, like `floe2 index` on a layout
         # (2026-09-16; a jobdeck load gets it through `floe2 index
         # deck.jb`, whose sources default to the summary)
-        self._index_modal("indexing layout…",
-                          [bin_, "vfs", src, outdir,
-                           "--jobs", "12", "--no-lod"],
-                          on_success, "VFS indexing")
+        self._index_modal("indexing layout…", argv, on_success,
+                          "VFS indexing")
 
     def _jobdeck_index_and_load(self, path, after=None, ids=None):
         """`<APP> index deck.jb [--level N,..]` (every source the deck's
@@ -6091,9 +6483,14 @@ class Viewer:
                     err[4:] if err.startswith("ERR ") else err)
 
         # a source that failed to index is a skipped placement: open
-        # the deck with the rest (the log stays up with the error)
-        argv = [sys.executable, "-B", "-m", APP, "index", path,
-                "--jobs", "12"]
+        # the deck with the rest (the log stays up with the error).
+        # The command line is the Rust `floe2` (rust/floe2)
+        from .vfsclient import find_floe2
+        try:
+            argv = [find_floe2(), "index", path, "--jobs", "12"]
+        except RuntimeError as exc:
+            self._set_live_status("jobdeck indexing failed: %s" % exc)
+            return
         if ids:
             argv += ["--level", ",".join(str(i) for i in ids)]
         self._index_modal("indexing jobdeck sources…", argv,
@@ -6168,7 +6565,13 @@ class Viewer:
             self._set_live_status("jobdeck colour mode: %s" % exc)
             self._restore_keys()
             return
-        self._apply_cache(cache)
+        # the view controller opens the new spec at this view, not at a fit
+        # it would draw first and then drop
+        self._ctl_open_view = view
+        try:
+            self._apply_cache(cache)
+        finally:
+            self._ctl_open_view = None
         self.cx, self.cy, self.spp = view
         self._fit_after_worker_start = False
         self._set_live_status("jobdeck %s view" % mode)
@@ -6246,12 +6649,31 @@ class Viewer:
         info.set_ellipsize(Pango.EllipsizeMode.START)
         top.pack_start(info, True, True, 2)
         win._info = info
+        review_info = Gtk.Label(label="V visited · X not for review · * note")
+        review_info.set_xalign(0.0)
+        review_info.set_line_wrap(True)
+        review_info.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        review_info.set_max_width_chars(40)
+        box.pack_start(review_info, False, False, 2)
+        win._review_info = review_info
+        export_stats = Gtk.Button(label="export review statistics…")
+        export_stats.connect("clicked", lambda *_: self._drc_review_export_stats())
+        box.pack_start(export_stats, False, False, 0)
+        conflict_info = Gtk.Label()
+        conflict_info.set_xalign(0)
+        conflict_info.set_line_wrap(True)
+        conflict_info.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        conflict_info.set_max_width_chars(40)
+        box.pack_start(conflict_info, False, False, 0)
+        win._conflict_info = conflict_info
         # top pane = rules list (left) | error-number grid (right);
         # bottom pane = per-error detail. Selecting a rule shows its
         # grid alone (one rule at a time = the accordion ask), and
         # the grid's own equal columns keep the numbers aligned
         # regardless of rule-title widths.
-        rstore = Gtk.ListStore(str, str, int)  # name, count, ci
+        # A rule with a cluster sidecar has selectable children. Parent
+        # rows retain the complete rule, including unclassified errors.
+        rstore = Gtk.TreeStore(str, str, int, object)  # name, count, ci, cluster
         rules = Gtk.TreeView(model=rstore)
         for j, expand in ((0, True), (1, False)):
             cell = Gtk.CellRendererText()
@@ -6332,6 +6754,71 @@ class Viewer:
         pbar.pack_start(pnext, False, False, 0)
         gbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
                        spacing=2)
+        # Keep the group browser bounded as well as the 1,000-error grid.
+        # A tiny step may produce one distinct group per error.
+        delta_controls = Gtk.FlowBox()
+        delta_controls.set_selection_mode(Gtk.SelectionMode.NONE)
+        delta_controls.set_min_children_per_line(1)
+        delta_controls.set_max_children_per_line(3)
+        delta_mode = Gtk.ComboBoxText()
+        for mid, label in (("absolute", "Δ absolute"),
+                           ("percent", "Δ ratio (%)"), ("off", "no grouping")):
+            delta_mode.append(mid, label)
+        delta_mode.set_active_id(self._drc_delta_mode)
+        delta_mode.set_tooltip_text(
+            "|CD − bound|, or |CD − bound| / |bound| × 100; "
+            "group intervals start at zero")
+        delta_mode.connect("changed", self._on_drc_delta_mode)
+        delta_controls.add(delta_mode)
+        delta_step = Gtk.Entry()
+        delta_step.set_width_chars(9)
+        delta_step.set_text(self._drc_delta_step_text)
+        delta_step.set_tooltip_text(
+            "Automatic interval targets 10 groups from this rule's full delta range. "
+            "Enter a positive value (up to 5 decimal places) to override for this rule, "
+            "or auto / an empty value to reset. Absolute: um (area: um²); "
+            "ratio: percentage points. Enter to apply.")
+        delta_step.connect("activate", self._on_drc_delta_step)
+        delta_controls.add(delta_step)
+        delta_apply = Gtk.Button(label="set step")
+        delta_apply.connect("clicked", self._on_drc_delta_step)
+        delta_controls.add(delta_apply)
+        gbox.pack_start(delta_controls, False, False, 0)
+        delta_store = Gtk.ListStore(str, str, object)
+        delta_tree = Gtk.TreeView(model=delta_store)
+        for j in (0, 1):
+            cell = Gtk.CellRendererText()
+            if j == 0:
+                cell.set_property("ellipsize", Pango.EllipsizeMode.END)
+            col = Gtk.TreeViewColumn("", cell, text=j)
+            col.set_expand(j == 0)
+            delta_tree.append_column(col)
+        delta_tree.set_headers_visible(False)
+        delta_tree.set_enable_search(False)
+        delta_tree.set_tooltip_column(0)
+        delta_tree.get_selection().connect("changed", self._on_drc_delta_sel)
+        delta_sc = Gtk.ScrolledWindow()
+        delta_sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        delta_sc.set_size_request(-1, 86)
+        delta_sc.add(delta_tree)
+        _remote_x_scroll_repaint(delta_sc)
+        gbox.pack_start(delta_sc, False, False, 0)
+        delta_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        delta_label = Gtk.Label(label="select a rule for CD groups")
+        delta_label.set_ellipsize(Pango.EllipsizeMode.END)
+        delta_prev, delta_next = Gtk.Button(label="◀"), Gtk.Button(label="▶")
+        for button, direction in ((delta_prev, -1), (delta_next, 1)):
+            button.set_sensitive(False)
+            button.connect("clicked", lambda _w, d=direction:
+                           self._drc_delta_page_step(d))
+        delta_bar.pack_start(delta_prev, False, False, 0)
+        delta_bar.pack_start(delta_label, True, True, 0)
+        delta_bar.pack_start(delta_next, False, False, 0)
+        gbox.pack_start(delta_bar, False, False, 0)
+        win._delta_mode, win._delta_step = delta_mode, delta_step
+        win._delta_store, win._delta_tree = delta_store, delta_tree
+        win._delta_label = delta_label
+        win._delta_prev, win._delta_next = delta_prev, delta_next
         gbox.pack_start(pbar, False, False, 0)
         gbox.pack_start(gsc, True, True, 0)
         hsplit = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
@@ -6411,6 +6898,12 @@ class Viewer:
         selv.connect("toggled", self._on_drc_selview)
         nav.add(selv)
         win._selv = selv
+        conflict = Gtk.CheckButton(label="Conflict only")
+        conflict.set_tooltip_text("Global judgement conflicts among visited reviewers in the last Reviewers snapshot. "
+            "Intersects the current cluster, CD group and waive filter; rule/group counts remain unfiltered.")
+        conflict.connect("toggled", self._on_drc_conflict)
+        nav.add(conflict)
+        win._conflict = conflict
         tf = Gtk.ComboBoxText()
         tf.append("all", "all types")
         tf.set_active_id("all")
@@ -6438,7 +6931,7 @@ class Viewer:
         # ScrolledWindow subtree - retina clip note) and their
         # scrollers share the layer pane's scrollbar look; the detail
         # text and the controls keep the theme (user call 2026-09-08)
-        for tv, sc in ((rules, rsc), (grid, gsc)):
+        for tv, sc in ((rules, rsc), (grid, gsc), (delta_tree, delta_sc)):
             tv.get_style_context().add_class("floe-drc-list")
             sc.get_style_context().add_class("floe-layers-frame")
         self._drcwin = win
@@ -6943,7 +7436,6 @@ class Viewer:
         self._margin_frame = None
         self._frame_anchor = None
         self._clear_pending()
-        self._job_keys.clear()
         self._cell_hl = None
         self._cell_hl_key = None
         root = self._view_root
@@ -7149,18 +7641,43 @@ class Viewer:
         # AND canvas size (cx/cy/spp alone served a stale list
         # after a window resize)
         bb = self.view_bbox()
-        key = (bb, id(self._drc), ci, self._drc_wfilter)
+        membership = self._drc_active_members()
+        key = (bb, id(self._drc), ci, self._drc_wfilter,
+               None if membership is None else tuple(sorted(membership.spec.items())))
         cached = self._drc_hl_res
         if cached is not None and cached[0] == key:
             return cached[1]
+        conflict_only = getattr(self, "_drc_conflict_only", False)
+        if conflict_only and (membership is None or not membership):
+            self._drc_hl_res = (key, [])
+            return []
         if ci is None:
             self._drc_hl_res = (key, [])
             self._set_live_status(
                 "DRC filter: select a rule in the browser first")
             return []
         k = self.dbu
+        if getattr(self._drc, "packed", False) and \
+                len(self._drc.checks[ci].errors) >= DRC_LARGE_RULE:
+            # a large rule's capped query runs as a service job: the
+            # GTK thread never waits for its scan
+            if key != getattr(self, "_drc_hl_key", None):
+                self._drc_hl_key = key
+                self._drc_hl_res = None
+                worker = getattr(self, "_drc_query_worker", None)
+                if worker is None:
+                    worker = self._drc_query_worker = \
+                        gtkservice.ExactQueryWorker()
+                worker.submit(key, self._drc, ci, tuple(v * k for v in bb),
+                              DRC_HL_CAP, membership,
+                              None if conflict_only or self._drc_wfilter == "all"
+                              else self._drc_wfilter == "waived")
+                self._set_live_status("DRC filter: querying errors in view…")
+            return []
         kw = {}
-        if self._drc_wfilter != "all" \
+        if membership is not None:
+            kw["members"] = {ci: membership}
+        if not conflict_only and self._drc_wfilter != "all" \
                 and hasattr(self._drc, "get_status"):
             # the waive filter runs INSIDE the query, before the
             # cap: a post-filter over a capped result dropped every
@@ -7186,6 +7703,31 @@ class Viewer:
         if self._drc_hl and self._drc_grid_ci == ci:
             GLib.idle_add(self._drc_grid_fill, ci)
         return lst
+
+    def _drc_query_poll(self):
+        worker = getattr(self, "_drc_query_worker", None)
+        result = worker.poll() if worker is not None else None
+        if result is None:
+            return
+        key, values, error = result
+        if key != getattr(self, "_drc_hl_key", None):
+            return
+        # Only an in-flight query owns this key. Notes/toggle paths can
+        # invalidate the completed result without changing the viewport.
+        self._drc_hl_key = None
+        # Coordinates are converted only for the bounded returned page.
+        k = self.dbu
+        items = [(ci, ei, kind, [(x / k, y / k) for x, y in points])
+                 for ci, ei, kind, points in (values or ())]
+        self._drc_hl_res = (key, items)
+        if error:
+            self._set_live_status("DRC in-view query failed: %s" % error)
+        elif self._drc_hl:
+            self._set_live_status("DRC filter: %d in view%s" % (
+                len(items), " (capped)" if len(items) >= DRC_HL_CAP else ""))
+        if self._drc_hl and self._drc_open is not None:
+            self._drc_grid_fill(self._drc_open)
+            self._display()
 
     def _drc_open_dialog(self):
         dlg = Gtk.FileChooserDialog(title="open DRC results (.db)",
@@ -7217,8 +7759,17 @@ class Viewer:
         a reference cycle, so the GC would release it at some later time,
         and a re-pack of it would be refused meanwhile)."""
         old = self._drc
+        for window in (getattr(self, "_drc_team", None),
+                       getattr(self, "_drc_migration", None)):
+            if window is not None:
+                window.window.destroy()
+        self._drc_conflict_reset(drop_source=True)
         self.drc_mark = None
         self._drc = None
+        self._drc_marker_invalidate(drop_worker=True)
+        self._drc_delta_reset(drop_worker=True)
+        self._drc_clusters = None
+        self._drc_cluster = None
         self._drc_rmeta = None
         self._drc_rmatch = (0, 0)
         self._drc_tfilter = "all"
@@ -7250,6 +7801,7 @@ class Viewer:
             w._gstore.clear()
             w._detail.set_text("")
             w._info.set_text("no results database loaded")
+            self._drc_review_stats_refresh()
             self._drc_types_rebuild()   # empty+disable type combo
         close = getattr(old, "close", None)
         if close is not None:
@@ -7263,25 +7815,25 @@ class Viewer:
         ASCII .db, floe LOADS only its pack. When no usable
         pack exists (missing, stale or an old layout/v1 sidecar) it
         ASKS before building one (user call 2026-08-28)."""
-        from . import drc as drc_mod
-        from . import cachepath
-        # another run packs this db (floe/indexlock.py): say who - no
-        # open of a pack being replaced, no second build beside it
-        busy = indexlock.state(indexlock.PACK, cachepath.pack_path(path),
-                               users=False).opening_refusal()
+        # another run packs this db (floe_vfs::lock): say who - no open
+        # of a pack being replaced, no second build beside it (the
+        # decisions and the review are floe2 gtk-service's, P2b)
+        try:
+            busy = gtkservice.drc_busy(path)
+            side = None if busy else gtkservice.drc_find(path)
+        except gtkservice.ServiceError as exc:
+            self._set_live_status("DRC: %s" % exc)
+            return
         if busy is not None:
             self._set_live_status(str(busy))
             return
-        side = cachepath.find_pack(path)
         if side is not None:
             try:
-                db = drc_mod.IcePack(side, src_path=path,
-                                     verify_src=True)
-            except indexlock.Busy as busy:
-                self._set_live_status(str(busy))
-                return
-            except (ValueError, OSError):
-                pass
+                db = gtkservice.drc_open_pack(side, source=path)
+            except gtkservice.ServiceError as exc:
+                if exc.kind == "busy":
+                    self._set_live_status(str(exc))
+                    return
             else:
                 self.load_drc(path, db=db)  # adopt the fresh pack
                 return
@@ -7297,8 +7849,6 @@ class Viewer:
     def _drc_pack_and_load(self, path):
         """Run `floe-index drc <db>` with its log in a MODAL
         dialog, then load the pack."""
-        from . import drc as drc_mod
-        from . import cachepath
         from .vfsclient import find_binary
         try:
             bin_ = find_binary()
@@ -7306,8 +7856,11 @@ class Viewer:
             self._set_live_status("DRC indexing failed: %s" % exc)
             return
         held = getattr(self._drc, "path", None)
-        if held and indexlock.key(indexlock.PACK, held) == indexlock.key(
-                indexlock.PACK, cachepath.pack_path(path)):
+        try:
+            side = gtkservice.drc_find(path)
+        except gtkservice.ServiceError:
+            side = None
+        if held and side and os.path.realpath(held) == os.path.realpath(side):
             # this review holds the pack being re-packed (its .db ran
             # again): let go first - its own reader's lock would refuse
             # the re-pack (floe/indexlock.py)
@@ -7316,7 +7869,7 @@ class Viewer:
 
         def on_success():
             self.load_drc(path)
-            if not isinstance(self._drc, drc_mod.IcePack):
+            if not getattr(self._drc, "packed", False):
                 # the indexer that just ran wrote a layout the reader
                 # refuses: it is an OUTDATED binary
                 self._set_live_status(
@@ -7416,7 +7969,7 @@ class Viewer:
                     "%s cancelled" % fail if state["cancelled"]
                     # refused: another run indexes it, or someone has it
                     # open - the [lock] line says who
-                    else state["lock"] if (rc == indexlock.BUSY_EXIT
+                    else state["lock"] if (rc == BUSY_EXIT
                                            and state["lock"])
                     else "%s failed (rc %d)" % (fail, rc))
                 if not state["cancelled"] and on_failure is not None:
@@ -7442,20 +7995,29 @@ class Viewer:
         browser. `db` = an already-opened backend to adopt (the
         dialog preflight verifies the pack by opening it - opening
         twice pays the block-table bbox scan twice)."""
-        from . import drc as drc_mod
         if db is None:
             try:
-                db = drc_mod.load_db(path)
+                db = gtkservice.drc_load(path)
             except Exception as exc:
-                # a pack another run re-packs says who (floe/indexlock.py)
-                msg = (str(exc) if isinstance(exc, indexlock.Busy)
+                # a pack another run re-packs says who (floe_vfs::lock)
+                msg = (str(exc) if getattr(exc, "kind", None) == "busy"
                        else "DRC load failed: %s" % exc)
                 if self._drcwin is not None:
                     self._drcwin._info.set_text(msg)
                 self._set_live_status(msg)
                 return False
         old = self._drc
+        for window in (getattr(self, "_drc_team", None),
+                       getattr(self, "_drc_migration", None)):
+            if window is not None and window.db is not db:
+                window.window.destroy()
+        self._drc_conflict_reset(drop_source=True)
         self._drc = db
+        self._drc_marker_invalidate(drop_worker=True)
+        self._drc_clusters = None
+        self._drc_cluster = None
+        self._drc_open = None
+        self._drc_delta_reset(drop_worker=True)
         # the embedded browser needs elbow room: widen the left
         # pane once a db is loaded (user can still drag it back)
         if self._lpaned.get_position() < 420:
@@ -7475,6 +8037,7 @@ class Viewer:
         self._esel_start = None
         self._drc_tfilter = "all"   # new db = new type census
         self._drc_rules_auto(path)
+        cluster_error = self._drc_clusters_auto(path)
         self._drc_types_rebuild()   # no-sidecar case: combo empties
         if self._drcwin is not None:
             self._drc_fill()
@@ -7488,9 +8051,9 @@ class Viewer:
                 self._drcwin._rules.get_selection().unselect_all()
             finally:
                 self._drc_rules_busy = False
-        self._set_live_status(
-            "DRC %s: %d checks, %d errors (n/p = step)"
-            % (os.path.basename(path), len(db.checks), db.total))
+        self._set_live_status(cluster_error or
+            ("DRC %s: %d checks, %d errors (. / , = step)"
+             % (os.path.basename(path), len(db.checks), db.total)))
         if old is not None and old is not db:
             # the db it replaces lets go of its pack now, not at some GC
             # (floe/indexlock.py: its reader's lock goes with it)
@@ -7501,6 +8064,58 @@ class Viewer:
                 except Exception:
                     pass
         return True
+
+    def _drc_clusters_auto(self, db_path):
+        """A visible <results.db>.clusters file also follows a direct pack
+        (the service finds it by the database's name)."""
+        try:
+            self._drc_clusters = self._drc.load_clusters()
+        except ValueError as exc:
+            msg = "DRC clusters load failed: %s" % exc
+            sys.stderr.write("[floe] %s\n" % msg)
+            return msg
+        return None
+
+    def _drc_clusters_dialog(self):
+        if self._drc is None:
+            self._set_live_status("open a DRC .db first")
+            return
+        dlg = Gtk.FileChooserDialog(title="load DRC clusters",
+                                    parent=self.window,
+                                    action=Gtk.FileChooserAction.OPEN)
+        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                        "Open", Gtk.ResponseType.OK)
+        self._only_close_button(dlg)
+        self._center_on_parent(dlg)
+        dlg.set_current_folder(os.path.dirname(os.path.abspath(self._drc.path)))
+        for name, pattern in (("DRC clusters (*.clusters)", "*.clusters"),
+                              ("all files", "*")):
+            ff = Gtk.FileFilter()
+            ff.set_name(name)
+            ff.add_pattern(pattern)
+            dlg.add_filter(ff)
+        path = (dlg.get_filename()
+                if dlg.run() == Gtk.ResponseType.OK else None)
+        dlg.destroy()
+        self.window.present()
+        if not path:
+            return
+        try:
+            data = self._drc.load_clusters(path)
+        except ValueError as exc:
+            self._set_live_status("DRC clusters load failed: %s" % exc)
+            return
+        keep = self._drc_open
+        self._drc_clusters = data
+        self._drc_cluster = None
+        self._drc_sel = None
+        self._drc_sels = {}
+        self._drc_hl_res = None
+        self._drc_fill()
+        self._drc_select_row(keep)
+        self._display()
+        self._set_live_status("DRC clusters loaded: %d rules (%s)"
+                              % (len(data.rules), os.path.basename(path)))
 
     def _drc_rules_auto(self, db_path):
         """Auto-pick the `floe-index svrf` rule-metadata sidecar: the
@@ -7533,14 +8148,13 @@ class Viewer:
         """Attach a <deck>.rules.json metadata sidecar to the open
         db; the detail pane then shows constraint / measured /
         source layers per error."""
-        from . import svrf
         db = self._drc
         if db is None:
             if not silent:
                 self._set_live_status("open a DRC .db first")
             return False
         try:
-            data = svrf.load_rules(path)
+            data = gtkservice.svrf_rules(path)
         except (OSError, ValueError) as exc:
             if not silent:
                 self._set_live_status(
@@ -7550,6 +8164,14 @@ class Viewer:
         matched = sum(1 for c in db.checks if c.name in meta)
         self._drc_rmeta = data
         self._drc_rmatch = (matched, len(db.checks))
+        # A replaced deck may define different bounds under the same name.
+        # Preserve parent/file-cluster picks, discard obsolete delta scopes.
+        self._drc_sels = {key: value for key, value in self._drc_sels.items()
+                          if len(key) == 2}
+        self._drc_delta_reset(drop_worker=True)
+        self._drc_delta_sync()
+        if self._drc_open is not None:
+            self._drc_delta_scope_refresh()
         self._drc_types_rebuild()
         self._drc_info_refresh()
         if not silent or matched:
@@ -7583,7 +8205,27 @@ class Viewer:
         else:
             dlg.destroy()
 
-    def _drc_fill(self):
+    def _drc_select_row(self, ci, cluster=None):
+        """Reselect a rule or a specific cluster after a model rebuild."""
+        win = self._drcwin
+        if ci is None or win is None:
+            return False
+        for row in win._rstore:
+            if row[2] != ci:
+                continue
+            target = row if cluster is None else next(
+                (child for child in row.iterchildren()
+                 if child[3] is cluster), None)
+            if target is None:
+                return False
+            if cluster is not None:
+                win._rules.expand_row(row.path, False)
+            win._rules.set_cursor(target.path, None, False)
+            win._rules.scroll_to_cell(target.path, None, False, 0.0, 0.0)
+            return True
+        return False
+
+    def _drc_fill(self, preserve=False):
         """Rules list: NAME + total/waived counts (user call
         2026-08-18); under a waive filter rules with no matching
         errors are hidden (2026-08-14). No waived state exists in
@@ -7591,16 +8233,24 @@ class Viewer:
         Calibre's notation is known."""
         win, db = self._drcwin, self._drc
         rstore = win._rstore
+        keep = (self._drc_open, self._drc_cluster)
+        if self._drc_open is not None and self._drc_sel is not None:
+            self._drc_sels[self._drc_scope_key()] = self._drc_sel
+        expanded = {row[2] for row in rstore
+                    if win._rules.row_expanded(row.path)}
         _t0 = time.perf_counter()
         self._drc_rules_busy = True
         win._rules.set_model(None)   # detach: clear/append without
         rstore.clear()               # per-row view+selection work
         win._gstore.clear()
         self._drc_open = None
+        self._drc_cluster = None
+        self._drc_sel = None
         self._drc_grid_ci = None
         self._drc_grid_rows = 0
         self._drc_grid_map = []
         self._drc_grid_base = None
+        self._drc_page_marks = []
         self._drc_cell = None
         self._drc_page = 0
         _t1 = time.perf_counter()
@@ -7625,11 +8275,43 @@ class Viewer:
             # both are O(1) ([wcount] table - the perf contract)
             wv = (db.status_counts(ci)[0]
                   if hasattr(db, "status_counts") else 0)
-            rstore.append([c.name,
-                           "%d/%d" % (len(c.errors), wv), ci])
+            parent = rstore.append(None, [c.name,
+                           "%d/%d" % (len(c.errors), wv), ci, None])
+            clusters = (self._drc_clusters.rules.get(ci, ())
+                        if self._drc_clusters is not None else ())
+            if clusters:
+                self._drc_clusters.prepare_counts(ci)
+            for cluster in clusters:
+                cw, ct = cluster.status_counts()
+                matching = (ct if self._drc_wfilter == "all" else
+                            cw if self._drc_wfilter == "waived" else ct - cw)
+                if matching or self._drc_wfilter == "all":
+                    rstore.append(parent, [cluster.name, "%d/%d" % (ct, cw),
+                                           ci, cluster])
             shown += 1
         win._rules.set_model(rstore)
+        win._rules.get_selection().unselect_all()
+        for row in rstore:
+            if row[2] in expanded:
+                win._rules.expand_row(row.path, False)
         self._drc_rules_busy = False
+        if preserve:
+            self._drc_select_row(*keep)
+        if self._drc_open is None:
+            self._drc_marker_invalidate()
+            self._drc_delta_reset()
+            self._drc_focus = None
+            self._drc_pos = -1
+            self.drc_mark = None
+            self._drc_hl_res = None
+            for ruler in self._drc_ruler:
+                if ruler in self.rulers:
+                    self.rulers.remove(ruler)
+            self._drc_ruler = []
+            win._detail.set_text("")
+            win._plabel.set_text("")
+            win._pprev.set_sensitive(False)
+            win._pnext.set_sensitive(False)
         if _DRC_PROF:
             sys.stderr.write(
                 "[drcprof] rules_fill rules=%d shown=%d clear=%.1f "
@@ -7645,15 +8327,31 @@ class Viewer:
         win, db = self._drcwin, self._drc
         if win is None or db is None:
             return
-        backend = ("pack v4" if isinstance(db, drc_mod.IcePack)
+        backend = ("pack v4" if getattr(db, "packed", False)
                    else "ASCII - NO INDEX")
         rules = ""
         if self._drc_rmeta is not None:
             rules = " · svrf %d/%d" % self._drc_rmatch
+        if self._drc_clusters is not None:
+            rules += " · clusters %d rules" % len(self._drc_clusters.rules)
+        busy = getattr(self, "_drc_marker_busy", False)
+        if busy:
+            rules += " · markers…"
+        if getattr(self, "_drc_marker_result", None) is not None:
+            markers = self._drc_marker_result[1]
+            count, shown = markers.visible_count, markers.occupied_count
+            if busy and markers.total_count:
+                rules += " %d / %d processed" % (
+                    markers.processed_count, markers.total_count)
+            rules += " · %d errors / %d markers in view" % (
+                count, shown)
+            if busy:
+                rules += " (partial)"
         win._info.set_text(
             "%s [%s] — cell %s · %d/%d rules · %d errors%s"
             % (os.path.basename(db.path), backend, db.cell,
                self._drc_shown, len(db.checks), db.total, rules))
+        self._drc_review_stats_refresh()
 
     def _drc_types_rebuild(self):
         """Classify every rule by its SVRF measurement metrics
@@ -7706,14 +8404,7 @@ class Viewer:
         self._drc_tfilter = tid
         # per-rule selections stay valid (the filter only hides
         # RULES); the open rule may vanish from the list, though
-        keep = self._drc_open
-        self._drc_fill()
-        if keep is not None:
-            for r in self._drcwin._rstore:
-                if r[2] == keep:
-                    self._drcwin._rules.set_cursor(r.path, None,
-                                                   False)
-                    break
+        self._drc_fill(preserve=True)
         self._display()
 
     def _drc_wf_count(self, db, ci):
@@ -7742,11 +8433,9 @@ class Viewer:
             return
         if _DRC_PROF:
             import platform
-            import numpy
             sys.stderr.write(
-                "[drcprof] == filter -> %s | py %s %s numpy %s\n"
-                % (wid, sys.version.split()[0], platform.machine(),
-                   numpy.__version__))
+                "[drcprof] == filter -> %s | py %s %s\n"
+                % (wid, sys.version.split()[0], platform.machine()))
         self._drc_wfilter = wid
         self._drc_hl_res = None
         # a waive-filter switch RESETS the selections (user call
@@ -7754,41 +8443,313 @@ class Viewer:
         self._drc_sel = None
         self._drc_sels = {}
         self._drc_focus = None
-        keep = self._drc_open
         with _dprof("wfilter: rules refill"):
-            self._drc_fill()
-        with _dprof("wfilter: reselect rule"):
-            if keep is not None:
-                for r in self._drcwin._rstore:
-                    if r[2] == keep:
-                        self._drcwin._rules.set_cursor(
-                            r.path, None, False)
-                        break
+            self._drc_fill(preserve=True)
         with _dprof("wfilter: display"):
             self._display()
 
     def _drc_set_sel(self, selobj):
-        """Set the open rule's selection and keep the per-rule
-        store in sync (None clears the open rule's entry)."""
+        """Keep selections separate for each rule/cluster scope."""
+        self._drc_selection_cancel()
         self._drc_sel = selobj
+        self._drc_marker_invalidate()
+        key = self._drc_scope_key()
         if selobj is not None:
-            self._drc_sels[selobj[0]] = selobj
+            self._drc_sels[key] = selobj
         elif self._drc_open is not None:
-            self._drc_sels.pop(self._drc_open, None)
+            self._drc_sels.pop(key, None)
+
+    def _drc_active_members(self):
+        if getattr(self, "_drc_conflict_only", False):
+            return self._drc_conflict_sync()
+        return self._drc_base_members()
+
+    def _drc_scope_key(self):
+        key = (self._drc_open, self._drc_cluster)
+        group = getattr(self, "_drc_delta_group", None)
+        if group is not None:
+            key += (id(self._drc_rmeta), self._drc_delta_mode,
+                    self._drc_delta_step, group.key)
+        if getattr(self, "_drc_conflict_only", False):
+            key += ("conflict", id(getattr(self, "_drc_conflict_source", None)),
+                    getattr(self, "_drc_conflict_revision", 0), self._drc_wfilter)
+        return key
+
+    def _drc_delta_write_step(self, step):
+        text = "auto" if step is None else format_ticks(step)
+        self._drc_delta_step_text = text
+        win = self._drcwin
+        if win is not None and hasattr(win, "_delta_step"):
+            win._delta_step.set_text(text)
+
+    def _drc_delta_reset(self, drop_worker=False):
+        worker = getattr(self, "_drc_delta_worker", None)
+        if worker is not None:
+            if drop_worker:
+                worker.close()
+                self._drc_delta_worker = None
+            else:
+                worker.cancel()
+        if drop_worker:
+            self._drc_delta_steps = {}
+            self._drc_delta_auto_steps = {}
+            self._drc_delta_step_scope = None
+            self._drc_delta_step = None
+            self._drc_delta_write_step(None)
+        self._drc_delta_key = None
+        self._drc_delta_groups = self._drc_delta_group = None
+        self._drc_delta_busy = False
+        self._drc_delta_restore = None
+        self._drc_delta_progress = None
+        self._drc_delta_error = None
+        self._drc_delta_page = 0
+        self._drc_delta_refresh()
+
+    def _drc_delta_sync(self, force=False):
+        """Request grouping once per rule/cluster, basis and interval."""
+        db, ci = self._drc, self._drc_open
+        mode = getattr(self, "_drc_delta_mode", "absolute")
+        meta = self._drc_rmeta
+        cons = ((meta.get("checks", {}).get(db.checks[ci].name, {})
+                 .get("constraints") or [])
+                if db is not None and ci is not None and meta else [])
+        setting = (ci, mode)
+        requested_step = self._drc_delta_steps.get(setting)
+        self._drc_delta_step = (requested_step if requested_step is not None
+                                else self._drc_delta_auto_steps.get(setting))
+        scope = (id(db), id(meta), ci, mode)
+        if scope != self._drc_delta_step_scope:
+            self._drc_delta_step_scope = scope
+            self._drc_delta_write_step(self._drc_delta_step)
+        key = (id(db), ci, id(meta), self._drc_cluster, mode,
+               requested_step,
+               getattr(self, "_drc_delta_revision", 0))
+        if not force and key == getattr(self, "_drc_delta_key", None):
+            self._drc_delta_refresh()
+            return False
+        self._drc_delta_key = key
+        self._drc_delta_restore = None
+        self._drc_delta_progress = None
+        self._drc_delta_groups = self._drc_delta_group = None
+        self._drc_delta_page = 0
+        self._drc_delta_error = None
+        self._drc_delta_busy = bool(ci is not None and cons and mode != "off")
+        worker = getattr(self, "_drc_delta_worker", None)
+        if self._drc_delta_busy:
+            from .gtkservice import DeltaWorker
+            if worker is None:
+                worker = self._drc_delta_worker = DeltaWorker()
+            worker.submit(key, db, ci, cons, requested_step, mode,
+                          self._drc_cluster)
+        elif worker is not None:
+            worker.cancel()
+        self._drc_delta_refresh()
+        return True
+
+    def _drc_delta_refresh(self):
+        """Only 50 group adapters and GTK rows, regardless of group count."""
+        win = self._drcwin
+        if win is None or not hasattr(win, "_delta_store"):
+            return
+        groups = getattr(self, "_drc_delta_groups", None)
+        total = len(groups) if groups is not None else 0
+        pages = max(1, (total + 49) // 50)
+        page = max(0, min(getattr(self, "_drc_delta_page", 0), pages - 1))
+        self._drc_delta_page = page
+        want = None if self._drc_wfilter == "all" else self._drc_wfilter == "waived"
+        count = 0
+        if self._drc is not None and self._drc_open is not None:
+            count = (self._drc_cluster.count(want) if self._drc_cluster is not None
+                     else self._drc_wf_count(self._drc, self._drc_open))
+        self._drc_delta_ui_busy = True
+        try:
+            store = win._delta_store
+            store.clear()
+            selected = store.append(["All errors", str(count), None])
+            active = getattr(self, "_drc_delta_group", None)
+            if groups is not None:
+                for group in groups.page(page * 50, 50, want):
+                    it = store.append([group.name, str(group.count(want)), group])
+                    if active is not None and active.key == group.key:
+                        selected = it
+            # Paging the group directory does not change the selected scope.
+            win._delta_tree.get_selection().unselect_all()
+            if active is None or store.get_value(selected, 2) is not None:
+                win._delta_tree.get_selection().select_iter(selected)
+        finally:
+            self._drc_delta_ui_busy = False
+        message = getattr(self, "_drc_delta_error", None)
+        if not message:
+            if getattr(self, "_drc_delta_busy", False):
+                progress = getattr(getattr(self, "_drc_delta_worker", None), "progress", None)
+                message = progress if isinstance(progress, str) and progress else "measuring CD / grouping…"
+            elif getattr(self, "_drc_delta_mode", "absolute") == "off":
+                message = "grouping off"
+            elif self._drc_open is None:
+                message = "select a rule for CD groups"
+            elif groups is None:
+                message = "load matching SVRF metadata for CD groups"
+            else:
+                message = "groups %d / %d · %d groups" % (page + 1, pages, total)
+                if getattr(groups, "auto_step", False):
+                    message += " · auto step %s" % format_ticks(groups.step_ticks)
+                estimated = getattr(groups, "estimated_total", 0)
+                if estimated:
+                    message += " · %d estimated (all statuses)" % estimated
+        win._delta_label.set_text(message)
+        win._delta_label.set_tooltip_text(message)
+        win._delta_prev.set_sensitive(page > 0)
+        win._delta_next.set_sensitive(page + 1 < pages)
+        win._delta_step.set_sensitive(self._drc_open is not None and
+                                     getattr(self, "_drc_delta_mode", "absolute") != "off")
+
+    def _drc_delta_page_step(self, delta):
+        self._drc_delta_page = max(0, self._drc_delta_page + delta)
+        self._drc_delta_refresh()
+
+    def _drc_delta_poll(self):
+        worker = getattr(self, "_drc_delta_worker", None)
+        result = worker.poll() if worker is not None else None
+        if result is None:
+            progress = getattr(worker, "progress", None)
+            if (getattr(self, "_drc_delta_busy", False) and isinstance(progress, str)
+                    and progress != getattr(self, "_drc_delta_progress", None)):
+                self._drc_delta_progress = progress
+                self._drc_delta_refresh()
+            return
+        key, groups, error = result
+        if key != getattr(self, "_drc_delta_key", None):
+            return
+        self._drc_delta_busy = False
+        self._drc_delta_groups = groups
+        self._drc_delta_error = "CD grouping failed: %s" % error if error else None
+        if groups is not None:
+            self._drc_delta_step = groups.step_ticks
+            if groups.auto_step:
+                setting = (self._drc_open, self._drc_delta_mode)
+                self._drc_delta_auto_steps[setting] = groups.step_ticks
+            win = self._drcwin
+            if (win is not None and hasattr(win, "_delta_step") and
+                    win._delta_step.get_text() == self._drc_delta_step_text):
+                # Preserve a draft typed while the worker was measuring.
+                self._drc_delta_write_step(groups.step_ticks)
+            restore = getattr(self, "_drc_delta_restore", None)
+            if restore is not None and restore[0] == key:
+                row = groups.find(restore[1])
+                self._drc_delta_group = groups[row] if row is not None else None
+                self._drc_delta_restore = None
+                self._drc_delta_scope_refresh()
+        self._drc_delta_refresh()
+        if error:
+            self._set_live_status(self._drc_delta_error)
+
+    def _drc_delta_scope_refresh(self):
+        """A new scope starts at page one, with only its own saved picks."""
+        ci = self._drc_open
+        self._drc_focus = None
+        self._drc_pos = -1
+        self.drc_mark = None
+        self._drc_hl_res = None
+        for ruler in self._drc_ruler:
+            if ruler in self.rulers:
+                self.rulers.remove(ruler)
+        self._drc_ruler = []
+        self._drc_sel = self._drc_sels.get(self._drc_scope_key())
+        self._drc_page = 0
+        self._drc_marker_invalidate()
+        self._drc_selection_restore()
+        self._drc_delta_refresh()
+        if ci is not None:
+            self._drc_grid_fill(ci)
+            self._drc_show_rule(ci)
+        self._display()
+
+    def _drc_delta_choose(self, group):
+        if group is getattr(self, "_drc_delta_group", None):
+            return
+        if self._drc_sel is not None:
+            self._drc_sels[self._drc_scope_key()] = self._drc_sel
+        self._drc_delta_group = group
+        self._drc_delta_scope_refresh()
+
+    def _on_drc_delta_sel(self, selection):
+        if getattr(self, "_drc_delta_ui_busy", False):
+            return
+        model, it = selection.get_selected()
+        if it is not None:
+            self._drc_delta_choose(model.get_value(it, 2))
+
+    def _on_drc_delta_mode(self, combo):
+        mode = combo.get_active_id() or "absolute"
+        if mode == self._drc_delta_mode:
+            return
+        if self._drc_sel is not None:
+            self._drc_sels[self._drc_scope_key()] = self._drc_sel
+        self._drc_delta_mode = mode
+        self._drc_delta_sync()
+        self._drc_delta_scope_refresh()
+
+    def _on_drc_delta_step(self, _widget=None):
+        from .gtkservice import parse_step
+        if self._drc_delta_mode == "off" or self._drc_open is None:
+            return
+        text = self._drcwin._delta_step.get_text().strip()
+        try:
+            step = None if text.lower() in ("", "auto") else parse_step(text)
+        except ValueError as exc:
+            self._drc_delta_error = str(exc)
+            self._drc_delta_refresh()
+            self._set_live_status("CD group step: %s" % exc)
+            return
+        setting = (self._drc_open, self._drc_delta_mode)
+        previous = self._drc_delta_steps.get(setting)
+        resolved = step if step is not None else self._drc_delta_auto_steps.get(setting)
+        self._drc_delta_write_step(resolved)
+        if step == previous:
+            self._drc_delta_error = None
+            self._drc_delta_refresh()
+            return
+        if self._drc_sel is not None:
+            self._drc_sels[self._drc_scope_key()] = self._drc_sel
+        if step is None:
+            self._drc_delta_steps.pop(setting, None)
+        else:
+            self._drc_delta_steps[setting] = step
+        self._drc_delta_sync()
+        self._drc_delta_scope_refresh()
+
+    def _drc_delta_status_changed(self, ci, eis=None):
+        if ci != self._drc_open:
+            return
+        groups = getattr(self, "_drc_delta_groups", None)
+        if groups is not None:
+            if eis is None:
+                if getattr(groups, "_persistent", False):
+                    active = getattr(self, "_drc_delta_group", None)
+                    if self._drc_sel is not None:
+                        self._drc_sels[self._drc_scope_key()] = self._drc_sel
+                    self._drc_delta_revision = getattr(self, "_drc_delta_revision", 0) + 1
+                    self._drc_delta_sync(force=True)
+                    if active is not None:
+                        self._drc_delta_restore = (self._drc_delta_key, active.key)
+                    return
+                groups.reset_status()
+            else:
+                groups.status_changed(eis)
+        if getattr(self, "_drc_delta_busy", False):
+            # A result's status snapshot may precede this write. Re-bin with
+            # current statuses in the worker, reusing the measured CDs.
+            self._drc_delta_revision = getattr(self, "_drc_delta_revision", 0) + 1
+            self._drc_delta_sync()
+        self._drc_delta_refresh()
 
     def _on_drc_search(self, entry):
         txt = entry.get_text().strip().lower()
         if txt == self._drc_search or self._drc is None:
             return
         self._drc_search = txt
-        keep = self._drc_open
-        self._drc_fill()
-        if keep is not None:
-            for r in self._drcwin._rstore:
-                if r[2] == keep:
-                    self._drcwin._rules.set_cursor(r.path, None,
-                                                   False)
-                    break
+        self._drc_fill(preserve=True)
+        self._display()
 
     def _on_drc_selview(self, btn):
         self._drc_show_sel = btn.get_active()
@@ -7805,7 +8766,7 @@ class Viewer:
             return
         self._drc_page = p       # the fill clamps to the last page
         self._drc_grid_fill(ci)
-        self._display()          # the canvas markers show THIS page
+        self._display()          # refresh focus; marker population stays fixed
 
     def _on_drc_rule_sel(self, sel):
         """Selecting a rule shows ITS error grid alone (the
@@ -7822,11 +8783,18 @@ class Viewer:
         if it is None or self._drc is None:
             return
         ci = model.get_value(it, 2)
-        if ci == self._drc_open:
+        cluster = model.get_value(it, 3)
+        if ci == self._drc_open and cluster is self._drc_cluster:
             return
-        if self._drc_sel is not None:
-            self._drc_sels[self._drc_sel[0]] = self._drc_sel
+        if self._drc_sel is not None and self._drc_open is not None:
+            self._drc_sels[self._drc_scope_key()] = self._drc_sel
+        self._drc_marker_invalidate()
         self._drc_open = ci
+        self._drc_cluster = cluster
+        self._drc_delta_sync()
+        self._drc_focus = None
+        self._drc_pos = -1
+        self._drc_hl_res = None
         # a live jump belongs to the PREVIOUS rule: drop its mark,
         # position and auto CD rulers or they linger on the canvas
         # over the new rule's errors (user call 2026-08-18)
@@ -7837,9 +8805,10 @@ class Viewer:
                 if r in self.rulers:
                     self.rulers.remove(r)
             self._drc_ruler = []
-        # selections are PER RULE and survive switches (user call
-        # 2026-08-15: 'selected' must keep applying)
-        self._drc_sel = self._drc_sels.get(ci)
+        # Each rule/cluster keeps its own selection. A batch waive or
+        # note action must never include another cluster's hidden picks.
+        self._drc_sel = self._drc_sels.get(self._drc_scope_key())
+        self._drc_selection_restore()
         self._drc_page = 0
         with _dprof("rule_sel: grid fill"):
             self._drc_grid_fill(ci)
@@ -7904,7 +8873,7 @@ class Viewer:
         with 'filter errors in view' on, the viewport;
         _drc_grid_map always holds the page's ei list."""
         win, db = self._drcwin, self._drc
-        if win is None or db is None:
+        if win is None or db is None or ci != self._drc_open:
             return
         _t0 = time.perf_counter()
         gstore = win._gstore
@@ -7912,36 +8881,47 @@ class Viewer:
         self._drc_cell = None
         self._drc_grid_ci = ci
         c = db.checks[ci]
-        # the visible list = selected ∧ in-view ∧ waive filter
+        # the visible list = cluster ∧ selected ∧ in-view ∧ waive filter
         # (each stage narrows; None = every error of the rule)
+        cluster = self._drc_active_members()
+        conflict_only = getattr(self, "_drc_conflict_only", False)
         base = None
         sel = self._drc_sel
+        selected = sel[1] if sel is not None and sel[0] == ci else None
         if self._drc_show_sel:
-            if sel is not None and sel[0] == ci and sel[1]:
-                base = list(sel[1])
+            if selected:
+                if hasattr(selected, "page"):
+                    base = ("cluster", selected, None)
+                else:
+                    base = list(selected)  # legacy bounded selection fixture
             else:
-                base = []   # 'selected' with no selection = empty
+                base = []
         if self._drc_hl and hasattr(db, "query_rect"):
-            inview = [ei for rci, ei, _k, _p in self._drc_hl_list()
-                      if rci == ci]
-            if base is None:
-                base = inview
+            inview = [ei for rci, ei, _k, _p in self._drc_hl_list() if rci == ci]
+            if self._drc_show_sel:
+                base = ([ei for ei, ok in zip(inview, selected.contains_many(inview)) if ok]
+                        if selected is not None else [])
             else:
-                iv = set(inview)
-                base = [ei for ei in base if ei in iv]
-        if self._drc_wfilter != "all":
+                base = inview
+        if cluster is not None and base is None:
+            want = None if conflict_only or self._drc_wfilter == "all" else self._drc_wfilter == "waived"
+            base = ("cluster", cluster, want)
+        elif cluster is not None and isinstance(base, list):
+            # one service question for the page, not one per error
+            base = [ei for ei, ok in zip(base, cluster.contains_many(base)) if ok]
+        if not conflict_only and self._drc_wfilter != "all" and not isinstance(base, tuple):
             if base is None:
                 base = self._drc_wf_base(db, ci)
             elif hasattr(db, "get_status"):
                 want = self._drc_wfilter == "waived"
-                base = [ei for ei in base
-                        if (db.get_status(ci, ei) == 1) == want]
+                base = [ei for ei in base if (db.get_status(ci, ei) == 1) == want]
             elif self._drc_wfilter == "waived":
                 base = []
         if base is None:
             count = len(c.errors)
         elif isinstance(base, tuple):
-            count = self._drc_wf_count(db, ci)   # O(1) via wcount
+            count = (base[1].count(base[2]) if base[0] == "cluster" else
+                     self._drc_wf_count(db, ci))
         else:
             count = len(base)
         self._drc_grid_base = base
@@ -7952,7 +8932,9 @@ class Viewer:
         if base is None:
             eis = list(range(start, stop))
         elif isinstance(base, tuple):
-            eis = db.status_page(ci, base[1], start, stop - start)
+            eis = (base[1].page(start, stop - start, base[2])
+                   if base[0] == "cluster" else
+                   db.status_page(ci, base[1], start, stop - start))
         else:
             eis = base[start:stop]
         self._drc_grid_map = eis
@@ -7970,7 +8952,8 @@ class Viewer:
         # the "*" when any cell on the page is noted)
         maxloc = (max(eis) + 1) if eis else 1
         probe = win._grid.create_pango_layout(
-            "0" * (max(2, len(str(maxloc))) + (1 if noted else 0)))
+            "0" * (max(2, len(str(maxloc))) + (1 if noted else 0)
+                   + (3 if hasattr(db, "review_flags") else 0)))
         self._drc_cellw = probe.get_pixel_size()[0] + 18
         avail = win._grid.get_allocation().width
         n = max(1, min(24, avail // max(24, self._drc_cellw)))
@@ -7994,26 +8977,9 @@ class Viewer:
         elif f is not None and f[1] in eis:
             idx = eis.index(f[1])
             self._drc_cell_mark(idx // W, idx % W)
-        # the canvas paints THIS page (user call 2026-08-15):
-        # geometry built once per fill; the in-view filter already
-        # decoded its pts, other modes decode the page's blocks
-        k = self.dbu
-        marks = []
-        if self._drc_hl and hasattr(db, "query_rect"):
-            have = {rei: (k2, p2)
-                    for rci, rei, k2, p2 in self._drc_hl_list()
-                    if rci == ci}
-            for ei in eis:
-                kp = have.get(ei)
-                if kp is not None:
-                    marks.append((ci, ei, kp[0], kp[1]))
-        else:
-            errs = c.errors
-            for ei in eis:
-                e = errs[ei]
-                marks.append((ci, ei, e.kind,
-                              [(x / k, y / k) for x, y in e.pts]))
-        self._drc_page_marks = marks
+        # Grid rows only need IDs/statuses. Geometry is decoded on an
+        # explicit jump or by the marker worker, never eagerly on a click.
+        self._drc_page_marks = []
         if _DRC_PROF:
             dt = (time.perf_counter() - _t0) * 1e3
             if dt >= 1.0:
@@ -8027,41 +8993,20 @@ class Viewer:
                 sys.stderr.flush()
 
     def _drc_sel_click(self, ci, row, j, idx, ei, is_range):
-        """Grid selection editing (user call 2026-08-14):
-        Ctrl+click toggles ONE error in/out of the selection,
-        Shift+click ADDS the visual range from the current cell.
-        No pan/zoom change."""
-        db = self._drc
-        sel = self._drc_sel
-        eset = (set(sel[3]) if sel is not None and sel[0] == ci
-                else set())
+        """Edit a bounded grid page without expanding the saved selection."""
+        from .gtkservice import ListMembers
         if is_range:
             aidx = idx
             if self._drc_cell is not None:
-                aidx = (self._drc_cell[0] * self._drc_gridw
-                        + self._drc_cell[1])
+                aidx = self._drc_cell[0] * self._drc_gridw + self._drc_cell[1]
             lo, hi = sorted((aidx, idx))
-            gmap = self._drc_grid_map
-            for k2 in range(lo, min(hi + 1, len(gmap))):
-                eset.add(gmap[k2])
-        elif ei in eset:
-            eset.discard(ei)
+            indices = self._drc_grid_map[lo:hi + 1]
         else:
-            eset.add(ei)
-        eis = sorted(eset)
-        k = self.dbu
-        errs = db.checks[ci].errors
-        marks = [(e2, errs[e2].kind,
-                  [(x / k, y / k) for x, y in errs[e2].pts])
-                 for e2 in eis]
-        self._drc_set_sel((ci, eis, marks, frozenset(eset))
-                          if eis else None)
-        self._drc_grid_fill(ci)   # repaint the gold marks
+            indices = [ei]
+        self._drc_selection_submit(ci, None, ListMembers(indices),
+                                   "add" if is_range else "toggle")
         self._drc_cell_mark(row, j)
         self._drc_show_detail(ci, ei)
-        self._set_live_status(
-            "error select %s: %d selected"
-            % (db.checks[ci].name, len(eis)))
         self._display()
 
     def _on_drc_grid_menu(self, tree, ev):
@@ -8096,7 +9041,7 @@ class Viewer:
         self._drc_show_detail(ci, ei)
         sel = self._drc_sel
         if sel is not None and sel[0] == ci and sel[1]:
-            targets = list(sel[1])
+            targets = sel[1]
             scope = "%d selected" % len(targets)
         else:
             targets = [ei]
@@ -8109,6 +9054,15 @@ class Viewer:
                        lambda _i, o=on, t=targets:
                        self._drc_set_waived(ci, t, o))
             menu.append(it)
+        if hasattr(db, "review_flags"):
+            menu.append(Gtk.SeparatorMenuItem())
+            for label, on in (("mark not for review: %s" % scope, True),
+                              ("clear not for review: %s" % scope, False)):
+                it = Gtk.MenuItem(label=label)
+                it.connect("activate", lambda _i, o=on, t=targets, d=db:
+                           self._drc_set_not_required(ci, t, o)
+                           if self._drc is d else None)
+                menu.append(it)
         self._drc_menu = menu
 
         def released(_menu):
@@ -8124,75 +9078,664 @@ class Viewer:
         return True
 
     def _drc_set_waived(self, ci, eis, on):
-        """Write the status byte for the targets and refresh every
-        dependent surface (rule counts, grid, detail, canvas)."""
+        """Write the status of the targets and refresh every dependent
+        surface (rule counts, grid, detail, canvas); a selection past a
+        page is one service job (feature/jobdeck-drc)."""
         db = self._drc
         if db is None or not hasattr(db, "set_status"):
             return
-        val = drc_mod.STATUS_WAIVED if on else drc_mod.STATUS_NONE
-        try:
-            for ei in eis:
-                db.set_status(ci, ei, val)
-        except OSError as exc:
-            self._set_live_status("waive failed (%s) - is the "
-                                  "waive store writable?" % exc)
+        if self._drc_review_pending():
             return
+        if len(eis) > DRC_PAGE:
+            self._drc_review_submit("waive", ci, eis, on=on)
+            return
+        val = STATUS_WAIVED if on else STATUS_NONE
+        error = None
+        try:
+            # one request for the selection (floe2 gtk-service)
+            db.set_statuses(ci, list(eis), val)
+        except (OSError, gtkservice.ServiceError) as exc:
+            error = "%s - is the waive store writable?" % exc
+        self._drc_waived_refresh(ci, eis, on, error)
+
+    def _drc_visit_drawn(self, mark, points, width, height):
+        """Queue one visit only after individual geometry was painted.
+
+        No review-store access belongs in this paint path. In particular a
+        sparse edge pair's bounding box can cross the view without either
+        edge being visible, so test segments rather than just the bbox.
+        """
+        target = mark.get("review_target")
+        if (mark is not getattr(self, "drc_mark", None) or not target
+                or target[0] is not getattr(self, "_drc", None)
+                or mark.get("review_queued")
+                or getattr(self, "overlay_mode", 0) == 2
+                or width <= 0 or height <= 0 or not points):
+            return
+        xs, ys = zip(*points)
+        if max(xs) - min(xs) < DRC_MARK_PX and max(ys) - min(ys) < DRC_MARK_PX:
+            return
+
+        def rect_visible(x, y, w, h):
+            x, y, w, h = (int(round(v)) for v in (x, y, w, h))
+            return w > 0 and h > 0 and x < width and y < height and x + w > 0 and y + h > 0
+
+        def painted_segment(a, b):
+            ax, ay = a
+            dx, dy = b[0] - ax, b[1] - ay
+            if round(ay) == round(b[1]):
+                return rect_visible(min(ax, b[0]), ay - 1, abs(dx) + 1, 2)
+            if round(ax) == round(b[0]):
+                return rect_visible(ax - 1, min(ay, b[1]), 2, abs(dy) + 1)
+            # stamp_segment samples free-angle lines at most 8,001 times.
+            # A very long diagonal can cross the viewport between dabs and
+            # paint nothing. Clip the possible 2px-core dab centers first,
+            # then test those exact samples with fill_rect's rounding rule.
+            lo, hi = 0.0, 1.0
+            for p, q in ((-dx, ax + 0.5), (dx, width + 0.5 - ax),
+                         (-dy, ay + 0.5), (dy, height + 0.5 - ay)):
+                if p == 0:
+                    if q < 0:
+                        return False
+                    continue
+                t = q / p
+                if p < 0:
+                    lo = max(lo, t)
+                else:
+                    hi = min(hi, t)
+                if lo > hi:
+                    return False
+            steps = min(int(max(abs(dx), abs(dy))) + 1, 8000)
+            first = max(0, int(math.floor(lo * steps)) - 1)
+            last = min(steps, int(math.ceil(hi * steps)) + 1)
+            return any(rect_visible(ax + dx * i / steps - 1,
+                                    ay + dy * i / steps - 1, 2, 2)
+                       for i in range(first, last + 1))
+
+        polygon = mark.get("kind") == "p"
+        segments = (zip(points, points[1:] + points[:1]) if polygon else
+                    ((points[j], points[j + 1]) for j in range(0, len(points) - 1, 2)))
+        visible = any(painted_segment(a, b) for a, b in segments)
+        if not visible and polygon and 3 <= len(points) <= 256:
+            # Match the translucent renderer's actual clipped scanline spans,
+            # including polygons whose off-screen edges surround the view.
+            edges = [(a, b) for a, b in zip(points, points[1:] + points[:1])
+                     if a[1] != b[1]]
+            for y in range(max(0, int(math.floor(min(ys)))),
+                           min(height - 1, int(math.ceil(max(ys)))) + 1):
+                yc = y + 0.5
+                crossings = sorted(ax + (yc - ay) * (bx - ax) / (by - ay)
+                    for (ax, ay), (bx, by) in edges
+                    if (ay <= yc < by) or (by <= yc < ay))
+                if any(min(width, int(math.floor(crossings[i + 1])) + 1)
+                       > max(0, int(math.ceil(crossings[i])))
+                       for i in range(0, len(crossings) - 1, 2)):
+                    visible = True
+                    break
+        if not visible:
+            return
+        db, ci, ei = target
+        if not hasattr(db, "mark_visited"):
+            return
+        mark["review_queued"] = True
+        # no service request in the paint path: the next idle sends it
+        GLib.idle_add(self._drc_visit_send, db, ci, ei)
+
+    def _drc_visit_send(self, db, ci, ei):
+        try:
+            db.mark_visited(ci, ei)
+        except gtkservice.ServiceError as exc:
+            if db is getattr(self, "_drc", None):
+                self._set_live_status("visit save failed: %s" % exc)
+        return False
+
+    def _drc_visit_poll(self):
+        db = getattr(self, "_drc", None)
+        if db is None or not hasattr(db, "visit_events"):
+            return
+        dirty, errors = set(), []
+        for ci, _ei, error in db.visit_events():
+            if error:
+                errors.append(error)
+            else:
+                dirty.add(ci)
+        for ci in dirty:
+            self._drc_review_flags_refresh(ci)
+        if errors:
+            self._set_live_status("visit save failed: %s" % errors[-1])
+
+    def _drc_not_required_key(self, on):
+        target = self._drc_current_target()
+        if target is None:
+            self._set_live_status("select or focus errors to change their review requirement")
+            return
+        self._drc_set_not_required(*target, on)
+
+    def _drc_set_not_required(self, ci, targets, on):
+        db = getattr(self, "_drc", None)
+        if db is None or not hasattr(db, "review_flags"):
+            self._set_live_status("review flags need a packed index: floe-index drc <db>")
+            return
+        # Even one SQLite update runs outside the GTK thread.
+        self._drc_review_submit("not-required", ci, targets, on=bool(on))
+
+    def _drc_review_flags(self, db, ci, ei):
+        if not hasattr(db, "review_flags"):
+            return 0
+        try:
+            return db.review_flags(ci, ei)
+        except Exception as exc:
+            key = (id(db), str(exc))
+            if key != getattr(self, "_drc_review_read_error", None):
+                self._drc_review_read_error = key
+                self._set_live_status("review flags unavailable: %s" % exc)
+            return None
+
+    def _drc_review_flags_refresh(self, ci):
+        """Only repaint this page's labels; flags never change its members."""
+        win, db = getattr(self, "_drcwin", None), getattr(self, "_drc", None)
+        if db is None:
+            return
+        if win is not None and ci == getattr(self, "_drc_grid_ci", None):
+            sel = getattr(self, "_drc_sel", None)
+            selected = sel[3] if sel is not None and sel[0] == ci else ()
+            cols = self._drc_gridw
+            current = getattr(self, "_drc_cell", None)
+            for i, ei in enumerate(self._drc_grid_map):
+                row, col = divmod(i, cols)
+                noted = bool(hasattr(db, "get_note") and db.get_note(ci, ei))
+                win._gstore[row][col] = self._drc_cell_markup(
+                    db, ci, ei, noted, selected, current == (row, col))
+        if ci == getattr(self, "_drc_open", None):
+            focus = getattr(self, "_drc_focus", None)
+            shown = focus[1] if focus is not None and focus[0] == ci else None
+            pos, cumulative = getattr(self, "_drc_pos", -1), getattr(self, "_drc_cum", ())
+            if shown is None and pos >= 0 and cumulative:
+                current_ci = bisect.bisect_right(cumulative, pos) - 1
+                if current_ci == ci:
+                    shown = pos - cumulative[ci]
+            if shown is not None:
+                self._drc_show_detail(ci, shown)
+        self._drc_review_stats_refresh()
+
+    def _drc_review_stats_refresh(self):
+        win = getattr(self, "_drcwin", None)
+        label = getattr(win, "_review_info", None) if win is not None else None
+        if label is None:
+            return
+        db = getattr(self, "_drc", None)
+        legend = "V visited · X not for review · * note"
+        if db is None or not hasattr(db, "review_counts"):
+            label.set_text(legend)
+            return
+
+        def line(scope, counts):
+            return ("%s: total %d · visited %d · not for review %d · unvisited targets %d"
+                    % (scope, counts["total"], counts["visited"],
+                       counts["not_required"], counts["pending"]))
+        try:
+            lines = [legend, line("Whole DB", db.review_counts())]
+            ci = getattr(self, "_drc_open", None)
+            if ci is not None:
+                lines.append(line("Whole rule %s" % db.checks[ci].name,
+                                  db.review_counts(ci)))
+            label.set_text("\n".join(lines))
+        except Exception as exc:
+            label.set_text(legend + "\nReview statistics unavailable: %s" % exc)
+
+    def _drc_review_export_stats(self):
+        if self._drc_review_pending():
+            return
+        db = getattr(self, "_drc", None)
+        if db is None or not hasattr(db, "review_counts"):
+            self._set_live_status("review statistics need a packed index")
+            return
+        dlg = Gtk.FileChooserDialog(title="export review statistics",
+                                    parent=self.window,
+                                    action=Gtk.FileChooserAction.SAVE)
+        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Save", Gtk.ResponseType.OK)
+        dlg.set_do_overwrite_confirmation(True)
+        dlg.set_current_folder(os.path.dirname(os.path.abspath(db.path)))
+        from .gtkservice import db_name_of
+        dlg.set_current_name(db_name_of(db.path) + ".review.csv")
+        path = dlg.get_filename() if dlg.run() == Gtk.ResponseType.OK else None
+        dlg.destroy()
+        self._restore_keys()
+        if path and self._drc is not db:
+            self._set_live_status("DRC changed; reopen the review statistics export")
+        elif path:
+            self._drc_review_export_start(path)
+
+    def _drc_review_export_start(self, path):
+        """The statistics CSV, written by the service's review job after
+        the visits it accepted (drc_review_stats)."""
+        if self._drc_review_pending():
+            return
+        db = getattr(self, "_drc", None)
+        if db is None or not hasattr(db, "review_counts"):
+            return
+        try:
+            db._start("review", "drc_review_stats", path=os.path.abspath(path))
+        except gtkservice.ServiceError as exc:
+            self._set_live_status("review export failed: %s" % exc)
+            return
+        self._drc_review_job = dict(db=db, ci=None, targets=(), operation="review-export",
+                                    on=None, path=path)
+        self._set_live_status("exporting whole-DB and per-rule review statistics…")
+
+    def _drc_conflict_retired_jobs(self):
+        """Keep canceled readers alive until their final pack access finishes."""
+        jobs = [job for job in getattr(self, "_drc_conflict_retired", ())
+                if not job.get("done", False)]
+        self._drc_conflict_retired = jobs
+        return jobs
+
+    def _drc_conflict_reset(self, drop_source=False):
+        retired = self._drc_conflict_retired_jobs()
+        job = getattr(self, "_drc_conflict_job", None)
+        if job is not None:
+            job["cancel"].set()
+            if not job.get("done", False) and not any(old is job for old in retired):
+                retired.append(job)
+        self._drc_conflict_job = None
+        self._drc_conflict_key = None
+        self._drc_conflict_members = None
+        self._drc_conflict_error = None
+        if drop_source:
+            source = getattr(self, "_drc_conflict_source", None)
+            self._drc_conflict_source = None
+            self._drc_conflict_only = False
+            self._drc_conflict_stamp = ""
+            if source is not None:
+                source.close()
+            button = getattr(getattr(self, "_drcwin", None), "_conflict", None)
+            if button is not None:
+                self._drc_conflict_guard = True
+                try:
+                    button.set_active(False)
+                finally:
+                    self._drc_conflict_guard = False
+        self._drc_conflict_label()
+
+    def _drc_conflict_clear_scope(self):
+        """A new conflict scope must never inherit all-rule picks or hits."""
+        self._drc_selection_cancel()
+        self._drc_sel, self._drc_sels = None, {}
+        self._drc_page, self._drc_focus = 0, None
+        self.drc_mark, self._drc_pos = None, -1
+        for ruler in getattr(self, "_drc_ruler", ()):
+            if ruler in getattr(self, "rulers", ()):
+                self.rulers.remove(ruler)
+        self._drc_ruler = []
         self._drc_hl_res = None
+        self._drc_hl_key = None
+        query = getattr(self, "_drc_query_worker", None)
+        if query is not None:
+            query.cancel()
+        self._drc_marker_invalidate()
+
+    def _drc_conflict_label(self):
+        label = getattr(getattr(self, "_drcwin", None), "_conflict_info", None)
+        if label is None:
+            return
+        if not getattr(self, "_drc_conflict_only", False):
+            label.set_text("")
+            return
+        error = getattr(self, "_drc_conflict_error", None)
+        job = getattr(self, "_drc_conflict_job", None)
+        if error:
+            state = "Conflict filter failed: " + error
+        elif getattr(self, "_drc_conflict_source", None) is None:
+            state = "Conflict only: load peer work and Refresh in Reviewers."
+        elif job is not None:
+            progress = job.get("progress")
+            state = "Conflict only: preparing…" if progress is None else "Conflict only: %d / %d processed" % progress
+        elif self._drc_open is None:
+            state = "Conflict only: select a rule."
+        else:
+            members = getattr(self, "_drc_conflict_members", None)
+            state = "Conflict only: %d errors in this scope" % (len(members) if members is not None else 0)
+        label.set_text(state + "\nSnapshot %s · Refresh in Reviewers after edits/visits. "
+            "Rule and CD-group counts are unfiltered." %
+            (getattr(self, "_drc_conflict_stamp", "") or "not loaded"))
+
+    def _on_drc_conflict(self, button):
+        if getattr(self, "_drc_conflict_guard", False):
+            return
+        on = bool(button.get_active())
+        if on == getattr(self, "_drc_conflict_only", False):
+            return
+        self._drc_conflict_only = on
+        self._drc_conflict_reset()
+        self._drc_conflict_clear_scope()
+        if self._drc_open is not None:
+            self._drc_grid_fill(self._drc_open)
+        self._display()
+        if on and getattr(self, "_drc_conflict_source", None) is None:
+            self._set_live_status("Conflict only needs a reviewer snapshot: load peer work, then Refresh.")
+            self._drc_waive_load_dialog()
+
+    def _drc_conflict_publish(self, aggregate, stamp):
+        """Retain the last published comparison independently of its window."""
+        source = aggregate.lease()
+        previous = getattr(self, "_drc_conflict_source", None)
+        self._drc_conflict_reset()
+        self._drc_conflict_source = source
+        self._drc_conflict_stamp = stamp
+        if previous is not None:
+            previous.close()
+        if getattr(self, "_drc_conflict_only", False):
+            self._drc_conflict_clear_scope()
+            if self._drc_open is not None:
+                self._drc_grid_fill(self._drc_open)
+            self._display()
+        self._drc_conflict_label()
+
+    def _drc_conflict_status_changed(self):
+        if not getattr(self, "_drc_conflict_only", False):
+            return
+        # Conflict votes remain the labelled snapshot; the live waive filter
+        # must be resolved again after a completed local waiver batch.
+        self._drc_conflict_revision = getattr(self, "_drc_conflict_revision", 0) + 1
+        self._drc_conflict_reset()
+        self._drc_conflict_clear_scope()
+
+    def _drc_conflict_sync(self):
+        db = self._drc
+        ci = self._drc_open
+        if ci is None and getattr(self, "_drc_pos", -1) >= 0 and getattr(self, "_drc_cum", ()):
+            ci = bisect.bisect_right(self._drc_cum, self._drc_pos) - 1
+        if db is None or ci is None:
+            if (getattr(self, "_drc_conflict_job", None) is not None or
+                    getattr(self, "_drc_conflict_key", None) is not None):
+                self._drc_conflict_reset()
+            if getattr(self, "_drc_conflict_members", None) is None:
+                self._drc_conflict_members = gtkservice.EmptyScope(db, ci)
+            return self._drc_conflict_members
+        source = getattr(self, "_drc_conflict_source", None)
+        base = self._drc_base_members()
+        # Retain the source membership: a rebuilt CD group may otherwise
+        # reuse a released object's id and accidentally reuse its old mask.
+        key = (id(db), id(source), ci, base, self._drc_wfilter,
+               getattr(self, "_drc_conflict_revision", 0))
+        if key == getattr(self, "_drc_conflict_key", None):
+            return self._drc_conflict_members
+        self._drc_conflict_reset()
+        self._drc_conflict_key = key
+        self._drc_conflict_members = gtkservice.EmptyScope(db, ci)
+        self._drc_conflict_clear_scope()
+        if source is None:
+            self._drc_conflict_label()
+            return self._drc_conflict_members
+        cancel = threading.Event()
+        job = dict(key=key, db=db, ci=ci, cancel=cancel, done=False,
+                   result=None, error=None, progress=None)
+        try:
+            lease = source.lease()
+        except Exception as exc:
+            self._drc_conflict_error = str(exc)
+            self._drc_conflict_label()
+            return self._drc_conflict_members
+        self._drc_conflict_job = job
+        want = None if self._drc_wfilter == "all" else self._drc_wfilter == "waived"
+
+        def run():
+            try:
+                from .gtkservice import prepare_conflict_selection
+                job["result"] = prepare_conflict_selection(db, lease, ci,
+                    membership=base, waived=want, cancelled=cancel.is_set,
+                    progress=lambda done, total, *_: job.update(progress=(done, total)))
+            except Exception as exc:
+                job["error"] = str(exc)
+            finally:
+                lease.close()
+                job["done"] = True
+        threading.Thread(target=run, name="drc-conflict-filter", daemon=True).start()
+        self._drc_conflict_label()
+        return self._drc_conflict_members
+
+    def _drc_conflict_poll(self):
+        self._drc_conflict_retired_jobs()
+        if not getattr(self, "_drc_conflict_only", False):
+            return
+        # Rule/group changes may occur while the preparation thread runs.
+        self._drc_conflict_sync()
+        job = getattr(self, "_drc_conflict_job", None)
+        if job is None:
+            return
+        if not job["done"]:
+            self._drc_conflict_label()
+            return
+        if (job["cancel"].is_set() or job["db"] is not self._drc or
+                job["key"] != self._drc_conflict_key):
+            return
+        self._drc_conflict_job = None
+        self._drc_conflict_error = job["error"]
+        if job["error"]:
+            self._set_live_status("Conflict filter failed: " + job["error"])
+        else:
+            self._drc_conflict_members = job["result"]
+        self._drc_hl_res, self._drc_hl_key = None, None
+        self._drc_marker_invalidate()
+        if self._drc_open == job["ci"]:
+            self._drc_grid_fill(job["ci"])
+        self._drc_conflict_label()
+        self._display()
+
+    def _drc_base_members(self):
+        """A delta group already intersects the selected file cluster."""
+        group = getattr(self, "_drc_delta_group", None)
+        return group if group is not None else self._drc_cluster
+
+    def _drc_migration_dialog(self):
+        db = getattr(self, "_drc", None)
+        if db is None or not hasattr(db, "review_counts"):
+            self._set_live_status("review migration needs a packed index: floe-index drc <db>")
+            return None
+        window = getattr(self, "_drc_migration", None)
+        if window is not None and (window.closed or window.db is not db):
+            if not window.closed:
+                window.window.destroy()
+            window = None
+        if window is None:
+            window = _DrcMigrationWindow(self)
+            self._drc_migration = window
+        window.window.present()
+        return window
+
+    def _drc_team_dialog(self):
+        db = getattr(self, "_drc", None)
+        if db is None or not hasattr(db, "review_counts"):
+            self._set_live_status("review sharing needs a packed index: floe-index drc <db>")
+            return None
+        window = getattr(self, "_drc_team", None)
+        if window is not None and (window.closed or window.db is not db):
+            if not window.closed:
+                window.window.destroy()
+            window = None
+        if window is None:
+            window = _DrcTeamWindow(self)
+            self._drc_team = window
+        window.window.present()
+        return window
+
+    def _drc_team_changed(self, db, waived=True):
+        """Publish completed peer edits without switching the marker source."""
+        if self._drc is not db:
+            return
+        ci = self._drc_open
+        jump = None
+        if (not getattr(self, "_drc_conflict_only", False) and
+                self.drc_mark is not None and self._drc_pos >= 0):
+            jump = (self.drc_mark, self._drc_pos, tuple(self._drc_ruler))
+        if waived:
+            self._drc_conflict_status_changed()
+            self._drc_marker_invalidate()
+            self._drc_delta_status_changed(ci)
+            self._drc_hl_res = None
+            if self.drc_mark is not None and self._drc_pos >= 0 and self._drc_cum:
+                mci = bisect.bisect_right(self._drc_cum, self._drc_pos) - 1
+                mei = self._drc_pos - self._drc_cum[mci]
+                self.drc_mark["color"] = (DRC_GREEN if self._drc_waived(db, mci, mei) else DRC_RED)
+            if self._drc_sel is not None and self._drc_wfilter != "all":
+                self._drc_selection_restore()
+            if self._drcwin is not None:
+                self._drc_fill(preserve=True)
+                if jump is not None:
+                    # Rebuilding the rule tree clears a jump even when the
+                    # peer browser owns navigation. Keep the already viewed
+                    # shape/rulers without changing filters or reframing it.
+                    self.drc_mark, self._drc_pos = jump[:2]
+                    self._drc_focus = None
+                    self._drc_ruler = list(jump[2])
+                    for ruler in self._drc_ruler:
+                        if ruler not in self.rulers:
+                            self.rulers.append(ruler)
+                    mci = bisect.bisect_right(self._drc_cum, self._drc_pos) - 1
+                    self._drc_show_detail(mci, self._drc_pos - self._drc_cum[mci])
+        if ci is not None:
+            self._drc_review_flags_refresh(ci)
+        else:
+            self._drc_review_stats_refresh()
+        self._display()
+
+    def _drc_review_pending(self):
+        if getattr(self, "_drc_selection_key", None) is not None:
+            self._set_live_status("error selection is still being updated")
+            return True
+        if getattr(self, "_drc_review_job", None) is not None:
+            self._set_live_status("review update is still running")
+            return True
+        if getattr(self, "_drc_team_busy", None) is not None:
+            self._set_live_status("review sharing operation is still running")
+            return True
+        return False
+
+    def _drc_review_submit(self, operation, ci, targets, on=None, text=None):
+        """One review writer (the service's review job); the request keeps
+        its database and targets - a selection of any size."""
+        if self._drc_review_pending():
+            return
+        db = self._drc
+        if not targets:
+            return
+        if operation != "not-required":
+            self._drc_marker_invalidate()
+        fields = dict(check=int(ci), action=operation, on=on, text=text)
+        if getattr(targets, "sid", None) is not None:
+            fields["selection"] = targets.sid
+        else:
+            fields["errors"] = [int(e) for e in targets]
+        try:
+            db._start("review", "drc_review", **fields)
+        except gtkservice.ServiceError as exc:
+            self._set_live_status("%s failed: %s" % (operation, exc))
+            return
+        self._drc_review_job = dict(db=db, ci=ci, targets=targets,
+                                    operation=operation, on=on)
+        self._set_live_status("%s: processing %d selected errors…"
+                              % (operation, len(targets)))
+
+    def _drc_review_poll(self):
+        self._drc_visit_poll()
+        job = getattr(self, "_drc_review_job", None)
+        if job is None:
+            return
+        event = job["db"].poll("review")
+        if event is None:
+            return
+        if event["state"] == "progress":
+            self._set_live_status("%s: %d / %d processed"
+                                  % (job["operation"], event["done"], event["total"]))
+            return
+        self._drc_review_job = None
+        error = event.get("message") if event["state"] != "done" else None
+        if self._drc is not job["db"]:
+            if error:
+                self._set_live_status("previous DRC review update failed: %s" % error)
+            return
+        ci, targets, operation = job["ci"], job["targets"], job["operation"]
+        db = self._drc
+        if operation == "review-export":
+            self._set_live_status(("review export failed: %s" % error)
+                                  if error else "review statistics exported: %s" % job["path"])
+        elif operation == "not-required":
+            # a failed batch may have committed earlier chunks: show the
+            # flags as they are, markers, groups and selection untouched
+            db.review_flags_changed(ci)
+            self._drc_review_flags_refresh(ci)
+            self._set_live_status(("review update failed: %s" % error)
+                if error else "%s on %d errors" % (
+                    "not for review set" if event.get("on", job["on"]) else "not for review cleared",
+                    len(targets)))
+        elif operation == "waive":
+            db.statuses_changed(ci, event.get("counts"))
+            if self._drc_clusters is not None:
+                self._drc_clusters.status_changed(ci)
+            self._drc_waived_refresh(ci, targets, event.get("on", job["on"]),
+                                     error, bulk=True)
+        elif error:
+            if operation in ("note", "note-clear"):
+                self._drc_note_refresh(ci, targets, fallback=False)
+            self._set_live_status("%s failed: %s" % (operation, error))
+        elif operation == "note-read":
+            prefill = event.get("prefill") or ""
+            text = self._drc_note_dialog(prefill, len(targets))
+            if text is not None and not (prefill and text == prefill):
+                self._drc_review_submit("note", ci, targets, text=text)
+        else:
+            db._notes_reply(event)
+            self._drc_note_refresh(ci, targets, fallback=False)
+            self._set_live_status("%s: %d errors updated" % (operation, len(targets)))
+
+    def _drc_waived_refresh(self, ci, eis, on, error=None, bulk=False):
+        db = self._drc
+        self._drc_conflict_status_changed()
+        self._drc_marker_invalidate()
+        self._drc_hl_res = None
+        if self._drc_clusters is not None:
+            self._drc_clusters.status_changed(ci)
+            self._drc_clusters.prepare_counts(ci)
+        self._drc_delta_status_changed(ci, None if bulk else eis)
         # the jump mark stores a RESOLVED color: re-derive it for
         # the marked error or a toggle leaves the old status color
-        if self.drc_mark is not None and self._drc_pos >= 0 \
-                and self._drc_cum:
-            mci = bisect.bisect_right(self._drc_cum,
-                                      self._drc_pos) - 1
+        if self.drc_mark is not None and self._drc_pos >= 0 and self._drc_cum:
+            mci = bisect.bisect_right(self._drc_cum, self._drc_pos) - 1
             mei = self._drc_pos - self._drc_cum[mci]
-            self.drc_mark["color"] = (
-                DRC_GREEN if self._drc_waived(db, mci, mei)
-                else DRC_RED)
+            self.drc_mark["color"] = (DRC_GREEN if self._drc_waived(db, mci, mei)
+                                      else DRC_RED)
         # under a waive filter the toggled errors leave the list -
-        # purge them from the gold selection too, or their markers
-        # linger on the canvas (user report 2026-08-15)
+        # the selection is rechecked against it (user report 2026-08-15)
         sel = self._drc_sel
-        if sel is not None and sel[0] == ci \
-                and self._drc_wfilter != "all" \
-                and hasattr(db, "get_status"):
-            want = self._drc_wfilter == "waived"
-            keep = [(e2, k2, p2) for e2, k2, p2 in sel[2]
-                    if (db.get_status(ci, e2) == 1) == want]
-            eis2 = [m[0] for m in keep]
-            self._drc_set_sel((ci, eis2, keep, frozenset(eis2))
-                              if eis2 else None)
-            f = self._drc_focus
-            if f is not None and f[0] == ci \
-                    and (db.get_status(ci, f[1]) == 1) != want:
+        if sel is not None and sel[0] == ci and self._drc_wfilter != "all":
+            self._drc_selection_restore()
+            focus = self._drc_focus
+            if focus is not None and focus[0] == ci and \
+                    (db.get_status(ci, focus[1]) == 1) != (self._drc_wfilter == "waived"):
                 self._drc_focus = None
-        if self._drc_wfilter == "all":
-            # membership is unchanged but the row's total/waived
-            # text is not: refresh that one row in place
-            for r in self._drcwin._rstore:
-                if r[2] == ci:
-                    wv = (db.status_counts(ci)[0]
-                          if hasattr(db, "status_counts") else 0)
-                    r[1] = "%d/%d" % (len(db.checks[ci].errors), wv)
-                    break
-            self._drc_grid_fill(ci)
-        else:
-            # counts and membership changed under a waive filter:
-            # rebuild the rule list and reselect the open rule
-            keep = self._drc_open
-            self._drc_fill()
-            if keep is not None:
-                for r in self._drcwin._rstore:
-                    if r[2] == keep:
-                        self._drcwin._rules.set_cursor(
-                            r.path, None, False)
+        if self._drcwin is not None:
+            if self._drc_wfilter == "all":
+                # membership is unchanged but the row's total/waived
+                # text is not: refresh that row (and its clusters) in place
+                for row in self._drcwin._rstore:
+                    if row[2] == ci:
+                        waived = db.status_counts(ci)[0] if hasattr(db, "status_counts") else 0
+                        row[1] = "%d/%d" % (len(db.checks[ci].errors), waived)
+                        for child in row.iterchildren():
+                            cw, ct = child[3].status_counts()
+                            child[1] = "%d/%d" % (ct, cw)
                         break
-        f = self._drc_focus
-        if f is not None and f[0] == ci:
-            self._drc_show_detail(ci, f[1])
-        self._set_live_status(
-            "%s %d error(s) in %s"
-            % ("waived" if on else "unwaived", len(eis),
-               db.checks[ci].name))
+                self._drc_grid_fill(ci)
+            else:
+                # counts and membership changed under a waive filter:
+                # rebuild the rule list and reselect the open rule
+                self._drc_fill(preserve=True)
+        focus = self._drc_focus
+        if focus is not None and focus[0] == ci:
+            self._drc_show_detail(ci, focus[1])
+        self._set_live_status(("waive failed: %s" % error) if error else
+            "%s %d error(s) in %s" % ("waived" if on else "unwaived", len(eis),
+                                       db.checks[ci].name))
         self._display()
 
     def _drc_waive_key(self):
@@ -8215,9 +9758,12 @@ class Viewer:
             return
         sel = self._drc_sel
         if sel is not None and sel[1]:
-            ci, eis = sel[0], list(sel[1])
-            on = not all(self._drc_waived(db, ci, e) for e in eis)
-            self._drc_set_waived(ci, eis, on)
+            ci, eis = sel[0], sel[1]
+            if len(eis) > DRC_PAGE:
+                self._drc_review_submit("waive", ci, eis)
+            else:
+                on = not all(self._drc_waived(db, ci, e) for e in eis)
+                self._drc_set_waived(ci, eis, on)
             return
         ci = ei = None
         f = self._drc_focus
@@ -8240,7 +9786,7 @@ class Viewer:
         jumped error, else None - the target of note/waive actions."""
         sel = self._drc_sel
         if sel is not None and sel[1]:
-            return sel[0], list(sel[1])
+            return sel[0], sel[1]
         db = self._drc
         ci = ei = None
         f = self._drc_focus
@@ -8265,12 +9811,17 @@ class Viewer:
             self._set_live_status(
                 "note needs a packed index: floe-index drc <db>")
             return
+        if self._drc_review_pending():
+            return
         target = self._drc_current_target()
         if target is None:
             self._set_live_status(
                 "note는 선택/현재 에러 대상입니다: 먼저 선택·클릭·점프하세요")
             return
         ci, eis = target
+        if len(eis) > DRC_PAGE:
+            self._drc_review_submit("note-read", ci, eis)
+            return
         texts = set(db.get_note(ci, e) for e in eis)
         prefill = (texts.pop() if len(texts) == 1 and None not in texts
                    else "")
@@ -8289,16 +9840,21 @@ class Viewer:
         db = self._drc
         if db is None or not hasattr(db, "clear_note"):
             return
+        if self._drc_review_pending():
+            return
         target = self._drc_current_target()
         if target is None:
             self._set_live_status("먼저 note 있는 에러를 선택하세요")
             return
         ci, eis = target
+        if len(eis) > DRC_PAGE:
+            self._drc_review_submit("note-clear", ci, eis)
+            return
         db.clear_note([db.error_gid(ci, e) for e in eis])
         self._drc_note_refresh(ci, eis)
         self._set_live_status("note cleared on %d error(s)" % len(eis))
 
-    def _drc_note_refresh(self, ci, eis):
+    def _drc_note_refresh(self, ci, eis, fallback=True):
         """Repaint after a note change: the grid (the "*" prefix), the
         detail pane if it shows one of these errors, and the canvas.
         Note membership never changes the list, so the grid keeps its
@@ -8315,7 +9871,8 @@ class Viewer:
             c2 = bisect.bisect_right(self._drc_cum, self._drc_pos) - 1
             if c2 == ci:
                 shown = self._drc_pos - self._drc_cum[ci]
-        self._drc_show_detail(ci, shown if shown is not None else eis[0])
+        if ci == self._drc_open and (shown is not None or fallback):
+            self._drc_show_detail(ci, shown if shown is not None else eis[0])
         self._display()
 
     def _drc_note_dialog(self, prefill, count):
@@ -8444,6 +10001,8 @@ class Viewer:
     def _drc_note_save_dialog(self):
         """DRC > save notes as… : snapshot the per-reviewer note state
         to a picked flateyes .fe (share a review / keep a record)."""
+        if self._drc_review_pending():
+            return
         db = self._drc
         if db is None or not hasattr(db, "note_export"):
             self._set_live_status(
@@ -8459,8 +10018,7 @@ class Viewer:
         dlg.set_do_overwrite_confirmation(True)
         dlg.set_current_folder(
             os.path.dirname(os.path.abspath(db.path)))
-        from . import cachepath
-        base = cachepath.db_name_of(db.path)
+        base = gtkservice.db_name_of(db.path)
         dlg.set_current_name(base + ".notes.fe")
         out = dlg.get_filename() \
             if dlg.run() == Gtk.ResponseType.OK else None
@@ -8478,6 +10036,8 @@ class Viewer:
     def _drc_note_load_dialog(self):
         """DRC > load notes… : REPLACE the notes from a saved .fe
         (save your own first). Files from a different pack are refused."""
+        if self._drc_review_pending():
+            return
         db = self._drc
         if db is None or not hasattr(db, "note_import"):
             self._set_live_status(
@@ -8523,6 +10083,8 @@ class Viewer:
         the auto-saved per-user waive state (~/.cache/floe/waive)
         to a picked file - for sharing a review or keeping a
         round's record. Same format as the auto sidecar."""
+        if self._drc_review_pending():
+            return
         db = self._drc
         if db is None or not hasattr(db, "waive_export"):
             self._set_live_status(
@@ -8539,8 +10101,7 @@ class Viewer:
         dlg.set_do_overwrite_confirmation(True)
         dlg.set_current_folder(
             os.path.dirname(os.path.abspath(db.path)))
-        from . import cachepath
-        base = cachepath.db_name_of(db.path)
+        base = gtkservice.db_name_of(db.path)
         dlg.set_current_name(base + ".waive")
         out = dlg.get_filename() \
             if dlg.run() == Gtk.ResponseType.OK else None
@@ -8556,69 +10117,15 @@ class Viewer:
         self._set_live_status("waives saved: %s" % out)
 
     def _drc_waive_load_dialog(self):
-        """DRC > load waives… (user call 2026-08-28): REPLACE the
-        current review state with a saved waive file (save your own
-        first to keep it). Refused when the file was recorded
-        against a different pack."""
-        db = self._drc
-        if db is None or not hasattr(db, "waive_import"):
-            self._set_live_status(
-                "waive load needs a packed index: "
-                "floe-index drc <db>")
-            return
-        dlg = Gtk.FileChooserDialog(title="load waives",
-                                    parent=self.window,
-                                    action=Gtk.FileChooserAction.OPEN)
-        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
-                        "Open", Gtk.ResponseType.OK)
-        self._only_close_button(dlg)
-        self._center_on_parent(dlg)
-        dlg.set_current_folder(
-            os.path.dirname(os.path.abspath(db.path)))
-        for name, pats in (("floe waives (*.waive)", ("*.waive",)),
-                           ("all files", ("*",))):
-            ff = Gtk.FileFilter()
-            ff.set_name(name)
-            for p in pats:
-                ff.add_pattern(p)
-            dlg.add_filter(ff)
-        path = dlg.get_filename() \
-            if dlg.run() == Gtk.ResponseType.OK else None
-        dlg.destroy()
-        self.window.present()
-        if not path:
-            return
-        try:
-            waived = db.waive_import(path)
-        except (OSError, ValueError) as exc:
-            self._set_live_status("waive load failed: %s" % exc)
-            return
-        # the whole status array changed: reset every dependent
-        # surface, exactly like a waive-filter switch
-        self._drc_hl_res = None
-        self._drc_sel = None
-        self._drc_sels = {}
-        self._drc_focus = None
-        if self.drc_mark is not None and self._drc_pos >= 0 \
-                and self._drc_cum:
-            mci = bisect.bisect_right(self._drc_cum,
-                                      self._drc_pos) - 1
-            mei = self._drc_pos - self._drc_cum[mci]
-            self.drc_mark["color"] = (
-                DRC_GREEN if self._drc_waived(db, mci, mei)
-                else DRC_RED)
-        keep = self._drc_open
-        self._drc_fill()
-        if keep is not None:
-            for r in self._drcwin._rstore:
-                if r[2] == keep:
-                    self._drcwin._rules.set_cursor(r.path, None,
-                                                   False)
-                    break
-        self._display()
-        self._set_live_status(
-            "waives loaded: %d waived (%s)"
-            % (waived, os.path.basename(path)))
+        """Load an external snapshot for comparison; never replace my state."""
+        window = self._drc_team_dialog()
+        if window is not None:
+            # A comparison may still be running. Queue the chooser after it
+            # so the legacy menu always reaches the non-destructive loader.
+            if window.job is None:
+                window._load_dialog()
+            else:
+                window._open_load_when_ready = True
 
     @staticmethod
     def _rgb_hex(rgba):
@@ -8635,6 +10142,14 @@ class Viewer:
         t = "%d" % (ei + 1)          # rule-local numbering
         if noted:
             t = "*" + t              # note present (user call 2026-08-28)
+        flags = self._drc_review_flags(db, ci, ei)
+        if flags is None:
+            t = "? " + t
+        elif flags:
+            prefix = (("V" if flags & gtkservice.VISITED else "")
+                      + ("X" if flags & gtkservice.NOT_REQUIRED else ""))
+            if prefix:
+                t = prefix + " " + t
         if current:
             return ("<span background='#3465a4' "
                     "foreground='#ffffff'>%s</span>" % t)
@@ -8743,10 +10258,17 @@ class Viewer:
         lines = ["rule: %s" % c.name,
                  "errors: %d (declared %d)"
                  % (len(c.errors), c.declared)]
+        if self._drc_cluster is not None:
+            lines.append("cluster: %s (%d errors)"
+                         % (self._drc_cluster.name, self._drc_cluster.total))
+        group = getattr(self, "_drc_delta_group", None)
+        if group is not None:
+            lines.append("delta group: %s (%d errors)" % (group.name, group.total))
         if c.desc:
             lines.append("")
             lines += c.desc.split("\n")
         win._detail.set_text("\n".join(lines))
+        self._drc_review_stats_refresh()
 
     def _drc_show_detail(self, ci, ei):
         """Bottom pane: rule description, kind, coordinates and the
@@ -8763,6 +10285,14 @@ class Viewer:
                       2: "reserved"}.get(s, "status %d" % s)
         lines = ["#%d(%d)  [%s]" % (ei + 1, e.num, status),
                  "rule: %s" % c.name]
+        if hasattr(db, "review_flags"):
+            flags = self._drc_review_flags(db, ci, ei)
+            if flags is None:
+                lines.append("review: unavailable")
+            else:
+                lines.append("visited: %s · not for review: %s" % (
+                    "yes" if flags & gtkservice.VISITED else "no",
+                    "yes" if flags & gtkservice.NOT_REQUIRED else "no"))
         if hasattr(db, "get_note"):
             note = db.get_note(ci, ei)
             if note:
@@ -8844,12 +10374,14 @@ class Viewer:
                          "color": (DRC_GREEN
                                    if self._drc_waived(db, ci, ei)
                                    else DRC_RED)}
+        # visited once its own geometry is drawn (_drc_visit_drawn)
+        self.drc_mark["review_target"] = (db, ci, ei)
         # auto CD rulers: replaced on every jump (hand-drawn rulers
         # stay; k/Esc treat them like any ruler)
         for r in self._drc_ruler:
             if r in self.rulers:
                 self.rulers.remove(r)
-        self._drc_ruler = self._drc_cd_ruler(e)
+        self._drc_ruler = self._drc_cd_ruler(e, check.name)
         if e.kind == "e" and len(e.pts) == 2 and self._drc_ruler:
             # A ruler painted directly over a one-edge violation hides the
             # red error. Tag it for a constant screen-space parallel offset;
@@ -8915,15 +10447,145 @@ class Viewer:
             "layer visibility restored (%d on)" % len(saved))
         self.redraw(immediate=True)
 
+    def _drc_marker_invalidate(self, drop_worker=False):
+        """Cancel stale scope/status work, including same-count status swaps."""
+        self._drc_selection_cancel(close=drop_worker)
+        self._drc_marker_revision = getattr(self, "_drc_marker_revision", 0) + 1
+        self._drc_marker_key = None
+        self._drc_marker_result = None
+        self._drc_marker_overlay = None
+        self._drc_marker_busy = False
+        self._drc_hits = []
+        self._drc_point_hits = None
+        self._drc_hl_key = None
+        self._drc_hl_res = None
+        for name in ("_drc_query_worker", "_drc_marker_worker"):
+            worker = getattr(self, name, None)
+            if worker is not None:
+                if drop_worker:
+                    worker.close()
+                    setattr(self, name, None)
+                else:
+                    worker.cancel()
+
+    def _drc_marker_request(self, obox, ospp, width, height):
+        """Query the whole rule/cluster/group at the DISPLAYED frame's
+        transform (a service job; its partial pictures arrive while it
+        runs)."""
+        db, ci = self._drc, self._drc_open
+        if db is None or ci is None or width < 1 or height < 1:
+            return []
+        active_members = self._drc_active_members()
+        conflict_only = getattr(self, "_drc_conflict_only", False)
+        if conflict_only and (active_members is None or not active_members):
+            return []
+        sel = self._drc_sel
+        selected = sel[1] if sel is not None and sel[0] == ci else None
+        # obox/ospp may describe a frozen base while the widget resizes.
+        # Query the actual canvas corners under the same sx/sy transform.
+        bounds = (obox[0] * self.dbu,
+                  (obox[3] - height * ospp) * self.dbu,
+                  (obox[0] + width * ospp) * self.dbu,
+                  obox[3] * self.dbu)
+        key = (id(db), ci,
+               None if active_members is None
+               else tuple(sorted(active_members.spec.items())),
+               self._drc_wfilter,
+               getattr(self, "_drc_marker_revision", 0),
+               None if selected is None else selected.sid, self._drc_show_sel,
+               bounds, width, height)
+        if key != getattr(self, "_drc_marker_key", None):
+            self._drc_marker_key = key
+            self._drc_marker_result = None
+            self._drc_marker_overlay = None
+            self._drc_point_hits = None
+            self._drc_marker_busy = True
+            worker = getattr(self, "_drc_marker_worker", None)
+            if worker is None:
+                worker = self._drc_marker_worker = gtkservice.MarkerWorker()
+            membership = (gtkservice.intersect(
+                selected if selected is not None
+                else gtkservice.DrcScope(db, ci, {"empty": True}),
+                active_members) if self._drc_show_sel else active_members)
+            query = dict(bounds_um=bounds, width_px=width, height_px=height,
+                         checks=(ci,),
+                         selected={ci: selected} if selected is not None else None,
+                         progressive=True,
+                         members=({ci: membership}
+                                  if membership is not None else None),
+                         waived=(None if conflict_only or self._drc_wfilter == "all" else
+                                 self._drc_wfilter == "waived"))
+            worker.submit(key, db, query)
+            self._drc_info_refresh()
+        result = getattr(self, "_drc_marker_result", None)
+        return result[1] if result is not None and result[0] == key else []
+
+    def _drc_marker_poll(self):
+        worker = getattr(self, "_drc_marker_worker", None)
+        if worker is None:
+            return
+        reply = worker.poll()
+        if reply is None:
+            return
+        key, markers, error = reply
+        if key != self._drc_marker_key:
+            return
+        partial = isinstance(markers, gtkservice.MarkerProgress)
+        self._drc_marker_busy = partial and error is None
+        if error is not None:
+            # A preview is never presented as a successfully completed scope.
+            self._drc_marker_result = None
+            self._drc_marker_overlay = None
+            self._drc_point_hits = None
+            self._drc_hits = []
+            self._set_live_status("DRC markers failed: %s" % error)
+        else:
+            if partial:
+                markers = markers.markers
+            self._drc_marker_result = (key, markers)
+            self._drc_marker_overlay = None
+        self._drc_info_refresh()
+        self._display()
+
+    def _drc_stamp_markers(self, disp, obox, ospp):
+        """Composite the service's full-scope circle picture and keep its
+        pixel hit map."""
+        width, height = disp.get_width(), disp.get_height()
+        markers = self._drc_marker_request(obox, ospp, width, height)
+        self._drc_point_hits = None
+        if not isinstance(markers, gtkservice.PointMarkers):
+            return  # no picture for this view yet
+        if markers.width != width or markers.height != height:
+            return
+        key = self._drc_marker_key
+        cached = getattr(self, "_drc_marker_overlay", None)
+        if cached is None or cached[0] != key:
+            layer = GdkPixbuf.Pixbuf.new_from_bytes(
+                GLib.Bytes.new(markers.rgba), GdkPixbuf.Colorspace.RGB,
+                True, 8, width, height, width * 4)
+            cached = self._drc_marker_overlay = (key, layer)
+        cached[1].composite(disp, 0, 0, width, height, 0, 0, 1, 1,
+                            GdkPixbuf.InterpType.NEAREST, 255)
+        self._drc_point_hits = markers
+
+    def _drc_display_view(self):
+        """World bounds and scale of the pixels currently on the canvas."""
+        view = getattr(self, "_drc_marker_view", None)
+        if view is None:
+            return self.view_bbox(), self.spp
+        box, spp, width, height = view
+        return (box[0], box[3] - height * spp,
+                box[0] + width * spp, box[3]), spp
+
     def _drc_stamp_errs(self, disp, sx, sy, items, color=None):
         """Error painter: geometry in `color`, or per-status when
         None (user call 2026-08-14/17: not waived = red, waived =
         green). ONLY the jumped error (double-click / n-p - the one
         drc_mark points at) draws its real shape, collapsing to a
         marker when its screen span is below the marker size; every
-        OTHER error is a DRC_MARK_PX square at ANY zoom (user call
+        OTHER error is a DRC_MARK_PX circle at ANY zoom (user call
         2026-08-18 - shape soup at wide views; the focused one:
-        9x9). A 20k segment budget bounds pathological frames."""
+        9 px). A 20k segment budget bounds pathological frames."""
         db = self._drc
         focus = self._drc_focus
         jci = jei = -1
@@ -8933,6 +10595,7 @@ class Viewer:
                                       self._drc_pos) - 1
             jei = self._drc_pos - self._drc_cum[jci]
         budget = 20000
+        sprites = {}
         for ci_, ei_, kind, spts in items:
             col = color
             if col is None:
@@ -8950,8 +10613,8 @@ class Viewer:
                 s_px = 9 if (focus is not None
                              and focus[0] == ci_
                              and focus[1] == ei_) else DRC_MARK_PX
-                fill_rect(disp, cxp - s_px // 2, cyp - s_px // 2,
-                          s_px, s_px, col)
+                stamp_drc_circle(disp, cxp, cyp, s_px // 2, col,
+                                 sprites=sprites, solid=True)
                 self._drc_hits.append((cxp, cyp, ci_, ei_))
                 budget -= 1
             else:
@@ -8971,7 +10634,7 @@ class Viewer:
         have no status: everything counts as not waived)."""
         return (hasattr(db, "get_status")
                 and db.get_status(ci, ei)
-                == drc_mod.STATUS_WAIVED)
+                == STATUS_WAIVED)
 
     def _drc_fill_strip(self, width, color):
         """One-row SOLID strip in `color` at 50% alpha, composited
@@ -9047,28 +10710,33 @@ class Viewer:
         for t in dict.fromkeys(c.get("text", "") for c in cons):
             if t:
                 lines.append("constraint: %s" % t)
-        cands = []
-        for con in cons:
-            v = con.get("value")
-            if v is None:
-                continue
-            mv = self._drc_measured(e, con.get("metric"))
-            if mv is not None:
-                cands.append((con, v, mv))
-        if cands:
-            # prefer the UPPER bound: "> 0 < v" chains flag by the
-            # upper limit - the lower bound reads as a meaningless
-            # positive delta (real decks use zero-lower ranges)
-            pick = next((c for c in cands
-                         if c[0].get("op") in ("<", "<=", "==")),
-                        cands[0])
-            con, v, mv = pick
-            pct = (" (%+.1f%%)" % ((mv - v) / v * 100.0)) if v else ""
+        # the CD the rule's condition flagged on this marker, its bound and
+        # their difference in five-decimal ticks (app-core drc::analysis -
+        # the delta groups' numbers; feature/jobdeck-drc 2026-10-06)
+        pick = self._drc_cd_info(e, name).get("pick")
+        ticks = pick.get("ticks") if pick else None
+        if ticks:
+            mv, v, delta = ticks
+            con = cons[pick["constraint"]]
+            ratio = pick.get("ratio")
+            pct = (" (%s%%)" % format_ticks(ratio) if ratio is not None
+                   else " (ratio unavailable)")
             unit = "um2" if con.get("metric") == "area" else "um"
-            lines.append("measured: %.4f %s vs %s %.4f · "
-                         "Δ %+.4f%s"
-                         % (mv, unit, con.get("op", "?"), v,
-                            mv - v, pct))
+            label = "estimated CD" if pick.get("estimated") else "measured"
+            lines.append("%s: %s %s vs %s %s · Δ %s%s"
+                         % (label, format_ticks(mv), unit, con.get("op", "?"),
+                            format_ticks(v), format_ticks(delta), pct))
+            if pick.get("estimated"):
+                cticks = pick.get("candidate_ticks") or []
+                if len(cticks) > 1:
+                    lines.append("CD candidates: %s %s" % (", ".join(
+                        format_ticks(t) if t is not None else "?"
+                        for t in cticks), unit))
+                if pick.get("reason"):
+                    lines.append("CD selection: %s" % pick["reason"])
+        elif cons:
+            lines.append("CD unavailable: geometry or rule condition "
+                         "unresolved")
         lays = mc.get("layers") or []
         if lays:
             lines.append("layers: %s" % ", ".join(lays))
@@ -9080,7 +10748,6 @@ class Viewer:
         if mc.get("unresolved"):
             lines.append("unresolved: %s"
                          % ", ".join(mc["unresolved"]))
-        from . import svrf
         derived = meta.get("derived", {})
         out, seen, stack = [], set(), list(lays)
         while stack and len(out) < 6:
@@ -9089,7 +10756,7 @@ class Viewer:
                 continue
             seen.add(n)
             out.append("  %s = %s" % (n, derived[n]))
-            stack.extend(svrf.rhs_operands(derived[n]))
+            stack.extend(gtkservice.svrf_operands(derived[n]))
         if out:
             lines.append("derivation:")
             lines += out
@@ -9097,49 +10764,31 @@ class Viewer:
                 lines.append("  …")
         return lines
 
-    def _drc_measured(self, e, metric):
-        """This violation's own dimension for a sidecar constraint
-        metric - only shapes whose measurement is unambiguous (the
-        same ones that get auto CD rulers). Returns um (um^2 for
-        area) or None."""
-        pts = e.pts   # um
-        if metric == "area":
-            if e.kind != "p" or len(pts) < 3:
-                return None
-            s = 0.0
-            for i in range(len(pts)):
-                x0, y0 = pts[i]
-                x1, y1 = pts[(i + 1) % len(pts)]
-                s += x0 * y1 - x1 * y0
-            return abs(s) / 2.0
-        if metric in ("width", "space", "enclosure"):
-            # rect region -> min span; facing edge pair -> the gap
-            if e.kind == "p" or (e.kind == "e" and len(pts) == 4):
-                segs = self._drc_cd_ruler(e)   # dbu 4-tuples
-                if not segs:
-                    return None
-                # cd_segments keeps the true closest edge-pair gap first;
-                # later entries can be its horizontal/vertical diagnostics.
-                if e.kind == "e":
-                    x0, y0, x1, y1 = segs[0]
-                    return math.hypot(x1 - x0, y1 - y0) * self.dbu
-                return min(math.hypot(x1 - x0, y1 - y0)
-                           for x0, y0, x1, y1 in segs) * self.dbu
-            return None
-        if metric == "length" and e.kind == "e" and len(pts) == 2:
-            return math.hypot(pts[1][0] - pts[0][0],
-                              pts[1][1] - pts[0][1])
-        return None
+    def _drc_cd_info(self, e, name):
+        """The rule-aware rulers, an AREA rule's label and the CD pick of
+        one violation (gtk-service drc_cd_info), with the rule's sidecar
+        constraints; none when the service refuses."""
+        meta = self._drc_rmeta or {}
+        cons = ((meta.get("checks", {}).get(name) or {}).get("constraints")
+                or [])
+        try:
+            return e.cd_info(cons)
+        except gtkservice.ServiceError as exc:
+            self._set_live_status("DRC CD: %s" % exc)
+            return {"rulers": [], "area": None, "pick": None}
 
-    def _drc_cd_ruler(self, e):
-        """CD rulers of a violation as dbu 4-tuples - the geometry
-        (single edge / facing gap and optional axis components /
-        rect spans) lives in
-        drc.cd_segments, SHARED with the CLI snapshot embeds; this
-        wrapper only converts um -> dbu."""
+    def _drc_cd_ruler(self, e, name=None):
+        """Auto CD rulers as dbu 4-tuples, an AREA rule's readout as a
+        _DrcAreaLabel - the rectangle directions the rule flags (both
+        when it cannot tell), SHARED with the CLI snapshot embeds."""
+        info = self._drc_cd_info(e, name)
         k = self.dbu
-        return [(x0 / k, y0 / k, x1 / k, y1 / k)
-                for x0, y0, x1, y1 in drc_mod.cd_segments(e)]
+        rulers = [(x0 / k, y0 / k, x1 / k, y1 / k)
+                  for x0, y0, x1, y1 in info.get("rulers") or []]
+        if info.get("area"):
+            x, y, text = info["area"]
+            rulers.append(_DrcAreaLabel(x / k, y / k, text))
+        return rulers
 
     def _drc_step(self, delta):
         """n/p: cycle within the VISIBLE list of the open rule
@@ -9155,12 +10804,7 @@ class Viewer:
         # sync the browser FIRST so the grid base belongs to ci
         if win is not None and self._drc_grid_ci != ci:
             self._drc_page = 0
-            for r in win._rstore:   # the list may be filtered
-                if r[2] == ci:
-                    win._rules.set_cursor(r.path, None, False)
-                    win._rules.scroll_to_cell(
-                        r.path, None, False, 0.0, 0.0)
-                    break
+            self._drc_select_row(ci, self._drc_cluster)
         n_all = len(db.checks[ci].errors)
         lo = self._drc_cum[ci]
         cur = (self._drc_pos - lo
@@ -9202,6 +10846,16 @@ class Viewer:
                 return 0 if delta > 0 else n - 1
             return (cur + delta) % n
         if isinstance(base, tuple):     # lazy waive filter
+            if base[0] == "cluster":
+                cluster, waived = base[1:]
+                cnt = cluster.count(waived)
+                if not cnt:
+                    return None
+                rank = (cluster.rank(cur, waived) if cur is not None else None)
+                nrank = ((rank + delta) % cnt if rank is not None
+                         else (0 if delta > 0 else cnt - 1))
+                page = cluster.page(nrank, 1, waived)
+                return page[0] if page else None
             waived = base[1]
             cnt = self._drc_wf_count(db, ci)
             if not cnt:
@@ -9228,7 +10882,8 @@ class Viewer:
         if base is None:
             bidx = ei
         elif isinstance(base, tuple):
-            bidx = self._drc.status_rank(ci, base[1], ei)
+            bidx = (base[1].rank(ei, base[2]) if base[0] == "cluster" else
+                    self._drc.status_rank(ci, base[1], ei))
             if bidx is None:
                 return
         elif ei in base:
@@ -9248,9 +10903,10 @@ class Viewer:
 
     # ---- ruler / snap / pick -----------------------------------------------
     def _update_cursor(self, ev):
-        bbox = self.view_bbox()
-        self._cursor = (bbox[0] + ev.x * self.spp,
-                        bbox[3] - ev.y * self.spp)
+        bbox, spp = (self._drc_display_view() if self.mode == "esel" else
+                     (self.view_bbox(), self.spp))
+        self._cursor = (bbox[0] + ev.x * spp,
+                        bbox[3] - ev.y * spp)
 
     def _hover(self, ev):
         x, y = self._cursor
@@ -9263,9 +10919,10 @@ class Viewer:
                 x1, y1 = self._ruler_end_preview()
                 x0, y0 = self._ruler_start
                 d = math.hypot(x1 - x0, y1 - y0) * self.dbu
-                parts.append("measure %.4f um (dx %.4f, dy %.4f)"
-                             % (d, (x1 - x0) * self.dbu,
-                                (y1 - y0) * self.dbu))
+                parts.append("measure %s um (dx %s, dy %s)"
+                             % tuple(format_um5(v) for v in
+                                     (d, (x1 - x0) * self.dbu,
+                                      (y1 - y0) * self.dbu)))
             else:
                 parts.append("ruler: click 1st point"
                              + (" [snap]" if self.snap_on else ""))
@@ -9385,6 +11042,10 @@ class Viewer:
         (field 2026-09-30) - the next Esc runs the chain."""
         if self._pending is not None or getattr(self, "_refining", False):
             self._cancel_render()
+            return
+        if getattr(self, "_drc_selection_key", None) is not None:
+            self._drc_selection_cancel()
+            self._set_live_status("error selection cancelled")
             return
         if self.mode == "esel":
             if self._esel_start is not None:
@@ -9572,6 +11233,21 @@ class Viewer:
             if d <= r * r and d < bd:
                 bd = d
                 best = (ci, ei)
+        points = getattr(self, "_drc_point_hits", None)
+        if points is not None:
+            # At most (2r+1)^2 cells even for a hundred million errors.
+            # Focus/gold hits above retain priority at equal distances.
+            x0, x1 = max(0, math.ceil(x - r)), min(points.width, math.floor(x + r) + 1)
+            y0, y1 = max(0, math.ceil(y - r)), min(points.height, math.floor(y + r) + 1)
+            for hy in range(y0, y1):
+                for hx in range(x0, x1):
+                    ei = points.error_id(hx, hy)
+                    if ei < 0:
+                        continue
+                    d = (hx - x) ** 2 + (hy - y) ** 2
+                    if d <= r * r and d < bd:
+                        bd = d
+                        best = (points.check, ei)
         return best
 
     def _drc_pick(self, ci, ei):
@@ -9992,28 +11668,28 @@ class Viewer:
         dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
         dlg.add_button("Apply", Gtk.ResponseType.OK)
         cell = 18
-        da = Gtk.DrawingArea()
-        da.set_size_request(16 * cell + 1, 16 * cell + 1)
+        side = 16 * cell + 1
+        # an image of the grid, painted again after each change (no
+        # cairo "draw" handler: the hosts have no pycairo)
+        grid = Gtk.Image()
+        da = Gtk.EventBox()
+        da.add(grid)
         da.set_halign(Gtk.Align.CENTER)
         paint = {"v": None}
 
-        def draw(_w, cr):
-            for y in range(16):
-                for x in range(16):
-                    on = rows[y][x] == "*"
-                    cr.set_source_rgb(*((0.0, 0.0, 0.0) if on
-                                        else (1.0, 1.0, 1.0)))
-                    cr.rectangle(x * cell, y * cell, cell, cell)
-                    cr.fill()
-            cr.set_source_rgb(0.6, 0.6, 0.6)
-            cr.set_line_width(1)
-            for i in range(17):
-                cr.move_to(i * cell + 0.5, 0)
-                cr.line_to(i * cell + 0.5, 16 * cell)
-                cr.move_to(0, i * cell + 0.5)
-                cr.line_to(16 * cell, i * cell + 0.5)
-            cr.stroke()
-            return False
+        def draw():
+            line = b"\x99\x99\x99"            # the grid lines
+            out = []
+            for r in rows:
+                cells = b"".join(
+                    line + (b"\x00\x00\x00" if c == "*"
+                            else b"\xff\xff\xff") * (cell - 1) for c in r)
+                out.append(line * side)
+                out.extend([cells + line] * (cell - 1))
+            out.append(line * side)
+            grid.set_from_pixbuf(pixbuf_of(side, side, b"".join(out)))
+
+        draw()
 
         def cell_at(ev):
             return int(ev.x) // cell, int(ev.y) // cell
@@ -10023,7 +11699,7 @@ class Viewer:
             if 0 <= x < 16 and 0 <= y < 16:
                 paint["v"] = "." if rows[y][x] == "*" else "*"
                 rows[y][x] = paint["v"]
-                da.queue_draw()
+                draw()
             return True
 
         def motion(_w, ev):
@@ -10033,13 +11709,12 @@ class Viewer:
             if 0 <= x < 16 and 0 <= y < 16 \
                     and rows[y][x] != paint["v"]:
                 rows[y][x] = paint["v"]
-                da.queue_draw()
+                draw()
             return True
 
         da.add_events(Gdk.EventMask.BUTTON_PRESS_MASK
                       | Gdk.EventMask.BUTTON1_MOTION_MASK
                       | Gdk.EventMask.BUTTON_RELEASE_MASK)
-        da.connect("draw", draw)
         da.connect("button-press-event", press)
         da.connect("motion-notify-event", motion)
         da.connect("button-release-event",
@@ -10060,14 +11735,14 @@ class Viewer:
                            fillpat.pattern(name).split("\n")]
             else:
                 break
-            da.queue_draw()
+            draw()
         ok = r == Gtk.ResponseType.OK
         dlg.destroy()
         if not ok:
             return
         self._fill_patterns[slot] = "\n".join(
             "".join(rr) for rr in rows)
-        self._fill_slots[slot].queue_draw()
+        self._fill_slots[slot].refresh()
         self._refresh_row_fills()
         if slot in self._layer_patterns.values():
             self._push_fills()
@@ -10112,9 +11787,8 @@ class Viewer:
         if not path:
             return
         try:
-            with open(path) as fh:
-                rows = fillpat.parse_layerprops(fh.read())
-        except OSError as e:
+            rows = gtkservice.layerprops_read(path)
+        except (OSError, gtkservice.ServiceError) as e:
             self._set_live_status(
                 "layer properties load failed: %s" % e)
             return
@@ -10170,12 +11844,10 @@ class Viewer:
         if not path:
             return
         try:
-            with open(path, "w") as fh:
-                fh.write(
-                    fillpat.format_layerprops(self._props_rows()))
+            gtkservice.layerprops_save(path, self._props_rows())
             self._set_live_status(
                 "layer properties saved: %s" % path)
-        except OSError as e:
+        except (OSError, gtkservice.ServiceError) as e:
             self._set_live_status(
                 "layer properties save failed: %s" % e)
 
@@ -10185,12 +11857,12 @@ class Viewer:
         anyone opening the design with no personal palette adopts
         it - and it seeds their personal cache on first open."""
         try:
-            path = cache_mod.save_shared_props(
+            path = gtkservice.layerprops_publish(
                 getattr(self.cache, "props_src", self.cache.src),
-                fillpat.format_layerprops(self._props_rows()))
+                self._props_rows())
             self._set_live_status(
                 "design default layerprops saved: %s" % path)
-        except OSError as e:
+        except (OSError, gtkservice.ServiceError) as e:
             self._set_live_status(
                 "default layerprops save failed: %s" % e)
 
@@ -10466,6 +12138,21 @@ class Viewer:
         if self._quitting:
             return
         self._quitting = True
+        for window in (getattr(self, "_drc_team", None),
+                       getattr(self, "_drc_migration", None)):
+            if window is not None:
+                window.window.destroy()
+        self._drc_conflict_reset(drop_source=True)
+        self._drc_selection_cancel(close=True)
+        marker_worker = getattr(self, "_drc_marker_worker", None)
+        if marker_worker is not None:
+            marker_worker.close()
+        delta_worker = getattr(self, "_drc_delta_worker", None)
+        if delta_worker is not None:
+            delta_worker.close()
+        query_worker = getattr(self, "_drc_query_worker", None)
+        if query_worker is not None:
+            query_worker.close()
         if self.server_sock is not None:
             try:
                 self.server_sock.close()
@@ -10516,7 +12203,9 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
                 elif viewer._worker_starting:
                     smoke_error.append("Rust render cache is still opening")
                 elif viewer.worker is None or not viewer.worker.alive():
-                    smoke_error.append("Rust render worker is not alive")
+                    smoke_error.append("Rust render worker is not alive%s" % (
+                        "" if viewer.worker is None
+                        else " (%s)" % viewer.worker.exitcode()))
                 elif viewer.last_frame is None:
                     smoke_error.append("no GUI frame was displayed")
             if drc and not smoke_error and viewer._drc_total == 0:

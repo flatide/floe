@@ -11,10 +11,30 @@ selfcheck·고지/체크섬과 현장 미검증 범위를 설명한다. 아래 �
   AVX memcpy·per-thread malloc arena 덕). 타깃 호스트의 glibc가
   빌드 머신과 같거나 새 버전이어야 한다 — 빌드/운영이 같은 배포판
   계열이면 보통 충족. 링크에 시스템 `cc`(gcc)가 필요하다.
+  빌드 머신의 glibc가 현장보다 새로우면(예: Ubuntu 24.04 = 2.39, 현장
+  RHEL 8 = 2.28) `GNU_GLIBC=2.28 sh build-linux.sh`로 그 glibc 기준으로
+  링크한다(cargo-zigbuild + zig, gcc 불필요, 어느 OS에서든; 2026-10-11).
+  결과는 GLIBC_2.28까지의 심볼만 쓰고, 실행 때는 현장의 glibc를 쓰므로
+  속도 이점은 그대로다:
+
+  ```sh
+  cargo install cargo-zigbuild      # 한 번 (crates.io 접속 필요)
+  # zig: venv에 ziglang (Ubuntu 24.04는 시스템 pip --user를 막는다, PEP 668)
+  python3 -m venv ~/zig && ~/zig/bin/pip install ziglang
+  export PATH=~/zig/bin:$PATH        # 또는 zig 배포판을 PATH에
+  GNU_GLIBC=2.28 sh build-linux.sh   # -> dist/*-linux-gnu (glibc >= 2.28)
+  strings dist/floe-index-linux-gnu | grep -oE '^GLIBC_[0-9.]+$' | sort -V | tail -1
+  ```
 - `dist/floe-index-linux-x86_64` — **완전 정적 musl ELF, 이식성
   폴백.** glibc 버전과 무관하게 어떤 x86_64 리눅스에서든 실행된다.
-  rustc 내장 rust-lld가 링크하므로 gcc 등 시스템 패키지가 전혀
-  필요 없다.
+  0.12.346부터 floe2가 SQLite(DRC 검토 파일 `.<db>.review.<리뷰어>.sqlite3`·
+  `.floereview`, rusqlite의 bundled amalgamation)를 담으므로 musl용 C
+  컴파일러가 필요하다: 위의 cargo-zigbuild + zig가 있으면 `cargo zigbuild
+  --target x86_64-unknown-linux-musl`(zig cc가 컴파일·링크), 없으면
+  musl-gcc(`musl-tools`)로 `CC_x86_64_unknown_linux_musl=musl-gcc cargo
+  build --release --target x86_64-unknown-linux-musl`. build-linux.sh와
+  tools/make_portable.sh가 이 순서로 고른다. macOS·gnu 빌드는 시스템
+  cc(clang/gcc) 또는 zig cc가 컴파일한다.
 
 동일 suffix로 `floe-renderd`(GUI Rust backend), `floe-render-cli`(headless oracle), `path-inventory`도 함께 생성된다.
 `floe-renderd`도 0.12.13부터 같은 형식의 `--version`/시작 스탬프를
@@ -22,11 +42,11 @@ selfcheck·고지/체크섬과 현장 미검증 범위를 설명한다. 아래 �
 보여준다 — 호스트에서 "이 바이너리가 어느 빌드냐"는 질문은 About
 화면만으로 답할 수 있다.
 
-의존 크레이트는 순수 Rust에 전부 `vendor/`로 동봉되어 **빌드 중
-crates.io 접속이 없다**. 인터넷이 필요한 것은 Rust 툴체인
-설치뿐이다. 빌드 머신에 gcc가 없으면 gnu 단계에서 실패하는데,
-musl만 필요하면 `cargo build --release --target
-x86_64-unknown-linux-musl`로 그 단계만 직접 실행하면 된다.
+의존 크레이트는 전부 `vendor/`로 동봉되어 **빌드 중
+crates.io 접속이 없다**(SQLite C 소스 포함; libsqlite3-sys의 쓰지 않는
+sqlcipher 사본과 vcpkg의 테스트 데이터는 뺐다). 인터넷이 필요한 것은 Rust
+툴체인 설치뿐이다. 빌드 머신에 gcc가 없으면 gnu 단계에서 실패하는데,
+musl만 필요하면 위의 zig 또는 musl-gcc로 그 단계만 직접 실행하면 된다.
 
 ## A. 인터넷 되는 서버 (권장 경로)
 
@@ -85,7 +105,8 @@ sh build-linux.sh        # vendor/ 동봉, 네트워크 불필요
 ```
 
 gnu 툴체인 tarball에 gnu용 std가 들어 있어 모든 산출물을 오프라인
-으로 빌드된다 (gnu 링크에 필요한 gcc만 서버에 있어야 한다).
+으로 빌드된다 (gnu 빌드의 SQLite 컴파일·링크에 쓸 gcc, musl 빌드에 쓸
+musl-gcc 또는 zig만 서버에 있어야 한다).
 
 ## 확인
 
@@ -97,7 +118,7 @@ sha256sum -c dist/floe-index-linux-x86_64.sha256
 ./dist/floe-index-linux-gnu scan some.oas 16      # 스모크
 ```
 
-`floe-renderd-linux-*`는 Python runtime 옆에 `floe-renderd` 이름으로 배치하거나 `FLOE_RENDERD_BIN`으로 지정한다.
+`floe2-linux-*`·`floe-index-linux-*`·`floe-renderd-linux-*`는 같은 suffix 것끼리 suffix를 떼고 한 폴더(portable의 `runtime/bin`)에 둔다 — floe2와 GTK 뷰어가 floe2 옆에서 floe-index·floe-renderd를 찾는다. `FLOE_INDEX_BIN`·`FLOE_RENDERD_BIN`은 다른 위치를 강제할 때만 쓴다(설정하면 그 경로가 이긴다).
 
 반입한 바이너리가 어떤 빌드인지는 실행 시 첫 줄 스탬프로 확인한다:
 `[floe-index <버전> [<git>] (gnu)]` / `(musl-static)`. gnu 바이너리가

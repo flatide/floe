@@ -377,8 +377,28 @@ floe2 render deck.jb --batch shots.txt --out shots/ --report shots/report.json
   stretch layers depth mosaic corners line linecolor keep_tiles; 빈 키는 명령행
   값). 워커를 한 번만 열고 모두 찍는다(`--out`은 디렉터리). `--report`는 shot별
   영역·픽셀·시간(mosaic은 타일 영역과 선 규칙) JSON.
-- 출력은 보관용이므로 solid 채움(뷰어의 speckle은 표시용). 단일 shot은 renderd의
-  PNG 그대로, mosaic은 raw 타일을 stdlib zlib으로 PNG 인코딩(Pillow 불필요).
+- 디코드 예산(레이아웃 소스, 2026-10-12 현장):
+  - `--detail exact`(컷 0, `--archival`의 기본)는 모든 도형을 그리거나 실패한다.
+    - 실패하면 에러에 필요한 양·예산·길이 나온다. 길은 `--detail high`, 좁은 영역이나 `--layers`, `FLOE_RUST_BUDGET_MB`이다.
+    - 예전에는 `render: decoded_generation_budget_exceeded:_N_>_M_bytes`만 나왔다.
+  - 컷이 있는 detail은 뷰어처럼 예산에 맞춰 성기게 그린다.
+    - 그랬으면 로그(stdout)의 WARNING과 report의 `budget_fit`(mosaic은 타일별)으로 알린다.
+    - 합성 MAIN01 1/10의 칩 전체를 1 GiB·high로 찍으면 449개 레이어 중 206개만 그려졌는데, 예전에는 아무 표시가 없었다.
+- `--density on|off`(레이아웃, 2026-10-12): 뷰어의 `--density`와 같다.
+  - 켜면 컷이 버린 도형을 밀도로 그린다. 그래서 `--detail low|medium|high`가 필요하다.
+  - 기본은 켜짐이다(0.12.351, 사용자 2026-10-12: "밀도는 기본으로 켜지게 해줘"; 그전에는 `FLOE_RUST_DENSITY_STACK=top`일 때만).
+    - `--detail exact`, `--archival`, jobdeck은 꺼짐이다. `FLOE_RUST_DENSITY_STACK=off`면 뷰어와 함께 기본이 꺼짐이다.
+  - jobdeck에서 `--density on`은 거부한다. 덱 패스는 밀도를 그리지 않는다.
+- `--layer-colors row|group`(레이아웃, 2026-10-13): 레이어 기본 색을 패널 줄마다(row, 기본) 또는 layer 번호마다(group,
+  예전 방식) 정한다. `FLOE_LAYER_COLORS`가 기본값이다. jobdeck은 자기 색 체계를 쓰므로 거부한다.
+- `--legend`(2026-10-13): 그린 레이어의 레전드(`box 색 fill 이름 L/D`)를 이미지마다 flateyes 메타데이터로 넣는다.
+  - 덱은 레벨 보기처럼 레벨마다 한 줄(머리 행, 레벨 색)이다. 칩 행은 그 레벨 아래에 묶인다. `--layers '$2,ALIGN'`이면 그 레벨들만 준 순서로 넣는다.
+  - 픽셀은 그대로다. `floe2 fe-embed --dump`로 읽고, flateyes로 열면 보인다.
+- 그림 모양(0.12.350, 사용자 2026-10-12: "캡쳐도 동일한 결과가 나와야 함"):
+  - 기본은 뷰어를 같은 영역으로 연 그림이다. detail medium, thin keep, 밀도 켬(뷰어의 시작값), 뷰어의 채움·layerprops, 셀 프레임과 라벨(덱은 라벨 없음).
+  - 예전 기본인 보관용 모양(solid 채움, 컷 0, 프레임·라벨 없음; 참조 툴 cli-spec)은 `--archival`이다. `FLOE_RENDER_DEFAULTS=archival`이면 그것이 기본이 된다.
+  - 이 문서의 M4 검사들(jobdeck 게이트의 `run_floe2`)은 그 변수로 보관용 모양에서 돈다.
+- 단일 shot은 renderd의 PNG 그대로, mosaic은 raw 타일을 stdlib zlib으로 PNG 인코딩(Pillow 불필요).
 
 ### 칩 on/off 캡처 (사용자 2026-10-06)
 

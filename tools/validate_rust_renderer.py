@@ -5,6 +5,7 @@ import inspect
 import io
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -16,9 +17,10 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (P3)
 
 from floe import RENDERD_VERSION, __version__  # noqa: E402
-from floe.rust_render import (  # noqa: E402
+from floe_oracle.rust_render import (  # noqa: E402
     CELL_QUERY_KINDS,
     DENSITY_PLAN2,
     RustRenderWorker,
@@ -82,9 +84,32 @@ def _stub_margin_viewer(worker, frame_cache, viewport=(858, 802)):
     return v
 
 
+def _policy_viewer(deck=False):
+    """A Viewer shell with what _ctl_policy reads: the patch the viewer
+    sends the view controller (P4d)."""
+    from floe.gui import Viewer
+
+    v = Viewer.__new__(Viewer)
+    v.cache = SimpleNamespace(is_jobdeck=deck)
+    v.visible = {(1, 0)}
+    v._viewport_size = lambda: (800, 600)
+    v._depth = lambda: None
+    v._layers_arg = lambda: None
+    v.cut_px = 3.0
+    v.frames_on = v.labels_on = True
+    v.label_font_px = 14
+    v._mono = False
+    v.density_on = False
+    v.thin_mode = "auto"
+    v._view_root = None
+    return v
+
+
 class WorkerContractTests(unittest.TestCase):
     def test_single_instance_forwards_effective_detail_and_depth(self):
-        from floe import cli, instance
+        from floe import instance
+        # the product's view front (floe/viewcli.py, P2d)
+        from floe import viewcli as cli
 
         def forward(detail, depth, thin=None):
             args = SimpleNamespace(
@@ -120,39 +145,61 @@ class WorkerContractTests(unittest.TestCase):
         self.assertIn("\tthin=auto", forward("high", 7, "auto"))
         self.assertIn("\tthin=keep", forward("high", 7, "keep"))
 
+    def test_layer_colors_open_a_window_of_their_own(self):
+        """--layer-colors row|group (user 2026-10-13): a choice made when
+        a layout opens - the flag sets FLOE_LAYER_COLORS for the service
+        the viewer starts and opens an independent window (a running one
+        keeps its colours); unset, the request is forwarded as before."""
+        from floe import instance
+        from floe import viewcli as cli
+        args = SimpleNamespace(
+            src="/tmp/colours.oas", hairline=None, thin_um=None, goto=None,
+            stream_kb=None, stream_target_ms=500, label_font_px=14,
+            perf_baseline=False, lod="on", frames="on", labels="on",
+            refinement="on", frame_cache="on", margin="off",
+            render_debug=False, multi=False, drc=None, detail=None,
+            depth=None, dump=False, thin=None, layer_colors="group")
+        with mock.patch.dict(os.environ), \
+                mock.patch.object(cli.os.path, "isfile", return_value=True), \
+                mock.patch.object(cli, "_cache_ready", return_value=True), \
+                mock.patch.object(cli, "_service_open", return_value=None), \
+                mock.patch.object(instance, "try_forward") as try_forward, \
+                mock.patch("floe.gui.run_viewer") as run_viewer:
+            os.environ.pop("FLOE_LAYER_COLORS", None)
+            cli.cmd_view(args)
+            self.assertEqual(os.environ.get("FLOE_LAYER_COLORS"), "group")
+        try_forward.assert_not_called()
+        run_viewer.assert_called_once()
+        self.assertEqual(
+            cli.parser().parse_args(["--layer-colors", "group", "x.oas"]).layer_colors,
+            "group")
+        self.assertIsNone(cli.parser().parse_args(["x.oas"]).layer_colors)
+        with mock.patch("sys.stderr", new_callable=io.StringIO), \
+                self.assertRaises(SystemExit):
+            cli.parser().parse_args(["--layer-colors", "groups", "x.oas"])
+
     def test_render_key_carries_the_thin_policy(self):
         """Review 2026-09-11 P1-1: toggling View > keep thin shapes must
         invalidate the displayed frame (and the margin frame, which
-        shares the key) - the key differs by the effective policy."""
-        from types import SimpleNamespace
+        shares the key). Since P4d the policy goes to the view controller,
+        whose render key changes with it: the patch says the effective
+        policy - auto is keep on a layout and on a deck."""
         from floe import gui
-        v = gui.Viewer.__new__(gui.Viewer)
-        v.visible = {(1, 0)}
-        v._depth_key = lambda: ("d", 3)
-        v.cut_px = 1.0
-        v.lod_on = True
-        v.frames_on = False
-        v.labels_on = False
-        v._color_epoch = 5
-        v.cache = SimpleNamespace(is_jobdeck=False)
-        v.thin_mode = "auto"
-        auto = gui.Viewer._render_key(v, "live")
-        v.thin_mode = "keep"
-        keep = gui.Viewer._render_key(v, "live")
-        self.assertEqual(keep, auto,
+        v = _policy_viewer()
+        self.assertEqual(gui.Viewer._ctl_policy(v)["thin"], "keep",
                          "auto on a layout is keep (2026-09-23)")
         v.thin_mode = "cull"
-        self.assertNotEqual(gui.Viewer._render_key(v, "live"), auto)
-        v.thin_mode = "auto"
-        v.cache = SimpleNamespace(is_jobdeck=True)
-        self.assertEqual(gui.Viewer._render_key(v, "live"), keep,
+        self.assertEqual(gui.Viewer._ctl_policy(v)["thin"], "cull")
+        v = _policy_viewer(deck=True)
+        self.assertEqual(gui.Viewer._ctl_policy(v)["thin"], "keep",
                          "auto on a deck is keep")
         # the displayed frame and the margin frame are judged by the
-        # same key
+        # controller's key (the frames carry it)
         import inspect
-        self.assertIn("_render_key(", inspect.getsource(gui.Viewer._covered))
         self.assertIn('margin[3] != self._render_key("live")',
                       inspect.getsource(gui))
+        self.assertIn('snap["render_key"]',
+                      inspect.getsource(gui.Viewer._render_key))
 
     def test_forwarded_view_options_batch_before_one_goto(self):
         from floe import gui
@@ -243,7 +290,7 @@ class WorkerContractTests(unittest.TestCase):
         self.assertFalse(viewer._fit_after_worker_start)
 
     def test_common_perf_baseline_disables_optional_render_work(self):
-        from floe import cli
+        from floe import viewcli as cli
 
         args = SimpleNamespace(
             src=None, hairline=None, thin_um=None, goto=None,
@@ -268,7 +315,7 @@ class WorkerContractTests(unittest.TestCase):
         self.assertEqual(options["depth"], 999)
 
     def test_refinement_off_rejects_nonzero_stable_stream_budget(self):
-        from floe import cli
+        from floe import viewcli as cli
 
         args = SimpleNamespace(
             src=None, hairline=None, thin_um=None, goto=None,
@@ -286,7 +333,7 @@ class WorkerContractTests(unittest.TestCase):
         prefetch alone stays off - retained-frame pan reuse (frame_cache)
         stays on - so a margin's landing can be told apart from the frame
         itself. It is a process option (an independent instance)."""
-        from floe import cli
+        from floe import viewcli as cli
         from floe.gui import Viewer
 
         args = SimpleNamespace(
@@ -312,12 +359,20 @@ class WorkerContractTests(unittest.TestCase):
             cli.cmd_view(args)
         self.assertTrue(run_viewer.call_args.kwargs["margin"])
         self.assertFalse(display_key.called)
-        rust = SimpleNamespace(supports_margin_prefetch=True)
-        v = _stub_margin_viewer(rust, True)
-        self.assertTrue(Viewer._margin_enabled(v))
-        v.margin_on = False
-        self.assertFalse(Viewer._margin_enabled(v))
-        self.assertTrue(v.frame_cache_on)
+        # the view controller's margin prefetch is asked for with --margin
+        # on and the frame cache on (--perf-baseline turns both off)
+        for margin, frame_cache, asked in ((True, True, True),
+                                           (False, True, False),
+                                           (True, False, False)):
+            v = _policy_viewer()
+            v.margin_on, v.frame_cache_on = margin, frame_cache
+            v._did_fit = False
+            v._fit_after_worker_start = True
+            with mock.patch("floe.gtkservice.ViewWorker") as worker:
+                Viewer._make_view_worker(v, v.cache)
+            self.assertEqual(worker.call_args.kwargs["margin"], asked)
+            self.assertEqual(worker.call_args.kwargs["frame_cache"],
+                             frame_cache)
 
     def test_rust_gui_startup_does_not_import_klayout(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -340,10 +395,12 @@ def guarded_import(name, *args, **kwargs):
 builtins.__import__ = guarded_import
 os.environ.pop("FLOE_RENDERER", None)
 
-import floe2
-from floe import cache
+# the Rust-only product (floe/product.py), as `import floe2` said before
+# the Rust command line took the Python floe2 package's place
+os.environ["FLOE_PRODUCT"] = "floe2"
+from floe_oracle import cache
 from floe import gui
-from floe.service import make_render_worker
+from floe_oracle.service import make_render_worker
 
 class Cache:
     src = "/tmp/source.oas"
@@ -354,13 +411,19 @@ worker = make_render_worker(Cache())
 assert worker.__class__.__name__ == "RustRenderWorker"
 assert cache.db.__class__.__name__ == "_LazyKLayoutDb"
 assert all(not name.startswith("klayout") for name in sys.modules)
-assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
-                      "src": {"size": 1}}) == (256, 1024)
+# the frozen shell's view policy (the floe2 viewer no longer reads it, P2d)
+from floe_oracle.view_policy import live_caps
+assert live_caps({"grid": {"nx": 1, "ny": 1},
+                  "src": {"size": 1}}) == (256, 1024)
+assert not hasattr(gui, "live_caps")
 '''
             environment = os.environ.copy()
             environment.update({
                 "FLOE_RENDERD_BIN": binary,
                 "PYTHONDONTWRITEBYTECODE": "1",
+                # the frozen shell's modules (dev-only oracle, P3)
+                "PYTHONPATH": os.pathsep.join(
+                    (str(ROOT / "tools" / "oracle"), str(ROOT))),
             })
             environment.pop("FLOE_RENDERER", None)
             completed = subprocess.run(
@@ -370,8 +433,8 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_klayout_is_an_explicit_abstract_capable_rollback(self):
-        from floe import service
-        from floe.cli import _renderer_backend
+        from floe_oracle import service
+        from floe_oracle.cli import _renderer_backend
 
         sentinel = object()
         with tempfile.TemporaryDirectory() as directory, \
@@ -467,17 +530,28 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         v.worker = SimpleNamespace(supports_density=True)
         gui.Viewer._sync_density_capability(v)
         self.assertTrue(v._density_menu_item.sensitive)
-        off = gui.Viewer._render_key(v, "live")
+        p = _policy_viewer()
+        self.assertFalse(gui.Viewer._ctl_policy(p)["density"])
         gui.Viewer._toggle_density(v)
         self.assertTrue(v.density_on)
         self.assertEqual(redraws, [True])
-        self.assertNotEqual(gui.Viewer._render_key(v, "live"), off)
+        p.density_on = v.density_on
+        self.assertTrue(gui.Viewer._ctl_policy(p)["density"],
+                        "the view controller's patch carries it")
+        # none where nothing is under a cut (exact) or in a deck's frames -
+        # floe2 render's rule (app-core shots::density_on, render.rs)
+        p.cut_px = 0.0
+        self.assertFalse(gui.Viewer._ctl_policy(p)["density"])
+        p.cut_px = 3.0
+        self.assertFalse(gui.Viewer._ctl_policy(p, deck=True)["density"])
+        # unsaid it starts on (user 2026-10-12); FLOE_RUST_DENSITY_STACK=off
+        # is the kill switch
+        start = inspect.getsource(gui.Viewer.__init__)
+        self.assertIn('os.environ.get("FLOE_RUST_DENSITY_STACK") != "off"', start)
         # the key, the menu, the status line and both render jobs
         self.assertIn("self._toggle_density()", inspect.getsource(gui.Viewer._on_key))
         self.assertIn('"density under the cut\\tv"', inspect.getsource(gui.Viewer._build_menubar))
         self.assertIn("density:%s", inspect.getsource(gui.Viewer._depth_label))
-        self.assertIn('job["density"] = self.density_on', inspect.getsource(gui.Viewer._submit_render))
-        self.assertIn('job["density"] = self.density_on', inspect.getsource(gui.Viewer._submit_margin))
         # a forwarded density= (and --density through pending_fields)
 
         class Status:
@@ -496,33 +570,43 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         self.assertTrue(gui.Viewer._forwarded_view_options(v, ["density=on"]))
         self.assertTrue(v.density_on)
 
-    def test_a_dropped_foreground_render_clears_the_pending_state(self):
-        """Review 2026-09-30: the mouse waits on _pending until the pending
-        generation's first frame; a `dropped` answer for that generation
-        (unreachable today - a stale generation is never sent) must clear it
-        rather than leave the viewer waiting for ever; another generation's
-        `dropped` (a margin's) leaves it be."""
+    def test_a_refused_frame_clears_the_pending_state_and_is_said(self):
+        """Review 2026-09-30: the mouse waits on _pending until a frame of
+        the state lands; a frame renderd refuses (the view controller's
+        render_failure, P4a) must clear it and say why - once - rather than
+        leave the viewer waiting for ever; Esc's cancel (cancelled_rev) is
+        said the same way; an answer the channel refused clears it too."""
         from floe.gui import Viewer
 
-        texts = []
-        worker = SimpleNamespace(submit=lambda job: None)
-        v = _stub_margin_viewer(worker, True)
-        v._pending_timer = None
-        v._pending = 5
-        v.rstatus = SimpleNamespace(set_text=texts.append)
-        v._set_cursor = lambda cursor: None
-        v._idle_cursor = lambda: "idle"
-        v._margin_debug = lambda message: None
-        Viewer._handle_result(v, {"kind": "dropped", "gen": 4, "reason": "fit"})
-        self.assertEqual(v._pending, 5, "another generation's drop")
-        Viewer._handle_result(v, {"kind": "dropped", "gen": 5, "reason": "stale"})
+        v = self._render_wait_viewer(SimpleNamespace())
+        v._ctl_shown_rev = 2
+        v._ctl_said = None
+        v.max_depth = None
+        rendering = {"phase": "rendering", "render_rev": 3, "max_depth": 7,
+                     "render_failure": None, "cancelled_rev": None}
+        Viewer._ctl_view(v, rendering)
+        self.assertEqual((v._pending, v.max_depth), (5, 7),
+                         "still waiting, the depth learned")
+        refused = dict(rendering, phase="idle", render_failure={
+            "render_rev": 3, "message": "budget: over"})
+        Viewer._ctl_view(v, refused)
         self.assertIsNone(v._pending)
-        self.assertEqual(texts[-1], "render dropped (stale)")
+        self.assertEqual(v.texts[-1], "error: budget: over")
+        n = len(v.texts)
+        Viewer._ctl_view(v, refused)
+        self.assertEqual(len(v.texts), n, "said once")
+        Viewer._ctl_view(v, dict(rendering, render_rev=4, phase="idle",
+                                 cancelled_rev=4))
+        self.assertEqual(v.texts[-1], "render cancelled")
+        v._pending = 9
+        Viewer._handle_result(v, {"kind": "error", "msg": "edit refused"})
+        self.assertIsNone(v._pending)
+        self.assertEqual(v.texts[-1], "error: edit refused")
 
     def _render_wait_viewer(self, worker, pending=5):
-        """A Viewer shell in the middle of a render (gen == _pending)."""
+        """A Viewer shell in the middle of a render (_pending set)."""
         v = _stub_margin_viewer(worker, True)
-        v.gen = v._pending = pending
+        v._pending = pending
         v._pending_timer = None
         v._pending_t0 = 0.0
         v._debounce = None
@@ -541,30 +625,30 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
 
     def test_esc_cancels_the_render_in_flight_before_the_chain(self):
         """Field 2026-09-30: Esc during "rendering…" did nothing to the
-        render. Now the first Esc moves the daemon's frontier past the
-        pending generation (worker.cancel(before_gen)), bumps the viewer's
-        generation so a late frame of the cancelled one is not shown, and
-        clears the pending state; the rulers and the rest of the chain wait
-        for the next Esc. A worker without cancel still unblocks; the density
+        render. Now the first Esc asks the view controller to stop the
+        frame in progress (worker.cancel(): renderd drops it at its next
+        step and the controller does not draw that state again) and clears
+        the pending state; the rulers and the rest of the chain wait for
+        the next Esc. A worker without cancel still unblocks; the density
         round being drawn (refining, nothing pending) is cancelled the same
         way."""
         from floe.gui import Viewer
 
         cancelled = []
-        v = self._render_wait_viewer(SimpleNamespace(submit=lambda job: None, cancel=cancelled.append))
+        v = self._render_wait_viewer(SimpleNamespace(cancel=lambda: cancelled.append(1)))
         Viewer._esc(v)
-        self.assertEqual(cancelled, [6], "before_gen = the cancelled generation + 1")
-        self.assertEqual((v._pending, v.gen, v._refining), (None, 6, False))
+        self.assertEqual(cancelled, [1])
+        self.assertEqual((v._pending, v._refining), (None, False))
         self.assertEqual(v.texts[-1], "render cancelled")
         self.assertEqual(len(v.rulers), 1, "the chain waits for the next Esc")
         # the density round being drawn: refining, nothing pending
-        v = self._render_wait_viewer(SimpleNamespace(submit=lambda job: None, cancel=cancelled.append))
+        v = self._render_wait_viewer(SimpleNamespace(cancel=lambda: cancelled.append(2)))
         v._pending = None
         v._refining = True
         Viewer._esc(v)
-        self.assertEqual((cancelled[-1], v._refining, v.gen), (6, False, 6))
-        # a worker without cancel (the KLayout service): the state clears anyway
-        v = self._render_wait_viewer(SimpleNamespace(submit=lambda job: None))
+        self.assertEqual((cancelled[-1], v._refining), (2, False))
+        # a worker without cancel: the state clears anyway
+        v = self._render_wait_viewer(SimpleNamespace())
         Viewer._esc(v)
         self.assertIsNone(v._pending)
 
@@ -591,57 +675,6 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         self.assertEqual(len(zoomed), 1)
         self.assertEqual(zoomed[0][:2], (10.0, 20.0))
 
-    def test_a_settled_frame_of_this_view_does_not_render_again(self):
-        """Field 2026-09-30 ("rendering repeats"): 0.12.251 re-rendered
-        after every settled frame that _covered did not accept - and with the
-        margin off _covered wants comfort around the view that a fresh
-        viewport frame (<= 2 px snap slack) never has. A frame that holds the
-        view tops the margin up; one the view has left renders it; a pending
-        debounce or a pan in progress does neither."""
-        from floe.gui import Viewer
-
-        calls = []
-        v = self._render_wait_viewer(SimpleNamespace(submit=lambda job: None))
-        v._pending = None
-        v._drag = None
-        v.margin_on = False
-        v.redraw = lambda immediate=False: calls.append("redraw")
-        v._schedule_margin = lambda: calls.append("margin")
-        b = v.view_bbox()
-        # the exact viewport frame: the snap grows it by 2 px on one side only
-        v.last_frame = (None, (b[0], b[1] - 2 * v.spp, b[2] + 2 * v.spp, b[3]), v.spp, _MARGIN_KEY)
-        self.assertFalse(Viewer._covered(v, b, "live"), "the reuse test refuses it (margin off)")
-        Viewer._settle_after_frame(v)
-        self.assertEqual(calls, ["margin"], "a frame of this view renders nothing again")
-        # the view moved away while the frame was drawn, nothing submitted
-        v.cx += 500 * v.spp
-        Viewer._settle_after_frame(v)
-        self.assertEqual(calls[-1], "redraw")
-        # a render of the new view already on its way, or a pan in progress
-        n = len(calls)
-        v._debounce = 17
-        Viewer._settle_after_frame(v)
-        v._debounce, v._drag = None, (1.0, 2.0)
-        Viewer._settle_after_frame(v)
-        self.assertEqual(len(calls), n)
-
-    def test_an_older_generations_error_leaves_the_pending_render(self):
-        """An error of a superseded generation (its late failure) must not
-        clear the state of the one now pending; the pending one's, and an
-        adapter failure without a generation, must."""
-        from floe.gui import Viewer
-
-        v = self._render_wait_viewer(SimpleNamespace(submit=lambda job: None))
-        Viewer._handle_result(v, {"kind": "error", "gen": 4, "msg": "late"})
-        self.assertEqual(v._pending, 5)
-        Viewer._handle_result(v, {"kind": "cancelled", "gen": 4, "phase": "render"})
-        self.assertEqual(v._pending, 5, "an older generation's cancellation")
-        Viewer._handle_result(v, {"kind": "cancelled", "gen": 5, "phase": "queued"})
-        self.assertIsNone(v._pending)
-        v = self._render_wait_viewer(SimpleNamespace(submit=lambda job: None))
-        Viewer._handle_result(v, {"kind": "error", "msg": "submit failed"})
-        self.assertIsNone(v._pending, "an adapter failure carries no generation")
-
     def test_the_bar_shows_the_brief_perf_line_and_the_log_keeps_the_whole(self):
         """User 2026-10-01: "the log has it all; the bar should show only
         what is needed now, without an ellipsis". perf_status gives the
@@ -654,7 +687,8 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         Pass 2's shapes under the cut look like dots too but are no cell's:
         a frame lights them with no cell dot (user 2026-10-01: "two draws
         and dots, yet dot items 0")."""
-        from floe.gui import Viewer, perf_status
+        from floe.gui import Viewer
+        from floe_oracle.perf_line import perf_status
 
         # the field's frame of 2026-10-01 (renderd 0.12.242)
         res = {
@@ -898,187 +932,6 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
             " open 8.8 s] + first frame 2.50 s) · ")
         self.assertEqual(load_brief, "loaded in 12.5 s · ")
         self.assertEqual(Viewer._load_note(v, {}), ("", ""))
-
-    def test_margin_prefetch_is_a_rust_only_reuse_capability(self):
-        """P0 review (2026-09-05): the F2R-17 margin prefetch lives in
-        the shared GUI and used to fire for ANY backend - stable
-        floe/KLayout would have rendered ~4.8x the pixels of every
-        settled view as foreground work (its service also dropped the
-        bg flag). The GUI now gates on the worker capability AND on
-        --frame-cache (off under --perf-baseline), and _covered() only
-        crops an oversize frame while the margin is enabled."""
-        from floe import service
-        from floe.gui import Viewer
-
-        self.assertTrue(RustRenderWorker.supports_margin_prefetch)
-        self.assertFalse(service.RenderWorker.supports_margin_prefetch)
-
-        key = _MARGIN_KEY
-        submitted = []
-        make = _stub_margin_viewer
-
-        rust = SimpleNamespace(supports_margin_prefetch=True,
-                               alive=lambda: True,
-                               submit=lambda job: submitted.append(job))
-        klayout = SimpleNamespace(supports_abstract=True,
-                                  alive=lambda: True,
-                                  submit=lambda job: submitted.append(job))
-
-        v = make(klayout, True)
-        Viewer._schedule_margin(v)
-        self.assertFalse(Viewer._submit_margin(v))
-        self.assertEqual(submitted, [], "KLayout must never get a margin")
-        self.assertIsNone(v._margin_pending)
-
-        v = make(rust, False)
-        Viewer._schedule_margin(v)
-        self.assertEqual(submitted, [], "--frame-cache off disables it")
-
-        v = make(rust, True)
-        Viewer._schedule_margin(v)
-        self.assertEqual(len(submitted), 1)
-        job = submitted[0]
-        self.assertTrue(job["bg"])
-        # ~2x2 viewports: one snapped half-step per side (exact sizes
-        # pinned below)
-        self.assertGreaterEqual(job["w"], 2 * 858)
-        self.assertGreaterEqual(job["h"], 2 * 802)
-        # §F2R-21 (user call): the margin carries the labels of its
-        # own box so a pan inside it is a labelled crop
-        self.assertEqual(job["labels"], v.labels_on)
-        self.assertTrue(job["labels"])
-        self.assertTrue(job["frames"], "hierarchy outlines are geometry")
-        self.assertEqual(v._margin_pending[0], job["gen"])
-
-        # exact fit (user call 2026-09-05): the landed margin covers
-        # one snapped 50% arrow step per side to the pixel - the step
-        # itself is a crop, one more 16 px period is not
-        v = make(rust, True)
-        Viewer._submit_margin(v)
-        job = submitted[-1]
-        v.last_frame = (None, tuple(job["bbox"]), v.spp, key)
-        w_px, h_px = v._viewport_size()
-        step_x = Viewer._snap_pan_px(v, w_px * 0.5)
-        step_y = Viewer._snap_pan_px(v, h_px * 0.5)
-        self.assertEqual(job["w"], w_px + 2 + 2 * step_x)
-        self.assertEqual(job["h"], h_px + 2 + 2 * step_y)
-        cx, cy = v.cx, v.cy
-        for sx, sy in ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, -1)):
-            v.cx = cx + sx * step_x * v.spp
-            v.cy = cy + sy * step_y * v.spp
-            self.assertTrue(Viewer._covered(v, v.view_bbox(), "live"),
-                            "one 50%% step (%d,%d) must be a crop" % (sx, sy))
-            v.cx = cx + sx * (step_x + 16) * v.spp
-            v.cy = cy + sy * (step_y + 16) * v.spp
-            self.assertFalse(Viewer._covered(v, v.view_bbox(), "live"),
-                             "a step plus one period must re-render")
-        v.cx, v.cy = cx, cy
-
-        # _covered(): an oversize (margin) frame serves a shifted view
-        # only while the margin is enabled; the exact frame keeps
-        # serving the unchanged view either way
-        for worker, frame_cache, crops in ((rust, True, True),
-                                           (rust, False, False),
-                                           (klayout, True, False)):
-            v = make(worker, frame_cache)
-            b = v.view_bbox()
-            self.assertTrue(Viewer._covered(v, b, "live"))
-            vw, vh = b[2] - b[0], b[3] - b[1]
-            v.last_frame = (None, (b[0] - vw, b[1] - vh,
-                                   b[2] + vw, b[3] + vh), v.spp, key)
-            shifted = (b[0] + 0.3 * vw, b[1], b[2] + 0.3 * vw, b[3])
-            self.assertEqual(Viewer._covered(v, shifted, "live"), crops)
-
-    def test_margin_prefetch_caps_pixels_for_large_viewports(self):
-        """§F2R-20: a margin frame is bounded in pixels so renderd's
-        retained set, the publish file and the GUI pixbuf stay small
-        on shared hosts. Ordinary windows keep the exact one-step
-        margin; a 4K window shrinks both extensions (16 px multiples)
-        to fit; a window that fills the cap alone gets no margin. A
-        capped margin still counts as "already margined" once landed
-        and centered, so it is not topped up after every pan."""
-        from floe.gui import MARGIN_MAX_MPIX, Viewer
-
-        submitted = []
-        rust = SimpleNamespace(supports_margin_prefetch=True,
-                               alive=lambda: True,
-                               submit=lambda job: submitted.append(job))
-        cap = MARGIN_MAX_MPIX << 20
-
-        v = _stub_margin_viewer(rust, True, viewport=(2560, 1440))
-        v._margin_max_px = cap
-        self.assertTrue(Viewer._submit_margin(v) is False and submitted)
-        job = submitted[-1]
-        self.assertEqual((job["w"], job["h"]),
-                         (2560 + 2 + 2 * 1280, 1440 + 2 + 2 * 720),
-                         "a QHD window keeps the full one-step margin")
-        self.assertLessEqual(job["w"] * job["h"], cap)
-
-        v = _stub_margin_viewer(rust, True, viewport=(3840, 2160))
-        v._margin_max_px = cap
-        Viewer._submit_margin(v)
-        job = submitted[-1]
-        self.assertLessEqual(job["w"] * job["h"], cap, "capped")
-        ex = (job["w"] - 3842) // 2
-        ey = (job["h"] - 2162) // 2
-        self.assertEqual((job["w"] - 3842) % 32, 0)
-        self.assertEqual((job["h"] - 2162) % 32, 0)
-        self.assertGreater(ex, 0)
-        self.assertGreater(ey, 0)
-        self.assertLess(ex, 1920)
-        self.assertLess(ey, 1080)
-        # tight: one more 16 px period on both axes would break the
-        # cap (each axis is floored to the period from one common
-        # shrink factor, so a single axis may keep sub-period slack)
-        self.assertGreater((job["w"] + 32) * (job["h"] + 32), cap)
-        # landed and centered: no top-up; drift past 30% of the
-        # (smaller) extension: top-up
-        v.last_frame = (None, tuple(job["bbox"]), v.spp, _MARGIN_KEY)
-        v._margin_pending = None
-        before = len(submitted)
-        Viewer._schedule_margin(v)
-        self.assertEqual(len(submitted), before, "centered: no top-up")
-        v.cx += 0.5 * ex * v.spp
-        Viewer._schedule_margin(v)
-        self.assertEqual(len(submitted), before + 1, "drifted: top-up")
-
-        v = _stub_margin_viewer(rust, True, viewport=(3840, 2160))
-        v._margin_max_px = 3842 * 2162
-        before = len(submitted)
-        self.assertFalse(Viewer._submit_margin(v))
-        self.assertEqual(len(submitted), before,
-                         "no room under the cap: no margin at all")
-
-    def test_pan_inside_a_landed_margin_submits_without_debounce(self):
-        """§F2R-21 field: with labels on the landed margin is display
-        base + renderd reuse only; an arrow pan that stays inside it
-        submits immediately (fast path), one that leaves it debounces."""
-        from floe.gui import Viewer
-
-        rust = SimpleNamespace(supports_margin_prefetch=True,
-                               alive=lambda: True, submit=lambda job: None)
-        v = _stub_margin_viewer(rust, True)
-        calls = []
-        v.redraw = lambda immediate=False: calls.append(immediate)
-        b = v.view_bbox()
-        vw, vh = b[2] - b[0], b[3] - b[1]
-        # a margin 1.5 viewports wide on each side: two snapped 50%
-        # steps (2 x 432 px) stay inside, the third (1296 px) leaves
-        v._margin_frame = (object(), (b[0] - 1.5 * vw, b[1] - 1.5 * vh,
-                                      b[2] + 1.5 * vw, b[3] + 1.5 * vh),
-                           v.spp, _MARGIN_KEY)
-        Viewer._pan_view(v, "Right")
-        Viewer._pan_view(v, "Right")
-        Viewer._pan_view(v, "Right")
-        self.assertEqual(calls, [True, True, False])
-        v._margin_frame = None
-        Viewer._pan_view(v, "Left")
-        self.assertEqual(calls[-1], False)
-        # a margin of another render state or scale is no base
-        v._margin_frame = (object(), (b[0] - vw, b[1] - vh,
-                                      b[2] + vw, b[3] + vh),
-                           v.spp * 2, _MARGIN_KEY)
-        self.assertIsNone(Viewer._margin_base(v))
 
     def test_margin_geometry_fills_the_strip_a_pan_uncovers(self):
         """§F2R-21 field (2026-09-05): a pan used to show the incoming
@@ -1413,7 +1266,6 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         v.last_frame = ("frame",)
         v._margin_frame = ("margin",)
         v._frame_anchor = (1, 2)
-        v._job_keys = {3: "k"}
         v._clear_pending = lambda: None
         v._cell_hl = {"boxes": []}
         v._cell_hl_key = "k"
@@ -1433,7 +1285,12 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         v.worker = types.SimpleNamespace(alive=lambda: True,
                                          submit=sent.append)
         v._cell_insts_seq = None
-        plain_key = v._render_key("live")
+        v._viewport_size = lambda: (800, 600)
+        v._depth = lambda: None
+        v._layers_arg = lambda: None
+        v.label_font_px = 14
+        v._mono = v.density_on = False
+        self.assertIsNone(v._ctl_policy()["root"])
         self.assertIsNone(v._root_ci())
         self.assertEqual(v._die_bbox(), [0, 0, 20000, 12000])
         self.assertEqual(v._minimap_frontier_depth(), 0)
@@ -1454,8 +1311,8 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         self.assertEqual(v._minimap_bases, {})
         self.assertIsNone(v.last_frame)
         self.assertIsNone(v._margin_frame)
-        self.assertEqual(v._job_keys, {})
-        self.assertNotEqual(v._render_key("live"), plain_key)
+        self.assertEqual(v._ctl_policy()["root"], {"src": 0, "cell": 5},
+                         "the view controller's patch carries the root")
         self.assertEqual(titles[-1], "floe - x · root BLK")
         self.assertIn("view root: BLK", status[-1])
         # the highlight was re-asked under the root
@@ -1477,7 +1334,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         v._cell_root_top()
         self.assertIsNone(v._root_ci())
         self.assertEqual(v._die_bbox(), [0, 0, 20000, 12000])
-        self.assertEqual(v._render_key("live"), plain_key)
+        self.assertIsNone(v._ctl_policy()["root"])
         self.assertEqual(titles[-1], "floe - x")
         self.assertEqual(len(fits), 2)
         # a jobdeck has no view root
@@ -1655,7 +1512,7 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
         v.dbu, v.spp = 0.001, 1.0
         v._viewport_size = lambda: (800, 400)
         v.rulers, v._drc_ruler = [], []
-        v._drc_cd_ruler = lambda e: []
+        v._drc_cd_ruler = lambda e, name=None: []
         v._drc_waived = lambda db_, ci, ei: False
         v._drc_isolate_layers = lambda name: None
         v._drc_show_detail = lambda ci, ei: None
@@ -1902,6 +1759,45 @@ assert gui.live_caps({"grid": {"nx": 1, "ny": 1},
                 lines[0].startswith("floe-index unavailable:"), lines)
             self.assertTrue(
                 lines[1].startswith("floe-renderd unavailable:"), lines)
+            # no override: the binaries beside the floe2 that started the
+            # viewer (FLOE2_BIN) - floe2's own - win over this checkout's
+            # build (user 2026-10-13: About found none of the bundle's)
+            env = {"FLOE2_BIN": os.path.join(directory, "floe2")}
+            with mock.patch.dict(os.environ, env, clear=False):
+                os.environ.pop("FLOE_INDEX_BIN", None)
+                os.environ.pop("FLOE_RENDERD_BIN", None)
+                self.assertEqual(gui.component_versions(None), [
+                    "floe-index 9.9.9 abc (native)",
+                    "floe-renderd 0.12.11",
+                ])
+
+    def test_the_viewer_finds_the_binaries_floe2_runs(self):
+        """floe/vfsclient.py beside_floe2 = app-core native::Discovery: a
+        rust/target/<profile> floe2 takes its checkout's release build, a
+        cross build (target/<triple>/release) the one beside it."""
+        from floe import vfsclient
+        with tempfile.TemporaryDirectory() as directory:
+            target = os.path.join(directory, "rust", "target")
+
+            def stub(*parts):
+                path = os.path.join(target, *parts)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="ascii") as script:
+                    script.write("#!/bin/sh\n")
+                os.chmod(path, 0o755)
+                return path
+
+            release = stub("release", "floe-index")
+            stub("debug", "floe-index")
+            triple = stub("x86_64-unknown-linux-gnu", "release", "floe-index")
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("FLOE_INDEX_BIN", None)
+                for floe2, want in (
+                        (os.path.join(target, "debug", "floe2"), release),
+                        (os.path.join(target, "x86_64-unknown-linux-gnu",
+                                      "release", "floe2"), triple)):
+                    os.environ["FLOE2_BIN"] = floe2
+                    self.assertEqual(vfsclient.find_binary(), want)
 
     def test_converts_patterns_and_preserves_special_fills(self):
         solid = "\n".join(["*" * 16] * 16)
@@ -3012,14 +2908,239 @@ class LayerListTests(unittest.TestCase):
             self.assertEqual(v._layers_arg(), [(3, 0), (3, 300), (6, 0)])
 
 
+class PaletteTests(unittest.TestCase):
+    """A layout's default layer colours follow the layer panel's rows (user
+    2026-10-13: "a group shows one colour - 2.0 2.1 2.2 2.32 - give
+    consecutive layers different colours, in the viewer and in captures";
+    the layer number keyed them from 2026-08-04): the pairs holding shapes
+    in (layer, datatype) order take golden-angle steps of hue - app-core
+    styles::palette_ranks when a cache opens, floe-index's meta.json and the
+    oracle's normalisation alike; a LAYERNAME-only pair goes after them; a
+    layerprops colour still wins and moves no other row's. `group` (user
+    2026-10-13: "a group's colours sometimes have to be one too - a run
+    option"): floe2 render --layer-colors group, or FLOE_LAYER_COLORS=group
+    for the viewer's service and captures alike, gives one colour per layer
+    number; the option beats the environment; the report says which."""
+
+    PAIRS = [(2, 0), (2, 1), (2, 2), (2, 32), (3, 0), (3, 1), (5, 0)]
+
+    def test_neighbouring_rows_differ_in_the_viewer_and_in_captures(self):
+        import copy
+        import json
+        import klayout.db as db
+        from PIL import Image
+        from floe import gtkservice
+        from floe_oracle.cache import layer_color, normalize_layer_colors
+        from floe_oracle.cachepath import vfs_cache_dir
+
+        release = ROOT / "rust" / "target" / "release"
+        floe2 = os.environ.get("FLOE2_BIN") or str(release / "floe2")
+        env = dict(os.environ, FLOE_INDEX_BIN=str(release / "floe-index"),
+                   FLOE_RENDERD_BIN=str(release / "floe-renderd"))
+        env.pop("FLOE_EMPTY_LAYERS", None)
+        env.pop("FLOE_RENDER_DEFAULTS", None)
+        with tempfile.TemporaryDirectory() as directory:
+            src = os.path.join(directory, "groups.oas")
+            layout = db.Layout()
+            layout.dbu = 0.001
+            top = layout.create_cell("TOP")
+            for i, (layer, datatype) in enumerate(self.PAIRS):
+                li = layout.layer(db.LayerInfo(layer, datatype))
+                top.shapes(li).insert(
+                    db.Box(i * 12000, 0, i * 12000 + 10000, 10000))
+            # named by the layer table alone: nothing on it
+            layout.layer(db.LayerInfo(2, 5, "NAMED"))
+            layout.write(src)
+            subprocess.run([floe2, "index", src, "--jobs", "1"], env=env,
+                           check=True, capture_output=True, timeout=120)
+            rows = {key: layer_color(n) for n, key in enumerate(self.PAIRS)}
+            groups = {key: layer_color(key[0]) for key in self.PAIRS}
+            colours = [rows[key] for key in self.PAIRS]
+            self.assertEqual(len(set(colours)), len(colours))
+            # floe-index's meta.json: the empty pair after the drawn ones
+            with open(os.path.join(vfs_cache_dir(src), "meta.json")) as f:
+                meta = json.load(f)
+            written = {(l["layer"], l["datatype"]): l["color"]
+                       for l in meta["layers"]}
+            self.assertEqual(written, {**rows, (2, 5): layer_color(len(self.PAIRS))})
+            # the oracle's normalisation of it (an old cache) is the same
+            def keyed(layers):
+                return {(l["layer"], l["datatype"]): l["color"] for l in layers}
+
+            normal = normalize_layer_colors(copy.deepcopy(meta))
+            self.assertEqual(keyed(normal["layers"]), written)
+            with mock.patch.dict(os.environ, {"FLOE_LAYER_COLORS": "group"}):
+                normal = normalize_layer_colors(copy.deepcopy(meta))
+            self.assertEqual(keyed(normal["layers"]),
+                             {**groups, (2, 5): layer_color(2)})
+
+            def panel(**environ):
+                # the viewer's service, as `floe2 view` starts it
+                with mock.patch.dict(os.environ, environ):
+                    svc = gtkservice.Service(floe2)
+                    try:
+                        opened = svc.request("open", source=src, levels=None,
+                                             mode="level")
+                    finally:
+                        svc.close()
+                return keyed(opened["meta"]["layers"])
+
+            def captured(*extra, **environ):
+                out = os.path.join(directory, "capture.png")
+                report = os.path.join(directory, "capture.json")
+                subprocess.run(
+                    [floe2, "render", src, "--bbox", "0,0,84,10",
+                     "--px", "840x100", "--stretch", "--archival",
+                     "--out", out, "--report", report, *extra],
+                    env={**env, **environ}, check=True, capture_output=True,
+                    timeout=120)
+                image = Image.open(out).convert("RGB")
+                with open(report) as f:
+                    said = json.load(f)["layer_colors"]
+                return {key: "#%02x%02x%02x" % image.getpixel(
+                    ((12 * i + 5) * 10, 50))
+                    for i, key in enumerate(self.PAIRS)}, said
+
+            # the viewer's rows (gtk-service open: app-core's catalog) and a
+            # capture's solid fills draw them so
+            self.assertEqual(panel(), rows)
+            self.assertEqual(captured(), (rows, "row"))
+            # one colour per layer number, asked for: the option, or the
+            # environment the viewer's service and captures share
+            self.assertEqual(captured("--layer-colors", "group"), (groups, "group"))
+            self.assertEqual(panel(FLOE_LAYER_COLORS="group"), groups)
+            self.assertEqual(captured(FLOE_LAYER_COLORS="group"), (groups, "group"))
+            self.assertEqual(captured("--layer-colors", "row", FLOE_LAYER_COLORS="group"),
+                             (rows, "row"))
+            # a layerprops colour wins; the other rows keep their colours
+            with open(src + ".layerprops", "w") as f:
+                f.write("2.1 #ffffff solid PINNED 1 1\n")
+            pinned = {**rows, (2, 1): "#ffffff"}
+            self.assertEqual(panel(), pinned)
+            self.assertEqual(captured(), (pinned, "row"))
+            self.assertEqual(captured("--layer-colors=group"),
+                             ({**groups, (2, 1): "#ffffff"}, "group"))
+            # a jobdeck keeps its colour scheme: the option is refused
+            refused = subprocess.run(
+                [floe2, "render", os.path.join(directory, "none.jb"),
+                 "--layer-colors", "group"],
+                env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(refused.returncode, 2, refused.stderr)
+            self.assertIn("for layouts", refused.stderr)
+
+
+class LegendTests(unittest.TestCase):
+    """floe2 render --legend (user 2026-10-13: "a command to include a
+    legend in a capture" - (가), the DRC captures' way): each image carries
+    the legend of the layers it draws as flateyes metadata - `box COLOUR FILL
+    NAME L/D` from the styles the frame is drawn with (app-core legend.rs):
+    every layer on, the layer panel's rows (no LAYERNAME-only pair); --layers,
+    its pairs in its order; --archival, solid; a layerprops pattern by name,
+    clear as none; --layer-colors group, the group colours; each batch shot
+    its own; a mosaic's final image. The pixels stay as drawn: stripped of
+    the metadata, the PNG is the capture without --legend byte for byte."""
+
+    PAIRS = [(2, 0), (2, 1), (2, 2), (2, 32), (3, 0), (3, 1), (5, 0)]
+
+    def test_each_image_carries_the_legend_of_the_layers_it_draws(self):
+        import json
+        import klayout.db as db
+        from floe_oracle.cache import layer_color
+
+        release = ROOT / "rust" / "target" / "release"
+        floe2 = os.environ.get("FLOE2_BIN") or str(release / "floe2")
+        env = dict(os.environ, FLOE_INDEX_BIN=str(release / "floe-index"),
+                   FLOE_RENDERD_BIN=str(release / "floe-renderd"))
+        for name in ("FLOE_EMPTY_LAYERS", "FLOE_RENDER_DEFAULTS", "FLOE_LAYER_COLORS"):
+            env.pop(name, None)
+
+        def floe(*args, ok=True):
+            done = subprocess.run([floe2, *map(str, args)], env=env, capture_output=True,
+                                  text=True, timeout=120)
+            if ok:
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+            return done
+
+        def legend(png):
+            dump = floe("fe-embed", "--dump", png).stdout
+            return [line.split("=", 1)[1] for line in dump.splitlines()
+                    if line.startswith("legend=")]
+
+        def rows(pairs, fill="speckle", colour=None):
+            colour = colour or (lambda key: layer_color(self.PAIRS.index(key)))
+            return ["box %s %s L%dD%d %d/%d" % (colour(key), fill, key[0], key[1], *key)
+                    for key in pairs]
+
+        with tempfile.TemporaryDirectory() as directory:
+            d = Path(directory)
+            src = d / "groups.oas"
+            layout = db.Layout()
+            layout.dbu = 0.001
+            top = layout.create_cell("TOP")
+            for i, (layer, datatype) in enumerate(self.PAIRS):
+                li = layout.layer(db.LayerInfo(layer, datatype, "L%dD%d" % (layer, datatype)))
+                top.shapes(li).insert(db.Box(i * 12000, 0, i * 12000 + 10000, 10000))
+            layout.layer(db.LayerInfo(2, 5, "NAMED"))
+            layout.write(str(src))
+            floe("index", src, "--jobs", "1")
+
+            def capture(name, *extra):
+                out, report = d / (name + ".png"), d / (name + ".json")
+                floe("render", src, "--px", "300", "--out", out, "--report", report, *extra)
+                return out, json.loads(report.read_text())
+
+            # every layer on: the panel's rows, the empty 2/5 left out
+            out, report = capture("all", "--legend")
+            self.assertEqual(legend(out), rows(self.PAIRS))
+            self.assertIs(report["legend"], True)
+            self.assertEqual(report["shots"][0]["legend"], rows(self.PAIRS))
+            # the pixels as drawn: stripped, the capture without --legend
+            plain, plain_report = capture("plain")
+            self.assertEqual(legend(plain), [])
+            self.assertIs(plain_report["legend"], False)
+            self.assertNotIn("legend", plain_report["shots"][0])
+            floe("fe-embed", "--strip", out)
+            self.assertEqual(out.read_bytes(), plain.read_bytes())
+            # --layers: its pairs in its order
+            out, _ = capture("some", "--legend", "--layers", "3/0,2/1")
+            self.assertEqual(legend(out), rows([(3, 0), (2, 1)]))
+            # --archival draws solid; --layer-colors group, one colour a layer
+            out, _ = capture("archival", "--legend", "--archival")
+            self.assertEqual(legend(out), rows(self.PAIRS, "solid"))
+            out, _ = capture("group", "--legend", "--layer-colors", "group")
+            self.assertEqual(legend(out), rows(self.PAIRS, colour=lambda key: layer_color(key[0])))
+            # a layerprops pattern by name, clear as none, the colours named
+            (d / "groups.oas.layerprops").write_text(
+                "2.1 #ffffff diagonal_right_wide PINNED 1 1\n3 orange clear OUTLINE 1 2\n")
+            out, _ = capture("props", "--legend", "--layers", "2/1,3/0,5/0")
+            self.assertEqual(legend(out), [
+                "box #ffffff diagonal_right_wide L2D1 2/1",
+                "box #ffa500 none L3D0 3/0",
+                "box %s speckle L5D0 5/0" % layer_color(6)])
+            (d / "groups.oas.layerprops").unlink()
+            # each batch shot its own layers'; a mosaic's final image
+            (d / "shots.txt").write_text("wide\nnarrow layers=5/0,2/32\n")
+            floe("render", src, "--px", "200", "--legend", "--batch", d / "shots.txt",
+                 "--out", d / "batch")
+            self.assertEqual(legend(d / "batch" / "wide.png"), rows(self.PAIRS))
+            self.assertEqual(legend(d / "batch" / "narrow.png"), rows([(5, 0), (2, 32)]))
+            mosaic = d / "mosaic.png"
+            floe("render", src, "--corners", "--size", "30,30", "--px", "100", "--legend",
+                 "--layers", "2/0,3/1", "--out", mosaic)
+            self.assertEqual(legend(mosaic), rows([(2, 0), (3, 1)]))
+            # a flag, no value
+            self.assertEqual(floe("render", src, "--legend=on", "--out", d / "x.png",
+                                  ok=False).returncode, 2)
+
+
 @unittest.skipUnless(os.environ.get("FLOE_INTEGRATION_SOURCE"),
                      "set FLOE_INTEGRATION_SOURCE for the real daemon test")
 class RealDaemonIntegrationTests(unittest.TestCase):
     maxDiff = None
 
     def test_parent_cache_progressive_style_and_shutdown(self):
-        from floe.cache import Cache
-        from floe.service import make_render_worker
+        from floe_oracle.cache import Cache
+        from floe_oracle.service import make_render_worker
 
         source = os.path.abspath(os.environ["FLOE_INTEGRATION_SOURCE"])
         cache = Cache(source)
@@ -3337,38 +3458,27 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             # .<source>.ice sibling (floe/cachepath.py).  Give the
             # subprocess a conventional source/cache pair while retaining
             # the same files and metadata.
-            from floe.cachepath import vfs_cache_dir
+            from floe_oracle.cachepath import vfs_cache_dir
             cli_source = os.path.join(directory, "CLI source.oas")
             os.symlink(source, cli_source)
-            os.symlink(cache.dir, vfs_cache_dir(cli_source))
-            # sitecustomize runs before `python -m floe2` and turns an
-            # accidental KLayout import anywhere in the CLI startup path
-            # into a hard failure.  The parent test process keeps KLayout as
-            # the independent OASIS/Region oracle.
-            with open(os.path.join(directory, "sitecustomize.py"),
-                      "w", encoding="ascii") as startup:
-                startup.write(
-                    "import builtins\n"
-                    "_real = builtins.__import__\n"
-                    "def _guard(name, *args, **kwargs):\n"
-                    "    if name == 'klayout' or "
-                    "name.startswith('klayout.'):\n"
-                    "        raise ImportError('KLayout unavailable')\n"
-                    "    return _real(name, *args, **kwargs)\n"
-                    "builtins.__import__ = _guard\n")
+            # a copy, not a link: the Rust command line opens a real cache
+            # folder only (the shared app layer's rule, catalog.rs)
+            shutil.copytree(cache.dir, vfs_cache_dir(cli_source))
+            # the Rust `floe2` (rust/floe2) - no Python, so no KLayout, in
+            # its startup path (the Python CLI this guarded is gone, P1c)
+            floe2 = os.environ.get("FLOE2_BIN") or str(
+                ROOT / "rust" / "target" / "release" / "floe2")
             child_env = os.environ.copy()
             child_env.pop("FLOE_RENDERER", None)
-            child_env["PYTHONPATH"] = directory + os.pathsep + \
-                child_env.get("PYTHONPATH", "")
             completed = subprocess.run(
-                [sys.executable, "-B", "-m", "floe2", "info", cli_source],
+                [floe2, "info", cli_source],
                 cwd=str(ROOT), env=child_env, check=True,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, timeout=10)
             self.assertIn("top cell", completed.stdout)
 
             completed = subprocess.run(
-                [sys.executable, "-B", "-m", "floe2", "probe", cli_source],
+                [floe2, "probe", cli_source],
                 cwd=str(ROOT), env=child_env, check=True,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, timeout=30)
@@ -3376,7 +3486,7 @@ class RealDaemonIntegrationTests(unittest.TestCase):
 
             output = os.path.join(directory, "CLI output with spaces.oas")
             completed = subprocess.run(
-                [sys.executable, "-B", "-m", "floe2", "clip", cli_source,
+                [floe2, "clip", cli_source,
                  "--bbox", bbox_um, "--layers", layer_arg,
                  "--cell-name", "CLI 한글", "--out", output],
                 cwd=str(ROOT), env=child_env, check=True,
@@ -3394,7 +3504,7 @@ class RealDaemonIntegrationTests(unittest.TestCase):
             png_path = os.path.join(
                 directory, "CLI rendered labels with spaces.png")
             completed = subprocess.run(
-                [sys.executable, "-B", "-m", "floe2", "render",
+                [floe2, "render",
                  cli_source, "--bbox", bbox_um, "--layers", layer_arg,
                  "--px", "257", "--depth", "999", "--labels",
                  "--label-font-px", "19", "--out", png_path],
@@ -3463,13 +3573,13 @@ class RealDaemonIntegrationTests(unittest.TestCase):
     def _assert_query_parity(self, cache, worker, bbox):
         """Use the legacy KLayout service only as a query oracle."""
         import klayout.db as db
-        from floe.service import (
+        from floe_oracle.service import (
             _iter_global_polys,
             _svc_pick,
             _svc_snap,
         )
-        from floe.vfsclient import VfsClient
-        from floe.viewport import VfsMosaic
+        from floe_oracle.vfsclient import VfsClient
+        from floe_oracle.viewport import VfsMosaic
 
         box = db.Box(*(int(value) for value in bbox))
         cache.vfs_client = VfsClient(cache.dir)
@@ -3501,8 +3611,8 @@ class RealDaemonIntegrationTests(unittest.TestCase):
     def _assert_clip_parity(self, cache, worker, bbox):
         """Exact Rust export must be Region-identical to parent KLayout."""
         import klayout.db as db
-        from floe.service import _svc_clip
-        from floe.vfsclient import VfsClient
+        from floe_oracle.service import _svc_clip
+        from floe_oracle.vfsclient import VfsClient
 
         layers = [
             (int(layer["layer"]), int(layer["datatype"]))

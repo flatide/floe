@@ -1,8 +1,10 @@
 //! One bounded control thread owns one worker. It polls/drains even without a
 //! frame subscriber; HTTP/WS credit never gates worker cleanup or cancellation.
 use super::{
-    margin, query, Model, Patch, QueryAnchor, QuerySnapshot, Root, RootEdit, ViewQuery,
-    ViewQueryResult, ViewState, Viewport, CELL_TIMEOUT, CELL_WITHOUT_SHAPES, ROOT_UNSUPPORTED,
+    margin,
+    perf::{FrameReport, PerfAdapter, PerfJob, PerfTiming},
+    query, Model, Patch, QueryAnchor, QuerySnapshot, Root, RootEdit, ViewQuery, ViewQueryResult,
+    ViewState, Viewport, CELL_TIMEOUT, CELL_WITHOUT_SHAPES, ROOT_UNSUPPORTED,
 };
 use crate::{
     managed::{ManagedDataset, Permit, Resources},
@@ -26,6 +28,9 @@ use std::{
 /// Cell-tree tickets waiting for or on the worker. The hier thread answers in
 /// order; a panel needs an expand and a highlight walk, not a backlog.
 const MAX_PENDING_CELLS: usize = 4;
+/// The frame reports kept for the frames shown (DesktopPolicy::report): the
+/// foreground's and the margin's, and a few the viewer has not taken yet.
+const KEPT_REPORTS: usize = 8;
 /// Resolving a root cell happens inside an edit; the panel already opened
 /// the summary to show that cell, so this covers a slow disk, not a build.
 const ROOT_RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -51,6 +56,75 @@ impl Default for ControllerOptions {
             frame_cache: true,
         }
     }
+}
+/// Where a desktop viewer's view differs from the web's (P4: the GTK viewer
+/// through `floe2 gtk-service`): a superseded frame drains as long as it
+/// takes, a frame renderd refuses is said and the view goes on, a slow frame
+/// or pick does not end the worker. The default is the web's.
+#[derive(Clone, Copy, Debug)]
+pub struct DesktopPolicy {
+    /// How long a cancelled frame may take to drain before the view fails;
+    /// None: as long as it takes (renderd stops at its next step).
+    pub drain_timeout: Option<Duration>,
+    /// The worker's render and pick/snap deadlines (None: the worker
+    /// client's, 300 s and 5 s).
+    pub render_timeout: Option<Duration>,
+    pub query_timeout: Option<Duration>,
+    /// A foreground frame renderd refuses (a budget it cannot hold, …) is
+    /// recorded in `Snapshot::render_failure` and the view stays usable.
+    pub keep_view_on_render_error: bool,
+    /// Every edit's viewport kept inside the desktop viewer's bounds
+    /// (Viewport::clamped: the zoom range, the die and 10% around it).
+    pub clamp: bool,
+    /// A viewport-only edit (a pan, a zoom, a resize) renders once the view
+    /// has been still this long: a wheel burst or a drag is one render, not
+    /// one started and cancelled per step (the GTK viewer's 120 ms
+    /// debounce). A policy edit (layers, depth, styles …) renders at once.
+    pub settle: Option<Duration>,
+    /// Each frame's report kept beside it (`ViewController::frame_report`):
+    /// its generation's rounds added up as floe_oracle/rust_render.py's
+    /// `_emit_frame` did - the perf line's source (P4b, `view::perf`).
+    pub report: bool,
+    /// Snap and pick on a frame whose geometry is not complete (the density
+    /// under the cut, a budget-fit partial frame, deferred pages) answer
+    /// from what it drew (`incomplete=ok`), as the GTK viewer's did; the
+    /// web refuses them (no promise of exact geometry).
+    pub incomplete_queries: bool,
+}
+impl Default for DesktopPolicy {
+    fn default() -> Self {
+        Self {
+            drain_timeout: Some(Duration::from_secs(5)),
+            render_timeout: None,
+            query_timeout: None,
+            keep_view_on_render_error: false,
+            clamp: false,
+            settle: None,
+            report: false,
+            incomplete_queries: false,
+        }
+    }
+}
+impl DesktopPolicy {
+    /// The GTK viewer's: what floe_oracle/rust_render.py did - no deadline on a
+    /// frame or its drain, a refused frame on the status line.
+    pub fn desktop() -> Self {
+        Self {
+            drain_timeout: None,
+            render_timeout: Some(Duration::from_secs(30 * 24 * 3600)),
+            query_timeout: Some(Duration::from_secs(600)),
+            keep_view_on_render_error: true,
+            clamp: true,
+            settle: Some(Duration::from_millis(120)),
+            report: true,
+            incomplete_queries: true,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Default)]
+struct Configuration {
+    options: ControllerOptions,
+    desktop: DesktopPolicy,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Purpose {
@@ -112,6 +186,12 @@ pub struct Snapshot {
     pub margin_failure: Option<(ErrorKind, String)>,
     /// Local diagnostics only; web maps the kind to a safe message/code.
     pub failure: Option<(ErrorKind, String)>,
+    /// A foreground frame renderd refused under DesktopPolicy's
+    /// keep_view_on_render_error: (its render_rev, the reason).
+    pub render_failure: Option<(u64, String)>,
+    /// The render_rev whose frame `cancel_render` stopped (Esc); the view
+    /// renders again on its next change.
+    pub cancelled_rev: Option<u64>,
 }
 struct CellTicket {
     id: u64,
@@ -137,9 +217,17 @@ impl Cells {
 }
 struct Shared {
     replacement_pending: bool,
+    /// `cancel_render`'s request: the render_rev to stop.
+    cancel_requested: Option<u64>,
+    /// When the last viewport-only edit came (DesktopPolicy::settle).
+    navigated_at: Option<Instant>,
     snapshot: Snapshot,
     latest: Option<Arc<DisplayFrame>>,
     margin: Option<Arc<DisplayFrame>>,
+    /// (frame id, its report), newest last (DesktopPolicy::report).
+    reports: VecDeque<(u64, serde_json::Value)>,
+    /// DesktopPolicy::incomplete_queries.
+    incomplete_queries: bool,
     queries: query::Queries,
     cells: Cells,
 }
@@ -187,7 +275,7 @@ impl Shared {
             .unwrap()
             .frame
             .query_scene()?;
-        if !displayed.complete {
+        if !displayed.complete && !self.incomplete_queries {
             return Err(Error::new(
                 ErrorKind::Incomplete,
                 "displayed geometry is incomplete",
@@ -198,7 +286,13 @@ impl Shared {
             .source
             .as_ref()
             .ok_or_else(|| Error::new(ErrorKind::Busy, "no published query scene"))?;
-        query::request(input, &self.snapshot(), model, source)
+        query::request(
+            input,
+            &self.snapshot(),
+            model,
+            source,
+            self.incomplete_queries,
+        )
     }
     fn snapshot(&self) -> Snapshot {
         let mut s = self.snapshot.clone();
@@ -227,7 +321,7 @@ pub struct ViewController {
     resources: Weak<Resources>,
     reservation: Weak<Permit>,
     native_options: Option<RenderOptions>,
-    configuration: ControllerOptions,
+    configuration: Configuration,
 }
 
 /// One queued cell question (ViewController::cell_ticket). Waiting never
@@ -278,7 +372,7 @@ impl CellWait {
 pub struct ReservedView {
     resources: Arc<Resources>,
     options: RenderOptions,
-    configuration: ControllerOptions,
+    configuration: Configuration,
     permit: Permit,
 }
 impl ReservedView {
@@ -365,6 +459,8 @@ trait Engine: Send {
     fn max_depth(&self) -> Option<u64> {
         None
     }
+    fn set_timeouts(&mut self, _render: Duration, _query: Duration) {}
+    fn set_incomplete_queries(&mut self, _on: bool) {}
 }
 impl Engine for RenderSession {
     fn query(&mut self, r: QueryRequest) -> Result<u64> {
@@ -384,6 +480,12 @@ impl Engine for RenderSession {
     }
     fn max_depth(&self) -> Option<u64> {
         Some(self.max_depth())
+    }
+    fn set_timeouts(&mut self, render: Duration, query: Duration) {
+        self.set_timeouts(render, query)
+    }
+    fn set_incomplete_queries(&mut self, on: bool) {
+        self.set_incomplete_queries(on)
     }
     fn submit(&mut self, r: RenderRequest) -> Result<u64> {
         self.submit(r)
@@ -431,6 +533,20 @@ impl ViewController {
     ) -> Result<Self> {
         Self::reserve(resources, options, configuration)?.start(dataset, initial)
     }
+    /// start_configured with a desktop viewer's DesktopPolicy (P4); its
+    /// replacements and forks keep it.
+    pub fn start_desktop(
+        resources: &Arc<Resources>,
+        dataset: Arc<ManagedDataset>,
+        options: RenderOptions,
+        initial: ViewState,
+        configuration: ControllerOptions,
+        desktop: DesktopPolicy,
+    ) -> Result<Self> {
+        let mut reserved = Self::reserve(resources, options, configuration)?;
+        reserved.configuration.desktop = desktop;
+        reserved.start(dataset, initial)
+    }
     pub fn reserve(
         resources: &Arc<Resources>,
         options: RenderOptions,
@@ -440,7 +556,10 @@ impl ViewController {
         Ok(ReservedView {
             resources: Arc::clone(resources),
             options,
-            configuration,
+            configuration: Configuration {
+                options: configuration,
+                desktop: DesktopPolicy::default(),
+            },
             permit,
         })
     }
@@ -587,7 +706,7 @@ impl ViewController {
         model: Arc<Model>,
         initial: ViewState,
         permit: Permit,
-        configuration: ControllerOptions,
+        configuration: Configuration,
         open: impl FnOnce(Arc<AtomicUsize>) -> Result<(Box<dyn Engine>, Option<Arc<ManagedDataset>>)>
             + Send
             + 'static,
@@ -606,7 +725,7 @@ impl ViewController {
         model: Arc<Model>,
         initial: ViewState,
         permit: Arc<Permit>,
-        configuration: ControllerOptions,
+        configuration: Configuration,
         open: impl FnOnce(Arc<AtomicUsize>) -> Result<(Box<dyn Engine>, Option<Arc<ManagedDataset>>)>
             + Send
             + 'static,
@@ -618,6 +737,8 @@ impl ViewController {
         let stop = Arc::new(AtomicUsize::new(0));
         let shared = Arc::new(Mutex::new(Shared {
             replacement_pending: false,
+            cancel_requested: None,
+            navigated_at: None,
             snapshot: Snapshot {
                 state: initial,
                 state_rev: 1,
@@ -629,8 +750,8 @@ impl ViewController {
                 submitted: 0,
                 consumed: 0,
                 discarded: 0,
-                margin_enabled: configuration.margin_prefetch
-                    && configuration.frame_cache
+                margin_enabled: configuration.options.margin_prefetch
+                    && configuration.options.frame_cache
                     && !model.deck,
                 margin_working: false,
                 margin_submitted: 0,
@@ -638,9 +759,13 @@ impl ViewController {
                 margin: None,
                 margin_failure: None,
                 failure: None,
+                render_failure: None,
+                cancelled_rev: None,
             },
             latest: None,
             margin: None,
+            reports: VecDeque::new(),
+            incomplete_queries: configuration.desktop.incomplete_queries,
             queries: query::Queries::default(),
             cells: Cells::default(),
         }));
@@ -706,6 +831,19 @@ impl ViewController {
     }
     pub fn latest(&self) -> Option<Arc<DisplayFrame>> {
         self.shared.lock().unwrap().latest.clone()
+    }
+    /// The report of a frame shown (DesktopPolicy::report): the result
+    /// floe_oracle/rust_render.py's `_emit_frame` gave for it - its generation's
+    /// rounds so far added up, `ms` from the frame's submission (the perf
+    /// line, `view::perf::perf_status`). None without the policy or once
+    /// newer frames pushed it out; kept from the moment the frame is.
+    pub fn frame_report(&self, frame_id: u64) -> Option<serde_json::Value> {
+        let s = self.shared.lock().unwrap();
+        s.reports
+            .iter()
+            .rev()
+            .find(|(id, _)| *id == frame_id)
+            .map(|(_, r)| r.clone())
     }
     pub fn margin(&self) -> Option<Arc<DisplayFrame>> {
         let s = self.shared.lock().unwrap();
@@ -958,7 +1096,10 @@ impl ViewController {
                 delta,
             )?);
         }
-        let next = s.snapshot.state.edit(&self.model, patch)?;
+        let mut next = s.snapshot.state.edit(&self.model, patch)?;
+        if self.configuration.desktop.clamp {
+            next.viewport = next.viewport.clamped(next.die(&self.model))?;
+        }
         if next == s.snapshot.state {
             return Ok(s.snapshot());
         }
@@ -979,6 +1120,7 @@ impl ViewController {
         } else {
             s.snapshot.render_key
         };
+        s.navigated_at = (render_changed && !key_changed).then(Instant::now);
         s.snapshot.state = next;
         s.snapshot.state_rev = rev;
         s.snapshot.render_rev = render_rev;
@@ -995,6 +1137,18 @@ impl ViewController {
             s.margin = None;
         }
         Ok(s.snapshot())
+    }
+    /// Stop the frame in progress (the desktop viewer's Esc): renderd drops
+    /// it at its next step, its later rounds are discarded, and the view does
+    /// not render the same state again - its next change does. A frame already
+    /// shown stays `latest`. Nothing to stop: nothing happens.
+    pub fn cancel_render(&self) -> Snapshot {
+        let mut s = self.shared.lock().unwrap();
+        // a margin in flight is not the frame in progress: it stays
+        if matches!(s.snapshot.phase, Phase::Rendering | Phase::Cancelling) {
+            s.cancel_requested = Some(s.snapshot.render_rev);
+        }
+        s.snapshot()
     }
     /// Non-blocking; interrupts ready/open/style and worker polling too.
     pub fn request_close(&self) {
@@ -1031,6 +1185,13 @@ pub fn cell_failure(f: CellFailure) -> Error {
     };
     Error::new(kind, format!("{}: {}", f.code.wire(), f.message))
 }
+/// One generation's report (DesktopPolicy::report).
+struct Report {
+    generation: u64,
+    submitted: Instant,
+    report: FrameReport,
+    adapter: PerfAdapter,
+}
 struct Ticket {
     generation: u64,
     snapshot: Snapshot,
@@ -1043,15 +1204,28 @@ fn run(
     stop: &AtomicUsize,
     model: &Model,
     resources: &Resources,
-    configuration: ControllerOptions,
+    configuration: Configuration,
 ) -> Result<()> {
     let mut styles = Arc::clone(&model.styles);
     let mut active: Option<Ticket> = None;
     let mut handled_rev = 0;
     let mut draining: Option<Instant> = None;
     let mut margin_attempt: Option<(u64, Viewport)> = None;
+    // DesktopPolicy::report: the generation in flight's
+    let mut report: Option<Report> = None;
     let mut base = engine.base();
-    base.frame_cache = configuration.frame_cache;
+    base.frame_cache = configuration.options.frame_cache;
+    let policy = configuration.desktop;
+    if policy.render_timeout.is_some() || policy.query_timeout.is_some() {
+        let defaults = floe_worker_client::Config::new("");
+        engine.set_timeouts(
+            policy.render_timeout.unwrap_or(defaults.render_timeout),
+            policy.query_timeout.unwrap_or(defaults.query_timeout),
+        );
+    }
+    if policy.incomplete_queries {
+        engine.set_incomplete_queries(true);
+    }
     while stop.load(Ordering::Relaxed) == 0 {
         {
             let mut s = shared.lock().unwrap();
@@ -1062,6 +1236,26 @@ fn run(
             pump_cells(engine, &mut s, hold)?;
         }
         let current = shared.lock().unwrap().snapshot();
+        // Esc (cancel_render): this state's frame stops and is not asked
+        // again; a later state's request is moot
+        let cancel = shared.lock().unwrap().cancel_requested.take();
+        if cancel == Some(current.render_rev) {
+            handled_rev = current.render_rev;
+            margin_attempt = Some((current.render_key, current.state.viewport));
+            let pending = engine.pending() > 0;
+            if pending && draining.is_none() {
+                engine.cancel()?;
+                draining = Some(Instant::now());
+            }
+            let mut s = shared.lock().unwrap();
+            s.snapshot.cancelled_rev = Some(current.render_rev);
+            s.snapshot.margin_working = false;
+            s.snapshot.phase = if pending {
+                Phase::Cancelling
+            } else {
+                Phase::Idle
+            };
+        }
         let covered = current.margin.is_some_and(|m| m.crop_safe);
         if current.render_rev != handled_rev && covered {
             handled_rev = current.render_rev;
@@ -1070,6 +1264,14 @@ fn run(
             s.snapshot.phase = Phase::Idle;
         }
         let needs_foreground = current.render_rev != handled_rev;
+        // a pan or zoom still moving: its render waits (DesktopPolicy::settle)
+        let settling = policy.settle.is_some_and(|d| {
+            shared
+                .lock()
+                .unwrap()
+                .navigated_at
+                .is_some_and(|at| at.elapsed() < d)
+        });
         let stale_active = active.as_ref().is_some_and(|t| match t.purpose {
             Purpose::Foreground => t.snapshot.render_rev != current.render_rev,
             Purpose::Margin => {
@@ -1092,7 +1294,11 @@ fn run(
             active = None;
             let mut submit = None;
             if needs_foreground {
-                submit = Some((Purpose::Foreground, current.state.viewport));
+                if settling {
+                    shared.lock().unwrap().snapshot.phase = Phase::Rendering;
+                } else {
+                    submit = Some((Purpose::Foreground, current.state.viewport));
+                }
             } else if current.margin_enabled {
                 let s = shared.lock().unwrap();
                 let settled = covered
@@ -1117,6 +1323,12 @@ fn run(
             if waiting_styles {
                 shared.lock().unwrap().snapshot.phase = Phase::Cancelling;
             }
+            if submit.is_none() && !waiting_styles && !(needs_foreground && settling) {
+                let mut s = shared.lock().unwrap();
+                if s.snapshot.phase == Phase::Cancelling {
+                    s.snapshot.phase = Phase::Idle;
+                }
+            }
             if let Some((purpose, viewport)) = submit.filter(|_| !waiting_styles) {
                 if current.state.styles != styles {
                     engine.styles(&current.state.styles)?;
@@ -1127,7 +1339,32 @@ fn run(
                 request.width = viewport.width;
                 request.height = viewport.height;
                 request.background = purpose == Purpose::Margin;
+                if purpose == Purpose::Margin {
+                    // the viewport the margin is around: renderd thins the
+                    // density dots for the viewport's fit view (vw/vh)
+                    request.viewport =
+                        Some((current.state.viewport.width, current.state.viewport.height));
+                }
+                let job = policy.report.then(|| {
+                    let mut job = PerfJob::new(request.view, request.width, request.height);
+                    job.bg = request.background;
+                    job.cut_px = request.cut_px;
+                    (
+                        job,
+                        PerfAdapter {
+                            raster_jobs: i64::from(request.raster_jobs),
+                            max_depth: engine.max_depth().and_then(|d| i64::try_from(d).ok()),
+                            dbu: Some(model.dbu),
+                        },
+                    )
+                });
                 let generation = engine.submit(request)?;
+                report = job.map(|(job, adapter)| Report {
+                    generation,
+                    submitted: Instant::now(),
+                    report: FrameReport::new(job),
+                    adapter,
+                });
                 if purpose == Purpose::Foreground {
                     handled_rev = current.render_rev;
                 }
@@ -1144,6 +1381,8 @@ fn run(
                 s.snapshot.submitted += 1;
                 if purpose == Purpose::Foreground {
                     s.snapshot.phase = Phase::Rendering;
+                    s.snapshot.render_failure = None;
+                    s.snapshot.cancelled_rev = None;
                 } else {
                     s.snapshot.margin_submitted += 1;
                     s.snapshot.margin_working = true;
@@ -1151,7 +1390,7 @@ fn run(
                 }
             }
         }
-        if draining.is_some_and(|at| at.elapsed() > Duration::from_secs(5)) {
+        if draining.is_some_and(|at| policy.drain_timeout.is_some_and(|d| at.elapsed() > d)) {
             return Err(Error::new(
                 ErrorKind::Worker,
                 "cancel drain deadline exceeded",
@@ -1175,6 +1414,22 @@ fn run(
                 let _ = ticket.reply.send(Ok(reply));
             }
             Some(Event::Frame(frame)) => {
+                // every round of the generation adds up, shown or not (the
+                // Python adapter's sums)
+                let round = report
+                    .as_mut()
+                    .filter(|r| r.generation == frame.generation)
+                    .map(|r| {
+                        let elapsed_ms = r.submitted.elapsed().as_secs_f64() * 1000.0;
+                        r.report.frame(
+                            &frame,
+                            &r.adapter,
+                            PerfTiming {
+                                adapter_read_us: 0,
+                                elapsed_ms,
+                            },
+                        )
+                    });
                 let mut s = shared.lock().unwrap();
                 s.snapshot.consumed += 1;
                 if let Some(t) = active.as_ref().filter(|t| {
@@ -1205,6 +1460,12 @@ fn run(
                         frame,
                     });
                     s.queries.observe(&f)?;
+                    if let Some(round) = round {
+                        s.reports.push_back((f.id, round));
+                        while s.reports.len() > KEPT_REPORTS {
+                            s.reports.pop_front();
+                        }
+                    }
                     if t.purpose == Purpose::Foreground {
                         s.latest = Some(f);
                     } else {
@@ -1237,6 +1498,18 @@ fn run(
                     s.snapshot.margin_working = false;
                     s.snapshot.margin_failure =
                         Some((ErrorKind::Worker, format!("{code}: {message}")));
+                } else if let Some(t) = active.as_ref().filter(|t| {
+                    policy.keep_view_on_render_error
+                        && t.purpose == Purpose::Foreground
+                        && generation == Some(t.generation)
+                }) {
+                    // the desktop's status line says it; the view stays
+                    let mut s = shared.lock().unwrap();
+                    s.snapshot.render_failure =
+                        Some((t.snapshot.render_rev, format!("{code}: {message}")));
+                    if s.snapshot.render_rev == t.snapshot.render_rev {
+                        s.snapshot.phase = Phase::Idle;
+                    }
                 } else {
                     return Err(Error::new(ErrorKind::Worker, format!("{code}: {message}")));
                 }

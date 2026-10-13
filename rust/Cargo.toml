@@ -16,6 +16,8 @@ members = [
     "web",
     "packager",
     "notices",
+    "app-cli",
+    "floe2",
 ]
 
 [workspace.package]

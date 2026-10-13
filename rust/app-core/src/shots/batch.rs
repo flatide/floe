@@ -47,9 +47,18 @@ pub struct Capture {
     /// CLI input order is clockwise: TL, TR, BR, BL.
     pub mosaic: Option<[[f64; 2]; 4]>,
     pub corners: Option<[f64; 4]>,
+    /// `--corners` alone (or `fit`): the corners of the default region -
+    /// the chips' extent with chips named, else the whole source
+    pub corners_fit: bool,
     pub line: f64,
     pub line_color: String,
     pub keep_tiles: bool,
+    /// a jobdeck's chips (jobdeck::chips, user 2026-10-06): these alone on
+    pub chip: Option<String>,
+    /// these off, the others on
+    pub chip_off: Option<String>,
+    /// the default region is these chips' extent (`NAME#K`: one placement)
+    pub fit_chip: Option<String>,
 }
 impl Default for Capture {
     fn default() -> Self {
@@ -57,9 +66,13 @@ impl Default for Capture {
             shot: Shot::default(),
             mosaic: None,
             corners: None,
+            corners_fit: false,
             line: 2.,
             line_color: "#ffffff".into(),
             keep_tiles: false,
+            chip: None,
+            chip_off: None,
+            fit_chip: None,
         }
     }
 }
@@ -90,7 +103,18 @@ pub fn color(text: &str) -> Result<[u8; 3]> {
 }
 impl Capture {
     pub fn is_mosaic(&self) -> bool {
-        self.mosaic.is_some() || self.corners.is_some()
+        self.mosaic.is_some() || self.corners.is_some() || self.corners_fit
+    }
+    /// A region of its own - not the default region (the chips' or the
+    /// whole source), which `--corners` alone also takes.
+    pub fn explicit_region(&self) -> bool {
+        self.shot.bbox.is_some()
+            || self.shot.at.is_some()
+            || self.mosaic.is_some()
+            || self.corners.is_some()
+    }
+    pub fn names_chips(&self) -> bool {
+        self.chip.is_some() || self.chip_off.is_some() || self.fit_chip.is_some()
     }
     pub fn validate(&self) -> Result<()> {
         self.shot.validate()?;
@@ -98,7 +122,7 @@ impl Capture {
             self.shot.bbox.is_some(),
             self.shot.at.is_some(),
             self.mosaic.is_some(),
-            self.corners.is_some(),
+            self.corners.is_some() || self.corners_fit,
         ]
         .into_iter()
         .filter(|v| *v)
@@ -111,6 +135,16 @@ impl Capture {
         }
         if self.is_mosaic() && self.shot.size.is_none() {
             return Err(Error::input("mosaic/corners requires --size W,H"));
+        }
+        if self.fit_chip.is_some() && self.explicit_region() {
+            return Err(Error::input(
+                "--fit-chip frames the default region; --bbox, --at, --mosaic-at and --corners X1,Y1,X2,Y2 give a region of their own",
+            ));
+        }
+        if self.shot.layers.is_some() && (self.chip.is_some() || self.chip_off.is_some()) {
+            return Err(Error::input(
+                "--layers and --chip/--chip-off both say what is on; give one",
+            ));
         }
         if !self.line.is_finite() || self.line < 0. {
             return Err(Error::input("line width must be finite and nonnegative"));
@@ -129,7 +163,7 @@ impl Capture {
                 shot.at = Some(p[i]);
                 tiles.push(shot);
             }
-        } else if let Some(b) = self.corners {
+        } else if let Some(b) = self.corners.or(self.corners_fit.then_some(default_box)) {
             let [x0, y0, x1, y1] = normalize(b)?;
             let [w, h] = self.shot.size.unwrap();
             for b in [
@@ -158,6 +192,10 @@ impl Capture {
         }
         Ok(tiles)
     }
+}
+/// `corners=fit`: the corners of the default region.
+pub fn is_fit(value: &str) -> bool {
+    value.trim().eq_ignore_ascii_case("fit")
 }
 fn flag(value: &str) -> bool {
     matches!(
@@ -251,14 +289,39 @@ pub fn parse(text: &str, defaults: &Capture) -> Result<Vec<NamedCapture>> {
                 })
                 .collect::<Result<Vec<_>>>()?;
             let mut c = defaults.clone();
-            if fields
+            // a line's own region form replaces the defaults' form - every
+            // region key, fit_chip too; fit_chip or corners=fit, which frame
+            // the default region, replace the explicit forms alone
+            // (floe.shots parse_batch)
+            if fields.iter().any(|(key, v)| {
+                matches!(*key, "bbox" | "at" | "mosaic") || (*key == "corners" && !is_fit(v))
+            }) {
+                c.shot.bbox = None;
+                c.shot.at = None;
+                c.mosaic = None;
+                c.corners = None;
+                c.corners_fit = false;
+                c.fit_chip = None;
+            } else if fields
                 .iter()
-                .any(|(key, _)| matches!(*key, "bbox" | "at" | "mosaic" | "corners"))
+                .any(|(key, v)| *key == "fit_chip" || (*key == "corners" && is_fit(v)))
             {
                 c.shot.bbox = None;
                 c.shot.at = None;
                 c.mosaic = None;
                 c.corners = None;
+            }
+            // and a line's own say of what is on: its layers replace the
+            // defaults' chips, its chips the defaults' layers
+            if fields.iter().any(|(key, _)| *key == "layers") {
+                c.chip = None;
+                c.chip_off = None;
+            }
+            if fields
+                .iter()
+                .any(|(key, _)| matches!(*key, "chip" | "chip_off"))
+            {
+                c.shot.layers = None;
             }
             for (key, v) in fields {
                 match key {
@@ -266,7 +329,13 @@ pub fn parse(text: &str, defaults: &Capture) -> Result<Vec<NamedCapture>> {
                     "at" => c.shot.at = optional(v)?,
                     "size" => c.shot.size = optional(v)?,
                     "mosaic" => c.mosaic = if v.is_empty() { None } else { Some(points(v)?) },
-                    "corners" => c.corners = optional(v)?,
+                    "corners" => {
+                        c.corners_fit = is_fit(v);
+                        c.corners = if c.corners_fit { None } else { optional(v)? };
+                    }
+                    "chip" => c.chip = (!v.is_empty()).then(|| v.to_string()),
+                    "chip_off" => c.chip_off = (!v.is_empty()).then(|| v.to_string()),
+                    "fit_chip" => c.fit_chip = (!v.is_empty()).then(|| v.to_string()),
                     "px" => c.shot.pixels = pixels(v)?,
                     "anchor" => {
                         c.shot.anchor = match v {

@@ -254,6 +254,15 @@ pub struct RenderRequest {
     /// The view root (SPEC-VIEWER §8c): the plan starts from this cell in
     /// ITS coordinates; None = the top. A jobdeck has none.
     pub root: Option<u32>,
+    /// The viewer's viewport (w, h px) when this frame is not it (a margin:
+    /// the viewport and the area around it at the viewport's scale) -
+    /// `vw=`/`vh=`: the fit view the density dots thin past is the
+    /// viewport's (renderd, 2026-10-04). None: the frame is the viewport.
+    pub viewport: Option<(u32, u32)>,
+    /// The density under the cut for this frame (`density=on|off`, the
+    /// desktop viewer's toggle, 2026-10-05); None leaves renderd's default
+    /// (FLOE_RUST_DENSITY_STACK).
+    pub density: Option<bool>,
 }
 
 impl Default for RenderRequest {
@@ -281,6 +290,8 @@ impl Default for RenderRequest {
             thin: ThinPolicy::Cull,
             format: FrameFormat::Raw,
             root: None,
+            viewport: None,
+            density: None,
         }
     }
 }
@@ -334,6 +345,15 @@ impl RenderRequest {
         }
         if let Some(root) = self.root {
             write!(command, " root={root}").unwrap();
+        }
+        if let Some((vw, vh)) = self.viewport {
+            if vw == 0 || vh == 0 {
+                return Err(Error::input("invalid viewport size"));
+            }
+            write!(command, " vw={vw} vh={vh}").unwrap();
+        }
+        if let Some(density) = self.density {
+            write!(command, " density={}", if density { "on" } else { "off" }).unwrap();
         }
         if command.len() > MAX_LINE_BYTES {
             return Err(Error::new(
@@ -443,5 +463,26 @@ mod tests {
             .command(1, 1, "/tmp/f", 1_000_000)
             .unwrap()
             .ends_with(" bg=on"));
+    }
+
+    #[test]
+    fn viewport_and_density_go_on_the_wire_only_when_given() {
+        let mut r = RenderRequest::default();
+        let plain = r.command(1, 1, "/tmp/f", 1_000_000).unwrap();
+        assert!(!plain.contains(" vw=") && !plain.contains(" density="));
+        r.background = true;
+        r.viewport = Some((640, 480));
+        r.density = Some(false);
+        assert!(r
+            .command(1, 1, "/tmp/f", 1_000_000)
+            .unwrap()
+            .ends_with(" bg=on vw=640 vh=480 density=off"));
+        r.density = Some(true);
+        assert!(r
+            .command(1, 1, "/tmp/f", 1_000_000)
+            .unwrap()
+            .ends_with(" density=on"));
+        r.viewport = Some((0, 480));
+        assert!(r.command(1, 1, "/tmp/f", 1_000_000).is_err());
     }
 }

@@ -74,6 +74,9 @@ pub fn run(
         report,
         batch: batch.is_some(),
         input,
+        // the layer legend as flateyes metadata (jobdeck 0.12.353): the
+        // shared CLI's --legend; floe2-web's own copy of this command goes
+        legend: false,
     };
     let complete = captures::run(
         &dataset,

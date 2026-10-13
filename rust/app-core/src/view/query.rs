@@ -236,11 +236,14 @@ impl QueryAnchor {
     }
 }
 
+/// `incomplete_ok`: DesktopPolicy::incomplete_queries (the scene's
+/// incompleteness is said to renderd as `incomplete=ok` by the engine).
 pub(super) fn request(
     input: &ViewQuery,
     state: &Snapshot,
     model: &Model,
     source: &Source,
+    incomplete_ok: bool,
 ) -> Result<QueryRequest> {
     if source.key != state.render_key || !margin::covers(source.viewport, state.state.viewport) {
         return Err(Error::new(
@@ -252,7 +255,7 @@ pub(super) fn request(
         .context
         .id
         .ok_or_else(|| Error::new(ErrorKind::Unsupported, "scene has no query geometry"))?;
-    if !source.context.complete {
+    if !source.context.complete && !incomplete_ok {
         return Err(Error::new(
             ErrorKind::Incomplete,
             "published query scene is incomplete",

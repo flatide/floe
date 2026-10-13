@@ -56,8 +56,8 @@ rust/target/release/floe-index vfs <design.oas> [outdir] [옵션]
 ## 3. 뷰어 실행
 
 ```sh
-.venv/bin/python -m floe view [design.oas] [옵션]   # 파일 생략 = 빈 뷰어
-.venv/bin/python -m floe                            # 인자 없음 = view
+rust/target/release/floe2 view [design.oas] [옵션]   # 파일 생략 = 빈 뷰어
+rust/target/release/floe2                            # 인자 없음 = view
 ```
 
 | 옵션 | 의미 |
@@ -158,9 +158,11 @@ fit·clip·open .db·rules 기능을 노출한다(구 패널 버튼들은 메뉴
 
 ## 7. 기타 CLI
 
-`python -m floe <cmd>`: `index`(레거시 타일 캐시 .tiles), `info`,
-`render --bbox … --out view.png`, `clip --bbox …`, `probe`, `profile`,
-`drc`(요약; .ice 인덱스 자동 사용), `gtktest`. `floe-index`: `scan`,
+`floe2 <cmd>`(Rust): `index`, `info`, `render --bbox … --out view.png`,
+`clip --bbox …`, `probe`, `jobdeck`, `drc`(요약; 팩 자동 사용), `fe-embed`,
+`selfcheck`, `gtktest`(GTK 표시 점검). 동결 floe 셸은 개발 전용 오라클
+`python -m floe_oracle <cmd>`(PYTHONPATH=tools/oracle:.; `index --legacy`의
+레거시 타일 캐시 .tiles, `profile` 등 — 뷰어 없음, P3). `floe-index`: `scan`,
 `tile`, `index`, `vfs`, `plan`(플래너 계측 JSON), `vfsd`(데몬),
 `drc`(DRC 인덱스 사이드카 굽기), `svrf`(SVRF 룰덱 서브셋 파스 →
 `<deck>.rules.json`; 2026-09-29 `floe svrf`에서 이동 — 입력으로 파일을
@@ -174,7 +176,7 @@ fit·clip·open .db·rules 기능을 노출한다(구 패널 버튼들은 메뉴
 
 ```sh
 rust/target/release/floe-index drc results.db [--jobs N]
-.venv/bin/python -m floe view chip.oas --drc results.db
+rust/target/release/floe2 view chip.oas --drc results.db
 ```
 
 - 실측 1/4~1/5 크기, 변환 후 .db 불필요. 병렬 빌드(--jobs 무관 동일
@@ -234,7 +236,7 @@ FILLA=0/0,FILLB=63/63" \
   --pathname testchip.drc.cal --svrf data/testchip.drc.cal
 rust/target/release/floe-index drc data/testchip_1g5.drc.db --pack
 rust/target/release/floe-index svrf data/testchip.drc.cal
-.venv/bin/python -m floe view data/testchip_1g5.oas \
+rust/target/release/floe2 view data/testchip_1g5.oas \
   --drc data/testchip_1g5.drc.db
 ```
 

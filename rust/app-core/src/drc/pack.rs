@@ -321,6 +321,129 @@ fn delta(b: &[u8], p: &mut usize, x: i64) -> Result<i64> {
         .ok_or_else(|| corrupt("coordinate delta overflow"))
 }
 
+/// A pack's coordinate blocks for whole-rule passes on worker threads
+/// (drc::analysis): its own file handle, positional reads, no cache; the
+/// pack's decoding and validation.
+#[derive(Clone)]
+pub struct Blocks {
+    file: Arc<File>,
+    len: u64,
+    blocks: u64,
+    block_count: u64,
+    blob_end: u64,
+    pub precision: f64,
+    /// per check: (first global error, count, first block)
+    checks: Arc<Vec<(u64, u64, u64)>>,
+}
+impl Blocks {
+    pub fn check_count(&self) -> usize {
+        self.checks.len()
+    }
+    pub fn count(&self, check: usize) -> u64 {
+        self.checks.get(check).map_or(0, |c| c.1)
+    }
+    fn read(&self, off: u64, out: &mut [u8]) -> Result<()> {
+        if off
+            .checked_add(out.len() as u64)
+            .is_none_or(|n| n > self.len)
+        {
+            return Err(corrupt("read range"));
+        }
+        self.file.read_exact_at(out, off)?;
+        Ok(())
+    }
+    /// The dbu bboxes of rule `check`'s blocks `first..first+count`.
+    pub fn block_boxes(&self, check: usize, first: u64, count: u64) -> Result<Vec<[i64; 4]>> {
+        let c = self
+            .checks
+            .get(check)
+            .ok_or_else(|| crate::Error::input("DRC check index out of range"))?;
+        let n = c.1.div_ceil(64);
+        let count = count.min(n.saturating_sub(first));
+        let mut raw = vec![0u8; usize_of(mul(count, 48)?)?];
+        self.read(add(self.blocks, mul(c.2 + first, 48)?)?, &mut raw)?;
+        Ok(raw
+            .chunks_exact(48)
+            .map(|b| [i64at(b, 16), i64at(b, 24), i64at(b, 32), i64at(b, 40)])
+            .collect())
+    }
+    /// Decode rule `check`'s block `block` (its 64-error group, rule-local):
+    /// `visit(j, kind, points)` for each member in order.
+    pub fn decode(
+        &self,
+        check: usize,
+        block: u64,
+        visit: &mut dyn FnMut(usize, char, &[[i64; 2]]) -> Result<()>,
+    ) -> Result<()> {
+        let c = self
+            .checks
+            .get(check)
+            .ok_or_else(|| crate::Error::input("DRC check index out of range"))?;
+        let bi = c.2 + block;
+        if bi >= self.block_count || block >= c.1.div_ceil(64) {
+            return Err(crate::Error::input("DRC block index out of range"));
+        }
+        let mut b = [0; 48];
+        self.read(add(self.blocks, mul(bi, 48)?)?, &mut b)?;
+        let off = u64at(&b, 0);
+        let count = u32at(&b, 8) as usize;
+        if !(1..=64).contains(&count) {
+            return Err(corrupt("block count changed"));
+        }
+        let end = if bi + 1 < self.block_count {
+            let mut n = [0; 8];
+            self.read(add(self.blocks, mul(bi + 1, 48)?)?, &mut n)?;
+            u64at(&n, 0)
+        } else {
+            self.blob_end
+        };
+        let length = end
+            .checked_sub(off)
+            .ok_or_else(|| corrupt("block offsets"))?;
+        if length > BLOCK_BYTES as u64 {
+            return Err(limit("coordinate block"));
+        }
+        let mut buf = vec![0u8; usize_of(length)?];
+        self.read(off, &mut buf)?;
+        let (mut pos, mut previous, mut total) = (0, [0i64; 2], 0);
+        let mut points: Vec<[i64; 2]> = Vec::new();
+        for j in 0..count {
+            let kind = varint(&buf, &mut pos)?;
+            let n = usize_of(kind >> 1)?;
+            if n == 0 {
+                return Err(corrupt("empty geometry"));
+            }
+            if n > RECORD_POINTS || n > BLOCK_POINTS - total {
+                return Err(limit("coordinate points"));
+            }
+            if n > (buf.len() - pos) / 2 {
+                return Err(corrupt("point count exceeds block bytes"));
+            }
+            total += n;
+            points.clear();
+            let first = [
+                delta(&buf, &mut pos, previous[0])?,
+                delta(&buf, &mut pos, previous[1])?,
+            ];
+            previous = first;
+            points.push(first);
+            let mut point = first;
+            for _ in 1..n {
+                point = [
+                    delta(&buf, &mut pos, point[0])?,
+                    delta(&buf, &mut pos, point[1])?,
+                ];
+                points.push(point);
+            }
+            visit(j, if kind & 1 == 1 { 'e' } else { 'p' }, &points)?;
+        }
+        if pos != buf.len() {
+            return Err(corrupt("trailing coordinate bytes"));
+        }
+        Ok(())
+    }
+}
+
 pub struct Pack {
     pub path: PathBuf,
     pub cell: String,
@@ -342,8 +465,32 @@ pub struct Pack {
     cache: VecDeque<(u64, Arc<Vec<Violation>>, usize)>,
     cache_bytes: usize,
     pub decoded_blocks: u64,
+    /// the pack's reader lock while it is open (floe_vfs::lock, kind Pack):
+    /// a re-pack is refused under a review, and this open was refused
+    /// while one ran (floe/drc.py IcePack)
+    reader: Option<floe_vfs::lock::ReaderGuard>,
 }
 impl Pack {
+    /// Hold `reader` (the pack's reader lock) as long as the pack is open.
+    /// (blocks section offset, block count, coordinate blob end, each
+    /// rule's first block) - the matcher's view of the blob (drc::matcher).
+    pub(crate) fn block_layout(&self) -> (u64, u64, u64, Vec<u64>) {
+        (
+            self.blocks,
+            self.block_count,
+            self.blob_end,
+            self.checks.iter().map(|c| c.block_start).collect(),
+        )
+    }
+    pub(crate) fn hold(&mut self, reader: floe_vfs::lock::ReaderGuard) {
+        self.reader = Some(reader);
+    }
+    /// The embedded `[status]` and `[wcount]` sections' offsets (the
+    /// retired in-pack review state: a desktop review's seed and last
+    /// resort, drc::desktop).
+    pub(crate) fn review_sections(&self) -> (u64, u64) {
+        (self.status, self.wcount)
+    }
     /// Opening is read-only, including legacy embedded statuses. Sidecars are
     /// selected by the trusted local caller, never synthesized or overwritten.
     pub fn open(path: &Path, cancelled: &AtomicUsize) -> Result<Self> {
@@ -490,6 +637,7 @@ impl Pack {
             cache: VecDeque::new(),
             cache_bytes: 0,
             decoded_blocks: 0,
+            reader: None,
         };
         // Same check-bbox prepass as the legacy reader, but bounded 192 KiB
         // slabs instead of a resident 48B-per-block table. No coordinate decode.
@@ -541,6 +689,58 @@ impl Pack {
         }
         p.unchanged()?;
         Ok(p)
+    }
+    /// The review identity of the pack (floe_oracle drc.py
+    /// `_review_fingerprint`): sha256 over its header, footer, rule
+    /// directory, description references and strings, then its size and
+    /// mtime in ns (`<QQ`), as hex. Copies and renames keep it (no device,
+    /// inode or ctime); a re-run changes it. No geometry is read.
+    pub fn review_fingerprint(&self) -> Result<String> {
+        use sha2::{Digest, Sha256};
+        let len = self.input.stamp.len;
+        let end = len - 136;
+        let mut foot = [0; 136];
+        self.input.read(end, &mut foot)?;
+        let f = |i: usize| u64at(&foot, i * 8);
+        let mut head = [0; 40];
+        self.input.read(0, &mut head)?;
+        let mut digest = Sha256::new();
+        digest.update(head);
+        digest.update(foot);
+        for (off, n) in [(f(8), f(9) * 64), (f(10), f(11) * 4), (f(12), f(13))] {
+            digest.update(self.input.bytes(off, usize_of(n)?, META_BYTES)?);
+        }
+        let (s, ns) = self.input.stamp.modified;
+        let mtime_ns = i128::from(s) * 1_000_000_000 + i128::from(ns);
+        digest.update(len.to_le_bytes());
+        digest.update((mtime_ns as u64).to_le_bytes());
+        Ok(digest
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect())
+    }
+    /// The coordinate blocks, for worker threads (drc::analysis).
+    pub fn blocks(&self) -> Result<Blocks> {
+        Ok(Blocks {
+            file: Arc::new(self.input.file.try_clone()?),
+            len: self.input.stamp.len,
+            blocks: self.blocks,
+            block_count: self.block_count,
+            blob_end: self.blob_end,
+            precision: self.precision,
+            checks: Arc::new(
+                self.checks
+                    .iter()
+                    .map(|c| (c.start, c.count, c.block_start))
+                    .collect(),
+            ),
+        })
+    }
+    /// The pack's file stamp: (len, dev, ino, mtime s/ns, ctime s/ns).
+    pub fn stamp(&self) -> (u64, u64, u64, i64, i64, i64, i64) {
+        let s = self.input.stamp;
+        (s.len, s.dev, s.ino, s.modified.0, s.modified.1, s.changed.0, s.changed.1)
     }
     pub fn unchanged(&self) -> Result<()> {
         self.input.unchanged()?;
@@ -685,6 +885,28 @@ impl Pack {
         self.review = Some(r);
         self.review_counts = None;
         Ok(())
+    }
+    /// Rule `check`'s embedded `[status]` bytes `start..start+count`
+    /// (clamped): the retired in-pack review of an old run, read-only.
+    pub fn embedded_statuses(&self, check: usize, start: u64, count: u64) -> Result<Vec<u8>> {
+        let c = self
+            .checks
+            .get(check)
+            .ok_or_else(|| crate::Error::input("DRC check index out of range"))?;
+        let start = start.min(c.count);
+        let count = count.min(c.count - start);
+        let mut out = vec![0u8; usize_of(count)?];
+        self.input.read(add(self.status, c.start + start)?, &mut out)?;
+        Ok(out)
+    }
+    /// Rule `check`'s embedded waived counter.
+    pub fn embedded_waived(&self, check: usize) -> Result<u64> {
+        if check >= self.checks.len() {
+            return Err(crate::Error::input("DRC check index out of range"));
+        }
+        let mut b = [0; 4];
+        self.input.read(add(self.wcount, mul(check as u64, 4)?)?, &mut b)?;
+        Ok(u32at(&b, 0) as u64)
     }
     pub fn waived_count(&self, check: usize) -> Result<u64> {
         if check >= self.checks.len() {

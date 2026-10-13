@@ -137,8 +137,12 @@ floe2는 **최초 1회 인덱싱**으로 이 비용을 지불하고, 이후 모�
 관심 영역과 교차하는 타일만 로딩해 ms~초 단위로 응답한다.
 
 ```sh
-alias floe2=".venv/bin/python -m floe2"  # 제품 (Rust renderer)
-alias floe=".venv/bin/python -m floe"    # 개발 전용: 동결된 KLayout 셸 (oracle·선행 검증)
+# floe2 = Rust 명령줄 (rust/floe2, 2026-10-09 P1c). GTK 뷰어(view)만 Python이다:
+# floe2 view가 체크아웃의 .venv python으로 floe.gtkview를 띄운다.
+(cd rust && cargo build --release)          # floe2, floe-index, floe-renderd
+alias floe2="$PWD/rust/target/release/floe2"  # 제품
+alias floe="env PYTHONPATH=$PWD/tools/oracle:$PWD .venv/bin/python -m floe_oracle"  # 개발 전용: 동결 KLayout 셸(오라클, 명령만 - P3)
+# tcsh: alias floe2 /path/to/floe2/rust/target/release/floe2
 
 floe2 index data/testchip_1g5.oas          # 1회: 공유 .<src>.ice/ 생성(소스 옆 숨김 폴더)
 floe2 index data/testchip_1g5.oas --jobs 1 # 병렬 끄기
@@ -153,6 +157,11 @@ floe view data/testchip_1g5.oas            # 개발용 KLayout 셸 (동결, 비�
 ```
 
 - `--bbox`는 µm 단위 `X0,Y0,X1,Y1`. `--layers`는 이름 또는 `layer/datatype` 목록.
+- 뷰어의 렌더 루프(무엇을 언제 그릴지, 이동이 멈춘 뒤 그리기, 이전 렌더 취소,
+  여백, Esc)와 내비게이션·미니맵은 웹과 같은 Rust 컨트롤러가 정한다
+  (0.12.337~0.12.338, docs/SHARED_APP_LAYER.ko.md §7 P4d·P4e). 예전 Python 루프와
+  `FLOE_GTK_LOOP=legacy`는 회사 Linux 확인 뒤 0.12.342에서 지웠다(P4f). 남은 Python은
+  GTK 화면(위젯, 프레임 표시, 덧그림, 입력)뿐이다.
 - `floe2 index`와 `floe index`는 같은 `floe-index vfs`를 실행한다. 같은 source
   fingerprint의 정상 캐시는 재사용하며 기존·불완전·stale 캐시 교체는 명시적
   `--force`가 있어야 한다. `--page-target-mb`, `--no-lod`, `--slow-cell-s`,
@@ -209,7 +218,9 @@ floe2 view   deck.jb                    # 뷰어에서 열기(File > load jobdec
 floe2 view   deck.jb --level 1,3        # 묻지 않고 level 1,3만 로드(스크립트는 FLOE_JOBDECK_LEVELS=all|N,N… 로 답할 수도 있다)
 floe2 info   deck.jb                    # 덱 요약 + 뷰 레이어 표
 floe2 render deck.jb --bbox 40000,80000,60000,95000 --px 1200 --out deck.png
-floe2 render chip.oas --bbox 0,0,2000,2000 --px 800 --out a.png --detail high   # 뷰어와 같은 1 px cut으로 캡처(기본 exact = cut 없음; low/medium/high = 5/3/1 px)
+floe2 render chip.oas --bbox 0,0,2000,2000 --px 800 --out a.png               # 뷰어가 그 영역에서 보여 주는 그림 그대로(detail medium, thin keep, 채움·프레임·라벨)
+floe2 render chip.oas --px 1600 --out d.png --detail high --density on        # detail high + 컷 아래 도형을 밀도로(뷰어의 --density / View > density)
+floe2 render chip.oas --bbox 0,0,2000,2000 --px 800 --out x.png --archival    # 내보내기용: cut 없음(exact), solid 채움, 프레임·라벨 없음
 floe2 render deck.jb --at 53.02mm,92.61mm --size 32mm,25.6mm --px 1200x900 --out a.png
 floe2 render deck.jb --corners 40000,80000,60000,95000 --size 4mm,3mm --px 600x450 --out quad.png  # 영역 안쪽 네 꼭짓점 4장 mosaic
 floe2 info   deck.jb --level 2 --chips      # 레벨 2의 칩(칩뷰 행): CHIP, 배치 #K, 범위
@@ -223,6 +234,46 @@ floe2 jobdeck deck.jb --level 2 --mode chip --placements --report r.json   # 분
 mosaic, `--batch`는 레이아웃(.oas/.gds)에도 그대로 쓰인다. 칩 on/off
 (`--chip/--chip-off/--fit-chip`, 이름·`N:이름`·CHIP id·와일드카드)는 덱
 전용이다(`docs/JOBDECK.ko.md` §7).
+
+**캡처 기본값 = 뷰어**(0.12.350, 2026-10-12 사용자: "캡쳐도 동일한 결과가 나와야 함")
+- `floe2 render`는 뷰어를 같은 영역으로 연 그림(`floe2 view --goto`, depth full)을 그대로 그린다.
+  - detail medium, thin keep, 밀도는 뷰어가 시작할 때와 같은 규칙이다.
+  - 뷰어의 채움(speckle·layerprops 패턴), 셀 프레임, 라벨을 그린다. jobdeck은 라벨이 없다.
+  - 확인 방법: 뷰어(`gui.Viewer`)가 그린 화면과 같은 영역·크기·depth의 캡처를 비교했다. 처음 열기·확대·전체 depth·축소·밀도 on 화면 모두 픽셀이 같았다(gtk_view 게이트 capture_parity).
+  - 뷰어는 같은 배율에서 정한 예산 맞춤을 기억하므로, 이동한 뒤의 화면은 처음 그 배율로 연 화면과 다를 수 있다. 캡처는 그 배율의 첫 화면과 같다.
+- `--archival`은 0.12.349까지의 기본값인 내보내기 모양이다: cut 없음(exact), solid 채움, 프레임·라벨 없음.
+  - 함께 준 옵션이 우선한다. 예: `--archival --detail high`.
+  - `FLOE_RENDER_DEFAULTS=archival`이면 이것이 기본값이 된다(예전 스크립트용).
+- `--frames`/`--labels`는 뷰어처럼 `on|off`를 받는다(값 없이 쓰면 on).
+- `--layer-colors row|group`(레이아웃, 2026-10-13): 레이어 기본 색. `row`(기본)는 패널의 줄마다 다른 색, `group`은 layer 번호마다 한 색(0.12.351까지의 방식)이다.
+  - 주지 않으면 `FLOE_LAYER_COLORS`(없으면 row)를 따른다. 뷰어의 `--layer-colors`와 같은 규칙이다.
+  - layerprops의 색이 여전히 먼저다. report 맨 위의 `layer_colors`에 어느 쪽인지 남는다.
+  - jobdeck은 자기 색 체계를 쓰므로 거부한다.
+- `--legend`(2026-10-13): 그린 레이어의 레전드를 이미지마다 flateyes 메타데이터로 넣는다(DRC 캡처와 같은 방식).
+  - 한 줄은 `box 색 fill 이름 L/D`다. 그림을 그린 스타일에서 만든다(layerprops 색·패턴, `--layer-colors`, `--archival`의 solid, jobdeck 레벨 색).
+  - 모든 레이어를 켜면 레이어 패널의 줄(빈 LAYERNAME 쌍 제외)이고, `--layers`면 그 레이어들을 준 순서로 넣는다. jobdeck은 레벨(머리 행)을 넣는다.
+  - batch는 샷마다 자기 레이어의 레전드, mosaic은 합친 최종 이미지에 넣는다. report의 shot에 `legend` 줄들이 남는다.
+  - 픽셀은 그대로다(`floe2 fe-embed --strip`으로 지우면 `--legend` 없는 캡처와 바이트가 같다). flateyes로 열면 보이고, `floe2 fe-embed --dump x.png`로 읽는다.
+  - DRC 캡처는 격리된 레이어면 원래 레전드를 넣고, `--legend`면 전체 레이어 캡처에도 넣는다.
+
+레이아웃 캡처의 디코드 예산(`FLOE_RUST_BUDGET_MB`, 기본 1024)은 뷰어와 같다.
+- `--detail exact`(`--archival`의 기본)는 모든 도형을 그리거나 실패한다(내보내기가 도형을 빠뜨리면 안 되므로).
+  - 넓은 영역이 예산을 넘으면 실패하고, 에러에 필요한 양과 길이 함께 나온다.
+  - 길: `--detail high`, 더 좁은 영역이나 `--layers`, 또는 예산을 올린 `FLOE_RUST_BUDGET_MB=…`.
+- 컷이 있는 detail(`high`/`medium`/`low`)은 뷰어처럼 예산에 맞춰 성기게 그린다.
+  - 그랬으면 로그(stdout, `[floe2] rendered`와 같은 곳)에 `WARNING: … thinned to fit the render budget: …`이 나온다. 예: `206 layer(s) whole, 243 layer(s) left out`.
+  - report의 shot에는 `budget_fit`(renderd의 `fit_*`, mosaic은 타일별)이 붙는다.
+
+`--density on|off`(2026-10-12)는 뷰어의 `--density`와 같다.
+- 켜면 컷이 버린 도형을 덮는 면적만큼의 밝기로 그린다(renderd의 density stack).
+  - 컷이 있어야 한다(`--detail low|medium|high`; 기본 medium). `--detail exact`(`--archival`의 기본 detail 포함)와 쓰면 거부한다.
+  - 레이아웃 전용이다. jobdeck은 프레임에 밀도를 그리지 않으므로 거부한다.
+  - 배치·mosaic·DRC 캡처에도 같이 적용된다.
+- 주지 않으면 뷰어가 시작할 때처럼 켜진다(0.12.351, 사용자 2026-10-12: "밀도는 기본으로 켜지게 해줘"; 0.12.350까지는 `FLOE_RUST_DENSITY_STACK=top`일 때만 켬).
+  - 컷이 없는 `--detail exact`, 보관용 모양 `--archival`, jobdeck에서는 꺼진다. `--archival --detail high --density on`처럼 주면 켜진다.
+  - `FLOE_RUST_DENSITY_STACK=off`이면 뷰어와 캡처 모두 기본이 꺼짐이다(되돌리는 스위치).
+- report 맨 위의 `density`에 켜졌는지가 남는다.
+- 예산 때문에 도형으로 못 그린 레이어도 밀도에는 나온다. 그래서 경고가 `left out` 대신 `as density only`라고 쓴다.
 
 renderd가 소스 캐시들을 그대로 열어 합성하며(배율은 씬 루트에만), 포맷의
 확정/미확정 사항과 단계별 설계는 `docs/JOBDECK.ko.md`에 있다. 실제 jobdeck과
@@ -375,7 +426,7 @@ Calibre가 `DRC RESULTS DATABASE "out.db" ASCII`로 쓰는 **ASCII 결과
   edge = 선분 + 끝점 표시). `Esc` 로 마커 삭제.
 - **`n` / `p`** = 다음/이전 에러로 순차 이동 (창의 prev/next 버튼과 동일,
   전체 에러를 룰 순서로 순회하며 트리 선택도 따라온다).
-- 파서(`floe/drc.py`)는 순수 파이썬으로 포맷 오차에 관대하다: CRLF/빈 줄
+- 파서(Rust app-core `drc`; 동결 Python 구현은 오라클 `tools/oracle/floe_oracle/drc.py`)는 포맷 오차에 관대하다: CRLF/빈 줄
   무시, 선언 카운트는 참고만, 모르는 레코드 문자는 건너뜀, 잘린 파일은
   파싱된 부분까지 사용. 포맷: `p <n> <꼭짓점수>` + 줄당 `x y`,
   `e <n> <엣지수>` + 줄당 `x1 y1 x2 y2` (정수, um = 값/precision).
@@ -573,7 +624,7 @@ GUI는 **GTK3/PyGObject** 셸이다. flateyes와 같은 폐쇄망 호스트
   `n`/`p` 다음/이전 DRC 에러, `0`-`9` depth, `Esc` 단계 해제,
   `q` 종료 (확인 다이얼로그). `v`는 floe2에서 컷 아래 밀도(View > density
   under the cut) 켜기/끄기이고(2026-10-05; 시작값 `floe2 view --density
-  on|off`, 없으면 `FLOE_RUST_DENSITY_STACK=top`일 때 켬), 안정판 floe에서는
+  on|off`, 없으면 켬 - 0.12.351부터, `FLOE_RUST_DENSITY_STACK=off`면 끔), 안정판 floe에서는
   density coverage 토글이다.
 - 마우스: 왼쪽 드래그는 패닝(짧은 클릭은 객체 선택), 오른쪽 드래그는
   영역 줌(오른쪽 방향은 확대, 왼쪽 방향은 축소)이다. 휠은 커서 위치를
@@ -596,6 +647,18 @@ GUI는 **GTK3/PyGObject** 셸이다. flateyes와 같은 폐쇄망 호스트
   터미널에 `N layers not listed …` 한 줄). `floe2 info`는 모든 쌍을
   stored shapes와 함께 보이며(0이 그런 쌍), `FLOE_EMPTY_LAYERS=show`이면
   패널도 예전처럼 모두 보인다. 잡덱의 레이어 표는 그대로다.
+  레이어의 기본 색(layerprops가 색을 정하지 않은 레이어)은 패널의 줄 순서로
+  매긴다(2026-10-13, 사용자: "연속되는 레이어는 다른 색을 가지도록"). 도형이나
+  텍스트가 있는 쌍을 (layer, datatype) 순으로 세운 순번마다 색상(hue)을
+  황금각(137.5°)씩 돌린다. 그래서 한 layer 번호의 datatype들(`2.0 2.1 2.2 2.32`)도,
+  이웃한 줄도 서로 다른 색이다. 2026-08-04부터는 layer 번호로 정해 한 그룹이 한
+  색이었다. 뷰어와 `floe2 render` 캡처(DRC 포함)가 같은 색을 쓰고, 기존 캐시도
+  다시 색인하지 않고 열 때 적용된다. 잡덱은 자기 색 규칙(레벨 색)을 그대로 쓴다.
+  그룹 안이 한 색이어야 할 때는 실행 옵션 `--layer-colors group`을 준다
+  (`floe2 view`·`floe2 render` 모두; 예전처럼 layer 번호마다 한 색). `row`가
+  기본이고, 환경 변수 `FLOE_LAYER_COLORS=row|group`으로 둘의 기본값을 함께
+  정할 수 있다. 뷰어는 이 옵션을 주면 따로 창을 연다(이미 떠 있는 창은 제 색을
+  유지한다).
   그룹이 접혀 있을 때 부모를 온/오프하면 자식도 함께 바뀐다. 그룹을
   펼치면 부모와 각 자식 datatype이 모두 개별적으로 토글된다.
   자식 없는 레이어는 마커 자리가 공백이라 모든 이름이 좌측 정렬된다.
@@ -749,23 +812,20 @@ klayout은 서브픽셀 도형도 전부 순회하며 그리므로(멤버당 비
 
 ## 폐쇄망 리눅스 배포
 
-기본 경로의 Python 의존성은 `numpy`, `pillow` 휠이고 GUI는
-PyGObject/GTK3 (**RHEL 계열 GNOME 호스트에 기본 탑재** — flateyes와 동일하게
-추가 설치 없음). 인덱싱/렌더용 Rust 바이너리 두 개를 함께 배포한다.
-KLayout wheel은 legacy indexer/renderer와 개발 oracle에서만 선택적으로 필요하다.
+제품은 Rust 실행 파일 세 개(`floe2`·`floe-index`·`floe-renderd`)와 GTK 뷰어
+`floe/`이다. 뷰어의 Python 의존성은 PyGObject/GTK3 하나다(**RHEL 계열 GNOME
+호스트에 기본 탑재** — flateyes와 동일하게 추가 설치 없음; pycairo도 쓰지 않는다).
+NumPy·Pillow는 0.12.342부터 뷰어에 필요 없다(P4f) - 게이트와 동결 KLayout
+셸(개발 전용 오라클)만 쓴다. `view`를 뺀 명령(index·info·render·clip·drc …)은
+Python 없이 돈다.
 
 ```sh
-# 1) 인터넷 PC에서 휠 수집 (타겟 파이썬 버전에 맞춰)
-pip download numpy pillow -d wheels/ \
-    --platform manylinux2014_x86_64 --only-binary=:all: \
-    --python-version 311        # 예: 타겟이 python3.11
-
-# 2) 폐쇄망 호스트에서 - 반드시 시스템 PyGObject가 보이는 파이썬으로
+# 폐쇄망 호스트에서 - 시스템 PyGObject가 보이는 파이썬이면 그대로
 python3 -c 'import gi; gi.require_version("Gtk", "3.0")'   # GUI 사전 확인
-python3 -m venv --system-site-packages .venv               # gi가 보이게
-.venv/bin/pip install --no-index --find-links wheels/ numpy pillow
-# rollback/oracle 환경만 별도로 klayout wheel을 설치
-# floe/ 디렉토리 복사 후: .venv/bin/python -m floe ...
+# floe/(GTK 뷰어)와 Rust 바이너리(floe2·floe-index·floe-renderd)를 같은
+# 폴더 아래에 두고(floe2가 위쪽 폴더의 floe/gui.py를 찾는다):
+#   setenv FLOE_GTK_PYTHON /usr/bin/python3     # tcsh; 없으면 PATH의 python3
+#   floe2 view chip.oas
 ```
 
 **주의 — PyGObject/pycairo를 pip으로 설치하지 말 것.** pip은 meson 소스
@@ -788,13 +848,14 @@ python3 -m venv --system-site-packages .venv               # gi가 보이게
 
 호스트에 `python3-gobject`(gi)조차 없거나 파이썬 버전이 안 맞는 경우,
 flateyes-portable과 동일하게 필요한 걸 전부 싸서 가져간다. Python +
-PyGObject + GTK3 (conda-forge, 재배치 가능) + NumPy/Pillow + floe/floe2 +
-`floe-index`/`floe-renderd`가 한 tar에 들어가고, 호스트엔 아무것도
+PyGObject + GTK3 (conda-forge, 재배치 가능) + floe(GTK 뷰어) + `floe2`·
+`floe-index`·`floe-renderd`가 한 tar에 들어가고, 호스트엔 아무것도
 설치·변경하지 않는다 (쓰는 것은 X 디스플레이와 시스템 폰트뿐).
 기본 floe2 번들은 KLayout을 포함하지 않는다.
 
-NumPy/Pillow Linux 휠과 네이티브 바이너리를 런타임에 넣으므로 번들은
-**x86_64 Linux 빌드 머신**에서 만든다. Rust 바이너리는 빌드 호스트의 glibc
+번들의 런타임 Python을 빌드 중에 실행해 확인하므로(KLayout 개발 번들은 그
+pip로 NumPy·Pillow·KLayout 휠도 넣는다) 번들은 **x86_64 Linux 빌드 머신**에서
+만든다. 기본 floe2 번들에는 pip 휠이 하나도 들어가지 않는다(0.12.342~). Rust 바이너리는 빌드 호스트의 glibc
 버전을 끌고 들어오지 않도록 기본적으로 `x86_64-unknown-linux-musl` 정적
 타깃으로 빌드한다(`rustup target`이 없으면 자동 설치). 빌드 시 verify가 모든
 ELF의 실제 glibc floor를 출력한다. `tools/make_portable.sh`가 flateyes의
@@ -802,11 +863,23 @@ ELF의 실제 glibc floor를 출력한다. `tools/make_portable.sh`가 flateyes�
 
 ```sh
 tools/make_portable.sh                     # -> floe2-portable-<ver>-<date>.tar.gz
-# 폐쇄망 미러만 되는 빌드 머신이면 numpy/pillow 휠을 미리 받아두고:
-WHEELS=./wheels tools/make_portable.sh
+# KLayout 번들을 폐쇄망 미러만 되는 빌드 머신에서 만들면 휠을 미리 받아두고:
+WHEELS=./wheels FLOE_PORTABLE_KLAYOUT=1 tools/make_portable.sh
 # KLayout 포함 번들(기본 배포 아님): floe와 floe2 실행 파일을 함께 제공
 FLOE_PORTABLE_KLAYOUT=1 tools/make_portable.sh
+# Rust 실행 파일을 glibc(GNU) 빌드로: 병렬 색인이 ~40% 빠르다(rust/BUILD.md).
+# 빌드 머신의 glibc와 무관하게 glibc 2.28(GLIBC_CEILING) 기준으로 링크하므로
+# RHEL 8 이상 현장에서 돈다. cargo-zigbuild와 zig가 필요하다(한 번):
+#   cargo install cargo-zigbuild
+#   python3 -m venv ~/zig && ~/zig/bin/pip install ziglang   # Ubuntu 24.04는
+#   export PATH=~/zig/bin:$PATH     # 시스템 pip --user를 막는다(PEP 668)
+FLOE_PORTABLE_RUST=gnu tools/make_portable.sh   # -> ...-gnu.tar.gz
 ```
+기본(`FLOE_PORTABLE_RUST=musl`)은 정적 musl이라 어느 x86_64 Linux에서나 돈다.
+`selfcheck`의 `rust:` 줄이 번들이 어느 쪽인지 말한다. 0.12.346부터 floe2가 DRC
+검토 파일용 SQLite(C, 동봉 소스)를 컴파일하므로 musl 빌드에도 C 컴파일러가 필요하다:
+위의 cargo-zigbuild + zig가 있으면 그것으로(`cargo zigbuild --target
+x86_64-unknown-linux-musl`), 없으면 musl-gcc(`musl-tools`)로 빌드한다.
 
 호스트에서는 **풀고 실행만** (설치·권한 불필요):
 
@@ -825,14 +898,17 @@ tar xzf floe2-portable-*.tar.gz -C /opt     # 위치 자유
 conda-forge가 GTK 스택 전체를 재배치 가능하게 묶어주므로 (GIR 타입립·
 gdk-pixbuf 로더·스키마·폰트 포함) gi를 시스템에 얹을 필요가 없다. 런처가
 첫 실행 시 호스트별 캐시(GSettings 스키마, pixbuf 로더 목록)를 자동
-생성한다. 코드를 갱신할 때는 새 `floe/`와 `floe2/` 패키지를 번들의
-`runtime/lib/python*/site-packages/`에 함께 덮어쓴다.
+생성한다. 갱신은 번들을 새로 만드는 것이 기본이다. Python 뷰어만 바뀐
+판이면 새 `floe/` 패키지를 번들의 `runtime/lib/python*/site-packages/`에
+통째로 덮어써도 되지만, Rust 쪽(`floe2`, `floe-index`, `floe-renderd`)이
+바뀐 판은 `runtime/bin/`의 세 실행 파일도 함께 바꿔야 한다(셋과
+`floe/`는 같은 판이어야 한다). Python `floe2/` 패키지는 0.12.328부터 없다.
 `floe-portable`은 KLayout과 Rust renderer를 모두 포함하므로 루트의 `floe`는
 안정판 KLayout 제품, `floe2`는 Rust-only 제품으로 같은 cache를 공유한다. 기본
 `floe2-portable`은 KLayout이 없으므로 `floe2` launcher만 제공한다.
 
 **뷰어 문제 진단 순서** (창이 검게 나오는 등):
-1. `selfcheck` — 스택(gi/GTK/pixbuf/NumPy/Pillow/Rust binaries) 검증,
+1. `selfcheck` — 스택(gi/GTK/pixbuf/Rust binaries; KLayout 번들은 NumPy/Pillow/KLayout도) 검증,
    창 없이. 기본 번들은 KLayout 부재도 확인한다.
 2. `floe2 render <src> --bbox ... --out t.png` — 캐시·렌더 엔진 검증, GUI 없이.
 3. `floe2 probe <src>` — **뷰어의 렌더 서비스 경로**(spawn 자식 + 큐 + 프레임)
@@ -984,7 +1060,7 @@ payload decode와 2D image tile raster를 worker 여러 개로 병렬 수행한�
 cd rust
 cargo build --release -p floe-renderd -p floe-render-cli
 cd ..
-.venv/bin/python -m floe2 view --multi chip.oas
+rust/target/release/floe2 view --multi chip.oas
 ```
 
 `floe2`의 유일한 backend는 in-tree `floe.rust_render.RustRenderWorker`와
@@ -1081,10 +1157,15 @@ sh rust/build-linux.sh
 #                                   빠름; 타깃 glibc >= 빌드 머신이면 OK)
 #  -> dist/floe-index-linux-x86_64  musl 완전 정적 - 어떤 x86_64 리눅스든
 #                                   실행되는 이식성 폴백 (+ .sha256)
+#     (floe2의 SQLite는 C: musl 빌드는 zig cc(cargo-zigbuild)나 musl-gcc로)
 ```
 
-- 소스 트리 밖의 바이너리는 `FLOE_INDEX_BIN`으로 지정하거나 Python 실행
-  파일 옆/`PATH`에 둔다. portable은 `runtime/bin/floe-index`에 동봉한다.
+- floe2와 GTK 뷰어는 floe-index·floe-renderd를 floe2 옆에서 찾는다(개발
+  트리의 `rust/target/release`, portable의 `runtime/bin` - 세 바이너리를
+  한 폴더에). 다른 위치는 `PATH`에 두거나 `FLOE_INDEX_BIN`·`FLOE_RENDERD_BIN`
+  으로 강제한다(설정하면 그 경로가 이긴다 - 평소에는 비워 둔다).
+  portable은 최상위 `floe2`(런처)로 실행한다; `runtime/bin/floe2`를 직접
+  실행해도 뷰어는 런처를 거쳐 뜬다.
 - musl 정적 빌드에는 musl malloc의 전역 락(전 스레드 수가 ~190초로
   수렴하는 병목)을 우회하는 스레드 캐시 allocator가 내장된다. glibc/
   macOS 빌드는 순수 시스템 allocator를 쓴다 (자체 per-thread 캐시 보유).

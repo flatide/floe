@@ -186,6 +186,16 @@ pub(crate) fn unhex(s: &str) -> Result<String> {
     String::from_utf8(out).map_err(|_| Error::protocol("non-UTF8 query text"))
 }
 pub(crate) fn parse_reply(kind: &str, f: Fields, request: QueryRequest) -> Result<QueryReply> {
+    parse_reply_with(kind, f, request, false)
+}
+/// `incomplete_ok`: the query was sent with `incomplete=ok` - an answer
+/// from an incomplete scene is valid.
+pub(crate) fn parse_reply_with(
+    kind: &str,
+    f: Fields,
+    request: QueryRequest,
+    incomplete_ok: bool,
+) -> Result<QueryReply> {
     if kind != request.operation.name() {
         return Err(Error::protocol("query kind mismatch"));
     }
@@ -213,14 +223,15 @@ pub(crate) fn parse_reply(kind: &str, f: Fields, request: QueryRequest) -> Resul
         return Err(Error::protocol("query hit with no layers"));
     }
     let matches = scene.id == Some(request.scene);
+    let answered = scene.complete || incomplete_ok;
     let valid = match status {
-        QueryStatus::Ok => matches && scene.complete && summary_layers == 0,
+        QueryStatus::Ok => matches && answered && summary_layers == 0,
         QueryStatus::Unavailable => scene.id.is_none(),
         QueryStatus::Mismatch => scene.id.is_some() && !matches,
-        QueryStatus::Incomplete => matches && !scene.complete,
-        QueryStatus::Summary => matches && scene.complete && summary_layers != 0,
-        QueryStatus::Superseded => matches && scene.complete && summary_layers == 0,
-        QueryStatus::Error => scene.id.is_none() || (matches && scene.complete),
+        QueryStatus::Incomplete => matches && !scene.complete && !incomplete_ok,
+        QueryStatus::Summary => matches && answered && summary_layers != 0,
+        QueryStatus::Superseded => matches && answered && summary_layers == 0,
+        QueryStatus::Error => scene.id.is_none() || (matches && answered),
     };
     let error = f.get("err_hex").map(unhex).transpose()?;
     if matches!(
@@ -428,6 +439,21 @@ mod tests {
             assert!(unhex(bad).is_err());
         }
         assert_eq!(unhex("544f5020ed959ceab880").unwrap(), "TOP 한글");
+    }
+    #[test]
+    fn an_incomplete_scene_answers_only_when_the_query_allowed_it() {
+        let mut f = snap();
+        f.0.insert("scene_complete".into(), "0".into());
+        // the web's query: an answer from an incomplete scene is a lie
+        assert!(parse_reply("snap", f.clone(), request()).is_err());
+        // the desktop's (incomplete=ok): what the scene holds
+        let r = parse_reply_with("snap", f, request(), true).unwrap();
+        assert_eq!(r.status, QueryStatus::Ok);
+        assert!(!r.scene.complete);
+        // and renderd does not refuse such a query as incomplete
+        let refused = fields("snap seq=5 found=0 x=1 y=2 snap=- scene_gen=7 scene_round=2 scene_complete=0 scene_summary=0 query_status=scene_incomplete err_hex=6572726f72");
+        assert!(parse_reply("snap", refused.clone(), request()).is_ok());
+        assert!(parse_reply_with("snap", refused, request(), true).is_err());
     }
     #[test]
     fn refusals_are_not_successful_empty_results() {

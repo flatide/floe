@@ -52,8 +52,12 @@ os.environ["FLOE_RUST_AREA_TRUE"] = "off"
 # switch workers still set =off, and RenderTests checks the default.
 os.environ["FLOE_RUST_OCCUPANCY"] = "on"
 sys.path.insert(0, str(ROOT))
-from floe.cachepath import vfs_cache_dir  # noqa: E402
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (P3)
+from floe_oracle.cachepath import vfs_cache_dir  # noqa: E402
 BIN = ROOT / "rust" / "target" / "release" / "floe-index"
+# the product command line: the Rust `floe2` (rust/floe2; the Python
+# floe2 CLI is gone - docs/SHARED_APP_LAYER.ko.md P1c)
+FLOE2 = os.environ.get("FLOE2_BIN") or str(ROOT / "rust" / "target" / "release" / "floe2")
 TMP = Path(tempfile.mkdtemp(prefix="floe-occ-"))
 UM = 1000  # dbu per micron in the fixtures (dbu 0.001)
 
@@ -93,8 +97,8 @@ def floe_index(*args, ok=0, env=None):
 
 
 def floe2(*args, ok=0, env=None):
-    res = subprocess.run([sys.executable, "-B", "-m", "floe2",
-                          *map(str, args)], cwd=ROOT, env=env or run_env(),
+    res = subprocess.run([FLOE2, *map(str, args)], cwd=ROOT,
+                         env=env or run_env(),
                          capture_output=True, text=True)
     if ok is not None and res.returncode != ok:
         raise AssertionError("floe2 %s: exit %d, wanted %d\n%s\n%s"
@@ -949,7 +953,9 @@ class GenerationContractTests(unittest.TestCase):
 
         def lit(detail, thin, env=None):
             out = d / ("corner-%s-%s.png" % (detail, thin))
-            floe2("render", src, "--bbox", "17300,-17309,17919,-16700",
+            # (--archival: solid fills, no frames - the lit pixels as
+            # these checks were made, before the viewer's look, 0.12.350)
+            floe2("render", src, "--archival", "--bbox", "17300,-17309,17919,-16700",
                   "--px", "300", "--detail", detail, "--thin", thin,
                   "--layers", "3/0", "--out", out, env=env)
             im = Image.open(out).convert("RGB")
@@ -1016,15 +1022,19 @@ class GenerationContractTests(unittest.TestCase):
         self.assertEqual(read_ovo(self.cache / "design.ovo")["cell"], 3000)
         # a child that dies after writing the tmp: the wrapper removes it
         fake = TMP / "fake-index"
+        # it answers --version as the real one: the Rust command line asks
+        # its indexer's version before it runs it
         fake.write_text("""#!/usr/bin/env python3
-import pathlib, sys
+import os, pathlib, sys
 args = sys.argv[1:]
+if args == ["--version"]:
+    os.execv(%r, [%r, "--version"])
 if args and args[0] == "vfsd":
     sys.exit(0)
 out = pathlib.Path(args[2])
 (out / "design.ovo.tmp").write_bytes(b"half")
 sys.exit(9)
-""")
+""" % (str(BIN), str(BIN)))
         fake.chmod(0o755)
         env = run_env()
         env["FLOE_INDEX_BIN"] = str(fake)
@@ -1261,8 +1271,8 @@ class RenderTests(unittest.TestCase):
     @classmethod
     def _start_worker(cls):
         sys.path.insert(0, str(ROOT))
-        from floe.cache import Cache
-        from floe.rust_render import RustRenderWorker
+        from floe_oracle.cache import Cache
+        from floe_oracle.rust_render import RustRenderWorker
         cache = Cache(str(cls.src))
         cache.load()
         worker = RustRenderWorker(cache)
@@ -1491,8 +1501,8 @@ class RenderTests(unittest.TestCase):
         cache = index_with_occupancy(src, 4)
         os.environ["FLOE_RUST_OCCUPANCY"] = "on"
         sys.path.insert(0, str(ROOT))
-        from floe.cache import Cache
-        from floe.rust_render import RustRenderWorker
+        from floe_oracle.cache import Cache
+        from floe_oracle.rust_render import RustRenderWorker
         c = Cache(str(src))
         c.load()
         worker = RustRenderWorker(c)
@@ -2019,8 +2029,8 @@ class SubCutTests(unittest.TestCase):
 
     @classmethod
     def _worker(cls):
-        from floe.cache import Cache
-        from floe.rust_render import RustRenderWorker
+        from floe_oracle.cache import Cache
+        from floe_oracle.rust_render import RustRenderWorker
         cache = Cache(str(cls.src))
         cache.load()
         worker = RustRenderWorker(cache)
@@ -2232,10 +2242,10 @@ class DeckRenderTests(unittest.TestCase):
 
     @classmethod
     def _workers(cls):
-        from floe.jobdeck.viewer import DeckCache
-        from floe.jobdeck import render as jrender
-        from floe.cache import Cache
-        from floe.rust_render import RustRenderWorker
+        from floe_oracle.jobdeck.viewer import DeckCache
+        from floe_oracle.jobdeck import render as jrender
+        from floe_oracle.cache import Cache
+        from floe_oracle.rust_render import RustRenderWorker
         dc = DeckCache(str(cls.dir / "wide.jb"), mode="level")
         dc.load()
         deck = jrender.DeckRenderWorker(dc)

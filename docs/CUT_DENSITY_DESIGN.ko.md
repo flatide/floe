@@ -2220,7 +2220,7 @@ pages, pass 2 over budget: thinned`였다.
 - **재현되지 않는 것:** 실칩의 시간(75 s, 2.7 s)이다. 이 칩의 프레임은 0.2~0.5 s다. 실칩은 9.8 GB 색인, 449
   레이어, 깊이 15이고 첫 읽기가 디스크에서 온다.
 - **만들기:** `.venv/bin/python tools/gen_route_chip.py data/synthetic/route_chip.oas`, 그다음
-  `.venv/bin/python -m floe2 index data/synthetic/route_chip.oas`.
+  `rust/target/release/floe2 index data/synthetic/route_chip.oas`.
 
 **하한 아래 페이지의 점유 비트(2026-10-02, 0.12.274 / renderd 0.12.252).** 사용자가 실칩에서 퍼뜨리기를 켜 보고
 "실제로는 없는 곳이 채워지는 현상"을 보았다. 원인(페이지 상자 전체에 고르게 뿌림)은 예상한 대로였고, 결정은 "점유 비트
@@ -3061,6 +3061,7 @@ detail medium과 high에서 차이가 나는 밀도 디테일 표현으로 mediu
 
 - floe2 View > **density under the cut**(`v`)로 켜고 끈다. 시작값은 `floe2 view --density on|off`이고, 없으면
   `FLOE_RUST_DENSITY_STACK=top`일 때 켜진다. 상태줄에 `density:on/off`가 붙는다.
+  - 0.12.351(2026-10-12)부터 없으면 켜진다. `FLOE_RUST_DENSITY_STACK=off`가 되돌리는 스위치다(SPEC-VIEWER §7).
 - 렌더 명령의 `density=on|off`가 프레임마다 renderd의 환경 기본을 대신한다. 켬은 스택과 점(밝기 포함)이고, 끔은
   2패스가 없다. 환경 변수 없이도 뷰어에서 바로 켤 수 있다.
 - 보관 프레임 키에 이 설정을 넣었다. 키에 없으면 같은 뷰에서 밀도를 켰을 때 밀도 없이 보관된 프레임이 통째로

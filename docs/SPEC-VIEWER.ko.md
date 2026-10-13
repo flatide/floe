@@ -187,6 +187,31 @@
     목록 없이(전부) 가므로 그림도 같다.
   - 킬 스위치 `FLOE_EMPTY_LAYERS=show`: 모든 쌍을 예전처럼 보인다. 게이트: cell_tree C10, rust_renderer
     `LayerListTests`.
+- **레이어 기본 색: 패널의 줄 순서(2026-10-13, app 0.12.352; 사용자: "각 레이어에 대해 별도의 지정이 없을 경우
+  같은 그룹은 같은 색으로 표시되는데(예를들어 2.0 2.1 2.2 2.32... 등) 연속되는 레이어는 다른 색을 가지도록
+  변경해줘. 뷰어와 캡쳐 모두 적용해줘.").**
+  - 예전(2026-08-04 b3ce5dd6부터): 색상이 layer 번호의 황금각 배수여서 한 번호의 datatype이 모두 같은 색이었다.
+  - 이제 app-core `styles::palette_ranks`가 순번을 정한다. 도형·텍스트가 있는 쌍을 (layer, datatype) 순(패널의 줄)으로
+    세우고, 빈 쌍(LAYERNAME만, `FLOE_EMPTY_LAYERS=show`일 때만 목록에 나옴)은 그 뒤에 둔다. 순번 n의 색은
+    `styles::layer_color(n)`이다. 색상(hue)은 n × 137.508°, 채도 0.75, 명도 1이고 계산은 예전과 같다.
+  - 패널에서 이웃한 줄은 색상이 137.5° 떨어진다. 둘 건너는 85°, 셋 건너는 52.5°다.
+  - layerprops의 색이 여전히 먼저다. 캐시를 열 때(catalog) 정하므로 뷰어(gtk-service `open`의 meta)·렌더 스타일·
+    `floe2 render`·DRC 캡처가 같은 색이고, 기존 캐시는 다시 색인할 필요가 없다. floe-index도 meta.json에 같은 색을
+    쓰고, 오라클(`floe_oracle.cache.normalize_layer_colors`)도 같은 규칙이다.
+  - 같은 쌍도 레이아웃마다 다른 색일 수 있다(순번이 그 파일의 레이어 집합에 달림). KLayout의 기본 배색과 같은 방식이다.
+  - 잡덱은 자기 색 규칙(색 체계·레벨 머리 색)을 그대로 쓴다.
+  - **실행 옵션(같은 날 사용자: "그룹내에서는 색이 같아야 하기도 하니 실행 옵션으로 색을 다르게 할지 기존처럼 할지
+    정할 수 있게 해줘").** `floe2 view --layer-colors row|group`, `floe2 render --layer-colors row|group`이다.
+    - `row`가 기본(패널 줄 순서)이고, `group`은 예전처럼 layer 번호마다 한 색이다(app-core `styles::LayerColors`).
+    - 환경 `FLOE_LAYER_COLORS=row|group`이 두 쪽의 기본값이다. catalog가 열 때 읽으므로 웹도 같다. 다른 값은 한 번
+      경고하고 row를 쓴다.
+    - 뷰어: 옵션은 그 환경을 자기가 띄우는 gtk-service에 물려주고, 독립 창으로 연다(`process_options`). 레이아웃을
+      열 때 정하는 값이라 이미 떠 있는 창에 넘기지 않는다. 그 창은 제 색을 유지한다.
+    - 캡처: 옵션이 환경보다 먼저다(`Dataset::set_layer_colors`). report에 `layer_colors`가 남는다. jobdeck은 거부한다.
+    - 오라클(`normalize_layer_colors`)도 `FLOE_LAYER_COLORS=group`을 따른다.
+  - 테스트: app-core `neighbouring_rows_take_neighbouring_places`·`a_group_shares_its_layer_numbers_colour_when_asked`,
+    app-cli `layer_colors_are_asked_for_a_layout`, 게이트 rust_renderer `PaletteTests`·
+    `test_layer_colors_open_a_window_of_their_own`.
 - 오버레이(픽스버프 직접 스탬프, gui.py 상단 헬퍼): 룰러(흰 1px 실선
   + 화살촉 + 거리 칩 흰 텍스트 + 점선 리더), 러버밴드(흰 1px), 스냅
   마커(흰 십자+사각), DRC 마크(**상태색** — 2026-08-14: not waived
@@ -291,7 +316,11 @@
   (CUT_DENSITY_DESIGN §10.12)을 켜고 끈다. `_toggle_density`가 `density_on`을 뒤집고 `_on_depth`(상태줄과 다시
   그리기)를 부른다.
   - 시작값은 `floe2 view --density on|off`다. 실행 중인 창에는 `density=`로 넘어가고, 인덱스가 없어 열기를 미룬 경우는
-    pending_fields로 간다. 옵션이 없으면 뷰어와 renderd가 함께 보는 환경 `FLOE_RUST_DENSITY_STACK=top`일 때 켜진다.
+    pending_fields로 간다. 옵션이 없으면 켜진다(0.12.351, 사용자 2026-10-12: "밀도는 기본으로 켜지게 해줘"; 그전에는
+    뷰어와 renderd가 함께 보는 환경 `FLOE_RUST_DENSITY_STACK=top`일 때만). 그 환경이 `FLOE_RUST_DENSITY_STACK=off`면 꺼진
+    채 시작한다(되돌리는 스위치). `floe2 render`의 기본도 같은 규칙이다(app-core `shots::density_default`).
+  - 컷이 없는 프레임(cut 0)과 jobdeck 프레임에는 켜 두어도 `density`를 끔으로 보낸다. 컷 0에서 켜면 그릴 것은 없고
+    2패스 예약만큼 1패스 예산만 줄어든다. 덱 패스는 밀도를 그리지 않는다. `floe2 render`도 같다.
   - 렌더 작업(뷰포트와 여백)에 `density`가 실리고, 어댑터는 렌더 명령에 `density=on|off`를 붙인다.
     - renderd는 켬이면 스택과 점을 그린다(`FLOE_RUST_DENSITY_DOTS=off`가 아니면 점). 끔이면 2패스가 없다.
     - 필드가 없는 요청(CLI 내보내기, 게이트)은 예전처럼 환경 변수가 정한다.
@@ -317,6 +346,47 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
 
 ## 8b. DRC 브라우저 (대용량 규약)
 
+- **검토 통계**(2026-10-09 feature/jobdeck-drc, 2026-10-11 서비스 이식 —
+  floe2 gtk-service `drc_team.rs`, app-core `drc::team`): 개별 에러를 열어 그
+  도형이 실제로 캔버스에 그려졌을 때 `visited`를 기록한다(`_drc_visit_drawn`:
+  선분·채움 스캔라인이 화면 안에 찍혔는지). 숨긴 오버레이(Tab), 화면 밖의 도형,
+  원형 마커로 축약된 도형, 마커 표시와 다중 선택은 방문이 아니다. 숨겼던 오버레이를
+  다시 보이면 그때 그려진 현재 에러가 방문이다. paint에서는 서비스 요청을 하지 않고
+  다음 idle에 `drc_visit`를 보낸다. 서비스는 세션의 방문 스레드에서 순서대로 쓰고
+  `{"kind": "visit"}` 이벤트로 알린다. 같은 마크의 반복 프레임은 한 번만 보낸다.
+  `검토대상 아님`은 에러 번호 우클릭(현재/선택 전체)과 DRC 메뉴
+  `mark/clear not for review`로 지정·해제한다(서비스 review 작업, 마커·그룹·선택은
+  그대로). 목록은 번호 앞에 `V`/`X`(읽기 실패는 `?`)를 붙이고 waive·선택 색은 그대로다.
+  상세에 `visited: … · not for review: …` 줄, 패널에 전체 DB·현재 룰 전체 통계와
+  `export review statistics…`(CSV, 서비스가 접수한 방문을 쓴 뒤 작성)를 둔다.
+- **공동 검토**(DRC 메뉴 `reviewers…`; `load waives…`도 이 창의 불러오기로 간다 —
+  내 상태를 갈아끼우지 않는다): 다른 리뷰어의 `.floereview`, 작업 review SQLite,
+  waive 파일을 읽기 전용으로 불러와(`drc_team_load`) 내 상태와 비교한다. 리뷰어마다
+  최신 스냅숏 하나만 남는다. `Refresh`는 내 최신 작업과 불러온 자료를 집계한다
+  (`drc_team_aggregate`, 서비스가 접수한 방문을 쓴 뒤). 목록은 선택한 동료의 작업,
+  방문한 리뷰어 사이의 conflict, 선택한 동료와의 import conflict를 1,000개씩 보이며
+  각 행에 내·동료의 V/W/NR과 conflict 이유를 쓴다. 더블클릭은 내 도형을 연다.
+  `Apply all peer work safely`는 내 방문 에러의 다른 판단을 건너뛰고,
+  `Use peer judgement on selected rows`는 선택한 행에 강제로 적용한다. 수동
+  버튼(Waive/Unwaive/Exclude/Require selected)은 내 상태를 바꾼다. 상대 visited는
+  복사하지 않는다. `Export my review…`, `Statistics CSV…`(전체 DB·룰별, conflicts·
+  reviewers 열). 모든 불러오기·집계·페이지·저장·적용은 창의 작업 스레드에서 서비스
+  작업을 기다리며, 창을 닫으면 읽기 작업은 취소하고 쓰기는 끝까지 간다.
+  메인 목록의 `Conflict only`는 마지막 집계의 conflict를 클러스터·CD 그룹·waive
+  필터와 교집합으로 서비스 선택(`drc_team_conflicts`)으로 만들고, 목록·마커·박스
+  선택·in view의 조건으로 쓴다. 준비 중에는 전체를 대신 보이지 않으며 룰·조건·DB가
+  바뀐 뒤 도착한 결과는 버린다. 룰/그룹 제목의 개수는 기존 범위의 개수다. 내 판단을
+  바꾸면 다음 `Refresh`까지 conflict 집합은 그대로이고 waive 필터만 다시 계산한다.
+  Reviewers 창을 닫아도 마지막 집계와 필터는 남고, 다른 DB를 열면 초기화한다.
+- **이전 DRC 실행의 검토 승계**(DRC 메뉴 `review from previous run…`): 이전 `.db`나
+  `.tray`와(선택) 검토 파일을 고르고 `Compare geometry`(`drc_migrate_prepare`,
+  진행률·단계·취소)로 정확한 도형 대응을 본 뒤 `Apply exact matches`
+  (`drc_migrate_apply`)로 적용한다. 목록은 일치, conflict(모호·보호), 모호한 이전
+  상태를 1,000개씩 보이고, 각 행에 현재와 이전의 V/W/NR(불일치 항목 `—`), 결과
+  (exact match / partial consensus / current judgement protected / geometry match
+  unverified)를 쓴다. 통계 줄은 일치(부분)·미대응·모호·conflict와 제외된 도형·
+  이름이 없거나 중복인 룰의 이전 작업 수, 적용 결과를 보인다. 입력을 바꾸면 준비
+  결과를 버리고, DB가 바뀌면 창을 닫는다.
 - `drc.load_db`가 소스: 신선한 pack(`.<db>.tray`)이면 IcePack(mmap, 블록
   단위 lazy 디코드), 아니면 ASCII 전체 파스(v1 오프셋 사이드카는
   2026-08-19 폐기 — 잔존 파일은 stderr 안내 후 ASCII 폴백).
@@ -364,17 +434,76 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   베이스네임의 **db 옆** 사이드카 우선, 기록 경로·`<db>.rules.json`
   차선) + DRC 메뉴 load SVRF rules… 수동 로드. 정보줄에 `svrf 매칭/전체`.
   상세 pane 하단(`_drc_meta_lines`): 덱 원문 제약(constraint:) ·
-  **measured** = 이 에러 자체의 치수 vs 한계값과 Δ/%(waive 판단
-  보조; `_drc_measured` — CD 룰러와 동일 판정: rect=min(w,h)·마주
-  보는 엣지쌍=갭·단일 엣지=길이·area=신발끈, 복잡 도형은 생략;
-  제약이 여럿이면 **상한(<,<=,==) 우선** — `> 0 < v` 체인의 하한은
-  무의미한 +Δ라 표시하지 않음, 2026-08-17) ·
+  **measured / estimated CD** = 마커 치수 vs 한계값과 Δ/%(waive 판단
+  보조; 에지쌍=실제 최소 갭·단일 에지=길이·area=신발끈,
+  직사각형=가로/세로 후보 중 룰 조건으로 선택, 복잡 도형은 생략).
+  추정 CD는 후보와 선택 이유도 상세에 표시한다. CD를 특정할 수 없으면
+  `CD unavailable`로 표시한다. eqDRC 데이터는 사용하지 않는다.
   layers(직접 피연산자) · gds(원천 레이어 폐쇄) · derivation 체인
   (`derived` 맵을 `svrf.rhs_operands`로 워크, 6줄 캡). 메타 없는
   룰/사이드카 부재 시 상세는 기존 그대로(추가 줄 0).
+- **측정 차이 그룹**(2026-10-05): SVRF 메타데이터가 있는 룰에서
+  룰을 선택하면 에러 그리드 위의 `Δ absolute`가 자동 활성화된다.
+  `Δ ratio (%)`로 기준을 바꾸고 `no grouping`으로 해제한다.
+  기본 간격은 룰 전체의 델타 범위에서 약 10개 그룹이 되도록 자동 계산한다.
+  제약별 범위를 사용해 서로 다른 단위를 섞지 않고, 가장 넓은 범위를
+  기준으로 공통 간격을 정해 각 제약당 최대 10개 구간으로 나눈다.
+  다섯 자리 정밀도와 빈 구간 제외로 실제 그룹 수는 더 적을 수 있고,
+  서로 다른 제약과 Unmeasurable 행 때문에 총합은 10개를 넘을 수 있다.
+  클러스터/waive 필터와 독립적이며 절대 차이·비율을 따로 계산한다.
+  직접 입력한 간격은 룰별·모드별로 기억하며 `auto` 또는 빈칸으로
+  자동 간격을 복원한다. DRC/SVRF 메타데이터를 다시 로드하면 초기화한다.
+  절대 차이는
+  `abs(CD - bound)`, 비율 차이는 `abs(CD - bound) / abs(bound) × 100`이며
+  둘 다 0 이상의 위반 크기를 표시한다(2026-10-06).
+  상세의 델타·비율과 그룹 구간에는 양수의 `+` 부호를 붙이지 않는다.
+  공통 측정/제약 선택(app-core `drc::analysis::measure` Selector, 2026-10-11
+  Rust 이식 - 기준 구현은 `tools/oracle/floe_oracle/drc_delta.py`)을 상세 창
+  (gtk-service `drc_cd_info`)과 그룹 계산이 함께 사용한다. 산술은 CPython의
+  `math.hypot`·`math.fsum`과 같은 방식이라 비교·다섯 자리 경계에서도 기준과 같다.
+  CD와 bound를 `Decimal(str(value))`(float는 가장 짧은 왕복 자릿수)로 받아 소수 다섯 자리
+  `ROUND_HALF_UP`으로 먼저 정수화한다. 비율은 이 정수값의 정확한
+  비로 계산한 뒤 다섯 자리로 반올림한다. CD 룰러 라벨도 같은 다섯
+  자리 정밀도로 표시한다. 간격은 다섯 자리보다 유효
+  소수 자릿수가 많으면 거부하며, 끝의 0은 허용한다.
+  그룹 키는 `(제약 인덱스, floor(차이 정수 / 간격 정수))`이고,
+  0 기준 반개구간 `[하한, 상한)`이다. 예: 간격 `0.10000`에서
+  `0.10001`은 `[0.10000, 0.20000)`에 속한다.
+  후보 선택(2026-10-06)은 원래 정밀도의 CD 후보에 오류 출력 조건을
+  먼저 적용한다. 하나만 맞으면 그 값, 여럿이면 `<`/`<=`는 작은 값,
+  `>`/`>=`는 큰 값을 사용한다. 직사각형 후보의 방향을 룰에서 추론한
+  값은 `estimated CD`다. 같은 문장의 범위 조건은 AND로 평가하며
+  `>L<U`는 상한 기준 작은 후보를 선택한다. 서로 무관한 제약을
+  같은 구간으로 합치지 않는다. 후보가 없거나 서로 다른 측정문이
+  맞아 어느 기준인지 특정할 수 없는 경우는 측정 불가로 유지한다.
+  경계에서는 좌표·측정값의 수 ULP 규모 연산 오차만 허용하고,
+  이 보정으로 판정이 달라지거나 해석 불가 대안 제약이 남으면 추정 표시한다.
+  제약 번호와 단위를 그룹 이름에 포함하며 길이 `um`, 면적 `um2`,
+  비율 `%`를 구별한다. 그룹의 추정 CD 개수는 waive 필터와 독립적인
+  전체 소속의 개수이고, 추정 여부도 에러 수에 비례하는 수치 배열로 유지한다.
+  측정 불가능 에러는 마지막 `Unmeasurable` 그룹에 보존하고,
+  비율에서 반올림된 bound가 0이면
+  `Unmeasurable / ratio unavailable`에 포함한다.
+  그룹 목록은 `All errors`와 50개 단위 페이지, 선택 그룹의 에러 목록은
+  기존 `DRC_PAGE(1000)` 단위 페이지이다. 파일 클러스터 ∧ 측정 그룹
+  ∧ selected ∧ in view ∧ waive를 교집합으로 적용하며, 캔버스는
+  에러 페이지와 독립적으로 선택 그룹 전체의 개별 마커를 표시한다. 그룹 카운트는
+  waive 필터를 반영하되 0개 그룹도 행을 유지하여 활성 범위를 보존한다.
+  최초 전체 룰 측정은 취소 가능한 백그라운드 작업이다. 현재 룰의
+  측정 정수 배열을 재사용하여 기준/간격/파일 클러스터 변경 시 재측정을
+  피하고, 그룹 디렉터리와 소속도 수치 배열로 유지한다. 그룹 행은
+  요청한 페이지에 대해서만 생성하며, 구형 결과는 새 범위에 설치하지
+  않는다. waive 갱신은 그룹 카운트와 상태별 page/rank를 함께 갱신한다.
+  측정·그룹·마커·in-view(큰 룰)·박스 선택·대량 waive/note는 floe2 gtk-service의
+  작업 스레드(종류·DB마다 하나, 새 요청이 이전 것을 취소)에서 실행하고
+  `{"event": "drc", …}` 줄로 진행·중간·완료를 알린다(`rust/floe2/src/drc.rs`).
+  10만 건 이상 룰의 측정표와 그룹은 `.analysis` 디렉터리에 저장해 룰 왕복과
+  재시작에서 재사용한다. 그리드 채우기는
+  사용되지 않는 페이지 geometry를 디코딩하지 않는다. 대규모 전처리,
+  공간 인덱스와 중심·측정 캐시 저장 비용은 [DRC.ko.md §5](DRC.ko.md#5-성능-경로와-검증) 참고.
 - **룰 유형 필터**(2026-08-17, rules.json 필요): nav 행 콤보 —
-  "all types" + 사이드카 constraint **metric별 룰 수**(width/space/
-  enclosure/area/density/… DRC_METRICS 정순, 그 외 알파벳순;
+  "all types" + 사이드카 constraint **metric별 룰 수**(width/space/notch/
+  enclosure/overlap/extension/area/density/… DRC_METRICS 정순, 그 외 알파벳순;
   측정문 없는 매칭 룰·미매칭 룰 = other). `_drc_types_rebuild`가
   로드/사이드카 부착 시 룰당 metric frozenset(`_drc_rtypes`)을
   굽고, `_drc_fill`이 검색·waive 필터와 **교집합**으로 룰 목록을
@@ -416,6 +545,18 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   결정 — 자동 열기 금지): 모델 재부착 중 GTK가 행 0을 유령
   선택하면 busy 가드가 이벤트를 삼켜 "선택돼 보이는데 그리드는 빈"
   상태가 되므로, load_drc가 unselect_all로 유령 선택을 걷어낸다.
+- **사용자 클러스터**(2026-10-05): `<db>.clusters`가 정의한 룰은
+  TreeStore의 부모 행, 클러스터는 하위 행이다. 부모는 전체 에러,
+  하위 행은 그 소속만 표시한다. 미지정 에러는 `Unclustered`로 보존하고
+  룰 내부 번호를 다시 매기지 않는다. 파일이 없는 룰은 단일 행이다.
+  검색/유형 필터는 부모 룰에 적용하고, waive 필터는 빈 하위 행도 숨긴다.
+  모델 재구축 후 펼침 상태 및 선택한 클러스터를 유지한다(필터에 가려진
+  선택은 해제). 클러스터 ∧ selected ∧ in view ∧ waive를 교집합으로 적용한다.
+  `./,` 및 페이지 점프는 클러스터의 lazy count/page/rank를 사용하고,
+  in-view 소속은 `query_rect(members=)`의 cap 이전에 판정한다.
+  선택은 `(룰, 클러스터)`별로 보존하여 다른 클러스터의 에러가 일괄
+  waive/note 작업에 섞이지 않게 한다. 로딩/문법은 SPEC-FORMATS의
+  `<db>.clusters` 절을 따른다.
 - 그리드 = 전용 TreeView, **pane 폭에 맞춰 열 수 재배치**(가로
   스크롤 없음 — hscroll NEVER, size-allocate에서 열 수 = 폭 ÷ 셀
   폭[**현재 룰의 최대 번호 자릿수** 프로브 — 룰 전환/그리드 갱신마다
@@ -455,56 +596,88 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   더블클릭 자동 off는 폐지**. 뷰·db·선택 룰 키로 캐시, 룰 미선택
   시 상태줄 안내(상태줄 카운트는 필터 on일 때만). v1 사이드카에서는
   토글 거부+안내.
-- **룰 에러 상시 표시**(2026-08-14→15, 2026-08-18 마커 단일화):
-  룰이 열려 있으면 **현재 그리드 페이지의 에러들**(_drc_page_marks
-  — 그리드 채움 시 지오메트리 프리빌드, 페이지당 ~7ms)이 캔버스에
-  **상태색**(not waived=red, waived=green)으로 그려짐 — 페이지
-  넘김·필터·waive 변경 즉시 반영. **실도형은 점프된 에러
-  (더블클릭/n·p — drc_mark 대상) 하나만**: 그 에러도 화면 스팬 <
-  DRC_MARK_PX면 마커로 붕괴, **나머지 에러는 줌과 무관하게 항상
-  DRC_MARK_PX 마커**(2026-08-18 사용자 요청 — 광역 뷰 도형 뒤엉킴
-  제거; 포커스 셀은 9×9). `_drc_stamp_errs` 공용 페인터(세그먼트
-  예산 20k). 선택(gold)은 그 위에 같은 페인터로 덮임(동일 규칙 —
-  gold도 마커). in-view 필터의 뷰 추적 호출은 유지.
-  **마커 hover/pick**(2026-08-18): 페인터가 프레임마다 화면좌표
-  히트 리스트(_drc_hits)를 굽고 — ① hover 툴팁 = "룰명
-  #로컬(전역) · waived"(변경 시에만 set_tooltip_text), ② 정지
-  좌클릭이 마커 6px 안이면 `_drc_pick` = **번호 단일클릭과 동일**
-  (셀 마크+포커스+디테일, 뷰 불변), ③ **더블클릭 = 번호 더블클릭과
-  동일**(goto_cell + _drc_jump(isolate=True) — 프레이밍·CD 룰러·
-  레이어 격리; _on_press에서 drag 가드 **앞**에 처리 — 짝 단일
-  press가 재장전한 pan drag를 해제해야 이벤트가 살았음, 2026-08-18
-  rev 2); Ctrl/Shift 클릭은 디자인 선택 제스처 유지, 마커 미히트
-  시 기존 디자인 pick 폴스루. **룰 전환 시 점프 잔재 정리**
-  (2026-08-18): 다른 룰 선택은 이전 룰의 drc_mark·_drc_pos·자동
-  CD 룰러를 제거(수동 룰러 유지) — 새 룰의 마커 위에 이전 점프
-  도형이 남지 않음. **Esc 격리 복원 = 점프 마크 동시 해제**
-  (2026-08-18): _drc_lyr_saved 복원 스테이지가 drc_mark·자동 CD
-  룰러도 함께 제거 — _drc_pos·포커스는 유지(클릭-형 n/p가 같은
-  위치에서 이어짐).
-  v1 사이드카도 페이지 마커 표시(query_rect 불필요해짐).
+- **룰/클러스터 전체 마커**(2026-10-08): 선택한 룰·클러스터·CD 델타
+  그룹의 **전체 에러** 중 중심이 화면에 포함된 에러를 개별 원으로 표시한다.
+  그리드 페이지는 마커 조회 키에 포함하지 않는다. waive/selected 필터는
+  적용하며, `in view`는 목록만 좁힌다. gtk-service `drc_markers` 작업이
+  app-core `drc::analysis::points::query`로 그림을 만들고 GUI는
+  `gtkservice.PointMarkers`로 받는다(기준: `floe_oracle/drc_points.py`).
+  **에러를 개수 상한으로 잘라내지 않는다**. 같은 중심은 한 번만 그리며,
+  서로 다른 중심도 현재 화면의 같은 픽셀에 투영되면 중복 표시를 생략한다.
+  같은 픽셀에서는 첫 not waived 에러(없으면 첫 waived)를 선택 대상으로
+  남긴다. 원본 좌표를 보존하므로 확대하면 다시 구분된다.
+  개별 마커는 불투명 5px AA 원(포커스 9px)이다. not waived=red,
+  waived=green이며 같은 픽셀의 혼합 상태는 red를 우선한다.
+  포커스/선택(gold)은 그 위에 개별 마커로 강조한다.
+  **실도형은 점프된 에러(drc_mark 대상) 하나만** 표시하며, 화면 스팬이
+  DRC_MARK_PX보다 작으면 원형 마커로 표시한다.
+  `.tray`의 정확한 bbox 극값의 합을 원본 에러 순서의 little-endian int64
+  Nx2(`centers-r1-<identity>-<rule>/centers.bin`, 단위 1/(2×precision) µm)로
+  저장한다. 음수·반 DBU 중심을 유지하며 qbox 근사 위치를 사용하지 않는다.
+  룰별 16B/에러 파일은 pack identity에 연결해 원자적으로 공개하고 mmap한다.
+  처음에는 블록을 작업자들이 병렬로 복원하면서 바로 그림에 쓰고, 끝나면
+  캐시를 공개한다(폴더에 쓸 수 없으면 캐시 없이 그린다). 취소는 작업 단위마다 확인한다.
+  조회는 65536개 단위로 정확한 중심의 화면 포함 여부·소속·상태를
+  확인한다. 중심이 화면 밖이면 가장자리로 끌어오지 않는다. 단, 닫힌 경계
+  위의 중심은 마지막 픽셀에 포함한다. ASCII DB는 정확한 bbox 중심을
+  청크 단위로 순회하여 동일한 원형 마커를 만든다.
+  출력은 RGBA 이미지와 H×W 에러 ID 배열을 담은 임시 파일(`FLOEMRK1`)이다.
+  마커 리스트나 에러당 GTK 호출을 생성하지 않는다. GUI는 마커
+  레이어를 캐시하고 프레임마다 한 번 합성한다. 포인터 주변 13×13 픽셀만
+  확인해 선택하며 같은 거리에서는 포커스/gold를 우선한다. Tab 숨김은
+  픽셀 hit map도 비운다. 정보줄은 원본 에러 수와 실제 표시 중심 수를 구분한다.
+  마커 작업은 DB마다 하나이며 새 요청이 앞선 작업을 취소한다(GUI의
+  `gtkservice.MarkerWorker`가 마지막 요청만 기다린다). 뷰/캔버스 크기/DB/룰/클러스터/CD 그룹/
+  status revision/selected 소속이 키이며, 현재 키와 다른 결과는 버린다.
+  좌표는 실제 표시한 obox/ospp를 사용하며, 박스 선택도 렌더 대기 중
+  동결된 표시 좌표와 일치시킨다. in-view 목록의 뷰 추적 호출은 유지한다.
+  **마커 hover/pick**: hover 툴팁은 룰명 #로컬(전역)·waived·note 여부를
+  표시한다. 좌클릭이 마커 6px 안이면 `_drc_pick`은 **번호 단일클릭과 동일**
+  하게 셀 마크·포커스·상세만 변경하고 뷰를 유지한다. **더블클릭은 번호
+  더블클릭과 동일**하게 프레이밍·CD 룰러·레이어 격리를 적용한다.
+  Ctrl/Shift 클릭은 디자인 선택 제스처를 유지하고 마커가 없으면 디자인
+  pick으로 이어진다. 룰을 전환하면 이전 점프 마크·자동 CD 룰러를 지우고
+  수동 룰러는 유지한다. Esc로 격리 레이어를 복원할 때 점프 마크와 자동
+  CD 룰러도 지우며 현재 위치·포커스는 유지한다.
+  **0.5초 진행 표시**: 마커 작업은 약 0.5초마다 `partial` 그림을 보내고
+  GUI는 `MarkerProgress(markers)`로 받는다. 그림마다 processed/total
+  카운트와 독립된 ID 배열을 가지며, 매 프레임 마커 레이어를 교체한다.
+  GUI는 중간 결과에도 busy 상태를 유지하고 `(partial)`과 처리 건수를 표시한다.
+  최종 응답은 즉시 busy를 해제하며 오류 응답은 미완성 결과/픽 정보를 지운다.
+  GUI 쪽 결과 슬롯은 최신 그림 하나만 보관하고(밀린 파일은 지운다) 다른
+  작업의 응답은 버린다. 첫 캐시 생성 중에도 완료된 작업 단위가 바로 그림에
+  들어가며, 이후 전체 파일을 재스캔하지 않는다.
   **그리드 숫자도 상태색**(waived green / not-waived red; gold 선택
   배경 위에도 상태색 유지, 현재 셀은 파랑 배경+흰 글자).
 - **mono(그레이스케일)**: `b` 키 토글(독립 — 필터와 연동 없음),
   서비스 "mono" 잡 → Renderer.set_mono(디자인 레이어 색을
   luminance 회색으로; 프레임/스페클 구조 불변) + _color_epoch
   무효화.
-- **에러 박스 선택**(`e`, 2026-08-14→15): 크로스헤어 모드는
+- **에러 박스 선택**(`e`, 2026-10-08): 크로스헤어 모드는
   **Esc(또는 e 재입력)까지 유지** — 박스 완료 후에도 다음 박스
-  대기(룰러와 동일 계열). 두 클릭이 박스를 정의 → **현재 그려진 마커(_drc_page_marks =
-  필터·페이지 적용분) 중 박스 내 에러만** 선택 — 선택은 항상
-  보이는 에러 대상(query_rect/v2 요구 제거, v1도 동작). 두 번째
+  대기(룰러와 동일 계열). 두 클릭이 박스를 정의 → **페이지와 독립적인
+  전체 룰/클러스터 중 박스와 화면에 걸치는 실제 에러**를 선택한다.
+  gtk-service `drc_select` 작업(app-core `drc::analysis::select`)이 status/소속을
+  교차하여 개수 상한 없이 조회한다. pack의 블록이 박스 밖이면 건너뛰고 박스 안이면
+  일괄 선택하며, 나머지만 정확한 bbox를 복원한다. 선택은 서비스에 남는
+  비트셋(에러당 1비트)과 65536개 단위 prefix로 저장해 count·contains·1000개 page를
+  전체 열거 없이 처리하고, GUI는 그 번호(`gtkservice.DrcSelection`)만 가진다.
+  완료된 결과만 적용하며 취소·실패·룰 전환 뒤의 오래된 결과는 이전 선택을
+  덮어쓰지 않는다. 조회 중 Esc는 작업만 취소한다. 마커 숨김 상태에서는 선택하지 않는다. 두 번째
   클릭 수식키: 무수식=대체(빈 박스는 해제), **Shift=추가,
   Ctrl=박스 내 토글** — 그리드 Ctrl/Shift와 동일 계열. 선택은 목록을 **대체하지 않는다**(2026-08-14 수정):
   그리드는 기존 내용(전체 또는 hl in-view)을 유지하고 선택된
   번호만 **gold 배경**으로 마킹(현재 셀 파랑이 우선). 캔버스는
-  선택 에러를 **gold 원래 도형**(2px, 세그먼트 예산 20k)으로
-  표시. **화면 스팬이 마커 크기(DRC_MARK_PX=5) 미만인 에러는 어느
-  경로든 5×5 마커 사각형으로 붕괴**(점프 마크 포함; 포커스는 9×9)
+  선택 에러를 **gold 원형 마커**로 표시한다. 서비스의 마커 그림에
+  직접 합성하므로 GTK가 선택된 모든 도형을 보관하거나 순회하지 않는다.
+  동일 픽셀은 선택된 에러를 우선하고 그 안에서 not waived·원본 순서를 따른다.
+  **화면 스팬이 마커 크기(DRC_MARK_PX=5) 미만인 에러는 어느
+  경로든 지름 5px 원형 마커로 붕괴**(점프 마크 포함; 포커스는 9px)
   — 임계 = 마커 크기 자체(2026-08-16: 구 ≤2px 임계는 도형이
   마커보다 작게 그려지는 중간 줌 구간을 남겼음 — 재도입 금지).
-  해제 = Esc(선택 해제 단계는 마크 해제보다 먼저) /
-  룰 전환 / 새 박스.
+  해제 = Esc(선택 해제 단계는 마크 해제보다 먼저) / 새 박스.
+  룰·클러스터·CD 그룹마다 선택을 보관하며, 리뷰 필터 재검사가 필요한
+  큰 선택은 재검사가 끝나기 전에는 활성 선택으로 사용하지 않는다.
 - **단클릭 포커스**(`_drc_focus`): 에러 번호 단클릭 = 상세 갱신 +
   셀 마킹만(**뷰 이동 없음** — 2026-08-14 팬 제거, 도형 불변).
   포커스된 에러가 마커로 붕괴한 경우 9×9. 점프·룰 전환·Esc가
@@ -540,8 +713,24 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   길이). 엣지 쌍=최근접 갭 1개(평행 대면이면 중점 앵커; 교차/접촉은
   없음). 평행하지만 투영 구간이 겹치지 않아 최근접 양 끝이 대각선인
   경우에는 그 대각선 룰러 뒤에 같은 두 점을 잇는 **수평·수직 성분
-  룰러 2개**도 붙인다. 축정렬 사각형=**폭·높이 2개**(둘 다 유의미,
-  중앙 관통·중앙 교차). 복잡한 폴리곤/엣지셋은 룰러 생략(사용자 규정 2026-08-13).
+  룰러 2개**도 붙인다. 축정렬 사각형은 폭·높이에 SVRF 오류 조건을
+  각각 적용하여 해당 방향만 표시한다(2026-10-06). 양쪽이 조건에 맞거나
+  미해석 옵션/비치수 제약·메타 부재·조건 불일치로 방향을 정할 수 없으면 두 개를
+  유지한다. 구간은 CD 선택과 같은 AND 조건·부동소수점 경계 비교를 쓴다.
+  Selector의 `ruler_segments`를 CLI 스냅샷(app-core drc::capture)과 공유하고, 그룹용 CD를 하나
+  고르는 것만으로 다른 유효한 방향의 룰러를 숨기지 않는다.
+  notch/overlap/extension metric도 거리 측정 대상으로 처리한다.
+  EXTERNAL의 `NOTCH`/`SPACE` 분류 옵션은 방향 판정을 허용하며,
+  그 외 평가하지 않은 옵션이 있으면 두 방향을 유지한다.
+  **area 전용 룰은 길이 룰러 없이 면적 라벨만 표시한다.**
+  `area_label`(app-core drc::analysis::measure)이 상세·그룹과 같은 폴리곤 면적을 다섯 자리
+  `area … µm²`로 만든다. bbox는 위치 앵커에만 사용한다. 혼합 검사면
+  면적 라벨과 치수 룰러를 병행하며 에지 레코드는 면적 라벨이 없다.
+  `_DrcAreaLabel`은 선·화살표 없이 기존 거리 칩으로 표시하고 자동
+  룰러의 Tab/Esc/k/새 점프 수명주기를 그대로 따른다. CLI PNG에도 같은
+  문자열을 텍스트 주석으로 저장한다.
+  거리 칩과 실시간 수동 측정 상태줄은 소수점 다섯 자리 HALF_UP이다.
+  복잡한 폴리곤/엣지셋은 룰러 생략(사용자 규정 2026-08-13).
   수동 룰러는 보존, k/Esc에는 일반 룰러처럼 반응.
 
 ## 8c. 셀 트리 (Calibre cell tree, 2026-09-29)

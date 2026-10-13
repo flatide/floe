@@ -23,13 +23,14 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (P3)
 
 # Product/backend selection happens in main() before any worker spawns:
 # --backend rust imports floe2 (Rust-only product), --backend klayout keeps
 # the stable floe product so the same trace drives the KLayout service.
 from floe import __version__  # noqa: E402
-from floe.cache import Cache  # noqa: E402
-from floe.service import DEFAULT_DETAIL, DETAIL_LEVELS, DETAIL_PX  # noqa: E402
+from floe_oracle.cache import Cache  # noqa: E402
+from floe_oracle.service import DEFAULT_DETAIL, DETAIL_LEVELS, DETAIL_PX  # noqa: E402
 
 
 PHASE_FIELDS = (
@@ -378,7 +379,7 @@ def benchmark_session(cache, trace, args, jobs, run_number):
     if args.backend == "klayout":
         # The stable service runs its pinned single C++ raster; the jobs
         # sweep only labels the session.
-        from floe.service import make_render_worker
+        from floe_oracle.service import make_render_worker
         worker = make_render_worker(cache)
     else:
         os.environ["FLOE_RUST_JOBS"] = str(decode_jobs)
@@ -389,7 +390,7 @@ def benchmark_session(cache, trace, args, jobs, run_number):
         os.environ["FLOE_RUST_OPEN_TIMEOUT_S"] = str(args.timeout)
         if args.renderd:
             os.environ["FLOE_RENDERD_BIN"] = os.path.abspath(args.renderd)
-        from floe.rust_render import RustRenderWorker
+        from floe_oracle.rust_render import RustRenderWorker
         worker = RustRenderWorker(cache)
     monitor = None
     try:
@@ -530,7 +531,9 @@ def main(argv=None):
         os.environ["FLOE_PRODUCT"] = "floe"
         os.environ["FLOE_RENDERER"] = "klayout"
     else:
-        import floe2  # noqa: F401 - select the Rust-only product
+        # the Rust-only product (floe/product.py), as floe2/__init__.py
+        # said before the Rust command line took its place
+        os.environ["FLOE_PRODUCT"] = "floe2"
     if args.serial:
         args.jobs = [1]
         if args.decode_jobs is None:

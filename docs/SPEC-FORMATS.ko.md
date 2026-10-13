@@ -234,9 +234,11 @@ design.ovm의 배치 레코드는 부모별 BVH 순서(자식별 아님)라 "셀
 }
 ```
 
-- `layers[].color`는 로딩 시 `normalize_layer_colors`(레이어 번호 팔레트)
-  후 layerprops 오버레이(`apply_personal_colors`)를 거친다 — meta 파일
-  자체는 불변.
+- `layers[].color`는 로딩 시 `normalize_layer_colors`(패널 줄 순서 팔레트,
+  2026-10-13; 그전에는 레이어 번호 팔레트) 후 layerprops 오버레이
+  (`apply_personal_colors`)를 거친다 — meta 파일 자체는 불변. floe-index도
+  0.12.320부터 같은 팔레트로 쓰지만, 읽는 쪽(app-core catalog, 오라클)이 다시
+  매기므로 예전 캐시도 그대로 맞다.
 - frontier의 정준 파라미터(px_per_um/cut_px)는 L9 게이트가 vfsd
   `mode=frontier`로 재생해 굽기와 박스 단위 일치를 검증하는 키다.
 
@@ -345,6 +347,141 @@ ovm 헤더와 meta.src 모두 소스 절대경로/size/mtime을 기록. `Vfs::op
   **작은 사각형 쿼리만 조용히 빗나가는** 사고가 실제로 있었음
   (2026-08-13, #5/#8 하이라이트 실종).
 
+## `.<db>.review.<리뷰어>.sqlite3` — DRC 방문·검토 제외
+
+2026-10-09(feature/jobdeck-drc), 2026-10-11 Rust 이식(app-core `drc::team::flags`,
+SQLite는 rusqlite의 bundled amalgamation; 참조 `tools/oracle/floe_oracle/drc_review.py`).
+방문 이력과 검토 대상 여부는 waive 상태와 별도로 저장한다. `visited`(1)와
+`not_required`(2)는 독립이며 같은 에러에 둘 다 지정할 수 있다. `not_required`
+변경은 방문 이력을 지우지 않고, waive/note 변경도 두 플래그를 바꾸지 않는다.
+
+- 스키마(참조와 바이트 단위로 같은 문장):
+  - `metadata(id=1, value)` = `{"version":1,"fingerprint":"<pack 리뷰 지문>","sizes":[룰별 에러 수]}`
+    (공백 없는 JSON). 문자열이 다르면 다른 결과의 파일로 보고 거부하며 파일은 그대로 둔다.
+  - `totals(id=1, visited, nr, both)`, `rules(ci, visited, nr, both)`.
+  - `chunks(ci, chunk, visited, nr) WITHOUT ROWID`: 손댄 4,096개 에러 구간만.
+    비트 i(리틀엔디언 바이트)가 그 구간의 i번째 에러다. 빈 평면은 빈 BLOB이다.
+- 비트맵 변경과 세 카운터(겹침 포함)는 한 트랜잭션으로 커밋한다. 롤백 저널
+  (공유 결과 폴더에서 WAL의 공유 메모리를 쓰지 않음)과 `synchronous=FULL`을 쓴다.
+- 룰별/전체 `total, visited, not_required, visited_not_required, pending`
+  (`pending = total − visited − not_required + visited_not_required`; waive와 무관).
+  도형을 디코딩하거나 에러 전체를 스캔하지 않는다.
+- 위치: 결과 폴더(`.db` 옆). `FLOE_DRC_REVIEW_ROOT`가 있으면
+  `<root>/<.db 실제 경로의 sha256 앞 20자리>/` 아래. 결과 폴더를 만들 수 없으면
+  `$XDG_DATA_HOME`(없으면 `~/.local/share`)`/floe/review/<같은 키>/`로 폴백하고
+  안내한다. 기존 파일은 손상되었거나 읽을 수 없어도 우회해 빈 상태로 시작하지 않는다.
+  리뷰어 태그는 waive 파일과 같은 규칙이며 DB를 열 때 고정한다.
+- 읽기는 파일을 만들지 않는다. 읽기는 SQLite·첫 생성 잠금을 50ms까지만 기다리고,
+  실패는 1초 동안 같은 오류로 되풀이한다(목록 1,000행이 같은 실패를 반복하지 않게).
+  실패를 0건으로 보이지 않는다. 쓰기는 별도 연결이며 10초까지 기다린다.
+- 리뷰 지문(`Pack::review_fingerprint`): pack 헤더 40B·푸터 136B·룰 디렉터리·설명
+  참조·문자열 섹션에 이어 `<QQ`(파일 크기, mtime ns)의 sha256 hex. 장치·inode·ctime은
+  넣지 않으므로 복사·이름 변경은 같은 기록, 다시 만든 pack은 다른 기록이다.
+- 일괄 지정(검토 제외)은 65,536개 단위 트랜잭션이다. 취소·실패 전에 완료한 청크와
+  그 카운터는 남는다.
+
+## `.floereview` — 공유용 리뷰 스냅숏
+
+공동 검토용 내보내기(2026-10-11, app-core `drc::team::snapshot`; 참조 `drc_team.py`).
+개인 작업 파일을 바꾸지 않는 SQLite 파일이며 임시 파일
+(`.review-snapshot-*.sqlite3`)로 쓰고 fsync 뒤 이름을 바꿔 공개한다.
+
+- `metadata(id=1, value)`: `type="floe-review-snapshot"`, `version=1`,
+  `fingerprint`, `sizes`, `reviewer`, `snapshot_id`(uuid4 hex), `exported_ns`,
+  `visited_known`, `waive_known`, `not_required_known`(없는 정보와 명시적 false를
+  구별), 변환본은 `source_path`·`source_waive_path`·`source_format`
+  (`working-review` | `legacy-waive`), 집계는 `aggregate=true`와
+  `sources=[{reviewer, snapshot_id}]`, 이전 매핑은 `migration`·`prior_*`.
+  Python `json.dumps(separators=(",",":"))`처럼 비ASCII는 `\uXXXX`로 쓴다.
+- `rules(ci, total, v, w, n, c, a, done)`; `done`은 `v|n`의 개수다.
+- `chunks(ci, k, v, w, n, c, a BLOB, vc..ac 개수, ve..ae 누적 끝) WITHOUT ROWID`와
+  평면마다 부분 인덱스 `page_<평면> ON chunks(ci, <평면>e, k) WHERE <평면>c>0`.
+  평면: visited, waived, not-required, conflict, work(옮길 것 = 기본 `v|w|n`).
+  1,000개 페이지와 순위를 ID 배열 없이 누적 끝으로 찾는다. 열 때 카운터와 각 평면의
+  마지막 누적 끝을 맞춰 보며 비트맵은 읽지 않는다.
+- 내보내기는 자기 waive 파일의 stamp를 확인해 다른 세션이 바꾸면 재시도를 요청한다.
+  waive가 없는 룰은 상태 바이트를 훑지 않고 희소 방문·검토 제외 청크만 읽는다.
+- 불러오기: 스냅숏은 그대로, 개인 review SQLite는 같은 폴더의 같은 DB·리뷰어
+  이름 waive 파일과 함께(있으면), waive 전용 파일은 방문·검토 제외를 unknown으로
+  변환한다. 원본은 읽기만 한다. 다른 결과의 파일은 거부한다(지문·룰 크기).
+- 집계: 리뷰어마다 가장 최근(`exported_ns`, snapshot ID) 스냅숏 하나, 자기 작업은
+  같은 이름의 예전 스냅숏보다 우선. visited는 합집합. 방문한 리뷰어들의 알려진
+  waive 또는 검토 제외 판단이 반대이면 conflict이며 그 에러는 waived·검토 제외
+  카운트에서 빠진다.
+- 적용: 알려진 판단 차원만 바꾼다. 안전 적용은 내 visited 에러의 다른 판단을
+  건너뛰고(import conflict) 강제 적용은 선택한 에러에서 이 보호를 푼다. 상대의
+  visited는 복사하지 않는다. 청크마다 따로 커밋한다.
+
+DRC 재수행 간 승계(app-core `drc::team::migrate`, 참조 `drc_migrate.py`)는 지문
+검사를 완화하지 않는다. 이전 상태를 이전 pack 지문으로 검증한 뒤, 같은 이름(양쪽에서
+유일)의 룰에서 정확히 같은 도형을 찾아 새 pack 지문·새 에러 번호의 임시 매핑을 만든다.
+
+- `drc::matcher`(protocol 2; `floe2 drc-match`로도 노출): 정수 좌표와 precision의
+  정확한 유리수 표현으로 도형을 비교한다. polygon의 순환·반대 방향과 마지막 닫힘점,
+  edge의 끝점·선분 순서를 정규화한다. 해시는 후보만 찾으며 같은 해시 그룹은 바이트로
+  다시 비교한다(충돌 = 검증되지 않은 후보). 룰마다 외부 정렬(24B 레코드, 16-way 병합)로
+  메모리를 제한한다. 이전 중복의 V는 OR, W/NR은 차원마다 모든 중복이 합의한 값만
+  승계하고(미처리 000도 투표), 불일치 차원은 unknown이다.
+- 레코드 16바이트, (룰, 에러) 정렬: ci u32, 값 u8(V=1, W=2, NR=4), disposition u8
+  (0 일치, 1 해시 충돌), unknown u8(W=2, NR=4), 0 u8, ei u64.
+- 매핑은 새 ID 4,096개 단위 비트맵(매핑·모호·자격 스냅숏)으로 둔다. 적용은 룰당
+  16청크 묶음으로 W/NR을 먼저, V를 나중에 쓰며, 현재 방문 판단과 다르면 보호한다.
+  unknown 차원은 덮어쓰지 않는다. 미대응 수 = 전체 − 일치 − 모호 + 부분 합의.
+- 별도 waive 파일과 V/NR SQLite 사이의 원자성은 없다. 취소·실패 전에 완료한
+  청크는 남는다. 이전 결과·검토 파일은 쓰지 않는다.
+
+## <db>.clusters — 사용자 DRC 클러스터
+
+2026-10-05. 사용자/외부 스크립트가 작성하는 UTF-8 텍스트 사이드카.
+`results.db` 옆 `results.db.clusters`를 뷰어가 자동 탐색한다. pack을
+직접 열어도 원래 DB 이름을 기준으로 찾는다. 수동 `load clusters…`는
+임의 경로의 파일을 읽으며, 검증 성공 후 기존 클러스터 전체를 대체한다.
+pack 및 waive/note 파일은 변경하지 않는다.
+
+```ini
+[M1.SPACE.1]
+반복 패턴 = 1-1000000, 2000001
+경계부 = 1000001-2000000
+반복 패턴 = 2000002-3000000
+
+[VIA.ENC.2]
+모서리 = 1, 5, 9-12
+```
+
+- `[룰 이름]`: DB의 정확한 룰 이름(대소문자 구분). 앞뒤 공백은 제거한다.
+  같은 이름의 룰 블록이 여럿이면 모호하므로 지정할 수 없다.
+- `클러스터 이름 = 번호, 시작-끝, …`: **1부터 시작하는 룰 내부 번호**.
+  화면 에러 그리드 및 CLI `--errs`의 `local`과 같다. 전역 번호나
+  원본 ASCII 레코드의 ordinal이 아니다. 구간은 양 끝을 포함하며,
+  순서는 자유다. 읽은 뒤 원래 번호 순서로 조회한다.
+- 빈 줄과 `#`로 시작하는 주석 줄은 무시한다. UTF-8 BOM을 허용한다.
+  번호 사이에 쉼표 또는 공백을 쓸 수 있다. 이름에는 `=`를 쓰지 않는다.
+- 같은 룰 섹션/클러스터 이름을 반복하면 소속을 이어 붙인다. 클러스터
+  표시 순서는 첫 등장 순서다. 수백만 개의 흩어진 번호는 여러 줄에 나눠 쓴다.
+- 중복/겹치는 범위(같은 클러스터 내 중복 포함), 0/음수/역방향/룰 에러 수
+  초과, 없는 룰, 문법 오류는 **파일 전체를 거부**한다. 오류는 파일과 줄을
+  표시하고, 수동 로드 실패 시 기존 클러스터를 유지한다.
+- 누락된 번호는 자동 `Unclustered`에 속한다. 이 이름은 예약어다.
+  `[룰]` 헤더만 있고 클러스터가 없는 섹션은 무시한다.
+- 이 파일에는 DB 지문이 없다. DRC 재실행으로 에러 순서가 바뀌었는데
+  룰 이름과 번호 범위가 그대로면 이를 감지할 수 없으므로, 해당 결과와
+  함께 생성·보관하고 재실행 시 다시 작성해야 한다.
+
+읽기와 조회는 app-core `drc::analysis::clusters`(2026-10-11 Rust 이식, gtk-service
+`drc_clusters_load`; 기준 구현 `tools/oracle/floe_oracle/drc_clusters.py`)다.
+저장/조회: 정규화한 불연속 구간과 누적 개수를 보관한다. 에러마다
+객체나 소속 비트맵을 만들지 않으며, 일반 페이지와 rank는 구간
+누적합을 이진 탐색한다. 메모리는 에러 수가 아닌 **구간 수**에 비례한다.
+status 카운트 초기화만 해당 상태 바이트를 읽고, 이후 카운트는 캐시한다.
+한 룰의 여러 클러스터는 청크 누적합을 공유하여 같은 상태 바이트를 반복해서
+읽지 않는다. 룰 전체가 waived 또는 미waived면 상태 스캔도 생략한다.
+waive 페이지/rank/변경은 최대 1M 에러 단위 청크를 사용하며 도형을 읽지
+않는다. 공간 조회의 소속 마스크는 bounded 쿼리 청크에만 만들고,
+지오메트리 디코딩 및 cap **이전**에 적용한다.
+
+검증: `tools/validate_drc_analysis.py` A1·A3·A5
+(`sh tools/validate_rust.sh --only drc_analysis`).
+
 ## <deck>.rules.json — SVRF 룰 메타데이터 사이드카 (v1)
 
 정본: `rust/cli/src/svrf.rs`(`floe-index svrf deck.cal [-D SW]…`; 2026-09-29
@@ -396,6 +533,14 @@ ovm 헤더와 meta.src 모두 소스 절대경로/size/mtime을 기록. `Vfs::op
   (SVRF 자유 서식 — 한계값이 제 줄로 감싸인 실덱 대응, 다중 줄
   가능, 블록 닫힘을 넘어 누출 금지). 한계: 피연산자가 줄바꿈으로
   갈라진 경우는 미지 히스토그램행(--scan으로 가시).
+- **치수 분류/연속 옵션**(R3c, 2026-10-06): 단일 레이어
+  `EXTERNAL … NOTCH`는 `notch`, 명확한 두 레이어 `INTERNAL`은
+  `overlap`으로 분류한다. `ENCLOSURE`는 extension 검사도 포함하므로
+  `enclosure`를 유지한다. `OVERLAP` 옵션 자체로 metric을 바꾸지 않는다.
+  줄바꿈된 옵션은 같은 측정문의 모든 제약에 동일한 `text`/metric으로
+  보존하고, 옵션 뒤의 비교값은 주 CD 한계로 추가하지 않는다.
+  구형 사이드카도 보존된 원문 근거가 있으면 로더가 분류를 보정한다.
+  구형 파일에서 누락된 연속 옵션은 사이드카를 재생성해야 복구된다.
 - 미인식 문장은 히스토그램 카운트 후 스킵(치명 아님). **의도적
   공백**: DMACRO/CMACRO 비전개(바디는 브레이스 깊이로 통스킵,
   CMACRO 호출 수를 경고로 노출), TVF(Tcl) 덱은 Calibre가 생성한

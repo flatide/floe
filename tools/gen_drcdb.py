@@ -49,7 +49,7 @@ for the testchip_1g5 recipe.
 
 Then index and open:
   rust/target/release/floe-index drc data/drctest.db
-  .venv/bin/python -m floe view <design.oas> --drc data/drctest.db
+  rust/target/release/floe2 view <design.oas> --drc data/drctest.db
 """
 
 import argparse

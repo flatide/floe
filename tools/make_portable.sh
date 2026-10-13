@@ -1,17 +1,19 @@
 #!/bin/bash
 # Build a self-contained floe2 runtime bundle for hosts without PyGObject.
 # Adapted from flateyes' make_portable.sh - the GTK3 stack is pulled from
-# conda-forge (relocatable) exactly as flateyes does; floe additionally
-# needs NumPy + Pillow wheels. The product (release artifact) is Rust-only
+# conda-forge (relocatable) exactly as flateyes does; no pip wheel goes in
+# (the GTK viewer uses neither NumPy nor Pillow since P4f - only the KLayout
+# development bundle adds them, with KLayout). The product (release artifact) is Rust-only
 # floe2. FLOE_PORTABLE_KLAYOUT=1 builds the DEVELOPMENT bundle with the
 # frozen KLayout shell `floe` next to `floe2` - oracle / pre-validation use
 # on closed networks only, never a release (floe is frozen since
-# 2026-09-08, branch floe-legacy).
+# 2026-09-08, branch floe-legacy; here it is the gates' oracle,
+# tools/oracle/floe_oracle, its command line without a viewer since P3).
 #
 #   ./make_portable.sh [output-dir]     # -> floe2-portable-<ver>-<date>.tar.gz
 #   ./make_portable.sh --print-name     # print the artifact name and stop
 #
-# The bundle holds python + PyGObject + GTK3 (conda-forge) + NumPy/Pillow +
+# The bundle holds python + PyGObject + GTK3 (conda-forge) +
 # the shared floe implementation, floe2 shell, and matched Rust binaries,
 # plus a launcher that builds
 # the machine-local GTK caches on first run. Target: x86_64 Linux; verify
@@ -34,6 +36,21 @@ CONDA_GLIBC=${CONDA_GLIBC:-2.27}                # conda solver target
 GLIBC_CEILING=${GLIBC_CEILING:-28}              # verify guard (RHEL8=2.28)
 WHEELS=${WHEELS:-}                              # local wheel dir (closed net)
 FLOE_PORTABLE_KLAYOUT=${FLOE_PORTABLE_KLAYOUT:-0}
+# How the three Rust binaries (floe2, floe-index, floe-renderd) are built:
+#   musl (default) - fully static, run on any x86_64 Linux;
+#   gnu            - glibc, dynamically linked against glibc 2.$GLIBC_CEILING
+#                    whatever the build host's (cargo-zigbuild + zig: the
+#                    link takes that glibc's symbols only) - parallel indexing
+#                    ~40% faster (glibc's memcpy and malloc arenas, MAIN09
+#                    60 s vs 97 s, rust/BUILD.md); the hosts need glibc >=
+#                    2.$GLIBC_CEILING (RHEL 8 = 2.28). Needs `cargo install
+#                    cargo-zigbuild` and zig (`pip install ziglang` or zig on
+#                    PATH) on the build machine.
+FLOE_PORTABLE_RUST=${FLOE_PORTABLE_RUST:-musl}
+case "$FLOE_PORTABLE_RUST" in
+    musl | gnu) ;;
+    *) echo "FLOE_PORTABLE_RUST must be musl or gnu"; exit 1 ;;
+esac
 case "$FLOE_PORTABLE_KLAYOUT" in
     0 | 1) ;;
     *) echo "FLOE_PORTABLE_KLAYOUT must be 0 or 1"; exit 1 ;;
@@ -73,6 +90,9 @@ FLAVOR=""
 if [ "$FLOE_PORTABLE_KLAYOUT" = 1 ]; then
     FLAVOR="-klayout"
 fi
+if [ "$FLOE_PORTABLE_RUST" = gnu ]; then
+    FLAVOR="$FLAVOR-gnu"
+fi
 NAME="${FLOE_PORTABLE_PRODUCT}-portable-${VERSION}-${STAMP}${FLAVOR}"
 if [ "$PRINT_NAME" = 1 ]; then
     printf '%s\n' "$NAME"
@@ -81,8 +101,8 @@ fi
 
 case "$(uname -s)-$(uname -m)" in
     Linux-x86_64) : ;;
-    *) echo "floe's bundle needs numpy/pillow Linux wheels installed by the"
-       echo "runtime's pip, so build on an x86_64 Linux machine (got"
+    *) echo "the bundle's runtime python runs here (its checks, the KLayout"
+       echo "bundle's wheels), so build on an x86_64 Linux machine (got"
        echo "$(uname -s)-$(uname -m))."; exit 1 ;;
 esac
 
@@ -119,31 +139,47 @@ PYBIN="$(ls "$WORK"/runtime/bin/python3.[0-9]* 2>/dev/null | head -1)"
 PYVER="$("$PYBIN" -c 'import sys;print("%d.%d"%sys.version_info[:2])')"
 echo "== runtime python $PYVER"
 
-# -- 3. add NumPy/Pillow; KLayout only for an opt-in rollback bundle ---
-"$PYBIN" -m pip install --upgrade pip >/dev/null
-PIP_PACKAGES=(numpy pillow)
+# -- 3. wheels: none for the floe2 bundle (the GTK viewer needs PyGObject
+#       alone since P4f); the KLayout development bundle adds NumPy, Pillow
+#       and KLayout (the frozen shell, floe_oracle, uses them)
+PIP_PACKAGES=""
 if [ "$FLOE_PORTABLE_KLAYOUT" = 1 ]; then
-    PIP_PACKAGES+=(klayout)
+    PIP_PACKAGES="numpy pillow klayout"
     echo "== KLayout rollback bundle requested"
 fi
-if [ -n "$WHEELS" ]; then
-    echo "== installing runtime wheels from local directory: $WHEELS"
-    "$PYBIN" -m pip install --no-index --find-links "$WHEELS" \
-        --only-binary=:all: "${PIP_PACKAGES[@]}"
-else
-    "$PYBIN" -m pip install --only-binary=:all: "${PIP_PACKAGES[@]}"
-fi
-"$PYBIN" -c 'import numpy, PIL; print("== numpy", numpy.__version__, "pillow", PIL.__version__)'
-if [ "$FLOE_PORTABLE_KLAYOUT" = 1 ]; then
+if [ -n "$PIP_PACKAGES" ]; then
+    "$PYBIN" -m pip install --upgrade pip >/dev/null
+    # shellcheck disable=SC2086  # a word list on purpose
+    if [ -n "$WHEELS" ]; then
+        echo "== installing runtime wheels from local directory: $WHEELS"
+        "$PYBIN" -m pip install --no-index --find-links "$WHEELS" \
+            --only-binary=:all: $PIP_PACKAGES
+    else
+        "$PYBIN" -m pip install --only-binary=:all: $PIP_PACKAGES
+    fi
+    "$PYBIN" -c 'import numpy, PIL; print("== numpy", numpy.__version__, "pillow", PIL.__version__)'
     "$PYBIN" -c 'import klayout; print("== klayout rollback", klayout.__version__)'
+else
+    echo "== no wheels (the floe2 bundle: PyGObject + GTK3 + Python alone)"
 fi
 
-# -- 4. drop the shared implementation + product shell into site-packages
+# -- 4. drop the GTK viewer (floe/) into site-packages and, in the KLayout
+# bundle, the frozen floe shell (tools/oracle/floe_oracle). floe2's command
+# line is the Rust runtime/bin/floe2 (step 5b), which starts the viewer
+# through this interpreter
 SITE="$("$PYBIN" -c 'import site;print(site.getsitepackages()[0])')"
-rm -rf "$SITE/floe"; cp -r "$REPO/floe" "$SITE/floe"
-rm -rf "$SITE/floe2"; cp -r "$REPO/floe2" "$SITE/floe2"
-find "$SITE/floe" -name '__pycache__' -type d -prune -exec rm -rf {} +
-find "$SITE/floe2" -name '__pycache__' -type d -prune -exec rm -rf {} +
+# The floe package is the viewer alone (P2d/P3): its UI and the client of
+# floe2 gtk-service. The list is what ships - a file left in floe/ by
+# mistake does not.
+FLOE2_PRODUCT_FILES="__init__.py gtkview.py viewcli.py gui.py gtkservice.py vfsclient.py instance.py product.py hangul.py fillpat.py colornames.def fillpatterns.def"
+rm -rf "$SITE/floe" "$SITE/floe2" "$SITE/floe_oracle"
+mkdir -p "$SITE/floe"
+for f in $FLOE2_PRODUCT_FILES; do cp "$REPO/floe/$f" "$SITE/floe/$f"; done
+if [ "$FLOE_PORTABLE_KLAYOUT" = 1 ]; then
+    cp -r "$REPO/tools/oracle/floe_oracle" "$SITE/floe_oracle"
+fi
+find "$SITE/floe" "$SITE/floe_oracle" -name '__pycache__' -type d -prune \
+    -exec rm -rf {} + 2>/dev/null || true
 
 # -- 5. slim: build-time payloads never touched at runtime --------------
 cd "$WORK/runtime"
@@ -182,33 +218,84 @@ cd "$WORK"
 # host's glibc floor (for example GLIBC_2.35 on Ubuntu 22.04) and cannot satisfy
 # the RHEL8/2.28 deployment ceiling even though the bundled GTK runtime can.
 # Explicit overrides remain available for already-built, compatible binaries,
-# but must be supplied as a pair.
+# but must be supplied as a set (floe2 is the Rust command line, P1c).
 MUSL_TARGET=x86_64-unknown-linux-musl
-if [ -n "${FLOE_INDEX_BIN:-}" ] || [ -n "${FLOE_RENDERD_BIN:-}" ]; then
-    if [ -z "${FLOE_INDEX_BIN:-}" ] || [ -z "${FLOE_RENDERD_BIN:-}" ]; then
-        echo "FLOE_INDEX_BIN and FLOE_RENDERD_BIN must be specified together"
+if [ -n "${FLOE_INDEX_BIN:-}" ] || [ -n "${FLOE_RENDERD_BIN:-}" ] || \
+   [ -n "${FLOE2_BIN:-}" ]; then
+    if [ -z "${FLOE_INDEX_BIN:-}" ] || [ -z "${FLOE_RENDERD_BIN:-}" ] || \
+       [ -z "${FLOE2_BIN:-}" ]; then
+        # optional: none of them = build here (running floe2 needs none)
+        echo "FLOE2_BIN, FLOE_INDEX_BIN and FLOE_RENDERD_BIN go together: all three"
+        echo "to bundle binaries built elsewhere, or none (unset) to build them here"
+        echo "(now: FLOE2_BIN=${FLOE2_BIN:-} FLOE_INDEX_BIN=${FLOE_INDEX_BIN:-} FLOE_RENDERD_BIN=${FLOE_RENDERD_BIN:-})"
+        exit 1
+    fi
+elif [ "$FLOE_PORTABLE_RUST" = gnu ]; then
+    GNU_TARGET=x86_64-unknown-linux-gnu
+    GNU_GLIBC="2.$GLIBC_CEILING"
+    FLOE_INDEX_BIN="$REPO/rust/target/$GNU_TARGET/release/floe-index"
+    FLOE_RENDERD_BIN="$REPO/rust/target/$GNU_TARGET/release/floe-renderd"
+    FLOE2_BIN="$REPO/rust/target/$GNU_TARGET/release/floe2"
+    if ! command -v cargo-zigbuild >/dev/null; then
+        echo "FLOE_PORTABLE_RUST=gnu needs cargo-zigbuild: cargo install cargo-zigbuild"
+        exit 1
+    fi
+    if ! command -v zig >/dev/null && ! python3 -c "import ziglang" 2>/dev/null; then
+        echo "FLOE_PORTABLE_RUST=gnu needs zig: python3 -m venv ~/zig && ~/zig/bin/pip install ziglang,"
+        echo "then PATH=~/zig/bin:\$PATH (or a zig release on PATH)"
+        exit 1
+    fi
+    if command -v rustup >/dev/null && \
+       ! rustup target list --installed | grep -qx "$GNU_TARGET"; then
+        echo "== installing Rust target $GNU_TARGET"
+        rustup target add "$GNU_TARGET"
+    fi
+    echo "== building glibc Rust runtime ($GNU_TARGET against glibc $GNU_GLIBC, release)"
+    if ! (cd "$REPO/rust" && cargo zigbuild --release \
+        --target "$GNU_TARGET.$GNU_GLIBC" -p floe-index -p floe-renderd -p floe2); then
+        echo "glibc $GNU_GLIBC Rust build failed (cargo-zigbuild/zig);"
+        echo "or specify FLOE_INDEX_BIN, FLOE_RENDERD_BIN and FLOE2_BIN"
         exit 1
     fi
 else
     FLOE_INDEX_BIN="$REPO/rust/target/$MUSL_TARGET/release/floe-index"
     FLOE_RENDERD_BIN="$REPO/rust/target/$MUSL_TARGET/release/floe-renderd"
+    FLOE2_BIN="$REPO/rust/target/$MUSL_TARGET/release/floe2"
     if command -v cargo >/dev/null; then
         if command -v rustup >/dev/null && \
            ! rustup target list --installed | grep -qx "$MUSL_TARGET"; then
             echo "== installing Rust target $MUSL_TARGET"
             rustup target add "$MUSL_TARGET"
         fi
-        echo "== building static Rust runtime ($MUSL_TARGET, release)"
-        if ! (cd "$REPO/rust" && cargo build --release \
-            --target "$MUSL_TARGET" -p floe-index -p floe-renderd); then
+        # floe2 carries SQLite (the DRC review files, compiled from the
+        # bundled amalgamation): a C compiler for musl - zig cc through
+        # cargo-zigbuild, else musl-gcc (rust/BUILD.md)
+        if command -v cargo-zigbuild >/dev/null && \
+           { command -v zig >/dev/null || python3 -c "import ziglang" 2>/dev/null; }; then
+            MUSL_BUILD="cargo zigbuild"
+        elif command -v musl-gcc >/dev/null; then
+            MUSL_BUILD="cargo build"
+            CC_x86_64_unknown_linux_musl=musl-gcc
+            export CC_x86_64_unknown_linux_musl
+        else
+            echo "the static Rust build compiles SQLite: it needs cargo-zigbuild and zig"
+            echo "(cargo install cargo-zigbuild; python3 -m venv ~/zig && ~/zig/bin/pip install"
+            echo "ziglang, then PATH=~/zig/bin:\$PATH) or musl-gcc (musl-tools)"
+            exit 1
+        fi
+        echo "== building static Rust runtime ($MUSL_TARGET, release, $MUSL_BUILD)"
+        if ! (cd "$REPO/rust" && $MUSL_BUILD --release \
+            --target "$MUSL_TARGET" -p floe-index -p floe-renderd -p floe2); then
             echo "static Rust build failed; install the $MUSL_TARGET target"
-            echo "or specify both FLOE_INDEX_BIN and FLOE_RENDERD_BIN"
+            echo "or specify FLOE_INDEX_BIN, FLOE_RENDERD_BIN and FLOE2_BIN"
             exit 1
         fi
     elif [ -x "$REPO/rust/dist/floe-index-linux-x86_64" ] && \
-         [ -x "$REPO/rust/dist/floe-renderd-linux-x86_64" ]; then
+         [ -x "$REPO/rust/dist/floe-renderd-linux-x86_64" ] && \
+         [ -x "$REPO/rust/dist/floe2-linux-x86_64" ]; then
         FLOE_INDEX_BIN="$REPO/rust/dist/floe-index-linux-x86_64"
         FLOE_RENDERD_BIN="$REPO/rust/dist/floe-renderd-linux-x86_64"
+        FLOE2_BIN="$REPO/rust/dist/floe2-linux-x86_64"
         echo "== using prebuilt static Rust runtime from rust/dist"
     fi
 fi
@@ -220,9 +307,15 @@ fi
     echo "floe-renderd binary not found ($FLOE_RENDERD_BIN):"
     echo "install cargo + the $MUSL_TARGET target, or point both"
     echo "FLOE_INDEX_BIN and FLOE_RENDERD_BIN at Linux x86_64 builds"; exit 1; }
+[ -x "$FLOE2_BIN" ] || {
+    echo "floe2 binary not found ($FLOE2_BIN):"
+    echo "install cargo + the $MUSL_TARGET target, or point FLOE_INDEX_BIN,"
+    echo "FLOE_RENDERD_BIN and FLOE2_BIN at Linux x86_64 builds"; exit 1; }
 cp "$FLOE_INDEX_BIN" "$WORK/runtime/bin/floe-index"
 cp "$FLOE_RENDERD_BIN" "$WORK/runtime/bin/floe-renderd"
-chmod +x "$WORK/runtime/bin/floe-index" "$WORK/runtime/bin/floe-renderd"
+cp "$FLOE2_BIN" "$WORK/runtime/bin/floe2"
+chmod +x "$WORK/runtime/bin/floe-index" "$WORK/runtime/bin/floe-renderd" \
+    "$WORK/runtime/bin/floe2"
 
 # -- 6. verify: arch, glibc floor <= ceiling, key files -----------------
 # The real host requirement is the MAX GLIBC_2.x any bundled ELF needs
@@ -261,18 +354,22 @@ for why, p in bad:
     print("FAIL", why, "(> ceiling 2.%d)" % ceiling, os.path.relpath(p, root))
 must = ["lib/libgtk-3.so.0", "lib/girepository-1.0/Gtk-3.0.typelib",
         "lib/python%s/site-packages/gi/__init__.py" % pyver,
-        "lib/python%s/site-packages/floe/cli.py" % pyver,
-        "lib/python%s/site-packages/floe2/cli.py" % pyver,
+        "lib/python%s/site-packages/floe/gui.py" % pyver,
+        "lib/python%s/site-packages/floe/viewcli.py" % pyver,
+        "bin/floe2",        # the product command line (Rust)
         "bin/floe-index",   # vfs/index runtime
         "bin/floe-renderd", # default multicore CPU renderer
         "share/glib-2.0/schemas",
         "fonts"]  # bundled sans fallback (fonts.conf lists it first)
 klayout_dir = "lib/python%s/site-packages/klayout" % pyver
+oracle_dir = "lib/python%s/site-packages/floe_oracle" % pyver
 if with_klayout:
-    must.append(klayout_dir)
-elif os.path.exists(os.path.join(root, klayout_dir)):
-    print("FAIL unexpected KLayout in default bundle", klayout_dir)
-    bad.append(("unexpected KLayout", os.path.join(root, klayout_dir)))
+    must.extend((klayout_dir, oracle_dir))
+else:
+    for extra in (klayout_dir, oracle_dir):
+        if os.path.exists(os.path.join(root, extra)):
+            print("FAIL unexpected in the default bundle", extra)
+            bad.append(("unexpected dev-only package", os.path.join(root, extra)))
 missing = [m for m in must if not os.path.exists(os.path.join(root, m))]
 for m in missing:
     print("MISSING", m)
@@ -304,9 +401,9 @@ B="$WORK/${FLOE_PORTABLE_PRODUCT}-portable"
 rm -rf "$B"; mkdir -p "$B"
 mv "$WORK/runtime" "$B/runtime"
 
-# The KLayout-enabled floe bundle can run both products from the same shared
-# packages/runtime. The Rust-only floe2 bundle intentionally omits a `floe`
-# launcher because stable floe requires KLayout.
+# The KLayout-enabled development bundle runs both from the same runtime:
+# floe2 and the frozen floe shell (floe_oracle). The Rust-only floe2 bundle
+# omits a `floe` launcher - the frozen shell needs KLayout.
 PORTABLE_LAUNCHERS="floe2"
 if [ "$FLOE_PORTABLE_KLAYOUT" = 1 ]; then
     PORTABLE_LAUNCHERS="floe floe2"
@@ -326,6 +423,7 @@ LOADERS="\$RT/lib/gdk-pixbuf-2.0/2.10.0/loaders"
 FAILED=0
 echo "host glibc:   \$(ldd --version 2>/dev/null | head -1)"
 echo "arch:         \$(uname -m)   (needs x86_64, glibc >= ${FLOOR})"
+echo "rust:         ${FLOE_PORTABLE_RUST} (musl: static, any x86_64 Linux; gnu: glibc ${FLOOR}+, faster indexing)"
 # build the pixbuf loader cache exactly as the launcher does, so the png
 # decoder used for render frames is exercised (a broken cache = black view)
 CACHE=\$(mktemp)
@@ -347,9 +445,12 @@ print("pixbuf:       %s, %s" % (png, svg))
 if "png" not in fmts:
     sys.exit(2)
 import importlib.util
-import numpy, PIL
-print("numpy:        %s OK" % numpy.__version__)
-print("pillow:       %s OK" % PIL.__version__)
+if "$FLOE_PORTABLE_KLAYOUT" == "1":
+    import numpy, PIL
+    print("numpy:        %s OK" % numpy.__version__)
+    print("pillow:       %s OK" % PIL.__version__)
+else:
+    print("numpy/pillow: not bundled (the viewer needs neither)")
 if "$FLOE_PORTABLE_KLAYOUT" == "1":
     klayout = importlib.import_module("klayout")
     importlib.import_module("klayout.db")
@@ -360,9 +461,14 @@ elif importlib.util.find_spec("klayout") is not None:
     sys.exit(2)
 else:
     print("klayout:      not bundled (expected; Rust default)")
-import floe, floe2
-print("packages:     floe %s, floe2 %s OK" %
-      (floe.__version__, floe2.__version__))
+import floe
+print("packages:     floe %s OK (the GTK viewer)" % floe.__version__)
+if "$FLOE_PORTABLE_KLAYOUT" == "1":
+    import floe_oracle
+    print("oracle:       floe_oracle OK (the frozen floe shell)")
+elif importlib.util.find_spec("floe_oracle") is not None:
+    print("oracle:       UNEXPECTED in default bundle")
+    sys.exit(2)
 PY
 then
     FAILED=1
@@ -470,15 +576,18 @@ cat > "$B/README-PORTABLE.txt" <<EOF
 ${FLOE_PORTABLE_PRODUCT} 포터블 번들 (${FLOE_PORTABLE_PRODUCT} ${VERSION}, ${STAMP} 빌드)
 ====================
 PyGObject(python3-gobject)가 없는 호스트에서 ${FLOE_PORTABLE_PRODUCT}를 실행하기 위한 자체
-포함 런타임. Python + PyGObject + GTK3 + NumPy/Pillow + floe/floe2 패키지 +
-floe-index(러스트 인덱서/VFS daemon)와 floe-renderd(기본 CPU renderer)가
+포함 런타임. Python + PyGObject + GTK3 + floe 패키지(GTK 뷰어) +
+floe2(러스트 명령: index/info/render/clip/jobdeck/drc…), floe-index(러스트
+인덱서/VFS daemon)와 floe-renderd(기본 CPU renderer)가
 runtime/bin/ 안에 들어
 있으며 시스템에는 아무것도 설치·변경하지 않는다. 시스템에서
 쓰는 것은 X 디스플레이와 (있다면) 시스템 폰트뿐.
 
-기본 floe2 번들은 KLayout을 포함하지 않는다. 안정판 floe/KLayout 번들은
+기본 floe2 번들은 KLayout을 포함하지 않는다. 개발용 KLayout 번들은
 FLOE_PORTABLE_KLAYOUT=1로 별도 빌드하며, 이 번들은 같은 runtime에서
-floe(KLayout)와 floe2(Rust) 실행 파일을 모두 제공한다.
+floe2(Rust)와 동결 floe 셸(KLayout, 개발 전용 오라클 floe_oracle: index/
+info/render/clip/probe/drc/jobdeck 명령만 - 뷰어는 floe2 view, KLayout
+뷰어는 floe-legacy 브랜치)을 함께 제공한다.
 
 요구: x86_64 리눅스, glibc ${FLOOR}+, X 디스플레이.
 
@@ -487,19 +596,26 @@ floe(KLayout)와 floe2(Rust) 실행 파일을 모두 제공한다.
     /opt/${FLOE_PORTABLE_PRODUCT}-portable/selfcheck
     /opt/${FLOE_PORTABLE_PRODUCT}-portable/floe2 view /path/to/chip.oas
     /opt/${FLOE_PORTABLE_PRODUCT}-portable/floe2 index /path/to/chip.oas
-    # KLayout 포함 floe-portable에서만:
-    /opt/floe-portable/floe view /path/to/chip.oas
+    /opt/${FLOE_PORTABLE_PRODUCT}-portable/floe2 drc-prepare /path/to/results.db --svrf /path/to/deck.rules.json --jobs 4
+    # KLayout 포함 floe-portable에서만 (동결 floe 셸, 명령만):
+    /opt/floe-portable/floe render /path/to/chip.oas --out frame.png
 
 편의상 링크: ln -s /opt/${FLOE_PORTABLE_PRODUCT}-portable/floe2 /usr/local/bin/floe2
 
-코드 업데이트: 새 floe/와 floe2/ 패키지를
+실행은 번들 최상위의 floe2(런처)로 한다: 런처가 번들의 Python·GTK
+환경을 잡는다. runtime/bin/floe2를 직접 실행해도 뷰어는 런처를 거쳐
+뜬다. FLOE2_BIN·FLOE_INDEX_BIN·FLOE_RENDERD_BIN은 설정하지 않는다 -
+floe2와 뷰어가 runtime/bin에서 찾고, 설정돼 있으면 그 경로가 이긴다.
+
+코드 업데이트: 새 floe/ 패키지(GTK 뷰어)를
     runtime/lib/python*/site-packages/floe
-    runtime/lib/python*/site-packages/floe2
-에 각각 덮어쓰고, 같은 체크아웃에서 빌드한 두 바이너리를
+에 덮어쓰고, 같은 체크아웃에서 빌드한 세 바이너리를
+    runtime/bin/floe2
     runtime/bin/floe-index
     runtime/bin/floe-renderd
-로 함께 교체한다 (chmod +x). 파이썬 패키지와 러스트 바이너리는
-포맷 버전이 한 쌍이라 항상 같이 움직여야 한다. 런타임은 재사용.
+로 함께 교체한다 (열린 뷰어를 닫고 install -m 755). 파이썬 패키지와
+러스트 바이너리는 포맷 버전이 한 쌍이라 항상 같이 움직여야 한다.
+런타임은 재사용.
 
 문제 해결:
 - "GLIBC_x.xx not found": 호스트 glibc가 ${FLOOR} 미만 → 사용 불가 (selfcheck 확인)

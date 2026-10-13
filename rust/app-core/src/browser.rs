@@ -250,7 +250,8 @@ impl Drop for Browser {
             if self.close().is_err() {
                 // Do not delete a profile potentially still used by a process.
                 eprintln!(
-                    "[floe2-web] Firefox cleanup failed; private profile retained: {}",
+                    "[{}] Firefox cleanup failed; private profile retained: {}",
+                    crate::program(),
                     self.profile.display()
                 );
             }

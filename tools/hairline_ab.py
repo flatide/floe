@@ -27,6 +27,7 @@ from PIL import Image
 ROOT = Path.cwd()
 assert (ROOT / "floe").is_dir(), "run from the repo root"
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (P3)
 
 SCRATCH = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT
 # Optional outline width (default 1): `hairline_ab.py <workdir> 4`
@@ -90,7 +91,7 @@ def build_fixture(path):
 def render_klayout(source, output, visible):
     import klayout.db as db
 
-    from floe.render import Renderer
+    from floe_oracle.render import Renderer
 
     layout = db.Layout(False)
     layout.read(str(source))

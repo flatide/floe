@@ -38,6 +38,66 @@ pack을 자동 사용한다(소스 size/mtime 대조). pack이 없거나 낡으�
 느리므로 스크립트는 pack을 먼저 만들 것. `--pack`은 호환용
 no-op. 좌표 토큰이 정수가 아닌 db는 명확한 메시지와 함께 거부.
 
+### 대규모 룰의 마커 중심·CD/델타 사전 준비 (`drc-prepare`)
+
+```bash
+floe2 drc-prepare results.db --svrf deck.svrf.rules.json
+# 한 룰 안의 좌표 블록을 작업자 4개로 병렬 처리
+floe2 drc-prepare results.db --svrf deck.svrf.rules.json --jobs 4
+# 특정 룰만 준비 (--rule 반복 가능)
+floe2 drc-prepare results.db --svrf deck.svrf.rules.json --rule M1.SPACE
+# SVRF 없이 마커 중심만 준비
+floe2 drc-prepare results.db --spatial-only
+# 브랜치의 명령도 그대로: floe-index가 옆의 floe2에 넘긴다
+floe-index drc-prepare results.db --svrf deck.svrf.rules.json
+```
+
+기존 `.tray`를 읽고 룰별로 캔버스 마커가 읽는 정확한 중심(에러당 16B)과
+CD 측정표, 절대/비율 델타의 기본(auto) 그룹을 `.results.db.analysis/`에
+저장한다(app-core `drc::analysis`, 2026-10-11 Rust 이식 - 브랜치의 Python/NumPy
+계층과 floe-index drc-measure/drc-centers 프로토콜을 대신한다). pack이나 개인
+waive/notes는 변경하지 않는다. pack이 없거나 낡으면 중단하며 ASCII 전체 로딩으로
+우회하지 않는다. `--delta-only`로 CD/델타만 준비할 수 있다. 진행률은 stderr,
+취소는 Ctrl+C(종료 코드 130)이며 완료된 룰의 캐시는 재실행 때 사용한다. 진행 중인
+룰은 다시 준비한다. 실제 에러가 0개인 룰은 건너뛰고, 완료 메시지에서 준비한 룰 수와
+건너뛴 룰 수를 따로 표시한다. `--svrf`에는 원문 SVRF가 아니라 `floe-index svrf`로
+생성한 `.rules.json`을 지정한다(없으면 `--spatial-only`만 가능).
+
+`--jobs N`은 룰 내부 병렬 작업자 수(1~256), 기본은 CPU 수와 4 중 작은 값이다.
+환경변수 `FLOE_DRC_JOBS=N`으로 뷰어의 측정·마커 작업에도 같은 수를 적용할 수 있다.
+`--backend auto|rust`는 받아들이고 무시하며(`python`은 거부), 수치 경계를 Python
+프로세스로 재확인하던 경로도 없다 - Rust 산술이 CPython의 `math.hypot`·`math.fsum`과
+`Decimal(str(value))`를 그대로 따른다(게이트 `drc_analysis`가 기준 구현과 대조).
+
+읽기 전용/네트워크 결과 폴더라면 `FLOE_DRC_ANALYSIS_ROOT=/local/ssd/drc-cache`로
+별도 저장소를 지정한다. 뷰어에도 같은 환경변수를 지정해야 같은 캐시를 사용한다.
+전체 14억 건의 측정표와 두 모드 그룹은 약 40.6GB, 중심은 약 22.4GB이므로 필요한
+룰부터 준비할 수 있다.
+
+2026-10-11 Apple M4(8코어), 작업자 4개, `gen_drcdb --heavy 10000000`의 1천만 에러
+룰: 뷰어 서비스에서 첫 측정과 절대 그룹 2.36초, 같은 측정표의 비율 그룹 0.25초,
+다시 연 뒤 0.02초(캐시), 중심 캐시를 만들며 그린 첫 마커 0.33초. OS 파일 캐시는
+따뜻한 상태였다. 실제 형상과 조건 수, 저장장치에 따라 달라진다.
+
+### 이전 실행과의 도형 대응 (`drc-match`)
+
+```bash
+floe2 drc-match OLD.tray NEW.tray --plan pairs.json --states flags.u8 \
+    --out records.bin --work-dir /tmp/match [--jobs 4] [--memory-mib 64] \
+    [--progress progress.json] [--report report.json]
+floe2 drc-match --protocol        # 2
+```
+
+뷰어의 `review from previous run…`은 app-core `drc::matcher`를 직접 부른다. 이
+명령은 같은 매처를 스크립트와 기준 구현(`tools/oracle/floe_oracle/drc_migrate.py`)에
+내준다(2026-10-11; 브랜치의 `floe-index drc-match`를 app-core로 옮겼다).
+`pairs.json`은 `[[이전 룰, 새 룰], ...]`(양쪽에서 유일한 같은 이름),
+`flags.u8`은 이전 pack 전역 에러당 1바이트(V=1, W=2, NR=4)다. `records.bin`은
+16바이트 레코드를 (룰, 에러) 순으로 쓴다(SPEC-FORMATS `.floereview` 절). 출력은 모두
+새 파일이어야 하고 입력과 달라야 한다. 해시 그룹의 바이트 비교는 pack을 읽기 전용으로
+매핑해 대상 에러까지만 디코딩하고 작업자들이 나눠 한다. Apple M4에서 작업 상태가 모두
+있는 2백만 에러 룰이 4개 작업자로 2.7초(1개 6.6초)였다.
+
 ## 1. 룰 목록: `floe drc <db> --rules`
 
 ```bash
@@ -106,6 +166,13 @@ floe render chip.oas --drc results.db --drc-rule M1.SPACE.1 \
   세션 + detail medium 컷/헤어라인/LOD/커버리지) 그대로, depth만
   full. 첫 에러가 콜드 스타트(수 초, 타임아웃 300s)를 내고 이후
   에러당 ms급.
+- **디코드 예산**(`FLOE_RUST_BUDGET_MB`, 2026-10-12): 레이아웃 캡처와 같다(README Jobdeck 절 아래).
+  - 컷 0 프레임이 예산을 넘으면 필요한 양과 길(`--detail high`, `--layers`, 예산 올리기)을 말하며 실패한다.
+  - `--detail`로 컷을 줬을 때 예산 때문에 성기게 그렸으면 `[drc][warn] … thinned to fit the render budget: …`으로 알린다.
+- **`--detail`·`--density`**(2026-10-12): detail 기본은 뷰어와 같은 medium이다(0.12.349까지는 컷 0; `--archival`이면 컷 0).
+  - 밀도는 뷰어처럼 기본으로 켜져 컷 아래 도형을 밀도로 그린다(0.12.351). `--density off`나 `FLOE_RUST_DENSITY_STACK=off`로 끈다.
+- **`--layer-colors row|group`**(2026-10-13): 레이어 기본 색. row(기본)는 패널 줄마다 다른 색, group은 layer 번호마다 한 색이다.
+  범례(fe-embed) 색도 같다. `FLOE_LAYER_COLORS`가 기본값이다.
 - **레이어 격리**: rules.json 사이드카가 발견되면(탐색 순서 =
   db 옆 덱 basename → 기록된 덱 경로 → `<db>.rules.json`, 또는
   `--drc-rules`) 그 룰의 원천 GDS 레이어만 켠다 — 뷰어 더블클릭
@@ -121,7 +188,16 @@ floe render chip.oas --drc results.db --drc-rule M1.SPACE.1 \
   레이어의 legend(색 + fill 패턴 **이름**, 예 `speckle`)가
   **flateyes embed**(iTXt 청크)로 실린다 — flateyes(1.16+)로
   열면 주석·범례 표시/편집, 다른 도구에선 평범한 PNG.
-  스크립트에서 주석만 뽑으려면 `python fe_embed.py --dump x.png`.
+  모든 레이어를 그린 캡처는 legend가 없고, `--legend`(2026-10-13)를 주면 레이어 패널 줄 순서로 모든 레이어의
+  legend가 실린다. legend는 그림을 그린 스타일에서 만든다(app-core `legend.rs`, 일반 캡처의 `--legend`와 같은 코드).
+  스크립트에서 주석만 뽑으려면 `floe2 fe-embed --dump x.png`.
+- 사각형 룰러는 뷰어와 같은 SVRF 오류 방향 선택을 사용한다. 한 방향만
+  해당하면 하나, 양쪽 해당/판단 불가이면 둘을 임베드한다. `--layers`를
+  지정해도 룰러 판단용 사이드카를 읽는다. 룰러의 표시 자릿수는 외부
+  flateyes에서 정하며 PNG에는 좌표와 ppu를 저장한다.
+- area 전용 룰은 길이 룰러 대신 `area 0.12345 µm²` 면적 텍스트를
+  임베드한다. 폴리곤의 실제 면적을 사용하고 혼합 검사면 길이 룰러와
+  면적 텍스트를 함께 넣는다.
 
 ## 4. SVRF 사이드카 생성: `floe-index svrf`
 

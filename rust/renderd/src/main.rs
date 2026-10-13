@@ -538,6 +538,11 @@ struct RenderCommand {
 #[derive(Debug, PartialEq, Eq)]
 struct SnapCommand {
     expected_scene: Option<SceneId>,
+    /// `incomplete=ok`: a pinned scene that is not complete (a density
+    /// picture, a budget-fit partial frame, deferred pages) is still
+    /// answered from the geometry it holds - the desktop viewer's rule (P4d);
+    /// without it such a scene is refused (`scene_incomplete`), the web's.
+    incomplete_ok: bool,
     sequence: i64,
     x: i64,
     y: i64,
@@ -548,6 +553,8 @@ struct SnapCommand {
 #[derive(Debug, PartialEq, Eq)]
 struct PickCommand {
     expected_scene: Option<SceneId>,
+    /// As SnapCommand's.
+    incomplete_ok: bool,
     sequence: i64,
     x: i64,
     y: i64,
@@ -769,10 +776,20 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
         "snap" => {
             reject_unknown(
                 &fields,
-                &["seq", "x", "y", "r", "layers", "scene_gen", "scene_round"],
+                &[
+                    "seq",
+                    "x",
+                    "y",
+                    "r",
+                    "layers",
+                    "scene_gen",
+                    "scene_round",
+                    "incomplete",
+                ],
             )?;
             Ok(Some(InputCommand::Snap(SnapCommand {
                 expected_scene: SceneId::parse(&fields)?,
+                incomplete_ok: incomplete_ok(&fields)?,
                 sequence: optional_parse(&fields, "seq")?.unwrap_or(-1),
                 x: required_parse(&fields, "x")?,
                 y: required_parse(&fields, "y")?,
@@ -792,10 +809,12 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                     "layers",
                     "scene_gen",
                     "scene_round",
+                    "incomplete",
                 ],
             )?;
             Ok(Some(InputCommand::Pick(PickCommand {
                 expected_scene: SceneId::parse(&fields)?,
+                incomplete_ok: incomplete_ok(&fields)?,
                 sequence: optional_parse(&fields, "seq")?.unwrap_or(-1),
                 x: required_parse(&fields, "x")?,
                 y: required_parse(&fields, "y")?,
@@ -2061,6 +2080,15 @@ fn superseded(error: String) -> String {
     }
 }
 
+/// A query's `incomplete=ok` (the only value; absent = false).
+fn incomplete_ok(fields: &BTreeMap<String, String>) -> Result<bool, String> {
+    match fields.get("incomplete").map(String::as_str) {
+        None => Ok(false),
+        Some("ok") => Ok(true),
+        Some(other) => Err(format!("invalid incomplete={other}")),
+    }
+}
+
 fn handle_snap(
     shared: &SharedPublishedScene,
     command: SnapCommand,
@@ -2075,7 +2103,7 @@ fn handle_snap(
         .map_or(QueryContext::default(), |p| p.context);
     let refusal = command
         .expected_scene
-        .and_then(|id| context.rejection(id, 0));
+        .and_then(|id| context.rejection_with(id, 0, command.incomplete_ok));
     let mut requested_summaries = 0;
     let result: Result<Option<floe_render_core::SceneSnap>, String> = (|| {
         if let Some(code) = refusal {
@@ -2164,7 +2192,7 @@ fn handle_pick(
         .map_or(QueryContext::default(), |p| p.context);
     let refusal = command
         .expected_scene
-        .and_then(|id| context.rejection(id, 0));
+        .and_then(|id| context.rejection_with(id, 0, command.incomplete_ok));
     let mut requested_summaries = 0;
     let result: Result<Option<PickWireResponse>, String> = (|| {
         if let Some(code) = refusal {
@@ -4144,6 +4172,10 @@ fn run_render_attempt(
     // what the density stack counts pass 1 by (density_as_read)
     let mut generation_grown = 0u64;
     let mut round_index = 0usize;
+    // the density's own first rounds (publish_first) published so far: a
+    // round number each, so the generation's rounds keep counting up (the
+    // shared worker client refuses a round that does not)
+    let density_rounds = std::cell::Cell::new(0usize);
     let mut drain_representatives = false;
     // the budget's last resort (budget_refit_enabled): the frame draws the
     // pages the budget holds and reports the rest as over it
@@ -4342,12 +4374,21 @@ fn run_render_attempt(
                         && density_progressive_enabled()
                         && command.unique_round_paths
                         && !command.background;
+                    // a frame line like every other (the shared worker client
+                    // requires the style epoch, the labels flag and the query
+                    // scene): this round's own scene, incomplete - nothing
+                    // is published for it, so no pick or snap binds to it
+                    let first_epoch = state
+                        .style_epoch
+                        .map(|epoch| epoch.to_string())
+                        .unwrap_or_else(|| "none".to_string());
                     let mut publish_first =
                         |frame: &floe_render_core::RgbaFrame| -> Result<(), String> {
                             check_generation(cancellation, command.generation)?;
                             let format = if command.raw_frame { "raw" } else { "png" };
+                            let round = round_index + 1 + density_rounds.get();
                             let path = format!(
-                                "{}.gen-{}.round-1.partial.{}",
+                                "{}.gen-{}.round-{round}.partial.{}",
                                 command.out, command.generation, format
                             );
                             let (header, png);
@@ -4359,7 +4400,8 @@ fn run_render_attempt(
                                 vec![png.as_slice()]
                             };
                             publish_frame(&path, command.generation, &parts, cancellation)?;
-                            respond(responses, format!("frame gen={} round=1 final=0 png={} format={} partial=1 deferred=1 density_round=1", command.generation, path, format));
+                            respond(responses, format!("frame gen={} round={round} final=0 png={} format={} partial=1 deferred=1 density_round=1 style_epoch={first_epoch} labels_truncated=0 scene_gen={} scene_round={round} scene_complete=0 scene_summary=0", command.generation, path, format, command.generation));
+                            density_rounds.set(density_rounds.get() + 1);
                             Ok(())
                         };
                     let (report, counts, times, floor, plan2) = match render_density_frame(
@@ -4506,12 +4548,14 @@ fn run_render_attempt(
         };
         check_generation(cancellation, command.generation)?;
         let final_round = round_index + 1 == rounds.len();
+        // this round's number on the wire: after any density first rounds
+        let wire_round = round_index + 1 + density_rounds.get();
         let published_output = if command.unique_round_paths && !final_round {
             format!(
                 "{}.gen-{}.round-{}.partial.{}",
                 command.out,
                 command.generation,
-                round_index + 1,
+                wire_round,
                 if command.raw_frame { "raw" } else { "png" }
             )
         } else {
@@ -4543,7 +4587,7 @@ fn run_render_attempt(
                 context: QueryContext {
                     id: Some(SceneId {
                         generation: command.generation,
-                        round: (round_index + 1) as u64,
+                        round: wire_round as u64,
                     }),
                     complete: !pixels.partial
                         && planned.representative_stream.is_none()
@@ -4603,7 +4647,7 @@ fn run_render_attempt(
         let response = format!(
                 "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} fit_pct={} fit_cull={} fit_over={} fit_thin={} fit_full_pct={} fit_none_pct={} fit_fixed={} fit_redecided={} sub_cut_boxes={} sub_cut_box_over={} sub_cut_box_level={} sub_cut_box_unsure={} shape_cut={} shape_cut_max={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={} once_tiles={} once_passes={} once_items={} place_walks={} density_stack={} density_pages={} density_us={} density_bin={} density_dots={} density_floor={} density_block={} density_plan2={} queue_us={} wall_us={} fit_scale={} fit_refits={} fit_probe_us={} fit_probe_walk={} fit_ranked={} fit_layers_whole={} fit_layer_edge={} fit_layers_out={}",
                 command.generation,
-                round_index + 1,
+                wire_round,
                 final_round as u8,
                 published_output,
                 if command.raw_frame { "raw" } else { "png" },
@@ -6542,6 +6586,7 @@ mod tests {
         });
         tx.send(QueryCommand::Pick(PickCommand {
             expected_scene: None,
+            incomplete_ok: false,
             sequence: 5,
             x: 1,
             y: 2,
@@ -6552,6 +6597,7 @@ mod tests {
         .unwrap();
         tx.send(QueryCommand::Snap(SnapCommand {
             expected_scene: None,
+            incomplete_ok: false,
             sequence: 6,
             x: 1,
             y: 2,
@@ -6842,6 +6888,7 @@ mod tests {
             ),
             SnapCommand {
                 expected_scene: None,
+                incomplete_ok: false,
                 sequence: 4,
                 x: -2,
                 y: 7,
@@ -6857,6 +6904,7 @@ mod tests {
             ),
             PickCommand {
                 expected_scene: None,
+                incomplete_ok: false,
                 sequence: 5,
                 x: 1,
                 y: 2,
@@ -6865,6 +6913,15 @@ mod tests {
                 visible_layers: None,
             }
         );
+        assert!(
+            snap(
+                parse_command("snap seq=4 x=1 y=2 r=3 scene_gen=7 scene_round=2 incomplete=ok")
+                    .unwrap()
+                    .unwrap()
+            )
+            .incomplete_ok
+        );
+        assert!(parse_command("pick seq=4 x=1 y=2 r=3 incomplete=yes").is_err());
         assert!(parse_command("snap x=1 y=2 r=3 unknown=4").is_err());
         assert_eq!(wire_hex("TOP 한글"), "544f5020ed959ceab880");
         assert_eq!(

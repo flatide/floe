@@ -80,10 +80,19 @@ chip (tools/gen_main01_like.py) under a small budget:
     of its own - are the same pixels, pages and fit with the summary and
     with FLOE_RUST_FIT_PROBE_SUMMARY=off (the walk), both report the probe's
     time (fit_probe_ms; fit_probe_walk says which), and a scale decided
-    before is not probed again.
+    before is not probed again;
+  * the command line's captures say what the budget did (field 2026-10-12:
+    a whole-chip `floe2 render` failed with `render: decoded_generation_
+    budget_exceeded:_3967202112_>_1073741824_bytes`; --detail exact, then
+    the capture's default, is every shape or none): under 48 MB the whole chip
+    at --detail exact fails in words - what the region needs, the budget,
+    --detail high and FLOE_RUST_BUDGET_MB - and saves nothing; at --detail
+    high it is drawn, thinned, with a WARNING in the log (stdout, as the
+    jobdeck's) and the report's `budget_fit`; with the budget roomy neither.
 
     .venv/bin/python tools/validate_fit_budget.py
 """
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -92,9 +101,13 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
+# the product command line: the Rust `floe2` (rust/floe2; the Python
+# floe2 CLI is gone - docs/SHARED_APP_LAYER.ko.md P1c)
+FLOE2 = os.environ.get("FLOE2_BIN") or str(ROOT / "rust" / "target" / "release" / "floe2")
 sys.path.insert(0, str(ROOT))
-from floe.cache import Cache
-from floe.rust_render import RustRenderWorker
+sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (P3)
+from floe_oracle.cache import Cache
+from floe_oracle.rust_render import RustRenderWorker
 
 PX = 1920       # at this size keep + cut 1 px of the whole chip decodes ~110 MB
 
@@ -329,10 +342,10 @@ def top_first_checks(temp, src):
     layout_pair(pair)
     layout_over(over)
     for path in (pair, over):
-        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(path), '--jobs', '2'],
+        done = subprocess.run([FLOE2, 'index', str(path), '--jobs', '2'],
                               cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
         assert done.returncode == 0, done.stdout + done.stderr
-    from floe.gui import perf_status
+    from floe_oracle.perf_line import perf_status
     low, up = (7, 59), (14, 367)
     top, old = top_first_worker(pair, 1), top_first_worker(pair, 1, on=False)
     try:
@@ -414,7 +427,7 @@ def refit_checks(temp):
     lit = lambda pixels: sum(1 for i in range(0, len(pixels), 4) if pixels[i:i + 3] != b'\x00\x00\x00')
 
     def index(src):
-        done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(src)],
+        done = subprocess.run([FLOE2, 'index', str(src)],
                               cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
         assert done.returncode == 0, done.stdout + done.stderr
 
@@ -620,6 +633,39 @@ def probe_checks(src):
         walked.stop()
 
 
+def cli_checks(temp, src):
+    """`floe2 render` over the budget: the exact capture's error in words,
+    the thinned capture said (module doc)."""
+    env = {k: v for k, v in os.environ.items() if k != 'FLOE_RUST_FIT_TOP_FIRST'}
+
+    def render(name, budget_mb, *extra):
+        out, report = Path(temp) / (name + '.png'), Path(temp) / (name + '.json')
+        done = subprocess.run(
+            [FLOE2, 'render', str(src), '--px', str(PX), '--out', str(out), '--report', str(report), *extra],
+            cwd=ROOT, env={**env, 'FLOE_RUST_BUDGET_MB': str(budget_mb)},
+            capture_output=True, text=True, timeout=600)
+        shot = json.loads(report.read_text())['shots'][0] if report.exists() else None
+        return done, out, shot
+
+    done, out, shot = render('cli_exact', 48, '--detail', 'exact')
+    assert done.returncode != 0 and not out.exists() and shot is None, (done.returncode, done.stderr)
+    err = done.stderr
+    for words in ('decoded generation budget exceeded - the region needs at least',
+                  'the render budget is 48 MiB', '--detail high', 'FLOE_RUST_BUDGET_MB='):
+        assert words in err, (words, err)
+    assert '_>_' not in err, err
+    done, out, shot = render('cli_high', 48, '--detail', 'high')
+    assert done.returncode == 0 and out.exists(), done.stderr
+    assert 'WARNING' in done.stdout and 'thinned to fit the render budget: ' in done.stdout, done.stdout
+    fit = shot.get('budget_fit')
+    assert fit and (fit.get('fit_thin') or fit.get('fit_layers_out') or fit.get('fit_pct')), shot
+    warning = next(line for line in done.stdout.splitlines() if 'thinned to fit' in line)
+    done, out, shot = render('cli_roomy', 1024, '--detail', 'high')
+    assert done.returncode == 0 and 'WARNING' not in done.stdout + done.stderr and 'budget_fit' not in shot, (done.stdout, shot)
+    print('fit budget: floe2 render - exact over 48 MB fails in words, nothing saved; --detail high drawn and said (%s); '
+          'roomy budget silent' % warning.split(': ', 2)[-1])
+
+
 def main():
     os.environ['FLOE_INDEX_BIN'] = str(ROOT / 'rust/target/release/floe-index')
     os.environ['FLOE_RENDERD_BIN'] = str(ROOT / 'rust/target/release/floe-renderd')
@@ -631,7 +677,7 @@ def main():
         src = Path(temp) / 'chip.oas'
         for argv in ([sys.executable, '-B', str(ROOT / 'tools/gen_main01_like.py'), str(src),
                       '--scale', '0.003', '--jobs', '2', '--geometry', 'legacy'],
-                     [sys.executable, '-B', '-m', 'floe2', 'index', str(src), '--jobs', '2']):
+                     [FLOE2, 'index', str(src), '--jobs', '2']):
             done = subprocess.run(argv, cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
             assert done.returncode == 0, done.stdout + done.stderr
         tight, tight_off = worker(src, 48), worker(src, 48, fit=False)
@@ -697,7 +743,7 @@ def main():
             # everything), the whole layout as its margin cannot hold that
             uneven = Path(temp) / 'uneven.oas'
             layout_uneven(uneven)
-            done = subprocess.run([sys.executable, '-B', '-m', 'floe2', 'index', str(uneven), '--jobs', '2'],
+            done = subprocess.run([FLOE2, 'index', str(uneven), '--jobs', '2'],
                                   cwd=ROOT, env=os.environ, capture_output=True, text=True, timeout=600)
             assert done.returncode == 0, done.stdout + done.stderr
             # retention on: the corner's frame would serve the whole layout's
@@ -761,6 +807,7 @@ def main():
         refit_checks(temp)
         probe_checks(src)
         top_first_checks(temp, src)
+        cli_checks(temp, src)
     print('FIT BUDGET: ALL OK')
 
 

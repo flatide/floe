@@ -820,6 +820,23 @@ pub fn opening_refusal(key: &Key) -> Option<Busy> {
     Some(Busy::Indexing { subject: key.subject.clone(), holder: read_holder(&build), opening: true })
 }
 
+/// Whether a run writes `key`'s target now - its `.build` held - said as a
+/// refused writer is told (floe/indexlock.py `state(...).writing_refusal`):
+/// what a front end asks before it looks at a cache whose files another
+/// run is writing, where they would read as "not current". A probe like
+/// `opening_refusal`: no file made, no lock kept.
+pub fn writing_refusal(key: &Key) -> Option<Busy> {
+    if disabled() {
+        return None;
+    }
+    let build = key.dir.join(format!("{}.build", key.name));
+    let held = match File::open(&build) {
+        Ok(file) => matches!(file.try_lock_shared(), Err(TryLockError::WouldBlock)),
+        Err(_) => false,
+    };
+    held.then(|| Busy::Indexing { subject: key.subject.clone(), holder: read_holder(&build), opening: false })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -838,10 +855,16 @@ mod tests {
         // nothing there: no refusal, and the probe made no lock folder
         assert!(opening_refusal(&k).is_none());
         assert!(!k.dir.exists());
-        // an addition (.build alone) lets readers open
+        assert!(writing_refusal(&k).is_none());
+        // an addition (.build alone) lets readers open; a writer is told
         let w = writer(&k, Mode::Additive, "hier").unwrap();
         assert!(opening_refusal(&k).is_none());
+        match writing_refusal(&k) {
+            Some(Busy::Indexing { opening: false, holder: Some(h), .. }) => assert_eq!(h.what, "hier"),
+            other => panic!("{other:?}"),
+        }
         drop(w);
+        assert!(writing_refusal(&k).is_none());
         // a whole rebuild (.build and .use) refuses them, naming the run
         let w = writer(&k, Mode::Full, "floe-index vfs").unwrap();
         match opening_refusal(&k) {

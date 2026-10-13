@@ -65,7 +65,7 @@ const MEAS: [(&str, &str); 12] = [
 // operator / option words excluded from operand-name extraction (a layer
 // whose NAME collides with one of these is mis-filtered - the unresolved
 // list makes that visible instead of silently wrong); MEAS heads join
-const KEYWORD_WORDS: [&str; 70] = [
+const KEYWORD_WORDS: [&str; 73] = [
     "AND", "OR", "NOT", "XOR", "INTERACT", "INSIDE", "OUTSIDE", "TOUCH", "CUT", "ENCLOSE", "BY",
     "SIZE", "GROW", "SHRINK", "EXTENT", "EXTENTS", "HOLES", "WITH", "EDGE", "CONVEX", "OPPOSITE",
     "ABUT", "SINGULAR", "REGION", "PROJECTING", "PARALLEL", "PERPENDICULAR", "ONLY", "ALSO",
@@ -73,6 +73,7 @@ const KEYWORD_WORDS: [&str; 70] = [
     "OUTER", "MEASURE", "ALL", "PRINT", "RECTANGLE", "SQUARE", "COUNT", "COINCIDENT", "EXPAND",
     "TOP", "LEFT", "RIGHT", "BOTTOM", "GOOD", "BAD", "MAX", "MIN", "EVEN", "ODD", "MULTI",
     "ORTHOGONAL", "POLYGON", "CORNER", "CENTERLINE", "SPACE", "WIDTH", "NOTCH",
+    "OVERLAP", "INTERSECTING", "EXTENDED",
     // repeated in the Python set; harmless
     "OPPOSITE", "AND", "OR", "NOT",
 ];
@@ -279,6 +280,64 @@ fn chain(cs: &[char], mut pos: usize) -> Vec<(String, String)> {
         }
     }
     out
+}
+
+/// First character after the primary comparator chain, not option bounds.
+fn chain_end(cs: &[char], mut pos: usize) -> usize {
+    while let Some((_, _, end)) = bound_at(cs, pos) {
+        pos = end;
+        while pos < cs.len() && py_isspace(cs[pos]) {
+            pos += 1;
+        }
+    }
+    pos
+}
+
+/// Only refine verified simple dimensional syntax. Mentor's Calibre Rule
+/// Writing: Basic Concepts slides 1-85 / 1-91 / 1-102 / 1-140: INTERNAL
+/// with two layers is overlap; EXTERNAL one layer + NOTCH is notch;
+/// ENCLOSURE covers enclosure AND extension. The OVERLAP option itself
+/// never changes a metric. Keep in sync with floe/svrf.py constraint_metric.
+fn statement_metric(w: &Words, text: &str) -> String {
+    let (h, rest) = py_split1(text);
+    let metric = meas_metric(&upper(h.unwrap_or(""))).unwrap_or("");
+    if !matches!(metric, "width" | "space") {
+        return metric.to_string();
+    }
+    let rest = rest.unwrap_or("");
+    let cs: Vec<char> = rest.chars().collect();
+    let first = op_search(&cs);
+    let operands: String = cs[..first.unwrap_or(cs.len())].iter().collect();
+    let names = py_split(&operands);
+    for name in &names {
+        let name = if (name.starts_with('[') && name.ends_with(']'))
+            || (name.starts_with('(') && name.ends_with(')')) {
+            &name[1..name.len() - 1]
+        } else {
+            name
+        };
+        if !name.chars().next().map(is_id_start).unwrap_or(false)
+            || !name.chars().all(is_id_char) || w.keyword(&upper(name)) {
+            return metric.to_string();
+        }
+    }
+    if metric == "width" && names.len() == 2 {
+        return "overlap".to_string();
+    }
+    if metric == "space" && names.len() == 1 {
+        if let Some(p) = first {
+            let options: String = cs[chain_end(&cs, p)..].iter().collect();
+            if id_findall(&options).iter().any(|word| upper(word) == "NOTCH") {
+                return "notch".to_string();
+            }
+        }
+    }
+    metric.to_string()
+}
+
+fn measurement_has_options(text: &str) -> bool {
+    let cs: Vec<char> = text.chars().collect();
+    op_search(&cs).map(|p| chain_end(&cs, p) < cs.len()).unwrap_or(false)
 }
 
 /// `^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$` (ASCII digits).
@@ -1074,6 +1133,7 @@ struct Cont {
     metric: String,
     text: String,
     had_bound: bool,
+    constraint_start: usize,
 }
 
 struct Parser {
@@ -1591,6 +1651,11 @@ impl Parser {
                     for n in rhs_operands(&self.w, &s) {
                         push_unique(&mut self.d.arena[ck].layers, &n);
                     }
+                    // Retain wrapped options for metric classification and
+                    // the viewer's uncertainty/provenance warning.
+                    let mut c = self.cont.take().unwrap();
+                    self.extend_measurement(&mut c, &s);
+                    self.cont = Some(c);
                     self.icont = false;
                 } else if self.w.ignored.contains(head.as_str()) {
                     // DFM RDB / spec statements inside checks
@@ -1758,6 +1823,15 @@ impl Parser {
         }
     }
 
+    fn extend_measurement(&mut self, c: &mut Cont, s: &str) {
+        c.text = format!("{} {}", c.text, py_strip(s));
+        c.metric = statement_metric(&self.w, &c.text);
+        for constraint in &mut self.d.arena[c.check].constraints[c.constraint_start..] {
+            constraint.text = c.text.clone();
+            constraint.metric = c.metric.clone();
+        }
+    }
+
     /// A comparator-leading line continues the previous measurement
     /// statement - real decks wrap the constraint onto its own line.
     fn try_cont(&mut self, s: &str) -> bool {
@@ -1772,13 +1846,21 @@ impl Parser {
         if bounds.is_empty() {
             return false;
         }
-        let c = self.cont.take().unwrap();
-        let text = format!("{} {}", c.text, py_strip(s));
-        self.add_bounds(c.check, &c.metric, &bounds, &text);
+        let mut c = self.cont.take().unwrap();
+        let option_bound = c.had_bound && measurement_has_options(&c.text);
+        self.extend_measurement(&mut c, s);
+        if option_bound {
+            // E.g. OPPOSITE EXTENDED on one line and < value on the
+            // next: it is still an option bound, never the primary CD.
+            self.cont = Some(c);
+            return true;
+        }
+        self.add_bounds(c.check, &c.metric, &bounds, &c.text);
         if !c.had_bound {
             self.d.stats.add("meas_no_bound", -1);
         }
-        self.cont = Some(Cont { check: c.check, metric: c.metric, text, had_bound: true });
+        c.had_bound = true;
+        self.cont = Some(c);
         true
     }
 
@@ -1788,7 +1870,7 @@ impl Parser {
         let (h, rest) = py_split1(s);
         let head = upper(h.unwrap_or(""));
         let rest = rest.unwrap_or("");
-        let metric = meas_metric(&head).unwrap_or("").to_string();
+        let metric = statement_metric(&self.w, s);
         self.d.meas_hist.add(&head, 1);
         let rc: Vec<char> = rest.chars().collect();
         let m = op_search(&rc);
@@ -1806,11 +1888,12 @@ impl Parser {
                 None => Vec::new(),
             };
             let text = py_strip(s).to_string();
+            let constraint_start = self.d.arena[ci].constraints.len();
             self.add_bounds(ci, &metric, &bounds, &text);
             if bounds.is_empty() {
                 self.d.stats.add("meas_no_bound", 1);
             }
-            self.cont = Some(Cont { check: ci, metric, text, had_bound: !bounds.is_empty() });
+            self.cont = Some(Cont { check: ci, metric, text, had_bound: !bounds.is_empty(), constraint_start });
         }
         ops
     }

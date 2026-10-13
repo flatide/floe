@@ -78,6 +78,35 @@ fn exit_quietly_on_broken_pipe() {
 #[cfg(not(unix))]
 fn exit_quietly_on_broken_pipe() {}
 
+/// `floe-index drc-prepare` (feature/jobdeck-drc's command): the DRC
+/// analysis is the shared Rust app layer's (app-core drc::analysis), so the
+/// floe2 beside this binary - the bundle's runtime/bin/floe2, the build's
+/// target/release/floe2 - runs it; its exit status is ours.
+fn drc_prepare_handover(rest: &[String]) {
+    let beside = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("floe2")))
+        .filter(|p| p.is_file());
+    let floe2 = std::env::var_os("FLOE2_BIN")
+        .map(std::path::PathBuf::from)
+        .or(beside)
+        .unwrap_or_else(|| std::path::PathBuf::from("floe2"));
+    match std::process::Command::new(&floe2)
+        .arg("drc-prepare")
+        .args(rest)
+        .status()
+    {
+        Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+        Err(e) => {
+            eprintln!(
+                "floe-index drc-prepare: {} could not run ({e}); drc-prepare is `floe2 drc-prepare`",
+                floe2.display()
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
 fn main() {
     exit_quietly_on_broken_pipe();
     let args: Vec<String> = std::env::args().collect();
@@ -115,6 +144,9 @@ fn main() {
     if args.len() >= 3 && args[1] == "vfsd" {
         return vfs::vfsd_cmd(&args[2..]);
     }
+    if args.len() >= 2 && args[1] == "drc-prepare" {
+        return drc_prepare_handover(&args[2..]);
+    }
     if args.len() >= 3 && args[1] == "drc" {
         return drcice::drc_cmd(&args[2..]);
     }
@@ -149,6 +181,7 @@ fn main() {
              floe-index ovs <outdir> [--um F] [--jobs N] [--roots F]  (add design.ovs, the occupancy density pass 2 draws by - FLOE_RUST_DENSITY_OCC=off: the plans; --roots: the cells under the top this share of its box or more get design.ovs.<cell>, default 0.25)\n       \
              floe-index drc <results.db> [out.tray] \
              [--pack] [--jobs N]\n       \
+             floe-index drc-prepare <results.db|pack> [--svrf RULES_JSON] ...  (runs floe2 drc-prepare)\n       \
              floe-index svrf <deck> [-o OUT] [--scan] [-D NAME[=VAL]]... [-I DIR]... \
              [--follow-verbatim] [--no-env-switches]  (SVRF rule deck subset -> <deck>.rules.json)"
         );
@@ -567,11 +600,10 @@ fn jesc(s: &str) -> String {
     out
 }
 
-/// colorsys.hsv_to_rgb + int(x*255) truncation, bit-for-bit. Key the
-/// palette by the OASIS layer number so every datatype of one layer
-/// shares a color and independent caches agree.
-fn layer_color(layer: usize) -> String {
-    let h = ((layer as f64) * 137.508) % 360.0 / 360.0;
+/// colorsys.hsv_to_rgb + int(x*255) truncation, bit-for-bit: the colour at
+/// palette place `n` (palette_places), a golden-angle step of hue each.
+fn layer_color(n: usize) -> String {
+    let h = ((n as f64) * 137.508) % 360.0 / 360.0;
     let (s, v) = (0.75f64, 1.0f64);
     let i6 = (h * 6.0) as i64;
     let f = h * 6.0 - i6 as f64;
@@ -592,6 +624,28 @@ fn layer_color(layer: usize) -> String {
         (g * 255.0) as u8,
         (b * 255.0) as u8
     )
+}
+
+/// Each pair's palette place (user 2026-10-13: "consecutive layers get
+/// different colours" - it was the layer number, so 2.0 2.1 2.2 2.32 shared
+/// one): the pairs holding shapes or text in (layer, datatype) order - the
+/// viewer's layer panel - then the empty ones (LAYERNAME only), as app-core
+/// styles::palette_ranks places them when it opens the cache.
+fn palette_places(
+    pairs: &[(u32, u32)],
+    stored: &std::collections::HashMap<(u32, u32), u64>,
+) -> std::collections::HashMap<(u32, u32), usize> {
+    let mut order: Vec<_> = pairs
+        .iter()
+        .map(|key| (stored.get(key).copied().unwrap_or(0) == 0, *key))
+        .collect();
+    order.sort_unstable();
+    order.dedup();
+    order
+        .into_iter()
+        .enumerate()
+        .map(|(n, (_, key))| (key, n))
+        .collect()
 }
 
 /// /proc metrics (Linux); None elsewhere - the governor is inert
@@ -1128,6 +1182,7 @@ fn index_cmd(args: &[String]) {
             *stored.entry((t.layer, t.dt)).or_default() += t.rep.members();
         }
     }
+    let places = palette_places(&doc.layer_order, &stored);
     let layers_json: Vec<String> = doc
         .layer_order
         .iter()
@@ -1157,7 +1212,7 @@ fn index_cmd(args: &[String]) {
                 d,
                 jesc(&name),
                 aliases,
-                layer_color(l as usize),
+                layer_color(places[&(l, d)]),
                 stored.get(&(l, d)).copied().unwrap_or(0)
             )
         })

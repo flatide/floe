@@ -214,6 +214,7 @@ struct Active {
 struct ActiveQuery {
     request: QueryRequest,
     deadline: Instant,
+    incomplete_ok: bool,
 }
 struct ActiveQueryCancel {
     before_sequence: u64,
@@ -244,6 +245,20 @@ pub struct WorkerClient {
     queries: BTreeMap<u64, ActiveQuery>,
     query_cancels: BTreeMap<QueryKind, ActiveQueryCancel>,
     cells: BTreeMap<u64, ActiveCell>,
+    /// set_incomplete_queries: snap/pick answer an incomplete scene too.
+    incomplete_queries: bool,
+}
+
+/// `text_hex`'s UTF-8 text (renderd's `error code=locked`).
+fn unhex(hex: &str) -> Option<String> {
+    if hex.len() % 2 != 0 {
+        return None;
+    }
+    let bytes = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
+        .collect::<Option<Vec<u8>>>()?;
+    String::from_utf8(bytes).ok()
 }
 
 impl WorkerClient {
@@ -323,6 +338,7 @@ impl WorkerClient {
             queries: BTreeMap::new(),
             query_cancels: BTreeMap::new(),
             cells: BTreeMap::new(),
+            incomplete_queries: false,
         };
         let tx = response_tx.clone();
         client.threads.push(
@@ -358,9 +374,29 @@ impl WorkerClient {
                 .spawn(move || {
                     let mut errors = errors;
                     let mut buf = [0; 4096];
+                    // renderd's `[lock]` notes (floe_vfs::lock: a deck's
+                    // caches opened without their locks, a folder that
+                    // cannot hold them) are the user's to read, as the
+                    // Python adapter passed them on; the rest stays in the
+                    // tail an error quotes
+                    let mut line = Vec::new();
                     while let Ok(n) = errors.read(&mut buf) {
                         if n == 0 {
                             break;
+                        }
+                        for &b in &buf[..n] {
+                            if b != b'\n' {
+                                if line.len() < 4096 {
+                                    line.push(b);
+                                }
+                                continue;
+                            }
+                            if line.starts_with(b"[lock]") {
+                                let mut err = std::io::stderr().lock();
+                                let _ = err.write_all(&line);
+                                let _ = err.write_all(b"\n");
+                            }
+                            line.clear();
                         }
                         let mut tail = stderr.lock().unwrap();
                         tail.extend(&buf[..n]);
@@ -391,6 +427,22 @@ impl WorkerClient {
     /// been consumed. A cancel acknowledgement alone does not drain work.
     pub fn pending_generations(&self) -> usize {
         self.issued.len()
+    }
+    /// The render and pick/snap deadlines for work submitted from now on.
+    /// The desktop viewer waits as long as a frame takes (a field chip's can
+    /// outlast the 300 s default) and a slow pick there must not end the
+    /// worker; the web keeps Config's.
+    pub fn set_timeouts(&mut self, render: Duration, query: Duration) {
+        self.config.render_timeout = render;
+        self.config.query_timeout = query;
+    }
+    /// Snap and pick on a scene that is not complete (a density picture, a
+    /// budget-fit partial frame, deferred pages) are answered from the
+    /// geometry it holds (`incomplete=ok`, renderd 0.12.310) instead of
+    /// refused as `scene_incomplete`: the desktop viewer answered what it
+    /// drew; the web keeps the refusal (no promise of exact geometry).
+    pub fn set_incomplete_queries(&mut self, on: bool) {
+        self.incomplete_queries = on;
     }
     pub fn work_dir(&self) -> &Path {
         &self.workspace.0
@@ -554,13 +606,18 @@ impl WorkerClient {
             .query_sequence
             .checked_add(1)
             .ok_or_else(|| Error::input("query sequence exhausted"))?;
-        self.send(request.command(sequence)?)?;
+        let mut command = request.command(sequence)?;
+        if self.incomplete_queries {
+            command.push_str(" incomplete=ok");
+        }
+        self.send(command)?;
         self.query_sequence = sequence;
         self.queries.insert(
             sequence,
             ActiveQuery {
                 request,
                 deadline: Instant::now() + self.config.query_timeout,
+                incomplete_ok: self.incomplete_queries,
             },
         );
         Ok(sequence)
@@ -771,6 +828,14 @@ impl WorkerClient {
                 return Ok(line.fields);
             }
             if line.kind == "error" {
+                // a cache another run rebuilds (floe_vfs::lock): renderd
+                // sends the text as UTF-8 hex - the message field's
+                // whitespace <-> `_` mangles names like ws_kim
+                if line.fields.get("code") == Some("locked") {
+                    if let Some(text) = line.fields.get("text_hex").and_then(unhex) {
+                        return Err(Error::new(ErrorKind::Busy, text));
+                    }
+                }
                 return Err(Error::new(
                     ErrorKind::Worker,
                     line.fields.required("message")?,
@@ -867,10 +932,11 @@ impl WorkerClient {
                     .queries
                     .remove(&sequence)
                     .ok_or_else(|| Error::protocol("unissued query response"))?;
-                Ok(Some(Event::Query(query::parse_reply(
+                Ok(Some(Event::Query(query::parse_reply_with(
                     &line.kind,
                     f,
                     pending.request,
+                    pending.incomplete_ok,
                 )?)))
             }
             "frame" => {

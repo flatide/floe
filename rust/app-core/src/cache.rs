@@ -59,7 +59,7 @@ pub(crate) fn utf8(path: &Path) -> Result<&str> {
         .ok_or_else(|| Error::input("native indexer requires a UTF-8 path"))
 }
 pub fn fingerprint(source: &Path) -> Result<(u64, u64)> {
-    let m = fs::metadata(source)?;
+    let m = fs::metadata(source).map_err(|e| Error::opening(e, "source", source))?;
     if !m.is_file() {
         return Err(Error::input("source is not a regular file"));
     }
@@ -147,4 +147,24 @@ pub(crate) fn validated_vfs(directory: &Path) -> Result<floe_vfs::Vfs> {
             format!("cache commit validation failed: {e}"),
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_source_is_named() {
+        let missing = std::env::temp_dir().join("floe-no-such-source-4242.oas");
+        let e = fingerprint(&missing).unwrap_err();
+        assert_eq!(e.kind, ErrorKind::Io);
+        assert_eq!(
+            e.message,
+            format!("source not found: {}", missing.display())
+        );
+        let deck = std::env::temp_dir().join("floe-no-such-deck-4242.jb");
+        let e =
+            crate::jobdeck::parser::JobDeck::read(&deck, true, &Default::default()).unwrap_err();
+        assert_eq!(e.message, format!("jobdeck not found: {}", deck.display()));
+    }
 }

@@ -77,10 +77,12 @@ pub fn color(value: &str) -> Option<[u8; 4]> {
         255,
     ])
 }
-pub fn layer_color(layer: u32) -> [u8; 4] {
-    // Same operation order as colorsys.hsv_to_rgb + int(x*255) and
-    // floe-index's palette: layer-number keyed, not datatype/row keyed.
-    let h = (f64::from(layer) * 137.508) % 360. / 360.;
+/// The palette's colour at place `n` (palette_ranks): a golden-angle step
+/// (137.508 degrees) of hue per place, saturation 0.75, value 1 - the same
+/// operation order as colorsys.hsv_to_rgb + int(x*255), floe-index's
+/// meta.json and the oracle (floe_oracle.cache.layer_color).
+pub fn layer_color(n: u32) -> [u8; 4] {
+    let h = (f64::from(n) * 137.508) % 360. / 360.;
     let i = (h * 6.) as u32;
     let f = h * 6. - f64::from(i);
     let (p, q, t) = (0.25, 1. - 0.75 * f, 1. - 0.75 * (1. - f));
@@ -93,6 +95,84 @@ pub fn layer_color(layer: u32) -> [u8; 4] {
         _ => (1., p, q),
     };
     [(r * 255.) as u8, (g * 255.) as u8, (b * 255.) as u8, 255]
+}
+/// Each layer's place in the palette where no layer property names its
+/// colour (user 2026-10-13: "a group shows one colour - 2.0 2.1 2.2 2.32 -
+/// give consecutive layers different colours"; the palette was keyed by the
+/// layer number since 2026-08-04): the pairs that hold shapes or text in
+/// (layer, datatype) order - the layer panel's rows - then the empty ones
+/// (named by the file's LAYERNAME table alone, listed only with
+/// FLOE_EMPTY_LAYERS=show), so neighbouring rows are a golden angle apart in
+/// hue (LayerColors::Row). floe-index (meta.json) and the oracle
+/// (floe_oracle.cache.palette_ranks) place them the same way.
+pub fn palette_ranks(
+    pairs: impl IntoIterator<Item = ((u32, u32), u64)>,
+) -> std::collections::BTreeMap<(u32, u32), u32> {
+    let mut order: Vec<_> = pairs.into_iter().map(|(key, stored)| (stored == 0, key)).collect();
+    order.sort_unstable();
+    order
+        .into_iter()
+        .enumerate()
+        .map(|(n, (_, key))| (key, u32::try_from(n).unwrap_or(u32::MAX)))
+        .collect()
+}
+/// How a layout's default layer colours are given (user 2026-10-13, after
+/// the rows: "a group's colours sometimes have to be one too - let a run
+/// option choose"): `row`, every row of the layer panel its own colour,
+/// neighbours a golden angle apart (palette_ranks; the default), or `group`,
+/// one colour per layer number shared by its datatypes (as before 0.12.352).
+/// FLOE_LAYER_COLORS=row|group is the default every open takes (the viewer's
+/// `--layer-colors` sets it for its service, in a window of its own); `floe2
+/// render --layer-colors` overrides it for its run (Layout::set_layer_colors).
+/// A jobdeck keeps its own colour scheme.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LayerColors {
+    #[default]
+    Row,
+    Group,
+}
+impl LayerColors {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "row" => Some(Self::Row),
+            "group" => Some(Self::Group),
+            _ => None,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Row => "row",
+            Self::Group => "group",
+        }
+    }
+    /// FLOE_LAYER_COLORS: `row` or `group`; unset, row. Another value is
+    /// said once and row is used.
+    pub fn from_env() -> Self {
+        let Ok(text) = std::env::var("FLOE_LAYER_COLORS") else {
+            return Self::default();
+        };
+        Self::parse(&text).unwrap_or_else(|| {
+            static SAID: std::sync::Once = std::sync::Once::new();
+            SAID.call_once(|| {
+                eprintln!(
+                    "[{}][warn] FLOE_LAYER_COLORS={text:?}: row or group - row is used",
+                    crate::program()
+                )
+            });
+            Self::default()
+        })
+    }
+    /// Each pair's place in the palette (layer_color): its panel row
+    /// (palette_ranks) or its layer number.
+    pub fn places(
+        self,
+        pairs: impl IntoIterator<Item = ((u32, u32), u64)>,
+    ) -> std::collections::BTreeMap<(u32, u32), u32> {
+        match self {
+            Self::Row => palette_ranks(pairs),
+            Self::Group => pairs.into_iter().map(|(key, _)| (key, key.0)).collect(),
+        }
+    }
 }
 pub fn load_props(source: &Path) -> Result<Vec<LayerProps>> {
     let mut full = source.as_os_str().to_owned();
@@ -200,5 +280,46 @@ mod tests {
         assert_eq!(color("#한글"), None);
         assert_eq!(color("#zzffff"), None);
         assert_eq!(layer_color(0), [255, 63, 63, 255]);
+    }
+    #[test]
+    fn neighbouring_rows_take_neighbouring_places() {
+        // one layer's datatypes no longer share a colour; the empty pair
+        // (LAYERNAME only) goes after every drawn one
+        let ranks = palette_ranks([
+            ((3, 0), 5),
+            ((2, 32), 1),
+            ((2, 0), 9),
+            ((2, 1), 0),
+            ((2, 2), 4),
+        ]);
+        let places: Vec<_> = ranks.iter().map(|(k, n)| (*k, *n)).collect();
+        assert_eq!(
+            places,
+            [((2, 0), 0), ((2, 1), 4), ((2, 2), 1), ((2, 32), 2), ((3, 0), 3)]
+        );
+        let colours: Vec<_> = [(2, 0), (2, 2), (2, 32), (3, 0)]
+            .iter()
+            .map(|k| layer_color(ranks[k]))
+            .collect();
+        for pair in colours.windows(2) {
+            assert_ne!(pair[0], pair[1]);
+        }
+        assert_eq!(colours[0], [255, 63, 63, 255]);
+        assert_eq!(colours[1], color("#3fff77").unwrap());
+    }
+    #[test]
+    fn a_group_shares_its_layer_numbers_colour_when_asked() {
+        let pairs = [((2, 0), 9), ((2, 1), 0), ((2, 32), 1), ((3, 0), 5)];
+        let group = LayerColors::Group.places(pairs);
+        assert_eq!(group[&(2, 0)], 2);
+        assert_eq!(group[&(2, 1)], 2);
+        assert_eq!(group[&(2, 32)], 2);
+        assert_eq!(group[&(3, 0)], 3);
+        assert_eq!(LayerColors::Row.places(pairs), palette_ranks(pairs));
+        for mode in [LayerColors::Row, LayerColors::Group] {
+            assert_eq!(LayerColors::parse(mode.name()), Some(mode));
+        }
+        assert_eq!(LayerColors::parse("groups"), None);
+        assert_eq!(LayerColors::default(), LayerColors::Row);
     }
 }
