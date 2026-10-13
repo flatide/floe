@@ -93,8 +93,13 @@ def main():
         temp.mkdir()
         (work / "oracle-temp").mkdir()
         env = {k: v for k, v in os.environ.items() if not k.startswith("FLOE_")}
+        # FLOE_RENDER_DEFAULTS=archival: the export look (as before 0.12.350) -
+        # what the Python floe2, the reference here, renders; the viewer's
+        # defaults are held to the viewer by jobdeck's gtk_view. The layer
+        # colours stay the default (row): floe-index's meta.json colours, the
+        # oracle's too (group is the viewer's old palette, another thing)
         env.update(PATH="", FLOE_INDEX_BIN=str(INDEX), FLOE_RENDERD_BIN=str(RENDERD),
-                   FLOE_PRODUCT="floe2",
+                   FLOE_PRODUCT="floe2", FLOE_RENDER_DEFAULTS="archival", 
                    PYTHONPATH=os.pathsep.join([str(ROOT / "tools" / "oracle"), str(ROOT)]), PYTHONDONTWRITEBYTECODE="1", TMPDIR=str(temp))
         for name, dbu, w, h, layers in [
                 ("chipA.oas", 5e-5, 2000, 2550, [(123, 43), (456, 0)]),

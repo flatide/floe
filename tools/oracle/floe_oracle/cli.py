@@ -1688,7 +1688,8 @@ def main(argv=None, *, prog=None, rust_only=None):
                       metavar="N", help="encoded page target in MiB "
                       "(default: 1)")
     p.set_defaults(coverage=False, coverage_only=False,
-                   index_module="floe2" if rust_only else "floe")
+                   # the child CLI: this package's (P1c removed floe2/, P3 moved floe's)
+                   index_module="floe_oracle.floe2" if rust_only else "floe_oracle")
     if not rust_only:
         coverage = rust.add_mutually_exclusive_group()
         coverage.add_argument(

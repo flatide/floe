@@ -77,7 +77,10 @@ def main():
                         _frontier_depths=frontier["depths"], _minimap_bases={},
                         depth_value=999 if depth is None else depth,
                         _minimap_image=image, _minimap_event=object(), cx=cx, cy=cy,
-                        spp=span/800, redraw=lambda **_: None)
+                        spp=span/800, redraw=lambda **_: None,
+                        # no service bake, and the controller's navigation declined
+                        # (P4e): the viewer's own, the oracle
+                        _ctl_minimap=lambda d: None, _ctl_navigate=lambda nav: False)
                     for name in names:
                         if name.startswith("_"):
                             setattr(obj, name, MethodType(scope[name], obj))

@@ -60,6 +60,10 @@ def compare(source, work, env, tag, args, code=0, python_env=None):
         for row in doc["shots"]:
             for key in ("ms", "out", "name"):
                 row.pop(key)
+    # the shared CLI's report says its render policy (0.12.350-0.12.353);
+    # the Python floe2's does not
+    for key in ("archival", "density", "layer_colors", "legend"):
+        actual.pop(key, None)
     assert actual == expected, (tag, actual, expected)
     return out
 
@@ -120,7 +124,8 @@ for line in sys.stdin:
         doc = json.loads(report.read_text())
         assert not doc["complete"] and not doc["jobdeck"]["complete"]
         assert doc["jobdeck"]["over_budget_pages"] == 2
-        assert "INCOMPLETE" in result.stderr
+        # the shared CLI says it as the Python floe2 did: "rendered incomplete - ... [exit 3]"
+        assert "rendered incomplete" in result.stderr and "[exit 3]" in result.stderr
         target.write_bytes(b"keep previous successful export")
     for phase in ("ready", "open", "style", "render"):
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -159,8 +164,13 @@ def main(fixture):
         temp = work / "worker-temp"
         temp.mkdir()
         env = {k: v for k, v in os.environ.items() if not k.startswith("FLOE_")}
+        # FLOE_RENDER_DEFAULTS=archival: the export look (as before 0.12.350) -
+        # what the Python floe2, the reference here, renders; the viewer's
+        # defaults are held to the viewer by jobdeck's gtk_view. The layer
+        # colours stay the default (row): floe-index's meta.json colours, the
+        # oracle's too (group is the viewer's old palette, another thing)
         env.update(FLOE_INDEX_BIN=str(INDEX), FLOE_RENDERD_BIN=str(RENDERD),
-                   PATH="", PYTHONPATH=os.pathsep.join([str(ROOT / "tools" / "oracle"), str(ROOT)]), PYTHONDONTWRITEBYTECODE="1",
+                   PATH="", FLOE_RENDER_DEFAULTS="archival", PYTHONPATH=os.pathsep.join([str(ROOT / "tools" / "oracle"), str(ROOT)]), PYTHONDONTWRITEBYTECODE="1",
                    TMPDIR=str(temp))
         for command in ("info", "render", "probe"):
             assert "Usage:" in run([command, "--help"], env).stdout

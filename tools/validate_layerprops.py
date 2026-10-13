@@ -16,6 +16,7 @@ import random
 import shutil
 import subprocess
 import sys
+from types import SimpleNamespace
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,7 +52,15 @@ def gtk_view(metadata, rows):
     tree = ast.parse((ROOT / "floe/gui.py").read_text())
     methods = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name in names]
     assert len(methods) == len(names)
-    scope = {"fillpat": fillpat}
+    # the load reads the file through floe2 gtk-service (P2c: app-core
+    # desktop::read_props, whose rows are fillpat.parse_layerprops's - the
+    # service's reference, jobdeck's GtkServiceTests); here the reference
+    class ServiceError(Exception):
+        pass
+    gtkservice = SimpleNamespace(
+        layerprops_read=lambda path: fillpat.parse_layerprops(Path(path).read_text()),
+        ServiceError=ServiceError)
+    scope = {"fillpat": fillpat, "gtkservice": gtkservice}
     exec(compile(ast.Module(body=methods, type_ignores=[]), "GTK props oracle", "exec"), scope)
     legacy = type("LegacyVisibility", (), {name: scope[name] for name in names})()
     legacy.meta = metadata

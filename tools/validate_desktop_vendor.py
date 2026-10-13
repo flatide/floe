@@ -34,7 +34,9 @@ def main():
             for filename, digest in checksum["files"].items():
                 assert hashlib.sha256((path / filename).read_bytes()).hexdigest() == digest
             assert manifest["license"]
-    assert new == {"bitflags", "block2", "dispatch2", "objc2", "objc2-encode",
+    # bitflags 2 is the workspace's too since the 2026-10-13 feature/jobdeck merge
+    # (rusqlite's), so it is shared, not the desktop's own
+    assert new == {"block2", "dispatch2", "objc2", "objc2-encode",
                    "objc2-foundation", "objc2-app-kit", "objc2-core-foundation", "objc2-web-kit"}
     # No dependency version drift for shared names, including multi-version syn.
     assert not ({n for n, _ in desktop} & {n for n, _ in shared} & new)

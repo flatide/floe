@@ -51,7 +51,9 @@ def main():
                 cx=(bbox[0] + bbox[2]) / 2, cy=(bbox[1] + bbox[3]) / 2,
                 spp=25 / w, _viewport_size=lambda: (w, h),
                 view_bbox=lambda: bbox, redraw=lambda: None,
-                _display=lambda: None, _set_live_status=lambda _: None)
+                _display=lambda: None, _set_live_status=lambda _: None,
+                # the controller's navigation (P4e) declined: the viewer's own band maths, the oracle
+                _ctl_navigate=lambda nav: False)
             for x, y in moves:
                 scope["_track_band"](obj, SimpleNamespace(x=x, y=y))
             scope["_on_release"](obj, None, SimpleNamespace(

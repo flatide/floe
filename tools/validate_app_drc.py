@@ -26,9 +26,12 @@ from validate_drc_ice import DB
 
 
 def fingerprint(root):
+    # .floe-lock/: the index locks' reader registrations beside a pack
+    # (floe_vfs::lock, open_current's Pack::hold) - coordination, not a
+    # sidecar or a change to the source
     return {str(p.relative_to(root)): (p.stat().st_mtime_ns,
             hashlib.sha256(p.read_bytes()).hexdigest())
-            for p in root.rglob("*") if p.is_file()}
+            for p in root.rglob("*") if p.is_file() and ".floe-lock" not in p.relative_to(root).parts}
 
 
 def ascii_case(path):

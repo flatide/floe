@@ -81,7 +81,7 @@ done
                                   ORACLE_SOURCE=src, ORACLE_TEST_EXIT=str(code)),
                 capture_output=True, text=True, timeout=10)
             assert result.returncode == code, (result.returncode, result.stderr)
-            assert result.stdout.splitlines() == [".", "-m", "floe", "index", "--legacy", src, "--jobs", "1"]
+            assert result.stdout.splitlines() == ["tools/oracle:.", "-m", "floe_oracle", "index", "--legacy", src, "--jobs", "1"]
             assert not Path(src).exists()
     print(f"VALIDATION SELECTOR: ALL OK ({len(names)} gates; {cases} parser/predicate cases; 2 isolated oracle argv/exit cases; no real fixture builds)")
 

@@ -35,11 +35,18 @@ POLICIES = {
     "_set_depth": linked("depth", "viewer", "viewer"),
     "_set_frames": linked("frames", "viewer", "viewer"),
     "_toggle_abstract": (1, "excluded", "Rust never supported abstract", None, None),
-    "_toggle_coverage": (1, "excluded", "Retired density coverage; not occupancy", None, None),
     # feature/jobdeck 6c5a69f4 (2026-10-05). The worker sends no density=, and
     # its frame contract has no place yet for the stack's pass-1 round
     # (frame ... final=0 density_round=1: no style_epoch or query scene).
     "_toggle_density": (1, "open", "View > density under the cut: no web toggle yet", None, None),
+    # feature/jobdeck-drc, ported to app-core drc::analysis / drc::team (2026-10-11,
+    # docs/SHARED_APP_LAYER.ko.md §8-§9): the shared modules the web can serve over
+    # HTTP later; no web UI for them yet
+    "_drc_clusters_dialog": (1, "open", "DRC > clusters: no web dialog yet (app-core drc::analysis)", None, None),
+    "_drc_not_required_key": (2, "open", "DRC > not-required flags: no web keys yet (app-core drc::team)", None, None),
+    "_drc_team_dialog": (1, "open", "DRC > reviewers (team review snapshots): no web dialog yet", None, None),
+    "_drc_migration_dialog": (1, "open", "DRC > review from a previous run: no web dialog yet", None, None),
+    "_drc_review_export_stats": (1, "open", "DRC > review statistics / CSV export: no web action yet", None, None),
     "_set_thin": linked("thin", "viewer", "viewer"),
     "_set_mono": linked("mono", "viewer", "viewer"),
     "_toggle_overlays": linked("overlays"),

@@ -46,7 +46,7 @@ def main(fixture):
         exports.mkdir()
         export_source = exports / "layout.oas"
         shutil.copy2(fixture, export_source)
-        oracle_env = dict(env, PYTHONPATH=str(ROOT), PYTHONDONTWRITEBYTECODE="1")
+        oracle_env = dict(env, PYTHONPATH=os.pathsep.join([str(ROOT / "tools" / "oracle"), str(ROOT)]), PYTHONDONTWRITEBYTECODE="1")
         run(["index", export_source, "--jobs=2"], oracle_env)
         before = digest(vfs_cache(export_source))
         for name, layers in [("all", None), ("visible", "1/0"), ("none", None)]:

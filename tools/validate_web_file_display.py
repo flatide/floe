@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 from types import MethodType, SimpleNamespace
 from unittest.mock import patch
 
@@ -32,6 +33,7 @@ def main():
     class Cache:
         def __init__(self, path, ids=None):
             self.src, self.ids = path, ids
+            self.is_jobdeck = path.endswith(".jb")
         def is_stale(self):
             return False
         def exists(self):
@@ -40,6 +42,11 @@ def main():
             pass
 
     scope["cache_mod"] = SimpleNamespace(Cache=Cache)
+
+    class ServiceError(Exception):
+        kind = "input"
+    floe_package = types.ModuleType("floe")
+    floe_package.__path__ = []
     exec(compile(ast.Module(body=functions, type_ignores=[]), "GTK file policy", "exec"), scope)
     writes = {n.attr for n in ast.walk(methods["_apply_cache"])
               if isinstance(n, ast.Attribute) and isinstance(n.ctx, ast.Store)
@@ -76,7 +83,10 @@ def main():
         obj._apply_cache = apply
         for name in method_names:
             setattr(obj, name, MethodType(scope[name], obj))
-        with patch.dict(sys.modules, {"floe.jobdeck.viewer": SimpleNamespace(DeckCache=Cache)}):
+        # the open goes through floe2 gtk-service's ServiceCache (P2a; the
+        # method's relative import): the synthetic cache in its place
+        with patch.dict(sys.modules, {"floe": floe_package, "floe.gtkservice": SimpleNamespace(
+                ServiceCache=Cache, ServiceError=ServiceError)}):
             assert obj.open_file(path) is None
         assert len(loading) == (0 if same else 1), "new cache loads show the banner; same source does not"
         assert None not in loading, "successful apply leaves banner for worker-ready completion"

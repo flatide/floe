@@ -173,7 +173,7 @@ def main(fixture):
         temp.mkdir()
         env = {k: v for k, v in os.environ.items() if not k.startswith("FLOE_")}
         env.update(FLOE_INDEX_BIN=str(INDEX), FLOE_RENDERD_BIN=str(RENDERD), PATH="",
-                   PYTHONPATH=str(ROOT), PYTHONDONTWRITEBYTECODE="1", TMPDIR=str(temp))
+                   PYTHONPATH=os.pathsep.join([str(ROOT / "tools" / "oracle"), str(ROOT)]), PYTHONDONTWRITEBYTECODE="1", TMPDIR=str(temp))
         assert "--bbox" in run(["clip", "--help"], env).stdout
         run(["clip"], env, code=2)
         run(["index", source, "--jobs=2"], env)

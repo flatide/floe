@@ -17,7 +17,6 @@ from types import MethodType, SimpleNamespace
 from unittest.mock import patch
 
 from validate_web_cli import APP, INDEX, RENDERD, Client, read_json, wait
-from validate_web_cli_inventory import legacy_parsers
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -109,16 +108,19 @@ def refinement_oracle():
     precedence rather than reimplementing them in the native test driver.
     """
     sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (docs/SHARED_APP_LAYER.ko.md P3)
-    from floe_oracle import cli, rust_render
-    parser = legacy_parsers()["view"]
-    tree = ast.parse((ROOT / "tools/oracle/floe_oracle/cli.py").read_text())
+    sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (docs/SHARED_APP_LAYER.ko.md P3)
+    from floe import viewcli
+    from floe_oracle import rust_render
+    # the viewer entry's view parser and cmd_view (P2d: floe/viewcli.py; the
+    # frozen shell's cli has no viewer since P3)
+    parser = viewcli.parser()
+    tree = ast.parse((ROOT / "floe/viewcli.py").read_text())
     method = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "cmd_view")
     cut = next(i for i, n in enumerate(method.body) if isinstance(n, ast.Assign)
                and any(isinstance(t, ast.Name) and t.id == "server" for t in n.targets))
     method.body = method.body[:cut] + ast.parse(
         "return dict(stream_kb=stream_kb, independent=process_options)").body
-    scope = dict(vars(cli))
+    scope = dict(vars(viewcli))
     exec(compile(ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[])),
                  "GTK refinement CLI prefix", "exec"), scope)
     tree = ast.parse((ROOT / "tools/oracle/floe_oracle/rust_render.py").read_text())
@@ -141,15 +143,15 @@ def oracle(work):
     # Execute the real policy prefix, stopping before sockets, GUI or indexing.
     # Only test-owned empty paths are inspected; no monkey-patched policy math.
     sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (docs/SHARED_APP_LAYER.ko.md P3)
-    from floe_oracle import cli
-    tree = ast.parse((ROOT / "tools/oracle/floe_oracle/cli.py").read_text())
+    sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (docs/SHARED_APP_LAYER.ko.md P3)
+    from floe import viewcli
+    tree = ast.parse((ROOT / "floe/viewcli.py").read_text())
     method = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "cmd_view")
     cut = next(i for i, n in enumerate(method.body) if isinstance(n, ast.Assign)
                and any(isinstance(t, ast.Name) and t.id == "server" for t in n.targets))
     method.body = method.body[:cut] + ast.parse(
         'return dict(depth=depth, frames=args.frames, labels=args.labels)').body
-    scope = dict(vars(cli))
+    scope = dict(vars(viewcli))
     exec(compile(ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[])),
                  "GTK CLI startup policy", "exec"), scope)
     viewer = next(n for n in ast.parse((ROOT / "floe/gui.py").read_text()).body
@@ -184,12 +186,15 @@ sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (docs/SHARED_A
         pixels = ([1001, 733], [800, 600], [600, 1000])[len(cases) % 3]
         bbox, dbu = [-111., 222., 8301., 7102.], .001
         obj = SimpleNamespace(cache=True, meta={"bbox":bbox}, dbu=dbu,
-                              _viewport_size=lambda: pixels, redraw=lambda **_: None)
+                              _viewport_size=lambda: pixels, redraw=lambda **_: None,
+                              # the controller's navigation (P4e) declined: the
+                              # viewer's own fit/goto maths, the oracle
+                              _ctl_navigate=lambda nav: False)
         for name in names:
             setattr(obj, name, MethodType(gui[name], obj))
         obj.fit()
         if target:
-            obj.goto(*cli.parse_goto(target))
+            obj.goto(*viewcli.parse_goto(target))
         argv = ["view", str(source), "--frames", frames, "--labels", labels]
         if target:
             argv += ["--goto", target]

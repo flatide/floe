@@ -116,7 +116,7 @@ def legacy_parsers():
     # Capture the actual rust_only constructor, stopping before dispatch. This
     # keeps helper-defined flags and conditional exclusions in the inventory.
     sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (docs/SHARED_APP_LAYER.ko.md P3)
+    sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (docs/SHARED_APP_LAYER.ko.md P3)
     from floe_oracle.cli import main
     class Captured(BaseException):
         pass

@@ -33,6 +33,8 @@ class Widgets:
         self.destroyed = False
         self.gtk = SimpleNamespace(
             Dialog=self.dialog, DrawingArea=self.area, Menu=self.menu,
+            # the grid is an image in an event box (0.12.339: no pycairo)
+            Image=self.image, EventBox=self.area,
             MenuItem=self.item, Align=SimpleNamespace(CENTER=0),
             ResponseType=SimpleNamespace(OK=OK, CANCEL=CANCEL))
 
@@ -43,8 +45,13 @@ class Widgets:
             show_all=lambda: None, run=self.run,
             destroy=lambda: setattr(self, "destroyed", True))
 
+    @staticmethod
+    def image():
+        return SimpleNamespace(set_from_pixbuf=lambda _pixbuf: None)
+
     def area(self):
         return SimpleNamespace(
+            add=lambda _widget: None,
             set_size_request=lambda *_args: None, set_halign=lambda *_args: None,
             add_events=lambda *_args: None, queue_draw=lambda: None,
             connect=lambda event, callback: self.callbacks.__setitem__(event, callback))
@@ -84,7 +91,9 @@ def method_code():
 def methods(widgets):
     gdk = SimpleNamespace(EventType=SimpleNamespace(BUTTON_PRESS=1), EventMask=SimpleNamespace(
         BUTTON_PRESS_MASK=1, BUTTON1_MOTION_MASK=2, BUTTON_RELEASE_MASK=4))
-    scope = dict(os=os, sys=sys, fillpat=fillpat, Gtk=widgets.gtk, Gdk=gdk)
+    scope = dict(os=os, sys=sys, fillpat=fillpat, Gtk=widgets.gtk, Gdk=gdk,
+                 # the grid image's pixels (gui.pixbuf_of): never looked at here
+                 pixbuf_of=lambda w, h, data: SimpleNamespace(w=w, h=h, size=len(data)))
     exec(method_code(), scope)
     return {name: scope[name] for name in METHODS}
 
@@ -103,7 +112,7 @@ def gui_for(scope, slot, used=True):
         redraw=lambda **kw: redraws.append(kw),
         meta=dict(layers=[dict(layer=p[0], datatype=p[1], color="#ffffff", name="SYNTH")
                           for p in pairs]),
-        _fill_slots=[SimpleNamespace(queue_draw=lambda: None) for _ in fillpat.FILL_NAMES],
+        _fill_slots=[SimpleNamespace(queue_draw=lambda: None, refresh=lambda: None) for _ in fillpat.FILL_NAMES],
         _layer_rows={p: SimpleNamespace(
             set_fill=lambda value, p=p: swatches.__setitem__(p, value)) for p in pairs})
     for name, method in scope.items():

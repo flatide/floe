@@ -219,7 +219,9 @@ def cancellations(work, env, base):
 def main():
     with tempfile.TemporaryDirectory(prefix="floe-fe-embed-") as td:
         work = Path(td)
-        env = dict(os.environ, PATH="", FLOE_RENDERD_BIN="/missing", FLOE_INDEX_BIN="/missing", PYTHONDONTWRITEBYTECODE="1")
+        # the Python reference is the oracle package's (P3: tools/oracle)
+        env = dict(os.environ, PATH="", FLOE_RENDERD_BIN="/missing", FLOE_INDEX_BIN="/missing", PYTHONDONTWRITEBYTECODE="1",
+                   PYTHONPATH=os.pathsep.join([str(ROOT / "tools" / "oracle"), str(ROOT)]))
         run(["--selftest"], env)
         base = rich_png()
         definitions = fe._sample_annos()

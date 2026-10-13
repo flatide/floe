@@ -33,7 +33,7 @@ def main():
         workers = root / "workers"
         workers.mkdir()
         env = {k: v for k, v in os.environ.items() if not k.startswith("FLOE_")}
-        env.update(PATH="", TMPDIR=str(workers), PYTHONPATH=str(ROOT),
+        env.update(PATH="", TMPDIR=str(workers), PYTHONPATH=os.pathsep.join([str(ROOT / "tools" / "oracle"), str(ROOT)]),
                    PYTHONDONTWRITEBYTECODE="1", FLOE_INDEX_BIN=str(INDEX),
                    FLOE_RENDERD_BIN=str(RENDERD), FLOE_MANAGED_EXPORT_ROOT=str(root))
         source = root / "layout 설계.oas"

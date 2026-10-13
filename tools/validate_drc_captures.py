@@ -213,7 +213,12 @@ def main():
         (work / "oracle-temp").mkdir()
         source = work / "한 글.oas"
         shutil.copyfile(sys.argv[1], source)
-        env = dict(os.environ, PATH="", PYTHONPATH=os.pathsep.join([str(ROOT / "tools" / "oracle"), str(ROOT)]), FLOE_REVIEWER="drc-capture-test",
+        # FLOE_RENDER_DEFAULTS=archival: the export look (as before 0.12.350) -
+        # what the Python floe2, the reference here, renders; the viewer's
+        # defaults are held to the viewer by jobdeck's gtk_view. The layer
+        # colours stay the default (row): floe-index's meta.json colours, the
+        # oracle's too (group is the viewer's old palette, another thing)
+        env = dict(os.environ, PATH="", FLOE_RENDER_DEFAULTS="archival", PYTHONPATH=os.pathsep.join([str(ROOT / "tools" / "oracle"), str(ROOT)]), FLOE_REVIEWER="drc-capture-test",
                    FLOE_RENDERD_BIN=str(RENDERD), FLOE_INDEX_BIN=str(INDEX),
                    FLOE_RUST_JOBS="1", FLOE_RUST_RASTER_JOBS="4", FLOE_RUST_ROUND_PAGES=str(1 << 30),
                    TMPDIR=str(runtime), PYTHONDONTWRITEBYTECODE="1")

@@ -100,9 +100,18 @@ def main(fixture):
         assert "requires DECK" in run("svrf", env=env, code=2).stderr
         deck = work / "rules.svrf"
         deck.write_text("LAYER M 7\nR { INT M < .05 }\n")
-        assert "checks 1" in run("svrf", deck, "--scan", env=env).stdout
+        # svrf: floe2-web points at floe-index svrf - the one SVRF parser
+        # (2026-09-29; the shared CLI's svrf) - and exits 2 without writing
+        pointer = run("svrf", deck, "--scan", env=env, code=2)
+        assert "floe-index svrf" in pointer.stderr and "--scan" in pointer.stderr and not pointer.stdout
         assert not Path(str(deck) + ".rules.json").exists()
-        run("svrf", deck, env=env)
+
+        def index_svrf(*flags):
+            return subprocess.run([str(INDEX), "svrf", str(deck), *flags], env=env,
+                                  capture_output=True, text=True, timeout=30)
+        assert "checks 1" in index_svrf("--scan").stdout
+        assert not Path(str(deck) + ".rules.json").exists()
+        assert index_svrf().returncode == 0
         rules = json.loads(Path(str(deck) + ".rules.json").read_text())
         assert rules["checks"]["R"]["source_gds"] == [[7, None]]
         for option in ("--coverage", "--legacy", "--tile-mb", "--level"):
@@ -331,7 +340,9 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
             "--p2-shard-limit-mb", "1024", "--occupancy-um", "4", env=dict(fake_env, FAKE_EXIT="7"), code=7)
         call = json.loads(log.read_text().splitlines()[-1])
         assert call[:3] == ["vfs", str(fake_source), str(vfs_cache(fake_source))]
-        assert call[3:] == ["--jobs", "16", "--page-target-mb", "2", "--occupancy", "--occupancy-um", "4",
+        # the base cell as the Python CLI wrote it (`4.0`; the shared index,
+        # jobdeck 0.12.328 G3)
+        assert call[3:] == ["--jobs", "16", "--page-target-mb", "2", "--occupancy", "--occupancy-um", "4.0",
                             "--no-lod", "--slow-cell-s", "0", "--p2-shard-limit-mb", "1024"]
         bad_cleanup = run("index", source, "--occupancy-only",
                           env=dict(fake_env, FAKE_CLEANUP_ERROR="1"), code=7)

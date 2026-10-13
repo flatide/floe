@@ -45,8 +45,9 @@ class Pixbuf:
 
 
 def gtk_pixels():
-    cli = ast.parse((ROOT / "floe/cli.py").read_text())
-    command = next(n for n in cli.body if isinstance(n, ast.FunctionDef) and n.name == "cmd_gtktest")
+    # `floe2 gtktest` is the viewer entry's (floe/viewcli.py gtktest, P3)
+    cli = ast.parse((ROOT / "floe/viewcli.py").read_text())
+    command = next(n for n in cli.body if isinstance(n, ast.FunctionDef) and n.name == "gtktest")
     synth = next(n for n in command.body if isinstance(n, ast.FunctionDef) and n.name == "synth")
     gui = ast.parse((ROOT / "floe/gui.py").read_text())
     fill = next(n for n in gui.body if isinstance(n, ast.FunctionDef) and n.name == "fill_rect")
