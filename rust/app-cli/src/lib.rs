@@ -537,6 +537,20 @@ pub fn main(host: &'static Host, args: Vec<OsString>) -> ! {
             std::env::set_var("FLOE_LOCK_WHAT", format!("{program} {command}"));
         }
     }
+    exit_with(host, |cancelled| run(cli, cancelled))
+}
+/// Run `command` - a host's own, parsed (floe2-web's view, server and
+/// displaytest) - as `host` under the shared CLI's signal handling, and exit
+/// with its status as the shared commands do: a busy target is one `[lock]`
+/// line and 75, an input error the host's `input_error_exit`, a cancel 128 +
+/// the signal, an incomplete result 3, any other failure 1.
+pub fn exit_with(
+    host: &'static Host,
+    command: impl FnOnce(&Arc<AtomicUsize>) -> Result<i32>,
+) -> ! {
+    let _ = HOST.set(host);
+    floe_app_core::set_program(host.name);
+    let program = floe_app_core::program();
     let signals = match Signals::install() {
         Ok(s) => s,
         Err(e) => {
@@ -544,7 +558,7 @@ pub fn main(host: &'static Host, args: Vec<OsString>) -> ! {
             std::process::exit(1);
         }
     };
-    let code = match run(cli, &signals.flag) {
+    let code = match command(&signals.flag) {
         Ok(code) => code,
         // a busy target (floe_vfs::lock): one line, as floe-index says it,
         // and 75 - the jobdeck index and the viewer read it as busy

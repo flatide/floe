@@ -866,14 +866,26 @@ fn run_hosted(
             "levels":handoff::levels_json(levels),"body":initial,"label_preference":label_preference});
         Gateway::with_startup_options(listener.local_addr()?,Arc::clone(&service),request,confirm_levels)
     } else { Gateway::with_service(listener.local_addr()?,Arc::clone(&service)) }.map_err(Error::input)?;
-    Gateway::attach_build(&mut gate, crate::selfcheck::build_info()).map_err(Error::input)?;
+    // the build identity About shows (the shared selfcheck's, this host's)
+    let build = floe_app_cli::selfcheck::build_info();
+    Gateway::attach_build(
+        &mut gate,
+        floe_web::about::BuildInfo {
+            app_version: build.app_version,
+            source_revision: build.source_revision,
+            target: build.target,
+            index_compatibility: build.index_compatibility,
+            renderd_compatibility: build.renderd_compatibility,
+        },
+    )
+    .map_err(Error::input)?;
     if c.dump {
         Gateway::enable_display_dump(&mut gate).map_err(Error::input)?;
     }
     if c.local_sharing {
         Gateway::enable_local_sharing(&mut gate).map_err(Error::input)?;
     }
-    let notices = match crate::selfcheck::notice_catalog(cancelled) {
+    let notices = match floe_app_cli::selfcheck::notice_catalog(cancelled) {
         Ok(Some(c)) => floe_web::about::Notices::Ready(Arc::new(c)),
         Ok(None) => floe_web::about::Notices::NotPackaged,
         Err(e) => {
@@ -1100,11 +1112,12 @@ mod tests {
                 "{words:?}"
             );
         }
-        assert!(crate::parse([OsString::from("index")]).is_err());
-        assert!(matches!(
-            crate::parse([OsString::from("selfcheck")]).unwrap(),
-            crate::Cli::SelfCheck(_)
-        ));
+        // the shared commands are the shared CLI's (cli_main runs them
+        // before this parser): never a view's source
+        for shared in ["index", "selfcheck"] {
+            assert!(floe_app_cli::COMMANDS.contains(&shared));
+            assert!(crate::parse([OsString::from(shared)]).is_err(), "{shared}");
+        }
         for words in [
             vec!["--version", "a.oas"],
             vec!["--help", "a.oas"],

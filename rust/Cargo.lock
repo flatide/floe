@@ -203,12 +203,12 @@ dependencies = [
 name = "floe-app"
 version = "0.1.0"
 dependencies = [
+ "floe-app-cli",
  "floe-app-core",
  "floe-notices",
  "floe-web",
  "floe-worker-client",
  "serde_json",
- "signal-hook",
  "tokio",
 ]
 

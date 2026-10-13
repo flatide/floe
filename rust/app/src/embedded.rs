@@ -11,7 +11,7 @@ use std::sync::{
 /// identity compiled into this host. No source, worker, listener or UI starts.
 pub fn check_notices() -> Result<usize> {
     let cancel = AtomicUsize::new(0);
-    let catalog = crate::selfcheck::notice_catalog(&cancel)?
+    let catalog = floe_app_cli::selfcheck::notice_catalog(&cancel)?
         .ok_or_else(|| Error::input("no notice index was packaged into this build"))?;
     let mut start = Some(0);
     while let Some(at) = start {

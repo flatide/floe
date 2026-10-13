@@ -1,5 +1,13 @@
 # floe2-web — Rust 애플리케이션 CLI (개발 중)
 
+2026-10-13(feature/jobdeck 병합, [공유 Rust 앱 계층](../../docs/SHARED_APP_LAYER.ko.md)): 웹이 없는
+명령(`index`·`info`·`render`·`probe`·`clip`·`jobdeck`·`drc`·`drc-prepare`·`drc-match`·`fe-embed`·
+`svrf`·`selfcheck`)은 공유 크레이트 `rust/app-cli`의 것이고, jobdeck의 `floe2`와 같은 코드다.
+이 크레이트(`src/lib.rs`)는 그 CLI의 호스트(`floe_app_cli::Host` — 이름 `floe2-web`, 입력 오류
+exit 2, `--version`·selfcheck의 `web_bundle`)이며 웹 명령 `view`(소스만 주거나 아무것도 없을
+때도)·`server`·`displaytest`만 직접 가진다. 공유 명령의 동작·도움말·옵션은 app-cli의 문서와
+`floe2-web <명령> --help`를 본다(`svrf`는 `floe-index svrf`를 가리키고 exit 2).
+
 회사 홈페이지용 로그인 없는 샘플 데모는 `server --help`와
 [공개 데모 구성 안내](../../docs/WEBUI_WEBSITE_DEMO.ko.md)를 참고한다.
 TeeBox는 기존 Electron standalone 경로를 유지한다.

@@ -67,8 +67,9 @@ def main(fixture):
         cache = vfs_cache(source)
         # No Python/shell can be discovered by the Rust runtime under this PATH.
         env = dict(os.environ, FLOE_INDEX_BIN=str(INDEX), PATH="",
-                   PYTHONPATH=str(ROOT), PYTHONDONTWRITEBYTECODE="1")
-        assert "Rust application migration CLI" in run("--help", env=env).stdout
+                   PYTHONPATH=os.pathsep.join([str(ROOT / "tools" / "oracle"), str(ROOT)]), PYTHONDONTWRITEBYTECODE="1")
+        assert "floe2-web — the Rust application CLI" in run("--help", env=env).stdout
+        assert "floe2-web view [SOURCE ...] [OPTIONS]" in run("--help", env=env).stdout
         assert "selfcheck" in run("--help", env=env).stdout
         assert version in run("--version", env=env).stdout
         assert "--no-open" in run("view", "--help", env=env).stdout
@@ -363,8 +364,10 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
             try:
                 child_pid = wait_file(ready, p)
                 assert os.getpgid(child_pid) != os.getpgid(p.pid), "child SIGINT not isolated"
-                busy = run("index", cancel_source, "--force", env=fake_env, code=1)
-                assert "another Rust application" in busy.stderr
+                # a busy target: one [lock] line and 75, as the shared CLI
+                # says it (floe_app_cli::exit_with; the Rust floe2 too)
+                busy = run("index", cancel_source, "--force", env=fake_env, code=75)
+                assert "[lock] another Rust application" in busy.stderr
                 p.send_signal(sig)
                 out, err = p.communicate(timeout=5)
                 assert p.returncode == 128 + sig, (out, err, p.returncode)
