@@ -25,9 +25,15 @@ layer's strike and the palettes drawn as images.
 
 `floe2 render` with its defaults = the viewer's pixels for the views it
 settles on (capture_parity, 2026-10-12).
+
+The scale border (2026-10-13): the band along the frame's edges is the
+service's (app-core view::border) - segments, tones, rule, the corners'
+chips -, it follows a pan, goes with `s` and under Tab's clean look
+(border_parity); view_border with a box given, and refused.
 """
 
 
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -285,6 +291,153 @@ def minimap_parity(v):
     print("minimap: %d base(s) as the viewer's bake" % len(depths))
 
 
+def border_parity(v):
+    """The scale border (user 2026-10-13; app-core view::border): the band
+    along the frame's four edges is the service's - its segments alternate
+    the two tones at the service's px, each a 1-2-5 length of 60 px or
+    more, their edges the world's round coordinates (moved by a pan as the
+    layout is), the rule between band and layout -, the corners' chips say
+    the viewport's corners in um to the service's decimals and the top one
+    the length; the same view is asked once; off (`s`) the frame shows
+    where the band was, and under Tab's clean look nothing of it shows."""
+    from floe import gui
+    pump(v, lambda: settled(v), "a settled view")
+    v._display()
+    border = v._border_shown
+    check(border is not None, "the viewer drew no scale border")
+    w, h = v._viewport_size()
+    vb = v.view_bbox()
+    um_px = v.spp * v.dbu
+    step = border["step_um"]
+    exponent = math.floor(math.log10(step))
+    mantissa = step / 10 ** exponent
+    check(any(abs(mantissa - m) < 1e-9 for m in (1, 2, 5)),
+          "the step %r um is not 1, 2 or 5 x 10^n" % step)
+    check(60 <= border["step_px"] <= 150 + 1e-9
+          and abs(border["step_px"] - step / um_px) < 1e-6,
+          "the step %r um is %r px at %r um/px" % (step, border["step_px"], um_px))
+    check(border["label"] == "%.*f um" % (max(0, -exponent), step),
+          "the label %r is not the step %r" % (border["label"], step))
+    for axis, segs, length, edge_um in (
+            ("x", border["x"], w, lambda s: (vb[0] + s["from"] * v.spp) * v.dbu),
+            ("y", border["y"], h, lambda s: (vb[3] - s["from"] * v.spp) * v.dbu)):
+        check(segs and segs[0]["from"] == 0 and abs(segs[-1]["to"] - length) < 1e-9,
+              "%s: the band does not span the frame: %s" % (axis, segs))
+        for a, b in zip(segs, segs[1:]):
+            check(abs(a["to"] - b["from"]) < 1e-9 and a["even"] != b["even"],
+                  "%s: segments %s and %s" % (axis, a, b))
+        for s in segs[1:-1]:
+            check(abs(s["to"] - s["from"] - border["step_px"]) < 1e-6,
+                  "%s: an inner segment %s is not the step" % (axis, s))
+        for s in segs[1:]:
+            # each inner edge is a multiple of the step from the origin; the
+            # ordinal counts the segment on the origin's side of the edge
+            k = edge_um(s) / step
+            check(abs(k - round(k)) < 1e-6, "%s: the edge at %r um is not a "
+                  "multiple of %r" % (axis, edge_um(s), step))
+            ordinal = round(k) if axis == "x" else round(k) - 1
+            check((ordinal % 2 == 0) == s["even"],
+                  "%s: the segment from %r um has the wrong tone" % (axis, edge_um(s)))
+    # the pixels: the tones at the segments' middles, the rule, the corners
+    disp = v.image.get_pixbuf()
+    pixels, stride, channels = bytes(disp.get_pixels()), disp.get_rowstride(), disp.get_n_channels()
+
+    def at(x, y):
+        i = int(y) * stride + int(x) * channels
+        return pixels[i:i + 3]
+
+    def rgb(c):
+        return bytes(((c >> 24) & 255, (c >> 16) & 255, (c >> 8) & 255))
+
+    band = gui.BORDER_PX
+    for s in border["x"]:
+        mid = (s["from"] + s["to"]) // 2
+        if band <= mid < w - band and s["to"] - s["from"] >= 3:
+            tone = rgb(gui.BORDER_EVEN if s["even"] else gui.BORDER_ODD)
+            check(at(mid, 2) == tone and at(mid, h - 3) == tone,
+                  "the top/bottom band at x %d is not its tone" % mid)
+    for s in border["y"]:
+        mid = (s["from"] + s["to"]) // 2
+        if band <= mid < h - band and s["to"] - s["from"] >= 3:
+            tone = rgb(gui.BORDER_EVEN if s["even"] else gui.BORDER_ODD)
+            check(at(2, mid) == tone and at(w - 3, mid) == tone,
+                  "the left/right band at y %d is not its tone" % mid)
+    rule = rgb(gui.BORDER_RULE)
+    check(at(w // 2, band - 1) == rule and at(w // 2, h - band) == rule
+          and at(band - 1, h // 2) == rule and at(w - band, h // 2) == rule,
+          "the rule between the band and the layout is missing")
+    check(at(2, 2) == rgb(gui.BORDER_ODD) and at(w - 3, h - 3) == rgb(gui.BORDER_ODD),
+          "the corner squares are not filled")
+    # the chips: the service's text, the viewport's corners in um
+    labels = v._border_labels
+    decimals = border["decimals"]
+    check(3 <= decimals <= 5, "decimals %r" % decimals)
+    for key, (cx, cy) in (("top_left", (vb[0], vb[3])), ("top_right", (vb[2], vb[3])),
+                          ("bottom_left", (vb[0], vb[1])), ("bottom_right", (vb[2], vb[1]))):
+        corner = border[key]
+        check(labels[key].get_visible() and labels[key].get_text()
+              == " %s, %s " % (corner["x"], corner["y"]),
+              "the %s chip says %r, the service %r" % (key, labels[key].get_text(), corner))
+        for shown, world in ((corner["x"], cx), (corner["y"], cy)):
+            check(len(shown.split(".")[1]) == decimals
+                  and abs(float(shown) - world * v.dbu) <= 0.5 * 10 ** -decimals + 1e-9,
+                  "%s: %r is not %r um" % (key, shown, world * v.dbu))
+    check(labels["scale"].get_visible()
+          and labels["scale"].get_text() == " scale %s " % border["label"],
+          "the scale chip says %r" % labels["scale"].get_text())
+    asked = []
+    original = v.worker.border
+
+    def counted(*args):
+        asked.append(args)
+        return original(*args)
+
+    v.worker.border = counted
+    try:
+        v._display()
+        check(not asked, "the same view asked the service for its border again")
+        # a pan moves the band with the layout: every inner edge still on
+        # screen moved by the pan's px
+        edges = [s["from"] for s in border["x"][1:]]
+        v._pan_view("Right", 0.1)
+        pump(v, lambda: settled(v) and v.view_bbox()[0] != vb[0], "a pan")
+        v._display()
+        moved = v._border_shown
+        shift = (v.view_bbox()[0] - vb[0]) / v.spp
+        check(shift > 0 and asked, "the pan moved %r px; asked %d" % (shift, len(asked)))
+        now = [s["from"] for s in moved["x"][1:]]
+        for e in edges:
+            if 0 < e - shift < w:
+                check(any(abs(e - shift - f) < 1e-6 for f in now),
+                      "the edge at %r px did not move to %r px with the pan" % (e, e - shift))
+    finally:
+        v.worker.border = original
+    # off: the frame's own pixels where the band was, no chips
+    frame = v.last_frame[0]
+    v._toggle_border()
+    check(not v.border_on and v._border_shown is None
+          and not any(l.get_visible() for l in labels.values()),
+          "the border did not go with `s`")
+    disp = v.image.get_pixbuf()
+    fpx, fstride, fch = bytes(frame.get_pixels()), frame.get_rowstride(), frame.get_n_channels()
+    for x, y in ((w // 2, 2), (2, h // 2), (w - 3, h - 3)):
+        shown = bytes(disp.get_pixels())[y * disp.get_rowstride() + x * disp.get_n_channels():][:3]
+        own = fpx[y * fstride + x * fch:][:3]
+        check(shown == own, "off: the pixel at %d,%d is %r, the frame's %r" % (x, y, shown, own))
+    v._toggle_border()
+    check(v.border_on and v._border_shown is not None and labels["scale"].get_visible(),
+          "the border did not come back")
+    # Tab's clean look hides it, Tab again shows it
+    v._toggle_overlays()
+    v._toggle_overlays()
+    check(v.overlay_mode == 2 and v._border_shown is None
+          and not labels["top_left"].get_visible(), "the border survived Tab's clean look")
+    v._toggle_overlays()
+    check(v.overlay_mode == 0 and v._border_shown is not None, "the border did not return")
+    print("scale border: %d + %d segments of %s, the corners' chips, a pan, off, Tab"
+          % (len(border["x"]), len(border["y"]), border["label"]))
+
+
 def gtk_ready():
     """Whether the viewer's windows can open here (GuiSmokeTests' rule)."""
     try:
@@ -427,6 +580,7 @@ def gui_viewer(src, ref):
         check(last["perf"][1] in v.pstatus.get_text(),
               "the lower bar %r is not the frame's %r" % (v.pstatus.get_text(), last["perf"][1]))
         minimap_parity(v)
+        border_parity(v)
         navigation_parity(v)
         pump(v, lambda: settled(v, frames), "the fit after the moves")
         steps = (("a zoom", lambda: v._zoom_center(0.25), {}),
@@ -613,6 +767,27 @@ def main():
                   "first frame: %s" % {k: first[k] for k in ("width", "height", "format")})
             same(first["pixels"], ref.frame(first), "the open")
             queries_and_cells(s, ref, first, Path(temp))
+            # the scale border of the view's viewport, of a box given, and
+            # a box the viewport refuses
+            b = s.border()
+            check(b["step_px"] >= 60 and b["x"][0]["from"] == 0
+                  and abs(b["x"][-1]["to"] - W) < 1e-9 and b["y"][0]["from"] == 0
+                  and abs(b["y"][-1]["to"] - H) < 1e-9 and 3 <= b["decimals"] <= 5,
+                  "view_border: %s" % b)
+            dbu = s.model["dbu"]
+            given = s.border([0.0, 0.0, 1000.0, 750.0], W, H)
+            decimals = min(5, max(3, math.ceil(-math.log10(2.5 * dbu))))
+            check(given["bottom_left"] == {"x": "%.*f" % (decimals, 0), "y": "%.*f" % (decimals, 0)}
+                  and given["top_right"] == {"x": "%.*f" % (decimals, 1000 * dbu),
+                                             "y": "%.*f" % (decimals, 750 * dbu)}
+                  and abs(given["step_px"] - given["step_um"] / (2.5 * dbu)) < 1e-6,
+                  "view_border of a box: %s" % given)
+            try:
+                s.border([0.0, 0.0, 1000.0, 750.0], 0, H)
+                check(False, "view_border took a zero width")
+            except gtkservice.ServiceError as exc:
+                check(exc.kind == "input", "view_border's refusal: %s %s" % (exc.kind, exc))
+            print("view_border: %s, %d + %d segments" % (b["label"], len(b["x"]), len(b["y"])))
             cells_while_opening(src, Path(temp))
             # the density under the cut: its first round, then the frame
             on = s.edit(density=True)

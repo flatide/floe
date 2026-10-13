@@ -1069,6 +1069,18 @@ MINIMAP_VIEW = 0x8ECDF5FF
 MINIMAP_FRONT = 0x46565FFF  # depth-frontier outlines: dim slate,
                             # well under the view box brightness
 
+# the scale border (user 2026-10-13: "a band around the viewport that reads
+# lengths, as Calibre's, with the reference length; the coordinates at the
+# four corners"): a band along the frame's four edges, two tones
+# alternating every reference length - the view's service says where
+# (app-core view::border: 1, 2 or 5 x 10^n um, 60 px or wider, counted
+# from the origin) -, a rule toward the layout, the length written over
+# the top band, each corner's coordinates in um as a chip
+BORDER_PX = 12             # the band each side, its rule included
+BORDER_EVEN = 0xDCDCDCFF   # the segments of even ordinal from the origin
+BORDER_ODD = 0x3C3C3CFF    # the odd ones (and the corner squares)
+BORDER_RULE = 0x8C8C8CFF   # the line between the band and the layout
+
 # Layer/datatype is operationally capped at 999.999. The number column is
 # independent of the current design's actual maximum, so changing files or
 # expanding a group never moves the palette columns. A small fractional
@@ -2287,6 +2299,12 @@ class Viewer:
         # environment the viewer shares with renderd, is the kill switch
         self.density_on = (os.environ.get("FLOE_RUST_DENSITY_STACK") != "off"
                            if density is None else bool(density))
+        # the scale border starts on (user 2026-10-13); View > scale
+        # border / `s` toggles it, FLOE_SCALE_BORDER=off starts it off
+        self.border_on = os.environ.get("FLOE_SCALE_BORDER") != "off"
+        self._border = None         # (the view's key, the service's border)
+        self._border_shown = None   # the border drawn on the frame shown
+        self._border_labels = None  # its chips: corners and the length
         self.frames_on = bool(frames)
         # Frame is the normal UI control for both hierarchy outlines and
         # texts. An explicit --labels off remains available as a startup/
@@ -2894,6 +2912,7 @@ class Viewer:
             self.visible = set()
             self._frontier_depths = []
             self._minimap_bases = {}
+            self._border = None
         else:
             # a layout's pairs with nothing on them stay off the panel
             self.meta = listed_meta(cache)
@@ -2909,6 +2928,8 @@ class Viewer:
             self._frontier_depths = (self.meta.get("frontier")
                                      or {}).get("depths") or []
             self._minimap_bases = {}
+            # the scale border is the source's (its dbu): asked again
+            self._border = None
         # fill palette state: user-global edited bitmaps + the
         # effective layerprops (personal, else the design default
         # next to the source - already seeded by Cache.load)
@@ -3717,6 +3738,7 @@ class Viewer:
         # leaders are stamped into this frame
         self._update_labels(obox, ospp, disp)
         self._update_note_labels(obox, ospp)
+        self._update_border_labels(getattr(self, "_border_shown", None))
         self.image.set_from_pixbuf(disp)
         self._update_minimap(bbox)
 
@@ -3747,6 +3769,7 @@ class Viewer:
         self._drc_point_hits = None
         self._drc_marker_view = (tuple(obox), ospp,
                                  disp.get_width(), disp.get_height())
+        self._border_shown = None
 
         def sx(v):
             return (v - obox[0]) / ospp
@@ -3756,9 +3779,9 @@ class Viewer:
 
         if self.overlay_mode == 2:
             # Tab state 2 (flateyes parity): overlays hidden -
-            # rulers, marks, markers, selections all skip; only the
-            # live zoom band stays interactive. Stale marker hits
-            # must not pick invisible markers.
+            # rulers, marks, markers, selections and the scale border
+            # all skip; only the live zoom band stays interactive. Stale
+            # marker hits must not pick invisible markers.
             self._drc_hits = []
             if self._zoomdrag is not None \
                     and self._band_cur is not None:
@@ -3879,11 +3902,117 @@ class Viewer:
             bx, by = self._cursor
             rect_outline(disp, sx(ax), sy(ay), sx(bx), sy(by),
                          BLACK, RULER_CORE, px=1)
+        border = self._border_for(obox, ospp)
+        if border is not None:
+            # the scale border lies over the frame and the marks along its
+            # edges; the live zoom band alone paints over it
+            self._draw_border(disp, border)
+            self._border_shown = border
         if self._zoomdrag is not None and self._band_cur is not None:
             x0, y0 = self._zoomdrag
             x1, y1 = self._band_cur
             color = BAND_IN if x1 >= x0 else BAND_OUT
             rect_outline(disp, x0, y0, x1, y1, None, color, px=1)
+
+    # ---- the scale border (user 2026-10-13) --------------------------------
+    def _border_for(self, obox, ospp):
+        """The scale border of the view shown - the band's segments in px,
+        the reference length, the corners' text - from the view's service
+        (app-core view::border, the web's too), kept for the view until it
+        moves: a frame landing, a hover's marker or a toggle redraws the
+        same view. None when there is none to draw: off, Tab's clean look,
+        no layout, the view still opening (the viewer's own loop never
+        draws it)."""
+        # (getattr: the contract tests draw with viewers built by hand)
+        if not getattr(self, "border_on", False) or self.overlay_mode == 2 \
+                or self.meta is None or not self._ctl() \
+                or self.worker.snapshot is None:
+            return None
+        w, h = self._viewport_size()
+        key = (tuple(obox), ospp, w, h)
+        kept = getattr(self, "_border", None)
+        if kept is not None and kept[0] == key:
+            return kept[1]
+        got = self.worker.border(obox, w, h)
+        if not isinstance(got, dict):
+            return None
+        self._border = (key, got)
+        return got
+
+    def _draw_border(self, disp, border):
+        """The band along the frame's four edges: the service's segments in
+        the two tones (whole pixels: a segment ends where the next begins),
+        the corner squares, the rule between the band and the layout."""
+        w, h = disp.get_width(), disp.get_height()
+        band = BORDER_PX - 1
+        for seg in border["x"]:
+            colour = BORDER_EVEN if seg["even"] else BORDER_ODD
+            x0, x1 = int(round(seg["from"])), int(round(seg["to"]))
+            if x1 > x0:
+                fill_rect(disp, x0, 0, x1 - x0, band, colour)
+                fill_rect(disp, x0, h - band, x1 - x0, band, colour)
+        for seg in border["y"]:
+            colour = BORDER_EVEN if seg["even"] else BORDER_ODD
+            y0, y1 = int(round(seg["from"])), int(round(seg["to"]))
+            if y1 > y0:
+                fill_rect(disp, 0, y0, band, y1 - y0, colour)
+                fill_rect(disp, w - band, y0, band, y1 - y0, colour)
+        for x, y in ((0, 0), (w - band, 0), (0, h - band),
+                     (w - band, h - band)):
+            fill_rect(disp, x, y, band, band, BORDER_ODD)
+        fill_rect(disp, 0, band, w, 1, BORDER_RULE)
+        fill_rect(disp, 0, h - BORDER_PX, w, 1, BORDER_RULE)
+        fill_rect(disp, band, 0, 1, h, BORDER_RULE)
+        fill_rect(disp, w - BORDER_PX, 0, 1, h, BORDER_RULE)
+
+    def _update_border_labels(self, border):
+        """The border's text: each corner's coordinates (um) at its corner
+        and the reference length over the top band - Gtk.Labels on the
+        overlay as the ruler chips are (no pycairo: the frame carries no
+        text), taking no clicks; hidden with the border."""
+        labels = getattr(self, "_border_labels", None)
+        if border is None:
+            if labels is not None:
+                for lbl in labels.values():
+                    lbl.hide()
+            return
+        if labels is None:
+            labels = self._border_labels = {}
+            for key, halign, valign in (
+                    ("top_left", Gtk.Align.START, Gtk.Align.START),
+                    ("top_right", Gtk.Align.END, Gtk.Align.START),
+                    ("bottom_left", Gtk.Align.START, Gtk.Align.END),
+                    ("bottom_right", Gtk.Align.END, Gtk.Align.END),
+                    ("scale", Gtk.Align.CENTER, Gtk.Align.START)):
+                lbl = Gtk.Label()
+                lbl.set_halign(halign)
+                lbl.set_valign(valign)
+                lbl.set_no_show_all(True)
+                self.overlay.add_overlay(lbl)
+                try:
+                    self.overlay.set_overlay_pass_through(lbl, True)
+                except AttributeError:  # GTK < 3.18
+                    pass
+                labels[key] = lbl
+        for key in ("top_left", "top_right", "bottom_left", "bottom_right"):
+            corner = border[key]
+            labels[key].set_markup(
+                '<span background="#101010" foreground="#ffffff"> %s, %s '
+                '</span>' % (GLib.markup_escape_text(corner["x"]),
+                             GLib.markup_escape_text(corner["y"])))
+        labels["scale"].set_markup(
+            '<span background="#101010" foreground="#ffffff"> scale %s '
+            '</span>' % GLib.markup_escape_text(border["label"]))
+        for lbl in labels.values():
+            lbl.show()
+
+    def _toggle_border(self):
+        """`s` / View > scale border: the band along the frame's edges and
+        its chips on or off; the status line says which."""
+        self.border_on = not self.border_on
+        self._set_live_status("scale border %s"
+                              % ("on" if self.border_on else "off"))
+        self._display()
 
     def _minimap_geom(self):
         """(scale, panel x0, panel y0, die px w, die px h) or None."""
@@ -4166,7 +4295,6 @@ class Viewer:
             panel = self._note_panel = Gtk.Label()
             panel.set_halign(Gtk.Align.START)
             panel.set_valign(Gtk.Align.START)
-            panel.set_margin_top(10)
             panel.set_margin_start(10)
             panel.set_line_wrap(True)
             panel.set_max_width_chars(44)
@@ -4178,6 +4306,9 @@ class Viewer:
                 self.overlay.set_overlay_pass_through(panel, True)
             except AttributeError:  # GTK < 3.18
                 pass
+        # under the scale border's top-left chip when the border shows
+        panel.set_margin_top(10 if getattr(self, "_border_shown", None) is None
+                             else BORDER_PX + 24)
         panel.set_text(note)
         panel.show()
 
@@ -5307,6 +5438,8 @@ class Viewer:
             self._toggle_abstract()
         elif name == "v":
             self._toggle_density()
+        elif name == "s":
+            self._toggle_border()
         elif name == "b":
             self._set_mono(not self._mono)
         elif name == "e":
@@ -6156,6 +6289,10 @@ class Viewer:
         check(m, "grayscale layers\tb",
               lambda: self._set_mono(not self._mono),
               lambda: self._mono)
+        # the scale border (user 2026-10-13): the band along the frame's
+        # edges that reads lengths, the corners' coordinates
+        check(m, "scale border\ts", self._toggle_border,
+              lambda: self.border_on)
         sep(m)
         item(m, "cycle overlays (all / errors / none)\tTab",
              self._toggle_overlays)
@@ -7432,6 +7569,7 @@ class Viewer:
         """The view root moved: nothing on screen or in flight belongs to
         the new coordinates; fit the new die."""
         self._minimap_bases = {}
+        self._border = None
         self.last_frame = None
         self._margin_frame = None
         self._frame_anchor = None

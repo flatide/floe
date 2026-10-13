@@ -410,3 +410,13 @@ P4d처럼 컨트롤러 루프에서만 바뀐다. `FLOE_GTK_LOOP=legacy`는 예�
 - **뷰어:** 브랜치 UI(방문 기록, V/X, 통계·CSV, 검토 제외 메뉴, Reviewers 창, Conflict only, 이전 실행 창)를 `floe/gtkservice.py`의 래퍼(`ReviewSnapshot`, `MigrationPlan`, `open_review` 등 브랜치 함수 모양) 위로 옮겼다. 방문 요청은 paint 밖 idle에서 보낸다.
 - **게이트 `drc_team`:** R1~R7(SPEC-VALIDATION). 같은 pack에서 리뷰어 "py"(참조)와 "rs"(서비스)의 파일이 행 단위로 같다.
 - **웹과의 조율(나중):** `drc::team`과 `drc::matcher`는 공유 모듈이다. 웹이 쓰려면 app-core의 `review-sqlite`를 켜고(C 컴파일러 필요) 서비스 요청을 HTTP로 옮긴다.
+
+## 10. 눈금 띠 (2026-10-13, app 0.12.355) — 계산은 공유 Rust, 그리기는 UI
+
+사용자: "viewer의 뷰포트 외곽으로 calibre와 같이 길이를 확인할 수 있는 띠를 두르고 기준 길이도 표시해줘. 그리고 좌상단, 좌하단, 우상단, 우하단에 좌표를 표시해줘."
+
+- **app-core `view::border`:** `Border::new(viewport, dbu)`. 기준 길이(1·2·5 × 10ⁿ µm 중 `MIN_PX` 60 px 이상인 가장 짧은 것; 축의 배율이 다르면 거친 축 기준), 축마다 구간 목록(`x`·`y`: `[{from, to, even}]`, 뷰포트 px, 원점부터 센 순번의 짝홀, 뷰포트에 잘라 축 순서로), 글자 `label`("10 um"), 그 px 폭 `step_px`, 모서리 네 곳의 µm 글자(`top_left`·`top_right`·`bottom_left`·`bottom_right`: `{x, y}`; 소수 자리 `decimals`는 픽셀 크기로 정해 3~5자리, 0으로 반올림되면 부호 없음). 입력 검증은 `Viewport::validate`와 dbu > 0.
+- **서비스:** `view_border {view, bbox?, width?, height?}` → 그 JSON. 상자를 주면 그 상자의 띠(뷰어는 확대 중 얼어 있는 프레임의 상자로 묻는다), 없으면 컨트롤러 뷰포트의 띠.
+- **GTK 뷰어(UI):** 띠 픽셀(두 색조·모서리·안쪽 선)을 화면 pixbuf에 칠하고 글자(모서리 좌표·`scale …`)는 Gtk.Label로 올린다(SPEC-VIEWER §6). 같은 뷰에는 한 번만 묻는다. View > scale border / `s`, `FLOE_SCALE_BORDER=off`.
+- **웹(나중):** 같은 `Border`를 브로커가 스냅숏이나 요청으로 내주고 UI가 띠와 글자를 그리면 된다. 웹 UI에는 아직 없다.
+- **게이트:** `gtk_view` `border_parity`(뷰어 = 서비스, 이동, 끄기, Tab)와 서비스 `view_border`의 상자 지정·거절; 단위 `view::border` 5개.

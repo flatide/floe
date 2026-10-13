@@ -617,7 +617,15 @@ GUI는 **GTK3/PyGObject** 셸이다. flateyes와 같은 폐쇄망 호스트
   `q` 종료 (확인 다이얼로그). `v`는 floe2에서 컷 아래 밀도(View > density
   under the cut) 켜기/끄기이고(2026-10-05; 시작값 `floe2 view --density
   on|off`, 없으면 켬 - 0.12.351부터, `FLOE_RUST_DENSITY_STACK=off`면 끔), 안정판 floe에서는
-  density coverage 토글이다.
+  density coverage 토글이다. `s`는 눈금 띠(View > scale border) 켜기/끄기다.
+- **눈금 띠**(2026-10-13, 0.12.355; 사용자: "뷰포트 외곽으로 calibre와 같이 길이를 확인할 수
+  있는 띠를 두르고 기준 길이도 표시, 네 모서리에 좌표"): 프레임 네 가장자리의 띠가 기준
+  길이(1·2·5 × 10ⁿ µm 중 60 px 이상인 가장 짧은 것, 원점부터 센 구간)마다 두 색조로 번갈아
+  들어 길이를 가늠하게 하고, 위 가운데 `scale 10 um`이 기준 길이, 네 모서리 칩이 그 모서리의
+  좌표(µm)다. 시작은 켬(`FLOE_SCALE_BORDER=off`면 끔), Tab의 오버레이 숨김에 함께 숨는다.
+  계산은 웹과 공유하는 Rust(app-core `view::border`, gtk-service `view_border`)가 하고 GTK는
+  그리기만 한다(docs/SHARED_APP_LAYER.ko.md §10, SPEC-VIEWER §6). 캡처(`floe2 render`)에는
+  들어가지 않는다.
 - 마우스: 왼쪽 드래그는 패닝(짧은 클릭은 객체 선택), 오른쪽 드래그는
   영역 줌(오른쪽 방향은 확대, 왼쪽 방향은 축소)이다. 휠은 커서 위치를
   기준으로 이벤트당 최대 한 단계(4%)만 줌한다. 가운데 드래그도 패닝을

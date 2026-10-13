@@ -1,6 +1,7 @@
 //! Server-authoritative view state. Relative inputs are applied in order;
 //! rendering and latest-only queries are coalesced independently. No HTTP or
 //! browser floating-point world math.
+pub mod border;
 mod controller;
 pub mod deck_mode;
 mod fill_slots;

@@ -25,6 +25,14 @@
 //!                                         the overview's base image (palette
 //!                                         digits, size x size) and the die's
 //!                                         place in it; bbox = a view root's
+//!   view_border {view, bbox?, width?, height?}
+//!                                      -> the scale border (app-core
+//!                                         view::border: the band's segments
+//!                                         in px, the reference length, the
+//!                                         corners' coordinates) of the
+//!                                         view's viewport, or of the box and
+//!                                         size given (the frame the viewer
+//!                                         shows while a zoom's is on its way)
 //!   view_clip {view, seq, bbox (dbu, the root's coordinates), layers?,
 //!              cell_name?, out}       -> null; a `clip` event when written
 //!
@@ -49,9 +57,10 @@ use floe_app_core::{
     render::RenderOptions,
     shots::{Detail, Thin},
     view::{
-        minimap, perf, CellOutcome, CellReply, CellRequest, ControllerOptions, Depth,
+        border, minimap, perf, CellOutcome, CellReply, CellRequest, ControllerOptions, Depth,
         DesktopPolicy, DisplayFrame, Model, Navigation, Patch, Phase, Purpose, QueryOperation,
         RootEdit, Snapshot, StyleDelta, ViewController, ViewQuery, ViewQueryResult, ViewState,
+        Viewport,
     },
     Error, ErrorKind, Result,
 };
@@ -153,6 +162,10 @@ impl Views {
             "view_minimap" => {
                 let view = self.view(request)?;
                 minimap_json(&view.controller, request)
+            }
+            "view_border" => {
+                let view = self.view(request)?;
+                border_json(&view.controller, request)
             }
             "view_close" => {
                 let id = view_id(request)?;
@@ -512,6 +525,25 @@ fn minimap_json(controller: &ViewController, request: &Value) -> Result<Value> {
         "die": placement.map(|(die, _)| die),
         "scale": placement.map(|(_, scale)| scale),
     }))
+}
+
+/// view_border: the scale border (app-core `view::border`, the band along
+/// the viewport's edges) of the view's viewport - or of `bbox` (dbu) at
+/// `width` x `height` when given: the viewer keeps the frame it shows while
+/// a zoom's fresh frame is on its way, and its band belongs to that frame.
+fn border_json(controller: &ViewController, request: &Value) -> Result<Value> {
+    let viewport = match request.get("bbox").filter(|b| !b.is_null()) {
+        Some(b) => Viewport::new(
+            f64s::<4>(b, "border bbox")?,
+            dimension(request, "width")?,
+            dimension(request, "height")?,
+        )?,
+        None => controller.snapshot().state.viewport,
+    };
+    Ok(
+        serde_json::to_value(border::Border::new(viewport, controller.model.dbu)?)
+            .expect("border serializes"),
+    )
 }
 
 /// The frame's bytes as a file the viewer takes: written under a temporary

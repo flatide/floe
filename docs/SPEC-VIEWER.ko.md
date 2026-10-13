@@ -212,6 +212,26 @@
   - 테스트: app-core `neighbouring_rows_take_neighbouring_places`·`a_group_shares_its_layer_numbers_colour_when_asked`,
     app-cli `layer_colors_are_asked_for_a_layout`, 게이트 rust_renderer `PaletteTests`·
     `test_layer_colors_open_a_window_of_their_own`.
+- **눈금 띠(scale border)**(2026-10-13, app 0.12.355; 사용자: "viewer의 뷰포트 외곽으로 calibre와 같이 길이를 확인할 수
+  있는 띠를 두르고 기준 길이도 표시해줘. 그리고 좌상단, 좌하단, 우상단, 우하단에 좌표를 표시해줘").
+  - 프레임 네 가장자리에 `BORDER_PX`(12 px, 안쪽 1 px 선 포함) 띠를 두른다. 두 색조(`BORDER_EVEN` dcdcdc · `BORDER_ODD`
+    3c3c3c)가 기준 길이마다 번갈아 든다. 기준 길이는 1·2·5 × 10ⁿ µm 중 화면에서 60 px 이상인 가장 짧은 것이고, 구간은
+    원점부터 센다 — 구간 경계가 세계 좌표의 어림수이고 띠는 레이아웃과 함께 움직인다(Calibre DESIGNrev의 띠와 같은
+    쓰임). 띠와 레이아웃 사이에 1 px 선(`BORDER_RULE` 8c8c8c), 네 모서리 정사각형은 어두운 색조.
+  - 글자는 위젯이다(pycairo 없음, 룰러 칩과 같은 방식·`_border_labels`): 네 모서리에 그 모서리의 세계 좌표 `x, y`(µm;
+    소수 자리는 픽셀 크기에 맞춰 3자리 이상 5자리 이하, 0으로 반올림되면 부호 없음), 위 띠 가운데에 `scale 10 um`(기준
+    길이). 클릭은 통과한다(pass-through). DRC 노트 패널은 띠가 보일 때 왼쪽 위 칩 아래로 내려간다.
+  - 계산은 app-core `view::border`(`Border::new(viewport, dbu)`)가 하고 gtk-service `view_border {view, bbox?, width?,
+    height?}`로 받는다(SHARED_APP_LAYER §10). 뷰어는 보이는 프레임의 상자(`obox`/`ospp`: 확대 중 얼어 있는 프레임이면 그
+    상자)와 뷰포트 크기로 묻고, 같은 뷰에는 다시 묻지 않는다(`_border`). 컨트롤러 루프가 아직 없으면(뷰 여는 중) 띠가
+    없다.
+  - View > **scale border**(체크, `s`)로 켜고 끈다. 시작은 켬, `FLOE_SCALE_BORDER=off`면 끈 채 시작. Tab 2단계(오버레이
+    전부 숨김)에서는 띠와 칩도 숨는다. 프레임 픽셀과 캡처(`floe2 render`)에는 들어가지 않는다(화면 합성에만; Ctrl+C
+    복사는 창을 찍으므로 포함).
+  - 게이트 `gtk_view` `border_parity`: 구간이 서비스의 것(1-2-5, 60~150 px, 경계 = 기준 길이의 배수와 그 짝홀, 색조 교대,
+    프레임 전체 폭), 띠·선·모서리 픽셀, 모서리 칩 = 서비스 글자 = 뷰포트 모서리 µm, 같은 뷰는 한 번만 묻기, 이동하면 경계가
+    이동 px만큼 옮겨짐, 끄면 프레임 픽셀, Tab 2단계에서 숨김; 서비스 `view_border`의 상자 지정과 거절. 단위 `view::border`
+    5개.
 - 오버레이(픽스버프 직접 스탬프, gui.py 상단 헬퍼): 룰러(흰 1px 실선
   + 화살촉 + 거리 칩 흰 텍스트 + 점선 리더), 러버밴드(흰 1px), 스냅
   마커(흰 십자+사각), DRC 마크(**상태색** — 2026-08-14: not waived
@@ -300,7 +320,7 @@
     빠지고, 나머지 소스로 열린다(`jobdeck/sources._cache_state`).
 - **메뉴 바**(2026-08-22, `_build_menubar`): File(**load layout**·
   clip·copy·quit) /
-  View(fit·줌·goto·detail·depth·토글 체크 5종·오버레이 순환) /
+  View(fit·줌·goto·detail·depth·토글 체크 6종(눈금 띠 `s` 포함, 2026-10-13)·오버레이 순환) /
   Cell(셀 트리·검색 `t`, 선택 셀로 줌, 인스턴스 하이라이트 체크,
   하이라이트 해제, 선택 셀을 뷰 루트로(키 없음 — Ctrl+T는 2026-09-30 삭제)·탑으로 `Ctrl+Shift+T`,
   셀 인덱스 빌드 — §8c) /
@@ -902,5 +922,6 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
 
 MIN_SPP 0.01 · FIT_ZOOM_OUT 16 · WHEEL_ZOOM_STEP 0.96 ·
 KEY_PAN_FRACTION 0.5 / _FINE 0.1 · CAL_ZOOM_IN 0.5 · MINIMAP_PX 180 · MINIMAP_PAD 6 ·
+BORDER_PX 12(눈금 띠; 기준 길이의 하한 60 px은 app-core `view::border::MIN_PX`) ·
 DETAIL_PX (5,3,1)/기본 medium · COV_MAX_TEXEL_PX 160 ·
 DEBOUNCE_MS(gui.py) · 스트림 상수(_MAX_STREAM_ROUNDS 8, 예산 클램프 2048..32768KB)는 service.py.

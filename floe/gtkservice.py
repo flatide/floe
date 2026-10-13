@@ -1382,6 +1382,18 @@ class ViewSession:
             "view_minimap", view=self.view, depth=depth,
             bbox=None if bbox is None else [float(v) for v in bbox])
 
+    def border(self, bbox=None, width=None, height=None):
+        """The scale border (app-core view::border) of the view's viewport,
+        or of `bbox` (dbu) at `width` x `height`: {step_um, step_px, label,
+        decimals, x, y ([{from, to, even}] in px along the top/bottom and
+        the left/right bands), top_left, top_right, bottom_left,
+        bottom_right ({x, y} in um, written)}."""
+        fields = {}
+        if bbox is not None:
+            fields = dict(bbox=[float(v) for v in bbox], width=int(width),
+                          height=int(height))
+        return self._svc.request("view_border", view=self.view, **fields)
+
     def cells(self, kind, seq, **fields):
         """A cell-tree question (cell_sources, cells, cell_find, cell_bbox,
         cell_insts - floe_oracle/rust_render.py's fields; cell_insts' view box is
@@ -1570,6 +1582,17 @@ class ViewWorker:
             return self.session.minimap(depth, bbox)
         except ServiceError as exc:
             self.res.put({"kind": "error", "msg": "minimap: %s" % exc})
+            return None
+
+    def border(self, bbox, width, height):
+        """ViewSession.border for the box the viewer shows; None while the
+        view opens or when refused (no band then)."""
+        if self.session is None:
+            return None
+        try:
+            return self.session.border(bbox, width, height)
+        except ServiceError as exc:
+            self.res.put({"kind": "error", "msg": "scale border: %s" % exc})
             return None
 
     def _viewport_px(self, x, y):
