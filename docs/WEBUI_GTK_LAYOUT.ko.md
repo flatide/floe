@@ -492,3 +492,82 @@ view root도 WS `view.set`의 `root`로 가며 해결(`root_ticket`)은 같은 �
   - `web_svrf`, `app_svrf`, `svrf_native`: oracle로 쓰던 Python SVRF 파서가 cb634dd4에서
     `floe-index svrf`(rust/cli)로 옮겨져 지난 병합부터 실패한다. oracle을 `floe-index svrf`로
     바꾸거나 웹이 그 빌더를 직접 쓰도록 정해야 한다.
+
+## 7. 2026-10-15 GTK 구성으로 재정리, 웹 설명문 제거
+
+사용자 요청: "웹뷰어의 ui구성이 기존 ui와 다르게 구성된 부분이 많음. 최대한 기존 ui와
+동일하게 구성하고 웹 특유의 불필요한 설명등을 제거해줘. 툴 본연의 목적에 충실하게 구성해야 함."
+§2의 배치 위에 남아 있던 웹 고유 요소(툴바·inspect 탭·안내 오버레이·패널마다의 설명 단락)를
+GTK `floe/gui.py`의 구성으로 바꿨다. 컨트롤 id는 유지했고(플러그인·Electron·테스트의 id 참조),
+화면에서 뺀 컨트롤은 `#menu-proxies`(display:none)에 두어 메뉴·키가 계속 쓴다.
+
+```text
+header  floe2 · 소스 이름(· root NAME) · 연결 상태 · share locally… · end session
+nav     File | View | Cell | Ruler | DRC | Jobdeck | Help      (GTK _build_menubar의 라벨·순서, 소문자)
++------------------+--------------------------------------+---------------------------+
+| cells | DRC      |                                      | expand all | collapse all   |
+| find cell…       |               canvas                 | 1     [swatch] 1          |
+| tree             |        (빈 화면: 메시지 한 줄)        | 63.63 [swatch] MARKER     |
+| ☑highlight zoom  |                                      | minimap | palette         |
++------------------+--------------------------------------+---------------------------+
+status  x … y … um | snap | ruler | sel …          view W x H um   depth: d/max · detail · thin · frame
+perf    Rust foreground · plan …                              [snapshot]  [margin]  rendering… / Live · gen N
+```
+
+- **툴바 삭제** → View > goto position…(g, Ctrl+.)은 GTK처럼 대화상자(x / y / window / ok);
+  fit·zoom in/out은 메뉴·키. **inspect 탭 삭제** → pick/snap/ruler 상태는 상태줄 1행의
+  `cursor | snap | ruler | selection`(GTK `_hover`의 순서, 선택 줄은 `n selected · NAME L.D · CELL ·
+  w x h um @ (x, y) · overlap i/n`), 조작은 Ruler 메뉴와 키(r m k Shift+K Esc). 캔버스 위의
+  키 안내 오버레이와 빈 화면의 제목(`Layout workspace`)은 없애고 GTK `_loading` 배너처럼 메시지
+  한 줄만 둔다(`no layout (File > load layout…)` 등). 상태줄은 GTK의 두 행: 1행 오른쪽
+  `view W x H um`(`V.um`: 0.1 um 미만 4자리, 1 um 미만 3자리)과 `depth: …`, 2행 왼쪽 perf,
+  오른쪽 렌더 상태(`rendering…` / 프레임의 `Live · gen N`; 유휴 스냅샷은 프레임 상태를 덮지 않음).
+  문서 제목은 `floe2 - <소스>`.
+- **메뉴**: File(load layout…/load jobdeck…/registered sources…/index this source…/clip region…/
+  copy view to clipboard Ctrl+C/save view PNG…/end session q), View(fit/zoom in 50%/zoom out 50%/
+  goto position…/detail… d/label size…/depth +1 -1 full/hierarchy frames/labels/thin shapes at wide
+  views ▸/grayscale layers/cycle overlays (all / errors / none) Tab), Cell(GTK와 동일; view root 항목은
+  키 없음), Ruler(ruler mode/edge-vertex snap/delete last ruler/clear rulers), DRC(open results .db…/
+  load SVRF rules…/reconnect launcher reviewer…/next·previous error/waive/save·load waives…/note/
+  save·load notes…/error box-select mode/restore layers/build pack…/review files…), Jobdeck(GTK 라벨),
+  Help(About floe2/Open Source Licenses/share locally…). `detail…`과 `label size…`는 같은 display
+  대화상자(detail·depth·thin·frames·labels·grayscale·label px·overlays·jobdeck view)를 해당 컨트롤에
+  포커스해 연다(`panes.show(name, prepare)`의 prepare는 표시 **후**). View의 Layers 서브메뉴·
+  Display options·Show DRC pane, Ruler의 snap probe·inspect pane, Jobdeck의 Open mode는 뺐다.
+- **레이어 pane**: 행 안내문·`N layers` 카운터(페이징이 필요할 때만 `#layers-pager`) 제거. swatch
+  클릭은 GTK처럼 행 선택(이름과 같은 handler). 행 컨텍스트 메뉴 = GTK `_popup_layer_menu`: show/hide/
+  toggle selected, show all/hide all, line width 1·3·5 px·increase·decrease(`style_batch.width`/
+  `width_step`), style selected…, load/save layer properties…, save colors+fills as design default…
+  (`palette.js`의 `menuExtras`; 소유자 화면만, 가능할 때만 보임). 행 스타일 편집기(`#style-editor`)는
+  삭제(app.js·server.js), 다중 선택 편집기 `#palette-style`은 모달 카드(Escape 닫힘). 팔레트 탭의
+  안내문 제거; bitmap slot 편집은 GTK처럼 fill swatch 우클릭(`#fill-slot-tools`는 숨김).
+- **셀 트리**: root/top 버튼 숨김(Cell 메뉴가 proxy). 더블클릭/Enter = GTK `_on_cell_activate`
+  (08d9da35): 셀을 view root로, 최상위 셀은 top 복귀, 잡덱(root 불가)은 zoom; 검색창 Enter와 zoom
+  버튼은 zoom(포커스 규칙 그대로). 빌드 확인문은 GTK `_index_consent`의 문구.
+- **DRC pane** = GTK `_build_drc_panel`: 정보줄(제목 · 요약) / [rules(`find rule…`) | 에러 **번호 격자**
+  (5열 auto-fill, red·waived green·선택 gold·현재 blue, `*`=note, 툴팁에 global·kind·waived)] /
+  상세(selected·rule·note·description·metadata·comparison·CD) / 필터 행(in view·selected·markers·
+  all types·All/Not Waived/Waived) / 상태 한 줄(비어 있으면 숨김) + `continue search`·`reload`.
+  rule·type pager는 다음 페이지가 있을 때만. 설명 단락 전부 삭제, 기본 문구는 빈 줄(`drc-message`,
+  `drc-selected`, `drc-comparison`, `drc-rule-title`, type 정보). 편집은 대화상자: note(n)·waive(w)
+  (`drc.js` `showEditor`)·review files(save/load notes·waives, 복구 `<details>`)·build pack.
+  저장 흐름(스냅샷 → 미리보기 → 저장)은 서버 계약이라 그대로, 문구만 ok/save/cancel로 축약.
+- **대화상자**: registered sources / detail / goto position / clip region / layer properties(+design
+  default) / index this source / load layout / index and open / About floe2(빌드 식별·저작권,
+  Open Source Licenses·display diagnostics는 접힘) / End this session?(No·Yes) / share locally —
+  설명 단락 제거, 상태 줄만 남김. 제목은 소문자(GTK 창 제목).
+- **데모·게스트**: `server.html`(배너 문구·display 설명 제거, goto 대화상자 주입, 상태줄 2행),
+  `server.js`(GTK 라벨 메뉴, `detail…` 대화상자, 행 편집기 삭제, `view W x H um`), `demo.html`
+  (샘플 목록과 한 줄), `guest.html`/`guest.css`(설명문 제거, 사이드바 배치는 유지).
+- 바뀐 모듈: `index.html`·`app.css` 재작성, `app.js`(메뉴 모델·상태줄·`focusIn`·`cycleOverlays`·
+  대화상자 연결·빈 화면 문구·행 편집기 삭제), `panes.js`(탭 2개, 대화상자 goto/notes/waives/
+  transfer/build 추가), `viewer.js`(`um`, `dialog` 포트로 g/d/Ctrl+.), `drc.js`, `palette.js`,
+  `cells.js`(`activate`), `presets.js`·`snapshot.js`·`inspect.js`·`measure.js`·`minimap.js`(유휴
+  문구 제거; 미니맵의 base 종류는 툴팁), `server.js`.
+- 검증: `node tools/validate_web_ui.cjs` 전체 통과(갱신한 테스트: client·cells·server·drc·
+  drc-svrf·drc-note-display-panel·minimap·session-exit, validate_web_ui의 inspect 패널 단언 삭제),
+  `validate_web_menu_inventory.py` 링크 통과(OPEN 7개는 §1d 그대로), `validate_web_cli.py`·
+  `validate_display_cli.py`의 페이지 표식은 `id="menubar"`. Chrome(valmini, 스크래치 빌드): 메뉴 7개와
+  항목, goto 대화상자, 레이어 컨텍스트 메뉴, 팔레트 탭, 상태줄 2행, DRC pane(샘플 결과) 확인.
+- 남은 차이: 다크 테마 색상(GTK 시스템 테마), 게스트 페이지의 사이드바 배치, DRC 편집의 승인 단계,
+  density 토글(§6), jobdeck-drc 항목(clusters·reviewers·migration·not-required·statistics).
