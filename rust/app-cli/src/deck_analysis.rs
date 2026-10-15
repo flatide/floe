@@ -1,11 +1,8 @@
 use floe_app_core::{
-    artifact, cache, check_cancelled,
+    artifact, check_cancelled,
     jobdeck::{
-        chips::tokens,
-        chipset,
         color::{ColorScheme, Mode},
-        index::{parse_levels, validate_levels},
-        parser::JobDeck,
+        index::parse_levels,
         plan::{Analysis, AnalysisOptions},
         spec,
     },
@@ -25,13 +22,6 @@ const HELP: &str = "Usage: floe2-web jobdeck DECK.jb [OPTIONS]
   --placements               Print all placements and their analysis colors
   --report FILE              JSON report; atomic individual artifact
   --spec FILE                Composite spec from indexed sources; skip ledger
-  --chipset NAME[,NAME...]   The chip set of a source: every CHIP block that
-                             places it, with the CHIP line's text, the levels,
-                             placements and the line in the deck. NAME is the
-                             source's file name, its TC path or a path to the
-                             file; wildcards * ? [..]; '*' lists every source.
-                             Reads the deck's text alone (no source needed);
-                             takes --level, --sources and --lenient only
 No indexing or rendering is performed. Inputs/caches cannot be output targets.
 Report/spec are individually atomic, not a two-file transaction.
 This command's CHIP-block colors differ from the viewer's source-chip tree.";
@@ -42,8 +32,6 @@ pub struct Args {
     placements: bool,
     report: Option<PathBuf>,
     spec: Option<PathBuf>,
-    /// --chipset: the sources whose CHIP blocks to show
-    chipset: Option<Vec<String>>,
 }
 pub enum Command {
     Help,
@@ -59,9 +47,6 @@ pub fn parse(args: &[String]) -> Result<Command> {
     let mut report = None;
     let mut spec = None;
     let mut placements = false;
-    let mut chipset = None;
-    // the analysis's own options, which a --chipset lookup does not take
-    let mut analysis_flags: Vec<String> = Vec::new();
     let mut positional = false;
     let mut i = 1;
     while i < args.len() {
@@ -98,13 +83,6 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 Ok(())
             }
         };
-        if matches!(
-            flag,
-            "--mode" | "--colors" | "--ly-dt" | "--on-missing" | "--placements" | "--report" | "--spec"
-        ) && !analysis_flags.iter().any(|f| f == flag)
-        {
-            analysis_flags.push(flag.into());
-        }
         match flag {
             "-h" | "--help" => {
                 boolean()?;
@@ -138,25 +116,8 @@ pub fn parse(args: &[String]) -> Result<Command> {
             }
             "--report" => report = Some(PathBuf::from(value()?)),
             "--spec" => spec = Some(PathBuf::from(value()?)),
-            "--chipset" => {
-                let names: Vec<String> = tokens(value()?).into_iter().map(String::from).collect();
-                if names.is_empty() {
-                    return Err(Error::input(
-                        "--chipset takes NAME[,NAME...]: a source's file name, TC path or a path to it",
-                    ));
-                }
-                chipset = Some(names);
-            }
             _ => return Err(Error::input(format!("unknown jobdeck option: {flag}"))),
         }
-    }
-    if chipset.is_some() && !analysis_flags.is_empty() {
-        return Err(Error::input(format!(
-            "--chipset looks the sources up in the deck's text; {} {} the analysis's \
-             (--chipset takes --level, --sources and --lenient)",
-            analysis_flags.join(", "),
-            if analysis_flags.len() == 1 { "is" } else { "are" }
-        )));
     }
     Ok(Command::Run(Box::new(Args {
         source: source.ok_or_else(|| Error::input("jobdeck requires a deck"))?,
@@ -165,41 +126,13 @@ pub fn parse(args: &[String]) -> Result<Command> {
         placements,
         report,
         spec,
-        chipset,
     })))
 }
-
-/// `--chipset`: every CHIP block that places each source named, from the
-/// deck's text alone (floe_app_core::jobdeck::chipset) - no source is
-/// opened, so one that is missing or not indexed is looked up as well.
-fn chipset_lookup(a: &Args, names: &[String], cancelled: &AtomicUsize) -> Result<i32> {
-    let deck = JobDeck::read(&a.source, a.options.strict, cancelled)?;
-    validate_levels(&deck, a.options.ids.as_ref())?;
-    // the TC paths' base, as the analysis resolves them (SourceCatalog)
-    let base = match &a.options.sources {
-        Some(dir) => cache::absolute(dir)?,
-        None => cache::absolute(&a.source)?
-            .parent()
-            .expect("absolute path")
-            .to_path_buf(),
-    };
-    let cwd = std::env::current_dir()?;
-    let found = chipset::lookup(&deck, names, &base, &cwd, a.options.ids.as_ref())?;
-    for line in chipset::lines(&deck, &found) {
-        check_cancelled(cancelled)?;
-        println!("{line}");
-    }
-    Ok(0)
-}
-
 pub fn run(command: Command, cancelled: &AtomicUsize) -> Result<i32> {
     let Command::Run(mut a) = command else {
         println!("{}", crate::named(HELP));
         return Ok(0);
     };
-    if let Some(names) = &a.chipset {
-        return chipset_lookup(&a, names, cancelled);
-    }
     if let Some(path) = &a.colors {
         a.options.scheme = Some(ColorScheme::load(path)?);
     }
@@ -349,7 +282,6 @@ mod tests {
             [1, 3]
         );
         assert!(a.placements && a.options.skip_missing);
-        assert!(a.chipset.is_none());
         for s in [
             &["jobdeck"][..],
             &["jobdeck", "x", "y"],
@@ -359,54 +291,6 @@ mod tests {
             &["jobdeck", "x", "--report"],
         ] {
             assert!(parse(s).is_err());
-        }
-    }
-
-    #[test]
-    fn chipset_names_sources_and_takes_no_analysis_option() {
-        let parse = |s: &[&str]| super::parse(&s.iter().map(|s| s.to_string()).collect::<Vec<_>>());
-        let Command::Run(a) = parse(&[
-            "jobdeck",
-            "x.jb",
-            "--chipset",
-            " a.oas, ,b*.oas ",
-            "--level=2",
-            "--sources",
-            "src",
-            "--lenient",
-        ])
-        .unwrap() else {
-            panic!()
-        };
-        assert_eq!(a.chipset.unwrap(), ["a.oas", "b*.oas"]);
-        assert!(!a.options.strict);
-        let Command::Run(a) = parse(&["jobdeck", "--chipset=*", "x.jb"]).unwrap() else {
-            panic!()
-        };
-        assert_eq!(a.chipset.unwrap(), ["*"]);
-        for s in [
-            &["jobdeck", "x", "--chipset"][..],
-            &["jobdeck", "x", "--chipset", ","],
-            &["jobdeck", "x", "--chipset="],
-            &["jobdeck", "--chipset", "a"],
-        ] {
-            assert!(parse(s).is_err(), "{s:?}");
-        }
-        for flag in [
-            &["--report", "r.json"][..],
-            &["--spec", "s.spec"],
-            &["--placements"],
-            &["--mode", "chip"],
-            &["--colors", "c.json"],
-            &["--ly-dt", "zip"],
-            &["--on-missing", "fail"],
-        ] {
-            let mut s = vec!["jobdeck", "x.jb", "--chipset", "a.oas"];
-            s.extend_from_slice(flag);
-            let Err(e) = parse(&s) else {
-                panic!("{s:?} parsed")
-            };
-            assert!(e.message.contains(flag[0]), "{}", e.message);
         }
     }
 }

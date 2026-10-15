@@ -220,7 +220,6 @@ floe2 render deck.jb --level 2 --chip A.oas,B.oas --px 1600 --out ab.png   # 칩
 floe2 render deck.jb --level 2 --chip A.oas --corners --size 300um,300um --px 800 --out a4.png   # 칩의 네 모서리를 한 장으로
 floe2 render deck.jb --batch shots.txt --out shots/ --report shots/report.json     # 한 번 열고 여러 장
 floe2 jobdeck deck.jb --level 2 --mode chip --placements --report r.json   # 분석·보고
-floe2 jobdeck deck.jb --chipset A.oas        # A.oas가 속한 chipset(CHIP 블록): CHIP 줄 글자, 레벨, 배치 수, 덱 줄 번호 ('*'는 모든 소스; 덱 글자만 읽음)
 ```
 
 `render`의 `--at/--size/--anchor`, 단위 접미사(nm/um/mm/cm/m), `--px WxH`,

@@ -1,7 +1,6 @@
 //! Observed Calibre jobdeck subset. Unknown fields remain diagnostic data;
 //! they never acquire guessed placement semantics during the Rust migration.
 pub mod chips;
-pub mod chipset;
 pub mod color;
 pub mod dataset;
 pub mod geom;
