@@ -51,7 +51,7 @@ let qaReadiness = null;
 let qaPostResponses = 0, qaRejectedPostResponses = 0;
 let qaCancelReceive = false, qaCancelledActive = false, qaReceiveCleanup;
 let qaRecoverAccept = false, qaCrashes = 0, qaForceAccept = false, qaForcePrompts = 0;
-const qaRecoveryRequests = { root: 0, exchange: 0, paletteReads: 0, mutations: 0 };
+const qaRecoveryRequests = { root: 0, exchange: 0, paletteReads: 0, cellReads: 0, mutations: 0 };
 const validRuntime = process.versions.electron === runtime.version && ['darwin', 'linux'].includes(process.platform) &&
   !['no-sandbox', 'disable-web-security', 'remote-debugging-port', 'remote-debugging-pipe'].some(s => app.commandLine.hasSwitch(s));
 
@@ -225,6 +225,9 @@ app.whenReady().then(async () => {
       // The palette uses a POST body for bounded read-page/range queries, not
       // a style mutation. Classify the exact read-only server endpoint, not all POSTs.
       else if (details.method === 'POST' && /^\/api\/v1\/views\/[^/]+\/palette$/.test(details.url.slice(origin.length))) qaRecoveryRequests.paletteReads++;
+      // The cell tree (shown by default since the GTK layout) asks its
+      // sources/children/find questions with a POST body too; they read.
+      else if (details.method === 'POST' && /^\/api\/v1\/views\/[^/]+\/cells$/.test(details.url.slice(origin.length))) qaRecoveryRequests.cellReads++;
       else if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(details.method)) qaRecoveryRequests.mutations++;
     }
     callback({ cancel: details.url !== statusURL && (ended || (!P.requestAllowed(origin, details.url) && !blobAllowed(origin, details.url))) });
