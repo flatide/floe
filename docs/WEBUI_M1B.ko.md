@@ -161,7 +161,9 @@ render를 먼저 실행하지 않는다. open 대기 중 입력도 최신 상태
   누락 TC의 키도 포함한다. 실제 open 후 source 집합을 다시 대조한다.
   재open은 새 dataset revision이며 외부 `.ovo` 자동 감지/hot reload는 없다.
 - `Resources` 기본 예약은 CPU 16 slot, index가 빌려 쓸 수 없는 foreground 4,
-  worker 2, decoded budget 합 2048 MiB다. render는 **decode+raster 합**으로
+  worker 3(최초2, 2026-09-28 owner+Explore+clip 여유 보완), decoded budget 합 2048 MiB다.
+  Explore는 최소 owner clip의 worker1·CPU1·cache 여유를 남겨야 입장할 수 있다
+  ([공유 자원 계약](WEBUI_SHARING_EXPLORE.ko.md)). render는 **decode+raster 합**으로
   보수적으로 예약한다. index 요청은 1..16 jobs를 검증하되 기본 reserve 때문에
   한 번에 최대 12가 승인된다. 16을 쓰려면 관리자가 reserve=0 등 명시 설정해야
   한다. 초과는 Busy이고 조용히 jobs를 줄이지 않는다. 대기 queue는 아직 없다.
@@ -480,13 +482,14 @@ viewport의 budget-fit 결정을 바꿔야 하는 margin은 버리고 기존 화
 `view`의 frame-cache는 기본 on이다. `--frame-cache off`는 native retained frame
 재사용과 margin prefetch를 함께 끈다(decoded page LRU를 끄는 옵션은 아니다).
 기존 `ViewController::start`/`Service::start`는 prefetch 없는 하네스 계약을 유지하고,
-웹 launcher가 `start_configured(ControllerOptions)`로 명시 활성화한다. 잡덱은
+웹 launcher가 `--margin on`이고 frame-cache도 on일 때만
+`start_configured(ControllerOptions)`로 활성화한다. 잡덱은
 요청이 on이어도 margin capability=false이며 추가 렌더를 하지 않는다.
 
 ### 10.1 생성·스케줄·수명
 
-- 첫 foreground final 이후 idle 때 ±50% 커서 한 스텝만큼 확장한 프레임을
-  같은 worker에 제출한다. 확장은 양축 16 device px 배수다. 8192 px/축·16 Mpx
+- prefetch가 켜졌을 때 첫 foreground final 이후 idle 때 ±50% 커서 한 스텝만큼
+  확장한 프레임을 같은 worker에 제출한다. 확장은 양축 16 device px 배수다. 8192 px/축·16 Mpx
   한도에 걸리면 같은 비율로 축소/16px 내림, 여유가 없거나 지원 좌표 경계를
   넘으면 prefetch를 생략한다. viewport 요청 자체를 확대하거나 숨은 fit을 만들지 않는다.
 - margin은 라벨을 포함하고 foreground와 같은 depth/detail/thin/style/mono/frames

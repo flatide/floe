@@ -19,6 +19,8 @@ assert.equal(demoClient.status,0,'demo.test.cjs: '+demoClient.error);
 acorn.parse(fs.readFileSync(path.join(ui,'server.js'),'utf8'),options);
 const serverClient=spawnSync(process.execPath,[path.join(ui,'server.test.cjs')],{stdio:'inherit',timeout:15000});
 assert.equal(serverClient.status,0,'server.test.cjs: '+serverClient.error);
+const reconnectClient=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_RECONNECT:'1'}});
+assert.equal(reconnectClient.status,0,'reconnect client: '+reconnectClient.error);
 const timingClient=spawnSync(process.execPath,[path.join(ui,'client.test.cjs')],{stdio:'inherit',timeout:15000,env:{...process.env,FLOE_TEST_TIMING:'1'}});
 assert.equal(timingClient.status,0,'browser timing client: '+timingClient.error);
 for(const loss of ['missing','unreadable','cookie','unavailable']){

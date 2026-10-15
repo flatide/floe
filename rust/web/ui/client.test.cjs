@@ -29,6 +29,8 @@ const resumeBoundary=process.env.FLOE_TEST_RESUME_BOUNDARY||'exit';
 const resumeFailure=process.env.FLOE_TEST_RESUME_FAILURE||'0';
 let resumeArmed=false,resumeRelease=null;
 const resumeCalls=[];
+const reconnectTest=process.env.FLOE_TEST_RECONNECT==='1', reconnectTimers=new Map();
+let reconnectTimerId=0,reconnectFailures=[];
 function resumeBarrier(name,release){
     if(!resumeArmed||resumeFence!==name){return false;}
     resumeArmed=false;resumeRelease=release;return true;
@@ -149,6 +151,11 @@ class XHR {
         const settingsPath=this.path.includes('/settings/');
         const raw=this.path.endsWith('/transfer/chunk');
         const body=text===null?null:settingsPath||raw?text:JSON.parse(text); requests.push(Object.assign({method:this.method,path:this.path,body},raw?{headers:this.headers}:{}));
+        if(reconnectTest&&this.method==='GET'&&this.path==='/api/v1/view'&&reconnectFailures.length){
+            const failure=reconnectFailures.shift();
+            setImmediate(()=>{if(failure==='timeout'){this.ontimeout();}else if(failure==='network'){this.onerror();}
+                else{this.status=failure;this.responseText='{"error":"unavailable"}';this.onload();}});return;
+        }
         if(holdExitRead&&this.method==='GET'&&this.path==='/api/v1/operations'){heldExitRead=this;return;}
         let value, status=200;
         if(this.path.startsWith('/api/v1/display-test/')){assert.equal(this.responseType,'arraybuffer');displayReads.push(this);return;}
@@ -330,8 +337,8 @@ const sandbox={window,document,XMLHttpRequest:XHR,WebSocket:Socket,Image,ImageDa
     history:{replaceState(){sandbox.location.hash='';}},sessionStorage:{getItem:k=>storage.get(k)||null,setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},
     URL:{createObjectURL(){const s='blob:test/'+images.length;urls.add(s);return s;},revokeObjectURL:s=>urls.delete(s)},
     Blob,TextEncoder,TextDecoder,ArrayBuffer,DataView,Uint8Array,Uint8ClampedArray,
-    setTimeout:function(fn,ms){assert(!this||!this.context,'unbound Window timer receiver');return setTimeout(fn,modeEnabled?Math.min(ms,5):ms);},
-    clearTimeout:function(id){assert(!this||!this.context,'unbound Window timer receiver');return clearTimeout(id);},
+    setTimeout:function(fn,ms){assert(!this||!this.context,'unbound Window timer receiver');if(reconnectTest){const id=++reconnectTimerId;reconnectTimers.set(id,{fn,ms});return id;}return setTimeout(fn,modeEnabled?Math.min(ms,5):ms);},
+    clearTimeout:function(id){assert(!this||!this.context,'unbound Window timer receiver');if(reconnectTest){reconnectTimers.delete(id);return;}return clearTimeout(id);},
     setInterval:()=>0,Date:{now:()=>freezeTime?clock:(clock+=100)},console};
 if(authLoss){
     sandbox.location.hash='';node('logout').disabled=true;
@@ -380,6 +387,29 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
         node('zoom-in').onclick();cursor(true);snapshot.status='failed';snapshot.failure='worker_failed';ws.receive(snapshot);cursor(false);
         listeners.pagehide();cursor(false);
         console.log('SHARED OWNER VIEWER: ALL OK (all policy edits keep pixels; stale rejection; decode/final/failure cursor)');return;
+    }
+    if(reconnectTest){
+        await wait(()=>sockets.length===1);hello(sockets[0]);
+        const mutations=()=>requests.filter(r=>r.method!=='GET'&&!r.path.endsWith('/palette')).length;
+        const before=mutations();
+        async function fire(ms){await wait(()=>[...reconnectTimers.values()].some(t=>t.ms===ms));
+            const [id,t]=[...reconnectTimers].find(([,t])=>t.ms===ms);reconnectTimers.delete(id);t.fn();
+            for(let i=0;i<10;i++)await new Promise(setImmediate);}
+        reconnectFailures=[503,'timeout','network',503,503];sockets[0].close();
+        for(const ms of [500,1000,2000,4000,5000,5000])await fire(ms);
+        await wait(()=>sockets.length===2);hello(sockets[1]);assert.equal(mutations(),before);
+        assert(![...reconnectTimers.values()].some(t=>t.ms>=500));
+        sockets[1].close();await wait(()=>[...reconnectTimers.values()].some(t=>t.ms===500));
+        const late=[...reconnectTimers.values()].find(t=>t.ms===500).fn;
+        listeners.pagehide();const reads=requests.length;late();await new Promise(setImmediate);
+        assert.equal(requests.length,reads,'suspended retry read the service');
+        assert(![...reconnectTimers.values()].some(t=>t.ms>=500));
+        listeners.pageshow({persisted:true});await wait(()=>sockets.length===3);hello(sockets[2]);
+        reconnectFailures=[401];sockets[2].close();await fire(500);
+        assert.equal(node('connection')['data-session-state'],'restart-required');
+        assert(![...reconnectTimers.values()].some(t=>t.ms>=500),'401 continued retrying');
+        assert.equal(mutations(),before);listeners.pagehide();
+        console.log('WEB RECONNECT: ALL OK (503/network/timeout chain, capped backoff/reset, GET-only, suspend/stale callback, 401 stop)');return;
     }
     if(process.env.FLOE_TEST_TIMING==='1'){
         await wait(()=>sockets.length===1);const ws=sockets[0];hello(ws);

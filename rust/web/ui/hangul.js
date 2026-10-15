@@ -76,6 +76,9 @@
             // A cursor move, selection or external edit commits the old preedit.
             if(c.pending()&&(input.selectionStart!==anchor+c.preedit().length||
                 input.selectionEnd!==input.selectionStart||input.value.slice(anchor,input.selectionStart)!==c.preedit())){reset();}
+            // Consume the composition Escape before the editor's discard
+            // shortcut. Keep the visible syllable; a second Escape may discard.
+            if(e.key==='Escape'&&c.pending()){external();return true;}
             const pending=c.pending(),old=c.preedit(),state=[c.lead,c.vowel,c.tail];
             let start=pending?anchor:input.selectionStart,end=pending?anchor+old.length:input.selectionEnd,committed='',preedit;
             if(e.key==='Backspace'&&pending){preedit=c.backspace();}

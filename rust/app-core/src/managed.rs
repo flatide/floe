@@ -30,7 +30,9 @@ impl Default for Limits {
         Self {
             cpu_slots: 16,
             foreground_reserve: 4,
-            workers: 2,
+            // Owner + one Explore + one exact export, still within the same
+            // CPU/memory ceilings. Explore must leave the export headroom.
+            workers: 3,
             decoded_mb: 2048,
         }
     }
@@ -119,18 +121,40 @@ impl Resources {
         Ok(s.next_id)
     }
     pub fn render(self: &Arc<Self>, options: &RenderOptions) -> Result<Permit> {
+        self.acquire(Self::render_usage(options)?, BTreeSet::new(), false)
+    }
+    fn render_usage(options: &RenderOptions) -> Result<Usage> {
         if options.decode_jobs == 0 || options.raster_jobs == 0 || options.budget_mb == 0 {
             return Err(Error::input("invalid managed render reservation"));
         }
         // Conservatively reserve both pools, including mixed deck passes.
         // I/O/control threads, mmap, generation/retained masks are not this budget.
-        let use_ = Usage {
+        Ok(Usage {
             cpu_slots: u32::from(options.decode_jobs) + u32::from(options.raster_jobs),
             workers: 1,
             decoded_mb: options.budget_mb,
             index_jobs: 0,
-        };
-        self.acquire(use_, BTreeSet::new(), false)
+        })
+    }
+    /// Low-priority guests may not take the last minimum owner clip capacity.
+    /// Check atomically with admission; this is not a reserved export permit
+    /// or a promise against other owner/index admissions after this check.
+    pub(crate) fn explore(
+        self: &Arc<Self>,
+        options: &RenderOptions,
+        clip_budget_mb: u64,
+    ) -> Result<Permit> {
+        self.acquire_with_headroom(
+            Self::render_usage(options)?,
+            BTreeSet::new(),
+            false,
+            Usage {
+                cpu_slots: 1,
+                workers: 1,
+                decoded_mb: clip_budget_mb,
+                index_jobs: 0,
+            },
+        )
     }
     pub fn read(self: &Arc<Self>, caches: impl IntoIterator<Item = PathBuf>) -> Result<Permit> {
         self.acquire(Usage::default(), keys(caches)?, false)
@@ -249,6 +273,15 @@ impl Resources {
         keys: BTreeSet<PathBuf>,
         write: bool,
     ) -> Result<Permit> {
+        self.acquire_with_headroom(use_, keys, write, Usage::default())
+    }
+    fn acquire_with_headroom(
+        self: &Arc<Self>,
+        use_: Usage,
+        keys: BTreeSet<PathBuf>,
+        write: bool,
+        headroom: Usage,
+    ) -> Result<Permit> {
         let mut s = self.state.lock().unwrap();
         let u = s.usage;
         // At most one index job is admitted. Limit that job's reservation,
@@ -261,10 +294,11 @@ impl Resources {
                 .get(key)
                 .is_some_and(|h| h.writer || (write && h.readers > 0))
         });
-        if u.cpu_slots + use_.cpu_slots > self.limits.cpu_slots
+        if u.cpu_slots + use_.cpu_slots + headroom.cpu_slots > self.limits.cpu_slots
             || index_borrows_reserve
-            || u.workers + use_.workers > self.limits.workers
-            || use_.decoded_mb > self.limits.decoded_mb.saturating_sub(u.decoded_mb)
+            || u.workers + use_.workers + headroom.workers > self.limits.workers
+            || use_.decoded_mb.saturating_add(headroom.decoded_mb)
+                > self.limits.decoded_mb.saturating_sub(u.decoded_mb)
             || u.index_jobs + use_.index_jobs > 1
             || leases_conflict
         {
@@ -533,6 +567,68 @@ impl ManagedDataset {
 mod tests {
     use super::*;
     #[test]
+    fn explore_leaves_minimum_owner_export_capacity_without_overbooking() {
+        let owner = RenderOptions {
+            binary: PathBuf::from("unused-explore-capacity-test"),
+            decode_jobs: 8,
+            raster_jobs: 4,
+            budget_mb: 1024,
+            tile_px: 384,
+            round_pages: 1024,
+            open_timeout_s: 30,
+            label_font_px: 14,
+            raw: true,
+            debug: false,
+        };
+        let guest = RenderOptions {
+            decode_jobs: 1,
+            raster_jobs: 1,
+            budget_mb: 128,
+            ..owner.clone()
+        };
+        let r = Resources::new(Limits::default()).unwrap();
+        let visible = r.render(&owner).unwrap();
+        let browse = r.browse().unwrap();
+        let baseline = r.usage();
+        let explorer = r.explore(&guest, 256).unwrap();
+        assert_eq!(r.export_capacity().cpu_slots, 1);
+        assert_eq!(r.export_capacity().workers, 1);
+        let before = r.usage();
+        assert!(matches!(r.explore(&guest, 256), Err(e) if e.kind == ErrorKind::Busy));
+        assert_eq!(r.usage(), before);
+        let clip = r.export(1, 256).unwrap();
+        assert_eq!(r.usage().workers, 3);
+        assert_eq!(r.usage().cpu_slots, 16);
+        drop((clip, explorer));
+        assert_eq!(r.usage(), baseline);
+        drop((browse, visible));
+        assert_eq!(r.usage(), Usage::default());
+        // Each independent ceiling protects headroom, not only worker count.
+        for limits in [
+            Limits {
+                workers: 2,
+                ..Limits::default()
+            },
+            Limits {
+                cpu_slots: 14,
+                ..Limits::default()
+            },
+            Limits {
+                decoded_mb: 1407,
+                ..Limits::default()
+            },
+        ] {
+            let r = Resources::new(limits).unwrap();
+            let visible = r.render(&owner).unwrap();
+            let before = r.usage();
+            assert!(matches!(r.explore(&guest, 256), Err(e) if e.kind == ErrorKind::Busy));
+            assert_eq!(r.usage(), before);
+            drop(r.export(1, 256).unwrap());
+            drop(visible);
+            assert_eq!(r.usage(), Usage::default());
+        }
+    }
+    #[test]
     fn clip_advice_is_read_only_and_default_foreground_can_export() {
         let r = Resources::new(Limits::default()).unwrap();
         let render = r
@@ -556,7 +652,7 @@ mod tests {
             r.export_capacity(),
             ExportCapacity {
                 cpu_slots: 2,
-                workers: 1,
+                workers: 2,
                 decoded_mb: 320
             }
         );
@@ -578,7 +674,7 @@ mod tests {
             r.export_capacity(),
             ExportCapacity {
                 cpu_slots: 0,
-                workers: 0,
+                workers: 1,
                 decoded_mb: 64
             }
         );

@@ -608,12 +608,13 @@ impl ViewController {
         let mut options = self.native_options.clone().ok_or_else(|| {
             Error::new(ErrorKind::Unsupported, "view has no native configuration")
         })?;
+        let clip_budget_mb = options.budget_mb.min(256);
         options.decode_jobs = decode_jobs;
         options.raster_jobs = raster_jobs;
         options.budget_mb = budget_mb;
         options.debug = false;
         initial.validate(&self.model)?;
-        let permit = resources.render(&options)?;
+        let permit = resources.explore(&options, clip_budget_mb)?;
         let weak = Arc::downgrade(&dataset);
         let native_options = options.clone();
         let mut next = Self::spawn(

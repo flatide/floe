@@ -52,7 +52,7 @@ follow 전송은 [후속 기록](WEBUI_SHARING_FOLLOW.ko.md)을 따른다.
 | [stream.rs](../rust/web/src/stream.rs), `Control` | 인증 후 `view.set/apply/fill_slot/query/measure/clip.prepare`를 dispatch | WS handshake뿐 아니라 각 메시지에서 역할·대상·만료·폐기 검증. follow에는 렌더 상태 변경 금지 |
 | [owner.rs](../rust/web/src/owner.rs), [DRC HTTP](../rust/web/src/drc/http.rs) | owner catalog는 등록 source 전체; DRC 조회·팔레트 조회 일부는 POST | GET=허용/POST=거부 정책 불가. 공유 dataset/DRC별 투영 DTO와 명시 명령 allowlist 필요 |
 | [origin.rs](../rust/web/src/origin.rs) | literal loopback Host/Origin만 허용, 전달 헤더로 origin을 바꾸지 않음 | 원격용 고정 public origin·TLS 종료/프록시 신뢰 정책을 별도로 승인·구현. 현재 검사 완화로 원격을 켜지 않기 |
-| [managed.rs](../rust/app-core/src/managed.rs), `Resources` | process-local admission. 기본 CPU16/foreground reserve4/worker2/decoded2048MiB | 한 gateway의 모든 guest가 같은 자원 관리자를 사용. gateway 여러 개의 서버 전체 상한은 별도 운영 설계 필요 |
+| [managed.rs](../rust/app-core/src/managed.rs), `Resources` | process-local admission. 기본 CPU16/foreground reserve4/decoded2048MiB. worker는 초기2 → 2026-09-28부터3이며 Explore는 최소 owner clip 여유도 검사 | 한 gateway의 모든 guest가 같은 자원 관리자를 사용. [현재 입장 조건](WEBUI_SHARING_EXPLORE.ko.md). gateway 여러 개의 서버 전체 상한은 별도 운영 설계 필요 |
 | [app.js](../rust/web/ui/app.js), `start` | 인증 storage가 origin 기준이며 초기화 때 owner catalog를 읽음 | 역할·세션별 복원, owner와 guest의 쿠키/CSRF/storage 충돌 방지. guest용 catalog/controls·쓰기 receipt 복구 차단 |
 
 현재의 단일 owner 제품에서 권한 우회가 재현됐다는 보고가 아니다. **guest를 같은
@@ -137,7 +137,7 @@ renderd를 두 view가 공유하면 generation frontier·게시 scene을 서로 
 
 현재 [RenderOptions::local](../rust/app-core/src/render.rs)은 CPU가 충분하면
 decode8+raster4, cache1024MiB를 기본으로 잡는다. 두 view를 그대로 복제하면 CPU
-예약24가 기본16을 초과한다. DRC/picker 예약도 별도여서 `workers=2`만으로 둘째
+예약24가 기본16을 초과한다. DRC/picker 예약도 별도여서 worker 수만 늘린다고 둘째
 view가 들어간다고 보장할 수 없다. guest를 늘리며 매번 새 `Resources`를 만드는
 방법은 상한을 우회하므로 금지한다. admission 실패는 명시 busy로 반환하고 품질이나
 정확도를 몰래 낮추지 않는다. guest jobs/cache 및 동시 수는 실측과 운영 승인으로 정한다.

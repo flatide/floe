@@ -270,7 +270,7 @@ async fn local_explore_views_are_independent_and_reconnect_without_new_worker() 
             false,
             true,
             Limits {
-                workers: 3,
+                workers: 4, // owner + two guests + minimum owner export headroom
                 ..Limits::default()
             },
         )
@@ -492,6 +492,10 @@ async fn local_explore_admission_and_scope_are_not_authority_expansion() {
     )
     .await;
     denied(guest_request(&h, bid, &bc), 429).await;
+    // A connected Explorer must not occupy the owner's last exact-clip slot.
+    let clip = h.resources.export(1, 64).unwrap();
+    assert_eq!(h.resources.usage().workers, baseline.workers + 2);
+    drop(clip);
     let denied_edit = edit(
         &mut av,
         &ah,

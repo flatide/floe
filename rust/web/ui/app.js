@@ -468,6 +468,20 @@
         if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
         updateCursor();
     }
+    function scheduleReconnect() {
+        if (reconnectTimer || stopped || pageSuspended || socket || !live()) { return; }
+        const run = pageRun, serial = socketSerial;
+        const active = function () { return currentPage(run) && serial === socketSerial && !socket && live(); };
+        reconnectTimer = setTimeout(function () {
+            reconnectTimer = null;
+            if (!active()) { return; }
+            // Only re-read authoritative state; never replay input or an
+            // approved mutation. A failed GET must not end the retry chain.
+            restore().catch(function (e) { if (active()) { report(e); } })
+                .then(function () { if (active()) { scheduleReconnect(); } });
+        }, reconnectDelay);
+        reconnectDelay = Math.min(5000, reconnectDelay * 2);
+    }
     function connect() {
         disconnect(); if (stopped || pageSuspended || !currentId || !live()) { return; }
         const serial = socketSerial;
@@ -508,10 +522,7 @@
             ackedFrames = {foreground: null, margin: null};
             controls(); connection('Disconnected', false);
             if (uncertain) { notice('Connection interrupted. Pending input was not replayed; the restored view is authoritative.'); }
-            if (!stopped && live()) {
-                reconnectTimer = setTimeout(function () { restore().catch(report); }, reconnectDelay);
-                reconnectDelay = Math.min(5000, reconnectDelay * 2);
-            }
+            scheduleReconnect();
         };
         ws.onerror = function () { if (!stopped && socket === ws && serial === socketSerial) { connection('Connection error', false); } };
     }

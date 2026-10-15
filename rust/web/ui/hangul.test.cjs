@@ -15,6 +15,10 @@ function harness(text=''){
 function test(){
     const h=harness('😀 prefix ');assert(!h.key('g'));assert(h.key(' ',{shiftKey:true}));h.type('gksrmf');
     assert.equal(h.input.value,'😀 prefix 한글');assert.equal(h.fullWrites,0);assert.equal(h.input.scrollTop,300);assert.equal(h.statusWrites,2);
+    const esc=harness('draft ');esc.key('HangulMode');esc.type('gks');
+    assert(esc.key('Escape'));assert.equal(esc.input.value,'draft 한');assert(!esc.key('Escape'));
+    esc.type('r');esc.input.selectionStart=esc.input.selectionEnd=0;
+    assert(!esc.key('Escape'),'moved caret must not retain a stale composition');
     for(const [keys,expected] of [['rhk','과'],['rnj','궈'],['rkqt','값'],['rkqtk','갑사'],['Rk','까'],['Tkd','쌍'],['dkssudgktpdy','안녕하세요']]){
         const c=harness();c.key('HangulMode');c.type(keys);assert.equal(c.input.value,expected,keys);
     }

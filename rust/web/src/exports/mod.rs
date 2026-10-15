@@ -332,7 +332,7 @@ mod tests {
         assert_eq!(status["jobs_default"], 2);
         assert_eq!(
             status["capacity"],
-            json!({"cpu_slots":2,"workers":1,"decoded_mb":"320","cache_mb":"256"})
+            json!({"cpu_slots":2,"workers":2,"decoded_mb":"320","cache_mb":"256"})
         );
         assert_eq!(resources.usage(), baseline);
         let cpu = resources.index([], 1).unwrap();
@@ -342,7 +342,7 @@ mod tests {
             .export(2, service.inner.options.budget_mb)
             .unwrap();
         let status = service.status();
-        assert_eq!(status["capacity"]["workers"], 0);
+        assert_eq!(status["capacity"]["workers"], 1);
         assert_eq!(status["capacity"]["cpu_slots"], 0);
         assert_eq!(status["jobs_default"], 1);
         // Existing downloads/releases remain available under exhaustion.

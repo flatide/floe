@@ -107,7 +107,11 @@ fn errors_are_not_disguised_as_cancellation_and_retired_results_are_absent() {
 }
 #[test]
 fn export_cpu_memory_and_worker_reservations_balance() {
-    let resources = Resources::new(crate::managed::Limits::default()).unwrap();
+    let resources = Resources::new(crate::managed::Limits {
+        workers: 2,
+        ..crate::managed::Limits::default()
+    })
+    .unwrap();
     let a = resources.export(4, 256).unwrap();
     assert_eq!(resources.usage().cpu_slots, 4);
     assert_eq!(resources.usage().workers, 1);

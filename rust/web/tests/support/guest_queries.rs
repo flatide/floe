@@ -13,7 +13,7 @@ async fn start(raw: bool, margin: bool) -> (Harness, Login, Socket, Value, Value
         false,
         true,
         Limits {
-            workers: 3,
+            workers: 4, // owner + two guests + minimum owner export headroom
             ..Limits::default()
         },
     )

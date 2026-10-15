@@ -235,7 +235,7 @@ async fn independent_drc_guests_are_explicit_read_only_and_revision_bound() {
         false,
         false,
         Limits {
-            workers: 3,
+            workers: 4, // owner + two guests + minimum owner export headroom
             ..Limits::default()
         },
         true,

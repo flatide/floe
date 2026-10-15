@@ -137,7 +137,7 @@ async fn exact_export_receipts_replays_and_authenticated_binary_downloads() {
     assert_eq!(advice.1["jobs_default"], 2);
     assert_eq!(
         advice.1["capacity"],
-        json!({"cpu_slots":14,"workers":1,"decoded_mb":"1984","cache_mb":"64"})
+        json!({"cpu_slots":14,"workers":2,"decoded_mb":"1984","cache_mb":"64"})
     );
     let mut forged = f.clone();
     forged["dataset_revision"] = json!("999999");

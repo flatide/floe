@@ -39,9 +39,13 @@ M2b-3b, CLI opt-in·발급/guest UI는 M2b-4에 남는다. `shares=false`는 유
 
 로컬 실험값은 explore당 decode1+raster1, decoded128MiB다. owner의 tile/raw/round/font
 등 trusted native 설정과 margin/cache 정책은 상속한다. 브라우저가 jobs/budget/native
-경로를 지정할 수 없다. 기본 worker 한도2에서는 owner+explore1개가 가능하나 다른 서비스의
-예약이 있으면 그보다 먼저 busy일 수 있다. 두 게스트 검증은 테스트에만 worker 한도3을
-명시했다. 이 값은 운영 서버의 처리량/지연/RSS 보장이 아니며 실제 부하는 별도 측정한다.
+경로를 지정할 수 없다. 2026-09-28부터 기본 worker 한도는3(owner+explore+clip)이며
+CPU16·decoded2048MiB 총한도는 유지한다. Explore 입장은 같은 자원 lock 안에서
+최소 owner clip 1 worker·1 CPU·min(owner budget,256MiB)의 여유까지 검사한다.
+그 여유를 잠식하는 게스트는429로 거부하고 owner worker를 중단하거나 상한을 우회하지 않는다.
+두 게스트 검증은 테스트에만 worker 한도4를 명시한다. 이는 clip의 실제 예약은 아니며
+이후 다른 owner/index 입장·큰 jobs 요청까지 무조건 보장하지 않는다. 자원이 부족하면
+clip UI의 현재 capacity와 명시 busy를 따른다. 운영 처리량/지연/RSS는 별도 측정한다.
 
 기존 guest 전용 전송256MiB·복사 worker1·socket4/grant당1·한 프레임 write+ACK credit을
 그대로 쓴다. follow와 explore가 이 전송 budget을 공유하되 owner의 전송 credit과는 별도다.

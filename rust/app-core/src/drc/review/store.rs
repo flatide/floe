@@ -126,6 +126,9 @@ impl ReadTargets {
 /// before constructing this object; request text cannot choose an output path.
 pub struct Store {
     editable: bool,
+    // A predictable name in shared TMPDIR is not reviewer authentication.
+    // Adjacent sidecars retain their existing shared-filesystem policy.
+    legacy_uid: Option<u32>,
     scope: Arc<AccessScope>,
     pack: Mutex<Pack>,
     pack_path: PathBuf,
@@ -288,9 +291,15 @@ impl Store {
             .map(crate::cache::absolute)
             .transpose()?
             .unwrap_or(target);
+        let mut legacy_uid = None;
         if read_target.is_some() {
-            if !read_paths(&pack_path, reviewer, kind)?.contains(&target) {
+            let allowed = read_paths(&pack_path, reviewer, kind)?;
+            if !allowed.contains(&target) {
                 return Err(Error::input("review read target is not a derived sidecar"));
+            }
+            if target == allowed[1] {
+                // SAFETY: geteuid has no arguments or memory side effects.
+                legacy_uid = Some(unsafe { libc::geteuid() });
             }
         } else {
             scope.check(&target)?;
@@ -305,6 +314,7 @@ impl Store {
         files.push(pack_path.clone());
         let store = Arc::new(Self {
             editable: read_target.is_none(),
+            legacy_uid,
             scope,
             pack: Mutex::new(pack),
             pack_path,
@@ -463,6 +473,13 @@ impl Capture {
             Err(e) => return Err(e.into()),
         };
         let meta = file.metadata()?;
+        // Check the opened descriptor before hashing, parsing or accepting a
+        // binding. A selection-time lstat alone would race a replacement.
+        if store.legacy_uid.is_some_and(|uid| meta.uid() != uid) {
+            return Err(Error::input(
+                "legacy temporary review must be owned by the service user",
+            ));
+        }
         if !meta.is_file()
             || meta.nlink() != links
             || meta.len() > store.max_bytes()

@@ -226,6 +226,10 @@ fn selected_readonly_review_cannot_create_drafts_or_publish() {
         )
         .unwrap();
         let snap = || reader.snapshot(&f.stop).unwrap();
+        assert_eq!(
+            reader.legacy_uid,
+            Some(fs::metadata(&target).unwrap().uid())
+        );
         assert!(snap().legacy_unverified());
         if review_kind == Kind::Notes {
             assert_eq!(snap().notes().unwrap().get(0), Some("saved legacy note"));
@@ -272,6 +276,13 @@ fn selected_readonly_review_cannot_create_drafts_or_publish() {
             &f.stop,
         )
         .is_err());
+        // Exercise the real descriptor-read guard with a different expected
+        // service uid; no chown, elevated account or foreign files required.
+        let mut reader = reader;
+        let uid = reader.legacy_uid.unwrap();
+        Arc::get_mut(&mut reader).unwrap().legacy_uid = Some(uid.wrapping_add(1));
+        assert_eq!(kind(reader.snapshot(&f.stop)), ErrorKind::InvalidInput);
+        assert_eq!(fs::read(&target).unwrap(), bytes);
         fs::remove_file(target).unwrap();
         f.clean();
     }
