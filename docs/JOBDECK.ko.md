@@ -170,7 +170,9 @@ floe2 jobdeck deck.jb [--sources DIR] [--id N,N] [--mode identifier|layer|chip]
                       [--colors FILE] [--ly-dt cross|zip] [--on-missing skip|fail]
                       [--lenient] [--placements] [--report FILE]
                       [--index [--force] [--jobs N]]
+floe2 jobdeck deck.jb --chipset NAME[,NAME...] [--level N,N] [--sources DIR] [--lenient]
 ```
+(`--chipset`은 2026-10-15에 더했다. §7 끝의 "소스가 속한 chipset 조회"를 본다.)
 종료 코드: 0 정상, 1 구조 오류/인자, 2 `--on-missing fail`에서 dbu 없는
 소스 또는 인덱싱 실패, 3 선택 안에 배치 못 한 항목이 있음(ledger 출력).
 `--index`는 probe가 ok인 소스마다 `floe2 index <src> --jobs N`을 순차
@@ -465,6 +467,56 @@ floe2 render deck.jb --chip '2:*' --fit-chip 'MARK.oas#3' --px 600 --out mark3.p
   - batch 키의 대체 규칙을 지킨다.
   - `info --chips`가 칩 목록을 낸다.
 - 변이 확인: 꺼진 칩의 skip을 세게 바꾸거나 칩 범위를 무시하게 바꾸면 테스트가 실패한다.
+
+### 소스가 속한 chipset 조회 (사용자 2026-10-15)
+
+사용자 요청: "jobdeck 파일에서 oas 파일이 어느 chipset에 속해있는지 표시하는 기능이
+필요함. cli로만 동작하면 됨."
+
+chipset은 덱의 CHIP 블록으로 본다. CHIP 블록은 배치 단위 하나다. 블록의 `$` 항목들이
+mask level마다 TC 소스를 하나씩 대고, ROWS의 모든 위치에 함께 놓인다(§1). 그래서
+"oas가 어느 chipset에 속하나"는 "그 TC를 쓰는 CHIP 블록이 어느 것인가"이다.
+
+```sh
+floe2 jobdeck deck.jb --chipset chipA.oas          # chipA.oas를 쓰는 CHIP 블록들
+floe2 jobdeck deck.jb --chipset 'TEST*,mark.oas'   # 여럿, 와일드카드
+floe2 jobdeck deck.jb --chipset '*'                # 모든 소스
+floe2 jobdeck deck.jb --chipset chipA.oas --level 2   # 레벨 2의 항목만
+```
+
+출력은 (소스, CHIP 블록)마다 한 줄이다. 칸을 맞춰 grep하기 쉽다.
+
+```
+chipA.oas  CHIP ID001  * MAIN 1.0000   $1 METAL1, $2 VIA1  2 placements  line 11
+chipA.oas  CHIP ID002  * MAIN2 1.0000  $1 METAL1           3 placements  line 19
+chipA.oas  CHIP ID003  * MAIN3 1.0000  $1 METAL1           1 placement   line 28
+```
+
+- 칸 순서는 소스, CHIP id, CHIP 줄의 나머지 글자, 레벨, 배치 수, 덱의 줄 번호다.
+  - 소스는 덱에 적힌 TC 경로를 정규화한 것이다. 덱이 파일 이름만 적으면 파일 이름이다.
+  - CHIP 줄의 나머지 글자(`* MAIN 1.0000`)는 뜻을 모르므로 적힌 그대로 보인다. 모든 블록이 비어 있으면 그 칸을 뺀다.
+  - 레벨은 그 블록이 이 소스를 놓는 `$` 번호와 MTITLE 이름이다. MTITLE이 없으면 `$5`처럼 번호만 쓴다.
+  - 배치 수는 그 블록의 ROWS 위치 수다. 블록의 모든 항목이 같은 위치를 쓴다.
+  - 줄 번호는 덱 파일에서 그 CHIP 줄의 번호다.
+- 한 소스를 여러 블록이 쓰면 블록마다 한 줄이다. 소스는 덱에서 처음 쓰인 순서, 블록은 덱 순서로 나온다.
+- NAME으로는 셋 중 무엇이든 받는다.
+  - 소스의 파일 이름. 다른 폴더에 같은 이름이 있으면 둘 다 나온다.
+  - 덱에 적힌 TC 경로. `./`나 `..`는 정규화해서 비교한다.
+  - 파일로 가는 경로. 현재 폴더 기준으로 풀어서, 덱 폴더(또는 `--sources DIR`) 기준으로 푼 TC와 비교한다.
+  - 파일 이름과 TC에는 `*`, `?`, `[..]` 와일드카드를 쓸 수 있다. 셸에서는 따옴표로 감싼다. 쉼표로 여럿을 준다.
+- 덱 글자만 읽는다. 소스를 열지 않으므로 없는 소스나 인덱스 없는 소스도 찾는다. 분석 요약 줄은 찍지 않는다.
+- 거부하는 경우:
+  - 아무 소스도 가리키지 않는 NAME이 하나라도 있으면 아무것도 찍지 않고 exit 1이다. 메시지에 덱(또는 그 레벨)의 소스 목록이 붙는다.
+  - 덱에 없는 레벨, 구조 오류가 있는 덱도 분석과 같이 exit 1이다. `--lenient`는 분석처럼 잘못된 항목을 빼고 찾는다.
+  - 분석 전용 옵션(`--report`, `--spec`, `--placements`, `--mode`, `--colors`, `--ly-dt`, `--on-missing`)과 함께 쓰면 exit 2다.
+- 코드는 공유 Rust `floe_app_core::jobdeck::chipset`(members, lookup, lines)에 있고, CLI는 app-cli의 `jobdeck` 명령이다. 그래서 floe2와 floe2-web 둘 다 같은 옵션을 갖는다. 뷰어 UI에는 넣지 않았다(요청이 CLI).
+
+**검증**: 단위 테스트 4개(app-core), 옵션 파싱 1개(app-cli), gate `ChipsetTests` 3개.
+- test.jb를 손으로 푼 줄과 글자 그대로 같다. 레벨 1·2를 함께 쓰는 블록, MTITLE 없는 `$5`, 배치 1개의 단수형을 포함한다.
+- 디스크에 없는 소스로만 된 덱을 찾는다. 분석은 exit 3이고, 조회는 exit 0으로 줄만 찍는다.
+- 파일 이름, TC 경로, `./` TC, 절대 경로, 현재 폴더 기준 상대 경로, `--sources`, 와일드카드로 찾는다.
+- 레벨 필터, 없는 이름, 그 레벨에 없는 이름, 없는 레벨, 분석 옵션, 구조 오류 덱을 거부한다.
+- 변이 확인: `--chipset`이 없는 0.12.355 빌드로 돌리면 3개 모두 실패한다.
 
 ## 8. M5 상세 — KLayout 독립 오라클
 

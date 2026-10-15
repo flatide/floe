@@ -732,6 +732,128 @@ class ColorTests(unittest.TestCase):
             jd.ColorScheme.load(str(TMP / "bad_scheme.json"))
 
 
+class ChipsetTests(unittest.TestCase):
+    """`floe2 jobdeck DECK --chipset NAME` (user 2026-10-15: "jobdeck 파일에서
+    oas 파일이 어느 chipset에 속해있는지 표시하는 기능이 필요함. cli로만
+    동작하면 됨."): every CHIP block that places a source - its CHIP line's
+    text, the levels, the block's placements, the line in the deck - named by
+    its file name, its TC path or a path to the file, from the deck's text
+    alone. Expected lines are test.jb's by hand."""
+
+    CHIP_A = [
+        "chipA.oas  CHIP ID001  * MAIN 1.0000   $1 METAL1, $2 VIA1  2 placements  line 11",
+        "chipA.oas  CHIP ID002  * MAIN2 1.0000  $1 METAL1           3 placements  line 19",
+        "chipA.oas  CHIP ID003  * MAIN3 1.0000  $1 METAL1           1 placement   line 28",
+    ]
+    # sources in directories, none of them on disk
+    DIRS_DECK = """* dirs.jb
+MTITLE 1,METAL1
+MTITLE 2,VIA1
+*PLACE-INFO
+CHIP MAIN01, * MAIN 1.0000
+$ (1, M1, AD=0.00020, SF=1, TC=main/m1.oas, LY={1}, DT={0}, BX=0.0, BY=0.0, UX=10.0, UY=10.0 )
+$ (2, V1, AD=0.00020, SF=1, TC=./main/v1.oas, LY={2}, DT={0}, BX=0.0, BY=0.0, UX=10.0, UY=10.0 )
+ROWS 100.0/100.0
+CHIP TEG01, * TEG 1.0000
+$ (1, M1, AD=0.00020, SF=1, TC=teg/m1.oas, LY={1}, DT={0}, BX=0.0, BY=0.0, UX=10.0, UY=10.0 )
+ROWS 200.0/100.0, 300.0/100.0
+*END-PLACE
+END
+"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = TMP / "chipset"
+        cls.dir.mkdir(exist_ok=True)
+        cls.deck = cls.dir / "dirs.jb"
+        cls.deck.write_text(cls.DIRS_DECK)
+
+    def lines(self, *args, ok=0):
+        return run_cli(*args, ok=ok).stdout.splitlines()
+
+    def test_a_source_by_its_file_name_tc_path_or_a_path(self):
+        self.assertEqual(self.lines(TMP / "test.jb", "--chipset", "chipA.oas"),
+                         self.CHIP_A)
+        every = self.lines(TMP / "test.jb", "--chipset", "*")
+        self.assertEqual(every[:3], self.CHIP_A)
+        self.assertEqual([(l.split()[0], l.split()[2]) for l in every],
+                         [("chipA.oas", "ID001"), ("chipA.oas", "ID002"),
+                          ("chipA.oas", "ID003"), ("mark.oas", "ID001"),
+                          ("mark.oas", "ID003"), ("chipB.oas", "ID002")])
+        # chipB at 2 and 5, which has no MTITLE; the analysis's view of it
+        self.assertIn("$2 VIA1, $5  ", every[5])
+        self.assertIn("3 placements  line 19", every[5])
+        # sources nowhere on disk: the file name names both m1.oas
+        self.assertEqual(
+            self.lines(self.deck, "--chipset", "m1.oas"),
+            ["main/m1.oas  CHIP MAIN01  * MAIN 1.0000  $1 METAL1  1 placement   line 5",
+             "teg/m1.oas   CHIP TEG01   * TEG 1.0000   $1 METAL1  2 placements  line 9"])
+        teg = ["teg/m1.oas  CHIP TEG01  * TEG 1.0000  $1 METAL1  2 placements  line 9"]
+        # the TC path; an absolute path; a path from the current directory
+        # (run_cli runs in the checkout)
+        self.assertEqual(self.lines(self.deck, "--chipset", "teg/m1.oas"), teg)
+        self.assertEqual(self.lines(self.deck, "--chipset",
+                                    self.dir / "teg" / "m1.oas"), teg)
+        rel = os.path.relpath(self.dir / "teg" / "m1.oas", ROOT)
+        self.assertTrue(rel.startswith(".."), rel)
+        self.assertEqual(self.lines(self.deck, "--chipset", rel), teg)
+        # the TC written ./main/v1.oas; --sources moves the TC paths' base
+        v1 = ["main/v1.oas  CHIP MAIN01  * MAIN 1.0000  $2 VIA1  1 placement  line 5"]
+        self.assertEqual(self.lines(self.deck, "--chipset", "main/v1.oas"), v1)
+        self.assertEqual(self.lines(self.deck, "--sources", "/data/masks",
+                                    "--chipset", "/data/masks/main/v1.oas"), v1)
+        run_cli(self.deck, "--chipset", self.dir / "main" / "v1.oas", "--sources",
+                "/data/masks", ok=1)
+        # wildcards on the TC path or the file name, names in any order
+        self.assertEqual(len(self.lines(self.deck, "--chipset", "main/*")), 2)
+        self.assertEqual(
+            [l.split()[0] for l in self.lines(self.deck, "--chipset",
+                                              "v?.oas,teg/*,m1.oas")],
+            ["main/m1.oas", "main/v1.oas", "teg/m1.oas"])
+
+    def test_levels_and_refusals(self):
+        self.assertEqual(
+            self.lines(TMP / "test.jb", "--chipset", "mark.oas", "--level", "3"),
+            ["mark.oas  CHIP ID001  * MAIN 1.0000   $3 ALIGN  2 placements  line 11",
+             "mark.oas  CHIP ID003  * MAIN3 1.0000  $3 ALIGN  1 placement   line 28"])
+        self.assertEqual(
+            self.lines(TMP / "test.jb", "--chipset", "chipA.oas", "--id", "2"),
+            ["chipA.oas  CHIP ID001  * MAIN 1.0000  $2 VIA1  2 placements  line 11"])
+        res = run_cli(TMP / "test.jb", "--chipset", "chipA.oas,nope.oas", ok=1)
+        self.assertEqual(res.stdout, "")
+        self.assertIn("no source of the deck is named 'nope.oas' - its sources: "
+                      "chipA.oas, mark.oas, chipB.oas", res.stderr)
+        res = run_cli(TMP / "test.jb", "--chipset", "chipB.oas", "--level", "3",
+                      ok=1)
+        self.assertIn("no source of level 3 is named 'chipB.oas' - its "
+                      "sources: mark.oas", res.stderr)
+        res = run_cli(TMP / "test.jb", "--chipset", "chipA.oas", "--level", "9",
+                      ok=1)
+        self.assertIn("level(s) 9 not in the deck", res.stderr)
+        # the analysis's options are refused, nothing written
+        out = self.dir / "never.json"
+        res = run_cli(TMP / "test.jb", "--chipset", "chipA.oas", "--report",
+                      out, ok=2)
+        self.assertIn("--report is the analysis's", res.stderr)
+        self.assertFalse(out.exists())
+        run_cli(TMP / "test.jb", "--chipset", ",", ok=2)
+        run_cli(TMP / "test.jb", "--placements", "--chipset", "chipA.oas", ok=2)
+        # a deck that would place geometry wrongly is refused as the
+        # analysis refuses it
+        res = run_cli(TMP / "broken.jb", "--chipset", "*", ok=1)
+        self.assertIn("structural error", res.stderr)
+
+    def test_the_deck_alone(self):
+        """No source on disk: the analysis reports them missing (exit 3),
+        the lookup answers from the deck and prints nothing else."""
+        res = run_cli(self.deck, ok=3)
+        self.assertIn("could not be placed", res.stdout)
+        lines = self.lines(self.deck, "--chipset", "*")
+        self.assertEqual(len(lines), 3)
+        self.assertFalse([l for l in lines if l.startswith("[jobdeck]")])
+        self.assertFalse(any(p.suffix == ".oas" for p in self.dir.iterdir()))
+
+
 class CliTests(unittest.TestCase):
     def test_1_plan_and_report(self):
         rep = CLI / "report.json"
