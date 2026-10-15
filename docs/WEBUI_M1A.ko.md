@@ -3,6 +3,11 @@
 2026-09-13, `feature/webui`. [M0 대조표](WEBUI_M0.ko.md),
 [서비스 초안](WEBUI_SERVICE_API.ko.md), [실행 방법](../rust/app/README.md).
 
+아래 완료 범위·버전·검증은 M1a 당시 기록이다. 현재 구현 잔여는
+[잔여 표](WEBUI_REMAINING.ko.md), 2026-09-28 병합 이후 표시 기본값은
+[병합 기록](WEBUI_JOBDECK_MERGE.ko.md)을 따른다. 과거의 “아직 미구현”을
+현재 제품 상태로 읽지 않는다.
+
 ## 1. 완료 범위
 
 - M1a-1: `cf7fbe1`, worker client와 M0 문서. renderd의
@@ -172,7 +177,8 @@ HTTP 서버, GTK 실행은 없다. PNG는 renderd의 원본 바이트를 그대�
 - `--bbox`, `--at --size`, 단위 suffix, center/lb anchor, WxH aspect 확장과
   stretch, width-only half-even 높이 계산, fractional DBU를 보존한다.
   default exact는 **cut=0, wire exact=0**인 기존 캡처 계약이다. headless depth는
-  기본 full, low/medium/high는 5/3/1px, thin auto는 layout cull이다.
+  기본 full, low/medium/high는 5/3/1px. 당시 thin auto는 layout cull이었으며,
+  2026-09-28 병합 후 현재는 일반/덱 모두 keep이다(명시 cull은 유지).
 - 레이어 이름/별칭(동일 별칭의 여러 datatype), explicit pair, 중복 제거를
   보존한다. 메타는 소스 기록 순서, **렌더 스타일은 (L,D) 정렬 순서**다.
   첫 PNG 대조가 이 차이를 잡았고 수정 후 바이트 일치를 확인했다.
@@ -378,8 +384,9 @@ offline/locked Linux musl release 빌드 통과. 전체 배터리의 신규 orac
 - spec은 worker 소유 0700 workspace에만 staging하고 close/오류/취소에서 제거한다.
   native `opened unit`은 layout에서 DBU/µm, deck에서 µm/DBU인 기존 차이를
   구분해 검증한다. 좌표와 native wire/기하 코드는 바꾸지 않는다.
-- `thin auto`는 layout cull/deck keep, depth/detail/frames/occupancy와 pass streaming
-  정책은 그대로다. deck label 요청은 worker 실행 전에 거부한다.
+- 당시 `thin auto`는 layout cull/deck keep이었다. 현재는 일반/덱 모두 keep이며,
+  일반 레이아웃 occupancy 표시는 `FLOE_RUST_OCCUPANCY=on` opt-in이다.
+  최신 표시 정책은 병합 기록을 따른다. deck label 요청은 worker 실행 전에 거부한다.
 - source/spec 단계 누락이나 native 예산 deferral은 **표시된 부분 PNG + report
   complete=false + exit 3**으로 기존 덱 CLI를 보존한다. 원인 없는 final-partial,
   glyph 잘림, 실패/취소는 기존 PNG를 보존한다. report는 PNG와 별개 원자적 게시이며

@@ -1,18 +1,42 @@
-# 웹/Electron 전환 잔여 작업 — 2026-09-25 정리
+# 웹/Electron 전환 잔여 작업 — 2026-09-30 갱신
 
 현재 구현 범위의 정리표다. `WEBUI_PLAN`과 각 단계 문서의 날짜별 기록은 보존하되,
 예전의 “미구현/미검증” 문구를 현재 잔여로 중복 계산하지 않는다.
-이번 사용자 요청은 **실제 테스트를 제외한 나머지 진행**이다. 실제 GUI·현장 실행을
+2026-09-25의 정리 기준은 **실제 테스트를 제외한 나머지 진행**이다. 실제 GUI·현장 실행을
 단위 검사로 대체 통과시키지 않으며, 명시적으로 보류된 기능을 임의로 재개하지 않는다.
 초기 잔여 정리의 기능·자동 검증 커밋은 `374452b`다. 이후 재개한 인덱스
 수명주기의 최신 구현·검증은 아래 §1과 IR 추적 문서를 기준으로 한다.
+`b655282` 이후 미커밋 변경의 통합 재검증에서 OVH revision 누락과 Electron 단위
+검사 연결·시간 의존성을 보완했다. [후속 검증 기록](WEBUI_REVIEW_CLIENT_SAFETY.ko.md)을
+참조하며, 기존 Electron archive가 최신 수정까지 포함한다는 의미는 아니다.
 
-**최신 사용자 결정: xattr 없는 NFS의 기본 읽기·저장 호환성은 구현한다.**
+**유지되는 사용자 결정: xattr 없는 NFS의 기본 읽기·저장 호환성은 구현한다.**
 [불변 보조 record 방식](WEBUI_NO_XATTR.ko.md)으로 note/waive/shared-default의
 xattr 필수 조건을 제거했다. NFS 서버 장애·다중 client·재마운트 수용과 실제
 현장 검증은 별도로 남고, RHEL/ETX 수용도 완료 처리하지 않는다.
 
 ## 1. 승인된 비실측 구현
+
+**2026-09-29 최신 결정: 공용 서버 도입을 보류하고
+[TeeBox standalone](WEBUI_TEEBOX_STANDALONE.ko.md)을 우선한다.**
+아래 S0/S1 개발 코드는 보존하지만 운영 CLI·인증/TeeBox 서버 연결·S2~S5를 계속
+진행하지 않는다. 기존 Electron 로컬 backend·DISPLAY 실행, 배포 실행기와 동봉 CLI를
+사용한다. 로그인 위임·개인 작업공간 서비스는 standalone에 추가하지 않는다.
+
+**후속 승인: [회사 홈페이지 공개 데모](WEBUI_WEBSITE_DEMO.ko.md)만 구성 가능하게 한다.**
+익명 sample-ID 선택/독립 세션·관리자 immutable 준비·loopback serving CLI·프록시 예제를
+추가했다. 아래 이전 기록의 “익명 데모 API 잔여”는 이 경로로 갱신한다. TeeBox 서버
+나머지 단계는 보류하며 실제 HTTPS 공개·브라우저/부하 실측은 별도 잔여다.
+
+2026-09-28 새 범위: [공용 서비스 S0~S5](WEBUI_PUBLIC_SERVICE.ko.md)를 재개했다.
+S0 정책·설정 검사·공유 인덱싱 원장과 [S1a 위임 세션 코어](WEBUI_SERVER_SESSIONS.ko.md)를
+추가했다. 2026-09-29 S1b-1은 사용자별 실제 renderd·공용 Resources·준비 취소·회수·
+게시 revision pin을 연결했다. 이어 S1b-2에서 세션별 HTTP/WS 렌더 dispatch·idle/재접속·
+종료 회수를 구현했다. S1b-3에서 서버 전용 기본 뷰 UI·픽셀 표시·인증/재접속을 연결했다.
+실제 프록시/키/TeeBox 연결·나머지 UI 패널, native 인덱싱 연결·개인 저장·Electron 서버 연결·
+익명 데모 API는 아직 남는다.
+당시 원격 보류는 이 승인 범위 안에서 해제됐으나, 위 최신 결정으로 다시 보류했다.
+실제 서버 공개·현장 수용은 하지 않았다.
 
 2026-09-25 후속 승인: 열린 인덱스 전환·공유 캐시 수명주기를 재개한다.
 [IR-1 저장·빌드, IR-2 관리형 backend, IR-3 opt-in UI/명시적 전환](WEBUI_INDEX_REVISIONS.ko.md)을
@@ -21,10 +45,15 @@ xattr 필수 조건을 제거했다. NFS 서버 장애·다중 client·재마운
 사용량 조회·v2 소유권·협조적 reader 잠금 기반을 추가했다. 이어 IR-4b-1의
 **v3 native reader 직접 잠금·로컬 inactive set 회수/중단 복구 backend**를 추가했고,
 IR-4b-2의 owner 미리보기·1회 승인·응답 유실/새 세션 복구 UI/API까지 연결했다.
-**승인된 비실측 구현의 확인된 잔여는 없다.** 실제 GUI/현장 수용은 남고,
-NFS의 캐시 회수는 계속 차단한다.
-원격 공유·외부 CI·WK 동결 및 이번 NFS 제외
-범위는 그대로다.
+**이전 로컬 전환 범위의 확인된 비실측 잔여는 없다.** 위의 새 공용 서비스와 실제 GUI/현장 수용은 남고,
+NFS의 캐시 회수는 계속 차단한다. 외부 CI·WK 동결 및 아래 NFS 확장
+수용 제외 범위는 그대로다. 2026-09-28 문서 대조에서는 Stamp와 회수 조건을
+명문화했으며 런타임 동작/권한은 바꾸지 않았다.
+같은 날 별도 보고된 재접속 재시도·내장 한글 Escape·Explore/owner clip 자원 경합·
+legacy 임시 sidecar 소유자 누락은 [후속 수정·자동 회귀](WEBUI_REVIEW_CLIENT_SAFETY.ko.md)로
+닫았다. 이 후속 수정은 런타임 변경이며 앞의 문서 정리와 구분한다.
+같은 날 [SIGHUP·배포 fuse 강화](WEBUI_ELECTRON_HARDENING.ko.md)도 추가했다.
+macOS ad-hoc 서명·번들 정적 검증은 Developer ID 서명/공증이나 RHEL/ETX 수용이 아니다.
 
 | 범위 | 현재 상태 / 근거 |
 |---|---|
@@ -35,7 +64,7 @@ NFS의 캐시 회수는 계속 차단한다.
 | 공유 layer default 중단 복구 | 이번에 source-bound 표식·별도 승인·읽기 전용 확인·회귀 추가: [상세](WEBUI_DEFAULT_RECOVERY.ko.md) |
 | 일반 게시 syscall 결과 불명 | 이번에 사후 확인·증거 보존·불명 receipt·새 게시 차단 추가. 일반 게시 불명은 파일 확인/새 서버 세션이 필요한 보수적 운영 계약 |
 | xattr 없는 NFS의 기본 저장 호환성 | ENOTSUP만 inode별 보조 record로 전환. 식별·별도 복구·파일 형식 유지. [계약·제한](WEBUI_NO_XATTR.ko.md) |
-| 인덱스 수명주기 | IR-1~3·IR-4a/4b 구현. owner 회수 UI/API·새 세션 재승인 복구까지 연결: [계약/검증](WEBUI_INDEX_REVISIONS.ko.md). 자동 GC/NFS 회수 아님 |
+| 인덱스 수명주기 | IR-1~4 구현. Stamp는 파일 메타데이터 비교이며 내용 해시가 아님. 게시 증거·소유권·current/reader 보호를 통과한 inactive v3 set만 owner 별도 승인으로 회수·복구: [계약/검증](WEBUI_INDEX_REVISIONS.ko.md). 자동 GC/NFS 회수 아님 |
 | 로컬 Follow/Explore 공유 | 기존 opt-in/loopback 구현 유지. 원격 공개로 확장하지 않음 |
 | 오프라인 개발 번들·고지·무결성/의존성 검사 도구 | 구현됨: [portable](WEBUI_ELECTRON_PORTABLE.ko.md), [고지](WEBUI_ELECTRON_NOTICES.ko.md). 정식 배포 승인이 아님 |
 | GTK 배치의 웹/데모 UI, 셀 트리·view root | 2026-09-30 구현: [배치·셀 트리·데모](WEBUI_GTK_LAYOUT.ko.md). `floe-index hier` 웹 승인 경로와 RHEL/ETX/Electron 실화면 수용은 남음 |
@@ -69,8 +98,10 @@ NFS의 캐시 회수는 계속 차단한다.
   방화벽 변경을 이번 “나머지”에 포함하지 않는다.
 - **유료/외부 CI 실행**: GitHub Actions 실행 보류 유지.
 - **M5 world-tile**: F2R-03c/10 및 실측에 따른 조건부 단계. 미구현이며 완료 처리하지 않는다.
-- **열린 인덱스/공유 캐시 수명주기**: 이번에 재개. §1의 IR-1~4로 이동했다.
-  승인된 비실측 구현 완료. 자동 갱신이 아니라 명시적 revision 전환·로컬 회수다.
+- **인덱스 수명주기의 경계**: 승인된 IR-1~4는 §1에서 완료로 추적한다.
+  자동 갱신/GC·디스크 용량 상한·v1/v2/standalone/미게시 후보 정리·NFS 회수는
+  구현한 것으로 세지 않는다. Stamp의 remount/cross-host 이식성과 악의적 외부
+  in-place 변경 방어도 제공하지 않는다. 이 경계를 풀려면 별도 설계/승인이 필요하다.
 - **WKWebView 전용 호스트**: `617909e` 동결. 기능 추가·교차 호스트 수용은 필수 잔여에서 제외.
 - **정식 서명·공증·배포/업데이트 운영 승인**: 개발 번들 생성과 별개. 인증서/계정/배포 대상/
   보안 정책을 임의로 만들거나 적용하지 않는다. GTK 비교 패키지 은퇴도 별도 판단이다.

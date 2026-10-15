@@ -72,11 +72,17 @@ sh tools/validate_rust.sh --only web_portable
 않았다. 앞선 실패 로그는 `floe-electron-notices-{first,phase,final,native,visible,ready,present}.log`,
 `floe-notices-owner-smoke.log`에 남아 있다.
 
-## 남은 범위
+## 당시 남은 범위와 현재 상태
+
+아래는 2026-09-22 검증 시점의 한계다. 이후 Electron 단일 호스트를 선택했고,
+인덱스 수명주기도 재개하여 IR-1~4를 구현했다. 현재 잔여·보류는
+[잔여 표](WEBUI_REMAINING.ko.md)를 따른다. 아래 timeout은 당시 실행 기록이지
+최신 전체 배터리 결과가 아니다([병합 검증](WEBUI_JOBDECK_MERGE.ko.md)).
 
 이번 결과는 고지 메뉴 구현과 로컬 회귀 근거이며 정식 Electron 채택이나 전체 goal
 완료가 아니다. 전체 배터리는 마지막 `layer_defaults`30초 기동 timeout 실패를
 유지한다. 이번에는 영향 범위 `web_portable`만 실행했으며 전체 green으로 세지 않는다.
 G1 동일 조건 성능/실제 입력·표시, G4 추가 UI·저장 복구와 DRC-PUB-01 파일시스템
 정책, RHEL8.6/8.10+ETX/Python-free Linux, 고지·코덱·대응 소스/업데이트·서명·배포
-수용은 남아 있다. M5 조건부·원격 공유·캐시 수명주기의 사용자 보류도 유지한다.
+수용은 당시 남아 있었다. M5 조건부·원격 공유 보류는 유지하지만,
+캐시 수명주기 전체를 보류로 세지 않는다. NFS 회수·자동 GC 등 IR 밖 경계는 별도다.

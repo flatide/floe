@@ -5,7 +5,7 @@
 서비스 계약 초안: [WEBUI_SERVICE_API.ko.md](WEBUI_SERVICE_API.ko.md).
 
 현재 구현·수용 잔여는 [G4 감사](WEBUI_G4_AUDIT.ko.md)에서 대조한다.
-M4g-27의 [CLI 재대조](WEBUI_G4_CLI.ko.md)는 현재94개 공개 옵션(보조 PNG16개 별도)을
+M4g-27의 [CLI 재대조](WEBUI_G4_CLI.ko.md)는 당시94개 공개 옵션(보조 PNG16개 별도)을
 고정하고 명시 refinement on의 기존 환경 page-round 동작을 사용자 결정대로 복원했다.
 M4g-23은 GTK 메뉴 원본의 실행 중 DRC/SVRF 교체·카메라 유지 레벨 재선택3건을
 미구현으로 확인했다([메뉴 대조](WEBUI_G4_MENU.ko.md)). CLI 초기 등록/일반 open과
@@ -20,8 +20,11 @@ M4g-19는 실제 GTK 휠 핸들러의 이벤트당 상한·렌더 대기를 웹�
 M4g-22는 승인된 브라우저 최근 프레임/합성 화면의 보관·명시 다운로드를 연결했다.
 실제 브라우저 PNG/OS·ETX 화면 수용은 별도다([표시 진단](WEBUI_DISPLAY_DIAGNOSTICS.ko.md)).
 
-**로컬 조사/설계 결과이며 이관 완료표가 아니다.** 아래 Rust 서비스와 웹 UI는
-아직 전체 미구현이다. 2026-09-13에 M1a-1 worker client와 M1a-2a/b 일반 index·info/render/probe
+**로컬 조사/설계 결과이며 이관 완료표가 아니다.** 최초 조사 당시 Rust 서비스와 웹 UI는
+전체 미구현이었다. 현재 승인된 비실측 구현/실제 수용/보류 범위는
+[잔여 표](WEBUI_REMAINING.ko.md), 최신 표시 정책은
+[2026-09-28 병합 기록](WEBUI_JOBDECK_MERGE.ko.md)을 따른다.
+2026-09-13에 M1a-1 worker client와 M1a-2a/b 일반 index·info/render/probe
 경로를 추가했으며 §8~9에서 추적한다. 기존 Rust parser/VFS/raster/occupancy 구현과 새 서비스의
 완료 상태를 구별한다. 실칩 jobdeck/occupancy 판정은 실측 브랜치에서 계속한다.
 
@@ -91,7 +94,7 @@ CLI의 사람용 출력과 HTTP용 구조화 DTO는 같은 서비스 결과에�
 | `--line`, `--line-color`, `--keep-tiles` | mosaic 구분선 기본 2.0 / `#ffffff`, 중간 PNG 보관 opt-in |
 | `--batch`, `--report` | batch 파일/`-` stdin, JSON 결과 보고서 |
 | `--depth`, `--detail` | depth 생략/full, 0=top. detail 기본 `exact`, 그 외 low/medium/high |
-| `--thin` | `auto/keep/cull`, 생략과 명시 auto는 구별. auto=layout cull / deck keep |
+| `--thin` | `auto/keep/cull`, 생략과 명시 auto는 구별. 최초 layout cull/deck keep; 2026-09-28 병합 후 현재 auto=둘 다 keep |
 | `--frames`, `--labels`, `--label-font-px` | 두 표시 기본 off, 폰트 14px(6..96). 덱 capability에 따라 제한 |
 | `--drc`, `--drc-rule`, `--drc-err` | overlay DB/룰/오류 선택. err 기본 `all` |
 | `--drc-cap`, `--drc-frac`, `--drc-rules` | 기본 200 / 0.3 / 미지정. 명시 오류 번호·범위와 자동 all의 cap 의미 구별 |

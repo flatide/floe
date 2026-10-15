@@ -92,7 +92,7 @@ browser 경로, 비공개 임시 cwd를 사용하며 source 파일·설정·세�
 | 옵션 | 현재 동작·판정 |
 |---|---|
 | `--stream-target-ms` | 기존 Rust에서 쓰지 않던 값. 웹은 명시 거부. 시간 적응형 정책을 새로 만들지 않음 |
-| view `--lod` | 기존 Rust wire에 전달되지 않음. on/off 모두 명시 거부. `index --lod`는 생성 옵션으로 지원 |
+| view `--lod` | 2026-09-28 병합으로 Python 공개 옵션에서도 제거됨. Rust 웹 CLI는 계속 on/off 모두 명시 거부. `index --lod`는 생성 옵션으로 지원 |
 | `--hairline`/`--thin-um` | 기존 KLayout planner에만 연결. 웹은 명시 거부. `--thin keep/cull`로 같은 의미인 척 대체하지 않음 |
 | `--render-debug` | 전체 wire/경로·좌표 출력 대신 숫자 전용 진단. 독립 workspace, stderr 지연 가능성을 명시 |
 | `--dump` | 사용자가 선택한 브라우저 최근 수신/합성 bitmap 보관·명시 다운로드. 고정 서버 `/tmp` 파일 덮어쓰기 아님 |

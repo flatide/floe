@@ -2,10 +2,30 @@
 
 작성 2026-08-29, 갱신 2026-09-25(Electron 단일 호스트; WK 동결; xattr 없는 저장 호환성).
 
+**2026-09-29 최신 결정:** TeeBox 공용 서버 개발은 보류하고
+[TeeBox에서 기존 Electron standalone 실행](WEBUI_TEEBOX_STANDALONE.ko.md)을 우선한다.
+아래 서버 재개 기록은 이전 결정이다. S0/S1 코드는 보존하며 운영 연결·S2~S5는
+재개하지 않는다. 로컬 backend·공유 원본/인덱스 재사용·기존 명시 승인 규칙을 유지한다.
+
+같은 날 후속 요청으로 [회사 홈페이지용 공개 샘플 데모](WEBUI_WEBSITE_DEMO.ko.md)만
+별도 실행 경로로 연결했다. 익명 독립 뷰·관리자 사전 준비·HTTPS 프록시용 loopback이며
+TeeBox 서버·개인 저장·Electron 원격 연결을 재개한 것은 아니다. 실제 외부 공개도 하지 않았다.
+
+**2026-09-28 서비스 구현 재개:** [TeeBox/Electron·공용 인덱스·공개 데모](WEBUI_PUBLIC_SERVICE.ko.md)가
+최신 서버 모델이다. 서비스 계정과 실제 사용자 ID를 분리하고 원본·인덱스는 공용,
+작업 파일·렌더 세션은 개인별이다. Electron은 주 작업, 브라우저는 공유/익명 데모로
+구분한다. 이전 원격 보류 중 이 문서의 승인 범위는 해제됐으나 실제 서버 공개는
+승인/실측하지 않았다. S0 정책·설정 검사와 [S1a 세션 발급/회수 코어](WEBUI_SERVER_SESSIONS.ko.md)를
+추가했다. 2026-09-29 S1b-1은 사용자별 renderd·공용 자원 예약·회수·게시 revision pin까지
+연결했다. 이어 S1b-2에서 세션별 HTTP/WS 렌더 dispatch·재접속/idle·종료 회수를
+구현했다. S1b-3은 서버 전용 기본 뷰 UI와 인증/화면/복구를 연결했다.
+운영 연결·나머지 UI 패널과 S2~S5는 남는다.
+이하 날짜별 보류/완료는 당시 범위로 읽는다. WK 동결은 유지한다.
+
 **최신 범위 결정: xattr 없는 NFS에서도 기본 저장은 동작하도록 구현한다.**
 [inode별 보조 record](WEBUI_NO_XATTR.ko.md)로 xattr 의존을 대체한다. 이전의
 NFS 전체 보류보다 이 요청이 우선하며, 실제 NFS 장애/다중 client와 RHEL/ETX
-수용은 여전히 남는다. 원격 공유 보류와 WK 동결은 바뀌지 않는다.
+수용은 여전히 남는다. 원격 서비스는 위 2026-09-29 최신 결정으로 보류한다.
 
 **최신 잔여 정본:** [비실측 구현/실제 테스트/보류 구분](WEBUI_REMAINING.ko.md).
 
@@ -16,7 +36,7 @@ NFS 전체 보류보다 이 요청이 우선하며, 실제 NFS 장애/다중 cli
 사용자 요청에 따라 실제 테스트를 제외하고 shared-default 파일 복구와 일반 게시의
 결과 불명 처리를 추가했다([계약·검증](WEBUI_DEFAULT_RECOVERY.ko.md)). 아래 날짜별
 “shared defaults 미구현” 등은 과거 상태다. 실제 GUI/RHEL/NFS 수용이나 전체 goal을
-완료 처리하지 않으며 원격 공유·M5·hot-reload 보류와 WK 동결은 유지한다.
+완료 처리하지 않으며 M5·자동 hot-reload 보류와 WK 동결은 유지한다.
 
 2026-09-25 추가 검증: [DRC 게시 복구](WEBUI_REVIEW_RECOVERY.ko.md)의 실제 Electron
 note/waive 미리보기·취소·승인·응답 유실·Chromium 종료·동일 승인 재확인·picker 재열기와
@@ -788,18 +808,23 @@ IR-4b-1의 v3 native 직접 reader 잠금·로컬 inactive set 회수/중단 복
 승인된 비실측 구현은 완료했고 실제 GUI·현장 수용은 남는다.
 
 열린 GUI가 `.ovo` 교체를 즉시 감지하지 않는 기존 항목은 사용자 합의대로
-jobdeck 실측의 차단 조건에서 제외한다. 웹/서버 모델에서는 별도 계약을 정한다.
+jobdeck 실측의 차단 조건에서 제외한다. 웹/서버의 현재 계약은 다음과 같다.
 
 - 소스 식별자·인덱스 revision·뷰 상태 revision·render generation을
   구분한다. 한 세션/프레임이 서로 다른 revision의 OVM/OVP/OVT/OVO를
   섞어 쓰지 않아야 한다. 덱은 참조 소스별 revision 집합도 식별한다.
 - 재인덱싱 중 기존 세션 유지, 새 세션의 버전 선택, 명시적 reopen/전환,
-  사용 중인 파일의 보존·회수 책임을 Rust 서비스 계약으로 정한다.
+  사용 중인 파일의 보존·회수 책임을 Rust 서비스에 구현했다. 일반 Open은 기존
+  경로를 유지하고 불변 revision은 명시적인 Check/Use로만 선택한다.
 - revision 전환 시 frame/margin/retained/query 캐시의 무효화 범위를
-  함께 정한다. mtime 감지만으로 일관된 snapshot이 보장된다고 가정하지 않는다.
-- 불변 revision 디렉터리/manifest 방식을 분리 저장소에서 구현한다.
-  관리형 경로 연결 전에는 인덱싱 완료 후 열기·재인덱싱 후 재열기를 전제로
-  개발하며 hot reload를 지원한다고 표시하지 않는다.
+  함께 적용한다. Stamp(dev/inode/len/ns mtime/ctime)는 내용 해시가 아니며,
+  봉인된 파일 집합·set manifest·reader lease를 대신하지 않는다.
+- 불변 revision 디렉터리/manifest를 분리 저장소에서 제공한다. 게시된 inactive
+  v3 set과 전용 멤버만 잠금·current·Stamp·게시 증거 재확인 및 별도 1회 승인으로
+  회수한다. 조회의 idle, pin 해제, 파일 나이만으로 삭제하지 않는다.
+- 자동 hot reload/GC·용량 상한·NFS 회수는 없다. 기존 mutable 경로는 계속
+  색인 완료 후 열기·외부 재색인 후 재열기가 전제다. Stamp와 전체 회수 조건은
+  [IR 계약](WEBUI_INDEX_REVISIONS.ko.md)을 따른다.
 
 ## 5. 전송 계층 (진화 단계)
 
