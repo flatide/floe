@@ -276,9 +276,11 @@ if(require.main===module)(async()=>{
     assert.equal(shell.el('dstatus').textContent,'depth: full/6 · detail: high · thin:auto · frame:on');
     assert(shell.requests.every(r=>r.path.startsWith(base)&&!r.path.includes('/api/v1/views/')),'owner routes are never addressed');
     const view=shell.el('menubar').children[1];view.children[0].onclick({preventDefault(){}});assert.equal(view.children[1].hidden,false);
-    const detail=view.children[1].children.find(n=>n.children[0]&&n.children[0].children[1]&&n.children[0].children[1].textContent==='Detail');
-    const low=detail.children[1].children[0];assert.equal(low.children[1].textContent,'Low · 5 px');low.onclick({preventDefault(){}});
-    assert.equal(shell.el('detail').value,'low');assert.deepEqual(shell.sockets[0].sent.at(-1).body,{detail:'low'});assert.equal(view.children[1].hidden,true);
+    // "detail…" is a dialog (GTK): the menu item opens it on the detail control.
+    const detail=view.children[1].children.find(n=>n.children[1]&&n.children[1].textContent==='detail…');
+    detail.onclick({preventDefault(){}});assert.equal(shell.el('display-dialog').hidden,false);assert.equal(view.children[1].hidden,true);
+    assert.equal(shell.doc.activeElement,shell.el('detail'));shell.el('detail').value='low';shell.el('detail').onchange();
+    assert.deepEqual(shell.sockets[0].sent.at(-1).body,{detail:'low'});shell.el('display-close').onclick();assert.equal(shell.el('display-dialog').hidden,true);
     assert.equal(shell.el('minimap-panel').hidden,true,'no minimap projection in this snapshot');
     shell.el('tab-palette').onclick();assert.equal(shell.el('palette-page').hidden,false);assert.equal(shell.el('minimap-page').hidden,true);
     assert(shell.requests.some(r=>r.path.endsWith('/presets')),'presets load with the palette page');

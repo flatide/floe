@@ -1,4 +1,4 @@
-/* Workspace chrome: the left cells/DRC/inspect notebook, the right
+/* Workspace chrome: the left cells/DRC notebook, the right
  * minimap/palette notebook, the two pane splitters and the tool dialogs that
  * host panels the GTK viewer shows as menu dialogs. Panels keep their own ids
  * and enable/disable logic; this module only decides where they are shown. */
@@ -103,12 +103,12 @@
             return dialogs[id];
         }
         notebook('left', [
-            {tab: 'tab-cells', page: 'cells-page'}, {tab: 'tab-drc', page: 'drc-page'}, {tab: 'tab-inspect', page: 'inspect-page'}
+            {tab: 'tab-cells', page: 'cells-page'}, {tab: 'tab-drc', page: 'drc-page'}
         ], 'cells-page');
         notebook('right', [{tab: 'tab-minimap', page: 'minimap-page'}, {tab: 'tab-palette', page: 'palette-page'}], 'minimap-page');
         const leftSplit = splitter('left-splitter', 'left-pane', 'left', LEFT_MIN);
         splitter('right-splitter', 'right-pane', 'right', RIGHT_MIN);
-        ['source', 'display', 'clip', 'settings', 'index'].forEach(function (n) { dialog(n + '-dialog', n + '-close'); });
+        ['source', 'display', 'goto', 'clip', 'settings', 'index', 'notes', 'waives', 'transfer', 'build'].forEach(function (n) { dialog(n + '-dialog', n + '-close'); });
         let drcWasShown = false, launchWasShown = false, indexWasShown = false;
         function changed() {
             // Loading a DRC database raises the DRC page and widens the pane
@@ -131,7 +131,8 @@
         return Object.freeze({
             changed: changed,
             raise: raise,
-            show: function (name, prepare) { const d = dialogs[name + '-dialog']; if (d) { if (prepare) { prepare(); } d.show(); } },
+            // `prepare` runs once the dialog is up: it may focus a field.
+            show: function (name, prepare) { const d = dialogs[name + '-dialog']; if (d) { d.show(); if (prepare && !d.node.hidden) { prepare(); } } },
             hide: function (name) { const d = dialogs[name + '-dialog']; if (d) { d.hide(true); } },
             active: function () { return active; },
             page: function (name) { return notebooks[name] ? notebooks[name].current : null; },

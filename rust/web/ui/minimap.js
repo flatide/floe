@@ -24,7 +24,9 @@
             else if(m.die){const d=m.die;ctx.fillStyle=COLORS[1];ctx.fillRect(d[0],d[1],d[2],d[3]);
                 if(rooted(s)){ctx.fillStyle=COLORS[2];ctx.fillRect(d[0],d[1],d[2],1);ctx.fillRect(d[0],d[1]+d[3]-1,d[2],1);ctx.fillRect(d[0],d[1],1,d[3]);ctx.fillRect(d[0]+d[2]-1,d[1],1,d[3]);}}
             m.marks.forEach(function(r){ctx.fillStyle=COLORS[r[4]];ctx.fillRect(r[0],r[1],r[2],r[3]);});
-            el('minimap-note').textContent=rooted(s)?'Root '+(s.root_name||'cell')+' · current view':failed===m.base?'Overview unavailable; retry to reload.':!base?'Loading structural overview…':m.base==='full'?'Die outline · current view':'Baked depth '+m.base+' · current view';
+            // GTK shows the overview alone; what it is made of is its tooltip.
+            el('minimap-note').textContent=rooted(s)?'root '+(s.root_name||'cell'):failed===m.base?'overview unavailable':!base?'loading…':'';
+            el('minimap').title='Click inside the die to center the viewport'+(base?' · '+(m.base==='full'?'die outline':'baked depth '+m.base):'');
             el('minimap-retry').hidden=rooted(s)||failed!==m.base;
         }
         async function fetchBase(s){

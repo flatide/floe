@@ -78,13 +78,13 @@ const scenarios = [
     ['C3 frame at open and after a view switch', async () => {
         // The view's root is its frame from the first pass: the first
         // snapshot after the tree is no root change, so a double-click in
-        // between asks once and frames.
+        // between asks once and makes the cell the view root (GTK).
         const h = harness(); h.state.root = {cell: 1, name: 'BLK'}; h.state.root_name = 'BLK';
         await h.load();
         let from = h.requests.length; h.row('VIA').ondblclick(); h.c.changed();
         assert.equal(h.kinds(from).filter(k => k === 'bbox').length, 1, 'an unchanged root asks the extent once');
         await h.reply(h.last('bbox'), {insts: 9, approx: false, bbox: [200, 200, 240, 220]});
-        assert.deepEqual(h.edits, [{navigation: {kind: 'goto', center_um: ['0.22', '0.21'], width_um: '0.05'}}], 'and the double-click frames');
+        assert.deepEqual(h.edits, [{root: {src: 0, cell: 2}}], 'and the double-click roots the cell');
         // reset() forgets the old view's frame.
         h.connect('v2', Object.assign({}, h.state, {root: null, root_name: ''}));
         await h.reply(h.last('sources'), SOURCES); await h.reply(h.last('children'), TOP);
@@ -134,26 +134,27 @@ const scenarios = [
         assert.deepEqual(h.requests.slice(from).map(r => r.body.kind + '#' + r.body.cell), ['bbox#2', 'insts#2'], 'asked once available');
     }],
     ['C0 focus of a zoom that lands later', async () => {
-        // The canvas takes the focus only from where the gesture left it;
-        // the zoom button always hands it over.
+        // A row's Enter / double-click make the cell the view root once its
+        // extent lands and never move the focus (GTK). The search box's Enter
+        // frames the selection; the canvas takes the focus only from where
+        // the gesture left it, and the zoom button always hands it over.
         const h = harness(); await h.load(); await h.expand('BLK', BLK);
         const search = h.el('cells-search'), form = h.el('cells-search-form'), at = {insts: 9, approx: false, bbox: [200, 200, 240, 220]};
         h.row('VIA').focus(); h.row('VIA').onkeydown(key('Enter')); search.focus();
         await h.reply(h.last('bbox'), at);
-        assert.equal(h.edits.length, 1, 'the zoom lands'); assert.equal(h.focusedCanvas(), 0); assert.equal(h.doc.activeElement, search, 'the field the user moved into keeps the focus');
+        assert.deepEqual(h.edits, [{root: {src: 0, cell: 2}}], 'Enter roots the cell'); assert.equal(h.focusedCanvas(), 0); assert.equal(h.doc.activeElement, search, 'the field the user moved into keeps the focus');
         h.row('VIA').focus(); h.row('VIA').ondblclick(); await h.reply(h.last('bbox'), at);
-        assert.equal(h.edits.length, 2); assert.equal(h.focusedCanvas(), 1, 'an undisturbed double-click hands it to the canvas');
-        h.row('VIA').focus(); h.row('VIA').onkeydown(key('Enter')); h.row('BLK').focus(); h.row('BLK').onkeydown(key('ArrowLeft'));
-        await h.reply(h.last('bbox'), at);
-        assert.equal(h.edits.length, 3); assert.equal(h.focusedCanvas(), 2, 'focus still in the rebuilt tree counts');
+        assert.equal(h.edits.length, 2); assert.equal(h.focusedCanvas(), 0, 'a double-click leaves the focus in the tree');
+        h.row('TOP').focus(); h.row('TOP').ondblclick(); await h.reply(h.last('bbox'), {insts: 1, approx: false, bbox: [0, 0, 1000, 500]});
+        assert.deepEqual(h.edits.at(-1), {root: null}, 'the top cell goes back to the top'); assert.equal(h.focusedCanvas(), 0);
         // Search Enter with the extent still out: only from the search box.
         h.row('VIA').onclick({target: h.row('VIA').children[1]}); search.focus(); form.onsubmit(key('Enter')); h.row('VIA').focus();
         await h.reply(h.last('bbox'), at);
-        assert.equal(h.edits.length, 4); assert.equal(h.focusedCanvas(), 2); assert.equal(h.doc.activeElement, h.row('VIA'));
+        assert.equal(h.edits.length, 4); assert.equal(h.edits.at(-1).navigation.kind, 'goto'); assert.equal(h.focusedCanvas(), 0); assert.equal(h.doc.activeElement, h.row('VIA'));
         h.row('VIA').onclick({target: h.row('VIA').children[1]}); search.focus(); form.onsubmit(key('Enter'));
         await h.reply(h.last('bbox'), at);
-        assert.equal(h.edits.length, 5); assert.equal(h.focusedCanvas(), 3);
-        h.click('cells-zoom'); assert.equal(h.focusedCanvas(), 4, 'the zoom button always does');
+        assert.equal(h.edits.length, 5); assert.equal(h.focusedCanvas(), 1);
+        h.click('cells-zoom'); assert.equal(h.focusedCanvas(), 2, 'the zoom button always does');
     }],
     ['R2/R4 keyboard in the tree', async () => {
         // One Tab stop (the selected row, else the first), arrows over cell
@@ -172,7 +173,7 @@ const scenarios = [
         assert.equal(h.row('M1'), m1, 'selecting marks the row in place'); assert.equal(h.doc.activeElement, m1);
         assert.deepEqual(tabs(), [-1, -1, 0, -1], 'the selected row is the Tab stop');
         await h.reply(h.last('bbox'), {insts: 2, approx: false, bbox: [10, 10, 30, 20]});
-        assert.equal(h.doc.activeElement, h.el('viewport'), 'the zoom hands the focus to the canvas');
+        assert.deepEqual(h.edits.at(-1), {root: {src: 0, cell: 3}}, 'Enter roots the cell'); assert.equal(h.doc.activeElement, m1, 'and leaves the focus in the tree');
         h.row('BLK').focus(); move('ArrowLeft');
         assert.deepEqual(h.rows(), ['▾|TOP|', '▸|BLK|×4', '|VIA|']); assert.equal(h.doc.activeElement, h.row('BLK'));
         assert.deepEqual(tabs(), [0, -1, -1], 'a hidden selection leaves the stop on the first row');
@@ -434,25 +435,25 @@ const scenarios = [
     h.el('cells-zoom').onclick();
     assert.deepEqual(h.edits.at(-1).navigation, {kind: 'goto', center_um: ['0.2', '0.15'], width_um: '0.25'});
     h.state.dbu_um = '0.001'; h.unit = 0.001;
-    // Double-click and Enter frame the cell after its extent lands; a root
-    // change in between cancels the pending zoom.
+    // Double-click and Enter make the cell the view root after its extent
+    // lands (GTK); a root change in between cancels the pending root.
     const via2 = h.el('cells-tree').children.find(n => n.children[1] && n.children[1].textContent === 'VIA');
     let edits0 = h.edits.length; via2.ondblclick();
     assert.equal(h.requests.at(-1).body.kind, 'bbox'); assert.equal(h.requests.at(-1).body.cell, 2, 'VIA extent asked first');
-    assert.equal(h.edits.length, edits0, 'no navigation before the extent');
+    assert.equal(h.edits.length, edits0, 'no edit before the extent');
     await h.reply(h.requests.length - 1, {insts: 9, approx: false, bbox: [200, 200, 240, 220]});
-    assert.equal(h.edits.at(-1).navigation.kind, 'goto'); assert.deepEqual(h.edits.at(-1).navigation.center_um, ['0.22', '0.21'], 'double-click frames after the answer');
+    assert.deepEqual(h.edits.at(-1), {root: {src: 0, cell: 2}}, 'double-click roots after the answer');
     await h.reply(h.requests.length - 1, {n: 0, more: false, visited: 0, boxes: []});
     edits0 = h.edits.length; via2.onkeydown({key: 'Enter', preventDefault() {}});
     assert.equal(h.requests.at(-1).body.kind, 'bbox'); assert.equal(h.edits.length, edits0);
     await h.reply(h.requests.length - 1, {insts: 9, approx: false, bbox: [200, 200, 240, 220]});
-    assert.equal(h.edits.length, edits0 + 1, 'Enter frames after the answer');
+    assert.equal(h.edits.length, edits0 + 1, 'Enter roots after the answer'); assert.deepEqual(h.edits.at(-1), {root: {src: 0, cell: 2}});
     await h.reply(h.requests.length - 1, {n: 0, more: false, visited: 0, boxes: []});
-    edits0 = h.edits.length; via2.ondblclick(); const staleZoom = h.requests.length - 1;
+    edits0 = h.edits.length; via2.ondblclick(); const staleRoot = h.requests.length - 1;
     h.state.root = {cell: 1, name: 'BLK'}; h.state.root_name = 'BLK'; h.c.changed();
-    await h.reply(staleZoom, {insts: 9, approx: false, bbox: [200, 200, 240, 220]});
+    await h.reply(staleRoot, {insts: 9, approx: false, bbox: [200, 200, 240, 220]});
     await h.reply(h.requests.length - 1, {insts: 9, approx: false, bbox: [0, 0, 40, 20]});
-    assert.equal(h.edits.length, edits0, 'a root change cancels the pending double-click zoom');
+    assert.equal(h.edits.length, edits0, 'a root change cancels the pending double-click');
     await h.reply(h.requests.length - 1, {n: 0, more: false, visited: 0, boxes: []});
     h.state.root = null; h.state.root_name = ''; h.c.changed();
     await h.reply(h.requests.length - 1, {insts: 9, approx: false, bbox: [200, 200, 240, 220]});

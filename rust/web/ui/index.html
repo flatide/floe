@@ -53,221 +53,77 @@
 </head>
 <body id="app-shell" data-floe-viewer>
   <header id="app-header" class="topbar">
-    <div class="brand">floe<span>2</span><small>WEB PREVIEW</small></div>
-    <div id="document-title" class="document-title">Layout workspace</div>
+    <div class="brand">floe<span>2</span></div>
+    <div id="document-title" class="document-title">no layout (File &gt; load layout…)</div>
     <span id="connection" class="connection">Connecting</span>
-    <button id="share-open" class="quiet" aria-haspopup="dialog" aria-controls="share-dialog" aria-expanded="false" hidden disabled>Share locally…</button>
-    <button id="drc-toggle" class="quiet" aria-expanded="true" aria-controls="drc-panel" hidden>DRC</button>
-    <button id="logout" class="quiet" title="Confirm ending this session (q on canvas)" aria-haspopup="dialog" aria-controls="session-exit-dialog" aria-expanded="false" disabled>End session</button>
-    <button id="about-open" class="quiet" aria-haspopup="dialog" aria-controls="about-dialog" aria-expanded="false" disabled>About</button>
+    <button id="share-open" class="quiet" aria-haspopup="dialog" aria-controls="share-dialog" aria-expanded="false" hidden disabled>share locally…</button>
+    <button id="logout" class="quiet" aria-haspopup="dialog" aria-controls="session-exit-dialog" aria-expanded="false" disabled>end session</button>
   </header>
   <nav id="menubar" class="menubar" aria-label="Main menu"></nav>
   <div id="app-workspace" class="workspace">
-    <aside id="left-pane" class="left-pane" aria-label="Cells, DRC and inspection">
+    <aside id="left-pane" class="left-pane" aria-label="Cells and DRC">
       <div class="pane-tabs" role="tablist" aria-label="Left pane">
         <button id="tab-cells" class="pane-tab active" type="button" role="tab" aria-selected="true" aria-controls="cells-page">cells</button>
         <button id="tab-drc" class="pane-tab" type="button" role="tab" aria-selected="false" aria-controls="drc-page">DRC</button>
-        <button id="tab-inspect" class="pane-tab" type="button" role="tab" aria-selected="false" aria-controls="inspect-page">inspect</button>
       </div>
       <!-- floe-cells-page:start -->
       <section id="cells-page" class="pane-page cells-page" role="tabpanel" aria-labelledby="tab-cells">
         <form id="cells-search-form" class="cells-search"><input id="cells-search" placeholder="find cell… (* ? wildcards)" maxlength="256" autocomplete="off" spellcheck="false" aria-label="Find cell" disabled></form>
         <div id="cells-tree" class="cells-tree" role="tree" aria-label="Cell hierarchy"></div>
-        <div class="cells-controls"><label class="check"><input id="cells-highlight" type="checkbox" checked disabled> highlight</label><button id="cells-zoom" type="button" disabled title="Frame the selected cell (Enter)">zoom</button><button id="cells-root" type="button" disabled title="Selected cell as view root">root</button><button id="cells-top" type="button" disabled title="View root: back to the top cell">top</button></div>
-        <button id="cells-build" type="button" hidden>build cell index…</button>
+        <div class="cells-controls"><label class="check"><input id="cells-highlight" type="checkbox" checked disabled> highlight</label><button id="cells-zoom" type="button" disabled>zoom</button></div>
+        <div class="menu-proxies" hidden><button id="cells-root" type="button" disabled>root</button><button id="cells-top" type="button" disabled>top</button></div>
+        <button id="cells-build" type="button" hidden>build index…</button>
         <div id="cells-build-confirm" class="cells-confirm" role="group" aria-label="Build the cell index" aria-describedby="cells-build-note" hidden>
-          <p id="cells-build-note" class="note">Adds design.ovh beside this layout's cache; the layout file is not changed. Large layouts can take minutes; the view waits meanwhile.</p>
+          <p id="cells-build-note" class="note">The cell tree needs the hierarchy index (design.ovh). Build it now?</p>
           <div class="cells-controls"><button id="cells-build-run" type="button">Build</button><button id="cells-build-cancel" type="button">Cancel</button></div>
         </div>
-        <p id="cells-info" class="note" role="status"></p>
+        <p id="cells-info" class="note" role="status">no layout</p>
       </section>
       <!-- floe-cells-page:end -->
       <section id="drc-page" class="pane-page drc-page" role="tabpanel" aria-labelledby="tab-drc" hidden>
         <p id="drc-empty" class="pane-empty">no results database loaded</p>
-    <aside id="drc-panel" class="drc-panel" aria-label="DRC review" hidden>
-      <div class="drc-heading"><h2>DRC review <span id="drc-review-mode">NO REVIEW WRITES</span></h2><strong id="drc-title">DRC results</strong><p id="drc-summary" class="note"></p></div>
-      <details id="recovery-panel" class="notes-panel" aria-label="Interrupted review file recovery" hidden>
-        <summary>Recover interrupted review file…</summary>
-        <p class="note">For marked note/waive files interrupted during publication. No payload rewrite, directory scan or legacy-file cleanup. Also available when DRC metadata cannot load.</p>
-        <label>File <select id="recovery-kind"><option value="notes">Notes</option><option id="recovery-waives-choice" value="waives" disabled>Waives</option></select></label>
-        <button id="recovery-prepare">Preview file recovery</button>
-        <div id="recovery-preview" hidden>
-          <p><strong id="recovery-target"></strong></p>
-          <label class="check"><input id="recovery-consent" type="checkbox"> Remove only the verified extra staging link; keep the target and its contents.</label>
-          <div class="button-row"><button id="recovery-approve" disabled>Approve file recovery</button><button id="recovery-discard">Discard preview</button></div>
-        </div>
-        <p id="recovery-status" role="status"></p><p id="recovery-message" class="note" role="status"></p>
-        <div class="button-row"><button id="recovery-refresh">Refresh receipt</button><button id="recovery-resolve" hidden>Resolve same approval</button><button id="recovery-check" hidden>Check same repair (read only)</button></div>
-        <label id="recovery-checked-label" class="check" hidden><input id="recovery-checked" type="checkbox"> I checked the file and receipt independently.</label>
-        <button id="recovery-forget" hidden disabled>Clear tab receipt only</button>
-      </details>
-      <section id="drc-build" class="drc-build" aria-label="DRC pack build" hidden>
-        <button id="drc-build-open" aria-expanded="false" aria-controls="drc-build-form" disabled>Build pack…</button>
-        <form id="drc-build-form" aria-label="Approve pack build" hidden>
-          <p>Current review: <strong id="drc-build-source"></strong></p>
-          <p>The registered ASCII source’s hidden <code>.tray</code> pack will be created or reused beside that source. This explicit build also renames a legacy <code>.ice</code> pack when no new-name pack exists. Completed renames remain if later work fails or is cancelled.</p>
-          <p>DRC reads pause. Close readers in other processes first; reader leases are app-local. Selected errors, groups and CD rulers reset, even if cancelled. Layout and layer visibility stay unchanged. Review files are not changed.</p>
-          <div class="form-row"><label for="drc-build-jobs">Build jobs</label><input id="drc-build-jobs" class="short" type="number" min="1" max="16" step="1" value="4" required></div>
-          <label class="check"><input id="drc-build-force" type="checkbox"> Replace existing pack</label>
-          <p class="note">Unchecked: reuse a current pack; refuse a stale or corrupt pack. Checked: rebuild and atomically replace it, without a backup.</p>
-          <div class="button-row"><button id="drc-build-submit" class="primary" type="submit">Approve build</button><button id="drc-build-dismiss" type="button">Back</button></div>
-        </form>
-        <p id="drc-build-status" role="status">No pack build requested.</p>
-        <p id="drc-build-review" class="note"></p>
-        <p id="drc-build-note" class="note" role="status"></p>
-        <div class="button-row"><button id="drc-build-cancel" hidden>Cancel build</button><button id="drc-build-resolve" hidden>Resolve request</button></div>
-      </section>
-      <form id="drc-search-form" class="drc-search"><label for="drc-search" class="sr-only">Search DRC rules</label><input id="drc-search" placeholder="Search rule names" maxlength="256"><button id="drc-search-submit">Search</button></form>
-      <div class="form-row"><label for="drc-type">Rule type</label><select id="drc-type" disabled><option value="">All types</option></select></div>
-      <div class="pagination"><button id="drc-type-prev" aria-label="Previous type page" disabled>←</button><span>Type pages</span><button id="drc-type-next" aria-label="Next type page" disabled>→</button></div>
-      <p id="drc-type-info" class="note" role="status"></p>
-      <div id="drc-rules" class="drc-rules" aria-label="DRC rules">Waiting for DRC metadata…</div>
-      <div class="pagination"><button id="drc-rule-prev" aria-label="Previous rule page" disabled>←</button><span>Rule pages</span><button id="drc-rule-next" aria-label="Next rule page" disabled>→</button></div>
-      <details class="drc-description"><summary id="drc-rule-title">Choose a rule</summary><pre id="drc-description"></pre><pre id="drc-rule-metadata"></pre></details>
-      <div class="form-row"><label for="drc-waived">Errors</label><select id="drc-waived"><option value="all">All statuses</option><option value="unwaived">Not waived</option><option value="waived">Waived</option></select></div>
-      <div class="drc-actions"><label class="check" title="Only errors of this rule intersecting the live viewport"><input id="drc-in-view" type="checkbox"> In view</label><label class="check" title="Only this rule’s selected errors; an empty selection shows no errors"><input id="drc-selected-only" type="checkbox"> Selected</label><label class="check"><input id="drc-markers" type="checkbox" checked> Markers</label><button id="drc-first" title="First error page; back history retains 128 pages">First page</button></div>
-      <p id="drc-result-info" class="note">No rule selected.</p>
-      <p class="note">Canvas markers: click to inspect · double-click to go. Current page and this rule’s selections are marked; only the focused error shows its outline.</p>
-      <section class="drc-groups" aria-label="DRC selection groups">
-        <div class="button-row"><button id="drc-box" aria-pressed="false" title="Two-click box selection (e)" disabled>Box select</button><button id="drc-group-clear" disabled>Clear rule selection</button></div>
-        <p id="drc-group-count" class="note">0 selected</p>
-        <p id="drc-box-status" class="note" role="status">e: two corners · Shift adds · Ctrl/Cmd toggles. Current rule and page only.</p>
-        <p id="drc-group-status" class="note" role="status"></p>
-      </section>
-      <div id="drc-errors" class="drc-errors" aria-label="DRC errors"></div>
-      <div class="pagination"><button id="drc-error-prev" aria-label="Previous error page" disabled>←</button><span>Error pages</span><button id="drc-error-next" aria-label="Next error page" disabled>→</button></div>
-      <div class="button-row"><button id="drc-step-prev" title="Previous matching error in this rule, wrapping (comma)" disabled>Previous error</button><button id="drc-step-next" title="Next matching error in this rule, wrapping (period)" disabled>Next error</button></div>
-      <p class="note">Comma / period: previous / next error. N: note editor. W: propose a waive toggle. Editing requires a writer registration. Preview and approval are the default; saving confirmed edits automatically is a separate reviewer opt-in.</p>
-      <button id="drc-step-continue" hidden>Continue search</button>
-      <div class="drc-selection"><p id="drc-selected" class="note">Click to inspect · double-click to go to an error.</p><div class="button-row"><button id="drc-frame" disabled>Frame error</button><button id="drc-clear" disabled>Clear</button></div></div>
-      <section id="notes-panel" class="notes-panel" aria-label="Owner DRC notes" hidden>
-        <section id="drc-saved-notes" aria-label="Saved note display" hidden>
-          <p id="drc-notes-status" class="note" role="status"></p>
-          <button id="drc-notes-refresh">Refresh saved notes</button>
-          <details id="drc-note-body" class="drc-description" hidden><summary>Last jumped error · full saved note</summary><pre id="drc-note-text"></pre></details>
-        </section>
-        <h3>Notes</h3><p id="notes-owner" class="note"></p>
-        <div id="notes-authoring" hidden><p id="notes-selection" class="note"></p>
-        <label class="check"><input id="notes-autosave" type="checkbox" disabled> Automatically save confirmed note edits for this reviewer (this tab)</label>
-        <p id="notes-autosave-status" class="note" role="status"></p>
-        <button id="notes-read" disabled>Read selected notes</button>
-        <div id="notes-editor" hidden>
-          <p id="notes-target" class="note"></p>
-          <label for="notes-text">Note text</label><textarea id="notes-text" rows="5" maxlength="65536" spellcheck="false" aria-describedby="notes-bytes notes-local notes-hangul-status"></textarea>
-          <label><input id="notes-hangul" type="checkbox">Built-in Hangul (Shift+Space)</label>
-          <p id="notes-hangul-status" class="note" role="status"></p>
-          <p id="notes-bytes" class="note"></p><p id="notes-local" class="note">Local draft only · not autosaved · lost on page reload. Ctrl/Cmd+Enter previews; Escape discards. Browser IME is supported.</p>
-          <div class="button-row"><button id="notes-prepare">Preview save</button><button id="notes-reload">Reload snapshot, keep text</button><button id="notes-discard">Discard draft</button></div>
-          <div id="notes-review" hidden>
-            <strong id="notes-preview-target"></strong><pre id="notes-preview"></pre><p id="notes-report" class="note"></p>
-            <label id="notes-legacy-row" class="check" hidden><input id="notes-legacy" type="checkbox"> I verified that this unbound legacy note file belongs to this DRC run.</label>
-            <label class="check"><input id="notes-consent" type="checkbox"> Save this exact text (or clear it) on the listed selected errors in this reviewer's note file.</label>
-            <button id="notes-approve" class="primary" disabled>Approve note save</button>
+        <aside id="drc-panel" class="drc-panel" aria-label="DRC review" hidden>
+          <div class="drc-info"><strong id="drc-title"></strong><span id="drc-summary"></span></div>
+          <div class="drc-split">
+            <div class="drc-rules-col">
+              <form id="drc-search-form" class="drc-search"><input id="drc-search" placeholder="find rule…" maxlength="256" aria-label="Find rule"><button id="drc-search-submit" class="menu-proxies" tabindex="-1">Search</button></form>
+              <div id="drc-rules" class="drc-rules" aria-label="DRC rules"></div>
+              <div id="drc-rule-pager" class="pagination" hidden><button id="drc-rule-prev" type="button" aria-label="Previous rule page" disabled>◀</button><span></span><button id="drc-rule-next" type="button" aria-label="Next rule page" disabled>▶</button></div>
+            </div>
+            <div class="drc-errors-col">
+              <div class="pagination"><button id="drc-error-prev" type="button" aria-label="Previous error page" disabled>◀</button><span id="drc-result-info"></span><button id="drc-error-next" type="button" aria-label="Next error page" disabled>▶</button></div>
+              <div id="drc-errors" class="drc-errors" aria-label="DRC errors"></div>
+            </div>
           </div>
-        </div>
-        <p class="note">Latest session save receipt</p><p id="notes-status" role="status"></p><p id="notes-message" class="note" role="status"></p>
-        <div class="button-row"><button id="notes-refresh">Refresh save status</button><button id="notes-cancel" hidden>Cancel save</button></div>
-        <div id="notes-uncertain" hidden>
-          <p>Previous approval may have reached the server. Resolve resends only that same approved request; refresh never resends a save.</p>
-          <button id="notes-resolve">Resolve approved request</button>
-          <label class="check"><input id="notes-checked" type="checkbox"> I checked the note file and understand the previous outcome.</label>
-          <button id="notes-forget" disabled>Clear local recovery record</button>
-        </div>
-        </div>
-      </section>
-      <section id="waives-panel" class="notes-panel" aria-label="Owner DRC waives" hidden>
-        <h3>Waives</h3><p id="waives-owner" class="note"></p><p id="waives-selection" class="note"></p>
-        <label class="check"><input id="waives-autosave" type="checkbox" disabled> Automatically save confirmed waive changes for this reviewer (this tab)</label>
-        <p id="waives-autosave-status" class="note" role="status"></p>
-        <button id="waives-read" disabled>Read selected statuses</button>
-        <div id="waives-editor" hidden>
-          <p id="waives-target" class="note"></p>
-          <label for="waives-action">Action on this selection</label>
-          <select id="waives-action"><option value="">Choose an action…</option><option value="waive">Waive</option><option value="clear">Clear waive</option></select>
-          <p id="waives-local" class="note">No automatic save. Ctrl/Cmd+Enter previews; Escape discards the local choice.</p>
-          <div class="button-row"><button id="waives-prepare">Preview save</button><button id="waives-reload">Reload snapshot</button><button id="waives-discard">Discard choice</button></div>
-          <div id="waives-review" hidden>
-            <strong id="waives-preview-target"></strong><p id="waives-preview"></p><p id="waives-reserved" class="note"></p>
-            <label id="waives-legacy-row" class="check" hidden><input id="waives-legacy" type="checkbox"> I verified that this unbound legacy waive file belongs to this DRC run.</label>
-            <label class="check"><input id="waives-consent" type="checkbox"> Save the displayed action on these selected errors in this reviewer's waive file.</label>
-            <button id="waives-approve" class="primary" disabled>Approve waive save</button>
+          <div id="drc-detail" class="drc-detail" aria-label="Selected error">
+            <p id="drc-selected"></p>
+            <p id="drc-rule-title"></p>
+            <div id="drc-saved-notes" hidden><div id="drc-note-body" hidden><pre id="drc-note-text"></pre></div><span id="drc-notes-status" role="status"></span><button id="drc-notes-refresh" type="button" class="menu-proxies">Refresh saved notes</button></div>
+            <pre id="drc-description"></pre>
+            <pre id="drc-rule-metadata"></pre>
+            <pre id="drc-comparison" role="status"></pre>
+            <p id="drc-cd-title" role="status"></p><ul id="drc-cd-values"></ul>
           </div>
-        </div>
-        <p class="note">Latest session waive receipt · file save and reader update are separate</p>
-        <p id="waives-status" role="status"></p><p id="waives-message" class="note" role="status"></p>
-        <p id="waives-paused" class="note" hidden>DRC reads are paused until the save outcome and matching reader revision are confirmed. If reader update failed or is unknown, check the file and reopen the review. Layout navigation remains available.</p>
-        <div class="button-row"><button id="waives-refresh">Refresh save and review status</button><button id="waives-cancel" hidden>Cancel save</button></div>
-        <div id="waives-uncertain" hidden>
-          <p>Previous approval may have reached the server. Resolve resends only that same approved request; refresh never resends a save.</p>
-          <button id="waives-resolve">Resolve approved request</button>
-          <label class="check"><input id="waives-checked" type="checkbox"> I checked the waive file and understand the previous outcome.</label>
-          <button id="waives-forget" disabled>Clear local recovery record</button>
-        </div>
-      </section>
-      <section id="transfer-panel" class="notes-panel" aria-label="Whole review import and export" hidden>
-        <h3>Import / export review</h3>
-        <p class="note">Import replaces this reviewer's ENTIRE review, not the selected errors. Uploading is not saving. No automatic import or save on reload.</p>
-        <label for="transfer-kind">Review file</label><select id="transfer-kind"><option value="notes">Notes (.fe)</option><option id="transfer-waives-option" value="waives">Waives (.waive)</option></select>
-        <label for="transfer-file">Local file to import</label><input id="transfer-file" type="file" accept=".fe,.waive">
-        <p class="note">Notes: 16 MiB maximum. Waives: 512 MiB maximum and exact pack length. Finish or discard the selection editor before importing.</p>
-        <div class="button-row"><button id="transfer-import">Upload and preview</button><button id="transfer-export">Prepare export</button></div>
-        <p id="transfer-progress" class="note" role="status"></p><p id="transfer-message" class="note" role="status"></p>
-        <div class="button-row"><button id="transfer-refresh">Refresh transfer status</button><button id="transfer-cancel">Cancel transfer</button><button id="transfer-discard">Discard temporary upload</button><button id="transfer-resolve" hidden>Resolve identical request</button></div>
-        <div id="transfer-review" hidden>
-          <pre id="transfer-preview"></pre>
-          <label class="check"><input id="transfer-run" type="checkbox"> I verified that this portable file belongs to this exact DRC run; its size/time/count header alone is not proof.</label>
-          <label class="check"><input id="transfer-consent" type="checkbox"> Replace the ENTIRE listed review with this file, including removing entries that are not present. This is not a merge.</label>
-          <button id="transfer-approve" class="primary" disabled>Approve entire review replacement</button>
-          <p class="note">The Notes/Waives save panel above owns save receipts, cancellation and recovery. A completed save is not undone by cancelling a transfer.</p>
-        </div>
-        <p id="transfer-usage" class="note"></p><div id="transfer-files" aria-label="Prepared review downloads"></div>
-      </section>
-      <div class="button-row"><button id="drc-restore-layers" title="Restore the visibility saved before the first DRC layer isolation" disabled>Restore layers</button></div>
-      <p id="drc-layer-status" class="note" role="status"></p>
-      <section class="drc-constraint" aria-label="SVRF constraint comparison"><pre id="drc-comparison" role="status">Select an error to compare its parsed bound.</pre><p class="note">Parsed metadata and geometric measurement only · not a sign-off or waive decision.</p></section>
-      <section class="drc-cd" aria-label="Automatic CD measurements">
-        <p id="drc-cd-title" class="note" role="status">Go to an error to measure it.</p>
-        <ul id="drc-cd-values"></ul>
-        <div class="button-row"><button id="drc-cd-pop" title="Remove the last CD ruler only" disabled>Remove CD ruler</button><button id="drc-cd-clear" title="Clear CD rulers only" disabled>Clear CD rulers</button></div>
-        <p class="note">k removes one · Shift+K clears all. Escape: rulers → selections → restore layers and end focus.</p>
-      </section>
-      <p id="drc-message" class="note" role="status">Read-only review</p>
-      <p id="drc-sync-status" class="note" role="status"></p>
-      <button id="drc-reload" class="quiet" title="Discard unsynchronized local panel changes and restore this view's server state">Reload review</button>
-    </aside>
-      </section>
-      <section id="inspect-page" class="pane-page inspect-page" role="tabpanel" aria-labelledby="tab-inspect" hidden>
-      <section class="inspect-panel" aria-label="Geometry inspection">
-        <h2>Inspect geometry</h2>
-        <p id="pick-status" role="status">Click a shape to inspect it.</p>
-        <div class="button-row"><button id="pick-prev" disabled title="Previous overlapping shape">←</button><button id="pick-next" disabled title="Next overlapping shape">→</button><button id="pick-clear" disabled>Clear selection</button></div>
-        <pre id="pick-details"></pre>
-        <label class="check"><input id="snap-probe" type="checkbox" disabled> Snap probe (m)</label>
-        <p id="snap-status" tabindex="0" role="region" aria-label="Snap probe result"></p>
-        <p id="query-availability" class="note">Connect a layout to inspect geometry.</p>
-        <p class="note">Click again: next overlap · Shift: add · Ctrl/Cmd: toggle. Snap probes vertices and edges; it does not measure.</p>
-      </section>
-      <section class="inspect-panel" aria-label="Manual and selected bbox rulers">
-        <div class="button-row"><button id="ruler-mode" aria-pressed="false" disabled>Ruler (r)</button><button id="ruler-pop" disabled>Undo (k)</button><button id="ruler-clear" disabled>Clear (Shift+K)</button></div>
-        <label class="check"><input id="ruler-snap" type="checkbox" checked disabled> Edge/vertex snap (m in ruler mode)</label>
-        <p id="ruler-status" role="status">Click two points to measure.</p><pre id="ruler-details"></pre>
-        <p id="ruler-count" class="note">0 rulers</p><p id="ruler-availability" class="note"></p>
-        <pre id="ruler-auto"></pre>
-        <p class="note">Select 2+ shapes, then enter Ruler: nearest-neighbour bbox gaps, not contour distances. Undo follows creation order across manual, bbox and CD rulers.</p>
-        <p class="note">Axis-aligned by default · Shift: free angle · Escape: cancel point, exit mode, clear rulers.</p>
-      </section>
+          <div class="drc-filters">
+            <label class="check" title="only the errors inside the current view"><input id="drc-in-view" type="checkbox"> in view</label>
+            <label class="check" title="only the box/Ctrl-selected errors"><input id="drc-selected-only" type="checkbox"> selected</label>
+            <label class="check"><input id="drc-markers" type="checkbox" checked> markers</label>
+            <select id="drc-type" disabled title="filter rules by their SVRF measurement type"><option value="">all types</option></select>
+            <div id="drc-type-pager" class="pagination" hidden><button id="drc-type-prev" type="button" aria-label="Previous type page" disabled>◀</button><button id="drc-type-next" type="button" aria-label="Next type page" disabled>▶</button></div>
+            <select id="drc-waived"><option value="all">All</option><option value="unwaived">Not Waived</option><option value="waived">Waived</option></select>
+          </div>
+          <div class="drc-status">
+            <span id="drc-group-count"></span><span id="drc-layer-status" role="status"></span><span id="drc-box-status" role="status" hidden></span>
+            <span id="drc-message" role="status"></span><span id="drc-group-status" role="status"></span><span id="drc-sync-status" role="status"></span><span id="drc-type-info" role="status"></span>
+            <button id="drc-step-continue" type="button" hidden>continue search</button>
+            <button id="drc-reload" type="button" class="quiet" title="Read this view's saved review state again">reload</button>
+          </div>
+        </aside>
       </section>
     </aside>
-    <div id="left-splitter" class="splitter" role="separator" aria-orientation="vertical" aria-label="Resize the left pane" tabindex="0" title="Drag to resize · double-click resets"></div>
+    <div id="left-splitter" class="splitter" role="separator" aria-orientation="vertical" aria-label="Resize the left pane" tabindex="0"></div>
     <main class="main">
-      <!-- floe-view-toolbar:start -->
-      <form id="goto-form" class="toolbar" title="Goto draft is kept while editing. Escape in a coordinate restores the current view; Go applies it.">
-        <button id="fit" type="button" disabled title="Fit layout (Ctrl+A)">Fit</button>
-        <div class="zoom-buttons"><button id="zoom-out" type="button" disabled title="Zoom out (−)">−</button><button id="zoom-in" type="button" disabled title="Zoom in (+)">+</button></div>
-        <div class="goto-fields"><label>X <input id="goto-x" value="0" inputmode="decimal" aria-label="Center X in micrometres"></label><label>Y <input id="goto-y" value="0" inputmode="decimal" aria-label="Center Y in micrometres"></label><label>View <input id="goto-width" value="700" inputmode="decimal" aria-label="View width in micrometres"></label><span>µm</span><button id="goto" disabled>Go</button></div>
-      </form>
-      <!-- floe-view-toolbar:end -->
-      <div id="viewport" class="viewport" tabindex="0" aria-label="Layout canvas. Click selects a shape; repeat cycles overlaps; Shift adds; Ctrl or Command toggles. R starts two-point rulers; Shift allows free angles; M toggles snap; K undoes; Shift+K clears rulers. Left or middle drag and arrow keys pan. Right drag rightwards zooms into a box; leftwards zooms out; Escape cancels. Shift plus arrow pans ten percent; plus and minus zoom; Ctrl+A fits; F toggles frames. Less/greater steps depth; digits choose depth, 9 9 selects full. Comma/period steps DRC errors; N opens notes; W proposes a waive toggle, with separate save approval. Tab cycles overlays; Shift+Tab leaves the canvas. Ctrl or Command+C copies visible pixels.">
+      <div id="viewport" class="viewport" tabindex="0" aria-label="Layout canvas. Click selects a shape; Shift adds; Ctrl or Command toggles. R starts rulers; M toggles snap; K undoes; Shift+K clears rulers. Left or middle drag and arrow keys pan. Right drag zooms into a box. Plus and minus zoom; Ctrl+A fits; F toggles frames; less/greater steps depth; 9 9 selects full depth. Comma and period step DRC errors; N edits a note; W toggles a waive. Tab cycles overlays. Ctrl or Command+C copies the view.">
         <div id="notice" class="notice" role="alert" hidden></div>
         <canvas id="margin-canvas" class="viewer-frame" width="1" height="1" aria-hidden="true" hidden></canvas>
         <canvas id="canvas" class="viewer-frame" width="1" height="1" aria-label="Rendered layout"></canvas>
@@ -276,39 +132,24 @@
         <canvas id="cells-canvas" width="1" height="1" aria-label="Highlighted cell instances" hidden></canvas>
         <canvas id="ruler-canvas" width="1" height="1" aria-label="Manual, bbox gap and CD rulers with measurement preview" hidden></canvas>
         <div id="zoom-band" class="viewer-band" aria-hidden="true" hidden></div><div id="zoom-band-hint" class="viewer-band-hint" role="status" hidden></div>
-        <div id="empty" class="empty"><div class="empty-mark">＋</div><h1>Layout workspace</h1><p id="empty-message">Connecting to the local Rust renderer…</p></div>
-        <div id="rendering" class="rendering" hidden>Rendering</div>
-        <div class="viewport-hint">Drag / arrows · pan <span>Right drag · box zoom</span> <span>Shift · 10%</span> <span>+ / − zoom</span> <span>Ctrl+A · fit</span></div>
+        <div id="empty" class="empty"><p id="empty-message">connecting to the local renderer…</p></div>
       </div>
     </main>
-    <div id="right-splitter" class="splitter" role="separator" aria-orientation="vertical" aria-label="Resize the layer pane" tabindex="0" title="Drag to resize · double-click resets"></div>
+    <div id="right-splitter" class="splitter" role="separator" aria-orientation="vertical" aria-label="Resize the layer pane" tabindex="0"></div>
     <aside id="right-pane" class="right-pane" aria-label="Layers, minimap and palette">
       <!-- floe-right-pane:start -->
       <div class="layers-head"><button id="layers-expand" type="button" disabled>expand all</button><button id="layers-collapse" type="button" disabled>collapse all</button></div>
-        <div id="layers" class="layers"><p class="empty-list">Open a layout to see its layers.</p></div>
-        <div class="pagination"><button id="layers-prev" disabled aria-label="Previous layer page">←</button><span id="layers-count">0 layers</span><button id="layers-next" disabled aria-label="Next layer page">→</button></div>
-        <p id="layers-note" class="note" role="status"></p><button id="layers-retry" hidden>Reload layer page</button>
-        <p id="layers-hint" class="note layers-hint">click selects · Ctrl/⌘ toggles · Shift ranges · double-click shows/hides · right-click actions</p>
-        <form id="palette-style" class="style-editor" hidden>
-          <strong id="palette-style-title">Style selected layers</strong>
-          <p class="note">Only checked/changed fields are assigned. Folded parents include their children. Jobdeck parent colors propagate; child fill/width overrides win in expanded groups.</p>
-          <div class="form-row"><label class="check"><input id="palette-color-on" type="checkbox"> Color</label><input id="palette-color" type="color" value="#00ffff" aria-label="Selected layer color"></div>
-          <div class="form-row"><label for="palette-fill">Fill</label><select id="palette-fill"><option value="">Unchanged</option><option value="solid">Solid</option><option value="clear">Outline</option><option value="speckle">Speckle</option><option value="pattern">16×16 pattern</option></select></div>
+        <div id="layers" class="layers"></div>
+        <div id="layers-pager" class="pagination" hidden><button id="layers-prev" type="button" disabled aria-label="Previous layer page">◀</button><span id="layers-count">0 layers</span><button id="layers-next" type="button" disabled aria-label="Next layer page">▶</button></div>
+        <p id="layers-note" class="note" role="status"></p><button id="layers-retry" type="button" class="quiet" hidden>reload layers</button>
+        <form id="palette-style" class="style-editor" aria-labelledby="palette-style-title" hidden>
+          <strong id="palette-style-title">style selected layers</strong>
+          <div class="form-row"><label class="check"><input id="palette-color-on" type="checkbox"> color</label><input id="palette-color" type="color" value="#00ffff" aria-label="Selected layer color"></div>
+          <div class="form-row"><label for="palette-fill">fill</label><select id="palette-fill"><option value="">unchanged</option><option value="solid">solid</option><option value="clear">outline</option><option value="speckle">speckle</option><option value="pattern">16×16 pattern</option></select></div>
           <label id="palette-pattern-label" for="palette-pattern" hidden>16 rows, four hex digits each</label>
           <textarea id="palette-pattern" rows="3" maxlength="95" spellcheck="false" hidden></textarea>
-          <div class="form-row"><label for="palette-width">Line px</label><select id="palette-width"><option value="">Unchanged</option><option value="1">1 (inherit)</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7</option><option value="8">8</option><option value="+1">Increase</option><option value="-1">Decrease</option></select></div>
-          <p class="note">1 clears the width override. Increase/decrease steps each row’s assigned width (default 1), not an inherited group width.</p>
-          <div class="button-row"><button id="palette-style-apply" type="submit">Apply to selection</button><button id="palette-style-cancel" type="button">Cancel</button></div>
-        </form>
-        <form id="style-editor" class="style-editor" hidden>
-          <strong id="style-title">Layer style</strong>
-          <p class="note">Only changed fields are assigned. A folded parent includes children; expanded jobdeck children retain their fill/width overrides.</p>
-          <div class="form-row"><label for="style-color">Color</label><input id="style-color" type="color" value="#00ffff" aria-label="Layer color"></div>
-          <div class="form-row"><label for="style-fill">Fill</label><select id="style-fill"><option value="solid">Solid</option><option value="clear">Outline</option><option value="speckle">Speckle</option><option value="pattern">16×16 pattern</option></select></div>
-          <label id="pattern-label" for="style-pattern" hidden>16 rows, four hex digits each</label>
-          <textarea id="style-pattern" rows="3" maxlength="95" spellcheck="false" hidden></textarea>
-          <div class="form-row"><label for="style-width">Line px</label><input id="style-width" class="short" type="number" min="1" max="8" value="1" title="1 clears the override; a child inherits its group width"></div>
-          <div class="button-row"><button type="submit">Apply style</button><button id="style-cancel" type="button">Cancel</button></div>
+          <div class="form-row"><label for="palette-width">line px</label><select id="palette-width"><option value="">unchanged</option><option value="1">1 (inherit)</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7</option><option value="8">8</option><option value="+1">increase</option><option value="-1">decrease</option></select></div>
+          <div class="button-row"><button id="palette-style-apply" type="submit">ok</button><button id="palette-style-cancel" type="button">cancel</button></div>
         </form>
       <div class="pane-tabs" role="tablist" aria-label="Right pane">
         <button id="tab-minimap" class="pane-tab active" type="button" role="tab" aria-selected="true" aria-controls="minimap-page">minimap</button>
@@ -316,142 +157,158 @@
       </div>
       <section id="minimap-page" class="pane-page minimap-page" role="tabpanel" aria-labelledby="tab-minimap">
         <div id="minimap-panel" hidden>
-          <canvas id="minimap" width="180" height="180" tabindex="0" role="button" aria-label="Structural overview. Click to recenter at the current zoom. Enter or Space centers the layout."></canvas>
-          <p id="minimap-note" class="note" role="status"></p><button id="minimap-retry" type="button" hidden>Retry overview</button>
-          <p class="note">Click to recenter · same zoom · 16px aligned. Structural boxes, not rendered geometry.</p>
+          <canvas id="minimap" width="180" height="180" tabindex="0" role="button" aria-label="Overview. Click inside the die to center the viewport." title="Click inside the die to center the viewport"></canvas>
+          <p id="minimap-note" class="note" role="status"></p><button id="minimap-retry" type="button" class="quiet" hidden>reload overview</button>
         </div>
       </section>
       <section id="palette-page" class="pane-page palette-page" role="tabpanel" aria-labelledby="tab-palette" hidden>
-        <div id="palette-presets">
+        <details id="palette-presets">
+          <summary class="sr-only">palette</summary>
           <div id="presets-colors" class="preset-grid colors" role="group" aria-label="Color presets"></div>
           <div id="presets-fills" class="preset-grid fills" role="group" aria-label="Fill presets"></div>
-          <p id="presets-note" class="note" role="status">Select layers, then click a swatch.</p><button id="presets-retry" type="button" hidden>Reload presets</button>
-          <div id="fill-slot-tools" hidden>
-            <label for="fill-slot-choice">Developer bitmap slot</label>
-            <select id="fill-slot-choice"></select><button id="fill-slot-open" type="button" disabled>Edit bitmap…</button>
+          <p id="presets-note" class="note" role="status"></p><button id="presets-retry" type="button" class="quiet" hidden>reload palette</button>
+          <div id="fill-slot-tools" class="menu-proxies" hidden>
+            <label for="fill-slot-choice">bitmap slot</label>
+            <select id="fill-slot-choice"></select><button id="fill-slot-open" type="button" disabled>edit bitmap…</button>
           </div>
-          <form id="fill-slot-editor" class="style-editor" hidden>
-            <strong id="fill-slot-title">Edit bitmap</strong>
-            <p id="fill-slot-help" class="note">Click or drag to paint. Arrow keys move; Space/Enter toggles; Escape cancels. Apply changes every layer referencing this slot, not just the selection.</p>
-            <div id="fill-slot-grid" role="group" aria-label="16 by 16 bitmap" aria-describedby="fill-slot-help"></div>
+          <form id="fill-slot-editor" class="style-editor" aria-labelledby="fill-slot-title" hidden>
+            <strong id="fill-slot-title">edit bitmap</strong>
+            <div id="fill-slot-grid" role="group" aria-label="16 by 16 bitmap"></div>
             <canvas id="fill-slot-preview" width="16" height="16" aria-label="Bitmap preview"></canvas>
-            <div class="button-row"><button id="fill-slot-clear" type="button">Clear</button><button id="fill-slot-solid" type="button">Solid</button><button id="fill-slot-invert" type="button">Invert</button><button id="fill-slot-reset" type="button">Reset</button></div>
-            <p class="note">Reset restores the bundled default. Apply writes no files; save Native JSON to preserve edits and references.</p>
-            <div class="button-row"><button id="fill-slot-apply" type="submit">Apply slot</button><button id="fill-slot-cancel" type="button">Cancel</button></div>
+            <div class="button-row"><button id="fill-slot-clear" type="button">clear</button><button id="fill-slot-solid" type="button">solid</button><button id="fill-slot-invert" type="button">invert</button><button id="fill-slot-reset" type="button">reset</button></div>
+            <div class="button-row"><button id="fill-slot-apply" type="submit">apply</button><button id="fill-slot-cancel" type="button">cancel</button></div>
           </form>
           <p id="fill-slot-status" class="note" role="status"></p>
-        </div>
+        </details>
       </section>
       <!-- floe-right-pane:end -->
     </aside>
   </div>
-  <footer class="statusbar"><span id="cursor-info" class="cursor-info"></span><span id="status">Waiting for session</span><span id="margin-info"></span><span class="status-right"><span id="viewport-info">Native pixels · Canvas 2D</span><span id="dstatus"></span></span></footer>
-  <div id="perf" class="perf">Waiting for a Rust frame · no automatic indexing</div>
+  <footer class="statusbar"><span class="status-left"><span id="cursor-info" class="cursor-info"></span><span id="snap-status" role="status"></span><span id="ruler-status" role="status"></span><span id="pick-status" role="status"></span></span><span class="status-right"><span id="viewport-info"></span><span id="dstatus">depth: -</span></span></footer>
+  <div class="perf"><span id="perf"></span><span class="status-right"><span id="snapshot-status" role="status"></span><button id="snapshot-retry" type="button" class="quiet" hidden>download captured PNG</button><span id="margin-info"></span><span id="status"></span></span></div>
   <div id="menu-proxies" class="menu-proxies" hidden>
+    <button id="about-open" aria-haspopup="dialog" aria-controls="about-dialog" aria-expanded="false" disabled>About</button>
+    <button id="drc-toggle" aria-expanded="true" aria-controls="drc-panel" hidden>DRC</button>
+    <div id="rendering" class="rendering" hidden>Rendering</div>
     <!-- floe-layer-tools:start -->
-        <div class="section-title"><h2>Layers</h2><div><button id="layers-all" class="text-button" disabled>All</button><button id="layers-none" class="text-button" disabled>None</button></div></div>
-        <div class="palette-tools"><span id="layers-selected" role="status">0 selected</span><button id="layers-clear" disabled>Clear selection</button></div>
-        <div class="palette-tools"><button id="layers-show" disabled>Show selected</button><button id="layers-hide" disabled>Hide selected</button><button id="layers-toggle" disabled>Toggle</button></div>
-        <button id="layers-style" disabled>Style selected…</button>
+        <button id="layers-all" disabled>show all</button><button id="layers-none" disabled>hide all</button>
+        <span id="layers-selected" role="status">0 selected</span><button id="layers-clear" disabled>clear selection</button>
+        <button id="layers-show" disabled>show selected</button><button id="layers-hide" disabled>hide selected</button><button id="layers-toggle" disabled>toggle selected</button>
+        <button id="layers-style" disabled>style selected…</button>
     <!-- floe-layer-tools:end -->
+    <button id="browse-open" type="button" aria-haspopup="dialog" aria-controls="browse-dialog" aria-expanded="false" hidden disabled>load layout…</button>
+    <button id="drc-open" type="button" aria-haspopup="dialog" aria-controls="browse-dialog" aria-expanded="false" hidden disabled>open DRC results…</button>
+    <button id="drc-reconnect" type="button" aria-haspopup="dialog" aria-controls="browse-dialog" aria-expanded="false" hidden disabled>reconnect launcher reviewer…</button>
+    <button id="drc-rules-load" type="button" aria-haspopup="dialog" aria-controls="browse-dialog" aria-expanded="false" hidden disabled>load SVRF rules…</button>
+    <div id="snapshot-panel" hidden><button id="snapshot-copy" type="button" disabled>copy view</button><button id="snapshot-save" type="button" disabled>save view PNG</button></div>
+    <button id="pick-prev" disabled>previous overlapping shape</button><button id="pick-next" disabled>next overlapping shape</button><button id="pick-clear" disabled>clear selection</button>
+    <pre id="pick-details"></pre>
+    <input id="snap-probe" type="checkbox" disabled aria-label="Snap probe">
+    <span id="query-availability"></span>
+    <button id="ruler-mode" aria-pressed="false" disabled>ruler</button><button id="ruler-pop" disabled>delete last ruler</button><button id="ruler-clear" disabled>clear rulers</button>
+    <input id="ruler-snap" type="checkbox" checked disabled aria-label="Edge/vertex snap">
+    <pre id="ruler-details"></pre><span id="ruler-count">0 rulers</span><span id="ruler-availability"></span><pre id="ruler-auto"></pre>
+    <span id="drc-review-mode"></span>
+    <button id="drc-first" disabled>first page</button><button id="drc-frame" disabled>frame error</button><button id="drc-clear" disabled>clear</button>
+    <button id="drc-step-prev" disabled>previous error</button><button id="drc-step-next" disabled>next error</button>
+    <button id="drc-box" aria-pressed="false" disabled>box select</button><button id="drc-group-clear" disabled>clear rule selection</button>
+    <button id="drc-restore-layers" disabled>restore layers</button>
+    <button id="drc-cd-pop" disabled>remove CD ruler</button><button id="drc-cd-clear" disabled>clear CD rulers</button>
   </div>
   <div id="source-dialog" class="about-backdrop" role="dialog" aria-modal="true" aria-labelledby="source-title" tabindex="-1" hidden>
     <section class="about-card tool-card">
-      <div class="about-heading"><h2 id="source-title">Load layout</h2><button id="source-close" type="button">Close</button></div>
-        <button id="browse-open" type="button" aria-haspopup="dialog" aria-controls="browse-dialog" aria-expanded="false" hidden disabled>Browse server files…</button>
-        <button id="drc-open" type="button" aria-haspopup="dialog" aria-controls="browse-dialog" aria-expanded="false" hidden disabled>Open DRC results…</button>
-        <button id="drc-reconnect" type="button" aria-haspopup="dialog" aria-controls="browse-dialog" aria-expanded="false" hidden disabled>Reconnect launcher reviewer…</button>
-        <button id="drc-rules-load" type="button" aria-haspopup="dialog" aria-controls="browse-dialog" aria-expanded="false" hidden disabled>Load SVRF metadata…</button>
+      <div class="about-heading"><h2 id="source-title">registered sources</h2><button id="source-close" type="button">close</button></div>
         <label for="source" class="sr-only">Registered source</label>
-        <select id="source"><option>Loading catalog…</option></select>
-        <div class="source-mode"><label for="mode">Open mode</label><select id="mode"><option value="level">Level view</option><option value="chip">Chip view</option><option value="layer">Source layers</option></select></div>
-        <details id="level-options"><summary>Levels to load</summary><label class="check"><input id="levels-all" type="checkbox" checked> All levels</label><div id="level-list"></div><button id="level-more" hidden>More levels</button><button id="reselect-levels" hidden disabled title="Keep camera/current mode; reload layer defaults. Indexing requires separate approval.">Apply levels · keep view</button></details>
-        <div class="button-row"><button id="open" class="primary">Open layout</button><button id="close" disabled>Close</button></div>
-        <p id="source-note" class="note">Sources are registered by the local launcher.</p>
+        <select id="source"><option>loading catalog…</option></select>
+        <div class="source-mode"><label for="mode">open mode</label><select id="mode"><option value="level">level view</option><option value="chip">chip view</option><option value="layer">source layers</option></select></div>
+        <details id="level-options"><summary>levels to load</summary><label class="check"><input id="levels-all" type="checkbox" checked> all levels</label><div id="level-list"></div><button id="level-more" type="button" hidden>more levels</button><button id="reselect-levels" type="button" hidden disabled>apply levels · keep view</button></details>
+        <div class="button-row"><button id="open" class="primary">open</button><button id="close" disabled>close layout</button></div>
+        <p id="source-note" class="note" role="status"></p>
         <div id="launch-panel" hidden>
           <p id="launch-status" class="note" role="status"></p>
-          <button id="launch-open" type="button" hidden>Open requested layout</button>
-          <button id="launch-check" type="button" hidden>Check / retry same request</button>
-          <button id="launch-dismiss" type="button">Dismiss request</button>
+          <button id="launch-open" type="button" hidden>open requested layout</button>
+          <button id="launch-check" type="button" hidden>check / retry same request</button>
+          <button id="launch-dismiss" type="button">dismiss request</button>
         </div>
     </section>
   </div>
   <div id="display-dialog" class="about-backdrop" role="dialog" aria-modal="true" aria-labelledby="display-title" tabindex="-1" hidden>
     <section class="about-card tool-card">
-      <div class="about-heading"><h2 id="display-title">Display options</h2><button id="display-close" type="button">Close</button></div>
-        <div id="live-mode-row" hidden><div class="form-row"><label for="live-mode">Jobdeck mode</label><select id="live-mode" disabled title="Keep camera and visibility; reload mode defaults"><option value="level">Level view</option><option value="chip">Chip view</option><option value="layer">Source layers</option></select></div><p id="live-mode-note" class="note" role="status">Ctrl+, toggles level/chip · same camera and loaded levels. Mode defaults reload.</p></div>
+      <div class="about-heading"><h2 id="display-title">detail</h2><button id="display-close" type="button">close</button></div>
         <!-- floe-view-controls:start -->
-        <div class="form-row"><label for="depth">Depth <span id="max-depth"></span></label><input id="depth" value="full" title="full or a nonnegative depth; canvas &lt; / &gt; steps, 9 9 selects full" class="short" disabled></div>
-        <div class="form-row"><label for="detail">Detail</label><select id="detail" disabled><option value="low">Low · 5 px</option><option value="medium" selected>Medium · 3 px</option><option value="high">High · 1 px</option><option value="exact">Exact · no cut</option></select></div>
-        <div class="form-row"><label for="thin">Thin shapes</label><select id="thin" disabled><option value="auto">Auto · keep</option><option value="keep">Keep</option><option value="cull">Cull</option></select></div>
-        <div class="check-row"><label class="check"><input id="frames" type="checkbox" disabled> Frames</label><label class="check"><input id="labels" type="checkbox" disabled> Labels</label><label class="check"><input id="mono" type="checkbox" disabled> Mono</label></div>
-        <div class="form-row"><label for="font-px">Label px</label><input id="font-px" class="short" type="number" min="6" max="96" value="14" disabled></div>
+        <div class="form-row"><label for="detail">detail</label><select id="detail" disabled><option value="low">low · 5 px</option><option value="medium" selected>medium · 3 px</option><option value="high">high · 1 px</option><option value="exact">exact · no cut</option></select></div>
+        <div class="form-row"><label for="depth">depth <span id="max-depth"></span></label><input id="depth" value="full" class="short" disabled></div>
+        <div class="form-row"><label for="thin">thin shapes at wide views</label><select id="thin" disabled><option value="auto">auto (keep)</option><option value="keep">keep</option><option value="cull">cull</option></select></div>
+        <div class="check-row"><label class="check"><input id="frames" type="checkbox" disabled> hierarchy frames</label><label class="check"><input id="labels" type="checkbox" disabled> labels</label><label class="check"><input id="mono" type="checkbox" disabled> grayscale layers</label></div>
+        <div class="form-row"><label for="font-px">label size (px)</label><input id="font-px" class="short" type="number" min="6" max="96" value="14" disabled></div>
         <!-- floe-view-controls:end -->
-        <div class="form-row"><label for="overlays">Overlays</label><select id="overlays" disabled><option value="all">All</option><option value="focus">Hide other errors</option><option value="none">Hide all</option></select></div>
-        <p class="note">Tab on canvas cycles overlays; Shift+Tab leaves the canvas. Hiding keeps selections and rulers.</p>
-        <div id="snapshot-panel" hidden>
-          <div class="button-row"><button id="snapshot-copy" type="button" disabled title="Copy the visible layout and annotations (Ctrl/Cmd+C on canvas)">Copy view</button><button id="snapshot-save" type="button" disabled>Save view PNG</button></div>
-          <button id="snapshot-retry" type="button" hidden>Download captured PNG</button>
-          <p id="snapshot-status" class="note" role="status"></p>
-          <p class="note">Visible pixels and annotations, including previews. Not an exact geometry export. Panels and status messages are excluded.</p>
-        </div>
+        <div class="form-row"><label for="overlays">overlays</label><select id="overlays" disabled><option value="all">all</option><option value="focus">errors</option><option value="none">none</option></select></div>
+        <div id="live-mode-row" hidden><div class="form-row"><label for="live-mode">jobdeck view</label><select id="live-mode" disabled><option value="level">level view</option><option value="chip">chip view</option><option value="layer">source layer view</option></select></div><p id="live-mode-note" class="note" role="status"></p></div>
     </section>
   </div>
+  <!-- floe-view-toolbar:start -->
+  <div id="goto-dialog" class="about-backdrop" role="dialog" aria-modal="true" aria-labelledby="goto-title" tabindex="-1" hidden>
+    <section class="about-card tool-card goto-card">
+      <div class="about-heading"><h2 id="goto-title">goto position</h2><button id="goto-close" type="button">close</button></div>
+      <form id="goto-form" class="goto-form">
+        <div class="goto-fields"><label>x <input id="goto-x" value="0" inputmode="decimal" aria-label="Center X in micrometres"></label><label>y <input id="goto-y" value="0" inputmode="decimal" aria-label="Center Y in micrometres"></label><label>window <input id="goto-width" value="700" inputmode="decimal" aria-label="View width in micrometres"></label><span>um</span></div>
+        <div class="button-row"><button id="goto" class="primary" disabled>ok</button></div>
+        <div class="menu-proxies" hidden><button id="fit" type="button" disabled>fit</button><button id="zoom-out" type="button" disabled>−</button><button id="zoom-in" type="button" disabled>+</button></div>
+      </form>
+    </section>
+  </div>
+  <!-- floe-view-toolbar:end -->
   <div id="clip-dialog" class="about-backdrop" role="dialog" aria-modal="true" aria-labelledby="clip-title" tabindex="-1" hidden>
     <section class="about-card tool-card">
-      <div class="about-heading"><h2 id="clip-title">Clip region</h2><button id="clip-close" type="button">Close</button></div>
+      <div class="about-heading"><h2 id="clip-title">clip region</h2><button id="clip-close" type="button">close</button></div>
       <section id="clip-panel" class="clip-panel" aria-label="Exact OASIS export" hidden>
-        <h2>Export exact clip</h2>
-        <button id="clip-open" aria-expanded="false" aria-controls="clip-form" disabled>Clip current viewport…</button>
-        <p class="note">Full-depth source geometry, independent of detail, summary and style. Layout only; no jobdeck, labels, frames or DRC markers.</p>
+        <button id="clip-open" class="menu-proxies" aria-expanded="false" aria-controls="clip-form" disabled>clip current viewport…</button>
         <form id="clip-form" hidden>
-          <div class="form-row"><label for="clip-layers">Layers</label><select id="clip-layers"><option value="visible">Visible layers</option><option value="all">All layers</option><option value="none">None (empty file)</option></select></div>
-          <div class="form-row"><label for="clip-jobs">Jobs</label><input id="clip-jobs" class="short" type="number" min="1" max="16" value="2" required></div>
-          <label for="clip-cell-name">Output cell name</label><input id="clip-cell-name" value="FLOE_CLIP" maxlength="4096" required autocomplete="off" spellcheck="false">
-          <div class="button-row"><button id="clip-prepare" type="submit">Review clip</button><button id="clip-dismiss" type="button">Dismiss</button></div>
+          <div class="form-row"><label for="clip-layers">layers</label><select id="clip-layers"><option value="visible">visible layers</option><option value="all">all layers</option><option value="none">none (empty file)</option></select></div>
+          <div class="form-row"><label for="clip-jobs">jobs</label><input id="clip-jobs" class="short" type="number" min="1" max="16" value="2" required></div>
+          <div class="form-row"><label for="clip-cell-name">output cell name</label><input id="clip-cell-name" value="FLOE_CLIP" maxlength="4096" required autocomplete="off" spellcheck="false"></div>
+          <div class="button-row"><button id="clip-prepare" type="submit">clip</button><button id="clip-dismiss" type="button">cancel</button></div>
           <div id="clip-review" hidden>
-            <p class="note">Exact bounds: left, bottom, right, top</p><pre id="clip-bounds"></pre>
+            <pre id="clip-bounds"></pre>
             <p id="clip-selection"></p><p id="clip-options"></p>
-            <p id="clip-stale" class="note" hidden>Source changed since indexing. Export uses the indexed geometry, not newer source contents.</p>
-            <button id="clip-approve" type="button" class="primary" disabled>Approve export</button>
+            <p id="clip-stale" class="note" hidden>Source changed since indexing: the clip uses the indexed geometry.</p>
+            <button id="clip-approve" type="button" class="primary" disabled>save</button>
           </div>
         </form>
-        <p id="clip-status" role="status">No clip requested.</p>
-        <div class="button-row"><button id="clip-cancel" hidden>Cancel clip</button><button id="clip-resolve" hidden>Resolve request</button><button id="clip-refresh">Refresh</button></div>
+        <p id="clip-status" role="status"></p>
+        <div class="button-row"><button id="clip-cancel" hidden>cancel clip</button><button id="clip-resolve" hidden>resolve request</button><button id="clip-refresh">refresh</button></div>
         <p id="clip-note" class="note" role="status"></p><p id="clip-usage" class="note"></p>
         <p id="clip-resources" class="note"></p>
         <div id="clip-files" aria-label="Available clip files"></div>
-        <p class="note">Files expire after 10 minutes. Maximum 4 files, 512 MiB each. Closing the view does not cancel an approved clip; ending the session does.</p>
       </section>
     </section>
   </div>
   <div id="settings-dialog" class="about-backdrop" role="dialog" aria-modal="true" aria-labelledby="settings-title" tabindex="-1" hidden>
     <section class="about-card tool-card">
-      <div class="about-heading"><h2 id="settings-title">Layer settings and shared design default</h2><button id="settings-close" type="button">Close</button></div>
+      <div class="about-heading"><h2 id="settings-title">layer properties</h2><button id="settings-close" type="button">close</button></div>
         <div id="settings-panel" hidden>
-          <div class="button-row"><button id="settings-load" disabled>Load settings…</button><button id="settings-cancel" disabled>Cancel</button></div>
+          <div class="button-row"><button id="settings-load" disabled>load layer properties…</button><button id="settings-cancel" disabled>cancel</button></div>
           <input id="settings-file" type="file" accept=".layerprops,.json" hidden>
-          <div class="button-row"><select id="settings-format" aria-label="Settings save format"><option value="native">Native JSON (lossless)</option><option value="calibre">Calibre layerprops</option></select><button id="settings-save" disabled>Save settings…</button></div>
-          <p class="note">Load applies to this session; Save downloads a file. Native restores the same layer/group table; Calibre flattens inherited styles. These buttons do not write design defaults.</p>
+          <div class="button-row"><select id="settings-format" aria-label="Settings save format"><option value="native">native JSON</option><option value="calibre">Calibre layerprops</option></select><button id="settings-save" disabled>save layer properties…</button></div>
           <p id="settings-status" role="status" class="note"></p>
         </div>
         <div id="default-panel" hidden>
-          <h2>Shared design default</h2>
-          <div class="button-row"><button id="default-prepare" type="button" disabled>Review publication…</button><button id="default-recover" type="button" disabled>Review interrupted-file repair…</button><button id="default-dismiss" type="button" disabled>Dismiss</button></div>
+          <h2>design default</h2>
+          <div class="button-row"><button id="default-prepare" type="button" disabled>save colors+fills as design default…</button><button id="default-recover" type="button" disabled>repair interrupted file…</button><button id="default-dismiss" type="button" disabled>dismiss</button></div>
           <div id="default-review" hidden>
             <p id="default-target"></p><p id="default-levels" class="note"></p>
-            <p id="default-impact" class="note">This writes the shared Calibre layerprops file for future opens, including other users. It replaces the whole file, not a merge. Existing windows are unchanged.</p>
-            <label class="check"><input id="default-consent" type="checkbox"><span id="default-consent-label">I approve writing this shared default.</span></label>
-            <button id="default-approve" type="button" class="primary" disabled>Publish shared default</button>
+            <p id="default-impact" class="note"></p>
+            <label class="check"><input id="default-consent" type="checkbox"><span id="default-consent-label">write this shared default</span></label>
+            <button id="default-approve" type="button" class="primary" disabled>publish</button>
           </div>
           <p id="default-status" role="status" class="note"></p>
-          <button id="default-check-repair" type="button" hidden>Check repair result (read only)</button>
-          <div class="button-row"><button id="default-cancel" type="button" hidden>Request cancel</button><button id="default-refresh" type="button">Refresh receipt</button></div>
+          <button id="default-check-repair" type="button" hidden>check repair result</button>
+          <div class="button-row"><button id="default-cancel" type="button" hidden>cancel</button><button id="default-refresh" type="button">refresh</button></div>
           <div id="default-uncertain" hidden>
-            <p class="note">Outcome unknown. Resolve sends only the original approved request. Do not start a new publication to retry it.</p>
-            <button id="default-resolve" type="button">Resolve original request</button>
-            <label class="check"><input id="default-checked" type="checkbox">I checked the shared file and want to clear this unresolved local record.</label>
-            <button id="default-forget" type="button" disabled>Clear local record</button>
+            <p class="note">outcome unknown: resolve sends only the original approved request.</p>
+            <button id="default-resolve" type="button">resolve original request</button>
+            <label class="check"><input id="default-checked" type="checkbox">I checked the shared file.</label>
+            <button id="default-forget" type="button" disabled>clear local record</button>
           </div>
           <p id="default-note" class="note" role="status"></p>
         </div>
@@ -459,167 +316,269 @@
   </div>
   <div id="index-dialog" class="about-backdrop" role="dialog" aria-modal="true" aria-labelledby="index-title" tabindex="-1" hidden>
     <section class="about-card tool-card">
-      <div class="about-heading"><h2 id="index-title">Index this source</h2><button id="index-close" type="button">Close</button></div>
-      <button id="index-open" type="button" aria-haspopup="dialog" aria-controls="index-open-dialog" hidden disabled>Index and open…</button>
-      <details class="index-panel"><summary>Index this source</summary>
-        <p class="note">Explicit operation. Close views here and in other processes before rebuilding or renaming their cache; reader leases are app-local. Legacy cache names migrate to hidden .ice directories. Completed renames remain if later work fails or is cancelled.</p>
-        <div class="form-row"><label for="index-jobs">Index jobs</label><input id="index-jobs" class="short" type="number" min="1" max="16" value="12"></div>
-        <label class="check"><input id="index-lod" type="checkbox"> Include LOD</label>
-        <label class="check"><input id="index-occupancy" type="checkbox"> Include occupancy summary (default: jobdeck only)</label>
-        <label for="index-occupancy-prune">Occupancy walk</label>
-        <select id="index-occupancy-prune" disabled><option value="">Native default (prune on)</option><option value="1">Prune sub-cell bboxes</option><option value="0">Exact walk (diagnostic)</option></select>
-        <label class="check"><input id="index-representatives" type="checkbox"> Include representative samples (plain layout only)</label>
-        <label for="index-representatives-format">Representative format</label>
-        <select id="index-representatives-format" disabled><option value="">Reuse existing / native default (points)</option><option value="1">Rebuild as points (1)</option><option value="2">Rebuild as shape/tree samples (2)</option></select>
-        <p class="note">Samples are approximate display data, not pickable geometry. An explicit format rebuilds OVR even on a current cache. Occupancy pruning may enlarge sub-cell footprints within one grid cell. Reopen after generation. Adding both summaries to a current cache uses two passes; a completed first pass remains if the second fails.</p>
-        <label class="check"><input id="index-force" type="checkbox"> Force replacement of existing cache</label>
-        <div class="button-row"><button id="index">Run index</button><button id="cancel-job" disabled>Cancel</button></div>
+      <div class="about-heading"><h2 id="index-title">index this source</h2><button id="index-close" type="button">close</button></div>
+      <button id="index-open" type="button" aria-haspopup="dialog" aria-controls="index-open-dialog" hidden disabled>index and open…</button>
+      <div class="index-panel">
+        <div class="form-row"><label for="index-jobs">index jobs</label><input id="index-jobs" class="short" type="number" min="1" max="16" value="12"></div>
+        <label class="check"><input id="index-lod" type="checkbox"> include LOD</label>
+        <label class="check"><input id="index-occupancy" type="checkbox"> occupancy summary</label>
+        <div class="form-row"><label for="index-occupancy-prune">occupancy walk</label><select id="index-occupancy-prune" disabled><option value="">native default (prune on)</option><option value="1">prune sub-cell bboxes</option><option value="0">exact walk</option></select></div>
+        <label class="check"><input id="index-representatives" type="checkbox"> representative samples (plain layout only)</label>
+        <div class="form-row"><label for="index-representatives-format">representative format</label><select id="index-representatives-format" disabled><option value="">reuse existing / native default (points)</option><option value="1">rebuild as points (1)</option><option value="2">rebuild as shape/tree samples (2)</option></select></div>
+        <label class="check"><input id="index-force" type="checkbox"> force replacement of the existing cache</label>
+        <div class="button-row"><button id="index">run index</button><button id="cancel-job" disabled>cancel</button></div>
         <details id="revision-panel" hidden>
-          <summary>Immutable index revisions</summary>
-          <p class="note">Build a complete separate index using the jobs/summary options above. Existing readers keep their index. Force is not used. All selected jobdeck sources must be valid OASIS; missing/GDS/gzip members fail the build. No automatic switch or cleanup; each build requires another full cache's disk space.</p>
-          <label class="check"><input id="revision-approve" type="checkbox"> Approve one full separate index build</label>
-          <button id="revision-build" type="button" disabled>Build new revision</button>
-          <button id="revision-check" type="button" disabled>Check published revision</button>
-          <p id="revision-status" class="note" role="status">No revision checked.</p>
+          <summary>index revisions</summary>
+          <label class="check"><input id="revision-approve" type="checkbox"> approve one full separate index build</label>
+          <button id="revision-build" type="button" disabled>build new revision</button>
+          <button id="revision-check" type="button" disabled>check published revision</button>
+          <p id="revision-status" class="note" role="status"></p>
           <p id="revision-current" class="note"></p>
-          <p class="note">Use is a separate action. Same source/levels/mode keeps camera and display settings if the layer schema matches. Inspection, rulers, DRC selection and unapproved previews reset; save unfinished review edits first. To change source/levels/mode, close the view first. The old and failed revision files remain on disk.</p>
-          <button id="revision-use" type="button" disabled>Use checked revision</button>
-          <button id="revision-usage" type="button" disabled>Refresh revision storage usage</button>
-          <p class="note">Reads the selected source and its registered dependencies, across all loaded-level selections. Logical file bytes, not allocated or reclaimable space. No cleanup is performed. Old-format readers cannot be tracked. Reader status is a point-in-time observation, not permission to delete.</p>
-          <pre id="revision-usage-status" class="note" aria-live="polite">Storage usage not checked.</pre>
+          <button id="revision-use" type="button" disabled>use checked revision</button>
+          <button id="revision-usage" type="button" disabled>refresh revision storage usage</button>
+          <pre id="revision-usage-status" class="note" aria-live="polite"></pre>
           <fieldset id="reclaim-panel" hidden>
-            <legend>Reclaim an inactive revision set</legend>
-            <p class="note">Only published v3 sets on supported local filesystems. Current/open, old-format, standalone, unpublished and uncertain candidates remain protected. NFS/shared-mount reclamation is disabled. Original layouts and reviews are never targets.</p>
-            <label for="reclaim-choice">Observed sets / recovery evidence</label>
-            <select id="reclaim-choice"><option value="">Refresh storage usage to list sets</option></select>
-            <label for="reclaim-id">Exact set ID (32 lowercase hex characters; not a path)</label>
+            <legend>reclaim an inactive revision set</legend>
+            <label for="reclaim-choice">observed sets</label>
+            <select id="reclaim-choice"><option value="">refresh storage usage to list sets</option></select>
+            <label for="reclaim-id">set ID</label>
             <input id="reclaim-id" maxlength="32" autocomplete="off" spellcheck="false">
-            <button id="reclaim-prepare" type="button" disabled>Preview deletion / check recovery</button>
-            <pre id="reclaim-status" class="note" aria-live="polite">No reclamation preview.</pre>
-            <label class="check"><input id="reclaim-approve" type="checkbox" disabled> Permanently delete exactly the previewed inactive cache files</label>
-            <button id="reclaim-run" type="button" disabled>Delete approved inactive files</button>
-            <p class="note">No automatic retry. After interruption or a new server session, refresh usage, prepare the same set ID again and approve only the newly listed remaining files. Recovery evidence can also describe completed or invalid work. Source files, current revisions and journals are kept.</p>
+            <button id="reclaim-prepare" type="button" disabled>preview deletion</button>
+            <pre id="reclaim-status" class="note" aria-live="polite"></pre>
+            <label class="check"><input id="reclaim-approve" type="checkbox" disabled> permanently delete exactly the previewed inactive cache files</label>
+            <button id="reclaim-run" type="button" disabled>delete approved inactive files</button>
           </fieldset>
         </details>
-        <p id="operation" class="note" role="status">No active operation.</p>
-      </details>
+        <p id="operation" class="note" role="status"></p>
+      </div>
     </section>
   </div>
   <div id="browse-dialog" class="about-backdrop" role="dialog" aria-modal="true" aria-labelledby="browse-title" tabindex="-1" hidden>
     <section class="about-card browse-card">
-      <div class="about-heading"><h2 id="browse-title">Open server layout</h2><button id="browse-close" type="button">Close</button></div>
+      <div class="about-heading"><h2 id="browse-title">load layout</h2><button id="browse-close" type="button">cancel</button></div>
       <div id="browse-files">
-      <p class="note">Approved folders on the server, not this browser's computer. No upload or automatic indexing. Hidden files, *.floe directories and symbolic links are not listed. ICE files are shown only in DRC mode.</p>
-      <label>Approved folder <select id="browse-root"></select></label>
+      <div class="browse-tools"><label>folder <select id="browse-root"></select></label><label>files <select id="browse-filter"><option value="layouts">layouts (*.oas)</option><option value="jobdecks">jobdecks (*.jb)</option><option value="all_files">all files</option><option value="drc_files" hidden>DRC results / ICE packs</option></select></label><label>name contains <input id="browse-query" type="search" maxlength="128" autocomplete="off"></label><button id="browse-refresh" type="button">refresh</button></div>
       <nav id="browse-crumbs" aria-label="Folder breadcrumbs"></nav>
-      <div class="browse-tools"><label>File type <select id="browse-filter"><option value="layouts">OASIS layouts</option><option value="jobdecks">Jobdecks (*.jb)</option><option value="all_files">All files (including extensionless OASIS)</option><option value="drc_files" hidden>DRC results / ICE packs</option></select></label><label>Name contains <input id="browse-query" type="search" maxlength="128" autocomplete="off"></label><button id="browse-refresh" type="button">Refresh / search</button></div>
       </div>
-      <label id="browse-review-label" class="check" hidden><input id="browse-review-consent" type="checkbox"> Reconnect the launcher-authorized reviewer and permissions to the current DRC. No file is saved and automatic saving stays off.</label>
+      <label id="browse-review-label" class="check" hidden><input id="browse-review-consent" type="checkbox"> reconnect the launcher-authorized reviewer to the current DRC</label>
       <p id="browse-status" class="note" role="status"></p>
       <ul id="browse-entries" aria-label="Server files"></ul>
-      <div class="button-row"><button id="browse-prev" type="button">Previous 128</button><button id="browse-next" type="button">Next 128</button><button id="browse-check" type="button" hidden>Check / retry same request</button><button id="browse-cancel" type="button" hidden>Cancel work</button></div>
-      <p id="browse-selection" class="note">No file selected</p>
-      <button id="browse-select" type="button" class="primary" disabled>Open selected layout</button>
-      <p id="browse-purpose" class="note">Jobdecks with multiple levels ask before opening. After publication use Dismiss request. GDS/gzip support remains pending.</p>
+      <div class="button-row"><button id="browse-prev" type="button">◀</button><button id="browse-next" type="button">▶</button><button id="browse-check" type="button" hidden>check / retry same request</button><button id="browse-cancel" type="button" hidden>cancel work</button></div>
+      <p id="browse-selection" class="note"></p>
+      <button id="browse-select" type="button" class="primary" disabled>open</button>
+      <p id="browse-purpose" class="note"></p>
     </section>
   </div>
   <div id="index-open-dialog" class="about-backdrop" role="dialog" aria-modal="true" aria-labelledby="index-open-title" tabindex="-1" hidden>
     <section class="about-card">
-      <div class="about-heading"><h2 id="index-open-title">Index and open layout</h2><button id="index-open-close" type="button">Close</button></div>
+      <div class="about-heading"><h2 id="index-open-title">index and open</h2><button id="index-open-close" type="button">close</button></div>
       <pre id="index-open-preview" tabindex="0" aria-label="Original source and selected levels"></pre>
-      <p class="note">This writes index files for the ORIGINAL selection above, then opens it. Choosing a file or reading this preview does not approve indexing. Other selected files on the page do not change this request.</p>
-      <div class="form-row"><label for="index-open-jobs">Index jobs</label><input id="index-open-jobs" class="short" type="number" min="1" max="16" value="12"></div>
-      <label class="check"><input id="index-open-lod" type="checkbox"> Include LOD</label>
-      <label class="check"><input id="index-open-occupancy" type="checkbox"> Include occupancy summary (default: jobdeck only)</label>
-      <label class="check"><input id="index-open-force" type="checkbox"> Also approve FORCE replacement of existing cache files</label>
-      <p class="note">This also migrates legacy cache names to hidden .ice directories. Existing live cache readers in this app can block indexing or renaming. Close viewers in other processes first. No view is silently closed. Partial indexing does not open a partial deck. Cancellation or failure does not remove completed cache files or undo completed renames.</p>
-      <div class="button-row"><button id="index-open-approve" type="button" class="primary" disabled>Approve indexing and open</button><button id="index-open-check" type="button" hidden>Check / retry same approval</button><button id="index-open-cancel" type="button" hidden>Cancel approved work</button></div>
+      <div class="form-row"><label for="index-open-jobs">index jobs</label><input id="index-open-jobs" class="short" type="number" min="1" max="16" value="12"></div>
+      <label class="check"><input id="index-open-lod" type="checkbox"> include LOD</label>
+      <label class="check"><input id="index-open-occupancy" type="checkbox"> occupancy summary</label>
+      <label class="check"><input id="index-open-force" type="checkbox"> force replacement of existing cache files</label>
+      <div class="button-row"><button id="index-open-approve" type="button" class="primary" disabled>index and open</button><button id="index-open-check" type="button" hidden>check / retry same approval</button><button id="index-open-cancel" type="button" hidden>cancel approved work</button></div>
       <p id="index-open-status" class="note" role="status"></p>
-      <p class="note">Close hides this dialog; it does not cancel approved work or forget its receipt. If recovery is unavailable, close this dialog and use End session. Reload only checks status; it never submits a new approval.</p>
     </section>
   </div>
   <div id="about-dialog" class="about-backdrop" role="dialog" aria-modal="true" aria-labelledby="about-title" hidden>
     <section class="about-card">
-      <div class="about-heading"><h2 id="about-title">About floe2 · Web preview</h2><button id="about-close">Close</button></div>
+      <div class="about-heading"><h2 id="about-title">About floe2</h2><button id="about-close">close</button></div>
       <p id="about-status" role="status"></p>
       <pre id="about-build" tabindex="0" aria-label="Build identity"></pre>
-      <p class="note">Native versions above are the launcher's expected compatibility versions, not source hashes of running tools. Revision “unknown” has no Git provenance; a trailing “+” reports a dirty tree observed at build time. These are diagnostics, not signatures.</p>
-      <p class="note">Linux, Firefox/ETX and shared-server acceptance still require field validation. About does not run selfcheck, open design files or change the view.</p>
-      <h2>Display diagnostics</h2>
-      <section id="dump-panel" hidden aria-label="Recent display pixels">
-        <label class="check"><input id="dump-enabled" type="checkbox"> Keep recent received frame and composed display</label>
-        <p class="note">Browser memory only; off by default unless launched with --dump. Copies cost time and memory (up to 128 MiB retained pixels, plus encoding). Downloads can contain design data and annotations. No server PNGs, uploads or persistent image storage.</p>
-        <p id="dump-received-info" class="note"></p><button id="dump-received" type="button" disabled>Download received frame PNG</button>
-        <p id="dump-display-info" class="note"></p><button id="dump-display" type="button" disabled>Download composed display PNG</button>
-        <div class="button-row"><button id="dump-refresh" type="button" disabled>Capture display now</button><button id="dump-clear" type="button" disabled>Clear retained images</button></div>
-        <button id="dump-retry" type="button" hidden>Download encoded PNG again</button>
-        <p id="dump-status" class="note" role="status"></p>
-        <p class="note">Latest accepted decoded frame (foreground or margin) and latest composition are independent captures, not a guaranteed pair. Composition includes visible overlays/previews, not panels, CSS selection boxes or the OS/remote screen. View close/change, opt-out and page exit clear retained images; downloaded files remain.</p>
-      </section>
-      <p class="note">Run explicitly to compare PNG, raw RGBA and crop/overlay display. Expect red, green, blue and yellow bars on black; panel C is cropped and has a white cross. No design data, renderer, upload or file save is involved.</p>
-      <div class="button-row"><button id="display-test-run" type="button" disabled>Run display test</button><button id="display-test-cancel" type="button" disabled>Cancel test</button></div>
-      <p id="display-test-status" role="status">Canvas readback does not prove what the remote screen displays.</p>
-      <div id="display-test-results" hidden>
-        <p>A · PNG decoding</p><canvas id="display-test-png" width="1" height="1" aria-label="PNG color bars"></canvas>
-        <p>B · Raw RGBA</p><canvas id="display-test-raw" width="1" height="1" aria-label="Raw RGBA color bars"></canvas>
-        <p>C · Cropped viewport and separate overlay</p>
-        <div id="display-test-stack" class="viewport display-test-stack" aria-label="Cropped bars with a white cross"><canvas id="display-test-base" width="1" height="1"></canvas><canvas id="display-test-overlay" width="1" height="1"></canvas></div>
-        <label for="display-test-observed">What do you see?</label><select id="display-test-observed"><option value="unverified">Not checked</option><option value="all_visible">All three panels look correct</option><option value="display_problem">One or more panels are wrong or blank</option></select>
-        <pre id="display-test-report" tabindex="0" aria-label="Local display diagnostic report"></pre>
-      </div>
-      <h2>Browser timing · local diagnostics</h2>
-      <label class="check"><input id="timing-enabled" type="checkbox"> Record browser callback timings</label>
-      <p class="note">Off by default. Last 256 numeric samples only; no coordinates, filenames, IDs, pixels, notes, network upload or persistent storage. Close About before navigating, then reopen it and refresh this report. Hidden pages stop recording. Recording adds overhead.</p>
-      <p class="note">Edit queue→send→acknowledgement→snapshot, frame callback→packet check→decode→Canvas submission, and drag event→preview submission are separate measurements. These are not actual paint, input-to-photon, FPS or a GTK comparison. OS/ETX presentation needs separate measurement.</p>
-      <div class="button-row"><button id="timing-refresh" type="button">Show / refresh measurements</button><button id="timing-clear" type="button">Clear measurements</button></div>
-      <pre id="timing-report" tabindex="0" aria-label="Local browser callback timing report"></pre>
-      <h2>Distribution notices</h2>
-      <p>Portable packages contain the collected original material in NOTICES/ (starting with INVENTORY.txt). Use verify.sh to check the complete package hashes. The reader below displays one bounded source chunk at a time, not executable HTML.</p>
-      <p class="note">The inventory includes build dependencies and may include components not linked at runtime. It is not legal clearance or a grant of Floe distribution rights. Development executables may have no adjacent notice bundle.</p>
-      <p id="notice-availability" role="status"></p>
-      <div id="notice-catalog" hidden>
-        <div class="button-row"><button id="notice-list-prev">Previous files</button><button id="notice-list-next">More files</button><button id="notice-list-retry">Reload list</button></div>
-        <p id="notice-list-status" role="status"></p><div id="notice-files" aria-label="Portable notice files"></div>
-        <h3 id="notice-title"></h3>
-        <div class="button-row notice-pages"><button id="notice-prev">Previous page</button><button id="notice-next">Next page</button><label>Page <input id="notice-jump" inputmode="numeric" size="5" aria-label="Notice page number"></label><button id="notice-go">Go to page</button><button id="notice-retry">Retry page</button></div>
-        <p id="notice-page-status" role="status"></p><pre id="notice-text" tabindex="0" aria-label="Original notice source"></pre>
-      </div>
-      <h2>Noto Sans Mono · Original font notice</h2>
-      <pre id="about-font" tabindex="0" aria-label="Original font license"></pre>
+      <p class="about-copyright">2026 FLATIDE LC.<br>http://flatide.com</p>
+      <details id="about-licenses">
+        <summary>Open Source Licenses</summary>
+        <p id="notice-availability" role="status"></p>
+        <div id="notice-catalog" hidden>
+          <div class="button-row"><button id="notice-list-prev">previous files</button><button id="notice-list-next">more files</button><button id="notice-list-retry">reload list</button></div>
+          <p id="notice-list-status" role="status"></p><div id="notice-files" aria-label="Portable notice files"></div>
+          <h3 id="notice-title"></h3>
+          <div class="button-row notice-pages"><button id="notice-prev">previous page</button><button id="notice-next">next page</button><label>page <input id="notice-jump" inputmode="numeric" size="5" aria-label="Notice page number"></label><button id="notice-go">go</button><button id="notice-retry">retry page</button></div>
+          <p id="notice-page-status" role="status"></p><pre id="notice-text" tabindex="0" aria-label="Original notice source"></pre>
+        </div>
+        <h3>Noto Sans Mono</h3>
+        <pre id="about-font" tabindex="0" aria-label="Original font license"></pre>
+      </details>
+      <details id="about-diagnostics">
+        <summary>display diagnostics</summary>
+        <section id="dump-panel" hidden aria-label="Recent display pixels">
+          <label class="check"><input id="dump-enabled" type="checkbox"> keep the recent received frame and composed display</label>
+          <p id="dump-received-info" class="note"></p><button id="dump-received" type="button" disabled>download received frame PNG</button>
+          <p id="dump-display-info" class="note"></p><button id="dump-display" type="button" disabled>download composed display PNG</button>
+          <div class="button-row"><button id="dump-refresh" type="button" disabled>capture display now</button><button id="dump-clear" type="button" disabled>clear retained images</button></div>
+          <button id="dump-retry" type="button" hidden>download encoded PNG again</button>
+          <p id="dump-status" class="note" role="status"></p>
+        </section>
+        <div class="button-row"><button id="display-test-run" type="button" disabled>run display test</button><button id="display-test-cancel" type="button" disabled>cancel test</button></div>
+        <p id="display-test-status" role="status"></p>
+        <div id="display-test-results" hidden>
+          <p>A · PNG decoding</p><canvas id="display-test-png" width="1" height="1" aria-label="PNG color bars"></canvas>
+          <p>B · raw RGBA</p><canvas id="display-test-raw" width="1" height="1" aria-label="Raw RGBA color bars"></canvas>
+          <p>C · cropped viewport and separate overlay</p>
+          <div id="display-test-stack" class="viewport display-test-stack" aria-label="Cropped bars with a white cross"><canvas id="display-test-base" width="1" height="1"></canvas><canvas id="display-test-overlay" width="1" height="1"></canvas></div>
+          <label for="display-test-observed">observed</label><select id="display-test-observed"><option value="unverified">not checked</option><option value="all_visible">all three panels look correct</option><option value="display_problem">one or more panels are wrong or blank</option></select>
+          <pre id="display-test-report" tabindex="0" aria-label="Local display diagnostic report"></pre>
+        </div>
+        <label class="check"><input id="timing-enabled" type="checkbox"> record browser callback timings</label>
+        <div class="button-row"><button id="timing-refresh" type="button">show / refresh measurements</button><button id="timing-clear" type="button">clear measurements</button></div>
+        <pre id="timing-report" tabindex="0" aria-label="Local browser callback timing report"></pre>
+      </details>
     </section>
   </div>
   <div id="session-exit-dialog" class="about-backdrop" role="dialog" aria-modal="true" aria-labelledby="session-exit-title" aria-describedby="session-exit-description" hidden>
     <section class="about-card session-exit-card">
       <h2 id="session-exit-title">End this session?</h2>
-      <p id="session-exit-description">Stop this session's workers and discard unsaved local drafts. Earlier approved file writes are not undone. This does not close your browser tab.</p>
-      <div class="button-row"><button id="session-exit-cancel">Cancel</button><button id="session-exit-confirm">End session</button></div>
+      <p id="session-exit-description">Unsaved local drafts are discarded; earlier approved file writes are not undone.</p>
+      <div class="button-row"><button id="session-exit-cancel">No</button><button id="session-exit-confirm">Yes</button></div>
     </section>
   </div>
-  <noscript>This workspace requires JavaScript. All assets are served locally.</noscript>
+  <noscript>This viewer requires JavaScript.</noscript>
   <!-- floe-layer-menu:start -->
   <div id="layer-menu" class="layer-menu" role="menu" aria-label="Selected layer actions" hidden>
-    <button id="layer-menu-show" role="menuitem">Show selected</button><button id="layer-menu-hide" role="menuitem">Hide selected</button><button id="layer-menu-toggle" role="menuitem">Toggle selected</button>
-    <button id="layer-menu-style" role="menuitem">Style selected…</button>
-    <button id="layer-menu-all" role="menuitem">Show all</button><button id="layer-menu-none" role="menuitem">Hide all</button><button id="layer-menu-close" role="menuitem">Close menu</button>
+    <button id="layer-menu-show" role="menuitem">show selected</button><button id="layer-menu-hide" role="menuitem">hide selected</button><button id="layer-menu-toggle" role="menuitem">toggle selected</button>
+    <div class="menu-sep" role="separator"></div>
+    <button id="layer-menu-all" role="menuitem">show all</button><button id="layer-menu-none" role="menuitem">hide all</button>
+    <div class="menu-sep" role="separator"></div>
+    <span class="layer-menu-group">line width</span>
+    <button id="layer-menu-width1" role="menuitem" data-width="1">1 px</button><button id="layer-menu-width3" role="menuitem" data-width="3">3 px</button><button id="layer-menu-width5" role="menuitem" data-width="5">5 px</button><button id="layer-menu-width-up" role="menuitem" data-width="+1">increase</button><button id="layer-menu-width-down" role="menuitem" data-width="-1">decrease</button>
+    <button id="layer-menu-style" role="menuitem">style selected…</button>
+    <div class="menu-sep" role="separator"></div>
+    <button id="layer-menu-load" role="menuitem" hidden>load layer properties…</button><button id="layer-menu-save" role="menuitem" hidden>save layer properties…</button><button id="layer-menu-default" role="menuitem" hidden>save colors+fills as design default…</button>
+    <button id="layer-menu-close" role="menuitem">close</button>
   </div>
   <!-- floe-layer-menu:end -->
   <div id="share-dialog" class="about-backdrop" role="dialog" aria-modal="true" aria-labelledby="share-heading" hidden>
     <section class="about-dialog">
-      <h2 id="share-heading">Read-only local invitation</h2>
-      <p>Only loopback is enabled. This link works on this machine or an already authorized tunnel; it does not publish a remote server.</p>
-      <p>The current visible layers and loaded jobdeck levels are shared, including layout labels, geometry outside the viewport, and future pan/zoom within that scope. A changed source, view or layer scope revokes the invitation.</p>
-      <p>Layout approval does not include DRC. Review notes, SVRF metadata, file browsing and writes are never granted here.</p>
+      <h2 id="share-heading">share locally</h2>
       <div id="share-drc" hidden><p id="share-drc-title"></p>
-        <label class="check"><input id="share-drc-consent" type="checkbox"> Also expose this entire DRC result: rule names/descriptions, all error coordinates and waive statuses, including errors outside the visible layers or viewport.</label>
-        <p class="note">Review notes and separate SVRF metadata are excluded. A result/review revision change revokes this share; it does not follow new reviews.</p>
+        <label class="check"><input id="share-drc-consent" type="checkbox"> also expose this entire DRC result</label>
       </div><p id="share-drc-status" class="note" role="status"></p>
-      <label for="share-mode">Mode</label><select id="share-mode"><option value="follow">Follow the owner's camera</option><option value="explore">Explore independently</option></select>
-      <p>Explore uses a separate admitted renderer and can be busy when capacity is full. Owner close ends the share. Received pixels can be copied and cannot be recalled by revoking access.</p>
-      <label class="check"><input id="share-consent" type="checkbox"> I approve exposing this layout scope to the holder of a one-use invitation.</label>
-      <div class="button-row"><button id="share-create" disabled>Create invitation</button><button id="share-cancel">Close</button></div>
+      <label for="share-mode">mode</label><select id="share-mode"><option value="follow">follow the owner's camera</option><option value="explore">explore independently</option></select>
+      <label class="check"><input id="share-consent" type="checkbox"> expose this layout scope to the holder of a one-use invitation</label>
+      <div class="button-row"><button id="share-create" disabled>create invitation</button><button id="share-cancel">close</button></div>
       <p id="share-status" class="note" role="status"></p>
-      <div id="share-result" hidden><label for="share-link">Private guest link · copy only to the intended recipient</label><input id="share-link" readonly><a id="share-visit" target="_blank" rel="noopener noreferrer">Open guest tab</a></div>
-      <h3>Invitations / sessions (maximum 4)</h3><button id="share-refresh">Refresh list</button><div id="share-list"></div>
+      <div id="share-result" hidden><label for="share-link">guest link</label><input id="share-link" readonly><a id="share-visit" target="_blank" rel="noopener noreferrer">open guest tab</a></div>
+      <h3>invitations</h3><button id="share-refresh">refresh</button><div id="share-list"></div>
+    </section>
+  </div>
+  <div id="notes-dialog" class="about-backdrop" role="dialog" aria-modal="true" aria-labelledby="notes-title" tabindex="-1" hidden>
+    <section class="about-card tool-card">
+      <div class="about-heading"><h2 id="notes-title">note</h2><button id="notes-close" type="button">close</button></div>
+      <section id="notes-panel" class="notes-panel" aria-label="Owner DRC notes" hidden>
+        <p id="notes-owner" class="note"></p>
+        <div id="notes-authoring" hidden><p id="notes-selection" class="note"></p>
+        <label class="check"><input id="notes-autosave" type="checkbox" disabled> save confirmed note edits automatically (this tab)</label>
+        <p id="notes-autosave-status" class="note" role="status"></p>
+        <button id="notes-read" disabled>read selected notes</button>
+        <div id="notes-editor" hidden>
+          <p id="notes-target" class="note"></p>
+          <label for="notes-text" class="sr-only">Note text</label><textarea id="notes-text" rows="5" maxlength="65536" spellcheck="false" aria-describedby="notes-bytes notes-local notes-hangul-status"></textarea>
+          <label class="check"><input id="notes-hangul" type="checkbox"> Hangul (Shift+Space)</label>
+          <p id="notes-hangul-status" class="note" role="status"></p>
+          <p id="notes-bytes" class="note"></p><p id="notes-local" class="note"></p>
+          <div class="button-row"><button id="notes-prepare">ok</button><button id="notes-reload">reload snapshot</button><button id="notes-discard">cancel</button></div>
+          <div id="notes-review" hidden>
+            <strong id="notes-preview-target"></strong><pre id="notes-preview"></pre><p id="notes-report" class="note"></p>
+            <label id="notes-legacy-row" class="check" hidden><input id="notes-legacy" type="checkbox"> this legacy note file belongs to this DRC run</label>
+            <label class="check"><input id="notes-consent" type="checkbox"> save this text on the selected errors</label>
+            <button id="notes-approve" class="primary" disabled>save</button>
+          </div>
+        </div>
+        <p id="notes-status" role="status"></p><p id="notes-message" class="note" role="status"></p>
+        <div class="button-row"><button id="notes-refresh">refresh</button><button id="notes-cancel" hidden>cancel save</button></div>
+        <div id="notes-uncertain" hidden>
+          <p class="note">outcome unknown: resolve resends only the same approved request.</p>
+          <button id="notes-resolve">resolve approved request</button>
+          <label class="check"><input id="notes-checked" type="checkbox"> I checked the note file.</label>
+          <button id="notes-forget" disabled>clear local recovery record</button>
+        </div>
+        </div>
+      </section>
+    </section>
+  </div>
+  <div id="waives-dialog" class="about-backdrop" role="dialog" aria-modal="true" aria-labelledby="waives-title" tabindex="-1" hidden>
+    <section class="about-card tool-card">
+      <div class="about-heading"><h2 id="waives-title">waive</h2><button id="waives-close" type="button">close</button></div>
+      <section id="waives-panel" class="notes-panel" aria-label="Owner DRC waives" hidden>
+        <p id="waives-owner" class="note"></p><p id="waives-selection" class="note"></p>
+        <label class="check"><input id="waives-autosave" type="checkbox" disabled> save confirmed waive changes automatically (this tab)</label>
+        <p id="waives-autosave-status" class="note" role="status"></p>
+        <button id="waives-read" disabled>read selected statuses</button>
+        <div id="waives-editor" hidden>
+          <p id="waives-target" class="note"></p>
+          <label for="waives-action">action</label>
+          <select id="waives-action"><option value="">Choose an action…</option><option value="waive">Waive</option><option value="clear">Clear waive</option></select>
+          <p id="waives-local" class="note"></p>
+          <div class="button-row"><button id="waives-prepare">ok</button><button id="waives-reload">reload snapshot</button><button id="waives-discard">cancel</button></div>
+          <div id="waives-review" hidden>
+            <strong id="waives-preview-target"></strong><p id="waives-preview"></p><p id="waives-reserved" class="note"></p>
+            <label id="waives-legacy-row" class="check" hidden><input id="waives-legacy" type="checkbox"> this legacy waive file belongs to this DRC run</label>
+            <label class="check"><input id="waives-consent" type="checkbox"> save the displayed action on the selected errors</label>
+            <button id="waives-approve" class="primary" disabled>save</button>
+          </div>
+        </div>
+        <p id="waives-status" role="status"></p><p id="waives-message" class="note" role="status"></p>
+        <p id="waives-paused" class="note" hidden>DRC reads are paused until the save outcome and the reader revision are confirmed.</p>
+        <div class="button-row"><button id="waives-refresh">refresh</button><button id="waives-cancel" hidden>cancel save</button></div>
+        <div id="waives-uncertain" hidden>
+          <p class="note">outcome unknown: resolve resends only the same approved request.</p>
+          <button id="waives-resolve">resolve approved request</button>
+          <label class="check"><input id="waives-checked" type="checkbox"> I checked the waive file.</label>
+          <button id="waives-forget" disabled>clear local recovery record</button>
+        </div>
+      </section>
+    </section>
+  </div>
+  <div id="transfer-dialog" class="about-backdrop" role="dialog" aria-modal="true" aria-labelledby="transfer-title" tabindex="-1" hidden>
+    <section class="about-card tool-card">
+      <div class="about-heading"><h2 id="transfer-title">review files</h2><button id="transfer-close" type="button">close</button></div>
+      <section id="transfer-panel" class="notes-panel" aria-label="Whole review import and export" hidden>
+        <div class="form-row"><label for="transfer-kind">file</label><select id="transfer-kind"><option value="notes">notes (.fe)</option><option id="transfer-waives-option" value="waives">waives (.waive)</option></select></div>
+        <div class="form-row"><label for="transfer-file">load from</label><input id="transfer-file" type="file" accept=".fe,.waive"></div>
+        <div class="button-row"><button id="transfer-import">load…</button><button id="transfer-export">save as…</button></div>
+        <p id="transfer-progress" class="note" role="status"></p><p id="transfer-message" class="note" role="status"></p>
+        <div class="button-row"><button id="transfer-refresh">refresh</button><button id="transfer-cancel">cancel</button><button id="transfer-discard">discard upload</button><button id="transfer-resolve" hidden>resolve identical request</button></div>
+        <div id="transfer-review" hidden>
+          <pre id="transfer-preview"></pre>
+          <label class="check"><input id="transfer-run" type="checkbox"> this file belongs to this exact DRC run</label>
+          <label class="check"><input id="transfer-consent" type="checkbox"> replace the entire listed review with this file</label>
+          <button id="transfer-approve" class="primary" disabled>replace review</button>
+        </div>
+        <p id="transfer-usage" class="note"></p><div id="transfer-files" aria-label="Prepared review downloads"></div>
+      </section>
+      <details id="recovery-panel" class="notes-panel" aria-label="Interrupted review file recovery" hidden>
+        <summary>recover an interrupted review file…</summary>
+        <div class="form-row"><label for="recovery-kind">file</label><select id="recovery-kind"><option value="notes">notes</option><option id="recovery-waives-choice" value="waives" disabled>waives</option></select></div>
+        <button id="recovery-prepare">preview file recovery</button>
+        <div id="recovery-preview" hidden>
+          <p><strong id="recovery-target"></strong></p>
+          <label class="check"><input id="recovery-consent" type="checkbox"> remove only the verified extra staging link; keep the target</label>
+          <div class="button-row"><button id="recovery-approve" disabled>approve file recovery</button><button id="recovery-discard">discard preview</button></div>
+        </div>
+        <p id="recovery-status" role="status"></p><p id="recovery-message" class="note" role="status"></p>
+        <div class="button-row"><button id="recovery-refresh">refresh</button><button id="recovery-resolve" hidden>resolve same approval</button><button id="recovery-check" hidden>check same repair</button></div>
+        <label id="recovery-checked-label" class="check" hidden><input id="recovery-checked" type="checkbox"> I checked the file and receipt.</label>
+        <button id="recovery-forget" hidden disabled>clear tab receipt</button>
+      </details>
+    </section>
+  </div>
+  <div id="build-dialog" class="about-backdrop" role="dialog" aria-modal="true" aria-labelledby="build-title" tabindex="-1" hidden>
+    <section class="about-card tool-card">
+      <div class="about-heading"><h2 id="build-title">build pack</h2><button id="build-close" type="button">close</button></div>
+      <section id="drc-build" class="drc-build" aria-label="DRC pack build" hidden>
+        <button id="drc-build-open" class="menu-proxies" aria-expanded="false" aria-controls="drc-build-form" disabled>build pack…</button>
+        <form id="drc-build-form" aria-label="Approve pack build" hidden>
+          <p>review: <strong id="drc-build-source"></strong></p>
+          <div class="form-row"><label for="drc-build-jobs">build jobs</label><input id="drc-build-jobs" class="short" type="number" min="1" max="16" step="1" value="4" required></div>
+          <label class="check"><input id="drc-build-force" type="checkbox"> replace an existing pack</label>
+          <div class="button-row"><button id="drc-build-submit" class="primary" type="submit">build</button><button id="drc-build-dismiss" type="button">cancel</button></div>
+        </form>
+        <p id="drc-build-status" role="status"></p>
+        <p id="drc-build-review" class="note"></p>
+        <p id="drc-build-note" class="note" role="status"></p>
+        <div class="button-row"><button id="drc-build-cancel" hidden>cancel build</button><button id="drc-build-resolve" hidden>resolve request</button></div>
+      </section>
     </section>
   </div>
 </body>

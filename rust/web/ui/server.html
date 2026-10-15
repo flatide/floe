@@ -2,7 +2,7 @@
 <html lang="en"><head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="floe-http-test" content="@@HTTP_TEST@@">
-  <meta name="floe-bundle" content="@@BUNDLE@@"><title>floe2 · Server session</title>
+  <meta name="floe-bundle" content="@@BUNDLE@@"><title>floe2 demo</title>
   <link rel="stylesheet" href="/server-assets/@@BUNDLE@@/app.css">
   <link rel="stylesheet" href="/server-assets/@@BUNDLE@@/viewer.css">
   <link rel="stylesheet" href="/server-assets/@@BUNDLE@@/server.css">
@@ -21,8 +21,8 @@
 </head><body id="server-shell" data-floe-viewer>
   <header class="topbar"><div class="brand">floe<span>2</span><small>DEMO</small></div>
     <span id="server-status" class="document-title" role="status">Connecting…</span>
-    <button id="server-reconnect" class="quiet" disabled>Reconnect</button><button id="server-leave" class="quiet" disabled>End my session</button>
-    <a id="server-samples" class="samples-link" href="/demo" hidden>Samples</a>
+    <button id="server-reconnect" class="quiet" disabled>reconnect</button><button id="server-leave" class="quiet" disabled>end my session</button>
+    <a id="server-samples" class="samples-link" href="/demo" hidden>samples</a>
   </header>
   <nav id="server-menubar" class="menubar" aria-label="Main menu"></nav>
   <div class="workspace">
@@ -32,38 +32,35 @@
       </div>
       @@CELLS_PAGE@@
     </aside>
-    <div id="server-left-splitter" class="splitter" role="separator" aria-orientation="vertical" aria-label="Resize the cells pane" tabindex="0" title="Drag to resize · double-click resets"></div>
+    <div id="server-left-splitter" class="splitter" role="separator" aria-orientation="vertical" aria-label="Resize the cells pane" tabindex="0"></div>
     <main class="main">
-      @@VIEW_TOOLBAR@@
       <div id="server-banner" class="server-banner">
-        <p id="transport-warning" hidden>HTTP test · unencrypted connection. Trusted internal network only.</p>
-        <button id="server-open" hidden disabled>Open assigned layout</button>
+        <p id="transport-warning" hidden>HTTP test · unencrypted connection.</p>
+        <button id="server-open" hidden disabled>open assigned layout</button>
       </div>
       <div id="server-viewport" class="viewport" tabindex="0" aria-label="Assigned layout canvas. Arrow keys pan; plus and minus zoom; Home fits; left or middle drag pans; right drag zooms into a box.">
       <canvas id="server-canvas" class="viewer-frame" width="1" height="1"></canvas>
       <canvas id="server-cells-canvas" width="1" height="1" aria-label="Highlighted cell instances" hidden></canvas>
       <div id="server-zoom-band" class="viewer-band" hidden></div><div id="server-zoom-band-hint" class="viewer-band-hint" hidden></div>
-      <p id="server-empty">Waiting for an authorized frame…</p>
+      <div id="server-empty" class="empty"><p>waiting for an authorized frame…</p></div>
       </div>
     </main>
-    <div id="server-right-splitter" class="splitter" role="separator" aria-orientation="vertical" aria-label="Resize the layer pane" tabindex="0" title="Drag to resize · double-click resets"></div>
+    <div id="server-right-splitter" class="splitter" role="separator" aria-orientation="vertical" aria-label="Resize the layer pane" tabindex="0"></div>
     <aside id="server-right-pane" class="right-pane" aria-label="Layers, minimap and palette">
       @@RIGHT_PANE@@
     </aside>
   </div>
-  <footer class="statusbar"><span id="server-frame-status" role="status">No displayed frame</span><span class="status-right"><span id="server-viewport-info"></span><span id="server-dstatus"></span></span></footer>
+  <footer class="statusbar"><span class="status-left"><span id="server-frame-status" role="status"></span></span><span class="status-right"><span id="server-viewport-info"></span><span id="server-dstatus">depth: -</span></span></footer>
   <div id="server-user" class="perf"></div>
   <div class="menu-proxies" hidden>
     @@LAYER_TOOLS@@
   </div>
   <div id="server-display-dialog" class="about-backdrop" role="dialog" aria-modal="true" aria-labelledby="server-display-title" tabindex="-1" hidden>
     <section class="about-card tool-card">
-      <div class="about-heading"><h2 id="server-display-title">Display options</h2><button id="server-display-close" type="button">Close</button></div>
+      <div class="about-heading"><h2 id="server-display-title">detail</h2><button id="server-display-close" type="button">close</button></div>
       @@VIEW_CONTROLS@@
-      <p class="note">Canvas: arrow keys pan 50%, Shift + arrows 10%; + / − zoom, Home fits. Left/middle drag pans; wheel zooms about the cursor. Right drag draws a zoom band: rightward zooms in, leftward zooms out; Escape cancels.</p>
-      <p class="note">During navigation or display-option changes the previous image stays visible until the current frame arrives. A wait cursor marks pending work; the previous image is not the completed new view.</p>
-      <p class="note">Your view is independent. Shared layout and index files are read-only here: no file browsing, indexing, review writes, query or export. A lost connection clears the display; Reconnect restores the server's current view without replaying navigation.</p>
     </section>
   </div>
+  @@VIEW_TOOLBAR@@
   @@LAYER_MENU@@
 </body></html>

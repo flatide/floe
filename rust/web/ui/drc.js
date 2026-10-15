@@ -4,7 +4,7 @@
     'use strict';
     const geometry = typeof module === 'object' && module.exports ? require('./drc-geometry.js') : root.FloeDRCGeometry;
     const projection = geometry.projection, point = geometry.point, shifted = geometry.shifted, vertices = geometry.vertices;
-    const rootNote = 'View root active: DRC positions are top-cell coordinates. Markers, In view and box selection pause; going to an error returns to the top.';
+    const rootNote = 'View root active: DRC pauses (top-cell coordinates); going to an error returns to the top.';
     // These formatters never interpret rule text as markup or compute a DRC
     // measurement in JS. Exact server scalars remain available in the text.
     function metricName(s) {
@@ -191,8 +191,7 @@
                     v.next !== null && (!v.rows.length || cursor(v.next) !== end || P.compare(end, v.total) >= 0)) { throw new Error('Invalid SVRF type cursor'); }
                 const seen = new Set(); v.rows.forEach(function (r) { metricName(r.metric); cursor(r.checks); if (seen.has(r.metric)) { throw new Error('Duplicate SVRF type'); } seen.add(r.metric); });
                 typeNext = v.next; typeReady = v.total !== '0'; renderTypes(v.rows);
-                el('drc-type-info').textContent = v.total === '0' ? 'Metadata has no classified types.' :
-                    v.rows.length + '/' + v.total + ' types on this page · ' + registration.metadata.svrf.matched + '/' + registration.metadata.svrf.checks + ' rules matched';
+                el('drc-type-info').textContent = v.total === '0' ? 'Metadata has no classified types.' : '';
             } catch (e) {
                 if (valid('types', t, c)) { typeNext = null; renderTypes([]); el('drc-type-info').textContent = 'Type catalog unavailable · ' + e.message; }
                 if (strict) { throw e; }
@@ -236,12 +235,15 @@
             el('drc-type-next').disabled = !available || typeBusy || typeNext === null;
             const c = current(), isolated = !!c && c.state.layers_isolated === true;
             el('drc-restore-layers').disabled = !available || !isolated || !c.connected || c.pending;
-            el('drc-layer-status').textContent = (isolated ? 'Layers isolated · Restore returns to the first visibility snapshot. ' : '') + isolationNotice;
+            el('drc-layer-status').textContent = (isolated ? 'Layers isolated · ' : '') + isolationNotice;
+            el('drc-rule-pager').hidden = !previousRules.length && ruleNext === null;
+            el('drc-type-pager').hidden = !previousTypes.length && typeNext === null;
         }
         function boxReset(off) {
             boxStart = boxEnd = null; if (off) { boxMode = false; }
             el('drc-box').setAttribute('aria-pressed', String(boxMode));
             el('drc-box-status').textContent = boxMode ? 'Click the first box corner · drag still pans.' : 'e: two corners · Shift adds · Ctrl/Cmd toggles. Current rule and page only.';
+            el('drc-box-status').hidden = !boxMode;
             if (o.cursor) { o.cursor(); } paintLater();
         }
         function toggleBox() {
@@ -255,7 +257,8 @@
             if (notes) { notes.changed(); }
             if (waives) { waives.changed(); }
             const count = rule ? groups.ids(rule.check).length : 0;
-            el('drc-group-count').textContent = count + ' selected in this rule · ' + groups.total() + '/5000 across all rules';
+            el('drc-group-count').textContent = count + ' selected' + (groups.total() > count ? ' · ' + groups.total() + ' in all rules' : '');
+            el('drc-group-count').hidden = !count && !groups.total();
             markErrors(); navigationButtons(); paintLater(); loadGroupMarkers(); followFilters();
         }
         async function loadGroupMarkers() {
@@ -490,8 +493,8 @@
             cancel('geometry'); cancel('focus'); selected = null; points = null; pointsReady = false;
             if (notes) { notes.changed(); }
             if (waives) { waives.changed(); }
-            cancel('comparison'); el('drc-comparison').textContent = 'Select an error to compare its parsed bound.';
-            jumpScale = null; zoomLock = false; el('drc-selected').textContent = 'Click to inspect · double-click to go to an error.';
+            cancel('comparison'); el('drc-comparison').textContent = '';
+            jumpScale = null; zoomLock = false; el('drc-selected').textContent = '';
             paintLater(); navigationButtons(); renderErrors(); savePanel();
         }
         function endFocus() {
@@ -501,8 +504,8 @@
             resetCD();
             jumpActive = focusVisible = rowFocus = false;
             noteTarget=null;if(noteDisplay){noteDisplay.sync();}
-            if (selected) { el('drc-selected').textContent = 'Global ' + selected.global + ' · focus cleared; comma/period continues without moving the view.'; }
-            info('Focus cleared · pending error search cancelled.');
+            if (selected) { el('drc-selected').textContent = 'Global ' + selected.global + ' · focus cleared'; }
+            info('');
             paintLater(); navigationButtons(); savePanel(); return true;
         }
         function renderRules() {
@@ -542,11 +545,11 @@
         }
         function showDescription(page) {
             el('drc-description').textContent = page.description;
-            el('drc-rule-metadata').textContent = hasMetadata() ? metadataText(page.svrf) : 'No SVRF metadata registered.';
+            el('drc-rule-metadata').textContent = hasMetadata() ? metadataText(page.svrf) : '';
         }
         async function loadComparison(r) {
             cancel('comparison');
-            if (!hasMetadata()) { el('drc-comparison').textContent = 'No SVRF metadata registered.'; return; }
+            if (!hasMetadata()) { el('drc-comparison').textContent = ''; return; }
             const c = current(), t = task('comparison'); el('drc-comparison').textContent = 'Reading constraint comparison…';
             try {
                 const v = await read('comparison', t, c, {kind: 'comparison', check: r.check, error: r.local});
@@ -599,13 +602,14 @@
             const b = bbox(r.bbox_um), q = bbox(bounds);
             return b[0] <= q[2] && b[2] >= q[0] && b[1] <= q[3] && b[3] >= q[1];
         }
+        function errorTitle(r) { return 'global ' + r.global + ' · ' + (r.kind === 'p' ? 'polygon' : 'edge') + (r.status === 1 ? ' · waived' : ''); }
         function markErrors() {
             Array.prototype.forEach.call(el('drc-errors').children, function (b, i) {
                 const r = rows[i], active = r && selected && selected.check === r.check && selected.local === r.local;
                 b.className = 'drc-error' + (r && r.status === 1 ? ' waived' : '') + (r && groups.contains(r.check, r.local) ? ' grouped' : '') + (active ? ' selected' : '');
                 if(r){const noted=noteDisplay&&noteDisplay.noted({check:r.check,error:r.local});
-                    b.textContent=(noted===true?'* ':'')+'#'+P.next(r.local)+'  ·  global '+r.global+'  ·  '+(r.kind==='p'?'poly':'edge')+(r.status===1?'  ·  waived':'');
-                    b.title=noted===true?'Saved note present':noted===false?'No saved note':'Saved-note status unavailable';}
+                    b.textContent=(noted===true?'*':'')+P.next(r.local);
+                    b.title=errorTitle(r)+(noted===true?' · note':noted===false?'':' · note status unavailable');}
                 if (active && rowFocus) { rowFocus = false; b.focus(); b.scrollIntoView({block: 'nearest'}); }
             });
         }
@@ -615,7 +619,7 @@
             rows.forEach(function (r) {
                 const b = doc.createElement('button');
                 b.disabled = restoring || !pageReady;
-                b.textContent = '#' + P.next(r.local) + '  ·  global ' + r.global + '  ·  ' + (r.kind === 'p' ? 'poly' : 'edge') + (r.status === 1 ? '  ·  waived' : '');
+                b.textContent = P.next(r.local); b.title = errorTitle(r);
                 b.setAttribute('aria-label', 'Error ' + P.next(r.local) + ', global ' + r.global);
                 b.onclick = function (e) {
                     if (e && e.altKey) { return; }
@@ -635,8 +639,7 @@
                 el('drc-errors').appendChild(b);
             });
             if (!rows.length) { el('drc-errors').textContent = !pageReady ? 'Waiting for an error page…' : errorNext === null ? 'No matching errors.' : 'No match in this scan. Continue to the next page.'; }
-            el('drc-result-info').textContent = (query ? 'Saved viewport query' : 'Rule errors' + (selectedOnly() ? ' ∩ Selected' : '') + (inView() ? ' ∩ In view' : '')) +
-                ' · ' + rows.length + ' on this page' + (!pageReady ? ' · waiting for a page' : errorNext === null ? ' · end' : ' · more available');
+            el('drc-result-info').textContent = (query ? 'saved viewport query · ' : '') + rows.length + ' on this page' + (!pageReady ? ' · waiting for a page' : errorNext === null ? '' : ' · more available');
             markErrors(); navigationButtons(); paintLater();if(noteDisplay){noteDisplay.sync();}
         }
         async function loadErrors(strict) {
@@ -670,7 +673,7 @@
                 if (errorNext !== null) { if (query) { cursor(errorNext.check); cursor(errorNext.error); } else { cursor(errorNext); } }
                 if (JSON.stringify(errorNext) === JSON.stringify(errorStart)) { throw new Error('DRC cursor did not progress'); }
                 // A list read while In view pauses is unfiltered; say why.
-                pageReady = true; renderErrors(); info(inViewPaused() ? rootNote : 'Read-only geometry query · no review file changed by this read.'); savePanel();
+                pageReady = true; renderErrors(); info(inViewPaused() ? rootNote : ''); savePanel();
             } catch (e) {
                 const now = current();
                 if (body.in_view && valid('errors', t, c) && now && (!now.connected || now.pending || now.state.state_rev !== c.state.state_rev)) {
@@ -728,7 +731,7 @@
                     isolationNotice = isolation.status === 'ready' ? 'Last jump: ' + isolation.matched + ' layer pairs isolated.' :
                         isolation.status === 'unsupported_deck' ? 'Layers unchanged · physical GDS isolation is unavailable in jobdeck views.' :
                         'Layers unchanged · this rule has no matching source-layer metadata.';
-                    info('Read-only geometry query · no review file changed by this read.');
+                    info('');
                     navigationButtons(); savePanel();
                 });
             } catch (e) { failure('focus', t, c, e); }
@@ -807,7 +810,7 @@
                 }
                 const allowFocus = !c.pending && !current().pending && current().state.state_rev === c.state.state_rev;
                 select(r, false, allowFocus);
-                info(allowFocus || !jumpActive ? 'Read-only geometry query · no review file changed by this read.' : 'View changed during search; selected without moving.');
+                info(allowFocus || !jumpActive ? '' : 'View changed during search; selected without moving.');
             } catch (e) { failure('step', t, c, e); }
             finally { if (valid('step', t, c)) { stepBusy = false; navigationButtons(); } }
         }
@@ -881,14 +884,14 @@
                     const page = await read('restore', t, c, {kind: 'rule', check: data.check}); if (!page) { return; }
                     rule = {check: data.check, name: page.name, errors: page.errors, waived: page.waived};
                     el('drc-rule-title').textContent = page.name; showDescription(page);
-                } else { el('drc-rule-title').textContent = 'Choose a rule'; el('drc-description').textContent = ''; el('drc-rule-metadata').textContent = ''; }
+                } else { el('drc-rule-title').textContent = ''; el('drc-description').textContent = ''; el('drc-rule-metadata').textContent = ''; }
                 await loadErrors(true); if (!valid('restore', t, c)) { return; }
                 if (data.selected) {
                     const ref = data.selected; cursor(ref.check); cursor(ref.error);
                     const page = await read('restore', t, c, {kind: 'geometry', check: ref.check, error: ref.error, start: '0', limit: 1}); if (!page) { return; }
                     selected = validateRows([page])[0]; points = null; pointsReady = false;
                     loadComparison(selected);
-                    el('drc-selected').textContent = 'Global ' + selected.global + (focusVisible ? ' · bounding-box preview' : ' · focus cleared; comma/period continues without moving the view.');
+                    el('drc-selected').textContent = 'Global ' + selected.global + (focusVisible ? ' · bounding-box preview' : ' · focus cleared');
                     if (focusVisible) { geometry(selected); }
                 }
                 if (cdTarget && cdRemaining && !rooted()) { loadCD(); } showCD(); // a root drops CD in contextChanged(); skip its read
@@ -926,7 +929,7 @@
                 bound = key; restoring = false; isolationNotice = ''; rule = null; ruleRows = []; rows = []; ruleStart = errorStart = '0'; query = null;
                 metric = null; typeStart = '0'; typeNext = null; typeReady = typeBusy = false; previousTypes.length = 0; renderTypes([]);
                 previousRules.length = previousErrors.length = 0; ruleNext = errorNext = null; clearSelection(); renderRules();
-                el('drc-rule-title').textContent = 'Choose a rule'; el('drc-description').textContent = ''; el('drc-rule-metadata').textContent = ''; el('drc-type-info').textContent = '';
+                el('drc-rule-title').textContent = ''; el('drc-description').textContent = ''; el('drc-rule-metadata').textContent = ''; el('drc-type-info').textContent = '';
                 if (c) { restoreState(); }
             }
             // Box corners and CD rulers are top-frame geometry. Leaving the
@@ -975,7 +978,7 @@
                     }
                 }
                 if (!before || before.id !== registration.id || before.phase !== registration.phase) {
-                    info(registration.error || (registration.phase === 'opening' ? 'Opening DRC metadata…' : activeWaives ? 'Geometry is read-only. Notes/waives use approval by default; automatic save of confirmed edits is a separate reviewer opt-in.' : activeNotes&&v.notes.editable ? 'Geometry and waive statuses are read-only. Confirmed note edits can use the separate reviewer save opt-in.' : 'Read-only review; reviewer registration does not transfer from another DRC.'));
+                    info(registration.error || (registration.phase === 'opening' ? 'opening DRC metadata…' : ''));
                 }
             }
             // The catalog is polled while idle too. Rebinding/restarting an
@@ -1026,6 +1029,7 @@
             const editor=key==='n'?notes:waives;
             if(!shown){shown=true;el('drc-panel').hidden=false;el('drc-toggle').setAttribute('aria-expanded','true');o.resize();savePanel();}
             if(!editor||!editor.open()){info(key==='n'?'Notes require an enabled owner note session.':'Waives require an enabled owner waive session.');}
+            else if(o.showEditor){o.showEditor(key);}
             return true;
         }
         el('drc-box').onclick = toggleBox;

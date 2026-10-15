@@ -82,7 +82,7 @@ const geom=(r,pts,start,total,next)=>({check:r.check,local:r.local,global:r.glob
     reply('rule',{description:'<script>not HTML</script>'});
     reply('errors',{rows:[a,b],next:'9007199254740995'});await tick();
     assert.equal(el('drc-description').textContent,'<script>not HTML</script>');
-    assert(el('drc-errors').children[0].textContent.includes('#9007199254740994'));
+    assert.equal(el('drc-errors').children[0].textContent,'9007199254740994');assert.match(el('drc-errors').children[0].title,/^global /);
     const beforeIME=calls.length;
     for(const signal of [{isComposing:true},{isComposing:false,keyCode:229}])for(const key of ['Tab','ArrowUp','ArrowDown','k','K']){
         el('drc-errors').children[0].onkeydown({key,...signal,preventDefault(){assert.fail('IME selected or measured an error');}});

@@ -116,6 +116,8 @@
             c.size.pixels.some(function (v, i) { return v !== c.state.pixels[i]; })) { return; }
         const n = o.gestures.wheelNavigation(event, c.size, o.viewport.getBoundingClientRect()); if (n) { o.navigate(n); }
     }
+    // GTK's view-size readout: four decimals below 0.1 um, three below 1 um.
+    function um(v) { return v < 0.1 ? v.toFixed(4) : v < 1 ? v.toFixed(3) : v.toFixed(1); }
     function keyName(e) {
         const key = e.key;
         return key.length === 1 && key.charCodeAt(0) > 127 && /^Key[A-Z]$/.test(e.code || '') ?
@@ -179,7 +181,9 @@
             if (g && g.active()) { if (e.key === 'Escape') { e.preventDefault(); g.cancel(); } return; }
             if (e.metaKey || e.altKey) { return; }
             const k = keyName(e); let action = null;
-            function focus(name) { el(name).focus(); if (name === 'goto-x') { el(name).select(); } }
+            // g / d / Ctrl+. open the goto and detail dialogs (GTK); a shell
+            // without dialogs focuses the control itself.
+            function focus(name) { if (o.dialog) { o.dialog(name === 'detail' ? 'display' : 'goto', name); return; } el(name).focus(); if (name === 'goto-x') { el(name).select(); } }
             if (e.ctrlKey) {
                 if (k.toLowerCase() === 'a') { action = function () { navigate({kind: 'fit'}); }; }
                 else if (k.toLowerCase() === 'z') { action = function () { navigate({kind: 'zoom', factor: 0.5}); }; }
@@ -205,6 +209,6 @@
     }
     const api = {dimensions: dimensions, screen: screen, position: position, centered: centered, panDelta: panDelta,
         compose: compose, paint: paint, freeze: freeze, sameSource: sameSource, busy: busy, cursor: cursor, band: band,
-        wheel: wheel, keyName: keyName, bindControls: bindControls, frameStatus: frameStatus};
+        wheel: wheel, keyName: keyName, bindControls: bindControls, frameStatus: frameStatus, um: um};
     if (typeof module === 'object' && module.exports) { module.exports = api; } else { root.FloeViewer = api; }
 }(typeof window === 'object' ? window : this));

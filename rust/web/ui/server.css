@@ -1,10 +1,13 @@
-#server-empty { position: absolute; top: 40%; left: 10%; right: 10%; text-align: center; pointer-events: none; color: #b6c3d6; }
-#server-frame-status { padding: 7px 14px; min-height: 32px; font-size: 12px; border-top: 1px solid #343d4c; }
+#server-empty { pointer-events: none; }
+#server-frame-status:empty::before { content: "no displayed frame"; }
 .sidebar input:not([type=checkbox]) { max-width: 100%; }
 #server-user { overflow-wrap: anywhere; }
+.server-banner:empty { display: none; }
+.server-banner p, .server-banner button { margin: 6px 10px; }
 #demo-samples { display:flex; flex-wrap:wrap; gap:12px; margin:24px 0; }
 .demo-page { max-width:820px; margin:48px auto; padding:24px; line-height:1.7; }
 body.demo-shell { height:auto; min-height:100vh; overflow:auto; }
 #server-cells-canvas { position: absolute; top: 0; left: 0; pointer-events: none; }
 #server-cells-info { min-height: 1.5em; }
 #server-cells-build { margin-top: 6px; }
+.brand small { display: inline-block; font-size: 9px; font-weight: 600; letter-spacing: 1px; border: 1px solid #46556c; border-radius: 3px; color: #aab7cb; padding: 3px 5px; margin-left: 12px; vertical-align: middle; }

@@ -15,16 +15,16 @@ const answer=(i,override={})=>requests[i].resolve({view_id:'view',dataset_revisi
     s=snapshot();m.changed();assert.equal(requests.length,1);
     for(let i=0;i<30;i++){s={...s,minimap:{...s.minimap,marks:[[i,i,5,5,4]]}};m.changed();}
     assert.equal(requests.length,1,'pan started another overview read');answer(0);await tick();
-    assert.match(el('minimap-note').textContent,/Die outline/);const painted=draws.length;
+    assert.match(el('minimap').title,/die outline/);assert.equal(el('minimap-note').textContent,'');const painted=draws.length;
     m.changed();assert.equal(draws.length,painted,'unchanged projection repainted');
     s=snapshot('0');m.changed();s=snapshot('2');m.changed();assert.equal(requests.length,2,'depth inputs did not coalesce');
-    answer(1);await tick();assert.equal(requests.length,3);answer(2);await tick();assert.match(el('minimap-note').textContent,/depth 2/);
+    answer(1);await tick();assert.equal(requests.length,3);answer(2);await tick();assert.match(el('minimap').title,/depth 2/);
     s=snapshot('0');m.changed();assert.equal(requests.length,3,'cached depth refetched');
     s=snapshot('3');m.changed();answer(3);await tick();s=snapshot();m.changed();assert.equal(requests.length,5,'cache did not evict to three bases');
     requests[4].reject(new Error('network'));await tick();assert(!el('minimap-retry').hidden);m.changed();assert.equal(requests.length,5,'failed GET loop');
     el('minimap-retry').onclick();assert.equal(requests.length,6);answer(5,{pixels:'x'.repeat(32400)});await tick();assert(!el('minimap-retry').hidden,'invalid palette accepted');
     el('minimap-retry').onclick();s=snapshot('0','new-epoch');m.changed();answer(6);await tick();assert.equal(requests.length,8,'old reply blocked new epoch read');
-    assert.match(el('minimap-note').textContent,/Loading/);answer(7);await tick();assert.match(el('minimap-note').textContent,/depth 0/);
+    assert.match(el('minimap-note').textContent,/loading/);answer(7);await tick();assert.match(el('minimap').title,/depth 0/);
     const event={button:0,buttons:1,detail:1,clientX:200,clientY:210,preventDefault(){}};
     el('minimap').handlers.mousedown(event);assert.deepEqual(jumps,[{kind:'minimap',point:[90,90]}]);assert.equal(focus,1);
     for(const extra of [{button:2},{buttons:3},{detail:2},{ctrlKey:true},{altKey:true},{metaKey:true}]){el('minimap').handlers.mousedown({...event,...extra});}
@@ -39,7 +39,7 @@ const answer=(i,override={})=>requests[i].resolve({view_id:'view',dataset_revisi
     assert(el('minimap-panel').hidden);assert.equal(requests.length,suspended+1,'suspended panel kept reading');
     el('minimap').handlers.mousedown(event);assert.equal(jumps.length,2,'suspended navigation');
     s=snapshot('2','resumed-epoch');m.resume();assert.equal(requests.length,suspended+2);assert(!el('minimap-panel').hidden);
-    answer(suspended+1);await tick();assert.match(el('minimap-note').textContent,/depth 2/);
+    answer(suspended+1);await tick();assert.match(el('minimap').title,/depth 2/);
     s=snapshot('3','resumed-epoch');m.changed();const pending=requests.length-1;m.stop();answer(pending);await tick();m.changed();m.resume();assert(el('minimap-panel').hidden);
     assert.equal(requests.length,pending+1,'closed panel kept reading');
     console.log('WEB MINIMAP: ALL OK (bounded bases, pan no reads, depth coalescing, epochs, invalid replies, retry, same-scale screen input, suspend/resume, stop)');

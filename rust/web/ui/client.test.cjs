@@ -1016,17 +1016,19 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
         ws.receive({type:'error',seq:fill.seq,code:'stale_state',state_rev:'5',render_rev:'5'});ws.receive(snapshot);
         await wait(()=>!node('layers-style').disabled);assert.equal(edits().length,count+2,'preset error replayed a write');
         assert.equal(requests.filter(r=>r.path==='/api/v1/palette/presets').length,1,'style change reread immutable presets');
-        // Row editors share folded-group semantics, and stale rows cannot act.
-        row('3/1').children.at(-1).onclick();node('style-width').value='7';
-        node('layers-expand').onclick();await wait(()=>node('layers').children.length===4&&!node('layers-style').disabled);
-        node('style-editor').onsubmit({preventDefault(){}});assert.equal(edits().length,count+2,'old folded editor survived a fold change');
+        // The swatch is part of the row (GTK): it selects like the name. The
+        // row menu's line-width items write the selection's width.
         node('layers-collapse').onclick();await wait(()=>node('layers').children.length===2&&!node('layers-style').disabled);
-        row('3/1').children.at(-1).onclick();node('style-width').value='7';node('style-editor').onsubmit({preventDefault(){}});
-        assert.deepEqual(edits().at(-1).body,{style_batch:{pairs:[[3,1]],collapsed:[[3,1]],width:7}});
+        row('3/1').children.at(-1).onclick({button:0,detail:1});assert.equal(node('layers-selected').textContent,'1 selected');
+        node('layer-menu-width5').onclick();await wait(()=>edits().length===count+3);
+        assert.deepEqual(edits().at(-1).body,{style_batch:{pairs:[[3,1]],collapsed:[[3,1]],width:5}});
         const width=edits().at(-1);ws.receive({type:'accepted',seq:width.seq,state_rev:'6',render_rev:'6'});
         snapshot.state_rev='6';snapshot.render_rev='6';snapshot.render_key='6';ws.receive(snapshot);await wait(()=>!node('layers-style').disabled);
-        row('3/1').children.at(-1).onclick();node('layers-style').onclick();assert.equal(node('style-editor').hidden,true);
-        row('3/1').children.at(-1).onclick();assert.equal(node('palette-style').hidden,true);
+        node('layer-menu-width-up').onclick();await wait(()=>edits().length===count+4);
+        assert.deepEqual(edits().at(-1).body,{style_batch:{pairs:[[3,1]],collapsed:[[3,1]],width_step:1}});
+        const step=edits().at(-1);ws.receive({type:'accepted',seq:step.seq,state_rev:'7',render_rev:'7'});
+        snapshot.state_rev='7';snapshot.render_rev='7';snapshot.render_key='7';ws.receive(snapshot);await wait(()=>!node('layers-style').disabled);
+        node('layers-style').onclick();assert.equal(node('palette-style').hidden,false);node('palette-style').onkeydown({key:'Escape',preventDefault(){}});assert.equal(node('palette-style').hidden,true);
         listeners.pagehide();assert.equal(node('layers-show').disabled,true);assert.equal(node('layer-menu').hidden,true);
         assert(node('presets-colors').children.every(b=>b.disabled));
         console.log('WEB PALETTE CLIENT: ALL OK (real selection/fold/presets, read without render, one-field CAS, ACK/snapshot, row fold parity, rejected/stale edits, cleanup)');return;
@@ -1368,7 +1370,7 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
         listeners.pagehide();console.log('WEB SESSION EXIT CLIENT: ALL OK (cancel keeps frame, single DELETE, immediate buffer/overlay/status cleanup, late frame fence, unknown shutdown retains recovery)');return;
     }
     if(minimapEnabled){
-        await wait(()=>node('minimap-note').textContent==='Die outline · current view');
+        await wait(()=>/die outline$/.test(node('minimap').title)&&node('minimap-note').textContent==='');
         const n=requests.length;
         node('minimap').mousedown({button:0,buttons:1,detail:1,clientX:25,clientY:20,preventDefault(){}});
         const move=ws.sent.at(-1);assert.equal(move.type,'view.set');assert.equal(move.base_state_rev,'1');
@@ -1570,12 +1572,12 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     const submitEvent={preventDefault(){}};
     node('font-px').value='999';const beforeInvalid=second.sent.length;node('font-px').onchange();
     assert.equal(second.sent.length,beforeInvalid);
-    node('layers').children[0].children.at(-1).onclick();
-    node('style-fill').value='pattern';node('style-fill').onchange();
-    node('style-pattern').value='ffff';node('style-editor').onsubmit(submitEvent);
+    node('layers').children[0].children.at(-1).onclick({button:0,detail:1});node('layers-style').onclick();
+    node('palette-fill').value='pattern';node('palette-fill').onchange();
+    node('palette-pattern').value='ffff';node('palette-style').onsubmit(submitEvent);
     assert.equal(second.sent.length,beforeInvalid);
-    node('style-pattern').value=new Array(16).fill('a55a').join(' ');node('style-width').value='4';
-    node('style-editor').onsubmit(submitEvent);
+    node('palette-pattern').value=new Array(16).fill('a55a').join(' ');node('palette-width').value='4';
+    node('palette-style').onsubmit(submitEvent);
     let sent=second.sent.at(-1);assert.equal(sent.type,'view.set');
     assert.deepEqual(sent.body.style_batch,{pairs:[[7,0]],collapsed:[],fill:{kind:'pattern',rows:new Array(16).fill(0xa55a)},width:4});
     async function applied(policy=true){
@@ -1590,11 +1592,11 @@ function packet(format,id,rev='1',ep=epoch,extra={}){
     const colorInput=node('layers').children[0].children[1];colorInput.value='#123456';colorInput.onchange();
     assert.deepEqual(second.sent.at(-1).body,{style_batch:{pairs:[[7,0]],collapsed:[],color:'#123456'}});await applied();
     await wait(()=>node('layers').children.length===1);
-    node('layers').children[0].children.at(-1).onclick();
-    const noChange=second.sent.length;node('style-editor').onsubmit(submitEvent);
-    assert.equal(second.sent.length,noChange,'unchanged style form materialized inherited settings');
-    node('layers').children[0].children.at(-1).onclick();node('style-width').value='7';node('style-editor').onsubmit(submitEvent);
-    assert.deepEqual(second.sent.at(-1).body,{style_batch:{pairs:[[7,0]],collapsed:[],width:7}});await applied();
+    node('layers-clear').onclick();node('layers').children[0].children.at(-1).onclick({button:0,detail:1});node('layers-style').onclick();
+    const noChange=second.sent.length;node('palette-style').onsubmit(submitEvent);
+    assert.equal(second.sent.length,noChange,'empty style form submitted a write');
+    node('layer-menu-width-up').onclick();
+    assert.deepEqual(second.sent.at(-1).body,{style_batch:{pairs:[[7,0]],collapsed:[],width_step:1}});await applied();
     node('font-px').value='18';node('font-px').onchange();assert.equal(second.sent.at(-1).body.font_px,18);await applied();
     node('viewport').keydown({key:'f',preventDefault(){}});assert.deepEqual(second.sent.at(-1).body,{frames:true});await applied();
     node('viewport').keydown({key:'a',ctrlKey:true,preventDefault(){}});assert.equal(second.sent.at(-1).body.navigation.kind,'fit');await applied(false);

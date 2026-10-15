@@ -1,3 +1,10 @@
+.sidebar { width: 300px; flex: 0 0 300px; overflow-y: auto; background: #1d232d; border-right: 1px solid #343d4c; }
+.sidebar section { padding: 12px 12px; border-bottom: 1px solid #333c4a; }
+.sidebar section > p:empty { display: none; }
+.sidebar .button-row { flex-wrap: wrap; }
+.sidebar .button-row button { white-space: normal; }
+.sidebar > section > label:not(.check) { display: block; margin-top: 10px; font-size: 12px; color: #9badc5; }
+.sidebar input:not([type=checkbox]), .sidebar select { max-width: 100%; }
 #guest-viewport { position: relative; flex: 1; min-width: 1px; min-height: 1px; background: #000; overflow: hidden; }
 #guest-canvas { display: block; width: 100%; height: 100%; object-fit: contain; }
 #guest-drc-canvas { position: absolute; top: 0; left: 0; pointer-events: none; }
@@ -7,7 +14,8 @@
 .guest-review-list button[aria-pressed="true"] { border-color: #f4cd64; }
 #gd-description { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 160px; overflow: auto; }
 #guest-empty { position: absolute; top: 40%; left: 10%; right: 10%; text-align: center; pointer-events: none; color: #b6c3d6; }
-#guest-frame-status { padding: 7px 14px; min-height: 32px; font-size: 12px; border-top: 1px solid #343d4c; }
+#guest-frame-status { padding: 4px 12px; min-height: 25px; font-size: 12px; border-top: 1px solid #343d4c; background: #1c2430; }
+#guest-frame-status:empty::before { content: "no displayed frame"; color: #9badc5; }
 #guest-controls > input { display: block; width: 100%; margin: 4px 0 10px; }
 #guest-controls h2 { margin-top: 18px; }
 #guest-mode { white-space: nowrap; }
@@ -16,3 +24,6 @@
 .guest-layer-row label { display: flex; align-items: center; gap: 5px; overflow-wrap: anywhere; }
 .guest-layer-row button { flex: none; padding: 2px 5px; width: auto; }
 .guest-layer-child { padding-left: 23px; }
+.inspect-panel pre { margin: 8px 0 0; font: 12px/1.45 monospace; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 170px; overflow-y: auto; }
+.inspect-panel pre:empty { display: none; }
+#snap-status { min-height: 1.4em; }

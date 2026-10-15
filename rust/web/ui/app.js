@@ -4,6 +4,8 @@
     const P = window.FloeProtocol, V = window.FloeViewer;
     const bundle = document.querySelector('meta[name="floe-bundle"]').content;
     const el = function (id) { return document.getElementById(id); };
+    // A dialog's field takes the keys once the dialog is up (GTK: the entry).
+    function focusIn(id) { return function () { const f = el(id); if (f && !f.disabled) { f.focus(); if (typeof f.select === 'function') { f.select(); } } }; }
     const timing = window.FloeDisplayTiming.bind({el: el, window: window});
     const editTimings = new WeakMap();
     document.addEventListener('visibilitychange', function () { if (document.hidden) { timing.stop(); } });
@@ -19,7 +21,7 @@
     // The GTK title gains "· root NAME" under a view root.
     function titleSuffix() {
         const root = state && state.root_name ? ' · root ' + state.root_name : '';
-        el('document-title').textContent = currentTitle + root; document.title = currentTitle + root + ' · floe2';
+        el('document-title').textContent = currentTitle + root; document.title = 'floe2 - ' + currentTitle + root;
     }
     let completedFrame = null, decodeFailed = false;
     let drcPanel = null, displayProjection = null, frozenProjection = null;
@@ -43,7 +45,6 @@
     let reclaimSupported=false,reclaimPreview=null,reclaimSeen='',reclaimSpent='',reclaimDeadline=0,reclaimTimer=null,reclaimChoices='';
     let modeReceipt = '', modeSupported = false, levelsSupported = false, fillEditSupported = false;
     let pendingStartup = null, startupWaiting = false;
-    let selectedStyle = null;
     let levelNext = null, levelSource = '', levelIds = new Set(), levelLoad = 0, levelBusy = false;
     let operationTimer = null, resizeTimer = null, displayed = false;
     // The cell tree's pending design.ovh build: settled by its ledger receipt.
@@ -226,7 +227,7 @@
         el('revision-build').disabled = !revisionReady || !el('revision-approve').checked;
         el('revision-check').disabled = !revisionReady;
         el('revision-usage').disabled = !revisionReady;
-        const usageText = revisionUsage && revisionUsage.source_id === el('source').value ? revisionUsage.text : 'Storage usage not checked for this source.';
+        const usageText = revisionUsage && revisionUsage.source_id === el('source').value ? revisionUsage.text : '';
         if(el('revision-usage-status').textContent !== usageText){el('revision-usage-status').textContent = usageText;}
         const reclaimReady=revisionReady&&reclaimSupported;
         el('reclaim-prepare').disabled=!reclaimReady||!window.FloeIndexRevisions.id(el('reclaim-id').value);
@@ -367,12 +368,16 @@
         controls();
         el('rendering').hidden = !['opening', 'rendering', 'cancelling'].includes(s.status);
         el('rendering').textContent = s.status === 'opening' ? 'Opening index' : 'Rendering';
-        if (!displayed) { el('empty-message').textContent = s.status === 'failed' ? message(s.failure) : 'Preparing the first frame…'; }
+        if (!displayed) { el('empty-message').textContent = s.status === 'failed' ? message(s.failure) : 'preparing the first frame…'; }
         if (s.failure) { notice(message(s.failure)); }
         viewControls.sync();
         const b = s.bbox_dbu.map(Number), dbu = Number(s.dbu_um);
-        el('viewport-info').textContent = ((b[2] - b[0]) * dbu).toPrecision(6) + ' × ' + ((b[3] - b[1]) * dbu).toPrecision(6) + ' µm';
-        el('status').textContent = s.status + ' · depth ' + s.depth + ' · thin:' + s.effective_thin + (s.source_stale ? ' · SOURCE STALE' : '');
+        el('viewport-info').textContent = 'view ' + V.um((b[2] - b[0]) * dbu) + ' x ' + V.um((b[3] - b[1]) * dbu) + ' um';
+        // GTK's render row: "rendering…" while a frame is due; the frame's own
+        // status line (V.frameStatus) stays once the view is idle again.
+        const stale = s.source_stale ? ' · SOURCE STALE' : '';
+        if (s.status !== 'idle' || !displayed) { el('status').textContent = (s.status === 'rendering' ? 'rendering…' : s.status) + stale; }
+        else if (stale && !el('status').textContent.endsWith(stale)) { el('status').textContent += stale; }
         if (currentTitle) { titleSuffix(); }
         el('dstatus').textContent = 'depth: ' + s.depth + (s.max_depth == null ? '' : '/' + s.max_depth) + ' · detail: ' + s.detail + ' · thin:' + s.effective_thin + ' · frame:' + (s.frames ? 'on' : 'off');
         pump();
@@ -540,7 +545,7 @@
         }
         if (current.view.status === 'closed') { clearClosedView(); return true; }
         const changed = currentId !== current.view.view_id;
-        if (changed) { displayed = false; clearBuffers(); el('empty').hidden = false; selectedStyle = null; el('style-editor').hidden = true; }
+        if (changed) { displayed = false; clearBuffers(); el('empty').hidden = false; }
         currentId = current.view.view_id; currentSource = current.source_id; currentMode = current.mode; state = current.view;
         currentRevision = current.index_revision || null; currentLevels = current.levels;
         el('revision-current').textContent = currentRevision ? 'Open index revision: ' + currentRevision : 'Open index: legacy mutable cache';
@@ -566,16 +571,8 @@
             edit({style_batch: {pairs:[r.pair],collapsed:r.closed?[r.pair]:[],color:value}});
         };
         const style = document.createElement('button'); style.type = 'button'; style.className = 'layer-swatch';
-        style.setAttribute('aria-label', 'Edit style ' + r.name); style.title = r.color + ' · ' + r.fill.kind + ' · ' + r.width + ' px';
+        style.setAttribute('aria-label', 'Select ' + r.name); style.title = r.color + ' · ' + r.fill.kind + ' · ' + r.width + ' px';
         const swatch = document.createElement('canvas'); swatch.setAttribute('aria-hidden', 'true'); window.FloePalette.swatch(swatch, r); style.appendChild(swatch);
-        style.onclick = function () {
-            if (!valid()) { return; }
-            palette.closeStyle();
-            selectedStyle = {row: r, key: scope.key, view: scope.id, valid:valid};
-            el('style-title').textContent = r.name; el('style-fill').value = r.fill.kind; el('style-width').value = r.width; el('style-color').value = r.color;
-            el('style-pattern').value = (r.fill.rows || new Array(16).fill(0xaaaa)).map(function (n) { return n.toString(16).padStart(4, '0'); }).join(' ');
-            el('style-editor').hidden = false; patternControls(); el('style-fill').focus();
-        };
         return {color:color, style:style};
     }
     async function moreLevels() {
@@ -600,7 +597,7 @@
     }
     function sourceSelection() {
         const source = catalog.find(function (r) { return r.source_id === el('source').value; });
-        if (!source) { el('source-note').textContent = 'No source registered in this workspace.'; el('level-options').hidden = true; controls(); return; }
+        if (!source) { el('source-note').textContent = 'no registered source'; el('level-options').hidden = true; controls(); return; }
         if (pendingStartup && pendingStartup.source_id !== source.source_id) { pendingStartup = null; startupWaiting = false; }
         el('mode').disabled = !source.deck; el('level-options').hidden = !source.deck;
         el('index-representatives').disabled = source.deck;
@@ -608,7 +605,7 @@
         if (levelSource !== source.source_id) {
             reclaimPreview=null;reclaimSeen='';reclaimDeadline=0;clearTimeout(reclaimTimer);
             el('reclaim-approve').checked=false;el('reclaim-id').value='';
-            el('reclaim-status').textContent='No reclamation preview for this source.';
+            el('reclaim-status').textContent='';
             el('index-occupancy').checked = source.deck;
             el('index-representatives').checked = false;
             el('index-occupancy-prune').value = '';
@@ -617,7 +614,7 @@
             levelSource = source.source_id; levelNext = null; levelIds = new Set(); el('level-list').textContent = ''; el('levels-all').checked = true;
             if (source.deck) { moreLevels().catch(report); }
         }
-        el('source-note').textContent = source.deck ? 'Jobdeck · select levels before opening.' : 'OASIS layout · current index required.';
+        el('source-note').textContent = source.deck ? 'jobdeck · select the levels to load' : '';
         indexSummaryControls();
         refreshReclaimChoices();
         controls();
@@ -670,10 +667,10 @@
         revisionCandidate = window.FloeIndexRevisions.candidate(recent);
         revisionUsage = window.FloeIndexRevisions.usage(recent);
         observeReclamation(recent);
-        el('revision-status').textContent = revisionCandidate ? 'Checked revision: ' + revisionCandidate.index_revision + ' (selection must match)' : 'No matching published revision checked. Check the selected source/levels; no indexing or switch is automatic.';
+        el('revision-status').textContent = revisionCandidate ? 'Checked revision: ' + revisionCandidate.index_revision + ' (selection must match)' : 'no revision checked';
         controls();
         if (last) { el('operation').textContent = operationLabel(last); }
-        el('live-mode-note').textContent = ownerBusy && last && last.kind === 'mode' ? 'Changing jobdeck mode…' : 'Ctrl+, toggles level/chip · same camera and loaded levels. Mode defaults reload.';
+        el('live-mode-note').textContent = ownerBusy && last && last.kind === 'mode' ? 'changing jobdeck view…' : '';
         if (!ownerBusy && last && ['failed', 'incomplete', 'cancelled'].includes(last.phase)) {
             notice(message(last.error || last.phase));
             if (!currentId) { el('empty-message').textContent = message(last.error || last.phase); connection('Local · ready', true); }
@@ -834,13 +831,13 @@
                 if (preferences.confirm_levels) {
                     startupWaiting = true;
                     el('level-options').open = true;
-                    el('empty-message').textContent = 'Choose jobdeck levels, then Open layout. No indexing or rendering has started.';
-                    connection('Local · choose levels', true); el('open').focus();
+                    el('empty-message').textContent = 'choose the jobdeck levels to load, then open';
+                    connection('Local · choose levels', true); panes.show('source'); el('open').focus();
                 } else { await openSource(startup); }
             }
-            else { el('empty-message').textContent = catalog.length ? 'Choose a registered source and open its index.' : caps.file_picker ? 'Choose a server file with Browse server files. Indexing requires separate approval.' : caps.launcher ? 'Workspace ready. Run floe2-web view FILE to open a layout here.' : 'No registered sources. Restart this independent workspace with FILE.'; connection('Local · ready', true); }
+            else { el('empty-message').textContent = caps.file_picker ? 'no layout (File > load layout…)' : catalog.length ? 'no layout (File > registered sources…)' : caps.launcher ? 'no layout (floe2-web view FILE)' : 'no layout'; connection('Local · ready', true); }
         } else if (!currentId && operations.last_seq === '0' && startupSent) {
-            el('empty-message').textContent = 'The initial open was already submitted. Check operation status before opening again. No automatic retry.';
+            el('empty-message').textContent = 'the initial open was already submitted · check the operation status before opening again';
             connection('Local · ready', true);
         }
         if (!currentPage(run)) { return; }
@@ -868,8 +865,8 @@
         ++restoreRead;
         disconnect(); state = null; currentId = ''; displayed = false; clearBuffers();
         currentRevision = null; currentLevels = null; el('revision-current').textContent = '';
-        selectedStyle = null; el('style-editor').hidden = true;
-        controls(); el('empty').hidden = false; el('empty-message').textContent = 'View closed. Choose a source to reopen.';
+       
+        controls(); el('empty').hidden = false; el('empty-message').textContent = 'no layout (File > load layout…)';
         el('rendering').hidden = true; el('layers').textContent = ''; el('status').textContent = 'View closed';
         ['perf', 'margin-info', 'viewport-info', 'max-depth'].forEach(function (id) { el(id).textContent = ''; });
         connection('Local · ready', true);
@@ -905,7 +902,7 @@
         // Stop local presentation immediately, even if shutdown times out.
         // Recovery records are only retired after the server confirms below.
         state = null; currentId = ''; displayed = false; clearBuffers(); controls();
-        inspector.stop(); measurement.stop(); selectedStyle = null; el('style-editor').hidden = true;
+        inspector.stop(); measurement.stop();
         el('empty').hidden = false; el('empty-message').textContent = 'Local view stopped.';
         el('rendering').hidden = true; el('layers').textContent = '';
         el('status').textContent = 'Local view stopped';
@@ -927,29 +924,9 @@
     el('levels-all').onchange = function () { Array.from(el('level-list').querySelectorAll('input')).forEach(function (box) { box.disabled = el('levels-all').checked; }); };
     el('level-more').onclick = function () { moreLevels().catch(report); };
     viewControls = V.bindControls({el: el, document: document, protocol: P, edit: edit, notice: notice,
+        dialog: function (name, focusId) { if (panes) { panes.show(name, focusIn(focusId)); } },
         gesture: function () { return gesture; }, context: function () { return {id: currentId, state: state, ready: live(),
             gotoBlocked: !currentId || (launcher && launcher.blocked()) || (pendingStartup && pendingStartup.source_id !== currentSource)}; }});
-    function patternControls() { el('style-pattern').hidden = el('pattern-label').hidden = el('style-fill').value !== 'pattern'; }
-    el('style-fill').onchange = patternControls;
-    el('style-cancel').onclick = function () { selectedStyle = null; el('style-editor').hidden = true; };
-    el('style-editor').onsubmit = function (event) {
-        event.preventDefault();
-        if (!selectedStyle || !state || selectedStyle.view !== currentId || selectedStyle.key !== state.render_key || !selectedStyle.valid()) { notice('Layer styles changed. Select the layer again before applying.'); return; }
-        const fill = {kind: el('style-fill').value}, width = Number(el('style-width').value);
-        if (!Number.isInteger(width) || width < 1 || width > 8) { notice('Line width must be 1–8 device pixels.'); return; }
-        if (fill.kind === 'pattern') {
-            const rows = el('style-pattern').value.trim().split(/\s+/);
-            if (rows.length !== 16 || !rows.every(function (s) { return /^[0-9a-f]{4}$/i.test(s); })) { notice('A pattern needs exactly 16 four-digit hex rows.'); return; }
-            fill.rows = rows.map(function (s) { return parseInt(s, 16); });
-        }
-        const row = selectedStyle.row, delta = {pairs:[row.pair],collapsed:row.closed?[row.pair]:[]};
-        const color = String(el('style-color').value || '').toLowerCase();
-        if (/^#[0-9a-f]{6}$/.test(color) && color !== String(row.color).toLowerCase()) { delta.color = color; }
-        if (fill.kind !== row.fill.kind || (fill.kind === 'pattern' && fill.rows.some(function (n, i) { return n !== row.fill.rows[i]; }))) { delta.fill = fill; }
-        if (width !== row.width) { delta.width = width; }
-        if (delta.fill || delta.color || delta.width !== undefined) { edit({style_batch: delta}); }
-        selectedStyle = null; el('style-editor').hidden = true;
-    };
     const nav = viewControls.navigate;
     panes = window.FloePanes.bind({el: el, document: document, window: window, focus: function () { viewport.focus(); },
         resized: function () { resized(); }, changed: function () { if (menubar) { menubar.refresh(); } },
@@ -960,6 +937,7 @@
         inspector.showOverlay(mode!=='none');measurement.showOverlay(mode!=='none');drcPanel.overlayMode(mode);
     }
     el('overlays').onchange=function(){overlays(el('overlays').value);};
+    function cycleOverlays() { const modes = ['all', 'focus', 'none']; overlays(modes[(modes.indexOf(overlayMode) + 1) % 3]); }
     viewport.addEventListener('mousedown', function () { viewport.focus(); });
     viewport.addEventListener('keydown', function (event) {
         if (!live() || event.isComposing || event.keyCode === 229) { return; }
@@ -976,7 +954,7 @@
             } else { viewControls.key(event); }
             return;
         }
-        if(key==='Tab'&&!event.shiftKey&&event.target===viewport){event.preventDefault();const modes=['all','focus','none'];overlays(modes[(modes.indexOf(overlayMode)+1)%3]);return;}
+        if(key==='Tab'&&!event.shiftKey&&event.target===viewport){event.preventDefault();cycleOverlays();return;}
         if(key==='q'&&!event.shiftKey&&event.target===viewport){event.preventDefault();sessionExit.open();return;}
         if (key === 'r' && drcPanel && drcPanel.boxActive()) { drcPanel.key('e'); }
         if (measurement && !(drcPanel && drcPanel.boxActive()) && measurement.key(key)) {
@@ -1145,6 +1123,7 @@
     drcPanel = window.FloeDRC.bind({document: document, window: window, protocol: P, http: http, painted:dumpChanged,
         history:rulerHistory, rulerKey:function (key) { return measurement && !drcPanel.boxActive() && measurement.key(key); },
         stateStore: window.FloePanelState, rulers: window.FloeRulers, groups: window.FloeDRCGroups, builds: window.FloeDRCBuild, cursor: reviewCursor,
+        showEditor: function (key) { if (panes) { panes.show(key === 'n' ? 'notes' : 'waives'); } },
         notes: window.FloeDRCNotes, noteDisplay: window.FloeDRCNoteDisplay, waives: window.FloeDRCWaives, transfers: window.FloeDRCTransfer, recovery: window.FloeDRCRecovery, session: function () { return auth ? auth.session_id : ''; },
         loadRecoveryPending: function () { return sessionStorage.getItem('floe-review-recovery'); },
         saveRecoveryPending: function (value) { if (value === null) { sessionStorage.removeItem('floe-review-recovery'); } else { sessionStorage.setItem('floe-review-recovery', value); } },
@@ -1218,12 +1197,15 @@
         csrf:function(){return auth?auth.csrf:'';},message:message,edit:edit,setTimeout:setTimeout.bind(window),clearTimeout:clearTimeout.bind(window),
         context:settingsContext});
     palette=window.FloePalette.bind({el:el,document:document,window:window,http:http,edit:edit,styles:paletteStyle,presets:window.FloePresets,slotEditor:window.FloeFillEditor,wholeList:true,
+        menuExtras:[
+            {id:'load',available:function(){return !el('settings-panel').hidden;},enabled:function(){return !el('settings-load').disabled;},action:function(){el('settings-load').click();}},
+            {id:'save',available:function(){return !el('settings-panel').hidden;},enabled:function(){return !el('settings-save').disabled;},action:function(){panes.show('settings',focusIn('settings-save'));}},
+            {id:'default',available:function(){return !el('default-panel').hidden;},enabled:function(){return !el('default-prepare').disabled;},action:function(){panes.show('settings',function(){el('default-prepare').click();});}}],
         editSlot:function(c,body,done){
             const now=settingsContext();
             if(!fillEditSupported||!now||!now.ready||!now.idle||now.id!==c.id||now.epoch!==c.epoch||now.rev!==c.rev||state.fill_slots_key!==c.slotKey){done('View changed; the bitmap was not replayed.');return null;}
             return edit({slot_request:{context:c,body:body}},done);
         },
-        closeRowStyle:function(){selectedStyle=null;el('style-editor').hidden=true;},
         painted:function(){highlightPicked(pickedPairs);},
         context:function(){return !stopped&&state&&currentId?{id:currentId,key:state.render_key,epoch:epoch,rev:state.state_rev,slotKey:state.fill_slots_key,fillEdit:fillEditSupported,
             connected:!document.hidden&&live()&&!!epoch&&!!socket&&socket.readyState===WebSocket.OPEN&&!ownerBusy&&!submitting&&!indexBlocked(),
@@ -1289,89 +1271,88 @@
         setTimeout:function(fn,ms){return setTimeout(fn,ms);},clearTimeout:function(id){clearTimeout(id);}});
     function menuModel() {
         function proxy(label, id, key, extra) { return Object.assign({label: label, proxy: id, key: key}, extra || {}); }
-        function dialogItem(label, name, key, prepare) { return {label: label, key: key, action: function () { panes.show(name, prepare); }}; }
+        function dialogItem(label, name, key, prepare, extra) { return Object.assign({label: label, key: key, action: function () { panes.show(name, prepare); }}, extra || {}); }
+        // save/load notes or waives: the review-files dialog on that file kind.
+        function reviewFile(label, kind, control) {
+            return {label: label, enabled: function () { return !el('transfer-panel').hidden; }, action: function () {
+                panes.show('transfer', function () { const k = el('transfer-kind'); k.value = kind; if (typeof k.onchange === 'function') { k.onchange(); } focusIn(control)(); });
+            }};
+        }
         const deckHidden = function () { return el('live-mode-row').hidden; };
         return [
             {name: 'File', items: [
-                proxy('Load layout…', 'browse-open'), proxy('Load jobdeck…', 'browse-open'),
-                dialogItem('Registered sources…', 'source'), dialogItem('Index this source…', 'index'),
+                proxy('load layout…', 'browse-open'), proxy('load jobdeck…', 'browse-open'),
+                dialogItem('registered sources…', 'source'), dialogItem('index this source…', 'index'),
                 {sep: true},
-                dialogItem('Clip region…', 'clip', null, function () { if (!el('clip-open').disabled && el('clip-form').hidden) { el('clip-open').click(); } }),
-                proxy('Copy view to clipboard', 'snapshot-copy', 'Ctrl+C'), proxy('Save view PNG…', 'snapshot-save'),
+                dialogItem('clip region…', 'clip', null, function () { if (!el('clip-open').disabled && el('clip-form').hidden) { el('clip-open').click(); } }, {enabled: function () { return !el('clip-open').disabled; }}),
+                proxy('copy view to clipboard', 'snapshot-copy', 'Ctrl+C'), proxy('save view PNG…', 'snapshot-save'),
                 {sep: true},
-                proxy('Load layer settings…', 'settings-load'), proxy('Save layer settings…', 'settings-save'),
-                dialogItem('Shared design default…', 'settings'),
-                {sep: true},
-                proxy('End session', 'logout', 'q')
+                proxy('end session', 'logout', 'q')
             ]},
             {name: 'View', items: [
-                proxy('Fit (zoom all)', 'fit', 'Ctrl+A'),
-                {label: 'Zoom in 50%', key: 'Ctrl+Z', enabled: function () { return !el('fit').disabled; }, action: function () { nav({kind: 'zoom', factor: 0.5}); }},
-                {label: 'Zoom out 50%', key: 'Shift+Z', enabled: function () { return !el('fit').disabled; }, action: function () { nav({kind: 'zoom', factor: 2}); }},
-                {label: 'Goto position…', key: 'g', enabled: function () { return !el('goto').disabled; }, action: function () { el('goto-x').focus(); el('goto-x').select(); }},
+                proxy('fit (zoom all)', 'fit', 'Ctrl+A'),
+                {label: 'zoom in 50%', key: 'Ctrl+Z', enabled: function () { return !el('fit').disabled; }, action: function () { nav({kind: 'zoom', factor: 0.5}); }},
+                {label: 'zoom out 50%', key: 'Shift+Z', enabled: function () { return !el('fit').disabled; }, action: function () { nav({kind: 'zoom', factor: 2}); }},
+                dialogItem('goto position…', 'goto', 'g', focusIn('goto-x'), {enabled: function () { return !el('goto').disabled; }}),
                 {sep: true},
-                {label: 'Detail', sub: [{label: 'Low · 5 px', radio: {id: 'detail', value: 'low'}}, {label: 'Medium · 3 px', radio: {id: 'detail', value: 'medium'}},
-                    {label: 'High · 1 px', radio: {id: 'detail', value: 'high'}}, {label: 'Exact · no cut', radio: {id: 'detail', value: 'exact'}}], key: 'd'},
-                {label: 'Label size…', enabled: function () { return !el('font-px').disabled; }, action: function () { panes.show('display'); el('font-px').focus(); el('font-px').select(); }},
-                {label: 'Depth +1', key: '>', enabled: function () { return !el('depth').disabled; }, action: function () { edit({depth_step: 1}); }},
-                {label: 'Depth −1', key: '<', enabled: function () { return !el('depth').disabled; }, action: function () { edit({depth_step: -1}); }},
-                {label: 'Depth full', key: '9 9', enabled: function () { return !el('depth').disabled; }, action: function () { edit({depth: 'full'}); }},
+                dialogItem('detail…', 'display', 'd', focusIn('detail'), {enabled: function () { return !el('detail').disabled; }}),
+                dialogItem('label size…', 'display', null, focusIn('font-px'), {enabled: function () { return !el('font-px').disabled; }}),
+                {label: 'depth +1', key: '>', enabled: function () { return !el('depth').disabled; }, action: function () { edit({depth_step: 1}); }},
+                {label: 'depth -1', key: '<', enabled: function () { return !el('depth').disabled; }, action: function () { edit({depth_step: -1}); }},
+                {label: 'depth full', key: '9 9', enabled: function () { return !el('depth').disabled; }, action: function () { edit({depth: 'full'}); }},
                 {sep: true},
-                {label: 'Hierarchy frames', key: 'f', toggle: 'frames'}, {label: 'Labels', toggle: 'labels'}, {label: 'Grayscale layers', key: 'b', toggle: 'mono'},
-                {label: 'Thin shapes at wide views', sub: [{label: 'Auto (keep)', radio: {id: 'thin', value: 'auto'}}, {label: 'Keep (thin shapes as hairlines)', radio: {id: 'thin', value: 'keep'}}, {label: 'Cull (drop all-thin pages, faster)', radio: {id: 'thin', value: 'cull'}}]},
-                {label: 'Overlays', key: 'Tab', sub: [{label: 'All', radio: {id: 'overlays', value: 'all'}}, {label: 'Hide other errors', radio: {id: 'overlays', value: 'focus'}}, {label: 'Hide all', radio: {id: 'overlays', value: 'none'}}]},
+                {label: 'hierarchy frames', key: 'f', toggle: 'frames'}, {label: 'labels', toggle: 'labels'},
+                {label: 'thin shapes at wide views', sub: [{label: 'auto (keep)', radio: {id: 'thin', value: 'auto'}}, {label: 'keep (thin shapes as hairlines)', radio: {id: 'thin', value: 'keep'}}, {label: 'cull (drop all-thin pages, faster)', radio: {id: 'thin', value: 'cull'}}]},
+                {label: 'grayscale layers', key: 'b', toggle: 'mono'},
                 {sep: true},
-                {label: 'Layers', sub: [proxy('Show all', 'layers-all'), proxy('Hide all', 'layers-none'), {sep: true}, proxy('Show selected', 'layers-show'), proxy('Hide selected', 'layers-hide'),
-                    proxy('Toggle selected', 'layers-toggle'), proxy('Style selected…', 'layers-style'), proxy('Clear selection', 'layers-clear'), {sep: true}, proxy('Expand all groups', 'layers-expand'), proxy('Collapse all groups', 'layers-collapse')]},
-                {sep: true},
-                dialogItem('Display options…', 'display')
+                {label: 'cycle overlays (all / errors / none)', key: 'Tab', enabled: function () { return !el('overlays').disabled; }, action: cycleOverlays}
             ]},
             {name: 'Cell', items: [
-                {label: 'Cell tree / find cell…', key: 't', enabled: function () { return !el('cells-search').disabled; }, action: function () { panes.raise('left', 'cells-page'); el('cells-search').focus(); }},
-                proxy('Zoom to selected cell', 'cells-zoom', 'Enter'),
-                {label: 'Highlight instances', toggle: 'cells-highlight'},
-                {label: 'Clear highlight', key: 'Esc', enabled: function () { return cells && cells.hasSelection(); }, action: function () { cells.clearHighlight(); }},
+                {label: 'cell tree / find cell…', key: 't', enabled: function () { return !el('cells-search').disabled; }, action: function () { panes.raise('left', 'cells-page'); el('cells-search').focus(); }},
+                proxy('zoom to selected cell', 'cells-zoom'),
+                {label: 'highlight instances', toggle: 'cells-highlight'},
+                {label: 'clear highlight', key: 'Esc', enabled: function () { return cells && cells.hasSelection(); }, action: function () { cells.clearHighlight(); }},
                 {sep: true},
-                proxy('Selected cell as view root', 'cells-root'), proxy('View root: back to the top cell', 'cells-top'),
+                proxy('selected cell as view root', 'cells-root'), proxy('view root: back to the top cell', 'cells-top'),
                 {sep: true},
-                proxy('Build cell index (design.ovh)…', 'cells-build')
+                proxy('build cell index (design.ovh)…', 'cells-build')
             ]},
             {name: 'Ruler', items: [
-                {label: 'Ruler mode', key: 'r', enabled: function () { return !el('ruler-mode').disabled; }, check: function () { return el('ruler-mode').getAttribute('aria-pressed') === 'true'; }, action: function () { el('ruler-mode').click(); }},
-                {label: 'Edge/vertex snap', key: 'm', toggle: 'ruler-snap'},
+                {label: 'ruler mode', key: 'r', enabled: function () { return !el('ruler-mode').disabled; }, check: function () { return el('ruler-mode').getAttribute('aria-pressed') === 'true'; }, action: function () { el('ruler-mode').click(); }},
+                {label: 'edge/vertex snap', key: 'm', toggle: 'ruler-snap'},
                 {sep: true},
-                proxy('Delete last ruler', 'ruler-pop', 'k'), proxy('Clear rulers', 'ruler-clear', 'Shift+K'),
-                {sep: true},
-                {label: 'Snap probe', key: 'm', toggle: 'snap-probe'}, proxy('Clear shape selection', 'pick-clear', 'Esc'),
-                {label: 'Inspect pane', action: function () { panes.raise('left', 'inspect-page'); }}
+                proxy('delete last ruler', 'ruler-pop', 'k'), proxy('clear rulers', 'ruler-clear', 'Shift+K')
             ]},
             {name: 'DRC', items: [
-                proxy('Open results .db…', 'drc-open'), proxy('Load SVRF rules…', 'drc-rules-load'), proxy('Reconnect launcher reviewer…', 'drc-reconnect'),
+                proxy('open results .db…', 'drc-open'), proxy('load SVRF rules…', 'drc-rules-load'), proxy('reconnect launcher reviewer…', 'drc-reconnect'),
                 {sep: true},
-                proxy('Next error', 'drc-step-next', '.'), proxy('Previous error', 'drc-step-prev', ','),
-                {label: 'Waive/unwaive current error', key: 'w', enabled: function () { return !el('drc-step-next').disabled; }, action: function () { drcPanel.key('w'); }},
+                proxy('next error', 'drc-step-next', '.'), proxy('previous error', 'drc-step-prev', ','),
+                {label: 'waive/unwaive current error', key: 'w', enabled: function () { return !el('drc-step-next').disabled; }, action: function () { drcPanel.key('w'); }},
+                reviewFile('save waives as…', 'waives', 'transfer-export'), reviewFile('load waives…', 'waives', 'transfer-import'),
                 {sep: true},
-                {label: 'Note (add/edit)', key: 'n', enabled: function () { return !el('drc-step-next').disabled; }, action: function () { drcPanel.key('n'); }},
+                {label: 'note (add/edit)', key: 'n', enabled: function () { return !el('drc-step-next').disabled; }, action: function () { drcPanel.key('n'); }},
+                reviewFile('save notes as…', 'notes', 'transfer-export'), reviewFile('load notes…', 'notes', 'transfer-import'),
                 {sep: true},
-                {label: 'Error box-select mode', key: 'e', enabled: function () { return !el('drc-box').disabled; }, check: function () { return el('drc-box').getAttribute('aria-pressed') === 'true'; }, action: function () { el('drc-box').click(); }},
-                proxy('Build pack…', 'drc-build-open'), proxy('Restore layers', 'drc-restore-layers'),
+                {label: 'error box-select mode', key: 'e', enabled: function () { return !el('drc-box').disabled; }, check: function () { return el('drc-box').getAttribute('aria-pressed') === 'true'; }, action: function () { el('drc-box').click(); }},
+                proxy('restore layers', 'drc-restore-layers'),
                 {sep: true},
-                {label: 'Show DRC pane', hidden: function () { return el('drc-toggle').hidden; }, check: function () { return !el('drc-panel').hidden; }, action: function () { el('drc-toggle').click(); if (!el('drc-panel').hidden) { panes.raise('left', 'drc-page'); } }}
+                {label: 'build pack…', hidden: function () { return el('drc-build-open').hidden; }, enabled: function () { return !el('drc-build-open').disabled; }, action: function () { panes.show('build', function () { if (el('drc-build-form').hidden) { el('drc-build-open').click(); } }); }},
+                dialogItem('review files…', 'transfer', null, null, {enabled: function () { return !el('transfer-panel').hidden || !el('recovery-panel').hidden; }})
             ]},
             {name: 'Jobdeck', items: [
-                {label: 'Level view (mask levels)', hidden: deckHidden, radio: {id: 'live-mode', value: 'level'}},
-                {label: 'Chip view (CHIP blocks)', hidden: deckHidden, radio: {id: 'live-mode', value: 'chip'}},
-                {label: 'Source layer view (LY/DT)', hidden: deckHidden, radio: {id: 'live-mode', value: 'layer'}},
+                {label: 'level view (mask levels $n)', hidden: deckHidden, radio: {id: 'live-mode', value: 'level'}},
+                {label: 'chip view (CHIP blocks, expand to levels)', hidden: deckHidden, radio: {id: 'live-mode', value: 'chip'}},
+                {label: 'source layer view (LY/DT)', hidden: deckHidden, radio: {id: 'live-mode', value: 'layer'}},
                 {sep: true},
-                {label: 'Toggle level view / chip view', key: 'Ctrl+,', hidden: deckHidden, enabled: function () { return !el('live-mode').disabled; }, action: function () { changeDeckMode(currentMode === 'level' ? 'chip' : 'level').catch(report); }},
+                {label: 'toggle level view / chip view', key: 'Ctrl+,', hidden: deckHidden, enabled: function () { return !el('live-mode').disabled; }, action: function () { changeDeckMode(currentMode === 'level' ? 'chip' : 'level').catch(report); }},
                 {sep: true},
-                {label: 'Select levels to load…', action: function () { panes.show('source', function () { el('level-options').open = true; }); }},
-                dialogItem('Open mode…', 'source')
+                dialogItem('select levels to load…', 'source', null, function () { el('level-options').open = true; })
             ]},
             {name: 'Help', items: [
-                proxy('About floe2', 'about-open'), proxy('Open source licenses', 'about-open'),
+                proxy('About floe2', 'about-open'),
+                {label: 'Open Source Licenses', enabled: function () { return !el('about-open').disabled; }, action: function () { el('about-licenses').open = true; el('about-open').click(); }},
                 {sep: true},
-                proxy('Share locally…', 'share-open')
+                proxy('share locally…', 'share-open')
             ]}
         ];
     }

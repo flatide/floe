@@ -11,7 +11,7 @@
         const inputs=['fit','zoom-in','zoom-out','depth','detail','thin','frames','labels','mono','font-px','goto-x','goto-y','goto-width','goto'];
         let auth=null,socket=null,hello=null,state=null,seq='0',serial=0,started=false,stopped=false,hidden=false,joining=false;
         let fresh=false,unopened=false,publicDemo=false,flight=null,accepted=null,queue=[],decode=null,raf=null,image=null,shift=null,gesture=null,releasedPan=false;
-        let lastPlacement=null,frozen=false,flightBody=null,palette=null,minimap=null,panes=null,menubar=null,cells=null,rowStyle=null;
+        let lastPlacement=null,frozen=false,flightBody=null,palette=null,minimap=null,panes=null,menubar=null,cells=null;
         const callbacks=new WeakMap();
         let retryTimer=null,flushTimer=null,resizeTimer=null,connectTimer=null,editTimer=null,ping=null,observer=null,delay=500,lastSend=-Infinity,received=0;
         const requests=new Set(),now=o.now||function(){return win.performance.now();};
@@ -135,7 +135,7 @@
                 if(v.type==='opening'){if(v.view_id!==id||v.connection_epoch!==hello.connection_epoch){throw Error('Wrong opening identity');}status('Opening assigned layout…');updateCursor();return;}
                 if(v.type==='snapshot'){validate(v);
                     const b=v.bbox_dbu.map(Number),dbu=Number(v.dbu_um);
-                    if(Number.isFinite(dbu)){el('viewport-info').textContent=((b[2]-b[0])*dbu).toPrecision(6)+' × '+((b[3]-b[1])*dbu).toPrecision(6)+' µm';}
+                    if(Number.isFinite(dbu)){el('viewport-info').textContent='view '+V.um((b[2]-b[0])*dbu)+' x '+V.um((b[3]-b[1])*dbu)+' um';}
                     el('dstatus').textContent='depth: '+v.depth+(v.max_depth==null?'':'/'+v.max_depth)+' · detail: '+v.detail+' · thin:'+(v.effective_thin||v.thin)+' · frame:'+(v.frames?'on':'off');if(state&&state.state_rev!==v.state_rev){if(gesture){gesture.cancel();}if(image&&!P.placement(image.header,v)){freezeDisplay();}releasedPan=false;shift=null;}state=v;
                     if(v.failure){rejectQueue();}viewControls.sync();compose();controls();settle();resized();status(v.failure?'Renderer failed; end this session and request a new launch.':'Connected · '+v.status+(v.root_name?' · root '+v.root_name:''));return;}
                 if(v.type==='accepted'){if(!flight||v.seq!==flight){throw Error('Wrong acknowledgment');}P.counter(v.state_rev);flight=null;accepted=v.state_rev;settle();return;}
@@ -150,7 +150,7 @@
                 if(session.launch_id!==id||session.viewer_ready!==true||session.render_transport!==true||!session.principal||
                     typeof session.principal.namespace!=='string'||typeof session.principal.subject!=='string'){stop('Server viewer unavailable.',false);return;}
                 publicDemo=session.public_demo===true;
-                el('user').textContent=publicDemo?'Public demo · independent read-only view · session up to 15 minutes':session.principal.namespace+' / '+session.principal.subject;
+                el('user').textContent=publicDemo?'demo · read-only · session up to 15 minutes':session.principal.namespace+' / '+session.principal.subject;
                 let view=await request('GET','/view');if(token!==serial||stopped||hidden){return;}
                 if(view.view_id!==id){throw Error('Wrong view');}
                 if(view.type==='unopened'){
@@ -187,7 +187,9 @@
         el('leave').onclick=async function(){if(!auth||stopped||!win.confirm('End only this server session? Shared files and other users remain unchanged.')){return;}
             stop('Ending this session…',false);remove();try{await request('DELETE','');status('Session ended. Shared files and other users are unchanged.');}
             catch(_){status('Display cleared; server logout unconfirmed. This session will expire automatically. No retry was sent.');}finally{auth=null;controls();}};
+        function focusIn(id){return function(){const f=el(id);if(f&&!f.disabled){f.focus();if(f.select){f.select();}}};}
         const viewControls=V.bindControls({el:el,document:doc,protocol:P,edit:edit,notice:status,now:now,gesture:function(){return gesture;},
+            dialog:function(name,focusId){if(panes){panes.show(name,focusIn(focusId));}},
             context:function(){return {id:id,state:state,ready:ready()};}}),nav=viewControls.navigate;
         // The cell tree's keys (t, Escape) come first, except while a
         // gesture owns Escape.
@@ -201,33 +203,14 @@
             const color=doc.createElement('input');color.type='color';color.value=r.color;color.className='layer-edit';color.setAttribute('aria-label','Color '+r.name);
             color.onchange=function(){const value=color.value;color.value=r.color;if(!valid()){status('Layer styles changed; select the layer again.');return;}
                 edit({style_batch:{pairs:[r.pair],collapsed:r.closed?[r.pair]:[],color:value}});};
-            const style=doc.createElement('button');style.type='button';style.className='layer-swatch';style.setAttribute('aria-label','Edit style '+r.name);style.title=r.color+' · '+r.fill.kind+' · '+r.width+' px';
+            const style=doc.createElement('button');style.type='button';style.className='layer-swatch';style.setAttribute('aria-label','Select '+r.name);style.title=r.color+' · '+r.fill.kind+' · '+r.width+' px';
             const swatch=doc.createElement('canvas');swatch.setAttribute('aria-hidden','true');if(o.palette&&o.palette.swatch){o.palette.swatch(swatch,r);}style.appendChild(swatch);
-            style.onclick=function(){if(!valid()){return;}palette.closeStyle();rowStyle={row:r,key:scope.key,valid:valid};
-                el('style-title').textContent=r.name;el('style-fill').value=r.fill.kind;el('style-width').value=r.width;el('style-color').value=r.color;
-                el('style-pattern').value=(r.fill.rows||new Array(16).fill(0xaaaa)).map(function(n){return n.toString(16).padStart(4,'0');}).join(' ');
-                el('style-editor').hidden=false;patternControls();el('style-fill').focus();};
             return {color:color,style:style};
         }
-        function patternControls(){el('style-pattern').hidden=el('pattern-label').hidden=el('style-fill').value!=='pattern';}
-        function closeRowStyle(){rowStyle=null;el('style-editor').hidden=true;}
         if(o.palette){
-            el('style-fill').onchange=patternControls;el('style-cancel').onclick=closeRowStyle;
-            el('style-editor').onsubmit=function(event){event.preventDefault();
-                if(!rowStyle||!state||rowStyle.key!==state.render_key||!rowStyle.valid()){status('Layer styles changed; select the layer again.');closeRowStyle();return;}
-                const fill={kind:el('style-fill').value},width=Number(el('style-width').value),row=rowStyle.row,delta={pairs:[row.pair],collapsed:row.closed?[row.pair]:[]};
-                if(!Number.isInteger(width)||width<1||width>8){status('Line width must be 1–8 device pixels.');return;}
-                if(fill.kind==='pattern'){const rows=el('style-pattern').value.trim().split(/\s+/);
-                    if(rows.length!==16||!rows.every(function(t){return /^[0-9a-f]{4}$/i.test(t);})){status('A pattern needs exactly 16 four-digit hex rows.');return;}
-                    fill.rows=rows.map(function(t){return parseInt(t,16);});}
-                const color=String(el('style-color').value||'').toLowerCase();
-                if(/^#[0-9a-f]{6}$/.test(color)&&color!==String(row.color).toLowerCase()){delta.color=color;}
-                if(fill.kind!==row.fill.kind||(fill.kind==='pattern'&&fill.rows.some(function(n,i){return n!==row.fill.rows[i];}))){delta.fill=fill;}
-                if(width!==row.width){delta.width=width;}
-                if(delta.fill||delta.color||delta.width!==undefined){edit({style_batch:delta});}closeRowStyle();};
             palette=o.palette.bind({el:el,document:doc,window:win,http:http,edit:edit,styles:rowStyles,presets:o.presets,slotEditor:o.fillEditor,wholeList:true,
                 editSlot:function(c,body,done){done('Bitmap editing is not available in this session.');return null;},
-                closeRowStyle:closeRowStyle,painted:function(){},context:paletteContext});
+                painted:function(){},context:paletteContext});
         }
         if(o.minimap){minimap=o.minimap.bind({el:el,document:doc,http:http,state:function(){return ready()?state:null;},
             ready:function(){return editable()&&!(gesture&&gesture.active());},navigate:function(n){nav(n);},focus:function(){port.focus();}});}
@@ -241,35 +224,33 @@
             now:now,setTimeout:function(f,ms){return win.setTimeout(f,ms);},clearTimeout:function(t){win.clearTimeout(t);}});}
         if(o.menubar){
             function proxy(label,name,key){return {label:label,proxy:name,key:key};}
+            function dialogItem(label,name,key,prepare,extra){return Object.assign({label:label,key:key,action:function(){if(panes){panes.show(name,prepare);}}},extra||{});}
             menubar=o.menubar.bind({el:el,document:doc,window:win,focus:function(){port.focus();},report:function(e){status(String(e&&e.message||e));},model:[
                 {name:'File',items:[
-                    {label:'Samples…',hidden:function(){return !publicDemo;},action:function(){o.location.href='/demo';}},
-                    proxy('Reconnect','reconnect'),{sep:true},proxy('End my session','leave')]},
+                    {label:'samples…',hidden:function(){return !publicDemo;},action:function(){o.location.href='/demo';}},
+                    proxy('reconnect','reconnect'),{sep:true},proxy('end my session','leave')]},
                 {name:'View',items:[
-                    proxy('Fit (zoom all)','fit','Ctrl+A'),
-                    {label:'Zoom in 50%',key:'Ctrl+Z',enabled:function(){return !el('fit').disabled;},action:function(){nav({kind:'zoom',factor:0.5});}},
-                    {label:'Zoom out 50%',key:'Shift+Z',enabled:function(){return !el('fit').disabled;},action:function(){nav({kind:'zoom',factor:2});}},
-                    {label:'Goto position…',key:'g',enabled:function(){return !el('goto').disabled;},action:function(){el('goto-x').focus();el('goto-x').select();}},
+                    proxy('fit (zoom all)','fit','Ctrl+A'),
+                    {label:'zoom in 50%',key:'Ctrl+Z',enabled:function(){return !el('fit').disabled;},action:function(){nav({kind:'zoom',factor:0.5});}},
+                    {label:'zoom out 50%',key:'Shift+Z',enabled:function(){return !el('fit').disabled;},action:function(){nav({kind:'zoom',factor:2});}},
+                    dialogItem('goto position…','goto','g',focusIn('goto-x'),{enabled:function(){return !el('goto').disabled;}}),
                     {sep:true},
-                    {label:'Detail',key:'d',sub:[{label:'Low · 5 px',radio:{id:'detail',value:'low'}},{label:'Medium · 3 px',radio:{id:'detail',value:'medium'}},{label:'High · 1 px',radio:{id:'detail',value:'high'}},{label:'Exact · no cut',radio:{id:'detail',value:'exact'}}]},
-                    {label:'Label size…',enabled:function(){return !el('font-px').disabled;},action:function(){if(panes){panes.show('display');}el('font-px').focus();el('font-px').select();}},
-                    {label:'Depth +1',key:'>',enabled:function(){return !el('depth').disabled;},action:function(){edit({depth_step:1});}},
-                    {label:'Depth −1',key:'<',enabled:function(){return !el('depth').disabled;},action:function(){edit({depth_step:-1});}},
-                    {label:'Depth full',key:'9 9',enabled:function(){return !el('depth').disabled;},action:function(){edit({depth:'full'});}},
+                    dialogItem('detail…','display','d',focusIn('detail'),{enabled:function(){return !el('detail').disabled;}}),
+                    dialogItem('label size…','display',null,focusIn('font-px'),{enabled:function(){return !el('font-px').disabled;}}),
+                    {label:'depth +1',key:'>',enabled:function(){return !el('depth').disabled;},action:function(){edit({depth_step:1});}},
+                    {label:'depth -1',key:'<',enabled:function(){return !el('depth').disabled;},action:function(){edit({depth_step:-1});}},
+                    {label:'depth full',key:'9 9',enabled:function(){return !el('depth').disabled;},action:function(){edit({depth:'full'});}},
                     {sep:true},
-                    {label:'Hierarchy frames',key:'f',toggle:'frames'},{label:'Labels',toggle:'labels'},{label:'Grayscale layers',key:'b',toggle:'mono'},
-                    {label:'Thin shapes at wide views',sub:[{label:'Auto (keep)',radio:{id:'thin',value:'auto'}},{label:'Keep (thin shapes as hairlines)',radio:{id:'thin',value:'keep'}},{label:'Cull (drop all-thin pages, faster)',radio:{id:'thin',value:'cull'}}]},
-                    {sep:true},
-                    {label:'Layers',sub:[proxy('Show all','layers-all'),proxy('Hide all','layers-none'),{sep:true},proxy('Show selected','layers-show'),proxy('Hide selected','layers-hide'),proxy('Toggle selected','layers-toggle'),proxy('Style selected…','layers-style'),proxy('Clear selection','layers-clear'),{sep:true},proxy('Expand all groups','layers-expand'),proxy('Collapse all groups','layers-collapse')]},
-                    {sep:true},
-                    {label:'Display options…',action:function(){if(panes){panes.show('display');}}}]},
+                    {label:'hierarchy frames',key:'f',toggle:'frames'},{label:'labels',toggle:'labels'},
+                    {label:'thin shapes at wide views',sub:[{label:'auto (keep)',radio:{id:'thin',value:'auto'}},{label:'keep (thin shapes as hairlines)',radio:{id:'thin',value:'keep'}},{label:'cull (drop all-thin pages, faster)',radio:{id:'thin',value:'cull'}}]},
+                    {label:'grayscale layers',key:'b',toggle:'mono'}]},
                 {name:'Cell',items:[
-                    {label:'Cell tree / find cell…',key:'t',enabled:function(){return !el('cells-search').disabled;},action:function(){if(panes){panes.raise('left','cells-page');}el('cells-search').focus();}},
-                    proxy('Zoom to selected cell','cells-zoom','Enter'),
-                    {label:'Highlight instances',toggle:'cells-highlight'},
-                    {label:'Clear highlight',key:'Esc',enabled:function(){return !!cells&&cells.hasSelection();},action:function(){cells.clearHighlight();}},
+                    {label:'cell tree / find cell…',key:'t',enabled:function(){return !el('cells-search').disabled;},action:function(){if(panes){panes.raise('left','cells-page');}el('cells-search').focus();}},
+                    proxy('zoom to selected cell','cells-zoom'),
+                    {label:'highlight instances',toggle:'cells-highlight'},
+                    {label:'clear highlight',key:'Esc',enabled:function(){return !!cells&&cells.hasSelection();},action:function(){cells.clearHighlight();}},
                     {sep:true},
-                    proxy('Selected cell as view root','cells-root'),proxy('View root: back to the top cell','cells-top')]}
+                    proxy('selected cell as view root','cells-root'),proxy('view root: back to the top cell','cells-top')]}
             ]});
         }
         function screen(){const r=port.getBoundingClientRect();return V.screen(r,state.pixels,V.dimensions(P,r,win.devicePixelRatio||1));}

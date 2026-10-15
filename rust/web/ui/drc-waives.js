@@ -74,7 +74,7 @@
     function refs(v,P){if(!Array.isArray(v)||!v.length||v.length>5000){fail();}const seen=new Set();return v.map(function(r){keys(r,['check','error']);P.counter(r.check,true);P.counter(r.error,true);
         const k=r.check+':'+r.error;if(seen.has(k)){fail();}seen.add(k);return {check:r.check,error:r.error};});}
     function statusText(v,metadata){
-        if(!v){return 'No waive save in this server session.';}
+        if(!v){return '';}
         let s=(v.outcome_unknown?'Save outcome UNKNOWN':phases[v.phase])+' · #'+v.seq;
         if(v.published===true){s+='\nWaive file saved.';if(!v.directory_synced){s+=' Directory sync failed: durability is unconfirmed. Do not repeat the save to retry sync.';}
             if(v.phase==='refreshing_reader'){s+='\nWaiting for the review reader.';}
@@ -156,8 +156,7 @@
             const connection=o.connection?o.connection():null;
             saveMode.sync(enabled&&!stopped&&model&&!model.detached?model.reviewer:'',o.session()+'\n'+(connection||''),!!ok&&!!connection);
             el('waives-prepare').textContent=saveMode.on()?'Save status':'Preview save';
-            el('waives-local').textContent=saveMode.on()?'Choosing an action saves it. The w key opens a new toggle-and-save action; an existing choice stays unchanged. Escape discards an unsent choice.':
-                'No automatic save. Ctrl/Cmd+Enter previews; Escape discards the local choice.';
+            el('waives-local').textContent=saveMode.on()?'choosing an action saves it · Esc: discard an unsent choice':'Ctrl+Enter: preview · Esc: discard';
             el('waives-selection').textContent=c?c.caption:'Select errors in a ready ICE review to edit waives.';
             el('waives-read').disabled=!ok||!c||!!editor;el('waives-editor').hidden=!editor;
             el('waives-action').disabled=!!io||!!draft||busy()||stopped;

@@ -119,7 +119,7 @@ async function toggle(id,v){el(id).checked=v;el(id).onchange();await tick();}
     assert.equal(saves.length,savesBefore,'restore wrote back before an edit');assert.match(el('drc-comparison').textContent,/Measured/);
     badComparison=true;el('drc-errors').children[1].onclick();await tick();assert.match(el('drc-comparison').textContent,/unavailable/);badComparison=false;
     holdComparison=true;el('drc-errors').children[0].onclick();await tick();const cleared=heldComparison;el('drc-clear').onclick();cleared.resolve();await tick();assert(cleared.token.cancelled);
-    assert.match(el('drc-comparison').textContent,/Select an error/);holdComparison=false;
+    assert.equal(el('drc-comparison').textContent,'');holdComparison=false;
     badTypes=true;el('drc-type-next').onclick();await tick();assert(el('drc-type').disabled);assert.match(el('drc-type-info').textContent,/unavailable/);badTypes=false;
     await el('drc-reload').onclick();await tick();assert(!el('drc-type').disabled);
     holdType=true;el('drc-type-next').onclick();await tick();const oldType=heldType;

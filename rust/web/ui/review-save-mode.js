@@ -9,10 +9,7 @@
             o.toggle.checked=!!grant;
             // Opt-out remains available while a read/prepare/submit is pending.
             o.toggle.disabled=!reviewer||(!grant&&!ready);
-            const message=reviewer?'Reviewer: '+reviewer+' · '+(grant?
-                'confirmed '+o.kind+' edits save automatically in this tab. Unchecking stops unsent edits, not committed saves.':
-                'automatic save is off. Each edit needs preview and approval.'):
-                'A launcher-enabled reviewer is required. This setting does not grant file permissions.';
+            const message=reviewer?'Reviewer: '+reviewer+(grant?' · confirmed '+o.kind+' edits save automatically in this tab':''):'a launcher-enabled reviewer is required';
             if(o.hint.textContent!==message){o.hint.textContent=message;}
         }
         o.toggle.onchange=function(){

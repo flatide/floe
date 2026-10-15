@@ -38,7 +38,7 @@
             const ready=allowed()&&o.ready()&&!busy();
             el('snapshot-copy').disabled=!ready||!clipboard(o.window);el('snapshot-save').disabled=!ready;
             el('snapshot-retry').hidden=!retained;el('snapshot-retry').disabled=!allowed()||busy();
-            el('snapshot-status').textContent=note||(!clipboard(o.window)?'Image clipboard unavailable. Use Save view PNG.':'Ctrl/Cmd+C on the canvas copies its visible pixels.');
+            el('snapshot-status').textContent=note;
         }
         function download(){
             if(!allowed()||!retained){return;}

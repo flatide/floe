@@ -66,7 +66,7 @@
         }
         function cancelAuto() { if (auto) { o.clearTimeout(auto.timeout);auto=null;book.clear('auto'); } }
         function interrupt() { retire(); cancelAuto(); snap.cancel('snap'); refresh(); }
-        function leave() { enabled=false; start=null; interrupt(); status('Ruler off.'); o.modeChanged(); }
+        function leave() { enabled=false; start=null; interrupt(); status(''); o.modeChanged(); }
         function changed() {
             // A view root is another coordinate system: DBU measured under
             // one root (or the top) mean nothing under another. A guest
@@ -74,7 +74,7 @@
             const c=o.context(), r=c&&c.state.root, root=!r?'':r===true?'root':String(r.cell);
             const key=c?[c.id,c.state.dataset_revision,c.state.worker_epoch,root].join(':'):'';
             const s=scope(), next=s?s.key:''; rooted=!!root;
-            if (key!==bound) { enabled=false; start=null; bound=key;book.clear('manual');book.clear('auto');interrupt();status('Click two points to measure.');o.modeChanged(); }
+            if (key!==bound) { enabled=false; start=null; bound=key;book.clear('manual');book.clear('auto');interrupt();status('');o.modeChanged(); }
             if (next!==stamp) { if (locked || auto) { status('View changed; pending measurement was discarded.'); } stamp=next; interrupt(); }
             snap.changed();
             if (auto && JSON.stringify(selection())!==auto.selection) { cancelAuto();status('Selection changed; gap request was discarded.'); }

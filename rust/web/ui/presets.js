@@ -67,7 +67,7 @@
         }
         async function loadSlots(){
             const c=context(),key=identity(c);if(!c||!panel.open||!data||current()||slotFlight||slotFailure===key){controls();return;}
-            const f={identity:key,context:c,token:{}};slotFlight=f;el('presets-note').textContent='Loading session fill slots…';controls();
+            const f={identity:key,context:c,token:{}};slotFlight=f;el('presets-note').textContent='loading…';controls();
             try{
                 const value=await port.http('GET','/api/v1/views/'+c.id+'/fill-slots/'+c.slotKey,undefined,false,f.token);
                 if(slotFlight!==f||f.token.cancelled||identity(context())!==key){return;}
@@ -80,13 +80,13 @@
                 });
                 live={identity:key,value:value};
                 buttons.filter(function(b){return !!b.fillSlot;}).forEach(function(b){const p=value.fills.find(function(p){return p.name===b.fillSlot;});preview(b.children[0],p.rows);});
-                el('presets-note').textContent='Click a swatch to apply it to the selection. Fill swatches reference the current session slot.';
+                el('presets-note').textContent='';
             }catch(e){if(slotFlight===f&&!f.token.cancelled){live=null;slotFailure=key;el('presets-note').textContent=e.message;}}
             finally{if(slotFlight===f){slotFlight=null;}controls();}
         }
         async function load(){
             if(!available()||!panel.open||data||flight||failed){controls();return;}
-            const f={token:{}};flight=f;el('presets-note').textContent='Loading palette…';controls();
+            const f={token:{}};flight=f;el('presets-note').textContent='loading…';controls();
             try{
                 const value=await port.http('GET','/api/v1/palette/presets',undefined,false,f.token);
                 if(flight!==f||f.token.cancelled||!available()){return;}

@@ -38,7 +38,7 @@ def main():
                     assert session["mode"] == "display-test"
                     client = Client(session)
                     page = client.call("GET", "/")
-                    assert b"Display diagnostics" in page and b"Layout workspace" not in page
+                    assert b"Display diagnostics" in page and b'id="menubar"' not in page
                     assert session["bundle"].encode() in page
                     assert session["url"].encode() not in page
                     client.call("GET", "/api/v1/display-test/raw", code=401)

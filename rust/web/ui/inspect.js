@@ -25,10 +25,10 @@
             o.layers(selections.map(function (s) { return s.pair; })); paintLater();
         }
         function invalidate() { ++pickTurn; ++snapTurn; waiting = false; transport.cancel('pick'); transport.cancel('snap'); snap = null; el('snap-status').textContent = ''; }
-        function clear() { invalidate(); selections = []; cycle = null; info('Selection cleared.'); refresh(); }
+        function clear() { invalidate(); selections = []; cycle = null; info('selection cleared'); refresh(); }
         function changed() {
             const c = o.context(), key = identity(c), s = transport.changed();
-            if (bound !== key) { invalidate(); selections = []; cycle = null; bound = key; info('Click a shape to inspect it.'); refresh(); }
+            if (bound !== key) { invalidate(); selections = []; cycle = null; bound = key; info(''); refresh(); }
             const stamp = s ? s.key : '';
             if (queryStamp !== stamp) {
                 if (waiting) { info('View changed; pending selection was discarded.'); }
@@ -58,7 +58,10 @@
                 else if (kept.length < 64) { selections = kept.concat([h]); }
                 else { cycle = null; info('64 selected shapes: clear a selection before adding more.'); refresh(); return; }
                 cycle = mode === 'replace' ? {position: p.slice(), index: Number(h.index), count: Number(h.count), stamp: s.key} : null;
-                info(selections.length + ' selected · overlap ' + (Number(h.index) + 1) + '/' + h.count);
+                // GTK's status line: sel(n) NAME L.D · CELL · w x h um @ (x, y) · i/n
+                const u = Number(c.state.dbu_um), bb = h.bbox_dbu.map(Number), um = function (n) { return (n * u).toFixed(3); };
+                info(selections.length + ' selected · ' + h.layer_name + ' ' + h.pair[0] + (h.pair[1] ? '.' + h.pair[1] : '') + ' · ' + h.cell_name +
+                    ' · ' + um(bb[2] - bb[0]) + ' x ' + um(bb[3] - bb[1]) + ' um @ (' + um(bb[0]) + ', ' + um(bb[1]) + ') · overlap ' + (Number(h.index) + 1) + '/' + h.count);
                 refresh();
             });
             if (!ok) { waiting = false; info('Query could not start. Select again.'); refresh(); }

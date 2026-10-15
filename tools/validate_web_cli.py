@@ -115,7 +115,7 @@ def main(fixture):
                 assert session_path.stat().st_mode & 0o777 == 0o600
                 client = Client(session)
                 page = client.call("GET", "/")
-                assert b"Layout workspace" in page
+                assert b'id="menubar"' in page
                 assert session["bundle"].encode() in page
                 assert session["url"].encode() not in page
                 client.call("GET", "/api/v1/startup", code=401)

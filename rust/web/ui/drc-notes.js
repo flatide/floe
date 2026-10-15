@@ -76,7 +76,7 @@
         const k=r.check+':'+r.error;if(seen.has(k)){fail();}seen.add(k);return {check:r.check,error:r.error};});}
     function reportText(v){return Object.keys(v).filter(function(k){return v[k]>0;}).map(function(k){return k+': '+v[k];}).join(', ');}
     function statusText(v){
-        if(!v){return 'No notes saved in this server session.';}
+        if(!v){return '';}
         let s=(v.outcome_unknown?'Save outcome UNKNOWN':phases[v.phase])+' · #'+v.seq;
         if(v.published===true){s+='\nNote sidecar saved. Layout and waive statuses are unchanged.';if(!v.directory_synced){s+='\nDirectory sync failed: saved, but durability is unconfirmed. Do not repeat the save just to retry sync.';}}
         if(v.outcome_unknown){s+='\nThe worker could have committed. Read back the notes before deciding on another edit.';}
@@ -148,8 +148,7 @@
             const connection=o.connection?o.connection():null;
             saveMode.sync(enabled&&!stopped&&model&&model.editable?model.reviewer:'',o.session()+'\n'+(connection||''),!!ok&&!!connection);
             el('notes-prepare').textContent=saveMode.on()?'Save note':'Preview save';
-            el('notes-local').textContent='Local draft only until confirmed · lost on page reload. Ctrl/Cmd+Enter '+
-                (saveMode.on()?'saves the note':'previews')+'; Escape discards. Browser IME is supported.';
+            el('notes-local').textContent='Ctrl+Enter: '+(saveMode.on()?'save':'preview')+' · Esc: discard · Shift+Space: 한글 · empty text removes the note';
             el('notes-selection').textContent=c?c.caption:'Select errors in a ready ICE review to edit notes.';
             el('notes-read').disabled=!ok||!c||!!editor;
             el('notes-editor').hidden=!editor;el('notes-text').disabled=!!io||!!draft||busy()||stopped;
@@ -165,7 +164,7 @@
             el('notes-uncertain').hidden=!uncertain;el('notes-resolve').disabled=!pending||stopped||!!write||!!cancelling;
             el('notes-forget').disabled=!(permitted()||model&&model.detached&&!stopped&&!stale)||!!active()||!!write||!el('notes-checked').checked;
             el('notes-status').textContent=(latest()&&latest().scope_id&&model.binding_id!==latest().scope_id?'Earlier review registration — receipt only\n':'')+statusText(latest());el('notes-message').textContent=[notice,storageWarning].filter(Boolean).join('\n');
-            el('notes-bytes').textContent=new TextEncoder().encode(el('notes-text').value).length+' / '+LIMIT+' UTF-8 bytes · empty text clears the selected notes';
+            el('notes-bytes').textContent=new TextEncoder().encode(el('notes-text').value).length+' / '+LIMIT+' bytes';
             if(o.displayState){o.displayState(!enabled||!model?null:{reviewer:model.reviewer,review_rev:model.review_rev,read_turn:readTurn,
                 blocked:!displayReady()?'Saved-note status is not ready.':busy(true)||latest()&&latest().outcome_unknown&&(!latest().scope_id||latest().scope_id===model.binding_id)?'Saved-note publication is pending or unconfirmed.':
                     transferLocked?'Whole-review transfer is in progress; no save is implied.':

@@ -3,7 +3,7 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),Exit=require('.
 const html=fs.readFileSync(__dirname+'/index.html','utf8');
 const ids=new Set([...html.matchAll(/\bid="([^"]+)"/g)].map(m=>m[1]));
 assert.match(html,/id="session-exit-dialog"[^>]*role="dialog"[^>]*aria-modal="true"/);
-assert.match(html,/Earlier approved file writes are not undone/);
+assert.match(html,/earlier approved file writes are not undone/);
 const nodes=new Map(),listeners={};
 const doc={activeElement:null,contains:n=>[...nodes.values()].includes(n),
     defaultView:{addEventListener(k,f,capture){assert(capture);listeners[k]=f;}},

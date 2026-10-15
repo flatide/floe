@@ -67,7 +67,7 @@ const p=D.projection({bbox_dbu:['0','0','200','160'],width:400,height:320},[0,0]
 const paint=()=>{drawing.length=0;panel.paint(p,size);};
 async function jump(i){el('drc-errors').children[i].ondblclick();await tick();}
 (async()=>{
-    await panel.init();await tick();assert.match(el('drc-errors').children[0].textContent,/^\* #1/);assert(el('drc-note-body').hidden);
+    await panel.init();await tick();assert.match(el('drc-errors').children[0].textContent,/^\*1$/);assert(el('drc-note-body').hidden);
     const before=reads();el('drc-errors').children[0].onclick();await tick();assert.equal(reads(),before,'single selection read focus');
     hold=true;await jump(0);assert.equal(el('drc-note-text').textContent,'','unacknowledged jump changed note');ack(null);hold=false;await tick();
     assert.equal(el('drc-note-text').textContent,noteText);assert.deepEqual(saves.at(-1).note_target,{check:'0',error:'0'});paint();

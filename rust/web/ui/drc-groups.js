@@ -36,7 +36,7 @@
         async function attach(s) {
             close(); scope = s; const t = {cancelled: false, abort: null}; request = t;
             busy = true; changed(); o.status('Reading selection groups…');
-            try { if (await load(t, s)) { o.status('Selections live in this open view; files are unchanged.'); } }
+            try { if (await load(t, s)) { o.status(''); } }
             catch (e) { if (active(t, s)) { o.status('Selection unavailable · ' + e.message + ' · Reload review to retry.'); } }
             finally { if (active(t, s)) { request = null; busy = false; changed(); } }
         }

@@ -39,6 +39,10 @@
     }
     function bind(port) {
         const el = port.el, list = el('layers'), menu = el('layer-menu');
+        // GTK's row menu: line width 1/3/5 px, increase, decrease; the shell
+        // adds layer-properties items (load/save, the design default).
+        const WIDTHS = {width1: '1', width3: '3', width5: '5', 'width-up': '+1', 'width-down': '-1'};
+        const menuExtras = port.menuExtras || [];
         let identity = '', loadedKey = '', start = 0, page = null, widgets = [];
         let allClosed = false, exceptions = new Set(), foldRevision = 0;
         let selected = new Map(), anchor = null, flight = null, writing = null, failed = '';
@@ -76,6 +80,8 @@
                 const s = context(), disabled = !available() || !s.editable || !!writing;
                 el('layers-' + action).disabled = el('layer-menu-' + action).disabled = disabled;
             });
+            Object.keys(WIDTHS).forEach(function (k) { el('layer-menu-' + k).disabled = !edit || !selected.size; });
+            menuExtras.forEach(function (x) { const b = el('layer-menu-' + x.id); b.hidden = !x.available(); b.disabled = !x.enabled(); });
             el('layers-clear').disabled = !available() || !selected.size || !!writing;
             ['collapse','expand'].forEach(function (v) { el('layers-' + v).disabled = !available() || !!writing; });
             el('layers-prev').disabled = !use || !!flight || start === 0;
@@ -148,6 +154,13 @@
             patternFields(); el('palette-style').hidden = false; update(); el('palette-fill').focus();
         }
         function patternFields() { el('palette-pattern').hidden = el('palette-pattern-label').hidden = el('palette-fill').value !== 'pattern'; }
+        function setWidth(value) {
+            if (!editable() || !selected.size) { return; }
+            const ids = Array.from(selected.keys()).sort(order);
+            const batch = {pairs:ids.map(pair),collapsed:ids.filter(function(k){return selected.get(k) && closed(k);}).map(pair)};
+            if (value === '+1' || value === '-1') { batch.width_step = Number(value); } else { batch.width = Number(value); }
+            closeStyle(); write({style_batch:batch});
+        }
         function applyStyle(event) {
             event.preventDefault();
             if (!editable() || !styleCurrent()) { closeStyle(); notify('Selection or view changed. Open Style selected again.'); return; }
@@ -218,6 +231,8 @@
                 let lastClick = null, lastRevision = 0;
                 name.onclick = function (e) { lastClick = select(r,e,p); lastRevision = inputRevision; };
                 name.ondblclick = function (e) { e.preventDefault(); const revision = lastRevision; Promise.resolve(lastClick).then(function (ok) { if (ok && revision === inputRevision && valid(p)) { change('toggle', new Map([[k,r.children > 0]])); } }); };
+                // The swatch is part of the row (GTK): it selects and toggles like the name.
+                extras.style.onclick = name.onclick; extras.style.ondblclick = name.ondblclick;
                 name.onkeydown = function (e) { if (!e.isComposing && e.keyCode !== 229 && (e.key === 'ContextMenu' || e.key === 'F10' && e.shiftKey)) { showMenu(e,name); } };
                 row.oncontextmenu = function (e) { showMenu(e,name); };
                 row.onclick = function (e) { if (e.target === row) { select(r,e,p); } };
@@ -232,7 +247,7 @@
             if (!value.rows.length) { list.textContent = 'No layer rows.'; }
             const whole = value.start === 0 && value.next === null;
             el('layers-count').textContent = whole ? value.total + ' layer' + (value.total === 1 ? '' : 's') : (value.total ? (start + 1) + '–' + (start + value.rows.length) + ' / ' : '') + value.total;
-            el('layers-prev').hidden = el('layers-next').hidden = whole;
+            el('layers-prev').hidden = el('layers-next').hidden = el('layers-pager').hidden = whole;
             port.painted(); update();
             const target = focused && widgets.find(function (w) { return w.key === focused.key; }); if (target && !target.name.disabled) { target.name.focus(); }
         }
@@ -286,6 +301,9 @@
         el('palette-fill').onchange = patternFields;
         el('palette-style').onsubmit = applyStyle;
         el('palette-style-cancel').onclick = closeStyle;
+        el('palette-style').onkeydown = function (e) { if (e.key === 'Escape' && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); closeStyle(); } };
+        Object.keys(WIDTHS).forEach(function (k) { el('layer-menu-' + k).onclick = function () { hideMenu(false); setWidth(WIDTHS[k]); }; });
+        menuExtras.forEach(function (x) { el('layer-menu-' + x.id).onclick = function () { hideMenu(false); x.action(); }; });
         ['all','none'].forEach(function (v) { el('layers-' + v).onclick = el('layer-menu-' + v).onclick = function () { write({layers:{mode:v}}); }; });
         el('layers-clear').onclick = function () { if (available() && !writing) { if (flight && flight.kind === 'range') { cancelRead(); } ++inputRevision; selected.clear(); notify(''); update(); } };
         el('layers-collapse').onclick = function () { if (available() && !writing) { allClosed = true; exceptions.clear(); folding(); } };
@@ -299,7 +317,7 @@
             if (e.isComposing || e.keyCode === 229) { return; }
             if (e.key === 'Escape') { e.preventDefault(); hideMenu(true); return; }
             if (!['ArrowDown','ArrowUp','Home','End'].includes(e.key)) { return; }
-            const buttons = ['show','hide','toggle','style','all','none','close'].map(function (k) { return el('layer-menu-' + k); }).filter(function (b) { return !b.disabled; });
+            const buttons = ['show','hide','toggle','all','none','width1','width3','width5','width-up','width-down','style','load','save','default','close'].map(function (k) { return el('layer-menu-' + k); }).filter(function (b) { return !b.disabled && !b.hidden; });
             const i = buttons.indexOf(port.document.activeElement); e.preventDefault();
             buttons[e.key === 'Home' ? 0 : e.key === 'End' ? buttons.length - 1 : (i + (e.key === 'ArrowUp' ? -1 : 1) + buttons.length) % buttons.length].focus();
         };

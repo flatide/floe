@@ -35,7 +35,7 @@
         function dropHighlight() { ++highlightFlight; highlight = null; highlightKey = ''; highlightAsked = ''; }
         function reset() {
             roots = []; results = null; selected = null; shown = []; rootName = ''; hier = true; rootKey = ''; reframe = false; lacking = false; confirming = false;
-            tree.textContent = ''; search.value = ''; note(''); abandon(); dropHighlight(); paintHighlight(); update();
+            tree.textContent = ''; search.value = ''; note(identity ? '' : 'no layout'); abandon(); dropHighlight(); paintHighlight(); update();
         }
         async function query(body) {
             const c = context(); if (!c) { throw new Error('No open view.'); }
@@ -59,12 +59,12 @@
             node.setAttribute('aria-expanded', cell.leaf ? 'false' : String(!!cell.open));
             node.tabIndex = -1;
             node.onclick = function (e) { if (!cell.leaf && e.target === twist) { expand(cell); } else { choose(cell); } };
-            node.ondblclick = function () { chooseAndZoom(cell, gesture()); };
+            node.ondblclick = function () { activate(cell, gesture()); };
             node.onkeydown = function (e) {
                 if (e.isComposing || e.keyCode === 229) { return; }
                 if (e.key === 'ArrowRight' && !cell.leaf && !cell.open) { e.preventDefault(); expand(cell); }
                 else if (e.key === 'ArrowLeft' && cell.open) { e.preventDefault(); cell.open = false; paint(); }
-                else if (e.key === 'Enter') { e.preventDefault(); chooseAndZoom(cell, gesture()); }
+                else if (e.key === 'Enter') { e.preventDefault(); activate(cell, gesture()); }
                 // Only cell rows are stops: '…' and '… N more' are skipped.
                 else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); const next = shown[shown.indexOf(cell) + (e.key === 'ArrowDown' ? 1 : -1)]; if (next) { next.node.focus(); } }
             };
@@ -206,8 +206,21 @@
                 return !!r.bbox;
             } catch (e) { if (token === bboxFlight) { note(String(e.message || e)); } return false; }
         }
-        // Double-click / Enter: frame the cell once its extent in THIS frame
-        // is known; a root change or another selection in between cancels.
+        // Double-click / Enter on a row (GTK _on_cell_activate): the cell
+        // becomes the view root once its extent in THIS frame is known; the
+        // layout's top cell goes back to the top; a jobdeck (no view root)
+        // frames the cell instead. A root change or another selection in
+        // between cancels.
+        function activate(cell, still) {
+            if (cell.source || cell.ci === null || cell.ci === undefined) { return choose(cell); }
+            if (!port.rootAllowed()) { return chooseAndZoom(cell, still); }
+            if (roots.length === 1 && cell === roots[0]) { const chosen = choose(cell); clearRoot(); return chosen; }
+            const frame = rootKey;
+            return choose(cell).then(function (ok) { if (ok && selected === cell && rootKey === frame && cell.bbox) { setRoot(); } });
+        }
+        // The search box's Enter and the zoom button frame the cell once its
+        // extent in THIS frame is known; a root change or another selection
+        // in between cancels.
         function chooseAndZoom(cell, still) {
             const frame = rootKey;
             return choose(cell).then(function (ok) { if (ok && selected === cell && rootKey === frame && cell.bbox) { zoom(still()); } });

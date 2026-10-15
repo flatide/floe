@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="en"><head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="floe-bundle" content="@@BUNDLE@@"><title>floe2 · Read-only guest</title>
+  <meta name="floe-bundle" content="@@BUNDLE@@"><title>floe2 guest</title>
   <link rel="stylesheet" href="/assets/@@BUNDLE@@/app.css">
   <link rel="stylesheet" href="/assets/@@BUNDLE@@/guest.css">
   <script defer src="/assets/@@BUNDLE@@/protocol.js"></script>
@@ -22,82 +22,67 @@
   <script defer src="/assets/@@BUNDLE@@/guest-tools.js"></script>
   <script defer src="/assets/@@BUNDLE@@/guest.js"></script>
 </head><body>
-  <header class="topbar"><div class="brand">floe<span>2</span></div><strong id="guest-mode">Read-only guest</strong>
+  <header class="topbar"><div class="brand">floe<span>2</span></div><strong id="guest-mode">guest</strong>
     <span id="guest-status" class="document-title" role="status">Connecting…</span>
-    <button id="guest-reconnect" disabled>Reconnect</button><button id="guest-leave" disabled>Leave share</button>
+    <button id="guest-reconnect" class="quiet" disabled>reconnect</button><button id="guest-leave" class="quiet" disabled>leave share</button>
   </header>
   <div class="workspace">
     <aside class="sidebar" aria-label="Guest display controls">
-      <section><h2>Shared layout</h2>
-        <p class="note">This is not an owner workspace. No file browsing, indexing, review writes or server export.</p>
-        <p id="guest-scope" class="note">The invitation grants only the owner's approved layers and loaded levels.</p>
-        <p class="note">Local preview only. Owner close, expiry, or a scope change ends access. Already received pixels cannot be recalled.</p>
+      <section><p id="guest-scope" class="note"></p></section>
+      <section id="guest-controls" hidden><h2>view</h2>
+        <div class="button-row"><button id="guest-fit" disabled>fit</button><button id="guest-in" disabled>+</button><button id="guest-out" disabled>−</button></div>
+        <div class="form-row"><label for="guest-depth">depth</label><input id="guest-depth" class="short" value="full" disabled></div>
+        <div class="form-row"><label for="guest-detail">detail</label><select id="guest-detail" disabled><option value="low">low · 5 px</option><option value="medium">medium · 3 px</option><option value="high">high · 1 px</option><option value="exact">exact · no cut</option></select></div>
+        <div class="form-row"><label for="guest-thin">thin shapes at wide views</label><select id="guest-thin" disabled><option value="auto">auto (keep)</option><option value="keep">keep</option><option value="cull">cull</option></select></div>
+        <label class="check"><input id="guest-frames" type="checkbox" disabled> hierarchy frames</label>
+        <label class="check"><input id="guest-labels" type="checkbox" disabled> labels</label>
+        <label class="check"><input id="guest-mono" type="checkbox" disabled> grayscale layers</label>
+        <h2>goto position (um)</h2><label for="guest-x">x</label><input id="guest-x" value="0" disabled>
+        <label for="guest-y">y</label><input id="guest-y" value="0" disabled>
+        <label for="guest-width">window</label><input id="guest-width" disabled>
+        <button id="guest-go" disabled>go</button>
       </section>
-      <section id="guest-controls" hidden><h2>Independent view</h2>
-        <div class="button-row"><button id="guest-fit" disabled>Fit</button><button id="guest-in" disabled>+</button><button id="guest-out" disabled>−</button></div>
-        <div class="form-row"><label for="guest-depth">Depth</label><input id="guest-depth" class="short" value="full" disabled></div>
-        <div class="form-row"><label for="guest-detail">Detail</label><select id="guest-detail" disabled><option value="low">Low · 5 px</option><option value="medium">Medium · 3 px</option><option value="high">High · 1 px</option><option value="exact">Exact · no cut</option></select></div>
-        <div class="form-row"><label for="guest-thin">Thin shapes</label><select id="guest-thin" disabled><option value="auto">Auto · keep</option><option value="keep">Keep</option><option value="cull">Cull</option></select></div>
-        <label class="check"><input id="guest-frames" type="checkbox" disabled> Frames</label>
-        <label class="check"><input id="guest-labels" type="checkbox" disabled> Labels</label>
-        <label class="check"><input id="guest-mono" type="checkbox" disabled> Mono</label>
-        <h2>Go to (µm)</h2><label for="guest-x">X</label><input id="guest-x" value="0" disabled>
-        <label for="guest-y">Y</label><input id="guest-y" value="0" disabled>
-        <label for="guest-width">View width (optional)</label><input id="guest-width" disabled>
-        <button id="guest-go" disabled>Go</button>
-        <p class="note">On the canvas: arrow keys pan 50%, Shift + arrows 10%; + / − zoom, Home fits. Only your view changes.</p>
-        <p class="note">Drag left/middle to pan. Right drag: zoom band (leftward zooms out). Wheel zooms about the cursor; pending views drop wheel input.</p>
-      </section>
-      <section id="gl-panel" hidden><h2>Approved layers</h2>
-        <button id="gl-reload">Reload layers</button>
-        <div class="button-row"><button id="gl-all">Show all approved</button><button id="gl-none">Hide all</button></div>
-        <div class="button-row"><button id="gl-collapse">Collapse all</button><button id="gl-expand">Expand all</button></div>
+      <section id="gl-panel" hidden><h2>layers</h2>
+        <button id="gl-reload">reload layers</button>
+        <div class="button-row"><button id="gl-all">show all</button><button id="gl-none">hide all</button></div>
+        <div class="button-row"><button id="gl-collapse">collapse all</button><button id="gl-expand">expand all</button></div>
         <div id="gl-rows" class="guest-review-list" aria-label="Approved layers"></div>
         <p id="gl-count" class="note"></p>
-        <div class="button-row"><button id="gl-prev">Previous layers</button><button id="gl-next">Next layers</button></div>
+        <div class="button-row"><button id="gl-prev">◀</button><button id="gl-next">▶</button></div>
         <p id="gl-status" class="note" role="status"></p>
       </section>
       <section id="guest-inspect" class="inspect-panel" hidden aria-label="Shared geometry inspection">
-        <h2>Inspect approved geometry</h2><p id="pick-status" role="status"></p>
-        <div class="button-row"><button id="pick-prev" disabled title="Previous overlapping shape">←</button><button id="pick-next" disabled title="Next overlapping shape">→</button><button id="pick-clear" disabled>Clear selection</button></div>
+        <h2>selection</h2><p id="pick-status" role="status"></p>
+        <div class="button-row"><button id="pick-prev" disabled title="Previous overlapping shape">←</button><button id="pick-next" disabled title="Next overlapping shape">→</button><button id="pick-clear" disabled>clear</button></div>
         <pre id="pick-details"></pre>
-        <label class="check"><input id="snap-probe" type="checkbox" disabled> Snap probe (m)</label>
+        <label class="check"><input id="snap-probe" type="checkbox" disabled> snap probe (m)</label>
         <p id="snap-status"></p><p id="query-availability" class="note"></p>
-        <p class="note">Click again: next overlap · Shift: add · Ctrl/Cmd: toggle. Only current visible approved layers are queried. Jobdeck geometry queries are unavailable.</p>
       </section>
       <section id="guest-rulers" class="inspect-panel" hidden aria-label="Private guest rulers">
-        <h2>Private rulers</h2>
-        <div class="button-row"><button id="ruler-mode" aria-pressed="false" disabled>Ruler (r)</button><button id="ruler-pop" disabled>Undo (k)</button><button id="ruler-clear" disabled>Clear (Shift+K)</button></div>
-        <label class="check"><input id="ruler-snap" type="checkbox" checked disabled> Edge/vertex snap (m in ruler mode)</label>
+        <h2>ruler</h2>
+        <div class="button-row"><button id="ruler-mode" aria-pressed="false" disabled>ruler (r)</button><button id="ruler-pop" disabled>delete last (k)</button><button id="ruler-clear" disabled>clear (Shift+K)</button></div>
+        <label class="check"><input id="ruler-snap" type="checkbox" checked disabled> edge/vertex snap (m)</label>
         <p id="ruler-status" role="status"></p><pre id="ruler-details"></pre><p id="ruler-count" class="note">0 rulers</p><p id="ruler-availability" class="note"></p><pre id="ruler-auto"></pre>
-        <p class="note">Click two points · Shift: free angle · Escape: cancel, exit, then clear. Select 2+ shapes before entering Ruler for nearest bbox gaps, not contour distances.</p>
-        <p class="note">Cursor-only measurement also works in jobdeck. Annotations are private and cleared on disconnect; nothing is saved or exported.</p>
       </section>
-      <section id="gd-panel" hidden><h2>Shared DRC · read-only</h2>
-        <p class="note">This entire result was explicitly shared. Your lists and selections are private; no notes, SVRF or review writes are available.</p>
-        <p id="gd-summary" class="note"></p><button id="gd-reload">Reload review</button>
-        <label for="gd-search">Rule name filter</label><input id="gd-search" maxlength="256"><button id="gd-filter">Filter</button>
-        <label for="gd-waived">Status</label><select id="gd-waived"><option value="all">All errors</option><option value="no">Active only</option><option value="yes">Waived only</option></select>
+      <section id="gd-panel" hidden><h2>DRC</h2>
+        <p id="gd-summary" class="note"></p><button id="gd-reload">reload review</button>
+        <label for="gd-search">find rule</label><input id="gd-search" maxlength="256"><button id="gd-filter">filter</button>
+        <label for="gd-waived">status</label><select id="gd-waived"><option value="all">All</option><option value="no">Not Waived</option><option value="yes">Waived</option></select>
         <div id="gd-rules" class="guest-review-list" aria-label="Shared DRC rules"></div>
-        <div class="button-row"><button id="gd-rule-prev">Previous rules</button><button id="gd-rule-next">Next rules</button></div>
+        <div class="button-row"><button id="gd-rule-prev">◀</button><button id="gd-rule-next">▶</button></div>
         <p id="gd-description" class="note"></p>
-        <label class="check"><input id="gd-in-view" type="checkbox"> Current view</label>
-        <label class="check"><input id="gd-selected-only" type="checkbox"> Selected only</label>
-        <label class="check"><input id="gd-markers" type="checkbox" checked> DRC markers and outline</label>
+        <label class="check"><input id="gd-in-view" type="checkbox"> in view</label>
+        <label class="check"><input id="gd-selected-only" type="checkbox"> selected</label>
+        <label class="check"><input id="gd-markers" type="checkbox" checked> markers</label>
         <div id="gd-errors" class="guest-review-list" aria-label="Shared DRC errors"></div>
-        <div class="button-row"><button id="gd-error-prev">Previous errors</button><button id="gd-error-next">Next errors</button></div>
-        <div class="button-row"><button id="gd-step-prev">Previous error (,)</button><button id="gd-step-next">Next error (.)</button></div>
-        <button id="gd-step-continue" hidden>Continue search</button><p id="gd-step-status" class="note"></p>
-        <button id="gd-box" aria-pressed="false">Box select (e)</button><p id="gd-box-status" class="note"></p>
-        <p class="note">Click selects; Shift adds; Ctrl/Command toggles. This never changes the owner's selection.</p>
-        <p class="note">Canvas markers select the displayed page; plain double-click frames an error in Explore. Box selection uses two corners on the current page only; drag still pans. Comma/period or Tab/Shift+Tab traverse the current rule; after a confirmed error jump, traversal also moves your Explore view.</p>
-        <p id="gd-selection" class="note"></p><button id="gd-clear">Clear selections</button>
-        <p id="gd-selected" class="note"></p><div class="button-row"><button id="gd-go">Go · same scale</button><button id="gd-fit">Frame error</button></div>
-        <p id="gd-jump-status" class="note"></p><button id="gd-end-jump">End error navigation</button>
-        <h3>CD · last confirmed jump</h3><p id="gd-cd-title" class="note"></p><ul id="gd-cd-values"></ul>
-        <p class="note">Once a jump is confirmed, rule stepping follows errors. Manual zoom locks its scale; Frame error unlocks it. Marker clicks never jump. CD stays on the last confirmed jump, not a newly selected marker.</p>
-        <p class="note">k removes the newest ruler; Shift+K clears rulers. Escape cancels a box, then CD, then error navigation. Hidden markers also hide CD. Reload restores CD without repeating a move.</p>
-        <p class="note">Follow mode cannot move the owner's camera. Use Explore for your own error navigation.</p>
+        <div class="button-row"><button id="gd-error-prev">◀</button><button id="gd-error-next">▶</button></div>
+        <div class="button-row"><button id="gd-step-prev">previous error (,)</button><button id="gd-step-next">next error (.)</button></div>
+        <button id="gd-step-continue" hidden>continue search</button><p id="gd-step-status" class="note"></p>
+        <button id="gd-box" aria-pressed="false">box select (e)</button><p id="gd-box-status" class="note"></p>
+        <p id="gd-selection" class="note"></p><button id="gd-clear">clear selections</button>
+        <p id="gd-selected" class="note"></p><div class="button-row"><button id="gd-go">go · same scale</button><button id="gd-fit">frame error</button></div>
+        <p id="gd-jump-status" class="note"></p><button id="gd-end-jump">end error navigation</button>
+        <h3>CD</h3><p id="gd-cd-title" class="note"></p><ul id="gd-cd-values"></ul>
         <p id="gd-status" class="note" role="status"></p>
       </section>
     </aside>
@@ -107,8 +92,8 @@
       <canvas id="guest-drc-canvas" width="1" height="1" aria-label="Shared DRC markers and outline" hidden></canvas>
       <canvas id="ruler-canvas" width="1" height="1" aria-label="Private manual and bbox rulers" hidden></canvas>
       <div id="zoom-band" aria-hidden="true" hidden></div><div id="zoom-band-hint" role="status" hidden></div>
-      <p id="guest-empty">Waiting for an authorized frame…</p>
+      <p id="guest-empty">waiting for an authorized frame…</p>
     </main>
   </div>
-  <footer id="guest-frame-status" role="status">No displayed frame</footer>
+  <footer id="guest-frame-status" role="status"></footer>
 </body></html>

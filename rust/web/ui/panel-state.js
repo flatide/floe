@@ -34,7 +34,7 @@
                 const state = checked(response); revision = state.panel_rev; last = encode(state.body);
                 await o.apply(state.body);
                 if (!valid(n, token)) { return; }
-                ready = true; status('Review state synchronized · server session only');
+                ready = true; status('');
             } catch (e) {
                 if (valid(n, token)) { ready = false; status('Review state unavailable: ' + e.message + ' · use Reload review.'); }
             } finally { if (valid(n, token)) { active = null; } }
@@ -52,7 +52,7 @@
         async function flush() {
             if (!scope || !ready || active || pending === null) { return; }
             const text = pending; pending = null;
-            if (text === last) { status('Review state synchronized · server session only'); return; }
+            if (text === last) { status(''); return; }
             const n = serial, token = {cancelled: false}; active = token;
             try {
                 const response = await o.http('POST', scope.path,
@@ -61,7 +61,7 @@
                 const state = checked(response);
                 if (o.protocol.compare(state.panel_rev, revision) < 0 || encode(state.body) !== text) { throw new Error('DRC panel state differs from the saved request'); }
                 revision = state.panel_rev; last = encode(state.body);
-                if (pending === null || pending === last) { pending = null; status('Review state synchronized · server session only'); }
+                if (pending === null || pending === last) { pending = null; status(''); }
             } catch (e) {
                 if (valid(n, token)) {
                     ready = false; pending = null;

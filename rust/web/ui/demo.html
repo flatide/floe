@@ -2,21 +2,16 @@
 <html lang="en"><head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="floe-http-test" content="@@HTTP_TEST@@">
-  <title>floe2 · Interactive demo</title>
+  <title>floe2 demo</title>
   <link rel="stylesheet" href="/server-assets/@@BUNDLE@@/app.css">
   <link rel="stylesheet" href="/server-assets/@@BUNDLE@@/server.css">
   <script defer src="/server-assets/@@BUNDLE@@/demo.js"></script>
 </head><body class="demo-shell">
-  <header class="topbar"><div class="brand">floe<span>2</span></div><strong>Interactive layout demo</strong></header>
+  <header class="topbar"><div class="brand">floe<span>2</span><small>DEMO</small></div><strong>samples</strong></header>
   <main class="demo-page">
-    <h1>Explore a layout</h1>
-    <p id="transport-warning" hidden>HTTP test · unencrypted connection. Use only approved samples on a trusted internal network.</p>
-    <p>Choose a published sample to start your own independent view. No login or installation is needed.</p>
-    <p>Pan, zoom and change display detail. Files are read-only; uploading, browsing server files,
-      indexing, review writes and exports are unavailable. Displayed sample content is public.</p>
+    <p id="transport-warning" hidden>HTTP test · unencrypted connection.</p>
+    <p>Choose a sample to open your own read-only view. Sessions last up to 15 minutes.</p>
     <div id="demo-samples" aria-label="Published samples"></div>
-    <p id="demo-status" role="status">Loading samples…</p>
-    <p>Sessions last up to 15 minutes. Please end your session when finished. Capacity is limited;
-      a busy demo can be tried again later.</p>
+    <p id="demo-status" role="status">loading samples…</p>
   </main>
 </body></html>
