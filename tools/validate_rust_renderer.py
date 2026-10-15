@@ -1065,6 +1065,103 @@ assert not hasattr(gui, "live_caps")
         w._tree.expand_row(store.get_path(mid), False)
         self.assertEqual(len(sent), asked + 1)
 
+    def test_a_selected_cell_says_its_facts_on_the_status_line(self):
+        """User 2026-10-15: "셀 트리에서 셀을 선택하면 셀의 관련정보(좌표등)을
+        상태줄에 표시해줘". A selected row asks cell_info under the view root
+        and the highlight's cell_insts; the status line says the name, then
+        the answer's text (app-core view::cell_info's words), the count in
+        view after it; as the cursor moves its coordinates go in front, a
+        pick's selection between; a stale answer is dropped; Esc clears the
+        line with the selection."""
+        try:
+            from floe import gui
+            gui.import_gtk()
+        except Exception as exc:  # pragma: no cover - headless hosts
+            self.skipTest("GTK unavailable: %s" % exc)
+        import types
+        from floe.gui import Viewer
+        v = Viewer.__new__(Viewer)
+        v.cache = types.SimpleNamespace(catalog=None, is_jobdeck=False)
+        v.dbu = 0.001
+        v.mode = "normal"
+        v._sel_text = ""
+        v._view_root = None
+        v._cellwin = None
+        v._cell_seq = 0
+        v._cell_pending = {}
+        v._cell_sources = v._cell_sel = v._cell_hl = None
+        v._cell_hl_on = True
+        v._cell_hl_key = None
+        v._cell_find_seq = v._cell_insts_seq = v._cell_info_seq = None
+        v._cell_sel_text = v._cell_view_text = ""
+        v._cell_search_timer = None
+        v._cell_mode = "tree"
+        v._cell_nohier = set()
+        v.view_bbox = lambda: (0.0, 0.0, 4000.0, 3000.0)
+        v._display = lambda: None
+        status, sent = [], []
+        v._set_live_status = status.append
+        v.worker = types.SimpleNamespace(alive=lambda: True,
+                                         submit=sent.append)
+        panel = v._build_cell_panel()
+        self.addCleanup(panel.destroy)
+        w = v._cellwin
+        v._cell_tree_load_roots()
+        v._on_cell_result({
+            "kind": "cell_sources", "seq": sent[-1]["seq"], "found": True,
+            "sources": [{"src": 0, "placements": 1, "path": "/x/.a.ice"}]})
+        v._on_cell_result({
+            "kind": "cells", "seq": sent[-1]["seq"], "found": True,
+            "src": 0, "cell": 6, "name": "TOP", "insts": 1, "height": 1,
+            "unit": 1000.0, "bbox": [0, 0, 4000, 3000], "total": 1,
+            "children": [{"cell": 5, "members": 2, "leaf": True, "name": "BLK"}]})
+        store = w._store
+        blk = store.iter_nth_child(store.get_iter_first(), 0)
+        del sent[:]
+        w._tree.get_selection().select_iter(blk)
+        self.assertEqual([(j["kind"], j["src"], j["cell"], j.get("root")) for j in sent],
+                         [("cell_info", 0, 5, None), ("cell_insts", 0, 5, None)])
+        self.assertEqual(status[-1], "BLK", "the name until the facts come")
+        text = ("BLK · 2 placements · extent (0.000, 0.000) – (2.000, 1.000) um"
+                " · cell 1.000 × 1.000 um · leaf")
+        info = {"kind": "cell_info", "seq": sent[0]["seq"], "found": True,
+                "src": 0, "cell": 5, "insts": 2, "approx": False,
+                "bbox": [0, 0, 2000, 1000], "text": text}
+        v._on_cell_result(dict(info, seq=sent[0]["seq"] + 99))   # not asked
+        self.assertEqual(status[-1], "BLK")
+        v._on_cell_result(info)
+        self.assertEqual(status[-1], text)
+        self.assertEqual(w._info.get_text(), "BLK: 2 instances · 2.00 × 1.00 um")
+        v._on_cell_result({
+            "kind": "cell_insts", "seq": sent[1]["seq"], "found": True,
+            "src": 0, "cell": 5, "boxes": [[0, 0, 1000, 1000]], "more": True,
+            "visited": 3})
+        line = text + " · 1 in view (more - zoom in)"
+        self.assertEqual(status[-1], line)
+        # the cursor's coordinates in front of it, a pick's selection between
+        v._cursor = (1500, -250)
+        v._hover(types.SimpleNamespace(state=0))
+        self.assertEqual(status[-1], "x 1.500  y -0.250 um   |   " + line)
+        v._sel_text = "sel 1/0 · BLK"
+        v._hover(types.SimpleNamespace(state=0))
+        self.assertEqual(status[-1], "x 1.500  y -0.250 um   |   sel 1/0 · BLK   |   " + line)
+        v._sel_text = ""
+        # a row's late answer, another row selected since, is dropped
+        del sent[:]
+        w._tree.get_selection().select_iter(store.get_iter_first())
+        self.assertEqual(status[-1], "TOP")
+        late = sent[0]["seq"]
+        w._tree.get_selection().select_iter(blk)
+        self.assertEqual(status[-1], "BLK")
+        v._on_cell_result(dict(info, seq=late, text="TOP · top cell"))
+        self.assertEqual(status[-1], "BLK")
+        # Esc: the selection and its line go
+        v._cell_hl_clear(display=False)
+        self.assertEqual(status[-1], "cell selection cleared")
+        self.assertEqual(v._cell_status_text(), "")
+        v._hover(types.SimpleNamespace(state=0))
+        self.assertEqual(status[-1], "x 1.500  y -0.250 um")
+
     def test_cell_page_fits_the_left_pane_at_its_start_width(self):
         """Field 2026-09-29: the left pane opened with the `cells` tab
         off screen and the DRC tab half hidden - the page's one-row
@@ -1318,6 +1415,16 @@ assert not hasattr(gui, "live_caps")
         # the highlight was re-asked under the root
         self.assertEqual(sent[-1]["kind"], "cell_insts")
         self.assertEqual(sent[-1]["root"], 5)
+        # and the selected cell's facts, which keep to the cursor's line:
+        # the root's own message stays (user 2026-10-15)
+        self.assertEqual((sent[-2]["kind"], sent[-2]["cell"], sent[-2]["root"]),
+                         ("cell_info", 5, 5))
+        v._on_cell_result({
+            "kind": "cell_info", "seq": sent[-2]["seq"], "found": True,
+            "src": 0, "cell": 5, "insts": 1, "approx": False,
+            "bbox": [0, 0, 5000, 4000], "text": "BLK · view root · bbox"})
+        self.assertIn("view root: BLK", status[-1])
+        self.assertEqual(v._cell_status_text(), "BLK · view root · bbox")
         # the same root again is a no-op; a shapeless cell is refused
         n = len(sent)
         v._cell_set_root()

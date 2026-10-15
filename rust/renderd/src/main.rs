@@ -84,6 +84,9 @@ const CELL_FIND_CAP: usize = 5_000;
 /// partially (more=1) instead of running for seconds.
 const CELL_INSTS_CAP: usize = 4_096;
 const CELL_INSTS_BUDGET: u64 = 2_000_000;
+/// The walk behind a `cell_info` answer (every instance's box, counted for
+/// the exact span): past it the summary's extent answers, approx=1.
+const CELL_INFO_BUDGET: u64 = 2_000_000;
 
 // which target this binary was built for, mirrored from floe-index:
 // multiple builds circulate on the closed-network hosts and "which
@@ -361,6 +364,13 @@ enum HierCommand {
         cap: usize,
         root: Option<u32>,
     },
+    /// what the viewer's status line says of a cell (view coordinates)
+    Info {
+        sequence: i64,
+        source: usize,
+        cell: u32,
+        root: Option<u32>,
+    },
     Shutdown,
 }
 
@@ -371,7 +381,8 @@ impl HierCommand {
             | HierCommand::Cells { sequence, .. }
             | HierCommand::Find { sequence, .. }
             | HierCommand::Bbox { sequence, .. }
-            | HierCommand::Insts { sequence, .. } => *sequence,
+            | HierCommand::Insts { sequence, .. }
+            | HierCommand::Info { sequence, .. } => *sequence,
             HierCommand::Shutdown => -1,
         }
     }
@@ -383,6 +394,7 @@ impl HierCommand {
             HierCommand::Find { .. } => "cell_find",
             HierCommand::Bbox { .. } => "cell_bbox",
             HierCommand::Insts { .. } => "cell_insts",
+            HierCommand::Info { .. } => "cell_info",
             HierCommand::Shutdown => "shutdown",
         }
     }
@@ -895,6 +907,15 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                 cell: required_parse(&fields, "cell")?,
                 view: parse_view(required(&fields, "view")?)?,
                 cap: cap.clamp(1, CELL_INSTS_CAP),
+                root: optional_parse(&fields, "root")?,
+            })))
+        }
+        "cell_info" => {
+            reject_unknown(&fields, &["seq", "src", "cell", "root"])?;
+            Ok(Some(InputCommand::Hier(HierCommand::Info {
+                sequence: optional_parse(&fields, "seq")?.unwrap_or(-1),
+                source: optional_parse(&fields, "src")?.unwrap_or(0),
+                cell: required_parse(&fields, "cell")?,
                 root: optional_parse(&fields, "root")?,
             })))
         }
@@ -1932,6 +1953,60 @@ fn handle_hier(hier: &SharedHier, command: HierCommand, responses: &Sender<Strin
                 u8::from(more),
                 visited,
                 if boxes.is_empty() { "-".to_string() } else { boxes.join(";") }
+            ))
+        }
+        HierCommand::Info { source, cell, root, .. } => {
+            let src = source_of(*source)?;
+            let info = floe_render_core::cell_info(&src.handle, *root, *cell, CELL_INFO_BUDGET)
+                .map_err(|e| hier_error(kind, sequence, &e))
+                .map_err(HierWire)?;
+            // view coordinates: through each geometric placement of the
+            // source (a layout's one is the identity)
+            let mut span: Option<[f64; 4]> = None;
+            if let Some(b) = info.span {
+                for xf in &src.placements {
+                    let t = xf.apply(&b);
+                    span = Some(match span {
+                        None => t,
+                        Some(u) => [u[0].min(t[0]), u[1].min(t[1]), u[2].max(t[2]), u[3].max(t[3])],
+                    });
+                }
+            }
+            // the instance's origin and box, when the view holds it once
+            let at = match (info.placement, src.placements.as_slice()) {
+                (Some(p), [xf]) => Some((
+                    format!(
+                        "{},{},{},{}",
+                        xf.scale * p.x as f64 + xf.dx,
+                        xf.scale * p.y as f64 + xf.dy,
+                        p.rot,
+                        u8::from(p.flip)
+                    ),
+                    wire_f64_box(&xf.apply(&p.bbox)),
+                )),
+                _ => None,
+            };
+            let rbbox = info
+                .rbbox
+                .map(|b| format!("{},{},{},{}", b.x0, b.y0, b.x1, b.y1))
+                .unwrap_or_else(|| "-".to_string());
+            Ok(format!(
+                "cell_info seq={} src={} cell={} found=1 name_hex={} height={} children={} unit={} rbbox={} is_root={} insts={} placements={} approx={} span={} at={} abox={}",
+                sequence,
+                source,
+                cell,
+                wire_hex(&info.name),
+                info.height,
+                info.children,
+                src.handle.unit(),
+                rbbox,
+                u8::from(info.is_root),
+                info.insts,
+                src.placements.len(),
+                u8::from(info.approx),
+                span.map(|b| wire_f64_box(&b)).unwrap_or_else(|| "-".to_string()),
+                at.as_ref().map(|a| a.0.as_str()).unwrap_or("-"),
+                at.as_ref().map(|a| a.1.as_str()).unwrap_or("-")
             ))
         }
         HierCommand::Shutdown => Ok(String::new()),
@@ -6999,6 +7074,17 @@ mod tests {
                 root: None
             }
         );
+        assert_eq!(
+            hier("cell_info seq=10 src=2 cell=9 root=4"),
+            HierCommand::Info {
+                sequence: 10,
+                source: 2,
+                cell: 9,
+                root: Some(4)
+            }
+        );
+        assert!(parse_command("cell_info seq=10").is_err());
+        assert!(parse_command("cell_info seq=10 cell=9 view=0,0,1,1").is_err());
         assert!(parse_command("cell_bbox seq=8").is_err());
         assert!(parse_command("cell_insts seq=9 cell=1 view=0,0,1,1 extra=1").is_err());
         assert!(parse_command("cells seq=1 cell=x").is_err());
@@ -7195,11 +7281,23 @@ mod tests {
             root: None,
         })
         .unwrap();
+        tx.send(HierCommand::Info {
+            sequence: 4,
+            source: 0,
+            cell: 1,
+            root: None,
+        })
+        .unwrap();
         tx.send(HierCommand::Shutdown).unwrap();
         let worker = thread::spawn(move || hier_worker(rx, responses, hier));
         worker.join().unwrap();
         let lines: Vec<String> = answers.try_iter().collect();
-        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert_eq!(lines.len(), 4, "{lines:?}");
+        assert!(
+            lines[3].starts_with("cell_info seq=4 found=0 code=state"),
+            "{}",
+            lines[3]
+        );
         assert!(
             lines[0].starts_with("cells seq=1 found=0 code=state"),
             "{}",
@@ -7215,6 +7313,67 @@ mod tests {
             "{}",
             lines[2]
         );
+    }
+
+    /// cell_info's answer is in view coordinates: a layout's through the
+    /// identity, a deck source's through its placements - the instance's
+    /// origin and box only when the view holds the cell once.
+    #[test]
+    fn cell_info_answers_in_view_coordinates() {
+        use floe_oasis::doc::Rep;
+        use floe_vfs::hiersum::fixture::{build, shape, FCell};
+        // X turned 90 degrees after a mirror at (5, 7) in C, C turned 180
+        // degrees at (100, 200) in T
+        let ask = |placements: Vec<DeckXf>, line: &str| -> String {
+            let ovm = build(
+                &[
+                    FCell { name: "X", shape: shape(0, 0, 10, 4), places: vec![] },
+                    FCell { name: "C", shape: shape(0, 0, 50, 50), places: vec![(0, 5, 7, 1, true, Rep::One)] },
+                    FCell { name: "T", shape: shape(0, 0, 1000, 1000), places: vec![(1, 100, 200, 2, false, Rep::One)] },
+                ],
+                2,
+            );
+            let handle = HierHandle::new(
+                Arc::new(floe_vfs::Vfs::from_ovm_for_tests(ovm)),
+                "/nonexistent/floe-renderd-cells".to_string(),
+            );
+            let hier: SharedHier = Arc::new(RwLock::new(Some(Arc::new(PublishedHier {
+                sources: vec![HierSource {
+                    path: "/x/.t.oas.ice".to_string(),
+                    handle: Arc::new(handle),
+                    placements,
+                }],
+            }))));
+            let Ok(Some(InputCommand::Hier(command))) = parse_command(line) else {
+                panic!("{line}");
+            };
+            let (responses, answers) = mpsc::channel();
+            handle_hier(&hier, command, &responses);
+            answers.try_recv().unwrap()
+        };
+        let x = wire_hex("X");
+        assert_eq!(
+            ask(vec![DeckXf::IDENTITY], "cell_info seq=5 cell=0"),
+            format!("cell_info seq=5 src=0 cell=0 found=1 name_hex={x} height=0 children=0 unit=1000 rbbox=0,0,10,4 is_root=0 insts=1 placements=1 approx=0 span=91,183,95,193 at=95,193,3,1 abox=91,183,95,193")
+        );
+        // the root itself; C as the root
+        assert_eq!(
+            ask(vec![DeckXf::IDENTITY], "cell_info seq=6 cell=2"),
+            format!("cell_info seq=6 src=0 cell=2 found=1 name_hex={} height=2 children=1 unit=1000 rbbox=0,0,1000,1000 is_root=1 insts=1 placements=1 approx=0 span=0,0,1000,1000 at=- abox=-", wire_hex("T"))
+        );
+        assert!(ask(vec![DeckXf::IDENTITY], "cell_info seq=7 cell=0 root=1")
+            .ends_with("insts=1 placements=1 approx=0 span=5,7,9,17 at=5,7,1,1 abox=5,7,9,17"));
+        // a deck source placed once, scaled: the origin and the box move
+        let deck = DeckXf { scale: 2.0, dx: 1000.0, dy: -50.0 };
+        assert!(ask(vec![deck], "cell_info seq=8 cell=0")
+            .ends_with("insts=1 placements=1 approx=0 span=1182,316,1190,336 at=1190,336,3,1 abox=1182,316,1190,336"));
+        // placed twice: the span holds both, no one placement
+        let again = DeckXf { scale: 1.0, dx: 5000.0, dy: 0.0 };
+        assert!(ask(vec![DeckXf::IDENTITY, again], "cell_info seq=9 cell=0")
+            .ends_with("insts=1 placements=2 approx=0 span=91,183,5095,193 at=- abox=-"));
+        // a cell out of the table is the query's refusal
+        assert!(ask(vec![DeckXf::IDENTITY], "cell_info seq=10 cell=9")
+            .starts_with("cell_info seq=10 found=0 code=query"));
     }
 
     #[test]

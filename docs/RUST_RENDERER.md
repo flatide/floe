@@ -117,12 +117,13 @@ cells seq=31 src=0 cell=17
 cell_find seq=32 src=-1 pat_hex=2a696e763f limit=2000
 cell_bbox seq=33 src=0 cell=9
 cell_insts seq=34 src=0 cell=9 view=0,0,404000,447000 cap=4096
+cell_info seq=35 src=0 cell=9 root=17
 cancel before_gen=11
 info
 quit
 ```
 
-`root=<cell index>` on `render`, `clip`, `cell_bbox` and `cell_insts` is the
+`root=<cell index>` on `render`, `clip`, `cell_bbox`, `cell_insts` and `cell_info` is the
 view root (docs/SPEC-VIEWER.ko.md §8c): the plan starts from that cell in ITS
 coordinates (depth counted from it; the published pick/snap scene, the frame's
 retained state and the fit memory are per root); absent = the top cell. A root
@@ -130,7 +131,7 @@ outside the cell table is an error; a jobdeck refuses a root (its sources' tops
 are its cells). Under a root the occupancy summary (a flattening of the top) is
 not used.
 
-The five `cell_*` commands are the viewer's cell tree (docs/SPEC-VIEWER.ko.md
+The six `cell_*` commands are the viewer's cell tree (docs/SPEC-VIEWER.ko.md
 §8c). They run on the daemon's own hier thread over the hierarchy summary
 `design.ovh` (docs/SPEC-FORMATS.ko.md) and never touch the render or the
 pick/snap thread. Every answer repeats the kind and `seq`; a failure is
@@ -142,11 +143,28 @@ searches every source). Answers:
 
 ```text
 cell_sources seq=30 found=1 n=<sources> sources=<src>:<placements>:<path_hex>,...
-cells seq=31 src=0 found=1 cell=17 name_hex=<hex> insts=<under the top> height=<levels> unit=<source dbu> bbox=<rbbox|-> n=<rows> total=<distinct children> children=<ci>:<members>:<leaf 0|1>:<name_hex>,...   (cell omitted = the source's top; rows by name, at most 20,000)
+cells seq=31 src=0 found=1 cell=17 name_hex=<hex> insts=<under the top> height=<levels> unit=<source units per micron> bbox=<rbbox|-> n=<rows> total=<distinct children> children=<ci>:<members>:<leaf 0|1>:<name_hex>,...   (cell omitted = the source's top; rows by name, at most 20,000)
 cell_find seq=32 src=-1 found=1 total=<matches> n=<rows> matches=<src>:<ci>:<insts>:<name_hex>,...   (substring, or a whole-name glob with * ?, case-insensitively; rows by name, at most limit <= 5,000)
 cell_bbox seq=33 src=0 cell=9 found=1 insts=<n> approx=<0|1> bbox=<x0,y0,x1,y1|->   (view coordinates: the deck's dbu for a deck; approx=1 = the extent of the top-level placements holding the cell)
 cell_insts seq=34 src=0 cell=9 found=1 n=<rows> more=<0|1> visited=<walk cost> boxes=<x0,y0,x1,y1>;...   (instance boxes meeting the view, at most cap <= 4,096 and a 2,000,000-visit walk budget; more=1 = partial)
+cell_info seq=35 src=0 cell=9 found=1 name_hex=<hex> height=<levels below> children=<distinct> unit=<source units per micron> rbbox=<own box in its coordinates|-> is_root=<0|1> insts=<under the root, in the source> placements=<the source's placements> approx=<0|1> span=<x0,y0,x1,y1|-> at=<x,y,rot,flip|-> abox=<x0,y0,x1,y1|->
 ```
+
+`cell_info` (2026-10-15) is what the viewer's status line says of the selected
+cell (app-core `view::cell_info` words it): `span` is the exact union of the
+instances' boxes in view coordinates - for a cell the root places directly
+(and only there) the summary's extent, which is that union already; for a
+deeper cell a walk pruned by the summary's reach counts them all within a
+2,000,000-visit budget (`CELL_INFO_BUDGET`); past it, or when the count
+disagrees, `span` and `approx` are `cell_bbox`'s (the holding blocks' extent,
+`approx=1`).
+`at` is the one instance's composed placement when the view holds the cell
+exactly once (insts x placements = 1): its origin (view coordinates), quarter
+turns counterclockwise `rot` 0..3 and `flip` = mirrored about the x axis before
+the rotation (GDS/OASIS order); `abox` its box. A deck's source placements
+(`scale·p + (dx, dy)`) move `span`, `at` and `abox` into deck dbu. A cell
+without shapes has nothing to walk to: its count, `span=-`, `at=-`.
+`is_root=1` is the cell the walk starts from (the top, the view root).
 
 `font_px` is an integer screen-pixel size in `6..96`. The Python Rust worker
 passes it on every render request, so `View > label size... (Rust renderer)` or

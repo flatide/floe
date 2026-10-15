@@ -94,6 +94,7 @@ pub(crate) fn parse_line(bytes: &[u8]) -> Result<Line> {
             | "cell_find"
             | "cell_bbox"
             | "cell_insts"
+            | "cell_info"
     ) {
         return Err(Error::protocol(format!("unexpected response kind {kind}")));
     }

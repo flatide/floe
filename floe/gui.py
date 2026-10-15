@@ -2379,7 +2379,12 @@ class Viewer:
         self._cell_hl_key = None
         self._cell_find_seq = None
         self._cell_insts_seq = None
-        self._cell_bbox_seq = None
+        self._cell_info_seq = None
+        # the selected cell's status line (user 2026-10-15): its facts as
+        # the service words them (cell_info) and its instances in the view
+        # (the highlight's) - kept beside the cursor's coordinates
+        self._cell_sel_text = ""
+        self._cell_view_text = ""
         self._cell_search_timer = None
         self._cell_mode = "tree"
         self._cell_nohier = set()
@@ -7197,6 +7202,8 @@ class Viewer:
         self._cell_pending = {}
         self._cell_sources = None
         self._cell_sel = None
+        self._cell_sel_text = ""
+        self._cell_view_text = ""
         self._cell_hl = None
         self._cell_hl_key = None
         self._cell_nohier = set()
@@ -7308,19 +7315,23 @@ class Viewer:
         elif kind == "cell_bbox":
             if what == "zoom":
                 self._cell_frame(res)
-            elif res["seq"] == self._cell_bbox_seq:
-                w._info.set_text(self._cell_info_text(res))
+        elif kind == "cell_info":
+            if res["seq"] != self._cell_info_seq:
+                return
+            w._info.set_text(self._cell_info_text(res))
+            self._cell_sel_text = res.get("text") or ""
+            if ref:   # the selection asked; a root change says its own
+                self._cell_status()
         elif kind == "cell_insts":
             if res["seq"] != self._cell_insts_seq:
                 return
             self._cell_hl = {"src": res["src"], "cell": res["cell"],
                              "boxes": res["boxes"], "more": res["more"],
                              "key": ref}
-            name = self._cell_sel[2] if self._cell_sel else "cell"
-            n = len(res["boxes"])
-            self._set_live_status("%s: %s instance%s in view%s" % (
-                name, fmt_count(n), "" if n == 1 else "s",
-                " (more - zoom in)" if res["more"] else ""))
+            # exact, with separators, as the facts before it count
+            self._cell_view_text = "{:,} in view{}".format(
+                len(res["boxes"]), " (more - zoom in)" if res["more"] else "")
+            self._cell_status()
             self._display()
 
     def _cell_fill(self, what, ref, res):
@@ -7391,8 +7402,10 @@ class Viewer:
         return False
 
     def _on_cell_select(self, sel):
-        """A cell row (tree or results): remember it, show its instance
-        count and extent, highlight its instances in the view."""
+        """A cell row (tree or results): remember it, say its facts on the
+        status line (user 2026-10-15: "셀 트리에서 셀을 선택하면 셀의
+        관련정보(좌표등)을 상태줄에 표시해줘") and its instance count and
+        extent in the panel, highlight its instances in the view."""
         model, it = sel.get_selected()
         w = self._cellwin
         if it is None or w is None:
@@ -7403,11 +7416,42 @@ class Viewer:
         if model is w._store and model[it][5] not in ("cell", "source"):
             return
         self._cell_sel = (src, ci, model[it][0])
-        self._cell_bbox_seq = self._cell_query(
-            "cell_bbox", {"src": src, "cell": ci, "root": self._root_ci()},
-            ("info", None, src))
+        self._cell_sel_text = ""
+        self._cell_view_text = ""
+        self._cell_status()   # the name until the facts come
+        self._cell_info_query(announce=True)
         self._cell_hl_key = None
         self._cell_hl_query()
+
+    def _cell_info_query(self, announce=True):
+        """Ask for the selected cell's facts under the view root (renderd
+        `cell_info`, worded by app-core view::cell_info): the panel's info
+        line and the status line - said at once when `announce`, else kept
+        for the cursor's line (a view root change says its own)."""
+        if getattr(self, "_cell_sel", None) is None:
+            return
+        src, ci, _name = self._cell_sel
+        self._cell_info_seq = self._cell_query(
+            "cell_info", {"src": src, "cell": ci, "root": self._root_ci()},
+            ("info", announce, src))
+
+    def _cell_status_text(self):
+        """The selected cell's part of the status line: its facts, then
+        its instances in the view; empty without a selected cell."""
+        sel = getattr(self, "_cell_sel", None)
+        if sel is None:
+            return ""
+        parts = [getattr(self, "_cell_sel_text", "") or sel[2]]
+        if getattr(self, "_cell_view_text", ""):
+            parts.append(self._cell_view_text)
+        return " · ".join(parts)
+
+    def _cell_status(self):
+        """Say the selected cell on the status line (the cursor's next
+        move puts its coordinates in front)."""
+        text = self._cell_status_text()
+        if text:
+            self._set_live_status(text)
 
     def _on_cell_activate(self, tree, path, _col):
         """Double-click / Enter on a cell row: draw that cell as the view
@@ -7586,7 +7630,11 @@ class Viewer:
         if dstatus is not None:
             dstatus.set_text(self._depth_label())
         self.fit()
-        # the highlight follows the selected cell into the new coordinates
+        # the selected cell's facts and highlight follow it into the new
+        # coordinates
+        self._cell_sel_text = ""
+        self._cell_view_text = ""
+        self._cell_info_query(announce=False)
         self._cell_hl_query()
 
     def _depth_label_for_root(self):
@@ -7629,6 +7677,7 @@ class Viewer:
         if not on:
             self._cell_hl = None
             self._cell_hl_key = None
+            self._cell_view_text = ""
             self._display()
         else:
             self._cell_hl_query()
@@ -7638,19 +7687,26 @@ class Viewer:
         if not self._cell_hl_on:
             self._cell_hl = None
             self._cell_hl_key = None
+            self._cell_view_text = ""
             self._display()
         else:
             self._cell_hl_query()
 
     def _cell_hl_clear(self, display=True):
         """Esc / menu: drop the highlight and the tree selection it
-        follows (the switch stays as it is)."""
+        follows (the switch stays as it is), and the selected cell's
+        status line."""
+        selected = self._cell_sel is not None
         self._cell_hl = None
         self._cell_hl_key = None
         self._cell_sel = None
+        self._cell_sel_text = ""
+        self._cell_view_text = ""
         w = self._cellwin
         if w is not None:
             w._tree.get_selection().unselect_all()
+        if selected:
+            self._set_live_status("cell selection cleared")
         if display:
             self._display()
 
@@ -11072,8 +11128,13 @@ class Viewer:
                 self._display()   # live box preview
             else:
                 parts.append("error select: click the 1st corner")
-        elif self._sel_text:
-            parts.append(self._sel_text)
+        else:
+            if self._sel_text:
+                parts.append(self._sel_text)
+            # the cell selected in the cell tree stays on the line
+            cell = self._cell_status_text()
+            if cell:
+                parts.append(cell)
         text = "   |   ".join(parts)
         self._set_live_status(text)
 
@@ -11203,8 +11264,9 @@ class Viewer:
             self._drc_ruler = []
         elif self.selection is not None:
             self._clear_selection()
-        elif self._cell_hl is not None:
-            # the cell tree's highlight (and the selection it follows)
+        elif self._cell_hl is not None or self._cell_sel is not None:
+            # the cell tree's highlight and the selection it follows (its
+            # status line goes with it, the highlight on or off)
             self._cell_hl_clear(display=False)
         elif self._drc_sel is not None:
             self._drc_set_sel(None)

@@ -1320,9 +1320,10 @@ def db_name_of(path):
 # --- the view channel (P4c, docs/SHARED_APP_LAYER.ko.md §7): a source
 # drawn through the shared Rust ViewController
 
-# the cell tree's questions (view_cells kinds)
+# the cell tree's questions (view_cells kinds); cell_info's answer carries
+# the selected cell's status line (`text`, app-core view::cell_info)
 CELL_QUERY_KINDS = ("cell_sources", "cells", "cell_find", "cell_bbox",
-                    "cell_insts")
+                    "cell_insts", "cell_info")
 
 RAW_SIGNATURE = b"FLOERAW1"
 RAW_HEADER_LEN = 16
@@ -1397,7 +1398,8 @@ class ViewSession:
     def cells(self, kind, seq, **fields):
         """A cell-tree question (cell_sources, cells, cell_find, cell_bbox,
         cell_insts - floe_oracle/rust_render.py's fields; cell_insts' view box is
-        `box`); the answer is a ("cells", result) event with `seq`."""
+        `box` -, cell_info: a cell's facts and their status line `text`); the
+        answer is a ("cells", result) event with `seq`."""
         self._svc.request("view_cells", view=self.view, kind=kind,
                           seq=int(seq), **fields)
 

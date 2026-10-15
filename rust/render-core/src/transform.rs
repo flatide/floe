@@ -115,6 +115,22 @@ impl OrthoTransform {
         })
     }
 
+    /// The placement this transform is: `place(x, y, rot, flip)`'s
+    /// arguments - the origin, quarter turns counterclockwise, and whether
+    /// the x axis is mirrored before the rotation (the GDS/OASIS order).
+    pub fn parts(&self) -> (i64, i64, u8, bool) {
+        let m = self.matrix;
+        let det = i32::from(m[0][0]) * i32::from(m[1][1]) - i32::from(m[0][1]) * i32::from(m[1][0]);
+        // place()'s first column is (cos, sin), mirrored or not
+        let rot = match (m[0][0], m[1][0]) {
+            (1, 0) => 0,
+            (0, 1) => 1,
+            (-1, 0) => 2,
+            _ => 3,
+        };
+        (self.translation.0, self.translation.1, rot, det < 0)
+    }
+
     pub fn apply_bbox(&self, bbox: BBox) -> Result<BBox, String> {
         if bbox.is_empty() {
             return Ok(BBox::EMPTY);
@@ -166,6 +182,32 @@ mod tests {
                 assert_eq!(inverse.apply(point.0, point.1).unwrap(), (91, -37));
             }
         }
+    }
+
+    #[test]
+    fn parts_are_the_placement_that_makes_the_transform() {
+        for rot in 0..4 {
+            for flip in [false, true] {
+                let t = OrthoTransform::place(-17, 23, rot, flip).unwrap();
+                assert_eq!(t.parts(), (-17, 23, rot, flip));
+                // a composed transform is a placement too: the one its
+                // parts make maps every point the same way
+                for inner_rot in 0..4 {
+                    for inner_flip in [false, true] {
+                        let inner = OrthoTransform::place(5, -7, inner_rot, inner_flip).unwrap();
+                        let both = t.compose(&inner).unwrap();
+                        let (x, y, r, f) = both.parts();
+                        let again = OrthoTransform::place(x, y, r, f).unwrap();
+                        assert_eq!(again, both, "{rot} {flip} then {inner_rot} {inner_flip}");
+                        assert_eq!(f, flip != inner_flip);
+                    }
+                }
+            }
+        }
+        // R180 over (R90 after a mirror) = R270 after a mirror
+        let outer = OrthoTransform::place(100, 200, 2, false).unwrap();
+        let inner = OrthoTransform::place(5, 7, 1, true).unwrap();
+        assert_eq!(outer.compose(&inner).unwrap().parts(), (95, 193, 3, true));
     }
 
     /// fast_arith: a row in i64 adds is the i128 sum, value for value - and an

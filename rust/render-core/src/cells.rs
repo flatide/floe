@@ -432,6 +432,37 @@ struct Walk<'a> {
     /// cell's BVH is walked, so a whole-chip view of a cell placed in
     /// six blocks visits those blocks' leaves and no other
     reach: std::collections::HashMap<u32, BBox>,
+    /// each instance's box goes to `out` (the in-view walk), or only into
+    /// `union` (`info`'s span; no cap)
+    keep_boxes: bool,
+    union: BBox,
+    /// target instances met
+    found: u64,
+    /// the first `xf_cap` instances' transforms (top coordinates)
+    xf_cap: usize,
+    xfs: Vec<OrthoTransform>,
+}
+
+impl<'a> Walk<'a> {
+    fn new(ovm: &'a Ovm, summary: &'a HierSummary, inset: &'a [bool], target: u32, cap: usize, budget: u64) -> Self {
+        Walk {
+            ovm,
+            summary,
+            inset,
+            target,
+            cap,
+            budget,
+            visited: 0,
+            out: Vec::new(),
+            more: false,
+            reach: std::collections::HashMap::new(),
+            keep_boxes: true,
+            union: BBox::EMPTY,
+            found: 0,
+            xf_cap: 0,
+            xfs: Vec::new(),
+        }
+    }
 }
 
 fn floor_div(a: i128, b: i128) -> i128 {
@@ -510,7 +541,17 @@ impl Walk<'_> {
             return Ok(true);
         }
         if head.child == self.target {
-            self.out.push(outer.apply_bbox(mbox)?);
+            let placed = outer.apply_bbox(mbox)?;
+            self.found += 1;
+            if self.xfs.len() < self.xf_cap {
+                let xf = OrthoTransform::place(head.x.saturating_add(ox), head.y.saturating_add(oy), head.rot, head.flip)?;
+                self.xfs.push(outer.compose(&xf)?);
+            }
+            if !self.keep_boxes {
+                self.union.grow(&placed);
+                return Ok(true);
+            }
+            self.out.push(placed);
             if self.out.len() >= self.cap {
                 self.more = true;
                 return Ok(false);
@@ -679,24 +720,114 @@ pub fn instances(
     if !inset.get(root as usize).copied().unwrap_or(false) {
         return Ok(Instances { boxes: Vec::new(), more: false, visited: 0 });
     }
-    let mut walk = Walk {
-        ovm,
-        summary: &s,
-        inset: &inset,
-        target: cell,
-        cap,
-        budget,
-        visited: 0,
-        out: Vec::new(),
-        more: false,
-        reach: std::collections::HashMap::new(),
-    };
+    let mut walk = Walk::new(ovm, &s, &inset, cell, cap, budget);
     walk.walk(root, &OrthoTransform::identity(), &view)?;
     Ok(Instances {
         boxes: walk.out,
         more: walk.more,
         visited: walk.visited,
     })
+}
+
+/// What the status line says of a cell (SPEC-VIEWER §8c; user 2026-10-15:
+/// "셀 트리에서 셀을 선택하면 셀의 관련정보(좌표등)을 상태줄에 표시해줘").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CellInfo {
+    pub cell: u32,
+    pub name: String,
+    /// levels below the cell
+    pub height: u32,
+    /// distinct children
+    pub children: usize,
+    /// the cell's recursive bbox in its own coordinates; None = no shapes
+    pub rbbox: Option<BBox>,
+    /// the cell is the root the query walked from (the top or a view root)
+    pub is_root: bool,
+    /// instances under the root
+    pub insts: u64,
+    /// where they lie (root coordinates): the union of their boxes when a
+    /// walk met every one of them within its budget, else CellExtent's box
+    /// and `approx`
+    pub span: Option<BBox>,
+    pub approx: bool,
+    /// the instance, when the root holds the cell once
+    pub placement: Option<CellPlacement>,
+}
+
+/// One instance of a cell, in the root's coordinates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CellPlacement {
+    /// the cell's origin
+    pub x: i64,
+    pub y: i64,
+    /// quarter turns counterclockwise
+    pub rot: u8,
+    /// mirrored about the x axis before the rotation (GDS/OASIS order)
+    pub flip: bool,
+    /// the instance's box
+    pub bbox: BBox,
+}
+
+/// A view that holds every coordinate a walk can reach: each cell cuts it
+/// to where its instances of the target lie before anything is transformed.
+const EVERYWHERE: BBox = BBox {
+    x0: i64::MIN / 4,
+    y0: i64::MIN / 4,
+    x1: i64::MAX / 4,
+    y1: i64::MAX / 4,
+};
+
+/// A cell's facts under `root` (None = the top): its own extent and
+/// children, how many instances the root holds and where - the summary's
+/// extent for a cell the root places directly, else a walk of at most
+/// `budget` visits counts them all for the exact span (past it, the
+/// summary's extent stands); for one instance the walk gives its placement.
+/// A cell without shapes has no box to walk to: its count and no place.
+pub fn info(h: &HierHandle, root: Option<u32>, cell: u32, budget: u64) -> Result<CellInfo, HierError> {
+    let s = h.summary()?;
+    let ovm = h.ovm();
+    let root_ci = root_of(ovm, root)?;
+    if cell >= ovm.n_cells {
+        return Err(HierError::Other(format!("cell index {} out of range 0..{}", cell, ovm.n_cells)));
+    }
+    let record = ovm.cell(cell);
+    let rbbox = ovm.cell_rbbox(cell);
+    let extent = extent(h, root, cell)?;
+    let mut out = CellInfo {
+        cell,
+        name: record.name,
+        height: record.height,
+        children: s.children(cell).count(),
+        rbbox: (!rbbox.is_empty()).then_some(rbbox),
+        is_root: cell == root_ci,
+        insts: extent.insts,
+        span: extent.bbox,
+        approx: extent.approx,
+        placement: None,
+    };
+    // a cell the root places directly (and only there) has its exact extent
+    // in the summary already, the union of its records'; the walk is for a
+    // cell deeper down and for the one instance's placement
+    if out.is_root || out.insts == 0 || rbbox.is_empty() || (!out.approx && out.insts > 1) {
+        return Ok(out);
+    }
+    let inset = s.ancestors(cell);
+    let mut walk = Walk::new(ovm, &s, &inset, cell, usize::MAX, budget);
+    walk.keep_boxes = false;
+    walk.xf_cap = 1;
+    walk.walk(root_ci, &OrthoTransform::identity(), &EVERYWHERE)?;
+    if walk.more || walk.found != out.insts || walk.union.is_empty() {
+        return Ok(out);
+    }
+    out.span = Some(walk.union);
+    out.approx = false;
+    if out.insts == 1 {
+        if let Some(xf) = walk.xfs.first() {
+            let (x, y, rot, flip) = xf.parts();
+            out.placement = Some(CellPlacement { x, y, rot, flip, bbox: walk.union });
+        }
+    }
+    Ok(out)
 }
 
 /// A jobdeck placement of a source: `p -> scale * p + (dx, dy)`, deck dbu.
@@ -906,6 +1037,58 @@ mod tests {
         assert!(extent(&h, Some(2), 0).unwrap().approx);
         assert_eq!(extent(&h, None, 0).unwrap().insts, 30);
         assert!(root_of(h.ovm(), Some(99)).is_err());
+    }
+
+    #[test]
+    fn info_says_where_the_root_holds_a_cell_and_how_it_is_placed() {
+        let h = handle(sample());
+        // the top: the root itself, its own box
+        let top = info(&h, None, 4, 1_000_000).unwrap();
+        assert_eq!((top.name.as_str(), top.is_root, top.insts, top.children, top.height), ("TOP", true, 1, 3, 2));
+        assert_eq!((top.span, top.approx, top.placement), (Some(b(0, 0, 1000, 1000)), false, None));
+        // MID: twice, directly - the exact span, no one placement
+        let mid = info(&h, None, 2, 1_000_000).unwrap();
+        assert_eq!((mid.insts, mid.span, mid.approx, mid.placement), (2, Some(b(0, 0, 500, 200)), false, None));
+        assert_eq!((mid.rbbox, mid.children, mid.height, mid.is_root), (Some(b(0, 0, 100, 100)), 1, 1, false));
+        // LEAF: 17 instances through both MIDs and the pts repetition - the
+        // walk's union, where the summary had only the MIDs' extent
+        let leaf = info(&h, None, 0, 1_000_000).unwrap();
+        assert_eq!(extent(&h, None, 0).unwrap().bbox, Some(b(0, 0, 860, 850)));
+        assert_eq!((leaf.insts, leaf.span, leaf.approx), (17, Some(b(5, 5, 860, 850)), false));
+        assert_eq!((leaf.children, leaf.height, leaf.rbbox), (0, 0, Some(b(0, 0, 10, 4))));
+        // past the budget the summary's extent stands, approximate
+        let starved = info(&h, None, 0, 2).unwrap();
+        assert_eq!((starved.insts, starved.span, starved.approx), (17, Some(b(0, 0, 860, 850)), true));
+        // a shapeless cell: counted, nowhere to walk to; an unplaced one
+        let empty = info(&h, None, 1, 1_000_000).unwrap();
+        assert_eq!((empty.insts, empty.rbbox, empty.span, empty.placement), (1, None, None, None));
+        let orphan = info(&h, None, 3, 1_000_000).unwrap();
+        assert_eq!((orphan.insts, orphan.span, orphan.placement), (0, None, None));
+        // under MID as the view root: LEAF seven times in MID's coordinates
+        let under = info(&h, Some(2), 0, 1_000_000).unwrap();
+        assert_eq!((under.insts, under.span, under.approx), (7, Some(b(5, 5, 60, 74)), false));
+        assert!(info(&h, None, 99, 10).is_err());
+        // one instance two levels down: its origin and orientation are the
+        // composed placement's - C turns X 90 degrees after a mirror at
+        // (5, 7), T turns C 180 degrees at (100, 200)
+        let ovm = build(
+            &[
+                FCell { name: "X", shape: shape(0, 0, 10, 4), places: vec![] },
+                FCell { name: "C", shape: shape(0, 0, 50, 50), places: vec![(0, 5, 7, 1, true, Rep::One)] },
+                FCell { name: "T", shape: shape(0, 0, 1000, 1000), places: vec![(1, 100, 200, 2, false, Rep::One)] },
+            ],
+            2,
+        );
+        let h = handle(ovm);
+        let x = info(&h, None, 0, 1_000_000).unwrap();
+        assert_eq!((x.insts, x.approx, x.span), (1, false, Some(b(91, 183, 95, 193))));
+        assert_eq!(x.placement, Some(CellPlacement { x: 95, y: 193, rot: 3, flip: true, bbox: b(91, 183, 95, 193) }));
+        // C as the root: X's placement in C
+        let in_c = info(&h, Some(1), 0, 1_000_000).unwrap();
+        assert_eq!(in_c.placement, Some(CellPlacement { x: 5, y: 7, rot: 1, flip: true, bbox: b(5, 7, 9, 17) }));
+        // C itself under T: placed once, turned
+        let c = info(&h, None, 1, 1_000_000).unwrap();
+        assert_eq!(c.placement, Some(CellPlacement { x: 100, y: 200, rot: 2, flip: false, bbox: b(50, 150, 100, 200) }));
     }
 
     #[test]

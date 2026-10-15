@@ -12,8 +12,9 @@ mod files;
 mod protocol;
 mod query;
 pub use cells::{
-    CellChild, CellFailure, CellFailureCode, CellMatch, CellOutcome, CellReply, CellRequest,
-    CellSource, CELLS_CHILD_CAP, CELL_FIND_CAP, CELL_INSTS_CAP, CELL_PATTERN_BYTES,
+    CellChild, CellFailure, CellFailureCode, CellInfo, CellMatch, CellOutcome, CellPlacement,
+    CellReply, CellRequest, CellSource, CELLS_CHILD_CAP, CELL_FIND_CAP, CELL_INSTS_CAP,
+    CELL_PATTERN_BYTES,
 };
 pub use clip::{ClipArtifact, ClipRequest};
 use files::{wire_path, Workspace};
@@ -901,7 +902,7 @@ impl WorkerClient {
             }));
         }
         match line.kind.as_str() {
-            "cell_sources" | "cells" | "cell_find" | "cell_bbox" | "cell_insts" => {
+            "cell_sources" | "cells" | "cell_find" | "cell_bbox" | "cell_insts" | "cell_info" => {
                 let sequence = f.u64("seq")?;
                 let pending = self
                     .cells

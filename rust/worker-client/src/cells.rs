@@ -41,6 +41,14 @@ pub enum CellRequest {
         cap: usize,
         root: Option<u32>,
     },
+    /// `cell_info`: what the status line says of a cell under `root` (None =
+    /// the top) - its size, children, instances, their span, the one
+    /// instance's placement.
+    Info {
+        source: usize,
+        cell: u32,
+        root: Option<u32>,
+    },
 }
 impl CellRequest {
     pub fn kind(&self) -> &'static str {
@@ -50,11 +58,12 @@ impl CellRequest {
             Self::Find { .. } => "cell_find",
             Self::Bbox { .. } => "cell_bbox",
             Self::Insts { .. } => "cell_insts",
+            Self::Info { .. } => "cell_info",
         }
     }
     pub fn root(&self) -> Option<u32> {
         match self {
-            Self::Bbox { root, .. } | Self::Insts { root, .. } => *root,
+            Self::Bbox { root, .. } | Self::Insts { root, .. } | Self::Info { root, .. } => *root,
             _ => None,
         }
     }
@@ -130,6 +139,16 @@ impl CellRequest {
                 }
                 c
             }
+            Self::Info { source, cell, root } => {
+                let mut c = format!(
+                    "cell_info seq={sequence} src={} cell={cell}",
+                    source_index(*source)?
+                );
+                if let Some(root) = root {
+                    write!(c, " root={root}").unwrap();
+                }
+                c
+            }
         };
         if command.len() > MAX_LINE_BYTES {
             return Err(Error::input("cell command exceeds limit"));
@@ -160,6 +179,49 @@ pub struct CellMatch {
     pub insts: u64,
     pub name: String,
 }
+/// One instance of a cell (`cell_info`, the view's coordinates).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CellPlacement {
+    /// The cell's origin.
+    pub x: f64,
+    pub y: f64,
+    /// Quarter turns counterclockwise.
+    pub rot: u8,
+    /// Mirrored about the x axis before the rotation (GDS/OASIS order).
+    pub flip: bool,
+    /// The instance's box.
+    pub bbox: [f64; 4],
+}
+/// What renderd says of a cell for the status line (`cell_info`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CellInfo {
+    pub source: usize,
+    pub cell: u32,
+    /// The root asked about (None = the source's top).
+    pub root: Option<u32>,
+    pub name: String,
+    /// Levels below the cell.
+    pub height: u64,
+    /// Distinct children.
+    pub children: u64,
+    /// The source's database units per micron (OASIS's unit, 1 / its dbu):
+    /// `rbbox` / `unit` is microns.
+    pub unit: f64,
+    /// The cell's own extent (its coordinates); None = no shapes.
+    pub rbbox: Option<[f64; 4]>,
+    /// The cell is the root the daemon walked from (the top, a view root).
+    pub is_root: bool,
+    /// Instances under the root, in the source.
+    pub insts: u64,
+    /// The source's placements in the view (a layout: 1).
+    pub placements: u64,
+    /// Where the instances lie (view coordinates): their boxes' union, or -
+    /// `approx` - the extent of the top-level placements holding the cell.
+    pub span: Option<[f64; 4]>,
+    pub approx: bool,
+    /// The instance, when the view holds the cell once.
+    pub at: Option<CellPlacement>,
+}
 #[derive(Clone, Debug, PartialEq)]
 pub enum CellReply {
     Sources(Vec<CellSource>),
@@ -170,7 +232,8 @@ pub enum CellReply {
         /// Instances under the top (or the root the daemon walked from).
         insts: u64,
         height: u64,
-        /// The source's DBU in micrometres (a deck: the deck unit).
+        /// The source's database units per micron (OASIS's unit, 1 / its
+        /// dbu) - a deck's source's own.
         unit: f64,
         /// Recursive extent; None = the cell holds no shapes.
         bbox: Option<[f64; 4]>,
@@ -198,6 +261,7 @@ pub enum CellReply {
         visited: u64,
         boxes: Vec<[f64; 4]>,
     },
+    Info(CellInfo),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CellFailureCode {
@@ -244,7 +308,7 @@ pub type CellOutcome = std::result::Result<CellReply, CellFailure>;
 pub(crate) fn is_cell_kind(kind: &str) -> bool {
     matches!(
         kind,
-        "cell_sources" | "cells" | "cell_find" | "cell_bbox" | "cell_insts"
+        "cell_sources" | "cells" | "cell_find" | "cell_bbox" | "cell_insts" | "cell_info"
     )
 }
 
@@ -457,6 +521,61 @@ pub(crate) fn parse_reply(kind: &str, f: &Fields, request: &CellRequest) -> Resu
                 visited: counter(f.required("visited")?)?,
                 boxes,
             }
+        }
+        CellRequest::Info { source, cell, root } => {
+            let src = source_field(*source)?;
+            if cell_index(f.required("cell")?)? != *cell {
+                return Err(Error::protocol("cell reply cell mismatch"));
+            }
+            let unit = float(f.required("unit")?)?;
+            if unit <= 0. {
+                return Err(Error::protocol("invalid cell unit"));
+            }
+            let at = match (f.required("at")?, optional_box(f.required("abox")?)?) {
+                ("-", None) => None,
+                (at, Some(bbox)) if at != "-" => {
+                    let parts: Vec<&str> = at.split(',').collect();
+                    let &[x, y, rot, flip] = parts.as_slice() else {
+                        return Err(Error::protocol("invalid cell placement"));
+                    };
+                    let rot = match rot {
+                        "0" => 0,
+                        "1" => 1,
+                        "2" => 2,
+                        "3" => 3,
+                        _ => return Err(Error::protocol("invalid cell rotation")),
+                    };
+                    let flip = match flip {
+                        "0" => false,
+                        "1" => true,
+                        _ => return Err(Error::protocol("invalid cell mirror flag")),
+                    };
+                    Some(CellPlacement {
+                        x: float(x)?,
+                        y: float(y)?,
+                        rot,
+                        flip,
+                        bbox,
+                    })
+                }
+                _ => return Err(Error::protocol("cell placement without its box")),
+            };
+            CellReply::Info(CellInfo {
+                source: src,
+                cell: *cell,
+                root: *root,
+                name: unhex(f.required("name_hex")?)?,
+                height: counter(f.required("height")?)?,
+                children: counter(f.required("children")?)?,
+                unit,
+                rbbox: optional_box(f.required("rbbox")?)?,
+                is_root: f.flag("is_root")?,
+                insts: counter(f.required("insts")?)?,
+                placements: counter(f.required("placements")?)?,
+                span: optional_box(f.required("span")?)?,
+                approx: f.flag("approx")?,
+                at,
+            })
         }
     };
     Ok(Ok(reply))
@@ -829,6 +948,85 @@ mod tests {
             &insts
         )
         .is_err());
+    }
+    #[test]
+    fn info_carries_the_cells_facts_and_its_one_placement() {
+        let info = CellRequest::Info {
+            source: 0,
+            cell: 9,
+            root: Some(4),
+        };
+        assert_eq!(info.kind(), "cell_info");
+        assert_eq!(info.root(), Some(4));
+        assert_eq!(info.command(6).unwrap(), "cell_info seq=6 src=0 cell=9 root=4");
+        assert_eq!(
+            CellRequest::Info { source: 1, cell: 2, root: None }.command(7).unwrap(),
+            "cell_info seq=7 src=1 cell=2"
+        );
+        let head = "cell_info seq=6 src=0 cell=9 found=1 name_hex=41 height=2 children=3 unit=1000 rbbox=0,0,10,4";
+        let once = reply(
+            &format!("{head} is_root=0 insts=1 placements=1 approx=0 span=91,183,95,193 at=95.5,193,3,1 abox=91,183,95,193"),
+            &info,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            once,
+            CellReply::Info(CellInfo {
+                source: 0,
+                cell: 9,
+                root: Some(4),
+                name: "A".into(),
+                height: 2,
+                children: 3,
+                unit: 1000.,
+                rbbox: Some([0., 0., 10., 4.]),
+                is_root: false,
+                insts: 1,
+                placements: 1,
+                span: Some([91., 183., 95., 193.]),
+                approx: false,
+                at: Some(CellPlacement {
+                    x: 95.5,
+                    y: 193.,
+                    rot: 3,
+                    flip: true,
+                    bbox: [91., 183., 95., 193.]
+                }),
+            })
+        );
+        // many instances, approximately placed; a shapeless cell
+        let many = reply(
+            &format!("{head} is_root=0 insts=17 placements=2 approx=1 span=0,0,860,850 at=- abox=-"),
+            &info,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(matches!(many, CellReply::Info(CellInfo { insts: 17, placements: 2, approx: true, at: None, .. })));
+        let empty = reply(
+            "cell_info seq=6 src=0 cell=9 found=1 name_hex=41 height=0 children=0 unit=1000 rbbox=- is_root=0 insts=1 placements=1 approx=0 span=- at=- abox=-",
+            &info,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(matches!(empty, CellReply::Info(CellInfo { rbbox: None, span: None, at: None, .. })));
+        // a placement needs its box and four fields; rotations are 0..3
+        for bad in [
+            "at=95,193,3,1 abox=-",
+            "at=- abox=91,183,95,193",
+            "at=95,193,3 abox=91,183,95,193",
+            "at=95,193,4,1 abox=91,183,95,193",
+            "at=95,193,1,2 abox=91,183,95,193",
+            "at=x,193,1,0 abox=91,183,95,193",
+        ] {
+            assert!(
+                reply(&format!("{head} is_root=0 insts=1 placements=1 approx=0 span=91,183,95,193 {bad}"), &info).is_err(),
+                "{bad}"
+            );
+        }
+        // another cell's answer, a missing field
+        assert!(reply(&format!("{head} is_root=0 insts=1 placements=1 approx=0 span=- at=- abox=-").replace("cell=9", "cell=8"), &info).is_err());
+        assert!(reply(&format!("{head} is_root=0 insts=1 approx=0 span=- at=- abox=-"), &info).is_err());
     }
     #[test]
     fn refusals_carry_their_code_and_decoded_message() {

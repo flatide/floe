@@ -30,6 +30,11 @@ The scale border (2026-10-13): the band along the frame's edges is the
 service's (app-core view::border) - segments, tones, rule, the corners'
 chips -, it follows a pan, goes with `s` and under Tab's clean look
 (border_parity); view_border with a box given, and refused.
+
+The cell tree's status line (2026-10-15): a selected cell says the
+service's cell_info text (app-core view::cell_info) - a cell placed once
+its place, one placed 2.25 million times its count -, behind the cursor's
+coordinates as it moves; Esc clears it (cell_status).
 """
 
 
@@ -438,6 +443,52 @@ def border_parity(v):
           % (len(border["x"]), len(border["y"]), border["label"]))
 
 
+def cell_status(v, answers):
+    """User 2026-10-15 ("셀 트리에서 셀을 선택하면 셀의 관련정보(좌표등)을
+    상태줄에 표시해줘"): a cell selected in the tree says the service's
+    cell_info text on the status line - a cell placed once its origin and
+    box, one placed 2.25 million times its count and extent -, the cursor's move
+    puts its coordinates in front and keeps it, Esc takes it away."""
+    v.mode = "normal"   # the snap's ruler mode before
+    w = v._cellwin
+    store = w._store
+
+    def children():
+        top = store.get_iter_first()
+        if top is None:
+            return {}
+        out, it = {}, store.iter_children(top)
+        while it is not None:
+            if store[it][5] == "cell":
+                out[store[it][0]] = it
+            it = store.iter_next(it)
+        return out
+
+    pump(v, lambda: {"DEEPA", "MEGAFILL"} <= set(children()), "the cell tree", 60)
+    for name, says in (("DEEPA", "DEEPA · 1 placement at ("),
+                       ("MEGAFILL", "MEGAFILL · 2,250,000 placements · extent (")):
+        started = time.monotonic()
+        w._tree.get_selection().select_iter(children()[name])
+        pump(v, lambda: any(a.get("kind") == "cell_info" and a.get("name") == name
+                            for a in answers), "%s's facts" % name, 60)
+        took = time.monotonic() - started
+        got = [a for a in answers if a.get("kind") == "cell_info"][-1]
+        check(got["found"] and got["text"].startswith(says),
+              "%s: cell_info said %r" % (name, got.get("text")))
+        check(v.status.get_text().startswith(got["text"]),
+              "%s: the status line %r, the service %r" % (name, v.status.get_text(), got["text"]))
+        print("cell status (%.2f s): %s" % (took, v.status.get_text()))
+    # the cursor's coordinates in front, the cell kept
+    v._cursor = (0, 0)
+    v._hover(Event(state=0))
+    check(v.status.get_text().startswith("x 0.000  y 0.000 um   |   " + got["text"]),
+          "the cursor's line %r" % v.status.get_text())
+    v._cell_hl_clear(display=False)
+    v._hover(Event(state=0))
+    check(v.status.get_text() == "x 0.000  y 0.000 um",
+          "Esc left %r on the status line" % v.status.get_text())
+
+
 def gtk_ready():
     """Whether the viewer's windows can open here (GuiSmokeTests' rule)."""
     try:
@@ -624,6 +675,7 @@ def gui_viewer(src, ref):
             "snap: viewer %r, adapter %r" % (got, want))
         print("viewer: %d frame(s), perf %r" % (len(frames), last["perf"][1]))
         strike_and_palettes(v)
+        cell_status(v, answers)
     finally:
         v._quit()
         v.window.destroy()

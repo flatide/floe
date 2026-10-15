@@ -43,6 +43,11 @@ pins the CLI contract:
   C10 the index keeps such layers (stored_shapes 0, a text alone
       counted); the viewer lists the layers something is on, as Calibre
       does (FLOE_EMPTY_LAYERS=show: every layer)
+  C11 cell_info through `floe2 gtk-service` (the viewer's status line,
+      2026-10-15): instance counts, their exact extent, the cell's own
+      box, children and depth, under a view root too; one instance two
+      levels down: its origin, rotation and mirror = KLayout's composed
+      transformation; the status line's words
 
 usage: python tools/validate_cell_tree.py
 """
@@ -255,8 +260,63 @@ class Daemon:
         self.worker.stop()
 
 
+class Channel:
+    """The product's path to the same questions: `floe2 gtk-service`'s view
+    channel (floe/gtkservice.py ViewSession), asked as the viewer asks."""
+
+    def __init__(self, src):
+        from floe import gtkservice
+        self.gtkservice = gtkservice
+        saved = dict(os.environ)
+        os.environ.update(run_env())
+        try:
+            self.svc = gtkservice.Service(FLOE2)
+            self.view = gtkservice.ViewSession(str(src), 400, 300, svc=self.svc)
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+        self.seq = 0
+
+    def ask(self, kind, **fields):
+        self.seq += 1
+        self.view.cells(kind, self.seq, **fields)
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline:
+            for k, v in self.view.events():
+                if k == "frame":
+                    self.gtkservice.read_frame(v)   # the frame's file goes
+                elif k == "cells" and v.get("seq") == self.seq:
+                    return v
+            time.sleep(0.005)
+        raise AssertionError("view channel: no %s answer" % kind)
+
+    def names(self):
+        res = self.ask("cell_find", src=-1, pattern="", limit=50)
+        return {m["name"]: m["cell"] for m in res["matches"]}
+
+    def close(self):
+        self.view.close()
+        self.svc.close()
+
+
 def as_int_box(b):
     return tuple(int(round(v)) for v in b)
+
+
+def um_box(b):
+    """A dbu box (dbu 0.001) as the status line writes it."""
+    return "(%.3f, %.3f) – (%.3f, %.3f) um" % tuple(v / 1000.0 for v in b)
+
+
+def hier_tail(cell):
+    """The status line's last words: the cell's children and depth."""
+    kids = {cell.layout().cell(i.cell_index).name for i in cell.each_inst()}
+    if not kids:
+        return "leaf"
+    levels = cell.hierarchy_levels()
+    return "%d child%s · %d level%s below" % (
+        len(kids), "" if len(kids) == 1 else "ren",
+        levels, "" if levels == 1 else "s")
 
 
 class CellTreeTests(unittest.TestCase):
@@ -591,6 +651,126 @@ class CellTreeTests(unittest.TestCase):
             os.environ.pop("FLOE_EMPTY_LAYERS", None)
             if saved is not None:
                 os.environ["FLOE_EMPTY_LAYERS"] = saved
+
+    def test_c11_cell_info_says_where_the_cell_is_and_how_it_is_placed(self):
+        """User 2026-10-15: "셀 트리에서 셀을 선택하면 셀의 관련정보(좌표등)을
+        상태줄에 표시해줘". cell_info through the viewer's own channel
+        (floe2 gtk-service): each cell's instance count, their extent - the
+        walk's exact union = KLayout's, where cell_bbox gave the blocks' -,
+        its own box, children and depth; under a view root all of it from
+        the root; one instance two levels down: its origin, rotation and
+        mirror = KLayout's composed transformation, its box; and the status
+        line (`text`) says them in microns."""
+        ch = Channel(self.src)
+        try:
+            ids = ch.names()
+            insts = self.oracle.insts()
+            for name in ("BLK", "INV", "VIA"):
+                info = ch.ask("cell_info", src=0, cell=ids[name])
+                self.assertTrue(info["found"], info)
+                union = self.oracle.union(self.oracle.boxes(name))
+                cell = self.oracle.cell(name)
+                bb = cell.bbox()
+                self.assertEqual(
+                    (info["name"], info["insts"], info["placements"], info["approx"],
+                     info["is_root"], info["at"], as_int_box(info["span"]),
+                     as_int_box(info["rbbox"]), info["unit"], info["height"]),
+                    (name, insts[name], 1, False, False, None, union,
+                     (bb.left, bb.bottom, bb.right, bb.top), 1000,
+                     cell.hierarchy_levels()), name)
+                self.assertEqual(info["text"], "%s · %d placements · extent %s · cell %.3f × %.3f um · %s" % (
+                    name, insts[name], um_box(union), bb.width() / 1000.0,
+                    bb.height() / 1000.0, hier_tail(cell)))
+            # VIA was located by the blocks holding it (C5); the walk counts
+            # every instance instead
+            self.assertTrue(self.by_name("cell_bbox", cell=self.ci_of("VIA"))["approx"])
+            top = ch.ask("cell_info", src=0, cell=ids["TOP"])
+            self.assertEqual((top["is_root"], top["insts"], as_int_box(top["span"])),
+                             (True, 1, (0, 0, 20000, 12000)))
+            self.assertEqual(top["text"], "TOP · top cell · bbox %s · 20.000 × 12.000 um · %s"
+                             % (um_box((0, 0, 20000, 12000)), hier_tail(self.oracle.cell("TOP"))))
+            empty = ch.ask("cell_info", src=0, cell=ids["EMPTY"])
+            self.assertEqual((empty["insts"], empty["rbbox"], empty["at"], empty["text"]),
+                             (3, None, None, "EMPTY · 3 placements · no shapes · leaf"))
+            # under BLK as the view root: counted and placed from BLK
+            blk = ids["BLK"]
+            inv = ch.ask("cell_info", src=0, cell=ids["INV"], root=blk)
+            union = self.oracle.union(self.oracle.boxes("INV", root="BLK"))
+            self.assertEqual((inv["insts"], inv["approx"], as_int_box(inv["span"]), inv["root"]),
+                             (6, False, union, blk))
+            self.assertTrue(inv["text"].startswith("INV · 6 placements · extent %s" % um_box(union)),
+                            inv["text"])
+            self.assertTrue(ch.ask("cell_info", src=0, cell=blk, root=blk)["text"].startswith(
+                "BLK · view root · bbox (0.000, 0.000) – (5.000, 4.000) um · 5.000 × 4.000 um"))
+            self.assertTrue(ch.ask("cell_info", src=0, cell=ids["TOP"], root=blk)["text"].startswith(
+                "TOP · not placed under the view root · cell 20.000 × 12.000 um"))
+            # a shapeless cell placed once: counted, nowhere to walk to
+            self.assertEqual(ch.ask("cell_info", src=0, cell=ids["EMPTY"], root=blk)["text"],
+                             "EMPTY · 1 placement · no shapes · leaf")
+        finally:
+            ch.close()
+        # one instance two levels down, turned and mirrored at both levels;
+        # in a second file a 3 x 1 array of the same cell beside it
+        inner = db.Trans(2, False, db.Vector(1500, 700))
+        outer = db.Trans(1, True, db.Vector(6000, 2000))
+
+        def chain(path, array):
+            ly = db.Layout(True)
+            ly.dbu = 0.001
+            l1 = ly.layer(db.LayerInfo(1, 0))
+            b = ly.create_cell("B")
+            b.shapes(l1).insert(db.Box(0, 0, 400, 100))
+            a = ly.create_cell("A")
+            a.shapes(l1).insert(db.Box(0, 0, 2000, 2000))
+            a.insert(db.CellInstArray(b.cell_index(), inner))
+            t = ly.create_cell("T2")
+            t.shapes(l1).insert(db.Box(0, 0, 10000, 10000))
+            t.insert(db.CellInstArray(a.cell_index(), outer))
+            if array:
+                t.insert(db.CellInstArray(b.cell_index(), db.Trans(db.Vector(100, 9000)),
+                                          db.Vector(1000, 0), db.Vector(0, 1000), 3, 1))
+            ly.write(str(path))
+            floe2("index", path, "--jobs", "1")
+            return ly
+
+        once = TMP / "deep_once.oas"
+        ly = chain(once, False)
+        both = outer * inner
+        # m135: a turn of 270 degrees after the mirror
+        self.assertEqual((both.angle, both.is_mirror()), (3, True))
+        ch = Channel(once)
+        try:
+            ids = ch.names()
+            for name, root, trans in (("A", None, outer), ("B", ids["A"], inner),
+                                      ("B", None, both)):
+                box = ly.cell(name).bbox().transformed(trans)
+                info = ch.ask("cell_info", src=0, cell=ids[name], root=root)
+                at = info["at"]
+                self.assertTrue(at, info)
+                self.assertEqual(
+                    (info["insts"], at["x"], at["y"], at["rot"], at["flip"],
+                     as_int_box(at["bbox"]), as_int_box(info["span"])),
+                    (1, trans.disp.x, trans.disp.y, trans.angle, trans.is_mirror(),
+                     (box.left, box.bottom, box.right, box.top),
+                     (box.left, box.bottom, box.right, box.top)), (name, root))
+            box = ly.cell("B").bbox().transformed(both)
+            self.assertEqual(
+                ch.ask("cell_info", src=0, cell=ids["B"])["text"],
+                "B · 1 placement at (%.3f, %.3f) R270 MX · bbox %s · %.3f × %.3f um · leaf"
+                % (both.disp.x / 1000.0, both.disp.y / 1000.0,
+                   um_box((box.left, box.bottom, box.right, box.top)),
+                   box.width() / 1000.0, box.height() / 1000.0))
+        finally:
+            ch.close()
+        many = TMP / "deep_many.oas"
+        chain(many, True)
+        ch = Channel(many)
+        try:
+            info = ch.ask("cell_info", src=0, cell=ch.names()["B"])
+            self.assertEqual((info["insts"], info["at"], info["approx"]), (4, None, False))
+            self.assertTrue(info["text"].startswith("B · 4 placements · extent "), info["text"])
+        finally:
+            ch.close()
 
     def test_c7_missing_summary_inline_or_refused_then_picked_up_live(self):
         ovh = self.cache_dir / "design.ovh"

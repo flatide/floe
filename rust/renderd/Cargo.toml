@@ -1,9 +1,14 @@
 [package]
 name = "floe-renderd"
-version = "0.12.325"
+version = "0.12.326"
 edition.workspace = true
 license.workspace = true
 description = "Long-lived CPU rendering daemon for floe"
 
 [dependencies]
 floe-render-core = { path = "../render-core" }
+
+[dev-dependencies]
+# the hierarchy fixtures of the cell queries' tests
+floe-oasis = { path = "../oasis" }
+floe-vfs = { path = "../vfs" }

@@ -2,6 +2,7 @@
 //! rendering and latest-only queries are coalesced independently. No HTTP or
 //! browser floating-point world math.
 pub mod border;
+pub mod cell_info;
 mod controller;
 pub mod deck_mode;
 mod fill_slots;
@@ -27,8 +28,8 @@ pub use controller::{
 };
 pub use fill_slots::FillSlotEdit;
 pub use floe_worker_client::{
-    CellChild, CellFailure, CellFailureCode, CellMatch, CellOutcome, CellReply, CellRequest,
-    CellSource, QueryKind, QueryOperation,
+    CellChild, CellFailure, CellFailureCode, CellInfo, CellMatch, CellOutcome, CellPlacement,
+    CellReply, CellRequest, CellSource, QueryKind, QueryOperation,
 };
 use floe_worker_client::{Layers, RenderRequest, Style};
 pub use palette::{LayerAction, LayerBatch};

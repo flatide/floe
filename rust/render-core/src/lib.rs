@@ -32,9 +32,9 @@ pub use cache::{
 };
 pub use cancel::RenderCancellation;
 pub use cells::{
-    children as cell_children, extent as cell_extent, find as cell_find,
-    instances as cell_instances, CellChildren, CellExtent, ChildRow, DeckXf, FindResult, FindRow,
-    HierError, HierHandle, Instances,
+    children as cell_children, extent as cell_extent, find as cell_find, info as cell_info,
+    instances as cell_instances, CellChildren, CellExtent, CellInfo, CellPlacement, ChildRow, DeckXf,
+    FindResult, FindRow, HierError, HierHandle, Instances,
 };
 pub use clip::ClipGeometry;
 pub use deck::{

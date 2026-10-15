@@ -19,8 +19,11 @@
 //!                                         (x, y in viewport px from its
 //!                                         top-left; frame = the frame shown)
 //!   view_cells {view, seq, kind: cell_sources|cells|cell_find|cell_bbox|
-//!               cell_insts, src?, cell?, pattern?, limit?, box?, cap?, root?}
-//!                                      -> null; the answer is a `cells` event
+//!               cell_insts|cell_info, src?, cell?, pattern?, limit?, box?,
+//!               cap?, root?}       -> null; the answer is a `cells` event
+//!                                         (cell_info's carries `text`, the
+//!                                         status line: app-core
+//!                                         view::cell_info)
 //!   view_minimap {view, depth?, bbox?} -> {size, key, base, bbox, die, scale}:
 //!                                         the overview's base image (palette
 //!                                         digits, size x size) and the die's
@@ -57,7 +60,7 @@ use floe_app_core::{
     render::RenderOptions,
     shots::{Detail, Thin},
     view::{
-        border, minimap, perf, CellOutcome, CellReply, CellRequest, ControllerOptions, Depth,
+        border, cell_info, minimap, perf, CellOutcome, CellReply, CellRequest, ControllerOptions, Depth,
         DesktopPolicy, DisplayFrame, Model, Navigation, Patch, Phase, Purpose, QueryOperation,
         RootEdit, Snapshot, StyleDelta, ViewController, ViewQuery, ViewQueryResult, ViewState,
         Viewport,
@@ -219,13 +222,15 @@ impl Views {
                 let seq = request.get("seq").and_then(Value::as_i64).unwrap_or(-1);
                 let (out, id) = (Arc::clone(&self.out), view_id(request)?);
                 let (controller, stop) = (Arc::clone(&view.controller), Arc::clone(&view.stop));
+                // the status line's coordinates are the view's
+                let (dbu, deck) = (controller.model.dbu, controller.model.deck);
                 thread::Builder::new()
                     .name("floe2-view-cells".into())
                     .spawn(move || {
                         let outcome = cell_ticket(&controller, &stop, cell_request)
                             .and_then(|wait| wait.wait(CELL_WAIT));
                         out.line(&json!({"event": "cells", "view": id,
-                                         "result": cells_json(kind, seq, src, outcome)}));
+                                         "result": cells_json(kind, seq, src, outcome, dbu, deck)}));
                     })?;
                 Ok(Value::Null)
             }
@@ -721,6 +726,15 @@ fn cell_request(r: &Value) -> Result<(&'static str, CellRequest, Option<i64>)> {
             },
             src,
         ),
+        "cell_info" => (
+            "cell_info",
+            CellRequest::Info {
+                source: source()?,
+                cell: cell("cell")?.ok_or_else(|| Error::input("cell_info needs a cell"))?,
+                root: cell("root")?,
+            },
+            src,
+        ),
         _ => return Err(Error::input("unknown cell query kind")),
     })
 }
@@ -756,7 +770,16 @@ fn cell_ticket(
     }
 }
 
-fn cells_json(kind: &str, seq: i64, src: Option<i64>, outcome: Result<CellOutcome>) -> Value {
+/// `dbu` and `deck` are the view's: a `cell_info` answer's status line
+/// (app-core view::cell_info) speaks its coordinates.
+fn cells_json(
+    kind: &str,
+    seq: i64,
+    src: Option<i64>,
+    outcome: Result<CellOutcome>,
+    dbu: f64,
+    deck: bool,
+) -> Value {
     let mut o = Map::new();
     o.insert("kind".into(), json!(kind));
     o.insert("seq".into(), json!(seq));
@@ -862,6 +885,29 @@ fn cells_json(kind: &str, seq: i64, src: Option<i64>, outcome: Result<CellOutcom
             o.insert("more".into(), json!(more));
             o.insert("visited".into(), json!(visited));
             o.insert("boxes".into(), json!(boxes));
+        }
+        CellReply::Info(info) => {
+            o.insert("src".into(), json!(info.source));
+            o.insert("cell".into(), json!(info.cell));
+            o.insert("root".into(), json!(info.root));
+            o.insert("name".into(), json!(info.name));
+            o.insert("height".into(), json!(info.height));
+            o.insert("children".into(), json!(info.children));
+            o.insert("unit".into(), json!(info.unit));
+            o.insert("rbbox".into(), json!(info.rbbox));
+            o.insert("is_root".into(), json!(info.is_root));
+            o.insert("insts".into(), json!(info.insts));
+            o.insert("placements".into(), json!(info.placements));
+            o.insert("approx".into(), json!(info.approx));
+            o.insert("span".into(), json!(info.span));
+            // the panel's info line reads cell_bbox's keys
+            o.insert("bbox".into(), json!(info.span));
+            o.insert(
+                "at".into(),
+                json!(info.at.as_ref().map(|p| json!({"x": p.x, "y": p.y, "rot": p.rot,
+                                                      "flip": p.flip, "bbox": p.bbox}))),
+            );
+            o.insert("text".into(), json!(cell_info::status_line(&info, dbu, deck)));
         }
     }
     Value::Object(o)

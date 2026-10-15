@@ -420,3 +420,15 @@ P4d처럼 컨트롤러 루프에서만 바뀐다. `FLOE_GTK_LOOP=legacy`는 예�
 - **GTK 뷰어(UI):** 띠 픽셀(두 색조·모서리·안쪽 선)을 화면 pixbuf에 칠하고 글자(모서리 좌표·`scale …`)는 Gtk.Label로 올린다(SPEC-VIEWER §6). 같은 뷰에는 한 번만 묻는다. View > scale border / `s`, `FLOE_SCALE_BORDER=off`.
 - **웹(나중):** 같은 `Border`를 브로커가 스냅숏이나 요청으로 내주고 UI가 띠와 글자를 그리면 된다. 웹 UI에는 아직 없다.
 - **게이트:** `gtk_view` `border_parity`(뷰어 = 서비스, 이동, 끄기, Tab)와 서비스 `view_border`의 상자 지정·거절; 단위 `view::border` 5개.
+
+## 11. 셀 트리 선택의 상태줄 정보 (2026-10-15, app 0.12.358) — 계산과 문장은 공유 Rust, 보여 주기는 UI
+
+사용자: "셀 트리에서 셀을 선택하면 셀의 관련정보(좌표등)을 상태줄에 표시해줘"
+
+- **render-core `cells::info`:** 셀 자체(이름, 재귀 bbox, 서로 다른 자식 수, 아래 깊이)와 루트 아래 인스턴스 수, 그 인스턴스 상자의 **정확한 합집합**(루트가 직접만 배치한 셀은 요약의 범위가 곧 그것; 더 깊은 셀은 요약의 도달 범위로 가지친 `instances` 걷기를 상자 대신 합집합·개수로, 예산 안에서 전부 세었을 때; 아니면 `extent`의 범위와 approx), 한 번 배치면 루트까지 합성한 배치(`OrthoTransform::parts`: 원점, 반시계 90° 단위 회전, 회전 전 x축 대칭).
+- **renderd `cell_info`**(hier 스레드, RUST_RENDERER.md): 소스 배치(잡덱)로 덱 좌표로 옮겨 답한다. **worker-client** `CellRequest::Info`·`CellInfo`·`CellPlacement`.
+- **app-core `view::cell_info::status_line(info, dbu, deck)`:** 상태줄 문장(SPEC-VIEWER §8c "상태줄의 셀 정보"). 좌표는 뷰 dbu로 µm(필요한 소수 3~6자리, 셋째 자리 뒤 끝 0은 뗌), 셀 크기는 소스 단위(`unit` = µm당 단위 수)로.
+- **서비스:** `view_cells kind=cell_info` → `cells` 이벤트에 필드와 `text`(위 문장; 패널용 `bbox` = span도).
+- **GTK 뷰어(UI):** 행을 고르면 묻고 `text`를 상태줄 윗줄에 둔다. 커서 좌표 뒤에 이어 쓰고, highlight의 `· N in view`를 붙이며, Esc가 지운다(SPEC-VIEWER §8c).
+- **웹(나중):** 같은 `view_cells`의 `cell_info`를 브로커가 내주면 웹 UI가 `text`를 상태 표시에 두면 된다. 웹 UI에는 아직 없다.
+- **게이트:** `cell_tree` C11(서비스 경로, KLayout 대조), `rust_renderer`의 GUI 배선 테스트, `gtk_view` `cell_status`(실제 뷰어); 단위 render-core·renderd·worker-client·app-core.

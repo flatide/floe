@@ -804,8 +804,9 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   전체 이름 **글롭**. 결과 행 = `NAME  insts`(탑 아래 인스턴스 수),
   상한 2,000행 + 전체 개수 정보 줄. 키 입력 뒤 150 ms(SearchEntry 자체
   지연 포함 약 300 ms) 후 질의.
-- **선택**(트리·결과 공통, 단클릭): `cell_bbox`로 정보 줄(`NAME: N
-  instances · W × H um`, 근사면 `(the blocks holding it)`), highlight가
+- **선택**(트리·결과 공통, 단클릭): `cell_info`로 **상태줄**과 패널 정보
+  줄(`NAME: N instances · W × H um`, 근사면 `(the blocks holding it)`)을
+  채운다(아래 "상태줄의 셀 정보"), highlight가
   켜져 있으면 `cell_insts`로 **현재 뷰 안 인스턴스 박스**를 받아 캔버스에
   **CELL_HL(#40E0FF) 2 px 외곽**으로 그린다(화면에서 7 px보다 작은
   인스턴스는 7 px 마커 사각). 상한 4,096박스·탐색 예산 200만 방문 —
@@ -813,6 +814,47 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   뷰 키(src, ci, 뷰 박스 반올림)가 바뀌었으면 다시 묻는다
   (`_cell_hl_follow`; 데몬은 대기 중인 더 새 insts 질의가 있으면 옛것을
   `superseded`로 즉시 답한다). Tab 오버레이 숨김 상태에서는 그리지 않음.
+- **상태줄의 셀 정보**(2026-10-15, app 0.12.358 / RENDERD 0.12.326; 사용자:
+  "셀 트리에서 셀을 선택하면 셀의 관련정보(좌표등)을 상태줄에 표시해줘"):
+  행을 고르면 renderd `cell_info`(hier 스레드, RUST_RENDERER.md)를 뷰 루트
+  기준으로 묻고, 답의 `text` — app-core `view::cell_info::status_line`이
+  쓴 문장(웹도 같은 것을 쓴다) — 를 상태줄 윗줄에 둔다. 답이 오기 전에는
+  셀 이름, highlight가 켜져 있으면 뒤에 `· N in view`(넘치면 `(more -
+  zoom in)`). 커서가 움직이면 `x … y … um   |   [선택한 도형]   |   셀
+  정보` 순으로 이어 쓰므로 셀 정보가 사라지지 않는다(눈금자·오류 선택
+  모드는 제 안내만). Esc 체인에서 선택 해제 다음 단계(highlight가 꺼져
+  있어도)가 셀 선택과 이 줄을 지우고 `cell selection cleared`; 뷰 루트가
+  바뀌면 새 루트 기준으로 다시 묻되 루트 안내 문구를 덮지 않는다. 문장:
+  - 한 번 배치: `B · 1 placement at (6.700, 3.500) R270 MX · bbox (6.600,
+    3.100) – (6.700, 3.500) um · 0.100 × 0.400 um · leaf` — 원점과 방향은
+    루트까지 합성한 배치(`R0`~`R270` = 반시계 90° 단위, `MX` = 회전 전
+    x축 대칭, GDS/OASIS 순서), bbox는 그 인스턴스의 상자.
+  - 여러 번: `VIA · 39 placements · extent (1.300, 1.300) – (15.400,
+    10.700) um · cell 0.100 × 0.100 um · leaf` — extent는 인스턴스 상자의
+    **정확한 합집합**: 루트가 직접만 배치한 셀은 요약(design.ovh)의 범위가
+    곧 그것이라 걷지 않고, 더 깊은 셀은 render-core `cells::info`가 요약의
+    도달 범위로 가지친 걷기로 전부 세어 얻는다(`cell_bbox`의 블록 범위보다
+    정확). 예산(`CELL_INFO_BUDGET` 200만 방문)을 넘으면 요약의 범위로
+    `within … (the blocks holding it)`. `cell`은 셀 자체 크기.
+  - 루트: `TOP · top cell · bbox … · 20.000 × 12.000 um · 2 children · 3
+    levels below`(뷰 루트면 `view root`), 루트 아래에 없으면 `not placed
+    under the top cell`/`the view root`, 도형 없는 셀은 `no shapes`(상자가
+    없어 걷기로 찾을 수 없으므로 한 번 배치여도 자리는 없다).
+  - 잡덱: 소스 배치를 곱한 개수 `6,000 placements (1,500 × 4 source
+    placements)`, 소스 탑은 `source top cell`, 좌표는 덱 dbu(소스 배치로
+    옮긴 것), 한 번 배치는 덱 전체에서 하나일 때만.
+  - 좌표는 뷰의 좌표(탑·뷰 루트·덱)를 µm로, 소수 자리는 dbu가 필요한
+    만큼(3~6자리; 셋째 자리 뒤의 끝 0은 뗀다 — 0.25 nm 격자의
+    15960.40400은 `15960.404`), 개수는 천 단위 쉼표. 창이 좁으면 줄 끝이
+    `…`로 잘리고(앞쪽이 좌표) 전체는 툴팁에 있다.
+  실측(macOS): valmini의 한 번 배치된 DEEPA 0.01~0.06 s, 탑이 직접 225만 번
+  배치한 MEGAFILL 0.05~0.06 s(요약의 범위; 걷던 첫 구현은 예산까지 0.08 s); 합성 MAIN01 1/10(배치 레코드 8,260만)의 TOP·한 번
+  배치된 H01_00003·6배치 H01_00001·3,876만 배치 LF00_00004 모두 0.04~0.07 s
+  (직접 배치 셀을 걷던 첫 구현은 H01_00001에 0.26 s). 게이트: `cell_tree` C11(KLayout 대조),
+  `rust_renderer` `test_a_selected_cell_says_its_facts_on_the_status_line`,
+  `gtk_view` `cell_status`(실제 뷰어), 단위 render-core `cells::info`·
+  `transform::parts`, renderd `cell_info_answers_in_view_coordinates`,
+  worker-client, app-core `view::cell_info`.
 - **줌**(`zoom`·검색 박스 Enter·메뉴; 잡덱은 행 더블클릭·Enter도 — 레이아웃의
   행 더블클릭은 0.12.289부터 뷰 루트): `cell_bbox`의 범위를 DRC 점프와
   같은 규칙으로 프레이밍(양 축 0.8, `CELL_VIEW_FRACTION`). 범위 =
@@ -824,8 +866,9 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   줌하지 않고 상태줄로 이유를 말한다.
 - **키/Esc**: `t` = cells 페이지 올리고 검색 박스 포커스(pane 폭 하한
   260 px); Esc 체인에서 선택 해제 **다음** 단계가 셀 하이라이트 해제
-  (`_cell_hl_clear`: 하이라이트와 트리 선택을 함께 지움; highlight
-  체크는 유지). 검색 박스에 포커스가 있으면 캔버스 키는 오지 않는다
+  (`_cell_hl_clear`: 하이라이트와 트리 선택, 상태줄의 셀 정보를 함께
+  지움; highlight 체크는 유지; 0.12.358부터 highlight가 꺼져 있어도 고른
+  셀이 있으면 이 단계가 온다). 검색 박스에 포커스가 있으면 캔버스 키는 오지 않는다
   (§7의 Entry 가드).
 - **인덱스 부재**: 어떤 소스의 답이 `code=nohier`면 정보 줄 안내 +
   `build index…` 버튼, 그리고 **소스당 로드마다 한 번** "지금 만들까요?"
