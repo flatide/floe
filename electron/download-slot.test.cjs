@@ -47,6 +47,17 @@ test('pipelined watch plus EOF cancels without buffered-control deadlock', async
     assert.deepEqual(fs.readdirSync(root), []);
   } finally { slot.close(); await deadline(slot.finished); fs.rmSync(root, { recursive: true }); }
 });
+
+test('SIGHUP discards a partial slot without publishing or retaining staging', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'floe-electron-download-hup-'));
+  const slot = new DownloadSlot(binary, root);
+  try {
+    await deadline(slot.ready); slot.watch(); fs.writeFileSync(slot.path, 'partial');
+    slot.child.kill('SIGHUP');
+    assert.deepEqual(await deadline(slot.finished), {publication:'not_requested', cleanup:true});
+    assert.deepEqual(fs.readdirSync(root), []);
+  } finally { slot.close(); await deadline(slot.finished); fs.rmSync(root, {recursive:true}); }
+});
 test('real oversize watchdog reports before cleanup; parent first stops the producer', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'floe-electron-download-qa-'));
   const slot = new DownloadSlot(binary, root);

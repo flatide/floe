@@ -208,6 +208,50 @@ test('parent pipe EOF cancels a live owned service', async () => {
   }
 });
 
+test('SIGHUP cancels both folder-stage and live services through owned cleanup', async () => {
+  for (const folder of [false, true]) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'floe-electron-hup-'));
+    const service = new ServiceClient(binary, folder ? ['--multi'] : ['--multi', '--root', root]);
+    try {
+      const [ready] = await deadline(once(service, folder ? 'directory' : 'ready'));
+      service.child.kill('SIGHUP');
+      const exit = await deadline(service.finished);
+      assert.deepEqual(exit, {code:129, signal:null});
+      if (!folder) await assert.rejects(fetch(ready.origin + '/'));
+      assert.deepEqual(fs.readdirSync(root), []);
+    } finally { service.close(); await deadline(service.finished); fs.rmdirSync(root); }
+  }
+});
+
+test('hangup of a fresh host process group still joins its Rust service', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'floe-electron-group-hup-'));
+  const source = `
+    const {ServiceClient}=require(process.argv[1]);
+    const c=new ServiceClient(process.argv[2],['--multi','--root',process.argv[3]]);
+    let origin;
+    process.on('SIGHUP',()=>c.close());
+    c.on('ready',r=>{origin=r.origin;console.log('READY');});
+    c.on('failure',()=>{console.log('PIPE_FAILURE');process.exitCode=1;});
+    c.finished.then(async r=>{
+      if(r.signal||![129,143].includes(r.code))process.exitCode=1;
+      try{await fetch(origin+'/');console.log('SERVICE_STILL_LIVE');process.exitCode=1;}catch(_){}
+      console.log('JOINED '+JSON.stringify(r));
+    });`;
+  const host = spawn(process.execPath, ['-e', source, path.join(__dirname, 'service-client.cjs'), binary, root],
+    {detached:true, stdio:['ignore','pipe','pipe']});
+  let output=''; host.stdout.on('data', b=>{output+=b;}); host.stderr.on('data',()=>{});
+  const ended=once(host,'close');
+  try {
+    await until(()=>output.includes('READY'));
+    process.kill(-host.pid,'SIGHUP'); // Only the new isolated synthetic group.
+    assert.deepEqual(await deadline(ended),[0,null],output);
+    assert(output.includes('JOINED'));assert.deepEqual(fs.readdirSync(root),[]);
+  } finally {
+    if(host.exitCode===null&&host.signalCode===null)process.kill(-host.pid,'SIGKILL');
+    await deadline(ended);fs.rmdirSync(root);
+  }
+});
+
 test('regular stdout file rejected before even requesting a folder', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'floe-electron-redirection-'));
   const output = path.join(root, 'empty');

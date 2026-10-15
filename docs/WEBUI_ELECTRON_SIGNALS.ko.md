@@ -1,5 +1,10 @@
 # Electron 종료 신호 수용 — E2e
 
+2026-09-28 후속: SIGHUP을 Electron·Rust 서비스·CLI·download helper·패키저에
+연결했다. 초기 폴더 대기와 동시 process-group hangup의 합성 회귀는
+[후속 hardening](WEBUI_ELECTRON_HARDENING.ko.md)을 따른다. 아래는 당시 INT/TERM의
+실제 GUI 수용 기록이며 새 SIGHUP GUI/현장 수용을 뜻하지 않는다.
+
 2026-09-21. [Electron 비교판](WEBUI_ELECTRON.ko.md)의 native 종료 경로 수정.
 클립보드 실조작을 위해 별도 합성 창을 열었다가, 화면 제어 연결이 없어 SIGTERM으로
 정리하는 과정에서 발견했다. CUA 실패와 호스트 종료 실패는 별개의 문제다.

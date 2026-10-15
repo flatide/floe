@@ -3,12 +3,14 @@
 use super::*;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+mod fuses;
 
 const HELP: &str = "Usage: sh tools/make_electron_portable.sh
     --runtime-zip /path/to/pinned-electron.zip --out NEW.tar.gz [--jobs 1..16]
 
 Native macOS arm64/x64 or Linux x64 builds only, installed offline toolchain.
-No downloads, browser launch, design access, signing, security changes or overwrite.
+No downloads, browser launch, design access, signing identity or overwrite.
+Hardens the private runtime's fuses; macOS uses local ad-hoc re-signing only.
 Runtime archive MUST match electron/runtime.json for this compiler's host target.
 Builds matched release Rust workers with at most 16 jobs (default 4).
 Linux Rust workers require GLIBC <= 2.28. Chromium/ETX acceptance remains separate.
@@ -19,6 +21,7 @@ const APP_FILES: &[&str] = &[
     "electron/package.json",
     "electron/runtime.json",
     "electron/main.cjs",
+    "electron/x11.cjs",
     "electron/notices.cjs",
     "electron/service-client.cjs",
     "electron/policy.cjs",
@@ -42,6 +45,7 @@ const APP_FILES: &[&str] = &[
     "rust/web/ui/protocol.js",
 ];
 const WORKERS: &[(&str, &str)] = &[
+    ("floe2-web", "rust/target/release/floe2-web"),
     ("floe-index", "rust/target/release/floe-index"),
     ("floe-renderd", "rust/target/release/floe-renderd"),
     (
@@ -200,6 +204,13 @@ pub(super) fn verify(root: &Path) -> Result<()> {
             "bundle inventory mismatch (missing/extra/changed content, mode or link)".into(),
         );
     }
+    if manifest["electron_fuses"] != fuses::record() {
+        return Err("missing/unsupported Electron fuse policy; rebuild this bundle".into());
+    }
+    fuses::verify(
+        &root.join("runtime"),
+        manifest["target"].as_str().ok_or("missing bundle target")?,
+    )?;
     println!(
         "ELECTRON BUNDLE: {} entries verified; checksum integrity, not signature or GUI acceptance",
         current.len()
@@ -259,6 +270,7 @@ pub(super) fn build(root: &Path, args: &[String]) -> Result<()> {
             return Err("empty runtime input".into());
         }
     }
+    fuses::harden(&runtime, target)?;
 
     let mut crates = dependency_notices(&root, &cargo, &rustc, target)?;
     crates.extend(dependency_notices_for(
@@ -293,7 +305,7 @@ pub(super) fn build(root: &Path, args: &[String]) -> Result<()> {
         build_dir = env::current_dir()?.join(build_dir);
     }
     for (workspace, packages) in [
-        ("rust", vec!["floe-index", "floe-renderd"]),
+        ("rust", vec!["floe-app", "floe-index", "floe-renderd"]),
         ("electron/service", vec!["floe-electron-service"]),
     ] {
         eprintln!(
@@ -357,6 +369,19 @@ pub(super) fn build(root: &Path, args: &[String]) -> Result<()> {
         bundle.join("floe2-electron"),
         fs::Permissions::from_mode(0o755),
     )?;
+    for (name, script) in [
+        (
+            "floe2-teebox",
+            include_str!("../../../tools/electron-portable/teebox.sh"),
+        ),
+        (
+            "floe2-cli",
+            include_str!("../../../tools/electron-portable/cli.sh"),
+        ),
+    ] {
+        fs::write(bundle.join(name), script)?;
+        fs::set_permissions(bundle.join(name), fs::Permissions::from_mode(0o755))?;
+    }
     fs::write(
         bundle.join("verify.sh"),
         include_str!("../../../tools/electron-portable/verify.sh"),
@@ -365,9 +390,14 @@ pub(super) fn build(root: &Path, args: &[String]) -> Result<()> {
         bundle.join("README.txt"),
         include_str!("../../../tools/electron-portable/README.txt"),
     )?;
-    fs::write(bundle.join("BUILD.txt"), format!("format=1\nproduct=floe2-electron-comparison\ntarget={target}\nsource_revision={stamp}\nworkers_profile=release\nassembler_profile=development\nruntime_archive_sha256={pin}\ngui_checked=false\nfield_acceptance=unverified\npython_runtime=false\n\n{compiler}"))?;
+    let signature = if target.ends_with("-apple-darwin") {
+        "ad-hoc"
+    } else {
+        "not-applicable"
+    };
+    fs::write(bundle.join("BUILD.txt"), format!("format=1\nproduct=floe2-electron-comparison\ntarget={target}\nsource_revision={stamp}\nworkers_profile=release\nassembler_profile=development\nruntime_archive_sha256={pin}\nelectron_fuse_policy=floe-electron-fuses-v1\nruntime_signature={signature}\nasar_integrity=false\ngui_checked=false\nfield_acceptance=unverified\npython_runtime=false\n\n{compiler}"))?;
     let record = json!({"format":1, "product":"floe2-electron-comparison", "target":target,
-        "source_revision":stamp, "runtime_archive_sha256":pin, "files":inventory(&bundle)?});
+        "source_revision":stamp, "runtime_archive_sha256":pin, "electron_fuses":fuses::record(), "files":inventory(&bundle)?});
     fs::write(
         bundle.join("BUNDLE.json"),
         serde_json::to_vec_pretty(&record)?,
@@ -441,13 +471,55 @@ mod tests {
     fn verify_rejects_missing_extra_mode_and_corrupt_manifest() {
         let stage = Stage::new(&env::temp_dir()).unwrap();
         fs::write(stage.0.join("file"), b"data").unwrap();
-        let record = json!({"format":1,"product":"floe2-electron-comparison", "files":inventory(&stage.0).unwrap()});
+        fs::create_dir(stage.0.join("runtime")).unwrap();
+        fs::write(
+            stage.0.join("runtime/electron"),
+            b"dL7pKGdnNz796PbbjQWNKmHXBZaB9tsX\x01\x09000000001",
+        )
+        .unwrap();
+        let record = json!({"format":1,"product":"floe2-electron-comparison", "target":"x86_64-unknown-linux-gnu",
+            "electron_fuses":fuses::record(), "files":inventory(&stage.0).unwrap()});
         fs::write(
             stage.0.join("BUNDLE.json"),
             serde_json::to_vec(&record).unwrap(),
         )
         .unwrap();
         verify(&stage.0).unwrap();
+        // Matching file checksums alone must not bless an unhardened runtime.
+        let runtime = stage.0.join("runtime/electron");
+        let hardened = fs::read(&runtime).unwrap();
+        fs::write(
+            &runtime,
+            b"dL7pKGdnNz796PbbjQWNKmHXBZaB9tsX\x01\x09101100011",
+        )
+        .unwrap();
+        let mut weak = record.clone();
+        weak["files"] = serde_json::to_value(inventory(&stage.0).unwrap()).unwrap();
+        fs::write(
+            stage.0.join("BUNDLE.json"),
+            serde_json::to_vec(&weak).unwrap(),
+        )
+        .unwrap();
+        assert!(verify(&stage.0).is_err());
+        fs::write(&runtime, hardened).unwrap();
+        fs::write(
+            stage.0.join("BUNDLE.json"),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+        let mut missing = record.clone();
+        missing.as_object_mut().unwrap().remove("electron_fuses");
+        fs::write(
+            stage.0.join("BUNDLE.json"),
+            serde_json::to_vec(&missing).unwrap(),
+        )
+        .unwrap();
+        assert!(verify(&stage.0).is_err());
+        fs::write(
+            stage.0.join("BUNDLE.json"),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
         fs::write(stage.0.join("extra"), b"unexpected").unwrap();
         assert!(verify(&stage.0).is_err());
         fs::remove_file(stage.0.join("extra")).unwrap();

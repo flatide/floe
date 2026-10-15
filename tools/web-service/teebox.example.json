@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "public_origin": "https://floe.example.test",
+  "runtime_root": "/run/floe2-service",
+  "max_sessions": 4,
+  "deployment": {
+    "mode": "teebox",
+    "client_id": "teebox-service",
+    "user_namespace": "teebox",
+    "shared_root": "/srv/teebox/layouts",
+    "work_root": "/srv/floe2-work",
+    "index": { "max_running": 1, "max_entries": 32, "jobs": 8 }
+  }
+}

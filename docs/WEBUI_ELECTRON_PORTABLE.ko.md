@@ -6,6 +6,11 @@ RHEL 8.6/8.10·ETX 정식 채택, 서명/공증, 설치 프로그램 완료를 �
 이 문서의 번들은 여전히 개발 비교판이며 정식 패키지 승격은 별도다. 기존 WK
 앱/코드는 삭제하지 않는다. 동결 결정으로 렌더·표시 정책/제품 버전은 바꾸지 않았다.
 
+2026-09-29: [TeeBox standalone](WEBUI_TEEBOX_STANDALONE.ko.md)을 위한 Linux/X11
+`floe2-teebox` 실행기·`--check`와 `floe2-cli`를 추가했다(shell0.1.4).
+동봉 Rust 실행 파일은 기존4개에 headless `floe2-web` CLI를 더한5개다.
+공용 서버 도입은 보류하고 로컬 backend를 유지한다. RHEL/ETX 수용 완료는 아니다.
+
 ## 만들기와 실행
 
 설치된 native Rust toolchain, `sh`, `unzip`, `tar`, `sha256sum` 또는 `shasum`이
@@ -20,8 +25,8 @@ sh tools/make_electron_portable.sh \
 ```
 
 macOS arm64/x64 및 Linux x64 GNU **native compiler host**만 지원한다. 크로스 빌드나
-기존 임의 바이너리 디렉터리를 입력으로 받지 않는다. Rust worker 4개는 동일 소스의
-release로 `--offline --locked` 빌드한다. jobs 기본4, 범위1..16이다.
+기존 임의 바이너리 디렉터리를 입력으로 받지 않는다. Rust 실행 파일5개(CLI 포함)는
+동일 소스의 release로 `--offline --locked` 빌드한다. jobs 기본4, 범위1..16이다.
 `CARGO_TARGET_DIR`은 재사용 build 디렉터리로 쓸 수 있다. 기본은
 `rust/target/electron-portable`이다. 기존 출력·심볼릭 링크는 교체하지 않는다.
 
@@ -41,7 +46,8 @@ Electron 내부 `.app`을 따로 옮기거나 Finder/`open`으로 실행하는 �
 개발용 `FLOE_ELECTRON_BIN`, `FLOE_ELECTRON_SERVICE_BIN`,
 `FLOE_ELECTRON_DOWNLOAD_BIN`, `FLOE_INDEX_BIN`, `FLOE_RENDERD_BIN`은 유지한다.
 번들 자체를 검사할 때는 모두 unset한다. 명시한 무효 값에 fallback은 없다.
-`ELECTRON_RUN_AS_NODE`, `NODE_OPTIONS`, `NODE_PATH`가 비어 있지 않으면 런처가 거부한다.
+`ELECTRON_RUN_AS_NODE`, `NODE_OPTIONS`, `NODE_PATH`, `NODE_EXTRA_CA_CERTS`가 비어 있지
+않으면 개발·번들 런처 모두 거부한다. 번들의 runtime fuse 정책과는 별도 방어다.
 
 ## 조립과 무결성 계약
 
@@ -49,8 +55,9 @@ Electron 내부 `.app`을 따로 옮기거나 Finder/`open`으로 실행하는 �
   같은 파일시스템 hard-link 기반 no-clobber 게시를 재사용한다. Electron service는
   자체 vendor 디렉터리 없이 공유 `rust/vendor`를 사용한다.
 - 먼저 caller zip을 private stage에 복사하여 **그 복사본의 SHA-256을 확인한 뒤**
-  같은 파일을 해제한다. 공식 runtime 전체를 유지하며 Framework 내부 상대 링크도
-  보존한다. 외부/절대/깨진 링크·특수 파일·setuid/setgid/sticky bit는 거부한다.
+  같은 파일을 해제한다. 공식 runtime 파일 구성과 Framework 내부 상대 링크를
+  보존한다. private 복사본의 fuse/서명만 아래 정책대로 변경한다.
+  외부/절대/깨진 링크·특수 파일·setuid/setgid/sticky bit는 거부한다.
 - 앱은 JS/shared UI의 명시 목록만 복사한다. 저장소 전체·설계·캐시·리뷰·사용자 설정은
   포함하지 않는다. 합성 QA 모듈도 의존 파일을 함께 포함하되 명시 `--smoke-*`에서만
   실행된다. 특히 clipboard smoke는 별도 승인 필요하며 일반 조립/검사는 실행하지 않는다.
@@ -68,9 +75,13 @@ Electron 내부 `.app`을 따로 옮기거나 Finder/`open`으로 실행하는 �
 
 공식 [배포 지침](https://www.electronjs.org/docs/latest/tutorial/application-distribution)의
 rebranding/서명 배포와 달리 runtime 옆에 앱 소스를 두고 경로로 실행하는 개발 비교판이다.
-[fuse](https://www.electronjs.org/docs/latest/tutorial/fuses)는 변경하지 않았다.
-런처의 환경변수 거부는 변경되지 않은 Electron 바이너리의 fuse를 비활성화하는
-보안 경계가 아니다. 서명·배포 시 fuse/업데이트/고지 수용은 별도 작업이다.
+2026-09-28부터 [fuse 강화](WEBUI_ELECTRON_HARDENING.ko.md)를 적용한다. RunAsNode,
+NodeOptions, NodeCliInspect, FileProtocolExtraPrivileges를 끄고 실제 wire를 검증한다.
+macOS는 staging 복사본만 ad-hoc 재서명·검증한다. 설치된 앱이나 input ZIP, 인증서,
+OS 보안 정책은 변경하지 않는다. Developer ID 서명·공증·ASAR-only/무결성은 구현한
+것으로 세지 않는다. `BUNDLE.json`의 fuse 정책이 없거나 runtime이 정책과 다르면 새
+검증기는 재빌드를 요구한다(구 번들의 자기 검증기는 여전히 당시 계약만 검사한다).
+개발 runtime override는 이 보장을 우회할 수 있으므로 번들 검증에서는 unset한다.
 OS 패키지 설치, setuid 변경, namespace 설정 변경, `--no-sandbox` 우회는 하지 않는다.
 
 ## 회귀·실행 기록

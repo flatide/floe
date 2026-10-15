@@ -170,28 +170,30 @@ def main():
         result = call(repo, dict(env, PACKAGER_CASE="bad-elf"), out)
         assert "ELF" in result.stderr, (result.returncode, result.stdout, result.stderr)
         marker.unlink()
-        p = subprocess.Popen([str(PACKAGER), str(repo), "--out", str(out), "--target",
-                              "x86_64-unknown-linux-musl"], env=dict(env, PACKAGER_CASE="cancel"),
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        try:
-            until = time.monotonic() + 10
-            while not marker.exists():
-                assert p.poll() is None and time.monotonic() < until
-                time.sleep(.01)
-            p.send_signal(signal.SIGTERM)
-            stdout, stderr = p.communicate(timeout=4)
-            assert p.returncode == 143, (stdout, stderr)
-            assert not out.exists() and not list(work.glob(".floe-web-stage-*"))
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            marker.unlink(missing_ok=True)
+            p = subprocess.Popen([str(PACKAGER), str(repo), "--out", str(out), "--target",
+                                  "x86_64-unknown-linux-musl"], env=dict(env, PACKAGER_CASE="cancel"),
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             try:
-                os.kill(int(marker.read_text()), 0)
-            except ProcessLookupError:
-                pass
-            else:
-                raise AssertionError("packager build child not reaped")
-        finally:
-            if p.poll() is None:
-                p.kill()
-                p.wait()
+                until = time.monotonic() + 10
+                while not marker.exists():
+                    assert p.poll() is None and time.monotonic() < until
+                    time.sleep(.01)
+                p.send_signal(sig)
+                stdout, stderr = p.communicate(timeout=4)
+                assert p.returncode == 128 + sig, (stdout, stderr)
+                assert not out.exists() and not list(work.glob(".floe-web-stage-*"))
+                try:
+                    os.kill(int(marker.read_text()), 0)
+                except ProcessLookupError:
+                    pass
+                else:
+                    raise AssertionError("packager build child not reaped")
+            finally:
+                if p.poll() is None:
+                    p.kill()
+                    p.wait()
         if len(sys.argv) > 1:
             inspect_archive(Path(sys.argv[1]), work)
     print("WEB PORTABLE: ALL OK (no-clobber, notice/build/ELF refusal, cancellation/reap/cleanup" +

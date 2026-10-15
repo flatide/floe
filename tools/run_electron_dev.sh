@@ -2,6 +2,10 @@
 # Comparison host only. Preserve caller cwd, quoted arguments, and explicit overrides.
 set -eu
 repo=$(CDPATH= cd -P "$(dirname "$0")/.." && pwd)
+if [ -n "${ELECTRON_RUN_AS_NODE-}${NODE_OPTIONS-}${NODE_PATH-}${NODE_EXTRA_CA_CERTS-}" ]; then
+    echo 'floe2 Electron: unset ELECTRON_RUN_AS_NODE, NODE_OPTIONS, NODE_PATH and NODE_EXTRA_CA_CERTS.' >&2
+    exit 2
+fi
 case "$(uname -s)" in Darwin|Linux) ;; *) echo 'Electron comparison: macOS/Linux only' >&2; exit 2 ;; esac
 if [ -z "${FLOE_ELECTRON_BIN-}" ] || [ ! -x "$FLOE_ELECTRON_BIN" ]; then
     echo 'Set FLOE_ELECTRON_BIN to the checksum-verified pinned Electron executable.' >&2

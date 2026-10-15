@@ -14,6 +14,7 @@ const { TerminalExit } = require('./terminal-exit.cjs');
 const { Downloads, blobAllowed, postAllowed, mimeAllowed, outsideProfile } = require('./downloads.cjs');
 const P = require('./policy.cjs');
 const runtime = require('./runtime.json');
+require('./x11.cjs').configureX11(app.commandLine, process.platform, process.env);
 
 app.setName('floe2 Electron comparison');
 app.enableSandbox();
@@ -132,7 +133,7 @@ async function finish(code) {
   clipboardAccess?.end();
   if (close) close.end();
   if (recovery) recovery.end();
-  if (code !== 0 && !(stopping && code === 143)) failure = true;
+  if (code !== 0 && !(stopping && [129, 130, 143].includes(code))) failure = true;
   if (smoke && !qaCompleted) failure = true;
   const keepError = failure && !smoke && !stopping && window && !window.isDestroyed();
   terminalExit.begin(!!keepError);
@@ -340,6 +341,9 @@ app.whenReady().then(async () => {
     '--jobs', '4', '--raster-jobs', '4', '--refinement', 'off'] : emptySmoke || signalSmoke || downloadSmoke ? [] : (args[0] === 'view' ? args.slice(1) : args);
   if (clipSmoke) viewArgs.push('--budget-mb', '256'); // leave managed capacity for explicit exact export
   if (paritySmoke) viewArgs.push('--raw');
+  // These QA probes explicitly compare/await margin crops. Production is off
+  // by default; a default change must not silently disable the tested path.
+  if (layoutSmoke || paritySmoke || recoverySmoke) viewArgs.push('--margin', 'on');
   if (smoke) viewArgs.push('--multi'); // never attach synthetic QA to a user's owner
   if (emptySmoke || signalSmoke || downloadSmoke) {
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'floe-electron-smoke-'));

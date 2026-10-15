@@ -722,7 +722,11 @@ fn main() {
     let cancellation = Arc::new(AtomicUsize::new(0));
     CANCEL.set(Arc::clone(&cancellation)).unwrap();
     let mut handlers = Vec::new();
-    for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
+    for signal in [
+        signal_hook::consts::SIGINT,
+        signal_hook::consts::SIGTERM,
+        signal_hook::consts::SIGHUP,
+    ] {
         match signal_hook::flag::register_usize(signal, Arc::clone(&cancellation), signal as usize)
         {
             Ok(id) => handlers.push(id),

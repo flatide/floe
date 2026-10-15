@@ -2,6 +2,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #[path = "../../../desktop/src/download_fs.rs"]
 mod download_fs;
+mod termination;
 #[allow(dead_code)]
 #[path = "../../../desktop/src/transfers.rs"]
 mod transfers;
@@ -11,7 +12,7 @@ use std::io::{Read, Write};
 use std::os::fd::FromRawFd;
 use std::path::Path;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicUsize, Ordering},
     Arc,
 };
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -87,7 +88,7 @@ fn readable(timeout: i32) -> Result<bool> {
     }
     Ok(n != 0)
 }
-fn run() -> Result<()> {
+fn run(stop: &Arc<AtomicUsize>) -> Result<()> {
     if std::env::args_os().len() != 1 || !stream(0) || !stream(1) {
         return Err("private pipes required".into());
     }
@@ -98,15 +99,14 @@ fn run() -> Result<()> {
         return Err(std::io::Error::last_os_error().into());
     }
     // SAFETY: fcntl returned a new uniquely owned descriptor.
-    let mut input = unsafe { std::fs::File::from_raw_fd(fd) };
+    let mut input = termination::Input {
+        file: unsafe { std::fs::File::from_raw_fd(fd) },
+        stop: Arc::clone(stop),
+    };
     let init = read_json(&mut input)?;
     let root = Path::new(field(&init, "directory")?);
     if !root.is_absolute() {
         return Err("absolute directory required".into());
-    }
-    let stop = Arc::new(AtomicBool::new(false));
-    for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
-        signal_hook::flag::register(signal, stop.clone())?;
     }
     let pending = transfers::PendingFile::new(&root.join("unpublished-download"))?;
     send(
@@ -116,7 +116,7 @@ fn run() -> Result<()> {
     let mut watching = false;
     let mut limit_sent = false;
     loop {
-        if stop.load(Ordering::Relaxed) {
+        if stop.load(Ordering::Relaxed) != 0 {
             break;
         }
         if watching
@@ -132,7 +132,11 @@ fn run() -> Result<()> {
             continue;
         }
         let mut byte = [0];
-        if input.read(&mut byte)? == 0 {
+        let n = match input.read(&mut byte) {
+            Err(_) if stop.load(Ordering::Relaxed) != 0 => break,
+            result => result?,
+        };
+        if n == 0 {
             break;
         }
         if byte[0] != b'\n' {
@@ -167,7 +171,7 @@ fn run() -> Result<()> {
             }
         } else {
             pending.copy_publish(destination, || {
-                stop.load(Ordering::Relaxed) || readable(0).unwrap_or(true)
+                stop.load(Ordering::Relaxed) != 0 || readable(0).unwrap_or(true)
             })
         };
         send(
@@ -185,7 +189,14 @@ fn run() -> Result<()> {
     result.map_err(Into::into)
 }
 fn main() {
-    if run().is_err() {
+    let termination = match termination::Termination::install() {
+        Ok(value) => value,
+        Err(_) => {
+            eprintln!("floe-electron-download: cannot install termination handlers");
+            std::process::exit(1);
+        }
+    };
+    if run(&termination.flag).is_err() {
         eprintln!("floe-electron-download: transfer not confirmed; inspect the selected folder; no replay");
         std::process::exit(1);
     }

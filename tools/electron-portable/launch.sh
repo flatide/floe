@@ -2,8 +2,8 @@
 # A terminal launcher, not a renamed/signed Finder application.
 set -eu
 bundle=$(CDPATH= cd -P "$(dirname "$0")" && pwd)
-if [ -n "${ELECTRON_RUN_AS_NODE-}${NODE_OPTIONS-}${NODE_PATH-}" ]; then
-    echo 'floe2 Electron: unset ELECTRON_RUN_AS_NODE, NODE_OPTIONS and NODE_PATH.' >&2
+if [ -n "${ELECTRON_RUN_AS_NODE-}${NODE_OPTIONS-}${NODE_PATH-}${NODE_EXTRA_CA_CERTS-}" ]; then
+    echo 'floe2 Electron: unset ELECTRON_RUN_AS_NODE, NODE_OPTIONS, NODE_PATH and NODE_EXTRA_CA_CERTS.' >&2
     exit 2
 fi
 if [ "${FLOE_ELECTRON_BIN+x}" = x ]; then

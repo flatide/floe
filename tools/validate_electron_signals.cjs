@@ -74,8 +74,10 @@ async function run(signal, mode = 'idle') {
   }
 }
 (async () => {
-  for (const signal of ['SIGTERM', 'SIGINT']) await run(signal);
+  for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) await run(signal);
   await run('SIGTERM', 'dialog');
   await run('SIGTERM', 'error');
+  await run('SIGHUP', 'dialog');
+  await run('SIGHUP', 'error');
   console.log('ELECTRON SIGNAL GATE: ALL OK');
 })().catch(e => { console.error(e.message); process.exitCode = 1; });

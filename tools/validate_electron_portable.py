@@ -25,6 +25,130 @@ def app_files():
 
 
 class LauncherTests(unittest.TestCase):
+    def test_teebox_launcher_and_readonly_preflight(self):
+        # Installed /bin/sh handles fake programs; no new executable interpreter,
+        # Chromium, design, connection, or real Linux/ETX assertion here.
+        with tempfile.TemporaryDirectory(prefix="floe-teebox-launch-") as td:
+            work = Path(td).resolve()
+            bundle = work / "bundle 한글 spaces"
+            bundle.mkdir()
+            launcher = bundle / "floe2-teebox"
+            launcher.write_text((REPO / "tools/electron-portable/teebox.sh").read_text())
+            required = ("floe2-electron", "floe2-cli", "runtime/electron",
+                        "rust/target/release/floe2-web", "rust/target/release/floe-index",
+                        "rust/target/release/floe-renderd",
+                        "electron/service/target/release/floe-electron-service",
+                        "electron/service/target/release/floe-electron-download")
+            for name in required:
+                target = bundle / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.symlink_to("/bin/sh")
+            (bundle / "runtime/libffmpeg.so").touch()
+            (bundle / "verify.sh").write_text('echo verify-only; exit "${TEST_VERIFY_EXIT:-0}"\n')
+            (work / "selfcheck").write_text('printf \'selfcheck %s\\n\' "$*" >&2; exit "${TEST_SELFCHECK_EXIT:-0}"\n')
+            (work / "view").write_text(
+                'printf \'%s\\000\' "$PWD" "$DISPLAY" "$XAUTHORITY" "$FLOE_ELECTRON_X11" "$0" "$@"\n'
+                'printf \'%s\\000\' "$FLOE_ELECTRON_BIN" "$FLOE_ELECTRON_SERVICE_BIN" '
+                '"$FLOE_ELECTRON_DOWNLOAD_BIN" "$FLOE_INDEX_BIN" "$FLOE_RENDERD_BIN" >&2\n'
+                'exit "${TEST_VIEW_EXIT:-0}"\n')
+            env = {k: v for k, v in os.environ.items()
+                   if not k.startswith(("FLOE_", "NODE_", "ELECTRON_", "TEST_"))}
+            env.update(DISPLAY="synthetic:7.0", XAUTHORITY="/synthetic/private auth")
+            mock = '''
+uname() { case "$1" in -s) echo "${TEST_OS:-Linux}";; -m) echo "${TEST_ARCH:-x86_64}";; esac; }
+id() { echo "${TEST_UID:-1000}"; }
+ldd() { echo "${TEST_LDD:-mock libraries resolved}"; return "${TEST_LDD_EXIT:-0}"; }
+. "$0"
+'''
+
+            def call(args, extra=None):
+                return subprocess.run(["sh", "-c", mock, str(launcher), *args],
+                                      cwd=work, env=dict(env, **(extra or {})),
+                                      capture_output=True, text=True, timeout=10)
+
+            args = ["view", "relative 한글.oas", "--root", "/shared folder",
+                    "--goto", "-1,2,500", "--multi", "--cell", "x ; $(false)"]
+            result = call(args)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.split("\0")[:-1],
+                             [str(work), env["DISPLAY"], env["XAUTHORITY"], "1", *args])
+            self.assertEqual(result.stderr.split("\0")[:-1], [str(bundle / name) for name in (
+                "runtime/electron", "electron/service/target/release/floe-electron-service",
+                "electron/service/target/release/floe-electron-download",
+                "rust/target/release/floe-index", "rust/target/release/floe-renderd")])
+            self.assertEqual(call(args, {"TEST_VIEW_EXIT": "17"}).returncode, 17)
+            checked = call(["--check"])
+            self.assertEqual(checked.returncode, 0, checked.stderr)
+            self.assertIn("verify-only\n", checked.stdout)
+            self.assertEqual(checked.stderr, "selfcheck --adjacent\n")
+            self.assertIn("remain untested", checked.stdout)
+            self.assertNotIn("\0", checked.stdout)
+            for extra in ({"DISPLAY": ""}, {"TEST_OS": "Darwin"}, {"TEST_ARCH": "aarch64"},
+                          {"TEST_UID": "0"}, {"FLOE_RENDERD_BIN": ""},
+                          {"FLOE_INDEX_BIN": "/old/index"}, {"NODE_OPTIONS": "synthetic"}):
+                with self.subTest(extra=extra):
+                    denied = call(args, extra)
+                    self.assertEqual(denied.returncode, 2)
+                    self.assertEqual(denied.stdout, "")
+            for extra in ({"TEST_LDD": "libfake => not found"}, {"TEST_LDD_EXIT": "1"},
+                          {"TEST_VERIFY_EXIT": "1"}, {"TEST_SELFCHECK_EXIT": "1"}):
+                denied = call(["--check"], extra)
+                self.assertNotEqual(denied.returncode, 0)
+                self.assertNotIn("checks passed", denied.stdout)
+            for args in ([], ["index", "source.jb"], ["--check", "extra"]):
+                self.assertEqual(call(args).returncode, 2)
+            self.assertEqual(call(["--help"], {"DISPLAY": "", "TEST_OS": "Darwin"}).returncode, 0)
+            (bundle / required[-1]).unlink()
+            self.assertEqual(call(["view", "source.oas"]).returncode, 2)
+
+    def test_bundled_cli_preserves_cwd_and_needs_no_display(self):
+        with tempfile.TemporaryDirectory(prefix="floe-bundled-cli-") as td:
+            work = Path(td).resolve()
+            bundle = work / "bundle 한글"
+            binary = bundle / "rust/target/release/floe2-web"
+            binary.parent.mkdir(parents=True)
+            binary.symlink_to("/bin/sh")
+            for name in ("floe-index", "floe-renderd"):
+                (binary.parent / name).symlink_to("/bin/sh")
+            launcher = bundle / "floe2-cli"
+            launcher.write_text((REPO / "tools/electron-portable/cli.sh").read_text())
+            (work / "index").write_text('printf \'%s\\000\' "$PWD" "$0" "$@"\n'
+                                        'printf \'%s\\000\' "$FLOE_INDEX_BIN" "$FLOE_RENDERD_BIN" >&2\n')
+            env = {k: v for k, v in os.environ.items()
+                   if not k.startswith("FLOE_") and k != "DISPLAY"}
+            args = ["index", "relative 한글.jb", "--level", "1,3", "--jobs", "4", "--lod"]
+            result = subprocess.run(["sh", str(launcher), *args], cwd=work, env=env,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.split("\0")[:-1], [str(work), *args])
+            self.assertEqual(result.stderr.split("\0")[:-1],
+                             [str(binary.parent / name) for name in ("floe-index", "floe-renderd")])
+            for key in ("FLOE_INDEX_BIN", "FLOE_RENDERD_BIN"):
+                denied = subprocess.run(["sh", str(launcher), *args], cwd=work,
+                                        env=dict(env, **{key: ""}), capture_output=True,
+                                        text=True, timeout=10)
+                self.assertEqual(denied.returncode, 2)
+                self.assertEqual(denied.stdout, "")
+            (binary.parent / "floe-index").unlink()
+            missing = subprocess.run(["sh", str(launcher), *args], cwd=work,
+                                     env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(missing.returncode, 2)
+            self.assertEqual(missing.stdout, "")
+
+    def test_x11_host_policy(self):
+        subprocess.run(["node", "--test", str(REPO / "electron/x11.test.cjs"),
+                        str(REPO / "electron/layout-qa.test.cjs")],
+                       check=True, timeout=10, capture_output=True)
+
+    def test_development_launcher_rejects_runtime_injection_before_exec(self):
+        for key in ("ELECTRON_RUN_AS_NODE", "NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS"):
+            env = dict(os.environ, FLOE_ELECTRON_BIN="/bin/sh", **{key: "synthetic"})
+            result = subprocess.run(["sh", str(REPO / "tools/run_electron_dev.sh")],
+                                    env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stdout, "")
+            self.assertIn("unset", result.stderr)
+
     def test_caller_cwd_arguments_overrides_and_no_fallback(self):
         with tempfile.TemporaryDirectory(prefix="floe-electron-launch-") as td:
             root = Path(td).resolve()
@@ -40,7 +164,7 @@ class LauncherTests(unittest.TestCase):
             launcher.write_text((REPO / "tools/electron-portable/launch.sh")
                                 .read_text().replace("@RUNTIME@", "mock runtime"))
             env = {k: v for k, v in os.environ.items() if not k.startswith("FLOE_")}
-            for key in ("ELECTRON_RUN_AS_NODE", "NODE_OPTIONS", "NODE_PATH"):
+            for key in ("ELECTRON_RUN_AS_NODE", "NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS"):
                 env.pop(key, None)
 
             def call(extra=None):
@@ -57,7 +181,7 @@ class LauncherTests(unittest.TestCase):
             self.assertEqual(call({"FLOE_ELECTRON_BIN": str(runtime)}).returncode, 0)
             for value in ("", "relative", str(root / "missing"), str(root)):
                 self.assertNotEqual(call({"FLOE_ELECTRON_BIN": value}).returncode, 0)
-            for key in ("ELECTRON_RUN_AS_NODE", "NODE_OPTIONS", "NODE_PATH"):
+            for key in ("ELECTRON_RUN_AS_NODE", "NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS"):
                 result = call({key: "synthetic"})
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(result.stdout, "")
@@ -125,6 +249,24 @@ def inspect_bundle(bundle):
     manifest = json.loads((bundle / "BUNDLE.json").read_text())
     assert manifest["format"] == 1
     assert manifest["product"] == "floe2-electron-comparison"
+    assert manifest["electron_fuses"] == {"policy": "floe-electron-fuses-v1", "schema": 1, "wire": "000000001"}
+    fuse_file = bundle / "runtime" / (
+        "Electron.app/Contents/Frameworks/Electron Framework.framework/Versions/A/Electron Framework"
+        if manifest["target"].endswith("-apple-darwin") else "electron")
+    sentinel = b"dL7pKGdnNz796PbbjQWNKmHXBZaB9tsX"
+    offsets, consumed, carry = [], 0, b""
+    with fuse_file.open("rb") as stream:
+        while block := stream.read(1024 * 1024):
+            data = carry + block
+            start = 0
+            while (at := data.find(sentinel, start)) >= 0:
+                offsets.append(consumed - len(carry) + at + len(sentinel))
+                start = at + 1
+            consumed += len(block)
+            carry = data[-(len(sentinel) - 1):]
+        assert len(offsets) == 1, "ambiguous/missing fuse wire"
+        stream.seek(offsets[0])
+        assert stream.read(11) == b"\x01\x09000000001", "runtime fuse policy mismatch"
     expected = manifest["files"]
     found = set()
     for directory, dirs, files in os.walk(bundle, followlinks=False):
@@ -149,6 +291,7 @@ def inspect_bundle(bundle):
                         assert hashlib.file_digest(stream, "sha256").hexdigest() == entry["sha256"]
     assert found == set(expected)
     for name in ("runtime/LICENSE", "runtime/LICENSES.chromium.html", "NOTICES/INVENTORY.txt",
+                 "floe2-teebox", "floe2-cli", "rust/target/release/floe2-web", "electron/x11.cjs",
                  "electron/main.cjs", "rust/target/release/floe-index",
                  "rust/target/release/floe-renderd",
                  "electron/service/target/release/floe-electron-service",

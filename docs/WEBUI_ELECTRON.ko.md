@@ -97,6 +97,9 @@ bootstrap·저장·index를 재전송하지 않는다. Chromium 표시 프로세
 
 ### 개발 실행
 
+2026-09-29: TeeBox에서 쓸 **서버 없는 standalone**의 고정 번들 실행기와 동봉 CLI는
+[TeeBox 실행 안내](WEBUI_TEEBOX_STANDALONE.ko.md)를 따른다. 아래는 저장소 개발 실행이다.
+
 현재는 저장소 기반 비교판이며 `.app`/RPM/portable 완성 패키지가 아니다. 메뉴 코드도
 `desktop/ui/menu-action.js`를 재사용하므로 `electron` 디렉터리만 떼어 배포하지 않는다.
 공식 런타임 archive를 `runtime.json`의 SHA-256으로 검증하고 전체 내용(Helper,

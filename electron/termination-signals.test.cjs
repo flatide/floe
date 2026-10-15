@@ -9,8 +9,9 @@ test('rearm replaces only its own watchers and never duplicates callbacks', () =
   for (let i = 0; i < 3; i++) rearm();
   assert.equal(process.listenerCount('SIGINT'), 2);
   assert.equal(process.listenerCount('SIGTERM'), 1);
+  assert.equal(process.listenerCount('SIGHUP'), 1);
   assert.deepEqual(calls, []); // installation must never authorize a shutdown
-  process.emit('SIGINT'); process.emit('SIGTERM');
-  assert.deepEqual(calls, ['SIGINT', 'SIGTERM']);
+  process.emit('SIGINT'); process.emit('SIGTERM'); process.emit('SIGHUP');
+  assert.deepEqual(calls, ['SIGINT', 'SIGTERM', 'SIGHUP']);
   assert.deepEqual(other, ['other']);
 });

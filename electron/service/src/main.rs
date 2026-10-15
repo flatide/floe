@@ -4,6 +4,7 @@
 
 #[path = "../../../desktop/src/service.rs"]
 mod service;
+mod termination;
 
 use floe_app::embedded::{validate_ready, Session};
 use floe_app_core::{Error, ErrorKind, Result};
@@ -108,7 +109,7 @@ fn private_pipe(fd: libc::c_int) -> bool {
 }
 
 #[cfg(unix)]
-fn run() -> Result<i32> {
+fn run(stop: &Arc<AtomicUsize>) -> Result<i32> {
     if std::env::args_os().len() != 1 || !private_pipe(0) || !private_pipe(1) {
         return Err(invalid());
     }
@@ -119,22 +120,25 @@ fn run() -> Result<i32> {
         return Err(invalid());
     }
     // SAFETY: a new uniquely owned CLOEXEC duplicate of the validated stdin.
-    let mut input = unsafe { std::fs::File::from_raw_fd(fd) };
-    let request = read_json(&mut input)?;
+    let mut input = termination::Input {
+        file: unsafe { std::fs::File::from_raw_fd(fd) },
+        stop: Arc::clone(stop),
+    };
+    let request = read_json(&mut input)
+        .map_err(|e| floe_app_core::check_cancelled(stop).err().unwrap_or(e))?;
     let present = Arc::new(AtomicBool::new(false));
-    let Some(mut session) =
-        Session::electron(&args(&request)?, &AtomicUsize::new(0), Arc::clone(&present))?
-    else {
+    let Some(mut session) = Session::electron(&args(&request)?, stop, Arc::clone(&present))? else {
         send(json!({"v":1,"event":"forwarded"}))?;
         return Ok(0);
     };
     send(json!({"v":1,"event":"starting"}))?;
     if session.needs_initial_directory() {
         send(json!({"v":1,"event":"directory"}))?;
-        let choice = read_json(&mut input)?;
+        let choice = read_json(&mut input)
+            .map_err(|e| floe_app_core::check_cancelled(stop).err().unwrap_or(e))?;
         session.set_initial_directory(Path::new(directory(&choice)?))?;
     }
-    let mut service = service::Service::start(session)?;
+    let mut service = service::Service::start_with_stop(session, Arc::clone(stop))?;
     let mut closing = false;
     let mut bad_control = false;
     let mut command = Vec::new();
@@ -165,7 +169,11 @@ fn run() -> Result<i32> {
             }
             if result > 0 {
                 let mut bytes = [0; 64];
-                let n = input.read(&mut bytes).map_err(|_| invalid())?;
+                let n = input.read(&mut bytes).map_err(|_| {
+                    floe_app_core::check_cancelled(stop)
+                        .err()
+                        .unwrap_or_else(invalid)
+                })?;
                 if n == 0 {
                     closing = true; // parent death/EOF revokes the whole session
                 } else {
@@ -202,12 +210,25 @@ fn run() -> Result<i32> {
 }
 
 fn main() {
+    let termination = match termination::Termination::install() {
+        Ok(value) => value,
+        Err(_) => {
+            eprintln!("floe-electron-service: cannot install termination handlers");
+            std::process::exit(1);
+        }
+    };
     #[cfg(unix)]
-    let result = run();
+    let result = run(&termination.flag);
     #[cfg(not(unix))]
     let result: Result<i32> = Err(invalid());
+    let signal = termination.flag.load(Ordering::Relaxed);
+    // run has returned: owned Session/Service have cancelled and joined even
+    // if the interrupt arrived during startup rather than the HTTP loop.
     match result {
         Ok(code) => std::process::exit(code),
+        Err(error) if signal != 0 && error.kind == ErrorKind::Cancelled => {
+            std::process::exit(128 + signal as i32)
+        }
         Err(_) => {
             // Never echo malformed input, paths or bootstrap values. The shell
             // reports this fixed error; raw service stderr is not a wire frame.

@@ -14,8 +14,18 @@ pub struct Service {
     signals: Vec<signal_hook::SigId>,
 }
 impl Service {
+    #[allow(dead_code)] // Frozen WK host; Electron installs before pipe startup.
     pub fn start(session: Session) -> Result<Self> {
         let stop = Arc::new(AtomicUsize::new(0));
+        Self::spawn(session, stop, true)
+    }
+    /// The pipe host installs handlers before its initial/folder handshake.
+    /// It keeps that guard alive through join; do not replace its stop reason.
+    #[allow(dead_code)] // Electron entry point; the frozen WK host uses start.
+    pub fn start_with_stop(session: Session, stop: Arc<AtomicUsize>) -> Result<Self> {
+        Self::spawn(session, stop, false)
+    }
+    fn spawn(session: Session, stop: Arc<AtomicUsize>, install_signals: bool) -> Result<Self> {
         let (tx, ready) = mpsc::sync_channel(1);
         let mut service = Self {
             ready,
@@ -23,7 +33,14 @@ impl Service {
             thread: None,
             signals: Vec::new(),
         };
-        for n in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
+        for n in [
+            signal_hook::consts::SIGINT,
+            signal_hook::consts::SIGTERM,
+            signal_hook::consts::SIGHUP,
+        ]
+        .into_iter()
+        .filter(|_| install_signals)
+        {
             service.signals.push(
                 signal_hook::flag::register_usize(n, Arc::clone(&service.stop), n as usize)
                     .map_err(|_| Error::input("cannot register desktop termination handler"))?,
@@ -44,7 +61,9 @@ impl Service {
         Ok(service)
     }
     pub fn cancel(&self) {
-        self.stop.store(15, Ordering::Relaxed);
+        let _ = self
+            .stop
+            .compare_exchange(0, 15, Ordering::Relaxed, Ordering::Relaxed);
     }
     pub fn finished(&self) -> bool {
         self.thread.as_ref().is_none_or(|t| t.is_finished())

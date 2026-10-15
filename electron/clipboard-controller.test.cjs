@@ -1,15 +1,32 @@
 'use strict';
 const test = require('node:test'), assert = require('node:assert/strict');
-const { ClipboardController, activationProbe } = require('./clipboard-controller.cjs');
+const fs = require('node:fs'), vm = require('node:vm');
+const { activationProbe } = require('./clipboard-controller.cjs');
+const source = fs.readFileSync(require.resolve('./clipboard-controller.cjs'), 'utf8');
 const origin = 'http://127.0.0.1:32123', owner = {};
 const details = { isMainFrame: true, requestingUrl: origin + '/' };
 function setup(probe = async () => true) {
   const state = { active: true, origin, probes: 0 };
+  // Control both the monotonic deadline and timer delivery. Real 10ms timers
+  // can expire during a parallel Rust build even for an immediate probe.
+  let now = 0, nextTimer = 0;
+  const timers = new Map(), module = { exports: {} };
+  vm.runInNewContext(source, { module, require, performance: { now: () => now },
+    setTimeout: (fn, delay) => { const id = ++nextTimer; timers.set(id, { fn, at: now + delay }); return id; },
+    clearTimeout: id => timers.delete(id),
+  });
+  const { ClipboardController } = module.exports;
   const c = new ClipboardController({ origin: () => state.origin, owns: web => web === owner,
     allowed: () => state.active, probe: web => { state.probes++; return probe(web); }, timeout: 10 });
   const request = (web = owner, permission = 'clipboard-sanitized-write', d = details) =>
     new Promise(resolve => c.request(web, permission, resolve, d));
-  return { c, state, request };
+  const advance = ms => {
+    now += ms;
+    for (const [id, timer] of timers) {
+      if (timer.at <= now) { timers.delete(id); timer.fn(); }
+    }
+  };
+  return { c, state, request, advance };
 }
 test('only the active owner root can request a transient sanitized write', async () => {
   const { request, state } = setup();
@@ -39,9 +56,11 @@ test('activation must be exactly true; unavailable/throwing probes deny', async 
 });
 test('timeout denies once; a stalled probe keeps its credit until it settles', async () => {
   const resolutions = [], calls = [];
-  const { c } = setup(() => new Promise(r => resolutions.push(r)));
+  const { c, advance } = setup(() => new Promise(r => resolutions.push(r)));
   c.request(owner, 'clipboard-sanitized-write', v => calls.push(v), details);
-  await new Promise(r => setTimeout(r, 25));
+  await new Promise(r => setImmediate(r));
+  advance(9); assert.deepEqual(calls, []);
+  advance(1);
   assert.deepEqual(calls, [false]);
   assert.equal(await new Promise(r => c.request(owner, 'clipboard-sanitized-write', r, details)), false);
   assert.equal(resolutions.length, 1);
@@ -55,6 +74,17 @@ test('a busy event loop cannot grant after the deadline before the timer runs', 
   const { c, request } = setup(async () => { c.now = () => 11; return true; });
   c.now = () => 0;
   assert.equal(await request(), false);
+});
+test('deadline before probe dispatch denies without starting a late activation read', async () => {
+  const { c, state, advance } = setup();
+  const replies = [];
+  c.request(owner, 'clipboard-sanitized-write', value => replies.push(value), details);
+  advance(10);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(replies, [false]);
+  assert.equal(state.probes, 0);
+  assert.equal(c.pending, null);
+  assert.equal(c.probing, false);
 });
 test('overlapping requests deny; invalidation/end fence the pending callback', async () => {
   for (const end of [false, true]) {

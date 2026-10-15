@@ -321,6 +321,7 @@ if os.environ.get("FAKE_WAIT"):
         sys.exit(128 + n)
     signal.signal(signal.SIGINT, interrupted)
     signal.signal(signal.SIGTERM, interrupted)
+    signal.signal(signal.SIGHUP, interrupted)
     print("heartbeat", file=sys.stderr, flush=True)
     ready = pathlib.Path(os.environ["FAKE_READY"])
     ready.write_text("")
@@ -363,7 +364,7 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
         assert len(log.read_text().splitlines()) == calls_before + 1, "failed first pass launched second"
         cancel_cases = [(source, ("--occupancy-only",)), (source, ("--representatives-only",)),
                         (sequence, ("--representatives", "--occupancy"))]
-        for sig, (cancel_source, cancel_args) in ((sig, case) for sig in (signal.SIGINT, signal.SIGTERM) for case in cancel_cases):
+        for sig, (cancel_source, cancel_args) in ((sig, case) for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP) for case in cancel_cases):
             ready.unlink(missing_ok=True)
             stopped.unlink(missing_ok=True)
             cancel_cache = vfs_cache(cancel_source)
@@ -393,7 +394,7 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
             assert not (cancel_cache / "design.ovr.tmp").exists()
             assert len(log.read_text().splitlines()) == calls_before + 1, "cancel launched next pass"
         assert "up to date" in run("index", source, env=env).stdout, "lease leaked after cancel"
-        print("app CLI: override/version, argv, exit status, writer lock and SIGINT/SIGTERM cleanup ok")
+        print("app CLI: override/version, argv, exit status, writer lock and SIGINT/SIGTERM/SIGHUP cleanup ok")
     print("RUST APP CLI: ALL OK")
 
 
