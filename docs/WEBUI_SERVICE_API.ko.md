@@ -348,6 +348,10 @@ M4g-20은 승인된 유도 legacy 임시 이름을 인접 파일 다음 읽기 �
 임시 디렉터리는 browse/쓰기 root가 아니고 read-only store는 native 초안/게시도
 거부한다. waive는 검증된 FD를 reader에 설치하고, note는 기존 display 경로로만
 읽는다. 다른 reviewer/pack으로의 자동 승계는 없다.
+2026-09-28 후속 보강: legacy 임시 파일은 열린 FD의 UID가 서비스의 effective UID와
+같아야 읽는다. 이름 선택 시점의 검사만 신뢰하지 않고 hash/parse/binding 전에
+거부하며, 인접 sidecar의 기존 공유 파일시스템 정책은 바꾸지 않는다. reviewer 태그를
+OS 사용자 인증으로 해석하지 않는다([회귀·경계](WEBUI_REVIEW_CLIENT_SAFETY.ko.md)).
 M4g-21은 명시 `--floe-reviewer`의 ASCII에서 현재 인접 ICE를 선택한다. 카탈로그
 `drc.metadata.review_cache`는 `explicit`(직접 ICE), `cache`(현재 인접 ICE),
 `missing`(캐시 없음, ASCII), `ignored`(오래되거나 무효인 캐시, ASCII), 그 외 등록은
@@ -796,22 +800,27 @@ anchor를 연결한다. matching ACK와 writer 완료를 모두 확인한 foregr
 stale 검사를 UI에 연결했으며 결정적 하네스와 실제 브라우저 수용은 구별한다.
 로컬 anchor는 접근 권한 토큰이 아니다.
 
-## 6. 인덱스 revision — 제안 비교, hot reload 미구현
+## 6. 인덱스 revision — opt-in 구현, 자동 hot reload 없음
 
-mtime/size는 현재 freshness에 필요한 정보지만 일관된 다중 파일 transaction ID는
-아니다. OVM/OVP/OVT/OVO를 다른 시점 파일과 혼합하지 않아야 한다.
+2026-09-28 현재 IR-1~4의 별도 full-build·pin·명시적 Check/Use·로컬 회수/복구를
+구현했다. 상세 계약과 로컬 검증은 [인덱스 수명주기](WEBUI_INDEX_REVISIONS.ko.md)를
+따른다. 기존 Run index/CLI를 불변 저장소로 자동 전환하지 않으며 실제 GUI·현장 수용은 별도다.
+
+초기 대안 비교와 현재 선택은 다음과 같다.
 
 | 안 | 장점 | 제약 |
 |---|---|---|
 | 현 위치 캐시 + source별 read/write lease | 초기 구현이 작고 현재 cache layout 재사용 | 열린 세션이 있으면 관리형 재색인을 대기/거부. 외부 legacy indexer에는 lock 강제 불가 |
-| 불변 revision 디렉터리 + 원자적 manifest 전환 | 기존 세션 pin, 새 세션 새 revision, 참조 종료 후 회수 가능 | 추가 디스크·게시/회수/실패 복구 설계와 indexer 출력 경로 검증 필요 |
+| 불변 revision 디렉터리 + 원자적 manifest 전환 | opt-in 구현. 기존 세션 pin, 명시 Check/Use로 새 revision 선택 | 매 빌드 전체 캐시 추가. inactive v3 set만 모든 회수 조건·별도 승인 충족 시 삭제. 자동 GC/용량 상한 없음 |
 | mtime 감지 후 파일별 즉시 재열기 | 겉보기 단순 | 혼합 세대/열린 mmap/GUI frame 불일치. 채택하지 않음 |
 
-M1 로컬 실험은 **색인 완료 후 열기, 열려 있는 동안 외부 교체 없음**을 전제로
-한다. 서비스가 실행하는 index는 모든 관련 view/worker lease 확인 후 진행한다.
+기존 mutable 캐시는 **색인 완료 후 열기, 열려 있는 동안 외부 교체 없음**을 전제로
+한다. 기존 관리형 Index는 모든 관련 view/worker lease 확인 후 진행한다.
 old GTK/외부 CLI가 같은 캐시를 교체하는 경우까지 보호했다고 주장하지 않는다.
-관리형 서버의 무중단 재색인에는 불변 revision+manifest 안을 우선 제안하되,
-저장량/보존/운영 정책 승인 전 구현 범위로 확정하지 않는다.
+불변 revision 경로는 이전 캐시를 수정하지 않고 별도 빌드 후 set current만 게시한다.
+기존 뷰는 같은 pin을 유지한다. 다만 빌드 중 owner operation 직렬화로 입력은 일시
+잠기며, Use는 old worker를 reap한 뒤 새 worker를 시작한다. 렌더 중단 없는 hot-swap을
+약속하지 않으며 새 worker 시작 실패 후 자동 rollback도 없다.
 
 덱 snapshot은 각 source의 revision과 선택/좌표/spec identity를 묶는다.
 `.ovo` 추가도 다른 표시 결과를 만들므로 표시 revision 변경에 포함한다.
@@ -819,8 +828,15 @@ old GTK/외부 CLI가 같은 캐시를 교체하는 경우까지 보호했다고
 완성 snapshot을 교체한다. 사용 중 파일을 삭제하지 않는다. 원본 OASIS 전체 hash를
 open마다 계산하는 방식으로 대형 파일 비용을 늘리지 않는다.
 
-사용자가 미룬 열린 GUI `.ovo` 자동 감지는 이 설계만으로 해결 처리하지 않는다.
-revision의 디스크 형식/보존량/무중단 업데이트는 별도 설계 판정 항목이다.
+파일 `Stamp`는 dev/inode/len/ns mtime/ctime 비교이지 내용 해시나 다중 파일
+transaction ID가 아니다. 봉인된 파일 집합, set manifest, reader lease와 함께 사용한다.
+v1/v2는 읽기만 호환하고, 회수는 게시 증거가 있는 inactive v3 set과 전용 멤버에
+한정한다. current·native reader·정확한 파일 집합을 재검사하고 5분 preview의 별도
+1회 승인을 소비한 뒤 journal을 sync하고 삭제한다. inventory의 idle이나 pin drop은
+삭제 권한이 아니다. 부분 삭제는 새 preview/승인으로만 복구한다.
+
+사용자가 미룬 열린 GUI `.ovo` 자동 감지는 이 구현으로 해결 처리하지 않는다.
+NFS 회수·자동 GC·구형/미게시 후보 청소·remount/cross-host identity 재사용도 제공하지 않는다.
 
 ## 7. 공유 서버 자원 — 로컬 예약 구현과 운영 제안
 
@@ -898,6 +914,8 @@ M2/M4 gate: DRC 대형 synthetic pack paging/읽기와 동시 waive/note 쓰기,
 재접속 중복 실행 방지, query scene identity, jobdeck skip/capability. 최종
 Python-free 판정은 M0의 전체 대조표와 portable 검사 통과 후다.
 
-미결: 의존성 lock/feature/MSRV, 브라우저/프론트 빌드 하한, CLI 무효 옵션 정리,
-query wire 확장 세부, shared supervisor 배포, resource 숫자, revision 게시·회수,
-원격 TLS/launcher bootstrap, 보조 명령 이름. 미결인 정책을 구현 완료로 표시하지 않는다.
+초기 미결 목록 중 의존성/브라우저 하한·CLI 명시 거부·scene-pinned query·로컬
+bootstrap·보조 명령과 revision 게시/명시 회수는 후속 단계에서 구현·정리했다.
+이를 현장 수용 완료로 확대하지 않는다. shared supervisor 운영, 서버 전체 자원 정책,
+원격 TLS, 실제 브라우저·RHEL/ETX 수용 및 보류 범위는
+[현재 잔여 표](WEBUI_REMAINING.ko.md)를 기준으로 한다.

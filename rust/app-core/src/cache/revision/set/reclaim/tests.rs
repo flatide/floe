@@ -9,9 +9,13 @@ struct Fixture {
     store: Store,
     old: String,
     member: String,
+    hierarchy: bool,
 }
 impl Fixture {
     fn new() -> Self {
+        Self::with_hierarchy(false)
+    }
+    fn with_hierarchy(hierarchy: bool) -> Self {
         let path = std::env::temp_dir().join(format!(
             "floe-reclaim-{}-{}",
             std::process::id(),
@@ -37,6 +41,7 @@ impl Fixture {
             store,
             old: "a".repeat(32),
             member: "b".repeat(32),
+            hierarchy,
         };
         f.publish('a', 'b');
         f.publish('c', 'd');
@@ -63,6 +68,9 @@ impl Fixture {
         fs::create_dir(&path).unwrap();
         for name in ["meta.json", "design.ovm", "design.ovp"] {
             fs::write(path.join(name), b"synthetic payload").unwrap();
+        }
+        if self.hierarchy {
+            fs::write(path.join("design.ovh"), b"synthetic hierarchy").unwrap();
         }
         let record = Record {
             version: 3,
@@ -164,6 +172,39 @@ fn read_only_preview_and_one_explicit_reclamation_preserve_current_and_source() 
             .unwrap()
             .removed_files,
         0
+    );
+}
+
+#[test]
+fn sealed_hierarchy_is_counted_and_reclaimed_but_unsealed_files_are_protected() {
+    let f = Fixture::with_hierarchy(true);
+    let current = f.current_bytes();
+    let inventory =
+        crate::cache::revision::inventory::inspect(&f.source, &AtomicUsize::new(0)).unwrap();
+    assert_eq!(inventory.unknown_entries, 0);
+    assert!(!inventory.partial);
+    let preview = f.prepare().unwrap();
+    assert_eq!(preview.summary.files, 7);
+    let bytes = preview.summary.logical_bytes.clone();
+    let outcome = preview.execute(&AtomicUsize::new(0)).unwrap();
+    assert_eq!(outcome.status, "complete");
+    assert_eq!(outcome.removed_files, 7);
+    assert_eq!(outcome.removed_logical_bytes, bytes);
+    assert!(!f.member_dir().exists());
+    assert_eq!(f.current_bytes(), current);
+    assert!(f
+        .source_store()
+        .path()
+        .join("d".repeat(32))
+        .join("design.ovh")
+        .exists());
+
+    let f = Fixture::new();
+    fs::write(f.member_dir().join("design.ovh"), b"not in the seal").unwrap();
+    f.assert_protected();
+    assert_eq!(
+        fs::read(f.member_dir().join("design.ovh")).unwrap(),
+        b"not in the seal"
     );
 }
 

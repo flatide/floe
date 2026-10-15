@@ -101,6 +101,11 @@ fn actual_build_pins_old_bytes_and_publishes_only_complete_generations() {
     let old = fs::read(first.directory().join("design.ovp")).unwrap();
     assert!(first.directory().join("design.ovo").is_file());
     assert!(first.directory().join("design.ovr").is_file());
+    assert!(first.directory().join("design.ovh").is_file());
+    let seal: serde_json::Value =
+        serde_json::from_slice(&fs::read(first.directory().join("revision.json")).unwrap())
+            .unwrap();
+    assert!(seal["files"]["design.ovh"].is_object());
     let mut build = Build::start(&resources, &source, &options, binary.clone(), &stop).unwrap();
     wait(&mut build);
     let second = build.publish(&stop).unwrap().snapshot;
@@ -120,6 +125,21 @@ fn actual_build_pins_old_bytes_and_publishes_only_complete_generations() {
     assert!(cancelled_dir.is_dir());
     assert_eq!(store.pin().unwrap().unwrap().id(), second.id());
     // A corrupt or source-raced successful build cannot replace current.
+    for wrong_source in [false, true] {
+        let mut build = Build::start(&resources, &source, &options, binary.clone(), &stop).unwrap();
+        wait(&mut build);
+        let summary = build.directory().join("design.ovh");
+        let mut bytes = fs::read(&summary).unwrap();
+        if wrong_source {
+            let size = u64::from_le_bytes(bytes[24..32].try_into().unwrap());
+            bytes[24..32].copy_from_slice(&size.wrapping_add(1).to_le_bytes());
+        } else {
+            bytes[0] = b'?';
+        }
+        fs::write(summary, bytes).unwrap();
+        assert!(build.publish(&stop).is_err());
+        assert_eq!(store.pin().unwrap().unwrap().id(), second.id());
+    }
     let mut build = Build::start(&resources, &source, &options, binary.clone(), &stop).unwrap();
     wait(&mut build);
     fs::write(build.directory().join("design.ovm"), b"corrupt").unwrap();

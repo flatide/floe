@@ -28,11 +28,17 @@ impl Drop for Root {
 // File-set pin tests do not pretend these bytes are a valid geometry cache.
 // The separate actual-index integration gate covers validation/publication.
 fn sealed(store: &Store, digit: char) -> (PathBuf, Vec<u8>) {
+    sealed_with_files(store, digit, &[])
+}
+fn sealed_with_files(store: &Store, digit: char, optional: &[&str]) -> (PathBuf, Vec<u8>) {
     fs::create_dir_all(store.path()).unwrap();
     let revision = digit.to_string().repeat(32);
     let path = store.path().join(&revision);
     fs::create_dir(&path).unwrap();
-    for name in ["meta.json", "design.ovm", "design.ovp"] {
+    for name in ["meta.json", "design.ovm", "design.ovp"]
+        .iter()
+        .chain(optional)
+    {
         fs::write(path.join(name), revision.as_bytes()).unwrap();
     }
     let record = Record {
@@ -98,7 +104,7 @@ fn malformed_pointer_never_falls_back_to_legacy_or_traverses() {
 
 #[test]
 fn optional_summaries_and_inode_replacement_are_part_of_pin() {
-    for change in 0..4 {
+    for change in 0..5 {
         let root = Root::new();
         let store = root.store();
         let (path, bytes) = sealed(&store, 'a');
@@ -111,10 +117,41 @@ fn optional_summaries_and_inode_replacement_are_part_of_pin() {
                 fs::write(path.join("design.ovp"), b"a".repeat(32)).unwrap();
             }
             2 => fs::write(path.join("design.ovm"), b"altered geometry").unwrap(),
+            3 => fs::write(path.join("design.ovh"), b"unsealed hierarchy").unwrap(),
             _ => fs::remove_file(path.join("revision.json")).unwrap(),
         }
         assert!(pin.validate().is_err());
         assert!(store.pin().is_err());
+    }
+}
+
+#[test]
+fn hierarchy_summary_stamp_detects_mutation_removal_replacement_and_links() {
+    for change in 0..5 {
+        let root = Root::new();
+        let store = root.store();
+        let (path, bytes) = sealed_with_files(&store, 'a', &["design.ovh"]);
+        create_record(&store.path().join("current.json"), &bytes).unwrap();
+        let pin = store.pin().unwrap().unwrap();
+        assert!(pin.record.files.contains_key("design.ovh"));
+        pin.validate().unwrap();
+        let summary = path.join("design.ovh");
+        match change {
+            0 => fs::write(&summary, b"changed hierarchy").unwrap(),
+            1 => fs::remove_file(&summary).unwrap(),
+            2 => {
+                let replacement = root.0.join("replacement");
+                fs::write(&replacement, fs::read(&summary).unwrap()).unwrap();
+                fs::rename(replacement, &summary).unwrap();
+            }
+            3 => {
+                fs::remove_file(&summary).unwrap();
+                std::os::unix::fs::symlink(root.0.join("missing"), &summary).unwrap();
+            }
+            _ => fs::hard_link(&summary, root.0.join("alias")).unwrap(),
+        }
+        assert!(pin.validate().is_err(), "change {change}");
+        assert!(store.pin().is_err(), "change {change}");
     }
 }
 

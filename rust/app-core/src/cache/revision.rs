@@ -23,6 +23,7 @@ const FILES: &[&str] = &[
     "design.ovt",
     "design.ovo",
     "design.ovr",
+    "design.ovh",
 ];
 const MAX_RECORD: u64 = 16 * 1024;
 fn valid_id(value: &str) -> bool {
@@ -336,6 +337,11 @@ impl Candidate {
         }
         if stamps.contains_key("design.ovr") {
             floe_vfs::representatives::File::open(utf8(&path)?, &vfs.ovm).map_err(invalid)?;
+        }
+        if stamps.contains_key("design.ovh") {
+            floe_vfs::hiersum::HierSummary::open(utf8(&path.join("design.ovh"))?)
+                .and_then(|h| h.validate_against(&vfs.ovm))
+                .map_err(invalid)?;
         }
         drop(vfs);
         let record = Record {

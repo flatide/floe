@@ -23,6 +23,52 @@ backend와 IR-4b-2의 **owner 미리보기·별도 1회 승인·응답 유실/�
 | IR-4b-1 | native 직접 reader 잠금, inactive v3 set 회수·부분 삭제 복구 backend | 구현. 로컬 합성 자동 검증; 아래 계약 참조 |
 | IR-4b-2 | owner 전용 미리보기·1회 승인 UI/API, 응답 유실/새 세션 복구 연결 | 구현. 조회 결과는 삭제 권한이 아님; 실제 UI/현장 수용 별도 |
 
+## Stamp와 revision identity — 2026-09-28 코드 대조
+
+현재 새 source/set seal은 **v3**다. 형식 버전, 빌드마다 생성하는 128-bit 무작위
+revision ID(소문자 hex 32자), 파일의 `Stamp`, open별 dataset revision·worker epoch는
+서로 다른 값이다. ID나 형식 버전이 같다는 이유만으로 파일 검증을 생략하지 않는다.
+
+`Stamp`는 `dev`, `ino`, `len`, `mtime`, `mtime_ns`, `ctime`, `ctime_ns`의
+**모든 필드가 같은지** 비교하는 파일 메타데이터 스냅샷이다. `ctime`은 생성 시각이
+아니라 inode 변경 시각이며, 읽기로 달라질 수 있는 `atime`은 포함하지 않는다.
+내용 해시·서명·분산 저장소의 transaction ID가 아니다. 동일 바이트를 복사해
+inode가 바뀌거나 touch/권한 변경으로 시각이 바뀌어도 검증은 실패할 수 있다.
+반대로 전체 바이트의 암호학적 동일성을 입증하지는 않는다.
+
+| 검사 대상/시점 | 검사와 불일치 시 동작 |
+|---|---|
+| 빌드의 원본 `source_stamp` | 시작 시 채취하고 seal/set 게시·current 교체 전에 재검사. 바뀌면 게시 거부 |
+| 소스 `Snapshot::validate` | store/revision 디렉터리의 `(dev, ino)`, 봉인된 cache 파일의 존재 여부·Stamp, seal record를 검사. 원본 freshness 검사는 별도 |
+| 단일 소스 `Snapshot::open_layout` | cache 검증 전후에 Layout을 열고 원본 Stamp 차이는 `source_stale`로 표시. 이 읽기와 관리형 set 열기의 정책은 다름 |
+| 관리형 set의 새 pin/Check/Use | set 원본과 각 소스 Stamp도 같아야 함. 기존 pin의 데이터 유지와 새 pin의 stale 거부를 구분 |
+| 회수 prepare/execute | 대상 파일 Stamp·디렉터리 identity·정확한 이름 집합 및 current 관측값을 확인/재확인. 잠금을 유지한 삭제 중에는 각 unlink 직전 파일 Stamp와 디렉터리 identity를 다시 확인 |
+
+cache Stamp의 대상은 `meta.json`, `design.ovm`, `design.ovp`와 존재하는
+`design.ovt`/`design.ovo`/`design.ovr`/`design.ovh`다. 필수 3개 외 요약 파일의 추가·삭제도
+pin 검증 실패다. seal은 별도로 record/bytes를 비교한다. 일반 pin 검증은 이
+지정 파일 집합을 확인하며, **알 수 없는 추가 entry까지 거부하는 것은 회수의
+전체 디렉터리 검사**다. 회수 journal은 cache 파일뿐 아니라 삭제할 seal·게시 증거의
+Stamp도 보관한다. 디렉터리는 하위 파일 삭제 때 시각이 바뀌므로 Stamp 대신
+`(dev, ino)`로 동일성을 확인한다.
+
+Stamp는 잠금 대신이 아니다. reader lease가 협조적 회수와 경합을 막고, 별도의
+VFS 구조·OVO/OVR/OVH binding 검증이 게시할 캐시의 정합성을 검사한다. 주기적 전체
+hash 검사나 열린 GUI의 외부 파일 자동 갱신은 없다. 외부 in-place 수정,
+remount/다른 host로 복사한 revision의 identity 재사용은 지원 계약 밖이다.
+
+2026-09-30: 셀 트리 병합으로 기본 생성되는 `design.ovh`가 이 목록에서 빠져 있었다.
+회수 prepare가 정상 native revision도 extra file로 거부했고, 그 전의 pin은 OVH의
+변경을 추적하지 못했다. 새 seal은 OVH를 sync·Stamp 기록하고 OVM과의 binding도
+검사한다. 사용량 집계와 명시적 회수는 같은 목록을 사용한다. OVH가 원래 없는 구
+revision은 그대로 읽지만, **OVH가 있는데 seal에 기록되지 않은 구 revision은
+자동 채택·재봉인·회수하지 않고 거부**한다. 기존 파일/current/seal을 수정하는
+마이그레이션은 추가하지 않았다. 일반 mutable cache의 읽기 정책은 변하지 않는다.
+
+구현 근거: [source Stamp/pin](../rust/app-core/src/cache/revision.rs),
+[set pin](../rust/app-core/src/cache/revision/set.rs),
+[회수 재검사](../rust/app-core/src/cache/revision/set/reclaim.rs).
+
 ## 저장과 게시 계약
 
 - 기존 캐시와 분리된 `.<source>.ice.revisions/<128-bit id>/`에 새 full-build를
@@ -75,10 +121,11 @@ filesystem이나 악의적 동일 사용자로부터의 보호를 뜻하지 않�
 수정하는 운영은 지원하지 않는다. remount/다른 host로의 identity portability도
 이번 단계에서 제공하지 않는다.
 
-## 보존과 전환의 후속 조건
+## 보존과 명시적 전환
 
 이전 revision·미게시 후보·게시 불명 증거를 자동 삭제하지 않는다. pin의 drop도
-삭제하지 않는다. 따라서 이 단계에는 디스크 사용량 상한이나 완성된 GC가 없다.
+삭제하지 않는다. 현재 IR-4b의 별도 승인 회수만 있으며 디스크 사용량 상한이나
+자동 GC는 없다.
 사용자 캐시를 재귀 삭제하거나 파일 age만으로 회수하지 않는다.
 
 IR-2는 아래의 set manifest로 덱의 선택 소스 전체를 고정한다. 새 revision이
@@ -105,8 +152,8 @@ path와 구별해야 한다. stale 버튼/실패한 준비는 이전 뷰를 그�
   기존 정책대로 거부한다. 덱 occupancy 기본 on, 일반 기본 off를 보존한다.
 - 선택된 소스에 missing/GDS/gzip 등 지원되지 않는 멤버가 있으면 후보 생성 전
   preflight에서 실패한다. 새 backend는 불완전한 덱을 current로 게시하지 않는다.
-  기존 legacy backend의 skip/부분 덱 정책은 그대로이며, 향후 UI는 이 차이와
-  전체 재빌드 디스크 비용을 승인 전에 설명해야 한다.
+  기존 legacy backend의 skip/부분 덱 정책은 그대로이며, IR-3 UI는 이 차이와
+  전체 재빌드 디스크 비용을 승인 전에 설명한다.
 - `open_revisions`는 등록된 deck/선택 레벨에서 expected source 집합을 다시
   유도한다. manifest의 소스 집합·레벨이 정확히 맞아야 하며, 검증 전에는
   manifest가 지정한 멤버 파일을 열지 않는다. 임의 디렉터리 선택 기능이 아니다.
@@ -167,8 +214,9 @@ retained·query와 분리되고 브라우저의 두 이미지 버퍼도 비운�
 최근 operation ledger를 읽어 결과를 복구할 뿐 불명 응답/재연결에서 새 빌드나 전환
 POST를 자동 재전송하지 않는다. 현재 ID는 뷰 API와 UI에 표시한다.
 
-IR-4 전에는 이전·실패 후보가 계속 쌓인다. GC/용량 상한, 외부 캐시 수정 감지,
-NFS crash/remount·cross-host 수용, 실제 브라우저/ETX 수용은 이번 완료 범위가 아니다.
+IR-3 당시에는 이전·실패 후보가 계속 쌓였으며, 현재는 IR-4b 조건을 만족하는
+구 set만 별도 승인으로 회수한다. 자동 GC/용량 상한, 외부 캐시 교체의 자동 반영,
+NFS crash/remount·cross-host 수용, 실제 브라우저/ETX 수용은 완료 범위가 아니다.
 
 ## IR-4a 사용량 조회·보호 기반 — 2026-09-27
 
@@ -191,8 +239,9 @@ NFS crash/remount·cross-host 수용, 실제 브라우저/ETX 수용은 이번 �
   관리형 set 소유권은 **조회 시점의 관측**이다. `idle_at_scan`은 협조적 잠금이 그때
   없었다는 뜻이지 안전한 삭제 판정이 아니다. current/구형/미완료/손상/미확인 항목을
   자동으로 지우거나 “회수 가능”으로 표시하지 않는다.
-- 새 source/set seal은 **version 2**다. source seal에는 관리형 빌드가 속하는
-  dataset·set ID를 기록한다. 새 set은 자신을 위해 새로 만든 v2 source만 게시하며
+- **IR-4a 당시** source/set seal은 version 2로 확장했다(현재 새 빌드는 아래 IR-4b의
+  **v3**). source seal에는 관리형 빌드가 속하는 dataset·set ID를 기록한다.
+  당시 새 set은 자신을 위해 새로 만든 v2 source만 게시하며
   다른 set의 source pin 재사용을 거부한다. v1 set이 v2 source를 참조하는 것도
   거부한다. v1은 읽기 호환을 유지하지만 `legacy_untracked`로 표시한다. 구 실행
   파일은 v2를 거부하므로 새 게시본을 열려면 새 web/Electron backend가 필요하다.
@@ -202,11 +251,12 @@ NFS crash/remount·cross-host 수용, 실제 브라우저/ETX 수용은 이번 �
   source를 모두 pin한다. `Layout`과 `RenderSession`도 pin을 보유하며 정상 drop 시
   native worker를 먼저 reap한다. 잠금 불가 파일시스템에서는 open이 명시 실패한다.
   legacy mutable reader에는 이 잠금을 추가하지 않았다.
-- **회수를 열기 전 남은 조건**: host의 비정상 종료 뒤 native worker만 남는 경우의
+- **IR-4a 당시의 회수 선행 조건**: host의 비정상 종료 뒤 native worker만 남는 경우의
   직접 잠금/수명 계약, preview에 묶인 정확한 대상·소유권·current 재확인, writer 및
-  모든 reader에 대한 배타성, 부분 삭제·결과 불명 증거와 명시적 복구다. 지금의 v2
-  관측만으로 이 조건이 성립했다고 간주하지 않는다. IR-4b의 회수 가능 형식/reader
-  호환성 판정도 그 단계에서 확정한다. v1과 미게시/불명 후보는 계속 보존한다.
+  모든 reader에 대한 배타성, 부분 삭제·결과 불명 증거와 명시적 복구였다.
+  아래 IR-4b에서 v3·직접 native lease·재승인 복구로 구현했다. v2의
+  `idle_at_scan` 관측을 소급하여 삭제 권한으로 쓰지 않는다. v1/v2와
+  미게시/불명 후보는 계속 보존한다.
 
 이번 단계는 실제 사용자 캐시를 삭제하지 않았다. NFS 장애·cross-host 수용, 실제
 GUI·ETX 검사는 실행하지 않았으며, read-only inventory도 자동 주기 실행하지 않는다.
@@ -225,12 +275,34 @@ IR-4b-1은 `revision::reclaim::prepare`/`Prepared::execute`의 Rust backend다.
 - render-core `Cache`가 seal 있는 revision directory의 shared lock을 직접 가진다.
   따라서 호스트의 `Snapshot`/`Layout`을 닫아도 별도 renderd가 그 캐시를 사용 중이면
   배타 잠금을 얻을 수 없다. 잡덱은 각 source Cache를 덱 수명 동안 보유한다.
-  새 worker의 version handshake는 renderd **0.12.186**을 요구한다.
+  최초 구현 당시 worker 호환 버전은 **0.12.186**이었다. 현재 handshake는
+  [renderd/Cargo.toml](../rust/renderd/Cargo.toml)의 버전과 정확히 일치해야 한다
+  ([단일 버전 출처](../rust/worker-client/build.rs)); 0.12.186 이상이면 된다는 뜻이 아니다.
 - 이것은 새 cooperative reader 계약이다. 임의 구형 native 도구로 v3 디렉터리를
   직접 열거나 외부에서 in-place 변경하는 운영을 안전하다고 주장하지 않는다.
 - 성공한 current rename **뒤에만** seal과 동일한 `published.json`을 기록·sync한다.
   이 증거가 없거나 다르면 미게시/게시 불명 후보로 보호한다. 기록 실패가 이미
   끝난 게시를 rollback하거나 사용 가능한 current를 숨기지는 않는다.
+
+### 회수 가능 조건 — 모두 충족해야 함
+
+회수 단위는 **등록된 dataset의 inactive v3 set 하나와 그 set 전용 source revisions**다.
+일반 레이아웃도 1-source set으로 만들었으면 대상이 될 수 있지만, IR-1 단독 source
+revision을 개별 삭제하는 API는 없다. 다른 덱 전체를 훑어 참조 수를 세는 방식이 아니라
+v3의 set별 전용 source 소유권·새 빌드 불변식과 reader 잠금에 의존한다.
+
+| 조건 | 보호/거부되는 경우 |
+|---|---|
+| 등록된 소스·선택 레벨로 경로와 멤버를 다시 유도, set/member 모두 v3이며 owner 일치 | 임의 경로, v1/v2, standalone, 다른 set 소유, 등록/선택 불일치 |
+| 최초 회수에는 set의 seal과 `published.json` bytes 일치, 대상 ID의 pending current 없음 | 미게시/게시 불명·누락/손상 증거. set 멤버는 seal-only 빌드이므로 source별 `published.json`을 요구하지 않음 |
+| set current 존재·정합, 회수 set이 current 아님, current set이 대상 member를 참조하지 않음 | current 누락/손상, 활성 set/member. source current는 없어도 되지만 있으면 정합해야 하며 대상 source revision을 가리키면 거부 |
+| 모든 관련 store의 기존 writer lock + 대상 directory exclusive lock 확보 | 빌드 중, Snapshot/Layout/Follow/Explore/native reader 사용 중. inventory의 idle은 대체 증거가 아님 |
+| 정확한 파일 이름 집합·Stamp·디렉터리 identity 일치, 정규 단일 링크 파일 | 추가/누락/교체·변경 파일, symlink/hardlink/중첩 디렉터리. 유효 journal 복구 때만 이미 삭제된 대상의 부재 허용 |
+| 각 store가 로컬 FS allowlist에 포함, 자원 상한 안 | NFS/SMB/FUSE/overlay/미확인 FS, 1,024 sources/32 MiB journal·FD 한계 초과 |
+| 새 preview에 대한 별도 1회 승인, 5분 TTL 안의 execute 재검사, 삭제 전 journal sync 성공 | 조회만 함, 만료/소비된 token, 미리보기 후 current·reader·파일 변화, journal sync 실패 |
+
+stamp/idle/나이/사용량 어느 하나도 단독 회수 기준이 아니다. 지원되지 않는
+저장소에서도 조회는 가능하지만 조회 성공이 삭제 가능성을 뜻하지 않는다.
 
 ### 한 번의 회수와 재승인 복구
 
@@ -256,8 +328,10 @@ IR-4b-1은 `revision::reclaim::prepare`/`Prepared::execute`의 Rust backend다.
    syscall을 자동 재시도하지 않는다. 삭제 수/bytes는 성공 응답을 받은 합계이며
    불명 syscall의 실제 삭제량을 추측하지 않는다. 완료 후 sync 오류는 별도 경고다.
 7. 불변 journal을 남겨 두므로 새 `prepare`는 실제 남은 파일을 검증한 **복구
-   미리보기**가 된다. 다시 승인한 `execute`만 남은 부분을 처리한다. 이미 완료된
-   journal은 0 files/complete로 조회된다. journal 손상·변경된/추가된 파일·inode
+   미리보기**가 된다. 다시 승인한 `execute`만 남은 부분을 처리한다. 복구 완료
+   판정은 모든 대상 디렉터리까지 없어야 `complete=true`다. **0 files만으로
+   완료가 아니다**. 파일 unlink 뒤 빈 디렉터리만 남아도 새 승인으로 rmdir 복구를
+   해야 한다. journal 손상·변경된/추가된 파일·inode
    교체는 자동 복구하지 않는다. journal은 자동 청소하지 않는다.
 
 ### 파일시스템 범위·owner 연결
@@ -304,6 +378,7 @@ inventory의 `idle_at_scan`, Check/Build/Use receipt 또는 reconnect만으로 �
    파일은 다시 prepare해야 안다. 세션을 새로 열면 old token은 무효이며, usage의
    journal ID → 새 미리보기 → **새 별도 승인**으로만 나머지를 처리한다.
    완료 journal은 `complete`, 0 files/bytes로 표시하고 삭제 버튼은 비활성이다.
+   0 files/bytes여도 빈 대상 디렉터리가 남은 `complete=false`는 별도 승인 복구 대상이다.
 
 preview/ledger는 세션 메모리이며 지속적 권한 저장소가 아니다. journal만 복구
 증거로 보존한다. 부분 삭제를 rollback하거나 unknown syscall을 추측하지 않는다.
@@ -497,3 +572,17 @@ IR-4b-2의 owner 승인 UI/API·journal 복구 목록·응답 유실/새 세션 
 최종 진행도: **IR-1/2/3, IR-4a, IR-4b-1/2 완료. 승인된 비실측 구현의 확인된
 잔여는 0**이다. 실제 GUI/현장 수용과 NFS 회수·원격 공유·외부 CI·조건부 world-tile·
 WK 동결·정식 배포 승인 등 명시적 보류는 [잔여 표](WEBUI_REMAINING.ko.md)에 구분했다.
+
+## 2026-09-28 문서·코드 대조
+
+Stamp/파일 집합/원본 freshness의 역할, v3 set 단위 회수 조건, 0 files와
+디렉터리 제거 완료의 차이를 현 구현에 맞춰 정리했다. 런타임·형식·권한 변경은 없다.
+이전 단계의 v2/고정 worker 버전·미구현/보류 표현은 당시 기록임을 명시했다.
+
+- `cd rust && cargo test --offline --locked -p floe-app-core --lib cache::revision`:
+  30 passed. current/reader/소유권 보호, preview 재검사, 중단·재승인 복구 포함.
+- `cd rust && cargo test --offline --locked -p floe-render-core --lib revision_lease::tests`:
+  1 passed. native reader의 독립 잠금과 배타 회수 차단.
+- 관련 문서 10개의 로컬 링크 경로 및 `git diff --check` 통과.
+  기존 의존성/렌더 경고는 변경하지 않았다. 전체 배터리·실제 GUI/RHEL/ETX/NFS
+  실측을 이번 문서 정리에서 새로 실행한 것으로 세지 않는다.
