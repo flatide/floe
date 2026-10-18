@@ -1,8 +1,7 @@
+use crate::ready::Waiter;
 use floe_app_core::{
     captures::{self, ExportOptions},
     check_cancelled,
-    dataset::Dataset,
-    jobdeck::color::Mode,
     render::RenderOptions,
     shots::batch::{self, Capture, NamedCapture},
     styles::LayerColors,
@@ -34,6 +33,7 @@ pub(crate) fn stdin_text(cancelled: &Arc<AtomicUsize>) -> Result<String> {
         }
     }
 }
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     source: PathBuf,
     capture: Capture,
@@ -43,6 +43,8 @@ pub fn run(
     levels: Option<BTreeSet<i64>>,
     layer_colors: Option<LayerColors>,
     legend: bool,
+    index: bool,
+    waiter: &mut Waiter,
     cancelled: &Arc<AtomicUsize>,
 ) -> Result<i32> {
     if batch.is_none() {
@@ -71,13 +73,43 @@ pub fn run(
             .to_string();
         (vec![NamedCapture { name, capture }], None)
     };
-    let mut dataset = Dataset::open(&source, levels, Mode::Level, cancelled)?;
+    // the shots read once; the open and the captures again (--wait) when
+    // the source was refused after its open
+    crate::read::again(&source, waiter, |waiter| {
+        render(
+            &source,
+            &shots,
+            ExportOptions {
+                out: out.clone(),
+                report: report.clone(),
+                batch: batch.is_some(),
+                input: input.clone(),
+                legend,
+            },
+            levels.clone(),
+            layer_colors,
+            index,
+            waiter,
+            cancelled,
+        )
+    })
+}
+#[allow(clippy::too_many_arguments)]
+fn render(
+    source: &std::path::Path,
+    shots: &[NamedCapture],
+    options: ExportOptions,
+    levels: Option<BTreeSet<i64>>,
+    layer_colors: Option<LayerColors>,
+    index: bool,
+    waiter: &mut Waiter,
+    cancelled: &Arc<AtomicUsize>,
+) -> Result<i32> {
+    // indexed first when it has none, its staleness said (read::dataset)
+    let mut dataset = crate::read::dataset(source, levels, index, waiter, cancelled)?;
     // --layer-colors over FLOE_LAYER_COLORS (the open's)
     if let Some(mode) = layer_colors {
         dataset.set_layer_colors(mode);
-    }
-    if dataset.source_stale() {
-        eprintln!("[{}][warn] source changed; displaying cached geometry. Rebuild with index --force, then reopen.", floe_app_core::program());
     }
     // what the deck asked for that will not be drawn (a source without
     // dbu, a cache without the entry's LY/DT): said at every open, and
@@ -88,16 +120,9 @@ pub fn run(
             r.chip, r.idx, r.tc, r.reason, r.detail
         );
     }
-    let options = ExportOptions {
-        out,
-        report,
-        batch: batch.is_some(),
-        input,
-        legend,
-    };
     let summary = captures::run_summary(
         &dataset,
-        &shots,
+        shots,
         &options,
         RenderOptions::local()?,
         cancelled,

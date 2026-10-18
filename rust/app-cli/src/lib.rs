@@ -13,6 +13,7 @@ mod drc_match;
 mod drc_prepare;
 mod fe_embed;
 mod read;
+mod ready;
 pub mod selfcheck;
 mod svrf;
 use floe_app_core::{
@@ -100,6 +101,9 @@ Usage: floe2-web index SOURCE [OPTIONS]
 
 Implemented: layout/jobdeck index/info/render/probe, occupancy, profiling,
 and jobdeck analysis/spec + source indexing with level selection.
+info/render/probe/clip index a source that has no index first (--no-index or
+FLOE_AUTO_INDEX=off: refuse instead); a source another run indexes is refused
+(exit 75) unless --wait[=SECONDS] (FLOE_LOCK_WAIT=on|SECONDS) waits for it.
 DRC: read-only ICE/ASCII queries; explicit --build [--force] for atomic packs.
 Clip: full-depth exact layout OASIS export; jobdeck clip remains unsupported.
 Render: batch/mosaic + JSON reports, DRC marker/CD/legend captures; no Python runtime.
@@ -134,6 +138,10 @@ const INDEX_HELP: &str = "Usage: floe2-web index SOURCE [OPTIONS]
   --profile-repeat N         Repeat each job count (default 1)
   --profile-snapshot PATH    Explicit reusable parse/prepare snapshot
   --profile-snapshot-refresh Replace an explicit snapshot
+  --wait[=SECONDS]           Another run indexing it (or, to rebuild it, a viewer
+                            with it open): wait for it instead of exit 75; SECONDS
+                            bounds the wait (FLOE_LOCK_WAIT=on|SECONDS: the default)
+  --no-wait                  Refuse at once (exit 75) whatever FLOE_LOCK_WAIT says
   -h, --help                Show this help
 
 .jb sources are indexed sequentially; each source uses --jobs workers.
@@ -150,7 +158,7 @@ The source path may contain spaces/Unicode. Use -- for a leading dash.";
 enum Cli {
     Help(bool),
     Version,
-    Index(PathBuf, Box<IndexOptions>, Option<BTreeSet<i64>>),
+    Index(PathBuf, Box<IndexOptions>, Option<BTreeSet<i64>>, ready::Wait),
     Read(Box<read::Command>),
     Clip(Box<clip::Command>),
     Jobdeck(Box<deck_analysis::Command>),
@@ -199,6 +207,8 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
     let mut occupancy_mode = None;
     let mut source = None;
     let mut levels = None;
+    // --wait / --no-wait over FLOE_LOCK_WAIT (ready.rs)
+    let mut ready = ready::Ready::from_env()?;
     let mut positional = false;
     let mut i = 1;
     while i < args.len() {
@@ -237,6 +247,10 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
                 Ok(())
             }
         };
+        if matches!(flag, "--wait" | "--no-wait") {
+            ready.take(flag, inline)?;
+            continue;
+        }
         match flag {
             "--help" | "-h" => {
                 no_value()?;
@@ -355,7 +369,30 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
     if is_deck(&source) && options.profile_cell.is_some() {
         return Err(Error::input("profile a jobdeck source OASIS directly"));
     }
-    Ok(Cli::Index(source, Box::new(options), levels))
+    Ok(Cli::Index(source, Box::new(options), levels, ready.wait))
+}
+
+/// Where a command's own lines go: stdout, or stderr for an index a read
+/// command runs first (its stdout is the command's: `info --json`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Out {
+    Stdout,
+    Stderr,
+}
+impl Out {
+    pub(crate) fn line(self, text: &str) {
+        match self {
+            Out::Stdout => println!("{text}"),
+            Out::Stderr => eprintln!("{text}"),
+        }
+    }
+    pub(crate) fn flush(self) -> std::io::Result<()> {
+        use std::io::Write;
+        match self {
+            Out::Stdout => std::io::stdout().flush(),
+            Out::Stderr => std::io::stderr().flush(),
+        }
+    }
 }
 /// Words as a POSIX shell reads them back (Python's `shlex.join`).
 pub(crate) fn shell_join<S: AsRef<std::ffi::OsStr>>(words: &[S]) -> String {
@@ -458,11 +495,25 @@ fn run(cli: Cli, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
                 floe_worker_client::EXPECTED_RENDERD_VERSION
             )
         }
-        Cli::Index(source, options, levels) => {
+        Cli::Index(source, options, levels, wait) => {
+            let mut waiter = ready::Waiter::new(wait, cancelled);
             if is_deck(&source) {
-                return deck_index::run(&source, levels, &options, cancelled);
+                return deck_index::run(&source, levels, &options, &mut waiter, cancelled);
             }
-            return execute_index(&source, &options, cancelled).map(|(code, _)| code);
+            // a cache with readers in the way of this run: a rebuild or a
+            // replacement of what they map - it is there already
+            let readers = options.force
+                || floe_app_core::cache::cache_path(&source).is_ok_and(|d| d.exists());
+            loop {
+                match execute_index(&source, &options, Out::Stdout, cancelled) {
+                    // refused (floe-index's `[lock]` line, or the probe's,
+                    // which the waiting line says again): wait, then again
+                    Ok((floe_vfs::lock::BUSY_EXIT, _)) if waiter.on() => (),
+                    Err(e) if e.kind == ErrorKind::Busy && waiter.on() => (),
+                    other => return other.map(|(code, _)| code),
+                }
+                waiter.wait_to_write(&ready::layout_key(&source)?, readers)?;
+            }
         }
     }
     Ok(0)
@@ -470,26 +521,30 @@ fn run(cli: Cli, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
 fn execute_index(
     source: &Path,
     options: &IndexOptions,
+    out: Out,
     cancelled: &AtomicUsize,
 ) -> Result<(i32, Action)> {
     let indexer = Indexer::discover(&Discovery::local()?)?;
-    let prepared = PreparedIndex::prepare(source, options, indexer, cancelled)?;
+    let mut prepared = PreparedIndex::prepare(source, options, indexer, cancelled)?;
+    if out == Out::Stderr {
+        prepared = prepared.on_stderr();
+    }
     let action = prepared.action().clone();
     match action {
         Action::Reuse => {
-            println!(
+            out.line(&format!(
                 "[{}] cache up to date: {} (use --force to rebuild with new options)",
                 floe_app_core::program(),
                 prepared.directory().display()
-            );
+            ));
             return Ok((0, action));
         }
         Action::OccupancyPresent => {
-            println!(
+            out.line(&format!(
                 "[{}] cache up to date: {} (occupancy already present; use --force to rebuild, --occupancy-only to rebuild the summary)",
                 floe_app_core::program(),
                 prepared.directory().join("design.ovo").display()
-            );
+            ));
             return Ok((0, action));
         }
         _ => (),
@@ -501,7 +556,7 @@ fn execute_index(
         if action == Action::Profile {
             eprintln!("{line}");
         } else {
-            println!("{line}");
+            out.line(&line);
         }
     }
     let mut job = prepared.start(cancelled)?;
@@ -547,9 +602,12 @@ pub fn main(host: &'static Host, args: Vec<OsString>) -> ! {
     let code = match run(cli, &signals.flag) {
         Ok(code) => code,
         // a busy target (floe_vfs::lock): one line, as floe-index says it,
-        // and 75 - the jobdeck index and the viewer read it as busy
+        // and 75 - the jobdeck index and the viewer read it as busy; none
+        // when floe-index said it already (an index run first, ready.rs)
         Err(e) if e.kind == ErrorKind::Busy => {
-            eprintln!("[lock] {}", e.message);
+            if !e.message.is_empty() {
+                eprintln!("[lock] {}", e.message);
+            }
             floe_vfs::lock::BUSY_EXIT
         }
         Err(e) => {
@@ -577,7 +635,7 @@ mod tests {
     }
     #[test]
     fn parser_keeps_values_and_defaults() {
-        let Cli::Index(p, o, _) = parsed(&[
+        let Cli::Index(p, o, _, _) = parsed(&[
             "index",
             "한 글.oas",
             "--jobs=16",
@@ -591,14 +649,14 @@ mod tests {
         assert_eq!(p, PathBuf::from("한 글.oas"));
         assert_eq!(o.jobs, 16);
         assert!(o.lod);
-        let Cli::Index(p, o, _) = parsed(&["index", "--", "-source.oas"]).unwrap() else {
+        let Cli::Index(p, o, _, _) = parsed(&["index", "--", "-source.oas"]).unwrap() else {
             panic!()
         };
         assert_eq!(p, PathBuf::from("-source.oas"));
         assert_eq!(o.jobs, 12);
         assert!(!o.lod);
         assert_eq!(o.occupancy, None);
-        let Cli::Index(_, o, levels) =
+        let Cli::Index(_, o, levels, _) =
             parsed(&["index", "x.JB", "--level", "2,1,2", "--lod"]).unwrap()
         else {
             panic!()
@@ -616,7 +674,7 @@ mod tests {
         ] {
             let mut args = vec!["index", "x.oas"];
             args.extend(flags);
-            let Cli::Index(_, o, _) = parsed(&args).unwrap() else {
+            let Cli::Index(_, o, _, _) = parsed(&args).unwrap() else {
                 panic!()
             };
             assert_eq!((o.occupancy, o.occupancy_only), (enabled, only));
@@ -627,7 +685,7 @@ mod tests {
     #[test]
     fn invalid_or_unported_requests_never_launch_native() {
         for format in ["1", "2"] {
-            let Cli::Index(_, o, _) = parsed(&[
+            let Cli::Index(_, o, _, _) = parsed(&[
                 "index",
                 "x",
                 "--representatives-format",

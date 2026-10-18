@@ -61,6 +61,16 @@ floe-index vfs <src.oas> [outdir=.<src>.ice] [--jobs N] [--plan-batch N]
     [--profile-snapshot PATH] [--profile-snapshot-refresh]
 ```
 
+잡덱(`floe-index vfs <deck.jb> [--level N,..] [--jobs N] [--force] [--wait[=S]] …`,
+2026-10-18, app 0.12.359)이면 직접 빌드하지 않는다. 옆의 floe2(`FLOE2_BIN`, 같은
+폴더의 `floe2`·`floe2-web`, PATH)가 `index <deck.jb> …`로 덱의 소스를 인덱싱한다.
+그 소스들의 floe-index는 이 바이너리다(`FLOE_INDEX_BIN`).
+- **대상:** 고른 level의 소스 중 인덱스가 없는 것이다(`--force`면 전부). 소스마다 옆에
+  자기 캐시를 만들고, 덱의 옵션(점유 요약 on, `design.ovs` 없음)과 잠금을 쓴다.
+- **출력과 종료:** `N built, N failed, N busy, N kept`로 센다. 종료는 0, 2(실패), 75(busy)다.
+- **거절:** OUTDIR을 주면 종료 2다. `floe2 index`가 모르는 옵션(`--coverage` 등)은 그
+  쪽 메시지와 종료 2다.
+
 `--`로 시작하는데 위 목록에 없는 인자는 `floe-index <cmd>: unknown option …`으로
 거부한다(exit 2, 파일 시스템 접근 전). 위치 인자(src·outdir)는 `--`로 시작할 수
 없다. `tile`·`index`·`vfs`·`occupancy`·`vfsd` 공통(2026-09-14 현장: `floe-index
@@ -296,6 +306,10 @@ CACHE-NAMING §5에 있다.
   - `[lock] X.oas is being indexed by … - try again when it finishes`
   - `[lock] X.oas is in use by … - re-indexing it would pull it from under them; close it there first`
   - 잠금 파일을 열 수 없으면 종료 1과 고치는 법을 알린다.
+- 기다리기(0.12.359): `floe2 index`·`render`·`info`·`probe`·`clip`의 `--wait[=SECONDS]`
+  (`FLOE_LOCK_WAIT=on|SECONDS`)는 거절된 뒤 앞선 실행이 끝날 때까지 탐침으로 기다렸다가
+  다시 시도한다. 다시 만들기라면 연 사람이 닫을 때까지다. 잠금 자체는 여전히 기다리지
+  않는다. 읽기 명령은 인덱스가 아예 없는 원본을 먼저 인덱싱한다(SHARED_APP_LAYER §12).
 - 프로파일 실행(`--profile-cell`)은 캐시를 쓰지 않으므로 잡지 않는다.
 - 같은 실행 안에서 그 잠금을 쥔 채 덧붙이는 단계(`write_hier`, ovs)는 함수 호출이라
   다시 잡지 않는다.

@@ -253,6 +253,15 @@ floe2 render deck.jb --bbox X0,Y0,X1,Y1 --px 1200 --out d.png [--layers "$1 META
 floe2 jobdeck deck.jb [--report r.json] [--spec s.spec]   # 분석·보고만
 ```
 
+`floe-index vfs deck.jb [--level N,..] [--jobs N] [--force] [--wait]`(2026-10-18,
+app 0.12.359)도 같은 덱 인덱싱이다. floe-index가 옆의 floe2에 `index deck.jb …`로
+넘기고, 소스마다 이 floe-index로 빌드한다(SPEC-INDEXER §1). `info`·`render`·`probe`는
+고른 level의 소스 중 인덱스가 아예 없는 것을 먼저 인덱싱하고 그린다. 다른 실행이
+인덱싱 중인 소스는 장부에 누가 하는지 적고 빼고 그린다(종료 3). `--wait`면 끝날
+때까지 기다렸다가 다 그린다. `--no-index`면 예전처럼 인덱스 없는 소스를 장부에 적고
+빼며, 이유는 `no fresh index cache (run: floe2 index deck.jb)`다
+(SHARED_APP_LAYER §12).
+
 LOD를 포함해 덱의 모든 소스 캐시를 다시 만들려면:
 
 ```sh

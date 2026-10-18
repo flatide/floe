@@ -432,3 +432,26 @@ P4d처럼 컨트롤러 루프에서만 바뀐다. `FLOE_GTK_LOOP=legacy`는 예�
 - **GTK 뷰어(UI):** 행을 고르면 묻고 `text`를 상태줄 윗줄에 둔다. 커서 좌표 뒤에 이어 쓰고, highlight의 `· N in view`를 붙이며, Esc가 지운다(SPEC-VIEWER §8c).
 - **웹(나중):** 같은 `view_cells`의 `cell_info`를 브로커가 내주면 웹 UI가 `text`를 상태 표시에 두면 된다. 웹 UI에는 아직 없다.
 - **게이트:** `cell_tree` C11(서비스 경로, KLayout 대조), `rust_renderer`의 GUI 배선 테스트, `gtk_view` `cell_status`(실제 뷰어); 단위 render-core·renderd·worker-client·app-core.
+
+## 12. 읽기 명령의 자동 인덱싱과 대기 (2026-10-18, app 0.12.359)
+
+사용자: "자동 인덱싱하도록 하고 대기 옵션도 넣어줘. 그리고 jobdeck 인덱싱도 floe-index로 할 수 있게 수정해줘."
+
+- **app-cli `ready.rs`:** `render`·`info`·`probe`·`clip`이 원본을 열기 전에 준비한다.
+  - **캐시가 아예 없는 레이아웃:** `index SOURCE`(기본 옵션)로 먼저 만든다. 안내 한 줄(`X has no index yet - indexing it first`)과 인덱서 출력은 stderr로 낸다. stdout은 그 명령의 것이다(`info --json`). app-core `PreparedIndex::on_stderr`와 `native::Output::Stderr`가 이를 맡는다.
+  - **잡덱:** 고른 level의 소스 중 캐시가 아예 없는 것만 덱 인덱스로 만든다(`deck_index::run_entries`, 출력은 stderr). 실패한 소스는 장부의 skipped로 남고 종료 3이다.
+  - **만들지 않는 것:** 원본이 바뀐 캐시는 경고와 함께 옛 캐시로 그린다(재빌드는 `index --force`). 이 빌드가 읽지 못하는 캐시(버전 차이)도 거절한다. 판이 다른 번들 둘이 서로의 캐시를 다시 만들어 무르는 일을 막는다.
+  - **끄기:** `--no-index` 또는 `FLOE_AUTO_INDEX=off`면 예전처럼 거절한다. 거절 문구에 원본 경로를 넣었다(`no real VFS cache directory for X; run floe2 index /path first`).
+  - **반쯤 만든 캐시:** 빌드가 도중에 멈춰 남은 폴더(`meta.json` 없음; 인덱서가 kill된 경우)는 아무도 쓰고 있지 않으면 `--force`로 다시 만든다(`has an incomplete index (a build stopped half-way) - rebuilding it first`). 덱의 소스도 같다. 누가 쓰는 중이면 열기 단계가 거절하거나 기다린다. `--no-index`일 때는 "incomplete …; rebuild it: floe2 index --force …"라고 알린다(catalog.rs; 예전에는 `No such file or directory (os error 2)`뿐이었다).
+  - **안내 문구:** 덱의 `(run --index)`는 실제 명령 `(run: floe2 index DECK.jb)`로 고쳤다.
+- **대기 `--wait[=SECONDS]`:**
+  - **대상:** `index`·`render`·`info`·`probe`·`clip`. 기본값은 `FLOE_LOCK_WAIT=on|SECONDS`, `--no-wait`는 즉시 거절이다.
+  - **동작:** 다른 실행이 원본을 인덱싱 중이거나, 다시 만들기라면 연 사람이 있을 때 75로 끝내지 않는다. `floe_vfs::lock`의 탐침으로 0.5초마다 확인하다가 풀리면 다시 시도한다. 확인에 쓰는 것은 `writing_refusal`·`opening_refusal`과 새로 둔 `reader_refusal`(`.use`에 배타를 잠깐 시도해 독자를 확인)이다.
+  - **결과:** 앞선 실행이 만든 캐시는 그대로 쓰고 다시 만들지 않는다. 한도를 넘기면 75와 "(waited m:ss, the --wait bound)", 신호를 받으면 130이다.
+  - **잠금:** 잠금 자체는 여전히 기다리지 않는다(2026-10-09 정책). 기다리는 것은 앞단이다.
+  - **문구:** `[lock] X is being indexed by … - waiting for it to finish (--wait)`, 1분마다 `still waiting`, 풀리면 `X is free - going on (waited m:ss)`.
+- **app-core 리스:** WriteLease(`.X.ice.index.lock`)의 거절 문구에 대상 이름을 붙였다(`another Rust application is indexing this cache (X.oas) - try again when it finishes`). 앞부분은 webui 게이트가 확인하는 문구 그대로다.
+- **floe-index `vfs DECK.jb`:** 잡덱이면 옆의 floe2(`FLOE2_BIN`, 같은 폴더의 `floe2`, `floe2-web`, PATH 순)의 `index DECK.jb`에 넘긴다. 이때 `FLOE_INDEX_BIN`은 이 floe-index다.
+  - **판정:** 덱 인덱스는 하나다(app-core `jobdeck::index`). 옵션은 `floe2 index`의 것이고 OUTDIR은 없다(종료 2). 종료 코드는 0·2(실패)·75(busy) 그대로다. `drc-prepare`와 같은 방식이다.
+- **웹:** floe2-web도 같은 app-cli라 CLI에서는 같다. 웹 서버의 관리 인덱스(`managed_index`)는 바뀌지 않았다.
+- **게이트:** `index_lock` K10~K12(CLI 자동 인덱싱, `--wait`의 거절·한도·신호·한 번만 빌드, 독자 대기, 덱 대기, `floe-index vfs DECK.jb`). 단위 테스트는 app-cli `ready`, vfs `lock`이다.

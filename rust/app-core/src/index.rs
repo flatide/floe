@@ -402,9 +402,14 @@ impl WriteLease {
         }
         match f.try_lock() {
             Ok(()) => Ok(Self(f)),
+            // which source (2026-10-15: two runs started at once, the one
+            // refused here did not say what it was refused)
             Err(std::fs::TryLockError::WouldBlock) => Err(Error::new(
                 ErrorKind::Busy,
-                "another Rust application is indexing this cache",
+                format!(
+                    "another Rust application is indexing this cache ({}) - try again when it finishes",
+                    floe_vfs::lock::key(floe_vfs::lock::Kind::Vfs, &directory.to_string_lossy()).subject
+                ),
             )),
             Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
         }
@@ -427,8 +432,16 @@ pub struct PreparedIndex {
     cleanup_occupancy: bool,
     cleanup_representatives: bool,
     next_args: Option<Vec<OsString>>,
+    /// the indexer's stdout onto stderr (`on_stderr`)
+    on_stderr: bool,
 }
 impl PreparedIndex {
+    /// The indexer's output all on stderr: an index a read command runs
+    /// first (app-cli ready.rs), its stdout the command's (`info --json`).
+    pub fn on_stderr(mut self) -> Self {
+        self.on_stderr = true;
+        self
+    }
     pub fn action(&self) -> &Action {
         &self.action
     }
@@ -608,6 +621,7 @@ impl PreparedIndex {
             cleanup_occupancy: !profiling && (options.wants_occupancy() || options.occupancy_only),
             cleanup_representatives: !profiling && options.wants_representatives(),
             next_args,
+            on_stderr: false,
         })
     }
     pub fn start(self, cancelled: &AtomicUsize) -> Result<IndexJob> {
@@ -626,7 +640,14 @@ impl PreparedIndex {
                 "index cancelled before launch",
             ));
         }
-        let mut child = self.indexer.spawn(&self.args, capture)?;
+        let output = if capture {
+            crate::native::Output::Capture
+        } else if self.on_stderr {
+            crate::native::Output::Stderr
+        } else {
+            crate::native::Output::Inherit
+        };
+        let mut child = self.indexer.spawn_output(&self.args, output, &[])?;
         let capture = if capture {
             match crate::index_progress::Capture::take(&mut child) {
                 Ok(c) => Some(c),
@@ -648,6 +669,7 @@ impl PreparedIndex {
             next: self.next_args.take().map(|a| (self.indexer.clone(), a)),
             finished: None,
             capture,
+            output,
         })
     }
 }
@@ -661,6 +683,7 @@ pub struct IndexJob {
     next: Option<(Indexer, Vec<OsString>)>,
     finished: Option<i32>,
     capture: Option<crate::index_progress::Capture>,
+    output: crate::native::Output,
 }
 /// floe-index's own locks (floe_vfs::lock) off, for a run whose target is
 /// private to this build - a revision candidate, a DRC staging directory: no
@@ -695,6 +718,7 @@ impl IndexJob {
             next: None,
             finished: None,
             capture: Some(capture),
+            output: crate::native::Output::Capture,
         })
     }
     pub fn pid(&self) -> Option<u32> {
@@ -720,7 +744,7 @@ impl IndexJob {
                         let _ = c.finish();
                     }
                     let started = (|| {
-                        let mut child = indexer.spawn(&args, self.capture.is_some())?;
+                        let mut child = indexer.spawn_output(&args, self.output, &[])?;
                         let capture = if self.capture.is_some() {
                             match crate::index_progress::Capture::take(&mut child) {
                                 Ok(mut c) => {
@@ -884,6 +908,7 @@ mod tests {
             next: Some((indexer, Vec::new())),
             finished: None,
             capture: None,
+            output: native::Output::Inherit,
         };
         assert_eq!(job.cancel(libc::SIGINT).unwrap(), 130);
         assert_eq!(job.poll().unwrap(), Some(130));
@@ -913,6 +938,7 @@ mod tests {
                 next: None,
                 finished: None,
                 capture: None,
+                output: native::Output::Inherit,
             };
             let done = loop {
                 if let Some(code) = job.poll().unwrap() {

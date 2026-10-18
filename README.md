@@ -138,7 +138,7 @@ alias floe="env PYTHONPATH=$PWD/tools/oracle:$PWD .venv/bin/python -m floe_oracl
 
 floe2 index data/testchip_1g5.oas          # 1회: 공유 .<src>.ice/ 생성(소스 옆 숨김 폴더)
 floe2 index data/testchip_1g5.oas --jobs 1 # 병렬 끄기
-floe2 info  data/testchip_1g5.oas
+floe2 info  data/testchip_1g5.oas          # 인덱스가 없으면 먼저 만든다(render/probe/clip도; --no-index로 끔)
 floe2 view  data/testchip_1g5.oas
 floe2 view  data/testchip_1g5.oas --goto 5240,5260,50
 floe2 render data/testchip_1g5.oas --bbox 5000,5000,5200,5200 \
@@ -154,6 +154,13 @@ floe view data/testchip_1g5.oas            # 개발용 KLayout 셸 (동결, 비�
   (0.12.337~0.12.338, docs/SHARED_APP_LAYER.ko.md §7 P4d·P4e). 예전 Python 루프와
   `FLOE_GTK_LOOP=legacy`는 회사 Linux 확인 뒤 0.12.342에서 지웠다(P4f). 남은 Python은
   GTK 화면(위젯, 프레임 표시, 덧그림, 입력)뿐이다.
+- **자동 인덱싱(0.12.359, 2026-10-18).** `info`·`render`·`probe`·`clip`은 인덱스가
+  아예 없는 원본을 `floe2 index`와 같이 먼저 인덱싱하고 이어서 실행한다. 잡덱은 고른
+  level의 소스 중 인덱스가 없는 것을 먼저 인덱싱한다.
+  - 인덱싱 출력은 stderr로 나가서 stdout(`info --json`)을 더럽히지 않는다.
+  - 원본이 바뀐 캐시는 다시 만들지 않는다. 예전처럼 경고와 함께 옛 캐시로 그리고,
+    `floe2 index --force`가 다시 만든다.
+  - `--no-index` 또는 `FLOE_AUTO_INDEX=off`이면 예전처럼 거절한다.
 - `floe2 index`와 `floe index`는 같은 `floe-index vfs`를 실행한다. 같은 source
   fingerprint의 정상 캐시는 재사용하며 기존·불완전·stale 캐시 교체는 명시적
   `--force`가 있어야 한다. `--page-target-mb`, `--no-lod`, `--slow-cell-s`,
@@ -198,6 +205,13 @@ floe view data/testchip_1g5.oas            # 개발용 KLayout 셸 (동결, 비�
   - NFS가 `nolock`으로 마운트돼 있으면 다른 호스트끼리는 막지 못한다. 처음
     한 번 `[lock] … locks hold on this host only` 경고가 나온다.
   - `FLOE_LOCK=off`이면 예전처럼 잠금 없이 동작한다.
+  - **기다리기(0.12.359):** `floe2 index`·`render`·`info`·`probe`·`clip`에 `--wait`를
+    주면 75로 끝내지 않고 앞선 실행이 끝날 때까지 기다린 뒤 진행한다. 앞선 실행이
+    만든 캐시는 다시 만들지 않는다.
+    - `--wait=600`처럼 초를 주면 그만큼만 기다리고 75로 끝난다.
+    - `FLOE_LOCK_WAIT=on|초`가 기본값이 되고, `--no-wait`는 즉시 거절이다.
+    - Ctrl-C는 기다림을 끝낸다(130). 기다리는 동안
+      `[lock] X.oas is being indexed by … - waiting for it to finish (--wait)`가 나온다.
 
 ### Jobdeck (Calibre MDPView `.jb`)
 
@@ -206,6 +220,7 @@ floe view data/testchip_1g5.oas            # 개발용 KLayout 셸 (동결, 비�
 ```sh
 floe2 index  deck.jb --jobs 8           # 덱이 참조하는 모든 TC 소스를 인덱싱(최신 캐시는 유지)
 floe2 index  deck.jb --level 1,3        # 그 mask level이 쓰는 소스만 인덱싱
+floe-index vfs deck.jb --jobs 8         # 같은 덱 인덱싱을 floe-index로(옆의 floe2 index에 넘긴다; OUTDIR 없음)
 floe2 view   deck.jb                    # 뷰어에서 열기(File > load jobdeck… 도 동일): Calibre처럼 로드할 level을 먼저 고른다; Jobdeck 메뉴 또는 Ctrl+, 로 level view / chip view 전환
 floe2 view   deck.jb --level 1,3        # 묻지 않고 level 1,3만 로드(스크립트는 FLOE_JOBDECK_LEVELS=all|N,N… 로 답할 수도 있다)
 floe2 info   deck.jb                    # 덱 요약 + 뷰 레이어 표

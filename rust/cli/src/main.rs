@@ -78,19 +78,79 @@ fn exit_quietly_on_broken_pipe() {
 #[cfg(not(unix))]
 fn exit_quietly_on_broken_pipe() {}
 
+/// The shared app layer's command line beside this binary: FLOE2_BIN, else
+/// `floe2` here (the bundle's runtime/bin, the build's target/release), else
+/// `floe2-web` here (the web port's), else `floe2` on PATH.
+fn floe2_beside() -> std::path::PathBuf {
+    if let Some(bin) = std::env::var_os("FLOE2_BIN").filter(|v| !v.is_empty()) {
+        return std::path::PathBuf::from(bin);
+    }
+    let here = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
+    for name in ["floe2", "floe2-web"] {
+        if let Some(path) = here.as_ref().map(|d| d.join(name)).filter(|p| p.is_file()) {
+            return path;
+        }
+    }
+    std::path::PathBuf::from("floe2")
+}
+
+/// Whether `path` names a jobdeck (`.jb`, any case: app-core's is_deck).
+fn is_deck(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("jb"))
+}
+
+/// `floe-index vfs DECK.jb [OPTIONS]` (user 2026-10-18: "jobdeck 인덱싱도
+/// floe-index로 할 수 있게 수정해줘"): a jobdeck's sources indexed as `floe2
+/// index DECK.jb` indexes them - those of its levels (--level) that have no
+/// index (--force: every one), each its own cache beside it with a deck's
+/// options (the occupancy summary, no design.ovs), under the index locks,
+/// counted `N built, N failed, N busy, N kept` - the shared app layer's
+/// (app-core jobdeck::index), which the floe2 beside this binary runs with
+/// this indexer; its exit status is ours (0; 2 a source failed; 75 one was
+/// busy). The options are `floe2 index`'s; there is no OUTDIR.
+fn deck_handover(rest: &[String]) {
+    let deck = &rest[0];
+    if let Some(outdir) = rest.get(1).filter(|a| !a.starts_with('-')) {
+        eprintln!(
+            "floe-index vfs {deck}: a jobdeck's sources are indexed each beside its source - no OUTDIR ({outdir})"
+        );
+        std::process::exit(2);
+    }
+    let floe2 = floe2_beside();
+    eprintln!(
+        "[vfs] {deck} is a jobdeck: its sources are indexed by {} index (floe2 index {deck})",
+        floe2.display()
+    );
+    let mut command = std::process::Command::new(&floe2);
+    command.arg("index").args(rest);
+    // the sources by this indexer, unless one is named
+    if std::env::var_os("FLOE_INDEX_BIN").is_none_or(|v| v.is_empty()) {
+        if let Ok(me) = std::env::current_exe() {
+            command.env("FLOE_INDEX_BIN", me);
+        }
+    }
+    match command.status() {
+        Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+        Err(e) => {
+            eprintln!(
+                "floe-index vfs {deck}: {} could not run ({e}); a jobdeck's sources are indexed by `floe2 index {deck}`",
+                floe2.display()
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
 /// `floe-index drc-prepare` (feature/jobdeck-drc's command): the DRC
 /// analysis is the shared Rust app layer's (app-core drc::analysis), so the
 /// floe2 beside this binary - the bundle's runtime/bin/floe2, the build's
 /// target/release/floe2 - runs it; its exit status is ours.
 fn drc_prepare_handover(rest: &[String]) {
-    let beside = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("floe2")))
-        .filter(|p| p.is_file());
-    let floe2 = std::env::var_os("FLOE2_BIN")
-        .map(std::path::PathBuf::from)
-        .or(beside)
-        .unwrap_or_else(|| std::path::PathBuf::from("floe2"));
+    let floe2 = floe2_beside();
     match std::process::Command::new(&floe2)
         .arg("drc-prepare")
         .args(rest)
@@ -122,6 +182,9 @@ fn main() {
     }
     if args.len() >= 3 && args[1] == "index" {
         return index_cmd(&args[2..]);
+    }
+    if args.len() >= 3 && args[1] == "vfs" && is_deck(&args[2]) {
+        return deck_handover(&args[2..]);
     }
     if args.len() >= 3 && args[1] == "vfs" {
         return vfs::vfs_cmd(&args[2..]);
@@ -169,6 +232,8 @@ fn main() {
              [--profile-cell NAME | --profile-cell-ci N] \
              [--profile-jobs N,N,...] [--profile-repeat N] \
              [--profile-snapshot PATH] [--profile-snapshot-refresh]\n       \
+             floe-index vfs <deck.jb> [--level N,N,..] [--jobs N] [--force] [--wait[=S]] \
+             [--occupancy-um F] ...  (a jobdeck: its sources that have no index, each beside its source - runs floe2 index)\n       \
              floe-index plan <outdir> --view x0,y0,x1,y1 \
              [--px-per-um N] [--cut-px N] [--layers a/b,..] \
              [--depth N] [--explain 1] [--page-hairline 0|1] [--sub-cut-wash 0|1] [--page-reps 0|1] [--sub-cut-box 0|1] [--sub-cut-box-px N] [--sub-cut-dots SHARE] [--dot-records SHARE] [--decode-budget-mb N] \

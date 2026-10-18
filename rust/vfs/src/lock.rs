@@ -24,7 +24,10 @@
 //! is a dead owner's) so a refused writer can name the people in its way.
 //! A target's key is taken from its real path (symbolic links resolved).
 //! Locks are never waited for: a busy target is refused (BUSY_EXIT) after
-//! a retry of about RETRY that rides out another process's probe.
+//! a retry of about RETRY that rides out another process's probe. A front
+//! end asked to wait (`floe2 render --wait`, app-cli ready.rs; user
+//! 2026-10-18: "대기 옵션도 넣어줘") polls the probes below until the run in
+//! its way is done, then tries again - the locks themselves still refuse.
 //! FLOE_LOCK=off turns it all off.
 
 use std::fmt;
@@ -281,6 +284,31 @@ impl fmt::Display for Busy {
                 f,
                 "{subject}: cannot take its lock: {message} (FLOE_LOCK=off runs without the lock)"
             ),
+        }
+    }
+}
+
+impl Busy {
+    /// The target refused (`X.oas`).
+    pub fn subject(&self) -> &str {
+        match self {
+            Busy::Indexing { subject, .. } | Busy::InUse { subject, .. } | Busy::Error { subject, .. } => subject,
+        }
+    }
+
+    /// What a run asked to wait says while it waits: who is in the way and
+    /// what it waits for (an Error is not waited for: said as it is).
+    pub fn waiting(&self) -> String {
+        match self {
+            Busy::Indexing { subject, holder, .. } => {
+                let by = holder.as_ref().map(|h| h.to_string()).unwrap_or_else(|| "another process".to_string());
+                format!("{subject} is being indexed by {by} - waiting for it to finish")
+            }
+            Busy::InUse { subject, users } => format!(
+                "{subject} is in use by {} - waiting for it to be closed there",
+                users_text(users)
+            ),
+            Busy::Error { .. } => self.to_string(),
         }
     }
 }
@@ -837,6 +865,25 @@ pub fn writing_refusal(key: &Key) -> Option<Busy> {
     held.then(|| Busy::Indexing { subject: key.subject.clone(), holder: read_holder(&build), opening: false })
 }
 
+/// Whether readers hold `key`'s target now - its `.use` taken shared - so a
+/// whole rebuild would be refused (Busy::InUse, naming them): what a run
+/// asked to wait for a rebuild (`floe2 index --force --wait`) waits out. A
+/// probe: one non-blocking exclusive try on `.use`, let go at once (a reader
+/// coming in meanwhile rides it out on its retry); no file made, and a lock
+/// it cannot try (no write access, no lock support) refuses nothing.
+pub fn reader_refusal(key: &Key) -> Option<Busy> {
+    if disabled() {
+        return None;
+    }
+    let file = OpenOptions::new().read(true).write(true).open(key.dir.join(format!("{}.use", key.name))).ok()?;
+    match file.try_lock() {
+        Err(TryLockError::WouldBlock) => {
+            Some(Busy::InUse { subject: key.subject.clone(), users: users_of(&key.dir, &key.name) })
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -875,6 +922,27 @@ mod tests {
         assert!(opening_refusal(&k).is_some());
         drop(w);
         assert!(opening_refusal(&k).is_none());
+        // readers in: a rebuild's waiter is told who, and the probe keeps
+        // no lock - the readers stay, a reader still gets in
+        assert!(reader_refusal(&k).is_none());
+        let r = readers(&[k.clone()], "floe2 view").unwrap();
+        match reader_refusal(&k) {
+            Some(b @ Busy::InUse { .. }) => {
+                assert!(b.waiting().starts_with("Z.oas is in use by "), "{}", b.waiting());
+                assert!(b.waiting().ends_with("(floe2 view) - waiting for it to be closed there"), "{}", b.waiting());
+                assert_eq!(b.subject(), "Z.oas");
+            }
+            other => panic!("{other:?}"),
+        }
+        let r2 = readers(&[k.clone()], "floe2 render").unwrap();
+        drop(r);
+        drop(r2);
+        assert!(reader_refusal(&k).is_none());
+        let w = writer(&k, Mode::Additive, "floe-index vfs").unwrap();
+        let busy = writing_refusal(&k).unwrap();
+        assert!(busy.waiting().starts_with("Z.oas is being indexed by "), "{}", busy.waiting());
+        assert!(busy.waiting().ends_with("(floe-index vfs) - waiting for it to finish"), "{}", busy.waiting());
+        drop(w);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

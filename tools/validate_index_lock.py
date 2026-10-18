@@ -47,11 +47,30 @@ another user would (FLOE_REVIEWER=ws_kim_01):
       pack (an unreadable .db) leaves the published pack
   K9  a rule deck's sidecar: its build lock held refuses `floe-index
       svrf`, the rules file byte for byte
+  K10 (2026-10-18) render / info --json / probe / clip on a source with no
+      index index it first (stderr; stdout stays the command's), then use
+      it; --no-index and FLOE_AUTO_INDEX=off refuse as before, making
+      nothing; a changed source keeps its cache; a missing source says so,
+      a build stopped half-way too (--no-index) or is rebuilt; a jobdeck's
+      sources with none are indexed first, without auto-index its ledger
+      says what to run
+  K11 a busy source: refused at once (75, the holder named); --wait=1 ends
+      75 after the bound, saying it waited; FLOE_LOCK_WAIT=on and
+      --no-wait; render --wait, index --wait and info under FLOE_LOCK_WAIT
+      wait for the holder and go on once it lets go, the cache built once;
+      SIGINT ends a wait with 130 and nothing written; two renders at once
+      on a fresh source build it once; index --force --wait waits for the
+      reader that has it open
+  K12 a deck render with a busy source: 3 with the holder in its ledger,
+      --wait draws it whole once it is free; `floe-index vfs DECK.jb`
+      indexes the deck's sources as `floe2 index DECK` (a deck's options),
+      kept on a second run, no OUTDIR, --level, a busy source 75, --wait
 
 usage: python tools/validate_index_lock.py
 """
 import fcntl
 import inspect
+import json
 import os
 import shutil
 import signal
@@ -160,6 +179,11 @@ ROWS 0.0/3000.0
 *END-PLACE
 END
 """
+
+
+# two levels: srcA in level 1, srcB in level 2 (K12's --level)
+DECK_LEVELS = DECK.replace("MTITLE 1,A\n", "MTITLE 1,A\nMTITLE 2,B\n").replace(
+    "$ (1, A, AD=0.00020, SF=1, TC=srcB.oas", "$ (2, B, AD=0.00020, SF=1, TC=srcB.oas")
 
 
 class IndexLockTests(unittest.TestCase):
@@ -558,6 +582,269 @@ class IndexLockTests(unittest.TestCase):
         source = inspect.getsource(gui.Viewer._index_modal)
         self.assertIn("start_new_session=True", source)
         self.assertIn("os.killpg(proc.pid, signal.SIGTERM)", source)
+
+
+def spawn(argv, log, env=None):
+    """A command in the background, its stderr in `log`."""
+    with open(log, "w") as err:
+        return subprocess.Popen([str(a) for a in argv], stdout=subprocess.PIPE,
+                                stderr=err, text=True, cwd=str(ROOT),
+                                env=env or run_env(), stdin=subprocess.DEVNULL)
+
+
+def until_said(log, text, proc, deadline_s=60):
+    """`log` says `text` (the background command still running)."""
+    deadline = time.monotonic() + deadline_s
+    while time.monotonic() < deadline:
+        if text in Path(log).read_text():
+            return
+        if proc.poll() is not None:
+            raise AssertionError("ended (%d) before saying %r:\n%s" % (
+                proc.returncode, text, Path(log).read_text()))
+        time.sleep(0.05)
+    raise AssertionError("did not say %r in %d s:\n%s" % (
+        text, deadline_s, Path(log).read_text()))
+
+
+class ReadyTests(unittest.TestCase):
+    """K10-K12 (user 2026-10-18: "자동 인덱싱하도록 하고 대기 옵션도 넣어줘.
+    그리고 jobdeck 인덱싱도 floe-index로 할 수 있게"; app-cli ready.rs)."""
+
+    def setUp(self):
+        os.environ["FLOE_LOCK_RETRY_MS"] = "300"
+        self.dir = Path(tempfile.mkdtemp(prefix="ready", dir=TMP))
+
+    def tearDown(self):
+        os.environ.pop("FLOE_LOCK_RETRY_MS", None)
+
+    def layout(self, name="c.oas"):
+        src = self.dir / name
+        write_layout(src)
+        return src
+
+    def deck(self):
+        for name in ("srcA.oas", "srcB.oas"):
+            write_layout(self.dir / name)
+        (self.dir / "lock.jb").write_text(DECK)
+        return self.dir / "lock.jb"
+
+    def hold(self, src, full=True):
+        lock = indexlock.try_writer(indexlock.VFS, cachepath.vfs_cache_dir(str(src)),
+                                    full=full, what="gate_holder run", create=True)
+        self.assertIsNotNone(lock)
+        self.addCleanup(lock.close)
+        return lock
+
+    def cache(self, src):
+        return Path(cachepath.vfs_cache_dir(str(src)))
+
+    def test_k10_a_read_command_indexes_a_source_with_none_first(self):
+        # render, info --json, probe, clip: each on a source with no index
+        src = self.layout()
+        res = floe2("render", src, "--px", "120", "--out", self.dir / "r.png", ok=0)
+        self.assertIn("c.oas has no index yet - indexing it first", res.stderr)
+        self.assertTrue((self.cache(src) / "meta.json").is_file())
+        self.assertTrue((self.dir / "r.png").read_bytes().startswith(b"\x89PNG"))
+        self.assertIn("rendered", res.stdout)
+        # an index there is used: no second build
+        again = floe2("render", src, "--px", "120", "--out", self.dir / "r2.png", ok=0)
+        self.assertNotIn("indexing it first", again.stderr)
+        js = self.layout("j.oas")
+        res = floe2("info", js, "--json", ok=0)
+        self.assertEqual(json.loads(res.stdout)["source"], str(js))
+        self.assertIn("j.oas has no index yet", res.stderr)
+        floe2("probe", self.layout("p.oas"), ok=0)
+        cl = self.layout("k.oas")
+        floe2("clip", cl, "--bbox", "0,0,3,3", "--out", self.dir / "k_clip.oas", ok=0)
+        self.assertTrue((self.dir / "k_clip.oas").stat().st_size > 0)
+        # --no-index / FLOE_AUTO_INDEX=off: refused as before, nothing made
+        for name, args, env in (("n1.oas", ("--no-index",), None),
+                                ("n2.oas", (), run_env(FLOE_AUTO_INDEX="off"))):
+            n = self.layout(name)
+            res = floe2("render", n, *args, "--out", self.dir / "n.png", env=env)
+            self.assertEqual(res.returncode, 1, res.stderr)
+            self.assertIn("no real VFS cache directory for %s; run floe2 index %s first"
+                          % (name, n), res.stderr)
+            self.assertFalse(self.cache(n).exists())
+        # a changed source keeps its cache: drawn with the warning
+        before = snapshot(self.cache(src))
+        os.utime(src, (time.time() + 5, time.time() + 5))
+        res = floe2("render", src, "--px", "120", "--out", self.dir / "s.png", ok=0)
+        self.assertIn("source changed", res.stderr)
+        self.assertEqual(snapshot(self.cache(src)), before)
+        # a source not there, a build stopped half-way: said so
+        res = floe2("render", self.dir / "none.oas", "--out", self.dir / "x.png")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("source not found: %s" % (self.dir / "none.oas"), res.stderr)
+        half = self.layout("h.oas")
+        self.cache(half).mkdir()
+        res = floe2("render", half, "--no-index", "--out", self.dir / "h.png")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("the index of h.oas is incomplete", res.stderr)
+        self.assertIn("floe2 index --force %s" % half, res.stderr)
+        # ... which the index first rebuilds (a Ctrl-C on it left the folder)
+        res = floe2("render", half, "--px", "120", "--out", self.dir / "h.png", ok=0)
+        self.assertIn("h.oas has an incomplete index (a build stopped half-way) - rebuilding it first",
+                      res.stderr)
+        self.assertTrue((self.cache(half) / "meta.json").is_file())
+        # a jobdeck: its sources with none first, then drawn whole
+        deck = self.deck()
+        res = floe2("render", deck, "--px", "160", "--out", self.dir / "d.png", ok=0)
+        self.assertIn("[jobdeck] 2 source(s) have no index yet - indexing them first", res.stderr)
+        self.assertIn("index     : 2 built, 0 failed, 0 kept", res.stderr)
+        self.assertNotIn("skipped", res.stdout)
+        res = floe2("info", deck, "--json", ok=0)
+        json.loads(res.stdout)
+
+    def test_k10_a_deck_without_auto_index_says_what_to_run(self):
+        deck = self.deck()
+        res = floe2("render", deck, "--no-index", "--out", self.dir / "d.png")
+        self.assertEqual(res.returncode, 1, res.stderr)
+        self.assertIn("no placement can be drawn", res.stderr)
+        floe2("index", self.dir / "srcA.oas", ok=0)
+        res = floe2("render", deck, "--no-index", "--out", self.dir / "d.png")
+        self.assertEqual(res.returncode, 3, res.stdout + res.stderr)
+        self.assertIn("srcB.oas: not_indexed (no fresh index cache (run: floe2 index lock.jb))",
+                      res.stdout)
+
+    def test_k11_a_busy_source_is_refused_or_waited_for(self):
+        src = self.layout()
+        lock = self.hold(src)
+        # no --wait: refused at once, naming the holder
+        started = time.monotonic()
+        res = floe2("render", src, "--out", self.dir / "a.png")
+        self.assertEqual(res.returncode, 75, res.stderr)
+        self.assertLess(time.monotonic() - started, 3.0)
+        self.assertIn("c.oas is being indexed by %s" % HOLDER, lock_line(res))
+        self.assertIn("(gate_holder run)", lock_line(res))
+        # bounded: refused after the bound, saying it waited
+        started = time.monotonic()
+        res = floe2("render", src, "--wait=1", "--out", self.dir / "a.png")
+        self.assertEqual(res.returncode, 75, res.stderr)
+        self.assertGreaterEqual(time.monotonic() - started, 1.0)
+        self.assertIn("waiting for it to finish (--wait, up to 1 s)", res.stderr)
+        self.assertIn("(waited 0:01, the --wait bound)", lock_line(res))
+        self.assertEqual(res.stderr.count("waiting for it to finish"), 1, res.stderr)
+        # FLOE_LOCK_WAIT=on the default, --no-wait over it
+        res = floe2("index", src, "--no-wait", env=run_env(FLOE_LOCK_WAIT="on"))
+        self.assertEqual(res.returncode, 75, res.stderr)
+        # --wait: the render, the index, the info wait; released, each goes
+        # on - the cache built once
+        logs = [self.dir / ("w%d.log" % i) for i in range(3)]
+        procs = [spawn([FLOE2, "render", src, "--wait", "--px", "120", "--out", self.dir / "w.png"], logs[0]),
+                 spawn([FLOE2, "index", src, "--wait", "--jobs", "2"], logs[1]),
+                 spawn([FLOE2, "info", src], logs[2], env=run_env(FLOE_LOCK_WAIT="30"))]
+        for proc, log in zip(procs, logs):
+            until_said(log, "waiting for it to finish", proc)
+        time.sleep(1.0)
+        self.assertTrue(all(p.poll() is None for p in procs))
+        lock.close()
+        for proc, log in zip(procs, logs):
+            self.assertEqual(proc.wait(timeout=120), 0, Path(log).read_text())
+            proc.stdout.close()
+            self.assertIn("c.oas is free - going on", Path(log).read_text())
+        builds = sum(Path(log).read_text().count("[vfs] done in") for log in logs)
+        self.assertEqual(builds, 1, [Path(log).read_text() for log in logs])
+        self.assertTrue((self.dir / "w.png").is_file())
+        # a signal ends the wait as it ends the command: nothing written
+        busy = self.layout("s.oas")
+        self.hold(busy)
+        log = self.dir / "sig.log"
+        proc = spawn([FLOE2, "render", busy, "--wait", "--out", self.dir / "sig.png"], log)
+        until_said(log, "waiting for it to finish", proc)
+        proc.send_signal(signal.SIGINT)
+        self.assertEqual(proc.wait(timeout=30), 130, Path(log).read_text())
+        proc.stdout.close()
+        self.assertFalse((self.dir / "sig.png").exists())
+        self.assertFalse(self.cache(busy).joinpath("meta.json").exists())
+
+    def test_k11_two_reads_at_once_build_once(self):
+        src = self.layout()
+        logs = [self.dir / ("t%d.log" % i) for i in range(2)]
+        procs = [spawn([FLOE2, "render", src, "--wait", "--px", "120", "--out", self.dir / ("t%d.png" % i)], logs[i])
+                 for i in range(2)]
+        for proc, log in zip(procs, logs):
+            self.assertEqual(proc.wait(timeout=120), 0, Path(log).read_text())
+            proc.stdout.close()
+        self.assertEqual(sum(Path(log).read_text().count("[vfs] done in") for log in logs), 1)
+
+    def test_k11_a_rebuild_waits_for_its_readers(self):
+        src = self.layout()
+        floe2("index", src, "--jobs", "2", ok=0)
+        w = open_worker(src)
+        stopped = []
+        self.addCleanup(lambda: stopped or w.stop())
+        res = floe2("index", src, "--force", "--wait=1", "--jobs", "2")
+        self.assertEqual(res.returncode, 75, res.stderr)
+        self.assertIn("c.oas is in use by %s" % HOLDER, res.stderr)
+        self.assertIn("waiting for it to be closed there (--wait, up to 1 s)", res.stderr)
+        log = self.dir / "rebuild.log"
+        proc = spawn([FLOE2, "index", src, "--force", "--wait", "--jobs", "2"], log)
+        until_said(log, "waiting for it to be closed there", proc)
+        w.stop()
+        stopped.append(1)
+        self.assertEqual(proc.wait(timeout=120), 0, log.read_text())
+        proc.stdout.close()
+        self.assertIn("[vfs] done in", log.read_text())
+
+    def test_k12_a_deck_render_waits_for_its_busy_source(self):
+        deck = self.deck()
+        floe2("index", self.dir / "srcA.oas", ok=0)
+        lock = self.hold(self.dir / "srcB.oas")
+        res = floe2("render", deck, "--px", "160", "--out", self.dir / "d.png")
+        self.assertEqual(res.returncode, 3, res.stdout + res.stderr)
+        self.assertIn("srcB.oas: not_indexed (srcB.oas is being indexed by %s" % HOLDER, res.stdout)
+        log = self.dir / "deck.log"
+        proc = spawn([FLOE2, "render", deck, "--px", "160", "--wait", "--out", self.dir / "w.png"], log)
+        until_said(log, "srcB.oas is being indexed by %s" % HOLDER, proc)
+        time.sleep(0.5)
+        self.assertIsNone(proc.poll())
+        lock.close()
+        self.assertEqual(proc.wait(timeout=120), 0, log.read_text())
+        out = proc.stdout.read()
+        proc.stdout.close()
+        self.assertNotIn("skipped", out)
+        # its index was the waiter's to build (the holder built nothing)
+        self.assertIn("index     : 1 built, 0 failed, 0 kept", log.read_text())
+
+    def test_k12_floe_index_indexes_a_jobdeck(self):
+        deck = self.deck()
+        res = floe_index("vfs", deck, "--jobs", "2", ok=0)
+        self.assertIn("lock.jb is a jobdeck: its sources are indexed by", res.stderr)
+        self.assertIn("index     : 2 built, 0 failed, 0 kept", res.stdout)
+        for name in ("srcA.oas", "srcB.oas"):
+            self.assertTrue((self.cache(self.dir / name) / "meta.json").is_file())
+            # a deck's source: the occupancy summary, no design.ovs
+            self.assertTrue((self.cache(self.dir / name) / "design.ovo").is_file())
+            self.assertFalse((self.cache(self.dir / name) / "design.ovs").exists())
+        res = floe_index("vfs", deck, ok=0)
+        self.assertIn("index     : 0 built, 0 failed, 2 kept", res.stdout)
+        res = floe_index("vfs", deck, self.dir / "out")
+        self.assertEqual(res.returncode, 2, res.stderr)
+        self.assertIn("no OUTDIR", res.stderr)
+        floe2("render", deck, "--no-index", "--px", "160", "--out", self.dir / "d.png", ok=0)
+        # its levels, a busy source (75), --wait for it
+        d2 = Path(tempfile.mkdtemp(prefix="deck2", dir=TMP))
+        for name in ("srcA.oas", "srcB.oas"):
+            write_layout(d2 / name)
+        (d2 / "lock.jb").write_text(DECK_LEVELS)
+        res = floe_index("vfs", d2 / "lock.jb", "--level", "1", ok=0)
+        self.assertIn("index     : 1 built, 0 failed, 0 kept", res.stdout)
+        self.assertFalse(self.cache(d2 / "srcB.oas").exists())
+        lock = indexlock.try_writer(indexlock.VFS, cachepath.vfs_cache_dir(str(d2 / "srcB.oas")),
+                                    full=True, what="gate_holder run", create=True)
+        self.addCleanup(lock.close)
+        res = floe_index("vfs", d2 / "lock.jb")
+        self.assertEqual(res.returncode, 75, res.stdout + res.stderr)
+        self.assertIn("index     : 0 built, 0 failed, 1 busy, 1 kept", res.stdout)
+        log = d2 / "w.log"
+        proc = spawn([BIN, "vfs", d2 / "lock.jb", "--wait"], log)
+        until_said(log, "waiting for it to finish", proc)
+        lock.close()
+        self.assertEqual(proc.wait(timeout=120), 0, log.read_text())
+        out = proc.stdout.read()
+        proc.stdout.close()
+        self.assertIn("index     : 1 built, 0 failed, 1 kept", out)
 
 
 class PackLockTests(unittest.TestCase):

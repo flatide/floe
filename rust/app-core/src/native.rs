@@ -180,26 +180,47 @@ impl Indexer {
         capture: bool,
         env: &[(&str, &str)],
     ) -> Result<Child> {
+        self.spawn_output(
+            args,
+            if capture { Output::Capture } else { Output::Inherit },
+            env,
+        )
+    }
+    /// The indexer with its output as `output` says.
+    pub(crate) fn spawn_output(
+        &self,
+        args: &[OsString],
+        output: Output,
+        env: &[(&str, &str)],
+    ) -> Result<Child> {
         cache::utf8(&self.binary)?;
         // CLI output still streams to its descriptors. Managed jobs use two
         // bounded nonblocking pipes, never output() or a shell/Python fallback.
+        let (stdout, stderr) = match output {
+            Output::Inherit => (Stdio::inherit(), Stdio::inherit()),
+            Output::Capture => (Stdio::piped(), Stdio::piped()),
+            Output::Stderr => (Stdio::from(std::io::stderr()), Stdio::inherit()),
+        };
         Ok(Command::new(&self.binary)
             .args(args)
             .envs(env.iter().copied())
             .stdin(Stdio::null())
-            .stdout(if capture {
-                Stdio::piped()
-            } else {
-                Stdio::inherit()
-            })
-            .stderr(if capture {
-                Stdio::piped()
-            } else {
-                Stdio::inherit()
-            })
+            .stdout(stdout)
+            .stderr(stderr)
             .process_group(0)
             .spawn()?)
     }
+}
+
+/// Where an indexer's output goes: this process's descriptors, two pipes a
+/// managed job reads, or both onto stderr - an index a read command runs
+/// first (app-cli ready.rs), whose stdout is the command's own (`info
+/// --json`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Output {
+    Inherit,
+    Capture,
+    Stderr,
 }
 
 pub(crate) fn signal_child(child: &Child, signal: i32) -> Result<()> {

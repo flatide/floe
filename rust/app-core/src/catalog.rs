@@ -120,11 +120,35 @@ impl Layout {
             return Err(Error::new(ErrorKind::Busy, busy.to_string()));
         }
         if !fs::symlink_metadata(&directory).is_ok_and(|m| m.is_dir()) {
+            // the source named (2026-10-15: it said `SOURCE`)
             return Err(Error::new(
                 ErrorKind::Cache,
                 format!(
-                    "no real VFS cache directory; run {} index SOURCE first",
-                    crate::program()
+                    "no real VFS cache directory for {}; run {} index {} first",
+                    source
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    crate::program(),
+                    source.display()
+                ),
+            ));
+        }
+        // a build stopped half-way (cancelled, killed) left the folder
+        // without its commit: said so, not "No such file or directory"
+        if matches!(fs::symlink_metadata(directory.join("meta.json")), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+        {
+            return Err(Error::new(
+                ErrorKind::Cache,
+                format!(
+                    "the index of {} is incomplete (no meta.json in {}: a build stopped half-way?); rebuild it: {} index --force {}",
+                    source
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    directory.display(),
+                    crate::program(),
+                    source.display()
                 ),
             ));
         }

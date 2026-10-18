@@ -7,6 +7,7 @@ use super::{
 use crate::{check_cancelled, Error, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
+use std::path::Path;
 use std::sync::atomic::AtomicUsize;
 
 const SPEC_BYTES: usize = 128 * 1024 * 1024;
@@ -108,6 +109,16 @@ pub fn compose(analysis: &Analysis, cancelled: &AtomicUsize) -> Result<Composite
     let mut count = 0;
     let mut skipped = Vec::new();
     let mut seen = BTreeSet::new();
+    // what a source without a fresh cache is told to run (2026-10-15: it
+    // said `--index`, an option no command has)
+    let unindexed = format!(
+        "no fresh index cache (run: {} index {})",
+        crate::program(),
+        Path::new(&analysis.deck.path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| analysis.deck.path.clone())
+    );
     for p in &analysis.model.placements {
         check_cancelled(cancelled)?;
         let info = analysis.catalog.infos.get(&p.tc);
@@ -118,7 +129,7 @@ pub fn compose(analysis: &Analysis, cancelled: &AtomicUsize) -> Result<Composite
                 let detail = info
                     .map(|i| i.busy.as_str())
                     .filter(|busy| !busy.is_empty())
-                    .unwrap_or("no fresh index cache (run --index)");
+                    .unwrap_or(&unindexed);
                 skipped.push(skip(p, "not_indexed", detail.into(), false));
             }
             continue;

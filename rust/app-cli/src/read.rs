@@ -1,9 +1,7 @@
+use crate::ready::{self, Ready, Waiter};
 use floe_app_core::{
     dataset::Dataset,
-    jobdeck::{
-        color::Mode,
-        index::{is_deck, parse_levels},
-    },
+    jobdeck::index::{is_deck, parse_levels},
     render::{require_complete, RenderOptions, RenderSession},
     shots::{self, batch::Capture, Anchor, Detail, Shot, Thin},
     styles::LayerColors,
@@ -70,13 +68,21 @@ makes it the default, as before 0.12.350).
   --drc-frac F              Error/frame span (default .3, clamped .02..1)
   --drc-rules FILE          SVRF isolation sidecar; explicit --layers wins
   --floe-reviewer TAG       Read existing waive status; no review writes
+  --no-index                A source with no index yet is refused, not indexed
+                            first (FLOE_AUTO_INDEX=off: the default)
+  --wait[=SECONDS]          A source another run indexes: wait for it instead of
+                            exit 75 (SECONDS bounds it; FLOE_LOCK_WAIT=on|SECONDS)
+  --no-wait                 Refuse at once (exit 75) whatever FLOE_LOCK_WAIT says
+A source with no index (a jobdeck: its sources of the levels loaded) is indexed
+first, as `floe2-web index` builds it, its output on stderr; a changed source keeps
+its cache (index --force rebuilds it).
 Lengths: bare/um/µm/μm, nm, mm, cm, m. Fractional DBU is preserved.
 Batch: NAME key=value ...; quotes supported, full-line # comments. Region fields
 override the CLI region. Keys: bbox at size anchor px stretch layers depth mosaic
 corners line linecolor keep_tiles chip chip_off fit_chip; corners=fit. Limit 16 MiB/4096 shots; no shell expansion.
 DRC uses the width from --px even for WxH; frames/labels are on (deck labels off),
 the viewer's fills. --detail/--thin/--density/--label-font-px are honored.
-No batch/mosaic/region/report with DRC; no implicit indexing. Local/global/path TSV.
+No batch/mosaic/region/report with DRC. Local/global/path TSV.
 Only complete DRC frames are saved; all-layer shots omit the layer legend
 unless --legend.
 Annotate existing PNGs with fe-embed. Jobdeck labels unsupported.
@@ -85,15 +91,19 @@ Mosaic final image is four tiles (up to 64 Mpx). Outputs must not collide.
 Cancelled/failed frames never replace an existing PNG. Jobdeck known skipped
 placements/over-budget pages may publish a flagged incomplete PNG (exit 3).
 Other incomplete frames preserve the previous output.";
-const INFO_HELP: &str = "Usage: floe2-web info SOURCE [--level N,N,...] [--json] [--chips]
+const INFO_HELP: &str = "Usage: floe2-web info SOURCE [--level N,N,...] [--json] [--chips] [--no-index] [--wait[=SECONDS]]
 --chips (jobdeck): every chip of the levels loaded - its CHIP blocks,
 placements (#K) and extents, the names render --chip/--fit-chip take.
 Read layout/cache summary. --json emits metadata plus source_stale.
-No indexing is performed. Jobdeck info includes the skip ledger and virtual layers;
+A source with no index is indexed first (its output on stderr; --no-index or
+FLOE_AUTO_INDEX=off: refused instead); one another run indexes is refused (75)
+unless --wait[=SECONDS] (FLOE_LOCK_WAIT=on|SECONDS; --no-wait). Jobdeck info
+includes the skip ledger and virtual layers;
 --level is a jobdeck load selection. --json uses cache:null for composites.";
-const PROBE_HELP: &str = "Usage: floe2-web probe SOURCE
+const PROBE_HELP: &str = "Usage: floe2-web probe SOURCE [--no-index] [--wait[=SECONDS]]
 Headless ready/open/style + fit/center frame checks; no output files.
-This validates the worker, not browser display or ETX performance.";
+This validates the worker, not browser display or ETX performance.
+A source with no index is indexed first (--no-index: refused); --wait as render's.";
 
 pub enum Command {
     Help(&'static str),
@@ -102,6 +112,7 @@ pub enum Command {
         json: bool,
         levels: Option<BTreeSet<i64>>,
         chips: bool,
+        ready: Ready,
     },
     Render {
         source: PathBuf,
@@ -113,8 +124,12 @@ pub enum Command {
         drc: Option<Box<floe_app_core::drc::capture::Options>>,
         layer_colors: Option<LayerColors>,
         legend: bool,
+        ready: Ready,
     },
-    Probe(PathBuf),
+    Probe {
+        source: PathBuf,
+        ready: Ready,
+    },
 }
 pub fn parse(args: &[String]) -> Result<Command> {
     let kind = args[0].as_str();
@@ -146,6 +161,8 @@ pub fn parse(args: &[String]) -> Result<Command> {
     let mut layer_colors = None;
     // --legend (each image's layer legend as flateyes metadata)
     let mut legend = false;
+    // --no-index / --wait / --no-wait over FLOE_AUTO_INDEX / FLOE_LOCK_WAIT
+    let mut ready = Ready::from_env()?;
     let mut positional = false;
     let mut i = 1;
     while i < args.len() {
@@ -202,6 +219,9 @@ pub fn parse(args: &[String]) -> Result<Command> {
         }
         if kind != "probe" && flag == "--level" {
             levels = Some(parse_levels(value()?)?);
+            continue;
+        }
+        if ready.take(flag, inline)? {
             continue;
         }
         if kind != "render" {
@@ -459,8 +479,9 @@ pub fn parse(args: &[String]) -> Result<Command> {
             json,
             levels,
             chips,
+            ready,
         }),
-        "probe" => Ok(Command::Probe(source)),
+        "probe" => Ok(Command::Probe { source, ready }),
         _ => {
             // the capture's own rules (one region form, --fit-chip against
             // a region of its own, --layers against --chip) are checked
@@ -475,16 +496,21 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 drc,
                 layer_colors,
                 legend,
+                ready,
             })
         }
     }
 }
-fn dataset(
+/// `source` opened (ready.rs: indexed first when it has no index, waited
+/// for when `waiter` waits), its staleness said.
+pub(crate) fn dataset(
     source: &std::path::Path,
     levels: Option<BTreeSet<i64>>,
+    index: bool,
+    waiter: &mut Waiter,
     cancelled: &AtomicUsize,
 ) -> Result<Dataset> {
-    let l = Dataset::open(source, levels, Mode::Level, cancelled)?;
+    let l = ready::open(source, levels, index, waiter, cancelled)?;
     if l.source_stale() {
         eprintln!("[{}][warn] source changed; displaying cached geometry. Rebuild with index --force, then reopen.", floe_app_core::program());
     }
@@ -492,12 +518,16 @@ fn dataset(
 }
 pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
     match command {
-        Command::Help(help) => println!("{}", crate::named(help)),
+        Command::Help(help) => {
+            println!("{}", crate::named(help));
+            Ok(0)
+        }
         Command::Info {
             source,
             json,
             levels,
             chips,
+            ready,
         } => {
             if chips && !is_deck(&source) {
                 return Err(Error::input(format!(
@@ -505,49 +535,24 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
                     source.display()
                 )));
             }
-            let l = dataset(&source, levels, cancelled)?;
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&l.info())
-                        .map_err(|e| Error::input(e.to_string()))?
-                );
-            } else {
-                print!("{}", l.summary(cancelled)?);
-            }
-            if let (true, Dataset::Deck(deck)) = (chips, &l) {
-                // what `render --chip / --chip-off / --fit-chip` name: the
-                // chip view's rows, their CHIP blocks and placements
-                let table = floe_app_core::jobdeck::chips::ChipTable::new(
-                    &deck.analysis.deck,
-                    &deck.analysis.model.placements,
-                    &deck.metadata.layers,
-                );
-                let levels = table.levels();
-                println!(
-                    "[jobdeck] chip rows : {} in level{} {} - the chips render --chip / --chip-off / --fit-chip NAME[#K] name",
-                    table.rows.len(),
-                    if levels.len() == 1 { "" } else { "s" },
-                    levels.iter().map(i64::to_string).collect::<Vec<_>>().join(",")
-                );
-                for line in table.listing() {
-                    println!("  {line}");
-                }
-            }
+            let mut waiter = Waiter::new(ready.wait, cancelled);
+            again(&source, &mut waiter, |waiter| {
+                info(&source, json, levels.clone(), chips, ready.index, waiter, cancelled)
+            })
         }
         Command::Render {
             source,
             capture,
             out,
-            report,
-            batch,
             levels,
-            drc,
+            drc: Some(drc),
             layer_colors,
-            legend,
+            ready,
+            ..
         } => {
-            if let Some(drc) = drc {
-                let mut dataset = dataset(&source, levels, cancelled)?;
+            let mut waiter = Waiter::new(ready.wait, cancelled);
+            again(&source, &mut waiter, |waiter| {
+                let mut dataset = dataset(&source, levels.clone(), ready.index, waiter, cancelled)?;
                 if let Some(mode) = layer_colors {
                     dataset.set_layer_colors(mode);
                 }
@@ -560,9 +565,25 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
                     cancelled,
                     |line| println!("{line}"),
                 )?;
-                return Ok(0);
-            }
-            return crate::capture::run(
+                Ok(0)
+            })
+        }
+        Command::Render {
+            source,
+            capture,
+            out,
+            report,
+            batch,
+            levels,
+            drc: None,
+            layer_colors,
+            legend,
+            ready,
+        } => {
+            // its shots read once (`--batch -` is stdin), the captures run
+            // again there
+            let mut waiter = Waiter::new(ready.wait, cancelled);
+            crate::capture::run(
                 source,
                 *capture,
                 out,
@@ -571,62 +592,127 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
                 levels,
                 layer_colors,
                 legend,
+                ready.index,
+                &mut waiter,
                 cancelled,
-            );
+            )
         }
-        Command::Probe(source) => {
-            let l = dataset(&source, None, cancelled)?;
-            let mut session =
-                RenderSession::open(&l, RenderOptions::local()?, false, Arc::clone(cancelled))?;
-            println!(
-                "[probe] service spawned (pid {})",
-                session.pid().unwrap_or(0)
-            );
-            let bb = l.bbox();
-            let cx = (i128::from(bb[0]) + i128::from(bb[2])).div_euclid(2) as f64;
-            let cy = (i128::from(bb[1]) + i128::from(bb[3])).div_euclid(2) as f64;
-            let hw = (l.grid().tile_w / 2).max(1) as f64;
-            let hh = (l.grid().tile_h / 2).max(1) as f64;
-            for (label, view, depth) in [
-                ("fit view (live, depth 0)", bb.map(|n| n as f64), Some(0)),
-                (
-                    "live (1-tile region at center)",
-                    [cx - hw, cy - hh, cx + hw, cy + hh],
-                    None,
-                ),
-            ] {
-                let mut request = session.base_request();
-                request.view = view;
-                request.width = 600;
-                request.height = 600;
-                request.depth = depth;
-                request.frames = true;
-                request.labels = !l.is_deck();
-                request.thin = Thin::Auto.effective(l.is_deck());
-                let started = Instant::now();
-                let frame = session.capture(request)?;
-                require_complete(&frame)?;
-                println!(
-                    "[probe] {label}: frame OK {} bytes, {} ms, final={}, partial={}",
-                    frame.bytes.len(),
-                    started.elapsed().as_millis(),
-                    frame.final_frame,
-                    frame.partial
-                );
-            }
-            session.close()?;
-            if !l.skipped().is_empty() {
-                return Err(Error::new(
-                    ErrorKind::Incomplete,
-                    format!(
-                        "probe rendered but jobdeck is incomplete: {} skipped placement(s)",
-                        l.skipped().len()
-                    ),
-                ));
-            }
-            println!("[probe] OK — worker open/style/frames/shutdown validated; browser display not tested");
+        Command::Probe { source, ready } => {
+            let mut waiter = Waiter::new(ready.wait, cancelled);
+            again(&source, &mut waiter, |waiter| probe(&source, ready.index, waiter, cancelled))
         }
     }
+}
+/// `body` again once its source is free (--wait) when it was refused for
+/// it after the open: a rebuild that began as renderd took its locks.
+pub(crate) fn again(
+    source: &std::path::Path,
+    waiter: &mut Waiter,
+    mut body: impl FnMut(&mut Waiter) -> Result<i32>,
+) -> Result<i32> {
+    loop {
+        match body(waiter) {
+            Err(e) if waiter.again(&e, source)? => continue,
+            other => return other,
+        }
+    }
+}
+fn info(
+    source: &std::path::Path,
+    json: bool,
+    levels: Option<BTreeSet<i64>>,
+    chips: bool,
+    index: bool,
+    waiter: &mut Waiter,
+    cancelled: &Arc<AtomicUsize>,
+) -> Result<i32> {
+    let l = dataset(source, levels, index, waiter, cancelled)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&l.info())
+                .map_err(|e| Error::input(e.to_string()))?
+        );
+    } else {
+        print!("{}", l.summary(cancelled)?);
+    }
+    if let (true, Dataset::Deck(deck)) = (chips, &l) {
+        // what `render --chip / --chip-off / --fit-chip` name: the
+        // chip view's rows, their CHIP blocks and placements
+        let table = floe_app_core::jobdeck::chips::ChipTable::new(
+            &deck.analysis.deck,
+            &deck.analysis.model.placements,
+            &deck.metadata.layers,
+        );
+        let levels = table.levels();
+        println!(
+            "[jobdeck] chip rows : {} in level{} {} - the chips render --chip / --chip-off / --fit-chip NAME[#K] name",
+            table.rows.len(),
+            if levels.len() == 1 { "" } else { "s" },
+            levels.iter().map(i64::to_string).collect::<Vec<_>>().join(",")
+        );
+        for line in table.listing() {
+            println!("  {line}");
+        }
+    }
+    Ok(0)
+}
+fn probe(
+    source: &std::path::Path,
+    index: bool,
+    waiter: &mut Waiter,
+    cancelled: &Arc<AtomicUsize>,
+) -> Result<i32> {
+    let l = dataset(source, None, index, waiter, cancelled)?;
+    let mut session =
+        RenderSession::open(&l, RenderOptions::local()?, false, Arc::clone(cancelled))?;
+    println!(
+        "[probe] service spawned (pid {})",
+        session.pid().unwrap_or(0)
+    );
+    let bb = l.bbox();
+    let cx = (i128::from(bb[0]) + i128::from(bb[2])).div_euclid(2) as f64;
+    let cy = (i128::from(bb[1]) + i128::from(bb[3])).div_euclid(2) as f64;
+    let hw = (l.grid().tile_w / 2).max(1) as f64;
+    let hh = (l.grid().tile_h / 2).max(1) as f64;
+    for (label, view, depth) in [
+        ("fit view (live, depth 0)", bb.map(|n| n as f64), Some(0)),
+        (
+            "live (1-tile region at center)",
+            [cx - hw, cy - hh, cx + hw, cy + hh],
+            None,
+        ),
+    ] {
+        let mut request = session.base_request();
+        request.view = view;
+        request.width = 600;
+        request.height = 600;
+        request.depth = depth;
+        request.frames = true;
+        request.labels = !l.is_deck();
+        request.thin = Thin::Auto.effective(l.is_deck());
+        let started = Instant::now();
+        let frame = session.capture(request)?;
+        require_complete(&frame)?;
+        println!(
+            "[probe] {label}: frame OK {} bytes, {} ms, final={}, partial={}",
+            frame.bytes.len(),
+            started.elapsed().as_millis(),
+            frame.final_frame,
+            frame.partial
+        );
+    }
+    session.close()?;
+    if !l.skipped().is_empty() {
+        return Err(Error::new(
+            ErrorKind::Incomplete,
+            format!(
+                "probe rendered but jobdeck is incomplete: {} skipped placement(s)",
+                l.skipped().len()
+            ),
+        ));
+    }
+    println!("[probe] OK — worker open/style/frames/shutdown validated; browser display not tested");
     Ok(0)
 }
 

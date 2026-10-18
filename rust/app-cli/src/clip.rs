@@ -1,6 +1,7 @@
+use crate::ready::{Ready, Waiter};
 use floe_app_core::{
-    catalog::Layout,
     clip::{export, ClipOptions},
+    dataset::Dataset,
     jobdeck::index::is_deck,
     Error, ErrorKind, Result,
 };
@@ -15,9 +16,14 @@ const HELP: &str = "Usage: floe2-web clip SOURCE --bbox X0,Y0,X1,Y1 [OPTIONS]
   --out PATH           OASIS output (default clip.oas); publish only on success
   --cell-name NAME     Output top cell (default FLOE_CLIP)
   --exact              Compatibility flag: Rust clip is always exact
+  --no-index           A source with no index yet is refused, not indexed first
+                       (FLOE_AUTO_INDEX=off: the default)
+  --wait[=SECONDS]     A source another run indexes: wait for it instead of exit 75
+                       (SECONDS bounds it; FLOE_LOCK_WAIT=on|SECONDS); --no-wait
   -h, --help           Show this help
 
-Uses the existing cache, full depth, cut=0; display/LOD/summary settings ignored.
+Uses the source's cache (indexed first when it has none, its output on stderr),
+full depth, cut=0; display/LOD/summary settings ignored.
 An empty layer-token list means all, matching the existing clip CLI (not render).
 Jobdeck clip is unsupported; clip a source OASIS layout directly.
 FLOE_RUST_JOBS controls decode workers (default min(CPUs,8)).
@@ -34,6 +40,7 @@ pub enum Command {
         layers: Option<String>,
         out: PathBuf,
         cell: String,
+        ready: Ready,
     },
 }
 pub fn parse(args: &[String]) -> Result<Command> {
@@ -42,6 +49,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
     let mut layers = None;
     let mut out = PathBuf::from("clip.oas");
     let mut cell = "FLOE_CLIP".to_string();
+    let mut ready = Ready::from_env()?;
     let mut positional = false;
     let mut i = 1;
     while i < args.len() {
@@ -67,6 +75,9 @@ pub fn parse(args: &[String]) -> Result<Command> {
             if flag != "--exact" {
                 return Ok(Command::Help);
             }
+            continue;
+        }
+        if ready.take(flag, inline)? {
             continue;
         }
         if !matches!(flag, "--bbox" | "--layers" | "--out" | "--cell-name") {
@@ -122,6 +133,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
         layers,
         out,
         cell,
+        ready,
     })
 }
 pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
@@ -131,22 +143,45 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         layers,
         out,
         cell,
+        ready,
     } = command
     else {
         println!("{}", crate::named(HELP));
         return Ok(0);
     };
+    let mut waiter = Waiter::new(ready.wait, cancelled);
+    crate::read::again(&source, &mut waiter, |waiter| {
+        clip(&source, bbox, layers.as_deref(), &out, &cell, ready.index, waiter, cancelled)
+    })
+}
+#[allow(clippy::too_many_arguments)]
+fn clip(
+    source: &std::path::Path,
+    bbox: [f64; 4],
+    layers: Option<&str>,
+    out: &std::path::Path,
+    cell: &str,
+    index: bool,
+    waiter: &mut Waiter,
+    cancelled: &Arc<AtomicUsize>,
+) -> Result<i32> {
+    // indexed first when it has none (ready.rs); a layout - parse refused a deck
+    let Dataset::Layout(layout) = crate::ready::open(source, None, index, waiter, cancelled)? else {
+        return Err(Error::new(
+            ErrorKind::Unsupported,
+            "jobdeck clip is unsupported; clip a source layout directly",
+        ));
+    };
     let start = Instant::now();
-    let layout = Layout::open(&source, cancelled)?;
     if layout.source_stale {
         eprintln!("[{}][warn] source changed; clipping cached geometry. Rebuild with index --force first to export the current source.", floe_app_core::program());
     }
     let report = export(
         &layout,
         bbox,
-        layers.as_deref(),
-        &cell,
-        &out,
+        layers,
+        cell,
+        out,
         &ClipOptions::local()?,
         cancelled,
     )?;
