@@ -226,8 +226,8 @@ fn main() {
     if args.len() < 3 || args[1] != "scan" {
         eprintln!(
             "usage: floe-index scan <file.oas> [jobs]\n       \
-             floe-index inventory <file.oas> [--jobs N] [--check] [--cells]  \
-             (the streaming build's first pass: cell table, layer order, hierarchy fold; --check holds it to the Doc pre-passes)\n       \
+             floe-index inventory <file.oas> [--jobs N] [--check] [--check-cells] [--cells]  \
+             (the streaming build's first pass: cell table, layer order, hierarchy fold; --check holds it to the Doc pre-passes, --check-cells the cell parser to the Doc's cells)\n       \
              floe-index tile <file.oas> <outdir> \
              --grid x0,y0,tw,th,nx,ny --edges e0,e1,e2\n       \
              floe-index index <file.oas> [outdir] [--mem GB] \

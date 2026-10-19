@@ -561,14 +561,18 @@ pub struct ScanStats {
     /// CELLNAME table in file order: (explicit reference, name) -
     /// implicit (id 3) entries are numbered by position when resolving
     cellnames_seen: Vec<(Option<u64>, String)>,
-    /// inventory mode: TEXTSTRING records in file order (explicit
-    /// reference or implicit) and the references TEXT records make -
-    /// an unresolved one is refused as doc.rs finish_inner refuses it
-    textstrings_seen: Vec<Option<u64>>,
+    /// inventory mode: the TEXTSTRING table in file order (explicit
+    /// reference or implicit, string) and the references TEXT records
+    /// make - an unresolved one is refused as doc.rs finish_inner
+    /// refuses it; the cell parser resolves its texts through the table
+    textstrings_seen: Vec<(Option<u64>, String)>,
     text_refs: HashSet<u64>,
     /// the resolved table (finish): reference -> name, first entry wins
-    /// as in the parallel geometry parse's union
+    /// as in the parallel geometry parse's union; `cellname_dups` says a
+    /// reference number was defined twice (the inventory refuses that:
+    /// the geometry parser's result then depends on record positions)
     cellname_table: HashMap<u64, String>,
+    cellname_dups: bool,
     /// the inventory collector of this parse (None: plain scan); a
     /// parallel scan appends its workers' collectors to `inv_parts` in
     /// file order and `inventory::finish` folds them
@@ -701,7 +705,11 @@ impl ScanStats {
                     implicit - 1
                 }
             };
-            names.entry(r).or_insert(name);
+            if names.contains_key(&r) {
+                self.cellname_dups = true;
+            } else {
+                names.insert(r, name);
+            }
         }
         let (mut extra, mut extra2) = (0u64, 0u64);
         for cs in self.cell_stats.iter_mut() {
@@ -875,8 +883,8 @@ fn record(
                 st.n5 += 1;
             }
             if st.inv.is_some() {
-                st.check_utf8(c, s)?;
-                st.textstrings_seen.push(r);
+                let s = st.name_string(c, s)?;
+                st.textstrings_seen.push((r, s));
             }
         }
         7 | 8 | 9 | 10 => {

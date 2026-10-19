@@ -1,7 +1,7 @@
 # 스트리밍 인덱서 설계 — 셀 단위 2-패스 빌드 (2026-10-19)
 
 상태: S1(1차 재고 패스) 구현됨(0.12.363, §3.6), S2(CellStore) 구현됨
-(0.12.365, §4.2). S3 이후는 설계. 근거는
+(0.12.365, §4.2), S3(셀 파서) 구현됨(0.12.366, §4.1). S4 이후는 설계. 근거는
 rust/FLOE_INDEX_MEMORY_PLAN.md §5의 현장 수치와 `floe-index scan`
 0.12.328의 결과. 코드 줄 번호 참조는 0.12.360(8b59f3a5) 기준.
 
@@ -207,6 +207,36 @@ Doc을 만들었으니 레코드를 저장하지 않는 1차 패스는 5~7분으
 - 단위 테스트: 전체 파싱 Doc의 cells[ci]와 셀 파서의 결과가 레코드
   단위로 같다(§6 G2).
 
+**구현(S3, 0.12.366 / floe-index 0.12.331).** `floe_oasis::doc::
+parse_cell_range(data, &CellRange, &CellTables) -> Vec<CellPiece>`:
+범위 하나를 `parse_records`(청크 빌더, 범위의 암시 참조번호 시드)로
+읽고, 셀 이름은 재고의 CELLNAME 표로(자리표시자 포함), 배치 대상은
+재고의 셀 표로 Doc 인덱스로, 미해결 텍스트는 범위 안의 표 또는 재고의
+TEXTSTRING 표로 해결한다. 범위는 보통 셀 하나지만 CBLOCK 안의 CELL이
+더 나올 수 있고(`CellPiece.index`로 구분), 셀 하나가 CELL 레코드 여럿
+이면 조각이 여러 범위에서 나오므로 조각을 파일 순서로 이어 붙인 뒤
+`normalize_cells(&mut [cell], jobs)`를 건다 — 전체 패스의 8셀 묶음
+본체를 그대로 떼어낸 함수라 결과가 레코드 단위로 같다. 재고는 이를
+위해 `head`(첫 보이는 CELL 앞 구간; 표와, CBLOCK이 거기 정의한 셀),
+`cellnames`, `textstrings`, `cell_tables()`를 더 들고 있다. G2는
+`floe-index inventory FILE --check-cells`(전체 Doc 파스의 cells[ci]와
+레코드 단위 비교; `rust_inventory` 게이트가 모든 fixture에 jobs 1·3으로
+돈다)와 단위 테스트(적대적 스트림 4변종, 헤드 CBLOCK 셀, 정규화가
+쪼개는 반복을 가진 write_tree 계층)다.
+
+검토(S3, 2026-10-20) 반영: (1) 미해결 텍스트는 재고의 TEXTSTRING 표를
+먼저 본다(전체 Doc 파스가 보류 텍스트를 해결하는 표가 그것이다);
+(2) 참조번호가 두 번 정의된 CELLNAME·TEXTSTRING은 재고가 거절한다 —
+Doc은 그 참조를 레코드 위치에 따라(정의가 앞서면 그 자리에서, 아니면
+표에서) 해결하므로 범위 단위 파서가 재현할 수 없고, 실제 라이터는 그런
+스트림을 내지 않는다; (3) `InvCell.def_ranges` = 그 셀의 CELL 레코드를
+담은 범위(헤드 포함)의 시작 오프셋들 — 범위가 셀 하나의 CELL 레코드
+둘을 접으면 조각은 하나이므로 "조각 수 = 정의 수"는 성립하지 않고,
+S4의 완료 판정은 def_ranges의 범위가 모두 파싱됐는지로 한다; (4)
+`parse_cell_bytes(bytes, base, seeds, tables)` — pread 리더가 범위의
+바이트만 들고 부른다; (5) `CellStore::failed()` — 리더 스레드의 파싱
+오류를 커미터가 대기 중에 보고 빌드를 중단한다(Doc에서는 None).
+
 **S3 셀 파서의 계약(S2 검토에서 정리).** 변환된 함수들이 셀 밖에서
 읽는 것은 자식의 rbb(PrePass)뿐이고, 셀 안에서는 (1) `PlaceRec.cell`이
 재고의 Doc 인덱스와 같아야 하며(플래너의 `rbb[pl.cell]`, sink의
@@ -370,8 +400,10 @@ S6은 S1~S5와 독립이라 먼저 번들로 낼 수 있다. S1은 scan 확장�
 진행: S1 완료(0.12.363, §3.6; 사용자 2026-10-19 "S1부터 진행해줘").
 S2 완료(0.12.365, §4.2 구현; 사용자 2026-10-19 "S2 진행해줘"): build()의
 입력이 `(&dyn CellStore, PrePass)`가 되어 S4의 드라이버는 저장소 하나와
-재고의 PrePass를 끼우면 된다. 다음은 S3 셀 파서(바이트 범위 → Cell,
-셀 단위 정규화; G2).
+재고의 PrePass를 끼우면 된다. S3 완료(0.12.366, §4.1 구현; 사용자
+2026-10-19 "S3 진행해줘"): `parse_cell_range` + `normalize_cells`, G2
+녹색. 다음은 S4 드라이버(리더 + 바이트 입장 예산 + 스트리밍 CellStore +
+기존 커미터/인코더, `--stream` opt-in; G3·G4·G5).
 
 ## 9. 조사 중 발견한 문서 불일치 (구현 커밋에서 바로잡는다)
 

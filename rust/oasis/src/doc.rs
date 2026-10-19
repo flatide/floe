@@ -8,6 +8,7 @@
 //! placements raise a clear error so the production version grows
 //! deliberately, not silently.
 
+use crate::inventory::CellRange;
 use crate::{err, Cur, OasisError, Result};
 use std::collections::HashMap;
 use std::io::Read;
@@ -43,7 +44,7 @@ impl Rep {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RectRec {
     pub layer: u32,
     pub dt: u32,
@@ -54,7 +55,7 @@ pub struct RectRec {
     pub rep: Rep,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PolyRec {
     pub layer: u32,
     pub dt: u32,
@@ -63,7 +64,7 @@ pub struct PolyRec {
     pub rep: Rep,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PlaceRec {
     /// resolved cell index into Doc::cells
     pub cell: usize,
@@ -75,7 +76,7 @@ pub struct PlaceRec {
     pub rep: Rep,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PathRec {
     pub layer: u32,
     pub dt: u32,
@@ -89,7 +90,7 @@ pub struct PathRec {
     pub rep: Rep,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TextRec {
     pub layer: u32,
     pub dt: u32,
@@ -99,7 +100,7 @@ pub struct TextRec {
     pub s: String,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug, PartialEq)]
 pub struct Cell {
     pub name: String,
     pub rects: Vec<RectRec>,
@@ -1515,77 +1516,88 @@ fn normalize_reps(doc: &mut Doc, jobs: usize) {
     // final apply pass. Cell order and candidate walk order are unchanged, so
     // output stays byte-identical at every worker count.
     for cells in doc.cells.chunks_mut(NORMALIZE_CELL_BATCH_MAX) {
-        // Modal repetition reuse gives many records the same Arc. Normalize
-        // that point set once, then share the immutable decomposition across
-        // all records that reference it. This prevents N workers from sorting
-        // N copies of the same die-wide fill repetition simultaneously.
-        let mut unique: Vec<&[(i64, i64)]> = Vec::new();
-        let mut unique_by_ptr: HashMap<(usize, usize), usize> =
-            HashMap::new();
-        let mut candidate_unique_by_cell: Vec<Vec<usize>> =
-            Vec::with_capacity(cells.len());
-        for cell in cells.iter() {
-            let mut candidate_unique = Vec::new();
-            for p in pts_candidates(cell) {
-                let key = (p.as_ptr() as usize, p.len());
-                let ui = match unique_by_ptr.get(&key) {
-                    Some(&ui) => ui,
-                    None => {
-                        let ui = unique.len();
-                        unique.push(p.as_ref());
-                        unique_by_ptr.insert(key, ui);
-                        ui
-                    }
-                };
-                candidate_unique.push(ui);
-            }
-            candidate_unique_by_cell.push(candidate_unique);
-        }
-        if unique.is_empty() {
-            continue;
-        }
-        let mut results: Vec<std::sync::OnceLock<GridDecomp>> = Vec::new();
-        results.resize_with(unique.len(), std::sync::OnceLock::new);
-        if jobs <= 1 || unique.len() < 2 {
-            for (p, r) in unique.iter().zip(results.iter_mut()) {
-                let _ = r.set(find_grids(p));
-            }
-        } else {
-            let ctr = std::sync::atomic::AtomicUsize::new(0);
-            std::thread::scope(|s| {
-                for _ in 0..jobs.min(unique.len()) {
-                    let unique = &unique;
-                    let results = &results;
-                    let ctr = &ctr;
-                    s.spawn(move || loop {
-                        let i = ctr.fetch_add(
-                            1,
-                            std::sync::atomic::Ordering::Relaxed,
-                        );
-                        if i >= unique.len() {
-                            return;
-                        }
-                        let _ = results[i].set(find_grids(unique[i]));
-                    });
+        normalize_cells(cells, jobs);
+    }
+}
+
+/// Repetition normalization of a slice of cells: one batch of the
+/// whole-Doc pass above, and the streaming build's call on a single
+/// cell once its pieces are together (docs/STREAMING_INDEX_PLAN.ko.md
+/// §4.1, S3). A cell's result depends on its own point sets only - the
+/// batch is a work unit that shares decompositions, never a boundary
+/// of the result - so a cell normalized alone equals the cell of the
+/// whole-Doc pass (gate G2).
+pub fn normalize_cells(cells: &mut [Cell], jobs: usize) {
+    // Modal repetition reuse gives many records the same Arc. Normalize
+    // that point set once, then share the immutable decomposition across
+    // all records that reference it. This prevents N workers from sorting
+    // N copies of the same die-wide fill repetition simultaneously.
+    let mut unique: Vec<&[(i64, i64)]> = Vec::new();
+    let mut unique_by_ptr: HashMap<(usize, usize), usize> =
+        HashMap::new();
+    let mut candidate_unique_by_cell: Vec<Vec<usize>> =
+        Vec::with_capacity(cells.len());
+    for cell in cells.iter() {
+        let mut candidate_unique = Vec::new();
+        for p in pts_candidates(cell) {
+            let key = (p.as_ptr() as usize, p.len());
+            let ui = match unique_by_ptr.get(&key) {
+                Some(&ui) => ui,
+                None => {
+                    let ui = unique.len();
+                    unique.push(p.as_ref());
+                    unique_by_ptr.insert(key, ui);
+                    ui
                 }
-            });
+            };
+            candidate_unique.push(ui);
         }
-        drop(unique);
-        let results: Vec<Arc<GridDecomp>> = results
+        candidate_unique_by_cell.push(candidate_unique);
+    }
+    if unique.is_empty() {
+        return;
+    }
+    let mut results: Vec<std::sync::OnceLock<GridDecomp>> = Vec::new();
+    results.resize_with(unique.len(), std::sync::OnceLock::new);
+    if jobs <= 1 || unique.len() < 2 {
+        for (p, r) in unique.iter().zip(results.iter_mut()) {
+            let _ = r.set(find_grids(p));
+        }
+    } else {
+        let ctr = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|s| {
+            for _ in 0..jobs.min(unique.len()) {
+                let unique = &unique;
+                let results = &results;
+                let ctr = &ctr;
+                s.spawn(move || loop {
+                    let i = ctr.fetch_add(
+                        1,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    if i >= unique.len() {
+                        return;
+                    }
+                    let _ = results[i].set(find_grids(unique[i]));
+                });
+            }
+        });
+    }
+    drop(unique);
+    let results: Vec<Arc<GridDecomp>> = results
+        .into_iter()
+        .map(|c| {
+            Arc::new(c.into_inner().expect("normalize slot unset"))
+        })
+        .collect();
+    for (cell, candidate_unique) in
+        cells.iter_mut().zip(candidate_unique_by_cell)
+    {
+        let mut res = candidate_unique
             .into_iter()
-            .map(|c| {
-                Arc::new(c.into_inner().expect("normalize slot unset"))
-            })
-            .collect();
-        for (cell, candidate_unique) in
-            cells.iter_mut().zip(candidate_unique_by_cell)
-        {
-            let mut res = candidate_unique
-                .into_iter()
-                .map(|ui| Arc::clone(&results[ui]));
-            normalize_cell(cell, &mut res);
-            debug_assert!(res.next().is_none());
-        }
+            .map(|ui| Arc::clone(&results[ui]));
+        normalize_cell(cell, &mut res);
+        debug_assert!(res.next().is_none());
     }
 }
 
@@ -1645,6 +1657,149 @@ fn merge_cells(g: &mut Builder, o: Builder) {
     for (ci, slot, r) in o.pending_texts {
         g.pending_texts.push((map[ci], text_base[ci] + slot, r));
     }
+}
+
+// ------------------------------------------------------- cell parser
+
+/// The tables a cell range's parser needs besides the bytes: the
+/// streaming build takes them from the inventory
+/// (`Inventory::cell_tables`, docs/STREAMING_INDEX_PLAN.ko.md §4.1).
+pub struct CellTables<'a> {
+    /// CELLNAME reference -> name (implicit entries numbered by position)
+    pub cellnames: &'a HashMap<u64, String>,
+    /// TEXTSTRING reference -> string
+    pub textstrings: &'a HashMap<u64, String>,
+    /// cell name -> Doc index (the inventory's cell table, CELL record
+    /// order with placement-only targets appended)
+    pub cell_index: HashMap<String, usize>,
+}
+
+impl<'a> CellTables<'a> {
+    pub fn new(
+        cellnames: &'a HashMap<u64, String>,
+        textstrings: &'a HashMap<u64, String>,
+        names: impl Iterator<Item = &'a str>,
+    ) -> CellTables<'a> {
+        CellTables {
+            cellnames,
+            textstrings,
+            cell_index: names.enumerate().map(|(i, n)| (n.to_string(), i)).collect(),
+        }
+    }
+}
+
+/// one cell's records found in a byte range
+pub struct CellPiece {
+    /// Doc index (the inventory's)
+    pub index: usize,
+    pub cell: Cell,
+}
+
+/// Parse one byte range of the file - a visible CELL record's range, or
+/// the head before the first one - into the cells it defines, with
+/// placement targets resolved to Doc indices and text strings resolved
+/// through the tables, exactly as the whole-Doc parse materializes them
+/// (the same `parse_records` on a chunk builder seeded with the range's
+/// implicit-reference bases; the same name resolution as merge_cells /
+/// finish_inner, per cell). A range normally holds one cell; a CELL
+/// record inside a CBLOCK adds another (and a second CELL record of the
+/// same cell inside the range folds into the same piece, as the chunk
+/// parser folds it), and a cell defined by CELL records in several
+/// ranges comes in pieces that join in file order. Records are NOT
+/// normalized: `normalize_cells` does that once a cell's pieces are
+/// together. `data` is the whole file; a reader that holds only the
+/// range's bytes calls `parse_cell_bytes`.
+pub fn parse_cell_range(
+    data: &[u8],
+    range: &CellRange,
+    tables: &CellTables,
+) -> Result<Vec<CellPiece>> {
+    let (start, end) = (range.start as usize, range.end as usize);
+    if start > end || end > data.len() {
+        return err(start, "cell range outside the file");
+    }
+    parse_cell_bytes(
+        &data[start..end],
+        range.start,
+        range.cellname_base,
+        range.textstring_base,
+        tables,
+    )
+}
+
+/// `parse_cell_range` on the range's bytes alone: `base` is the file
+/// offset of `bytes[0]` (error positions stay absolute), the bases are
+/// the range's implicit CELLNAME / TEXTSTRING seeds (`CellRange`).
+pub fn parse_cell_bytes(
+    bytes: &[u8],
+    base: u64,
+    cellname_base: u64,
+    textstring_base: u64,
+    tables: &CellTables,
+) -> Result<Vec<CellPiece>> {
+    let start = base as usize;
+    let mut c = Cur::new(bytes, start);
+    let mut m = Modal::default();
+    let mut b = new_builder(cellname_base, textstring_base);
+    // depth 1: a range ends without an END record
+    parse_records(&mut c, &mut m, &mut b, 1)?;
+    let mut index: Vec<usize> = Vec::with_capacity(b.cells.len());
+    let mut names: Vec<String> = Vec::with_capacity(b.cells.len());
+    for cell in &b.cells {
+        // a by-reference CELL whose table lies elsewhere carries the
+        // placeholder; the inventory named it through the same table
+        let name = resolve_ref_name(tables.cellnames, cell.name.clone());
+        match tables.cell_index.get(&name) {
+            Some(&i) => index.push(i),
+            None => {
+                return err(
+                    start,
+                    &format!("cell {:?} is not in the inventory", name),
+                )
+            }
+        }
+        names.push(name);
+    }
+    for (ci, slot, tgt) in std::mem::take(&mut b.pending) {
+        let name = match tgt {
+            PlaceTarget::Name(n) => n,
+            PlaceTarget::Ref(r) => match tables.cellnames.get(&r) {
+                Some(n) => n.clone(),
+                None => return err(start, "unresolved cellname ref"),
+            },
+        };
+        let idx = match tables.cell_index.get(&name) {
+            Some(&i) => i,
+            None => {
+                return err(
+                    start,
+                    &format!("placement target {:?} is not in the inventory", name),
+                )
+            }
+        };
+        b.cells[ci].places[slot].cell = idx;
+    }
+    // the inventory's table first: it is every TEXTSTRING of the file in
+    // walk order, which is what the whole-Doc parse resolves a pending
+    // text against (the range's own table only when the file's table
+    // somehow lacks the entry)
+    for (ci, slot, r) in std::mem::take(&mut b.pending_texts) {
+        let s = match tables.textstrings.get(&r).or_else(|| b.textstrings.get(&r)) {
+            Some(s) => s.clone(),
+            None => return err(start, "unresolved textstring ref"),
+        };
+        b.cells[ci].texts[slot].s = s;
+    }
+    Ok(b
+        .cells
+        .into_iter()
+        .zip(index)
+        .zip(names)
+        .map(|((mut cell, index), name)| {
+            cell.name = name;
+            CellPiece { index, cell }
+        })
+        .collect())
 }
 
 pub fn parse_doc(data: &[u8]) -> Result<Doc> {

@@ -6611,6 +6611,11 @@ fn build(
                         ci
                     );
                 }
+                if let Some(e) = store.failed() {
+                    // a streaming store's reader failed on a range the
+                    // planners still wait for: abort the build
+                    panic!("build: the source reader failed: {}", e);
+                }
                 std::thread::sleep(std::time::Duration::from_micros(200));
             };
             commit_base.store(ci + 1, std::sync::atomic::Ordering::Release);

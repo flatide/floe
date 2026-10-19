@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""G1 of the streaming index plan (docs/STREAMING_INDEX_PLAN.ko.md §6):
-the inventory pass equals the in-memory build's Doc pre-passes, cell by
-cell.
+"""G1 and G2 of the streaming index plan (docs/STREAMING_INDEX_PLAN.ko.md
+§6): the inventory pass equals the in-memory build's Doc pre-passes, cell
+by cell (G1), and the cell parser - every byte range through
+parse_cell_range + normalize_cells - equals the whole-Doc parse's cells,
+record by record (G2, `--check-cells`).
 
 `floe-index inventory FILE --check` parses the Doc itself, runs build()'s
 pre-passes (rust/cli/src/prepass.rs PrePass::from_doc) and compares them
@@ -70,8 +72,8 @@ def generate(script, out, *args):
 
 def check(path, jobs):
     t0 = time.perf_counter()
-    r = subprocess.run([str(BIN), "inventory", str(path), "--check", "--jobs", str(jobs)],
-                       capture_output=True, text=True)
+    r = subprocess.run([str(BIN), "inventory", str(path), "--check", "--check-cells",
+                        "--jobs", str(jobs)], capture_output=True, text=True)
     dt = time.perf_counter() - t0
     if r.returncode != 0:
         fail("inventory --check %s (jobs %d) exit %d\n%s" % (path.name, jobs, r.returncode, r.stderr[-3000:]))
@@ -81,6 +83,8 @@ def check(path, jobs):
         fail("inventory %s: no JSON\n%s" % (path.name, r.stdout[-800:]))
     if not j.get("check", {}).get("ok"):
         fail("inventory %s (jobs %d): check not ok: %s" % (path.name, jobs, j.get("check")))
+    if not j.get("check_cells", {}).get("ok"):
+        fail("inventory %s (jobs %d): cell check not ok: %s" % (path.name, jobs, j.get("check_cells")))
     if j["cells"] < 1 or j["layers"] < 1 or j["bbox"] is None:
         fail("inventory %s: empty result %s" % (path.name, {k: j[k] for k in ("cells", "layers", "bbox")}))
     return j, dt
@@ -120,9 +124,10 @@ def main():
                 elif key != first:
                     fail("%s: jobs 1 vs 3 disagree: %s vs %s" % (name, first, key))
                 print("OK  %-22s jobs %d: %d cells, %d layers, height %d, bbox %s; "
-                      "inventory %.2fs, doc pre-pass %.2fs (%.1fs wall)"
+                      "inventory %.2fs, doc pre-pass %.2fs, cell parser %d pieces %.2fs (%.1fs wall)"
                       % (name, jobs, j["cells"], j["layers"], j["height"], j["bbox"],
-                         j["inventory_s"], j["check"]["doc_s"], dt))
+                         j["inventory_s"], j["check"]["doc_s"], j["check_cells"]["pieces"],
+                         j["check_cells"]["parse_s"], dt))
     print("rust_inventory: ALL OK")
 
 

@@ -32,19 +32,27 @@
 //! Known divergences from the Doc (invalid or odd streams only):
 //! - a cell defined by two CELL records, one by reference whose
 //!   CELLNAME comes later, merges here as the parallel Doc parse merges
-//!   it; the sequential (`jobs 1`) Doc parse keeps two cells;
+//!   it; the sequential (`jobs 1`) Doc parse keeps two cells; likewise
+//!   a range that re-opens one cell under a placeholder and under its
+//!   name yields two pieces whose join follows the parallel parse's
+//!   record order, not the sequential parse's interleaving;
 //! - recursive members saturate per edge (members x child), the Doc per
 //!   placement - equal unless a product exceeds u64;
 //! - a CELL record inside a CBLOCK has no byte range of its own: it is
-//!   counted in `cblock_defs` and its records belong to the enclosing
-//!   visible cell's range.
+//!   counted in `cblock_defs`, its records belong to the enclosing
+//!   visible cell's range (or the head), and `def_ranges` names that
+//!   range;
+//! - a CELLNAME or TEXTSTRING reference number defined twice is refused
+//!   (the Doc resolves such a reference by record position - at the
+//!   record when a definition precedes it, else from the table - which
+//!   a per-range parser cannot reproduce; real writers never emit it).
 
 use crate::doc::{resolved_layer_names, LayerNameRule};
 use crate::geom::{
     box_grow, box_is_empty, orient_box, path_bbox, pts_box, Box4, EMPTY_BOX,
 };
 use crate::{err, Repetition, Result, ScanStats};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// how a CELL record or a placement names a cell: by CELLNAME reference
 /// number or by name (doc.rs PlaceTarget)
@@ -91,6 +99,10 @@ struct WCell {
     start: u64,
     end: u64,
     in_cblock: bool,
+    /// the visible range this CELL record lies in: its own start, or
+    /// the enclosing visible cell's for a CELL inside a CBLOCK (None =
+    /// the head)
+    host_start: Option<u64>,
     n3: u64,
     n5: u64,
     dbox: Box4,
@@ -153,12 +165,18 @@ impl Part {
                 self.cells[v].end = at;
             }
         }
+        let host_start = if in_cblock {
+            self.open_visible.map(|v| self.cells[v].start)
+        } else {
+            Some(at)
+        };
         let i = self.cells.len();
         self.cells.push(WCell {
             key,
             start: at,
             end: at,
             in_cblock,
+            host_start,
             n3,
             n5,
             dbox: EMPTY_BOX,
@@ -327,6 +345,10 @@ pub struct InvCell {
     pub ranges: Vec<CellRange>,
     /// CELL records inside CBLOCKs (no range of their own)
     pub cblock_defs: u32,
+    /// start offsets, in file order, of the ranges (the head counts as
+    /// `Inventory::head`) that hold a CELL record of this cell: once a
+    /// reader has parsed them all, the cell's pieces are complete
+    pub def_ranges: Vec<u64>,
     pub records: u64,
     pub shapes: u64,
     pub placements: u64,
@@ -353,6 +375,15 @@ pub struct Inventory {
     /// cells in Doc index order
     pub cells: Vec<InvCell>,
     pub top: usize,
+    /// the head: the bytes before the first visible CELL record (START,
+    /// name tables, and any cell a CBLOCK there defines) - the first
+    /// range a cell parser reads; seeds 0
+    pub head: CellRange,
+    /// CELLNAME reference -> name and TEXTSTRING reference -> string
+    /// (implicit entries numbered by position, first entry wins): what
+    /// the cell parser resolves names and texts through
+    pub cellnames: HashMap<u64, String>,
+    pub textstrings: HashMap<u64, String>,
     pub layer_order: Vec<(u32, u32)>,
     pub layer_names: HashMap<(u32, u32), String>,
     pub layer_aliases: HashMap<(u32, u32), Vec<String>>,
@@ -381,6 +412,15 @@ impl Inventory {
     /// bytes per layer mask
     pub fn mask_bytes(&self) -> usize {
         self.layer_order.len().div_ceil(8).max(1)
+    }
+
+    /// the tables a cell range's parser needs (doc.rs parse_cell_range)
+    pub fn cell_tables(&self) -> crate::doc::CellTables<'_> {
+        crate::doc::CellTables::new(
+            &self.cellnames,
+            &self.textstrings,
+            self.cells.iter().map(|c| c.name.as_str()),
+        )
     }
 }
 
@@ -478,24 +518,47 @@ pub(crate) fn finish(mut st: ScanStats) -> Result<Inventory> {
     parts.push(head);
     parts.append(&mut st.inv_parts);
     let refnames = std::mem::take(&mut st.cellname_table);
-    // every TEXTSTRING reference resolves (doc.rs finish_inner); implicit
-    // entries are numbered by position in file order
+    if st.cellname_dups {
+        return err(
+            0,
+            "duplicate CELLNAME reference number: the geometry parser              resolves it by record position, which a cell-wise build              cannot reproduce - refused",
+        );
+    }
+    // the TEXTSTRING table (implicit entries numbered by position in
+    // file order; a reference defined twice is refused for the same
+    // reason as a CELLNAME); every reference a TEXT made must resolve
+    // (doc.rs finish_inner)
+    let mut textstrings: HashMap<u64, String> = HashMap::new();
     {
-        let mut table: HashSet<u64> = HashSet::new();
         let mut implicit = 0u64;
-        for r in std::mem::take(&mut st.textstrings_seen) {
-            table.insert(match r {
+        for (r, s) in std::mem::take(&mut st.textstrings_seen) {
+            let r = match r {
                 Some(r) => r,
                 None => {
                     implicit += 1;
                     implicit - 1
                 }
-            });
+            };
+            if textstrings.contains_key(&r) {
+                return err(
+                    0,
+                    &format!("duplicate TEXTSTRING reference number {} - refused", r),
+                );
+            }
+            textstrings.insert(r, s);
         }
-        if st.text_refs.iter().any(|r| !table.contains(r)) {
+        if st.text_refs.iter().any(|r| !textstrings.contains_key(r)) {
             return err(0, "unresolved textstring ref");
         }
     }
+    // the head ends where the first visible CELL record starts
+    let head_end = parts
+        .iter()
+        .flat_map(|p| p.cells.iter())
+        .filter(|wc| !wc.in_cblock)
+        .map(|wc| wc.start)
+        .min()
+        .unwrap_or(st.end_at);
 
     // ---- layers: the parts' first-appearance orders merged in file
     // order (the Doc's head-then-chunks union), per-layer sums remapped
@@ -579,6 +642,7 @@ pub(crate) fn finish(mut st: ScanStats) -> Result<Inventory> {
             name,
             ranges: Vec::new(),
             cblock_defs: 0,
+            def_ranges: Vec::new(),
             records: 0,
             shapes: 0,
             placements: 0,
@@ -612,6 +676,10 @@ pub(crate) fn finish(mut st: ScanStats) -> Result<Inventory> {
                     cellname_base: wc.n3,
                     textstring_base: wc.n5,
                 });
+            }
+            let host = wc.host_start.unwrap_or(crate::MAGIC.len() as u64);
+            if !cell.def_ranges.contains(&host) {
+                cell.def_ranges.push(host);
             }
             cell.records += cs.records;
             cell.shapes += cs.shapes;
@@ -731,6 +799,14 @@ pub(crate) fn finish(mut st: ScanStats) -> Result<Inventory> {
         scan: st,
         cells,
         top,
+        head: CellRange {
+            start: crate::MAGIC.len() as u64,
+            end: head_end,
+            cellname_base: 0,
+            textstring_base: 0,
+        },
+        cellnames: refnames,
+        textstrings,
         layer_order,
         layer_names,
         layer_aliases,
@@ -861,11 +937,16 @@ pub mod fixtures {
         w.uint(2);
         w.sint(-300);
         w.sint(700);
-        // PLACEMENT ref 1 (LEAF) at (20000, 0)
+        // PLACEMENT ref 1 (LEAF) at (20000, 0), then LEAF by name
         w.uint(17);
         w.byte(0x80 | 0x40 | 0x20 | 0x10);
         w.uint(1);
         w.sint(20000);
+        w.sint(0);
+        w.uint(17);
+        w.byte(0x80 | 0x20 | 0x10);
+        w.string(b"LEAF");
+        w.sint(21000);
         w.sint(0);
         // PLACEMENT "GHOST" (never defined) at (5,5) rot 2
         w.uint(17);
@@ -1135,11 +1216,27 @@ pub mod fixtures {
         w.sint(8);
     }
 
+    /// LEAF again (CELL by ref 1): a second CELL record of a cell, after
+    /// LBL - its one rectangle joins LEAF's records in file order
+    fn leaf_again(w: &mut W) {
+        w.uint(13);
+        w.uint(1);
+        w.uint(20);
+        w.byte(0x40 | 0x20 | 0x10 | 0x08 | 0x02 | 0x01);
+        w.uint(6);
+        w.uint(0);
+        w.uint(10);
+        w.uint(10);
+        w.sint(300);
+        w.sint(300);
+    }
+
     /// The adversarial hierarchy: TOP -> MID (x3 orientations) -> LEAF,
-    /// LBL; TOP -> LEAF, GHOST (undefined). `tables_first` puts the
-    /// name tables before the cells (seeds > 0 for every cell range),
-    /// else after them (by-reference cells resolve at the end).
-    /// `cblock` compresses LEAF's body.
+    /// LBL; TOP -> LEAF (by reference and by name), GHOST (undefined);
+    /// LEAF defined by two CELL records. `tables_first` puts the name
+    /// tables before the cells (seeds > 0 for every cell range), else
+    /// after them (by-reference cells resolve at the end). `cblock`
+    /// compresses LEAF's body.
     pub fn adversarial(tables_first: bool, cblock: bool) -> Vec<u8> {
         let mut w = W::new();
         start(&mut w);
@@ -1150,9 +1247,51 @@ pub mod fixtures {
         mid_cell(&mut w);
         leaf_cell(&mut w, cblock);
         lbl_cell(&mut w);
+        leaf_again(&mut w);
         if !tables_first {
             tables(&mut w);
         }
+        end(&mut w);
+        w.out
+    }
+
+    /// a cell re-opened by a CELL record inside a CBLOCK of its own
+    /// range, with records after the CBLOCK: one range, one piece,
+    /// three rectangles (the chunk parser folds the two CELL records)
+    pub fn dup_in_range() -> Vec<u8> {
+        let mut w = W::new();
+        start(&mut w);
+        let rect = |w: &mut W, x: i64| {
+            w.uint(20);
+            w.byte(0x40 | 0x20 | 0x10 | 0x08 | 0x02 | 0x01);
+            w.uint(1);
+            w.uint(0);
+            w.uint(5);
+            w.uint(5);
+            w.sint(x);
+            w.sint(0);
+        };
+        w.uint(14);
+        w.string(b"A");
+        rect(&mut w, 0);
+        let mut b = W::new();
+        b.uint(14);
+        b.string(b"A");
+        rect(&mut b, 100);
+        let comp = deflate(&b.out);
+        w.uint(34);
+        w.uint(0);
+        w.uint(b.out.len() as u64);
+        w.uint(comp.len() as u64);
+        w.out.extend_from_slice(&comp);
+        rect(&mut w, 200);
+        w.uint(14);
+        w.string(b"TOP");
+        w.uint(17);
+        w.byte(0x80 | 0x20 | 0x10);
+        w.string(b"A");
+        w.sint(7);
+        w.sint(7);
         end(&mut w);
         w.out
     }
@@ -1245,13 +1384,22 @@ pub mod fixtures {
 
     /// TEXT streams doc.rs refuses: 0 = a non-UTF-8 TEXTSTRING, 1 = a
     /// non-UTF-8 inline string, 2 = a first TEXT without a string, 3 =
-    /// a reference no TEXTSTRING defines
+    /// a reference no TEXTSTRING defines; 4 = a TEXTSTRING reference
+    /// number defined twice (doc.rs accepts it, the inventory refuses)
     pub fn text_refusal(kind: u8) -> Vec<u8> {
         let mut w = W::new();
         start(&mut w);
         if kind == 0 {
             w.uint(5);
             w.string(&[0xff, 0xfe]);
+        }
+        if kind == 4 {
+            w.uint(6);
+            w.string(b"first");
+            w.uint(0);
+            w.uint(6);
+            w.string(b"second");
+            w.uint(0);
         }
         w.uint(14);
         w.string(b"A");
@@ -1543,12 +1691,14 @@ mod tests {
                     assert!(inv.rank[ci] < inv.rank[e.child], "rank {} -> {}", ci, e.child);
                 }
             }
-            // ranges: one visible CELL record each, GHOST none; seeds
-            // count the implicit CELLNAME (2) and TEXTSTRING (1)
-            // records before the cell
+            // ranges: one visible CELL record each (LEAF two), GHOST
+            // none; seeds count the implicit CELLNAME (2) and TEXTSTRING
+            // (1) records before the cell
             for ci in 0..4 {
                 let c = &inv.cells[ci];
-                assert_eq!(c.ranges.len(), 1, "{}", c.name);
+                assert_eq!(c.ranges.len(), if ci == 2 { 2 } else { 1 }, "{}", c.name);
+                let starts: Vec<u64> = c.ranges.iter().map(|r| r.start).collect();
+                assert_eq!(c.def_ranges, starts, "{}", c.name);
                 let rg = &c.ranges[0];
                 assert!(rg.start < rg.end);
                 assert_eq!(data[rg.start as usize], if ci == 1 { 14 } else { 13 }, "{}", c.name);
@@ -1556,9 +1706,12 @@ mod tests {
                 assert_eq!((rg.cellname_base, rg.textstring_base), seeds);
             }
             assert!(inv.cells[4].ranges.is_empty());
-            // consecutive ranges tile the cell section
+            // consecutive ranges tile the cell section; LEAF's second
+            // definition follows LBL
             assert_eq!(inv.cells[0].ranges[0].end, inv.cells[1].ranges[0].start);
             assert_eq!(inv.cells[2].ranges[0].end, inv.cells[3].ranges[0].start);
+            assert_eq!(inv.cells[3].ranges[0].end, inv.cells[2].ranges[1].start);
+            assert!(inv.cells[4].def_ranges.is_empty());
             if cblock {
                 assert!(inv.scan.cblocks >= 1);
             }
@@ -1582,6 +1735,82 @@ mod tests {
         }
     }
 
+    /// every range of the file through the cell parser (the head first,
+    /// then the cells' ranges in file order), the pieces of a cell
+    /// joined in file order and normalized on their own
+    fn parse_all_cells(data: &[u8], inv: &Inventory, jobs: usize) -> Vec<crate::doc::Cell> {
+        use crate::doc::{normalize_cells, parse_cell_range, Cell};
+        let tables = inv.cell_tables();
+        let mut ranges: Vec<&CellRange> = vec![&inv.head];
+        for c in &inv.cells {
+            for r in &c.ranges {
+                ranges.push(r);
+            }
+        }
+        ranges.sort_by_key(|r| r.start);
+        let n = inv.cells.len();
+        let mut pieces: Vec<Vec<Cell>> = (0..n).map(|_| Vec::new()).collect();
+        for r in ranges {
+            for p in parse_cell_range(data, r, &tables).expect("parse range") {
+                pieces[p.index].push(p.cell);
+            }
+        }
+        pieces
+            .into_iter()
+            .enumerate()
+            .map(|(ci, ps)| {
+                let ic = &inv.cells[ci];
+                // a defined cell has pieces, an undefined target none (a
+                // range folds its CELL records of one cell into one piece,
+                // so the count is not the record count)
+                assert_eq!(ps.is_empty(), ic.def_ranges.is_empty(), "pieces of {}", ic.name);
+                let mut cell = Cell { name: ic.name.clone(), ..Default::default() };
+                for p in ps {
+                    cell.rects.extend(p.rects);
+                    cell.polys.extend(p.polys);
+                    cell.paths.extend(p.paths);
+                    cell.places.extend(p.places);
+                    cell.texts.extend(p.texts);
+                }
+                normalize_cells(std::slice::from_mut(&mut cell), jobs);
+                cell
+            })
+            .collect()
+    }
+
+    /// G2: the cell parser's cells equal the whole-Doc parse's, record by
+    /// record, on every fixture (late and early tables, CBLOCK bodies, a
+    /// cell defined inside the head's CBLOCK, by-reference and by-name
+    /// placements, the undefined target, text references)
+    #[test]
+    fn cell_parser_matches_doc() {
+        let mut fixtures: Vec<Vec<u8>> = Vec::new();
+        for (tables_first, cblock) in [(false, false), (true, false), (false, true), (true, true)] {
+            fixtures.push(adversarial(tables_first, cblock));
+        }
+        fixtures.push(head_cblock_cell());
+        fixtures.push(dup_in_range());
+        for data in &fixtures {
+            let doc = parse_doc(data).expect("parse_doc");
+            for jobs in [1, 2] {
+                let inv = crate::inventory(data, jobs).expect("inventory");
+                let cells = parse_all_cells(data, &inv, jobs);
+                assert_eq!(cells.len(), doc.cells.len());
+                for (ci, c) in cells.iter().enumerate() {
+                    assert_eq!(c, &doc.cells[ci], "cell {} (jobs {})", ci, jobs);
+                }
+            }
+        }
+        // the head range of a tables-first stream holds the tables and no cell
+        let data = adversarial(true, false);
+        let inv = crate::inventory(&data, 1).expect("inventory");
+        assert!(inv.head.end > inv.head.start);
+        let tables = inv.cell_tables();
+        assert!(crate::doc::parse_cell_range(&data, &inv.head, &tables).expect("head").is_empty());
+        assert_eq!(inv.textstrings.get(&0).map(|s| s.as_str()), Some("lbl"));
+        assert_eq!(inv.cellnames.get(&2).map(|s| s.as_str()), Some("MID"));
+    }
+
     /// a cell defined inside the head's CBLOCK: the parallel scan's
     /// per-cell stats stay aligned with the inventory parts
     #[test]
@@ -1602,26 +1831,41 @@ mod tests {
         }
         assert_eq!((seq.cells[0].texts, seq.cells[1].placements), (1, 1));
         assert_eq!((seq.cells[0].cblock_defs, seq.cells[0].ranges.len()), (1, 0));
+        assert_eq!(seq.cells[0].def_ranges, vec![seq.head.start]);
         assert_eq!(seq.cells[1].ranges.len(), 1);
+        // a cell re-opened inside its own range's CBLOCK: one range holds
+        // both CELL records
+        let data = dup_in_range();
+        let inv = check_against_doc(&data, 1);
+        assert_eq!((inv.cells[0].ranges.len(), inv.cells[0].cblock_defs), (1, 1));
+        assert_eq!(inv.cells[0].def_ranges, vec![inv.cells[0].ranges[0].start]);
+        // three rectangles and the CBLOCK record (CELL records are not counted)
+        assert_eq!((inv.cells[0].shapes, inv.cells[0].records), (3, 4));
     }
 
     #[test]
     fn refusals_match_the_geometry_parser() {
-        for data in [
-            cyclic(),
-            two_tops(),
-            with_record(18),
-            with_record(33),
-            text_refusal(0),
-            text_refusal(1),
-            text_refusal(2),
-            text_refusal(3),
+        // (fixture, whether parse_doc accepts it): the cyclic stream parses
+        // (build() refuses it), a duplicate TEXTSTRING reference parses
+        // (the inventory refuses it on purpose)
+        for (data, doc_accepts) in [
+            (cyclic(), true),
+            (two_tops(), false),
+            (with_record(18), false),
+            (with_record(33), false),
+            (text_refusal(0), false),
+            (text_refusal(1), false),
+            (text_refusal(2), false),
+            (text_refusal(3), false),
+            (text_refusal(4), true),
         ] {
             let inv = crate::inventory(&data, 1);
             let doc = parse_doc(&data);
-            assert!(inv.is_err(), "inventory accepted what parse_doc refuses");
-            assert!(doc.is_err() || data == cyclic(), "parse_doc accepted a refused fixture");
+            assert!(inv.is_err(), "inventory accepted what it must refuse");
+            assert_eq!(doc.is_ok(), doc_accepts, "parse_doc on a refusal fixture");
         }
+        let e = format!("{}", crate::inventory(&text_refusal(4), 1).err().unwrap());
+        assert!(e.contains("duplicate TEXTSTRING reference"), "{}", e);
         let e = format!("{}", crate::inventory(&cyclic(), 1).err().unwrap());
         assert!(e.contains("cycle in hierarchy"), "{}", e);
         let e = format!("{}", crate::inventory(&two_tops(), 1).err().unwrap());

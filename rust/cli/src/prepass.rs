@@ -543,14 +543,187 @@ pub fn check(
     out
 }
 
-/// `floe-index inventory <file.oas> [--jobs N] [--check] [--cells]`:
+/// what differs between a parsed cell and the Doc's, briefly
+fn describe_cell_diff(ci: usize, a: &floe_oasis::doc::Cell, b: &floe_oasis::doc::Cell) -> String {
+    fn short(s: String) -> String {
+        if s.len() > 240 {
+            let cut = s.char_indices().nth(240).map(|(i, _)| i).unwrap_or(s.len());
+            format!("{}...", &s[..cut])
+        } else {
+            s
+        }
+    }
+    if a.name != b.name {
+        return format!("cell {}: name {:?} vs doc {:?}", ci, a.name, b.name);
+    }
+    macro_rules! vecdiff {
+        ($f:ident) => {
+            if a.$f.len() != b.$f.len() {
+                return format!(
+                    "cell {} ({}): {} count {} vs doc {}",
+                    ci,
+                    b.name,
+                    stringify!($f),
+                    a.$f.len(),
+                    b.$f.len()
+                );
+            }
+            if let Some(i) = a.$f.iter().zip(&b.$f).position(|(x, y)| x != y) {
+                return short(format!(
+                    "cell {} ({}): {}[{}] {:?} vs doc {:?}",
+                    ci,
+                    b.name,
+                    stringify!($f),
+                    i,
+                    a.$f[i],
+                    b.$f[i]
+                ));
+            }
+        };
+    }
+    vecdiff!(rects);
+    vecdiff!(polys);
+    vecdiff!(paths);
+    vecdiff!(places);
+    vecdiff!(texts);
+    format!("cell {} ({}): differs", ci, b.name)
+}
+
+/// G2: every range of the file through the cell parser (the head, then
+/// the cells' ranges in file order), the pieces of a cell joined in file
+/// order and normalized on their own, against the whole-Doc parse's
+/// cells record by record. Returns the mismatches and the piece count.
+pub fn check_cells(data: &[u8], doc: &Doc, inv: &Inventory, jobs: usize) -> (Vec<String>, usize) {
+    use floe_oasis::doc::{normalize_cells, parse_cell_range, Cell, CellPiece};
+    let tables = inv.cell_tables();
+    let mut ranges: Vec<&floe_oasis::inventory::CellRange> = vec![&inv.head];
+    for c in &inv.cells {
+        for r in &c.ranges {
+            ranges.push(r);
+        }
+    }
+    ranges.sort_by_key(|r| r.start);
+    let n = inv.cells.len();
+    let threads = jobs.max(1);
+    let per = ranges.len().div_ceil(threads).max(1);
+    let parsed: Vec<Result<Vec<Vec<CellPiece>>, String>> = std::thread::scope(|s| {
+        let tables = &tables;
+        let ranges = &ranges;
+        let handles: Vec<_> = (0..ranges.len())
+            .step_by(per)
+            .map(|i| {
+                s.spawn(move || {
+                    let mut out = Vec::new();
+                    for r in &ranges[i..(i + per).min(ranges.len())] {
+                        out.push(parse_cell_range(data, r, tables).map_err(|e| {
+                            format!("range {}..{}: {}", r.start, r.end, e)
+                        })?);
+                    }
+                    Ok(out)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("range parser"))
+            .collect()
+    });
+    let mut pieces: Vec<Vec<Cell>> = (0..n).map(|_| Vec::new()).collect();
+    let mut n_pieces = 0usize;
+    let mut diffs: Vec<String> = Vec::new();
+    for r in parsed {
+        match r {
+            Ok(per_range) => {
+                for ps in per_range {
+                    for p in ps {
+                        if p.index >= n {
+                            diffs.push(format!("piece for cell index {} beyond the inventory", p.index));
+                            continue;
+                        }
+                        pieces[p.index].push(p.cell);
+                        n_pieces += 1;
+                    }
+                }
+            }
+            Err(e) => diffs.push(e),
+        }
+    }
+    if !diffs.is_empty() {
+        return (diffs, n_pieces);
+    }
+    // a defined cell has pieces, an undefined target none (a range folds
+    // the CELL records of one cell into one piece, so the piece count is
+    // not the definition count; the record comparison below is the test)
+    for (ci, ps) in pieces.iter().enumerate() {
+        if ps.is_empty() != inv.cells[ci].def_ranges.is_empty() {
+            diffs.push(format!(
+                "cell {} ({}): {} pieces from {} defining range(s)",
+                ci,
+                inv.cells[ci].name,
+                ps.len(),
+                inv.cells[ci].def_ranges.len()
+            ));
+        }
+    }
+    let mut cells: Vec<Cell> = pieces
+        .into_iter()
+        .enumerate()
+        .map(|(ci, ps)| {
+            let mut cell = Cell { name: inv.cells[ci].name.clone(), ..Default::default() };
+            for p in ps {
+                cell.rects.extend(p.rects);
+                cell.polys.extend(p.polys);
+                cell.paths.extend(p.paths);
+                cell.places.extend(p.places);
+                cell.texts.extend(p.texts);
+            }
+            cell
+        })
+        .collect();
+    let per_cells = n.div_ceil(threads).max(1);
+    let found: Vec<String> = std::thread::scope(|s| {
+        let handles: Vec<_> = cells
+            .chunks_mut(per_cells)
+            .enumerate()
+            .map(|(k, chunk)| {
+                s.spawn(move || {
+                    let mut d = Vec::new();
+                    for (j, cell) in chunk.iter_mut().enumerate() {
+                        let ci = k * per_cells + j;
+                        normalize_cells(std::slice::from_mut(cell), 1);
+                        if ci >= doc.cells.len() {
+                            d.push(format!("cell {}: beyond the Doc", ci));
+                        } else if *cell != doc.cells[ci] {
+                            d.push(describe_cell_diff(ci, cell, &doc.cells[ci]));
+                        }
+                    }
+                    d
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("cell check"))
+            .collect()
+    });
+    diffs.extend(found);
+    if doc.cells.len() != n {
+        diffs.push(format!("cells: doc {} vs inventory {}", doc.cells.len(), n));
+    }
+    (diffs, n_pieces)
+}
+
+/// `floe-index inventory <file.oas> [--jobs N] [--check] [--check-cells] [--cells]`:
 /// the inventory pass on a source - the cell table, the layer order,
 /// the hierarchy fold - as JSON, and with `--check` the Doc pre-passes
-/// beside it, held equal cell by cell (exit 1 on a difference).
+/// beside it, held equal cell by cell (G1); `--check-cells` adds the
+/// cell parser: every range through parse_cell_range + normalize_cells
+/// against the Doc's cells record by record (G2). Exit 1 on a difference.
 pub fn inventory_cmd(args: &[String]) {
     let mut src: Option<String> = None;
     let mut jobs = 1usize;
     let mut do_check = false;
+    let mut do_check_cells = false;
     let mut cells = false;
     let mut i = 0;
     while i < args.len() {
@@ -563,6 +736,10 @@ pub fn inventory_cmd(args: &[String]) {
                 i += 1;
             }
             "--check" => do_check = true,
+            "--check-cells" => {
+                do_check = true;
+                do_check_cells = true;
+            }
             "--cells" => cells = true,
             a if a.starts_with("--") => {
                 eprintln!("inventory: unknown option {}", a);
@@ -575,7 +752,7 @@ pub fn inventory_cmd(args: &[String]) {
     let src = match src {
         Some(s) => s,
         None => {
-            eprintln!("usage: floe-index inventory <file.oas> [--jobs N] [--check] [--cells]");
+            eprintln!("usage: floe-index inventory <file.oas> [--jobs N] [--check] [--check-cells] [--cells]");
             std::process::exit(2);
         }
     };
@@ -704,6 +881,35 @@ pub fn inventory_cmd(args: &[String]) {
             inv_s,
             doc_s
         );
+        if do_check_cells {
+            let t3 = std::time::Instant::now();
+            let (diffs2, pieces) = check_cells(&data, &doc, &inv, jobs);
+            let cells_s = t3.elapsed().as_secs_f64();
+            let ok2 = diffs2.is_empty();
+            ok = ok && ok2;
+            out.push_str(&format!(
+                "  \"check_cells\": {{\"ok\": {}, \"ranges\": {}, \"pieces\": {}, \"parse_s\": {:.3}, \"mismatches\": [{}]}},\n",
+                ok2,
+                1 + inv.cells.iter().map(|c| c.ranges.len()).sum::<usize>(),
+                pieces,
+                cells_s,
+                diffs2
+                    .iter()
+                    .map(|d| crate::json_str(d))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            for d in &diffs2 {
+                eprintln!("cell check: {}", d);
+            }
+            eprintln!(
+                "cell check: {} ({} cells from {} pieces; parse + normalize + compare {:.1}s)",
+                if ok2 { "OK" } else { "MISMATCH" },
+                n,
+                pieces,
+                cells_s
+            );
+        }
     }
     out.push_str(&format!(
         "  \"read_s\": {:.3},\n  \"inventory_s\": {:.3},\n  \"inventory_mb_s\": {:.1}\n}}",
@@ -753,6 +959,11 @@ mod tests {
         assert_eq!(inv.rbb, cell_bboxes_full(&doc));
         assert_eq!(inv.rbb_notext, cell_bboxes(&doc));
         assert_eq!(inv.topo, topo_order(&doc));
+        // G2: the cell parser + per-cell normalization against the Doc
+        let (diffs2, pieces) = check_cells(data, &doc, &inv, jobs);
+        assert!(diffs2.is_empty(), "G2 jobs {}: {:#?}", jobs, diffs2);
+        let defined = inv.cells.iter().filter(|c| !c.def_ranges.is_empty()).count();
+        assert!(pieces >= defined, "{} pieces for {} defined cells", pieces, defined);
     }
 
     /// the hand-encoded adversarial stream (floe_oasis::inventory

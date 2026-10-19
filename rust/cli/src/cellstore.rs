@@ -66,6 +66,12 @@ pub trait CellStore: Sync {
     fn flush_wanted(&self) -> bool {
         false
     }
+    /// a streaming store whose reader failed on a range the planners
+    /// still wait for says so here; the committer polls it while it
+    /// waits and aborts the build (the store wakes its waiters too)
+    fn failed(&self) -> Option<String> {
+        None
+    }
 }
 
 impl CellStore for Doc {
