@@ -211,3 +211,12 @@ work on top of the resident Doc, and normalization can only add to it (the
 routing chip above goes from 2.96 to 5.24 GiB there). Repetition
 normalization, `cell_stats` and the per-cell working set are the inputs of
 the streaming build this plan's M5 leads to.
+
+The field scan (0.12.328, 2026-10-19) answered the unknowns: 48.5 billion
+vertices (28.9 per polygon), 2.5 billion point-list repetition members
+(10.5 per repetition), `doc_bytes_est` 927 GiB (1.05 TiB with the bundle's
+power-of-two classes) + 49 GiB source, largest cell 1.18 M records /
+415 MiB. The cell-wise two-pass streaming build that follows from these
+numbers is designed in docs/STREAMING_INDEX_PLAN.ko.md (inventory pass on
+the scan's frame, file-order cell parse into the existing planner /
+committer / encoder, byte-identical output as the transition gate).
