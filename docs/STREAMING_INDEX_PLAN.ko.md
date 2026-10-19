@@ -1,6 +1,7 @@
 # 스트리밍 인덱서 설계 — 셀 단위 2-패스 빌드 (2026-10-19)
 
-상태: S1(1차 재고 패스) 구현됨(0.12.363, §3.6). S2 이후는 설계. 근거는
+상태: S1(1차 재고 패스) 구현됨(0.12.363, §3.6), S2(CellStore) 구현됨
+(0.12.365, §4.2). S3 이후는 설계. 근거는
 rust/FLOE_INDEX_MEMORY_PLAN.md §5의 현장 수치와 `floe-index scan`
 0.12.328의 결과. 코드 줄 번호 참조는 0.12.360(8b59f3a5) 기준.
 
@@ -206,6 +207,14 @@ Doc을 만들었으니 레코드를 저장하지 않는 1차 패스는 5~7분으
 - 단위 테스트: 전체 파싱 Doc의 cells[ci]와 셀 파서의 결과가 레코드
   단위로 같다(§6 G2).
 
+**S3 셀 파서의 계약(S2 검토에서 정리).** 변환된 함수들이 셀 밖에서
+읽는 것은 자식의 rbb(PrePass)뿐이고, 셀 안에서는 (1) `PlaceRec.cell`이
+재고의 Doc 인덱스와 같아야 하며(플래너의 `rbb[pl.cell]`, sink의
+place), (2) 모든 rect/poly/path/text의 (layer, dt)가 재고의 layer_order에
+있어야 하고(lidx 조회는 panic), (3) 셀 단위 정규화가 전체 Doc 패스와
+레코드 단위로 같아야 한다(페이지의 PRec.idx가 레코드 인덱스다).
+G2가 이 셋을 본다.
+
 ### 4.2 플랜·커밋·인코딩: 그대로
 
 - `build_cell_plan`, `build_cell_texts`, `encode_write_pages`,
@@ -218,6 +227,27 @@ Doc을 만들었으니 레코드를 저장하지 않는 1차 패스는 5~7분으
 - 인코딩 청크가 design.ovp에 쓰인 뒤 그 청크의 셀을 **해제**한다.
   지금 아레나와 PtsPrepared가 떨어지는 지점(6958~6961)과 같다.
 
+**구현(S2, 0.12.365 / floe-index 0.12.330).** rust/cli/src/cellstore.rs의
+`trait CellStore: Sync { n_cells, unit, top, layer_order, layer_names,
+layer_aliases, cell_name(ci), cell(ci) -> CellRef }`와 `impl CellStore
+for Doc`. `CellRef`는 상주 Doc에서 빌린 `&Cell` 또는 (S4의 스트리밍
+저장소가 줄) `Arc<Cell>`이며 Deref로 같은 코드가 돈다. `build()`는
+`(&dyn CellStore, PrePass, ...)`를 받고(사전 패스는 호출자가 만든다:
+인메모리는 `PrePass::from_doc`, 스트리밍은 `from_inventory`),
+`build_cell_plan`·`gen_lod_job`·`build_cell_texts`·`encode_write_pages`·
+`encode_job`·커미터·레이어 표·`emit_viewer_side`가 `&Doc` 대신 저장소를
+읽는다. meta.json의 레이어별 stored_shapes에 들어가던 텍스트 멤버 합은
+Doc 전체를 다시 걷지 않고 `build_cell_texts`가 셀을 커밋하면서 레이어별로
+누적한다(`TextIndexStats::layer_text_members`; 값은 같다). 그대로 `&Doc`을
+받는 것은 전체 Doc이 필요한 보류·후처리 경로뿐이다: design.ovo(§4.6에서
+S5), design.ovc/ovr(§4.7 보류), `vfs --profile-*`. G0: S2 직전 바이너리
+(0.12.329)와 S2 바이너리가 같은 소스(valmini, route_chip 0.05, main01_like
+0.001, 평면 CTRAPEZOID 400만 반복 유/무)를 `--jobs 1`·`4`, `--coverage
+--occupancy`로 빌드한 캐시의 모든 파일(design.ovm·ovp·ovt·ovb·ovo·ovc·
+ovh·ovs, meta.json)이 바이트 동일함을 확인했다: 10회 빌드 × 9파일 모두
+`cmp` 일치(2026-10-19, macOS). 단위 테스트 35개(플래너·인코더·텍스트
+인덱스의 보존 오라클 포함)도 그대로 통과한다.
+
 ### 4.3 입장 예산
 
 지금의 창은 셀 **개수**(`plan_batch`, 바닥 jobs)다. 1차 패스가 셀마다
@@ -227,12 +257,27 @@ doc_bytes_est를 알므로 **바이트**로 입장시킨다: 상주 셀(파싱 �
 절반과 32 GiB 중 작은 값. 개수 창과 MemAvailable 거버너(6793~6807)는
 그대로 둔다. 셀 하나가 예산보다 크면 §5의 거절이다.
 
+**교착 방지(S2 검토, 2026-10-19).** 커미터의 플러시 조건은 개수 창
+(`ci + 1 >= chunk_base + window`)뿐이라, 바이트 예산이 커밋됐으나
+미인코딩인 셀들에 다 쓰인 채 청크가 덜 찼으면 리더는 다음 셀을 읽지
+않고 커미터는 그 셀의 플랜을 기다려 멈춘다. 그래서 저장소가
+`flush_wanted()`로 역압을 주고 커미터는 이를 플러시 조건에 OR한다
+(S2에서 훅을 넣었다; Doc 저장소는 항상 false). 인코딩이 끝난 청크는
+`release(chunk_base..ci+1)`로 저장소에 돌려준다 — 아레나가 떨어지는
+바로 그 지점이다.
+
 ### 4.4 상주 메모리
 
 상주 = 창 안 셀들의 Doc 바이트 + 플랜 스크래치(아레나·샤드, 지금과 같음)
 + 인코딩 중 페이로드(encode_batch) + Builder 메타데이터 + 1차 패스 표
 + 리더 버퍼. 현장 파일: 창 48(12×4)에 평균 174 MiB, 최대 415 MiB →
 8~20 GiB. 메타데이터는 페이지 수(약 100만)에 비례해 수십 MB다.
+정정(S2 검토): 플러시 시점에는 **인코딩 중인 청크(창 하나)와 그 뒤의
+플랜 창**이 함께 상주하므로 셀 수로는 최대 2×창(96)이고, 인코더가
+레코드를 인덱스로 다시 읽기 때문에 커밋 시점에 셀을 버릴 수 없다.
+바이트 입장(§4.3)은 이 2×창을 예산 안에 넣는 기준이어야 하며,
+현장 파일 기준 16 GiB(평균)~39 GiB(큰 셀이 몰릴 때)다 — §10의 예산
+기본값 질문에 이 수치를 쓴다.
 
 ### 4.5 후처리
 
@@ -323,8 +368,10 @@ S6은 S1~S5와 독립이라 먼저 번들로 낼 수 있다. S1은 scan 확장�
 연장이라 작다. S2는 기계적 리팩터다. S3·S4가 본체다.
 
 진행: S1 완료(0.12.363, §3.6; 사용자 2026-10-19 "S1부터 진행해줘").
-S2의 출발점은 prepass.rs의 `PrePass`(build()가 Doc 대신 이 값을 받는
-형태가 이미 갖춰졌다)와 §4.2의 CellStore다.
+S2 완료(0.12.365, §4.2 구현; 사용자 2026-10-19 "S2 진행해줘"): build()의
+입력이 `(&dyn CellStore, PrePass)`가 되어 S4의 드라이버는 저장소 하나와
+재고의 PrePass를 끼우면 된다. 다음은 S3 셀 파서(바이트 범위 → Cell,
+셀 단위 정규화; G2).
 
 ## 9. 조사 중 발견한 문서 불일치 (구현 커밋에서 바로잡는다)
 

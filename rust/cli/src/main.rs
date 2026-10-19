@@ -12,6 +12,7 @@
 
 use std::time::Instant;
 
+mod cellstore;
 mod drcice;
 mod drcpack;
 mod prepass;

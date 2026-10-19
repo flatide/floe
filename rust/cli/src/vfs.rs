@@ -11,6 +11,7 @@
 //! skeleton own them), which makes the G5 gate exact: page record/
 //! member sums must equal the source's geometry scan.
 
+use crate::cellstore::CellStore;
 use floe_oasis::doc::{Cell, Doc, PathRec, PlaceRec, PolyRec, RectRec, Rep};
 use floe_oasis::write::WCell;
 use floe_ovm::{narrow_u32, BBox, Builder, PBVH_NONE};
@@ -756,8 +757,12 @@ pub fn vfs_cmd(args: &[String]) {
             eprintln!("[vfs] --kill-at marker-deleted");
             std::process::exit(9);
         }
+        let t_build = std::time::Instant::now();
+        let pre = crate::prepass::PrePass::from_doc(&doc, jobs);
         let (ovm_bytes, rbb, lmems, tstats) = build(
             &doc,
+            pre,
+            t_build,
             size,
             mtime,
             &outdir,
@@ -2962,7 +2967,7 @@ fn write_replacing(path: &str, bytes: &[u8]) -> std::io::Result<()> {
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn emit_viewer_side(
-    doc: &Doc,
+    store: &dyn CellStore,
     src: &str,
     size: u64,
     mtime: u64,
@@ -2973,38 +2978,38 @@ fn emit_viewer_side(
     frontier: &str,
 ) {
     let t0 = std::time::Instant::now();
-    let bbox = rbb[doc.top].unwrap_or((0, 0, 0, 0));
-    let dbu = 1.0 / doc.unit;
+    let bbox = rbb[store.top()].unwrap_or((0, 0, 0, 0));
+    let dbu = 1.0 / store.unit();
     let n = {
         let t = (size as f64 / 6.0e6).sqrt().round_ties_even() as i64;
         t.clamp(4, 96)
     };
     let tw = ((bbox.2 - bbox.0) as f64 / n as f64).ceil() as i64;
     let th = ((bbox.3 - bbox.1) as f64 / n as f64).ceil() as i64;
+    // stored shapes per layer pair = paged geometry members + text
+    // members; the text index counted the latter per layer while it
+    // committed each cell, so no second walk over the cells is needed
+    // (the streaming build has none to walk)
     let mut stored: std::collections::HashMap<(u32, u32), u64> = std::collections::HashMap::new();
-    for (i, &(l, d)) in doc.layer_order.iter().enumerate() {
-        if lmems[i] > 0 {
-            stored.insert((l, d), lmems[i]);
+    for (i, &(l, d)) in store.layer_order().iter().enumerate() {
+        let n = lmems[i] + tstats.layer_text_members.get(i).copied().unwrap_or(0);
+        if n > 0 {
+            stored.insert((l, d), n);
         }
     }
-    for cell in &doc.cells {
-        for t in &cell.texts {
-            *stored.entry((t.layer, t.dt)).or_default() += t.rep.members();
-        }
-    }
-    let places = crate::palette_places(&doc.layer_order, &stored);
-    let layers_json: Vec<String> = doc
-        .layer_order
+    let places = crate::palette_places(store.layer_order(), &stored);
+    let layers_json: Vec<String> = store
+        .layer_order()
         .iter()
         .map(|&(l, d)| {
-            let name = doc
-                .layer_names
+            let name = store
+                .layer_names()
                 .get(&(l, d))
                 .cloned()
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| format!("{}/{}", l, d));
-            let aliases = doc
-                .layer_aliases
+            let aliases = store
+                .layer_aliases()
                 .get(&(l, d))
                 .map(|names| {
                     names
@@ -3058,7 +3063,7 @@ fn emit_viewer_side(
         size,
         mtime,
         dbu,
-        crate::jesc(&doc.cells[doc.top].name),
+        crate::jesc(store.cell_name(store.top())),
         bbox.0,
         bbox.1,
         bbox.2,
@@ -3887,9 +3892,10 @@ fn frag_rep(rep: &Rep, frag: &Frag, arena: &Arena) -> Option<((i64, i64), Rep)> 
 }
 
 /// encode one page job to its OASIS payload (parallel-safe: reads
-/// doc immutably, allocates only its own buffers)
-fn encode_job(doc: &Doc, job: &PageJob, arenas: &[Arena]) -> (Vec<u8>, u64) {
-    let cell = &doc.cells[job.ci];
+/// the cell immutably, allocates only its own buffers)
+fn encode_job(store: &dyn CellStore, job: &PageJob, arenas: &[Arena]) -> (Vec<u8>, u64) {
+    let cell_ref = store.cell(job.ci);
+    let cell: &Cell = &cell_ref;
     let arena = arena_at(arenas, job.arena_slot);
     let mut rects: Vec<RectRec> = Vec::new();
     let mut polys: Vec<PolyRec> = Vec::new();
@@ -3945,7 +3951,7 @@ fn encode_job(doc: &Doc, job: &PageJob, arenas: &[Arena]) -> (Vec<u8>, u64) {
         texts: &[],
         places: Vec::new(),
     };
-    floe_oasis::write::write_tree_sized(&[wc], doc.unit).expect("page payload")
+    floe_oasis::write::write_tree_sized(&[wc], store.unit()).expect("page payload")
 }
 
 /// design.ovb being written (floe_ovm::OVB_MAGIC, ovb_image's bytes): the
@@ -4273,7 +4279,7 @@ fn write_encoded_page(
 /// batch of payloads, independent of the complete design page count.
 #[allow(clippy::too_many_arguments)]
 fn encode_write_pages(
-    doc: &Doc,
+    store: &dyn CellStore,
     page_jobs: &[PageJob],
     arenas: &[std::sync::Arc<Vec<Arena>>],
     arena_cell_base: usize,
@@ -4308,8 +4314,9 @@ fn encode_write_pages(
             return (Vec::new(), 0.0);
         }
         let t = std::time::Instant::now();
+        let cell = store.cell(job.ci);
         let record = page_occupancy_record(
-            &doc.cells[job.ci],
+            &cell,
             arena_at(arena_for(job), job.arena_slot),
             job,
         );
@@ -4317,7 +4324,7 @@ fn encode_write_pages(
     };
     if workers <= 1 || ptotal == 1 {
         for job in page_jobs {
-            let (payload, raw) = encode_job(doc, job, arena_for(job));
+            let (payload, raw) = encode_job(store, job, arena_for(job));
             let (occ, secs) = occ_of(job);
             if let Some(ovb) = ovb.as_mut() {
                 ovb.secs += secs;
@@ -4346,7 +4353,7 @@ fn encode_write_pages(
                     Err(_) => return,
                 };
                 let job = &page_jobs[i];
-                let (payload, raw) = encode_job(doc, job, arena_for(job));
+                let (payload, raw) = encode_job(store, job, arena_for(job));
                 let (occ, secs) = occ_of(job);
                 if result_tx.send((i, (payload, raw, occ, secs))).is_err() {
                     return;
@@ -4612,7 +4619,7 @@ fn lod_axis_cells(lo: i64, hi: i64, step: i64, n: i64, b0: i64, bext: i64, g: i6
 /// overcoverage bounded by one grid cell. Returns None when the
 /// page has no fusable content.
 fn gen_lod_job(
-    doc: &Doc,
+    store: &dyn CellStore,
     cell: &floe_oasis::doc::Cell,
     arena: &Arena,
     exact: &PageJob,
@@ -4747,7 +4754,7 @@ fn gen_lod_job(
     // fuse: rows into runs, identical-span runs into taller rects.
     // Cell boundaries come from the SAME integer division both ways
     // so adjacent rects share edges exactly (no cracks).
-    let (l, d) = doc.layer_order[exact.li as usize];
+    let (l, d) = store.layer_order()[exact.li as usize];
     let cx = |gx: i64| bb.x0 + (gx as i128 * bw as i128 / g as i128) as i64;
     let cy = |gy: i64| bb.y0 + (gy as i128 * bh as i128 / g as i128) as i64;
     let mut rects: Vec<RectRec> = Vec::new();
@@ -5418,7 +5425,7 @@ fn plan_layer_frontier(
 
 #[allow(clippy::too_many_arguments)]
 fn build_cell_plan(
-    doc: &Doc,
+    store: &dyn CellStore,
     ci: usize,
     rbb: &[Option<(i64, i64, i64, i64)>],
     lidx: &std::collections::HashMap<(u32, u32), usize>,
@@ -5431,7 +5438,8 @@ fn build_cell_plan(
     jobs: usize,
     p2_shard_limit: Option<u64>,
 ) -> CellPlan {
-    let cell = &doc.cells[ci];
+    let cell_ref = store.cell(ci);
+    let cell: &Cell = &cell_ref;
     let mut phase_s = [0f32; 6];
     let mut tmark = std::time::Instant::now();
     let mut lap = |slot: &mut f32| {
@@ -5716,7 +5724,7 @@ fn build_cell_plan(
     let mut layer_profiles: Vec<LayerProfile> = Vec::new();
     let (mut p2_tasks, mut shard_bytes) = (0usize, 0u64);
     for mut lp in layer_plans {
-        let layer_key = doc.layer_order[lp.li as usize];
+        let layer_key = store.layer_order()[lp.li as usize];
         layer_profiles.push(LayerProfile {
             layer: layer_key,
             input_records: lp.input_records,
@@ -5823,7 +5831,7 @@ fn build_cell_plan(
                 }
                 let mut lst = SplitStats::default();
                 if let Some(job) = gen_lod_job(
-                    doc,
+                    store,
                     cell,
                     arena_at(&arenas, pages[cand[i]].arena_slot),
                     &pages[cand[i]],
@@ -5903,7 +5911,7 @@ fn build_cell_plan(
     } else {
         for &k in &cand {
             if let Some(job) = gen_lod_job(
-                doc,
+                store,
                 cell,
                 arena_at(&arenas, pages[k].arena_slot),
                 &pages[k],
@@ -5982,6 +5990,9 @@ struct TextIndexStats {
     pts_reps: u64,
     string_bytes: u64,
     pts_bytes: u64,
+    /// text members per layer_order index (meta.json's stored shapes
+    /// add them to the paged members; sized by build())
+    layer_text_members: Vec<u64>,
 }
 
 /// local text-BVH split (median partition, same shape as
@@ -6029,7 +6040,7 @@ fn split_tbvh(
 /// partition, so jobs count never changes a byte. Returns the
 /// cell's (trange_start, trange_count).
 fn build_cell_texts(
-    doc: &Doc,
+    store: &dyn CellStore,
     ci: usize,
     lidx: &std::collections::HashMap<(u32, u32), usize>,
     b: &mut Builder,
@@ -6037,7 +6048,8 @@ fn build_cell_texts(
     ovt_off: &mut u64,
     st: &mut TextIndexStats,
 ) -> (u32, u32) {
-    let cell = &doc.cells[ci];
+    let cell_ref = store.cell(ci);
+    let cell: &Cell = &cell_ref;
     let tr_start = b.n_tranges();
     if cell.texts.is_empty() {
         return (tr_start, 0);
@@ -6077,6 +6089,11 @@ fn build_cell_texts(
                 .members
                 .checked_add(t.rep.members())
                 .expect("limit exceeded: text members");
+            if let Some(slot) = st.layer_text_members.get_mut(li as usize) {
+                *slot = slot
+                    .checked_add(t.rep.members())
+                    .expect("limit exceeded: text members per layer");
+            }
             let soff = *ovt_off;
             ovt.write_all(t.s.as_bytes()).expect("write ovt");
             *ovt_off = ovt_off
@@ -6233,7 +6250,9 @@ fn build_cell_texts(
 #[allow(clippy::type_complexity)]
 #[allow(clippy::too_many_arguments)]
 fn build(
-    doc: &Doc,
+    store: &dyn CellStore,
+    pre: crate::prepass::PrePass,
+    t0: std::time::Instant,
     size: u64,
     mtime: u64,
     outdir: &str,
@@ -6251,13 +6270,15 @@ fn build(
     Vec<u64>,
     TextIndexStats,
 ) {
-    let t0 = std::time::Instant::now();
-    let n = doc.cells.len();
+    // `t0`: when the caller started the pre-pass - the closing
+    // "pages + ovm in N s" line keeps covering pre-pass + pipeline, as
+    // it did when the pre-pass ran in here
+    let n = store.n_cells();
     // the whole-Doc pre-passes (recursive bbox, direct masks /
-    // members / bbox + per-layer totals, topological fold) - one value
-    // the streaming build (docs/STREAMING_INDEX_PLAN.ko.md S1) also
-    // produces from its inventory pass without a Doc
-    let pre = crate::prepass::PrePass::from_doc(doc, jobs);
+    // members / bbox + per-layer totals, topological fold) come in
+    // from the caller: PrePass::from_doc for the in-memory build,
+    // PrePass::from_inventory for the streaming one
+    // (docs/STREAMING_INDEX_PLAN.ko.md S1/S2)
     let crate::prepass::PrePass {
         rbb,
         dbox,
@@ -6271,16 +6292,16 @@ fn build(
         rtmask,
         ..
     } = pre;
-    let nl = doc.layer_order.len();
-    let lidx: std::collections::HashMap<(u32, u32), usize> = doc
-        .layer_order
+    let nl = store.layer_order().len();
+    let lidx: std::collections::HashMap<(u32, u32), usize> = store
+        .layer_order()
         .iter()
         .enumerate()
         .map(|(i, &k)| (k, i))
         .collect();
 
-    let mut b = Builder::new(doc.unit, size, mtime, nl);
-    b.top = narrow_u32(doc.top as u64, "top cell index");
+    let mut b = Builder::new(store.unit(), size, mtime, nl);
+    b.top = narrow_u32(store.top() as u64, "top cell index");
     // layer table records are STORED records (post-fragmentation),
     // so they are summed from the page jobs after the split - see
     // below; only source-count lrecs would disagree with the page
@@ -6307,6 +6328,7 @@ fn build(
     let mut ovt = std::io::BufWriter::new(std::fs::File::create(&ovt_path).expect("create ovt"));
     let mut ovt_off = 0u64;
     let mut tstats = TextIndexStats::default();
+    tstats.layer_text_members = vec![0u64; nl];
     let mut pages_bytes = 0u64;
     let mut pages_total = 0usize;
     let mut lrecs_stored = vec![0u64; nl];
@@ -6475,7 +6497,7 @@ fn build(
                 let _active_cell = ActiveCellGuard(active_cell_plans);
                 let plan = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     build_cell_plan(
-                        doc,
+                        store,
                         ci,
                         rbb,
                         lidx,
@@ -6529,11 +6551,11 @@ fn build(
                          splits {}; bvh {:.1} asm {:.1} split \
                          {:.1}/{}t{} lod {:.1}/{}t pts {:.1} sink \
                          {:.1}; layers {}, top{})",
-                        doc.cells[ci].name,
+                        store.cell_name(ci),
                         ci,
                         n,
                         secs,
-                        doc.cells[ci].places.len(),
+                        store.cell(ci).places.len(),
                         plan.pages.len(),
                         plan.split_stats.fragments,
                         plan.phase_s[0],
@@ -6637,7 +6659,8 @@ fn build(
                 .lod_grid_verbatim
                 .checked_add(split_stats.lod_grid_verbatim)
                 .expect("limit exceeded: lod verbatim count");
-            let cell = &doc.cells[ci];
+            let cell_ref = store.cell(ci);
+            let cell: &Cell = &cell_ref;
             let page_base = pages_total as u64;
             let page_start = narrow_u32(page_base, "page count");
             let page_count = narrow_u32(pages.len() as u64, "cell page count");
@@ -6673,7 +6696,7 @@ fn build(
             batch_jobs.append(&mut pages);
 
             let (tr_start, tr_count) =
-                build_cell_texts(doc, ci, &lidx, &mut b, &mut ovt, &mut ovt_off, &mut tstats);
+                build_cell_texts(store, ci, &lidx, &mut b, &mut ovt, &mut ovt_off, &mut tstats);
             let mask_d = b.bitset(&dmask[ci]);
             let mask_r = b.bitset(&rmask[ci]);
             let mask_t = b.bitset(&rtmask[ci]);
@@ -6706,11 +6729,12 @@ fn build(
                     + window
                         .load(std::sync::atomic::Ordering::Relaxed)
                         .min(ring_cap)
-                || ci + 1 == n;
+                || ci + 1 == n
+                || store.flush_wanted();
             if flush {
                 let te = std::time::Instant::now();
                 encode_write_pages(
-                    doc,
+                    store,
                     &batch_jobs,
                     &batch_arenas,
                     chunk_base,
@@ -6726,8 +6750,10 @@ fn build(
                 encode_elapsed += te.elapsed();
                 batch_jobs.clear();
                 batch_arenas.clear();
+                // this chunk's arenas and PtsPrepared drop here, and a
+                // streaming store may let the chunk's cells go
+                store.release(chunk_base..ci + 1);
                 chunk_base = ci + 1;
-                // this chunk's arenas and PtsPrepared drop here
             }
         }
     });
@@ -6771,10 +6797,10 @@ fn build(
         );
     }
 
-    for (i, &(l, d)) in doc.layer_order.iter().enumerate() {
+    for (i, &(l, d)) in store.layer_order().iter().enumerate() {
         debug_assert!(lrecs_stored[i] >= lrecs[i]);
-        let nm = doc
-            .layer_names
+        let nm = store
+            .layer_names()
             .get(&(l, d))
             .cloned()
             .filter(|s| !s.is_empty())
