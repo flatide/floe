@@ -156,3 +156,58 @@ Memory/performance gates on the 9.8 GB asset:
 
 The customer design and geometry-derived diagnostics remain outside Git. Only
 aggregate counts, byte sizes, timings and RSS values may enter reports.
+
+## 5. Sizing a source before it is indexed (`floe-index scan`)
+
+Field 2026-10-19: a ~50 GB deck source - 1.97 billion records, 85% POLYGON,
+5,461 cells each placed once, 781,767 CBLOCKs of ~120 KB inflated - was
+killed in the syntax parse on a 376 GiB host: 361 GiB resident at 160 s
+(the twelve-thread parse grew ~2.2 GiB/s), then swap until the kernel's
+OOM killer at 1,425 s. No in-memory pipeline holds that file: at the record
+sizes above its Doc is 0.5-1.3 TiB before normalization, and normalization
+clones every record whose >= 16-member point-list repetition decomposes
+into grids. `floe-index scan FILE [jobs]` (0.12.328) answers the sizing
+question before an index is attempted - one pass over the source, nothing
+retained beyond counters and one small struct per cell:
+
+- `points` / `points_max`: polygon and path vertices as `doc.rs`
+  materializes them (16 B each; the implicit closing vertex of a closed
+  manhattan list, trapezoids as 4, CTRAPEZOID triangles as 3, circles as
+  64), and the largest single point list;
+- `pts_reps` / `pts_rep_members` / `pts_rep_members_max`: explicit
+  point-list repetitions (types 4-7, 10, 11: one heap block each, 16 B per
+  member; a type-0 reuse shares the block);
+- `doc_bytes_est`: the parsed Doc's resident bytes - every record at its
+  real `size_of` (RectRec 96, PolyRec 88, PathRec 112, PlaceRec 88, TextRec
+  104; `Rep` is 56 B inline) plus the per-record heap (vertices, point-list
+  repetitions, explicit text strings, cell names), before normalization
+  and without the source buffer, which stays resident until normalization
+  ends - so the parse-end RSS is `doc_bytes_est + file_bytes`;
+- `doc_bytes_est_pow2`: the same with every per-record heap block at the
+  power-of-two class the portable bundle's thread-caching allocator
+  (`rust/cli/src/tcache.rs`, classes 16 B .. 32 KiB) hands out - a
+  20-vertex polygon's 320 B block occupies 512 B there, and musl's own class
+  rounding sits on top; the glibc build is close to `doc_bytes_est`. The
+  two differ only for files whose records own heap blocks (polygons, paths,
+  point-list repetitions);
+- `cell_stats`: `records` and `doc_bytes` percentiles (max / p99 / p90 /
+  p50) over the cells and the ten biggest cells by `doc_bytes` (`cell`,
+  `records`, `shapes`, `placements`, `texts`, `points`, `pts_rep_members`,
+  `doc_bytes`, `doc_bytes_pow2`), in file order whatever the worker count -
+  the working set a cell-wise streaming build needs for its largest unit.
+  The stderr summary line repeats the totals and the largest cell.
+
+Checked against the `[vfs] syntax parsed` RSS of the in-memory build
+(macOS system allocator, `--jobs 1`, source still resident):
+
+| file | `doc_bytes_est` + `file_bytes` | parse-end RSS |
+| --- | --- | --- |
+| sample9 (145 MB, 1,188 cells, CBLOCK, rectangles) | 1.32 + 0.14 = 1.46 GiB | 1.47 GiB |
+| synthetic routing chip (281 MB, 29 cells, 16 x 1 M-member point lists) | 2.71 + 0.26 = 2.97 GiB | 2.96 GiB |
+| synthetic flat 16 M CTRAPEZOID file (54 MB compressed) | 2.27 + 0.05 = 2.32 GiB | 2.27 GiB |
+
+The estimate is the floor for the whole run: the plan and encode phases
+work on top of the resident Doc, and normalization can only add to it (the
+routing chip above goes from 2.96 to 5.24 GiB there). Repetition
+normalization, `cell_stats` and the per-cell working set are the inputs of
+the streaming build this plan's M5 leads to.

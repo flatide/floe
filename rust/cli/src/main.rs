@@ -1,8 +1,10 @@
 //! floe-index CLI.
 //!
 //!   scan  - JSON inventory (cells, per-layer record/member counts,
-//!           texts, placements) + throughput; validated against
-//!           klayout by tools/validate_rust_scan.py
+//!           texts, placements, vertices and point-list repetitions,
+//!           the parsed Doc's estimated size and the per-cell spread
+//!           with the ten biggest cells) + throughput; validated
+//!           against klayout by tools/validate_rust_scan.py
 //!   tile  - band partitioning with an EXPLICIT grid (debug/A-B path)
 //!   index - the production build: grid choice, band tiles, LOD
 //!           companions, density table, meta.json - a complete .tiles
@@ -296,6 +298,26 @@ fn main() {
         "  \"cblock_bytes_inflated\": {},\n",
         st.cblock_bytes_inflated
     ));
+    // sizing (2026-10-19, a ~50 GB deck source killed in the parse):
+    // vertices, explicit point-list repetitions, the parsed Doc's
+    // estimated resident bytes and the per-cell spread
+    out.push_str(&format!("  \"points\": {},\n", st.points));
+    out.push_str(&format!("  \"points_max\": {},\n", st.points_max));
+    out.push_str(&format!("  \"pts_reps\": {},\n", st.pts_reps));
+    out.push_str(&format!(
+        "  \"pts_rep_members\": {},\n",
+        st.pts_rep_members
+    ));
+    out.push_str(&format!(
+        "  \"pts_rep_members_max\": {},\n",
+        st.pts_rep_members_max
+    ));
+    out.push_str(&format!("  \"doc_bytes_est\": {},\n", st.doc_bytes));
+    out.push_str(&format!(
+        "  \"doc_bytes_est_pow2\": {},\n",
+        st.doc_bytes_pow2
+    ));
+    out.push_str(&cell_stats_json(&st));
     let mut rids: Vec<_> = st.record_ids.iter().collect();
     rids.sort_by_key(|(k, _)| **k);
     let mut rts: Vec<_> = st.rep_types.iter().collect();
@@ -344,6 +366,101 @@ fn main() {
         st.file_bytes as f64 / 1e6 / t_scan
     ));
     println!("{}", out);
+    // the field reads the terminal, not the JSON: say whether the
+    // in-memory build can hold this file and what its biggest cell is
+    let big = st.cell_stats.iter().max_by_key(|c| c.doc_bytes);
+    eprintln!(
+        "scan: {} records in {} cells; parsed Doc about {} ({} with the \
+         portable bundle's power-of-two heap classes) + source {}; \
+         largest cell {}: {} records, {}",
+        st.records,
+        st.cells,
+        fmt_size(st.doc_bytes),
+        fmt_size(st.doc_bytes_pow2),
+        fmt_size(st.file_bytes),
+        big.map(|c| c.name.as_str()).unwrap_or("-"),
+        big.map(|c| c.records).unwrap_or(0),
+        fmt_size(big.map(|c| c.doc_bytes).unwrap_or(0))
+    );
+}
+
+/// `cell_stats`: the per-cell inventory's spread (what one cell costs a
+/// cell-wise build) - percentiles of records and estimated Doc bytes
+/// over all cells, and the ten biggest cells by Doc bytes. Cells are
+/// scanned in file order whatever the worker count, so the output is
+/// identical at any `jobs`.
+fn cell_stats_json(st: &floe_oasis::ScanStats) -> String {
+    fn pct(sorted: &[u64], p: f64) -> u64 {
+        if sorted.is_empty() {
+            return 0;
+        }
+        let i = ((sorted.len() - 1) as f64 * p).round() as usize;
+        sorted[i.min(sorted.len() - 1)]
+    }
+    fn quartet(sorted: &[u64]) -> String {
+        format!(
+            "{{\"max\": {}, \"p99\": {}, \"p90\": {}, \"p50\": {}}}",
+            sorted.last().copied().unwrap_or(0),
+            pct(sorted, 0.99),
+            pct(sorted, 0.90),
+            pct(sorted, 0.50)
+        )
+    }
+    let mut recs: Vec<u64> = st.cell_stats.iter().map(|c| c.records).collect();
+    recs.sort_unstable();
+    let mut bytes: Vec<u64> =
+        st.cell_stats.iter().map(|c| c.doc_bytes).collect();
+    bytes.sort_unstable();
+    let mut top: Vec<&floe_oasis::CellStat> = st.cell_stats.iter().collect();
+    top.sort_by(|a, b| {
+        b.doc_bytes
+            .cmp(&a.doc_bytes)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    top.truncate(10);
+    let mut s = String::new();
+    s.push_str("  \"cell_stats\": {\n");
+    s.push_str(&format!("    \"records\": {},\n", quartet(&recs)));
+    s.push_str(&format!("    \"doc_bytes\": {},\n", quartet(&bytes)));
+    s.push_str("    \"top\": [");
+    for (i, c) in top.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(&format!(
+            "\n      {{\"cell\": {}, \"records\": {}, \"shapes\": {}, \
+             \"placements\": {}, \"texts\": {}, \"points\": {}, \
+             \"pts_rep_members\": {}, \"doc_bytes\": {}, \
+             \"doc_bytes_pow2\": {}}}",
+            json_str(&c.name),
+            c.records,
+            c.shapes,
+            c.placements,
+            c.texts,
+            c.points,
+            c.pts_rep_members,
+            c.doc_bytes,
+            c.doc_bytes_pow2
+        ));
+    }
+    s.push_str("\n    ]\n  },\n");
+    s
+}
+
+/// a JSON string literal (cell names are arbitrary bytes in OASIS)
+fn json_str(s: &str) -> String {
+    let mut o = String::with_capacity(s.len() + 2);
+    o.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+            c => o.push(c),
+        }
+    }
+    o.push('"');
+    o
 }
 
 /// An argument that starts with `--` and is not an option of the

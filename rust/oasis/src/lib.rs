@@ -251,18 +251,40 @@ fn read_repetition(
         }
         _ => return err(c.here(), "bad repetition type"),
     };
+    if matches!(t, 4 | 5 | 6 | 7 | 10 | 11) {
+        // the geometry parser keeps these as Rep::Pts: one heap block
+        // of 16 B per member (a type-0 reuse shares the block)
+        st.pts_rep(rep.members);
+    }
     *modal = Some(rep);
     Ok(rep)
 }
 
-/// point-list: consume and return the delta count
-fn read_point_list(c: &mut Cur) -> Result<u64> {
+/// point-list: consume it and return the vertex count the geometry
+/// parser materializes (doc::read_points: the anchor, one vertex per
+/// delta and, for a closed manhattan list, the implicit closing vertex)
+fn read_point_list(c: &mut Cur, closed: bool) -> Result<u64> {
     let t = c.uint()?;
     let n = c.uint()?;
+    let mut verts = n + 1;
     match t {
         0 | 1 => {
+            let (mut x, mut y) = (0i64, 0i64);
+            let mut horiz = t == 0;
             for _ in 0..n {
-                c.sint()?; // 1-delta
+                let d = c.sint()?; // 1-delta
+                if horiz {
+                    x = x.wrapping_add(d);
+                } else {
+                    y = y.wrapping_add(d);
+                }
+                horiz = !horiz;
+            }
+            if closed && (x != 0 || y != 0) {
+                let u = if horiz { (0, y) } else { (x, 0) };
+                if u != (x, y) && u != (0, 0) {
+                    verts += 1;
+                }
             }
         }
         2 | 3 => {
@@ -277,7 +299,7 @@ fn read_point_list(c: &mut Cur) -> Result<u64> {
         }
         _ => return err(c.here(), "bad point-list type"),
     }
-    Ok(n)
+    Ok(verts)
 }
 
 fn read_interval(c: &mut Cur) -> Result<()> {
@@ -304,6 +326,14 @@ struct Modal {
     datatype: Option<u64>,
     textlayer: Option<u64>,
     texttype: Option<u64>,
+    /// vertex counts of the modal point lists (a POLYGON / PATH without
+    /// the P bit reuses them), the modal CTRAPEZOID's vertex count and
+    /// the modal text string's length: the Doc cost of a record that
+    /// spells none of them out
+    poly_verts: Option<u64>,
+    path_verts: Option<u64>,
+    ctrap_verts: Option<u64>,
+    text_len: u64,
     /// last property had a value list (needed only for stream sync of
     /// PROPERTY-repeat records, which carry no fields at all)
     _last_prop: bool,
@@ -315,6 +345,66 @@ struct Modal {
 pub struct LayerStat {
     pub records: u64,
     pub members: u64,
+}
+
+/// Per-cell inventory in file order: what a cell-wise (streaming) build
+/// holds for one cell, and the field question "how big is the biggest
+/// cell" - 2026-10-19 a ~50 GB deck source with 5,461 cells died in
+/// the syntax parse at 361 GiB of a 376 GiB host.
+#[derive(Default, Debug, Clone)]
+pub struct CellStat {
+    /// CELL name (by-reference cells are named from the CELLNAME table
+    /// after the scan; "#<ref>" when the table does not name them)
+    pub name: String,
+    cell_ref: Option<u64>,
+    /// records inside the cell (CBLOCK bodies included)
+    pub records: u64,
+    pub shapes: u64,
+    pub placements: u64,
+    pub texts: u64,
+    /// polygon / path vertices as the geometry parser materializes them
+    pub points: u64,
+    /// explicit point-list repetitions spelled out in this cell and
+    /// their members
+    pub pts_reps: u64,
+    pub pts_rep_members: u64,
+    /// estimated resident bytes of this cell in the parsed Doc (see
+    /// ScanStats::doc_bytes)
+    pub doc_bytes: u64,
+    pub doc_bytes_pow2: u64,
+}
+
+/// in-memory record sizes of the geometry parser (rust/oasis/src/doc.rs)
+const RECT_SZ: u64 = std::mem::size_of::<crate::doc::RectRec>() as u64;
+const POLY_SZ: u64 = std::mem::size_of::<crate::doc::PolyRec>() as u64;
+const PATH_SZ: u64 = std::mem::size_of::<crate::doc::PathRec>() as u64;
+const PLACE_SZ: u64 = std::mem::size_of::<crate::doc::PlaceRec>() as u64;
+const TEXT_SZ: u64 = std::mem::size_of::<crate::doc::TextRec>() as u64;
+const CELL_SZ: u64 = std::mem::size_of::<crate::doc::Cell>() as u64;
+/// a materialized vertex or repetition member: (i64, i64)
+const PT_SZ: u64 = 16;
+
+/// What the portable bundle's thread-caching allocator
+/// (rust/cli/src/tcache.rs: power-of-two classes 16 B .. 32 KiB, larger
+/// blocks pass through) makes of a heap block of `bytes`.
+fn pow2_block(bytes: u64) -> u64 {
+    if bytes == 0 {
+        0
+    } else if bytes <= 32_768 {
+        bytes.max(16).next_power_of_two()
+    } else {
+        bytes
+    }
+}
+
+/// CTRAPEZOID vertex count by type (doc::ctrapezoid_points: 16-23 are
+/// triangles)
+fn ctrap_verts(t: u64) -> u64 {
+    if (16..=23).contains(&t) {
+        3
+    } else {
+        4
+    }
 }
 
 #[derive(Default, Debug)]
@@ -338,9 +428,134 @@ pub struct ScanStats {
     /// grid-encoded or explicit
     pub rep_types: HashMap<u64, u64>,
     pub unit: f64,
+    /// polygon + path vertices as the geometry parser materializes them
+    /// (16 B each in memory) and the largest single point list
+    pub points: u64,
+    pub points_max: u64,
+    /// explicit point-list repetitions (types 4-7, 10, 11: one heap
+    /// block of 16 B per member each; a type-0 reuse shares the block)
+    /// and their members
+    pub pts_reps: u64,
+    pub pts_rep_members: u64,
+    pub pts_rep_members_max: u64,
+    /// estimated resident bytes of the parsed Doc: every record at its
+    /// real size (RectRec / PolyRec / PathRec / PlaceRec / TextRec with
+    /// the 56 B Rep inline) plus the per-record heap (vertices,
+    /// point-list repetitions, text strings, cell names), before
+    /// repetition normalization and without the source buffer.
+    /// `doc_bytes_pow2` counts each heap block at the power-of-two class
+    /// the portable bundle's thread-caching allocator uses.
+    pub doc_bytes: u64,
+    pub doc_bytes_pow2: u64,
+    /// per-cell inventory in file order (the scan entry points fill it;
+    /// the skim passes leave it empty)
+    pub cell_stats: Vec<CellStat>,
+    track_cells: bool,
+    cur_cell: Option<CellStat>,
+    /// CELLNAME table in file order: (explicit reference, name) -
+    /// implicit (id 3) entries are numbered by position when resolving
+    cellnames_seen: Vec<(Option<u64>, String)>,
 }
 
 impl ScanStats {
+    /// the scan entry points track cells; the skim passes (cell_cuts and
+    /// scan_parallel's split) run on a default ScanStats and do not
+    fn tracking() -> ScanStats {
+        ScanStats {
+            track_cells: true,
+            ..Default::default()
+        }
+    }
+
+    /// one parsed record's share of the in-memory Doc: `fixed` bytes
+    /// inline in its cell's record vector, `heap` bytes in its own block
+    fn cost(&mut self, fixed: u64, heap: u64) {
+        self.doc_bytes += fixed + heap;
+        self.doc_bytes_pow2 += fixed + pow2_block(heap);
+        if let Some(cs) = self.cur_cell.as_mut() {
+            cs.doc_bytes += fixed + heap;
+            cs.doc_bytes_pow2 += fixed + pow2_block(heap);
+        }
+    }
+
+    fn pts_rep(&mut self, members: u64) {
+        self.pts_reps += 1;
+        self.pts_rep_members += members;
+        self.pts_rep_members_max = self.pts_rep_members_max.max(members);
+        if let Some(cs) = self.cur_cell.as_mut() {
+            cs.pts_reps += 1;
+            cs.pts_rep_members += members;
+        }
+        // Rep::Pts(Arc<[(i64, i64)]>): the two counters and the members
+        self.cost(0, 16 + PT_SZ * members);
+    }
+
+    fn points(&mut self, verts: u64) {
+        self.points += verts;
+        self.points_max = self.points_max.max(verts);
+        if let Some(cs) = self.cur_cell.as_mut() {
+            cs.points += verts;
+        }
+    }
+
+    fn open_cell(&mut self, name: String, cell_ref: Option<u64>) {
+        if !self.track_cells {
+            return;
+        }
+        self.close_cell();
+        self.cur_cell = Some(CellStat {
+            name,
+            cell_ref,
+            ..Default::default()
+        });
+        self.cost(CELL_SZ, 0);
+    }
+
+    fn close_cell(&mut self) {
+        if let Some(cs) = self.cur_cell.take() {
+            self.cell_stats.push(cs);
+        }
+    }
+
+    /// after the last record (of the whole file - a parallel scan calls
+    /// this once on the merged stats): name the by-reference cells from
+    /// the CELLNAME table (implicit entries numbered by position, as the
+    /// geometry parser does) and charge each cell its name string
+    fn finish(&mut self) {
+        self.close_cell();
+        if !self.track_cells {
+            return;
+        }
+        let mut names: HashMap<u64, String> = HashMap::new();
+        let mut implicit = 0u64;
+        for (r, name) in std::mem::take(&mut self.cellnames_seen) {
+            let r = match r {
+                Some(r) => r,
+                None => {
+                    implicit += 1;
+                    implicit - 1
+                }
+            };
+            names.insert(r, name);
+        }
+        let (mut extra, mut extra2) = (0u64, 0u64);
+        for cs in self.cell_stats.iter_mut() {
+            if let Some(r) = cs.cell_ref {
+                cs.name = match names.get(&r) {
+                    Some(n) => n.clone(),
+                    None => format!("#{}", r),
+                };
+            }
+            let n = cs.name.len() as u64;
+            cs.doc_bytes += n;
+            cs.doc_bytes_pow2 += pow2_block(n);
+            extra += n;
+            extra2 += pow2_block(n);
+        }
+        self.doc_bytes += extra;
+        self.doc_bytes_pow2 += extra2;
+    }
+
     fn shape(&mut self, m: &Modal, c: &Cur, members: u64) -> Result<()> {
         let (l, d) = match (m.layer, m.datatype) {
             (Some(l), Some(d)) => (l, d),
@@ -349,6 +564,9 @@ impl ScanStats {
         let e = self.shapes.entry((l, d)).or_default();
         e.records += 1;
         e.members += members;
+        if let Some(cs) = self.cur_cell.as_mut() {
+            cs.shapes += 1;
+        }
         Ok(())
     }
 
@@ -360,6 +578,9 @@ impl ScanStats {
         let e = self.texts.entry((l, d)).or_default();
         e.records += 1;
         e.members += members;
+        if let Some(cs) = self.cur_cell.as_mut() {
+            cs.texts += 1;
+        }
         Ok(())
     }
 }
@@ -454,9 +675,11 @@ fn record(
         }
         3 | 4 => {
             // CELLNAME
-            c.string()?;
-            if id == 4 {
-                c.uint()?;
+            let name = c.string()?;
+            let r = if id == 4 { Some(c.uint()?) } else { None };
+            if st.track_cells {
+                st.cellnames_seen
+                    .push((r, String::from_utf8_lossy(name).into_owned()));
             }
             st.cellnames += 1;
         }
@@ -479,15 +702,17 @@ fn record(
             read_interval(c)?;
         }
         13 => {
-            c.uint()?;
+            let r = c.uint()?;
             st.cells += 1;
             *modal = Modal::default();
+            st.open_cell(String::new(), Some(r));
             return Ok(Rec::Cell);
         }
         14 => {
-            c.string()?;
+            let name = c.string()?;
             st.cells += 1;
             *modal = Modal::default();
+            st.open_cell(String::from_utf8_lossy(name).into_owned(), None);
             return Ok(Rec::Cell);
         }
         15 | 16 => {} // XYABSOLUTE / XYRELATIVE (coords consumed as-is)
@@ -521,6 +746,10 @@ fn record(
             let members = rep_members(c, modal, st, rbit)?;
             st.placements += 1;
             st.placement_members += members;
+            st.cost(PLACE_SZ, 0);
+            if let Some(cs) = st.cur_cell.as_mut() {
+                cs.placements += 1;
+            }
         }
         19 => {
             // TEXT: 0CNXYRTL
@@ -532,8 +761,9 @@ fn record(
             if cbit {
                 if nbit {
                     c.uint()?;
+                    modal.text_len = 0; // table string: not costed
                 } else {
-                    c.string()?;
+                    modal.text_len = c.string()?.len() as u64;
                 }
             }
             if lbit {
@@ -550,6 +780,7 @@ fn record(
             }
             let members = rep_members(c, modal, st, rbit)?;
             st.text(modal, c, members)?;
+            st.cost(TEXT_SZ, modal.text_len);
         }
         20 => {
             // RECTANGLE: SWHXYRDL
@@ -582,6 +813,7 @@ fn record(
             }
             let members = rep_members(c, modal, st, rbit)?;
             st.shape(modal, c, members)?;
+            st.cost(RECT_SZ, 0);
         }
         21 => {
             // POLYGON: 00PXYRDL
@@ -597,7 +829,7 @@ fn record(
                 modal.datatype = Some(c.uint()?);
             }
             if pbit {
-                read_point_list(c)?;
+                modal.poly_verts = Some(read_point_list(c, true)?);
             }
             if xbit {
                 c.sint()?;
@@ -607,6 +839,9 @@ fn record(
             }
             let members = rep_members(c, modal, st, rbit)?;
             st.shape(modal, c, members)?;
+            let verts = modal.poly_verts.unwrap_or(0);
+            st.points(verts);
+            st.cost(POLY_SZ, PT_SZ * verts);
         }
         22 => {
             // PATH: EWPXYRDL
@@ -636,7 +871,7 @@ fn record(
                 }
             }
             if pbit {
-                read_point_list(c)?;
+                modal.path_verts = Some(read_point_list(c, false)?);
             }
             if xbit {
                 c.sint()?;
@@ -646,6 +881,9 @@ fn record(
             }
             let members = rep_members(c, modal, st, rbit)?;
             st.shape(modal, c, members)?;
+            let verts = modal.path_verts.unwrap_or(0);
+            st.points(verts);
+            st.cost(PATH_SZ, PT_SZ * verts);
         }
         23 | 24 | 25 => {
             // TRAPEZOID: 0WHXYRDL (+delta-a / delta-b)
@@ -680,6 +918,9 @@ fn record(
             }
             let members = rep_members(c, modal, st, rbit)?;
             st.shape(modal, c, members)?;
+            // materialized as a four-vertex PolyRec
+            st.points(4);
+            st.cost(POLY_SZ, PT_SZ * 4);
         }
         26 => {
             // CTRAPEZOID: TWHXYRDL
@@ -696,7 +937,7 @@ fn record(
                 modal.datatype = Some(c.uint()?);
             }
             if tbit {
-                c.uint()?;
+                modal.ctrap_verts = Some(ctrap_verts(c.uint()?));
             }
             if wbit {
                 c.uint()?;
@@ -712,6 +953,9 @@ fn record(
             }
             let members = rep_members(c, modal, st, rbit)?;
             st.shape(modal, c, members)?;
+            let verts = modal.ctrap_verts.unwrap_or(4);
+            st.points(verts);
+            st.cost(POLY_SZ, PT_SZ * verts);
         }
         27 => {
             // CIRCLE: 00rXYRDL
@@ -737,6 +981,9 @@ fn record(
             }
             let members = rep_members(c, modal, st, rbit)?;
             st.shape(modal, c, members)?;
+            // materialized as an inscribed 64-gon PolyRec
+            st.points(64);
+            st.cost(POLY_SZ, PT_SZ * 64);
         }
         28 => {
             // PROPERTY: UUUUVCNS
@@ -827,6 +1074,9 @@ fn record(
         }
         _ => return err(c.here(), &format!("unknown record id {}", id)),
     }
+    if let Some(cs) = st.cur_cell.as_mut() {
+        cs.records += 1;
+    }
     Ok(Rec::Normal)
 }
 
@@ -839,11 +1089,12 @@ pub fn scan(data: &[u8]) -> Result<ScanStats> {
     let mut c = Cur::new(&data[MAGIC.len()..], MAGIC.len());
     let mut st = ScanStats {
         file_bytes: data.len() as u64,
-        ..Default::default()
+        ..ScanStats::tracking()
     };
     let mut modal = Modal::default();
     while !c.at_end() {
         if record(&mut c, &mut modal, &mut st, true)? == Rec::End {
+            st.finish();
             return Ok(st); // END reached
         }
     }
@@ -851,6 +1102,16 @@ pub fn scan(data: &[u8]) -> Result<ScanStats> {
 }
 
 fn merge(into: &mut ScanStats, other: ScanStats) {
+    into.points += other.points;
+    into.points_max = into.points_max.max(other.points_max);
+    into.pts_reps += other.pts_reps;
+    into.pts_rep_members += other.pts_rep_members;
+    into.pts_rep_members_max =
+        into.pts_rep_members_max.max(other.pts_rep_members_max);
+    into.doc_bytes += other.doc_bytes;
+    into.doc_bytes_pow2 += other.doc_bytes_pow2;
+    into.cell_stats.extend(other.cell_stats);
+    into.cellnames_seen.extend(other.cellnames_seen);
     into.cells += other.cells;
     into.cellnames += other.cellnames;
     into.placements += other.placements;
@@ -969,7 +1230,7 @@ pub fn scan_parallel(data: &[u8], jobs: usize) -> Result<ScanStats> {
     // ---- head (tables before the first cell): parse inline ----------
     let mut st = ScanStats {
         file_bytes: data.len() as u64,
-        ..Default::default()
+        ..ScanStats::tracking()
     };
     {
         let mut hc = Cur::new(&body[..head_end], MAGIC.len());
@@ -993,7 +1254,7 @@ pub fn scan_parallel(data: &[u8], jobs: usize) -> Result<ScanStats> {
                 s.spawn(move || {
                     let mut wc = Cur::new(&body[a..b], MAGIC.len() + a);
                     let mut wm = Modal::default();
-                    let mut ws = ScanStats::default();
+                    let mut ws = ScanStats::tracking();
                     while !wc.at_end() {
                         if record(&mut wc, &mut wm, &mut ws, true)?
                             == Rec::End
@@ -1001,6 +1262,7 @@ pub fn scan_parallel(data: &[u8], jobs: usize) -> Result<ScanStats> {
                             return err(wc.here(), "END inside group");
                         }
                     }
+                    ws.close_cell();
                     Ok(ws)
                 })
             })
@@ -1010,5 +1272,283 @@ pub fn scan_parallel(data: &[u8], jobs: usize) -> Result<ScanStats> {
     for r in results {
         merge(&mut st, r?);
     }
+    st.finish();
     Ok(st)
+}
+
+#[cfg(test)]
+mod scan_tests {
+    use super::*;
+
+    fn uint(v: u64, out: &mut Vec<u8>) {
+        let mut v = v;
+        loop {
+            let b = (v & 0x7f) as u8;
+            v >>= 7;
+            if v != 0 {
+                out.push(b | 0x80);
+            } else {
+                out.push(b);
+                return;
+            }
+        }
+    }
+
+    fn sint(v: i64, out: &mut Vec<u8>) {
+        uint((v.unsigned_abs() << 1) | (v < 0) as u64, out);
+    }
+
+    fn bstr(s: &[u8], out: &mut Vec<u8>) {
+        uint(s.len() as u64, out);
+        out.extend_from_slice(s);
+    }
+
+    /// two-form g-delta
+    fn gdelta(dx: i64, dy: i64, out: &mut Vec<u8>) {
+        uint((dx.unsigned_abs() << 2) | (((dx < 0) as u64) << 1) | 1, out);
+        sint(dy, out);
+    }
+
+    /// Two cells named through an explicit CELLNAME table. A holds one
+    /// of every record kind the Doc costs: a rectangle with an explicit
+    /// point-list repetition that the next polygon reuses, manhattan
+    /// polygons with and without the implicit closing vertex, a
+    /// general-delta polygon reused by the next one, a path, a text and
+    /// a placement of B. B holds two rectangles (one grid repetition)
+    /// and a CTRAPEZOID.
+    fn fixture() -> Vec<u8> {
+        let mut o = Vec::new();
+        o.extend_from_slice(MAGIC);
+        // START: version, unit (real type 0), offset flag + table
+        uint(1, &mut o);
+        bstr(b"1.0", &mut o);
+        uint(0, &mut o);
+        uint(1000, &mut o);
+        uint(0, &mut o);
+        for _ in 0..12 {
+            uint(0, &mut o);
+        }
+        uint(4, &mut o);
+        bstr(b"A", &mut o);
+        uint(0, &mut o);
+        uint(4, &mut o);
+        bstr(b"B", &mut o);
+        uint(1, &mut o);
+        // CELL A
+        uint(13, &mut o);
+        uint(0, &mut o);
+        // rect: W H X Y R D L, 1/0, 10x20, repetition type 10 with
+        // two g-deltas (3 members)
+        uint(20, &mut o);
+        o.push(0x7f);
+        uint(1, &mut o);
+        uint(0, &mut o);
+        uint(10, &mut o);
+        uint(20, &mut o);
+        sint(0, &mut o);
+        sint(0, &mut o);
+        uint(10, &mut o);
+        uint(1, &mut o);
+        gdelta(5, 0, &mut o);
+        gdelta(0, 5, &mut o);
+        // poly1: manhattan, 2 deltas -> anchor + 2 + implicit closing
+        // vertex = 4; repetition reuse (type 0)
+        uint(21, &mut o);
+        o.push(0x3c);
+        uint(0, &mut o);
+        uint(2, &mut o);
+        sint(10, &mut o);
+        sint(10, &mut o);
+        sint(100, &mut o);
+        sint(0, &mut o);
+        uint(0, &mut o);
+        // poly2: manhattan, 3 deltas ending on the anchor's axis -> 4,
+        // no implicit vertex
+        uint(21, &mut o);
+        o.push(0x38);
+        uint(0, &mut o);
+        uint(3, &mut o);
+        sint(10, &mut o);
+        sint(10, &mut o);
+        sint(-10, &mut o);
+        sint(200, &mut o);
+        sint(0, &mut o);
+        // poly3: three general deltas -> 4 vertices
+        uint(21, &mut o);
+        o.push(0x38);
+        uint(4, &mut o);
+        uint(3, &mut o);
+        gdelta(10, 0, &mut o);
+        gdelta(0, 10, &mut o);
+        gdelta(-10, 0, &mut o);
+        sint(300, &mut o);
+        sint(0, &mut o);
+        // poly4: no point list - reuses poly3's (4 vertices)
+        uint(21, &mut o);
+        o.push(0x18);
+        sint(400, &mut o);
+        sint(0, &mut o);
+        // path: E W P X Y, half-width 2, both extensions "0", two
+        // general deltas -> 3 vertices
+        uint(22, &mut o);
+        o.push(0xf8);
+        uint(2, &mut o);
+        uint(5, &mut o);
+        uint(4, &mut o);
+        uint(2, &mut o);
+        gdelta(10, 0, &mut o);
+        gdelta(0, 10, &mut o);
+        sint(500, &mut o);
+        sint(0, &mut o);
+        // text: C X Y T L with an explicit 5-byte string on 5/0
+        uint(19, &mut o);
+        o.push(0x5b);
+        bstr(b"hello", &mut o);
+        uint(5, &mut o);
+        uint(0, &mut o);
+        sint(0, &mut o);
+        sint(50, &mut o);
+        // placement of B: C N X Y
+        uint(17, &mut o);
+        o.push(0xf0);
+        uint(1, &mut o);
+        sint(1000, &mut o);
+        sint(0, &mut o);
+        // CELL B
+        uint(13, &mut o);
+        uint(1, &mut o);
+        uint(20, &mut o);
+        o.push(0x7b);
+        uint(2, &mut o);
+        uint(0, &mut o);
+        uint(10, &mut o);
+        uint(10, &mut o);
+        sint(0, &mut o);
+        sint(0, &mut o);
+        // second rectangle: W/H modal, grid repetition type 2 (5 members)
+        uint(20, &mut o);
+        o.push(0x1c);
+        sint(0, &mut o);
+        sint(100, &mut o);
+        uint(2, &mut o);
+        uint(3, &mut o);
+        uint(100, &mut o);
+        // CTRAPEZOID type 0, 10 x 5
+        uint(26, &mut o);
+        o.push(0xf8);
+        uint(0, &mut o);
+        uint(10, &mut o);
+        uint(5, &mut o);
+        sint(0, &mut o);
+        sint(200, &mut o);
+        // END: 256 bytes in all
+        let start = o.len();
+        uint(2, &mut o);
+        bstr(&[0u8; 252], &mut o);
+        uint(0, &mut o);
+        assert_eq!(o.len() - start, 256);
+        o
+    }
+
+    fn pts_key(r: &crate::doc::Rep) -> Option<(usize, usize)> {
+        match r {
+            crate::doc::Rep::Pts(p) => Some((
+                std::sync::Arc::as_ptr(p) as *const (i64, i64) as usize,
+                p.len(),
+            )),
+            _ => None,
+        }
+    }
+
+    /// the scan's cost model computed from the parsed Doc itself:
+    /// records at their real sizes, vertex and text heap, the cell
+    /// name, one block per distinct Rep::Pts allocation (modal reuse
+    /// shares it)
+    fn doc_model(cell: &crate::doc::Cell) -> u64 {
+        let mut seen: std::collections::HashSet<(usize, usize)> =
+            std::collections::HashSet::new();
+        let mut reps = |r: &crate::doc::Rep| -> u64 {
+            match pts_key(r) {
+                Some(k) if seen.insert(k) => 16 + PT_SZ * k.1 as u64,
+                _ => 0,
+            }
+        };
+        let mut b = CELL_SZ + cell.name.len() as u64;
+        for r in &cell.rects {
+            b += RECT_SZ + reps(&r.rep);
+        }
+        for p in &cell.polys {
+            b += POLY_SZ + PT_SZ * p.pts.len() as u64 + reps(&p.rep);
+        }
+        for p in &cell.paths {
+            b += PATH_SZ + PT_SZ * p.pts.len() as u64 + reps(&p.rep);
+        }
+        for p in &cell.places {
+            b += PLACE_SZ + reps(&p.rep);
+        }
+        for t in &cell.texts {
+            b += TEXT_SZ + t.s.len() as u64 + reps(&t.rep);
+        }
+        b
+    }
+
+    #[test]
+    fn scan_cell_stats_and_doc_estimate() {
+        let data = fixture();
+        let st = scan(&data).expect("scan");
+        assert_eq!(st.cells, 2);
+        assert_eq!(st.cell_stats.len(), 2);
+        let a = &st.cell_stats[0];
+        let b = &st.cell_stats[1];
+        assert_eq!((a.name.as_str(), b.name.as_str()), ("A", "B"));
+        assert_eq!((a.records, a.shapes, a.placements, a.texts), (8, 6, 1, 1));
+        assert_eq!((b.records, b.shapes, b.placements, b.texts), (3, 3, 0, 0));
+        // vertices as the geometry parser materializes them: 4 + 4 + 4
+        // + 4 (modal reuse) + 3 (path) in A, the CTRAPEZOID's 4 in B
+        assert_eq!((a.points, b.points), (19, 4));
+        assert_eq!((st.points, st.points_max), (23, 4));
+        // one explicit point-list repetition of 3 members, reused once
+        assert_eq!((a.pts_reps, a.pts_rep_members, b.pts_reps), (1, 3, 0));
+        assert_eq!(
+            (st.pts_reps, st.pts_rep_members, st.pts_rep_members_max),
+            (1, 3, 3)
+        );
+        assert_eq!(st.rep_types.get(&0), Some(&1));
+        assert_eq!(st.rep_types.get(&10), Some(&1));
+        assert_eq!(st.rep_types.get(&2), Some(&1));
+        // the estimate is the parsed Doc's own size, cell by cell
+        let doc = crate::doc::parse_doc(&data).expect("parse_doc");
+        let mut total = 0;
+        for cs in &st.cell_stats {
+            let cell = doc
+                .cells
+                .iter()
+                .find(|c| c.name == cs.name)
+                .expect("doc cell");
+            assert_eq!(cs.doc_bytes, doc_model(cell), "cell {}", cs.name);
+            total += cs.doc_bytes;
+        }
+        assert_eq!(st.doc_bytes, total);
+        // power-of-two classes round every heap block up, never down
+        assert!(st.doc_bytes_pow2 > st.doc_bytes);
+        assert_eq!(pow2_block(48), 64);
+        assert_eq!(pow2_block(16 + 16 * 3), 64);
+        assert_eq!(pow2_block(0), 0);
+        assert_eq!(pow2_block(40_000), 40_000);
+        // the parallel scan (one cell per worker) reports the same
+        let par = scan_parallel(&data, 2).expect("scan_parallel");
+        assert_eq!(par.cell_stats.len(), 2);
+        for (x, y) in st.cell_stats.iter().zip(par.cell_stats.iter()) {
+            assert_eq!(
+                (x.name.as_str(), x.records, x.points, x.pts_rep_members),
+                (y.name.as_str(), y.records, y.points, y.pts_rep_members)
+            );
+            assert_eq!((x.doc_bytes, x.doc_bytes_pow2), (y.doc_bytes, y.doc_bytes_pow2));
+        }
+        assert_eq!(
+            (par.doc_bytes, par.doc_bytes_pow2, par.points, par.pts_reps),
+            (st.doc_bytes, st.doc_bytes_pow2, st.points, st.pts_reps)
+        );
+        assert_eq!(par.records, st.records);
+    }
 }
