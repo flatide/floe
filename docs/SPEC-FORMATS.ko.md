@@ -3,7 +3,7 @@
 정본 코드: `rust/ovm/src/lib.rs` (Builder/Ovm), 검증:
 `tools/validate_vfs.py`(오픈 검증), `rust/VFS_HIER.md` par.1~2.
 
-## design.ovm — 메타·인덱스 (VERSION = 7)
+## design.ovm — 메타·인덱스 (VERSION = 8; v8 = 인스턴스 BVH 노드의 서브트리 레이어 마스크)
 
 단일 파일, 섹션 연속 배치. `Ovm::open`(mmap, 2단 검증: 얕은 헤더 +
 샘플링)과 `Ovm::from_bytes`(딥 검증 — 인덱서가 커밋 직전 1회 통과)로

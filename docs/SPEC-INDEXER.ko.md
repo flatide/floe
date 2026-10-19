@@ -146,11 +146,20 @@ floe2 index chip.oas --jobs 16 --profile-cell-ci 32810 \
 
 ## 2. 파이프라인 (스트리밍, rev 44)
 
-1. **파스**: `std::fs::read` 전체 → `parse_doc` (진행 하트비트 스레드가
-   경과/RSS를 stderr로 틱). 150M급 실측 ~155s — 단일 스레드, 수용됨.
-2. **rbbox**: `cell_bboxes_full` (직렬 1패스; 알려진 미결).
-3. **본 빌드** (`build`): 셀들을 topo 순서로 **지속 워커 풀 + 순서
-   커미터** 파이프라인 처리.
+1. **파스**: `std::fs::read` 전체 → `parse_doc_parallel_phased(&data, jobs)`
+   (`cell_cuts` 스킴이 CELL 경계에서 나눈 묶음을 `jobs` 스레드가 파싱하고
+   파일 순서로 합친다; 진행 하트비트 스레드가 경과/RSS를 stderr로 틱).
+   정규화(`normalize_reps`)는 8셀 묶음 단위. (2026-10-19 정정: 이전
+   문구의 "단일 스레드"는 0.12 이전 상태.)
+2. **사전 패스** (`prepass::PrePass::from_doc`): `cell_bboxes_full`(직렬
+   1패스), 직접 마스크·멤버·bbox + 레이어별 합(병렬), topo fold. 스트리밍
+   빌드의 1차 재고 패스가 같은 값을 Doc 없이 만든다
+   (docs/STREAMING_INDEX_PLAN.ko.md §3).
+3. **본 빌드** (`build`): 셀들을 **Doc 인덱스 순서(= CELL 레코드, 파일
+   순서)**로 **지속 워커 풀 + 순서 커미터** 파이프라인 처리. topo 순서는
+   fold(height·rmembers·마스크)와 rank에만 쓰인다. (2026-10-19 정정:
+   이전 문구의 "topo 순서로 처리"는 커밋 순서가 아니다 — 커밋 순서가
+   파일 순서라서 출력 바이트가 워커 수와 무관하다.)
    - 워커: 입장 제어(`ci >= commit_base + window` 시 1ms 슬립) 후
      `build_cell_plan` — phase 타이머 6칸 [bvh/asm/split/lod/pts/sink]:
      - 인스턴스 BVH(리프 순서=방출 순서, v7 max_dim/max_min 주석; v8 레이어 마스크는
@@ -490,5 +499,5 @@ floe-index svrf <deck> [-o OUT] [--scan] [-D NAME[=VAL]]… [-I DIR]… [--follo
 
 - 파스·rbbox 직렬(수용), split 재귀 병렬화(#60 2-B: PtsArena order
   in-place 분할이 형제 병렬을 막음 — 아레나 선생성+분리 재설계 필요).
-- split_pages seq u16 오버플로 가능성(이론), fragments 카운터 과대
-  표시(0.8.2 이후, 계수만 문제).
+- split_pages seq는 u32(vfs.rs·ovm; 2026-10-19 정정 — 이전 문구의 u16은
+  오류), fragments 카운터 과대 표시(0.8.2 이후, 계수만 문제).

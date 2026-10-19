@@ -21,9 +21,12 @@ floe-index vfs chip.oas .chip.oas.ice --jobs 16 \
   --plan-batch 2 --encode-batch 32
 ```
 
-If cell-plan RSS remains above the host limit, rerun with
-`--plan-batch 1`. If it is comfortably below the limit, compare 2, 4 and the
-default (16) to recover planning throughput. `--encode-batch` bounds completed
+The plan window's floor is `--jobs` (vfs.rs: `ring_cap = plan_batch.max(jobs)`),
+so a `--plan-batch` below the worker count changes nothing - `--plan-batch 1`
+or `2` with 16 workers is a 16-cell window (2026-10-19 correction of the
+advice that stood here). To shrink the window, lower `--jobs` too; if RSS is
+comfortably below the limit, compare the default (16), 32 and 64 to recover
+planning throughput. `--encode-batch` bounds completed
 payloads, not the number of workers; 32 is a conservative starting point for
 16 workers and nominal 1 MiB pages.
 
@@ -41,7 +44,7 @@ The 9.8 GB production OASIS run establishes the current live-set shape:
 | parse + repetition normalization | 95 s | 166 GB |
 | build cell plans | 195 s | 443 GB |
 | encode 876,166 pages | 175 s | 463 GB |
-| viewer-side skeleton | 875 s | 355 GB |
+| viewer-side skeleton (retired in 0.10.0, 810b4919; the row is the 2026-09 measurement) | 875 s | 355 GB |
 
 The immediate objective is to make peak memory proportional to the parsed
 document plus a bounded amount of planning and encoding work, rather than the
@@ -140,7 +143,7 @@ Routine gates:
 - `cargo fmt --check`;
 - `cargo test --workspace`;
 - `sh tools/validate_rust.sh`;
-- identical `design.ovm`, `design.ovp`, skeleton and sidecar bytes at jobs 1
+- identical `design.ovm`, `design.ovp` and sidecar bytes at jobs 1
   and a multi-worker run for deterministic fixtures;
 - marker fault-injection recovery remains green.
 
