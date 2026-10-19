@@ -48,7 +48,7 @@ set -e
 cd "$(dirname "$0")/.."
 
 # ---- gate names (in battery order) and aliases ----------------------
-GATES="unit unit_vfs unit_render index_cli vfs_profile floe2 rust_scan \
+GATES="unit unit_vfs unit_render index_cli vfs_profile floe2 rust_scan rust_inventory \
 rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage \
 occupancy vfs_hier vfs_lifecycle vfs_marker vfs_split vfs_text \
 render_goldens render_speckle render_frames drc_ice drc_analysis drc_team svrf oasis_shapes \
@@ -61,7 +61,7 @@ alias_gates() {
         planner)  echo "unit_vfs occupancy jobdeck rust_renderer vfs_hier vfs_lifecycle fit_budget sub_cut_box shape_cut" ;;
         occ)      echo "unit_vfs occupancy" ;;
         render)   echo "unit_render unit_renderd rust_renderer representatives fit_budget sub_cut_box shape_cut write_once layer_decode area_true density_stack cell_tree render_goldens render_speckle render_frames klayout" ;;
-        indexer)  echo "unit_vfs index_cli rust_scan rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage vfs_split vfs_text vfs_marker representatives cell_tree index_lock" ;;
+        indexer)  echo "unit_vfs index_cli rust_scan rust_inventory rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage vfs_split vfs_text vfs_marker representatives cell_tree index_lock" ;;
         python)   echo "index_cli vfs_profile floe2 drc_ice drc_analysis drc_team svrf gen_main01" ;;
         deck)     echo "jobdeck occupancy" ;;
         *)        echo "" ;;
@@ -192,6 +192,11 @@ gates_for() {
             echo "$RENDER_GATES perf_parity" ;;
         rust/dbg/*)
             echo unit ;;
+        rust/oasis/src/inventory.rs)
+            # the streaming build's inventory pass (S1, 2026-10-19): its
+            # parity gate, both crates' unit tests, the scan it rides on
+            # (geom.rs and cli/src/prepass.rs feed the build itself: ALL)
+            echo "unit rust_inventory rust_scan" ;;
         rust/*)
             # the parser, the index format, the tiler, the rest of the
             # VFS, floe-index, the vendored crates, the workspace
@@ -432,6 +437,9 @@ if gate floe2; then RAN="$RAN floe2"; lap floe2
 OUT="${SRC%.oas}_rust.tiles"
 if gate rust_scan; then RAN="$RAN rust_scan"; lap rust_scan
     .venv/bin/python tools/validate_rust_scan.py "$SRC"; fi
+# G1 of the streaming index plan: the inventory pass == the Doc pre-passes
+if gate rust_inventory; then RAN="$RAN rust_inventory"; lap rust_inventory
+    .venv/bin/python tools/validate_rust_inventory.py "$SRC"; fi
 if gate rust_tiles; then RAN="$RAN rust_tiles"; lap rust_tiles
     .venv/bin/python tools/validate_rust_tiles.py "$SRC" "$OUT"; fi
 if gate rust_depth; then RAN="$RAN rust_depth"; lap rust_depth

@@ -14,6 +14,7 @@ use std::time::Instant;
 
 mod drcice;
 mod drcpack;
+mod prepass;
 mod svrf;
 mod vfs;
 
@@ -185,6 +186,9 @@ fn main() {
     if args.len() >= 3 && args[1] == "index" {
         return index_cmd(&args[2..]);
     }
+    if args.len() >= 3 && args[1] == "inventory" {
+        return prepass::inventory_cmd(&args[2..]);
+    }
     if args.len() >= 3 && args[1] == "vfs" && is_deck(&args[2]) {
         return deck_handover(&args[2..]);
     }
@@ -221,6 +225,8 @@ fn main() {
     if args.len() < 3 || args[1] != "scan" {
         eprintln!(
             "usage: floe-index scan <file.oas> [jobs]\n       \
+             floe-index inventory <file.oas> [--jobs N] [--check] [--cells]  \
+             (the streaming build's first pass: cell table, layer order, hierarchy fold; --check holds it to the Doc pre-passes)\n       \
              floe-index tile <file.oas> <outdir> \
              --grid x0,y0,tw,th,nx,ny --edges e0,e1,e2\n       \
              floe-index index <file.oas> [outdir] [--mem GB] \

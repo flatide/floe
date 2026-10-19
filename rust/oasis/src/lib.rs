@@ -13,12 +13,16 @@
 //! CBLOCK boundary (spec guarantee), so the record loop simply runs
 //! over the inflated bytes with the same modal state.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 
 pub mod doc;
+pub mod geom;
 pub mod header;
+pub mod inventory;
 pub mod write;
+
+use crate::geom::{grid_extent, Box4};
 
 #[derive(Debug)]
 pub enum OasisError {
@@ -172,10 +176,17 @@ impl<'a> Cur<'a> {
 
 // ------------------------------------------------------------- repetition
 
-/// Parsed enough to know the member count; kept as a record.
+/// Parsed enough to know the member count and the offset extents;
+/// kept as a record. `ex`/`ey` are what `geom::rep_extent` reports for
+/// the Rep the geometry parser builds from the same bytes (grids: the
+/// corner arithmetic; point lists: min/max over the members, (0, 0)
+/// included), so the inventory's boxes equal the Doc's without the
+/// members ever being materialized.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Repetition {
     pub members: u64,
+    pub ex: (i64, i64),
+    pub ey: (i64, i64),
 }
 
 fn read_repetition(
@@ -193,61 +204,71 @@ fn read_repetition(
         1 => {
             let xd = c.uint()?;
             let yd = c.uint()?;
-            c.uint()?; // x-space
-            c.uint()?; // y-space
-            Repetition { members: (xd + 2) * (yd + 2) }
+            let dx = c.uint()? as i64;
+            let dy = c.uint()? as i64;
+            let (ex, ey) = grid_extent(xd + 2, yd + 2, (dx, 0), (0, dy));
+            Repetition { members: (xd + 2) * (yd + 2), ex, ey }
         }
         2 => {
             let xd = c.uint()?;
-            c.uint()?;
-            Repetition { members: xd + 2 }
+            let dx = c.uint()? as i64;
+            let (ex, ey) = grid_extent(xd + 2, 1, (dx, 0), (0, 0));
+            Repetition { members: xd + 2, ex, ey }
         }
         3 => {
             let yd = c.uint()?;
-            c.uint()?;
-            Repetition { members: yd + 2 }
+            let dy = c.uint()? as i64;
+            let (ex, ey) = grid_extent(yd + 2, 1, (0, dy), (0, 0));
+            Repetition { members: yd + 2, ex, ey }
         }
         4 | 5 => {
             let xd = c.uint()?;
-            if t == 5 {
-                c.uint()?; // grid
-            }
+            let g = if t == 5 { c.uint()? as i64 } else { 1 };
+            let (mut x, mut lo, mut hi) = (0i64, 0i64, 0i64);
             for _ in 0..=xd {
-                c.uint()?;
+                x = x.wrapping_add((c.uint()? as i64).wrapping_mul(g));
+                lo = lo.min(x);
+                hi = hi.max(x);
             }
-            Repetition { members: xd + 2 }
+            Repetition { members: xd + 2, ex: (lo, hi), ey: (0, 0) }
         }
         6 | 7 => {
             let yd = c.uint()?;
-            if t == 7 {
-                c.uint()?;
-            }
+            let g = if t == 7 { c.uint()? as i64 } else { 1 };
+            let (mut y, mut lo, mut hi) = (0i64, 0i64, 0i64);
             for _ in 0..=yd {
-                c.uint()?;
+                y = y.wrapping_add((c.uint()? as i64).wrapping_mul(g));
+                lo = lo.min(y);
+                hi = hi.max(y);
             }
-            Repetition { members: yd + 2 }
+            Repetition { members: yd + 2, ex: (0, 0), ey: (lo, hi) }
         }
         8 => {
             let nd = c.uint()?;
             let md = c.uint()?;
-            c.g_delta()?;
-            c.g_delta()?;
-            Repetition { members: (nd + 2) * (md + 2) }
+            let va = c.g_delta()?;
+            let vb = c.g_delta()?;
+            let (ex, ey) = grid_extent(nd + 2, md + 2, va, vb);
+            Repetition { members: (nd + 2) * (md + 2), ex, ey }
         }
         9 => {
             let d = c.uint()?;
-            c.g_delta()?;
-            Repetition { members: d + 2 }
+            let va = c.g_delta()?;
+            let (ex, ey) = grid_extent(d + 2, 1, va, (0, 0));
+            Repetition { members: d + 2, ex, ey }
         }
         10 | 11 => {
             let d = c.uint()?;
-            if t == 11 {
-                c.uint()?; // grid
-            }
+            let g = if t == 11 { c.uint()? as i64 } else { 1 };
+            let (mut x, mut y) = (0i64, 0i64);
+            let mut bb: Box4 = (0, 0, 0, 0);
             for _ in 0..=d {
-                c.g_delta()?;
+                let (dx, dy) = c.g_delta()?;
+                x = x.wrapping_add(dx.wrapping_mul(g));
+                y = y.wrapping_add(dy.wrapping_mul(g));
+                bb = (bb.0.min(x), bb.1.min(y), bb.2.max(x), bb.3.max(y));
             }
-            Repetition { members: d + 2 }
+            Repetition { members: d + 2, ex: (bb.0, bb.2), ey: (bb.1, bb.3) }
         }
         _ => return err(c.here(), "bad repetition type"),
     };
@@ -263,20 +284,42 @@ fn read_repetition(
 /// point-list: consume it and return the vertex count the geometry
 /// parser materializes (doc::read_points: the anchor, one vertex per
 /// delta and, for a closed manhattan list, the implicit closing vertex)
-fn read_point_list(c: &mut Cur, closed: bool) -> Result<u64> {
+/// and the vertices' box relative to the anchor. `spine`, when given,
+/// receives the vertices themselves (the inventory needs a path's
+/// spine for its exact outline box).
+fn read_point_list(
+    c: &mut Cur,
+    closed: bool,
+    mut spine: Option<&mut Vec<(i64, i64)>>,
+) -> Result<(u64, Box4)> {
     let t = c.uint()?;
     let n = c.uint()?;
     let mut verts = n + 1;
+    let (mut x, mut y) = (0i64, 0i64);
+    let mut bb: Box4 = (0, 0, 0, 0);
+    if let Some(s) = spine.as_deref_mut() {
+        s.clear();
+        s.push((0, 0));
+    }
+    macro_rules! step {
+        ($dx:expr, $dy:expr) => {{
+            x = x.wrapping_add($dx);
+            y = y.wrapping_add($dy);
+            bb = (bb.0.min(x), bb.1.min(y), bb.2.max(x), bb.3.max(y));
+            if let Some(s) = spine.as_deref_mut() {
+                s.push((x, y));
+            }
+        }};
+    }
     match t {
         0 | 1 => {
-            let (mut x, mut y) = (0i64, 0i64);
             let mut horiz = t == 0;
             for _ in 0..n {
                 let d = c.sint()?; // 1-delta
                 if horiz {
-                    x = x.wrapping_add(d);
+                    step!(d, 0);
                 } else {
-                    y = y.wrapping_add(d);
+                    step!(0, d);
                 }
                 horiz = !horiz;
             }
@@ -284,36 +327,68 @@ fn read_point_list(c: &mut Cur, closed: bool) -> Result<u64> {
                 let u = if horiz { (0, y) } else { (x, 0) };
                 if u != (x, y) && u != (0, 0) {
                     verts += 1;
+                    if let Some(s) = spine.as_deref_mut() {
+                        s.push(u);
+                    }
                 }
             }
         }
-        2 | 3 => {
+        2 => {
             for _ in 0..n {
-                c.uint()?; // 2-delta / 3-delta (dir bits + magnitude)
+                let g = c.uint()?; // 2-delta: direction + magnitude
+                let m = (g >> 2) as i64;
+                let (dx, dy) = match g & 3 {
+                    0 => (m, 0),
+                    1 => (0, m),
+                    2 => (-m, 0),
+                    _ => (0, -m),
+                };
+                step!(dx, dy);
             }
         }
-        4 | 5 => {
+        3 => {
             for _ in 0..n {
-                c.g_delta()?;
+                let g = c.uint()?; // 3-delta
+                let m = (g >> 3) as i64;
+                let (dx, dy) = match g & 7 {
+                    0 => (m, 0),
+                    1 => (0, m),
+                    2 => (-m, 0),
+                    3 => (0, -m),
+                    4 => (m, m),
+                    5 => (-m, m),
+                    6 => (-m, -m),
+                    _ => (m, -m),
+                };
+                step!(dx, dy);
+            }
+        }
+        4 => {
+            for _ in 0..n {
+                let (dx, dy) = c.g_delta()?;
+                step!(dx, dy);
+            }
+        }
+        5 => {
+            // double-delta: each g-delta adds to the RUNNING delta
+            let (mut rx, mut ry) = (0i64, 0i64);
+            for _ in 0..n {
+                let (dx, dy) = c.g_delta()?;
+                rx = rx.wrapping_add(dx);
+                ry = ry.wrapping_add(dy);
+                step!(rx, ry);
             }
         }
         _ => return err(c.here(), "bad point-list type"),
     }
-    Ok(verts)
+    Ok((verts, bb))
 }
 
-fn read_interval(c: &mut Cur) -> Result<()> {
-    match c.uint()? {
-        0 => {}
-        1 | 2 | 3 => {
-            c.uint()?;
-        }
-        4 => {
-            c.uint()?;
-            c.uint()?;
-        }
-        _ => return err(c.here(), "bad interval type")?,
-    }
+/// a coordinate field: absolute, or a delta on the modal in XYRELATIVE
+/// mode (doc.rs coord)
+fn coord(c: &mut Cur, modal_v: &mut i64, relative: bool) -> Result<()> {
+    let v = c.sint()?;
+    *modal_v = if relative { modal_v.wrapping_add(v) } else { v };
     Ok(())
 }
 
@@ -337,6 +412,37 @@ struct Modal {
     /// last property had a value list (needed only for stream sync of
     /// PROPERTY-repeat records, which carry no fields at all)
     _last_prop: bool,
+    // ---- coordinates and shape modals: the inventory's geometry (the
+    // plain scan decodes and ignores them) - doc.rs's modal set: xy
+    // mode, separate x/y for geometry, placements and texts, width /
+    // height, the point lists, path extensions, the placement target
+    relative: bool,
+    geo_x: i64,
+    geo_y: i64,
+    pl_x: i64,
+    pl_y: i64,
+    tx_x: i64,
+    tx_y: i64,
+    geo_w: Option<i64>,
+    geo_h: Option<i64>,
+    circle_r: Option<i64>,
+    ctrap_type: Option<u64>,
+    /// the modal polygon point list's box relative to the anchor
+    poly_box: Option<Box4>,
+    /// the modal path point list (vertices relative to the anchor)
+    path_pts: Vec<(i64, i64)>,
+    path_set: bool,
+    path_hw: Option<i64>,
+    path_es: Option<i64>,
+    path_ee: Option<i64>,
+    /// the modal placement target and a counter that changes whenever a
+    /// record spells a new one (the inventory's edge cache key)
+    place: Option<inventory::Target>,
+    place_gen: u64,
+    /// the modal text string: None = none yet (doc.rs "text without
+    /// string"), Some(None) = an inline string, Some(Some(r)) = a
+    /// TEXTSTRING reference
+    text_target: Option<Option<u64>>,
 }
 
 // ------------------------------------------------------------- scan stats
@@ -455,15 +561,74 @@ pub struct ScanStats {
     /// CELLNAME table in file order: (explicit reference, name) -
     /// implicit (id 3) entries are numbered by position when resolving
     cellnames_seen: Vec<(Option<u64>, String)>,
+    /// inventory mode: TEXTSTRING records in file order (explicit
+    /// reference or implicit) and the references TEXT records make -
+    /// an unresolved one is refused as doc.rs finish_inner refuses it
+    textstrings_seen: Vec<Option<u64>>,
+    text_refs: HashSet<u64>,
+    /// the resolved table (finish): reference -> name, first entry wins
+    /// as in the parallel geometry parse's union
+    cellname_table: HashMap<u64, String>,
+    /// the inventory collector of this parse (None: plain scan); a
+    /// parallel scan appends its workers' collectors to `inv_parts` in
+    /// file order and `inventory::finish` folds them
+    inv: Option<Box<inventory::Part>>,
+    inv_parts: Vec<inventory::Part>,
+    /// implicit CELLNAME (id 3) / TEXTSTRING (id 5) records seen so far
+    /// outside CBLOCKs: a cell range's parser seeds, as `cell_cuts`
+    /// counts them (a parallel worker starts from its cut's bases)
+    n3: u64,
+    n5: u64,
+    cblock_depth: u32,
+    /// file offset of the END record (the last cell range's end)
+    end_at: u64,
 }
 
 impl ScanStats {
-    /// the scan entry points track cells; the skim passes (cell_cuts and
-    /// scan_parallel's split) run on a default ScanStats and do not
-    fn tracking() -> ScanStats {
+    /// the scan entry points track cells; the skim pass (cell_cuts) runs
+    /// on a default ScanStats and does not.
+    /// `inventory`: with the per-cell geometry collector (inventory.rs)
+    fn tracking_with(inventory: bool) -> ScanStats {
         ScanStats {
             track_cells: true,
+            inv: inventory.then(|| Box::new(inventory::Part::new())),
             ..Default::default()
+        }
+    }
+
+    fn open_inv_cell(&mut self, key: inventory::Target, at: u64) {
+        let (n3, n5, depth) = (self.n3, self.n5, self.cblock_depth);
+        if let Some(p) = self.inv.as_deref_mut() {
+            p.open_cell(key, at, depth > 0, n3, n5);
+        }
+    }
+
+    fn close_inv(&mut self, end: u64) {
+        if let Some(p) = self.inv.as_deref_mut() {
+            p.close(end);
+        }
+    }
+
+    /// inventory mode refuses what doc.rs utf8() refuses
+    fn check_utf8(&self, c: &Cur, b: &[u8]) -> Result<()> {
+        if self.inv.is_some() && std::str::from_utf8(b).is_err() {
+            return Err(OasisError::Format(format!(
+                "@{}: non-utf8 name",
+                c.here()
+            )));
+        }
+        Ok(())
+    }
+
+    /// a name as the geometry parser keeps it: the inventory refuses
+    /// what doc.rs refuses (non-UTF-8), the plain scan keeps a lossy copy
+    fn name_string(&self, c: &Cur, b: &[u8]) -> Result<String> {
+        if self.inv.is_some() {
+            String::from_utf8(b.to_vec()).map_err(|_| {
+                OasisError::Format(format!("@{}: non-utf8 name", c.here()))
+            })
+        } else {
+            Ok(String::from_utf8_lossy(b).into_owned())
         }
     }
 
@@ -536,7 +701,7 @@ impl ScanStats {
                     implicit - 1
                 }
             };
-            names.insert(r, name);
+            names.entry(r).or_insert(name);
         }
         let (mut extra, mut extra2) = (0u64, 0u64);
         for cs in self.cell_stats.iter_mut() {
@@ -554,6 +719,7 @@ impl ScanStats {
         }
         self.doc_bytes += extra;
         self.doc_bytes_pow2 += extra2;
+        self.cellname_table = names;
     }
 
     fn shape(&mut self, m: &Modal, c: &Cur, members: u64) -> Result<()> {
@@ -587,17 +753,27 @@ impl ScanStats {
 
 // ----------------------------------------------------------- record layer
 
-fn rep_members(
+/// the record's repetition (members + extents), or the single member
+fn rep_of(
     c: &mut Cur,
     modal: &mut Modal,
     st: &mut ScanStats,
     has_rep: bool,
-) -> Result<u64> {
+) -> Result<Repetition> {
     if has_rep {
-        Ok(read_repetition(c, &mut modal.repetition, st)?.members)
+        read_repetition(c, &mut modal.repetition, st)
     } else {
-        Ok(1)
+        Ok(Repetition { members: 1, ex: (0, 0), ey: (0, 0) })
     }
+}
+
+/// the (layer, datatype) the geometry parser keys a shape by (checked
+/// present by ScanStats::shape before this is called)
+fn shape_layer(modal: &Modal) -> (u32, u32) {
+    (
+        modal.layer.unwrap_or(0) as u32,
+        modal.datatype.unwrap_or(0) as u32,
+    )
 }
 
 fn read_property_value(c: &mut Cur) -> Result<()> {
@@ -648,15 +824,20 @@ enum Rec {
 
 /// Parse one record. `inflate=false` skips CBLOCK bodies without
 /// decompressing (used by the parallel skim pass, which only needs
-/// record boundaries - field consumption is modal-independent).
+/// record boundaries - field consumption is modal-independent). With
+/// an inventory collector on `st` the coordinates are followed as
+/// doc.rs follows them and the records the geometry parser refuses
+/// are refused here too.
 fn record(
     c: &mut Cur,
     modal: &mut Modal,
     st: &mut ScanStats,
     inflate: bool,
 ) -> Result<Rec> {
+    let at = c.here() as u64;
     let id = c.uint()?;
     if id == 2 {
+        st.end_at = at;
         return Ok(Rec::End); // END: not counted (parallel workers
     }                        // never see it - keep both paths equal)
     st.records += 1;
@@ -677,16 +858,25 @@ fn record(
             // CELLNAME
             let name = c.string()?;
             let r = if id == 4 { Some(c.uint()?) } else { None };
+            if id == 3 && st.cblock_depth == 0 {
+                st.n3 += 1;
+            }
             if st.track_cells {
-                st.cellnames_seen
-                    .push((r, String::from_utf8_lossy(name).into_owned()));
+                let s = st.name_string(c, name)?;
+                st.cellnames_seen.push((r, s));
             }
             st.cellnames += 1;
         }
         5 | 6 => {
-            c.string()?;
-            if id == 6 {
-                c.uint()?;
+            // TEXTSTRING
+            let s = c.string()?;
+            let r = if id == 6 { Some(c.uint()?) } else { None };
+            if id == 5 && st.cblock_depth == 0 {
+                st.n5 += 1;
+            }
+            if st.inv.is_some() {
+                st.check_utf8(c, s)?;
+                st.textstrings_seen.push(r);
             }
         }
         7 | 8 | 9 | 10 => {
@@ -696,40 +886,78 @@ fn record(
             }
         }
         11 | 12 => {
-            // LAYERNAME: name + layer interval + datatype interval
-            c.string()?;
-            read_interval(c)?;
-            read_interval(c)?;
+            // LAYERNAME: name + layer interval + datatype interval; an
+            // exact pair joins the layer order (doc.rs reg_layer) and
+            // every rule names layers
+            let name = c.string()?;
+            let layer = crate::doc::name_interval(c)?;
+            let datatype = crate::doc::name_interval(c)?;
+            if st.inv.is_some() {
+                let name = st.name_string(c, name)?;
+                let part = st.inv.as_deref_mut().unwrap();
+                if let (Some(l), Some(d)) = (layer.exact(), datatype.exact()) {
+                    part.reg_layer(l, d);
+                }
+                part.rules.push(crate::doc::LayerNameRule {
+                    name,
+                    layer,
+                    datatype,
+                });
+            }
         }
         13 => {
             let r = c.uint()?;
             st.cells += 1;
             *modal = Modal::default();
             st.open_cell(String::new(), Some(r));
+            st.open_inv_cell(inventory::Target::Ref(r), at);
             return Ok(Rec::Cell);
         }
         14 => {
             let name = c.string()?;
             st.cells += 1;
             *modal = Modal::default();
-            st.open_cell(String::from_utf8_lossy(name).into_owned(), None);
+            let s = st.name_string(c, name)?;
+            if st.inv.is_some() {
+                st.open_cell(s.clone(), None);
+                st.open_inv_cell(inventory::Target::Name(s), at);
+            } else {
+                st.open_cell(s, None);
+            }
             return Ok(Rec::Cell);
         }
-        15 | 16 => {} // XYABSOLUTE / XYRELATIVE (coords consumed as-is)
+        15 => modal.relative = false, // XYABSOLUTE
+        16 => modal.relative = true,  // XYRELATIVE
         17 | 18 => {
-            // PLACEMENT
+            // PLACEMENT: C N X Y R AA F
             let info = c.byte()?;
             let (cbit, nbit) = (info & 0x80 != 0, info & 0x40 != 0);
             let (xbit, ybit) = (info & 0x20 != 0, info & 0x10 != 0);
             let rbit = info & 0x08 != 0;
             if cbit {
-                if nbit {
-                    c.uint()?;
+                let tgt = if nbit {
+                    let r = c.uint()?;
+                    st.inv.is_some().then_some(inventory::Target::Ref(r))
                 } else {
-                    c.string()?;
+                    let s = c.string()?;
+                    if st.inv.is_some() {
+                        Some(inventory::Target::Name(st.name_string(c, s)?))
+                    } else {
+                        None
+                    }
+                };
+                if let Some(t) = tgt {
+                    modal.place = Some(t);
+                    modal.place_gen += 1;
                 }
             }
             if id == 18 {
+                if st.inv.is_some() {
+                    return err(
+                        c.here(),
+                        "magnified/angled placement: out of spike scope",
+                    );
+                }
                 if info & 0x04 != 0 {
                     c.real()?; // magnification
                 }
@@ -738,17 +966,33 @@ fn record(
                 }
             }
             if xbit {
-                c.sint()?;
+                coord(c, &mut modal.pl_x, modal.relative)?;
             }
             if ybit {
-                c.sint()?;
+                coord(c, &mut modal.pl_y, modal.relative)?;
             }
-            let members = rep_members(c, modal, st, rbit)?;
+            let rep = rep_of(c, modal, st, rbit)?;
             st.placements += 1;
-            st.placement_members += members;
+            st.placement_members += rep.members;
             st.cost(PLACE_SZ, 0);
             if let Some(cs) = st.cur_cell.as_mut() {
                 cs.placements += 1;
+            }
+            if let Some(part) = st.inv.as_deref_mut() {
+                let tgt = match modal.place.as_ref() {
+                    Some(t) => t,
+                    None => return err(c.here(), "placement without cell"),
+                };
+                part.place(
+                    c.here(),
+                    tgt,
+                    modal.place_gen,
+                    modal.pl_x,
+                    modal.pl_y,
+                    (info >> 1) & 3,
+                    info & 0x01 != 0,
+                    &rep,
+                )?;
             }
         }
         19 => {
@@ -760,10 +1004,14 @@ fn record(
             let (tbit, lbit) = (info & 0x02 != 0, info & 0x01 != 0);
             if cbit {
                 if nbit {
-                    c.uint()?;
+                    let r = c.uint()?;
+                    modal.text_target = Some(Some(r));
                     modal.text_len = 0; // table string: not costed
                 } else {
-                    modal.text_len = c.string()?.len() as u64;
+                    let s = c.string()?;
+                    st.check_utf8(c, s)?;
+                    modal.text_target = Some(None);
+                    modal.text_len = s.len() as u64;
                 }
             }
             if lbit {
@@ -773,14 +1021,35 @@ fn record(
                 modal.texttype = Some(c.uint()?);
             }
             if xbit {
-                c.sint()?;
+                coord(c, &mut modal.tx_x, modal.relative)?;
             }
             if ybit {
-                c.sint()?;
+                coord(c, &mut modal.tx_y, modal.relative)?;
             }
-            let members = rep_members(c, modal, st, rbit)?;
-            st.text(modal, c, members)?;
+            let rep = rep_of(c, modal, st, rbit)?;
+            st.text(modal, c, rep.members)?;
             st.cost(TEXT_SZ, modal.text_len);
+            if st.inv.is_some() {
+                match modal.text_target {
+                    None => return err(c.here(), "text without string"),
+                    Some(Some(r)) => {
+                        st.text_refs.insert(r);
+                    }
+                    Some(None) => {}
+                }
+            }
+            if let Some(part) = st.inv.as_deref_mut() {
+                let (l, d) = (
+                    modal.textlayer.unwrap_or(0) as u32,
+                    modal.texttype.unwrap_or(0) as u32,
+                );
+                let li = part.reg_layer(l, d);
+                part.text(
+                    c.here(),
+                    li,
+                    inventory::rep_box(modal.tx_x, modal.tx_y, modal.tx_x, modal.tx_y, &rep),
+                )?;
+            }
         }
         20 => {
             // RECTANGLE: SWHXYRDL
@@ -797,23 +1066,49 @@ fn record(
                 modal.datatype = Some(c.uint()?);
             }
             if wbit {
-                c.uint()?;
+                modal.geo_w = Some(c.uint()? as i64);
             }
             if hbit {
-                if sbit {
-                    return err(c.here(), "square with H bit");
-                }
-                c.uint()?;
+                modal.geo_h = Some(c.uint()? as i64);
+            }
+            if sbit {
+                // S with H set is spec-invalid; doc.rs reads the H field
+                // and then takes h = w, and so does this parser
+                modal.geo_h = modal.geo_w;
             }
             if xbit {
-                c.sint()?;
+                coord(c, &mut modal.geo_x, modal.relative)?;
             }
             if ybit {
-                c.sint()?;
+                coord(c, &mut modal.geo_y, modal.relative)?;
             }
-            let members = rep_members(c, modal, st, rbit)?;
-            st.shape(modal, c, members)?;
+            let rep = rep_of(c, modal, st, rbit)?;
+            st.shape(modal, c, rep.members)?;
             st.cost(RECT_SZ, 0);
+            if let Some(part) = st.inv.as_deref_mut() {
+                let w = match modal.geo_w {
+                    Some(w) => w,
+                    None => return Err(OasisError::Format("no width".into())),
+                };
+                let h = match modal.geo_h {
+                    Some(h) => h,
+                    None => return Err(OasisError::Format("no height".into())),
+                };
+                let (l, d) = shape_layer(modal);
+                let li = part.reg_layer(l, d);
+                part.shape(
+                    c.here(),
+                    li,
+                    rep.members,
+                    inventory::rep_box(
+                        modal.geo_x,
+                        modal.geo_y,
+                        modal.geo_x + w,
+                        modal.geo_y + h,
+                        &rep,
+                    ),
+                )?;
+            }
         }
         21 => {
             // POLYGON: 00PXYRDL
@@ -829,19 +1124,41 @@ fn record(
                 modal.datatype = Some(c.uint()?);
             }
             if pbit {
-                modal.poly_verts = Some(read_point_list(c, true)?);
+                let (verts, bb) = read_point_list(c, true, None)?;
+                modal.poly_verts = Some(verts);
+                modal.poly_box = Some(bb);
             }
             if xbit {
-                c.sint()?;
+                coord(c, &mut modal.geo_x, modal.relative)?;
             }
             if ybit {
-                c.sint()?;
+                coord(c, &mut modal.geo_y, modal.relative)?;
             }
-            let members = rep_members(c, modal, st, rbit)?;
-            st.shape(modal, c, members)?;
+            let rep = rep_of(c, modal, st, rbit)?;
+            st.shape(modal, c, rep.members)?;
             let verts = modal.poly_verts.unwrap_or(0);
             st.points(verts);
             st.cost(POLY_SZ, PT_SZ * verts);
+            if let Some(part) = st.inv.as_deref_mut() {
+                let pb = match modal.poly_box {
+                    Some(b) => b,
+                    None => return err(c.here(), "poly without points"),
+                };
+                let (l, d) = shape_layer(modal);
+                let li = part.reg_layer(l, d);
+                part.shape(
+                    c.here(),
+                    li,
+                    rep.members,
+                    inventory::rep_box(
+                        modal.geo_x + pb.0,
+                        modal.geo_y + pb.1,
+                        modal.geo_x + pb.2,
+                        modal.geo_y + pb.3,
+                        &rep,
+                    ),
+                )?;
+            }
         }
         22 => {
             // PATH: EWPXYRDL
@@ -859,34 +1176,76 @@ fn record(
                 modal.datatype = Some(c.uint()?);
             }
             if wbit {
-                c.uint()?;
+                modal.path_hw = Some(c.uint()? as i64);
             }
             if ebit {
+                // extension scheme (doc.rs): 0 = reuse the modal, 1 =
+                // flush, 2 = half-width, 3 = explicit
                 let scheme = c.uint()?;
-                if (scheme >> 2) & 3 == 3 {
-                    c.sint()?; // explicit start extension
-                }
-                if scheme & 3 == 3 {
-                    c.sint()?; // explicit end extension
-                }
+                let hw = modal.path_hw;
+                modal.path_es = match (scheme >> 2) & 3 {
+                    0 => modal.path_es,
+                    1 => Some(0),
+                    2 => hw,
+                    _ => Some(c.sint()?),
+                };
+                modal.path_ee = match scheme & 3 {
+                    0 => modal.path_ee,
+                    1 => Some(0),
+                    2 => hw,
+                    _ => Some(c.sint()?),
+                };
             }
             if pbit {
-                modal.path_verts = Some(read_point_list(c, false)?);
+                let spine = if st.inv.is_some() {
+                    Some(&mut modal.path_pts)
+                } else {
+                    None
+                };
+                let (verts, _) = read_point_list(c, false, spine)?;
+                modal.path_verts = Some(verts);
+                modal.path_set = true;
             }
             if xbit {
-                c.sint()?;
+                coord(c, &mut modal.geo_x, modal.relative)?;
             }
             if ybit {
-                c.sint()?;
+                coord(c, &mut modal.geo_y, modal.relative)?;
             }
-            let members = rep_members(c, modal, st, rbit)?;
-            st.shape(modal, c, members)?;
+            let rep = rep_of(c, modal, st, rbit)?;
+            st.shape(modal, c, rep.members)?;
             let verts = modal.path_verts.unwrap_or(0);
             st.points(verts);
             st.cost(PATH_SZ, PT_SZ * verts);
+            if let Some(part) = st.inv.as_deref_mut() {
+                let hw = match modal.path_hw {
+                    Some(v) => v,
+                    None => return Err(OasisError::Format("no halfwidth".into())),
+                };
+                let es = match modal.path_es {
+                    Some(v) => v,
+                    None => return Err(OasisError::Format("no start extension".into())),
+                };
+                let ee = match modal.path_ee {
+                    Some(v) => v,
+                    None => return Err(OasisError::Format("no end extension".into())),
+                };
+                if !modal.path_set {
+                    return err(c.here(), "path without points");
+                }
+                let (l, d) = shape_layer(modal);
+                let li = part.reg_layer(l, d);
+                let b4 = part.path_box(&modal.path_pts, modal.geo_x, modal.geo_y, hw, es, ee);
+                part.shape(
+                    c.here(),
+                    li,
+                    rep.members,
+                    inventory::rep_box(b4.0, b4.1, b4.2, b4.3, &rep),
+                )?;
+            }
         }
         23 | 24 | 25 => {
-            // TRAPEZOID: 0WHXYRDL (+delta-a / delta-b)
+            // TRAPEZOID: OWHXYRDL (+delta-a / delta-b)
             let info = c.byte()?;
             let (wbit, hbit) = (info & 0x40 != 0, info & 0x20 != 0);
             let (xbit, ybit) = (info & 0x10 != 0, info & 0x08 != 0);
@@ -899,28 +1258,52 @@ fn record(
                 modal.datatype = Some(c.uint()?);
             }
             if wbit {
-                c.uint()?;
+                modal.geo_w = Some(c.uint()? as i64);
             }
             if hbit {
-                c.uint()?;
+                modal.geo_h = Some(c.uint()? as i64);
             }
-            if id == 23 || id == 24 {
-                c.sint()?; // delta-a
-            }
-            if id == 23 || id == 25 {
-                c.sint()?; // delta-b
-            }
+            let da = if id == 25 { 0 } else { c.sint()? };
+            let db = if id == 24 { 0 } else { c.sint()? };
             if xbit {
-                c.sint()?;
+                coord(c, &mut modal.geo_x, modal.relative)?;
             }
             if ybit {
-                c.sint()?;
+                coord(c, &mut modal.geo_y, modal.relative)?;
             }
-            let members = rep_members(c, modal, st, rbit)?;
-            st.shape(modal, c, members)?;
+            let rep = rep_of(c, modal, st, rbit)?;
+            st.shape(modal, c, rep.members)?;
             // materialized as a four-vertex PolyRec
             st.points(4);
             st.cost(POLY_SZ, PT_SZ * 4);
+            if let Some(part) = st.inv.as_deref_mut() {
+                let w = match modal.geo_w {
+                    Some(w) => w,
+                    None => return Err(OasisError::Format("no width".into())),
+                };
+                let h = match modal.geo_h {
+                    Some(h) => h,
+                    None => return Err(OasisError::Format("no height".into())),
+                };
+                let (l, d) = shape_layer(modal);
+                // the layer registers even when the shape degenerates
+                let li = part.reg_layer(l, d);
+                let pts = crate::doc::dedupe_ring(crate::doc::trapezoid_points(
+                    info & 0x80 != 0,
+                    w,
+                    h,
+                    da,
+                    db,
+                ));
+                if pts.len() >= 3 {
+                    part.shape(
+                        c.here(),
+                        li,
+                        rep.members,
+                        inventory::rep_box_pts(&pts, modal.geo_x, modal.geo_y, &rep),
+                    )?;
+                }
+            }
         }
         26 => {
             // CTRAPEZOID: TWHXYRDL
@@ -937,25 +1320,73 @@ fn record(
                 modal.datatype = Some(c.uint()?);
             }
             if tbit {
-                modal.ctrap_verts = Some(ctrap_verts(c.uint()?));
+                let t = c.uint()?;
+                modal.ctrap_type = Some(t);
+                modal.ctrap_verts = Some(ctrap_verts(t));
             }
             if wbit {
-                c.uint()?;
+                modal.geo_w = Some(c.uint()? as i64);
             }
             if hbit {
-                c.uint()?;
+                modal.geo_h = Some(c.uint()? as i64);
             }
             if xbit {
-                c.sint()?;
+                coord(c, &mut modal.geo_x, modal.relative)?;
             }
             if ybit {
-                c.sint()?;
+                coord(c, &mut modal.geo_y, modal.relative)?;
             }
-            let members = rep_members(c, modal, st, rbit)?;
-            st.shape(modal, c, members)?;
+            let rep = rep_of(c, modal, st, rbit)?;
+            st.shape(modal, c, rep.members)?;
             let verts = modal.ctrap_verts.unwrap_or(4);
             st.points(verts);
             st.cost(POLY_SZ, PT_SZ * verts);
+            if let Some(part) = st.inv.as_deref_mut() {
+                let t = match modal.ctrap_type {
+                    Some(t) => t,
+                    None => return Err(OasisError::Format("ctrapezoid without type".into())),
+                };
+                // the types that imply one dimension read only the other
+                let w = match t {
+                    20 | 21 => modal.geo_w.unwrap_or(0),
+                    _ => match modal.geo_w {
+                        Some(w) => w,
+                        None => return Err(OasisError::Format("no width".into())),
+                    },
+                };
+                let h = match t {
+                    16..=19 | 22 | 23 | 25 => modal.geo_h.unwrap_or(0),
+                    _ => match modal.geo_h {
+                        Some(h) => h,
+                        None => return Err(OasisError::Format("no height".into())),
+                    },
+                };
+                let Some((pts, iw, ih)) = crate::doc::ctrapezoid_points(t, w, h) else {
+                    return err(
+                        c.here(),
+                        &format!("CTRAPEZOID type {} is outside 0..=25", t),
+                    );
+                };
+                // the implied dimensions feed the modals (a following
+                // record without W/H sees them)
+                if let Some(iw) = iw {
+                    modal.geo_w = Some(iw);
+                }
+                if let Some(ih) = ih {
+                    modal.geo_h = Some(ih);
+                }
+                let (l, d) = shape_layer(modal);
+                let li = part.reg_layer(l, d);
+                let pts = crate::doc::dedupe_ring(pts);
+                if pts.len() >= 3 {
+                    part.shape(
+                        c.here(),
+                        li,
+                        rep.members,
+                        inventory::rep_box_pts(&pts, modal.geo_x, modal.geo_y, &rep),
+                    )?;
+                }
+            }
         }
         27 => {
             // CIRCLE: 00rXYRDL
@@ -971,19 +1402,41 @@ fn record(
                 modal.datatype = Some(c.uint()?);
             }
             if radbit {
-                c.uint()?;
+                let r = c.uint()?;
+                modal.circle_r = Some(match i64::try_from(r) {
+                    Ok(v) => v,
+                    Err(_) => return err(c.here(), "circle radius out of range"),
+                });
             }
             if xbit {
-                c.sint()?;
+                coord(c, &mut modal.geo_x, modal.relative)?;
             }
             if ybit {
-                c.sint()?;
+                coord(c, &mut modal.geo_y, modal.relative)?;
             }
-            let members = rep_members(c, modal, st, rbit)?;
-            st.shape(modal, c, members)?;
+            let rep = rep_of(c, modal, st, rbit)?;
+            st.shape(modal, c, rep.members)?;
             // materialized as an inscribed 64-gon PolyRec
             st.points(64);
             st.cost(POLY_SZ, PT_SZ * 64);
+            if let Some(part) = st.inv.as_deref_mut() {
+                let r = match modal.circle_r {
+                    Some(r) => r,
+                    None => return err(c.here(), "circle without radius"),
+                };
+                // r == 0 defines no geometry and registers no layer
+                if r > 0 {
+                    let (l, d) = shape_layer(modal);
+                    let li = part.reg_layer(l, d);
+                    let pts = crate::doc::circle64(modal.geo_x, modal.geo_y, r);
+                    part.shape(
+                        c.here(),
+                        li,
+                        rep.members,
+                        inventory::rep_box_pts(&pts, 0, 0, &rep),
+                    )?;
+                }
+            }
         }
         28 => {
             // PROPERTY: UUUUVCNS
@@ -1024,6 +1477,9 @@ fn record(
         }
         33 => {
             // XGEOMETRY: 000XYRDL, attribute, b-string
+            if st.inv.is_some() {
+                return err(c.here(), "XGEOMETRY: out of spike scope");
+            }
             let info = c.byte()?;
             let (xbit, ybit) = (info & 0x10 != 0, info & 0x08 != 0);
             let rbit = info & 0x04 != 0;
@@ -1037,13 +1493,13 @@ fn record(
             }
             c.string()?;
             if xbit {
-                c.sint()?;
+                coord(c, &mut modal.geo_x, modal.relative)?;
             }
             if ybit {
-                c.sint()?;
+                coord(c, &mut modal.geo_y, modal.relative)?;
             }
-            let members = rep_members(c, modal, st, rbit)?;
-            st.shape(modal, c, members)?;
+            let rep = rep_of(c, modal, st, rbit)?;
+            st.shape(modal, c, rep.members)?;
         }
         34 => {
             // CBLOCK: comp-type, uncomp-count, comp-count, bytes
@@ -1064,12 +1520,14 @@ fn record(
                 }
                 st.cblocks += 1;
                 st.cblock_bytes_inflated += un as u64;
+                st.cblock_depth += 1;
                 let mut sub = Cur::new(&out, c.here());
                 while !sub.at_end() {
                     if record(&mut sub, modal, st, true)? == Rec::End {
                         return err(sub.here(), "END inside CBLOCK");
                     }
                 }
+                st.cblock_depth -= 1;
             }
         }
         _ => return err(c.here(), &format!("unknown record id {}", id)),
@@ -1083,25 +1541,128 @@ fn record(
 const MAGIC: &[u8] = b"%SEMI-OASIS\r\n";
 
 pub fn scan(data: &[u8]) -> Result<ScanStats> {
+    scan_with(data, 1, false)
+}
+
+/// Parallel scan: a cheap skim pass (CBLOCK bodies skipped, not
+/// inflated) splits the stream at CELL boundaries - modal state resets
+/// there, so each contiguous cell-group parses independently. Workers
+/// then run the full parser (inflating) over their byte ranges. No
+/// GIL, no shared state: the whole file's parse work spreads over
+/// `jobs` OS threads.
+pub fn scan_parallel(data: &[u8], jobs: usize) -> Result<ScanStats> {
+    scan_with(data, jobs, false)
+}
+
+/// The streaming build's first pass (docs/STREAMING_INDEX_PLAN.ko.md
+/// §3, S1): the scan with the per-cell geometry collector on, folded
+/// into the Inventory (inventory.rs: cell table, layer order, per-cell
+/// boxes / masks / edges, the hierarchy fold).
+pub fn inventory(data: &[u8], jobs: usize) -> Result<inventory::Inventory> {
+    let st = scan_with(data, jobs, true)?;
+    inventory::finish(st)
+}
+
+/// The scan frame: one record walk over the whole file, CBLOCKs
+/// inflated. `jobs > 1`: the `cell_cuts` skim finds the CELL
+/// boundaries, the head (tables before the first cell) parses inline,
+/// workers run the full parser over contiguous cell groups (the same
+/// grouping as the parallel geometry parse) and the results merge in
+/// file order. `inventory` attaches the per-cell geometry collector.
+fn scan_with(data: &[u8], jobs: usize, inventory: bool) -> Result<ScanStats> {
     if data.len() < MAGIC.len() || &data[..MAGIC.len()] != MAGIC {
         return err(0, "not an OASIS file (bad magic)");
     }
-    let mut c = Cur::new(&data[MAGIC.len()..], MAGIC.len());
+    let body = &data[MAGIC.len()..];
+    if jobs <= 1 {
+        let mut c = Cur::new(body, MAGIC.len());
+        let mut st = ScanStats {
+            file_bytes: data.len() as u64,
+            ..ScanStats::tracking_with(inventory)
+        };
+        let mut modal = Modal::default();
+        while !c.at_end() {
+            if record(&mut c, &mut modal, &mut st, true)? == Rec::End {
+                let end = st.end_at;
+                st.close_inv(end);
+                st.finish();
+                return Ok(st); // END reached
+            }
+        }
+        return err(c.here(), "stream ended without END record");
+    }
+    let (head_end, cuts, end_at) = cell_cuts(body, MAGIC.len())?;
     let mut st = ScanStats {
         file_bytes: data.len() as u64,
-        ..ScanStats::tracking()
+        ..ScanStats::tracking_with(inventory)
     };
-    let mut modal = Modal::default();
-    while !c.at_end() {
-        if record(&mut c, &mut modal, &mut st, true)? == Rec::End {
-            st.finish();
-            return Ok(st); // END reached
+    {
+        let mut hc = Cur::new(&body[..head_end], MAGIC.len());
+        let mut hm = Modal::default();
+        while !hc.at_end() {
+            record(&mut hc, &mut hm, &mut st, true)?;
         }
     }
-    err(c.here(), "stream ended without END record")
+    // a CELL record inside a CBLOCK ahead of the first visible one (the
+    // skim does not inflate, so it belongs to the head) is still open
+    // here: close it before the workers' cells merge behind it, or its
+    // CellStat would land last while its inventory part comes first
+    st.close_cell();
+    let file_end = (MAGIC.len() + end_at) as u64;
+    let n_units = cuts.len();
+    if n_units > 0 {
+        let per = n_units.div_ceil(jobs).max(1);
+        let groups: Vec<((usize, u64, u64), usize)> = (0..n_units)
+            .step_by(per)
+            .map(|i| {
+                let end = if i + per < n_units {
+                    cuts[i + per].0
+                } else {
+                    end_at
+                };
+                (cuts[i], end)
+            })
+            .collect();
+        let results: Vec<Result<ScanStats>> = std::thread::scope(|s| {
+            let handles: Vec<_> = groups
+                .iter()
+                .map(|&((a, n3, n5), b)| {
+                    s.spawn(move || {
+                        let mut wc = Cur::new(&body[a..b], MAGIC.len() + a);
+                        let mut wm = Modal::default();
+                        let mut ws = ScanStats::tracking_with(inventory);
+                        ws.n3 = n3;
+                        ws.n5 = n5;
+                        while !wc.at_end() {
+                            if record(&mut wc, &mut wm, &mut ws, true)?
+                                == Rec::End
+                            {
+                                return err(wc.here(), "END inside group");
+                            }
+                        }
+                        ws.close_cell();
+                        ws.close_inv((MAGIC.len() + b) as u64);
+                        Ok(ws)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        for r in results {
+            merge(&mut st, r?);
+        }
+    }
+    st.end_at = file_end;
+    st.close_inv(file_end);
+    st.finish();
+    Ok(st)
 }
 
-fn merge(into: &mut ScanStats, other: ScanStats) {
+fn merge(into: &mut ScanStats, mut other: ScanStats) {
+    if let Some(p) = other.inv.take() {
+        into.inv_parts.push(*p);
+    }
+    into.inv_parts.append(&mut other.inv_parts);
     into.points += other.points;
     into.points_max = into.points_max.max(other.points_max);
     into.pts_reps += other.pts_reps;
@@ -1112,6 +1673,8 @@ fn merge(into: &mut ScanStats, other: ScanStats) {
     into.doc_bytes_pow2 += other.doc_bytes_pow2;
     into.cell_stats.extend(other.cell_stats);
     into.cellnames_seen.extend(other.cellnames_seen);
+    into.textstrings_seen.extend(other.textstrings_seen);
+    into.text_refs.extend(other.text_refs);
     into.cells += other.cells;
     into.cellnames += other.cellnames;
     into.placements += other.placements;
@@ -1184,96 +1747,6 @@ pub(crate) fn cell_cuts(
             }
         }
     }
-}
-
-/// Parallel scan: a cheap skim pass (CBLOCK bodies skipped, not
-/// inflated) splits the stream at CELL boundaries - modal state resets
-/// there, so each contiguous cell-group parses independently. Workers
-/// then run the full parser (inflating) over their byte ranges. No
-/// GIL, no shared state: the whole file's parse work spreads over
-/// `jobs` OS threads.
-pub fn scan_parallel(data: &[u8], jobs: usize) -> Result<ScanStats> {
-    if jobs <= 1 {
-        return scan(data);
-    }
-    if data.len() < MAGIC.len() || &data[..MAGIC.len()] != MAGIC {
-        return err(0, "not an OASIS file (bad magic)");
-    }
-    let body = &data[MAGIC.len()..];
-    // ---- skim: find CELL record offsets and the END offset ----------
-    let mut c = Cur::new(body, MAGIC.len());
-    let mut skim_stats = ScanStats::default(); // discarded (recounted)
-    let mut modal = Modal::default();
-    let mut head_end = None; // offset of first CELL record in `body`
-    let mut cuts: Vec<usize> = Vec::new();
-    let end_at;
-    loop {
-        if c.at_end() {
-            return err(c.here(), "stream ended without END record");
-        }
-        let at = c.pos;
-        match record(&mut c, &mut modal, &mut skim_stats, false)? {
-            Rec::Cell => {
-                if head_end.is_none() {
-                    head_end = Some(at);
-                }
-                cuts.push(at);
-            }
-            Rec::End => {
-                end_at = at;
-                break;
-            }
-            Rec::Normal => {}
-        }
-    }
-    let head_end = head_end.unwrap_or(end_at);
-    // ---- head (tables before the first cell): parse inline ----------
-    let mut st = ScanStats {
-        file_bytes: data.len() as u64,
-        ..ScanStats::tracking()
-    };
-    {
-        let mut hc = Cur::new(&body[..head_end], MAGIC.len());
-        let mut hm = Modal::default();
-        while !hc.at_end() {
-            record(&mut hc, &mut hm, &mut st, true)?;
-        }
-    }
-    // ---- cell groups over worker threads ----------------------------
-    cuts.push(end_at);
-    let n_units = cuts.len() - 1;
-    let per = (n_units + jobs - 1) / jobs.max(1);
-    let groups: Vec<(usize, usize)> = (0..n_units)
-        .step_by(per.max(1))
-        .map(|i| (cuts[i], cuts[(i + per).min(n_units)]))
-        .collect();
-    let results: Vec<Result<ScanStats>> = std::thread::scope(|s| {
-        let handles: Vec<_> = groups
-            .iter()
-            .map(|&(a, b)| {
-                s.spawn(move || {
-                    let mut wc = Cur::new(&body[a..b], MAGIC.len() + a);
-                    let mut wm = Modal::default();
-                    let mut ws = ScanStats::tracking();
-                    while !wc.at_end() {
-                        if record(&mut wc, &mut wm, &mut ws, true)?
-                            == Rec::End
-                        {
-                            return err(wc.here(), "END inside group");
-                        }
-                    }
-                    ws.close_cell();
-                    Ok(ws)
-                })
-            })
-            .collect();
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
-    });
-    for r in results {
-        merge(&mut st, r?);
-    }
-    st.finish();
-    Ok(st)
 }
 
 #[cfg(test)]

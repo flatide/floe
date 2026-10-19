@@ -212,6 +212,17 @@ routing chip above goes from 2.96 to 5.24 GiB there). Repetition
 normalization, `cell_stats` and the per-cell working set are the inputs of
 the streaming build this plan's M5 leads to.
 
+`floe-index inventory FILE [--jobs N] [--check] [--cells]` (0.12.329) is
+the streaming plan's first pass on the same frame (docs/STREAMING_INDEX_PLAN
+.ko.md §3, S1): the scan with the coordinates followed, so that without
+keeping a record it produces what build() derives from the parsed Doc -
+the cell table, the layer order and names, per cell the own boxes, masks,
+members and the edges to its children with per-orientation offset boxes,
+and the fold (topological order, rank, height, recursive members, masks
+and boxes). `--check` parses the Doc beside it and holds the two equal
+cell by cell (gate `rust_inventory`); `--cells` lists every cell with its
+byte range, boxes, rank, height and children.
+
 The field scan (0.12.328, 2026-10-19) answered the unknowns: 48.5 billion
 vertices (28.9 per polygon), 2.5 billion point-list repetition members
 (10.5 per repetition), `doc_bytes_est` 927 GiB (1.05 TiB with the bundle's

@@ -125,34 +125,9 @@ fn cell_bboxes_opt(doc: &Doc, with_texts: bool) -> Vec<Option<Win>> {
     memo.into_iter().map(|m| m.unwrap()).collect()
 }
 
-/// min/max offset extents of a repetition: ((min_x, max_x), (min_y, max_y))
-pub fn rep_extent(rep: &Rep) -> ((i64, i64), (i64, i64)) {
-    match rep {
-        Rep::One => ((0, 0), (0, 0)),
-        Rep::Grid { na, nb, va, vb } => {
-            let (na, nb) = (*na as i64 - 1, *nb as i64 - 1);
-            let xs = [0, va.0 * na, vb.0 * nb, va.0 * na + vb.0 * nb];
-            let ys = [0, va.1 * na, vb.1 * nb, va.1 * na + vb.1 * nb];
-            (
-                (*xs.iter().min().unwrap(), *xs.iter().max().unwrap()),
-                (*ys.iter().min().unwrap(), *ys.iter().max().unwrap()),
-            )
-        }
-        Rep::Pts(p) => {
-            // single allocation-free pass: the routing pre-cull calls
-            // this per (record, window)
-            let (mut x0, mut x1, mut y0, mut y1) =
-                (i64::MAX, i64::MIN, i64::MAX, i64::MIN);
-            for &(x, y) in p.iter() {
-                x0 = x0.min(x);
-                x1 = x1.max(x);
-                y0 = y0.min(y);
-                y1 = y1.max(y);
-            }
-            ((x0, x1), (y0, y1))
-        }
-    }
-}
+// rep_extent lives in floe_oasis::geom since the inventory pass (S1,
+// 2026-10-19); re-exported unchanged
+pub use floe_oasis::geom::rep_extent;
 
 // -------------------------------------------------------------- variants
 

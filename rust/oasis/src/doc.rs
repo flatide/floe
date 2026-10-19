@@ -163,7 +163,7 @@ const COS64: [f64; 17] = [
 /// right for -), delta-b the east end (bottom edge left for +, top
 /// edge left for -); vertical - the parallel sides are west and
 /// east, delta-a shifts the south end, delta-b the north end.
-fn trapezoid_points(vertical: bool, w: i64, h: i64, da: i64, db: i64) -> Vec<(i64, i64)> {
+pub(crate) fn trapezoid_points(vertical: bool, w: i64, h: i64, da: i64, db: i64) -> Vec<(i64, i64)> {
     if vertical {
         vec![
             (0, da.max(0)),
@@ -186,7 +186,7 @@ fn trapezoid_points(vertical: bool, w: i64, h: i64, da: i64, db: i64) -> Vec<(i6
 /// sizes, 2026-09-09). Returns the points and the dimensions the type
 /// implies (KLayout writes those back into the geometry-w/h modals: a
 /// following record without W/H sees them).
-fn ctrapezoid_points(t: u64, w: i64, h: i64) -> Option<(Vec<(i64, i64)>, Option<i64>, Option<i64>)> {
+pub(crate) fn ctrapezoid_points(t: u64, w: i64, h: i64) -> Option<(Vec<(i64, i64)>, Option<i64>, Option<i64>)> {
     let pts = match t {
         0 => vec![(0, 0), (0, h), (w - h, h), (w, 0)],
         1 => vec![(0, 0), (0, h), (w, h), (w - h, 0)],
@@ -222,7 +222,7 @@ fn ctrapezoid_points(t: u64, w: i64, h: i64) -> Option<(Vec<(i64, i64)>, Option<
 /// Drop consecutive duplicate vertices (a zero-length side of a
 /// degenerate trapezoid) so the polygon path never sees a repeated
 /// point; fewer than three left means no area.
-fn dedupe_ring(pts: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
+pub(crate) fn dedupe_ring(pts: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
     let mut out: Vec<(i64, i64)> = Vec::with_capacity(pts.len());
     for p in pts {
         if out.last() != Some(&p) {
@@ -240,7 +240,7 @@ fn dedupe_ring(pts: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
 /// the circle's. Consecutive duplicates collapse (a radius under
 /// ~6 dbu rounds neighbors together) - the count stays >= 4 for
 /// any r >= 1.
-fn circle64(x: i64, y: i64, r: i64) -> Vec<(i64, i64)> {
+pub(crate) fn circle64(x: i64, y: i64, r: i64) -> Vec<(i64, i64)> {
     let rf = r as f64;
     let mut pts: Vec<(i64, i64)> = Vec::with_capacity(64);
     for k in 0..64usize {
@@ -540,14 +540,14 @@ struct Builder {
     unit: f64,
 }
 
-#[derive(Clone)]
-struct NameInterval {
-    lo: u64,
-    hi: u64,
+#[derive(Clone, Debug)]
+pub(crate) struct NameInterval {
+    pub(crate) lo: u64,
+    pub(crate) hi: u64,
 }
 
 impl NameInterval {
-    fn exact(&self) -> Option<u32> {
+    pub(crate) fn exact(&self) -> Option<u32> {
         if self.lo == self.hi {
             u32::try_from(self.lo).ok()
         } else {
@@ -560,14 +560,14 @@ impl NameInterval {
     }
 }
 
-#[derive(Clone)]
-struct LayerNameRule {
-    name: String,
-    layer: NameInterval,
-    datatype: NameInterval,
+#[derive(Clone, Debug)]
+pub(crate) struct LayerNameRule {
+    pub(crate) name: String,
+    pub(crate) layer: NameInterval,
+    pub(crate) datatype: NameInterval,
 }
 
-fn name_interval(c: &mut Cur) -> Result<NameInterval> {
+pub(crate) fn name_interval(c: &mut Cur) -> Result<NameInterval> {
     let interval = match c.uint()? {
         0 => NameInterval { lo: 0, hi: u64::MAX },
         1 => NameInterval { lo: 0, hi: c.uint()? },
@@ -589,7 +589,7 @@ fn name_interval(c: &mut Cur) -> Result<NameInterval> {
     Ok(interval)
 }
 
-fn resolved_layer_names(
+pub(crate) fn resolved_layer_names(
     order: &[(u32, u32)],
     rules: &[LayerNameRule],
 ) -> (

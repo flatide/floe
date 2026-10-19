@@ -1,8 +1,8 @@
 # 스트리밍 인덱서 설계 — 셀 단위 2-패스 빌드 (2026-10-19)
 
-상태: 설계. 구현 전. 근거는 rust/FLOE_INDEX_MEMORY_PLAN.md §5의 현장
-수치와 `floe-index scan` 0.12.328의 결과. 코드 참조는 0.12.360
-(8b59f3a5) 기준.
+상태: S1(1차 재고 패스) 구현됨(0.12.363, §3.6). S2 이후는 설계. 근거는
+rust/FLOE_INDEX_MEMORY_PLAN.md §5의 현장 수치와 `floe-index scan`
+0.12.328의 결과. 코드 줄 번호 참조는 0.12.360(8b59f3a5) 기준.
 
 ## 0. 결론
 
@@ -128,6 +128,65 @@ Doc을 만들었으니 레코드를 저장하지 않는 1차 패스는 5~7분으
 실측은 현장 scan의 `scan_s`로 확인한다. 결과는 `.ice/inventory.bin`
 같은 사이드카로 남겨 덱 사전 점검(§5)과 재시작에 쓸 수 있다(열린
 질문 §10).
+
+### 3.6 구현 (S1, 0.12.363 / floe-index 0.12.329)
+
+- `floe_oasis::inventory`(rust/oasis/src/inventory.rs). scan의
+  `record()`가 doc.rs와 같은 좌표 모달(XY 모드, geometry·placement·text
+  각각의 x·y, W/H, 점 목록, 경로 확장, 배치 대상, CTRAPEZOID가 모달에
+  되돌려 쓰는 암시 치수)을 따라가고, 수집기 `Part`가 CELL 레코드마다
+  바이트 범위와 암시 이름 시드, 두 가지 자기 bbox, 레이어·텍스트
+  마스크, 멤버 수, 자식별 간선(첫 등장 순서; 배치 수, 멤버 합, 방향
+  8가지별 오프셋 박스)을, 전역으로 레이어 첫 등장 순서와 LAYERNAME
+  규칙을 모은다. 레코드는 하나도 남기지 않는다. `finish`가 이름을
+  해결하고(CELL 레코드 순서, 참조번호는 표로, 미정의 배치 대상은 뒤에
+  첫 참조 순서로 — doc.rs finish_inner와 같다), top을 정하고, 파트의
+  레이어 순서를 파일 순서로 합쳐 마스크를 재배치한 뒤 fold(topo·rank·
+  height·rmembers·rmask·rtmask·rbb 두 변종)를 만든다. 진입점은
+  `floe_oasis::inventory(data, jobs)`; 병렬 분할은 `cell_cuts`로 Doc
+  파스와 같은 묶음을 쓴다.
+- `floe_oasis::geom`(rust/oasis/src/geom.rs). tiler의 `rep_extent`·
+  `path_outline`·`path_bbox`를 옮겨 왔고(tiler는 재export, 호출부
+  불변) 방향 박스 변환 `orient_box`(Xf::place의 선형부)를 더했다. 재고와
+  빌드가 같은 함수를 쓰므로 박스가 바이트 단위로 같다.
+- `floe-index`(rust/cli/src/prepass.rs). build()의 사전 패스(재귀 bbox,
+  직접 마스크·멤버·bbox와 레이어별 합, topo fold)를 `PrePass::from_doc`
+  으로 떼어냈고(동작 불변, 출력 바이트 동일), `PrePass::from_inventory`
+  가 같은 값을 재고에서 만든다. `check`가 G1: 셀 표와 순서, top, unit,
+  레이어 순서·이름·별칭, 셀별 dbox 두 변종·dmask·dtmask·dmembers, 간선
+  (자식 순서·멤버 합·오프셋 박스·배치 수), rbb 두 변종(tiler
+  `cell_bboxes_full`·`cell_bboxes` 그대로), topo·rank·height·rmembers·
+  rmask·rtmask, 레이어별 레코드·멤버 합. 명령은
+  `floe-index inventory FILE [--jobs N] [--check] [--cells]`
+  (JSON 요약 + stderr 한 줄; `--check`는 불일치 목록과 종료 코드 1).
+- 게이트. 단위 테스트: 손으로 쓴 적대적 스트림(표 앞/뒤 × CBLOCK
+  유무, 참조·이름 혼용 셀, 미정의 대상, 반복 12종, XYRELATIVE, 사다리꼴
+  퇴화, CTRAPEZOID 암시 치수, 반지름 0 원, 텍스트만 있는 셀)을 jobs
+  1·2·3으로 Doc과 대조(floe_oasis 안에서는 레코드 기반 참조값, cli에서는
+  실제 `PrePass::from_doc`·tiler 함수), write_tree 계층 하나. 배터리:
+  `rust_inventory`(tools/validate_rust_inventory.py) = valmini, KLayout이
+  CBLOCK 없이/strict 모드로 다시 쓴 valmini, route_chip 0.05, main01_like
+  0.001을 jobs 1·3으로 `--check`.
+- 알려진 차이(유효하지 않거나 특이한 스트림에서만). (1) 같은 셀을 CELL
+  레코드 둘이 정의하고 하나가 참조번호인데 CELLNAME 표가 뒤에 오면
+  재고는 병렬 Doc 파스처럼 한 셀로 합치고 순차 파스(jobs 1)는 둘로
+  둔다. (2) rmembers의 포화 연산이 배치 단위가 아니라 간선 단위다(곱이
+  u64를 넘지 않는 한 같다). (3) CBLOCK 안의 CELL 레코드는 자기 바이트
+  범위가 없고(`cblock_defs`로 센다) 둘러싼 보이는 셀의 범위에 속한다;
+  암시 이름 시드는 cell_cuts처럼 CBLOCK 밖의 레코드만 센다. (4) 참조번호가
+  중복된 CELLNAME은 첫 항목이 이긴다(병렬 파스와 같고, 순차 파스는
+  마지막).
+- 비용은 §3.5의 추정대로 scan과 같다(macOS, jobs 4; Doc 열은 `--check`가
+  같은 프로세스에서 잰 파싱 + 정규화 + 사전 패스 시간).
+
+| 파일 | scan | inventory | Doc 파스 + 사전 패스 |
+| --- | --- | --- | --- |
+| 합성 라우팅 칩 281 MB, 2,760만 레코드, 29셀 | 12.1 s | 12.0 s | 19.0 s |
+| 합성 평면 CTRAPEZOID 1,600만 (반복 있음) | — | 8.4 s | 11.5 s |
+| main01_like 0.001 (17.6 MB, 3,521셀, 449 레이어, 깊이 16) | — | 0.37 s | 1.24 s |
+
+  현장 50 GB 파일의 1차 패스는 scan의 실측(`scan_s`)과 같은 시간으로
+  본다.
 
 ## 4. 2차 패스: 빌드
 
@@ -262,6 +321,10 @@ design.ovm 커밋, design.ovs(덱 제외)는 변경 없음. meta.json의 텍스�
 
 S6은 S1~S5와 독립이라 먼저 번들로 낼 수 있다. S1은 scan 확장의
 연장이라 작다. S2는 기계적 리팩터다. S3·S4가 본체다.
+
+진행: S1 완료(0.12.363, §3.6; 사용자 2026-10-19 "S1부터 진행해줘").
+S2의 출발점은 prepass.rs의 `PrePass`(build()가 Doc 대신 이 값을 받는
+형태가 이미 갖춰졌다)와 §4.2의 CellStore다.
 
 ## 9. 조사 중 발견한 문서 불일치 (구현 커밋에서 바로잡는다)
 
