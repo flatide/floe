@@ -130,9 +130,14 @@ pub(crate) fn run_entries(
             }
             Ok((code, _)) => {
                 failed += 1;
+                // the code in words where there are some (STREAMING_INDEX_PLAN
+                // §5: 137 is the kernel's kill, 71 the memory guard's stop)
                 out.line(&format!(
-                    "[jobdeck] {label} : {progress} FAILED {} (exit {code}; {timing})",
-                    entry.tc
+                    "[jobdeck] {label} : {progress} FAILED {} (exit {code}{}; {timing})",
+                    entry.tc,
+                    floe_app_core::index::exit_words(code)
+                        .map(|w| format!(" - {w}"))
+                        .unwrap_or_default()
                 ));
             }
             Err(error) => {

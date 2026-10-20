@@ -68,6 +68,8 @@ floe-index vfs <src.oas> [outdir=.<src>.ice] [--jobs N] [--plan-batch N]
 - **대상:** 고른 level의 소스 중 인덱스가 없는 것이다(`--force`면 전부). 소스마다 옆에
   자기 캐시를 만들고, 덱의 옵션(점유 요약 on, `design.ovs` 없음)과 잠금을 쓴다.
 - **출력과 종료:** `N built, N failed, N busy, N kept`로 센다. 종료는 0, 2(실패), 75(busy)다.
+  실패한 소스의 `FAILED … (exit N - …)`는 코드를 말로 푼다(§4.6: 71 메모리 상한/크기
+  거절 → `--stream`, 137 "killed (out of memory?)", 130/143 취소, 134 abort, 139 segfault).
 - **거절:** OUTDIR을 주면 종료 2다. `floe2 index`가 모르는 옵션(`--coverage` 등)은 그
   쪽 메시지와 종료 2다.
 
@@ -335,6 +337,27 @@ CACHE-NAMING §5에 있다.
   - 실패한 자식의 임시 파일(`design.ovo.tmp` 등)은 build를 잠깐 잡을 수 있을 때만
     지운다.
   - 자식이 75면 지우지 않는다.
+
+## 4.6 메모리 가드 (S6, 2026-10-20, app 0.12.369 / floe-index 0.12.334)
+
+STREAMING_INDEX_PLAN §5. 현장(2026-10-19)의 50 GB 덱 소스는 인메모리 파싱이 376 GiB
+호스트의 361 GiB에 160 s 만에 닿은 뒤 21분을 스왑하다 137로 죽었다. 이제는 한 줄로
+멈춘다(`rust/cli/src/guard.rs`).
+- **메모리 상한:** 프로세스의 익명 상주 크기(Linux `RssAnon`, macOS phys_footprint;
+  스트리밍의 파일 매핑은 세지 않음)가 `FLOE_RSS_CEILING`(비우면 MemTotal의 90 %,
+  퍼센트 `80`, 바이트 `300G`, `off`)을 넘으면 `[vfs] memory ceiling: rss … is over …
+  during the <stage>: stopping before the host swaps (<캐시 상태>); <조언>`과 종료 71.
+  검사: 빌드 시작, 캐시를 지우기 직전(파싱 뒤·재고 뒤 — "the cache is unchanged"),
+  모든 하트비트(200 ms; "no commit marker and is rebuilt next time"). 조언은 인메모리면
+  `--stream`, 스트리밍이면 `--mem`을 낮추라고 한다. 잘못된 값은 한 줄 알리고 기본값.
+- **크기 사전 거절(인메모리):** 파일이 MemAvailable보다 크면 읽기 전에 종료 71로
+  거절("index with --stream"), 1/5을 넘으면 파싱 결과가 파일의 5~20배라는 한 줄.
+  MemAvailable이 없으면(Linux 밖) 꺼짐; `FLOE_MEM_AVAILABLE_GB`가 대신한다(게이트).
+- **스트리밍 사전 거절:** 가장 큰 셀(또는 다중 정의 스팬)이 `--mem`을 넘으면 출력을
+  건드리기 전에 종료 71("needs intra-cell splitting, which is not implemented").
+- **종료 코드 71**은 잠금의 75, 사용법 2, 실패 1, 커널의 137과 구별된다. `floe2 index
+  DECK.jb`와 자동 색인은 코드를 말로 푼다(`app-core index::exit_words`).
+- 게이트: `vfs_stream`(tools/validate_vfs_stream.py)의 guards 절.
 
 ## 5. 미니맵 프런티어 굽기 (rev 46b)
 

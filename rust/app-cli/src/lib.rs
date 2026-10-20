@@ -104,6 +104,9 @@ and jobdeck analysis/spec + source indexing with level selection.
 info/render/probe/clip index a source that has no index first (--no-index or
 FLOE_AUTO_INDEX=off: refuse instead); a source another run indexes is refused
 (exit 75) unless --wait[=SECONDS] (FLOE_LOCK_WAIT=on|SECONDS) waits for it.
+A build that outgrows the host stops at the memory ceiling (FLOE_RSS_CEILING: a percent
+of MemTotal, default 90, or bytes such as 300G, or off; exit 71), and a file larger than
+MemAvailable is refused the in-memory build (exit 71): both say to index with --stream.
 DRC: read-only ICE/ASCII queries; explicit --build [--force] for atomic packs.
 Clip: full-depth exact layout OASIS export; jobdeck clip remains unsupported.
 Render: batch/mosaic + JSON reports, DRC marker/CD/legend captures; no Python runtime.

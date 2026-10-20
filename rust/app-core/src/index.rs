@@ -297,6 +297,22 @@ pub fn decide(
     Ok(Action::Build)
 }
 
+/// what an indexer's exit status means, for the lines that report one
+/// (the deck index's FAILED lines, the auto-index's error): floe-index's
+/// own codes - the lock's floe_vfs::lock::BUSY_EXIT, the memory guard's
+/// 71 (STREAMING_INDEX_PLAN §5) - and the kernel's 128 + signal
+pub fn exit_words(code: i32) -> Option<&'static str> {
+    Some(match code {
+        71 => "stopped at the memory ceiling or refused for its size: index with --stream",
+        c if c == floe_vfs::lock::BUSY_EXIT => "busy: another run or a viewer holds the cache",
+        130 | 143 => "cancelled",
+        134 => "aborted (a panic or a failed assertion)",
+        137 => "killed (out of memory?): the host's OOM killer or a kill -9; index with --stream",
+        139 => "segmentation fault",
+        _ => return None,
+    })
+}
+
 fn arguments(
     source: &Path,
     directory: &Path,
@@ -1285,6 +1301,16 @@ mod stream_policy_tests {
     /// a current cache built by --stream has no design.ovo; with --stream
     /// still on, a deck's --occupancy must not turn into an in-memory
     /// occupancy-only parse of the whole source
+    #[test]
+    fn exit_words_name_the_memory_kill_and_the_guard() {
+        assert!(exit_words(137).unwrap().contains("out of memory"));
+        assert!(exit_words(71).unwrap().contains("--stream"));
+        assert!(exit_words(floe_vfs::lock::BUSY_EXIT).unwrap().starts_with("busy"));
+        assert_eq!(exit_words(130), Some("cancelled"));
+        assert_eq!(exit_words(1), None);
+        assert_eq!(exit_words(2), None);
+    }
+
     #[test]
     fn stream_reuses_a_cache_without_occupancy() {
         let mut o = IndexOptions::default();

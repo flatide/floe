@@ -16,7 +16,10 @@ hierarchy of 3,500 cells over 449 layers):
   - G4: `floe2 index SRC --stream --mem G` (the product's command line)
     builds the same bytes as `floe-index vfs ... --no-lod` (floe2 passes
     --no-lod); `--stream --coverage` is refused (exit 2); `--mem` without
-    `--stream` is refused;
+    `--stream` is refused; a budget below the largest cell is refused with
+    exit 71; the S6 guards (the memory ceiling FLOE_RSS_CEILING, the size
+    pre-check of the in-memory build) stop with exit 71 and the cache as
+    it was;
   - G5: the peak resident set of the streaming build (ru_maxrss of its
     process) is bounded against the in-memory build's: the main build
     alone (no --occupancy, jobs 1) at 1.25 x the in-memory peak + 128 MB;
@@ -221,11 +224,43 @@ def main():
             fail("--mem without --stream should be refused with exit 2, got %d" % r.returncode)
         r = subprocess.run([str(BIN), "vfs", str(src), str(work / "x3"), "--stream", "--mem", "0.0000001"],
                            capture_output=True, text=True, env=env)
-        if r.returncode == 0 or "--mem" not in r.stderr:
-            fail("a budget below the largest cell should be refused: exit %d\n%s" % (r.returncode, r.stderr[-600:]))
+        if r.returncode != 71 or "--mem" not in r.stderr:
+            fail("a budget below the largest cell should be refused with exit 71: exit %d\n%s" % (r.returncode, r.stderr[-600:]))
         if (work / "x3" / "design.ovm").exists():
             fail("a refused streaming build left a cache behind")
         print("OK  refusals: --stream --coverage (2), --mem without --stream (2), budget below the largest cell (%d)" % r.returncode)
+        # S6 guards (STREAMING_INDEX_PLAN §5): the memory ceiling stops a
+        # build at its first check, the size pre-check refuses an in-memory
+        # build of a file larger than MemAvailable - exit 71, the cache as
+        # it was, one line saying what to do; off, the build runs
+        keep = work / "valmini_keep"
+        r = subprocess.run([str(BIN), "vfs", str(src), str(keep), "--jobs", "2"],
+                           capture_output=True, text=True, env=env)
+        if r.returncode != 0:
+            fail("guard reference build: %s" % r.stderr[-1500:])
+        snapshot = lambda: {p.name: (p.stat().st_mtime_ns, p.read_bytes()) for p in keep.iterdir() if p.is_file()}
+        before = snapshot()
+        for label, extra, more, needle in (
+                ("memory ceiling, in-memory build", [], {"FLOE_RSS_CEILING": "1M"}, "memory ceiling"),
+                ("memory ceiling, streaming build", ["--stream", "--mem", "0.5"], {"FLOE_RSS_CEILING": "1M"}, "memory ceiling"),
+                ("size pre-check", [], {"FLOE_MEM_AVAILABLE_GB": "0.000001"}, "index with --stream")):
+            r = subprocess.run([str(BIN), "vfs", str(src), str(keep), "--jobs", "2"] + extra,
+                               capture_output=True, text=True, env=dict(env, **more), timeout=120)
+            if r.returncode != 71:
+                fail("%s: exit %d, want 71\n%s" % (label, r.returncode, r.stderr[-1500:]))
+            if needle not in r.stderr or "the cache is unchanged" not in r.stderr and label != "size pre-check":
+                fail("%s: the stop line is missing\n%s" % (label, r.stderr[-1500:]))
+            if snapshot() != before:
+                fail("%s: the cache changed" % label)
+        r = subprocess.run([str(BIN), "vfs", str(src), str(keep), "--jobs", "2"],
+                           capture_output=True, text=True, env=dict(env, FLOE_RSS_CEILING="off"))
+        if r.returncode != 0:
+            fail("FLOE_RSS_CEILING=off: the build should run: exit %d\n%s" % (r.returncode, r.stderr[-1500:]))
+        r = subprocess.run([str(BIN), "vfs", str(src), str(keep), "--jobs", "2"],
+                           capture_output=True, text=True, env=dict(env, FLOE_RSS_CEILING="12x"))
+        if r.returncode != 0 or "the default ceiling applies" not in r.stderr:
+            fail("FLOE_RSS_CEILING=12x: the build should run with a note: exit %d\n%s" % (r.returncode, r.stderr[-1500:]))
+        print("OK  guards: memory ceiling (in-memory, streaming) and the size pre-check exit 71 and keep the cache; off and a bad setting build")
         # a source that changes under the reader: one line, exit 1, no hang
         broken = work / "broken.oas"
         data = bytearray(src.read_bytes())

@@ -13,6 +13,7 @@
 use std::time::Instant;
 
 mod cellstore;
+mod guard;
 mod drcice;
 mod drcpack;
 mod prepass;
@@ -852,7 +853,17 @@ fn proc_kv_gb(path: &str, key: &str) -> Option<f64> {
     None
 }
 
+/// MemAvailable in GB (Linux /proc; None elsewhere, where the governor
+/// and the size pre-check are inert). FLOE_MEM_AVAILABLE_GB stands in for
+/// it - the gate drives the pre-check and the budget default with it.
 fn mem_available_gb() -> Option<f64> {
+    if let Ok(v) = std::env::var("FLOE_MEM_AVAILABLE_GB") {
+        if let Ok(g) = v.trim().parse::<f64>() {
+            if g.is_finite() && g >= 0.0 {
+                return Some(g);
+            }
+        }
+    }
     proc_kv_gb("/proc/meminfo", "MemAvailable:")
 }
 

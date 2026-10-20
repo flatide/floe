@@ -91,6 +91,27 @@ pub struct StreamStore {
     cv: Condvar,
 }
 
+/// why `StreamStore::new` refused the file
+#[derive(Debug)]
+pub enum NewError {
+    /// the file cannot be opened
+    Open(String),
+    /// a cell, or the span of cells a multi-definition holds resident,
+    /// does not fit the budget (STREAMING_INDEX_PLAN §5): the memory
+    /// refusal, ended with crate::guard::EXIT_MEMORY
+    Budget(String),
+    /// the inventory contradicts itself (a bug, or a file that changed)
+    Inventory(String),
+}
+
+impl std::fmt::Display for NewError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NewError::Open(s) | NewError::Budget(s) | NewError::Inventory(s) => f.write_str(s),
+        }
+    }
+}
+
 /// what `StreamStore::new` found about the file
 pub struct StreamPlan {
     pub ranges: usize,
@@ -102,8 +123,9 @@ impl StreamStore {
     /// `budget`: resident Doc bytes (the inventory's estimate) the
     /// readers may admit; a cell larger than it is refused before any
     /// output is touched (STREAMING_INDEX_PLAN §5).
-    pub fn new(inv: Inventory, path: &str, budget: u64) -> Result<(StreamStore, StreamPlan), String> {
-        let file = std::fs::File::open(path).map_err(|e| format!("open {}: {}", path, e))?;
+    pub fn new(inv: Inventory, path: &str, budget: u64) -> Result<(StreamStore, StreamPlan), NewError> {
+        let file = std::fs::File::open(path)
+            .map_err(|e| NewError::Open(format!("open {}: {}", path, e)))?;
         let n = inv.cells.len();
         let (mut largest, mut largest_name) = (0u64, String::new());
         for c in &inv.cells {
@@ -113,13 +135,14 @@ impl StreamStore {
             }
         }
         if largest > budget {
-            return Err(format!(
-                "cell {} needs about {} resident, the budget is {} (--mem): the \
-                 streaming build cannot hold it; raise --mem or index in memory",
+            return Err(NewError::Budget(format!(
+                "cell {} needs about {} resident, the budget is {} (--mem): a cell larger \
+                 than the budget needs intra-cell splitting, which is not implemented \
+                 (STREAMING_INDEX_PLAN §4.7); raise --mem if the host allows",
                 largest_name,
                 crate::fmt_size(largest),
                 crate::fmt_size(budget)
-            ));
+            )));
         }
         // ranges in file order: the head first, then every cell's
         // definitions; a cell is charged to the budget by the range that
@@ -169,10 +192,10 @@ impl StreamStore {
                 Some(&i) => i,
                 None => {
                     if first != head_start {
-                        return Err(format!(
+                        return Err(NewError::Inventory(format!(
                             "inventory: cell {} defined at offset {} outside every range",
                             c.name, first
-                        ));
+                        )));
                     }
                     0
                 }
@@ -194,14 +217,14 @@ impl StreamStore {
             let span: u64 = ranges[first..=last].iter().map(|r| r.cost).sum();
             min_budget = min_budget.max(span);
             if span > budget {
-                return Err(format!(
+                return Err(NewError::Budget(format!(
                     "cell {} is defined in several places of the file; the cells between \
                      its definitions need about {} resident together, the budget is {} \
-                     (--mem): raise --mem or index in memory",
+                     (--mem): raise --mem if the host allows",
                     inv.cells[ci].name,
                     crate::fmt_size(span),
                     crate::fmt_size(budget)
-                ));
+                )));
             }
         }
         let plan = StreamPlan {
@@ -855,6 +878,8 @@ mod tests {
         let largest = inv.cells.iter().map(|c| c.doc_bytes).max().unwrap();
         if largest < span {
             let e = StreamStore::new(inv, src.to_str().unwrap(), span - 1).err().expect("refused");
+            assert!(matches!(e, NewError::Budget(_)), "{}", e);
+            let e = e.to_string();
             assert!(e.contains("several places"), "{}", e);
         } else {
             // the largest cell already covers the span: admissible
@@ -874,6 +899,8 @@ mod tests {
         let inv = floe_oasis::inventory(&data, 1).expect("inventory");
         let largest = inv.cells.iter().map(|c| c.doc_bytes).max().unwrap();
         let e = StreamStore::new(inv, src.to_str().unwrap(), largest - 1).err().expect("refused");
+        assert!(matches!(e, NewError::Budget(_)), "{}", e);
+        let e = e.to_string();
         assert!(e.contains("--mem"), "{}", e);
         let _ = std::fs::remove_dir_all(&dir);
     }

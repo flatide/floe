@@ -3,7 +3,8 @@
 상태: S1(1차 재고 패스) 구현됨(0.12.363, §3.6), S2(CellStore) 구현됨
 (0.12.365, §4.2), S3(셀 파서) 구현됨(0.12.366, §4.1), S4(드라이버,
 `--stream`) 구현됨(0.12.367, §4.3 구현), S5(스트리밍 design.ovo) 구현됨
-(0.12.368, §4.6 구현). S6 이후는 설계. 근거는
+(0.12.368, §4.6 구현), S6(가드) 구현됨(0.12.369, §5 구현). 전환 이후는
+설계. 근거는
 rust/FLOE_INDEX_MEMORY_PLAN.md §5의 현장 수치와 `floe-index scan`
 0.12.328의 결과. 코드 줄 번호 참조는 0.12.360(8b59f3a5) 기준.
 
@@ -462,6 +463,40 @@ on/off × 셀 1/0.25 um × 평면 예산(1패스/여러 패스)으로 비교한�
 - 원장: 시그널 137은 "killed (out of memory?)"로 적는다.
 - 이 셋은 스트리밍과 독립이라 먼저 나갈 수 있다(S6).
 
+**구현(S6, 0.12.369 / floe-index 0.12.334; 사용자 2026-10-20 "S6
+진행해줘").** `rust/cli/src/guard.rs`.
+- 사전 거절. 스트리밍: 가장 큰 셀(또는 여러 곳에 정의된 셀의 스팬)이
+  예산을 넘으면 `StreamStore::new`가 출력을 건드리기 전에 거절한다(S4부터;
+  이제 종료 71과 "a cell larger than the budget needs intra-cell splitting,
+  which is not implemented (§4.7)"). 인메모리: 파일을 읽기 전에 크기를
+  MemAvailable과 견준다 — 파일이 MemAvailable보다 크면 읽지도 못하므로
+  종료 71로 거절하고(캐시 그대로, "index with --stream"), 1/5을 넘으면
+  "parsed form is 5-20x the file"이라고 한 줄 적는다. MemAvailable이 없는
+  곳(Linux 밖)에서는 꺼져 있고, `FLOE_MEM_AVAILABLE_GB`가 그 값을 대신한다
+  (게이트가 쓴다; 거버너와 `--mem` 기본값도 따른다).
+- RSS 상한. 프로세스의 **익명** 상주 크기(Linux `RssAnon`, macOS
+  phys_footprint — 스트리밍 재고 패스가 맵한 파일 페이지는 세지 않는다)가
+  상한을 넘으면 한 줄과 종료 71로 끝낸다. 상한은 `FLOE_RSS_CEILING`: 비우면
+  MemTotal의 90 %, 퍼센트(`80`), 바이트(`300G`), `off`. 검사 지점: 빌드
+  시작, 캐시를 지우기 직전(파싱 뒤 / 재고 뒤 — 여기까지는 "the cache is
+  unchanged"), 그리고 모든 하트비트(파싱·파이프라인·재고·리더·점유 패스,
+  200 ms마다 — 이때는 "no commit marker, rebuilt next time"). 조언은 모드를
+  따른다: 인메모리면 `--stream`, 스트리밍이면 `--mem`을 낮추라고.
+- 원장 문구. `floe2 index DECK.jb`의 `FAILED … (exit N - …)`와 자동 색인의
+  "indexing X first failed (exit N - …)"가 코드를 말로 푼다
+  (`app-core index::exit_words`): 71 "stopped at the memory ceiling or
+  refused for its size: index with --stream", 137 "killed (out of memory?):
+  the host's OOM killer or a kill -9; index with --stream", 75 busy,
+  130/143 cancelled, 134 aborted, 139 segmentation fault.
+- 덱 건너뛰기. 덱 색인은 소스 하나의 실패(71 포함)를 세고 다음 소스로
+  간다(기존 동작; 요약 `N built, N failed, …`, 종료 2). 거절은 출력을
+  건드리기 전이라 기존 캐시가 남는다.
+- 게이트 `vfs_stream`: `FLOE_RSS_CEILING=1M`의 인메모리·스트리밍 빌드와
+  `FLOE_MEM_AVAILABLE_GB=0.000001`의 인메모리 빌드가 종료 71, 캐시 바이트·
+  mtime 그대로, 안내 한 줄; `off`와 잘못된 값(`12x`, 기본값 적용 안내)은
+  빌드. 단위 테스트 `guard::tests`(철자·호스트 수치), `index::tests::
+  exit_words_name_the_memory_kill_and_the_guard`.
+
 ## 6. 결정성과 게이트
 
 - G0 CellStore 리팩터: 인메모리 경로의 ovm/ovp/ovt/ovb/ovo/meta.json
@@ -517,9 +552,10 @@ S2 완료(0.12.365, §4.2 구현; 사용자 2026-10-19 "S2 진행해줘"): build
 녹색. S4 완료(0.12.367, §4.3 구현; 사용자 2026-10-20 "S4 진행해줘"):
 `floe-index vfs --stream [--mem GiB]`, `floe2 index --stream`, 게이트
 `vfs_stream`(G3·G4·G5). S5 완료(0.12.368, §4.6 구현; 사용자 2026-10-20
-"S5 진행해줘"): 스트리밍 design.ovo, 바이트 동일. 남은 것: S6(가드:
-사전 거절·RSS 상한·원장 문구·덱 건너뛰기), 전환(§10), S7 후속. 현장
-50 GB 파일의 실측(시간·피크)은 `--stream`으로 다음 기회에 잰다.
+"S5 진행해줘"): 스트리밍 design.ovo, 바이트 동일. S6 완료(0.12.369, §5
+구현; 사용자 2026-10-20 "S6 진행해줘"): 메모리 상한·크기 사전 거절(종료
+71)·원장 문구. 남은 것: 전환(§10), S7 후속. 현장 50 GB 파일의 실측(시간·
+피크)은 `--stream`으로 다음 기회에 잰다.
 
 ## 9. 조사 중 발견한 문서 불일치 (구현 커밋에서 바로잡는다)
 

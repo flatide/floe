@@ -362,7 +362,12 @@ fn index_layout(source: &Path, waiter: &mut Waiter, cancelled: &AtomicUsize) -> 
             Ok((code, _)) => {
                 return Err(Error::new(
                     ErrorKind::Worker,
-                    format!("indexing {name} first failed (exit {code}; see above)"),
+                    format!(
+                        "indexing {name} first failed (exit {code}{}; see above)",
+                        floe_app_core::index::exit_words(code)
+                            .map(|w| format!(" - {w}"))
+                            .unwrap_or_default()
+                    ),
                 ));
             }
             Err(e) if e.kind == ErrorKind::Busy => e,

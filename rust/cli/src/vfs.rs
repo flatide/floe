@@ -615,6 +615,11 @@ pub fn vfs_cmd(args: &[String]) {
         );
         return;
     }
+    // S6 guards (STREAMING_INDEX_PLAN §5): a file that cannot fit the host
+    // is refused before the cache is touched, and the memory ceiling is
+    // checked here, before the cache is cleared and by every heartbeat
+    crate::guard::precheck_in_memory(&src);
+    crate::guard::check("start", crate::guard::CACHE_UNCHANGED);
     eprintln!("[vfs] reading {}...", src);
     let data = std::fs::read(&src).expect("read src");
     let read_s = t0.elapsed().as_secs_f64();
@@ -642,6 +647,7 @@ pub fn vfs_cmd(args: &[String]) {
                 if !parsing.load(Relaxed) {
                     return;
                 }
+                crate::guard::check("parse", crate::guard::CACHE_UNCHANGED);
                 let e = t.elapsed().as_secs();
                 if e >= last + 5 {
                     last = e;
@@ -792,6 +798,7 @@ pub fn vfs_cmd(args: &[String]) {
         // (marker partial), never as a valid cache.
         // --kill-at: gate-only hook forcing death at the interrupt
         // points (tools/validate_vfs_marker.py).
+        crate::guard::check("parsed source", crate::guard::CACHE_UNCHANGED);
         clear_outputs(&outdir);
         if kill_at.as_deref() == Some("marker-deleted") {
             eprintln!("[vfs] --kill-at marker-deleted");
@@ -1002,6 +1009,8 @@ fn vfs_stream(a: StreamArgs, mut lock: floe_vfs::lock::WriterGuard, t0: std::tim
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    crate::guard::set_streaming(true);
+    crate::guard::check("start", crate::guard::CACHE_UNCHANGED);
     // ---- pass 1: the inventory (the mapping goes before pass 2 starts)
     eprintln!("[vfs] stream: inventory pass over {} ({})...", a.src, fmt_size(size));
     let t1 = std::time::Instant::now();
@@ -1017,6 +1026,7 @@ fn vfs_stream(a: StreamArgs, mut lock: floe_vfs::lock::WriterGuard, t0: std::tim
                 if !ticking.load(Relaxed) {
                     return;
                 }
+                crate::guard::check("inventory pass", crate::guard::CACHE_UNCHANGED);
                 let e = t.elapsed().as_secs();
                 if e >= last + 10 {
                     last = e;
@@ -1063,8 +1073,12 @@ fn vfs_stream(a: StreamArgs, mut lock: floe_vfs::lock::WriterGuard, t0: std::tim
     let (mut store, plan) = match crate::stream::StreamStore::new(inv, &a.src, budget) {
         Ok(v) => v,
         Err(e) => {
+            // before any output is touched: the cache stays as it was
             eprintln!("[vfs] stream: {}", e);
-            std::process::exit(1);
+            std::process::exit(match e {
+                crate::stream::NewError::Budget(_) => crate::guard::EXIT_MEMORY,
+                crate::stream::NewError::Open(_) | crate::stream::NewError::Inventory(_) => 1,
+            });
         }
     };
     eprintln!(
@@ -1078,6 +1092,7 @@ fn vfs_stream(a: StreamArgs, mut lock: floe_vfs::lock::WriterGuard, t0: std::tim
         eprintln!("create {}: {}", a.outdir, e);
         std::process::exit(1);
     });
+    crate::guard::check("inventory", crate::guard::CACHE_UNCHANGED);
     clear_outputs(&a.outdir);
     if a.kill_at.as_deref() == Some("marker-deleted") {
         eprintln!("[vfs] --kill-at marker-deleted");
@@ -1114,6 +1129,7 @@ fn vfs_stream(a: StreamArgs, mut lock: floe_vfs::lock::WriterGuard, t0: std::tim
                     if !streaming.load(Relaxed) {
                         return;
                     }
+                    crate::guard::check("streaming build", crate::guard::CACHE_INCOMPLETE);
                     let e = t.elapsed().as_secs();
                     if e >= last + 10 {
                         last = e;
@@ -1349,6 +1365,7 @@ fn stream_occupancy(
                             if done_ref.load(Relaxed) {
                                 return;
                             }
+                            crate::guard::check("occupancy pass", crate::guard::CACHE_INCOMPLETE);
                             let e = t0.elapsed().as_secs();
                             if e >= last + occ::PROGRESS_EVERY_S {
                                 last = e;
@@ -6950,6 +6967,7 @@ pub(crate) fn build(
                 if !pipeline_on.load(Relaxed) {
                     return;
                 }
+                crate::guard::check("build pipeline", crate::guard::CACHE_INCOMPLETE);
                 let elapsed = pipeline_start.elapsed().as_secs();
                 if elapsed >= last + 5 {
                     last = elapsed;
