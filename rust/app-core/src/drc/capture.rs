@@ -521,6 +521,7 @@ pub fn run(
                 font_px: shot.font_px,
                 thin: shot.thin.effective(dataset.is_deck()),
                 density: Some(!dataset.is_deck() && shot.density_on()),
+                occupancy: shot.occupancy,
                 format: FrameFormat::Png,
                 ..session.base_request()
             };

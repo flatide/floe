@@ -560,6 +560,8 @@ pub fn run_summary(
             "cut_px":shots[0].capture.shot.detail.cut_px(),"thin":shots[0].capture.shot.thin.name(),
             // the density under the cut drawn (--density; a jobdeck draws none)
             "density":!dataset.is_deck() && shots[0].capture.shot.density_on(),
+            // the occupancy summary asked for (--occupancy; null = renderd's rule)
+            "occupancy":shots[0].capture.shot.occupancy,
             // a layout's default layer colours (--layer-colors; a jobdeck: null)
             "layer_colors":dataset.layer_colors().map(crate::styles::LayerColors::name),
             // each image's layer legend embedded (--legend; the shots' `legend`)

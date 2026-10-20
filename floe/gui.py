@@ -2237,7 +2237,8 @@ class Viewer:
                  label_font_px=DEFAULT_LABEL_FONT_PX,
                  frame_cache=True, margin=False,
                  stream_kb=None, stream_target_ms=500,
-                 render_debug=False, thin="auto", density=None):
+                 render_debug=False, thin="auto", density=None,
+                 occupancy=None):
         self.server_sock = server_sock
         self.cx = self.cy = 0
         self.spp = 1.0              # dbu per screen pixel
@@ -2299,6 +2300,15 @@ class Viewer:
         # environment the viewer shares with renderd, is the kill switch
         self.density_on = (os.environ.get("FLOE_RUST_DENSITY_STACK") != "off"
                            if density is None else bool(density))
+        # the occupancy summary at wide views (user 2026-10-20: "an option
+        # to see the occupancy when a jobdeck-indexed layout is opened in
+        # the plain layout mode"): None = renderd's rule (a jobdeck's passes
+        # draw it, a plain layout's frames do not - user decision
+        # 2026-09-24), a bool the user's choice - View > occupancy summary
+        # at wide views / `o` switch it live, --occupancy (or a forwarded
+        # occupancy=) sets it; the rule reads the same FLOE_RUST_OCCUPANCY
+        # the renderer does (_occupancy_effective)
+        self.occupancy_on = None if occupancy is None else bool(occupancy)
         # the scale border starts on (user 2026-10-13); View > scale
         # border / `s` toggles it, FLOE_SCALE_BORDER=off starts it off
         self.border_on = os.environ.get("FLOE_SCALE_BORDER") != "off"
@@ -3538,7 +3548,8 @@ class Viewer:
         before = (self.detail, self.depth_value, self.lod_on,
                   self.frames_on, self.labels_on, self.label_font_px,
                   getattr(self, "thin_mode", "auto"),
-                  getattr(self, "density_on", None))
+                  getattr(self, "density_on", None),
+                  getattr(self, "occupancy_on", None))
         detail = opts.get("detail")
         if detail in DETAIL_LEVELS:
             self._set_detail(DETAIL_LEVELS.index(detail), redraw=False)
@@ -3553,6 +3564,9 @@ class Viewer:
         # --density / a forwarded density= (2026-10-05)
         if opts.get("density") in ("on", "off"):
             self.density_on = opts["density"] == "on"
+        # --occupancy / a forwarded occupancy= (2026-10-20)
+        if opts.get("occupancy") in ("on", "off"):
+            self.occupancy_on = opts["occupancy"] == "on"
         frames = opts.get("frames")
         labels = opts.get("labels")
         if frames in ("on", "off"):
@@ -3576,7 +3590,8 @@ class Viewer:
             self.detail, self.depth_value, self.lod_on,
             self.frames_on, self.labels_on, self.label_font_px,
             getattr(self, "thin_mode", "auto"),
-            getattr(self, "density_on", None))
+            getattr(self, "density_on", None),
+            getattr(self, "occupancy_on", None))
         if changed:
             self.dstatus.set_text(self._depth_label())
         return changed
@@ -3654,6 +3669,27 @@ class Viewer:
                        False):
             return None
         return bool(getattr(self, "density_on", False))
+
+    def _occupancy_key(self):
+        """Render-key component: the occupancy summary toggle where the
+        renderer draws the summary (the Rust renderer), None elsewhere."""
+        if not getattr(getattr(self, "worker", None), "supports_occupancy",
+                       False):
+            return None
+        return bool(self._occupancy_effective())
+
+    def _occupancy_effective(self):
+        """The occupancy summary in force: the user's choice, else
+        renderd's rule - a jobdeck's passes draw it unless
+        FLOE_RUST_OCCUPANCY=off (the kill switch), a plain layout's frames
+        do not unless FLOE_RUST_OCCUPANCY=on (user decision 2026-09-24)."""
+        on = getattr(self, "occupancy_on", None)
+        if on is not None:
+            return bool(on)
+        env = os.environ.get("FLOE_RUST_OCCUPANCY")
+        if getattr(getattr(self, "cache", None), "is_jobdeck", False):
+            return env != "off"
+        return env == "on"
 
     def _effective_cut_px(self):
         """Screen-space detail cut is independent of merged LOD."""
@@ -4399,6 +4435,11 @@ class Viewer:
             "density": bool(getattr(self, "density_on", False))
             and cut > 0 and not deck,
         }
+        # the occupancy summary (View > occupancy summary, `o`): the user's
+        # choice once made, else nothing - renderd's rule (a jobdeck's
+        # passes draw it, a plain layout's frames do not)
+        if getattr(self, "occupancy_on", None) is not None:
+            patch["occupancy"] = bool(self.occupancy_on)
         if not deck:
             # a deck has no label font and no root (renderd's rule)
             patch["font_px"] = int(self.label_font_px)
@@ -5443,6 +5484,8 @@ class Viewer:
             self._toggle_abstract()
         elif name == "v":
             self._toggle_density()
+        elif name == "o":
+            self._toggle_occupancy()
         elif name == "s":
             self._toggle_border()
         elif name == "b":
@@ -5526,6 +5569,10 @@ class Viewer:
             if self._density_key() is not None:
                 lbl += " · density:%s" % (
                     "on" if self.density_on else "off")
+            # the occupancy summary (View > occupancy summary, `o`)
+            if self._occupancy_key() is not None:
+                lbl += " · occupancy:%s" % (
+                    "on" if self._occupancy_effective() else "off")
         if self.abstract:
             lbl += " · abstract"
         return lbl
@@ -5581,10 +5628,30 @@ class Viewer:
         self.density_on = not self.density_on
         self._on_depth()
 
+    def _toggle_occupancy(self):
+        """`o` / View > occupancy summary at wide views (user 2026-10-20:
+        "an option to see the occupancy when a jobdeck-indexed layout is
+        opened in the plain layout mode"): the wide views drawn from the
+        cache's design.ovo - a jobdeck's passes have it by renderd's rule,
+        a plain layout's frames do not (user decision 2026-09-24) even
+        with the file there (a source a jobdeck indexed, opened on its
+        own) - on or off from the next frame, the opposite of what is in
+        force; the status line says which, the perf line says `summary:
+        none (nofile)` where the cache has no design.ovo. The Rust
+        renderer only."""
+        if self._occupancy_key() is None:
+            return
+        self.occupancy_on = not self._occupancy_effective()
+        self._on_depth()
+
     def _sync_density_capability(self):
         item = getattr(self, "_density_menu_item", None)
         if item is not None:
             item.set_sensitive(self._density_key() is not None)
+        # the occupancy summary toggle: the same renderer's (2026-10-20)
+        item = getattr(self, "_occupancy_menu_item", None)
+        if item is not None:
+            item.set_sensitive(self._occupancy_key() is not None)
 
     def _effective_thin(self):
         """The page hairline policy in force: the explicit mode, or
@@ -6266,6 +6333,14 @@ class Viewer:
             m, "density under the cut\tv", self._toggle_density,
             lambda: self._density_key() is True)
         self._density_menu_item.set_sensitive(False)
+        # the occupancy summary at wide views (user 2026-10-20): the Rust
+        # renderer draws a jobdeck's passes from design.ovo; this lets a
+        # plain layout's frames use the file too (a source a jobdeck
+        # indexed, opened on its own), or a deck's passes go without it
+        self._occupancy_menu_item = check(
+            m, "occupancy summary at wide views\to", self._toggle_occupancy,
+            lambda: self._occupancy_effective())
+        self._occupancy_menu_item.set_sensitive(False)
         self._abstract_menu_item = check(
             m, "abstract cells\ta", self._toggle_abstract,
             lambda: self.abstract)
@@ -12371,7 +12446,7 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
                frame_cache=True, margin=False,
                stream_kb=None, stream_target_ms=500,
                render_debug=False, pending_open=None, pending_fields=(),
-               thin="auto", density=None):
+               thin="auto", density=None, occupancy=None):
     """`pending_open`: a layout/jobdeck given on the command line that
     has no index yet - the viewer starts empty, asks, indexes and
     opens it (user call 2026-09-09), then applies `pending_fields`
@@ -12383,7 +12458,8 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
                     frame_cache=frame_cache, margin=margin,
                     stream_kb=stream_kb,
                     stream_target_ms=stream_target_ms,
-                    render_debug=render_debug, thin=thin, density=density)
+                    render_debug=render_debug, thin=thin, density=density,
+                    occupancy=occupancy)
     smoke_ms = os.environ.get("FLOE_GUI_SMOKE_MS")
     smoke_error = []
     if smoke_ms is not None:

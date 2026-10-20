@@ -545,6 +545,14 @@ struct RenderCommand {
     /// off none. None (absent): FLOE_RUST_DENSITY_STACK and
     /// FLOE_RUST_DENSITY_DOTS decide, as before.
     density: Option<bool>,
+    /// `occupancy=on|off`: the occupancy summary of this frame - the
+    /// viewer's toggle (user 2026-10-20: "an option to see the occupancy
+    /// when a jobdeck-indexed layout is opened in the plain layout mode"):
+    /// on draws a layout's wide views from its design.ovo as a jobdeck's
+    /// passes are drawn, off draws none (a jobdeck's passes take the page
+    /// path). None (absent): the rule as before - a jobdeck on, a plain
+    /// layout off, FLOE_RUST_OCCUPANCY (summary_switches).
+    occupancy: Option<bool>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -682,6 +690,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                 "vw",
                 "vh",
                 "density",
+                "occupancy",
             ]);
             reject_unknown(&fields, &allowed)?;
             let thin_keep = match fields.get("thin").map(|s| s.as_str()) {
@@ -776,6 +785,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                         _ => None,
                     },
                     density: optional_bool(&fields, "density")?,
+                    occupancy: optional_bool(&fields, "occupancy")?,
                 },
             ))))
         }
@@ -1239,16 +1249,21 @@ impl Default for WorkerState {
 }
 
 /// The key a budget fit is remembered under: the layers, depth, cut, thin
-/// mode and the scale (a pan keeps it, a zoom changes it).
+/// mode, the layers the occupancy summary draws (they leave the page plan)
+/// and the scale (a pan keeps it, a zoom changes it).
 fn fit_memory_key(command: &RenderCommand, request: &PlanRequest) -> String {
     let (head, tail) = fit_memory_scope(command);
     format!(
-        "{head}{}|{}|{}|{}|{}{tail}",
+        "{head}{}|{}|{}|{}|{}|{:?}{tail}",
         request.cut_dbu,
         scale_token(request.px_per_dbu),
         command.thin_keep,
         request.page_hairline,
-        command.frames
+        command.frames,
+        // the fit over the pages left beside the summary is another decision
+        // than the fit over them all - and a request's occupancy= switches
+        // the summary at one scale (2026-10-20)
+        request.summary_layers
     )
 }
 
@@ -2583,6 +2598,7 @@ fn run_deck_render(
         // (partial frame, pages "over budget (not drawn)")
         stream: std::env::var("FLOE_RUST_DECK_STREAM").as_deref() != Ok("off"),
         thin_keep: command.thin_keep,
+        occupancy: command.occupancy,
     };
     let report = deck.render(&request, command.generation, cancellation)?;
     check_generation(cancellation, command.generation)?;
@@ -3287,6 +3303,25 @@ fn density_dots_enabled() -> bool {
     std::env::var("FLOE_RUST_DENSITY_DOTS").as_deref() == Ok("on")
 }
 
+/// The occupancy summary's switches of a layout frame (summary_selection's
+/// `disabled` and `layout_off`): the command's `occupancy=on|off` (the
+/// viewer's View > occupancy summary, `floe2 render --occupancy`, 2026-10-20)
+/// decides for the frame - on draws a plain layout's wide views from its
+/// design.ovo as a jobdeck's passes are drawn, off draws none; without it
+/// FLOE_RUST_OCCUPANCY: `off` is the kill switch, `on` a layout's opt-in
+/// (diagnostic, user decision 2026-09-24), else a plain layout draws none
+/// (`summary: none (layout)`). Under a view root the summary is off whatever
+/// was asked: design.ovo flattens the TOP cell.
+fn summary_switches(occupancy: Option<bool>, rooted: bool, env: Option<&str>) -> (bool, bool) {
+    let disabled = rooted
+        || match occupancy {
+            Some(on) => !on,
+            None => env == Some("off"),
+        };
+    let layout_off = occupancy.is_none() && env != Some("on");
+    (disabled, layout_off)
+}
+
 /// The density stack of this frame: the command's `density=` (the viewer's
 /// toggle, 2026-10-05), or without it FLOE_RUST_DENSITY_STACK=top
 /// (density_stack_enabled).
@@ -3821,19 +3856,26 @@ fn run_render_attempt(
     // pass-2 plans nor a whole-hierarchy coverage warm-up.
     // occupancy summary (docs/OCCUPANCY_PLAN.ko.md M2): decided per
     // request before any reuse, since the retained-frame and published-
-    // scene keys carry it; FLOE_RUST_OCCUPANCY=off is the kill switch
+    // scene keys carry it. The switches (summary_switches): the command's
+    // `occupancy=on|off` (the viewer's toggle, 2026-10-20) decides for this
+    // frame, else FLOE_RUST_OCCUPANCY - off the kill switch, on a plain
+    // layout's opt-in (user decision 2026-09-24: a plain layout's frames
+    // draw none by default; jobdeck passes keep it) - and a view root turns
+    // it off whatever was asked (design.ovo flattens the TOP cell: under
+    // another root it is not this picture's summary)
     // the policy condition: keep, or cull (2026-09-18) unless
     // FLOE_RUST_OCCUPANCY_CULL=off (the kill switch back to keep-only)
     let policy_allows = command.thin_keep || floe_render_core::summary_cull_allowed();
+    let (summary_disabled, layout_off) = summary_switches(
+        command.occupancy,
+        command.root.is_some(),
+        std::env::var("FLOE_RUST_OCCUPANCY").ok().as_deref(),
+    );
     let summary = cache.summary_selection(
         &make_plan_request(cache, &command, state.page_cache.budget_bytes())?,
         policy_allows,
-        // design.ovo flattens the TOP cell: under another view root it is
-        // not this picture's summary
-        std::env::var("FLOE_RUST_OCCUPANCY").as_deref() == Ok("off") || command.root.is_some(),
-        // a plain layout draws no summary unless FLOE_RUST_OCCUPANCY=on
-        // (user decision 2026-09-24; jobdeck passes keep it)
-        !floe_render_core::summary_layout_allowed(),
+        summary_disabled,
+        layout_off,
     )?;
     let summary_key = SummaryKey::of(&summary);
     let query_summary_layers = Arc::new(
@@ -3853,10 +3895,15 @@ fn run_render_attempt(
     let (expected_fit, expected_whole) = if command.exact {
         (None, None)
     } else {
-        let pre = make_plan_request(
-            cache,
-            &command,
-            scaled_decode_budget(state.page_cache.budget_bytes(), &command, budget_scale),
+        // (keyed as the plan below is: without the layers the summary draws)
+        let pre = cache.page_plan_request(
+            &make_plan_request(
+                cache,
+                &command,
+                scaled_decode_budget(state.page_cache.budget_bytes(), &command, budget_scale),
+            )?,
+            &summary,
+            !command.frames,
         )?;
         if pre.decode_budget > 0 {
             (
@@ -3919,7 +3966,7 @@ fn run_render_attempt(
     // fit_memory); the first frame at a scale decides it over the extent the
     // viewer's margin frame will have - twice the view per axis - so the
     // margin, when it lands, thins as the viewport did (no flip after a zoom)
-    let fit_key = fit_memory_key(command, &request);
+    let fit_key = fit_memory_key(command, &page_request);
     // what that decision took (the frame line's fit_probe_us): it is no part
     // of the plan's time, and was time under no phase (field 2026-10-05)
     let mut fit_probe_us = 0u64;
@@ -6699,6 +6746,72 @@ mod tests {
             InputCommand::Worker(WorkerCommand::Render(render)) => render,
             _ => panic!("expected render command"),
         }
+    }
+
+    /// The occupancy summary's switches (2026-10-20): the command's
+    /// `occupancy=` decides for its frame, the environment only where the
+    /// command says nothing, a view root turns it off either way.
+    #[test]
+    fn occupancy_switches_follow_the_command_then_the_environment() {
+        // (disabled, layout_off)
+        assert_eq!(summary_switches(None, false, None), (false, true));
+        assert_eq!(summary_switches(None, false, Some("on")), (false, false));
+        assert_eq!(summary_switches(None, false, Some("off")), (true, true));
+        assert_eq!(summary_switches(Some(true), false, None), (false, false));
+        assert_eq!(summary_switches(Some(true), false, Some("off")), (false, false));
+        assert_eq!(summary_switches(Some(false), false, None), (true, false));
+        assert_eq!(summary_switches(Some(false), false, Some("on")), (true, false));
+        assert_eq!(summary_switches(Some(true), true, Some("on")), (true, false));
+        assert_eq!(summary_switches(None, true, Some("on")), (true, false));
+        let parse = |extra: &str| {
+            render(
+                parse_command(&format!(
+                    "render gen=1 view=0,0,320,320 w=32 h=32 frames=off{extra} out=/tmp/a.raw"
+                ))
+                .unwrap()
+                .unwrap(),
+            )
+        };
+        assert_eq!(parse("").occupancy, None);
+        assert_eq!(parse(" occupancy=on").occupancy, Some(true));
+        assert_eq!(parse(" occupancy=off").occupancy, Some(false));
+        assert!(parse_command(
+            "render gen=1 view=0,0,320,320 w=32 h=32 frames=off occupancy=maybe out=/tmp/a.raw"
+        )
+        .is_err());
+    }
+
+    /// The summarized layers are part of the fit memory's key (2026-10-20):
+    /// a request's occupancy= switches the summary at one scale, and the fit
+    /// over the pages left is another decision than the fit over them all;
+    /// forget_fits still scopes by the layers, depth and root.
+    #[test]
+    fn fit_memory_keys_split_on_the_summarized_layers() {
+        let command = render(
+            parse_command("render gen=1 view=0,0,320,320 w=32 h=32 frames=off out=/tmp/a.raw")
+                .unwrap()
+                .unwrap(),
+        );
+        let all = fit_request(&command);
+        let summarized = PlanRequest {
+            summary_layers: vec![1],
+            ..fit_request(&command)
+        };
+        assert_ne!(
+            fit_memory_key(&command, &all),
+            fit_memory_key(&command, &summarized)
+        );
+        let mut fits = BTreeMap::new();
+        let mut whole = BTreeSet::new();
+        for key in [
+            fit_memory_key(&command, &all),
+            fit_memory_key(&command, &summarized),
+        ] {
+            fits.insert(key.clone(), floe_render_core::FixedFit::everything(3));
+            whole.insert(key);
+        }
+        forget_fits(&mut fits, &mut whole, &command);
+        assert!(fits.is_empty() && whole.is_empty());
     }
 
     /// Review 2026-09-11 P1-2: a retained frame (and the published

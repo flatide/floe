@@ -1354,7 +1354,7 @@ class ViewSession:
     def edit(self, **patch):
         """One edit (the controller's Patch: navigation, pixels, depth,
         detail, thin, layers, layer_change, frames, labels, font_px, mono,
-        density, style_deltas, root); the state it made."""
+        density, occupancy, style_deltas, root); the state it made."""
         self.snapshot = self._svc.request("view_edit", view=self.view,
                                           patch=patch)
         return self.snapshot
@@ -1462,6 +1462,9 @@ class ViewWorker:
 
     supports_abstract = False
     supports_density = True
+    # the occupancy summary toggle (2026-10-20): the controller's
+    # `occupancy` patch field, renderd's `occupancy=on|off`
+    supports_occupancy = True
     controller = True
 
     def __init__(self, cache, width, height, patch=None, margin=False,

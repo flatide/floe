@@ -812,6 +812,10 @@ budget = 패스별 디코드 보유)을 코드와 대조했다. 모두 사실이
   cull은 View > thin shapes at wide views > cull 또는 `--thin cull`로 명시할 때만 쓴다(킬 스위치).
   keep은 광역 뷰에서 all-thin 페이지를 디코드하므로 넓은 뷰의 비용이 늘 수 있다(위 실측 6의 덱
   fit 뷰 참고) — 실칩 관측(2026-09-23, 사용자): keep 기본에서 fit 뷰 시간은 괜찮았다.
+  **점유 요약 옵션(2026-10-20, 0.12.371; 사용자 요청)**: 덱이 색인한 소스(design.ovo 있음)를 단독 레이아웃으로
+  열면 요약은 기본 끔이지만(OCCUPANCY_PLAN §6-9), View > occupancy summary at wide views(`o`)·`floe2 view
+  --occupancy on`·`floe2 render --occupancy on`으로 그 뷰에서 켤 수 있다(요청 필드 `occupancy=`, 환경보다 먼저;
+  덱 뷰에서는 같은 토글이 요약을 끈다). SPEC-VIEWER §7, OCCUPANCY_PLAN 2026-10-20 절.
   **실측 6(2026-09-11, 덱 fit 뷰 165 × 160 mm, 1 px = 202 µm)**: keep 정책으로
   25,138페이지(그중 thin 25k)를 전부 디코드(합 30.9 s)하고 4,170만 hairline을
   칠해(draw 22.2 s) 프레임 32 s → 광역 뷰에서는 쓸 수 없음. 이 줌에서 선

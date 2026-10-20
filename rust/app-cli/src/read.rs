@@ -34,6 +34,13 @@ makes it the default, as before 0.12.350).
                             they cover; needs --detail low|medium|high; layouts
                             (default on, as the viewer starts; off for --archival;
                             FLOE_RUST_DENSITY_STACK=off makes it off)
+  --occupancy on|off         The occupancy summary (design.ovo) at wide views,
+                            as the viewer's View > occupancy summary: on draws
+                            a layout's wide views from it as a jobdeck's are
+                            drawn (a source a jobdeck indexed has the file),
+                            off none for a jobdeck either; needs --detail
+                            low|medium|high (default: a jobdeck on, a layout
+                            off; FLOE_RUST_OCCUPANCY=off|on where unsaid)
   --frames[=on|off] --labels[=on|off]  Cell frames, design text (default on,
                             as the viewer; jobdeck labels unsupported)
   --layer-colors row|group  A layout's default layer colours: row = every row
@@ -81,7 +88,7 @@ Batch: NAME key=value ...; quotes supported, full-line # comments. Region fields
 override the CLI region. Keys: bbox at size anchor px stretch layers depth mosaic
 corners line linecolor keep_tiles chip chip_off fit_chip; corners=fit. Limit 16 MiB/4096 shots; no shell expansion.
 DRC uses the width from --px even for WxH; frames/labels are on (deck labels off),
-the viewer's fills. --detail/--thin/--density/--label-font-px are honored.
+the viewer's fills. --detail/--thin/--density/--occupancy/--label-font-px are honored.
 No batch/mosaic/region/report with DRC. Local/global/path TSV.
 Only complete DRC frames are saved; all-layer shots omit the layer legend
 unless --legend.
@@ -298,6 +305,13 @@ pub fn parse(args: &[String]) -> Result<Command> {
                     _ => return Err(Error::input("--density must be on or off")),
                 })
             }
+            "--occupancy" => {
+                shot.occupancy = Some(match value()? {
+                    "on" => true,
+                    "off" => false,
+                    _ => return Err(Error::input("--occupancy must be on or off")),
+                })
+            }
             "--thin" => {
                 shot.thin = match value()? {
                     "auto" => Thin::Auto,
@@ -465,6 +479,14 @@ pub fn parse(args: &[String]) -> Result<Command> {
         return Err(Error::new(
             ErrorKind::Unsupported,
             "--density is for layouts: a jobdeck's frames draw no density under the cut",
+        ));
+    }
+    // the occupancy summary stands in for pages at a cut: at exact (cut 0)
+    // nothing is summarized (render-core summary_selection, reason exact)
+    if shot.occupancy == Some(true) && shot.detail == Detail::Exact {
+        return Err(Error::input(
+            "--occupancy on draws the wide view from the occupancy summary in place of the pages a \
+             size cut drops: give --detail low, medium or high (exact draws every page)",
         ));
     }
     if layer_colors.is_some() && is_deck(&source) {
@@ -820,6 +842,36 @@ mod tests {
         // the viewer's detail is the default: on asks for no more
         assert_eq!(density(&["render", "a.oas", "--density=on"]), Ok(Some(true)));
         let archival = density(&["render", "a.oas", "--archival", "--density=on"]).unwrap_err();
+        assert!(archival.contains("--detail low, medium or high"), "{archival}");
+    }
+    /// `--occupancy on|off` (user 2026-10-20): the occupancy summary at wide
+    /// views for a layout or a jobdeck, unsaid = renderd's rule; it stands in
+    /// for pages a cut drops, so exact (and the archival look) refuse `on`.
+    #[test]
+    fn occupancy_is_asked_with_a_cut_for_layouts_and_jobdecks() {
+        let occupancy = |args: &[&str]| match parsed(args) {
+            Ok(Command::Render { capture, .. }) => Ok(capture.shot.occupancy),
+            Ok(_) => panic!(),
+            Err(e) => Err(e.to_string()),
+        };
+        assert_eq!(occupancy(&["render", "a.oas", "--detail", "high"]), Ok(None));
+        assert_eq!(occupancy(&["render", "a.oas", "--detail=high", "--occupancy=on"]), Ok(Some(true)));
+        assert_eq!(occupancy(&["render", "a.oas", "--occupancy", "off"]), Ok(Some(false)));
+        // the viewer's detail is the default: on asks for no more
+        assert_eq!(occupancy(&["render", "a.oas", "--occupancy=on"]), Ok(Some(true)));
+        // a jobdeck's passes: off, or on against the kill switch
+        assert_eq!(occupancy(&["render", "a.jb", "--occupancy=off"]), Ok(Some(false)));
+        assert_eq!(occupancy(&["render", "a.jb", "--detail=high", "--occupancy=on"]), Ok(Some(true)));
+        // a DRC capture asks it the same way
+        assert_eq!(
+            occupancy(&["render", "a.oas", "--drc=db", "--drc-rule=R", "--detail=low", "--occupancy=on"]),
+            Ok(Some(true))
+        );
+        assert!(occupancy(&["render", "a.oas", "--occupancy=maybe"]).is_err());
+        let exact = occupancy(&["render", "a.oas", "--detail=exact", "--occupancy=on"]).unwrap_err();
+        assert!(exact.contains("--detail low, medium or high"), "{exact}");
+        assert_eq!(occupancy(&["render", "a.oas", "--detail=exact", "--occupancy=off"]), Ok(Some(false)));
+        let archival = occupancy(&["render", "a.oas", "--archival", "--occupancy=on"]).unwrap_err();
         assert!(archival.contains("--detail low, medium or high"), "{archival}");
     }
     #[test]

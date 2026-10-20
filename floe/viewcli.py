@@ -227,6 +227,9 @@ def cmd_view(args):
         # an explicit --density reaches the running window (2026-10-05)
         if getattr(args, "density", None) is not None:
             request += "\tdensity=" + args.density
+        # an explicit --occupancy too (2026-10-20)
+        if getattr(args, "occupancy", None) is not None:
+            request += "\toccupancy=" + args.occupancy
         for _ in range(5):
             code = instance.try_forward(addr, request)
             if code is not None:
@@ -265,7 +268,9 @@ def cmd_view(args):
                if levels else [])
             + (["thin=" + thin_mode] if thin_mode != "auto" else [])
             + (["density=" + args.density]
-               if getattr(args, "density", None) is not None else []))
+               if getattr(args, "density", None) is not None else [])
+            + (["occupancy=" + args.occupancy]
+               if getattr(args, "occupancy", None) is not None else []))
         c = None
         goto = None
     elif src and APP == "floe2":
@@ -287,7 +292,9 @@ def cmd_view(args):
                pending_open=pending_open, pending_fields=pending_fields,
                thin=thin_mode,
                density=(None if getattr(args, "density", None) is None
-                        else args.density == "on"))
+                        else args.density == "on"),
+               occupancy=(None if getattr(args, "occupancy", None) is None
+                          else args.occupancy == "on"))
 
 
 def parser():
@@ -338,6 +345,18 @@ def parser():
                             "cut (`v`) switches it live. Default: on "
                             "(FLOE_RUST_DENSITY_STACK=off: off). "
                             "Forwarded to a running instance")
+        # the occupancy summary at wide views (user 2026-10-20: "an option
+        # to see the occupancy when a jobdeck-indexed layout is opened in
+        # the plain layout mode"): the Rust renderer's design.ovo summary
+        p.add_argument("--occupancy", choices=("on", "off"), default=None,
+                       help="start with the occupancy summary at wide views "
+                            "on or off - the wide views drawn from the "
+                            "cache's design.ovo (a source a jobdeck indexed "
+                            "has one; a layout gets it with `floe2 index "
+                            "SRC --occupancy-only`); View > occupancy "
+                            "summary at wide views (`o`) switches it live. "
+                            "Default: a jobdeck on, a layout off. Forwarded "
+                            "to a running instance")
     # a layout's default layer colours (user 2026-10-13)
     p.add_argument("--layer-colors", choices=("row", "group"), default=None,
                    help="a layout's default layer colours (where no layer "

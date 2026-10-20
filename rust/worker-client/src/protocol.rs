@@ -264,6 +264,12 @@ pub struct RenderRequest {
     /// desktop viewer's toggle, 2026-10-05); None leaves renderd's default
     /// (FLOE_RUST_DENSITY_STACK).
     pub density: Option<bool>,
+    /// The occupancy summary for this frame (`occupancy=on|off`, the viewer's
+    /// toggle, 2026-10-20): on draws a layout's wide views from its
+    /// design.ovo as a jobdeck's passes are drawn, off draws none for a
+    /// jobdeck's passes either. None leaves renderd's rule (a jobdeck on, a
+    /// plain layout off, FLOE_RUST_OCCUPANCY).
+    pub occupancy: Option<bool>,
 }
 
 impl Default for RenderRequest {
@@ -293,6 +299,7 @@ impl Default for RenderRequest {
             root: None,
             viewport: None,
             density: None,
+            occupancy: None,
         }
     }
 }
@@ -355,6 +362,9 @@ impl RenderRequest {
         }
         if let Some(density) = self.density {
             write!(command, " density={}", if density { "on" } else { "off" }).unwrap();
+        }
+        if let Some(on) = self.occupancy {
+            write!(command, " occupancy={}", if on { "on" } else { "off" }).unwrap();
         }
         if command.len() > MAX_LINE_BYTES {
             return Err(Error::new(
@@ -470,7 +480,9 @@ mod tests {
     fn viewport_and_density_go_on_the_wire_only_when_given() {
         let mut r = RenderRequest::default();
         let plain = r.command(1, 1, "/tmp/f", 1_000_000).unwrap();
-        assert!(!plain.contains(" vw=") && !plain.contains(" density="));
+        assert!(
+            !plain.contains(" vw=") && !plain.contains(" density=") && !plain.contains(" occupancy=")
+        );
         r.background = true;
         r.viewport = Some((640, 480));
         r.density = Some(false);
@@ -483,6 +495,17 @@ mod tests {
             .command(1, 1, "/tmp/f", 1_000_000)
             .unwrap()
             .ends_with(" density=on"));
+        // the occupancy summary toggle (2026-10-20): only when given
+        r.occupancy = Some(false);
+        assert!(r
+            .command(1, 1, "/tmp/f", 1_000_000)
+            .unwrap()
+            .ends_with(" density=on occupancy=off"));
+        r.occupancy = Some(true);
+        assert!(r
+            .command(1, 1, "/tmp/f", 1_000_000)
+            .unwrap()
+            .ends_with(" density=on occupancy=on"));
         r.viewport = Some((0, 480));
         assert!(r.command(1, 1, "/tmp/f", 1_000_000).is_err());
     }

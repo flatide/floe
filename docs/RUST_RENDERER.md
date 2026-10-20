@@ -585,6 +585,20 @@ Before this cache-aware policy, a 506-page `sample9` run with `round_pages=64`
 published its first 600x600 partial frame in roughly 10ms over eight rounds;
 the final PNG was byte-identical to single-shot rendering.
 
+Since 0.12.336 a render command may carry `occupancy=on|off`, the viewer's
+occupancy summary toggle (View > occupancy summary at wide views, `o`, `floe2
+view --occupancy`, `floe2 render --occupancy`; user 2026-10-20: an option to
+see the occupancy when a jobdeck-indexed layout is opened in the plain layout
+mode): on draws a plain layout's wide views from its design.ovo as a jobdeck's
+passes are drawn (over the kill switch `FLOE_RUST_OCCUPANCY=off`), off draws
+none (a jobdeck's passes take the page path, reason `off`); without it the rule
+stands - a jobdeck on, a plain layout off, `FLOE_RUST_OCCUPANCY=on|off`
+(renderd `summary_switches`; a view root turns the summary off either way). The
+retained frame's key already carries the summary (`RetainedKey::summary`); the
+budget fit memory's key gained the layers the summary draws
+(`PlanRequest::summary_layers`), since the fit over the pages left is another
+decision than the fit over them all.
+
 A historical cold-daemon gate on a 303-page dense `sample9` mid-zoom view measured
 first/final frame latency of 17/290ms, 17/159ms, 21/122ms, and 31/99ms for
 `round_pages=32/64/128/256` respectively at 600x600 with eight workers. The

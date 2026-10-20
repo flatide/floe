@@ -570,6 +570,105 @@ assert not hasattr(gui, "live_caps")
         self.assertTrue(gui.Viewer._forwarded_view_options(v, ["density=on"]))
         self.assertTrue(v.density_on)
 
+    def test_gui_occupancy_toggle_follows_backend_capability(self):
+        """The viewer's occupancy summary toggle (user 2026-10-20: "an option
+        to see the occupancy when a jobdeck-indexed layout is opened in the
+        plain layout mode"): View > occupancy summary at wide views / `o`
+        flip it where the renderer draws the summary; unset, the check shows
+        renderd's rule (a jobdeck on, a layout off, FLOE_RUST_OCCUPANCY) and
+        the patch carries nothing; set, the patch carries it (a deck's too),
+        the status line says it, a forwarded occupancy= sets it; a renderer
+        without the summary keeps no state, the menu item is insensitive."""
+        import inspect
+        from types import SimpleNamespace
+        from floe import gui
+
+        class Item:
+            sensitive = None
+
+            def set_sensitive(self, value):
+                self.sensitive = bool(value)
+
+        had = os.environ.pop("FLOE_RUST_OCCUPANCY", None)
+        try:
+            v = gui.Viewer.__new__(gui.Viewer)
+            v.cache = SimpleNamespace(is_jobdeck=False)
+            v._density_menu_item = Item()
+            v._occupancy_menu_item = Item()
+            v.density_on = False
+            v.occupancy_on = None
+            redraws = []
+            v._on_depth = lambda: redraws.append(True)
+            # without the summary: nothing to toggle
+            v.worker = SimpleNamespace(supports_label_font_px=True)
+            gui.Viewer._sync_density_capability(v)
+            self.assertFalse(v._occupancy_menu_item.sensitive)
+            self.assertIsNone(gui.Viewer._occupancy_key(v))
+            gui.Viewer._toggle_occupancy(v)
+            self.assertIsNone(v.occupancy_on)
+            self.assertEqual(redraws, [])
+            # the Rust renderer's: renderd's rule until the user says
+            v.worker = SimpleNamespace(supports_occupancy=True)
+            gui.Viewer._sync_density_capability(v)
+            self.assertTrue(v._occupancy_menu_item.sensitive)
+            self.assertFalse(gui.Viewer._occupancy_effective(v),
+                             "a layout: off by the rule")
+            v.cache = SimpleNamespace(is_jobdeck=True)
+            self.assertTrue(gui.Viewer._occupancy_effective(v),
+                            "a jobdeck: on by the rule")
+            os.environ["FLOE_RUST_OCCUPANCY"] = "off"
+            self.assertFalse(gui.Viewer._occupancy_effective(v), "the kill switch")
+            v.cache = SimpleNamespace(is_jobdeck=False)
+            os.environ["FLOE_RUST_OCCUPANCY"] = "on"
+            self.assertTrue(gui.Viewer._occupancy_effective(v), "the layout opt-in")
+            del os.environ["FLOE_RUST_OCCUPANCY"]
+            p = _policy_viewer()
+            self.assertNotIn("occupancy", gui.Viewer._ctl_policy(p),
+                             "unsaid: renderd's rule, nothing on the patch")
+            gui.Viewer._toggle_occupancy(v)
+            self.assertTrue(v.occupancy_on)
+            self.assertEqual(redraws, [True])
+            p.occupancy_on = v.occupancy_on
+            self.assertTrue(gui.Viewer._ctl_policy(p)["occupancy"],
+                            "the view controller's patch carries it")
+            self.assertTrue(gui.Viewer._ctl_policy(p, deck=True)["occupancy"],
+                            "a deck's passes take the toggle too")
+            gui.Viewer._toggle_occupancy(v)
+            self.assertFalse(v.occupancy_on)
+            p.occupancy_on = False
+            self.assertFalse(gui.Viewer._ctl_policy(p)["occupancy"])
+            # the key, the menu and the status line
+            self.assertIn("self._toggle_occupancy()",
+                          inspect.getsource(gui.Viewer._on_key))
+            self.assertIn('"occupancy summary at wide views\\to"',
+                          inspect.getsource(gui.Viewer._build_menubar))
+            self.assertIn("occupancy:%s", inspect.getsource(gui.Viewer._depth_label))
+            # a forwarded occupancy= (and --occupancy through pending_fields)
+
+            class Status:
+                text = None
+
+                def set_text(self, value):
+                    self.text = value
+
+            v.detail, v.depth_value, v.label_font_px = 1, 0, 14
+            v.lod_on = False
+            v.frames_on = v.labels_on = True
+            v.thin_mode = "auto"
+            v._ddlg = v._fontdlg = None
+            v.dstatus = Status()
+            v._depth_label = lambda: "forwarded state"
+            self.assertTrue(gui.Viewer._forwarded_view_options(v, ["occupancy=on"]))
+            self.assertTrue(v.occupancy_on)
+            self.assertFalse(gui.Viewer._forwarded_view_options(v, ["occupancy=on"]))
+            self.assertTrue(gui.Viewer._forwarded_view_options(v, ["occupancy=off"]))
+            self.assertFalse(v.occupancy_on)
+        finally:
+            if had is None:
+                os.environ.pop("FLOE_RUST_OCCUPANCY", None)
+            else:
+                os.environ["FLOE_RUST_OCCUPANCY"] = had
+
     def test_a_refused_frame_clears_the_pending_state_and_is_said(self):
         """Review 2026-09-30: the mouse waits on _pending until a frame of
         the state lands; a frame renderd refuses (the view controller's

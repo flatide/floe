@@ -461,6 +461,11 @@ pub struct DeckRenderRequest {
     /// page hairline rule is off for the passes' plans. false is the
     /// plain layout's cull.
     pub thin_keep: bool,
+    /// The occupancy summary of the passes (`occupancy=on|off`, the
+    /// viewer's toggle, 2026-10-20): None = on unless FLOE_RUST_OCCUPANCY=off
+    /// (the field kill switch), Some(false) = the page path for every pass,
+    /// Some(true) = the summary whatever the environment says.
+    pub occupancy: Option<bool>,
 }
 
 pub struct DeckRenderReport {
@@ -810,8 +815,13 @@ impl Deck {
         let mut culls = crate::cache::PlanCullCounts::default();
         let mut summary_passes = 0u32;
         let mut summary_none_passes = 0u32;
-        // FLOE_RUST_OCCUPANCY=off: the field kill switch of the summary
-        let occupancy_off = std::env::var("FLOE_RUST_OCCUPANCY").as_deref() == Ok("off");
+        // the request's `occupancy=on|off` (the viewer's toggle, 2026-10-20)
+        // decides for every pass; without it FLOE_RUST_OCCUPANCY=off, the
+        // field kill switch of the summary
+        let occupancy_off = request.occupancy.map_or(
+            std::env::var("FLOE_RUST_OCCUPANCY").as_deref() == Ok("off"),
+            |on| !on,
+        );
         for placed_index in 0..self.placements.len() {
             let (out, source_index) = {
                 let placed = &self.placements[placed_index];
@@ -2187,6 +2197,7 @@ mod tests {
             wide: false,
             stream: true,
             thin_keep: true,
+            occupancy: None,
         };
         let p = placement(4.0, 0.0, 0.0);
         let sv = source_view(&request.view, &p).unwrap();
@@ -2252,6 +2263,7 @@ mod tests {
             wide: false,
             stream: true,
             thin_keep: true,
+            occupancy: None,
         };
         let p = placement(0.001, 1e16, 1e16);
         let sv = source_view(&request.view, &p).unwrap();
@@ -2286,6 +2298,7 @@ mod tests {
             wide: false,
             stream: true,
             thin_keep: true,
+            occupancy: None,
         };
         let big = 1i64 << 60;
         // the placement puts the deck view's origin at the source's

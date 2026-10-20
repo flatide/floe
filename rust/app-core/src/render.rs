@@ -242,6 +242,8 @@ impl RenderSession {
             thin: shot.thin.effective(dataset.is_deck()),
             // a jobdeck's frames draw no density (renderd's deck pass): off
             density: Some(!dataset.is_deck() && shot.density_on()),
+            // the occupancy summary as asked (--occupancy; None = renderd's rule)
+            occupancy: shot.occupancy,
             format: FrameFormat::Png,
             ..self.base_request()
         })

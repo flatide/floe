@@ -1282,7 +1282,7 @@ class RenderTests(unittest.TestCase):
     @classmethod
     def _render(cls, worker, bbox_um=(0, 0, 2000, 2000), px=200, cut_px=1.0,
                 thin="keep", visible=None, depth=None, fill="solid",
-                width_px=1):
+                width_px=1, occupancy=None):
         cls.gen += 1
         gen = cls.gen
         solid = "\n".join(["*" * 16] * 16)
@@ -1299,6 +1299,9 @@ class RenderTests(unittest.TestCase):
                "cut_px": cut_px, "lod": False, "frames": False,
                "labels": False, "abstract": False, "visible": visible,
                "frame_format": "raw", "thin": thin}
+        if occupancy is not None:
+            # the request's occupancy=on|off (the viewer's toggle, 2026-10-20)
+            job["occupancy"] = occupancy
         worker.submit(job)
         while True:
             res = worker.res.get(timeout=60)
@@ -1321,6 +1324,37 @@ class RenderTests(unittest.TestCase):
         self.assertEqual((s_default["layers"], s_default["none"]), (0, "layout"), s_default)
         self.assertEqual(default, off, "the default frame differs from the kill switch's")
         self.assertGreater(s_on["layers"], 0, s_on)
+
+    def test_the_request_turns_the_summary_on_for_a_layout_and_off_for_the_opt_in(self):
+        """User 2026-10-20 ("an option to see the occupancy when a
+        jobdeck-indexed layout is opened in the plain layout mode"): a
+        render command's `occupancy=on` draws a plain layout's summary
+        under the default rule and under the kill switch, `occupancy=off`
+        draws none under the opt-in - the request decides for its frame,
+        the environment only where it says nothing; the frames of one
+        worker switch back and forth (the retained frame's key carries
+        the summary)."""
+        on, s_on, _ = self._render(self.worker, thin="keep")
+        self.assertGreater(s_on["layers"], 0, s_on)
+        off, s_off, _ = self._render(self.worker_off, thin="keep")
+        self.assertEqual((s_off["layers"], s_off["none"]), (0, "off"), s_off)
+        self.assertNotEqual(on, off)
+        asked, s_asked, _ = self._render(self.worker_default, thin="keep", occupancy=True)
+        self.assertEqual((s_asked["layers"], s_asked["none"]), (s_on["layers"], "-"), s_asked)
+        self.assertEqual(asked, on, "the default worker's occupancy=on frame differs from the opt-in's")
+        against, s_against, _ = self._render(self.worker_off, thin="keep", occupancy=True)
+        self.assertGreater(s_against["layers"], 0, s_against)
+        self.assertEqual(against, on, "occupancy=on under the kill switch drew no summary")
+        none, s_none, _ = self._render(self.worker, thin="keep", occupancy=False)
+        self.assertEqual((s_none["layers"], s_none["none"]), (0, "off"), s_none)
+        self.assertEqual(none, off, "occupancy=off under the opt-in differs from the kill switch's frame")
+        # back and forth on one worker: on, off, on again, and the rule
+        again, s_again, _ = self._render(self.worker_default, thin="keep", occupancy=False)
+        self.assertEqual((again, s_again["layers"]), (off, 0))
+        again, s_again, _ = self._render(self.worker_default, thin="keep", occupancy=True)
+        self.assertEqual((again, s_again["layers"]), (on, s_on["layers"]))
+        rule, s_rule, _ = self._render(self.worker_default, thin="keep")
+        self.assertEqual((rule, s_rule["none"]), (off, "layout"))
 
     def test_the_wide_view_mask_equals_the_projected_level_at_every_pan_phase(self):
         ovo = read_ovo(self.cache / "design.ovo")
@@ -1609,18 +1643,22 @@ END
 
 
 def render_settled(worker, gen, bbox_dbu, px, cut_px=1.0, thin="keep",
-                   visible=None, depth=None, frames=False):
+                   visible=None, depth=None, frames=False, occupancy=None):
     solid = "\n".join(["*" * 16] * 16)
     keys = [(int(l["layer"]), int(l["datatype"]))
             for l in worker.cache.meta["layers"]]
     worker.submit({"kind": "repattern", "fills": [(k, solid) for k in keys],
                    "widths": [(k, 1) for k in keys]})
-    worker.submit({"kind": "render", "gen": gen, "scope": "headless",
-                   "bbox": tuple(float(v) for v in bbox_dbu), "view": None,
-                   "w": px, "h": px, "depth": depth, "cut_px": cut_px,
-                   "lod": False, "frames": frames, "labels": False,
-                   "abstract": False, "visible": visible,
-                   "frame_format": "raw", "thin": thin})
+    job = {"kind": "render", "gen": gen, "scope": "headless",
+           "bbox": tuple(float(v) for v in bbox_dbu), "view": None,
+           "w": px, "h": px, "depth": depth, "cut_px": cut_px,
+           "lod": False, "frames": frames, "labels": False,
+           "abstract": False, "visible": visible,
+           "frame_format": "raw", "thin": thin}
+    if occupancy is not None:
+        # the request's occupancy=on|off (the viewer's toggle, 2026-10-20)
+        job["occupancy"] = occupancy
+    worker.submit(job)
     while True:
         res = worker.res.get(timeout=60)
         if res.get("kind") == "error":
@@ -2314,6 +2352,26 @@ class DeckRenderTests(unittest.TestCase):
                                        200, depth=depth)
             self.assertEqual(res_d["deck"]["summary_passes"], 1, (depth, res_d["deck"]))
             self.assertEqual(at, on, depth)
+
+    def test_the_request_switches_the_passes_summary_either_way(self):
+        """2026-10-20: a deck request's `occupancy=off` takes the page path
+        for every pass (the kill switch's picture), `occupancy=on` draws the
+        summary under the kill switch - the request decides, the environment
+        only where it says nothing."""
+        on, _ = render_settled(self.deck, self._next(), self.bbox, 200)
+        off, _ = render_settled(self.deck_off, self._next(), self.bbox, 200)
+        self.assertNotEqual(on, off)
+        asked_off, res = render_settled(self.deck, self._next(), self.bbox,
+                                        200, occupancy=False)
+        self.assertEqual(res["deck"]["summary_passes"], 0, res["deck"])
+        self.assertEqual(asked_off, off)
+        asked_on, res_on = render_settled(self.deck_off, self._next(),
+                                          self.bbox, 200, occupancy=True)
+        self.assertEqual(res_on["deck"]["summary_passes"], 1, res_on["deck"])
+        self.assertEqual(asked_on, on)
+        # and back to each worker's rule
+        again, res_again = render_settled(self.deck, self._next(), self.bbox, 200)
+        self.assertEqual((again, res_again["deck"]["summary_passes"]), (on, 1))
 
     def test_a_source_without_the_file_counts_as_none(self):
         ovo = Path(vfs_cache_dir(self.dir / "thinwide.oas")) / "design.ovo"

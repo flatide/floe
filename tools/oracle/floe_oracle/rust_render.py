@@ -383,6 +383,11 @@ class RustRenderWorker:
     # (the viewer's View > density toggle, 2026-10-05); absent, renderd's
     # environment decides (FLOE_RUST_DENSITY_STACK / _DOTS)
     supports_density = True
+    # the occupancy summary at wide views (design.ovo): a render job's
+    # `occupancy` turns it on or off for that frame (the viewer's View >
+    # occupancy summary toggle, 2026-10-20); absent, renderd's rule decides
+    # (a jobdeck on, a plain layout off, FLOE_RUST_OCCUPANCY)
+    supports_occupancy = True
     # §F2R-17: the GUI's background margin prefetch (an enlarged frame
     # around the view whose crops serve later pans) is a Rust-only
     # optimization: renderd honors bg=True, cancels it at the
@@ -830,6 +835,11 @@ class RustRenderWorker:
             # the viewer's density toggle (2026-10-05): this frame's density
             # stack, over renderd's environment default
             command += " density=%s" % ("on" if job["density"] else "off")
+        if job.get("occupancy") is not None:
+            # the viewer's occupancy summary toggle (2026-10-20): this
+            # frame's summary, over renderd's rule (a jobdeck on, a plain
+            # layout off) and its environment
+            command += " occupancy=%s" % ("on" if job["occupancy"] else "off")
         self._send(command)
 
     def _submit_recolor(self, job):

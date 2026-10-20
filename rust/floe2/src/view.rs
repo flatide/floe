@@ -971,6 +971,7 @@ pub fn snapshot_json(s: &Snapshot) -> Value {
             "font_px": st.font_px,
             "mono": st.mono,
             "density": st.density,
+            "occupancy": st.occupancy,
             "root": st.root.as_ref().map(|r| json!({
                 "cell": r.cell, "name": r.name, "bbox": r.bbox})),
         },
@@ -1079,7 +1080,7 @@ fn navigation(v: &Value) -> Result<Navigation> {
 }
 
 /// The viewer's edit as the controller's Patch (the web's PatchDto names,
-/// rust/web/src/view.rs on feature/webui, plus `density`).
+/// rust/web/src/view.rs on feature/webui, plus `density` and `occupancy`).
 pub fn patch(v: &Value) -> Result<Patch> {
     let empty = Map::new();
     let o = match v {
@@ -1101,6 +1102,7 @@ pub fn patch(v: &Value) -> Result<Patch> {
         "font_px",
         "mono",
         "density",
+        "occupancy",
         "style_deltas",
         "root",
     ];
@@ -1118,6 +1120,7 @@ pub fn patch(v: &Value) -> Result<Patch> {
         labels: flag("labels")?,
         mono: flag("mono")?,
         density: flag("density")?,
+        occupancy: flag("occupancy")?,
         ..Default::default()
     };
     if let Some(px) = o.get("pixels") {
@@ -1240,6 +1243,7 @@ mod tests {
         let p = patch(&json!({
             "navigation": {"kind": "pan", "x": 0.25, "y": -0.5, "snap": true},
             "depth": 3, "detail": "high", "thin": "keep", "density": true,
+            "occupancy": false,
             "layers": [[1, 0], [2, 0]], "font_px": 18, "mono": false,
             "style_deltas": [{"pair": [1, 0], "color": "#ff0000",
                               "fill": {"kind": "speckle"}, "width": 2}],
@@ -1250,6 +1254,7 @@ mod tests {
         );
         assert!(matches!(p.depth, Some(Depth::Levels(3))));
         assert_eq!(p.density, Some(true));
+        assert_eq!(p.occupancy, Some(false));
         assert_eq!(p.layers, Some(Layers::Only(vec![(1, 0), (2, 0)])));
         assert_eq!(p.style_deltas.len(), 1);
         assert_eq!(p.style_deltas[0].color, Some([255, 0, 0, 255]));

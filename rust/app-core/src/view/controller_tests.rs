@@ -1797,6 +1797,48 @@ fn density_is_a_render_policy_and_goes_on_the_request() {
     assert_eq!(c.requests.lock().unwrap()[1].density, Some(true));
     v.close().unwrap();
 }
+/// The occupancy summary toggle (user 2026-10-20: "an option to see the
+/// occupancy when a jobdeck-indexed layout is opened in the plain layout
+/// mode"): a render policy like the density - the state keeps it, the render
+/// key changes with it and every frame request carries it; unset, nothing
+/// goes on the request (renderd's rule).
+#[test]
+fn occupancy_is_a_render_policy_and_goes_on_the_request() {
+    let r = Resources::new(Limits::default()).unwrap();
+    let m = model(false);
+    let c = Arc::new(Control::default());
+    let mut v = desktop(&c, &m, &r);
+    wait(|| v.latest().is_some());
+    let before = v.snapshot();
+    assert_eq!(before.state.occupancy, None);
+    assert_eq!(c.requests.lock().unwrap()[0].occupancy, None);
+    let after = v
+        .edit(
+            before.state_rev,
+            Patch {
+                occupancy: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_ne!(after.render_key, before.render_key);
+    assert_eq!(after.state.occupancy, Some(true));
+    wait(|| c.requests.lock().unwrap().len() == 2);
+    assert_eq!(c.requests.lock().unwrap()[1].occupancy, Some(true));
+    let off = v
+        .edit(
+            after.state_rev,
+            Patch {
+                occupancy: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_ne!(off.render_key, after.render_key);
+    wait(|| c.requests.lock().unwrap().len() == 3);
+    assert_eq!(c.requests.lock().unwrap()[2].occupancy, Some(false));
+    v.close().unwrap();
+}
 #[test]
 fn desktop_clamp_keeps_the_gtk_zoom_range_and_the_die_in_reach() {
     let r = Resources::new(Limits::default()).unwrap();

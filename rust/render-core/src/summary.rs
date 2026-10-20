@@ -68,7 +68,8 @@ pub const NONE_INVALID: &str = "invalid";
 pub const NONE_NEAR: &str = "near";
 pub const NONE_LAYERS: &str = "layers";
 /// a plain layout's frame (not a jobdeck pass): the summary is off by
-/// default there (user decision 2026-09-24), FLOE_RUST_OCCUPANCY=on uses it
+/// default there (user decision 2026-09-24); FLOE_RUST_OCCUPANCY=on or the
+/// request's `occupancy=on` (the viewer's toggle, 2026-10-20) uses it
 pub const NONE_LAYOUT: &str = "layout";
 
 /// The summary decision of one request.
@@ -231,7 +232,9 @@ pub fn cull_allowed() -> bool {
 /// (a layout indexed with --occupancy kept replacing its wide keep views,
 /// and hid the page path from measurements). FLOE_RUST_OCCUPANCY=on uses
 /// it for layouts again (diagnostic); =off turns it off for decks too.
-/// Jobdeck passes (deck.rs) are not affected.
+/// Jobdeck passes (deck.rs) are not affected. A request's `occupancy=on|off`
+/// decides for its frame before either (renderd summary_switches, the
+/// viewer's toggle, 2026-10-20).
 pub fn layout_allowed() -> bool {
     std::env::var("FLOE_RUST_OCCUPANCY").as_deref() == Ok("on")
 }

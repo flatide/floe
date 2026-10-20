@@ -228,6 +228,10 @@ level L  cell = base_cell_dbu × 2^L, grid (w, h) = ceil(span/cell),
    경로가 가려졌다. `floe2 index`의 레이아웃 기본(요약 안 만듦)은 그대로이고, 만든 파일은 남아 있어도
    쓰이지 않는다. gate `RenderTests.test_a_plain_layout_draws_no_summary_by_default`(기본 프레임 =
    킬 스위치 프레임, 이유 `layout`, opt-in은 요약); 이 게이트의 레이아웃 워커는 `=on`으로 요약을 판정한다.
+   **요청 단위 옵션(2026-10-20, 0.12.371 / RENDERD 0.12.336)**: 렌더 명령의 `occupancy=on|off`가 환경보다 먼저다 -
+   `on`이면 레이아웃 프레임도 요약(킬 스위치가 있어도), `off`면 덱 pass도 페이지 경로(사유 `off`), 없으면 이 규칙
+   그대로. 뷰어의 View > occupancy summary at wide views(`o`)·`floe2 view --occupancy`·`floe2 render --occupancy`가
+   보낸다(renderd `summary_switches`; 아래 2026-10-20 절).
 
 ## 7. 덱 통합
 
@@ -992,3 +996,38 @@ occupancy는 정밀할수록 용량이 커진다: 셀을 절반으로 줄이면 
 - fit의 "0 cells"는 미해결이다. 337 레이어가 선택됐는데 셀이 하나도 투영되지 않았다는
   뜻이라, 재사용 프레임(`frame_cache_hit`)이거나 depth 제한 요청일 수 있다. perf 라인의
   `frame_cache_hit`, `summary_level`, `summary_cell_um`, depth로 확인한다.
+
+### 2026-10-20 — 레이아웃 뷰에서 요약을 켜는 옵션 (0.12.371 / RENDERD 0.12.336, 사용자 요청)
+
+사용자: "jobdeck으로 인덱싱된 레이아웃 파일을 일반 레이아웃 모드로 열었을 때도 occupancy를 볼 수 있도록
+옵션이 있으면 좋겠음."
+
+덱이 색인한 소스는 design.ovo를 갖지만, 단독으로 열면 §6-9의 규칙(2026-09-24)대로 `summary: none
+(layout)`이었다. 기본값은 그대로 두고 요청 단위의 옵션을 더했다.
+
+- **렌더 명령 필드 `occupancy=on|off`**(worker-client `RenderRequest::occupancy`, renderd
+  `RenderCommand::occupancy`): 있으면 그 프레임의 요약을 정한다 - `on`은 레이아웃 프레임도 요약(킬 스위치
+  `FLOE_RUST_OCCUPANCY=off`보다 먼저), `off`는 덱 pass도 페이지 경로(사유 `off`). 없으면 종전 규칙(덱 켬·
+  레이아웃 끔·환경 `on`/`off`). 뷰 루트 아래는 어느 쪽이든 끔(design.ovo는 탑을 평탄화한 것). renderd
+  `summary_switches`(단위 테스트 `occupancy_switches_follow_the_command_then_the_environment`), 덱은
+  `DeckRenderRequest::occupancy`.
+- **예산 맞춤 기억**(`fit_memory_key`)에 `PlanRequest::summary_layers`를 더했다. 요약 상태가 한 프로세스 안에서
+  요청마다 달라질 수 있게 되어, 같은 배율·레이어의 켬/끔이 서로의 맞춤 결정을 쓰지 않도록(요약이 뺀 레이어
+  없이 맞춘 결정과 전부를 맞춘 결정은 다르다; 단위 테스트 `fit_memory_keys_split_on_the_summarized_layers`).
+  보관 프레임의 키는 이미 요약을 담는다(`RetainedKey::summary`).
+- **뷰어**: View > occupancy summary at wide views(`o`), 상태줄 ` · occupancy:on/off`, `floe2 view --occupancy
+  on|off`(실행 중인 창에 `occupancy=` 전달). app-core `ViewState::occupancy`/`Patch::occupancy`(None = 규칙),
+  gtk-service 패치 필드 `occupancy`. 체크 상태는 유효 상태(사용자 선택, 없으면 규칙을 같은 환경에서 계산). 덱의
+  mode 전환은 토글을 유지한다. SPEC-VIEWER §7의 항목.
+- **CLI**: `floe2 render --occupancy on|off`(app-core `Shot::occupancy`, DRC 캡처도; `--detail exact`·
+  `--archival`은 `on`을 거절 - 컷 0은 요약하지 않는다). 보고서 JSON `occupancy`(null = 규칙).
+- **게이트**: `validate_occupancy` RenderTests
+  `test_the_request_turns_the_summary_on_for_a_layout_and_off_for_the_opt_in`(기본·킬 스위치 워커의
+  `occupancy=on` = opt-in 프레임, opt-in 워커의 `occupancy=off` = 킬 스위치 프레임, 한 워커에서 켬-끔-켬-규칙),
+  DeckRenderTests `test_the_request_switches_the_passes_summary_either_way`; `gtk_view`(토글 뒤 컨트롤러 상태와
+  픽셀, `floe2 render --occupancy on` 캡처 일치); `rust_renderer`
+  `test_gui_occupancy_toggle_follows_backend_capability`(GUI 계약); 단위 테스트 renderd(위 둘), app-core
+  `occupancy_is_a_render_policy_and_goes_on_the_request`, app-cli
+  `occupancy_is_asked_with_a_cut_for_layouts_and_jobdecks`, floe2 뷰 채널 패치, worker-client wire.
+- **안 바뀐 것**: 생성 기본(레이아웃은 `--occupancy` opt-in, 덱 소스는 켬), 레이아웃 프레임의 기본(끔), 환경
+  변수의 뜻(필드가 없는 요청 - 게이트·예전 클라이언트 - 은 종전대로).

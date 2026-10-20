@@ -364,6 +364,11 @@ pub struct Patch {
     /// The density under the cut on or off (the desktop viewer's View >
     /// density / `v`, 2026-10-05).
     pub density: Option<bool>,
+    /// The occupancy summary on or off (the desktop viewer's View >
+    /// occupancy summary / `o`, 2026-10-20): a plain layout's wide views
+    /// drawn from its design.ovo as a jobdeck's passes are (a source a
+    /// jobdeck indexed, opened on its own), or a jobdeck's passes without it.
+    pub occupancy: Option<bool>,
     pub style_changes: Vec<Style>,
     pub style_deltas: Vec<StyleDelta>,
     pub style_batch: Option<StyleBatch>,
@@ -411,6 +416,11 @@ pub struct ViewState {
     /// renderd's default (FLOE_RUST_DENSITY_STACK), Some the viewer's
     /// choice for every frame.
     pub density: Option<bool>,
+    /// The occupancy summary (design.ovo at wide views): None leaves
+    /// renderd's rule (a jobdeck's passes draw it, a plain layout's frames
+    /// do not - user decision 2026-09-24), Some the viewer's choice for
+    /// every frame (2026-10-20).
+    pub occupancy: Option<bool>,
     pub styles: Arc<Vec<Style>>,
     assignments: Arc<properties::Assignments>,
     pub root: Option<Root>,
@@ -652,6 +662,7 @@ impl ViewState {
             font_px: 14,
             mono: false,
             density: None,
+            occupancy: None,
             styles: Arc::clone(&model.styles),
             assignments: Arc::clone(&model.assignments),
             root: None,
@@ -756,6 +767,9 @@ impl ViewState {
         }
         if let Some(density) = patch.density {
             s.density = Some(density);
+        }
+        if let Some(occupancy) = patch.occupancy {
+            s.occupancy = Some(occupancy);
         }
         if let Some(layers) = patch.layers {
             s.layers = model.layers(&layers)?;
@@ -954,6 +968,7 @@ impl ViewState {
             && self.font_px == other.font_px
             && self.mono == other.mono
             && self.density == other.density
+            && self.occupancy == other.occupancy
             && self.styles == other.styles
     }
     pub fn request(&self, model: &Model, base: RenderRequest) -> RenderRequest {
@@ -971,6 +986,7 @@ impl ViewState {
             mono: self.mono,
             root: self.root.as_ref().map(|r| r.cell),
             density: self.density,
+            occupancy: self.occupancy,
             ..base
         }
     }

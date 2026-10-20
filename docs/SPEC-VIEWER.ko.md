@@ -354,6 +354,30 @@
   LOD 토글(메뉴 항목·`l` 키·깊이 라벨의 `lod:on/off`·`floe2 view --lod`)은 제거됐다(2026-09-22
   사용자 결정: LOD는 쓰지 않는다 — 토글은 Rust 경로의 renderd에 닿지도 않았다). 실행 중인 창으로
   넘어오는 `lod=` 필드는 받아서 무시하고, renderd의 LOD 교체는 기본 끔이다(SPEC-PLANNER §3).
+- **점유 요약 켜기/끄기**(2026-10-20, 0.12.371 / RENDERD 0.12.336; 사용자: "jobdeck으로 인덱싱된 레이아웃 파일을
+  일반 레이아웃 모드로 열었을 때도 occupancy를 볼 수 있도록 옵션이 있으면 좋겠음"): floe2(Rust 렌더러)의 View >
+  **occupancy summary at wide views**(체크, `o`). 캐시의 design.ovo로 광역 뷰를 그리는 점유 요약(OCCUPANCY_PLAN
+  §6)을 이 뷰에서 켜고 끈다. renderd의 규칙은 잡덱의 pass는 켬, 일반 레이아웃의 프레임은 끔(2026-09-24 사용자
+  결정)이라, 덱이 색인한 소스를 단독으로 열면 파일이 있어도 `summary: none (layout)`이었다. `_toggle_occupancy`가
+  `occupancy_on`을 지금 유효한 상태의 반대로 두고 `_on_depth`(상태줄과 다시 그리기)를 부른다.
+  - 체크 상태는 유효 상태다: 사용자가 정하지 않았으면(`occupancy_on` None) renderd의 규칙을 같은 환경에서 계산한
+    값 - 덱 켬·레이아웃 끔, `FLOE_RUST_OCCUPANCY=on`이면 레이아웃도 켬, `=off`면 덱도 끔(`_occupancy_effective`).
+  - 시작값은 `floe2 view --occupancy on|off`다. 실행 중인 창에는 `occupancy=`로 넘어가고, 인덱스가 없어 열기를 미룬
+    경우는 pending_fields로 간다. 옵션이 없으면 아무것도 보내지 않는다(= renderd의 규칙).
+  - 렌더 작업(뷰포트와 여백)에는 사용자가 정한 뒤로만 `occupancy`가 실리고(컨트롤러 `ViewState::occupancy`,
+    `Patch::occupancy`; gtk-service 패치 필드 `occupancy`, 상태 JSON `occupancy`), worker-client는 렌더 명령에
+    `occupancy=on|off`를 붙인다. renderd(`summary_switches`): 필드가 있으면 그 프레임은 그대로 따르고(켬이면
+    레이아웃 프레임도 요약 - 킬 스위치 `FLOE_RUST_OCCUPANCY=off`보다 먼저; 끔이면 덱 pass도 페이지 경로, 사유
+    `off`), 없으면 종전 규칙이다. 뷰 루트 아래서는 어느 쪽이든 끔이다(design.ovo는 탑을 평탄화한 것). 덱은
+    `DeckRenderRequest::occupancy`로 pass마다 같은 규칙이다. 덱의 level/chip 전환은 토글을 유지한다.
+  - 보관 프레임의 키는 요약 선택(`RetainedKey::summary`)을 이미 담고 있어 토글한 뷰가 이전 프레임으로 대신되지
+    않는다. 예산 맞춤 기억(`fit_memory_key`)에는 요약이 플랜에서 뺀 레이어(`PlanRequest::summary_layers`)를
+    더했다: 같은 배율에서 요약 켬과 끔은 서로 다른 페이지 집합을 맞춘 것이라 서로의 결정을 쓰지 않는다.
+  - 상태줄(깊이 라벨)에 ` · occupancy:on/off`가 붙는다. 캐시에 design.ovo가 없으면 켜도 perf 줄이 `summary: none
+    (nofile)`이고 그림은 그대로다(레이아웃은 `floe2 index SRC --occupancy-only`로 만든다).
+  - `floe2 render --occupancy on|off`가 같은 필드다(app-core `Shot::occupancy`, DRC 캡처도; `--detail exact`와
+    `--archival`은 `on`을 거절한다 - 컷 0은 요약하지 않는다). 보고서 JSON에 `occupancy`(null = 규칙)가 실린다.
+  - 렌더러가 요약을 모르면(`supports_occupancy` 없음) 메뉴 항목이 비활성이고 키도 아무 일을 하지 않는다.
 
 ## 8. 색/패턴 적용 경로
 

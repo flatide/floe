@@ -96,7 +96,7 @@ class Reference:
         self.gen = 0
 
     def frame(self, f, density=None, labels=True, view=None, frames=False,
-              depth=None):
+              depth=None, occupancy=None):
         self.gen += 1
         job = {"kind": "render", "gen": self.gen, "scope": "live",
                "bbox": tuple(f["bbox"]), "view": view, "w": f["width"],
@@ -108,6 +108,8 @@ class Reference:
             job["bg"] = True
         if density is not None:
             job["density"] = density
+        if occupancy is not None:
+            job["occupancy"] = occupancy
         self.worker.submit(job)
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
@@ -637,6 +639,11 @@ def gui_viewer(src, ref):
         steps = (("a zoom", lambda: v._zoom_center(0.25), {}),
                  ("a pan", lambda: v._pan_view("Right"), {}),
                  ("the density", v._toggle_density, {"density": True}),
+                 # the occupancy summary toggle (2026-10-20): the state and
+                 # the request carry it (this layout has no design.ovo, so
+                 # the picture is the page path's either way)
+                 ("the occupancy summary", v._toggle_occupancy,
+                  {"occupancy": True}),
                  ("the grayscale", lambda: v._set_mono(True, announce=False),
                   {"mono": True}))
         for what, step, policy in steps:
@@ -651,7 +658,8 @@ def gui_viewer(src, ref):
             if policy.get("mono"):
                 ref.worker.submit({"kind": "mono", "on": True})
             same(on_screen, ref.frame(f, density=v.density_on, frames=True,
-                                      depth=v._depth()), what)
+                                      depth=v._depth(),
+                                      occupancy=v.occupancy_on), what)
             if policy.get("mono"):
                 ref.worker.submit({"kind": "mono", "on": False})
             for key, value in policy.items():
@@ -743,9 +751,10 @@ def capture_parity(src, temp):
     view` starts it (detail medium, thin keep, frames and labels on, the
     density under the cut on - user 2026-10-12: "turn the density on by
     default"), and for each view it settles on - the plain open (depth 0), a
-    zoom, full depth, a zoom out, the density turned off (`v`) - the capture
-    of its box at its size, its depth and, for the last, --density off: the
-    same RGB, pixel for pixel."""
+    zoom, full depth, a zoom out, the density turned off (`v`), the occupancy
+    summary turned on (`o`, 2026-10-20) - the capture of its box at its size,
+    its depth and, for the last two, --density off / --occupancy on: the same
+    RGB, pixel for pixel."""
     from PIL import Image
     from floe import gui
     cache = gtkservice.ServiceCache(str(src))
@@ -783,7 +792,9 @@ def capture_parity(src, temp):
         steps = (("a zoom", lambda: v._zoom_center(0.25), ()),
                  ("full depth", lambda: v._set_depth(999), ()),
                  ("a zoom out", lambda: v._zoom_center(4.0), ()),
-                 ("the density off", v._toggle_density, ("--density", "off")))
+                 ("the density off", v._toggle_density, ("--density", "off")),
+                 ("the occupancy summary on", v._toggle_occupancy,
+                  ("--density", "off", "--occupancy", "on")))
         for what, step, extra in steps:
             rev = v.worker.snapshot["render_rev"]
             step()
@@ -791,7 +802,8 @@ def capture_parity(src, temp):
                  and v.worker.snapshot["render_rev"] != rev, what)
             compare(what, *extra)
         print("capture parity: floe2 render's defaults = the viewer's pixels "
-              "(open, zoom, full depth, zoom out with the density on; density off)")
+              "(open, zoom, full depth, zoom out with the density on; density off; "
+              "occupancy summary on)")
     finally:
         v._quit()
         v.window.destroy()

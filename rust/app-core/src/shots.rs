@@ -138,6 +138,12 @@ pub struct Shot {
     /// starts - on wherever a cut drops shapes (user 2026-10-12: "turn the
     /// density on by default"), off for the export look (density_on).
     pub density: Option<bool>,
+    /// The occupancy summary (`--occupancy on|off`, the viewer's View >
+    /// occupancy summary, 2026-10-20): on draws a layout's wide views from
+    /// its design.ovo (a jobdeck's source opened on its own has one), off
+    /// none for a jobdeck's passes either. None: renderd's rule - a jobdeck
+    /// on, a plain layout off (user decision 2026-09-24).
+    pub occupancy: Option<bool>,
     /// Solid fills, no layer-property patterns - the export look
     /// (Dataset::styles(archival)); false: the viewer's fills.
     pub archival: bool,
@@ -171,6 +177,7 @@ impl Default for Shot {
             labels: false,
             font_px: 14,
             density: None,
+            occupancy: None,
             archival: true,
         }
     }

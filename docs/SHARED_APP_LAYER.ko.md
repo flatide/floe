@@ -455,3 +455,12 @@ P4d처럼 컨트롤러 루프에서만 바뀐다. `FLOE_GTK_LOOP=legacy`는 예�
   - **판정:** 덱 인덱스는 하나다(app-core `jobdeck::index`). 옵션은 `floe2 index`의 것이고 OUTDIR은 없다(종료 2). 종료 코드는 0·2(실패)·75(busy) 그대로다. `drc-prepare`와 같은 방식이다.
 - **웹:** floe2-web도 같은 app-cli라 CLI에서는 같다. 웹 서버의 관리 인덱스(`managed_index`)는 바뀌지 않았다.
 - **게이트:** `index_lock` K10~K12(CLI 자동 인덱싱, `--wait`의 거절·한도·신호·한 번만 빌드, 독자 대기, 덱 대기, `floe-index vfs DECK.jb`). 단위 테스트는 app-cli `ready`, vfs `lock`이다.
+
+## 13. 레이아웃 뷰의 점유 요약 옵션 (2026-10-20, app 0.12.371 / RENDERD 0.12.336) — 정책은 공유 Rust, 켜고 끄기는 UI
+
+사용자: "jobdeck으로 인덱싱된 레이아웃 파일을 일반 레이아웃 모드로 열었을 때도 occupancy를 볼 수 있도록 옵션이 있으면 좋겠음."
+
+- **공유 Rust:** worker-client `RenderRequest::occupancy`(`occupancy=on|off`, 있을 때만 wire에), renderd `RenderCommand::occupancy` + `summary_switches`(요청 > 환경 > 규칙; 뷰 루트는 끔) + 예산 맞춤 키의 요약 레이어(`fit_memory_key`), render-core `DeckRenderRequest::occupancy`, app-core `ViewState::occupancy`·`Patch::occupancy`(None = renderd의 규칙; `same_policy`와 렌더 키에 든다; 덱 mode 전환이 유지)·`Shot::occupancy`(`floe2 render --occupancy`, DRC 캡처, 보고서 JSON `occupancy`), gtk-service 뷰 채널의 패치 필드 `occupancy`와 상태 JSON.
+- **UI만:** floe/gui.py의 메뉴 항목(View > occupancy summary at wide views, `o`), 상태줄 ` · occupancy:on/off`, `floe2 view --occupancy`(viewcli.py; 실행 중인 창에 `occupancy=` 전달, pending_fields). 체크 상태 = 유효 상태(사용자 선택, 없으면 renderd의 규칙을 같은 환경 `FLOE_RUST_OCCUPANCY`에서 계산). 렌더러가 요약을 모르면(`supports_occupancy` 없음) 비활성.
+- **웹:** 웹 PatchDto에 `occupancy`를 더하면 같은 컨트롤러 필드다(feature/webui의 몫). `floe2-web render --occupancy`는 app-cli 공유라 바로 있다.
+- **게이트:** occupancy(RenderTests·DeckRenderTests), gtk_view(토글 뒤 상태·픽셀, `floe2 render --occupancy on` 캡처 일치), rust_renderer(GUI 계약), 단위 테스트(renderd·app-core·app-cli·floe2·worker-client). 자세한 것은 OCCUPANCY_PLAN 2026-10-20 절, SPEC-VIEWER §7.
