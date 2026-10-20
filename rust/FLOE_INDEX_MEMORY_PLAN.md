@@ -226,6 +226,12 @@ and boxes). `--check` parses the Doc beside it and holds the two equal
 cell by cell (gate `rust_inventory`); `--cells` lists every cell with its
 byte range, boxes, rank, height and children.
 
+`floe-index vfs SRC OUT --stream [--mem GiB]` (0.12.332) is the streaming
+build the plan's M5 pointed at (docs/STREAMING_INDEX_PLAN.ko.md §4): the
+inventory pass, then the cells read in file order behind a byte budget and
+built by the same planner / committer / encoder, byte-identical to the
+in-memory build (gate `vfs_stream`); `floe2 index SRC --stream` forwards it.
+
 The field scan (0.12.328, 2026-10-19) answered the unknowns: 48.5 billion
 vertices (28.9 per polygon), 2.5 billion point-list repetition members
 (10.5 per repetition), `doc_bytes_est` 927 GiB (1.05 TiB with the bundle's

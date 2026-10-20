@@ -117,6 +117,12 @@ pub fn vfs_cmd(args: &[String]) {
     // MemAvailable, so without this flag the ceiling is UNBOUNDED
     // there - set it when indexing big files on macOS.
     let mut p2_shard_limit: Option<u64> = None;
+    // the streaming build (docs/STREAMING_INDEX_PLAN.ko.md S4): the
+    // inventory pass over the file, then the cells read in file order
+    // behind a byte budget (--mem GiB; default min(MemAvailable/2, 32 GiB))
+    // instead of the whole parse held in memory
+    let mut stream = false;
+    let mut mem_gib: Option<f64> = None;
     // Isolated, non-publishing cell planner profile. The complete source is
     // still parsed and recursive child bboxes are prepared, but exactly one
     // build_cell_plan call runs and no cache path is created or modified.
@@ -318,6 +324,19 @@ pub fn vfs_cmd(args: &[String]) {
                 profile_snapshot_refresh = true;
                 i += 1;
             }
+            "--stream" => {
+                stream = true;
+                i += 1;
+            }
+            "--mem" => {
+                let g: f64 = args[i + 1].parse().expect("--mem GiB");
+                if !(g > 0.0) || !g.is_finite() {
+                    eprintln!("--mem must be a positive number of GiB");
+                    std::process::exit(2);
+                }
+                mem_gib = Some(g);
+                i += 2;
+            }
             a if a.starts_with("--") => crate::unknown_option("vfs", a),
             a => {
                 if src.is_none() {
@@ -384,6 +403,27 @@ pub fn vfs_cmd(args: &[String]) {
         eprintln!(
             "cell profiling cannot be combined with coverage, occupancy, representatives, frontier-only, or kill-at"
         );
+        std::process::exit(2);
+    }
+    if stream
+        && (profiling
+            || coverage
+            || coverage_only
+            || occupancy_only
+            || representatives
+            || representatives_only
+            || frontier_only)
+    {
+        eprintln!(
+            "--stream builds the index from the inventory pass without holding the \
+             whole parse: coverage and representatives are not available in \
+             streaming mode (deferred), and the profile and additive-only runs \
+             parse in memory - drop --stream for them"
+        );
+        std::process::exit(2);
+    }
+    if mem_gib.is_some() && !stream {
+        eprintln!("--mem belongs to --stream");
         std::process::exit(2);
     }
     if [
@@ -548,6 +588,31 @@ pub fn vfs_cmd(args: &[String]) {
                 return;
             }
         }
+    }
+    if stream {
+        vfs_stream(
+            StreamArgs {
+                src: src.clone(),
+                outdir: outdir.clone(),
+                jobs,
+                encode_batch,
+                plan_batch,
+                page_target_bytes,
+                lod,
+                page_occ,
+                hier,
+                ovs,
+                occupancy,
+                slow_cell_s,
+                p2_shard_limit,
+                kill_at: kill_at.clone(),
+                hold_at: hold_at.clone(),
+                mem_gib,
+            },
+            lock,
+            t0,
+        );
+        return;
     }
     eprintln!("[vfs] reading {}...", src);
     let data = std::fs::read(&src).expect("read src");
@@ -726,33 +791,7 @@ pub fn vfs_cmd(args: &[String]) {
         // (marker partial), never as a valid cache.
         // --kill-at: gate-only hook forcing death at the interrupt
         // points (tools/validate_vfs_marker.py).
-        for f in [
-            "design.ovm",
-            "design.ovp",
-            "design.ovt",
-            "design.ovc",
-            "design.ovc.tmp",
-            "design.ovo",
-            "design.ovo.tmp",
-            "design.ovr",
-            "design.ovr.tmp",
-            "design.ovh",
-            "design.ovh.tmp",
-            "design.ovb",
-            "design.ovb.tmp",
-            "design.ovs",
-            "design.ovs.tmp",
-            "labels.tsv",
-            // legacy (pre-0.10) viewer file: scrub on rebuild so a
-            // re-index actually reclaims the skeleton's bytes
-            "skeleton.oas",
-            "texts.tsv",
-            "meta.json",
-            "meta.json.tmp",
-        ] {
-            let _ = std::fs::remove_file(format!("{}/{}", outdir, f));
-        }
-        let _ = remove_cell_ovs(&outdir, &[]);
+        clear_outputs(&outdir);
         if kill_at.as_deref() == Some("marker-deleted") {
             eprintln!("[vfs] --kill-at marker-deleted");
             std::process::exit(9);
@@ -862,6 +901,322 @@ pub fn vfs_cmd(args: &[String]) {
         "[vfs] done in {:.1}s -> {}",
         t0.elapsed().as_secs_f64(),
         outdir
+    );
+}
+
+/// the marker protocol's first step (VFS_HIER.md par.3.6): design.ovm is
+/// the commit marker - kill it FIRST, delete the other outputs, write
+/// everything, write the marker LAST; an interrupted build reads as "no
+/// cache" (marker gone) or "corrupt cache" (marker partial), never as a
+/// valid cache
+fn clear_outputs(outdir: &str) {
+    for f in [
+        "design.ovm",
+        "design.ovp",
+        "design.ovt",
+        "design.ovc",
+        "design.ovc.tmp",
+        "design.ovo",
+        "design.ovo.tmp",
+        "design.ovr",
+        "design.ovr.tmp",
+        "design.ovh",
+        "design.ovh.tmp",
+        "design.ovb",
+        "design.ovb.tmp",
+        "design.ovs",
+        "design.ovs.tmp",
+        "labels.tsv",
+        // legacy (pre-0.10) viewer file: scrub on rebuild so a
+        // re-index actually reclaims the skeleton's bytes
+        "skeleton.oas",
+        "texts.tsv",
+        "meta.json",
+        "meta.json.tmp",
+    ] {
+        let _ = std::fs::remove_file(format!("{}/{}", outdir, f));
+    }
+    let _ = remove_cell_ovs(outdir, &[]);
+}
+
+struct StreamArgs {
+    src: String,
+    outdir: String,
+    jobs: usize,
+    encode_batch: usize,
+    plan_batch: usize,
+    page_target_bytes: u64,
+    lod: bool,
+    page_occ: bool,
+    hier: bool,
+    ovs: bool,
+    occupancy: bool,
+    slow_cell_s: f64,
+    p2_shard_limit: Option<u64>,
+    kill_at: Option<String>,
+    hold_at: Option<String>,
+    mem_gib: Option<f64>,
+}
+
+/// the streaming build's budget when --mem is not given: half of
+/// MemAvailable, at most 32 GiB (the field host serves other services;
+/// STREAMING_INDEX_PLAN §4.3 / §10); half of MemTotal when only that is
+/// known; 32 GiB when neither is (macOS: set --mem). Returns the bytes
+/// and how they were chosen.
+fn default_stream_budget() -> (u64, &'static str) {
+    let (gib, how) = if let Some(gb) = crate::mem_available_gb() {
+        ((gb / 2.0).min(32.0), "half of MemAvailable, at most 32 GiB")
+    } else if let Some(gb) = crate::mem_total_gb() {
+        ((gb / 2.0).min(32.0), "half of MemTotal, at most 32 GiB (MemAvailable unknown)")
+    } else {
+        (32.0, "32 GiB (the host's memory is unknown here: give --mem)")
+    };
+    ((gib.max(0.001) * (1u64 << 30) as f64) as u64, how)
+}
+
+/// `floe-index vfs SRC OUT --stream`: the two-pass build
+/// (docs/STREAMING_INDEX_PLAN.ko.md §3-§4). Pass 1 is the inventory over
+/// a read-only mapping of the file (one sequential sweep, nothing of the
+/// geometry kept); pass 2 reads the cells in file order behind the byte
+/// budget through the streaming store (stream.rs) and drives the same
+/// planner / committer / encoder as the in-memory build, so the cache's
+/// bytes are the same (gate G3). design.ovo (occupancy) waits for S5;
+/// design.ovc / design.ovr are not offered in this mode.
+fn vfs_stream(a: StreamArgs, mut lock: floe_vfs::lock::WriterGuard, t0: std::time::Instant) {
+    let file = std::fs::File::open(&a.src).unwrap_or_else(|e| {
+        eprintln!("open {}: {}", a.src, e);
+        std::process::exit(1);
+    });
+    let meta = file.metadata().expect("source metadata");
+    let size = meta.len();
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // ---- pass 1: the inventory (the mapping goes before pass 2 starts)
+    eprintln!("[vfs] stream: inventory pass over {} ({})...", a.src, fmt_size(size));
+    let t1 = std::time::Instant::now();
+    let ticking = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    {
+        let ticking = ticking.clone();
+        std::thread::spawn(move || {
+            use std::sync::atomic::Ordering::Relaxed;
+            let t = std::time::Instant::now();
+            let mut last = 0u64;
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                if !ticking.load(Relaxed) {
+                    return;
+                }
+                let e = t.elapsed().as_secs();
+                if e >= last + 10 {
+                    last = e;
+                    eprintln!("[vfs] stream: inventory... ({}s, rss {})", e, rss());
+                }
+            }
+        });
+    }
+    let inv = {
+        // SAFETY: a private read-only mapping of a file this process
+        // only reads; a concurrent writer would corrupt any reader of
+        // this file, mapped or not (the cache locks keep our own runs out)
+        let map = unsafe { memmap2::Mmap::map(&file) }.unwrap_or_else(|e| {
+            eprintln!("map {}: {}", a.src, e);
+            std::process::exit(1);
+        });
+        match floe_oasis::inventory(&map[..], a.jobs) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("inventory {}: {}", a.src, e);
+                std::process::exit(1);
+            }
+        }
+    };
+    ticking.store(false, std::sync::atomic::Ordering::Relaxed);
+    let inventory_s = t1.elapsed().as_secs_f64();
+    let (budget, budget_how) = match a.mem_gib {
+        Some(g) => ((g * (1u64 << 30) as f64) as u64, "from --mem"),
+        None => default_stream_budget(),
+    };
+    eprintln!(
+        "[vfs] stream: inventory {} cells, {} layers, {} records in {:.1}s \
+         (Doc estimate {}; budget {} {}; rss {})",
+        inv.cells.len(),
+        inv.layer_order.len(),
+        inv.scan.records,
+        inventory_s,
+        fmt_size(inv.scan.doc_bytes),
+        fmt_size(budget),
+        budget_how,
+        rss()
+    );
+    let pre = crate::prepass::PrePass::from_inventory(&inv);
+    let (store, plan) = match crate::stream::StreamStore::new(inv, &a.src, budget) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[vfs] stream: {}", e);
+            std::process::exit(1);
+        }
+    };
+    eprintln!(
+        "[vfs] stream: {} ranges; largest cell {} about {} resident",
+        plan.ranges,
+        plan.largest_cell,
+        fmt_size(plan.largest_cell_bytes)
+    );
+    // ---- pass 2: the build behind the marker protocol
+    std::fs::create_dir_all(&a.outdir).unwrap_or_else(|e| {
+        eprintln!("create {}: {}", a.outdir, e);
+        std::process::exit(1);
+    });
+    clear_outputs(&a.outdir);
+    if a.kill_at.as_deref() == Some("marker-deleted") {
+        eprintln!("[vfs] --kill-at marker-deleted");
+        std::process::exit(9);
+    }
+    let t_build = std::time::Instant::now();
+    let streaming = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    struct StopOnDrop<'a>(&'a std::sync::atomic::AtomicBool);
+    impl Drop for StopOnDrop<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        store.with_readers(a.jobs, || {
+        // the readers' heartbeat beside the pipeline's: what is charged
+        // against the budget and how far the file is read; the guard
+        // stops it when build() returns or panics, so the scope joins
+        std::thread::scope(|s| {
+            let _stop = StopOnDrop(&streaming);
+            let streaming = &streaming;
+            let store_ref: &crate::stream::StreamStore = &store;
+            s.spawn(move || {
+                use std::sync::atomic::Ordering::Relaxed;
+                let t = std::time::Instant::now();
+                let mut last = 0u64;
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    if !streaming.load(Relaxed) {
+                        return;
+                    }
+                    let e = t.elapsed().as_secs();
+                    if e >= last + 10 {
+                        last = e;
+                        let (resident, done, total) = store_ref.progress();
+                        eprintln!(
+                            "[vfs] stream: ranges {}/{} read, {} of {} charged \
+                             ({}s, rss {})",
+                            done,
+                            total,
+                            fmt_size(resident),
+                            fmt_size(budget),
+                            e,
+                            rss()
+                        );
+                    }
+                }
+            });
+            build(
+                &store,
+                pre,
+                t_build,
+                size,
+                mtime,
+                &a.outdir,
+                a.jobs,
+                a.encode_batch,
+                a.plan_batch,
+                a.page_target_bytes,
+                a.lod,
+                a.page_occ,
+                a.slow_cell_s,
+                a.p2_shard_limit,
+            )
+        })
+        })
+    }));
+    let (ovm_bytes, rbb, lmems, tstats) = match built {
+        Ok(v) => v,
+        Err(e) => {
+            // the source failed under the reader (a parse error, a short
+            // read): one line and exit 1, as the in-memory parse ends;
+            // anything else is a bug and keeps its panic
+            if let Some(why) = store.failed() {
+                eprintln!(
+                    "[vfs] stream: {} - the build stopped; no cache was written \
+                     (design.ovm, the commit marker, was removed first)",
+                    why
+                );
+                std::process::exit(1);
+            }
+            std::panic::resume_unwind(e);
+        }
+    };
+    let (resident, done, total) = store.progress();
+    eprintln!(
+        "[vfs] stream: build complete; {}/{} ranges read, {} still charged to the budget",
+        done,
+        total,
+        fmt_size(resident)
+    );
+    if a.kill_at.as_deref() == Some("ovp-written") {
+        eprintln!("[vfs] --kill-at ovp-written");
+        std::process::exit(9);
+    }
+    if a.kill_at.as_deref() == Some("ovt-written") {
+        eprintln!("[vfs] --kill-at ovt-written");
+        std::process::exit(9);
+    }
+    let (frontier, ovm_bytes) = {
+        let ovm = floe_ovm::Ovm::from_bytes(ovm_bytes).expect("reopen built ovm");
+        if a.hier {
+            write_hier(&ovm, &a.outdir);
+        }
+        let fj = frontier_json_planned(&ovm);
+        match ovm.data {
+            floe_ovm::Backing::Vec(v) => (fj, v),
+            floe_ovm::Backing::Map(_) => unreachable!(),
+        }
+    };
+    emit_viewer_side(&store, &a.src, size, mtime, &a.outdir, &rbb, &lmems, &tstats, &frontier);
+    if a.occupancy {
+        eprintln!(
+            "[vfs] stream: design.ovo (the occupancy grid) is not built in streaming \
+             mode yet (STREAMING_INDEX_PLAN.ko.md S5); the cache is complete without it"
+        );
+    }
+    if a.kill_at.as_deref() == Some("ovm-partial") {
+        std::fs::write(
+            format!("{}/design.ovm", a.outdir),
+            &ovm_bytes[..ovm_bytes.len() / 2],
+        )
+        .expect("write partial ovm");
+        eprintln!("[vfs] --kill-at ovm-partial");
+        std::process::exit(9);
+    }
+    std::fs::write(format!("{}/design.ovm", a.outdir), &ovm_bytes).expect("write ovm");
+    eprintln!(
+        "[vfs] commit design.ovm ({})",
+        fmt_size(ovm_bytes.len() as u64)
+    );
+    lock.release_use();
+    if let Some(spec) = a.hold_at.as_deref() {
+        gate_hold(spec, "committed");
+    }
+    if a.ovs {
+        drop(ovm_bytes);
+        drop(store);
+        write_ovs_after_build(&a.outdir, a.jobs, a.page_occ, a.hier);
+    }
+    eprintln!(
+        "[vfs] done in {:.1}s -> {} (streaming: inventory {:.1}s, build {:.1}s)",
+        t0.elapsed().as_secs_f64(),
+        a.outdir,
+        inventory_s,
+        t_build.elapsed().as_secs_f64()
     );
 }
 
@@ -5456,9 +5811,13 @@ fn build_cell_plan(
         .map(|(pi, pl)| {
             let cb = win_to_bbox(rbb[pl.cell]);
             // v7 node annotations: child rbbox max/min side (the
-            // rotation-invariant pair the cut/hairline test uses)
-            let cw = (cb.x1 - cb.x0).max(0);
-            let ch = (cb.y1 - cb.y0).max(0);
+            // rotation-invariant pair the cut/hairline test uses); an
+            // empty child (a placement-only or empty cell) has none
+            let (cw, ch) = if cb.is_empty() {
+                (0, 0)
+            } else {
+                ((cb.x1 - cb.x0).max(0), (cb.y1 - cb.y0).max(0))
+            };
             let (md, mn) = (sat32(cw.max(ch)), sat32(cw.min(ch)));
             let bb = if cb.is_empty() {
                 BBox {
@@ -5982,7 +6341,7 @@ fn build_cell_plan(
 
 /// v5 text-index build tallies (heartbeat summary + meta.json)
 #[derive(Default)]
-struct TextIndexStats {
+pub(crate) struct TextIndexStats {
     records: u64,
     members: u64,
     cells: u64,
@@ -6249,7 +6608,7 @@ fn build_cell_texts(
 
 #[allow(clippy::type_complexity)]
 #[allow(clippy::too_many_arguments)]
-fn build(
+pub(crate) fn build(
     store: &dyn CellStore,
     pre: crate::prepass::PrePass,
     t0: std::time::Instant,
@@ -6413,11 +6772,13 @@ fn build(
     // an exit so the scope can join and propagate the panic
     // instead of hanging a multi-hour build
     let died = std::sync::atomic::AtomicBool::new(false);
-    struct DiedFlag<'a>(&'a std::sync::atomic::AtomicBool);
+    struct DiedFlag<'a>(&'a std::sync::atomic::AtomicBool, &'a dyn CellStore);
     impl Drop for DiedFlag<'_> {
         fn drop(&mut self) {
             if std::thread::panicking() {
                 self.0.store(true, std::sync::atomic::Ordering::Release);
+                // a streaming store wakes the planners it holds
+                self.1.abort("the committer failed");
             }
         }
     }
@@ -6439,7 +6800,7 @@ fn build(
     std::thread::scope(|s| {
         // committer side: a panic below (commit/encode) must also
         // release workers stuck in the admission wait
-        let _died_guard = DiedFlag(&died);
+        let _died_guard = DiedFlag(&died, store);
         for _ in 0..planners {
             let ring = &ring;
             let window = &window;
@@ -6514,6 +6875,7 @@ fn build(
                     Ok(p) => p,
                     Err(e) => {
                         died.store(true, std::sync::atomic::Ordering::Release);
+                        store.abort("a cell planner failed");
                         std::panic::resume_unwind(e);
                     }
                 };
@@ -6580,6 +6942,35 @@ fn build(
         let mut batch_jobs: Vec<PageJob> = Vec::new();
         let mut batch_arenas: Vec<std::sync::Arc<Vec<Arena>>> = Vec::new();
         let mut chunk_base = 0usize;
+        // encode and write the committed chunk (cells chunk_base..end),
+        // then let its arenas, PtsPrepared and - in a streaming store -
+        // its cells go. Pages are written in page order whatever the
+        // chunking, so the bytes do not depend on when this runs.
+        macro_rules! flush_chunk {
+            ($end:expr) => {{
+                let end: usize = $end;
+                let te = std::time::Instant::now();
+                encode_write_pages(
+                    store,
+                    &batch_jobs,
+                    &batch_arenas,
+                    chunk_base,
+                    encode_workers,
+                    encode_batch,
+                    &mut b,
+                    &mut ovp,
+                    &mut ovp_off,
+                    &mut pages_bytes,
+                    &encoded_pages,
+                    &mut ovb,
+                );
+                encode_elapsed += te.elapsed();
+                batch_jobs.clear();
+                batch_arenas.clear();
+                store.release(chunk_base..end);
+                chunk_base = end;
+            }};
+        }
         for ci in 0..n {
             if ci % 64 == 0 {
                 if let Some(avail) = crate::mem_available_gb() {
@@ -6615,6 +7006,14 @@ fn build(
                     // a streaming store's reader failed on a range the
                     // planners still wait for: abort the build
                     panic!("build: the source reader failed: {}", e);
+                }
+                if ci > chunk_base && store.flush_wanted() {
+                    // a streaming store's reader waits for the budget
+                    // while committed cells (chunk_base..ci, pages or
+                    // none) sit unreleased: encode what they have and
+                    // give them back now, so the cell this wait is for
+                    // can be read
+                    flush_chunk!(ci);
                 }
                 std::thread::sleep(std::time::Duration::from_micros(200));
             };
@@ -6737,28 +7136,7 @@ fn build(
                 || ci + 1 == n
                 || store.flush_wanted();
             if flush {
-                let te = std::time::Instant::now();
-                encode_write_pages(
-                    store,
-                    &batch_jobs,
-                    &batch_arenas,
-                    chunk_base,
-                    encode_workers,
-                    encode_batch,
-                    &mut b,
-                    &mut ovp,
-                    &mut ovp_off,
-                    &mut pages_bytes,
-                    &encoded_pages,
-                    &mut ovb,
-                );
-                encode_elapsed += te.elapsed();
-                batch_jobs.clear();
-                batch_arenas.clear();
-                // this chunk's arenas and PtsPrepared drop here, and a
-                // streaming store may let the chunk's cells go
-                store.release(chunk_base..ci + 1);
-                chunk_base = ci + 1;
+                flush_chunk!(ci + 1);
             }
         }
     });

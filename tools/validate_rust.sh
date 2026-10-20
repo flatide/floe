@@ -50,7 +50,7 @@ cd "$(dirname "$0")/.."
 # ---- gate names (in battery order) and aliases ----------------------
 GATES="unit unit_vfs unit_render index_cli vfs_profile floe2 rust_scan rust_inventory \
 rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage \
-occupancy vfs_hier vfs_lifecycle vfs_marker vfs_split vfs_text \
+occupancy vfs_hier vfs_lifecycle vfs_marker vfs_split vfs_text vfs_stream \
 render_goldens render_speckle render_frames drc_ice drc_analysis drc_team svrf oasis_shapes \
 jobdeck representatives gen_main01 fit_budget sub_cut_box shape_cut write_once layer_decode area_true density_stack cell_tree index_lock worker_client cell_index perf_parity gtk_view rust_renderer klayout"
 # (unit_renderd is unit's renderd part, as unit_vfs and unit_render are)
@@ -61,7 +61,7 @@ alias_gates() {
         planner)  echo "unit_vfs occupancy jobdeck rust_renderer vfs_hier vfs_lifecycle fit_budget sub_cut_box shape_cut" ;;
         occ)      echo "unit_vfs occupancy" ;;
         render)   echo "unit_render unit_renderd rust_renderer representatives fit_budget sub_cut_box shape_cut write_once layer_decode area_true density_stack cell_tree render_goldens render_speckle render_frames klayout" ;;
-        indexer)  echo "unit_vfs index_cli rust_scan rust_inventory rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage vfs_split vfs_text vfs_marker representatives cell_tree index_lock" ;;
+        indexer)  echo "unit_vfs index_cli rust_scan rust_inventory rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage vfs_split vfs_text vfs_stream vfs_marker representatives cell_tree index_lock" ;;
         python)   echo "index_cli vfs_profile floe2 drc_ice drc_analysis drc_team svrf gen_main01" ;;
         deck)     echo "jobdeck occupancy" ;;
         *)        echo "" ;;
@@ -197,6 +197,10 @@ gates_for() {
             # parity gate, both crates' unit tests, the scan it rides on
             # (geom.rs and cli/src/prepass.rs feed the build itself: ALL)
             echo "unit rust_inventory rust_scan" ;;
+        rust/cli/src/stream.rs|tools/validate_vfs_stream.py)
+            # the streaming store (S4): its parity gate, the unit tests, the
+            # in-memory build it must equal
+            echo "unit vfs_stream vfs vfs_split rust_renderer" ;;
         rust/*)
             # the parser, the index format, the tiler, the rest of the
             # VFS, floe-index, the vendored crates, the workspace
@@ -505,6 +509,10 @@ if gate vfs_split; then RAN="$RAN vfs_split"; lap vfs_split
 # daemon label lifecycle
 if gate vfs_text; then RAN="$RAN vfs_text"; lap vfs_text
     .venv/bin/python tools/validate_vfs_text.py; fi
+# G3/G4/G5 of the streaming index plan: `floe-index vfs --stream` == the
+# in-memory build byte for byte, at jobs 1 and 4, within a byte budget
+if gate vfs_stream; then RAN="$RAN vfs_stream"; lap vfs_stream
+    .venv/bin/python tools/validate_vfs_stream.py "$SRC"; fi
 # rasterization goldens for the rust-renderer replacement:
 # bake (version-pinned) + determinism + policy discrimination
 if gate render_goldens; then RAN="$RAN render_goldens"; lap render_goldens

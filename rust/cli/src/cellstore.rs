@@ -72,6 +72,10 @@ pub trait CellStore: Sync {
     fn failed(&self) -> Option<String> {
         None
     }
+    /// the build is aborting (a planner or the committer panicked): a
+    /// streaming store wakes every planner parked in `cell` so build()'s
+    /// thread scope can join and the panic surface
+    fn abort(&self, _why: &str) {}
 }
 
 impl CellStore for Doc {

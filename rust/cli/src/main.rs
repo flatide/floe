@@ -16,6 +16,7 @@ mod cellstore;
 mod drcice;
 mod drcpack;
 mod prepass;
+mod stream;
 mod svrf;
 mod vfs;
 
@@ -240,7 +241,8 @@ fn main() {
              [--slow-cell-s S] [--p2-shard-limit-mb N] \
              [--profile-cell NAME | --profile-cell-ci N] \
              [--profile-jobs N,N,...] [--profile-repeat N] \
-             [--profile-snapshot PATH] [--profile-snapshot-refresh]\n       \
+             [--profile-snapshot PATH] [--profile-snapshot-refresh] \
+             [--stream [--mem GiB]]  (the two-pass streaming build: the inventory pass, then cells read in file order behind a byte budget; no coverage / representatives, no design.ovo yet)\n       \
              floe-index vfs <deck.jb> [--level N,N,..] [--jobs N] [--force] [--wait[=S]] \
              [--occupancy-um F] ...  (a jobdeck: its sources that have no index, each beside its source - runs floe2 index)\n       \
              floe-index plan <outdir> --view x0,y0,x1,y1 \

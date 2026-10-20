@@ -1670,21 +1670,17 @@ pub struct CellTables<'a> {
     /// TEXTSTRING reference -> string
     pub textstrings: &'a HashMap<u64, String>,
     /// cell name -> Doc index (the inventory's cell table, CELL record
-    /// order with placement-only targets appended)
-    pub cell_index: HashMap<String, usize>,
+    /// order with placement-only targets appended: `Inventory::cell_index`)
+    pub cell_index: &'a HashMap<String, usize>,
 }
 
 impl<'a> CellTables<'a> {
     pub fn new(
         cellnames: &'a HashMap<u64, String>,
         textstrings: &'a HashMap<u64, String>,
-        names: impl Iterator<Item = &'a str>,
+        cell_index: &'a HashMap<String, usize>,
     ) -> CellTables<'a> {
-        CellTables {
-            cellnames,
-            textstrings,
-            cell_index: names.enumerate().map(|(i, n)| (n.to_string(), i)).collect(),
-        }
+        CellTables { cellnames, textstrings, cell_index }
     }
 }
 

@@ -414,13 +414,14 @@ impl Inventory {
         self.layer_order.len().div_ceil(8).max(1)
     }
 
-    /// the tables a cell range's parser needs (doc.rs parse_cell_range)
-    pub fn cell_tables(&self) -> crate::doc::CellTables<'_> {
-        crate::doc::CellTables::new(
-            &self.cellnames,
-            &self.textstrings,
-            self.cells.iter().map(|c| c.name.as_str()),
-        )
+    /// cell name -> Doc index, for a cell range's parser
+    /// (`doc::CellTables::new(&inv.cellnames, &inv.textstrings, &index)`)
+    pub fn cell_index(&self) -> HashMap<String, usize> {
+        self.cells
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.name.clone(), i))
+            .collect()
     }
 }
 
@@ -1739,8 +1740,9 @@ mod tests {
     /// then the cells' ranges in file order), the pieces of a cell
     /// joined in file order and normalized on their own
     fn parse_all_cells(data: &[u8], inv: &Inventory, jobs: usize) -> Vec<crate::doc::Cell> {
-        use crate::doc::{normalize_cells, parse_cell_range, Cell};
-        let tables = inv.cell_tables();
+        use crate::doc::{normalize_cells, parse_cell_range, Cell, CellTables};
+        let cix = inv.cell_index();
+        let tables = CellTables::new(&inv.cellnames, &inv.textstrings, &cix);
         let mut ranges: Vec<&CellRange> = vec![&inv.head];
         for c in &inv.cells {
             for r in &c.ranges {
@@ -1805,7 +1807,8 @@ mod tests {
         let data = adversarial(true, false);
         let inv = crate::inventory(&data, 1).expect("inventory");
         assert!(inv.head.end > inv.head.start);
-        let tables = inv.cell_tables();
+        let cix = inv.cell_index();
+        let tables = crate::doc::CellTables::new(&inv.cellnames, &inv.textstrings, &cix);
         assert!(crate::doc::parse_cell_range(&data, &inv.head, &tables).expect("head").is_empty());
         assert_eq!(inv.textstrings.get(&0).map(|s| s.as_str()), Some("lbl"));
         assert_eq!(inv.cellnames.get(&2).map(|s| s.as_str()), Some("MID"));

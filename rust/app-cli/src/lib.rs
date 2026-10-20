@@ -132,6 +132,10 @@ const INDEX_HELP: &str = "Usage: floe2-web index SOURCE [OPTIONS]
   --representatives-format 1|2 Points or shape/tree samples; implies rebuild of OVR
   --slow-cell-s S            Nonnegative slow-cell threshold
   --p2-shard-limit-mb N       Nonnegative shard-copy ceiling
+  --stream                   Two-pass streaming build: inventory pass, then cells read
+                             in file order behind a byte budget (no design.ovo yet)
+  --mem GiB                  Streaming budget for resident cells (default
+                             min(MemAvailable/2, 32)); requires --stream
   --profile-cell NAME        Profile one cell without writing a normal cache
   --profile-cell-ci N        Profile by zero-based cell index (exclusive)
   --profile-jobs N,N,...     Reuse parse/prepare across ordered job counts
@@ -326,6 +330,11 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
             }
             "--slow-cell-s" => options.slow_cell_s = Some(number(value()?, flag)?),
             "--p2-shard-limit-mb" => options.p2_shard_limit_mb = Some(number(value()?, flag)?),
+            "--stream" => {
+                no_value()?;
+                options.stream = true;
+            }
+            "--mem" => options.mem_gib = Some(number(value()?, flag)?),
             "--profile-cell" => {
                 if matches!(options.profile_cell, Some(ProfileCell::Index(_))) {
                     return Err(Error::input(

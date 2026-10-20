@@ -52,6 +52,12 @@ pub struct IndexOptions {
     /// The occupancy density (design.ovs), built by default (2026-10-07);
     /// `--no-ovs` leaves it out.
     pub ovs: bool,
+    /// `--stream`: the two-pass streaming build (`floe-index vfs
+    /// --stream`, docs/STREAMING_INDEX_PLAN.ko.md S4) - the inventory
+    /// pass, then the cells read in file order behind a byte budget of
+    /// `mem_gib` GiB (default min(MemAvailable/2, 32)); no design.ovo yet.
+    pub stream: bool,
+    pub mem_gib: Option<f64>,
 }
 impl Default for IndexOptions {
     fn default() -> Self {
@@ -79,6 +85,8 @@ impl Default for IndexOptions {
             hier_only: false,
             page_occupancy: true,
             ovs: true,
+            stream: false,
+            mem_gib: None,
         }
     }
 }
@@ -104,6 +112,23 @@ impl IndexOptions {
                 || (self.representatives_only && self.wants_occupancy()))
         {
             return Err(Error::input("representatives cannot be combined with profiling or other additive-only summaries"));
+        }
+        if self.mem_gib.is_some() && !self.stream {
+            return Err(Error::input("mem belongs to stream"));
+        }
+        if self.mem_gib.is_some_and(|v| !v.is_finite() || v <= 0.) {
+            return Err(Error::input("invalid mem (GiB)"));
+        }
+        if self.stream
+            && (self.profile_cell.is_some()
+                || self.occupancy_only
+                || self.representatives_only
+                || self.representatives
+                || self.hier_only)
+        {
+            return Err(Error::input(
+                "stream cannot be combined with profiling, representatives or additive-only runs",
+            ));
         }
         if self.jobs == 0 || self.jobs.checked_mul(8).is_none() || self.profile_repeat == 0 {
             return Err(Error::input(
@@ -248,6 +273,13 @@ pub fn decide(
         return Ok(if options.wants_occupancy() {
             if has_occupancy {
                 Action::OccupancyPresent
+            } else if options.stream {
+                // the streaming build leaves design.ovo out until the
+                // streaming occupancy lands (STREAMING_INDEX_PLAN S5); an
+                // occupancy-only run would parse the whole source in
+                // memory - the very thing --stream avoids - so the
+                // current cache is reused as it is
+                Action::Reuse
             } else {
                 Action::OccupancyOnly
             }
@@ -311,6 +343,12 @@ fn arguments(
     if *action != Action::Profile && o.wants_occupancy() {
         a.push("--occupancy".into());
         occupancy_args(&mut a, o);
+    }
+    if o.stream && *action == Action::Build {
+        a.push("--stream".into());
+        if let Some(g) = o.mem_gib {
+            add(&mut a, "--mem", g);
+        }
     }
     if !o.lod {
         a.push("--no-lod".into());
@@ -1236,5 +1274,31 @@ mod tests {
             ..Default::default()
         };
         assert!(o.validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod stream_policy_tests {
+    use super::*;
+
+    /// a current cache built by --stream has no design.ovo; with --stream
+    /// still on, a deck's --occupancy must not turn into an in-memory
+    /// occupancy-only parse of the whole source
+    #[test]
+    fn stream_reuses_a_cache_without_occupancy() {
+        let mut o = IndexOptions::default();
+        o.occupancy = Some(true);
+        assert_eq!(decide(&o, &CacheState::Current, false, false).unwrap(), Action::OccupancyOnly);
+        o.stream = true;
+        assert_eq!(decide(&o, &CacheState::Current, false, false).unwrap(), Action::Reuse);
+        assert_eq!(decide(&o, &CacheState::Current, true, false).unwrap(), Action::OccupancyPresent);
+        assert_eq!(decide(&o, &CacheState::Missing, false, false).unwrap(), Action::Build);
+        let a = arguments(Path::new("x.oas"), Path::new("x.ice"), &o, &Action::Build).unwrap();
+        assert!(a.contains(&OsString::from("--stream")));
+        o.mem_gib = Some(2.5);
+        let a = arguments(Path::new("x.oas"), Path::new("x.ice"), &o, &Action::Build).unwrap();
+        assert!(a.windows(2).any(|w| w == ["--mem", "2.5"]));
+        o.stream = false;
+        assert!(o.validate().is_err(), "mem without stream");
     }
 }

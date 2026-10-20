@@ -594,8 +594,9 @@ fn describe_cell_diff(ci: usize, a: &floe_oasis::doc::Cell, b: &floe_oasis::doc:
 /// order and normalized on their own, against the whole-Doc parse's
 /// cells record by record. Returns the mismatches and the piece count.
 pub fn check_cells(data: &[u8], doc: &Doc, inv: &Inventory, jobs: usize) -> (Vec<String>, usize) {
-    use floe_oasis::doc::{normalize_cells, parse_cell_range, Cell, CellPiece};
-    let tables = inv.cell_tables();
+    use floe_oasis::doc::{normalize_cells, parse_cell_range, Cell, CellPiece, CellTables};
+    let cix = inv.cell_index();
+    let tables = CellTables::new(&inv.cellnames, &inv.textstrings, &cix);
     let mut ranges: Vec<&floe_oasis::inventory::CellRange> = vec![&inv.head];
     for c in &inv.cells {
         for r in &c.ranges {
