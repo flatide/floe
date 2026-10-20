@@ -3,8 +3,8 @@
 상태: S1(1차 재고 패스) 구현됨(0.12.363, §3.6), S2(CellStore) 구현됨
 (0.12.365, §4.2), S3(셀 파서) 구현됨(0.12.366, §4.1), S4(드라이버,
 `--stream`) 구현됨(0.12.367, §4.3 구현), S5(스트리밍 design.ovo) 구현됨
-(0.12.368, §4.6 구현), S6(가드) 구현됨(0.12.369, §5 구현). 전환 이후는
-설계. 근거는
+(0.12.368, §4.6 구현), S6(가드) 구현됨(0.12.369, §5 구현), 전환(스트리밍
+기본) 구현됨(0.12.370, §11). S7 후속은 설계. 근거는
 rust/FLOE_INDEX_MEMORY_PLAN.md §5의 현장 수치와 `floe-index scan`
 0.12.328의 결과. 코드 줄 번호 참조는 0.12.360(8b59f3a5) 기준.
 
@@ -439,9 +439,10 @@ occupancy::StreamOcc`가 격자·레이어별 마스크를 만들고
 단위 테스트 `streaming_occupancy_matches_in_memory`는 격자·점목록·
 경로·다각형·텍스트와 가지치기 가능/불가능 격자를 가진 계층을 prune
 on/off × 셀 1/0.25 um × 평면 예산(1패스/여러 패스)으로 비교한다.
-배치가 상한(5,000만 레코드)을 넘으면 한 줄 알리고 ovo 없이 캐시를 완성하며,
-`floe2 index --stream`은 그런 캐시를 occupancy-only 재파싱 없이 그대로
-쓴다.
+배치가 상한(5,000만 레코드)을 넘으면 한 줄 알리고 ovo 없이 캐시를 완성한다.
+(0.12.370부터 `--occupancy-only`도 스트리밍하므로 ovo 없는 현재 캐시에는 모든
+모드에서 occupancy-only 실행이 붙고, 상한을 넘는 캐시는 한 줄 알리고 그대로
+둔다 — §11.)
 
 ### 4.7 보류
 
@@ -481,7 +482,9 @@ on/off × 셀 1/0.25 um × 평면 예산(1패스/여러 패스)으로 비교한�
   시작, 캐시를 지우기 직전(파싱 뒤 / 재고 뒤 — 여기까지는 "the cache is
   unchanged"), 그리고 모든 하트비트(파싱·파이프라인·재고·리더·점유 패스,
   200 ms마다 — 이때는 "no commit marker, rebuilt next time"). 조언은 모드를
-  따른다: 인메모리면 `--stream`, 스트리밍이면 `--mem`을 낮추라고.
+  따른다: 인메모리면 `--stream`, 스트리밍이면 `--mem`을 낮추라고, 기본 모드의
+  폴백(스트리밍이 거절한 뒤의 인메모리, §11)이면 호스트 메모리를 비우거나
+  `--stream --mem`으로 고집하라고.
 - 원장 문구. `floe2 index DECK.jb`의 `FAILED … (exit N - …)`와 자동 색인의
   "indexing X first failed (exit N - …)"가 코드를 말로 푼다
   (`app-core index::exit_words`): 71 "stopped at the memory ceiling or
@@ -554,8 +557,11 @@ S2 완료(0.12.365, §4.2 구현; 사용자 2026-10-19 "S2 진행해줘"): build
 `vfs_stream`(G3·G4·G5). S5 완료(0.12.368, §4.6 구현; 사용자 2026-10-20
 "S5 진행해줘"): 스트리밍 design.ovo, 바이트 동일. S6 완료(0.12.369, §5
 구현; 사용자 2026-10-20 "S6 진행해줘"): 메모리 상한·크기 사전 거절(종료
-71)·원장 문구. 남은 것: 전환(§10), S7 후속. 현장 50 GB 파일의 실측(시간·
-피크)은 `--stream`으로 다음 기회에 잰다.
+71)·원장 문구. 전환 완료(0.12.370, §11; 사용자 2026-10-20 "전환해줘"):
+`floe-index vfs`와 `floe2 index`의 기본이 스트리밍, `--in-memory`가 이전의
+전체 파싱 빌드, 기본 모드는 스트리밍이 거절한 파일을 인메모리로 넘기고,
+`--occupancy-only`도 스트리밍한다. 남은 것: S7 후속, 현장 50 GB 파일의
+실측(기본 명령으로)과 9.8 GB 파일의 바이트 비교(§11의 절차).
 
 ## 9. 조사 중 발견한 문서 불일치 (구현 커밋에서 바로잡는다)
 
@@ -574,11 +580,91 @@ S2 완료(0.12.365, §4.2 구현; 사용자 2026-10-19 "S2 진행해줘"): build
    서버에서 다른 서비스가 쓰는 양을 고려한 값이 필요하면 알려 달라.
    (S4는 이 제안대로 구현했고 `--mem`으로 바꾼다; §4.4의 2×창 수치가
    현장 파일에서 16~39 GiB이므로 32 GiB면 평균적으로 맞고 큰 셀이 몰린
-   구간에서는 리더가 기다린다.)
+   구간에서는 리더가 기다린다.) **전환(0.12.370):** 기본값은 그대로이고,
+   파일의 가장 큰 셀(또는 다중 정의 스팬)이 그보다 크면 호스트가 허락하는
+   한(MemAvailable, 없으면 MemTotal의 90 %) 그만큼 올린다(§11). 다른 값이
+   필요하면 `--mem`.
 2. 1차 패스 결과를 사이드카로 남길지: 덱 사전 점검과 재시작에 쓸 수
-   있으나 캐시 디렉터리에 파일이 하나 는다.
+   있으나 캐시 디렉터리에 파일이 하나 는다. **보류(2026-10-20):** 전환에
+   넣지 않았다. 재고 패스는 scan 비용(현장 파일에서 수 분)이고, 사이드카는
+   캐시 디렉터리에 무효화 규칙이 필요한 파일을 하나 더한다. 재시작이나 덱
+   사전 점검 수요가 생기면 S7에서.
 3. ~~스트리밍 모드에서 `--coverage`·`--representatives` 거절을 받아들일지.~~
    결정됨(2026-10-19): 둘 다 현재 쓰지 않는 옵션이므로 미룬다(§4.7).
 4. 전환 시점: G3가 fixture와 9.8 GB 현장 파일에서 녹색이면 기본값으로
    돌린다. 그전까지 `floe2 index`는 1차 패스의 추정이 예산을 넘는
-   소스에만 `--stream`을 자동으로 켠다.
+   소스에만 `--stream`을 자동으로 켠다. **결정(2026-10-20, 사용자
+   "전환해줘"):** fixture의 G3가 S4~S6의 배터리(5회)와 전환 배터리에서
+   녹색이라 기본값으로 돌렸다(§11). 9.8 GB 현장 파일의 비교는 §11의 절차로
+   현장에서 하고, 그때까지 `--in-memory`(또는 `FLOE_INDEX_STREAM=off`)가
+   즉시 폴백이다. "추정이 예산을 넘는 소스에만 자동"이라는 중간 단계는
+   두지 않았다: 재고 패스를 치르고도 인메모리로 가면 그 비용이 헛되고,
+   스트리밍이 같은 바이트를 내므로 작은 파일에서도 피할 이유가 없다.
+
+## 11. 전환 구현 (0.12.370 / floe-index 0.12.335; 사용자 2026-10-20 "전환해줘")
+
+- **기본값.** `floe-index vfs SRC OUT`과 `floe2 index`(덱 소스, 뷰어의 덱
+  색인, `info`·`render`·`probe`의 자동 색인 포함)는 스트리밍으로 빌드한다.
+  모드는 셋이다(`vfs.rs resolve_build_mode`, app-core `IndexMode`): 기본
+  (Auto) — 플래그 없음, floe-index가 정한다; `--stream` — 고집(스트리밍이
+  안 되면 종료); `--in-memory` — 이전의 전체 파싱 빌드. 킬 스위치
+  `FLOE_INDEX_STREAM=off`는 기본을 인메모리로 돌린다(모르는 값은 한 줄
+  알리고 기본). `--stream`과 `--in-memory`는 배타(종료 2).
+- **전체 파싱이 필요한 실행**(`--coverage`/`--coverage-only`,
+  `--representatives`/`--representatives-only`, 프로파일, `--frontier-only`)은
+  기본 모드에서 인메모리로 간다; `--stream`과 함께면 종료 2(그대로).
+  `--mem`은 스트리밍 빌드의 것이라 인메모리로 가는 실행과 함께면 종료 2
+  (`--in-memory --mem`도).
+- **`--occupancy-only`도 스트리밍한다**(`vfs_stream_occupancy_only`):
+  design.ovm의 식별자(소스 크기/mtime, top) 확인 → 재고 패스 → (재고의
+  PLACEMENT 수가 상한 5,000만을 넘으면 패스 없이 판정) → 배치 수집 패스(모든
+  셀을 한 번 읽고 바로 돌려줌, `keep_places`; `jobs`개 소비자) → S5의 레이어
+  묶음 패스 → 같은 게시. 덱의 "캐시는 있는데 design.ovo만 없는 소스"가
+  `--stream`에서 실패하던 결함(0.12.369)이 이것으로 없어졌고, app-core의
+  `decide()`는 모든 모드에서 OccupancyOnly를 고른다(스트리밍 캐시 재사용
+  규칙 삭제). 패스 중 가드의 상태 문구는 "the cache is unchanged"(캐시는
+  design.ovo가 rename될 때까지 그대로).
+- **기본 모드의 폴백**(출력을 건드리기 전에만): 재고가 거절한 파일(§4.1의
+  참조 번호 중복 등, 또는 재고가 읽지 못한 파일)과 `StreamStore::new`의
+  Inventory 오류는 "the in-memory build takes over" 한 줄과 함께 인메모리
+  빌드로 넘어간다; `--occupancy-only`에서 배치가 상한을 넘으면 인메모리
+  occupancy-only로 넘어간다(`--stream`이면 한 줄 알리고 ovo 없이 종료 0).
+  손상 파일은 재고가 거절 → 인메모리 파스가 같은 자리에서 거절(종료 1).
+  폴백 뒤의 메모리 상한·사전 거절의 조언은 두 플래그 대신 "호스트 메모리를
+  비우거나 `--stream --mem`으로 고집"(guard `Mode::Fallback`).
+- **예산.** 기본은 그대로 min(MemAvailable/2, 32 GiB)(MemAvailable이 없으면
+  MemTotal/2 — macOS는 hw.memsize로, 이제 Linux 밖에서도 읽는다). `--mem`
+  없이 파일의 가장 큰 셀(또는 다중 정의 스팬)이 기본 예산을 넘으면 예산을
+  그만큼 올린다(한 줄: "cell X needs about N resident, over the default
+  budget M: the budget is raised to N (MemAvailable G)"; 상한은
+  MemAvailable, 없으면 MemTotal의 90 %). 상한도 넘으면 종료 71("the budget
+  cannot rise to N past …: … intra-cell splitting"). `--mem`을 준 경우는
+  그대로 거절(71). 근거: 올린 예산의 스트리밍(상주 ≤ 2×창 + 플랜 스크래치)
+  도 전체 파싱(Doc 전체 + 스크래치)보다 적게 든다. `NewError::Budget`이
+  재고와 필요량을 돌려주므로 재고 패스는 한 번이다.
+- **floe2.** `IndexOptions.mode: IndexMode {Auto, Stream, InMemory}`
+  (`stream: bool` 대체), `--in-memory` 플래그, `--mem`은 Auto에서도 전달
+  (`--in-memory`와는 거절), Build와 OccupancyOnly 실행에 모드를 전달.
+  `exit_words(71/137)`의 조언은 모드를 가리지 않는 문구("a lower --mem for
+  the streaming build, --stream for an in-memory one"). 뷰어·자동 색인은
+  플래그를 주지 않으므로 그대로 스트리밍이 된다.
+- **게이트.** `vfs_stream`: 기준 빌드가 `--in-memory`; 기본 명령줄(플래그
+  없음)이 스트리밍하고 바이트 동일(세 fixture), `--occupancy-only`가
+  스트리밍하고 design.ovo 동일(세 fixture), `floe2 index` 기본/`--stream
+  --mem`/`--in-memory`, 거절 네 가지, `--coverage`의 인메모리,
+  `FLOE_INDEX_STREAM=off`(동일)/모르는 값, 예산 상향(route_chip:
+  MemAvailable 1.5×가장 큰 셀 → 상향·동일, 0.5× → 71), 가드(인메모리·
+  스트리밍·기본), 재고가 거절하는 파일(CELLNAME 참조 번호 중복을 손으로 쓴
+  OASIS: `--in-memory` 빌드, `--stream` 종료 1, 기본은 폴백·동일), 손상
+  파일(`--stream`·기본). `jobdeck`: design.ovo가 없는 소스를 `--stream`과
+  기본이 복구(바이트 동일), `--in-memory --force`와 기본 `--force`. 전체
+  배터리는 이제 모든 색인을 스트리밍으로 돈다(이전 게이트들이 그대로 녹색
+  = G4).
+- **현장 검증 절차(§10.4의 9.8 GB 파일).** `python3
+  tools/validate_vfs_stream.py --compare FILE.oas [--jobs N]`이 `--in-memory`
+  와 기본 빌드를 임시 폴더에 만들고 파일별로 비교한다(시간·피크 RSS도
+  적는다). 도구 없이: `floe-index vfs FILE A --in-memory --occupancy`,
+  `floe-index vfs FILE B --occupancy`, 파일별 `cmp`. 50 GB 덱 소스는
+  `floe2 index DECK.jb`를 그대로 돌리면 된다(기본 예산 32 GiB; 재고 패스는
+  scan 시간; 가장 큰 셀 415 MiB).
+- **남은 것.** S7(§8), 사이드카(§10.2 보류), 현장 실측.

@@ -855,6 +855,30 @@ class JobdeckIndexLodTests(unittest.TestCase):
             self.assertIn("3 built, 0 failed, 0 kept", summary.stdout)
             self.assertEqual(before, {path: path.read_bytes() for path in pages})
 
+            # the switch-over (STREAMING_INDEX_PLAN §11, 0.12.370): a current
+            # cache without design.ovo gets it from a streaming occupancy-only
+            # run - under --stream too (0.12.369 failed that source) - with
+            # the in-memory run's bytes; --in-memory is the whole-parse build
+            ovo = marker("chipA.oas").parent / "design.ovo"
+            before_ovo = ovo.read_bytes()
+            for mode in (["--stream", "--mem", "0.5"], []):
+                ovo.unlink()
+                restored = run_floe2("index", deck, "--occupancy-um", "8",
+                                     "--jobs", "2", *mode, env=env, ok=0)
+                self.assertIn("1 built, 0 failed, 2 kept", restored.stdout)
+                self.assertIn("occupancy streaming", restored.stdout + restored.stderr)
+                self.assertEqual(ovo.read_bytes(), before_ovo, mode)
+            rebuilt = run_floe2("index", deck, "--force", "--in-memory",
+                                "--jobs", "2", env=env, ok=0)
+            self.assertIn("3 built, 0 failed, 0 kept", rebuilt.stdout)
+            self.assertNotIn("stream: inventory", rebuilt.stdout + rebuilt.stderr)
+            streamed = run_floe2("index", deck, "--force", "--jobs", "2",
+                                 env=env, ok=0)
+            self.assertIn("3 built, 0 failed, 0 kept", streamed.stdout)
+            self.assertIn("stream: inventory", streamed.stdout + streamed.stderr)
+            for name in names:
+                self.assertTrue((marker(name).parent / "design.ovo").is_file(), name)
+
 
 # ---------------------------------------------------------------------
 # M2: the composite through renderd

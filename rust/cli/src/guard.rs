@@ -23,6 +23,8 @@ pub const CACHE_INCOMPLETE: &str = "the cache has no commit marker and is rebuil
 /// what to do, for the stop line
 pub const ADVICE_STREAM: &str = "index with --stream (two passes; resident memory bounded by --mem)";
 pub const ADVICE_BUDGET: &str = "lower --mem (the resident budget) or free memory on the host";
+pub const ADVICE_FALLBACK: &str = "the streaming build declined this file (the line above says why): \
+free memory on the host, or insist on streaming with --stream --mem <GiB>";
 
 /// anonymous resident bytes of this process: Linux RssAnon (VmRSS on a
 /// kernel without it), macOS phys_footprint; None elsewhere, where the
@@ -177,11 +179,47 @@ pub fn ceiling() -> Option<&'static Ceiling> {
         .as_ref()
 }
 
-static STREAMING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// which build is running, for the advice a stop gives
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mode {
+    /// the whole-parse build (`--in-memory`, FLOE_INDEX_STREAM=off, or a
+    /// run that reads the whole parse): a stop advises --stream
+    InMemory,
+    /// the streaming build: a stop advises a lower --mem
+    Streaming,
+    /// the whole-parse build after the streaming build declined the file
+    /// (the default mode's fallback, STREAMING_INDEX_PLAN §10): a stop
+    /// advises neither flag
+    Fallback,
+}
 
-/// the streaming build sets this so a stop advises the budget, not --stream
-pub fn set_streaming(on: bool) {
-    STREAMING.store(on, std::sync::atomic::Ordering::Relaxed);
+static MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// the build says which one it is before its first check
+pub fn set_mode(mode: Mode) {
+    let v = match mode {
+        Mode::InMemory => 0,
+        Mode::Streaming => 1,
+        Mode::Fallback => 2,
+    };
+    MODE.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn mode() -> Mode {
+    match MODE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => Mode::Streaming,
+        2 => Mode::Fallback,
+        _ => Mode::InMemory,
+    }
+}
+
+/// the advice of a memory stop in the running build's mode
+pub fn advice() -> &'static str {
+    match mode() {
+        Mode::InMemory => ADVICE_STREAM,
+        Mode::Streaming => ADVICE_BUDGET,
+        Mode::Fallback => ADVICE_FALLBACK,
+    }
 }
 
 /// stop the process with one line when its anonymous resident size is
@@ -193,11 +231,7 @@ pub fn check(stage: &str, state: &str) {
     if rss <= c.bytes {
         return;
     }
-    let advice = if STREAMING.load(std::sync::atomic::Ordering::Relaxed) {
-        ADVICE_BUDGET
-    } else {
-        ADVICE_STREAM
-    };
+    let advice = advice();
     eprintln!(
         "[vfs] memory ceiling: rss {} is over {} ({}) during the {}: stopping before the \
          host swaps ({}); {}, or set FLOE_RSS_CEILING=<percent of MemTotal>|<bytes, e.g. 300G>|off",
@@ -229,7 +263,7 @@ pub fn precheck_in_memory(src: &str) {
             crate::fmt_size(size),
             crate::fmt_size(avail),
             EXIT_MEMORY,
-            ADVICE_STREAM
+            advice()
         );
         std::process::exit(EXIT_MEMORY);
     }
@@ -240,7 +274,7 @@ pub fn precheck_in_memory(src: &str) {
             src,
             crate::fmt_size(size),
             crate::fmt_size(avail),
-            ADVICE_STREAM
+            advice()
         );
     }
 }

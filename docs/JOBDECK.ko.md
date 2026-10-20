@@ -268,6 +268,14 @@ LOD를 포함해 덱의 모든 소스 캐시를 다시 만들려면:
 floe2 index deck.jb --force --lod --jobs 16
 ```
 
+소스 색인은 **스트리밍 빌드가 기본**이다(2026-10-20, app 0.12.370; SPEC-INDEXER
+§1.2, STREAMING_INDEX_PLAN §11): 재고 패스 뒤 셀을 파일 순서로 읽어 `--mem GiB`
+(기본 min(MemAvailable/2, 32 GiB), 파일의 가장 큰 셀까지 자동 상향) 안에서
+처리하므로 50 GB급 소스도 호스트 메모리 안에서 색인된다. `--in-memory`가 이전의
+전체 파싱 빌드(`FLOE_INDEX_STREAM=off`도 같다)이고, design.ovo가 없는 현재 캐시의
+점유 추가(`occupancy` 실행)도 스트리밍이다. 뷰어의 덱 소스 색인과 `info`·`render`
+의 자동 색인도 같은 기본을 쓴다.
+
 소스 파일은 순차 처리하고, 각 파일 내부에서 `--jobs`만큼 병렬화한다.
 소스마다 시작 줄 `[jobdeck] index : (n/N) <src>`와 끝 줄 `[jobdeck] index :
 (n/N) ok <src> (Ts; M:SS elapsed, ~M:SS left)`를 찍는다(N = 이번 실행이 처리할

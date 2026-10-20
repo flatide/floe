@@ -52,12 +52,24 @@ pub struct IndexOptions {
     /// The occupancy density (design.ovs), built by default (2026-10-07);
     /// `--no-ovs` leaves it out.
     pub ovs: bool,
-    /// `--stream`: the streaming build (`floe-index vfs --stream`,
-    /// docs/STREAMING_INDEX_PLAN.ko.md S4/S5) - the inventory pass, then
-    /// the cells read in file order behind a byte budget of `mem_gib` GiB
-    /// (default min(MemAvailable/2, 32)), design.ovo from one more pass.
-    pub stream: bool,
+    /// the build's mode (docs/STREAMING_INDEX_PLAN.ko.md §10, the
+    /// switch-over of 0.12.370): `Auto` passes no flag and floe-index
+    /// streams - the inventory pass, then the cells read in file order
+    /// behind a byte budget of `mem_gib` GiB (default min(MemAvailable/2,
+    /// 32), raised to the file's need when the host has it), design.ovo
+    /// from one more pass - unless FLOE_INDEX_STREAM=off or the run reads
+    /// the whole parse; `Stream` insists (`--stream`); `InMemory` is the
+    /// whole-parse build (`--in-memory`).
+    pub mode: IndexMode,
     pub mem_gib: Option<f64>,
+}
+/// how `floe-index vfs` builds: see `IndexOptions::mode`
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum IndexMode {
+    #[default]
+    Auto,
+    Stream,
+    InMemory,
 }
 impl Default for IndexOptions {
     fn default() -> Self {
@@ -85,7 +97,7 @@ impl Default for IndexOptions {
             hier_only: false,
             page_occupancy: true,
             ovs: true,
-            stream: false,
+            mode: IndexMode::Auto,
             mem_gib: None,
         }
     }
@@ -113,21 +125,20 @@ impl IndexOptions {
         {
             return Err(Error::input("representatives cannot be combined with profiling or other additive-only summaries"));
         }
-        if self.mem_gib.is_some() && !self.stream {
-            return Err(Error::input("mem belongs to stream"));
+        if self.mem_gib.is_some() && self.mode == IndexMode::InMemory {
+            return Err(Error::input("mem belongs to the streaming build, not in-memory"));
         }
         if self.mem_gib.is_some_and(|v| !v.is_finite() || v <= 0.) {
             return Err(Error::input("invalid mem (GiB)"));
         }
-        if self.stream
+        if self.mode == IndexMode::Stream
             && (self.profile_cell.is_some()
-                || self.occupancy_only
                 || self.representatives_only
                 || self.representatives
                 || self.hier_only)
         {
             return Err(Error::input(
-                "stream cannot be combined with profiling, representatives or additive-only runs",
+                "stream cannot be combined with profiling, representatives or hier-only",
             ));
         }
         if self.jobs == 0 || self.jobs.checked_mul(8).is_none() || self.profile_repeat == 0 {
@@ -270,17 +281,13 @@ pub fn decide(
                 Action::RepresentativesOnly
             });
         }
+        // a current cache without design.ovo gets it from an occupancy-only
+        // run in every mode: the streaming one streams it too (the
+        // switch-over, STREAMING_INDEX_PLAN §10; a cache whose placements
+        // exceed the pass's cap is told so and kept as it is)
         return Ok(if options.wants_occupancy() {
             if has_occupancy {
                 Action::OccupancyPresent
-            } else if options.stream {
-                // a streaming build without design.ovo skipped it on
-                // purpose (its placements exceeded the cap the occupancy
-                // pass keeps, STREAMING_INDEX_PLAN §4.6); an
-                // occupancy-only run would parse the whole source in
-                // memory - the very thing --stream avoids - so the
-                // current cache is reused as it is
-                Action::Reuse
             } else {
                 Action::OccupancyOnly
             }
@@ -303,11 +310,11 @@ pub fn decide(
 /// 71 (STREAMING_INDEX_PLAN §5) - and the kernel's 128 + signal
 pub fn exit_words(code: i32) -> Option<&'static str> {
     Some(match code {
-        71 => "stopped at the memory ceiling or refused for its size: index with --stream",
+        71 => "stopped at the memory ceiling or refused for its size: the indexer's line above says what to do (a lower --mem for the streaming build, --stream for an in-memory one)",
         c if c == floe_vfs::lock::BUSY_EXIT => "busy: another run or a viewer holds the cache",
         130 | 143 => "cancelled",
         134 => "aborted (a panic or a failed assertion)",
-        137 => "killed (out of memory?): the host's OOM killer or a kill -9; index with --stream",
+        137 => "killed (out of memory?): the host's OOM killer or a kill -9; a lower --mem, or --stream if it was built in memory",
         139 => "segmentation fault",
         _ => return None,
     })
@@ -343,6 +350,7 @@ fn arguments(
     if *action == Action::OccupancyOnly {
         a.push("--occupancy-only".into());
         occupancy_args(&mut a, o);
+        mode_args(&mut a, o);
         return Ok(a);
     }
     if let Some(v) = o.page_target_mb {
@@ -361,11 +369,8 @@ fn arguments(
         a.push("--occupancy".into());
         occupancy_args(&mut a, o);
     }
-    if o.stream && *action == Action::Build {
-        a.push("--stream".into());
-        if let Some(g) = o.mem_gib {
-            add(&mut a, "--mem", g);
-        }
+    if *action == Action::Build {
+        mode_args(&mut a, o);
     }
     if !o.lod {
         a.push("--no-lod".into());
@@ -407,6 +412,20 @@ fn arguments(
         a.push("--profile-snapshot-refresh".into());
     }
     Ok(a)
+}
+
+/// the build's mode for the runs that parse the source (the whole build
+/// and the occupancy-only run): `Auto` passes nothing - floe-index's own
+/// default (streaming, or FLOE_INDEX_STREAM) decides
+fn mode_args(a: &mut Vec<OsString>, o: &IndexOptions) {
+    match o.mode {
+        IndexMode::Auto => {}
+        IndexMode::Stream => a.push("--stream".into()),
+        IndexMode::InMemory => a.push("--in-memory".into()),
+    }
+    if let Some(g) = o.mem_gib {
+        a.extend(["--mem".into(), g.to_string().into()]);
+    }
 }
 
 /// The summary's options as the Python CLI gave them (`_occupancy_args`):
@@ -1298,34 +1317,53 @@ mod tests {
 mod stream_policy_tests {
     use super::*;
 
-    /// a current cache built by --stream has no design.ovo; with --stream
-    /// still on, a deck's --occupancy must not turn into an in-memory
-    /// occupancy-only parse of the whole source
     #[test]
     fn exit_words_name_the_memory_kill_and_the_guard() {
         assert!(exit_words(137).unwrap().contains("out of memory"));
         assert!(exit_words(71).unwrap().contains("--stream"));
+        assert!(exit_words(71).unwrap().contains("--mem"));
         assert!(exit_words(floe_vfs::lock::BUSY_EXIT).unwrap().starts_with("busy"));
         assert_eq!(exit_words(130), Some("cancelled"));
         assert_eq!(exit_words(1), None);
         assert_eq!(exit_words(2), None);
     }
 
+    /// the switch-over (STREAMING_INDEX_PLAN §10): the default passes no
+    /// mode flag (floe-index streams), --stream and --in-memory are
+    /// forwarded to the whole build and to the occupancy-only run, a
+    /// current cache without design.ovo gets an occupancy-only run in
+    /// every mode, and --mem belongs to the streaming build
     #[test]
-    fn stream_reuses_a_cache_without_occupancy() {
+    fn modes_are_forwarded_and_occupancy_only_streams() {
         let mut o = IndexOptions::default();
         o.occupancy = Some(true);
-        assert_eq!(decide(&o, &CacheState::Current, false, false).unwrap(), Action::OccupancyOnly);
-        o.stream = true;
-        assert_eq!(decide(&o, &CacheState::Current, false, false).unwrap(), Action::Reuse);
-        assert_eq!(decide(&o, &CacheState::Current, true, false).unwrap(), Action::OccupancyPresent);
-        assert_eq!(decide(&o, &CacheState::Missing, false, false).unwrap(), Action::Build);
-        let a = arguments(Path::new("x.oas"), Path::new("x.ice"), &o, &Action::Build).unwrap();
-        assert!(a.contains(&OsString::from("--stream")));
+        for mode in [IndexMode::Auto, IndexMode::Stream, IndexMode::InMemory] {
+            o.mode = mode;
+            assert_eq!(decide(&o, &CacheState::Current, false, false).unwrap(), Action::OccupancyOnly);
+            assert_eq!(decide(&o, &CacheState::Current, true, false).unwrap(), Action::OccupancyPresent);
+            assert_eq!(decide(&o, &CacheState::Missing, false, false).unwrap(), Action::Build);
+            for action in [Action::Build, Action::OccupancyOnly] {
+                let a = arguments(Path::new("x.oas"), Path::new("x.ice"), &o, &action).unwrap();
+                assert_eq!(a.contains(&OsString::from("--stream")), mode == IndexMode::Stream, "{mode:?} {action:?}");
+                assert_eq!(a.contains(&OsString::from("--in-memory")), mode == IndexMode::InMemory, "{mode:?} {action:?}");
+                assert!(!a.contains(&OsString::from("--mem")));
+            }
+        }
+        o.mode = IndexMode::Auto;
         o.mem_gib = Some(2.5);
+        assert!(o.validate().is_ok(), "mem with the default mode streams");
         let a = arguments(Path::new("x.oas"), Path::new("x.ice"), &o, &Action::Build).unwrap();
         assert!(a.windows(2).any(|w| w == ["--mem", "2.5"]));
-        o.stream = false;
-        assert!(o.validate().is_err(), "mem without stream");
+        let a = arguments(Path::new("x.oas"), Path::new("x.ice"), &o, &Action::OccupancyOnly).unwrap();
+        assert!(a.windows(2).any(|w| w == ["--mem", "2.5"]));
+        o.mode = IndexMode::InMemory;
+        assert!(o.validate().is_err(), "mem with --in-memory");
+        o.mem_gib = None;
+        o.mode = IndexMode::Stream;
+        o.occupancy_only = true;
+        assert!(o.validate().is_ok(), "--stream --occupancy-only streams the summary");
+        o.occupancy_only = false;
+        o.representatives = true;
+        assert!(o.validate().is_err(), "--stream --representatives");
     }
 }

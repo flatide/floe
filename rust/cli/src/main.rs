@@ -243,7 +243,7 @@ fn main() {
              [--profile-cell NAME | --profile-cell-ci N] \
              [--profile-jobs N,N,...] [--profile-repeat N] \
              [--profile-snapshot PATH] [--profile-snapshot-refresh] \
-             [--stream [--mem GiB]]  (the two-pass streaming build: the inventory pass, then cells read in file order behind a byte budget; design.ovo from a third pass; no coverage / representatives)\n       \
+             [--stream | --in-memory] [--mem GiB]  (the build's mode: streaming by default since 0.12.370 - the inventory pass, then cells read in file order behind a byte budget of --mem GiB, design.ovo from one more pass; --in-memory or FLOE_INDEX_STREAM=off = the whole-parse build, which coverage, representatives and a profile use anyway; --stream insists)\n       \
              floe-index vfs <deck.jb> [--level N,N,..] [--jobs N] [--force] [--wait[=S]] \
              [--occupancy-um F] ...  (a jobdeck: its sources that have no index, each beside its source - runs floe2 index)\n       \
              floe-index plan <outdir> --view x0,y0,x1,y1 \

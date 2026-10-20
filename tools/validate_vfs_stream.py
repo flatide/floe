@@ -1,25 +1,36 @@
 #!/usr/bin/env python3
 """G3, G4 and G5 of the streaming index plan (docs/STREAMING_INDEX_PLAN.ko.md
-§6): `floe-index vfs SRC OUT --stream` builds the same cache as the
-in-memory build.
+§6) and the switch-over (§10-§11, 0.12.370): the streaming build is the
+default of `floe-index vfs SRC OUT` and builds the same cache as the
+in-memory build (`--in-memory`).
 
 For the battery fixture (valmini) and two generated files (tools/
 gen_route_chip.py --scale 0.05: million-member point lists that the
 normalization pass splits; tools/gen_main01_like.py --scale 0.001: a deep
 hierarchy of 3,500 cells over 449 layers):
-  - G3: the in-memory build and the streaming build at jobs 1 and 4, the
-    budget set to the inventory's largest cell times 1.5 so cells are
-    admitted, planned, encoded and released in waves, agree byte for byte
-    on design.ovm / ovp / ovt / ovb / ovh / ovs / ovo and meta.json (both
-    with --occupancy; design.ovc is not offered in streaming mode), and
-    the exact occupancy walk (--occupancy-prune 0) at a finer cell too;
-  - G4: `floe2 index SRC --stream --mem G` (the product's command line)
-    builds the same bytes as `floe-index vfs ... --no-lod` (floe2 passes
-    --no-lod); `--stream --coverage` is refused (exit 2); `--mem` without
-    `--stream` is refused; a budget below the largest cell is refused with
-    exit 71; the S6 guards (the memory ceiling FLOE_RSS_CEILING, the size
-    pre-check of the in-memory build) stop with exit 71 and the cache as
-    it was;
+  - G3: the in-memory build (--in-memory) and the streaming build at jobs 1
+    and 4, the budget set to the inventory's largest cell times 1.5 so cells
+    are admitted, planned, encoded and released in waves, agree byte for
+    byte on design.ovm / ovp / ovt / ovb / ovh / ovs / ovo and meta.json
+    (both with --occupancy; design.ovc is not offered in streaming mode);
+    the default command line (no mode flag, no --mem) streams and agrees
+    too; the exact occupancy walk (--occupancy-prune 0) at a finer cell too;
+    `--occupancy-only` on a cache without design.ovo streams (the
+    switch-over) and writes the in-memory run's bytes;
+  - G4: `floe2 index SRC` (the product's command line, default mode) and
+    `floe2 index SRC --stream --mem G` build the same bytes as `floe-index
+    vfs ... --in-memory --no-lod` (floe2 passes --no-lod), `floe2 index
+    --in-memory` builds in memory; the refusals: `--stream --coverage` (2),
+    `--in-memory --mem` (2), `--stream --in-memory` (2), a --mem below the
+    largest cell (71); `--coverage` without a mode flag builds in memory;
+    FLOE_INDEX_STREAM=off builds in memory, an unknown value notes and
+    streams; the default budget rises to the file's largest cell when the
+    host has it (FLOE_MEM_AVAILABLE_GB) and is refused with 71 when it has
+    not; a file the inventory refuses (a CELLNAME reference number defined
+    twice) falls back to the in-memory build in the default mode, exits 1
+    under --stream; the S6 guards (the memory ceiling FLOE_RSS_CEILING, the
+    size pre-check of the in-memory build) stop with exit 71 and the cache
+    as it was;
   - G5: the peak resident set of the streaming build (ru_maxrss of its
     process) is bounded against the in-memory build's: the main build
     alone (no --occupancy, jobs 1) at 1.25 x the in-memory peak + 128 MB;
@@ -31,11 +42,13 @@ hierarchy of 3,500 cells over 449 layers):
     build's peak varies by about 100 MB run to run).
 
 usage: python tools/validate_vfs_stream.py valmini.oas
+       python tools/validate_vfs_stream.py --compare FILE.oas [--jobs N]
+           (the field check of §10.4: the in-memory and the default build
+           of one file, compared byte for byte; nothing else runs)
 """
 import json
 import os
 from pathlib import Path
-import platform
 import shutil
 import subprocess
 import sys
@@ -69,7 +82,7 @@ def run_measured(cmd, env=None):
         "m = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss\n"
         "if sys.platform != 'darwin': m *= 1024\n"
         "sys.stdout.write(str(m) + '\\n')\n"
-        "sys.stderr.write(r.stderr[-40000:])\n"
+        "sys.stderr.write(r.stderr[-200000:])\n"
         "sys.exit(r.returncode)\n"
     )
     t0 = time.perf_counter()
@@ -106,14 +119,87 @@ def compare_dirs(a, b, what, skip=SKIP):
     return fa
 
 
+def streamed(err):
+    """the streaming build's log lines: the inventory pass's (its first),
+    the main build's last, the done line's tag - a long log (every cell
+    logged under --slow-cell-s 0) may be cut at the front"""
+    return ("stream: inventory" in err or "stream: build complete" in err
+            or "stream: placements" in err or "(streaming" in err)
+
+
+# --- a minimal OASIS stream the inventory refuses: two CELLNAME records
+# with the same reference number (the geometry parser resolves the
+# reference by record position; a cell-wise build cannot reproduce that)
+
+def _uint(v):
+    out = bytearray()
+    while True:
+        b = v & 0x7F
+        v >>= 7
+        if v:
+            out.append(b | 0x80)
+        else:
+            out.append(b)
+            return bytes(out)
+
+
+def _sint(v):
+    return _uint((abs(v) << 1) | (1 if v < 0 else 0))
+
+
+def _string(s):
+    return _uint(len(s)) + s
+
+
+def dup_cellname_oas():
+    b = bytearray(b"%SEMI-OASIS\r\n")
+    # START: version, unit 1000/um (real type 0), offset-flag 0 + 6 zero pairs
+    b += bytes([1]) + _string(b"1.0") + bytes([0]) + _uint(1000) + _uint(0) + _uint(0) * 12
+    b += bytes([4]) + _string(b"TOP") + _uint(0)
+    b += bytes([4]) + _string(b"TOP2") + _uint(0)
+    b += bytes([13]) + _uint(0)
+    # RECTANGLE, info-byte W H X Y D L
+    b += bytes([20, 0x7B]) + _uint(1) + _uint(0) + _uint(2000) + _uint(1000) + _sint(100) + _sint(200)
+    # END: a 256-byte record, validation scheme 0
+    b += bytes([2]) + _string(b"\0" * 252) + bytes([0])
+    return bytes(b)
+
+
+def compare_file(src, jobs):
+    """--compare FILE: the field check of the switch-over - the in-memory
+    build and the default (streaming) build of one file, byte for byte"""
+    env = dict(os.environ, FLOE_LOCK="off")
+    with tempfile.TemporaryDirectory(prefix="floe-stream-cmp-") as td:
+        work = Path(td)
+        for label, out, extra in (("in-memory", work / "mem", ["--in-memory"]), ("default", work / "def", [])):
+            rc, peak, dt, err = run_measured(
+                [BIN, "vfs", src, out, "--jobs", str(jobs), "--occupancy"] + extra, env)
+            if rc != 0:
+                fail("%s build exit %d\n%s" % (label, rc, err[-3000:]))
+            if (label == "default") != streamed(err):
+                fail("%s build: unexpected mode\n%s" % (label, err[-1500:]))
+            print("%-9s build: %.1fs, peak rss %.0f MB" % (label, dt, peak / 1e6))
+        names = compare_dirs(work / "mem", work / "def", "%s default vs in-memory" % src.name)
+        print("OK  %s: %d files identical (%s)" % (src.name, len(names), ", ".join(names)))
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
         sys.exit(2)
-    src0 = Path(sys.argv[1]).resolve()
     for b in (BIN, FLOE2):
         if not b.is_file():
             fail("release binary missing: %s" % b)
+    if sys.argv[1] == "--compare":
+        if len(sys.argv) < 3:
+            fail("--compare needs a file")
+        jobs = 4
+        if "--jobs" in sys.argv:
+            jobs = int(sys.argv[sys.argv.index("--jobs") + 1])
+        compare_file(Path(sys.argv[2]).resolve(), jobs)
+        print("vfs_stream --compare: ALL OK")
+        return
+    src0 = Path(sys.argv[1]).resolve()
     env = os.environ.copy()
     env["FLOE_LOCK"] = "off"
     with tempfile.TemporaryDirectory(prefix="floe-stream-") as td:
@@ -128,15 +214,19 @@ def main():
         main01 = work / "main01_like.oas"
         generate("gen_main01_like.py", main01, "--scale", "0.001", "--jobs", "2")
         files.append(("main01_like 0.001", main01))
+        largest_of = {}
         for name, src in files:
             largest, est = largest_cell_bytes(src, 4)
+            largest_of[name] = largest
             mem_gib = max(largest * 1.5, 1 << 16) / float(1 << 30)
             budget = int(mem_gib * (1 << 30))
             ref = work / (src.stem + "_mem")
             rc, peak_mem, dt_mem, err = run_measured(
-                [BIN, "vfs", src, ref, "--jobs", "4", "--slow-cell-s", "0", "--occupancy"], env)
+                [BIN, "vfs", src, ref, "--in-memory", "--jobs", "4", "--slow-cell-s", "0", "--occupancy"], env)
             if rc != 0:
                 fail("in-memory build %s exit %d\n%s" % (name, rc, err[-2000:]))
+            if streamed(err) or "[vfs] done in" not in err:
+                fail("--in-memory %s did not build in memory\n%s" % (name, err[-1500:]))
             # G5, the main build alone: no occupancy pass, jobs 1
             out = work / (src.stem + "_stream_noocc")
             rc, peak0, dt0, err = run_measured(
@@ -162,7 +252,7 @@ def main():
                      "--occupancy", "--stream", "--mem", "%.6f" % mem_gib], env)
                 if rc != 0:
                     fail("stream build %s jobs %d exit %d\n%s" % (name, jobs, rc, err[-2000:]))
-                if "inventory" not in err or "stream:" not in err:
+                if not streamed(err):
                     fail("stream build %s jobs %d: no streaming log lines\n%s" % (name, jobs, err[-1500:]))
                 names = compare_dirs(ref, out, "%s stream jobs %d" % (name, jobs))
                 if not (out / "design.ovo").exists():
@@ -181,11 +271,40 @@ def main():
                          "" if jobs == 1 else ", reported", dt, dt_mem))
                 if verdict == "FAIL":
                     fail("%s jobs %d: streaming peak %d above the in-memory peak %d + slack" % (name, jobs, peak, peak_mem))
+            # the switch-over: the default command line (no mode flag, no
+            # --mem) streams and builds the same bytes
+            out = work / (src.stem + "_default")
+            r = subprocess.run([str(BIN), "vfs", str(src), str(out), "--jobs", "4", "--slow-cell-s", "0", "--occupancy"],
+                               capture_output=True, text=True, env=env)
+            if r.returncode != 0:
+                fail("default build %s exit %d\n%s" % (name, r.returncode, r.stderr[-2000:]))
+            if not streamed(r.stderr):
+                fail("default build %s did not stream\n%s" % (name, r.stderr[-1500:]))
+            names = compare_dirs(ref, out, "%s default" % name)
+            # the switch-over: --occupancy-only on a cache without design.ovo
+            # streams (inventory, placements pass, occupancy passes) and
+            # writes the in-memory run's bytes
+            out = work / (src.stem + "_occonly")
+            r = subprocess.run([str(BIN), "vfs", str(src), str(out), "--in-memory", "--jobs", "4", "--slow-cell-s", "0"],
+                               capture_output=True, text=True, env=env)
+            if r.returncode != 0 or (out / "design.ovo").exists():
+                fail("cache without design.ovo %s: exit %d\n%s" % (name, r.returncode, r.stderr[-1500:]))
+            t0 = time.perf_counter()
+            r = subprocess.run([str(BIN), "vfs", str(src), str(out), "--occupancy-only", "--jobs", "4"],
+                               capture_output=True, text=True, env=env)
+            dt_oo = time.perf_counter() - t0
+            if r.returncode != 0:
+                fail("--occupancy-only %s exit %d\n%s" % (name, r.returncode, r.stderr[-2000:]))
+            if not streamed(r.stderr) or "placements of" not in r.stderr or "occupancy streaming" not in r.stderr:
+                fail("--occupancy-only %s did not stream\n%s" % (name, r.stderr[-1500:]))
+            compare_dirs(ref, out, "%s --occupancy-only (streaming)" % name)
+            print("OK  %-18s default command line streams (%d files identical); --occupancy-only streams design.ovo (identical, %.1fs)"
+                  % (name, len(names), dt_oo))
         # the exact walk (--occupancy-prune 0) and a finer cell on valmini
         src = files[0][1]
         ref = work / "valmini_exact_mem"
         out = work / "valmini_exact_stream"
-        for target, extra in ((ref, []), (out, ["--stream", "--mem", "0.5"])):
+        for target, extra in ((ref, ["--in-memory"]), (out, ["--stream", "--mem", "0.5"])):
             r = subprocess.run([str(BIN), "vfs", str(src), str(target), "--jobs", "2", "--occupancy",
                                 "--occupancy-prune", "0", "--occupancy-um", "1"] + extra,
                                capture_output=True, text=True, env=env)
@@ -196,39 +315,84 @@ def main():
         # G4: the product command line, and the refusals. The reference is
         # built from the SAME path (meta.json records the source path).
         src = files[0][1]
-        prod_src = work / "prod" / "valmini.oas"
-        prod_src.parent.mkdir()
-        shutil.copy2(src, prod_src)
-        ref = work / "valmini_nolod_mem"
-        r = subprocess.run([str(BIN), "vfs", str(prod_src), str(ref), "--jobs", "2", "--no-lod"],
-                           capture_output=True, text=True, env=env)
-        if r.returncode != 0:
-            fail("in-memory --no-lod build: %s" % r.stderr[-1500:])
         penv = dict(env, FLOE_INDEX_BIN=str(BIN))
-        r = subprocess.run([str(FLOE2), "index", str(prod_src), "--jobs", "2", "--stream", "--mem", "0.5"],
-                           capture_output=True, text=True, env=penv)
-        if r.returncode != 0:
-            fail("floe2 index --stream exit %d\n%s\n%s" % (r.returncode, r.stdout[-800:], r.stderr[-2000:]))
-        caches = [p for p in prod_src.parent.iterdir() if p.is_dir() and p.name.endswith(".ice")]
-        if len(caches) != 1:
-            fail("floe2 index --stream: expected one .ice cache, found %s" % [c.name for c in caches])
-        compare_dirs(ref, caches[0], "floe2 index --stream vs floe-index vfs --no-lod")
-        print("OK  floe2 index --stream --mem 0.5: cache %s identical to floe-index vfs --no-lod" % caches[0].name)
+        for label, extra, expect_stream in (("--stream --mem 0.5", ["--stream", "--mem", "0.5"], True),
+                                            ("(default)", [], True),
+                                            ("--in-memory", ["--in-memory"], False)):
+            prod_src = work / ("prod_" + str(len(label))) / "valmini.oas"
+            prod_src.parent.mkdir()
+            shutil.copy2(src, prod_src)
+            ref = prod_src.parent / "ref_nolod_mem"
+            r = subprocess.run([str(BIN), "vfs", str(prod_src), str(ref), "--in-memory", "--jobs", "2", "--no-lod"],
+                               capture_output=True, text=True, env=env)
+            if r.returncode != 0:
+                fail("in-memory --no-lod build: %s" % r.stderr[-1500:])
+            r = subprocess.run([str(FLOE2), "index", str(prod_src), "--jobs", "2"] + extra,
+                               capture_output=True, text=True, env=penv)
+            if r.returncode != 0:
+                fail("floe2 index %s exit %d\n%s\n%s" % (label, r.returncode, r.stdout[-800:], r.stderr[-2000:]))
+            if streamed(r.stderr + r.stdout) != expect_stream:
+                fail("floe2 index %s: unexpected mode\n%s\n%s" % (label, r.stdout[-800:], r.stderr[-1500:]))
+            caches = [p for p in prod_src.parent.iterdir() if p.is_dir() and p.name.endswith(".ice")]
+            if len(caches) != 1:
+                fail("floe2 index %s: expected one .ice cache, found %s" % (label, [c.name for c in caches]))
+            compare_dirs(ref, caches[0], "floe2 index %s vs floe-index vfs --in-memory --no-lod" % label)
+            print("OK  floe2 index %s: cache %s identical to floe-index vfs --in-memory --no-lod" % (label, caches[0].name))
         r = subprocess.run([str(BIN), "vfs", str(src), str(work / "x1"), "--stream", "--coverage"],
                            capture_output=True, text=True, env=env)
         if r.returncode != 2:
             fail("--stream --coverage should be refused with exit 2, got %d" % r.returncode)
-        r = subprocess.run([str(BIN), "vfs", str(src), str(work / "x2"), "--mem", "1"],
+        r = subprocess.run([str(BIN), "vfs", str(src), str(work / "x2"), "--in-memory", "--mem", "1"],
                            capture_output=True, text=True, env=env)
         if r.returncode != 2:
-            fail("--mem without --stream should be refused with exit 2, got %d" % r.returncode)
-        r = subprocess.run([str(BIN), "vfs", str(src), str(work / "x3"), "--stream", "--mem", "0.0000001"],
+            fail("--in-memory --mem should be refused with exit 2, got %d" % r.returncode)
+        r = subprocess.run([str(BIN), "vfs", str(src), str(work / "x2b"), "--stream", "--in-memory"],
+                           capture_output=True, text=True, env=env)
+        if r.returncode != 2:
+            fail("--stream --in-memory should be refused with exit 2, got %d" % r.returncode)
+        r = subprocess.run([str(BIN), "vfs", str(src), str(work / "x3"), "--mem", "0.0000001"],
                            capture_output=True, text=True, env=env)
         if r.returncode != 71 or "--mem" not in r.stderr:
-            fail("a budget below the largest cell should be refused with exit 71: exit %d\n%s" % (r.returncode, r.stderr[-600:]))
+            fail("a --mem below the largest cell should be refused with exit 71: exit %d\n%s" % (r.returncode, r.stderr[-600:]))
         if (work / "x3" / "design.ovm").exists():
             fail("a refused streaming build left a cache behind")
-        print("OK  refusals: --stream --coverage (2), --mem without --stream (2), budget below the largest cell (%d)" % r.returncode)
+        r = subprocess.run([str(BIN), "vfs", str(src), str(work / "x4"), "--jobs", "2", "--coverage"],
+                           capture_output=True, text=True, env=env)
+        if r.returncode != 0 or streamed(r.stderr) or not (work / "x4" / "design.ovc").exists():
+            fail("--coverage without a mode flag should build in memory: exit %d\n%s" % (r.returncode, r.stderr[-1000:]))
+        print("OK  refusals: --stream --coverage (2), --in-memory --mem (2), --stream --in-memory (2), --mem below the largest cell (71); --coverage builds in memory")
+        # FLOE_INDEX_STREAM: off = the in-memory build, an unknown value notes
+        # and streams
+        ref = work / "valmini_mem"
+        r = subprocess.run([str(BIN), "vfs", str(src), str(work / "envoff"), "--jobs", "2", "--occupancy"],
+                           capture_output=True, text=True, env=dict(env, FLOE_INDEX_STREAM="off"))
+        if r.returncode != 0 or streamed(r.stderr) or "[vfs] reading" not in r.stderr:
+            fail("FLOE_INDEX_STREAM=off should build in memory: exit %d\n%s" % (r.returncode, r.stderr[-1000:]))
+        compare_dirs(ref, work / "envoff", "FLOE_INDEX_STREAM=off")
+        r = subprocess.run([str(BIN), "vfs", str(src), str(work / "envbad"), "--jobs", "2"],
+                           capture_output=True, text=True, env=dict(env, FLOE_INDEX_STREAM="maybe"))
+        if r.returncode != 0 or not streamed(r.stderr) or "FLOE_INDEX_STREAM=maybe" not in r.stderr:
+            fail("FLOE_INDEX_STREAM=maybe should note and stream: exit %d\n%s" % (r.returncode, r.stderr[-1000:]))
+        print("OK  FLOE_INDEX_STREAM=off builds in memory (identical); an unknown value notes and streams")
+        # the default budget rises to the file's largest cell when the host
+        # has it (route_chip: a 117 MB top cell; MemAvailable 1.5 x it ->
+        # the default budget is half of it, below the cell), and is refused
+        # with 71 when the host has not (0.5 x)
+        rsrc = files[1][1]
+        largest = largest_of[files[1][0]]
+        ref = work / (rsrc.stem + "_mem")
+        r = subprocess.run([str(BIN), "vfs", str(rsrc), str(work / "raise"), "--jobs", "2", "--slow-cell-s", "0", "--occupancy"],
+                           capture_output=True, text=True,
+                           env=dict(env, FLOE_MEM_AVAILABLE_GB="%.9f" % (largest * 1.5 / 1e9)))
+        if r.returncode != 0 or "the budget is raised to" not in r.stderr:
+            fail("the default budget should rise to the largest cell: exit %d\n%s" % (r.returncode, r.stderr[-1500:]))
+        compare_dirs(ref, work / "raise", "route_chip, budget raised")
+        r = subprocess.run([str(BIN), "vfs", str(rsrc), str(work / "noraise"), "--jobs", "2"],
+                           capture_output=True, text=True,
+                           env=dict(env, FLOE_MEM_AVAILABLE_GB="%.9f" % (largest * 0.5 / 1e9)))
+        if r.returncode != 71 or "cannot rise" not in r.stderr or (work / "noraise").exists():
+            fail("a need past the host should be refused with 71: exit %d\n%s" % (r.returncode, r.stderr[-1500:]))
+        print("OK  default budget: raised to the largest cell within the host (identical); refused (71) past it")
         # S6 guards (STREAMING_INDEX_PLAN §5): the memory ceiling stops a
         # build at its first check, the size pre-check refuses an in-memory
         # build of a file larger than MemAvailable - exit 71, the cache as
@@ -241,9 +405,10 @@ def main():
         snapshot = lambda: {p.name: (p.stat().st_mtime_ns, p.read_bytes()) for p in keep.iterdir() if p.is_file()}
         before = snapshot()
         for label, extra, more, needle in (
-                ("memory ceiling, in-memory build", [], {"FLOE_RSS_CEILING": "1M"}, "memory ceiling"),
+                ("memory ceiling, in-memory build", ["--in-memory"], {"FLOE_RSS_CEILING": "1M"}, "memory ceiling"),
                 ("memory ceiling, streaming build", ["--stream", "--mem", "0.5"], {"FLOE_RSS_CEILING": "1M"}, "memory ceiling"),
-                ("size pre-check", [], {"FLOE_MEM_AVAILABLE_GB": "0.000001"}, "index with --stream")):
+                ("memory ceiling, default build", [], {"FLOE_RSS_CEILING": "1M"}, "memory ceiling"),
+                ("size pre-check", ["--in-memory"], {"FLOE_MEM_AVAILABLE_GB": "0.000001"}, "index with --stream")):
             r = subprocess.run([str(BIN), "vfs", str(src), str(keep), "--jobs", "2"] + extra,
                                capture_output=True, text=True, env=dict(env, **more), timeout=120)
             if r.returncode != 71:
@@ -260,7 +425,26 @@ def main():
                            capture_output=True, text=True, env=dict(env, FLOE_RSS_CEILING="12x"))
         if r.returncode != 0 or "the default ceiling applies" not in r.stderr:
             fail("FLOE_RSS_CEILING=12x: the build should run with a note: exit %d\n%s" % (r.returncode, r.stderr[-1500:]))
-        print("OK  guards: memory ceiling (in-memory, streaming) and the size pre-check exit 71 and keep the cache; off and a bad setting build")
+        print("OK  guards: memory ceiling (in-memory, streaming, default) and the size pre-check exit 71 and keep the cache; off and a bad setting build")
+        # a file the inventory refuses (a CELLNAME reference number defined
+        # twice): --in-memory builds it, --stream exits 1 before any output,
+        # the default falls back to the in-memory build with the same bytes
+        dup = work / "dup_cellname.oas"
+        dup.write_bytes(dup_cellname_oas())
+        r = subprocess.run([str(BIN), "vfs", str(dup), str(work / "dup_mem"), "--in-memory", "--jobs", "1"],
+                           capture_output=True, text=True, env=env)
+        if r.returncode != 0:
+            fail("dup-cellname file: the in-memory build should run: exit %d\n%s" % (r.returncode, r.stderr[-1500:]))
+        r = subprocess.run([str(BIN), "vfs", str(dup), str(work / "dup_stream"), "--stream", "--jobs", "1"],
+                           capture_output=True, text=True, env=env)
+        if r.returncode != 1 or "inventory" not in r.stderr or (work / "dup_stream").exists():
+            fail("dup-cellname file: --stream should exit 1 before any output: exit %d\n%s" % (r.returncode, r.stderr[-1500:]))
+        r = subprocess.run([str(BIN), "vfs", str(dup), str(work / "dup_default"), "--jobs", "1"],
+                           capture_output=True, text=True, env=env)
+        if r.returncode != 0 or "the in-memory build takes over" not in r.stderr:
+            fail("dup-cellname file: the default should fall back: exit %d\n%s" % (r.returncode, r.stderr[-1500:]))
+        compare_dirs(work / "dup_mem", work / "dup_default", "dup-cellname fallback")
+        print("OK  a file the inventory refuses: --in-memory builds, --stream exits 1, the default falls back (identical)")
         # a source that changes under the reader: one line, exit 1, no hang
         broken = work / "broken.oas"
         data = bytearray(src.read_bytes())
@@ -272,16 +456,18 @@ def main():
         # the inventory refuses the broken record itself; so corrupt a copy
         # AFTER the inventory would run: emulate by patching a byte deep
         # inside a cell's range that the inventory does not inspect is not
-        # possible, hence the check is on the error path's shape only
-        t0 = time.perf_counter()
-        try:
-            r = subprocess.run([str(BIN), "vfs", str(broken), str(work / "x4"), "--stream", "--mem", "1"],
-                               capture_output=True, text=True, env=env, timeout=120)
-        except subprocess.TimeoutExpired:
-            fail("a streaming build of a corrupt source hung for 120 s")
-        if r.returncode == 0:
-            fail("a corrupt source built a cache")
-        print("OK  corrupt source: exit %d in %.1fs (%s)" % (r.returncode, time.perf_counter() - t0, (r.stderr.strip().splitlines() or ['?'])[-1][:100]))
+        # possible, hence the check is on the error path's shape only (the
+        # default mode falls back to the in-memory parse, which refuses too)
+        for label, extra in (("--stream", ["--stream", "--mem", "1"]), ("default", [])):
+            t0 = time.perf_counter()
+            try:
+                r = subprocess.run([str(BIN), "vfs", str(broken), str(work / ("x5_" + label.strip("-"))), "--jobs", "2"] + extra,
+                                   capture_output=True, text=True, env=env, timeout=120)
+            except subprocess.TimeoutExpired:
+                fail("a %s build of a corrupt source hung for 120 s" % label)
+            if r.returncode == 0:
+                fail("a corrupt source built a cache (%s)" % label)
+            print("OK  corrupt source, %s: exit %d in %.1fs (%s)" % (label, r.returncode, time.perf_counter() - t0, (r.stderr.strip().splitlines() or ['?'])[-1][:100]))
     print("vfs_stream: ALL OK")
 
 

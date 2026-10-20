@@ -92,22 +92,64 @@ pub struct StreamStore {
 }
 
 /// why `StreamStore::new` refused the file
-#[derive(Debug)]
 pub enum NewError {
     /// the file cannot be opened
     Open(String),
     /// a cell, or the span of cells a multi-definition holds resident,
     /// does not fit the budget (STREAMING_INDEX_PLAN §5): the memory
-    /// refusal, ended with crate::guard::EXIT_MEMORY
-    Budget(String),
+    /// refusal, ended with crate::guard::EXIT_MEMORY. The inventory comes
+    /// back with the smallest budget the file streams under (`need`), so
+    /// a caller that chose the budget itself can retry with it (the
+    /// switch-over, §10: the default budget rises to the file's need
+    /// when the host has it)
+    Budget {
+        /// what needs the memory: "cell X needs about N resident", or the
+        /// multi-definition span
+        what: String,
+        /// a single cell is the need (intra-cell splitting would be the
+        /// remedy, §4.7); false for a span
+        single_cell: bool,
+        need: u64,
+        budget: u64,
+        inv: Box<Inventory>,
+    },
     /// the inventory contradicts itself (a bug, or a file that changed)
     Inventory(String),
 }
 
+/// the remedy a single cell over a budget would need (STREAMING_INDEX_PLAN
+/// §4.7, not implemented)
+pub const SPLITTING: &str =
+    "a cell larger than the budget needs intra-cell splitting, which is not implemented (STREAMING_INDEX_PLAN §4.7)";
+
 impl std::fmt::Display for NewError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            NewError::Open(s) | NewError::Budget(s) | NewError::Inventory(s) => f.write_str(s),
+            NewError::Open(s) | NewError::Inventory(s) => f.write_str(s),
+            NewError::Budget {
+                what,
+                single_cell,
+                budget,
+                ..
+            } => write!(
+                f,
+                "{}, the budget is {} (--mem): {}raise --mem if the host allows",
+                what,
+                crate::fmt_size(*budget),
+                if *single_cell { format!("{}; ", SPLITTING) } else { String::new() }
+            ),
+        }
+    }
+}
+
+impl std::fmt::Debug for NewError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NewError::Open(s) => write!(f, "Open({:?})", s),
+            NewError::Budget { what, need, budget, .. } => {
+                write!(f, "Budget({:?}, need {}, budget {})", what, need, budget)
+            }
+            NewError::Inventory(s) => write!(f, "Inventory({:?})", s),
         }
     }
 }
@@ -134,16 +176,8 @@ impl StreamStore {
                 largest_name = c.name.clone();
             }
         }
-        if largest > budget {
-            return Err(NewError::Budget(format!(
-                "cell {} needs about {} resident, the budget is {} (--mem): a cell larger \
-                 than the budget needs intra-cell splitting, which is not implemented \
-                 (STREAMING_INDEX_PLAN §4.7); raise --mem if the host allows",
-                largest_name,
-                crate::fmt_size(largest),
-                crate::fmt_size(budget)
-            )));
-        }
+        // (the budget is checked below, once the multi-definition spans
+        // are known: the refusal names the file's whole need)
         // ranges in file order: the head first, then every cell's
         // definitions; a cell is charged to the budget by the range that
         // defines it first
@@ -212,20 +246,44 @@ impl StreamStore {
                 remaining: c.def_ranges.len() as u32,
             });
         }
+        // the smallest budget the file streams under: the largest cell, or
+        // the largest span of cells a multi-definition holds resident
         let mut min_budget = largest;
+        let mut binding_span: Option<(usize, u64)> = None;
         for (ci, first, last) in spans {
             let span: u64 = ranges[first..=last].iter().map(|r| r.cost).sum();
-            min_budget = min_budget.max(span);
-            if span > budget {
-                return Err(NewError::Budget(format!(
-                    "cell {} is defined in several places of the file; the cells between \
-                     its definitions need about {} resident together, the budget is {} \
-                     (--mem): raise --mem if the host allows",
-                    inv.cells[ci].name,
-                    crate::fmt_size(span),
-                    crate::fmt_size(budget)
-                )));
+            if span > min_budget {
+                min_budget = span;
+                binding_span = Some((ci, span));
             }
+        }
+        if min_budget > budget {
+            let (what, single_cell) = match binding_span {
+                Some((ci, span)) => (
+                    format!(
+                        "cell {} is defined in several places of the file; the cells between \
+                         its definitions need about {} resident together",
+                        inv.cells[ci].name,
+                        crate::fmt_size(span)
+                    ),
+                    false,
+                ),
+                None => (
+                    format!(
+                        "cell {} needs about {} resident",
+                        largest_name,
+                        crate::fmt_size(largest)
+                    ),
+                    true,
+                ),
+            };
+            return Err(NewError::Budget {
+                what,
+                single_cell,
+                need: min_budget,
+                budget,
+                inv: Box::new(inv),
+            });
         }
         let plan = StreamPlan {
             ranges: ranges.len(),
@@ -301,6 +359,16 @@ impl StreamStore {
             overflow: false,
             by_cell: (0..n).map(|_| None).collect(),
         });
+    }
+
+    /// whether the kept placements overflowed the cap: (records seen,
+    /// cap); None while they fit (or nothing is kept)
+    pub fn kept_places_overflow(&self) -> Option<(u64, u64)> {
+        let st = self.lock();
+        match &st.keep {
+            Some(k) if k.overflow => Some((k.total, k.cap)),
+            _ => None,
+        }
     }
 
     /// the kept placements per cell, or why the occupancy pass cannot
@@ -878,7 +946,7 @@ mod tests {
         let largest = inv.cells.iter().map(|c| c.doc_bytes).max().unwrap();
         if largest < span {
             let e = StreamStore::new(inv, src.to_str().unwrap(), span - 1).err().expect("refused");
-            assert!(matches!(e, NewError::Budget(_)), "{}", e);
+            assert!(matches!(e, NewError::Budget { .. }), "{}", e);
             let e = e.to_string();
             assert!(e.contains("several places"), "{}", e);
         } else {
@@ -899,7 +967,7 @@ mod tests {
         let inv = floe_oasis::inventory(&data, 1).expect("inventory");
         let largest = inv.cells.iter().map(|c| c.doc_bytes).max().unwrap();
         let e = StreamStore::new(inv, src.to_str().unwrap(), largest - 1).err().expect("refused");
-        assert!(matches!(e, NewError::Budget(_)), "{}", e);
+        assert!(matches!(e, NewError::Budget { .. }), "{}", e);
         let e = e.to_string();
         assert!(e.contains("--mem"), "{}", e);
         let _ = std::fs::remove_dir_all(&dir);

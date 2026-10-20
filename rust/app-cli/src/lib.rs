@@ -17,7 +17,7 @@ mod ready;
 pub mod selfcheck;
 mod svrf;
 use floe_app_core::{
-    index::{Action, IndexOptions, PreparedIndex, ProfileCell},
+    index::{Action, IndexMode, IndexOptions, PreparedIndex, ProfileCell},
     jobdeck::index::{is_deck, parse_levels},
     native::{Discovery, Indexer},
     Error, ErrorKind, Result,
@@ -104,9 +104,10 @@ and jobdeck analysis/spec + source indexing with level selection.
 info/render/probe/clip index a source that has no index first (--no-index or
 FLOE_AUTO_INDEX=off: refuse instead); a source another run indexes is refused
 (exit 75) unless --wait[=SECONDS] (FLOE_LOCK_WAIT=on|SECONDS) waits for it.
-A build that outgrows the host stops at the memory ceiling (FLOE_RSS_CEILING: a percent
-of MemTotal, default 90, or bytes such as 300G, or off; exit 71), and a file larger than
-MemAvailable is refused the in-memory build (exit 71): both say to index with --stream.
+Indexing streams the source by default (0.12.370: an inventory pass, then the cells in file
+order behind --mem GiB; --in-memory or FLOE_INDEX_STREAM=off is the whole-parse build). A
+build that outgrows the host stops at the memory ceiling (FLOE_RSS_CEILING: a percent of
+MemTotal, default 90, or bytes such as 300G, or off; exit 71) and says what to do.
 DRC: read-only ICE/ASCII queries; explicit --build [--force] for atomic packs.
 Clip: full-depth exact layout OASIS export; jobdeck clip remains unsupported.
 Render: batch/mosaic + JSON reports, DRC marker/CD/legend captures; no Python runtime.
@@ -135,10 +136,16 @@ const INDEX_HELP: &str = "Usage: floe2-web index SOURCE [OPTIONS]
   --representatives-format 1|2 Points or shape/tree samples; implies rebuild of OVR
   --slow-cell-s S            Nonnegative slow-cell threshold
   --p2-shard-limit-mb N       Nonnegative shard-copy ceiling
-  --stream                   Streaming build: inventory pass, then cells read in file
-                             order behind a byte budget (design.ovo from one more pass)
+  --stream                   Insist on the streaming build (the default: inventory pass,
+                             then cells read in file order behind a byte budget,
+                             design.ovo from one more pass); refuses representatives,
+                             profiling and hier-only, which read the whole parse
+  --in-memory                The whole-parse build (the default before 0.12.370; also
+                             FLOE_INDEX_STREAM=off); the default falls back to it when
+                             the streaming build declines a source
   --mem GiB                  Streaming budget for resident cells (default
-                             min(MemAvailable/2, 32)); requires --stream
+                             min(MemAvailable/2, 32), raised to the source's largest
+                             cell when the host has it); not with --in-memory
   --profile-cell NAME        Profile one cell without writing a normal cache
   --profile-cell-ci N        Profile by zero-based cell index (exclusive)
   --profile-jobs N,N,...     Reuse parse/prepare across ordered job counts
@@ -335,7 +342,17 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
             "--p2-shard-limit-mb" => options.p2_shard_limit_mb = Some(number(value()?, flag)?),
             "--stream" => {
                 no_value()?;
-                options.stream = true;
+                if options.mode == IndexMode::InMemory {
+                    return Err(Error::input("--stream and --in-memory are exclusive"));
+                }
+                options.mode = IndexMode::Stream;
+            }
+            "--in-memory" => {
+                no_value()?;
+                if options.mode == IndexMode::Stream {
+                    return Err(Error::input("--stream and --in-memory are exclusive"));
+                }
+                options.mode = IndexMode::InMemory;
             }
             "--mem" => options.mem_gib = Some(number(value()?, flag)?),
             "--profile-cell" => {

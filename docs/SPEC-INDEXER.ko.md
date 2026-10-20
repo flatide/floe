@@ -55,7 +55,7 @@ floe-index vfs <src.oas> [outdir=.<src>.ice] [--jobs N] [--plan-batch N]
     [--coverage | --coverage-only] [--frontier-only] [--kill-at P]
     [--occupancy | --occupancy-only] [--occupancy-um F] [--occupancy-balance 0|1]
     [--occupancy-max-cells N] [--occupancy-max-work N] [--occupancy-max-bytes N]
-    [--slow-cell-s S] [--p2-shard-limit-mb N] [--stream [--mem GiB]]
+    [--slow-cell-s S] [--p2-shard-limit-mb N] [--stream | --in-memory] [--mem GiB]
     [--profile-cell NAME | --profile-cell-ci N]
     [--profile-jobs N,N,...] [--profile-repeat N]
     [--profile-snapshot PATH] [--profile-snapshot-refresh]
@@ -72,6 +72,7 @@ floe-index vfs <src.oas> [outdir=.<src>.ice] [--jobs N] [--plan-batch N]
   거절 → `--stream`, 137 "killed (out of memory?)", 130/143 취소, 134 abort, 139 segfault).
 - **거절:** OUTDIR을 주면 종료 2다. `floe2 index`가 모르는 옵션(`--coverage` 등)은 그
   쪽 메시지와 종료 2다.
+- **모드:** §1.2 — 스트리밍이 기본(2026-10-20), `--in-memory`가 이전의 전체 파싱 빌드.
 
 `--`로 시작하는데 위 목록에 없는 인자는 `floe-index <cmd>: unknown option …`으로
 거부한다(exit 2, 파일 시스템 접근 전). 위치 인자(src·outdir)는 `--`로 시작할 수
@@ -133,6 +134,34 @@ floe2 index chip.oas --jobs 16 --profile-cell-ci 32810 \
     --profile-snapshot /fast-scratch/ltv_top_FEOL_dmy.floe-profile \
     --profile-snapshot-refresh
 ```
+
+### 1.2 빌드 모드 (2026-10-20 전환, app 0.12.370 / floe-index 0.12.335)
+
+STREAMING_INDEX_PLAN §11. 소스를 읽어 캐시를 만드는 실행은 **스트리밍 빌드가
+기본**이다: 재고 패스(파일 매핑 한 번 훑기, 도형은 버림) 뒤 셀을 파일 순서로 읽어
+기존 플래너·커미터·인코더에 넘기고, 상주 바이트를 `--mem GiB` 안에 둔다. 출력은
+전체 파싱 빌드와 바이트 동일하다(게이트 `vfs_stream`).
+- `--stream`: 스트리밍을 고집한다. 전체 파싱이 필요한 실행(`--coverage`,
+  `--representatives`, 프로파일, `--frontier-only`)과 함께면 종료 2.
+- `--in-memory`: 이전의 전체 파싱 빌드. `FLOE_INDEX_STREAM=off`가 기본을 이것으로
+  돌린다(킬 스위치; 모르는 값은 한 줄 알리고 기본). `--stream`과 배타(종료 2).
+- 기본(플래그 없음): 스트리밍. 전체 파싱이 필요한 실행은 인메모리로 간다. 재고가
+  거절한 파일(참조 번호 중복 등)은 "the in-memory build takes over" 한 줄과 함께
+  인메모리로 넘어간다(출력을 건드리기 전). `--occupancy-only`는 스트리밍한다(재고 →
+  배치 수집 패스 → 레이어 묶음별 마킹 패스; 배치가 상한 5,000만을 넘으면 기본
+  모드는 인메모리로, `--stream`은 한 줄 알리고 ovo 없이 종료 0).
+- `--mem GiB`: 상주 셀의 예산. 기본 min(MemAvailable/2, 32 GiB)(MemAvailable이
+  없으면 MemTotal/2). `--mem` 없이 가장 큰 셀(또는 다중 정의 스팬)이 기본 예산을
+  넘으면 호스트가 허락하는 한(MemAvailable, 없으면 MemTotal의 90 %) 그만큼 올리고
+  한 줄 적는다; 그것도 넘으면 종료 71. `--mem`을 주면 넘는 파일은 종료 71. 인메모리로
+  가는 실행과 함께면 종료 2.
+- `floe2 index`는 같은 세 플래그(`--stream`, `--in-memory`, `--mem`)를 그대로 넘기고,
+  기본은 아무것도 넘기지 않는다(floe-index의 기본 = 스트리밍). 덱 소스·뷰어의 덱
+  색인·자동 색인도 같다. design.ovo 없는 현재 캐시의 점유 추가(`occupancy` 실행)도
+  모든 모드에서 붙는다.
+- 현장 검증(9.8 GB 파일): `python3 tools/validate_vfs_stream.py --compare FILE.oas`
+  (인메모리·기본 빌드를 만들어 파일별 비교), 또는 두 빌드를 `--in-memory`/기본으로
+  만들어 `cmp`.
 
 ## 1.5 파스 규약 (도형 변환)
 
@@ -349,10 +378,13 @@ STREAMING_INDEX_PLAN §5. 현장(2026-10-19)의 50 GB 덱 소스는 인메모리
   during the <stage>: stopping before the host swaps (<캐시 상태>); <조언>`과 종료 71.
   검사: 빌드 시작, 캐시를 지우기 직전(파싱 뒤·재고 뒤 — "the cache is unchanged"),
   모든 하트비트(200 ms; "no commit marker and is rebuilt next time"). 조언은 인메모리면
-  `--stream`, 스트리밍이면 `--mem`을 낮추라고 한다. 잘못된 값은 한 줄 알리고 기본값.
-- **크기 사전 거절(인메모리):** 파일이 MemAvailable보다 크면 읽기 전에 종료 71로
-  거절("index with --stream"), 1/5을 넘으면 파싱 결과가 파일의 5~20배라는 한 줄.
-  MemAvailable이 없으면(Linux 밖) 꺼짐; `FLOE_MEM_AVAILABLE_GB`가 대신한다(게이트).
+  `--stream`, 스트리밍이면 `--mem`을 낮추라고, 기본 모드의 폴백(스트리밍이 거절한 뒤의
+  인메모리, §1.2)이면 호스트 메모리를 비우거나 `--stream --mem`으로 고집하라고 한다.
+  잘못된 값은 한 줄 알리고 기본값.
+- **크기 사전 거절(인메모리 — `--in-memory`, `FLOE_INDEX_STREAM=off`, 전체 파싱이
+  필요한 실행, 폴백):** 파일이 MemAvailable보다 크면 읽기 전에 종료 71로 거절("index
+  with --stream"), 1/5을 넘으면 파싱 결과가 파일의 5~20배라는 한 줄. MemAvailable이
+  없으면(Linux 밖) 꺼짐; `FLOE_MEM_AVAILABLE_GB`가 대신한다(게이트).
 - **스트리밍 사전 거절:** 가장 큰 셀(또는 다중 정의 스팬)이 `--mem`을 넘으면 출력을
   건드리기 전에 종료 71("needs intra-cell splitting, which is not implemented").
 - **종료 코드 71**은 잠금의 75, 사용법 2, 실패 1, 커널의 137과 구별된다. `floe2 index

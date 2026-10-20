@@ -117,11 +117,14 @@ pub fn vfs_cmd(args: &[String]) {
     // MemAvailable, so without this flag the ceiling is UNBOUNDED
     // there - set it when indexing big files on macOS.
     let mut p2_shard_limit: Option<u64> = None;
-    // the streaming build (docs/STREAMING_INDEX_PLAN.ko.md S4): the
-    // inventory pass over the file, then the cells read in file order
-    // behind a byte budget (--mem GiB; default min(MemAvailable/2, 32 GiB))
-    // instead of the whole parse held in memory
-    let mut stream = false;
+    // the build's mode (docs/STREAMING_INDEX_PLAN.ko.md S4, §10): the
+    // streaming build - the inventory pass over the file, then the cells
+    // read in file order behind a byte budget (--mem GiB; default
+    // min(MemAvailable/2, 32 GiB), raised to the file's need when the host
+    // has it) - is the default since 0.12.370; --in-memory (or
+    // FLOE_INDEX_STREAM=off) is the whole-parse build, --stream insists
+    let mut stream_flag = false;
+    let mut in_memory_flag = false;
     let mut mem_gib: Option<f64> = None;
     // Isolated, non-publishing cell planner profile. The complete source is
     // still parsed and recursive child bboxes are prepared, but exactly one
@@ -325,7 +328,11 @@ pub fn vfs_cmd(args: &[String]) {
                 i += 1;
             }
             "--stream" => {
-                stream = true;
+                stream_flag = true;
+                i += 1;
+            }
+            "--in-memory" => {
+                in_memory_flag = true;
                 i += 1;
             }
             "--mem" => {
@@ -405,25 +412,53 @@ pub fn vfs_cmd(args: &[String]) {
         );
         std::process::exit(2);
     }
-    if stream
-        && (profiling
-            || coverage
-            || coverage_only
-            || occupancy_only
-            || representatives
-            || representatives_only
-            || frontier_only)
-    {
+    // the build's mode (STREAMING_INDEX_PLAN §10, the switch-over of
+    // 0.12.370): streaming, unless --in-memory / FLOE_INDEX_STREAM=off or
+    // the run reads the whole parse (coverage, representatives, a profile,
+    // frontier-only) - --stream insists and refuses those; the additive
+    // occupancy-only run streams too (its own inventory and places passes)
+    let (mode, mode_how) = match resolve_build_mode(
+        stream_flag,
+        in_memory_flag,
+        std::env::var("FLOE_INDEX_STREAM").ok().as_deref(),
+    ) {
+        Ok((mode, how, note)) => {
+            if let Some(n) = note {
+                eprintln!("[vfs] {}", n);
+            }
+            (mode, how)
+        }
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(2);
+        }
+    };
+    let whole_parse = profiling
+        || coverage
+        || coverage_only
+        || representatives
+        || representatives_only
+        || frontier_only;
+    if mode == BuildMode::Stream && whole_parse {
         eprintln!(
             "--stream builds the index from the inventory pass without holding the \
              whole parse: coverage and representatives are not available in \
-             streaming mode (deferred), and the profile and additive-only runs \
-             parse in memory - drop --stream for them"
+             streaming mode (deferred), and the profile and frontier-only runs \
+             parse in memory - drop --stream for them (the default build picks \
+             the in-memory build for these runs by itself)"
         );
         std::process::exit(2);
     }
+    let stream = mode != BuildMode::InMemory && !whole_parse;
     if mem_gib.is_some() && !stream {
-        eprintln!("--mem belongs to --stream");
+        eprintln!(
+            "--mem belongs to the streaming build; this run builds in memory ({})",
+            if whole_parse {
+                "coverage, representatives, a profile and frontier-only read the whole parse"
+            } else {
+                mode_how
+            }
+        );
         std::process::exit(2);
     }
     if [
@@ -590,30 +625,48 @@ pub fn vfs_cmd(args: &[String]) {
         }
     }
     if stream {
-        vfs_stream(
-            StreamArgs {
-                src: src.clone(),
-                outdir: outdir.clone(),
-                jobs,
-                encode_batch,
-                plan_batch,
-                page_target_bytes,
-                lod,
-                page_occ,
-                hier,
-                ovs,
-                occupancy,
-                slow_cell_s,
-                p2_shard_limit,
-                kill_at: kill_at.clone(),
-                hold_at: hold_at.clone(),
-                mem_gib,
-                occ_opts,
-            },
-            lock,
-            t0,
-        );
-        return;
+        let a = StreamArgs {
+            src: src.clone(),
+            outdir: outdir.clone(),
+            jobs,
+            encode_batch,
+            plan_batch,
+            page_target_bytes,
+            lod,
+            page_occ,
+            hier,
+            ovs,
+            occupancy,
+            slow_cell_s,
+            p2_shard_limit,
+            kill_at: kill_at.clone(),
+            hold_at: hold_at.clone(),
+            mem_gib,
+            occ_opts: &occ_opts,
+            auto: mode == BuildMode::Auto,
+        };
+        let declined = if occupancy_only {
+            vfs_stream_occupancy_only(&a, t0)
+        } else {
+            vfs_stream(&a, &mut lock, t0)
+        };
+        match declined {
+            None => return,
+            Some(why) => {
+                // the default mode only (--stream exits instead): the
+                // streaming build declined the file before any output was
+                // touched, and the whole-parse build takes it
+                eprintln!(
+                    "[vfs] stream: {} - the in-memory build takes over (its resident \
+                     memory is not bounded; --stream insists on streaming, --in-memory \
+                     selects this build directly)",
+                    why
+                );
+                crate::guard::set_mode(crate::guard::Mode::Fallback);
+            }
+        }
+    } else {
+        crate::guard::set_mode(crate::guard::Mode::InMemory);
     }
     // S6 guards (STREAMING_INDEX_PLAN §5): a file that cannot fit the host
     // is refused before the cache is touched, and the memory ceiling is
@@ -947,7 +1000,7 @@ fn clear_outputs(outdir: &str) {
     let _ = remove_cell_ovs(outdir, &[]);
 }
 
-struct StreamArgs {
+struct StreamArgs<'a> {
     src: String,
     outdir: String,
     jobs: usize,
@@ -964,7 +1017,10 @@ struct StreamArgs {
     kill_at: Option<String>,
     hold_at: Option<String>,
     mem_gib: Option<f64>,
-    occ_opts: floe_vfs::occupancy::Opts,
+    occ_opts: &'a floe_vfs::occupancy::Opts,
+    /// the default mode (neither --stream nor --in-memory): the streaming
+    /// build may decline the file and leave it to the in-memory build
+    auto: bool,
 }
 
 /// placement records kept through the streaming build for the occupancy
@@ -972,44 +1028,149 @@ struct StreamArgs {
 /// thousands, a layout past this has occupancy off by default)
 const STREAM_PLACES_CAP: u64 = 50_000_000;
 
+/// the build's mode (STREAMING_INDEX_PLAN §10, the switch-over of
+/// 0.12.370)
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum BuildMode {
+    /// the default: streaming, falling back to the in-memory build for the
+    /// runs that read the whole parse and for a file the streaming build
+    /// declines
+    Auto,
+    /// `--stream`: streaming or exit
+    Stream,
+    /// `--in-memory` or FLOE_INDEX_STREAM=off: the whole-parse build
+    InMemory,
+}
+
+/// the mode from the flags and FLOE_INDEX_STREAM: the mode, what chose it
+/// (for the refusals' wording) and a note about a setting that was not
+/// understood
+pub(crate) fn resolve_build_mode(
+    stream: bool,
+    in_memory: bool,
+    env: Option<&str>,
+) -> Result<(BuildMode, &'static str, Option<String>), String> {
+    if stream && in_memory {
+        return Err("--stream and --in-memory are exclusive".to_string());
+    }
+    if stream {
+        return Ok((BuildMode::Stream, "--stream", None));
+    }
+    if in_memory {
+        return Ok((BuildMode::InMemory, "--in-memory", None));
+    }
+    let v = env.map(|s| s.trim().to_ascii_lowercase()).unwrap_or_default();
+    match v.as_str() {
+        "" | "auto" | "on" | "1" | "yes" | "default" => Ok((BuildMode::Auto, "the default", None)),
+        "off" | "0" | "no" | "false" | "in-memory" | "memory" => {
+            Ok((BuildMode::InMemory, "FLOE_INDEX_STREAM=off", None))
+        }
+        other => Ok((
+            BuildMode::Auto,
+            "the default",
+            Some(format!(
+                "FLOE_INDEX_STREAM={}: want off (the in-memory build) or auto; the default \
+                 (streaming) applies",
+                other
+            )),
+        )),
+    }
+}
+
 /// the streaming build's budget when --mem is not given: half of
 /// MemAvailable, at most 32 GiB (the field host serves other services;
 /// STREAMING_INDEX_PLAN §4.3 / §10); half of MemTotal when only that is
-/// known; 32 GiB when neither is (macOS: set --mem). Returns the bytes
-/// and how they were chosen.
+/// known (macOS: hw.memsize); 32 GiB when neither is. Returns the bytes
+/// and how they were chosen. A file whose largest cell (or
+/// multi-definition span) needs more gets it when the host has it
+/// (`stream_host_limit`).
 fn default_stream_budget() -> (u64, &'static str) {
     let (gib, how) = if let Some(gb) = crate::mem_available_gb() {
         ((gb / 2.0).min(32.0), "half of MemAvailable, at most 32 GiB")
-    } else if let Some(gb) = crate::mem_total_gb() {
-        ((gb / 2.0).min(32.0), "half of MemTotal, at most 32 GiB (MemAvailable unknown)")
+    } else if let Some(b) = crate::guard::mem_total_bytes() {
+        (
+            (b as f64 / (1u64 << 30) as f64 / 2.0).min(32.0),
+            "half of MemTotal, at most 32 GiB (MemAvailable unknown)",
+        )
     } else {
         (32.0, "32 GiB (the host's memory is unknown here: give --mem)")
     };
     ((gib.max(0.001) * (1u64 << 30) as f64) as u64, how)
 }
 
-/// `floe-index vfs SRC OUT --stream`: the two-pass build
-/// (docs/STREAMING_INDEX_PLAN.ko.md §3-§4). Pass 1 is the inventory over
-/// a read-only mapping of the file (one sequential sweep, nothing of the
-/// geometry kept); pass 2 reads the cells in file order behind the byte
-/// budget through the streaming store (stream.rs) and drives the same
-/// planner / committer / encoder as the in-memory build, so the cache's
-/// bytes are the same (gate G3). design.ovo (occupancy) waits for S5;
-/// design.ovc / design.ovr are not offered in this mode.
-fn vfs_stream(a: StreamArgs, mut lock: floe_vfs::lock::WriterGuard, t0: std::time::Instant) {
-    let file = std::fs::File::open(&a.src).unwrap_or_else(|e| {
-        eprintln!("open {}: {}", a.src, e);
+/// how far the default budget may rise for a file that needs more than
+/// `default_stream_budget`: MemAvailable where it is known, else 90 % of
+/// MemTotal, else no limit (the host's memory is unknown; the ceiling
+/// guard is inert there too)
+fn stream_host_limit() -> (u64, String) {
+    if let Some(gb) = crate::mem_available_gb() {
+        let b = (gb * 1e9) as u64;
+        return (b, format!("MemAvailable {}", fmt_size(b)));
+    }
+    if let Some(total) = crate::guard::mem_total_bytes() {
+        let b = total / 10 * 9;
+        return (b, format!("90% of MemTotal {}", fmt_size(b)));
+    }
+    (u64::MAX, "the host's memory is unknown here".to_string())
+}
+
+/// the source's identity as design.ovm records it (size, mtime seconds)
+fn source_identity(src: &str) -> (u64, u64) {
+    let meta = std::fs::metadata(src).unwrap_or_else(|e| {
+        eprintln!("open {}: {}", src, e);
         std::process::exit(1);
     });
-    let meta = file.metadata().expect("source metadata");
-    let size = meta.len();
     let mtime = meta
         .modified()
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    crate::guard::set_streaming(true);
+    (meta.len(), mtime)
+}
+
+/// what the streaming build has before it touches any output
+struct StreamOpen {
+    store: crate::stream::StreamStore,
+    budget: u64,
+    size: u64,
+    mtime: u64,
+    inventory_s: f64,
+}
+
+/// why the streaming build stopped before touching any output
+struct StreamDecline {
+    why: String,
+    /// the in-memory build can take the file (the default mode lets it;
+    /// --stream exits with `exit` instead)
+    fallback: bool,
+    exit: i32,
+}
+
+/// a decline's outcome: the reason for the caller's fallback (the default
+/// mode), or the one line and the exit
+fn declined(a: &StreamArgs, d: StreamDecline) -> Option<String> {
+    if d.fallback && a.auto {
+        return Some(d.why);
+    }
+    eprintln!("[vfs] stream: {}", d.why);
+    std::process::exit(d.exit);
+}
+
+/// the streaming build's opening, shared by the whole build and the
+/// occupancy-only run: pass 1, the inventory over a read-only mapping of
+/// the file (one sequential sweep, nothing of the geometry kept), the
+/// budget (--mem, or the default raised to the file's need when the host
+/// has it) and the streaming store. Nothing of the cache is touched; a
+/// decline says whether the in-memory build may take the file.
+fn stream_open(a: &StreamArgs) -> Result<StreamOpen, StreamDecline> {
+    let file = std::fs::File::open(&a.src).map_err(|e| StreamDecline {
+        why: format!("open {}: {}", a.src, e),
+        fallback: false,
+        exit: 1,
+    })?;
+    let (size, mtime) = source_identity(&a.src);
+    crate::guard::set_mode(crate::guard::Mode::Streaming);
     crate::guard::check("start", crate::guard::CACHE_UNCHANGED);
     // ---- pass 1: the inventory (the mapping goes before pass 2 starts)
     eprintln!("[vfs] stream: inventory pass over {} ({})...", a.src, fmt_size(size));
@@ -1039,15 +1200,30 @@ fn vfs_stream(a: StreamArgs, mut lock: floe_vfs::lock::WriterGuard, t0: std::tim
         // SAFETY: a private read-only mapping of a file this process
         // only reads; a concurrent writer would corrupt any reader of
         // this file, mapped or not (the cache locks keep our own runs out)
-        let map = unsafe { memmap2::Mmap::map(&file) }.unwrap_or_else(|e| {
-            eprintln!("map {}: {}", a.src, e);
-            std::process::exit(1);
-        });
+        let map = match unsafe { memmap2::Mmap::map(&file) } {
+            Ok(m) => m,
+            Err(e) => {
+                ticking.store(false, std::sync::atomic::Ordering::Relaxed);
+                return Err(StreamDecline {
+                    why: format!("map {}: {}", a.src, e),
+                    fallback: true,
+                    exit: 1,
+                });
+            }
+        };
         match floe_oasis::inventory(&map[..], a.jobs) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("inventory {}: {}", a.src, e);
-                std::process::exit(1);
+                // what the inventory refuses (a reference number defined
+                // twice, which the geometry parser resolves by position)
+                // or cannot read: the in-memory build may still take the
+                // file (the default mode), or report its own error
+                ticking.store(false, std::sync::atomic::Ordering::Relaxed);
+                return Err(StreamDecline {
+                    why: format!("inventory {}: {}", a.src, e),
+                    fallback: true,
+                    exit: 1,
+                });
             }
         }
     };
@@ -1069,16 +1245,74 @@ fn vfs_stream(a: StreamArgs, mut lock: floe_vfs::lock::WriterGuard, t0: std::tim
         budget_how,
         rss()
     );
-    let pre = crate::prepass::PrePass::from_inventory(&inv);
-    let (mut store, plan) = match crate::stream::StreamStore::new(inv, &a.src, budget) {
+    let opened = match crate::stream::StreamStore::new(inv, &a.src, budget) {
+        Ok((store, plan)) => Ok((store, plan, budget)),
+        Err(crate::stream::NewError::Budget {
+            what,
+            single_cell,
+            need,
+            budget,
+            inv,
+        }) if a.mem_gib.is_none() => {
+            // the default budget is the host's share, not the file's
+            // need: a file whose largest cell (or multi-definition span)
+            // is larger gets that much when the host has it - the
+            // streaming build under the raised budget still holds less
+            // than the whole parse would
+            let (limit, limit_how) = stream_host_limit();
+            if need <= limit {
+                eprintln!(
+                    "[vfs] stream: {}, over the default budget {}: the budget is raised to {} ({})",
+                    what,
+                    fmt_size(budget),
+                    fmt_size(need),
+                    limit_how
+                );
+                crate::stream::StreamStore::new(*inv, &a.src, need)
+                    .map(|(store, plan)| (store, plan, need))
+            } else {
+                return Err(StreamDecline {
+                    why: format!(
+                        "{}; the budget cannot rise to {} past {}{}",
+                        what,
+                        fmt_size(need),
+                        limit_how,
+                        if single_cell {
+                            format!(": {}", crate::stream::SPLITTING)
+                        } else {
+                            String::new()
+                        }
+                    ),
+                    fallback: false,
+                    exit: crate::guard::EXIT_MEMORY,
+                });
+            }
+        }
+        Err(e) => Err(e),
+    };
+    let (store, plan, budget) = match opened {
         Ok(v) => v,
-        Err(e) => {
-            // before any output is touched: the cache stays as it was
-            eprintln!("[vfs] stream: {}", e);
-            std::process::exit(match e {
-                crate::stream::NewError::Budget(_) => crate::guard::EXIT_MEMORY,
-                crate::stream::NewError::Open(_) | crate::stream::NewError::Inventory(_) => 1,
-            });
+        // before any output is touched: the cache stays as it was
+        Err(e @ crate::stream::NewError::Budget { .. }) => {
+            return Err(StreamDecline {
+                why: e.to_string(),
+                fallback: false,
+                exit: crate::guard::EXIT_MEMORY,
+            })
+        }
+        Err(crate::stream::NewError::Open(why)) => {
+            return Err(StreamDecline {
+                why,
+                fallback: false,
+                exit: 1,
+            })
+        }
+        Err(crate::stream::NewError::Inventory(why)) => {
+            return Err(StreamDecline {
+                why,
+                fallback: true,
+                exit: 1,
+            })
         }
     };
     eprintln!(
@@ -1087,6 +1321,42 @@ fn vfs_stream(a: StreamArgs, mut lock: floe_vfs::lock::WriterGuard, t0: std::tim
         plan.largest_cell,
         fmt_size(plan.largest_cell_bytes)
     );
+    Ok(StreamOpen {
+        store,
+        budget,
+        size,
+        mtime,
+        inventory_s,
+    })
+}
+
+/// `floe-index vfs SRC OUT` (the default since 0.12.370; `--stream`
+/// insists): the two-pass build (docs/STREAMING_INDEX_PLAN.ko.md §3-§4).
+/// Pass 1 is the inventory over a read-only mapping of the file (one
+/// sequential sweep, nothing of the geometry kept); pass 2 reads the
+/// cells in file order behind the byte budget through the streaming
+/// store (stream.rs) and drives the same planner / committer / encoder
+/// as the in-memory build, so the cache's bytes are the same (gate G3);
+/// design.ovo (occupancy) comes from one more pass per group of layers
+/// (S5). design.ovc / design.ovr are not offered in this mode. Returns
+/// why the streaming build declined the file (before any output was
+/// touched) when the default mode may hand it to the in-memory build.
+fn vfs_stream(
+    a: &StreamArgs,
+    lock: &mut floe_vfs::lock::WriterGuard,
+    t0: std::time::Instant,
+) -> Option<String> {
+    let StreamOpen {
+        mut store,
+        budget,
+        size,
+        mtime,
+        inventory_s,
+    } = match stream_open(a) {
+        Ok(o) => o,
+        Err(d) => return declined(a, d),
+    };
+    let pre = crate::prepass::PrePass::from_inventory(store.inventory());
     // ---- pass 2: the build behind the marker protocol
     std::fs::create_dir_all(&a.outdir).unwrap_or_else(|e| {
         eprintln!("create {}: {}", a.outdir, e);
@@ -1216,9 +1486,10 @@ fn vfs_stream(a: StreamArgs, mut lock: floe_vfs::lock::WriterGuard, t0: std::tim
             &a.outdir,
             size,
             mtime,
-            &a.occ_opts,
+            a.occ_opts,
             a.jobs,
             budget,
+            false,
             a.kill_at.as_deref(),
         );
     }
@@ -1252,6 +1523,201 @@ fn vfs_stream(a: StreamArgs, mut lock: floe_vfs::lock::WriterGuard, t0: std::tim
         inventory_s,
         t_build.elapsed().as_secs_f64()
     );
+    None
+}
+
+/// `floe-index vfs SRC OUT --occupancy-only` in the streaming build (the
+/// switch-over, STREAMING_INDEX_PLAN §10): design.ovo added to a current
+/// cache without the whole parse - the cache's identity against the
+/// source and the inventory's top (as the in-memory run checks them),
+/// the inventory pass, one pass over the file that keeps every cell's
+/// placements (the whole build gets them from the committer; this run
+/// has no build), then the occupancy passes of S5 and the same
+/// publication. The cache is as it was until design.ovo is renamed in.
+/// Returns why the run declined (the default mode's fallback to the
+/// in-memory occupancy-only run: the inventory refused the file, or its
+/// placements exceed the cap the pass keeps).
+fn vfs_stream_occupancy_only(a: &StreamArgs, t0: std::time::Instant) -> Option<String> {
+    // the cache's identity first, before the inventory pass is paid: the
+    // file carries the source's size / mtime and the top, so a cache built
+    // from other source bytes or another top is refused here instead of
+    // producing a file the reader rejects
+    let ovm_path = format!("{}/design.ovm", a.outdir);
+    let ovm = floe_ovm::Ovm::open(&ovm_path).unwrap_or_else(|e| {
+        eprintln!("--occupancy-only: {} (build the cache first)", e);
+        std::process::exit(1);
+    });
+    let (size, mtime) = source_identity(&a.src);
+    if ovm.src_size != size || ovm.src_mtime != mtime {
+        eprintln!(
+            "--occupancy-only: {} was built for source {}/{} but the \
+             source is now {}/{}; re-index it",
+            ovm_path, ovm.src_size, ovm.src_mtime, size, mtime
+        );
+        std::process::exit(1);
+    }
+    let cache_top = ovm.cell(ovm.top).name.to_string();
+    drop(ovm);
+    let StreamOpen {
+        mut store,
+        budget,
+        size,
+        mtime,
+        inventory_s,
+    } = match stream_open(a) {
+        Ok(o) => o,
+        Err(d) => return declined(a, d),
+    };
+    {
+        let inv = store.inventory();
+        let top = &inv.cells[inv.top].name;
+        if cache_top != *top {
+            eprintln!(
+                "--occupancy-only: cache top {:?} differs from the parsed top {:?}",
+                cache_top, top
+            );
+            std::process::exit(1);
+        }
+        // the cap before the pass is paid (a lower bound: the normalization
+        // can split a placement record)
+        let placements = inv.scan.placements;
+        if placements > STREAM_PLACES_CAP {
+            let why = format!(
+                "{} placement records exceed the {} the streaming occupancy pass keeps",
+                placements, STREAM_PLACES_CAP
+            );
+            if a.auto {
+                return Some(why);
+            }
+            eprintln!(
+                "[vfs] stream: {} - design.ovo is skipped (STREAMING_INDEX_PLAN.ko.md §4.6); \
+                 the cache is complete without it (--in-memory --occupancy-only builds it)",
+                why
+            );
+            return None;
+        }
+    }
+    // ---- the places pass: every cell read once and released at once; the
+    // readers parse ahead within the budget, `jobs` consumers release
+    let t_places = std::time::Instant::now();
+    store.keep_places(STREAM_PLACES_CAP);
+    let n = store.n_cells();
+    let st: &crate::stream::StreamStore = &store;
+    let passed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        st.with_readers(a.jobs, || {
+            let next = std::sync::atomic::AtomicUsize::new(0);
+            let done = std::sync::atomic::AtomicBool::new(false);
+            std::thread::scope(|s| {
+                struct DoneOnDrop<'a>(&'a std::sync::atomic::AtomicBool);
+                impl Drop for DoneOnDrop<'_> {
+                    fn drop(&mut self) {
+                        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                let _done = DoneOnDrop(&done);
+                let (next_ref, done_ref) = (&next, &done);
+                s.spawn(move || {
+                    use std::sync::atomic::Ordering::Relaxed;
+                    let t = std::time::Instant::now();
+                    let mut last = 0u64;
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        if done_ref.load(Relaxed) {
+                            return;
+                        }
+                        crate::guard::check("placements pass", crate::guard::CACHE_UNCHANGED);
+                        let e = t.elapsed().as_secs();
+                        if e >= last + 10 {
+                            last = e;
+                            let (resident, done, total) = st.progress();
+                            eprintln!(
+                                "[vfs] stream: placements of {}/{} cells kept; ranges {}/{} read, \
+                                 {} of {} charged ({}s, rss {})",
+                                next_ref.load(Relaxed).min(n),
+                                n,
+                                done,
+                                total,
+                                fmt_size(resident),
+                                fmt_size(budget),
+                                e,
+                                rss()
+                            );
+                        }
+                    }
+                });
+                let handles: Vec<_> = (0..a.jobs.max(1))
+                    .map(|_| {
+                        s.spawn(move || {
+                            use std::sync::atomic::Ordering::Relaxed;
+                            loop {
+                                let ci = next_ref.fetch_add(1, Relaxed);
+                                if ci >= n {
+                                    break;
+                                }
+                                drop(st.cell(ci));
+                                st.release(ci..ci + 1);
+                            }
+                        })
+                    })
+                    .collect();
+                for h in handles {
+                    h.join().expect("placements consumer");
+                }
+            })
+        })
+    }));
+    if let Err(e) = passed {
+        if let Some(why) = st.failed() {
+            eprintln!(
+                "[vfs] stream: {} - the placements pass stopped; the cache is as it was \
+                 (design.ovo was not written)",
+                why
+            );
+            std::process::exit(1);
+        }
+        std::panic::resume_unwind(e);
+    }
+    let places_s = t_places.elapsed().as_secs_f64();
+    if let Some((total, cap)) = store.kept_places_overflow() {
+        let why = format!(
+            "{} placement records exceed the {} the streaming occupancy pass keeps",
+            total, cap
+        );
+        if a.auto {
+            return Some(why);
+        }
+        eprintln!(
+            "[vfs] stream: {} - design.ovo is skipped (STREAMING_INDEX_PLAN.ko.md §4.6); \
+             the cache is complete without it (--in-memory --occupancy-only builds it)",
+            why
+        );
+        return None;
+    }
+    eprintln!(
+        "[vfs] stream: placements of {} cells kept in {:.1}s (rss {})",
+        n,
+        places_s,
+        rss()
+    );
+    stream_occupancy(
+        &mut store,
+        &a.outdir,
+        size,
+        mtime,
+        a.occ_opts,
+        a.jobs,
+        budget,
+        true,
+        a.kill_at.as_deref(),
+    );
+    eprintln!(
+        "[vfs] done in {:.1}s -> {} (streaming occupancy-only: inventory {:.1}s, placements {:.1}s)",
+        t0.elapsed().as_secs_f64(),
+        a.outdir,
+        inventory_s,
+        places_s
+    );
+    None
 }
 
 /// design.ovo of the streaming build (docs/STREAMING_INDEX_PLAN.ko.md
@@ -1263,7 +1729,8 @@ fn vfs_stream(a: StreamArgs, mut lock: floe_vfs::lock::WriterGuard, t0: std::tim
 /// group's layers, by `jobs` markers into shared planes - and the same
 /// publication as the in-memory build. Skipped with a line when the
 /// placements exceed the cap the store keeps (the cache is complete
-/// without design.ovo).
+/// without design.ovo). `additive`: the occupancy-only run, whose cache
+/// is whole throughout (the whole build has no commit marker yet).
 fn stream_occupancy(
     store: &mut crate::stream::StreamStore,
     outdir: &str,
@@ -1272,10 +1739,16 @@ fn stream_occupancy(
     opts: &floe_vfs::occupancy::Opts,
     jobs: usize,
     budget: u64,
+    additive: bool,
     kill_at: Option<&str>,
 ) {
     use floe_vfs::occupancy as occ;
     let t = std::time::Instant::now();
+    let cache_state = if additive {
+        crate::guard::CACHE_UNCHANGED
+    } else {
+        crate::guard::CACHE_INCOMPLETE
+    };
     let places = match store.take_places() {
         Ok(p) => p,
         Err(why) => {
@@ -1365,7 +1838,7 @@ fn stream_occupancy(
                             if done_ref.load(Relaxed) {
                                 return;
                             }
-                            crate::guard::check("occupancy pass", crate::guard::CACHE_INCOMPLETE);
+                            crate::guard::check("occupancy pass", cache_state);
                             let e = t0.elapsed().as_secs();
                             if e >= last + occ::PROGRESS_EVERY_S {
                                 last = e;
@@ -1416,9 +1889,13 @@ fn stream_occupancy(
                 // cache counts as absent); anything else keeps its panic
                 if let Some(why) = st.failed() {
                     eprintln!(
-                        "[vfs] stream: {} - the occupancy pass stopped; the cache is \
-                         incomplete (design.ovm, the commit marker, is not written)",
-                        why
+                        "[vfs] stream: {} - the occupancy pass stopped; {}",
+                        why,
+                        if additive {
+                            "the cache is as it was (design.ovo was not written)"
+                        } else {
+                            "the cache is incomplete (design.ovm, the commit marker, is not written)"
+                        }
                     );
                     std::process::exit(1);
                 }
@@ -11224,6 +11701,37 @@ pub(crate) fn hidden_sibling(path: &str, suffix: &str) -> String {
     match p.parent() {
         Some(dir) if !dir.as_os_str().is_empty() => dir.join(hidden).to_string_lossy().into_owned(),
         _ => hidden,
+    }
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::{resolve_build_mode, BuildMode};
+
+    /// the switch-over (STREAMING_INDEX_PLAN §11): the default streams,
+    /// the flags insist and are exclusive, FLOE_INDEX_STREAM=off is the
+    /// in-memory default, an unknown setting is noted and ignored
+    #[test]
+    fn modes_from_flags_and_the_environment() {
+        assert!(resolve_build_mode(true, true, None).is_err());
+        let (m, how, note) = resolve_build_mode(true, false, Some("off")).unwrap();
+        assert_eq!((m, how), (BuildMode::Stream, "--stream"));
+        assert!(note.is_none());
+        let (m, how, _) = resolve_build_mode(false, true, None).unwrap();
+        assert_eq!((m, how), (BuildMode::InMemory, "--in-memory"));
+        for env in [None, Some(""), Some("auto"), Some("on"), Some(" Default ")] {
+            let (m, how, note) = resolve_build_mode(false, false, env).unwrap();
+            assert_eq!((m, how), (BuildMode::Auto, "the default"), "{env:?}");
+            assert!(note.is_none(), "{env:?}");
+        }
+        for env in ["off", "0", "no", "false", "in-memory", "MEMORY"] {
+            let (m, how, note) = resolve_build_mode(false, false, Some(env)).unwrap();
+            assert_eq!((m, how), (BuildMode::InMemory, "FLOE_INDEX_STREAM=off"), "{env}");
+            assert!(note.is_none(), "{env}");
+        }
+        let (m, _, note) = resolve_build_mode(false, false, Some("maybe")).unwrap();
+        assert_eq!(m, BuildMode::Auto);
+        assert!(note.unwrap().contains("FLOE_INDEX_STREAM=maybe"));
     }
 }
 
