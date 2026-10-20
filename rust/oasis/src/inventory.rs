@@ -108,9 +108,11 @@ struct WCell {
     dbox: Box4,
     dbox_notext: Box4,
     dmembers: u64,
-    /// bits = this part's local layer indices
+    /// bits = this part's local layer indices (all records / texts /
+    /// shapes only)
     mask: Vec<u64>,
     tmask: Vec<u64>,
+    smask: Vec<u64>,
     /// children in first-placement order
     edges: Vec<WEdge>,
     edge_of: HashMap<Target, usize>,
@@ -184,6 +186,7 @@ impl Part {
             dmembers: 0,
             mask: Vec::new(),
             tmask: Vec::new(),
+            smask: Vec::new(),
             edges: Vec::new(),
             edge_of: HashMap::new(),
             last_edge: None,
@@ -230,6 +233,7 @@ impl Part {
         box_grow(&mut cell.dbox, &bb);
         box_grow(&mut cell.dbox_notext, &bb);
         set_bit(&mut cell.mask, li);
+        set_bit(&mut cell.smask, li);
         cell.dmembers = cell.dmembers.saturating_add(members);
         self.lrecs[li as usize] += 1;
         self.lmems[li as usize] += members;
@@ -362,9 +366,11 @@ pub struct InvCell {
     pub dbox_notext: Box4,
     /// own shape members (texts and placements excluded)
     pub dmembers: u64,
-    /// own layer mask / text-layer mask over `Inventory::layer_order`
+    /// own layer mask / text-layer mask / shape-only layer mask over
+    /// `Inventory::layer_order` (the occupancy grid sees shapes only)
     pub dmask: Vec<u8>,
     pub dtmask: Vec<u8>,
+    pub dsmask: Vec<u8>,
     /// children in first-placement order
     pub edges: Vec<Edge>,
 }
@@ -400,6 +406,8 @@ pub struct Inventory {
     pub rmembers: Vec<u64>,
     pub rmask: Vec<Vec<u8>>,
     pub rtmask: Vec<Vec<u8>>,
+    /// recursive shape-only layer mask (the occupancy grid's presence)
+    pub rsmask: Vec<Vec<u8>>,
     pub rbb: Vec<Option<Box4>>,
     pub rbb_notext: Vec<Option<Box4>>,
 }
@@ -412,6 +420,14 @@ impl Inventory {
     /// bytes per layer mask
     pub fn mask_bytes(&self) -> usize {
         self.layer_order.len().div_ceil(8).max(1)
+    }
+
+    /// per cell: its children (the edges' targets, first-placement order)
+    pub fn children(&self) -> Vec<Vec<usize>> {
+        self.cells
+            .iter()
+            .map(|c| c.edges.iter().map(|e| e.child).collect())
+            .collect()
     }
 
     /// cell name -> Doc index, for a cell range's parser
@@ -656,6 +672,7 @@ pub(crate) fn finish(mut st: ScanStats) -> Result<Inventory> {
             dmembers: 0,
             dmask: vec![0u8; bw],
             dtmask: vec![0u8; bw],
+            dsmask: vec![0u8; bw],
             edges: Vec::new(),
         })
         .collect();
@@ -694,6 +711,7 @@ pub(crate) fn finish(mut st: ScanStats) -> Result<Inventory> {
             cell.dmembers = cell.dmembers.saturating_add(wc.dmembers);
             remap_bits(&wc.mask, &maps[pi], &mut cell.dmask);
             remap_bits(&wc.tmask, &maps[pi], &mut cell.dtmask);
+            remap_bits(&wc.smask, &maps[pi], &mut cell.dsmask);
             for (k, we) in wc.edges.into_iter().enumerate() {
                 let child = children[k];
                 match edge_of[ci].get(&child) {
@@ -746,6 +764,7 @@ pub(crate) fn finish(mut st: ScanStats) -> Result<Inventory> {
     let mut rmembers = vec![0u64; n];
     let mut rmask: Vec<Vec<u8>> = vec![Vec::new(); n];
     let mut rtmask: Vec<Vec<u8>> = vec![Vec::new(); n];
+    let mut rsmask: Vec<Vec<u8>> = vec![Vec::new(); n];
     let mut rbb: Vec<Option<Box4>> = vec![None; n];
     let mut rbb_notext: Vec<Option<Box4>> = vec![None; n];
     for &ci in &topo {
@@ -754,6 +773,7 @@ pub(crate) fn finish(mut st: ScanStats) -> Result<Inventory> {
         let mut mm = c.dmembers;
         let mut mask = c.dmask.clone();
         let mut tmask = c.dtmask.clone();
+        let mut smask = c.dsmask.clone();
         let mut bb = if box_is_empty(&c.dbox) { None } else { Some(c.dbox) };
         let mut bbn = if box_is_empty(&c.dbox_notext) {
             None
@@ -771,6 +791,9 @@ pub(crate) fn finish(mut st: ScanStats) -> Result<Inventory> {
                 *a |= *b;
             }
             for (a, b) in tmask.iter_mut().zip(&rtmask[ch]) {
+                *a |= *b;
+            }
+            for (a, b) in smask.iter_mut().zip(&rsmask[ch]) {
                 *a |= *b;
             }
             for (o, ob) in e.obox.iter().enumerate() {
@@ -792,6 +815,7 @@ pub(crate) fn finish(mut st: ScanStats) -> Result<Inventory> {
         rmembers[ci] = mm;
         rmask[ci] = mask;
         rtmask[ci] = tmask;
+        rsmask[ci] = smask;
         rbb[ci] = bb;
         rbb_notext[ci] = bbn;
     }
@@ -819,6 +843,7 @@ pub(crate) fn finish(mut st: ScanStats) -> Result<Inventory> {
         rmembers,
         rmask,
         rtmask,
+        rsmask,
         rbb,
         rbb_notext,
     })

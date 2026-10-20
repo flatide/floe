@@ -608,6 +608,7 @@ pub fn vfs_cmd(args: &[String]) {
                 kill_at: kill_at.clone(),
                 hold_at: hold_at.clone(),
                 mem_gib,
+                occ_opts,
             },
             lock,
             t0,
@@ -956,7 +957,13 @@ struct StreamArgs {
     kill_at: Option<String>,
     hold_at: Option<String>,
     mem_gib: Option<f64>,
+    occ_opts: floe_vfs::occupancy::Opts,
 }
+
+/// placement records kept through the streaming build for the occupancy
+/// pass (about 90 B each; STREAMING_INDEX_PLAN §4.6: deck sources hold
+/// thousands, a layout past this has occupancy off by default)
+const STREAM_PLACES_CAP: u64 = 50_000_000;
 
 /// the streaming build's budget when --mem is not given: half of
 /// MemAvailable, at most 32 GiB (the field host serves other services;
@@ -1053,7 +1060,7 @@ fn vfs_stream(a: StreamArgs, mut lock: floe_vfs::lock::WriterGuard, t0: std::tim
         rss()
     );
     let pre = crate::prepass::PrePass::from_inventory(&inv);
-    let (store, plan) = match crate::stream::StreamStore::new(inv, &a.src, budget) {
+    let (mut store, plan) = match crate::stream::StreamStore::new(inv, &a.src, budget) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("[vfs] stream: {}", e);
@@ -1078,6 +1085,11 @@ fn vfs_stream(a: StreamArgs, mut lock: floe_vfs::lock::WriterGuard, t0: std::tim
     }
     let t_build = std::time::Instant::now();
     let streaming = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    if a.occupancy {
+        // the occupancy pass needs every cell's placements (the walk's
+        // instances): kept as the committer releases the cells
+        store.keep_places(STREAM_PLACES_CAP);
+    }
     struct StopOnDrop<'a>(&'a std::sync::atomic::AtomicBool);
     impl Drop for StopOnDrop<'_> {
         fn drop(&mut self) {
@@ -1183,9 +1195,15 @@ fn vfs_stream(a: StreamArgs, mut lock: floe_vfs::lock::WriterGuard, t0: std::tim
     };
     emit_viewer_side(&store, &a.src, size, mtime, &a.outdir, &rbb, &lmems, &tstats, &frontier);
     if a.occupancy {
-        eprintln!(
-            "[vfs] stream: design.ovo (the occupancy grid) is not built in streaming \
-             mode yet (STREAMING_INDEX_PLAN.ko.md S5); the cache is complete without it"
+        stream_occupancy(
+            &mut store,
+            &a.outdir,
+            size,
+            mtime,
+            &a.occ_opts,
+            a.jobs,
+            budget,
+            a.kill_at.as_deref(),
         );
     }
     if a.kill_at.as_deref() == Some("ovm-partial") {
@@ -1218,6 +1236,198 @@ fn vfs_stream(a: StreamArgs, mut lock: floe_vfs::lock::WriterGuard, t0: std::tim
         inventory_s,
         t_build.elapsed().as_secs_f64()
     );
+}
+
+/// design.ovo of the streaming build (docs/STREAMING_INDEX_PLAN.ko.md
+/// §4.6, S5): the walk's instances of every cell from the placements the
+/// store kept (enumerated through the parents, not expanded), then one
+/// pass over the file per group of layers whose planes fit the plane
+/// budget (a quarter of the streaming budget `budget`, at least one
+/// layer) - each resident cell marked at all its instances for the
+/// group's layers, by `jobs` markers into shared planes - and the same
+/// publication as the in-memory build. Skipped with a line when the
+/// placements exceed the cap the store keeps (the cache is complete
+/// without design.ovo).
+fn stream_occupancy(
+    store: &mut crate::stream::StreamStore,
+    outdir: &str,
+    size: u64,
+    mtime: u64,
+    opts: &floe_vfs::occupancy::Opts,
+    jobs: usize,
+    budget: u64,
+    kill_at: Option<&str>,
+) {
+    use floe_vfs::occupancy as occ;
+    let t = std::time::Instant::now();
+    let places = match store.take_places() {
+        Ok(p) => p,
+        Err(why) => {
+            eprintln!(
+                "[vfs] stream: {} - design.ovo is skipped (STREAMING_INDEX_PLAN.ko.md §4.6); \
+                 the cache is complete without it",
+                why
+            );
+            return;
+        }
+    };
+    let (n, top, mut built, topo) = {
+        let inv = store.inventory();
+        let children = inv.children();
+        let built = match occ::StreamOcc::new(
+            inv.unit(),
+            inv.top,
+            &inv.cells[inv.top].name,
+            &inv.layer_order,
+            &inv.rbb_notext,
+            &inv.cells.iter().map(|c| c.dsmask.clone()).collect::<Vec<_>>(),
+            &inv.topo,
+            &children,
+            size,
+            mtime,
+            opts,
+        ) {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("[vfs] occupancy: {}", e);
+                std::process::exit(1);
+            }
+        };
+        (inv.cells.len(), inv.top, built, inv.topo.clone())
+    };
+    let has_any = built.has_any();
+    let instances = occ::Instances::new(top, &places, built.small(), &has_any, &topo, built.cell_dbu());
+    // the pass holds a quarter of the streaming budget in planes and a
+    // quarter in resident cells (a marker needs one cell at a time; the
+    // readers run that far ahead), never less than the file streams under
+    let plane_budget = (budget / 4).max(1);
+    let pass_budget = (budget / 4).max(store.min_budget());
+    if built.needs_marking() {
+        eprintln!(
+            "[vfs] occupancy streaming: {} instances over {} cells ({} cells materialized); \
+             plane budget {}, resident budget {} (a quarter of the streaming budget each)",
+            instances.total(),
+            n,
+            instances.flat_cells(),
+            fmt_size(plane_budget),
+            fmt_size(pass_budget)
+        );
+    }
+    let mut groups = 0usize;
+    while let Some(group) = built.begin_group(plane_budget) {
+        groups += 1;
+        store.reset(pass_budget);
+        let st: &crate::stream::StreamStore = &*store;
+        let (group_ref, occ_ref, inst) = (&group, &built, &instances);
+        let tg = std::time::Instant::now();
+        // the heartbeat stops when the markers are done or one of them
+        // panicked (a reader failure surfaces as a panic in `cell()`),
+        // so the scope always joins
+        struct DoneOnDrop<'a>(&'a std::sync::atomic::AtomicBool);
+        impl Drop for DoneOnDrop<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        let marked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            st.with_readers(jobs, || {
+            let next = std::sync::atomic::AtomicUsize::new(0);
+            let done = std::sync::atomic::AtomicBool::new(false);
+            std::thread::scope(|s| {
+                let _done = DoneOnDrop(&done);
+                let (next_ref, done_ref) = (&next, &done);
+                if let Some(log) = opts.progress {
+                    s.spawn(move || {
+                        use std::sync::atomic::Ordering::Relaxed;
+                        let t0 = std::time::Instant::now();
+                        let mut last = 0u64;
+                        loop {
+                            // a short poll: a pass over a small file ends
+                            // in milliseconds, and there is one per layer
+                            // group
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+                            if done_ref.load(Relaxed) {
+                                return;
+                            }
+                            let e = t0.elapsed().as_secs();
+                            if e >= last + occ::PROGRESS_EVERY_S {
+                                last = e;
+                                log(&format!(
+                                    "streaming: group {} cells {}/{} ({}s, rss {})",
+                                    groups,
+                                    next_ref.load(Relaxed).min(n),
+                                    n,
+                                    e,
+                                    rss()
+                                ));
+                            }
+                        }
+                    });
+                }
+                let handles: Vec<_> = (0..jobs.max(1))
+                    .map(|_| {
+                        s.spawn(move || {
+                            use std::sync::atomic::Ordering::Relaxed;
+                            let mut sc = occ_ref.scratch(group_ref);
+                            loop {
+                                let ci = next_ref.fetch_add(1, Relaxed);
+                                if ci >= n {
+                                    break;
+                                }
+                                {
+                                    let cell = st.cell(ci);
+                                    occ_ref.mark_cell(group_ref, &cell, ci, inst, &mut sc);
+                                }
+                                st.release(ci..ci + 1);
+                            }
+                            sc
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("occupancy marker"))
+                    .collect::<Vec<occ::StreamScratch>>()
+            })
+            })
+        }));
+        let scratches = match marked {
+            Ok(v) => v,
+            Err(e) => {
+                // the source failed under a reader during this pass: one
+                // line and exit 1 (the commit marker is not written, so the
+                // cache counts as absent); anything else keeps its panic
+                if let Some(why) = st.failed() {
+                    eprintln!(
+                        "[vfs] stream: {} - the occupancy pass stopped; the cache is \
+                         incomplete (design.ovm, the commit marker, is not written)",
+                        why
+                    );
+                    std::process::exit(1);
+                }
+                std::panic::resume_unwind(e);
+            }
+        };
+        built.end_group(group, scratches);
+        if let Some(log) = opts.progress {
+            log(&format!(
+                "streaming: group {} marked in {:.1}s (rss {})",
+                groups,
+                tg.elapsed().as_secs_f64(),
+                rss()
+            ));
+        }
+    }
+    drop(instances);
+    drop(places);
+    let built = built.finish();
+    let built_s = t.elapsed().as_secs_f64();
+    eprintln!(
+        "[vfs] occupancy streaming: {} pass(es) over the file ({:.1}s)",
+        groups,
+        built_s
+    );
+    publish_ovo(outdir, &built, opts, t, built_s, None, kill_at);
 }
 
 const PROFILE_SNAPSHOT_MAGIC: &[u8; 8] = b"FLOEPS01";
@@ -2402,35 +2612,60 @@ fn write_occupancy(
     kill_at: Option<&str>,
 ) {
     use floe_vfs::occupancy as occ;
-    use std::io::Write;
     let t = std::time::Instant::now();
-    let tmp = format!("{}/design.ovo.tmp", outdir);
-    let path = format!("{}/design.ovo", outdir);
-    let _ = std::fs::remove_file(&tmp);
+    let _ = std::fs::remove_file(format!("{}/design.ovo.tmp", outdir));
     let built = occ::build(doc, size, mtime, opts).unwrap_or_else(|e| {
         eprintln!("[vfs] occupancy: {}", e);
         std::process::exit(1);
     });
     let built_s = t.elapsed().as_secs_f64();
     let phases = occ::phases_take();
+    publish_ovo(outdir, &built, opts, t, built_s, Some(phases), kill_at);
+}
+
+/// design.ovo's publication and log lines, shared by the in-memory and
+/// the streaming build: tmp + fsync + rename, the phase line, the
+/// summary, the per-layer verdicts
+fn publish_ovo(
+    outdir: &str,
+    built: &floe_vfs::occupancy::Occupancy,
+    opts: &floe_vfs::occupancy::Opts,
+    t: std::time::Instant,
+    built_s: f64,
+    phases: Option<[f64; 4]>,
+    kill_at: Option<&str>,
+) {
+    use floe_vfs::occupancy as occ;
+    use std::io::Write;
+    let tmp = format!("{}/design.ovo.tmp", outdir);
+    let path = format!("{}/design.ovo", outdir);
     let writing = std::time::Instant::now();
-    let bytes = occ::write_ovo(&built);
+    let bytes = occ::write_ovo(built);
     {
         let mut f = std::fs::File::create(&tmp).expect("create ovo tmp");
         f.write_all(&bytes).expect("write ovo tmp");
         f.sync_all().expect("sync ovo tmp");
     }
-    // CUT_DENSITY_DESIGN §10.5: where the build's time went
-    eprintln!(
-        "[vfs] occupancy phases: build {:.1}s = group {:.1}s + prepare {:.1}s + mark {:.1}s + pyramid {:.1}s + other {:.1}s; write {:.1}s",
-        built_s,
-        phases[0],
-        phases[1],
-        phases[2],
-        phases[3],
-        (built_s - phases.iter().sum::<f64>()).max(0.0),
-        writing.elapsed().as_secs_f64()
-    );
+    // CUT_DENSITY_DESIGN §10.5: where the build's time went (the in-memory
+    // build's phases; the streaming build reports its passes instead)
+    if let Some(phases) = phases {
+        eprintln!(
+            "[vfs] occupancy phases: build {:.1}s = group {:.1}s + prepare {:.1}s + mark {:.1}s + pyramid {:.1}s + other {:.1}s; write {:.1}s",
+            built_s,
+            phases[0],
+            phases[1],
+            phases[2],
+            phases[3],
+            (built_s - phases.iter().sum::<f64>()).max(0.0),
+            writing.elapsed().as_secs_f64()
+        );
+    } else {
+        eprintln!(
+            "[vfs] occupancy phases: build {:.1}s (streaming); write {:.1}s",
+            built_s,
+            writing.elapsed().as_secs_f64()
+        );
+    }
     if kill_at == Some("occupancy-tmp") {
         eprintln!("[vfs] --kill-at occupancy-tmp");
         std::process::exit(9);

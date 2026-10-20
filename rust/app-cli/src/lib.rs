@@ -132,8 +132,8 @@ const INDEX_HELP: &str = "Usage: floe2-web index SOURCE [OPTIONS]
   --representatives-format 1|2 Points or shape/tree samples; implies rebuild of OVR
   --slow-cell-s S            Nonnegative slow-cell threshold
   --p2-shard-limit-mb N       Nonnegative shard-copy ceiling
-  --stream                   Two-pass streaming build: inventory pass, then cells read
-                             in file order behind a byte budget (no design.ovo yet)
+  --stream                   Streaming build: inventory pass, then cells read in file
+                             order behind a byte budget (design.ovo from one more pass)
   --mem GiB                  Streaming budget for resident cells (default
                              min(MemAvailable/2, 32)); requires --stream
   --profile-cell NAME        Profile one cell without writing a normal cache

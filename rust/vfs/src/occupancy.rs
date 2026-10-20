@@ -2306,6 +2306,774 @@ pub fn build(doc: &Doc, src_size: u64, src_mtime: u64, opts: &Opts) -> Result<Oc
     Ok(occ)
 }
 
+// ------------------------------------------------------ streaming build
+
+/// The streaming index build's occupancy (docs/STREAMING_INDEX_PLAN.ko.md
+/// §4.6, S5): the same marks as `build`, made cell by cell while the
+/// cell is resident instead of top-down over a Doc. Every mark is an OR
+/// and every charge is per operation, so the bits and the work do not
+/// depend on the order; only the SET of operations must be the walk's:
+/// - a cell's instances are the walk's visits of it (`expand_instances`):
+///   the paths from the top through cells that are not pruned (a small
+///   cell's subtree is marked as its bbox and not descended; a prunable
+///   grid of a small cell is one footprint fill and its members are not
+///   visited), through cells that hold any layer at all;
+/// - at each instance a small cell marks its subtree bbox into the planes
+///   of the depths this layer has shapes under it; any other cell marks
+///   its own records of the layer and charges its placements' members
+///   into children that hold the layer (a prunable grid of a small child:
+///   one charge and the footprint) - the children's own marks come with
+///   the children's instances;
+/// - the planes of many layers are open at once (the walk does one layer
+///   at a time), in groups that fit a plane memory budget, one pass over
+///   the file per group; the file-size budget is applied in layer order
+///   afterwards, exactly where the walk would have stopped marking.
+/// A layer over its work budget records none:work with a partial count
+/// there as here; that count depends on the schedule in both builds.
+///
+/// Inputs from the inventory (floe_oasis::inventory): the top, the
+/// no-text recursive boxes (the walk's `cell_bboxes`), the shape-only
+/// direct and recursive layer masks, the edges in topological order.
+pub struct StreamOcc {
+    unit: f64,
+    src_size: u64,
+    src_mtime: u64,
+    top: String,
+    top_ci: usize,
+    cell_dbu: i64,
+    bbox: Win,
+    w: u32,
+    h: u32,
+    n_levels: u32,
+    layer_order: Vec<(u32, u32)>,
+    max_work: u64,
+    prune: bool,
+    small: Vec<bool>,
+    bboxes: Vec<Option<Win>>,
+    /// per layer, per cell: the relative-depth mask (0 = the layer is
+    /// absent below the cell, the walk's `!has`)
+    masks: Vec<Vec<u32>>,
+    /// per layer: the result once known (EMPTY / NONE_* up front, the
+    /// marked ones after their group)
+    layers: Vec<Option<Layer>>,
+    next_layer: usize,
+    slot: usize,
+    fit: usize,
+    paths_skipped: u64,
+}
+
+/// one layer open for marking in a group
+struct StreamLayer {
+    li: usize,
+    planes: Planes,
+    work: std::sync::atomic::AtomicU64,
+    over: std::sync::atomic::AtomicBool,
+    paths_skipped: std::sync::atomic::AtomicU64,
+}
+
+/// the layers of one pass over the file
+pub struct StreamGroup {
+    layers: Vec<StreamLayer>,
+    /// layer key -> position in `layers`
+    pos: HashMap<(u32, u32), usize>,
+}
+
+/// a marker thread's state across the cells it marks: per group layer
+/// the local charges (flushed to the layer's total in blocks, as the
+/// walk's threads do) and what it skipped
+pub struct StreamScratch {
+    work: Vec<u64>,
+    over: Vec<bool>,
+    unflushed: Vec<u64>,
+    paths_skipped: Vec<u64>,
+    dummy: Doc,
+}
+
+/// per cell: the walk's visits of it (world transform, placement depth)
+impl StreamOcc {
+    /// the grid and the per-layer masks of a source from its inventory;
+    /// a grid over the cell budget records every layer none:cells
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        unit: f64,
+        top_ci: usize,
+        top_name: &str,
+        layer_order: &[(u32, u32)],
+        bboxes: &[Option<Win>],
+        dsmask: &[Vec<u8>],
+        topo: &[usize],
+        children: &[Vec<usize>],
+        src_size: u64,
+        src_mtime: u64,
+        opts: &Opts,
+    ) -> Result<StreamOcc, String> {
+        if opts.base_um < 0.0 || !opts.base_um.is_finite() {
+            return Err(format!(
+                "occupancy: base cell must be positive or 0 (auto), got {}",
+                opts.base_um
+            ));
+        }
+        let n = bboxes.len();
+        let nl = layer_order.len();
+        let bbox = bboxes[top_ci].unwrap_or((0, 0, 0, 0));
+        let span_x = (bbox.2 as i128 - bbox.0 as i128).max(0);
+        let span_y = (bbox.3 as i128 - bbox.1 as i128).max(0);
+        let base_um = if opts.base_um > 0.0 {
+            opts.base_um
+        } else {
+            auto_base_um_for_span(span_x.max(span_y) as f64 / unit)
+        };
+        let cell_dbu = ((base_um * unit).round() as i64).max(1);
+        let gw = ceil_div(span_x, cell_dbu as i128);
+        let gh = ceil_div(span_y, cell_dbu as i128);
+        let cells = (gw as u128) * (gh as u128);
+        let mut occ = StreamOcc {
+            unit,
+            src_size,
+            src_mtime,
+            top: top_name.to_string(),
+            top_ci,
+            cell_dbu,
+            bbox,
+            w: 0,
+            h: 0,
+            n_levels: 1,
+            layer_order: layer_order.to_vec(),
+            max_work: opts.max_work,
+            prune: opts.prune,
+            small: Vec::new(),
+            bboxes: bboxes.to_vec(),
+            masks: Vec::new(),
+            layers: (0..nl).map(|_| None).collect(),
+            next_layer: 0,
+            slot: 0,
+            fit: 0,
+            paths_skipped: 0,
+        };
+        if cells > opts.max_cells as u128 || gw > u32::MAX as i128 || gh > u32::MAX as i128 {
+            for (li, &(l, d)) in layer_order.iter().enumerate() {
+                occ.layers[li] = Some(Layer {
+                    layer: l,
+                    dt: d,
+                    status: STATUS_NONE_CELLS,
+                    work: 0,
+                    planes: Vec::new(),
+                });
+            }
+            occ.next_layer = nl;
+            return Ok(occ);
+        }
+        let (w, h) = (gw as u32, gh as u32);
+        occ.w = w;
+        occ.h = h;
+        occ.n_levels = level_count(w, h);
+        let per_layer = layer_bytes(w, h);
+        occ.fit = if per_layer == 0 {
+            nl
+        } else {
+            (opts.max_bytes / per_layer) as usize
+        };
+        // Opts::prune: the cells whose whole subtree fits one grid cell
+        occ.small = bboxes
+            .iter()
+            .map(|b| opts.prune && b.is_some_and(|b| b.2 - b.0 <= cell_dbu && b.3 - b.1 <= cell_dbu))
+            .collect();
+        // the relative-depth masks of every layer, bottom-up over the
+        // edges (layer_depth_masks over the Doc's placements: a child
+        // placed twice ORs the same mask twice)
+        let mut masks: Vec<Vec<u32>> = (0..nl).map(|_| vec![0u32; n]).collect();
+        for li in 0..nl {
+            let (byte, bit) = (li / 8, 1u8 << (li % 8));
+            let m = &mut masks[li];
+            for &ci in topo {
+                let mut v: u32 = if dsmask[ci].get(byte).is_some_and(|b| b & bit != 0) {
+                    1
+                } else {
+                    0
+                };
+                for &ch in &children[ci] {
+                    let cm = m[ch];
+                    v |= (cm << 1) | (cm & (1 << 31));
+                }
+                m[ci] = v;
+            }
+        }
+        occ.masks = masks;
+        if let Some(log) = opts.progress {
+            log(&format!(
+                "streaming: grid {}x{} ({} dbu), {} layers, prune {} ({} of {} cells fit a cell)",
+                w,
+                h,
+                cell_dbu,
+                nl,
+                if opts.prune { "on" } else { "off" },
+                occ.small.iter().filter(|&&s| s).count(),
+                n
+            ));
+        }
+        Ok(occ)
+    }
+
+    pub fn cell_dbu(&self) -> i64 {
+        self.cell_dbu
+    }
+
+    pub fn small(&self) -> &[bool] {
+        &self.small
+    }
+
+    /// per cell: whether any layer has a shape in its subtree (the cells
+    /// the walk ever visits)
+    pub fn has_any(&self) -> Vec<bool> {
+        let n = self.bboxes.len();
+        let mut out = vec![false; n];
+        for m in &self.masks {
+            for (ci, &v) in m.iter().enumerate() {
+                if v != 0 {
+                    out[ci] = true;
+                }
+            }
+        }
+        out
+    }
+
+    /// whether any layer is still to be marked (false: every layer's
+    /// status is known - none:cells, or nothing below the top)
+    pub fn needs_marking(&self) -> bool {
+        (self.next_layer..self.layer_order.len()).any(|li| self.masks[li][self.top_ci] != 0)
+    }
+
+    /// the next layers to mark, in layer order, whose level-0 planes fit
+    /// `plane_budget` bytes together (at least one); the layers decided
+    /// without marking (absent below the top: empty; past the file-size
+    /// budget: none:size) are recorded as they are passed
+    pub fn begin_group(&mut self, plane_budget: u64) -> Option<StreamGroup> {
+        let nl = self.layer_order.len();
+        let mut layers: Vec<StreamLayer> = Vec::new();
+        let mut pos: HashMap<(u32, u32), usize> = HashMap::new();
+        let mut bytes = 0u64;
+        while self.next_layer < nl {
+            let li = self.next_layer;
+            let key = self.layer_order[li];
+            if self.masks[li][self.top_ci] == 0 {
+                self.layers[li] = Some(Layer {
+                    layer: key.0,
+                    dt: key.1,
+                    status: STATUS_EMPTY,
+                    work: 0,
+                    planes: Vec::new(),
+                });
+                self.next_layer += 1;
+                continue;
+            }
+            if self.slot >= self.fit {
+                self.layers[li] = Some(Layer {
+                    layer: key.0,
+                    dt: key.1,
+                    status: STATUS_NONE_SIZE,
+                    work: 0,
+                    planes: Vec::new(),
+                });
+                self.next_layer += 1;
+                continue;
+            }
+            let max_depth = 31 - self.masks[li][self.top_ci].leading_zeros();
+            let n_planes = (max_depth.min(DEPTH_CAP as u32) + 1) as u64;
+            let stride = (self.w as u64 + 63) / 64;
+            let plane_bytes = n_planes * stride * 8 * self.h as u64;
+            if !layers.is_empty() && bytes + plane_bytes > plane_budget {
+                break;
+            }
+            bytes += plane_bytes;
+            pos.insert(key, layers.len());
+            layers.push(StreamLayer {
+                li,
+                planes: Planes::new(self.w, self.h, max_depth),
+                work: std::sync::atomic::AtomicU64::new(0),
+                over: std::sync::atomic::AtomicBool::new(false),
+                paths_skipped: std::sync::atomic::AtomicU64::new(0),
+            });
+            self.next_layer += 1;
+        }
+        if layers.is_empty() {
+            None
+        } else {
+            Some(StreamGroup { layers, pos })
+        }
+    }
+
+    /// a marker thread's scratch for `group`
+    pub fn scratch(&self, group: &StreamGroup) -> StreamScratch {
+        let k = group.layers.len();
+        StreamScratch {
+            work: vec![0; k],
+            over: vec![false; k],
+            unflushed: vec![0; k],
+            paths_skipped: vec![0; k],
+            dummy: Doc {
+                unit: self.unit,
+                cells: Vec::new(),
+                top: 0,
+                layer_order: Vec::new(),
+                norm_s: 0.0,
+                layer_names: HashMap::new(),
+                layer_aliases: HashMap::new(),
+            },
+        }
+    }
+
+    /// mark one resident cell at every one of its instances for the
+    /// group's layers (the instances enumerated once, every layer's
+    /// marker fed per instance; bits and charges are order-free)
+    pub fn mark_cell(
+        &self,
+        group: &StreamGroup,
+        cell: &floe_oasis::doc::Cell,
+        ci: usize,
+        inst: &Instances<'_>,
+        sc: &mut StreamScratch,
+    ) {
+        if inst.count(ci) == 0 {
+            return;
+        }
+        let small = self.small[ci];
+        // the cell's own records of the group's layers (none for a small
+        // cell: its subtree is one bbox)
+        let mut own: Vec<(usize, Vec<&RectRec>, Vec<&PolyRec>, Vec<&PathRec>)> = Vec::new();
+        let mut own_pos: HashMap<usize, usize> = HashMap::new();
+        if !small {
+            let mut slot_of = |g: usize, own: &mut Vec<(usize, Vec<&RectRec>, Vec<&PolyRec>, Vec<&PathRec>)>| -> usize {
+                *own_pos.entry(g).or_insert_with(|| {
+                    own.push((g, Vec::new(), Vec::new(), Vec::new()));
+                    own.len() - 1
+                })
+            };
+            for r in &cell.rects {
+                if let Some(&g) = group.pos.get(&(r.layer, r.dt)) {
+                    let k = slot_of(g, &mut own);
+                    own[k].1.push(r);
+                }
+            }
+            for p in &cell.polys {
+                if let Some(&g) = group.pos.get(&(p.layer, p.dt)) {
+                    let k = slot_of(g, &mut own);
+                    own[k].2.push(p);
+                }
+            }
+            for p in &cell.paths {
+                if let Some(&g) = group.pos.get(&(p.layer, p.dt)) {
+                    let k = slot_of(g, &mut own);
+                    own[k].3.push(p);
+                }
+            }
+        }
+        let empty_shapes: [CellShapes<'_>; 0] = [];
+        let empty_has: [bool; 0] = [];
+        struct LayerMark<'a> {
+            g: usize,
+            m: Marker<'a>,
+            mask: &'a [u32],
+            own: Option<usize>,
+        }
+        let mut marks: Vec<LayerMark<'_>> = Vec::new();
+        for (g, layer) in group.layers.iter().enumerate() {
+            let mask = &self.masks[layer.li];
+            if mask[ci] == 0 || sc.over[g] || layer.over.load(std::sync::atomic::Ordering::Relaxed) {
+                continue;
+            }
+            let prune = if self.prune {
+                Some(Prune {
+                    bboxes: &self.bboxes,
+                    small: &self.small,
+                    depth_mask: mask,
+                })
+            } else {
+                None
+            };
+            marks.push(LayerMark {
+                g,
+                m: Marker {
+                    doc: &sc.dummy,
+                    shapes: &empty_shapes,
+                    has: &empty_has,
+                    ox: self.bbox.0,
+                    oy: self.bbox.1,
+                    c: self.cell_dbu,
+                    w: self.w,
+                    h: self.h,
+                    planes: &layer.planes,
+                    depth: 0,
+                    work: sc.work[g],
+                    max_work: self.max_work,
+                    over: sc.over[g],
+                    paths_skipped: sc.paths_skipped[g],
+                    shared: Some(&layer.work),
+                    unflushed: sc.unflushed[g],
+                    prune,
+                },
+                mask,
+                own: own_pos.get(&g).copied(),
+            });
+        }
+        if marks.is_empty() {
+            return;
+        }
+        let mut live = marks.len();
+        inst.each(ci, &mut |xf, depth| {
+            for lm in marks.iter_mut() {
+                if lm.m.over {
+                    continue;
+                }
+                let ok = if small {
+                    lm.m.mark_subtree(ci, xf, depth)
+                } else {
+                    self.mark_instance(&mut lm.m, cell, lm.mask, lm.own.map(|k| &own[k]), xf, depth)
+                };
+                if !ok {
+                    live -= 1;
+                }
+            }
+            live > 0
+        });
+        for lm in marks {
+            sc.work[lm.g] = lm.m.work;
+            sc.over[lm.g] = lm.m.over;
+            sc.unflushed[lm.g] = lm.m.unflushed;
+            sc.paths_skipped[lm.g] = lm.m.paths_skipped;
+            if lm.m.over {
+                group.layers[lm.g].over.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// one instance of a cell that is not small, for one layer: its own
+    /// records at `depth`, then its placements as the walk charges them
+    /// before descending (the children's marks are theirs)
+    #[allow(clippy::type_complexity)]
+    fn mark_instance(
+        &self,
+        m: &mut Marker<'_>,
+        cell: &floe_oasis::doc::Cell,
+        mask: &[u32],
+        own: Option<&(usize, Vec<&RectRec>, Vec<&PolyRec>, Vec<&PathRec>)>,
+        xf: &Xf,
+        depth: u32,
+    ) -> bool {
+        m.depth = depth;
+        if let Some((_, rects, polys, paths)) = own {
+            for r in rects {
+                if !m.mark_rect_rec(r, xf) {
+                    return false;
+                }
+            }
+            for p in polys {
+                if !m.mark_poly_rec(p, xf) {
+                    return false;
+                }
+            }
+            for p in paths {
+                if !m.mark_path_rec(p, xf) {
+                    return false;
+                }
+            }
+        }
+        for pl in &cell.places {
+            if mask[pl.cell] == 0 {
+                continue;
+            }
+            match &pl.rep {
+                Rep::One => {}
+                Rep::Grid { .. } => {
+                    if self.small[pl.cell] && grid_prunable(&pl.rep, self.cell_dbu) {
+                        if !m.mark_grid_footprint(pl, xf, depth) {
+                            return false;
+                        }
+                    } else if !m.charge(rep_members(&pl.rep)) {
+                        return false;
+                    }
+                }
+                Rep::Pts(p) => {
+                    if !m.charge(p.len() as u64) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// the group's layers are marked: their statuses and pyramids, in
+    /// layer order against the file-size budget
+    pub fn end_group(&mut self, group: StreamGroup, scratches: Vec<StreamScratch>) {
+        use std::sync::atomic::Ordering::Relaxed;
+        for (g, layer) in group.layers.into_iter().enumerate() {
+            let li = layer.li;
+            let key = self.layer_order[li];
+            let mut work = layer.work.load(Relaxed);
+            let mut over = layer.over.load(Relaxed);
+            let mut skipped = layer.paths_skipped.load(Relaxed);
+            for sc in &scratches {
+                work = work.saturating_add(sc.unflushed[g]);
+                over |= sc.over[g];
+                skipped += sc.paths_skipped[g];
+            }
+            let layer_with = |status: u8, work: u64, planes: Vec<Plane>| Layer {
+                layer: key.0,
+                dt: key.1,
+                status,
+                work,
+                planes,
+            };
+            if self.slot >= self.fit {
+                // the walk would not have marked this layer
+                self.layers[li] = Some(layer_with(STATUS_NONE_SIZE, 0, Vec::new()));
+                continue;
+            }
+            if over || work > self.max_work {
+                self.layers[li] = Some(layer_with(STATUS_NONE_WORK, work, Vec::new()));
+                self.paths_skipped += skipped;
+                continue;
+            }
+            if skipped > 0 {
+                self.layers[li] = Some(layer_with(STATUS_NONE_UNSUPPORTED, work, Vec::new()));
+                self.paths_skipped += skipped;
+                continue;
+            }
+            let mut out = Vec::new();
+            for (depth, plane) in layer.planes.by_depth.iter().enumerate() {
+                if !plane.any() {
+                    continue;
+                }
+                let mut levels = vec![plane.to_level()];
+                while levels.last().unwrap().w > TOP_GRID || levels.last().unwrap().h > TOP_GRID {
+                    let next = levels.last().unwrap().pool();
+                    levels.push(next);
+                }
+                out.push(Plane {
+                    depth: depth as u8,
+                    levels,
+                });
+            }
+            if out.is_empty() {
+                self.layers[li] = Some(layer_with(STATUS_EMPTY, work, Vec::new()));
+                continue;
+            }
+            self.slot += out.len();
+            self.layers[li] = Some(layer_with(STATUS_OK, work, out));
+        }
+    }
+
+    pub fn finish(mut self) -> Occupancy {
+        // layers never reached (no group needed them): decided by the
+        // same rules as begin_group
+        let nl = self.layer_order.len();
+        for li in 0..nl {
+            if self.layers[li].is_none() {
+                let key = self.layer_order[li];
+                let status = if self.masks[li][self.top_ci] == 0 {
+                    STATUS_EMPTY
+                } else {
+                    STATUS_NONE_SIZE
+                };
+                self.layers[li] = Some(Layer {
+                    layer: key.0,
+                    dt: key.1,
+                    status,
+                    work: 0,
+                    planes: Vec::new(),
+                });
+            }
+        }
+        Occupancy {
+            unit: self.unit,
+            src_size: self.src_size,
+            src_mtime: self.src_mtime,
+            top: self.top,
+            cell_dbu: self.cell_dbu,
+            bbox: self.bbox,
+            w: self.w,
+            h: self.h,
+            n_levels: self.n_levels,
+            layers: self.layers.into_iter().map(|l| l.expect("layer decided")).collect(),
+            paths_skipped: self.paths_skipped,
+        }
+    }
+}
+
+/// instances kept materialized over all cells (the cells with few of
+/// them, parents first; 56 B each, 14 MB in all): the rest are
+/// enumerated through their parents on demand
+pub const FLAT_INSTANCES: u64 = 1 << 18;
+
+/// The walk's visits of every cell (STREAMING_INDEX_PLAN §4.6): from the
+/// top through the placements the streaming store kept - every member of
+/// a grid or point-list repetition, as the walk enumerates them -
+/// skipping children without any shape below them (never visited by any
+/// layer's walk), not descending into a small cell (its subtree is one
+/// bbox) nor into the members of a prunable grid of a small child (one
+/// footprint fill). Nothing is expanded up front: a cell's instances are
+/// enumerated through its parents' (the top's is the identity), and only
+/// cells with few instances keep theirs materialized, FLAT_INSTANCES in
+/// all - so the memory is the placements', not the visits' (valmini's
+/// 2.25 M grid members were 270 MB expanded; the routing chip's 800 K
+/// via instances 45 MB).
+pub struct Instances<'p> {
+    top: usize,
+    places: &'p [Vec<PlaceRec>],
+    /// per cell: (parent, index into the parent's placements) of every
+    /// placement the walk descends through
+    parents: Vec<Vec<(u32, u32)>>,
+    /// per cell: the walk's visits (saturating)
+    count: Vec<u64>,
+    flat: Vec<Option<Vec<(Xf, u32)>>>,
+}
+
+impl<'p> Instances<'p> {
+    /// `topo`: the inventory's children-first order (a placement of a
+    /// cell later in it would close a cycle: dropped, as the walk's
+    /// cycle guard drops the return to an ancestor)
+    pub fn new(
+        top: usize,
+        places: &'p [Vec<PlaceRec>],
+        small: &[bool],
+        has_any: &[bool],
+        topo: &[usize],
+        c: i64,
+    ) -> Instances<'p> {
+        Self::with_flat_budget(top, places, small, has_any, topo, c, FLAT_INSTANCES)
+    }
+
+    pub fn with_flat_budget(
+        top: usize,
+        places: &'p [Vec<PlaceRec>],
+        small: &[bool],
+        has_any: &[bool],
+        topo: &[usize],
+        c: i64,
+        flat_budget: u64,
+    ) -> Instances<'p> {
+        let n = places.len();
+        let mut pos = vec![usize::MAX; n];
+        for (i, &ci) in topo.iter().enumerate() {
+            pos[ci] = i;
+        }
+        let mut parents: Vec<Vec<(u32, u32)>> = (0..n).map(|_| Vec::new()).collect();
+        let mut count = vec![0u64; n];
+        if top < n && has_any[top] {
+            count[top] = 1;
+        }
+        // parents before children
+        for &p in topo.iter().rev() {
+            if count[p] == 0 || small[p] {
+                continue;
+            }
+            for (k, pl) in places[p].iter().enumerate() {
+                let ch = pl.cell;
+                if ch >= n || !has_any[ch] || pos[ch] >= pos[p] {
+                    continue;
+                }
+                if small[ch] && grid_prunable(&pl.rep, c) {
+                    continue;
+                }
+                parents[ch].push((p as u32, k as u32));
+                count[ch] = count[ch].saturating_add(count[p].saturating_mul(rep_members(&pl.rep)));
+            }
+        }
+        let mut inst = Instances {
+            top,
+            places,
+            parents,
+            count,
+            flat: (0..n).map(|_| None).collect(),
+        };
+        let mut left = flat_budget;
+        for &ci in topo.iter().rev() {
+            let k = inst.count[ci];
+            if k == 0 || k > left {
+                continue;
+            }
+            let mut v = Vec::with_capacity(k as usize);
+            inst.each(ci, &mut |xf, d| {
+                v.push((*xf, d));
+                true
+            });
+            left -= k;
+            inst.flat[ci] = Some(v);
+        }
+        inst
+    }
+
+    /// the walk's visits of `ci`
+    pub fn count(&self, ci: usize) -> u64 {
+        self.count[ci]
+    }
+
+    /// the walk's visits over all cells
+    pub fn total(&self) -> u64 {
+        self.count.iter().fold(0u64, |a, &b| a.saturating_add(b))
+    }
+
+    /// cells whose instances are materialized
+    pub fn flat_cells(&self) -> usize {
+        self.flat.iter().filter(|f| f.is_some()).count()
+    }
+
+    /// every instance of `ci` - (transform, placement depth) - until `f`
+    /// returns false; through the parents' instances unless materialized
+    pub fn each(&self, ci: usize, f: &mut dyn FnMut(&Xf, u32) -> bool) -> bool {
+        if let Some(v) = &self.flat[ci] {
+            for (xf, d) in v {
+                if !f(xf, *d) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        if ci == self.top {
+            return f(&Xf::identity(), 0);
+        }
+        for &(p, k) in &self.parents[ci] {
+            let pl = &self.places[p as usize][k as usize];
+            let go = self.each(p as usize, &mut |xp: &Xf, d: u32| {
+                each_member(&pl.rep, |dx, dy| {
+                    let t = xp.compose(&Xf::place(pl.x + dx, pl.y + dy, pl.rot, pl.flip));
+                    f(&t, d + 1)
+                })
+            });
+            if !go {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// the members of a repetition in the walk's order (Grid: i fastest),
+/// until `f` returns false
+fn each_member(rep: &Rep, mut f: impl FnMut(i64, i64) -> bool) -> bool {
+    match rep {
+        Rep::One => f(0, 0),
+        Rep::Grid { na, nb, va, vb } => {
+            for j in 0..*nb as i64 {
+                for i in 0..*na as i64 {
+                    if !f(i * va.0 + j * vb.0, i * va.1 + j * vb.1) {
+                        return false;
+                    }
+                }
+            }
+            true
+        }
+        Rep::Pts(p) => {
+            for &(dx, dy) in p.iter() {
+                if !f(dx, dy) {
+                    return false;
+                }
+            }
+            true
+        }
+    }
+}
+
 // ---------------------------------------------------------- serialize
 
 const HEADER_FIXED: usize = 8 + 4 + 8 + 8 + 8 + 8 + 32 + 4 + 4 + 2;

@@ -10,14 +10,22 @@ hierarchy of 3,500 cells over 449 layers):
   - G3: the in-memory build and the streaming build at jobs 1 and 4, the
     budget set to the inventory's largest cell times 1.5 so cells are
     admitted, planned, encoded and released in waves, agree byte for byte
-    on design.ovm / ovp / ovt / ovb / ovh / ovs and meta.json (design.ovo
-    and ovc do not exist in streaming mode);
+    on design.ovm / ovp / ovt / ovb / ovh / ovs / ovo and meta.json (both
+    with --occupancy; design.ovc is not offered in streaming mode), and
+    the exact occupancy walk (--occupancy-prune 0) at a finer cell too;
   - G4: `floe2 index SRC --stream --mem G` (the product's command line)
     builds the same bytes as `floe-index vfs ... --no-lod` (floe2 passes
     --no-lod); `--stream --coverage` is refused (exit 2); `--mem` without
     `--stream` is refused;
   - G5: the peak resident set of the streaming build (ru_maxrss of its
-    process) is at most the in-memory build's plus a slack, reported.
+    process) is bounded against the in-memory build's: the main build
+    alone (no --occupancy, jobs 1) at 1.25 x the in-memory peak + 128 MB;
+    with the occupancy pass (S5) at that plus half the budget - the pass
+    keeps a quarter of the budget in planes and a quarter in resident
+    cells, and it runs after the main build whose freed heap the
+    allocator may keep (macOS does, so the two add up). The bound is
+    enforced at jobs 1; the jobs 4 peak is reported (the parallel main
+    build's peak varies by about 100 MB run to run).
 
 usage: python tools/validate_vfs_stream.py valmini.oas
 """
@@ -34,7 +42,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "rust" / "target" / "release" / "floe-index"
 FLOE2 = ROOT / "rust" / "target" / "release" / "floe2"
-SKIP = {"design.ovo", "design.ovc"}
+SKIP = {"design.ovc"}
 
 
 def fail(msg):
@@ -82,9 +90,9 @@ def largest_cell_bytes(src, jobs):
     return int(j["largest_cell"]["doc_bytes"]), int(j["doc_bytes_est"])
 
 
-def compare_dirs(a, b, what):
-    fa = sorted(p.name for p in Path(a).iterdir() if p.is_file() and p.name not in SKIP)
-    fb = sorted(p.name for p in Path(b).iterdir() if p.is_file() and p.name not in SKIP)
+def compare_dirs(a, b, what, skip=SKIP):
+    fa = sorted(p.name for p in Path(a).iterdir() if p.is_file() and p.name not in skip)
+    fb = sorted(p.name for p in Path(b).iterdir() if p.is_file() and p.name not in skip)
     if fa != fb:
         fail("%s: files differ: %s vs %s" % (what, fa, fb))
     for name in fa:
@@ -120,33 +128,68 @@ def main():
         for name, src in files:
             largest, est = largest_cell_bytes(src, 4)
             mem_gib = max(largest * 1.5, 1 << 16) / float(1 << 30)
+            budget = int(mem_gib * (1 << 30))
             ref = work / (src.stem + "_mem")
             rc, peak_mem, dt_mem, err = run_measured(
-                [BIN, "vfs", src, ref, "--jobs", "4", "--slow-cell-s", "0"], env)
+                [BIN, "vfs", src, ref, "--jobs", "4", "--slow-cell-s", "0", "--occupancy"], env)
             if rc != 0:
                 fail("in-memory build %s exit %d\n%s" % (name, rc, err[-2000:]))
+            # G5, the main build alone: no occupancy pass, jobs 1
+            out = work / (src.stem + "_stream_noocc")
+            rc, peak0, dt0, err = run_measured(
+                [BIN, "vfs", src, out, "--jobs", "1", "--slow-cell-s", "0",
+                 "--stream", "--mem", "%.6f" % mem_gib], env)
+            if rc != 0:
+                fail("stream build %s (no occupancy) exit %d\n%s" % (name, rc, err[-2000:]))
+            names = compare_dirs(ref, out, "%s stream (no occupancy) jobs 1" % name,
+                                 skip=SKIP | {"design.ovo"})
+            if (out / "design.ovo").exists():
+                fail("%s: a streaming build without --occupancy wrote design.ovo" % name)
+            bound0 = int(peak_mem * 1.25) + (128 << 20)
+            verdict = "OK " if peak0 <= bound0 else "FAIL"
+            print("%s %-18s jobs 1, no ovo: %d files identical; peak rss stream %.0f MB vs memory %.0f MB "
+                  "(bound %.0f MB); %.1fs vs %.1fs"
+                  % (verdict, name, len(names), peak0 / 1e6, peak_mem / 1e6, bound0 / 1e6, dt0, dt_mem))
+            if verdict == "FAIL":
+                fail("%s: streaming peak %d above the in-memory peak %d + slack" % (name, peak0, peak_mem))
             for jobs in (1, 4):
                 out = work / ("%s_stream_j%d" % (src.stem, jobs))
                 rc, peak, dt, err = run_measured(
                     [BIN, "vfs", src, out, "--jobs", str(jobs), "--slow-cell-s", "0",
-                     "--stream", "--mem", "%.6f" % mem_gib], env)
+                     "--occupancy", "--stream", "--mem", "%.6f" % mem_gib], env)
                 if rc != 0:
                     fail("stream build %s jobs %d exit %d\n%s" % (name, jobs, rc, err[-2000:]))
                 if "inventory" not in err or "stream:" not in err:
                     fail("stream build %s jobs %d: no streaming log lines\n%s" % (name, jobs, err[-1500:]))
                 names = compare_dirs(ref, out, "%s stream jobs %d" % (name, jobs))
-                if (out / "design.ovo").exists():
-                    fail("%s: streaming mode wrote design.ovo" % name)
+                if not (out / "design.ovo").exists():
+                    fail("%s: the streaming build wrote no design.ovo" % name)
                 if "the build stopped" in err:
                     fail("%s jobs %d: the streaming build reported a failure\n%s" % (name, jobs, err[-1500:]))
-                slack = int(peak_mem * 1.25) + (128 << 20)
-                verdict = "OK " if peak <= slack else "FAIL"
+                # with the occupancy pass: half the budget more (planes +
+                # resident cells of the pass, on top of the main build's
+                # kept heap); enforced at jobs 1, reported at jobs 4
+                bound = int(peak_mem * 1.25) + (128 << 20) + budget // 2
+                verdict = "OK " if (peak <= bound or jobs != 1) else "FAIL"
                 print("%s %-18s jobs %d: %d files identical; Doc est %.0f MB, budget %.1f MB; "
-                      "peak rss stream %.0f MB vs memory %.0f MB; %.1fs vs %.1fs"
+                      "peak rss stream %.0f MB vs memory %.0f MB (bound %.0f MB%s); %.1fs vs %.1fs"
                       % (verdict, name, jobs, len(names), est / 1e6, mem_gib * 1024,
-                         peak / 1e6, peak_mem / 1e6, dt, dt_mem))
+                         peak / 1e6, peak_mem / 1e6, bound / 1e6,
+                         "" if jobs == 1 else ", reported", dt, dt_mem))
                 if verdict == "FAIL":
                     fail("%s jobs %d: streaming peak %d above the in-memory peak %d + slack" % (name, jobs, peak, peak_mem))
+        # the exact walk (--occupancy-prune 0) and a finer cell on valmini
+        src = files[0][1]
+        ref = work / "valmini_exact_mem"
+        out = work / "valmini_exact_stream"
+        for target, extra in ((ref, []), (out, ["--stream", "--mem", "0.5"])):
+            r = subprocess.run([str(BIN), "vfs", str(src), str(target), "--jobs", "2", "--occupancy",
+                                "--occupancy-prune", "0", "--occupancy-um", "1"] + extra,
+                               capture_output=True, text=True, env=env)
+            if r.returncode != 0:
+                fail("exact-walk build %s: %s" % (target.name, r.stderr[-1500:]))
+        compare_dirs(ref, out, "valmini exact walk (prune 0, 1 um)")
+        print("OK  valmini --occupancy-prune 0 --occupancy-um 1: streaming identical")
         # G4: the product command line, and the refusals. The reference is
         # built from the SAME path (meta.json records the source path).
         src = files[0][1]

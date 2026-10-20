@@ -52,10 +52,10 @@ pub struct IndexOptions {
     /// The occupancy density (design.ovs), built by default (2026-10-07);
     /// `--no-ovs` leaves it out.
     pub ovs: bool,
-    /// `--stream`: the two-pass streaming build (`floe-index vfs
-    /// --stream`, docs/STREAMING_INDEX_PLAN.ko.md S4) - the inventory
-    /// pass, then the cells read in file order behind a byte budget of
-    /// `mem_gib` GiB (default min(MemAvailable/2, 32)); no design.ovo yet.
+    /// `--stream`: the streaming build (`floe-index vfs --stream`,
+    /// docs/STREAMING_INDEX_PLAN.ko.md S4/S5) - the inventory pass, then
+    /// the cells read in file order behind a byte budget of `mem_gib` GiB
+    /// (default min(MemAvailable/2, 32)), design.ovo from one more pass.
     pub stream: bool,
     pub mem_gib: Option<f64>,
 }
@@ -274,8 +274,9 @@ pub fn decide(
             if has_occupancy {
                 Action::OccupancyPresent
             } else if options.stream {
-                // the streaming build leaves design.ovo out until the
-                // streaming occupancy lands (STREAMING_INDEX_PLAN S5); an
+                // a streaming build without design.ovo skipped it on
+                // purpose (its placements exceeded the cap the occupancy
+                // pass keeps, STREAMING_INDEX_PLAN §4.6); an
                 // occupancy-only run would parse the whole source in
                 // memory - the very thing --stream avoids - so the
                 // current cache is reused as it is

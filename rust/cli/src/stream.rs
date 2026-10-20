@@ -24,7 +24,7 @@
 //! order either way.
 
 use crate::cellstore::{CellRef, CellStore};
-use floe_oasis::doc::{normalize_cells, parse_cell_bytes, Cell, CellTables};
+use floe_oasis::doc::{normalize_cells, parse_cell_bytes, Cell, CellTables, PlaceRec};
 use floe_oasis::inventory::Inventory;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -54,8 +54,19 @@ enum Slot {
     Released,
 }
 
+/// the placements of the cells released so far, for the occupancy pass
+/// (STREAMING_INDEX_PLAN §4.6): kept up to `cap` records in all, dropped
+/// past it (the pass is then skipped)
+struct KeptPlaces {
+    cap: u64,
+    total: u64,
+    overflow: bool,
+    by_cell: Vec<Option<Vec<PlaceRec>>>,
+}
+
 struct State {
     slots: Vec<Slot>,
+    keep: Option<KeptPlaces>,
     /// estimated Doc bytes of the cells charged and not yet released
     resident: u64,
     next_range: usize,
@@ -72,6 +83,10 @@ pub struct StreamStore {
     file: std::fs::File,
     ranges: Vec<RangeJob>,
     budget: u64,
+    /// the smallest budget this file streams under: the largest cell, or
+    /// the largest span of ranges a cell defined in several places holds
+    /// resident (what `new` refused below)
+    min_budget: u64,
     st: Mutex<State>,
     cv: Condvar,
 }
@@ -146,10 +161,7 @@ impl StreamStore {
             if c.def_ranges.is_empty() {
                 // a placement-only target: an empty cell, resident from
                 // the start (it costs nothing)
-                slots.push(Slot::Ready(Arc::new(Cell {
-                    name: c.name.clone(),
-                    ..Default::default()
-                })));
+                slots.push(Self::empty_slot(&c.name));
                 continue;
             }
             let first = c.def_ranges[0];
@@ -177,8 +189,10 @@ impl StreamStore {
                 remaining: c.def_ranges.len() as u32,
             });
         }
+        let mut min_budget = largest;
         for (ci, first, last) in spans {
             let span: u64 = ranges[first..=last].iter().map(|r| r.cost).sum();
+            min_budget = min_budget.max(span);
             if span > budget {
                 return Err(format!(
                     "cell {} is defined in several places of the file; the cells between \
@@ -203,8 +217,10 @@ impl StreamStore {
                 file,
                 ranges,
                 budget,
+                min_budget,
                 st: Mutex::new(State {
                     slots,
+                    keep: None,
                     resident: 0,
                     next_range: 0,
                     ranges_done: 0,
@@ -239,6 +255,87 @@ impl StreamStore {
                 Err(e) => std::panic::resume_unwind(e),
             }
         })
+    }
+
+    fn empty_slot(name: &str) -> Slot {
+        Slot::Ready(Arc::new(Cell {
+            name: name.to_string(),
+            ..Default::default()
+        }))
+    }
+
+    pub fn inventory(&self) -> &Inventory {
+        &self.inv
+    }
+
+    /// keep every released cell's placements (for the occupancy pass),
+    /// up to `cap` placement records in all; call before the readers run
+    pub fn keep_places(&self, cap: u64) {
+        let n = self.inv.cells.len();
+        self.lock().keep = Some(KeptPlaces {
+            cap,
+            total: 0,
+            overflow: false,
+            by_cell: (0..n).map(|_| None).collect(),
+        });
+    }
+
+    /// the kept placements per cell, or why the occupancy pass cannot
+    /// run: the record count overflowed the cap, or a cell was never
+    /// released by the build (its placements were never seen)
+    pub fn take_places(&self) -> Result<Vec<Vec<PlaceRec>>, String> {
+        let mut st = self.lock();
+        match st.keep.take() {
+            None => Err("no placements were kept".to_string()),
+            Some(k) if k.overflow => Err(format!(
+                "{} placement records exceed the {} the occupancy pass keeps",
+                k.total, k.cap
+            )),
+            Some(k) => {
+                if let Some(ci) = k.by_cell.iter().position(|p| p.is_none()) {
+                    return Err(format!(
+                        "cell {} ({}) was never released by the build",
+                        ci, self.inv.cells[ci].name
+                    ));
+                }
+                Ok(k.by_cell.into_iter().map(|p| p.unwrap_or_default()).collect())
+            }
+        }
+    }
+
+    /// the smallest budget this file streams under (the largest cell or
+    /// multi-definition span)
+    pub fn min_budget(&self) -> u64 {
+        self.min_budget
+    }
+
+    /// another pass over the file under `budget` (at least `min_budget`):
+    /// every cell pending again, nothing resident (no readers may be
+    /// running)
+    pub fn reset(&mut self, budget: u64) {
+        self.budget = budget.max(self.min_budget);
+        let mut slots: Vec<Slot> = Vec::with_capacity(self.inv.cells.len());
+        for c in &self.inv.cells {
+            if c.def_ranges.is_empty() {
+                slots.push(Self::empty_slot(&c.name));
+            } else {
+                slots.push(Slot::Pending {
+                    pieces: Vec::new(),
+                    remaining: c.def_ranges.len() as u32,
+                });
+            }
+        }
+        // in place: the condition variable is bound to this mutex
+        *self.lock() = State {
+            slots,
+            keep: None,
+            resident: 0,
+            next_range: 0,
+            ranges_done: 0,
+            budget_blocked: false,
+            failed: None,
+            stop: false,
+        };
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -399,9 +496,21 @@ impl CellStore for StreamStore {
     }
     fn release(&self, cells: Range<usize>) {
         let mut st = self.lock();
+        let st = &mut *st;
         let mut freed = 0u64;
         for ci in cells {
             if !matches!(st.slots[ci], Slot::Released) {
+                if let (Slot::Ready(c), Some(k)) = (&st.slots[ci], &mut st.keep) {
+                    if !k.overflow {
+                        k.total = k.total.saturating_add(c.places.len() as u64);
+                        if k.total > k.cap {
+                            k.overflow = true;
+                            k.by_cell.clear();
+                        } else {
+                            k.by_cell[ci] = Some(c.places.clone());
+                        }
+                    }
+                }
                 st.slots[ci] = Slot::Released;
                 freed = freed.saturating_add(self.inv.cells[ci].doc_bytes);
             }
@@ -538,6 +647,145 @@ mod tests {
             }
         }
         build_both(&cases[0].1, "late-wide", 2, 2, false);
+    }
+
+
+    /// design.ovo (S5): the streaming occupancy against the in-memory
+    /// one, byte for byte - prune on and off, a coarse and a fine cell,
+    /// the planes in one group and in groups small enough to need several
+    /// passes over the file
+    #[test]
+    fn streaming_occupancy_matches_in_memory() {
+        use floe_oasis::doc::{PathRec, PolyRec, RectRec, Rep, TextRec};
+        use floe_oasis::write::{write_tree, WCell};
+        use floe_vfs::occupancy as occ;
+        let leaf_rects = vec![
+            RectRec { layer: 1, dt: 0, x: 0, y: 0, w: 300, h: 300, rep: Rep::One },
+            RectRec { layer: 2, dt: 0, x: 50, y: 50, w: 40, h: 40, rep: Rep::Grid { na: 3, nb: 3, va: (60, 0), vb: (0, 60) } },
+        ];
+        let leaf = WCell { name: "LEAF".to_string(), rects: &leaf_rects, polys: &[], paths: &[], texts: &[], places: vec![] };
+        let tiny_rects = vec![RectRec { layer: 3, dt: 0, x: 0, y: 0, w: 20, h: 20, rep: Rep::One }];
+        let tiny = WCell { name: "TINY".to_string(), rects: &tiny_rects, polys: &[], paths: &[], texts: &[], places: vec![] };
+        let pts = Rep::Pts(vec![(0, 0), (5000, 100), (-200, 2500), (9100, 7600)].into());
+        let dense = Rep::Grid { na: 40, nb: 30, va: (200, 0), vb: (0, 200) };
+        let sparse = Rep::Grid { na: 4, nb: 3, va: (5000, 0), vb: (0, 4000) };
+        let one = Rep::One;
+        let mid_rects = vec![
+            RectRec { layer: 1, dt: 0, x: -100, y: -100, w: 12000, h: 50, rep: Rep::One },
+            RectRec { layer: 4, dt: 1, x: 0, y: 0, w: 90, h: 90, rep: Rep::Grid { na: 20, nb: 20, va: (100, 0), vb: (0, 100) } },
+            RectRec { layer: 4, dt: 1, x: 3000, y: 3000, w: 90, h: 90, rep: Rep::Grid { na: 5, nb: 5, va: (900, 0), vb: (0, 900) } },
+        ];
+        let mid_polys = vec![PolyRec { layer: 5, dt: 0, pts: vec![(100, 100), (4100, 300), (2600, 3900)], rep: Rep::One }];
+        let mid_paths = vec![PathRec { layer: 5, dt: 0, pts: vec![(0, 6000), (7000, 6000), (7000, 9000)], hw: 150, es: 0, ee: 150, rep: Rep::One }];
+        let mid_texts = vec![TextRec { layer: 1, dt: 0, x: 10, y: 10, rep: Rep::One, s: "t".to_string() }];
+        let mid = WCell {
+            name: "MID".to_string(),
+            rects: &mid_rects,
+            polys: &mid_polys,
+            paths: &mid_paths,
+            texts: &mid_texts,
+            places: vec![
+                ("TINY", 100, 100, 0, false, &dense),
+                ("TINY", 200, 300, 1, true, &sparse),
+                ("LEAF", 8000, 0, 2, false, &pts),
+                ("LEAF", 0, 8000, 3, true, &one),
+            ],
+        };
+        let top_rects = vec![RectRec { layer: 1, dt: 0, x: 0, y: 0, w: 60000, h: 50, rep: Rep::One }];
+        let top = WCell {
+            name: "TOP".to_string(),
+            rects: &top_rects,
+            polys: &[],
+            paths: &[],
+            texts: &[],
+            places: vec![
+                ("MID", 0, 0, 0, false, &one),
+                ("MID", 30000, 0, 1, false, &Rep::Grid { na: 2, nb: 2, va: (14000, 0), vb: (0, 14000) }),
+                ("LEAF", 20000, 40000, 0, true, &one),
+            ],
+        };
+        let mut cases: Vec<(&str, Vec<u8>)> = vec![
+            ("tree", write_tree(&[tiny, leaf, mid, top], 1000.0).expect("write_tree")),
+            ("adv", fixtures::adversarial(false, true)),
+            ("head", fixtures::head_cblock_cell()),
+        ];
+        for (tag, data) in cases.drain(..) {
+            let dir = tmpdir(&format!("ovo-{}", tag));
+            let src = dir.join("src.oas");
+            std::fs::write(&src, &data).unwrap();
+            let doc = parse_doc_parallel_phased(&data, 2, |_| {}).expect("parse");
+            // (prune, base cell, plane budget, flat-instance budget): one
+            // pass or one per layer; instances materialized or enumerated
+            // through the parents
+            for (prune, base_um, plane_budget, flat_budget) in [(true, 1.0, u64::MAX, 0), (false, 1.0, 1, u64::MAX), (true, 0.25, 1, 0), (false, 0.25, u64::MAX, u64::MAX)] {
+                let opts = occ::Opts { base_um, jobs: 2, prune, progress: None, ..Default::default() };
+                let reference_occ = occ::build(&doc, 11, 22, &opts).expect("in-memory occupancy");
+                let ok_layers = reference_occ.layers.iter().filter(|l| l.status == occ::STATUS_OK).count();
+                if tag == "tree" {
+                    assert!(ok_layers >= 4, "tree prune {} base {} um: only {} layers marked", prune, base_um, ok_layers);
+                }
+                let reference = occ::write_ovo(&reference_occ);
+                // the streaming side: the main pass keeps the placements,
+                // the occupancy passes re-read the file per layer group
+                let inv = floe_oasis::inventory(&data, 2).expect("inventory");
+                let pre = PrePass::from_inventory(&inv);
+                let (mut store, _) = StreamStore::new(inv, src.to_str().unwrap(), u64::MAX / 4).expect("store");
+                store.keep_places(1 << 20);
+                let out = dir.join(format!("out-{}-{}", prune, base_um));
+                std::fs::create_dir_all(&out).unwrap();
+                store.with_readers(2, || {
+                    crate::vfs::build(&store, pre, std::time::Instant::now(), 11, 22, out.to_str().unwrap(), 2, 4, 8, 64 * 1024, true, false, 1e9, None)
+                });
+                let places = store.take_places().expect("placements kept");
+                let (n, top_ci, mut built, topo) = {
+                    let inv = store.inventory();
+                    let children = inv.children();
+                    let dsmask: Vec<Vec<u8>> = inv.cells.iter().map(|c| c.dsmask.clone()).collect();
+                    let built = occ::StreamOcc::new(inv.unit(), inv.top, &inv.cells[inv.top].name, &inv.layer_order, &inv.rbb_notext, &dsmask, &inv.topo, &children, 11, 22, &opts).expect("stream occupancy");
+                    (inv.cells.len(), inv.top, built, inv.topo.clone())
+                };
+                let instances = occ::Instances::with_flat_budget(top_ci, &places, built.small(), &built.has_any(), &topo, built.cell_dbu(), flat_budget);
+                assert!(instances.total() > 0, "{}: the walk visits something", tag);
+                if tag == "tree" && prune {
+                    assert!(built.small().iter().any(|&s| s), "tree: the pruned walk must have small cells");
+                }
+                if flat_budget == 0 {
+                    assert_eq!(instances.flat_cells(), 0, "{}: nothing materialized under a zero budget", tag);
+                }
+                let mut passes = 0;
+                while let Some(group) = built.begin_group(plane_budget) {
+                    passes += 1;
+                    store.reset(u64::MAX / 4);
+                    let st: &StreamStore = &store;
+                    let (g, b, inst) = (&group, &built, &instances);
+                    let scratches: Vec<occ::StreamScratch> = st.with_readers(2, || {
+                        let next = std::sync::atomic::AtomicUsize::new(0);
+                        std::thread::scope(|s| {
+                            let next = &next;
+                            let hs: Vec<_> = (0..2).map(|_| s.spawn(move || {
+                                let mut sc = b.scratch(g);
+                                loop {
+                                    let ci = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    if ci >= n { break; }
+                                    { let cell = st.cell(ci); b.mark_cell(g, &cell, ci, inst, &mut sc); }
+                                    st.release(ci..ci + 1);
+                                }
+                                sc
+                            })).collect();
+                            hs.into_iter().map(|h| h.join().unwrap()).collect()
+                        })
+                    });
+                    built.end_group(group, scratches);
+                }
+                drop(instances);
+                let streamed = occ::write_ovo(&built.finish());
+                assert!(streamed == reference, "{} prune {} base {} um flat {}: design.ovo differs ({} passes)", tag, prune, base_um, flat_budget, passes);
+                if plane_budget == 1 && tag == "tree" {
+                    assert!(passes > 1, "{}: the plane budget of 1 byte must force several passes", tag);
+                }
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     /// a corrupt range (the file changed under the inventory): the reader
