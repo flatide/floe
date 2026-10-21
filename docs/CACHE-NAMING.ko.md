@@ -46,7 +46,9 @@
   네 함수 — 전부 `floe/cachepath.py`를 부른다. `rust/cli/src/vfs.rs`(기본 outdir),
   `rust/cli/src/drcice.rs`(기본 out), usage 문자열.
 - 로드 대화상자 `BROWSE_HIDDEN_SUFFIXES = (".floe", ".ice")`는 **구 이름 잔재를
-  숨기는 용도로만** 남는다(새 이름은 점 파일 규칙으로 숨겨진다).
+  숨기는 용도로만** 남는다(새 이름은 점 파일 규칙으로 숨겨진다). 같은 브라우저는
+  심볼릭 링크를 따라가지 않고 `이름 -> 대상` 행으로 나열한다(2026-10-21; SPEC-VIEWER의
+  "파일 열기 대화상자" 항목).
 - `.gitignore`: `.*.ice/`, `.*.tray`.
 - 게이트: `validate_index_cli`(기본 경로 = 숨김 형제, 구 이름 자동 개명·재색인
   없음·stderr 알림), `validate_drc_ice`(`validate_names`: 기본 pack 이름, 구 이름

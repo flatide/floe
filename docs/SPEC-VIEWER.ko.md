@@ -295,6 +295,26 @@
   창이 이미 실현돼 있으면(_did_fit) 즉시 fit. 인스턴스 포워딩 경로
   자체는 여전히 인덱스 필수(다이얼로그만 인덱싱 제안). 실행 중
   인스턴스에 빈 요청("")이 포워딩되면 창만 present(옵션 무시).
+- **파일 열기 대화상자 = 자체 브라우저**(`_browse_file_dialog`; 사용자 요청
+  2026-09-10 — GTK chooser는 필터와 무관하게 모든 폴더를 보여 캐시 폴더와 DRC 팩이
+  레이아웃 옆에 늘어섰다): 폴더 먼저, 그다음 현재 필터가 허용하는 파일
+  (`list_browse_entries`; 점 파일·`*.floe`·`*.ice`는 숨김), 위/홈 버튼, 경로 입력란
+  (Enter = 폴더 이동 또는 파일 선택), 이름 열 type-ahead, 필터 콤보. **심볼릭 링크는
+  따라가지 않는다**(사용자 요청 2026-10-21, app 0.12.372 — 다른 볼륨을 가리키는
+  링크가 많은 데이터 폴더에서 링크마다 대상을 stat 하느라(automount, 응답 없는 NFS)
+  대화상자가 늦게 떴다): 링크는 가리키는 것이 무엇이든 모든 필터에서 `이름 -> 대상`
+  행(readlink 텍스트; 크기·수정 시각 없음)으로 폴더 뒤, 파일 앞에 나열되고, 사용자가
+  그 행을 활성화할 때만 그 하나를 따라가 폴더면 들어가고 파일이면 선택하며 끊긴
+  링크면 아무 일도 없다. 나열에 드는 호출은 항목마다 d_type/lstat와 링크의 readlink뿐.
+  이 브라우저를 쓰는 대화상자: load layout, load jobdeck, DRC open .db, load DRC
+  clusters, open rule metadata, load notes, load layer properties. 저장 대화상자
+  (export review statistics, save notes/waives, save layer properties, save clip)와
+  Reviewers 창의 다중 선택은 GTK chooser 그대로다(GIO가 항목마다 링크 대상을 stat 하며
+  바꿀 수 없다; 이름을 치는 저장 모드는 미구현). 웹의 picker(app-core `browse`,
+  `fstatat(AT_SYMLINK_NOFOLLOW)`)는 링크를 아예 건너뛴다(`skipped_links`). 게이트:
+  rust_renderer `test_load_browser_hides_caches_and_sidecars`(폴더 링크가 폴더 행이
+  아니고 레이아웃 링크가 파일 행이 아니며 링크는 모든 필터에서 이름순·대상 포함,
+  열기 대화상자마다 `_browse_file_dialog`).
 - **색인 잠금**(2026-10-09, app 0.12.323 / RENDERD 0.12.297; CACHE-NAMING §5,
   SPEC-INDEXER §4.5).
   - **열기 전 확인:** 다른 실행이 레이아웃 캐시를 통째로 색인 중이면 상태줄에

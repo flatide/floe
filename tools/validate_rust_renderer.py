@@ -2859,9 +2859,14 @@ class IndexOnOpenTests(unittest.TestCase):
     def test_load_browser_hides_caches_and_sidecars(self):
         """User call 2026-09-10: the load dialog's folder listing never
         shows a layout's <src>.floe cache or a DRC db's .ice sidecar
-        (nor dotfiles); folders come first, files follow the filter."""
+        (nor dotfiles); folders come first, files follow the filter.
+        User call 2026-10-21: the listing follows no symbolic link - a
+        link is a link row under every filter, a link to a folder is
+        not a folder row, a link to a layout not a file row - and every
+        dialog that opens a file is this browser."""
         import tempfile
         from floe import gui
+        layouts = ("*.oas", "*.oas.gz", "*.gds", "*.gds.gz")
         with tempfile.TemporaryDirectory() as d:
             os.mkdir(os.path.join(d, "a.oas.floe"))
             os.mkdir(os.path.join(d, "Sub"))
@@ -2870,26 +2875,57 @@ class IndexOnOpenTests(unittest.TestCase):
                          "deck.jb", "notes.txt"):
                 with open(os.path.join(d, name), "w") as fh:
                     fh.write("x")
-            folders, files = gui.list_browse_entries(
-                d, ("*.oas", "*.oas.gz", "*.gds", "*.gds.gz"))
+            folders, files, links = gui.list_browse_entries(d, layouts)
             self.assertEqual(folders, ["Sub"])
             self.assertEqual([f[0] for f in files], ["a.oas", "b.GDS"])
             self.assertEqual(files[0][1], 1)
-            folders, files = gui.list_browse_entries(d, ("*.jb",))
+            self.assertEqual(links, [])
+            folders, files, links = gui.list_browse_entries(d, ("*.jb",))
             self.assertEqual([f[0] for f in files], ["deck.jb"])
-            folders, files = gui.list_browse_entries(d, ("*",))
+            folders, files, links = gui.list_browse_entries(d, ("*",))
             self.assertEqual([f[0] for f in files],
                              ["a.oas", "b.GDS", "deck.jb", "notes.txt", "x.db"],
                              "all files: still no .ice, no dotfile")
             self.assertEqual(gui.list_browse_entries(
-                os.path.join(d, "nope"), ("*",)), ([], []))
+                os.path.join(d, "nope"), ("*",)), ([], [], []))
+            # links: to a folder, to a layout (absolute), dangling, a
+            # loop, and two the name rules hide (dotfile, *.floe)
+            for name, target in (("to_sub", "Sub"),
+                                 ("to_a.oas", os.path.join(d, "a.oas")),
+                                 ("dangling", "nowhere"), ("loop", "loop"),
+                                 (".hidden_link", "a.oas"),
+                                 ("old.oas.floe", "a.oas")):
+                os.symlink(target, os.path.join(d, name))
+            for pats in (layouts, ("*.jb",), ("*",)):
+                folders, files, links = gui.list_browse_entries(d, pats)
+                self.assertEqual(
+                    folders, ["Sub"],
+                    "a link to a folder is not followed into a folder row")
+                self.assertNotIn(
+                    "to_a.oas", [f[0] for f in files],
+                    "a link to a layout is not followed into a file row")
+                self.assertEqual(
+                    links, [("dangling", "nowhere"), ("loop", "loop"),
+                            ("to_a.oas", os.path.join(d, "a.oas")),
+                            ("to_sub", "Sub")],
+                    "every link under every filter, name-sorted, with its target")
         self.assertEqual(gui.fmt_bytes(1023), "1023 B")
         self.assertEqual(gui.fmt_bytes(4300), "4.2 KB")
         self.assertEqual(gui.fmt_bytes(1.3 * 1024 ** 2), "1.3 MB")
         import inspect
-        src = inspect.getsource(gui.Viewer._load_layout_dialog)
-        self.assertIn("_browse_file_dialog(", src)
-        self.assertNotIn("FileChooserDialog", src)
+        for method in (gui.Viewer._load_layout_dialog,
+                       gui.Viewer._drc_open_dialog,
+                       gui.Viewer._drc_clusters_dialog,
+                       gui.Viewer._drc_rules_dialog,
+                       gui.Viewer._drc_note_load_dialog):
+            src = inspect.getsource(method)
+            self.assertIn("_browse_file_dialog(", src, method.__name__)
+            self.assertNotIn("FileChooserDialog", src, method.__name__)
+        self.assertIn("_browse_file_dialog(",
+                      inspect.getsource(gui.Viewer._props_chooser))
+        src = inspect.getsource(gui.list_browse_entries)
+        self.assertNotIn("e.is_dir()", src, "the listing follows no link")
+        self.assertNotIn("e.stat()", src, "the listing follows no link")
 
     def test_load_dialog_routes_a_deck_through_the_level_question(self):
         """File > load jobdeck… (field 2026-09-10): an INDEXED deck

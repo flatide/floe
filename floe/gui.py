@@ -1559,17 +1559,26 @@ BROWSE_HIDDEN_SUFFIXES = (".floe", ".ice")
 
 
 def list_browse_entries(folder, patterns):
-    """(folders, files) of `folder` for the load dialog's browser.
+    """(folders, files, links) of `folder` for the file dialogs' browser.
     Folders are names; files are (name, size, mtime) admitted by one
-    of the fnmatch `patterns` (case-insensitive). Dotfiles, *.floe
-    and *.ice are never listed; both lists sort case-insensitively.
-    An unreadable folder lists nothing."""
+    of the fnmatch `patterns` (case-insensitive); links are
+    (name, target) for every symbolic link, whatever it points to.
+    Dotfiles, *.floe and *.ice are never listed; each list sorts
+    case-insensitively. An unreadable folder lists nothing.
+
+    Nothing here follows a symbolic link (user call 2026-10-21): a
+    data folder of links to other volumes made the dialog stat every
+    link's target before it opened - an automount or an unreachable
+    NFS server per link. Only following a link tells a folder from a
+    file, so a link is listed as a link under every filter, with the
+    text of the link itself (readlink) for the user to tell; the
+    browser follows the one link the user activates."""
     import fnmatch
-    folders, files = [], []
+    folders, files, links = [], [], []
     try:
         it = os.scandir(folder)
     except OSError:
-        return [], []
+        return [], [], []
     lowered = [p.lower() for p in patterns]
     with it:
         for e in it:
@@ -1578,7 +1587,14 @@ def list_browse_entries(folder, patterns):
                     BROWSE_HIDDEN_SUFFIXES):
                 continue
             try:
-                is_dir = e.is_dir()
+                if e.is_symlink():
+                    try:
+                        target = os.readlink(e.path)
+                    except OSError:
+                        target = ""
+                    links.append((name, target))
+                    continue
+                is_dir = e.is_dir(follow_symlinks=False)
             except OSError:
                 continue
             if is_dir:
@@ -1587,13 +1603,14 @@ def list_browse_entries(folder, patterns):
             if not any(fnmatch.fnmatch(name.lower(), p) for p in lowered):
                 continue
             try:
-                st = e.stat()
+                st = e.stat(follow_symlinks=False)
                 files.append((name, st.st_size, st.st_mtime))
             except OSError:
                 files.append((name, -1, 0))
     folders.sort(key=str.lower)
     files.sort(key=lambda t: t[0].lower())
-    return folders, files
+    links.sort(key=lambda t: t[0].lower())
+    return folders, files, links
 
 
 def fmt_bytes(n):
@@ -6486,13 +6503,20 @@ class Viewer:
         self._load_picked(path)
 
     def _browse_file_dialog(self, title, folder, filters, first=0):
-        """A file browser of our own: folder list first, then the files
-        the current filter admits; `list_browse_entries` hides dotfiles,
-        pre-rename <src>.floe caches and .ice packs (user call 2026-09-10 -
-        GTK's chooser applies no filter to folders). Up / home buttons,
-        an editable path (Enter navigates to a folder or accepts a
-        file), type-ahead on the name column, a filter combo. Returns
-        the picked path, or None."""
+        """A file browser of our own - every dialog that opens a file
+        (load layout / jobdeck, DRC .db, clusters, rule metadata,
+        notes, layer properties): folder list first, then the symbolic
+        links, then the files the current filter admits;
+        `list_browse_entries` hides dotfiles, pre-rename <src>.floe
+        caches and .ice packs (user call 2026-09-10 - GTK's chooser
+        applies no filter to folders) and follows no link (user call
+        2026-10-21 - GTK's chooser stats every link's target, which a
+        folder of links to other volumes turned into a wait per link);
+        a link row reads `name -> target` and is followed, alone, when
+        activated. Up / home buttons, an editable path (Enter navigates
+        to a folder or accepts a file), type-ahead on the name column,
+        a filter combo. Returns the picked path, or None. Saving (a
+        name to type) and the reviewers' multi-pick keep GTK's chooser."""
         dlg = Gtk.Dialog(title=title, transient_for=self.window, modal=True)
         dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
                         "Open", Gtk.ResponseType.OK)
@@ -6512,8 +6536,8 @@ class Viewer:
         bar.pack_start(home, False, False, 0)
         bar.pack_start(entry, True, True, 0)
         box.pack_start(bar, False, False, 0)
-        # name, size, modified, is_dir
-        store = Gtk.ListStore(str, str, str, bool)
+        # display, size, modified, is_dir, name, is_link
+        store = Gtk.ListStore(str, str, str, bool, str, bool)
         view = Gtk.TreeView(model=store)
         for j, (label, expand) in enumerate((("name", True), ("size", False),
                                              ("modified", False))):
@@ -6525,6 +6549,7 @@ class Viewer:
             view.append_column(col)
         view.set_enable_search(True)
         view.set_search_column(0)
+        view.set_tooltip_column(0)   # the whole text behind an ellipsis
         sc = Gtk.ScrolledWindow()
         # no sideways scrolling: the name column ellipsizes instead, so
         # size and modified stay in view
@@ -6542,13 +6567,20 @@ class Viewer:
         def fill():
             store.clear()
             pats = filters[combo.get_active()][1]
-            folders, files = list_browse_entries(state["folder"], pats)
+            folders, files, links = list_browse_entries(state["folder"],
+                                                        pats)
             for name in folders:
-                store.append([name + "/", "", "", True])
+                store.append([name + "/", "", "", True, name, False])
+            # a link is listed as one, with what it points to, never
+            # followed to tell a folder from a file (user call 2026-10-21)
+            for name, target in links:
+                store.append(["%s -> %s" % (name, target or "?"), "", "",
+                              False, name, True])
             for name, size, mtime in files:
                 store.append([name, fmt_bytes(size) if size >= 0 else "",
                               time.strftime("%Y-%m-%d %H:%M",
-                                            time.localtime(mtime)), False])
+                                            time.localtime(mtime)),
+                              False, name, False])
             entry.set_text(state["folder"])
             if len(store):
                 view.get_selection().select_path(Gtk.TreePath.new_first())
@@ -6559,12 +6591,19 @@ class Viewer:
             fill()
 
         def selected():
-            """(path, is_dir) of the selected row, or None."""
+            """(path, is_dir) of the selected row, or None. A link row
+            is followed here - this one, now that the user chose it: a
+            folder behind it is entered, a file picked, a dangling link
+            is nothing."""
             model, it = view.get_selection().get_selected()
             if it is None:
                 return None
-            name = model[it][0].rstrip("/")
-            return os.path.join(state["folder"], name), bool(model[it][3])
+            path = os.path.join(state["folder"], model[it][4])
+            if not model[it][5]:
+                return path, bool(model[it][3])
+            if os.path.isdir(path):
+                return path, True
+            return (path, False) if os.path.isfile(path) else None
 
         def activate(*_args):
             row = selected()
@@ -7999,28 +8038,19 @@ class Viewer:
             self._display()
 
     def _drc_open_dialog(self):
-        dlg = Gtk.FileChooserDialog(title="open DRC results (.db)",
-                                    parent=self.window,
-                                    action=Gtk.FileChooserAction.OPEN)
-        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
-                        "Open", Gtk.ResponseType.OK)
-        if self.meta is not None:
-            dlg.set_current_folder(
-                os.path.dirname(self.meta["src"]["path"]))
-        for name, pats in (("Calibre DRC results (*.db)",
-                            ("*.db",)),
-                           ("all files", ("*",))):
-            ff = Gtk.FileFilter()
-            ff.set_name(name)
-            for p in pats:
-                ff.add_pattern(p)
-            dlg.add_filter(ff)
-        if dlg.run() == Gtk.ResponseType.OK:
-            path = dlg.get_filename()
-            dlg.destroy()
+        """DRC > open .db…: the viewer's own browser (user call
+        2026-10-21: the file dialogs list a folder without following
+        its symbolic links; GTK's chooser stats every target). Starts
+        in the loaded layout's folder, else where floe was launched."""
+        folder = (os.path.dirname(self.meta["src"]["path"])
+                  if self.meta is not None else self._launch_dir)
+        path = self._browse_file_dialog(
+            "open DRC results (.db)", folder,
+            [("Calibre DRC results (*.db)", ("*.db",)),
+             ("all files", ("*",))])
+        self._restore_keys()
+        if path:
             self._drc_open_db(path)
-        else:
-            dlg.destroy()
 
     def _drc_release(self):
         """Drop the loaded DRC db and empty its browser, closing its pack
@@ -8349,24 +8379,12 @@ class Viewer:
         if self._drc is None:
             self._set_live_status("open a DRC .db first")
             return
-        dlg = Gtk.FileChooserDialog(title="load DRC clusters",
-                                    parent=self.window,
-                                    action=Gtk.FileChooserAction.OPEN)
-        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
-                        "Open", Gtk.ResponseType.OK)
-        self._only_close_button(dlg)
-        self._center_on_parent(dlg)
-        dlg.set_current_folder(os.path.dirname(os.path.abspath(self._drc.path)))
-        for name, pattern in (("DRC clusters (*.clusters)", "*.clusters"),
-                              ("all files", "*")):
-            ff = Gtk.FileFilter()
-            ff.set_name(name)
-            ff.add_pattern(pattern)
-            dlg.add_filter(ff)
-        path = (dlg.get_filename()
-                if dlg.run() == Gtk.ResponseType.OK else None)
-        dlg.destroy()
-        self.window.present()
+        path = self._browse_file_dialog(
+            "load DRC clusters",
+            os.path.dirname(os.path.abspath(self._drc.path)),
+            [("DRC clusters (*.clusters)", ("*.clusters",)),
+             ("all files", ("*",))])
+        self._restore_keys()
         if not path:
             return
         try:
@@ -8450,29 +8468,17 @@ class Viewer:
         return True
 
     def _drc_rules_dialog(self):
-        dlg = Gtk.FileChooserDialog(
-            title="open rule metadata (*.rules.json)",
-            parent=self.window,
-            action=Gtk.FileChooserAction.OPEN)
-        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
-                        "Open", Gtk.ResponseType.OK)
-        if self._drc is not None:
-            dlg.set_current_folder(
-                os.path.dirname(os.path.abspath(self._drc.path)))
-        for name, pats in (("rule metadata (*.rules.json)",
-                            ("*.rules.json",)),
-                           ("all files", ("*",))):
-            ff = Gtk.FileFilter()
-            ff.set_name(name)
-            for p in pats:
-                ff.add_pattern(p)
-            dlg.add_filter(ff)
-        if dlg.run() == Gtk.ResponseType.OK:
-            path = dlg.get_filename()
-            dlg.destroy()
+        """DRC > SVRF rules…: the viewer's own browser (user call
+        2026-10-21), from the open db's folder, else the launch folder."""
+        folder = (os.path.dirname(os.path.abspath(self._drc.path))
+                  if self._drc is not None else self._launch_dir)
+        path = self._browse_file_dialog(
+            "open rule metadata (*.rules.json)", folder,
+            [("rule metadata (*.rules.json)", ("*.rules.json",)),
+             ("all files", ("*",))])
+        self._restore_keys()
+        if path:
             self._drc_rules_load(path)
-        else:
-            dlg.destroy()
 
     def _drc_select_row(self, ci, cluster=None):
         """Reselect a rule or a specific cluster after a model rebuild."""
@@ -10312,26 +10318,11 @@ class Viewer:
             self._set_live_status(
                 "notes need a packed index: floe-index drc <db>")
             return
-        dlg = Gtk.FileChooserDialog(title="load notes",
-                                    parent=self.window,
-                                    action=Gtk.FileChooserAction.OPEN)
-        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
-                        "Open", Gtk.ResponseType.OK)
-        self._only_close_button(dlg)
-        self._center_on_parent(dlg)
-        dlg.set_current_folder(
-            os.path.dirname(os.path.abspath(db.path)))
-        for name, pats in (("flateyes notes (*.fe)", ("*.fe",)),
-                           ("all files", ("*",))):
-            ff = Gtk.FileFilter()
-            ff.set_name(name)
-            for p in pats:
-                ff.add_pattern(p)
-            dlg.add_filter(ff)
-        path = dlg.get_filename() \
-            if dlg.run() == Gtk.ResponseType.OK else None
-        dlg.destroy()
-        self.window.present()
+        path = self._browse_file_dialog(
+            "load notes", os.path.dirname(os.path.abspath(db.path)),
+            [("flateyes notes (*.fe)", ("*.fe",)),
+             ("all files", ("*",))])
+        self._restore_keys()
         if not path:
             return
         try:
@@ -12023,15 +12014,24 @@ class Viewer:
             self._push_fills()
 
     def _props_chooser(self, save):
+        """The layer-properties file dialog: loading goes through the
+        viewer's own browser (user call 2026-10-21: no symbolic link
+        followed while listing); saving, which needs a name to type,
+        keeps GTK's chooser."""
+        src = os.path.abspath(self.cache.src)
+        if not save:
+            path = self._browse_file_dialog(
+                "load layer properties", os.path.dirname(src),
+                [("layerprops (*.layerprops)", ("*.layerprops",)),
+                 ("all files", ("*",))])
+            self._restore_keys()
+            return path
         dlg = Gtk.FileChooserDialog(
-            title=("save layer properties" if save
-                   else "load layer properties"),
+            title="save layer properties",
             transient_for=self.window,
-            action=(Gtk.FileChooserAction.SAVE if save
-                    else Gtk.FileChooserAction.OPEN))
+            action=Gtk.FileChooserAction.SAVE)
         dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
-                        "Save" if save else "Open",
-                        Gtk.ResponseType.OK)
+                        "Save", Gtk.ResponseType.OK)
         flt = Gtk.FileFilter()
         flt.set_name("layerprops (*.layerprops)")
         flt.add_pattern("*.layerprops")
@@ -12040,12 +12040,9 @@ class Viewer:
         allf.set_name("all files")
         allf.add_pattern("*")
         dlg.add_filter(allf)
-        src = os.path.abspath(self.cache.src)
         dlg.set_current_folder(os.path.dirname(src))
-        if save:
-            dlg.set_do_overwrite_confirmation(True)
-            dlg.set_current_name(
-                os.path.basename(src) + ".layerprops")
+        dlg.set_do_overwrite_confirmation(True)
+        dlg.set_current_name(os.path.basename(src) + ".layerprops")
         ok = dlg.run() == Gtk.ResponseType.OK
         path = dlg.get_filename() if ok else None
         dlg.destroy()
