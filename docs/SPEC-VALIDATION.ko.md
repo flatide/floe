@@ -760,7 +760,7 @@ sh tools/validate_rust.sh --only quick path/to.oas
 
 | 게이트 | 스크립트 | 고정하는 계약 |
 |---|---|---|
-| scan/tile/depth/meta XOR | validate_rust_scan.py 등 | 러스트 vs klayout 밴드 타일 완전 일치 |
+| scan/tile/depth/meta XOR | validate_rust_scan.py 등 | 러스트 vs klayout 밴드 타일 완전 일치; `rust_scan`은 `segments` 블록의 일관성(count = cblocks + spans, 분류 합, 체인 ≤ count, 상위 셀 ≤ 10)과 `--seg-bytes 4096`에서 span이 줄지 않음도 검사(0.12.374, DIRECT_READ_PLAN §8.1) |
 | vfs 오픈 검증 | `tools/validate_vfs.py` | ovm v7 구조(PAGE_LEN 104, 텍스트 수), **frontier 스키마**(keep/px_per_um/cut_px/5원소 행/다이 내부/depth0 비지 않음) |
 | 렌더 6뷰 | validate_vfs_render | hier 델타 → klayout 렌더 XOR |
 | H1~H5 | validate_vfs_hier | 실데몬 hier: 프로브 cut=0 XOR 일치 등 |

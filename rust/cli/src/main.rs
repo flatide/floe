@@ -227,7 +227,7 @@ fn main() {
     }
     if args.len() < 3 || args[1] != "scan" {
         eprintln!(
-            "usage: floe-index scan <file.oas> [jobs]\n       \
+            "usage: floe-index scan <file.oas> [jobs] [--seg-bytes N]  (sizing + segment statistics, docs/DIRECT_READ_PLAN.ko.md §8.1)\n       \
              floe-index inventory <file.oas> [--jobs N] [--check] [--check-cells] [--cells]  \
              (the streaming build's first pass: cell table, layer order, hierarchy fold; --check holds it to the Doc pre-passes, --check-cells the cell parser to the Doc's cells)\n       \
              floe-index tile <file.oas> <outdir> \
@@ -265,7 +265,35 @@ fn main() {
         std::process::exit(2);
     }
     let path = &args[2];
-    let jobs: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1);
+    let mut jobs: usize = 1;
+    let mut seg_bytes = floe_oasis::segments::DEFAULT_SPAN_BYTES;
+    let mut i = 3;
+    while i < args.len() {
+        let a = &args[i];
+        if a == "--seg-bytes" {
+            match args.get(i + 1).and_then(|v| parse_bytes(v)) {
+                Some(v) if v > 0 => seg_bytes = v,
+                _ => {
+                    eprintln!("scan: --seg-bytes needs a byte count (e.g. 256K)");
+                    std::process::exit(2);
+                }
+            }
+            i += 2;
+            continue;
+        }
+        if a.starts_with("--") {
+            eprintln!("scan: unknown option {}", a);
+            std::process::exit(2);
+        }
+        match a.parse::<usize>() {
+            Ok(j) => jobs = j,
+            Err(_) => {
+                eprintln!("scan: jobs must be a number: {}", a);
+                std::process::exit(2);
+            }
+        }
+        i += 1;
+    }
     let t0 = Instant::now();
     let data = match std::fs::read(path) {
         Ok(d) => d,
@@ -276,7 +304,7 @@ fn main() {
     };
     let t_read = t0.elapsed().as_secs_f64();
     let t1 = Instant::now();
-    let st = match floe_oasis::scan_parallel(&data, jobs) {
+    let st = match floe_oasis::scan_segments(&data, jobs, seg_bytes) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("scan {}: {}", path, e);
@@ -328,6 +356,7 @@ fn main() {
         st.doc_bytes_pow2
     ));
     out.push_str(&cell_stats_json(&st));
+    out.push_str(&segments_json(&st));
     let mut rids: Vec<_> = st.record_ids.iter().collect();
     rids.sort_by_key(|(k, _)| **k);
     let mut rts: Vec<_> = st.rep_types.iter().collect();
@@ -392,6 +421,9 @@ fn main() {
         big.map(|c| c.records).unwrap_or(0),
         fmt_size(big.map(|c| c.doc_bytes).unwrap_or(0))
     );
+    if let Some(line) = segments_line(&st) {
+        eprintln!("{}", line);
+    }
 }
 
 /// `cell_stats`: the per-cell inventory's spread (what one cell costs a
@@ -399,6 +431,132 @@ fn main() {
 /// over all cells, and the ten biggest cells by Doc bytes. Cells are
 /// scanned in file order whatever the worker count, so the output is
 /// identical at any `jobs`.
+/// a byte count with an optional K / M / G / T suffix (binary units)
+fn parse_bytes(s: &str) -> Option<u64> {
+    let t = s.trim();
+    let t = t.strip_suffix("iB").or_else(|| t.strip_suffix('B')).unwrap_or(t);
+    let (digits, mult) = match t.chars().last()? {
+        'k' | 'K' => (&t[..t.len() - 1], 1u64 << 10),
+        'm' | 'M' => (&t[..t.len() - 1], 1u64 << 20),
+        'g' | 'G' => (&t[..t.len() - 1], 1u64 << 30),
+        't' | 'T' => (&t[..t.len() - 1], 1u64 << 40),
+        _ => (t, 1u64),
+    };
+    digits.parse::<u64>().ok()?.checked_mul(mult)
+}
+
+/// `segments`: the sub-cell random-access statistics (floe_oasis::segments,
+/// docs/DIRECT_READ_PLAN.ko.md §8.1) - one CBLOCK or one span of records at
+/// a time: how their boxes sit in their cells (tile / band / full), how
+/// far they overlap, the layers per segment, and the modal lists a
+/// record reused from an earlier segment
+fn segments_json(st: &floe_oasis::ScanStats) -> String {
+    let Some(s) = floe_oasis::segments::summarize(st) else {
+        return String::new();
+    };
+    fn quartet(q: &floe_oasis::segments::Quartet) -> String {
+        format!(
+            "{{\"max\": {}, \"p99\": {}, \"p90\": {}, \"p50\": {}}}",
+            q.max, q.p99, q.p90, q.p50
+        )
+    }
+    fn classes(c: &floe_oasis::segments::Classes) -> String {
+        format!(
+            "{{\"tile\": {}, \"band\": {}, \"full\": {}, \"other\": {}, \"empty\": {}}}",
+            c.tile, c.band, c.full, c.other, c.empty
+        )
+    }
+    let mut out = String::new();
+    out.push_str("  \"segments\": {\n");
+    out.push_str(&format!(
+        "    \"span_bytes\": {}, \"count\": {}, \"cblocks\": {}, \"spans\": {},\n",
+        s.span_bytes, s.segments, s.cblocks, s.spans
+    ));
+    out.push_str(&format!(
+        "    \"bytes\": {}, \"inflated\": {}, \"records\": {}, \"layers\": {},\n",
+        quartet(&s.bytes),
+        quartet(&s.inflated),
+        quartet(&s.records),
+        quartet(&s.layers)
+    ));
+    out.push_str(&format!(
+        "    \"with_shapes\": {}, \"with_placements\": {}, \"with_texts\": {},\n",
+        s.with_shapes, s.with_placements, s.with_texts
+    ));
+    out.push_str(&format!(
+        "    \"class_by_count\": {},\n    \"class_by_bytes\": {},\n",
+        classes(&s.by_count),
+        classes(&s.by_bytes)
+    ));
+    out.push_str(&format!(
+        "    \"overlap\": {{\"cells\": {}, \"p50\": {:.4}, \"p90\": {:.4}, \"max\": {:.4}}},\n",
+        s.overlap_cells, s.overlap_p50, s.overlap_p90, s.overlap_max
+    ));
+    out.push_str(&format!(
+        "    \"chained\": {{\"segments\": {}, \"rep\": {}, \"poly\": {}, \"path\": {}, \"list_max\": {}}},\n",
+        s.chained, s.chained_rep, s.chained_poly, s.chained_path, s.chain_list_max
+    ));
+    out.push_str("    \"cells\": [");
+    for (i, c) in s.cells.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&format!(
+            "\n      {{\"cell\": {}, \"segments\": {}, \"bytes\": {}, \"shape_segments\": {}, \"overlap\": {:.4}, \"classes\": {}, \"layers_p50\": {}, \"chained\": {}}}",
+            json_str(&c.name),
+            c.segments,
+            c.bytes,
+            c.shape_segments,
+            c.overlap,
+            classes(&c.classes),
+            c.layers_p50,
+            c.chained
+        ));
+    }
+    out.push_str("\n    ]\n  },\n");
+    out
+}
+
+/// the terminal's one line of the segment statistics
+fn segments_line(st: &floe_oasis::ScanStats) -> Option<String> {
+    let s = floe_oasis::segments::summarize(st)?;
+    let total = s.by_bytes.total();
+    let share = |v: u64| -> u64 {
+        if total == 0 {
+            0
+        } else {
+            (v * 100 + total / 2) / total
+        }
+    };
+    let chained_pct = if s.segments == 0 {
+        0.0
+    } else {
+        100.0 * s.chained as f64 / s.segments as f64
+    };
+    Some(format!(
+        "scan: segments {} ({} CBLOCK, {} span of {}): by bytes tile {}% band {}% full {}% \
+         other {}% empty {}%; overlap p50 {:.2} p90 {:.2} ({} cells with 2+ segments); \
+         layers/segment p50 {} max {}; chained {} ({:.1}%), largest carried list {}",
+        s.segments,
+        s.cblocks,
+        s.spans,
+        fmt_size(s.span_bytes),
+        share(s.by_bytes.tile),
+        share(s.by_bytes.band),
+        share(s.by_bytes.full),
+        share(s.by_bytes.other),
+        share(s.by_bytes.empty),
+        s.overlap_p50,
+        s.overlap_p90,
+        s.overlap_cells,
+        s.layers.p50,
+        s.layers.max,
+        s.chained,
+        chained_pct,
+        s.chain_list_max
+    ))
+}
+
 fn cell_stats_json(st: &floe_oasis::ScanStats) -> String {
     fn pct(sorted: &[u64], p: f64) -> u64 {
         if sorted.is_empty() {

@@ -84,6 +84,12 @@ index file.oas --occupancy-only`가 옵션을 outdir로 받아 `--occupancy-only
 게이트/계측용), `--p2-shard-limit-mb N` = P2 arena 샤딩 복사 명시
 상한(미지정: Linux = MemAvailable 여유 절반, off-Linux = 무제한).
 
+`floe-index scan <src.oas> [jobs] [--seg-bytes N]`은 색인 전에 소스의 크기와 구조를
+재는 읽기 전용 명령이다: 레코드·정점·점 목록 반복·파싱된 Doc의 추정 바이트·셀별
+분포(0.12.360, STREAMING_INDEX_PLAN §1)와 세그먼트 통계 `segments` 블록(0.12.374:
+CBLOCK/구간별 bbox·레이어·모달 체인, docs/DIRECT_READ_PLAN.ko.md §8.1). `--seg-bytes`는
+CBLOCK 없는 구간의 길이(기본 256K, K/M/G 접미사). `jobs`는 위치 인자다.
+
 ### 1.1 단일 셀 비게시 프로파일
 
 `--profile-cell NAME`은 정확한 셀 이름, `--profile-cell-ci N`은 slow-cell

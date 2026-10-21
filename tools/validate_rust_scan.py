@@ -23,9 +23,40 @@ import klayout.db as db
 RUST = "rust/target/release/floe-index"
 
 
-def rust_scan(path):
-    out = subprocess.check_output([RUST, "scan", path])
+def rust_scan(path, extra=()):
+    out = subprocess.check_output([RUST, "scan", path] + list(extra))
     return json.loads(out)
+
+
+def check_segments(path, r):
+    """The segment statistics (docs/DIRECT_READ_PLAN.ko.md L0 / 8.1,
+    0.12.374): the block is there and consistent with the scan's own
+    counts, and a shorter span never gives fewer spans."""
+    s = r.get("segments")
+    assert s, "%s: no segments block" % path
+    assert s["count"] == s["cblocks"] + s["spans"], s
+    assert s["cblocks"] <= r["cblocks"], (s["cblocks"], r["cblocks"])
+    for key in ("class_by_count", "class_by_bytes"):
+        assert set(s[key]) == {"tile", "band", "full", "other", "empty"}, s[key]
+    assert sum(s["class_by_count"].values()) == s["count"], s["class_by_count"]
+    assert s["chained"]["segments"] <= s["count"], s["chained"]
+    assert 0 <= s["with_shapes"] <= s["count"]
+    assert s["span_bytes"] == 262144, s["span_bytes"]
+    cells = s["cells"]
+    assert 1 <= len(cells) <= 10, len(cells)
+    for c in cells:
+        assert c["segments"] >= 1 and c["overlap"] >= 0.0, c
+        assert sum(c["classes"].values()) == c["segments"], c
+    s2 = rust_scan(path, ["--seg-bytes", "4096"])["segments"]
+    assert s2["span_bytes"] == 4096, s2["span_bytes"]
+    assert s2["cblocks"] == s["cblocks"], (s2["cblocks"], s["cblocks"])
+    assert s2["spans"] >= s["spans"], (s2["spans"], s["spans"])
+    bb = s["class_by_bytes"]
+    return ("segments %d (cblock %d, span %d; 4K spans %d) by bytes tile %d band %d "
+            "full %d other %d empty %d; overlap p50 %.2f (%d cells); chained %d"
+            % (s["count"], s["cblocks"], s["spans"], s2["spans"], bb["tile"],
+               bb["band"], bb["full"], bb["other"], bb["empty"],
+               s["overlap"]["p50"], s["overlap"]["cells"], s["chained"]["segments"]))
 
 
 def klayout_counts(path, recount=()):
@@ -67,6 +98,7 @@ def main():
     bad = 0
     for path in sys.argv[1:]:
         r = rust_scan(path)
+        seg_line = check_segments(path, r)
         k = klayout_counts(path)
         # rust: geometry members per pair + text members per pair;
         # klayout Shapes.size() counts both in one container
@@ -93,6 +125,7 @@ def main():
               % (status, path, r["cells"], k["cells"],
                  len(combined), len(k["shapes"]), rt, kt,
                  r["scan_mb_s"], k["read_s"]))
+        print("    " + seg_line)
         if not ok_shapes:
             rk, kk = set(combined), set(k["shapes"])
             for key in sorted(rk - kk)[:5]:

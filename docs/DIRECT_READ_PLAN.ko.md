@@ -51,7 +51,7 @@
    정규 페이지를 메모리에서 만들어 쓰는 길(§5.8)이 있다. 사용자 결정 사항.
 6. **먼저 잴 것(§7, 하루치)**: 현장 파일의 세그먼트 공간 지역성(라이터가 도형을
    어떤 순서로 쓰는가)과 모달 스냅샷의 체인 빈도. `floe-index scan` 확장으로
-   잰다. 지역성이 나빠도 설계는 성립하지만(세그먼트 병렬 파싱이 하한을 준다)
+   잰다(구현 §8.1, 0.12.374). 지역성이 나빠도 설계는 성립하지만(세그먼트 병렬 파싱이 하한을 준다)
    근접 뷰 첫 방문 시간이 ms인지 초인지가 거기서 갈린다.
 
 ## 1. 문제의 수치 — 지금 캐시가 왜 크고 느린가
@@ -353,7 +353,7 @@ N pass(es)`/`charged` 줄로 확인한다. 패스가 여럿이었다면 예산(`
 
 | 위험 | 영향 | 측정/대응 |
 | --- | --- | --- |
-| 세그먼트 공간 지역성이 나쁨(라이터가 도형을 무작위 순서로 씀) | 근접 뷰 첫 방문이 셀 전체 파싱(1~2 s)으로 떨어짐 | **L0**: `floe-index scan`에 세그먼트별 bbox를 더해 "세그먼트 bbox 면적 합 ÷ 셀 bbox 면적"(겹침 배수)과 세그먼트 bbox 크기 분포(셀 대비 분위수), 레이어 수 분포를 셀별로 낸다. 현장 파일에서 한 번(scan 시간 ≈ 2 min/50 GB). 겹침 배수 ≤ 10이면 좋음, ≥ 1,000이면 무작위 |
+| 세그먼트 공간 지역성이 나쁨(라이터가 도형을 무작위 순서로 씀) | 근접 뷰 첫 방문이 셀 전체 파싱(1~2 s)으로 떨어짐 | **L0**: `floe-index scan`에 세그먼트별 bbox를 더해 "세그먼트 bbox 면적 합 ÷ 셀 bbox 면적"(겹침 배수)과 세그먼트 bbox 크기 분포(셀 대비 분위수), 레이어 수 분포를 셀별로 낸다. 현장 파일에서 한 번(scan 시간 ≈ 2 min/50 GB). 겹침 배수 ≤ 10이면 좋음, ≥ 1,000이면 무작위. **구현 §8.1(0.12.374)** |
 | 모달 목록 체인이 잦음 | 체인된 세그먼트는 앞에서부터 파싱 → 병렬성·프루닝 손실 | L0에서 "경계에서 살아 있는 목록 모달 × 세그먼트 안 재사용" 빈도. 잦으면 목록 상한을 올리거나(스냅샷 풀이 커짐) 세그먼트 경계를 목록 정의 직후로 옮긴다 |
 | CBLOCK 안의 CELL 레코드(드묾) | 그 셀은 둘러싼 범위의 세그먼트로만 접근 | 재고가 이미 `cblock_defs`로 센다; 세그먼트는 둘러싼 셀의 것 + 안의 CELL 경계 기록 |
 | cut 뷰의 픽셀 차이 | 전체 색인과 비교 게이트가 "동일"이 아니라 "허용 오차" | §5.8; exact는 동일 게이트, cut은 B안 선택지 |
@@ -366,7 +366,7 @@ N pass(es)`/`charged` 줄로 확인한다. 패스가 여럿이었다면 예산(`
 
 | 단계 | 내용 | 게이트 |
 | --- | --- | --- |
-| L0 측정 | scan 확장: 세그먼트별 bbox·레이어 수·모달 체인 통계; 현장 파일 1회 | 통계 줄; fixture에서 값 검증 |
+| L0 측정 | scan 확장: 세그먼트별 bbox·레이어 수·모달 체인 통계; 현장 파일 1회 | **완료 0.12.374(§8.1)**: 단위 테스트 + `rust_scan` 게이트; 현장 파일 실행 대기 |
 | L1 사이드카 | `design.inv` 직렬화/로더(재고 ↔ 파일 왕복 동일), 전체 빌드도 함께 씀(선택) | 왕복 바이트 동일, `--check` |
 | L2 세그먼트 | 재고 패스의 세그먼트 방출(스냅샷·레이어 통계), `design.seg` | 세그먼트 통계 = 전체 Doc에서 계산한 값 |
 | L3 시드 파서 | `parse_segment`, CBLOCK inflate, 체인 | 모든 fixture + 적대적 스트림: 세그먼트 파싱의 레코드 합 = 셀 파싱 (G2급) |
@@ -377,6 +377,73 @@ N pass(es)`/`charged` 줄로 확인한다. 패스가 여럿이었다면 예산(`
 
 L0는 하루, L1~L3는 S1~S3와 비슷한 크기(재고 코드 위의 확장), L4가 본체다.
 L4까지 끝나면 단독 소스를 경량으로 열어 볼 수 있고, L5·L6이 제품 경로다.
+
+### 8.1 L0 구현 (0.12.374 / floe-index 0.12.337, 2026-10-21; 사용자 "L0 진행해줘")
+
+- **명령.** `floe-index scan FILE [jobs] [--seg-bytes N]`(N은 K/M/G 접미사 허용,
+  기본 256K). 0.12.360의 sizing 출력에 `segments` 블록이 더해지고 stderr에 한 줄이
+  더 붙는다. `floe-index inventory`와 스트리밍 빌드의 재고 패스는 세그먼트를 모으지
+  않는다(출력 바이트·시간 불변; `rust_inventory`·`vfs_stream` 게이트).
+- **세그먼트**(`floe_oasis::segments`, lib.rs의 scan frame이 수집). 셀 안의 최상위
+  CBLOCK 하나(압축 블록은 통째로 inflate하므로 더 잘게 못 읽는다; `bytes`는 header
+  포함 레코드 전체, `inflated`는 uncomp-count), 또는 CBLOCK 사이와 CBLOCK 없는
+  스트림의 구간(span: 누적 길이가 `--seg-bytes`를 넘은 첫 레코드 경계에서 닫히고,
+  CELL 레코드·CBLOCK 시작·END에서도 닫힌다). 헤드(첫 보이는 CELL 앞)의 CBLOCK이
+  정의한 셀은 세그먼트가 없다(재고의 `cblock_defs`와 같은 경우). 세그먼트마다 셀,
+  종류, 오프셋, 바이트, 레코드 수, 도형 수·멤버, 배치 수, 텍스트 수, 도형 bbox(반복
+  확장; 재고와 같은 `rep_box`·`path_bbox`·사다리꼴/CTRAPEZOID/원 꼭짓점), 도형의
+  (layer, datatype) 집합, 체인 비트, 체인된 목록의 최대 크기를 적는다.
+- **모달 체인.** 레코드가 앞 세그먼트에서 spelled-out된 목록 모달을 되쓰면 체인이다:
+  반복 type 0이 점 목록 반복(4~7·10·11)을 되쓰면 `rep`(격자 반복은 스칼라라 제외),
+  POLYGON의 P 비트 없음이 `poly`, PATH의 P 비트 없음이 `path`. 같은 세그먼트 안의
+  재사용은 체인이 아니다. CELL 레코드에서 모달이 초기화되므로(스펙) 셀 경계를 넘는
+  체인은 없고, 병렬 scan의 워커는 CELL 경계에서 시작하므로 결과가 jobs와 무관하다
+  (단위 테스트가 jobs 1 = 3을 고정).
+- **요약**(`segments` 블록, `floe_oasis::segments::summarize`). `count`·`cblocks`·
+  `spans`·`span_bytes`; `bytes`·`inflated`·`records`(max/p99/p90/p50); `layers`(도형
+  있는 세그먼트의 레이어 수 분위수); `with_shapes`/`with_placements`/`with_texts`;
+  `class_by_count`·`class_by_bytes` — 세그먼트 bbox를 셀 bbox(그 셀의 도형
+  세그먼트 bbox 합집합)와 견주어 **tile**(두 변 모두 ≤ 25 %), **band**(한 변만
+  > 50 %), **full**(두 변 모두 > 50 %), **other**, **empty**(도형 없음);
+  `overlap`(도형 세그먼트가 둘 이상인 셀의 "세그먼트 bbox 면적 합 ÷ 셀 bbox 면적"
+  p50/p90/max와 그런 셀의 수); `chained`(세그먼트 수, rep/poly/path별, `list_max`);
+  `cells`(바이트 상위 10셀: 세그먼트 수, 바이트, overlap, 분류, 레이어 p50, 체인
+  수). stderr: `scan: segments N (C CBLOCK, S span of 256K): by bytes tile a% band b%
+  full c% other d% empty e%; overlap p50 x p90 y (K cells with 2+ segments);
+  layers/segment p50 u max v; chained C (p%), largest carried list L`.
+- **판정.** (1) by bytes의 tile이 대부분이고 overlap p50 ≤ 10이면 라이터가 공간
+  순서로 쓴 것 — 근접 뷰 = 세그먼트 수십 개(§6.2 첫 줄). (2) band가 대부분이고
+  overlap 10~1,000이면 한 축 정렬 띠 — 수백 개. (3) full이 대부분이거나 overlap
+  ≥ 1,000이면 무작위 — 셀 전체 병렬 파싱(1~2 s). (4) `chained.segments / count`가
+  1 % 미만이면 §5.2의 스냅샷 설계 그대로, 그 이상이면 경계를 목록 정의 직후로
+  옮기는 규칙과 `list_max`에 맞춘 스냅샷 상한을 더한다. (5) `layers` p50이 1이면
+  세그먼트가 레이어별로 나뉘어 있어 레이어 프루닝이 세그먼트 단위로 된다.
+- **현장 절차.** 새 빌드로 `floe-index scan FILE 12 > scan.json 2> scan.err`를
+  돌리고 `scan.err`의 두 줄과 `scan.json`의 `segments` 블록을 붙여 주시면 된다.
+  시간은 scan과 같다(현장 50 GB ≈ 2 min; 아래 실측).
+- **검증.** 단위 테스트 `floe_oasis::segments::tests`: CBLOCK 3개짜리 셀 + 평문 셀의
+  손으로 쓴 스트림(박스·레이어·멤버·체인·바이트 경계·셀 bbox·요약값), span 길이
+  1/60/무한(레코드 경계·CELL 경계·체인 유무), jobs 1 = 3, 평문 scan은 수집 없음,
+  적대적 스트림 3종(도형 수 보존), 분류 경계. 게이트 `rust_scan`: `segments` 블록의
+  일관성(count = cblocks + spans, 분류 합 = count, cblocks ≤ scan의 cblocks, 체인
+  ≤ count, 상위 셀 ≤ 10, 셀별 분류 합 = 세그먼트 수)과 `--seg-bytes 4096`에서
+  span이 줄지 않음·CBLOCK 수 불변.
+- **실측(2026-10-21, macOS 4 jobs; 모두 KLayout 또는 합성기가 쓴 파일).** 현장 파일의
+  판정은 아직 없다 — 아래는 도구가 내는 값의 예와, 라이터가 공간 순서로 쓰지 않을
+  때의 모습이다(KLayout은 셀의 도형을 레이어 컨테이너 순서로 쓰므로 CBLOCK이 셀
+  전체에 걸친다 = full).
+
+| 파일 | scan | 세그먼트 | by bytes | overlap p50 (2+ 셀) | layers/seg p50 (max) | chained |
+| --- | --- | --- | --- | --- | --- | --- |
+| valmini 16 KB | 0.00 s | 8 (CBLOCK 3, span 5) | full 99 % | — (0셀) | 1 (3) | 0 |
+| sample9 145 MB (CBLOCK, 40 레이어) | 1.14 s | 1,238 (CBLOCK 1,232) | full 99 %, band 1 % | 2.00 (49셀) | 6 (12) | 0 |
+| route_chip 281 MB (CBLOCK 없음) | 2.85 s | 916 span | full 73 %, empty 16 %, tile 10 % | 9.9 (17셀; top 624) | 1 (4) | 0 |
+| main01_chip_p10 953 MB (CBLOCK 없음, 배치 위주) | 9.6 s | 37,332 span | full 59 %, empty 41 % | 2.0 (301셀; top 74) | 5 (26) | 0 |
+
+  `empty`는 도형 없는 세그먼트(배치·텍스트만)의 몫이라 배치 위주 레이아웃에서 크다.
+  세 파일 모두 체인이 0인 것은 KLayout과 합성기가 점 목록을 레코드마다 다시 쓰기
+  때문이고, 현장 라이터는 다를 수 있다. 시간은 0.12.360의 scan과 같은 자릿수다
+  (sample9 1.14 s = 재고 패스 1.23 s와 같다).
 
 ## 9. 검토한 대안
 
