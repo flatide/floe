@@ -58,7 +58,10 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "rust" / "target" / "release" / "floe-index"
 FLOE2 = ROOT / "rust" / "target" / "release" / "floe2"
-SKIP = {"design.ovc"}
+# design.ovc is not offered in streaming mode; design.inv (the inventory
+# as a file, DIRECT_READ_PLAN L1) is written by streaming builds only and
+# checked on its own below
+SKIP = {"design.ovc", "design.inv"}
 
 
 def fail(msg):
@@ -281,14 +284,40 @@ def main():
             if not streamed(r.stderr):
                 fail("default build %s did not stream\n%s" % (name, r.stderr[-1500:]))
             names = compare_dirs(ref, out, "%s default" % name)
+            # L1 (DIRECT_READ_PLAN §8.2): the streaming build leaves the
+            # inventory as design.inv - the bytes `floe-index inventory --out`
+            # writes, identical to a fresh inventory of the source; the
+            # in-memory build has no inventory and writes none
+            inv = out / "design.inv"
+            if not inv.is_file() or "stream: design.inv" not in r.stderr:
+                fail("%s default: no design.inv\n%s" % (name, r.stderr[-800:]))
+            if (ref / "design.inv").exists():
+                fail("%s: the in-memory build wrote design.inv" % name)
+            j4 = work / ("%s_stream_j4" % src.stem) / "design.inv"
+            if not j4.is_file() or j4.read_bytes() != inv.read_bytes():
+                fail("%s: design.inv differs between the default and the jobs-4 streaming build" % name)
+            alone = work / (src.stem + "_alone.inv")
+            r = subprocess.run([str(BIN), "inventory", str(src), "--jobs", "4", "--out", str(alone)],
+                               capture_output=True, text=True)
+            if r.returncode != 0 or alone.read_bytes() != inv.read_bytes():
+                fail("%s: design.inv differs from floe-index inventory --out (exit %d)\n%s" % (name, r.returncode, r.stderr[-800:]))
+            r = subprocess.run([str(BIN), "inventory", "--load", str(inv), str(src), "--jobs", "4"],
+                               capture_output=True, text=True)
+            if r.returncode != 0 or '"identical": true' not in r.stdout:
+                fail("%s: design.inv --load beside the source (exit %d)\n%s" % (name, r.returncode, r.stderr[-800:]))
             # the switch-over: --occupancy-only on a cache without design.ovo
             # streams (inventory, placements pass, occupancy passes) and
-            # writes the in-memory run's bytes
+            # writes the in-memory run's bytes; a stale design.inv planted
+            # before the in-memory build is cleared with the other outputs
             out = work / (src.stem + "_occonly")
+            out.mkdir(exist_ok=True)
+            (out / "design.inv").write_bytes(b"stale")
             r = subprocess.run([str(BIN), "vfs", str(src), str(out), "--in-memory", "--jobs", "4", "--slow-cell-s", "0"],
                                capture_output=True, text=True, env=env)
             if r.returncode != 0 or (out / "design.ovo").exists():
                 fail("cache without design.ovo %s: exit %d\n%s" % (name, r.returncode, r.stderr[-1500:]))
+            if (out / "design.inv").exists():
+                fail("%s: a stale design.inv survived the in-memory rebuild" % name)
             t0 = time.perf_counter()
             r = subprocess.run([str(BIN), "vfs", str(src), str(out), "--occupancy-only", "--jobs", "4"],
                                capture_output=True, text=True, env=env)
@@ -298,7 +327,7 @@ def main():
             if not streamed(r.stderr) or "placements of" not in r.stderr or "occupancy streaming" not in r.stderr:
                 fail("--occupancy-only %s did not stream\n%s" % (name, r.stderr[-1500:]))
             compare_dirs(ref, out, "%s --occupancy-only (streaming)" % name)
-            print("OK  %-18s default command line streams (%d files identical); --occupancy-only streams design.ovo (identical, %.1fs)"
+            print("OK  %-18s default command line streams (%d files identical; design.inv = inventory --out, absent in memory, stale one cleared); --occupancy-only streams design.ovo (identical, %.1fs)"
                   % (name, len(names), dt_oo))
         # the exact walk (--occupancy-prune 0) and a finer cell on valmini
         src = files[0][1]

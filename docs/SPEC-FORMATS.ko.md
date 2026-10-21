@@ -216,6 +216,35 @@ design.ovm의 배치 레코드는 부모별 BVH 순서(자식별 아님)라 "셀
   그 캐시 안에 있어야 하고, 요청한 root와 같아야 한다. 아니면 "파일 없음"으로 읽혀 계획 경로로 그린다(stderr 한 줄).
   version 1·2는 거절한다.
 
+## design.inv — 재고 (FLOEINV1, 2026-10-21)
+
+정본: `rust/oasis/src/invfile.rs`. 스트리밍 빌드의 1차 패스(`floe_oasis::inventory`,
+STREAMING_INDEX_PLAN S1)가 만든 재고를 파일로 둔 것 — 경량 캐시(DIRECT_READ_PLAN §5.1)의
+첫 파일(L1, §8.2)이자 STREAMING_INDEX_PLAN §10.2에서 보류했던 사이드카. 스트리밍 빌드가
+design.ovm 커밋 전에 쓰고(`[vfs] stream: design.inv (…)`), `floe-index inventory FILE
+--out PATH`가 혼자 쓰며 `--load PATH`가 읽는다. tmp + rename, 마커 프로토콜 밖
+(design.ovh처럼: 없어도 캐시는 완전하고, 재빌드의 삭제 목록에 있다). 인메모리 빌드
+(`--in-memory`)는 재고가 없으므로 쓰지 않는다.
+
+- 헤더 72 B: magic `FLOEINV1`, version u32(1), header_len u32(72), body_len u64,
+  body_crc32 u32(IEEE, 본문 전체), flags u32(0), src_size u64, src_mtime u64
+  (design.ovm과 같은 소스 identity), n_cells u32, n_layers u32, top u32, 예약 u32,
+  unit f64.
+- 본문: 섹션 `tag u32, len u64, payload`가 이 순서로 — SCAN(1: scan 카운터 15개,
+  record_ids·shapes·texts·rep_types 표, CELL 레코드별 cell_stats), LAYERS(2:
+  layer_order, 마스크 폭, lrecs/lmems, 이름·별칭), HEAD(3: head 범위, top),
+  CELLS(4: 셀마다 이름, ranges, cblock_defs, def_ranges, 카운터 8, dbox 2, 마스크 3,
+  간선 — child, placements, members, 쓰인 방향 비트 u8, 그 방향의 obox),
+  NAMES(5: CELLNAME·TEXTSTRING 표), FOLD(6: topo, rank, height, rmembers, rmask/
+  rtmask/rsmask, rbb/rbb_notext). 문자열 = u32 길이 + UTF-8, 박스 = 4×i64, 선택
+  박스 = u8 플래그 + 박스, 표 = u32 n + 키 오름차순 항목. 한 재고의 바이트는 하나다
+  (jobs 1 = 3 = 4; 게이트가 인코딩을 비교한다).
+- 로더는 길이·개수·색인(child·topo·top < n_cells)·마스크 폭·CRC를 모두 검사하고
+  어긋나면 위치와 함께 거절한다(잘린 파일, 손상, 다른 파일, 다른 version). `peek`는
+  헤더만 읽어 identity와 개수를 돌려준다.
+- 크기: valmini 12 KB, sample9(1,188셀·40 레이어) 859 KB, main01_chip_p10(35,183셀·
+  188,065 간선·449 레이어) 64 MB(쓰기 0.6 s); 현장 50 GB(5,461셀·5 레이어)는 수 MB.
+
 ## meta.json (CACHE_VERSION = 8)
 
 ```json

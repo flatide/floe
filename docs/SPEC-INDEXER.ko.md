@@ -90,6 +90,15 @@ index file.oas --occupancy-only`가 옵션을 outdir로 받아 `--occupancy-only
 CBLOCK/구간별 bbox·레이어·모달 체인, docs/DIRECT_READ_PLAN.ko.md §8.1). `--seg-bytes`는
 CBLOCK 없는 구간의 길이(기본 256K, K/M/G 접미사). `jobs`는 위치 인자다.
 
+`floe-index inventory <src.oas> [--jobs N] [--check] [--check-cells] [--cells] [--out design.inv]`는
+스트리밍 빌드의 1차 패스를 혼자 돌린다(STREAMING_INDEX_PLAN S1·S3의 게이트 G1·G2).
+`--out`은 재고를 design.inv(SPEC-FORMATS, FLOEINV1)로 쓰고 바로 읽어 같은 바이트인지
+확인한다(`"file": {…, "roundtrip": true}`); `floe-index inventory --load design.inv
+[<src.oas>] [--cells] [--check]`는 파일을 읽어 같은 JSON을 내고, 소스가 있으면 새 재고와
+바이트를 비교하며(`"load": {…, "identical": true}`) `--check`는 읽은 재고를 Doc에 댄다.
+스트리밍 빌드는 design.ovm을 커밋하기 전에 같은 design.inv를 캐시에 쓴다(0.12.379,
+DIRECT_READ_PLAN L1 §8.2).
+
 ### 1.1 단일 셀 비게시 프로파일
 
 `--profile-cell NAME`은 정확한 셀 이름, `--profile-cell-ci N`은 slow-cell
@@ -161,6 +170,12 @@ STREAMING_INDEX_PLAN §11. 소스를 읽어 캐시를 만드는 실행은 **스�
   넘으면 호스트가 허락하는 한(MemAvailable, 없으면 MemTotal의 90 %) 그만큼 올리고
   한 줄 적는다; 그것도 넘으면 종료 71. `--mem`을 주면 넘는 파일은 종료 71. 인메모리로
   가는 실행과 함께면 종료 2.
+- 스트리밍 빌드는 재고를 `design.inv`(SPEC-FORMATS FLOEINV1)로 캐시에 남긴다(0.12.379,
+  DIRECT_READ_PLAN L1): design.ovm 커밋 전에 tmp + rename, 마커 프로토콜 밖, 재빌드의
+  삭제 목록. 인메모리 빌드와 `--occupancy-only`는 쓰지 않는다. 게이트 `vfs_stream`은
+  그 파일이 `floe-index inventory --out`과 같은 바이트인지, 인메모리 캐시에 없는지,
+  묵은 파일이 재빌드에 지워지는지 본다. 빌드가 이 파일을 읽어 재고 패스를 생략하는
+  일은 아직 없다(L5).
 - `floe2 index`는 같은 세 플래그(`--stream`, `--in-memory`, `--mem`)를 그대로 넘기고,
   기본은 아무것도 넘기지 않는다(floe-index의 기본 = 스트리밍). 덱 소스·뷰어의 덱
   색인·자동 색인도 같다. design.ovo 없는 현재 캐시의 점유 추가(`occupancy` 실행)도

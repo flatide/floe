@@ -726,6 +726,8 @@ pub fn inventory_cmd(args: &[String]) {
     let mut do_check = false;
     let mut do_check_cells = false;
     let mut cells = false;
+    let mut out_path: Option<String> = None;
+    let mut load_path: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -734,6 +736,18 @@ pub fn inventory_cmd(args: &[String]) {
                     eprintln!("--jobs needs a number");
                     std::process::exit(2);
                 });
+                i += 1;
+            }
+            "--out" | "--load" => {
+                let v = args.get(i + 1).cloned().unwrap_or_else(|| {
+                    eprintln!("{} needs a path", args[i]);
+                    std::process::exit(2);
+                });
+                if args[i] == "--out" {
+                    out_path = Some(v);
+                } else {
+                    load_path = Some(v);
+                }
                 i += 1;
             }
             "--check" => do_check = true,
@@ -750,31 +764,135 @@ pub fn inventory_cmd(args: &[String]) {
         }
         i += 1;
     }
-    let src = match src {
-        Some(s) => s,
-        None => {
-            eprintln!("usage: floe-index inventory <file.oas> [--jobs N] [--check] [--check-cells] [--cells]");
-            std::process::exit(2);
-        }
-    };
-    let t0 = std::time::Instant::now();
-    let data = match std::fs::read(&src) {
-        Ok(d) => d,
-        Err(e) => {
+    if src.is_none() && load_path.is_none() {
+        eprintln!(
+            "usage: floe-index inventory <file.oas> [--jobs N] [--check] [--check-cells] [--cells] [--out design.inv]\n       \
+             floe-index inventory --load design.inv [<file.oas>] [--cells] [--check]  (the file read back; with the source, compared to a fresh inventory)"
+        );
+        std::process::exit(2);
+    }
+    if out_path.is_some() && (load_path.is_some() || src.is_none()) {
+        eprintln!("inventory: --out writes a fresh inventory of the source (not with --load)");
+        std::process::exit(2);
+    }
+    let read_src = |src: &str| -> Vec<u8> {
+        std::fs::read(src).unwrap_or_else(|e| {
             eprintln!("read {}: {}", src, e);
             std::process::exit(1);
-        }
+        })
     };
-    let read_s = t0.elapsed().as_secs_f64();
-    let t1 = std::time::Instant::now();
-    let inv = match floe_oasis::inventory(&data, jobs) {
-        Ok(v) => v,
-        Err(e) => {
+    let fresh = |src: &str, data: &[u8]| -> Inventory {
+        floe_oasis::inventory(data, jobs).unwrap_or_else(|e| {
             eprintln!("inventory {}: {}", src, e);
             std::process::exit(1);
-        }
+        })
     };
-    let inv_s = t1.elapsed().as_secs_f64();
+    // what the JSON says about the file read or written, and whether
+    // that holds (a loaded file that differs from a fresh inventory, or a
+    // written file that does not read back to its bytes, fails the run)
+    let mut file_json = String::new();
+    let mut file_ok = true;
+    let (data, inv, read_s, inv_s): (Option<Vec<u8>>, Inventory, f64, f64) = if let Some(lp) = &load_path {
+        // the file read back (docs/DIRECT_READ_PLAN.ko.md L1)
+        let t0 = std::time::Instant::now();
+        let bytes = read_src(lp);
+        let read_s = t0.elapsed().as_secs_f64();
+        let t1 = std::time::Instant::now();
+        let (id, inv) = floe_oasis::invfile::decode(&bytes).unwrap_or_else(|e| {
+            eprintln!("inventory: load {}: {}", lp, e);
+            std::process::exit(1);
+        });
+        let inv_s = t1.elapsed().as_secs_f64();
+        let mut identical: Option<bool> = None;
+        let data = src.as_deref().map(|s| {
+            let d = read_src(s);
+            let f = fresh(s, &d);
+            identical = Some(floe_oasis::invfile::encode(&f, id) == bytes);
+            d
+        });
+        file_json = format!(
+            "  \"load\": {{\"path\": {}, \"bytes\": {}, \"src_size\": {}, \"src_mtime\": {}{}}},\n",
+            crate::json_str(lp),
+            bytes.len(),
+            id.src_size,
+            id.src_mtime,
+            identical.map(|b| format!(", \"identical\": {}", b)).unwrap_or_default()
+        );
+        eprintln!(
+            "inventory: loaded {} ({}; {} cells, {} layers; decode {:.3}s){}",
+            lp,
+            crate::fmt_size(bytes.len() as u64),
+            inv.cells.len(),
+            inv.layer_order.len(),
+            inv_s,
+            match identical {
+                Some(true) => "; identical to a fresh inventory of the source",
+                Some(false) => "; DIFFERS from a fresh inventory of the source",
+                None => "",
+            }
+        );
+        if identical == Some(false) {
+            file_ok = false;
+        }
+        (data, inv, read_s, inv_s)
+    } else {
+        let src = src.as_deref().expect("a source");
+        let t0 = std::time::Instant::now();
+        let data = read_src(src);
+        let read_s = t0.elapsed().as_secs_f64();
+        let t1 = std::time::Instant::now();
+        let inv = fresh(src, &data);
+        let inv_s = t1.elapsed().as_secs_f64();
+        if let Some(op) = &out_path {
+            // design.inv written beside nothing: the file alone, then read
+            // back and encoded again - the L1 gate's round trip
+            let t2 = std::time::Instant::now();
+            let (size, mtime) = crate::vfs::source_identity(src);
+            let id = floe_oasis::invfile::Identity {
+                src_size: size,
+                src_mtime: mtime,
+            };
+            let bytes = floe_oasis::invfile::encode(&inv, id);
+            let tmp = format!("{}.tmp", op);
+            if let Err(e) = std::fs::write(&tmp, &bytes).and_then(|_| std::fs::rename(&tmp, op)) {
+                eprintln!("inventory: write {}: {}", op, e);
+                std::process::exit(1);
+            }
+            let back = std::fs::read(op).unwrap_or_else(|e| {
+                eprintln!("inventory: read back {}: {}", op, e);
+                std::process::exit(1);
+            });
+            let roundtrip = match floe_oasis::invfile::roundtrip(&back) {
+                Ok(()) if back == bytes => true,
+                Ok(()) => false,
+                Err(e) => {
+                    eprintln!("inventory: {}: {}", op, e);
+                    false
+                }
+            };
+            let write_s = t2.elapsed().as_secs_f64();
+            file_json = format!(
+                "  \"file\": {{\"path\": {}, \"bytes\": {}, \"src_size\": {}, \"src_mtime\": {}, \"roundtrip\": {}, \"write_s\": {:.3}}},\n",
+                crate::json_str(op),
+                bytes.len(),
+                size,
+                mtime,
+                roundtrip,
+                write_s
+            );
+            eprintln!(
+                "inventory file: {} ({}; {} cells, {} layers; roundtrip {}, {:.3}s)",
+                op,
+                crate::fmt_size(bytes.len() as u64),
+                inv.cells.len(),
+                inv.layer_order.len(),
+                if roundtrip { "OK" } else { "MISMATCH" },
+                write_s
+            );
+            file_ok = roundtrip;
+        }
+        (Some(data), inv, read_s, inv_s)
+    };
     let n = inv.cells.len();
     let edges: usize = inv.cells.iter().map(|c| c.edges.len()).sum();
     let big = inv.cells.iter().max_by_key(|c| c.doc_bytes);
@@ -844,11 +962,17 @@ pub fn inventory_cmd(args: &[String]) {
         }
         out.push_str("\n  ],\n");
     }
-    let mut ok = true;
+    let mut ok = file_ok;
+    out.push_str(&file_json);
     if do_check {
+        let data = data.as_deref().unwrap_or_else(|| {
+            eprintln!("inventory: --check needs the source file beside --load");
+            std::process::exit(2);
+        });
+        let src = src.as_deref().unwrap_or("-");
         let t2 = std::time::Instant::now();
         let mut prenorm: Option<PreNorm> = None;
-        let doc = match floe_oasis::doc::parse_doc_parallel_phased(&data, jobs, |d| {
+        let doc = match floe_oasis::doc::parse_doc_parallel_phased(data, jobs, |d| {
             prenorm = Some(PreNorm::from_doc(d));
         }) {
             Ok(d) => d,
@@ -884,7 +1008,7 @@ pub fn inventory_cmd(args: &[String]) {
         );
         if do_check_cells {
             let t3 = std::time::Instant::now();
-            let (diffs2, pieces) = check_cells(&data, &doc, &inv, jobs);
+            let (diffs2, pieces) = check_cells(data, &doc, &inv, jobs);
             let cells_s = t3.elapsed().as_secs_f64();
             let ok2 = diffs2.is_empty();
             ok = ok && ok2;

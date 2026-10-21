@@ -987,6 +987,8 @@ fn clear_outputs(outdir: &str) {
         "design.ovb.tmp",
         "design.ovs",
         "design.ovs.tmp",
+        "design.inv",
+        "design.inv.tmp",
         "labels.tsv",
         // legacy (pre-0.10) viewer file: scrub on rebuild so a
         // re-index actually reclaims the skeleton's bytes
@@ -1115,7 +1117,7 @@ fn stream_host_limit() -> (u64, String) {
 }
 
 /// the source's identity as design.ovm records it (size, mtime seconds)
-fn source_identity(src: &str) -> (u64, u64) {
+pub(crate) fn source_identity(src: &str) -> (u64, u64) {
     let meta = std::fs::metadata(src).unwrap_or_else(|e| {
         eprintln!("open {}: {}", src, e);
         std::process::exit(1);
@@ -1480,6 +1482,26 @@ fn vfs_stream(
         }
     };
     emit_viewer_side(&store, &a.src, size, mtime, &a.outdir, &rbb, &lmems, &tstats, &frontier);
+    // the inventory beside the cache (docs/DIRECT_READ_PLAN.ko.md L1):
+    // the light cache's first file, written by the pass that computed
+    // it; outside the marker protocol like design.ovh (the cache is
+    // complete without it, so a failure is one line)
+    {
+        let path = std::path::Path::new(&a.outdir).join(floe_oasis::invfile::FILE_NAME);
+        let id = floe_oasis::invfile::Identity {
+            src_size: size,
+            src_mtime: mtime,
+        };
+        match floe_oasis::invfile::write(&path, store.inventory(), id) {
+            Ok(n) => eprintln!(
+                "[vfs] stream: design.inv ({}, {} cells, {} layers)",
+                fmt_size(n as u64),
+                store.inventory().cells.len(),
+                store.inventory().layer_order.len()
+            ),
+            Err(e) => eprintln!("[vfs] stream: design.inv not written: {}", e),
+        }
+    }
     if a.occupancy {
         stream_occupancy(
             &mut store,

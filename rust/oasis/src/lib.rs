@@ -20,6 +20,7 @@ pub mod doc;
 pub mod geom;
 pub mod header;
 pub mod inventory;
+pub mod invfile;
 pub mod segments;
 pub mod write;
 

@@ -180,7 +180,7 @@ L0 실측), 가장 큰 셀 26 MiB = CBLOCK 341개(레코드 118만, Doc 415 MiB)
 
 | 파일 | 내용 | 크기(현장 50 GB) |
 | --- | --- | --- |
-| `design.inv` | 재고 직렬화: 헤더(magic, 버전, unit, src_size/mtime, top, n_cells, n_layers), 레이어 표(순서·이름·별칭), 셀 표(이름, ranges, def_ranges, 카운터, dbox 2종, dmembers, 마스크 3종), 간선(child, placements, members, obox 8 — 쓰인 방향만), fold(topo, rank, height, rmembers, rmask/rtmask/rsmask, rbb 2종), CELLNAME/TEXTSTRING 표 | 셀 5,461 → 수 MB. (p10: 셀 35,183·간선 188,065·레이어 449 → 약 60~80 MB; 마스크 상한 = obox 8 × 32 B를 쓰인 방향만으로) |
+| `design.inv` (**구현 §8.2**, SPEC-FORMATS FLOEINV1) | 재고 직렬화: 헤더(magic, 버전, unit, src_size/mtime, top, n_cells, n_layers), 레이어 표(순서·이름·별칭), 셀 표(이름, ranges, def_ranges, 카운터, dbox 2종, dmembers, 마스크 3종), 간선(child, placements, members, obox 8 — 쓰인 방향만), fold(topo, rank, height, rmembers, rmask/rtmask/rsmask, rbb 2종), CELLNAME/TEXTSTRING 표 | 셀 5,461 → 수 MB. (p10: 셀 35,183·간선 188,065·레이어 449 → 약 60~80 MB; 마스크 상한 = obox 8 × 32 B를 쓰인 방향만으로) |
 | `design.seg` | 세그먼트 디렉터리: 세그먼트마다 cell u32, 파일 오프셋 u64, 압축 길이 u32, 해제 길이 u32, 종류(CBLOCK/구간) u8, 스냅샷 오프셋 u32(또는 "체인: 이전 독립 세그먼트에서 파싱"), 레코드 수 u32, 멤버 u64, bbox 4×i64, 레이어 마스크(비트셋 풀 참조), 레이어별 통계 블록(레이어 idx, records, members, bbox, max_w, max_h, max_min — 세그먼트가 가진 레이어만), 배치·텍스트 유무 플래그; 셀별 세그먼트 범위 표; 스냅샷 풀 | 78.1만 × (약 80 B + 레이어 통계) ≈ 60~120 MB (0.12~0.24 %) |
 | `design.ovo` | 지금과 같은 FLOEOVO2 | 마스크 수 MB~수십 MB |
 | `meta.json` | `vfs: 1` 대신 `light: 1`; 소스 identity; 세그먼트 통계; 생성 시간 | — |
@@ -383,7 +383,7 @@ geometry/placement/text x·y, W/H, 점 목록, 경로 확장, 반복, 배치 대
 | 단계 | 내용 | 게이트 |
 | --- | --- | --- |
 | L0 측정 | scan 확장: 세그먼트별 bbox·레이어 수·모달 체인 통계; 현장 파일 1회 | **완료 0.12.374(§8.1)**: 단위 테스트 + `rust_scan` 게이트; **현장 판정 2026-10-21: 한 축 띠, 체인 0 — L1로** |
-| L1 사이드카 | `design.inv` 직렬화/로더(재고 ↔ 파일 왕복 동일), 전체 빌드도 함께 씀(선택) | 왕복 바이트 동일, `--check` |
+| L1 사이드카 | `design.inv` 직렬화/로더(재고 ↔ 파일 왕복 동일), 전체 빌드도 함께 씀(선택) | **완료 0.12.379(§8.2)**: 왕복 바이트 동일(단위 테스트 + `rust_inventory`), 스트리밍 빌드가 씀(`vfs_stream`) |
 | L2 세그먼트 | 재고 패스의 세그먼트 방출(스냅샷·레이어 통계), `design.seg` | 세그먼트 통계 = 전체 Doc에서 계산한 값 |
 | L3 시드 파서 | `parse_segment`, CBLOCK inflate, 체인 | 모든 fixture + 적대적 스트림: 세그먼트 파싱의 레코드 합 = 셀 파싱 (G2급) |
 | L4 LightVfs | 합성 Ovm, 세그먼트 페이지 디코드, 배치 LRU, 셀 트리 | `--detail exact` 픽셀 동일(fixture 전부), cut 뷰 허용 오차 게이트, 성능 카운터 |
@@ -494,6 +494,39 @@ L4까지 끝나면 단독 소스를 경량으로 열어 볼 수 있고, L5·L6�
   첫 방문 수 s의 근접 뷰가 되고 L2(세그먼트)가 그것을 수십 ms로 줄인다 — 1차
   범위(§10 1번)를 정할 때 이 단계적 가치를 쓴다.
 
+### 8.2 L1 구현 (0.12.379 / floe-index 0.12.338, 2026-10-21; 사용자 "제안대로 L1 진행해줘")
+
+- **파일.** `design.inv` = 재고(`floe_oasis::inventory::Inventory`)의 직렬화, 형식
+  FLOEINV1(SPEC-FORMATS "design.inv"): 72 B 헤더(magic, version, body_len, CRC-32,
+  소스 identity src_size/src_mtime, n_cells, n_layers, top, unit) + 섹션 SCAN·LAYERS·
+  HEAD·CELLS·NAMES·FOLD. 표는 키 오름차순으로 써서 한 재고의 바이트가 하나다(jobs
+  1 = 3 = 4). 간선의 obox 8개는 쓰인 방향만(비트 u8). 정본 `rust/oasis/src/invfile.rs`
+  (`encode`/`decode`/`peek`/`write`/`read`/`roundtrip`); 로더는 길이·개수·색인·마스크
+  폭·CRC를 검사하고 어긋나면 위치와 함께 거절한다.
+- **쓰는 곳.** 스트리밍 빌드(`floe-index vfs`/`floe2 index` 기본)가 뷰어 파일 뒤,
+  design.ovm 커밋 전에 쓴다(`[vfs] stream: design.inv (12K, 7 cells, 9 layers)`);
+  마커 프로토콜 밖(design.ovh처럼 없어도 캐시는 완전, 실패는 한 줄), 재빌드의 삭제
+  목록(`clear_outputs`)에 있다. 인메모리 빌드는 재고가 없으므로 쓰지 않는다(그래서
+  `vfs_stream`의 바이트 비교는 이 파일을 건너뛰고 따로 검사한다). `--occupancy-only`는
+  아직 쓰지 않는다(L5의 열기 규칙과 함께).
+- **명령.** `floe-index inventory FILE --out PATH`(쓰고 바로 읽어 같은 바이트인지:
+  `"file": {"roundtrip": true}`), `floe-index inventory --load PATH [FILE] [--cells]
+  [--check]`(읽어서 같은 JSON; FILE이 있으면 새 재고와 바이트 비교 `"load":
+  {"identical": true}`; `--check`는 읽은 재고를 Doc에 댄다).
+- **아직 아닌 것.** 재사용 — 빌드·재시작·덱 사전 점검이 design.inv를 읽어 재고 패스를
+  생략하는 것(현장 131.6 s)은 identity 규칙·열기 규칙(L5)과 함께 한다; 렌더러가 읽는
+  것은 L4.
+- **검증.** 단위 테스트 `floe_oasis::invfile::tests`(적대적 스트림 4종 + head-CBLOCK 셀의
+  왕복: 바이트 동일 + 필드 동일 + jobs 3 동일; 모든 길이의 잘림·본문 비트 반전·꼬리
+  바이트·다른 magic·다른 version·top 범위·child 범위 거절; CRC 참조 벡터; 디스크
+  왕복). 게이트 `rust_inventory`: fixture마다 `--out` 왕복, jobs 1 = 3 바이트, `--load
+  --cells` = 새 `--cells`, `--load FILE` identical + `--check`, 잘린·손상 파일 거절.
+  게이트 `vfs_stream`: 스트리밍 캐시의 design.inv가 `--out`과 같은 바이트·jobs 4와 같음,
+  인메모리 캐시에는 없음, 인메모리 재빌드가 묵은 파일을 지움.
+- **실측(macOS 4 jobs).** valmini 12 KB; sample9 859 KB(1,188셀·40 레이어; 전체 1.25 s
+  중 쓰기 0.011 s); main01_chip_p10 64 MB(35,183셀·188,065 간선·449 레이어; 11.6 s 중
+  쓰기 0.58 s) — §5.1의 추정 60~80 MB 안. 현장 50 GB(5,461셀·5 레이어)는 수 MB.
+
 ## 9. 검토한 대안
 
 - **A. 전체 색인만 빠르게/작게 만들기**(ovp 압축률, 인코딩 병렬, 소스 병렬):
@@ -516,17 +549,19 @@ L4까지 끝나면 단독 소스를 경량으로 열어 볼 수 있고, L5·L6�
   뷰어 근접 뷰가 요구이므로 세그먼트까지 간다 — 단, **E를 1차 납품으로 자르는
   선택지**는 있다(§10).
 
-## 10. 열린 질문 (사용자 결정)
+## 10. 열린 질문 (사용자 결정 — 2026-10-21 "제안대로 L1 진행해줘"로 1~5는 제안대로 결정)
 
 1. 1차 범위: (i) 캡처 우선 — 경량 생성(inv + ovo)으로 광역 캡처부터(세그먼트
    없이, L0·L1·요약 identity 변경만), (ii) 뷰어 근접 뷰까지(L4). 제안: L0로 잰 뒤
    (ii)로 바로 간다 — (i)는 (ii)의 앞부분이다. L0 결과(§8.1): 띠·체인 0이라 (ii)의
-   근접 뷰 첫 방문은 수십 ms, L1(셀 단위)만으로도 수 s다.
-2. 자동 색인 기본(§5.6): 덱 소스 = 경량, 레이아웃 = 전체? 크기 문턱?
-3. cut 뷰의 픽셀 계약(§5.8): 허용 오차로 가는가, B안으로 동일성을 사는가.
-4. 요약 없는 동안의 광역 표시(§5.5): 배너(제안) / 임시 bbox 채움 / 대기.
+   근접 뷰 첫 방문은 수십 ms, L1(셀 단위)만으로도 수 s다. **결정: (ii), L1부터.**
+2. 자동 색인 기본(§5.6): 덱 소스 = 경량, 레이아웃 = 전체? 크기 문턱? **결정: 덱 소스
+   경량, 단독 레이아웃 전체, 플래그로 뒤집음(크기 문턱 없음).**
+3. cut 뷰의 픽셀 계약(§5.8): 허용 오차로 가는가, B안으로 동일성을 사는가. **결정:
+   허용 오차로 시작; exact/archival은 동일 게이트; B안은 필요할 때.**
+4. 요약 없는 동안의 광역 표시(§5.5): 배너(제안) / 임시 bbox 채움 / 대기. **결정: 배너.**
 5. 덱 캡처의 최소 배율(µm/px): 기준 셀 1 µm(`--occupancy-um 1`)로 요약 구간을
-   넓힐지.
+   넓힐지. **결정: 4 µm 유지, 바꾸기 전에 측정.**
 6. 현장 50 GB 요약 패스의 `budget`/`pass(es)`/`charged` 줄(2026-10-20 요청) —
    **답 2026-10-21**: `--mem 0.5`, 1패스, 상주 예산 415M ≈ 2셀 = 예산 병목(§6.1).
    남은 것은 기본 예산 재실행의 시간.
