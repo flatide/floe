@@ -120,6 +120,11 @@ def check(path, jobs, inv_out):
     cs = j.get("check_seg", {})
     if not cs.get("ok") or cs.get("segments") != g["segments"] or cs.get("cells_skipped", 1) != 0:
         fail("inventory %s (jobs %d): segment check: %s" % (path.name, jobs, cs))
+    # L3: every segment parsed with its snapshot concatenates to the cell parse
+    if cs.get("stats_ok") is not True or cs.get("parse_ok") is not True or cs.get("pieces", 0) < cs["segments"]:
+        fail("inventory %s (jobs %d): segment parse: %s" % (path.name, jobs, {k: cs.get(k) for k in ("stats_ok", "parse_ok", "pieces", "segments")}))
+    if "parse OK" not in r.stderr:
+        fail("inventory %s: no segment parse line\n%s" % (path.name, r.stderr[-800:]))
     return j, dt
 
 
@@ -222,7 +227,7 @@ def main():
                 fail("%s: design.seg differs between jobs 1 and 3" % name)
             size = check_file(path, inv_files[1], 2)
             print("OK  %-22s design.inv %d bytes, design.seg %d bytes: round trips, jobs 1 = 3, --load = fresh, --load + source identical + check, "
-                  "segment statistics = Doc, --load-seg paired + identical, truncated and damaged copies refused"
+                  "segment statistics = Doc, segments parsed with their snapshots = cell parse, --load-seg paired + identical, truncated and damaged copies refused"
                   % (name, size, inv_files[1].with_suffix(".seg").stat().st_size))
     print("rust_inventory: ALL OK")
 

@@ -385,7 +385,7 @@ geometry/placement/text x·y, W/H, 점 목록, 경로 확장, 반복, 배치 대
 | L0 측정 | scan 확장: 세그먼트별 bbox·레이어 수·모달 체인 통계; 현장 파일 1회 | **완료 0.12.374(§8.1)**: 단위 테스트 + `rust_scan` 게이트; **현장 판정 2026-10-21: 한 축 띠, 체인 0 — L1로** |
 | L1 사이드카 | `design.inv` 직렬화/로더(재고 ↔ 파일 왕복 동일), 전체 빌드도 함께 씀(선택) | **완료 0.12.379(§8.2)**: 왕복 바이트 동일(단위 테스트 + `rust_inventory`), 스트리밍 빌드가 씀(`vfs_stream`) |
 | L2 세그먼트 | 재고 패스의 세그먼트 방출(스냅샷·레이어 통계), `design.seg` | **완료 0.12.380(§8.3)**: 세그먼트 통계 = Doc(`--check-seg`, `rust_inventory`), 왕복 동일, 스트리밍 빌드가 씀(`vfs_stream`) |
-| L3 시드 파서 | `parse_segment`, CBLOCK inflate, 체인 | 모든 fixture + 적대적 스트림: 세그먼트 파싱의 레코드 합 = 셀 파싱 (G2급) |
+| L3 시드 파서 | `parse_segment`, CBLOCK inflate, 체인 | **완료 0.12.381(§8.4)**: 모든 fixture + 적대적 스트림에서 세그먼트 파싱의 레코드 합 = 셀 파싱(`--check-seg`, `rust_inventory`, 단위 테스트) |
 | L4 LightVfs | 합성 Ovm, 세그먼트 페이지 디코드, 배치 LRU, 셀 트리 | `--detail exact` 픽셀 동일(fixture 전부), cut 뷰 허용 오차 게이트, 성능 카운터 |
 | L5 명령·모드 | `floe-index light`, `floe2 index --light`, 열기 규칙, 상태줄/info, 자동 생성, 잠금 | CLI 게이트, index_lock |
 | L6 덱·뷰어·캡처 | 덱 소스 경량 열기, 요약 없는 상태 표시, refine 흐름, `floe2 render` 완료 대기 | jobdeck·gtk_view·occupancy 게이트 |
@@ -574,6 +574,41 @@ L4까지 끝나면 단독 소스를 경량으로 열어 볼 수 있고, L5·L6�
 - **다음.** L3 시드 파서(`parse_segment`: 스냅샷으로 모달을 채우고 CBLOCK을 inflate해
   세그먼트 하나를 Doc으로; 참조 필드는 정의한 세그먼트에서 가져온다), 게이트는
   세그먼트 파싱의 레코드 합 = 셀 파싱(G2급).
+
+### 8.4 L3 구현 (0.12.381 / floe-index 0.12.340, 2026-10-21; 사용자 "L3 진행해줘")
+
+- **시드 파서.** `floe_oasis::doc::parse_segment(bytes, base, cell, snapshot, fields,
+  tables) -> Vec<CellPiece>`: 세그먼트의 바이트(구간의 레코드들, 또는 CBLOCK 레코드
+  하나 — 파서가 inflate)를 그 스냅샷의 모달 상태에서 파싱한다. 스칼라는 그대로
+  `Modal`에 넣고, 목록 필드(반복·폴리곤·경로 점 목록·inline 텍스트 문자열)는
+  레코드 자신이 지나는 같은 판독기(`read_rep`, `read_points`, 문자열)로 바이트에서
+  복원한다(남는 바이트가 있으면 거절). 셀은 재고의 이름으로 미리 열어 두고(CELL
+  레코드 없이 시작) `parse_records`를 depth 1로 돌린 뒤 `parse_cell_bytes`와 같은
+  끝처리(`pieces_of`: 배치 대상 → Doc 색인, 텍스트 참조 → 문자열)를 한다. 결과는
+  정규화 전의 레코드이고 전체 파싱과 같은 형태다. 세그먼트 안의 CELL 레코드는 그
+  셀의 조각을 더하고, 이름 표 레코드는 소비만 한다(참조는 재고의 표가 푼다).
+- **참조 필드.** `Snapshot::seed_fields(fetch)`가 inline 필드는 그대로, 참조 필드는
+  `fetch(seg, off, len)`으로 바이트를 채운다. 파일 전체를 가진 독자의 구현이
+  `segments::segment_stream(data, offset, bytes, cblock)`(CBLOCK이면
+  `inflate_cblock_record`)과 `fetch_from(data, segs, …)`이고, L4의 LightVfs는 pread +
+  inflate로 같은 일을 한다.
+- **게이트(§8 "세그먼트 파싱의 레코드 합 = 셀 파싱").** `floe-index inventory FILE
+  --check-seg`가 통계 비교에 더해 모든 세그먼트를 스냅샷으로 파싱해 셀별로 이어
+  붙이고, 같은 셀의 `parse_cell_range`(head + 모든 범위, 파일 순서) 결과와 레코드
+  단위로 비교한다(`"check_seg": {"stats_ok", "parse_ok", "pieces", "parse_s"}`; head
+  CBLOCK이 정의한 셀은 세그먼트가 없어 건너뛴다). `rust_inventory`가 fixture마다
+  본다. 단위 테스트 `segments_parse_with_their_snapshots_to_the_cell_parse`: 스트림
+  8종 × 구간 길이 1/60/기본(레코드마다 세그먼트인 경우까지), 130점 폴리곤 목록을
+  참조로 잇는 fixture(Ref 경로: 둘째 CBLOCK의 스냅샷이 첫 CBLOCK의 바이트를 가리키고
+  파싱 때 가져온다), inline 텍스트·이름 배치 대상·격자 반복을 구간마다 잇는
+  fixture, 남는 바이트가 있는 시드의 거절.
+- **실측(macOS 4 jobs, `--check-seg`의 parse 부분 = 세그먼트 전부를 스냅샷으로 파싱 +
+  셀 파싱 + 비교, 단일 스레드).** valmini 8 조각 0.0 s; sample9 1,238 조각 2.5 s(전체
+  4.7 s); route_chip 916 조각 3.0 s(전체 9.1 s); main01_chip_p10 37,332 조각 24.5 s(전체
+  56 s). 모두 OK, 건너뛴 셀 0.
+- **다음.** L4 LightVfs: design.inv/seg로 Ovm을 합성하고(셀 디렉터리 ← 재고, 페이지
+  디렉터리 ← 세그먼트 × 레이어), 페이지 페이로드를 원본에서 pread + inflate +
+  `parse_segment`로 디코드한다(§5.3).
 
 ## 9. 검토한 대안
 

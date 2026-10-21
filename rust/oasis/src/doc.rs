@@ -1739,6 +1739,121 @@ pub fn parse_cell_bytes(
     let mut b = new_builder(cellname_base, textstring_base);
     // depth 1: a range ends without an END record
     parse_records(&mut c, &mut m, &mut b, 1)?;
+    pieces_of(b, start, tables)
+}
+
+/// the list fields of a segment's snapshot as bytes (segments.rs
+/// `Carried`: an inline field as the record spelled it, a referenced one
+/// fetched by the caller from the defining segment's stream -
+/// `Snapshot::seed_fields`)
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SeedFields {
+    /// the repetition field: type and parameters
+    pub rep: Option<Vec<u8>>,
+    pub poly: Option<Vec<u8>>,
+    pub path: Option<Vec<u8>>,
+    /// an inline text string field (an OASIS string: length, bytes)
+    pub text: Option<Vec<u8>>,
+}
+
+/// the modal state a segment's first record sees: the snapshot's
+/// scalars, and its list fields decoded by the readers the records
+/// themselves go through
+fn seed_modal(snap: &crate::segments::Snapshot, fields: &SeedFields, at: usize) -> Result<Modal> {
+    use crate::segments::{PlaceModal, TextModal};
+    let mut m = Modal {
+        relative: snap.relative,
+        layer: snap.layer,
+        datatype: snap.datatype,
+        textlayer: snap.textlayer,
+        texttype: snap.texttype,
+        geo_x: snap.geo_x,
+        geo_y: snap.geo_y,
+        pl_x: snap.pl_x,
+        pl_y: snap.pl_y,
+        tx_x: snap.tx_x,
+        tx_y: snap.tx_y,
+        geo_w: snap.geo_w,
+        geo_h: snap.geo_h,
+        circle_r: snap.circle_r,
+        ctrap_type: snap.ctrap_type,
+        path_hw: snap.path_hw,
+        path_es: snap.path_es,
+        path_ee: snap.path_ee,
+        place_cell: snap.place.as_ref().map(|p| match p {
+            PlaceModal::Ref(r) => PlaceTarget::Ref(*r),
+            PlaceModal::Name(n) => PlaceTarget::Name(n.clone()),
+        }),
+        ..Modal::default()
+    };
+    let whole = |c: &Cur, what: &str| -> Result<()> {
+        if !c.at_end() {
+            return err(at, &format!("segment seed: the {} field has bytes left over", what));
+        }
+        Ok(())
+    };
+    if let Some(b) = &fields.rep {
+        let mut c = Cur::new(b, at);
+        let mut none = None;
+        m.rep = Some(read_rep(&mut c, &mut none)?);
+        whole(&c, "repetition")?;
+    }
+    if let Some(b) = &fields.poly {
+        let mut c = Cur::new(b, at);
+        m.poly_pts = Some(read_points(&mut c, true)?);
+        whole(&c, "polygon point-list")?;
+    }
+    if let Some(b) = &fields.path {
+        let mut c = Cur::new(b, at);
+        m.path_pts = Some(read_points(&mut c, false)?);
+        whole(&c, "path point-list")?;
+    }
+    m.text_string = match &snap.text {
+        TextModal::None => None,
+        TextModal::Ref(r) => Some(TextTarget::Ref(*r)),
+        TextModal::Inline(_) => match &fields.text {
+            Some(b) => {
+                let mut c = Cur::new(b, at);
+                let sb = c.string()?.to_vec();
+                whole(&c, "text string")?;
+                Some(TextTarget::Str(utf8(&c, &sb)?))
+            }
+            None => return err(at, "segment seed: inline text string not supplied"),
+        },
+    };
+    Ok(m)
+}
+
+/// Parse one segment of a cell on its own (docs/DIRECT_READ_PLAN.ko.md
+/// §5.2, L3): `bytes` are the segment's bytes - a span's records, or
+/// one CBLOCK record, inflated here - starting from the modal state of
+/// its snapshot (`fields`: the snapshot's list fields as bytes), inside
+/// the cell `cell` (the inventory's name), with placements and texts
+/// resolved through the tables as `parse_cell_bytes` resolves them.
+/// The records come out as the whole-Doc parse materializes them, not
+/// normalized. A CELL record inside the segment (a CBLOCK that holds
+/// one) adds that cell's piece. Name-table records inside the segment
+/// are consumed; the tables given resolve every reference.
+pub fn parse_segment(
+    bytes: &[u8],
+    base: u64,
+    cell: &str,
+    snap: &crate::segments::Snapshot,
+    fields: &SeedFields,
+    tables: &CellTables,
+) -> Result<Vec<CellPiece>> {
+    let start = base as usize;
+    let mut c = Cur::new(bytes, start);
+    let mut m = seed_modal(snap, fields, start)?;
+    let mut b = new_builder(0, 0);
+    b.cur = Some(b.cell_index(cell));
+    parse_records(&mut c, &mut m, &mut b, 1)?;
+    pieces_of(b, start, tables)
+}
+
+/// a chunk builder's cells as pieces: names resolved through the
+/// tables, placement targets to Doc indices, pending texts to strings
+fn pieces_of(mut b: Builder, start: usize, tables: &CellTables) -> Result<Vec<CellPiece>> {
     let mut index: Vec<usize> = Vec::with_capacity(b.cells.len());
     let mut names: Vec<String> = Vec::with_capacity(b.cells.len());
     for cell in &b.cells {

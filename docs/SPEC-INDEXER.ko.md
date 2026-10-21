@@ -100,9 +100,11 @@ CBLOCK 없는 구간의 길이(기본 256K, K/M/G 접미사). `jobs`는 위치 �
 DIRECT_READ_PLAN L1 §8.2). `--seg design.seg [--seg-bytes N]`은 같은 걸음에 모은
 세그먼트 디렉터리(SPEC-FORMATS FLOESEG1: CBLOCK·구간마다 모달 스냅샷과 레이어별 페이지
 통계)를 쓰고 읽어 확인하며, `--check-seg`는 그 레이어별 통계(셀·레이어별 레코드·멤버 합,
-bbox 합집합, 도형 치수 최대)를 Doc에서 같은 식으로 계산한 값에 댄다; `--load-seg
-design.seg`는 읽어서 design.inv와 짝인지(`"pair_ok"`), 소스가 있으면 새 디렉터리와
-같은 바이트인지(`"identical"`) 본다(0.12.380, L2 §8.3).
+bbox 합집합, 도형 치수 최대)를 Doc에서 같은 식으로 계산한 값에 대고, 모든 세그먼트를
+스냅샷으로 파싱해(`doc::parse_segment`, L3 §8.4) 셀별로 이어 붙인 레코드가 셀 파싱
+(`parse_cell_range`)과 같은지 본다(`"check_seg": {"stats_ok", "parse_ok", "pieces"}`,
+0.12.381); `--load-seg design.seg`는 읽어서 design.inv와 짝인지(`"pair_ok"`), 소스가
+있으면 새 디렉터리와 같은 바이트인지(`"identical"`) 본다(0.12.380, L2 §8.3).
 
 ### 1.1 단일 셀 비게시 프로파일
 

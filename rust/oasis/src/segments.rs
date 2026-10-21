@@ -19,7 +19,7 @@
 
 use crate::geom::{box_grow, box_is_empty, path_bbox, Box4, EMPTY_BOX};
 use crate::inventory::{rep_box, Target};
-use crate::{CellStat, Modal, Repetition, ScanStats};
+use crate::{CellStat, Modal, Repetition, Result, ScanStats};
 
 /// the span length of a stream without CBLOCKs (`--seg-bytes`)
 pub const DEFAULT_SPAN_BYTES: u64 = 256 * 1024;
@@ -143,6 +143,62 @@ impl Snapshot {
     pub fn is_default(&self) -> bool {
         *self == Snapshot::default()
     }
+
+    /// the list fields as bytes for a seeded parse (`doc::parse_segment`):
+    /// an inline field as it is, a referenced one through `fetch(seg, off,
+    /// len)` = the bytes at `off` of segment `seg`'s record stream
+    /// (`segment_stream`)
+    pub fn seed_fields(
+        &self,
+        mut fetch: impl FnMut(u32, u32, u32) -> Result<Vec<u8>>,
+    ) -> Result<crate::doc::SeedFields> {
+        let mut get = |c: &Carried| -> Result<Option<Vec<u8>>> {
+            match c {
+                Carried::None => Ok(None),
+                Carried::Inline(b) => Ok(Some(b.clone())),
+                Carried::Ref { seg, off, len } => fetch(*seg, *off, *len).map(Some),
+            }
+        };
+        Ok(crate::doc::SeedFields {
+            rep: get(&self.rep)?,
+            poly: get(&self.poly)?,
+            path: get(&self.path)?,
+            text: match &self.text {
+                TextModal::Inline(c) => get(c)?,
+                _ => None,
+            },
+        })
+    }
+}
+
+/// a segment's record stream out of the whole file: a CBLOCK's inflated
+/// body, a span's bytes as they are (what a snapshot's references and
+/// `doc::parse_segment` read)
+pub fn segment_stream(data: &[u8], offset: u64, bytes: u64, cblock: bool) -> Result<std::borrow::Cow<'_, [u8]>> {
+    let (a, b) = (offset as usize, (offset + bytes) as usize);
+    if b > data.len() || a > b {
+        return crate::err(a, "segment outside the file");
+    }
+    if cblock {
+        Ok(std::borrow::Cow::Owned(crate::inflate_cblock_record(&data[a..b], a)?))
+    } else {
+        Ok(std::borrow::Cow::Borrowed(&data[a..b]))
+    }
+}
+
+/// `fetch` for `Snapshot::seed_fields` over the whole file and the
+/// collected segments: the bytes a reference names
+pub fn fetch_from(data: &[u8], segs: &[SegStat], seg: u32, off: u32, len: u32) -> Result<Vec<u8>> {
+    let d = match segs.get(seg as usize) {
+        Some(d) => d,
+        None => return crate::err(0, "snapshot refers to a segment outside the table"),
+    };
+    let stream = segment_stream(data, d.offset, d.bytes, d.cblock)?;
+    let (a, b) = (off as usize, off as usize + len as usize);
+    if b > stream.len() {
+        return crate::err(d.offset as usize, "snapshot refers past the segment's stream");
+    }
+    Ok(stream[a..b].to_vec())
 }
 
 /// the page statistics of one segment's shapes on one layer - what
@@ -1180,6 +1236,241 @@ mod tests {
                 assert_eq!(a.overlap_p50, b.overlap_p50);
             }
         }
+    }
+
+    /// a polygon list too long to carry inline: cell A's first CBLOCK
+    /// spells a 130-vertex polygon on 1/0, the second reuses the list
+    /// (no P bit) at another anchor - its snapshot refers to the first
+    /// block's bytes
+    fn fixture_long_list() -> Vec<u8> {
+        let mut w = W::new();
+        start(&mut w);
+        w.uint(14);
+        w.string(b"A");
+        let mut b = W::new();
+        b.uint(21);
+        b.byte(0x20 | 0x10 | 0x08 | 0x02 | 0x01);
+        b.uint(1);
+        b.uint(0);
+        b.uint(4);
+        b.uint(130);
+        for i in 0..130u32 {
+            if i % 2 == 0 {
+                b.g_delta(3, 0);
+            } else {
+                b.g_delta(0, 2);
+            }
+        }
+        b.sint(0);
+        b.sint(0);
+        cblock(&mut w, &b.out);
+        let mut b = W::new();
+        b.uint(21);
+        b.byte(0x10 | 0x08);
+        b.sint(500);
+        b.sint(500);
+        b.uint(20);
+        b.byte(0x80 | 0x40 | 0x10 | 0x08 | 0x02 | 0x01);
+        b.uint(2);
+        b.uint(0);
+        b.uint(10);
+        b.sint(0);
+        b.sint(0);
+        cblock(&mut w, &b.out);
+        end(&mut w);
+        w.out
+    }
+
+    /// carries across spans of one record each: an inline text string
+    /// reused by the next TEXT, a placement target by name reused by the
+    /// next PLACEMENT, a grid repetition reused by the next RECT; cell B
+    /// (the target) follows
+    fn fixture_carries() -> Vec<u8> {
+        let mut w = W::new();
+        start(&mut w);
+        w.uint(14);
+        w.string(b"A");
+        w.uint(19);
+        w.byte(0x40 | 0x10 | 0x08 | 0x02 | 0x01);
+        w.string(b"lbl");
+        w.uint(1);
+        w.uint(0);
+        w.sint(1);
+        w.sint(1);
+        w.uint(19);
+        w.byte(0x10 | 0x08);
+        w.sint(2);
+        w.sint(2);
+        w.uint(17);
+        w.byte(0x80 | 0x20 | 0x10);
+        w.string(b"B");
+        w.sint(10);
+        w.sint(10);
+        w.uint(17);
+        w.byte(0x20 | 0x10);
+        w.sint(20);
+        w.sint(20);
+        w.uint(20);
+        w.byte(0x80 | 0x40 | 0x10 | 0x08 | 0x04 | 0x02 | 0x01);
+        w.uint(1);
+        w.uint(0);
+        w.uint(5);
+        w.sint(0);
+        w.sint(0);
+        w.uint(1);
+        w.uint(1);
+        w.uint(1);
+        w.uint(7);
+        w.uint(9);
+        w.uint(20);
+        w.byte(0x80 | 0x10 | 0x08 | 0x04);
+        w.sint(100);
+        w.sint(100);
+        w.uint(0);
+        w.uint(14);
+        w.string(b"B");
+        w.uint(20);
+        w.byte(0x80 | 0x40 | 0x10 | 0x08 | 0x02 | 0x01);
+        w.uint(7);
+        w.uint(0);
+        w.uint(10);
+        w.sint(0);
+        w.sint(0);
+        end(&mut w);
+        w.out
+    }
+
+    /// the L0 fixtures leave A and B both unplaced, which the inventory
+    /// refuses (two tops): the same streams with A placing B, for the
+    /// seeded parse
+    fn fixture_tree(cblocks: bool) -> Vec<u8> {
+        let mut w = W::new();
+        start(&mut w);
+        w.uint(14);
+        w.string(b"A");
+        for part in [part_one, part_two, part_three] {
+            if cblocks {
+                let mut b = W::new();
+                part(&mut b);
+                cblock(&mut w, &b.out);
+            } else {
+                part(&mut w);
+            }
+        }
+        w.uint(17);
+        w.byte(0x80 | 0x20 | 0x10);
+        w.string(b"B");
+        w.sint(1000);
+        w.sint(1000);
+        w.uint(14);
+        w.string(b"B");
+        w.uint(20);
+        w.byte(0x80 | 0x40 | 0x10 | 0x08 | 0x02 | 0x01);
+        w.uint(7);
+        w.uint(0);
+        w.uint(10);
+        w.sint(0);
+        w.sint(0);
+        end(&mut w);
+        w.out
+    }
+
+    fn append(into: &mut crate::doc::Cell, piece: crate::doc::Cell) {
+        into.rects.extend(piece.rects);
+        into.polys.extend(piece.polys);
+        into.paths.extend(piece.paths);
+        into.places.extend(piece.places);
+        into.texts.extend(piece.texts);
+    }
+
+    /// L3's gate: every segment parsed on its own with its snapshot, the
+    /// pieces concatenated per cell, equal the cell's own parse
+    /// (parse_cell_range over the head and every range, in file order)
+    fn parse_check(name: &str, data: &[u8], span: u64) -> usize {
+        let (inv, col) = crate::inventory_segments(data, 1, span).unwrap_or_else(|e| panic!("{}: {}", name, e));
+        let index = inv.cell_index();
+        let tables = crate::doc::CellTables::new(&inv.cellnames, &inv.textstrings, &index);
+        let n = inv.cells.len();
+        let fresh = |ci: usize| crate::doc::Cell {
+            name: inv.cells[ci].name.clone(),
+            ..Default::default()
+        };
+        let mut expected: Vec<crate::doc::Cell> = (0..n).map(fresh).collect();
+        let mut actual: Vec<crate::doc::Cell> = (0..n).map(fresh).collect();
+        let mut ranges: Vec<&crate::inventory::CellRange> = vec![&inv.head];
+        ranges.extend(inv.cells.iter().flat_map(|c| c.ranges.iter()));
+        ranges.sort_by_key(|r| r.start);
+        for r in ranges {
+            for p in crate::doc::parse_cell_range(data, r, &tables).unwrap_or_else(|e| panic!("{}: range: {}", name, e)) {
+                append(&mut expected[p.index], p.cell);
+            }
+        }
+        let mut refs = 0usize;
+        for s in &col.segs {
+            let cell = &inv.scan.cell_stats[s.cell as usize].name;
+            let bytes = &data[s.offset as usize..(s.offset + s.bytes) as usize];
+            let fields = s
+                .snapshot
+                .seed_fields(|seg, off, len| {
+                    refs += 1;
+                    fetch_from(data, &col.segs, seg, off, len)
+                })
+                .unwrap_or_else(|e| panic!("{}: fields: {}", name, e));
+            for p in crate::doc::parse_segment(bytes, s.offset, cell, &s.snapshot, &fields, &tables)
+                .unwrap_or_else(|e| panic!("{}: segment at {}: {}", name, s.offset, e))
+            {
+                append(&mut actual[p.index], p.cell);
+            }
+        }
+        for ci in 0..n {
+            if inv.cells[ci].ranges.is_empty() {
+                continue; // a cell a head CBLOCK defines: no segment
+            }
+            assert_eq!(actual[ci], expected[ci], "{}: cell {} (span {})", name, inv.cells[ci].name, span);
+        }
+        refs
+    }
+
+    #[test]
+    fn segments_parse_with_their_snapshots_to_the_cell_parse() {
+        use crate::inventory::fixtures;
+        for span in [1u64, 60, DEFAULT_SPAN_BYTES] {
+            parse_check("cblocks", &fixture_tree(true), span);
+            parse_check("plain", &fixture_tree(false), span);
+            parse_check("carries", &fixture_carries(), span);
+            parse_check("early", &fixtures::adversarial(true, true), span);
+            parse_check("late-plain", &fixtures::adversarial(false, false), span);
+            parse_check("early-plain", &fixtures::adversarial(true, false), span);
+            parse_check("late-cblock", &fixtures::adversarial(false, true), span);
+            parse_check("head", &fixtures::head_cblock_cell(), span);
+        }
+        // the long list is carried by reference and fetched for the parse
+        let data = fixture_long_list();
+        let (_, col) = crate::inventory_segments(&data, 1, DEFAULT_SPAN_BYTES).unwrap();
+        let a: Vec<&SegStat> = col.segs.iter().filter(|s| s.cell == 0).collect();
+        assert_eq!(a.len(), 2);
+        assert!(matches!(a[1].snapshot.poly, Carried::Ref { seg: 0, .. }), "{:?}", a[1].snapshot.poly);
+        assert_eq!(a[1].chained, CHAIN_POLY);
+        assert!(parse_check("long list", &data, DEFAULT_SPAN_BYTES) >= 1);
+        // the carries: one record per span, every modal carried
+        let data = fixture_carries();
+        let (_, col) = crate::inventory_segments(&data, 1, 1).unwrap();
+        let a: Vec<&SegStat> = col.segs.iter().filter(|s| s.cell == 0).collect();
+        assert_eq!(a.len(), 6);
+        assert!(matches!(&a[1].snapshot.text, TextModal::Inline(Carried::Inline(b)) if b == &[3, b'l', b'b', b'l']));
+        assert_eq!(a[3].snapshot.place, Some(PlaceModal::Name("B".into())));
+        assert_eq!(a[5].snapshot.rep, Carried::Inline(vec![1, 1, 1, 7, 9]));
+        // a seed that is not whole is refused
+        let bad = crate::doc::SeedFields {
+            rep: Some(vec![1, 1, 1, 7, 9, 0]),
+            ..Default::default()
+        };
+        let snap = Snapshot::default();
+        let index = std::collections::HashMap::new();
+        let names = std::collections::HashMap::new();
+        let tables = crate::doc::CellTables::new(&names, &names, &index);
+        let e = format!("{}", crate::doc::parse_segment(&[], 0, "A", &snap, &bad, &tables).err().expect("refused"));
+        assert!(e.contains("bytes left over"), "{}", e);
     }
 
     #[test]

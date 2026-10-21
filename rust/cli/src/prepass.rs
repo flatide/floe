@@ -892,6 +892,126 @@ pub fn check_segments(
     (out, skipped)
 }
 
+fn append_piece(into: &mut floe_oasis::doc::Cell, piece: floe_oasis::doc::Cell) {
+    into.rects.extend(piece.rects);
+    into.polys.extend(piece.polys);
+    into.paths.extend(piece.paths);
+    into.places.extend(piece.places);
+    into.texts.extend(piece.texts);
+}
+
+/// L3's gate (DIRECT_READ_PLAN §8.4): every segment parsed on its own
+/// with its snapshot (`doc::parse_segment`), the pieces concatenated
+/// per cell in file order, against the cell's own parse
+/// (`parse_cell_range` over the head and every range, in file order) -
+/// the records as the geometry parser materializes them, before
+/// normalization. Returns (mismatches, pieces parsed, cells skipped:
+/// the ones a head CBLOCK defines, which have no segment).
+pub fn check_segment_parse(
+    data: &[u8],
+    inv: &Inventory,
+    segs: &[floe_oasis::segments::SegStat],
+) -> (Vec<String>, usize, usize) {
+    use floe_oasis::doc::{parse_cell_range, parse_segment, Cell, CellTables};
+    const CAP: usize = 60;
+    let mut out: Vec<String> = Vec::new();
+    let mut total = 0usize;
+    let mut bad = |msg: String| {
+        total += 1;
+        if out.len() < CAP {
+            out.push(msg);
+        }
+    };
+    let index = inv.cell_index();
+    let tables = CellTables::new(&inv.cellnames, &inv.textstrings, &index);
+    let n = inv.cells.len();
+    let fresh = |ci: usize| Cell {
+        name: inv.cells[ci].name.clone(),
+        ..Default::default()
+    };
+    let mut expected: Vec<Cell> = (0..n).map(fresh).collect();
+    let mut actual: Vec<Cell> = (0..n).map(fresh).collect();
+    let mut ranges: Vec<&floe_oasis::inventory::CellRange> = vec![&inv.head];
+    ranges.extend(inv.cells.iter().flat_map(|c| c.ranges.iter()));
+    ranges.sort_by_key(|r| r.start);
+    for r in ranges {
+        match parse_cell_range(data, r, &tables) {
+            Ok(pieces) => {
+                for p in pieces {
+                    append_piece(&mut expected[p.index], p.cell);
+                }
+            }
+            Err(e) => bad(format!("range at {}: {}", r.start, e)),
+        }
+    }
+    let mut pieces = 0usize;
+    for s in segs {
+        let cell = match inv.scan.cell_stats.get(s.cell as usize) {
+            Some(c) => &c.name,
+            None => {
+                bad(format!("segment at {}: no scan record for cell {}", s.offset, s.cell));
+                continue;
+            }
+        };
+        let (a, b) = (s.offset as usize, (s.offset + s.bytes) as usize);
+        if b > data.len() {
+            bad(format!("segment at {}: outside the file", s.offset));
+            continue;
+        }
+        let fields = match s
+            .snapshot
+            .seed_fields(|seg, off, len| floe_oasis::segments::fetch_from(data, segs, seg, off, len))
+        {
+            Ok(f) => f,
+            Err(e) => {
+                bad(format!("segment at {} ({}): seed: {}", s.offset, cell, e));
+                continue;
+            }
+        };
+        match parse_segment(&data[a..b], s.offset, cell, &s.snapshot, &fields, &tables) {
+            Ok(ps) => {
+                for p in ps {
+                    pieces += 1;
+                    append_piece(&mut actual[p.index], p.cell);
+                }
+            }
+            Err(e) => bad(format!("segment at {} ({}): {}", s.offset, cell, e)),
+        }
+    }
+    let mut skipped = 0usize;
+    for ci in 0..n {
+        if inv.cells[ci].ranges.is_empty() {
+            skipped += 1;
+            continue;
+        }
+        let (a, e) = (&actual[ci], &expected[ci]);
+        if a != e {
+            let first = |x: usize, y: usize| if x != y { format!("{}/{}", x, y) } else { x.to_string() };
+            let mut what = Vec::new();
+            if a.rects != e.rects {
+                what.push(format!("rects {} (first differs at {})", first(a.rects.len(), e.rects.len()), a.rects.iter().zip(&e.rects).position(|(x, y)| x != y).map_or("len".to_string(), |i| i.to_string())));
+            }
+            if a.polys != e.polys {
+                what.push(format!("polys {} (first differs at {})", first(a.polys.len(), e.polys.len()), a.polys.iter().zip(&e.polys).position(|(x, y)| x != y).map_or("len".to_string(), |i| i.to_string())));
+            }
+            if a.paths != e.paths {
+                what.push(format!("paths {} (first differs at {})", first(a.paths.len(), e.paths.len()), a.paths.iter().zip(&e.paths).position(|(x, y)| x != y).map_or("len".to_string(), |i| i.to_string())));
+            }
+            if a.places != e.places {
+                what.push(format!("places {} (first differs at {})", first(a.places.len(), e.places.len()), a.places.iter().zip(&e.places).position(|(x, y)| x != y).map_or("len".to_string(), |i| i.to_string())));
+            }
+            if a.texts != e.texts {
+                what.push(format!("texts {} (first differs at {})", first(a.texts.len(), e.texts.len()), a.texts.iter().zip(&e.texts).position(|(x, y)| x != y).map_or("len".to_string(), |i| i.to_string())));
+            }
+            bad(format!("cell {} ({}): segments vs cell parse: {}", ci, inv.cells[ci].name, what.join(", ")));
+        }
+    }
+    if total > out.len() {
+        out.push(format!("... {} mismatches in all", total));
+    }
+    (out, pieces, skipped)
+}
+
 pub fn inventory_cmd(args: &[String]) {
     let mut src: Option<String> = None;
     let mut jobs = 1usize;
@@ -1387,20 +1507,30 @@ pub fn inventory_cmd(args: &[String]) {
         }
         if do_check_seg {
             let c = col.as_ref().expect("segments collected");
-            let (diffs3, skipped) = check_segments(doc_stats.as_deref().unwrap_or(&[]), &inv, &c.segs);
+            let (mut diffs3, skipped) = check_segments(doc_stats.as_deref().unwrap_or(&[]), &inv, &c.segs);
             let ok3 = diffs3.is_empty();
-            ok = ok && ok3;
+            // L3: every segment parsed with its snapshot = the cell parse
+            let t4 = std::time::Instant::now();
+            let (diffs4, pieces, skipped4) = check_segment_parse(data, &inv, &c.segs);
+            let parse_s = t4.elapsed().as_secs_f64();
+            let ok4 = diffs4.is_empty();
+            diffs3.extend(diffs4);
+            ok = ok && ok3 && ok4;
             let cblocks = c.segs.iter().filter(|s| s.cblock).count();
             let chained = c.segs.iter().filter(|s| s.chained != 0).count();
             out.push_str(&format!(
-                "  \"check_seg\": {{\"ok\": {}, \"segments\": {}, \"cblocks\": {}, \"spans\": {}, \"span_bytes\": {}, \"chained\": {}, \"cells_skipped\": {}, \"mismatches\": [{}]}},\n",
+                "  \"check_seg\": {{\"ok\": {}, \"stats_ok\": {}, \"parse_ok\": {}, \"segments\": {}, \"cblocks\": {}, \"spans\": {}, \"span_bytes\": {}, \"chained\": {}, \"pieces\": {}, \"parse_s\": {:.3}, \"cells_skipped\": {}, \"mismatches\": [{}]}},\n",
+                ok3 && ok4,
                 ok3,
+                ok4,
                 c.segs.len(),
                 cblocks,
                 c.segs.len() - cblocks,
                 seg_bytes,
                 chained,
-                skipped,
+                pieces,
+                parse_s,
+                skipped.max(skipped4),
                 diffs3
                     .iter()
                     .map(|d| crate::json_str(d))
@@ -1411,14 +1541,17 @@ pub fn inventory_cmd(args: &[String]) {
                 eprintln!("segment check: {}", d);
             }
             eprintln!(
-                "segment check: {} ({} segments: {} CBLOCK, {} span of {}; {} chained; {} cells skipped; per cell and layer the sums, boxes and feature maxima equal the Doc's)",
+                "segment check: {} ({} segments: {} CBLOCK, {} span of {}; {} chained; {} cells skipped; per cell and layer the sums, boxes and feature maxima equal the Doc's); parse {}: {} pieces from the segments with their snapshots = the cell parse ({:.1}s)",
                 if ok3 { "OK" } else { "MISMATCH" },
                 c.segs.len(),
                 cblocks,
                 c.segs.len() - cblocks,
                 crate::fmt_size(seg_bytes),
                 chained,
-                skipped
+                skipped.max(skipped4),
+                if ok4 { "OK" } else { "MISMATCH" },
+                pieces,
+                parse_s
             );
         }
     }

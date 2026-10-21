@@ -1875,6 +1875,31 @@ fn record(
 
 const MAGIC: &[u8] = b"%SEMI-OASIS\r\n";
 
+/// The inflated body of the CBLOCK record at `bytes[0]` (`base`: its
+/// file offset, for messages): the record stream a CBLOCK segment of
+/// the segment directory holds (docs/DIRECT_READ_PLAN.ko.md L3).
+pub fn inflate_cblock_record(bytes: &[u8], base: usize) -> Result<Vec<u8>> {
+    let mut c = Cur::new(bytes, base);
+    if c.uint()? != 34 {
+        return err(base, "not a CBLOCK record");
+    }
+    let ctype = c.uint()?;
+    let un = c.uint()? as usize;
+    let cn = c.uint()? as usize;
+    let comp = c.bytes(cn)?;
+    if ctype != 0 {
+        return err(c.here(), "unknown CBLOCK compression");
+    }
+    let mut out = Vec::with_capacity(un);
+    flate2::read::DeflateDecoder::new(comp)
+        .read_to_end(&mut out)
+        .map_err(OasisError::Io)?;
+    if out.len() != un {
+        return err(c.here(), "CBLOCK inflate size mismatch");
+    }
+    Ok(out)
+}
+
 pub fn scan(data: &[u8]) -> Result<ScanStats> {
     scan_with(data, 1, false, None)
 }
