@@ -97,7 +97,12 @@ CBLOCK 없는 구간의 길이(기본 256K, K/M/G 접미사). `jobs`는 위치 �
 [<src.oas>] [--cells] [--check]`는 파일을 읽어 같은 JSON을 내고, 소스가 있으면 새 재고와
 바이트를 비교하며(`"load": {…, "identical": true}`) `--check`는 읽은 재고를 Doc에 댄다.
 스트리밍 빌드는 design.ovm을 커밋하기 전에 같은 design.inv를 캐시에 쓴다(0.12.379,
-DIRECT_READ_PLAN L1 §8.2).
+DIRECT_READ_PLAN L1 §8.2). `--seg design.seg [--seg-bytes N]`은 같은 걸음에 모은
+세그먼트 디렉터리(SPEC-FORMATS FLOESEG1: CBLOCK·구간마다 모달 스냅샷과 레이어별 페이지
+통계)를 쓰고 읽어 확인하며, `--check-seg`는 그 레이어별 통계(셀·레이어별 레코드·멤버 합,
+bbox 합집합, 도형 치수 최대)를 Doc에서 같은 식으로 계산한 값에 댄다; `--load-seg
+design.seg`는 읽어서 design.inv와 짝인지(`"pair_ok"`), 소스가 있으면 새 디렉터리와
+같은 바이트인지(`"identical"`) 본다(0.12.380, L2 §8.3).
 
 ### 1.1 단일 셀 비게시 프로파일
 
@@ -176,6 +181,11 @@ STREAMING_INDEX_PLAN §11. 소스를 읽어 캐시를 만드는 실행은 **스�
   그 파일이 `floe-index inventory --out`과 같은 바이트인지, 인메모리 캐시에 없는지,
   묵은 파일이 재빌드에 지워지는지 본다. 빌드가 이 파일을 읽어 재고 패스를 생략하는
   일은 아직 없다(L5).
+- 같은 재고 패스가 세그먼트 디렉터리 `design.seg`(SPEC-FORMATS FLOESEG1)도 모아 design.inv
+  뒤에 쓴다(0.12.380, DIRECT_READ_PLAN L2): `--no-seg`로 생략, `--seg-bytes N`(기본
+  256K)이 CBLOCK 없는 구간의 길이. 재고 패스 시간의 +10~15 %. 게이트 `vfs_stream`은
+  design.inv와 같은 규칙으로 본다(`floe-index inventory --seg`와 같은 바이트, 짝,
+  인메모리에 없음, 묵은 파일 제거, `--no-seg`).
 - `floe2 index`는 같은 세 플래그(`--stream`, `--in-memory`, `--mem`)를 그대로 넘기고,
   기본은 아무것도 넘기지 않는다(floe-index의 기본 = 스트리밍). 덱 소스·뷰어의 덱
   색인·자동 색인도 같다. design.ovo 없는 현재 캐시의 점유 추가(`occupancy` 실행)도

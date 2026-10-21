@@ -126,6 +126,11 @@ pub fn vfs_cmd(args: &[String]) {
     let mut stream_flag = false;
     let mut in_memory_flag = false;
     let mut mem_gib: Option<f64> = None;
+    // the segment directory design.seg (DIRECT_READ_PLAN L2): collected in
+    // the streaming build's inventory pass unless --no-seg; its span
+    // length between CBLOCKs
+    let mut seg = true;
+    let mut seg_bytes = floe_oasis::segments::DEFAULT_SPAN_BYTES;
     // Isolated, non-publishing cell planner profile. The complete source is
     // still parsed and recursive child bboxes are prepared, but exactly one
     // build_cell_plan call runs and no cache path is created or modified.
@@ -342,6 +347,21 @@ pub fn vfs_cmd(args: &[String]) {
                     std::process::exit(2);
                 }
                 mem_gib = Some(g);
+                i += 2;
+            }
+            "--no-seg" => {
+                seg = false;
+                i += 1;
+            }
+            "--seg-bytes" => {
+                seg_bytes = args
+                    .get(i + 1)
+                    .and_then(|v| crate::parse_bytes(v))
+                    .filter(|&v| v > 0)
+                    .unwrap_or_else(|| {
+                        eprintln!("--seg-bytes needs a byte count (e.g. 256K)");
+                        std::process::exit(2);
+                    });
                 i += 2;
             }
             a if a.starts_with("--") => crate::unknown_option("vfs", a),
@@ -642,6 +662,8 @@ pub fn vfs_cmd(args: &[String]) {
             kill_at: kill_at.clone(),
             hold_at: hold_at.clone(),
             mem_gib,
+            seg,
+            seg_bytes,
             occ_opts: &occ_opts,
             auto: mode == BuildMode::Auto,
         };
@@ -989,6 +1011,8 @@ fn clear_outputs(outdir: &str) {
         "design.ovs.tmp",
         "design.inv",
         "design.inv.tmp",
+        "design.seg",
+        "design.seg.tmp",
         "labels.tsv",
         // legacy (pre-0.10) viewer file: scrub on rebuild so a
         // re-index actually reclaims the skeleton's bytes
@@ -1019,6 +1043,10 @@ struct StreamArgs<'a> {
     kill_at: Option<String>,
     hold_at: Option<String>,
     mem_gib: Option<f64>,
+    /// design.seg collected in the inventory pass (DIRECT_READ_PLAN L2)
+    /// and its span length between CBLOCKs
+    seg: bool,
+    seg_bytes: u64,
     occ_opts: &'a floe_vfs::occupancy::Opts,
     /// the default mode (neither --stream nor --in-memory): the streaming
     /// build may decline the file and leave it to the in-memory build
@@ -1138,6 +1166,8 @@ struct StreamOpen {
     size: u64,
     mtime: u64,
     inventory_s: f64,
+    /// the segment directory of the same walk (None under --no-seg)
+    segs: Option<floe_oasis::segments::SegCollector>,
 }
 
 /// why the streaming build stopped before touching any output
@@ -1213,7 +1243,12 @@ fn stream_open(a: &StreamArgs) -> Result<StreamOpen, StreamDecline> {
                 });
             }
         };
-        match floe_oasis::inventory(&map[..], a.jobs) {
+        let walked = if a.seg {
+            floe_oasis::inventory_segments(&map[..], a.jobs, a.seg_bytes).map(|(inv, col)| (inv, Some(col)))
+        } else {
+            floe_oasis::inventory(&map[..], a.jobs).map(|inv| (inv, None))
+        };
+        match walked {
             Ok(v) => v,
             Err(e) => {
                 // what the inventory refuses (a reference number defined
@@ -1229,6 +1264,7 @@ fn stream_open(a: &StreamArgs) -> Result<StreamOpen, StreamDecline> {
             }
         }
     };
+    let (inv, segs) = inv;
     ticking.store(false, std::sync::atomic::Ordering::Relaxed);
     let inventory_s = t1.elapsed().as_secs_f64();
     let (budget, budget_how) = match a.mem_gib {
@@ -1237,7 +1273,7 @@ fn stream_open(a: &StreamArgs) -> Result<StreamOpen, StreamDecline> {
     };
     eprintln!(
         "[vfs] stream: inventory {} cells, {} layers, {} records in {:.1}s \
-         (Doc estimate {}; budget {} {}; rss {})",
+         (Doc estimate {}; budget {} {}; rss {}){}",
         inv.cells.len(),
         inv.layer_order.len(),
         inv.scan.records,
@@ -1245,7 +1281,11 @@ fn stream_open(a: &StreamArgs) -> Result<StreamOpen, StreamDecline> {
         fmt_size(inv.scan.doc_bytes),
         fmt_size(budget),
         budget_how,
-        rss()
+        rss(),
+        match &segs {
+            Some(c) => format!("; {} segments", c.segs.len()),
+            None => String::new(),
+        }
     );
     let opened = match crate::stream::StreamStore::new(inv, &a.src, budget) {
         Ok((store, plan)) => Ok((store, plan, budget)),
@@ -1329,6 +1369,7 @@ fn stream_open(a: &StreamArgs) -> Result<StreamOpen, StreamDecline> {
         size,
         mtime,
         inventory_s,
+        segs,
     })
 }
 
@@ -1354,6 +1395,7 @@ fn vfs_stream(
         size,
         mtime,
         inventory_s,
+        segs,
     } = match stream_open(a) {
         Ok(o) => o,
         Err(d) => return declined(a, d),
@@ -1487,19 +1529,51 @@ fn vfs_stream(
     // it; outside the marker protocol like design.ovh (the cache is
     // complete without it, so a failure is one line)
     {
-        let path = std::path::Path::new(&a.outdir).join(floe_oasis::invfile::FILE_NAME);
         let id = floe_oasis::invfile::Identity {
             src_size: size,
             src_mtime: mtime,
         };
-        match floe_oasis::invfile::write(&path, store.inventory(), id) {
-            Ok(n) => eprintln!(
+        let inv_bytes = floe_oasis::invfile::encode(store.inventory(), id);
+        let publish = |name: &str, bytes: &[u8]| -> std::io::Result<()> {
+            let path = std::path::Path::new(&a.outdir).join(name);
+            let tmp = std::path::Path::new(&a.outdir).join(format!("{}.tmp", name));
+            std::fs::write(&tmp, bytes)?;
+            std::fs::rename(&tmp, &path)
+        };
+        match publish(floe_oasis::invfile::FILE_NAME, &inv_bytes) {
+            Ok(()) => eprintln!(
                 "[vfs] stream: design.inv ({}, {} cells, {} layers)",
-                fmt_size(n as u64),
+                fmt_size(inv_bytes.len() as u64),
                 store.inventory().cells.len(),
                 store.inventory().layer_order.len()
             ),
             Err(e) => eprintln!("[vfs] stream: design.inv not written: {}", e),
+        }
+        // the segment directory of the same walk (DIRECT_READ_PLAN L2),
+        // paired with the inventory's bytes; outside the marker protocol
+        // like design.inv
+        if let Some(col) = segs.as_ref() {
+            match floe_oasis::segfile::SegFile::from_segments(&col.segs, store.inventory(), a.seg_bytes) {
+                Ok(mut f) => {
+                    f.inv_crc = floe_oasis::segfile::inv_crc_of(&inv_bytes).unwrap_or(0);
+                    let bytes = floe_oasis::segfile::encode(&f, id);
+                    let cblocks = f.segs.iter().filter(|s| s.is_cblock()).count();
+                    match publish(floe_oasis::segfile::FILE_NAME, &bytes) {
+                        Ok(()) => eprintln!(
+                            "[vfs] stream: design.seg ({}; {} segments: {} CBLOCK, {} span of {}; {} layer rows, {} snapshot bytes)",
+                            fmt_size(bytes.len() as u64),
+                            f.segs.len(),
+                            cblocks,
+                            f.segs.len() - cblocks,
+                            fmt_size(a.seg_bytes),
+                            f.layers.len(),
+                            fmt_size(f.snaps.len() as u64)
+                        ),
+                        Err(e) => eprintln!("[vfs] stream: design.seg not written: {}", e),
+                    }
+                }
+                Err(e) => eprintln!("[vfs] stream: design.seg not written: {}", e),
+            }
         }
     }
     if a.occupancy {
@@ -1586,6 +1660,7 @@ fn vfs_stream_occupancy_only(a: &StreamArgs, t0: std::time::Instant) -> Option<S
         size,
         mtime,
         inventory_s,
+        segs: _,
     } = match stream_open(a) {
         Ok(o) => o,
         Err(d) => return declined(a, d),

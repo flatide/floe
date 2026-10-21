@@ -21,6 +21,7 @@ pub mod geom;
 pub mod header;
 pub mod inventory;
 pub mod invfile;
+pub mod segfile;
 pub mod segments;
 pub mod write;
 
@@ -196,6 +197,7 @@ fn read_repetition(
     modal: &mut Option<Repetition>,
     st: &mut ScanStats,
 ) -> Result<Repetition> {
+    let p0 = c.here() as u64;
     let t = c.uint()?;
     *st.rep_types.entry(t).or_default() += 1;
     let rep = match t {
@@ -284,7 +286,11 @@ fn read_repetition(
     if t == 0 {
         st.seg_rep_reused();
     } else {
-        st.seg_rep_defined(matches!(t, 4 | 5 | 6 | 7 | 10 | 11).then_some(rep.members));
+        st.seg_rep_defined(
+            matches!(t, 4 | 5 | 6 | 7 | 10 | 11).then_some(rep.members),
+            p0,
+            c.here() as u64,
+        );
     }
     *modal = Some(rep);
     Ok(rep)
@@ -655,56 +661,75 @@ impl ScanStats {
     }
 
     /// after a record: counted into the open segment; a top-level span
-    /// past its length closes at this record boundary
-    fn seg_record_end(&mut self, end: u64) {
+    /// past its length closes at this record boundary (`live` /
+    /// `live_base`: the bytes the records are in, for the snapshot)
+    fn seg_record_end(&mut self, end: u64, live: &[u8], live_base: u64, modal: &Modal) {
         let depth = self.cblock_depth;
         if let Some(s) = self.seg.as_deref_mut() {
             s.record();
             if depth == 0 {
-                s.record_end(end);
+                s.record_end(end, modal, live, live_base);
             }
         }
     }
 
-    /// a CELL record: the open span closes, the modal lists are dropped
-    fn seg_cell(&mut self, at: u64) {
+    /// a CELL record: at the top level the open span closes and the
+    /// modal lists are dropped; inside a CBLOCK the block stays one
+    /// segment, flagged
+    fn seg_cell(&mut self, at: u64, live: &[u8], live_base: u64, modal: &Modal) {
+        let depth = self.cblock_depth;
         if let Some(s) = self.seg.as_deref_mut() {
-            s.close(at);
-            s.cell_reset();
+            if depth > 0 {
+                s.cell_inside();
+            } else {
+                s.close(at, modal, live, live_base);
+                s.cell_reset();
+            }
         }
     }
 
-    fn seg_close(&mut self, at: u64) {
+    fn seg_close(&mut self, at: u64, live: &[u8], live_base: u64, modal: &Modal) {
         if let Some(s) = self.seg.as_deref_mut() {
-            s.close(at);
+            s.close(at, modal, live, live_base);
         }
     }
 
     /// a top-level CBLOCK inside a cell is a segment of its own
-    fn seg_open_cblock(&mut self, at: u64, inflated: u64) {
+    /// (`body_base`: where the cursor over its inflated bytes counts
+    /// from; `live`: the bytes the span before it was in)
+    fn seg_open_cblock(
+        &mut self,
+        at: u64,
+        inflated: u64,
+        body_base: u64,
+        modal: &Modal,
+        live: &[u8],
+        live_base: u64,
+    ) {
         if self.cblock_depth == 0 && self.cur_cell.is_some() {
             let ci = self.seg_cell_index();
             if let Some(s) = self.seg.as_deref_mut() {
-                s.open_cblock(ci, at, inflated);
+                s.open_cblock(ci, at, inflated, body_base, modal, live, live_base);
             }
         }
     }
 
     /// after a top-level CBLOCK's body: its record ends at `end`
-    fn seg_close_cblock(&mut self, end: u64) {
+    /// (`body`: its inflated bytes, still at hand for the snapshot)
+    fn seg_close_cblock(&mut self, end: u64, body: &[u8], body_base: u64, modal: &Modal) {
         if self.cblock_depth == 0 {
-            self.seg_close(end);
+            self.seg_close(end, body, body_base, modal);
         }
     }
 
-    /// a shape: counted into the open segment with its box (when the
-    /// modals gave one), and into the open cell's box
-    fn seg_shape(&mut self, m: &Modal, members: u64, bb: Option<Box4>) {
-        if let Some(s) = self.seg.as_deref_mut() {
-            s.shape(m.layer.unwrap_or(0), m.datatype.unwrap_or(0), members, bb);
-        } else {
-            return;
-        }
+    /// a shape: counted into the open segment and its layer with the
+    /// single feature's box `rec` (when the modals gave one) widened by
+    /// its repetition, and into the open cell's box
+    fn seg_shape(&mut self, m: &Modal, members: u64, rec: Option<Box4>, rep: &Repetition) {
+        let bb = match self.seg.as_deref_mut() {
+            Some(s) => s.shape(m.layer.unwrap_or(0), m.datatype.unwrap_or(0), members, rec, rep),
+            None => return,
+        };
         if let (Some(b), Some(cs)) = (bb, self.cur_cell.as_mut()) {
             match cs.bbox.as_mut() {
                 Some(cb) => box_grow(cb, &b),
@@ -725,9 +750,9 @@ impl ScanStats {
         }
     }
 
-    fn seg_rep_defined(&mut self, pts: Option<u64>) {
+    fn seg_rep_defined(&mut self, pts: Option<u64>, p0: u64, p1: u64) {
         if let Some(s) = self.seg.as_deref_mut() {
-            s.rep_defined(pts);
+            s.rep_defined(pts, p0, p1);
         }
     }
 
@@ -737,9 +762,9 @@ impl ScanStats {
         }
     }
 
-    fn seg_poly_defined(&mut self, verts: u64) {
+    fn seg_poly_defined(&mut self, verts: u64, p0: u64, p1: u64) {
         if let Some(s) = self.seg.as_deref_mut() {
-            s.poly_defined(verts);
+            s.poly_defined(verts, p0, p1);
         }
     }
 
@@ -749,9 +774,16 @@ impl ScanStats {
         }
     }
 
-    fn seg_path_defined(&mut self, verts: u64) {
+    fn seg_path_defined(&mut self, verts: u64, p0: u64, p1: u64) {
         if let Some(s) = self.seg.as_deref_mut() {
-            s.path_defined(verts);
+            s.path_defined(verts, p0, p1);
+        }
+    }
+
+    /// an inline text string spelled out at `p0..p1`
+    fn seg_text_defined(&mut self, p0: u64, p1: u64) {
+        if let Some(s) = self.seg.as_deref_mut() {
+            s.text_defined(p0, p1);
         }
     }
 
@@ -1010,7 +1042,7 @@ fn record(
     let id = c.uint()?;
     if id == 2 {
         st.end_at = at;
-        st.seg_close(at);
+        st.seg_close(at, c.data, c.base as u64, modal);
         return Ok(Rec::End); // END: not counted (parallel workers
     }                        // never see it - keep both paths equal)
     st.records += 1;
@@ -1089,7 +1121,7 @@ fn record(
             let r = c.uint()?;
             st.cells += 1;
             *modal = Modal::default();
-            st.seg_cell(at);
+            st.seg_cell(at, c.data, c.base as u64, modal);
             st.open_cell(String::new(), Some(r));
             st.open_inv_cell(inventory::Target::Ref(r), at);
             return Ok(Rec::Cell);
@@ -1098,7 +1130,7 @@ fn record(
             let name = c.string()?;
             st.cells += 1;
             *modal = Modal::default();
-            st.seg_cell(at);
+            st.seg_cell(at, c.data, c.base as u64, modal);
             let s = st.name_string(c, name)?;
             if st.inv.is_some() {
                 st.open_cell(s.clone(), None);
@@ -1191,10 +1223,12 @@ fn record(
                     modal.text_target = Some(Some(r));
                     modal.text_len = 0; // table string: not costed
                 } else {
+                    let p0 = c.here() as u64;
                     let s = c.string()?;
                     st.check_utf8(c, s)?;
                     modal.text_target = Some(None);
                     modal.text_len = s.len() as u64;
+                    st.seg_text_defined(p0, c.here() as u64);
                 }
             }
             if lbit {
@@ -1270,17 +1304,13 @@ fn record(
             st.shape(modal, c, rep.members)?;
             st.cost(RECT_SZ, 0);
             if st.seg.is_some() {
-                let bb = match (modal.geo_w, modal.geo_h) {
-                    (Some(w), Some(h)) => Some(inventory::rep_box(
-                        modal.geo_x,
-                        modal.geo_y,
-                        modal.geo_x + w,
-                        modal.geo_y + h,
-                        &rep,
-                    )),
+                let rec = match (modal.geo_w, modal.geo_h) {
+                    (Some(w), Some(h)) => {
+                        Some((modal.geo_x, modal.geo_y, modal.geo_x + w, modal.geo_y + h))
+                    }
                     _ => None,
                 };
-                st.seg_shape(modal, rep.members, bb);
+                st.seg_shape(modal, rep.members, rec, &rep);
             }
             if let Some(part) = st.inv.as_deref_mut() {
                 let w = match modal.geo_w {
@@ -1321,10 +1351,11 @@ fn record(
                 modal.datatype = Some(c.uint()?);
             }
             if pbit {
+                let p0 = c.here() as u64;
                 let (verts, bb) = read_point_list(c, true, None)?;
                 modal.poly_verts = Some(verts);
                 modal.poly_box = Some(bb);
-                st.seg_poly_defined(verts);
+                st.seg_poly_defined(verts, p0, c.here() as u64);
             } else {
                 st.seg_poly_reused();
             }
@@ -1340,16 +1371,15 @@ fn record(
             st.points(verts);
             st.cost(POLY_SZ, PT_SZ * verts);
             if st.seg.is_some() {
-                let bb = modal.poly_box.map(|pb| {
-                    inventory::rep_box(
+                let rec = modal.poly_box.map(|pb| {
+                    (
                         modal.geo_x + pb.0,
                         modal.geo_y + pb.1,
                         modal.geo_x + pb.2,
                         modal.geo_y + pb.3,
-                        &rep,
                     )
                 });
-                st.seg_shape(modal, rep.members, bb);
+                st.seg_shape(modal, rep.members, rec, &rep);
             }
             if let Some(part) = st.inv.as_deref_mut() {
                 let pb = match modal.poly_box {
@@ -1414,10 +1444,11 @@ fn record(
                 } else {
                     None
                 };
+                let p0 = c.here() as u64;
                 let (verts, _) = read_point_list(c, false, spine)?;
                 modal.path_verts = Some(verts);
                 modal.path_set = true;
-                st.seg_path_defined(verts);
+                st.seg_path_defined(verts, p0, c.here() as u64);
             } else {
                 st.seg_path_reused();
             }
@@ -1439,7 +1470,7 @@ fn record(
                     }
                     _ => None,
                 };
-                st.seg_shape(modal, rep.members, bb);
+                st.seg_shape(modal, rep.members, bb, &rep);
             }
             if let Some(part) = st.inv.as_deref_mut() {
                 let hw = match modal.path_hw {
@@ -1501,7 +1532,9 @@ fn record(
             st.points(4);
             st.cost(POLY_SZ, PT_SZ * 4);
             if st.seg.is_some() {
-                let bb = match (modal.geo_w, modal.geo_h) {
+                // as the inventory branch below: a degenerate trapezoid
+                // materializes no record; missing modals give no box
+                match (modal.geo_w, modal.geo_h) {
                     (Some(w), Some(h)) => {
                         let pts = crate::doc::dedupe_ring(crate::doc::trapezoid_points(
                             info & 0x80 != 0,
@@ -1510,12 +1543,14 @@ fn record(
                             da,
                             db,
                         ));
-                        (pts.len() >= 3)
-                            .then(|| inventory::rep_box_pts(&pts, modal.geo_x, modal.geo_y, &rep))
+                        if pts.len() >= 3 {
+                            let b = crate::geom::pts_box(&pts);
+                            let rec = (modal.geo_x + b.0, modal.geo_y + b.1, modal.geo_x + b.2, modal.geo_y + b.3);
+                            st.seg_shape(modal, rep.members, Some(rec), &rep);
+                        }
                     }
-                    _ => None,
-                };
-                st.seg_shape(modal, rep.members, bb);
+                    _ => st.seg_shape(modal, rep.members, None, &rep),
+                }
             }
             if let Some(part) = st.inv.as_deref_mut() {
                 let w = match modal.geo_w {
@@ -1584,8 +1619,11 @@ fn record(
             st.cost(POLY_SZ, PT_SZ * verts);
             if st.seg.is_some() {
                 // the same implied-dimension rules as the inventory's
-                // branch below (the two never run together)
-                let mut bb = None;
+                // branch below (the two never run together); a
+                // degenerate one materializes no record, missing modals
+                // give no box
+                let mut known = false;
+                let mut rec = None;
                 if let Some(t) = modal.ctrap_type {
                     let w = match t {
                         20 | 21 => Some(modal.geo_w.unwrap_or(0)),
@@ -1597,6 +1635,7 @@ fn record(
                     };
                     if let (Some(w), Some(h)) = (w, h) {
                         if let Some((pts, iw, ih)) = crate::doc::ctrapezoid_points(t, w, h) {
+                            known = true;
                             if let Some(iw) = iw {
                                 modal.geo_w = Some(iw);
                             }
@@ -1605,12 +1644,20 @@ fn record(
                             }
                             let pts = crate::doc::dedupe_ring(pts);
                             if pts.len() >= 3 {
-                                bb = Some(inventory::rep_box_pts(&pts, modal.geo_x, modal.geo_y, &rep));
+                                let b = crate::geom::pts_box(&pts);
+                                rec = Some((
+                                    modal.geo_x + b.0,
+                                    modal.geo_y + b.1,
+                                    modal.geo_x + b.2,
+                                    modal.geo_y + b.3,
+                                ));
                             }
                         }
                     }
                 }
-                st.seg_shape(modal, rep.members, bb);
+                if !known || rec.is_some() {
+                    st.seg_shape(modal, rep.members, rec, &rep);
+                }
             }
             if let Some(part) = st.inv.as_deref_mut() {
                 let t = match modal.ctrap_type {
@@ -1691,11 +1738,16 @@ fn record(
             st.points(64);
             st.cost(POLY_SZ, PT_SZ * 64);
             if st.seg.is_some() {
-                let bb = modal.circle_r.filter(|&r| r > 0).map(|r| {
-                    let pts = crate::doc::circle64(modal.geo_x, modal.geo_y, r);
-                    inventory::rep_box_pts(&pts, 0, 0, &rep)
-                });
-                st.seg_shape(modal, rep.members, bb);
+                // a radius of 0 materializes no record (and registers no
+                // layer: the inventory branch below); no radius gives no box
+                match modal.circle_r {
+                    Some(r) if r > 0 => {
+                        let b = crate::geom::pts_box(&crate::doc::circle64(modal.geo_x, modal.geo_y, r));
+                        st.seg_shape(modal, rep.members, Some(b), &rep);
+                    }
+                    Some(_) => {}
+                    None => st.seg_shape(modal, rep.members, None, &rep),
+                }
             }
             if let Some(part) = st.inv.as_deref_mut() {
                 let r = match modal.circle_r {
@@ -1778,7 +1830,7 @@ fn record(
             }
             let rep = rep_of(c, modal, st, rbit)?;
             st.shape(modal, c, rep.members)?;
-            st.seg_shape(modal, rep.members, None);
+            st.seg_shape(modal, rep.members, None, &rep);
         }
         34 => {
             // CBLOCK: comp-type, uncomp-count, comp-count, bytes
@@ -1799,7 +1851,8 @@ fn record(
                 }
                 st.cblocks += 1;
                 st.cblock_bytes_inflated += un as u64;
-                st.seg_open_cblock(at, un as u64);
+                let body_base = c.here() as u64;
+                st.seg_open_cblock(at, un as u64, body_base, modal, c.data, c.base as u64);
                 st.cblock_depth += 1;
                 let mut sub = Cur::new(&out, c.here());
                 while !sub.at_end() {
@@ -1808,12 +1861,12 @@ fn record(
                     }
                 }
                 st.cblock_depth -= 1;
-                st.seg_close_cblock(c.here() as u64);
+                st.seg_close_cblock(c.here() as u64, &out, body_base, modal);
             }
         }
         _ => return err(c.here(), &format!("unknown record id {}", id)),
     }
-    st.seg_record_end(c.here() as u64);
+    st.seg_record_end(c.here() as u64, c.data, c.base as u64, modal);
     if let Some(cs) = st.cur_cell.as_mut() {
         cs.records += 1;
     }
@@ -1851,6 +1904,22 @@ pub fn scan_segments(data: &[u8], jobs: usize, span_bytes: u64) -> Result<ScanSt
 pub fn inventory(data: &[u8], jobs: usize) -> Result<inventory::Inventory> {
     let st = scan_with(data, jobs, true, None)?;
     inventory::finish(st)
+}
+
+/// The inventory pass with the segment directory collected in the same
+/// walk (docs/DIRECT_READ_PLAN.ko.md L2): every top-level CBLOCK inside a
+/// cell and every span of `span_bytes` between them, each with the modal
+/// snapshot at its first record and its per-layer page statistics
+/// (segments.rs). The collector's cells are numbered as the inventory's.
+pub fn inventory_segments(
+    data: &[u8],
+    jobs: usize,
+    span_bytes: u64,
+) -> Result<(inventory::Inventory, segments::SegCollector)> {
+    let mut st = scan_with(data, jobs, true, Some(span_bytes))?;
+    let seg = st.seg.take().map(|b| *b).unwrap_or_default();
+    let inv = inventory::finish(st)?;
+    Ok((inv, seg))
 }
 
 /// The scan frame: one record walk over the whole file, CBLOCKs
@@ -1903,7 +1972,7 @@ fn scan_with(
     // here: close it before the workers' cells merge behind it, or its
     // CellStat would land last while its inventory part comes first
     st.close_cell();
-    st.seg_close((MAGIC.len() + head_end) as u64);
+    st.seg_close((MAGIC.len() + head_end) as u64, &[], 0, &Modal::default());
     let file_end = (MAGIC.len() + end_at) as u64;
     let n_units = cuts.len();
     if n_units > 0 {
@@ -1937,7 +2006,7 @@ fn scan_with(
                             }
                         }
                         ws.close_cell();
-                        ws.seg_close((MAGIC.len() + b) as u64);
+                        ws.seg_close((MAGIC.len() + b) as u64, &body[a..b], (MAGIC.len() + a) as u64, &wm);
                         ws.close_inv((MAGIC.len() + b) as u64);
                         Ok(ws)
                     })

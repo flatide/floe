@@ -181,7 +181,7 @@ L0 실측), 가장 큰 셀 26 MiB = CBLOCK 341개(레코드 118만, Doc 415 MiB)
 | 파일 | 내용 | 크기(현장 50 GB) |
 | --- | --- | --- |
 | `design.inv` (**구현 §8.2**, SPEC-FORMATS FLOEINV1) | 재고 직렬화: 헤더(magic, 버전, unit, src_size/mtime, top, n_cells, n_layers), 레이어 표(순서·이름·별칭), 셀 표(이름, ranges, def_ranges, 카운터, dbox 2종, dmembers, 마스크 3종), 간선(child, placements, members, obox 8 — 쓰인 방향만), fold(topo, rank, height, rmembers, rmask/rtmask/rsmask, rbb 2종), CELLNAME/TEXTSTRING 표 | 셀 5,461 → 수 MB. (p10: 셀 35,183·간선 188,065·레이어 449 → 약 60~80 MB; 마스크 상한 = obox 8 × 32 B를 쓰인 방향만으로) |
-| `design.seg` | 세그먼트 디렉터리: 세그먼트마다 cell u32, 파일 오프셋 u64, 압축 길이 u32, 해제 길이 u32, 종류(CBLOCK/구간) u8, 스냅샷 오프셋 u32(또는 "체인: 이전 독립 세그먼트에서 파싱"), 레코드 수 u32, 멤버 u64, bbox 4×i64, 레이어 마스크(비트셋 풀 참조), 레이어별 통계 블록(레이어 idx, records, members, bbox, max_w, max_h, max_min — 세그먼트가 가진 레이어만), 배치·텍스트 유무 플래그; 셀별 세그먼트 범위 표; 스냅샷 풀 | 78.1만 × (약 80 B + 레이어 통계) ≈ 60~120 MB (0.12~0.24 %) |
+| `design.seg` (**구현 §8.3**, SPEC-FORMATS FLOESEG1) | 세그먼트 디렉터리: 세그먼트마다 cell u32, 파일 오프셋 u64, 압축 길이 u32, 해제 길이 u32, 종류(CBLOCK/구간) u8, 스냅샷 오프셋 u32(또는 "체인: 이전 독립 세그먼트에서 파싱"), 레코드 수 u32, 멤버 u64, bbox 4×i64, 레이어 마스크(비트셋 풀 참조), 레이어별 통계 블록(레이어 idx, records, members, bbox, max_w, max_h, max_min — 세그먼트가 가진 레이어만), 배치·텍스트 유무 플래그; 셀별 세그먼트 범위 표; 스냅샷 풀 | 78.1만 × (약 80 B + 레이어 통계) ≈ 60~120 MB (0.12~0.24 %) |
 | `design.ovo` | 지금과 같은 FLOEOVO2 | 마스크 수 MB~수십 MB |
 | `meta.json` | `vfs: 1` 대신 `light: 1`; 소스 identity; 세그먼트 통계; 생성 시간 | — |
 
@@ -384,7 +384,7 @@ geometry/placement/text x·y, W/H, 점 목록, 경로 확장, 반복, 배치 대
 | --- | --- | --- |
 | L0 측정 | scan 확장: 세그먼트별 bbox·레이어 수·모달 체인 통계; 현장 파일 1회 | **완료 0.12.374(§8.1)**: 단위 테스트 + `rust_scan` 게이트; **현장 판정 2026-10-21: 한 축 띠, 체인 0 — L1로** |
 | L1 사이드카 | `design.inv` 직렬화/로더(재고 ↔ 파일 왕복 동일), 전체 빌드도 함께 씀(선택) | **완료 0.12.379(§8.2)**: 왕복 바이트 동일(단위 테스트 + `rust_inventory`), 스트리밍 빌드가 씀(`vfs_stream`) |
-| L2 세그먼트 | 재고 패스의 세그먼트 방출(스냅샷·레이어 통계), `design.seg` | 세그먼트 통계 = 전체 Doc에서 계산한 값 |
+| L2 세그먼트 | 재고 패스의 세그먼트 방출(스냅샷·레이어 통계), `design.seg` | **완료 0.12.380(§8.3)**: 세그먼트 통계 = Doc(`--check-seg`, `rust_inventory`), 왕복 동일, 스트리밍 빌드가 씀(`vfs_stream`) |
 | L3 시드 파서 | `parse_segment`, CBLOCK inflate, 체인 | 모든 fixture + 적대적 스트림: 세그먼트 파싱의 레코드 합 = 셀 파싱 (G2급) |
 | L4 LightVfs | 합성 Ovm, 세그먼트 페이지 디코드, 배치 LRU, 셀 트리 | `--detail exact` 픽셀 동일(fixture 전부), cut 뷰 허용 오차 게이트, 성능 카운터 |
 | L5 명령·모드 | `floe-index light`, `floe2 index --light`, 열기 규칙, 상태줄/info, 자동 생성, 잠금 | CLI 게이트, index_lock |
@@ -526,6 +526,54 @@ L4까지 끝나면 단독 소스를 경량으로 열어 볼 수 있고, L5·L6�
 - **실측(macOS 4 jobs).** valmini 12 KB; sample9 859 KB(1,188셀·40 레이어; 전체 1.25 s
   중 쓰기 0.011 s); main01_chip_p10 64 MB(35,183셀·188,065 간선·449 레이어; 11.6 s 중
   쓰기 0.58 s) — §5.1의 추정 60~80 MB 안. 현장 50 GB(5,461셀·5 레이어)는 수 MB.
+
+### 8.3 L2 구현 (0.12.380 / floe-index 0.12.339, 2026-10-21; 사용자 "L2 진행해줘")
+
+- **수집.** 재고 패스가 같은 걸음에 세그먼트를 모은다(`floe_oasis::inventory_segments
+  (data, jobs, span_bytes)` → 재고 + `SegCollector`; L0의 수집기 확장). 세그먼트 정의는
+  §8.1 그대로(셀 안의 최상위 CBLOCK, 또는 구간). CBLOCK 안의 CELL 레코드는 그 블록을
+  나누지 않고 `cells_inside`로 표시한다(독자가 블록 전체를 파싱해 셀별로 나눈다).
+- **스냅샷(§5.2).** 세그먼트의 첫 레코드에서의 모달 변수: 스칼라(XY 모드, geo/pl/tx
+  x·y, layer/datatype/textlayer/texttype, W/H, circle_r, ctrap_type, path hw/es/ee,
+  배치 대상, 텍스트 참조)와 목록 필드(반복, 폴리곤 점 목록, 경로 점 목록, inline
+  텍스트 문자열). 목록 필드는 레코드에 적힌 그대로의 바이트로 — 닫히는 세그먼트
+  안에서 정의됐고 256 B 이하면 inline, 길면 참조(정의한 세그먼트·오프셋·길이), 더
+  앞에서 정의됐으면 앞 스냅샷의 것을 그대로 — 복사는 경계마다 한 번뿐이라 비용이
+  없다. 셀의 첫 세그먼트는 기본값(길이 0). 체인 통계(§8.1)는 그대로 남는다.
+- **레이어별 통계.** 세그먼트 × (layer, datatype)마다 records, members, bbox(반복
+  확장 합집합), max_w/max_h/max_min(단일 도형의 치수; 반복 제외) — 전체 색인의
+  `emit_page`와 같은 식(RECT = w·h, POLYGON = 점 bbox, PATH = `path_bbox`, 사다리꼴·
+  원 = 파서가 만드는 폴리곤의 bbox). 파서가 버리는 레코드(반지름 0인 원, 퇴화한
+  사다리꼴)는 세지 않는다(재고와 같은 규칙). L0의 PATH 박스가 반복으로 넓혀지지 않던
+  것을 함께 고쳤다.
+- **파일.** `design.seg` FLOESEG1(SPEC-FORMATS): 80 B 헤더(CRC, 소스 identity,
+  `inv_crc` = 짝인 design.inv의 본문 CRC, 개수) + CELLS(셀별 구간) + SEGS(112 B 행,
+  (cell, offset) 순) + LAYERS(80 B 행) + SNAPS(varint 스냅샷 풀). 로더는 모든 범위·
+  색인·짝·CRC를 검사한다. 정본 `rust/oasis/src/segfile.rs`.
+- **쓰는 곳.** 스트리밍 빌드가 design.inv 뒤, design.ovm 커밋 전에 쓴다(`[vfs] stream:
+  design.seg (…)`; `--no-seg`로 생략, `--seg-bytes N`); 재빌드의 삭제 목록. `floe-index
+  inventory FILE --seg PATH [--seg-bytes N] [--check-seg]`, `--load-seg PATH`(짝·동일
+  확인). design.inv는 세그먼트를 모았든 아니든 같은 바이트다(스캔의 셀 레코드 박스는
+  파일에 넣지 않는다).
+- **게이트(§8 "세그먼트 통계 = 전체 Doc에서 계산한 값").** `--check-seg`: Doc(정규화
+  전)의 셀·레이어별 통계를 같은 식으로 계산해 세그먼트들의 합(records, members)·
+  합집합(bbox)·최대(max_*)와 비교한다; `cells_inside`가 있는 셀은 건너뛴다(개수 보고).
+  `rust_inventory`: fixture마다 `--seg` 왕복, jobs 1 = 3 바이트, `--check-seg` OK,
+  `--load-seg` 짝·동일, design.inv를 design.seg로 읽기·손상 거절. `vfs_stream`:
+  스트리밍 캐시의 design.seg = `--seg` 바이트·jobs 4와 같음·짝, 인메모리에 없음, 묵은
+  파일 제거, `--no-seg`. 단위 테스트: `segments::tests`(CBLOCK 3개 셀의 스냅샷 내용 —
+  레이어·크기·좌표·inline 목록 바이트·경로 파라미터·앞 세그먼트의 목록 계승 — 과
+  레이어별 통계, 파서가 버리는 레코드), `segfile::tests`(적대적 스트림 5종의 왕복·셀
+  구간·레이어 행·기본 스냅샷·jobs 3 동일, 모든 길이의 잘림·손상·소스 밖 거절, 스냅샷
+  전 필드 왕복).
+- **실측(macOS 4 jobs).** design.seg: valmini 2 KB; sample9 931 KB(1,238 세그먼트,
+  레이어 행 9,756, 스냅샷 2.3 KB); route_chip 217 KB; main01_chip_p10 22.7 MB(37,332
+  구간, 레이어 행 226,776, 스냅샷 77 KB). 재고 패스 시간: sample9 1.23 → 1.39 s, p10
+  11.1 → 12.2 s(+10~13 %). 현장 50 GB(78.6만 세그먼트, 레이어/세그먼트 1, 체인 0)는
+  약 150~180 MB, 재고 131.6 s의 +10~15 %로 본다 — 다음 `floe2 index`가 답한다.
+- **다음.** L3 시드 파서(`parse_segment`: 스냅샷으로 모달을 채우고 CBLOCK을 inflate해
+  세그먼트 하나를 Doc으로; 참조 필드는 정의한 세그먼트에서 가져온다), 게이트는
+  세그먼트 파싱의 레코드 합 = 셀 파싱(G2급).
 
 ## 9. 검토한 대안
 

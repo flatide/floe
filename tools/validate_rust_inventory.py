@@ -70,7 +70,7 @@ def generate(script, out, *args):
         fail("%s: %s\n%s" % (script, r.stdout[-800:], r.stderr[-1200:]))
 
 
-TIMING = ("read_s", "inventory_s", "inventory_mb_s", "file", "load")
+TIMING = ("read_s", "inventory_s", "inventory_mb_s", "file", "load", "seg", "load_seg", "check_seg")
 
 
 def inventory_json(args, what):
@@ -86,10 +86,14 @@ def inventory_json(args, what):
 def check(path, jobs, inv_out):
     """--check + --check-cells (G1, G2) and, in the same run, design.inv
     written with --out and read back (DIRECT_READ_PLAN L1: the file's
-    round trip is byte-identical)"""
+    round trip is byte-identical) and design.seg written with --seg,
+    read back and held to the Doc with --check-seg (L2: per cell and
+    layer the segments' sums, boxes and feature maxima are the Doc's)"""
+    seg_out = inv_out.with_suffix(".seg")
     t0 = time.perf_counter()
     r = subprocess.run([str(BIN), "inventory", str(path), "--check", "--check-cells",
-                        "--jobs", str(jobs), "--out", str(inv_out)], capture_output=True, text=True)
+                        "--jobs", str(jobs), "--out", str(inv_out), "--seg", str(seg_out), "--check-seg"],
+                       capture_output=True, text=True)
     dt = time.perf_counter() - t0
     if r.returncode != 0:
         fail("inventory --check %s (jobs %d) exit %d\n%s" % (path.name, jobs, r.returncode, r.stderr[-3000:]))
@@ -108,13 +112,24 @@ def check(path, jobs, inv_out):
         fail("inventory %s (jobs %d): design.inv round trip: %s" % (path.name, jobs, f))
     if "inventory file:" not in r.stderr or "roundtrip OK" not in r.stderr:
         fail("inventory %s: no file line\n%s" % (path.name, r.stderr[-800:]))
+    g = j.get("seg", {})
+    if not g.get("roundtrip") or not seg_out.is_file() or g.get("bytes") != seg_out.stat().st_size:
+        fail("inventory %s (jobs %d): design.seg round trip: %s" % (path.name, jobs, g))
+    if g.get("segments", 0) < 1 or g["segments"] != g["cblocks"] + g["spans"] or "segment file:" not in r.stderr:
+        fail("inventory %s (jobs %d): design.seg counts: %s" % (path.name, jobs, g))
+    cs = j.get("check_seg", {})
+    if not cs.get("ok") or cs.get("segments") != g["segments"] or cs.get("cells_skipped", 1) != 0:
+        fail("inventory %s (jobs %d): segment check: %s" % (path.name, jobs, cs))
     return j, dt
 
 
 def check_file(path, inv_out, jobs):
     """design.inv read back (L1): --load prints what the source gives,
     beside the source it is identical to a fresh inventory, --check holds
-    the loaded inventory to the Doc, and a truncated copy is refused"""
+    the loaded inventory to the Doc, and truncated / damaged copies are
+    refused; design.seg read back (L2): paired with the inventory it was
+    written with, identical to a fresh directory beside the source, and
+    refused when it is another file or damaged"""
     loaded = inventory_json(["--load", inv_out, "--cells"], "inventory --load %s" % inv_out.name)
     fresh = inventory_json([path, "--cells", "--jobs", jobs], "inventory %s --cells" % path.name)
     for k in TIMING:
@@ -137,6 +152,24 @@ def check_file(path, inv_out, jobs):
     r = subprocess.run([str(BIN), "inventory", "--load", str(cut)], capture_output=True, text=True)
     if r.returncode == 0 or "checksum" not in r.stderr:
         fail("%s: a damaged design.inv was not refused (exit %d)\n%s" % (inv_out.name, r.returncode, r.stderr[-500:]))
+    # L2: design.seg read back
+    seg_out = inv_out.with_suffix(".seg")
+    ls = inventory_json(["--load", inv_out, "--load-seg", seg_out], "inventory --load-seg %s" % seg_out.name)
+    if ls.get("load_seg", {}).get("pair_ok") is not True:
+        fail("%s: not paired with %s: %s" % (seg_out.name, inv_out.name, ls.get("load_seg")))
+    ls2 = inventory_json([path, "--load-seg", seg_out, "--jobs", jobs], "inventory --load-seg + source %s" % path.name)
+    if ls2.get("load_seg", {}).get("identical") is not True or ls2["load_seg"].get("pair_ok") is not True:
+        fail("%s: beside the source: %s" % (seg_out.name, ls2.get("load_seg")))
+    r = subprocess.run([str(BIN), "inventory", "--load", str(inv_out), "--load-seg", str(inv_out)], capture_output=True, text=True)
+    if r.returncode == 0 or "design.seg" not in r.stderr:
+        fail("%s: a design.inv read as design.seg was not refused (exit %d)\n%s" % (seg_out.name, r.returncode, r.stderr[-500:]))
+    seg_cut = seg_out.with_suffix(".segcut")
+    damaged = bytearray(seg_out.read_bytes())
+    damaged[len(damaged) // 2] ^= 0x55
+    seg_cut.write_bytes(bytes(damaged))
+    r = subprocess.run([str(BIN), "inventory", "--load", str(inv_out), "--load-seg", str(seg_cut)], capture_output=True, text=True)
+    if r.returncode == 0 or "checksum" not in r.stderr:
+        fail("%s: a damaged design.seg was not refused (exit %d)\n%s" % (seg_out.name, r.returncode, r.stderr[-500:]))
     return inv_out.stat().st_size
 
 
@@ -185,9 +218,12 @@ def main():
             # serial scan's; the file reads back to the same inventory
             if inv_files[1].read_bytes() != inv_files[3].read_bytes():
                 fail("%s: design.inv differs between jobs 1 and 3" % name)
+            if inv_files[1].with_suffix(".seg").read_bytes() != inv_files[3].with_suffix(".seg").read_bytes():
+                fail("%s: design.seg differs between jobs 1 and 3" % name)
             size = check_file(path, inv_files[1], 2)
-            print("OK  %-22s design.inv %d bytes: round trip, jobs 1 = 3, --load = fresh, --load + source identical + check, truncated and damaged copies refused"
-                  % (name, size))
+            print("OK  %-22s design.inv %d bytes, design.seg %d bytes: round trips, jobs 1 = 3, --load = fresh, --load + source identical + check, "
+                  "segment statistics = Doc, --load-seg paired + identical, truncated and damaged copies refused"
+                  % (name, size, inv_files[1].with_suffix(".seg").stat().st_size))
     print("rust_inventory: ALL OK")
 
 

@@ -720,14 +720,190 @@ pub fn check_cells(data: &[u8], doc: &Doc, inv: &Inventory, jobs: usize) -> (Vec
 /// beside it, held equal cell by cell (G1); `--check-cells` adds the
 /// cell parser: every range through parse_cell_range + normalize_cells
 /// against the Doc's cells record by record (G2). Exit 1 on a difference.
+/// the per-(cell, layer) page statistics of a Doc's own shapes, computed
+/// as build()'s emit_page computes a page's (vfs.rs): the record's box
+/// widened by its repetition, its members, and the single feature's
+/// width / height / min(width, height) - what a segment directory's
+/// layer rows must sum, unite and max to (DIRECT_READ_PLAN L2's gate)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SegAcc {
+    records: u64,
+    members: u64,
+    bbox: Box4,
+    max_w: i64,
+    max_h: i64,
+    max_min: i64,
+}
+
+impl SegAcc {
+    const NONE: SegAcc = SegAcc {
+        records: 0,
+        members: 0,
+        bbox: EMPTY_BOX,
+        max_w: 0,
+        max_h: 0,
+        max_min: 0,
+    };
+
+    fn add(&mut self, rec: Box4, members: u64, ex: (i64, i64), ey: (i64, i64)) {
+        self.records += 1;
+        self.members = self.members.saturating_add(members);
+        let bb = (
+            rec.0 + ex.0.min(0),
+            rec.1 + ey.0.min(0),
+            rec.2 + ex.1.max(0),
+            rec.3 + ey.1.max(0),
+        );
+        floe_oasis::geom::box_grow(&mut self.bbox, &bb);
+        let (w, h) = (rec.2 - rec.0, rec.3 - rec.1);
+        self.max_w = self.max_w.max(w);
+        self.max_h = self.max_h.max(h);
+        self.max_min = self.max_min.max(w.min(h));
+    }
+
+    fn join(&mut self, o: &SegAcc) {
+        self.records += o.records;
+        self.members = self.members.saturating_add(o.members);
+        floe_oasis::geom::box_grow(&mut self.bbox, &o.bbox);
+        self.max_w = self.max_w.max(o.max_w);
+        self.max_h = self.max_h.max(o.max_h);
+        self.max_min = self.max_min.max(o.max_min);
+    }
+}
+
+/// per cell: (layer, datatype) -> the statistics of the Doc's own shapes
+/// before normalization (the records as the geometry parser materializes
+/// them, which is what the inventory pass counts)
+fn doc_layer_stats(doc: &Doc) -> Vec<HashMap<(u32, u32), SegAcc>> {
+    doc.cells
+        .iter()
+        .map(|cell| {
+            let mut m: HashMap<(u32, u32), SegAcc> = HashMap::new();
+            for r in &cell.rects {
+                let (ex, ey) = rep_extent(&r.rep);
+                m.entry((r.layer, r.dt)).or_insert(SegAcc::NONE).add(
+                    (r.x, r.y, r.x + r.w, r.y + r.h),
+                    r.rep.members(),
+                    ex,
+                    ey,
+                );
+            }
+            for p in &cell.polys {
+                let (ex, ey) = rep_extent(&p.rep);
+                m.entry((p.layer, p.dt)).or_insert(SegAcc::NONE).add(
+                    floe_oasis::geom::pts_box(&p.pts),
+                    p.rep.members(),
+                    ex,
+                    ey,
+                );
+            }
+            for pa in &cell.paths {
+                let (ex, ey) = rep_extent(&pa.rep);
+                m.entry((pa.layer, pa.dt)).or_insert(SegAcc::NONE).add(
+                    path_bbox(&pa.pts, pa.hw, pa.es, pa.ee),
+                    pa.rep.members(),
+                    ex,
+                    ey,
+                );
+            }
+            m
+        })
+        .collect()
+}
+
+/// the segment directory against the Doc (DIRECT_READ_PLAN L2's gate):
+/// per cell and layer, the sum of the segments' records and members,
+/// the union of their boxes and the max of their feature dimensions
+/// equal the Doc's; a cell with a CELL record inside one of its CBLOCKs
+/// is skipped (its block holds another cell's records too). Returns
+/// (mismatches, cells skipped).
+pub fn check_segments(
+    doc_stats: &[HashMap<(u32, u32), SegAcc>],
+    inv: &Inventory,
+    segs: &[floe_oasis::segments::SegStat],
+) -> (Vec<String>, usize) {
+    const CAP: usize = 60;
+    let mut out: Vec<String> = Vec::new();
+    let mut total = 0usize;
+    let mut bad = |msg: String| {
+        total += 1;
+        if out.len() < CAP {
+            out.push(msg);
+        }
+    };
+    let index = inv.cell_index();
+    let n = inv.cells.len();
+    let mut per_cell: Vec<HashMap<(u32, u32), SegAcc>> = vec![HashMap::new(); n];
+    let mut skip = vec![false; n];
+    for s in segs {
+        let name = match inv.scan.cell_stats.get(s.cell as usize) {
+            Some(c) => &c.name,
+            None => {
+                bad(format!("segment at {}: no scan record for cell {}", s.offset, s.cell));
+                continue;
+            }
+        };
+        let Some(&ci) = index.get(name) else {
+            bad(format!("segment at {}: unknown cell {:?}", s.offset, name));
+            continue;
+        };
+        if s.cells_inside > 0 {
+            skip[ci] = true;
+        }
+        for l in &s.layer_stats {
+            let key = (l.layer.0 as u32, l.layer.1 as u32);
+            per_cell[ci].entry(key).or_insert(SegAcc::NONE).join(&SegAcc {
+                records: l.records,
+                members: l.members,
+                bbox: l.bbox,
+                max_w: l.max_w,
+                max_h: l.max_h,
+                max_min: l.max_min,
+            });
+        }
+    }
+    let mut skipped = 0usize;
+    for ci in 0..n.min(doc_stats.len()) {
+        if skip[ci] {
+            skipped += 1;
+            continue;
+        }
+        let nm = &inv.cells[ci].name;
+        let mut keys: Vec<(u32, u32)> = doc_stats[ci].keys().chain(per_cell[ci].keys()).copied().collect();
+        keys.sort_unstable();
+        keys.dedup();
+        for key in keys {
+            let d = doc_stats[ci].get(&key).copied().unwrap_or(SegAcc::NONE);
+            let s = per_cell[ci].get(&key).copied().unwrap_or(SegAcc::NONE);
+            if d != s {
+                bad(format!(
+                    "cell {} ({}) layer {}/{}: doc {:?} vs segments {:?}",
+                    ci, nm, key.0, key.1, d, s
+                ));
+            }
+        }
+    }
+    if doc_stats.len() != n {
+        bad(format!("cells: doc {} vs inventory {}", doc_stats.len(), n));
+    }
+    if total > out.len() {
+        out.push(format!("... {} mismatches in all", total));
+    }
+    (out, skipped)
+}
+
 pub fn inventory_cmd(args: &[String]) {
     let mut src: Option<String> = None;
     let mut jobs = 1usize;
     let mut do_check = false;
     let mut do_check_cells = false;
+    let mut do_check_seg = false;
     let mut cells = false;
     let mut out_path: Option<String> = None;
     let mut load_path: Option<String> = None;
+    let mut seg_path: Option<String> = None;
+    let mut load_seg_path: Option<String> = None;
+    let mut seg_bytes = floe_oasis::segments::DEFAULT_SPAN_BYTES;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -738,15 +914,23 @@ pub fn inventory_cmd(args: &[String]) {
                 });
                 i += 1;
             }
-            "--out" | "--load" => {
+            "--seg-bytes" => {
+                seg_bytes = args.get(i + 1).and_then(|v| crate::parse_bytes(v)).filter(|&v| v > 0).unwrap_or_else(|| {
+                    eprintln!("--seg-bytes needs a byte count (e.g. 256K)");
+                    std::process::exit(2);
+                });
+                i += 1;
+            }
+            "--out" | "--load" | "--seg" | "--load-seg" => {
                 let v = args.get(i + 1).cloned().unwrap_or_else(|| {
                     eprintln!("{} needs a path", args[i]);
                     std::process::exit(2);
                 });
-                if args[i] == "--out" {
-                    out_path = Some(v);
-                } else {
-                    load_path = Some(v);
+                match args[i].as_str() {
+                    "--out" => out_path = Some(v),
+                    "--load" => load_path = Some(v),
+                    "--seg" => seg_path = Some(v),
+                    _ => load_seg_path = Some(v),
                 }
                 i += 1;
             }
@@ -755,6 +939,7 @@ pub fn inventory_cmd(args: &[String]) {
                 do_check = true;
                 do_check_cells = true;
             }
+            "--check-seg" => do_check_seg = true,
             "--cells" => cells = true,
             a if a.starts_with("--") => {
                 eprintln!("inventory: unknown option {}", a);
@@ -764,15 +949,19 @@ pub fn inventory_cmd(args: &[String]) {
         }
         i += 1;
     }
-    if src.is_none() && load_path.is_none() {
+    if src.is_none() && load_path.is_none() && load_seg_path.is_none() {
         eprintln!(
-            "usage: floe-index inventory <file.oas> [--jobs N] [--check] [--check-cells] [--cells] [--out design.inv]\n       \
-             floe-index inventory --load design.inv [<file.oas>] [--cells] [--check]  (the file read back; with the source, compared to a fresh inventory)"
+            "usage: floe-index inventory <file.oas> [--jobs N] [--check] [--check-cells] [--cells] [--out design.inv] [--seg design.seg] [--seg-bytes N] [--check-seg]\n       \
+             floe-index inventory --load design.inv [--load-seg design.seg] [<file.oas>] [--cells] [--check]  (the files read back; with the source, compared to fresh ones)"
         );
         std::process::exit(2);
     }
-    if out_path.is_some() && (load_path.is_some() || src.is_none()) {
-        eprintln!("inventory: --out writes a fresh inventory of the source (not with --load)");
+    if (out_path.is_some() || seg_path.is_some() || do_check_seg) && (load_path.is_some() || src.is_none()) {
+        eprintln!("inventory: --out, --seg and --check-seg work on a fresh inventory of the source (not with --load)");
+        std::process::exit(2);
+    }
+    if load_seg_path.is_some() && load_path.is_none() && src.is_none() {
+        eprintln!("inventory: --load-seg needs --load design.inv or the source beside it");
         std::process::exit(2);
     }
     let read_src = |src: &str| -> Vec<u8> {
@@ -781,118 +970,272 @@ pub fn inventory_cmd(args: &[String]) {
             std::process::exit(1);
         })
     };
-    let fresh = |src: &str, data: &[u8]| -> Inventory {
-        floe_oasis::inventory(data, jobs).unwrap_or_else(|e| {
-            eprintln!("inventory {}: {}", src, e);
-            std::process::exit(1);
-        })
+    let want_segs = seg_path.is_some() || do_check_seg || load_seg_path.is_some();
+    let fresh = |src: &str, data: &[u8]| -> (Inventory, Option<floe_oasis::segments::SegCollector>) {
+        if want_segs {
+            match floe_oasis::inventory_segments(data, jobs, seg_bytes) {
+                Ok((inv, col)) => (inv, Some(col)),
+                Err(e) => {
+                    eprintln!("inventory {}: {}", src, e);
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            match floe_oasis::inventory(data, jobs) {
+                Ok(inv) => (inv, None),
+                Err(e) => {
+                    eprintln!("inventory {}: {}", src, e);
+                    std::process::exit(1);
+                }
+            }
+        }
     };
-    // what the JSON says about the file read or written, and whether
-    // that holds (a loaded file that differs from a fresh inventory, or a
+    let identity_of = |src: &str| -> floe_oasis::invfile::Identity {
+        let (size, mtime) = crate::vfs::source_identity(src);
+        floe_oasis::invfile::Identity {
+            src_size: size,
+            src_mtime: mtime,
+        }
+    };
+    // what the JSON says about the files read or written, and whether
+    // that holds (a loaded file that differs from a fresh one, or a
     // written file that does not read back to its bytes, fails the run)
     let mut file_json = String::new();
     let mut file_ok = true;
-    let (data, inv, read_s, inv_s): (Option<Vec<u8>>, Inventory, f64, f64) = if let Some(lp) = &load_path {
-        // the file read back (docs/DIRECT_READ_PLAN.ko.md L1)
-        let t0 = std::time::Instant::now();
-        let bytes = read_src(lp);
-        let read_s = t0.elapsed().as_secs_f64();
-        let t1 = std::time::Instant::now();
-        let (id, inv) = floe_oasis::invfile::decode(&bytes).unwrap_or_else(|e| {
-            eprintln!("inventory: load {}: {}", lp, e);
-            std::process::exit(1);
-        });
-        let inv_s = t1.elapsed().as_secs_f64();
-        let mut identical: Option<bool> = None;
-        let data = src.as_deref().map(|s| {
-            let d = read_src(s);
-            let f = fresh(s, &d);
-            identical = Some(floe_oasis::invfile::encode(&f, id) == bytes);
-            d
-        });
-        file_json = format!(
-            "  \"load\": {{\"path\": {}, \"bytes\": {}, \"src_size\": {}, \"src_mtime\": {}{}}},\n",
-            crate::json_str(lp),
-            bytes.len(),
-            id.src_size,
-            id.src_mtime,
-            identical.map(|b| format!(", \"identical\": {}", b)).unwrap_or_default()
-        );
-        eprintln!(
-            "inventory: loaded {} ({}; {} cells, {} layers; decode {:.3}s){}",
-            lp,
-            crate::fmt_size(bytes.len() as u64),
-            inv.cells.len(),
-            inv.layer_order.len(),
-            inv_s,
-            match identical {
-                Some(true) => "; identical to a fresh inventory of the source",
-                Some(false) => "; DIFFERS from a fresh inventory of the source",
-                None => "",
-            }
-        );
-        if identical == Some(false) {
-            file_ok = false;
-        }
-        (data, inv, read_s, inv_s)
-    } else {
-        let src = src.as_deref().expect("a source");
-        let t0 = std::time::Instant::now();
-        let data = read_src(src);
-        let read_s = t0.elapsed().as_secs_f64();
-        let t1 = std::time::Instant::now();
-        let inv = fresh(src, &data);
-        let inv_s = t1.elapsed().as_secs_f64();
-        if let Some(op) = &out_path {
-            // design.inv written beside nothing: the file alone, then read
-            // back and encoded again - the L1 gate's round trip
-            let t2 = std::time::Instant::now();
-            let (size, mtime) = crate::vfs::source_identity(src);
-            let id = floe_oasis::invfile::Identity {
-                src_size: size,
-                src_mtime: mtime,
-            };
-            let bytes = floe_oasis::invfile::encode(&inv, id);
-            let tmp = format!("{}.tmp", op);
-            if let Err(e) = std::fs::write(&tmp, &bytes).and_then(|_| std::fs::rename(&tmp, op)) {
-                eprintln!("inventory: write {}: {}", op, e);
-                std::process::exit(1);
-            }
-            let back = std::fs::read(op).unwrap_or_else(|e| {
-                eprintln!("inventory: read back {}: {}", op, e);
+    // the inventory's bytes (design.inv), encoded once when wanted: the
+    // file written, and the pair key design.seg carries
+    let mut inv_bytes: Option<Vec<u8>> = None;
+    let (data, inv, col, read_s, inv_s): (Option<Vec<u8>>, Inventory, Option<floe_oasis::segments::SegCollector>, f64, f64) =
+        if let Some(lp) = &load_path {
+            // the file read back (docs/DIRECT_READ_PLAN.ko.md L1)
+            let t0 = std::time::Instant::now();
+            let bytes = read_src(lp);
+            let read_s = t0.elapsed().as_secs_f64();
+            let t1 = std::time::Instant::now();
+            let (id, inv) = floe_oasis::invfile::decode(&bytes).unwrap_or_else(|e| {
+                eprintln!("inventory: load {}: {}", lp, e);
                 std::process::exit(1);
             });
-            let roundtrip = match floe_oasis::invfile::roundtrip(&back) {
-                Ok(()) if back == bytes => true,
-                Ok(()) => false,
-                Err(e) => {
-                    eprintln!("inventory: {}: {}", op, e);
-                    false
-                }
-            };
-            let write_s = t2.elapsed().as_secs_f64();
+            let inv_s = t1.elapsed().as_secs_f64();
+            let mut identical: Option<bool> = None;
+            let mut col = None;
+            let data = src.as_deref().map(|s| {
+                let d = read_src(s);
+                let (f, c) = fresh(s, &d);
+                identical = Some(floe_oasis::invfile::encode(&f, id) == bytes);
+                col = c;
+                d
+            });
             file_json = format!(
-                "  \"file\": {{\"path\": {}, \"bytes\": {}, \"src_size\": {}, \"src_mtime\": {}, \"roundtrip\": {}, \"write_s\": {:.3}}},\n",
-                crate::json_str(op),
+                "  \"load\": {{\"path\": {}, \"bytes\": {}, \"src_size\": {}, \"src_mtime\": {}{}}},\n",
+                crate::json_str(lp),
                 bytes.len(),
-                size,
-                mtime,
-                roundtrip,
-                write_s
+                id.src_size,
+                id.src_mtime,
+                identical.map(|b| format!(", \"identical\": {}", b)).unwrap_or_default()
             );
             eprintln!(
-                "inventory file: {} ({}; {} cells, {} layers; roundtrip {}, {:.3}s)",
-                op,
+                "inventory: loaded {} ({}; {} cells, {} layers; decode {:.3}s){}",
+                lp,
                 crate::fmt_size(bytes.len() as u64),
                 inv.cells.len(),
                 inv.layer_order.len(),
-                if roundtrip { "OK" } else { "MISMATCH" },
-                write_s
+                inv_s,
+                match identical {
+                    Some(true) => "; identical to a fresh inventory of the source",
+                    Some(false) => "; DIFFERS from a fresh inventory of the source",
+                    None => "",
+                }
             );
-            file_ok = roundtrip;
-        }
-        (Some(data), inv, read_s, inv_s)
+            if identical == Some(false) {
+                file_ok = false;
+            }
+            inv_bytes = Some(bytes);
+            (data, inv, col, read_s, inv_s)
+        } else {
+            let src = src.as_deref().expect("a source");
+            let t0 = std::time::Instant::now();
+            let data = read_src(src);
+            let read_s = t0.elapsed().as_secs_f64();
+            let t1 = std::time::Instant::now();
+            let (inv, col) = fresh(src, &data);
+            let inv_s = t1.elapsed().as_secs_f64();
+            if out_path.is_some() || seg_path.is_some() || load_seg_path.is_some() {
+                inv_bytes = Some(floe_oasis::invfile::encode(&inv, identity_of(src)));
+            }
+            if let Some(op) = &out_path {
+                // design.inv written beside nothing: the file alone, then read
+                // back and encoded again - the L1 gate's round trip
+                let t2 = std::time::Instant::now();
+                let id = identity_of(src);
+                let bytes = inv_bytes.as_ref().expect("encoded");
+                let tmp = format!("{}.tmp", op);
+                if let Err(e) = std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, op)) {
+                    eprintln!("inventory: write {}: {}", op, e);
+                    std::process::exit(1);
+                }
+                let back = std::fs::read(op).unwrap_or_else(|e| {
+                    eprintln!("inventory: read back {}: {}", op, e);
+                    std::process::exit(1);
+                });
+                let roundtrip = match floe_oasis::invfile::roundtrip(&back) {
+                    Ok(()) if back == *bytes => true,
+                    Ok(()) => false,
+                    Err(e) => {
+                        eprintln!("inventory: {}: {}", op, e);
+                        false
+                    }
+                };
+                let write_s = t2.elapsed().as_secs_f64();
+                file_json.push_str(&format!(
+                    "  \"file\": {{\"path\": {}, \"bytes\": {}, \"src_size\": {}, \"src_mtime\": {}, \"roundtrip\": {}, \"write_s\": {:.3}}},\n",
+                    crate::json_str(op),
+                    bytes.len(),
+                    id.src_size,
+                    id.src_mtime,
+                    roundtrip,
+                    write_s
+                ));
+                eprintln!(
+                    "inventory file: {} ({}; {} cells, {} layers; roundtrip {}, {:.3}s)",
+                    op,
+                    crate::fmt_size(bytes.len() as u64),
+                    inv.cells.len(),
+                    inv.layer_order.len(),
+                    if roundtrip { "OK" } else { "MISMATCH" },
+                    write_s
+                );
+                file_ok = file_ok && roundtrip;
+            }
+            (Some(data), inv, col, read_s, inv_s)
+        };
+    // ---- design.seg written (L2): the directory of the same walk, paired
+    // with the inventory's bytes, read back and encoded again
+    let seg_file_of = |col: &floe_oasis::segments::SegCollector, inv: &Inventory, inv_bytes: &[u8]| -> floe_oasis::segfile::SegFile {
+        let mut f = floe_oasis::segfile::SegFile::from_segments(&col.segs, inv, seg_bytes).unwrap_or_else(|e| {
+            eprintln!("inventory: segments: {}", e);
+            std::process::exit(1);
+        });
+        f.inv_crc = floe_oasis::segfile::inv_crc_of(inv_bytes).unwrap_or(0);
+        f
     };
+    let seg_counts = |f: &floe_oasis::segfile::SegFile| -> (usize, usize, usize, usize) {
+        let cblocks = f.segs.iter().filter(|s| s.is_cblock()).count();
+        let chained = f
+            .segs
+            .iter()
+            .filter(|s| s.flags & (floe_oasis::segfile::F_CHAIN_REP | floe_oasis::segfile::F_CHAIN_POLY | floe_oasis::segfile::F_CHAIN_PATH) != 0)
+            .count();
+        (f.segs.len(), cblocks, f.segs.len() - cblocks, chained)
+    };
+    if let (Some(sp), Some(c)) = (&seg_path, col.as_ref()) {
+        let t2 = std::time::Instant::now();
+        let src = src.as_deref().expect("a source");
+        let id = identity_of(src);
+        let f = seg_file_of(c, &inv, inv_bytes.as_deref().expect("encoded"));
+        let bytes = floe_oasis::segfile::encode(&f, id);
+        let tmp = format!("{}.tmp", sp);
+        if let Err(e) = std::fs::write(&tmp, &bytes).and_then(|_| std::fs::rename(&tmp, sp)) {
+            eprintln!("inventory: write {}: {}", sp, e);
+            std::process::exit(1);
+        }
+        let back = std::fs::read(sp).unwrap_or_else(|e| {
+            eprintln!("inventory: read back {}: {}", sp, e);
+            std::process::exit(1);
+        });
+        let roundtrip = match floe_oasis::segfile::roundtrip(&back) {
+            Ok(()) if back == bytes => true,
+            Ok(()) => false,
+            Err(e) => {
+                eprintln!("inventory: {}: {}", sp, e);
+                false
+            }
+        };
+        let write_s = t2.elapsed().as_secs_f64();
+        let (n, cb, sp_n, ch) = seg_counts(&f);
+        file_json.push_str(&format!(
+            "  \"seg\": {{\"path\": {}, \"bytes\": {}, \"segments\": {}, \"cblocks\": {}, \"spans\": {}, \"span_bytes\": {}, \"layer_rows\": {}, \"snapshot_bytes\": {}, \"chained\": {}, \"inv_crc\": {}, \"roundtrip\": {}, \"write_s\": {:.3}}},\n",
+            crate::json_str(sp),
+            bytes.len(),
+            n,
+            cb,
+            sp_n,
+            seg_bytes,
+            f.layers.len(),
+            f.snaps.len(),
+            ch,
+            f.inv_crc,
+            roundtrip,
+            write_s
+        ));
+        eprintln!(
+            "segment file: {} ({}; {} segments: {} CBLOCK, {} span of {}; {} layer rows, {} snapshot bytes, {} chained; roundtrip {}, {:.3}s)",
+            sp,
+            crate::fmt_size(bytes.len() as u64),
+            n,
+            cb,
+            sp_n,
+            crate::fmt_size(seg_bytes),
+            f.layers.len(),
+            crate::fmt_size(f.snaps.len() as u64),
+            ch,
+            if roundtrip { "OK" } else { "MISMATCH" },
+            write_s
+        );
+        file_ok = file_ok && roundtrip;
+    }
+    // ---- design.seg read back: paired with the inventory at hand and,
+    // beside the source, identical to a fresh directory
+    if let Some(lsp) = &load_seg_path {
+        let bytes = read_src(lsp);
+        let (sid, sf) = floe_oasis::segfile::decode(&bytes).unwrap_or_else(|e| {
+            eprintln!("inventory: load-seg {}: {}", lsp, e);
+            std::process::exit(1);
+        });
+        let inv_b = inv_bytes.as_deref().expect("inventory bytes");
+        let (iid, _, _) = floe_oasis::invfile::peek(inv_b).expect("inventory header");
+        let pair_ok = sf.inv_crc == floe_oasis::segfile::inv_crc_of(inv_b).unwrap_or(1)
+            && sid == iid
+            && sf.n_cells as usize == inv.cells.len()
+            && sf.n_layers as usize == inv.layer_order.len();
+        let identical = col.as_ref().map(|c| {
+            let f = seg_file_of(c, &inv, inv_b);
+            floe_oasis::segfile::encode(&f, sid) == bytes
+        });
+        let (n, cb, sp_n, ch) = seg_counts(&sf);
+        file_json.push_str(&format!(
+            "  \"load_seg\": {{\"path\": {}, \"bytes\": {}, \"segments\": {}, \"cblocks\": {}, \"spans\": {}, \"span_bytes\": {}, \"layer_rows\": {}, \"snapshot_bytes\": {}, \"chained\": {}, \"pair_ok\": {}{}}},\n",
+            crate::json_str(lsp),
+            bytes.len(),
+            n,
+            cb,
+            sp_n,
+            sf.span_bytes,
+            sf.layers.len(),
+            sf.snaps.len(),
+            ch,
+            pair_ok,
+            identical.map(|b| format!(", \"identical\": {}", b)).unwrap_or_default()
+        ));
+        eprintln!(
+            "inventory: loaded {} ({}; {} segments: {} CBLOCK, {} span; {} layer rows){}{}",
+            lsp,
+            crate::fmt_size(bytes.len() as u64),
+            n,
+            cb,
+            sp_n,
+            sf.layers.len(),
+            if pair_ok { "; paired with the inventory" } else { "; NOT the inventory's directory" },
+            match identical {
+                Some(true) => "; identical to a fresh directory of the source",
+                Some(false) => "; DIFFERS from a fresh directory of the source",
+                None => "",
+            }
+        );
+        if !pair_ok || identical == Some(false) {
+            file_ok = false;
+        }
+    }
     let n = inv.cells.len();
     let edges: usize = inv.cells.iter().map(|c| c.edges.len()).sum();
     let big = inv.cells.iter().max_by_key(|c| c.doc_bytes);
@@ -964,7 +1307,7 @@ pub fn inventory_cmd(args: &[String]) {
     }
     let mut ok = file_ok;
     out.push_str(&file_json);
-    if do_check {
+    if do_check || do_check_seg {
         let data = data.as_deref().unwrap_or_else(|| {
             eprintln!("inventory: --check needs the source file beside --load");
             std::process::exit(2);
@@ -972,8 +1315,12 @@ pub fn inventory_cmd(args: &[String]) {
         let src = src.as_deref().unwrap_or("-");
         let t2 = std::time::Instant::now();
         let mut prenorm: Option<PreNorm> = None;
+        let mut doc_stats: Option<Vec<HashMap<(u32, u32), SegAcc>>> = None;
         let doc = match floe_oasis::doc::parse_doc_parallel_phased(data, jobs, |d| {
             prenorm = Some(PreNorm::from_doc(d));
+            if do_check_seg {
+                doc_stats = Some(doc_layer_stats(d));
+            }
         }) {
             Ok(d) => d,
             Err(e) => {
@@ -981,58 +1328,97 @@ pub fn inventory_cmd(args: &[String]) {
                 std::process::exit(1);
             }
         };
-        let pre = PrePass::from_doc(&doc, jobs);
-        let diffs = check(&doc, &pre, prenorm.as_ref(), &inv);
         let doc_s = t2.elapsed().as_secs_f64();
-        ok = diffs.is_empty();
-        out.push_str(&format!(
-            "  \"check\": {{\"ok\": {}, \"doc_s\": {:.3}, \"mismatches\": [{}]}},\n",
-            ok,
-            doc_s,
-            diffs
-                .iter()
-                .map(|d| crate::json_str(d))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-        for d in &diffs {
-            eprintln!("inventory check: {}", d);
-        }
-        eprintln!(
-            "inventory check: {} ({} cells, {} layers; inventory {:.1}s, doc pre-pass {:.1}s)",
-            if ok { "OK" } else { "MISMATCH" },
-            n,
-            inv.layer_order.len(),
-            inv_s,
-            doc_s
-        );
-        if do_check_cells {
-            let t3 = std::time::Instant::now();
-            let (diffs2, pieces) = check_cells(data, &doc, &inv, jobs);
-            let cells_s = t3.elapsed().as_secs_f64();
-            let ok2 = diffs2.is_empty();
-            ok = ok && ok2;
+        if do_check {
+            let pre = PrePass::from_doc(&doc, jobs);
+            let diffs = check(&doc, &pre, prenorm.as_ref(), &inv);
+            let ok1 = diffs.is_empty();
+            ok = ok && ok1;
             out.push_str(&format!(
-                "  \"check_cells\": {{\"ok\": {}, \"ranges\": {}, \"pieces\": {}, \"parse_s\": {:.3}, \"mismatches\": [{}]}},\n",
-                ok2,
-                1 + inv.cells.iter().map(|c| c.ranges.len()).sum::<usize>(),
-                pieces,
-                cells_s,
-                diffs2
+                "  \"check\": {{\"ok\": {}, \"doc_s\": {:.3}, \"mismatches\": [{}]}},\n",
+                ok1,
+                doc_s,
+                diffs
                     .iter()
                     .map(|d| crate::json_str(d))
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
-            for d in &diffs2 {
-                eprintln!("cell check: {}", d);
+            for d in &diffs {
+                eprintln!("inventory check: {}", d);
             }
             eprintln!(
-                "cell check: {} ({} cells from {} pieces; parse + normalize + compare {:.1}s)",
-                if ok2 { "OK" } else { "MISMATCH" },
+                "inventory check: {} ({} cells, {} layers; inventory {:.1}s, doc pre-pass {:.1}s)",
+                if ok1 { "OK" } else { "MISMATCH" },
                 n,
-                pieces,
-                cells_s
+                inv.layer_order.len(),
+                inv_s,
+                doc_s
+            );
+            if do_check_cells {
+                let t3 = std::time::Instant::now();
+                let (diffs2, pieces) = check_cells(data, &doc, &inv, jobs);
+                let cells_s = t3.elapsed().as_secs_f64();
+                let ok2 = diffs2.is_empty();
+                ok = ok && ok2;
+                out.push_str(&format!(
+                    "  \"check_cells\": {{\"ok\": {}, \"ranges\": {}, \"pieces\": {}, \"parse_s\": {:.3}, \"mismatches\": [{}]}},\n",
+                    ok2,
+                    1 + inv.cells.iter().map(|c| c.ranges.len()).sum::<usize>(),
+                    pieces,
+                    cells_s,
+                    diffs2
+                        .iter()
+                        .map(|d| crate::json_str(d))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+                for d in &diffs2 {
+                    eprintln!("cell check: {}", d);
+                }
+                eprintln!(
+                    "cell check: {} ({} cells from {} pieces; parse + normalize + compare {:.1}s)",
+                    if ok2 { "OK" } else { "MISMATCH" },
+                    n,
+                    pieces,
+                    cells_s
+                );
+            }
+        }
+        if do_check_seg {
+            let c = col.as_ref().expect("segments collected");
+            let (diffs3, skipped) = check_segments(doc_stats.as_deref().unwrap_or(&[]), &inv, &c.segs);
+            let ok3 = diffs3.is_empty();
+            ok = ok && ok3;
+            let cblocks = c.segs.iter().filter(|s| s.cblock).count();
+            let chained = c.segs.iter().filter(|s| s.chained != 0).count();
+            out.push_str(&format!(
+                "  \"check_seg\": {{\"ok\": {}, \"segments\": {}, \"cblocks\": {}, \"spans\": {}, \"span_bytes\": {}, \"chained\": {}, \"cells_skipped\": {}, \"mismatches\": [{}]}},\n",
+                ok3,
+                c.segs.len(),
+                cblocks,
+                c.segs.len() - cblocks,
+                seg_bytes,
+                chained,
+                skipped,
+                diffs3
+                    .iter()
+                    .map(|d| crate::json_str(d))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            for d in &diffs3 {
+                eprintln!("segment check: {}", d);
+            }
+            eprintln!(
+                "segment check: {} ({} segments: {} CBLOCK, {} span of {}; {} chained; {} cells skipped; per cell and layer the sums, boxes and feature maxima equal the Doc's)",
+                if ok3 { "OK" } else { "MISMATCH" },
+                c.segs.len(),
+                cblocks,
+                c.segs.len() - cblocks,
+                crate::fmt_size(seg_bytes),
+                chained,
+                skipped
             );
         }
     }

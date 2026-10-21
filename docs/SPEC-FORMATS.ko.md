@@ -245,6 +245,49 @@ design.ovm 커밋 전에 쓰고(`[vfs] stream: design.inv (…)`), `floe-index i
 - 크기: valmini 12 KB, sample9(1,188셀·40 레이어) 859 KB, main01_chip_p10(35,183셀·
   188,065 간선·449 레이어) 64 MB(쓰기 0.6 s); 현장 50 GB(5,461셀·5 레이어)는 수 MB.
 
+## design.seg — 세그먼트 디렉터리 (FLOESEG1, 2026-10-21)
+
+정본: `rust/oasis/src/segfile.rs`(파일), `rust/oasis/src/segments.rs`(수집). 경량
+캐시(DIRECT_READ_PLAN §5.1·§5.2, L2 §8.3)의 둘째 파일: 셀 안의 최상위 CBLOCK 하나,
+또는 CBLOCK 사이·CBLOCK 없는 스트림의 구간(`--seg-bytes`, 기본 256K; 레코드 경계와
+CELL·CBLOCK·END에서 닫힘)이 세그먼트이고, 세그먼트마다 그 첫 레코드에서의 모달 변수
+스냅샷과 레이어별 페이지 통계를 적는다. 재고 패스가 같은 걸음에 모으며(`floe_oasis::
+inventory_segments`), 스트리밍 빌드가 design.inv 뒤에 쓰고(`--no-seg`로 생략),
+`floe-index inventory FILE --seg PATH`가 혼자 쓰며 `--load-seg PATH`가 읽는다. tmp +
+rename, 마커 프로토콜 밖, 재빌드의 삭제 목록. design.inv와 한 쌍이다(헤더의 `inv_crc` =
+그 design.inv의 본문 CRC; 로더가 짝을 확인한다).
+
+- 헤더 80 B: magic `FLOESEG1`, version u32(1), header_len u32(80), body_len u64,
+  body_crc32 u32, flags u32(0), src_size u64, src_mtime u64, inv_crc u32, n_cells u32,
+  n_layers u32, n_segments u32, span_bytes u64, n_layer_rows u64.
+- 본문 섹션(`tag u32, len u64, payload`, 이 순서): CELLS(1) = 셀마다 (first u32,
+  count u32) — 셀의 세그먼트는 표의 연속 구간, 파일 순서; SEGS(2) = 세그먼트마다
+  112 B — cell u32, flags u8(1 CBLOCK, 2 배치 있음, 4 텍스트 있음, 8 안에 CELL 레코드
+  있음, 16/32/64 반복·폴리곤·경로 목록 체인), 예약 3, offset u64(파일), bytes u64
+  (CBLOCK은 레코드 전체), inflated u64, records u32, shapes u32, members u64,
+  placements u32, texts u32, bbox 4×i64(반복 확장; 도형 없으면 EMPTY), layers_first
+  u32, layers_count u32, snapshot_off u32, snapshot_len u32, cells_inside u32,
+  chain_list_max u32 — (cell, offset) 순; LAYERS(3) = (세그먼트, 레이어)마다 80 B —
+  layer_idx u32(design.inv의 layer_order 색인), 예약 u32, records u64, members u64,
+  bbox 4×i64(반복 확장 합집합), max_w i64, max_h i64, max_min i64(단일 도형의
+  폭·높이·min(폭,높이)의 최대: 전체 색인 페이지의 PageV와 같은 뜻, `emit_page`와 같은
+  식) — 세그먼트의 레이어는 (layer, datatype) 오름차순; SNAPS(4) = 스냅샷 풀.
+- 스냅샷(`encode_snapshot`): 존재 비트 uvarint(relative, layer, datatype, textlayer,
+  texttype, geo_w, geo_h, circle_r, ctrap_type, path_hw/es/ee, place, rep, poly, path,
+  text), 좌표 6개 svarint(geo/pl/tx x·y), 있는 필드 순서대로(uvarint/svarint), place
+  (태그 0 참조 번호 / 1 이름), 반복·폴리곤·경로 목록 필드(태그 0 없음 / 1 inline:
+  레코드에 적힌 그대로의 바이트, 길이 ≤ 256 / 2 참조: 정의한 세그먼트 번호·그 레코드
+  스트림 안의 오프셋·길이 — CBLOCK이면 inflate한 바이트, 구간이면 파일), 텍스트(태그
+  0 TEXTSTRING 참조 / 1 inline 문자열 필드). 셀의 첫 세그먼트는 길이 0(기본값: CELL
+  레코드가 모달을 초기화한다). 한 재고 패스의 바이트는 하나다(jobs 1 = 3 = 4).
+- 로더는 섹션 길이·개수(헤더와 교차)·셀 구간의 연속성·세그먼트의 셀·레이어 행 범위·
+  스냅샷 범위·레이어 색인·`offset + bytes ≤ src_size`·구간의 inflated = bytes·스냅샷
+  디코드·참조의 셀 일치·CRC를 검사하고 어긋나면 위치와 함께 거절한다.
+- 크기(macOS 4 jobs): valmini 2 KB; sample9 931 KB(1,238 세그먼트, 레이어 행 9,756,
+  스냅샷 2.3 KB; 재고 1.23 → 1.39 s); route_chip 217 KB(916 구간); main01_chip_p10
+  22.7 MB(37,332 구간, 레이어 행 226,776; 재고 11.1 → 12.2 s). 현장 50 GB(78.6만
+  세그먼트, 레이어/세그먼트 1)는 약 150~180 MB(소스의 0.3 %)로 본다.
+
 ## meta.json (CACHE_VERSION = 8)
 
 ```json

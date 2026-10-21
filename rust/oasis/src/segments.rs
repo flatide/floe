@@ -18,7 +18,8 @@
 //! does not collect it.
 
 use crate::geom::{box_grow, box_is_empty, path_bbox, Box4, EMPTY_BOX};
-use crate::{CellStat, ScanStats};
+use crate::inventory::{rep_box, Target};
+use crate::{CellStat, Modal, Repetition, ScanStats};
 
 /// the span length of a stream without CBLOCKs (`--seg-bytes`)
 pub const DEFAULT_SPAN_BYTES: u64 = 256 * 1024;
@@ -33,6 +34,133 @@ pub const CHAIN_PATH: u8 = 4;
 /// full; the rest = other
 pub const TILE_SHARE: f64 = 0.25;
 pub const LONG_SHARE: f64 = 0.5;
+
+/// a modal field's raw bytes go into a snapshot inline when they are
+/// this long or shorter; longer ones are referenced where they were
+/// spelled out (L2, docs/DIRECT_READ_PLAN.ko.md §5.2)
+pub const CARRY_INLINE_MAX: usize = 256;
+
+/// where a modal field's bytes are, as the record spelled them: a
+/// repetition field (type byte and parameters), a polygon or path
+/// point list, an inline text string
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Carried {
+    /// no modal value yet
+    #[default]
+    None,
+    /// the field's bytes
+    Inline(Vec<u8>),
+    /// the field's bytes in segment `seg`'s record stream (a CBLOCK:
+    /// its inflated bytes; a span: the file from the span's first byte)
+    /// at `off`, `len` bytes
+    Ref { seg: u32, off: u32, len: u32 },
+}
+
+/// the modal text string
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum TextModal {
+    #[default]
+    None,
+    /// a TEXTSTRING reference
+    Ref(u64),
+    /// an inline string (the OASIS string field: length, bytes)
+    Inline(Carried),
+}
+
+/// the modal placement target
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlaceModal {
+    Ref(u64),
+    Name(String),
+}
+
+/// the modal variables at a segment's first record, as doc.rs keeps
+/// them (xy mode, the coordinates, layers, dimensions, the path
+/// parameters, the repetition and point lists, the placement target,
+/// the text string): what a parser seeded with them needs to read the
+/// segment on its own. A cell's first segment starts from the default
+/// (a CELL record resets every modal).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Snapshot {
+    pub relative: bool,
+    pub layer: Option<u64>,
+    pub datatype: Option<u64>,
+    pub textlayer: Option<u64>,
+    pub texttype: Option<u64>,
+    pub geo_x: i64,
+    pub geo_y: i64,
+    pub pl_x: i64,
+    pub pl_y: i64,
+    pub tx_x: i64,
+    pub tx_y: i64,
+    pub geo_w: Option<i64>,
+    pub geo_h: Option<i64>,
+    pub circle_r: Option<i64>,
+    pub ctrap_type: Option<u64>,
+    pub path_hw: Option<i64>,
+    pub path_es: Option<i64>,
+    pub path_ee: Option<i64>,
+    pub place: Option<PlaceModal>,
+    /// the modal repetition's field (every type: a grid's few bytes
+    /// are inline, a long point list is a reference)
+    pub rep: Carried,
+    /// the modal polygon / path point lists
+    pub poly: Carried,
+    pub path: Carried,
+    pub text: TextModal,
+}
+
+impl Snapshot {
+    fn of(m: &Modal) -> Snapshot {
+        Snapshot {
+            relative: m.relative,
+            layer: m.layer,
+            datatype: m.datatype,
+            textlayer: m.textlayer,
+            texttype: m.texttype,
+            geo_x: m.geo_x,
+            geo_y: m.geo_y,
+            pl_x: m.pl_x,
+            pl_y: m.pl_y,
+            tx_x: m.tx_x,
+            tx_y: m.tx_y,
+            geo_w: m.geo_w,
+            geo_h: m.geo_h,
+            circle_r: m.circle_r,
+            ctrap_type: m.ctrap_type,
+            path_hw: m.path_hw,
+            path_es: m.path_es,
+            path_ee: m.path_ee,
+            place: m.place.as_ref().map(|t| match t {
+                Target::Ref(r) => PlaceModal::Ref(*r),
+                Target::Name(n) => PlaceModal::Name(n.clone()),
+            }),
+            ..Snapshot::default()
+        }
+    }
+
+    /// the snapshot has no modal value at all (a cell's first segment)
+    pub fn is_default(&self) -> bool {
+        *self == Snapshot::default()
+    }
+}
+
+/// the page statistics of one segment's shapes on one layer - what
+/// the full index keeps per page (floe_ovm PageV: records, members,
+/// the box with repetitions widened, the largest single feature's
+/// width / height / min(width, height)), computed as build()'s
+/// emit_page computes them
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LayerSeg {
+    pub layer: (u64, u64),
+    pub records: u64,
+    pub members: u64,
+    /// EMPTY_BOX while no record gave a box
+    pub bbox: Box4,
+    pub max_w: i64,
+    pub max_h: i64,
+    pub max_min: i64,
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SegStat {
@@ -61,6 +189,38 @@ pub struct SegStat {
     pub chained: u8,
     /// the largest such list (repetition members or vertices)
     pub chain_list_max: u64,
+    /// per (layer, datatype), in `layers` order: the page statistics
+    pub layer_stats: Vec<LayerSeg>,
+    /// the modal variables at the segment's first record
+    pub snapshot: Snapshot,
+    /// CELL records inside this CBLOCK (a stream that opens cells
+    /// inside CBLOCKs): the records after one belong to that cell, so
+    /// a reader parses the whole block and splits it by cell
+    pub cells_inside: u32,
+}
+
+impl SegStat {
+    /// the stats of one layer, when the segment has shapes on it
+    pub fn layer(&self, key: (u64, u64)) -> Option<&LayerSeg> {
+        self.layer_stats
+            .binary_search_by_key(&key, |l| l.layer)
+            .ok()
+            .map(|i| &self.layer_stats[i])
+    }
+}
+
+/// where a modal field was last spelled out: the segment (this
+/// parse's ordinal) and the field's place in its record stream
+#[derive(Debug, Clone, Copy)]
+struct DefSite {
+    seg: u64,
+    off: u64,
+    len: u64,
+    /// members / vertices of a point list (the chain statistic); 0 for
+    /// a grid repetition or a text string
+    size: u64,
+    /// a point-list kind (the chain statistic counts those only)
+    list: bool,
 }
 
 /// the open segment and the modal-list bookkeeping of one parse
@@ -74,12 +234,20 @@ pub struct SegCollector {
     /// modal list is dropped)
     next_id: u64,
     cur_id: u64,
-    /// (segment ordinal, size) of the modal lists as last spelled out:
-    /// a point-list repetition (grid repetitions are scalars and are
-    /// not tracked), the polygon point list, the path point list
-    rep_def: Option<(u64, u64)>,
-    poly_def: Option<(u64, u64)>,
-    path_def: Option<(u64, u64)>,
+    /// the open segment's record stream begins here in the positions
+    /// the cursor reports (a span: its first byte; a CBLOCK: the
+    /// nested cursor's base) - a position minus it is an offset into
+    /// the segment's bytes
+    stream_base: u64,
+    /// the modal lists, the modal repetition and the inline text
+    /// string as last spelled out
+    rep_def: Option<DefSite>,
+    poly_def: Option<DefSite>,
+    path_def: Option<DefSite>,
+    text_def: Option<DefSite>,
+    /// what the next segment of this cell starts from (None: the
+    /// default - a cell's first segment)
+    next_snapshot: Option<Snapshot>,
     /// path outline scratch
     spine: Vec<(i64, i64)>,
 }
@@ -96,15 +264,17 @@ impl SegCollector {
         self.cur.is_some()
     }
 
-    fn open(&mut self, cell: u32, cblock: bool, offset: u64) {
+    fn open(&mut self, cell: u32, cblock: bool, offset: u64, stream_base: u64) {
         debug_assert!(self.cur.is_none(), "segment already open");
         self.cur_id = self.next_id;
         self.next_id += 1;
+        self.stream_base = stream_base;
         self.cur = Some(SegStat {
             cell,
             cblock,
             offset,
             bbox: EMPTY_BOX,
+            snapshot: self.next_snapshot.take().unwrap_or_default(),
             ..Default::default()
         });
     }
@@ -112,47 +282,117 @@ impl SegCollector {
     /// a span opens at the first record that needs one
     pub(crate) fn open_span(&mut self, cell: u32, offset: u64) {
         if self.cur.is_none() {
-            self.open(cell, false, offset);
+            self.open(cell, false, offset, offset);
         }
     }
 
     /// a CBLOCK is a segment of its own: any span closes before it
-    pub(crate) fn open_cblock(&mut self, cell: u32, offset: u64, inflated: u64) {
-        self.close(offset);
-        self.open(cell, true, offset);
+    /// (`live` / `live_base`: the bytes the closing span's records are
+    /// in, for the snapshot); `body_base` is where the nested cursor
+    /// over the inflated bytes starts counting
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn open_cblock(
+        &mut self,
+        cell: u32,
+        offset: u64,
+        inflated: u64,
+        body_base: u64,
+        modal: &Modal,
+        live: &[u8],
+        live_base: u64,
+    ) {
+        self.close(offset, modal, live, live_base);
+        self.open(cell, true, offset, body_base);
         if let Some(s) = self.cur.as_mut() {
             s.inflated = inflated;
         }
     }
 
-    /// the open segment ends at `end` (exclusive file offset)
-    pub(crate) fn close(&mut self, end: u64) {
+    /// a modal field's bytes for the next snapshot: spelled out in the
+    /// closing segment, they are copied from `live` (or referenced when
+    /// long); spelled out earlier, the closing segment's own snapshot
+    /// already carries them
+    fn carry(&self, def: Option<DefSite>, prev: &Carried, live: &[u8], live_base: u64) -> Carried {
+        match def {
+            None => Carried::None,
+            Some(d) if d.seg == self.cur_id => {
+                let at = (self.stream_base + d.off).checked_sub(live_base);
+                let short = d.len as usize <= CARRY_INLINE_MAX;
+                match at {
+                    Some(a) if short && a as usize + d.len as usize <= live.len() => {
+                        Carried::Inline(live[a as usize..a as usize + d.len as usize].to_vec())
+                    }
+                    _ => Carried::Ref {
+                        seg: self.cur_id as u32,
+                        off: d.off as u32,
+                        len: d.len as u32,
+                    },
+                }
+            }
+            Some(_) => prev.clone(),
+        }
+    }
+
+    /// the open segment ends at `end` (exclusive file offset); `modal`
+    /// is the state after its last record = the next segment's start
+    pub(crate) fn close(&mut self, end: u64, modal: &Modal, live: &[u8], live_base: u64) {
         if let Some(mut s) = self.cur.take() {
             s.bytes = end.saturating_sub(s.offset);
             if !s.cblock {
                 s.inflated = s.bytes;
             }
+            let mut next = Snapshot::of(modal);
+            next.rep = self.carry(self.rep_def, &s.snapshot.rep, live, live_base);
+            next.poly = self.carry(self.poly_def, &s.snapshot.poly, live, live_base);
+            next.path = self.carry(self.path_def, &s.snapshot.path, live, live_base);
+            next.text = match modal.text_target {
+                None => TextModal::None,
+                Some(Some(r)) => TextModal::Ref(r),
+                Some(None) => {
+                    let prev = match &s.snapshot.text {
+                        TextModal::Inline(c) => c.clone(),
+                        _ => Carried::None,
+                    };
+                    TextModal::Inline(self.carry(self.text_def, &prev, live, live_base))
+                }
+            };
+            self.next_snapshot = Some(next);
             self.segs.push(s);
         }
     }
 
     /// after a record at the stream's top level: a span past its
     /// length closes at the record boundary
-    pub(crate) fn record_end(&mut self, end: u64) {
+    pub(crate) fn record_end(&mut self, end: u64, modal: &Modal, live: &[u8], live_base: u64) {
         let full = match self.cur.as_ref() {
             Some(s) if !s.cblock => end.saturating_sub(s.offset) >= self.span_bytes,
             _ => false,
         };
         if full {
-            self.close(end);
+            self.close(end, modal, live, live_base);
         }
     }
 
-    /// a CELL record: modal lists are dropped
+    /// a CELL record at the top level: modal lists are dropped and the
+    /// next segment starts from the default
     pub(crate) fn cell_reset(&mut self) {
         self.rep_def = None;
         self.poly_def = None;
         self.path_def = None;
+        self.text_def = None;
+        self.next_snapshot = None;
+    }
+
+    /// a CELL record inside the open CBLOCK: the block stays one
+    /// segment, flagged; the modal lists are dropped as at any CELL
+    pub(crate) fn cell_inside(&mut self) {
+        if let Some(s) = self.cur.as_mut() {
+            s.cells_inside += 1;
+        }
+        self.rep_def = None;
+        self.poly_def = None;
+        self.path_def = None;
+        self.text_def = None;
     }
 
     pub(crate) fn record(&mut self) {
@@ -161,19 +401,51 @@ impl SegCollector {
         }
     }
 
-    pub(crate) fn shape(&mut self, layer: u64, datatype: u64, members: u64, bb: Option<Box4>) {
-        let Some(s) = self.cur.as_mut() else {
-            return;
-        };
+    /// a shape: `rec` = the single feature's box (repetition excluded;
+    /// None when the modals gave none), widened by `rep` into the
+    /// segment's and the layer's boxes
+    pub(crate) fn shape(
+        &mut self,
+        layer: u64,
+        datatype: u64,
+        members: u64,
+        rec: Option<Box4>,
+        rep: &Repetition,
+    ) -> Option<Box4> {
+        let s = self.cur.as_mut()?;
         s.shapes += 1;
         s.members = s.members.saturating_add(members);
+        let bb = rec.map(|r| rep_box(r.0, r.1, r.2, r.3, rep));
         if let Some(b) = bb {
             box_grow(&mut s.bbox, &b);
         }
         let key = (layer, datatype);
-        if let Err(i) = s.layers.binary_search(&key) {
-            s.layers.insert(i, key);
+        let i = match s.layers.binary_search(&key) {
+            Ok(i) => i,
+            Err(i) => {
+                s.layers.insert(i, key);
+                s.layer_stats.insert(
+                    i,
+                    LayerSeg {
+                        layer: key,
+                        bbox: EMPTY_BOX,
+                        ..Default::default()
+                    },
+                );
+                i
+            }
+        };
+        let l = &mut s.layer_stats[i];
+        l.records += 1;
+        l.members = l.members.saturating_add(members);
+        if let (Some(r), Some(b)) = (rec, bb) {
+            box_grow(&mut l.bbox, &b);
+            let (w, h) = (r.2 - r.0, r.3 - r.1);
+            l.max_w = l.max_w.max(w);
+            l.max_h = l.max_h.max(h);
+            l.max_min = l.max_min.max(w.min(h));
         }
+        bb
     }
 
     pub(crate) fn place(&mut self) {
@@ -188,10 +460,23 @@ impl SegCollector {
         }
     }
 
-    /// a repetition spelled out: `pts` = Some(members) for a point-list
-    /// kind (types 4-7, 10, 11), None for a grid
-    pub(crate) fn rep_defined(&mut self, pts: Option<u64>) {
-        self.rep_def = pts.map(|m| (self.cur_id, m));
+    /// a field spelled out at positions `p0..p1` of the open segment's
+    /// stream
+    fn site(&self, p0: u64, p1: u64, size: u64, list: bool) -> Option<DefSite> {
+        self.cur.as_ref()?;
+        Some(DefSite {
+            seg: self.cur_id,
+            off: p0.saturating_sub(self.stream_base),
+            len: p1.saturating_sub(p0),
+            size,
+            list,
+        })
+    }
+
+    /// a repetition spelled out at `p0..p1`: `pts` = Some(members) for a
+    /// point-list kind (types 4-7, 10, 11), None for a grid
+    pub(crate) fn rep_defined(&mut self, pts: Option<u64>, p0: u64, p1: u64) {
+        self.rep_def = self.site(p0, p1, pts.unwrap_or(0), pts.is_some());
     }
 
     pub(crate) fn rep_reused(&mut self) {
@@ -199,8 +484,8 @@ impl SegCollector {
         self.reuse(CHAIN_REP, def);
     }
 
-    pub(crate) fn poly_defined(&mut self, verts: u64) {
-        self.poly_def = Some((self.cur_id, verts));
+    pub(crate) fn poly_defined(&mut self, verts: u64, p0: u64, p1: u64) {
+        self.poly_def = self.site(p0, p1, verts, true);
     }
 
     pub(crate) fn poly_reused(&mut self) {
@@ -208,8 +493,8 @@ impl SegCollector {
         self.reuse(CHAIN_POLY, def);
     }
 
-    pub(crate) fn path_defined(&mut self, verts: u64) {
-        self.path_def = Some((self.cur_id, verts));
+    pub(crate) fn path_defined(&mut self, verts: u64, p0: u64, p1: u64) {
+        self.path_def = self.site(p0, p1, verts, true);
     }
 
     pub(crate) fn path_reused(&mut self) {
@@ -217,20 +502,26 @@ impl SegCollector {
         self.reuse(CHAIN_PATH, def);
     }
 
-    fn reuse(&mut self, bit: u8, def: Option<(u64, u64)>) {
+    /// an inline text string spelled out at `p0..p1`
+    pub(crate) fn text_defined(&mut self, p0: u64, p1: u64) {
+        self.text_def = self.site(p0, p1, 0, false);
+    }
+
+    fn reuse(&mut self, bit: u8, def: Option<DefSite>) {
         let Some(s) = self.cur.as_mut() else {
             return;
         };
-        if let Some((id, size)) = def {
-            if id != self.cur_id {
+        if let Some(d) = def {
+            if d.list && d.seg != self.cur_id {
                 s.chained |= bit;
-                s.chain_list_max = s.chain_list_max.max(size);
+                s.chain_list_max = s.chain_list_max.max(d.size);
             }
         }
     }
 
-    /// a path's box: the modal spine (anchor-relative) placed at the
-    /// anchor, then geom::path_bbox (the build's own function)
+    /// a path's outline box: the modal spine (anchor-relative) placed
+    /// at the anchor, then geom::path_bbox (the build's own function);
+    /// the repetition is not applied here (`shape` does that)
     pub(crate) fn path_box(
         &mut self,
         deltas: &[(i64, i64)],
@@ -247,11 +538,21 @@ impl SegCollector {
     }
 
     /// a parallel scan appends a worker's segments behind the ones
-    /// before it, its cells numbered from `cell_base`
+    /// before it, its cells numbered from `cell_base`; a snapshot's
+    /// references to the worker's segments move with them
     pub(crate) fn append(&mut self, mut other: SegCollector, cell_base: u32) {
         debug_assert!(other.cur.is_none(), "worker left a segment open");
+        let seg_base = self.segs.len() as u32;
         for s in other.segs.iter_mut() {
             s.cell += cell_base;
+            for c in [&mut s.snapshot.rep, &mut s.snapshot.poly, &mut s.snapshot.path] {
+                if let Carried::Ref { seg, .. } = c {
+                    *seg += seg_base;
+                }
+            }
+            if let TextModal::Inline(Carried::Ref { seg, .. }) = &mut s.snapshot.text {
+                *seg += seg_base;
+            }
         }
         self.segs.append(&mut other.segs);
     }
@@ -735,6 +1036,38 @@ mod tests {
             assert_eq!(a[2].bbox, A_SEG2);
             assert_eq!(a[2].chained, CHAIN_PATH);
             assert_eq!(a[2].chain_list_max, 3);
+            // L2: the per-layer page statistics (the rectangle's x list
+            // widens its box, not its feature size) ...
+            assert_eq!(
+                a[0].layer((1, 0)).cloned(),
+                Some(LayerSeg { layer: (1, 0), records: 1, members: 3, bbox: (0, 0, 20, 10), max_w: 10, max_h: 10, max_min: 10 })
+            );
+            assert_eq!(
+                a[0].layer((2, 0)).cloned(),
+                Some(LayerSeg { layer: (2, 0), records: 1, members: 1, bbox: (0, 0, 20, 20), max_w: 20, max_h: 20, max_min: 20 })
+            );
+            assert_eq!(a[1].layer((3, 0)).map(|l| (l.records, l.bbox, l.max_w, l.max_h, l.max_min)), Some((1, (298, 298, 352, 332), 54, 34, 34)));
+            assert!(a[0].layer((3, 0)).is_none());
+            // ... and the modal snapshots: the cell's first segment starts
+            // from nothing; the second carries the layer, the square's
+            // size and the spelled-out lists (inline, as the records
+            // spelled them); the third the path parameters, the lists
+            // the second reused unchanged and the path list it spelled
+            assert!(a[0].snapshot.is_default());
+            let s1 = &a[1].snapshot;
+            assert_eq!((s1.layer, s1.datatype, s1.geo_x, s1.geo_y, s1.geo_w, s1.geo_h), (Some(2), Some(0), 0, 0, Some(10), Some(10)));
+            assert_eq!(s1.rep, Carried::Inline(vec![4, 1, 5, 5]));
+            match &s1.poly {
+                Carried::Inline(b) => assert_eq!(&b[..2], &[4, 3]),
+                other => panic!("polygon list {:?}", other),
+            }
+            assert_eq!((&s1.path, &s1.text, &s1.place), (&Carried::None, &TextModal::None, &None));
+            let s2 = &a[2].snapshot;
+            assert_eq!((s2.layer, s2.geo_x, s2.geo_y, s2.path_hw, s2.path_es, s2.path_ee), (Some(3), 300, 300, Some(2), Some(2), Some(2)));
+            assert_eq!(s2.rep, s1.rep);
+            assert_eq!(s2.poly, s1.poly);
+            assert_eq!(s2.path, Carried::Inline(vec![0, 2, 100, 60]));
+            assert_eq!(a[2].cells_inside, 0);
             // the CBLOCK's uncompressed count and its whole record
             assert!(a.iter().all(|s| s.inflated > 0 && s.bytes > s.inflated / 8));
             assert!(a[0].offset < a[1].offset && a[1].offset < a[2].offset);
@@ -869,7 +1202,18 @@ mod tests {
             for jobs in [1usize, 2] {
                 let st = crate::scan_segments(&data, jobs, 64).unwrap_or_else(|e| panic!("{}: {}", name, e));
                 let segs = &st.segments().unwrap().segs;
-                let shapes: u64 = st.shapes.values().map(|s| s.records).sum();
+                // the shapes the geometry parser materializes (before
+                // normalization): a zero-radius circle or a degenerate
+                // trapezoid is a record the scan counts and no shape
+                let mut shapes = 0u64;
+                crate::doc::parse_doc_parallel_phased(&data, 1, |d| {
+                    shapes = d
+                        .cells
+                        .iter()
+                        .map(|c| (c.rects.len() + c.polys.len() + c.paths.len()) as u64)
+                        .sum();
+                })
+                .unwrap_or_else(|e| panic!("{}: parse: {}", name, e));
                 let in_segs: u64 = segs.iter().map(|s| s.shapes).sum();
                 // every shape inside a visible cell lands in a segment
                 // (a cell a head CBLOCK defines has none)

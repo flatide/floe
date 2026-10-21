@@ -228,9 +228,9 @@ fn main() {
     if args.len() < 3 || args[1] != "scan" {
         eprintln!(
             "usage: floe-index scan <file.oas> [jobs] [--seg-bytes N]  (sizing + segment statistics, docs/DIRECT_READ_PLAN.ko.md §8.1)\n       \
-             floe-index inventory <file.oas> [--jobs N] [--check] [--check-cells] [--cells] [--out design.inv]  \
-             (the streaming build's first pass: cell table, layer order, hierarchy fold; --check holds it to the Doc pre-passes, --check-cells the cell parser to the Doc's cells; --out writes it as design.inv, FLOEINV1, and reads it back)\n       \
-             floe-index inventory --load design.inv [<file.oas>] [--cells] [--check]  (a design.inv read back; with the source, compared to a fresh inventory)\n       \
+             floe-index inventory <file.oas> [--jobs N] [--check] [--check-cells] [--cells] [--out design.inv] [--seg design.seg] [--seg-bytes N] [--check-seg]  \
+             (the streaming build's first pass: cell table, layer order, hierarchy fold; --check holds it to the Doc pre-passes, --check-cells the cell parser to the Doc's cells; --out writes it as design.inv, FLOEINV1, and reads it back; --seg writes the segment directory design.seg, FLOESEG1, of the same walk and --check-seg holds its per-layer statistics to the Doc)\n       \
+             floe-index inventory --load design.inv [--load-seg design.seg] [<file.oas>] [--cells] [--check]  (the files read back; with the source, compared to fresh ones)\n       \
              floe-index tile <file.oas> <outdir> \
              --grid x0,y0,tw,th,nx,ny --edges e0,e1,e2\n       \
              floe-index index <file.oas> [outdir] [--mem GB] \
@@ -244,7 +244,7 @@ fn main() {
              [--profile-cell NAME | --profile-cell-ci N] \
              [--profile-jobs N,N,...] [--profile-repeat N] \
              [--profile-snapshot PATH] [--profile-snapshot-refresh] \
-             [--stream | --in-memory] [--mem GiB]  (the build's mode: streaming by default since 0.12.370 - the inventory pass, then cells read in file order behind a byte budget of --mem GiB, design.ovo from one more pass; --in-memory or FLOE_INDEX_STREAM=off = the whole-parse build, which coverage, representatives and a profile use anyway; --stream insists)\n       \
+             [--stream | --in-memory] [--mem GiB] [--no-seg] [--seg-bytes N]  (the build's mode: streaming by default since 0.12.370 - the inventory pass, then cells read in file order behind a byte budget of --mem GiB, design.ovo from one more pass; --in-memory or FLOE_INDEX_STREAM=off = the whole-parse build, which coverage, representatives and a profile use anyway; --stream insists; the streaming build leaves design.inv and design.seg beside the cache, --no-seg skips the segment directory)\n       \
              floe-index vfs <deck.jb> [--level N,N,..] [--jobs N] [--force] [--wait[=S]] \
              [--occupancy-um F] ...  (a jobdeck: its sources that have no index, each beside its source - runs floe2 index)\n       \
              floe-index plan <outdir> --view x0,y0,x1,y1 \

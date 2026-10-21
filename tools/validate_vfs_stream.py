@@ -58,10 +58,11 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "rust" / "target" / "release" / "floe-index"
 FLOE2 = ROOT / "rust" / "target" / "release" / "floe2"
-# design.ovc is not offered in streaming mode; design.inv (the inventory
-# as a file, DIRECT_READ_PLAN L1) is written by streaming builds only and
-# checked on its own below
-SKIP = {"design.ovc", "design.inv"}
+# design.ovc is not offered in streaming mode; design.inv and design.seg
+# (the inventory and the segment directory as files, DIRECT_READ_PLAN
+# L1 / L2) are written by streaming builds only and checked on their
+# own below
+SKIP = {"design.ovc", "design.inv", "design.seg"}
 
 
 def fail(msg):
@@ -211,6 +212,14 @@ def main():
         v = work / "valmini.oas"
         shutil.copy2(src0, v)
         files.append(("valmini", v))
+        # L2: --no-seg leaves the segment directory out and the inventory in
+        out = work / "valmini_noseg"
+        r = subprocess.run([str(BIN), "vfs", str(v), str(out), "--jobs", "2", "--no-seg"],
+                           capture_output=True, text=True, env=env)
+        if r.returncode != 0 or (out / "design.seg").exists() or not (out / "design.inv").is_file():
+            fail("--no-seg: exit %d, design.seg %s, design.inv %s\n%s" % (
+                r.returncode, (out / "design.seg").exists(), (out / "design.inv").exists(), r.stderr[-800:]))
+        print("OK  valmini            --no-seg: design.inv written, design.seg left out")
         route = work / "route_chip.oas"
         generate("gen_route_chip.py", route, "--scale", "0.05", "--jobs", "2")
         files.append(("route_chip 0.05", route))
@@ -283,6 +292,7 @@ def main():
                 fail("default build %s exit %d\n%s" % (name, r.returncode, r.stderr[-2000:]))
             if not streamed(r.stderr):
                 fail("default build %s did not stream\n%s" % (name, r.stderr[-1500:]))
+            r_default_err = r.stderr
             names = compare_dirs(ref, out, "%s default" % name)
             # L1 (DIRECT_READ_PLAN §8.2): the streaming build leaves the
             # inventory as design.inv - the bytes `floe-index inventory --out`
@@ -305,6 +315,44 @@ def main():
                                capture_output=True, text=True)
             if r.returncode != 0 or '"identical": true' not in r.stdout:
                 fail("%s: design.inv --load beside the source (exit %d)\n%s" % (name, r.returncode, r.stderr[-800:]))
+            # L2 (DIRECT_READ_PLAN §8.3): design.seg beside it - the bytes
+            # `floe-index inventory --seg` writes, paired with design.inv,
+            # identical to a fresh directory of the source
+            seg = out / "design.seg"
+            if not seg.is_file() or "stream: design.seg" not in r_default_err:
+                fail("%s default: no design.seg\n%s" % (name, r_default_err[-800:]))
+            if (ref / "design.seg").exists():
+                fail("%s: the in-memory build wrote design.seg" % name)
+            if (j4.parent / "design.seg").read_bytes() != seg.read_bytes():
+                fail("%s: design.seg differs between the default and the jobs-4 streaming build" % name)
+            alone_seg = work / (src.stem + "_alone.seg")
+            r = subprocess.run([str(BIN), "inventory", str(src), "--jobs", "4", "--out", str(alone), "--seg", str(alone_seg)],
+                               capture_output=True, text=True)
+            if r.returncode != 0 or alone_seg.read_bytes() != seg.read_bytes():
+                fail("%s: design.seg differs from floe-index inventory --seg (exit %d)\n%s" % (name, r.returncode, r.stderr[-800:]))
+            r = subprocess.run([str(BIN), "inventory", "--load", str(inv), "--load-seg", str(seg), str(src), "--jobs", "4"],
+                               capture_output=True, text=True)
+            if r.returncode != 0 or '"pair_ok": true, "identical": true' not in r.stdout:
+                fail("%s: design.seg --load-seg beside design.inv and the source (exit %d)\n%s" % (name, r.returncode, r.stderr[-800:]))
+            # L2 (DIRECT_READ_PLAN §8.3): design.seg beside it - the bytes
+            # `floe-index inventory --seg` writes, paired with design.inv,
+            # identical to a fresh directory of the source
+            seg = out / "design.seg"
+            if not seg.is_file() or "stream: design.seg" not in r_default_err:
+                fail("%s default: no design.seg\n%s" % (name, r_default_err[-800:]))
+            if (ref / "design.seg").exists():
+                fail("%s: the in-memory build wrote design.seg" % name)
+            if (j4.parent / "design.seg").read_bytes() != seg.read_bytes():
+                fail("%s: design.seg differs between the default and the jobs-4 streaming build" % name)
+            alone_seg = work / (src.stem + "_alone.seg")
+            r = subprocess.run([str(BIN), "inventory", str(src), "--jobs", "4", "--out", str(alone), "--seg", str(alone_seg)],
+                               capture_output=True, text=True)
+            if r.returncode != 0 or alone_seg.read_bytes() != seg.read_bytes():
+                fail("%s: design.seg differs from floe-index inventory --seg (exit %d)\n%s" % (name, r.returncode, r.stderr[-800:]))
+            r = subprocess.run([str(BIN), "inventory", "--load", str(inv), "--load-seg", str(seg), str(src), "--jobs", "4"],
+                               capture_output=True, text=True)
+            if r.returncode != 0 or '"pair_ok": true, "identical": true' not in r.stdout:
+                fail("%s: design.seg --load-seg beside design.inv and the source (exit %d)\n%s" % (name, r.returncode, r.stderr[-800:]))
             # the switch-over: --occupancy-only on a cache without design.ovo
             # streams (inventory, placements pass, occupancy passes) and
             # writes the in-memory run's bytes; a stale design.inv planted
@@ -312,12 +360,13 @@ def main():
             out = work / (src.stem + "_occonly")
             out.mkdir(exist_ok=True)
             (out / "design.inv").write_bytes(b"stale")
+            (out / "design.seg").write_bytes(b"stale")
             r = subprocess.run([str(BIN), "vfs", str(src), str(out), "--in-memory", "--jobs", "4", "--slow-cell-s", "0"],
                                capture_output=True, text=True, env=env)
             if r.returncode != 0 or (out / "design.ovo").exists():
                 fail("cache without design.ovo %s: exit %d\n%s" % (name, r.returncode, r.stderr[-1500:]))
-            if (out / "design.inv").exists():
-                fail("%s: a stale design.inv survived the in-memory rebuild" % name)
+            if (out / "design.inv").exists() or (out / "design.seg").exists():
+                fail("%s: a stale design.inv / design.seg survived the in-memory rebuild" % name)
             t0 = time.perf_counter()
             r = subprocess.run([str(BIN), "vfs", str(src), str(out), "--occupancy-only", "--jobs", "4"],
                                capture_output=True, text=True, env=env)
@@ -327,7 +376,7 @@ def main():
             if not streamed(r.stderr) or "placements of" not in r.stderr or "occupancy streaming" not in r.stderr:
                 fail("--occupancy-only %s did not stream\n%s" % (name, r.stderr[-1500:]))
             compare_dirs(ref, out, "%s --occupancy-only (streaming)" % name)
-            print("OK  %-18s default command line streams (%d files identical; design.inv = inventory --out, absent in memory, stale one cleared); --occupancy-only streams design.ovo (identical, %.1fs)"
+            print("OK  %-18s default command line streams (%d files identical; design.inv = inventory --out, design.seg = inventory --seg and paired, both absent in memory, stale ones cleared); --occupancy-only streams design.ovo (identical, %.1fs)"
                   % (name, len(names), dt_oo))
         # the exact walk (--occupancy-prune 0) and a finer cell on valmini
         src = files[0][1]

@@ -214,7 +214,10 @@ fn section_scan(st: &ScanStats) -> Wr {
         ] {
             w.u64(v);
         }
-        w.opt_box(&c.bbox);
+        // the record's shape box is the scan's extra (filled only when the
+        // walk collected segments): not the inventory's, so the file reads
+        // the same whichever walk produced it
+        w.u8(0);
     }
     w
 }
@@ -540,7 +543,9 @@ fn read_scan(r: &mut Rd) -> Result<ScanStats> {
         for x in c.iter_mut() {
             *x = r.u64()?;
         }
-        let bbox = r.opt_box()?;
+        if r.u8()? != 0 {
+            return err(r.at(), "design.inv: cell record box flag");
+        }
         cell_stats.push(CellStat {
             name,
             cell_ref: None,
@@ -553,7 +558,7 @@ fn read_scan(r: &mut Rd) -> Result<ScanStats> {
             pts_rep_members: c[6],
             doc_bytes: c[7],
             doc_bytes_pow2: c[8],
-            bbox,
+            bbox: None,
         });
     }
     r.done("SCAN")?;
@@ -1012,11 +1017,14 @@ mod tests {
             assert_eq!(s.rep_types, t.rep_types);
             assert_eq!(s.cell_stats.len(), t.cell_stats.len());
             for (a, b) in s.cell_stats.iter().zip(&t.cell_stats) {
-                assert_eq!((&a.name, a.records, a.doc_bytes, a.bbox), (&b.name, b.records, b.doc_bytes, b.bbox));
+                assert_eq!((&a.name, a.records, a.doc_bytes), (&b.name, b.records, b.doc_bytes));
             }
-            // the parallel scan's inventory is the same file
+            // the parallel scan's inventory is the same file, and so is
+            // the walk that collects segments beside it
             let inv3 = crate::inventory(&data, 3).expect(name);
             assert_eq!(encode(&inv3, ID), bytes, "{}: jobs 3", name);
+            let (inv_s, _) = crate::inventory_segments(&data, 2, 64).expect(name);
+            assert_eq!(encode(&inv_s, ID), bytes, "{}: with segments", name);
         }
     }
 
