@@ -10,6 +10,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::font::label_planner_metrics;
+use crate::light::{LightLink, LightState};
 use crate::{PlanRequest, RenderCancellation, RenderStats};
 
 const MAX_DECODE_WORKERS: u16 = 256;
@@ -503,7 +504,7 @@ fn fit_probe_by_summary() -> bool {
 /// and no page of the synthetic chips is charged past its estimate (the
 /// worst 1.231 -> 0.787 of it). The charge as read is kept
 /// (DecodedPage::grown_bytes) for the density stack's count.
-fn decode_shrink() -> bool {
+pub(crate) fn decode_shrink() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("FLOE_RUST_DECODE_SHRINK").as_deref() != Ok("off"))
 }
@@ -512,7 +513,10 @@ fn decode_shrink() -> bool {
 /// existing floe crates; only the currently-private OVP byte read is isolated
 /// here.
 pub struct Cache {
-    vfs: std::sync::Arc<Vfs>,
+    /// the index planned on (a full cache's as opened; a light cache's
+    /// synthesized image, replaced as cells are filled) and the light
+    /// cache's state (crate::light)
+    link: LightLink,
     dir: String,
     /// the hierarchy (index + design.ovh summary) the cell tree's queries
     /// read, shared with the daemon's query thread
@@ -808,13 +812,24 @@ impl Cache {
         let dir = path
             .to_str()
             .ok_or_else(|| format!("cache path is not UTF-8: {}", path.display()))?;
-        let vfs = std::sync::Arc::new(Vfs::open(dir)?);
-        let hier = std::sync::Arc::new(crate::cells::HierHandle::new(
-            std::sync::Arc::clone(&vfs),
+        // a light cache (floe_vfs::light): design.inv + design.seg and no
+        // design.ovm - the index is synthesized from them over the source
+        let full = std::fs::symlink_metadata(path.join("design.ovm")).is_ok();
+        let link = if !full && floe_vfs::light::LightIndex::present(dir) {
+            let (state, vfs) = LightState::open(dir)?;
+            LightLink {
+                slot: crate::light::VfsSlot::new(vfs),
+                light: Some(std::sync::Arc::new(state)),
+            }
+        } else {
+            LightLink::full(std::sync::Arc::new(Vfs::open(dir)?))
+        };
+        let hier = std::sync::Arc::new(crate::cells::HierHandle::with_link(
+            link.clone(),
             dir.to_string(),
         ));
         Ok(Self {
-            vfs,
+            link,
             dir: dir.to_string(),
             hier,
             occupancy: std::sync::Mutex::new(OccupancySlot::default()),
@@ -828,6 +843,40 @@ impl Cache {
         })
     }
 
+    /// The index this cache plans on, as it is now: a full cache's for
+    /// good, a light cache's until the next fill (crate::light::VfsSlot).
+    pub(crate) fn vfs(&self) -> std::sync::Arc<Vfs> {
+        self.link.vfs()
+    }
+
+    /// `work` on the index, again after a fill on a light cache until it
+    /// expanded no cell without its placements (crate::light::LightLink::run).
+    fn filled<T>(&self, work: impl Fn(&Vfs) -> Result<T, String>) -> Result<T, String> {
+        self.link.run(work)
+    }
+
+    /// The cache is a light one (design.inv + design.seg over the source;
+    /// floe_vfs::light): its pages are segments of the source and its
+    /// placements come in as cells are visited.
+    pub fn is_light(&self) -> bool {
+        self.link.is_light()
+    }
+
+    /// A light cache's counters: (images assembled after the first, rounds
+    /// requests took, placement-section bytes resident, cells filled over
+    /// the open, cells let go by the places budget); None on a full cache.
+    pub fn light_stats(&self) -> Option<(u64, u64, u64, u64, u64)> {
+        let light = self.link.light.as_ref()?;
+        let (bytes, filled, evicted) = light.index.fill_stats();
+        Some((
+            light.images.load(Ordering::Relaxed),
+            light.rounds.load(Ordering::Relaxed),
+            bytes,
+            filled,
+            evicted,
+        ))
+    }
+
     /// The cells' cover (floe_vfs::cover::CellCover; floe_vfs HierOpts::
     /// cell_cover): the area each cell's shapes cover by layer, worked out
     /// cell by cell on first use from the pages' occupancy records
@@ -838,7 +887,7 @@ impl Cache {
     /// COVER_RETRY: the viewer may build design.ovh while the daemon is up),
     /// or with FLOE_RUST_DENSITY_CELL_COVER=off (the kill switch).
     pub fn cell_cover(&self) -> Option<std::sync::Arc<floe_vfs::cover::CellCover>> {
-        if !floe_vfs::hier::dot_cell_cover() || !self.vfs.ovm.has_page_occ() {
+        if !floe_vfs::hier::dot_cell_cover() || !self.vfs().ovm.has_page_occ() {
             return None;
         }
         let mut slot = match self.cell_cover.lock() {
@@ -850,7 +899,7 @@ impl Cache {
                 .hier
                 .summary()
                 .ok()
-                .and_then(|summary| floe_vfs::cover::CellCover::new(&self.vfs.ovm, summary))
+                .and_then(|summary| floe_vfs::cover::CellCover::new(&self.vfs().ovm, summary))
                 .map(std::sync::Arc::new);
             slot.missed = if slot.table.is_none() {
                 Some(Instant::now())
@@ -864,7 +913,7 @@ impl Cache {
             // diagnostic: on first use alone)
             if let Some(table) = slot.table.clone() {
                 if std::env::var("FLOE_RUST_DENSITY_COVER_WARM").as_deref() != Ok("off") {
-                    let vfs = std::sync::Arc::clone(&self.vfs);
+                    let vfs = self.vfs();
                     let _ = std::thread::Builder::new()
                         .name("floe-cover-warm".to_string())
                         .spawn(move || {
@@ -885,7 +934,12 @@ impl Cache {
     /// The deepest placement level holding pages of layer `idx`.
     pub fn layer_depth(&self, idx: u32) -> u32 {
         self.layer_depth
-            .get_or_init(|| layer_max_depths(&self.vfs.ovm))
+            .get_or_init(|| match &self.link.light {
+                // (the inventory's edges: the image holds the visited
+                // cells' placements alone)
+                Some(light) => light.index.layer_max_depths(),
+                None => layer_max_depths(&self.vfs().ovm),
+            })
             .get(idx as usize)
             .copied()
             .unwrap_or(0)
@@ -912,16 +966,22 @@ impl Cache {
         {
             return known;
         }
-        let ovm = &self.vfs.ovm;
-        let held = ci >= ovm.n_cells
-            || layer_held_in(
-                ovm,
-                ci,
-                rem,
-                layer,
-                &mut LAYER_HELD_READS.clone(),
-                &mut std::collections::HashMap::new(),
-            )
+        // (a light cache: the walk marks the cells it needs the placements
+        // of, and runs again once they are in - `filled`)
+        let held = self
+            .filled(|vfs| {
+                let ovm = &vfs.ovm;
+                Ok(ci >= ovm.n_cells
+                    || layer_held_in(
+                        ovm,
+                        ci,
+                        rem,
+                        layer,
+                        &mut LAYER_HELD_READS.clone(),
+                        &mut std::collections::HashMap::new(),
+                    )
+                    .unwrap_or(true))
+            })
             .unwrap_or(true);
         if let Ok(mut known) = self.held_layers.lock() {
             known.insert((ci, rem, layer), held);
@@ -932,7 +992,8 @@ impl Cache {
     /// The layers cell `ci` or any cell below it holds texts of (its
     /// recursive text mask), a bit per layer index.
     pub fn layers_texted(&self, ci: u32) -> Vec<u8> {
-        let ovm = &self.vfs.ovm;
+        let vfs = self.vfs();
+        let ovm = &vfs.ovm;
         if ci >= ovm.n_cells {
             return Vec::new();
         }
@@ -979,14 +1040,14 @@ impl Cache {
             Err(poisoned) => poisoned.into_inner(),
         };
         // the top as the view root: its own file
-        let root = root.filter(|&ci| ci != self.vfs.ovm.top);
+        let root = root.filter(|&ci| ci != self.vfs().ovm.top);
         let path = match root {
             Some(ci) => format!("{}/design.ovs.{}", self.dir, ci),
             None => format!("{}/design.ovs", self.dir),
         };
         if !slot.files.contains_key(&root) {
             let opened = floe_vfs::occ_density::OvsFile::open(&path)
-                .and_then(|f| f.validate_against(&self.vfs.ovm).map(|()| f))
+                .and_then(|f| f.validate_against(&self.vfs().ovm).map(|()| f))
                 .and_then(|f| {
                     if f.root.map(|r| r.ci) == root {
                         Ok(f)
@@ -1149,7 +1210,7 @@ impl Cache {
             match stat {
                 None => slot.error = Some("no design.ovo".to_string()),
                 Some(_) => match floe_vfs::occupancy::OvoFile::open(&path) {
-                    Ok(file) => match file.validate_against(&self.vfs.ovm) {
+                    Ok(file) => match file.validate_against(&self.vfs().ovm) {
                         Ok(()) => slot.file = Some(std::sync::Arc::new(file)),
                         Err(e) => slot.error = Some(e),
                     },
@@ -1342,12 +1403,12 @@ impl Cache {
 
     pub fn info(&self) -> CacheInfo {
         CacheInfo {
-            unit: self.vfs.ovm.unit,
-            top_cell: self.vfs.ovm.top,
-            layers: self.vfs.ovm.n_layers,
-            cells: self.vfs.ovm.n_cells,
-            pages: self.vfs.ovm.n_pages,
-            ovp_bytes: self.vfs.ovm.ovp_len,
+            unit: self.vfs().ovm.unit,
+            top_cell: self.vfs().ovm.top,
+            layers: self.vfs().ovm.n_layers,
+            cells: self.vfs().ovm.n_cells,
+            pages: self.vfs().ovm.n_pages,
+            ovp_bytes: self.vfs().ovm.ovp_len,
             // GUI depth cap; the same expression the VFS daemon
             // reports as max_depth (top cell hierarchy height)
             max_depth: self.max_depth(),
@@ -1357,10 +1418,10 @@ impl Cache {
     /// The top cell's hierarchy height: a requested depth at or above
     /// it draws every shape, exactly like the unlimited depth.
     pub fn max_depth(&self) -> u32 {
-        if self.vfs.ovm.n_cells == 0 {
+        if self.vfs().ovm.n_cells == 0 {
             0
         } else {
-            self.vfs.ovm.cell(self.vfs.ovm.top).height
+            self.vfs().ovm.cell(self.vfs().ovm.top).height
         }
     }
 
@@ -1375,14 +1436,14 @@ impl Cache {
     }
 
     pub fn unit(&self) -> f64 {
-        self.vfs.ovm.unit
+        self.vfs().ovm.unit
     }
 
     /// Stable OVM layer-index mapping used by renderer paint-plane requests.
     pub fn layers(&self) -> Vec<CacheLayer> {
-        (0..self.vfs.ovm.n_layers)
+        (0..self.vfs().ovm.n_layers)
             .map(|index| {
-                let layer = self.vfs.ovm.layer(index);
+                let layer = self.vfs().ovm.layer(index);
                 CacheLayer {
                     index,
                     layer: layer.layer,
@@ -1586,7 +1647,7 @@ impl Cache {
         plan.pages
             .iter()
             .map(|&page| {
-                let p = self.vfs.ovm.page(page);
+                let p = self.vfs().ovm.page(page);
                 floe_vfs::hier::page_memory(p.records, p.usize_)
             })
             .sum()
@@ -1599,9 +1660,9 @@ impl Cache {
     pub fn pages_memory(&self, pages: &[u32]) -> u64 {
         pages
             .iter()
-            .filter(|&&page| page < self.vfs.ovm.n_pages)
+            .filter(|&&page| page < self.vfs().ovm.n_pages)
             .map(|&page| {
-                let p = self.vfs.ovm.page(page);
+                let p = self.vfs().ovm.page(page);
                 floe_vfs::hier::page_memory(p.records, p.usize_)
             })
             .sum()
@@ -1616,7 +1677,7 @@ impl Cache {
             .iter()
             .filter(|page| free.binary_search(page).is_err())
             .map(|&page| {
-                let p = self.vfs.ovm.page(page);
+                let p = self.vfs().ovm.page(page);
                 floe_vfs::hier::page_memory(p.records, p.usize_)
             })
             .sum()
@@ -1707,19 +1768,19 @@ impl Cache {
 
     /// The layer (cache layer index) of page `page_id`; None outside the index.
     pub fn page_layer(&self, page_id: u32) -> Option<u32> {
-        (page_id < self.vfs.ovm.n_pages).then(|| self.vfs.ovm.page(page_id).layer_idx)
+        (page_id < self.vfs().ovm.n_pages).then(|| self.vfs().ovm.page(page_id).layer_idx)
     }
 
     /// whether the index has design.ovb attached (its pages' occupancy records)
     pub fn has_page_occ(&self) -> bool {
-        self.vfs.ovm.has_page_occ()
+        self.vfs().ovm.has_page_occ()
     }
 
     pub fn page_encoded_bytes(&self, page_id: u32) -> u64 {
-        if page_id >= self.vfs.ovm.n_pages {
+        if page_id >= self.vfs().ovm.n_pages {
             return 0;
         }
-        self.vfs.ovm.page(page_id).usize_ as u64
+        self.vfs().ovm.page(page_id).usize_ as u64
     }
 
     /// The layer and the cell-local bbox of one page, without reading its
@@ -1728,38 +1789,38 @@ impl Cache {
     /// anything, and a page missing from that collection could never be
     /// painted later.
     pub fn page_geometry(&self, page_id: u32) -> Result<(u32, floe_ovm::BBox), String> {
-        if page_id >= self.vfs.ovm.n_pages {
+        if page_id >= self.vfs().ovm.n_pages {
             return Err(format!("page {} is outside the index", page_id));
         }
-        let page = self.vfs.ovm.page(page_id);
+        let page = self.vfs().ovm.page(page_id);
         Ok((page.layer_idx, page.bbox))
     }
 
     /// Original design-cell name for query/pick provenance.
     pub fn cell_name(&self, cell_id: u32) -> Result<String, String> {
-        if cell_id >= self.vfs.ovm.n_cells {
+        if cell_id >= self.vfs().ovm.n_cells {
             return Err(format!(
                 "cell index {} out of range 0..{}",
-                cell_id, self.vfs.ovm.n_cells
+                cell_id, self.vfs().ovm.n_cells
             ));
         }
-        Ok(self.vfs.ovm.cell(cell_id).name)
+        Ok(self.vfs().ovm.cell(cell_id).name)
     }
 
     /// The recursive box of cell `cell_id` (its shapes and every cell below);
     /// None out of range.
     pub fn cell_rbbox(&self, cell_id: u32) -> Option<BBox> {
-        (cell_id < self.vfs.ovm.n_cells).then(|| self.vfs.ovm.cell_rbbox(cell_id))
+        (cell_id < self.vfs().ovm.n_cells).then(|| self.vfs().ovm.cell_rbbox(cell_id))
     }
 
     pub(crate) fn cell_bbox(&self, cell_id: u32) -> Result<BBox, String> {
-        if cell_id >= self.vfs.ovm.n_cells {
+        if cell_id >= self.vfs().ovm.n_cells {
             return Err(format!(
                 "cell index {} out of range 0..{}",
-                cell_id, self.vfs.ovm.n_cells
+                cell_id, self.vfs().ovm.n_cells
             ));
         }
-        Ok(self.vfs.ovm.cell_rbbox(cell_id))
+        Ok(self.vfs().ovm.cell_rbbox(cell_id))
     }
 
     /// The budget fit of `plan`, a complete plan of `request` made as asked
@@ -1773,14 +1834,16 @@ impl Cache {
         plan: HierPlan,
     ) -> Result<Option<HierPlan>, String> {
         let req = self.view_request(request)?;
-        Ok(self.vfs.fit_planned_in(
-            &req,
-            request.fixed_fit,
-            request.free_pages.clone(),
-            plan,
-            request.dot_bright,
-            request.dot_occ_first,
-        ))
+        self.filled(|vfs| {
+            Ok(vfs.fit_planned_in(
+                &req,
+                request.fixed_fit,
+                request.free_pages.clone(),
+                plan.clone(),
+                request.dot_bright,
+                request.dot_occ_first,
+            ))
+        })
     }
 
     /// The pages `left` (sorted) of `plan` - a plan of `request` - that the
@@ -1799,7 +1862,7 @@ impl Cache {
         }
         let req = self.view_request(request)?;
         Ok(self
-            .vfs
+            .vfs()
             .stand_in_pages(&req, plan, left, request.dot_bright))
     }
 
@@ -1846,7 +1909,7 @@ impl Cache {
             self.hier
                 .summary()
                 .ok()
-                .filter(|summary| summary.n_cells == self.vfs.ovm.n_cells)
+                .filter(|summary| summary.n_cells == self.vfs().ovm.n_cells)
         } else {
             None
         };
@@ -1918,23 +1981,27 @@ impl Cache {
         } else {
             None
         };
-        let mut plan = self.vfs.plan_hier_in(
-            &req,
-            &regions,
-            request.density_mask.clone(),
-            request.density_layers.clone(),
-            request.fixed_fit,
-            request.sub_cut_dots,
-            request.dot_records,
-            request.probe_limit,
-            request.free_pages.clone(),
-            stop,
-            request.dot_bright,
-            request.dot_occ_first,
-            cover,
-            decide_by,
-            request.fit_rank.clone(),
-        );
+        // (a light cache plans again after filling the cells the walk
+        // expanded without their placements - DIRECT_READ_PLAN §5.4)
+        let mut plan = self.filled(|vfs| {
+            Ok(vfs.plan_hier_in(
+                &req,
+                &regions,
+                request.density_mask.clone(),
+                request.density_layers.clone(),
+                request.fixed_fit,
+                request.sub_cut_dots,
+                request.dot_records,
+                request.probe_limit,
+                request.free_pages.clone(),
+                stop.clone(),
+                request.dot_bright,
+                request.dot_occ_first,
+                cover.clone(),
+                decide_by.clone(),
+                request.fit_rank.clone(),
+            ))
+        })?;
         if plan.stats.cancelled {
             return Err("render cancelled: the plan's generation is superseded".to_string());
         }
@@ -1984,8 +2051,9 @@ impl Cache {
             culls: PlanCullCounts::from_stats(&plan.stats),
             ..PlanSummary::default()
         };
+        let vfs = self.vfs();
         for &page_id in &plan.pages {
-            let page = self.vfs.ovm.page(page_id);
+            let page = vfs.ovm.page(page_id);
             summary.compressed_bytes = summary
                 .compressed_bytes
                 .checked_add(page.csize as u64)
@@ -2055,7 +2123,7 @@ impl Cache {
             if !Path::new(&self.dir).join("design.ovr").exists() {
                 return None;
             }
-            match floe_vfs::representatives::File::open(&self.dir, &self.vfs.ovm) {
+            match floe_vfs::representatives::File::open(&self.dir, &self.vfs().ovm) {
                 Ok(file) => Some(std::sync::Arc::new(file)),
                 Err(error) => {
                     eprintln!("[render] ignoring design.ovr: {}", error);
@@ -2129,7 +2197,7 @@ impl Cache {
     /// set of just the (empty) top cell so the scene validates; the
     /// scene built on it carries labels only.
     pub fn empty_plan(&self) -> PlannedView {
-        let top = (self.vfs.ovm.top, floe_vfs::hier::REM_FULL);
+        let top = (self.vfs().ovm.top, floe_vfs::hier::REM_FULL);
         PlannedView {
             representative_stream: None,
             plan: HierPlan {
@@ -2186,7 +2254,7 @@ impl Cache {
             opts.blocks = false;
         }
         let started = Instant::now();
-        let planned = self.vfs.plan_labels_with(&req, &opts)?;
+        let planned = self.filled(|vfs| vfs.plan_labels_with(&req, &opts))?;
         let plan_us = elapsed_us(started);
         let layer_indices: BTreeMap<(u32, u32), u32> = self
             .layers()
@@ -2222,10 +2290,10 @@ impl Cache {
     fn view_request(&self, request: &PlanRequest) -> Result<ViewReq, String> {
         request.validate()?;
         if let Some(root) = request.root {
-            if root >= self.vfs.ovm.n_cells {
+            if root >= self.vfs().ovm.n_cells {
                 return Err(format!(
                     "view root {} is outside the cell table 0..{}",
-                    root, self.vfs.ovm.n_cells
+                    root, self.vfs().ovm.n_cells
                 ));
             }
         }
@@ -2234,15 +2302,15 @@ impl Cache {
             cut_dbu: if request.exact { 0 } else { request.cut_dbu },
             vis: match &request.visible_indices {
                 Some(indices) => {
-                    let mut vis = vec![0u8; self.vfs.ovm.bs_width];
+                    let mut vis = vec![0u8; self.vfs().ovm.bs_width];
                     for &idx in indices {
-                        if idx < self.vfs.ovm.n_layers {
+                        if idx < self.vfs().ovm.n_layers {
                             floe_ovm::bit_set(&mut vis, idx as usize);
                         }
                     }
                     vis
                 }
-                None => self.vfs.layer_mask(request.visible_layers.as_deref())?,
+                None => self.vfs().layer_mask(request.visible_layers.as_deref())?,
             },
             depth: request.depth,
             px_per_dbu: if request.exact {
@@ -2265,9 +2333,9 @@ impl Cache {
             page_skip: if request.summary_layers.is_empty() {
                 Vec::new()
             } else {
-                let mut skip = vec![0u8; self.vfs.ovm.bs_width];
+                let mut skip = vec![0u8; self.vfs().ovm.bs_width];
                 for &idx in &request.summary_layers {
-                    if idx < self.vfs.ovm.n_layers {
+                    if idx < self.vfs().ovm.n_layers {
                         floe_ovm::bit_set(&mut skip, idx as usize);
                     }
                 }
@@ -2279,10 +2347,10 @@ impl Cache {
     /// Reads pages through `floe-vfs`. The public contract preserves caller
     /// order and duplicates while performing the underlying IO in file order.
     pub fn read_pages(&self, page_ids: &[u32]) -> Result<Vec<PagePayload>, String> {
-        let payloads = self.vfs.read_page_batch(page_ids)?;
+        let payloads = self.vfs().read_page_batch(page_ids)?;
         let mut pages = Vec::with_capacity(payloads.len());
         for (page_id, bytes) in payloads {
-            let meta = self.vfs.ovm.page(page_id);
+            let meta = self.vfs().ovm.page(page_id);
             if meta.codec != CODEC_OASIS {
                 return Err(format!(
                     "unsupported page codec {} for page {}",
@@ -2400,6 +2468,9 @@ impl Cache {
             return Err(format!(
                 "decode workers must be in 1..={MAX_DECODE_WORKERS}: {workers}"
             ));
+        }
+        if let Some(light) = &self.link.light {
+            return crate::light::decode_pages(light, &self.vfs(), page_ids, workers, guard);
         }
         check_decode_cancelled(guard)?;
         let read_started = Instant::now();
@@ -2579,6 +2650,17 @@ impl DecodePool<'_> {
         if page_ids.is_empty() {
             return Ok((Vec::new(), RenderStats::default()));
         }
+        // (a light cache's pages: segments of the source, decoded on
+        // threads of their own - the pool's workers sit this batch out)
+        if let Some(light) = &self.source.link.light {
+            return crate::light::decode_pages(
+                light,
+                &self.source.vfs(),
+                page_ids,
+                self.workers.try_into().unwrap_or(u16::MAX),
+                self.guard,
+            );
+        }
         let read_started = Instant::now();
         let payloads = self.source.read_pages(page_ids)?;
         let page_read_us = elapsed_us(read_started);
@@ -2696,7 +2778,7 @@ fn decode_payload(
 }
 
 /// decode_shrink: a parsed page's record lists cut to their length.
-fn shrink_records(doc: &mut Doc) {
+pub(crate) fn shrink_records(doc: &mut Doc) {
     for cell in &mut doc.cells {
         cell.rects.shrink_to_fit();
         cell.polys.shrink_to_fit();
@@ -2706,14 +2788,14 @@ fn shrink_records(doc: &mut Doc) {
     }
 }
 
-fn check_decode_cancelled(guard: Option<(u64, &RenderCancellation)>) -> Result<(), String> {
+pub(crate) fn check_decode_cancelled(guard: Option<(u64, &RenderCancellation)>) -> Result<(), String> {
     if let Some((generation, cancellation)) = guard {
         cancellation.check(generation)?;
     }
     Ok(())
 }
 
-fn elapsed_us(started: Instant) -> u64 {
+pub(crate) fn elapsed_us(started: Instant) -> u64 {
     started.elapsed().as_micros().try_into().unwrap_or(u64::MAX)
 }
 

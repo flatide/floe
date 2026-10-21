@@ -7,6 +7,7 @@ pub mod coverage;
 mod density_mask;
 pub mod hier;
 pub mod hiersum;
+pub mod light;
 pub mod lock;
 pub mod occ_density;
 pub mod occupancy;
@@ -183,6 +184,18 @@ impl Vfs {
         Ok(Vfs { ovm, ovp_path, ovt })
     }
 
+    /// The light cache's session (crate::light, DIRECT_READ_PLAN L4): the
+    /// synthesized index over the source file itself - its pages are
+    /// segments of `source` (CODEC_SEGMENT), decoded by the renderer, and
+    /// there is no text index yet.
+    pub fn light(ovm: Ovm, source: String) -> Vfs {
+        Vfs {
+            ovm,
+            ovp_path: source,
+            ovt: floe_ovm::Backing::Vec(Vec::new()),
+        }
+    }
+
     /// A session over an in-memory index without payload files (the
     /// cell tree's tests in another crate); never a product path.
     #[doc(hidden)]
@@ -247,6 +260,12 @@ impl Vfs {
         for &pi in pages {
             if pi >= n {
                 return Err(format!("page {} out of range ({} pages)", pi, n));
+            }
+            if self.ovm.page(pi).codec == floe_ovm::CODEC_SEGMENT {
+                return Err(format!(
+                    "page {} of a light index is a segment of the source, not a page file; the renderer decodes it (floe_vfs::light)",
+                    pi
+                ));
             }
         }
         if pages.is_empty() {

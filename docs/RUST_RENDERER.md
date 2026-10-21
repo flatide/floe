@@ -657,6 +657,31 @@ box misses.
 
 See [RUST_RENDERER_PLAN.ko.md](RUST_RENDERER_PLAN.ko.md) for scope and gates.
 
+## Light cache (DIRECT_READ_PLAN L4, 0.12.382)
+
+`Cache::open` on a directory without `design.ovm` but with `design.inv` opens
+the light cache (`floe_vfs::light::LightIndex`, render-core `light.rs`): the
+inventory and the segment directory are read, the source they were made from
+(meta.json `src.path`, else `.NAME.ice` -> `NAME`; size and mtime must match) is
+opened for pread, and a `design.ovm` IMAGE is synthesized in memory - every cell
+from the inventory, a page per (segment, layer) row with codec `CODEC_SEGMENT`,
+no placements and no texts. The planner, the raster, the page cache and the
+cell tree run on it as on a full index: the index sits in a slot (`VfsSlot`)
+both the `Cache` and its `HierHandle` read; a plan that expanded a cell whose
+placements the image lacks (floe_ovm `LightMarks`, set by the planner's expand
+and the `cell_places`/`cell_bvh` accessors) is made again after `LightIndex::
+fill` read those cells' placement segments and the image was reassembled
+(`LightLink::run`; a round per hierarchy level, FLOE_LIGHT_PREFILL_PLACES /
+_MB take the cells under them along, FLOE_LIGHT_PLACES_MB bounds what stays
+resident, FLOE_LIGHT_LOG=on prints a line per round). A page decodes from its
+segment of the source - read in file order, parsed once with its snapshot,
+split by layer into one-cell Docs (`light::decode_pages`; the pool's workers
+sit a light batch out). The hierarchy summary comes from the inventory's edges
+(no `design.ovh`). `Cache::is_light()` and `light_stats()` say so; `read_pages`
+refuses a light page. Pixel contract: identical to the full index where every
+shape is drawn (gate `light_cache`); a cut view may differ page by page. Not
+yet: texts and labels, `floe2`'s own light modes and status (L5/L6).
+
 ## floe2 product boundary
 
 `floe2` is the Rust-only product shell. The stable `floe` shell defaults to

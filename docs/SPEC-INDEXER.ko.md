@@ -106,6 +106,17 @@ bbox 합집합, 도형 치수 최대)를 Doc에서 같은 식으로 계산한 �
 0.12.381); `--load-seg design.seg`는 읽어서 design.inv와 짝인지(`"pair_ok"`), 소스가
 있으면 새 디렉터리와 같은 바이트인지(`"identical"`) 본다(0.12.380, L2 §8.3).
 
+`floe-index light <src.oas> [--out DIR] [--jobs N] [--seg-bytes N]`(0.12.382,
+DIRECT_READ_PLAN L4 §8.5)은 경량 캐시의 파일을 쓴다: 재고 패스 한 번으로 design.inv와
+design.seg(짝)를, 그리고 전체 색인의 키에 `"cache": "light"`를 더한 meta.json을 DIR(기본
+`.<src.oas>.ice`)에 둔다. design.ovm이 있는 디렉터리는 건드리지 않는다(종료 1). 두 파일은
+스트리밍 빌드가 캐시 옆에 두는 것과 같은 바이트다(게이트 `light_cache`). 렌더러(render-core
+`Cache::open`)는 design.ovm이 없고 design.inv가 있는 디렉터리를 경량으로 열어 소스
+(meta.json `src.path`, 없으면 `.NAME.ice`의 NAME; size/mtime이 맞아야 한다)에서 직접
+읽는다 — 셀 디렉터리는 재고, 페이지는 세그먼트 × 레이어, 배치는 플랜이 방문한 셀부터
+pread + inflate + `parse_segment`로 채운다. CBLOCK 안에 정의된 셀이 있는 스트림은 경량으로
+열리지 않는다(명령이 경고한다). 요약 패스(design.ovo)·잠금·`floe2 index --light`는 L5.
+
 ### 1.1 단일 셀 비게시 프로파일
 
 `--profile-cell NAME`은 정확한 셀 이름, `--profile-cell-ci N`은 slow-cell
@@ -187,7 +198,9 @@ STREAMING_INDEX_PLAN §11. 소스를 읽어 캐시를 만드는 실행은 **스�
   뒤에 쓴다(0.12.380, DIRECT_READ_PLAN L2): `--no-seg`로 생략, `--seg-bytes N`(기본
   256K)이 CBLOCK 없는 구간의 길이. 재고 패스 시간의 +10~15 %. 게이트 `vfs_stream`은
   design.inv와 같은 규칙으로 본다(`floe-index inventory --seg`와 같은 바이트, 짝,
-  인메모리에 없음, 묵은 파일 제거, `--no-seg`).
+  인메모리에 없음, 묵은 파일 제거, `--no-seg`). 같은 두 파일이 경량 캐시의 색인이다
+  (`floe-index light`, DIRECT_READ_PLAN L4): design.ovm이 없는 디렉터리를 렌더러가 그
+  둘과 소스로 연다.
 - `floe2 index`는 같은 세 플래그(`--stream`, `--in-memory`, `--mem`)를 그대로 넘기고,
   기본은 아무것도 넘기지 않는다(floe-index의 기본 = 스트리밍). 덱 소스·뷰어의 덱
   색인·자동 색인도 같다. design.ovo 없는 현재 캐시의 점유 추가(`occupancy` 실행)도

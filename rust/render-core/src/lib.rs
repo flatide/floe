@@ -12,6 +12,7 @@ mod clip;
 mod deck;
 mod font;
 mod layer_decode;
+mod light;
 pub mod occ;
 mod page_cache;
 mod page_index;

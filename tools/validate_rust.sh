@@ -50,7 +50,7 @@ cd "$(dirname "$0")/.."
 # ---- gate names (in battery order) and aliases ----------------------
 GATES="unit unit_vfs unit_render index_cli vfs_profile floe2 rust_scan rust_inventory \
 rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage \
-occupancy vfs_hier vfs_lifecycle vfs_marker vfs_split vfs_text vfs_stream \
+occupancy vfs_hier vfs_lifecycle vfs_marker vfs_split vfs_text vfs_stream light_cache \
 render_goldens render_speckle render_frames drc_ice drc_analysis drc_team svrf oasis_shapes \
 jobdeck representatives gen_main01 fit_budget sub_cut_box shape_cut write_once layer_decode area_true density_stack cell_tree index_lock worker_client cell_index perf_parity gtk_view rust_renderer klayout"
 # (unit_renderd is unit's renderd part, as unit_vfs and unit_render are)
@@ -60,8 +60,8 @@ alias_gates() {
         quick)    echo "unit_vfs unit_render occupancy rust_renderer" ;;
         planner)  echo "unit_vfs occupancy jobdeck rust_renderer vfs_hier vfs_lifecycle fit_budget sub_cut_box shape_cut" ;;
         occ)      echo "unit_vfs occupancy" ;;
-        render)   echo "unit_render unit_renderd rust_renderer representatives fit_budget sub_cut_box shape_cut write_once layer_decode area_true density_stack cell_tree render_goldens render_speckle render_frames klayout" ;;
-        indexer)  echo "unit_vfs index_cli rust_scan rust_inventory rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage vfs_split vfs_text vfs_stream vfs_marker representatives cell_tree index_lock" ;;
+        render)   echo "unit_render unit_renderd rust_renderer representatives fit_budget sub_cut_box shape_cut write_once layer_decode area_true density_stack cell_tree render_goldens render_speckle render_frames light_cache klayout" ;;
+        indexer)  echo "unit_vfs index_cli rust_scan rust_inventory rust_tiles rust_depth rust_meta rust_skel vfs vfs_render vfs_coverage vfs_split vfs_text vfs_stream light_cache vfs_marker representatives cell_tree index_lock" ;;
         python)   echo "index_cli vfs_profile floe2 drc_ice drc_analysis drc_team svrf gen_main01" ;;
         deck)     echo "jobdeck occupancy" ;;
         *)        echo "" ;;
@@ -75,7 +75,7 @@ alias_gates() {
 RENDER_GATES="unit_render unit_renderd rust_renderer jobdeck occupancy \
 fit_budget sub_cut_box shape_cut write_once layer_decode area_true \
 density_stack cell_tree index_lock representatives oasis_shapes floe2 klayout \
-gtk_view"
+gtk_view light_cache"
 # The planner feeds every one of those, and the plan CLI's gates.
 PLAN_GATES="unit_vfs $RENDER_GATES vfs_hier vfs_lifecycle vfs_marker \
 vfs_split vfs_text vfs_profile"
@@ -201,6 +201,11 @@ gates_for() {
             # the streaming store (S4): its parity gate, the unit tests, the
             # in-memory build it must equal
             echo "unit vfs_stream vfs vfs_split rust_renderer" ;;
+        rust/vfs/src/light.rs|rust/render-core/src/light.rs|rust/cli/src/light.rs|tools/validate_light_cache.py)
+            # the light cache (DIRECT_READ_PLAN L4): its pixel gate against
+            # the full index, the unit tests, the files it shares with the
+            # streaming build, the renderer it plugs into
+            echo "unit light_cache rust_inventory vfs_stream rust_renderer cell_tree" ;;
         rust/*)
             # the parser, the index format, the tiler, the rest of the
             # VFS, floe-index, the vendored crates, the workspace
@@ -513,6 +518,10 @@ if gate vfs_text; then RAN="$RAN vfs_text"; lap vfs_text
 # in-memory build byte for byte, at jobs 1 and 4, within a byte budget
 if gate vfs_stream; then RAN="$RAN vfs_stream"; lap vfs_stream
     .venv/bin/python tools/validate_vfs_stream.py "$SRC"; fi
+# L4 of the direct-read plan: a light cache (design.inv + design.seg over
+# the source) renders pixel for pixel as the full index at exact detail
+if gate light_cache; then RAN="$RAN light_cache"; lap light_cache
+    .venv/bin/python tools/validate_light_cache.py "$SRC"; fi
 # rasterization goldens for the rust-renderer replacement:
 # bake (version-pinned) + determinism + policy discrimination
 if gate render_goldens; then RAN="$RAN render_goldens"; lap render_goldens

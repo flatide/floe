@@ -5011,6 +5011,9 @@ impl<'a> Hier<'a> {
             self.begin_grid(&boxes);
             self.cell_rbbox = self.v.cell(ci).rbbox;
         }
+        // the light cache: a cell expanded here needs its placements in the
+        // image (floe_ovm LightMarks; nothing on a full index)
+        self.v.light_touch(ci);
         let cell = self.v.cell(ci);
         let mut wc = WsCell {
             key,

@@ -717,6 +717,8 @@ pub fn plan_labels(
         if w.done {
             break;
         }
+        // (the light cache: the cell's placements are needed in the image)
+        v.light_touch(ci);
         let cell = v.cell(ci);
         if cell.bvh_count == 0 {
             for pli in cell.place_start as u64..cell.place_start as u64 + cell.place_count as u64 {

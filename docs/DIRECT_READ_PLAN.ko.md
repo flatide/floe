@@ -183,7 +183,7 @@ L0 실측), 가장 큰 셀 26 MiB = CBLOCK 341개(레코드 118만, Doc 415 MiB)
 | `design.inv` (**구현 §8.2**, SPEC-FORMATS FLOEINV1) | 재고 직렬화: 헤더(magic, 버전, unit, src_size/mtime, top, n_cells, n_layers), 레이어 표(순서·이름·별칭), 셀 표(이름, ranges, def_ranges, 카운터, dbox 2종, dmembers, 마스크 3종), 간선(child, placements, members, obox 8 — 쓰인 방향만), fold(topo, rank, height, rmembers, rmask/rtmask/rsmask, rbb 2종), CELLNAME/TEXTSTRING 표 | 셀 5,461 → 수 MB. (p10: 셀 35,183·간선 188,065·레이어 449 → 약 60~80 MB; 마스크 상한 = obox 8 × 32 B를 쓰인 방향만으로) |
 | `design.seg` (**구현 §8.3**, SPEC-FORMATS FLOESEG1) | 세그먼트 디렉터리: 세그먼트마다 cell u32, 파일 오프셋 u64, 압축 길이 u32, 해제 길이 u32, 종류(CBLOCK/구간) u8, 스냅샷 오프셋 u32(또는 "체인: 이전 독립 세그먼트에서 파싱"), 레코드 수 u32, 멤버 u64, bbox 4×i64, 레이어 마스크(비트셋 풀 참조), 레이어별 통계 블록(레이어 idx, records, members, bbox, max_w, max_h, max_min — 세그먼트가 가진 레이어만), 배치·텍스트 유무 플래그; 셀별 세그먼트 범위 표; 스냅샷 풀 | 78.1만 × (약 80 B + 레이어 통계) ≈ 60~120 MB (0.12~0.24 %) |
 | `design.ovo` | 지금과 같은 FLOEOVO2 | 마스크 수 MB~수십 MB |
-| `meta.json` | `vfs: 1` 대신 `light: 1`; 소스 identity; 세그먼트 통계; 생성 시간 | — |
+| `meta.json` (**구현 §8.5**) | 전체 색인의 키(version, vfs, src, dbu, top_cell, bbox, grid, layers, texts, frontier)에 `"cache": "light"`; `src.path`가 캐시가 소스 옆이 아닐 때 소스를 가리킨다 | — |
 
 - 무효화: 전체 캐시와 같은 `src_size/src_mtime` identity. 세 파일은 각각
   tmp + rename 게시, `design.inv`·`design.seg`가 한 쌍(둘 다 재고 패스가 쓴다),
@@ -386,7 +386,7 @@ geometry/placement/text x·y, W/H, 점 목록, 경로 확장, 반복, 배치 대
 | L1 사이드카 | `design.inv` 직렬화/로더(재고 ↔ 파일 왕복 동일), 전체 빌드도 함께 씀(선택) | **완료 0.12.379(§8.2)**: 왕복 바이트 동일(단위 테스트 + `rust_inventory`), 스트리밍 빌드가 씀(`vfs_stream`) |
 | L2 세그먼트 | 재고 패스의 세그먼트 방출(스냅샷·레이어 통계), `design.seg` | **완료 0.12.380(§8.3)**: 세그먼트 통계 = Doc(`--check-seg`, `rust_inventory`), 왕복 동일, 스트리밍 빌드가 씀(`vfs_stream`) |
 | L3 시드 파서 | `parse_segment`, CBLOCK inflate, 체인 | **완료 0.12.381(§8.4)**: 모든 fixture + 적대적 스트림에서 세그먼트 파싱의 레코드 합 = 셀 파싱(`--check-seg`, `rust_inventory`, 단위 테스트) |
-| L4 LightVfs | 합성 Ovm, 세그먼트 페이지 디코드, 배치 LRU, 셀 트리 | `--detail exact` 픽셀 동일(fixture 전부), cut 뷰 허용 오차 게이트, 성능 카운터 |
+| L4 LightVfs | 합성 Ovm, 세그먼트 페이지 디코드, 배치 LRU, 셀 트리 | **완료 0.12.382(§8.5)**: 게이트 `light_cache` — fixture 5종 × exact 뷰 5개(전체·근접·depth 1·레이어 부분)가 전체 색인과 PNG 동일 + 플랜의 셀·간선·프레임 수 동일, cut 3 px 뷰는 빛나는 픽셀의 0.5 % 안(실측 0), 거절 3종; 단위 테스트(재고 요약 = 이미지 요약, 페이지 = 레이어 도형, 셀 트리 질의); valmini·sample9·route_chip·p10에서 뷰 17개 PNG 동일 |
 | L5 명령·모드 | `floe-index light`, `floe2 index --light`, 열기 규칙, 상태줄/info, 자동 생성, 잠금 | CLI 게이트, index_lock |
 | L6 덱·뷰어·캡처 | 덱 소스 경량 열기, 요약 없는 상태 표시, refine 흐름, `floe2 render` 완료 대기 | jobdeck·gtk_view·occupancy 게이트 |
 | L7 후속 | 요약 패스 1패스화/마킹 가속, ovs 합치기(레이아웃 밀도), B안(정규 페이지), 세그먼트 캐시 디스크 보존(방문한 셀의 디코드 결과를 남겨 다음 세션 가속), 1패스 경량 생성(셀 로컬 점유 격자 합성) | 각각 |
@@ -609,6 +609,85 @@ L4까지 끝나면 단독 소스를 경량으로 열어 볼 수 있고, L5·L6�
 - **다음.** L4 LightVfs: design.inv/seg로 Ovm을 합성하고(셀 디렉터리 ← 재고, 페이지
   디렉터리 ← 세그먼트 × 레이어), 페이지 페이로드를 원본에서 pread + inflate +
   `parse_segment`로 디코드한다(§5.3).
+
+### 8.5 L4 구현 (0.12.382 / floe-index·renderd 0.12.341, 2026-10-22; 사용자 "L4 진행해줘")
+
+- **파일.** `floe-index light SRC [--out DIR] [--jobs N] [--seg-bytes N]`(cli light.rs)이
+  재고 패스 한 번으로 design.inv·design.seg(짝)와 meta.json(전체 색인의 키 +
+  `"cache": "light"`, §5.1)을 DIR(기본 `.<SRC>.ice`)에 쓴다. design.ovm이 있는
+  디렉터리는 건드리지 않는다(종료 1; 스트리밍 빌드가 이미 inv/seg를 옆에 둔다).
+  writer는 `floe_vfs::light::write_files`로 두 명령이 같은 바이트를 쓴다(게이트가 본다).
+- **열기(`floe_vfs::light::LightIndex`).** render-core `Cache::open`은 design.ovm이 없고
+  design.inv가 있으면 경량으로 연다: inv를 읽고(CRC), seg가 그 inv와 짝인지(`inv_crc`,
+  identity, 셀·레이어 수), 소스(meta.json `src.path`, 없으면 `.NAME.ice` → `NAME`)가
+  파일을 만든 소스인지(size, mtime) 확인하고 pread용으로 연다. 거절: CBLOCK 안에 정의된
+  셀이 있는 스트림(세그먼트 한 개가 두 셀의 레코드를 가져 디렉터리 행이 가르지 못한다 —
+  전체 색인이 읽는다), 바뀐 소스, 짝이 아닌 seg, 소스를 말하지 않는 디렉터리.
+- **합성 Ovm(§5.3 1·2·4).** `LightIndex::ovm()`이 `floe_ovm::Builder`로 이미지를 만들어
+  `Ovm::from_bytes_shallow`(open의 얕은 검증)로 연다: 셀 = 재고 전부(이름·height·rank·
+  dbox·rbbox·dmask/rmask/rtmask·rmembers = PrePass::from_inventory의 값), 페이지 = 세그먼트
+  × 레이어 행(cell, layer_idx, bbox, records, members, max_w/h/min은 행 그대로, `file_off` =
+  소스 오프셋, csize/usize_ = 세그먼트 바이트를 레이어 레코드 비율로 나눈 몫 — 한 레이어
+  세그먼트는 전부, 여러 레이어 세그먼트는 몫; 코덱 `CODEC_SEGMENT` = 1, 디스크에는 없는
+  값; `ovp_len` = 소스 크기), (셀, 레이어) 런은 세그먼트 순서 + `split_pbvh`(전체
+  빌드의 finish_layer와 같은 함수 — split_bvh/split_pbvh는 cli에서 floe_ovm으로 옮겼다),
+  텍스트 표는 비어 있다(라벨은 L6). 배치·인스턴스 BVH는 처음엔 없다.
+- **채움(§5.3 3, §5.4).** `floe_ovm::Ovm`에 `LightMarks`가 붙는다: 이미지에 배치가 없는
+  셀(재고는 있다고 한다)과 그중 독자가 요구한 셀. 플래너의 `expand`(hier.rs), 라벨
+  walk(text.rs), 접근자 `cell_places`/`cell_bvh`가 `light_touch(ci)`로 표시한다(전체
+  색인에서는 아무것도 하지 않는 한 분기). render-core의 모든 플랜 진입점(`plan`, fit
+  decision, fit_plan, labels, `layer_held`, 셀 트리의 instances/info walk)은
+  `LightLink::run`으로 돈다: 플랜 → 표시된 셀이 있으면 채움 → 이미지 재합성 → 다시 플랜,
+  표시가 없을 때까지(한 라운드가 계층 한 단계; 상한 64). 표시는 늘기만 하고 채움은
+  멱등이라 두 스레드가 한 이미지에서 같이 플랜해도 안전하다. 채움(`LightIndex::fill`)은
+  셀의 배치 플래그 세그먼트를 pread + inflate + `parse_segment`(병렬)하고 재고의 배치 수와
+  맞는지 확인한 뒤 build_cell_plan과 같은 항목 박스·v7 주석·`split_bvh`·`CellSink`로
+  인코딩해 둔다(v8 노드 마스크는 합성 때 `annotate_bvh_masks`). 선채움: 요구된 셀 아래의
+  셀도 `FLOE_LIGHT_PREFILL_PLACES`(262,144)·`FLOE_LIGHT_PREFILL_MB`(4) 안에서 같이 읽는다
+  (sample9 근접 뷰 3라운드 30 ms; 전부 읽으면 652 셀 178 ms, 안 읽으면 5라운드 17 ms).
+  상주 예산 `FLOE_LIGHT_PLACES_MB`(1 GiB)를 넘으면 지금 요구하지 않은 채움을 오래된
+  순서로 비운다(재방문하면 다시 읽는다). 인덱스 교체는 `VfsSlot`(RwLock<Arc<Vfs>>)로,
+  Cache와 HierHandle이 같은 슬롯을 본다; 한 요청은 집은 스냅샷을 끝까지 쓴다.
+- **디코드(§5.3 5).** `Cache::decode_pages*`와 DecodePool은 경량이면 render-core
+  `light::decode_pages`로 간다: 요청 페이지를 세그먼트별로 묶고 파일 순서로 pread, 세그먼트
+  하나를 스냅샷으로 한 번 파싱해(워커 N) 레이어별 한 셀 Doc(`page_cell_name`, 그
+  레이어의 rects/polys/paths만, 배치·텍스트 없음)으로 나눠 `DecodedPage`를 만든다
+  (PageIndex, decode_shrink 동일). 정규화는 하지 않는다 — 멤버 집합이 같으므로 픽셀이
+  같다(게이트). `read_page_batch`는 CODEC_SEGMENT 페이지를 거절한다.
+- **요약·셀 트리(§5.3 6).** `LightIndex::summary()`가 재고 간선(obox 8방향 ⊕ 자식 rbbox의
+  방향 박스 = 간선 extent, members, rank 순서의 insts)으로 design.ovh 바이트를 만든다
+  (`hiersum::build_from_edges`, build()와 공유); 단위 테스트가 전부 채운 이미지의
+  `hiersum::build`와 바이트 동일임을 본다. `layer_depth`도 재고 자식 표로 센다.
+- **게이트 `light_cache`(tools/validate_light_cache.py).** valmini·KLayout 재작성 2종·
+  gen_route_chip 0.05·gen_main01_like 0.001: `floe-index light`의 inv/seg = 스트리밍 빌드의
+  바이트, meta.json 키, floe-render-cli로 exact 뷰 5개(전체·근접·근접 depth 1·전체 depth
+  1·두 레이어) PNG 동일 + 플랜 wc_cells/inst_edges/frame_rects 동일(페이지 수와 members는
+  다르다: 경량 페이지는 세그먼트의 것이라 구간의 bbox가 도형 없는 뷰에 닿는다), cut 3 px
+  전체 뷰 차이 ≤ 빛나는 픽셀의 0.5 %(실측 0), 거절(전체 색인 디렉터리, 바뀐 소스, 이름
+  없는 디렉터리). 단위 테스트: floe_vfs `light::tests`(스트림 5종: 열기·이미지 검증·
+  마크·선채움 집합·전부 채움 = 재고 배치 수·요약 바이트 동일·딥 검증; 페이지마다 레코드·
+  멤버 = 세그먼트 파싱의 그 레이어, 셀·레이어별 멤버 합 = parse_doc; 거절 4종),
+  render-core `light::tests`(경량 Cache 열기, exact 플랜 + 라운드, 재플랜에 채움 없음,
+  전 페이지 디코드의 레이어별 멤버, 풀 경로 동일, read_pages 거절, 셀 트리 children·
+  instances 17·info).
+- **실측(macOS 4 jobs, floe-render-cli, 전체 색인 → 경량; `FLOE_LIGHT_LOG=on`이 라운드
+  줄을 낸다).** valmini: 뷰 4개 동일, 1라운드. sample9(1,188 셀, 1,450만 레코드; light
+  파일 1.2 s, inv 859 K + seg 909 K): 칩 전체 exact 9,760 → 9,756 페이지, 2.51 → 2.79 s;
+  60 µm 근접 뷰 4 페이지 = 4 페이지, 0.02 → 0.06 s(3라운드). route_chip(29 셀, 916 구간,
+  CBLOCK 없음): 100 µm 근접 뷰 동일하나 경량이 765 페이지 / 2,080만 레코드를 고른다(전체
+  38 / 132만; 1.34 s 대 0.09 s) — 이 writer는 레코드를 칩 전체에 흩뿌려 구간마다 bbox가
+  칩이다(L0의 "full" 등급, §4·§7의 지역성 위험이 그대로 보인다; KLayout·현장 writer는
+  띠다). main01_chip_p10(35,183 셀, 1억 레코드; light 파일 9.4 s, inv 64 M + seg 22 M):
+  40 µm 근접 뷰 동일, 168 대 157 페이지, 1.02 s 대 0.13 s — 1라운드가 top의 배치 280만
+  개(구간 103개)를 481 ms에 읽고 265 MB 이미지를 156 ms에 합성한다; 2 mm 창 cut 3 px:
+  4라운드, 채운 배치 1,040만 개, 이미지 901 MB, 3.4 s 대 0.33 s. 이미지 = 방문한
+  셀의 배치(64 B/개 + BVH; 전체 색인은 같은 것을 디스크에 두고 mmap), 채움 = 전체 빌드가
+  색인 때 하던 일. 현장 마스크(배치 5,461개)는 top 한 라운드, 수 ms다.
+- **남은 것(L7로).** 이미지 증분 합성(지금은 라운드마다 정적 섹션을 다시 인코딩·복사:
+  p10 150~300 ms/라운드), 세그먼트 pread 병렬화·묶음(NFS), 텍스트 색인(라벨, L6), 채운
+  셀의 최근 사용 추적(지금은 채운 순서로 비운다), `floe-index light`의 잠금·요약 패스·
+  모드(L5), 세그먼트 지역성이 나쁜 writer의 근접 뷰(route_chip류: B안 또는 세그먼트
+  재분할).
 
 ## 9. 검토한 대안
 

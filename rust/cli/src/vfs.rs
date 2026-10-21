@@ -14,7 +14,7 @@
 use crate::cellstore::CellStore;
 use floe_oasis::doc::{Cell, Doc, PathRec, PlaceRec, PolyRec, RectRec, Rep};
 use floe_oasis::write::WCell;
-use floe_ovm::{narrow_u32, BBox, Builder, PBVH_NONE};
+use floe_ovm::{narrow_u32, split_bvh, split_pbvh, BBox, Builder, PBVH_LEAF, PBVH_NONE};
 use floe_tiler::hier::{cell_bboxes_full, rep_extent};
 use floe_tiler::{path_bbox, xf_rep, Xf};
 use std::io::Write;
@@ -43,10 +43,8 @@ const PLAN_BATCH_PER_JOB: usize = 4;
 /// halve the next batch (never below `jobs` - that would re-starve the
 /// plan threads). Linux-only signal; hosts without it keep the default.
 const GOVERNOR_MIN_AVAIL_GB: f64 = 4.0;
-const BVH_LEAF: usize = 8;
-/// pages per page-BVH leaf, and the run size at or below which a
-/// (cell,layer) run gets no BVH at all (linear scan, root = NONE)
-const PBVH_LEAF: usize = 8;
+// (BVH_LEAF / PBVH_LEAF and split_bvh / split_pbvh live in floe_ovm since
+// the light cache's fill builds the same trees - DIRECT_READ_PLAN L4)
 /// texts per text-BVH leaf / linear-scan threshold (v5 text index)
 const TBVH_LEAF: usize = 8;
 
@@ -5703,40 +5701,6 @@ struct LayerProfile {
 /// binary BVH over one (cell,layer) page run with subtree max_w/
 /// max_h aggregates (pre-leaf cut culling). Same reorder trick as
 /// split_bvh: items end up in leaf-concatenated order.
-fn split_pbvh(
-    nodes: &mut Vec<(BBox, u32, u16, bool, u64, u64)>,
-    items: &mut [(BBox, u64, u64, usize)],
-    lo: usize,
-    slot: usize,
-) {
-    let mut bb = BBox::EMPTY;
-    let (mut mw, mut mh) = (0u64, 0u64);
-    for (ib, w, h, _) in items.iter() {
-        bb.grow(ib);
-        mw = mw.max(*w);
-        mh = mh.max(*h);
-    }
-    if items.len() <= PBVH_LEAF {
-        nodes[slot] = (bb, lo as u32, items.len() as u16, true, mw, mh);
-        return;
-    }
-    let wx = bb.x1 - bb.x0;
-    let wy = bb.y1 - bb.y0;
-    let mid = items.len() / 2;
-    if wx >= wy {
-        items.select_nth_unstable_by_key(mid, |(b, _, _, _)| b.x0 + b.x1);
-    } else {
-        items.select_nth_unstable_by_key(mid, |(b, _, _, _)| b.y0 + b.y1);
-    }
-    let l = nodes.len();
-    nodes.push((BBox::EMPTY, 0, 0, false, 0, 0));
-    nodes.push((BBox::EMPTY, 0, 0, false, 0, 0));
-    nodes[slot] = (bb, l as u32, 2, false, mw, mh);
-    let (a, c) = items.split_at_mut(mid);
-    split_pbvh(nodes, a, lo, l);
-    split_pbvh(nodes, c, lo + mid, l + 1);
-}
-
 /// M7 LOD trigger: pages this dense get a merged-coverage variant.
 /// M7-C field finding (sample9, fit view 0.044 px/um, depth 9): at
 /// 4096 only 800 of 10560 pages had variants - the other ~9000
@@ -8094,44 +8058,7 @@ pub(crate) fn pts_bbox(pts: &[(i64, i64)]) -> BBox {
     b
 }
 
-/// binary BVH over (bbox, local place idx); reorders items so leaf
-/// ranges are contiguous; nodes[slot] filled, children appended in
-/// adjacent pairs (first = local node index of the left child)
-fn split_bvh(
-    nodes: &mut Vec<(BBox, u32, u16, bool, u32, u32)>,
-    items: &mut [(BBox, u32, u32, usize)],
-    lo: usize,
-    slot: usize,
-) {
-    let mut bb = BBox::EMPTY;
-    let (mut md, mut mn) = (0u32, 0u32);
-    for (ib, imd, imn, _) in items.iter() {
-        bb.grow(ib);
-        md = md.max(*imd);
-        mn = mn.max(*imn);
-    }
-    if items.len() <= BVH_LEAF {
-        nodes[slot] = (bb, lo as u32, items.len() as u16, true, md, mn);
-        return;
-    }
-    let wx = bb.x1 - bb.x0;
-    let wy = bb.y1 - bb.y0;
-    let mid = items.len() / 2;
-    if wx >= wy {
-        items.select_nth_unstable_by_key(mid, |(b, ..)| b.x0 + b.x1);
-    } else {
-        items.select_nth_unstable_by_key(mid, |(b, ..)| b.y0 + b.y1);
-    }
-    let l = nodes.len();
-    nodes.push((BBox::EMPTY, 0, 0, false, 0, 0));
-    nodes.push((BBox::EMPTY, 0, 0, false, 0, 0));
-    nodes[slot] = (bb, l as u32, 2, false, md, mn);
-    let (a, c) = items.split_at_mut(mid);
-    split_bvh(nodes, a, lo, l);
-    split_bvh(nodes, c, lo + mid, l + 1);
-}
-
-fn fmt_size(bytes: u64) -> String {
+pub(crate) fn fmt_size(bytes: u64) -> String {
     let mut v = bytes as f64;
     for unit in ["B", "K", "M", "G", "T"] {
         if v < 1024.0 || unit == "T" {

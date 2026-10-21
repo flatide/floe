@@ -34,6 +34,11 @@
   LOD_GRID=128 커버리지 격자 병합, **LOD ⊇ exact@격자, 과잉 ≤1셀** 계약.
   후보 조건 members ≥ LOD_MIN_MEMBERS(256). 셀명 "…q".
 - prange의 런은 자기 (cell,layer)의 **EXACT 페이지만** 커버(오픈 검증).
+- 페이지 codec: 0 = OASIS 단일 셀 파일(design.ovp 안). 1 = `CODEC_SEGMENT`
+  (0.12.382, DIRECT_READ_PLAN L4): 경량 캐시가 메모리에 합성한 색인의 페이지 —
+  `file_off`/`csize`가 **소스 파일**의 세그먼트(CBLOCK 레코드 또는 구간)이고 페이지는
+  그 안의 한 레이어의 도형이다(`floe_oasis::doc::parse_segment`로 디코드, `ovp_len` =
+  소스 크기). 디스크의 design.ovm에는 나타나지 않는다; `read_page_batch`는 거절한다.
 
 ### CellSink 병렬 append (#58)
 
@@ -288,11 +293,17 @@ rename, 마커 프로토콜 밖, 재빌드의 삭제 목록. design.inv와 한 �
   22.7 MB(37,332 구간, 레이어 행 226,776; 재고 11.1 → 12.2 s). 현장 50 GB(78.6만
   세그먼트, 레이어/세그먼트 1)는 약 150~180 MB(소스의 0.3 %)로 본다.
 
+경량 캐시 디렉터리(DIRECT_READ_PLAN L4, 0.12.382): design.ovm 없이 design.inv +
+design.seg(+ meta.json)만 있는 `.<src>.ice/`. `floe-index light`가 쓰고 렌더러가 소스와
+함께 연다(소스 = meta.json `src.path`, 없으면 디렉터리 이름의 NAME; identity가 맞아야
+한다). 같은 디렉터리에 design.ovm이 생기면 전체 캐시가 우선한다.
+
 ## meta.json (CACHE_VERSION = 8)
 
 ```json
 {
  "version": 8, "vfs": 1,
+ "cache": "light",                 // 경량 캐시만(floe-index light, 0.12.382); 전체 캐시에는 없음
  "src": {"path": abs, "size": N, "mtime": N},
  "dbu": 0.001, "top_cell": "TOP",
  "bbox": [x0,y0,x1,y1],            // dbu

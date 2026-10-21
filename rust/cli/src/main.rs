@@ -16,6 +16,7 @@ mod cellstore;
 mod guard;
 mod drcice;
 mod drcpack;
+mod light;
 mod prepass;
 mod stream;
 mod svrf;
@@ -192,6 +193,9 @@ fn main() {
     if args.len() >= 3 && args[1] == "inventory" {
         return prepass::inventory_cmd(&args[2..]);
     }
+    if args.len() >= 3 && args[1] == "light" {
+        return light::light_cmd(&args[2..]);
+    }
     if args.len() >= 3 && args[1] == "vfs" && is_deck(&args[2]) {
         return deck_handover(&args[2..]);
     }
@@ -231,6 +235,7 @@ fn main() {
              floe-index inventory <file.oas> [--jobs N] [--check] [--check-cells] [--cells] [--out design.inv] [--seg design.seg] [--seg-bytes N] [--check-seg]  \
              (the streaming build's first pass: cell table, layer order, hierarchy fold; --check holds it to the Doc pre-passes, --check-cells the cell parser to the Doc's cells; --out writes it as design.inv, FLOEINV1, and reads it back; --seg writes the segment directory design.seg, FLOESEG1, of the same walk and --check-seg holds its per-layer statistics to the Doc)\n       \
              floe-index inventory --load design.inv [--load-seg design.seg] [<file.oas>] [--cells] [--check]  (the files read back; with the source, compared to fresh ones)\n       \
+             floe-index light <file.oas> [--out DIR] [--jobs N] [--seg-bytes N]  (the light cache: design.inv + design.seg + meta.json from one inventory pass into DIR, default .<file.oas>.ice; the renderer reads the geometry from the source - docs/DIRECT_READ_PLAN.ko.md L4)\n       \
              floe-index tile <file.oas> <outdir> \
              --grid x0,y0,tw,th,nx,ny --edges e0,e1,e2\n       \
              floe-index index <file.oas> [outdir] [--mem GB] \

@@ -105,6 +105,13 @@ pub const LOD_PAGE_NONE: u32 = u32::MAX;
 pub const LOD_GRID: i64 = 128;
 /// codec 0 = plain OASIS single-cell file (CBLOCK inside)
 pub const CODEC_OASIS: u8 = 0;
+/// codec 1 = a segment of the SOURCE file (the light cache's synthesized
+/// index, floe_vfs::light; never on disk): the page's bytes at file_off
+/// are a CBLOCK record or a span of records of the source, and the page is
+/// the shapes of ONE layer in it, decoded by the seeded segment parser
+/// (floe_oasis::doc::parse_segment) - the renderer's light decode, not
+/// read_page_batch, which refuses such a page (it is no page file).
+pub const CODEC_SEGMENT: u8 = 1;
 
 /// design.ovb (2026-10-02; v2 2026-10-03): how much of each cell of an
 /// OCC_GRID x OCC_GRID grid over each page's bbox its shapes cover - where in
@@ -1234,6 +1241,13 @@ impl Builder {
         assert!(n >= PAGE_LEN, "page_max_min before any page");
         self.pages[n - 8..].copy_from_slice(&v.to_le_bytes());
     }
+    /// overwrite the LAST page's codec (CODEC_SEGMENT: the light cache's
+    /// synthesized index; `page` writes CODEC_OASIS)
+    pub fn page_codec(&mut self, codec: u8) {
+        let n = self.pages.len();
+        assert!(n >= PAGE_LEN, "page_codec before any page");
+        self.pages[n - PAGE_LEN + 13] = codec;
+    }
 
     /// v5: trailing (trange_start, trange_count, tmask_rec) wire
     /// the cell-local text index - tmask_rec is the RECURSIVE
@@ -1547,6 +1561,89 @@ impl Builder {
     }
 }
 
+// ------------------------------------------------------- bvh splits
+
+/// placements per instance-BVH leaf (the index builders')
+pub const BVH_LEAF: usize = 8;
+/// pages per page-BVH leaf, and the run size at or below which a
+/// (cell,layer) run gets no BVH at all (linear scan, root = NONE)
+pub const PBVH_LEAF: usize = 8;
+
+/// binary BVH over (bbox, max_dim, max_min, local place idx); reorders
+/// items so leaf ranges are contiguous; nodes[slot] filled, children
+/// appended in adjacent pairs (first = local node index of the left
+/// child). The index builder's (cli build_cell_plan) and the light cache's
+/// (floe_vfs::light) one function, so both make the same tree.
+pub fn split_bvh(
+    nodes: &mut Vec<(BBox, u32, u16, bool, u32, u32)>,
+    items: &mut [(BBox, u32, u32, usize)],
+    lo: usize,
+    slot: usize,
+) {
+    let mut bb = BBox::EMPTY;
+    let (mut md, mut mn) = (0u32, 0u32);
+    for (ib, imd, imn, _) in items.iter() {
+        bb.grow(ib);
+        md = md.max(*imd);
+        mn = mn.max(*imn);
+    }
+    if items.len() <= BVH_LEAF {
+        nodes[slot] = (bb, lo as u32, items.len() as u16, true, md, mn);
+        return;
+    }
+    let wx = bb.x1 - bb.x0;
+    let wy = bb.y1 - bb.y0;
+    let mid = items.len() / 2;
+    if wx >= wy {
+        items.select_nth_unstable_by_key(mid, |(b, ..)| b.x0 + b.x1);
+    } else {
+        items.select_nth_unstable_by_key(mid, |(b, ..)| b.y0 + b.y1);
+    }
+    let l = nodes.len();
+    nodes.push((BBox::EMPTY, 0, 0, false, 0, 0));
+    nodes.push((BBox::EMPTY, 0, 0, false, 0, 0));
+    nodes[slot] = (bb, l as u32, 2, false, md, mn);
+    let (a, c) = items.split_at_mut(mid);
+    split_bvh(nodes, a, lo, l);
+    split_bvh(nodes, c, lo + mid, l + 1);
+}
+
+/// `split_bvh` for the page BVH: items (bbox, max_w, max_h, local page
+/// idx), nodes (bbox, first, count, leaf, max_w, max_h)
+pub fn split_pbvh(
+    nodes: &mut Vec<(BBox, u32, u16, bool, u64, u64)>,
+    items: &mut [(BBox, u64, u64, usize)],
+    lo: usize,
+    slot: usize,
+) {
+    let mut bb = BBox::EMPTY;
+    let (mut mw, mut mh) = (0u64, 0u64);
+    for (ib, w, h, _) in items.iter() {
+        bb.grow(ib);
+        mw = mw.max(*w);
+        mh = mh.max(*h);
+    }
+    if items.len() <= PBVH_LEAF {
+        nodes[slot] = (bb, lo as u32, items.len() as u16, true, mw, mh);
+        return;
+    }
+    let wx = bb.x1 - bb.x0;
+    let wy = bb.y1 - bb.y0;
+    let mid = items.len() / 2;
+    if wx >= wy {
+        items.select_nth_unstable_by_key(mid, |(b, _, _, _)| b.x0 + b.x1);
+    } else {
+        items.select_nth_unstable_by_key(mid, |(b, _, _, _)| b.y0 + b.y1);
+    }
+    let l = nodes.len();
+    nodes.push((BBox::EMPTY, 0, 0, false, 0, 0));
+    nodes.push((BBox::EMPTY, 0, 0, false, 0, 0));
+    nodes[slot] = (bb, l as u32, 2, false, mw, mh);
+    let (a, c) = items.split_at_mut(mid);
+    split_pbvh(nodes, a, lo, l);
+    split_pbvh(nodes, c, lo + mid, l + 1);
+}
+
 // ------------------------------------------------------------ decode
 
 fn g16(b: &[u8], o: usize) -> u16 {
@@ -1811,6 +1908,40 @@ pub struct Ovm {
     /// per page the area its shapes cover by design.ovb (page_occ_area), f64
     /// bits once worked out (OCC_AREA_UNKNOWN before, OCC_AREA_NONE: none)
     page_occ_area: Vec<std::sync::atomic::AtomicU64>,
+    /// the light cache's marks (set_light_marks): None on an index read
+    /// from design.ovm
+    light: Option<LightMarks>,
+}
+
+/// The light cache's marks on a synthesized index (floe_vfs::light,
+/// docs/DIRECT_READ_PLAN.ko.md §5.4): which cells' placements the image
+/// does not hold yet - the inventory says they have some, no reader asked
+/// for them so far - and which of those a reader asked for since the image
+/// was made. The planner marks a cell when it expands it (hier.rs
+/// `expand`, the label walk), and `cell_places` / `cell_bvh` mark on their
+/// own; the renderer fills the marked cells, assembles a new image and
+/// plans again (render-core Cache::filled). The marks only ever set, so a
+/// plan made on this image is complete when none is set after it - two
+/// threads planning on one image may both fill, the fill is idempotent.
+pub struct LightMarks {
+    unfilled: Vec<u64>,
+    touched: Vec<std::sync::atomic::AtomicU64>,
+}
+
+impl LightMarks {
+    fn new(unfilled: &[bool]) -> LightMarks {
+        let words = unfilled.len().div_ceil(64);
+        let mut bits = vec![0u64; words];
+        for (ci, &u) in unfilled.iter().enumerate() {
+            if u {
+                bits[ci / 64] |= 1u64 << (ci % 64);
+            }
+        }
+        LightMarks {
+            unfilled: bits,
+            touched: (0..words).map(|_| std::sync::atomic::AtomicU64::new(0)).collect(),
+        }
+    }
 }
 
 const OCC_AREA_UNKNOWN: u64 = u64::MAX;
@@ -1926,6 +2057,69 @@ impl Ovm {
     /// tests and gate fixtures come through here.
     pub fn from_bytes(data: Vec<u8>) -> Result<Ovm, String> {
         Ovm::validate(Backing::Vec(data), true)
+    }
+
+    /// `from_bytes` with the shallow validation of `open`: the light cache's
+    /// synthesized image (floe_vfs::light), whose placement and BVH sections
+    /// the assembler wrote a moment ago - the per-record sweeps would cost a
+    /// visited layout's worth of reads at every reassembly.
+    pub fn from_bytes_shallow(data: Vec<u8>) -> Result<Ovm, String> {
+        Ovm::validate(Backing::Vec(data), false)
+    }
+
+    /// Marks this index as the light cache's: `unfilled[ci]` says the image
+    /// holds no placements of cell `ci` though the source has some
+    /// (LightMarks).
+    pub fn set_light_marks(&mut self, unfilled: &[bool]) {
+        assert_eq!(unfilled.len(), self.n_cells as usize, "light marks per cell");
+        self.light = Some(LightMarks::new(unfilled));
+    }
+
+    /// The index is the light cache's synthesized one.
+    pub fn is_light(&self) -> bool {
+        self.light.is_some()
+    }
+
+    /// Whether the image holds none of cell `ci`'s placements yet (a light
+    /// index; false on a full one).
+    pub fn light_unfilled(&self, ci: u32) -> bool {
+        match &self.light {
+            Some(m) => m
+                .unfilled
+                .get(ci as usize / 64)
+                .is_some_and(|w| (w >> (ci % 64)) & 1 == 1),
+            None => false,
+        }
+    }
+
+    /// A reader is about to use cell `ci`'s placements: noted when the
+    /// image does not hold them (LightMarks); nothing on a full index.
+    #[inline]
+    pub fn light_touch(&self, ci: u32) {
+        if let Some(m) = &self.light {
+            let (w, b) = (ci as usize / 64, ci % 64);
+            if m.unfilled.get(w).is_some_and(|x| (x >> b) & 1 == 1) {
+                m.touched[w].fetch_or(1u64 << b, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// The unfilled cells readers asked for since the image was made
+    /// (ascending); empty on a full index, and when the image answered
+    /// every reader whole.
+    pub fn light_touched(&self) -> Vec<u32> {
+        let mut out = Vec::new();
+        if let Some(m) = &self.light {
+            for (w, word) in m.touched.iter().enumerate() {
+                let mut bits = word.load(std::sync::atomic::Ordering::Relaxed);
+                while bits != 0 {
+                    let b = bits.trailing_zeros();
+                    bits &= bits - 1;
+                    out.push((w * 64) as u32 + b);
+                }
+            }
+        }
+        out
     }
 
     /// production open: read-only mmap + SHALLOW validation - the
@@ -2271,7 +2465,7 @@ impl Ovm {
             if b[12] != LOD_EXACT && b[12] != LOD_MERGED {
                 return Err(corrupt(format!("page {} lod byte {}", i, b[12])));
             }
-            if b[13] != CODEC_OASIS {
+            if b[13] != CODEC_OASIS && b[13] != CODEC_SEGMENT {
                 return Err(corrupt(format!("page {} codec {}", i, b[13])));
             }
             // exact -> LOD link: in bounds, target is EXACTLY a
@@ -2556,6 +2750,7 @@ impl Ovm {
             data,
             page_occ: None,
             page_occ_area: Vec::new(),
+            light: None,
         })
     }
 
@@ -2755,6 +2950,7 @@ impl Ovm {
 
     pub fn cell_places(&self, i: u32) -> (u32, u32) {
         assert!(i < self.n_cells, "cell index");
+        self.light_touch(i);
         let b = &self.sec(SEC_CELLS)[i as usize * CELL_LEN..];
         (g32(b, 80), g32(b, 84))
     }
@@ -2771,6 +2967,7 @@ impl Ovm {
     /// materializing the name (the cell tree's instance walk)
     pub fn cell_bvh(&self, i: u32) -> (u32, u32) {
         assert!(i < self.n_cells, "cell index");
+        self.light_touch(i);
         let b = &self.sec(SEC_CELLS)[i as usize * CELL_LEN..];
         (g32(b, 96), g32(b, 100))
     }

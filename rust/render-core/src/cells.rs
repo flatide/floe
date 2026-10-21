@@ -51,7 +51,9 @@ struct HierSlot {
 /// One cache's hierarchy: the index and its summary, shareable with the
 /// daemon's query thread (the render worker owns the cache itself).
 pub struct HierHandle {
-    vfs: Arc<Vfs>,
+    /// the index (crate::light::LightLink: a light cache's image grows as
+    /// cells are visited; the walks here fill what they expand, as the plans do)
+    link: crate::light::LightLink,
     dir: String,
     slot: Mutex<HierSlot>,
     names: OnceLock<Arc<Vec<String>>>,
@@ -72,20 +74,26 @@ fn inline_places_limit() -> u64 {
 
 impl HierHandle {
     pub fn new(vfs: Arc<Vfs>, dir: String) -> Self {
+        Self::with_link(crate::light::LightLink::full(vfs), dir)
+    }
+
+    pub(crate) fn with_link(link: crate::light::LightLink, dir: String) -> Self {
         Self {
-            vfs,
+            link,
             dir,
             slot: Mutex::new(HierSlot::default()),
             names: OnceLock::new(),
         }
     }
 
-    pub fn ovm(&self) -> &Ovm {
-        &self.vfs.ovm
+    /// The index as it is now (a light cache's grows; a query takes one and
+    /// reads it to the end).
+    pub fn vfs(&self) -> Arc<Vfs> {
+        self.link.vfs()
     }
 
     pub fn unit(&self) -> f64 {
-        self.vfs.ovm.unit
+        self.link.vfs().ovm.unit
     }
 
     pub fn dir(&self) -> &str {
@@ -95,7 +103,8 @@ impl HierHandle {
     /// Every cell's name, read once.
     pub fn names(&self) -> Arc<Vec<String>> {
         Arc::clone(self.names.get_or_init(|| {
-            let ovm = &self.vfs.ovm;
+            let vfs = self.link.vfs();
+            let ovm = &vfs.ovm;
             Arc::new((0..ovm.n_cells).map(|ci| ovm.cell(ci).name).collect())
         }))
     }
@@ -103,6 +112,11 @@ impl HierHandle {
     /// The summary: the file next to the cache when it is there and
     /// belongs to it, else an in-memory build for a small cache.
     pub fn summary(&self) -> Result<Arc<HierSummary>, HierError> {
+        // a light cache's: from the inventory's edges, made at open (the
+        // image's placements are the visited cells' alone; no file is read)
+        if let Some(light) = &self.link.light {
+            return Ok(Arc::clone(&light.summary));
+        }
         let path = format!("{}/design.ovh", self.dir);
         let stat = std::fs::metadata(&path).ok().map(|m| {
             let mtime = m
@@ -117,7 +131,8 @@ impl HierHandle {
             Ok(slot) => slot,
             Err(poisoned) => poisoned.into_inner(),
         };
-        let ovm = &self.vfs.ovm;
+        let vfs = self.link.vfs();
+        let ovm = &vfs.ovm;
         // an in-memory summary (stat None) stands until a file appears
         if slot.summary.is_some() && (slot.stat == stat || slot.stat.is_none() && stat.is_none()) {
             return Ok(Arc::clone(slot.summary.as_ref().unwrap()));
@@ -197,7 +212,8 @@ fn name_key(name: &str) -> String {
 /// A cell's children, by name. `cell` None = the top cell.
 pub fn children(h: &HierHandle, cell: Option<u32>, cap: usize) -> Result<CellChildren, HierError> {
     let s = h.summary()?;
-    let ovm = h.ovm();
+    let vfs = h.vfs();
+    let ovm = &vfs.ovm;
     let ci = cell.unwrap_or(ovm.top);
     if ci >= ovm.n_cells {
         return Err(HierError::Other(format!("cell index {} out of range 0..{}", ci, ovm.n_cells)));
@@ -370,7 +386,8 @@ fn insts_under(s: &HierSummary, ovm: &Ovm, root: u32, cell: u32, anc: &[bool]) -
 /// directly, else the containers' extent. Root coordinates.
 pub fn extent(h: &HierHandle, root: Option<u32>, cell: u32) -> Result<CellExtent, HierError> {
     let s = h.summary()?;
-    let ovm = h.ovm();
+    let vfs = h.vfs();
+    let ovm = &vfs.ovm;
     let root = root_of(ovm, root)?;
     if cell >= ovm.n_cells {
         return Err(HierError::Other(format!("cell index {} out of range 0..{}", cell, ovm.n_cells)));
@@ -703,7 +720,8 @@ pub fn instances(
     budget: u64,
 ) -> Result<Instances, HierError> {
     let s = h.summary()?;
-    let ovm = h.ovm();
+    let vfs = h.vfs();
+    let ovm = &vfs.ovm;
     let root = root_of(ovm, root)?;
     if cell >= ovm.n_cells {
         return Err(HierError::Other(format!("cell index {} out of range 0..{}", cell, ovm.n_cells)));
@@ -720,12 +738,17 @@ pub fn instances(
     if !inset.get(root as usize).copied().unwrap_or(false) {
         return Ok(Instances { boxes: Vec::new(), more: false, visited: 0 });
     }
-    let mut walk = Walk::new(ovm, &s, &inset, cell, cap, budget);
-    walk.walk(root, &OrthoTransform::identity(), &view)?;
+    // (a light cache: the walk marks the cells whose placements the image
+    // lacks and runs again once they are in - crate::light::LightLink::run)
+    let (boxes, more, visited) = h.link.run(|vfs| {
+        let mut walk = Walk::new(&vfs.ovm, &s, &inset, cell, cap, budget);
+        walk.walk(root, &OrthoTransform::identity(), &view)?;
+        Ok((walk.out, walk.more, walk.visited))
+    })?;
     Ok(Instances {
-        boxes: walk.out,
-        more: walk.more,
-        visited: walk.visited,
+        boxes,
+        more,
+        visited,
     })
 }
 
@@ -785,7 +808,8 @@ const EVERYWHERE: BBox = BBox {
 /// A cell without shapes has no box to walk to: its count and no place.
 pub fn info(h: &HierHandle, root: Option<u32>, cell: u32, budget: u64) -> Result<CellInfo, HierError> {
     let s = h.summary()?;
-    let ovm = h.ovm();
+    let vfs = h.vfs();
+    let ovm = &vfs.ovm;
     let root_ci = root_of(ovm, root)?;
     if cell >= ovm.n_cells {
         return Err(HierError::Other(format!("cell index {} out of range 0..{}", cell, ovm.n_cells)));
@@ -812,19 +836,22 @@ pub fn info(h: &HierHandle, root: Option<u32>, cell: u32, budget: u64) -> Result
         return Ok(out);
     }
     let inset = s.ancestors(cell);
-    let mut walk = Walk::new(ovm, &s, &inset, cell, usize::MAX, budget);
-    walk.keep_boxes = false;
-    walk.xf_cap = 1;
-    walk.walk(root_ci, &OrthoTransform::identity(), &EVERYWHERE)?;
-    if walk.more || walk.found != out.insts || walk.union.is_empty() {
+    let (more, found, union, xfs) = h.link.run(|vfs| {
+        let mut walk = Walk::new(&vfs.ovm, &s, &inset, cell, usize::MAX, budget);
+        walk.keep_boxes = false;
+        walk.xf_cap = 1;
+        walk.walk(root_ci, &OrthoTransform::identity(), &EVERYWHERE)?;
+        Ok((walk.more, walk.found, walk.union, walk.xfs))
+    })?;
+    if more || found != out.insts || union.is_empty() {
         return Ok(out);
     }
-    out.span = Some(walk.union);
+    out.span = Some(union);
     out.approx = false;
     if out.insts == 1 {
-        if let Some(xf) = walk.xfs.first() {
+        if let Some(xf) = xfs.first() {
             let (x, y, rot, flip) = xf.parts();
-            out.placement = Some(CellPlacement { x, y, rot, flip, bbox: walk.union });
+            out.placement = Some(CellPlacement { x, y, rot, flip, bbox: union });
         }
     }
     Ok(out)
@@ -1036,7 +1063,7 @@ mod tests {
         assert_eq!(extent(&h, Some(2), 0).unwrap().insts, 6);
         assert!(extent(&h, Some(2), 0).unwrap().approx);
         assert_eq!(extent(&h, None, 0).unwrap().insts, 30);
-        assert!(root_of(h.ovm(), Some(99)).is_err());
+        assert!(root_of(&h.vfs().ovm, Some(99)).is_err());
     }
 
     #[test]

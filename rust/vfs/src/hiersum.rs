@@ -167,17 +167,15 @@ pub struct BuildStats {
 /// placement records. Returns the file bytes and the statistics.
 pub fn build(ovm: &Ovm) -> (Vec<u8>, BuildStats) {
     let n = ovm.n_cells as usize;
-    let mut kids_start: Vec<u64> = Vec::with_capacity(n + 1);
     // (child, members, extent) per parent, children ascending
-    let mut edges: Vec<(u32, u64, BBox)> = Vec::new();
     let mut per_parent: HashMap<u32, (u64, BBox)> = HashMap::new();
     let mut rbboxes: Vec<BBox> = Vec::with_capacity(n);
     for ci in 0..ovm.n_cells {
         rbboxes.push(ovm.cell_rbbox(ci));
     }
     let mut records = 0u64;
+    let mut kids_of: Vec<Vec<(u32, u64, BBox)>> = Vec::with_capacity(n);
     for ci in 0..ovm.n_cells {
-        kids_start.push(edges.len() as u64);
         let (start, count) = ovm.cell_places(ci);
         per_parent.clear();
         for k in 0..count as u64 {
@@ -192,7 +190,46 @@ pub fn build(ovm: &Ovm) -> (Vec<u8>, BuildStats) {
         }
         let mut kids: Vec<(u32, u64, BBox)> = per_parent.iter().map(|(c, (m, e))| (*c, *m, *e)).collect();
         kids.sort_unstable_by_key(|k| k.0);
-        edges.extend(kids);
+        kids_of.push(kids);
+    }
+    let ranks: Vec<u32> = (0..ovm.n_cells).map(|ci| ovm.cell(ci).topo_rank).collect();
+    build_from_edges(
+        ovm.n_cells,
+        ovm.n_places,
+        records,
+        ovm.src_size,
+        ovm.src_mtime,
+        ovm.top,
+        &ranks,
+        &kids_of,
+    )
+}
+
+/// The summary of a hierarchy given as its edges: per parent its distinct
+/// children ascending by index with their placed members and extent
+/// (parent coordinates; EMPTY for a child without shapes), the cells'
+/// topological ranks (a parent's below its children's) and the counts the
+/// header carries. `build` makes the edges from an index's placement
+/// records; the light cache (floe_vfs::light) from the inventory's.
+#[allow(clippy::too_many_arguments)]
+pub fn build_from_edges(
+    n_cells: u32,
+    n_places: u64,
+    records: u64,
+    src_size: u64,
+    src_mtime: u64,
+    top: u32,
+    ranks: &[u32],
+    kids_of: &[Vec<(u32, u64, BBox)>],
+) -> (Vec<u8>, BuildStats) {
+    let n = n_cells as usize;
+    assert_eq!(kids_of.len(), n, "edges per cell");
+    assert_eq!(ranks.len(), n, "ranks per cell");
+    let mut kids_start: Vec<u64> = Vec::with_capacity(n + 1);
+    let mut edges: Vec<(u32, u64, BBox)> = Vec::new();
+    for kids in kids_of {
+        kids_start.push(edges.len() as u64);
+        edges.extend(kids.iter().copied());
     }
     kids_start.push(edges.len() as u64);
     // parents (CSR over the same edges, by child)
@@ -224,15 +261,11 @@ pub fn build(ovm: &Ovm) -> (Vec<u8>, BuildStats) {
     // parents of a child ascend: the edges are visited by ascending parent
     // instances under the top: topological order by topo_rank (the
     // indexer guarantees a parent's rank below its children's)
-    let mut order: Vec<u32> = (0..ovm.n_cells).collect();
-    let mut ranks: Vec<u32> = Vec::with_capacity(n);
-    for ci in 0..ovm.n_cells {
-        ranks.push(ovm.cell(ci).topo_rank);
-    }
+    let mut order: Vec<u32> = (0..n_cells).collect();
     order.sort_unstable_by_key(|&ci| (ranks[ci as usize], ci));
     let mut insts = vec![0u64; n];
-    if (ovm.top as usize) < n {
-        insts[ovm.top as usize] = 1;
+    if (top as usize) < n {
+        insts[top as usize] = 1;
     }
     for &parent in &order {
         let mine = insts[parent as usize];
@@ -247,18 +280,18 @@ pub fn build(ovm: &Ovm) -> (Vec<u8>, BuildStats) {
             }
         }
     }
-    let unplaced = (0..n).filter(|&ci| insts[ci] == 0 && ci != ovm.top as usize).count() as u32;
+    let unplaced = (0..n).filter(|&ci| insts[ci] == 0 && ci != top as usize).count() as u32;
     // encode
     let mut out: Vec<u8> = Vec::with_capacity(
         HEADER_LEN + (n + 1) * 16 + edges.len() * (EDGE_LEN + 4) + n * 8,
     );
     out.extend_from_slice(MAGIC);
     p32(&mut out, VERSION);
-    p32(&mut out, ovm.n_cells);
-    p64(&mut out, ovm.n_places);
-    p64(&mut out, ovm.src_size);
-    p64(&mut out, ovm.src_mtime);
-    p32(&mut out, ovm.top);
+    p32(&mut out, n_cells);
+    p64(&mut out, n_places);
+    p64(&mut out, src_size);
+    p64(&mut out, src_mtime);
+    p32(&mut out, top);
     p32(&mut out, 0);
     p64(&mut out, edges.len() as u64);
     p64(&mut out, 0);
@@ -284,7 +317,7 @@ pub fn build(ovm: &Ovm) -> (Vec<u8>, BuildStats) {
     (
         out,
         BuildStats {
-            cells: ovm.n_cells,
+            cells: n_cells,
             records,
             edges: edges.len() as u64,
             unplaced,
