@@ -418,9 +418,11 @@ L4까지 끝나면 단독 소스를 경량으로 열어 볼 수 있고, L5·L6�
   1 % 미만이면 §5.2의 스냅샷 설계 그대로, 그 이상이면 경계를 목록 정의 직후로
   옮기는 규칙과 `list_max`에 맞춘 스냅샷 상한을 더한다. (5) `layers` p50이 1이면
   세그먼트가 레이어별로 나뉘어 있어 레이어 프루닝이 세그먼트 단위로 된다.
-- **현장 절차.** 새 빌드로 `floe-index scan FILE 12 > scan.json 2> scan.err`를
-  돌리고 `scan.err`의 두 줄과 `scan.json`의 `segments` 블록을 붙여 주시면 된다.
-  시간은 scan과 같다(현장 50 GB ≈ 2 min; 아래 실측).
+- **현장 절차.** 새 빌드로 `floe-index scan FILE 12 > scan.json 2> scan.err`
+  (sh/bash; csh·tcsh에는 `2>`가 없어 "Ambiguous output redirect."가 나므로
+  `(floe-index scan FILE 12 > scan.json) >& scan.err`)를 돌리고 `scan.err`의
+  두 줄과 `scan.json`의 `segments` 블록을 붙여 주시면 된다. 시간은 scan과
+  같다(현장 50 GB ≈ 2 min; 아래 실측).
 - **검증.** 단위 테스트 `floe_oasis::segments::tests`: CBLOCK 3개짜리 셀 + 평문 셀의
   손으로 쓴 스트림(박스·레이어·멤버·체인·바이트 경계·셀 bbox·요약값), span 길이
   1/60/무한(레코드 경계·CELL 경계·체인 유무), jobs 1 = 3, 평문 scan은 수집 없음,
