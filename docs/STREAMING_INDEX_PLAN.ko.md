@@ -679,9 +679,10 @@ S2 완료(0.12.365, §4.2 구현; 사용자 2026-10-19 "S2 진행해줘"): build
   heartbeat `ranges 5427/5462 read, 390M of 512M charged (5740s, rss 8.2G)` →
   `build complete; 5462/5462 ranges read, 0B still charged`(5,992 s);
   `occupancy streaming: 5461 instances over 5461 cells (5461 cells
-  materialized); plane budget 128M, resident budget 415M` → `group 1 marked in
-  1765.7s (rss 8.1G)` → `1 pass(es) over the file (1765.8s)`; 합 7,890 s. 읽기는
-  §7. 남은 것: 기본 예산 재실행의 시간(요약 패스 4~6 min 예상), 9.8 GB 파일의
+  materialized); plane budget 128M, resident budget 415M` → heartbeat `group 1
+  cells 53/5461 (10s, rss 8.4G)` … `5411/5461 (1760s, rss 8.8G)` = 패스 내내
+  3.1셀/s → `group 1 marked in 1765.7s (rss 8.1G)` → `1 pass(es) over the file
+  (1765.8s)`; 합 7,890 s. 읽기는 §7(일정한 3셀/s가 상주 2셀 파이프라인의 속도다). 남은 것: 기본 예산 재실행의 시간(요약 패스 4~6 min 예상), 9.8 GB 파일의
   `--compare`, 뷰어 확인.
 - **남은 것.** S7(§8), 사이드카(§10.2 보류 — DIRECT_READ_PLAN L1이 이를 design.inv로
   만든다), 기본 예산 재실행.
