@@ -212,6 +212,36 @@ impl Vfs {
         &self.ovt
     }
 
+    /// A light session's image and design.ovt buffer, for a fill to extend
+    /// in place (light::LightIndex::extend_image); None for a session over
+    /// files.
+    pub fn light_parts_mut(&mut self) -> Option<(&mut Ovm, &mut Vec<u8>)> {
+        if !self.ovm.is_parts() {
+            return None;
+        }
+        match &mut self.ovt {
+            floe_ovm::Backing::Vec(v) => Some((&mut self.ovm, v)),
+            floe_ovm::Backing::Map(_) => None,
+        }
+    }
+
+    /// The light session over an image built anew (light::LightIndex::
+    /// compact_image).
+    pub fn replace_light(&mut self, ovm: Ovm, ovt: Vec<u8>) {
+        self.ovm = ovm;
+        self.ovt = floe_ovm::Backing::Vec(ovt);
+    }
+
+    /// The light session copied (floe_ovm `Ovm::clone_light`): a fill's
+    /// way when a reader still holds the image it would extend in place.
+    pub fn clone_light(&self) -> Option<Vfs> {
+        Some(Vfs {
+            ovm: self.ovm.clone_light()?,
+            ovp_path: self.ovp_path.clone(),
+            ovt: floe_ovm::Backing::Vec(self.ovt.to_vec()),
+        })
+    }
+
     pub fn page_name(&self, pi: u32) -> String {
         let p = self.ovm.page(pi);
         if p.lod == floe_ovm::LOD_EXACT {

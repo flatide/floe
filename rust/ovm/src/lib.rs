@@ -51,7 +51,9 @@ pub const VERSION: u32 = 8;
 /// overrides (diagnostic).
 pub const BVH_MASK_MIN_PLACES: u64 = 64;
 
-fn bvh_mask_min_places() -> u64 {
+/// FLOE_INDEX_BVH_MASK_MIN: the placements below an instance-BVH node from
+/// which its subtree layer masks are annotated (v8; `annotate_cell_bvh`)
+pub fn bvh_mask_min_places() -> u64 {
     std::env::var("FLOE_INDEX_BVH_MASK_MIN")
         .ok()
         .and_then(|v| v.trim().parse().ok())
@@ -725,6 +727,7 @@ pub fn prepare_pts(src: &[(i64, i64)]) -> PtsPrepared {
 /// Section-by-section builder. The caller appends places/BVH/pages/
 /// pranges/pbvh for a cell and then the cell record with the ranges
 /// it recorded. All narrowings are checked (panic "limit exceeded").
+#[derive(Clone)]
 pub struct Builder {
     pub unit: f64,
     pub src_size: u64,
@@ -797,6 +800,196 @@ impl Builder {
             n_treps: 0,
             tchunks: Vec::new(),
             n_tchunks: 0,
+        }
+    }
+
+    /// section `i`'s bytes as built so far (SEC_PLACES: the records
+    /// alone - the pts pool is `pts_pool`): the light image reads its
+    /// sections here (`Ovm::parts`) instead of a flat buffer
+    fn section(&self, i: usize) -> &[u8] {
+        match i {
+            SEC_STRINGS => &self.names,
+            SEC_LAYERS => &self.layers,
+            SEC_CELLS => &self.cells,
+            SEC_PLACES => &self.places,
+            SEC_BITSETS => &self.bitsets,
+            SEC_BVH => &self.bvh,
+            SEC_PAGEDIR => &self.pages,
+            SEC_PRANGES => &self.pranges,
+            SEC_PBVH => &self.pbvh,
+            SEC_TEXTS => &self.texts,
+            SEC_TRANGES => &self.tranges,
+            SEC_TBVH => &self.tbvh,
+            SEC_TREPS => &self.treps,
+            SEC_TCHUNKS => &self.tchunks,
+            _ => panic!("ovm section {}", i),
+        }
+    }
+
+    /// the bytes of every section and the pool
+    pub fn section_bytes(&self) -> usize {
+        (0..N_SECTIONS).map(|i| self.section(i).len()).sum::<usize>() + self.pts_pool.len()
+    }
+
+    /// The image as a reader over these sections, no flat buffer made
+    /// (the light cache's image, DIRECT_READ_PLAN §8.9): `Ovm::light_edit`
+    /// appends to the sections in place, `Ovm::flat_bytes` lays them out
+    /// as `finish` would.
+    pub fn into_ovm(self, ovp_len: u64, ovt_len: u64) -> Ovm {
+        let mut ovm = Ovm {
+            bvh_member_log2: std::sync::Mutex::new(std::collections::HashMap::new()),
+            unit: self.unit,
+            src_size: self.src_size,
+            src_mtime: self.src_mtime,
+            top: self.top,
+            n_layers: self.n_layers,
+            n_cells: self.n_cells,
+            n_pages: self.n_pages,
+            n_places: self.n_places,
+            n_bvh: self.n_bvh,
+            n_pranges: self.n_pranges,
+            n_pbvh: self.n_pbvh,
+            n_texts: self.n_texts,
+            n_tranges: self.n_tranges,
+            n_tbvh: self.n_tbvh,
+            n_treps: self.n_treps,
+            n_tchunks: self.n_tchunks,
+            ovp_len,
+            ovt_len,
+            bs_width: self.bs_width,
+            secs: [(0, 0); N_SECTIONS],
+            data: Backing::Vec(Vec::new()),
+            page_occ: None,
+            page_occ_area: Vec::new(),
+            light: None,
+            parts: None,
+        };
+        ovm.parts = Some(Box::new(self));
+        ovm
+    }
+
+    /// `finish` without consuming the builder (tests, `Ovm::flat_bytes`)
+    pub fn to_bytes(&self, ovp_len: u64, ovt_len: u64) -> Vec<u8> {
+        self.clone().finish(ovp_len, ovt_len)
+    }
+
+    /// Appends one cell's placement sections as `append_cell_sink` does
+    /// (the records rebased onto this builder's pool, the BVH's leaf and
+    /// inner `first` onto the places and nodes appended), without a sink
+    /// to copy them into first: the light cache's fill (DIRECT_READ_PLAN
+    /// §8.9). Returns (place_start, bvh_start).
+    pub fn append_cell_places(&mut self, places: &[u8], n_places: u64, pool: &[u8], bvh: &[u8], n_bvh: u32) -> (u64, u32, u64) {
+        let sink = CellSink {
+            places: places.to_vec(),
+            n_places,
+            pts_pool: pool.to_vec(),
+            bvh: bvh.to_vec(),
+            n_bvh,
+            ..CellSink::default()
+        };
+        let pool_start = self.pts_pool.len() as u64;
+        let bases = self.append_cell_sink(&sink, 0);
+        (bases.place_start, bases.bvh_start, pool_start)
+    }
+
+    /// the pts pool's bytes so far (the next appended cell's pool offset)
+    pub fn pool_len(&self) -> usize {
+        self.pts_pool.len()
+    }
+
+    /// Cell `ci`'s placement sections taken back out of the image as a
+    /// sink `append_cell_sink` takes - the records' pool offsets and the
+    /// nodes' `first` made local again (the reverse of the append): a
+    /// compaction builds the image anew from the one at hand, the fills
+    /// having let their bytes go (floe_vfs::light, DIRECT_READ_PLAN §8.9).
+    /// `pool_start` / `pool_len`: the cell's pool bytes as the append put
+    /// them.
+    pub fn cell_sink_from_image(&self, ci: u32, pool_start: u64, pool_len: usize) -> CellSink {
+        let (ps, pc, bs, bc, _, _) = self.cell_ranges(ci);
+        let mut places = self.places[ps as usize * PLACE_LEN..(ps as usize + pc as usize) * PLACE_LEN].to_vec();
+        for rec in places.chunks_exact_mut(PLACE_LEN) {
+            if rec[6] != 2 {
+                continue;
+            }
+            let abs = i64::from_le_bytes(rec[32..40].try_into().unwrap()) as u64;
+            let local = abs.checked_sub(pool_start).expect("a pool offset before the cell's pool");
+            rec[32..40].copy_from_slice(&(local as i64).to_le_bytes());
+        }
+        let mut bvh = self.bvh[bs as usize * BVH_LEN..(bs as usize + bc as usize) * BVH_LEN].to_vec();
+        for rec in bvh.chunks_exact_mut(BVH_LEN) {
+            let first = u32::from_le_bytes(rec[32..36].try_into().unwrap());
+            let leaf = u16::from_le_bytes(rec[38..40].try_into().unwrap()) != 0;
+            let local = if leaf { first - ps } else { first - bs };
+            rec[32..36].copy_from_slice(&local.to_le_bytes());
+        }
+        let pool = self.pts_pool[pool_start as usize..pool_start as usize + pool_len].to_vec();
+        CellSink {
+            places,
+            n_places: pc as u64,
+            pts_pool: pool,
+            bvh,
+            n_bvh: bc,
+            ..CellSink::default()
+        }
+    }
+
+    /// Capacity for the sections a light image grows by (`light_edit`), so
+    /// that the appends move nothing: `places_cap` and `bvh_cap` bytes in
+    /// all (the inventory's bound: every placement of the source, and the
+    /// nodes a split makes of them), `pool_more` bytes beyond the pool's
+    /// length. Reserved address space, resident only where written.
+    pub fn reserve_sections(&mut self, places_cap: usize, bvh_cap: usize, pool_more: usize) {
+        if self.places.capacity() < places_cap {
+            self.places.reserve_exact(places_cap.saturating_sub(self.places.len()));
+        }
+        if self.bvh.capacity() < bvh_cap {
+            self.bvh.reserve_exact(bvh_cap.saturating_sub(self.bvh.len()));
+        }
+        if self.pts_pool.capacity() < self.pts_pool.len() + pool_more {
+            self.pts_pool.reserve(pool_more);
+        }
+    }
+
+    /// Rewrites cell `ci`'s placement, instance-BVH and text ranges (the
+    /// light cache's fill patches a cell appended without them; an
+    /// eviction patches it back to none)
+    pub fn patch_cell(&mut self, ci: u32, place_start: u32, place_count: u32, bvh_start: u32, bvh_count: u32, trange_start: u32, trange_count: u32) {
+        assert!(ci < self.n_cells, "cell index");
+        let b = &mut self.cells[ci as usize * CELL_LEN..(ci as usize + 1) * CELL_LEN];
+        b[80..84].copy_from_slice(&place_start.to_le_bytes());
+        b[84..88].copy_from_slice(&place_count.to_le_bytes());
+        b[96..100].copy_from_slice(&bvh_start.to_le_bytes());
+        b[100..104].copy_from_slice(&bvh_count.to_le_bytes());
+        b[128..132].copy_from_slice(&trange_start.to_le_bytes());
+        b[132..136].copy_from_slice(&trange_count.to_le_bytes());
+    }
+
+    /// cell `ci`'s (place_start, place_count, bvh_start, bvh_count,
+    /// trange_start, trange_count) as written
+    pub fn cell_ranges(&self, ci: u32) -> (u32, u32, u32, u32, u32, u32) {
+        assert!(ci < self.n_cells, "cell index");
+        let b = &self.cells[ci as usize * CELL_LEN..];
+        (g32(b, 80), g32(b, 84), g32(b, 96), g32(b, 100), g32(b, 128), g32(b, 132))
+    }
+
+    /// the interned bitsets so far (bs_width bytes each, in id order)
+    pub fn bitsets_bytes(&self) -> &[u8] {
+        &self.bitsets
+    }
+
+    /// Takes a table of bitsets made elsewhere in id order (the light
+    /// cache's shared table, DIRECT_READ_PLAN §8.9): `bitset()` then finds
+    /// them under their ids. `tail` continues the builder's own bitsets,
+    /// which must be a prefix of it (it is: both append in the same order).
+    pub fn extend_bitsets(&mut self, table: &[u8]) {
+        let width = self.bs_width;
+        assert!(table.len() >= self.bitsets.len() && table.len() % width == 0, "bitset table");
+        assert!(table.starts_with(&self.bitsets), "the builder's bitsets are not a prefix of the table");
+        let mut id = narrow_u32((self.bitsets.len() / width) as u64, "bitset count");
+        for bits in table[self.bitsets.len()..].chunks_exact(width) {
+            self.bitsets.extend_from_slice(bits);
+            self.bs_map.insert(bits.to_vec(), id);
+            id += 1;
         }
     }
 
@@ -1327,12 +1520,7 @@ impl Builder {
             return (0, 0);
         }
         let to_words = |bitsets: &[u8], idx: u32| -> Vec<u64> {
-            let bytes = &bitsets[idx as usize * width..(idx as usize + 1) * width];
-            let mut out = vec![0u64; words];
-            for (at, &byte) in bytes.iter().enumerate() {
-                out[at / 8] |= (byte as u64) << (8 * (at % 8));
-            }
-            out
+            mask_words(&bitsets[idx as usize * width..(idx as usize + 1) * width], words)
         };
         // per cell: (recursive, own-shapes) layer words and the BVH range
         let mut cell_masks: Vec<(Vec<u64>, Vec<u64>)> = Vec::with_capacity(n_cells);
@@ -1345,67 +1533,6 @@ impl Builder {
             ));
             ranges.push((g32(rec, 96), g32(rec, 100)));
         }
-        struct CellOut {
-            table: Vec<Vec<u64>>,
-            // per node of the cell: (recursive, own-shapes) index into `table`,
-            // LMASK_UNKNOWN for a node under the placement threshold
-            ids: Vec<(u32, u32)>,
-        }
-        let annotate = |places: &[u8], bvh: &[u8], (start, count): (u32, u32)| -> CellOut {
-            let mut table: Vec<Vec<u64>> = Vec::new();
-            let mut index: std::collections::HashMap<Vec<u64>, u32> =
-                std::collections::HashMap::new();
-            let mut ids = vec![(LMASK_UNKNOWN, LMASK_UNKNOWN); count as usize];
-            // masks and placement counts of the nodes not consumed by their parent yet
-            let mut open: std::collections::HashMap<usize, (Vec<u64>, Vec<u64>, u64)> =
-                std::collections::HashMap::new();
-            let mut intern = |mask: Vec<u64>, table: &mut Vec<Vec<u64>>| -> u32 {
-                if let Some(&id) = index.get(&mask) {
-                    return id;
-                }
-                let id = table.len() as u32;
-                index.insert(mask.clone(), id);
-                table.push(mask);
-                id
-            };
-            // children are appended after their parent: walk backwards
-            for local in (0..count as usize).rev() {
-                let node = &bvh[(start as usize + local) * BVH_LEN..];
-                let (first, n, leaf) = (
-                    g32(node, 32) as usize,
-                    g16(node, 36) as usize,
-                    g16(node, 38) != 0,
-                );
-                let (mut rec, mut own, mut below) = (vec![0u64; words], vec![0u64; words], 0u64);
-                for k in first..first + n {
-                    if leaf {
-                        let child = g32(&places[k * PLACE_LEN..], 0) as usize;
-                        for w in 0..words {
-                            rec[w] |= cell_masks[child].0[w];
-                            own[w] |= cell_masks[child].1[w];
-                        }
-                        below += 1;
-                    } else {
-                        let (r, d, count) = open
-                            .remove(&(k - start as usize))
-                            .expect("child node before its parent");
-                        for w in 0..words {
-                            rec[w] |= r[w];
-                            own[w] |= d[w];
-                        }
-                        below += count;
-                    }
-                }
-                if below >= min_places {
-                    ids[local] = (
-                        intern(rec.clone(), &mut table),
-                        intern(own.clone(), &mut table),
-                    );
-                }
-                open.insert(local, (rec, own, below));
-            }
-            CellOut { table, ids }
-        };
         const BATCH_NODES: u64 = 4 << 20;
         let mut annotated = 0u64;
         let jobs = jobs.max(1);
@@ -1417,10 +1544,10 @@ impl Builder {
                 nodes += ranges[end].1 as u64;
                 end += 1;
             }
-            let outs: Vec<CellOut> = {
+            let outs: Vec<CellMasks> = {
                 let (places, bvh) = (&self.places[..], &self.bvh[..]);
                 let next = std::sync::atomic::AtomicUsize::new(at);
-                let slots: Vec<std::sync::Mutex<Option<CellOut>>> =
+                let slots: Vec<std::sync::Mutex<Option<CellMasks>>> =
                     (at..end).map(|_| std::sync::Mutex::new(None)).collect();
                 std::thread::scope(|scope| {
                     for _ in 0..jobs.min(end - at) {
@@ -1429,7 +1556,7 @@ impl Builder {
                             if ci >= end {
                                 break;
                             }
-                            let out = annotate(places, bvh, ranges[ci]);
+                            let out = annotate_cell_bvh(places, bvh, ranges[ci], words, min_places, &cell_masks);
                             *slots[ci - at].lock().unwrap() = Some(out);
                         });
                     }
@@ -1443,14 +1570,7 @@ impl Builder {
                 let global: Vec<u32> = out
                     .table
                     .iter()
-                    .map(|mask| {
-                        let bytes: Vec<u8> = mask
-                            .iter()
-                            .flat_map(|word| word.to_le_bytes())
-                            .take(width)
-                            .collect();
-                        self.bitset(&bytes)
-                    })
+                    .map(|mask| self.bitset(&mask_bytes(mask, width)))
                     .collect();
                 let start = ranges[ci].0 as usize;
                 for (local, &(rec, own)) in out.ids.iter().enumerate() {
@@ -1562,6 +1682,104 @@ impl Builder {
 }
 
 // ------------------------------------------------------- bvh splits
+
+/// a layer bitset's bytes as words (`annotate_cell_bvh`'s masks)
+pub fn mask_words(bytes: &[u8], words: usize) -> Vec<u64> {
+    let mut out = vec![0u64; words];
+    for (at, &byte) in bytes.iter().enumerate() {
+        out[at / 8] |= (byte as u64) << (8 * (at % 8));
+    }
+    out
+}
+
+/// the words back as a bitset of `width` bytes (`Builder::bitset`)
+pub fn mask_bytes(words: &[u64], width: usize) -> Vec<u8> {
+    words.iter().flat_map(|word| word.to_le_bytes()).take(width).collect()
+}
+
+/// One cell's instance-BVH node masks (`annotate_cell_bvh`): the distinct
+/// (recursive, own-shapes) layer masks in words, and per node of the cell
+/// the two indices into that table - LMASK_UNKNOWN under the placement
+/// threshold.
+pub struct CellMasks {
+    pub table: Vec<Vec<u64>>,
+    pub ids: Vec<(u32, u32)>,
+}
+
+/// The v8 annotation of one cell's instance BVH: per node, the union of
+/// the layer masks of the cells placed below it (`cell_masks[child]` =
+/// (recursive, own-shapes) words), for the nodes with at least
+/// `min_places` placements below. `bvh[(start + local) * BVH_LEN..]` are
+/// the cell's nodes, a leaf's `first` indexes `places` (PLACE_LEN records,
+/// child at byte 0), an inner node's `first` the nodes from `start`.
+/// `Builder::annotate_bvh_masks` runs it over every cell of a full build,
+/// the light cache's fill over one cell's local sections as it is read
+/// (DIRECT_READ_PLAN §8.9) - the same masks either way.
+pub fn annotate_cell_bvh(
+    places: &[u8],
+    bvh: &[u8],
+    (start, count): (u32, u32),
+    words: usize,
+    min_places: u64,
+    cell_masks: &[(Vec<u64>, Vec<u64>)],
+) -> CellMasks {
+    let mut table: Vec<Vec<u64>> = Vec::new();
+    let mut index: std::collections::HashMap<Vec<u64>, u32> = std::collections::HashMap::new();
+    let mut ids = vec![(LMASK_UNKNOWN, LMASK_UNKNOWN); count as usize];
+    // masks and placement counts of the nodes not consumed by their parent yet
+    let mut open: std::collections::HashMap<usize, (Vec<u64>, Vec<u64>, u64)> = std::collections::HashMap::new();
+    let mut intern = |mask: Vec<u64>, table: &mut Vec<Vec<u64>>| -> u32 {
+        if let Some(&id) = index.get(&mask) {
+            return id;
+        }
+        let id = table.len() as u32;
+        index.insert(mask.clone(), id);
+        table.push(mask);
+        id
+    };
+    // children are appended after their parent: walk backwards
+    for local in (0..count as usize).rev() {
+        let node = &bvh[(start as usize + local) * BVH_LEN..];
+        let (first, n, leaf) = (g32(node, 32) as usize, g16(node, 36) as usize, g16(node, 38) != 0);
+        let (mut rec, mut own, mut below) = (vec![0u64; words], vec![0u64; words], 0u64);
+        for k in first..first + n {
+            if leaf {
+                let child = g32(&places[k * PLACE_LEN..], 0) as usize;
+                for w in 0..words {
+                    rec[w] |= cell_masks[child].0[w];
+                    own[w] |= cell_masks[child].1[w];
+                }
+                below += 1;
+            } else {
+                let (r, d, count) = open.remove(&(k - start as usize)).expect("child node before its parent");
+                for w in 0..words {
+                    rec[w] |= r[w];
+                    own[w] |= d[w];
+                }
+                below += count;
+            }
+        }
+        if below >= min_places {
+            ids[local] = (intern(rec.clone(), &mut table), intern(own.clone(), &mut table));
+        }
+        open.insert(local, (rec, own, below));
+    }
+    CellMasks { table, ids }
+}
+
+/// Writes a cell's node mask ids (`annotate_cell_bvh` resolved to global
+/// bitset ids) into its nodes: `bvh` the cell's nodes from its first, `ids`
+/// per node the global (recursive, own-shapes) ids or LMASK_UNKNOWN.
+pub fn write_bvh_masks(bvh: &mut [u8], ids: &[(u32, u32)]) {
+    for (local, &(rec, own)) in ids.iter().enumerate() {
+        if rec == LMASK_UNKNOWN {
+            continue;
+        }
+        let node = &mut bvh[local * BVH_LEN..(local + 1) * BVH_LEN];
+        node[48..52].copy_from_slice(&rec.to_le_bytes());
+        node[52..56].copy_from_slice(&own.to_le_bytes());
+    }
+}
 
 /// placements per instance-BVH leaf (the index builders')
 pub const BVH_LEAF: usize = 8;
@@ -1953,6 +2171,12 @@ pub struct Ovm {
     /// the light cache's marks (set_light_marks): None on an index read
     /// from design.ovm
     light: Option<LightMarks>,
+    /// the light image's sections as its builder holds them (one buffer
+    /// each, the pts pool apart; `Builder::into_ovm`): `sec` reads them in
+    /// place of `data`, a fill appends to them (`light_edit`) instead of
+    /// assembling a flat image anew (DIRECT_READ_PLAN §8.9). None on an
+    /// index read from design.ovm.
+    parts: Option<Box<Builder>>,
 }
 
 /// The light cache's marks on a synthesized index (floe_vfs::light,
@@ -2867,6 +3091,7 @@ impl Ovm {
             page_occ: None,
             page_occ_area: Vec::new(),
             light: None,
+            parts: None,
         })
     }
 
@@ -2997,8 +3222,105 @@ impl Ovm {
     }
 
     fn sec(&self, i: usize) -> &[u8] {
+        if let Some(b) = &self.parts {
+            return b.section(i);
+        }
         let (o, l) = self.secs[i];
         &self.data[o as usize..(o + l) as usize]
+    }
+
+    /// the pts pool: the tail of the places section of a flat image, its
+    /// own buffer in a parts-backed one
+    fn pool(&self) -> &[u8] {
+        if let Some(b) = &self.parts {
+            return &b.pts_pool;
+        }
+        &self.sec(SEC_PLACES)[self.n_places as usize * PLACE_LEN..]
+    }
+
+    /// the image's bytes (the flat buffer, or the sections of a parts-backed
+    /// light image)
+    pub fn bytes(&self) -> usize {
+        match &self.parts {
+            Some(b) => b.section_bytes(),
+            None => self.data.len(),
+        }
+    }
+
+    /// What tells this image from another for a cache keyed by node index
+    /// (floe_vfs density_mask): the flat buffer's address and length, or
+    /// the parts' address - stable across in-place edits, which never move
+    /// a node (sections only grow; an evicted cell's nodes are holes no cell
+    /// refers to), and new for a clone or a rebuilt image.
+    pub fn identity(&self) -> (usize, usize) {
+        match &self.parts {
+            Some(b) => (&**b as *const Builder as usize, 0),
+            None => (self.data.as_ptr() as usize, self.data.len()),
+        }
+    }
+
+    /// Whether the image is parts-backed (a light cache's).
+    pub fn is_parts(&self) -> bool {
+        self.parts.is_some()
+    }
+
+    /// A parts-backed image's builder, to read its sections (a compaction
+    /// takes the cells' sections back out of it: `cell_sink_from_image`).
+    pub fn light_parts(&self) -> Option<&Builder> {
+        self.parts.as_deref()
+    }
+
+    /// Edits a parts-backed image in place through its builder - the light
+    /// cache's fill appends cells' sections and patches their records
+    /// (`Builder::append_cell_places`, `patch_cell`, `extend_bitsets`) -
+    /// and takes the counts over; None on a flat image. The lazy per-cell
+    /// tables of `changed` cells are forgotten (an evicted cell's, a
+    /// refilled one's). The caller renews the light marks and `ovt_len`.
+    pub fn light_edit<R>(&mut self, changed: &[u32], f: impl FnOnce(&mut Builder) -> R) -> Option<R> {
+        let b = self.parts.as_mut()?;
+        let out = f(b);
+        self.n_layers = b.n_layers;
+        self.n_cells = b.n_cells;
+        self.n_pages = b.n_pages;
+        self.n_places = b.n_places;
+        self.n_bvh = b.n_bvh;
+        self.n_pranges = b.n_pranges;
+        self.n_pbvh = b.n_pbvh;
+        self.n_texts = b.n_texts;
+        self.n_tranges = b.n_tranges;
+        self.n_tbvh = b.n_tbvh;
+        self.n_treps = b.n_treps;
+        self.n_tchunks = b.n_tchunks;
+        if !changed.is_empty() {
+            let mut tables = self.bvh_member_log2.lock().unwrap_or_else(|p| p.into_inner());
+            for ci in changed {
+                tables.remove(ci);
+            }
+        }
+        Some(out)
+    }
+
+    /// the design.ovt length the image commits (a light image's grows with
+    /// its text fills)
+    pub fn set_ovt_len(&mut self, len: u64) {
+        self.ovt_len = len;
+    }
+
+    /// A parts-backed image copied (its sections, the bitset map): the
+    /// light cache's fill when a reader still holds the image it would edit
+    /// in place. Fresh lazy tables and no light marks (the caller sets them).
+    pub fn clone_light(&self) -> Option<Ovm> {
+        let b = self.parts.as_ref()?;
+        Some((**b).clone().into_ovm(self.ovp_len, self.ovt_len))
+    }
+
+    /// The image laid out flat as design.ovm would hold it (a parts-backed
+    /// image through `Builder::to_bytes`): tests validate it deep.
+    pub fn flat_bytes(&self) -> Vec<u8> {
+        match &self.parts {
+            Some(b) => b.to_bytes(self.ovp_len, self.ovt_len),
+            None => self.data.to_vec(),
+        }
     }
 
     fn nm(&self, off: u32, len: u16) -> String {
@@ -3179,7 +3501,7 @@ impl Ovm {
         if b[6] != 2 {
             return None;
         }
-        let pool = &sec[self.n_places as usize * PLACE_LEN..];
+        let pool = self.pool();
         let off = gi64(b, 32) as usize;
         let entry = &pool[off..];
         Some(PtsRef {

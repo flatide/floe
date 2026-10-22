@@ -72,8 +72,9 @@ impl VfsSlot {
         Arc::clone(&self.current.read().unwrap_or_else(|p| p.into_inner()))
     }
 
-    fn set(&self, vfs: Arc<Vfs>) {
-        *self.current.write().unwrap_or_else(|p| p.into_inner()) = vfs;
+    /// the slot for a fill to grow its image in place (or put a copy in)
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, Arc<Vfs>> {
+        self.current.write().unwrap_or_else(|p| p.into_inner())
     }
 }
 
@@ -139,33 +140,43 @@ impl LightState {
         RequestGuard(&self.active)
     }
 
-    /// Fills `cells` and puts the new image in `slot`; nothing when another
-    /// thread's image, made after `seen`, holds them already. Serialized
-    /// with every other fill.
-    fn fill_into(&self, cells: &[u32], slot: &VfsSlot, seen: &Arc<Vfs>, round: u32) -> Result<(), String> {
+    /// Fills `cells` (keeping `keep`, the cells the request read from the
+    /// image it planned on: floe_vfs::light::LightIndex::fill_keeping -
+    /// the rounds would otherwise refill what the round before let go, up
+    /// to MAX_FILL_ROUNDS) and grows the slot's image by them in place
+    /// (`LightIndex::extend_image`; DIRECT_READ_PLAN §8.9) - the request
+    /// let its snapshot go, so no one else holds the image; a reader that
+    /// does gets to keep it and a copy grows instead. Serialized with every
+    /// other fill.
+    fn fill_into(&self, cells: &[u32], keep: &[u32], slot: &VfsSlot, round: u32) -> Result<(), String> {
         let _guard = self.fill_lock.lock().unwrap_or_else(|p| p.into_inner());
         let started = Instant::now();
         let (places_cap, bytes_cap) = *self.prefill.lock().unwrap_or_else(|p| p.into_inner());
         let set = self.index.fill_set_within(cells, places_cap, bytes_cap);
-        // the cells this request read from the image it planned on stay
-        // resident whatever the budget (floe_vfs::light::LightIndex::
-        // fill_keeping): the rounds would otherwise refill what the round
-        // before let go, up to MAX_FILL_ROUNDS
-        let keep = seen.ovm.light_used();
-        let report = self.index.fill_keeping(&set, &keep)?;
+        let report = self.index.fill_keeping(&set, keep)?;
         let fill_us = elapsed_us(started);
-        let moved = !Arc::ptr_eq(&slot.get(), seen);
-        if report.cells == 0 && moved {
+        if report.cells == 0 && report.evicted == 0 && !self.index.image_behind() {
+            // (another thread's fill put them in the image meanwhile)
             return Ok(());
         }
         let image_started = Instant::now();
-        let (ovm, ovt) = self.index.ovm()?;
-        let image_bytes = ovm.data.len();
-        slot.set(Arc::new(Vfs::light(ovm, self.index.source.clone(), ovt)));
+        let mut current = slot.write();
+        let (how, extended) = match Arc::get_mut(&mut *current) {
+            Some(vfs) => ("in place", self.index.extend_image(vfs)?),
+            None => {
+                let mut copy = current
+                    .clone_light()
+                    .ok_or_else(|| "light index: the session's image is not a light one".to_string())?;
+                let extended = self.index.extend_image(&mut copy)?;
+                *current = Arc::new(copy);
+                ("copied", extended)
+            }
+        };
+        drop(current);
         self.images.fetch_add(1, Ordering::Relaxed);
         if light_log() {
             eprintln!(
-                "[light] round {}: {} cell(s) asked, {} filled ({} placements, {} texts from {} segments, {} evicted) in {} ms; image {} MB in {} ms{}",
+                "[light] round {}: {} cell(s) asked, {} filled ({} placements, {} texts from {} segments, {} evicted) in {} ms; image {} MB {} (+{} cells, {} holed{}) in {} ms{}",
                 round,
                 cells.len(),
                 report.cells,
@@ -174,7 +185,15 @@ impl LightState {
                 report.segments,
                 report.evicted,
                 fill_us / 1000,
-                image_bytes >> 20,
+                extended.bytes >> 20,
+                if extended.rebuilt { "rebuilt" } else { how },
+                extended.appended,
+                extended.holed,
+                if extended.dead_bytes > 0 {
+                    format!(", {} MB dead", extended.dead_bytes >> 20)
+                } else {
+                    String::new()
+                },
                 elapsed_us(image_started) / 1000,
                 if report.over_budget > 0 {
                     format!(
@@ -274,7 +293,13 @@ impl LightLink {
                     touched.len()
                 ));
             }
-            light.fill_into(&touched, &self.slot, &vfs, rounds)?;
+            // the cells this request read from the image stay resident; the
+            // plan and the snapshot go before the fill, so the slot's image
+            // is held by no one and grows in place (fill_into)
+            let keep = vfs.ovm.light_used();
+            drop(out);
+            drop(vfs);
+            light.fill_into(&touched, &keep, &self.slot, rounds)?;
         }
     }
 }
@@ -421,11 +446,11 @@ pub(crate) fn decode_pages(
     }
     check_decode_cancelled(guard)?;
     let read_started = Instant::now();
-    let mut raws: Vec<Vec<u8>> = Vec::with_capacity(jobs.len());
-    for (si, _) in &jobs {
-        raws.push(index.segment_bytes(*si)?);
-        check_decode_cancelled(guard)?;
-    }
+    // adjacent segments as one pread, the runs in parallel
+    // (LightIndex::read_segments)
+    let sis: Vec<u32> = jobs.iter().map(|(si, _)| *si).collect();
+    let raws: Vec<Vec<u8>> = index.read_segments(&sis, workers.max(1) as usize)?;
+    check_decode_cancelled(guard)?;
     let page_read_us = elapsed_us(read_started);
     let decode_started = Instant::now();
     type Out = (usize, Result<Vec<(usize, DecodedPage, u64)>, String>, u64);

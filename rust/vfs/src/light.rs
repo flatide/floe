@@ -55,6 +55,8 @@ use floe_ovm::{
     morton_key, prepare_pts, split_bvh, split_pbvh, split_tbvh, BBox, Builder, CellSink, Ovm,
     CODEC_SEGMENT, LOD_EXACT, LOD_PAGE_NONE, PBVH_LEAF, PBVH_NONE, TBVH_LEAF, TBVH_NONE, TREP_NONE,
 };
+use crate::Vfs;
+use floe_ovm::{annotate_cell_bvh, bvh_mask_min_places, mask_bytes, mask_words, write_bvh_masks, LMASK_UNKNOWN};
 use floe_tiler::Xf;
 use std::collections::{BTreeMap, HashMap};
 use std::os::unix::fs::FileExt;
@@ -162,6 +164,13 @@ struct CellFill {
     bytes: u64,
     /// fill order (the budget lets the lowest go first)
     serial: u64,
+    /// the pool's bytes (kept when `pool` is let go)
+    pool_len: usize,
+    /// where the image's pool holds the cell's (once `extend_image` put
+    /// the sections in: `places` / `pool` / `bvh` are then empty, the
+    /// image holds the only copy and a compaction takes them back out of
+    /// it - floe_ovm `Builder::cell_sink_from_image`)
+    pool_start: u64,
 }
 
 /// whether the image needs a fill for a cell at all: the inventory counts
@@ -189,6 +198,74 @@ struct Fills {
     /// cells filled over the index's life, and let go by the budget
     filled: u64,
     evicted: u64,
+    /// per cell: the slot's image holds its sections (`extend_image`
+    /// appended them, or the image was built with them)
+    in_image: Vec<bool>,
+    /// cells let go while the image held them, with their bytes: the next
+    /// `extend_image` patches their records to none (their sections stay
+    /// as holes until a compaction)
+    pending_evict: Vec<(u32, u64)>,
+    /// the holes' bytes in the image
+    dead_bytes: u64,
+}
+
+/// The image's bitset table (floe_ovm `Builder::bitset` ids), shared by
+/// every image of the index: the cells' three masks at the first image,
+/// then the node masks of the cells as they are filled
+/// (`encode_places`). Append-only, so the ids hold across the images a
+/// fill extends and the ones a compaction builds anew (DIRECT_READ_PLAN
+/// §8.9).
+struct BitsetTable {
+    width: usize,
+    bytes: Vec<u8>,
+    map: HashMap<Vec<u8>, u32>,
+}
+
+impl BitsetTable {
+    fn new(width: usize) -> BitsetTable {
+        BitsetTable {
+            width,
+            bytes: Vec::new(),
+            map: HashMap::new(),
+        }
+    }
+
+    fn intern(&mut self, bits: &[u8]) -> u32 {
+        debug_assert_eq!(bits.len(), self.width, "bitset width");
+        if let Some(&i) = self.map.get(bits) {
+            return i;
+        }
+        let i = (self.bytes.len() / self.width) as u32;
+        self.bytes.extend_from_slice(bits);
+        self.map.insert(bits.to_vec(), i);
+        i
+    }
+
+    /// takes up what a builder seeded from this table interned after it
+    /// (the first image's cell masks)
+    fn absorb(&mut self, builder_bitsets: &[u8]) {
+        debug_assert!(builder_bitsets.starts_with(&self.bytes), "the builder's bitsets do not continue the table");
+        let from = self.bytes.len().min(builder_bitsets.len());
+        for bits in builder_bitsets[from..].chunks_exact(self.width) {
+            self.intern(bits);
+        }
+    }
+}
+
+/// What `extend_image` / `compact_image` did to the slot's image.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ExtendReport {
+    /// cells whose sections were appended
+    pub appended: usize,
+    /// cells whose records were patched to none (their sections holes)
+    pub holed: usize,
+    /// the image was built anew instead (a flat image, or the holes
+    /// outgrew the live sections)
+    pub rebuilt: bool,
+    /// the image's bytes after
+    pub bytes: usize,
+    /// the holes' bytes after
+    pub dead_bytes: u64,
 }
 
 /// What one `fill` did.
@@ -275,6 +352,12 @@ pub struct LightIndex {
     cell_static: Vec<CellSink>,
     fills: Mutex<Fills>,
     budget: std::sync::atomic::AtomicU64,
+    /// per cell its (recursive, own-shapes) layer masks in words - the
+    /// inventory's - for the node masks of its parents' instance BVHs
+    /// (floe_ovm::annotate_cell_bvh's `cell_masks`)
+    mask_words: Vec<(Vec<u64>, Vec<u64>)>,
+    /// the images' bitset table (ids shared by every image of the index)
+    bitsets: Mutex<BitsetTable>,
 }
 
 impl std::fmt::Debug for LightIndex {
@@ -586,6 +669,13 @@ impl LightIndex {
             .enumerate()
             .map(|(i, &key)| (key, i as u32))
             .collect();
+        // the cells' layer masks in words and the images' bitset table
+        // (floe_ovm annotate_cell_bvh at fill time; DIRECT_READ_PLAN §8.9)
+        let width = inv.layer_order.len().div_ceil(8).max(1);
+        let words = width.div_ceil(8).max(1);
+        let cell_mask_words: Vec<(Vec<u64>, Vec<u64>)> = (0..n)
+            .map(|ci| (mask_words(&inv.rmask[ci], words), mask_words(&inv.cells[ci].dmask, words)))
+            .collect();
         Ok(LightIndex {
             dir: dir.to_string(),
             source,
@@ -599,9 +689,12 @@ impl LightIndex {
             cell_static,
             fills: Mutex::new(Fills {
                 cells: (0..n).map(|_| None).collect(),
+                in_image: vec![false; n],
                 ..Fills::default()
             }),
             budget: std::sync::atomic::AtomicU64::new(places_budget()),
+            mask_words: cell_mask_words,
+            bitsets: Mutex::new(BitsetTable::new(width)),
         })
     }
 
@@ -715,6 +808,79 @@ impl LightIndex {
     /// refuses).
     pub fn segment_cell(&self, si: u32) -> Result<Cell, String> {
         let raw = self.segment_bytes(si)?;
+        self.segment_cell_from(si, &raw)
+    }
+
+    /// The bytes of segments `sis` (any order, duplicates allowed), in the
+    /// order of `sis`: adjacent segments are read as one pread (a cell's
+    /// bands lie side by side in the file; a network file system likes few
+    /// large reads) up to RUN_BYTES a run, and the runs are read by `jobs`
+    /// threads at once (DIRECT_READ_PLAN §8.9).
+    pub fn read_segments(&self, sis: &[u32], jobs: usize) -> Result<Vec<Vec<u8>>, String> {
+        const RUN_BYTES: u64 = 32 << 20;
+        let segs = &self.seg.segs;
+        for &si in sis {
+            if si as usize >= segs.len() {
+                return Err(format!("light index: segment {} out of range ({})", si, segs.len()));
+            }
+        }
+        let mut order: Vec<usize> = (0..sis.len()).collect();
+        order.sort_by_key(|&k| (segs[sis[k] as usize].offset, segs[sis[k] as usize].bytes));
+        // runs of adjacent (or enclosed) segments: (offset, bytes, positions)
+        let mut runs: Vec<(u64, u64, Vec<usize>)> = Vec::new();
+        for &k in &order {
+            let s = &segs[sis[k] as usize];
+            if let Some(last) = runs.last_mut() {
+                let end = last.0 + last.1;
+                if s.offset >= last.0 && s.offset + s.bytes <= end {
+                    last.2.push(k);
+                    continue;
+                }
+                if s.offset == end && last.1 + s.bytes <= RUN_BYTES {
+                    last.1 += s.bytes;
+                    last.2.push(k);
+                    continue;
+                }
+            }
+            runs.push((s.offset, s.bytes, vec![k]));
+        }
+        let file = source_file(&self.source)?;
+        let bufs: Vec<Mutex<Option<Result<Vec<u8>, String>>>> = (0..runs.len()).map(|_| Mutex::new(None)).collect();
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..jobs.min(runs.len()).max(1) {
+                scope.spawn(|| loop {
+                    let r = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(&(offset, bytes, _)) = runs.get(r) else { break };
+                    let got = (|| -> Result<Vec<u8>, String> {
+                        let n = usize::try_from(bytes).map_err(|_| "segment run too large".to_string())?;
+                        let mut buf = vec![0u8; n];
+                        file.read_exact_at(&mut buf, offset)
+                            .map_err(|e| format!("{}: read {} bytes at {}: {}", self.source, bytes, offset, e))?;
+                        Ok(buf)
+                    })();
+                    *bufs[r].lock().unwrap_or_else(|p| p.into_inner()) = Some(got);
+                });
+            }
+        });
+        let mut out: Vec<Vec<u8>> = vec![Vec::new(); sis.len()];
+        for (r, (offset, _, positions)) in runs.into_iter().enumerate() {
+            let buf = bufs[r]
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .take()
+                .unwrap_or_else(|| Err("segment run without a result".to_string()))?;
+            for k in positions {
+                let s = &segs[sis[k] as usize];
+                let a = (s.offset - offset) as usize;
+                out[k] = buf[a..a + s.bytes as usize].to_vec();
+            }
+        }
+        Ok(out)
+    }
+
+    /// `segment_cell` with the segment's bytes read already (`read_segments`)
+    pub fn segment_cell_from(&self, si: u32, raw: &[u8]) -> Result<Cell, String> {
         let s = &self.seg.segs[si as usize];
         let name = self.inv.cells[s.cell as usize].name.clone();
         let mut out = Cell {
@@ -774,14 +940,54 @@ impl LightIndex {
             return Ok(report);
         }
         let jobs = std::thread::available_parallelism().map_or(4, |n| n.get()).min(8);
-        let (mut pieces_of, segments) = self.pieces_of(&todo, jobs, true)?;
-        report.segments = segments;
+        // read, parse and encode in batches of about BATCH_PLACES placements
+        // (a cell at least): the parsed records of one batch live at a time,
+        // the encoded sections of all of them (what the image takes)
+        const BATCH_PLACES: u64 = 4 << 20;
         let mut built: Vec<(u32, CellFill)> = Vec::with_capacity(todo.len());
-        for &ci in &todo {
-            let (places, texts) = pieces_of.remove(&ci).unwrap_or_default();
-            report.placements += places.len() as u64;
-            report.texts += texts.len() as u64;
-            built.push((ci, self.encode_places(&places, texts)));
+        let mut at = 0usize;
+        while at < todo.len() {
+            let mut end = at;
+            let mut places = 0u64;
+            while end < todo.len() && (end == at || places + self.inv.cells[todo[end] as usize].placements <= BATCH_PLACES) {
+                places += self.inv.cells[todo[end] as usize].placements;
+                end += 1;
+            }
+            let batch = &todo[at..end];
+            at = end;
+            let (mut pieces_of, segments) = self.pieces_of(batch, jobs, true)?;
+            report.segments += segments;
+            let items: Vec<(u32, Vec<PlaceRec>, Vec<TextRec>)> = batch
+                .iter()
+                .map(|&ci| {
+                    let (places, texts) = pieces_of.remove(&ci).unwrap_or_default();
+                    report.placements += places.len() as u64;
+                    report.texts += texts.len() as u64;
+                    (ci, places, texts)
+                })
+                .collect();
+            // the encoding (the items' boxes, the instance BVH, its node
+            // masks) cell by cell on `jobs` threads
+            let encoded: Vec<Mutex<Option<CellFill>>> = (0..items.len()).map(|_| Mutex::new(None)).collect();
+            {
+                let next = std::sync::atomic::AtomicUsize::new(0);
+                std::thread::scope(|scope| {
+                    for _ in 0..jobs.min(items.len()).max(1) {
+                        scope.spawn(|| loop {
+                            let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let Some((_, places, texts)) = items.get(k) else { break };
+                            let fill = self.encode_places(places, texts.clone());
+                            *encoded[k].lock().unwrap_or_else(|p| p.into_inner()) = Some(fill);
+                        });
+                    }
+                });
+            }
+            for ((ci, _, _), slot) in items.iter().zip(encoded) {
+                built.push((
+                    *ci,
+                    slot.into_inner().unwrap_or_else(|p| p.into_inner()).expect("encoded cell"),
+                ));
+            }
         }
         let mut keep: Vec<u32> = keep.to_vec();
         keep.sort_unstable();
@@ -811,6 +1017,13 @@ impl LightIndex {
                     f.bytes -= c.bytes;
                     f.evicted += 1;
                     report.evicted += 1;
+                    // its sections in the image become a hole: the next
+                    // extend_image patches the cell's record to none, a
+                    // compaction drops the holes
+                    if f.in_image[ci] {
+                        f.in_image[ci] = false;
+                        f.pending_evict.push((ci as u32, c.bytes));
+                    }
                 }
             }
         }
@@ -918,6 +1131,10 @@ impl LightIndex {
         type Got = Result<(Vec<PlaceRec>, Vec<TextRec>), String>;
         let slots: Vec<Mutex<Option<Got>>> = (0..tasks.len()).map(|_| Mutex::new(None)).collect();
         let jobs = jobs.min(tasks.len()).max(1);
+        // the segments read first (adjacent ones as one pread, runs in
+        // parallel), then parsed in parallel
+        let sis: Vec<u32> = tasks.iter().map(|&(_, si)| si).collect();
+        let raws = self.read_segments(&sis, jobs)?;
         let next = std::sync::atomic::AtomicUsize::new(0);
         std::thread::scope(|scope| {
             for _ in 0..jobs {
@@ -925,7 +1142,7 @@ impl LightIndex {
                     let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let Some(&(_, si)) = tasks.get(k) else { break };
                     let got = self
-                        .segment_cell(si)
+                        .segment_cell_from(si, &raws[k])
                         .map(|c| (c.places, if texts { c.texts } else { Vec::new() }));
                     *slots[k].lock().unwrap_or_else(|p| p.into_inner()) = Some(got);
                 });
@@ -1048,6 +1265,28 @@ impl LightIndex {
             for &(bb, first, count, leaf, md, mn) in &nodes {
                 sink.bvh_node(&bb, first, count, leaf, md, mn);
             }
+            // the v8 node masks of this cell's BVH, here as the cell is read
+            // instead of a pass over the whole image at every assembly
+            // (floe_ovm annotate_cell_bvh; the ids from the index's table)
+            let words = self.mask_words.first().map_or(1, |m| m.0.len());
+            let masks = annotate_cell_bvh(&sink.places, &sink.bvh, (0, sink.n_bvh), words, bvh_mask_min_places(), &self.mask_words);
+            let global: Vec<u32> = {
+                let mut t = self.bitsets.lock().unwrap_or_else(|p| p.into_inner());
+                let width = t.width;
+                masks.table.iter().map(|m| t.intern(&mask_bytes(m, width))).collect()
+            };
+            let ids: Vec<(u32, u32)> = masks
+                .ids
+                .iter()
+                .map(|&(r, o)| {
+                    if r == LMASK_UNKNOWN {
+                        (r, o)
+                    } else {
+                        (global[r as usize], global[o as usize])
+                    }
+                })
+                .collect();
+            write_bvh_masks(&mut sink.bvh, &ids);
         }
         // (a text's share of the budget: its record, its string, its points)
         let text_bytes: u64 = texts
@@ -1064,12 +1303,14 @@ impl LightIndex {
         CellFill {
             places: sink.places,
             n_places: sink.n_places,
+            pool_len: sink.pts_pool.len(),
             pool: sink.pts_pool,
             bvh: sink.bvh,
             n_bvh: sink.n_bvh,
             texts,
             bytes,
             serial: 0,
+            pool_start: 0,
         }
     }
 
@@ -1081,21 +1322,237 @@ impl LightIndex {
     /// image's design.ovt bytes (the filled cells' strings and text point
     /// lists).
     pub fn ovm(&self) -> Result<(Ovm, Vec<u8>), String> {
-        let image = self.image()?;
-        let mut ovm = Ovm::from_bytes_shallow(image.bytes)?;
-        ovm.set_light_marks(&image.unfilled_places, &image.unfilled_texts);
-        Ok((ovm, image.ovt))
+        let f = self.fills.lock().unwrap_or_else(|p| p.into_inner());
+        let built = self.build_image(&f, None)?;
+        drop(f);
+        let mut ovm = built.builder.into_ovm(self.identity.src_size, built.ovt.len() as u64);
+        ovm.set_light_marks(&built.unfilled_places, &built.unfilled_texts);
+        Ok((ovm, built.ovt))
     }
 
-    /// the image's bytes, its design.ovt bytes and, per cell, whether its
-    /// placements / its texts are missing
+    /// `ovm` built anew from the fills at hand and the image `vfs` holds
+    /// (the fills put in the image let their bytes go), the index's
+    /// bookkeeping untouched: what a compaction would make (tests).
+    pub fn rebuild_from(&self, vfs: &Vfs) -> Result<(Ovm, Vec<u8>), String> {
+        let f = self.fills.lock().unwrap_or_else(|p| p.into_inner());
+        let built = self.build_image(&f, vfs.ovm.light_parts())?;
+        drop(f);
+        let mut ovm = built.builder.into_ovm(self.identity.src_size, built.ovt.len() as u64);
+        ovm.set_light_marks(&built.unfilled_places, &built.unfilled_texts);
+        Ok((ovm, built.ovt))
+    }
+
+    /// `ovm`'s image laid out flat (design.ovm's layout; floe_ovm
+    /// `Builder::to_bytes`): the tests validate it deep.
     pub fn image(&self) -> Result<LightImage, String> {
+        let f = self.fills.lock().unwrap_or_else(|p| p.into_inner());
+        let built = self.build_image(&f, None)?;
+        drop(f);
+        Ok(LightImage {
+            bytes: built.builder.to_bytes(self.identity.src_size, built.ovt.len() as u64),
+            ovt: built.ovt,
+            unfilled_places: built.unfilled_places,
+            unfilled_texts: built.unfilled_texts,
+        })
+    }
+
+    /// Grows the slot's image by what the fills added since it was made
+    /// and takes what they let go out of it, in place (floe_ovm
+    /// `Ovm::light_edit`; DIRECT_READ_PLAN §8.9): the bitsets the table
+    /// gained, every filled cell not in the image yet (its sections
+    /// appended, its record patched), every cell let go while in the image
+    /// (its record patched to none; its sections stay as a hole). When the
+    /// holes outgrow the live sections (and 64 MB), or the image is a flat
+    /// one, the image is built anew (`compact_image`). `vfs` must be the
+    /// index's own session (`Vfs::light`), uniquely held or a
+    /// `Vfs::clone_light` of the held one.
+    pub fn extend_image(&self, vfs: &mut Vfs) -> Result<ExtendReport, String> {
+        const COMPACT_MIN_BYTES: u64 = 64 << 20;
+        let compact = {
+            let f = self.fills.lock().unwrap_or_else(|p| p.into_inner());
+            !vfs.ovm.is_parts() || (f.dead_bytes > COMPACT_MIN_BYTES && f.dead_bytes > f.bytes / 2)
+        };
+        if compact {
+            return self.compact_image(vfs);
+        }
+        let mut f = self.fills.lock().unwrap_or_else(|p| p.into_inner());
+        let n = self.inv.cells.len();
+        let Some((ovm, ovt)) = vfs.light_parts_mut() else {
+            return Err("light index: the session's image is not a light one".to_string());
+        };
+        let evicted = std::mem::take(&mut f.pending_evict);
+        let todo: Vec<u32> = (0..n)
+            .filter(|&ci| f.cells[ci].is_some() && !f.in_image[ci])
+            .map(|ci| ci as u32)
+            .collect();
+        let changed: Vec<u32> = evicted.iter().map(|e| e.0).chain(todo.iter().copied()).collect();
+        let t = self.bitsets.lock().unwrap_or_else(|p| p.into_inner());
+        let mut failed: Option<(u32, String)> = None;
+        let mut pool_bases: Vec<(u32, u64)> = Vec::with_capacity(todo.len());
+        // the fills' bytes move out here and go cell by cell as the image
+        // takes them, so the two never add up (the metadata stays)
+        let mut moved: Vec<(u32, Vec<u8>, u64, Vec<u8>, Vec<u8>, u32)> = todo
+            .iter()
+            .map(|&ci| {
+                let c = f.cells[ci as usize].as_mut().expect("a filled cell");
+                (
+                    ci,
+                    std::mem::take(&mut c.places),
+                    c.n_places,
+                    std::mem::take(&mut c.pool),
+                    std::mem::take(&mut c.bvh),
+                    c.n_bvh,
+                )
+            })
+            .collect();
+        // the sections' capacity: the inventory's bound on the placements
+        // (64 B each) and on the nodes a split makes of them (at most one
+        // node per two placements and one per cell, 56 B each), the pool by
+        // what this round adds - so the appends move nothing
+        let total_places = usize::try_from(self.inv.scan.placements).unwrap_or(usize::MAX / 128);
+        let places_cap = total_places.saturating_mul(floe_ovm::PLACE_LEN);
+        let bvh_cap = total_places
+            .saturating_mul(floe_ovm::BVH_LEN / 2)
+            .saturating_add(n.saturating_mul(floe_ovm::BVH_LEN));
+        let pool_more: usize = moved.iter().map(|m| m.3.len()).sum();
+        let edited = ovm.light_edit(&changed, |b| {
+            b.extend_bitsets(&t.bytes);
+            b.reserve_sections(places_cap, bvh_cap, pool_more);
+            for &(ci, _) in &evicted {
+                b.patch_cell(ci, 0, 0, 0, 0, 0, 0);
+            }
+            for (ci, places, n_places, pool, bvh, n_bvh) in moved.drain(..) {
+                let (place_start, bvh_start, pool_start) = b.append_cell_places(&places, n_places, &pool, &bvh, n_bvh);
+                drop((places, pool, bvh));
+                let texts = f.cells[ci as usize].as_ref().map(|c| &c.texts[..]).unwrap_or(&[]);
+                let ranges = match build_cell_texts(b, ovt, ci, texts, &self.layer_index) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        failed = Some((ci, e));
+                        return;
+                    }
+                };
+                pool_bases.push((ci, pool_start));
+                b.patch_cell(
+                    ci,
+                    floe_ovm::narrow_u32(place_start, "place count"),
+                    floe_ovm::narrow_u32(n_places, "cell place count"),
+                    if n_bvh == 0 { 0 } else { bvh_start },
+                    n_bvh,
+                    ranges.0,
+                    ranges.1,
+                );
+            }
+        });
+        drop(t);
+        // the image holds the sections now (the fills' bytes went as it took
+        // them; a compaction takes them back out of the image)
+        for (ci, pool_start) in pool_bases {
+            f.in_image[ci as usize] = true;
+            if let Some(c) = f.cells[ci as usize].as_mut() {
+                c.pool_start = pool_start;
+            }
+        }
+        if edited.is_none() {
+            return Err("light index: the session's image is not a light one".to_string());
+        }
+        if let Some((ci, e)) = failed {
+            // the cells after the failed one kept their bytes in `moved`
+            // (gone with it) - they and the failed one count as not filled
+            let Fills {
+                cells,
+                in_image,
+                bytes,
+                evicted: gone,
+                ..
+            } = &mut *f;
+            for (k, c) in cells.iter_mut().enumerate() {
+                if let Some(fill) = c {
+                    if fill.n_places > 0 && fill.places.is_empty() && !in_image[k] {
+                        *bytes = bytes.saturating_sub(fill.bytes);
+                        *gone += 1;
+                        *c = None;
+                    }
+                }
+            }
+            return Err(format!("light index: cell {}: {}", ci, e));
+        }
+        f.dead_bytes += evicted.iter().map(|e| e.1).sum::<u64>();
+        ovm.set_ovt_len(ovt.len() as u64);
+        let (up, ut) = self.unfilled_flags(&f);
+        ovm.set_light_marks(&up, &ut);
+        Ok(ExtendReport {
+            appended: todo.len(),
+            holed: evicted.len(),
+            rebuilt: false,
+            bytes: ovm.bytes(),
+            dead_bytes: f.dead_bytes,
+        })
+    }
+
+    /// Whether the slot's image lacks a fill or still holds a cell let go
+    /// (`extend_image` has work to do).
+    pub fn image_behind(&self) -> bool {
+        let f = self.fills.lock().unwrap_or_else(|p| p.into_inner());
+        !f.pending_evict.is_empty() || f.cells.iter().zip(&f.in_image).any(|(c, &i)| c.is_some() && !i)
+    }
+
+    /// The slot's image built anew from the fills at hand (`build_image`),
+    /// the holes gone: `extend_image` when they outgrow the live sections.
+    pub fn compact_image(&self, vfs: &mut Vfs) -> Result<ExtendReport, String> {
+        let mut f = self.fills.lock().unwrap_or_else(|p| p.into_inner());
+        let built = self.build_image(&f, vfs.ovm.light_parts())?;
+        let n = self.inv.cells.len();
+        for ci in 0..n {
+            f.in_image[ci] = f.cells[ci].is_some();
+        }
+        for &(ci, pool_start) in &built.pool_bases {
+            if let Some(c) = f.cells[ci as usize].as_mut() {
+                c.pool_start = pool_start;
+                c.places = Vec::new();
+                c.pool = Vec::new();
+                c.bvh = Vec::new();
+            }
+        }
+        f.pending_evict.clear();
+        f.dead_bytes = 0;
+        let mut ovm = built.builder.into_ovm(self.identity.src_size, built.ovt.len() as u64);
+        ovm.set_light_marks(&built.unfilled_places, &built.unfilled_texts);
+        let bytes = ovm.bytes();
+        vfs.replace_light(ovm, built.ovt);
+        Ok(ExtendReport {
+            appended: 0,
+            holed: 0,
+            rebuilt: true,
+            bytes,
+            dead_bytes: 0,
+        })
+    }
+
+    /// per cell: the inventory counts placements / texts the fills lack
+    fn unfilled_flags(&self, f: &Fills) -> (Vec<bool>, Vec<bool>) {
+        let n = self.inv.cells.len();
+        let places = (0..n).map(|ci| self.inv.cells[ci].placements > 0 && f.cells[ci].is_none()).collect();
+        let texts = (0..n).map(|ci| self.inv.cells[ci].texts > 0 && f.cells[ci].is_none()).collect();
+        (places, texts)
+    }
+
+    /// The image built anew from the fills at hand: the bitsets of the
+    /// index's table (`extend_bitsets`; the table takes up what the build
+    /// interns beyond them - the cells' masks the first time), every filled
+    /// cell's sections (their node masks came with the fill), the pages.
+    /// The open's image, `compact_image`'s and the tests' (`image`).
+    fn build_image(&self, f: &Fills, from: Option<&Builder>) -> Result<BuiltImage, String> {
         let inv = &self.inv;
         let n = inv.cells.len();
         let nl = inv.layer_order.len();
         let mut b = Builder::new(inv.unit(), self.identity.src_size, self.identity.src_mtime, nl);
         b.top = inv.top as u32;
-        let f = self.fills.lock().unwrap_or_else(|p| p.into_inner());
+        {
+            let t = self.bitsets.lock().unwrap_or_else(|p| p.into_inner());
+            b.extend_bitsets(&t.bytes);
+        }
+        let mut pool_bases: Vec<(u32, u64)> = Vec::new();
         let mut unfilled_places = vec![false; n];
         let mut unfilled_texts = vec![false; n];
         let mut ovt: Vec<u8> = Vec::new();
@@ -1111,10 +1568,25 @@ impl LightIndex {
             let mut texts: &[TextRec] = &[];
             match &f.cells[ci] {
                 Some(c) => {
-                    sink.places.clone_from(&c.places);
+                    if c.n_places > 0 && c.places.is_empty() {
+                        // the image alone holds the sections (extend_image
+                        // let the fill's go): taken back out of it
+                        let Some(src) = from else {
+                            return Err(format!(
+                                "light index: cell {}'s placements are in the image alone and no image was given to rebuild from",
+                                ci
+                            ));
+                        };
+                        let s = src.cell_sink_from_image(ci as u32, c.pool_start, c.pool_len);
+                        sink.places = s.places;
+                        sink.pts_pool = s.pts_pool;
+                        sink.bvh = s.bvh;
+                    } else {
+                        sink.places.clone_from(&c.places);
+                        sink.pts_pool.clone_from(&c.pool);
+                        sink.bvh.clone_from(&c.bvh);
+                    }
                     sink.n_places = c.n_places;
-                    sink.pts_pool.clone_from(&c.pool);
-                    sink.bvh.clone_from(&c.bvh);
                     sink.n_bvh = c.n_bvh;
                     texts = &c.texts;
                 }
@@ -1124,7 +1596,11 @@ impl LightIndex {
                 }
             }
             let (page_base, page_count) = self.cell_pages[ci];
+            let pool_start = b.pool_len() as u64;
             let bases = b.append_cell_sink(&sink, page_base as u64);
+            if f.cells[ci].is_some() {
+                pool_bases.push((ci as u32, pool_start));
+            }
             let (trange_start, trange_count) =
                 build_cell_texts(&mut b, &mut ovt, ci as u32, texts, &self.layer_index)?;
             for p in &self.pages[page_base as usize..(page_base + page_count) as usize] {
@@ -1179,7 +1655,6 @@ impl LightIndex {
                 mask_t,
             );
         }
-        drop(f);
         for (i, &(l, d)) in inv.layer_order.iter().enumerate() {
             let nm = inv
                 .layer_names
@@ -1189,16 +1664,18 @@ impl LightIndex {
                 .unwrap_or_else(|| format!("{}/{}", l, d));
             b.layer(l, d, &nm, inv.lrecs[i], inv.lmems[i]);
         }
-        let jobs = std::thread::available_parallelism().map_or(4, |n| n.get()).min(8);
-        b.annotate_bvh_masks(jobs);
-        // ovp_len = the source's size: every page's span lies inside it;
-        // ovt_len = the bytes made here
-        let bytes = b.finish(self.identity.src_size, ovt.len() as u64);
-        Ok(LightImage {
-            bytes,
+        // (the node masks came with the fills: encode_places annotates a
+        // cell as it is read, so no pass over the image here)
+        {
+            let mut t = self.bitsets.lock().unwrap_or_else(|p| p.into_inner());
+            t.absorb(b.bitsets_bytes());
+        }
+        Ok(BuiltImage {
+            builder: b,
             ovt,
             unfilled_places,
             unfilled_texts,
+            pool_bases,
         })
     }
 
@@ -1311,11 +1788,23 @@ impl LightIndex {
     }
 }
 
-/// What `write_files` wrote.
+/// `build_image`'s result: the builder holding the sections (an `Ovm`
+/// reads them in place, `Builder::into_ovm`), the design.ovt bytes, the
+/// unfilled flags
+struct BuiltImage {
+    builder: Builder,
+    ovt: Vec<u8>,
+    unfilled_places: Vec<bool>,
+    unfilled_texts: Vec<bool>,
+    /// per filled cell where the builder's pool holds its bytes
+    pool_bases: Vec<(u32, u64)>,
+}
+
+/// One assembled image of a light index (`LightIndex::image`), laid out
+/// flat as design.ovm would hold it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-/// One assembled image of a light index (`LightIndex::image`).
 pub struct LightImage {
-    /// the design.ovm image
+    /// the design.ovm image, laid out flat
     pub bytes: Vec<u8>,
     /// the image's design.ovt bytes: the filled cells' text strings and
     /// the point lists of their Pts repetitions
@@ -1924,6 +2413,140 @@ mod tests {
         assert_eq!(report.placements, li.inv.cells.iter().map(|c| c.placements).sum::<u64>());
     }
 
+    /// per cell what an image holds of it: the placement records in order,
+    /// the BVH nodes with their masks as bytes, the text runs
+    fn cell_contents(ovm: &Ovm, ci: u32) -> (Vec<(u32, i64, i64, u8, bool, Rep)>, Vec<(BBox, u16, bool, Vec<u8>, Vec<u8>)>, Vec<(u32, u32)>) {
+        let (ps, pc) = ovm.cell_places(ci);
+        let places = (ps as u64..ps as u64 + pc as u64)
+            .map(|i| {
+                let p = ovm.place(i);
+                (p.child, p.x, p.y, p.rot, p.flip, p.rep)
+            })
+            .collect();
+        let (bs, bc) = ovm.cell_bvh(ci);
+        let mask = |id: u32| if id == LMASK_UNKNOWN { Vec::new() } else { ovm.bitset(id).to_vec() };
+        let nodes = (bs..bs + bc)
+            .map(|i| {
+                let nd = ovm.bvh(i);
+                (nd.bbox, nd.count, nd.leaf, mask(nd.lmask_rec), mask(nd.lmask_direct))
+            })
+            .collect();
+        let (ts, tc) = ovm.cell_tranges(ci);
+        let tranges = (ts..ts + tc)
+            .map(|i| {
+                let t = ovm.trange(i);
+                (t.layer_idx, t.text_count)
+            })
+            .collect();
+        (places, nodes, tranges)
+    }
+
+    /// DIRECT_READ_PLAN §8.9: the image a fill extends in place holds, cell
+    /// for cell, what an image built anew from the same fills holds - the
+    /// records, the BVH nodes with their masks, the text runs, the unfilled
+    /// marks - and lays out flat as a valid design.ovm; an eviction leaves
+    /// a hole (the cell's record says none) and a compaction drops it
+    #[test]
+    fn the_image_grows_in_place_as_the_rebuilt_one_would() {
+        use crate::Vfs;
+        for (name, data) in [("tree", tree()), ("adv", adversarial(false, true)), ("labels", labelled_tree())] {
+            let (_src, dir) = light_of(&format!("grow-{}", name), &data);
+            let li = LightIndex::open(&dir).unwrap();
+            let n = li.inv.cells.len() as u32;
+            let same_as_rebuilt = |li: &LightIndex, vfs: &Vfs| {
+                let (fresh, _) = li.rebuild_from(vfs).unwrap();
+                for ci in 0..n {
+                    assert_eq!(cell_contents(&fresh, ci), cell_contents(&vfs.ovm, ci), "{}: cell {}", name, ci);
+                    assert_eq!(fresh.light_unfilled(ci), vfs.ovm.light_unfilled(ci), "{}: cell {} marks", name, ci);
+                }
+                // (the flat layout passes the open's validation: the deep one
+                // wants the sections owned in cell order, which an image
+                // grown in fill order with holes is not - it never goes to
+                // disk; the rebuilt image is deep-valid, see the open test)
+                floe_ovm::Ovm::from_bytes_shallow(vfs.ovm.flat_bytes()).unwrap_or_else(|e| panic!("{}: shallow: {}", name, e));
+            };
+            let (ovm, ovt) = li.ovm().unwrap();
+            assert!(ovm.is_parts());
+            let mut vfs = Vfs::light(ovm, li.source.clone(), ovt);
+            same_as_rebuilt(&li, &vfs);
+            // level by level, as the planner's rounds would
+            let mut frontier = vec![li.inv.top as u32];
+            let mut rounds = 0;
+            while !frontier.is_empty() {
+                li.fill(&frontier).unwrap();
+                let rep = li.extend_image(&mut vfs).unwrap();
+                assert!(!rep.rebuilt, "{}: {:?}", name, rep);
+                same_as_rebuilt(&li, &vfs);
+                let mut next: Vec<u32> = frontier
+                    .iter()
+                    .flat_map(|&ci| li.inv.cells[ci as usize].edges.iter().map(|e| e.child as u32))
+                    .filter(|&c| !li.is_filled(c))
+                    .collect();
+                next.sort_unstable();
+                next.dedup();
+                frontier = next;
+                rounds += 1;
+            }
+            assert!(rounds >= 1, "{}", name);
+            // an eviction: the top goes when its children are filled past a
+            // budget of one byte (not kept), the image gets a hole the
+            // rebuilt image has not, the contents still agree; a compaction
+            // drops the hole
+            let li2 = LightIndex::open(&dir).unwrap();
+            let (ovm2, ovt2) = li2.ovm().unwrap();
+            let mut vfs2 = Vfs::light(ovm2, li2.source.clone(), ovt2);
+            let top = li2.inv.top as u32;
+            li2.fill(&[top]).unwrap();
+            li2.extend_image(&mut vfs2).unwrap();
+            let kids: Vec<u32> = li2.inv.cells[top as usize]
+                .edges
+                .iter()
+                .map(|e| e.child as u32)
+                .filter(|&c| needs_fill(&li2.inv.cells[c as usize]))
+                .collect();
+            if !kids.is_empty() && needs_fill(&li2.inv.cells[top as usize]) {
+                li2.set_places_budget(1);
+                li2.fill(&kids).unwrap();
+                assert!(!li2.is_filled(top), "{}: the top stayed", name);
+                let rep = li2.extend_image(&mut vfs2).unwrap();
+                assert!(rep.holed == 1 && !rep.rebuilt && rep.dead_bytes > 0, "{}: {:?}", name, rep);
+                assert_eq!(vfs2.ovm.cell_places(top).1, 0, "{}", name);
+                assert!(vfs2.ovm.light_unfilled(top), "{}", name);
+                same_as_rebuilt(&li2, &vfs2);
+                let before = vfs2.ovm.n_places;
+                let rep = li2.compact_image(&mut vfs2).unwrap();
+                assert!(rep.rebuilt && rep.dead_bytes == 0, "{}: {:?}", name, rep);
+                assert!(vfs2.ovm.n_places < before, "{}: the hole stayed", name);
+                same_as_rebuilt(&li2, &vfs2);
+                // and the top comes back on a fill, appended after the hole
+                li2.set_places_budget(1 << 30);
+                li2.fill(&[top]).unwrap();
+                let rep = li2.extend_image(&mut vfs2).unwrap();
+                assert_eq!((rep.appended, rep.holed, rep.rebuilt), (1, 0, false), "{}", name);
+                same_as_rebuilt(&li2, &vfs2);
+            }
+        }
+    }
+
+    /// the coalesced reads of `read_segments` are the segments' bytes, in
+    /// the order asked, duplicates included
+    #[test]
+    fn coalesced_reads_are_the_single_reads() {
+        let (_src, dir) = light_of("coalesce", &adversarial(false, true));
+        let li = LightIndex::open(&dir).unwrap();
+        let n = li.seg.segs.len() as u32;
+        let mut sis: Vec<u32> = (0..n).rev().collect();
+        sis.push(0);
+        sis.push(n / 2);
+        let got = li.read_segments(&sis, 3).unwrap();
+        assert_eq!(got.len(), sis.len());
+        for (k, &si) in sis.iter().enumerate() {
+            assert_eq!(got[k], li.segment_bytes(si).unwrap(), "segment {}", si);
+        }
+        assert!(li.read_segments(&[n], 1).is_err());
+    }
+
+    #[test]
     #[test]
     fn what_the_light_index_refuses() {
         // a cell defined inside a CBLOCK: the directory cannot tell its

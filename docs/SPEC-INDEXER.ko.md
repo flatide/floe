@@ -136,7 +136,9 @@ design.ovo를 더하는데, 인스턴스의 배치는 파일 전체를 다시 �
 캐시 옆에 두는 것과 같은 바이트다. 렌더러(render-core `Cache::open`)는 design.ovm이 없고
 design.inv가 있는 디렉터리를 경량으로 열어 소스(meta.json `src.path`, 없으면 `.NAME.ice`의
 NAME; size/mtime이 맞아야 한다)에서 직접 읽는다 — 셀 디렉터리는 재고, 페이지는 세그먼트 ×
-레이어, 배치는 플랜이 방문한 셀부터 pread + inflate + `parse_segment`로 채운다. CBLOCK
+레이어, 배치는 플랜이 방문한 셀부터 pread + inflate + `parse_segment`로 채운다(0.12.386부터
+이미지는 섹션 버퍼 위에서 제자리로 자라고 인접 세그먼트는 한 pread로 읽는다 —
+DIRECT_READ_PLAN §8.9). CBLOCK
 안에 정의된 셀이 있는 스트림은 경량으로 읽을 수 없다: `floe-index light`가 아무것도 쓰지 않고
 종료 79(`floe_vfs::light::UNSUITABLE_EXIT`)로 거절하고, `floe2 index`는 규칙이 경량을 고른
 소스(덱 소스, FLOE_INDEX_LIGHT=on)면 그 자리에서 전체 색인을 짓는다(`--light` 명시는 79;

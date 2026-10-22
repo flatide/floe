@@ -671,13 +671,21 @@ both the `Cache` and its `HierHandle` read; a plan that expanded a cell whose
 placements the image lacks (floe_ovm `LightMarks`, set by the planner's expand
 and the `cell_places`/`cell_bvh` accessors) is made again after `LightIndex::
 fill` read those cells' placement segments and the image was reassembled
-(`LightLink::run`; a round per hierarchy level, FLOE_LIGHT_PREFILL_PLACES /
+(`LightLink::run`; a round per hierarchy level - the image grows in place
+between rounds since 0.12.386: the sections sit in their builder
+(`Ovm::parts`, `light_edit`), a fill appends its cells and patches their
+records, a request lets its snapshot go before the fill so no one holds the
+image, a reader that does gets to keep it while a copy grows; the BVH node
+masks come with the fill (`annotate_cell_bvh`), the fills' bytes go once in
+the image, evicted cells leave holes a compaction drops - DIRECT_READ_PLAN
+§8.9; FLOE_LIGHT_PREFILL_PLACES /
 _MB take the cells under them along, FLOE_LIGHT_PLACES_MB bounds what stays
 resident between requests - a fill lets go only cells the request in progress
 did not read from the image it planned on (`Ovm::light_used`,
 `LightIndex::fill_keeping`), so a request larger than the budget keeps its
 working set and completes instead of refilling what the round before let go
-(0.12.385) -, FLOE_LIGHT_LOG=on prints a line per round). A page decodes from its
+(0.12.385) -, FLOE_LIGHT_LOG=on prints a line per round, through the
+service's stderr to `floe2 render` and the viewer since 0.12.386). A page decodes from its
 segment of the source - read in file order, parsed once with its snapshot,
 split by layer into one-cell Docs (`light::decode_pages`; the pool's workers
 sit a light batch out); the source files are pread through a process-wide

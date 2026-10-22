@@ -422,7 +422,7 @@ geometry/placement/text x·y, W/H, 점 목록, 경로 확장, 반복, 배치 대
 | L4 LightVfs | 합성 Ovm, 세그먼트 페이지 디코드, 배치 LRU, 셀 트리 | **완료 0.12.382(§8.5)**: 게이트 `light_cache` — fixture 5종 × exact 뷰 5개(전체·근접·depth 1·레이어 부분)가 전체 색인과 PNG 동일 + 플랜의 셀·간선·프레임 수 동일, cut 3 px 뷰는 빛나는 픽셀의 0.5 % 안(실측 0), 거절 3종; 단위 테스트(재고 요약 = 이미지 요약, 페이지 = 레이어 도형, 셀 트리 질의); valmini·sample9·route_chip·p10에서 뷰 17개 PNG 동일 |
 | L5 명령·모드 | `floe-index light`, `floe2 index --light`, 열기 규칙, 상태줄/info, 자동 생성, 잠금 | **완료 0.12.383(§8.6)**: `floe2`(경량 생명주기: index --light/--full, info, exact 렌더 = 전체, clip 거절, 덮어쓰기 규칙, FLOE_INDEX_LIGHT), `jobdeck`(덱 소스 경량 기본), `index_lock` K13, `light_cache`(design.ovo 바이트 동일, --occupancy-only, --force) |
 | L6 덱·뷰어·캡처 | 덱 소스 경량 열기, 요약 없는 상태 표시, refine 흐름, `floe2 render` 완료 대기 | **완료 0.12.384(§8.7)**: `floe2`(exact 렌더 = 전체, 라벨 켠 채), `jobdeck`(LightSummaryTests: `--no-occupancy` 뒤 광역 캡처 미완(3)·근접 캡처 통과·자동 색인의 요약 추가·2단계 `index`), `gtk_view`(경량 레이아웃의 `cache:light`·`light_rounds`), 단위 테스트(텍스트 채우기 = Doc, 라벨 행, 시한 라운드) |
-| L7 후속 | 요약 패스 1패스화/마킹 가속, ovs 합치기(레이아웃 밀도), B안(정규 페이지), 세그먼트 캐시 디스크 보존(방문한 셀의 디코드 결과를 남겨 다음 세션 가속), 1패스 경량 생성(셀 로컬 점유 격자 합성) | 각각 |
+| L7 후속 | 요약 패스 1패스화/마킹 가속, ovs 합치기(레이아웃 밀도), B안(정규 페이지), 세그먼트 캐시 디스크 보존(방문한 셀의 디코드 결과를 남겨 다음 세션 가속), 1패스 경량 생성(셀 로컬 점유 격자 합성) | 각각 — **L7a 완료 0.12.386(§8.9)**: 이미지 증분 합성(제자리 성장, 채움 시점 노드 마스크, 채움 바이트 해제), 세그먼트 pread 묶음·병렬 인코딩; 나머지는 사용자 지시에 따라 |
 
 L0는 하루, L1~L3는 S1~S3와 비슷한 크기(재고 코드 위의 확장), L4가 본체다.
 L4까지 끝나면 단독 소스를 경량으로 열어 볼 수 있고, L5·L6이 제품 경로다.
@@ -883,6 +883,73 @@ exact fit은 경량에서 64라운드 228 s 11 GB 뒤 오류(전체 색인은 ra
   (`_summary_job_rc`). `floe2 render`의 미완 메시지도 그 경우를 말한다. 게이트 light_cache
   `check_summary_budget`(main01_like 0.001: 1.29 M 배치, top 62 MB; `--mem 0.1` = 107 MB는 셀보다
   크고 상한 ≈ 28만이라 건너뛰고 말한다; 기본 예산은 짓는다 — check_fixture).
+
+### 8.9 L7a 구현 (0.12.386 / floe-index·renderd 0.12.345, 2026-10-22; 사용자 "L7 진행해줘")
+
+§8.5·§8.7이 L7로 미룬 것 중 렌더러 쪽 둘 — 이미지 증분 합성과 세그먼트 pread 묶음 — 을 했다.
+요약 패스 쪽(1패스화·1패스 경량 생성), B안, 웹 배너는 다음 차례다.
+
+- **이미지 증분 합성.** 경량 이미지는 더 이상 라운드마다 새로 짓는 평평한 바이트 버퍼가
+  아니다. floe_ovm `Builder`가 들고 있는 섹션 버퍼들(섹션당 Vec 하나, pts pool은 따로)이
+  이미지다: `Builder::into_ovm`이 그 위에 `Ovm` 독자를 얹고(`Ovm::parts`; `sec()`가 평평한
+  버퍼 대신 섹션 버퍼를, `pool()`이 pool을 읽는다 — 전체 색인의 mmap 경로는 그대로), 채움은
+  `Ovm::light_edit`로 제자리에서 붙인다(`LightIndex::extend_image`): 비트셋 표의 꼬리
+  (`extend_bitsets`), 비운 셀의 레코드를 0으로(`patch_cell`), 새로 채운 셀의 배치·pool·BVH를
+  섹션 끝에(`append_cell_places`: 레코드의 pool 오프셋과 노드의 `first`를 다시 기준 잡는
+  append_cell_sink의 길), 텍스트 색인(`build_cell_texts`)을 꼬리 섹션에, 셀 레코드 패치. 라운드마다
+  O(이미지)이던 재합성(정적 섹션 재인코딩 + `annotate_bvh_masks` 전체 패스 + finish 복사 +
+  얕은 검증)이 O(새 채움)이 됐다 — p10 exact fit의 라운드별 이미지 시간 177/573/3,143/7,400 ms
+  → 25/179/408/445 ms.
+- **스냅샷 규약.** 요청은 플랜 결과와 스냅샷을 채움 전에 놓는다(render-core `run_within`:
+  `drop(out); drop(vfs)`). `fill_into`는 슬롯을 쓰기 잠금으로 잡고 `Arc::get_mut`가 되면(아무도
+  들고 있지 않으면) 그 이미지를 제자리에서 늘리고, 다른 독자(동시 요청, 셀 트리 질의)가 들고
+  있으면 `Vfs::clone_light`(섹션 memcpy, 재인코딩 없음) 위에 늘려 슬롯에 넣는다(로그 `in
+  place` / `copied`). 그 독자의 스냅샷은 불변으로 남는다 — 제자리 성장은 섹션을 늘리고 셀
+  레코드만 바꾸므로 기존 노드·레코드의 자리는 움직이지 않는다(밀도 마스크 캐시의 키는
+  `Ovm::identity()` = parts 주소; 복제·재합성이면 새 키).
+- **노드 마스크를 채움 시점에.** v8 BVH 노드 마스크는 셀 단위 계산이라
+  (`floe_ovm::annotate_cell_bvh` — 전체 빌드의 `annotate_bvh_masks`도 이 함수를 셀마다 부른다)
+  `encode_places`가 셀을 읽을 때 매긴다(`write_bvh_masks`). 비트셋 id는 인덱스의 공유 표
+  (`BitsetTable`, append-only: 첫 이미지의 셀 마스크 세 개씩 → 채운 셀의 노드 마스크)에서
+  받으므로 이미지마다·재합성마다 같다. 인코딩(`split_bvh` + 주석)은 셀 단위로 `jobs` 스레드.
+- **채움 바이트는 이미지가 든다.** `extend_image`가 붙인 셀의 `CellFill` 바이트(배치·pool·BVH)는
+  놓는다(메타데이터 `pool_start`/`pool_len`만 남는다) — 상주 메모리 ≈ 이미지 1×. 비움은 레코드만
+  0으로 하고 섹션은 구멍으로 남긴다(`Fills.dead_bytes`, `pending_evict`); 구멍이 산 섹션의 절반과
+  64 MB를 넘으면 `compact_image`가 현재 이미지에서 셀을 되꺼내(`Builder::cell_sink_from_image`:
+  pool 오프셋·노드 first를 다시 로컬로) 새로 짓는다. 섹션 용량은 재고의 상한(배치 64 B, 노드
+  28 B + 셀당 56 B)으로 미리 잡아(`reserve_sections`; 가상 주소, 쓴 곳만 상주) Vec 배가
+  realloc의 2배 복사가 없다. 예산(§8.8)은 그대로 `CellFill.bytes`로 센다.
+- **세그먼트 pread 묶음.** `LightIndex::read_segments(sis, jobs)`: 요청 세그먼트를 오프셋순으로
+  정렬해 인접(또는 포함) 구간을 한 pread로(최대 32 MiB), 구간들을 `jobs` 스레드로 읽는다.
+  채움(`pieces_of`: 읽기 → 병렬 파싱)과 페이지 디코드(render-core `decode_pages`)가 쓴다.
+- **FLOE_LIGHT_LOG.** `[light]` 줄이 worker-client를 지나 `floe2 render`·뷰어의 stderr에 보인다
+  (전에는 `[lock]`만 통과시켜 L6의 안내가 CLI·뷰어에서는 맞지 않았다). 줄: `image N MB in
+  place|copied|rebuilt (+A cells, H holed[, D MB dead]) in T ms`.
+- **테스트.** floe_vfs `the_image_grows_in_place_as_the_rebuilt_one_would`(tree·adv·labels:
+  라운드마다 제자리 이미지 = 이미지에서 새로 지은 것 — 셀마다 배치 레코드·BVH 노드와 마스크
+  바이트·텍스트 run·unfilled 표시 —, 평평한 배치는 open의 검증을 지난다(deep은 셀 순서 소유를
+  요구하므로 디스크에 가지 않는 이미지에는 맞지 않다), 비움 → 구멍(레코드 0, dead_bytes) →
+  compaction(n_places 줄어듦) → 되채움), `coalesced_reads_are_the_single_reads`; render-core의
+  light 테스트(budget_tests·deadline_tests 포함)와 게이트 light_cache(픽셀 동일)는 그대로.
+- **실측(macOS 4 jobs, p10 909 MB; `floe2 render` 뷰어 기본 설정 fit / 40 µm 근접; render-cli
+  exact fit 256 px decode 1,000 페이지).**
+
+  | 뷰 | 0.12.385 (§8.8 뒤) | L7a 0.12.386 | 전체 색인 |
+  | --- | --- | --- | --- |
+  | fit, 뷰어 기본 | 21.2~25.4 s, 10.5~10.7 GB | 9.7~10.5 s, 11.3~11.8 GB | 3.7 s, 1.3 GB |
+  | 40 µm 근접 | 1.3 s, 1.4 GB | 1.0 s, 1.7 GB | 0.20 s, 0.33 GB |
+  | exact fit: 플랜 1회 / 라운드별 이미지 / RSS | 45.9 s / 177·573·3,143·7,400 ms / 10.2 GB | 26.2 s / 25·181·429·297 ms / 11.8 GB | — |
+
+  fit의 남은 10 s는 한 라운드다: 예산 fit의 플랜이 4,053셀을 요구하고 선채움이 5,531셀 =
+  8,257만 배치(소스의 전부)를 7.1 s에 읽어 인코딩하고 6.9 GB 이미지를 1.0~1.2 s에 제자리로
+  늘린다 — 전체 색인이 색인 때 한 일을 뷰 때 하는 비용이라 셀 단위 채움으로는 여기까지다
+  (덱 소스의 광역 뷰는 요약으로 그리므로 채움이 없다; 레이아웃은 전체 색인이 기본). 메모리는
+  이미지 6.9 GB + 플랜·디코드 상태(exact fit은 전체 색인에서도 6 GB를 넘겼다). 플랜 1회가
+  46 → 26 s인 것은 제자리 이미지가 셀별 lazy 표(`bvh_member_log2`)를 라운드 사이에
+  유지해서다. 근접 뷰의 PNG는 수정 전과 바이트 동일.
+- **남은 것(L7b~).** 요약 패스 1패스화/마킹 가속과 1패스 경량 생성(§8 표; 현장 TB 덱의 요약 1.5~2
+  시간), 지역성이 나쁜 writer의 B안, 웹(feature/webui)의 배너·`PatchDto`, 세그먼트 캐시 디스크
+  보존.
 
 ## 9. 검토한 대안
 

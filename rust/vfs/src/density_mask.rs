@@ -116,7 +116,10 @@ impl DensityLayerMemo {
         const MAX_BYTES: usize = 16 << 20;
         const MAX_ENTRIES: usize = 65_536;
         const MAX_READS: usize = 4096;
-        let key = (v.data.as_ptr() as usize, v.data.len(), ni);
+        // (a light image's parts keep their identity across the fills that
+        // extend them in place: a node never moves)
+        let id = v.identity();
+        let key = (id.0, id.1, ni);
         let mut nodes = self.nodes[ni as usize % self.nodes.len()].lock().unwrap_or_else(|error| error.into_inner());
         if let Some(known) = nodes.get(&key) {
             return known.as_ref().map(|bits| masks_intersect(bits, visible));
