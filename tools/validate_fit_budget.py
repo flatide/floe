@@ -634,20 +634,31 @@ def probe_checks(src):
 
 
 def cli_checks(temp, src):
-    """`floe2 render` over the budget: the exact capture's error in words,
-    the thinned capture said (module doc)."""
+    """`floe2 render` over the budget: the exact capture drawn in bands
+    (0.12.389, DIRECT_READ_PLAN section 8.12) byte-equal to the roomy one,
+    its refusal in words under the kill switch, the thinned capture said
+    (module doc)."""
     env = {k: v for k, v in os.environ.items() if k != 'FLOE_RUST_FIT_TOP_FIRST'}
 
-    def render(name, budget_mb, *extra):
+    def render(name, budget_mb, *extra, more=None):
         out, report = Path(temp) / (name + '.png'), Path(temp) / (name + '.json')
         done = subprocess.run(
             [FLOE2, 'render', str(src), '--px', str(PX), '--out', str(out), '--report', str(report), *extra],
-            cwd=ROOT, env={**env, 'FLOE_RUST_BUDGET_MB': str(budget_mb)},
+            cwd=ROOT, env={**env, 'FLOE_RUST_BUDGET_MB': str(budget_mb), **(more or {})},
             capture_output=True, text=True, timeout=600)
         shot = json.loads(report.read_text())['shots'][0] if report.exists() else None
         return done, out, shot
 
+    # exact over 48 MB: drawn in bands, complete, the same bytes as under a
+    # budget that holds every page
     done, out, shot = render('cli_exact', 48, '--detail', 'exact')
+    assert done.returncode == 0 and out.exists() and shot and shot.get('complete'), (done.returncode, done.stderr)
+    assert '[capture]' in done.stderr and 'drawn in bands' in done.stderr, done.stderr
+    roomy_done, roomy_out, _ = render('cli_exact_roomy', 4096, '--detail', 'exact')
+    assert roomy_done.returncode == 0 and '[capture]' not in roomy_done.stderr, roomy_done.stderr
+    assert out.read_bytes() == roomy_out.read_bytes(), 'the banded exact capture differs from the whole one'
+    # the kill switch: the refusal as before, in words, nothing saved
+    done, out, shot = render('cli_exact_off', 48, '--detail', 'exact', more={'FLOE_RUST_BANDED_CAPTURE': 'off'})
     assert done.returncode != 0 and not out.exists() and shot is None, (done.returncode, done.stderr)
     err = done.stderr
     for words in ('decoded generation budget exceeded - the region needs at least',
@@ -662,8 +673,8 @@ def cli_checks(temp, src):
     warning = next(line for line in done.stdout.splitlines() if 'thinned to fit' in line)
     done, out, shot = render('cli_roomy', 1024, '--detail', 'high')
     assert done.returncode == 0 and 'WARNING' not in done.stdout + done.stderr and 'budget_fit' not in shot, (done.stdout, shot)
-    print('fit budget: floe2 render - exact over 48 MB fails in words, nothing saved; --detail high drawn and said (%s); '
-          'roomy budget silent' % warning.split(': ', 2)[-1])
+    print('fit budget: floe2 render - exact over 48 MB drawn in bands, byte-equal to the roomy capture (FLOE_RUST_BANDED_CAPTURE=off: '
+          'fails in words, nothing saved); --detail high drawn and said (%s); roomy budget silent' % warning.split(': ', 2)[-1])
 
 
 def main():

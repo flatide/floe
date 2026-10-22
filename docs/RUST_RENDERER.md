@@ -816,6 +816,21 @@ without design.ovh walks as before (`floe-index hier` adds it).
 from 100 ms and the log line `, fit probe N ms` (` (walk)` without a
 summary).
 
+Since 0.12.389 an exact capture - a frame at cut 0, every page or none - whose
+pages' estimated decoded size passes half the generation budget is drawn in
+bands of device rows instead of failing (`render_banded_capture`;
+docs/DIRECT_READ_PLAN.ko.md §8.12): every band is planned over its own world
+box (the view's width, the band's rows, 9 px of stroke slack), decoded within
+the budget and rastered with the windowed raster, whose rows are byte-equal to
+a full render's, into a composite; the labels go over the composite in a final
+label-only pass. A band still over the budget splits in two, down to one row.
+The frame line carries `bands= band_pages=`, stderr a `[capture]` line, and the
+published query scene of such a capture holds no page (`scene_complete=0`).
+Viewer frames and margins keep the refusal (they are drawn again);
+`FLOE_RUST_BANDED_CAPTURE=off` is the kill switch. The capture's render
+deadline is no longer the viewer's 300 s: app-core `captures::run` waits a week
+(`FLOE_RENDER_TIMEOUT_S`).
+
 The operational knobs are `FLOE_RENDERD_BIN`, `FLOE_RUST_JOBS` (page decode,
 default up to 8 host CPUs), `FLOE_RUST_RASTER_JOBS` (default up to 4 and never
 above decode jobs), `FLOE_RUST_BUDGET_MB` (1024), `FLOE_RUST_ROUND_PAGES` (1024),

@@ -425,7 +425,7 @@ geometry/placement/text x·y, W/H, 점 목록, 경로 확장, 반복, 배치 대
 | L5 명령·모드 | `floe-index light`, `floe2 index --light`, 열기 규칙, 상태줄/info, 자동 생성, 잠금 | **완료 0.12.383(§8.6)**: `floe2`(경량 생명주기: index --light/--full, info, exact 렌더 = 전체, clip 거절, 덮어쓰기 규칙, FLOE_INDEX_LIGHT), `jobdeck`(덱 소스 경량 기본), `index_lock` K13, `light_cache`(design.ovo 바이트 동일, --occupancy-only, --force) |
 | L6 덱·뷰어·캡처 | 덱 소스 경량 열기, 요약 없는 상태 표시, refine 흐름, `floe2 render` 완료 대기 | **완료 0.12.384(§8.7)**: `floe2`(exact 렌더 = 전체, 라벨 켠 채), `jobdeck`(LightSummaryTests: `--no-occupancy` 뒤 광역 캡처 미완(3)·근접 캡처 통과·자동 색인의 요약 추가·2단계 `index`), `gtk_view`(경량 레이아웃의 `cache:light`·`light_rounds`), 단위 테스트(텍스트 채우기 = Doc, 라벨 행, 시한 라운드) |
 | 운영 규칙 | 캡처·뷰어의 캐시 종류와 요약 기본값 (사용자 시나리오 2026-10-22) | **완료 0.12.388(§8.11)**: `render`·`probe`·`info --light/--full`, `render --occupancy on`만 요약 추가, 뷰어 모달 색인 1회·백그라운드 요약 제거; 게이트 `jobdeck` LightSummaryTests, `floe2` |
-| L8 띠 분할 캡처 | exact 캡처가 디코드 예산으로 실패하지 않게 타일 띠 단위로 디코드·래스터 (§8.11 다음) | 사용자 지시 2026-10-22 "그 순서로" — 다음 차례 |
+| L8 띠 분할 캡처 | exact 캡처가 디코드 예산으로 실패하지 않게 장치 행 띠 단위로 플랜·디코드·래스터 | **완료 0.12.389(§8.12)**: renderd `render_banded_capture`, 띠 그림 = 통짜 그림 바이트 동일(게이트 `floe2`), 캡처 시한 해제 |
 | L7 후속 | 요약 패스 1패스화/마킹 가속, ovs 합치기(레이아웃 밀도), B안(정규 페이지), 세그먼트 캐시 디스크 보존(방문한 셀의 디코드 결과를 남겨 다음 세션 가속), 1패스 경량 생성(셀 로컬 점유 격자 합성) | 각각 — **L7a 완료 0.12.386(§8.9)**: 이미지 증분 합성(제자리 성장, 채움 시점 노드 마스크, 채움 바이트 해제), 세그먼트 pread 묶음·병렬 인코딩; **L7b 완료 0.12.387(§8.10)**: 요약 패스의 마커가 셀을 직접 파싱(리더 풀·상주 창 없음, 묶음이 안 쓰는 셀은 읽지 않음), 다각형 스캔 변환 버퍼 재사용, 크기 예산 밖의 레이어는 마킹하지 않음; 나머지(1패스 경량 생성은 §8.10의 정확성 논거로 보류)는 사용자 지시에 따라 |
 
 L0는 하루, L1~L3는 S1~S3와 비슷한 크기(재고 코드 위의 확장), L4가 본체다.
@@ -1041,6 +1041,47 @@ exact fit은 경량에서 64라운드 228 s 11 GB 뒤 오류(전체 색인은 ra
   색인을 거치는 덱 fit 캡처는 `--occupancy on`; 맨 캡처는 이제 미완), `gtk_view`(fixture를 요약과
   함께 색인: capture_parity의 `--occupancy on` 단계가 요약 그림 자체를 비교한다). 다음은 L8: exact
   캡처의 띠 분할(§8 표).
+
+### 8.12 L8 띠 분할 exact 캡처 (0.12.389 / renderd 0.12.347, 2026-10-23; 사용자 "그 순서로 진행해줘")
+
+exact 캡처(cut 0)는 "모든 페이지 아니면 없음"이라 디코드 페이지의 추정 바이트가 예산
+(FLOE_RUST_BUDGET_MB, 기본 1 GiB)을 넘으면 `decoded generation budget exceeded`로 실패했다
+(0.12.348의 문구). 덱의 pass는 이미 페이지 조각으로 스트리밍한다(render-core deck.rs
+`stream_pass`: pass가 한 레이어 한 색이라 조각의 합이 통짜 래스터와 픽셀 동일). 레이아웃
+캡처는 레이어·채움·프레임·라벨이 섞여 조각 합성이 같은 논거를 갖지 못하므로 **장치 행 띠**로
+나눴다(renderd `render_banded_capture`).
+
+- 조건: exact, 캡처(`progressive=0`, 여백 프레임 아님), 프로브·밀도 패스·`decode_pages` 제한
+  없음, 플랜의 페이지 추정(`Cache::pages_memory`)이 예산의 절반을 넘을 때. 뷰어 프레임과
+  여백은 다시 그려지므로 전처럼 거절한다. FLOE_RUST_BANDED_CAPTURE=off가 킬 스위치.
+- 띠: 예산의 4분의 1씩이 되도록 추정으로 띠 수를 정하고(최소 2), 띠마다 그 행들의 월드 상자
+  (뷰 너비 × 행 높이, 위아래 9 px의 stroke 여유)로 다시 플랜해 페이지를 예산 안에서 디코드하고
+  (페이지 캐시의 LRU가 다음 띠와 겹치는 페이지를 쥔다), 창 단위 래스터
+  (`render_geometry_styled_cancellable_windowed`: 월드-장치 매핑, 타일 격자, 채움 위상이
+  통짜 프레임의 것이라 창의 픽셀은 통짜 렌더와 바이트 동일)로 그려 합성 버퍼의 행에 복사한다.
+  어느 띠의 페이지가 그래도 예산의 절반(디코드 뒤에는 예산)을 넘으면 둘로 나눈다, 한 행까지.
+- 라벨: 마지막에 합성 버퍼 위로 라벨만의 패스(pan의 라벨 전용 렌더와 같다: 빈 플랜, 뷰 전체의
+  라벨, 버퍼 전체 재사용). 띠의 장면은 라벨을 들지 않으므로 띠 경계에서 잘리는 라벨이 없다.
+- 발표된 질의 장면은 페이지가 없어 `scene_complete=0`이다(캡처는 pick/snap을 하지 않는다).
+  프레임 줄에 `bands= band_pages=`, stderr에 `[capture] gen N: exact capture WxH px: P pages
+  estimated at E bytes against the decode budget B - drawn in bands`(worker-client가 `[lock]`·
+  `[light]`처럼 넘긴다).
+- 캡처 시한: worker-client의 렌더 시한 300 s는 뷰어의 것이라 app-core `captures::run`이
+  `RenderSession::set_timeouts`로 캡처를 기다리게 했다(FLOE_RENDER_TIMEOUT_S, 기본 일주일).
+- **측정** (macOS 4 jobs, `floe2 render --detail exact --px 800`, 뷰어 기본의 프레임·라벨 켬):
+
+  | 소스 | 기본 예산 | 예산 축소 → 띠 | PNG |
+  | --- | --- | --- | --- |
+  | route_chip 0.05 | 1.8 s, 643 MB (추정 265 MB < 예산 절반: 통짜) | 64 MB: 67띠 5.6 s · 16 MB: 252띠 21 s · 4 MB: 800띠(행마다) 66 s; 모든 띠가 예산 초과(칩 폭 배선 페이지가 모든 행에 걸림, 행당 132 MB) | 셋 다 동일, 라벨·프레임 끈 변형도 동일 |
+  | sample9 145 MB | 8 GiB 예산: 3.6 s, 2.19 GB (기본 1 GiB에서는 전에 `needs at least 1.66 GiB`로 실패) | 기본 1 GiB: 추정 2.86 GB → 띠, 15 s, 1.70 GB · 64 MB: 428띠 99 s, 1.28 GB (335띠 예산 초과) | 둘 다 동일 |
+
+  띠 분할의 비용은 띠마다의 플랜과 띠 경계·띠를 가로지르는 페이지의 재디코드(LRU가 쥐지 못한 것)다: sample9 기본 예산에서 통짜의 4배. 전에는 실패하던 캡처가 나온다는 것이 요점이고, 띠 수는 추정의 4분의 1 예산으로 잡아 과추정에 여유를 둔다(필요하면 상수 하나). 페이지가 띠 전체에 걸치는 소스(route_chip의 칩 폭 배선, sample9의 탑 페이지)는 나누어도 줄지 않으므로 그 띠는 예산을 넘겨서라도 그린다 — 한 행을 그리는 어떤 렌더도 그 페이지들을 들어야 한다; `[capture] … N of M bands drawn past the decode budget` 줄이 알린다. 현장 EBEAM 파일은 한 축 띠 writer라 페이지가 국소적이고(L0 실측) 예산 안에서 띠가 잡힌다.
+- 게이트 `floe2`: route_chip 0.05의 exact 캡처를 기본 예산과 FLOE_RUST_BUDGET_MB=64로 찍어
+  바이트 비교, 작은 예산 쪽 stderr의 `[capture] … drawn in bands`, 라벨·프레임 끈 변형도 동일; 게이트
+  `fit_budget`의 cli_checks(48 MB 예산의 exact 캡처가 띠로 그려져 넉넉한 예산의 것과 바이트 동일, 킬 스위치에서는
+  전의 거절 문구와 저장 없음).
+  남은 것: 디코드 쪽 coverage 컬링(§8.11의 확인 3: 래스터는 write-once로 덮인 영역을 건너뛰지만
+  디코드는 아니다), 덱 pass와 레이아웃 띠의 통합.
 
 ## 9. 검토한 대안
 

@@ -334,6 +334,32 @@ def validate_rust_cli(base, fixture):
               "render's default auto-index did not build the full index: %s" % res.stderr[-300:])
         res = rust(env, "render", auto_full, "--light", "--full", "--px", "64", ok=False)
         check("exclusive" in res.stderr, "--light --full was not refused: %s" % res.stderr[-200:])
+        # the banded exact capture (DIRECT_READ_PLAN section 8.12, 0.12.389):
+        # an exact capture whose pages pass half the decode budget is drawn
+        # in bands of device rows - byte-equal to the capture under the
+        # default budget, with and without frames and labels; a tiny budget
+        # that fails every page or none no longer fails
+        route = work / "banded route_chip.oas"
+        generated = subprocess.run([sys.executable, "-B", str(ROOT / "tools" / "gen_route_chip.py"),
+                                    str(route), "--scale", "0.05", "--jobs", "2"],
+                                   cwd=ROOT, capture_output=True, text=True)
+        check(generated.returncode == 0 and route.is_file(),
+              "gen_route_chip.py: %s" % (generated.stderr or generated.stdout)[-400:])
+        rust(env, "index", route, "--jobs", "2")
+        banded = dict(env, FLOE_RUST_BUDGET_MB="64")
+        for tag, extra in (("default", []), ("plain", ["--labels", "off", "--frames", "off"])):
+            whole = work / ("banded ref %s.png" % tag)
+            rust(env, "render", route, "--detail", "exact", "--px", "600", "--out", whole, *extra)
+            out = work / ("banded %s.png" % tag)
+            res = rust(banded, "render", route, "--detail", "exact", "--px", "600", "--out", out, *extra)
+            check("[capture]" in res.stderr and "drawn in bands" in res.stderr,
+                  "the exact capture under FLOE_RUST_BUDGET_MB=64 was not banded (%s): %s" % (tag, res.stderr[-400:]))
+            check(whole.read_bytes() == out.read_bytes(),
+                  "the banded exact capture (%s) differs from the whole one" % tag)
+        off = rust(dict(banded, FLOE_RUST_BANDED_CAPTURE="off"), "render", route, "--detail", "exact",
+                   "--px", "600", "--out", work / "banded off.png", ok=False)
+        check("decoded generation budget exceeded" in off.stderr,
+              "FLOE_RUST_BANDED_CAPTURE=off did not bring the budget refusal back: %s" % off.stderr[-300:])
         env_src = work / "rust cli env 설계.oas"
         shutil.copy2(fixture, env_src)
         rust(dict(env, FLOE_INDEX_LIGHT="on"), "index", env_src, "--jobs", "2")

@@ -402,7 +402,10 @@ impl WorkerClient {
                             }
                             // (and the light cache's round lines under
                             // FLOE_LIGHT_LOG=on, DIRECT_READ_PLAN §8.9)
-                            if line.starts_with(b"[lock]") || line.starts_with(b"[light]") {
+                            if line.starts_with(b"[lock]")
+                                || line.starts_with(b"[light]")
+                                || line.starts_with(b"[capture]")
+                            {
                                 let mut err = std::io::stderr().lock();
                                 let _ = err.write_all(&line);
                                 let _ = err.write_all(b"\n");

@@ -1,11 +1,12 @@
 use floe_render_core::{
     pick_scene, pick_scene_cancellable, render_geometry_occupancy_cancellable,
     render_geometry_styled_cancellable, render_geometry_styled_cancellable_reuse,
-    render_geometry_styled_unbinned_cancellable, snap_scene, snap_scene_cancellable,
+    render_geometry_styled_cancellable_windowed, render_geometry_styled_unbinned_cancellable,
+    snap_scene, snap_scene_cancellable,
     validate_font_px, Cache, CacheLayer, ClipGeometry, Deck, DeckRenderRequest, DeckSpec, DeckXf,
     DecodedPageCache, FrameReuse, FrameScene, GeometryRasterRequest, HierError, HierHandle,
     HierPlan, LayerFill, LayerProbeReport, LayerRasterSession, LayerStyle, PlanRequest, ProbeMode,
-    RasterViewBox, RenderCancellation, RenderLabel, SceneQueryLayer, SceneQueryRequest,
+    RasterViewBox, RenderCancellation, RenderLabel, RgbaFrame, SceneQueryLayer, SceneQueryRequest,
     SceneSnapKind, StyledGeometryRasterRequest, SummarySelection, ViewBox, DEFAULT_LABEL_FONT_PX,
     DEFAULT_TILE_SIZE, FULL_DEPTH, MAX_TILE_SIZE,
 };
@@ -4427,6 +4428,44 @@ fn run_render_attempt(
     let mut rounds = refinement_batches(&selected, round_pages, |page_id| {
         state.page_cache.contains(page_id)
     })?;
+    // L8 (DIRECT_READ_PLAN §8.12): an exact capture whose pages would pass
+    // the decode budget is drawn in bands of device rows
+    // (render_banded_capture) instead of failing "every page or none"; the
+    // full plan served the selection, its pages are planned and decoded
+    // band by band, and the published scene holds no page (a banded
+    // capture answers no query)
+    // (`--detail exact` is cut 0 on the wire; `exact=1` the raw flag)
+    let banded_estimate = if (command.exact || command.cut_px <= 0.0)
+        && !command.progressive
+        && !command.background
+        && !label_only
+        && command.probe.is_none()
+        && command.decode_pages.is_none()
+        && density_plan.is_none()
+        && !(styles.is_empty() && !command.frames)
+        && !selected.is_empty()
+        && banded_capture_enabled()
+    {
+        let estimate = cache.pages_memory(&selected);
+        (estimate > state.page_cache.budget_bytes() / 2).then_some(estimate)
+    } else {
+        None
+    };
+    let mut bands = 0u32;
+    let mut band_pages = 0u64;
+    if let Some(estimate) = banded_estimate {
+        eprintln!(
+            "[capture] gen {}: exact capture {}x{} px: {} pages estimated at {} bytes against the decode budget {} - drawn in bands (FLOE_RUST_BANDED_CAPTURE=off: every page or none)",
+            command.generation,
+            command.width,
+            command.height,
+            selected.len(),
+            estimate,
+            state.page_cache.budget_bytes()
+        );
+        rounds = vec![Vec::new()];
+        plan = Arc::new(cache.empty_plan().plan);
+    }
     let mut decoded_pages = Vec::with_capacity(selected.len());
     let mut generation_bytes = 0u64;
     // the same pages as the parser read them (DecodedPage::grown_charge):
@@ -4718,6 +4757,27 @@ fn run_render_attempt(
                         report.stats.density_raster_us,
                     ]);
                     report
+                } else if let Some(estimate) = banded_estimate {
+                    let (report, outcome) = render_banded_capture(
+                        &mut state.page_cache,
+                        cache,
+                        command,
+                        &page_request,
+                        &styled,
+                        Arc::clone(&labels),
+                        estimate,
+                        decode_workers,
+                        cancellation,
+                    )?;
+                    bands = outcome.bands;
+                    band_pages = outcome.pages;
+                    let mut report = report;
+                    report.stats.raster_us = report.stats.raster_us.saturating_add(outcome.raster_us);
+                    report.rectangle_member_paints += outcome.rectangle_member_paints;
+                    report.polygon_member_paints += outcome.polygon_member_paints;
+                    report.path_member_paints += outcome.path_member_paints;
+                    report.frame_member_paints += outcome.frame_member_paints;
+                    report
                 } else if std::env::var("FLOE_RUST_WORK_BIN").as_deref() == Ok("off") {
                     render_geometry_styled_unbinned_cancellable(
                         &scene,
@@ -4854,6 +4914,7 @@ fn run_render_attempt(
                     }),
                     complete: !pixels.partial
                         && !light_continue
+                        && bands == 0
                         && planned.representative_stream.is_none()
                         // Pass-2 scenes are transient and are not part of
                         // this published query scene. A density picture must
@@ -4909,7 +4970,7 @@ fn run_render_attempt(
             .map_or(QueryContext::default(), |p| p.context)
             .wire();
         let response = format!(
-                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} fit_pct={} fit_cull={} fit_over={} fit_thin={} fit_full_pct={} fit_none_pct={} fit_fixed={} fit_redecided={} sub_cut_boxes={} sub_cut_box_over={} sub_cut_box_level={} sub_cut_box_unsure={} shape_cut={} shape_cut_max={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={} once_tiles={} once_passes={} once_items={} place_walks={} density_stack={} density_pages={} density_us={} density_bin={} density_dots={} density_floor={} density_block={} density_plan2={} queue_us={} wall_us={} fit_scale={} fit_refits={} fit_probe_us={} fit_probe_walk={} fit_ranked={} fit_layers_whole={} fit_layer_edge={} fit_layers_out={} light_rounds={} light_pending={}",
+                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} fit_pct={} fit_cull={} fit_over={} fit_thin={} fit_full_pct={} fit_none_pct={} fit_fixed={} fit_redecided={} sub_cut_boxes={} sub_cut_box_over={} sub_cut_box_level={} sub_cut_box_unsure={} shape_cut={} shape_cut_max={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={} once_tiles={} once_passes={} once_items={} place_walks={} density_stack={} density_pages={} density_us={} density_bin={} density_dots={} density_floor={} density_block={} density_plan2={} queue_us={} wall_us={} fit_scale={} fit_refits={} fit_probe_us={} fit_probe_walk={} fit_ranked={} fit_layers_whole={} fit_layer_edge={} fit_layers_out={} light_rounds={} light_pending={} bands={} band_pages={}",
                 command.generation,
                 wire_round,
                 final_round as u8,
@@ -5084,6 +5145,8 @@ fn run_render_attempt(
                 // this frame goes out before its own are done
                 cache.light_stats().map_or(0, |stats| stats.1),
                 light_continue as u8,
+                bands,
+                band_pages,
             );
         respond(responses, format!("{response} {query_context}"));
         // Representative batches bound query work, not the number of full
@@ -5252,6 +5315,228 @@ fn scaled_decode_budget(budget: u64, command: &RenderCommand, scale: Option<f64>
         Some(scale) if scale > 1.0 && pass1 > 0 => ((pass1 as f64 / scale) as u64).max(1),
         _ => pass1,
     }
+}
+
+/// L8 (docs/DIRECT_READ_PLAN.ko.md §8.12; user 2026-10-22: "an exact
+/// capture must not fail on the budget"): an exact capture - a frame at
+/// cut 0, every page or none - whose pages would pass the decode budget
+/// is drawn in bands of device rows. Every band is planned over its own
+/// world box (the view's width, its rows' height, BANDED_SLACK_PX of
+/// stroke slack on both sides), its pages decoded within the budget (the
+/// page cache keeps the ones the next band shares), rastered with the
+/// windowed raster - the world-to-device mapping, the tile grid and the
+/// fill phases are the full frame's, so a band's rows are byte-equal to a
+/// full render's - and copied into the composite; a band whose pages still
+/// pass half the budget is split in two, down to one row. The labels go
+/// over the composite in a final pass, as a pan's label-only render paints
+/// them over the reused geometry (an empty plan, the labels planned over
+/// the whole view). A viewer frame (progressive) and a margin keep the
+/// refusal - they are drawn again -, a capture is not; the deck's passes
+/// stream their pages in slices already (render-core deck.rs stream_pass).
+/// FLOE_RUST_BANDED_CAPTURE=off is the kill switch.
+const BANDED_SLACK_PX: f64 = 9.0;
+
+fn banded_capture_enabled() -> bool {
+    std::env::var("FLOE_RUST_BANDED_CAPTURE").as_deref() != Ok("off")
+}
+
+struct BandedOutcome {
+    bands: u32,
+    pages: u64,
+    raster_us: u64,
+    rectangle_member_paints: u64,
+    polygon_member_paints: u64,
+    path_member_paints: u64,
+    frame_member_paints: u64,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_banded_capture(
+    page_cache: &mut DecodedPageCache,
+    cache: &Cache,
+    command: &RenderCommand,
+    page_request: &PlanRequest,
+    styled: &StyledGeometryRasterRequest,
+    labels: Arc<[RenderLabel]>,
+    estimate: u64,
+    decode_workers: u16,
+    cancellation: &RenderCancellation,
+) -> Result<(floe_render_core::GeometryRasterReport, BandedOutcome), String> {
+    let (width, height) = (command.width, command.height);
+    if width == 0 || height == 0 {
+        return Err("banded capture: an empty frame".to_string());
+    }
+    let budget = page_cache.budget_bytes().max(1);
+    // bands of about a quarter of the budget each by the plan's estimate:
+    // the pages' charge runs past their estimate, and a band's pages
+    // overlap the next band's
+    let target = (budget / 4).max(1);
+    let n = estimate.div_ceil(target).clamp(2, u64::from(height)) as u32;
+    let rows = height.div_ceil(n).max(1);
+    // (a band, with the estimate of the band it was split from: a split
+    // goes on while it helps)
+    let mut work: std::collections::VecDeque<(u32, u32, Option<u64>)> = (0..height)
+        .step_by(rows as usize)
+        .map(|r0| (r0, (r0 + rows).min(height), None))
+        .collect();
+    let (mut over_bands, mut over_max) = (0u32, 0u64);
+    let [x0, y0, x1, y1] = command.view;
+    let per_row = (y1 - y0) / f64::from(height);
+    let slack = BANDED_SLACK_PX * per_row.abs();
+    let stride = width as usize * 4;
+    let mut composite = vec![0u8; stride * height as usize];
+    for px in composite.chunks_exact_mut(4) {
+        px.copy_from_slice(&styled.raster.background);
+    }
+    // the bands' geometry: the styles and the hierarchy frames, no labels
+    // (the scenes carry none)
+    let geometry = StyledGeometryRasterRequest {
+        raster: styled.raster.clone(),
+        layers: styled.layers.clone(),
+        hierarchy_frames: styled.hierarchy_frames,
+        mono: styled.mono,
+    };
+    let mut outcome = BandedOutcome {
+        bands: 0,
+        pages: 0,
+        raster_us: 0,
+        rectangle_member_paints: 0,
+        polygon_member_paints: 0,
+        path_member_paints: 0,
+        frame_member_paints: 0,
+    };
+    while let Some((r0, r1, parent)) = work.pop_front() {
+        check_generation(cancellation, command.generation)?;
+        // the band's world box: device row 0 is the view's top (y1)
+        let top = y1 - f64::from(r0) * per_row + slack;
+        let bottom = y1 - f64::from(r1) * per_row - slack;
+        let band_request = PlanRequest {
+            view: ViewBox::new(
+                checked_bound(x0.floor(), "band x0")?,
+                checked_bound(bottom.min(top).floor(), "band y0")?,
+                checked_bound(x1.ceil(), "band x1")?,
+                checked_bound(top.max(bottom).ceil(), "band y1")?,
+            )?,
+            ..page_request.clone()
+        };
+        let planned =
+            cache.plan_cancellable_within(&band_request, command.generation, cancellation, None)?;
+        let mut prioritized: Vec<(u64, u32)> = planned
+            .plan
+            .page_prio
+            .iter()
+            .copied()
+            .zip(planned.plan.pages.iter().copied())
+            .collect();
+        prioritized.sort_unstable();
+        let ids: Vec<u32> = prioritized.into_iter().map(|(_, page_id)| page_id).collect();
+        // a split helps while the pages are local - a half band's well under
+        // the band's; pages that span the band (a chip-wide route, a giant
+        // point list) come whole with every row, and such a band is drawn
+        // past the budget rather than refused: the pages of one row are what
+        // any render of that row holds
+        let splits = |estimate: u64| {
+            r1 - r0 > 1
+                && parent.map_or(true, |p| estimate.saturating_mul(10) < p.saturating_mul(9))
+        };
+        let split = |work: &mut std::collections::VecDeque<(u32, u32, Option<u64>)>, estimate: u64| {
+            let mid = r0 + (r1 - r0) / 2;
+            work.push_front((mid, r1, Some(estimate)));
+            work.push_front((r0, mid, Some(estimate)));
+        };
+        let band_estimate = cache.pages_memory(&ids);
+        if band_estimate > budget / 2 && splits(band_estimate) {
+            split(&mut work, band_estimate);
+            continue;
+        }
+        let (pages, _) =
+            page_cache.load_cancellable(cache, &ids, decode_workers, command.generation, cancellation)?;
+        let charge = pages.iter().try_fold(0u64, |total, page| {
+            total
+                .checked_add(page.estimated_bytes())
+                .ok_or_else(|| "decoded generation byte charge overflow".to_string())
+        })?;
+        if charge > budget {
+            if splits(charge) {
+                drop(pages);
+                split(&mut work, charge);
+                continue;
+            }
+            over_bands += 1;
+            over_max = over_max.max(charge);
+        }
+        let scene = FrameScene::new_shared(cache, Arc::new(planned.plan), pages)?;
+        let raster_started = Instant::now();
+        let out = render_geometry_styled_cancellable_windowed(
+            &scene,
+            &geometry,
+            command.generation,
+            cancellation,
+            [0, r0, width, r1],
+        )?;
+        outcome.raster_us = outcome.raster_us.saturating_add(elapsed_us(raster_started));
+        drop(scene);
+        let band_rows = (r1 - r0) as usize;
+        let src = out.frame.pixels();
+        // (the windowed frame: the whole frame with the band's rows drawn,
+        // or the band's rows alone)
+        let src_off = if out.frame.height() == height { r0 as usize * stride } else { 0 };
+        if src.len() < src_off + band_rows * stride {
+            return Err(format!(
+                "banded capture: the windowed frame holds {} bytes, rows {}..{} need {}",
+                src.len(),
+                r0,
+                r1,
+                src_off + band_rows * stride
+            ));
+        }
+        composite[r0 as usize * stride..r1 as usize * stride]
+            .copy_from_slice(&src[src_off..src_off + band_rows * stride]);
+        outcome.bands += 1;
+        outcome.pages = outcome.pages.saturating_add(ids.len() as u64);
+        outcome.rectangle_member_paints += out.rectangle_member_paints;
+        outcome.polygon_member_paints += out.polygon_member_paints;
+        outcome.path_member_paints += out.path_member_paints;
+        outcome.frame_member_paints += out.frame_member_paints;
+    }
+    if over_bands > 0 {
+        eprintln!(
+            "[capture] gen {}: {} of {} bands drawn past the decode budget {} (up to {} bytes): their pages span the band and come whole with any row",
+            command.generation,
+            over_bands,
+            outcome.bands,
+            budget,
+            over_max
+        );
+    }
+    // the labels over the composite: a pan's label-only render - an empty
+    // plan, the labels of the whole view, the composite reused whole
+    let base = RgbaFrame::from_pixels(width, height, composite)?;
+    let scene = FrameScene::new_shared_with_labels(
+        cache,
+        Arc::new(cache.empty_plan().plan),
+        Vec::new(),
+        labels,
+        command.label_font_px,
+    )?;
+    let label_pass = StyledGeometryRasterRequest {
+        raster: styled.raster.clone(),
+        layers: styled.layers.clone(),
+        hierarchy_frames: false,
+        mono: styled.mono,
+    };
+    let report = render_geometry_styled_cancellable_reuse(
+        &scene,
+        &label_pass,
+        command.generation,
+        cancellation,
+        Some(&FrameReuse {
+            base,
+            valid: [0, 0, width, height],
+        }),
+        false,
+    )?;
+    Ok((report, outcome))
 }
 
 fn checked_generation_bytes(current: u64, incoming: u64, budget: u64) -> Result<u64, String> {

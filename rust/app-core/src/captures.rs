@@ -92,6 +92,16 @@ fn lacks(dataset: &Dataset, layers: &Layers) -> Vec<usize> {
         .map(|(i, _)| i)
         .collect()
 }
+/// How long a capture's frame may take: FLOE_RENDER_TIMEOUT_S (seconds,
+/// positive), else a week - the frame is awaited, not abandoned
+pub fn capture_timeout() -> std::time::Duration {
+    std::env::var("FLOE_RENDER_TIMEOUT_S")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|s| s.is_finite() && *s > 0.0)
+        .map_or(std::time::Duration::from_secs(7 * 24 * 3600), std::time::Duration::from_secs_f64)
+}
+
 fn sidecars(path: &Path) -> Result<Vec<PathBuf>> {
     let filename = path
         .file_name()
@@ -317,6 +327,11 @@ pub fn run_summary(
     // shot of a run has the command line's)
     let archival = shots[0].capture.shot.archival;
     let mut session = RenderSession::open(dataset, render, archival, Arc::clone(cancelled))?;
+    // a capture runs as long as its frame takes (the worker's 300 s default
+    // is the viewer's: an exact capture of a source of hundreds of GB is
+    // drawn in bands for minutes - renderd render_banded_capture, 0.12.389);
+    // FLOE_RENDER_TIMEOUT_S bounds it
+    session.set_timeouts(capture_timeout(), std::time::Duration::from_secs(5));
     // the styles the frames are drawn with, for --legend
     let legend_styles = options.legend.then(|| dataset.styles(archival)).transpose()?;
     let mut rows = Vec::new();
