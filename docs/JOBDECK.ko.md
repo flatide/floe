@@ -272,10 +272,13 @@ sample9급 소스 4 s), 뷰어·`render`·`info`는 render-core가 그 디렉터
 그림을 쓰고 미완으로 끝낸다(종료 3, 누락 배치가 있는 덱 캡처와 같다; stderr `rendered
 incomplete - … summary_building=N pass(es) of light
 source(s) whose occupancy summary is not built yet …`, 보고서 JSON의 shot 행과 `jobdeck`에
-`summary_building`) — 자동 색인이 켜져 있으면(기본) 요약 없는 소스를 "no occupancy summary yet -
-indexing them first"로 먼저 채우고 찍는다(`--no-index`면 거절).
-GTK 열기는 두 단계다: `floe2 index deck.jb --no-occupancy`(재고, 모달) → 열기 → 뒤에서 `floe2
-index deck.jb`(요약; SPEC-VIEWER §7). `floe2 info deck.jb --json`의 `metadata.jobdeck`에
+`summary_building`). 0.12.388(DIRECT_READ_PLAN §8.11)부터 자동 색인은 캡처의 요약을 만들지
+않는다 — 캡처는 한 번 그리고 마는 전제다 — 고 `render --occupancy on`이 요약 없는 소스를 "no
+occupancy summary yet - indexing them first"로 먼저 채운다(0.12.384~0.12.387은 그리는 명령이 늘
+먼저 채웠다). `--light`/`--full`은 자동 색인의 캐시 종류다.
+GTK 열기는 모달 색인 한 번이다: `floe2 index deck.jb [--level …]`가 경량 캐시와 요약을 함께 만들고
+(요약 없는 캐시만 있으면 빠진 요약만), 그 뒤 연다(SPEC-VIEWER §7; 0.12.384~0.12.387의 두 단계와
+백그라운드 요약은 뺐다). `floe2 info deck.jb --json`의 `metadata.jobdeck`에
 `light_sources`·`summary_missing`, 준비 질의(`ready`)에 `summary_missing`. 게이트
 `LightSummaryTests`.
 

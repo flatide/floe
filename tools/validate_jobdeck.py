@@ -796,14 +796,16 @@ class CliTests(unittest.TestCase):
 
 class LightSummaryTests(unittest.TestCase):
     """The occupancy summary of a deck's light sources (DIRECT_READ_PLAN
-    section 5.5, L6): `floe2 index deck.jb --no-occupancy` leaves light
-    caches without design.ovo (the GTK viewer's first phase); a wide
-    capture of that deck with --no-index is refused as incomplete (its
-    passes wait for the summary - the wide view of those sources is empty
-    until it exists), a near one draws; the plain capture's auto-index adds
-    the summaries first; `floe2 index deck.jb` (the viewer's second phase,
-    behind the open) adds a missing one and keeps the rest; the deck's
-    metadata counts the light sources and the summaries missing."""
+    section 5.5, L6; section 8.11, 0.12.388): `floe2 index deck.jb
+    --no-occupancy` leaves light caches without design.ovo; a wide capture
+    of that deck is incomplete (its passes wait for the summary - the wide
+    view of those sources is empty until it exists), with --no-index and
+    with the auto-index alike (a capture builds no summary: user
+    2026-10-22, a capture is drawn once), a near one draws; `render
+    --occupancy on` has the auto-index add the summaries first; `floe2
+    index deck.jb` (the viewer's modal open) adds a missing one and keeps
+    the rest; the deck's metadata counts the light sources and the
+    summaries missing."""
 
     @classmethod
     def setUpClass(cls):
@@ -847,10 +849,22 @@ class LightSummaryTests(unittest.TestCase):
         self.assertTrue(near.is_file())
         for c in self.caches:
             self.assertFalse((c / "design.ovo").exists(), c)
-        # the plain capture: the auto-index adds the summaries first
+        # the plain capture builds no summary either (0.12.388): the picture
+        # with those passes empty, exit 3, the way out named
         res = run_floe2("render", self.deck, "--bbox", "40000,80000,60000,95000",
                         "--px", "300", "--detail", "medium", "--out", wide,
-                        env=self.env, ok=0)
+                        env=self.env, ok=3)
+        self.assertNotIn("indexing them first", res.stderr)
+        self.assertIn("summary_building=", res.stderr)
+        self.assertIn("--occupancy on", res.stderr)
+        self.assertTrue(wide.is_file())
+        wide.unlink()
+        for c in self.caches:
+            self.assertFalse((c / "design.ovo").exists(), c)
+        # --occupancy on: the auto-index adds the summaries first
+        res = run_floe2("render", self.deck, "--bbox", "40000,80000,60000,95000",
+                        "--px", "300", "--detail", "medium", "--occupancy", "on",
+                        "--out", wide, env=self.env, ok=0)
         self.assertIn("no occupancy summary yet - indexing them first", res.stderr)
         self.assertTrue(wide.is_file())
         for c in self.caches:
@@ -859,7 +873,7 @@ class LightSummaryTests(unittest.TestCase):
         info = json.loads(run_floe2("info", self.deck, "--json", env=self.env, ok=0).stdout)
         deck = info["metadata"]["jobdeck"]
         self.assertEqual((deck["light_sources"], deck["summary_missing"]), (3, 0))
-        # the viewer's second phase: `floe2 index deck.jb` adds a missing
+        # the viewer's modal open: `floe2 index deck.jb` adds a missing
         # summary beside the others and keeps them
         (self.caches[1] / "design.ovo").unlink()
         res = run_floe2("index", self.deck, "--jobs", "2", env=self.env, ok=0)

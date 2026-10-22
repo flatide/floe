@@ -44,6 +44,18 @@ inv/seg/ovo 크기를, `--json`은 `cache_kind`를 낸다. `floe2 clip`은 경�
 (페이지 파일이 없다). 열기는 design.ovm이 있으면 전체, 아니면 design.inv가 있으면
 경량이다(app-core `cache::cache_kind`).
 
+**캡처와 뷰어의 기본(2026-10-22, app 0.12.388; DIRECT_READ_PLAN §8.11, 사용자 시나리오).**
+명시적 색인(`floe2 index`)과 뷰어 열기는 다시 열 파일이므로 요약까지 만들고, 캡처(`render`,
+`probe`)는 한 번 그리고 마는 전제라 자동 색인이 요약을 만들지 않는다. `render`·`probe`·`info`의
+`--light` / `--full`은 자동 색인이 짓는 캐시의 종류(없으면 규칙: 덱 소스 경량, 레이아웃 전체;
+`floe2 render ebeam.oas --light <창>`이 EBEAM 파일 단독 캡처), `render --occupancy on`은 요약이
+없는 소스의 요약을 먼저 더한다(경량 캐시는 light 명령으로, 전체 색인은 `vfs --occupancy-only`로,
+종류는 유지). 기본의 덱 캡처는 요약이 있으면 쓰고 없으면 광역 pass를 비운 채 종료 3으로 끝내며
+`index deck.jb`와 `--occupancy on`을 안내한다. `clip`의 자동 색인은 항상 전체다. GTK 뷰어는 덱을
+열 때 모달 색인 한 번(`floe2 index deck.jb [--level …]`)으로 경량 캐시와 요약을 함께 만들고,
+요약 없는 캐시(캡처가 만든 것)만 있는 덱은 빠진 요약만 더한 뒤 연다; 0.12.384~0.12.387의
+백그라운드 요약은 뺐다.
+
 정상 VFS cache의 cache version과 source size/mtime fingerprint가 맞고,
 `floe-index vfsd`의 `Vfs::open` 검증(OVM 구조 + OVP/OVT committed length)을
 통과하면 재사용한다(경량 캐시는 design.inv·design.seg의 헤더로 identity·짝을 본다). 기존 cache가 stale/incomplete/non-VFS/corrupt이면

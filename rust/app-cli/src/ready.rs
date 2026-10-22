@@ -88,6 +88,11 @@ pub struct Ready {
     /// index what has none first (`--no-index`, FLOE_AUTO_INDEX=off: no)
     pub index: bool,
     pub wait: Wait,
+    /// the kind of cache the auto-index builds for a source without one:
+    /// `--light` / `--full`; None = the rule (a jobdeck's sources light, a
+    /// layout full - IndexOptions::light_for; user 2026-10-22: an EBEAM
+    /// file captured on its own takes `--light`)
+    pub light: Option<bool>,
 }
 impl Ready {
     /// The defaults: FLOE_AUTO_INDEX (on unless off/no/0), FLOE_LOCK_WAIT.
@@ -103,10 +108,11 @@ impl Ready {
         Ok(Self {
             index,
             wait: Wait::from_env()?,
+            light: None,
         })
     }
     /// Take `flag` when it is one of these options (`--no-index`, `--wait`,
-    /// `--wait=SECONDS`, `--no-wait`): whether it was.
+    /// `--wait=SECONDS`, `--no-wait`, `--light`, `--full`): whether it was.
     pub fn take(&mut self, flag: &str, inline: Option<&str>) -> Result<bool> {
         let no_value = || match inline {
             Some(_) => Err(Error::input(format!("{flag} takes no value"))),
@@ -121,6 +127,14 @@ impl Ready {
             "--no-wait" => {
                 no_value()?;
                 self.wait = Wait::No;
+            }
+            "--light" | "--full" => {
+                no_value()?;
+                let light = flag == "--light";
+                if self.light.is_some_and(|l| l != light) {
+                    return Err(Error::input("--light and --full are exclusive"));
+                }
+                self.light = Some(light);
             }
             _ => return Ok(false),
         }
@@ -321,9 +335,21 @@ fn found(source: &Path) -> Result<Found> {
     })
 }
 
-/// A layout with no cache indexed now, as `index SOURCE` would - a folder a
-/// build stopped half-way left rebuilt (`index --force`).
-fn index_layout(source: &Path, waiter: &mut Waiter, cancelled: &AtomicUsize) -> Result<()> {
+/// A layout with no cache indexed now, as `index SOURCE [--light|--full]`
+/// would (`light`: the kind asked for, None = the rule) - a folder a build
+/// stopped half-way left rebuilt (`index --force`); with `summaries`
+/// (`--occupancy on`) a cache without its occupancy summary gets it too
+/// (`index --occupancy` adds design.ovo to a current cache: the light
+/// cache's by the light command, the full index's by `vfs
+/// --occupancy-only` - the kind is kept, `decide` would build the full
+/// index over a light cache under a full request).
+fn index_layout(
+    source: &Path,
+    light: Option<bool>,
+    summaries: bool,
+    waiter: &mut Waiter,
+    cancelled: &AtomicUsize,
+) -> Result<()> {
     let source = cache::absolute(source)?;
     let name = file_name(&source);
     if !source.is_file() {
@@ -333,22 +359,49 @@ fn index_layout(source: &Path, waiter: &mut Waiter, cancelled: &AtomicUsize) -> 
     loop {
         let state = found(&source)?;
         // another run builds it: the open waits for it or says who
-        if state == Found::There || lock::writing_refusal(&layout_key(&source)?).is_some() {
+        if lock::writing_refusal(&layout_key(&source)?).is_some() {
             return Ok(());
         }
-        let options = IndexOptions {
-            force: state == Found::Incomplete,
-            ..IndexOptions::default()
+        let (options, what) = if state == Found::There {
+            if !summaries {
+                return Ok(());
+            }
+            let directory = cache::cache_path(&source)?;
+            if directory.join("design.ovo").is_file() {
+                return Ok(());
+            }
+            let kind_light = cache::cache_kind(&directory) == Some(cache::CacheKind::Light);
+            (
+                IndexOptions {
+                    light: Some(kind_light),
+                    occupancy: Some(true),
+                    ..IndexOptions::default()
+                },
+                "has no occupancy summary yet - adding it first (--occupancy on)".to_string(),
+            )
+        } else {
+            let options = IndexOptions {
+                force: state == Found::Incomplete,
+                light,
+                occupancy: summaries.then_some(true),
+                ..IndexOptions::default()
+            };
+            let kind = match light {
+                Some(true) => " (--light: the light cache)",
+                Some(false) => " (--full)",
+                None => "",
+            };
+            let what = if options.force {
+                format!("has an incomplete index (a build stopped half-way) - rebuilding it first{kind}")
+            } else {
+                format!("has no index yet - indexing it first{kind}")
+            };
+            (options, what)
         };
         if !said {
             eprintln!(
-                "[{}] {name} {} (--no-index: refuse instead)",
-                floe_app_core::program(),
-                if options.force {
-                    "has an incomplete index (a build stopped half-way) - rebuilding it first"
-                } else {
-                    "has no index yet - indexing it first"
-                }
+                "[{}] {name} {what} (--no-index: refuse instead)",
+                floe_app_core::program()
             );
             said = true;
         }
@@ -480,14 +533,28 @@ fn index_deck(
     Ok(())
 }
 
+/// the auto-index's options for a deck: the cache kind asked for (`light`:
+/// `--light` / `--full`, else the rule) and whether the summaries are built
+/// (`summaries`: `--occupancy on`; a capture builds none by default - user
+/// 2026-10-22: a capture is drawn once, `floe2 index deck.jb` and the
+/// viewer's open build the summary for what is opened again)
+fn deck_options(light: Option<bool>, summaries: bool) -> IndexOptions {
+    IndexOptions {
+        light,
+        occupancy: Some(summaries),
+        ..IndexOptions::default()
+    }
+}
+
 /// `source` opened for a read command: what has no index indexed first
-/// (`index`; for a command that draws - `summaries` - a deck source's
-/// missing occupancy summary as well), what another run indexes waited
-/// for (`waiter`) or refused.
+/// (`index`, as `light` asks; with `summaries` - `render --occupancy on` -
+/// a source's missing occupancy summary as well), what another run indexes
+/// waited for (`waiter`) or refused.
 pub(crate) fn open(
     source: &Path,
     levels: Option<BTreeSet<i64>>,
     index: bool,
+    light: Option<bool>,
     summaries: bool,
     waiter: &mut Waiter,
     cancelled: &AtomicUsize,
@@ -496,7 +563,7 @@ pub(crate) fn open(
     let mut deck_indexed = false;
     loop {
         if index && !deck {
-            index_layout(source, waiter, cancelled)?;
+            index_layout(source, light, summaries, waiter, cancelled)?;
         }
         let opened = Dataset::open(source, levels.clone(), Mode::Level, cancelled);
         let (none, busy, refused) = match opened {
@@ -524,7 +591,7 @@ pub(crate) fn open(
                 let plan = DeckIndexPlan::prepare(
                     source,
                     levels.clone(),
-                    &IndexOptions::default(),
+                    &deck_options(light, summaries),
                     cancelled,
                 )?;
                 let (none, busy) = deck_state(&plan.catalog, summaries)?;
@@ -546,7 +613,7 @@ pub(crate) fn open(
         if index && !deck_indexed && none {
             deck_indexed = true;
             let plan =
-                DeckIndexPlan::prepare(source, levels.clone(), &IndexOptions::default(), cancelled)?;
+                DeckIndexPlan::prepare(source, levels.clone(), &deck_options(light, summaries), cancelled)?;
             index_deck(plan, summaries, waiter, cancelled)?;
             continue;
         }
@@ -573,6 +640,7 @@ mod tests {
         let mut ready = Ready {
             index: true,
             wait: Wait::No,
+            light: None,
         };
         assert!(ready.take("--wait", Some("10")).unwrap());
         assert_eq!(ready.wait, Wait::For(Duration::from_secs(10)));
@@ -582,6 +650,20 @@ mod tests {
         assert!(!ready.index);
         assert!(ready.take("--no-index", Some("1")).is_err());
         assert!(!ready.take("--px", Some("1")).unwrap());
+        // the auto-index's cache kind (2026-10-22): --light / --full, exclusive
+        assert_eq!(ready.light, None);
+        assert!(ready.take("--light", None).unwrap());
+        assert_eq!(ready.light, Some(true));
+        assert!(ready.take("--light", None).unwrap());
+        assert!(ready.take("--full", None).is_err());
+        assert!(ready.take("--light", Some("1")).is_err());
+        let mut full = Ready {
+            index: true,
+            wait: Wait::No,
+            light: None,
+        };
+        assert!(full.take("--full", None).unwrap());
+        assert_eq!(full.light, Some(false));
         assert_eq!(hms(Duration::from_secs(5)), "0:05");
         assert_eq!(hms(Duration::from_secs(3725)), "1:02:05");
     }

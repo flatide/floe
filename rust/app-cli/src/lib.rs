@@ -102,8 +102,10 @@ Usage: floe2-web index SOURCE [OPTIONS]
 Implemented: layout/jobdeck index/info/render/probe, occupancy, profiling,
 and jobdeck analysis/spec + source indexing with level selection.
 info/render/probe/clip index a source that has no index first (--no-index or
-FLOE_AUTO_INDEX=off: refuse instead); a source another run indexes is refused
-(exit 75) unless --wait[=SECONDS] (FLOE_LOCK_WAIT=on|SECONDS) waits for it.
+FLOE_AUTO_INDEX=off: refuse instead; --light / --full the kind of cache, else the
+rule; a capture builds no occupancy summary unless render --occupancy on asks); a
+source another run indexes is refused (exit 75) unless --wait[=SECONDS]
+(FLOE_LOCK_WAIT=on|SECONDS) waits for it.
 Indexing streams the source by default (0.12.370: an inventory pass, then the cells in file
 order behind --mem GiB; --in-memory or FLOE_INDEX_STREAM=off is the whole-parse build). A
 jobdeck's sources get the light cache (design.inv + design.seg + design.ovo, the geometry

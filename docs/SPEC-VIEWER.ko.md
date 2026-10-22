@@ -338,13 +338,13 @@
     종료 코드가 75면 로그의 `[lock]` 줄을 상태줄에 띄운다.
   - **잡덱:** 통째로 색인 중인 소스는 ledger에 `not_indexed`와 "being indexed by …"로
     빠지고, 나머지 소스로 열린다(`jobdeck/sources._cache_state`).
-  - **잡덱 열기는 두 단계다(2026-10-22, app 0.12.384; DIRECT_READ_PLAN L6):**
-    `_jobdeck_index_and_load`가 모달로 `floe2 index deck.jb --jobs 12 --no-occupancy [--level …]`(경량 캐시의
-    재고 패스만)을 돌려 열고, `open_file`이 성공하면 `_summary_check`가 meta의 `jobdeck.summary_missing`을 보고
-    뒤에서 `floe2 index deck.jb --jobs 12 [--level …]`를 띄운다(`_summary_job_start`; 자기 세션, 로그는
-    `[summary]`로 stderr, 진행 `occupancy : (k/n)`을 배너에). 요약 추가는 경량 캐시의 additive 잠금이라 열린
-    뷰어 옆에서 붙고, 끝나면 다시 그린다. `_quit`이 killpg로 함께 끝내며 다음 열기가 남은 소스를 이어 받는다
-    (요약 있는 소스는 kept). 이미 준비된 덱(`_index_ready`)도 열린 뒤 같은 확인을 거친다.
+  - **잡덱 열기는 모달 색인 한 번이다(2026-10-22, app 0.12.388; DIRECT_READ_PLAN §8.11):**
+    `_jobdeck_index_and_load`가 모달로 `floe2 index deck.jb --jobs 12 [--level …]`를 돌려 경량 캐시와
+    요약을 함께 만들고 연다. `_index_ready`는 덱의 소스가 모두 색인되고 요약(`summary_missing` 0)까지 있어야
+    참이라, 캡처가 만든 요약 없는 캐시만 있는 덱은 "N sources have no occupancy summary … Build it now?"로
+    묻고 같은 모달 색인(플랜이 빠진 요약만 더하고 나머지는 kept)을 거쳐 연다. 뷰어가 여는 파일은 다시
+    열리는 전제라 요약을 먼저 만들고, 0.12.384~0.12.387의 두 단계(`--no-occupancy` 재고 → 열기 → 뒤의
+    `floe2 index deck.jb`, `_summary_job_start`)는 뺐다 — 수백 GB 덱에서 묻지 않은 수 시간의 작업이었다.
 - **메뉴 바**(2026-08-22, `_build_menubar`): File(**load layout**·
   clip·copy·quit) /
   View(fit·줌·goto·detail·depth·토글 체크 6종(눈금 띠 `s` 포함, 2026-10-13)·오버레이 순환) /
@@ -405,12 +405,12 @@
   - **경량 캐시(DIRECT_READ_PLAN L6, 0.12.384).** 깊이 라벨에 레이아웃이면 ` · cache:light`(meta.json
     `cache: light`), 덱이면 ` · light:N/M`(경량 소스 수/소스 수, meta `jobdeck.light_sources`)이 붙는다. 덱의
     경량 소스에 design.ovo가 아직 없으면 요약이 그릴 광역 뷰의 그 pass는 비어 있고(renderd `summary_building=N`;
-    근접 뷰는 그린다) 캔버스 위 배너가 뜬다 — 뒤에서 `floe2 index deck.jb`가 돌고 있으면 "occupancy summary
-    building (k/n sources) - wide views of those sources are empty until it is ready", 아니면 "occupancy summary
-    missing for N passes … (floe2 index deck.jb adds it)". 배너가 보이는 동안 3 s마다 다시 그려(`_summary_poll_tick`)
-    요약이 생기면 걷힌다. 뒤의 `floe2 index`가 끝났는데도 기다리는 pass가 남으면 "occupancy summary
-    unavailable for N passes - the background index (rc R) did not add it; its [summary] lines say why"로
-    바꾸고 폴링을 멈춘다(0.12.385: 배치가 요약 패스의 예산을 넘은 소스 — `--mem`이 올린다). perf 줄에는 `, N passes wait for their occupancy summary (light sources: empty until it
+    근접 뷰는 그린다) 캔버스 위 배너가 뜬다 — "occupancy summary missing for N passes - wide views of those
+    sources are empty (floe2 index deck.jb adds it; a source whose placements exceed the summary pass's budget
+    stays so, --mem raises it)". 배너가 보이는 동안 3 s마다 다시 그려(`_summary_poll_tick`) 다른 실행이 더한
+    요약이 생기면 걷힌다. 0.12.388부터 뷰어는 열 때의 모달 색인에서 요약을 만들므로 이 배너는 모달이 더하지
+    못한 소스(배치가 요약 패스의 예산을 넘은 것)에만 남는다(0.12.384~0.12.387의 "building"/"unavailable"
+    배너와 백그라운드 색인은 뺐다). perf 줄에는 `, N passes wait for their occupancy summary (light sources: empty until it
     is built)`, 요약 줄에는 `, N wait for the summary (building)`. 경량 캐시의 프레임이 채우기를 끝내기 전에 오면
     (`final=0`, `light_pending=1`) 하단 줄은 "reading the source... (fill round N)"이다(SPEC §3의 refining과 같은
     흐름; FLOE_LIGHT_FIRST_MS).

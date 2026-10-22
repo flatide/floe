@@ -497,10 +497,14 @@ P4d처럼 컨트롤러 루프에서만 바뀐다. `FLOE_GTK_LOOP=legacy`는 예�
   소스마다 `floe-index light … --occupancy`(요약은 덱 기본)이고, `--full`이나 전체 옵션(`--lod` 등)
   이면 `vfs`다. design.ovo 없는 경량 소스의 요약 추가는 `light --occupancy-only`.
 - **자동 색인(`ready.rs`):** 기본 옵션으로 규칙이 적용된다(레이아웃 전체, 덱 소스 경량). 뷰어의
-  `floe2 index deck.jb --jobs 12`도 같다. 0.12.384(L6)부터 그리는 명령(`render`·`probe`; `read::dataset`의
-  `draws`)의 `deck_state`는 요약(design.ovo) 없는 색인된 덱 소스도 색인 대상으로 보고, `index_deck`이
-  플랜의 occupancy-only 항목을 돌린다("N source(s) have no occupancy summary yet - indexing them first");
-  `info`는 캐시를 있는 대로 읽고, `--no-index`면 광역 캡처는 그 pass를 비운 채 미완(종료 3)으로 끝난다.
+  `floe2 index deck.jb --jobs 12`도 같다. 0.12.388(DIRECT_READ_PLAN §8.11)부터 `Ready.light`(`--light` /
+  `--full`, render·probe·info·clip의 공통 옵션; clip은 늘 전체)가 자동 색인의 캐시 종류이고, 요약은
+  `render --occupancy on`(`read::dataset`의 `summaries`; 샷 중 하나라도 on)일 때만 더한다 — `deck_state`가
+  요약 없는 색인된 덱 소스를 색인 대상으로 보고 `index_deck`이 플랜의 occupancy-only 항목을 돌리며("N
+  source(s) have no occupancy summary yet - indexing them first"), 레이아웃은 `index_layout`이 종류를 유지한
+  `--occupancy`로 더한다("has no occupancy summary yet - adding it first"). 기본 캡처는 요약을 만들지 않고
+  광역 pass를 비운 채 미완(종료 3)으로 끝낸다(0.12.384~0.12.387은 그리는 명령이 늘 먼저 채웠다); `info`와
+  `probe`는 캐시를 있는 대로 읽는다.
 - **L6(0.12.384; DIRECT_READ_PLAN §8.7):** `jobdeck/dataset.rs`의 `DeckInfo.light_sources`/`summary_missing`
   (meta `jobdeck.*`), `desktop::Readiness.summary_missing`(gtk-service `ready`), worker-client
   `RenderRequest.progressive`(캡처 `base_request`는 false → 와이어 `progressive=0`)와

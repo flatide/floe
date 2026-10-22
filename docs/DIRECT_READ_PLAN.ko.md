@@ -305,10 +305,12 @@ geometry/placement/text x·y, W/H, 점 목록, 경로 확장, 반복, 배치 대
   `floe2 render`는 그 pass를 비운 그림을 쓰고 미완(`summary_building`)으로 끝낸다(종료 3,
   덱 캡처의 다른 미완과 같다). 그리는 명령
   (`render`·`probe`)의 자동 색인(`ready.rs`)은 요약 없는 덱 소스도 "no occupancy summary
-  yet"으로 먼저 색인한다(`--no-index`면 거절; `info`는 캐시를 있는 대로 읽는다). GTK 열기는 2단계다: `floe2 index deck.jb --no-occupancy`(재고,
+  yet"으로 먼저 색인한다(`--no-index`면 거절; `info`는 캐시를 있는 대로 읽는다). GTK 열기는 2단계였다: `floe2 index deck.jb --no-occupancy`(재고,
   모달) → 열기 → 뒤에서 `floe2 index deck.jb`(요약; 경량 캐시의 additive 잠금이라 열린
   뷰어 옆에서 붙는다; 뷰어가 닫히면 함께 끝나고 다음 열기가 이어 받는다). 열기 응답
-  `jobdeck.light_sources`/`summary_missing`, 준비 질의 `summary_missing`.
+  `jobdeck.light_sources`/`summary_missing`, 준비 질의 `summary_missing`. **0.12.388(§8.11)부터**
+  뷰어는 모달 색인 한 번으로 요약까지 만들고 백그라운드 요약은 없으며, 캡처의 자동 색인은
+  `--occupancy on`일 때만 요약을 더한다.
 
 ### 5.6 모드와 선택 규칙
 
@@ -422,6 +424,8 @@ geometry/placement/text x·y, W/H, 점 목록, 경로 확장, 반복, 배치 대
 | L4 LightVfs | 합성 Ovm, 세그먼트 페이지 디코드, 배치 LRU, 셀 트리 | **완료 0.12.382(§8.5)**: 게이트 `light_cache` — fixture 5종 × exact 뷰 5개(전체·근접·depth 1·레이어 부분)가 전체 색인과 PNG 동일 + 플랜의 셀·간선·프레임 수 동일, cut 3 px 뷰는 빛나는 픽셀의 0.5 % 안(실측 0), 거절 3종; 단위 테스트(재고 요약 = 이미지 요약, 페이지 = 레이어 도형, 셀 트리 질의); valmini·sample9·route_chip·p10에서 뷰 17개 PNG 동일 |
 | L5 명령·모드 | `floe-index light`, `floe2 index --light`, 열기 규칙, 상태줄/info, 자동 생성, 잠금 | **완료 0.12.383(§8.6)**: `floe2`(경량 생명주기: index --light/--full, info, exact 렌더 = 전체, clip 거절, 덮어쓰기 규칙, FLOE_INDEX_LIGHT), `jobdeck`(덱 소스 경량 기본), `index_lock` K13, `light_cache`(design.ovo 바이트 동일, --occupancy-only, --force) |
 | L6 덱·뷰어·캡처 | 덱 소스 경량 열기, 요약 없는 상태 표시, refine 흐름, `floe2 render` 완료 대기 | **완료 0.12.384(§8.7)**: `floe2`(exact 렌더 = 전체, 라벨 켠 채), `jobdeck`(LightSummaryTests: `--no-occupancy` 뒤 광역 캡처 미완(3)·근접 캡처 통과·자동 색인의 요약 추가·2단계 `index`), `gtk_view`(경량 레이아웃의 `cache:light`·`light_rounds`), 단위 테스트(텍스트 채우기 = Doc, 라벨 행, 시한 라운드) |
+| 운영 규칙 | 캡처·뷰어의 캐시 종류와 요약 기본값 (사용자 시나리오 2026-10-22) | **완료 0.12.388(§8.11)**: `render`·`probe`·`info --light/--full`, `render --occupancy on`만 요약 추가, 뷰어 모달 색인 1회·백그라운드 요약 제거; 게이트 `jobdeck` LightSummaryTests, `floe2` |
+| L8 띠 분할 캡처 | exact 캡처가 디코드 예산으로 실패하지 않게 타일 띠 단위로 디코드·래스터 (§8.11 다음) | 사용자 지시 2026-10-22 "그 순서로" — 다음 차례 |
 | L7 후속 | 요약 패스 1패스화/마킹 가속, ovs 합치기(레이아웃 밀도), B안(정규 페이지), 세그먼트 캐시 디스크 보존(방문한 셀의 디코드 결과를 남겨 다음 세션 가속), 1패스 경량 생성(셀 로컬 점유 격자 합성) | 각각 — **L7a 완료 0.12.386(§8.9)**: 이미지 증분 합성(제자리 성장, 채움 시점 노드 마스크, 채움 바이트 해제), 세그먼트 pread 묶음·병렬 인코딩; **L7b 완료 0.12.387(§8.10)**: 요약 패스의 마커가 셀을 직접 파싱(리더 풀·상주 창 없음, 묶음이 안 쓰는 셀은 읽지 않음), 다각형 스캔 변환 버퍼 재사용, 크기 예산 밖의 레이어는 마킹하지 않음; 나머지(1패스 경량 생성은 §8.10의 정확성 논거로 보류)는 사용자 지시에 따라 |
 
 L0는 하루, L1~L3는 S1~S3와 비슷한 크기(재고 코드 위의 확장), L4가 본체다.
@@ -1003,6 +1007,40 @@ exact fit은 경량에서 64라운드 228 s 11 GB 뒤 오류(전체 색인은 ra
   뒤의 두 번째 읽기를 없애 1 TB당 40~50분을 더 줄이는 길이지만 그림이 달라지는 선택이라
   사용자 결정으로 남긴다. 남은 것: B안(지역성 나쁜 writer), 웹 배너·`PatchDto`, 세그먼트
   캐시 디스크 보존.
+
+### 8.11 캡처·뷰어의 기본값 (0.12.388, 2026-10-22; 사용자 시나리오와 "그 순서로 진행해줘")
+
+사용자가 정리한 세 시나리오 — 일반 레이아웃 뷰어·캡처·DRC 리뷰(10 GB 미만, 전체 색인), 잡덱
+뷰어·캡처, 잡덱 구성 레이아웃(**EBEAM 파일**, 수백 GB) 뷰어·캡처 — 와 두 원칙에 맞췄다.
+명시적 색인과 뷰어로 여는 파일은 다시 열리므로 요약을 만드는 것이 기본이고, 캡처는 다시
+열거나 다시 찍지 않는 전제라 요약을 만들지 않는다(잡덱은 한 파일을 여러 번 캡처하는 일이
+드물다).
+
+- **`render`·`probe`·`info`의 `--light` / `--full`** (app-cli `Ready.light`): 자동 색인이 캐시 없는
+  소스에 짓는 종류. 없으면 규칙(덱 소스 경량, 레이아웃 전체; FLOE_INDEX_LIGHT). 캐시가 있으면
+  종류를 바꾸지 않고 그대로 연다. `floe2 render ebeam.oas --light <창>`이 EBEAM 단독 캡처다.
+  `clip`은 페이지가 필요하므로 늘 전체.
+- **`render --occupancy on`** 은 뷰 스위치에 더해 자동 색인에 요약을 시킨다(`read::dataset`의
+  `summaries`): 덱은 플랜의 occupancy-only 항목(`index_deck`), 레이아웃은 종류를 유지한
+  `index --occupancy`(`index_layout`; `decide`가 경량 캐시 위의 전체 요청을 전체로 짓기 때문에
+  `light`를 캐시의 종류로 준다). 없으면(기본) 요약을 만들지 않는다: 덱 캡처는 요약이 있으면
+  쓰고 없으면 광역 pass를 비운 채 종료 3에 `index deck.jb`와 `--occupancy on`을 안내한다(근접
+  창은 완성). 0.12.384~0.12.387은 그리는 명령이 늘 요약부터 만들었다.
+- **GTK 뷰어**: 덱을 열 때 모달 색인 한 번(`floe2 index deck.jb [--level …]`)으로 경량 캐시와
+  요약을 함께 만든다. `_index_ready`가 `summary_missing`도 보므로 캡처가 만든 요약 없는 캐시만
+  있는 덱은 "N sources have no occupancy summary … Build it now?"로 묻고 빠진 요약만 더한 뒤
+  연다. 0.12.384의 두 단계(`--no-occupancy` → 열기 → 백그라운드 `floe2 index deck.jb`)는 뺐다 —
+  수백 GB 덱에서 묻지 않은 수 시간의 CPU와 NFS 읽기였다. 배너는 모달이 더하지 못한 소스(배치가
+  요약 패스의 예산을 넘은 것)에만 남고 3 s 폴링으로 다른 실행이 더한 요약을 받는다.
+- 남은 구멍: GTK 파일 열기 대화상자에는 플래그가 없어 캐시 없는 EBEAM을 거기서 처음 열면
+  레이아웃 규칙의 전체 색인이다 — FLOE_INDEX_LIGHT=on으로 두고, 필요해지면 대화상자의 선택이나
+  크기 규칙을 더한다. `floe2 view`도 아직 `--light`를 받지 않는다.
+- 게이트: `jobdeck` LightSummaryTests(기본 캡처는 요약 없이 종료 3 + 안내, `--occupancy on`이
+  먼저 채움, `index deck.jb`가 빠진 요약 추가), `floe2`(`render --light`가 경량 캐시만, 기본은
+  전체, `--occupancy on`이 종류를 유지한 채 요약 추가, `--light --full` 거절), `index_lock` k10/k12(자동
+  색인을 거치는 덱 fit 캡처는 `--occupancy on`; 맨 캡처는 이제 미완), `gtk_view`(fixture를 요약과
+  함께 색인: capture_parity의 `--occupancy on` 단계가 요약 그림 자체를 비교한다). 다음은 L8: exact
+  캡처의 띠 분할(§8 표).
 
 ## 9. 검토한 대안
 

@@ -743,9 +743,12 @@ class ReadyTests(unittest.TestCase):
         self.assertIn("h.oas has an incomplete index (a build stopped half-way) - rebuilding it first",
                       res.stderr)
         self.assertTrue((self.cache(half) / "meta.json").is_file())
-        # a jobdeck: its sources with none first, then drawn whole
+        # a jobdeck: its sources with none first, then drawn whole (its fit
+        # view draws the light sources' occupancy summary: --occupancy on has
+        # the auto-index build it - a plain capture builds none and ends
+        # incomplete, 0.12.388; validate_jobdeck LightSummaryTests)
         deck = self.deck()
-        res = floe2("render", deck, "--px", "160", "--out", self.dir / "d.png", ok=0)
+        res = floe2("render", deck, "--px", "160", "--occupancy", "on", "--out", self.dir / "d.png", ok=0)
         self.assertIn("[jobdeck] 2 source(s) have no index yet - indexing them first", res.stderr)
         self.assertIn("index     : 2 built, 0 failed, 0 kept", res.stderr)
         self.assertNotIn("skipped", res.stdout)
@@ -851,7 +854,11 @@ class ReadyTests(unittest.TestCase):
         self.assertEqual(res.returncode, 3, res.stdout + res.stderr)
         self.assertIn("srcB.oas: not_indexed (srcB.oas is being indexed by %s" % HOLDER, res.stdout)
         log = self.dir / "deck.log"
-        proc = spawn([FLOE2, "render", deck, "--px", "160", "--wait", "--out", self.dir / "w.png"], log)
+        # (--occupancy on: the fit view of the light source draws its summary,
+        # built by the auto-index after the wait; srcA's full index gets its
+        # summary the same way)
+        proc = spawn([FLOE2, "render", deck, "--px", "160", "--wait", "--occupancy", "on",
+                      "--out", self.dir / "w.png"], log)
         until_said(log, "srcB.oas is being indexed by %s" % HOLDER, proc)
         time.sleep(0.5)
         self.assertIsNone(proc.poll())
@@ -860,8 +867,11 @@ class ReadyTests(unittest.TestCase):
         out = proc.stdout.read()
         proc.stdout.close()
         self.assertNotIn("skipped", out)
-        # its index was the waiter's to build (the holder built nothing)
-        self.assertIn("index     : 1 built, 0 failed, 0 kept", log.read_text())
+        # its index was the waiter's to build (the holder built nothing);
+        # srcA's full index gets its summary in the same plan (--occupancy on)
+        text = log.read_text()
+        self.assertIn("ok srcB.oas", text)
+        self.assertRegex(text, r"index     : [12] built, 0 failed, 0 kept")
 
     def test_k12_floe_index_indexes_a_jobdeck(self):
         deck = self.deck()

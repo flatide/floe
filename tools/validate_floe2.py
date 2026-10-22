@@ -306,6 +306,34 @@ def validate_rust_cli(base, fixture):
             res = rust(env, "index", light_src, *bad, ok=False)
             check(res.returncode != 0 and "--light" in res.stderr,
                   "floe2 index %s was not refused with its reason: %d %s" % (" ".join(bad), res.returncode, res.stderr[-200:]))
+        # render's auto-index (0.12.388, user 2026-10-22: an EBEAM file
+        # captured on its own): --light builds the light cache without the
+        # summary, the default the full index, --occupancy on adds the
+        # summary to a cache that has none (the kind kept)
+        auto_light = work / "render auto light 설계.oas"
+        shutil.copy2(fixture, auto_light)
+        auto_dir = Path(vfs_cache_dir(auto_light))
+        res = rust(env, "render", auto_light, "--light", "--px", "64", "--out", work / "auto light.png")
+        check("indexing it first (--light: the light cache)" in res.stderr
+              and (auto_dir / "design.inv").is_file() and not (auto_dir / "design.ovm").exists()
+              and not (auto_dir / "design.ovo").exists(),
+              "render --light did not build the light cache alone: %s %s" % (
+                  res.stderr[-300:], sorted(p.name for p in auto_dir.iterdir()) if auto_dir.is_dir() else None))
+        res = rust(env, "render", auto_light, "--occupancy", "on", "--px", "64", "--out", work / "auto light occ.png")
+        check("no occupancy summary yet - adding it first (--occupancy on)" in res.stderr
+              and (auto_dir / "design.ovo").is_file() and not (auto_dir / "design.ovm").exists(),
+              "render --occupancy on did not add the light cache's summary (kept light): %s %s" % (
+                  res.stderr[-300:], sorted(p.name for p in auto_dir.iterdir())))
+        res = rust(env, "render", auto_light, "--occupancy", "on", "--px", "64", "--out", work / "auto light occ.png")
+        check("adding it first" not in res.stderr, "a summary there was added again: %s" % res.stderr[-300:])
+        auto_full = work / "render auto full 설계.oas"
+        shutil.copy2(fixture, auto_full)
+        res = rust(env, "render", auto_full, "--px", "64", "--out", work / "auto full.png")
+        check("has no index yet - indexing it first (--no-index" in res.stderr
+              and (Path(vfs_cache_dir(auto_full)) / "design.ovm").is_file(),
+              "render's default auto-index did not build the full index: %s" % res.stderr[-300:])
+        res = rust(env, "render", auto_full, "--light", "--full", "--px", "64", ok=False)
+        check("exclusive" in res.stderr, "--light --full was not refused: %s" % res.stderr[-200:])
         env_src = work / "rust cli env 설계.oas"
         shutil.copy2(fixture, env_src)
         rust(dict(env, FLOE_INDEX_LIGHT="on"), "index", env_src, "--jobs", "2")

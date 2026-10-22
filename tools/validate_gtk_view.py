@@ -752,9 +752,10 @@ def capture_parity(src, temp):
     density under the cut on - user 2026-10-12: "turn the density on by
     default"), and for each view it settles on - the plain open (depth 0), a
     zoom, full depth, a zoom out, the density turned off (`v`), the occupancy
-    summary turned on (`o`, 2026-10-20) - the capture of its box at its size,
-    its depth and, for the last two, --density off / --occupancy on: the same
-    RGB, pixel for pixel."""
+    summary turned on (`o`, 2026-10-20; the fixture is indexed with its
+    summary, so the summary itself is compared) - the capture of its box at
+    its size, its depth and, for the last two, --density off / --occupancy on:
+    the same RGB, pixel for pixel."""
     from PIL import Image
     from floe import gui
     cache = gtkservice.ServiceCache(str(src))
@@ -851,7 +852,11 @@ def main():
     with tempfile.TemporaryDirectory(prefix="floe-gtk-view-") as temp:
         src = Path(temp) / "valmini.oas"
         src.write_bytes((ROOT / "data/m1/valmini.oas").read_bytes())
-        done = subprocess.run([FLOE2, "index", str(src), "--jobs", "2"], cwd=ROOT,
+        # (with its occupancy summary: capture_parity's last step turns the
+        # summary on in the viewer and captures with --occupancy on, which
+        # since 0.12.388 builds a missing summary first - the fixture has it
+        # from the start, so both draw the same summary)
+        done = subprocess.run([FLOE2, "index", str(src), "--occupancy", "--jobs", "2"], cwd=ROOT,
                               capture_output=True, text=True, timeout=600)
         check(done.returncode == 0, done.stdout + done.stderr)
         svc = gtkservice.Service(FLOE2)

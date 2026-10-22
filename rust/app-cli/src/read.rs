@@ -37,10 +37,14 @@ makes it the default, as before 0.12.350).
   --occupancy on|off         The occupancy summary (design.ovo) at wide views,
                             as the viewer's View > occupancy summary: on draws
                             a layout's wide views from it as a jobdeck's are
-                            drawn (a source a jobdeck indexed has the file),
-                            off none for a jobdeck either; needs --detail
-                            low|medium|high (default: a jobdeck on, a layout
-                            off; FLOE_RUST_OCCUPANCY=off|on where unsaid)
+                            drawn, and has a source without the file get it
+                            first (the auto-index; a light cache's by the
+                            light command); off none for a jobdeck either;
+                            needs --detail low|medium|high. Unsaid: a jobdeck
+                            draws from the file where it is and builds none
+                            (a capture is drawn once: a wide pass of a light
+                            source without it stays empty, exit 3), a layout
+                            off; FLOE_RUST_OCCUPANCY=off|on where unsaid
   --frames[=on|off] --labels[=on|off]  Cell frames, design text (default on,
                             as the viewer; jobdeck labels unsupported)
   --layer-colors row|group  A layout's default layer colours: row = every row
@@ -77,12 +81,20 @@ makes it the default, as before 0.12.350).
   --floe-reviewer TAG       Read existing waive status; no review writes
   --no-index                A source with no index yet is refused, not indexed
                             first (FLOE_AUTO_INDEX=off: the default)
+  --light | --full          The cache the auto-index builds for a source with
+                            none: the light cache (design.inv + design.seg, the
+                            geometry read from the source - an EBEAM file
+                            captured on its own) or the full index; unsaid, a
+                            jobdeck's sources light and a layout full
+                            (FLOE_INDEX_LIGHT=on|off). A cache there is opened
+                            as it is
   --wait[=SECONDS]          A source another run indexes: wait for it instead of
                             exit 75 (SECONDS bounds it; FLOE_LOCK_WAIT=on|SECONDS)
   --no-wait                 Refuse at once (exit 75) whatever FLOE_LOCK_WAIT says
 A source with no index (a jobdeck: its sources of the levels loaded) is indexed
-first, as `floe2-web index` builds it, its output on stderr; a changed source keeps
-its cache (index --force rebuilds it).
+first, as `floe2-web index [--light|--full]` builds it - without the occupancy
+summary unless --occupancy on asks for it -, its output on stderr; a changed
+source keeps its cache (index --force rebuilds it).
 Lengths: bare/um/µm/μm, nm, mm, cm, m. Fractional DBU is preserved.
 Batch: NAME key=value ...; quotes supported, full-line # comments. Region fields
 override the CLI region. Keys: bbox at size anchor px stretch layers depth mosaic
@@ -98,7 +110,7 @@ Mosaic final image is four tiles (up to 64 Mpx). Outputs must not collide.
 Cancelled/failed frames never replace an existing PNG. Jobdeck known skipped
 placements/over-budget pages may publish a flagged incomplete PNG (exit 3).
 Other incomplete frames preserve the previous output.";
-const INFO_HELP: &str = "Usage: floe2-web info SOURCE [--level N,N,...] [--json] [--chips] [--no-index] [--wait[=SECONDS]]
+const INFO_HELP: &str = "Usage: floe2-web info SOURCE [--level N,N,...] [--json] [--chips] [--no-index] [--light|--full] [--wait[=SECONDS]]
 --chips (jobdeck): every chip of the levels loaded - its CHIP blocks,
 placements (#K) and extents, the names render --chip/--fit-chip take.
 Read layout/cache summary. --json emits metadata plus source_stale.
@@ -107,10 +119,11 @@ FLOE_AUTO_INDEX=off: refused instead); one another run indexes is refused (75)
 unless --wait[=SECONDS] (FLOE_LOCK_WAIT=on|SECONDS; --no-wait). Jobdeck info
 includes the skip ledger and virtual layers;
 --level is a jobdeck load selection. --json uses cache:null for composites.";
-const PROBE_HELP: &str = "Usage: floe2-web probe SOURCE [--no-index] [--wait[=SECONDS]]
+const PROBE_HELP: &str = "Usage: floe2-web probe SOURCE [--no-index] [--light|--full] [--wait[=SECONDS]]
 Headless ready/open/style + fit/center frame checks; no output files.
 This validates the worker, not browser display or ETX performance.
-A source with no index is indexed first (--no-index: refused); --wait as render's.";
+A source with no index is indexed first (--no-index: refused; --light / --full the
+kind, as render's; no occupancy summary is built); --wait as render's.";
 
 pub enum Command {
     Help(&'static str),
@@ -529,13 +542,16 @@ pub(crate) fn dataset(
     source: &std::path::Path,
     levels: Option<BTreeSet<i64>>,
     index: bool,
-    draws: bool,
+    light: Option<bool>,
+    summaries: bool,
     waiter: &mut Waiter,
     cancelled: &AtomicUsize,
 ) -> Result<Dataset> {
-    // (a command that draws has a deck source's missing occupancy summary
-    // added too - DIRECT_READ_PLAN §5.5; info reads the caches as they are)
-    let l = ready::open(source, levels, index, draws, waiter, cancelled)?;
+    // (`light`: the kind the auto-index builds - --light / --full;
+    // `summaries`: a render with --occupancy on has a source's missing
+    // occupancy summary added too - DIRECT_READ_PLAN §5.5 / §8.11; by
+    // default a capture builds none, and info reads the caches as they are)
+    let l = ready::open(source, levels, index, light, summaries, waiter, cancelled)?;
     if l.source_stale() {
         eprintln!("[{}][warn] source changed; displaying cached geometry. Rebuild with index --force, then reopen.", floe_app_core::program());
     }
@@ -562,7 +578,7 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
             }
             let mut waiter = Waiter::new(ready.wait, cancelled);
             again(&source, &mut waiter, |waiter| {
-                info(&source, json, levels.clone(), chips, ready.index, waiter, cancelled)
+                info(&source, json, levels.clone(), chips, ready.index, ready.light, waiter, cancelled)
             })
         }
         Command::Render {
@@ -577,7 +593,15 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         } => {
             let mut waiter = Waiter::new(ready.wait, cancelled);
             again(&source, &mut waiter, |waiter| {
-                let mut dataset = dataset(&source, levels.clone(), ready.index, true, waiter, cancelled)?;
+                let mut dataset = dataset(
+                    &source,
+                    levels.clone(),
+                    ready.index,
+                    ready.light,
+                    capture.shot.occupancy == Some(true),
+                    waiter,
+                    cancelled,
+                )?;
                 if let Some(mode) = layer_colors {
                     dataset.set_layer_colors(mode);
                 }
@@ -618,13 +642,14 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
                 layer_colors,
                 legend,
                 ready.index,
+                ready.light,
                 &mut waiter,
                 cancelled,
             )
         }
         Command::Probe { source, ready } => {
             let mut waiter = Waiter::new(ready.wait, cancelled);
-            again(&source, &mut waiter, |waiter| probe(&source, ready.index, waiter, cancelled))
+            again(&source, &mut waiter, |waiter| probe(&source, ready.index, ready.light, waiter, cancelled))
         }
     }
 }
@@ -648,10 +673,11 @@ fn info(
     levels: Option<BTreeSet<i64>>,
     chips: bool,
     index: bool,
+    light: Option<bool>,
     waiter: &mut Waiter,
     cancelled: &Arc<AtomicUsize>,
 ) -> Result<i32> {
-    let l = dataset(source, levels, index, false, waiter, cancelled)?;
+    let l = dataset(source, levels, index, light, false, waiter, cancelled)?;
     if json {
         println!(
             "{}",
@@ -685,10 +711,12 @@ fn info(
 fn probe(
     source: &std::path::Path,
     index: bool,
+    light: Option<bool>,
     waiter: &mut Waiter,
     cancelled: &Arc<AtomicUsize>,
 ) -> Result<i32> {
-    let l = dataset(source, None, index, true, waiter, cancelled)?;
+    // (a probe builds no summary: its frames are a check, drawn once)
+    let l = dataset(source, None, index, light, false, waiter, cancelled)?;
     let mut session =
         RenderSession::open(&l, RenderOptions::local()?, false, Arc::clone(cancelled))?;
     println!(
@@ -846,6 +874,25 @@ mod tests {
         assert_eq!(density(&["render", "a.oas", "--density=on"]), Ok(Some(true)));
         let archival = density(&["render", "a.oas", "--archival", "--density=on"]).unwrap_err();
         assert!(archival.contains("--detail low, medium or high"), "{archival}");
+    }
+    /// `--light` / `--full` (user 2026-10-22): the kind of cache the
+    /// auto-index builds, on render, probe and info alike; exclusive
+    #[test]
+    fn the_auto_index_takes_the_cache_kind() {
+        let light = |args: &[&str]| match parsed(args) {
+            Ok(Command::Render { ready, .. }) | Ok(Command::Probe { ready, .. }) | Ok(Command::Info { ready, .. }) => {
+                Ok(ready.light)
+            }
+            Ok(_) => panic!(),
+            Err(e) => Err(e.to_string()),
+        };
+        assert_eq!(light(&["render", "a.oas"]), Ok(None));
+        assert_eq!(light(&["render", "a.oas", "--light", "--px", "64"]), Ok(Some(true)));
+        assert_eq!(light(&["render", "a.jb", "--full"]), Ok(Some(false)));
+        assert_eq!(light(&["probe", "a.oas", "--light"]), Ok(Some(true)));
+        assert_eq!(light(&["info", "a.oas", "--full"]), Ok(Some(false)));
+        assert!(light(&["render", "a.oas", "--light", "--full"]).is_err());
+        assert!(light(&["render", "a.oas", "--light=1"]).is_err());
     }
     /// `--occupancy on|off` (user 2026-10-20): the occupancy summary at wide
     /// views for a layout or a jobdeck, unsaid = renderd's rule; it stands in

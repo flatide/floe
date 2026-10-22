@@ -44,6 +44,7 @@ pub fn run(
     layer_colors: Option<LayerColors>,
     legend: bool,
     index: bool,
+    light: Option<bool>,
     waiter: &mut Waiter,
     cancelled: &Arc<AtomicUsize>,
 ) -> Result<i32> {
@@ -89,6 +90,7 @@ pub fn run(
             levels.clone(),
             layer_colors,
             index,
+            light,
             waiter,
             cancelled,
         )
@@ -102,11 +104,16 @@ fn render(
     levels: Option<BTreeSet<i64>>,
     layer_colors: Option<LayerColors>,
     index: bool,
+    light: Option<bool>,
     waiter: &mut Waiter,
     cancelled: &Arc<AtomicUsize>,
 ) -> Result<i32> {
-    // indexed first when it has none, its staleness said (read::dataset)
-    let mut dataset = crate::read::dataset(source, levels, index, true, waiter, cancelled)?;
+    // indexed first when it has none (`light`: the kind), its staleness
+    // said (read::dataset); a shot with --occupancy on has the missing
+    // summaries built first, the default capture none (DIRECT_READ_PLAN
+    // §8.11: a capture is drawn once)
+    let summaries = shots.iter().any(|s| s.capture.shot.occupancy == Some(true));
+    let mut dataset = crate::read::dataset(source, levels, index, light, summaries, waiter, cancelled)?;
     // --layer-colors over FLOE_LAYER_COLORS (the open's)
     if let Some(mode) = layer_colors {
         dataset.set_layer_colors(mode);
@@ -139,7 +146,7 @@ fn render(
             summary.over_budget,
             if summary.summary_building > 0 {
                 format!(
-                    ", summary_building={} pass(es) of light source(s) whose occupancy summary is not built yet (`{} index DECK.jb` adds it, the auto-index does so unless --no-index; a source whose placements exceed the summary pass's budget stays so - the index's line says, --mem raises it)",
+                    ", summary_building={} pass(es) of light source(s) whose occupancy summary is not built yet (`{} index DECK.jb` adds it, or `render --occupancy on` builds it first; a source whose placements exceed the summary pass's budget stays so - the index's line says, --mem raises it)",
                     summary.summary_building,
                     floe_app_core::program()
                 )

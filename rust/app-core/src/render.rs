@@ -421,7 +421,7 @@ pub fn require_complete(frame: &Frame) -> Result<()> {
         // those sources would be empty - the way out is the summary
         let summary = if frame.summary_building > 0 {
             format!(
-                ", summary_building={}: {} pass(es) of light source(s) without their occupancy summary - `floe2 index DECK.jb` adds it (the auto-index does so unless --no-index)",
+                ", summary_building={}: {} pass(es) of light source(s) without their occupancy summary - `floe2 index DECK.jb` adds it, or `render --occupancy on` builds it first",
                 frame.summary_building, frame.summary_building
             )
         } else {
