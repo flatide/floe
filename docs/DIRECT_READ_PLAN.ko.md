@@ -304,6 +304,13 @@ geometry/placement/text x·y, W/H, 점 목록, 경로 확장, 반복, 배치 대
 - 웹(feature/webui)의 revision store는 업로드한 소스를 색인한 결과를 봉인한다 —
   경량 캐시도 같은 디렉터리 규칙이므로 render-core가 열 수 있다; 웹 쪽 정책은
   별도.
+- **구현(0.12.383, §8.6).** `floe-index light SRC [--out DIR] [--jobs N] [--seg-bytes N]
+  [--occupancy …] [--occupancy-only] [--mem GiB] [--force]`(요약은 `vfs`처럼 opt-in;
+  `floe2 index`가 덱 소스에 붙인다), `floe2 index SRC --light | --full`,
+  `FLOE_INDEX_LIGHT=on|off`, 기본 = 덱 소스 경량·레이아웃 전체(전체 색인만의 옵션이
+  있으면 전체). 열기는 위 규칙대로이고, `floe2 info`가 `light: the geometry is read
+  from the source`와 inv/seg/ovo 크기를, `info --json`이 `cache_kind: full|light`를 낸다.
+  상태줄 표기는 L6.
 
 ### 5.7 운영: NFS, 메모리, 동시성
 
@@ -387,7 +394,7 @@ geometry/placement/text x·y, W/H, 점 목록, 경로 확장, 반복, 배치 대
 | L2 세그먼트 | 재고 패스의 세그먼트 방출(스냅샷·레이어 통계), `design.seg` | **완료 0.12.380(§8.3)**: 세그먼트 통계 = Doc(`--check-seg`, `rust_inventory`), 왕복 동일, 스트리밍 빌드가 씀(`vfs_stream`) |
 | L3 시드 파서 | `parse_segment`, CBLOCK inflate, 체인 | **완료 0.12.381(§8.4)**: 모든 fixture + 적대적 스트림에서 세그먼트 파싱의 레코드 합 = 셀 파싱(`--check-seg`, `rust_inventory`, 단위 테스트) |
 | L4 LightVfs | 합성 Ovm, 세그먼트 페이지 디코드, 배치 LRU, 셀 트리 | **완료 0.12.382(§8.5)**: 게이트 `light_cache` — fixture 5종 × exact 뷰 5개(전체·근접·depth 1·레이어 부분)가 전체 색인과 PNG 동일 + 플랜의 셀·간선·프레임 수 동일, cut 3 px 뷰는 빛나는 픽셀의 0.5 % 안(실측 0), 거절 3종; 단위 테스트(재고 요약 = 이미지 요약, 페이지 = 레이어 도형, 셀 트리 질의); valmini·sample9·route_chip·p10에서 뷰 17개 PNG 동일 |
-| L5 명령·모드 | `floe-index light`, `floe2 index --light`, 열기 규칙, 상태줄/info, 자동 생성, 잠금 | CLI 게이트, index_lock |
+| L5 명령·모드 | `floe-index light`, `floe2 index --light`, 열기 규칙, 상태줄/info, 자동 생성, 잠금 | **완료 0.12.383(§8.6)**: `floe2`(경량 생명주기: index --light/--full, info, exact 렌더 = 전체, clip 거절, 덮어쓰기 규칙, FLOE_INDEX_LIGHT), `jobdeck`(덱 소스 경량 기본), `index_lock` K13, `light_cache`(design.ovo 바이트 동일, --occupancy-only, --force) |
 | L6 덱·뷰어·캡처 | 덱 소스 경량 열기, 요약 없는 상태 표시, refine 흐름, `floe2 render` 완료 대기 | jobdeck·gtk_view·occupancy 게이트 |
 | L7 후속 | 요약 패스 1패스화/마킹 가속, ovs 합치기(레이아웃 밀도), B안(정규 페이지), 세그먼트 캐시 디스크 보존(방문한 셀의 디코드 결과를 남겨 다음 세션 가속), 1패스 경량 생성(셀 로컬 점유 격자 합성) | 각각 |
 
@@ -685,9 +692,77 @@ L4까지 끝나면 단독 소스를 경량으로 열어 볼 수 있고, L5·L6�
   색인 때 하던 일. 현장 마스크(배치 5,461개)는 top 한 라운드, 수 ms다.
 - **남은 것(L7로).** 이미지 증분 합성(지금은 라운드마다 정적 섹션을 다시 인코딩·복사:
   p10 150~300 ms/라운드), 세그먼트 pread 병렬화·묶음(NFS), 텍스트 색인(라벨, L6), 채운
-  셀의 최근 사용 추적(지금은 채운 순서로 비운다), `floe-index light`의 잠금·요약 패스·
-  모드(L5), 세그먼트 지역성이 나쁜 writer의 근접 뷰(route_chip류: B안 또는 세그먼트
-  재분할).
+  셀의 최근 사용 추적(지금은 채운 순서로 비운다), 세그먼트 지역성이 나쁜 writer의
+  근접 뷰(route_chip류: B안 또는 세그먼트 재분할).
+
+### 8.6 L5 구현 (0.12.383 / floe-index·renderd 0.12.342, 2026-10-22; 사용자 "L5 진행해줘")
+
+- **`floe-index light`(cli light.rs).** `SRC [--out DIR] [--jobs N] [--seg-bytes N]
+  [--occupancy [--occupancy-um UM] [--occupancy-balance 0|1] [--occupancy-prune 0|1]
+  [--occupancy-max-*]] [--occupancy-only] [--mem GiB] [--force] [--hold-at …]`. 소스는
+  스트리밍 빌드의 `stream_open`으로 매핑해 재고 패스 한 번(L4는 파일을 통째로 읽었다 —
+  50 GB에서는 안 된다); design.inv → design.seg(짝) → meta.json(커밋 마커, 마지막) 순으로
+  tmp + rename. `--occupancy`는 S5의 스트리밍 요약 패스(`stream_occupancy`)인데, 인스턴스의
+  배치를 파일 전체를 다시 파싱하는 places 패스가 아니라 방금 쓴 세그먼트 디렉터리의
+  배치 플래그 세그먼트에서 읽는다(`LightIndex::all_placements` → `StreamStore::set_places`).
+  `--occupancy-only`는 경량 캐시에 design.ovo를 더한다(identity 확인; 전체 색인이나
+  경량 캐시 없는 디렉터리는 종료 1). design.ovm이 있는 디렉터리는 `--force`에만 손댄다
+  (전체 색인의 파일을 지우고 경량으로 교체; `clear_outputs`). 잠금은 `vfs`와 같다: 빌드는
+  Full(독자는 meta.json까지 배타, 그 뒤 `release_use`로 요약 패스 동안 열 수 있다),
+  `--occupancy-only`는 Additive에 기존 design.ovo를 바꿀 때 독자 배타. `--hold-at
+  locked:F`/`committed:F`로 게이트가 경쟁시킨다. 덱(`floe-index light DECK.jb`)은 옆의
+  floe2에 `index DECK --light`로 넘긴다(`--out` 거절). 배치 수가 STREAM_PLACES_CAP(5천만)을
+  넘으면 vfs처럼 요약을 건너뛴다.
+- **`floe2 index`(app-core index.rs, app-cli).** `IndexOptions.light: Option<bool>` —
+  `--light`/`--full`(배타); 없으면 `full_only()`(--lod, --page-target-mb, --representatives*,
+  --hier-only, --profile-*, --stream, --in-memory, --slow-cell-s, --p2-shard-limit-mb 중
+  하나가 있으면 전체; --no-ovs·--no-page-occupancy는 세지 않는다 — 덱 소스가 --no-ovs를
+  달고 온다) → `FLOE_INDEX_LIGHT=on|off`
+  → 규칙(덱 소스 경량, 레이아웃 전체; `light_for(deck_source)`). `--light`에 전체 색인만의
+  옵션이 오면 거절. `decide()`가 캐시의 종류(`cache::cache_kind`: design.ovm이면 전체,
+  아니면 design.inv면 경량)와 요청을 함께 본다: 경량 캐시 위에 전체 요청이면 `--force`
+  없이 빌드(잃는 것이 없다 — 스트리밍 빌드가 inv/seg를 옆에 남긴다; 안내
+  `the light cache of X becomes the full index`), 전체 색인 위에 경량 요청이면 유지(안내
+  `X has the full index …; kept (--force --light replaces it)`), `--representatives-only`·
+  `--hier-only`는 경량 캐시를 거절, `--occupancy-only`는 경량 캐시면 `light --occupancy-only`.
+  `arguments()`가 `light SRC --out DIR --jobs N [--occupancy …] [--force] [--mem G]`를 만든다.
+  덱(`jobdeck::index::DeckIndexPlan`)은 소스마다 `light = light_for(true)`를 정해 넘긴다;
+  자동 색인(`ready.rs`)은 기본 옵션이라 규칙이 그대로 적용된다(레이아웃 전체, 덱 소스
+  경량 + 요약). 웹의 revision 빌드는 전체 색인이다(design.ovm/ovp를 봉인한다).
+- **원본 파일 핸들.** `LightIndex`는 원본의 fd를 들고 있지 않는다: 읽기마다 프로세스 공용
+  풀(`floe_vfs::light` SOURCE_FILES, 최대 8개, LRU)에서 꺼내 pread한다. 덱은 소스마다 경량
+  캐시 하나라 수백 fd가 되고, 전체 색인은 파일을 매핑하고 페이지 파일은 읽을 때마다 열어
+  fd를 쥐지 않는다 — `ulimit -n 32`로 24개 소스 덱을 그리는 index_lock K7이 잡았다.
+- **열기·정보(app-core cache.rs, catalog.rs, dataset.rs, clip.rs).** `cache::inspect`와
+  `Layout::open_directory`가 `validated_identity()`로 종류별 identity를 본다: 전체는
+  `validated_vfs`(ovm), 경량은 `floe_vfs::light::check()` — inv·seg의 **헤더만**(각 72 B·
+  80 B; 길이·짝 `inv_crc` = inv의 body CRC·셀/레이어 수; 64 MB 재고를 열 때마다 읽지
+  않는다). `Layout.kind`, `Metadata.cache`(meta.json의 `"cache": "light"`), `floe2 info`의
+  `cache … (…, VFS v1, light: the geometry is read from the source)`와 design.inv/seg/ovo
+  크기(ovo 없으면 `none (no wide-view summary yet: index --occupancy adds it)`),
+  `info --json`의 `cache_kind: full|light`. `floe2 clip`은 경량 캐시를 거절한다(페이지
+  파일이 없다: `clip needs the full index of X …; index --full`). renderd·덱 합성은 L4의
+  `Cache::open` 그대로다.
+- **게이트.** `floe2`(validate_floe2.py `validate_rust_cli`): `index --light`의 파일,
+  `info` 문구·JSON, `render --detail exact --labels off`가 전체 색인과 PNG 동일(라벨은
+  경량 캐시에 텍스트 색인이 없어 L6까지 빠진다; 레이어 색은 같다 — 경량 meta.json의
+  `stored_shapes`가 텍스트만 있는 레이어도 센다: 그 레이어를 텍스트 마스크에 가진 셀들의
+  텍스트 수, 셀의 텍스트가 한 레이어에 있으면 정확하고 아니면 상한), `clip` 거절, 경량
+  유지·전체로 올리기·`--light` 유지·`--light --force` 교체, `--light --lod` 등 거절,
+  `FLOE_INDEX_LIGHT=on`; `jobdeck`(test_3: 덱 소스 3개가 경량 + ovo, `floe2 info deck`;
+  LOD 테스트: 평범한 `--force`는 경량, `--full`은 전체); `index_lock` K13(`light`끼리의
+  build 잠금, 독자가 있는 `--force`와 `floe2 index --light --force` 75, `--occupancy-only`의
+  추가는 되고 교체는 75); `light_cache`(design.ovo = 스트리밍 빌드의 바이트,
+  `--occupancy-only` 동일, 전체 색인·빈 디렉터리 거절, `--force` 교체). 단위 테스트
+  app-core `the_light_cache_decisions`, app-cli `the_light_cache_is_a_mode_of_its_own`.
+- **실측(macOS 4 jobs).** `floe-index light --occupancy` 대 `vfs --occupancy`(스트리밍):
+  valmini ovo 동일; sample9 4.3 s(재고 1.4 + 배치 0.3 + 요약 2.9) 대 6.5 s, ovo 1.07 GB
+  동일; route_chip 6.8 s 대 17.5 s, 동일. 경량 생성 = 재고 패스 + 요약 패스이고 본 빌드
+  (플랜·인코딩)가 없다 — 현장 50 GB에서는 §6.1의 131.6 s + 요약 패스(기본 예산 4~6 min
+  예상)만 남는다.
+- **남은 것.** 뷰어 상태줄의 `cache: light` 표기·요약 없는 동안의 배너·덱 소스 경량
+  열기의 refine 흐름(L6), 텍스트 색인(라벨), 세그먼트 지역성이 나쁜 writer, 이미지 증분
+  합성(L7).
 
 ## 9. 검토한 대안
 

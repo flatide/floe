@@ -161,13 +161,58 @@ pub struct FillReport {
     pub bytes: u64,
 }
 
+/// Open source files, shared by every light index of the process and
+/// bounded (`SOURCE_FILES`): a jobdeck opens one light cache per source -
+/// hundreds in the field - and a file descriptor each would run a tight
+/// open-file limit out (the full index keeps none: its files are mapped,
+/// its page file opened per read). A read takes the file from the pool,
+/// opening it when it is not there and letting the least recently used go
+/// past the cap; a reader in the middle of a pread keeps its own Arc.
+struct SourceFiles {
+    files: Vec<(String, std::sync::Arc<std::fs::File>, u64)>,
+    tick: u64,
+}
+
+/// open source files kept at most (the full index's budget under a tight
+/// limit leaves this much room beside the locks)
+const SOURCE_FILES_CAP: usize = 8;
+
+static SOURCE_FILES: Mutex<SourceFiles> = Mutex::new(SourceFiles {
+    files: Vec::new(),
+    tick: 0,
+});
+
+/// the source at `path`, open for pread, from the pool
+fn source_file(path: &str) -> Result<std::sync::Arc<std::fs::File>, String> {
+    let mut pool = SOURCE_FILES.lock().unwrap_or_else(|p| p.into_inner());
+    pool.tick += 1;
+    let tick = pool.tick;
+    if let Some(slot) = pool.files.iter_mut().find(|(p, _, _)| p == path) {
+        slot.2 = tick;
+        return Ok(std::sync::Arc::clone(&slot.1));
+    }
+    let file = std::fs::File::open(path).map_err(|e| format!("open {}: {}", path, e))?;
+    let file = std::sync::Arc::new(file);
+    while pool.files.len() >= SOURCE_FILES_CAP {
+        let oldest = pool
+            .files
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, (_, _, t))| *t)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        pool.files.remove(oldest);
+    }
+    pool.files.push((path.to_string(), std::sync::Arc::clone(&file), tick));
+    Ok(file)
+}
+
 /// The light index of one cache directory.
 pub struct LightIndex {
     pub dir: String,
     /// the source file's path (meta.json's `src.path`, else the sibling
     /// the directory's name says)
     pub source: String,
-    file: std::fs::File,
     pub identity: Identity,
     pub inv: Inventory,
     pub seg: SegFile,
@@ -262,6 +307,79 @@ pub fn file_identity(path: &str) -> std::io::Result<Identity> {
     })
 }
 
+/// What a light cache's headers say (`check`): the files are there, paired
+/// and whole by their lengths - without reading their bodies or the source.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LightFiles {
+    pub identity: Identity,
+    pub unit: f64,
+    pub n_cells: u32,
+    pub n_layers: u32,
+    pub n_segments: u32,
+    /// design.ovo is there (the wide views' summary)
+    pub occupancy: bool,
+}
+
+/// A light cache's files checked by their headers (app-core's cache probe,
+/// which must not read a 64 MB inventory per open): design.inv and
+/// design.seg present, read by this build, paired (design.seg's inv_crc is
+/// design.inv's body CRC, the same identity, the same counts) and whole
+/// (each body as long as its header says).
+pub fn check(dir: &str) -> Result<LightFiles, String> {
+    use std::io::Read;
+    let head = |name: &str, len: usize| -> Result<(Vec<u8>, u64), String> {
+        let path = Path::new(dir).join(name);
+        let mut f = std::fs::File::open(&path).map_err(|e| format!("{}: {}", path.display(), e))?;
+        let size = f.metadata().map_err(|e| format!("{}: {}", path.display(), e))?.len();
+        let mut bytes = vec![0u8; len];
+        f.read_exact(&mut bytes)
+            .map_err(|e| format!("{}: shorter than its header ({})", path.display(), e))?;
+        Ok((bytes, size))
+    };
+    let (ib, isize_) = head(invfile::FILE_NAME, invfile::HEADER_LEN)?;
+    let ih = invfile::peek_header(&ib).map_err(|e| format!("{}: {}", dir, e))?;
+    if ih.body_len + invfile::HEADER_LEN as u64 != isize_ {
+        return Err(format!(
+            "{}/{}: {} bytes, {} by its header (truncated or written over)",
+            dir,
+            invfile::FILE_NAME,
+            isize_,
+            ih.body_len + invfile::HEADER_LEN as u64
+        ));
+    }
+    let (sb, ssize) = head(segfile::FILE_NAME, segfile::HEADER_LEN)?;
+    let sh = segfile::peek_header(&sb).map_err(|e| format!("{}: {}", dir, e))?;
+    if sh.body_len + segfile::HEADER_LEN as u64 != ssize {
+        return Err(format!(
+            "{}/{}: {} bytes, {} by its header (truncated or written over)",
+            dir,
+            segfile::FILE_NAME,
+            ssize,
+            sh.body_len + segfile::HEADER_LEN as u64
+        ));
+    }
+    if sh.identity != ih.identity || sh.inv_crc != ih.body_crc {
+        return Err(format!(
+            "{}: design.seg is not paired with design.inv (another inventory or source); rebuild the light cache",
+            dir
+        ));
+    }
+    if sh.n_cells as usize != ih.n_cells || sh.n_layers as usize != ih.n_layers {
+        return Err(format!(
+            "{}: design.seg has {} cells and {} layers, design.inv {} and {}",
+            dir, sh.n_cells, sh.n_layers, ih.n_cells, ih.n_layers
+        ));
+    }
+    Ok(LightFiles {
+        identity: ih.identity,
+        unit: ih.unit,
+        n_cells: sh.n_cells,
+        n_layers: sh.n_layers,
+        n_segments: sh.n_segments,
+        occupancy: std::fs::symlink_metadata(Path::new(dir).join("design.ovo")).is_ok_and(|m| m.is_file()),
+    })
+}
+
 impl LightIndex {
     /// Whether `dir` holds a light cache's files (design.inv; the renderer
     /// opens a directory without design.ovm this way).
@@ -322,7 +440,8 @@ impl LightIndex {
                 source, dir, now.src_size, now.src_mtime, identity.src_size, identity.src_mtime
             ));
         }
-        let file = std::fs::File::open(&source).map_err(|e| format!("open {}: {}", source, e))?;
+        // (opened through the pool: a descriptor is not kept per index)
+        drop(source_file(&source)?);
         let inside = seg.segs.iter().filter(|s| s.flags & F_CELLS_INSIDE != 0).count();
         let cblock_cells = inv.cells.iter().filter(|c| c.cblock_defs > 0).count();
         if inside > 0 || cblock_cells > 0 {
@@ -415,7 +534,6 @@ impl LightIndex {
         Ok(LightIndex {
             dir: dir.to_string(),
             source,
-            file,
             identity,
             inv,
             seg,
@@ -464,7 +582,7 @@ impl LightIndex {
     fn read_at(&self, offset: u64, bytes: u64) -> Result<Vec<u8>, String> {
         let n = usize::try_from(bytes).map_err(|_| "segment too large".to_string())?;
         let mut buf = vec![0u8; n];
-        self.file
+        source_file(&self.source)?
             .read_exact_at(&mut buf, offset)
             .map_err(|e| format!("{}: read {} bytes at {}: {}", self.source, bytes, offset, e))?;
         Ok(buf)
@@ -582,54 +700,12 @@ impl LightIndex {
         if todo.is_empty() {
             return Ok(report);
         }
-        // the placement-flagged segments of every cell, parsed in parallel
-        let tasks: Vec<(u32, u32)> = todo
-            .iter()
-            .flat_map(|&ci| {
-                let (first, count) = self.seg.cells[ci as usize];
-                (first..first + count)
-                    .filter(move |&si| self.seg.segs[si as usize].flags & F_PLACEMENTS != 0)
-                    .map(move |si| (ci, si))
-            })
-            .collect();
-        report.segments = tasks.len();
-        let slots: Vec<Mutex<Option<Result<Vec<PlaceRec>, String>>>> =
-            (0..tasks.len()).map(|_| Mutex::new(None)).collect();
-        let jobs = std::thread::available_parallelism()
-            .map_or(4, |n| n.get())
-            .min(8)
-            .min(tasks.len())
-            .max(1);
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        std::thread::scope(|scope| {
-            for _ in 0..jobs {
-                scope.spawn(|| loop {
-                    let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let Some(&(_, si)) = tasks.get(k) else { break };
-                    let got = self.segment_cell(si).map(|c| c.places);
-                    *slots[k].lock().unwrap_or_else(|p| p.into_inner()) = Some(got);
-                });
-            }
-        });
-        let mut places_of: HashMap<u32, Vec<PlaceRec>> = HashMap::new();
-        for (k, &(ci, _)) in tasks.iter().enumerate() {
-            let got = slots[k]
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .take()
-                .unwrap_or_else(|| Err("fill task without a result".to_string()))?;
-            places_of.entry(ci).or_default().extend(got);
-        }
+        let jobs = std::thread::available_parallelism().map_or(4, |n| n.get()).min(8);
+        let (mut places_of, segments) = self.placements_of(&todo, jobs)?;
+        report.segments = segments;
         let mut built: Vec<(u32, CellFill)> = Vec::with_capacity(todo.len());
         for &ci in &todo {
             let places = places_of.remove(&ci).unwrap_or_default();
-            let want = self.inv.cells[ci as usize].placements;
-            if places.len() as u64 != want {
-                return Err(format!(
-                    "light index: cell {} ({}) yielded {} placements from its segments, the inventory counts {}",
-                    ci, self.inv.cells[ci as usize].name, places.len(), want
-                ));
-            }
             report.placements += places.len() as u64;
             built.push((ci, self.encode_places(&places)));
         }
@@ -732,6 +808,71 @@ impl LightIndex {
             }
         }
         out
+    }
+
+    /// The placements of `cells` from their placement-flagged segments
+    /// (pread + inflate + the seeded parse, `jobs` threads), each cell's in
+    /// file order and as many as the inventory counts; and the segments
+    /// read. A cell not in the list, or without placements, is absent.
+    pub fn placements_of(&self, cells: &[u32], jobs: usize) -> Result<(HashMap<u32, Vec<PlaceRec>>, usize), String> {
+        let tasks: Vec<(u32, u32)> = cells
+            .iter()
+            .filter(|&&ci| (ci as usize) < self.inv.cells.len() && self.inv.cells[ci as usize].placements > 0)
+            .flat_map(|&ci| {
+                let (first, count) = self.seg.cells[ci as usize];
+                (first..first + count)
+                    .filter(move |&si| self.seg.segs[si as usize].flags & F_PLACEMENTS != 0)
+                    .map(move |si| (ci, si))
+            })
+            .collect();
+        let slots: Vec<Mutex<Option<Result<Vec<PlaceRec>, String>>>> =
+            (0..tasks.len()).map(|_| Mutex::new(None)).collect();
+        let jobs = jobs.min(tasks.len()).max(1);
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..jobs {
+                scope.spawn(|| loop {
+                    let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(&(_, si)) = tasks.get(k) else { break };
+                    let got = self.segment_cell(si).map(|c| c.places);
+                    *slots[k].lock().unwrap_or_else(|p| p.into_inner()) = Some(got);
+                });
+            }
+        });
+        let mut places_of: HashMap<u32, Vec<PlaceRec>> = HashMap::new();
+        for (k, &(ci, _)) in tasks.iter().enumerate() {
+            let got = slots[k]
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .take()
+                .unwrap_or_else(|| Err("placement task without a result".to_string()))?;
+            places_of.entry(ci).or_default().extend(got);
+        }
+        for &ci in cells {
+            let Some(cell) = self.inv.cells.get(ci as usize) else { continue };
+            if cell.placements == 0 {
+                continue;
+            }
+            let got = places_of.get(&ci).map_or(0, |p| p.len()) as u64;
+            if got != cell.placements {
+                return Err(format!(
+                    "light index: cell {} ({}) yielded {} placements from its segments, the inventory counts {}",
+                    ci, cell.name, got, cell.placements
+                ));
+            }
+        }
+        Ok((places_of, tasks.len()))
+    }
+
+    /// Every cell's placements (`placements_of` over all cells; a cell
+    /// without any gets an empty list): the occupancy pass's instances
+    /// (`floe-index light --occupancy`), read from the placement-flagged
+    /// segments alone - not the whole file.
+    pub fn all_placements(&self, jobs: usize) -> Result<Vec<Vec<PlaceRec>>, String> {
+        let n = self.inv.cells.len();
+        let cells: Vec<u32> = (0..n as u32).collect();
+        let (mut by_cell, _) = self.placements_of(&cells, jobs)?;
+        Ok((0..n as u32).map(|ci| by_cell.remove(&ci).unwrap_or_default()).collect())
     }
 
     /// Whether the index holds cell `ci`'s placements (always for a cell

@@ -274,6 +274,60 @@ class IndexLockTests(unittest.TestCase):
         self.assertEqual(first.wait(timeout=120), 0)
         floe_index("vfsd", cachepath.vfs_cache_dir(str(src)), ok=0)
 
+    def test_k13_the_light_cache_takes_the_same_locks(self):
+        """DIRECT_READ_PLAN L5: `floe-index light` is a whole build - a second
+        run is refused by its build lock naming it, a reader refuses a rebuild
+        (--force) and `floe2 index --light --force`; `--occupancy-only`
+        replacing a design.ovo a reader maps is refused, adding one beside the
+        reader goes ahead."""
+        d = TMP / "light"
+        d.mkdir()
+        src = d / "light.oas"
+        write_layout(src, n=6)
+        cache = Path(cachepath.vfs_cache_dir(str(src)))
+        flag = d / "go"
+        first = subprocess.Popen(
+            [str(BIN), "light", str(src), "--jobs", "2", "--hold-at", "locked:%s" % flag],
+            stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True)
+        self.addCleanup(lambda: first.poll() is None and first.kill())
+        line = ""
+        while "--hold-at locked" not in line:
+            line = first.stderr.readline()
+            self.assertTrue(line or first.poll() is None, "the first light run ended early")
+        second = floe_index("light", src, "--jobs", "2")
+        self.assertEqual(second.returncode, 75, second.stderr)
+        self.assertIn("light.oas is being indexed by", lock_line(second))
+        self.assertIn("(floe-index light)", lock_line(second))
+        flag.write_text("go")
+        first.stderr.read()
+        first.stderr.close()
+        self.assertEqual(first.wait(timeout=120), 0)
+        self.assertTrue((cache / "design.inv").is_file() and not (cache / "design.ovm").exists())
+        # a reader: the rebuild is refused, an added summary goes in beside it,
+        # replacing that summary is refused while the reader is there
+        w = open_worker(src)
+        try:
+            for argv in ([BIN, "light", src, "--jobs", "2", "--force"],
+                         [FLOE2, "index", src, "--light", "--force", "--jobs", "2"]):
+                res = run(argv)
+                self.assertEqual(res.returncode, 75, (argv, res.stderr))
+                self.assertIn("light.oas is in use by %s" % HOLDER, lock_line(res))
+            floe_index("light", src, "--occupancy-only", "--jobs", "2", ok=0)
+            self.assertTrue((cache / "design.ovo").is_file())
+            res = floe_index("light", src, "--occupancy-only", "--jobs", "2")
+            self.assertEqual(res.returncode, 75, res.stderr)
+            self.assertIn("light.oas is in use by %s" % HOLDER, lock_line(res))
+        finally:
+            w.stop()
+        floe_index("light", src, "--occupancy-only", "--jobs", "2", ok=0)
+        res = floe2("index", src, "--light", "--force", "--jobs", "2", ok=0)
+        self.assertIn("floe-index light", res.stdout)
+        # the build lock held by another run refuses the light command too
+        self.hold(full=False, target=cache)
+        res = floe_index("light", src, "--jobs", "2", "--force")
+        self.assertEqual(res.returncode, 75, res.stderr)
+        self.assertIn("light.oas is being indexed by", lock_line(res))
+
     def test_k3_a_whole_rebuild_refuses_its_readers(self):
         self.hold(full=True)
         from floe_oracle.cache import Cache
@@ -475,7 +529,9 @@ class IndexLockTests(unittest.TestCase):
         self.assertEqual(res.returncode, 75, res.stdout + res.stderr)
         self.assertIn("BUSY srcB.oas", res.stdout)
         self.assertIn("index     : 1 built, 0 failed, 1 busy, 0 kept", res.stdout)
-        self.assertTrue((Path(cachepath.vfs_cache_dir(str(d / "srcA.oas"))) / "design.ovm").is_file())
+        # (a deck's source takes the light cache since L5: design.inv + meta.json)
+        built = Path(cachepath.vfs_cache_dir(str(d / "srcA.oas")))
+        self.assertTrue((built / "meta.json").is_file() and (built / "design.inv").is_file())
 
     def test_k6_the_legacy_rename_waits_for_the_locks(self):
         d = TMP / "legacy"

@@ -152,7 +152,7 @@ impl Dataset {
     pub fn info(&self) -> Value {
         match self {
             Self::Layout(l) => {
-                json!({"source":l.source,"cache":l.directory,"source_stale":l.source_stale,"metadata":l.metadata})
+                json!({"source":l.source,"cache":l.directory,"cache_kind":l.kind.name(),"source_stale":l.source_stale,"metadata":l.metadata})
             }
             // No private worker filename is exposed as a supposed cache. A deck
             // snapshot can be inspected without creating a spec file or daemon.

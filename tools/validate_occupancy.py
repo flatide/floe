@@ -1101,8 +1101,19 @@ sys.exit(9)
         self.assertIn("2 built, 0 failed, 0 kept", res.stdout)
         for c in caches:
             self.assertEqual(read_ovo(c / "design.ovo")["cell"], 5000)
-        before = {c: (sha(c / "design.ovm"), sha(c / "design.ovp"))
-                  for c in caches}
+
+        def index_files(c):
+            # a deck's sources take the light cache (DIRECT_READ_PLAN L5):
+            # its index files are design.inv / design.seg / meta.json, a
+            # full index's design.ovm / design.ovp - neither may change under
+            # an occupancy-only run
+            if (c / "design.ovm").exists():
+                return (sha(c / "design.ovm"), sha(c / "design.ovp"))
+            return (sha(c / "design.inv"), sha(c / "design.seg"), sha(c / "meta.json"))
+        for c in caches:
+            self.assertFalse((c / "design.ovm").exists(), c)
+            self.assertTrue((c / "design.seg").is_file(), c)
+        before = {c: index_files(c) for c in caches}
         res = floe2("index", deck_dir / "occ.jb", "--occupancy-only",
                     "--occupancy-um", "10", "--jobs", "2")
         self.assertIn("[jobdeck] occupancy : (1/2)", res.stdout)
@@ -1114,8 +1125,7 @@ sys.exit(9)
         self.assertIn("2 built, 0 failed, 0 kept", res.stdout)
         for c in caches:
             self.assertEqual(read_ovo(c / "design.ovo")["cell"], 10000)
-            self.assertEqual((sha(c / "design.ovm"), sha(c / "design.ovp")),
-                             before[c])
+            self.assertEqual(index_files(c), before[c])
         res = floe2("index", deck_dir / "occ.jb", "--occupancy", "--jobs", "2")
         self.assertIn("2 source(s) already indexed", res.stdout)
         self.assertIn("0 built, 0 failed, 2 kept", res.stdout)

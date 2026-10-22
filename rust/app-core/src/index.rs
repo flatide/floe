@@ -62,6 +62,11 @@ pub struct IndexOptions {
     /// whole-parse build (`--in-memory`).
     pub mode: IndexMode,
     pub mem_gib: Option<f64>,
+    /// the light cache (docs/DIRECT_READ_PLAN.ko.md §5.6, L5): `--light` /
+    /// `--full`; None = FLOE_INDEX_LIGHT=on|off, else the rule - a jobdeck's
+    /// sources light, a layout full - unless an option of the full index's
+    /// was given (`full_only`). `light_for` resolves it.
+    pub light: Option<bool>,
 }
 /// how `floe-index vfs` builds: see `IndexOptions::mode`
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -99,11 +104,75 @@ impl Default for IndexOptions {
             ovs: true,
             mode: IndexMode::Auto,
             mem_gib: None,
+            light: None,
         }
     }
 }
+/// FLOE_INDEX_LIGHT: the light cache for every source (`on`), the full
+/// index for every source (`off`), or unset - the rule (a jobdeck's sources
+/// light, a layout full).
+pub fn light_env() -> Option<bool> {
+    match std::env::var("FLOE_INDEX_LIGHT")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "on" | "yes" | "1" | "light" => Some(true),
+        "off" | "no" | "0" | "full" => Some(false),
+        _ => None,
+    }
+}
 impl IndexOptions {
+    /// The option given that the light cache has no use for - it has no
+    /// pages, no page BVH, no LOD, no text index - so the default rule builds
+    /// the full index for it, and `--light` refuses it. (`--no-page-occupancy`
+    /// and `--no-ovs` leave files out of the full index: moot under light, a
+    /// deck's sources carry the latter, so neither counts.)
+    pub fn full_only(&self) -> Option<&'static str> {
+        if self.lod {
+            Some("--lod")
+        } else if self.page_target_mb.is_some() {
+            Some("--page-target-mb")
+        } else if self.wants_representatives() {
+            Some("--representatives")
+        } else if self.hier_only {
+            Some("--hier-only")
+        } else if self.profile_cell.is_some() {
+            Some("--profile-cell")
+        } else if self.mode == IndexMode::Stream {
+            Some("--stream")
+        } else if self.mode == IndexMode::InMemory {
+            Some("--in-memory")
+        } else if self.slow_cell_s.is_some() {
+            Some("--slow-cell-s")
+        } else if self.p2_shard_limit_mb.is_some() {
+            Some("--p2-shard-limit-mb")
+        } else {
+            None
+        }
+    }
+    /// Whether this run builds the light cache: `--light` / `--full` as
+    /// given; else the full index when an option of its own was given; else
+    /// FLOE_INDEX_LIGHT; else a jobdeck's source light, a layout full
+    /// (DIRECT_READ_PLAN §10, decision 2).
+    pub fn light_for(&self, deck_source: bool) -> bool {
+        if let Some(light) = self.light {
+            return light;
+        }
+        if self.full_only().is_some() {
+            return false;
+        }
+        light_env().unwrap_or(deck_source)
+    }
     pub fn validate(&self) -> Result<()> {
+        if self.light == Some(true) {
+            if let Some(flag) = self.full_only() {
+                return Err(Error::input(format!(
+                    "--light builds the light cache (no pages, LOD or text index): not with {flag}; it takes --jobs, --occupancy*, --mem, --force and --wait"
+                )));
+            }
+        }
         if self
             .representatives_format
             .is_some_and(|n| n != 1 && n != 2)
@@ -232,21 +301,37 @@ pub enum Action {
 }
 
 /// Pure policy decision, independently testable without spawning a process.
+/// `kind` is the cache there (None: none); `light` whether this run would
+/// build the light cache (`IndexOptions::light_for`): a current light cache
+/// under a full request is built over (the full index holds everything the
+/// light one did, so nothing is lost and no --force is needed); a current
+/// full index under a light request is kept (it answers all the light cache
+/// would); the additive runs that need the full index's files refuse a
+/// light cache.
 pub fn decide(
     options: &IndexOptions,
     state: &CacheState,
     has_occupancy: bool,
     has_representatives: bool,
+    kind: Option<cache::CacheKind>,
+    light: bool,
 ) -> Result<Action> {
     options.validate()?;
     if options.profile_cell.is_some() {
         return Ok(Action::Profile);
     }
+    let light_here = kind == Some(cache::CacheKind::Light);
     if options.representatives_only {
         if *state != CacheState::Current {
             return Err(Error::new(
                 ErrorKind::Cache,
                 "--representatives-only needs a current cache",
+            ));
+        }
+        if light_here {
+            return Err(Error::new(
+                ErrorKind::Cache,
+                "--representatives-only needs the full index (the cache is light; index --full builds it)",
             ));
         }
         return Ok(Action::RepresentativesOnly);
@@ -267,7 +352,18 @@ pub fn decide(
                 "--hier-only needs a current cache",
             ));
         }
+        if light_here {
+            return Err(Error::new(
+                ErrorKind::Cache,
+                "--hier-only: a light cache's cell tree comes from its inventory, it has no design.ovh to build (index --full builds the full index)",
+            ));
+        }
         return Ok(Action::HierOnly);
+    }
+    if *state == CacheState::Current && light_here && !light {
+        // the full index over the light cache: nothing of the light cache
+        // is lost (the streaming build leaves its files beside the index)
+        return Ok(Action::Build);
     }
     if *state == CacheState::Current && !options.force {
         if options.wants_representatives()
@@ -325,16 +421,44 @@ fn arguments(
     directory: &Path,
     o: &IndexOptions,
     action: &Action,
+    light: bool,
 ) -> Result<Vec<OsString>> {
     if *action == Action::HierOnly {
         return Ok(vec!["hier".into(), directory.as_os_str().to_owned()]);
     }
+    fn add(a: &mut Vec<OsString>, flag: &str, value: impl ToString) {
+        a.extend([flag.into(), value.to_string().into()]);
+    }
+    // the light cache (floe-index light): the inventory pass's files, the
+    // summary with --occupancy, --occupancy-only on a light cache
+    if light && matches!(action, Action::Build | Action::OccupancyOnly) {
+        let mut a: Vec<OsString> = vec![
+            "light".into(),
+            source.as_os_str().to_owned(),
+            "--out".into(),
+            directory.as_os_str().to_owned(),
+        ];
+        add(&mut a, "--jobs", o.jobs);
+        if *action == Action::OccupancyOnly {
+            a.push("--occupancy-only".into());
+            occupancy_args(&mut a, o);
+        } else {
+            if o.wants_occupancy() {
+                a.push("--occupancy".into());
+                occupancy_args(&mut a, o);
+            }
+            if o.force {
+                a.push("--force".into());
+            }
+        }
+        if let Some(g) = o.mem_gib {
+            a.extend(["--mem".into(), g.to_string().into()]);
+        }
+        return Ok(a);
+    }
     let mut a: Vec<OsString> = vec!["vfs".into(), source.as_os_str().to_owned()];
     if *action != Action::Profile {
         a.push(directory.as_os_str().to_owned());
-    }
-    fn add(a: &mut Vec<OsString>, flag: &str, value: impl ToString) {
-        a.extend([flag.into(), value.to_string().into()]);
     }
     add(&mut a, "--jobs", o.jobs);
     if matches!(action, Action::RepresentativesOnly | Action::SummariesOnly) {
@@ -508,8 +632,21 @@ pub struct PreparedIndex {
     next_args: Option<Vec<OsString>>,
     /// the indexer's stdout onto stderr (`on_stderr`)
     on_stderr: bool,
+    /// this run builds the light cache (`IndexOptions::light_for`)
+    light: bool,
+    /// what the run says about the cache it found (a light cache built
+    /// over, a full index kept under --light)
+    note: Option<String>,
 }
 impl PreparedIndex {
+    /// Whether this run builds (or adds to) the light cache.
+    pub fn light(&self) -> bool {
+        self.light
+    }
+    /// A line about the cache found, when there is something to say.
+    pub fn note(&self) -> Option<&str> {
+        self.note.as_deref()
+    }
     /// The indexer's output all on stderr: an index a read command runs
     /// first (app-cli ready.rs), its stdout the command's (`info --json`).
     pub fn on_stderr(mut self) -> Self {
@@ -638,12 +775,36 @@ impl PreparedIndex {
         } else {
             cache::inspect(&source, &directory)?
         };
+        let kind = if profiling { None } else { cache::cache_kind(&directory) };
+        // a jobdeck's source comes with its kind decided (jobdeck::index);
+        // a layout alone follows the rule
+        let light = options.light_for(false);
         let action = decide(
             options,
             &state,
             directory.join("design.ovo").is_file(),
             directory.join("design.ovr").is_file(),
+            kind,
+            light,
         )?;
+        // the run the arguments are for: an occupancy-only run on a light
+        // cache is the light command's; a build is what was asked
+        let light_run = match action {
+            Action::OccupancyOnly => kind == Some(cache::CacheKind::Light),
+            Action::Build => light,
+            _ => false,
+        };
+        let note = match (kind, action.clone(), light) {
+            (Some(cache::CacheKind::Light), Action::Build, false) => Some(format!(
+                "the light cache of {} becomes the full index (its files stay beside it)",
+                source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+            )),
+            (Some(cache::CacheKind::Full), Action::Reuse | Action::OccupancyPresent | Action::OccupancyOnly, true) => Some(format!(
+                "{} has the full index, which answers everything the light cache would; kept (--force --light replaces it)",
+                source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+            )),
+            _ => None,
+        };
         if cancelled.load(Ordering::Relaxed) != 0 {
             return Err(Error::new(
                 ErrorKind::Cancelled,
@@ -655,7 +816,7 @@ impl PreparedIndex {
         } else {
             cache::default_cache_path(&source)?
         };
-        let args = arguments(&source, &destination, options, &action)?;
+        let args = arguments(&source, &destination, options, &action, light_run)?;
         // Both additive passes retain the same locks and migration receipt.
         // If the second fails, the first publication remains; this is not a
         // transaction across independent summary files.
@@ -665,6 +826,7 @@ impl PreparedIndex {
                 &destination,
                 options,
                 &Action::OccupancyOnly,
+                false,
             )?)
         } else {
             None
@@ -696,6 +858,8 @@ impl PreparedIndex {
             cleanup_representatives: !profiling && options.wants_representatives(),
             next_args,
             on_stderr: false,
+            light: light_run,
+            note,
         })
     }
     pub fn start(self, cancelled: &AtomicUsize) -> Result<IndexJob> {
@@ -1053,43 +1217,99 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]
+    fn the_light_cache_decisions() {
+        // DIRECT_READ_PLAN L5: a full request over a current light cache
+        // builds (nothing is lost); a light request over a full index keeps
+        // it; the additive runs that need the full index's files refuse a
+        // light cache; a light cache without its summary gets it from the
+        // light command's occupancy-only run
+        use crate::cache::CacheKind::{Full, Light};
+        let o = IndexOptions::default();
+        assert_eq!(decide(&o, &CacheState::Current, false, false, Some(Light), false).unwrap(), Action::Build);
+        assert_eq!(decide(&o, &CacheState::Current, false, false, Some(Light), true).unwrap(), Action::Reuse);
+        assert_eq!(decide(&o, &CacheState::Current, false, false, Some(Full), true).unwrap(), Action::Reuse);
+        assert_eq!(decide(&o, &CacheState::Missing, false, false, None, true).unwrap(), Action::Build);
+        let mut o = IndexOptions {
+            occupancy: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(decide(&o, &CacheState::Current, false, false, Some(Light), true).unwrap(), Action::OccupancyOnly);
+        assert_eq!(decide(&o, &CacheState::Current, true, false, Some(Light), true).unwrap(), Action::OccupancyPresent);
+        o.occupancy = None;
+        o.hier_only = true;
+        assert!(decide(&o, &CacheState::Current, false, false, Some(Light), false).is_err());
+        o.hier_only = false;
+        o.representatives_only = true;
+        assert!(decide(&o, &CacheState::Current, false, false, Some(Light), false).is_err());
+        // the arguments: the light command's forms
+        let o = IndexOptions {
+            occupancy: Some(true),
+            occupancy_um: Some(2.0),
+            mem_gib: Some(1.5),
+            force: true,
+            ..Default::default()
+        };
+        let a = arguments(Path::new("/x/s.oas"), Path::new("/x/.s.oas.ice"), &o, &Action::Build, true).unwrap();
+        let words: Vec<String> = a.iter().map(|w| w.to_string_lossy().into_owned()).collect();
+        assert_eq!(
+            words,
+            ["light", "/x/s.oas", "--out", "/x/.s.oas.ice", "--jobs", "12", "--occupancy", "--occupancy-um", "2.0", "--force", "--mem", "1.5"]
+        );
+        let a = arguments(Path::new("/x/s.oas"), Path::new("/x/.s.oas.ice"), &o, &Action::OccupancyOnly, true).unwrap();
+        let words: Vec<String> = a.iter().map(|w| w.to_string_lossy().into_owned()).collect();
+        assert_eq!(
+            words,
+            ["light", "/x/s.oas", "--out", "/x/.s.oas.ice", "--jobs", "12", "--occupancy-only", "--occupancy-um", "2.0", "--mem", "1.5"]
+        );
+        // the rule: a layout full, a deck's source light, an option of the
+        // full index's picks it, --light with one is refused
+        let o = IndexOptions::default();
+        assert!(!o.light_for(false) && o.light_for(true));
+        let o = IndexOptions { lod: true, ..Default::default() };
+        assert!(!o.light_for(true));
+        let o = IndexOptions { light: Some(true), lod: true, ..Default::default() };
+        assert!(o.validate().is_err());
+        let o = IndexOptions { light: Some(true), occupancy_only: true, ..Default::default() };
+        assert!(o.validate().is_ok());
+    }
+    #[test]
     fn representatives_are_explicit_additive_and_bounded() {
         let mut o = IndexOptions {
             representatives: true,
             ..Default::default()
         };
         assert_eq!(
-            decide(&o, &CacheState::Missing, false, false).unwrap(),
+            decide(&o, &CacheState::Missing, false, false, None, false).unwrap(),
             Action::Build
         );
         assert_eq!(
-            decide(&o, &CacheState::Current, false, false).unwrap(),
+            decide(&o, &CacheState::Current, false, false, None, false).unwrap(),
             Action::RepresentativesOnly
         );
         assert_eq!(
-            decide(&o, &CacheState::Current, false, true).unwrap(),
+            decide(&o, &CacheState::Current, false, true, None, false).unwrap(),
             Action::Reuse
         );
         o.occupancy = Some(true);
         assert_eq!(
-            decide(&o, &CacheState::Current, false, false).unwrap(),
+            decide(&o, &CacheState::Current, false, false, None, false).unwrap(),
             Action::SummariesOnly
         );
         assert_eq!(
-            decide(&o, &CacheState::Current, true, false).unwrap(),
+            decide(&o, &CacheState::Current, true, false, None, false).unwrap(),
             Action::RepresentativesOnly
         );
         assert_eq!(
-            decide(&o, &CacheState::Current, false, true).unwrap(),
+            decide(&o, &CacheState::Current, false, true, None, false).unwrap(),
             Action::OccupancyOnly
         );
         assert_eq!(
-            decide(&o, &CacheState::Current, true, true).unwrap(),
+            decide(&o, &CacheState::Current, true, true, None, false).unwrap(),
             Action::OccupancyPresent
         );
         o.representatives_points = Some(64);
         assert_eq!(
-            decide(&o, &CacheState::Current, true, true).unwrap(),
+            decide(&o, &CacheState::Current, true, true, None, false).unwrap(),
             Action::RepresentativesOnly
         );
         for (action, expected, excluded) in [
@@ -1110,16 +1330,16 @@ mod tests {
                 "--representatives",
             ),
         ] {
-            let a = arguments(Path::new("/s"), Path::new("/c"), &o, &action).unwrap();
+            let a = arguments(Path::new("/s"), Path::new("/c"), &o, &action, false).unwrap();
             assert!(a.contains(&OsString::from(expected)));
             assert!(!a.contains(&OsString::from(excluded)));
         }
         o.representatives_only = true;
         assert!(o.validate().is_err());
         o.occupancy = None;
-        assert!(decide(&o, &CacheState::Missing, false, false).is_err());
+        assert!(decide(&o, &CacheState::Missing, false, false, None, false).is_err());
         assert_eq!(
-            decide(&o, &CacheState::Current, true, true).unwrap(),
+            decide(&o, &CacheState::Current, true, true, None, false).unwrap(),
             Action::RepresentativesOnly
         );
         for n in [0, 4_194_305] {
@@ -1137,7 +1357,7 @@ mod tests {
             o.representatives_format = Some(format);
             assert!(o.wants_representatives());
             assert_eq!(
-                decide(&o, &CacheState::Current, true, true).unwrap(),
+                decide(&o, &CacheState::Current, true, true, None, false).unwrap(),
                 Action::RepresentativesOnly
             );
             for action in [
@@ -1145,7 +1365,7 @@ mod tests {
                 Action::RepresentativesOnly,
                 Action::SummariesOnly,
             ] {
-                let a = arguments(Path::new("/s"), Path::new("/c"), &o, &action).unwrap();
+                let a = arguments(Path::new("/s"), Path::new("/c"), &o, &action, false).unwrap();
                 assert!(a.windows(2).any(|w| w
                     == [
                         OsString::from("--representatives-format"),
@@ -1162,7 +1382,7 @@ mod tests {
         for prune in [false, true] {
             o.occupancy_prune = Some(prune);
             for action in [Action::Build, Action::OccupancyOnly] {
-                let a = arguments(Path::new("/s"), Path::new("/c"), &o, &action).unwrap();
+                let a = arguments(Path::new("/s"), Path::new("/c"), &o, &action, false).unwrap();
                 assert!(a.windows(2).any(|w| w
                     == [
                         OsString::from("--occupancy-prune"),
@@ -1170,7 +1390,7 @@ mod tests {
                     ]));
             }
             assert_eq!(
-                decide(&o, &CacheState::Current, true, true).unwrap(),
+                decide(&o, &CacheState::Current, true, true, None, false).unwrap(),
                 Action::OccupancyPresent
             );
         }
@@ -1179,6 +1399,7 @@ mod tests {
             Path::new("/c"),
             &IndexOptions::default(),
             &Action::Build,
+            false,
         )
         .unwrap();
         assert!(!a.contains(&OsString::from("--representatives-format")));
@@ -1191,32 +1412,32 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            decide(&o, &CacheState::Missing, false, false).unwrap(),
+            decide(&o, &CacheState::Missing, false, false, None, false).unwrap(),
             Action::Build
         );
         assert_eq!(
-            decide(&o, &CacheState::Current, false, false).unwrap(),
+            decide(&o, &CacheState::Current, false, false, None, false).unwrap(),
             Action::Reuse
         );
         let stale = CacheState::Unusable("stale".into());
-        assert!(decide(&o, &stale, false, false).is_err());
+        assert!(decide(&o, &stale, false, false, None, false).is_err());
         o.occupancy = Some(true);
         o.occupancy_balance = Some(false);
         assert_eq!(
-            decide(&o, &CacheState::Current, false, false).unwrap(),
+            decide(&o, &CacheState::Current, false, false, None, false).unwrap(),
             Action::OccupancyOnly
         );
         assert_eq!(
-            decide(&o, &CacheState::Current, true, false).unwrap(),
+            decide(&o, &CacheState::Current, true, false, None, false).unwrap(),
             Action::OccupancyPresent
         );
         o.force = true;
-        assert_eq!(decide(&o, &stale, true, false).unwrap(), Action::Build);
+        assert_eq!(decide(&o, &stale, true, false, None, false).unwrap(), Action::Build);
         o.occupancy = Some(false);
         o.occupancy_only = true;
-        assert!(decide(&o, &stale, true, false).is_err());
+        assert!(decide(&o, &stale, true, false, None, false).is_err());
         assert_eq!(
-            decide(&o, &CacheState::Current, true, false).unwrap(),
+            decide(&o, &CacheState::Current, true, false, None, false).unwrap(),
             Action::OccupancyOnly
         );
     }
@@ -1233,6 +1454,7 @@ mod tests {
             Path::new("/NEVER"),
             &o,
             &Action::Profile,
+            false,
         )
         .unwrap();
         assert!(!a.contains(&OsString::from("/NEVER")));
@@ -1246,13 +1468,13 @@ mod tests {
         let mut o = IndexOptions::default();
         assert_eq!(o.occupancy, None);
         assert_eq!(
-            decide(&o, &CacheState::Current, false, false).unwrap(),
+            decide(&o, &CacheState::Current, false, false, None, false).unwrap(),
             Action::Reuse
         );
         o.occupancy = Some(true);
         o.occupancy_balance = Some(false);
         assert_eq!(
-            decide(&o, &CacheState::Current, false, false).unwrap(),
+            decide(&o, &CacheState::Current, false, false, None, false).unwrap(),
             Action::OccupancyOnly
         );
         let a = arguments(
@@ -1260,13 +1482,14 @@ mod tests {
             Path::new("/cache"),
             &o,
             &Action::Build,
+            false,
         )
         .unwrap();
         assert!(a.contains(&OsString::from("--occupancy")));
         assert!(a.windows(2).any(|w| w == ["--occupancy-balance", "0"]));
         o.occupancy_only = true;
         assert_eq!(
-            decide(&o, &CacheState::Current, true, false).unwrap(),
+            decide(&o, &CacheState::Current, true, false, None, false).unwrap(),
             Action::OccupancyOnly
         );
         let a = arguments(
@@ -1274,6 +1497,7 @@ mod tests {
             Path::new("/cache"),
             &o,
             &Action::OccupancyOnly,
+            false,
         )
         .unwrap();
         assert!(a.contains(&OsString::from("--occupancy-only")));
@@ -1288,6 +1512,7 @@ mod tests {
             Path::new("/cache"),
             &o,
             &Action::Profile,
+            false,
         )
         .unwrap();
         assert!(!a.iter().any(|v| v.to_string_lossy().contains("occupancy")));
@@ -1339,11 +1564,11 @@ mod stream_policy_tests {
         o.occupancy = Some(true);
         for mode in [IndexMode::Auto, IndexMode::Stream, IndexMode::InMemory] {
             o.mode = mode;
-            assert_eq!(decide(&o, &CacheState::Current, false, false).unwrap(), Action::OccupancyOnly);
-            assert_eq!(decide(&o, &CacheState::Current, true, false).unwrap(), Action::OccupancyPresent);
-            assert_eq!(decide(&o, &CacheState::Missing, false, false).unwrap(), Action::Build);
+            assert_eq!(decide(&o, &CacheState::Current, false, false, None, false).unwrap(), Action::OccupancyOnly);
+            assert_eq!(decide(&o, &CacheState::Current, true, false, None, false).unwrap(), Action::OccupancyPresent);
+            assert_eq!(decide(&o, &CacheState::Missing, false, false, None, false).unwrap(), Action::Build);
             for action in [Action::Build, Action::OccupancyOnly] {
-                let a = arguments(Path::new("x.oas"), Path::new("x.ice"), &o, &action).unwrap();
+                let a = arguments(Path::new("x.oas"), Path::new("x.ice"), &o, &action, false).unwrap();
                 assert_eq!(a.contains(&OsString::from("--stream")), mode == IndexMode::Stream, "{mode:?} {action:?}");
                 assert_eq!(a.contains(&OsString::from("--in-memory")), mode == IndexMode::InMemory, "{mode:?} {action:?}");
                 assert!(!a.contains(&OsString::from("--mem")));
@@ -1352,9 +1577,9 @@ mod stream_policy_tests {
         o.mode = IndexMode::Auto;
         o.mem_gib = Some(2.5);
         assert!(o.validate().is_ok(), "mem with the default mode streams");
-        let a = arguments(Path::new("x.oas"), Path::new("x.ice"), &o, &Action::Build).unwrap();
+        let a = arguments(Path::new("x.oas"), Path::new("x.ice"), &o, &Action::Build, false).unwrap();
         assert!(a.windows(2).any(|w| w == ["--mem", "2.5"]));
-        let a = arguments(Path::new("x.oas"), Path::new("x.ice"), &o, &Action::OccupancyOnly).unwrap();
+        let a = arguments(Path::new("x.oas"), Path::new("x.ice"), &o, &Action::OccupancyOnly, false).unwrap();
         assert!(a.windows(2).any(|w| w == ["--mem", "2.5"]));
         o.mode = IndexMode::InMemory;
         assert!(o.validate().is_err(), "mem with --in-memory");

@@ -29,9 +29,24 @@ already present)"; 요약 없는 레이아웃 캐시는 그대로 둔다. 셀 �
 open .db 인덱싱도 동일하게 `--jobs 12`(+VFS는 `--occupancy --no-lod`; load
 jobdeck은 `floe2 index deck.jb`라 기본이 그대로 적용)로 실행한다.
 
+**경량 캐시(2026-10-22, app 0.12.383, DIRECT_READ_PLAN L5)**: `floe2 index SRC --light`는
+`floe-index light`로 design.inv + design.seg + meta.json(+ `--occupancy`면 design.ovo)만
+만들고 뷰어·캡처는 원본에서 직접 읽는다; `--full`은 전체 색인이다. 둘 다 없으면
+**덱의 소스는 경량, 레이아웃은 전체**가 기본이고(`FLOE_INDEX_LIGHT=on|off`가 모든
+소스의 기본을 바꾼다), 전체 색인만의 옵션(`--lod`, `--page-target-mb`,
+`--representatives*`, `--hier-only`, `--profile-*`, `--stream`, `--in-memory`,
+`--slow-cell-s`, `--p2-shard-limit-mb`)이 있으면 전체다(`--light`와 함께면 거절;
+`--no-ovs`·`--no-page-occupancy`는 전체 색인의 파일을 빼는 옵션이라 경량에서는 무의미할 뿐
+거절하지 않는다 — 덱 소스가 `--no-ovs`를 달고 온다). 경량 캐시 위에 전체 요청은 `--force` 없이 전체를
+만들고(잃는 것이 없다), 전체 색인 위에 경량 요청은 유지한다(`--force --light`가
+교체). `floe2 info`는 `cache … (…, light: the geometry is read from the source)`와
+inv/seg/ovo 크기를, `--json`은 `cache_kind`를 낸다. `floe2 clip`은 경량 캐시를 거절한다
+(페이지 파일이 없다). 열기는 design.ovm이 있으면 전체, 아니면 design.inv가 있으면
+경량이다(app-core `cache::cache_kind`).
+
 정상 VFS cache의 cache version과 source size/mtime fingerprint가 맞고,
 `floe-index vfsd`의 `Vfs::open` 검증(OVM 구조 + OVP/OVT committed length)을
-통과하면 재사용한다. 기존 cache가 stale/incomplete/non-VFS/corrupt이면
+통과하면 재사용한다(경량 캐시는 design.inv·design.seg의 헤더로 identity·짝을 본다). 기존 cache가 stale/incomplete/non-VFS/corrupt이면
 `--force` 없이 Rust를 실행하지 않는다. 즉 `--force`만 기존 `.<src>.ice`를
 교체할 권한이다. 현재 cache에 `--coverage`를 지정하면 `--coverage-only`로
 `design.ovc`만 비파괴 추가한다.
@@ -106,16 +121,25 @@ bbox 합집합, 도형 치수 최대)를 Doc에서 같은 식으로 계산한 �
 0.12.381); `--load-seg design.seg`는 읽어서 design.inv와 짝인지(`"pair_ok"`), 소스가
 있으면 새 디렉터리와 같은 바이트인지(`"identical"`) 본다(0.12.380, L2 §8.3).
 
-`floe-index light <src.oas> [--out DIR] [--jobs N] [--seg-bytes N]`(0.12.382,
-DIRECT_READ_PLAN L4 §8.5)은 경량 캐시의 파일을 쓴다: 재고 패스 한 번으로 design.inv와
-design.seg(짝)를, 그리고 전체 색인의 키에 `"cache": "light"`를 더한 meta.json을 DIR(기본
-`.<src.oas>.ice`)에 둔다. design.ovm이 있는 디렉터리는 건드리지 않는다(종료 1). 두 파일은
-스트리밍 빌드가 캐시 옆에 두는 것과 같은 바이트다(게이트 `light_cache`). 렌더러(render-core
-`Cache::open`)는 design.ovm이 없고 design.inv가 있는 디렉터리를 경량으로 열어 소스
-(meta.json `src.path`, 없으면 `.NAME.ice`의 NAME; size/mtime이 맞아야 한다)에서 직접
-읽는다 — 셀 디렉터리는 재고, 페이지는 세그먼트 × 레이어, 배치는 플랜이 방문한 셀부터
-pread + inflate + `parse_segment`로 채운다. CBLOCK 안에 정의된 셀이 있는 스트림은 경량으로
-열리지 않는다(명령이 경고한다). 요약 패스(design.ovo)·잠금·`floe2 index --light`는 L5.
+`floe-index light <src.oas> [--out DIR] [--jobs N] [--seg-bytes N] [--occupancy
+[--occupancy-um UM] [--occupancy-balance 0|1] [--occupancy-prune 0|1]] [--occupancy-only]
+[--mem GiB] [--force]`(0.12.382 L4, 0.12.383 L5; DIRECT_READ_PLAN §8.5·§8.6)는 경량
+캐시를 만든다: 소스를 매핑한 재고 패스 한 번(스트리밍 빌드의 1차 패스)으로 design.inv와
+design.seg(짝)를, 그리고 전체 색인의 키에 `"cache": "light"`를 더한 meta.json(커밋 마커,
+마지막)을 DIR(기본 `.<src.oas>.ice`)에 둔다. `--occupancy`는 스트리밍 요약 패스로
+design.ovo를 더하는데, 인스턴스의 배치는 파일 전체를 다시 파싱하지 않고 방금 쓴 세그먼트
+디렉터리의 배치 플래그 세그먼트에서 읽는다(바이트는 `vfs --occupancy`의 design.ovo와
+같다 — 게이트 `light_cache`); `--occupancy-only`는 경량 캐시에 design.ovo를 더한다
+(identity 확인; 전체 색인이나 경량 캐시 없는 디렉터리는 종료 1). design.ovm이 있는
+디렉터리는 `--force`에만 손댄다(전체 색인의 파일을 지우고 경량으로 교체). 잠금은 `vfs`와
+같다(§4.5). 덱은 옆의 floe2에 `index DECK --light`로 넘긴다. 두 파일은 스트리밍 빌드가
+캐시 옆에 두는 것과 같은 바이트다. 렌더러(render-core `Cache::open`)는 design.ovm이 없고
+design.inv가 있는 디렉터리를 경량으로 열어 소스(meta.json `src.path`, 없으면 `.NAME.ice`의
+NAME; size/mtime이 맞아야 한다)에서 직접 읽는다 — 셀 디렉터리는 재고, 페이지는 세그먼트 ×
+레이어, 배치는 플랜이 방문한 셀부터 pread + inflate + `parse_segment`로 채운다. CBLOCK
+안에 정의된 셀이 있는 스트림은 경량으로 열리지 않는다(명령이 경고한다). 배치 수가 요약
+패스의 상한(5천만)을 넘으면 요약을 건너뛴다. 제품 쪽(`floe2 index --light/--full`, 기본
+규칙, info, clip)은 §0.
 
 ### 1.1 단일 셀 비게시 프로파일
 
@@ -199,8 +223,10 @@ STREAMING_INDEX_PLAN §11. 소스를 읽어 캐시를 만드는 실행은 **스�
   256K)이 CBLOCK 없는 구간의 길이. 재고 패스 시간의 +10~15 %. 게이트 `vfs_stream`은
   design.inv와 같은 규칙으로 본다(`floe-index inventory --seg`와 같은 바이트, 짝,
   인메모리에 없음, 묵은 파일 제거, `--no-seg`). 같은 두 파일이 경량 캐시의 색인이다
-  (`floe-index light`, DIRECT_READ_PLAN L4): design.ovm이 없는 디렉터리를 렌더러가 그
-  둘과 소스로 연다.
+  (`floe-index light`, DIRECT_READ_PLAN L4·L5): design.ovm이 없는 디렉터리를 렌더러가 그
+  둘과 소스로 연다. 경량 생성은 재고 패스 + (요청 시) 요약 패스뿐이고 본 빌드가 없다;
+  요약 패스의 배치는 세그먼트 디렉터리에서 읽는다(places 패스 없음). 전체 색인을 그
+  위에 만들면 `clear_outputs`가 경량 파일을 지우고 스트리밍 빌드가 다시 쓴다.
 - `floe2 index`는 같은 세 플래그(`--stream`, `--in-memory`, `--mem`)를 그대로 넘기고,
   기본은 아무것도 넘기지 않는다(floe-index의 기본 = 스트리밍). 덱 소스·뷰어의 덱
   색인·자동 색인도 같다. design.ovo 없는 현재 캐시의 점유 추가(`occupancy` 실행)도
@@ -365,6 +391,8 @@ CACHE-NAMING §5에 있다.
 |---|---|---|
 | `vfs` 본 빌드 | 배타(끝까지) | 배타(원본을 읽기 전부터 `design.ovm` 커밋 직후까지; 뒤의 ovs 단계 동안은 열 수 있다) |
 | `vfs --occupancy-only/--representatives-only/--coverage-only/--frontier-only`, `hier`(`--check` 제외), `ovs` | 배타 | 새 파일을 더하면 — ; 독자가 mmap하는 기존 `design.ovo`(`--occupancy-only`)·`design.ovr`(`--representatives-only`)·`design.ovh`(`hier`)를 바꾸면 배타(0.12.325) |
+| `light` 빌드(0.12.383) | 배타(끝까지) | 배타(원본을 읽기 전부터 meta.json 커밋 직후까지; 뒤의 요약 패스 동안은 열 수 있다) |
+| `light --occupancy-only` | 배타 | 새 design.ovo면 — ; 기존 design.ovo를 바꾸면 배타 |
 | `vfsd` | — | 공유 + 등록 |
 | `drc <db> [out]`(DRC 팩, 0.12.324) | 배타(임시 파일 쓸기 전부터) | 배타(팩 리더 `IcePack`이 연 동안은 거절) |
 | `svrf <deck> [-o out]`(0.12.324) | 배타(쓰기 직전; `--scan`은 없음) | — |

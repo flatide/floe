@@ -106,6 +106,9 @@ FLOE_AUTO_INDEX=off: refuse instead); a source another run indexes is refused
 (exit 75) unless --wait[=SECONDS] (FLOE_LOCK_WAIT=on|SECONDS) waits for it.
 Indexing streams the source by default (0.12.370: an inventory pass, then the cells in file
 order behind --mem GiB; --in-memory or FLOE_INDEX_STREAM=off is the whole-parse build). A
+jobdeck's sources get the light cache (design.inv + design.seg + design.ovo, the geometry
+read from the source; index --light / --full, FLOE_INDEX_LIGHT=on|off), a layout the full
+index. A
 build that outgrows the host stops at the memory ceiling (FLOE_RSS_CEILING: a percent of
 MemTotal, default 90, or bytes such as 300G, or off; exit 71) and says what to do.
 DRC: read-only ICE/ASCII queries; explicit --build [--force] for atomic packs.
@@ -146,6 +149,16 @@ const INDEX_HELP: &str = "Usage: floe2-web index SOURCE [OPTIONS]
   --mem GiB                  Streaming budget for resident cells (default
                              min(MemAvailable/2, 32), raised to the source's largest
                              cell when the host has it); not with --in-memory
+  --light                    The light cache (floe-index light): design.inv + design.seg
+                             from one inventory pass, design.ovo with --occupancy; the
+                             viewer reads the geometry from the source. The default for
+                             a jobdeck's sources (FLOE_INDEX_LIGHT=on|off sets it for
+                             every source). Not with --lod, --page-target-mb,
+                             --representatives*, --hier-only, --profile-*, --stream,
+                             --in-memory, --slow-cell-s, --p2-shard-limit-mb
+  --full                     The full index (the default for a layout; also when one
+                             of the options above is given). A current light cache is
+                             built over; a full index is kept under --light
   --profile-cell NAME        Profile one cell without writing a normal cache
   --profile-cell-ci N        Profile by zero-based cell index (exclusive)
   --profile-jobs N,N,...     Reuse parse/prepare across ordered job counts
@@ -355,6 +368,14 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
                 options.mode = IndexMode::InMemory;
             }
             "--mem" => options.mem_gib = Some(number(value()?, flag)?),
+            "--light" | "--full" => {
+                no_value()?;
+                let light = flag == "--light";
+                if options.light.is_some_and(|l| l != light) {
+                    return Err(Error::input("--light and --full are exclusive"));
+                }
+                options.light = Some(light);
+            }
             "--profile-cell" => {
                 if matches!(options.profile_cell, Some(ProfileCell::Index(_))) {
                     return Err(Error::input(
@@ -559,6 +580,9 @@ fn execute_index(
         prepared = prepared.on_stderr();
     }
     let action = prepared.action().clone();
+    if let Some(note) = prepared.note() {
+        out.line(&format!("[{}] {}", floe_app_core::program(), note));
+    }
     match action {
         Action::Reuse => {
             out.line(&format!(
@@ -710,6 +734,36 @@ mod tests {
         }
         assert!(parsed(&["index", "x", "--occupancy-only", "--no-occupancy"]).is_err());
         assert!(parsed(&["index", "x", "--no-occupancy", "--occupancy"]).is_err());
+    }
+    #[test]
+    fn the_light_cache_is_a_mode_of_its_own() {
+        // (DIRECT_READ_PLAN L5): --light / --full, exclusive; --light with an
+        // option of the full index's is refused; nothing given leaves the rule
+        let Cli::Index(_, o, _, _) = parsed(&["index", "x.oas", "--light"]).unwrap() else {
+            panic!()
+        };
+        assert_eq!(o.light, Some(true));
+        assert!(o.light_for(false) && o.light_for(true));
+        let Cli::Index(_, o, _, _) = parsed(&["index", "x.jb", "--full", "--level", "1"]).unwrap() else {
+            panic!()
+        };
+        assert_eq!(o.light, Some(false));
+        assert!(!o.light_for(true));
+        let Cli::Index(_, o, _, _) = parsed(&["index", "x.jb", "--lod"]).unwrap() else {
+            panic!()
+        };
+        assert_eq!(o.light, None);
+        assert_eq!(o.full_only(), Some("--lod"));
+        assert!(!o.light_for(true), "an option of the full index's picks it");
+        assert!(parsed(&["index", "x", "--light", "--full"]).is_err());
+        for flag in ["--lod", "--hier-only", "--in-memory", "--stream", "--representatives"] {
+            assert!(parsed(&["index", "x", "--light", flag]).is_err(), "{flag}");
+        }
+        // leaving a file of the full index out is moot under light, not refused
+        // (a deck's sources come with --no-ovs)
+        assert!(parsed(&["index", "x", "--light", "--no-ovs", "--no-page-occupancy"]).is_ok());
+        assert!(parsed(&["index", "x", "--light", "--occupancy-only"]).is_ok());
+        assert!(parsed(&["index", "x", "--light", "--occupancy", "--occupancy-um", "2", "--mem", "1"]).is_ok());
     }
     #[test]
     fn invalid_or_unported_requests_never_launch_native() {

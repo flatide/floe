@@ -55,6 +55,10 @@ pub struct Skeleton {
 pub struct Metadata {
     pub version: u64,
     pub vfs: u64,
+    /// `"light"` in a light cache's meta.json (floe-index light); absent in
+    /// a full index's
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<String>,
     pub src: SourceInfo,
     pub dbu: f64,
     pub top_cell: String,
@@ -71,6 +75,8 @@ pub struct Layout {
     pub source: PathBuf,
     pub directory: PathBuf,
     pub metadata: Metadata,
+    /// the full index or the light cache (cache::CacheKind, by the files)
+    pub kind: cache::CacheKind,
     pub source_stale: bool,
     pub layer_props: Vec<styles::LayerProps>,
     /// how the layers' default colours were given (set_layer_colors)
@@ -187,16 +193,15 @@ impl Layout {
         if metadata.layers.iter().any(|l| !keys.insert(l.key())) {
             return Err(Error::new(ErrorKind::Cache, "duplicate layer in metadata"));
         }
-        let vfs = cache::validated_vfs(&directory)?;
-        if (vfs.ovm.src_size, vfs.ovm.src_mtime) != (metadata.src.size, metadata.src.mtime)
-            || (metadata.dbu * vfs.ovm.unit - 1.).abs() > 1e-12
+        let (marker_size, marker_mtime, unit, kind) = cache::validated_identity(&directory)?;
+        if (marker_size, marker_mtime) != (metadata.src.size, metadata.src.mtime)
+            || (metadata.dbu * unit - 1.).abs() > 1e-12
         {
             return Err(Error::new(
                 ErrorKind::Cache,
                 "metadata/marker identity or DBU mismatch",
             ));
         }
-        drop(vfs);
         let layer_props = styles::load_props(&source)?;
         let source_stale = fingerprint != (metadata.src.size, metadata.src.mtime);
         let mut layout = Self {
@@ -205,6 +210,7 @@ impl Layout {
             source,
             directory,
             metadata,
+            kind,
             source_stale,
             layer_props,
             layer_colors: styles::LayerColors::default(),
@@ -282,16 +288,25 @@ impl Layout {
     pub fn summary(&self, cancelled: &AtomicUsize) -> Result<String> {
         let m = &self.metadata;
         let bb = self.bbox_um();
-        let mut text = format!("source     : {} ({:.2} GB)\ntop cell   : {}\nbbox       : ({:.1}, {:.1}) - ({:.1}, {:.1}) um\ncache      : {}  ({:.1} MB, VFS v{})\n",
+        let light = self.kind == cache::CacheKind::Light;
+        let mut text = format!("source     : {} ({:.2} GB)\ntop cell   : {}\nbbox       : ({:.1}, {:.1}) - ({:.1}, {:.1}) um\ncache      : {}  ({:.1} MB, VFS v{}{})\n",
             m.src.path, m.src.size as f64 / 1e9, m.top_cell, bb[0], bb[1], bb[2], bb[3],
-            self.directory.display(), directory_size(&self.directory, cancelled)? as f64 / 1e6, m.vfs);
-        for part in ["design.ovm", "design.ovp"] {
-            writeln!(
-                text,
-                "  {part:<11}: {:.1} MB",
-                fs::metadata(self.directory.join(part))?.len() as f64 / 1e6
-            )
-            .unwrap();
+            self.directory.display(), directory_size(&self.directory, cancelled)? as f64 / 1e6, m.vfs,
+            if light { ", light: the geometry is read from the source" } else { "" });
+        let parts: &[&str] = if light {
+            &["design.inv", "design.seg", "design.ovo"]
+        } else {
+            &["design.ovm", "design.ovp"]
+        };
+        for part in parts {
+            match fs::metadata(self.directory.join(part)) {
+                Ok(m) => writeln!(text, "  {part:<11}: {:.1} MB", m.len() as f64 / 1e6).unwrap(),
+                // (a light cache without its summary yet)
+                Err(e) if light && e.kind() == std::io::ErrorKind::NotFound => {
+                    writeln!(text, "  {part:<11}: none (no wide-view summary yet: index --occupancy adds it)").unwrap()
+                }
+                Err(e) => return Err(e.into()),
+            }
         }
         let sk = m.skeleton.clone().unwrap_or_default();
         writeln!(

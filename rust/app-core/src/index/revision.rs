@@ -58,11 +58,13 @@ impl Build {
         let store = Store::new(source)?;
         indexer.verify(stop)?;
         let candidate = store.begin(stop)?;
+        // (a revision is the full index: the web seals design.ovm / ovp)
         let args = arguments(
             &crate::cache::absolute(source)?,
             &candidate.directory(),
             options,
             &Action::Build,
+            false,
         )?;
         check_cancelled(stop)?;
         let job = IndexJob::captured(&indexer, &args, super::PRIVATE_TARGET)?;

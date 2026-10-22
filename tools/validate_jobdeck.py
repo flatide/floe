@@ -770,12 +770,23 @@ class CliTests(unittest.TestCase):
         res = run_floe2("index", CLI / "test.jb", "--jobs", "2", env=env,
                         ok=0)
         self.assertIn("index     : 3 built, 0 failed, 0 kept", res.stdout)
+        # a deck's sources take the light cache (docs/DIRECT_READ_PLAN.ko.md
+        # §10 decision 2, L5): design.inv + design.seg + design.ovo and no
+        # design.ovm, meta.json saying so
+        self.assertIn("floe-index light", res.stdout)
         for name in ("chipA.oas", "chipB.oas", "mark.oas"):
             c = Cache(str(CLI / name))
             self.assertTrue(c.exists(), name)
             c.load()
             self.assertTrue(c.meta.get("vfs"), name)
+            self.assertEqual(c.meta.get("cache"), "light", name)
             self.assertFalse(c.is_stale(), name)
+            cache_dir = Path(c.dir)
+            self.assertFalse((cache_dir / "design.ovm").exists(), name)
+            for part in ("design.inv", "design.seg", "design.ovo"):
+                self.assertTrue((cache_dir / part).is_file(), (name, part))
+        info = run_floe2("info", CLI / "test.jb", env=env, ok=0)
+        self.assertIn("3 probed, 3 ok, 3 indexed", info.stdout)
         res = run_floe2("index", CLI / "test.jb", env=env, ok=0)
         self.assertIn("3 source(s) already indexed", res.stdout)
         self.assertIn("index     : 0 built, 0 failed, 3 kept", res.stdout)
@@ -810,7 +821,9 @@ class JobdeckIndexLodTests(unittest.TestCase):
 
             # The default still omits LOD, and --lod alone must not
             # overwrite a current cache; --force owns that permission.
-            first = run_floe2("index", deck, "--jobs", "2", env=env, ok=0)
+            # (L5: a plain deck index builds the light cache; this test is the
+            # full index's LOD forwarding, so it asks for the full index first)
+            first = run_floe2("index", deck, "--full", "--jobs", "2", env=env, ok=0)
             self.assertIn("3 built, 0 failed, 0 kept", first.stdout)
             self.assertEqual(lod_sources(), set())
             # the deck view never reads design.ovs: its sources get none
@@ -829,7 +842,8 @@ class JobdeckIndexLodTests(unittest.TestCase):
             self.assertIn("3 built, 0 failed, 0 kept", rebuilt.stdout)
             self.assertEqual(lod_sources(), set(names))
 
-            run_floe2("index", deck, "--force", "--no-lod", "--jobs",
+            # (--full: a plain --force builds the light cache since L5)
+            run_floe2("index", deck, "--force", "--full", "--no-lod", "--jobs",
                       "2", env=env, ok=0)
             self.assertEqual(lod_sources(), set())
             selected = run_floe2("index", deck, "--force", "--lod",
@@ -872,11 +886,24 @@ class JobdeckIndexLodTests(unittest.TestCase):
                                 "--jobs", "2", env=env, ok=0)
             self.assertIn("3 built, 0 failed, 0 kept", rebuilt.stdout)
             self.assertNotIn("stream: inventory", rebuilt.stdout + rebuilt.stderr)
+            # (L5: a plain --force on a deck builds the light cache - the
+            # streaming build's inventory pass and the summary, no design.ovm;
+            # --full is the full index again)
             streamed = run_floe2("index", deck, "--force", "--jobs", "2",
                                  env=env, ok=0)
             self.assertIn("3 built, 0 failed, 0 kept", streamed.stdout)
             self.assertIn("stream: inventory", streamed.stdout + streamed.stderr)
+            self.assertIn("floe-index light", streamed.stdout)
             for name in names:
+                self.assertTrue((marker(name).parent / "design.ovo").is_file(), name)
+                self.assertFalse(marker(name).exists(), name)
+                self.assertTrue((marker(name).parent / "design.seg").is_file(), name)
+            full = run_floe2("index", deck, "--force", "--full", "--jobs", "2",
+                             env=env, ok=0)
+            self.assertIn("3 built, 0 failed, 0 kept", full.stdout)
+            self.assertIn("floe-index vfs", full.stdout)
+            for name in names:
+                self.assertTrue(marker(name).is_file(), name)
                 self.assertTrue((marker(name).parent / "design.ovo").is_file(), name)
 
 

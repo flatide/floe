@@ -7,10 +7,14 @@ where the full index draws every shape.
 For the battery fixture (valmini), its KLayout rewrites (no CBLOCKs;
 strict mode) and two generated files (tools/gen_route_chip.py --scale
 0.05, tools/gen_main01_like.py --scale 0.001):
-  - `floe-index light SRC --out LIGHT` writes design.inv and design.seg
-    that are byte for byte the streaming build's (`floe-index vfs`
-    leaves them beside the full cache), and a meta.json with the full
-    index's keys (dbu, top_cell, bbox, layers) and `"cache": "light"`;
+  - `floe-index light SRC --out LIGHT --occupancy` writes design.inv and
+    design.seg that are byte for byte the streaming build's (`floe-index
+    vfs` leaves them beside the full cache), a design.ovo byte for byte
+    the streaming occupancy pass's (its instances from the segment
+    directory's placements), and a meta.json with the full index's keys
+    (dbu, top_cell, bbox, layers) and `"cache": "light"`; `--occupancy-only`
+    adds the same summary to a light cache (refused on a full index or
+    where no light cache is); `--force` replaces a full index;
   - floe-render-cli renders the full cache and the light directory at
     exact detail (cut 0): the whole extent, a near window, the near window
     at depth 1 with hierarchy frames, two layers alone - identical PNGs
@@ -109,15 +113,43 @@ def check_fixture(name, src, work):
     light = work / ("%s_light" % src.stem)
     shutil.rmtree(full, ignore_errors=True)
     shutil.rmtree(light, ignore_errors=True)
-    run([BIN, "vfs", src, full, "--no-lod", "--jobs", "2"], what="floe-index vfs")
-    r = run([BIN, "light", src, "--out", light, "--jobs", "2"], what="floe-index light")
+    run([BIN, "vfs", src, full, "--no-lod", "--occupancy", "--jobs", "2"], what="floe-index vfs")
+    r = run([BIN, "light", src, "--out", light, "--occupancy", "--jobs", "2"], what="floe-index light")
     if "[light]" not in r.stderr:
         fail("%s: no [light] line: %s" % (name, r.stderr[-300:]))
-    for f in ("design.inv", "design.seg"):
+    # the light command's files are the streaming build's, the summary
+    # (from the segment directory's placements) the streaming pass's
+    for f in ("design.inv", "design.seg", "design.ovo"):
         if (full / f).read_bytes() != (light / f).read_bytes():
             fail("%s: %s differs between the streaming build and floe-index light" % (name, f))
     if (light / "design.ovm").exists():
         fail("%s: the light directory holds a design.ovm" % name)
+    # --occupancy-only adds the same summary to a light cache without one;
+    # on a full index or no light cache it is refused
+    plain = work / ("%s_plain" % src.stem)
+    shutil.rmtree(plain, ignore_errors=True)
+    run([BIN, "light", src, "--out", plain, "--jobs", "2"], what="floe-index light (no summary)")
+    if (plain / "design.ovo").exists():
+        fail("%s: a light build without --occupancy wrote design.ovo" % name)
+    run([BIN, "light", src, "--out", plain, "--occupancy-only", "--jobs", "2"], what="floe-index light --occupancy-only")
+    if (plain / "design.ovo").read_bytes() != (full / "design.ovo").read_bytes():
+        fail("%s: --occupancy-only's design.ovo differs" % name)
+    for f in ("design.inv", "design.seg", "meta.json"):
+        if (plain / f).read_bytes() != (light / f).read_bytes():
+            fail("%s: --occupancy-only touched %s" % (name, f))
+    r = run([BIN, "light", src, "--out", full, "--occupancy-only"], ok=(1,), what="light --occupancy-only on a full index")
+    if "adds design.ovo to a light cache" not in r.stderr:
+        fail("%s: --occupancy-only on a full index: %s" % (name, r.stderr[-200:]))
+    empty = work / ("%s_empty" % src.stem)
+    empty.mkdir(exist_ok=True)
+    run([BIN, "light", src, "--out", empty, "--occupancy-only"], ok=(1,), what="light --occupancy-only without a light cache")
+    # --force over a full index replaces it with the light cache
+    victim = work / ("%s_victim" % src.stem)
+    shutil.rmtree(victim, ignore_errors=True)
+    shutil.copytree(full, victim)
+    run([BIN, "light", src, "--out", victim, "--jobs", "2", "--force"], what="floe-index light --force")
+    if (victim / "design.ovm").exists() or (victim / "design.ovp").exists() or not (victim / "design.seg").is_file():
+        fail("%s: --force did not replace the full index with the light cache: %s" % (name, sorted(p.name for p in victim.iterdir())))
     mf = json.loads((full / "meta.json").read_text())
     ml = json.loads((light / "meta.json").read_text())
     if ml.get("cache") != "light":
@@ -189,7 +221,7 @@ def check_fixture(name, src, work):
     if r.returncode == 0 or "does not say which source" not in r.stderr:
         fail("%s: a nameless light directory was not refused: %s" % (name, r.stderr[-300:]))
     print("OK  %-22s %d layers: %d exact views identical (same cells, edges, frames), cut view %d of %d lit pixels differ, "
-          "light files = the streaming build's, meta.json, refusals (%.1fs)"
+          "light files + design.ovo = the streaming build's, --occupancy-only, --force, meta.json, refusals (%.1fs)"
           % (name, len(mf["layers"]), len(views), diff, lit, time.time() - t0))
 
 

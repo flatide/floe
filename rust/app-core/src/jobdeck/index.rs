@@ -75,6 +75,10 @@ impl DeckIndexPlan {
         }
         let mut options = options.clone();
         options.occupancy = Some(options.occupancy.unwrap_or(true));
+        // a deck's sources take the light cache unless told otherwise
+        // (DIRECT_READ_PLAN §10 decision 2; --full, FLOE_INDEX_LIGHT=off, or
+        // an option of the full index's)
+        options.light = Some(options.light_for(true));
         if options.profile_cell.is_some() {
             return Err(Error::new(
                 ErrorKind::Unsupported,

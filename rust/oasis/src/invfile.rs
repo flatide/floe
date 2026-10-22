@@ -35,7 +35,7 @@ use std::path::Path;
 pub const MAGIC: &[u8; 8] = b"FLOEINV1";
 pub const VERSION: u32 = 1;
 pub const FILE_NAME: &str = "design.inv";
-const HEADER_LEN: usize = 72;
+pub const HEADER_LEN: usize = 72;
 
 const TAG_SCAN: u32 = 1;
 const TAG_LAYERS: u32 = 2;
@@ -798,6 +798,61 @@ fn read_fold(r: &mut Rd, n: usize, mask_bytes: usize) -> Result<Fold> {
 /// the header alone: the identity and the counts, without reading the
 /// body (what an opener compares against the source before trusting
 /// the file); the body's CRC is not checked here
+/// the header's fields (`peek_header`)
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InvHeader {
+    pub identity: Identity,
+    pub body_len: u64,
+    /// the body's CRC-32 - what design.seg's `inv_crc` names
+    pub body_crc: u32,
+    pub n_cells: usize,
+    pub n_layers: usize,
+    pub top: usize,
+    pub unit: f64,
+}
+
+/// The header alone (the file's first HEADER_LEN bytes): identity, counts,
+/// top and unit, the body's length and CRC - without the body (a cache
+/// probe reads this much and compares `body_len` with the file's size).
+pub fn peek_header(bytes: &[u8]) -> Result<InvHeader> {
+    if bytes.len() < HEADER_LEN {
+        return err(0, "design.inv: shorter than its header");
+    }
+    if &bytes[..8] != MAGIC {
+        return err(0, "design.inv: not a FLOEINV1 file");
+    }
+    let mut r = Rd::new(&bytes[8..HEADER_LEN], 8);
+    let version = r.u32()?;
+    if version != VERSION {
+        return err(8, &format!("design.inv: version {} (this build reads {})", version, VERSION));
+    }
+    let header_len = r.u32()? as usize;
+    if header_len != HEADER_LEN {
+        return err(12, "design.inv: header length");
+    }
+    let body_len = r.u64()?;
+    let body_crc = r.u32()?;
+    let _flags = r.u32()?;
+    let identity = Identity {
+        src_size: r.u64()?,
+        src_mtime: r.u64()?,
+    };
+    let n_cells = r.u32()? as usize;
+    let n_layers = r.u32()? as usize;
+    let top = r.u32()? as usize;
+    let _reserved = r.u32()?;
+    let unit = r.f64()?;
+    Ok(InvHeader {
+        identity,
+        body_len,
+        body_crc,
+        n_cells,
+        n_layers,
+        top,
+        unit,
+    })
+}
+
 pub fn peek(bytes: &[u8]) -> Result<(Identity, usize, usize)> {
     if bytes.len() < HEADER_LEN {
         return err(0, "design.inv: shorter than its header");

@@ -33,6 +33,57 @@ pub enum CacheState {
     Unusable(String),
 }
 
+/// What kind of cache a directory holds (docs/DIRECT_READ_PLAN.ko.md §5.6):
+/// the full index (design.ovm, its commit marker, with the page files), or
+/// the light cache (design.inv + design.seg and no design.ovm; the renderer
+/// reads the geometry from the source). A directory holding both is a full
+/// one: the streaming build leaves the light files beside its index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CacheKind {
+    Full,
+    Light,
+}
+impl CacheKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            CacheKind::Full => "full",
+            CacheKind::Light => "light",
+        }
+    }
+}
+
+/// The kind of cache in `directory`, by its files; None when neither
+/// design.ovm nor design.inv is there (no cache, or a build that stopped
+/// before its files).
+pub fn cache_kind(directory: &Path) -> Option<CacheKind> {
+    let present = |name: &str| fs::symlink_metadata(directory.join(name)).is_ok_and(|m| m.is_file());
+    if present("design.ovm") {
+        Some(CacheKind::Full)
+    } else if present("design.inv") {
+        Some(CacheKind::Light)
+    } else {
+        None
+    }
+}
+
+/// The cache's own identity: the source size and mtime its marker carries,
+/// its unit and its kind - the full index's from design.ovm (structurally
+/// validated, its pair files checked), the light cache's from the headers
+/// of design.inv and design.seg (paired, whole by their lengths).
+pub(crate) fn validated_identity(directory: &Path) -> Result<(u64, u64, f64, CacheKind)> {
+    match cache_kind(directory).unwrap_or(CacheKind::Full) {
+        CacheKind::Full => {
+            let vfs = validated_vfs(directory)?;
+            Ok((vfs.ovm.src_size, vfs.ovm.src_mtime, vfs.ovm.unit, CacheKind::Full))
+        }
+        CacheKind::Light => {
+            let files = floe_vfs::light::check(utf8(directory)?)
+                .map_err(|e| Error::new(ErrorKind::Cache, format!("light cache: {e}")))?;
+            Ok((files.identity.src_size, files.identity.src_mtime, files.unit, CacheKind::Light))
+        }
+    }
+}
+
 pub fn absolute(path: &Path) -> Result<PathBuf> {
     // Match Python abspath: do not resolve a source symlink and silently move
     // its sibling cache to the link target's directory.
@@ -113,8 +164,9 @@ pub fn inspect(source: &Path, directory: &Path) -> Result<CacheState> {
         // Canonical structural/pair validator, not a nonzero marker test.
         // Reject FIFOs/devices before the mmap reader opens them. Concurrent
         // external cache replacement remains outside this local lease model.
-        let vfs = validated_vfs(directory)?;
-        if (vfs.ovm.src_size, vfs.ovm.src_mtime) != (size, mtime) {
+        // (a light cache: its two headers, paired and whole)
+        let (marker_size, marker_mtime, _, _) = validated_identity(directory)?;
+        if (marker_size, marker_mtime) != (size, mtime) {
             return Err(Error::new(
                 ErrorKind::Cache,
                 "cache marker source fingerprint mismatch",

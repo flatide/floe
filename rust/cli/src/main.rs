@@ -152,6 +152,42 @@ fn deck_handover(rest: &[String]) {
     }
 }
 
+/// `floe-index light DECK.jb ...`: a jobdeck's sources are light-indexed by
+/// the floe2 beside this binary (`floe2 index DECK --light`), as `vfs
+/// DECK.jb` hands over; no --out (a deck's sources are indexed each beside
+/// its source).
+fn deck_handover_light(rest: &[String]) {
+    let deck = &rest[0];
+    if rest.iter().any(|a| a == "--out") {
+        eprintln!(
+            "floe-index light {deck}: a jobdeck's sources are indexed each beside its source - no --out"
+        );
+        std::process::exit(2);
+    }
+    let floe2 = floe2_beside();
+    eprintln!(
+        "[light] {deck} is a jobdeck: its sources are indexed by {} index --light (floe2 index {deck} --light)",
+        floe2.display()
+    );
+    let mut command = std::process::Command::new(&floe2);
+    command.arg("index").arg(deck).arg("--light").args(&rest[1..]);
+    if std::env::var_os("FLOE_INDEX_BIN").is_none_or(|v| v.is_empty()) {
+        if let Ok(me) = std::env::current_exe() {
+            command.env("FLOE_INDEX_BIN", me);
+        }
+    }
+    match command.status() {
+        Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+        Err(e) => {
+            eprintln!(
+                "floe-index light {deck}: {} could not run ({e}); a jobdeck's sources are indexed by `floe2 index {deck} --light`",
+                floe2.display()
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
 /// `floe-index drc-prepare` (feature/jobdeck-drc's command): the DRC
 /// analysis is the shared Rust app layer's (app-core drc::analysis), so the
 /// floe2 beside this binary - the bundle's runtime/bin/floe2, the build's
@@ -192,6 +228,9 @@ fn main() {
     }
     if args.len() >= 3 && args[1] == "inventory" {
         return prepass::inventory_cmd(&args[2..]);
+    }
+    if args.len() >= 3 && args[1] == "light" && is_deck(&args[2]) {
+        return deck_handover_light(&args[2..]);
     }
     if args.len() >= 3 && args[1] == "light" {
         return light::light_cmd(&args[2..]);
@@ -235,7 +274,7 @@ fn main() {
              floe-index inventory <file.oas> [--jobs N] [--check] [--check-cells] [--cells] [--out design.inv] [--seg design.seg] [--seg-bytes N] [--check-seg]  \
              (the streaming build's first pass: cell table, layer order, hierarchy fold; --check holds it to the Doc pre-passes, --check-cells the cell parser to the Doc's cells; --out writes it as design.inv, FLOEINV1, and reads it back; --seg writes the segment directory design.seg, FLOESEG1, of the same walk and --check-seg holds its per-layer statistics to the Doc)\n       \
              floe-index inventory --load design.inv [--load-seg design.seg] [<file.oas>] [--cells] [--check]  (the files read back; with the source, compared to fresh ones)\n       \
-             floe-index light <file.oas> [--out DIR] [--jobs N] [--seg-bytes N]  (the light cache: design.inv + design.seg + meta.json from one inventory pass into DIR, default .<file.oas>.ice; the renderer reads the geometry from the source - docs/DIRECT_READ_PLAN.ko.md L4)\n       \
+             floe-index light <file.oas> [--out DIR] [--jobs N] [--seg-bytes N] [--occupancy [--occupancy-um UM] [--occupancy-balance 0|1] [--occupancy-prune 0|1]] [--occupancy-only] [--mem GiB] [--force]  (the light cache: design.inv + design.seg + meta.json from one inventory pass into DIR, default .<file.oas>.ice, and design.ovo from the streaming occupancy pass with --occupancy; --occupancy-only adds design.ovo to a light cache; --force replaces a full index; the renderer reads the geometry from the source - docs/DIRECT_READ_PLAN.ko.md L4-L5; a jobdeck is handed to `floe2 index DECK --light`)\n       \
              floe-index tile <file.oas> <outdir> \
              --grid x0,y0,tw,th,nx,ny --edges e0,e1,e2\n       \
              floe-index index <file.oas> [outdir] [--mem GB] \

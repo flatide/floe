@@ -361,6 +361,21 @@ impl StreamStore {
         });
     }
 
+    /// The placements of every cell given from outside (the light build's
+    /// `floe-index light --occupancy`: read from the segment directory's
+    /// placement segments, not kept by a build) - what `take_places` then
+    /// hands the occupancy pass.
+    pub fn set_places(&self, places: Vec<Vec<PlaceRec>>) {
+        assert_eq!(places.len(), self.inv.cells.len(), "placements per cell");
+        let total = places.iter().map(|p| p.len() as u64).sum();
+        self.lock().keep = Some(KeptPlaces {
+            cap: u64::MAX,
+            total,
+            overflow: false,
+            by_cell: places.into_iter().map(Some).collect(),
+        });
+    }
+
     /// whether the kept placements overflowed the cap: (records seen,
     /// cap); None while they fit (or nothing is kept)
     pub fn kept_places_overflow(&self) -> Option<(u64, u64)> {

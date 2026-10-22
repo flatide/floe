@@ -676,7 +676,9 @@ _MB take the cells under them along, FLOE_LIGHT_PLACES_MB bounds what stays
 resident, FLOE_LIGHT_LOG=on prints a line per round). A page decodes from its
 segment of the source - read in file order, parsed once with its snapshot,
 split by layer into one-cell Docs (`light::decode_pages`; the pool's workers
-sit a light batch out). The hierarchy summary comes from the inventory's edges
+sit a light batch out); the source files are pread through a process-wide
+pool of at most 8 open files (a deck opens one light cache per source, and a
+descriptor each would run a tight open-file limit out). The hierarchy summary comes from the inventory's edges
 (no `design.ovh`). `Cache::is_light()` and `light_stats()` say so; `read_pages`
 refuses a light page. Pixel contract: identical to the full index where every
 shape is drawn (gate `light_cache`); a cut view may differ page by page. Not

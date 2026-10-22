@@ -253,12 +253,13 @@ fn stamps(data: &ManagedDataset) -> Result<Vec<(PathBuf, bool, Option<Stamp>)>> 
     let Dataset::Layout(l) = &data.dataset else {
         unreachable!()
     };
+    let light = l.kind == crate::cache::CacheKind::Light;
     let files = [
         l.source.clone(),
         l.directory.join("meta.json"),
-        l.directory.join("design.ovm"),
-        l.directory.join("design.ovp"),
-        l.directory.join("design.ovt"),
+        l.directory.join(if light { "design.inv" } else { "design.ovm" }),
+        l.directory.join(if light { "design.seg" } else { "design.ovp" }),
+        l.directory.join(if light { "design.ovo" } else { "design.ovt" }),
     ];
     files
         .into_iter()

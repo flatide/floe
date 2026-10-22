@@ -119,6 +119,18 @@ pub fn collect(
 ) -> Result<ClipArtifact> {
     check_cancelled(cancelled)?;
     request.validate()?;
+    // a light cache has no page files to splice (DIRECT_READ_PLAN L5)
+    if layout.kind == crate::cache::CacheKind::Light {
+        return Err(Error::new(
+            ErrorKind::Unsupported,
+            format!(
+                "clip needs the full index of {} (its page files); the cache is light - build it: {} index --full {}",
+                layout.source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                crate::program(),
+                layout.source.display()
+            ),
+        ));
+    }
     if request.jobs != options.jobs
         || options.budget_mb == 0
         || !(1..=86400).contains(&options.open_timeout_s)

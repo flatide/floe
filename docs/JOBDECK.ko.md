@@ -253,8 +253,16 @@ floe2 render deck.jb --bbox X0,Y0,X1,Y1 --px 1200 --out d.png [--layers "$1 META
 floe2 jobdeck deck.jb [--report r.json] [--spec s.spec]   # 분석·보고만
 ```
 
+**덱 소스의 캐시는 경량이 기본이다(2026-10-22, app 0.12.383; DIRECT_READ_PLAN L5, 사용자
+결정 §10 2).** `floe2 index deck.jb`는 소스마다 `floe-index light <src> --out <.src.ice>
+--occupancy`로 design.inv + design.seg + meta.json + design.ovo만 만들고(본 빌드 없음:
+sample9급 소스 4 s), 뷰어·`render`·`info`는 render-core가 그 디렉터리를 경량으로 열어
+원본에서 직접 읽는다(L4). `--full`(또는 `--lod` 같은 전체 색인만의 옵션,
+`FLOE_INDEX_LIGHT=off`)이면 전체 색인이다. 이미 전체 색인이 있는 소스는 그대로 둔다.
+`floe-index light deck.jb`는 옆의 floe2에 `index deck.jb --light`로 넘긴다.
+
 `floe-index vfs deck.jb [--level N,..] [--jobs N] [--force] [--wait]`(2026-10-18,
-app 0.12.359)도 같은 덱 인덱싱이다. floe-index가 옆의 floe2에 `index deck.jb …`로
+app 0.12.359)도 같은 덱 인덱싱이다(소스마다 이 규칙). floe-index가 옆의 floe2에 `index deck.jb …`로
 넘기고, 소스마다 이 floe-index로 빌드한다(SPEC-INDEXER §1). `info`·`render`·`probe`는
 고른 level의 소스 중 인덱스가 아예 없는 것을 먼저 인덱싱하고 그린다. 다른 실행이
 인덱싱 중인 소스는 장부에 누가 하는지 적고 빼고 그린다(종료 3). `--wait`면 끝날

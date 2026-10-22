@@ -40,7 +40,7 @@ use std::path::Path;
 pub const MAGIC: &[u8; 8] = b"FLOESEG1";
 pub const VERSION: u32 = 1;
 pub const FILE_NAME: &str = "design.seg";
-const HEADER_LEN: usize = 80;
+pub const HEADER_LEN: usize = 80;
 const SEG_ROW: usize = 112;
 const LAYER_ROW: usize = 80;
 
@@ -724,6 +724,56 @@ impl<'a> Rd<'a> {
 }
 
 /// the header alone: the identity, the pair key and the counts
+/// the header's fields (`peek_header`)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SegHeader {
+    pub identity: Identity,
+    pub body_len: u64,
+    /// the design.inv this directory is paired with (its body CRC)
+    pub inv_crc: u32,
+    pub n_cells: u32,
+    pub n_layers: u32,
+    pub n_segments: u32,
+}
+
+/// The header alone (the file's first HEADER_LEN bytes), without the body:
+/// a cache probe reads this much (`body_len` against the file's size).
+pub fn peek_header(bytes: &[u8]) -> Result<SegHeader> {
+    if bytes.len() < HEADER_LEN {
+        return err(0, "design.seg: shorter than its header");
+    }
+    if &bytes[..8] != MAGIC {
+        return err(0, "design.seg: not a FLOESEG1 file");
+    }
+    let mut r = Rd::new(&bytes[8..HEADER_LEN], 8);
+    let version = r.u32()?;
+    if version != VERSION {
+        return err(8, &format!("design.seg: version {} (this build reads {})", version, VERSION));
+    }
+    if r.u32()? as usize != HEADER_LEN {
+        return err(12, "design.seg: header length");
+    }
+    let body_len = r.u64()?;
+    let _crc = r.u32()?;
+    let _flags = r.u32()?;
+    let identity = Identity {
+        src_size: r.u64()?,
+        src_mtime: r.u64()?,
+    };
+    let inv_crc = r.u32()?;
+    let n_cells = r.u32()?;
+    let n_layers = r.u32()?;
+    let n_segments = r.u32()?;
+    Ok(SegHeader {
+        identity,
+        body_len,
+        inv_crc,
+        n_cells,
+        n_layers,
+        n_segments,
+    })
+}
+
 pub fn peek(bytes: &[u8]) -> Result<(Identity, u32, u32, u32, u32)> {
     if bytes.len() < HEADER_LEN {
         return err(0, "design.seg: shorter than its header");

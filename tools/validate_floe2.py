@@ -243,6 +243,72 @@ def validate_rust_cli(base, fixture):
         check(not called.exists(),
               "floe2 ran Python for a non-UI command: %s" % (
                   called.read_text() if called.exists() else ""))
+        # the light cache (docs/DIRECT_READ_PLAN.ko.md L5): `index --light`
+        # writes design.inv + design.seg + meta.json and no design.ovm; info
+        # says so; a render at exact detail (labels off) is the full index's
+        # pixel for pixel; clip needs the full index; the default (a layout) builds the
+        # full index over it, --light keeps a full index, --light --force
+        # replaces it; FLOE_INDEX_LIGHT=on makes light the default; --light
+        # with an option of the full index's is refused
+        light_src = work / "rust cli light 설계.oas"
+        shutil.copy2(fixture, light_src)
+        light_dir = Path(vfs_cache_dir(light_src))
+        lit = rust(env, "index", light_src, "--light", "--jobs", "2")
+        check("floe-index light" in lit.stdout or "light" in lit.stdout,
+              "floe2 index --light did not run the light command: %s" % lit.stdout)
+        check(not (light_dir / "design.ovm").exists() and (light_dir / "design.inv").is_file()
+              and (light_dir / "design.seg").is_file() and (light_dir / "meta.json").is_file(),
+              "floe2 index --light did not write a light cache: %s" % sorted(p.name for p in light_dir.iterdir()))
+        light_info = rust(env, "info", light_src)
+        check("light: the geometry is read from the source" in light_info.stdout
+              and "design.inv" in light_info.stdout and "stored shapes" in light_info.stdout,
+              "floe2 info did not say the cache is light: %s" % light_info.stdout)
+        light_json = json.loads(rust(env, "info", light_src, "--json").stdout)
+        check(light_json["cache_kind"] == "light" and light_json["metadata"]["cache"] == "light",
+              "floe2 info --json did not carry cache_kind light: %s" % list(light_json))
+        full_json = json.loads(rust(env, "info", source, "--json").stdout)
+        check(full_json["cache_kind"] == "full" and "cache" not in full_json["metadata"],
+              "floe2 info --json did not carry cache_kind full")
+        # (labels off: the light cache has no text index yet - L6; the layer
+        # colours are the full index's, a text-only layer counted as held)
+        exact_full = work / "exact full.png"
+        exact_light = work / "exact light.png"
+        rust(env, "render", source, "--px", "257", "--detail", "exact", "--labels", "off", "--out", exact_full)
+        rust(env, "render", light_src, "--px", "257", "--detail", "exact", "--labels", "off", "--out", exact_light)
+        check(exact_full.read_bytes() == exact_light.read_bytes(),
+              "the light cache's exact render differs from the full index's")
+        refused = rust(env, "clip", light_src, "--bbox=%r,%r,%r,%r" % (
+            x0, y0, (x0 + x1) / 2, (y0 + y1) / 2), "--out", work / "light clip.oas", ok=False)
+        check("clip needs the full index" in refused.stderr + refused.stdout,
+              "clip on a light cache was not refused with its reason: %s" % refused.stderr[-300:])
+        kept = rust(env, "index", light_src, "--light", "--jobs", "2")
+        check("cache up to date" in kept.stdout, "a current light cache was not kept: %s" % kept.stdout)
+        upgraded = rust(env, "index", light_src, "--jobs", "2")
+        check("becomes the full index" in upgraded.stdout and (light_dir / "design.ovm").is_file()
+              and (light_dir / "design.inv").is_file(),
+              "the default index did not build the full index over the light cache: %s" % upgraded.stdout)
+        check(json.loads(rust(env, "info", light_src, "--json").stdout)["cache_kind"] == "full",
+              "info does not see the full index over the light cache")
+        held = rust(env, "index", light_src, "--light", "--jobs", "2")
+        check("has the full index" in held.stdout and (light_dir / "design.ovm").is_file(),
+              "--light over a full index did not keep it: %s" % held.stdout)
+        relit = rust(env, "index", light_src, "--light", "--force", "--jobs", "2")
+        check("--force" in relit.stdout and not (light_dir / "design.ovm").exists()
+              and (light_dir / "design.inv").is_file(),
+              "--light --force did not replace the full index: %s" % relit.stdout)
+        for bad in (["--light", "--lod"], ["--light", "--hier-only"], ["--light", "--in-memory"], ["--light", "--full"]):
+            res = rust(env, "index", light_src, *bad, ok=False)
+            check(res.returncode != 0 and "--light" in res.stderr,
+                  "floe2 index %s was not refused with its reason: %d %s" % (" ".join(bad), res.returncode, res.stderr[-200:]))
+        env_src = work / "rust cli env 설계.oas"
+        shutil.copy2(fixture, env_src)
+        rust(dict(env, FLOE_INDEX_LIGHT="on"), "index", env_src, "--jobs", "2")
+        check(not (Path(vfs_cache_dir(env_src)) / "design.ovm").exists()
+              and (Path(vfs_cache_dir(env_src)) / "design.inv").is_file(),
+              "FLOE_INDEX_LIGHT=on did not make the light cache the default")
+        check(not called.exists(),
+              "floe2 ran Python for the light cache: %s" % (
+                  called.read_text() if called.exists() else ""))
         unknown = rust(env, "frobnicate", ok=False)
         check(unknown.returncode == 99 and called.exists(),
               "floe2 did not hand an unknown word to the GTK viewer as a source")

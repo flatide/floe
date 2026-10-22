@@ -990,7 +990,7 @@ pub fn vfs_cmd(args: &[String]) {
 /// everything, write the marker LAST; an interrupted build reads as "no
 /// cache" (marker gone) or "corrupt cache" (marker partial), never as a
 /// valid cache
-fn clear_outputs(outdir: &str) {
+pub(crate) fn clear_outputs(outdir: &str) {
     for f in [
         "design.ovm",
         "design.ovp",
@@ -1024,37 +1024,37 @@ fn clear_outputs(outdir: &str) {
     let _ = remove_cell_ovs(outdir, &[]);
 }
 
-struct StreamArgs<'a> {
-    src: String,
-    outdir: String,
-    jobs: usize,
-    encode_batch: usize,
-    plan_batch: usize,
-    page_target_bytes: u64,
-    lod: bool,
-    page_occ: bool,
-    hier: bool,
-    ovs: bool,
-    occupancy: bool,
-    slow_cell_s: f64,
-    p2_shard_limit: Option<u64>,
-    kill_at: Option<String>,
-    hold_at: Option<String>,
-    mem_gib: Option<f64>,
+pub(crate) struct StreamArgs<'a> {
+    pub(crate) src: String,
+    pub(crate) outdir: String,
+    pub(crate) jobs: usize,
+    pub(crate) encode_batch: usize,
+    pub(crate) plan_batch: usize,
+    pub(crate) page_target_bytes: u64,
+    pub(crate) lod: bool,
+    pub(crate) page_occ: bool,
+    pub(crate) hier: bool,
+    pub(crate) ovs: bool,
+    pub(crate) occupancy: bool,
+    pub(crate) slow_cell_s: f64,
+    pub(crate) p2_shard_limit: Option<u64>,
+    pub(crate) kill_at: Option<String>,
+    pub(crate) hold_at: Option<String>,
+    pub(crate) mem_gib: Option<f64>,
     /// design.seg collected in the inventory pass (DIRECT_READ_PLAN L2)
     /// and its span length between CBLOCKs
-    seg: bool,
-    seg_bytes: u64,
-    occ_opts: &'a floe_vfs::occupancy::Opts,
+    pub(crate) seg: bool,
+    pub(crate) seg_bytes: u64,
+    pub(crate) occ_opts: &'a floe_vfs::occupancy::Opts,
     /// the default mode (neither --stream nor --in-memory): the streaming
     /// build may decline the file and leave it to the in-memory build
-    auto: bool,
+    pub(crate) auto: bool,
 }
 
 /// placement records kept through the streaming build for the occupancy
 /// pass (about 90 B each; STREAMING_INDEX_PLAN §4.6: deck sources hold
 /// thousands, a layout past this has occupancy off by default)
-const STREAM_PLACES_CAP: u64 = 50_000_000;
+pub(crate) const STREAM_PLACES_CAP: u64 = 50_000_000;
 
 /// the build's mode (STREAMING_INDEX_PLAN §10, the switch-over of
 /// 0.12.370)
@@ -1158,23 +1158,23 @@ pub(crate) fn source_identity(src: &str) -> (u64, u64) {
 }
 
 /// what the streaming build has before it touches any output
-struct StreamOpen {
-    store: crate::stream::StreamStore,
-    budget: u64,
-    size: u64,
-    mtime: u64,
-    inventory_s: f64,
+pub(crate) struct StreamOpen {
+    pub(crate) store: crate::stream::StreamStore,
+    pub(crate) budget: u64,
+    pub(crate) size: u64,
+    pub(crate) mtime: u64,
+    pub(crate) inventory_s: f64,
     /// the segment directory of the same walk (None under --no-seg)
-    segs: Option<floe_oasis::segments::SegCollector>,
+    pub(crate) segs: Option<floe_oasis::segments::SegCollector>,
 }
 
 /// why the streaming build stopped before touching any output
-struct StreamDecline {
-    why: String,
+pub(crate) struct StreamDecline {
+    pub(crate) why: String,
     /// the in-memory build can take the file (the default mode lets it;
     /// --stream exits with `exit` instead)
-    fallback: bool,
-    exit: i32,
+    pub(crate) fallback: bool,
+    pub(crate) exit: i32,
 }
 
 /// a decline's outcome: the reason for the caller's fallback (the default
@@ -1193,7 +1193,7 @@ fn declined(a: &StreamArgs, d: StreamDecline) -> Option<String> {
 /// budget (--mem, or the default raised to the file's need when the host
 /// has it) and the streaming store. Nothing of the cache is touched; a
 /// decline says whether the in-memory build may take the file.
-fn stream_open(a: &StreamArgs) -> Result<StreamOpen, StreamDecline> {
+pub(crate) fn stream_open(a: &StreamArgs) -> Result<StreamOpen, StreamDecline> {
     let file = std::fs::File::open(&a.src).map_err(|e| StreamDecline {
         why: format!("open {}: {}", a.src, e),
         fallback: false,
@@ -1826,7 +1826,7 @@ fn vfs_stream_occupancy_only(a: &StreamArgs, t0: std::time::Instant) -> Option<S
 /// placements exceed the cap the store keeps (the cache is complete
 /// without design.ovo). `additive`: the occupancy-only run, whose cache
 /// is whole throughout (the whole build has no commit marker yet).
-fn stream_occupancy(
+pub(crate) fn stream_occupancy(
     store: &mut crate::stream::StreamStore,
     outdir: &str,
     size: u64,

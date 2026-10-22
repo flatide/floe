@@ -465,3 +465,42 @@ P4d처럼 컨트롤러 루프에서만 바뀐다. `FLOE_GTK_LOOP=legacy`는 예�
 - **UI만:** floe/gui.py의 메뉴 항목(View > occupancy summary at wide views, `o`), 상태줄 ` · occupancy:on/off`, `floe2 view --occupancy`(viewcli.py; 실행 중인 창에 `occupancy=` 전달, pending_fields). 체크 상태 = 유효 상태(사용자 선택, 없으면 renderd의 규칙을 같은 환경 `FLOE_RUST_OCCUPANCY`에서 계산). 렌더러가 요약을 모르면(`supports_occupancy` 없음) 비활성.
 - **웹:** 웹 PatchDto에 `occupancy`를 더하면 같은 컨트롤러 필드다(feature/webui의 몫). `floe2-web render --occupancy`는 app-cli 공유라 바로 있다.
 - **게이트:** occupancy(RenderTests·DeckRenderTests), gtk_view(토글 뒤 상태·픽셀, `floe2 render --occupancy on` 캡처 일치), rust_renderer(GUI 계약), 단위 테스트(renderd·app-core·app-cli·floe2·worker-client). 자세한 것은 OCCUPANCY_PLAN 2026-10-20 절, SPEC-VIEWER §7.
+
+## 14. 경량 캐시 모드 (2026-10-22, app 0.12.383 / floe-index·renderd 0.12.342) — DIRECT_READ_PLAN L5
+
+사용자 결정(DIRECT_READ_PLAN §10 2): 덱 소스는 경량, 단독 레이아웃은 전체가 기본, 플래그로 뒤집는다.
+
+- **app-core `index.rs`:** `IndexOptions.light: Option<bool>`(`--light`/`--full`), `light_env()`
+  (`FLOE_INDEX_LIGHT=on|off`), `full_only()`(전체 색인만의 옵션: --lod, --page-target-mb,
+  --representatives*, --hier-only, --profile-*, --stream, --in-memory, --slow-cell-s,
+  --p2-shard-limit-mb; --no-ovs·--no-page-occupancy는 세지 않는다 - 덱 소스가 --no-ovs를 달고
+  온다), `light_for(deck_source)`(플래그 → 전체 옵션 →
+  환경 → 규칙). `validate()`는 `--light` + 전체 옵션을 거절한다. `decide()`는 캐시의 종류
+  (`cache::cache_kind`)와 요청을 함께 본다: 경량 위 전체 요청 = Build(--force 없이; 잃는 것이
+  없다), 전체 위 경량 요청 = 유지, `--representatives-only`/`--hier-only`는 경량 캐시 거절,
+  `--occupancy-only`는 경량이면 light 명령. `arguments()`는 `floe-index light SRC --out DIR --jobs N
+  [--occupancy …] [--force] [--mem G]` / `… --occupancy-only`를 만든다. `PreparedIndex::note()`가
+  `the light cache of X becomes the full index` / `X has the full index …; kept`를 말하고
+  app-cli가 출력한다. 웹의 revision 빌드(`index/revision.rs`)는 전체다.
+- **app-core `cache.rs`/`catalog.rs`/`dataset.rs`/`clip.rs`:** `CacheKind{Full, Light}`,
+  `cache_kind(dir)`, `validated_identity(dir)`(전체: `validated_vfs`; 경량: `floe_vfs::light::check`
+  — inv·seg 헤더만, 짝과 길이). `Layout.kind`, `Metadata.cache`(serde default). `floe2 info`
+  문구와 design.inv/seg/ovo 줄(ovo 없음: `none (no wide-view summary yet: index --occupancy adds
+  it)`), `info --json`의 `cache_kind`. `clip`은 경량 캐시를 거절한다(페이지 파일이 없다; 메시지에
+  `index --full`). exports의 stamp 목록은 종류별이다.
+- **원본 파일:** render-core가 여는 경량 캐시는 원본의 fd를 캐시마다 들지 않고 `floe_vfs::light`의
+  공용 풀(8개, LRU)에서 꺼내 pread한다(덱 = 소스마다 캐시 하나; index_lock K7의 `ulimit -n 32`).
+- **덱(`jobdeck/index.rs`):** 소스마다 `light = light_for(true)`. 평범한 `floe2 index deck.jb`는
+  소스마다 `floe-index light … --occupancy`(요약은 덱 기본)이고, `--full`이나 전체 옵션(`--lod` 등)
+  이면 `vfs`다. design.ovo 없는 경량 소스의 요약 추가는 `light --occupancy-only`.
+- **자동 색인(`ready.rs`):** 바뀐 것 없음 — 기본 옵션으로 규칙이 적용된다(레이아웃 전체, 덱
+  소스 경량). 뷰어의 `floe2 index deck.jb --jobs 12`도 같다.
+- **UI만:** 상태줄의 `cache: light` 표기와 요약 없는 동안의 배너는 L6(SPEC-VIEWER).
+- **meta.json의 `stored_shapes`:** 경량은 레이어의 도형 멤버 + 그 레이어를 텍스트 마스크에 가진
+  셀들의 텍스트 수(재고에 레이어별 텍스트 수는 없다; 상한)라, 텍스트만 있는 레이어도 전체
+  색인처럼 "있는 레이어"로 세어 레이어 목록과 팔레트 자리가 같다(같은 레이아웃이 캐시 종류에
+  따라 다른 색으로 보이지 않는다).
+- **게이트:** floe2(경량 생명주기; exact 렌더 비교는 `--labels off` — 경량에는 텍스트 색인이
+  아직 없다), jobdeck(test_3 경량 기본, LOD 테스트의 `--full`), index_lock
+  K13, light_cache(ovo 동일·occupancy-only·force); 단위 테스트 app-core `the_light_cache_decisions`,
+  app-cli `the_light_cache_is_a_mode_of_its_own`.
