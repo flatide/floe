@@ -67,6 +67,13 @@ pub struct IndexOptions {
     /// sources light, a layout full - unless an option of the full index's
     /// was given (`full_only`). `light_for` resolves it.
     pub light: Option<bool>,
+    /// a jobdeck's source (jobdeck::index sets it): the rule's default for
+    /// `light` is the light cache, a layout's the full index
+    /// (`light_for(self.deck_source)`). The light cache the rule chose
+    /// gives way to the full index when `floe-index light` cannot read the
+    /// stream (floe_vfs::light::UNSUITABLE_EXIT); one asked for with
+    /// `--light` does not.
+    pub deck_source: bool,
 }
 /// how `floe-index vfs` builds: see `IndexOptions::mode`
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -105,6 +112,7 @@ impl Default for IndexOptions {
             mode: IndexMode::Auto,
             mem_gib: None,
             light: None,
+            deck_source: false,
         }
     }
 }
@@ -400,6 +408,27 @@ pub fn decide(
     Ok(Action::Build)
 }
 
+/// The full index's command line that takes the light cache's place when
+/// `floe-index light` cannot read the stream (a cell defined inside a
+/// CBLOCK; floe_vfs::light::UNSUITABLE_EXIT, nothing written): for a build
+/// whose light cache was the rule's choice (`light` None - a jobdeck's
+/// source, FLOE_INDEX_LIGHT); none for `--light` given, another action, or
+/// a full run. IndexJob chains it after that exit.
+fn fallback_arguments(
+    source: &Path,
+    directory: &Path,
+    o: &IndexOptions,
+    action: &Action,
+    light_run: bool,
+) -> Result<Option<Vec<OsString>>> {
+    if !(light_run && *action == Action::Build && o.light.is_none()) {
+        return Ok(None);
+    }
+    let mut full = o.clone();
+    full.light = Some(false);
+    Ok(Some(arguments(source, directory, &full, &Action::Build, false)?))
+}
+
 /// what an indexer's exit status means, for the lines that report one
 /// (the deck index's FAILED lines, the auto-index's error): floe-index's
 /// own codes - the lock's floe_vfs::lock::BUSY_EXIT, the memory guard's
@@ -408,6 +437,7 @@ pub fn exit_words(code: i32) -> Option<&'static str> {
     Some(match code {
         71 => "stopped at the memory ceiling or refused for its size: the indexer's line above says what to do (a lower --mem for the streaming build, --stream for an in-memory one)",
         c if c == floe_vfs::lock::BUSY_EXIT => "busy: another run or a viewer holds the cache",
+        c if c == floe_vfs::light::UNSUITABLE_EXIT => "the light cache cannot read this source (a cell is defined inside a CBLOCK): index --full builds the full index",
         130 | 143 => "cancelled",
         134 => "aborted (a panic or a failed assertion)",
         137 => "killed (out of memory?): the host's OOM killer or a kill -9; a lower --mem, or --stream if it was built in memory",
@@ -630,6 +660,9 @@ pub struct PreparedIndex {
     cleanup_occupancy: bool,
     cleanup_representatives: bool,
     next_args: Option<Vec<OsString>>,
+    /// the full index's run in the light cache's place when floe-index
+    /// light cannot read the stream (`fallback_arguments`)
+    fallback_args: Option<Vec<OsString>>,
     /// the indexer's stdout onto stderr (`on_stderr`)
     on_stderr: bool,
     /// this run builds the light cache (`IndexOptions::light_for`)
@@ -776,9 +809,10 @@ impl PreparedIndex {
             cache::inspect(&source, &directory)?
         };
         let kind = if profiling { None } else { cache::cache_kind(&directory) };
-        // a jobdeck's source comes with its kind decided (jobdeck::index);
-        // a layout alone follows the rule
-        let light = options.light_for(false);
+        // a jobdeck's source (jobdeck::index sets `deck_source`) and a layout
+        // alone follow their rules; `light` itself stays as given, so a
+        // light cache the rule chose may give way to the full index
+        let light = options.light_for(options.deck_source);
         let action = decide(
             options,
             &state,
@@ -817,6 +851,11 @@ impl PreparedIndex {
             cache::default_cache_path(&source)?
         };
         let args = arguments(&source, &destination, options, &action, light_run)?;
+        // the light cache the rule chose over a stream it cannot read (a cell
+        // defined inside a CBLOCK: floe-index light exits UNSUITABLE_EXIT
+        // before writing anything): the full index is built in its place
+        // (IndexJob chains it); `--light` given is refused as it is
+        let fallback_args = fallback_arguments(&source, &destination, options, &action, light_run)?;
         // Both additive passes retain the same locks and migration receipt.
         // If the second fails, the first publication remains; this is not a
         // transaction across independent summary files.
@@ -857,6 +896,7 @@ impl PreparedIndex {
             cleanup_occupancy: !profiling && (options.wants_occupancy() || options.occupancy_only),
             cleanup_representatives: !profiling && options.wants_representatives(),
             next_args,
+            fallback_args,
             on_stderr: false,
             light: light_run,
             note,
@@ -905,6 +945,8 @@ impl PreparedIndex {
             cleanup_occupancy: self.cleanup_occupancy,
             cleanup_representatives: self.cleanup_representatives,
             next: self.next_args.take().map(|a| (self.indexer.clone(), a)),
+            fallback: self.fallback_args.take().map(|a| (self.indexer.clone(), a)),
+            fell_back: false,
             finished: None,
             capture,
             output,
@@ -919,6 +961,10 @@ pub struct IndexJob {
     cleanup_occupancy: bool,
     cleanup_representatives: bool,
     next: Option<(Indexer, Vec<OsString>)>,
+    /// the full index's run chained when the light cache's exits
+    /// UNSUITABLE_EXIT (`fallback_arguments`), and whether it was
+    fallback: Option<(Indexer, Vec<OsString>)>,
+    fell_back: bool,
     finished: Option<i32>,
     capture: Option<crate::index_progress::Capture>,
     output: crate::native::Output,
@@ -954,6 +1000,8 @@ impl IndexJob {
             cleanup_occupancy: false,
             cleanup_representatives: false,
             next: None,
+            fallback: None,
+            fell_back: false,
             finished: None,
             capture: Some(capture),
             output: crate::native::Output::Capture,
@@ -961,6 +1009,11 @@ impl IndexJob {
     }
     pub fn pid(&self) -> Option<u32> {
         self.child.as_ref().map(Child::id)
+    }
+    /// Whether the light cache's run gave way to the full index's
+    /// (floe_vfs::light::UNSUITABLE_EXIT: a cell defined inside a CBLOCK).
+    pub fn fell_back(&self) -> bool {
+        self.fell_back
     }
     pub fn progress(&self) -> Option<&crate::index_progress::Progress> {
         self.capture.as_ref().map(|c| &c.progress)
@@ -976,8 +1029,21 @@ impl IndexJob {
             let code = status
                 .code()
                 .unwrap_or_else(|| 128 + status.signal().unwrap_or(1));
-            if code == 0 {
-                if let Some((indexer, args)) = self.next.take() {
+            // chained: the full index in the light cache's place
+            // (UNSUITABLE_EXIT), or the second summary pass after a success
+            let chained = match code {
+                c if c == floe_vfs::light::UNSUITABLE_EXIT => {
+                    let fallback = self.fallback.take();
+                    if fallback.is_some() {
+                        self.fell_back = true;
+                    }
+                    fallback
+                }
+                0 => self.next.take(),
+                _ => None,
+            };
+            {
+                if let Some((indexer, args)) = chained {
                     if let Some(c) = self.capture.as_mut() {
                         let _ = c.finish();
                     }
@@ -1042,6 +1108,7 @@ impl IndexJob {
             return Ok(code);
         }
         self.next = None;
+        self.fallback = None;
         native::signal_child(self.child.as_ref().expect("running child"), signal)?;
         let deadline = Instant::now() + Duration::from_secs(1);
         while Instant::now() < deadline {
@@ -1059,6 +1126,7 @@ impl IndexJob {
     }
     fn finish(&mut self, code: i32) {
         self.next = None;
+        self.fallback = None;
         self.child.take();
         // Telemetry is best-effort. Do not turn the native exit status into a
         // different result because of a late pipe failure during final drain.
@@ -1144,6 +1212,8 @@ mod tests {
             cleanup_occupancy: false,
             cleanup_representatives: false,
             next: Some((indexer, Vec::new())),
+            fallback: None,
+            fell_back: false,
             finished: None,
             capture: None,
             output: native::Output::Inherit,
@@ -1174,6 +1244,8 @@ mod tests {
                 cleanup_occupancy: true,
                 cleanup_representatives: false,
                 next: None,
+                fallback: None,
+                fell_back: false,
                 finished: None,
                 capture: None,
                 output: native::Output::Inherit,
@@ -1271,6 +1343,25 @@ mod tests {
         assert!(o.validate().is_err());
         let o = IndexOptions { light: Some(true), occupancy_only: true, ..Default::default() };
         assert!(o.validate().is_ok());
+        // the fallback (floe_vfs::light::UNSUITABLE_EXIT): the light cache
+        // the rule chose - a deck's source, FLOE_INDEX_LIGHT - gives way to
+        // the full index's build with the options as given (a deck source's
+        // --no-ovs); `--light` given, another action or a full run have none
+        let o = IndexOptions { deck_source: true, occupancy: Some(true), ovs: false, ..Default::default() };
+        assert!(o.light_for(o.deck_source));
+        let f = fallback_arguments(Path::new("/x/s.oas"), Path::new("/x/.s.oas.ice"), &o, &Action::Build, true)
+            .unwrap()
+            .unwrap();
+        let words: Vec<String> = f.iter().map(|w| w.to_string_lossy().into_owned()).collect();
+        assert_eq!(words[..3], ["vfs", "/x/s.oas", "/x/.s.oas.ice"]);
+        assert!(words.contains(&"--occupancy".to_string()) && words.contains(&"--no-ovs".to_string()), "{:?}", words);
+        assert!(!words.contains(&"light".to_string()));
+        let o = IndexOptions { light: Some(true), ..Default::default() };
+        assert!(fallback_arguments(Path::new("/x/s.oas"), Path::new("/x/.s.oas.ice"), &o, &Action::Build, true).unwrap().is_none());
+        let o = IndexOptions { deck_source: true, ..Default::default() };
+        assert!(fallback_arguments(Path::new("/x/s.oas"), Path::new("/x/.s.oas.ice"), &o, &Action::OccupancyOnly, true).unwrap().is_none());
+        assert!(fallback_arguments(Path::new("/x/s.oas"), Path::new("/x/.s.oas.ice"), &o, &Action::Build, false).unwrap().is_none());
+        assert!(exit_words(floe_vfs::light::UNSUITABLE_EXIT).unwrap().contains("--full"));
     }
     #[test]
     fn representatives_are_explicit_additive_and_bounded() {

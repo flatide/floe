@@ -1929,6 +1929,12 @@ impl Cache {
         self.link.set_prefill(places, bytes);
     }
 
+    /// (tests) the resident placement sections' budget of a light cache
+    /// (FLOE_LIGHT_PLACES_MB)
+    pub fn set_light_places_budget_for_tests(&self, bytes: u64) {
+        self.link.set_places_budget(bytes);
+    }
+
     /// `plan` with a deadline for a light cache's fills
     /// (plan_cancellable_within without a cancellation): a deck's pass.
     pub fn plan_within(

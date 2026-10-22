@@ -389,7 +389,10 @@ design.ovm 커밋, design.ovs(덱 제외)는 변경 없음. meta.json의 텍스�
 배치 레코드 보관은 임계(기본 5,000만, 약 2 GB) 이하일 때만 한다.
 덱 소스는 수천~수만이라 해당하고, 임계를 넘는 깊은 계층의 레이아웃은
 점유가 기본 off다. 넘는데 `--occupancy`가 켜져 있으면 "배치 N개:
-스트리밍 점유는 M개까지"로 거절한다.
+스트리밍 점유는 M개까지"로 거절한다. 경량 캐시의 요약 패스(`floe-index light
+--occupancy`, 0.12.385)는 임계를 `--mem`에서 구한다: 예산의 4분의 1을 배치당 약
+96 B로 나눈 수(`vfs::light_places_cap`; 현장 32 GiB 기본 ≈ 9,000만, `--mem`이
+올린다). 넘으면 한 줄 알리고 ovo 없이 완성한다(DIRECT_READ_PLAN §8.8).
 
 **구현(S5, 0.12.368 / floe-index 0.12.333).** 바이트 동일성의 근거:
 비트맵은 OR, charge는 연산 단위라 순서는 무관하고, top-down 걷기가
@@ -693,3 +696,7 @@ S2 완료(0.12.365, §4.2 구현; 사용자 2026-10-19 "S2 진행해줘"): build
   소스로 경량 캐시를 연다, L5 0.12.383이 `floe-index light`/`floe2 index --light`와 덱
   소스 경량 기본을 만들었다 — DIRECT_READ_PLAN §8.5·§8.6; 빌드가 design.inv를 읽어 재고
   패스를 생략하는 일은 아직 없다), 기본 예산 재실행.
+- 0.12.385 (2026-10-22): 경량 요약 패스(`floe-index light --occupancy`)의 배치 임계가
+  `--mem` 기반이 됐다(§4.6; 전체 빌드의 자기 패스는 5,000만 그대로). CBLOCK 안에 정의된
+  셀이 있는 스트림은 `floe-index light`가 79로 거절하고 `floe2 index`가 전체 색인으로
+  넘어간다 — DIRECT_READ_PLAN §8.8.

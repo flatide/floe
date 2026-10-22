@@ -90,6 +90,19 @@ pub(crate) struct LightState {
     /// the prefill caps of a fill (floe_vfs::light::prefill_caps, read at
     /// the open; a test sets them)
     prefill: Mutex<(u64, u64)>,
+    /// requests in flight (`LightLink::run_within`): the first to start
+    /// clears the image's used marks, so a fill keeps what the requests in
+    /// flight use and not what the previous one did
+    active: AtomicUsize,
+}
+
+/// a request in flight on a light cache (`LightState::begin_request`)
+struct RequestGuard<'a>(&'a AtomicUsize);
+
+impl Drop for RequestGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl LightState {
@@ -110,9 +123,20 @@ impl LightState {
                 images: AtomicU64::new(0),
                 rounds: AtomicU64::new(0),
                 prefill: Mutex::new(floe_vfs::light::prefill_caps()),
+                active: AtomicUsize::new(0),
             },
             vfs,
         ))
+    }
+
+    /// A request starts: the image's used marks (floe_ovm `light_used`, what
+    /// a fill keeps) become this request's when no other is in flight - a
+    /// concurrent request's marks stay, which only keeps more.
+    fn begin_request(&self, slot: &VfsSlot) -> RequestGuard<'_> {
+        if self.active.fetch_add(1, Ordering::SeqCst) == 0 {
+            slot.get().ovm.light_reset_used();
+        }
+        RequestGuard(&self.active)
     }
 
     /// Fills `cells` and puts the new image in `slot`; nothing when another
@@ -123,7 +147,12 @@ impl LightState {
         let started = Instant::now();
         let (places_cap, bytes_cap) = *self.prefill.lock().unwrap_or_else(|p| p.into_inner());
         let set = self.index.fill_set_within(cells, places_cap, bytes_cap);
-        let report = self.index.fill(&set)?;
+        // the cells this request read from the image it planned on stay
+        // resident whatever the budget (floe_vfs::light::LightIndex::
+        // fill_keeping): the rounds would otherwise refill what the round
+        // before let go, up to MAX_FILL_ROUNDS
+        let keep = seen.ovm.light_used();
+        let report = self.index.fill_keeping(&set, &keep)?;
         let fill_us = elapsed_us(started);
         let moved = !Arc::ptr_eq(&slot.get(), seen);
         if report.cells == 0 && moved {
@@ -136,7 +165,7 @@ impl LightState {
         self.images.fetch_add(1, Ordering::Relaxed);
         if light_log() {
             eprintln!(
-                "[light] round {}: {} cell(s) asked, {} filled ({} placements, {} texts from {} segments, {} evicted) in {} ms; image {} MB in {} ms",
+                "[light] round {}: {} cell(s) asked, {} filled ({} placements, {} texts from {} segments, {} evicted) in {} ms; image {} MB in {} ms{}",
                 round,
                 cells.len(),
                 report.cells,
@@ -146,7 +175,15 @@ impl LightState {
                 report.evicted,
                 fill_us / 1000,
                 image_bytes >> 20,
-                elapsed_us(image_started) / 1000
+                elapsed_us(image_started) / 1000,
+                if report.over_budget > 0 {
+                    format!(
+                        "; {} MB over the places budget, kept (the request uses them)",
+                        report.over_budget >> 20
+                    )
+                } else {
+                    String::new()
+                }
             );
         }
         Ok(())
@@ -167,6 +204,14 @@ impl LightLink {
     pub fn set_prefill(&self, places: u64, bytes: u64) {
         if let Some(light) = &self.light {
             *light.prefill.lock().unwrap_or_else(|p| p.into_inner()) = (places, bytes);
+        }
+    }
+
+    /// (tests) the resident placement sections' budget of this light cache
+    /// (floe_vfs::light PLACES_BUDGET_DEFAULT, FLOE_LIGHT_PLACES_MB)
+    pub fn set_places_budget(&self, bytes: u64) {
+        if let Some(light) = &self.light {
+            light.index.set_places_budget(bytes);
         }
     }
 
@@ -205,6 +250,7 @@ impl LightLink {
         work: impl Fn(&Vfs) -> Result<T, String>,
         deadline: Option<Instant>,
     ) -> Result<(T, bool), String> {
+        let _request = self.light.as_ref().map(|light| light.begin_request(&self.slot));
         let mut rounds = 0u32;
         loop {
             let vfs = self.slot.get();
@@ -230,6 +276,54 @@ impl LightLink {
             }
             light.fill_into(&touched, &self.slot, &vfs, rounds)?;
         }
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    /// FLOE_LIGHT_PLACES_MB (floe_vfs::light::LightIndex::fill_keeping): a
+    /// request keeps the cells it uses even past the budget - its rounds
+    /// would otherwise refill every round what the round before let go, up
+    /// to MAX_FILL_ROUNDS (the exact fit of a 909 MB chip did: 64 rounds,
+    /// 228 s, then the error) - and the next request's fill lets the cells
+    /// it does not use go
+    #[test]
+    fn a_request_past_the_budget_keeps_what_it_uses_and_the_next_one_lets_the_rest_go() {
+        let (root, dir) = super::tests::light_dir_of("budget", &super::tests::two_arms());
+        let cache = crate::Cache::open(&dir).unwrap();
+        cache.set_light_prefill_for_tests(0, 0);
+        cache.set_light_places_budget_for_tests(1);
+        let left = super::tests::exact(crate::ViewBox::new(0, 0, 1000, 1000).unwrap());
+        let right = super::tests::exact(crate::ViewBox::new(6000, 6000, 7000, 7000).unwrap());
+        // the left arm: TOP's placements (round 1) and ARM_A's (round 2);
+        // the budget is past from the first fill on, nothing the request
+        // uses goes
+        let (a, pending) = cache.plan_within_for_tests(&left, None).unwrap();
+        assert!(!pending);
+        let (_, rounds, _, filled, evicted) = cache.light_stats().unwrap();
+        assert_eq!((rounds, filled, evicted), (2, 2, 0));
+        assert!(a.plan.stats.inst_edges >= 2, "{:?}", a.plan.stats);
+        // the right arm: ARM_B is filled; ARM_A, which this request does
+        // not use, goes
+        let (b, pending) = cache.plan_within_for_tests(&right, None).unwrap();
+        assert!(!pending);
+        let (_, rounds, _, filled, evicted) = cache.light_stats().unwrap();
+        assert_eq!((rounds, filled, evicted), (3, 3, 1));
+        assert!(b.plan.stats.inst_edges >= 2, "{:?}", b.plan.stats);
+        // back to the left: ARM_A is read again, ARM_B goes
+        let (a2, pending) = cache.plan_within_for_tests(&left, None).unwrap();
+        assert!(!pending);
+        assert_eq!(a2.plan.pages, a.plan.pages);
+        let (_, rounds, _, filled, evicted) = cache.light_stats().unwrap();
+        assert_eq!((rounds, filled, evicted), (4, 4, 2));
+        // the default budget holds both arms
+        let cache2 = crate::Cache::open(&dir).unwrap();
+        cache2.set_light_prefill_for_tests(0, 0);
+        cache2.plan_within_for_tests(&left, None).unwrap();
+        cache2.plan_within_for_tests(&right, None).unwrap();
+        let (_, rounds, _, filled, evicted) = cache2.light_stats().unwrap();
+        assert_eq!((rounds, filled, evicted), (3, 3, 0));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
@@ -597,12 +691,56 @@ pub(crate) mod tests {
         write_tree(&cells, 1000.0).unwrap()
     }
 
+    /// two arms under the top - ARM_A at the origin, ARM_B far away, each
+    /// placing LEAF once - so a view over one arm expands that arm alone
+    /// (budget_tests)
+    pub(super) fn two_arms() -> Vec<u8> {
+        let leaf_rects = [rect(1, 0, 0, 10, 4)];
+        let top_rects = [rect(1, 0, 0, 10000, 10000)];
+        let one = Rep::One;
+        let cells = [
+            WCell {
+                name: "LEAF".into(),
+                rects: &leaf_rects,
+                polys: &[],
+                paths: &[],
+                texts: &[],
+                places: vec![],
+            },
+            WCell {
+                name: "ARM_A".into(),
+                rects: &[],
+                polys: &[],
+                paths: &[],
+                texts: &[],
+                places: vec![("LEAF", 10, 10, 0, false, &one)],
+            },
+            WCell {
+                name: "ARM_B".into(),
+                rects: &[],
+                polys: &[],
+                paths: &[],
+                texts: &[],
+                places: vec![("LEAF", 10, 10, 0, false, &one)],
+            },
+            WCell {
+                name: "TOP".into(),
+                rects: &top_rects,
+                polys: &[],
+                paths: &[],
+                texts: &[],
+                places: vec![("ARM_A", 0, 0, 0, false, &one), ("ARM_B", 6000, 6000, 0, false, &one)],
+            },
+        ];
+        write_tree(&cells, 1000.0).unwrap()
+    }
+
     /// the tree as a source file with its light files beside it
     pub(super) fn light_dir(tag: &str) -> (std::path::PathBuf, String) {
         light_dir_of(tag, &tree())
     }
 
-    fn light_dir_of(tag: &str, data: &[u8]) -> (std::path::PathBuf, String) {
+    pub(super) fn light_dir_of(tag: &str, data: &[u8]) -> (std::path::PathBuf, String) {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let d = std::env::temp_dir().join(format!("floe-rc-light-{}-{}-{}", std::process::id(), n, tag));
         let _ = std::fs::remove_dir_all(&d);

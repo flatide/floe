@@ -408,7 +408,9 @@
     근접 뷰는 그린다) 캔버스 위 배너가 뜬다 — 뒤에서 `floe2 index deck.jb`가 돌고 있으면 "occupancy summary
     building (k/n sources) - wide views of those sources are empty until it is ready", 아니면 "occupancy summary
     missing for N passes … (floe2 index deck.jb adds it)". 배너가 보이는 동안 3 s마다 다시 그려(`_summary_poll_tick`)
-    요약이 생기면 걷힌다. perf 줄에는 `, N passes wait for their occupancy summary (light sources: empty until it
+    요약이 생기면 걷힌다. 뒤의 `floe2 index`가 끝났는데도 기다리는 pass가 남으면 "occupancy summary
+    unavailable for N passes - the background index (rc R) did not add it; its [summary] lines say why"로
+    바꾸고 폴링을 멈춘다(0.12.385: 배치가 요약 패스의 예산을 넘은 소스 — `--mem`이 올린다). perf 줄에는 `, N passes wait for their occupancy summary (light sources: empty until it
     is built)`, 요약 줄에는 `, N wait for the summary (building)`. 경량 캐시의 프레임이 채우기를 끝내기 전에 오면
     (`final=0`, `light_pending=1`) 하단 줄은 "reading the source... (fill round N)"이다(SPEC §3의 refining과 같은
     흐름; FLOE_LIGHT_FIRST_MS).

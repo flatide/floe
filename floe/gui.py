@@ -2865,6 +2865,9 @@ class Viewer:
         self._summary_progress = ""
         self._summary_waiting = 0
         self._summary_poll_timer = None
+        # the exit of the last background summary index (None while none
+        # ran or one runs): passes still waiting after it are not waited for
+        self._summary_job_rc = None
         main.pack_start(self.overlay, True, True, 0)
 
         # Two-tier status area. Upper: cursor/interaction plus persistent
@@ -4986,6 +4989,18 @@ class Viewer:
                     "sources are empty until it is ready"
                     % ((" (%s)" % self._summary_progress)
                        if self._summary_progress else "..."))
+        elif self._summary_job_rc is not None:
+            # the background index ran and these passes still wait: it did
+            # not add their summary - the [summary] lines on stderr say why
+            # (placements past the summary pass's budget: --mem raises it)
+            text = ("occupancy summary unavailable for %d pass%s - the "
+                    "background index (rc %d) did not add it; its [summary] "
+                    "lines say why (%s index %s --mem G raises the summary "
+                    "pass's budget)"
+                    % (waiting, "" if waiting == 1 else "es",
+                       self._summary_job_rc, APP,
+                       os.path.basename(getattr(self.cache, "src", "")
+                                        or "deck.jb")))
         else:
             text = ("occupancy summary missing for %d pass%s - wide views "
                     "of those sources are empty (%s index %s adds it)"
@@ -4994,6 +5009,9 @@ class Viewer:
                                         or "deck.jb")))
         banner.set_text(text)
         banner.show()
+        if self._summary_job_rc is not None:
+            # nothing to wait for: no redraw every few seconds
+            return
         if self._summary_poll_timer is None:
             self._summary_poll_timer = GLib.timeout_add(
                 3000, self._summary_poll_tick)
@@ -5001,7 +5019,8 @@ class Viewer:
     def _summary_poll_tick(self):
         banner = getattr(self, "_summary_banner", None)
         if banner is None or not banner.get_visible() \
-                or self.cache is None or self.worker is None:
+                or self.cache is None or self.worker is None \
+                or self._summary_job_rc is not None:
             self._summary_poll_timer = None
             return False
         if self._pending is None and not getattr(self, "_refining", False):
@@ -5050,6 +5069,7 @@ class Viewer:
             return
         self._summary_job = {"proc": proc, "path": path, "ids": ids}
         self._summary_progress = ""
+        self._summary_job_rc = None
         sys.stderr.write(
             "[%s] occupancy summary: building for %s source(s) in the "
             "background (%s)\n" % (APP, missing if missing else "the",
@@ -5085,6 +5105,7 @@ class Viewer:
         if job is None or job["proc"] is not proc:
             return False
         self._summary_job = None
+        self._summary_job_rc = rc
         if rc == 0:
             self._set_live_status("occupancy summary built; wide views draw")
         elif rc not in (-signal.SIGTERM, 130, 143):

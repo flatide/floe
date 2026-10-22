@@ -619,6 +619,13 @@ fn execute_index(
             return job.cancel(signal).map(|code| (code, action));
         }
         if let Some(code) = job.poll()? {
+            if job.fell_back() {
+                out.line(&format!(
+                    "[{}] {}: the light cache cannot read it (a cell is defined inside a CBLOCK) - the full index was built in its place",
+                    floe_app_core::program(),
+                    source.display()
+                ));
+            }
             return Ok((code, action));
         }
         std::thread::sleep(Duration::from_millis(20));

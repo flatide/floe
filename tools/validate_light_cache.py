@@ -67,11 +67,72 @@ def generate(script, out, *args):
         fail("%s: %s\n%s" % (script, r.stdout[-800:], r.stderr[-1200:]))
 
 
-def run(cmd, ok=(0,), what=""):
-    r = subprocess.run([str(c) for c in cmd], capture_output=True, text=True)
+def run(cmd, ok=(0,), what="", env=None):
+    r = subprocess.run([str(c) for c in cmd], capture_output=True, text=True, env=env)
     if r.returncode not in ok:
         fail("%s: exit %d: %s" % (what or cmd[1], r.returncode, (r.stderr or r.stdout).strip()[-600:]))
     return r
+
+
+def check_summary_budget(work, src):
+    """The summary pass's placement cap follows --mem (a quarter at about
+    96 B each; the fixed 50 M before 0.12.385): main01_like 0.001 has 1.29 M
+    placements and a 62 MB top cell, so --mem 0.1 (107 MB: above the cell,
+    a cap of about 280 K) skips design.ovo with the line that says so, while
+    the default budget builds it (check_fixture)."""
+    out = work / "main01_light_budget"
+    r = run([BIN, "light", src, "--out", out, "--jobs", "2", "--occupancy", "--mem", "0.1"],
+            what="floe-index light --occupancy --mem 0.1")
+    if "placement records exceed" not in r.stderr or "--mem raises" not in r.stderr:
+        fail("the budget's cap did not say so: %s" % r.stderr[-600:])
+    if (out / "design.ovo").exists():
+        fail("design.ovo was built past the budget's cap")
+    if not (out / "design.inv").is_file() or not (out / "meta.json").is_file():
+        fail("the light cache was not written under the cap")
+    print("  summary pass: --mem 0.1 keeps too few placements for main01_like, skipped and said")
+
+
+def check_unsuitable(work):
+    """A stream with a cell defined inside a CBLOCK (floe_oasis's fixture
+    head_cblock_cell, written by floe-dbg): `floe-index light` refuses it
+    with exit 79 and writes nothing; `floe2 index` builds the full index in
+    its place when the light cache was the rule's choice (FLOE_INDEX_LIGHT=on
+    here, a jobdeck's source in the field) and ends with 79 under `--light`."""
+    import json
+    import os
+    import shutil
+    dbg = ROOT / "rust" / "target" / "release" / "floe-dbg"
+    floe2 = ROOT / "rust" / "target" / "release" / "floe2"
+    src = work / "head_cblock.oas"
+    run([dbg, "fixture", "head-cblock", src], what="floe-dbg fixture")
+    out = work / "head_light"
+    r = run([BIN, "light", src, "--out", out, "--jobs", "1"], ok=(79,),
+            what="floe-index light on a cell inside a CBLOCK")
+    if "defined inside CBLOCKs" not in r.stderr:
+        fail("the light refusal did not say why: %s" % r.stderr[-400:])
+    if out.exists() and any(out.iterdir()):
+        fail("the light refusal wrote files: %s" % sorted(p.name for p in out.iterdir()))
+    env = dict(os.environ, FLOE_INDEX_LIGHT="on")
+    r = run([floe2, "index", src, "--jobs", "1"], what="floe2 index (the fallback)", env=env)
+    text = r.stdout + r.stderr
+    if "the full index was built in its place" not in text:
+        fail("floe2 index did not say it fell back to the full index:\n%s" % text[-1200:])
+    cache = work / ".head_cblock.oas.ice"
+    if not (cache / "design.ovm").is_file():
+        fail("the fallback left no full index in %s" % cache)
+    r = run([floe2, "info", src, "--json"], what="floe2 info")
+    if json.loads(r.stdout).get("cache_kind") != "full":
+        fail("info does not see the full index: %s" % r.stdout[-300:])
+    src2 = work / "head_cblock_2.oas"
+    shutil.copyfile(str(src), str(src2))
+    r = run([floe2, "index", src2, "--light", "--jobs", "1"], ok=(79,),
+            what="floe2 index --light on a cell inside a CBLOCK")
+    text = r.stdout + r.stderr
+    if "defined inside CBLOCKs" not in text or "built in its place" in text:
+        fail("--light did not end with the refusal alone:\n%s" % text[-800:])
+    if (work / ".head_cblock_2.oas.ice" / "design.ovm").exists():
+        fail("--light built the full index")
+    print("  cells inside CBLOCKs: light refused (79), the rule's light cache fell back to the full index, --light did not")
 
 
 def render(cache, out, view, size, extra):
@@ -252,6 +313,8 @@ def main():
         files.append(("main01_like 0.001", main01))
         for name, path in files:
             check_fixture(name, path, work)
+        check_summary_budget(work, main01)
+        check_unsuitable(work)
     print("light_cache: ALL OK")
 
 

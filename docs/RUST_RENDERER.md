@@ -673,7 +673,11 @@ and the `cell_places`/`cell_bvh` accessors) is made again after `LightIndex::
 fill` read those cells' placement segments and the image was reassembled
 (`LightLink::run`; a round per hierarchy level, FLOE_LIGHT_PREFILL_PLACES /
 _MB take the cells under them along, FLOE_LIGHT_PLACES_MB bounds what stays
-resident, FLOE_LIGHT_LOG=on prints a line per round). A page decodes from its
+resident between requests - a fill lets go only cells the request in progress
+did not read from the image it planned on (`Ovm::light_used`,
+`LightIndex::fill_keeping`), so a request larger than the budget keeps its
+working set and completes instead of refilling what the round before let go
+(0.12.385) -, FLOE_LIGHT_LOG=on prints a line per round). A page decodes from its
 segment of the source - read in file order, parsed once with its snapshot,
 split by layer into one-cell Docs (`light::decode_pages`; the pool's workers
 sit a light batch out); the source files are pread through a process-wide

@@ -66,10 +66,23 @@ use std::sync::Mutex;
 /// the cache is not beside it
 pub const META_FILE: &str = "meta.json";
 
+/// `floe-index light`'s exit when the stream has a cell defined inside a
+/// CBLOCK: a segment then holds two cells' records and the directory cannot
+/// tell them apart (`LightIndex::open` refuses such a cache), so none is
+/// written. `floe2 index` builds the full index in its place when the light
+/// cache was the rule's choice (app-core index::IndexJob); `--light` given
+/// ends with this code.
+pub const UNSUITABLE_EXIT: i32 = 79;
+
 /// FLOE_LIGHT_PLACES_MB: the bytes of filled placement sections (records,
-/// point pools, BVH nodes) kept across fills; past it the cells filled
-/// longest ago that the fill at hand does not need are let go (they come
-/// back when a plan expands them again). Default 1 GiB.
+/// point pools, BVH nodes) kept across requests; past it a fill lets the
+/// cells filled longest ago go - never one the fill is asked for, nor one
+/// the request in progress read from the image it planned on
+/// (`fill_keeping`), so a request whose working set is larger than the
+/// budget keeps it whole and completes (its rounds would otherwise refill
+/// every round what the round before let go, up to the renderer's round
+/// cap; the next request's fill lets what it does not use go). Default
+/// 1 GiB.
 pub const PLACES_BUDGET_DEFAULT: u64 = 1 << 30;
 
 /// A fill takes, besides the cells a plan asked for, the cells under them -
@@ -188,6 +201,10 @@ pub struct FillReport {
     pub segments: usize,
     pub evicted: usize,
     pub bytes: u64,
+    /// the bytes the resident sections exceed the budget by after this
+    /// call: the request's own working set (the cells asked for and the
+    /// ones kept for it) is larger than the budget - nothing it uses went
+    pub over_budget: u64,
 }
 
 /// Open source files, shared by every light index of the process and
@@ -257,7 +274,7 @@ pub struct LightIndex {
     /// BVH empty) - the static part of its sink
     cell_static: Vec<CellSink>,
     fills: Mutex<Fills>,
-    budget: u64,
+    budget: std::sync::atomic::AtomicU64,
 }
 
 impl std::fmt::Debug for LightIndex {
@@ -584,7 +601,7 @@ impl LightIndex {
                 cells: (0..n).map(|_| None).collect(),
                 ..Fills::default()
             }),
-            budget: places_budget(),
+            budget: std::sync::atomic::AtomicU64::new(places_budget()),
         })
     }
 
@@ -614,6 +631,12 @@ impl LightIndex {
     pub fn fill_stats(&self) -> (u64, u64, u64) {
         let f = self.fills.lock().unwrap_or_else(|p| p.into_inner());
         (f.bytes, f.filled, f.evicted)
+    }
+
+    /// The resident placement sections' budget (FLOE_LIGHT_PLACES_MB at the
+    /// open), set anew: a test's or a diagnosis's.
+    pub fn set_places_budget(&self, bytes: u64) {
+        self.budget.store(bytes, std::sync::atomic::Ordering::Relaxed);
     }
 
     // ------------------------------------------------------ the source
@@ -716,11 +739,22 @@ impl LightIndex {
 
     // ------------------------------------------------------- the fill
 
+    /// `fill_keeping` with nothing kept but the cells asked for.
+    pub fn fill(&self, cells: &[u32]) -> Result<FillReport, String> {
+        self.fill_keeping(cells, &[])
+    }
+
     /// Reads the placements of `cells` (those the inventory gives
     /// placements and the index has not filled yet), builds their instance
     /// BVHs and keeps the sections for the next `ovm`. Past the places
-    /// budget, filled cells this call does not need go, oldest first.
-    pub fn fill(&self, cells: &[u32]) -> Result<FillReport, String> {
+    /// budget, filled cells go oldest first - never one asked for now, nor
+    /// one in `keep` (the cells the request in progress read from the image
+    /// it planned on, `Ovm::light_used`; any order) - and when those alone
+    /// are past the budget the request keeps them all and the report says by
+    /// how much (`over_budget`): a request whose working set is larger than
+    /// the budget completes instead of refilling every round what the round
+    /// before let go (DIRECT_READ_PLAN §5.4).
+    pub fn fill_keeping(&self, cells: &[u32], keep: &[u32]) -> Result<FillReport, String> {
         let mut todo: Vec<u32> = {
             let f = self.fills.lock().unwrap_or_else(|p| p.into_inner());
             cells
@@ -749,20 +783,28 @@ impl LightIndex {
             report.texts += texts.len() as u64;
             built.push((ci, self.encode_places(&places, texts)));
         }
+        let mut keep: Vec<u32> = keep.to_vec();
+        keep.sort_unstable();
+        keep.dedup();
+        let budget = self.budget.load(std::sync::atomic::Ordering::Relaxed);
         let mut f = self.fills.lock().unwrap_or_else(|p| p.into_inner());
         let adding: u64 = built.iter().map(|(_, c)| c.bytes).sum();
-        // the budget: let the oldest fills go, never one asked for now
-        if f.bytes.saturating_add(adding) > self.budget {
+        // the budget: let the oldest fills go - never one asked for now, nor
+        // one the request in progress uses (`keep`); past those the request
+        // keeps its working set whole (over_budget says by how much)
+        if f.bytes.saturating_add(adding) > budget {
             let mut old: Vec<(u64, usize)> = f
                 .cells
                 .iter()
                 .enumerate()
                 .filter_map(|(ci, c)| c.as_ref().map(|c| (c.serial, ci)))
-                .filter(|&(_, ci)| todo.binary_search(&(ci as u32)).is_err())
+                .filter(|&(_, ci)| {
+                    todo.binary_search(&(ci as u32)).is_err() && keep.binary_search(&(ci as u32)).is_err()
+                })
                 .collect();
             old.sort_unstable();
             for (_, ci) in old {
-                if f.bytes.saturating_add(adding) <= self.budget {
+                if f.bytes.saturating_add(adding) <= budget {
                     break;
                 }
                 if let Some(c) = f.cells[ci].take() {
@@ -785,6 +827,7 @@ impl LightIndex {
             report.bytes += c.bytes;
             f.cells[ci as usize] = Some(c);
         }
+        report.over_budget = f.bytes.saturating_sub(budget);
         Ok(report)
     }
 

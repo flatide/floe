@@ -678,8 +678,11 @@ L4까지 끝나면 단독 소스를 경량으로 열어 볼 수 있고, L5·L6�
   인코딩해 둔다(v8 노드 마스크는 합성 때 `annotate_bvh_masks`). 선채움: 요구된 셀 아래의
   셀도 `FLOE_LIGHT_PREFILL_PLACES`(262,144)·`FLOE_LIGHT_PREFILL_MB`(4) 안에서 같이 읽는다
   (sample9 근접 뷰 3라운드 30 ms; 전부 읽으면 652 셀 178 ms, 안 읽으면 5라운드 17 ms).
-  상주 예산 `FLOE_LIGHT_PLACES_MB`(1 GiB)를 넘으면 지금 요구하지 않은 채움을 오래된
-  순서로 비운다(재방문하면 다시 읽는다). 인덱스 교체는 `VfsSlot`(RwLock<Arc<Vfs>>)로,
+  상주 예산 `FLOE_LIGHT_PLACES_MB`(1 GiB)를 넘으면 채움을 오래된 순서로 비우되, 지금 요구한
+  셀과 진행 중인 요청이 플랜한 이미지에서 읽은 셀(`Ovm::light_used`)은 비우지 않는다 — 요청의
+  작업 집합이 예산보다 크면 그대로 들고 끝내고(라운드 로그 `over the places budget, kept`), 다음
+  요청의 채움이 쓰지 않는 셀을 비운다(0.12.385, §8.8; 그 전에는 앞 라운드가 채운 셀까지 비워
+  64라운드까지 되채웠다). 인덱스 교체는 `VfsSlot`(RwLock<Arc<Vfs>>)로,
   Cache와 HierHandle이 같은 슬롯을 본다; 한 요청은 집은 스냅샷을 끝까지 쓴다.
 - **디코드(§5.3 5).** `Cache::decode_pages*`와 DecodePool은 경량이면 render-core
   `light::decode_pages`로 간다: 요청 페이지를 세그먼트별로 묶고 파일 순서로 pread, 세그먼트
@@ -737,8 +740,10 @@ L4까지 끝나면 단독 소스를 경량으로 열어 볼 수 있고, L5·L6�
   Full(독자는 meta.json까지 배타, 그 뒤 `release_use`로 요약 패스 동안 열 수 있다),
   `--occupancy-only`는 Additive에 기존 design.ovo를 바꿀 때 독자 배타. `--hold-at
   locked:F`/`committed:F`로 게이트가 경쟁시킨다. 덱(`floe-index light DECK.jb`)은 옆의
-  floe2에 `index DECK --light`로 넘긴다(`--out` 거절). 배치 수가 STREAM_PLACES_CAP(5천만)을
-  넘으면 vfs처럼 요약을 건너뛴다.
+  floe2에 `index DECK --light`로 넘긴다(`--out` 거절). 배치 수가 요약 패스의 상한을 넘으면 한 줄
+  알리고 요약을 건너뛴다 — 상한은 0.12.385부터 `--mem`(기본 예산)의 4분의 1을 배치당 약 96 B로
+  나눈 수(`vfs::light_places_cap`; 현장 32 GiB 기본 ≈ 9,000만, 그 전에는 vfs와 같은 5,000만 고정;
+  §8.8). CBLOCK 안에 정의된 셀이 있는 스트림은 아무것도 쓰지 않고 종료 79로 거절한다(§8.8).
 - **`floe2 index`(app-core index.rs, app-cli).** `IndexOptions.light: Option<bool>` —
   `--light`/`--full`(배타); 없으면 `full_only()`(--lod, --page-target-mb, --representatives*,
   --hier-only, --profile-*, --stream, --in-memory, --slow-cell-s, --p2-shard-limit-mb 중
@@ -831,6 +836,53 @@ L4까지 끝나면 단독 소스를 경량으로 열어 볼 수 있고, L5·L6�
 - **남은 것(L7).** 이미지 증분 합성(라운드마다 정적 섹션 재인코딩: p10 150~300 ms),
   세그먼트 pread 병렬화·묶음, 채운 섹션의 recency 예산, 지역성이 나쁜 writer의 B안, 웹
   (feature/webui)의 배너·상태 표기(PatchDto).
+
+### 8.8 L6 후속 수정 (0.12.385 / floe-index·renderd 0.12.344, 2026-10-22; 사용자 "그 순서로 수정 진행해줘")
+
+테라바이트급 현장 덱을 바로 렌더해도 되는지 보려고 p10(909 MB)에 경량 캐시를 만들어 재다 찾은
+세 가지. 측정(macOS 4 jobs, `floe2 render` 뷰어 기본 설정, 수정 전): fit 뷰 전체 색인 3.7 s /
+1.3 GB, 경량 25.4 s / 10.5 GB; 40 µm 근접 뷰 0.20 s / 0.33 GB, 경량 1.3 s / 1.4 GB; render-cli
+exact fit은 경량에서 64라운드 228 s 11 GB 뒤 오류(전체 색인은 raster 55분 넘겨 중단 — 554 M
+멤버를 1024 px에 그리는 병적인 경우). 수정 뒤: 같은 exact fit이 4라운드(계층 깊이만큼, 비움 0)에
+플랜을 끝낸다 — 마지막 이미지 6.9 GB(예산 1 GiB를 5.8 GB 넘긴 채 들고), 플랜 한 번 46 s, 최대 RSS
+10.2 GB; 뷰어 기본 fit은 21 s / 10.7 GB로 전과 같다(되채움이 없던 경우). 경량 fit의 시간·메모리
+자체는 L7(증분 이미지 합성)의 몫이다.
+
+- **채움 예산이 자기 요청을 밀어내던 것.** `LightIndex::fill`의 예산(FLOE_LIGHT_PLACES_MB
+  1 GiB)은 이번 호출이 요구한 셀만 지켰다. 한 뷰가 펼치는 셀의 배치 섹션이 예산보다 크면(배치당
+  약 68 B: 1,500만 개쯤) 앞 라운드가 채운 셀이 밀려나고 다음 라운드의 플랜이 다시 요구해 되채우는
+  되돌이가 MAX_FILL_ROUNDS(64)까지 이어졌다 — 뷰어라면 "fill round N" 프레임이 몇 분 이어지다
+  오류, 캡처는 종료 1. 수정: floe_ovm `LightMarks`에 `used` 비트(`light_touch`/`light_touch_texts`가
+  이미지에서 배치·텍스트를 읽은 셀마다 켠다, 들고 있든 아니든; `Ovm::light_used`),
+  `LightIndex::fill_keeping(cells, keep)`(render-core `fill_into`가 플랜한 이미지의 used 집합을
+  넘긴다)은 요구한 셀과 keep을 비우지 않고, 그 둘만으로 예산을 넘으면 그대로 들고 끝낸다
+  (`FillReport.over_budget`, 라운드 로그 `; N MB over the places budget, kept (the request uses
+  them)`). 다음 요청의 채움이 쓰지 않는 셀을 비운다 — 예산은 요청 사이의 상주 한도다. 테스트
+  render-core `budget_tests`(두 팔 트리, 예산 1 B: 요청이 2라운드에 끝나고 아무것도 비우지 않는다,
+  다른 팔의 요청이 앞 팔을 비운다, 돌아오면 되읽는다, 기본 예산은 아무것도 비우지 않는다).
+- **CBLOCK 안에 정의된 셀이 있는 소스.** `floe-index light`가 경고만 하고 캐시를 썼고 렌더러가
+  그 캐시를 거부해(L4) 덱이 통째로 열리지 않았다. 수정: 재고 패스 뒤 `cells_inside` 세그먼트나
+  `cblock_defs` 셀이 있으면 아무것도 쓰지 않고 종료 79(`floe_vfs::light::UNSUITABLE_EXIT`);
+  `floe2 index`는 규칙이 경량을 고른 소스(덱 소스 — `IndexOptions.deck_source`, 덱 계획이 켠다 —
+  또는 FLOE_INDEX_LIGHT=on; `light`는 None 그대로)면 그 자리에서 전체 색인을 짓는다(app-core
+  `fallback_arguments`가 전체 빌드의 명령줄을 미리 만들고 `IndexJob`이 79 뒤 두 번째 명령으로 잇는다,
+  `fell_back`; app-cli 한 줄 "the light cache cannot read it (a cell is defined inside a CBLOCK) -
+  the full index was built in its place"; `exit_words(79)`), `--light` 명시면 79로 끝난다. 재고
+  패스는 두 번 든다(50 GB에 2~3분; 전체 빌드 2시간 앞에서는 작다). 게이트 light_cache
+  `check_unsuitable`(floe-dbg `fixture head-cblock`이 floe_oasis의 손으로 쓴 스트림을 파일로 낸다:
+  light 79·빈 디렉터리, FLOE_INDEX_LIGHT=on `floe2 index` → 전체 색인 + 한 줄, `--light` → 79).
+- **배치 5,000만 상한.** 경량 요약 패스는 모든 배치를 메모리에 들고 돌므로 상한이 있는데
+  (`STREAM_PLACES_CAP`), 넘는 소스는 요약 없이 남고 덱 광역 pass는 영원히 "building"이었다(p10이
+  그랬다: 8,260만). 수정: 상한 = `--mem`(기본 min(MemAvailable/2, 32 GiB))의 4분의 1 ÷ 배치당 약 96 B
+  (`vfs::light_places_cap`, `PLACE_BYTES_EST`; 현장 32 GiB ≈ 9,000만, `--mem 64` ≈ 1.8억; 전체
+  빌드의 자기 패스는 5,000만 그대로). 넘으면 한 줄("N placement records exceed the M the summary
+  pass keeps within its budget (a quarter of G at about 96 B each) … --mem raises the budget")과
+  함께 건너뛴다. GTK 배너: 뒤의 `floe2 index`가 끝났는데도 pass가 기다리면 "occupancy summary
+  unavailable for N passes - the background index (rc R) did not add it; its [summary] lines say
+  why (floe2 index deck.jb --mem G raises the summary pass's budget)"로 바꾸고 3 s 폴링을 멈춘다
+  (`_summary_job_rc`). `floe2 render`의 미완 메시지도 그 경우를 말한다. 게이트 light_cache
+  `check_summary_budget`(main01_like 0.001: 1.29 M 배치, top 62 MB; `--mem 0.1` = 107 MB는 셀보다
+  크고 상한 ≈ 28만이라 건너뛰고 말한다; 기본 예산은 짓는다 — check_fixture).
 
 ## 9. 검토한 대안
 

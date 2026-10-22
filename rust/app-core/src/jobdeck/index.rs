@@ -77,8 +77,11 @@ impl DeckIndexPlan {
         options.occupancy = Some(options.occupancy.unwrap_or(true));
         // a deck's sources take the light cache unless told otherwise
         // (DIRECT_READ_PLAN §10 decision 2; --full, FLOE_INDEX_LIGHT=off, or
-        // an option of the full index's)
-        options.light = Some(options.light_for(true));
+        // an option of the full index's): `deck_source` gives the rule to
+        // PreparedIndex::prepare, which keeps `light` as given - a light
+        // cache the rule chose gives way to the full index when floe-index
+        // light cannot read the stream (a cell defined inside a CBLOCK)
+        options.deck_source = true;
         if options.profile_cell.is_some() {
             return Err(Error::new(
                 ErrorKind::Unsupported,

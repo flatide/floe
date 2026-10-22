@@ -1057,6 +1057,20 @@ pub(crate) struct StreamArgs<'a> {
 /// thousands, a layout past this has occupancy off by default)
 pub(crate) const STREAM_PLACES_CAP: u64 = 50_000_000;
 
+/// what a kept placement record costs the light cache's summary pass in
+/// memory, about (the PlaceRec and its share of the per-cell vectors)
+pub(crate) const PLACE_BYTES_EST: u64 = 96;
+
+/// the placement records the light cache's summary pass keeps (`floe-index
+/// light --occupancy`: `LightIndex::all_placements` holds every placement of
+/// the source while the pass runs): a quarter of the streaming budget
+/// (--mem, or its default) at PLACE_BYTES_EST each - the field host's 32 GiB
+/// default allows about 90 M, `--mem` raises it; the streaming build's own
+/// pass keeps STREAM_PLACES_CAP (DIRECT_READ_PLAN §8.8)
+pub(crate) fn light_places_cap(budget: u64) -> u64 {
+    (budget / 4 / PLACE_BYTES_EST).max(1)
+}
+
 /// the build's mode (STREAMING_INDEX_PLAN §10, the switch-over of
 /// 0.12.370)
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

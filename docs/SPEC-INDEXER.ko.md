@@ -137,8 +137,12 @@ design.ovo를 더하는데, 인스턴스의 배치는 파일 전체를 다시 �
 design.inv가 있는 디렉터리를 경량으로 열어 소스(meta.json `src.path`, 없으면 `.NAME.ice`의
 NAME; size/mtime이 맞아야 한다)에서 직접 읽는다 — 셀 디렉터리는 재고, 페이지는 세그먼트 ×
 레이어, 배치는 플랜이 방문한 셀부터 pread + inflate + `parse_segment`로 채운다. CBLOCK
-안에 정의된 셀이 있는 스트림은 경량으로 열리지 않는다(명령이 경고한다). 배치 수가 요약
-패스의 상한(5천만)을 넘으면 요약을 건너뛴다. 제품 쪽(`floe2 index --light/--full`, 기본
+안에 정의된 셀이 있는 스트림은 경량으로 읽을 수 없다: `floe-index light`가 아무것도 쓰지 않고
+종료 79(`floe_vfs::light::UNSUITABLE_EXIT`)로 거절하고, `floe2 index`는 규칙이 경량을 고른
+소스(덱 소스, FLOE_INDEX_LIGHT=on)면 그 자리에서 전체 색인을 짓는다(`--light` 명시는 79;
+0.12.385). 배치 수가 요약 패스의 상한 — `--mem`(기본 예산)의 4분의 1을 배치당 약 96 B로 나눈
+수, 현장 32 GiB 기본 ≈ 9,000만(0.12.385; 그 전 5천만 고정) — 을 넘으면 한 줄 알리고 요약을
+건너뛴다. 제품 쪽(`floe2 index --light/--full`, 기본
 규칙, info, clip)은 §0.
 
 ### 1.1 단일 셀 비게시 프로파일
@@ -465,7 +469,8 @@ STREAMING_INDEX_PLAN §5. 현장(2026-10-19)의 50 GB 덱 소스는 인메모리
   없으면(Linux 밖) 꺼짐; `FLOE_MEM_AVAILABLE_GB`가 대신한다(게이트).
 - **스트리밍 사전 거절:** 가장 큰 셀(또는 다중 정의 스팬)이 `--mem`을 넘으면 출력을
   건드리기 전에 종료 71("needs intra-cell splitting, which is not implemented").
-- **종료 코드 71**은 잠금의 75, 사용법 2, 실패 1, 커널의 137과 구별된다. `floe2 index
+- **종료 코드 71**은 잠금의 75, 사용법 2, 실패 1, 커널의 137, 경량 캐시가 읽을 수 없는
+  스트림의 79(`floe-index light`; CBLOCK 안의 셀, 0.12.385)와 구별된다. `floe2 index
   DECK.jb`와 자동 색인은 코드를 말로 푼다(`app-core index::exit_words`).
 - 게이트: `vfs_stream`(tools/validate_vfs_stream.py)의 guards 절.
 

@@ -252,6 +252,24 @@ pub fn light_cmd(args: &[String]) {
             std::process::exit(1);
         }
     };
+    // a stream with a cell defined inside a CBLOCK: a segment then holds two
+    // cells' records and the directory cannot tell them apart - the renderer
+    // refuses such a cache (floe_vfs::light::LightIndex::open), so none is
+    // written; `floe2 index` builds the full index in its place when the
+    // light cache was the rule's choice (UNSUITABLE_EXIT)
+    if !occupancy_only {
+        let inside = segs
+            .as_ref()
+            .map_or(0, |c| c.segs.iter().filter(|s| s.cells_inside > 0).count());
+        let cblock_cells = store.inventory().cells.iter().filter(|c| c.cblock_defs > 0).count();
+        if inside > 0 || cblock_cells > 0 {
+            eprintln!(
+                "light: {} cell(s) of {} are defined inside CBLOCKs ({} segment(s) hold another cell's records) - the light cache cannot read them, nothing is written; the full index reads the stream (`floe2 index SRC --full`, `floe-index vfs SRC DIR`)",
+                cblock_cells, src, inside
+            );
+            std::process::exit(floe_vfs::light::UNSUITABLE_EXIT);
+        }
+    }
     let mut written = String::new();
     if !occupancy_only {
         std::fs::create_dir_all(&outdir).unwrap_or_else(|e| {
@@ -266,13 +284,6 @@ pub fn light_cmd(args: &[String]) {
             eprintln!("light: no segment directory was collected");
             std::process::exit(1);
         };
-        let inside = col.segs.iter().filter(|s| s.cells_inside > 0).count();
-        if inside > 0 {
-            eprintln!(
-                "light: {} segment(s) hold a CELL record inside a CBLOCK - the renderer will refuse the light cache (use the full index)",
-                inside
-            );
-        }
         let inv_bytes = floe_oasis::invfile::encode(inv, id);
         publish(floe_oasis::invfile::FILE_NAME, &inv_bytes);
         let mut f = floe_oasis::segfile::SegFile::from_segments(&col.segs, inv, seg_bytes).unwrap_or_else(|e| {
@@ -319,11 +330,14 @@ pub fn light_cmd(args: &[String]) {
     if occupancy || occupancy_only {
         let t_occ = std::time::Instant::now();
         let placements = store.inventory().scan.placements;
-        if placements > crate::vfs::STREAM_PLACES_CAP {
+        let cap = crate::vfs::light_places_cap(budget);
+        if placements > cap {
             eprintln!(
-                "[light] {} placement records exceed the {} the streaming occupancy pass keeps - design.ovo is skipped (STREAMING_INDEX_PLAN.ko.md §4.6); the light cache is complete without it",
+                "[light] {} placement records exceed the {} the summary pass keeps within its budget (a quarter of {} at about {} B each) - design.ovo is skipped, the light cache is complete without it; --mem raises the budget (STREAMING_INDEX_PLAN.ko.md §4.6)",
                 placements,
-                crate::vfs::STREAM_PLACES_CAP
+                cap,
+                crate::vfs::fmt_size(budget),
+                crate::vfs::PLACE_BYTES_EST
             );
         } else {
             let li = floe_vfs::light::LightIndex::open(&outdir).unwrap_or_else(|e| {
@@ -495,4 +509,19 @@ fn light_meta(src: &str, size: u64, mtime: u64, inv: &floe_oasis::inventory::Inv
         texts,
         text_cells,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    /// the summary pass's placement cap follows the streaming budget: a
+    /// quarter of it at about PLACE_BYTES_EST each (the field host's 32 GiB
+    /// default keeps about 90 M; the fixed 50 M before 0.12.385)
+    #[test]
+    fn the_summary_pass_keeps_a_quarter_of_the_budget_in_placements() {
+        use crate::vfs::{light_places_cap, PLACE_BYTES_EST};
+        assert_eq!(light_places_cap(32 << 30), (8u64 << 30) / PLACE_BYTES_EST);
+        assert!(light_places_cap(32 << 30) > 80_000_000);
+        assert!(light_places_cap(1 << 30) < 3_000_000);
+        assert_eq!(light_places_cap(0), 1);
+    }
 }

@@ -139,7 +139,7 @@ fn render(
             summary.over_budget,
             if summary.summary_building > 0 {
                 format!(
-                    ", summary_building={} pass(es) of light source(s) whose occupancy summary is not built yet (`{} index DECK.jb` adds it; the auto-index does so unless --no-index)",
+                    ", summary_building={} pass(es) of light source(s) whose occupancy summary is not built yet (`{} index DECK.jb` adds it, the auto-index does so unless --no-index; a source whose placements exceed the summary pass's budget stays so - the index's line says, --mem raises it)",
                     summary.summary_building,
                     floe_app_core::program()
                 )

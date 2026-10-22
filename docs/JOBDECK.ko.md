@@ -259,7 +259,11 @@ floe2 jobdeck deck.jb [--report r.json] [--spec s.spec]   # 분석·보고만
 sample9급 소스 4 s), 뷰어·`render`·`info`는 render-core가 그 디렉터리를 경량으로 열어
 원본에서 직접 읽는다(L4). `--full`(또는 `--lod` 같은 전체 색인만의 옵션,
 `FLOE_INDEX_LIGHT=off`)이면 전체 색인이다. 이미 전체 색인이 있는 소스는 그대로 둔다.
-`floe-index light deck.jb`는 옆의 floe2에 `index deck.jb --light`로 넘긴다.
+`floe-index light deck.jb`는 옆의 floe2에 `index deck.jb --light`로 넘긴다. CBLOCK 안에 셀이
+정의된 소스는 경량으로 읽을 수 없어 그 자리에서 전체 색인을 짓는다(0.12.385; `floe-index light`는
+79로 거절하고 아무것도 쓰지 않는다). 배치가 요약 패스의 예산(`--mem`의 4분의 1 ÷ 약 96 B; 32 GiB
+기본 ≈ 9,000만)을 넘는 소스는 요약 없이 남고 한 줄 알린다 — 뷰어 배너는 뒤의 색인이 끝나면
+"unavailable"로 바뀐다.
 
 **요약이 아직 없는 경량 소스(2026-10-22, app 0.12.384; DIRECT_READ_PLAN L6, 사용자 결정 §10 4 =
 배너).** 덱 pass의 소스가 경량인데 design.ovo가 없으면, 그 소스의 자동 기준 셀로 보아 요약이

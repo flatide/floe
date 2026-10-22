@@ -1974,6 +1974,11 @@ pub struct LightMarks {
     /// that passes a cell of texts alone asks for no fill
     texts: Vec<u64>,
     touched: Vec<std::sync::atomic::AtomicU64>,
+    /// the cells whose placements or texts a reader read from this image,
+    /// held by it or not (`light_used`): the working set of the request
+    /// planning on the image, which a fill's budget keeps
+    /// (floe_vfs::light::LightIndex::fill_keeping)
+    used: Vec<std::sync::atomic::AtomicU64>,
 }
 
 impl LightMarks {
@@ -1993,6 +1998,7 @@ impl LightMarks {
             places: bits(places),
             texts: bits(texts),
             touched: (0..words).map(|_| std::sync::atomic::AtomicU64::new(0)).collect(),
+            used: (0..words).map(|_| std::sync::atomic::AtomicU64::new(0)).collect(),
         }
     }
 
@@ -2010,6 +2016,28 @@ impl LightMarks {
             word.fetch_or(1u64 << b, std::sync::atomic::Ordering::Relaxed);
         }
     }
+
+    #[inline]
+    fn note_use(&self, ci: u32) {
+        let (w, b) = (ci as usize / 64, ci % 64);
+        if let Some(word) = self.used.get(w) {
+            word.fetch_or(1u64 << b, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+/// the set bits of `words` as cell indices, ascending
+fn set_bits(words: &[std::sync::atomic::AtomicU64]) -> Vec<u32> {
+    let mut out = Vec::new();
+    for (w, word) in words.iter().enumerate() {
+        let mut bits = word.load(std::sync::atomic::Ordering::Relaxed);
+        while bits != 0 {
+            let b = bits.trailing_zeros();
+            bits &= bits - 1;
+            out.push((w * 64) as u32 + b);
+        }
+    }
+    out
 }
 
 const OCC_AREA_UNKNOWN: u64 = u64::MAX;
@@ -2157,11 +2185,13 @@ impl Ovm {
         }
     }
 
-    /// A reader is about to use cell `ci`'s placements: noted when the
-    /// image does not hold them (LightMarks); nothing on a full index.
+    /// A reader is about to use cell `ci`'s placements: noted as used
+    /// (`light_used`), and as asked for when the image does not hold them
+    /// (LightMarks); nothing on a full index.
     #[inline]
     pub fn light_touch(&self, ci: u32) {
         if let Some(m) = &self.light {
+            m.note_use(ci);
             if LightMarks::bit(&m.places, ci) {
                 m.touch(ci);
             }
@@ -2169,11 +2199,12 @@ impl Ovm {
     }
 
     /// A reader is about to use cell `ci`'s texts (the label walk,
-    /// `cell_tranges`): noted when the image does not hold them; nothing on
-    /// a full index.
+    /// `cell_tranges`): noted as used, and as asked for when the image does
+    /// not hold them; nothing on a full index.
     #[inline]
     pub fn light_touch_texts(&self, ci: u32) {
         if let Some(m) = &self.light {
+            m.note_use(ci);
             if LightMarks::bit(&m.texts, ci) {
                 m.touch(ci);
             }
@@ -2184,18 +2215,27 @@ impl Ovm {
     /// (ascending); empty on a full index, and when the image answered
     /// every reader whole.
     pub fn light_touched(&self) -> Vec<u32> {
-        let mut out = Vec::new();
+        self.light.as_ref().map_or_else(Vec::new, |m| set_bits(&m.touched))
+    }
+
+    /// The cells readers read placements or texts of from this image since
+    /// it was made (ascending; held by the image or not): the working set of
+    /// the request planning on it, which the next fill's budget keeps
+    /// (floe_vfs::light::LightIndex::fill_keeping). Empty on a full index.
+    pub fn light_used(&self) -> Vec<u32> {
+        self.light.as_ref().map_or_else(Vec::new, |m| set_bits(&m.used))
+    }
+
+    /// Clears the used marks: a request's start on a light cache, so that
+    /// `light_used` is that request's and not the previous one's (the
+    /// settled image of one request is the starting image of the next;
+    /// render-core LightLink::run_within). Nothing on a full index.
+    pub fn light_reset_used(&self) {
         if let Some(m) = &self.light {
-            for (w, word) in m.touched.iter().enumerate() {
-                let mut bits = word.load(std::sync::atomic::Ordering::Relaxed);
-                while bits != 0 {
-                    let b = bits.trailing_zeros();
-                    bits &= bits - 1;
-                    out.push((w * 64) as u32 + b);
-                }
+            for word in &m.used {
+                word.store(0, std::sync::atomic::Ordering::Relaxed);
             }
         }
-        out
     }
 
     /// production open: read-only mmap + SHALLOW validation - the

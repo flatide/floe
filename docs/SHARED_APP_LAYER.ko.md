@@ -475,7 +475,10 @@ P4d처럼 컨트롤러 루프에서만 바뀐다. `FLOE_GTK_LOOP=legacy`는 예�
   --representatives*, --hier-only, --profile-*, --stream, --in-memory, --slow-cell-s,
   --p2-shard-limit-mb; --no-ovs·--no-page-occupancy는 세지 않는다 - 덱 소스가 --no-ovs를 달고
   온다), `light_for(deck_source)`(플래그 → 전체 옵션 →
-  환경 → 규칙). `validate()`는 `--light` + 전체 옵션을 거절한다. `decide()`는 캐시의 종류
+  환경 → 규칙). `IndexOptions.deck_source`(덱 계획이 켠다; 0.12.385)가 규칙을
+  `PreparedIndex::prepare`에 전하고 `light`는 준 대로 남아, 규칙이 고른 경량 캐시는 `floe-index
+  light`가 읽을 수 없는 스트림(종료 79, CBLOCK 안의 셀)에서 전체 색인으로 넘어간다
+  (`fallback_arguments`, `IndexJob`이 잇고 `fell_back`; `--light` 명시는 79). `validate()`는 `--light` + 전체 옵션을 거절한다. `decide()`는 캐시의 종류
   (`cache::cache_kind`)와 요청을 함께 본다: 경량 위 전체 요청 = Build(--force 없이; 잃는 것이
   없다), 전체 위 경량 요청 = 유지, `--representatives-only`/`--hier-only`는 경량 캐시 거절,
   `--occupancy-only`는 경량이면 light 명령. `arguments()`는 `floe-index light SRC --out DIR --jobs N
