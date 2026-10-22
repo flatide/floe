@@ -41,6 +41,12 @@ pub struct DeckInfo {
     pub placements: usize,
     pub skipped: Vec<Skipped>,
     pub colour_order: Vec<super::color::OrderRow>,
+    /// Drawable sources opened from a light cache (DIRECT_READ_PLAN L4),
+    /// and the drawable indexed sources without an occupancy summary
+    /// (design.ovo) yet - their wide views wait for it (the viewer's
+    /// banner, the background summary build; L6).
+    pub light_sources: usize,
+    pub summary_missing: usize,
 }
 #[derive(Debug)]
 pub struct DeckSnapshot {
@@ -145,6 +151,15 @@ impl DeckSnapshot {
         } else {
             analysis.deck.name().into()
         };
+        let (mut light_sources, mut summary_missing) = (0usize, 0usize);
+        for info in analysis.catalog.infos.values().filter(|i| i.ok() && i.indexed) {
+            if cache::cache_kind(&info.cache_dir) == Some(cache::CacheKind::Light) {
+                light_sources += 1;
+            }
+            if !info.cache_dir.join("design.ovo").is_file() {
+                summary_missing += 1;
+            }
+        }
         let metadata = DeckMetadata {
             dbu,
             bbox,
@@ -173,6 +188,8 @@ impl DeckSnapshot {
                 placements: analysis.model.placements.len(),
                 skipped,
                 colour_order: analysis.colors.order.clone(),
+                light_sources,
+                summary_missing,
             },
         };
         check_cancelled(cancelled)?;

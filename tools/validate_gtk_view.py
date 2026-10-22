@@ -809,6 +809,41 @@ def capture_parity(src, temp):
         v.window.destroy()
 
 
+def light_status(src, temp):
+    """A layout opened from a light cache (DIRECT_READ_PLAN L6): the depth
+    label says `cache:light`, its frame line carries the light fill rounds,
+    and no summary banner shows (a layout has none)."""
+    from floe import gui
+    light_src = Path(temp) / "light" / src.name
+    light_src.parent.mkdir()
+    light_src.write_bytes(src.read_bytes())
+    done = subprocess.run([FLOE2, "index", str(light_src), "--light", "--jobs", "2"],
+                          cwd=ROOT, capture_output=True, text=True, timeout=600)
+    check(done.returncode == 0, done.stdout + done.stderr)
+    cache = gtkservice.ServiceCache(str(light_src))
+    cache.load()
+    check(cache.meta.get("cache") == "light",
+          "the light cache's meta says %r" % cache.meta.get("cache"))
+    v = gui.Viewer(cache)
+    frames = []
+    take = v._ctl_frame
+    v._ctl_frame = lambda f: (frames.append(f), take(f))
+    try:
+        pump(v, lambda: settled(v, frames), "first frame")
+        label = v.dstatus.get_text()
+        check("cache:light" in label, "the depth label of a light cache: %r" % label)
+        last = [f for f in frames if f["purpose"] == "foreground"][-1]
+        fields = last.get("fields") or {}
+        check("light_rounds" in fields and fields.get("light_pending") == "0",
+              "the settled frame of a light cache: %s"
+              % {k: fields.get(k) for k in ("light_rounds", "light_pending")})
+        check(not v._summary_banner.get_visible(), "a layout showed the summary banner")
+        print("light cache: %r, %s fill round(s)" % (label, fields.get("light_rounds")))
+    finally:
+        v._quit()
+        v.window.destroy()
+
+
 def main():
     os.environ["FLOE_INDEX_BIN"] = str(ROOT / "rust/target/release/floe-index")
     os.environ["FLOE_RENDERD_BIN"] = str(ROOT / "rust/target/release/floe-renderd")
@@ -928,6 +963,7 @@ def main():
             if gtk_ready():
                 gui_viewer(src, ref)
                 capture_parity(src, temp)
+                light_status(src, temp)
         finally:
             ref.stop()
             svc.close()

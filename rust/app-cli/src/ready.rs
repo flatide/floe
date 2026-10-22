@@ -400,36 +400,60 @@ fn index_layout(source: &Path, waiter: &mut Waiter, cancelled: &AtomicUsize) -> 
 
 /// A deck's sources (`catalog`, its levels') that have no cache at all, and
 /// the locks of those another run rebuilds now.
+/// Whether the deck needs `index` before it is read: a drawable source
+/// with no cache at all; for a command that draws (`summaries`: render,
+/// probe - not info), an indexed one without its occupancy summary
+/// (design.ovo) as well - a deck's wide view draws nothing of a light
+/// source without it (DIRECT_READ_PLAN §5.5), and `floe2 index DECK` adds
+/// it; and the sources another run rebuilds.
 fn deck_state(
     catalog: &floe_app_core::jobdeck::sources::SourceCatalog,
+    summaries: bool,
 ) -> Result<(bool, Vec<Key>)> {
-    let mut none = false;
+    let mut needs = false;
     let mut busy = Vec::new();
     for info in catalog.infos.values() {
         if !info.busy.is_empty() {
             busy.push(lock::key(lock::Kind::Vfs, &info.cache_dir.to_string_lossy()));
-        } else if !none && info.ok() && !info.indexed && found(&info.path)? != Found::There {
-            none = true;
+        } else if !needs && info.ok() {
+            if !info.indexed {
+                needs = found(&info.path)? != Found::There;
+            } else if summaries && !info.cache_dir.join("design.ovo").is_file() {
+                needs = true;
+            }
         }
     }
-    Ok((none, busy))
+    Ok((needs, busy))
 }
 
-/// The deck's sources that have no cache at all, of the levels loaded,
-/// indexed now as `index DECK` indexes them; a source that fails or (no
-/// --wait) is busy is left out of the drawing, said in its ledger.
+/// The deck's sources that have no cache at all, and the indexed ones
+/// without their occupancy summary, of the levels loaded, indexed now as
+/// `index DECK` indexes them; a source that fails or (no --wait) is busy is
+/// left out of the drawing, said in its ledger.
 fn index_deck(
     plan: DeckIndexPlan,
+    summaries: bool,
     waiter: &mut Waiter,
     cancelled: &AtomicUsize,
 ) -> Result<()> {
     let mut todo = Vec::new();
+    let (mut without_index, mut without_summary) = (0usize, 0usize);
     for mut entry in plan.todo {
         match found(&entry.source)? {
-            Found::None => todo.push(entry),
+            Found::None => {
+                without_index += 1;
+                todo.push(entry);
+            }
             // a source's build stopped half-way: rebuilt
             Found::Incomplete => {
                 entry.options.force = true;
+                without_index += 1;
+                todo.push(entry);
+            }
+            // a current cache whose summary the plan adds (occupancy-only):
+            // for a command that draws
+            Found::There if summaries && entry.options.occupancy_only => {
+                without_summary += 1;
                 todo.push(entry);
             }
             Found::There => (),
@@ -438,20 +462,33 @@ fn index_deck(
     if todo.is_empty() {
         return Ok(());
     }
+    let mut what = Vec::new();
+    if without_index > 0 {
+        what.push(format!("{} source(s) have no index yet", without_index));
+    }
+    if without_summary > 0 {
+        what.push(format!(
+            "{} source(s) have no occupancy summary yet",
+            without_summary
+        ));
+    }
     eprintln!(
-        "[jobdeck] {} source(s) have no index yet - indexing them first (--no-index: draw without them)",
-        todo.len()
+        "[jobdeck] {} - indexing them first (--no-index: draw without them)",
+        what.join(", ")
     );
     crate::deck_index::run_entries(&todo, 0, Out::Stderr, waiter, cancelled)?;
     Ok(())
 }
 
 /// `source` opened for a read command: what has no index indexed first
-/// (`index`), what another run indexes waited for (`waiter`) or refused.
+/// (`index`; for a command that draws - `summaries` - a deck source's
+/// missing occupancy summary as well), what another run indexes waited
+/// for (`waiter`) or refused.
 pub(crate) fn open(
     source: &Path,
     levels: Option<BTreeSet<i64>>,
     index: bool,
+    summaries: bool,
     waiter: &mut Waiter,
     cancelled: &AtomicUsize,
 ) -> Result<Dataset> {
@@ -467,7 +504,7 @@ pub(crate) fn open(
                 let Dataset::Deck(snapshot) = &dataset else {
                     return Ok(dataset);
                 };
-                let (none, busy) = deck_state(&snapshot.analysis.catalog)?;
+                let (none, busy) = deck_state(&snapshot.analysis.catalog, summaries)?;
                 if !(index && !deck_indexed && none) && !(waiter.on() && !busy.is_empty()) {
                     return Ok(dataset);
                 }
@@ -490,13 +527,13 @@ pub(crate) fn open(
                     &IndexOptions::default(),
                     cancelled,
                 )?;
-                let (none, busy) = deck_state(&plan.catalog)?;
+                let (none, busy) = deck_state(&plan.catalog, summaries)?;
                 if !(index && !deck_indexed && none) && !(waiter.on() && !busy.is_empty()) {
                     return Err(e);
                 }
                 if index && !deck_indexed && none {
                     deck_indexed = true;
-                    index_deck(plan, waiter, cancelled)?;
+                    index_deck(plan, summaries, waiter, cancelled)?;
                     continue;
                 }
                 (none, busy, Some(e))
@@ -504,12 +541,13 @@ pub(crate) fn open(
             Err(e) => return Err(e),
         };
         drop(refused);
-        // its sources with no cache at all: indexed once, then drawn
+        // its sources with no cache at all, or no summary yet: indexed
+        // once, then drawn
         if index && !deck_indexed && none {
             deck_indexed = true;
             let plan =
                 DeckIndexPlan::prepare(source, levels.clone(), &IndexOptions::default(), cancelled)?;
-            index_deck(plan, waiter, cancelled)?;
+            index_deck(plan, summaries, waiter, cancelled)?;
             continue;
         }
         // its sources another run rebuilds: waited for, then the deck again

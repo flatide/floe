@@ -281,6 +281,7 @@ impl Engine for Fake {
                     deferred: 0,
                     labels_truncated: self.gen == 2
                         && self.control.margin_truncated.load(Ordering::Relaxed),
+                    summary_building: 0,
                     request,
                     bytes,
                     fields: Fields(

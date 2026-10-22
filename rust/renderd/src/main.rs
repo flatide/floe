@@ -553,6 +553,11 @@ struct RenderCommand {
     /// path). None (absent): the rule as before - a jobdeck on, a plain
     /// layout off, FLOE_RUST_OCCUPANCY (summary_switches).
     occupancy: Option<bool>,
+    /// `progressive=0`: a capture - a light cache's frame runs its fills to
+    /// the end before it is drawn (DIRECT_READ_PLAN §5.4). Absent (the
+    /// viewer): the frame goes out after FLOE_LIGHT_FIRST_MS of fills and is
+    /// drawn again after them (run_render's light attempts).
+    progressive: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -691,6 +696,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                 "vh",
                 "density",
                 "occupancy",
+                "progressive",
             ]);
             reject_unknown(&fields, &allowed)?;
             let thin_keep = match fields.get("thin").map(|s| s.as_str()) {
@@ -786,6 +792,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                     },
                     density: optional_bool(&fields, "density")?,
                     occupancy: optional_bool(&fields, "occupancy")?,
+                    progressive: optional_bool(&fields, "progressive")?.unwrap_or(true),
                 },
             ))))
         }
@@ -1665,7 +1672,7 @@ fn handle_open(
                 respond(
                     responses,
                     format!(
-                        "opened unit={} top=0 layers={} cells={} pages={} ovp_bytes=0 max_depth={} budget_bytes={} jobs={} deck=1 sources={} placements={} bbox={} open_us={}",
+                        "opened unit={} top=0 layers={} cells={} pages={} ovp_bytes=0 max_depth={} budget_bytes={} jobs={} deck=1 sources={} placements={} bbox={} open_us={} light_sources={} summary_missing={}",
                         info.unit,
                         info.layers,
                         info.sources,
@@ -1676,7 +1683,9 @@ fn handle_open(
                         info.sources,
                         info.placements,
                         bbox,
-                        elapsed_us(open_started)
+                        elapsed_us(open_started),
+                        info.light_sources,
+                        info.summary_missing
                     ),
                 );
             }
@@ -1697,6 +1706,7 @@ fn handle_open(
                     }],
                 }));
             }
+            let light = cache.is_light();
             state.cache = Some(cache);
             state.page_cache = DecodedPageCache::new(budget_bytes);
             state.retained.clear();
@@ -1715,7 +1725,7 @@ fn handle_open(
             respond(
                 responses,
                 format!(
-                    "opened unit={} top={} layers={} cells={} pages={} ovp_bytes={} max_depth={} budget_bytes={} jobs={} open_us={}",
+                    "opened unit={} top={} layers={} cells={} pages={} ovp_bytes={} max_depth={} budget_bytes={} jobs={} open_us={} cache={}",
                     info.unit,
                     info.top_cell,
                     info.layers,
@@ -1725,7 +1735,8 @@ fn handle_open(
                     info.max_depth,
                     budget_bytes,
                     command.jobs,
-                    elapsed_us(open_started)
+                    elapsed_us(open_started),
+                    if light { "light" } else { "full" }
                 ),
             );
         }
@@ -2542,6 +2553,35 @@ fn run_deck_render(
     responses: &Sender<String>,
     cancellation: &RenderCancellation,
 ) -> Result<(), String> {
+    // a deck of light sources (DIRECT_READ_PLAN §5.4): a viewer frame goes
+    // out before the sources' fills are done (final=0) and is drawn again
+    // after them, as run_render's light attempts - a capture
+    // (`progressive=0`) waits
+    let mut published = 0usize;
+    loop {
+        if !run_deck_render_attempt(state, command, responses, cancellation, published)? {
+            return Ok(());
+        }
+        published += 1;
+        if published > MAX_LIGHT_ATTEMPTS as usize {
+            return Err(format!(
+                "light index: the deck frame did not settle in {} attempts of filling",
+                MAX_LIGHT_ATTEMPTS
+            ));
+        }
+    }
+}
+
+/// run_deck_render once: the frame published as round `published + 1`,
+/// final unless a light source's fills are still pending (then true comes
+/// back and the frame is drawn again).
+fn run_deck_render_attempt(
+    state: &mut WorkerState,
+    command: &RenderCommand,
+    responses: &Sender<String>,
+    cancellation: &RenderCancellation,
+    published: usize,
+) -> Result<bool, String> {
     check_generation(cancellation, command.generation)?;
     if command.root.is_some() {
         return Err(
@@ -2599,9 +2639,32 @@ fn run_deck_render(
         stream: std::env::var("FLOE_RUST_DECK_STREAM").as_deref() != Ok("off"),
         thin_keep: command.thin_keep,
         occupancy: command.occupancy,
+        // the light sources' fills within FLOE_LIGHT_FIRST_MS, then the
+        // frame (a capture and a margin run them to the end)
+        light_deadline: if command.progressive
+            && !command.background
+            && deck.info().light_sources > 0
+        {
+            floe_render_core::light_first_budget().map(|budget| Instant::now() + budget)
+        } else {
+            None
+        },
     };
     let report = deck.render(&request, command.generation, cancellation)?;
     check_generation(cancellation, command.generation)?;
+    let pending = report.light_pending;
+    let round = published + 1;
+    let output = if pending && command.unique_round_paths {
+        format!(
+            "{}.gen-{}.round-{}.partial.{}",
+            command.out,
+            command.generation,
+            round,
+            if command.raw_frame { "raw" } else { "png" }
+        )
+    } else {
+        command.out.clone()
+    };
     let png_started = Instant::now();
     let png = if command.raw_frame {
         None
@@ -2617,12 +2680,14 @@ fn run_deck_render(
         (None, Some(png)) => vec![png.as_slice()],
         _ => return Err("frame has neither raw pixels nor PNG bytes".to_string()),
     };
-    let publish_stats = publish_frame(&command.out, command.generation, &parts, cancellation)?;
+    let publish_stats = publish_frame(&output, command.generation, &parts, cancellation)?;
     let stats = &report.stats;
     let response = format!(
-            "frame gen={} round=1 final=1 png={} format={} partial={} deferred={} frame_cache_hit=0 style_epoch={} plan_us={} text_plan_us=0 labels=0 labels_truncated=0 text_place_records=0 read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes=0 raster_us={} raster_tile_max_us={} tiles_reused=0 bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells=0 inst_edges=0 frame_rects=0 rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints=0 label_pixel_paints=0 rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes=0 passes={} passes_skipped={} pass_bytes_max={} frame_passes={} unique_pages={} frame_raster_us={} composite_us={} scene_reuses={} raster_wall_us={} pass_workers={} batches={} batch_bytes_max={} streamed_passes={} slices={} wide_washes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} summary_passes={} summary_none_passes={} summary_cells={} once_tiles={} once_passes={} once_items={}",
+            "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit=0 style_epoch={} plan_us={} text_plan_us=0 labels=0 labels_truncated=0 text_place_records=0 read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes=0 raster_us={} raster_tile_max_us={} tiles_reused=0 bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells=0 inst_edges=0 frame_rects=0 rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints=0 label_pixel_paints=0 rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes=0 passes={} passes_skipped={} pass_bytes_max={} frame_passes={} unique_pages={} frame_raster_us={} composite_us={} scene_reuses={} raster_wall_us={} pass_workers={} batches={} batch_bytes_max={} streamed_passes={} slices={} wide_washes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} summary_passes={} summary_none_passes={} summary_cells={} once_tiles={} once_passes={} once_items={} summary_building={} light_rounds={} light_pending={}",
             command.generation,
-            command.out,
+            round,
+            (!pending) as u8,
+            output,
             if command.raw_frame { "raw" } else { "png" },
             report.partial as u8,
             report.deferred,
@@ -2704,12 +2769,15 @@ fn run_deck_render(
             stats.once_full_tiles,
             stats.once_passes_skipped,
             stats.once_items_skipped,
+            report.summary_building_passes,
+            round,
+            pending as u8,
         );
     respond(
         responses,
         format!("{response} {}", QueryContext::default().wire()),
     );
-    Ok(())
+    Ok(pending)
 }
 
 /// Whether a plain layout's plan keeps its sub-cut pages as washes or
@@ -3813,6 +3881,10 @@ fn run_render(
     // a frame whose pages pass the generation budget is planned anew under
     // less of it (budget_refit_enabled)
     let mut refits = 0u32;
+    // a light cache's frame goes out before its fills are done (final=0)
+    // and is drawn again after them (LIGHT_CONTINUE; DIRECT_READ_PLAN §5.4):
+    // the rounds published so far number the next attempt's
+    let mut light = LightProgress::default();
     loop {
         match run_render_attempt(
             state,
@@ -3823,12 +3895,35 @@ fn run_render(
             run_started,
             queue_us,
             refits,
+            &mut light,
         ) {
             Err(error) if error == REFIT_BUDGET => refits += 1,
+            Err(error) if error == LIGHT_CONTINUE => {
+                light.attempts += 1;
+                if light.attempts > MAX_LIGHT_ATTEMPTS {
+                    return Err(format!(
+                        "light index: the frame did not settle in {} attempts of filling",
+                        MAX_LIGHT_ATTEMPTS
+                    ));
+                }
+            }
             result => return result,
         }
     }
 }
+
+/// run_render's light attempts (LIGHT_CONTINUE): the frames published by
+/// the attempts before, and their count.
+#[derive(Default)]
+struct LightProgress {
+    published: usize,
+    attempts: u32,
+}
+
+/// a light cache's attempt that ran out of its fill deadline: drawn again
+const LIGHT_CONTINUE: &str = "light:continue";
+/// (a fill round per hierarchy level at most: far more than any depth)
+const MAX_LIGHT_ATTEMPTS: u32 = 256;
 
 /// run_render once: `refits` plans of this frame before it passed the budget.
 #[allow(clippy::too_many_arguments)]
@@ -3841,6 +3936,7 @@ fn run_render_attempt(
     run_started: Instant,
     queue_us: u64,
     refits: u32,
+    light: &mut LightProgress,
 ) -> Result<(), String> {
     // the layers' pages decode larger than estimated by this much
     // (WorkerState::budget_scale): planned to the budget over it
@@ -3972,6 +4068,20 @@ fn run_render_attempt(
     let mut fit_probe_us = 0u64;
     // (it walked every cell of the extent: no hierarchy summary to go by)
     let mut fit_probe_walked = false;
+    // a light cache (floe_render_core Cache::is_light): a viewer frame's
+    // probe, plan and label walk fill for FLOE_LIGHT_FIRST_MS at most, then
+    // the frame goes out partial (final=0) and the next attempt goes on
+    // from the marks they left (DIRECT_READ_PLAN §5.4) - a margin and a
+    // capture (`progressive=0`) run the rounds to the end
+    let light_deadline = if cache.is_light() && command.progressive && !command.background {
+        floe_render_core::light_first_budget().map(|budget| Instant::now() + budget)
+    } else {
+        None
+    };
+    let mut light_continue = false;
+    // the rounds the attempts before this one published: every round
+    // number of this attempt counts on from them
+    let light_base = light.published;
     if !command.exact && !label_only && page_request.decode_budget > 0 {
         if let Some(decision) = state.fit_memory.get(&fit_key).copied() {
             page_request.fixed_fit = Some(decision);
@@ -3995,12 +4105,20 @@ fn run_render_attempt(
             // (for its decision alone: cells the extent covers whole are
             // not walked, floe_render_core Cache::fit_decision_cancellable)
             let probe_started = Instant::now();
-            let probed =
-                cache.fit_decision_cancellable(&probe, command.generation, cancellation)?;
+            let probed = cache.fit_decision_cancellable_within(
+                &probe,
+                command.generation,
+                cancellation,
+                light_deadline,
+            )?;
             fit_probe_us = elapsed_us(probe_started);
             fit_probe_walked = probed.walked;
             check_generation(cancellation, command.generation)?;
-            if let Some(decision) = probed.decision {
+            if probed.pending {
+                // (of the image so far: the frame plans without it and the
+                // next attempt asks again)
+                light_continue = true;
+            } else if let Some(decision) = probed.decision {
                 state.fit_memory.insert(fit_key.clone(), decision);
                 page_request.fixed_fit = Some(decision);
             }
@@ -4047,18 +4165,28 @@ fn run_render_attempt(
         if std::env::var("FLOE_RUST_REPRESENTATIVES").as_deref() == Ok("off") || command.thin_keep {
             // a newer generation ends the walk (floe_vfs HierOpts::stop): a
             // chip's plan is seconds, and the next view waited for it
-            cache.plan_cancellable(&page_request, command.generation, cancellation)?
+            cache.plan_cancellable_within(
+                &page_request,
+                command.generation,
+                cancellation,
+                light_deadline,
+            )?
         } else {
-            cache.plan_with_representatives_options(
+            cache.plan_with_representatives_within(
                 &page_request,
                 representative_options,
                 || cancellation.is_cancelled(command.generation),
+                light_deadline,
             )?
         }
     };
     check_generation(cancellation, command.generation)?;
+    if planned.light_pending {
+        light_continue = true;
+    }
     // remember the fit this plan decided (a redecision replaces the old one)
-    if !label_only && !command.exact {
+    // - not a pending light plan's: it is of the image so far
+    if !label_only && !command.exact && !light_continue {
         // every page as asked (or no budget fit at all)
         let whole = planned.plan.stats.fit_whole || planned.plan.stats.fit_decision.is_none();
         if command.background
@@ -4105,7 +4233,16 @@ fn run_render_attempt(
         planned.plan.stats.fit_decision
     };
     let planned_labels = if command.labels {
-        Some(cache.plan_labels(&request, command.frames, command.label_font_px)?)
+        let labels = cache.plan_labels_within(
+            &request,
+            command.frames,
+            command.label_font_px,
+            light_deadline,
+        )?;
+        if labels.pending {
+            light_continue = true;
+        }
+        Some(labels)
     } else {
         None
     };
@@ -4213,8 +4350,10 @@ fn run_render_attempt(
     // space pass 1 left (render_density_frame). A reused frame, an occupancy
     // frame and a probe have no pass 2, nor a frame without the write-once
     // tiles.
+    // (a light attempt still filling has no pass 2: the frame is drawn again)
     let density_plan: Option<()> = (raster_request.density_stack
         && !label_only
+        && !light_continue
         && !(styles.is_empty() && !command.frames)
         && command.probe.is_none()
         && std::env::var("FLOE_RUST_WRITE_ONCE").as_deref() != Ok("off"))
@@ -4508,7 +4647,7 @@ fn run_render_attempt(
                         |frame: &floe_render_core::RgbaFrame| -> Result<(), String> {
                             check_generation(cancellation, command.generation)?;
                             let format = if command.raw_frame { "raw" } else { "png" };
-                            let round = round_index + 1 + density_rounds.get();
+                            let round = light_base + round_index + 1 + density_rounds.get();
                             let path = format!(
                                 "{}.gen-{}.round-{round}.partial.{}",
                                 command.out, command.generation, format
@@ -4669,9 +4808,11 @@ fn run_render_attempt(
             }
         };
         check_generation(cancellation, command.generation)?;
-        let final_round = round_index + 1 == rounds.len();
+        // (a light attempt still filling publishes no final round)
+        let final_round = round_index + 1 == rounds.len() && !light_continue;
         // this round's number on the wire: after any density first rounds
-        let wire_round = round_index + 1 + density_rounds.get();
+        // and the rounds of the light attempts before
+        let wire_round = light_base + round_index + 1 + density_rounds.get();
         let published_output = if command.unique_round_paths && !final_round {
             format!(
                 "{}.gen-{}.round-{}.partial.{}",
@@ -4712,6 +4853,7 @@ fn run_render_attempt(
                         round: wire_round as u64,
                     }),
                     complete: !pixels.partial
+                        && !light_continue
                         && planned.representative_stream.is_none()
                         // Pass-2 scenes are transient and are not part of
                         // this published query scene. A density picture must
@@ -4738,8 +4880,8 @@ fn run_render_attempt(
                 }
             });
             // (a frame cut short at the budget serves no other: its pages
-            // are not its plan's)
-            if let Some(frame) = geometry.filter(|_| !cut_short) {
+            // are not its plan's; nor does a light attempt still filling)
+            if let Some(frame) = geometry.filter(|_| !cut_short && !light_continue) {
                 store_retained(
                     &mut state.retained,
                     RetainedFrame {
@@ -4767,7 +4909,7 @@ fn run_render_attempt(
             .map_or(QueryContext::default(), |p| p.context)
             .wire();
         let response = format!(
-                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} fit_pct={} fit_cull={} fit_over={} fit_thin={} fit_full_pct={} fit_none_pct={} fit_fixed={} fit_redecided={} sub_cut_boxes={} sub_cut_box_over={} sub_cut_box_level={} sub_cut_box_unsure={} shape_cut={} shape_cut_max={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={} once_tiles={} once_passes={} once_items={} place_walks={} density_stack={} density_pages={} density_us={} density_bin={} density_dots={} density_floor={} density_block={} density_plan2={} queue_us={} wall_us={} fit_scale={} fit_refits={} fit_probe_us={} fit_probe_walk={} fit_ranked={} fit_layers_whole={} fit_layer_edge={} fit_layers_out={}",
+                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} fit_pct={} fit_cull={} fit_over={} fit_thin={} fit_full_pct={} fit_none_pct={} fit_fixed={} fit_redecided={} sub_cut_boxes={} sub_cut_box_over={} sub_cut_box_level={} sub_cut_box_unsure={} shape_cut={} shape_cut_max={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={} once_tiles={} once_passes={} once_items={} place_walks={} density_stack={} density_pages={} density_us={} density_bin={} density_dots={} density_floor={} density_block={} density_plan2={} queue_us={} wall_us={} fit_scale={} fit_refits={} fit_probe_us={} fit_probe_walk={} fit_ranked={} fit_layers_whole={} fit_layer_edge={} fit_layers_out={} light_rounds={} light_pending={}",
                 command.generation,
                 wire_round,
                 final_round as u8,
@@ -4938,6 +5080,10 @@ fn run_render_attempt(
                 planned.summary.culls.fit_layers_whole,
                 fit_edge_spec(cache, planned.summary.culls.fit_layer_edge),
                 planned.summary.culls.fit_layers_out,
+                // the light cache's fill rounds over the open, and whether
+                // this frame goes out before its own are done
+                cache.light_stats().map_or(0, |stats| stats.1),
+                light_continue as u8,
             );
         respond(responses, format!("{response} {query_context}"));
         // Representative batches bound query work, not the number of full
@@ -4963,6 +5109,12 @@ fn run_render_attempt(
             drain_representatives = true;
         }
         round_index += 1;
+    }
+    if light_continue {
+        // the frames of this attempt are published (final=0); the next
+        // attempt numbers its rounds after them and fills on
+        light.published = light_base + round_index + density_rounds.get();
+        return Err(LIGHT_CONTINUE.to_string());
     }
     Ok(())
 }
@@ -6999,6 +7151,17 @@ mod tests {
         assert_eq!(parsed_render.tile_size, DEFAULT_TILE_SIZE);
         assert_eq!(parsed_render.round_pages, DEFAULT_ROUND_PAGES);
         assert!(!parsed_render.unique_round_paths);
+        // a light cache's frame goes out before its fills are done unless
+        // the command says otherwise (a capture's `progressive=0`, L6)
+        assert!(parsed_render.progressive);
+        assert!(!render(
+            parse_command(
+                "render gen=7 view=-0.5,-0.5,9.5,9.5 w=10 h=10 depth=full cut=0 exact=1 frames=off layers=1/0 progressive=0 out=/tmp/f.png",
+            )
+            .unwrap()
+            .unwrap(),
+        )
+        .progressive);
         assert!(parsed_render.exact);
         assert!(!parsed_render.frames);
         assert!(!parsed_render.labels);

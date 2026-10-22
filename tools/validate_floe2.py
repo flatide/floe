@@ -269,14 +269,20 @@ def validate_rust_cli(base, fixture):
         full_json = json.loads(rust(env, "info", source, "--json").stdout)
         check(full_json["cache_kind"] == "full" and "cache" not in full_json["metadata"],
               "floe2 info --json did not carry cache_kind full")
-        # (labels off: the light cache has no text index yet - L6; the layer
-        # colours are the full index's, a text-only layer counted as held)
+        # labels on (the default): the light cache's text index is filled
+        # with the placements (L6) and the labels are the full index's; the
+        # layer colours are the full index's too, a text-only layer counted
+        # as held. (The fixture has texts: the picture without labels differs.)
         exact_full = work / "exact full.png"
         exact_light = work / "exact light.png"
-        rust(env, "render", source, "--px", "257", "--detail", "exact", "--labels", "off", "--out", exact_full)
-        rust(env, "render", light_src, "--px", "257", "--detail", "exact", "--labels", "off", "--out", exact_light)
+        rust(env, "render", source, "--px", "257", "--detail", "exact", "--out", exact_full)
+        rust(env, "render", light_src, "--px", "257", "--detail", "exact", "--out", exact_light)
         check(exact_full.read_bytes() == exact_light.read_bytes(),
-              "the light cache's exact render differs from the full index's")
+              "the light cache's exact render (labels on) differs from the full index's")
+        unlabelled = work / "exact unlabelled.png"
+        rust(env, "render", source, "--px", "257", "--detail", "exact", "--labels", "off", "--out", unlabelled)
+        check(unlabelled.read_bytes() != exact_full.read_bytes(),
+              "the fixture's labels drew nothing: the light label check is empty")
         refused = rust(env, "clip", light_src, "--bbox=%r,%r,%r,%r" % (
             x0, y0, (x0 + x1) / 2, (y0 + y1) / 2), "--out", work / "light clip.oas", ok=False)
         check("clip needs the full index" in refused.stderr + refused.stdout,

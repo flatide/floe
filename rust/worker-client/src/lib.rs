@@ -157,6 +157,10 @@ pub struct Frame {
     pub partial: bool,
     pub deferred: u64,
     pub labels_truncated: bool,
+    /// A jobdeck frame's passes of a light source whose occupancy summary
+    /// is not built yet, left empty (renderd `summary_building`;
+    /// DIRECT_READ_PLAN §5.5): the frame is not complete until it is.
+    pub summary_building: u64,
     pub request: RenderRequest,
     /// Unmodified PNG or FLOERAW1 payload, never a daemon filesystem path.
     pub bytes: Vec<u8>,
@@ -176,7 +180,11 @@ impl Frame {
         Ok(scene)
     }
     pub fn complete(&self) -> bool {
-        self.final_frame && !self.partial && self.deferred == 0 && !self.labels_truncated
+        self.final_frame
+            && !self.partial
+            && self.deferred == 0
+            && !self.labels_truncated
+            && self.summary_building == 0
     }
 }
 
@@ -978,6 +986,13 @@ impl WorkerClient {
                 let partial = f.flag("partial")?;
                 let deferred = f.u64("deferred")?;
                 let labels_truncated = f.flag("labels_truncated")?;
+                // (a jobdeck frame's field since 0.12.343; absent before)
+                let summary_building = match f.0.get("summary_building") {
+                    None => 0,
+                    Some(v) => v
+                        .parse::<u64>()
+                        .map_err(|_| Error::protocol("invalid summary_building"))?,
+                };
                 let active = self.active.as_mut().unwrap();
                 active.last_round = round;
                 f.0.remove("png");
@@ -988,6 +1003,7 @@ impl WorkerClient {
                     partial,
                     deferred,
                     labels_truncated,
+                    summary_building,
                     request: active.request.clone(),
                     bytes,
                     fields: f,

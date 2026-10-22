@@ -23,6 +23,30 @@ use std::time::Instant;
 /// depth bounds the rounds a complete plan needs
 const MAX_FILL_ROUNDS: u32 = 64;
 
+/// FLOE_LIGHT_FIRST_MS: how long a viewer frame's plan fills before the
+/// frame goes out partial and the fills go on behind it (DIRECT_READ_PLAN
+/// §5.4: the viewer sees the first rounds' picture first, as it sees a
+/// refining frame; renderd run_render's light attempts). Default 300 ms;
+/// `0` / `off` = a plan runs its rounds to the end before any frame (the
+/// L4 behaviour, the kill switch).
+pub fn light_first_budget() -> Option<std::time::Duration> {
+    static MS: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    (*MS.get_or_init(|| match std::env::var("FLOE_LIGHT_FIRST_MS") {
+        Err(_) => Some(300),
+        Ok(v) => {
+            let v = v.trim().to_ascii_lowercase();
+            if v.is_empty() {
+                Some(300)
+            } else if v == "off" || v == "0" {
+                None
+            } else {
+                v.parse::<u64>().ok().filter(|&ms| ms > 0)
+            }
+        }
+    }))
+    .map(std::time::Duration::from_millis)
+}
+
 /// FLOE_LIGHT_LOG=on: a line per fill round on stderr (diagnostic)
 fn light_log() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -63,6 +87,9 @@ pub(crate) struct LightState {
     /// images assembled after the first, and the rounds requests took
     pub images: AtomicU64,
     pub rounds: AtomicU64,
+    /// the prefill caps of a fill (floe_vfs::light::prefill_caps, read at
+    /// the open; a test sets them)
+    prefill: Mutex<(u64, u64)>,
 }
 
 impl LightState {
@@ -73,8 +100,8 @@ impl LightState {
         let index = LightIndex::open(dir)?;
         let (bytes, _) = index.summary();
         let summary = Arc::new(HierSummary::from_bytes(bytes)?);
-        let ovm = index.ovm()?;
-        let vfs = Arc::new(Vfs::light(ovm, index.source.clone()));
+        let (ovm, ovt) = index.ovm()?;
+        let vfs = Arc::new(Vfs::light(ovm, index.source.clone(), ovt));
         Ok((
             LightState {
                 index,
@@ -82,6 +109,7 @@ impl LightState {
                 fill_lock: Mutex::new(()),
                 images: AtomicU64::new(0),
                 rounds: AtomicU64::new(0),
+                prefill: Mutex::new(floe_vfs::light::prefill_caps()),
             },
             vfs,
         ))
@@ -93,7 +121,8 @@ impl LightState {
     fn fill_into(&self, cells: &[u32], slot: &VfsSlot, seen: &Arc<Vfs>, round: u32) -> Result<(), String> {
         let _guard = self.fill_lock.lock().unwrap_or_else(|p| p.into_inner());
         let started = Instant::now();
-        let set = self.index.fill_set(cells);
+        let (places_cap, bytes_cap) = *self.prefill.lock().unwrap_or_else(|p| p.into_inner());
+        let set = self.index.fill_set_within(cells, places_cap, bytes_cap);
         let report = self.index.fill(&set)?;
         let fill_us = elapsed_us(started);
         let moved = !Arc::ptr_eq(&slot.get(), seen);
@@ -101,17 +130,18 @@ impl LightState {
             return Ok(());
         }
         let image_started = Instant::now();
-        let ovm = self.index.ovm()?;
+        let (ovm, ovt) = self.index.ovm()?;
         let image_bytes = ovm.data.len();
-        slot.set(Arc::new(Vfs::light(ovm, self.index.source.clone())));
+        slot.set(Arc::new(Vfs::light(ovm, self.index.source.clone(), ovt)));
         self.images.fetch_add(1, Ordering::Relaxed);
         if light_log() {
             eprintln!(
-                "[light] round {}: {} cell(s) asked, {} filled ({} placements from {} segments, {} evicted) in {} ms; image {} MB in {} ms",
+                "[light] round {}: {} cell(s) asked, {} filled ({} placements, {} texts from {} segments, {} evicted) in {} ms; image {} MB in {} ms",
                 round,
                 cells.len(),
                 report.cells,
                 report.placements,
+                report.texts,
                 report.segments,
                 report.evicted,
                 fill_us / 1000,
@@ -132,6 +162,14 @@ pub(crate) struct LightLink {
 }
 
 impl LightLink {
+    /// (tests) the prefill caps of this light cache's fills: 0 = the asked
+    /// cells alone, a round per hierarchy level
+    pub fn set_prefill(&self, places: u64, bytes: u64) {
+        if let Some(light) = &self.light {
+            *light.prefill.lock().unwrap_or_else(|p| p.into_inner()) = (places, bytes);
+        }
+    }
+
     /// a full cache's: the index as opened, nothing to fill
     pub fn full(vfs: Arc<Vfs>) -> LightLink {
         LightLink {
@@ -149,21 +187,37 @@ impl LightLink {
     }
 
     /// Runs `work` on the current index and, on a light cache, again after
-    /// filling the cells it expanded without their placements (floe_ovm
-    /// LightMarks), until it expands none such - the frame flow of
+    /// filling the cells it expanded without their placements or texts
+    /// (floe_ovm LightMarks), until it expands none such - the frame flow of
     /// DIRECT_READ_PLAN §5.4 (a round per hierarchy level at most). `work`
     /// must be repeatable: a plan, a probe, a walk.
     pub fn run<T>(&self, work: impl Fn(&Vfs) -> Result<T, String>) -> Result<T, String> {
+        self.run_within(work, None).map(|(out, _)| out)
+    }
+
+    /// `run` under a deadline: past it, with at least one fill made by this
+    /// call, the work's last result goes out with `true` (its marks stay on
+    /// the image; the next call takes them up where this one left) - the
+    /// viewer's partial frame of a light cache (light_first_budget). None:
+    /// to the end.
+    pub fn run_within<T>(
+        &self,
+        work: impl Fn(&Vfs) -> Result<T, String>,
+        deadline: Option<Instant>,
+    ) -> Result<(T, bool), String> {
         let mut rounds = 0u32;
         loop {
             let vfs = self.slot.get();
             let out = work(&vfs)?;
             let Some(light) = &self.light else {
-                return Ok(out);
+                return Ok((out, false));
             };
             let touched = vfs.ovm.light_touched();
             if touched.is_empty() {
-                return Ok(out);
+                return Ok((out, false));
+            }
+            if rounds > 0 && deadline.is_some_and(|d| Instant::now() >= d) {
+                return Ok((out, true));
             }
             rounds += 1;
             light.rounds.fetch_add(1, Ordering::Relaxed);
@@ -176,6 +230,56 @@ impl LightLink {
             }
             light.fill_into(&touched, &self.slot, &vfs, rounds)?;
         }
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+
+    #[test]
+    fn a_deadline_lets_the_work_out_after_one_fill_and_the_next_call_goes_on() {
+        let (root, dir) = super::tests::light_dir("deadline");
+        let cache = crate::Cache::open(&dir).unwrap();
+        // the asked cells alone per round (no prefill): the tree's two
+        // levels of placements take two rounds
+        cache.set_light_prefill_for_tests(0, 0);
+        let view = crate::ViewBox::new(-100, -100, 1100, 1100).unwrap();
+        let request = super::tests::exact(view);
+        // a deadline already past: the first call makes one fill round (the
+        // top's) and returns pending
+        let (first, pending) = cache
+            .plan_within_for_tests(&request, Some(Instant::now()))
+            .unwrap();
+        assert!(pending, "the plan did not finish within a past deadline");
+        let after_first = cache.light_stats().unwrap();
+        assert_eq!(after_first.1, 1, "one round: {:?}", after_first);
+        assert_eq!(after_first.3, 1, "the top filled: {:?}", after_first);
+        // the next call takes the marks up (MID's placements) and ends
+        let (second, pending) = cache
+            .plan_within_for_tests(&request, Some(Instant::now()))
+            .unwrap();
+        assert!(!pending, "the second call did not end the fills");
+        let after_second = cache.light_stats().unwrap();
+        assert_eq!((after_second.1, after_second.3), (2, 2), "{:?}", after_second);
+        // (LEAF's pages were reached through TOP's own placement of it in
+        // the first round; MID's placements of it come with the second)
+        assert!(first.plan.pages.len() <= second.plan.pages.len());
+        assert!(first.plan.stats.inst_edges < second.plan.stats.inst_edges);
+        assert_eq!(second.plan.stats.wc_cells, 3);
+        // nothing left: a call with no deadline plans the same without a round
+        let (third, pending) = cache.plan_within_for_tests(&request, None).unwrap();
+        assert!(!pending);
+        assert_eq!(third.plan.pages, second.plan.pages);
+        assert_eq!(cache.light_stats().unwrap().1, 2);
+        // no deadline on a fresh cache: the whole thing in one call
+        let cache2 = crate::Cache::open(&dir).unwrap();
+        cache2.set_light_prefill_for_tests(0, 0);
+        let (whole, pending) = cache2.plan_within_for_tests(&request, None).unwrap();
+        assert!(!pending);
+        assert_eq!(whole.plan.pages, third.plan.pages);
+        assert_eq!(cache2.light_stats().unwrap().1, 2);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
@@ -417,7 +521,7 @@ pub(crate) fn decode_pages(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use crate::{Cache, DecodedPageCache, PlanRequest, ViewBox, FULL_DEPTH};
     use floe_oasis::doc::{PathRec, PolyRec, RectRec, Rep};
     use floe_oasis::segments::DEFAULT_SPAN_BYTES;
@@ -494,21 +598,24 @@ mod tests {
     }
 
     /// the tree as a source file with its light files beside it
-    fn light_dir(tag: &str) -> (std::path::PathBuf, String) {
+    pub(super) fn light_dir(tag: &str) -> (std::path::PathBuf, String) {
+        light_dir_of(tag, &tree())
+    }
+
+    fn light_dir_of(tag: &str, data: &[u8]) -> (std::path::PathBuf, String) {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let d = std::env::temp_dir().join(format!("floe-rc-light-{}-{}-{}", std::process::id(), n, tag));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
-        let data = tree();
         let src = d.join("tree.oas");
         std::fs::write(&src, &data).unwrap();
         let id = floe_vfs::light::file_identity(src.to_str().unwrap()).unwrap();
         let dir = d.join(".tree.oas.ice").to_string_lossy().into_owned();
-        floe_vfs::light::write_files(&data, id, &dir, 1, DEFAULT_SPAN_BYTES).unwrap();
+        floe_vfs::light::write_files(data, id, &dir, 1, DEFAULT_SPAN_BYTES).unwrap();
         (d, dir)
     }
 
-    fn exact(view: ViewBox) -> PlanRequest {
+    pub(super) fn exact(view: ViewBox) -> PlanRequest {
         PlanRequest {
             view,
             cut_dbu: 0,
@@ -622,6 +729,48 @@ mod tests {
         assert_eq!(inst.boxes.len(), 17);
         let info = crate::cell_info(&h, Some(top), leaf, 1_000_000).unwrap();
         assert_eq!(info.insts, 17);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn labels_on_a_light_cache_come_from_the_filled_texts() {
+        let data = floe_oasis::inventory::fixtures::labelled_tree();
+        let (root, dir) = light_dir_of("labels", &data);
+        let cache = Cache::open(&dir).unwrap();
+        let view = ViewBox::new(-100, -100, 1100, 1100).unwrap();
+        // the label walk first: TOP's own texts are missing, its touch
+        // (cell_tranges) asks for the fill, which takes the cells under it
+        // within the prefill caps - every cell of this tree has a placement
+        // or a text - and the walk runs again on the filled image
+        assert_eq!(cache.light_stats().map(|s| (s.0, s.1, s.3)), Some((0, 0, 0)));
+        // (cut 0: TXT's recursive box is its text's anchor, a point, which a
+        // cut of any size would fold under - on the full index as well)
+        let request = PlanRequest {
+            exact: false,
+            px_per_dbu: 1.0,
+            ..exact(view)
+        };
+        let labels = cache.plan_labels(&request, false, 14.0).unwrap();
+        let stats = cache.light_stats().unwrap();
+        assert!(stats.0 >= 1 && stats.1 >= 1, "{:?}", stats);
+        assert_eq!(stats.3, 4, "TOP, MID, LEAF and TXT filled: {:?}", stats);
+        let texts: Vec<(&str, i64, i64)> = labels
+            .rows
+            .iter()
+            .filter(|r| !r.block)
+            .map(|r| (r.text.as_str(), r.x, r.y))
+            .collect();
+        assert!(texts.contains(&("T", 500, 990)), "{:?}", texts);
+        assert!(texts.contains(&("X", 907, 907)), "{:?}", texts);
+        assert!(texts.iter().any(|t| t.0 == "L") && texts.iter().any(|t| t.0 == "M"), "{:?}", texts);
+        // planned again, and the geometry planned: nothing more to fill,
+        // the same rows
+        let images = cache.light_stats().unwrap().0;
+        let again = cache.plan_labels(&request, false, 14.0).unwrap();
+        assert_eq!(again.rows.len(), labels.rows.len());
+        let planned = cache.plan(&exact(view)).unwrap();
+        assert_eq!(planned.plan.stats.wc_cells, 4);
+        assert_eq!(cache.light_stats().unwrap().0, images);
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -1504,6 +1504,120 @@ pub mod fixtures {
         end(&mut w);
         w.out
     }
+
+    /// The floe_vfs light tests' tree with labels (DIRECT_READ_PLAN L6),
+    /// through the crate's writer: LEAF (a rect on 1/0, a path on 3/0,
+    /// "L" on 4/0), MID (a polygon on 2/0; LEAF once and as a 2x3 grid;
+    /// "M" on 4/0 as a 2x2 grid, "N" on 5/0 at three points), TXT ("X" on
+    /// 4/0 and nothing else - a cell of texts alone), TOP (a rect on 1/0;
+    /// MID at the origin and turned at (500, 100), LEAF flipped at three
+    /// points, TXT at (900, 900); "T" on 4/0 at (500, 990)). LEAF is
+    /// instantiated 17 times under TOP; flattened, the labels number 33:
+    /// L x17, M x8, N x6, T x1, X x1 (at (907, 907)).
+    pub fn labelled_tree() -> Vec<u8> {
+        use crate::doc::{PathRec, PolyRec, RectRec, Rep, TextRec};
+        use crate::write::{write_tree, WCell};
+        let rect = |layer: u32, x: i64, y: i64, w: i64, h: i64| RectRec {
+            layer,
+            dt: 0,
+            x,
+            y,
+            w,
+            h,
+            rep: Rep::One,
+        };
+        let text = |layer: u32, x: i64, y: i64, s: &str, rep: Rep| TextRec {
+            layer,
+            dt: 0,
+            x,
+            y,
+            rep,
+            s: s.to_string(),
+        };
+        let leaf_rects = [rect(1, 0, 0, 10, 4)];
+        let leaf_paths = [PathRec {
+            layer: 3,
+            dt: 0,
+            pts: vec![(0, 2), (10, 2)],
+            hw: 1,
+            es: 0,
+            ee: 0,
+            rep: Rep::One,
+        }];
+        let leaf_texts = [text(4, 3, 1, "L", Rep::One)];
+        let mid_polys = [PolyRec {
+            layer: 2,
+            dt: 0,
+            pts: vec![(0, 0), (100, 0), (100, 100), (0, 100)],
+            rep: Rep::One,
+        }];
+        let mid_texts = [
+            text(
+                4,
+                10,
+                90,
+                "M",
+                Rep::Grid {
+                    na: 2,
+                    nb: 2,
+                    va: (40, 0),
+                    vb: (0, 5),
+                },
+            ),
+            text(5, 1, 1, "N", Rep::Pts(vec![(0, 0), (50, 0), (0, 50)].into())),
+        ];
+        let txt_texts = [text(4, 7, 7, "X", Rep::One)];
+        let top_rects = [rect(1, 0, 0, 1000, 1000)];
+        let top_texts = [text(4, 500, 990, "T", Rep::One)];
+        let grid = Rep::Grid {
+            na: 2,
+            nb: 3,
+            va: (30, 0),
+            vb: (0, 10),
+        };
+        let pts = Rep::Pts(vec![(0, 0), (50, 0), (0, 50)].into());
+        let one = Rep::One;
+        let cells = [
+            WCell {
+                name: "LEAF".into(),
+                rects: &leaf_rects,
+                polys: &[],
+                paths: &leaf_paths,
+                texts: &leaf_texts,
+                places: vec![],
+            },
+            WCell {
+                name: "MID".into(),
+                rects: &[],
+                polys: &mid_polys,
+                paths: &[],
+                texts: &mid_texts,
+                places: vec![("LEAF", 5, 5, 0, false, &one), ("LEAF", 20, 50, 0, false, &grid)],
+            },
+            WCell {
+                name: "TXT".into(),
+                rects: &[],
+                polys: &[],
+                paths: &[],
+                texts: &txt_texts,
+                places: vec![],
+            },
+            WCell {
+                name: "TOP".into(),
+                rects: &top_rects,
+                polys: &[],
+                paths: &[],
+                texts: &top_texts,
+                places: vec![
+                    ("MID", 0, 0, 0, false, &one),
+                    ("MID", 500, 100, 1, false, &one),
+                    ("LEAF", 800, 800, 0, true, &pts),
+                    ("TXT", 900, 900, 0, false, &one),
+                ],
+            },
+        ];
+        write_tree(&cells, 1000.0).unwrap()
+    }
 }
 
 #[cfg(test)]

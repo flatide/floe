@@ -87,6 +87,7 @@ mod tests {
             partial: false,
             deferred: 0,
             labels_truncated: true,
+            summary_building: 0,
             request: RenderRequest::default(),
             bytes: b"not logged pixels".to_vec(),
             fields: Fields(fields),

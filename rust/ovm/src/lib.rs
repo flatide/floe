@@ -1568,6 +1568,11 @@ pub const BVH_LEAF: usize = 8;
 /// pages per page-BVH leaf, and the run size at or below which a
 /// (cell,layer) run gets no BVH at all (linear scan, root = NONE)
 pub const PBVH_LEAF: usize = 8;
+/// texts per text-BVH leaf, and the run size at or below which a
+/// (cell,layer) text run gets no BVH at all (linear scan, root =
+/// TBVH_NONE) - the v5 text index's (the index builder's and the light
+/// cache's, DIRECT_READ_PLAN L6)
+pub const TBVH_LEAF: usize = 8;
 
 /// binary BVH over (bbox, max_dim, max_min, local place idx); reorders
 /// items so leaf ranges are contiguous; nodes[slot] filled, children
@@ -1642,6 +1647,43 @@ pub fn split_pbvh(
     let (a, c) = items.split_at_mut(mid);
     split_pbvh(nodes, a, lo, l);
     split_pbvh(nodes, c, lo + mid, l + 1);
+}
+
+/// `split_bvh` for the text BVH (median partition, the same shape as
+/// split_pbvh): items (bbox, local text idx), nodes (bbox, first, count,
+/// leaf) with RUN-LOCAL `first` for leaves; the caller rebases onto the
+/// emitted text order, which FOLLOWS the final item order here - leaves
+/// are contiguous by construction. The index builder's (cli
+/// build_cell_texts) and the light cache's (floe_vfs::light) one function.
+pub fn split_tbvh(
+    nodes: &mut Vec<(BBox, u32, u16, bool)>,
+    items: &mut [(BBox, u32)],
+    lo: usize,
+    slot: usize,
+) {
+    let mut bb = BBox::EMPTY;
+    for (ib, _) in items.iter() {
+        bb.grow(ib);
+    }
+    if items.len() <= TBVH_LEAF {
+        nodes[slot] = (bb, lo as u32, items.len() as u16, true);
+        return;
+    }
+    let wx = bb.x1 - bb.x0;
+    let wy = bb.y1 - bb.y0;
+    let mid = items.len() / 2;
+    if wx >= wy {
+        items.select_nth_unstable_by_key(mid, |(b, _)| b.x0 + b.x1);
+    } else {
+        items.select_nth_unstable_by_key(mid, |(b, _)| b.y0 + b.y1);
+    }
+    let l = nodes.len();
+    nodes.push((BBox::EMPTY, 0, 0, false));
+    nodes.push((BBox::EMPTY, 0, 0, false));
+    nodes[slot] = (bb, l as u32, 2, false);
+    let (a, c) = items.split_at_mut(mid);
+    split_tbvh(nodes, a, lo, l);
+    split_tbvh(nodes, c, lo + mid, l + 1);
 }
 
 // ------------------------------------------------------------ decode
@@ -1924,22 +1966,48 @@ pub struct Ovm {
 /// plan made on this image is complete when none is set after it - two
 /// threads planning on one image may both fill, the fill is idempotent.
 pub struct LightMarks {
-    unfilled: Vec<u64>,
+    /// the cells whose placements the image lacks (the inventory counts
+    /// some): a placement reader's touch marks them
+    places: Vec<u64>,
+    /// the cells whose texts the image lacks (DIRECT_READ_PLAN L6): the
+    /// label walk's touch (`cell_tranges`) marks them - a geometry plan
+    /// that passes a cell of texts alone asks for no fill
+    texts: Vec<u64>,
     touched: Vec<std::sync::atomic::AtomicU64>,
 }
 
 impl LightMarks {
-    fn new(unfilled: &[bool]) -> LightMarks {
-        let words = unfilled.len().div_ceil(64);
-        let mut bits = vec![0u64; words];
-        for (ci, &u) in unfilled.iter().enumerate() {
-            if u {
-                bits[ci / 64] |= 1u64 << (ci % 64);
+    fn new(places: &[bool], texts: &[bool]) -> LightMarks {
+        assert_eq!(places.len(), texts.len(), "light marks per cell");
+        let words = places.len().div_ceil(64);
+        let bits = |flags: &[bool]| {
+            let mut out = vec![0u64; words];
+            for (ci, &u) in flags.iter().enumerate() {
+                if u {
+                    out[ci / 64] |= 1u64 << (ci % 64);
+                }
             }
-        }
+            out
+        };
         LightMarks {
-            unfilled: bits,
+            places: bits(places),
+            texts: bits(texts),
             touched: (0..words).map(|_| std::sync::atomic::AtomicU64::new(0)).collect(),
+        }
+    }
+
+    #[inline]
+    fn bit(words: &[u64], ci: u32) -> bool {
+        words
+            .get(ci as usize / 64)
+            .is_some_and(|w| (w >> (ci % 64)) & 1 == 1)
+    }
+
+    #[inline]
+    fn touch(&self, ci: u32) {
+        let (w, b) = (ci as usize / 64, ci % 64);
+        if let Some(word) = self.touched.get(w) {
+            word.fetch_or(1u64 << b, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }
@@ -2070,9 +2138,9 @@ impl Ovm {
     /// Marks this index as the light cache's: `unfilled[ci]` says the image
     /// holds no placements of cell `ci` though the source has some
     /// (LightMarks).
-    pub fn set_light_marks(&mut self, unfilled: &[bool]) {
-        assert_eq!(unfilled.len(), self.n_cells as usize, "light marks per cell");
-        self.light = Some(LightMarks::new(unfilled));
+    pub fn set_light_marks(&mut self, places: &[bool], texts: &[bool]) {
+        assert_eq!(places.len(), self.n_cells as usize, "light marks per cell");
+        self.light = Some(LightMarks::new(places, texts));
     }
 
     /// The index is the light cache's synthesized one.
@@ -2080,14 +2148,11 @@ impl Ovm {
         self.light.is_some()
     }
 
-    /// Whether the image holds none of cell `ci`'s placements yet (a light
+    /// Whether the image lacks cell `ci`'s placements or texts yet (a light
     /// index; false on a full one).
     pub fn light_unfilled(&self, ci: u32) -> bool {
         match &self.light {
-            Some(m) => m
-                .unfilled
-                .get(ci as usize / 64)
-                .is_some_and(|w| (w >> (ci % 64)) & 1 == 1),
+            Some(m) => LightMarks::bit(&m.places, ci) || LightMarks::bit(&m.texts, ci),
             None => false,
         }
     }
@@ -2097,9 +2162,20 @@ impl Ovm {
     #[inline]
     pub fn light_touch(&self, ci: u32) {
         if let Some(m) = &self.light {
-            let (w, b) = (ci as usize / 64, ci % 64);
-            if m.unfilled.get(w).is_some_and(|x| (x >> b) & 1 == 1) {
-                m.touched[w].fetch_or(1u64 << b, std::sync::atomic::Ordering::Relaxed);
+            if LightMarks::bit(&m.places, ci) {
+                m.touch(ci);
+            }
+        }
+    }
+
+    /// A reader is about to use cell `ci`'s texts (the label walk,
+    /// `cell_tranges`): noted when the image does not hold them; nothing on
+    /// a full index.
+    #[inline]
+    pub fn light_touch_texts(&self, ci: u32) {
+        if let Some(m) = &self.light {
+            if LightMarks::bit(&m.texts, ci) {
+                m.touch(ci);
             }
         }
     }
@@ -2990,9 +3066,11 @@ impl Ovm {
         g32(&self.sec(SEC_CELLS)[i as usize * CELL_LEN..], 136)
     }
 
-    /// (trange_start, trange_count) without materializing the name
+    /// (trange_start, trange_count) without materializing the name (the
+    /// label walk's; a light image notes the cell when it lacks its texts)
     pub fn cell_tranges(&self, i: u32) -> (u32, u32) {
         assert!(i < self.n_cells, "cell index");
+        self.light_touch_texts(i);
         let b = &self.sec(SEC_CELLS)[i as usize * CELL_LEN..];
         (g32(b, 128), g32(b, 132))
     }

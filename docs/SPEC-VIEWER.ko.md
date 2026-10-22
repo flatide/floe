@@ -338,6 +338,13 @@
     종료 코드가 75면 로그의 `[lock]` 줄을 상태줄에 띄운다.
   - **잡덱:** 통째로 색인 중인 소스는 ledger에 `not_indexed`와 "being indexed by …"로
     빠지고, 나머지 소스로 열린다(`jobdeck/sources._cache_state`).
+  - **잡덱 열기는 두 단계다(2026-10-22, app 0.12.384; DIRECT_READ_PLAN L6):**
+    `_jobdeck_index_and_load`가 모달로 `floe2 index deck.jb --jobs 12 --no-occupancy [--level …]`(경량 캐시의
+    재고 패스만)을 돌려 열고, `open_file`이 성공하면 `_summary_check`가 meta의 `jobdeck.summary_missing`을 보고
+    뒤에서 `floe2 index deck.jb --jobs 12 [--level …]`를 띄운다(`_summary_job_start`; 자기 세션, 로그는
+    `[summary]`로 stderr, 진행 `occupancy : (k/n)`을 배너에). 요약 추가는 경량 캐시의 additive 잠금이라 열린
+    뷰어 옆에서 붙고, 끝나면 다시 그린다. `_quit`이 killpg로 함께 끝내며 다음 열기가 남은 소스를 이어 받는다
+    (요약 있는 소스는 kept). 이미 준비된 덱(`_index_ready`)도 열린 뒤 같은 확인을 거친다.
 - **메뉴 바**(2026-08-22, `_build_menubar`): File(**load layout**·
   clip·copy·quit) /
   View(fit·줌·goto·detail·depth·토글 체크 6종(눈금 띠 `s` 포함, 2026-10-13)·오버레이 순환) /
@@ -395,6 +402,16 @@
     더했다: 같은 배율에서 요약 켬과 끔은 서로 다른 페이지 집합을 맞춘 것이라 서로의 결정을 쓰지 않는다.
   - 상태줄(깊이 라벨)에 ` · occupancy:on/off`가 붙는다. 캐시에 design.ovo가 없으면 켜도 perf 줄이 `summary: none
     (nofile)`이고 그림은 그대로다(레이아웃은 `floe2 index SRC --occupancy-only`로 만든다).
+  - **경량 캐시(DIRECT_READ_PLAN L6, 0.12.384).** 깊이 라벨에 레이아웃이면 ` · cache:light`(meta.json
+    `cache: light`), 덱이면 ` · light:N/M`(경량 소스 수/소스 수, meta `jobdeck.light_sources`)이 붙는다. 덱의
+    경량 소스에 design.ovo가 아직 없으면 요약이 그릴 광역 뷰의 그 pass는 비어 있고(renderd `summary_building=N`;
+    근접 뷰는 그린다) 캔버스 위 배너가 뜬다 — 뒤에서 `floe2 index deck.jb`가 돌고 있으면 "occupancy summary
+    building (k/n sources) - wide views of those sources are empty until it is ready", 아니면 "occupancy summary
+    missing for N passes … (floe2 index deck.jb adds it)". 배너가 보이는 동안 3 s마다 다시 그려(`_summary_poll_tick`)
+    요약이 생기면 걷힌다. perf 줄에는 `, N passes wait for their occupancy summary (light sources: empty until it
+    is built)`, 요약 줄에는 `, N wait for the summary (building)`. 경량 캐시의 프레임이 채우기를 끝내기 전에 오면
+    (`final=0`, `light_pending=1`) 하단 줄은 "reading the source... (fill round N)"이다(SPEC §3의 refining과 같은
+    흐름; FLOE_LIGHT_FIRST_MS).
   - `floe2 render --occupancy on|off`가 같은 필드다(app-core `Shot::occupancy`, DRC 캡처도; `--detail exact`와
     `--archival`은 `on`을 거절한다 - 컷 0은 요약하지 않는다). 보고서 JSON에 `occupancy`(null = 규칙)가 실린다.
   - 렌더러가 요약을 모르면(`supports_occupancy` 없음) 메뉴 항목이 비활성이고 키도 아무 일을 하지 않는다.

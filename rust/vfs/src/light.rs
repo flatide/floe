@@ -28,7 +28,15 @@
 //! - the hierarchy summary (the cell tree's design.ovh): from the
 //!   inventory's edges in memory (`summary`), never from the image's
 //!   placements, which hold the visited cells alone;
-//! - texts: none yet (the label walk finds no text index; L6 territory).
+//! - texts (L6): filled with the placements. A cell's fill reads its
+//!   placement- and text-flagged segments; the texts stay as the parser
+//!   gives them and `ovm` writes them into the image as the full build's
+//!   build_cell_texts does (per layer a run in Morton order with a text BVH
+//!   past TBVH_LEAF; the strings and the point lists of Pts repetitions
+//!   in the image's design.ovt bytes), so the label walk plans on a light
+//!   cache what it plans on the full index. A cell of texts alone is
+//!   marked for the label walk's touch only (floe_ovm LightMarks::texts):
+//!   a geometry plan that passes it fills nothing.
 //!
 //! Refused at open: a design.seg not paired with the design.inv at hand,
 //! a source that is not the one the files were made from (size, mtime),
@@ -37,15 +45,15 @@
 //! full index reads such a file).
 
 use crate::hiersum;
-use floe_oasis::doc::{self, Cell, CellPiece, CellTables, PlaceRec, Rep};
+use floe_oasis::doc::{self, Cell, CellPiece, CellTables, PlaceRec, Rep, TextRec};
 use floe_oasis::geom::{box_is_empty, orient_box, rep_extent, Box4, EMPTY_BOX};
-use floe_oasis::inventory::Inventory;
+use floe_oasis::inventory::{InvCell, Inventory};
 use floe_oasis::invfile::{self, Identity};
-use floe_oasis::segfile::{self, SegFile, SegRow, F_CBLOCK, F_CELLS_INSIDE, F_PLACEMENTS};
+use floe_oasis::segfile::{self, SegFile, SegRow, F_CBLOCK, F_CELLS_INSIDE, F_PLACEMENTS, F_TEXTS};
 use floe_oasis::segments::Snapshot;
 use floe_ovm::{
-    prepare_pts, split_bvh, split_pbvh, BBox, Builder, CellSink, Ovm, CODEC_SEGMENT, LOD_EXACT,
-    LOD_PAGE_NONE, PBVH_LEAF, PBVH_NONE,
+    morton_key, prepare_pts, split_bvh, split_pbvh, split_tbvh, BBox, Builder, CellSink, Ovm,
+    CODEC_SEGMENT, LOD_EXACT, LOD_PAGE_NONE, PBVH_LEAF, PBVH_NONE, TBVH_LEAF, TBVH_NONE, TREP_NONE,
 };
 use floe_tiler::Xf;
 use std::collections::{BTreeMap, HashMap};
@@ -75,7 +83,7 @@ pub const PLACES_BUDGET_DEFAULT: u64 = 1 << 30;
 pub const PREFILL_PLACES_DEFAULT: u64 = 1 << 18;
 pub const PREFILL_BYTES_DEFAULT: u64 = 4 << 20;
 
-fn prefill_caps() -> (u64, u64) {
+pub fn prefill_caps() -> (u64, u64) {
     let places = std::env::var("FLOE_LIGHT_PREFILL_PLACES")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
@@ -128,16 +136,36 @@ pub struct LightPage {
     pub max_min: u64,
 }
 
-/// a filled cell's placement sections, cell-local indices (CellSink's)
+/// a filled cell's placement sections, cell-local indices (CellSink's),
+/// and its texts as the parser gives them (encoded into each image)
 struct CellFill {
     places: Vec<u8>,
     n_places: u64,
     pool: Vec<u8>,
     bvh: Vec<u8>,
     n_bvh: u32,
+    /// the cell's TEXT records in file order (the full build's cell.texts)
+    texts: Vec<TextRec>,
     bytes: u64,
     /// fill order (the budget lets the lowest go first)
     serial: u64,
+}
+
+/// whether the image needs a fill for a cell at all: the inventory counts
+/// placements or texts of it
+fn needs_fill(cell: &InvCell) -> bool {
+    cell.placements > 0 || cell.texts > 0
+}
+
+/// the record bytes a fill of `ci` reads: its placement- and text-flagged
+/// segments (a CBLOCK's inflated bytes)
+fn fill_bytes(seg: &SegFile, ci: usize) -> u64 {
+    let (first, count) = seg.cells[ci];
+    (first..first + count)
+        .map(|si| &seg.segs[si as usize])
+        .filter(|s| s.flags & (F_PLACEMENTS | F_TEXTS) != 0)
+        .map(|s| if s.inflated == 0 { s.bytes } else { s.inflated })
+        .sum()
 }
 
 #[derive(Default)]
@@ -156,6 +184,7 @@ pub struct FillReport {
     /// cells newly filled by this call (already filled ones skipped)
     pub cells: usize,
     pub placements: u64,
+    pub texts: u64,
     pub segments: usize,
     pub evicted: usize,
     pub bytes: u64,
@@ -217,6 +246,9 @@ pub struct LightIndex {
     pub inv: Inventory,
     pub seg: SegFile,
     cell_index: HashMap<String, usize>,
+    /// (layer, datatype) -> index into the inventory's layer_order (the
+    /// text builder's lidx)
+    layer_index: HashMap<(u32, u32), u32>,
     /// in page-id order
     pages: Vec<LightPage>,
     /// per cell: (first page, count)
@@ -531,6 +563,12 @@ impl LightIndex {
         u32::try_from(pages.len())
             .map_err(|_| "light index: more pages than the index can hold".to_string())?;
         let cell_index = inv.cell_index();
+        let layer_index = inv
+            .layer_order
+            .iter()
+            .enumerate()
+            .map(|(i, &key)| (key, i as u32))
+            .collect();
         Ok(LightIndex {
             dir: dir.to_string(),
             source,
@@ -538,6 +576,7 @@ impl LightIndex {
             inv,
             seg,
             cell_index,
+            layer_index,
             pages,
             cell_pages,
             cell_static,
@@ -689,7 +728,7 @@ impl LightIndex {
                 .copied()
                 .filter(|&ci| {
                     (ci as usize) < self.inv.cells.len()
-                        && self.inv.cells[ci as usize].placements > 0
+                        && needs_fill(&self.inv.cells[ci as usize])
                         && f.cells[ci as usize].is_none()
                 })
                 .collect()
@@ -701,13 +740,14 @@ impl LightIndex {
             return Ok(report);
         }
         let jobs = std::thread::available_parallelism().map_or(4, |n| n.get()).min(8);
-        let (mut places_of, segments) = self.placements_of(&todo, jobs)?;
+        let (mut pieces_of, segments) = self.pieces_of(&todo, jobs, true)?;
         report.segments = segments;
         let mut built: Vec<(u32, CellFill)> = Vec::with_capacity(todo.len());
         for &ci in &todo {
-            let places = places_of.remove(&ci).unwrap_or_default();
+            let (places, texts) = pieces_of.remove(&ci).unwrap_or_default();
             report.placements += places.len() as u64;
-            built.push((ci, self.encode_places(&places)));
+            report.texts += texts.len() as u64;
+            built.push((ci, self.encode_places(&places, texts)));
         }
         let mut f = self.fills.lock().unwrap_or_else(|p| p.into_inner());
         let adding: u64 = built.iter().map(|(_, c)| c.bytes).sum();
@@ -765,15 +805,6 @@ impl LightIndex {
         let mut out: Vec<u32> = Vec::new();
         let mut seen = vec![false; n];
         let f = self.fills.lock().unwrap_or_else(|p| p.into_inner());
-        // the record bytes of a cell's placement-flagged segments
-        let place_bytes = |ci: usize| -> u64 {
-            let (first, count) = self.seg.cells[ci];
-            (first..first + count)
-                .map(|si| &self.seg.segs[si as usize])
-                .filter(|s| s.flags & F_PLACEMENTS != 0)
-                .map(|s| if s.inflated == 0 { s.bytes } else { s.inflated })
-                .sum()
-        };
         for &c in touched {
             if c as usize >= n || seen[c as usize] {
                 continue;
@@ -791,11 +822,11 @@ impl LightIndex {
                 }
                 seen[k] = true;
                 let cell = &inv.cells[k];
-                if cell.placements == 0 {
+                if !needs_fill(cell) {
                     continue;
                 }
                 if f.cells[k].is_none() {
-                    let b = place_bytes(k);
+                    let b = fill_bytes(&self.seg, k);
                     if cell.placements > left_places || b > left_bytes {
                         seen[k] = false;
                         continue;
@@ -815,18 +846,34 @@ impl LightIndex {
     /// file order and as many as the inventory counts; and the segments
     /// read. A cell not in the list, or without placements, is absent.
     pub fn placements_of(&self, cells: &[u32], jobs: usize) -> Result<(HashMap<u32, Vec<PlaceRec>>, usize), String> {
+        let (pieces, segments) = self.pieces_of(cells, jobs, false)?;
+        Ok((pieces.into_iter().map(|(ci, (places, _))| (ci, places)).collect(), segments))
+    }
+
+    /// `placements_of`, and with `texts` the cells' TEXT records from their
+    /// text-flagged segments as well (a fill reads both at once): per cell
+    /// (placements, texts), each in file order and as many as the inventory
+    /// counts. A cell not in the list, or with nothing to read, is absent.
+    fn pieces_of(
+        &self,
+        cells: &[u32],
+        jobs: usize,
+        texts: bool,
+    ) -> Result<(HashMap<u32, (Vec<PlaceRec>, Vec<TextRec>)>, usize), String> {
+        let flags = if texts { F_PLACEMENTS | F_TEXTS } else { F_PLACEMENTS };
+        let wanted = |cell: &InvCell| cell.placements > 0 || (texts && cell.texts > 0);
         let tasks: Vec<(u32, u32)> = cells
             .iter()
-            .filter(|&&ci| (ci as usize) < self.inv.cells.len() && self.inv.cells[ci as usize].placements > 0)
+            .filter(|&&ci| (ci as usize) < self.inv.cells.len() && wanted(&self.inv.cells[ci as usize]))
             .flat_map(|&ci| {
                 let (first, count) = self.seg.cells[ci as usize];
                 (first..first + count)
-                    .filter(move |&si| self.seg.segs[si as usize].flags & F_PLACEMENTS != 0)
+                    .filter(move |&si| self.seg.segs[si as usize].flags & flags != 0)
                     .map(move |si| (ci, si))
             })
             .collect();
-        let slots: Vec<Mutex<Option<Result<Vec<PlaceRec>, String>>>> =
-            (0..tasks.len()).map(|_| Mutex::new(None)).collect();
+        type Got = Result<(Vec<PlaceRec>, Vec<TextRec>), String>;
+        let slots: Vec<Mutex<Option<Got>>> = (0..tasks.len()).map(|_| Mutex::new(None)).collect();
         let jobs = jobs.min(tasks.len()).max(1);
         let next = std::sync::atomic::AtomicUsize::new(0);
         std::thread::scope(|scope| {
@@ -834,34 +881,44 @@ impl LightIndex {
                 scope.spawn(|| loop {
                     let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let Some(&(_, si)) = tasks.get(k) else { break };
-                    let got = self.segment_cell(si).map(|c| c.places);
+                    let got = self
+                        .segment_cell(si)
+                        .map(|c| (c.places, if texts { c.texts } else { Vec::new() }));
                     *slots[k].lock().unwrap_or_else(|p| p.into_inner()) = Some(got);
                 });
             }
         });
-        let mut places_of: HashMap<u32, Vec<PlaceRec>> = HashMap::new();
+        let mut pieces_of: HashMap<u32, (Vec<PlaceRec>, Vec<TextRec>)> = HashMap::new();
         for (k, &(ci, _)) in tasks.iter().enumerate() {
-            let got = slots[k]
+            let (places, recs) = slots[k]
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .take()
                 .unwrap_or_else(|| Err("placement task without a result".to_string()))?;
-            places_of.entry(ci).or_default().extend(got);
+            let entry = pieces_of.entry(ci).or_default();
+            entry.0.extend(places);
+            entry.1.extend(recs);
         }
         for &ci in cells {
             let Some(cell) = self.inv.cells.get(ci as usize) else { continue };
-            if cell.placements == 0 {
+            if !wanted(cell) {
                 continue;
             }
-            let got = places_of.get(&ci).map_or(0, |p| p.len()) as u64;
-            if got != cell.placements {
+            let (places, recs) = pieces_of.get(&ci).map_or((0, 0), |p| (p.0.len() as u64, p.1.len() as u64));
+            if places != cell.placements {
                 return Err(format!(
                     "light index: cell {} ({}) yielded {} placements from its segments, the inventory counts {}",
-                    ci, cell.name, got, cell.placements
+                    ci, cell.name, places, cell.placements
+                ));
+            }
+            if texts && recs != cell.texts {
+                return Err(format!(
+                    "light index: cell {} ({}) yielded {} texts from its segments, the inventory counts {}",
+                    ci, cell.name, recs, cell.texts
                 ));
             }
         }
-        Ok((places_of, tasks.len()))
+        Ok((pieces_of, tasks.len()))
     }
 
     /// Every cell's placements (`placements_of` over all cells; a cell
@@ -875,19 +932,20 @@ impl LightIndex {
         Ok((0..n as u32).map(|ci| by_cell.remove(&ci).unwrap_or_default()).collect())
     }
 
-    /// Whether the index holds cell `ci`'s placements (always for a cell
-    /// without any).
+    /// Whether the index holds cell `ci`'s placements and texts (always for
+    /// a cell without any).
     pub fn is_filled(&self, ci: u32) -> bool {
         let f = self.fills.lock().unwrap_or_else(|p| p.into_inner());
         (ci as usize) < self.inv.cells.len()
-            && (self.inv.cells[ci as usize].placements == 0 || f.cells[ci as usize].is_some())
+            && (!needs_fill(&self.inv.cells[ci as usize]) || f.cells[ci as usize].is_some())
     }
 
     /// a cell's placements as the full build's build_cell_plan encodes them:
     /// the items' boxes (the child's recursive box under the placement,
     /// widened by the repetition), the v7 size annotations, the instance BVH
-    /// (floe_ovm::split_bvh) and the records in leaf order
-    fn encode_places(&self, places: &[PlaceRec]) -> CellFill {
+    /// (floe_ovm::split_bvh) and the records in leaf order; its texts kept
+    /// as they are (the image encodes them, `build_cell_texts`)
+    fn encode_places(&self, places: &[PlaceRec], texts: Vec<TextRec>) -> CellFill {
         let sat32 = |v: i64| u32::try_from(v.max(0)).unwrap_or(u32::MAX);
         let rbb = |ci: usize| -> BBox {
             match self.inv.rbb.get(ci).copied().flatten() {
@@ -948,13 +1006,25 @@ impl LightIndex {
                 sink.bvh_node(&bb, first, count, leaf, md, mn);
             }
         }
-        let bytes = (sink.places.len() + sink.pts_pool.len() + sink.bvh.len()) as u64;
+        // (a text's share of the budget: its record, its string, its points)
+        let text_bytes: u64 = texts
+            .iter()
+            .map(|t| {
+                80 + t.s.len() as u64
+                    + match &t.rep {
+                        Rep::Pts(p) => 16 * p.len() as u64,
+                        _ => 0,
+                    }
+            })
+            .sum();
+        let bytes = (sink.places.len() + sink.pts_pool.len() + sink.bvh.len()) as u64 + text_bytes;
         CellFill {
             places: sink.places,
             n_places: sink.n_places,
             pool: sink.pts_pool,
             bvh: sink.bvh,
             n_bvh: sink.n_bvh,
+            texts,
             bytes,
             serial: 0,
         }
@@ -962,25 +1032,30 @@ impl LightIndex {
 
     // --------------------------------------------------- the image
 
-    /// The index image with every filled cell's placements, as a validated
-    /// `Ovm` marked light (floe_ovm LightMarks: the cells with placements
-    /// not filled are the unfilled ones).
-    pub fn ovm(&self) -> Result<Ovm, String> {
-        let (bytes, unfilled) = self.image();
-        let mut ovm = Ovm::from_bytes_shallow(bytes)?;
-        ovm.set_light_marks(&unfilled);
-        Ok(ovm)
+    /// The index image with every filled cell's placements and texts, as a
+    /// validated `Ovm` marked light (floe_ovm LightMarks: the cells with
+    /// placements or texts not filled are the unfilled ones), and the
+    /// image's design.ovt bytes (the filled cells' strings and text point
+    /// lists).
+    pub fn ovm(&self) -> Result<(Ovm, Vec<u8>), String> {
+        let image = self.image()?;
+        let mut ovm = Ovm::from_bytes_shallow(image.bytes)?;
+        ovm.set_light_marks(&image.unfilled_places, &image.unfilled_texts);
+        Ok((ovm, image.ovt))
     }
 
-    /// the image's bytes and, per cell, whether its placements are missing
-    pub fn image(&self) -> (Vec<u8>, Vec<bool>) {
+    /// the image's bytes, its design.ovt bytes and, per cell, whether its
+    /// placements / its texts are missing
+    pub fn image(&self) -> Result<LightImage, String> {
         let inv = &self.inv;
         let n = inv.cells.len();
         let nl = inv.layer_order.len();
         let mut b = Builder::new(inv.unit(), self.identity.src_size, self.identity.src_mtime, nl);
         b.top = inv.top as u32;
         let f = self.fills.lock().unwrap_or_else(|p| p.into_inner());
-        let mut unfilled = vec![false; n];
+        let mut unfilled_places = vec![false; n];
+        let mut unfilled_texts = vec![false; n];
+        let mut ovt: Vec<u8> = Vec::new();
         for ci in 0..n {
             let st = &self.cell_static[ci];
             let mut sink = CellSink {
@@ -990,6 +1065,7 @@ impl LightIndex {
                 n_pranges: st.n_pranges,
                 ..CellSink::default()
             };
+            let mut texts: &[TextRec] = &[];
             match &f.cells[ci] {
                 Some(c) => {
                     sink.places.clone_from(&c.places);
@@ -997,11 +1073,17 @@ impl LightIndex {
                     sink.pts_pool.clone_from(&c.pool);
                     sink.bvh.clone_from(&c.bvh);
                     sink.n_bvh = c.n_bvh;
+                    texts = &c.texts;
                 }
-                None => unfilled[ci] = inv.cells[ci].placements > 0,
+                None => {
+                    unfilled_places[ci] = inv.cells[ci].placements > 0;
+                    unfilled_texts[ci] = inv.cells[ci].texts > 0;
+                }
             }
             let (page_base, page_count) = self.cell_pages[ci];
             let bases = b.append_cell_sink(&sink, page_base as u64);
+            let (trange_start, trange_count) =
+                build_cell_texts(&mut b, &mut ovt, ci as u32, texts, &self.layer_index)?;
             for p in &self.pages[page_base as usize..(page_base + page_count) as usize] {
                 let s = &self.seg.segs[p.seg as usize];
                 b.page(
@@ -1049,8 +1131,8 @@ impl LightIndex {
                 mask_d,
                 mask_r,
                 inv.rmembers[ci],
-                0,
-                0,
+                trange_start,
+                trange_count,
                 mask_t,
             );
         }
@@ -1066,8 +1148,15 @@ impl LightIndex {
         }
         let jobs = std::thread::available_parallelism().map_or(4, |n| n.get()).min(8);
         b.annotate_bvh_masks(jobs);
-        // ovp_len = the source's size: every page's span lies inside it
-        (b.finish(self.identity.src_size, 0), unfilled)
+        // ovp_len = the source's size: every page's span lies inside it;
+        // ovt_len = the bytes made here
+        let bytes = b.finish(self.identity.src_size, ovt.len() as u64);
+        Ok(LightImage {
+            bytes,
+            ovt,
+            unfilled_places,
+            unfilled_texts,
+        })
     }
 
     // ------------------------------------------------- the summary
@@ -1181,6 +1270,166 @@ impl LightIndex {
 
 /// What `write_files` wrote.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// One assembled image of a light index (`LightIndex::image`).
+pub struct LightImage {
+    /// the design.ovm image
+    pub bytes: Vec<u8>,
+    /// the image's design.ovt bytes: the filled cells' text strings and
+    /// the point lists of their Pts repetitions
+    pub ovt: Vec<u8>,
+    /// per cell: the inventory counts placements the image lacks
+    pub unfilled_places: Vec<bool>,
+    /// per cell: the inventory counts texts the image lacks
+    pub unfilled_texts: Vec<bool>,
+}
+
+/// A filled cell's texts into the image as the full build's
+/// build_cell_texts (cli vfs.rs) writes them: per layer a run in Morton
+/// order over the texts' boxes (source order the tie-break) with a text BVH
+/// past TBVH_LEAF (floe_ovm::split_tbvh, the storage order its leaves'),
+/// the strings and the Morton-ordered point lists of Pts repetitions
+/// appended to `ovt` in source order, a text's box its anchor grown by the
+/// repetition's extent. Returns the cell's (trange_start, trange_count); a
+/// cell without texts gets (the next run index, 0), as the full build
+/// writes it.
+fn build_cell_texts(
+    b: &mut Builder,
+    ovt: &mut Vec<u8>,
+    ci: u32,
+    texts: &[TextRec],
+    lidx: &HashMap<(u32, u32), u32>,
+) -> Result<(u32, u32), String> {
+    let tr_start = b.n_tranges();
+    if texts.is_empty() {
+        return Ok((tr_start, 0));
+    }
+    let narrow = |v: u64, what: &str| -> Result<u32, String> {
+        u32::try_from(v).map_err(|_| format!("light index: {} {} is more than the index can hold", what, v))
+    };
+    let add = |a: i64, b: i64, what: &str| -> Result<i64, String> {
+        a.checked_add(b)
+            .ok_or_else(|| format!("light index: {} overflows", what))
+    };
+    let mut groups: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    for (ti, t) in texts.iter().enumerate() {
+        let li = *lidx.get(&(t.layer, t.dt)).ok_or_else(|| {
+            format!(
+                "light index: text layer {}/{} is not in the inventory's layer table",
+                t.layer, t.dt
+            )
+        })?;
+        groups.entry(li).or_default().push(narrow(ti as u64, "cell text count")?);
+    }
+    struct TRec {
+        bbox: BBox,
+        rep: u32,
+        soff: u64,
+        slen: u32,
+        seq: u32,
+        x: i64,
+        y: i64,
+    }
+    for (li, idxs) in groups {
+        // strings and reps in SOURCE order (the ovt byte layout), the run
+        // records ordered spatially
+        let mut recs: Vec<TRec> = Vec::with_capacity(idxs.len());
+        for &ti in &idxs {
+            let t = &texts[ti as usize];
+            let soff = ovt.len() as u64;
+            ovt.extend_from_slice(t.s.as_bytes());
+            let slen = narrow(t.s.len() as u64, "text string length")?;
+            let rep = match &t.rep {
+                Rep::One => TREP_NONE,
+                Rep::Grid { na, nb, va, vb } => {
+                    b.trep_grid(narrow(*na, "text rep na")?, narrow(*nb, "text rep nb")?, *va, *vb)
+                }
+                Rep::Pts(p) => {
+                    let prep = prepare_pts(p);
+                    let pts_off = ovt.len() as u64;
+                    for &(px, py) in &prep.pts {
+                        ovt.extend_from_slice(&px.to_le_bytes());
+                        ovt.extend_from_slice(&py.to_le_bytes());
+                    }
+                    let chunk_lo = b.n_tchunks();
+                    for c in &prep.chunks {
+                        b.tchunk(c);
+                    }
+                    b.trep_pts(
+                        narrow(prep.pts.len() as u64, "text pts count")?,
+                        pts_off,
+                        chunk_lo,
+                        narrow(prep.chunks.len() as u64, "text pts chunks")?,
+                    )
+                }
+            };
+            let (ex, ey) = rep_extent(&t.rep);
+            recs.push(TRec {
+                bbox: BBox {
+                    x0: add(t.x, ex.0.min(0), "text bbox x0")?,
+                    y0: add(t.y, ey.0.min(0), "text bbox y0")?,
+                    x1: add(t.x, ex.1.max(0), "text bbox x1")?,
+                    y1: add(t.y, ey.1.max(0), "text bbox y1")?,
+                },
+                rep,
+                soff,
+                slen,
+                seq: ti,
+                x: t.x,
+                y: t.y,
+            });
+        }
+        // Morton pre-sort over bbox centers, source_seq tie-break
+        let center = |r: &TRec| {
+            (
+                ((r.bbox.x0 as i128 + r.bbox.x1 as i128) / 2) as i64,
+                ((r.bbox.y0 as i128 + r.bbox.y1 as i128) / 2) as i64,
+            )
+        };
+        let (mut minx, mut miny) = (i64::MAX, i64::MAX);
+        for r in &recs {
+            let (cx, cy) = center(r);
+            minx = minx.min(cx);
+            miny = miny.min(cy);
+        }
+        let mut order: Vec<u32> = (0..recs.len() as u32).collect();
+        order.sort_by_key(|&i| {
+            let (cx, cy) = center(&recs[i as usize]);
+            (morton_key(cx, cy, minx, miny), recs[i as usize].seq)
+        });
+        let text_lo = b.n_texts();
+        let count = narrow(recs.len() as u64, "trange text count")?;
+        let root = if recs.len() <= TBVH_LEAF {
+            for &i in &order {
+                let r = &recs[i as usize];
+                b.text(ci, li, r.x, r.y, r.soff, r.slen, r.rep, &r.bbox, r.seq);
+            }
+            TBVH_NONE
+        } else {
+            // the BVH partition decides the storage order (leaves are
+            // contiguous item ranges); the texts go out in that order
+            let mut items: Vec<(BBox, u32)> = order.iter().map(|&i| (recs[i as usize].bbox, i)).collect();
+            let mut nodes: Vec<(BBox, u32, u16, bool)> = vec![(BBox::EMPTY, 0, 0, false)];
+            split_tbvh(&mut nodes, &mut items, 0, 0);
+            for &(_, i) in &items {
+                let r = &recs[i as usize];
+                b.text(ci, li, r.x, r.y, r.soff, r.slen, r.rep, &r.bbox, r.seq);
+            }
+            let base = b.n_tbvh();
+            for &(bbb, first, cnt, leaf) in &nodes {
+                let f = if leaf {
+                    narrow(text_lo as u64 + first as u64, "text index")?
+                } else {
+                    narrow(base as u64 + first as u64, "tbvh index")?
+                };
+                b.tbvh_node(&bbb, f, cnt, leaf);
+            }
+            base
+        };
+        b.trange(li, text_lo, count, root);
+    }
+    Ok((tr_start, b.n_tranges() - tr_start))
+}
+
 pub struct Written {
     pub cells: usize,
     pub layers: usize,
@@ -1263,7 +1512,7 @@ mod tests {
     use super::*;
     use crate::hiersum;
     use floe_oasis::doc::{parse_doc, PathRec, PolyRec, RectRec};
-    use floe_oasis::inventory::fixtures::{adversarial, head_cblock_cell};
+    use floe_oasis::inventory::fixtures::{adversarial, head_cblock_cell, labelled_tree};
     use floe_oasis::segments::DEFAULT_SPAN_BYTES;
     use floe_oasis::write::{write_tree, WCell};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1393,16 +1642,19 @@ mod tests {
             let li = LightIndex::open(&dir).unwrap_or_else(|e| panic!("{}: {}", name, e));
             let n = li.inv.cells.len() as u32;
             let placed: Vec<u32> = (0..n).filter(|&ci| li.inv.cells[ci as usize].placements > 0).collect();
-            // the first image: every cell with placements unfilled, the
-            // planner's touch recorded, nothing on a cell without any
-            let ovm = li.ovm().unwrap_or_else(|e| panic!("{}: image: {}", name, e));
-            assert!(ovm.is_light());
+            // the cells a fill is for: with placements, or with texts (L6)
+            let needed: Vec<u32> = (0..n).filter(|&ci| needs_fill(&li.inv.cells[ci as usize])).collect();
+            // the first image: every cell with placements or texts unfilled,
+            // the planner's touch recorded for the placements, nothing on a
+            // cell without any
+            let (ovm, ovt) = li.ovm().unwrap_or_else(|e| panic!("{}: image: {}", name, e));
+            assert!(ovm.is_light() && ovt.is_empty());
             assert_eq!(ovm.n_cells, n, "{}", name);
             assert_eq!(ovm.n_places, 0, "{}", name);
             assert_eq!(ovm.n_pages, li.n_pages(), "{}", name);
             for ci in 0..n {
-                assert_eq!(ovm.light_unfilled(ci), placed.contains(&ci), "{}: cell {}", name, ci);
-                assert!(!li.is_filled(ci) || !placed.contains(&ci), "{}: cell {}", name, ci);
+                assert_eq!(ovm.light_unfilled(ci), needed.contains(&ci), "{}: cell {}", name, ci);
+                assert!(!li.is_filled(ci) || !needed.contains(&ci), "{}: cell {}", name, ci);
                 let _ = ovm.cell_places(ci);
             }
             assert_eq!(ovm.light_touched(), placed, "{}: the accessor marks the unfilled cells", name);
@@ -1421,7 +1673,7 @@ mod tests {
             let top = li.inv.top as u32;
             let mut set = li.fill_set_within(&[top], 1 << 20, 1 << 30);
             set.sort_unstable();
-            let mut want: Vec<u32> = placed.clone();
+            let mut want: Vec<u32> = needed.clone();
             if !want.contains(&top) {
                 want.push(top);
                 want.sort_unstable();
@@ -1432,7 +1684,7 @@ mod tests {
             // mark is left, and the summary made from the image's placements
             // (what a full index gets) is the one made from the inventory
             let report = li.fill(&(0..n).collect::<Vec<_>>()).unwrap_or_else(|e| panic!("{}: fill: {}", name, e));
-            assert_eq!(report.cells, placed.len(), "{}", name);
+            assert_eq!(report.cells, needed.len(), "{}", name);
             assert_eq!(
                 report.placements,
                 li.inv.cells.iter().map(|c| c.placements).sum::<u64>(),
@@ -1440,7 +1692,7 @@ mod tests {
                 name
             );
             assert_eq!(li.fill(&[top]).unwrap(), FillReport::default(), "{}: a second fill is nothing", name);
-            let ovm = li.ovm().unwrap();
+            let (ovm, _) = li.ovm().unwrap();
             assert_eq!(ovm.n_places, report.placements, "{}", name);
             for ci in 0..n {
                 let _ = ovm.cell_places(ci);
@@ -1455,7 +1707,7 @@ mod tests {
             let s = hiersum::HierSummary::from_bytes(from_edges).unwrap();
             s.validate_against(&ovm).unwrap();
             // the deep validation of the assembled image passes too
-            floe_ovm::Ovm::from_bytes(li.image().0).unwrap_or_else(|e| panic!("{}: deep: {}", name, e));
+            floe_ovm::Ovm::from_bytes(li.image().unwrap().bytes).unwrap_or_else(|e| panic!("{}: deep: {}", name, e));
             // the layer depths: the top's own layers at 0
             let depths = li.layer_max_depths();
             assert_eq!(depths.len(), li.inv.layer_order.len(), "{}", name);
@@ -1501,6 +1753,132 @@ mod tests {
             }
             assert_eq!(got, want, "{}: own members per cell and layer", name);
         }
+    }
+
+    #[test]
+    fn texts_are_filled_with_the_placements_and_planned_as_labels() {
+        let data = labelled_tree();
+        let (src, dir) = light_of("texts", &data);
+        let li = LightIndex::open(&dir).unwrap();
+        let doc = parse_doc(&data).unwrap();
+        let n = li.inv.cells.len() as u32;
+        let name = |ci: u32| li.inv.cells[ci as usize].name.as_str();
+        let txt = (0..n).find(|&ci| name(ci) == "TXT").unwrap();
+        let leaf = (0..n).find(|&ci| name(ci) == "LEAF").unwrap();
+        assert_eq!(li.inv.cells[txt as usize].placements, 0);
+        assert_eq!(li.inv.cells[txt as usize].texts, 1);
+        // the first image: no texts; TXT (texts alone) and LEAF (a text, no
+        // placements) are unfilled for the label walk's touch alone - a
+        // placement reader passing them asks for nothing
+        let (ovm, ovt) = li.ovm().unwrap();
+        assert!(ovt.is_empty() && ovm.ovt_len == 0);
+        assert!(ovm.light_unfilled(txt) && ovm.light_unfilled(leaf));
+        assert!(!li.is_filled(txt));
+        let _ = ovm.cell_places(txt);
+        let _ = ovm.cell_bvh(leaf);
+        assert!(ovm.light_touched().is_empty(), "a placement reader does not ask for a cell of texts alone");
+        let _ = ovm.cell_tranges(txt);
+        assert_eq!(ovm.light_touched(), vec![txt]);
+        assert_eq!(ovm.cell_tranges(txt), (ovm.cell_tranges(txt).0, 0));
+        // the prefill set from the top takes the cells of texts alone too
+        let top = li.inv.top as u32;
+        let mut set = li.fill_set_within(&[top], 1 << 20, 1 << 30);
+        set.sort_unstable();
+        assert_eq!(set, (0..n).collect::<Vec<_>>());
+        // fill everything: per cell and layer the image's texts are the
+        // Doc's - anchors, strings and repetition members
+        let report = li.fill(&(0..n).collect::<Vec<_>>()).unwrap();
+        assert_eq!(report.cells, n as usize, "every cell has a placement or a text");
+        assert_eq!(report.texts, doc.cells.iter().map(|c| c.texts.len() as u64).sum::<u64>());
+        assert_eq!(report.texts, 5);
+        let (ovm, ovt) = li.ovm().unwrap();
+        assert!(ovm.light_touched().is_empty());
+        assert_eq!(ovm.ovt_len, ovt.len() as u64);
+        for ci in 0..n {
+            assert!(li.is_filled(ci));
+            let cell = &doc.cells[ci as usize];
+            assert_eq!(cell.name, name(ci));
+            let mut want: Vec<((u32, u32), i64, i64, String, u64)> = cell
+                .texts
+                .iter()
+                .map(|t| ((t.layer, t.dt), t.x, t.y, t.s.clone(), t.rep.members()))
+                .collect();
+            want.sort();
+            let (ts, tc) = ovm.cell_tranges(ci);
+            let mut got = Vec::new();
+            for tri in ts..ts + tc {
+                let tr = ovm.trange(tri);
+                for ti in tr.text_lo..tr.text_lo + tr.text_count {
+                    let t = ovm.text(ti);
+                    assert_eq!(t.cell, ci);
+                    let s = std::str::from_utf8(&ovt[t.string_off as usize..(t.string_off + t.string_len as u64) as usize])
+                        .unwrap()
+                        .to_string();
+                    let members = if t.rep_idx == TREP_NONE {
+                        1
+                    } else {
+                        match ovm.trep(t.rep_idx) {
+                            floe_ovm::TrepV::Grid { na, nb, .. } => na as u64 * nb as u64,
+                            floe_ovm::TrepV::Pts { count, .. } => count as u64,
+                        }
+                    };
+                    got.push((li.layer_key(tr.layer_idx), t.x, t.y, s, members));
+                }
+            }
+            got.sort();
+            assert_eq!(got, want, "cell {}", name(ci));
+        }
+        // the deep validation reads the text sections and the pts pools
+        // against ovt_len
+        floe_ovm::Ovm::from_bytes(li.image().unwrap().bytes).unwrap();
+        // the raw label walk over the filled image: every placed text
+        // member of the flattened tree
+        let vfs = crate::Vfs::light(ovm, src.clone(), ovt);
+        let req = crate::ViewReq {
+            view: BBox {
+                x0: -10_000,
+                y0: -10_000,
+                x1: 10_000,
+                y1: 10_000,
+            },
+            cut_dbu: 0,
+            vis: vec![0xff; vfs.ovm.bs_width],
+            depth: u32::MAX,
+            px_per_dbu: 0.0,
+            sub_cut_wash: false,
+            page_reps: false,
+            decode_budget: 0,
+            page_hairline: false,
+            page_skip: Vec::new(),
+            prune_skipped: false,
+            sub_cut_box: false,
+            shape_cut: false,
+            shape_cut_max: false,
+            frames: true,
+            root: None,
+            page_wash: true,
+            lod_swap: true,
+        };
+        let opts = crate::text::LabelOpts {
+            raw: true,
+            ..Default::default()
+        };
+        let plan = crate::text::plan_labels(&vfs.ovm, vfs.ovt(), &req, &opts).unwrap();
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for r in plan.rows.iter().filter(|r| !r.block) {
+            *counts.entry(r.s.clone()).or_insert(0) += 1;
+        }
+        let want: BTreeMap<String, usize> = [("L", 17), ("M", 8), ("N", 6), ("T", 1), ("X", 1)]
+            .into_iter()
+            .map(|(s, k)| (s.to_string(), k))
+            .collect();
+        assert_eq!(counts, want);
+        assert!(plan.rows.iter().any(|r| r.s == "X" && (r.x, r.y) == (907, 907)), "{:?}", plan.rows);
+        assert!(plan.rows.iter().any(|r| r.s == "T" && (r.x, r.y) == (500, 990)));
+        // the fills do not change when asked again, and the placements are
+        // the inventory's
+        assert_eq!(li.fill(&[top, txt]).unwrap(), FillReport::default());
+        assert_eq!(report.placements, li.inv.cells.iter().map(|c| c.placements).sum::<u64>());
     }
 
     #[test]

@@ -529,10 +529,13 @@ pub(crate) fn dataset(
     source: &std::path::Path,
     levels: Option<BTreeSet<i64>>,
     index: bool,
+    draws: bool,
     waiter: &mut Waiter,
     cancelled: &AtomicUsize,
 ) -> Result<Dataset> {
-    let l = ready::open(source, levels, index, waiter, cancelled)?;
+    // (a command that draws has a deck source's missing occupancy summary
+    // added too - DIRECT_READ_PLAN §5.5; info reads the caches as they are)
+    let l = ready::open(source, levels, index, draws, waiter, cancelled)?;
     if l.source_stale() {
         eprintln!("[{}][warn] source changed; displaying cached geometry. Rebuild with index --force, then reopen.", floe_app_core::program());
     }
@@ -574,7 +577,7 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         } => {
             let mut waiter = Waiter::new(ready.wait, cancelled);
             again(&source, &mut waiter, |waiter| {
-                let mut dataset = dataset(&source, levels.clone(), ready.index, waiter, cancelled)?;
+                let mut dataset = dataset(&source, levels.clone(), ready.index, true, waiter, cancelled)?;
                 if let Some(mode) = layer_colors {
                     dataset.set_layer_colors(mode);
                 }
@@ -648,7 +651,7 @@ fn info(
     waiter: &mut Waiter,
     cancelled: &Arc<AtomicUsize>,
 ) -> Result<i32> {
-    let l = dataset(source, levels, index, waiter, cancelled)?;
+    let l = dataset(source, levels, index, false, waiter, cancelled)?;
     if json {
         println!(
             "{}",
@@ -685,7 +688,7 @@ fn probe(
     waiter: &mut Waiter,
     cancelled: &Arc<AtomicUsize>,
 ) -> Result<i32> {
-    let l = dataset(source, None, index, waiter, cancelled)?;
+    let l = dataset(source, None, index, true, waiter, cancelled)?;
     let mut session =
         RenderSession::open(&l, RenderOptions::local()?, false, Arc::clone(cancelled))?;
     println!(

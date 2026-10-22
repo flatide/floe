@@ -521,6 +521,7 @@ fn label_only_source_identity_preserves_wide_bounds_but_not_changed_metadata() {
             partial: false,
             deferred: 0,
             labels_truncated: true,
+            summary_building: 0,
             request,
             bytes: Vec::new(),
             fields,

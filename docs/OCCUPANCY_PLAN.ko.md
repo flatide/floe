@@ -403,8 +403,10 @@ M4(덱): pass마다 소스 뷰의 PlanRequest(`(v − d)/scale`의 px_per_dbu)�
 pass = 배치 하나 = 레이어 하나이므로 순서는 그대로다. 조건은 단일 소스와 같다
 (덱 exact/cut 0·depth 제한·thin cull은 페이지 경로). 덱 프레임 줄
 `summary_passes= summary_none_passes=(keep인데 nofile/invalid/near/layers)
-summary_cells=`, 어댑터 `deck.summary_*`, 상태줄 `summary P passes C cells (not
-pickable)`·`N passes without summary`. 킬 스위치는 같은 환경변수. gate
+summary_cells= summary_building=(경량 소스의 요약이 아직 없어 비워 둔 pass; 0.12.384,
+DIRECT_READ_PLAN L6)`, 어댑터 `deck.summary_*`, 상태줄 `summary P passes C cells (not
+pickable)`·`N passes without summary`·`N passes wait for their occupancy summary (light
+sources: empty until it is built)`. 킬 스위치는 같은 환경변수. gate
 `DeckRenderTests`: mag 0.2 배치(2000 µm 소스 → 400 µm 덱 상자)의 fit 뷰 픽셀이
 단일 소스의 0..2000 µm 요약 픽셀과 동일(레벨을 소스 뷰에서 고름), 킬 스위치
 픽셀 == 단일 소스 페이지 경로, depth 0 → 요약 없음(none_passes 0), 파일 없음 →

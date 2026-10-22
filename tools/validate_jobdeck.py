@@ -794,6 +794,81 @@ class CliTests(unittest.TestCase):
         self.assertIn("3 probed, 3 ok, 3 indexed", res.stdout)
 
 
+class LightSummaryTests(unittest.TestCase):
+    """The occupancy summary of a deck's light sources (DIRECT_READ_PLAN
+    section 5.5, L6): `floe2 index deck.jb --no-occupancy` leaves light
+    caches without design.ovo (the GTK viewer's first phase); a wide
+    capture of that deck with --no-index is refused as incomplete (its
+    passes wait for the summary - the wide view of those sources is empty
+    until it exists), a near one draws; the plain capture's auto-index adds
+    the summaries first; `floe2 index deck.jb` (the viewer's second phase,
+    behind the open) adds a missing one and keeps the rest; the deck's
+    metadata counts the light sources and the summaries missing."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = TMP / "light_summary"
+        cls.dir.mkdir()
+        for name in ("chipA.oas", "chipB.oas", "mark.oas", "test.jb"):
+            shutil.copy2(TMP / name, cls.dir / name)
+        cls.env = {"FLOE_INDEX_BIN": str(ROOT / "rust" / "target" / "release" / "floe-index"),
+                   "FLOE_RENDERD_BIN": str(ROOT / "rust" / "target" / "release" / "floe-renderd")}
+        cls.deck = cls.dir / "test.jb"
+        cls.caches = [Path(vfs_cache_dir(cls.dir / n))
+                      for n in ("chipA.oas", "chipB.oas", "mark.oas")]
+
+    def test_the_summaries_come_after_the_inventory(self):
+        res = run_floe2("index", self.deck, "--no-occupancy", "--jobs", "2",
+                        env=self.env, ok=0)
+        self.assertIn("3 built, 0 failed, 0 kept", res.stdout)
+        for c in self.caches:
+            self.assertTrue((c / "design.inv").is_file() and (c / "design.seg").is_file(), c)
+            self.assertFalse((c / "design.ovm").exists(), c)
+            self.assertFalse((c / "design.ovo").exists(), c)
+        info = json.loads(run_floe2("info", self.deck, "--json", env=self.env, ok=0).stdout)
+        deck = info["metadata"]["jobdeck"]
+        self.assertEqual((deck["light_sources"], deck["summary_missing"]), (3, 3))
+        # a wide capture without the auto-index: its passes wait for the
+        # summary - the picture is written with those passes empty, said
+        # incomplete (exit 3, as a deck capture with skipped placements)
+        wide = self.dir / "wide.png"
+        res = run_floe2("render", self.deck, "--bbox", "40000,80000,60000,95000",
+                        "--px", "300", "--detail", "medium", "--no-index", "--out", wide,
+                        env=self.env, ok=3)
+        self.assertIn("summary_building=", res.stderr)
+        self.assertIn("occupancy summary", res.stderr)
+        self.assertTrue(wide.is_file())
+        wide.unlink()
+        # a near capture draws: the summary is the wide view's alone
+        near = self.dir / "near.png"
+        run_floe2("render", self.deck, "--bbox", "38000,81000,38010,81010",
+                  "--px", "300", "--detail", "medium", "--no-index", "--out", near,
+                  env=self.env, ok=0)
+        self.assertTrue(near.is_file())
+        for c in self.caches:
+            self.assertFalse((c / "design.ovo").exists(), c)
+        # the plain capture: the auto-index adds the summaries first
+        res = run_floe2("render", self.deck, "--bbox", "40000,80000,60000,95000",
+                        "--px", "300", "--detail", "medium", "--out", wide,
+                        env=self.env, ok=0)
+        self.assertIn("no occupancy summary yet - indexing them first", res.stderr)
+        self.assertTrue(wide.is_file())
+        for c in self.caches:
+            self.assertTrue((c / "design.ovo").is_file(), c)
+            self.assertFalse((c / "design.ovm").exists(), c)
+        info = json.loads(run_floe2("info", self.deck, "--json", env=self.env, ok=0).stdout)
+        deck = info["metadata"]["jobdeck"]
+        self.assertEqual((deck["light_sources"], deck["summary_missing"]), (3, 0))
+        # the viewer's second phase: `floe2 index deck.jb` adds a missing
+        # summary beside the others and keeps them
+        (self.caches[1] / "design.ovo").unlink()
+        res = run_floe2("index", self.deck, "--jobs", "2", env=self.env, ok=0)
+        self.assertIn("1 built, 0 failed, 2 kept", res.stdout)
+        self.assertTrue((self.caches[1] / "design.ovo").is_file())
+        res = run_floe2("index", self.deck, "--jobs", "2", env=self.env, ok=0)
+        self.assertIn("0 built, 0 failed, 3 kept", res.stdout)
+
+
 class JobdeckIndexLodTests(unittest.TestCase):
     def test_lod_reaches_each_source_and_preserves_force_and_level_selection(self):
         from validate_vfs import read_ovm

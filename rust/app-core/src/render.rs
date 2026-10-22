@@ -254,6 +254,9 @@ impl RenderSession {
             raster_jobs: self.options.raster_jobs,
             round_pages: self.options.round_pages,
             tile_px: self.options.tile_px,
+            // a capture waits for a light cache's fills (DIRECT_READ_PLAN
+            // §5.4): no frame before they are done
+            progressive: false,
             font_px: self.options.label_font_px,
             format: if self.options.raw {
                 FrameFormat::Raw
@@ -413,9 +416,20 @@ pub fn budget_fit_brief(fit: &serde_json::Value, density: bool) -> String {
 
 pub fn require_complete(frame: &Frame) -> Result<()> {
     if !frame.complete() {
+        // a jobdeck frame with passes of a light source whose occupancy
+        // summary is not built yet (DIRECT_READ_PLAN §5.5): the wide view of
+        // those sources would be empty - the way out is the summary
+        let summary = if frame.summary_building > 0 {
+            format!(
+                ", summary_building={}: {} pass(es) of light source(s) without their occupancy summary - `floe2 index DECK.jb` adds it (the auto-index does so unless --no-index)",
+                frame.summary_building, frame.summary_building
+            )
+        } else {
+            String::new()
+        };
         return Err(Error::new(ErrorKind::Incomplete,
-            format!("incomplete frame (final={}, partial={}, deferred={}, labels_truncated={}); output not replaced",
-                frame.final_frame, frame.partial, frame.deferred, frame.labels_truncated)));
+            format!("incomplete frame (final={}, partial={}, deferred={}, labels_truncated={}{}); output not replaced",
+                frame.final_frame, frame.partial, frame.deferred, frame.labels_truncated, summary)));
     }
     Ok(())
 }
@@ -461,6 +475,7 @@ mod tests {
             partial: false,
             deferred: 0,
             labels_truncated: false,
+            summary_building: 0,
             request: RenderRequest::default(),
             bytes: Vec::new(),
             fields: floe_worker_client::Fields(

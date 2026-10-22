@@ -493,14 +493,25 @@ P4d처럼 컨트롤러 루프에서만 바뀐다. `FLOE_GTK_LOOP=legacy`는 예�
 - **덱(`jobdeck/index.rs`):** 소스마다 `light = light_for(true)`. 평범한 `floe2 index deck.jb`는
   소스마다 `floe-index light … --occupancy`(요약은 덱 기본)이고, `--full`이나 전체 옵션(`--lod` 등)
   이면 `vfs`다. design.ovo 없는 경량 소스의 요약 추가는 `light --occupancy-only`.
-- **자동 색인(`ready.rs`):** 바뀐 것 없음 — 기본 옵션으로 규칙이 적용된다(레이아웃 전체, 덱
-  소스 경량). 뷰어의 `floe2 index deck.jb --jobs 12`도 같다.
-- **UI만:** 상태줄의 `cache: light` 표기와 요약 없는 동안의 배너는 L6(SPEC-VIEWER).
+- **자동 색인(`ready.rs`):** 기본 옵션으로 규칙이 적용된다(레이아웃 전체, 덱 소스 경량). 뷰어의
+  `floe2 index deck.jb --jobs 12`도 같다. 0.12.384(L6)부터 그리는 명령(`render`·`probe`; `read::dataset`의
+  `draws`)의 `deck_state`는 요약(design.ovo) 없는 색인된 덱 소스도 색인 대상으로 보고, `index_deck`이
+  플랜의 occupancy-only 항목을 돌린다("N source(s) have no occupancy summary yet - indexing them first");
+  `info`는 캐시를 있는 대로 읽고, `--no-index`면 광역 캡처는 그 pass를 비운 채 미완(종료 3)으로 끝난다.
+- **L6(0.12.384; DIRECT_READ_PLAN §8.7):** `jobdeck/dataset.rs`의 `DeckInfo.light_sources`/`summary_missing`
+  (meta `jobdeck.*`), `desktop::Readiness.summary_missing`(gtk-service `ready`), worker-client
+  `RenderRequest.progressive`(캡처 `base_request`는 false → 와이어 `progressive=0`)와
+  `Frame.summary_building`(완료 판정에 포함; `require_complete` 문구에 길 안내), `view/perf.rs`의 덱 표
+  `summary_building`과 레이아웃 보고 `light_rounds`/`light_pending`, 문구 `, N passes wait for their
+  occupancy summary (light sources: empty until it is built)` / 요약 줄 `, N wait for the summary
+  (building)` / `, light N fill rounds (filling)`(오라클 perf_line.py 동일). UI(SPEC-VIEWER §7): 깊이 라벨
+  ` · cache:light` / ` · light:N/M`, 요약 배너와 3 s 재그리기, 두 단계 덱 열기(`--no-occupancy` 모달 →
+  뒤의 `floe2 index deck.jb`).
 - **meta.json의 `stored_shapes`:** 경량은 레이어의 도형 멤버 + 그 레이어를 텍스트 마스크에 가진
   셀들의 텍스트 수(재고에 레이어별 텍스트 수는 없다; 상한)라, 텍스트만 있는 레이어도 전체
   색인처럼 "있는 레이어"로 세어 레이어 목록과 팔레트 자리가 같다(같은 레이아웃이 캐시 종류에
   따라 다른 색으로 보이지 않는다).
-- **게이트:** floe2(경량 생명주기; exact 렌더 비교는 `--labels off` — 경량에는 텍스트 색인이
-  아직 없다), jobdeck(test_3 경량 기본, LOD 테스트의 `--full`), index_lock
+- **게이트:** floe2(경량 생명주기; exact 렌더 비교는 라벨을 켠 채 — 0.12.384부터 경량 캐시도 텍스트
+  색인을 채운다), jobdeck(test_3 경량 기본, LOD 테스트의 `--full`, L6의 LightSummaryTests), index_lock
   K13, light_cache(ovo 동일·occupancy-only·force); 단위 테스트 app-core `the_light_cache_decisions`,
   app-cli `the_light_cache_is_a_mode_of_its_own`.

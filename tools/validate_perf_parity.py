@@ -147,6 +147,8 @@ TOP = {
     "once_passes_skipped": "count", "once_items_skipped": "count",
     "labels_truncated": "flag", "over_budget_pages": "count", "workers": "count",
     "density_block": "msnone", "density_floor": "msnone",
+    # a light cache's fill rounds and a frame before its own are done (L6)
+    "light_rounds": "count", "light_pending": "flag",
 }
 CULLS = {k: "count" for k in (
     "pages_size", "page_bvh", "child_bvh", "children_size", "layer", "washed",
@@ -169,7 +171,7 @@ DECK = {k: "count" for k in (
     "passes", "frame_passes", "passes_skipped", "scene_reuses", "unique_pages",
     "pages_summed", "pass_workers", "batches", "streamed_passes", "slices",
     "wide_washes", "summary_passes", "summary_cells", "summary_none_passes",
-    "over_budget_pages")}
+    "summary_building", "over_budget_pages")}
 DECK.update({k: "us" for k in (
     "scene_us", "frame_raster_us", "composite_us", "raster_wall_us", "raster_us",
     "pass_bytes_max", "batch_bytes_max")})
@@ -282,6 +284,7 @@ def base_result():
         "subtrees_pruned": 9999, "once_full_tiles": 3, "once_passes_skipped": 4,
         "once_items_skipped": 12345, "drawn": 10500, "refining": 2, "cut_um": 0.1235,
         "labels_truncated": True, "over_budget_pages": 3,
+        "light_rounds": 2, "light_pending": True,
         "plan_culls": {k: 0 for k in CULLS},
         "summary": {"layers": 3, "cells": 12500, "pixels": 99, "level": 2, "cell_um": 0.5,
                     "none": "-", "pages_skipped": 7},
@@ -308,7 +311,7 @@ def base_result():
                         "pass_workers": 4, "batches": 2, "pass_bytes_max": 2500000,
                         "batch_bytes_max": 3500000, "streamed_passes": 1, "slices": 4,
                         "wide_washes": 12500, "summary_passes": 2, "summary_cells": 99,
-                        "summary_none_passes": 1})
+                        "summary_none_passes": 1, "summary_building": 1})
     res["density_plan2"].update({
         "probe_us": 2500, "fit_us": 3500, "probes": 2, "passes": 2, "regions": 4,
         "nodes": 12500, "page_nodes": 99, "page_candidates": 1000, "threads": 4,

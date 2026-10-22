@@ -44,12 +44,15 @@ struct Plan<'a> {
 }
 /// What a run of captures drew: whether every image is whole, and what
 /// they lack - the skipped placements of the chips some shot had on, the
-/// pages over the decode budget.
+/// pages over the decode budget, and a jobdeck's passes of light sources
+/// whose occupancy summary is not built yet (left empty; DIRECT_READ_PLAN
+/// §5.5 - `floe2 index DECK.jb` adds it).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Summary {
     pub complete: bool,
     pub lacking: usize,
     pub over_budget: u64,
+    pub summary_building: u64,
 }
 /// The ledger records a capture drawing `layers` lacks (floe.shots
 /// plan_shots, jobdeck.chips ChipTable.skipped_in): every record with every
@@ -353,6 +356,7 @@ pub fn run_summary(
             let mut kept = Vec::new();
             let mut png = None;
             let mut deferred = 0u64;
+            let mut summary_building = 0u64;
             let mut all_complete = plan.lacks.is_empty();
             // the tiles the budget fit thinned (render::budget_fit)
             let mut fits = Vec::new();
@@ -375,6 +379,9 @@ pub fn run_summary(
                 deferred = deferred
                     .checked_add(frame.deferred)
                     .ok_or_else(|| Error::input("deferred-page count overflow"))?;
+                summary_building = summary_building
+                    .checked_add(frame.summary_building)
+                    .ok_or_else(|| Error::input("summary-building pass count overflow"))?;
                 if let Some(canvas) = &mut canvas {
                     let rgba = &frame.bytes[16..]; // worker client validated FLOERAW1/size
                     canvas.insert(rgba, cancelled)?;
@@ -392,6 +399,7 @@ pub fn run_summary(
             }
             let mut row = serde_json::json!({"name":plan.named.name,"out":plan.display,"pixel":[width,height],
                 "layers":capture.shot.layers,"depth":capture.shot.depth,"over_budget_pages":deferred,
+                "summary_building":summary_building,
                 "skipped_placements":plan.lacks.len(),"complete":all_complete});
             if let (Some(sel), Some(table)) = (&plan.chips, &table) {
                 row["chips"] = serde_json::json!({
@@ -555,6 +563,13 @@ pub fn run_summary(
             n.checked_add(r["over_budget_pages"].as_u64().unwrap_or(0))
         })
         .ok_or_else(|| Error::input("report page count overflow"))?;
+    // the passes left empty for want of their light source's summary
+    let summary_building_total = rows
+        .iter()
+        .try_fold(0u64, |n, r| {
+            n.checked_add(r["summary_building"].as_u64().unwrap_or(0))
+        })
+        .ok_or_else(|| Error::input("report pass count overflow"))?;
     if let Some(path) = report {
         let mut doc = serde_json::json!({"source":dataset.source(),"dbu":dataset.dbu(),"shots":rows,
             "cut_px":shots[0].capture.shot.detail.cut_px(),"thin":shots[0].capture.shot.thin.name(),
@@ -577,6 +592,7 @@ pub fn run_summary(
                 })
                 .ok_or_else(|| Error::input("report page count overflow"))?;
             doc["jobdeck"] = serde_json::json!({"complete":complete,"skipped":lacking,"skipped_off":off,"over_budget_pages":over_budget,
+                "summary_building":summary_building_total,
                 "view":deck.metadata.jobdeck.mode,"levels":deck.metadata.jobdeck.levels});
         }
         let result = (|| {
@@ -590,7 +606,7 @@ pub fn run_summary(
             crate::program(),
             path.display(),
             shots.len(),
-            if lacking.is_empty() && over_budget_total == 0 {
+            if lacking.is_empty() && over_budget_total == 0 && summary_building_total == 0 {
                 ""
             } else {
                 ", INCOMPLETE"
@@ -601,5 +617,6 @@ pub fn run_summary(
         complete,
         lacking: lacking.len(),
         over_budget: over_budget_total,
+        summary_building: summary_building_total,
     })
 }

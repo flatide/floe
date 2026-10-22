@@ -28,6 +28,11 @@ pub struct Readiness {
     /// another run rebuilds the layout's cache whole: the refusal naming
     /// who (floe_vfs::lock); a deck's sources are judged as it opens
     pub busy: Option<String>,
+    /// a deck: its drawable indexed sources without an occupancy summary
+    /// (design.ovo) yet - the deck opens (`ready`) and the viewer builds
+    /// them behind the open (`floe2 index DECK.jb`; DIRECT_READ_PLAN §5.5,
+    /// L6). A layout: 0.
+    pub summary_missing: usize,
 }
 
 /// A layout with a VFS cache another run is not rebuilding, or a jobdeck
@@ -50,6 +55,7 @@ pub fn ready(
                     ready: false,
                     current: false,
                     busy: None,
+                    summary_missing: 0,
                 })
             }
         };
@@ -60,10 +66,15 @@ pub fn ready(
         catalog.probe_all(deck.sources(levels), cancelled)?;
         let drawable: Vec<_> = catalog.infos.values().filter(|i| i.ok()).collect();
         let ready = !drawable.is_empty() && drawable.iter().all(|i| i.indexed);
+        let summary_missing = drawable
+            .iter()
+            .filter(|i| i.indexed && !i.cache_dir.join("design.ovo").is_file())
+            .count();
         return Ok(Readiness {
             ready,
             current: ready,
             busy: None,
+            summary_missing,
         });
     }
     let key = floe_vfs::lock::key(
@@ -75,6 +86,7 @@ pub fn ready(
             ready: false,
             current: false,
             busy: Some(busy.to_string()),
+            summary_missing: 0,
         });
     }
     let directory = cache::cache_path(&source)?;
@@ -84,6 +96,7 @@ pub fn ready(
         ready,
         current,
         busy: None,
+        summary_missing: 0,
     })
 }
 

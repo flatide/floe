@@ -273,6 +273,17 @@ geometry/placement/text x·y, W/H, 점 목록, 경로 확장, 반복, 배치 대
   기다린다(지금도 partial을 버린다).
 - 메모리: Doc 2~3 GB짜리 셀 전체 파싱은 일어나지 않는다. 디코드 캐시가 세그먼트
   단위로 예산을 지킨다. 배치 BVH 상주는 LRU.
+- **구현(0.12.384, §8.7).** 라운드는 `LightLink::run_within(work, deadline)`이 돈다.
+  뷰어 프레임(캡처의 `progressive=0`·여백 프레임이 아닌 것)은 probe·플랜·라벨 걷기가
+  `FLOE_LIGHT_FIRST_MS`(기본 300 ms; `0`/`off` = 끝까지, L4 동작) 안에서 채우고, 남은
+  표시가 있으면 지금 이미지의 플랜으로 프레임을 `final=0`으로 내보낸 뒤(renderd
+  `LIGHT_CONTINUE` 시도; 라운드 번호는 이어진다) 같은 프레임을 다시 시도한다 — 시도마다
+  적어도 한 라운드는 채우므로 계층 깊이 안에 끝난다. 뷰어는 "reading the source…
+  (fill round N)"을 보고 채워지는 것을 본다. 미완 시도의 fit 결정·보관 프레임·published
+  scene은 남기지 않는다. 덱 프레임도 같다(`run_deck_render_attempt`,
+  `DeckRenderRequest::light_deadline` → pass의 `Cache::plan_within`,
+  `DeckRenderReport::light_pending`; 경량 소스가 하나라도 있을 때). 캡처(`floe2 render`, worker-client `RenderRequest::progressive =
+  false`)는 끝까지 채운 뒤 찍는다. 프레임 줄 `light_rounds= light_pending=`.
 
 ### 5.5 광역 뷰 = 요약, 요약이 없을 때
 
@@ -285,6 +296,19 @@ geometry/placement/text x·y, W/H, 점 목록, 경로 확장, 반복, 배치 대
   inv/seg + ovo까지 만든 뒤 찍는다.
 - 기준 셀: 덱 캡처가 1~4 µm/px까지 내려가면 `--occupancy-um 1`(ovo 16배)을
   권한다. 요약 구간 밖(기준 셀 > 1 px)은 세그먼트 경로다.
+- **구현(0.12.384, §8.7; 결정 (a)).** 덱 pass의 소스가 경량이고 design.ovo가 없거나
+  (`nofile`/`invalid`) 읽히지 않을 때, 그 소스의 자동 기준 셀(`auto_base_um_for_span`, 탑의
+  긴 변)로 판정해 요약이 그릴 뷰(`level_for`가 Some)이면 pass를 비워 두고
+  `summary_building_passes`에 센다(render-core `DeckSource::summary_pending`). 근접 뷰는
+  페이지 경로다. 프레임 줄 `summary_building=N` → 뷰어는 캔버스 위 배너("occupancy
+  summary building…" / "missing …")를 띄우고 3 s마다 다시 그려 요약이 생기면 걷힌다;
+  `floe2 render`는 그 pass를 비운 그림을 쓰고 미완(`summary_building`)으로 끝낸다(종료 3,
+  덱 캡처의 다른 미완과 같다). 그리는 명령
+  (`render`·`probe`)의 자동 색인(`ready.rs`)은 요약 없는 덱 소스도 "no occupancy summary
+  yet"으로 먼저 색인한다(`--no-index`면 거절; `info`는 캐시를 있는 대로 읽는다). GTK 열기는 2단계다: `floe2 index deck.jb --no-occupancy`(재고,
+  모달) → 열기 → 뒤에서 `floe2 index deck.jb`(요약; 경량 캐시의 additive 잠금이라 열린
+  뷰어 옆에서 붙는다; 뷰어가 닫히면 함께 끝나고 다음 열기가 이어 받는다). 열기 응답
+  `jobdeck.light_sources`/`summary_missing`, 준비 질의 `summary_missing`.
 
 ### 5.6 모드와 선택 규칙
 
@@ -310,7 +334,9 @@ geometry/placement/text x·y, W/H, 점 목록, 경로 확장, 반복, 배치 대
   `FLOE_INDEX_LIGHT=on|off`, 기본 = 덱 소스 경량·레이아웃 전체(전체 색인만의 옵션이
   있으면 전체). 열기는 위 규칙대로이고, `floe2 info`가 `light: the geometry is read
   from the source`와 inv/seg/ovo 크기를, `info --json`이 `cache_kind: full|light`를 낸다.
-  상태줄 표기는 L6.
+  상태줄(깊이 라벨)은 0.12.384부터 레이아웃이면 ` · cache:light`, 덱이면 ` · light:N/M`
+  (경량 소스 수/소스 수)을 붙인다; renderd의 `opened` 줄은 `cache=light|full`
+  (레이아웃) / `light_sources= summary_missing=`(덱)을 낸다.
 
 ### 5.7 운영: NFS, 메모리, 동시성
 
@@ -395,7 +421,7 @@ geometry/placement/text x·y, W/H, 점 목록, 경로 확장, 반복, 배치 대
 | L3 시드 파서 | `parse_segment`, CBLOCK inflate, 체인 | **완료 0.12.381(§8.4)**: 모든 fixture + 적대적 스트림에서 세그먼트 파싱의 레코드 합 = 셀 파싱(`--check-seg`, `rust_inventory`, 단위 테스트) |
 | L4 LightVfs | 합성 Ovm, 세그먼트 페이지 디코드, 배치 LRU, 셀 트리 | **완료 0.12.382(§8.5)**: 게이트 `light_cache` — fixture 5종 × exact 뷰 5개(전체·근접·depth 1·레이어 부분)가 전체 색인과 PNG 동일 + 플랜의 셀·간선·프레임 수 동일, cut 3 px 뷰는 빛나는 픽셀의 0.5 % 안(실측 0), 거절 3종; 단위 테스트(재고 요약 = 이미지 요약, 페이지 = 레이어 도형, 셀 트리 질의); valmini·sample9·route_chip·p10에서 뷰 17개 PNG 동일 |
 | L5 명령·모드 | `floe-index light`, `floe2 index --light`, 열기 규칙, 상태줄/info, 자동 생성, 잠금 | **완료 0.12.383(§8.6)**: `floe2`(경량 생명주기: index --light/--full, info, exact 렌더 = 전체, clip 거절, 덮어쓰기 규칙, FLOE_INDEX_LIGHT), `jobdeck`(덱 소스 경량 기본), `index_lock` K13, `light_cache`(design.ovo 바이트 동일, --occupancy-only, --force) |
-| L6 덱·뷰어·캡처 | 덱 소스 경량 열기, 요약 없는 상태 표시, refine 흐름, `floe2 render` 완료 대기 | jobdeck·gtk_view·occupancy 게이트 |
+| L6 덱·뷰어·캡처 | 덱 소스 경량 열기, 요약 없는 상태 표시, refine 흐름, `floe2 render` 완료 대기 | **완료 0.12.384(§8.7)**: `floe2`(exact 렌더 = 전체, 라벨 켠 채), `jobdeck`(LightSummaryTests: `--no-occupancy` 뒤 광역 캡처 미완(3)·근접 캡처 통과·자동 색인의 요약 추가·2단계 `index`), `gtk_view`(경량 레이아웃의 `cache:light`·`light_rounds`), 단위 테스트(텍스트 채우기 = Doc, 라벨 행, 시한 라운드) |
 | L7 후속 | 요약 패스 1패스화/마킹 가속, ovs 합치기(레이아웃 밀도), B안(정규 페이지), 세그먼트 캐시 디스크 보존(방문한 셀의 디코드 결과를 남겨 다음 세션 가속), 1패스 경량 생성(셀 로컬 점유 격자 합성) | 각각 |
 
 L0는 하루, L1~L3는 S1~S3와 비슷한 크기(재고 코드 위의 확장), L4가 본체다.
@@ -761,8 +787,50 @@ L4까지 끝나면 단독 소스를 경량으로 열어 볼 수 있고, L5·L6�
   (플랜·인코딩)가 없다 — 현장 50 GB에서는 §6.1의 131.6 s + 요약 패스(기본 예산 4~6 min
   예상)만 남는다.
 - **남은 것.** 뷰어 상태줄의 `cache: light` 표기·요약 없는 동안의 배너·덱 소스 경량
-  열기의 refine 흐름(L6), 텍스트 색인(라벨), 세그먼트 지역성이 나쁜 writer, 이미지 증분
-  합성(L7).
+  열기의 refine 흐름, 텍스트 색인(라벨) — L6(§8.7)에서 했다; 세그먼트 지역성이 나쁜
+  writer, 이미지 증분 합성(L7).
+
+### 8.7 L6 구현 (0.12.384 / floe-index·renderd 0.12.343, 2026-10-22; 사용자 "L6 진행해줘")
+
+- **텍스트 색인(라벨).** 경량 캐시의 채우기가 배치와 함께 텍스트를 읽는다
+  (`floe_vfs::light`: `pieces_of`가 F_PLACEMENTS|F_TEXTS 세그먼트를 파싱, 재고의 수와 대조;
+  `CellFill.texts`; `needs_fill` = 배치 또는 텍스트가 있는 셀). `image()`가 채운 셀마다
+  전체 빌드의 `build_cell_texts`와 같은 규칙으로 텍스트 표를 쓴다 — 레이어별 run, Morton
+  순서(원본 순서 tie-break), TBVH_LEAF 넘으면 텍스트 BVH(`floe_ovm::split_tbvh`로 옮김),
+  문자열과 Pts 반복의 점 목록은 이미지의 design.ovt 바이트(`Vfs::light(ovm, source,
+  ovt)`; `ovt_len`은 헤더에). `LightMarks`는 배치 표시와 텍스트 표시를 나눠 든다: 배치
+  리더(`cell_places`/`cell_bvh`, 플래너의 expand)는 배치가 빠진 셀만, 라벨 걷기
+  (`cell_tranges`)는 텍스트가 빠진 셀도 요청하므로 텍스트만 있는 셀은 기하 플랜에 라운드를
+  더하지 않는다. 결과: `floe2 render --detail exact`가 라벨을 켠 채 전체 색인과 픽셀 동일
+  (floe2 게이트; 스모크 fixture의 텍스트 레이어). 단위 테스트 `labelled_tree`(floe_oasis
+  fixtures): 셀·레이어별 텍스트 = Doc, raw 라벨 걷기 = 평탄화 33개, render-core의 라벨
+  플랜이 텍스트만 있는 셀을 채운다.
+- **refine 흐름.** §5.4의 구현 항목. `PlannedView::light_pending`, `FitProbe::pending`,
+  `PlannedLabels::pending`, `Cache::plan_cancellable_within` / `fit_decision_cancellable_within`
+  / `plan_labels_within` / `plan_with_representatives_within` / `plan_within`; renderd
+  `run_render`의 `LightProgress`(발행한 라운드 수·시도 수, 256 시도 상한)와 덱의
+  `run_deck_render_attempt`(라운드 = 시도 번호, 미완이면 `.partial.` 경로에 `final=0`). 캡처는
+  `progressive=0`(worker-client `RenderRequest::progressive`, app-core `base_request`).
+- **요약 없는 상태.** §5.5의 구현 항목. render-core `DeckSource::summary_pending`,
+  `DeckRenderReport::summary_building_passes`, `DeckInfo::light_sources/summary_missing`,
+  `Cache::has_occupancy_file`; worker-client `Frame::summary_building`(완료 판정에 포함),
+  app-core `require_complete` 문구, perf 줄 `, N passes wait for their occupancy summary
+  (light sources: empty until it is built)` / 요약 줄 `, N wait for the summary (building)`
+  (오라클 perf_line 동일), `DeckInfo`(jobdeck/dataset.rs) `light_sources`/`summary_missing`,
+  `desktop::Readiness::summary_missing`; app-cli `ready.rs`의 `deck_state`가 요약 없는 소스도
+  색인 대상으로 보고 `index_deck`이 occupancy-only 항목을 돌린다. GTK(gui.py):
+  `_summary_banner`·`_summary_banner_update`·`_summary_poll_tick`(3 s)·`_summary_check`(열기
+  뒤 meta의 `summary_missing` > 0이면)·`_summary_job_start/_done/_stop`(뒤의 `floe2 index
+  deck.jb [--level]`, 진행 `occupancy : (k/n)` 파싱, 종료 시 다시 그림, `_quit`에서 killpg),
+  `_jobdeck_index_and_load`의 1단계 `--no-occupancy`, 깊이 라벨 ` · cache:light` /
+  ` · light:N/M`, refining 문구 "reading the source… (fill round N)".
+- **게이트.** floe2(라벨 켠 exact 비교 + 라벨 없는 그림과 다름), jobdeck
+  `LightSummaryTests`(위 표), gtk_view `light_status`, 기존 light_cache·occupancy·index_lock
+  은 그대로; 오라클 `rust_render.py`/`perf_line.py`에 `summary_building`·`light_rounds`.
+- **실측(macOS 4 jobs).** 단위·게이트 fixture 수준; 현장 수치는 사용자 실행 뒤.
+- **남은 것(L7).** 이미지 증분 합성(라운드마다 정적 섹션 재인코딩: p10 150~300 ms),
+  세그먼트 pread 병렬화·묶음, 채운 섹션의 recency 예산, 지역성이 나쁜 writer의 B안, 웹
+  (feature/webui)의 배너·상태 표기(PatchDto).
 
 ## 9. 검토한 대안
 

@@ -1669,6 +1669,12 @@ class RustRenderWorker:
             "labels": _wire_int(fields, "labels"),
             "label_tile_paints": _wire_int(fields, "label_tile_paints"),
             "label_pixel_paints": _wire_int(fields, "label_pixel_paints"),
+            # a light cache's fill rounds over the open, and a frame that
+            # went out before its own were done (renderd's light attempts,
+            # DIRECT_READ_PLAN L6; 0 / False on a full cache and on a line
+            # before renderd 0.12.343)
+            "light_rounds": _wire_int(fields, "light_rounds"),
+            "light_pending": bool(_wire_int(fields, "light_pending")),
             # F2R diagnostics (cumulative over this generation's rounds):
             # rounds = refinement rounds served; decode_sum/decode_max
             # expose pool idle time and stragglers against decode_ms *
@@ -1764,6 +1770,10 @@ class RustRenderWorker:
                 "summary_none_passes": _wire_int(fields,
                                                  "summary_none_passes"),
                 "summary_cells": _wire_int(fields, "summary_cells"),
+                # passes of a light source without its occupancy summary
+                # yet, left empty (DIRECT_READ_PLAN L6; absent before
+                # renderd 0.12.343)
+                "summary_building": _wire_int(fields, "summary_building"),
                 "over_budget_pages": deferred,
             }
         if self._max_depth is not None:

@@ -188,11 +188,11 @@ impl Vfs {
     /// synthesized index over the source file itself - its pages are
     /// segments of `source` (CODEC_SEGMENT), decoded by the renderer, and
     /// there is no text index yet.
-    pub fn light(ovm: Ovm, source: String) -> Vfs {
+    pub fn light(ovm: Ovm, source: String, ovt: Vec<u8>) -> Vfs {
         Vfs {
             ovm,
             ovp_path: source,
-            ovt: floe_ovm::Backing::Vec(Vec::new()),
+            ovt: floe_ovm::Backing::Vec(ovt),
         }
     }
 

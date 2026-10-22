@@ -270,6 +270,11 @@ pub struct RenderRequest {
     /// jobdeck's passes either. None leaves renderd's rule (a jobdeck on, a
     /// plain layout off, FLOE_RUST_OCCUPANCY).
     pub occupancy: Option<bool>,
+    /// A light cache's frame may go out before its placement fills are done
+    /// and be drawn again after them (renderd's light attempts,
+    /// DIRECT_READ_PLAN §5.4): the viewer's way (true, the default). A
+    /// capture sets false (`progressive=0`): its frame waits for the fills.
+    pub progressive: bool,
 }
 
 impl Default for RenderRequest {
@@ -300,6 +305,7 @@ impl Default for RenderRequest {
             viewport: None,
             density: None,
             occupancy: None,
+            progressive: true,
         }
     }
 }
@@ -365,6 +371,9 @@ impl RenderRequest {
         }
         if let Some(on) = self.occupancy {
             write!(command, " occupancy={}", if on { "on" } else { "off" }).unwrap();
+        }
+        if !self.progressive {
+            command.push_str(" progressive=0");
         }
         if command.len() > MAX_LINE_BYTES {
             return Err(Error::new(
@@ -506,6 +515,14 @@ mod tests {
             .command(1, 1, "/tmp/f", 1_000_000)
             .unwrap()
             .ends_with(" density=on occupancy=on"));
+        // a capture's frame waits for a light cache's fills (L6): said only
+        // when it does
+        r.progressive = false;
+        assert!(r
+            .command(1, 1, "/tmp/f", 1_000_000)
+            .unwrap()
+            .ends_with(" density=on occupancy=on progressive=0"));
+        r.progressive = true;
         r.viewport = Some((0, 480));
         assert!(r.command(1, 1, "/tmp/f", 1_000_000).is_err());
     }

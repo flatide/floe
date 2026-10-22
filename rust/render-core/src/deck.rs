@@ -247,6 +247,41 @@ struct DeckSource {
     layers: Vec<CacheLayer>,
     top_bbox: BBox,
     max_depth: u32,
+    /// a light cache (floe_vfs::light): its pages are read from the source
+    light: bool,
+    /// the source's dbu per micron (the OASIS unit)
+    unit: f64,
+}
+
+impl DeckSource {
+    /// A light source without its occupancy summary, at a view the summary
+    /// would draw (DIRECT_READ_PLAN §5.5, the user's decision (a)): the pass
+    /// stays empty until the summary exists - the page path would read the
+    /// source whole at a wide view - and the frame says so
+    /// (DeckRenderReport::summary_building_passes). The view is judged by
+    /// the base cell `floe-index light --occupancy` picks for this source
+    /// (floe_vfs::occupancy::auto_base_um_for_span over the top's longer
+    /// side), as the file would be judged (summary::level_for): a nearer
+    /// view takes the page path as it does with the summary at hand.
+    fn summary_pending(
+        &self,
+        plan_request: &PlanRequest,
+        summary: &crate::summary::SummarySelection,
+    ) -> bool {
+        use crate::summary::{level_for, max_cell_px, NONE_INVALID, NONE_NOFILE};
+        if !self.light || !matches!(summary.none, Some(NONE_NOFILE) | Some(NONE_INVALID)) {
+            return false;
+        }
+        let span = (self.top_bbox.x1 - self.top_bbox.x0)
+            .max(self.top_bbox.y1 - self.top_bbox.y0)
+            .max(0) as f64;
+        if !(self.unit > 0.0) {
+            return false;
+        }
+        let base_um = floe_vfs::occupancy::auto_base_um_for_span(span / self.unit);
+        let cell_dbu = (base_um * self.unit).round().max(1.0) as i64;
+        level_for(cell_dbu, plan_request.px_per_dbu, 1, max_cell_px()).is_some()
+    }
 }
 
 struct Placed {
@@ -422,6 +457,11 @@ pub struct DeckInfo {
     pub max_depth: u32,
     /// Union of every placement's transformed top-cell bounds, deck dbu.
     pub bbox: Option<[f64; 4]>,
+    /// Sources opened as light caches (DIRECT_READ_PLAN L4), and those of
+    /// them without a design.ovo when the deck opened (their wide views
+    /// wait for the summary).
+    pub light_sources: usize,
+    pub summary_missing: usize,
 }
 
 /// A composite render request, viewport in deck dbu.
@@ -466,6 +506,11 @@ pub struct DeckRenderRequest {
     /// (the field kill switch), Some(false) = the page path for every pass,
     /// Some(true) = the summary whatever the environment says.
     pub occupancy: Option<bool>,
+    /// A light source's fills stop here (Cache::plan_within): past it the
+    /// pass plans the image so far and the frame is reported pending
+    /// (DeckRenderReport::light_pending) - renderd draws it again. None:
+    /// the fills run to the end (a capture).
+    pub light_deadline: Option<std::time::Instant>,
 }
 
 pub struct DeckRenderReport {
@@ -526,6 +571,14 @@ pub struct DeckRenderReport {
     pub summary_passes: u32,
     pub summary_none_passes: u32,
     pub summary_cells: u64,
+    /// Passes of a light source without its occupancy summary at a view
+    /// the summary would draw, left empty until it exists
+    /// (DeckSource::summary_pending; DIRECT_READ_PLAN §5.5).
+    pub summary_building_passes: u32,
+    /// A pass's plan ran out of the request's `light_deadline` with cells
+    /// still to fill: the frame is of the images so far (DIRECT_READ_PLAN
+    /// §5.4; renderd draws the frame again).
+    pub light_pending: bool,
 }
 
 impl Deck {
@@ -551,6 +604,8 @@ impl Deck {
             sources.push(DeckSource {
                 layers: cache.layers(),
                 pages: DecodedPageCache::new(budget_bytes),
+                light: cache.is_light(),
+                unit: info.unit,
                 cache,
                 top_bbox,
                 max_depth: info.max_depth,
@@ -663,6 +718,12 @@ impl Deck {
                 .max()
                 .unwrap_or(0),
             bbox,
+            light_sources: self.sources.iter().filter(|source| source.light).count(),
+            summary_missing: self
+                .sources
+                .iter()
+                .filter(|source| source.light && !source.cache.has_occupancy_file())
+                .count(),
         }
     }
 
@@ -786,6 +847,7 @@ impl Deck {
         let mut plan_pages = 0u32;
         let mut partial = false;
         let mut deferred = 0u32;
+        let mut light_pending = false;
         let mut rectangle_member_paints = 0u64;
         let mut polygon_member_paints = 0u64;
         let mut path_member_paints = 0u64;
@@ -815,6 +877,7 @@ impl Deck {
         let mut culls = crate::cache::PlanCullCounts::default();
         let mut summary_passes = 0u32;
         let mut summary_none_passes = 0u32;
+        let mut summary_building_passes = 0u32;
         // the request's `occupancy=on|off` (the viewer's toggle, 2026-10-20)
         // decides for every pass; without it FLOE_RUST_OCCUPANCY=off, the
         // field kill switch of the summary
@@ -880,6 +943,13 @@ impl Deck {
                 occupancy_off,
                 false,
             )?;
+            // a light source whose summary is not built yet, at a view the
+            // summary would draw: an empty pass, said on the frame
+            // (DIRECT_READ_PLAN §5.5; the GUI's banner, a capture's refusal)
+            if self.sources[source_index].summary_pending(&plan_request, &summary) {
+                summary_building_passes += 1;
+                continue;
+            }
             let plan_request = self.sources[source_index].cache.page_plan_request(
                 &plan_request,
                 &summary,
@@ -931,7 +1001,8 @@ impl Deck {
                 None => {
                     self.share_budget(source_index);
                     let source = &mut self.sources[source_index];
-                    let planned = source.cache.plan(&plan_request)?;
+                    let planned = source.cache.plan_within(&plan_request, request.light_deadline)?;
+                    light_pending |= planned.light_pending;
                     stats.plan_us = stats.plan_us.saturating_add(planned.stats.plan_us);
                     plan_pages = plan_pages.saturating_add(planned.summary.pages);
                     wide_washes = wide_washes.saturating_add(planned.plan.stats.sub_cut_washes);
@@ -1220,6 +1291,8 @@ impl Deck {
             summary_passes,
             summary_none_passes,
             summary_cells: tally.summary_cells,
+            summary_building_passes,
+            light_pending,
         })
     }
 }
@@ -2198,6 +2271,7 @@ mod tests {
             stream: true,
             thin_keep: true,
             occupancy: None,
+            light_deadline: None,
         };
         let p = placement(4.0, 0.0, 0.0);
         let sv = source_view(&request.view, &p).unwrap();
@@ -2264,6 +2338,7 @@ mod tests {
             stream: true,
             thin_keep: true,
             occupancy: None,
+            light_deadline: None,
         };
         let p = placement(0.001, 1e16, 1e16);
         let sv = source_view(&request.view, &p).unwrap();
@@ -2299,6 +2374,7 @@ mod tests {
             stream: true,
             thin_keep: true,
             occupancy: None,
+            light_deadline: None,
         };
         let big = 1i64 << 60;
         // the placement puts the deck view's origin at the source's

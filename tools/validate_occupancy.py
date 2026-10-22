@@ -2384,17 +2384,30 @@ class DeckRenderTests(unittest.TestCase):
         self.assertEqual((again, res_again["deck"]["summary_passes"]), (on, 1))
 
     def test_a_source_without_the_file_counts_as_none(self):
-        ovo = Path(vfs_cache_dir(self.dir / "thinwide.oas")) / "design.ovo"
+        """A full index without the file keeps the page path and counts
+        the pass as `none`; a light source (the deck's default since L5)
+        without it, at a view the summary would draw, leaves the pass
+        empty and counts it in `summary_building` instead (DIRECT_READ_PLAN
+        section 5.5, L6: the viewer's banner, a capture's refusal)."""
+        cache = Path(vfs_cache_dir(self.dir / "thinwide.oas"))
+        ovo = cache / "design.ovo"
         keep = ovo.read_bytes()
+        light = not (cache / "design.ovm").exists()
         try:
             ovo.unlink()
             _, res = render_settled(self.deck, self._next(), self.bbox, 200)
-            self.assertEqual((res["deck"]["summary_passes"],
-                              res["deck"]["summary_none_passes"]), (0, 1))
+            d = res["deck"]
+            if light:
+                self.assertEqual((d["summary_passes"], d["summary_none_passes"],
+                                  d["summary_building"]), (0, 0, 1))
+            else:
+                self.assertEqual((d["summary_passes"], d["summary_none_passes"],
+                                  d["summary_building"]), (0, 1, 0))
         finally:
             ovo.write_bytes(keep)
         _, res = render_settled(self.deck, self._next(), self.bbox, 200)
-        self.assertEqual(res["deck"]["summary_passes"], 1)
+        self.assertEqual((res["deck"]["summary_passes"],
+                          res["deck"]["summary_building"]), (1, 0))
 
 
 class PlanCliTests(unittest.TestCase):

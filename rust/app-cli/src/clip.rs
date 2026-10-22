@@ -166,7 +166,7 @@ fn clip(
     cancelled: &Arc<AtomicUsize>,
 ) -> Result<i32> {
     // indexed first when it has none (ready.rs); a layout - parse refused a deck
-    let Dataset::Layout(layout) = crate::ready::open(source, None, index, waiter, cancelled)? else {
+    let Dataset::Layout(layout) = crate::ready::open(source, None, index, false, waiter, cancelled)? else {
         return Err(Error::new(
             ErrorKind::Unsupported,
             "jobdeck clip is unsupported; clip a source layout directly",

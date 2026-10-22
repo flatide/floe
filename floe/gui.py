@@ -18,6 +18,7 @@ import functools
 import math
 import os
 import queue
+import re
 import signal
 import sys
 import threading
@@ -2847,6 +2848,23 @@ class Viewer:
         self._loading.get_style_context().add_class("floe-loading")
         self.overlay.add_overlay(self._loading)
         self.overlay.set_overlay_pass_through(self._loading, True)
+        # the occupancy summary banner (DIRECT_READ_PLAN L6, user decision
+        # section 10 4): over the top of the canvas while a frame's deck
+        # passes wait for the summary of their light sources (the wide
+        # view of those sources stays empty until it is built; near views
+        # draw) - shown and hidden by _summary_banner_update
+        self._summary_banner = Gtk.Label(label="")
+        self._summary_banner.set_halign(Gtk.Align.CENTER)
+        self._summary_banner.set_valign(Gtk.Align.START)
+        self._summary_banner.set_margin_top(8)
+        self._summary_banner.set_no_show_all(True)
+        self._summary_banner.get_style_context().add_class("floe-loading")
+        self.overlay.add_overlay(self._summary_banner)
+        self.overlay.set_overlay_pass_through(self._summary_banner, True)
+        self._summary_job = None
+        self._summary_progress = ""
+        self._summary_waiting = 0
+        self._summary_poll_timer = None
         main.pack_start(self.overlay, True, True, 0)
 
         # Two-tier status area. Upper: cursor/interaction plus persistent
@@ -3240,6 +3258,10 @@ class Viewer:
         try:
             err = self._open_file_load(path, ids)
             applied = err is None
+            if applied:
+                # a deck whose sources lack their occupancy summary
+                # builds it behind the open (L6)
+                self._summary_check()
             return err
         finally:
             if not applied:
@@ -4651,6 +4673,7 @@ class Viewer:
         mode, brief = frame.get("perf") or ("", "")
         load, load_brief = self._load_note(report)
         mode, brief = load + mode, load_brief + brief
+        fields = frame.get("fields") or {}
         if frame["final"]:
             if getattr(self, "_refining", False) or first:
                 self.rstatus.set_text("rendering done.")
@@ -4661,11 +4684,19 @@ class Viewer:
                      (b[3] - b[1]) * self.dbu), flush=True)
         else:
             self._refining = True
-            self.rstatus.set_text(
-                "drawing the density under the cut..."
-                if (frame.get("fields") or {}).get("density_round") else
-                "refining %d pages..." % (report.get("refining") or 1))
+            if fields.get("density_round"):
+                self.rstatus.set_text("drawing the density under the cut...")
+            elif fields.get("light_pending") == "1":
+                # a light cache's frame before its placement fills are
+                # done (renderd's light attempts, DIRECT_READ_PLAN L6)
+                self.rstatus.set_text(
+                    "reading the source... (fill round %s)"
+                    % (fields.get("light_rounds") or "?"))
+            else:
+                self.rstatus.set_text(
+                    "refining %d pages..." % (report.get("refining") or 1))
         self._set_status(self.view_bbox(), mode, brief)
+        self._summary_banner_update(fields)
         self._cell_hl_follow()
 
     def _ctl_view(self, snap):
@@ -4927,6 +4958,154 @@ class Viewer:
         banner.hide()
         self._set_cursor("move" if self._drag is not None
                          else self._idle_cursor())
+
+    # ---- the occupancy summary of a deck's light sources (L6)
+
+    def _summary_banner_update(self, fields):
+        """After a frame: its deck passes left empty because their light
+        source has no occupancy summary yet (renderd `summary_building`,
+        DIRECT_READ_PLAN section 5.5) show the banner; none hides it.
+        While it shows, the view is drawn again every few seconds
+        (_summary_poll_tick): the summary a background `floe2 index`
+        (_summary_job_start) or another run adds appears by itself."""
+        banner = getattr(self, "_summary_banner", None)
+        if banner is None:
+            return
+        try:
+            waiting = int(fields.get("summary_building") or 0)
+        except (TypeError, ValueError):
+            waiting = 0
+        self._summary_waiting = waiting
+        if waiting <= 0:
+            if banner.get_visible():
+                banner.hide()
+            return
+        job = self._summary_job
+        if job is not None and job["proc"].poll() is None:
+            text = ("occupancy summary building%s - wide views of those "
+                    "sources are empty until it is ready"
+                    % ((" (%s)" % self._summary_progress)
+                       if self._summary_progress else "..."))
+        else:
+            text = ("occupancy summary missing for %d pass%s - wide views "
+                    "of those sources are empty (%s index %s adds it)"
+                    % (waiting, "" if waiting == 1 else "es", APP,
+                       os.path.basename(getattr(self.cache, "src", "")
+                                        or "deck.jb")))
+        banner.set_text(text)
+        banner.show()
+        if self._summary_poll_timer is None:
+            self._summary_poll_timer = GLib.timeout_add(
+                3000, self._summary_poll_tick)
+
+    def _summary_poll_tick(self):
+        banner = getattr(self, "_summary_banner", None)
+        if banner is None or not banner.get_visible() \
+                or self.cache is None or self.worker is None:
+            self._summary_poll_timer = None
+            return False
+        if self._pending is None and not getattr(self, "_refining", False):
+            self.redraw(immediate=True)
+        return True
+
+    def _summary_check(self):
+        """After a deck opened: its drawable sources without a summary
+        (the open's meta, `jobdeck.summary_missing` - every source after
+        the first phase of the two-phase index, _jobdeck_index_and_load)
+        get it from a background `floe2 index deck.jb` (the plan adds the
+        summary to the sources that lack one and keeps the rest, beside
+        the viewer's readers - the light cache's additive lock)."""
+        cache = self.cache
+        if cache is None or not getattr(cache, "is_jobdeck", False):
+            return
+        meta = self.meta or {}
+        missing = (meta.get("jobdeck") or {}).get("summary_missing") or 0
+        if missing <= 0:
+            return
+        self._summary_job_start(cache.src, getattr(cache, "ids", None),
+                                missing)
+
+    def _summary_job_start(self, path, ids, missing=None):
+        import subprocess
+        job = self._summary_job
+        if job is not None:
+            if job["proc"].poll() is None and job["path"] == path \
+                    and job["ids"] == ids:
+                return
+            self._summary_job_stop()
+        from .vfsclient import find_floe2
+        try:
+            argv = [find_floe2(), "index", path, "--jobs", "12"]
+        except RuntimeError as exc:
+            self._set_live_status("occupancy summary build failed: %s" % exc)
+            return
+        if ids:
+            argv += ["--level", ",".join(str(i) for i in ids)]
+        try:
+            proc = subprocess.Popen(
+                argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1, start_new_session=True)
+        except OSError as exc:
+            self._set_live_status("occupancy summary build failed: %s" % exc)
+            return
+        self._summary_job = {"proc": proc, "path": path, "ids": ids}
+        self._summary_progress = ""
+        sys.stderr.write(
+            "[%s] occupancy summary: building for %s source(s) in the "
+            "background (%s)\n" % (APP, missing if missing else "the",
+                                  " ".join(argv)))
+
+        def reader():
+            try:
+                for line in proc.stdout:
+                    sys.stderr.write("[summary] " + line)
+                    m = re.search(r"occupancy\s*:\s*\((\d+)/(\d+)\)", line)
+                    if m:
+                        GLib.idle_add(self._summary_progress_set,
+                                      "%s/%s sources" % (m.group(1),
+                                                          m.group(2)))
+            except (OSError, ValueError):
+                pass
+            rc = proc.wait()
+            GLib.idle_add(self._summary_job_done, proc, rc)
+
+        threading.Thread(target=reader, daemon=True).start()
+
+    def _summary_progress_set(self, text):
+        self._summary_progress = text
+        banner = getattr(self, "_summary_banner", None)
+        if banner is not None and banner.get_visible():
+            banner.set_text("occupancy summary building (%s) - wide views "
+                            "of those sources are empty until it is ready"
+                            % text)
+        return False
+
+    def _summary_job_done(self, proc, rc):
+        job = self._summary_job
+        if job is None or job["proc"] is not proc:
+            return False
+        self._summary_job = None
+        if rc == 0:
+            self._set_live_status("occupancy summary built; wide views draw")
+        elif rc not in (-signal.SIGTERM, 130, 143):
+            self._set_live_status(
+                "occupancy summary build ended with rc %d (see the log)" % rc)
+        if self.cache is not None and self.worker is not None:
+            self.redraw(immediate=True)
+        return False
+
+    def _summary_job_stop(self):
+        job = self._summary_job
+        self._summary_job = None
+        if job is None or job["proc"].poll() is not None:
+            return
+        try:
+            os.killpg(job["proc"].pid, signal.SIGTERM)
+        except OSError:
+            try:
+                job["proc"].terminate()
+            except OSError:
+                pass
 
     def _set_live_status(self, text):
         """Upper-row message; cursor motion may replace it."""
@@ -5590,6 +5769,16 @@ class Viewer:
             if self._occupancy_key() is not None:
                 lbl += " · occupancy:%s" % (
                     "on" if self._occupancy_effective() else "off")
+            # the kind of cache (DIRECT_READ_PLAN L6): a layout opened from
+            # a light cache (its geometry read from the source), a deck's
+            # light sources
+            if self.meta.get("cache") == "light":
+                lbl += " · cache:light"
+            else:
+                deck = self.meta.get("jobdeck") or {}
+                if deck.get("light_sources"):
+                    lbl += " · light:%d/%d" % (deck["light_sources"],
+                                               deck.get("sources") or 0)
         if self.abstract:
             lbl += " · abstract"
         return lbl
@@ -6740,16 +6929,23 @@ class Viewer:
 
         # a source that failed to index is a skipped placement: open
         # the deck with the rest (the log stays up with the error).
-        # The command line is the Rust `floe2` (rust/floe2)
+        # The command line is the Rust `floe2` (rust/floe2).
+        # Two phases (DIRECT_READ_PLAN section 5.5, L6): the light caches
+        # first (`--no-occupancy`: the inventory pass, seconds to minutes),
+        # then the deck opens, and the occupancy summaries - the slow
+        # pass - are built behind it (_summary_check: `floe2 index
+        # deck.jb` adds what is missing); wide views show the banner
+        # until they exist, near views draw at once
         from .vfsclient import find_floe2
         try:
-            argv = [find_floe2(), "index", path, "--jobs", "12"]
+            argv = [find_floe2(), "index", path, "--jobs", "12",
+                    "--no-occupancy"]
         except RuntimeError as exc:
             self._set_live_status("jobdeck indexing failed: %s" % exc)
             return
         if ids:
             argv += ["--level", ",".join(str(i) for i in ids)]
-        self._index_modal("indexing jobdeck sources…", argv,
+        self._index_modal("indexing jobdeck sources (inventory)…", argv,
                           on_success, "jobdeck indexing",
                           on_failure=lambda rc: on_success())
 
@@ -12410,6 +12606,11 @@ class Viewer:
         if self._quitting:
             return
         self._quitting = True
+        # the background summary build goes with the viewer (the next
+        # open resumes it: a source with its summary is kept)
+        stop = getattr(self, "_summary_job_stop", None)
+        if stop is not None:
+            stop()
         for window in (getattr(self, "_drc_team", None),
                        getattr(self, "_drc_migration", None)):
             if window is not None:

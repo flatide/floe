@@ -14,7 +14,9 @@
 use crate::cellstore::CellStore;
 use floe_oasis::doc::{Cell, Doc, PathRec, PlaceRec, PolyRec, RectRec, Rep};
 use floe_oasis::write::WCell;
-use floe_ovm::{narrow_u32, split_bvh, split_pbvh, BBox, Builder, PBVH_LEAF, PBVH_NONE};
+use floe_ovm::{
+    narrow_u32, split_bvh, split_pbvh, split_tbvh, BBox, Builder, PBVH_LEAF, PBVH_NONE, TBVH_LEAF,
+};
 use floe_tiler::hier::{cell_bboxes_full, rep_extent};
 use floe_tiler::{path_bbox, xf_rep, Xf};
 use std::io::Write;
@@ -43,10 +45,9 @@ const PLAN_BATCH_PER_JOB: usize = 4;
 /// halve the next batch (never below `jobs` - that would re-starve the
 /// plan threads). Linux-only signal; hosts without it keep the default.
 const GOVERNOR_MIN_AVAIL_GB: f64 = 4.0;
-// (BVH_LEAF / PBVH_LEAF and split_bvh / split_pbvh live in floe_ovm since
-// the light cache's fill builds the same trees - DIRECT_READ_PLAN L4)
-/// texts per text-BVH leaf / linear-scan threshold (v5 text index)
-const TBVH_LEAF: usize = 8;
+// (BVH_LEAF / PBVH_LEAF / TBVH_LEAF and split_bvh / split_pbvh / split_tbvh
+// live in floe_ovm since the light cache's fill builds the same trees -
+// DIRECT_READ_PLAN L4, the text index L6)
 
 // ------------------------------------------------------------ build
 
@@ -7142,41 +7143,6 @@ pub(crate) struct TextIndexStats {
     /// text members per layer_order index (meta.json's stored shapes
     /// add them to the paged members; sized by build())
     layer_text_members: Vec<u64>,
-}
-
-/// local text-BVH split (median partition, same shape as
-/// split_pbvh): nodes hold RUN-LOCAL first for leaves; the caller
-/// rebases onto the emitted text order, which FOLLOWS the final
-/// item order here - leaves are contiguous by construction
-fn split_tbvh(
-    nodes: &mut Vec<(BBox, u32, u16, bool)>,
-    items: &mut [(BBox, u32)],
-    lo: usize,
-    slot: usize,
-) {
-    let mut bb = BBox::EMPTY;
-    for (ib, _) in items.iter() {
-        bb.grow(ib);
-    }
-    if items.len() <= TBVH_LEAF {
-        nodes[slot] = (bb, lo as u32, items.len() as u16, true);
-        return;
-    }
-    let wx = bb.x1 - bb.x0;
-    let wy = bb.y1 - bb.y0;
-    let mid = items.len() / 2;
-    if wx >= wy {
-        items.select_nth_unstable_by_key(mid, |(b, _)| b.x0 + b.x1);
-    } else {
-        items.select_nth_unstable_by_key(mid, |(b, _)| b.y0 + b.y1);
-    }
-    let l = nodes.len();
-    nodes.push((BBox::EMPTY, 0, 0, false));
-    nodes.push((BBox::EMPTY, 0, 0, false));
-    nodes[slot] = (bb, l as u32, 2, false);
-    let (a, c) = items.split_at_mut(mid);
-    split_tbvh(nodes, a, lo, l);
-    split_tbvh(nodes, c, lo + mid, l + 1);
 }
 
 /// cell-local text index of ONE cell (VFS_TEXT_PLAN.md par.3):

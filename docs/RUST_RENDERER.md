@@ -681,8 +681,24 @@ pool of at most 8 open files (a deck opens one light cache per source, and a
 descriptor each would run a tight open-file limit out). The hierarchy summary comes from the inventory's edges
 (no `design.ovh`). `Cache::is_light()` and `light_stats()` say so; `read_pages`
 refuses a light page. Pixel contract: identical to the full index where every
-shape is drawn (gate `light_cache`); a cut view may differ page by page. Not
-yet: texts and labels, `floe2`'s own light modes and status (L5/L6).
+shape is drawn (gate `light_cache`); a cut view may differ page by page.
+
+L6 (0.12.384): a fill reads a cell's texts with its placements and the image
+carries the text index the full build writes (`build_cell_texts`'s rules, the
+strings and point lists as the image's design.ovt bytes), so labels on a light
+cache are the full index's (`floe_ovm::LightMarks` keeps placement and text
+marks apart: a geometry plan passing a cell of texts alone asks for no fill).
+A viewer frame's probe, plan and label walk fill for FLOE_LIGHT_FIRST_MS (300;
+`0`/`off` = to the end) and then the frame goes out `final=0 light_pending=1`
+while renderd's next attempt fills on (`LIGHT_CONTINUE`; the rounds keep
+counting, the fit memory, the retained frame and the published scene wait for
+the settled attempt; a deck frame the same, `run_deck_render_attempt` with
+`DeckRenderRequest::light_deadline`); a capture sends `progressive=0` and waits. A deck pass of
+a light source without its `design.ovo`, at a view the summary would draw
+(the source's automatic base cell), is left empty and counted in the deck frame
+line's `summary_building=` - the viewer's banner, a capture's refusal
+(`summary_building` in `Frame::complete`); `opened` says `cache=light|full`
+(a layout) or `light_sources= summary_missing=` (a deck).
 
 ## floe2 product boundary
 

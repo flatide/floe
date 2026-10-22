@@ -240,6 +240,11 @@ pub struct PlannedView {
     pub plan: HierPlan,
     pub summary: PlanSummary,
     pub stats: RenderStats,
+    /// A light cache planned under a deadline (plan_cancellable_within) that
+    /// ran out before every expanded cell was filled: the plan is of the
+    /// image so far; planned again, it goes on from there. Never on a full
+    /// cache.
+    pub light_pending: bool,
 }
 
 impl PlannedView {
@@ -302,6 +307,9 @@ pub struct PlannedLabels {
     pub rows: Vec<RenderLabel>,
     pub stats: TextStats,
     pub plan_us: u64,
+    /// as PlannedView::light_pending: the walk ran out of its deadline with
+    /// cells still to fill
+    pub pending: bool,
 }
 
 #[derive(Debug)]
@@ -318,6 +326,9 @@ pub struct PagePayload {
 pub struct FitProbe {
     pub decision: Option<floe_vfs::hier::FixedFit>,
     pub walked: bool,
+    /// as PlannedView::light_pending: the probe's plan ran out of its
+    /// deadline - the decision is of the image so far
+    pub pending: bool,
 }
 
 pub struct DecodedPage {
@@ -853,6 +864,23 @@ impl Cache {
     /// expanded no cell without its placements (crate::light::LightLink::run).
     fn filled<T>(&self, work: impl Fn(&Vfs) -> Result<T, String>) -> Result<T, String> {
         self.link.run(work)
+    }
+
+    /// `filled` under a deadline (LightLink::run_within): the work's result
+    /// and whether cells were left to fill.
+    fn filled_within<T>(
+        &self,
+        work: impl Fn(&Vfs) -> Result<T, String>,
+        deadline: Option<Instant>,
+    ) -> Result<(T, bool), String> {
+        self.link.run_within(work, deadline)
+    }
+
+    /// Whether the cache directory holds a design.ovo (the occupancy
+    /// summary of the wide view; `summary_selection` reads and validates
+    /// it per request).
+    pub fn has_occupancy_file(&self) -> bool {
+        std::fs::symlink_metadata(format!("{}/design.ovo", self.dir)).is_ok()
     }
 
     /// The cache is a light one (design.inv + design.seg over the source;
@@ -1879,7 +1907,47 @@ impl Cache {
         generation: u64,
         cancellation: &crate::RenderCancellation,
     ) -> Result<PlannedView, String> {
-        self.plan_stopping(request, Some(cancellation.plan_stop(generation)))
+        self.plan_cancellable_within(request, generation, cancellation, None)
+    }
+
+    /// `plan_cancellable` with a deadline for a light cache's fills
+    /// (DIRECT_READ_PLAN §5.4, renderd's light attempts): past it the plan
+    /// of the image so far comes back with `light_pending` set; None (and a
+    /// full cache) plans to the end.
+    pub fn plan_cancellable_within(
+        &self,
+        request: &PlanRequest,
+        generation: u64,
+        cancellation: &crate::RenderCancellation,
+        deadline: Option<Instant>,
+    ) -> Result<PlannedView, String> {
+        self.plan_deciding(request, Some(cancellation.plan_stop(generation)), None, deadline)
+    }
+
+    #[doc(hidden)]
+    pub fn set_light_prefill_for_tests(&self, places: u64, bytes: u64) {
+        self.link.set_prefill(places, bytes);
+    }
+
+    /// `plan` with a deadline for a light cache's fills
+    /// (plan_cancellable_within without a cancellation): a deck's pass.
+    pub fn plan_within(
+        &self,
+        request: &PlanRequest,
+        deadline: Option<Instant>,
+    ) -> Result<PlannedView, String> {
+        self.plan_deciding(request, None, None, deadline)
+    }
+
+    #[doc(hidden)]
+    pub fn plan_within_for_tests(
+        &self,
+        request: &PlanRequest,
+        deadline: Option<Instant>,
+    ) -> Result<(PlannedView, bool), String> {
+        let planned = self.plan_within(request, deadline)?;
+        let pending = planned.light_pending;
+        Ok((planned, pending))
     }
 
     /// The budget fit a plan of `request` decides, and nothing else of it:
@@ -1905,6 +1973,20 @@ impl Cache {
         generation: u64,
         cancellation: &crate::RenderCancellation,
     ) -> Result<FitProbe, String> {
+        self.fit_decision_cancellable_within(request, generation, cancellation, None)
+    }
+
+    /// `fit_decision_cancellable` with a deadline for a light cache's fills
+    /// (plan_cancellable_within): past it the decision is of the image so
+    /// far and `pending` says so - renderd plans the frame without it and
+    /// asks again on the next attempt.
+    pub fn fit_decision_cancellable_within(
+        &self,
+        request: &PlanRequest,
+        generation: u64,
+        cancellation: &crate::RenderCancellation,
+        deadline: Option<Instant>,
+    ) -> Result<FitProbe, String> {
         let summary = if fit_probe_by_summary() {
             self.hier
                 .summary()
@@ -1917,10 +1999,10 @@ impl Cache {
         let checked =
             summary.is_some() && std::env::var("FLOE_RUST_FIT_PROBE_CHECK").as_deref() == Ok("on");
         let decided =
-            self.plan_deciding(request, Some(cancellation.plan_stop(generation)), summary)?;
+            self.plan_deciding(request, Some(cancellation.plan_stop(generation)), summary, deadline)?;
         if checked {
             let walked =
-                self.plan_deciding(request, Some(cancellation.plan_stop(generation)), None)?;
+                self.plan_deciding(request, Some(cancellation.plan_stop(generation)), None, deadline)?;
             let same = decided.plan.pages == walked.plan.pages
                 && decided.plan.stats.fit_decision == walked.plan.stats.fit_decision;
             // (the lines a field run is asked for)
@@ -1938,11 +2020,13 @@ impl Cache {
             return Ok(FitProbe {
                 decision: walked.plan.stats.fit_decision,
                 walked: true,
+                pending: walked.light_pending || decided.light_pending,
             });
         }
         Ok(FitProbe {
             decision: decided.plan.stats.fit_decision,
             walked,
+            pending: decided.light_pending,
         })
     }
 
@@ -1951,16 +2035,18 @@ impl Cache {
         request: &PlanRequest,
         stop: Option<floe_vfs::hier::PlanStop>,
     ) -> Result<PlannedView, String> {
-        self.plan_deciding(request, stop, None)
+        self.plan_deciding(request, stop, None, None)
     }
 
     /// plan_stopping; with `decide_by` the plan is for its fit decision alone
-    /// (fit_decision_cancellable).
+    /// (fit_decision_cancellable); with `deadline` a light cache's fills stop
+    /// there (plan_cancellable_within).
     fn plan_deciding(
         &self,
         request: &PlanRequest,
         stop: Option<floe_vfs::hier::PlanStop>,
         decide_by: Option<std::sync::Arc<floe_vfs::hiersum::HierSummary>>,
+        deadline: Option<Instant>,
     ) -> Result<PlannedView, String> {
         let req = self.view_request(request)?;
         let started = Instant::now();
@@ -1982,8 +2068,9 @@ impl Cache {
             None
         };
         // (a light cache plans again after filling the cells the walk
-        // expanded without their placements - DIRECT_READ_PLAN §5.4)
-        let mut plan = self.filled(|vfs| {
+        // expanded without their placements - DIRECT_READ_PLAN §5.4 - until
+        // its deadline, if one was given)
+        let (mut plan, light_pending) = self.filled_within(|vfs| {
             Ok(vfs.plan_hier_in(
                 &req,
                 &regions,
@@ -2001,7 +2088,7 @@ impl Cache {
                 decide_by.clone(),
                 request.fit_rank.clone(),
             ))
-        })?;
+        }, deadline)?;
         if plan.stats.cancelled {
             return Err("render cancelled: the plan's generation is superseded".to_string());
         }
@@ -2080,6 +2167,7 @@ impl Cache {
                 plan_us,
                 ..RenderStats::default()
             },
+            light_pending,
         })
     }
 
@@ -2088,6 +2176,26 @@ impl Cache {
     /// None before treating the scene as complete. Exact/probe/deck use `plan`.
     pub fn plan_with_representatives(&self, request: &PlanRequest) -> Result<PlannedView, String> {
         self.plan_with_representatives_options(request, Default::default(), || false)
+    }
+
+    /// `plan_with_representatives_options` with a deadline for a light
+    /// cache's fills (plan_cancellable_within); the representatives are not
+    /// added to a pending plan (the frame is drawn again).
+    pub fn plan_with_representatives_within(
+        &self,
+        request: &PlanRequest,
+        options: floe_vfs::representatives::TreeOptions,
+        cancelled: impl Fn() -> bool,
+        deadline: Option<Instant>,
+    ) -> Result<PlannedView, String> {
+        if deadline.is_none() {
+            return self.plan_with_representatives_options(request, options, cancelled);
+        }
+        let planned = self.plan_deciding(request, None, None, deadline)?;
+        if planned.light_pending {
+            return Ok(planned);
+        }
+        self.plan_with_representatives_options(request, options, cancelled)
     }
 
     pub fn plan_with_representatives_options(
@@ -2219,6 +2327,7 @@ impl Cache {
             },
             summary: PlanSummary::default(),
             stats: RenderStats::default(),
+            light_pending: false,
         }
     }
 
@@ -2229,6 +2338,19 @@ impl Cache {
         request: &PlanRequest,
         hierarchy_blocks: bool,
         font_px: f32,
+    ) -> Result<PlannedLabels, String> {
+        self.plan_labels_within(request, hierarchy_blocks, font_px, None)
+    }
+
+    /// `plan_labels` with a deadline for a light cache's fills
+    /// (plan_cancellable_within): past it the rows are of the image so far
+    /// and `pending` says so.
+    pub fn plan_labels_within(
+        &self,
+        request: &PlanRequest,
+        hierarchy_blocks: bool,
+        font_px: f32,
+        deadline: Option<Instant>,
     ) -> Result<PlannedLabels, String> {
         let req = self.view_request(request)?;
         let metrics = label_planner_metrics(font_px)?;
@@ -2254,7 +2376,7 @@ impl Cache {
             opts.blocks = false;
         }
         let started = Instant::now();
-        let planned = self.filled(|vfs| vfs.plan_labels_with(&req, &opts))?;
+        let (planned, pending) = self.filled_within(|vfs| vfs.plan_labels_with(&req, &opts), deadline)?;
         let plan_us = elapsed_us(started);
         let layer_indices: BTreeMap<(u32, u32), u32> = self
             .layers()
@@ -2284,6 +2406,7 @@ impl Cache {
             rows,
             stats: planned.stats,
             plan_us,
+            pending,
         })
     }
 

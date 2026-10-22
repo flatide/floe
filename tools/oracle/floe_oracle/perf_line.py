@@ -379,6 +379,14 @@ def perf_status(res, depth_note=""):
         if d.get("summary_none_passes"):
             text += ", %d passes without summary" % (
                 d["summary_none_passes"])
+        if d.get("summary_building"):
+            text += (", %d passes wait for their occupancy summary "
+                     "(light sources: empty until it is built)" % (
+                         d["summary_building"]))
+    if res.get("light_rounds"):
+        text += ", light %d fill rounds%s" % (
+            res["light_rounds"],
+            " (filling)" if res.get("light_pending") else "")
     # tiles = plan total (resident pages included);
     # +new = pages actually shipped for this view
     # (cache misses, summed over its stream rounds)
@@ -565,10 +573,12 @@ def perf_status(res, depth_note=""):
     # The depth sits in the bar above; the rest is in the log line.
     brief = ["%d ms%s" % (res["ms"], brief_split)]
     if res.get("deck"):
-        brief.append("deck %d passes%s" % (
+        brief.append("deck %d passes%s%s" % (
             res["deck"]["passes"],
             ", summary %d passes (not pickable)" % res["deck"]["summary_passes"]
-            if res["deck"].get("summary_passes") else ""))
+            if res["deck"].get("summary_passes") else "",
+            ", %d wait for the summary (building)" % res["deck"]["summary_building"]
+            if res["deck"].get("summary_building") else ""))
     if stack:
         brief.append(brief_stack)
     if res.get("work_bin_items"):

@@ -261,6 +261,20 @@ sample9급 소스 4 s), 뷰어·`render`·`info`는 render-core가 그 디렉터
 `FLOE_INDEX_LIGHT=off`)이면 전체 색인이다. 이미 전체 색인이 있는 소스는 그대로 둔다.
 `floe-index light deck.jb`는 옆의 floe2에 `index deck.jb --light`로 넘긴다.
 
+**요약이 아직 없는 경량 소스(2026-10-22, app 0.12.384; DIRECT_READ_PLAN L6, 사용자 결정 §10 4 =
+배너).** 덱 pass의 소스가 경량인데 design.ovo가 없으면, 그 소스의 자동 기준 셀로 보아 요약이
+그릴 광역 뷰에서는 pass를 비워 두고 프레임 줄에 `summary_building=N`을 낸다(근접 뷰는 세그먼트
+경로로 그린다). 뷰어는 배너를 띄우고 3 s마다 다시 그리며, `floe2 render`는 그 pass를 비운
+그림을 쓰고 미완으로 끝낸다(종료 3, 누락 배치가 있는 덱 캡처와 같다; stderr `rendered
+incomplete - … summary_building=N pass(es) of light
+source(s) whose occupancy summary is not built yet …`, 보고서 JSON의 shot 행과 `jobdeck`에
+`summary_building`) — 자동 색인이 켜져 있으면(기본) 요약 없는 소스를 "no occupancy summary yet -
+indexing them first"로 먼저 채우고 찍는다(`--no-index`면 거절).
+GTK 열기는 두 단계다: `floe2 index deck.jb --no-occupancy`(재고, 모달) → 열기 → 뒤에서 `floe2
+index deck.jb`(요약; SPEC-VIEWER §7). `floe2 info deck.jb --json`의 `metadata.jobdeck`에
+`light_sources`·`summary_missing`, 준비 질의(`ready`)에 `summary_missing`. 게이트
+`LightSummaryTests`.
+
 `floe-index vfs deck.jb [--level N,..] [--jobs N] [--force] [--wait]`(2026-10-18,
 app 0.12.359)도 같은 덱 인덱싱이다(소스마다 이 규칙). floe-index가 옆의 floe2에 `index deck.jb …`로
 넘기고, 소스마다 이 floe-index로 빌드한다(SPEC-INDEXER §1). `info`·`render`·`probe`는

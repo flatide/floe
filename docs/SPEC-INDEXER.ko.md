@@ -230,7 +230,11 @@ STREAMING_INDEX_PLAN §11. 소스를 읽어 캐시를 만드는 실행은 **스�
 - `floe2 index`는 같은 세 플래그(`--stream`, `--in-memory`, `--mem`)를 그대로 넘기고,
   기본은 아무것도 넘기지 않는다(floe-index의 기본 = 스트리밍). 덱 소스·뷰어의 덱
   색인·자동 색인도 같다. design.ovo 없는 현재 캐시의 점유 추가(`occupancy` 실행)도
-  모든 모드에서 붙는다.
+  모든 모드에서 붙는다. 0.12.384(DIRECT_READ_PLAN L6)부터 그리는 명령(`render`·`probe`)의
+  자동 색인은 요약이 없는 덱 소스도 먼저 채운다(경량이면 `light --occupancy-only`;
+  "N source(s) have no occupancy summary yet - indexing them first"; `info`는 캐시를 있는
+  대로 읽는다); `--no-index`면 덱의 광역 캡처는 그 pass를 비운 채 미완(`summary_building`,
+  종료 3)으로 끝난다.
 - 현장 검증(9.8 GB 파일): `python3 tools/validate_vfs_stream.py --compare FILE.oas`
   (인메모리·기본 빌드를 만들어 파일별 비교), 또는 두 빌드를 `--in-memory`/기본으로
   만들어 `cmp`.

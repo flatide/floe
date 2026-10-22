@@ -468,6 +468,11 @@ impl FrameReport {
         summary.insert("pages_skipped".into(), int_value(wi("summary_pages")));
         put("summary", Value::Object(summary));
         put("text_plan_ms", ms(wi("text_plan_us")));
+        // a light cache's fill rounds over the open, and a frame that went
+        // out before its own were done (renderd's light attempts, L6; 0 and
+        // false on a full cache and on a line before 0.12.343)
+        put("light_rounds", int_value(wi("light_rounds")));
+        put("light_pending", Value::Bool(wi("light_pending") != 0));
         put("text_place_records", int_value(wi("text_place_records")));
         put("labels", int_value(wi("labels")));
         put("label_tile_paints", int_value(wi("label_tile_paints")));
@@ -641,6 +646,9 @@ const DECK: &[(&str, &str)] = &[
     ("summary_passes", "summary_passes"),
     ("summary_none_passes", "summary_none_passes"),
     ("summary_cells", "summary_cells"),
+    // passes of a light source without its occupancy summary yet, left
+    // empty (DIRECT_READ_PLAN §5.5; the viewer's banner)
+    ("summary_building", "summary_building"),
 ];
 
 /// A probe's own report (docs/LAYER_DECODE_PROBE_PLAN.ko.md §8), in order:
@@ -1827,6 +1835,23 @@ pub fn perf_status_with(res: &Value, depth_note: &str, density_only: bool) -> (S
                 fmt_d(d.get("summary_none_passes"))
             );
         }
+        if d.get("summary_building").truthy() {
+            text += &format!(
+                ", {} passes wait for their occupancy summary (light sources: empty until it is built)",
+                fmt_d(d.get("summary_building"))
+            );
+        }
+    }
+    if res.get("light_rounds").truthy() {
+        text += &format!(
+            ", light {} fill rounds{}",
+            fmt_d(res.get("light_rounds")),
+            if res.get("light_pending").truthy() {
+                " (filling)"
+            } else {
+                ""
+            }
+        );
     }
     let mut stack = String::new();
     let mut brief_stack = String::new();
@@ -2112,12 +2137,20 @@ pub fn perf_status_with(res: &Value, depth_note: &str, density_only: bool) -> (S
     let mut brief = vec![format!("{} ms{}", fmt_d(res.get("ms")), brief_split)];
     if deck.truthy() {
         brief.push(format!(
-            "deck {} passes{}",
+            "deck {} passes{}{}",
             fmt_d(deck.get("passes")),
             if deck.get("summary_passes").truthy() {
                 format!(
                     ", summary {} passes (not pickable)",
                     fmt_d(deck.get("summary_passes"))
+                )
+            } else {
+                String::new()
+            },
+            if deck.get("summary_building").truthy() {
+                format!(
+                    ", {} wait for the summary (building)",
+                    fmt_d(deck.get("summary_building"))
                 )
             } else {
                 String::new()

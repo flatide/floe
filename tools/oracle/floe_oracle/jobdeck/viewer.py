@@ -323,6 +323,15 @@ class DeckCache:
         bbox = [int(round(bb[0] / dbu)), int(round(bb[1] / dbu)),
                 int(round(bb[2] / dbu)), int(round(bb[3] / dbu))]
         fst = os.stat(self.src)
+        light_sources = summary_missing = 0
+        for info in self.catalog.infos.values():
+            if not (info.ok() and info.indexed):
+                continue
+            if not os.path.exists(os.path.join(info.cache_dir, "design.ovm")) \
+                    and os.path.exists(os.path.join(info.cache_dir, "design.inv")):
+                light_sources += 1
+            if not os.path.exists(os.path.join(info.cache_dir, "design.ovo")):
+                summary_missing += 1
         return {
             "dbu": dbu,
             "bbox": bbox,
@@ -347,5 +356,10 @@ class DeckCache:
                 "placements": len(self.placements),
                 "skipped": list(st["skipped"]) + list(self.ledger),
                 "colour_order": st["colors"]["order"],
+                # the drawable indexed sources opened from a light cache
+                # (DIRECT_READ_PLAN L4) and those without an occupancy
+                # summary yet (L6: their wide views wait for it)
+                "light_sources": light_sources,
+                "summary_missing": summary_missing,
             },
         }

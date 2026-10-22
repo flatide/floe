@@ -13,6 +13,7 @@ mod deck;
 mod font;
 mod layer_decode;
 mod light;
+pub use light::light_first_budget;
 pub mod occ;
 mod page_cache;
 mod page_index;

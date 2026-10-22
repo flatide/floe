@@ -106,7 +106,7 @@ fn render(
     cancelled: &Arc<AtomicUsize>,
 ) -> Result<i32> {
     // indexed first when it has none, its staleness said (read::dataset)
-    let mut dataset = crate::read::dataset(source, levels, index, waiter, cancelled)?;
+    let mut dataset = crate::read::dataset(source, levels, index, true, waiter, cancelled)?;
     // --layer-colors over FLOE_LAYER_COLORS (the open's)
     if let Some(mode) = layer_colors {
         dataset.set_layer_colors(mode);
@@ -129,13 +129,23 @@ fn render(
         |line| println!("{line}"),
     )?;
     // what the images lack: the skipped placements of the chips on, the
-    // pages over the decode budget
-    if summary.lacking > 0 || summary.over_budget > 0 {
+    // pages over the decode budget, the passes of light sources whose
+    // occupancy summary is not built yet (DIRECT_READ_PLAN §5.5)
+    if summary.lacking > 0 || summary.over_budget > 0 || summary.summary_building > 0 {
         eprintln!(
-            "{}: rendered incomplete - {} jobdeck placement(s) missing, {} page(s) over the decode budget (see above)  [exit 3]",
+            "{}: rendered incomplete - {} jobdeck placement(s) missing, {} page(s) over the decode budget{} (see above)  [exit 3]",
             floe_app_core::program(),
             summary.lacking,
-            summary.over_budget
+            summary.over_budget,
+            if summary.summary_building > 0 {
+                format!(
+                    ", summary_building={} pass(es) of light source(s) whose occupancy summary is not built yet (`{} index DECK.jb` adds it; the auto-index does so unless --no-index)",
+                    summary.summary_building,
+                    floe_app_core::program()
+                )
+            } else {
+                String::new()
+            }
         );
     }
     Ok(if summary.complete { 0 } else { 3 })
