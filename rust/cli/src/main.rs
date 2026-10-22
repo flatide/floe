@@ -17,6 +17,7 @@ mod guard;
 mod drcice;
 mod drcpack;
 mod light;
+mod markpass;
 mod prepass;
 mod stream;
 mod svrf;

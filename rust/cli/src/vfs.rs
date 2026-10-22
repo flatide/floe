@@ -1403,7 +1403,7 @@ fn vfs_stream(
     t0: std::time::Instant,
 ) -> Option<String> {
     let StreamOpen {
-        mut store,
+        store,
         budget,
         size,
         mtime,
@@ -1591,7 +1591,7 @@ fn vfs_stream(
     }
     if a.occupancy {
         stream_occupancy(
-            &mut store,
+            &store,
             &a.outdir,
             size,
             mtime,
@@ -1668,7 +1668,7 @@ fn vfs_stream_occupancy_only(a: &StreamArgs, t0: std::time::Instant) -> Option<S
     let cache_top = ovm.cell(ovm.top).name.to_string();
     drop(ovm);
     let StreamOpen {
-        mut store,
+        store,
         budget,
         size,
         mtime,
@@ -1810,7 +1810,7 @@ fn vfs_stream_occupancy_only(a: &StreamArgs, t0: std::time::Instant) -> Option<S
         rss()
     );
     stream_occupancy(
-        &mut store,
+        &store,
         &a.outdir,
         size,
         mtime,
@@ -1842,7 +1842,7 @@ fn vfs_stream_occupancy_only(a: &StreamArgs, t0: std::time::Instant) -> Option<S
 /// without design.ovo). `additive`: the occupancy-only run, whose cache
 /// is whole throughout (the whole build has no commit marker yet).
 pub(crate) fn stream_occupancy(
-    store: &mut crate::stream::StreamStore,
+    store: &crate::stream::StreamStore,
     outdir: &str,
     size: u64,
     mtime: u64,
@@ -1897,8 +1897,8 @@ pub(crate) fn stream_occupancy(
     let has_any = built.has_any();
     let instances = occ::Instances::new(top, &places, built.small(), &has_any, &topo, built.cell_dbu());
     // the pass holds a quarter of the streaming budget in planes and a
-    // quarter in resident cells (a marker needs one cell at a time; the
-    // readers run that far ahead), never less than the file streams under
+    // quarter in the cells its markers parse and mark (markpass.rs), never
+    // less than the file streams under
     let plane_budget = (budget / 4).max(1);
     let pass_budget = (budget / 4).max(store.min_budget());
     if built.needs_marking() {
@@ -1913,111 +1913,72 @@ pub(crate) fn stream_occupancy(
         );
     }
     let mut groups = 0usize;
+    let mut totals = crate::markpass::MarkReport::default();
     while let Some(group) = built.begin_group(plane_budget) {
         groups += 1;
-        store.reset(pass_budget);
-        let st: &crate::stream::StreamStore = &*store;
-        let (group_ref, occ_ref, inst) = (&group, &built, &instances);
         let tg = std::time::Instant::now();
-        // the heartbeat stops when the markers are done or one of them
-        // panicked (a reader failure surfaces as a panic in `cell()`),
-        // so the scope always joins
-        struct DoneOnDrop<'a>(&'a std::sync::atomic::AtomicBool);
-        impl Drop for DoneOnDrop<'_> {
-            fn drop(&mut self) {
-                self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        // the markers parse the cells themselves (markpass.rs): a cell
+        // enters while the cells in flight fit the pass budget
+        let last = std::sync::atomic::AtomicU64::new(0);
+        let heartbeat = |cells: usize| {
+            use std::sync::atomic::Ordering::Relaxed;
+            crate::guard::check("occupancy pass", cache_state);
+            if let Some(log) = opts.progress {
+                let e = tg.elapsed().as_secs();
+                if e >= last.load(Relaxed) + occ::PROGRESS_EVERY_S {
+                    last.store(e, Relaxed);
+                    log(&format!(
+                        "streaming: group {} cells {}/{} ({}s, rss {})",
+                        groups,
+                        cells,
+                        n,
+                        e,
+                        rss()
+                    ));
+                }
             }
-        }
-        let marked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            st.with_readers(jobs, || {
-            let next = std::sync::atomic::AtomicUsize::new(0);
-            let done = std::sync::atomic::AtomicBool::new(false);
-            std::thread::scope(|s| {
-                let _done = DoneOnDrop(&done);
-                let (next_ref, done_ref) = (&next, &done);
-                if let Some(log) = opts.progress {
-                    s.spawn(move || {
-                        use std::sync::atomic::Ordering::Relaxed;
-                        let t0 = std::time::Instant::now();
-                        let mut last = 0u64;
-                        loop {
-                            // a short poll: a pass over a small file ends
-                            // in milliseconds, and there is one per layer
-                            // group
-                            std::thread::sleep(std::time::Duration::from_millis(20));
-                            if done_ref.load(Relaxed) {
-                                return;
-                            }
-                            crate::guard::check("occupancy pass", cache_state);
-                            let e = t0.elapsed().as_secs();
-                            if e >= last + occ::PROGRESS_EVERY_S {
-                                last = e;
-                                log(&format!(
-                                    "streaming: group {} cells {}/{} ({}s, rss {})",
-                                    groups,
-                                    next_ref.load(Relaxed).min(n),
-                                    n,
-                                    e,
-                                    rss()
-                                ));
-                            }
-                        }
-                    });
-                }
-                let handles: Vec<_> = (0..jobs.max(1))
-                    .map(|_| {
-                        s.spawn(move || {
-                            use std::sync::atomic::Ordering::Relaxed;
-                            let mut sc = occ_ref.scratch(group_ref);
-                            loop {
-                                let ci = next_ref.fetch_add(1, Relaxed);
-                                if ci >= n {
-                                    break;
-                                }
-                                {
-                                    let cell = st.cell(ci);
-                                    occ_ref.mark_cell(group_ref, &cell, ci, inst, &mut sc);
-                                }
-                                st.release(ci..ci + 1);
-                            }
-                            sc
-                        })
-                    })
-                    .collect();
-                handles
-                    .into_iter()
-                    .map(|h| h.join().expect("occupancy marker"))
-                    .collect::<Vec<occ::StreamScratch>>()
-            })
-            })
-        }));
-        let scratches = match marked {
+        };
+        let (scratches, rep) = match crate::markpass::mark_group(
+            store,
+            &built,
+            &group,
+            &instances,
+            jobs,
+            pass_budget,
+            &heartbeat,
+        ) {
             Ok(v) => v,
-            Err(e) => {
-                // the source failed under a reader during this pass: one
-                // line and exit 1 (the commit marker is not written, so the
-                // cache counts as absent); anything else keeps its panic
-                if let Some(why) = st.failed() {
-                    eprintln!(
-                        "[vfs] stream: {} - the occupancy pass stopped; {}",
-                        why,
-                        if additive {
-                            "the cache is as it was (design.ovo was not written)"
-                        } else {
-                            "the cache is incomplete (design.ovm, the commit marker, is not written)"
-                        }
-                    );
-                    std::process::exit(1);
-                }
-                std::panic::resume_unwind(e);
+            Err(why) => {
+                // the source failed under a marker's parse during this
+                // pass: one line and exit 1 (the commit marker is not
+                // written, so the cache counts as absent)
+                eprintln!(
+                    "[vfs] stream: {} - the occupancy pass stopped; {}",
+                    why,
+                    if additive {
+                        "the cache is as it was (design.ovo was not written)"
+                    } else {
+                        "the cache is incomplete (design.ovm, the commit marker, is not written)"
+                    }
+                );
+                std::process::exit(1);
             }
         };
         built.end_group(group, scratches);
+        totals.add(&rep);
         if let Some(log) = opts.progress {
             log(&format!(
-                "streaming: group {} marked in {:.1}s (rss {})",
+                "streaming: group {} marked in {:.1}s: {} cells parsed by the markers ({}), {} from their placements, {} small, {} not visited; parse {:.1}s + mark {:.1}s over {} threads (rss {})",
                 groups,
                 tg.elapsed().as_secs_f64(),
+                rep.parsed,
+                fmt_size(rep.bytes),
+                rep.places_only,
+                rep.small,
+                rep.skipped,
+                rep.parse_s,
+                rep.mark_s,
+                jobs.max(1),
                 rss()
             ));
         }
@@ -2027,9 +1988,11 @@ pub(crate) fn stream_occupancy(
     let built = built.finish();
     let built_s = t.elapsed().as_secs_f64();
     eprintln!(
-        "[vfs] occupancy streaming: {} pass(es) over the file ({:.1}s)",
+        "[vfs] occupancy streaming: {} pass(es) over the file ({:.1}s; the markers parsed {} cell(s), {})",
         groups,
-        built_s
+        built_s,
+        totals.parsed,
+        fmt_size(totals.bytes)
     );
     publish_ovo(outdir, &built, opts, t, built_s, None, kill_at);
 }

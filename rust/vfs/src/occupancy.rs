@@ -720,6 +720,21 @@ fn layer_max_depth(doc: &Doc, shapes: &[CellShapes<'_>], has: &[bool]) -> u32 {
     reach(doc, doc.top, shapes, has, &mut memo).unwrap_or(0)
 }
 
+/// a marker's reusable buffers for the polygon scan conversion: the
+/// world and the shifted vertices of a record, the scan's edge list,
+/// its active list and the row's crossings. Before 0.12.387 every
+/// polygon member allocated them anew - five allocations a polygon,
+/// on a file of 1.7 G polygons (the field's deck source) most of the
+/// marking's small work.
+#[derive(Default)]
+struct PolyScratch {
+    world: Vec<(i128, i128)>,
+    shifted: Vec<(i128, i128)>,
+    edges: Vec<((i128, i128), (i128, i128))>,
+    active: Vec<usize>,
+    xs: Vec<(i128, i128)>,
+}
+
 struct Marker<'a> {
     doc: &'a Doc,
     shapes: &'a [CellShapes<'a>],
@@ -744,6 +759,8 @@ struct Marker<'a> {
     shared: Option<&'a std::sync::atomic::AtomicU64>,
     unflushed: u64,
     prune: Option<Prune<'a>>,
+    /// the polygon scan conversion's buffers
+    scratch: PolyScratch,
 }
 
 impl<'a> Marker<'a> {
@@ -964,16 +981,6 @@ impl<'a> Marker<'a> {
         true
     }
 
-    /// every member's world offset (parent frame offsets through xf)
-    fn for_each_member<F: FnMut(&mut Self, i128, i128) -> bool>(
-        &mut self,
-        rep: &Rep,
-        xf: &Xf,
-        f: F,
-    ) -> bool {
-        self.for_each_member_range(rep, xf, 0, u64::MAX, f)
-    }
-
     /// members m0..m1 of `rep` in the enumeration order (Grid: i
     /// fastest, k = j * na + i), charged as one block before the
     /// first - so the ranges of one record charge what the whole
@@ -1064,6 +1071,25 @@ impl<'a> Marker<'a> {
 
     /// conservative cell-grid scan conversion of one world polygon
     fn mark_world_poly(&mut self, pts: &[(i128, i128)]) -> bool {
+        let mut edges = std::mem::take(&mut self.scratch.edges);
+        let mut active = std::mem::take(&mut self.scratch.active);
+        let mut xs = std::mem::take(&mut self.scratch.xs);
+        let ok = self.mark_world_poly_with(pts, &mut edges, &mut active, &mut xs);
+        self.scratch.edges = edges;
+        self.scratch.active = active;
+        self.scratch.xs = xs;
+        ok
+    }
+
+    /// mark_world_poly on the caller's buffers (emptied here, kept for
+    /// the next polygon)
+    fn mark_world_poly_with(
+        &mut self,
+        pts: &[(i128, i128)],
+        edges: &mut Vec<((i128, i128), (i128, i128))>,
+        active: &mut Vec<usize>,
+        xs: &mut Vec<(i128, i128)>,
+    ) -> bool {
         let n = pts.len();
         if n < 3 {
             return true;
@@ -1156,7 +1182,7 @@ impl<'a> Marker<'a> {
         }
         // (2) interior cells: even-odd parity at the row centre. Cells
         // no edge crosses are wholly in or out, so the centre decides.
-        let mut edges: Vec<((i128, i128), (i128, i128))> = Vec::with_capacity(n);
+        edges.clear();
         for k in 0..n {
             let a = pts[k];
             let b = pts[(k + 1) % n];
@@ -1169,8 +1195,8 @@ impl<'a> Marker<'a> {
         let j0 = floor_div(ymin - oy, c).max(0);
         let j1 = (ceil_div(ymax - oy, c) - 1).min(h - 1);
         let mut next = 0usize;
-        let mut active: Vec<usize> = Vec::new();
-        let mut xs: Vec<(i128, i128)> = Vec::new();
+        active.clear();
+        xs.clear();
         let mut j = j0;
         while j <= j1 {
             let yc2 = 2 * oy + 2 * j * c + c;
@@ -1183,7 +1209,7 @@ impl<'a> Marker<'a> {
                 return false;
             }
             xs.clear();
-            for &e in &active {
+            for &e in active.iter() {
                 let ((x0, y0), (x1, y1)) = edges[e];
                 let (dx, dy) = (x1 - x0, y1 - y0);
                 // crossing x = x0 + dx (yc - y0) / dy as num/den, den > 0
@@ -1221,15 +1247,16 @@ impl<'a> Marker<'a> {
         m0: u64,
         m1: u64,
     ) -> bool {
-        let world: Vec<(i128, i128)> = local
-            .iter()
-            .map(|&(x, y)| {
-                let (wx, wy) = xf.apply(x, y);
-                (wx as i128, wy as i128)
-            })
-            .collect();
-        let mut shifted = world.clone();
-        self.for_each_member_range(rep, xf, m0, m1, |m, dx, dy| {
+        let mut world = std::mem::take(&mut self.scratch.world);
+        let mut shifted = std::mem::take(&mut self.scratch.shifted);
+        world.clear();
+        world.extend(local.iter().map(|&(x, y)| {
+            let (wx, wy) = xf.apply(x, y);
+            (wx as i128, wy as i128)
+        }));
+        shifted.clear();
+        shifted.extend_from_slice(&world);
+        let ok = self.for_each_member_range(rep, xf, m0, m1, |m, dx, dy| {
             if dx == 0 && dy == 0 {
                 return m.mark_world_poly(&world);
             }
@@ -1237,7 +1264,10 @@ impl<'a> Marker<'a> {
                 *s = (p.0 + dx, p.1 + dy);
             }
             m.mark_world_poly(&shifted)
-        })
+        });
+        self.scratch.world = world;
+        self.scratch.shifted = shifted;
+        ok
     }
 
     fn mark_poly_rec(&mut self, p: &PolyRec, xf: &Xf) -> bool {
@@ -2059,6 +2089,7 @@ fn build_layer(
                             shared: if threads > 1 { Some(shared) } else { None },
                             unflushed: 0,
                             prune,
+                            scratch: PolyScratch::default(),
                         };
                         loop {
                             let k = next.fetch_add(1, Relaxed);
@@ -2386,6 +2417,8 @@ pub struct StreamScratch {
     over: Vec<bool>,
     unflushed: Vec<u64>,
     paths_skipped: Vec<u64>,
+    /// per group layer: the marker's polygon buffers, kept across cells
+    poly: Vec<PolyScratch>,
     dummy: Doc,
 }
 
@@ -2543,8 +2576,40 @@ impl StreamOcc {
         (self.next_layer..self.layer_order.len()).any(|li| self.masks[li][self.top_ci] != 0)
     }
 
+    /// whether the group's marking visits cell `ci` at all: a layer of
+    /// the group, still within its work budget, lies below the cell (in
+    /// its own records or a descendant's) - `mark_cell` marks nothing
+    /// otherwise, so the cell need not be read
+    pub fn group_visits(&self, group: &StreamGroup, ci: usize) -> bool {
+        group
+            .layers
+            .iter()
+            .any(|l| self.masks[l.li][ci] != 0 && !l.over.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// whether cell `ci`'s own records hold a layer of the group (bit 0
+    /// of the relative-depth mask): its shapes are needed; otherwise its
+    /// placements alone (the members' charges, small children's
+    /// footprints), and nothing of a small cell
+    pub fn group_own(&self, group: &StreamGroup, ci: usize) -> bool {
+        group
+            .layers
+            .iter()
+            .any(|l| self.masks[l.li][ci] & 1 != 0 && !l.over.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
     /// the next layers to mark, in layer order, whose level-0 planes fit
-    /// `plane_budget` bytes together (at least one); the layers decided
+    /// `plane_budget` bytes together (at least one) and whose planes fit
+    /// what the file-size budget still takes (0.12.387: the walk stops
+    /// marking in layer order where that budget is full, and so does the
+    /// pass - a group used to mark every layer its plane budget held and
+    /// `end_group` dropped the ones past the size budget: p10's 449
+    /// layers marked for the 23 kept). A layer's planes are counted from
+    /// the top's relative-depth mask - one per depth at which the layer
+    /// has records below the top, the depths past DEPTH_CAP sharing one -
+    /// which is the count `end_group` keeps unless a depth's records mark
+    /// no cell at all (then a group ends a layer early and the next pass
+    /// takes the rest: the same bytes, one parse more). The layers decided
     /// without marking (absent below the top: empty; past the file-size
     /// budget: none:size) are recorded as they are passed
     pub fn begin_group(&mut self, plane_budget: u64) -> Option<StreamGroup> {
@@ -2552,6 +2617,8 @@ impl StreamOcc {
         let mut layers: Vec<StreamLayer> = Vec::new();
         let mut pos: HashMap<(u32, u32), usize> = HashMap::new();
         let mut bytes = 0u64;
+        let room = self.fit.saturating_sub(self.slot);
+        let mut planes_bound = 0usize;
         while self.next_layer < nl {
             let li = self.next_layer;
             let key = self.layer_order[li];
@@ -2577,14 +2644,20 @@ impl StreamOcc {
                 self.next_layer += 1;
                 continue;
             }
-            let max_depth = 31 - self.masks[li][self.top_ci].leading_zeros();
+            let top_mask = self.masks[li][self.top_ci];
+            let max_depth = 31 - top_mask.leading_zeros();
             let n_planes = (max_depth.min(DEPTH_CAP as u32) + 1) as u64;
+            let planes_kept = (top_mask & ((1u32 << DEPTH_CAP) - 1)).count_ones() as usize
+                + usize::from(top_mask >> DEPTH_CAP != 0);
             let stride = (self.w as u64 + 63) / 64;
             let plane_bytes = n_planes * stride * 8 * self.h as u64;
-            if !layers.is_empty() && bytes + plane_bytes > plane_budget {
+            if !layers.is_empty()
+                && (bytes + plane_bytes > plane_budget || planes_bound + planes_kept > room)
+            {
                 break;
             }
             bytes += plane_bytes;
+            planes_bound += planes_kept;
             pos.insert(key, layers.len());
             layers.push(StreamLayer {
                 li,
@@ -2610,6 +2683,7 @@ impl StreamOcc {
             over: vec![false; k],
             unflushed: vec![0; k],
             paths_skipped: vec![0; k],
+            poly: (0..k).map(|_| PolyScratch::default()).collect(),
             dummy: Doc {
                 unit: self.unit,
                 cells: Vec::new(),
@@ -2622,13 +2696,20 @@ impl StreamOcc {
         }
     }
 
-    /// mark one resident cell at every one of its instances for the
-    /// group's layers (the instances enumerated once, every layer's
-    /// marker fed per instance; bits and charges are order-free)
+    /// mark one cell at every one of its instances for the group's layers
+    /// (the instances enumerated once, every layer's marker fed per
+    /// instance; bits and charges are order-free). `shapes` holds the
+    /// cell's own records - parsed for this pass by the marking thread
+    /// (cli markpass.rs, 0.12.387); empty for a small cell, whose subtree
+    /// is one bbox, and for a cell without a record on the group's layers
+    /// (`group_own`) - and `places` its placements as normalize_cells
+    /// left them (the kept ones: the members' charges and the footprints
+    /// of small children's grids)
     pub fn mark_cell(
         &self,
         group: &StreamGroup,
-        cell: &floe_oasis::doc::Cell,
+        shapes: &floe_oasis::doc::Cell,
+        places: &[PlaceRec],
         ci: usize,
         inst: &Instances<'_>,
         sc: &mut StreamScratch,
@@ -2648,20 +2729,33 @@ impl StreamOcc {
                     own.len() - 1
                 })
             };
-            for r in &cell.rects {
-                if let Some(&g) = group.pos.get(&(r.layer, r.dt)) {
+            // (records come in runs of one layer: the last lookup answers
+            // most of them)
+            let mut last: Option<((u32, u32), Option<usize>)> = None;
+            let slot_for = |key: (u32, u32), last: &mut Option<((u32, u32), Option<usize>)>| -> Option<usize> {
+                if let Some((k, s)) = *last {
+                    if k == key {
+                        return s;
+                    }
+                }
+                let s = group.pos.get(&key).copied();
+                *last = Some((key, s));
+                s
+            };
+            for r in &shapes.rects {
+                if let Some(g) = slot_for((r.layer, r.dt), &mut last) {
                     let k = slot_of(g, &mut own);
                     own[k].1.push(r);
                 }
             }
-            for p in &cell.polys {
-                if let Some(&g) = group.pos.get(&(p.layer, p.dt)) {
+            for p in &shapes.polys {
+                if let Some(g) = slot_for((p.layer, p.dt), &mut last) {
                     let k = slot_of(g, &mut own);
                     own[k].2.push(p);
                 }
             }
-            for p in &cell.paths {
-                if let Some(&g) = group.pos.get(&(p.layer, p.dt)) {
+            for p in &shapes.paths {
+                if let Some(g) = slot_for((p.layer, p.dt), &mut last) {
                     let k = slot_of(g, &mut own);
                     own[k].3.push(p);
                 }
@@ -2710,6 +2804,7 @@ impl StreamOcc {
                     shared: Some(&layer.work),
                     unflushed: sc.unflushed[g],
                     prune,
+                    scratch: std::mem::take(&mut sc.poly[g]),
                 },
                 mask,
                 own: own_pos.get(&g).copied(),
@@ -2727,7 +2822,7 @@ impl StreamOcc {
                 let ok = if small {
                     lm.m.mark_subtree(ci, xf, depth)
                 } else {
-                    self.mark_instance(&mut lm.m, cell, lm.mask, lm.own.map(|k| &own[k]), xf, depth)
+                    self.mark_instance(&mut lm.m, places, lm.mask, lm.own.map(|k| &own[k]), xf, depth)
                 };
                 if !ok {
                     live -= 1;
@@ -2743,6 +2838,7 @@ impl StreamOcc {
             if lm.m.over {
                 group.layers[lm.g].over.store(true, std::sync::atomic::Ordering::Relaxed);
             }
+            sc.poly[lm.g] = lm.m.scratch;
         }
     }
 
@@ -2753,7 +2849,7 @@ impl StreamOcc {
     fn mark_instance(
         &self,
         m: &mut Marker<'_>,
-        cell: &floe_oasis::doc::Cell,
+        places: &[PlaceRec],
         mask: &[u32],
         own: Option<&(usize, Vec<&RectRec>, Vec<&PolyRec>, Vec<&PathRec>)>,
         xf: &Xf,
@@ -2777,7 +2873,7 @@ impl StreamOcc {
                 }
             }
         }
-        for pl in &cell.places {
+        for pl in places {
             if mask[pl.cell] == 0 {
                 continue;
             }
@@ -3006,6 +3102,11 @@ impl<'p> Instances<'p> {
     /// the walk's visits of `ci`
     pub fn count(&self, ci: usize) -> u64 {
         self.count[ci]
+    }
+
+    /// the kept placements of `ci` (what the walk descends through)
+    pub fn places(&self, ci: usize) -> &[PlaceRec] {
+        &self.places[ci]
     }
 
     /// the walk's visits over all cells
@@ -3744,6 +3845,7 @@ mod tests {
             shared: None,
             unflushed: 0,
             prune: None,
+            scratch: PolyScratch::default(),
         };
         let world: Vec<(i128, i128)> = pts.iter().map(|&(x, y)| (x as i128, y as i128)).collect();
         assert!(m.mark_world_poly(&world));

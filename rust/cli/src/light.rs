@@ -226,7 +226,7 @@ pub fn light_cmd(args: &[String]) {
         auto: false,
     };
     let crate::vfs::StreamOpen {
-        mut store,
+        store,
         budget,
         size,
         mtime,
@@ -357,7 +357,7 @@ pub fn light_cmd(args: &[String]) {
             );
             drop(li);
             store.set_places(places);
-            crate::vfs::stream_occupancy(&mut store, &outdir, size, mtime, &occ_opts, jobs, budget, true, None);
+            crate::vfs::stream_occupancy(&store, &outdir, size, mtime, &occ_opts, jobs, budget, true, None);
         }
         occupancy_s = t_occ.elapsed().as_secs_f64();
     }

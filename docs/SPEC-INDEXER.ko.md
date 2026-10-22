@@ -129,7 +129,8 @@ design.seg(짝)를, 그리고 전체 색인의 키에 `"cache": "light"`를 더�
 마지막)을 DIR(기본 `.<src.oas>.ice`)에 둔다. `--occupancy`는 스트리밍 요약 패스로
 design.ovo를 더하는데, 인스턴스의 배치는 파일 전체를 다시 파싱하지 않고 방금 쓴 세그먼트
 디렉터리의 배치 플래그 세그먼트에서 읽는다(바이트는 `vfs --occupancy`의 design.ovo와
-같다 — 게이트 `light_cache`); `--occupancy-only`는 경량 캐시에 design.ovo를 더한다
+같다 — 게이트 `light_cache`; 0.12.387부터 마커 스레드가 셀을 직접 파싱하고 묶음이 안 쓰는
+셀은 읽지 않는다 — STREAMING_INDEX_PLAN §4.6, DIRECT_READ_PLAN §8.10); `--occupancy-only`는 경량 캐시에 design.ovo를 더한다
 (identity 확인; 전체 색인이나 경량 캐시 없는 디렉터리는 종료 1). design.ovm이 있는
 디렉터리는 `--force`에만 손댄다(전체 색인의 파일을 지우고 경량으로 교체). 잠금은 `vfs`와
 같다(§4.5). 덱은 옆의 floe2에 `index DECK --light`로 넘긴다. 두 파일은 스트리밍 빌드가
@@ -211,7 +212,8 @@ STREAMING_INDEX_PLAN §11. 소스를 읽어 캐시를 만드는 실행은 **스�
 - 기본(플래그 없음): 스트리밍. 전체 파싱이 필요한 실행은 인메모리로 간다. 재고가
   거절한 파일(참조 번호 중복 등)은 "the in-memory build takes over" 한 줄과 함께
   인메모리로 넘어간다(출력을 건드리기 전). `--occupancy-only`는 스트리밍한다(재고 →
-  배치 수집 패스 → 레이어 묶음별 마킹 패스; 배치가 상한 5,000만을 넘으면 기본
+  배치 수집 패스 → 레이어 묶음별 마킹 패스(0.12.387부터 마커가 셀을 직접 파싱하고 리더
+  풀·상주 창이 없다; STREAMING_INDEX_PLAN §4.6); 배치가 상한 5,000만을 넘으면 기본
   모드는 인메모리로, `--stream`은 한 줄 알리고 ovo 없이 종료 0).
 - `--mem GiB`: 상주 셀의 예산. 기본 min(MemAvailable/2, 32 GiB)(MemAvailable이
   없으면 MemTotal/2). `--mem` 없이 가장 큰 셀(또는 다중 정의 스팬)이 기본 예산을

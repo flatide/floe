@@ -1184,12 +1184,26 @@ impl LightIndex {
     /// Every cell's placements (`placements_of` over all cells; a cell
     /// without any gets an empty list): the occupancy pass's instances
     /// (`floe-index light --occupancy`), read from the placement-flagged
-    /// segments alone - not the whole file.
+    /// segments alone - not the whole file - and normalized as the full
+    /// build's cells are (`normalize_cells`: a point-list repetition of 16
+    /// members or more split into grids and a leftover; a cell's result
+    /// depends on its own point sets alone), so the pass sees the
+    /// placements the streaming build keeps and its design.ovo is the
+    /// same bytes - the marks of a small child under a prunable grid are
+    /// one footprint fill, under the raw point list one bbox a member
+    /// (the same bits, other charges; 0.12.387, found on p10).
     pub fn all_placements(&self, jobs: usize) -> Result<Vec<Vec<PlaceRec>>, String> {
         let n = self.inv.cells.len();
         let cells: Vec<u32> = (0..n as u32).collect();
         let (mut by_cell, _) = self.placements_of(&cells, jobs)?;
-        Ok((0..n as u32).map(|ci| by_cell.remove(&ci).unwrap_or_default()).collect())
+        let mut shells: Vec<floe_oasis::doc::Cell> = (0..n as u32)
+            .map(|ci| floe_oasis::doc::Cell {
+                places: by_cell.remove(&ci).unwrap_or_default(),
+                ..Default::default()
+            })
+            .collect();
+        floe_oasis::doc::normalize_cells(&mut shells, jobs.max(1));
+        Ok(shells.into_iter().map(|c| c.places).collect())
     }
 
     /// Whether the index holds cell `ci`'s placements and texts (always for

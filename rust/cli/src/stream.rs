@@ -415,33 +415,62 @@ impl StreamStore {
         self.min_budget
     }
 
-    /// another pass over the file under `budget` (at least `min_budget`):
-    /// every cell pending again, nothing resident (no readers may be
-    /// running)
-    pub fn reset(&mut self, budget: u64) {
-        self.budget = budget.max(self.min_budget);
-        let mut slots: Vec<Slot> = Vec::with_capacity(self.inv.cells.len());
-        for c in &self.inv.cells {
-            if c.def_ranges.is_empty() {
-                slots.push(Self::empty_slot(&c.name));
-            } else {
-                slots.push(Slot::Pending {
-                    pieces: Vec::new(),
-                    remaining: c.def_ranges.len() as u32,
-                });
+    /// the inventory's resident estimate of cell `ci` (what a reader
+    /// charges for it; the marking pass's admission)
+    pub fn cell_bytes(&self, ci: usize) -> u64 {
+        self.inv.cells[ci].doc_bytes
+    }
+
+    /// One cell parsed on the caller's thread (the marking pass, cli
+    /// markpass.rs, 0.12.387): the ranges that define it, in file order,
+    /// read by pread into `buf` and parsed as the readers parse them
+    /// (`parse_cell_bytes`), its pieces joined and normalized as `reader`
+    /// joins and normalizes them - the records `cell()` hands out, without
+    /// the reader pool, the slots or the budget (the caller bounds what it
+    /// holds). The other cells a range defines (one inside a CBLOCK, a cell
+    /// re-opened in another's range) are parsed again at their turn.
+    /// Returns the cell and the bytes read.
+    pub fn parse_cell(&self, ci: usize, buf: &mut Vec<u8>) -> Result<(Cell, u64), String> {
+        let c = &self.inv.cells[ci];
+        let mut cell = Cell {
+            name: c.name.clone(),
+            ..Default::default()
+        };
+        let tables = CellTables::new(&self.inv.cellnames, &self.inv.textstrings, &self.cell_index);
+        let mut read = 0u64;
+        for &start in &c.def_ranges {
+            let ri = match self.ranges.binary_search_by_key(&start, |r| r.start) {
+                Ok(i) => i,
+                Err(_) if start == self.inv.head.start => 0,
+                Err(_) => {
+                    return Err(format!(
+                        "inventory: cell {} defined at offset {} outside every range",
+                        c.name, start
+                    ))
+                }
+            };
+            let r = &self.ranges[ri];
+            let len = (r.end - r.start) as usize;
+            buf.clear();
+            buf.resize(len, 0);
+            self.file
+                .read_exact_at(buf, r.start)
+                .map_err(|e| format!("read {}..{}: {}", r.start, r.end, e))?;
+            read += len as u64;
+            let pieces = parse_cell_bytes(buf, r.start, r.cellname_base, r.textstring_base, &tables)
+                .map_err(|e| format!("range {}..{}: {}", r.start, r.end, e))?;
+            for p in pieces {
+                if p.index == ci {
+                    cell.rects.extend(p.cell.rects);
+                    cell.polys.extend(p.cell.polys);
+                    cell.paths.extend(p.cell.paths);
+                    cell.places.extend(p.cell.places);
+                    cell.texts.extend(p.cell.texts);
+                }
             }
         }
-        // in place: the condition variable is bound to this mutex
-        *self.lock() = State {
-            slots,
-            keep: None,
-            resident: 0,
-            next_range: 0,
-            ranges_done: 0,
-            budget_blocked: false,
-            failed: None,
-            stop: false,
-        };
+        normalize_cells(std::slice::from_mut(&mut cell), 1);
+        Ok((cell, read))
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -759,7 +788,9 @@ mod tests {
     /// design.ovo (S5): the streaming occupancy against the in-memory
     /// one, byte for byte - prune on and off, a coarse and a fine cell,
     /// the planes in one group and in groups small enough to need several
-    /// passes over the file
+    /// passes over the file, the markers parsing the cells themselves
+    /// (markpass, 0.12.387) under a wide budget and under one of the
+    /// largest cell's bytes (cells admitted one or two at a time)
     #[test]
     fn streaming_occupancy_matches_in_memory() {
         use floe_oasis::doc::{PathRec, PolyRec, RectRec, Rep, TextRec};
@@ -823,7 +854,7 @@ mod tests {
             // (prune, base cell, plane budget, flat-instance budget): one
             // pass or one per layer; instances materialized or enumerated
             // through the parents
-            for (prune, base_um, plane_budget, flat_budget) in [(true, 1.0, u64::MAX, 0), (false, 1.0, 1, u64::MAX), (true, 0.25, 1, 0), (false, 0.25, u64::MAX, u64::MAX)] {
+            for (prune, base_um, plane_budget, flat_budget, tight) in [(true, 1.0, u64::MAX, 0, false), (false, 1.0, 1, u64::MAX, true), (true, 0.25, 1, 0, false), (false, 0.25, u64::MAX, u64::MAX, true)] {
                 let opts = occ::Opts { base_um, jobs: 2, prune, progress: None, ..Default::default() };
                 let reference_occ = occ::build(&doc, 11, 22, &opts).expect("in-memory occupancy");
                 let ok_layers = reference_occ.layers.iter().filter(|l| l.status == occ::STATUS_OK).count();
@@ -835,7 +866,7 @@ mod tests {
                 // the occupancy passes re-read the file per layer group
                 let inv = floe_oasis::inventory(&data, 2).expect("inventory");
                 let pre = PrePass::from_inventory(&inv);
-                let (mut store, _) = StreamStore::new(inv, src.to_str().unwrap(), u64::MAX / 4).expect("store");
+                let (store, _) = StreamStore::new(inv, src.to_str().unwrap(), u64::MAX / 4).expect("store");
                 store.keep_places(1 << 20);
                 let out = dir.join(format!("out-{}-{}", prune, base_um));
                 std::fs::create_dir_all(&out).unwrap();
@@ -859,29 +890,19 @@ mod tests {
                     assert_eq!(instances.flat_cells(), 0, "{}: nothing materialized under a zero budget", tag);
                 }
                 let mut passes = 0;
+                let mut parsed = 0usize;
                 while let Some(group) = built.begin_group(plane_budget) {
                     passes += 1;
-                    store.reset(u64::MAX / 4);
-                    let st: &StreamStore = &store;
-                    let (g, b, inst) = (&group, &built, &instances);
-                    let scratches: Vec<occ::StreamScratch> = st.with_readers(2, || {
-                        let next = std::sync::atomic::AtomicUsize::new(0);
-                        std::thread::scope(|s| {
-                            let next = &next;
-                            let hs: Vec<_> = (0..2).map(|_| s.spawn(move || {
-                                let mut sc = b.scratch(g);
-                                loop {
-                                    let ci = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    if ci >= n { break; }
-                                    { let cell = st.cell(ci); b.mark_cell(g, &cell, ci, inst, &mut sc); }
-                                    st.release(ci..ci + 1);
-                                }
-                                sc
-                            })).collect();
-                            hs.into_iter().map(|h| h.join().unwrap()).collect()
-                        })
-                    });
+                    let pass_budget = if tight { store.min_budget() } else { u64::MAX / 4 };
+                    let (scratches, rep) = crate::markpass::mark_group(&store, &built, &group, &instances, 2, pass_budget, &|_| {}).expect("mark_group");
+                    assert_eq!(rep.parsed + rep.places_only + rep.small + rep.skipped, n, "{}: every cell decided", tag);
+                    parsed += rep.parsed;
                     built.end_group(group, scratches);
+                }
+                // (with prune on, a stream whose top fits one grid cell is
+                // its bbox alone: nothing parsed)
+                if !prune {
+                    assert!(parsed > 0, "{}: the markers parsed something", tag);
                 }
                 drop(instances);
                 let streamed = occ::write_ovo(&built.finish());
@@ -890,6 +911,44 @@ mod tests {
                     assert!(passes > 1, "{}: the plane budget of 1 byte must force several passes", tag);
                 }
             }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// the marking pass's own parse of a cell is the readers' cell: every
+    /// cell of the adversarial streams (a cell in two ranges, a cell inside
+    /// a CBLOCK, a cell re-opened in another's range, a cell in the head's
+    /// CBLOCK), record for record after normalization
+    #[test]
+    fn a_cell_parsed_alone_is_the_readers_cell() {
+        let cases: Vec<(&str, Vec<u8>)> = vec![
+            ("late", fixtures::adversarial(false, false)),
+            ("early-cblock", fixtures::adversarial(true, true)),
+            ("dup", fixtures::dup_in_range()),
+            ("head", fixtures::head_cblock_cell()),
+        ];
+        for (tag, data) in &cases {
+            let dir = tmpdir(&format!("alone-{}", tag));
+            let src = dir.join("src.oas");
+            std::fs::write(&src, data).unwrap();
+            let inv = floe_oasis::inventory(data, 2).expect("inventory");
+            let n = inv.cells.len();
+            let (store, _) = StreamStore::new(inv, src.to_str().unwrap(), u64::MAX / 4).expect("store");
+            let mut buf = Vec::new();
+            let mut compared = 0usize;
+            store.with_readers(2, || {
+                for ci in 0..n {
+                    let theirs = store.cell(ci);
+                    let (mine, bytes) = store.parse_cell(ci, &mut buf).expect("parse_cell");
+                    assert!(*theirs == mine, "{}: cell {} ({}) differs", tag, ci, mine.name);
+                    if !theirs.rects.is_empty() || !theirs.polys.is_empty() || !theirs.places.is_empty() {
+                        assert!(bytes > 0, "{}: cell {} read nothing", tag, ci);
+                        compared += 1;
+                    }
+                }
+                store.release(0..n);
+            });
+            assert!(compared > 0, "{}: cells with records compared", tag);
             let _ = std::fs::remove_dir_all(&dir);
         }
     }
