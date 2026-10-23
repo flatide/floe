@@ -215,7 +215,9 @@ Gate `tools/validate_jobdeck.py` (배터리 편입, 20 tests):
   placement source=0 layer=123/43 out=0 scale=8.0 dx=1640800000 dy=3200800000 order=0
   ```
   `scale = mag · source_dbu / deck_dbu`, `dx/dy`는 덱 그리드 정수(M1의 ix/iy).
-- renderd 와이어: `open deck=<spec> budget_mb= jobs=` (cache와 배타),
+- renderd 와이어: `open deck=<spec> budget_mb= jobs=` (cache와 배타; `jobs`는
+  2026-10-23부터 소스를 동시에 여는 수이기도 하다 — `Deck::open_with`, 환경
+  `FLOE_RUST_DECK_OPEN_JOBS`가 덮어쓴다, DIRECT_READ_PLAN §8.18),
   `style`은 `<out>/0 COLOR FILL WIDTH` 행으로 덱 레이어 색을 바꾼다, `render`는
   좌표가 덱 dbu·`layers=`가 `<out>/0`인 것 외에 동일하며 `frame …` 응답은
   단일 캐시 경로의 모든 필드를 유지(없는 단계는 0)하고 `passes=`,

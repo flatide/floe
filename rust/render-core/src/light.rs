@@ -760,6 +760,54 @@ pub(crate) mod tests {
         write_tree(&cells, 1000.0).unwrap()
     }
 
+    /// A deck of light sources opens them `jobs` at a time and keeps the
+    /// spec's order (deck.rs `open_sources`; DIRECT_READ_PLAN §8.18); a
+    /// source that fails is the error whatever the worker count.
+    #[test]
+    fn a_deck_opens_its_light_sources_in_parallel_in_order() {
+        use crate::deck::{Deck, DeckSpec};
+        let hex = |text: &str| -> String { text.bytes().map(|b| format!("{b:02x}")).collect() };
+        let kept: Vec<(std::path::PathBuf, String)> =
+            (0..7).map(|i| light_dir_of(&format!("deck-open-{i}"), &tree())).collect();
+        let dirs: Vec<String> = kept.iter().map(|(_, dir)| dir.clone()).collect();
+        let spec_text = |dirs: &[String]| -> String {
+            let mut text = String::from("deck unit=0.001\n");
+            for dir in dirs {
+                text += &format!("source path_hex={}\n", hex(dir));
+            }
+            text += &format!("layer out=0 key=1/0 name_hex={} color=#0000ff fill=solid width=1\n", hex("L1"));
+            for (i, _) in dirs.iter().enumerate() {
+                text += &format!(
+                    "placement source={i} layer=1/0 out=0 scale=1 dx={} dy=0 order={i}\n",
+                    i * 2000
+                );
+            }
+            text
+        };
+        for jobs in [1usize, 4, 16] {
+            let spec = DeckSpec::parse(&spec_text(&dirs)).unwrap();
+            let deck = Deck::open_with(spec, 1 << 20, jobs).unwrap();
+            assert_eq!(deck.source_paths(), &dirs[..], "jobs {jobs}");
+            let info = deck.info();
+            assert_eq!((info.sources, info.placements, info.light_sources), (7, 7, 7));
+        }
+        // the third source missing: its error, first in order, at any count
+        let mut broken = dirs.clone();
+        broken[2] = kept[2].0.join("missing.ice").to_string_lossy().into_owned();
+        broken[5] = kept[5].0.join("missing-too.ice").to_string_lossy().into_owned();
+        for jobs in [1usize, 4] {
+            let spec = DeckSpec::parse(&spec_text(&broken)).unwrap();
+            let error = match Deck::open_with(spec, 1 << 20, jobs) {
+                Err(error) => error,
+                Ok(_) => panic!("a deck with a missing source opened (jobs {jobs})"),
+            };
+            assert!(error.contains("missing.ice") && !error.contains("missing-too"), "{error}");
+        }
+        for (d, _) in &kept {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
     /// the tree as a source file with its light files beside it
     pub(super) fn light_dir(tag: &str) -> (std::path::PathBuf, String) {
         light_dir_of(tag, &tree())

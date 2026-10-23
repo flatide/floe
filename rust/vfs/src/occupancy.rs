@@ -82,10 +82,124 @@ pub fn auto_base_um_for_span(span_um: f64) -> f64 {
     }
     AUTO_CANDIDATES_UM[AUTO_CANDIDATES_UM.len() - 1]
 }
+/// The coarser cells the automatic choice climbs to when the grid of
+/// `auto_base_um_for_span`'s cell would exceed the cell cap, or one plane
+/// per layer of the file the size cap (field 2026-10-23, DIRECT_READ_PLAN
+/// §8.18: a deck's EBEAM sources whose bbox is the whole 152 mm reticle are
+/// 38,100 x 38,100 cells at 4 um, past the 2^30 cap - every layer
+/// `none:cells`, the wide view on the page path; 8 um is 363 M cells and
+/// 45 MB a plane). Past 32 um the file records `none:cells` as before.
+pub const AUTO_COARSE_UM: [f64; 3] = [8.0, 16.0, 32.0];
+
+/// Why the automatic base cell is what it is: the target cell count
+/// (`auto_base_um_for_span`), or a coarser cell for a cap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AutoWhy {
+    Target,
+    Cells,
+    Size,
+}
+
+impl AutoWhy {
+    /// the note of the `[vfs] occupancy cell=` line
+    pub fn note(self) -> &'static str {
+        match self {
+            AutoWhy::Target => ", auto",
+            AutoWhy::Cells => ", auto for the cell cap",
+            AutoWhy::Size => ", auto for the size cap",
+        }
+    }
+}
+
+/// The automatic base cell of a top cell `span_x_um` x `span_y_um` microns
+/// holding `layers` layers, under the caps `max_cells` (level-0 cells per
+/// layer) and `max_bytes` (bitmap bytes over the file):
+/// `auto_base_um_for_span`'s cell when its grid fits both - the cells, and
+/// one plane per layer (a layer has a plane per placement depth it has
+/// records at, so later layers can still end `none:size`; the depths are
+/// not known before the marking) - else the first coarser cell (the rest of
+/// AUTO_CANDIDATES_UM, then AUTO_COARSE_UM) that fits, with the reason the
+/// first choice did not; the coarsest when none does (the build records
+/// `none:cells` as before).
+pub fn auto_base_um(
+    span_x_um: f64,
+    span_y_um: f64,
+    layers: usize,
+    max_cells: u64,
+    max_bytes: u64,
+) -> (f64, AutoWhy) {
+    let first = auto_base_um_for_span(span_x_um.max(span_y_um));
+    let over = |um: f64| -> Option<AutoWhy> {
+        let gw = (span_x_um / um).ceil().max(0.0);
+        let gh = (span_y_um / um).ceil().max(0.0);
+        if gw > u32::MAX as f64 || gh > u32::MAX as f64 || gw * gh > max_cells as f64 {
+            return Some(AutoWhy::Cells);
+        }
+        let per_layer = layer_bytes(gw as u32, gh as u32);
+        if per_layer > 0 && (layers as u64).saturating_mul(per_layer) > max_bytes {
+            return Some(AutoWhy::Size);
+        }
+        None
+    };
+    let Some(why) = over(first) else {
+        return (first, AutoWhy::Target);
+    };
+    let mut last = first;
+    for um in AUTO_CANDIDATES_UM
+        .iter()
+        .rev()
+        .chain(AUTO_COARSE_UM.iter())
+        .copied()
+        .filter(|&um| um > first)
+    {
+        last = um;
+        if over(um).is_none() {
+            return (um, why);
+        }
+    }
+    (last, why)
+}
+
+/// the build log's line of a file whose grid exceeds the cell cap at its
+/// base cell: every layer is `none:cells` (the dump says so per layer; the
+/// build said nothing until 0.12.395)
+fn none_cells_note(gw: i128, gh: i128, base_um: f64, max_cells: u64) -> String {
+    format!(
+        "every layer none:cells: {}x{} cells at {}um exceed --occupancy-max-cells {} (a coarser --occupancy-um, or a larger cap)",
+        gw, gh, base_um, max_cells
+    )
+}
+
+/// What a layer without a summary needs, for the build log's line of it
+/// (field 2026-10-23: the line named the status and nothing else).
+pub fn status_hint(status: u8, opts: &Opts) -> String {
+    match status {
+        STATUS_NONE_WORK => format!(
+            " - over --occupancy-max-work {} marks (a flat file marks once per shape: raise it)",
+            opts.max_work
+        ),
+        STATUS_NONE_SIZE => format!(
+            " - the file's bitmaps reached --occupancy-max-bytes {} (raise it, or a coarser --occupancy-um)",
+            opts.max_bytes
+        ),
+        STATUS_NONE_CELLS => format!(
+            " - the grid exceeds --occupancy-max-cells {} (a coarser --occupancy-um)",
+            opts.max_cells
+        ),
+        _ => String::new(),
+    }
+}
 /// level-0 cells per layer before the whole file is `none:cells`
 pub const DEFAULT_MAX_CELLS: u64 = 1 << 30;
-/// marks (cells set + members + edge rows) per layer before `none:work`
-pub const DEFAULT_MAX_WORK: u64 = 1 << 31;
+/// marks (cells set + members + edge rows) per layer before `none:work`.
+/// 2^31 until 0.12.394: a flat EBEAM file marks once per shape, and the
+/// field's largest sources hold more shapes than that on one layer (the
+/// two of a 274-source deck that drew 5.1 G shapes at the wide view,
+/// 2026-10-23), so their summaries ended `none:work` and the first frame
+/// took eight minutes. 2^36 bounds the marking of one layer at about a
+/// quarter of an hour at the measured 80 M marks/s; `--occupancy-max-work`
+/// sets it.
+pub const DEFAULT_MAX_WORK: u64 = 1 << 36;
 /// bitmap bytes over all layers before the rest is `none:size`
 pub const DEFAULT_MAX_BYTES: u64 = 1 << 30;
 
@@ -2179,7 +2293,14 @@ pub fn build(doc: &Doc, src_size: u64, src_mtime: u64, opts: &Opts) -> Result<Oc
     let base_um = if opts.base_um > 0.0 {
         opts.base_um
     } else {
-        auto_base_um_for_span(span_x.max(span_y) as f64 / doc.unit)
+        auto_base_um(
+            span_x as f64 / doc.unit,
+            span_y as f64 / doc.unit,
+            doc.layer_order.len(),
+            opts.max_cells,
+            opts.max_bytes,
+        )
+        .0
     };
     let cell_dbu = ((base_um * doc.unit).round() as i64).max(1);
     let gw = ceil_div(span_x, cell_dbu as i128);
@@ -2200,6 +2321,9 @@ pub fn build(doc: &Doc, src_size: u64, src_mtime: u64, opts: &Opts) -> Result<Oc
         paths_skipped: 0,
     };
     if cells > opts.max_cells as u128 || gw > u32::MAX as i128 || gh > u32::MAX as i128 {
+        if let Some(log) = opts.progress {
+            log(&none_cells_note(gw, gh, base_um, opts.max_cells));
+        }
         occ.layers = doc
             .layer_order
             .iter()
@@ -2454,7 +2578,14 @@ impl StreamOcc {
         let base_um = if opts.base_um > 0.0 {
             opts.base_um
         } else {
-            auto_base_um_for_span(span_x.max(span_y) as f64 / unit)
+            auto_base_um(
+                span_x as f64 / unit,
+                span_y as f64 / unit,
+                nl,
+                opts.max_cells,
+                opts.max_bytes,
+            )
+            .0
         };
         let cell_dbu = ((base_um * unit).round() as i64).max(1);
         let gw = ceil_div(span_x, cell_dbu as i128);
@@ -2484,6 +2615,9 @@ impl StreamOcc {
             paths_skipped: 0,
         };
         if cells > opts.max_cells as u128 || gw > u32::MAX as i128 || gh > u32::MAX as i128 {
+            if let Some(log) = opts.progress {
+                log(&none_cells_note(gw, gh, base_um, opts.max_cells));
+            }
             for (li, &(l, d)) in layer_order.iter().enumerate() {
                 occ.layers[li] = Some(Layer {
                     layer: l,
@@ -5129,6 +5263,76 @@ mod tests {
             }
         )
         .is_err());
+    }
+
+    #[test]
+    fn the_automatic_base_cell_climbs_for_the_caps() {
+        use super::AutoWhy::{Cells, Size, Target};
+        let (cells, bytes) = (DEFAULT_MAX_CELLS, DEFAULT_MAX_BYTES);
+        // the first choice fits: the rule of 2026-09-16 as it was
+        assert_eq!(auto_base_um(35_838.4, 30_000.0, 40, cells, bytes), (4.0, Target));
+        assert_eq!(auto_base_um(2_252.0, 1_552.0, 3, cells, bytes), (1.0, Target));
+        assert_eq!(auto_base_um(0.0, 0.0, 0, cells, bytes), (0.25, Target));
+        // the field's reticle-sized EBEAM source: 38,100 x 38,100 cells at
+        // 4 um are past the cell cap, 8 um (19,050 x 19,050) fits
+        assert_eq!(auto_base_um(152_400.0, 152_400.0, 1, cells, bytes), (8.0, Cells));
+        // 131 mm square is the last 4 um size (32,768 x 32,768 = 2^30)
+        assert_eq!(auto_base_um(131_072.0, 131_072.0, 1, cells, bytes), (4.0, Target));
+        assert_eq!(auto_base_um(131_073.0, 131_072.0, 1, cells, bytes), (8.0, Cells));
+        // a wafer-sized extent climbs the ladder; past 32 um it is the
+        // coarsest with the reason (the build records none:cells)
+        assert_eq!(auto_base_um(300_000.0, 300_000.0, 1, cells, bytes), (16.0, Cells));
+        assert_eq!(auto_base_um(600_000.0, 600_000.0, 1, cells, bytes), (32.0, Cells));
+        assert_eq!(auto_base_um(2_000_000.0, 2_000_000.0, 1, cells, bytes), (32.0, Cells));
+        // one plane per layer over the size cap: a 36 x 30 mm source of 40
+        // layers is 9,000 x 7,500 cells at 4 um, 11.3 MB a plane, 452 MB
+        // for the layers - under 1 GiB; under 256 MiB it goes to 8 um
+        let plane_4 = layer_bytes(9_000, 7_500);
+        assert_eq!(auto_base_um(36_000.0, 30_000.0, 40, cells, 40 * plane_4), (4.0, Target));
+        assert_eq!(auto_base_um(36_000.0, 30_000.0, 40, cells, 40 * plane_4 - 1), (8.0, Size));
+        assert_eq!(auto_base_um(36_000.0, 30_000.0, 40, cells, 1 << 28), (8.0, Size));
+        // the ladder from a fine first choice passes the finer candidates
+        // of the rule before the coarse ones: a 3 x 2 mm chip is 1 um by
+        // the target, 4 um under a 1 M cell cap, 8 um under 100 k
+        assert_eq!(auto_base_um(3_000.0, 2_000.0, 1, 1_000_000, bytes), (4.0, Cells));
+        assert_eq!(auto_base_um(3_000.0, 2_000.0, 1, 100_000, bytes), (8.0, Cells));
+        // through build: the 10 x 3 mm chip of the test above (4 um by the
+        // target = 2,500 x 750 cells) is 8 um under a 1 M cell cap, 32 um
+        // under 100 k, and none:cells at 32 um under 10 k - with an
+        // explicit cell the caps change nothing
+        let mut top = cell("T");
+        top.rects
+            .push(rect(1, 0, 0, 10_000_000, 3_000_000, Rep::One));
+        let d = doc_with(vec![top], 0, vec![(1, 0)]);
+        let at = |max_cells: u64, base_um: f64| {
+            build(
+                &d,
+                0,
+                0,
+                &Opts {
+                    base_um,
+                    jobs: 2,
+                    max_cells,
+                    ..Opts::default()
+                },
+            )
+            .unwrap()
+        };
+        let auto = at(1_000_000, BASE_AUTO);
+        assert_eq!((auto.cell_dbu, auto.w, auto.h), (8000, 1250, 375));
+        assert_eq!(auto.layers[0].status, STATUS_OK);
+        let auto = at(100_000, BASE_AUTO);
+        assert_eq!((auto.cell_dbu, auto.w, auto.h), (32000, 313, 94));
+        assert_eq!(auto.layers[0].status, STATUS_OK);
+        let auto = at(10_000, BASE_AUTO);
+        assert_eq!(auto.cell_dbu, 32000);
+        assert_eq!(auto.layers[0].status, STATUS_NONE_CELLS);
+        let given = at(100_000, 4.0);
+        assert_eq!(given.cell_dbu, 4000);
+        assert_eq!(given.layers[0].status, STATUS_NONE_CELLS);
+        // (the streaming build takes the same function with the inventory's
+        // layer count: gate validate_occupancy
+        // test_the_base_cell_follows_the_chip_size_unless_given)
     }
 
     #[test]

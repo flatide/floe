@@ -260,9 +260,10 @@ impl DeckSource {
     /// source whole at a wide view - and the frame says so
     /// (DeckRenderReport::summary_building_passes). The view is judged by
     /// the base cell `floe-index light --occupancy` picks for this source
-    /// (floe_vfs::occupancy::auto_base_um_for_span over the top's longer
-    /// side), as the file would be judged (summary::level_for): a nearer
-    /// view takes the page path as it does with the summary at hand.
+    /// (floe_vfs::occupancy::auto_base_um: the top's sides and layer count
+    /// under the generator's default caps), as the file would be judged
+    /// (summary::level_for): a nearer view takes the page path as it does
+    /// with the summary at hand.
     fn summary_pending(
         &self,
         plan_request: &PlanRequest,
@@ -272,15 +273,33 @@ impl DeckSource {
         if !self.light || !matches!(summary.none, Some(NONE_NOFILE) | Some(NONE_INVALID)) {
             return false;
         }
-        let span = (self.top_bbox.x1 - self.top_bbox.x0)
-            .max(self.top_bbox.y1 - self.top_bbox.y0)
-            .max(0) as f64;
         if !(self.unit > 0.0) {
             return false;
         }
-        let base_um = floe_vfs::occupancy::auto_base_um_for_span(span / self.unit);
+        let span_x = (self.top_bbox.x1 - self.top_bbox.x0).max(0) as f64 / self.unit;
+        let span_y = (self.top_bbox.y1 - self.top_bbox.y0).max(0) as f64 / self.unit;
+        let (base_um, _) = floe_vfs::occupancy::auto_base_um(
+            span_x,
+            span_y,
+            self.layers.len(),
+            floe_vfs::occupancy::DEFAULT_MAX_CELLS,
+            floe_vfs::occupancy::DEFAULT_MAX_BYTES,
+        );
         let cell_dbu = (base_um * self.unit).round().max(1.0) as i64;
         level_for(cell_dbu, plan_request.px_per_dbu, 1, max_cell_px()).is_some()
+    }
+
+    /// Whether a pass's plan may leave the summarized layers' subtrees
+    /// unwalked (PlanRequest::prune_summary; OCCUPANCY_PLAN M3): when no
+    /// hierarchy frame can come of the walk - frames off, or the request at
+    /// or past this source's hierarchy height, where a frame's depth
+    /// boundary (hier.rs `frame_depth_boundary`, r == 0) is never reached.
+    /// Until 0.12.394 the walk ran whenever frames were on - the viewer's
+    /// default - and on a light source that is a placement fill round per
+    /// pass for nothing (field 2026-10-23: 27 s of a 274-source deck's first
+    /// frame; DIRECT_READ_PLAN §8.18).
+    fn prune_summary_for(&self, frames: bool, depth: u32) -> bool {
+        prune_summary_when(frames, depth, self.max_depth)
     }
 }
 
@@ -581,8 +600,122 @@ pub struct DeckRenderReport {
     pub light_pending: bool,
 }
 
+/// DeckSource::prune_summary_for's rule: no hierarchy frame can come of a
+/// pass's walk when frames are off, or the request's depth is unlimited or
+/// at or past the source's hierarchy height (`max_depth`).
+pub fn prune_summary_when(frames: bool, depth: u32, max_depth: u32) -> bool {
+    !frames || depth == crate::request::FULL_DEPTH || depth >= max_depth
+}
+
+/// One deck source opened: its cache, layers, bounds and page cache.
+fn open_source(path: &str, budget_bytes: u64) -> Result<DeckSource, String> {
+    let cache =
+        Cache::open_unlocked(path).map_err(|error| format!("deck source {path}: {error}"))?;
+    let info = cache.info();
+    let top_bbox = cache.cell_bbox(info.top_cell)?;
+    Ok(DeckSource {
+        layers: cache.layers(),
+        pages: DecodedPageCache::new(budget_bytes),
+        light: cache.is_light(),
+        unit: info.unit,
+        cache,
+        top_bbox,
+        max_depth: info.max_depth,
+    })
+}
+
+/// An open that failed on the process's open-file limit (EMFILE: `Too many
+/// open files (os error 24)` on macOS and Linux) - the parallel open's
+/// transient descriptors (a source's design.inv and design.seg read whole,
+/// its lease) are `workers` times the serial open's, and a host with a
+/// small limit refuses them where the serial open fit (gate index_lock K7:
+/// 40 sources under `ulimit -n 32`).
+pub fn is_too_many_open_files(error: &str) -> bool {
+    error.contains("Too many open files") || error.contains("os error 24")
+}
+
+/// The deck's sources opened `workers` at a time, in the spec's order; the
+/// first failure in that order is the error, and the workers start no
+/// further open once one has failed. An open refused on the open-file
+/// limit (`is_too_many_open_files`) stops the workers instead, and the
+/// sources still unopened are opened one after another once the workers'
+/// descriptors are closed - the serial open as it was until 0.12.394.
+fn open_sources(paths: &[String], budget_bytes: u64, workers: usize) -> Result<Vec<DeckSource>, String> {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    let n = paths.len();
+    let workers = workers.clamp(1, n.max(1));
+    let next = AtomicUsize::new(0);
+    let failed = AtomicBool::new(false);
+    let exhausted = AtomicBool::new(false);
+    let slots: Vec<Mutex<Option<Result<DeckSource, String>>>> = (0..n).map(|_| Mutex::new(None)).collect();
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let (next, failed, exhausted, slots) = (&next, &failed, &exhausted, &slots);
+            scope.spawn(move || loop {
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                if index >= n || failed.load(Ordering::Relaxed) || exhausted.load(Ordering::Relaxed) {
+                    break;
+                }
+                let out = open_source(&paths[index], budget_bytes);
+                if let Err(error) = &out {
+                    if is_too_many_open_files(error) {
+                        // left for the serial pass below
+                        exhausted.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                    failed.store(true, Ordering::Relaxed);
+                }
+                let mut slot = slots[index].lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                *slot = Some(out);
+            });
+        }
+    });
+    let exhausted = exhausted.load(Ordering::Relaxed);
+    let mut sources = Vec::with_capacity(n);
+    for (index, slot) in slots.into_iter().enumerate() {
+        match slot.into_inner().unwrap_or_else(|poisoned| poisoned.into_inner()) {
+            Some(Ok(source)) => sources.push(source),
+            Some(Err(error)) => return Err(error),
+            // the workers' descriptors are closed: one at a time now
+            None if exhausted => sources.push(open_source(&paths[index], budget_bytes)?),
+            // a worker stopped before this one (an earlier failure): the
+            // error above is returned first in order, so this is unreached
+            // unless every slot before it opened
+            None => return Err(format!("deck source {}: not opened", paths[index])),
+        }
+    }
+    Ok(sources)
+}
+
+/// How many of a deck's sources open at once (`Deck::open_with`): the
+/// caller's jobs, or FLOE_RUST_DECK_OPEN_JOBS when set (1 serializes the
+/// open, the diagnostic).
+pub fn open_workers(jobs: usize) -> usize {
+    std::env::var("FLOE_RUST_DECK_OPEN_JOBS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(jobs)
+        .max(1)
+}
+
 impl Deck {
+    /// The deck's sources opened with as many workers as the host has cores
+    /// (`open_with`).
     pub fn open(spec: DeckSpec, budget_bytes: u64) -> Result<Self, String> {
+        let jobs = std::thread::available_parallelism().map_or(4, |n| n.get());
+        Self::open_with(spec, budget_bytes, jobs)
+    }
+
+    /// The deck's sources opened `jobs` at a time (field 2026-10-23,
+    /// DIRECT_READ_PLAN §8.18: 274 light sources opened one after another
+    /// took 34 s of every first frame - each open reads design.inv and
+    /// design.seg whole and builds the source's summary and first image -
+    /// against a render of seconds once the summaries draw). The sources
+    /// keep the spec's order; the first source that fails, in that order,
+    /// is the error.
+    pub fn open_with(spec: DeckSpec, budget_bytes: u64, jobs: usize) -> Result<Self, String> {
         // every source's reader lock first: a source being rebuilt whole
         // refuses the open (its error starts with floe_vfs::lock::LOCKED)
         let keys: Vec<floe_vfs::lock::Key> = spec
@@ -595,22 +728,7 @@ impl Deck {
             .collect();
         let lock = floe_vfs::lock::readers(&keys, &floe_vfs::lock::reader_label("floe-renderd"))
             .map_err(|busy| format!("{}{}", floe_vfs::lock::LOCKED, busy))?;
-        let mut sources = Vec::with_capacity(spec.sources.len());
-        for path in &spec.sources {
-            let cache = Cache::open_unlocked(path)
-                .map_err(|error| format!("deck source {path}: {error}"))?;
-            let info = cache.info();
-            let top_bbox = cache.cell_bbox(info.top_cell)?;
-            sources.push(DeckSource {
-                layers: cache.layers(),
-                pages: DecodedPageCache::new(budget_bytes),
-                light: cache.is_light(),
-                unit: info.unit,
-                cache,
-                top_bbox,
-                max_depth: info.max_depth,
-            });
-        }
+        let sources = open_sources(&spec.sources, budget_bytes, open_workers(jobs))?;
         let mut placements = Vec::with_capacity(spec.placements.len());
         for placement in spec.ordered_placements() {
             let source = &sources[placement.source];
@@ -953,7 +1071,7 @@ impl Deck {
             let plan_request = self.sources[source_index].cache.page_plan_request(
                 &plan_request,
                 &summary,
-                !request.frames,
+                self.sources[source_index].prune_summary_for(request.frames, request.depth),
             )?;
             if summary.is_active() {
                 summary_passes += 1;
@@ -2248,6 +2366,34 @@ mod tests {
             &transform_bbox(&BBox::EMPTY, &p),
             &[0.0, 0.0, 1e9, 1e9]
         ));
+    }
+
+    #[test]
+    fn summarized_subtrees_are_pruned_whenever_no_frame_can_appear() {
+        use crate::request::FULL_DEPTH;
+        // frames off: pruned at every depth (the rule until 0.12.394)
+        for depth in [0, 1, 3, 7, FULL_DEPTH] {
+            assert!(prune_summary_when(false, depth, 3), "frames off, depth {depth}");
+        }
+        // frames on: pruned at the unlimited depth and at or past the
+        // source's hierarchy height, kept below it (frames can appear)
+        assert!(prune_summary_when(true, FULL_DEPTH, 3));
+        assert!(prune_summary_when(true, 3, 3));
+        assert!(prune_summary_when(true, 4, 3));
+        assert!(!prune_summary_when(true, 2, 3));
+        assert!(!prune_summary_when(true, 0, 3));
+        // a flat source (height 0): depth 0 is already full
+        assert!(prune_summary_when(true, 0, 0));
+        // the open workers: the caller's jobs, at least one, or the
+        // environment's number (read at the call; not set in the tests)
+        assert_eq!(open_workers(0), 1);
+        assert_eq!(open_workers(12), 12);
+        // the open-file limit's refusal, as std prints it, through the
+        // deck source's error text; other errors are failures
+        assert!(is_too_many_open_files(
+            "deck source /x/.s.oas.ice: /x/.s.oas.ice/design.inv: Too many open files (os error 24)"
+        ));
+        assert!(!is_too_many_open_files("deck source /x/.s.oas.ice: No such file or directory (os error 2)"));
     }
 
     #[test]

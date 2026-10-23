@@ -748,19 +748,44 @@ class GenerationContractTests(unittest.TestCase):
         write_chip(small, "SMALL", 10, 8)
         big = TMP / "auto_big.oas"
         write_chip(big, "BIG", 3000, 2000)
-        for src, extra, base, cell in ((small, (), 0.25, 250),
-                                       (big, (), 1.0, 1000),
-                                       (small, ("--occupancy-um", "4"), 4.0, 4000)):
+        # 2026-10-23 (DIRECT_READ_PLAN section 8.18): the automatic cell
+        # climbs to the first coarser cell whose grid fits the cell cap
+        # (the 3 x 2 mm chip: 6 M cells at 1 um - 4 um under a 1 M cap,
+        # 8 um under 100 k) or one plane per layer the size cap (the
+        # 2-layer chip under a cap of one plane: 2 um); an explicit cell
+        # stands whatever the caps say. The line names the reason.
+        for src, extra, base, cell, note in (
+                (small, (), 0.25, 250, ", auto"),
+                (big, (), 1.0, 1000, ", auto"),
+                (small, ("--occupancy-um", "4"), 4.0, 4000, ""),
+                (big, ("--occupancy-max-cells", "1000000"), 4.0, 4000,
+                 ", auto for the cell cap"),
+                (big, ("--occupancy-max-cells", "100000"), 8.0, 8000,
+                 ", auto for the cell cap"),
+                # one plane of the 1 um grid is about 1.0 MB, of the 2 um grid
+                # about 0.25 MB: a 500 kB cap moves the one-layer chip to 2 um
+                (big, ("--occupancy-max-bytes", "500000"), 2.0, 2000,
+                 ", auto for the size cap"),
+                (big, ("--occupancy-um", "1", "--occupancy-max-cells", "100000"),
+                 1.0, 1000, "")):
             cache = Path(vfs_cache_dir(src))
             shutil.rmtree(cache, ignore_errors=True)
             res = floe_index("vfs", src, cache, "--occupancy", *extra,
                              "--no-lod", "--slow-cell-s", "999", "--jobs", "2")
-            self.assertIn("occupancy cell=%gum (%d dbu%s)"
-                          % (base, cell, "" if extra else ", auto"),
+            self.assertIn("occupancy cell=%gum (%d dbu%s)" % (base, cell, note),
                           res.stderr)
             head = self.listing(cache).stdout.splitlines()[0]
             self.assertIn("cell_dbu=%d base_um=%g " % (cell, base), head)
             self.assertEqual(read_ovo(cache / "design.ovo")["cell"], cell)
+            rows = [l for l in self.listing(cache).stdout.splitlines()
+                    if l.startswith("layer ")]
+            if "--occupancy-um" in extra and "--occupancy-max-cells" in extra:
+                # the explicit 1 um grid is 6 M cells over the 100 k cap
+                self.assertTrue(rows and all("status=none:cells" in r for r in rows), rows)
+                self.assertIn("every layer none:cells: 3000x2000 cells at 1um exceed "
+                              "--occupancy-max-cells 100000", res.stderr)
+            else:
+                self.assertTrue(rows and all("status=ok" in r for r in rows), rows)
 
     def test_a_reader_closing_the_pipe_early_does_not_panic(self):
         # field 2026-09-16: `floe-index occupancy … | head -1` printed
@@ -985,31 +1010,78 @@ class GenerationContractTests(unittest.TestCase):
         self.assertGreater(washed, exact // 2)
 
     def test_limits_are_recorded_as_none_never_approximated(self):
-        floe_index("vfs", self.src, self.cache, "--occupancy-only",
-                   "--occupancy-max-cells", "10")
+        # an explicit cell under a cap of 10 cells: every layer none:cells
+        # (the automatic cell would climb to 16 um instead, below)
+        res = floe_index("vfs", self.src, self.cache, "--occupancy-only",
+                         "--occupancy-um", "1", "--occupancy-max-cells", "10")
+        self.assertIn("every layer none:cells:", res.stderr)
+        self.assertIn("exceed --occupancy-max-cells 10", res.stderr)
         res = self.listing(self.cache)
         rows = [l for l in res.stdout.splitlines() if l.startswith("layer ")]
         self.assertTrue(rows and all("status=none:cells" in r for r in rows))
         ovo = read_ovo(self.cache / "design.ovo")
         self.assertTrue(all(lv[2] == b"" for l in ovo["layers"]
                             for lv in l["levels"]))
-        floe_index("vfs", self.src, self.cache, "--occupancy-only",
-                   "--occupancy-max-work", "0")
+        # the automatic cell under the same cap: the 30 um fixture climbs
+        # the ladder to 16 um (2 x 2 cells) and keeps its summary
+        res = floe_index("vfs", self.src, self.cache, "--occupancy-only",
+                         "--occupancy-max-cells", "10")
+        self.assertIn("occupancy cell=16um (16000 dbu, auto for the cell cap)",
+                      res.stderr)
+        rows = [l for l in self.listing(self.cache).stdout.splitlines()
+                if l.startswith("layer ")]
+        self.assertTrue(rows and all("status=ok" in r or "status=empty" in r
+                                     for r in rows), rows)
+        res = floe_index("vfs", self.src, self.cache, "--occupancy-only",
+                         "--occupancy-max-work", "0")
         rows = [l for l in self.listing(self.cache).stdout.splitlines()
                 if l.startswith("layer ")]
         # the layer without a positive-area shape charges nothing: it
         # stays `empty` under a zero budget
         self.assertTrue(all("status=none:work" in r
                             or "ld=7/0 status=empty" in r for r in rows), rows)
+        # the build log's line says what the layer needs (2026-10-23)
+        self.assertIn("none:work (work ", res.stderr)
+        self.assertIn(" - over --occupancy-max-work 0 marks", res.stderr)
         res = floe_index("vfs", self.src, self.cache, "--occupancy-only",
                          "--occupancy-max-bytes", "1")
         self.assertIn("none:size", res.stderr)
+        self.assertIn(" - the file's bitmaps reached --occupancy-max-bytes 1", res.stderr)
+        # the byte cap takes a suffix (as --seg-bytes); with the automatic
+        # cell the fixture would climb to 1 um and fit 1K (7 planes of
+        # 120 B), so the explicit 0.25 um grid (1.8 kB a plane) shows it
+        res = floe_index("vfs", self.src, self.cache, "--occupancy-only",
+                         "--occupancy-um", "0.25", "--occupancy-max-bytes", "1K")
+        self.assertIn("none:size", res.stderr)
+        floe_index("vfs", self.src, self.cache, "--occupancy-only",
+                   "--occupancy-max-bytes", "4X", ok=2)
         floe_index("vfs", self.src, self.cache, "--occupancy-only",
                    "--occupancy-um", "1")
         rows = [l for l in self.listing(self.cache).stdout.splitlines()
                 if l.startswith("layer ")]
         self.assertTrue(all("status=ok" in r or "ld=7/0 status=empty" in r
                             for r in rows), rows)
+
+    def test_the_app_forwards_the_summary_caps(self):
+        # `floe2 index --occupancy-max-work N --occupancy-max-bytes N` reach
+        # floe-index (DIRECT_READ_PLAN section 8.18): a zero work cap leaves
+        # every marked layer none:work, a 4G byte cap changes nothing here,
+        # and the summary is rebuilt whole by the next occupancy-only run
+        floe2("index", self.src, "--occupancy-only", "--occupancy-max-work", "0",
+              "--occupancy-um", "1")
+        rows = [l for l in self.listing(self.cache).stdout.splitlines()
+                if l.startswith("layer ")]
+        self.assertTrue(rows and all("status=none:work" in r
+                                     or "ld=7/0 status=empty" in r for r in rows), rows)
+        floe2("index", self.src, "--occupancy-only", "--occupancy-max-bytes", "4G",
+              "--occupancy-um", "1")
+        rows = [l for l in self.listing(self.cache).stdout.splitlines()
+                if l.startswith("layer ")]
+        self.assertTrue(rows and all("status=ok" in r or "ld=7/0 status=empty" in r
+                                     for r in rows), rows)
+        # (the app's input error: exit 2, as its other option errors)
+        floe2("index", self.src, "--occupancy-only", "--occupancy-max-bytes", "4X",
+              ok=2)
 
     def test_kill_point_keeps_the_previous_file_and_the_wrapper_cleans_up(self):
         before = sha(self.cache / "design.ovo")

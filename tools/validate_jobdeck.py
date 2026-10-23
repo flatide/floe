@@ -150,6 +150,16 @@ END
 
 # 2026-09-11: a mask deck of the thin-line source (its default keeps
 # the all-thin pages; a plain layout culls them)
+DEEP_DECK = """* deep.jb
+MTITLE 1,DEEP
+*PLACE-INFO
+CHIP D1
+$ (1, DEEP, AD=0.00020, SF=1, TC=deep.oas, LY={1}, DT={0}, BX=0.0, BY=0.0, UX=2000.0, UY=2000.0 )
+ROWS 1000.0/1000.0
+*END-PLACE
+END
+"""
+
 SPARSE_DECK = """* sparse.jb
 SLICE 1,17
 RETICLE
@@ -272,6 +282,8 @@ def build_fixtures(d: Path):
     (d / "thin.jb").write_text(THIN_DECK)
     (d / "sparse.jb").write_text(SPARSE_DECK)
     build_sparse_oas(d / "sparse.oas")
+    (d / "deep.jb").write_text(DEEP_DECK)
+    build_deep_oas(d / "deep.oas")
     build_oas(d / "dt.oas", 0.00005, 2000.0, 2000.0, [(7, 0), (7, 1)], "DT")
     build_dense_oas(d / "dense.oas")
     build_tiny_oas(d / "tiny.oas")
@@ -361,6 +373,31 @@ def build_tiny_oas(path, dbu=0.00005, pitch_um=10.0, n=200, box_um=1.0):
     top.insert(db.CellInstArray(bit.cell_index(), db.Trans(),
                                 db.Vector(p, 0), db.Vector(0, p), n, n))
     ly.write(str(path))
+
+
+def build_deep_oas(path, levels=4, fan=2, pitch_um=1000.0):
+    """DEEP: a chain of `levels` cells, each placing the next `fan` x
+    `fan` times at a pitch halving per level, and each holding a box on
+    1/0 of 90 % of its pitch (900 / 450 / 225 / 112 um): every level has
+    a visible page above a wide view's cut, so an unpruned walk descends
+    the whole chain (FullDepthPruneTests)."""
+    import klayout.db as db
+    ly = db.Layout()
+    ly.dbu = 0.001
+    li = ly.layer(1, 0)
+    um = 1000
+    cells = [ly.create_cell("DEEP%d" % i) for i in range(levels)]
+    for i in range(levels):
+        step = int(pitch_um * um / (fan ** i))
+        cells[i].shapes(li).insert(db.Box(0, 0, step * 9 // 10, step * 9 // 10))
+        if i + 1 < levels:
+            for ix in range(fan):
+                for iy in range(fan):
+                    cells[i].insert(db.CellInstArray(
+                        cells[i + 1].cell_index(),
+                        db.Trans(db.Vector(ix * step // 2, iy * step // 2))))
+    ly.write(str(path))
+    ly._destroy()
 
 
 def build_sparse_oas(path, dbu=0.00005, extent_um=2000.0, box_um=1.0):
@@ -3435,6 +3472,65 @@ class ReviewFixTests3(unittest.TestCase):
             self.assertEqual(c.resolve_layers("DT"), [(1, 0), (1, 1)])
         finally:
             c.close()
+
+
+class FullDepthPruneTests(unittest.TestCase):
+    """DIRECT_READ_PLAN section 8.18 (field 2026-10-23): with frames on -
+    the viewer's default - and the depth unlimited, a summarized deck
+    pass's plan used to walk the summarized subtrees although no hierarchy
+    frame can come of it (frames come of the depth boundary alone), which
+    on a light source is a placement fill round per hierarchy level; the
+    plan prunes them now as it did with frames off. The deep deck (DEEP: a
+    four-level chain, a box above the wide view's cut on 1/0 at every
+    level) as a light cache with its summary, the prefill off so every
+    expanded cell costs a round of its own: the full-depth capture takes
+    no fill round with frames on or off (0.12.394: three with frames on,
+    one a level) and the two pictures are byte-identical; at depth 1 the
+    frames still draw (the pictures differ) and the walk is the same
+    either way."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = TMP / "full_depth"
+        cls.dir.mkdir()
+        shutil.copy2(TMP / "deep.oas", cls.dir / "deep.oas")
+        shutil.copy2(TMP / "deep.jb", cls.dir / "deep.jb")
+        cls.env = {"FLOE_INDEX_BIN": str(ROOT / "rust" / "target" / "release" / "floe-index"),
+                   "FLOE_RENDERD_BIN": str(ROOT / "rust" / "target" / "release" / "floe-renderd"),
+                   "FLOE_LIGHT_LOG": "on",
+                   "FLOE_LIGHT_PREFILL_PLACES": "0", "FLOE_LIGHT_PREFILL_MB": "0"}
+        res = run_floe2("index", cls.dir / "deep.jb", "--jobs", "2", env=cls.env, ok=0)
+        if "1 built" not in res.stdout:
+            raise AssertionError(res.stdout)
+        cache = Path(vfs_cache_dir(cls.dir / "deep.oas"))
+        if not (cache / "design.ovo").is_file() or (cache / "design.ovm").exists():
+            raise AssertionError("deep.oas is not a light cache with its summary: %s"
+                                 % sorted(p.name for p in cache.iterdir()))
+
+    def _capture(self, frames, depth=None):
+        out = self.dir / ("deep_%s_%s.png" % (frames, depth))
+        args = ["render", self.dir / "deep.jb", "--px", "400", "--detail", "medium",
+                "--occupancy", "on", "--frames=%s" % frames, "--out", out]
+        if depth is not None:
+            args += ["--depth", str(depth)]
+        res = run_floe2(*args, env=self.env, ok=0)
+        rounds = [l for l in res.stderr.splitlines() if l.startswith("[light] round")]
+        return out.read_bytes(), rounds
+
+    def test_frames_on_at_full_depth_fill_nothing_a_frames_off_capture_would_not(self):
+        on, on_rounds = self._capture("on")
+        off, off_rounds = self._capture("off")
+        self.assertEqual(off_rounds, [], "frames off: the summarized pass fills nothing")
+        self.assertEqual(on_rounds, [], "frames on at full depth: no frame can appear, "
+                                        "yet the walk filled: %s" % on_rounds)
+        self.assertEqual(on, off, "frames on/off pictures differ at full depth")
+        # a limited depth keeps the walk (frames can appear there): the
+        # frames draw, and the rounds are the same with and without them
+        d1_on, d1_on_rounds = self._capture("on", 1)
+        d1_off, d1_off_rounds = self._capture("off", 1)
+        self.assertNotEqual(d1_on, d1_off, "depth 1 with frames draws them")
+        self.assertEqual(len(d1_on_rounds), len(d1_off_rounds),
+                         (d1_on_rounds, d1_off_rounds))
 
 
 class PerfAnalysisTests(unittest.TestCase):

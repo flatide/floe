@@ -96,7 +96,12 @@ pub fn light_cmd(args: &[String]) {
                 i += 1;
             }
             "--occupancy-max-bytes" => {
-                occ_opts.max_bytes = need(i, "a number").parse().expect("occupancy max bytes");
+                // a byte count, with K/M/G as --seg-bytes takes them
+                occ_opts.max_bytes =
+                    crate::parse_bytes(&need(i, "a byte count")).unwrap_or_else(|| {
+                        eprintln!("--occupancy-max-bytes needs a byte count (e.g. 4G)");
+                        std::process::exit(2);
+                    });
                 i += 1;
             }
             "--occupancy-balance" => {

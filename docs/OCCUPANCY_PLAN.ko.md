@@ -168,10 +168,11 @@ level L  cell = base_cell_dbu × 2^L, grid (w, h) = ceil(span/cell),
   - Pts: 항상 멤버마다. `pts_full_rep` 같은 footprint 대체 없음. 비용은 작업 예산
     으로만 제한한다.
 - **처리 한계(리뷰 7)**: 레이어당 level 0 셀 수 상한(기본 2^30 셀 = 128 MB), 레이어당
-  마킹 작업 예산(기본 2^31 셀 마킹), 파일 크기 상한(기본 1 GiB). 초과한 레이어는
-  `status = none:<이유>`로 기록하고 다른 레이어는 계속 만든다(근사 저장 없음). 소스
-  전체가 셀 수 상한을 넘으면 `--occupancy-um`을 키우라는 안내와 함께 파일을 만들지
-  않는다.
+  마킹 작업 예산(기본 2^31 셀 마킹 → **2026-10-23부터 2^36**, §12 말미), 파일 크기
+  상한(기본 1 GiB). 초과한 레이어는 `status = none:<이유>`로 기록하고 다른 레이어는
+  계속 만든다(근사 저장 없음). 소스 전체가 셀 수 상한을 넘으면 `--occupancy-um`을
+  키우라는 안내와 함께 파일을 만들지 않는다(2026-10-23부터 자동 셀이 먼저 8/16/32 µm으로
+  굵어진다).
 - 병렬·메모리(2026-09-14 개정): 레이어는 순서대로, 한 레이어의 마킹을 `--jobs`
   스레드가 unit(top 레코드 조각·배치 멤버 범위, 단일 배치 top은 아래로 확장)으로
   나눠 각자의 level 0에 마킹하고 OR로 합친다. 메모리 = jobs × level 0 한 장. 결과는
@@ -334,7 +335,8 @@ extra 0). 상위 레벨 == OR 풀링. valmini 색인 + 요약 0.5 s.
   spine을 거부). 실칩 로그에 `paths_skipped`가 0이 아니면 M2 전에 확인.
 - Grid 닫힌형은 rect 반복에만 적용(polygon/path는 멤버마다).
 - 작업 예산의 단위 = 켠 셀 + 반복 멤버 + polygon 변의 행 방문(레이어별).
-  `--occupancy-max-cells/-work/-bytes`는 게이트용 명시 CLI 옵션.
+  `--occupancy-max-cells/-work/-bytes`는 명시 CLI 옵션(2026-10-23부터 `floe2 index`도
+  `-work`·`-bytes`를 전달한다).
 - 취소: Rust는 시그널을 잡지 않는다. 게시가 rename이므로 죽어도 이전 파일은
   남고, 다음 실행이 시작 시 tmp를 지우며 `floe2 index` 래퍼가 자식 실패·중단 뒤
   tmp를 지운다. 로더는 tmp를 읽지 않는다.
@@ -1033,3 +1035,23 @@ occupancy는 정밀할수록 용량이 커진다: 셀을 절반으로 줄이면 
   `occupancy_is_asked_with_a_cut_for_layouts_and_jobdecks`, floe2 뷰 채널 패치, worker-client wire.
 - **안 바뀐 것**: 생성 기본(레이아웃은 `--occupancy` opt-in, 덱 소스는 켬), 레이아웃 프레임의 기본(끔), 환경
   변수의 뜻(필드가 없는 요청 - 게이트·예전 클라이언트 - 은 종전대로).
+
+### 2026-10-23 — 생성 한도 2^36, 자동 셀의 상한 사다리, 전체 깊이의 prune (0.12.395 / RENDERD 0.12.353)
+
+현장(DIRECT_READ_PLAN §8.18): 경량 소스 274개 덱의 첫 프레임 8분 — 요약 없는 69 pass 가운데 거대 평탄 소스 둘이
+51억 도형을 칠했다. 평탄한 EBEAM 파일은 도형 하나가 마크 하나라 레이어당 마크 한도 2^31을 넘어 `none:work`가
+된 것으로 본다(덤프 확인은 복귀 뒤).
+
+- `DEFAULT_MAX_WORK` 2^31 → 2^36. `--occupancy-max-work/-bytes`는 `floe2 index`가 전달하고(`-bytes`는 K/M/G
+  접미사), 요약 없는 레이어의 로그 줄은 올릴 옵션을 말한다(`status_hint`); 파일 전체 none:cells도 한 줄 남긴다.
+- 자동 기준 셀(`auto_base_um`): 2026-09-16 규칙의 첫 선택이 셀 상한(2^30)이나 레이어당 평면 하나 × 레이어 수가
+  크기 상한(1 GiB)을 넘으면 4/8/16/32 µm으로 올라간다(로그 `auto for the cell cap` / `size cap`). 152 mm 레티클
+  전체 bbox의 EBEAM 파일은 4 µm 14.5억 셀 → 8 µm. 깊이 평면 수는 마킹 전에 모르므로 크기 상한 판정은 평면
+  하나 기준이다.
+- M3의 "프레임 없는 요청은 요약 전용 서브트리 프루닝"을 전체 깊이(무제한 또는 소스 높이 이상)의 frames on에도
+  적용한다(`DeckSource::prune_summary_for`): 그 깊이에서는 프레임이 나올 수 없다. 합성 8소스 덱의 fit 캡처
+  2.37 s·fill 32 round → 0.05 s·0 round, 픽셀 동일.
+- 덱 open은 소스를 `jobs`개씩 병렬로 연다(`Deck::open_with`; 64 소스 0.62 → 0.24 s).
+- 게이트 `occupancy`(자동 셀의 상한 사례, limits 시험의 안내 줄·접미사, `floe2 index` 전달), `jobdeck`
+  FullDepthPruneTests(네 단계 사슬의 경량 소스, prefill 끔: 전체 깊이 frames on/off 모두 fill round 0, 0.12.394는
+  on에서 3, 그림 동일; depth 1은 프레임이 그려짐), 단위 시험 5건.

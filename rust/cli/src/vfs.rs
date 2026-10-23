@@ -238,7 +238,11 @@ pub fn vfs_cmd(args: &[String]) {
                 i += 2;
             }
             "--occupancy-max-bytes" => {
-                occ_opts.max_bytes = args[i + 1].parse().expect("occupancy max bytes");
+                // a byte count, with K/M/G as --seg-bytes takes them
+                occ_opts.max_bytes = crate::parse_bytes(&args[i + 1]).unwrap_or_else(|| {
+                    eprintln!("--occupancy-max-bytes needs a byte count (e.g. 4G)");
+                    std::process::exit(2);
+                });
                 i += 2;
             }
             "--no-lod" => {
@@ -3286,7 +3290,21 @@ fn publish_ovo(
         "[vfs] occupancy cell={}um ({} dbu{}) grid={}x{} levels={} layers={} ok={} empty={} jobs={} {} ({:.1}s)",
         built.cell_dbu as f64 / built.unit,
         built.cell_dbu,
-        if opts.base_um > 0.0 { "" } else { ", auto" },
+        if opts.base_um > 0.0 {
+            ""
+        } else {
+            // the automatic cell's reason, as the build chose it
+            let (x0, y0, x1, y1) = built.bbox;
+            occ::auto_base_um(
+                (x1 as i128 - x0 as i128).max(0) as f64 / built.unit,
+                (y1 as i128 - y0 as i128).max(0) as f64 / built.unit,
+                built.layers.len(),
+                opts.max_cells,
+                opts.max_bytes,
+            )
+            .1
+            .note()
+        },
         built.w,
         built.h,
         built.n_levels,
@@ -3300,11 +3318,12 @@ fn publish_ovo(
     for l in &built.layers {
         if l.status != occ::STATUS_OK && l.status != occ::STATUS_EMPTY {
             eprintln!(
-                "[vfs] occupancy layer {}/{} {} (work {})",
+                "[vfs] occupancy layer {}/{} {} (work {}){}",
                 l.layer,
                 l.dt,
                 occ::status_text(l.status),
-                l.work
+                l.work,
+                occ::status_hint(l.status, opts)
             );
         }
     }

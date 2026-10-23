@@ -32,6 +32,12 @@ pub struct IndexOptions {
     pub occupancy_um: Option<f64>,
     pub occupancy_balance: Option<bool>,
     pub occupancy_prune: Option<bool>,
+    /// the summary generator's caps (floe_vfs::occupancy::Opts
+    /// `max_work` / `max_bytes`; DIRECT_READ_PLAN §8.18): marks per layer
+    /// before a layer is `none:work`, bitmap bytes per file before the
+    /// rest is `none:size`; None = floe-index's defaults
+    pub occupancy_max_work: Option<u64>,
+    pub occupancy_max_bytes: Option<u64>,
     pub representatives: bool,
     pub representatives_only: bool,
     pub representatives_points: Option<u64>,
@@ -95,6 +101,8 @@ impl Default for IndexOptions {
             occupancy_um: None,
             occupancy_balance: None,
             occupancy_prune: None,
+            occupancy_max_work: None,
+            occupancy_max_bytes: None,
             representatives: false,
             representatives_only: false,
             representatives_points: None,
@@ -593,6 +601,12 @@ fn occupancy_args(a: &mut Vec<OsString>, o: &IndexOptions) {
     }
     if let Some(v) = o.occupancy_prune {
         a.extend(["--occupancy-prune".into(), u8::from(v).to_string().into()]);
+    }
+    if let Some(v) = o.occupancy_max_work {
+        a.extend(["--occupancy-max-work".into(), v.to_string().into()]);
+    }
+    if let Some(v) = o.occupancy_max_bytes {
+        a.extend(["--occupancy-max-bytes".into(), v.to_string().into()]);
     }
 }
 
@@ -1681,5 +1695,34 @@ mod stream_policy_tests {
         o.occupancy_only = false;
         o.representatives = true;
         assert!(o.validate().is_err(), "--stream --representatives");
+    }
+
+    #[test]
+    fn the_summary_caps_go_to_floe_index_as_given() {
+        // DIRECT_READ_PLAN §8.18: `floe2 index --occupancy-max-work N
+        // --occupancy-max-bytes N` reach the light and the full build and
+        // the occupancy-only run; unset, floe-index's defaults stand
+        let o = IndexOptions {
+            occupancy: Some(true),
+            occupancy_max_work: Some(1 << 38),
+            occupancy_max_bytes: Some(4 << 30),
+            ..Default::default()
+        };
+        let words = |action: &Action, light: bool| -> Vec<String> {
+            arguments(Path::new("/x/s.oas"), Path::new("/x/.s.oas.ice"), &o, action, light)
+                .unwrap()
+                .iter()
+                .map(|w| w.to_string_lossy().into_owned())
+                .collect()
+        };
+        for (action, light) in [(Action::Build, true), (Action::Build, false), (Action::OccupancyOnly, true)] {
+            let w = words(&action, light);
+            let at = |flag: &str| w.iter().position(|x| x == flag).map(|i| w[i + 1].clone());
+            assert_eq!(at("--occupancy-max-work").as_deref(), Some("274877906944"), "{w:?}");
+            assert_eq!(at("--occupancy-max-bytes").as_deref(), Some("4294967296"), "{w:?}");
+        }
+        let plain = IndexOptions { occupancy: Some(true), ..Default::default() };
+        let w = arguments(Path::new("/x/s.oas"), Path::new("/x/.s.oas.ice"), &plain, &Action::Build, true).unwrap();
+        assert!(!w.iter().any(|x| x == "--occupancy-max-work" || x == "--occupancy-max-bytes"));
     }
 }

@@ -431,6 +431,7 @@ geometry/placement/text x·y, W/H, 점 목록, 경로 확장, 반복, 배치 대
 | 리뷰 수정 C | 0.12.391 리뷰 4건(5의 변형 1, 회귀 3) | **완료 0.12.392(§8.15)**: 정의를 공유하는 셀 집합(`SharedDef`)을 마킹 pass가 한 번에 파싱·과금(각자 정의 뒤 CBLOCK 재정의도), 띠 상자를 전체 플랜의 뷰로 잘라 가장자리 픽셀 동일, 높이 1은 띠 하나, 렌더 중 패닉은 `error code=panic` 응답, 자동 색인의 덱 플랜은 캐시를 그대로 연다(`render --full --occupancy on`이 요약을 만듦) |
 | 리뷰 수정 D | 0.12.392 리뷰 1건(연결된 집합을 통째로 적재) | **완료 0.12.393(§8.16)**: 집합의 범위를 파일 순서로 하나씩 내보내고 마지막 정의 범위가 읽힌 셀부터 join·마킹·해제(리더 풀의 규칙, 상주는 다중 정의 span 이내), 여러 셀을 정의하는 범위의 과금도 `min_budget`에 포함, 그룹 줄에 `resident peak`, 게이트가 peak ≤ 예산을 확인 |
 | 리뷰 수정 E | 0.12.393 리뷰 1건(비대상 셀의 임시 파싱 메모리) | **완료 0.12.394(§8.17)**: 파서가 그룹이 쓰는 셀의 레코드만 보관(`parse_cell_bytes_keeping`, 나머지는 파싱만), 집합들을 파일 순서의 한 커서로 함께 진행, 게이트가 레이어별 그룹의 12 jobs RSS 증가(≤ 18 MB)를 확인 |
+| 덱 첫 화면 | 현장 2026-10-23: 274 경량 소스 덱의 첫 프레임 8분(거대 평탄 소스 둘의 요약 없음, frames 걷기 27 s, 순차 open 34 s) | **완료 0.12.395(§8.18)**: 요약 마크 한도 2^36·`floe2 index`가 한도 옵션 전달·요약 없는 레이어의 로그 안내, 자동 셀이 셀/크기 상한을 보고 8/16/32 µm, 전체 깊이의 요약 서브트리 prune(픽셀 동일, fill 0 round), 덱 open 병렬(`jobs`) |
 | L7 후속 | 요약 패스 1패스화/마킹 가속, ovs 합치기(레이아웃 밀도), B안(정규 페이지), 세그먼트 캐시 디스크 보존(방문한 셀의 디코드 결과를 남겨 다음 세션 가속), 1패스 경량 생성(셀 로컬 점유 격자 합성) | 각각 — **L7a 완료 0.12.386(§8.9)**: 이미지 증분 합성(제자리 성장, 채움 시점 노드 마스크, 채움 바이트 해제), 세그먼트 pread 묶음·병렬 인코딩; **L7b 완료 0.12.387(§8.10)**: 요약 패스의 마커가 셀을 직접 파싱(리더 풀·상주 창 없음, 묶음이 안 쓰는 셀은 읽지 않음), 다각형 스캔 변환 버퍼 재사용, 크기 예산 밖의 레이어는 마킹하지 않음; 나머지(1패스 경량 생성은 §8.10의 정확성 논거로 보류)는 사용자 지시에 따라 |
 
 L0는 하루, L1~L3는 S1~S3와 비슷한 크기(재고 코드 위의 확장), L4가 본체다.
@@ -1277,6 +1278,74 @@ def_range 전체를 파싱한 뒤 그 셀의 조각만 골랐다. 범위는 셀�
   `FLOE_RENDER_TIMEOUT_S=120`은 멈춤을 잡는 상한이었는데, 이 캡처도 칩의 25,393 페이지를 디코드하므로 다른
   프로그램이 3코어를 쓰는 호스트에서는 120 s를 넘겼다(배터리 433; 430에서는 통과). 900 s로 올리고 subprocess
   제한도 1800 s로 맞췄다. 멈춤이면 일주일 대신 15분에 드러난다.
+
+### 8.18 덱 첫 화면 — 요약 생성 한도·자동 셀, 전체 깊이의 prune, 덱 open 병렬 (0.12.395 / floe-index·renderd 0.12.353, 2026-10-23; 사용자 "대용량 잡덱 첫 화면 10분 이상" 검토 → "진행해줘")
+
+- **현장 수치(사용자 붙여넣기).** 레벨 2개 × EBEAM 137개 = 경량 소스 274개, 758 × 794 px 창, 약 211 µm/px,
+  `cut<633um`, thin keep. frames on: `loaded in 491.8s (cache 6.9s + service 2.9s + first frame 482.02s)`,
+  `live (494986 tiles, +494986 new, 448436 ms = 108404 load [15371 plan+20038 delta+72995 apply] + 308724 draw)`;
+  frames off: 458.8 s, `418663 ms = 78866 load [1904 plan+6835 delta+70127 apply] + 308477 draw`. 상태줄
+  `deck 268 passes, summary 199 passes (not pickable) … evict 494k`; 긴 줄 `paints 5.1G`, `thin pages 495k kept`,
+  `raster wall 308398 ms 4p x 4t, 8 batches, pass max 801MB, batch max 22MB, 2 streamed in 503 slices`,
+  `dec sum 366423/max 274/idx 45825ms`.
+- **읽기.** 268 pass 중 69개가 요약 없이 49.5만 페이지를 그렸고, 그중 두 pass(거대 평탄 소스 둘, 가시 레이어
+  도형 약 25억 개씩)가 503 slice로 순차 스트리밍되며 51억 도형을 칠했다 — draw 308 s, decode 70 s의 거의
+  전부(나머지 266 pass는 22 MB 이하 batch 6개). frames on/off 차 27 s = plan 13.5 + read 13.2 s: 전체 깊이에서
+  프레임이 나올 수 없는데도 요약된 서브트리를 걷고 경량 캐시를 채운 비용. 두 실행 모두 프레임 자체 ms와 GUI
+  first frame 사이에 33.6 s가 같다 = renderd `Deck::open`(274개 순차, 소스마다 design.inv/seg 통째 읽기 +
+  요약·첫 이미지). 거대 소스에 요약이 없는 이유로 가장 유력한 것은 마크 한도 2^31(21.5억; 평탄 파일은 도형당
+  마크 하나) 초과의 `none:work`이고, 덤프 확인은 현장 복귀 뒤(미확인). 네 수정은 어느 한도가 걸렸든 유효하다.
+- **수정 1: 마크 한도 기본 2^36, `floe2 index`가 한도를 전달.** `occupancy::DEFAULT_MAX_WORK` 2^31 → 2^36
+  (측정 80 M marks/s에서 레이어 하나의 마킹 상한 약 15분; 25억 마크 ≈ 30 s). `floe2 index --occupancy-max-work N
+  --occupancy-max-bytes N[K|M|G]`가 floe-index light/vfs에 그대로 간다(`IndexOptions::occupancy_max_work/_bytes`,
+  `occupancy_args`; floe-index 쪽 `--occupancy-max-bytes`도 접미사를 받는다). 요약 없는 레이어의 빌드 로그 줄에
+  올릴 옵션을 덧붙이고(`occupancy::status_hint`: `… none:work (work N) - over --occupancy-max-work M marks (a flat
+  file marks once per shape: raise it)`), 파일 전체 none:cells도 한 줄 남긴다(`none_cells_note`; 전에는 무음이라
+  빌드 로그 grep으로는 못 찾았다).
+- **수정 2: 자동 기준 셀이 한도를 본다.** `occupancy::auto_base_um(span_x, span_y, layers, max_cells, max_bytes)`
+  → (셀, 사유): 2026-09-16 규칙(`auto_base_um_for_span`)의 첫 선택이 셀 상한(레이어당 2^30)이나 레이어당 평면
+  하나 × 레이어 수가 크기 상한을 넘으면 사다리(남은 4/2 µm 후보, 그다음 `AUTO_COARSE_UM` 8/16/32)에서 맞는
+  첫 셀로 올라간다(`AutoWhy::Cells/Size`; 로그 `cell=8um (8000 dbu, auto for the cell cap)`); 32 µm도 넘으면
+  종전대로 none:cells. 152.4 mm 레티클 전체 bbox: 4 µm에서 38,100² = 14.5억 > 2^30 → 8 µm 3.6억 셀(평면 45 MB);
+  131 mm까지는 4 µm 그대로. 인메모리·스트리밍 빌드 모두, `DeckSource::summary_pending`도 같은 함수(기본 한도)로
+  판정한다. 한계: 깊이 평면 수는 마킹 전에 모르므로 크기 상한은 레이어당 평면 하나로만 본다(sample9의 38~40
+  레이어 none:size는 그대로다).
+- **수정 3: 전체 깊이의 prune (P1).** `DeckSource::prune_summary_for` = `prune_summary_when(frames, depth,
+  max_depth)`: frames off이거나 depth가 무제한 또는 소스의 계층 높이 이상이면 요약된 서브트리를 걷지 않는다
+  (프레임은 hier.rs `frame_depth_boundary`의 r == 0에서만 나오므로 거기서는 나올 수 없다; 제한 깊이는 종전대로
+  걷는다). 합성 덱 8소스(sample9 ×8 하드링크, 1200 px fit 캡처): frames on 2.37 s·fill 32 round → 0.05 s·0 round,
+  frames off 0.04 s·0 round; 세 PNG md5 동일(`d98e4f72…`). 현장 27 s의 몫.
+- **수정 4: 덱 open 병렬 (P4).** `Deck::open_with(spec, budget, jobs)`: 소스를 `jobs`개 워커가 연다
+  (`open_sources`: 스펙 순서 보존, 순서상 첫 실패가 오류, 실패 뒤 새 open 없음); renderd가 `open … jobs=`를 넘기고
+  `FLOE_RUST_DECK_OPEN_JOBS`가 덮어쓴다(1 = 직렬, 진단). 합성 64 경량 소스(요약 없음, `--px 100` 캡처 = 사실상
+  open뿐, exit 3): 직렬 0.62 s → 4 jobs 0.28 → 8 jobs 0.24 s(프로세스 전체 벽시계, 로컬 SSD). 현장의 34 s는 NFS
+  읽기와 큰 design.seg라 비율은 다를 수 있다. 병렬 open의 일시 디스크립터(소스마다 design.inv·seg 통째 읽기,
+  lease)는 직렬의 workers 배라 열린 파일 한도가 작은 호스트에서는 거절된다(배터리 439: 게이트 index_lock K7,
+  `ulimit -n 32`에 40 소스가 `Too many open files`): 그 오류(`is_too_many_open_files`)를 만나면 워커를 멈추고
+  남은 소스를 종전처럼 하나씩 연다.
+- **재현(한 소스).** `floe-index light SRC --out DIR --occupancy-only --occupancy-max-work 1000000`: 레이어 1/0
+  (마크 3,043,564) → `none:work (work 1025923) - over --occupancy-max-work 1000000 marks …` → 덱 캡처 0.33 s,
+  fill 4 round(페이지 경로); 기본 한도로 재생성 → ok → 0.03 s, 0 round.
+- **게이트·시험.** 단위: occupancy.rs `the_automatic_base_cell_climbs_for_the_caps`(규칙 표 + build에서 셀 상한
+  1 M/100 k/10 k → 8 µm/32 µm/none:cells, 명시 셀 불변), deck.rs `summarized_subtrees_are_pruned_whenever_no_frame_can_appear`,
+  light.rs `a_deck_opens_its_light_sources_in_parallel_in_order`(7 소스, jobs 1/4/16에서 순서 동일, 빠진 소스
+  둘 중 앞의 것이 오류), app-core `the_summary_caps_go_to_floe_index_as_given`, app-cli
+  `the_summary_caps_are_options_of_index`. 게이트 `occupancy`: 자동 셀의 상한 사례(1 M → 4 µm, 100 k → 8 µm,
+  크기 500 kB → 2 µm, 명시 1 µm + 100 k → none:cells와 그 로그 줄), limits 시험(명시 셀 + 10 셀 → none:cells,
+  자동 → 16 µm ok, none:work/none:size 줄의 안내, `1K`, `4X` 거절), `test_the_app_forwards_the_summary_caps`;
+  게이트 `jobdeck` FullDepthPruneTests: 네 단계 사슬 픽스처 `deep.oas`(단계마다 광역 cut 위의 1/0 상자 하나,
+  `build_deep_oas`)를 경량 캐시 + 요약으로 색인하고 prefill을 끈 채(`FLOE_LIGHT_PREFILL_PLACES=0`: 펼친 셀마다
+  round 하나) `floe2 render --detail medium --occupancy on`: 전체 깊이의 frames on/off 모두 `[light] round` 0
+  (0.12.394는 frames on에서 단계마다 하나, 3 round)이고 두 PNG 바이트 동일; depth 1은 프레임이 그려지고(두 그림이
+  다름) round 수는 on/off 같다. 게이트 픽스처가 작아 오라클 워커 경로의 `light_rounds`(열기의 첫 채움 1)로는
+  구별되지 않아 CLI 캡처와 round 줄로 잡았다.
+- **현장 확인 절차.** 복귀 뒤 두 거대 캐시의 `floe-index occupancy DIR` 덤프에서 `status=`·`work=`(경량 캐시의
+  `identity=mismatch`/`identity_error=design.ovm …`는 표시 문제). 수정판으로 `floe2 index deck.jb --jobs 12`를
+  돌리면 그 두 소스의 로그에 `[vfs] occupancy cell=… ok=…`와 ok 레이어가 찍히고(없어진 요약만 다시 만든다),
+  상태줄은 `summary 268 passes`, 첫 화면은 open 수 초 + 요약 그리기가 된다. 여전히 `none:work`면 `floe2 index
+  deck.jb --occupancy-only --occupancy-max-work 274877906944`처럼 올린다.
+- **정정.** `floe2 view --render-debug`는 현재 아무것도 찍지 않는다(gui.py에서 미사용, 뷰 컨트롤러가 debug를 끔);
+  긴 perf 줄의 `, K passes without summary`가 nofile/invalid/near/layers 거부 수다(depth/off/exact는 무음).
 
 ## 9. 검토한 대안
 

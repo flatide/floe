@@ -1660,7 +1660,8 @@ fn handle_open(
         let opened = std::fs::read_to_string(spec_path)
             .map_err(|error| format!("read deck spec {spec_path}: {error}"))
             .and_then(|text| DeckSpec::parse(&text))
-            .and_then(|spec| Deck::open(spec, budget_bytes));
+            // the sources open `jobs` at a time (DIRECT_READ_PLAN §8.18)
+            .and_then(|spec| Deck::open_with(spec, budget_bytes, usize::from(command.jobs)));
         match opened {
             Ok(deck) => {
                 let info = deck.info();

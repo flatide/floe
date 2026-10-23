@@ -82,7 +82,7 @@ floe-index vfs <src.oas> [outdir=.<src>.ice] [--jobs N] [--plan-batch N]
     [--encode-batch N] [--page-target-mb N] [--no-lod] [--no-page-occupancy]
     [--coverage | --coverage-only] [--frontier-only] [--kill-at P]
     [--occupancy | --occupancy-only] [--occupancy-um F] [--occupancy-balance 0|1]
-    [--occupancy-max-cells N] [--occupancy-max-work N] [--occupancy-max-bytes N]
+    [--occupancy-max-cells N] [--occupancy-max-work N] [--occupancy-max-bytes N[K|M|G]]
     [--slow-cell-s S] [--p2-shard-limit-mb N] [--stream | --in-memory] [--mem GiB]
     [--profile-cell NAME | --profile-cell-ci N]
     [--profile-jobs N,N,...] [--profile-repeat N]
@@ -628,11 +628,19 @@ floe-index svrf <deck> [-o OUT] [--scan] [-D NAME[=VAL]]… [-I DIR]… [--follo
   0.5 s 이상이면 `L/D prepared: U units workers=N (Ts)`를 출력한다. 하트비트는
   종료 채널로 즉시 깨운다(이전 sleep+join은 짧은 레이어마다 최대 250 ms 대기).
 - 상한(레이어 단위, 근사 저장 없음): level 0 셀 수 > `--occupancy-max-cells`
-  (기본 2^30)면 모든 레이어 `none:cells`(파일은 만들어져 이유를 남김);
-  마킹 작업(켠 셀 + 멤버 + 변 행) > `--occupancy-max-work`(기본 2^31)면 그
-  레이어 `none:work`; 누적 비트맵 바이트가 `--occupancy-max-bytes`(기본 1 GiB)를
-  넘는 순서부터 `none:size`(`empty`·`none:*` 레이어는 자리를 차지하지 않는다). 세 옵션은 게이트용 명시 CLI 상태다(`--kill-at`과
-  같은 규칙, 환경변수 없음).
+  (기본 2^30)면 모든 레이어 `none:cells`(파일은 만들어져 이유를 남기고, 빌드 로그에
+  `every layer none:cells: WxH cells at Uum exceed --occupancy-max-cells N` 한 줄);
+  마킹 작업(켠 셀 + 멤버 + 변 행) > `--occupancy-max-work`(기본 **2^36**; 0.12.394까지
+  2^31 — 평탄한 EBEAM 파일은 도형 하나가 마크 하나라 현장의 가장 큰 소스가 한
+  레이어에서 넘었다, DIRECT_READ_PLAN §8.18)면 그 레이어 `none:work`; 누적 비트맵
+  바이트가 `--occupancy-max-bytes`(기본 1 GiB, K/M/G 접미사)를 넘는 순서부터
+  `none:size`(`empty`·`none:*` 레이어는 자리를 차지하지 않는다). 요약 없는 레이어의
+  로그 줄은 올릴 옵션을 덧붙인다(`… none:work (work N) - over --occupancy-max-work M
+  marks …`). 자동 기준 셀(`--occupancy-um` 생략)은 첫 선택의 격자가 셀 상한을, 또는
+  레이어당 평면 하나가 크기 상한을 넘으면 4/8/16/32 µm으로 굵어진다
+  (`occupancy::auto_base_um`; 로그 `cell=8um (8000 dbu, auto for the cell cap)`).
+  세 옵션은 `floe2 index`가 그대로 전달한다(`--occupancy-max-work`, `--occupancy-max-bytes`;
+  환경변수 없음).
 - 게시: `design.ovo.tmp` 작성·fsync 뒤 rename. `--kill-at occupancy-tmp`는 rename
   직전에 죽는 게이트 훅(이전 파일 보존, tmp 잔존). 다음 실행은 시작 시 tmp를
   지우고, Python 래퍼(`floe2 index`)는 자식이 실패·중단되면 tmp를 지운다.

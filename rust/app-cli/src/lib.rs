@@ -135,6 +135,10 @@ const INDEX_HELP: &str = "Usage: floe2-web index SOURCE [OPTIONS]
   --occupancy-um UM          Positive base cell; default chip-size adaptive
   --occupancy-balance 0|1    Marking work split; default 1, byte-neutral diagnostic
   --occupancy-prune 0|1      Sub-cell bbox marking; default 1, 0 walks exact geometry
+  --occupancy-max-work N     Marks per layer before it has no summary (none:work);
+                             default 2^36 - a flat file marks once per shape
+  --occupancy-max-bytes N    Bitmap bytes per file before the rest has none (none:size);
+                             default 1G; K/M/G suffixes
   --representatives          Add bounded representative points (plain layout only)
   --representatives-only     Rebuild only points on a current cache
   --representatives-points N Group sample cap, 1..4194304; implies representatives
@@ -353,6 +357,12 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
                     _ => return Err(Error::input("occupancy-prune must be 0 or 1")),
                 });
             }
+            "--occupancy-max-work" => {
+                options.occupancy_max_work = Some(number(value()?, flag)?);
+            }
+            "--occupancy-max-bytes" => {
+                options.occupancy_max_bytes = Some(byte_count(value()?, flag)?);
+            }
             "--slow-cell-s" => options.slow_cell_s = Some(number(value()?, flag)?),
             "--p2-shard-limit-mb" => options.p2_shard_limit_mb = Some(number(value()?, flag)?),
             "--stream" => {
@@ -464,6 +474,26 @@ pub(crate) fn shell_join<S: AsRef<std::ffi::OsStr>>(words: &[S]) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
+/// a byte count with an optional K/M/G/T suffix (as floe-index reads
+/// `--occupancy-max-bytes` and `--seg-bytes`), to the number floe-index gets
+fn byte_count(s: &str, flag: &str) -> Result<u64> {
+    let t = s.trim();
+    let t = t.strip_suffix("iB").or_else(|| t.strip_suffix('B')).unwrap_or(t);
+    let (digits, mult) = match t.chars().last() {
+        Some('k' | 'K') => (&t[..t.len() - 1], 1u64 << 10),
+        Some('m' | 'M') => (&t[..t.len() - 1], 1u64 << 20),
+        Some('g' | 'G') => (&t[..t.len() - 1], 1u64 << 30),
+        Some('t' | 'T') => (&t[..t.len() - 1], 1u64 << 40),
+        _ => (t, 1u64),
+    };
+    digits
+        .parse::<u64>()
+        .ok()
+        .and_then(|n| n.checked_mul(mult))
+        .filter(|&n| n > 0)
+        .ok_or_else(|| Error::input(format!("{flag} needs a byte count (e.g. 4G)")))
+}
+
 fn number<T: std::str::FromStr>(s: &str, flag: &str) -> Result<T> {
     s.parse()
         .map_err(|_| Error::input(format!("invalid numeric value for {flag}: {s}")))
@@ -692,6 +722,34 @@ pub fn main(host: &'static Host, args: Vec<OsString>) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn the_summary_caps_are_options_of_index() {
+        let Cli::Index(_, o, _, _) = parsed(&[
+            "index",
+            "x",
+            "--occupancy-max-work",
+            "68719476736",
+            "--occupancy-max-bytes",
+            "4G",
+        ])
+        .unwrap() else {
+            panic!("index")
+        };
+        assert_eq!(o.occupancy_max_work, Some(1 << 36));
+        assert_eq!(o.occupancy_max_bytes, Some(4 << 30));
+        for (text, bytes) in [("512", 512u64), ("64K", 64 << 10), ("3m", 3 << 20), ("2GiB", 2 << 30), ("1T", 1 << 40)] {
+            assert_eq!(byte_count(text, "--occupancy-max-bytes").unwrap(), bytes, "{text}");
+        }
+        for args in [
+            &["index", "x", "--occupancy-max-bytes", "0"][..],
+            &["index", "x", "--occupancy-max-bytes", "4X"],
+            &["index", "x", "--occupancy-max-work", "-1"],
+            &["index", "x", "--occupancy-max-work"],
+        ] {
+            assert!(parsed(args).is_err(), "{args:?}");
+        }
+    }
+
     fn parsed(args: &[&str]) -> Result<Cli> {
         parse(args.iter().map(OsString::from))
     }
