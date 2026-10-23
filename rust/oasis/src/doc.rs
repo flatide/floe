@@ -523,9 +523,18 @@ fn coord(c: &mut Cur, modal_v: &mut i64, relative: bool) -> Result<()> {
 
 // --------------------------------------------------------------- parser
 
-struct Builder {
+struct Builder<'k> {
     cells: Vec<Cell>,
     by_name: HashMap<String, usize>,
+    /// the cells whose records are kept (a range parsed for some of its
+    /// cells: `parse_cell_bytes_keeping`, the marking pass of the
+    /// streaming occupancy); None keeps every cell. The records of a cell
+    /// not kept are parsed - the modal state goes on through them - and
+    /// not materialized: `skip` while the current cell is one, `skipped`
+    /// the records so left
+    keep: Option<&'k (dyn Fn(CellId<'_>) -> bool + Sync)>,
+    skip: bool,
+    skipped: u64,
     refnames: HashMap<u64, String>,
     implicit_ref: u64,
     textstrings: HashMap<u64, String>,
@@ -618,7 +627,7 @@ pub(crate) fn resolved_layer_names(
     (names, aliases)
 }
 
-impl Builder {
+impl<'k> Builder<'k> {
     fn cell_index(&mut self, name: &str) -> usize {
         if let Some(&i) = self.by_name.get(name) {
             return i;
@@ -711,21 +720,28 @@ fn parse_records(
                 });
             }
             13 | 14 => {
-                let name = if id == 13 {
+                let (name, kept) = if id == 13 {
                     let r = c.uint()?;
-                    match b.refnames.get(&r) {
-                        Some(n) => n.clone(),
-                        // name table may come later in the stream:
-                        // use a placeholder key tied to the refnum
-                        None => format!("\u{1}ref{}", r),
-                    }
+                    let kept = b.keep.map_or(true, |keep| keep(CellId::Ref(r)));
+                    (
+                        match b.refnames.get(&r) {
+                            Some(n) => n.clone(),
+                            // name table may come later in the stream:
+                            // use a placeholder key tied to the refnum
+                            None => format!("\u{1}ref{}", r),
+                        },
+                        kept,
+                    )
                 } else {
-                    {
-                        let sb = c.string()?.to_vec();
-                        utf8(c, &sb)?
-                    }
+                    let sb = c.string()?.to_vec();
+                    let name = utf8(c, &sb)?;
+                    let kept = b.keep.map_or(true, |keep| keep(CellId::Name(&name)));
+                    (name, kept)
                 };
                 b.cur = Some(b.cell_index(&name));
+                // (a cell not kept: its records are parsed, the modal state
+                // goes on, and nothing of them is materialized)
+                b.skip = !kept;
                 *m = Modal::default();
             }
             15 => m.relative = false,
@@ -763,16 +779,20 @@ fn parse_records(
                     Some(t) => t.clone(),
                     None => return err(c.here(), "placement without cell"),
                 };
-                let slot = b.cells[cur].places.len();
-                b.cells[cur].places.push(PlaceRec {
-                    cell: usize::MAX,
-                    x: m.pl_x,
-                    y: m.pl_y,
-                    rot,
-                    flip,
-                    rep,
-                });
-                b.pending.push((cur, slot, tgt));
+                if b.skip {
+                    b.skipped += 1;
+                } else {
+                    let slot = b.cells[cur].places.len();
+                    b.cells[cur].places.push(PlaceRec {
+                        cell: usize::MAX,
+                        x: m.pl_x,
+                        y: m.pl_y,
+                        rot,
+                        flip,
+                        rep,
+                    });
+                    b.pending.push((cur, slot, tgt));
+                }
             }
             18 => return err(c.here(), "magnified/angled placement: \
                                         out of spike scope"),
@@ -821,25 +841,31 @@ fn parse_records(
                             Some(s) => s.clone(),
                             None => {
                                 // string table may come later
-                                b.pending_texts.push((
-                                    cur,
-                                    b.cells[cur].texts.len(),
-                                    *r,
-                                ));
+                                if !b.skip {
+                                    b.pending_texts.push((
+                                        cur,
+                                        b.cells[cur].texts.len(),
+                                        *r,
+                                    ));
+                                }
                                 String::new()
                             }
                         }
                     }
                     None => return err(c.here(), "text without string"),
                 };
-                b.cells[cur].texts.push(TextRec {
-                    layer: l,
-                    dt: d,
-                    x: m.tx_x,
-                    y: m.tx_y,
-                    rep,
-                    s,
-                });
+                if b.skip {
+                    b.skipped += 1;
+                } else {
+                    b.cells[cur].texts.push(TextRec {
+                        layer: l,
+                        dt: d,
+                        x: m.tx_x,
+                        y: m.tx_y,
+                        rep,
+                        s,
+                    });
+                }
             }
             20 => {
                 let info = c.byte()?;
@@ -884,15 +910,19 @@ fn parse_records(
                     _ => return err(c.here(), "rect before layer modal"),
                 };
                 b.reg_layer(l, d);
-                b.cells[cur].rects.push(RectRec {
-                    layer: l,
-                    dt: d,
-                    x: m.geo_x,
-                    y: m.geo_y,
-                    w,
-                    h,
-                    rep,
-                });
+                if b.skip {
+                    b.skipped += 1;
+                } else {
+                    b.cells[cur].rects.push(RectRec {
+                        layer: l,
+                        dt: d,
+                        x: m.geo_x,
+                        y: m.geo_y,
+                        w,
+                        h,
+                        rep,
+                    });
+                }
             }
             21 => {
                 let info = c.byte()?;
@@ -929,11 +959,15 @@ fn parse_records(
                     Some(p) => p,
                     None => return err(c.here(), "poly without points"),
                 };
-                let pts = deltas
-                    .iter()
-                    .map(|(dx, dy)| (m.geo_x + dx, m.geo_y + dy))
-                    .collect();
-                b.cells[cur].polys.push(PolyRec { layer: l, dt: d, pts, rep });
+                if b.skip {
+                    b.skipped += 1;
+                } else {
+                    let pts = deltas
+                        .iter()
+                        .map(|(dx, dy)| (m.geo_x + dx, m.geo_y + dy))
+                        .collect();
+                    b.cells[cur].polys.push(PolyRec { layer: l, dt: d, pts, rep });
+                }
             }
             22 => {
                 // PATH: EWPXYRDL
@@ -997,19 +1031,23 @@ fn parse_records(
                     Some(p) => p,
                     None => return err(c.here(), "path without points"),
                 };
-                let pts = deltas
-                    .iter()
-                    .map(|(dx, dy)| (m.geo_x + dx, m.geo_y + dy))
-                    .collect();
-                b.cells[cur].paths.push(PathRec {
-                    layer: l,
-                    dt: d,
-                    pts,
-                    hw,
-                    es,
-                    ee,
-                    rep,
-                });
+                if b.skip {
+                    b.skipped += 1;
+                } else {
+                    let pts = deltas
+                        .iter()
+                        .map(|(dx, dy)| (m.geo_x + dx, m.geo_y + dy))
+                        .collect();
+                    b.cells[cur].paths.push(PathRec {
+                        layer: l,
+                        dt: d,
+                        pts,
+                        hw,
+                        es,
+                        ee,
+                        rep,
+                    });
+                }
             }
             23..=25 => {
                 // TRAPEZOID: OWHXYRDL; 23 carries delta-a and delta-b,
@@ -1055,8 +1093,12 @@ fn parse_records(
                 b.reg_layer(l, d);
                 let pts = dedupe_ring(trapezoid_points(info & 0x80 != 0, w, h, da, db));
                 if pts.len() >= 3 {
-                    let pts = pts.into_iter().map(|(dx, dy)| (m.geo_x + dx, m.geo_y + dy)).collect();
-                    b.cells[cur].polys.push(PolyRec { layer: l, dt: d, pts, rep });
+                    if b.skip {
+                        b.skipped += 1;
+                    } else {
+                        let pts = pts.into_iter().map(|(dx, dy)| (m.geo_x + dx, m.geo_y + dy)).collect();
+                        b.cells[cur].polys.push(PolyRec { layer: l, dt: d, pts, rep });
+                    }
                 }
             }
             26 => {
@@ -1119,8 +1161,12 @@ fn parse_records(
                 b.reg_layer(l, d);
                 let pts = dedupe_ring(pts);
                 if pts.len() >= 3 {
-                    let pts = pts.into_iter().map(|(dx, dy)| (m.geo_x + dx, m.geo_y + dy)).collect();
-                    b.cells[cur].polys.push(PolyRec { layer: l, dt: d, pts, rep });
+                    if b.skip {
+                        b.skipped += 1;
+                    } else {
+                        let pts = pts.into_iter().map(|(dx, dy)| (m.geo_x + dx, m.geo_y + dy)).collect();
+                        b.cells[cur].polys.push(PolyRec { layer: l, dt: d, pts, rep });
+                    }
                 }
             }
             27 => {
@@ -1183,12 +1229,16 @@ fn parse_records(
                 };
                 if r > 0 {
                     b.reg_layer(l, d);
-                    b.cells[cur].polys.push(PolyRec {
-                        layer: l,
-                        dt: d,
-                        pts: circle64(m.geo_x, m.geo_y, r),
-                        rep,
-                    });
+                    if b.skip {
+                        b.skipped += 1;
+                    } else {
+                        b.cells[cur].polys.push(PolyRec {
+                            layer: l,
+                            dt: d,
+                            pts: circle64(m.geo_x, m.geo_y, r),
+                            rep,
+                        });
+                    }
                 }
                 // r == 0 defines no geometry; a 1-point "polygon"
                 // would not survive the page re-encode - skip
@@ -1603,10 +1653,13 @@ pub fn normalize_cells(cells: &mut [Cell], jobs: usize) {
 
 const MAGIC: &[u8] = b"%SEMI-OASIS\r\n";
 
-fn new_builder(implicit_ref: u64, implicit_tref: u64) -> Builder {
+fn new_builder(implicit_ref: u64, implicit_tref: u64) -> Builder<'static> {
     Builder {
         cells: Vec::new(),
         by_name: HashMap::new(),
+        keep: None,
+        skip: false,
+        skipped: 0,
         refnames: HashMap::new(),
         implicit_ref,
         textstrings: HashMap::new(),
@@ -1691,6 +1744,15 @@ pub struct CellPiece {
     pub cell: Cell,
 }
 
+/// what a CELL record says of its cell: a name, or a CELLNAME reference
+/// (`parse_cell_bytes_keeping` decides by it whether the cell's records
+/// are kept)
+#[derive(Clone, Copy, Debug)]
+pub enum CellId<'a> {
+    Name(&'a str),
+    Ref(u64),
+}
+
 /// Parse one byte range of the file - a visible CELL record's range, or
 /// the head before the first one - into the cells it defines, with
 /// placement targets resolved to Doc indices and text strings resolved
@@ -1733,13 +1795,46 @@ pub fn parse_cell_bytes(
     textstring_base: u64,
     tables: &CellTables,
 ) -> Result<Vec<CellPiece>> {
+    parse_cell_bytes_keeping(bytes, base, cellname_base, textstring_base, tables, &|_| true).map(|(p, _)| p)
+}
+
+/// `parse_cell_bytes` keeping the records of the cells `wanted` says
+/// yes to (by Doc index, resolved through the tables as `pieces_of`
+/// resolves a piece): the other cells' records are parsed - a record
+/// changes the modal state the next ones read, so none is skipped - and
+/// not materialized, their pieces come out empty, and the second value
+/// counts them. The marking pass of the streaming occupancy parses a
+/// set's range for the cells its group needs alone (the review of
+/// 0.12.393, 2026-10-23: a range's big cells of another layer were
+/// materialized and dropped by every marker at once, past the budget).
+/// A cell the tables do not name is kept (for `pieces_of` to report).
+pub fn parse_cell_bytes_keeping(
+    bytes: &[u8],
+    base: u64,
+    cellname_base: u64,
+    textstring_base: u64,
+    tables: &CellTables,
+    wanted: &(dyn Fn(usize) -> bool + Sync),
+) -> Result<(Vec<CellPiece>, u64)> {
     let start = base as usize;
     let mut c = Cur::new(bytes, start);
     let mut m = Modal::default();
+    let keep = |id: CellId<'_>| -> bool {
+        let name: Option<&str> = match id {
+            CellId::Name(n) => Some(n),
+            CellId::Ref(r) => tables.cellnames.get(&r).map(|s| s.as_str()),
+        };
+        match name.and_then(|n| tables.cell_index.get(n)) {
+            Some(&i) => wanted(i),
+            None => true,
+        }
+    };
     let mut b = new_builder(cellname_base, textstring_base);
+    b.keep = Some(&keep);
     // depth 1: a range ends without an END record
     parse_records(&mut c, &mut m, &mut b, 1)?;
-    pieces_of(b, start, tables)
+    let skipped = b.skipped;
+    Ok((pieces_of(b, start, tables)?, skipped))
 }
 
 /// the list fields of a segment's snapshot as bytes (segments.rs
@@ -2092,6 +2187,68 @@ fn finish_inner(mut b: Builder) -> Result<Doc> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// a range parsed for some of its cells (`parse_cell_bytes_keeping`):
+    /// the kept cells' pieces are the whole parse's, record for record,
+    /// the other cells' pieces are empty and their records counted - over
+    /// every range of streams with cells inside CBLOCKs, cells re-opened
+    /// in another's range, a cell in the head's CBLOCK, tables after the
+    /// cells, texts, chains and pairs
+    #[test]
+    fn a_range_parsed_for_some_cells_keeps_their_records_alone() {
+        use crate::inventory::fixtures;
+        let records = |c: &Cell| c.rects.len() + c.polys.len() + c.paths.len() + c.places.len() + c.texts.len();
+        for (tag, data) in [
+            ("adversarial", fixtures::adversarial(false, true)),
+            ("tables-first", fixtures::adversarial(true, true)),
+            ("dup", fixtures::dup_in_range()),
+            ("head", fixtures::head_cblock_cell()),
+            ("one-cblock", fixtures::cells_in_one_cblock(4)),
+            ("twice", fixtures::cells_defined_twice(3)),
+            ("chain", fixtures::cells_chained(3, 4)),
+            ("layered", fixtures::cells_layered_chain(3, 4)),
+            ("pairs", fixtures::cells_paired(3, 4)),
+            ("labelled", fixtures::labelled_tree()),
+        ] {
+            let inv = crate::inventory(&data, 1).expect("inventory");
+            let index = inv.cell_index();
+            let tables = CellTables::new(&inv.cellnames, &inv.textstrings, &index);
+            let mut ranges: Vec<&CellRange> = vec![&inv.head];
+            ranges.extend(inv.cells.iter().flat_map(|c| c.ranges.iter()));
+            let mut checked = 0usize;
+            for r in ranges {
+                let whole = parse_cell_range(&data, r, &tables).expect("whole");
+                let bytes = &data[r.start as usize..r.end as usize];
+                let (all, none) =
+                    parse_cell_bytes_keeping(bytes, r.start, r.cellname_base, r.textstring_base, &tables, &|_| true).expect("keeping all");
+                assert_eq!(none, 0, "{}: keeping every cell skips nothing", tag);
+                assert!(
+                    all.len() == whole.len() && all.iter().zip(&whole).all(|(a, b)| a.index == b.index && a.cell == b.cell),
+                    "{}: keeping every cell is the whole parse",
+                    tag
+                );
+                let defined: std::collections::BTreeSet<usize> = whole.iter().map(|p| p.index).collect();
+                for keep in defined {
+                    let (some, skipped) =
+                        parse_cell_bytes_keeping(bytes, r.start, r.cellname_base, r.textstring_base, &tables, &|i| i == keep).expect("keeping one");
+                    assert_eq!(some.len(), whole.len(), "{}: a piece per cell either way", tag);
+                    let mut others = 0usize;
+                    for (p, q) in some.iter().zip(&whole) {
+                        assert_eq!(p.index, q.index, "{}", tag);
+                        if p.index == keep {
+                            assert!(p.cell == q.cell, "{}: the kept cell {} differs", tag, q.cell.name);
+                        } else {
+                            assert_eq!(records(&p.cell), 0, "{}: cell {} kept beside {}", tag, q.cell.name, keep);
+                            others += records(&q.cell);
+                        }
+                    }
+                    assert_eq!(skipped as usize, others, "{}: the other cells' records counted", tag);
+                    checked += 1;
+                }
+            }
+            assert!(checked > 0, "{}", tag);
+        }
+    }
 
     #[test]
     fn layer_aliases_apply_intervals_and_last_alias_wins() {

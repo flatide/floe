@@ -24,7 +24,7 @@
 //! order either way.
 
 use crate::cellstore::{CellRef, CellStore};
-use floe_oasis::doc::{normalize_cells, parse_cell_bytes, Cell, CellPiece, CellTables, PlaceRec};
+use floe_oasis::doc::{normalize_cells, parse_cell_bytes, parse_cell_bytes_keeping, Cell, CellPiece, CellTables, PlaceRec};
 use floe_oasis::inventory::Inventory;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -116,6 +116,8 @@ pub struct StreamStore {
     /// set (`shared_def_of`)
     shared: Vec<SharedDef>,
     shared_of: Vec<Option<u32>>,
+    /// every set's ranges in file order: (range, set, position in the set)
+    shared_ranges: Vec<(usize, usize, usize)>,
     st: Mutex<State>,
     cv: Condvar,
 }
@@ -334,6 +336,12 @@ impl StreamStore {
             }
             shared.push(SharedDef { ranges: rs, cells, defines: defs });
         }
+        let mut shared_ranges: Vec<(usize, usize, usize)> = shared
+            .iter()
+            .enumerate()
+            .flat_map(|(si, d)| d.ranges.iter().enumerate().map(move |(k, &ri)| (ri, si, k)))
+            .collect();
+        shared_ranges.sort_unstable();
         // the smallest budget the file streams under: the largest cell, the
         // largest range (a range defining several cells - CELL records
         // inside a CBLOCK of another cell's range - is parsed whole, its
@@ -415,6 +423,7 @@ impl StreamStore {
                 min_budget,
                 shared,
                 shared_of,
+                shared_ranges,
                 st: Mutex::new(State {
                     slots,
                     keep: None,
@@ -567,7 +576,8 @@ impl StreamStore {
         let mut pieces: Vec<(usize, Cell)> = Vec::new();
         for &start in &c.def_ranges {
             let ri = self.range_index(start, &c.name)?;
-            for p in self.read_range(ri, buf, &tables)? {
+            // (the range's other cells, when it has any, are not kept)
+            for p in self.read_range(ri, buf, &tables, &|c| c == ci)?.0 {
                 if p.index == ci {
                     pieces.push((ri, p.cell));
                 }
@@ -612,8 +622,17 @@ impl StreamStore {
     }
 
     /// range `ri` read by pread into `buf` and parsed as the readers parse
-    /// it: the pieces of every cell it defines
-    fn read_range(&self, ri: usize, buf: &mut Vec<u8>, tables: &CellTables) -> Result<Vec<CellPiece>, String> {
+    /// it, keeping the records of the cells `wanted` says yes to (the
+    /// others' are parsed and not materialized, `parse_cell_bytes_keeping`):
+    /// the pieces of every cell it defines - empty for a cell not wanted -
+    /// and the records not kept
+    fn read_range(
+        &self,
+        ri: usize,
+        buf: &mut Vec<u8>,
+        tables: &CellTables,
+        wanted: &(dyn Fn(usize) -> bool + Sync),
+    ) -> Result<(Vec<CellPiece>, u64), String> {
         let r = &self.ranges[ri];
         let len = (r.end - r.start) as usize;
         buf.clear();
@@ -621,7 +640,7 @@ impl StreamStore {
         self.file
             .read_exact_at(buf, r.start)
             .map_err(|e| format!("read {}..{}: {}", r.start, r.end, e))?;
-        parse_cell_bytes(buf, r.start, r.cellname_base, r.textstring_base, tables)
+        parse_cell_bytes_keeping(buf, r.start, r.cellname_base, r.textstring_base, tables, wanted)
             .map_err(|e| format!("range {}..{}: {}", r.start, r.end, e))
     }
 
@@ -646,18 +665,42 @@ impl StreamStore {
     }
 
     /// Range `ri` read by pread into `buf` and parsed as the readers parse
-    /// it (a set's range, the marking pass): the pieces of every cell it
-    /// defines, (cell index, piece) in file order, and the bytes read. The
-    /// caller files them cell by cell and joins a cell's pieces when its
-    /// last range is parsed (`joined`), as the reader pool does, so the
-    /// pieces resident at a time are the cells open between their
-    /// definitions - the file's multi-definition span (`min_budget`) - not
-    /// the set's cells all together.
-    pub fn parse_range(&self, ri: usize, buf: &mut Vec<u8>) -> Result<(Vec<(usize, Cell)>, u64), String> {
+    /// it (a set's range, the marking pass), keeping the records of the
+    /// cells `wanted` says yes to - the others' are parsed, as the modal
+    /// state runs through them, and not materialized (the review of
+    /// 0.12.393: a range's big cells of another layer, made and dropped by
+    /// every marker at once, 0.12.394): the pieces of every cell it
+    /// defines, (cell index, piece) in file order - empty for a cell not
+    /// wanted - the bytes read and the records not kept. The caller files
+    /// the pieces cell by cell and joins a cell's when its last range is
+    /// parsed (`joined`), as the reader pool does, so the pieces resident
+    /// at a time are the cells open between their definitions - the file's
+    /// multi-definition span (`min_budget`) - not the set's cells all
+    /// together.
+    pub fn parse_range(
+        &self,
+        ri: usize,
+        buf: &mut Vec<u8>,
+        wanted: &(dyn Fn(usize) -> bool + Sync),
+    ) -> Result<(Vec<(usize, Cell)>, u64, u64), String> {
         let tables = CellTables::new(&self.inv.cellnames, &self.inv.textstrings, &self.cell_index);
-        let pieces = self.read_range(ri, buf, &tables)?;
+        let (pieces, skipped) = self.read_range(ri, buf, &tables, wanted)?;
         let read = buf.len() as u64;
-        Ok((pieces.into_iter().map(|p| (p.index, p.cell)).collect(), read))
+        Ok((pieces.into_iter().map(|p| (p.index, p.cell)).collect(), read, skipped))
+    }
+
+    /// every range of every set, in file order: (range, set, the range's
+    /// position in the set) - the marking pass's cursor over the sets
+    /// (markpass.rs: the sets' ranges go out in the file's order, as the
+    /// reader pool reads the file, so the cells open between their
+    /// definitions are within `min_budget`, whichever sets they are of)
+    pub fn shared_ranges(&self) -> &[(usize, usize, usize)] {
+        &self.shared_ranges
+    }
+
+    /// the sets (`shared_def` takes 0..shared_count())
+    pub fn shared_count(&self) -> usize {
+        self.shared.len()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -1033,6 +1076,8 @@ mod tests {
             ("shared", fixtures::cells_in_one_cblock(6)),
             ("twice", fixtures::cells_defined_twice(6)),
             ("chain", fixtures::cells_chained(6, 30)),
+            ("layered", fixtures::cells_layered_chain(5, 20)),
+            ("pairs", fixtures::cells_paired(5, 10)),
         ];
         for (tag, data) in cases.drain(..) {
             let dir = tmpdir(&format!("ovo-{}", tag));
@@ -1079,7 +1124,7 @@ mod tests {
                 }
                 let mut passes = 0;
                 let mut parsed = 0usize;
-                let (mut shared, mut bytes, mut peak) = (0usize, 0u64, 0u64);
+                let (mut shared, mut bytes, mut peak, mut dropped) = (0usize, 0u64, 0u64, 0u64);
                 while let Some(group) = built.begin_group(plane_budget) {
                     passes += 1;
                     let pass_budget = if tight { store.min_budget() } else { u64::MAX / 4 };
@@ -1089,6 +1134,7 @@ mod tests {
                     shared += rep.shared;
                     bytes += rep.bytes;
                     peak = peak.max(rep.peak);
+                    dropped += rep.dropped;
                     built.end_group(group, scratches);
                 }
                 // (with prune on, a stream whose top fits one grid cell is
@@ -1099,9 +1145,20 @@ mod tests {
                 // the cells inside HOST's CBLOCK come from one parse of
                 // HOST's range per group (and of their own ranges, when
                 // they have them): no range is read twice in a pass
-                if (tag == "shared" || tag == "twice" || tag == "chain") && !prune {
+                if matches!(tag, "shared" | "twice" | "chain" | "layered" | "pairs") && !prune {
                     assert!(shared >= 2, "{}: {} cells from a shared range", tag, shared);
                     assert!(bytes <= data.len() as u64 * passes as u64, "{}: {} bytes read over {} passes of a {} byte file", tag, bytes, passes, data.len());
+                }
+                // the layered chain under one layer a group: the layer-1
+                // pass parses the A's ranges, whose B's (layer 2) are not
+                // kept - their records counted, not materialized (the
+                // review of 0.12.393); under one group both are wanted
+                if tag == "layered" && !prune {
+                    if plane_budget == 1 {
+                        assert!(dropped > 0, "{}: the other layer's records left unkept", tag);
+                    } else {
+                        assert_eq!(dropped, 0, "{}: everything wanted in one group", tag);
+                    }
                 }
                 // under the tight budget - the file's multi-definition span -
                 // the markers never hold more than it: a set's ranges go out
@@ -1140,6 +1197,8 @@ mod tests {
             ("shared", fixtures::cells_in_one_cblock(5)),
             ("twice", fixtures::cells_defined_twice(5)),
             ("chain", fixtures::cells_chained(5, 20)),
+            ("layered", fixtures::cells_layered_chain(4, 10)),
+            ("pairs", fixtures::cells_paired(4, 10)),
         ];
         for (tag, data) in &cases {
             let dir = tmpdir(&format!("alone-{}", tag));
@@ -1230,7 +1289,8 @@ mod tests {
             let mut bytes = 0u64;
             let mut completed = 0usize;
             for (k, &ri) in d.ranges.iter().enumerate() {
-                let (ps, b) = store.parse_range(ri, &mut buf).expect("parse_range");
+                let (ps, b, skipped) = store.parse_range(ri, &mut buf, &|_| true).expect("parse_range");
+                assert_eq!(skipped, 0, "{}: wanting every cell keeps every record", tag);
                 bytes += b;
                 for (ci, piece) in ps {
                     assert!(d.cells.contains(&ci), "{}: range {} defines a cell outside the set", tag, ri);
@@ -1258,6 +1318,29 @@ mod tests {
             assert_eq!(completed, cells_expected, "{}: every cell complete at its last range", tag);
             assert!(pieces.is_empty(), "{}: no piece left over", tag);
             assert!(bytes > 0 && bytes < data.len() as u64, "{}", tag);
+            // a range parsed for one cell of the set keeps that cell's
+            // records alone: the others' are counted, not materialized
+            let records = |c: &Cell| c.rects.len() + c.polys.len() + c.paths.len() + c.places.len() + c.texts.len();
+            let first = d.cells[0];
+            let mut skipped_total = 0u64;
+            for &ri in &d.ranges {
+                let (all, _, _) = store.parse_range(ri, &mut buf, &|_| true).expect("parse_range");
+                let (some, _, skipped) = store.parse_range(ri, &mut buf, &|c| c == first).expect("parse_range keeping one");
+                assert_eq!(some.len(), all.len(), "{}: a piece per cell either way", tag);
+                let mut others = 0usize;
+                for ((c, p), (c2, q)) in some.iter().zip(&all) {
+                    assert_eq!(c, c2, "{}", tag);
+                    if *c == first {
+                        assert!(p == q, "{}: the kept cell's piece differs", tag);
+                    } else {
+                        assert_eq!(records(p), 0, "{}: cell {} kept beside cell {}", tag, c, first);
+                        others += records(q);
+                    }
+                }
+                assert_eq!(skipped as usize, others, "{}: the other cells' records counted", tag);
+                skipped_total += skipped;
+            }
+            assert!(skipped_total > 0, "{}: the set's other cells have records", tag);
             let _ = std::fs::remove_dir_all(&dir);
         }
     }

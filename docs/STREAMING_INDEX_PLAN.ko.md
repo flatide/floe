@@ -479,6 +479,12 @@ pread + `parse_cell_bytes` + `normalize_cells`, 리더와 같은 레코드)하�
 (거절 문구에 그 범위). 0.12.392 리뷰: 셀마다 CBLOCK이 다음 셀을 정의하는 32셀 체인(Doc 58 MB)이 마킹 예산
 4.6 MB에서 통째로 올라갔다(occupancy-only 패스 RSS 72 → 22.5 MB). 그룹 줄에 `resident peak`. 바이트 동일.
 
+**0.12.394 (DIRECT_READ_PLAN §8.17).** 집합의 범위를 파싱할 때 그룹이 쓰지 않는 셀의 레코드는 만들지 않는다
+(`floe_oasis::doc::parse_cell_bytes_keeping`: 파싱만 하고 보관하지 않음; 그룹 줄에 `records of other cells not
+kept`). 0.12.393 리뷰: 레이어 1의 작은 셀들과 레이어 2의 큰 셀들이 범위를 나눠 쓰는 파일에서 12 마커가 큰 셀들을
+만들었다 버려 예산 4.8 MB에 26.9 MB(occupancy-only RSS 12 jobs 54 → 29 MB). 집합들은 `shared_ranges`(모든 집합의
+범위, 파일 순서)의 한 커서로 함께 진행된다(0.12.393은 한 번에 하나). 바이트 동일.
+
 ### 4.7 보류
 
 `--coverage`(design.ovc)와 `--representatives`(design.ovr)는 Doc 전체를
@@ -744,3 +750,5 @@ S2 완료(0.12.365, §4.2 구현; 사용자 2026-10-19 "S2 진행해줘"): build
 - 0.12.393 (2026-10-23): 집합의 범위를 하나씩 걷고 완성된 셀부터 해제한다(상주 = 다중 정의 span, 집합
   전체가 아님); 여러 셀을 정의하는 범위의 과금도 `min_budget`에 든다 — §4.6, DIRECT_READ_PLAN §8.16.
   바이트 동일.
+- 0.12.394 (2026-10-23): 집합 범위의 파싱이 그룹이 쓰는 셀의 레코드만 보관하고(비대상 셀은 파싱만), 집합들이
+  파일 순서의 한 커서로 함께 진행된다 — §4.6, DIRECT_READ_PLAN §8.17. 바이트 동일.

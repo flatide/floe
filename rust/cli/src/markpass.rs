@@ -29,16 +29,25 @@
 //! cell is complete - joined, marked, released - when its last range is
 //! filed, as the reader pool does, so the resident pieces are the cells
 //! open between their definitions: the file's multi-definition span
-//! (`StreamStore::min_budget`, which the pass budget is at least). One
-//! set is in progress at a time (two would wait on each other's pieces).
+//! (`StreamStore::min_budget`, which the pass budget is at least). The
+//! ranges of every set go out in one file order (`StreamStore::
+//! shared_ranges`, 0.12.394), as the reader pool reads the file, so sets
+//! are in progress together as the budget allows and the span bound
+//! holds across them; a range is parsed for the cells the group needs
+//! alone - the other cells' records are parsed, as the modal state runs
+//! through them, and not materialized (`parse_cell_bytes_keeping`).
 //! Before, each cell's turn parsed every range of the cell again charging
 //! that cell alone (review 2026-10-23: a 663 KiB block of 24 cells read
 //! 24 times; the review of 0.12.391: the same when the 24 cells were
-//! defined on their own as well), and 0.12.392 parsed a set's ranges all
-//! at once charging the whole set, which a chain of CBLOCK definitions -
+//! defined on their own as well); 0.12.392 parsed a set's ranges all at
+//! once charging the whole set, which a chain of CBLOCK definitions -
 //! every cell's block defining the next, the file one set - held whole
 //! past the budget (the review of 0.12.392: a 32-cell chain, 58 MB
-//! resident under a 4.6 MB budget).
+//! resident under a 4.6 MB budget); and 0.12.393 materialized a range's
+//! every cell and dropped the ones the group did not need, so a range's
+//! big cells of another layer, charged nothing, were resident in every
+//! marker at once (the review of 0.12.393: 12 markers, 26.9 MB over a
+//! 4.8 MB budget that saw 2.9 KB) and ran one set at a time.
 //!
 //! The marks are the ones the reader-pool pass made (bits are ORs, the
 //! charges per operation, the set of operations the walk's), so the
@@ -50,7 +59,7 @@ use floe_oasis::doc::Cell;
 use floe_vfs::occupancy::{Instances, StreamGroup, StreamOcc, StreamScratch};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
 /// what one group's marking did
@@ -74,6 +83,9 @@ pub(crate) struct MarkReport {
     /// resident budget bounds it: a lone cell is at most the largest, a
     /// set's walk at most the multi-definition span)
     pub peak: u64,
+    /// records of cells the group does not parse met in a set's ranges:
+    /// parsed and not kept (`StreamStore::parse_range`)
+    pub dropped: u64,
     /// thread seconds spent parsing / marking, summed over the threads
     pub parse_s: f64,
     pub mark_s: f64,
@@ -89,6 +101,7 @@ impl MarkReport {
         self.shared_ranges += o.shared_ranges;
         self.bytes += o.bytes;
         self.peak = self.peak.max(o.peak);
+        self.dropped += o.dropped;
         self.parse_s += o.parse_s;
         self.mark_s += o.mark_s;
     }
@@ -121,6 +134,7 @@ fn need_of(occ: &StreamOcc, group: &StreamGroup, inst: &Instances<'_>, ci: usize
 }
 
 struct Admit {
+    /// the next cell in cell order (a cell of a set is the cursor's)
     next: usize,
     /// cells claimed (by their own turn, or with their set)
     claimed: Vec<bool>,
@@ -128,31 +142,41 @@ struct Admit {
     /// most it has been
     resident: u64,
     peak: u64,
-    /// the set whose ranges are going out (one at a time: the budget's
-    /// guarantee, the file's multi-definition span, is for one in-order
-    /// walk of a set's ranges)
-    active: Option<SetRun>,
+    /// the next of the sets' ranges in file order
+    /// (`StreamStore::shared_ranges`): the sets' ranges go out in the
+    /// file's order, one at a time, as the reader pool reads them, so the
+    /// cells open between their definitions - whichever sets they are of -
+    /// are within the file's multi-definition span
+    cursor: usize,
+    /// the sets the cursor has met (their cells claimed then), and the
+    /// sets with cells still to parse, mark or release
+    activated: Vec<bool>,
+    runs: HashMap<usize, SetRun>,
+    /// what will release memory without another admission: set ranges
+    /// out and not yet filed, set cells complete and being marked, lone
+    /// cells being parsed or marked
+    in_flight: usize,
+    marking: usize,
+    lone: usize,
     failed: Option<String>,
 }
 
-/// a set of cells whose definitions share ranges (`SharedDef`) in
-/// progress: its ranges go out in file order, a range at a time, and a
-/// cell completes - is joined, normalized, marked and let go - when its
-/// last range is filed, as the reader pool does; resident are the pieces
-/// of the cells opened and not yet complete, and the cells being marked
+/// a set of cells whose definitions share ranges (`SharedDef`) with
+/// cells the group parses: its ranges go out in file order, a range at a
+/// time, parsed for those cells alone, and a cell completes - is joined,
+/// normalized, marked and let go - when its last range is filed, as the
+/// reader pool does; resident are the pieces of the cells opened and not
+/// yet complete, and the cells being marked
 struct SetRun {
-    set: usize,
-    /// per range, whether a cell the group parses is defined in it (the
-    /// others are not read)
-    read: Vec<bool>,
-    /// the next range to go out; the ranges out and not yet filed; the
-    /// ranges filed (read or skipped)
-    next: usize,
-    in_flight: usize,
-    filed: usize,
-    /// the cells the group parses: their pieces so far (range position,
-    /// piece) and the ranges defining them still to file
+    /// the cells the group parses, in cell order (a range's parse keeps
+    /// their records alone)
+    wanted: Arc<Vec<usize>>,
+    /// their pieces so far (range position, piece) and the ranges
+    /// defining them still to file
     pending: HashMap<usize, Pend>,
+    /// ranges of the set not yet filed (read, or skipped as holding no
+    /// cell the group parses)
+    left: usize,
     /// cells complete and being marked (their bytes still charged)
     marking: usize,
     /// the set's share of `Admit::resident`
@@ -166,11 +190,7 @@ struct Pend {
 
 impl SetRun {
     fn done(&self) -> bool {
-        self.next >= self.read.len()
-            && self.filed == self.read.len()
-            && self.in_flight == 0
-            && self.pending.is_empty()
-            && self.marking == 0
+        self.left == 0 && self.pending.is_empty() && self.marking == 0
     }
 }
 
@@ -182,8 +202,9 @@ enum Task {
     /// marked from what is at hand
     Unparsed(Vec<(usize, Need)>),
     /// range `k` of set `si` (charged at the claim: the cells it defines
-    /// first that the group parses; released cell by cell)
-    Range(usize, usize),
+    /// first that the group parses; released cell by cell) and the cells
+    /// the group parses of the set
+    Range(usize, usize, Arc<Vec<usize>>),
 }
 
 fn fail(adm: &Mutex<Admit>, cv: &Condvar, e: String) {
@@ -194,9 +215,11 @@ fn fail(adm: &Mutex<Admit>, cv: &Condvar, e: String) {
     cv.notify_all();
 }
 
+/// a lone cell let go: its bytes off the budget
 fn release(adm: &Mutex<Admit>, cv: &Condvar, cost: u64) {
     let mut a = adm.lock().unwrap_or_else(|p| p.into_inner());
     a.resident = a.resident.saturating_sub(cost);
+    a.lone -= 1;
     cv.notify_all();
 }
 
@@ -253,16 +276,16 @@ impl Drop for StopOnDrop<'_> {
     }
 }
 
-/// the next task of a marker, or None when the group is marked (or a
-/// marker failed): the set in progress's next range when it fits the
-/// budget - or when the set alone is resident and nothing of it is out or
-/// being marked, so nothing but this range frees the budget (the set's
-/// pieces and the range are within the file's multi-definition span,
-/// `StreamStore::min_budget`, which the pass budget is at least) - else
-/// the next cell in cell order: a lone cell by its bytes (a lone cell
-/// always enters an empty budget), a cell of a set, when no set is in
-/// progress, its whole set taken in progress (the cells the group parses
-/// pending, the others marked from what is at hand); waits otherwise
+/// the next task of a marker, or None when nothing is left to claim (or
+/// a marker failed): the sets' next range in file order when it fits the
+/// budget - or when nothing is in flight at all, so nothing but this
+/// range frees memory (the sets' open pieces and the range are within the
+/// file's multi-definition span, `StreamStore::min_budget`, which the pass
+/// budget is at least: within it the case never comes) - a set the cursor
+/// meets first claiming its cells (the ones the group parses pending, the
+/// others marked from what is at hand); else the next lone cell in cell
+/// order by its bytes (a lone cell always enters an empty budget); waits
+/// otherwise
 #[allow(clippy::too_many_arguments)]
 fn claim(
     store: &StreamStore,
@@ -274,116 +297,121 @@ fn claim(
     budget: u64,
     n: usize,
 ) -> Option<Task> {
+    let ranges = store.shared_ranges();
     let mut guard = adm.lock().unwrap_or_else(|e| e.into_inner());
     loop {
         let a: &mut Admit = &mut guard;
         if a.failed.is_some() {
             return None;
         }
-        if let Some(run) = a.active.as_mut() {
-            let set = store.shared_def(run.set);
-            // a range holding no cell the group parses is not read
-            while run.next < set.ranges.len() && !run.read[run.next] {
-                run.next += 1;
-                run.filed += 1;
-            }
-            if run.next < set.ranges.len() {
-                let k = run.next;
-                let cost: u64 = store
-                    .range_charges(set.ranges[k])
-                    .iter()
-                    .filter(|c| run.pending.contains_key(c))
-                    .map(|&c| store.cell_bytes(c))
-                    .sum();
-                let alone = a.resident == run.charged && run.in_flight == 0 && run.marking == 0;
-                if alone || a.resident.saturating_add(cost) <= budget {
-                    run.next += 1;
-                    run.in_flight += 1;
-                    run.charged = run.charged.saturating_add(cost);
-                    a.resident = a.resident.saturating_add(cost);
-                    a.peak = a.peak.max(a.resident);
-                    return Some(Task::Range(run.set, k));
+        // 1. the sets' ranges, in file order
+        while a.cursor < ranges.len() {
+            let (ri, si, k) = ranges[a.cursor];
+            let set = store.shared_def(si);
+            if !a.activated[si] {
+                // the set met: its cells claimed, the ones the group parses
+                // pending with the ranges defining them, the others marked
+                // from what is at hand by this marker
+                a.activated[si] = true;
+                let mut unparsed: Vec<(usize, Need)> = Vec::new();
+                let mut wanted: Vec<usize> = Vec::new();
+                let mut pending: HashMap<usize, Pend> = HashMap::new();
+                for &c in &set.cells {
+                    if a.claimed[c] {
+                        continue;
+                    }
+                    a.claimed[c] = true;
+                    let nd = need_of(occ, group, inst, c);
+                    if nd == Need::Shapes {
+                        wanted.push(c);
+                        pending.insert(c, Pend { pieces: Vec::new(), remaining: store.def_count(c) });
+                    } else {
+                        unparsed.push((c, nd));
+                    }
                 }
-            } else if run.done() {
-                a.active = None;
+                if !pending.is_empty() {
+                    a.runs.insert(
+                        si,
+                        SetRun {
+                            wanted: Arc::new(wanted),
+                            pending,
+                            left: set.ranges.len(),
+                            marking: 0,
+                            charged: 0,
+                        },
+                    );
+                }
+                if !unparsed.is_empty() {
+                    // (the other markers take the ranges meanwhile)
+                    cv.notify_all();
+                    return Some(Task::Unparsed(unparsed));
+                }
+                continue;
             }
+            let Some(run) = a.runs.get_mut(&si) else {
+                // nothing of the set is parsed by this group
+                a.cursor += 1;
+                continue;
+            };
+            // a range holding no cell the group parses is not read
+            if !set.defines[k].iter().any(|c| run.pending.contains_key(c)) {
+                run.left -= 1;
+                let gone = run.done();
+                a.cursor += 1;
+                if gone {
+                    a.runs.remove(&si);
+                    cv.notify_all();
+                }
+                continue;
+            }
+            let cost: u64 = store
+                .range_charges(ri)
+                .iter()
+                .filter(|c| run.pending.contains_key(c))
+                .map(|&c| store.cell_bytes(c))
+                .sum();
+            let alone = a.in_flight == 0 && a.marking == 0 && a.lone == 0;
+            if alone || a.resident.saturating_add(cost) <= budget {
+                run.charged = run.charged.saturating_add(cost);
+                let wanted = run.wanted.clone();
+                a.cursor += 1;
+                a.in_flight += 1;
+                a.resident = a.resident.saturating_add(cost);
+                a.peak = a.peak.max(a.resident);
+                return Some(Task::Range(si, k, wanted));
+            }
+            break;
         }
-        while a.next < n && a.claimed[a.next] {
+        // 2. the next lone cell in cell order
+        while a.next < n && (a.claimed[a.next] || store.shared_def_of(a.next).is_some()) {
             a.next += 1;
         }
-        if a.next >= n {
-            if a.active.is_none() {
-                return None;
-            }
-        } else {
+        if a.next < n {
             let ci = a.next;
             let need = need_of(occ, group, inst, ci);
-            let shared = if need == Need::Shapes { store.shared_def_of(ci) } else { None };
-            match shared {
-                None => {
-                    let cost = if need == Need::Shapes { store.cell_bytes(ci) } else { 0 };
-                    if a.resident == 0 || a.resident.saturating_add(cost) <= budget {
-                        a.next += 1;
-                        a.claimed[ci] = true;
-                        a.resident = a.resident.saturating_add(cost);
-                        a.peak = a.peak.max(a.resident);
-                        return Some(Task::Cell(ci, need, cost));
-                    }
+            let cost = if need == Need::Shapes { store.cell_bytes(ci) } else { 0 };
+            if a.resident == 0 || a.resident.saturating_add(cost) <= budget {
+                a.next += 1;
+                a.claimed[ci] = true;
+                if need == Need::Shapes {
+                    a.lone += 1;
                 }
-                Some((si, d)) if a.active.is_none() => {
-                    // the set goes in progress: its cells claimed (ci is
-                    // the first unclaimed cell of all, so the set's
-                    // unclaimed cells follow it), the ones the group
-                    // parses pending, the ranges defining them to be read
-                    let mut unparsed: Vec<(usize, Need)> = Vec::new();
-                    let mut pending: HashMap<usize, Pend> = HashMap::new();
-                    for &c in &d.cells {
-                        if c != ci && a.claimed[c] {
-                            continue;
-                        }
-                        a.claimed[c] = true;
-                        let nd = if c == ci { need } else { need_of(occ, group, inst, c) };
-                        if nd == Need::Shapes {
-                            pending.insert(c, Pend { pieces: Vec::new(), remaining: store.def_count(c) });
-                        } else {
-                            unparsed.push((c, nd));
-                        }
-                    }
-                    let read: Vec<bool> = d
-                        .defines
-                        .iter()
-                        .map(|cells| cells.iter().any(|c| pending.contains_key(c)))
-                        .collect();
-                    a.next += 1;
-                    a.active = Some(SetRun {
-                        set: si,
-                        read,
-                        next: 0,
-                        in_flight: 0,
-                        filed: 0,
-                        pending,
-                        marking: 0,
-                        charged: 0,
-                    });
-                    // (the other markers take the ranges)
-                    cv.notify_all();
-                    if !unparsed.is_empty() {
-                        return Some(Task::Unparsed(unparsed));
-                    }
-                    continue;
-                }
-                // another set is in progress: its ranges first
-                Some(_) => {}
+                a.resident = a.resident.saturating_add(cost);
+                a.peak = a.peak.max(a.resident);
+                return Some(Task::Cell(ci, need, cost));
             }
+        } else if a.cursor >= ranges.len() {
+            return None;
         }
         guard = cv.wait(guard).unwrap_or_else(|e| e.into_inner());
     }
 }
 
-/// range `k` of set `si` read, parsed and its pieces filed; the cells it
-/// completes (their last range) joined, marked and let go, the set's turn
-/// over with its last cell. False when the parse failed (reported) or the
-/// set is gone (a failure elsewhere)
+/// range `k` of set `si` read, parsed for the cells the group parses
+/// (`wanted`; the other cells' records are parsed and not kept) and its
+/// pieces filed; the cells it completes (their last range) joined, marked
+/// and let go, the set's turn over with its last cell. False when the
+/// parse failed (reported) or the set is gone (a failure elsewhere)
 #[allow(clippy::too_many_arguments)]
 fn mark_range(
     store: &StreamStore,
@@ -395,17 +423,19 @@ fn mark_range(
     done: &AtomicUsize,
     si: usize,
     k: usize,
+    wanted: &[usize],
     buf: &mut Vec<u8>,
     sc: &mut StreamScratch,
     rep: &mut MarkReport,
 ) -> bool {
     let set = store.shared_def(si);
     let t = Instant::now();
-    let parsed = store.parse_range(set.ranges[k], buf);
+    let parsed = store.parse_range(set.ranges[k], buf, &|c| wanted.binary_search(&c).is_ok());
     rep.parse_s += t.elapsed().as_secs_f64();
     let pieces = match parsed {
-        Ok((pieces, bytes)) => {
+        Ok((pieces, bytes, skipped)) => {
             rep.bytes += bytes;
+            rep.dropped += skipped;
             pieces
         }
         Err(e) => {
@@ -415,12 +445,12 @@ fn mark_range(
     };
     rep.shared_ranges += 1;
     let complete: Vec<(usize, Vec<(usize, Cell)>)> = {
-        let mut a = adm.lock().unwrap_or_else(|e| e.into_inner());
-        let run = match a.active.as_mut() {
-            Some(run) if run.set == si => run,
-            _ => return false,
+        let mut guard = adm.lock().unwrap_or_else(|e| e.into_inner());
+        let a: &mut Admit = &mut guard;
+        let Some(run) = a.runs.get_mut(&si) else {
+            return false;
         };
-        // (a piece of a cell the group does not parse is dropped here)
+        // (a piece of a cell the group does not parse is empty: dropped)
         for (ci, piece) in pieces {
             if let Some(p) = run.pending.get_mut(&ci) {
                 p.pieces.push((k, piece));
@@ -436,11 +466,13 @@ fn mark_range(
                 }
             }
         }
-        run.filed += 1;
-        run.in_flight -= 1;
+        run.left -= 1;
         run.marking += complete.len();
-        if run.done() {
-            a.active = None;
+        let gone = run.done();
+        a.in_flight -= 1;
+        a.marking += complete.len();
+        if gone {
+            a.runs.remove(&si);
         }
         cv.notify_all();
         complete
@@ -452,16 +484,20 @@ fn mark_range(
         drop(cell);
         let bytes = store.cell_bytes(ci);
         {
-            let mut a = adm.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = adm.lock().unwrap_or_else(|e| e.into_inner());
+            let a: &mut Admit = &mut guard;
             a.resident = a.resident.saturating_sub(bytes);
-            if let Some(run) = a.active.as_mut() {
-                if run.set == si {
+            a.marking -= 1;
+            let gone = match a.runs.get_mut(&si) {
+                Some(run) => {
                     run.charged = run.charged.saturating_sub(bytes);
                     run.marking -= 1;
-                    if run.done() {
-                        a.active = None;
-                    }
+                    run.done()
                 }
+                None => false,
+            };
+            if gone {
+                a.runs.remove(&si);
             }
             cv.notify_all();
         }
@@ -490,7 +526,12 @@ pub(crate) fn mark_group(
         claimed: vec![false; n],
         resident: 0,
         peak: 0,
-        active: None,
+        cursor: 0,
+        activated: vec![false; store.shared_count()],
+        runs: HashMap::new(),
+        in_flight: 0,
+        marking: 0,
+        lone: 0,
         failed: None,
     });
     let cv = Condvar::new();
@@ -551,8 +592,8 @@ pub(crate) fn mark_group(
                                     done.fetch_add(1, Relaxed);
                                 }
                             }
-                            Task::Range(si, k) => {
-                                if !mark_range(store, occ, group, inst, adm, cv, done, si, k, &mut buf, &mut sc, &mut rep) {
+                            Task::Range(si, k, wanted) => {
+                                if !mark_range(store, occ, group, inst, adm, cv, done, si, k, &wanted, &mut buf, &mut sc, &mut rep) {
                                     break;
                                 }
                             }

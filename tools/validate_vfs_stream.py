@@ -160,6 +160,56 @@ def check_resident_peak(name, label, err):
     return worst
 
 
+def check_layered_markers(work, src):
+    """the layered chain (the review of 0.12.393): a layer-1 group parses
+    the tiny A's of ranges whose CBLOCKs hold the big layer-2 B's - the
+    B's records are parsed and not kept (doc.rs parse_cell_bytes_keeping),
+    so twelve markers hold no more of them than one: the occupancy-only
+    pass with one layer a group (--occupancy-um 0.01: two groups) at 12
+    jobs stays within 18 MB of peak RSS of the pass at 1 job (measured
+    2026-10-23 on this fixture: 0.12.393 +25 to +28 MB, every marker's big
+    cells materialized and dropped; 0.12.394 +5 to +11 MB, the in-flight
+    ranges' buffers and the threads' arenas), both design.ovo the
+    in-memory build's, and the first group's line says what was not kept"""
+    env = dict(os.environ, FLOE_LOCK="off")
+    # (0.01 um over the fixture's 100 x 6.4 um: a 0.8 MB plane a layer, two
+    # of them past the 1.5 MB plane budget of --mem 0.006 - two groups)
+    occ = ["--occupancy-prune", "0", "--occupancy-um", "0.01"]
+    ref = work / "layered_um_mem"
+    rc, _, _, err = run_measured([BIN, "vfs", src, ref, "--in-memory", "--jobs", "4", "--occupancy"] + occ, env)
+    if rc != 0:
+        fail("layered: in-memory build exit %d\n%s" % (rc, err[-1500:]))
+    base = work / "layered_um_stream"
+    r = subprocess.run([str(BIN), "vfs", str(src), str(base), "--stream", "--mem", "0.006", "--jobs", "4"],
+                       capture_output=True, text=True, env=env)
+    if r.returncode != 0:
+        fail("layered: streaming build exit %d\n%s" % (r.returncode, r.stderr[-1500:]))
+    peaks = {}
+    for jobs in (1, 12):
+        out = work / ("layered_um_j%d" % jobs)
+        shutil.copytree(base, out)
+        (out / "design.ovo").unlink(missing_ok=True)
+        rc, peak, dt, err = run_measured(
+            [BIN, "vfs", src, out, "--occupancy-only", "--stream", "--mem", "0.006", "--jobs", str(jobs)] + occ, env)
+        if rc != 0:
+            fail("layered occupancy-only jobs %d: exit %d\n%s" % (jobs, rc, err[-1500:]))
+        if (out / "design.ovo").read_bytes() != (ref / "design.ovo").read_bytes():
+            fail("layered occupancy-only jobs %d: design.ovo differs from the in-memory build's" % jobs)
+        groups = [line for line in err.splitlines() if "occupancy streaming: group" in line]
+        if len(groups) != 2:
+            fail("layered occupancy-only jobs %d: two layer groups expected\n%s" % (jobs, err[-1500:]))
+        if "records of other cells not kept" not in groups[0]:
+            fail("layered occupancy-only jobs %d: the layer-1 group kept the other layer's records\n%s" % (jobs, groups[0]))
+        check_resident_peak("cblock chain layered", "occupancy-only jobs %d" % jobs, err)
+        peaks[jobs] = peak
+    bound = peaks[1] + (18 << 20)
+    if peaks[12] > bound:
+        fail("layered occupancy-only: peak rss %.1f MB at 12 jobs against %.1f MB at 1 job (bound %.1f MB) - "
+             "the markers hold the other layer's cells" % (peaks[12] / 1e6, peaks[1] / 1e6, bound / 1e6))
+    print("OK  cblock chain layered occupancy-only, one layer a group: peak rss %.1f MB at 12 jobs vs %.1f MB at 1 job "
+          "(bound +18 MB); the other layer's records not kept; design.ovo = in-memory" % (peaks[12] / 1e6, peaks[1] / 1e6))
+
+
 def streamed(err):
     """the streaming build's log lines: the inventory pass's (its first),
     the main build's last, the done line's tag - a long log (every cell
@@ -292,11 +342,26 @@ def main():
         if r.returncode != 0 or not chain.is_file():
             fail("floe-dbg fixture cblock-chain: exit %d\n%s" % (r.returncode, r.stderr[-800:]))
         files.append(("cblock chain", chain))
+        # the review of 0.12.393: 63 tiny layer-1 cells, each followed by a
+        # CBLOCK defining two big layer-2 cells that chain - one set; a
+        # layer-1 group parses the A's and must not materialize the B's
+        # (0.12.394); and 64 independent pairs, sets in progress together
+        layered = work / "cblock_chain_layered.oas"
+        pairs = work / "cblock_pairs.oas"
+        for fixture, path in (("cblock-chain-layered", layered), ("cblock-pairs", pairs)):
+            r = subprocess.run([str(BIN.parent / "floe-dbg"), "fixture", fixture, str(path)],
+                               capture_output=True, text=True)
+            if r.returncode != 0 or not path.is_file():
+                fail("floe-dbg fixture %s: exit %d\n%s" % (fixture, r.returncode, r.stderr[-800:]))
+        files.append(("cblock chain layered", layered))
+        files.append(("cblock pairs", pairs))
+        check_layered_markers(work, layered)
         largest_of = {}
         for name, src in files:
             largest, est = largest_cell_bytes(src, 4)
             largest_of[name] = largest
-            mem_gib = max(largest * (3.0 if name == "cblock chain" else 1.5), 1 << 16) / float(1 << 30)
+            # (a chain's budget is its multi-definition span: about three cells)
+            mem_gib = max(largest * (3.0 if "chain" in name else 1.5), 1 << 16) / float(1 << 30)
             budget = int(mem_gib * (1 << 30))
             ref = work / (src.stem + "_mem")
             rc, peak_mem, dt_mem, err = run_measured(

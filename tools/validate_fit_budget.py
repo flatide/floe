@@ -748,12 +748,14 @@ def cli_checks(temp, src):
     # a capture of one device row (--px 800x1 --stretch) over the budget is
     # one band: `clamp(2, height)` panicked at height 1 and the capture,
     # unanswered, waited for its deadline (review 2026-10-23, 0.12.392); the
-    # deadline here keeps a regression from hanging the gate
+    # deadline here keeps a regression from hanging the gate - it is for a
+    # hang, not the host's pace (the row decodes the chip's 25,393 pages:
+    # over 120 s on a host another program held three cores of, 2026-10-23)
     out, report = Path(temp) / 'cli_row.png', Path(temp) / 'cli_row.json'
     done = subprocess.run(
         [FLOE2, 'render', str(src), '--px', '800x1', '--stretch', '--detail', 'exact', '--out', str(out), '--report', str(report)],
-        cwd=ROOT, env={**env, 'FLOE_RUST_BUDGET_MB': '48', 'FLOE_RENDER_TIMEOUT_S': '120'},
-        capture_output=True, text=True, timeout=600)
+        cwd=ROOT, env={**env, 'FLOE_RUST_BUDGET_MB': '48', 'FLOE_RENDER_TIMEOUT_S': '900'},
+        capture_output=True, text=True, timeout=1800)
     assert done.returncode == 0 and out.exists(), (done.returncode, done.stderr[-600:])
     assert '[capture]' in done.stderr and 'drawn in bands' in done.stderr, done.stderr[-600:]
     shot = json.loads(report.read_text())['shots'][0]

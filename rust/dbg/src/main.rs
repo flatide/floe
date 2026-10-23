@@ -9,7 +9,7 @@ fn main() {
         let (name, out) = match (args.get(2), args.get(3)) {
             (Some(n), Some(o)) => (n.as_str(), o),
             _ => {
-                eprintln!("usage: floe-dbg fixture head-cblock|adversarial|adversarial-cblock|dup-in-range|labelled-tree|cblock-cells|cblock-cells-twice|cblock-chain OUT");
+                eprintln!("usage: floe-dbg fixture head-cblock|adversarial|adversarial-cblock|dup-in-range|labelled-tree|cblock-cells|cblock-cells-twice|cblock-chain|cblock-chain-layered|cblock-pairs OUT");
                 std::process::exit(2);
             }
         };
@@ -30,6 +30,13 @@ fn main() {
             // 10,000 rects (the review of 0.12.392: one set, the file; the
             // markers walk it within the multi-definition span, 0.12.393)
             "cblock-chain" => fixtures::cells_chained(32, 10_000),
+            // the review of 0.12.393: 63 tiny layer-1 cells, each followed by
+            // a CBLOCK defining two big layer-2 cells (10,000 rects) that
+            // chain - a layer-1 group must not materialize the big ones
+            "cblock-chain-layered" => fixtures::cells_layered_chain(64, 10_000),
+            // 64 independent pairs (a cell and one inside its CBLOCK, 2,000
+            // rects): sets in progress together (0.12.394)
+            "cblock-pairs" => fixtures::cells_paired(64, 2_000),
             _ => {
                 eprintln!("floe-dbg fixture: unknown fixture {}", name);
                 std::process::exit(2);

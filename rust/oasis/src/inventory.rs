@@ -1583,6 +1583,116 @@ pub mod fixtures {
         w.out
     }
 
+    /// the review of 0.12.393 (2026-10-23): `k - 1` ranges, each a tiny
+    /// cell Ai (one rect on layer 1) followed by a CBLOCK defining the big
+    /// cells Bi and Bi+1 (`m` rects on layer 2 each), so the B's chain
+    /// through the CBLOCKs and the A's and B's are one set; then TOP
+    /// placing every A and B. A layer-1 group parses the A's alone and the
+    /// B's records in the same ranges are parsed but not kept (doc.rs
+    /// `parse_cell_bytes_keeping`): 0.12.393 materialized and dropped them,
+    /// in every marker at once, past the budget that saw the A's alone
+    pub fn cells_layered_chain(k: usize, m: usize) -> Vec<u8> {
+        let mut w = W::new();
+        start(&mut w);
+        let rect = |w: &mut W, layer: u64, j: usize, y: i64| {
+            w.uint(20);
+            w.byte(0x40 | 0x20 | 0x10 | 0x08 | 0x02 | 0x01);
+            w.uint(layer);
+            w.uint(0);
+            w.uint(5);
+            w.uint(5);
+            w.sint(10 * j as i64);
+            w.sint(10 * (j % 7) as i64 + y);
+        };
+        let hosts = k.saturating_sub(1);
+        for i in 0..hosts {
+            w.uint(14);
+            w.string(format!("A{}", i).as_bytes());
+            rect(&mut w, 1, i, 100);
+            let mut b = W::new();
+            for bi in [i, i + 1] {
+                b.uint(14);
+                b.string(format!("B{}", bi).as_bytes());
+                for j in 0..m {
+                    rect(&mut b, 2, j, bi as i64);
+                }
+            }
+            let comp = deflate(&b.out);
+            w.uint(34);
+            w.uint(0);
+            w.uint(b.out.len() as u64);
+            w.uint(comp.len() as u64);
+            w.out.extend_from_slice(&comp);
+        }
+        w.uint(14);
+        w.string(b"TOP");
+        let place = |w: &mut W, name: String, y: i64| {
+            w.uint(17);
+            w.byte(0x80 | 0x20 | 0x10);
+            w.string(name.as_bytes());
+            w.sint(0);
+            w.sint(y);
+        };
+        for i in 0..hosts {
+            place(&mut w, format!("A{}", i), 0);
+        }
+        for i in 0..k {
+            place(&mut w, format!("B{}", i), 100 * i as i64);
+        }
+        end(&mut w);
+        w.out
+    }
+
+    /// `k` independent pairs: each range a cell Hi with a rect on layer 1
+    /// and a CBLOCK defining Ci with `m` rects on layer 1 + i % 2, then
+    /// TOP placing every H and C - k sets of two cells and one range each,
+    /// in progress together as the budget allows (cli markpass.rs,
+    /// 0.12.394: 0.12.393 ran one set at a time)
+    pub fn cells_paired(k: usize, m: usize) -> Vec<u8> {
+        let mut w = W::new();
+        start(&mut w);
+        let rect = |w: &mut W, layer: u64, j: usize, y: i64| {
+            w.uint(20);
+            w.byte(0x40 | 0x20 | 0x10 | 0x08 | 0x02 | 0x01);
+            w.uint(layer);
+            w.uint(0);
+            w.uint(5);
+            w.uint(5);
+            w.sint(10 * j as i64);
+            w.sint(10 * (j % 7) as i64 + y);
+        };
+        for i in 0..k {
+            w.uint(14);
+            w.string(format!("H{}", i).as_bytes());
+            rect(&mut w, 1, i, 100);
+            let mut b = W::new();
+            b.uint(14);
+            b.string(format!("C{}", i).as_bytes());
+            for j in 0..m {
+                rect(&mut b, 1 + (i as u64 % 2), j, i as i64);
+            }
+            let comp = deflate(&b.out);
+            w.uint(34);
+            w.uint(0);
+            w.uint(b.out.len() as u64);
+            w.uint(comp.len() as u64);
+            w.out.extend_from_slice(&comp);
+        }
+        w.uint(14);
+        w.string(b"TOP");
+        for i in 0..k {
+            for name in [format!("H{}", i), format!("C{}", i)] {
+                w.uint(17);
+                w.byte(0x80 | 0x20 | 0x10);
+                w.string(name.as_bytes());
+                w.sint(0);
+                w.sint(100 * i as i64);
+            }
+        }
+        end(&mut w);
+        w.out
+    }
+
     /// TEXT streams doc.rs refuses: 0 = a non-UTF-8 TEXTSTRING, 1 = a
     /// non-UTF-8 inline string, 2 = a first TEXT without a string, 3 =
     /// a reference no TEXTSTRING defines; 4 = a TEXTSTRING reference

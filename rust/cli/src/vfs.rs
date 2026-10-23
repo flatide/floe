@@ -1993,7 +1993,16 @@ pub(crate) fn stream_occupancy(
                 rep.parsed,
                 fmt_size(rep.bytes),
                 if rep.shared > 0 {
-                    format!(" - {} of them from {} range(s) parsed once", rep.shared, rep.shared_ranges)
+                    format!(
+                        " - {} of them from {} range(s) parsed once{}",
+                        rep.shared,
+                        rep.shared_ranges,
+                        if rep.dropped > 0 {
+                            format!(", {} records of other cells not kept", rep.dropped)
+                        } else {
+                            String::new()
+                        }
+                    )
                 } else {
                     String::new()
                 },
