@@ -1529,6 +1529,60 @@ pub mod fixtures {
         w.out
     }
 
+    /// the review of 0.12.392 (2026-10-23): a chain of `k` cells, each
+    /// defined on its own with `m` rects on layer 1 and - but the last -
+    /// followed by a CBLOCK defining the next cell with `m` rects more, so
+    /// every cell but the first is defined in two ranges and the k cells
+    /// and k ranges are one set whose Doc estimate is the file's; then TOP
+    /// placing every Ci - the marking pass must keep the cells open between
+    /// their definitions resident (two or three), not the set (cli
+    /// markpass.rs, `StreamStore::min_budget`); the light cache refuses the
+    /// stream
+    pub fn cells_chained(k: usize, m: usize) -> Vec<u8> {
+        let mut w = W::new();
+        start(&mut w);
+        let rects = |w: &mut W, i: usize| {
+            for j in 0..m {
+                w.uint(20);
+                w.byte(0x40 | 0x20 | 0x10 | 0x08 | 0x02 | 0x01);
+                w.uint(1);
+                w.uint(0);
+                w.uint(5);
+                w.uint(5);
+                w.sint(10 * j as i64);
+                w.sint(10 * (j % 7) as i64 + i as i64);
+            }
+        };
+        for i in 0..k {
+            w.uint(14);
+            w.string(format!("C{}", i).as_bytes());
+            rects(&mut w, i);
+            if i + 1 < k {
+                let mut b = W::new();
+                b.uint(14);
+                b.string(format!("C{}", i + 1).as_bytes());
+                rects(&mut b, i + 1);
+                let comp = deflate(&b.out);
+                w.uint(34);
+                w.uint(0);
+                w.uint(b.out.len() as u64);
+                w.uint(comp.len() as u64);
+                w.out.extend_from_slice(&comp);
+            }
+        }
+        w.uint(14);
+        w.string(b"TOP");
+        for i in 0..k {
+            w.uint(17);
+            w.byte(0x80 | 0x20 | 0x10);
+            w.string(format!("C{}", i).as_bytes());
+            w.sint(0);
+            w.sint(100 * i as i64);
+        }
+        end(&mut w);
+        w.out
+    }
+
     /// TEXT streams doc.rs refuses: 0 = a non-UTF-8 TEXTSTRING, 1 = a
     /// non-UTF-8 inline string, 2 = a first TEXT without a string, 3 =
     /// a reference no TEXTSTRING defines; 4 = a TEXTSTRING reference

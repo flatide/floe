@@ -1328,8 +1328,9 @@ pub(crate) fn stream_open(a: &StreamArgs) -> Result<StreamOpen, StreamDecline> {
             inv,
         }) if a.mem_gib.is_none() => {
             // the default budget is the host's share, not the file's
-            // need: a file whose largest cell (or multi-definition span)
-            // is larger gets that much when the host has it - the
+            // need: a file whose largest cell (or range of several cells,
+            // or multi-definition span) is larger gets that much when the
+            // host has it - the
             // streaming build under the raised budget still holds less
             // than the whole parse would
             let (limit, limit_how) = stream_host_limit();
@@ -1986,7 +1987,7 @@ pub(crate) fn stream_occupancy(
         totals.add(&rep);
         if let Some(log) = opts.progress {
             log(&format!(
-                "streaming: group {} marked in {:.1}s: {} cells parsed by the markers ({}){}, {} from their placements, {} small, {} not visited; parse {:.1}s + mark {:.1}s over {} threads (rss {})",
+                "streaming: group {} marked in {:.1}s: {} cells parsed by the markers ({}){}, {} from their placements, {} small, {} not visited; parse {:.1}s + mark {:.1}s over {} threads (resident peak {}; rss {})",
                 groups,
                 tg.elapsed().as_secs_f64(),
                 rep.parsed,
@@ -2002,6 +2003,7 @@ pub(crate) fn stream_occupancy(
                 rep.parse_s,
                 rep.mark_s,
                 jobs.max(1),
+                fmt_size(rep.peak),
                 rss()
             ));
         }

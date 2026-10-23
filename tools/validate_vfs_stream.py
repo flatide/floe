@@ -48,6 +48,7 @@ usage: python tools/validate_vfs_stream.py valmini.oas
 """
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -121,6 +122,42 @@ def compare_dirs(a, b, what, skip=SKIP):
     if "design.ovm" not in fa or "meta.json" not in fa:
         fail("%s: no cache built (%s)" % (what, fa))
     return fa
+
+
+def _size(s):
+    """a fmt_size string (517B, 1.3K, 4.6M, 58M, 1.2G) in bytes"""
+    m = re.match(r"^(\d+(?:\.\d+)?)([BKMGT])$", s)
+    if not m:
+        fail("not a size: %r" % s)
+    return float(m.group(1)) * (1024 ** "BKMGT".index(m.group(2)))
+
+
+def check_resident_peak(name, label, err):
+    """the markers' resident peak of every group stays within the resident
+    budget (markpass.rs admission; 0.12.393: a set's ranges walked one at
+    a time within the multi-definition span, the cells complete released -
+    0.12.392 parsed a set at once and held a chain whole); on the chain
+    fixture it is a fraction of the file's Doc estimate"""
+    budgets = re.findall(r"resident budget (\S+) \(", err)
+    peaks = re.findall(r"resident peak (\S+);", err)
+    if not budgets and not peaks:
+        return
+    if not budgets or not peaks:
+        fail("%s %s: resident budget %s / peak lines %s\n%s" % (name, label, budgets, peaks, err[-1500:]))
+    budget = _size(budgets[0])
+    worst = max(_size(p) for p in peaks)
+    # (fmt_size rounds to two digits: a tenth of slack)
+    if worst > budget * 1.1 + 4096:
+        fail("%s %s: the markers' resident peak %s passed the resident budget %s\n%s"
+             % (name, label, max(peaks, key=_size), budgets[0], err[-1500:]))
+    if name == "cblock chain":
+        est = re.findall(r"Doc estimate (\S+);", err)
+        if not est:
+            fail("%s %s: no Doc estimate line\n%s" % (name, label, err[-1200:]))
+        if worst * 4 > _size(est[0]):
+            fail("%s %s: resident peak %s against the file's Doc estimate %s - the chain's set was held whole"
+                 % (name, label, max(peaks, key=_size), est[0]))
+    return worst
 
 
 def streamed(err):
@@ -244,11 +281,22 @@ def main():
         if r.returncode != 0 or not cc2.is_file():
             fail("floe-dbg fixture cblock-cells-twice: exit %d\n%s" % (r.returncode, r.stderr[-800:]))
         files.append(("cblock cells twice", cc2))
+        # a chain of 32 cells, each one's CBLOCK defining the next (the
+        # review of 0.12.392): one set of 32 cells and 32 ranges - the file -
+        # which the markers walk range by range within the multi-definition
+        # span instead of holding whole (0.12.393); its budget below is
+        # three cells, the span, where the others take one and a half
+        chain = work / "cblock_chain.oas"
+        r = subprocess.run([str(BIN.parent / "floe-dbg"), "fixture", "cblock-chain", str(chain)],
+                           capture_output=True, text=True)
+        if r.returncode != 0 or not chain.is_file():
+            fail("floe-dbg fixture cblock-chain: exit %d\n%s" % (r.returncode, r.stderr[-800:]))
+        files.append(("cblock chain", chain))
         largest_of = {}
         for name, src in files:
             largest, est = largest_cell_bytes(src, 4)
             largest_of[name] = largest
-            mem_gib = max(largest * 1.5, 1 << 16) / float(1 << 30)
+            mem_gib = max(largest * (3.0 if name == "cblock chain" else 1.5), 1 << 16) / float(1 << 30)
             budget = int(mem_gib * (1 << 30))
             ref = work / (src.stem + "_mem")
             rc, peak_mem, dt_mem, err = run_measured(
@@ -289,6 +337,10 @@ def main():
                     fail("%s: the streaming build wrote no design.ovo" % name)
                 if "the build stopped" in err:
                     fail("%s jobs %d: the streaming build reported a failure\n%s" % (name, jobs, err[-1500:]))
+                peak_resident = check_resident_peak(name, "jobs %d" % jobs, err)
+                if name == "cblock chain" and jobs == 4:
+                    print("OK  %-18s jobs 4: the markers' resident peak %s within the resident budget (a chain of 32 cells, one set)"
+                          % (name, "%.1f MB" % (peak_resident / 1e6) if peak_resident else "?"))
                 # with the occupancy pass: half the budget more (planes +
                 # resident cells of the pass, on top of the main build's
                 # kept heap); enforced at jobs 1, reported at jobs 4
@@ -311,6 +363,7 @@ def main():
             if not streamed(r.stderr):
                 fail("default build %s did not stream\n%s" % (name, r.stderr[-1500:]))
             r_default_err = r.stderr
+            check_resident_peak(name, "default", r_default_err)
             names = compare_dirs(ref, out, "%s default" % name)
             # L1 (DIRECT_READ_PLAN §8.2): the streaming build leaves the
             # inventory as design.inv - the bytes `floe-index inventory --out`

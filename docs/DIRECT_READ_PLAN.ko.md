@@ -429,6 +429,7 @@ geometry/placement/text x·y, W/H, 점 목록, 경로 확장, 반복, 배치 대
 | 리뷰 수정 A | 2026-10-23 리뷰 5건 중 1·4·3·2 | **완료 0.12.390(§8.13)**: `pieces_of` 바이트 배치 읽기(요약 pass가 원본 전체를 올리던 회귀), 소스 fd 풀의 (dev, ino) 검증, 덱 `--full`이 경량 캐시를 전체로 재색인, 메타데이터 전용 light의 예산 검사 면제; 5(공유 CBLOCK 범위의 셀별 재파싱)는 §8.14 |
 | 리뷰 수정 B | 리뷰 5건 중 5 | **완료 0.12.391(§8.14)**: 여러 셀을 정의하는 범위(다른 셀 범위의 CBLOCK 안 CELL)를 마킹 pass가 한 번만 파싱하고 범위 cost로 과금(`StreamStore::parse_range`, markpass `Task::Range`); 픽스처 `cells_in_one_cblock`, 게이트 `vfs_stream` |
 | 리뷰 수정 C | 0.12.391 리뷰 4건(5의 변형 1, 회귀 3) | **완료 0.12.392(§8.15)**: 정의를 공유하는 셀 집합(`SharedDef`)을 마킹 pass가 한 번에 파싱·과금(각자 정의 뒤 CBLOCK 재정의도), 띠 상자를 전체 플랜의 뷰로 잘라 가장자리 픽셀 동일, 높이 1은 띠 하나, 렌더 중 패닉은 `error code=panic` 응답, 자동 색인의 덱 플랜은 캐시를 그대로 연다(`render --full --occupancy on`이 요약을 만듦) |
+| 리뷰 수정 D | 0.12.392 리뷰 1건(연결된 집합을 통째로 적재) | **완료 0.12.393(§8.16)**: 집합의 범위를 파일 순서로 하나씩 내보내고 마지막 정의 범위가 읽힌 셀부터 join·마킹·해제(리더 풀의 규칙, 상주는 다중 정의 span 이내), 여러 셀을 정의하는 범위의 과금도 `min_budget`에 포함, 그룹 줄에 `resident peak`, 게이트가 peak ≤ 예산을 확인 |
 | L7 후속 | 요약 패스 1패스화/마킹 가속, ovs 합치기(레이아웃 밀도), B안(정규 페이지), 세그먼트 캐시 디스크 보존(방문한 셀의 디코드 결과를 남겨 다음 세션 가속), 1패스 경량 생성(셀 로컬 점유 격자 합성) | 각각 — **L7a 완료 0.12.386(§8.9)**: 이미지 증분 합성(제자리 성장, 채움 시점 노드 마스크, 채움 바이트 해제), 세그먼트 pread 묶음·병렬 인코딩; **L7b 완료 0.12.387(§8.10)**: 요약 패스의 마커가 셀을 직접 파싱(리더 풀·상주 창 없음, 묶음이 안 쓰는 셀은 읽지 않음), 다각형 스캔 변환 버퍼 재사용, 크기 예산 밖의 레이어는 마킹하지 않음; 나머지(1패스 경량 생성은 §8.10의 정확성 논거로 보류)는 사용자 지시에 따라 |
 
 L0는 하루, L1~L3는 S1~S3와 비슷한 크기(재고 코드 위의 확장), L4가 본체다.
@@ -1193,6 +1194,45 @@ def_range 전체를 파싱한 뒤 그 셀의 조각만 골랐다. 범위는 셀�
   (실행은 캐시 종류의 명령: `light_run = kind == Light`). `floe2 index deck.jb --full`과 서비스의 색인은 전처럼
   `prepare`다. 게이트 `jobdeck` LightSummaryTests에 `render --full --occupancy on` 단계(요약이 생기고 캐시는
   경량 그대로).
+
+### 8.16 L8 리뷰 수정 D (0.12.393 / floe-index·renderd 0.12.351, 2026-10-23; 0.12.392 리뷰 1건)
+
+0.12.392 리뷰: [P2] 연결된 공유 정의 집합 전체가 메모리 예산을 넘어 적재된다. 재현했다.
+
+- **지적.** `parse_ranges`는 (A,B) → (B,C) → (C,D)처럼 이어진 집합의 범위를 전부 파싱한 뒤 돌려주고, 마커의
+  admission은 진행 중인 작업이 없으면(`resident == 0`) 예산 초과도 허용하므로, 셀마다 CBLOCK이 다음 셀을
+  정의하는 32셀 체인(파일 3.9 MB, Doc 추정 58 MB)은 `--stream --mem 0.006`(마킹 예산 4.6 MB)에서 거절 없이
+  집합 전체 58 MB가 한 번에 올라갔다(리뷰 측정: 추가 힙 최고 6.2 → 62.3 MB; 여기서는 occupancy-only 패스의
+  최대 RSS 72 MB). `min_budget`은 가장 큰 셀과 다중 정의 span만 봤으므로 이런 파일도 거절되지 않았다. 집합의
+  길이만큼 메모리가 늘어 큰 입력에서는 OOM이 될 수 있는 결함이다.
+- **수정.** 집합을 리더 풀의 규칙으로 걷는다(markpass.rs `SetRun`/`Task::Range`, stream.rs `parse_range`·
+  `joined`). 집합의 첫 셀에 닿은 마커가 집합을 "진행 중"으로 올리고(집합의 셀 전부 claim; 그룹이 파싱할 셀은
+  pending, 나머지는 손에 있는 것으로 마킹), 마커들은 집합의 범위를 파일 순서로 하나씩, 예산이 허락하는 대로
+  집어 각각 한 번 파싱한다. 범위의 과금은 그 범위가 처음 정의하는 셀들의 Doc 추정이고(리더 풀의 `charges`와
+  같다), 셀은 마지막 정의 범위가 file되는 순간 완성되어 join·normalize·마킹·해제된다. 따라서 상주는 "정의
+  사이에 열려 있는 셀들" = 파일의 다중 정의 span이며 `min_budget` 이내다(마킹 예산은 `max(--mem/4,
+  min_budget)`). 집합이 혼자 상주하고 진행 중인 범위·마킹이 없을 때만 예산을 넘는 범위를 들이는데(교착
+  방지용 탈출구), span ≤ 예산이면 그 경우는 오지 않는다. 진행 중인 집합은 한 번에 하나다(둘이면 서로의 조각을
+  기다릴 수 있다). 범위가 다른 셀을 정의하지 않는 보통 파일은 전과 같이 셀 단위(`Task::Cell`)다.
+- **덤: `min_budget`의 허점.** 한 범위가 여러 셀을 정의하면(다른 셀 범위의 CBLOCK 안 CELL) 리더는 그 범위를
+  통째로 파싱해 셀들이 함께 상주하는데, `min_budget`은 가장 큰 셀과 span만 봤다(한 CBLOCK의 24셀 픽스처:
+  범위 과금 1,696 B, 가장 큰 셀 763 B. 리더 풀도 `resident == 0`의 탈출구로 그 범위를 들였다). 이제 가장 큰
+  범위 과금도 포함하고 거절 문구가 그 범위를 말한다("a range of the file (offset N) defines K cells together
+  ... which need about X resident at once"). 기본 예산의 상향(`need`까지, 호스트가 허락하면)은 그대로다.
+- **측정(체인 32셀, `--mem 0.006`, 4 jobs).** occupancy-only 패스의 최대 RSS 72 → 22.5 MB, 그룹 줄의 새 항목
+  `resident peak` 4.6M(예산 4.6M; 1 job이면 3.7M), 전체 스트리밍 빌드의 최대 RSS 85 → 36 MB; design.ovo는
+  인메모리 빌드와 바이트 동일(`--mem 0.02`, 1 job도). 한 CBLOCK 24셀·두 번 정의 픽스처는 읽기 194 B·517 B
+  그대로(peak 5.9K·12K), ovo 동일.
+- **게이트·시험.** 픽스처 `floe_oasis::inventory::fixtures::cells_chained(k, m)`, `floe-dbg fixture
+  cblock-chain`(32셀 × 10,000 rect, 4.1 MB), 게이트 `vfs_stream`에 체인 비교(예산 = 가장 큰 셀의 3배 = span)
+  추가 + 모든 픽스처의 스트리밍 로그에서 `resident peak ≤ resident budget`, 체인에서는 Doc 추정의 1/4 이하
+  확인(0.12.392 바이너리라면 58M으로 실패); 단위 시험 `a_shared_definition_is_parsed_once_for_its_cells`
+  (체인 케이스, `defines`·`range_charges`, 범위별 파싱 + `joined` = `parse_cell`), parity 시험에 체인 케이스와
+  tight 예산에서 `peak ≤ min_budget`(체인은 파일 Doc의 절반 이하), `build_both`는 파일의 need로 재시도.
+- **게이트 `fit_budget`의 시간 제한.** cli_checks의 `floe2 render` 단계(1920 px exact 캡처: 25,393 페이지를 48 MB
+  예산에서 104 띠로)는 subprocess 제한이 600 s였는데, 다른 프로그램이 3코어를 쓰는 호스트에서 0.12.392
+  바이너리로도 586 s가 걸려 배터리 428·429가 여기서 멈췄다(수정과 무관). 제한을 1800 s로 올렸다(멈춤을 잡는
+  상한이지 속도 기준이 아니다; 800×1 한 줄 캡처의 `FLOE_RENDER_TIMEOUT_S=120`은 그대로).
 
 ## 9. 검토한 대안
 

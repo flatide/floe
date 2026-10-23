@@ -472,6 +472,13 @@ pread + `parse_cell_bytes` + `normalize_cells`, 리더와 같은 레코드)하�
 (`parse_ranges`) 집합 셀들의 Doc 추정 합으로 과금한다(markpass `Task::Shared`). 0.12.391은 셀의 첫 범위만
 봐서 각자 정의된 뒤 CBLOCK에서 재정의된 셀은 여전히 셀마다 블록을 다시 읽었다(0.12.391 리뷰). 바이트 동일.
 
+**0.12.393 (DIRECT_READ_PLAN §8.16).** 집합을 한꺼번에 파싱해 집합 전체를 과금하던 것을 리더 풀의 규칙으로
+바꿨다: 마커들이 집합의 범위를 파일 순서로 하나씩 집어(`Task::Range`, `StreamStore::parse_range`) 범위가 처음
+정의하는 셀들을 과금하고, 마지막 정의 범위가 읽힌 셀부터 join·마킹·해제한다(`joined`). 상주는 정의 사이에
+열린 셀들 = 다중 정의 span이라 `min_budget` 이내이고, `min_budget`은 여러 셀을 정의하는 범위의 과금도 포함한다
+(거절 문구에 그 범위). 0.12.392 리뷰: 셀마다 CBLOCK이 다음 셀을 정의하는 32셀 체인(Doc 58 MB)이 마킹 예산
+4.6 MB에서 통째로 올라갔다(occupancy-only 패스 RSS 72 → 22.5 MB). 그룹 줄에 `resident peak`. 바이트 동일.
+
 ### 4.7 보류
 
 `--coverage`(design.ovc)와 `--representatives`(design.ovr)는 Doc 전체를
@@ -734,3 +741,6 @@ S2 완료(0.12.365, §4.2 구현; 사용자 2026-10-19 "S2 진행해줘"): build
   cost로 과금한다 — §4.6, DIRECT_READ_PLAN §8.14. 바이트 동일.
 - 0.12.392 (2026-10-23): 정의를 공유하는 셀 집합(`SharedDef`)을 마커가 한 번에 파싱·과금한다(각자
   정의된 뒤 CBLOCK에서 재정의된 셀도) — §4.6, DIRECT_READ_PLAN §8.15. 바이트 동일.
+- 0.12.393 (2026-10-23): 집합의 범위를 하나씩 걷고 완성된 셀부터 해제한다(상주 = 다중 정의 span, 집합
+  전체가 아님); 여러 셀을 정의하는 범위의 과금도 `min_budget`에 든다 — §4.6, DIRECT_READ_PLAN §8.16.
+  바이트 동일.

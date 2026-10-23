@@ -717,12 +717,15 @@ def cli_checks(temp, src):
     (module doc)."""
     env = {k: v for k, v in os.environ.items() if k != 'FLOE_RUST_FIT_TOP_FIRST'}
 
+    # (the banded exact capture of this chip - 25,393 pages, 104 bands under
+    # 48 MB - took 586 s on a host three cores of which another program held
+    # (2026-10-23); the bound is for a hang, not the host's pace)
     def render(name, budget_mb, *extra, more=None):
         out, report = Path(temp) / (name + '.png'), Path(temp) / (name + '.json')
         done = subprocess.run(
             [FLOE2, 'render', str(src), '--px', str(PX), '--out', str(out), '--report', str(report), *extra],
             cwd=ROOT, env={**env, 'FLOE_RUST_BUDGET_MB': str(budget_mb), **(more or {})},
-            capture_output=True, text=True, timeout=600)
+            capture_output=True, text=True, timeout=1800)
         shot = json.loads(report.read_text())['shots'][0] if report.exists() else None
         return done, out, shot
 
