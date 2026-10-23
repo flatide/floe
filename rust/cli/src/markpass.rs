@@ -17,16 +17,18 @@
 //! placements) - so a layout's later groups parse only the cells with
 //! records on their layers.
 //!
-//! A range that defines several cells - CELL records inside a CBLOCK of
-//! another cell's range - is parsed once for all of them
-//! (`StreamStore::parse_range`, 0.12.391): the marker that reaches the
-//! first of them claims every cell of the range not yet claimed, charges
-//! the range's cost (what its parse materializes: every cell's records)
-//! and marks them in cell order from that one parse; before, each cell's
-//! turn parsed the whole range again charging that cell alone (review
-//! 2026-10-23: a 663 KiB block of 24 cells read 24 times, the budget
-//! under-charged by the other 23). A cell of such a range that is also
-//! defined elsewhere is parsed on its own as before.
+//! Cells whose definitions share ranges - CELL records inside a CBLOCK of
+//! another cell's range, or a cell defined in several ranges that define
+//! others too - are parsed as one set (`StreamStore::shared_def_of`,
+//! `parse_ranges`; 0.12.391, generalized 0.12.392): the marker that
+//! reaches the first of them claims every cell of the set not yet
+//! claimed, charges the set's cost (what parsing its ranges materializes:
+//! every cell's records) and marks them in cell order from that one parse
+//! of the set's ranges; before, each cell's turn parsed every range of the
+//! cell again charging that cell alone (review 2026-10-23: a 663 KiB
+//! block of 24 cells read 24 times, the budget under-charged by the other
+//! 23; the review of 0.12.391: the same when the 24 cells were defined on
+//! their own as well, as 0.12.391 took a cell's first range alone).
 //!
 //! The marks are the ones the reader-pool pass made (bits are ORs, the
 //! charges per operation, the set of operations the walk's), so the
@@ -52,8 +54,8 @@ pub(crate) struct MarkReport {
     pub small: usize,
     /// cells the group does not visit
     pub skipped: usize,
-    /// of `parsed`, cells served from a range parsed once for several
-    /// cells (`StreamStore::parse_range`), and those ranges
+    /// of `parsed`, cells served from the ranges of a set parsed once for
+    /// several cells (`StreamStore::parse_ranges`), and those ranges
     pub shared: usize,
     pub shared_ranges: usize,
     /// source bytes the markers read
@@ -105,7 +107,7 @@ fn need_of(occ: &StreamOcc, group: &StreamGroup, inst: &Instances<'_>, ci: usize
 
 struct Admit {
     next: usize,
-    /// cells claimed (by their own turn, or with a shared range)
+    /// cells claimed (by their own turn, or with their set)
     claimed: Vec<bool>,
     /// estimated Doc bytes of the cells being parsed or marked
     resident: u64,
@@ -116,9 +118,10 @@ struct Admit {
 enum Task {
     /// one cell, its need and its charge (its Doc bytes when parsed)
     Cell(usize, Need, u64),
-    /// a range that defines several cells, parsed once: the cells claimed
-    /// with it (cell order) and the range's charge
-    Range(usize, Vec<(usize, Need)>, u64),
+    /// a set of cells whose definitions share ranges (`SharedDef`), its
+    /// ranges parsed once: the set, the cells claimed with it (cell order)
+    /// and the set's charge
+    Shared(usize, Vec<(usize, Need)>, u64),
 }
 
 fn fail(adm: &Mutex<Admit>, cv: &Condvar, e: String) {
@@ -235,8 +238,8 @@ pub(crate) fn mark_group(
                     let empty = Cell::default();
                     loop {
                         // the next cell in file order, admitted by its
-                        // bytes - with every other cell of its range when
-                        // the range defines several (parsed once, charged
+                        // bytes - with every other cell of its set when
+                        // its ranges define several (parsed once, charged
                         // whole)
                         let task = {
                             let mut a = adm.lock().unwrap_or_else(|e| e.into_inner());
@@ -249,9 +252,9 @@ pub(crate) fn mark_group(
                                 }
                                 let ci = a.next;
                                 let need = need_of(occ, group, inst, ci);
-                                let shared = if need == Need::Shapes { store.shared_range_of(ci) } else { None };
+                                let shared = if need == Need::Shapes { store.shared_def_of(ci) } else { None };
                                 let cost = match shared {
-                                    Some((_, _, cost)) => cost,
+                                    Some(d) => d.cost,
                                     None if need == Need::Shapes => store.cell_bytes(ci),
                                     None => 0,
                                 };
@@ -261,11 +264,11 @@ pub(crate) fn mark_group(
                                     a.resident = a.resident.saturating_add(cost);
                                     break Some(match shared {
                                         None => Task::Cell(ci, need, cost),
-                                        Some((ri, charges, _)) => {
+                                        Some(d) => {
                                             // (ci is the first unclaimed cell of all, so
-                                            // the range's unclaimed cells follow it)
-                                            let mut cells = Vec::with_capacity(charges.len());
-                                            for &c in charges {
+                                            // the set's unclaimed cells follow it)
+                                            let mut cells = Vec::with_capacity(d.cells.len());
+                                            for &c in &d.cells {
                                                 if c == ci {
                                                     cells.push((c, need));
                                                 } else if !a.claimed[c] {
@@ -273,7 +276,7 @@ pub(crate) fn mark_group(
                                                     cells.push((c, need_of(occ, group, inst, c)));
                                                 }
                                             }
-                                            Task::Range(ri, cells, cost)
+                                            Task::Shared(ci, cells, cost)
                                         }
                                     });
                                 }
@@ -307,9 +310,10 @@ pub(crate) fn mark_group(
                                 }
                                 done.fetch_add(1, Relaxed);
                             }
-                            Task::Range(ri, cells, cost) => {
+                            Task::Shared(first, cells, cost) => {
+                                let set = store.shared_def_of(first).expect("a claimed set");
                                 let t = Instant::now();
-                                let parsed = store.parse_range(ri, &mut buf);
+                                let parsed = store.parse_ranges(&set.ranges, &mut buf);
                                 rep.parse_s += t.elapsed().as_secs_f64();
                                 let mut by_cell: HashMap<usize, Cell> = match parsed {
                                     Ok((by_cell, bytes)) => {
@@ -321,12 +325,13 @@ pub(crate) fn mark_group(
                                         break;
                                     }
                                 };
-                                rep.shared_ranges += 1;
-                                let mut failed = None;
+                                rep.shared_ranges += set.ranges.len();
                                 for &(ci, need) in &cells {
                                     if need != Need::Shapes {
                                         mark_unparsed(occ, group, inst, ci, need, &empty, &mut sc, &mut rep);
-                                    } else if store.def_range_count(ci) == 1 {
+                                    } else {
+                                        // complete: the set's ranges are every range
+                                        // that defines it
                                         let cell = by_cell.remove(&ci).unwrap_or_else(|| Cell {
                                             name: store.inventory().cells[ci].name.clone(),
                                             ..Default::default()
@@ -334,31 +339,11 @@ pub(crate) fn mark_group(
                                         mark_parsed(occ, group, inst, ci, &cell, &mut sc, &mut rep);
                                         rep.shared += 1;
                                         drop(cell);
-                                    } else {
-                                        // defined in this range and elsewhere: every
-                                        // range of it, as a cell alone
-                                        let t = Instant::now();
-                                        let parsed = store.parse_cell(ci, &mut buf);
-                                        rep.parse_s += t.elapsed().as_secs_f64();
-                                        match parsed {
-                                            Ok((cell, bytes)) => {
-                                                rep.bytes += bytes;
-                                                mark_parsed(occ, group, inst, ci, &cell, &mut sc, &mut rep);
-                                            }
-                                            Err(e) => {
-                                                failed = Some(e);
-                                                break;
-                                            }
-                                        }
                                     }
                                     done.fetch_add(1, Relaxed);
                                 }
                                 drop(by_cell);
                                 release(adm, cv, cost);
-                                if let Some(e) = failed {
-                                    fail(adm, cv, e);
-                                    break;
-                                }
                             }
                         }
                     }

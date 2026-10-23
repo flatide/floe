@@ -276,7 +276,10 @@ source(s) whose occupancy summary is not built yet …`, 보고서 JSON의 shot 
 `summary_building`). 0.12.388(DIRECT_READ_PLAN §8.11)부터 자동 색인은 캡처의 요약을 만들지
 않는다 — 캡처는 한 번 그리고 마는 전제다 — 고 `render --occupancy on`이 요약 없는 소스를 "no
 occupancy summary yet - indexing them first"로 먼저 채운다(0.12.384~0.12.387은 그리는 명령이 늘
-먼저 채웠다). `--light`/`--full`은 자동 색인의 캐시 종류다.
+먼저 채웠다). `--light`/`--full`은 자동 색인의 캐시 종류다 — 캐시 없는 소스에 짓는 종류이고, 있는 캐시는
+종류와 무관하게 그대로 연다(`DeckIndexPlan::prepare_for_open`, 0.12.392): `render --full --occupancy on`은
+경량 캐시를 다시 짓지 않고 빠진 요약만 더한다(0.12.390~0.12.391은 경량 캐시를 재빌드 항목으로 만들어 자동
+색인이 건너뛰었고 캡처가 요약 없이 exit 3으로 끝났다; DIRECT_READ_PLAN §8.15).
 GTK 열기는 모달 색인 한 번이다: `floe2 index deck.jb [--level …]`가 경량 캐시와 요약을 함께 만들고
 (요약 없는 캐시만 있으면 빠진 요약만), 그 뒤 연다(SPEC-VIEWER §7; 0.12.384~0.12.387의 두 단계와
 백그라운드 요약은 뺐다). `floe2 info deck.jb --json`의 `metadata.jobdeck`에

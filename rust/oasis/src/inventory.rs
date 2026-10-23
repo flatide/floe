@@ -1464,6 +1464,71 @@ pub mod fixtures {
         w.out
     }
 
+    /// the review of 0.12.391 (2026-10-23): C0..Ck-1 each defined on its
+    /// own first (a CELL record with a rect on layer 1 + i % 3), then HOST
+    /// with a rect and a CBLOCK holding CELL C0..Ck-1 again with a second
+    /// rect each, then TOP placing HOST and every Ci - every Ci has two
+    /// definition ranges and HOST's range defines k + 1 cells, so all k + 1
+    /// cells and k + 1 ranges are one set the marking pass parses once
+    /// (cli stream.rs `SharedDef`); the light cache refuses the stream
+    pub fn cells_defined_twice(k: usize) -> Vec<u8> {
+        let mut w = W::new();
+        start(&mut w);
+        let rect = |w: &mut W, i: usize, x: i64| {
+            w.uint(20);
+            w.byte(0x40 | 0x20 | 0x10 | 0x08 | 0x02 | 0x01);
+            w.uint(1 + (i as u64 % 3));
+            w.uint(0);
+            w.uint(10 + i as u64);
+            w.uint(10);
+            w.sint(x);
+            w.sint(-(i as i64));
+        };
+        for i in 0..k {
+            w.uint(14);
+            w.string(format!("C{}", i).as_bytes());
+            rect(&mut w, i, i as i64);
+        }
+        w.uint(14);
+        w.string(b"HOST");
+        w.uint(20);
+        w.byte(0x40 | 0x20 | 0x10 | 0x08 | 0x02 | 0x01);
+        w.uint(1);
+        w.uint(0);
+        w.uint(50);
+        w.uint(60);
+        w.sint(0);
+        w.sint(0);
+        let mut b = W::new();
+        for i in 0..k {
+            b.uint(14);
+            b.string(format!("C{}", i).as_bytes());
+            rect(&mut b, i, 40 + i as i64);
+        }
+        let comp = deflate(&b.out);
+        w.uint(34);
+        w.uint(0);
+        w.uint(b.out.len() as u64);
+        w.uint(comp.len() as u64);
+        w.out.extend_from_slice(&comp);
+        w.uint(14);
+        w.string(b"TOP");
+        w.uint(17);
+        w.byte(0x80 | 0x20 | 0x10);
+        w.string(b"HOST");
+        w.sint(0);
+        w.sint(0);
+        for i in 0..k {
+            w.uint(17);
+            w.byte(0x80 | 0x20 | 0x10);
+            w.string(format!("C{}", i).as_bytes());
+            w.sint(100 * (i as i64 + 1));
+            w.sint(200);
+        }
+        end(&mut w);
+        w.out
+    }
+
     /// TEXT streams doc.rs refuses: 0 = a non-UTF-8 TEXTSTRING, 1 = a
     /// non-UTF-8 inline string, 2 = a first TEXT without a string, 3 =
     /// a reference no TEXTSTRING defines; 4 = a TEXTSTRING reference

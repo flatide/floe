@@ -43,6 +43,25 @@ struct RangeJob {
     cost: u64,
 }
 
+/// Cells whose definitions share ranges (0.12.392): the connected set of
+/// cells and ranges where a range defines several cells - CELL records
+/// inside a CBLOCK of another cell's range (the review's 24 cells in one
+/// 663 KiB block, 2026-10-23) - or a cell is defined in several ranges
+/// that define others too (the review's variant: 24 cells defined on
+/// their own and again in one CBLOCK). The marking pass parses the set's
+/// ranges once for all of its cells (`StreamStore::parse_ranges`) and
+/// charges the set's cost; a cell whose ranges define no other cell is
+/// in no set.
+#[derive(Debug)]
+pub struct SharedDef {
+    /// the ranges, in file order: every range that defines a cell of the set
+    pub ranges: Vec<usize>,
+    /// the cells, in cell order
+    pub cells: Vec<usize>,
+    /// their Doc estimates summed: what parsing the ranges materializes
+    pub cost: u64,
+}
+
 enum Slot {
     /// pieces parsed so far (range index, records) and the ranges still
     /// to come
@@ -87,6 +106,10 @@ pub struct StreamStore {
     /// the largest span of ranges a cell defined in several places holds
     /// resident (what `new` refused below)
     min_budget: u64,
+    /// the sets of cells whose definitions share ranges, and each cell's
+    /// set (`shared_def_of`)
+    shared: Vec<SharedDef>,
+    shared_of: Vec<Option<u32>>,
     st: Mutex<State>,
     cv: Condvar,
 }
@@ -246,6 +269,58 @@ impl StreamStore {
                 remaining: c.def_ranges.len() as u32,
             });
         }
+        // the cells each range defines (its CELL records, inside a CBLOCK
+        // of another cell's range too) and, over them, the sets of cells
+        // whose definitions share ranges: the marking pass parses such a
+        // set's ranges once for all of its cells (`SharedDef`, 0.12.392)
+        let mut defines: Vec<Vec<usize>> = vec![Vec::new(); ranges.len()];
+        for (ci, c) in inv.cells.iter().enumerate() {
+            for start in &c.def_ranges {
+                defines[by_start.get(start).copied().unwrap_or(0)].push(ci);
+            }
+        }
+        fn root(parent: &mut [usize], mut i: usize) -> usize {
+            while parent[i] != i {
+                parent[i] = parent[parent[i]];
+                i = parent[i];
+            }
+            i
+        }
+        let mut parent: Vec<usize> = (0..n).collect();
+        for cells in &defines {
+            if let Some((&first, rest)) = cells.split_first() {
+                for &c in rest {
+                    let (a, b) = (root(&mut parent, first), root(&mut parent, c));
+                    if a != b {
+                        parent[a.max(b)] = a.min(b);
+                    }
+                }
+            }
+        }
+        let mut members: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for ci in 0..n {
+            if !inv.cells[ci].def_ranges.is_empty() {
+                let r = root(&mut parent, ci);
+                members[r].push(ci);
+            }
+        }
+        let mut shared: Vec<SharedDef> = Vec::new();
+        let mut shared_of: Vec<Option<u32>> = vec![None; n];
+        for cells in members.into_iter().filter(|m| m.len() > 1) {
+            let mut rs: Vec<usize> = cells
+                .iter()
+                .flat_map(|&c| inv.cells[c].def_ranges.iter())
+                .map(|start| by_start.get(start).copied().unwrap_or(0))
+                .collect();
+            rs.sort_unstable();
+            rs.dedup();
+            let cost = cells.iter().map(|&c| inv.cells[c].doc_bytes).sum();
+            let idx = shared.len() as u32;
+            for &c in &cells {
+                shared_of[c] = Some(idx);
+            }
+            shared.push(SharedDef { ranges: rs, cells, cost });
+        }
         // the smallest budget the file streams under: the largest cell, or
         // the largest span of cells a multi-definition holds resident
         let mut min_budget = largest;
@@ -299,6 +374,8 @@ impl StreamStore {
                 ranges,
                 budget,
                 min_budget,
+                shared,
+                shared_of,
                 st: Mutex::new(State {
                     slots,
                     keep: None,
@@ -428,7 +505,8 @@ impl StreamStore {
     /// joins and normalizes them - the records `cell()` hands out, without
     /// the reader pool, the slots or the budget (the caller bounds what it
     /// holds). The other cells a range defines (one inside a CBLOCK, a cell
-    /// re-opened in another's range) are parsed again at their turn.
+    /// re-opened in another's range) are parsed with it: the marking pass
+    /// takes such cells as a set (`shared_def_of`, `parse_ranges`).
     /// Returns the cell and the bytes read.
     pub fn parse_cell(&self, ci: usize, buf: &mut Vec<u8>) -> Result<(Cell, u64), String> {
         let c = &self.inv.cells[ci];
@@ -483,49 +561,42 @@ impl StreamStore {
             .map_err(|e| format!("range {}..{}: {}", r.start, r.end, e))
     }
 
-    /// The range that defines cell `ci` first, when it defines other cells
-    /// as well - CELL records inside a CBLOCK of another cell's range (the
-    /// review's 24 cells in one 663 KiB block, 2026-10-23) - with the
-    /// cells charged to it in cell order and its cost: the marking pass
-    /// parses such a range once for all of them (`parse_range`) and
-    /// charges the range's cost, what the parse materializes, instead of
-    /// parsing it again at every cell's turn charging that cell alone
-    /// (0.12.391). None for a cell alone in its first range, or without a
-    /// definition.
-    pub fn shared_range_of(&self, ci: usize) -> Option<(usize, &[usize], u64)> {
-        let c = &self.inv.cells[ci];
-        let start = *c.def_ranges.first()?;
-        let ri = self.range_index(start, &c.name).ok()?;
-        let r = &self.ranges[ri];
-        (r.charges.len() > 1).then(|| (ri, r.charges.as_slice(), r.cost))
+    /// The set of cells whose definitions share ranges with cell `ci`
+    /// (`SharedDef`): the marking pass parses its ranges once for all of
+    /// them (`parse_ranges`) and charges its cost, what the parse
+    /// materializes, instead of parsing every range of a cell at the
+    /// cell's turn charging that cell alone - the review's 24 cells in one
+    /// CBLOCK read 24 times (0.12.391 took the cells' first range; the
+    /// review of it, 2026-10-23: cells defined on their own and again in
+    /// one CBLOCK still read the block at every turn, 0.12.392). None for
+    /// a cell whose ranges define no other cell, or without a definition.
+    pub fn shared_def_of(&self, ci: usize) -> Option<&SharedDef> {
+        self.shared_of[ci].map(|i| &self.shared[i as usize])
     }
 
-    /// the ranges that define cell `ci`: one for most cells; a cell with
-    /// several CELL records has several, and `parse_range` serves it only
-    /// for the first (`parse_cell` reads them all)
-    pub fn def_range_count(&self, ci: usize) -> usize {
-        self.inv.cells[ci].def_ranges.len()
-    }
-
-    /// Range `ri` parsed once (the marking pass's shared range): every cell
-    /// it defines, by cell index, each joined and normalized on its own as
-    /// `parse_cell` does; and the bytes read. A cell whose definition goes
-    /// on in another range is not complete here (`def_range_count` > 1).
-    pub fn parse_range(&self, ri: usize, buf: &mut Vec<u8>) -> Result<(HashMap<usize, Cell>, u64), String> {
+    /// Ranges `ris` parsed once (a `SharedDef`'s, the marking pass): every
+    /// cell they define, by cell index, its pieces of all of them joined in
+    /// file order and normalized as `parse_cell` does - the cell complete
+    /// when the ranges are every range that defines it, as a set's are -
+    /// and the bytes read.
+    pub fn parse_ranges(&self, ris: &[usize], buf: &mut Vec<u8>) -> Result<(HashMap<usize, Cell>, u64), String> {
         let tables = CellTables::new(&self.inv.cellnames, &self.inv.textstrings, &self.cell_index);
-        let pieces = self.read_range(ri, buf, &tables)?;
-        let read = buf.len() as u64;
         let mut by_cell: HashMap<usize, Cell> = HashMap::new();
-        for p in pieces {
-            let cell = by_cell.entry(p.index).or_insert_with(|| Cell {
-                name: self.inv.cells[p.index].name.clone(),
-                ..Default::default()
-            });
-            cell.rects.extend(p.cell.rects);
-            cell.polys.extend(p.cell.polys);
-            cell.paths.extend(p.cell.paths);
-            cell.places.extend(p.cell.places);
-            cell.texts.extend(p.cell.texts);
+        let mut read = 0u64;
+        for &ri in ris {
+            let pieces = self.read_range(ri, buf, &tables)?;
+            read += buf.len() as u64;
+            for p in pieces {
+                let cell = by_cell.entry(p.index).or_insert_with(|| Cell {
+                    name: self.inv.cells[p.index].name.clone(),
+                    ..Default::default()
+                });
+                cell.rects.extend(p.cell.rects);
+                cell.polys.extend(p.cell.polys);
+                cell.paths.extend(p.cell.paths);
+                cell.places.extend(p.cell.places);
+                cell.texts.extend(p.cell.texts);
+            }
         }
         for cell in by_cell.values_mut() {
             normalize_cells(std::slice::from_mut(cell), 1);
@@ -906,6 +977,7 @@ mod tests {
             ("adv", fixtures::adversarial(false, true)),
             ("head", fixtures::head_cblock_cell()),
             ("shared", fixtures::cells_in_one_cblock(6)),
+            ("twice", fixtures::cells_defined_twice(6)),
         ];
         for (tag, data) in cases.drain(..) {
             let dir = tmpdir(&format!("ovo-{}", tag));
@@ -969,8 +1041,9 @@ mod tests {
                     assert!(parsed > 0, "{}: the markers parsed something", tag);
                 }
                 // the cells inside HOST's CBLOCK come from one parse of
-                // HOST's range per group: no range is read twice in a pass
-                if tag == "shared" && !prune {
+                // HOST's range per group (and of their own ranges, when
+                // they have them): no range is read twice in a pass
+                if (tag == "shared" || tag == "twice") && !prune {
                     assert!(shared >= 2, "shared: {} cells from a shared range", shared);
                     assert!(bytes <= data.len() as u64 * passes as u64, "shared: {} bytes read over {} passes of a {} byte file", bytes, passes, data.len());
                 }
@@ -997,6 +1070,7 @@ mod tests {
             ("dup", fixtures::dup_in_range()),
             ("head", fixtures::head_cblock_cell()),
             ("shared", fixtures::cells_in_one_cblock(5)),
+            ("twice", fixtures::cells_defined_twice(5)),
         ];
         for (tag, data) in &cases {
             let dir = tmpdir(&format!("alone-{}", tag));
@@ -1024,47 +1098,58 @@ mod tests {
         }
     }
 
-    /// a range that defines several cells (HOST's range with 24 cells in
-    /// its CBLOCK): `shared_range_of` names it for every one of them with
-    /// all 25 charged, `parse_range` yields each cell as `parse_cell` does,
-    /// and TOP, alone in its range, has none
+    /// the sets of cells whose definitions share ranges: HOST's range with
+    /// 24 cells in its CBLOCK is one set of 25 cells and one range; the 24
+    /// cells defined on their own and again in HOST's CBLOCK (the review of
+    /// 0.12.391) one set of 25 cells and 25 ranges - `shared_def_of` names
+    /// it for every one of them, `parse_ranges` yields each cell complete,
+    /// as `parse_cell` does, and TOP, alone in its range, is in no set
     #[test]
-    fn a_shared_range_is_parsed_once_for_its_cells() {
-        let data = fixtures::cells_in_one_cblock(24);
-        let dir = tmpdir("shared-range");
-        let src = dir.join("src.oas");
-        std::fs::write(&src, &data).unwrap();
-        let inv = floe_oasis::inventory(&data, 2).expect("inventory");
-        let n = inv.cells.len();
-        assert_eq!(n, 26);
-        let (store, _) = StreamStore::new(inv, src.to_str().unwrap(), u64::MAX / 4).expect("store");
-        let mut buf = Vec::new();
-        let (mut shared_cells, mut ranges) = (0usize, std::collections::BTreeSet::new());
-        for ci in 0..n {
-            let name = store.inventory().cells[ci].name.clone();
-            match store.shared_range_of(ci) {
-                Some((ri, charges, cost)) => {
-                    assert_ne!(name, "TOP");
-                    assert_eq!(charges.len(), 25, "{}", name);
-                    assert!(charges.contains(&ci) && cost > 0, "{}", name);
-                    assert_eq!(store.def_range_count(ci), 1, "{}", name);
-                    shared_cells += 1;
-                    ranges.insert(ri);
+    fn a_shared_definition_is_parsed_once_for_its_cells() {
+        for (tag, data, ranges_expected, rects) in [
+            ("one-cblock", fixtures::cells_in_one_cblock(24), 1usize, 1usize),
+            ("twice", fixtures::cells_defined_twice(24), 25, 2),
+        ] {
+            let dir = tmpdir(&format!("shared-{}", tag));
+            let src = dir.join("src.oas");
+            std::fs::write(&src, &data).unwrap();
+            let inv = floe_oasis::inventory(&data, 2).expect("inventory");
+            let n = inv.cells.len();
+            assert_eq!(n, 26, "{}", tag);
+            let (store, _) = StreamStore::new(inv, src.to_str().unwrap(), u64::MAX / 4).expect("store");
+            let mut buf = Vec::new();
+            let mut shared_cells = 0usize;
+            let mut set: Option<*const SharedDef> = None;
+            for ci in 0..n {
+                let name = store.inventory().cells[ci].name.clone();
+                match store.shared_def_of(ci) {
+                    Some(d) => {
+                        assert_ne!(name, "TOP", "{}", tag);
+                        assert_eq!((d.cells.len(), d.ranges.len()), (25, ranges_expected), "{}: {}", tag, name);
+                        assert!(d.cells.contains(&ci) && d.cost > 0, "{}: {}", tag, name);
+                        assert!(d.ranges.windows(2).all(|w| w[0] < w[1]), "{}: ranges in file order", tag);
+                        assert!(set.map_or(true, |p| std::ptr::eq(p, d)), "{}: one set", tag);
+                        set = Some(d);
+                        shared_cells += 1;
+                    }
+                    None => assert_eq!(name, "TOP", "{}: {} is alone in its range", tag, name),
                 }
-                None => assert_eq!(name, "TOP", "{} is alone in its range", name),
             }
+            assert_eq!(shared_cells, 25, "{}", tag);
+            let d = store.shared_def_of(0).expect("a set");
+            let cost_expected: u64 = d.cells.iter().map(|&c| store.cell_bytes(c)).sum();
+            assert_eq!(d.cost, cost_expected, "{}: the set's cost is its cells' Doc estimates", tag);
+            let (by_cell, bytes) = store.parse_ranges(&d.ranges, &mut buf).expect("parse_ranges");
+            assert!(bytes > 0 && bytes < data.len() as u64, "{}", tag);
+            assert_eq!(by_cell.len(), 25, "{}", tag);
+            for (ci, cell) in &by_cell {
+                let (alone, _) = store.parse_cell(*ci, &mut buf).expect("parse_cell");
+                assert!(*cell == alone, "{}: cell {} ({}) differs from its own parse", tag, ci, cell.name);
+                let expected = if cell.name == "HOST" { 1 } else { rects };
+                assert_eq!(cell.rects.len(), expected, "{}: {}", tag, cell.name);
+            }
+            let _ = std::fs::remove_dir_all(&dir);
         }
-        assert_eq!((shared_cells, ranges.len()), (25, 1));
-        let ri = *ranges.iter().next().unwrap();
-        let (by_cell, bytes) = store.parse_range(ri, &mut buf).expect("parse_range");
-        assert!(bytes > 0 && bytes < data.len() as u64);
-        assert_eq!(by_cell.len(), 25);
-        for (ci, cell) in &by_cell {
-            let (alone, _) = store.parse_cell(*ci, &mut buf).expect("parse_cell");
-            assert!(*cell == alone, "cell {} ({}) differs from its own parse", ci, cell.name);
-            assert_eq!(cell.rects.len(), 1, "{}", cell.name);
-        }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// a corrupt range (the file changed under the inventory): the reader

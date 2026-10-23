@@ -244,6 +244,8 @@ python을 사용하지 않도록 변경해줘."
   - `WorkerClient::set_timeouts(render, query)`와 `RenderSession::set_timeouts`를 더했다. 0.12.389부터
     `captures::run`이 캡처 세션에 `capture_timeout()`(FLOE_RENDER_TIMEOUT_S, 기본 일주일)을 준다 — exact
     캡처가 띠 분할로 수 분 걸려도 300 s에 끊기지 않는다(DIRECT_READ_PLAN §8.12).
+  - 0.12.392: renderd의 렌더 중 패닉은 `error gen=N code=panic message=…`로 응답되고 렌더 워커가 끝난다(다음
+    명령에서 프로세스 종료). 전에는 응답 없이 기한까지 기다렸다 — 캡처는 일주일(DIRECT_READ_PLAN §8.15 3).
 - **`ViewState`·`Patch`:** `density: Option<bool>`를 더했다. None이면 renderd 기본값(`FLOE_RUST_DENSITY_STACK`)을 쓴다. 렌더 정책이므로 렌더 키에 들어간다.
   - GTK 뷰어는 늘 보내며 0.12.351부터 시작값이 켬이다(`FLOE_RUST_DENSITY_STACK=off`면 끔; 컷 0·덱 프레임은 끔으로 보냄). `floe2 render`도 같다(`shots::density_default`).
   - 웹은 아직 보내지 않아 renderd 기본(꺼짐)으로 그린다. 웹으로 옮길 때 같은 시작값을 맞춰야 한다.

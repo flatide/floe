@@ -534,10 +534,12 @@ fn index_deck(
 }
 
 /// the auto-index's options for a deck: the cache kind asked for (`light`:
-/// `--light` / `--full`, else the rule) and whether the summaries are built
-/// (`summaries`: `--occupancy on`; a capture builds none by default - user
-/// 2026-10-22: a capture is drawn once, `floe2 index deck.jb` and the
-/// viewer's open build the summary for what is opened again)
+/// `--light` / `--full`, else the rule - for the sources without a cache;
+/// `DeckIndexPlan::prepare_for_open` keeps a cache there as it is) and
+/// whether the summaries are built (`summaries`: `--occupancy on`; a
+/// capture builds none by default - user 2026-10-22: a capture is drawn
+/// once, `floe2 index deck.jb` and the viewer's open build the summary for
+/// what is opened again)
 fn deck_options(light: Option<bool>, summaries: bool) -> IndexOptions {
     IndexOptions {
         light,
@@ -588,7 +590,7 @@ pub(crate) fn open(
                     && e.kind != ErrorKind::Cancelled
                     && ((index && !deck_indexed) || waiter.on()) =>
             {
-                let plan = DeckIndexPlan::prepare(
+                let plan = DeckIndexPlan::prepare_for_open(
                     source,
                     levels.clone(),
                     &deck_options(light, summaries),
@@ -612,8 +614,12 @@ pub(crate) fn open(
         // once, then drawn
         if index && !deck_indexed && none {
             deck_indexed = true;
-            let plan =
-                DeckIndexPlan::prepare(source, levels.clone(), &deck_options(light, summaries), cancelled)?;
+            let plan = DeckIndexPlan::prepare_for_open(
+                source,
+                levels.clone(),
+                &deck_options(light, summaries),
+                cancelled,
+            )?;
             index_deck(plan, summaries, waiter, cancelled)?;
             continue;
         }

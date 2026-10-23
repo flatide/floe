@@ -829,7 +829,14 @@ published query scene of such a capture holds no page (`scene_complete=0`).
 Viewer frames and margins keep the refusal (they are drawn again);
 `FLOE_RUST_BANDED_CAPTURE=off` is the kill switch. The capture's render
 deadline is no longer the viewer's 300 s: app-core `captures::run` waits a week
-(`FLOE_RENDER_TIMEOUT_S`).
+(`FLOE_RENDER_TIMEOUT_S`). Since 0.12.392 (§8.15 there) a band's box ends at the
+full plan's view at the frame's top and bottom - the slack serves the strokes
+that cross a band's edge, and a page just outside the frame, which the whole
+render never plans, had come into the first and the last band's plan with a
+thick outline of it into the edge rows -, a frame of one row is one band
+(`clamp(2, height)` panicked at height 1), and a panic inside a render is
+answered with `error gen=N code=panic message=...` before the render worker
+ends (the client had waited for the render's deadline).
 
 The operational knobs are `FLOE_RENDERD_BIN`, `FLOE_RUST_JOBS` (page decode,
 default up to 8 host CPUs), `FLOE_RUST_RASTER_JOBS` (default up to 4 and never

@@ -1402,13 +1402,40 @@ fn render_worker(
                 &published_hier,
             ),
             WorkerCommand::Style(command) => handle_style(&mut state, command, &responses),
-            WorkerCommand::Render(command) => handle_render(
-                &mut state,
-                command,
-                &responses,
-                &cancellation,
-                &published_scene,
-            ),
+            WorkerCommand::Render(command) => {
+                // a panic inside a render (a bug - the one-row banded
+                // capture's `clamp`, review 2026-10-23) is answered: the
+                // client was left waiting for the render's deadline (a
+                // capture's is a week) with the worker thread gone and the
+                // process alive. The worker ends after the answer - its
+                // state is not trusted past a panic - and the main loop
+                // ends the process at the next command ("render worker
+                // stopped"); the panic hook's own report stays on stderr.
+                let generation = command.generation;
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    handle_render(
+                        &mut state,
+                        command,
+                        &responses,
+                        &cancellation,
+                        &published_scene,
+                    )
+                }));
+                if let Err(payload) = outcome {
+                    respond(
+                        &responses,
+                        format!(
+                            "error gen={} code=panic message={}",
+                            generation,
+                            wire_escape(&format!(
+                                "the renderer failed inside this render: {} (a bug: report the command line and the lines above)",
+                                panic_text(payload.as_ref())
+                            ))
+                        ),
+                    );
+                    return;
+                }
+            }
             WorkerCommand::Clip(command) => {
                 handle_clip(&mut state, command, &responses, &cancellation)
             }
@@ -5371,7 +5398,11 @@ fn render_banded_capture(
     // the pages' charge runs past their estimate, and a band's pages
     // overlap the next band's
     let target = (budget / 4).max(1);
-    let n = estimate.div_ceil(target).clamp(2, u64::from(height)) as u32;
+    // (a frame of one row is one band: `clamp(2, height)` panicked at
+    // height 1 - `--px 800x1 --stretch` - and the capture, unanswered,
+    // waited for its deadline; review 2026-10-23)
+    let h = u64::from(height);
+    let n = estimate.div_ceil(target).clamp(2.min(h), h) as u32;
     let rows = height.div_ceil(n).max(1);
     // (a band, with the estimate of the band it was split from: a split
     // goes on while it helps)
@@ -5380,7 +5411,7 @@ fn render_banded_capture(
         .map(|r0| (r0, (r0 + rows).min(height), None))
         .collect();
     let (mut over_bands, mut over_max) = (0u32, 0u64);
-    let [x0, y0, x1, y1] = command.view;
+    let [_, y0, _, y1] = command.view;
     let per_row = (y1 - y0) / f64::from(height);
     let slack = BANDED_SLACK_PX * per_row.abs();
     let stride = width as usize * 4;
@@ -5407,16 +5438,21 @@ fn render_banded_capture(
     };
     while let Some((r0, r1, parent)) = work.pop_front() {
         check_generation(cancellation, command.generation)?;
-        // the band's world box: device row 0 is the view's top (y1)
+        // the band's world box: device row 0 is the view's top (y1). The
+        // slack serves the strokes that cross a band's edge, so the frame's
+        // own edges take none: the box ends at the full plan's view
+        // (`page_request.view`, the command's view at whole units) - else
+        // the first and the last band planned pages just outside the frame,
+        // which the whole render never plans, and a thick outline of such a
+        // page came into the frame's edge rows (review 2026-10-23: a 100 x
+        // 100 exact capture differed by 264 pixels between two budgets)
+        let full = &page_request.view;
         let top = y1 - f64::from(r0) * per_row + slack;
         let bottom = y1 - f64::from(r1) * per_row - slack;
+        let band_y0 = checked_bound(bottom.min(top).floor(), "band y0")?.max(full.y0);
+        let band_y1 = checked_bound(top.max(bottom).ceil(), "band y1")?.min(full.y1);
         let band_request = PlanRequest {
-            view: ViewBox::new(
-                checked_bound(x0.floor(), "band x0")?,
-                checked_bound(bottom.min(top).floor(), "band y0")?,
-                checked_bound(x1.ceil(), "band x1")?,
-                checked_bound(top.max(bottom).ceil(), "band y1")?,
-            )?,
+            view: ViewBox::new(full.x0, band_y0.min(band_y1), full.x1, band_y1.max(band_y0))?,
             ..page_request.clone()
         };
         let planned =
@@ -6812,6 +6848,17 @@ fn make_plan_request_cut(
         return Err("invalid cache unit".to_string());
     }
     Ok(request)
+}
+
+/// a panic's payload in words (`panic!("...")` carries a &str or a String)
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "panic".to_string()
+    }
 }
 
 fn checked_bound(value: f64, name: &str) -> Result<i64, String> {

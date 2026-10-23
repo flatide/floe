@@ -633,6 +633,83 @@ def probe_checks(src):
         walked.stop()
 
 
+def layout_edge(path):
+    """1 x 1 mm of 150,000 scattered boxes (1/0, cell A) and, in a cell of
+    its own with 150,000 boxes far above, one 2/0 rect whose bottom edge
+    lies 1 px above the frame's top at 100 px: 300..700 x 1010..1500 um -
+    its page is outside the frame, its 8 px outline (centred on the edge)
+    is not."""
+    import random
+    import klayout.db as kdb
+    ly = kdb.Layout()
+    ly.dbu = 0.001
+    top, a, b = ly.create_cell('TOP'), ly.create_cell('A'), ly.create_cell('B')
+    la, lb = ly.layer(1, 0), ly.layer(2, 0)
+    rnd = random.Random(5)
+    for _ in range(150_000):
+        x, y = rnd.randrange(998_000), rnd.randrange(998_000)
+        a.shapes(la).insert(kdb.Box(x, y, x + 600 + rnd.randrange(400), y + 600 + rnd.randrange(400)))
+    b.shapes(lb).insert(kdb.DBox(300.0, 1010.0, 700.0, 1500.0))
+    for _ in range(150_000):
+        x, y = rnd.randrange(998_000), 1_200_000 + rnd.randrange(798_000)
+        b.shapes(lb).insert(kdb.Box(x, y, x + 600 + rnd.randrange(400), y + 600 + rnd.randrange(400)))
+    for cell in (a, b):
+        top.insert(kdb.DCellInstArray(cell.cell_index(), kdb.DTrans(kdb.DVector(0, 0))))
+    ly.write(str(path))
+
+
+def band_edge_checks(temp):
+    """The banded exact capture's edge rows are the whole render's
+    (0.12.392, DIRECT_READ_PLAN section 8.15): through the stroke slack the
+    first and the last band planned a page just outside the frame, which
+    the whole render never plans, and a thick outline of it came into the
+    frame's edge rows (review 2026-10-23: 100 x 100 px, two budgets, 264
+    pixels apart)."""
+    src = Path(temp) / 'edge.oas'
+    layout_edge(src)
+    done = subprocess.run([FLOE2, 'index', str(src), '--jobs', '2'], cwd=ROOT, env=os.environ,
+                          capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+
+    def capture(budget_mb):
+        os.environ['FLOE_RUST_BUDGET_MB'] = str(budget_mb)
+        cache = Cache(str(src))
+        cache.load()
+        w = RustRenderWorker(cache)
+        w.set_outline_width((2, 0), 8)
+        w.start()
+        os.environ.pop('FLOE_RUST_BUDGET_MB', None)
+        try:
+            keys = [(int(l['layer']), int(l['datatype'])) for l in w.cache.meta['layers']]
+            job = {'kind': 'render', 'gen': 1, 'scope': 'headless', 'bbox': (0.0, 0.0, 1e6, 1e6), 'view': None,
+                   'w': 100, 'h': 100, 'depth': None, 'cut_px': 0, 'lod': False, 'frames': False,
+                   'labels': False, 'abstract': False, 'visible': keys, 'frame_format': 'raw',
+                   'thin': 'keep', 'progressive': False}
+            w.submit(job)
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline:
+                res = w.res.get(timeout=max(0.1, deadline - time.monotonic()))
+                if res.get('kind') == 'error':
+                    raise AssertionError('band edge capture under %d MB failed: %s' % (budget_mb, res))
+                if res.get('kind') == 'frame' and res.get('gen') == 1 and not res.get('refining'):
+                    banded = any('drawn in bands' in line for line in w.stderr_tail())
+                    return bytes(res['rgba']), banded
+            raise AssertionError('band edge capture timeout')
+        finally:
+            w.stop()
+
+    whole, whole_banded = capture(4096)
+    banded, is_banded = capture(1)
+    assert not whole_banded and is_banded, (whole_banded, is_banded)
+    assert len(whole) == len(banded) == 100 * 100 * 4, (len(whole), len(banded))
+    lit = sum(1 for i in range(0, len(whole), 4) if whole[i:i + 4] != whole[:4])
+    assert lit > 0, 'the whole capture is empty'
+    differ = sum(1 for i in range(0, len(whole), 4) if whole[i:i + 4] != banded[i:i + 4])
+    assert differ == 0, 'the banded exact capture differs from the whole one in %d pixels (the frame edge rows)' % differ
+    print('fit budget: band edge - the banded exact capture of a frame with a thick-outlined shape just '
+          'outside it is the whole one, pixel for pixel (%d of 10,000 pixels lit)' % lit)
+
+
 def cli_checks(temp, src):
     """`floe2 render` over the budget: the exact capture drawn in bands
     (0.12.389, DIRECT_READ_PLAN section 8.12) byte-equal to the roomy one,
@@ -665,6 +742,19 @@ def cli_checks(temp, src):
                   'the render budget is 48 MiB', '--detail high', 'FLOE_RUST_BUDGET_MB='):
         assert words in err, (words, err)
     assert '_>_' not in err, err
+    # a capture of one device row (--px 800x1 --stretch) over the budget is
+    # one band: `clamp(2, height)` panicked at height 1 and the capture,
+    # unanswered, waited for its deadline (review 2026-10-23, 0.12.392); the
+    # deadline here keeps a regression from hanging the gate
+    out, report = Path(temp) / 'cli_row.png', Path(temp) / 'cli_row.json'
+    done = subprocess.run(
+        [FLOE2, 'render', str(src), '--px', '800x1', '--stretch', '--detail', 'exact', '--out', str(out), '--report', str(report)],
+        cwd=ROOT, env={**env, 'FLOE_RUST_BUDGET_MB': '48', 'FLOE_RENDER_TIMEOUT_S': '120'},
+        capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0 and out.exists(), (done.returncode, done.stderr[-600:])
+    assert '[capture]' in done.stderr and 'drawn in bands' in done.stderr, done.stderr[-600:]
+    shot = json.loads(report.read_text())['shots'][0]
+    assert shot.get('complete'), shot
     done, out, shot = render('cli_high', 48, '--detail', 'high')
     assert done.returncode == 0 and out.exists(), done.stderr
     assert 'WARNING' in done.stdout and 'thinned to fit the render budget: ' in done.stdout, done.stdout
@@ -819,6 +909,7 @@ def main():
         probe_checks(src)
         top_first_checks(temp, src)
         cli_checks(temp, src)
+        band_edge_checks(temp)
     print('FIT BUDGET: ALL OK')
 
 

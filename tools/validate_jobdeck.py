@@ -806,7 +806,8 @@ class LightSummaryTests(unittest.TestCase):
     index deck.jb` (the viewer's modal open) adds a missing one and keeps
     the rest; the deck's metadata counts the light sources and the
     summaries missing; `floe2 index deck.jb --full` rebuilds the light
-    caches as full indexes (0.12.390)."""
+    caches as full indexes (0.12.390), while `render --full --occupancy on`
+    keeps them and adds their summaries (0.12.392)."""
 
     @classmethod
     def setUpClass(cls):
@@ -862,6 +863,23 @@ class LightSummaryTests(unittest.TestCase):
         wide.unlink()
         for c in self.caches:
             self.assertFalse((c / "design.ovo").exists(), c)
+        # render --full --occupancy on over the light caches: the auto-index
+        # adds the summaries to the caches as they are and rebuilds none -
+        # --full names the cache built for a source without one (the plan's
+        # rebuild of a light cache under an explicit --full, 0.12.390, made
+        # these entries builds the auto-index skipped: no summary, exit 3;
+        # review 2026-10-23, 0.12.392)
+        res = run_floe2("render", self.deck, "--bbox", "40000,80000,60000,95000",
+                        "--px", "300", "--detail", "medium", "--full", "--occupancy", "on",
+                        "--out", wide, env=self.env, ok=0)
+        self.assertIn("no occupancy summary yet - indexing them first", res.stderr)
+        self.assertNotIn("summary_building=", res.stderr)
+        self.assertTrue(wide.is_file())
+        wide.unlink()
+        for c in self.caches:
+            self.assertTrue((c / "design.ovo").is_file(), c)
+            self.assertFalse((c / "design.ovm").exists(), c)
+            (c / "design.ovo").unlink()
         # --occupancy on: the auto-index adds the summaries first
         res = run_floe2("render", self.deck, "--bbox", "40000,80000,60000,95000",
                         "--px", "300", "--detail", "medium", "--occupancy", "on",

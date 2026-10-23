@@ -9,7 +9,7 @@ fn main() {
         let (name, out) = match (args.get(2), args.get(3)) {
             (Some(n), Some(o)) => (n.as_str(), o),
             _ => {
-                eprintln!("usage: floe-dbg fixture head-cblock|adversarial|adversarial-cblock|dup-in-range|labelled-tree|cblock-cells OUT");
+                eprintln!("usage: floe-dbg fixture head-cblock|adversarial|adversarial-cblock|dup-in-range|labelled-tree|cblock-cells|cblock-cells-twice OUT");
                 std::process::exit(2);
             }
         };
@@ -22,6 +22,10 @@ fn main() {
             // 24 cells inside one CBLOCK of HOST's range (the marking
             // pass's shared range, 0.12.391)
             "cblock-cells" => fixtures::cells_in_one_cblock(24),
+            // the same 24 cells defined on their own first, then again in
+            // HOST's CBLOCK (the review of 0.12.391: one set of 25 cells
+            // and 25 ranges, 0.12.392)
+            "cblock-cells-twice" => fixtures::cells_defined_twice(24),
             _ => {
                 eprintln!("floe-dbg fixture: unknown fixture {}", name);
                 std::process::exit(2);

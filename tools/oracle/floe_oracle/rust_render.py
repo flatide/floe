@@ -629,6 +629,17 @@ class RustRenderWorker:
         if self.alive():
             self._send("cancel before_gen=%d" % int(before_gen))
 
+    def set_outline_width(self, key, width):
+        """The outline width (1..8) of layer `key` for the style published
+        at start() - a gate's thick stroke (validate_fit_budget.py's band
+        edge check); the caches' own rows set it otherwise."""
+        self._widths[_layer_key(key)] = max(1, min(8, int(width)))
+
+    def stderr_tail(self):
+        """the last lines renderd wrote to stderr (its `[capture]` and
+        `[light]` notes among them)"""
+        return list(self._stderr_tail)
+
     def stop(self):
         with self._lifecycle_lock:
             if self._stopping:
@@ -817,6 +828,11 @@ class RustRenderWorker:
                 thin, self._style_epoch, output))
         if probe is not None:
             command += " probe=%s block=%d" % (probe, block)
+        if job.get("progressive") is False:
+            # a capture (renderd `progressive=0`: a light cache's fills run
+            # to the end, an exact capture over the budget is drawn in
+            # bands) - the gates' captures (validate_fit_budget.py)
+            command += " progressive=0"
         if job.get("bg"):
             # §F2R-17 margin: renderd drops one the scale's budget fit does
             # not hold instead of deciding anew (it must look as the

@@ -235,6 +235,15 @@ def main():
         if r.returncode != 0 or not cc.is_file():
             fail("floe-dbg fixture cblock-cells: exit %d\n%s" % (r.returncode, r.stderr[-800:]))
         files.append(("cblock cells", cc))
+        # the same 24 cells defined on their own first and again in that
+        # CBLOCK (the review of 0.12.391): one set of 25 cells and 25 ranges
+        # parsed once (0.12.392)
+        cc2 = work / "cblock_cells_twice.oas"
+        r = subprocess.run([str(BIN.parent / "floe-dbg"), "fixture", "cblock-cells-twice", str(cc2)],
+                           capture_output=True, text=True)
+        if r.returncode != 0 or not cc2.is_file():
+            fail("floe-dbg fixture cblock-cells-twice: exit %d\n%s" % (r.returncode, r.stderr[-800:]))
+        files.append(("cblock cells twice", cc2))
         largest_of = {}
         for name, src in files:
             largest, est = largest_cell_bytes(src, 4)

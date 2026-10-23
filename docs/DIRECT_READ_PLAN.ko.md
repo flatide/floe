@@ -428,6 +428,7 @@ geometry/placement/text x·y, W/H, 점 목록, 경로 확장, 반복, 배치 대
 | L8 띠 분할 캡처 | exact 캡처가 디코드 예산으로 실패하지 않게 장치 행 띠 단위로 플랜·디코드·래스터 | **완료 0.12.389(§8.12)**: renderd `render_banded_capture`, 띠 그림 = 통짜 그림 바이트 동일(게이트 `floe2`), 캡처 시한 해제 |
 | 리뷰 수정 A | 2026-10-23 리뷰 5건 중 1·4·3·2 | **완료 0.12.390(§8.13)**: `pieces_of` 바이트 배치 읽기(요약 pass가 원본 전체를 올리던 회귀), 소스 fd 풀의 (dev, ino) 검증, 덱 `--full`이 경량 캐시를 전체로 재색인, 메타데이터 전용 light의 예산 검사 면제; 5(공유 CBLOCK 범위의 셀별 재파싱)는 §8.14 |
 | 리뷰 수정 B | 리뷰 5건 중 5 | **완료 0.12.391(§8.14)**: 여러 셀을 정의하는 범위(다른 셀 범위의 CBLOCK 안 CELL)를 마킹 pass가 한 번만 파싱하고 범위 cost로 과금(`StreamStore::parse_range`, markpass `Task::Range`); 픽스처 `cells_in_one_cblock`, 게이트 `vfs_stream` |
+| 리뷰 수정 C | 0.12.391 리뷰 4건(5의 변형 1, 회귀 3) | **완료 0.12.392(§8.15)**: 정의를 공유하는 셀 집합(`SharedDef`)을 마킹 pass가 한 번에 파싱·과금(각자 정의 뒤 CBLOCK 재정의도), 띠 상자를 전체 플랜의 뷰로 잘라 가장자리 픽셀 동일, 높이 1은 띠 하나, 렌더 중 패닉은 `error code=panic` 응답, 자동 색인의 덱 플랜은 캐시를 그대로 연다(`render --full --occupancy on`이 요약을 만듦) |
 | L7 후속 | 요약 패스 1패스화/마킹 가속, ovs 합치기(레이아웃 밀도), B안(정규 페이지), 세그먼트 캐시 디스크 보존(방문한 셀의 디코드 결과를 남겨 다음 세션 가속), 1패스 경량 생성(셀 로컬 점유 격자 합성) | 각각 — **L7a 완료 0.12.386(§8.9)**: 이미지 증분 합성(제자리 성장, 채움 시점 노드 마스크, 채움 바이트 해제), 세그먼트 pread 묶음·병렬 인코딩; **L7b 완료 0.12.387(§8.10)**: 요약 패스의 마커가 셀을 직접 파싱(리더 풀·상주 창 없음, 묶음이 안 쓰는 셀은 읽지 않음), 다각형 스캔 변환 버퍼 재사용, 크기 예산 밖의 레이어는 마킹하지 않음; 나머지(1패스 경량 생성은 §8.10의 정확성 논거로 보류)는 사용자 지시에 따라 |
 
 L0는 하루, L1~L3는 S1~S3와 비슷한 크기(재고 코드 위의 확장), L4가 본체다.
@@ -1150,6 +1151,48 @@ def_range 전체를 파싱한 뒤 그 셀의 조각만 골랐다. 범위는 셀�
   `a_shared_range_is_parsed_once_for_its_cells`(24셀: 25셀 모두 같은 범위, parse_range = parse_cell);
   `floe-dbg fixture cblock-cells`로 게이트 `vfs_stream`이 in-memory와 스트리밍(jobs 1·4, --occupancy)의
   캐시 파일 전부를 바이트 비교한다.
+
+### 8.15 L8 리뷰 수정 C (0.12.392 / floe-index·renderd 0.12.350, 2026-10-23; 사용자 "다음 리뷰 결과를 확인해줘")
+
+0.12.391 리뷰: 5번(§8.14)의 변형 1건과 새 회귀 3건. 모두 재현했다.
+
+- **1. 여러 번 정의된 셀의 공유 CBLOCK(§8.14의 변형).** `shared_range_of`는 셀의 첫 def_range만 봤다. 24셀을
+  각자 정의한 뒤 다른 셀 범위의 CBLOCK에서 다시 정의하면 첫 범위는 혼자라 `Task::Cell`로 가고 `parse_cell`이
+  def_range 전부(그 CBLOCK 범위 포함)를 셀마다 다시 파싱했으며, 과금은 그 셀의 Doc 추정뿐이었다(리뷰 측정:
+  작업당 0.96 MB 과금, 실제 사각형 벡터 36 MiB). 이제 `StreamStore::new`가 범위마다 정의하는 셀 목록을 만들고
+  union-find로 셀–범위 연결 집합을 잇는다(`SharedDef { ranges, cells, cost }`; 셀이 둘 이상인 집합만, 셀마다
+  `shared_of`). 마커는 Shapes가 필요한 셀의 집합을 통째로 집어(`Task::Shared`) 집합의 범위를 각각 한 번씩 읽고
+  파싱한 뒤(`parse_ranges`: 셀별로 모든 범위의 조각을 파일 순서로 join·normalize = `parse_cell`) 셀 순서로
+  마킹한다. cost = 집합 셀들의 Doc 추정 합(집합의 범위가 가진 레코드 전부가 그 셀들의 것이므로 파싱이 만드는 양과
+  같다). 집합이 셀의 def_range를 모두 담으므로 셀은 늘 완전하고 `def_range_count` 폴백은 없어졌다. 최악의 집합
+  (CBLOCK 정의가 사슬처럼 이어진 파일)은 파일 전체가 한 작업이지만, 그런 파일은 리더 풀의 다중 정의 span 요구
+  (`min_budget`)도 같은 크기다. 픽스처 `cells_defined_twice(k)`(C0..Ck-1 각자 정의 → HOST + CBLOCK 재정의 →
+  TOP), `floe-dbg fixture cblock-cells-twice`, 게이트 `vfs_stream`의 비교 목록에 추가; 단위 시험
+  `a_shared_definition_is_parsed_once_for_its_cells`(한 CBLOCK: 25셀/1범위, 두 번 정의: 25셀/25범위, cost =
+  Doc 합, parse_ranges = parse_cell), parity 시험 두 곳에 "twice" 케이스. 측정(24셀 두 번 정의, `floe-index vfs
+  --stream --occupancy --occupancy-prune 0`, 2 jobs): 마커 읽기 5.5 KB → 517 B(파일 1,057 B; `25 of them from 25 range(s) parsed once`), design.ovo는 수정 전후와 인메모리 빌드와 바이트 동일; 한 CBLOCK 픽스처는 194 B 그대로.
+- **2. 띠 가장자리 픽셀.** 첫·마지막 띠에도 9 px 여유를 더해 ROI 밖 페이지(전체 렌더는 플랜에 넣지 않는)를
+  띠의 플랜에 넣었고, 윤곽선은 변 중심이라 폭의 절반이 도형 밖으로 나오므로 그 페이지의 굵은 윤곽선이 가장자리
+  행에 들어왔다. 띠 상자의 y를 전체 플랜의 뷰(`page_request.view`, 명령 뷰의 정수화)로 자른다(x는 원래 같다).
+  재현: ROI 위 0.5~3 px에 폭 8 윤곽의 도형(자기 페이지) → 100×100 exact 캡처가 예산에 따라 144/48 픽셀
+  달랐고, 수정 뒤 0. 게이트 `fit_budget` `band_edge_checks`(Python renderd 클라이언트 `RustRenderWorker`에
+  `set_outline_width`·`progressive=0`·`stderr_tail` 추가).
+- **3. 높이 1 캡처의 패닉.** `clamp(2, height)`가 height 1에서 패닉(Rust의 clamp는 min > max면 패닉).
+  `clamp(min(2, h), h)`: 한 띠. 덤으로 렌더 스레드의 패닉은 응답 없이 사라져 클라이언트가 기한까지 기다렸다
+  (캡처는 일주일; 재현: route_chip 800×1 `--detail exact`는 기본 예산에서도 588 페이지 5.3 GB 추정으로 띠
+  분할 → 패닉 → 대기, `FLOE_RENDER_TIMEOUT_S=20`이면 20 s 뒤 "render deadline exceeded"). renderd
+  `render_worker`가 렌더를 `catch_unwind`로 감싸 `error gen=N code=panic message=the renderer failed inside
+  this render: …`를 보내고 워커를 끝낸다(패닉 뒤 상태는 믿지 않는다; 다음 명령에서 "render worker stopped"로
+  프로세스가 끝나고 패닉 훅의 보고는 stderr에 남는다). 게이트 `fit_budget` cli_checks에 `--px 800x1 --stretch
+  --detail exact` 48 MB(기한 120 s로 회귀가 게이트를 멈추지 않게).
+- **4. `render --full --occupancy on`.** 자동 색인(app-cli ready.rs)이 `DeckIndexPlan::prepare`를 그대로 써서
+  0.12.390의 규칙(명시적 `--full`은 경량 캐시를 전체로 재빌드)이 경량 캐시를 빌드 항목으로 만들었고,
+  `index_deck`은 캐시가 있는 소스의 occupancy-only 항목만 받으므로 아무것도 실행하지 않았다(캡처 exit 3,
+  `summary_building=14`; `--full`을 빼면 성공). `prepare_for_open`을 분리했다: 자동 색인은 있는 캐시를 종류와
+  무관하게 그대로 열고(`--light`/`--full`은 캐시 없는 소스에 짓는 종류), 요약 없는 캐시는 occupancy-only 항목
+  (실행은 캐시 종류의 명령: `light_run = kind == Light`). `floe2 index deck.jb --full`과 서비스의 색인은 전처럼
+  `prepare`다. 게이트 `jobdeck` LightSummaryTests에 `render --full --occupancy on` 단계(요약이 생기고 캐시는
+  경량 그대로).
 
 ## 9. 검토한 대안
 

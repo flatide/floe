@@ -58,14 +58,51 @@ pub struct DeckIndexPlan {
     pub levels: BTreeSet<i64>,
     pub selected: Option<BTreeSet<i64>>,
     pub aliases: usize,
-    /// light caches an explicit --full rebuilds as the full index (0.12.390)
+    /// light caches an explicit --full rebuilds as the full index (0.12.390;
+    /// `prepare` - the auto-index's `prepare_for_open` rebuilds none)
     pub full_over_light: usize,
 }
 impl DeckIndexPlan {
+    /// The plan of `floe2 index DECK` (and the viewer's and the service's
+    /// index of a deck): the sources of the levels selected, each as
+    /// `options` ask - a source without a cache built, one with a current
+    /// cache kept, a light cache under an explicit `--full` built over as
+    /// the full index (0.12.390), a missing occupancy summary added.
     pub fn prepare(
         path: &Path,
         selected: Option<BTreeSet<i64>>,
         options: &IndexOptions,
+        cancelled: &AtomicUsize,
+    ) -> Result<Self> {
+        Self::plan(path, selected, options, true, cancelled)
+    }
+
+    /// The auto-index's plan (app-cli ready.rs: a read command that opens a
+    /// deck - render, probe, info): a cache there is opened as it is
+    /// whatever its kind - `--light` / `--full` name the cache built for a
+    /// source without one (render's help) - so a light cache under `--full`
+    /// is kept, and with the occupancy on a current cache without its
+    /// summary gets the occupancy-only entry (run as its own kind's
+    /// command, whatever `light` says). `prepare`'s rebuild of a light
+    /// cache under `--full` made such entries builds, which the auto-index
+    /// skips (a cache is there): `render --full --occupancy on` over light
+    /// caches built no summary and the capture ended incomplete (exit 3,
+    /// `summary_building=`) where the same command without `--full`
+    /// succeeded (review 2026-10-23, 0.12.392).
+    pub fn prepare_for_open(
+        path: &Path,
+        selected: Option<BTreeSet<i64>>,
+        options: &IndexOptions,
+        cancelled: &AtomicUsize,
+    ) -> Result<Self> {
+        Self::plan(path, selected, options, false, cancelled)
+    }
+
+    fn plan(
+        path: &Path,
+        selected: Option<BTreeSet<i64>>,
+        options: &IndexOptions,
+        rebuild_light_under_full: bool,
         cancelled: &AtomicUsize,
     ) -> Result<Self> {
         options.validate()?;
@@ -116,8 +153,10 @@ impl DeckIndexPlan {
             // in its place (decide() builds over a light cache under a full
             // request); the plan kept the source as indexed before, so
             // `floe2 index deck.jb --full` ended with "kept" and the caches
-            // light (review 2026-10-23, 0.12.390)
-            let light_under_full = options.light == Some(false)
+            // light (review 2026-10-23, 0.12.390). Not for the auto-index
+            // (`prepare_for_open`): it opens a cache as it is
+            let light_under_full = rebuild_light_under_full
+                && options.light == Some(false)
                 && info.indexed
                 && cache::cache_kind(&info.cache_dir) == Some(cache::CacheKind::Light);
             if light_under_full {
