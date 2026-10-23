@@ -39,7 +39,8 @@ jobdeck은 `floe2 index deck.jb`라 기본이 그대로 적용)로 실행한다.
 `--no-ovs`·`--no-page-occupancy`는 전체 색인의 파일을 빼는 옵션이라 경량에서는 무의미할 뿐
 거절하지 않는다 — 덱 소스가 `--no-ovs`를 달고 온다). 경량 캐시 위에 전체 요청은 `--force` 없이 전체를
 만들고(잃는 것이 없다), 전체 색인 위에 경량 요청은 유지한다(`--force --light`가
-교체). `floe2 info`는 `cache … (…, light: the geometry is read from the source)`와
+교체); 덱도 같다 — `floe2 index deck.jb --full`은 경량 캐시인 소스를 전체로 다시 짓는다(0.12.390;
+그 전에는 색인된 소스로 보아 유지했다). `floe2 info`는 `cache … (…, light: the geometry is read from the source)`와
 inv/seg/ovo 크기를, `--json`은 `cache_kind`를 낸다. `floe2 clip`은 경량 캐시를 거절한다
 (페이지 파일이 없다). 열기는 design.ovm이 있으면 전체, 아니면 design.inv가 있으면
 경량이다(app-core `cache::cache_kind`).

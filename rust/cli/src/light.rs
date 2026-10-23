@@ -224,6 +224,7 @@ pub fn light_cmd(args: &[String]) {
         seg_bytes,
         occ_opts: &occ_opts,
         auto: false,
+        metadata_only: !(occupancy || occupancy_only),
     };
     let crate::vfs::StreamOpen {
         store,

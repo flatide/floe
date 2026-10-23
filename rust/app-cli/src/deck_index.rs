@@ -40,6 +40,12 @@ pub fn run(
             plan.kept
         );
     }
+    if plan.full_over_light > 0 {
+        println!(
+            "[jobdeck] index     : {} light cache(s) rebuilt as the full index (--full)",
+            plan.full_over_light
+        );
+    }
     if plan.aliases > 0 {
         println!(
             "[jobdeck] aliases   : {} source name(s) share a cache destination",

@@ -258,7 +258,8 @@ floe2 jobdeck deck.jb [--report r.json] [--spec s.spec]   # 분석·보고만
 --occupancy`로 design.inv + design.seg + meta.json + design.ovo만 만들고(본 빌드 없음:
 sample9급 소스 4 s), 뷰어·`render`·`info`는 render-core가 그 디렉터리를 경량으로 열어
 원본에서 직접 읽는다(L4). `--full`(또는 `--lod` 같은 전체 색인만의 옵션,
-`FLOE_INDEX_LIGHT=off`)이면 전체 색인이다. 이미 전체 색인이 있는 소스는 그대로 둔다.
+`FLOE_INDEX_LIGHT=off`)이면 전체 색인이다. 이미 전체 색인이 있는 소스는 그대로 두고, `--full`은
+경량 캐시인 소스를 전체로 다시 짓는다(0.12.390; `N light cache(s) rebuilt as the full index`).
 `floe-index light deck.jb`는 옆의 floe2에 `index deck.jb --light`로 넘긴다. CBLOCK 안에 셀이
 정의된 소스는 경량으로 읽을 수 없어 그 자리에서 전체 색인을 짓는다(0.12.385; `floe-index light`는
 79로 거절하고 아무것도 쓰지 않는다). 배치가 요약 패스의 예산(`--mem`의 4분의 1 ÷ 약 96 B; 32 GiB

@@ -665,6 +665,7 @@ pub fn vfs_cmd(args: &[String]) {
             seg_bytes,
             occ_opts: &occ_opts,
             auto: mode == BuildMode::Auto,
+            metadata_only: false,
         };
         let declined = if occupancy_only {
             vfs_stream_occupancy_only(&a, t0)
@@ -1050,6 +1051,11 @@ pub(crate) struct StreamArgs<'a> {
     /// the default mode (neither --stream nor --in-memory): the streaming
     /// build may decline the file and leave it to the in-memory build
     pub(crate) auto: bool,
+    /// the light cache's metadata alone (`floe-index light` without
+    /// --occupancy: design.inv and design.seg are the inventory pass's
+    /// output, no cell is parsed) - the budget's cell check is waived
+    /// (review 2026-10-23, 0.12.390)
+    pub(crate) metadata_only: bool,
 }
 
 /// placement records kept through the streaming build for the occupancy
@@ -1302,6 +1308,18 @@ pub(crate) fn stream_open(a: &StreamArgs) -> Result<StreamOpen, StreamDecline> {
     );
     let opened = match crate::stream::StreamStore::new(inv, &a.src, budget) {
         Ok((store, plan)) => Ok((store, plan, budget)),
+        Err(crate::stream::NewError::Budget { what, need, inv, .. }) if a.metadata_only => {
+            // the light cache's files alone: the inventory pass made them
+            // already and no cell is parsed, so the store takes the file's
+            // need as its nominal budget (review 2026-10-23: a metadata-only
+            // light under a small --mem was refused for a cell it never
+            // decodes)
+            eprintln!(
+                "[vfs] stream: {} - no cell is parsed for the light cache's metadata, the budget check is waived",
+                what
+            );
+            crate::stream::StreamStore::new(*inv, &a.src, need).map(|(store, plan)| (store, plan, need))
+        }
         Err(crate::stream::NewError::Budget {
             what,
             single_cell,

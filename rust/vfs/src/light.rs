@@ -292,41 +292,91 @@ pub struct FillReport {
 /// opening it when it is not there and letting the least recently used go
 /// past the cap; a reader in the middle of a pread keeps its own Arc.
 struct SourceFiles {
-    files: Vec<(String, std::sync::Arc<std::fs::File>, u64)>,
+    /// (path, the file's id when it was opened, the file, last use)
+    files: Vec<(String, FileId, std::sync::Arc<std::fs::File>, u64)>,
     tick: u64,
+}
+
+/// A file's (device, inode): what tells the source a light index was opened
+/// on from a file that replaced it at the same path - an atomic rename, the
+/// cache rebuilt, the index reopened in the same process: the identity
+/// check reads the new file's size and mtime, the pool held the old inode
+/// (review 2026-10-23, 0.12.390).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileId {
+    pub dev: u64,
+    pub ino: u64,
+}
+
+fn file_id_of(meta: &std::fs::Metadata) -> FileId {
+    use std::os::unix::fs::MetadataExt;
+    FileId {
+        dev: meta.dev(),
+        ino: meta.ino(),
+    }
+}
+
+/// the (device, inode) of the file at `path`
+pub fn file_id(path: &str) -> std::io::Result<FileId> {
+    Ok(file_id_of(&std::fs::metadata(path)?))
 }
 
 /// open source files kept at most (the full index's budget under a tight
 /// limit leaves this much room beside the locks)
 const SOURCE_FILES_CAP: usize = 8;
 
+/// source bytes `pieces_of` reads and parses at a time (a segment at
+/// least): the raw bytes of one batch are resident beside the parsed
+/// records - not the bytes of every segment asked for, which on the summary
+/// pass (`all_placements`: every cell) of a source whose segments hold
+/// shapes and placements together was the whole file (0.12.386 read them
+/// all before parsing; review 2026-10-23, 0.12.390)
+pub const PIECES_BATCH_BYTES: u64 = 256 << 20;
+
 static SOURCE_FILES: Mutex<SourceFiles> = Mutex::new(SourceFiles {
     files: Vec::new(),
     tick: 0,
 });
 
-/// the source at `path`, open for pread, from the pool
-fn source_file(path: &str) -> Result<std::sync::Arc<std::fs::File>, String> {
+/// the source at `path`, open for pread, from the pool: the file whose id
+/// is `id` (the index's source as it was opened) - a pooled descriptor of
+/// another file at the path (one replaced since) is let go and the path
+/// opened anew, and a file at the path that is not `id` is refused
+fn source_file(path: &str, id: FileId) -> Result<std::sync::Arc<std::fs::File>, String> {
     let mut pool = SOURCE_FILES.lock().unwrap_or_else(|p| p.into_inner());
     pool.tick += 1;
     let tick = pool.tick;
-    if let Some(slot) = pool.files.iter_mut().find(|(p, _, _)| p == path) {
-        slot.2 = tick;
-        return Ok(std::sync::Arc::clone(&slot.1));
+    if let Some(i) = pool.files.iter().position(|(p, _, _, _)| p == path) {
+        if pool.files[i].1 == id {
+            pool.files[i].3 = tick;
+            return Ok(std::sync::Arc::clone(&pool.files[i].2));
+        }
+        // the path holds another file now: the stale descriptor goes
+        pool.files.remove(i);
     }
     let file = std::fs::File::open(path).map_err(|e| format!("open {}: {}", path, e))?;
+    let now = file
+        .metadata()
+        .map(|m| file_id_of(&m))
+        .map_err(|e| format!("{}: {}", path, e))?;
+    if now != id {
+        return Err(format!(
+            "{}: the file at this path (inode {} on device {}) is not the source the light cache was opened on (inode {} on device {}); reopen the cache, or rebuild it for the new file",
+            path, now.ino, now.dev, id.ino, id.dev
+        ));
+    }
     let file = std::sync::Arc::new(file);
     while pool.files.len() >= SOURCE_FILES_CAP {
         let oldest = pool
             .files
             .iter()
             .enumerate()
-            .min_by_key(|(_, (_, _, t))| *t)
+            .min_by_key(|(_, (_, _, _, t))| *t)
             .map(|(i, _)| i)
             .unwrap_or(0);
         pool.files.remove(oldest);
     }
-    pool.files.push((path.to_string(), std::sync::Arc::clone(&file), tick));
+    pool.files.push((path.to_string(), id, std::sync::Arc::clone(&file), tick));
     Ok(file)
 }
 
@@ -336,6 +386,9 @@ pub struct LightIndex {
     /// the source file's path (meta.json's `src.path`, else the sibling
     /// the directory's name says)
     pub source: String,
+    /// the source file's (device, inode) when the index was opened: the
+    /// pool's key beside the path
+    pub source_id: FileId,
     pub identity: Identity,
     pub inv: Inventory,
     pub seg: SegFile,
@@ -572,8 +625,10 @@ impl LightIndex {
                 source, dir, now.src_size, now.src_mtime, identity.src_size, identity.src_mtime
             ));
         }
-        // (opened through the pool: a descriptor is not kept per index)
-        drop(source_file(&source)?);
+        // the file's id, the pool's key beside the path (opened through the
+        // pool: a descriptor is not kept per index)
+        let source_id = file_id(&source).map_err(|e| format!("light index: source {}: {}", source, e))?;
+        drop(source_file(&source, source_id)?);
         let inside = seg.segs.iter().filter(|s| s.flags & F_CELLS_INSIDE != 0).count();
         let cblock_cells = inv.cells.iter().filter(|c| c.cblock_defs > 0).count();
         if inside > 0 || cblock_cells > 0 {
@@ -679,6 +734,7 @@ impl LightIndex {
         Ok(LightIndex {
             dir: dir.to_string(),
             source,
+            source_id,
             identity,
             inv,
             seg,
@@ -737,7 +793,7 @@ impl LightIndex {
     fn read_at(&self, offset: u64, bytes: u64) -> Result<Vec<u8>, String> {
         let n = usize::try_from(bytes).map_err(|_| "segment too large".to_string())?;
         let mut buf = vec![0u8; n];
-        source_file(&self.source)?
+        source_file(&self.source, self.source_id)?
             .read_exact_at(&mut buf, offset)
             .map_err(|e| format!("{}: read {} bytes at {}: {}", self.source, bytes, offset, e))?;
         Ok(buf)
@@ -844,7 +900,7 @@ impl LightIndex {
             }
             runs.push((s.offset, s.bytes, vec![k]));
         }
-        let file = source_file(&self.source)?;
+        let file = source_file(&self.source, self.source_id)?;
         let bufs: Vec<Mutex<Option<Result<Vec<u8>, String>>>> = (0..runs.len()).map(|_| Mutex::new(None)).collect();
         let next = std::sync::atomic::AtomicUsize::new(0);
         std::thread::scope(|scope| {
@@ -1116,6 +1172,18 @@ impl LightIndex {
         jobs: usize,
         texts: bool,
     ) -> Result<(HashMap<u32, (Vec<PlaceRec>, Vec<TextRec>)>, usize), String> {
+        self.pieces_of_batched(cells, jobs, texts, PIECES_BATCH_BYTES)
+    }
+
+    /// `pieces_of` reading `batch_bytes` of segments at a time (a test's
+    /// bound; PIECES_BATCH_BYTES otherwise)
+    fn pieces_of_batched(
+        &self,
+        cells: &[u32],
+        jobs: usize,
+        texts: bool,
+        batch_bytes: u64,
+    ) -> Result<(HashMap<u32, (Vec<PlaceRec>, Vec<TextRec>)>, usize), String> {
         let flags = if texts { F_PLACEMENTS | F_TEXTS } else { F_PLACEMENTS };
         let wanted = |cell: &InvCell| cell.placements > 0 || (texts && cell.texts > 0);
         let tasks: Vec<(u32, u32)> = cells
@@ -1129,35 +1197,50 @@ impl LightIndex {
             })
             .collect();
         type Got = Result<(Vec<PlaceRec>, Vec<TextRec>), String>;
-        let slots: Vec<Mutex<Option<Got>>> = (0..tasks.len()).map(|_| Mutex::new(None)).collect();
         let jobs = jobs.min(tasks.len()).max(1);
-        // the segments read first (adjacent ones as one pread, runs in
-        // parallel), then parsed in parallel
-        let sis: Vec<u32> = tasks.iter().map(|&(_, si)| si).collect();
-        let raws = self.read_segments(&sis, jobs)?;
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        std::thread::scope(|scope| {
-            for _ in 0..jobs {
-                scope.spawn(|| loop {
-                    let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let Some(&(_, si)) = tasks.get(k) else { break };
-                    let got = self
-                        .segment_cell_from(si, &raws[k])
-                        .map(|c| (c.places, if texts { c.texts } else { Vec::new() }));
-                    *slots[k].lock().unwrap_or_else(|p| p.into_inner()) = Some(got);
-                });
-            }
-        });
+        // read and parsed in batches of about `batch_bytes` of source bytes
+        // (a segment at least): the raw bytes of one batch live at a time,
+        // the parsed records of every batch (what the caller asked for)
         let mut pieces_of: HashMap<u32, (Vec<PlaceRec>, Vec<TextRec>)> = HashMap::new();
-        for (k, &(ci, _)) in tasks.iter().enumerate() {
-            let (places, recs) = slots[k]
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .take()
-                .unwrap_or_else(|| Err("placement task without a result".to_string()))?;
-            let entry = pieces_of.entry(ci).or_default();
-            entry.0.extend(places);
-            entry.1.extend(recs);
+        let mut at = 0usize;
+        while at < tasks.len() {
+            let mut end = at;
+            let mut bytes = 0u64;
+            while end < tasks.len() && (end == at || bytes + self.seg.segs[tasks[end].1 as usize].bytes <= batch_bytes) {
+                bytes += self.seg.segs[tasks[end].1 as usize].bytes;
+                end += 1;
+            }
+            let batch = &tasks[at..end];
+            at = end;
+            // the batch's segments read first (adjacent ones as one pread,
+            // runs in parallel), then parsed in parallel
+            let sis: Vec<u32> = batch.iter().map(|&(_, si)| si).collect();
+            let raws = self.read_segments(&sis, jobs)?;
+            let slots: Vec<Mutex<Option<Got>>> = (0..batch.len()).map(|_| Mutex::new(None)).collect();
+            let next = std::sync::atomic::AtomicUsize::new(0);
+            std::thread::scope(|scope| {
+                for _ in 0..jobs.min(batch.len()) {
+                    scope.spawn(|| loop {
+                        let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(&(_, si)) = batch.get(k) else { break };
+                        let got = self
+                            .segment_cell_from(si, &raws[k])
+                            .map(|c| (c.places, if texts { c.texts } else { Vec::new() }));
+                        *slots[k].lock().unwrap_or_else(|p| p.into_inner()) = Some(got);
+                    });
+                }
+            });
+            drop(raws);
+            for (k, &(ci, _)) in batch.iter().enumerate() {
+                let (places, recs) = slots[k]
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .take()
+                    .unwrap_or_else(|| Err("placement task without a result".to_string()))?;
+                let entry = pieces_of.entry(ci).or_default();
+                entry.0.extend(places);
+                entry.1.extend(recs);
+            }
         }
         for &ci in cells {
             let Some(cell) = self.inv.cells.get(ci as usize) else { continue };
@@ -2558,6 +2641,88 @@ mod tests {
             assert_eq!(got[k], li.segment_bytes(si).unwrap(), "segment {}", si);
         }
         assert!(li.read_segments(&[n], 1).is_err());
+    }
+
+    /// `pieces_of` read in batches of a byte (every segment alone) yields
+    /// what one read of all the segments does, cell for cell and in order
+    #[test]
+    fn batched_pieces_are_the_whole_read() {
+        for (tag, data) in [
+            ("batch-tree", tree()),
+            ("batch-adv", adversarial(false, true)),
+            ("batch-lbl", labelled_tree()),
+        ] {
+            let (_src, dir) = light_of(tag, &data);
+            let li = LightIndex::open(&dir).unwrap();
+            let cells: Vec<u32> = (0..li.inv.cells.len() as u32).collect();
+            let (whole, segs) = li.pieces_of_batched(&cells, 3, true, u64::MAX).unwrap();
+            let (batched, segs2) = li.pieces_of_batched(&cells, 3, true, 1).unwrap();
+            assert_eq!(segs, segs2, "{}", tag);
+            assert_eq!(whole, batched, "{}", tag);
+            if tag == "batch-tree" {
+                assert!(!whole.is_empty(), "{}: nothing read", tag);
+            }
+            let (places, _) = li.pieces_of_batched(&cells, 2, false, 1).unwrap();
+            for (ci, (p, t)) in &places {
+                assert!(t.is_empty(), "{}: cell {}", tag, ci);
+                assert_eq!(p, &whole[ci].0, "{}: cell {}", tag, ci);
+            }
+        }
+    }
+
+    /// the pool follows a source replaced at its path (an atomic rename):
+    /// asked with the new file's id it lets the old descriptor go, a
+    /// reader holding the old Arc still reads the old file, and the old id
+    /// is refused at the path
+    #[test]
+    fn the_pool_follows_a_replaced_source() {
+        let d = scratch("pool");
+        let path = d.join("src.oas");
+        std::fs::write(&path, b"first").unwrap();
+        let p = path.to_string_lossy().into_owned();
+        let id1 = file_id(&p).unwrap();
+        let f1 = source_file(&p, id1).unwrap();
+        let tmp = d.join("src.oas.new");
+        std::fs::write(&tmp, b"second").unwrap();
+        std::fs::rename(&tmp, &path).unwrap();
+        let id2 = file_id(&p).unwrap();
+        assert_ne!(id1, id2);
+        let f2 = source_file(&p, id2).unwrap();
+        let mut buf = [0u8; 6];
+        f2.read_exact_at(&mut buf, 0).unwrap();
+        assert_eq!(&buf, b"second");
+        let mut old = [0u8; 5];
+        f1.read_exact_at(&mut old, 0).unwrap();
+        assert_eq!(&old, b"first");
+        let e = source_file(&p, id1).unwrap_err();
+        assert!(e.contains("not the source"), "{}", e);
+    }
+
+    /// a light index reopened after its source was replaced at the path
+    /// (rename) and the cache rebuilt reads the new file, not the pooled
+    /// descriptor of the old one
+    #[test]
+    fn a_reopened_index_reads_the_replaced_source() {
+        let (src, dir) = light_of("replaced", &tree());
+        let li = LightIndex::open(&dir).unwrap();
+        let sis: Vec<u32> = (0..li.seg.segs.len() as u32).collect();
+        li.read_segments(&sis, 2).unwrap();
+        drop(li);
+        let data = adversarial(false, true);
+        assert_ne!(data, tree());
+        let tmp = format!("{}.new", src);
+        std::fs::write(&tmp, &data).unwrap();
+        std::fs::rename(&tmp, &src).unwrap();
+        let id = file_identity(&src).unwrap();
+        write_files(&data, id, &dir, 1, DEFAULT_SPAN_BYTES).unwrap();
+        let li = LightIndex::open(&dir).unwrap();
+        assert_eq!(li.source_id, file_id(&src).unwrap());
+        let sis: Vec<u32> = (0..li.seg.segs.len() as u32).collect();
+        let got = li.read_segments(&sis, 2).unwrap();
+        for (k, &si) in sis.iter().enumerate() {
+            let s = &li.seg.segs[si as usize];
+            assert_eq!(got[k].as_slice(), &data[s.offset as usize..(s.offset + s.bytes) as usize], "segment {}", si);
+        }
     }
 
     #[test]

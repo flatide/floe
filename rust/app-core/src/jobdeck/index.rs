@@ -58,6 +58,8 @@ pub struct DeckIndexPlan {
     pub levels: BTreeSet<i64>,
     pub selected: Option<BTreeSet<i64>>,
     pub aliases: usize,
+    /// light caches an explicit --full rebuilds as the full index (0.12.390)
+    pub full_over_light: usize,
 }
 impl DeckIndexPlan {
     pub fn prepare(
@@ -96,7 +98,7 @@ impl DeckIndexPlan {
                 .ok_or_else(|| Error::input("jobdeck has no parent directory"))?,
         )?;
         catalog.probe_all(deck.sources(selected.as_ref()), cancelled)?;
-        let (mut todo, mut kept, mut aliases) = (Vec::new(), 0, 0);
+        let (mut todo, mut kept, mut aliases, mut full_over_light) = (Vec::new(), 0, 0, 0);
         let mut destinations = BTreeSet::new();
         for (tc, info) in &catalog.infos {
             check_cancelled(cancelled)?;
@@ -110,7 +112,18 @@ impl DeckIndexPlan {
                 continue;
             }
             let mut current = options.clone();
-            if options.force || !info.indexed {
+            // an explicit --full over a light cache: the full index is built
+            // in its place (decide() builds over a light cache under a full
+            // request); the plan kept the source as indexed before, so
+            // `floe2 index deck.jb --full` ended with "kept" and the caches
+            // light (review 2026-10-23, 0.12.390)
+            let light_under_full = options.light == Some(false)
+                && info.indexed
+                && cache::cache_kind(&info.cache_dir) == Some(cache::CacheKind::Light);
+            if light_under_full {
+                full_over_light += 1;
+            }
+            if options.force || !info.indexed || light_under_full {
                 // Legacy deck occupancy-only also builds unindexed sources.
                 current.occupancy =
                     Some(options.occupancy.unwrap_or(true) || options.occupancy_only);
@@ -144,6 +157,7 @@ impl DeckIndexPlan {
             levels: deck.levels(),
             selected,
             aliases,
+            full_over_light,
         })
     }
 }

@@ -426,6 +426,7 @@ geometry/placement/text x·y, W/H, 점 목록, 경로 확장, 반복, 배치 대
 | L6 덱·뷰어·캡처 | 덱 소스 경량 열기, 요약 없는 상태 표시, refine 흐름, `floe2 render` 완료 대기 | **완료 0.12.384(§8.7)**: `floe2`(exact 렌더 = 전체, 라벨 켠 채), `jobdeck`(LightSummaryTests: `--no-occupancy` 뒤 광역 캡처 미완(3)·근접 캡처 통과·자동 색인의 요약 추가·2단계 `index`), `gtk_view`(경량 레이아웃의 `cache:light`·`light_rounds`), 단위 테스트(텍스트 채우기 = Doc, 라벨 행, 시한 라운드) |
 | 운영 규칙 | 캡처·뷰어의 캐시 종류와 요약 기본값 (사용자 시나리오 2026-10-22) | **완료 0.12.388(§8.11)**: `render`·`probe`·`info --light/--full`, `render --occupancy on`만 요약 추가, 뷰어 모달 색인 1회·백그라운드 요약 제거; 게이트 `jobdeck` LightSummaryTests, `floe2` |
 | L8 띠 분할 캡처 | exact 캡처가 디코드 예산으로 실패하지 않게 장치 행 띠 단위로 플랜·디코드·래스터 | **완료 0.12.389(§8.12)**: renderd `render_banded_capture`, 띠 그림 = 통짜 그림 바이트 동일(게이트 `floe2`), 캡처 시한 해제 |
+| 리뷰 수정 A | 2026-10-23 리뷰 5건 중 1·4·3·2 | **완료 0.12.390(§8.13)**: `pieces_of` 바이트 배치 읽기(요약 pass가 원본 전체를 올리던 회귀), 소스 fd 풀의 (dev, ino) 검증, 덱 `--full`이 경량 캐시를 전체로 재색인, 메타데이터 전용 light의 예산 검사 면제; 5(공유 CBLOCK 범위의 셀별 재파싱)는 §8.14 |
 | L7 후속 | 요약 패스 1패스화/마킹 가속, ovs 합치기(레이아웃 밀도), B안(정규 페이지), 세그먼트 캐시 디스크 보존(방문한 셀의 디코드 결과를 남겨 다음 세션 가속), 1패스 경량 생성(셀 로컬 점유 격자 합성) | 각각 — **L7a 완료 0.12.386(§8.9)**: 이미지 증분 합성(제자리 성장, 채움 시점 노드 마스크, 채움 바이트 해제), 세그먼트 pread 묶음·병렬 인코딩; **L7b 완료 0.12.387(§8.10)**: 요약 패스의 마커가 셀을 직접 파싱(리더 풀·상주 창 없음, 묶음이 안 쓰는 셀은 읽지 않음), 다각형 스캔 변환 버퍼 재사용, 크기 예산 밖의 레이어는 마킹하지 않음; 나머지(1패스 경량 생성은 §8.10의 정확성 논거로 보류)는 사용자 지시에 따라 |
 
 L0는 하루, L1~L3는 S1~S3와 비슷한 크기(재고 코드 위의 확장), L4가 본체다.
@@ -1082,6 +1083,44 @@ exact 캡처(cut 0)는 "모든 페이지 아니면 없음"이라 디코드 페�
   전의 거절 문구와 저장 없음).
   남은 것: 디코드 쪽 coverage 컬링(§8.11의 확인 3: 래스터는 write-once로 덮인 영역을 건너뛰지만
   디코드는 아니다), 덱 pass와 레이아웃 띠의 통합.
+
+### 8.13 L8 리뷰 수정 A (0.12.390 / floe-index·renderd 0.12.348, 2026-10-23; 사용자 "그 순서로 진행해줘")
+
+0.12.389까지를 본 리뷰가 다섯 건을 냈고 모두 사실이었다. 1·4·3·2를 한 묶음으로 고쳤고 5는 §8.14다.
+
+- **1 (P1) 요약 pass가 대상 세그먼트를 모두 메모리에 올린다.** L7a(0.12.386)가 읽기를 합치면서
+  `LightIndex::pieces_of`가 `read_segments`로 대상 세그먼트의 원본 바이트를 전부 읽은 뒤에야 파싱을
+  시작했고, `all_placements`(`floe-index light --occupancy`, 곧 `floe2 index deck.jb`와 `render
+  --occupancy on`의 요약)는 모든 셀을 넘긴다. 도형과 placement가 한 세그먼트에 있는 소스 — span
+  세그먼트의 비압축 파일(p10: 35,183셀에 37,332 span), 셀당 CBLOCK 하나인 KLayout류 — 에서는 원본
+  전체가 올라갔다(리뷰 실측: 46 MB 입력에서 추가 힙 최고 6.7 → 52.2 MB; L7a 전에는 작업자 수만큼만
+  동시에 읽었다). 이제 `pieces_of`는 세그먼트 바이트 합 `PIECES_BATCH_BYTES`(256 MiB, 세그먼트 하나는
+  늘 들어간다) 단위로 읽고 파싱하고 놓는다 — 한 배치의 원본 바이트와 모든 배치의 파싱 결과(요청한 것)만
+  상주. 뷰어의 fill(4 M placement 배치)도 같은 함수를 지난다. 단위 시험
+  `batched_pieces_are_the_whole_read`(1 바이트 배치 = 통째 읽기, 셀별·순서별 동일).
+- **4 (P2) 같은 경로의 원본이 교체되면 풀의 옛 fd를 쓴다.** `source_file` 풀이 경로 문자열로만 찾았다:
+  원본을 atomic rename으로 바꾸고 캐시를 다시 만든 뒤 같은 프로세스(뷰어 서비스, 웹 서비스)가
+  `LightIndex::open`을 다시 하면 identity 검사(경로 stat의 크기·mtime)는 새 파일을 통과시키고 읽기는
+  옛 inode로 갔다. 이제 `LightIndex`가 열 때 소스의 (dev, ino)를 `source_id`로 기록하고 풀은 (경로,
+  id)로 찾는다 — 다른 id의 항목은 버리고 다시 열며, 경로의 파일이 id와 다르면 거절한다(fstat 한 번,
+  읽기마다 경로 조회 없음). 단위 시험 `the_pool_follows_a_replaced_source`,
+  `a_reopened_index_reads_the_replaced_source`.
+- **3 (P2) 덱의 `--full`이 경량 캐시를 유지한다.** `DeckIndexPlan::prepare`가 `info.indexed`면 요약
+  유무만 보고 건너뛰어 `floe2 index deck.jb --full`이 "1 kept"로 끝나고 캐시는 경량이었다(레이아웃
+  `index src --full`은 decide()가 전체로 지었다). 이제 `options.light == Some(false)`이고 캐시 종류가
+  경량이면 빌드 목록에 넣고(`full_over_light`), `[jobdeck] index : N light cache(s) rebuilt as the
+  full index (--full)` 줄로 센다. 반대 방향(전체 위의 규칙상 경량)은 그대로 유지. 게이트 `jobdeck`
+  LightSummaryTests 끝에 `--full` 단계.
+- **2 (P3) 메타데이터만 만드는 light에도 셀 크기 예산 검사.** `stream_open`이 `StreamStore::new`를 거치며
+  최대 셀이 예산을 넘으면 71로 거절했는데, `--occupancy` 없는 light는 inventory pass만 돌고 셀을
+  디코딩하지 않는다(valmini `--mem 0.00005`: "cell VALMINI_TOP needs about 84K resident" 71, 실제
+  산출물 2.3 KB). 기본 예산은 호스트 한도까지 최대 셀에 맞춰 오르므로 명시적 `--mem`이 작을 때만
+  걸렸다. 이제 `StreamArgs.metadata_only`(light 명령이 `!(occupancy || occupancy_only)`로 세움)면
+  예산 arm이 `[vfs] stream: … the budget check is waived`를 내고 파일의 need를 명목 예산으로 store를
+  연다. `--occupancy`는 검사를 유지한다(마킹 pass는 단독 셀을 늘 받지만 호스트 메모리 보호로 둔다).
+  게이트 `light_cache` check_metadata_budget.
+- 영향 밖: render-core `decode_pages`의 `read_segments`는 디코드 선택(예산으로 묶임)의 세그먼트만 읽는다;
+  전체 색인은 풀을 쓰지 않는다(파일 mmap, 페이지 파일은 읽기마다 open).
 
 ## 9. 검토한 대안
 

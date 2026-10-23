@@ -92,6 +92,32 @@ def check_summary_budget(work, src):
     print("  summary pass: --mem 0.1 keeps too few placements for main01_like, skipped and said")
 
 
+def check_metadata_budget(work, src):
+    """The light cache's metadata alone (no --occupancy) is the inventory
+    pass's output and parses no cell, so a --mem below the largest cell
+    builds it - the budget check is waived and said (review 2026-10-23,
+    0.12.390) - while --occupancy under the same --mem keeps the refusal
+    (exit 71: the summary pass parses the cells)."""
+    out = work / "valmini_light_tiny_mem"
+    r = run([BIN, "light", src, "--out", out, "--jobs", "1", "--mem", "0.00001"],
+            what="floe-index light --mem 0.00001 (metadata only)")
+    if "budget check is waived" not in r.stderr:
+        fail("the waived check was not said: %s" % r.stderr[-600:])
+    for name in ("design.inv", "design.seg", "meta.json"):
+        if not (out / name).is_file():
+            fail("the metadata-only light cache lacks %s under a tiny --mem" % name)
+    if (out / "design.ovo").exists():
+        fail("a metadata-only light wrote design.ovo")
+    out2 = work / "valmini_light_tiny_mem_occ"
+    r = run([BIN, "light", src, "--out", out2, "--jobs", "1", "--occupancy", "--mem", "0.00001"],
+            ok=(71,), what="floe-index light --occupancy --mem 0.00001")
+    if "needs about" not in r.stderr or "raise --mem" not in r.stderr:
+        fail("the summary pass's refusal changed: %s" % r.stderr[-600:])
+    if out2.exists() and any(out2.iterdir()):
+        fail("the refused --occupancy run wrote files")
+    print("  tiny --mem: the metadata-only light cache is built (check waived), --occupancy keeps the refusal (71)")
+
+
 def check_unsuitable(work):
     """A stream with a cell defined inside a CBLOCK (floe_oasis's fixture
     head_cblock_cell, written by floe-dbg): `floe-index light` refuses it
@@ -314,6 +340,7 @@ def main():
         for name, path in files:
             check_fixture(name, path, work)
         check_summary_budget(work, main01)
+        check_metadata_budget(work, src)
         check_unsuitable(work)
     print("light_cache: ALL OK")
 

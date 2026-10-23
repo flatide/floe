@@ -805,7 +805,8 @@ class LightSummaryTests(unittest.TestCase):
     --occupancy on` has the auto-index add the summaries first; `floe2
     index deck.jb` (the viewer's modal open) adds a missing one and keeps
     the rest; the deck's metadata counts the light sources and the
-    summaries missing."""
+    summaries missing; `floe2 index deck.jb --full` rebuilds the light
+    caches as full indexes (0.12.390)."""
 
     @classmethod
     def setUpClass(cls):
@@ -881,6 +882,22 @@ class LightSummaryTests(unittest.TestCase):
         self.assertTrue((self.caches[1] / "design.ovo").is_file())
         res = run_floe2("index", self.deck, "--jobs", "2", env=self.env, ok=0)
         self.assertIn("0 built, 0 failed, 3 kept", res.stdout)
+        # an explicit --full over the light caches (0.12.390): the full
+        # index is built in their place, where the plan kept them as
+        # indexed before (review 2026-10-23)
+        res = run_floe2("index", self.deck, "--jobs", "2", "--full", env=self.env, ok=0)
+        self.assertIn("3 light cache(s) rebuilt as the full index", res.stdout)
+        self.assertIn("3 built, 0 failed, 0 kept", res.stdout)
+        for c in self.caches:
+            self.assertTrue((c / "design.ovm").is_file(), c)
+            self.assertTrue((c / "design.ovo").is_file(), c)
+        info = json.loads(run_floe2("info", self.deck, "--json", env=self.env, ok=0).stdout)
+        deck = info["metadata"]["jobdeck"]
+        self.assertEqual((deck["light_sources"], deck["summary_missing"]), (0, 0))
+        # and the full indexes are kept under the rule's light choice
+        res = run_floe2("index", self.deck, "--jobs", "2", env=self.env, ok=0)
+        self.assertIn("0 built, 0 failed, 3 kept", res.stdout)
+        self.assertNotIn("rebuilt as the full index", res.stdout)
 
 
 class JobdeckIndexLodTests(unittest.TestCase):
