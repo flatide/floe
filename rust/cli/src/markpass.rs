@@ -17,6 +17,17 @@
 //! placements) - so a layout's later groups parse only the cells with
 //! records on their layers.
 //!
+//! A range that defines several cells - CELL records inside a CBLOCK of
+//! another cell's range - is parsed once for all of them
+//! (`StreamStore::parse_range`, 0.12.391): the marker that reaches the
+//! first of them claims every cell of the range not yet claimed, charges
+//! the range's cost (what its parse materializes: every cell's records)
+//! and marks them in cell order from that one parse; before, each cell's
+//! turn parsed the whole range again charging that cell alone (review
+//! 2026-10-23: a 663 KiB block of 24 cells read 24 times, the budget
+//! under-charged by the other 23). A cell of such a range that is also
+//! defined elsewhere is parsed on its own as before.
+//!
 //! The marks are the ones the reader-pool pass made (bits are ORs, the
 //! charges per operation, the set of operations the walk's), so the
 //! bytes are unchanged: gates vfs_stream and light_cache, unit test
@@ -25,6 +36,7 @@
 use crate::stream::StreamStore;
 use floe_oasis::doc::Cell;
 use floe_vfs::occupancy::{Instances, StreamGroup, StreamOcc, StreamScratch};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 use std::sync::{Condvar, Mutex};
 use std::time::Instant;
@@ -40,6 +52,10 @@ pub(crate) struct MarkReport {
     pub small: usize,
     /// cells the group does not visit
     pub skipped: usize,
+    /// of `parsed`, cells served from a range parsed once for several
+    /// cells (`StreamStore::parse_range`), and those ranges
+    pub shared: usize,
+    pub shared_ranges: usize,
     /// source bytes the markers read
     pub bytes: u64,
     /// thread seconds spent parsing / marking, summed over the threads
@@ -53,6 +69,8 @@ impl MarkReport {
         self.places_only += o.places_only;
         self.small += o.small;
         self.skipped += o.skipped;
+        self.shared += o.shared;
+        self.shared_ranges += o.shared_ranges;
         self.bytes += o.bytes;
         self.parse_s += o.parse_s;
         self.mark_s += o.mark_s;
@@ -87,9 +105,80 @@ fn need_of(occ: &StreamOcc, group: &StreamGroup, inst: &Instances<'_>, ci: usize
 
 struct Admit {
     next: usize,
+    /// cells claimed (by their own turn, or with a shared range)
+    claimed: Vec<bool>,
     /// estimated Doc bytes of the cells being parsed or marked
     resident: u64,
     failed: Option<String>,
+}
+
+/// what a marker claims at a time
+enum Task {
+    /// one cell, its need and its charge (its Doc bytes when parsed)
+    Cell(usize, Need, u64),
+    /// a range that defines several cells, parsed once: the cells claimed
+    /// with it (cell order) and the range's charge
+    Range(usize, Vec<(usize, Need)>, u64),
+}
+
+fn fail(adm: &Mutex<Admit>, cv: &Condvar, e: String) {
+    let mut a = adm.lock().unwrap_or_else(|p| p.into_inner());
+    if a.failed.is_none() {
+        a.failed = Some(e);
+    }
+    cv.notify_all();
+}
+
+fn release(adm: &Mutex<Admit>, cv: &Condvar, cost: u64) {
+    let mut a = adm.lock().unwrap_or_else(|p| p.into_inner());
+    a.resident = a.resident.saturating_sub(cost);
+    cv.notify_all();
+}
+
+/// a cell marked from what is at hand: nothing (skipped), its subtree
+/// bbox, or its kept placements
+fn mark_unparsed(
+    occ: &StreamOcc,
+    group: &StreamGroup,
+    inst: &Instances<'_>,
+    ci: usize,
+    need: Need,
+    empty: &Cell,
+    sc: &mut StreamScratch,
+    rep: &mut MarkReport,
+) {
+    match need {
+        Need::None => rep.skipped += 1,
+        Need::Small => {
+            let t = Instant::now();
+            occ.mark_cell(group, empty, &[], ci, inst, sc);
+            rep.mark_s += t.elapsed().as_secs_f64();
+            rep.small += 1;
+        }
+        Need::Places => {
+            let t = Instant::now();
+            occ.mark_cell(group, empty, inst.places(ci), ci, inst, sc);
+            rep.mark_s += t.elapsed().as_secs_f64();
+            rep.places_only += 1;
+        }
+        Need::Shapes => unreachable!("a parsed cell"),
+    }
+}
+
+/// a parsed cell marked at every instance
+fn mark_parsed(
+    occ: &StreamOcc,
+    group: &StreamGroup,
+    inst: &Instances<'_>,
+    ci: usize,
+    cell: &Cell,
+    sc: &mut StreamScratch,
+    rep: &mut MarkReport,
+) {
+    let t = Instant::now();
+    occ.mark_cell(group, cell, inst.places(ci), ci, inst, sc);
+    rep.mark_s += t.elapsed().as_secs_f64();
+    rep.parsed += 1;
 }
 
 struct StopOnDrop<'a>(&'a AtomicBool);
@@ -116,6 +205,7 @@ pub(crate) fn mark_group(
     let n = store.inventory().cells.len();
     let adm = Mutex::new(Admit {
         next: 0,
+        claimed: vec![false; n],
         resident: 0,
         failed: None,
     });
@@ -144,20 +234,48 @@ pub(crate) fn mark_group(
                     let mut rep = MarkReport::default();
                     let empty = Cell::default();
                     loop {
-                        // the next cell in file order, admitted by its bytes
-                        let (ci, cost, need) = {
+                        // the next cell in file order, admitted by its
+                        // bytes - with every other cell of its range when
+                        // the range defines several (parsed once, charged
+                        // whole)
+                        let task = {
                             let mut a = adm.lock().unwrap_or_else(|e| e.into_inner());
                             let taken = loop {
+                                while a.next < n && a.claimed[a.next] {
+                                    a.next += 1;
+                                }
                                 if a.failed.is_some() || a.next >= n {
                                     break None;
                                 }
                                 let ci = a.next;
                                 let need = need_of(occ, group, inst, ci);
-                                let cost = if need == Need::Shapes { store.cell_bytes(ci) } else { 0 };
+                                let shared = if need == Need::Shapes { store.shared_range_of(ci) } else { None };
+                                let cost = match shared {
+                                    Some((_, _, cost)) => cost,
+                                    None if need == Need::Shapes => store.cell_bytes(ci),
+                                    None => 0,
+                                };
                                 if a.resident == 0 || a.resident.saturating_add(cost) <= budget {
                                     a.next += 1;
+                                    a.claimed[ci] = true;
                                     a.resident = a.resident.saturating_add(cost);
-                                    break Some((ci, cost, need));
+                                    break Some(match shared {
+                                        None => Task::Cell(ci, need, cost),
+                                        Some((ri, charges, _)) => {
+                                            // (ci is the first unclaimed cell of all, so
+                                            // the range's unclaimed cells follow it)
+                                            let mut cells = Vec::with_capacity(charges.len());
+                                            for &c in charges {
+                                                if c == ci {
+                                                    cells.push((c, need));
+                                                } else if !a.claimed[c] {
+                                                    a.claimed[c] = true;
+                                                    cells.push((c, need_of(occ, group, inst, c)));
+                                                }
+                                            }
+                                            Task::Range(ri, cells, cost)
+                                        }
+                                    });
                                 }
                                 a = cv.wait(a).unwrap_or_else(|e| e.into_inner());
                             };
@@ -166,48 +284,83 @@ pub(crate) fn mark_group(
                                 None => break,
                             }
                         };
-                        match need {
-                            Need::None => rep.skipped += 1,
-                            Need::Small => {
-                                let t = Instant::now();
-                                occ.mark_cell(group, &empty, &[], ci, inst, &mut sc);
-                                rep.mark_s += t.elapsed().as_secs_f64();
-                                rep.small += 1;
+                        match task {
+                            Task::Cell(ci, need, cost) => {
+                                if need == Need::Shapes {
+                                    let t = Instant::now();
+                                    let parsed = store.parse_cell(ci, &mut buf);
+                                    rep.parse_s += t.elapsed().as_secs_f64();
+                                    match parsed {
+                                        Ok((cell, bytes)) => {
+                                            rep.bytes += bytes;
+                                            mark_parsed(occ, group, inst, ci, &cell, &mut sc, &mut rep);
+                                            drop(cell);
+                                        }
+                                        Err(e) => {
+                                            fail(adm, cv, e);
+                                            break;
+                                        }
+                                    }
+                                    release(adm, cv, cost);
+                                } else {
+                                    mark_unparsed(occ, group, inst, ci, need, &empty, &mut sc, &mut rep);
+                                }
+                                done.fetch_add(1, Relaxed);
                             }
-                            Need::Places => {
+                            Task::Range(ri, cells, cost) => {
                                 let t = Instant::now();
-                                occ.mark_cell(group, &empty, inst.places(ci), ci, inst, &mut sc);
-                                rep.mark_s += t.elapsed().as_secs_f64();
-                                rep.places_only += 1;
-                            }
-                            Need::Shapes => {
-                                let t = Instant::now();
-                                let parsed = store.parse_cell(ci, &mut buf);
+                                let parsed = store.parse_range(ri, &mut buf);
                                 rep.parse_s += t.elapsed().as_secs_f64();
-                                match parsed {
-                                    Ok((cell, bytes)) => {
+                                let mut by_cell: HashMap<usize, Cell> = match parsed {
+                                    Ok((by_cell, bytes)) => {
                                         rep.bytes += bytes;
-                                        let t = Instant::now();
-                                        occ.mark_cell(group, &cell, inst.places(ci), ci, inst, &mut sc);
-                                        rep.mark_s += t.elapsed().as_secs_f64();
-                                        rep.parsed += 1;
-                                        drop(cell);
+                                        by_cell
                                     }
                                     Err(e) => {
-                                        let mut a = adm.lock().unwrap_or_else(|p| p.into_inner());
-                                        if a.failed.is_none() {
-                                            a.failed = Some(e);
-                                        }
-                                        cv.notify_all();
+                                        fail(adm, cv, e);
                                         break;
                                     }
+                                };
+                                rep.shared_ranges += 1;
+                                let mut failed = None;
+                                for &(ci, need) in &cells {
+                                    if need != Need::Shapes {
+                                        mark_unparsed(occ, group, inst, ci, need, &empty, &mut sc, &mut rep);
+                                    } else if store.def_range_count(ci) == 1 {
+                                        let cell = by_cell.remove(&ci).unwrap_or_else(|| Cell {
+                                            name: store.inventory().cells[ci].name.clone(),
+                                            ..Default::default()
+                                        });
+                                        mark_parsed(occ, group, inst, ci, &cell, &mut sc, &mut rep);
+                                        rep.shared += 1;
+                                        drop(cell);
+                                    } else {
+                                        // defined in this range and elsewhere: every
+                                        // range of it, as a cell alone
+                                        let t = Instant::now();
+                                        let parsed = store.parse_cell(ci, &mut buf);
+                                        rep.parse_s += t.elapsed().as_secs_f64();
+                                        match parsed {
+                                            Ok((cell, bytes)) => {
+                                                rep.bytes += bytes;
+                                                mark_parsed(occ, group, inst, ci, &cell, &mut sc, &mut rep);
+                                            }
+                                            Err(e) => {
+                                                failed = Some(e);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    done.fetch_add(1, Relaxed);
                                 }
-                                let mut a = adm.lock().unwrap_or_else(|p| p.into_inner());
-                                a.resident = a.resident.saturating_sub(cost);
-                                cv.notify_all();
+                                drop(by_cell);
+                                release(adm, cv, cost);
+                                if let Some(e) = failed {
+                                    fail(adm, cv, e);
+                                    break;
+                                }
                             }
                         }
-                        done.fetch_add(1, Relaxed);
                     }
                     reports.lock().unwrap_or_else(|e| e.into_inner()).push(rep);
                     sc

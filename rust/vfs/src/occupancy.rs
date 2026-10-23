@@ -2511,6 +2511,16 @@ impl StreamOcc {
             .iter()
             .map(|b| opts.prune && b.is_some_and(|b| b.2 - b.0 <= cell_dbu && b.3 - b.1 <= cell_dbu))
             .collect();
+        // the top is never small: the in-memory marker never applies the
+        // rule to the top (its units are its own records and its
+        // placements, each child walked on its own), so a design whose
+        // whole top fits one grid cell is marked child by child there -
+        // and here, for the same charges (0.12.391: the shared-range
+        // fixture's top fits one 1 um cell; the bits were the same, the
+        // work counts were not)
+        if top_ci < occ.small.len() {
+            occ.small[top_ci] = false;
+        }
         // the relative-depth masks of every layer, bottom-up over the
         // edges (layer_depth_masks over the Doc's placements: a child
         // placed twice ORs the same mask twice)

@@ -1986,11 +1986,16 @@ pub(crate) fn stream_occupancy(
         totals.add(&rep);
         if let Some(log) = opts.progress {
             log(&format!(
-                "streaming: group {} marked in {:.1}s: {} cells parsed by the markers ({}), {} from their placements, {} small, {} not visited; parse {:.1}s + mark {:.1}s over {} threads (rss {})",
+                "streaming: group {} marked in {:.1}s: {} cells parsed by the markers ({}){}, {} from their placements, {} small, {} not visited; parse {:.1}s + mark {:.1}s over {} threads (rss {})",
                 groups,
                 tg.elapsed().as_secs_f64(),
                 rep.parsed,
                 fmt_size(rep.bytes),
+                if rep.shared > 0 {
+                    format!(" - {} of them from {} range(s) parsed once", rep.shared, rep.shared_ranges)
+                } else {
+                    String::new()
+                },
                 rep.places_only,
                 rep.small,
                 rep.skipped,

@@ -460,6 +460,12 @@ pread + `parse_cell_bytes` + `normalize_cells`, 리더와 같은 레코드)하�
 `streaming_occupancy_matches_in_memory`·`a_cell_parsed_alone_is_the_readers_cell`).
 측정은 DIRECT_READ_PLAN §8.10.
 
+**0.12.391 (DIRECT_READ_PLAN §8.14).** 여러 셀을 정의하는 범위 — 다른 셀 범위의 CBLOCK 안에 CELL
+레코드가 든 스트림 — 는 마커가 한 번만 파싱한다(`StreamStore::parse_range`, markpass `Task::Range`):
+그 범위의 첫 셀을 집는 마커가 아직 안 집힌 범위의 셀을 모두 함께 집고 범위 cost(정의된 셀들의 Doc
+추정 합, 파싱이 실제로 만드는 양)로 입장한 뒤 셀 순서로 마킹한다. 전에는 셀마다 범위를 다시 읽고
+파싱하며 그 셀의 추정만 과금했다(리뷰 2026-10-23: 24셀의 663 KiB 블록을 24번). 바이트 동일.
+
 ### 4.7 보류
 
 `--coverage`(design.ovc)와 `--representatives`(design.ovr)는 Doc 전체를
@@ -718,3 +724,5 @@ S2 완료(0.12.365, §4.2 구현; 사용자 2026-10-19 "S2 진행해줘"): build
 - 0.12.387 (2026-10-22): 요약 패스의 마커가 셀을 직접 파싱한다(리더 풀·상주 창 없음, 묶음이
   안 쓰는 셀은 읽지 않음, 크기 예산 밖 레이어 마킹 생략, 다각형 버퍼 재사용) — §4.6,
   DIRECT_READ_PLAN §8.10(L7b). 바이트 동일.
+- 0.12.391 (2026-10-23): 여러 셀을 정의하는 범위(CBLOCK 안 CELL)는 마커가 한 번만 파싱하고 범위
+  cost로 과금한다 — §4.6, DIRECT_READ_PLAN §8.14. 바이트 동일.

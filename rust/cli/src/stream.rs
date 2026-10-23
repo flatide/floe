@@ -24,7 +24,7 @@
 //! order either way.
 
 use crate::cellstore::{CellRef, CellStore};
-use floe_oasis::doc::{normalize_cells, parse_cell_bytes, Cell, CellTables, PlaceRec};
+use floe_oasis::doc::{normalize_cells, parse_cell_bytes, Cell, CellPiece, CellTables, PlaceRec};
 use floe_oasis::inventory::Inventory;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -439,26 +439,9 @@ impl StreamStore {
         let tables = CellTables::new(&self.inv.cellnames, &self.inv.textstrings, &self.cell_index);
         let mut read = 0u64;
         for &start in &c.def_ranges {
-            let ri = match self.ranges.binary_search_by_key(&start, |r| r.start) {
-                Ok(i) => i,
-                Err(_) if start == self.inv.head.start => 0,
-                Err(_) => {
-                    return Err(format!(
-                        "inventory: cell {} defined at offset {} outside every range",
-                        c.name, start
-                    ))
-                }
-            };
-            let r = &self.ranges[ri];
-            let len = (r.end - r.start) as usize;
-            buf.clear();
-            buf.resize(len, 0);
-            self.file
-                .read_exact_at(buf, r.start)
-                .map_err(|e| format!("read {}..{}: {}", r.start, r.end, e))?;
-            read += len as u64;
-            let pieces = parse_cell_bytes(buf, r.start, r.cellname_base, r.textstring_base, &tables)
-                .map_err(|e| format!("range {}..{}: {}", r.start, r.end, e))?;
+            let ri = self.range_index(start, &c.name)?;
+            let pieces = self.read_range(ri, buf, &tables)?;
+            read += buf.len() as u64;
             for p in pieces {
                 if p.index == ci {
                     cell.rects.extend(p.cell.rects);
@@ -471,6 +454,83 @@ impl StreamStore {
         }
         normalize_cells(std::slice::from_mut(&mut cell), 1);
         Ok((cell, read))
+    }
+
+    /// the index of the range starting at `start` (a cell's def_range;
+    /// the head's start is range 0)
+    fn range_index(&self, start: u64, name: &str) -> Result<usize, String> {
+        match self.ranges.binary_search_by_key(&start, |r| r.start) {
+            Ok(i) => Ok(i),
+            Err(_) if start == self.inv.head.start => Ok(0),
+            Err(_) => Err(format!(
+                "inventory: cell {} defined at offset {} outside every range",
+                name, start
+            )),
+        }
+    }
+
+    /// range `ri` read by pread into `buf` and parsed as the readers parse
+    /// it: the pieces of every cell it defines
+    fn read_range(&self, ri: usize, buf: &mut Vec<u8>, tables: &CellTables) -> Result<Vec<CellPiece>, String> {
+        let r = &self.ranges[ri];
+        let len = (r.end - r.start) as usize;
+        buf.clear();
+        buf.resize(len, 0);
+        self.file
+            .read_exact_at(buf, r.start)
+            .map_err(|e| format!("read {}..{}: {}", r.start, r.end, e))?;
+        parse_cell_bytes(buf, r.start, r.cellname_base, r.textstring_base, tables)
+            .map_err(|e| format!("range {}..{}: {}", r.start, r.end, e))
+    }
+
+    /// The range that defines cell `ci` first, when it defines other cells
+    /// as well - CELL records inside a CBLOCK of another cell's range (the
+    /// review's 24 cells in one 663 KiB block, 2026-10-23) - with the
+    /// cells charged to it in cell order and its cost: the marking pass
+    /// parses such a range once for all of them (`parse_range`) and
+    /// charges the range's cost, what the parse materializes, instead of
+    /// parsing it again at every cell's turn charging that cell alone
+    /// (0.12.391). None for a cell alone in its first range, or without a
+    /// definition.
+    pub fn shared_range_of(&self, ci: usize) -> Option<(usize, &[usize], u64)> {
+        let c = &self.inv.cells[ci];
+        let start = *c.def_ranges.first()?;
+        let ri = self.range_index(start, &c.name).ok()?;
+        let r = &self.ranges[ri];
+        (r.charges.len() > 1).then(|| (ri, r.charges.as_slice(), r.cost))
+    }
+
+    /// the ranges that define cell `ci`: one for most cells; a cell with
+    /// several CELL records has several, and `parse_range` serves it only
+    /// for the first (`parse_cell` reads them all)
+    pub fn def_range_count(&self, ci: usize) -> usize {
+        self.inv.cells[ci].def_ranges.len()
+    }
+
+    /// Range `ri` parsed once (the marking pass's shared range): every cell
+    /// it defines, by cell index, each joined and normalized on its own as
+    /// `parse_cell` does; and the bytes read. A cell whose definition goes
+    /// on in another range is not complete here (`def_range_count` > 1).
+    pub fn parse_range(&self, ri: usize, buf: &mut Vec<u8>) -> Result<(HashMap<usize, Cell>, u64), String> {
+        let tables = CellTables::new(&self.inv.cellnames, &self.inv.textstrings, &self.cell_index);
+        let pieces = self.read_range(ri, buf, &tables)?;
+        let read = buf.len() as u64;
+        let mut by_cell: HashMap<usize, Cell> = HashMap::new();
+        for p in pieces {
+            let cell = by_cell.entry(p.index).or_insert_with(|| Cell {
+                name: self.inv.cells[p.index].name.clone(),
+                ..Default::default()
+            });
+            cell.rects.extend(p.cell.rects);
+            cell.polys.extend(p.cell.polys);
+            cell.paths.extend(p.cell.paths);
+            cell.places.extend(p.cell.places);
+            cell.texts.extend(p.cell.texts);
+        }
+        for cell in by_cell.values_mut() {
+            normalize_cells(std::slice::from_mut(cell), 1);
+        }
+        Ok((by_cell, read))
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -845,6 +905,7 @@ mod tests {
             ("tree", write_tree(&[tiny, leaf, mid, top], 1000.0).expect("write_tree")),
             ("adv", fixtures::adversarial(false, true)),
             ("head", fixtures::head_cblock_cell()),
+            ("shared", fixtures::cells_in_one_cblock(6)),
         ];
         for (tag, data) in cases.drain(..) {
             let dir = tmpdir(&format!("ovo-{}", tag));
@@ -891,18 +952,27 @@ mod tests {
                 }
                 let mut passes = 0;
                 let mut parsed = 0usize;
+                let (mut shared, mut bytes) = (0usize, 0u64);
                 while let Some(group) = built.begin_group(plane_budget) {
                     passes += 1;
                     let pass_budget = if tight { store.min_budget() } else { u64::MAX / 4 };
                     let (scratches, rep) = crate::markpass::mark_group(&store, &built, &group, &instances, 2, pass_budget, &|_| {}).expect("mark_group");
                     assert_eq!(rep.parsed + rep.places_only + rep.small + rep.skipped, n, "{}: every cell decided", tag);
                     parsed += rep.parsed;
+                    shared += rep.shared;
+                    bytes += rep.bytes;
                     built.end_group(group, scratches);
                 }
                 // (with prune on, a stream whose top fits one grid cell is
                 // its bbox alone: nothing parsed)
                 if !prune {
                     assert!(parsed > 0, "{}: the markers parsed something", tag);
+                }
+                // the cells inside HOST's CBLOCK come from one parse of
+                // HOST's range per group: no range is read twice in a pass
+                if tag == "shared" && !prune {
+                    assert!(shared >= 2, "shared: {} cells from a shared range", shared);
+                    assert!(bytes <= data.len() as u64 * passes as u64, "shared: {} bytes read over {} passes of a {} byte file", bytes, passes, data.len());
                 }
                 drop(instances);
                 let streamed = occ::write_ovo(&built.finish());
@@ -926,6 +996,7 @@ mod tests {
             ("early-cblock", fixtures::adversarial(true, true)),
             ("dup", fixtures::dup_in_range()),
             ("head", fixtures::head_cblock_cell()),
+            ("shared", fixtures::cells_in_one_cblock(5)),
         ];
         for (tag, data) in &cases {
             let dir = tmpdir(&format!("alone-{}", tag));
@@ -951,6 +1022,49 @@ mod tests {
             assert!(compared > 0, "{}: cells with records compared", tag);
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    /// a range that defines several cells (HOST's range with 24 cells in
+    /// its CBLOCK): `shared_range_of` names it for every one of them with
+    /// all 25 charged, `parse_range` yields each cell as `parse_cell` does,
+    /// and TOP, alone in its range, has none
+    #[test]
+    fn a_shared_range_is_parsed_once_for_its_cells() {
+        let data = fixtures::cells_in_one_cblock(24);
+        let dir = tmpdir("shared-range");
+        let src = dir.join("src.oas");
+        std::fs::write(&src, &data).unwrap();
+        let inv = floe_oasis::inventory(&data, 2).expect("inventory");
+        let n = inv.cells.len();
+        assert_eq!(n, 26);
+        let (store, _) = StreamStore::new(inv, src.to_str().unwrap(), u64::MAX / 4).expect("store");
+        let mut buf = Vec::new();
+        let (mut shared_cells, mut ranges) = (0usize, std::collections::BTreeSet::new());
+        for ci in 0..n {
+            let name = store.inventory().cells[ci].name.clone();
+            match store.shared_range_of(ci) {
+                Some((ri, charges, cost)) => {
+                    assert_ne!(name, "TOP");
+                    assert_eq!(charges.len(), 25, "{}", name);
+                    assert!(charges.contains(&ci) && cost > 0, "{}", name);
+                    assert_eq!(store.def_range_count(ci), 1, "{}", name);
+                    shared_cells += 1;
+                    ranges.insert(ri);
+                }
+                None => assert_eq!(name, "TOP", "{} is alone in its range", name),
+            }
+        }
+        assert_eq!((shared_cells, ranges.len()), (25, 1));
+        let ri = *ranges.iter().next().unwrap();
+        let (by_cell, bytes) = store.parse_range(ri, &mut buf).expect("parse_range");
+        assert!(bytes > 0 && bytes < data.len() as u64);
+        assert_eq!(by_cell.len(), 25);
+        for (ci, cell) in &by_cell {
+            let (alone, _) = store.parse_cell(*ci, &mut buf).expect("parse_cell");
+            assert!(*cell == alone, "cell {} ({}) differs from its own parse", ci, cell.name);
+            assert_eq!(cell.rects.len(), 1, "{}", cell.name);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// a corrupt range (the file changed under the inventory): the reader

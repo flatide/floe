@@ -1408,6 +1408,62 @@ pub mod fixtures {
         w.out
     }
 
+    /// `k` cells defined inside one CBLOCK of HOST's range (the review's
+    /// 24 cells in a 663 KiB block, 2026-10-23): HOST with a rect, then a
+    /// CBLOCK holding CELL C0..Ck-1 with a rect each on layers 1..3, then
+    /// TOP placing HOST and every Ci - the streaming store's range of HOST
+    /// defines k + 1 cells, which the marking pass parses once
+    /// (cli stream.rs `parse_range`); the light cache refuses the stream
+    pub fn cells_in_one_cblock(k: usize) -> Vec<u8> {
+        let mut w = W::new();
+        start(&mut w);
+        w.uint(14);
+        w.string(b"HOST");
+        w.uint(20);
+        w.byte(0x40 | 0x20 | 0x10 | 0x08 | 0x02 | 0x01);
+        w.uint(1);
+        w.uint(0);
+        w.uint(50);
+        w.uint(60);
+        w.sint(0);
+        w.sint(0);
+        let mut b = W::new();
+        for i in 0..k {
+            b.uint(14);
+            b.string(format!("C{}", i).as_bytes());
+            b.uint(20);
+            b.byte(0x40 | 0x20 | 0x10 | 0x08 | 0x02 | 0x01);
+            b.uint(1 + (i as u64 % 3));
+            b.uint(0);
+            b.uint(10 + i as u64);
+            b.uint(10);
+            b.sint(i as i64);
+            b.sint(-(i as i64));
+        }
+        let comp = deflate(&b.out);
+        w.uint(34);
+        w.uint(0);
+        w.uint(b.out.len() as u64);
+        w.uint(comp.len() as u64);
+        w.out.extend_from_slice(&comp);
+        w.uint(14);
+        w.string(b"TOP");
+        w.uint(17);
+        w.byte(0x80 | 0x20 | 0x10);
+        w.string(b"HOST");
+        w.sint(0);
+        w.sint(0);
+        for i in 0..k {
+            w.uint(17);
+            w.byte(0x80 | 0x20 | 0x10);
+            w.string(format!("C{}", i).as_bytes());
+            w.sint(100 * (i as i64 + 1));
+            w.sint(200);
+        }
+        end(&mut w);
+        w.out
+    }
+
     /// TEXT streams doc.rs refuses: 0 = a non-UTF-8 TEXTSTRING, 1 = a
     /// non-UTF-8 inline string, 2 = a first TEXT without a string, 3 =
     /// a reference no TEXTSTRING defines; 4 = a TEXTSTRING reference

@@ -226,6 +226,15 @@ def main():
         main01 = work / "main01_like.oas"
         generate("gen_main01_like.py", main01, "--scale", "0.001", "--jobs", "2")
         files.append(("main01_like 0.001", main01))
+        # 24 cells defined inside one CBLOCK of another cell's range: the
+        # marking pass parses that range once for all of them (0.12.391);
+        # design.ovo must still be the in-memory build's
+        cc = work / "cblock_cells.oas"
+        r = subprocess.run([str(BIN.parent / "floe-dbg"), "fixture", "cblock-cells", str(cc)],
+                           capture_output=True, text=True)
+        if r.returncode != 0 or not cc.is_file():
+            fail("floe-dbg fixture cblock-cells: exit %d\n%s" % (r.returncode, r.stderr[-800:]))
+        files.append(("cblock cells", cc))
         largest_of = {}
         for name, src in files:
             largest, est = largest_cell_bytes(src, 4)

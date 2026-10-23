@@ -427,6 +427,7 @@ geometry/placement/text x·y, W/H, 점 목록, 경로 확장, 반복, 배치 대
 | 운영 규칙 | 캡처·뷰어의 캐시 종류와 요약 기본값 (사용자 시나리오 2026-10-22) | **완료 0.12.388(§8.11)**: `render`·`probe`·`info --light/--full`, `render --occupancy on`만 요약 추가, 뷰어 모달 색인 1회·백그라운드 요약 제거; 게이트 `jobdeck` LightSummaryTests, `floe2` |
 | L8 띠 분할 캡처 | exact 캡처가 디코드 예산으로 실패하지 않게 장치 행 띠 단위로 플랜·디코드·래스터 | **완료 0.12.389(§8.12)**: renderd `render_banded_capture`, 띠 그림 = 통짜 그림 바이트 동일(게이트 `floe2`), 캡처 시한 해제 |
 | 리뷰 수정 A | 2026-10-23 리뷰 5건 중 1·4·3·2 | **완료 0.12.390(§8.13)**: `pieces_of` 바이트 배치 읽기(요약 pass가 원본 전체를 올리던 회귀), 소스 fd 풀의 (dev, ino) 검증, 덱 `--full`이 경량 캐시를 전체로 재색인, 메타데이터 전용 light의 예산 검사 면제; 5(공유 CBLOCK 범위의 셀별 재파싱)는 §8.14 |
+| 리뷰 수정 B | 리뷰 5건 중 5 | **완료 0.12.391(§8.14)**: 여러 셀을 정의하는 범위(다른 셀 범위의 CBLOCK 안 CELL)를 마킹 pass가 한 번만 파싱하고 범위 cost로 과금(`StreamStore::parse_range`, markpass `Task::Range`); 픽스처 `cells_in_one_cblock`, 게이트 `vfs_stream` |
 | L7 후속 | 요약 패스 1패스화/마킹 가속, ovs 합치기(레이아웃 밀도), B안(정규 페이지), 세그먼트 캐시 디스크 보존(방문한 셀의 디코드 결과를 남겨 다음 세션 가속), 1패스 경량 생성(셀 로컬 점유 격자 합성) | 각각 — **L7a 완료 0.12.386(§8.9)**: 이미지 증분 합성(제자리 성장, 채움 시점 노드 마스크, 채움 바이트 해제), 세그먼트 pread 묶음·병렬 인코딩; **L7b 완료 0.12.387(§8.10)**: 요약 패스의 마커가 셀을 직접 파싱(리더 풀·상주 창 없음, 묶음이 안 쓰는 셀은 읽지 않음), 다각형 스캔 변환 버퍼 재사용, 크기 예산 밖의 레이어는 마킹하지 않음; 나머지(1패스 경량 생성은 §8.10의 정확성 논거로 보류)는 사용자 지시에 따라 |
 
 L0는 하루, L1~L3는 S1~S3와 비슷한 크기(재고 코드 위의 확장), L4가 본체다.
@@ -1121,6 +1122,34 @@ exact 캡처(cut 0)는 "모든 페이지 아니면 없음"이라 디코드 페�
   게이트 `light_cache` check_metadata_budget.
 - 영향 밖: render-core `decode_pages`의 `read_segments`는 디코드 선택(예산으로 묶임)의 세그먼트만 읽는다;
   전체 색인은 풀을 쓰지 않는다(파일 mmap, 페이지 파일은 읽기마다 open).
+
+### 8.14 L8 리뷰 수정 B (0.12.391 / floe-index·renderd 0.12.349, 2026-10-23; 사용자 "그 순서로 진행해줘")
+
+리뷰의 5번: 스트리밍 full 빌드의 design.ovo pass(마킹 pass, L7b)에서 `StreamStore::parse_cell`이 셀의
+def_range 전체를 파싱한 뒤 그 셀의 조각만 골랐다. 범위는 셀의 CELL 레코드 구간이라 보통 셀 하나지만,
+다른 셀의 범위 안 CBLOCK에 CELL 레코드가 든 스트림(리뷰 재현: 24셀이 663 KiB 블록 하나에)에서는 그
+범위가 25셀을 정의하고 — 셀마다 24번 다시 읽고 파싱했으며, markpass의 admission은 그 셀의 Doc
+추정(`cell_bytes`)만 과금해 나머지 24셀의 파싱 결과가 예산 밖에 있었다. 경량 캐시는 이런 스트림을 79로
+거절하므로 light에서 full로 전환되는 입력과 명시적 full 빌드의 요약 pass에만 해당한다.
+
+- `StreamStore::shared_range_of(ci)`: 셀의 첫 def_range가 다른 셀도 처음 정의하는 범위(`charges` ≥ 2)면
+  (범위, 그 셀들, 범위 cost = charges의 Doc 추정 합). `parse_range(ri)`: 범위를 한 번 읽고 파싱해
+  정의된 모든 셀을 셀별로 join·normalize(parse_cell과 같은 레코드). `def_range_count(ci)`.
+- markpass: claim 단위가 `Task::Cell` 또는 `Task::Range`. 파일 순서로 다음 셀을 집을 때 그 셀이
+  Shapes가 필요하고 공유 범위에 있으면, 아직 claim되지 않은 그 범위의 셀을 모두 함께 집고(`claimed`
+  비트) 범위 cost로 입장한다. 한 번 파싱한 결과에서 셀 순서대로 마킹하며(Shapes가 아닌 셀은 전처럼
+  bbox·배치만), 다른 범위에도 정의된 셀은 전처럼 혼자 파싱한다. 그룹 줄에 `N of them from R range(s)
+  parsed once`가 붙는다(공유 범위가 있을 때만).
+- 덤으로 찾은 기존 차이: 스트리밍 `StreamOcc`는 탑 셀도 small 판정(subtree bbox가 격자 한 칸에 들어가면)을
+  받았는데 인메모리 마커는 탑에 그 규칙을 적용하지 않는다(탑의 단위는 자기 레코드와 배치, 자식마다 walk). 탑
+  전체가 격자 한 칸에 드는 설계(6셀 픽스처의 1 um 격자)에서 비트는 같고 `work`만 달랐다(인메모리 3/2/2,
+  스트리밍 1/1/1). `StreamOcc::new`가 탑의 small을 끈다 — 현장 파일에서는 탑이 격자 한 칸에 들지 않으므로
+  바이트 변화 없음.
+- 바이트 동일: `streaming_occupancy_matches_in_memory`에 픽스처 `cells_in_one_cblock(6)` 추가(한 pass에 읽은
+  바이트가 파일 크기를 넘지 않음도 확인), `a_cell_parsed_alone_is_the_readers_cell`에 (5),
+  `a_shared_range_is_parsed_once_for_its_cells`(24셀: 25셀 모두 같은 범위, parse_range = parse_cell);
+  `floe-dbg fixture cblock-cells`로 게이트 `vfs_stream`이 in-memory와 스트리밍(jobs 1·4, --occupancy)의
+  캐시 파일 전부를 바이트 비교한다.
 
 ## 9. 검토한 대안
 
