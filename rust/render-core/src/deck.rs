@@ -276,16 +276,17 @@ impl DeckSource {
         if !(self.unit > 0.0) {
             return false;
         }
-        let span_x = (self.top_bbox.x1 - self.top_bbox.x0).max(0) as f64 / self.unit;
-        let span_y = (self.top_bbox.y1 - self.top_bbox.y0).max(0) as f64 / self.unit;
+        let span_x = (self.top_bbox.x1 as i128 - self.top_bbox.x0 as i128).max(0);
+        let span_y = (self.top_bbox.y1 as i128 - self.top_bbox.y0 as i128).max(0);
         let (base_um, _) = floe_vfs::occupancy::auto_base_um(
             span_x,
             span_y,
+            self.unit,
             self.layers.len(),
             floe_vfs::occupancy::DEFAULT_MAX_CELLS,
             floe_vfs::occupancy::DEFAULT_MAX_BYTES,
         );
-        let cell_dbu = (base_um * self.unit).round().max(1.0) as i64;
+        let cell_dbu = floe_vfs::occupancy::cell_dbu_of(base_um, self.unit);
         level_for(cell_dbu, plan_request.px_per_dbu, 1, max_cell_px()).is_some()
     }
 

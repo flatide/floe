@@ -639,7 +639,9 @@ floe-index svrf <deck> [-o OUT] [--scan] [-D NAME[=VAL]]… [-I DIR]… [--follo
   로그 줄은 올릴 옵션을 덧붙인다(`… none:work (work N) - over --occupancy-max-work M
   marks …`). 자동 기준 셀(`--occupancy-um` 생략)은 첫 선택의 격자가 셀 상한을, 또는
   레이어당 평면 하나가 크기 상한을 넘으면 4/8/16/32 µm으로 굵어진다
-  (`occupancy::auto_base_um`; 로그 `cell=8um (8000 dbu, auto for the cell cap)`).
+  (`occupancy::auto_base_um`; 로그 `cell=8um (8000 dbu, auto for the cell cap)`); 후보의
+  격자는 빌더와 같은 정수 dbu 셀로 센다(0.12.397, DIRECT_READ_PLAN §8.20: 3 nm 파일의
+  4 µm = 1333 dbu).
   세 옵션은 `floe2 index`가 그대로 전달한다(`--occupancy-max-work`, `--occupancy-max-bytes`;
   환경변수 없음).
 - 게시: `design.ovo.tmp` 작성·fsync 뒤 rename. `--kill-at occupancy-tmp`는 rename

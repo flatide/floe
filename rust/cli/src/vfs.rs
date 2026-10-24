@@ -3288,7 +3288,7 @@ fn publish_ovo(
         .count();
     eprintln!(
         "[vfs] occupancy cell={}um ({} dbu{}) grid={}x{} levels={} layers={} ok={} empty={} jobs={} {} ({:.1}s)",
-        built.cell_dbu as f64 / built.unit,
+        floe_vfs::occupancy::um_text(built.cell_dbu, built.unit),
         built.cell_dbu,
         if opts.base_um > 0.0 {
             ""
@@ -3296,8 +3296,9 @@ fn publish_ovo(
             // the automatic cell's reason, as the build chose it
             let (x0, y0, x1, y1) = built.bbox;
             occ::auto_base_um(
-                (x1 as i128 - x0 as i128).max(0) as f64 / built.unit,
-                (y1 as i128 - y0 as i128).max(0) as f64 / built.unit,
+                (x1 as i128 - x0 as i128).max(0),
+                (y1 as i128 - y0 as i128).max(0),
+                built.unit,
                 built.layers.len(),
                 opts.max_cells,
                 opts.max_bytes,
@@ -3889,7 +3890,7 @@ pub fn occupancy_cmd(args: &[String]) {
         f.version,
         f.unit,
         f.cell_dbu,
-        f.base_um(),
+        floe_vfs::occupancy::um_text(f.cell_dbu, f.unit),
         f.bbox.0,
         f.bbox.1,
         f.bbox.2,

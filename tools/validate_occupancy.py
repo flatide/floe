@@ -1009,6 +1009,48 @@ class GenerationContractTests(unittest.TestCase):
                      env=dict(os.environ, FLOE_RUST_SUB_CUT_WASH="on"))
         self.assertGreater(washed, exact // 2)
 
+    def test_the_automatic_cell_is_judged_on_the_dbu_grid(self):
+        # review of 0.12.396 (DIRECT_READ_PLAN section 8.20): the automatic
+        # cell's grid is the builder's - the cell rounded to whole dbu, the
+        # spans divided rounding up. A 3 nm file whose top is a 3999.999 um
+        # square (1,333,333 dbu) is 1 um by the target; under a 1 M cell
+        # cap 4 um fit the judgement in microns (1,000 x 1,000) but is
+        # 1333 dbu = 3.999 um in that file, 1,001 x 1,001 cells, and the
+        # build ended none:cells where 8 um (2667 dbu, 500 x 500) fits.
+        # An explicit 4 um still records none:cells with its line.
+        src = TMP / "auto_dbu3.oas"
+        ly = db.Layout()
+        ly.dbu = 0.003
+        top = ly.create_cell("SQ")
+        li = ly.layer(1, 0)
+        top.shapes(li).insert(db.Box(0, 0, 1333333, 1333333))
+        top.shapes(li).insert(db.Box(100, 100, 2100, 2100))
+        ly.write(str(src))
+        ly._destroy()
+        cache = Path(vfs_cache_dir(src))
+        shutil.rmtree(cache, ignore_errors=True)
+        res = floe_index("vfs", src, cache, "--occupancy",
+                         "--occupancy-max-cells", "1000000",
+                         "--no-lod", "--slow-cell-s", "999", "--jobs", "2")
+        self.assertIn("occupancy cell=8.001um (2667 dbu, auto for the cell cap) "
+                      "grid=500x500", res.stderr)
+        self.assertNotIn("none:cells", res.stderr)
+        listing = self.listing(cache).stdout.splitlines()
+        self.assertIn("cell_dbu=2667 base_um=8.001 bbox=0,0,1333333,1333333 "
+                      "grid=500x500 levels=4 layers=1", listing[0])
+        self.assertEqual(read_ovo(cache / "design.ovo")["cell"], 2667)
+        rows = [l for l in listing if l.startswith("layer ")]
+        self.assertEqual(len(rows), 1, listing)
+        self.assertIn("status=ok", rows[0])
+        self.assertIn("level0=500x500", rows[0])
+        shutil.rmtree(cache, ignore_errors=True)
+        res = floe_index("vfs", src, cache, "--occupancy", "--occupancy-um", "4",
+                         "--occupancy-max-cells", "1000000",
+                         "--no-lod", "--slow-cell-s", "999", "--jobs", "2")
+        self.assertIn("every layer none:cells: 1001x1001 cells at 4um exceed "
+                      "--occupancy-max-cells 1000000", res.stderr)
+        self.assertIn("occupancy cell=3.999um (1333 dbu) grid=0x0", res.stderr)
+
     def test_limits_are_recorded_as_none_never_approximated(self):
         # an explicit cell under a cap of 10 cells: every layer none:cells
         # (the automatic cell would climb to 16 um instead, below)

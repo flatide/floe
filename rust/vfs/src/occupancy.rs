@@ -113,28 +113,65 @@ impl AutoWhy {
     }
 }
 
-/// The automatic base cell of a top cell `span_x_um` x `span_y_um` microns
-/// holding `layers` layers, under the caps `max_cells` (level-0 cells per
-/// layer) and `max_bytes` (bitmap bytes over the file):
-/// `auto_base_um_for_span`'s cell when its grid fits both - the cells, and
-/// one plane per layer (a layer has a plane per placement depth it has
-/// records at, so later layers can still end `none:size`; the depths are
-/// not known before the marking) - else the first coarser cell (the rest of
-/// AUTO_CANDIDATES_UM, then AUTO_COARSE_UM) that fits, with the reason the
-/// first choice did not; the coarsest when none does (the build records
-/// `none:cells` as before).
+/// The base cell in database units of `base_um` microns: whole dbu, at
+/// least one - the one rule of both builders, the automatic choice and the
+/// deck's pending check (a 3 nm file's 4 um is 1333 dbu = 3.999 um).
+pub fn cell_dbu_of(base_um: f64, unit: f64) -> i64 {
+    ((base_um * unit).round() as i64).max(1)
+}
+
+/// The cell of `dbu` database units in microns for a log line: up to six
+/// decimals, trailing zeros dropped (`4`, `0.25`, `3.999`, `8.001` - not
+/// the `8.001000000000001` of the raw quotient at 3 nm, which the gates'
+/// `%g` expectations cannot match).
+pub fn um_text(dbu: i64, unit: f64) -> String {
+    if !(unit > 0.0) || !unit.is_finite() {
+        return dbu.to_string();
+    }
+    let text = format!("{:.6}", dbu as f64 / unit);
+    let trimmed = text.trim_end_matches('0').trim_end_matches('.');
+    if trimmed.is_empty() || trimmed == "-" {
+        "0".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// The automatic base cell of a top cell `span_x_dbu` x `span_y_dbu`
+/// database units (`unit` of them a micron) holding `layers` layers, under
+/// the caps `max_cells` (level-0 cells per layer) and `max_bytes` (bitmap
+/// bytes over the file): `auto_base_um_for_span`'s cell when its grid fits
+/// both - the cells, and one plane per layer (a layer has a plane per
+/// placement depth it has records at, so later layers can still end
+/// `none:size`; the depths are not known before the marking) - else the
+/// first coarser cell (the rest of AUTO_CANDIDATES_UM, then AUTO_COARSE_UM)
+/// that fits, with the reason the first choice did not; the coarsest when
+/// none does (the build records `none:cells` as before). A candidate's grid
+/// is the builder's - the cell rounded to whole dbu (`cell_dbu_of`), the
+/// spans divided rounding up: judged in microns until 0.12.396, a 3 nm
+/// file's 3999.999 um square was 1,000 x 1,000 cells of 4 um to the
+/// judgement and 1,001 x 1,001 of 1333 dbu to the build, so a 1 M cell cap
+/// let 4 um through to `none:cells` where 8 um (2667 dbu, 500 x 500) fits
+/// (review of 0.12.396).
 pub fn auto_base_um(
-    span_x_um: f64,
-    span_y_um: f64,
+    span_x_dbu: i128,
+    span_y_dbu: i128,
+    unit: f64,
     layers: usize,
     max_cells: u64,
     max_bytes: u64,
 ) -> (f64, AutoWhy) {
-    let first = auto_base_um_for_span(span_x_um.max(span_y_um));
+    let (span_x, span_y) = (span_x_dbu.max(0), span_y_dbu.max(0));
+    let unit = if unit > 0.0 && unit.is_finite() { unit } else { 1.0 };
+    let first = auto_base_um_for_span(span_x.max(span_y) as f64 / unit);
     let over = |um: f64| -> Option<AutoWhy> {
-        let gw = (span_x_um / um).ceil().max(0.0);
-        let gh = (span_y_um / um).ceil().max(0.0);
-        if gw > u32::MAX as f64 || gh > u32::MAX as f64 || gw * gh > max_cells as f64 {
+        let cell = cell_dbu_of(um, unit) as i128;
+        let gw = ceil_div(span_x, cell);
+        let gh = ceil_div(span_y, cell);
+        if gw > u32::MAX as i128
+            || gh > u32::MAX as i128
+            || (gw as u128) * (gh as u128) > max_cells as u128
+        {
             return Some(AutoWhy::Cells);
         }
         let per_layer = layer_bytes(gw as u32, gh as u32);
@@ -461,8 +498,8 @@ impl Level {
 
     /// OR-pool 2x2 into the next level
     pub fn pool(&self) -> Level {
-        let w2 = (self.w + 1) / 2;
-        let h2 = (self.h + 1) / 2;
+        let w2 = half_up(self.w);
+        let h2 = half_up(self.h);
         let rb = Level::row_bytes(self.w);
         let rb2 = Level::row_bytes(w2);
         let mut bits = vec![0u8; rb2 * h2 as usize];
@@ -569,12 +606,20 @@ pub struct Occupancy {
     pub paths_skipped: u64,
 }
 
+/// the next level's side of `n` cells: half, rounding up - without the
+/// `(n + 1) / 2` overflow at u32::MAX, a width the 2^32 cell cap admits
+/// (a grid of u32::MAX x 1, about 17 km at 4 um: level_count said 2
+/// levels for 27; review of 0.12.396)
+pub fn half_up(n: u32) -> u32 {
+    n.div_ceil(2)
+}
+
 /// pyramid depth for a level-0 grid
 pub fn level_count(w: u32, h: u32) -> u32 {
     let (mut a, mut b, mut n) = (w, h, 1u32);
     while a > TOP_GRID || b > TOP_GRID {
-        a = (a + 1) / 2;
-        b = (b + 1) / 2;
+        a = half_up(a);
+        b = half_up(b);
         n += 1;
     }
     n
@@ -585,8 +630,8 @@ pub fn layer_bytes(w: u32, h: u32) -> u64 {
     let (mut a, mut b) = (w, h);
     let mut total = Level::row_bytes(a) as u64 * b as u64;
     while a > TOP_GRID || b > TOP_GRID {
-        a = (a + 1) / 2;
-        b = (b + 1) / 2;
+        a = half_up(a);
+        b = half_up(b);
         total += Level::row_bytes(a) as u64 * b as u64;
     }
     total
@@ -2310,15 +2355,16 @@ pub fn build(doc: &Doc, src_size: u64, src_mtime: u64, opts: &Opts) -> Result<Oc
         opts.base_um
     } else {
         auto_base_um(
-            span_x as f64 / doc.unit,
-            span_y as f64 / doc.unit,
+            span_x,
+            span_y,
+            doc.unit,
             doc.layer_order.len(),
             opts.max_cells,
             opts.max_bytes,
         )
         .0
     };
-    let cell_dbu = ((base_um * doc.unit).round() as i64).max(1);
+    let cell_dbu = cell_dbu_of(base_um, doc.unit);
     let gw = ceil_div(span_x, cell_dbu as i128);
     let gh = ceil_div(span_y, cell_dbu as i128);
     let cells = (gw as u128) * (gh as u128);
@@ -2595,15 +2641,16 @@ impl StreamOcc {
             opts.base_um
         } else {
             auto_base_um(
-                span_x as f64 / unit,
-                span_y as f64 / unit,
+                span_x,
+                span_y,
+                unit,
                 nl,
                 opts.max_cells,
                 opts.max_bytes,
             )
             .0
         };
-        let cell_dbu = ((base_um * unit).round() as i64).max(1);
+        let cell_dbu = cell_dbu_of(base_um, unit);
         let gw = ceil_div(span_x, cell_dbu as i128);
         let gh = ceil_div(span_y, cell_dbu as i128);
         let cells = (gw as u128) * (gh as u128);
@@ -3725,6 +3772,7 @@ impl OvoFile {
                             k, status
                         ));
                     }
+                    // (i128 here: the loader's expected sizes cannot overflow)
                     ew = (ew + 1) / 2;
                     eh = (eh + 1) / 2;
                     levels.push(e);
@@ -5285,46 +5333,72 @@ mod tests {
     fn the_automatic_base_cell_climbs_for_the_caps() {
         use super::AutoWhy::{Cells, Size, Target};
         let (cells, bytes) = (DEFAULT_MAX_CELLS, DEFAULT_MAX_BYTES);
+        // the table in microns of a 1 nm file (the cells are whole dbu there)
+        let at = |sx_um: f64, sy_um: f64, layers: usize, cells: u64, bytes: u64| {
+            auto_base_um(
+                (sx_um * 1000.0).round() as i128,
+                (sy_um * 1000.0).round() as i128,
+                1000.0,
+                layers,
+                cells,
+                bytes,
+            )
+        };
         // the first choice fits: the rule of 2026-09-16 as it was
-        assert_eq!(auto_base_um(35_838.4, 30_000.0, 40, cells, bytes), (4.0, Target));
-        assert_eq!(auto_base_um(2_252.0, 1_552.0, 3, cells, bytes), (1.0, Target));
-        assert_eq!(auto_base_um(0.0, 0.0, 0, cells, bytes), (0.25, Target));
+        assert_eq!(at(35_838.4, 30_000.0, 40, cells, bytes), (4.0, Target));
+        assert_eq!(at(2_252.0, 1_552.0, 3, cells, bytes), (1.0, Target));
+        assert_eq!(at(0.0, 0.0, 0, cells, bytes), (0.25, Target));
         // the field's reticle-sized EBEAM source keeps 4 um under the 2^32
         // cap (user decision 2026-10-24): 38,100 x 38,100 = 1.45 G cells;
         // so does a 9-inch reticle (57,150 x 57,150 = 3.27 G); under the
         // 2^30 cap of 0.12.395 the first climbed to 8 um (19,050 x 19,050)
-        assert_eq!(auto_base_um(152_400.0, 152_400.0, 1, cells, bytes), (4.0, Target));
-        assert_eq!(auto_base_um(228_600.0, 228_600.0, 1, cells, bytes), (4.0, Target));
-        assert_eq!(auto_base_um(152_400.0, 152_400.0, 1, 1 << 30, bytes), (8.0, Cells));
+        assert_eq!(at(152_400.0, 152_400.0, 1, cells, bytes), (4.0, Target));
+        assert_eq!(at(228_600.0, 228_600.0, 1, cells, bytes), (4.0, Target));
+        assert_eq!(at(152_400.0, 152_400.0, 1, 1 << 30, bytes), (8.0, Cells));
         // 262 mm square is the last 4 um size (65,536 x 65,536 = 2^32)
-        assert_eq!(auto_base_um(262_144.0, 262_144.0, 1, cells, bytes), (4.0, Target));
-        assert_eq!(auto_base_um(262_145.0, 262_144.0, 1, cells, bytes), (8.0, Cells));
+        assert_eq!(at(262_144.0, 262_144.0, 1, cells, bytes), (4.0, Target));
+        assert_eq!(at(262_145.0, 262_144.0, 1, cells, bytes), (8.0, Cells));
         // a wafer-sized extent climbs the ladder; past 32 um it is the
         // coarsest with the reason (the build records none:cells)
-        assert_eq!(auto_base_um(300_000.0, 300_000.0, 1, cells, bytes), (8.0, Cells));
-        assert_eq!(auto_base_um(600_000.0, 600_000.0, 1, cells, bytes), (16.0, Cells));
-        assert_eq!(auto_base_um(1_200_000.0, 1_200_000.0, 1, cells, bytes), (32.0, Cells));
-        assert_eq!(auto_base_um(3_000_000.0, 3_000_000.0, 1, cells, bytes), (32.0, Cells));
+        assert_eq!(at(300_000.0, 300_000.0, 1, cells, bytes), (8.0, Cells));
+        assert_eq!(at(600_000.0, 600_000.0, 1, cells, bytes), (16.0, Cells));
+        assert_eq!(at(1_200_000.0, 1_200_000.0, 1, cells, bytes), (32.0, Cells));
+        assert_eq!(at(3_000_000.0, 3_000_000.0, 1, cells, bytes), (32.0, Cells));
         // the size cap with the whole reticle at 4 um: as many layers as
         // 4 GiB holds a plane each (17 of 242 MB), one more goes to 8 um
         let plane_reticle = layer_bytes(38_100, 38_100);
         let fits = (bytes / plane_reticle) as usize;
         assert!((16..=18).contains(&fits), "{fits}");
-        assert_eq!(auto_base_um(152_400.0, 152_400.0, fits, cells, bytes), (4.0, Target));
-        assert_eq!(auto_base_um(152_400.0, 152_400.0, fits + 1, cells, bytes), (8.0, Size));
+        assert_eq!(at(152_400.0, 152_400.0, fits, cells, bytes), (4.0, Target));
+        assert_eq!(at(152_400.0, 152_400.0, fits + 1, cells, bytes), (8.0, Size));
         // one plane per layer over the size cap: a 36 x 30 mm source of 40
         // layers is 9,000 x 7,500 cells at 4 um, 11.3 MB a plane, 452 MB
         // for the layers - within a cap of just that; a byte less, or
         // 256 MiB, goes to 8 um
         let plane_4 = layer_bytes(9_000, 7_500);
-        assert_eq!(auto_base_um(36_000.0, 30_000.0, 40, cells, 40 * plane_4), (4.0, Target));
-        assert_eq!(auto_base_um(36_000.0, 30_000.0, 40, cells, 40 * plane_4 - 1), (8.0, Size));
-        assert_eq!(auto_base_um(36_000.0, 30_000.0, 40, cells, 1 << 28), (8.0, Size));
+        assert_eq!(at(36_000.0, 30_000.0, 40, cells, 40 * plane_4), (4.0, Target));
+        assert_eq!(at(36_000.0, 30_000.0, 40, cells, 40 * plane_4 - 1), (8.0, Size));
+        assert_eq!(at(36_000.0, 30_000.0, 40, cells, 1 << 28), (8.0, Size));
         // the ladder from a fine first choice passes the finer candidates
         // of the rule before the coarse ones: a 3 x 2 mm chip is 1 um by
         // the target, 4 um under a 1 M cell cap, 8 um under 100 k
-        assert_eq!(auto_base_um(3_000.0, 2_000.0, 1, 1_000_000, bytes), (4.0, Cells));
-        assert_eq!(auto_base_um(3_000.0, 2_000.0, 1, 100_000, bytes), (8.0, Cells));
+        assert_eq!(at(3_000.0, 2_000.0, 1, 1_000_000, bytes), (4.0, Cells));
+        assert_eq!(at(3_000.0, 2_000.0, 1, 100_000, bytes), (8.0, Cells));
+        // the grid is judged as the builder makes it (review of 0.12.396):
+        // a 3 nm file's 3999.999 um square (1,333,333 dbu) is 1 um by the
+        // target; under a 1 M cell cap the microns said 4 um (1,000 x
+        // 1,000) but 4 um is 1333 dbu = 3.999 um there, 1,001 x 1,001
+        // cells, and the build ended none:cells; 8 um (2667 dbu) is 500 x
+        // 500. The 1 nm counterpart fits 4 um exactly.
+        let third = 1000.0 / 3.0;
+        assert_eq!(cell_dbu_of(4.0, third), 1333);
+        assert_eq!(cell_dbu_of(8.0, third), 2667);
+        assert_eq!(cell_dbu_of(0.0004, 1000.0), 1);
+        assert_eq!(ceil_div(1_333_333, 1333), 1001);
+        assert_eq!(ceil_div(1_333_333, 2667), 500);
+        assert_eq!(auto_base_um(1_333_333, 1_333_333, third, 1, 1_000_000, bytes), (8.0, Cells));
+        assert_eq!(auto_base_um(1_333_333, 1_333_333, third, 1, cells, bytes), (1.0, Target));
+        assert_eq!(auto_base_um(4_000_000, 4_000_000, 1000.0, 1, 1_000_000, bytes), (4.0, Cells));
         // through build: the 10 x 3 mm chip of the test above (4 um by the
         // target = 2,500 x 750 cells) is 8 um under a 1 M cell cap, 32 um
         // under 100 k, and none:cells at 32 um under 10 k - with an
@@ -5362,6 +5436,71 @@ mod tests {
         // (the streaming build takes the same function with the inventory's
         // layer count: gate validate_occupancy
         // test_the_base_cell_follows_the_chip_size_unless_given)
+    }
+
+    #[test]
+    fn the_cell_text_is_the_microns_trimmed() {
+        assert_eq!(um_text(4000, 1000.0), "4");
+        assert_eq!(um_text(250, 1000.0), "0.25");
+        assert_eq!(um_text(1, 1000.0), "0.001");
+        assert_eq!(um_text(16000, 1000.0), "16");
+        assert_eq!(um_text(1333, 1000.0 / 3.0), "3.999");
+        assert_eq!(um_text(2667, 1000.0 / 3.0), "8.001");
+        assert_eq!(um_text(0, 1000.0), "0");
+        assert_eq!(um_text(5, 0.0), "5");
+    }
+
+    #[test]
+    fn the_pyramid_arithmetic_holds_at_the_widest_grid() {
+        // review of 0.12.396: `(n + 1) / 2` overflowed at u32::MAX, a width
+        // the 2^32 cell cap admits (a grid of u32::MAX x 1, about 17 km at
+        // 4 um): level_count gave 2 levels for 27 in release, a panic in
+        // debug; layer_bytes, Level::pool and the loader's level walk
+        // halved the same way
+        assert_eq!(half_up(u32::MAX), 1 << 31);
+        assert_eq!(half_up(5), 3);
+        assert_eq!(half_up(1), 1);
+        assert_eq!(half_up(0), 0);
+        assert_eq!(level_count(u32::MAX, 1), 27);
+        assert_eq!(level_count(1, u32::MAX), 27);
+        assert_eq!(level_count(1 << 31, 1), 26);
+        assert_eq!(level_count(64, 64), 1);
+        assert_eq!(level_count(65, 1), 2);
+        // the bytes: the levels summed in u64 arithmetic
+        let mut want = 0u64;
+        let (mut a, mut b) = (u32::MAX as u64, 1u64);
+        loop {
+            want += a.div_ceil(8) * b;
+            if a <= TOP_GRID as u64 && b <= TOP_GRID as u64 {
+                break;
+            }
+            a = a.div_ceil(2);
+            b = b.div_ceil(2);
+        }
+        assert_eq!(layer_bytes(u32::MAX, 1), want);
+        // a column pads every row to a byte: eight times the row's bytes
+        let mut column = 0u64;
+        let (mut a, mut b) = (1u64, u32::MAX as u64);
+        loop {
+            column += a.div_ceil(8) * b;
+            if a <= TOP_GRID as u64 && b <= TOP_GRID as u64 {
+                break;
+            }
+            a = a.div_ceil(2);
+            b = b.div_ceil(2);
+        }
+        assert_eq!(layer_bytes(1, u32::MAX), column);
+        assert!(column > 8 * want - 1024 && column < 8 * want + 1024, "{column} {want}");
+        // the automatic choice judges such a grid without overflowing
+        let wide = u32::MAX as i128 * 4000;
+        assert_eq!(
+            auto_base_um(wide, 4000, 1000.0, 1, DEFAULT_MAX_CELLS, DEFAULT_MAX_BYTES),
+            (4.0, AutoWhy::Target)
+        );
+        assert_eq!(
+            auto_base_um(wide + 4000, 4000, 1000.0, 1, DEFAULT_MAX_CELLS, DEFAULT_MAX_BYTES),
+            (8.0, AutoWhy::Cells)
+        );
     }
 
     #[test]
