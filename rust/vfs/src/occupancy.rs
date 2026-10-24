@@ -86,9 +86,11 @@ pub fn auto_base_um_for_span(span_um: f64) -> f64 {
 /// `auto_base_um_for_span`'s cell would exceed the cell cap, or one plane
 /// per layer of the file the size cap (field 2026-10-23, DIRECT_READ_PLAN
 /// §8.18: a deck's EBEAM sources whose bbox is the whole 152 mm reticle are
-/// 38,100 x 38,100 cells at 4 um, past the 2^30 cap - every layer
-/// `none:cells`, the wide view on the page path; 8 um is 363 M cells and
-/// 45 MB a plane). Past 32 um the file records `none:cells` as before.
+/// 38,100 x 38,100 cells at 4 um, past the cell cap of the time, 2^30 -
+/// every layer `none:cells`, the wide view on the page path; 8 um is 363 M
+/// cells and 45 MB a plane; since 2026-10-24 the cap is 2^32 and such a
+/// source keeps 4 um, the ladder serving extents past 262 mm). Past 32 um
+/// the file records `none:cells` as before.
 pub const AUTO_COARSE_UM: [f64; 3] = [8.0, 16.0, 32.0];
 
 /// Why the automatic base cell is what it is: the target cell count
@@ -189,8 +191,18 @@ pub fn status_hint(status: u8, opts: &Opts) -> String {
         _ => String::new(),
     }
 }
-/// level-0 cells per layer before the whole file is `none:cells`
-pub const DEFAULT_MAX_CELLS: u64 = 1 << 30;
+/// level-0 cells per layer before the whole file is `none:cells`: 2^32 -
+/// 65,536 x 65,536, a 512 MB level-0 plane - since 2026-10-24 (2^30 until
+/// 0.12.395), so the automatic cell stays 4 um over a whole reticle (152.4
+/// mm: 38,100 x 38,100 = 1.45 G cells, 181 MB a plane, 242 MB with its
+/// pyramid; a 9-inch 228.6 mm one 3.27 G) instead of climbing to 8 um.
+/// User decision 2026-10-24: mask data is shallow, its layers rarely
+/// overlap and the summary passes are not picked, so the summary's reach
+/// - the page path begins where the base cell is wider than a screen
+/// pixel, 4 um/px - is worth four times the bytes; the marking is a mark
+/// per shape whatever the cell. `--occupancy-max-cells` sets it; the
+/// ladder (AUTO_COARSE_UM) still climbs past it (300 mm -> 8 um).
+pub const DEFAULT_MAX_CELLS: u64 = 1 << 32;
 /// marks (cells set + members + edge rows) per layer before `none:work`.
 /// 2^31 until 0.12.394: a flat EBEAM file marks once per shape, and the
 /// field's largest sources hold more shapes than that on one layer (the
@@ -200,8 +212,12 @@ pub const DEFAULT_MAX_CELLS: u64 = 1 << 30;
 /// quarter of an hour at the measured 80 M marks/s; `--occupancy-max-work`
 /// sets it.
 pub const DEFAULT_MAX_WORK: u64 = 1 << 36;
-/// bitmap bytes over all layers before the rest is `none:size`
-pub const DEFAULT_MAX_BYTES: u64 = 1 << 30;
+/// bitmap bytes over all layers before the rest is `none:size`: 4 GiB
+/// since 2026-10-24 (1 GiB until 0.12.395), to go with the cell cap above
+/// - a whole-reticle layer at 4 um is 242 MB a plane with its pyramid, so
+/// a file of several such layers or depth planes keeps them all; the
+/// viewer maps the file (OvoFile::open) and touches the level it paints.
+pub const DEFAULT_MAX_BYTES: u64 = 1 << 32;
 
 /// Where a build's time goes (CUT_DENSITY_DESIGN §10.5, review
 /// 2026-09-24: the whole-run number could not say what layer
@@ -5273,20 +5289,33 @@ mod tests {
         assert_eq!(auto_base_um(35_838.4, 30_000.0, 40, cells, bytes), (4.0, Target));
         assert_eq!(auto_base_um(2_252.0, 1_552.0, 3, cells, bytes), (1.0, Target));
         assert_eq!(auto_base_um(0.0, 0.0, 0, cells, bytes), (0.25, Target));
-        // the field's reticle-sized EBEAM source: 38,100 x 38,100 cells at
-        // 4 um are past the cell cap, 8 um (19,050 x 19,050) fits
-        assert_eq!(auto_base_um(152_400.0, 152_400.0, 1, cells, bytes), (8.0, Cells));
-        // 131 mm square is the last 4 um size (32,768 x 32,768 = 2^30)
-        assert_eq!(auto_base_um(131_072.0, 131_072.0, 1, cells, bytes), (4.0, Target));
-        assert_eq!(auto_base_um(131_073.0, 131_072.0, 1, cells, bytes), (8.0, Cells));
+        // the field's reticle-sized EBEAM source keeps 4 um under the 2^32
+        // cap (user decision 2026-10-24): 38,100 x 38,100 = 1.45 G cells;
+        // so does a 9-inch reticle (57,150 x 57,150 = 3.27 G); under the
+        // 2^30 cap of 0.12.395 the first climbed to 8 um (19,050 x 19,050)
+        assert_eq!(auto_base_um(152_400.0, 152_400.0, 1, cells, bytes), (4.0, Target));
+        assert_eq!(auto_base_um(228_600.0, 228_600.0, 1, cells, bytes), (4.0, Target));
+        assert_eq!(auto_base_um(152_400.0, 152_400.0, 1, 1 << 30, bytes), (8.0, Cells));
+        // 262 mm square is the last 4 um size (65,536 x 65,536 = 2^32)
+        assert_eq!(auto_base_um(262_144.0, 262_144.0, 1, cells, bytes), (4.0, Target));
+        assert_eq!(auto_base_um(262_145.0, 262_144.0, 1, cells, bytes), (8.0, Cells));
         // a wafer-sized extent climbs the ladder; past 32 um it is the
         // coarsest with the reason (the build records none:cells)
-        assert_eq!(auto_base_um(300_000.0, 300_000.0, 1, cells, bytes), (16.0, Cells));
-        assert_eq!(auto_base_um(600_000.0, 600_000.0, 1, cells, bytes), (32.0, Cells));
-        assert_eq!(auto_base_um(2_000_000.0, 2_000_000.0, 1, cells, bytes), (32.0, Cells));
+        assert_eq!(auto_base_um(300_000.0, 300_000.0, 1, cells, bytes), (8.0, Cells));
+        assert_eq!(auto_base_um(600_000.0, 600_000.0, 1, cells, bytes), (16.0, Cells));
+        assert_eq!(auto_base_um(1_200_000.0, 1_200_000.0, 1, cells, bytes), (32.0, Cells));
+        assert_eq!(auto_base_um(3_000_000.0, 3_000_000.0, 1, cells, bytes), (32.0, Cells));
+        // the size cap with the whole reticle at 4 um: as many layers as
+        // 4 GiB holds a plane each (17 of 242 MB), one more goes to 8 um
+        let plane_reticle = layer_bytes(38_100, 38_100);
+        let fits = (bytes / plane_reticle) as usize;
+        assert!((16..=18).contains(&fits), "{fits}");
+        assert_eq!(auto_base_um(152_400.0, 152_400.0, fits, cells, bytes), (4.0, Target));
+        assert_eq!(auto_base_um(152_400.0, 152_400.0, fits + 1, cells, bytes), (8.0, Size));
         // one plane per layer over the size cap: a 36 x 30 mm source of 40
         // layers is 9,000 x 7,500 cells at 4 um, 11.3 MB a plane, 452 MB
-        // for the layers - under 1 GiB; under 256 MiB it goes to 8 um
+        // for the layers - within a cap of just that; a byte less, or
+        // 256 MiB, goes to 8 um
         let plane_4 = layer_bytes(9_000, 7_500);
         assert_eq!(auto_base_um(36_000.0, 30_000.0, 40, cells, 40 * plane_4), (4.0, Target));
         assert_eq!(auto_base_um(36_000.0, 30_000.0, 40, cells, 40 * plane_4 - 1), (8.0, Size));

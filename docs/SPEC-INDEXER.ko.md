@@ -628,12 +628,13 @@ floe-index svrf <deck> [-o OUT] [--scan] [-D NAME[=VAL]]… [-I DIR]… [--follo
   0.5 s 이상이면 `L/D prepared: U units workers=N (Ts)`를 출력한다. 하트비트는
   종료 채널로 즉시 깨운다(이전 sleep+join은 짧은 레이어마다 최대 250 ms 대기).
 - 상한(레이어 단위, 근사 저장 없음): level 0 셀 수 > `--occupancy-max-cells`
-  (기본 2^30)면 모든 레이어 `none:cells`(파일은 만들어져 이유를 남기고, 빌드 로그에
+  (기본 **2^32**; 0.12.395까지 2^30 — 152 mm 레티클 전체 bbox가 4 µm를 지키도록,
+  2026-10-24, DIRECT_READ_PLAN §8.19)면 모든 레이어 `none:cells`(파일은 만들어져 이유를 남기고, 빌드 로그에
   `every layer none:cells: WxH cells at Uum exceed --occupancy-max-cells N` 한 줄);
   마킹 작업(켠 셀 + 멤버 + 변 행) > `--occupancy-max-work`(기본 **2^36**; 0.12.394까지
   2^31 — 평탄한 EBEAM 파일은 도형 하나가 마크 하나라 현장의 가장 큰 소스가 한
   레이어에서 넘었다, DIRECT_READ_PLAN §8.18)면 그 레이어 `none:work`; 누적 비트맵
-  바이트가 `--occupancy-max-bytes`(기본 1 GiB, K/M/G 접미사)를 넘는 순서부터
+  바이트가 `--occupancy-max-bytes`(기본 **4 GiB**; 0.12.395까지 1 GiB; K/M/G 접미사)를 넘는 순서부터
   `none:size`(`empty`·`none:*` 레이어는 자리를 차지하지 않는다). 요약 없는 레이어의
   로그 줄은 올릴 옵션을 덧붙인다(`… none:work (work N) - over --occupancy-max-work M
   marks …`). 자동 기준 셀(`--occupancy-um` 생략)은 첫 선택의 격자가 셀 상한을, 또는

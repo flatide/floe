@@ -120,12 +120,87 @@ impl SummarySelection {
 
 /// The combined bits of (layer k, level, depth key) of one file, kept
 /// by the cache across frames: a level-0 plane of a 30 mm source is
-/// megabytes, and a deck asks per pass.
-pub type PlaneCache = std::collections::HashMap<(usize, u32, u32), Arc<[u8]>>;
+/// megabytes, and a deck asks per pass. Bounded in entries and in bytes
+/// (PLANE_CACHE_CAP, PLANE_CACHE_BYTES): the whole is emptied when an
+/// entry would pass either, as the entry count did alone until 0.12.395
+/// - with the generator's caps at 2^32 cells and 4 GiB (2026-10-24) a
+/// whole-reticle layer at 4 um is 181 MB at level 0 and 242 MB over its
+/// levels, and a count alone could hold gigabytes.
+pub struct PlaneCache {
+    map: std::collections::HashMap<(usize, u32, u32), Arc<[u8]>>,
+    bytes: usize,
+    cap: usize,
+    max_bytes: usize,
+}
 
 /// combined planes kept before the cache is emptied (a session that
 /// walks many depths and levels stays bounded)
 const PLANE_CACHE_CAP: usize = 512;
+/// bytes of combined planes kept before the cache is emptied: two
+/// whole-reticle layers at 4 um over all their levels, or one at two
+/// depth keys
+pub const PLANE_CACHE_BYTES: usize = 512 << 20;
+
+impl Default for PlaneCache {
+    fn default() -> Self {
+        Self::with_bounds(PLANE_CACHE_CAP, PLANE_CACHE_BYTES)
+    }
+}
+
+impl PlaneCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// a cache emptied past `cap` entries or `max_bytes` bytes
+    pub fn with_bounds(cap: usize, max_bytes: usize) -> Self {
+        PlaneCache {
+            map: std::collections::HashMap::new(),
+            bytes: 0,
+            cap: cap.max(1),
+            max_bytes,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.map.clear();
+        self.bytes = 0;
+    }
+
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    /// bytes of the planes held
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &(usize, u32, u32)> {
+        self.map.keys()
+    }
+
+    pub fn get(&self, key: &(usize, u32, u32)) -> Option<Arc<[u8]>> {
+        self.map.get(key).cloned()
+    }
+
+    /// Keeps `bits` under `key`; the cache is emptied first when the
+    /// entry would pass either bound (an entry wider than the byte bound
+    /// alone is kept on its own until the next insert).
+    pub fn insert(&mut self, key: (usize, u32, u32), bits: Arc<[u8]>) {
+        if self.map.len() >= self.cap || self.bytes.saturating_add(bits.len()) > self.max_bytes {
+            self.clear();
+        }
+        self.bytes = self.bytes.saturating_add(bits.len());
+        if let Some(old) = self.map.insert(key, bits) {
+            self.bytes = self.bytes.saturating_sub(old.len());
+        }
+    }
+}
 
 /// The cache key of a request depth (None = unlimited): every depth
 /// at or above the cap draws every plane, like the unlimited one.
@@ -180,7 +255,7 @@ pub(crate) fn planes_for(
                 continue;
             };
             let cache_key = (k, level, key_depth);
-            let cached = cache.as_deref().and_then(|c| c.get(&cache_key).cloned());
+            let cached = cache.as_deref().and_then(|c| c.get(&cache_key));
             let bits = match cached {
                 Some(bits) => bits,
                 None => {
@@ -190,9 +265,6 @@ pub(crate) fn planes_for(
                         None => Arc::from(Vec::new()),
                     };
                     if let Some(c) = cache.as_deref_mut() {
-                        if c.len() >= PLANE_CACHE_CAP {
-                            c.clear();
-                        }
                         c.insert(cache_key, Arc::clone(&bits));
                     }
                     bits
@@ -453,6 +525,41 @@ mod tests {
         assert_eq!(cache.len(), 2 * 4, "{:?}", cache.keys().collect::<Vec<_>>());
         assert_eq!(depth_key(Some(40)), depth_key(Some(15)));
         assert_ne!(depth_key(Some(15)), depth_key(None));
+    }
+
+    #[test]
+    fn the_plane_cache_is_emptied_at_either_bound() {
+        let plane = |n: usize| -> Arc<[u8]> { Arc::from(vec![0u8; n]) };
+        // the byte bound: three planes of 30 bytes fit under 100, the
+        // fourth empties the cache and is kept alone
+        let mut cache = PlaneCache::with_bounds(8, 100);
+        for k in 0..3 {
+            cache.insert((k, 0, 0), plane(30));
+        }
+        assert_eq!((cache.len(), cache.bytes()), (3, 90));
+        assert!(cache.get(&(0, 0, 0)).is_some());
+        cache.insert((3, 0, 0), plane(30));
+        assert_eq!((cache.len(), cache.bytes()), (1, 30));
+        assert!(cache.get(&(0, 0, 0)).is_none() && cache.get(&(3, 0, 0)).is_some());
+        // a plane wider than the bound is kept on its own
+        cache.insert((4, 0, 0), plane(150));
+        assert_eq!((cache.len(), cache.bytes()), (1, 150));
+        cache.insert((5, 0, 0), plane(1));
+        assert_eq!((cache.len(), cache.bytes()), (1, 1));
+        // the entry bound as before (512 by default)
+        let mut cache = PlaneCache::with_bounds(4, usize::MAX);
+        for k in 0..4 {
+            cache.insert((k, 0, 0), plane(2));
+        }
+        assert_eq!((cache.len(), cache.bytes()), (4, 8));
+        cache.insert((4, 0, 0), plane(2));
+        assert_eq!((cache.len(), cache.bytes()), (1, 2));
+        // the same key again replaces its bytes
+        cache.insert((4, 0, 0), plane(5));
+        assert_eq!((cache.len(), cache.bytes()), (1, 5));
+        let default = PlaneCache::new();
+        assert_eq!((default.cap, default.max_bytes), (PLANE_CACHE_CAP, PLANE_CACHE_BYTES));
+        assert!(default.is_empty());
     }
 
     #[test]
