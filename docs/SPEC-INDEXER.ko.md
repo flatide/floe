@@ -644,7 +644,28 @@ floe-index svrf <deck> [-o OUT] [--scan] [-D NAME[=VAL]]… [-I DIR]… [--follo
   4 µm = 1333 dbu).
   세 옵션은 `floe2 index`가 그대로 전달한다(`--occupancy-max-work`, `--occupancy-max-bytes`;
   환경변수 없음).
-- 게시: `design.ovo.tmp` 작성·fsync 뒤 rename. `--kill-at occupancy-tmp`는 rename
+  **파일 단위 깊이 상한**(0.12.398, DIRECT_READ_PLAN §8.21): 모든 레이어의 깊이 평면(top의 상대
+  깊이 마스크로 센 `planes_kept`)이 크기 상한을 넘기면 레이어를 none:size로 잃기 전에 깊이 평면을
+  접는다 — 평면 합이 들어가는 가장 큰 상한 k(`occupancy::depth_cap_for`; 0이면 레이어당 평면
+  하나)로 깊이 k 이상을 한 평면에 담고, 셀을 굵히는 사다리는 그래도 안 들어갈 때만 오른다. 두
+  빌더가 같은 마스크로 같은 k를 고르므로 파일은 바이트 동일하다. 로그 `depth planes capped at K
+  (depth K and deeper share one plane): L layers' P planes at every depth would be B bytes over
+  --occupancy-max-bytes M; Q planes kept`(스트리밍은 `streaming: grid … depth planes up to K`도).
+  p10 합성 칩(449 레이어, 깊이 16)은 4 µm에서 93 레이어 ok·356 none:size였고(4.29 GB), 이제 k = 0으로
+  449 레이어가 모두 ok다.
+- **배치 저장소**(0.12.398, `floe_vfs::places`): 스트리밍 요약 패스는 배치를 `Vec<Vec<PlaceRec>>`로
+  들지 않고 (자식, 부모) 간선별 run — 부모의 그 자식 배치 레코드를 레코드 순서로 바리언트 부호화
+  (평범한 배치 약 12 B) — 으로 저장소에 둔다: 배치 수 × 16 B가 스트리밍 예산의 4분의 1 이하면
+  메모리(블록 32 MiB), 넘으면 캐시 디렉터리의 임시 파일 `design.places.tmp`(pread로 run 단위로
+  읽고 저장소와 함께 지운다; `FLOE_OCCUPANCY_PLACES=file|mem`이 강제, 진단·게이트용). 셀의
+  인스턴스는 자기 incoming run과 조상의 run으로 열거하고(`Instances::each`), 자기 배치의 charge와
+  작은 자식 격자의 발자국은 outgoing run으로 본다(`Instances::outgoing`: 레코드 2^18개 이하면
+  목록으로, 넘으면 인스턴스마다 저장소에서 읽음). 상주 메모리는 run 표(간선당 하나; MAIN01급
+  칩 60만)와 마커가 열거 중 읽은 run뿐이다. 0.12.397까지의 배치 상한(전체 빌드 5,000만, 경량
+  캐시는 예산/4 ÷ 96 B)과 "design.ovo is skipped" 건너뜀, 그에 따른 매 open의 요약 재시도가
+  없어졌다. 로그 `placements of N cells … : R records in U runs, S in memory | in the staging file PATH`.
+- 게시: `design.ovo.tmp` 작성·fsync 뒤 rename(0.12.398부터 `write_ovo_to`가 피라미드에서 바로 흘려 쓴다 — 파일
+  이미지를 메모리에 만들지 않는다). `--kill-at occupancy-tmp`는 rename
   직전에 죽는 게이트 훅(이전 파일 보존, tmp 잔존). 다음 실행은 시작 시 tmp를
   지우고, Python 래퍼(`floe2 index`)는 자식이 실패·중단되면 tmp를 지운다.
   로더는 tmp를 읽지 않는다.

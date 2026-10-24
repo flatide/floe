@@ -11,6 +11,7 @@ pub mod light;
 pub mod lock;
 pub mod occ_density;
 pub mod occupancy;
+pub mod places;
 pub mod representatives;
 pub mod text;
 

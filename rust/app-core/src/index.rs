@@ -1177,6 +1177,7 @@ impl IndexJob {
         };
         for (enabled, name) in [
             (self.cleanup_occupancy, "design.ovo.tmp"),
+            (self.cleanup_occupancy, floe_vfs::places::FILE_NAME),
             (self.cleanup_representatives, "design.ovr.tmp"),
         ] {
             if !enabled {

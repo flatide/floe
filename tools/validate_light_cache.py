@@ -75,21 +75,41 @@ def run(cmd, ok=(0,), what="", env=None):
 
 
 def check_summary_budget(work, src):
-    """The summary pass's placement cap follows --mem (a quarter at about
-    96 B each; the fixed 50 M before 0.12.385): main01_like 0.001 has 1.29 M
-    placements and a 62 MB top cell, so --mem 0.1 (107 MB: above the cell,
-    a cap of about 280 K) skips design.ovo with the line that says so, while
-    the default budget builds it (check_fixture)."""
-    out = work / "main01_light_budget"
-    r = run([BIN, "light", src, "--out", out, "--jobs", "2", "--occupancy", "--mem", "0.1"],
-            what="floe-index light --occupancy --mem 0.1")
-    if "placement records exceed" not in r.stderr or "--mem raises" not in r.stderr:
-        fail("the budget's cap did not say so: %s" % r.stderr[-600:])
-    if (out / "design.ovo").exists():
-        fail("design.ovo was built past the budget's cap")
-    if not (out / "design.inv").is_file() or not (out / "meta.json").is_file():
-        fail("the light cache was not written under the cap")
-    print("  summary pass: --mem 0.1 keeps too few placements for main01_like, skipped and said")
+    """The summary pass keeps no placement cap (0.12.398, DIRECT_READ_PLAN
+    §8.21): main01_like 0.001 has 1.29 M placements and a 62 MB top cell,
+    and until 0.12.397 `--mem 0.1` (107 MB: above the cell, a cap of about
+    280 K at 96 B each) skipped design.ovo. Now the placement store takes
+    them - in memory under this budget (1.29 M at 16 B is under a quarter
+    of 107 MB), in the staging file design.places.tmp when
+    FLOE_OCCUPANCY_PLACES=file says so (or the estimate passes the
+    quarter) - and design.ovo is the default budget's bytes either way;
+    the staging file is gone with the store."""
+    reference = work / "main01_like_light" / "design.ovo"
+    if not reference.is_file():
+        fail("check_fixture's light cache of main01_like has no design.ovo")
+    for backing, env_value in (("in memory", None), ("in the staging file", "file")):
+        out = work / ("main01_light_budget_%s" % (env_value or "mem"))
+        env = dict(os.environ)
+        env.pop("FLOE_OCCUPANCY_PLACES", None)
+        if env_value:
+            env["FLOE_OCCUPANCY_PLACES"] = env_value
+        r = run([BIN, "light", src, "--out", out, "--jobs", "2", "--occupancy", "--mem", "0.1"],
+                what="floe-index light --occupancy --mem 0.1 (%s)" % backing, env=env)
+        if "placement records exceed" in r.stderr or "is skipped" in r.stderr:
+            fail("the summary pass still skips design.ovo under --mem 0.1: %s" % r.stderr[-600:])
+        line = [l for l in r.stderr.splitlines() if "placements of" in l and "segment directory" in l]
+        if not line or backing not in line[-1]:
+            fail("the placement store's line does not say '%s': %s" % (backing, r.stderr[-800:]))
+        if not (out / "design.ovo").is_file():
+            fail("design.ovo was not built under --mem 0.1 (%s)" % backing)
+        if (out / "design.ovo").read_bytes() != reference.read_bytes():
+            fail("design.ovo under --mem 0.1 (%s) differs from the default budget's" % backing)
+        if (out / "design.places.tmp").exists():
+            fail("the placement store's staging file was left behind (%s)" % backing)
+        for name in ("design.inv", "design.seg", "meta.json"):
+            if not (out / name).is_file():
+                fail("the light cache lacks %s under --mem 0.1 (%s)" % (name, backing))
+        print("  summary pass: --mem 0.1 builds main01_like's design.ovo with the placements %s, the default budget's bytes" % backing)
 
 
 def check_metadata_budget(work, src):

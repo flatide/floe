@@ -406,10 +406,10 @@
     `cache: light`), 덱이면 ` · light:N/M`(경량 소스 수/소스 수, meta `jobdeck.light_sources`)이 붙는다. 덱의
     경량 소스에 design.ovo가 아직 없으면 요약이 그릴 광역 뷰의 그 pass는 비어 있고(renderd `summary_building=N`;
     근접 뷰는 그린다) 캔버스 위 배너가 뜬다 — "occupancy summary missing for N passes - wide views of those
-    sources are empty (floe2 index deck.jb adds it; a source whose placements exceed the summary pass's budget
-    stays so, --mem raises it)". 배너가 보이는 동안 3 s마다 다시 그려(`_summary_poll_tick`) 다른 실행이 더한
+    sources are empty (floe2 index deck.jb adds it)". 배너가 보이는 동안 3 s마다 다시 그려(`_summary_poll_tick`) 다른 실행이 더한
     요약이 생기면 걷힌다. 0.12.388부터 뷰어는 열 때의 모달 색인에서 요약을 만들므로 이 배너는 모달이 더하지
-    못한 소스(배치가 요약 패스의 예산을 넘은 것)에만 남는다(0.12.384~0.12.387의 "building"/"unavailable"
+    못한 소스에만 남는다(0.12.397까지는 배치가 요약 패스의 예산을 넘은 소스가 그랬다; 0.12.398부터 요약 패스는
+    배치 상한이 없어 색인이 실패한 소스뿐이다 — DIRECT_READ_PLAN §8.21)(0.12.384~0.12.387의 "building"/"unavailable"
     배너와 백그라운드 색인은 뺐다). perf 줄에는 `, N passes wait for their occupancy summary (light sources: empty until it
     is built)`, 요약 줄에는 `, N wait for the summary (building)`. 경량 캐시의 프레임이 채우기를 끝내기 전에 오면
     (`final=0`, `light_pending=1`) 하단 줄은 "reading the source... (fill round N)"이다(SPEC §3의 refining과 같은

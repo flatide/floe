@@ -30,7 +30,9 @@
 //!   n_layers u32, top_len u16, top utf8, then per layer: layer u32,
 //!   dt u32, status u8, work u64, n_planes u8, per plane: depth u8
 //!   (placement depth of the shapes it holds, 0 = the top cell's own
-//!   records; DEPTH_CAP holds that depth and every deeper one), per
+//!   records; the file's cap plane - DEPTH_CAP, or a lower depth when
+//!   the planes of every depth would pass the byte cap, `depth_cap_for`
+//!   - holds that depth and every deeper one), per
 //!   level: w u32, h u32, off u64, len u64 (absolute offsets; rows
 //!   padded to whole bytes, bit i of a row at byte i/8 bit i%8).
 //!   Planes are ascending by depth and only depths holding a shape
@@ -58,6 +60,167 @@ pub const MAGIC_V1: &[u8; 8] = b"FLOEOVO1";
 pub const DEPTH_CAP: u8 = 15;
 /// the depth of a version-1 plane: every depth flattened together
 pub const DEPTH_ALL: u8 = 255;
+
+/// the planes a layer keeps under a depth cap: one per depth below the
+/// cap at which the top's relative-depth mask has a bit, and one for
+/// the cap and everything deeper (a bound: a depth whose records mark
+/// no cell leaves no plane)
+pub fn planes_kept(top_mask: u32, cap: u32) -> usize {
+    let below = if cap >= 32 { top_mask } else { top_mask & ((1u32 << cap) - 1) };
+    below.count_ones() as usize + usize::from(cap < 32 && top_mask >> cap != 0)
+}
+
+/// The depth cap of one file (0.12.398, DIRECT_READ_PLAN §8.21): DEPTH_CAP
+/// unless the planes of every layer holding a shape - `planes_kept` of
+/// its top mask - would pass `max_bytes` at `per_layer` bytes a plane;
+/// then the largest cap whose planes fit, down to 0 (one plane a layer,
+/// every depth together). Both builders take it from the same masks, so
+/// their files stay the same bytes. Before, the size cap was met in
+/// layer order and the rest of the layers were none:size (p10: 449
+/// layers of up to 16 depth planes at 4 um, 93 kept under 4 GiB); now a
+/// deep layout keeps every layer at 4 um with fewer depth planes - a
+/// limited request depth at or past the cap draws the cap plane, which
+/// holds the deeper shapes too, as it always did past DEPTH_CAP - and
+/// the automatic cell climbs its ladder only when even one plane a
+/// layer does not fit (`auto_base_um` judges one plane a layer).
+pub fn depth_cap_for(top_masks: &[u32], per_layer: u64, max_bytes: u64) -> u8 {
+    let total = |cap: u32| -> u128 {
+        top_masks
+            .iter()
+            .filter(|&&m| m != 0)
+            .map(|&m| planes_kept(m, cap) as u128)
+            .sum::<u128>()
+            * per_layer as u128
+    };
+    let mut cap = DEPTH_CAP as u32;
+    while cap > 0 && total(cap) > max_bytes as u128 {
+        cap -= 1;
+    }
+    cap as u8
+}
+
+/// the build log's line when the depth planes are capped below DEPTH_CAP
+pub fn depth_cap_note(cap: u8, top_masks: &[u32], per_layer: u64, max_bytes: u64) -> String {
+    let layers = top_masks.iter().filter(|&&m| m != 0).count();
+    let full: usize = top_masks.iter().filter(|&&m| m != 0).map(|&m| planes_kept(m, DEPTH_CAP as u32)).sum();
+    let kept: usize = top_masks.iter().filter(|&&m| m != 0).map(|&m| planes_kept(m, cap as u32)).sum();
+    format!(
+        "depth planes capped at {} (depth {} and deeper share one plane): {} layers' {} planes at every depth would be {} bytes over --occupancy-max-bytes {}; {} planes kept",
+        cap,
+        cap,
+        layers,
+        full,
+        full as u128 * per_layer as u128,
+        max_bytes,
+        kept
+    )
+}
+
+/// the generator's grid cell for a top of `bbox` (dbu) with `layers`
+/// layers: the explicit cell, or the automatic one under the caps (both
+/// builders, and the placement store's writer before a streaming build)
+pub fn plan_cell_dbu(unit: f64, bbox: (i64, i64, i64, i64), layers: usize, opts: &Opts) -> i64 {
+    let span_x = (bbox.2 as i128 - bbox.0 as i128).max(0);
+    let span_y = (bbox.3 as i128 - bbox.1 as i128).max(0);
+    let base_um = if opts.base_um > 0.0 {
+        opts.base_um
+    } else {
+        auto_base_um(span_x, span_y, unit, layers, opts.max_cells, opts.max_bytes).0
+    };
+    cell_dbu_of(base_um, unit)
+}
+
+/// Opts::prune's small cells: those whose recursive bbox fits one grid
+/// cell on both axes. The top is never small: the in-memory marker never
+/// applies the rule to the top (its units are its own records and its
+/// placements, each child walked on its own), so a design whose whole
+/// top fits one grid cell is marked child by child there - and in the
+/// streaming build, for the same charges (0.12.391: the shared-range
+/// fixture's top fits one 1 um cell; the bits were the same, the work
+/// counts were not)
+pub fn small_cells(bboxes: &[Option<(i64, i64, i64, i64)>], cell_dbu: i64, prune: bool, top: usize) -> Vec<bool> {
+    let mut small: Vec<bool> = bboxes
+        .iter()
+        .map(|b| prune && b.is_some_and(|b| b.2 - b.0 <= cell_dbu && b.3 - b.1 <= cell_dbu))
+        .collect();
+    if top < small.len() {
+        small[top] = false;
+    }
+    small
+}
+
+/// a placement as the markers see it - the child, the anchor and the
+/// repetition's shape without its point list - whether it comes from a
+/// Doc's record or the placement store's
+#[derive(Clone, Copy, Debug)]
+pub struct PlaceView {
+    pub cell: usize,
+    pub x: i64,
+    pub y: i64,
+    pub rot: u8,
+    pub flip: bool,
+    pub rep: RepView,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum RepView {
+    One,
+    Grid { na: u64, nb: u64, va: (i64, i64), vb: (i64, i64) },
+    /// a point list's member count
+    Pts(u64),
+}
+
+impl RepView {
+    pub fn members(&self) -> u64 {
+        match *self {
+            RepView::One => 1,
+            RepView::Grid { na, nb, .. } => na.saturating_mul(nb),
+            RepView::Pts(n) => n,
+        }
+    }
+
+    /// `grid_prunable` of the view
+    pub fn prunable(&self, c: i64) -> bool {
+        match *self {
+            RepView::Grid { na, nb, va, vb } => axis_grid_prunable(na, nb, va, vb, c),
+            _ => false,
+        }
+    }
+}
+
+impl PlaceView {
+    pub fn of(pl: &PlaceRec) -> PlaceView {
+        PlaceView {
+            cell: pl.cell,
+            x: pl.x,
+            y: pl.y,
+            rot: pl.rot,
+            flip: pl.flip,
+            rep: match &pl.rep {
+                Rep::One => RepView::One,
+                Rep::Grid { na, nb, va, vb } => RepView::Grid { na: *na, nb: *nb, va: *va, vb: *vb },
+                Rep::Pts(p) => RepView::Pts(p.len() as u64),
+            },
+        }
+    }
+
+    /// the store's record placing `cell`
+    pub fn stored(cell: usize, r: &crate::places::StoredPlace<'_>) -> PlaceView {
+        use crate::places::StoredRep;
+        PlaceView {
+            cell,
+            x: r.x,
+            y: r.y,
+            rot: r.rot,
+            flip: r.flip,
+            rep: match r.rep {
+                StoredRep::One => RepView::One,
+                StoredRep::Grid { na, nb, va, vb } => RepView::Grid { na, nb, va, vb },
+                StoredRep::Pts { n, .. } => RepView::Pts(n),
+            },
+        }
+    }
+}
 /// base cell in microns unless --occupancy-um says otherwise (the
 /// library default; the CLI asks for BASE_AUTO)
 pub const DEFAULT_BASE_UM: f64 = 4.0;
@@ -427,16 +590,20 @@ fn layer_depth_masks(doc: &Doc, shapes: &[CellShapes<'_>], has: &[bool]) -> Vec<
 /// world bbox) marks what the members would, in one fill.
 fn grid_prunable(rep: &Rep, c: i64) -> bool {
     match rep {
-        Rep::Grid { na, nb, va, vb } => {
-            let axis = |v: &(i64, i64)| (v.0 == 0 || v.1 == 0) && v.0.abs() <= c && v.1.abs() <= c;
-            *na >= 1 && *nb >= 1 && axis(va) && axis(vb)
-        }
+        Rep::Grid { na, nb, va, vb } => axis_grid_prunable(*na, *nb, *va, *vb, c),
         _ => false,
     }
 }
 
+/// `grid_prunable` on the grid's numbers (the placement store's records
+/// carry no `Rep`)
+pub fn axis_grid_prunable(na: u64, nb: u64, va: (i64, i64), vb: (i64, i64), c: i64) -> bool {
+    let axis = |v: (i64, i64)| (v.0 == 0 || v.1 == 0) && v.0.abs() <= c && v.1.abs() <= c;
+    na >= 1 && nb >= 1 && axis(va) && axis(vb)
+}
+
 /// world bbox of a placed cell's recursive bbox
-fn placed_bbox(b: Win, xf: &Xf, pl: &PlaceRec, dx: i64, dy: i64) -> (i128, i128, i128, i128) {
+fn placed_bbox(b: Win, xf: &Xf, pl: &PlaceView, dx: i64, dy: i64) -> (i128, i128, i128, i128) {
     let t = xf.compose(&Xf::place(pl.x + dx, pl.y + dy, pl.rot, pl.flip));
     let a = t.apply(b.0, b.1);
     let z = t.apply(b.2, b.3);
@@ -737,14 +904,15 @@ impl SharedBits {
 }
 
 /// a layer's level-0 planes under construction: one per placement
-/// depth 0..=min(max depth, DEPTH_CAP) the layer reaches
+/// depth 0..=min(max depth, the file's depth cap) the layer reaches
 struct Planes {
     by_depth: Vec<SharedBits>,
 }
 
 impl Planes {
-    fn new(w: u32, h: u32, max_depth: u32) -> Planes {
-        let n = (max_depth.min(DEPTH_CAP as u32) + 1) as usize;
+    /// `cap`: the file's depth cap (`depth_cap_for`; DEPTH_CAP at most)
+    fn new(w: u32, h: u32, max_depth: u32, cap: u8) -> Planes {
+        let n = (max_depth.min(cap.min(DEPTH_CAP) as u32) + 1) as usize;
         Planes {
             by_depth: (0..n).map(|_| SharedBits::new(w, h)).collect(),
         }
@@ -753,7 +921,7 @@ impl Planes {
     /// the plane of a placement depth (the cap and anything deeper,
     /// or a depth past the precomputed maximum, share the last one)
     fn plane(&self, depth: u32) -> &SharedBits {
-        let k = (depth.min(DEPTH_CAP as u32) as usize).min(self.by_depth.len() - 1);
+        let k = (depth as usize).min(self.by_depth.len() - 1);
         &self.by_depth[k]
     }
 }
@@ -776,6 +944,69 @@ impl CellShapes<'_> {
 }
 
 type ShapeIndex<'a> = HashMap<(u32, u32), HashMap<usize, CellShapes<'a>>>;
+
+/// per layer (`doc.layer_order`): the top's relative-depth mask of the
+/// layer's shapes - bit d set when a cell d placements below the top
+/// holds a shape record of the layer (bit 31 saturates) - folded over
+/// the cells' distinct children, children before parents, from the top
+/// (a cycle's back edge adds nothing, as `layer_depth_masks` has it).
+/// What `StreamOcc::new` folds over the inventory's edges, so both
+/// builders cap the depth planes alike (`depth_cap_for`).
+fn top_depth_masks(doc: &Doc, index: &ShapeIndex<'_>) -> Vec<u32> {
+    let n = doc.cells.len();
+    let children: Vec<Vec<usize>> = doc
+        .cells
+        .iter()
+        .map(|c| {
+            let mut v: Vec<usize> = c.places.iter().map(|p| p.cell).filter(|&ch| ch < n).collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        })
+        .collect();
+    let mut order: Vec<usize> = Vec::new();
+    if doc.top < n {
+        // 0 new, 1 open, 2 done
+        let mut state = vec![0u8; n];
+        let mut stack: Vec<(usize, usize)> = vec![(doc.top, 0)];
+        state[doc.top] = 1;
+        while let Some(top) = stack.last_mut() {
+            let (ci, k) = (top.0, top.1);
+            if k < children[ci].len() {
+                top.1 += 1;
+                let ch = children[ci][k];
+                if state[ch] == 0 {
+                    state[ch] = 1;
+                    stack.push((ch, 0));
+                }
+            } else {
+                state[ci] = 2;
+                order.push(ci);
+                stack.pop();
+            }
+        }
+    }
+    let mut m = vec![0u32; n];
+    doc.layer_order
+        .iter()
+        .map(|key| {
+            let own = index.get(key);
+            for &ci in &order {
+                let mut v: u32 = u32::from(own.is_some_and(|l| l.contains_key(&ci)));
+                for &ch in &children[ci] {
+                    let cm = m[ch];
+                    v |= (cm << 1) | (cm & (1 << 31));
+                }
+                m[ci] = v;
+            }
+            let top = m.get(doc.top).copied().unwrap_or(0);
+            for &ci in &order {
+                m[ci] = 0;
+            }
+            top
+        })
+        .collect()
+}
 
 fn index_shapes(doc: &Doc) -> ShapeIndex<'_> {
     let mut index: ShapeIndex<'_> = HashMap::new();
@@ -981,15 +1212,15 @@ impl<'a> Marker<'a> {
 
     /// Opts::prune for a Grid placement of a small cell with a pitch
     /// at most the cell: the footprint in one fill (see grid_prunable)
-    fn mark_grid_footprint(&mut self, pl: &PlaceRec, xf: &Xf, depth: u32) -> bool {
+    fn mark_grid_footprint(&mut self, pl: &PlaceView, xf: &Xf, depth: u32) -> bool {
         let Some(p) = self.prune else { return true };
         let Some(b) = p.bboxes[pl.cell] else {
             return true;
         };
-        let Rep::Grid { na, nb, va, vb } = &pl.rep else {
+        let RepView::Grid { na, nb, va, vb } = pl.rep else {
             return true;
         };
-        let (la, lb) = (*na as i64 - 1, *nb as i64 - 1);
+        let (la, lb) = (na as i64 - 1, nb as i64 - 1);
         let first = placed_bbox(b, xf, pl, 0, 0);
         let last = placed_bbox(b, xf, pl, la * va.0 + lb * vb.0, la * va.1 + lb * vb.1);
         if !self.charge(1) {
@@ -1097,7 +1328,7 @@ impl<'a> Marker<'a> {
                         && *m0 == 0
                         && *m1 == rep_members(&pl.rep)
                     {
-                        return self.mark_grid_footprint(pl, &u.xf, u.depth);
+                        return self.mark_grid_footprint(&PlaceView::of(pl), &u.xf, u.depth);
                     }
                 }
                 let charged = !matches!(pl.rep, Rep::One);
@@ -1515,7 +1746,7 @@ impl<'a> Marker<'a> {
                 Rep::Grid { na, nb, va, vb } => {
                     if let Some(p) = self.prune {
                         if p.small[pl.cell] && grid_prunable(&pl.rep, self.c) {
-                            if !self.mark_grid_footprint(pl, xf, depth) {
+                            if !self.mark_grid_footprint(&PlaceView::of(pl), xf, depth) {
                                 return false;
                             }
                             continue;
@@ -2159,6 +2390,7 @@ fn build_layer(
     progress: Option<fn(&str)>,
     balanced: bool,
     prune: Option<(&[Option<Win>], &[bool])>,
+    depth_cap: u8,
 ) -> (Layer, u64) {
     let layer_with = |status: u8, work: u64, planes: Vec<Plane>| Layer {
         layer: key.0,
@@ -2186,7 +2418,7 @@ fn build_layer(
         cell_dbu,
         prune.map(|p| p.small),
     );
-    let planes = Planes::new(w, h, layer_max_depth(doc, shapes, has));
+    let planes = Planes::new(w, h, layer_max_depth(doc, shapes, has), depth_cap);
     phase_add(1, prepared);
     let threads = jobs.max(1).min(units.len()).max(1);
     let shared = std::sync::atomic::AtomicU64::new(0);
@@ -2421,13 +2653,18 @@ pub fn build(doc: &Doc, src_size: u64, src_mtime: u64, opts: &Opts) -> Result<Oc
         log("grouping records by layer");
     }
     let mut index = index_shapes(doc);
+    // the depth cap of the file (depth_cap_for): the planes every layer
+    // would keep, from the top's relative-depth masks over the cells'
+    // distinct children (the streaming build's rule, over the inventory)
+    let top_masks = top_depth_masks(doc, &index);
+    let depth_cap = depth_cap_for(&top_masks, per_layer, opts.max_bytes);
     phase_add(0, indexing);
     // Opts::prune: the cells whose whole subtree fits one grid cell
-    let small: Vec<bool> = bboxes
-        .iter()
-        .map(|b| opts.prune && b.is_some_and(|b| b.2 - b.0 <= cell_dbu && b.3 - b.1 <= cell_dbu))
-        .collect();
+    let small = small_cells(&bboxes, cell_dbu, opts.prune, doc.top);
     if let Some(log) = opts.progress {
+        if depth_cap < DEPTH_CAP {
+            log(&depth_cap_note(depth_cap, &top_masks, per_layer, opts.max_bytes));
+        }
         log(&format!(
             "grouped records in {:.3}s; prune {} ({} of {} cells fit a {} dbu cell)",
             indexing.elapsed().as_secs_f64(),
@@ -2481,6 +2718,7 @@ pub fn build(doc: &Doc, src_size: u64, src_mtime: u64, opts: &Opts) -> Result<Oc
             } else {
                 None
             },
+            depth_cap,
         );
         skipped += sk;
         if layer.status == STATUS_OK {
@@ -2565,6 +2803,8 @@ pub struct StreamOcc {
     layer_order: Vec<(u32, u32)>,
     max_work: u64,
     prune: bool,
+    /// the file's depth cap (`depth_cap_for`)
+    depth_cap: u8,
     small: Vec<bool>,
     bboxes: Vec<Option<Win>>,
     /// per layer, per cell: the relative-depth mask (0 = the layer is
@@ -2668,6 +2908,7 @@ impl StreamOcc {
             layer_order: layer_order.to_vec(),
             max_work: opts.max_work,
             prune: opts.prune,
+            depth_cap: DEPTH_CAP,
             small: Vec::new(),
             bboxes: bboxes.to_vec(),
             masks: Vec::new(),
@@ -2704,20 +2945,8 @@ impl StreamOcc {
             (opts.max_bytes / per_layer) as usize
         };
         // Opts::prune: the cells whose whole subtree fits one grid cell
-        occ.small = bboxes
-            .iter()
-            .map(|b| opts.prune && b.is_some_and(|b| b.2 - b.0 <= cell_dbu && b.3 - b.1 <= cell_dbu))
-            .collect();
-        // the top is never small: the in-memory marker never applies the
-        // rule to the top (its units are its own records and its
-        // placements, each child walked on its own), so a design whose
-        // whole top fits one grid cell is marked child by child there -
-        // and here, for the same charges (0.12.391: the shared-range
-        // fixture's top fits one 1 um cell; the bits were the same, the
-        // work counts were not)
-        if top_ci < occ.small.len() {
-            occ.small[top_ci] = false;
-        }
+        // (the top never: small_cells)
+        occ.small = small_cells(bboxes, cell_dbu, opts.prune, top_ci);
         // the relative-depth masks of every layer, bottom-up over the
         // edges (layer_depth_masks over the Doc's placements: a child
         // placed twice ORs the same mask twice)
@@ -2738,20 +2967,32 @@ impl StreamOcc {
                 m[ci] = v;
             }
         }
+        // the depth cap of the file from the top's masks (depth_cap_for)
+        let top_masks: Vec<u32> = (0..nl).map(|li| masks[li][top_ci]).collect();
+        occ.depth_cap = depth_cap_for(&top_masks, per_layer, opts.max_bytes);
         occ.masks = masks;
         if let Some(log) = opts.progress {
             log(&format!(
-                "streaming: grid {}x{} ({} dbu), {} layers, prune {} ({} of {} cells fit a cell)",
+                "streaming: grid {}x{} ({} dbu), {} layers, prune {} ({} of {} cells fit a cell), depth planes up to {}",
                 w,
                 h,
                 cell_dbu,
                 nl,
                 if opts.prune { "on" } else { "off" },
                 occ.small.iter().filter(|&&s| s).count(),
-                n
+                n,
+                occ.depth_cap
             ));
+            if occ.depth_cap < DEPTH_CAP {
+                log(&depth_cap_note(occ.depth_cap, &top_masks, per_layer, opts.max_bytes));
+            }
         }
         Ok(occ)
+    }
+
+    /// the file's depth cap (`depth_cap_for`)
+    pub fn depth_cap(&self) -> u8 {
+        self.depth_cap
     }
 
     pub fn cell_dbu(&self) -> i64 {
@@ -2813,7 +3054,8 @@ impl StreamOcc {
     /// `end_group` dropped the ones past the size budget: p10's 449
     /// layers marked for the 23 kept). A layer's planes are counted from
     /// the top's relative-depth mask - one per depth at which the layer
-    /// has records below the top, the depths past DEPTH_CAP sharing one -
+    /// has records below the top, the depths past the file's depth cap
+    /// (`depth_cap_for`) sharing one -
     /// which is the count `end_group` keeps unless a depth's records mark
     /// no cell at all (then a group ends a layer early and the next pass
     /// takes the rest: the same bytes, one parse more). The layers decided
@@ -2853,9 +3095,9 @@ impl StreamOcc {
             }
             let top_mask = self.masks[li][self.top_ci];
             let max_depth = 31 - top_mask.leading_zeros();
-            let n_planes = (max_depth.min(DEPTH_CAP as u32) + 1) as u64;
-            let planes_kept = (top_mask & ((1u32 << DEPTH_CAP) - 1)).count_ones() as usize
-                + usize::from(top_mask >> DEPTH_CAP != 0);
+            let cap = self.depth_cap as u32;
+            let n_planes = (max_depth.min(cap) + 1) as u64;
+            let planes_kept = planes_kept(top_mask, cap);
             let stride = (self.w as u64 + 63) / 64;
             let plane_bytes = n_planes * stride * 8 * self.h as u64;
             if !layers.is_empty()
@@ -2868,7 +3110,7 @@ impl StreamOcc {
             pos.insert(key, layers.len());
             layers.push(StreamLayer {
                 li,
-                planes: Planes::new(self.w, self.h, max_depth),
+                planes: Planes::new(self.w, self.h, max_depth, self.depth_cap),
                 work: std::sync::atomic::AtomicU64::new(0),
                 over: std::sync::atomic::AtomicBool::new(false),
                 paths_skipped: std::sync::atomic::AtomicU64::new(0),
@@ -2909,14 +3151,13 @@ impl StreamOcc {
     /// cell's own records - parsed for this pass by the marking thread
     /// (cli markpass.rs, 0.12.387); empty for a small cell, whose subtree
     /// is one bbox, and for a cell without a record on the group's layers
-    /// (`group_own`) - and `places` its placements as normalize_cells
-    /// left them (the kept ones: the members' charges and the footprints
-    /// of small children's grids)
+    /// (`group_own`). The cell's placements - the members' charges and
+    /// the footprints of small children's grids - come from the
+    /// placement store through `inst` (`Instances::outgoing`, 0.12.398)
     pub fn mark_cell(
         &self,
         group: &StreamGroup,
         shapes: &floe_oasis::doc::Cell,
-        places: &[PlaceRec],
         ci: usize,
         inst: &Instances<'_>,
         sc: &mut StreamScratch,
@@ -2925,6 +3166,7 @@ impl StreamOcc {
             return;
         }
         let small = self.small[ci];
+        let outgoing = if small { Outgoing::None } else { inst.outgoing(ci) };
         // the cell's own records of the group's layers (none for a small
         // cell: its subtree is one bbox)
         let mut own: Vec<(usize, Vec<&RectRec>, Vec<&PolyRec>, Vec<&PathRec>)> = Vec::new();
@@ -3029,7 +3271,7 @@ impl StreamOcc {
                 let ok = if small {
                     lm.m.mark_subtree(ci, xf, depth)
                 } else {
-                    self.mark_instance(&mut lm.m, places, lm.mask, lm.own.map(|k| &own[k]), xf, depth)
+                    self.mark_instance(&mut lm.m, &outgoing, inst, ci, lm.mask, lm.own.map(|k| &own[k]), xf, depth)
                 };
                 if !ok {
                     live -= 1;
@@ -3052,11 +3294,13 @@ impl StreamOcc {
     /// one instance of a cell that is not small, for one layer: its own
     /// records at `depth`, then its placements as the walk charges them
     /// before descending (the children's marks are theirs)
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     fn mark_instance(
         &self,
         m: &mut Marker<'_>,
-        places: &[PlaceRec],
+        out: &Outgoing,
+        inst: &Instances<'_>,
+        ci: usize,
         mask: &[u32],
         own: Option<&(usize, Vec<&RectRec>, Vec<&PolyRec>, Vec<&PathRec>)>,
         xf: &Xf,
@@ -3080,29 +3324,36 @@ impl StreamOcc {
                 }
             }
         }
-        for pl in places {
-            if mask[pl.cell] == 0 {
-                continue;
+        let mut step = |pl: &PlaceView| -> bool {
+            if pl.cell >= mask.len() || mask[pl.cell] == 0 {
+                return true;
             }
-            match &pl.rep {
-                Rep::One => {}
-                Rep::Grid { .. } => {
-                    if self.small[pl.cell] && grid_prunable(&pl.rep, self.cell_dbu) {
-                        if !m.mark_grid_footprint(pl, xf, depth) {
-                            return false;
-                        }
-                    } else if !m.charge(rep_members(&pl.rep)) {
+            match pl.rep {
+                RepView::One => true,
+                RepView::Grid { .. } => {
+                    if self.small[pl.cell] && pl.rep.prunable(self.cell_dbu) {
+                        m.mark_grid_footprint(pl, xf, depth)
+                    } else {
+                        m.charge(pl.rep.members())
+                    }
+                }
+                RepView::Pts(n) => m.charge(n),
+            }
+        };
+        match out {
+            Outgoing::None => true,
+            Outgoing::List(v) => {
+                for pl in v {
+                    if !step(pl) {
                         return false;
                     }
                 }
-                Rep::Pts(p) => {
-                    if !m.charge(p.len() as u64) {
-                        return false;
-                    }
-                }
+                true
             }
+            Outgoing::Store => inst
+                .store()
+                .for_each_outgoing(ci, &mut |child, rec| step(&PlaceView::stored(child, rec))),
         }
-        true
     }
 
     /// the group's layers are marked: their statuses and pyramids, in
@@ -3208,89 +3459,109 @@ impl StreamOcc {
 /// enumerated through their parents on demand
 pub const FLAT_INSTANCES: u64 = 1 << 18;
 
+/// a cell's own placements, for `StreamOcc::mark_instance`: a list when
+/// the cell has at most OUTGOING_MATERIALIZED records (16 MB of views),
+/// read from the store at every instance otherwise (a cell with more is
+/// big and seldom placed often: the chip's top, 8 M records, once)
+pub enum Outgoing {
+    None,
+    List(Vec<PlaceView>),
+    Store,
+}
+
+pub const OUTGOING_MATERIALIZED: u64 = 1 << 18;
+
 /// The walk's visits of every cell (STREAMING_INDEX_PLAN §4.6): from the
-/// top through the placements the streaming store kept - every member of
-/// a grid or point-list repetition, as the walk enumerates them -
-/// skipping children without any shape below them (never visited by any
-/// layer's walk), not descending into a small cell (its subtree is one
-/// bbox) nor into the members of a prunable grid of a small child (one
-/// footprint fill). Nothing is expanded up front: a cell's instances are
-/// enumerated through its parents' (the top's is the identity), and only
-/// cells with few instances keep theirs materialized, FLAT_INSTANCES in
-/// all - so the memory is the placements', not the visits' (valmini's
-/// 2.25 M grid members were 270 MB expanded; the routing chip's 800 K
-/// via instances 45 MB).
+/// top through the placements the store keeps (`crate::places`) - every
+/// member of a grid or point-list repetition, as the walk enumerates
+/// them - skipping children without any shape below them (never visited
+/// by any layer's walk), not descending into a small cell (its subtree
+/// is one bbox) nor into the members of a prunable grid of a small
+/// child (one footprint fill). Nothing is expanded up front: a cell's
+/// instances are enumerated through its parents' (the top's is the
+/// identity) from its incoming runs - one per (child, parent) edge, the
+/// parent's records of this child - and only cells with few instances
+/// keep theirs materialized, FLAT_INSTANCES in all; so the memory is
+/// the run table's (one entry per distinct edge) and the runs a marker
+/// reads while enumerating, never the placements' (0.12.398: the
+/// MAIN01-like chip's 796 M records were kept in memory before, 76 GB,
+/// and the pass was skipped past a cap).
 pub struct Instances<'p> {
     top: usize,
-    places: &'p [Vec<PlaceRec>],
-    /// per cell: (parent, index into the parent's placements) of every
-    /// placement the walk descends through
-    parents: Vec<Vec<(u32, u32)>>,
+    store: &'p crate::places::PlaceStore,
+    small: Vec<bool>,
+    c: i64,
+    /// position in the inventory's children-first order (a placement of
+    /// a cell later in it would close a cycle: dropped, as the walk's
+    /// cycle guard drops the return to an ancestor)
+    pos: Vec<usize>,
     /// per cell: the walk's visits (saturating)
     count: Vec<u64>,
     flat: Vec<Option<Vec<(Xf, u32)>>>,
 }
 
 impl<'p> Instances<'p> {
-    /// `topo`: the inventory's children-first order (a placement of a
-    /// cell later in it would close a cycle: dropped, as the walk's
-    /// cycle guard drops the return to an ancestor)
+    /// `topo`: the inventory's children-first order
     pub fn new(
         top: usize,
-        places: &'p [Vec<PlaceRec>],
+        store: &'p crate::places::PlaceStore,
         small: &[bool],
         has_any: &[bool],
         topo: &[usize],
         c: i64,
     ) -> Instances<'p> {
-        Self::with_flat_budget(top, places, small, has_any, topo, c, FLAT_INSTANCES)
+        Self::with_flat_budget(top, store, small, has_any, topo, c, FLAT_INSTANCES)
     }
 
     pub fn with_flat_budget(
         top: usize,
-        places: &'p [Vec<PlaceRec>],
+        store: &'p crate::places::PlaceStore,
         small: &[bool],
         has_any: &[bool],
         topo: &[usize],
         c: i64,
         flat_budget: u64,
     ) -> Instances<'p> {
-        let n = places.len();
+        let n = store.n_cells();
         let mut pos = vec![usize::MAX; n];
         for (i, &ci) in topo.iter().enumerate() {
-            pos[ci] = i;
+            if ci < n {
+                pos[ci] = i;
+            }
         }
-        let mut parents: Vec<Vec<(u32, u32)>> = (0..n).map(|_| Vec::new()).collect();
         let mut count = vec![0u64; n];
-        if top < n && has_any[top] {
+        if top < n && has_any.get(top).copied().unwrap_or(false) {
             count[top] = 1;
         }
-        // parents before children
+        let small_of = |ci: usize| small.get(ci).copied().unwrap_or(false);
+        // parents before children: a child's visits are its parents'
+        // times the run's descents
         for &p in topo.iter().rev() {
-            if count[p] == 0 || small[p] {
+            if p >= n || count[p] == 0 || small_of(p) {
                 continue;
             }
-            for (k, pl) in places[p].iter().enumerate() {
-                let ch = pl.cell;
-                if ch >= n || !has_any[ch] || pos[ch] >= pos[p] {
+            for run in store.outgoing(p) {
+                let ch = run.child as usize;
+                if ch >= n || !has_any.get(ch).copied().unwrap_or(false) || pos[ch] >= pos[p] {
                     continue;
                 }
-                if small[ch] && grid_prunable(&pl.rep, c) {
-                    continue;
-                }
-                parents[ch].push((p as u32, k as u32));
-                count[ch] = count[ch].saturating_add(count[p].saturating_mul(rep_members(&pl.rep)));
+                count[ch] = count[ch].saturating_add(count[p].saturating_mul(run.visits));
             }
         }
         let mut inst = Instances {
             top,
-            places,
-            parents,
+            store,
+            small: (0..n).map(small_of).collect(),
+            c,
+            pos,
             count,
             flat: (0..n).map(|_| None).collect(),
         };
         let mut left = flat_budget;
         for &ci in topo.iter().rev() {
+            if ci >= n {
+                continue;
+            }
             let k = inst.count[ci];
             if k == 0 || k > left {
                 continue;
@@ -3306,14 +3577,13 @@ impl<'p> Instances<'p> {
         inst
     }
 
-    /// the walk's visits of `ci`
-    pub fn count(&self, ci: usize) -> u64 {
-        self.count[ci]
+    pub fn store(&self) -> &'p crate::places::PlaceStore {
+        self.store
     }
 
-    /// the kept placements of `ci` (what the walk descends through)
-    pub fn places(&self, ci: usize) -> &[PlaceRec] {
-        &self.places[ci]
+    /// the walk's visits of `ci`
+    pub fn count(&self, ci: usize) -> u64 {
+        self.count.get(ci).copied().unwrap_or(0)
     }
 
     /// the walk's visits over all cells
@@ -3326,10 +3596,29 @@ impl<'p> Instances<'p> {
         self.flat.iter().filter(|f| f.is_some()).count()
     }
 
+    /// the cell's own placements for the markers (`Outgoing`)
+    pub fn outgoing(&self, ci: usize) -> Outgoing {
+        let records: u64 = self.store.outgoing(ci).map(|r| r.records as u64).sum();
+        if records == 0 {
+            return Outgoing::None;
+        }
+        if records > OUTGOING_MATERIALIZED {
+            return Outgoing::Store;
+        }
+        let mut v = Vec::with_capacity(records as usize);
+        self.store.for_each_outgoing(ci, &mut |child, rec| {
+            v.push(PlaceView::stored(child, rec));
+            true
+        });
+        Outgoing::List(v)
+    }
+
     /// every instance of `ci` - (transform, placement depth) - until `f`
-    /// returns false; through the parents' instances unless materialized
+    /// returns false; through the parents' instances unless materialized.
+    /// A parent's run is read once and its records applied at each of
+    /// the parent's instances
     pub fn each(&self, ci: usize, f: &mut dyn FnMut(&Xf, u32) -> bool) -> bool {
-        if let Some(v) = &self.flat[ci] {
+        if let Some(v) = self.flat.get(ci).and_then(|f| f.as_ref()) {
             for (xf, d) in v {
                 if !f(xf, *d) {
                     return false;
@@ -3340,45 +3629,38 @@ impl<'p> Instances<'p> {
         if ci == self.top {
             return f(&Xf::identity(), 0);
         }
-        for &(p, k) in &self.parents[ci] {
-            let pl = &self.places[p as usize][k as usize];
-            let go = self.each(p as usize, &mut |xp: &Xf, d: u32| {
-                each_member(&pl.rep, |dx, dy| {
-                    let t = xp.compose(&Xf::place(pl.x + dx, pl.y + dy, pl.rot, pl.flip));
-                    f(&t, d + 1)
-                })
+        let n = self.count.len();
+        let small_ci = self.small.get(ci).copied().unwrap_or(false);
+        for run in self.store.incoming(ci) {
+            let p = run.parent as usize;
+            if p >= n || self.count[p] == 0 || self.small[p] || self.pos[ci] >= self.pos[p] || run.visits == 0 {
+                continue;
+            }
+            let bytes = self.store.run_bytes(run);
+            if bytes.is_empty() {
+                // a read failure (the store reports it); nothing to walk
+                return false;
+            }
+            let go = self.each(p, &mut |xp: &Xf, d: u32| {
+                for rec in crate::places::records(&bytes, run.records) {
+                    if small_ci && rec.grid_prunable(self.c) {
+                        continue;
+                    }
+                    let ok = rec.each_member(|dx, dy| {
+                        let t = xp.compose(&Xf::place(rec.x + dx, rec.y + dy, rec.rot, rec.flip));
+                        f(&t, d + 1)
+                    });
+                    if !ok {
+                        return false;
+                    }
+                }
+                true
             });
             if !go {
                 return false;
             }
         }
         true
-    }
-}
-
-/// the members of a repetition in the walk's order (Grid: i fastest),
-/// until `f` returns false
-fn each_member(rep: &Rep, mut f: impl FnMut(i64, i64) -> bool) -> bool {
-    match rep {
-        Rep::One => f(0, 0),
-        Rep::Grid { na, nb, va, vb } => {
-            for j in 0..*nb as i64 {
-                for i in 0..*na as i64 {
-                    if !f(i * va.0 + j * vb.0, i * va.1 + j * vb.1) {
-                        return false;
-                    }
-                }
-            }
-            true
-        }
-        Rep::Pts(p) => {
-            for &(dx, dy) in p.iter() {
-                if !f(dx, dy) {
-                    return false;
-                }
-            }
-            true
-        }
     }
 }
 
@@ -3408,7 +3690,22 @@ fn planes_written(layer: &Layer) -> &[Plane] {
     }
 }
 
+/// the file's bytes in memory (tests, and the readers' round trips);
+/// `write_ovo_to` streams them, which the builds use (0.12.398: the
+/// whole image beside the pyramids doubled the generator's peak - p10's
+/// 3.8 GB summary was written through a 3.8 GB Vec)
 pub fn write_ovo(occ: &Occupancy) -> Vec<u8> {
+    let mut out = Vec::new();
+    write_ovo_to(occ, &mut out).expect("a Vec takes every byte");
+    out
+}
+
+/// The file written to `w` (a BufWriter over the .tmp file): the header
+/// and the layer table first - the bitmap offsets summed in advance -
+/// then every plane's levels in table order, straight from the
+/// pyramids; nothing of the file is held beside them. Returns the bytes
+/// written. The same bytes as `write_ovo` (which calls this).
+pub fn write_ovo_to(occ: &Occupancy, w: &mut dyn std::io::Write) -> std::io::Result<u64> {
     let top = occ.top.as_bytes();
     let top_len = top.len().min(u16::MAX as usize);
     let nl = occ.layers.len();
@@ -3419,52 +3716,61 @@ pub fn write_ovo(occ: &Occupancy) -> Vec<u8> {
         .map(|l| LAYER_FIXED + planes_written(l).len() * (PLANE_FIXED + n_levels * LEVEL_ENTRY))
         .sum();
     let body_start = HEADER_FIXED + top_len + table_len;
-    let mut out = Vec::with_capacity(body_start);
-    out.extend_from_slice(MAGIC);
-    put32(&mut out, VERSION);
-    out.extend_from_slice(&occ.unit.to_le_bytes());
-    put64(&mut out, occ.src_size);
-    put64(&mut out, occ.src_mtime);
-    out.extend_from_slice(&occ.cell_dbu.to_le_bytes());
+    let mut head = Vec::with_capacity(body_start);
+    head.extend_from_slice(MAGIC);
+    put32(&mut head, VERSION);
+    head.extend_from_slice(&occ.unit.to_le_bytes());
+    put64(&mut head, occ.src_size);
+    put64(&mut head, occ.src_mtime);
+    head.extend_from_slice(&occ.cell_dbu.to_le_bytes());
     for v in [occ.bbox.0, occ.bbox.1, occ.bbox.2, occ.bbox.3] {
-        out.extend_from_slice(&v.to_le_bytes());
+        head.extend_from_slice(&v.to_le_bytes());
     }
-    put32(&mut out, occ.n_levels);
-    put32(&mut out, nl as u32);
-    out.extend_from_slice(&(top_len as u16).to_le_bytes());
-    out.extend_from_slice(&top[..top_len]);
-    let mut body: Vec<u8> = Vec::new();
+    put32(&mut head, occ.n_levels);
+    put32(&mut head, nl as u32);
+    head.extend_from_slice(&(top_len as u16).to_le_bytes());
+    head.extend_from_slice(&top[..top_len]);
+    let mut body_len: u64 = 0;
     for layer in &occ.layers {
-        put32(&mut out, layer.layer);
-        put32(&mut out, layer.dt);
-        out.push(layer.status);
-        put64(&mut out, layer.work);
+        put32(&mut head, layer.layer);
+        put32(&mut head, layer.dt);
+        head.push(layer.status);
+        put64(&mut head, layer.work);
         let planes = planes_written(layer);
-        out.push(planes.len() as u8);
+        head.push(planes.len() as u8);
         for plane in planes {
-            out.push(plane.depth);
+            head.push(plane.depth);
             for lv in 0..n_levels {
                 match plane.levels.get(lv) {
                     Some(level) => {
-                        put32(&mut out, level.w);
-                        put32(&mut out, level.h);
-                        put64(&mut out, (body_start + body.len()) as u64);
-                        put64(&mut out, level.bits.len() as u64);
-                        body.extend_from_slice(&level.bits);
+                        put32(&mut head, level.w);
+                        put32(&mut head, level.h);
+                        put64(&mut head, body_start as u64 + body_len);
+                        put64(&mut head, level.bits.len() as u64);
+                        body_len += level.bits.len() as u64;
                     }
                     None => {
-                        put32(&mut out, 0);
-                        put32(&mut out, 0);
-                        put64(&mut out, 0);
-                        put64(&mut out, 0);
+                        put32(&mut head, 0);
+                        put32(&mut head, 0);
+                        put64(&mut head, 0);
+                        put64(&mut head, 0);
                     }
                 }
             }
         }
     }
-    debug_assert_eq!(out.len(), body_start);
-    out.extend_from_slice(&body);
-    out
+    debug_assert_eq!(head.len(), body_start);
+    w.write_all(&head)?;
+    for layer in &occ.layers {
+        for plane in planes_written(layer) {
+            for lv in 0..n_levels {
+                if let Some(level) = plane.levels.get(lv) {
+                    w.write_all(&level.bits)?;
+                }
+            }
+        }
+    }
+    Ok(body_start as u64 + body_len)
 }
 
 /// a version-1 file of the flattened planes (tests: the reader keeps
@@ -4034,7 +4340,7 @@ mod tests {
     }
 
     fn assert_poly_matches_oracle(pts: &[(i64, i64)], c: i64, w: u32, h: u32) {
-        let planes = Planes::new(w, h, 0);
+        let planes = Planes::new(w, h, 0, DEPTH_CAP);
         let mut m = Marker {
             doc: &doc_with(vec![cell("T")], 0, vec![(1, 0)]),
             shapes: &[],
@@ -5751,6 +6057,133 @@ mod tests {
         assert!(occ.layers[0].level_at_depth(0, Some(40)).unwrap().count() == 2);
         let f = OvoFile::from_bytes(write_ovo(&occ)).unwrap();
         assert_eq!(f.layers[0].planes[0].depth, DEPTH_CAP);
+    }
+
+    /// the file's depth cap (0.12.398, `depth_cap_for`): the planes a
+    /// layer keeps under a cap, the largest cap whose planes fit the byte
+    /// cap, and a build whose depth planes are capped keeps the layer where
+    /// the layer-order cap would have lost it - the flattening the same,
+    /// a limited depth at or past the cap drawing the cap plane
+    #[test]
+    fn the_depth_planes_collapse_before_the_layers_are_lost() {
+        assert_eq!(planes_kept(0b1111, 15), 4);
+        assert_eq!(planes_kept(0b1111, 2), 3);
+        assert_eq!(planes_kept(0b1111, 1), 2);
+        assert_eq!(planes_kept(0b1111, 0), 1);
+        assert_eq!(planes_kept(0b1010, 0), 1);
+        assert_eq!(planes_kept(0b1010, 1), 1);
+        assert_eq!(planes_kept(0b1010, 2), 2);
+        assert_eq!(planes_kept(0, 5), 0);
+        assert_eq!(planes_kept(1 << 31, 15), 1);
+        assert_eq!(planes_kept(u32::MAX, 15), 16);
+        // ten layers of 16 planes at a byte a plane: 160 at the full cap,
+        // 20 at cap 1, 10 at cap 0
+        let masks = vec![0xffffu32; 10];
+        assert_eq!(depth_cap_for(&masks, 1, 1 << 20), DEPTH_CAP);
+        assert_eq!(depth_cap_for(&masks, 1, 160), DEPTH_CAP);
+        assert_eq!(depth_cap_for(&masks, 1, 159), 14);
+        assert_eq!(depth_cap_for(&masks, 1, 20), 1);
+        assert_eq!(depth_cap_for(&masks, 1, 19), 0);
+        assert_eq!(depth_cap_for(&masks, 1, 0), 0);
+        assert_eq!(depth_cap_for(&[0, 0], 1, 0), DEPTH_CAP, "layers without shapes count nothing");
+        assert_eq!(depth_cap_for(&masks, 0, 0), DEPTH_CAP, "a degenerate grid");
+        assert!(depth_cap_note(1, &masks, 1, 20).contains("capped at 1"));
+        // a chain of four cells with a layer-1 rect at every depth 0..3,
+        // 10 dbu cells: the grid is 31 x 1, one level, 4 B a plane
+        let mut cells = vec![cell("T")];
+        for k in 1..=3 {
+            cells[k - 1].places.push(PlaceRec {
+                cell: k,
+                x: 100,
+                y: 0,
+                rot: 0,
+                flip: false,
+                rep: Rep::One,
+            });
+            cells.push(cell(&format!("C{}", k)));
+        }
+        for c in cells.iter_mut() {
+            c.rects.push(rect(1, 0, 0, 5, 5, Rep::One));
+        }
+        let d = doc_with(cells, 0, vec![(1, 0)]);
+        let full = build(&d, 0, 0, &opts(0.01)).unwrap();
+        assert_eq!(full.layers[0].status, STATUS_OK);
+        assert_eq!(full.layers[0].planes.iter().map(|p| p.depth).collect::<Vec<_>>(), vec![0, 1, 2, 3]);
+        let per_layer = layer_bytes(full.w, full.h);
+        assert!(per_layer > 0 && full.n_levels == 1);
+        // room for two planes: cap 1 - the depth-0 plane and one for the
+        // depths 1..3 (three cells set)
+        let capped = build(&d, 0, 0, &Opts { max_bytes: per_layer * 2, ..opts(0.01) }).unwrap();
+        assert_eq!(capped.layers[0].status, STATUS_OK);
+        assert_eq!(capped.layers[0].planes.iter().map(|p| p.depth).collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(capped.layers[0].planes[1].levels[0].count(), 3);
+        assert_eq!(
+            capped.layers[0].level(0).unwrap().count(),
+            full.layers[0].level(0).unwrap().count(),
+            "the flattening is the same"
+        );
+        assert_eq!(capped.layers[0].level_at_depth(0, Some(0)).unwrap().count(), 1);
+        assert_eq!(capped.layers[0].level_at_depth(0, Some(1)).unwrap().count(), 4, "depth 1 draws the cap plane, the deeper cells with it");
+        // room for one plane: cap 0 - every depth in the one plane; room
+        // for none: none:size as before
+        let one = build(&d, 0, 0, &Opts { max_bytes: per_layer, ..opts(0.01) }).unwrap();
+        assert_eq!(one.layers[0].planes.iter().map(|p| p.depth).collect::<Vec<_>>(), vec![0]);
+        assert_eq!(one.layers[0].level(0).unwrap().count(), 4);
+        let none = build(&d, 0, 0, &Opts { max_bytes: per_layer - 1, ..opts(0.01) }).unwrap();
+        assert_eq!(none.layers[0].status, STATUS_NONE_SIZE);
+        let f = OvoFile::from_bytes(write_ovo(&capped)).unwrap();
+        assert_eq!(f.layers[0].planes.len(), 2);
+        assert_eq!(f.layers[0].planes[1].depth, 1);
+    }
+
+    /// the grid cell and the small cells both builders (and the placement
+    /// store's writer) take from the same two rules
+    #[test]
+    fn the_cell_and_the_small_cells_are_the_builders_rule() {
+        let bb = vec![Some((0, 0, 5, 5)), Some((0, 0, 50, 5)), None];
+        assert_eq!(small_cells(&bb, 10, true, 2), vec![true, false, false]);
+        assert_eq!(small_cells(&bb, 10, true, 0), vec![false, false, false], "the top is never small");
+        assert_eq!(small_cells(&bb, 10, false, 2), vec![false; 3]);
+        assert_eq!(
+            plan_cell_dbu(1000.0, (0, 0, 1_000_000, 1_000_000), 1, &Opts { base_um: 2.0, ..Opts::default() }),
+            2000
+        );
+        assert_eq!(
+            plan_cell_dbu(1000.0, (0, 0, 20_000_000, 20_000_000), 1, &Opts { base_um: BASE_AUTO, ..Opts::default() }),
+            4000,
+            "a 20 mm top: 4 um"
+        );
+        assert!(axis_grid_prunable(3, 1, (10, 0), (0, 10), 10));
+        assert!(!axis_grid_prunable(3, 1, (11, 0), (0, 10), 10));
+        assert!(!axis_grid_prunable(3, 1, (5, 5), (0, 10), 10));
+        let v = PlaceView::of(&PlaceRec {
+            cell: 1,
+            x: 1,
+            y: 2,
+            rot: 3,
+            flip: true,
+            rep: Rep::Pts(vec![(0, 0), (1, 1)].into()),
+        });
+        assert_eq!(v.rep.members(), 2);
+        assert!(!v.rep.prunable(10));
+    }
+
+    /// the streamed write (0.12.398) is the Vec's bytes and reports them
+    #[test]
+    fn the_streamed_write_is_the_image_byte_for_byte() {
+        let mut child = cell("C");
+        child.rects.push(rect(1, 0, 0, 20, 20, Rep::One));
+        let mut top = cell("T");
+        top.rects.push(rect(1, 100, 0, 20, 20, Rep::One));
+        top.places.push(PlaceRec { cell: 1, x: 0, y: 0, rot: 0, flip: false, rep: Rep::One });
+        let d = doc_with(vec![top, child], 0, vec![(1, 0), (2, 0)]);
+        let occ = build(&d, 7, 8, &opts(0.01)).unwrap();
+        let image = write_ovo(&occ);
+        let mut streamed: Vec<u8> = Vec::new();
+        let n = write_ovo_to(&occ, &mut streamed).unwrap();
+        assert_eq!(n as usize, image.len());
+        assert_eq!(streamed, image);
+        assert!(OvoFile::from_bytes(streamed).is_ok());
     }
 
     #[test]

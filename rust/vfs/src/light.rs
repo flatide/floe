@@ -1264,17 +1264,135 @@ impl LightIndex {
         Ok((pieces_of, tasks.len()))
     }
 
-    /// Every cell's placements (`placements_of` over all cells; a cell
-    /// without any gets an empty list): the occupancy pass's instances
-    /// (`floe-index light --occupancy`), read from the placement-flagged
-    /// segments alone - not the whole file - and normalized as the full
-    /// build's cells are (`normalize_cells`: a point-list repetition of 16
-    /// members or more split into grids and a leftover; a cell's result
-    /// depends on its own point sets alone), so the pass sees the
-    /// placements the streaming build keeps and its design.ovo is the
-    /// same bytes - the marks of a small child under a prunable grid are
-    /// one footprint fill, under the raw point list one bbox a member
-    /// (the same bits, other charges; 0.12.387, found on p10).
+    /// The placements of every cell, cell by cell as the segments are read
+    /// (the occupancy pass's instances, `floe-index light --occupancy`,
+    /// 0.12.398): the placement-flagged segments alone - not the whole
+    /// file - in `PIECES_BATCH_BYTES` batches as `pieces_of` reads them,
+    /// each cell handed to `f` once its last segment is parsed (the tasks
+    /// are in cell order, a cell's segments consecutive), normalized as the
+    /// full build's cells are (`normalize_cells`: a point-list repetition
+    /// of 16 members or more split into grids and a leftover; a cell's
+    /// result depends on its own point sets alone, so the pass sees the
+    /// placements the streaming build keeps and its design.ovo is the same
+    /// bytes - the marks of a small child under a prunable grid are one
+    /// footprint fill, under the raw point list one bbox a member; the
+    /// same bits, other charges; 0.12.387, found on p10) and then let go,
+    /// so the resident records are one batch's and the cells it holds open
+    /// at the batch's end. Returns the cells handed over; a cell whose
+    /// segments yield other than the inventory's count is an error.
+    /// `all_placements` (below) keeps them all, which on the MAIN01-like
+    /// chip's 796 M records was 76 GB.
+    pub fn placements_each(&self, jobs: usize, f: &mut dyn FnMut(u32, Vec<PlaceRec>)) -> Result<usize, String> {
+        self.placements_each_batched(jobs, PIECES_BATCH_BYTES, f)
+    }
+
+    /// `placements_each` reading `batch_bytes` of segments at a time
+    fn placements_each_batched(
+        &self,
+        jobs: usize,
+        batch_bytes: u64,
+        f: &mut dyn FnMut(u32, Vec<PlaceRec>),
+    ) -> Result<usize, String> {
+        let tasks: Vec<(u32, u32)> = (0..self.inv.cells.len() as u32)
+            .filter(|&ci| self.inv.cells[ci as usize].placements > 0)
+            .flat_map(|ci| {
+                let (first, count) = self.seg.cells[ci as usize];
+                (first..first + count)
+                    .filter(move |&si| self.seg.segs[si as usize].flags & F_PLACEMENTS != 0)
+                    .map(move |si| (ci, si))
+            })
+            .collect();
+        type Got = Result<Vec<PlaceRec>, String>;
+        let jobs = jobs.min(tasks.len()).max(1);
+        let mut pending: HashMap<u32, Vec<PlaceRec>> = HashMap::new();
+        let mut handed = 0usize;
+        let mut at = 0usize;
+        while at < tasks.len() {
+            let mut end = at;
+            let mut bytes = 0u64;
+            while end < tasks.len() && (end == at || bytes + self.seg.segs[tasks[end].1 as usize].bytes <= batch_bytes) {
+                bytes += self.seg.segs[tasks[end].1 as usize].bytes;
+                end += 1;
+            }
+            let batch = &tasks[at..end];
+            at = end;
+            let sis: Vec<u32> = batch.iter().map(|&(_, si)| si).collect();
+            let raws = self.read_segments(&sis, jobs)?;
+            let slots: Vec<Mutex<Option<Got>>> = (0..batch.len()).map(|_| Mutex::new(None)).collect();
+            let next = std::sync::atomic::AtomicUsize::new(0);
+            std::thread::scope(|scope| {
+                for _ in 0..jobs.min(batch.len()) {
+                    scope.spawn(|| loop {
+                        let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(&(_, si)) = batch.get(k) else { break };
+                        let got = self.segment_cell_from(si, &raws[k]).map(|c| c.places);
+                        *slots[k].lock().unwrap_or_else(|p| p.into_inner()) = Some(got);
+                    });
+                }
+            });
+            drop(raws);
+            let mut touched: Vec<u32> = Vec::new();
+            for (k, &(ci, _)) in batch.iter().enumerate() {
+                let places = slots[k]
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .take()
+                    .unwrap_or_else(|| Err("placement task without a result".to_string()))?;
+                pending.entry(ci).or_default().extend(places);
+                if touched.last() != Some(&ci) {
+                    touched.push(ci);
+                }
+            }
+            // the batch's last cell goes on in the next batch when the next
+            // task is its; every other touched cell is complete
+            let last = batch.last().map(|&(ci, _)| ci);
+            let continues = last.is_some() && last == tasks.get(at).map(|&(ci, _)| ci);
+            let mut shells: Vec<floe_oasis::doc::Cell> = Vec::new();
+            let mut ids: Vec<u32> = Vec::new();
+            for ci in touched {
+                if continues && Some(ci) == last {
+                    continue;
+                }
+                let places = pending.remove(&ci).unwrap_or_default();
+                let cell = &self.inv.cells[ci as usize];
+                if places.len() as u64 != cell.placements {
+                    return Err(format!(
+                        "light index: cell {} ({}) yielded {} placements from its segments, the inventory counts {}",
+                        ci,
+                        cell.name,
+                        places.len(),
+                        cell.placements
+                    ));
+                }
+                shells.push(floe_oasis::doc::Cell {
+                    places,
+                    ..Default::default()
+                });
+                ids.push(ci);
+            }
+            floe_oasis::doc::normalize_cells(&mut shells, jobs.max(1));
+            for (ci, shell) in ids.into_iter().zip(shells) {
+                handed += 1;
+                f(ci, shell.places);
+            }
+        }
+        if let Some((&ci, p)) = pending.iter().next() {
+            let cell = &self.inv.cells[ci as usize];
+            return Err(format!(
+                "light index: cell {} ({}) yielded {} placements from its segments, the inventory counts {}",
+                ci,
+                cell.name,
+                p.len(),
+                cell.placements
+            ));
+        }
+        Ok(handed)
+    }
+
+    /// Every cell's placements at once (`placements_of` over all cells; a
+    /// cell without any gets an empty list), normalized as
+    /// `placements_each` normalizes them: the tests' reference, and a
+    /// diagnosis's; the summary pass takes `placements_each` (0.12.398).
     pub fn all_placements(&self, jobs: usize) -> Result<Vec<Vec<PlaceRec>>, String> {
         let n = self.inv.cells.len();
         let cells: Vec<u32> = (0..n as u32).collect();
@@ -2645,6 +2763,36 @@ mod tests {
 
     /// `pieces_of` read in batches of a byte (every segment alone) yields
     /// what one read of all the segments does, cell for cell and in order
+    /// the summary pass's cell-by-cell placements (`placements_each`,
+    /// 0.12.398) are the whole read's: every cell with placements handed
+    /// once, normalized alike, in batches of one segment and of all
+    #[test]
+    fn placements_come_cell_by_cell_as_at_once() {
+        for (name, data) in [("tree", tree()), ("adv", adversarial(false, true)), ("labels", labelled_tree())] {
+            let (_src, dir) = light_of(&format!("each-{}", name), &data);
+            let li = LightIndex::open(&dir).unwrap();
+            let all = li.all_placements(2).unwrap();
+            let with = li.inv.cells.iter().filter(|c| c.placements > 0).count();
+            assert!(with >= 2, "{}: a fixture with placements", name);
+            for batch in [1u64, u64::MAX] {
+                let mut seen: Vec<Option<Vec<PlaceRec>>> = vec![None; all.len()];
+                let handed = li
+                    .placements_each_batched(3, batch, &mut |ci, places| {
+                        assert!(seen[ci as usize].is_none(), "{}: cell {} handed twice", name, ci);
+                        seen[ci as usize] = Some(places);
+                    })
+                    .unwrap();
+                assert_eq!(handed, with, "{} batch {}", name, batch);
+                for (ci, got) in seen.iter().enumerate() {
+                    match got {
+                        Some(p) => assert_eq!(p, &all[ci], "{} batch {}: cell {}", name, batch, ci),
+                        None => assert!(all[ci].is_empty(), "{} batch {}: cell {} not handed", name, batch, ci),
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn batched_pieces_are_the_whole_read() {
         for (tag, data) in [

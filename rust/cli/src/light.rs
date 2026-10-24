@@ -9,8 +9,12 @@
 //! beside the source, as the full index). `--occupancy` adds the wide
 //! views' summary design.ovo from the streaming occupancy pass (S5): the
 //! walk's instances come from the placement-flagged segments of the
-//! directory just written (floe_vfs::light), not from a pass over the whole
-//! file. `--occupancy-only` adds design.ovo to a light cache that has none.
+//! directory just written (floe_vfs::light), read cell by cell into the
+//! placement store (floe_vfs::places: in memory or in a staging file by
+//! the budget, 0.12.398 - until 0.12.397 every placement was held in
+//! memory and a source past a cap had its summary skipped), not from a
+//! pass over the whole file. `--occupancy-only` adds design.ovo to a
+//! light cache that has none.
 //! The renderer opens such a directory - no design.ovm, design.inv beside -
 //! through floe_vfs::light and reads the geometry from the source.
 //!
@@ -331,40 +335,35 @@ pub fn light_cmd(args: &[String]) {
         }
     }
     // ---- the summary (design.ovo): the streaming occupancy pass over the
-    // store, its instances from the directory's placement segments
+    // store, its instances from the directory's placement segments through
+    // the placement store (floe_vfs::places: in memory or in the staging
+    // file by the budget - never skipped for the count, 0.12.398)
     let mut occupancy_s = 0.0;
     if occupancy || occupancy_only {
         let t_occ = std::time::Instant::now();
-        let placements = store.inventory().scan.placements;
-        let cap = crate::vfs::light_places_cap(budget);
-        if placements > cap {
-            eprintln!(
-                "[light] {} placement records exceed the {} the summary pass keeps within its budget (a quarter of {} at about {} B each) - design.ovo is skipped, the light cache is complete without it; --mem raises the budget (STREAMING_INDEX_PLAN.ko.md §4.6)",
-                placements,
-                cap,
-                crate::vfs::fmt_size(budget),
-                crate::vfs::PLACE_BYTES_EST
-            );
-        } else {
-            let li = floe_vfs::light::LightIndex::open(&outdir).unwrap_or_else(|e| {
-                eprintln!("light: the directory just written does not open: {}", e);
-                std::process::exit(1);
-            });
-            let places = li.all_placements(jobs).unwrap_or_else(|e| {
+        let li = floe_vfs::light::LightIndex::open(&outdir).unwrap_or_else(|e| {
+            eprintln!("light: the directory just written does not open: {}", e);
+            std::process::exit(1);
+        });
+        let writer = crate::vfs::place_writer_for(store.inventory(), &occ_opts, budget, &outdir).unwrap_or_else(|e| {
+            eprintln!("light: {}", e);
+            std::process::exit(1);
+        });
+        let cells = li
+            .placements_each(jobs, &mut |ci, places| writer.add_cell(ci as usize, &places))
+            .unwrap_or_else(|e| {
                 eprintln!("light: placements from the segment directory: {}", e);
                 std::process::exit(1);
             });
-            let n_places: u64 = places.iter().map(|p| p.len() as u64).sum();
-            eprintln!(
-                "[light] placements of {} cells from the segment directory: {} records in {:.1}s",
-                places.len(),
-                n_places,
-                t_occ.elapsed().as_secs_f64()
-            );
-            drop(li);
-            store.set_places(places);
-            crate::vfs::stream_occupancy(&store, &outdir, size, mtime, &occ_opts, jobs, budget, true, None);
-        }
+        drop(li);
+        let places = crate::vfs::finish_place_store(writer, "light");
+        eprintln!(
+            "[light] placements of {} cells from the segment directory in {:.1}s: {}",
+            cells,
+            t_occ.elapsed().as_secs_f64(),
+            crate::vfs::place_store_words(&places)
+        );
+        crate::vfs::stream_occupancy(&store, places, &outdir, size, mtime, &occ_opts, jobs, budget, true, None);
         occupancy_s = t_occ.elapsed().as_secs_f64();
     }
     eprintln!(
@@ -396,6 +395,7 @@ fn clear_light_outputs(outdir: &str, full_too: bool) {
         "design.seg.tmp",
         "design.ovo",
         "design.ovo.tmp",
+        floe_vfs::places::FILE_NAME,
         "meta.json",
         "meta.json.tmp",
     ] {
@@ -515,19 +515,4 @@ fn light_meta(src: &str, size: u64, mtime: u64, inv: &floe_oasis::inventory::Inv
         texts,
         text_cells,
     )
-}
-
-#[cfg(test)]
-mod tests {
-    /// the summary pass's placement cap follows the streaming budget: a
-    /// quarter of it at about PLACE_BYTES_EST each (the field host's 32 GiB
-    /// default keeps about 90 M; the fixed 50 M before 0.12.385)
-    #[test]
-    fn the_summary_pass_keeps_a_quarter_of_the_budget_in_placements() {
-        use crate::vfs::{light_places_cap, PLACE_BYTES_EST};
-        assert_eq!(light_places_cap(32 << 30), (8u64 << 30) / PLACE_BYTES_EST);
-        assert!(light_places_cap(32 << 30) > 80_000_000);
-        assert!(light_places_cap(1 << 30) < 3_000_000);
-        assert_eq!(light_places_cap(0), 1);
-    }
 }

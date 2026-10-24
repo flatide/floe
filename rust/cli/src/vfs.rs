@@ -1017,6 +1017,7 @@ pub(crate) fn clear_outputs(outdir: &str) {
         "design.inv.tmp",
         "design.seg",
         "design.seg.tmp",
+        floe_vfs::places::FILE_NAME,
         "labels.tsv",
         // legacy (pre-0.10) viewer file: scrub on rebuild so a
         // re-index actually reclaims the skeleton's bytes
@@ -1062,23 +1063,80 @@ pub(crate) struct StreamArgs<'a> {
     pub(crate) metadata_only: bool,
 }
 
-/// placement records kept through the streaming build for the occupancy
-/// pass (about 90 B each; STREAMING_INDEX_PLAN §4.6: deck sources hold
-/// thousands, a layout past this has occupancy off by default)
-pub(crate) const STREAM_PLACES_CAP: u64 = 50_000_000;
+/// The occupancy pass's placement store writer for a source
+/// (floe_vfs::places, STREAMING_INDEX_PLAN §4.6, 0.12.398): the
+/// generator's grid cell and small cells from the inventory - what
+/// `StreamOcc::new` will compute, decided here so the cells released by
+/// a build can be stored before the pass - and the backing by the
+/// budget: memory while the source's placements fit a quarter of it at
+/// `places::BYTES_EST` each (p10's 82.6 M under a 16 GB laptop's default
+/// 8 GiB), the staging file `design.places.tmp` in the cache directory
+/// otherwise (the MAIN01-like chip's 796 M: about 10 GB there, removed
+/// with the store). Until 0.12.397 every placement was kept in memory
+/// (about 96 B each) up to a cap - 50 M for the streaming build, a
+/// quarter of the budget for the light cache - past which design.ovo was
+/// skipped, and the open retried the summary every time (p10: 82.6 M).
+pub(crate) fn place_writer_for(
+    inv: &floe_oasis::inventory::Inventory,
+    opts: &floe_vfs::occupancy::Opts,
+    budget: u64,
+    outdir: &str,
+) -> Result<std::sync::Arc<floe_vfs::places::PlaceWriter>, String> {
+    use floe_vfs::occupancy as occ;
+    let top_bbox = inv.rbb_notext.get(inv.top).copied().flatten().unwrap_or((0, 0, 0, 0));
+    let cell_dbu = occ::plan_cell_dbu(inv.unit(), top_bbox, inv.layer_order.len(), opts);
+    let small = occ::small_cells(&inv.rbb_notext, cell_dbu, opts.prune, inv.top);
+    let backing = floe_vfs::places::Backing::choose(inv.scan.placements, budget, std::path::Path::new(outdir));
+    if backing.is_file() {
+        std::fs::create_dir_all(outdir).map_err(|e| format!("create {}: {}", outdir, e))?;
+    }
+    let writer = floe_vfs::places::PlaceWriter::new(inv.cells.len(), backing, small, cell_dbu)
+        .map_err(|e| format!("the placement store: {}", e))?;
+    // every cell the inventory counts placements of must reach the store
+    // (a cell the build never released was an error before as well)
+    writer.expect(inv.cells.iter().map(|c| c.placements > 0).collect());
+    Ok(std::sync::Arc::new(writer))
+}
 
-/// what a kept placement record costs the light cache's summary pass in
-/// memory, about (the PlaceRec and its share of the per-cell vectors)
-pub(crate) const PLACE_BYTES_EST: u64 = 96;
+/// the store finished out of its writer (the store's only reference),
+/// or exit 1 with the reason (a failed write of the staging file)
+pub(crate) fn finish_place_store(
+    writer: std::sync::Arc<floe_vfs::places::PlaceWriter>,
+    what: &str,
+) -> floe_vfs::places::PlaceStore {
+    let writer = match std::sync::Arc::try_unwrap(writer) {
+        Ok(w) => w,
+        Err(_) => {
+            eprintln!("[vfs] {}: the placement store's writer is still shared", what);
+            std::process::exit(1);
+        }
+    };
+    match writer.finish() {
+        Ok(store) => store,
+        Err(why) => {
+            eprintln!("[vfs] {}: the placement store failed: {}", what, why);
+            std::process::exit(1);
+        }
+    }
+}
 
-/// the placement records the light cache's summary pass keeps (`floe-index
-/// light --occupancy`: `LightIndex::all_placements` holds every placement of
-/// the source while the pass runs): a quarter of the streaming budget
-/// (--mem, or its default) at PLACE_BYTES_EST each - the field host's 32 GiB
-/// default allows about 90 M, `--mem` raises it; the streaming build's own
-/// pass keeps STREAM_PLACES_CAP (DIRECT_READ_PLAN §8.8)
-pub(crate) fn light_places_cap(budget: u64) -> u64 {
-    (budget / 4 / PLACE_BYTES_EST).max(1)
+/// the log's words for a finished store
+pub(crate) fn place_store_words(store: &floe_vfs::places::PlaceStore) -> String {
+    match store.path() {
+        Some(p) => format!(
+            "{} records in {} runs, {} in the staging file {}",
+            store.total_records(),
+            store.n_runs(),
+            fmt_size(store.total_bytes()),
+            p.display()
+        ),
+        None => format!(
+            "{} records in {} runs, {} in memory",
+            store.total_records(),
+            store.n_runs(),
+            fmt_size(store.resident_bytes())
+        ),
+    }
 }
 
 /// the build's mode (STREAMING_INDEX_PLAN §10, the switch-over of
@@ -1452,8 +1510,15 @@ fn vfs_stream(
     let streaming = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     if a.occupancy {
         // the occupancy pass needs every cell's placements (the walk's
-        // instances): kept as the committer releases the cells
-        store.keep_places(STREAM_PLACES_CAP);
+        // instances): the committer's released cells go to the placement
+        // store as they go (floe_vfs::places)
+        match place_writer_for(store.inventory(), a.occ_opts, budget, &a.outdir) {
+            Ok(w) => store.keep_places_into(w),
+            Err(why) => {
+                eprintln!("[vfs] stream: {}", why);
+                std::process::exit(1);
+            }
+        }
     }
     struct StopOnDrop<'a>(&'a std::sync::atomic::AtomicBool);
     impl Drop for StopOnDrop<'_> {
@@ -1613,8 +1678,11 @@ fn vfs_stream(
         }
     }
     if a.occupancy {
+        let writer = store.take_place_writer().expect("the placement store's writer");
+        let places = finish_place_store(writer, "stream");
         stream_occupancy(
             &store,
+            places,
             &a.outdir,
             size,
             mtime,
@@ -1711,29 +1779,18 @@ fn vfs_stream_occupancy_only(a: &StreamArgs, t0: std::time::Instant) -> Option<S
             );
             std::process::exit(1);
         }
-        // the cap before the pass is paid (a lower bound: the normalization
-        // can split a placement record)
-        let placements = inv.scan.placements;
-        if placements > STREAM_PLACES_CAP {
-            let why = format!(
-                "{} placement records exceed the {} the streaming occupancy pass keeps",
-                placements, STREAM_PLACES_CAP
-            );
-            if a.auto {
-                return Some(why);
-            }
-            eprintln!(
-                "[vfs] stream: {} - design.ovo is skipped (STREAMING_INDEX_PLAN.ko.md §4.6); \
-                 the cache is complete without it (--in-memory --occupancy-only builds it)",
-                why
-            );
-            return None;
-        }
     }
     // ---- the places pass: every cell read once and released at once; the
-    // readers parse ahead within the budget, `jobs` consumers release
+    // readers parse ahead within the budget, `jobs` consumers release, and
+    // the released cells' placements go to the placement store
     let t_places = std::time::Instant::now();
-    store.keep_places(STREAM_PLACES_CAP);
+    match place_writer_for(store.inventory(), a.occ_opts, budget, &a.outdir) {
+        Ok(w) => store.keep_places_into(w),
+        Err(why) => {
+            eprintln!("[vfs] stream: {}", why);
+            std::process::exit(1);
+        }
+    }
     let n = store.n_cells();
     let st: &crate::stream::StreamStore = &store;
     let passed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1810,30 +1867,19 @@ fn vfs_stream_occupancy_only(a: &StreamArgs, t0: std::time::Instant) -> Option<S
         }
         std::panic::resume_unwind(e);
     }
+    let writer = store.take_place_writer().expect("the placement store's writer");
+    let places = finish_place_store(writer, "stream");
     let places_s = t_places.elapsed().as_secs_f64();
-    if let Some((total, cap)) = store.kept_places_overflow() {
-        let why = format!(
-            "{} placement records exceed the {} the streaming occupancy pass keeps",
-            total, cap
-        );
-        if a.auto {
-            return Some(why);
-        }
-        eprintln!(
-            "[vfs] stream: {} - design.ovo is skipped (STREAMING_INDEX_PLAN.ko.md §4.6); \
-             the cache is complete without it (--in-memory --occupancy-only builds it)",
-            why
-        );
-        return None;
-    }
     eprintln!(
-        "[vfs] stream: placements of {} cells kept in {:.1}s (rss {})",
+        "[vfs] stream: placements of {} cells stored in {:.1}s ({}; rss {})",
         n,
         places_s,
+        place_store_words(&places),
         rss()
     );
     stream_occupancy(
         &store,
+        places,
         &a.outdir,
         size,
         mtime,
@@ -1854,18 +1900,19 @@ fn vfs_stream_occupancy_only(a: &StreamArgs, t0: std::time::Instant) -> Option<S
 }
 
 /// design.ovo of the streaming build (docs/STREAMING_INDEX_PLAN.ko.md
-/// §4.6, S5): the walk's instances of every cell from the placements the
-/// store kept (enumerated through the parents, not expanded), then one
-/// pass over the file per group of layers whose planes fit the plane
-/// budget (a quarter of the streaming budget `budget`, at least one
-/// layer) - each resident cell marked at all its instances for the
-/// group's layers, by `jobs` markers into shared planes - and the same
-/// publication as the in-memory build. Skipped with a line when the
-/// placements exceed the cap the store keeps (the cache is complete
-/// without design.ovo). `additive`: the occupancy-only run, whose cache
-/// is whole throughout (the whole build has no commit marker yet).
+/// §4.6, S5): the walk's instances of every cell from the placement
+/// store `places` (floe_vfs::places: the runs by child, enumerated
+/// through the parents, not expanded), then one pass over the file per
+/// group of layers whose planes fit the plane budget (a quarter of the
+/// streaming budget `budget`, at least one layer) - each resident cell
+/// marked at all its instances for the group's layers, by `jobs` markers
+/// into shared planes - and the same publication as the in-memory
+/// build. `additive`: the occupancy-only run, whose cache is whole
+/// throughout (the whole build has no commit marker yet).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn stream_occupancy(
     store: &crate::stream::StreamStore,
+    places: floe_vfs::places::PlaceStore,
     outdir: &str,
     size: u64,
     mtime: u64,
@@ -1881,17 +1928,6 @@ pub(crate) fn stream_occupancy(
         crate::guard::CACHE_UNCHANGED
     } else {
         crate::guard::CACHE_INCOMPLETE
-    };
-    let places = match store.take_places() {
-        Ok(p) => p,
-        Err(why) => {
-            eprintln!(
-                "[vfs] stream: {} - design.ovo is skipped (STREAMING_INDEX_PLAN.ko.md §4.6); \
-                 the cache is complete without it",
-                why
-            );
-            return;
-        }
     };
     let (n, top, mut built, topo) = {
         let inv = store.inventory();
@@ -1927,10 +1963,11 @@ pub(crate) fn stream_occupancy(
     if built.needs_marking() {
         eprintln!(
             "[vfs] occupancy streaming: {} instances over {} cells ({} cells materialized); \
-             plane budget {}, resident budget {} (a quarter of the streaming budget each)",
+             placements {}; plane budget {}, resident budget {} (a quarter of the streaming budget each)",
             instances.total(),
             n,
             instances.flat_cells(),
+            place_store_words(&places),
             fmt_size(plane_budget),
             fmt_size(pass_budget)
         );
@@ -1987,6 +2024,18 @@ pub(crate) fn stream_occupancy(
                 std::process::exit(1);
             }
         };
+        if let Some(why) = places.failed() {
+            eprintln!(
+                "[vfs] stream: {} - the occupancy pass stopped; {}",
+                why,
+                if additive {
+                    "the cache is as it was (design.ovo was not written)"
+                } else {
+                    "the cache is incomplete (design.ovm, the commit marker, is not written)"
+                }
+            );
+            std::process::exit(1);
+        }
         built.end_group(group, scratches);
         totals.add(&rep);
         if let Some(log) = opts.progress {
@@ -3245,12 +3294,16 @@ fn publish_ovo(
     let tmp = format!("{}/design.ovo.tmp", outdir);
     let path = format!("{}/design.ovo", outdir);
     let writing = std::time::Instant::now();
-    let bytes = occ::write_ovo(built);
-    {
-        let mut f = std::fs::File::create(&tmp).expect("create ovo tmp");
-        f.write_all(&bytes).expect("write ovo tmp");
-        f.sync_all().expect("sync ovo tmp");
-    }
+    // streamed from the pyramids (0.12.398): the file is not built in
+    // memory first (p10's 3.8 GB summary doubled the peak at the write)
+    let written = {
+        let f = std::fs::File::create(&tmp).expect("create ovo tmp");
+        let mut w = std::io::BufWriter::with_capacity(8 << 20, f);
+        let n = occ::write_ovo_to(built, &mut w).expect("write ovo tmp");
+        w.flush().expect("flush ovo tmp");
+        w.into_inner().expect("ovo tmp").sync_all().expect("sync ovo tmp");
+        n
+    };
     // CUT_DENSITY_DESIGN §10.5: where the build's time went (the in-memory
     // build's phases; the streaming build reports its passes instead)
     if let Some(phases) = phases {
@@ -3313,7 +3366,7 @@ fn publish_ovo(
         ok,
         empty,
         opts.jobs,
-        fmt_size(bytes.len() as u64),
+        fmt_size(written),
         t.elapsed().as_secs_f64()
     );
     for l in &built.layers {
@@ -5606,7 +5659,8 @@ fn encode_write_pages(
     });
 }
 
-/// resident set size for the build heartbeat (Linux /proc; "?"
+/// resident set size for the build heartbeat (Linux /proc; the guard's
+/// phys_footprint on macOS, 0.12.398 - it printed "?" there; "?"
 /// elsewhere) so a long silent stage on a big chip shows RSS growth.
 pub(crate) fn rss() -> String {
     #[cfg(target_os = "linux")]
@@ -5617,7 +5671,7 @@ pub(crate) fn rss() -> String {
             }
         }
     }
-    String::from("?")
+    crate::guard::rss_anon_bytes().map_or_else(|| String::from("?"), fmt_size)
 }
 
 /// Linux process status value in bytes (VmRSS/VmHWM); absent on other

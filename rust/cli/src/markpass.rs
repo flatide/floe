@@ -13,9 +13,9 @@
 //! serial). What the group does not need is not read: a cell the walk
 //! never visits or without a layer of the group below it, a small cell
 //! (its subtree is one bbox) and a cell whose own records hold none of
-//! the group's layers (its placements' charges come from the kept
-//! placements) - so a layout's later groups parse only the cells with
-//! records on their layers.
+//! the group's layers (its placements' charges come from the placement
+//! store, floe_vfs::places) - so a layout's later groups parse only the
+//! cells with records on their layers.
 //!
 //! Cells whose definitions share ranges - CELL records inside a CBLOCK of
 //! another cell's range, or a cell defined in several ranges that define
@@ -239,13 +239,13 @@ fn mark_unparsed(
         Need::None => rep.skipped += 1,
         Need::Small => {
             let t = Instant::now();
-            occ.mark_cell(group, empty, &[], ci, inst, sc);
+            occ.mark_cell(group, empty, ci, inst, sc);
             rep.mark_s += t.elapsed().as_secs_f64();
             rep.small += 1;
         }
         Need::Places => {
             let t = Instant::now();
-            occ.mark_cell(group, empty, inst.places(ci), ci, inst, sc);
+            occ.mark_cell(group, empty, ci, inst, sc);
             rep.mark_s += t.elapsed().as_secs_f64();
             rep.places_only += 1;
         }
@@ -264,7 +264,7 @@ fn mark_parsed(
     rep: &mut MarkReport,
 ) {
     let t = Instant::now();
-    occ.mark_cell(group, cell, inst.places(ci), ci, inst, sc);
+    occ.mark_cell(group, cell, ci, inst, sc);
     rep.mark_s += t.elapsed().as_secs_f64();
     rep.parsed += 1;
 }

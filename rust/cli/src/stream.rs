@@ -24,7 +24,7 @@
 //! order either way.
 
 use crate::cellstore::{CellRef, CellStore};
-use floe_oasis::doc::{normalize_cells, parse_cell_bytes, parse_cell_bytes_keeping, Cell, CellPiece, CellTables, PlaceRec};
+use floe_oasis::doc::{normalize_cells, parse_cell_bytes, parse_cell_bytes_keeping, Cell, CellPiece, CellTables};
 use floe_oasis::inventory::Inventory;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -79,19 +79,11 @@ enum Slot {
     Released,
 }
 
-/// the placements of the cells released so far, for the occupancy pass
-/// (STREAMING_INDEX_PLAN §4.6): kept up to `cap` records in all, dropped
-/// past it (the pass is then skipped)
-struct KeptPlaces {
-    cap: u64,
-    total: u64,
-    overflow: bool,
-    by_cell: Vec<Option<Vec<PlaceRec>>>,
-}
-
 struct State {
     slots: Vec<Slot>,
-    keep: Option<KeptPlaces>,
+    /// the placement store's writer (STREAMING_INDEX_PLAN §4.6, 0.12.398):
+    /// every released cell's placements go to it, for the occupancy pass
+    keep: Option<Arc<floe_vfs::places::PlaceWriter>>,
     /// estimated Doc bytes of the cells charged and not yet released
     resident: u64,
     next_range: usize,
@@ -474,64 +466,16 @@ impl StreamStore {
         &self.inv
     }
 
-    /// keep every released cell's placements (for the occupancy pass),
-    /// up to `cap` placement records in all; call before the readers run
-    pub fn keep_places(&self, cap: u64) {
-        let n = self.inv.cells.len();
-        self.lock().keep = Some(KeptPlaces {
-            cap,
-            total: 0,
-            overflow: false,
-            by_cell: (0..n).map(|_| None).collect(),
-        });
+    /// every released cell's placements go to `writer` (the occupancy
+    /// pass's placement store, floe_vfs::places); call before the readers
+    /// run
+    pub fn keep_places_into(&self, writer: Arc<floe_vfs::places::PlaceWriter>) {
+        self.lock().keep = Some(writer);
     }
 
-    /// The placements of every cell given from outside (the light build's
-    /// `floe-index light --occupancy`: read from the segment directory's
-    /// placement segments, not kept by a build) - what `take_places` then
-    /// hands the occupancy pass.
-    pub fn set_places(&self, places: Vec<Vec<PlaceRec>>) {
-        assert_eq!(places.len(), self.inv.cells.len(), "placements per cell");
-        let total = places.iter().map(|p| p.len() as u64).sum();
-        self.lock().keep = Some(KeptPlaces {
-            cap: u64::MAX,
-            total,
-            overflow: false,
-            by_cell: places.into_iter().map(Some).collect(),
-        });
-    }
-
-    /// whether the kept placements overflowed the cap: (records seen,
-    /// cap); None while they fit (or nothing is kept)
-    pub fn kept_places_overflow(&self) -> Option<(u64, u64)> {
-        let st = self.lock();
-        match &st.keep {
-            Some(k) if k.overflow => Some((k.total, k.cap)),
-            _ => None,
-        }
-    }
-
-    /// the kept placements per cell, or why the occupancy pass cannot
-    /// run: the record count overflowed the cap, or a cell was never
-    /// released by the build (its placements were never seen)
-    pub fn take_places(&self) -> Result<Vec<Vec<PlaceRec>>, String> {
-        let mut st = self.lock();
-        match st.keep.take() {
-            None => Err("no placements were kept".to_string()),
-            Some(k) if k.overflow => Err(format!(
-                "{} placement records exceed the {} the occupancy pass keeps",
-                k.total, k.cap
-            )),
-            Some(k) => {
-                if let Some(ci) = k.by_cell.iter().position(|p| p.is_none()) {
-                    return Err(format!(
-                        "cell {} ({}) was never released by the build",
-                        ci, self.inv.cells[ci].name
-                    ));
-                }
-                Ok(k.by_cell.into_iter().map(|p| p.unwrap_or_default()).collect())
-            }
-        }
+    /// the writer given to `keep_places_into`, back (None when none was)
+    pub fn take_place_writer(&self) -> Option<Arc<floe_vfs::places::PlaceWriter>> {
+        self.lock().keep.take()
     }
 
     /// the smallest budget this file streams under (the largest cell, a
@@ -848,30 +792,36 @@ impl CellStore for StreamStore {
         }
     }
     fn release(&self, cells: Range<usize>) {
-        let mut st = self.lock();
-        let st = &mut *st;
-        let mut freed = 0u64;
-        for ci in cells {
-            if !matches!(st.slots[ci], Slot::Released) {
-                if let (Slot::Ready(c), Some(k)) = (&st.slots[ci], &mut st.keep) {
-                    if !k.overflow {
-                        k.total = k.total.saturating_add(c.places.len() as u64);
-                        if k.total > k.cap {
-                            k.overflow = true;
-                            k.by_cell.clear();
-                        } else {
-                            k.by_cell[ci] = Some(c.places.clone());
+        // the released cells' placements go to the store's writer outside
+        // the store's lock (a cell of millions of placements encodes for
+        // a while; the writer has a lock of its own)
+        let mut kept: Vec<(usize, Arc<Cell>)> = Vec::new();
+        let writer = {
+            let mut st = self.lock();
+            let st = &mut *st;
+            let mut freed = 0u64;
+            for ci in cells {
+                if !matches!(st.slots[ci], Slot::Released) {
+                    if let (Slot::Ready(c), Some(_)) = (&st.slots[ci], &st.keep) {
+                        if !c.places.is_empty() {
+                            kept.push((ci, Arc::clone(c)));
                         }
                     }
+                    st.slots[ci] = Slot::Released;
+                    freed = freed.saturating_add(self.inv.cells[ci].doc_bytes);
                 }
-                st.slots[ci] = Slot::Released;
-                freed = freed.saturating_add(self.inv.cells[ci].doc_bytes);
+            }
+            // (a placement-only cell was never charged: its doc_bytes is 0)
+            st.resident = st.resident.saturating_sub(freed);
+            st.budget_blocked = false;
+            self.cv.notify_all();
+            st.keep.clone()
+        };
+        if let Some(w) = writer {
+            for (ci, c) in kept {
+                w.add_cell(ci, &c.places);
             }
         }
-        // (a placement-only cell was never charged: its doc_bytes is 0)
-        st.resident = st.resident.saturating_sub(freed);
-        st.budget_blocked = false;
-        self.cv.notify_all();
     }
     fn flush_wanted(&self) -> bool {
         self.lock().budget_blocked
@@ -1079,16 +1029,36 @@ mod tests {
             ("layered", fixtures::cells_layered_chain(5, 20)),
             ("pairs", fixtures::cells_paired(5, 10)),
         ];
+        let mut file_backed = false;
         for (tag, data) in cases.drain(..) {
             let dir = tmpdir(&format!("ovo-{}", tag));
             let src = dir.join("src.oas");
             std::fs::write(&src, &data).unwrap();
             let doc = parse_doc_parallel_phased(&data, 2, |_| {}).expect("parse");
-            // (prune, base cell, plane budget, flat-instance budget): one
-            // pass or one per layer; instances materialized or enumerated
-            // through the parents
-            for (prune, base_um, plane_budget, flat_budget, tight) in [(true, 1.0, u64::MAX, 0, false), (false, 1.0, 1, u64::MAX, true), (true, 0.25, 1, 0, false), (false, 0.25, u64::MAX, u64::MAX, true)] {
-                let opts = occ::Opts { base_um, jobs: 2, prune, progress: None, ..Default::default() };
+            // (prune, base cell, plane budget, flat-instance budget, tight
+            // budget, byte cap): one pass or one per layer; instances
+            // materialized or enumerated through the parents; the last
+            // case's byte cap holds the tree's planes only with the depth
+            // planes capped (depth_cap_for), which both builders must do
+            // alike
+            for (prune, base_um, plane_budget, flat_budget, tight, max_bytes) in [(true, 1.0, u64::MAX, 0, false, u64::MAX), (false, 1.0, 1, u64::MAX, true, u64::MAX), (true, 0.25, 1, 0, false, u64::MAX), (false, 0.25, u64::MAX, u64::MAX, true, u64::MAX), (false, 1.0, u64::MAX, 0, false, 0)] {
+                let max_bytes = if max_bytes == 0 {
+                    // enough for one plane a layer, not for every depth
+                    // plane (a fixture whose layers have one plane each
+                    // has nothing to cap: skipped)
+                    let probe = occ::build(&doc, 11, 22, &occ::Opts { base_um, jobs: 2, prune, progress: None, ..Default::default() }).expect("probe");
+                    let per_layer = occ::layer_bytes(probe.w, probe.h);
+                    let layers = probe.layers.iter().filter(|l| l.status == occ::STATUS_OK).count() as u64;
+                    let planes: u64 = probe.layers.iter().map(|l| l.planes.len() as u64).sum();
+                    if planes <= layers {
+                        continue;
+                    }
+                    assert!(tag == "tree" || tag == "adv" || planes > layers, "{}", tag);
+                    per_layer * (layers + (planes - layers) / 2)
+                } else {
+                    max_bytes
+                };
+                let opts = occ::Opts { base_um, jobs: 2, prune, progress: None, max_bytes, ..Default::default() };
                 let reference_occ = occ::build(&doc, 11, 22, &opts).expect("in-memory occupancy");
                 let ok_layers = reference_occ.layers.iter().filter(|l| l.status == occ::STATUS_OK).count();
                 if tag == "tree" {
@@ -1099,14 +1069,27 @@ mod tests {
                 // the occupancy passes re-read the file per layer group
                 let inv = floe_oasis::inventory(&data, 2).expect("inventory");
                 let pre = PrePass::from_inventory(&inv);
-                let (store, _) = StreamStore::new(inv, src.to_str().unwrap(), u64::MAX / 4).expect("store");
-                store.keep_places(1 << 20);
+                // the placement store's writer before the build (the cell and
+                // the small cells from the inventory, as the build does), in
+                // memory or in the staging file by turns
                 let out = dir.join(format!("out-{}-{}", prune, base_um));
                 std::fs::create_dir_all(&out).unwrap();
+                let backing = if file_backed { floe_vfs::places::Backing::File(out.join(floe_vfs::places::FILE_NAME)) } else { floe_vfs::places::Backing::Memory };
+                file_backed = !file_backed;
+                let writer = {
+                    let top_bbox = inv.rbb_notext[inv.top].unwrap_or((0, 0, 0, 0));
+                    let cell_dbu = occ::plan_cell_dbu(inv.unit(), top_bbox, inv.layer_order.len(), &opts);
+                    let small = occ::small_cells(&inv.rbb_notext, cell_dbu, opts.prune, inv.top);
+                    std::sync::Arc::new(floe_vfs::places::PlaceWriter::new(inv.cells.len(), backing, small, cell_dbu).expect("writer"))
+                };
+                let (store, _) = StreamStore::new(inv, src.to_str().unwrap(), u64::MAX / 4).expect("store");
+                store.keep_places_into(writer);
                 store.with_readers(2, || {
                     crate::vfs::build(&store, pre, std::time::Instant::now(), 11, 22, out.to_str().unwrap(), 2, 4, 8, 64 * 1024, true, false, 1e9, None)
                 });
-                let places = store.take_places().expect("placements kept");
+                let writer = store.take_place_writer().expect("the writer");
+                let places = std::sync::Arc::try_unwrap(writer).ok().expect("the store's reference").finish().expect("placement store");
+                assert_eq!(places.total_records() > 0, store.inventory().scan.placements > 0, "{}: the store holds the file's placements", tag);
                 let (n, top_ci, mut built, topo) = {
                     let inv = store.inventory();
                     let children = inv.children();
@@ -1115,6 +1098,7 @@ mod tests {
                     (inv.cells.len(), inv.top, built, inv.topo.clone())
                 };
                 let instances = occ::Instances::with_flat_budget(top_ci, &places, built.small(), &built.has_any(), &topo, built.cell_dbu(), flat_budget);
+                assert_eq!(places.is_file(), !file_backed, "{}: the backings alternate", tag);
                 assert!(instances.total() > 0, "{}: the walk visits something", tag);
                 if tag == "tree" && prune {
                     assert!(built.small().iter().any(|&s| s), "tree: the pruned walk must have small cells");
@@ -1173,8 +1157,13 @@ mod tests {
                     }
                 }
                 drop(instances);
+                if max_bytes != u64::MAX {
+                    assert!(built.depth_cap() < occ::DEPTH_CAP, "{}: the byte cap must cap the depth planes", tag);
+                    assert!(reference_occ.layers.iter().all(|l| l.status != occ::STATUS_NONE_SIZE), "{}: no layer lost to the size cap under the depth cap", tag);
+                    assert!(reference_occ.layers.iter().all(|l| l.planes.iter().all(|p| p.depth <= built.depth_cap())), "{}: the in-memory planes keep the cap", tag);
+                }
                 let streamed = occ::write_ovo(&built.finish());
-                assert!(streamed == reference, "{} prune {} base {} um flat {}: design.ovo differs ({} passes)", tag, prune, base_um, flat_budget, passes);
+                assert!(streamed == reference, "{} prune {} base {} um flat {} bytes {}: design.ovo differs ({} passes)", tag, prune, base_um, flat_budget, max_bytes, passes);
                 if plane_budget == 1 && tag == "tree" {
                     assert!(passes > 1, "{}: the plane budget of 1 byte must force several passes", tag);
                 }

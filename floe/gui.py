@@ -4989,8 +4989,10 @@ class Viewer:
         (_summary_poll_tick): a summary another run adds (`floe2 index
         deck.jb`) appears by itself. The viewer builds none behind the
         open since 0.12.388 (user 2026-10-22): the open's modal index
-        builds them, and a deck past that (its sources' placements over
-        the summary pass's budget) shows this banner."""
+        builds them; a deck whose modal index could not add one (the
+        index's [summary] lines say why) shows this banner. The summary
+        pass keeps no placement cap since 0.12.398 (the placement store,
+        DIRECT_READ_PLAN §8.21)."""
         banner = getattr(self, "_summary_banner", None)
         if banner is None:
             return
@@ -5005,9 +5007,7 @@ class Viewer:
             return
         banner.set_text(
             "occupancy summary missing for %d pass%s - wide views of those "
-            "sources are empty (%s index %s adds it; a source whose "
-            "placements exceed the summary pass's budget stays so, "
-            "--mem raises it)"
+            "sources are empty (%s index %s adds it)"
             % (waiting, "" if waiting == 1 else "es", APP,
                os.path.basename(getattr(self.cache, "src", "") or "deck.jb")))
         banner.show()

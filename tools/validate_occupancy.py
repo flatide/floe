@@ -575,6 +575,51 @@ class GenerationOracleTests(unittest.TestCase):
             with self.subTest(src=src.name):
                 self.check_case(src, cache)
 
+    def test_the_depth_planes_are_capped_before_the_layers_are_lost(self):
+        """0.12.398 (DIRECT_READ_PLAN §8.21): when every layer's depth planes
+        would pass --occupancy-max-bytes, the file's depth cap drops - the
+        cap plane holding that depth and deeper - before a layer is lost to
+        none:size, and the flattening stays the same. deep.oas: 1/0 at
+        depths 0, 1, 2; 2/0 at 1; 3/0 at 2 - five planes."""
+        deep = TMP / "deep.oas"
+        full = read_ovo(Path(vfs_cache_dir(deep)) / "design.ovo")
+        by_key = {l["key"]: l for l in full["layers"]}
+        self.assertEqual({k: [p["depth"] for p in l["planes"]] for k, l in by_key.items()},
+                         {(1, 0): [0, 1, 2], (2, 0): [1], (3, 0): [2]})
+        per_plane = sum(len(lv[2]) for lv in by_key[(1, 0)]["planes"][0]["levels"])
+        self.assertGreater(per_plane, 0)
+        cache = TMP / "deep_cap"
+        shutil.rmtree(cache, ignore_errors=True)
+        shutil.copytree(Path(vfs_cache_dir(deep)), cache)
+
+        def rebuild(planes):
+            res = floe_index("vfs", deep, cache, "--occupancy-only", "--occupancy-um", 1,
+                             "--occupancy-prune", 0, "--occupancy-max-bytes", planes * per_plane)
+            ovo = read_ovo(cache / "design.ovo")
+            return res, {l["key"]: l for l in ovo["layers"]}
+
+        # four planes' room: cap 1 - 1/0 keeps depth 0 and one plane for
+        # depths 1..2, 2/0 and 3/0 their one (3/0's depth 2 in the cap plane)
+        res, capped = rebuild(4)
+        self.assertIn("depth planes capped at 1 (depth 1 and deeper share one plane)", res.stderr)
+        self.assertEqual({k: [p["depth"] for p in l["planes"]] for k, l in capped.items()},
+                         {(1, 0): [0, 1], (2, 0): [1], (3, 0): [1]})
+        for k in by_key:
+            self.assertEqual(capped[k]["status"], "ok", k)
+            self.assertEqual(capped[k]["levels"], by_key[k]["levels"], "%s: the flattening" % (k,))
+        # three planes' room: cap 0 - one plane a layer, every depth in it
+        res, capped = rebuild(3)
+        self.assertIn("depth planes capped at 0", res.stderr)
+        self.assertEqual({k: [p["depth"] for p in l["planes"]] for k, l in capped.items()},
+                         {(1, 0): [0], (2, 0): [0], (3, 0): [0]})
+        for k in by_key:
+            self.assertEqual(capped[k]["levels"], by_key[k]["levels"], "%s: the flattening" % (k,))
+        # two planes' room: even one plane a layer does not fit - the last
+        # layer in the file's order is none:size as before
+        res, capped = rebuild(2)
+        self.assertIn("none:size", res.stderr)
+        self.assertEqual([l["status"] for l in capped.values()], ["ok", "ok", "none:size"])
+
     def test_the_fixtures_exercise_empty_space_and_reps(self):
         # the L's empty corner and the ring's hole stay empty; the
         # diagonal array stays sparse (a bbox fill would light hundreds)

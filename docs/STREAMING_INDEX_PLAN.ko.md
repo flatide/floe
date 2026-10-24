@@ -386,13 +386,10 @@ design.ovm 커밋, design.ovs(덱 제외)는 변경 없음. meta.json의 텍스�
 레코드로 만든다. 작은 셀을 통째로 칠하는 규칙(2209~2212)은 rbb만
 쓰므로 그대로다. 결과 바이트는 지금과 같아야 한다(§6 G3).
 
-배치 레코드 보관은 임계(기본 5,000만, 약 2 GB) 이하일 때만 한다.
-덱 소스는 수천~수만이라 해당하고, 임계를 넘는 깊은 계층의 레이아웃은
-점유가 기본 off다. 넘는데 `--occupancy`가 켜져 있으면 "배치 N개:
-스트리밍 점유는 M개까지"로 거절한다. 경량 캐시의 요약 패스(`floe-index light
---occupancy`, 0.12.385)는 임계를 `--mem`에서 구한다: 예산의 4분의 1을 배치당 약
-96 B로 나눈 수(`vfs::light_places_cap`; 현장 32 GiB 기본 ≈ 9,000만, `--mem`이
-올린다). 넘으면 한 줄 알리고 ovo 없이 완성한다(DIRECT_READ_PLAN §8.8).
+배치 레코드는 0.12.397까지 메모리에 보관했고(전체 빌드 5,000만 상한, 경량
+캐시의 요약 패스는 예산의 4분의 1 ÷ 96 B; 넘으면 ovo 없이 완성 — DIRECT_READ_PLAN
+§8.8), **0.12.398부터 배치 저장소**(`floe_vfs::places`)에 둔다: 메모리 또는 캐시
+디렉터리의 임시 파일, 상한도 건너뜀도 없다(아래 0.12.398 항목, DIRECT_READ_PLAN §8.21).
 
 **구현(S5, 0.12.368 / floe-index 0.12.333).** 바이트 동일성의 근거:
 비트맵은 OR, charge는 연산 단위라 순서는 무관하고, top-down 걷기가
@@ -484,6 +481,24 @@ pread + `parse_cell_bytes` + `normalize_cells`, 리더와 같은 레코드)하�
 kept`). 0.12.393 리뷰: 레이어 1의 작은 셀들과 레이어 2의 큰 셀들이 범위를 나눠 쓰는 파일에서 12 마커가 큰 셀들을
 만들었다 버려 예산 4.8 MB에 26.9 MB(occupancy-only RSS 12 jobs 54 → 29 MB). 집합들은 `shared_ranges`(모든 집합의
 범위, 파일 순서)의 한 커서로 함께 진행된다(0.12.393은 한 번에 하나). 바이트 동일.
+
+**0.12.398 (DIRECT_READ_PLAN §8.21).** 배치의 상주가 없어졌다. 요약 패스가 쓰는 배치는 모두
+**배치 저장소**(`floe_vfs::places`)에 있다: 셀이 해제될 때(전체 빌드: `StreamStore::keep_places_into`,
+커미터의 release), 세그먼트 디렉터리에서 셀 단위로 읽을 때(`floe-index light`: `LightIndex::
+placements_each`, 배치 묶음마다 완성된 셀을 정규화해 넘김), 배치 수집 패스에서(occupancy-only)
+`PlaceWriter::add_cell`이 셀의 정규화된 배치를 자식별 run — (자식, 부모) 간선 하나에 부모의 그
+자식 레코드들, 레코드 순서, 태그 1 B + 지그재그 바리언트(평범한 배치 약 12 B, 메모리의 96 B 대비)
+— 으로 덧붙이고, `finish`가 run 표를 (자식, 부모)로 정렬해 자식별·부모별 색인을 만든다. 저장
+위치는 예산이 정한다: 재고의 배치 수 × 16 B ≤ 예산/4면 메모리(32 MiB 블록), 아니면 `design.places.tmp`
+(캐시 디렉터리; pread로 run 단위로 읽고 저장소를 버릴 때 지운다; `FLOE_OCCUPANCY_PLACES=file|mem`이
+강제). `Instances`는 자식의 incoming run으로 인스턴스를 열거한다(부모의 run을 한 번 읽어 부모의
+인스턴스마다 레코드를 적용 — 전에는 레코드마다 부모를 열거했다; 작은 자식의 가지치기 가능한 격자는
+건너뜀; 방문 수는 run의 `visits` 합으로 topo 순서에 셈), `mark_instance`의 charge·발자국은 부모의
+outgoing run으로 본다(레코드 2^18개 이하는 목록으로 실체화, 그 위는 인스턴스마다 저장소 읽기).
+상주는 run 표(간선당 32 B; MAIN01급 칩 60만 간선 = 19 MB)와 열거 중인 run뿐이다. 바이트는 같다
+(게이트 `vfs_stream`·`light_cache`, 단위 테스트 `streaming_occupancy_matches_in_memory`가 메모리/파일
+저장소를 번갈아 쓴다). 같이: 파일 단위 깊이 상한(`occupancy::depth_cap_for`, §8.21)으로 깊은
+레이아웃이 레이어를 none:size로 잃기 전에 깊이 평면을 접는다. 측정은 DIRECT_READ_PLAN §8.21.
 
 ### 4.7 보류
 
@@ -678,7 +693,8 @@ S2 완료(0.12.365, §4.2 구현; 사용자 2026-10-19 "S2 진행해줘"): build
   참조 번호 중복 등, 또는 재고가 읽지 못한 파일)과 `StreamStore::new`의
   Inventory 오류는 "the in-memory build takes over" 한 줄과 함께 인메모리
   빌드로 넘어간다; `--occupancy-only`에서 배치가 상한을 넘으면 인메모리
-  occupancy-only로 넘어간다(`--stream`이면 한 줄 알리고 ovo 없이 종료 0).
+  occupancy-only로 넘어갔다(`--stream`이면 한 줄 알리고 ovo 없이 종료 0) —
+  0.12.398부터 배치 상한이 없어 이 폴백은 없다(§4.6).
   손상 파일은 재고가 거절 → 인메모리 파스가 같은 자리에서 거절(종료 1).
   폴백 뒤의 메모리 상한·사전 거절의 조언은 두 플래그 대신 "호스트 메모리를
   비우거나 `--stream --mem`으로 고집"(guard `Mode::Fallback`).
