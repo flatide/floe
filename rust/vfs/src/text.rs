@@ -96,6 +96,9 @@ pub struct LabelRow {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TextStats {
+    /// cells a light cache's label walk left alone for their placements not
+    /// in the image (0.12.400)
+    pub light_skipped: u64,
     pub tbvh_nodes: u64,
     /// instance-BVH nodes visited while locating child placements
     pub place_bvh_nodes: u64,
@@ -711,6 +714,18 @@ pub fn plan_labels(
         // especially the top, which has no parent edge to perform this
         // check for it.
         if r == REM_FULL && !masks_intersect(v.bitset(v.cell_tmask_rec(ci)), &req.vis) {
+            continue;
+        }
+        // a light cache: the label walk takes what the image holds and asks
+        // for no placement fill (0.12.400, DIRECT_READ_PLAN §8.23) - a cell
+        // whose placements the geometry plan has not brought in is not
+        // descended, nor its own texts read (they come with the placements);
+        // a cell without placements has its texts filled as before. The fills
+        // of a summarized wide view's big cells - the MAIN01-like chip's top,
+        // 8 M placements, five levels at the fit - were the label walk's
+        // alone, minutes for the die's names
+        if v.light_unfilled_places(ci) {
+            w.st.light_skipped += 1;
             continue;
         }
         w.own_texts(ci, &xf, &clip);

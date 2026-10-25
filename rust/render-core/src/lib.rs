@@ -40,8 +40,8 @@ pub use cells::{
 };
 pub use clip::ClipGeometry;
 pub use deck::{
-    overlay, source_view, transform_bbox, Deck, DeckHierSource, DeckInfo, DeckLayer, DeckPlacement,
-    DeckRenderReport, DeckRenderRequest, DeckSpec,
+    overlay, prune_summary_when, source_view, transform_bbox, Deck, DeckHierSource, DeckInfo, DeckLayer,
+    DeckPlacement, DeckRenderReport, DeckRenderRequest, DeckSpec,
 };
 pub use font::{validate_font_px, DEFAULT_LABEL_FONT_PX, MAX_LABEL_FONT_PX, MIN_LABEL_FONT_PX};
 pub use layer_decode::{LayerProbeReport, ProbeMode};

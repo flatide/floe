@@ -4003,6 +4003,17 @@ fn run_render_attempt(
         layout_off,
     )?;
     let summary_key = SummaryKey::of(&summary);
+    // the summarized layers' subtrees leave the walk when no hierarchy frame
+    // can come of it - frames off, or the depth unlimited or at or past the
+    // hierarchy height - the deck's rule since 0.12.395 (floe_render_core
+    // DeckSource::prune_summary_for). Until 0.12.399 a layout pruned with
+    // frames off alone, so the viewer's default (frames on) walked, and on a
+    // light cache filled, the whole hierarchy under a view the summary drew
+    // whole: the MAIN01-like chip's fit took four minutes, its first frame at
+    // every new scale of the summary's range tens of seconds (DIRECT_READ_PLAN
+    // §8.23). The probe of a new scale, pass 1 and pass 2 all plan with it.
+    let prune_summary =
+        floe_render_core::prune_summary_when(command.frames, command.depth, cache.max_depth());
     let query_summary_layers = Arc::new(
         summary
             .planes
@@ -4028,7 +4039,7 @@ fn run_render_attempt(
                 scaled_decode_budget(state.page_cache.budget_bytes(), &command, budget_scale),
             )?,
             &summary,
-            !command.frames,
+            prune_summary,
         )?;
         if pre.decode_budget > 0 {
             (
@@ -4064,7 +4075,7 @@ fn run_render_attempt(
     request.fit_rank = pass1_fit_rank(cache, command, &state.styles);
     // the summarized layers leave the page plan (§6 step 3): no page
     // selection, page BVH or child walk for them
-    let mut page_request = cache.page_plan_request(&request, &summary, !command.frames)?;
+    let mut page_request = cache.page_plan_request(&request, &summary, prune_summary)?;
     // §F2R-21 label re-synthesis: when a retained frame (the margin
     // prefetch) covers the WHOLE request, its geometry is a pure
     // memcpy - skip the page plan and decode entirely, plan only the
@@ -4144,9 +4155,17 @@ fn run_render_attempt(
             fit_probe_walked = probed.walked;
             check_generation(cancellation, command.generation)?;
             if probed.pending {
-                // (of the image so far: the frame plans without it and the
-                // next attempt asks again)
-                light_continue = true;
+                // the probe's fills are not done (one round an attempt under
+                // the light deadline): a plan without its decision walks
+                // everything at the asked cut, and on a light cache fills far
+                // past the probe's working set - the MAIN01-like chip at the
+                // summary's edge: 3,238 cells, 115 M placements, 10 GB of
+                // image in one round, which the next attempt's probe evicted
+                // and refilled, never settling (DIRECT_READ_PLAN §8.23). The
+                // attempt ends here, no frame published; the next one probes
+                // on from the fills so far (the cells it used stay), and the
+                // plan waits for the decision
+                return Err(LIGHT_CONTINUE.to_string());
             } else if let Some(decision) = probed.decision {
                 state.fit_memory.insert(fit_key.clone(), decision);
                 page_request.fixed_fit = Some(decision);
@@ -5842,6 +5861,10 @@ fn render_density_frame(
     ),
     String,
 > {
+    // the summarized layers' subtrees leave pass 2's plans as they leave pass
+    // 1's (prune_summary_when; the frame's rule, 0.12.400)
+    let prune_summary =
+        floe_render_core::prune_summary_when(command.frames, command.depth, cache.max_depth());
     let work_bin = std::env::var("FLOE_RUST_WORK_BIN").as_deref() != Ok("off");
     let upper_cut = plan.stats.shape_cut.min(i64::MAX as u64) as i64;
     let session = LayerRasterSession::begin_with_density_cancellable(
@@ -6211,7 +6234,7 @@ fn render_density_frame(
                                 fine.probe_limit = reserve;
                             }
                             let fine_pages =
-                                cache.page_plan_request(&fine, summary, !command.frames)?;
+                                cache.page_plan_request(&fine, summary, prune_summary)?;
                             Ok(cache
                                 .plan_cancellable(&fine_pages, command.generation, cancellation)?
                                 .plan)
@@ -6236,7 +6259,7 @@ fn render_density_frame(
                             fine.density_mask = density_mask.clone();
                             fine.density_layers = density_layers.clone();
                             fine.visible_indices = Some(layers.clone());
-                            let fine = cache.page_plan_request(&fine, summary, !command.frames)?;
+                            let fine = cache.page_plan_request(&fine, summary, prune_summary)?;
                             floored = Some(
                                 cache
                                     .plan_cancellable(&fine, command.generation, cancellation)?
@@ -6299,7 +6322,7 @@ fn render_density_frame(
                                                 let fine = cache.page_plan_request(
                                                     &fine,
                                                     summary,
-                                                    !command.frames,
+                                                    prune_summary,
                                                 )?;
                                                 Ok(cache
                                                     .plan_cancellable(
@@ -6443,7 +6466,7 @@ fn render_density_frame(
                                                             let fine = cache.page_plan_request(
                                                                 &fine,
                                                                 summary,
-                                                                !command.frames,
+                                                                prune_summary,
                                                             )?;
                                                             Ok(cache
                                                                 .plan_cancellable(
@@ -6485,7 +6508,7 @@ fn render_density_frame(
                                     fit.free_pages = Some(Arc::clone(&held));
                                     fit.fixed_fit = density_memory.get(&side_key).copied();
                                     let fit =
-                                        cache.page_plan_request(&fit, summary, !command.frames)?;
+                                        cache.page_plan_request(&fit, summary, prune_summary)?;
                                     cache.fit_plan(&fit, merged)?.map(|plan| (plan, groups))
                                 } else {
                                     None

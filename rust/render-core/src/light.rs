@@ -949,10 +949,11 @@ pub(crate) mod tests {
         let (root, dir) = light_dir_of("labels", &data);
         let cache = Cache::open(&dir).unwrap();
         let view = ViewBox::new(-100, -100, 1100, 1100).unwrap();
-        // the label walk first: TOP's own texts are missing, its touch
-        // (cell_tranges) asks for the fill, which takes the cells under it
-        // within the prefill caps - every cell of this tree has a placement
-        // or a text - and the walk runs again on the filled image
+        // the label walk takes what the image holds and asks for no
+        // placement fill (0.12.400): on the fresh image TOP's placements are
+        // not in, so the walk neither descends nor reads TOP's own texts -
+        // no rows, nothing filled (until 0.12.399 the walk's touch filled TOP
+        // and every cell under it, five rounds at the chip's fit)
         assert_eq!(cache.light_stats().map(|s| (s.0, s.1, s.3)), Some((0, 0, 0)));
         // (cut 0: TXT's recursive box is its text's anchor, a point, which a
         // cut of any size would fold under - on the full index as well)
@@ -961,6 +962,14 @@ pub(crate) mod tests {
             px_per_dbu: 1.0,
             ..exact(view)
         };
+        let none = cache.plan_labels(&request, false, 14.0).unwrap();
+        assert!(none.rows.iter().all(|r| r.block), "a fresh light image labels nothing: {:?}", none.rows.len());
+        assert_eq!(cache.light_stats().map(|s| (s.0, s.1, s.3)), Some((0, 0, 0)), "the label walk filled");
+        // the geometry plan fills the cells it walks (TOP, MID, LEAF, TXT at
+        // cut 0); the labels then come from the filled texts - TXT's, a cell
+        // without placements, filled by the label walk itself
+        let planned = cache.plan(&exact(view)).unwrap();
+        assert_eq!(planned.plan.stats.wc_cells, 4);
         let labels = cache.plan_labels(&request, false, 14.0).unwrap();
         let stats = cache.light_stats().unwrap();
         assert!(stats.0 >= 1 && stats.1 >= 1, "{:?}", stats);

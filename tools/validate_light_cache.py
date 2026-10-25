@@ -114,6 +114,58 @@ def check_summary_budget(work, src):
         print("  summary pass: --mem 0.1 builds main01_like's design.ovo with the placements %s, the default budget's bytes" % backing)
 
 
+def check_summary_prune(work, src):
+    """A layout's frame with the summary on prunes the summarized subtrees
+    when no hierarchy frame can come of the walk - frames off, or the depth
+    unlimited (0.12.400, DIRECT_READ_PLAN §8.23; the deck's rule since
+    0.12.395). Until 0.12.399 a layout pruned with frames off alone, so the
+    viewer's default (frames on) walked - on a light cache filled - the
+    whole hierarchy under a view the summary drew: main01_like 0.001's
+    light cache with its summary, the prefill off so every expanded cell
+    costs a fill round, captured at the fit with the summary: no `[light]
+    round` with frames on or off and the two pictures byte-identical; at
+    depth 1 the frames still draw (the pictures differ) and the rounds
+    are the same either way."""
+    floe2 = ROOT / "rust" / "target" / "release" / "floe2"
+    env = dict(os.environ, FLOE_INDEX_BIN=str(BIN), FLOE_RENDERD_BIN=str(ROOT / "rust" / "target" / "release" / "floe-renderd"),
+               FLOE_LIGHT_LOG="on", FLOE_LIGHT_PREFILL_PLACES="0", FLOE_LIGHT_PREFILL_MB="0")
+    env.pop("FLOE_OCCUPANCY_PLACES", None)
+    run([floe2, "index", src, "--light", "--occupancy", "--jobs", "2"], what="floe2 index --light --occupancy", env=env)
+
+    def capture(frames, depth=None, labels="off"):
+        out = work / ("prune_%s_%s_%s.png" % (frames, depth, labels))
+        cmd = [floe2, "render", src, "--px", "400", "--detail", "medium", "--occupancy", "on",
+               "--frames=%s" % frames, "--labels=%s" % labels, "--no-index", "--out", out]
+        if depth is not None:
+            cmd += ["--depth", str(depth)]
+        r = run(cmd, what="floe2 render (frames %s, depth %s)" % (frames, depth), env=env)
+        rounds = [l for l in r.stderr.splitlines() if l.startswith("[light] round")]
+        return out.read_bytes(), rounds
+
+    on, on_rounds = capture("on")
+    off, off_rounds = capture("off")
+    if off_rounds:
+        fail("frames off at full depth: the summarized layout filled: %s" % off_rounds)
+    if on_rounds:
+        fail("frames on at full depth: no frame can appear, yet the walk filled: %s" % on_rounds)
+    if on != off:
+        fail("frames on/off pictures differ at full depth under the summary")
+    # the labels (on by default in the viewer and the capture): a light
+    # cache's label walk takes what the image holds and asks for no fill
+    # (0.12.400) - at the summarized fit nothing is filled, so no label
+    # walk fills either (0.12.399: five rounds, the die's names)
+    lab, lab_rounds = capture("on", labels="on")
+    if lab_rounds:
+        fail("labels on at the summarized fit: the label walk filled: %s" % lab_rounds)
+    d1_on, d1_on_rounds = capture("on", 1)
+    d1_off, d1_off_rounds = capture("off", 1)
+    if d1_on == d1_off:
+        fail("depth 1 with frames should draw them")
+    if len(d1_on_rounds) != len(d1_off_rounds):
+        fail("depth 1: the rounds differ with frames on/off: %s vs %s" % (d1_on_rounds, d1_off_rounds))
+    print("  summary prune: a layout's fit with the summary fills nothing with frames or labels on or off (depth 1 still draws the frames)")
+
+
 def check_metadata_budget(work, src):
     """The light cache's metadata alone (no --occupancy) is the inventory
     pass's output and parses no cell, so a --mem below the largest cell
@@ -362,6 +414,7 @@ def main():
         for name, path in files:
             check_fixture(name, path, work)
         check_summary_budget(work, main01)
+        check_summary_prune(work, main01)
         check_metadata_budget(work, src)
         check_unsuitable(work)
     print("light_cache: ALL OK")

@@ -2409,6 +2409,15 @@ impl Ovm {
         }
     }
 
+    /// Whether the image lacks cell `ci`'s placements yet (a light index;
+    /// false on a full one, and for a cell without placements)
+    pub fn light_unfilled_places(&self, ci: u32) -> bool {
+        match &self.light {
+            Some(m) => LightMarks::bit(&m.places, ci),
+            None => false,
+        }
+    }
+
     /// A reader is about to use cell `ci`'s placements: noted as used
     /// (`light_used`), and as asked for when the image does not hold them
     /// (LightMarks); nothing on a full index.
