@@ -396,6 +396,7 @@ fn clear_light_outputs(outdir: &str, full_too: bool) {
         "design.ovo",
         "design.ovo.tmp",
         floe_vfs::places::FILE_NAME,
+        floe_vfs::occupancy::PLANES_TMP,
         "meta.json",
         "meta.json.tmp",
     ] {

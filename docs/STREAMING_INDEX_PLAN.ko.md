@@ -500,6 +500,11 @@ outgoing run으로 본다(레코드 2^18개 이하는 목록으로 실체화, �
 저장소를 번갈아 쓴다). 같이: 파일 단위 깊이 상한(`occupancy::depth_cap_for`, §8.21)으로 깊은
 레이아웃이 레이어를 none:size로 잃기 전에 깊이 평면을 접는다. 측정은 DIRECT_READ_PLAN §8.21.
 
+**0.12.399 (DIRECT_READ_PLAN §8.22).** 마킹 패스는 셀을 도형만으로 파싱한다(`StreamStore::parse_cell_shapes` /
+`parse_range_shapes` → `floe_oasis::doc::parse_cell_bytes_shapes`: PLACEMENT·TEXT는 모달 상태만 이어 가고 만들지
+않음; 과금은 `cell_shape_bytes`), 묶음이 끝난 피라미드는 `design.planes.tmp`에 내려 두고(`StreamOcc::spill_to`,
+`Spill`) 게시할 때 `write_ovo_to`가 복사한다. 바이트 동일. 측정은 DIRECT_READ_PLAN §8.22.
+
 ### 4.7 보류
 
 `--coverage`(design.ovc)와 `--representatives`(design.ovr)는 Doc 전체를

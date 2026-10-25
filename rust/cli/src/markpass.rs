@@ -15,7 +15,12 @@
 //! (its subtree is one bbox) and a cell whose own records hold none of
 //! the group's layers (its placements' charges come from the placement
 //! store, floe_vfs::places) - so a layout's later groups parse only the
-//! cells with records on their layers.
+//! cells with records on their layers. A cell is parsed for its shapes
+//! alone (`StreamStore::parse_cell_shapes`, 0.12.399): its PLACEMENT and
+//! TEXT records are read for the modal state and not materialized - the
+//! store holds the placements - and it is charged its shapes' estimate
+//! (`cell_shape_bytes`); on the MAIN01-like chip the parsed big cells
+//! took about three times their Doc estimate, half of it placements.
 //!
 //! Cells whose definitions share ranges - CELL records inside a CBLOCK of
 //! another cell's range, or a cell defined in several ranges that define
@@ -368,7 +373,7 @@ fn claim(
                 .range_charges(ri)
                 .iter()
                 .filter(|c| run.pending.contains_key(c))
-                .map(|&c| store.cell_bytes(c))
+                .map(|&c| store.cell_shape_bytes(c))
                 .sum();
             let alone = a.in_flight == 0 && a.marking == 0 && a.lone == 0;
             if alone || a.resident.saturating_add(cost) <= budget {
@@ -389,7 +394,7 @@ fn claim(
         if a.next < n {
             let ci = a.next;
             let need = need_of(occ, group, inst, ci);
-            let cost = if need == Need::Shapes { store.cell_bytes(ci) } else { 0 };
+            let cost = if need == Need::Shapes { store.cell_shape_bytes(ci) } else { 0 };
             if a.resident == 0 || a.resident.saturating_add(cost) <= budget {
                 a.next += 1;
                 a.claimed[ci] = true;
@@ -430,7 +435,7 @@ fn mark_range(
 ) -> bool {
     let set = store.shared_def(si);
     let t = Instant::now();
-    let parsed = store.parse_range(set.ranges[k], buf, &|c| wanted.binary_search(&c).is_ok());
+    let parsed = store.parse_range_shapes(set.ranges[k], buf, &|c| wanted.binary_search(&c).is_ok());
     rep.parse_s += t.elapsed().as_secs_f64();
     let pieces = match parsed {
         Ok((pieces, bytes, skipped)) => {
@@ -482,7 +487,7 @@ fn mark_range(
         mark_parsed(occ, group, inst, ci, &cell, sc, rep);
         rep.shared += 1;
         drop(cell);
-        let bytes = store.cell_bytes(ci);
+        let bytes = store.cell_shape_bytes(ci);
         {
             let mut guard = adm.lock().unwrap_or_else(|e| e.into_inner());
             let a: &mut Admit = &mut guard;
@@ -567,7 +572,7 @@ pub(crate) fn mark_group(
                             Task::Cell(ci, need, cost) => {
                                 if need == Need::Shapes {
                                     let t = Instant::now();
-                                    let parsed = store.parse_cell(ci, &mut buf);
+                                    let parsed = store.parse_cell_shapes(ci, &mut buf);
                                     rep.parse_s += t.elapsed().as_secs_f64();
                                     match parsed {
                                         Ok((cell, bytes)) => {

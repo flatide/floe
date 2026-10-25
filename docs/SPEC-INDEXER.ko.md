@@ -665,7 +665,8 @@ floe-index svrf <deck> [-o OUT] [--scan] [-D NAME[=VAL]]… [-I DIR]… [--follo
   캐시는 예산/4 ÷ 96 B)과 "design.ovo is skipped" 건너뜀, 그에 따른 매 open의 요약 재시도가
   없어졌다. 로그 `placements of N cells … : R records in U runs, S in memory | in the staging file PATH`.
 - 게시: `design.ovo.tmp` 작성·fsync 뒤 rename(0.12.398부터 `write_ovo_to`가 피라미드에서 바로 흘려 쓴다 — 파일
-  이미지를 메모리에 만들지 않는다). `--kill-at occupancy-tmp`는 rename
+  이미지를 메모리에 만들지 않는다; 0.12.399부터 스트리밍 패스는 묶음이 끝난 피라미드를 `design.planes.tmp`에 내려
+  두고 게시할 때 복사한다(`StreamOcc::spill_to`), 마킹 패스의 셀 파싱은 도형만 만든다(`parse_cell_bytes_shapes`)). `--kill-at occupancy-tmp`는 rename
   직전에 죽는 게이트 훅(이전 파일 보존, tmp 잔존). 다음 실행은 시작 시 tmp를
   지우고, Python 래퍼(`floe2 index`)는 자식이 실패·중단되면 tmp를 지운다.
   로더는 tmp를 읽지 않는다.

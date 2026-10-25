@@ -24,7 +24,7 @@
 //! order either way.
 
 use crate::cellstore::{CellRef, CellStore};
-use floe_oasis::doc::{normalize_cells, parse_cell_bytes, parse_cell_bytes_keeping, Cell, CellPiece, CellTables};
+use floe_oasis::doc::{normalize_cells, parse_cell_bytes, parse_cell_bytes_keeping, parse_cell_bytes_shapes, Cell, CellPiece, CellTables};
 use floe_oasis::inventory::Inventory;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -514,6 +514,17 @@ impl StreamStore {
     /// takes such cells as a set (`shared_def_of`, `parse_range`).
     /// Returns the cell and the bytes read.
     pub fn parse_cell(&self, ci: usize, buf: &mut Vec<u8>) -> Result<(Cell, u64), String> {
+        self.parse_cell_with(ci, buf, false)
+    }
+
+    /// `parse_cell` materializing the shapes alone - no placements, no
+    /// texts (`parse_cell_bytes_shapes`, 0.12.399): what the marking pass
+    /// parses, its placements being the placement store's
+    pub fn parse_cell_shapes(&self, ci: usize, buf: &mut Vec<u8>) -> Result<(Cell, u64), String> {
+        self.parse_cell_with(ci, buf, true)
+    }
+
+    fn parse_cell_with(&self, ci: usize, buf: &mut Vec<u8>, only_shapes: bool) -> Result<(Cell, u64), String> {
         let c = &self.inv.cells[ci];
         let tables = CellTables::new(&self.inv.cellnames, &self.inv.textstrings, &self.cell_index);
         let mut read = 0u64;
@@ -521,7 +532,7 @@ impl StreamStore {
         for &start in &c.def_ranges {
             let ri = self.range_index(start, &c.name)?;
             // (the range's other cells, when it has any, are not kept)
-            for p in self.read_range(ri, buf, &tables, &|c| c == ci)?.0 {
+            for p in self.read_range(ri, buf, &tables, &|c| c == ci, only_shapes)?.0 {
                 if p.index == ci {
                     pieces.push((ri, p.cell));
                 }
@@ -576,6 +587,7 @@ impl StreamStore {
         buf: &mut Vec<u8>,
         tables: &CellTables,
         wanted: &(dyn Fn(usize) -> bool + Sync),
+        only_shapes: bool,
     ) -> Result<(Vec<CellPiece>, u64), String> {
         let r = &self.ranges[ri];
         let len = (r.end - r.start) as usize;
@@ -584,8 +596,23 @@ impl StreamStore {
         self.file
             .read_exact_at(buf, r.start)
             .map_err(|e| format!("read {}..{}: {}", r.start, r.end, e))?;
-        parse_cell_bytes_keeping(buf, r.start, r.cellname_base, r.textstring_base, tables, wanted)
-            .map_err(|e| format!("range {}..{}: {}", r.start, r.end, e))
+        let parsed = if only_shapes {
+            parse_cell_bytes_shapes(buf, r.start, r.cellname_base, r.textstring_base, tables, wanted)
+        } else {
+            parse_cell_bytes_keeping(buf, r.start, r.cellname_base, r.textstring_base, tables, wanted)
+        };
+        parsed.map_err(|e| format!("range {}..{}: {}", r.start, r.end, e))
+    }
+
+    /// the resident estimate of cell `ci`'s shapes alone - its Doc estimate
+    /// less its placement and text records' fixed bytes (their point lists
+    /// and strings stay in: a bound) - what the marking pass charges for a
+    /// cell it parses with `parse_cell_shapes` (0.12.399)
+    pub fn cell_shape_bytes(&self, ci: usize) -> u64 {
+        let c = &self.inv.cells[ci];
+        let places = c.placements.saturating_mul(std::mem::size_of::<floe_oasis::doc::PlaceRec>() as u64);
+        let texts = c.texts.saturating_mul(std::mem::size_of::<floe_oasis::doc::TextRec>() as u64);
+        c.doc_bytes.saturating_sub(places).saturating_sub(texts).max(1)
     }
 
     /// The set of cells whose definitions share ranges with cell `ci`
@@ -627,8 +654,28 @@ impl StreamStore {
         buf: &mut Vec<u8>,
         wanted: &(dyn Fn(usize) -> bool + Sync),
     ) -> Result<(Vec<(usize, Cell)>, u64, u64), String> {
+        self.parse_range_with(ri, buf, wanted, false)
+    }
+
+    /// `parse_range` materializing the shapes alone (`parse_cell_shapes`)
+    pub fn parse_range_shapes(
+        &self,
+        ri: usize,
+        buf: &mut Vec<u8>,
+        wanted: &(dyn Fn(usize) -> bool + Sync),
+    ) -> Result<(Vec<(usize, Cell)>, u64, u64), String> {
+        self.parse_range_with(ri, buf, wanted, true)
+    }
+
+    fn parse_range_with(
+        &self,
+        ri: usize,
+        buf: &mut Vec<u8>,
+        wanted: &(dyn Fn(usize) -> bool + Sync),
+        only_shapes: bool,
+    ) -> Result<(Vec<(usize, Cell)>, u64, u64), String> {
         let tables = CellTables::new(&self.inv.cellnames, &self.inv.textstrings, &self.cell_index);
-        let (pieces, skipped) = self.read_range(ri, buf, &tables, wanted)?;
+        let (pieces, skipped) = self.read_range(ri, buf, &tables, wanted, only_shapes)?;
         let read = buf.len() as u64;
         Ok((pieces.into_iter().map(|p| (p.index, p.cell)).collect(), read, skipped))
     }
@@ -1099,6 +1146,11 @@ mod tests {
                 };
                 let instances = occ::Instances::with_flat_budget(top_ci, &places, built.small(), &built.has_any(), &topo, built.cell_dbu(), flat_budget);
                 assert_eq!(places.is_file(), !file_backed, "{}: the backings alternate", tag);
+                // the pyramids spilled to disk on the file-backed runs
+                let spill_path = out.join(occ::PLANES_TMP);
+                if places.is_file() {
+                    built.spill_to(&spill_path).expect("spill");
+                }
                 assert!(instances.total() > 0, "{}: the walk visits something", tag);
                 if tag == "tree" && prune {
                     assert!(built.small().iter().any(|&s| s), "tree: the pruned walk must have small cells");
@@ -1162,7 +1214,17 @@ mod tests {
                     assert!(reference_occ.layers.iter().all(|l| l.status != occ::STATUS_NONE_SIZE), "{}: no layer lost to the size cap under the depth cap", tag);
                     assert!(reference_occ.layers.iter().all(|l| l.planes.iter().all(|p| p.depth <= built.depth_cap())), "{}: the in-memory planes keep the cap", tag);
                 }
-                let streamed = occ::write_ovo(&built.finish());
+                assert_eq!(built.spill_error(), None, "{}: the spill wrote", tag);
+                let spilled_some = built.spilled_bytes() > 0;
+                let (occ_built, spill) = built.finish_spilled();
+                if spill.is_some() {
+                    assert!(spill_path.is_file(), "{}: the spill file exists", tag);
+                    assert_eq!(spilled_some, occ_built.layers.iter().any(|l| l.status == occ::STATUS_OK), "{}: every ok plane spilled", tag);
+                    assert!(occ_built.layers.iter().all(|l| l.planes.iter().all(|p| p.levels.iter().all(|lv| lv.bits.is_empty()))), "{}: no pyramid in memory", tag);
+                }
+                let streamed = occ::write_ovo_with(&occ_built, spill.as_ref());
+                drop(spill);
+                assert!(!spill_path.exists(), "{}: the spill file goes with the spill", tag);
                 assert!(streamed == reference, "{} prune {} base {} um flat {} bytes {}: design.ovo differs ({} passes)", tag, prune, base_um, flat_budget, max_bytes, passes);
                 if plane_budget == 1 && tag == "tree" {
                     assert!(passes > 1, "{}: the plane budget of 1 byte must force several passes", tag);

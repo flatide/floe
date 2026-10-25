@@ -1018,6 +1018,7 @@ pub(crate) fn clear_outputs(outdir: &str) {
         "design.seg",
         "design.seg.tmp",
         floe_vfs::places::FILE_NAME,
+        floe_vfs::occupancy::PLANES_TMP,
         "labels.tsv",
         // legacy (pre-0.10) viewer file: scrub on rebuild so a
         // re-index actually reclaims the skeleton's bytes
@@ -1953,6 +1954,17 @@ pub(crate) fn stream_occupancy(
         };
         (inv.cells.len(), inv.top, built, inv.topo.clone())
     };
+    // the finished pyramids go to the spill as the groups end
+    // (floe_vfs::occupancy::Spill, 0.12.399): the resident memory does
+    // not grow by the summary file's size over the passes
+    if let Err(e) = built.spill_to(&std::path::Path::new(outdir).join(occ::PLANES_TMP)) {
+        eprintln!(
+            "[vfs] occupancy: the pyramids stay in memory - cannot create {}/{}: {}",
+            outdir,
+            occ::PLANES_TMP,
+            e
+        );
+    }
     let has_any = built.has_any();
     let instances = occ::Instances::new(top, &places, built.small(), &has_any, &topo, built.cell_dbu());
     // the pass holds a quarter of the streaming budget in planes and a
@@ -2072,16 +2084,22 @@ pub(crate) fn stream_occupancy(
     }
     drop(instances);
     drop(places);
-    let built = built.finish();
+    if let Some(why) = built.spill_error() {
+        eprintln!("[vfs] occupancy: the spill failed, the pyramids from then on stayed in memory: {}", why);
+    }
+    let spilled = built.spilled_bytes();
+    let (built, spill) = built.finish_spilled();
     let built_s = t.elapsed().as_secs_f64();
     eprintln!(
-        "[vfs] occupancy streaming: {} pass(es) over the file ({:.1}s; the markers parsed {} cell(s), {})",
+        "[vfs] occupancy streaming: {} pass(es) over the file ({:.1}s; the markers parsed {} cell(s), {}; pyramids spilled {})",
         groups,
         built_s,
         totals.parsed,
-        fmt_size(totals.bytes)
+        fmt_size(totals.bytes),
+        fmt_size(spilled)
     );
-    publish_ovo(outdir, &built, opts, t, built_s, None, kill_at);
+    publish_ovo(outdir, &built, spill.as_ref(), opts, t, built_s, None, kill_at);
+    drop(spill);
 }
 
 const PROFILE_SNAPSHOT_MAGIC: &[u8; 8] = b"FLOEPS01";
@@ -3274,15 +3292,17 @@ fn write_occupancy(
     });
     let built_s = t.elapsed().as_secs_f64();
     let phases = occ::phases_take();
-    publish_ovo(outdir, &built, opts, t, built_s, Some(phases), kill_at);
+    publish_ovo(outdir, &built, None, opts, t, built_s, Some(phases), kill_at);
 }
 
 /// design.ovo's publication and log lines, shared by the in-memory and
 /// the streaming build: tmp + fsync + rename, the phase line, the
 /// summary, the per-layer verdicts
+#[allow(clippy::too_many_arguments)]
 fn publish_ovo(
     outdir: &str,
     built: &floe_vfs::occupancy::Occupancy,
+    spill: Option<&floe_vfs::occupancy::Spill>,
     opts: &floe_vfs::occupancy::Opts,
     t: std::time::Instant,
     built_s: f64,
@@ -3299,7 +3319,7 @@ fn publish_ovo(
     let written = {
         let f = std::fs::File::create(&tmp).expect("create ovo tmp");
         let mut w = std::io::BufWriter::with_capacity(8 << 20, f);
-        let n = occ::write_ovo_to(built, &mut w).expect("write ovo tmp");
+        let n = occ::write_ovo_to(built, spill, &mut w).expect("write ovo tmp");
         w.flush().expect("flush ovo tmp");
         w.into_inner().expect("ovo tmp").sync_all().expect("sync ovo tmp");
         n

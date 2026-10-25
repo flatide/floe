@@ -535,6 +535,11 @@ struct Builder<'k> {
     keep: Option<&'k (dyn Fn(CellId<'_>) -> bool + Sync)>,
     skip: bool,
     skipped: u64,
+    /// the shapes alone (`parse_cell_bytes_shapes`, 0.12.399: the
+    /// marking pass of the streaming occupancy, whose placements come
+    /// from the placement store): PLACEMENT and TEXT records are parsed -
+    /// the modal state goes on through them - and not materialized
+    only_shapes: bool,
     refnames: HashMap<u64, String>,
     implicit_ref: u64,
     textstrings: HashMap<u64, String>,
@@ -781,7 +786,7 @@ fn parse_records(
                 };
                 if b.skip {
                     b.skipped += 1;
-                } else {
+                } else if !b.only_shapes {
                     let slot = b.cells[cur].places.len();
                     b.cells[cur].places.push(PlaceRec {
                         cell: usize::MAX,
@@ -841,7 +846,7 @@ fn parse_records(
                             Some(s) => s.clone(),
                             None => {
                                 // string table may come later
-                                if !b.skip {
+                                if !b.skip && !b.only_shapes {
                                     b.pending_texts.push((
                                         cur,
                                         b.cells[cur].texts.len(),
@@ -856,7 +861,7 @@ fn parse_records(
                 };
                 if b.skip {
                     b.skipped += 1;
-                } else {
+                } else if !b.only_shapes {
                     b.cells[cur].texts.push(TextRec {
                         layer: l,
                         dt: d,
@@ -1660,6 +1665,7 @@ fn new_builder(implicit_ref: u64, implicit_tref: u64) -> Builder<'static> {
         keep: None,
         skip: false,
         skipped: 0,
+        only_shapes: false,
         refnames: HashMap::new(),
         implicit_ref,
         textstrings: HashMap::new(),
@@ -1816,6 +1822,36 @@ pub fn parse_cell_bytes_keeping(
     tables: &CellTables,
     wanted: &(dyn Fn(usize) -> bool + Sync),
 ) -> Result<(Vec<CellPiece>, u64)> {
+    parse_cell_bytes_filtered(bytes, base, cellname_base, textstring_base, tables, wanted, false)
+}
+
+/// `parse_cell_bytes_keeping` materializing the shapes alone: the
+/// PLACEMENT and TEXT records of the kept cells are parsed - the modal
+/// state goes on through them - and not pushed (0.12.399: the marking
+/// pass of the streaming occupancy takes a cell's placements from the
+/// placement store and uses no text, and a placement-heavy cell's
+/// records were most of its resident memory - the MAIN01-like chip's
+/// top, 8 M placements of 16 M records)
+pub fn parse_cell_bytes_shapes(
+    bytes: &[u8],
+    base: u64,
+    cellname_base: u64,
+    textstring_base: u64,
+    tables: &CellTables,
+    wanted: &(dyn Fn(usize) -> bool + Sync),
+) -> Result<(Vec<CellPiece>, u64)> {
+    parse_cell_bytes_filtered(bytes, base, cellname_base, textstring_base, tables, wanted, true)
+}
+
+fn parse_cell_bytes_filtered(
+    bytes: &[u8],
+    base: u64,
+    cellname_base: u64,
+    textstring_base: u64,
+    tables: &CellTables,
+    wanted: &(dyn Fn(usize) -> bool + Sync),
+    only_shapes: bool,
+) -> Result<(Vec<CellPiece>, u64)> {
     let start = base as usize;
     let mut c = Cur::new(bytes, start);
     let mut m = Modal::default();
@@ -1831,6 +1867,7 @@ pub fn parse_cell_bytes_keeping(
     };
     let mut b = new_builder(cellname_base, textstring_base);
     b.keep = Some(&keep);
+    b.only_shapes = only_shapes;
     // depth 1: a range ends without an END record
     parse_records(&mut c, &mut m, &mut b, 1)?;
     let skipped = b.skipped;

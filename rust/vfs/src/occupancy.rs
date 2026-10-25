@@ -61,6 +61,93 @@ pub const DEPTH_CAP: u8 = 15;
 /// the depth of a version-1 plane: every depth flattened together
 pub const DEPTH_ALL: u8 = 255;
 
+/// the spill file's name in the cache directory (`StreamOcc::spill_to`)
+pub const PLANES_TMP: &str = "design.planes.tmp";
+
+/// The pyramids of the groups done so far, on disk (0.12.399,
+/// DIRECT_READ_PLAN §8.22): `StreamOcc::end_group` writes every finished
+/// level's bits here and keeps the level's size alone, so the resident
+/// memory no longer grows by the summary file's size over the passes
+/// (the MAIN01-like chip: 3.8 GB by the last group); `write_ovo_to`
+/// copies the levels back into the file in table order. The file is
+/// removed when the spill is dropped.
+pub struct Spill {
+    file: std::fs::File,
+    path: std::path::PathBuf,
+    len: u64,
+    /// (layer index, plane position, level) -> (offset, bytes)
+    at: HashMap<(u32, u8, u8), (u64, u64)>,
+}
+
+impl std::fmt::Debug for Spill {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Spill({}, {} bytes, {} levels)", self.path.display(), self.len, self.at.len())
+    }
+}
+
+impl Drop for Spill {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+impl Spill {
+    pub fn create(path: &std::path::Path) -> std::io::Result<Spill> {
+        let _ = std::fs::remove_file(path);
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+        Ok(Spill {
+            file,
+            path: path.to_path_buf(),
+            len: 0,
+            at: HashMap::new(),
+        })
+    }
+
+    fn put(&mut self, key: (u32, u8, u8), bits: &[u8]) -> std::io::Result<()> {
+        use std::os::unix::fs::FileExt;
+        self.file.write_all_at(bits, self.len)?;
+        self.at.insert(key, (self.len, bits.len() as u64));
+        self.len += bits.len() as u64;
+        Ok(())
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// bytes written so far
+    pub fn bytes(&self) -> u64 {
+        self.len
+    }
+
+    /// the bytes of a spilled level, None when the level was kept in memory
+    pub fn len_of(&self, layer: u32, plane: u8, level: u8) -> Option<u64> {
+        self.at.get(&(layer, plane, level)).map(|&(_, n)| n)
+    }
+
+    /// a spilled level copied to `w` through `buf`
+    fn copy_to(&self, key: (u32, u8, u8), w: &mut dyn std::io::Write, buf: &mut Vec<u8>) -> std::io::Result<()> {
+        use std::os::unix::fs::FileExt;
+        let Some(&(mut off, mut left)) = self.at.get(&key) else {
+            return Ok(());
+        };
+        const CHUNK: usize = 8 << 20;
+        while left > 0 {
+            let n = left.min(CHUNK as u64) as usize;
+            buf.resize(n, 0);
+            self.file.read_exact_at(&mut buf[..n], off)?;
+            w.write_all(&buf[..n])?;
+            off += n as u64;
+            left -= n as u64;
+        }
+        Ok(())
+    }
+}
+
 /// the planes a layer keeps under a depth cap: one per depth below the
 /// cap at which the top's relative-depth mask has a bit, and one for
 /// the cap and everything deeper (a bound: a depth whose records mark
@@ -2805,6 +2892,10 @@ pub struct StreamOcc {
     prune: bool,
     /// the file's depth cap (`depth_cap_for`)
     depth_cap: u8,
+    /// the finished pyramids on disk (`spill_to`), and the first failure
+    /// writing them (the rest stay in memory)
+    spill: Option<Spill>,
+    spill_error: Option<String>,
     small: Vec<bool>,
     bboxes: Vec<Option<Win>>,
     /// per layer, per cell: the relative-depth mask (0 = the layer is
@@ -2909,6 +3000,8 @@ impl StreamOcc {
             max_work: opts.max_work,
             prune: opts.prune,
             depth_cap: DEPTH_CAP,
+            spill: None,
+            spill_error: None,
             small: Vec::new(),
             bboxes: bboxes.to_vec(),
             masks: Vec::new(),
@@ -2993,6 +3086,24 @@ impl StreamOcc {
     /// the file's depth cap (`depth_cap_for`)
     pub fn depth_cap(&self) -> u8 {
         self.depth_cap
+    }
+
+    /// the finished pyramids go to `path` as the groups end (`Spill`);
+    /// call before the first group
+    pub fn spill_to(&mut self, path: &std::path::Path) -> std::io::Result<()> {
+        self.spill = Some(Spill::create(path)?);
+        Ok(())
+    }
+
+    /// the first failure writing the spill (the pyramids from then on
+    /// stayed in memory; the file written is whole either way)
+    pub fn spill_error(&self) -> Option<&str> {
+        self.spill_error.as_deref()
+    }
+
+    /// bytes of pyramids spilled so far
+    pub fn spilled_bytes(&self) -> u64 {
+        self.spill.as_ref().map_or(0, |s| s.bytes())
     }
 
     pub fn cell_dbu(&self) -> i64 {
@@ -3403,6 +3514,21 @@ impl StreamOcc {
                     let next = levels.last().unwrap().pool();
                     levels.push(next);
                 }
+                // the finished pyramid to the spill, the sizes alone kept
+                // (a failed write leaves this and the later levels in
+                // memory; write_ovo_to takes each level from where it is)
+                if let (Some(sp), None) = (self.spill.as_mut(), self.spill_error.as_ref()) {
+                    let pi = out.len() as u8;
+                    for (lv, level) in levels.iter_mut().enumerate() {
+                        match sp.put((li as u32, pi, lv as u8), &level.bits) {
+                            Ok(()) => level.bits = Vec::new(),
+                            Err(e) => {
+                                self.spill_error = Some(format!("{}: {}", sp.path().display(), e));
+                                break;
+                            }
+                        }
+                    }
+                }
                 out.push(Plane {
                     depth: depth as u8,
                     levels,
@@ -3417,7 +3543,15 @@ impl StreamOcc {
         }
     }
 
-    pub fn finish(mut self) -> Occupancy {
+    /// the summary without a spill (`spill_to` was not called)
+    pub fn finish(self) -> Occupancy {
+        assert!(self.spill.is_none(), "a spilled summary is finished with finish_spilled");
+        self.finish_spilled().0
+    }
+
+    /// the summary and its spill, if any: `write_ovo_to` takes both (a
+    /// level the spill holds has empty bits here)
+    pub fn finish_spilled(mut self) -> (Occupancy, Option<Spill>) {
         // layers never reached (no group needed them): decided by the
         // same rules as begin_group
         let nl = self.layer_order.len();
@@ -3438,19 +3572,23 @@ impl StreamOcc {
                 });
             }
         }
-        Occupancy {
-            unit: self.unit,
-            src_size: self.src_size,
-            src_mtime: self.src_mtime,
-            top: self.top,
-            cell_dbu: self.cell_dbu,
-            bbox: self.bbox,
-            w: self.w,
-            h: self.h,
-            n_levels: self.n_levels,
-            layers: self.layers.into_iter().map(|l| l.expect("layer decided")).collect(),
-            paths_skipped: self.paths_skipped,
-        }
+        let spill = self.spill.take();
+        (
+            Occupancy {
+                unit: self.unit,
+                src_size: self.src_size,
+                src_mtime: self.src_mtime,
+                top: self.top,
+                cell_dbu: self.cell_dbu,
+                bbox: self.bbox,
+                w: self.w,
+                h: self.h,
+                n_levels: self.n_levels,
+                layers: self.layers.into_iter().map(|l| l.expect("layer decided")).collect(),
+                paths_skipped: self.paths_skipped,
+            },
+            spill,
+        )
     }
 }
 
@@ -3695,17 +3833,24 @@ fn planes_written(layer: &Layer) -> &[Plane] {
 /// whole image beside the pyramids doubled the generator's peak - p10's
 /// 3.8 GB summary was written through a 3.8 GB Vec)
 pub fn write_ovo(occ: &Occupancy) -> Vec<u8> {
+    write_ovo_with(occ, None)
+}
+
+/// `write_ovo` of a summary whose pyramids a spill holds (the streaming
+/// build's, `StreamOcc::finish_spilled`)
+pub fn write_ovo_with(occ: &Occupancy, spill: Option<&Spill>) -> Vec<u8> {
     let mut out = Vec::new();
-    write_ovo_to(occ, &mut out).expect("a Vec takes every byte");
+    write_ovo_to(occ, spill, &mut out).expect("a Vec takes every byte");
     out
 }
 
 /// The file written to `w` (a BufWriter over the .tmp file): the header
 /// and the layer table first - the bitmap offsets summed in advance -
-/// then every plane's levels in table order, straight from the
-/// pyramids; nothing of the file is held beside them. Returns the bytes
-/// written. The same bytes as `write_ovo` (which calls this).
-pub fn write_ovo_to(occ: &Occupancy, w: &mut dyn std::io::Write) -> std::io::Result<u64> {
+/// then every plane's levels in table order, straight from the pyramids
+/// or copied from the spill that holds them (`Spill`, 0.12.399); nothing
+/// of the file is held beside them. Returns the bytes written. The same
+/// bytes as `write_ovo` (which calls this).
+pub fn write_ovo_to(occ: &Occupancy, spill: Option<&Spill>, w: &mut dyn std::io::Write) -> std::io::Result<u64> {
     let top = occ.top.as_bytes();
     let top_len = top.len().min(u16::MAX as usize);
     let nl = occ.layers.len();
@@ -3716,6 +3861,11 @@ pub fn write_ovo_to(occ: &Occupancy, w: &mut dyn std::io::Write) -> std::io::Res
         .map(|l| LAYER_FIXED + planes_written(l).len() * (PLANE_FIXED + n_levels * LEVEL_ENTRY))
         .sum();
     let body_start = HEADER_FIXED + top_len + table_len;
+    let level_len = |li: usize, pi: usize, lv: usize, level: &Level| -> u64 {
+        spill
+            .and_then(|s| s.len_of(li as u32, pi as u8, lv as u8))
+            .unwrap_or(level.bits.len() as u64)
+    };
     let mut head = Vec::with_capacity(body_start);
     head.extend_from_slice(MAGIC);
     put32(&mut head, VERSION);
@@ -3731,23 +3881,24 @@ pub fn write_ovo_to(occ: &Occupancy, w: &mut dyn std::io::Write) -> std::io::Res
     head.extend_from_slice(&(top_len as u16).to_le_bytes());
     head.extend_from_slice(&top[..top_len]);
     let mut body_len: u64 = 0;
-    for layer in &occ.layers {
+    for (li, layer) in occ.layers.iter().enumerate() {
         put32(&mut head, layer.layer);
         put32(&mut head, layer.dt);
         head.push(layer.status);
         put64(&mut head, layer.work);
         let planes = planes_written(layer);
         head.push(planes.len() as u8);
-        for plane in planes {
+        for (pi, plane) in planes.iter().enumerate() {
             head.push(plane.depth);
             for lv in 0..n_levels {
                 match plane.levels.get(lv) {
                     Some(level) => {
+                        let len = level_len(li, pi, lv, level);
                         put32(&mut head, level.w);
                         put32(&mut head, level.h);
                         put64(&mut head, body_start as u64 + body_len);
-                        put64(&mut head, level.bits.len() as u64);
-                        body_len += level.bits.len() as u64;
+                        put64(&mut head, len);
+                        body_len += len;
                     }
                     None => {
                         put32(&mut head, 0);
@@ -3761,11 +3912,16 @@ pub fn write_ovo_to(occ: &Occupancy, w: &mut dyn std::io::Write) -> std::io::Res
     }
     debug_assert_eq!(head.len(), body_start);
     w.write_all(&head)?;
-    for layer in &occ.layers {
-        for plane in planes_written(layer) {
+    let mut buf: Vec<u8> = Vec::new();
+    for (li, layer) in occ.layers.iter().enumerate() {
+        for (pi, plane) in planes_written(layer).iter().enumerate() {
             for lv in 0..n_levels {
                 if let Some(level) = plane.levels.get(lv) {
-                    w.write_all(&level.bits)?;
+                    let key = (li as u32, pi as u8, lv as u8);
+                    match spill {
+                        Some(sp) if sp.len_of(key.0, key.1, key.2).is_some() => sp.copy_to(key, w, &mut buf)?,
+                        _ => w.write_all(&level.bits)?,
+                    }
                 }
             }
         }
@@ -6180,10 +6336,57 @@ mod tests {
         let occ = build(&d, 7, 8, &opts(0.01)).unwrap();
         let image = write_ovo(&occ);
         let mut streamed: Vec<u8> = Vec::new();
-        let n = write_ovo_to(&occ, &mut streamed).unwrap();
+        let n = write_ovo_to(&occ, None, &mut streamed).unwrap();
         assert_eq!(n as usize, image.len());
         assert_eq!(streamed, image);
         assert!(OvoFile::from_bytes(streamed).is_ok());
+    }
+
+    /// a summary whose pyramids a spill holds writes the same file as the
+    /// one with them in memory, and the spill goes with its file
+    #[test]
+    fn the_spilled_pyramids_write_the_same_file() {
+        let mut child = cell("C");
+        child.rects.push(rect(1, 0, 0, 20, 20, Rep::One));
+        child.rects.push(rect(2, 5, 5, 300, 300, Rep::One));
+        let mut top = cell("T");
+        top.rects.push(rect(1, 100, 0, 20, 20, Rep::One));
+        top.places.push(PlaceRec { cell: 1, x: 0, y: 0, rot: 0, flip: false, rep: Rep::One });
+        top.places.push(PlaceRec { cell: 1, x: 900, y: 900, rot: 1, flip: true, rep: Rep::One });
+        let d = doc_with(vec![top, child], 0, vec![(1, 0), (2, 0), (3, 0)]);
+        let occ = build(&d, 7, 8, &opts(0.01)).unwrap();
+        assert!(occ.n_levels >= 2 && occ.layers.iter().filter(|l| l.status == STATUS_OK).count() == 2);
+        let image = write_ovo(&occ);
+        let dir = std::env::temp_dir().join(format!("floe-spill-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(PLANES_TMP);
+        let mut spill = Spill::create(&path).unwrap();
+        let mut spilled = occ.clone();
+        // every second level to the spill, the others left in memory
+        let mut k = 0;
+        for (li, layer) in spilled.layers.iter_mut().enumerate() {
+            for (pi, plane) in layer.planes.iter_mut().enumerate() {
+                for (lv, level) in plane.levels.iter_mut().enumerate() {
+                    k += 1;
+                    if k % 2 == 0 {
+                        spill.put((li as u32, pi as u8, lv as u8), &level.bits).unwrap();
+                        level.bits = Vec::new();
+                    }
+                }
+            }
+        }
+        assert!(spill.bytes() > 0 && spill.at.len() >= 2);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), spill.bytes());
+        let streamed = write_ovo_with(&spilled, Some(&spill));
+        assert_eq!(streamed, image);
+        let mut through: Vec<u8> = Vec::new();
+        assert_eq!(write_ovo_to(&spilled, Some(&spill), &mut through).unwrap() as usize, image.len());
+        assert_eq!(through, image);
+        assert!(OvoFile::from_bytes(streamed).is_ok());
+        drop(spill);
+        assert!(!path.exists(), "the spill file goes with the spill");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -106,6 +106,8 @@ def check_summary_budget(work, src):
             fail("design.ovo under --mem 0.1 (%s) differs from the default budget's" % backing)
         if (out / "design.places.tmp").exists():
             fail("the placement store's staging file was left behind (%s)" % backing)
+        if (out / "design.planes.tmp").exists():
+            fail("the pyramids' spill file was left behind (%s)" % backing)
         for name in ("design.inv", "design.seg", "meta.json"):
             if not (out / name).is_file():
                 fail("the light cache lacks %s under --mem 0.1 (%s)" % (name, backing))
