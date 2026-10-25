@@ -493,7 +493,9 @@ assert not hasattr(gui, "live_caps")
         changes with it (the displayed and the margin frame are redrawn),
         the status line says it, the job carries it, a forwarded density=
         sets it; a renderer without it keeps no state, the menu item is
-        insensitive."""
+        insensitive. On needs the cache's design.ovs (0.12.401, user
+        2026-10-25): without it the toggle and a forwarded density=on are
+        refused on the status line and the patch carries off."""
         import inspect
         from types import SimpleNamespace
         from floe import gui
@@ -512,7 +514,14 @@ assert not hasattr(gui, "live_caps")
         v.frames_on = True
         v.labels_on = True
         v._color_epoch = 1
+        class Status:
+            text = None
+
+            def set_text(self, value):
+                self.text = value
+
         v.cache = SimpleNamespace(is_jobdeck=False)
+        v.rstatus = Status()
         v.thin_mode = "auto"
         v._density_menu_item = Item()
         v.density_on = False
@@ -526,16 +535,31 @@ assert not hasattr(gui, "live_caps")
         gui.Viewer._toggle_density(v)
         self.assertFalse(v.density_on)
         self.assertEqual(redraws, [])
-        # the Rust renderer's
+        # the Rust renderer's: on needs the cache's design.ovs (0.12.401,
+        # user 2026-10-25) - a cache without it (a light cache) has the
+        # toggle refused on the status line, nothing redrawn
         v.worker = SimpleNamespace(supports_density=True)
         gui.Viewer._sync_density_capability(v)
         self.assertTrue(v._density_menu_item.sensitive)
+        self.assertFalse(gui.Viewer._density_available(v))
+        gui.Viewer._toggle_density(v)
+        self.assertFalse(v.density_on)
+        self.assertEqual(redraws, [])
+        self.assertIn("design.ovs", v.rstatus.text)
+        ovs_dir = tempfile.mkdtemp(prefix="floe-ovs-")
+        self.addCleanup(shutil.rmtree, ovs_dir, True)
+        open(os.path.join(ovs_dir, "design.ovs"), "wb").close()
+        v.cache = SimpleNamespace(is_jobdeck=False, dir=ovs_dir)
+        self.assertTrue(gui.Viewer._density_available(v))
         p = _policy_viewer()
         self.assertFalse(gui.Viewer._ctl_policy(p)["density"])
         gui.Viewer._toggle_density(v)
         self.assertTrue(v.density_on)
         self.assertEqual(redraws, [True])
         p.density_on = v.density_on
+        self.assertFalse(gui.Viewer._ctl_policy(p)["density"],
+                         "the patch carries the density only with the file")
+        p.cache = v.cache
         self.assertTrue(gui.Viewer._ctl_policy(p)["density"],
                         "the view controller's patch carries it")
         # none where nothing is under a cut (exact) or in a deck's frames -
@@ -553,13 +577,6 @@ assert not hasattr(gui, "live_caps")
         self.assertIn('"density under the cut\\tv"', inspect.getsource(gui.Viewer._build_menubar))
         self.assertIn("density:%s", inspect.getsource(gui.Viewer._depth_label))
         # a forwarded density= (and --density through pending_fields)
-
-        class Status:
-            text = None
-
-            def set_text(self, value):
-                self.text = value
-
         v.detail, v.depth_value, v.label_font_px = 1, 0, 14
         v._ddlg = v._fontdlg = None
         v.dstatus = Status()
@@ -569,6 +586,14 @@ assert not hasattr(gui, "live_caps")
         self.assertFalse(gui.Viewer._forwarded_view_options(v, ["density=off"]))
         self.assertTrue(gui.Viewer._forwarded_view_options(v, ["density=on"]))
         self.assertTrue(v.density_on)
+        # a forwarded density=on without the file is refused and said (stderr
+        # and the status line), the density left off
+        v.cache = SimpleNamespace(is_jobdeck=False)
+        with mock.patch("sys.stderr", new=io.StringIO()) as err:
+            self.assertTrue(gui.Viewer._forwarded_view_options(v, ["density=on"]))
+        self.assertFalse(v.density_on)
+        self.assertIn("design.ovs", err.getvalue())
+        self.assertIn("design.ovs", v.rstatus.text)
 
     def test_gui_occupancy_toggle_follows_backend_capability(self):
         """The viewer's occupancy summary toggle (user 2026-10-20: "an option
@@ -578,7 +603,10 @@ assert not hasattr(gui, "live_caps")
         renderd's rule (a jobdeck on, a layout off, FLOE_RUST_OCCUPANCY) and
         the patch carries nothing; set, the patch carries it (a deck's too),
         the status line says it, a forwarded occupancy= sets it; a renderer
-        without the summary keeps no state, the menu item is insensitive."""
+        without the summary keeps no state, the menu item is insensitive.
+        On needs a layout cache's design.ovo (0.12.401, user 2026-10-25):
+        without it the toggle and a forwarded occupancy=on are refused on
+        the status line; a deck's passes are renderd's rule."""
         import inspect
         from types import SimpleNamespace
         from floe import gui
@@ -588,6 +616,12 @@ assert not hasattr(gui, "live_caps")
 
             def set_sensitive(self, value):
                 self.sensitive = bool(value)
+
+        class Status:
+            text = None
+
+            def set_text(self, value):
+                self.text = value
 
         had = os.environ.pop("FLOE_RUST_OCCUPANCY", None)
         try:
@@ -625,6 +659,22 @@ assert not hasattr(gui, "live_caps")
             p = _policy_viewer()
             self.assertNotIn("occupancy", gui.Viewer._ctl_policy(p),
                              "unsaid: renderd's rule, nothing on the patch")
+            # on needs a layout cache's design.ovo (0.12.401, user
+            # 2026-10-25): without it the toggle is refused on the status
+            # line, nothing redrawn; a deck's passes are renderd's rule
+            v.rstatus = Status()
+            self.assertFalse(gui.Viewer._occupancy_available(v))
+            gui.Viewer._toggle_occupancy(v)
+            self.assertIsNone(v.occupancy_on)
+            self.assertEqual(redraws, [])
+            self.assertIn("design.ovo", v.rstatus.text)
+            self.assertTrue(gui.Viewer._occupancy_available(
+                SimpleNamespace(cache=SimpleNamespace(is_jobdeck=True))))
+            ovo_dir = tempfile.mkdtemp(prefix="floe-ovo-")
+            self.addCleanup(shutil.rmtree, ovo_dir, True)
+            open(os.path.join(ovo_dir, "design.ovo"), "wb").close()
+            v.cache = SimpleNamespace(is_jobdeck=False, dir=ovo_dir)
+            self.assertTrue(gui.Viewer._occupancy_available(v))
             gui.Viewer._toggle_occupancy(v)
             self.assertTrue(v.occupancy_on)
             self.assertEqual(redraws, [True])
@@ -644,13 +694,6 @@ assert not hasattr(gui, "live_caps")
                           inspect.getsource(gui.Viewer._build_menubar))
             self.assertIn("occupancy:%s", inspect.getsource(gui.Viewer._depth_label))
             # a forwarded occupancy= (and --occupancy through pending_fields)
-
-            class Status:
-                text = None
-
-                def set_text(self, value):
-                    self.text = value
-
             v.detail, v.depth_value, v.label_font_px = 1, 0, 14
             v.lod_on = False
             v.frames_on = v.labels_on = True
@@ -663,6 +706,14 @@ assert not hasattr(gui, "live_caps")
             self.assertFalse(gui.Viewer._forwarded_view_options(v, ["occupancy=on"]))
             self.assertTrue(gui.Viewer._forwarded_view_options(v, ["occupancy=off"]))
             self.assertFalse(v.occupancy_on)
+            # a forwarded occupancy=on without the file is refused and said
+            # (stderr and the status line), the choice left unsaid
+            v.cache = SimpleNamespace(is_jobdeck=False)
+            with mock.patch("sys.stderr", new=io.StringIO()) as err:
+                self.assertTrue(gui.Viewer._forwarded_view_options(v, ["occupancy=on"]))
+            self.assertIsNone(v.occupancy_on)
+            self.assertIn("design.ovo", err.getvalue())
+            self.assertIn("design.ovo", v.rstatus.text)
         finally:
             if had is None:
                 os.environ.pop("FLOE_RUST_OCCUPANCY", None)

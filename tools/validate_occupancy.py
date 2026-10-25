@@ -1645,6 +1645,12 @@ class RenderTests(unittest.TestCase):
             nofile, s_no, _ = self._render(self.worker, visible=[(1, 0)])
             self.assertEqual(s_no["none"], "nofile")
             self.assertEqual(nofile, off)
+            # an explicit occupancy=on without the file is refused (0.12.401,
+            # user 2026-10-25), the error naming what makes it
+            with self.assertRaises(AssertionError) as refused:
+                self._render(self.worker, visible=[(1, 0)], occupancy=True)
+            self.assertIn("design.ovo", str(refused.exception))
+            self.assertIn("--occupancy-only", str(refused.exception))
             ovo.write_bytes(keep[:-9])
             _, s_bad, _ = self._render(self.worker, visible=[(1, 0)])
             self.assertEqual(s_bad["none"], "invalid")

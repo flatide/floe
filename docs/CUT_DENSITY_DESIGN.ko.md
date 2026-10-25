@@ -3586,10 +3586,12 @@ design.ovo는 필요 없다. 탑에서 한 번 걷는다.
   - 이 머신의 합성 칩 fit에서는 1스레드 355~361 ms, 8스레드 70~72 ms였다.
 - 다음은 기존 계획 경로로 그린다:
   - 자기 파일(design.ovs.<셀>, 아래 root 뷰 절)이 없는 셀의 root 뷰. 탑 바로 아래의 큰 셀이 아니거나,
-    `--roots 0` 또는 0.12.315 이전 빌드인 경우다.
+    `--roots 0` 또는 0.12.315 이전 빌드인 경우다(0.12.401 뒤에도 그대로: 탑의 design.ovs가 있는 캐시는 밀도
+    파일이 있는 것이다 — §10.17).
   - 레이어별 단계(`FLOE_RUST_DENSITY_STAGES=on`)
   - 밝기 모드(패턴 끔)
-  - design.ovs가 없거나 다른 인덱스의 것인 캐시
+  - design.ovs가 다른 인덱스의 것이거나 읽히지 않는 캐시. 파일이 없는 캐시는 0.12.401부터 계획 경로가 아니라 밀도
+    없이 그린다(§10.17).
   - 첫 판 형식(version 1)도 같다: `floe-index ovs`로 다시 만들어야 한다.
 - design.ovs는 캐시를 연 뒤 한 번 찾는다. 뷰어를 띄운 뒤 만들었다면 다시 띄워야 한다.
 - 프레임은 `density_plan2`의 `occ_layers`(사용한 레이어 수)와 `occ_cell_nm`(셀)을 싣는다. 상태줄은 계획 내역 대신
@@ -3732,3 +3734,25 @@ design.ovs가 탑 기준이라 root 뷰는 계획 경로로 갔다. 사용자 �
 - MAIN01(배치 10배)의 빌드 시간·메모리는 현장 측정이 필요하다. 합성 칩 비례로는 걷기 수 분, 메모리 수 GB다.
 - 실칩의 20 s가 실제로 사라지는지, 점 밀도·색이 허용되는지는 현장 측정으로 판정한다.
 - 시작 depth는 아직 받지 않는다.
+
+### 10.17 design.ovs가 없으면 밀도를 거부한다 (2026-10-25, 0.12.401 / RENDERD 0.12.359)
+
+- 배경: §10.16의 점유 밀도는 캐시에 파일이 없으면 §10.15의 플랜 기반 2패스로 돌아갔다. 경량 캐시(DIRECT_READ_PLAN L6)에는
+  design.ovs가 없어 9.2 GB 합성 칩의 근접 뷰에서 그 2패스가 분 단위였고(DIRECT_READ_PLAN §8.23), 사용자는 "ovs가 없으면
+  density on을 거부"하기로 했다.
+- 규칙: renderd `run_render_attempt`가 밀도 스택이 켜질 요청(exact 아님, area-true, `density_stack_on`)에서
+  `Cache::has_density_file()`(캐시의 design.ovs, 탑의 파일)이 거짓이면 요청의 `density`를 끔으로 바꾼다 — 1패스의 2패스
+  예약, fit·보관 프레임 키, 2패스 모두 끔 프레임과 바이트 동일 — 프레임 줄에 `density_none=nofile`(있으면 `-`). 플랜
+  폴백은 `FLOE_RUST_DENSITY_OCC=off`(킬 스위치, 진단)에서만 남는다. 탑의 파일이 있는 캐시에서 자기 design.ovs.<셀>이
+  없는 셀의 root 뷰는 종전대로 플랜이고(§10.16의 root 뷰 절; 작은 셀의 플랜은 그 셀 크기에 묶인다), 파일이 있으나 읽히지
+  않으면 종전대로 `occ_density`의 줄과 플랜이다.
+- 캡처: app-core `render::density_for` — 덱은 끔, 명시적 `--density on`은 파일이 없으면 입력 오류로 거절(floe2는 exit 1, floe2-web은 2; 경량 캐시 "a light
+  cache draws no density; the full index has it", 전체 색인 "`floe-index ovs CACHE` adds it to a full index"), 말하지
+  않은 기본 켬은 파일이 있을 때만. 뷰어: gui.py `_density_available()`로 토글·시작 옵션(`--density on`, 넘어온
+  `density=on`)을 거절하고 하단 줄에 적는다; 요청의 `density`는 파일이 있을 때만 켬; 라벨 ` · density:none (no
+  design.ovs)`(renderd의 `density_none=nofile`도 같은 라벨). perf 필드 `density_none`은 app-core `view/perf.rs`와 oracle
+  `rust_render.py`가 넘긴다.
+- 게이트: `density_stack` `occ_density_checks`(파일 없음 = 끔 프레임 바이트 동일, `density_none=nofile`, occ_layers·
+  regions 0; 킬 스위치 워커는 종전 플랜 프레임; `occ_root_checks`의 SML root 뷰는 그대로 플랜), `light_cache`
+  `check_summary_prune`(경량 캐시의 `floe2 render --density on`이 입력 오류 exit 1, stderr에 design.ovs와 light cache; depth 1은
+  frames on이면 한 라운드, off면 0 — 0.12.400까지는 밀도 2패스의 플랜이 양쪽을 채웠다).

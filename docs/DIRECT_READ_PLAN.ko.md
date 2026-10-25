@@ -437,6 +437,7 @@ geometry/placement/text x·y, W/H, 점 목록, 경로 확장, 반복, 배치 대
 | 경량 캐시 완성 | 사용자 2026-10-24: 16 GB 맥북에서 9.2 GB 합성 칩의 `--stream --mem 0.5`가 셀 예산에 거절 — "어떤 상황에서도 인덱싱" 검토 → "경량캐시를 완성해줘" | **완료 0.12.398(§8.21)**: 요약 패스의 배치 저장소(자식별 run, 메모리/임시 파일; 상한·건너뜀 없음, 매 open의 재시도도 없음), 파일 단위 깊이 상한(바이트 상한을 넘기면 셀을 굵히기 전에 깊이 평면을 접음: p10 93 → 449 레이어 ok), 게이트 light_cache·vfs_stream·occupancy |
 | 경량 캐시 메모리 2단계 | §8.21의 측정: 파싱한 큰 셀의 실제 메모리가 Doc 추정의 약 3배, 피라미드가 끝까지 상주 → 전체 칩 `--mem 8`에서 14 GB | **완료 0.12.399(§8.22)**: 마킹 패스의 셀 파싱이 배치·텍스트를 만들지 않음(`parse_cell_bytes_shapes`, 도형 추정으로 과금), 묶음이 끝난 피라미드를 디스크에 내림(`Spill`, `design.planes.tmp`, 쓸 때 복사) — 바이트 동일; 측정은 §8.22 |
 | 레이아웃의 요약 가지치기 | 사용자 2026-10-25: 맥북에서 경량 캐시의 fit이 오래 걸리고 `+` 8~9회부터 20초 넘게 걸림(밀도 off면 빠른 듯) | **완료 0.12.400(§8.23)**: 레이아웃 경로 일곱 곳의 `!frames`를 덱과 같은 `prune_summary_when`으로 — 요약이 그리는 뷰에서 걷기·probe·채움이 사라짐; 측정은 §8.23 |
+| 파일이 없으면 거부 | 사용자 2026-10-25: ".ovs가 없으면 density on을 거부하고 ovo가 없으면 occupancy on을 거부하는게 맞는 동작"; 캡처의 명시적 `--occupancy on`은 요약을 먼저 만들고 그림 | **완료 0.12.401(§8.24)**: renderd가 design.ovs 없는 캐시의 밀도 요청을 끔으로 그리고(`density_none=nofile`, 플랜 폴백 없음) design.ovo 없는 명시적 `occupancy=on`을 오류로 거절; 캡처 `density_for`(입력 오류)와 뷰어 토글·시작 옵션의 거절; 게이트 density_stack·occupancy·light_cache |
 | L7 후속 | 요약 패스 1패스화/마킹 가속, ovs 합치기(레이아웃 밀도), B안(정규 페이지), 세그먼트 캐시 디스크 보존(방문한 셀의 디코드 결과를 남겨 다음 세션 가속), 1패스 경량 생성(셀 로컬 점유 격자 합성) | 각각 — **L7a 완료 0.12.386(§8.9)**: 이미지 증분 합성(제자리 성장, 채움 시점 노드 마스크, 채움 바이트 해제), 세그먼트 pread 묶음·병렬 인코딩; **L7b 완료 0.12.387(§8.10)**: 요약 패스의 마커가 셀을 직접 파싱(리더 풀·상주 창 없음, 묶음이 안 쓰는 셀은 읽지 않음), 다각형 스캔 변환 버퍼 재사용, 크기 예산 밖의 레이어는 마킹하지 않음; 나머지(1패스 경량 생성은 §8.10의 정확성 논거로 보류)는 사용자 지시에 따라 |
 
 L0는 하루, L1~L3는 S1~S3와 비슷한 크기(재고 코드 위의 확장), L4가 본체다.
@@ -1627,7 +1628,48 @@ pass의 `summary_building`처럼 "아직 안 채운 셀"을 그림에 남기고 
 같은 형태; 라벨 on도 채움 0. 전체 배터리 452(가지치기·라벨)·453(probe 우선) ALL OK.
 
 **남은 것.** 요약 경계를 처음 지나는 프레임의 큰 셀 채움(디코드 + BVH 인코딩; 한 번), design.ovs 없는 경량 캐시의 밀도
-2패스(플랜 기반; 요약 뷰에서는 이제 가지치기로 가벼움, 근접 뷰에서는 측정 뒤 판단).
+2패스(플랜 기반; 요약 뷰에서는 이제 가지치기로 가벼움, 근접 뷰에서는 측정 뒤 판단) → **§8.24(0.12.401)**: design.ovs가
+없으면 밀도를 거부하기로(사용자 결정), 플랜 폴백은 없어졌다.
+
+### 8.24 파일이 없으면 거부 — design.ovs 없는 밀도, design.ovo 없는 요약 (0.12.401 / floe-index·renderd 0.12.359, 2026-10-25; 사용자 결정)
+
+**결정.** §8.23 뒤 사용자: ".ovs가 없으면 density on을 거부하고 ovo가 없으면 occupancy on을 거부하는게 맞는 동작 같음",
+그리고 "캡쳐에서 명시적으로 --occupancy on이라면 요약을 먼저 만들고 그리는게 맞음". 지금까지는 둘 다 파일이 없으면
+조용히 다른 경로로 그렸다 — 밀도는 페이지 플랜 기반 2패스(경량 캐시에는 design.ovs가 없어 §8.23의 칩에서 근접 뷰의
+2패스가 분 단위), 요약은 perf 줄에 `summary: none (nofile)`을 적고 페이지 경로.
+
+**규칙.**
+- 밀도(캐시의 design.ovs). renderd `run_render_attempt`는 밀도 스택이 켜질 요청(exact 아님, area-true,
+  `density_stack_on`)에서 캐시에 파일이 없으면(`Cache::has_density_file`) 요청의 `density`를 끔으로 바꿔 그린다 — 1패스의
+  2패스 예약, fit·보관 프레임 키, 2패스까지 끔 프레임과 바이트 동일 — 프레임 줄에 `density_none=nofile`(있으면 `-`). 플랜
+  기반 2패스 폴백은 없다; `FLOE_RUST_DENSITY_OCC=off`(킬 스위치)는 진단용으로 플랜을 유지한다. 탑의 파일이 있는 캐시에서
+  자기 design.ovs.<셀>이 없는 셀의 root 뷰는 종전대로 플랜(CUT_DENSITY_DESIGN §10.16; 밀도 게이트 `occ_root_checks`의
+  SML), 파일이 있으나 읽히지 않는 경우도 종전대로 `occ_density`의 줄과 플랜이다. 캡처(`floe2 render/capture`)는 app-core
+  `render::density_for`: 덱은 끔, 명시적 `--density on`은 design.ovs가 없으면 입력 오류로 거절(floe2는 exit 1, floe2-web은 2; 경량 캐시 "a light cache draws
+  no density; the full index has it", 전체 색인 "`floe-index ovs CACHE` adds it to a full index"), 말하지 않으면 기본
+  켬은 파일이 있을 때만. 뷰어(gui.py `_density_available`): 토글 켬 거절 + 하단 줄, `--density on`/넘어온 `density=on`
+  거절(stderr `[floe2] --density on refused: …`), 요청의 `density`는 파일이 있을 때만 켬, 라벨 ` · density:none (no
+  design.ovs)`(renderd의 `density_none=nofile`도 같은 라벨). `floe2 render --help`의 `--density` 설명도 파일을 말한다.
+- 요약(design.ovo). renderd는 명시적 `occupancy=on`에 선택 사유가 `nofile`/`invalid`이면 오류로 거절한다 — "occupancy=on
+  asked but the cache's design.ovo is absent: `floe2 index SRC --occupancy-only` makes it"(덱 pass는 `run_deck_render`,
+  `summary_building` 규칙 그대로; render-core가 `NONE_NOFILE`/`NONE_INVALID`를 내보낸다). 말하지 않은 요청
+  (`FLOE_RUST_OCCUPANCY=on`의 레이아웃)은 종전처럼 `nofile`과 페이지 경로. 뷰어(`_occupancy_available`: 레이아웃은
+  design.ovo, 덱은 참): 토글 켬 거절 + 하단 줄 "occupancy summary needs design.ovo in the cache (floe2 index SRC
+  --occupancy-only adds it)", `--occupancy on`/넘어온 `occupancy=on` 거절(정하지 않은 상태로 둠). 캡처의 명시적
+  `--occupancy on`은 종전(0.12.388)대로 요약을 먼저 만들고 그린다(자동 색인; `--no-index`면 renderd의 거절이 오류).
+- perf 필드: 프레임 줄 끝의 `density_none`을 app-core `view/perf.rs`와 oracle `rust_render.py`가 넘긴다.
+
+**게이트.** `density_stack` `occ_density_checks`의 design.ovs 없는 사례: 켬 프레임 = 끔 프레임(바이트 동일),
+`density_none=nofile`, `density_plan2`의 occ_layers·regions 0; 킬 스위치 워커는 종전 플랜 프레임과 동일. `occupancy`
+게이트의 파일 없는 사례: 명시적 occupancy=on이 "design.ovo … --occupancy-only"로 거절. `light_cache` `check_summary_prune`:
+경량 캐시에 `floe2 render --density on`이 입력 오류 exit 1, stderr에 design.ovs·light cache; 같은 게이트의 depth 1 사례는 바뀌었다 —
+frames on은 depth-1 셀을 채우는 한 라운드, frames off는 0(요약 가지치기; 0.12.400까지는 경량 캐시의 밀도 2패스 플랜이 양쪽을
+똑같이 채워 "라운드 수가 같음"이었다). `rust_renderer`의 뷰어 토글 테스트 두 건도 파일 규칙으로 갱신(파일 없는 스텁 캐시는 토글과
+넘어온 on이 거절되고 패치는 끔; 임시 디렉터리의 design.ovs/design.ovo로 종전처럼 켜짐). 검증: 유닛 테스트(render-core 440,
+renderd 203, app-core 34, app-cli 25) 통과; 배터리 454(`--only occupancy,density_stack,light_cache`: 앞의 둘 통과, light_cache는
+거절 종료 코드 기대값 2→1 수정), 455(전체: unit~vfs_stream 23개 통과, light_cache의 depth 1 기대값 갱신), 456(light_cache~gtk_view
+25개 통과, rust_renderer의 토글 테스트 갱신), 457(rust_renderer·klayout 통과) — 같은 바이너리로 모든 게이트 통과(게이트 기대값 갱신
+세 건은 모두 이 변경이 설계한 동작).
 
 ## 9. 검토한 대안
 

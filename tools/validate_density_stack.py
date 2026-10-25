@@ -3008,15 +3008,25 @@ def occ_density_checks(temp):
         for w in workers.values():
             w.stop()
     occ_cost_checks(src, ice, env, occ)
-    # no design.ovs: the plans, byte for byte the frame without the switch
+    # no design.ovs: no pass 2 at all (0.12.401, user 2026-10-25: the file
+    # refuses the density, nothing plans in its place) - the frame is the
+    # density-off one and the line says density_none=nofile; the kill switch
+    # FLOE_RUST_DENSITY_OCC=off keeps the plans, byte for byte the walk's frame
     (ice / 'design.ovs').unlink()
-    bare = worker(src, occ)
+    bare, bare_off, bare_walk = worker(src, occ), worker(src, dict(occ, FLOE_RUST_DENSITY_STACK='off')), worker(src, env)
     try:
         pixels, res = view(bare, 1)
-        assert res['density_plan2']['occ_layers'] == 0 and pixels == walk, res['density_plan2']
+        off_pixels, off_res = view(bare_off, 1)
+        p2 = res.get('density_plan2') or {}
+        assert res.get('density_none') == 'nofile' and p2.get('occ_layers', 0) == 0 and p2.get('regions', 0) == 0, (res.get('density_none'), p2)
+        assert pixels == off_pixels, 'no design.ovs: the frame must be the density-off one'
+        assert off_res.get('density_none') == '-', off_res.get('density_none')
+        planned, planned_res = view(bare_walk, 1)
+        assert planned_res.get('density_none') == '-' and planned == walk, (planned_res.get('density_none'), planned_res['density_plan2'])
     finally:
-        bare.stop()
-    print('density stack: no design.ovs - the walk\'s frame; floe-index ovs refuses a cache without design.ovb, builds the same bytes again')
+        for w in (bare, bare_off, bare_walk):
+            w.stop()
+    print('density stack: no design.ovs - no pass 2 (density_none=nofile, the density-off frame), the kill switch plans the walk\'s frame; floe-index ovs refuses a cache without design.ovb, builds the same bytes again')
     occ_review_checks(temp, env, occ)
     occ_root_checks(temp, env, occ)
 

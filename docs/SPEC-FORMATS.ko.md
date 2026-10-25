@@ -192,7 +192,9 @@ design.ovm의 배치 레코드는 부모별 BVH 순서(자식별 아님)라 "셀
 정본: `rust/vfs/src/occ_density.rs`(`build`, `encode_file`, `OvsFile`), 생성 `rust/cli/src/vfs.rs`(`write_ovs`,
 `write_ovs_after_build`, `remove_cell_ovs`), 그리기 `rust/render-core/src/occ.rs`·`cache.rs`(`occ_density`).
 밀도 스택 2패스를 계획 없이 그리는 레이어 × 배치 depth 평면이다(0.12.317부터 기본, `FLOE_RUST_DENSITY_OCC=off`면
-쓰지 않음; CUT_DENSITY_DESIGN §10.16).
+쓰지 않음; CUT_DENSITY_DESIGN §10.16). 0.12.401부터 캐시에 이 파일이 없으면 2패스를 플랜으로 대신 그리지 않는다 —
+renderd는 밀도 없이 그리고 프레임 줄에 `density_none=nofile`을 적으며, 명시적 `--density on`과 뷰어의 토글은 거절된다
+(CUT_DENSITY_DESIGN §10.17, SPEC-VIEWER §5 density; 경량 캐시에는 이 파일이 없다).
 
 - 파일:
   - `design.ovs`: 탑의 파일, version 3.

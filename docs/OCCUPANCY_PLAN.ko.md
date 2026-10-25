@@ -1123,3 +1123,13 @@ occupancy는 정밀할수록 용량이 커진다: 셀을 절반으로 줄이면 
 요약 가지치기 규칙이 `!frames`에 머문 것(덱은 0.12.395부터 `prune_summary_when`). 뷰어 기본 frames on에서 요약이 그리는
 fit도 계층을 끝까지 걷고 경량 캐시의 큰 셀 배치를 채워 분 단위였다(fit 첫 프레임 246~254 s, 4 mm 51~58 s; 같은 배율 두
 번째 0.4 s). renderd 일곱 곳을 덱의 규칙으로 바꿨다. §6의 선택 규칙은 그대로다. 측정은 DIRECT_READ_PLAN §8.23.
+
+### 2026-10-25 — 파일이 없으면 거부: design.ovo 없는 occupancy on, design.ovs 없는 density on (0.12.401 / RENDERD 0.12.359, 사용자 결정)
+
+사용자: ".ovs가 없으면 density on을 거부하고 ovo가 없으면 occupancy on을 거부하는게 맞는 동작 같음"; 캡처의 명시적
+`--occupancy on`은 요약을 먼저 만들고 그린다(0.12.388 그대로). renderd는 레이아웃의 명시적 `occupancy=on`에 선택 사유가
+`nofile`/`invalid`이면 오류("occupancy=on asked but the cache's design.ovo is absent: `floe2 index SRC --occupancy-only`
+makes it")로 거절하고, 밀도 스택은 캐시에 design.ovs가 없으면 플랜 기반 2패스 대신 밀도 없이 그린다(프레임 줄
+`density_none=nofile`; 킬 스위치 `FLOE_RUST_DENSITY_OCC=off`만 플랜 유지). 뷰어는 토글과 시작 옵션을 파일 유무로 거절한다
+(gui.py `_density_available`/`_occupancy_available`). 말하지 않은 요청(`FLOE_RUST_OCCUPANCY=on`의 레이아웃, 덱 pass의
+`summary_building` 규칙)은 그대로다. 상세는 DIRECT_READ_PLAN §8.24, SPEC-VIEWER §5, CUT_DENSITY_DESIGN §10.17.

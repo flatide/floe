@@ -876,6 +876,17 @@ impl Cache {
         self.link.run_within(work, deadline)
     }
 
+    /// Whether the cache directory holds the occupancy density the density
+    /// stack's pass 2 draws by (`occ_density`): design.ovs, the top's file.
+    /// Without it there is no pass 2 (0.12.401, user 2026-10-25: the file's
+    /// absence refuses the density rather than planning it from the pages;
+    /// a light cache has none). A view root of a cell without its own
+    /// design.ovs.<cell> in a cache that has the top's keeps the plans, as
+    /// before (occ_density: the big cells' files are an acceleration).
+    pub fn has_density_file(&self) -> bool {
+        std::path::Path::new(&format!("{}/design.ovs", self.dir)).is_file()
+    }
+
     /// Whether the cache directory holds a design.ovo (the occupancy
     /// summary of the wide view; `summary_selection` reads and validates
     /// it per request).

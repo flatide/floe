@@ -507,7 +507,7 @@ pub fn run_summary(
                         } else {
                             String::new()
                         },
-                        budget_fit_brief(fit, !dataset.is_deck() && capture.shot.density_on())
+                        budget_fit_brief(fit, crate::render::density_for(dataset, &capture.shot).unwrap_or(false))
                     ));
                 }
             }
@@ -589,7 +589,7 @@ pub fn run_summary(
         let mut doc = serde_json::json!({"source":dataset.source(),"dbu":dataset.dbu(),"shots":rows,
             "cut_px":shots[0].capture.shot.detail.cut_px(),"thin":shots[0].capture.shot.thin.name(),
             // the density under the cut drawn (--density; a jobdeck draws none)
-            "density":!dataset.is_deck() && shots[0].capture.shot.density_on(),
+            "density":crate::render::density_for(dataset, &shots[0].capture.shot).unwrap_or(false),
             // the occupancy summary asked for (--occupancy; null = renderd's rule)
             "occupancy":shots[0].capture.shot.occupancy,
             // a layout's default layer colours (--layer-colors; a jobdeck: null)

@@ -467,6 +467,9 @@ impl FrameReport {
         );
         summary.insert("pages_skipped".into(), int_value(wi("summary_pages")));
         put("summary", Value::Object(summary));
+        // the density stack without its file (renderd 0.12.359: `nofile` - no
+        // pass 2 drawn; `-` otherwise)
+        put("density_none", Value::from(fields.get("density_none").map_or("-", String::as_str)));
         put("text_plan_ms", ms(wi("text_plan_us")));
         // a light cache's fill rounds over the open, and a frame that went
         // out before its own were done (renderd's light attempts, L6; 0 and

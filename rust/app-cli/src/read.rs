@@ -31,8 +31,11 @@ makes it the default, as before 0.12.350).
   --thin auto|keep|cull       Auto=keep for both layouts and jobdecks
   --density on|off           The density under the cut, as the viewer's: the
                             shapes the --detail cut drops, drawn by the area
-                            they cover; needs --detail low|medium|high; layouts
-                            (default on, as the viewer starts; off for --archival;
+                            they cover; needs --detail low|medium|high and the
+                            cache's design.ovs (on without it is refused: a
+                            light cache has none, `floe-index ovs CACHE` adds
+                            it to a full index); layouts (default on where the
+                            file is, as the viewer starts; off for --archival;
                             FLOE_RUST_DENSITY_STACK=off makes it off)
   --occupancy on|off         The occupancy summary (design.ovo) at wide views,
                             as the viewer's View > occupancy summary: on draws

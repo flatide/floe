@@ -375,7 +375,21 @@
     것이 되어 다시 그린다.
   - renderd도 보관 프레임의 키(`RetainedKey::density`)에 이 설정을 넣는다. 키에 없으면 밀도 없이 그려 보관한 프레임이
     같은 뷰의 켬 요청을 통째로(라벨만 다시 그리는 경로로) 대신해, 토글한 뷰에 밀도가 나오지 않는다.
-  - 상태줄(깊이 라벨)에 ` · density:on/off`가 붙는다.
+  - 상태줄(깊이 라벨)에 ` · density:on/off`가 붙는다. 캐시에 design.ovs가 없어 renderd가 밀도 없이 그린 프레임
+    (perf 필드 `density_none=nofile`)이면 ` · density:none (no design.ovs)`다.
+  - **파일이 없으면 거부(0.12.401 / RENDERD 0.12.359, 사용자 2026-10-25 "ovs가 없으면 density on을 거부").** 밀도
+    스택의 2패스는 캐시의 점유 밀도 design.ovs로 그린다. 캐시에 그 파일이 없으면 renderd(`run_render_attempt`,
+    `Cache::has_density_file`)는 요청의 `density=on`을 끔으로 바꿔 그린다 — 1패스의 2패스 예약, fit·보관 프레임 키,
+    2패스까지 끔 프레임과 바이트 동일 — 그리고 프레임 줄에 `density_none=nofile`을 적는다(페이지 플랜으로 2패스를
+    대신 그리던 폴백은 없다; `FLOE_RUST_DENSITY_OCC=off`는 진단용으로 플랜을 유지한다. 탑의 파일이 있는 캐시에서
+    자기 design.ovs.<셀>이 없는 셀의 root 뷰는 종전대로 플랜이다 — CUT_DENSITY_DESIGN §10.16). 뷰어는
+    `_density_available()`(레이아웃 캐시의 design.ovs; 덱은 거짓)로 토글 켬을 거절하고 하단 줄에 "density needs
+    design.ovs in the cache (floe-index ovs CACHE adds it to a full index; a light cache has none)"를 쓴다;
+    `--density on`과 넘어온 `density=on`도 같은 사유로 거절해 stderr `[floe2] --density on refused: …`와 하단 줄에
+    적고 끔으로 시작한다; 렌더 요청의 `density`는 파일이 있을 때만 켬이다. `floe2 render --density on`은 app-core
+    `render::density_for`가 입력 오류로 거절한다(floe2는 exit 1, floe2-web은 2; 경량 캐시 "a light cache draws no density; the full index has it", 전체
+    색인 "`floe-index ovs CACHE` adds it to a full index"). 말하지 않은 기본(켬)은 파일이 있을 때만 켬이다
+    (DIRECT_READ_PLAN §8.24, CUT_DENSITY_DESIGN §10.17).
   - stable floe(KLayout)는 `v`가 coverage 오버레이라 이 항목이 없다. 렌더러가 밀도 스택을 갖지 않으면
     (`supports_density` 없음) 메뉴 항목이 비활성이고 키도 아무 일을 하지 않는다.
   LOD 토글(메뉴 항목·`l` 키·깊이 라벨의 `lod:on/off`·`floe2 view --lod`)은 제거됐다(2026-09-22
@@ -400,8 +414,18 @@
   - 보관 프레임의 키는 요약 선택(`RetainedKey::summary`)을 이미 담고 있어 토글한 뷰가 이전 프레임으로 대신되지
     않는다. 예산 맞춤 기억(`fit_memory_key`)에는 요약이 플랜에서 뺀 레이어(`PlanRequest::summary_layers`)를
     더했다: 같은 배율에서 요약 켬과 끔은 서로 다른 페이지 집합을 맞춘 것이라 서로의 결정을 쓰지 않는다.
-  - 상태줄(깊이 라벨)에 ` · occupancy:on/off`가 붙는다. 캐시에 design.ovo가 없으면 켜도 perf 줄이 `summary: none
-    (nofile)`이고 그림은 그대로다(레이아웃은 `floe2 index SRC --occupancy-only`로 만든다).
+  - 상태줄(깊이 라벨)에 ` · occupancy:on/off`가 붙는다.
+  - **파일이 없으면 거부(0.12.401 / RENDERD 0.12.359, 사용자 2026-10-25 "ovo가 없으면 occupancy on을 거부").**
+    레이아웃 캐시에 design.ovo가 없거나(renderd 선택 사유 `nofile`) 이 캐시의 것이 아니면(`invalid`) 명시적
+    `occupancy=on`은 renderd가 오류로 거절한다 — "occupancy=on asked but the cache's design.ovo is absent: `floe2
+    index SRC --occupancy-only` makes it"(0.12.400까지는 perf 줄에 `summary: none (nofile)`을 적고 페이지 경로로
+    그렸다). 뷰어는 `_occupancy_available()`(레이아웃 캐시의 design.ovo; 덱은 renderd의 pass 규칙이라 참)로 토글
+    켬을 거절하고 하단 줄에 "occupancy summary needs design.ovo in the cache (floe2 index SRC --occupancy-only adds
+    it)"를 쓴다; `--occupancy on`과 넘어온 `occupancy=on`도 같은 사유로 거절해 stderr와 하단 줄에 적고 정하지 않은
+    상태(renderd의 규칙)로 둔다. 말하지 않은 요청(renderd의 규칙; `FLOE_RUST_OCCUPANCY=on`의 레이아웃)은 종전처럼
+    `nofile`을 적고 페이지 경로로 그린다. 캡처의 명시적 `--occupancy on`은 요약을 먼저 만들고 그린다(0.12.388의
+    자동 색인; 사용자 2026-10-25 "캡쳐에서 명시적으로 --occupancy on이라면 요약을 먼저 만들고 그리는게 맞음") —
+    `--no-index`로 만들 수 없을 때만 renderd의 거절이 그대로 오류다(DIRECT_READ_PLAN §8.24).
   - **경량 캐시(DIRECT_READ_PLAN L6, 0.12.384).** 깊이 라벨에 레이아웃이면 ` · cache:light`(meta.json
     `cache: light`), 덱이면 ` · light:N/M`(경량 소스 수/소스 수, meta `jobdeck.light_sources`)이 붙는다. 덱의
     경량 소스에 design.ovo가 아직 없으면 요약이 그릴 광역 뷰의 그 pass는 비어 있고(renderd `summary_building=N`;

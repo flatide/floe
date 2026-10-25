@@ -240,8 +240,9 @@ impl RenderSession {
             labels: shot.labels,
             font_px: shot.font_px,
             thin: shot.thin.effective(dataset.is_deck()),
-            // a jobdeck's frames draw no density (renderd's deck pass): off
-            density: Some(!dataset.is_deck() && shot.density_on()),
+            // a jobdeck's frames draw no density (renderd's deck pass): off;
+            // a layout's needs the cache's design.ovs (density_for)
+            density: Some(density_for(dataset, shot)?),
             // the occupancy summary as asked (--occupancy; None = renderd's rule)
             occupancy: shot.occupancy,
             format: FrameFormat::Png,
@@ -530,5 +531,31 @@ mod tests {
         );
         let cut = frame(&[("fit_pct", "141"), ("fit_cull", "1")]);
         assert_eq!(budget_fit_brief(&budget_fit(&cut).unwrap(), false), "cut x1.41, hairlines culled");
+    }
+}
+
+/// The density under the cut a capture draws (user 2026-10-25: the file
+/// refuses, nothing plans in its place): a jobdeck none; a layout's explicit
+/// `--density on` needs the cache's design.ovs - refused without it, naming
+/// what makes it (`floe-index ovs CACHE` on a full index; a light cache has
+/// none) - and the default (shots::density_default, on since 0.12.351) holds
+/// where the file is and is off where it is not.
+pub fn density_for(dataset: &Dataset, shot: &Shot) -> Result<bool> {
+    let Dataset::Layout(layout) = dataset else {
+        return Ok(false);
+    };
+    let has_ovs = layout.directory.join("design.ovs").is_file();
+    match shot.density {
+        Some(true) if !has_ovs => Err(Error::input(format!(
+            "--density on needs the cache's design.ovs, and {} has none ({})",
+            layout.directory.display(),
+            if layout.kind == crate::cache::CacheKind::Light {
+                "a light cache draws no density; the full index has it"
+            } else {
+                "`floe-index ovs CACHE` adds it to a full index"
+            }
+        ))),
+        Some(on) => Ok(on),
+        None => Ok(shot.density_on() && has_ovs),
     }
 }

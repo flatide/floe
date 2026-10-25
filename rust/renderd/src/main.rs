@@ -3976,6 +3976,26 @@ fn run_render_attempt(
         .cache
         .as_ref()
         .ok_or_else(|| "cache not open".to_string())?;
+    // the density stack needs the cache's occupancy density file (user
+    // 2026-10-25: without design.ovs the density is refused, nothing plans
+    // in its place; a light cache has none, and the planned pass 2 took
+    // minutes there): the frame is the density-off one in every part -
+    // pass 1's reserve, the fit and retained keys, no pass 2 - and its line
+    // says `density_none=nofile`; FLOE_RUST_DENSITY_OCC=off keeps the plans
+    // (the diagnostic path, density_occ_enabled). A view root of a cell
+    // without its own design.ovs.<cell>, and a file that will not read, are
+    // occ_density's cases still (the plans, with its line).
+    let density_none_word = if !command.exact
+        && area_true_enabled()
+        && density_stack_on(&command)
+        && density_occ_enabled()
+        && !cache.has_density_file()
+    {
+        command.density = Some(false);
+        "nofile"
+    } else {
+        "-"
+    };
     // Cell coverage is initialized only after pass 1 leaves space for
     // density (render_density_frame). A fully covered frame needs neither
     // pass-2 plans nor a whole-hierarchy coverage warm-up.
@@ -4003,6 +4023,22 @@ fn run_render_attempt(
         layout_off,
     )?;
     let summary_key = SummaryKey::of(&summary);
+    // an explicit occupancy=on needs the file (user 2026-10-25: a missing or
+    // invalid design.ovo refuses the summary rather than drawing the wide
+    // view through the pages); a jobdeck's passes keep their own rule
+    // (floe_render_core DeckSource::summary_pending, the viewer's banner) -
+    // its frames go through run_deck_render, not this attempt
+    if command.occupancy == Some(true) {
+        if let Some(reason) = summary
+            .none
+            .filter(|r| *r == floe_render_core::NONE_NOFILE || *r == floe_render_core::NONE_INVALID)
+        {
+            return Err(format!(
+                "occupancy=on asked but the cache's design.ovo is {}: `floe2 index SRC --occupancy-only` makes it",
+                if reason == floe_render_core::NONE_NOFILE { "absent" } else { "not this cache's (invalid)" }
+            ));
+        }
+    }
     // the summarized layers' subtrees leave the walk when no hierarchy frame
     // can come of it - frames off, or the depth unlimited or at or past the
     // hierarchy height - the deck's rule since 0.12.395 (floe_render_core
@@ -5017,7 +5053,7 @@ fn run_render_attempt(
             .map_or(QueryContext::default(), |p| p.context)
             .wire();
         let response = format!(
-                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} fit_pct={} fit_cull={} fit_over={} fit_thin={} fit_full_pct={} fit_none_pct={} fit_fixed={} fit_redecided={} sub_cut_boxes={} sub_cut_box_over={} sub_cut_box_level={} sub_cut_box_unsure={} shape_cut={} shape_cut_max={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={} once_tiles={} once_passes={} once_items={} place_walks={} density_stack={} density_pages={} density_us={} density_bin={} density_dots={} density_floor={} density_block={} density_plan2={} queue_us={} wall_us={} fit_scale={} fit_refits={} fit_probe_us={} fit_probe_walk={} fit_ranked={} fit_layers_whole={} fit_layer_edge={} fit_layers_out={} light_rounds={} light_pending={} bands={} band_pages={}",
+                "frame gen={} round={} final={} png={} format={} partial={} deferred={} frame_cache_hit={} style_epoch={} plan_us={} text_plan_us={} labels={} labels_truncated={} text_place_records={} read_us={} decode_us={} decode_sum_us={} decode_max_us={} index_us={} decode_workers={} scene_us={} mask_bytes={} raster_us={} raster_tile_max_us={} tiles_reused={} bin_items={} bin_overflow={} bin_defer_rep={} bin_defer_single={} bin_defer_wmax={} png_us={} publish_write_us={} publish_sync_us={} publish_rename_us={} workers={} tiles={} tile_px={} pages={} plan_pages={} cache_hit={} cache_miss={} cache_evict={} resident_bytes={} wc_cells={} inst_edges={} frame_rects={} rect_paints={} polygon_paints={} path_paints={} frame_paints={} label_tile_paints={} label_pixel_paints={} rep_tested={} rep_drawn={} hier_cells={} subtree_prunes={} retained_bytes={} cull_pages={} cull_pbvh={} cull_cbvh={} cull_children={} cull_layer={} washed={} lod_swapped={} thin_frames={} thin_pages={} sub_cut_washes={} sub_cut_sparse={} sub_cut_sparse_over={} sub_cut_wash_over={} rep_kept={} rep_washed={} rep_children={} rep_page_level={} rep_level={} fit_pct={} fit_cull={} fit_over={} fit_thin={} fit_full_pct={} fit_none_pct={} fit_fixed={} fit_redecided={} sub_cut_boxes={} sub_cut_box_over={} sub_cut_box_level={} sub_cut_box_unsure={} shape_cut={} shape_cut_max={} summary_layers={} summary_cells={} summary_pixels={} summary_level={} summary_cell_um={} summary_none={} summary_pages={} stored_rep_points={} stored_rep_tested={} stored_rep_limited={} stored_rep_nodes={} stored_rep_proxies={} stored_rep_bytes={} stored_rep_pixels={} stored_rep_spans={} stored_rep_painted_pixels={} once_tiles={} once_passes={} once_items={} place_walks={} density_stack={} density_pages={} density_us={} density_bin={} density_dots={} density_floor={} density_block={} density_plan2={} queue_us={} wall_us={} fit_scale={} fit_refits={} fit_probe_us={} fit_probe_walk={} fit_ranked={} fit_layers_whole={} fit_layer_edge={} fit_layers_out={} light_rounds={} light_pending={} bands={} band_pages={} density_none={}",
                 command.generation,
                 wire_round,
                 final_round as u8,
@@ -5194,6 +5230,7 @@ fn run_render_attempt(
                 light_continue as u8,
                 bands,
                 band_pages,
+                density_none_word,
             );
         respond(responses, format!("{response} {query_context}"));
         // Representative batches bound query work, not the number of full
@@ -5998,7 +6035,11 @@ fn render_density_frame(
                     // design.ovs classes shapes by the larger side: frames cut
                     // so alone (ShapeCut::Larger, the default), at the plan's
                     // cut (upper_cut; a budget's raise in it); a view root by
-                    // its cell's design.ovs.<cell> (none: the plans draw)
+                    // its cell's design.ovs.<cell>. A cache without design.ovs
+                    // never reaches pass 2 (run_render_attempt turns the
+                    // density off before pass 1, 0.12.401); a cell without its
+                    // own file, or a file that will not read, leaves the plans
+                    // to draw
                     if density_occ_enabled()
                         && styled.raster.density_pattern
                         && staged_plane.is_none()

@@ -1573,6 +1573,9 @@ class RustRenderWorker:
             "plan_ms": state["plan_us"] / 1000.0,
             "fit_probe_ms": state["fit_probe_us"] / 1000.0,
             "fit_probe_walk": bool(state["fit_probe_walk"]),
+            # the density stack without its design.ovs: "nofile" (renderd
+            # 0.12.359 draws no pass 2 then); "-" otherwise
+            "density_none": fields.get("density_none", "-"),
             "wc_cells": _wire_int(fields, "wc_cells"),
             "inst_edges": _wire_int(fields, "inst_edges"),
             "frame_rects": _wire_int(fields, "frame_rects"),

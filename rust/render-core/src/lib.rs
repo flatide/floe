@@ -64,7 +64,7 @@ pub use scene::FrameScene;
 pub use stats::{place_walks_wire, RenderStats, DENSITY_STACK_COUNTS, PLACE_WALK_OUTCOMES};
 pub use summary::{
     cull_allowed as summary_cull_allowed, layout_allowed as summary_layout_allowed,
-    level_for as summary_level_for, SummaryPlane, SummarySelection,
+    level_for as summary_level_for, SummaryPlane, SummarySelection, NONE_INVALID, NONE_NOFILE,
 };
 
 pub use floe_vfs::hier::FixedFit;

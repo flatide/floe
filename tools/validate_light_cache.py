@@ -124,8 +124,11 @@ def check_summary_prune(work, src):
     light cache with its summary, the prefill off so every expanded cell
     costs a fill round, captured at the fit with the summary: no `[light]
     round` with frames on or off and the two pictures byte-identical; at
-    depth 1 the frames still draw (the pictures differ) and the rounds
-    are the same either way."""
+    depth 1 the frames still draw (the pictures differ): frames on fills
+    the depth-1 cells for them (one round), frames off fills nothing - the
+    summarized subtrees are pruned and a light cache draws no density
+    (0.12.401: no design.ovs, no pass 2; until 0.12.400 the planned pass 2
+    filled them with frames on or off alike)."""
     floe2 = ROOT / "rust" / "target" / "release" / "floe2"
     env = dict(os.environ, FLOE_INDEX_BIN=str(BIN), FLOE_RENDERD_BIN=str(ROOT / "rust" / "target" / "release" / "floe-renderd"),
                FLOE_LIGHT_LOG="on", FLOE_LIGHT_PREFILL_PLACES="0", FLOE_LIGHT_PREFILL_MB="0")
@@ -157,13 +160,26 @@ def check_summary_prune(work, src):
     lab, lab_rounds = capture("on", labels="on")
     if lab_rounds:
         fail("labels on at the summarized fit: the label walk filled: %s" % lab_rounds)
+    # an explicit --density on needs design.ovs, which a light cache has none
+    # of: refused (0.12.401, user 2026-10-25) as an input error - floe2's
+    # input errors exit 1 (floe2/src/main.rs Host; floe2-web's 2); unsaid,
+    # the density is off there
+    r = run([floe2, "render", src, "--px", "400", "--detail", "medium", "--occupancy", "on", "--density", "on",
+             "--no-index", "--out", work / "prune_density_refused.png"], ok=(1,), what="floe2 render --density on (light)", env=env)
+    if "design.ovs" not in r.stderr or "light cache" not in r.stderr:
+        fail("--density on on a light cache was not refused for design.ovs: %s" % r.stderr[-400:])
     d1_on, d1_on_rounds = capture("on", 1)
     d1_off, d1_off_rounds = capture("off", 1)
     if d1_on == d1_off:
         fail("depth 1 with frames should draw them")
-    if len(d1_on_rounds) != len(d1_off_rounds):
-        fail("depth 1: the rounds differ with frames on/off: %s vs %s" % (d1_on_rounds, d1_off_rounds))
-    print("  summary prune: a layout's fit with the summary fills nothing with frames or labels on or off (depth 1 still draws the frames)")
+    # the frames at depth 1 need the depth-1 cells' placements: a fill round;
+    # with frames off the summarized subtrees are pruned and, the density
+    # off on a light cache (0.12.401), nothing else walks them
+    if not d1_on_rounds:
+        fail("depth 1 with frames on: the frames need the depth-1 cells, yet nothing was filled")
+    if d1_off_rounds:
+        fail("depth 1 with frames off: the summarized subtrees are pruned, yet the walk filled: %s" % d1_off_rounds)
+    print("  summary prune: a layout's fit with the summary fills nothing with frames or labels on or off; depth 1 draws the frames (one fill round with them, none without)")
 
 
 def check_metadata_budget(work, src):

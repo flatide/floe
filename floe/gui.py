@@ -3620,12 +3620,26 @@ class Viewer:
                 pass
         if opts.get("thin") in ("auto", "keep", "cull"):
             self._set_thin(opts["thin"], redraw=False)
-        # --density / a forwarded density= (2026-10-05)
+        # --density / a forwarded density= (2026-10-05); on needs the
+        # cache's design.ovs (0.12.401, user 2026-10-25: refused and said)
         if opts.get("density") in ("on", "off"):
-            self.density_on = opts["density"] == "on"
-        # --occupancy / a forwarded occupancy= (2026-10-20)
+            if opts["density"] == "on" and not self._density_available():
+                print("[%s] --density on refused: %s" % (APP, self.DENSITY_REFUSED),
+                      file=sys.stderr, flush=True)
+                self.rstatus.set_text("--density on refused: " + self.DENSITY_REFUSED)
+                self.density_on = False
+            else:
+                self.density_on = opts["density"] == "on"
+        # --occupancy / a forwarded occupancy= (2026-10-20); on needs the
+        # layout cache's design.ovo (0.12.401)
         if opts.get("occupancy") in ("on", "off"):
-            self.occupancy_on = opts["occupancy"] == "on"
+            if opts["occupancy"] == "on" and not self._occupancy_available():
+                print("[%s] --occupancy on refused: %s" % (APP, self.OCCUPANCY_REFUSED),
+                      file=sys.stderr, flush=True)
+                self.rstatus.set_text("--occupancy on refused: " + self.OCCUPANCY_REFUSED)
+                self.occupancy_on = None
+            else:
+                self.occupancy_on = opts["occupancy"] == "on"
         frames = opts.get("frames")
         labels = opts.get("labels")
         if frames in ("on", "off"):
@@ -4491,7 +4505,7 @@ class Viewer:
             # the density is of what a cut drops: none at exact (it would
             # only take pass 2's reserve from pass 1's budget) and none in a
             # deck's frames (renderd's deck pass) - floe2 render's rule too
-            "density": bool(getattr(self, "density_on", False))
+            "density": bool(getattr(self, "density_on", False)) and self._density_available()
             and cut > 0 and not deck,
         }
         # the occupancy summary (View > occupancy summary, `o`): the user's
@@ -4715,6 +4729,10 @@ class Viewer:
             else:
                 self.rstatus.set_text(
                     "refining %d pages..." % (report.get("refining") or 1))
+        # renderd's word on the density file (0.12.401): `nofile` when the
+        # density stack asked had no design.ovs - a view root's own file
+        # too - and the frame came out without it
+        self._density_nofile = fields.get("density_none") == "nofile"
         self._set_status(self.view_bbox(), mode, brief)
         self._summary_banner_update(fields)
         self._cell_hl_follow()
@@ -5679,10 +5697,16 @@ class Viewer:
             lbl += " · thin:%s" % self._effective_thin()
             lbl += " · frame:%s" % (
                 "on" if self.frames_on else "off")
-            # the density under the cut (View > density, `v`)
+            # the density under the cut (View > density, `v`): none where
+            # the cache has no design.ovs (0.12.401; the default on holds
+            # only with the file)
             if self._density_key() is not None:
-                lbl += " · density:%s" % (
-                    "on" if self.density_on else "off")
+                if self.density_on and (not self._density_available()
+                                        or getattr(self, "_density_nofile", False)):
+                    lbl += " · density:none (no design.ovs)"
+                else:
+                    lbl += " · density:%s" % (
+                        "on" if self.density_on else "off")
             # the occupancy summary (View > occupancy summary, `o`)
             if self._occupancy_key() is not None:
                 lbl += " · occupancy:%s" % (
@@ -5741,13 +5765,46 @@ class Viewer:
         self.abstract = not self.abstract
         self._on_depth()
 
+    def _density_available(self):
+        """The occupancy density file the density stack draws by:
+        design.ovs in the cache (user 2026-10-25: without it the density is
+        refused, not planned from the pages; a light cache has none, a
+        jobdeck draws no density)."""
+        cache = getattr(self, "cache", None)
+        if cache is None or getattr(cache, "is_jobdeck", False):
+            return False
+        d = getattr(cache, "dir", None)
+        return bool(d) and os.path.isfile(os.path.join(d, "design.ovs"))
+
+    def _occupancy_available(self):
+        """The occupancy summary file: design.ovo in a layout's cache
+        (user 2026-10-25: without it the summary is refused); a jobdeck's
+        passes are renderd's rule (DeckSource::summary_pending)."""
+        cache = getattr(self, "cache", None)
+        if cache is None:
+            return False
+        if getattr(cache, "is_jobdeck", False):
+            return True
+        d = getattr(cache, "dir", None)
+        return bool(d) and os.path.isfile(os.path.join(d, "design.ovo"))
+
+    DENSITY_REFUSED = ("density needs design.ovs in the cache (floe-index ovs "
+                       "CACHE adds it to a full index; a light cache has none)")
+    OCCUPANCY_REFUSED = ("occupancy summary needs design.ovo in the cache "
+                         "(floe2 index SRC --occupancy-only adds it)")
+
     def _toggle_density(self):
         """`v` / View > density under the cut (user 2026-10-05: "a density
         on/off option in the viewer"): the shapes the detail's cut drops,
         drawn as the density of the area they cover (renderd's density
         stack, CUT_DENSITY_DESIGN §10.12) - on or off from the next frame;
-        the status line says which. The Rust renderer only."""
+        the status line says which. The Rust renderer only. Without the
+        cache's design.ovs the toggle on is refused (0.12.401, user
+        2026-10-25) and the status line says what makes the file."""
         if self._density_key() is None:
+            return
+        if not self.density_on and not self._density_available():
+            self.rstatus.set_text(self.DENSITY_REFUSED)
             return
         self.density_on = not self.density_on
         self._on_depth()
@@ -5764,6 +5821,10 @@ class Viewer:
         none (nofile)` where the cache has no design.ovo. The Rust
         renderer only."""
         if self._occupancy_key() is None:
+            return
+        if not self._occupancy_effective() and not self._occupancy_available():
+            # (0.12.401, user 2026-10-25: the file refuses the summary)
+            self.rstatus.set_text(self.OCCUPANCY_REFUSED)
             return
         self.occupancy_on = not self._occupancy_effective()
         self._on_depth()
