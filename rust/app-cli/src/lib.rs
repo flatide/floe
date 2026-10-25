@@ -18,7 +18,7 @@ pub mod selfcheck;
 mod svrf;
 use floe_app_core::{
     index::{Action, IndexMode, IndexOptions, PreparedIndex, ProfileCell},
-    jobdeck::index::{is_deck, parse_levels},
+    jobdeck::index::{is_deck, parse_levels, ChipSelection},
     native::{Discovery, Indexer},
     Error, ErrorKind, Result,
 };
@@ -123,6 +123,11 @@ const INDEX_HELP: &str = "Usage: floe2-web index SOURCE [OPTIONS]
 
   --force                    Allow replacement of stale/existing cache
   --level N,N,...            Jobdeck: index sources of these mask levels only
+  --chipid ID,ID,...         Jobdeck: the sources these CHIP blocks place only
+                            (ids exact, or * ? [..] patterns as render --chip)
+  --chipnumber N,N-M,...     Jobdeck: the sources of these CHIP blocks, numbered
+                            1.. in deck order (ranges N-M); with --chipid a chip
+                            in either list is in; --level cuts across both
   --jobs N                   Native parser/planner workers (default 12)
   --page-target-mb N          Encoded page target MiB (native default 1)
   --lod / --no-lod            LOD generation opt-in / default off
@@ -191,7 +196,13 @@ The source path may contain spaces/Unicode. Use -- for a leading dash.";
 enum Cli {
     Help(bool),
     Version,
-    Index(PathBuf, Box<IndexOptions>, Option<BTreeSet<i64>>, ready::Wait),
+    Index(
+        PathBuf,
+        Box<IndexOptions>,
+        Option<BTreeSet<i64>>,
+        Option<ChipSelection>,
+        ready::Wait,
+    ),
     Read(Box<read::Command>),
     Clip(Box<clip::Command>),
     Jobdeck(Box<deck_analysis::Command>),
@@ -240,6 +251,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
     let mut occupancy_mode = None;
     let mut source = None;
     let mut levels = None;
+    let mut chips = ChipSelection::default();
     // --wait / --no-wait over FLOE_LOCK_WAIT (ready.rs)
     let mut ready = ready::Ready::from_env()?;
     let mut positional = false;
@@ -415,6 +427,10 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
             "--profile-repeat" => options.profile_repeat = number(value()?, flag)?,
             "--profile-snapshot" => options.profile_snapshot = Some(PathBuf::from(value()?)),
             "--level" => levels = Some(parse_levels(value()?)?),
+            // the CHIP blocks to index (0.12.402, user 2026-10-25: a deck's
+            // index split by chips, the parts run at once)
+            "--chipid" => chips.add_ids(value()?)?,
+            "--chipnumber" => chips.add_numbers(value()?)?,
             _ => {
                 return Err(Error::input(format!(
                     "unsupported index option: {flag}; run {} index --help",
@@ -428,10 +444,14 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli> {
     if levels.is_some() && !is_deck(&source) {
         return Err(Error::input("--level requires a .jb source"));
     }
+    let chips = (!chips.is_empty()).then_some(chips);
+    if chips.is_some() && !is_deck(&source) {
+        return Err(Error::input("--chipid / --chipnumber require a .jb source"));
+    }
     if is_deck(&source) && options.profile_cell.is_some() {
         return Err(Error::input("profile a jobdeck source OASIS directly"));
     }
-    Ok(Cli::Index(source, Box::new(options), levels, ready.wait))
+    Ok(Cli::Index(source, Box::new(options), levels, chips, ready.wait))
 }
 
 /// Where a command's own lines go: stdout, or stderr for an index a read
@@ -577,10 +597,10 @@ fn run(cli: Cli, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
                 floe_worker_client::EXPECTED_RENDERD_VERSION
             )
         }
-        Cli::Index(source, options, levels, wait) => {
+        Cli::Index(source, options, levels, chips, wait) => {
             let mut waiter = ready::Waiter::new(wait, cancelled);
             if is_deck(&source) {
-                return deck_index::run(&source, levels, &options, &mut waiter, cancelled);
+                return deck_index::run(&source, levels, chips, &options, &mut waiter, cancelled);
             }
             // a cache with readers in the way of this run: a rebuild or a
             // replacement of what they map - it is there already
@@ -724,7 +744,7 @@ mod tests {
     use super::*;
     #[test]
     fn the_summary_caps_are_options_of_index() {
-        let Cli::Index(_, o, _, _) = parsed(&[
+        let Cli::Index(_, o, _, _, _) = parsed(&[
             "index",
             "x",
             "--occupancy-max-work",
@@ -755,7 +775,7 @@ mod tests {
     }
     #[test]
     fn parser_keeps_values_and_defaults() {
-        let Cli::Index(p, o, _, _) = parsed(&[
+        let Cli::Index(p, o, _, _, _) = parsed(&[
             "index",
             "한 글.oas",
             "--jobs=16",
@@ -769,20 +789,49 @@ mod tests {
         assert_eq!(p, PathBuf::from("한 글.oas"));
         assert_eq!(o.jobs, 16);
         assert!(o.lod);
-        let Cli::Index(p, o, _, _) = parsed(&["index", "--", "-source.oas"]).unwrap() else {
+        let Cli::Index(p, o, _, _, _) = parsed(&["index", "--", "-source.oas"]).unwrap() else {
             panic!()
         };
         assert_eq!(p, PathBuf::from("-source.oas"));
         assert_eq!(o.jobs, 12);
         assert!(!o.lod);
         assert_eq!(o.occupancy, None);
-        let Cli::Index(_, o, levels, _) =
+        let Cli::Index(_, o, levels, _, _) =
             parsed(&["index", "x.JB", "--level", "2,1,2", "--lod"]).unwrap()
         else {
             panic!()
         };
         assert_eq!(levels, Some(BTreeSet::from([1, 2])));
         assert!(o.lod);
+    }
+    #[test]
+    fn chip_selectors_parse_and_need_a_deck() {
+        let Cli::Index(_, _, levels, chips, _) = parsed(&[
+            "index",
+            "x.jb",
+            "--level",
+            "1",
+            "--chipid",
+            "ID001,ID00[23]",
+            "--chipnumber",
+            "2,5-7",
+            "--chipnumber=9",
+        ])
+        .unwrap() else {
+            panic!()
+        };
+        assert_eq!(levels, Some(BTreeSet::from([1])));
+        let chips = chips.unwrap();
+        assert_eq!(chips.ids, ["ID001", "ID00[23]"]);
+        assert_eq!(chips.numbers, [(2, 2), (5, 7), (9, 9)]);
+        let Cli::Index(_, _, _, none, _) = parsed(&["index", "x.jb"]).unwrap() else {
+            panic!()
+        };
+        assert!(none.is_none());
+        assert!(parsed(&["index", "x.oas", "--chipid", "A"]).is_err());
+        assert!(parsed(&["index", "x.jb", "--chipnumber", "0"]).is_err());
+        assert!(parsed(&["index", "x.jb", "--chipnumber", "3-2"]).is_err());
+        assert!(parsed(&["index", "x.jb", "--chipid", ","]).is_err());
     }
     #[test]
     fn occupancy_default_optout_only_and_profile_parse_without_writes() {
@@ -794,7 +843,7 @@ mod tests {
         ] {
             let mut args = vec!["index", "x.oas"];
             args.extend(flags);
-            let Cli::Index(_, o, _, _) = parsed(&args).unwrap() else {
+            let Cli::Index(_, o, _, _, _) = parsed(&args).unwrap() else {
                 panic!()
             };
             assert_eq!((o.occupancy, o.occupancy_only), (enabled, only));
@@ -806,17 +855,17 @@ mod tests {
     fn the_light_cache_is_a_mode_of_its_own() {
         // (DIRECT_READ_PLAN L5): --light / --full, exclusive; --light with an
         // option of the full index's is refused; nothing given leaves the rule
-        let Cli::Index(_, o, _, _) = parsed(&["index", "x.oas", "--light"]).unwrap() else {
+        let Cli::Index(_, o, _, _, _) = parsed(&["index", "x.oas", "--light"]).unwrap() else {
             panic!()
         };
         assert_eq!(o.light, Some(true));
         assert!(o.light_for(false) && o.light_for(true));
-        let Cli::Index(_, o, _, _) = parsed(&["index", "x.jb", "--full", "--level", "1"]).unwrap() else {
+        let Cli::Index(_, o, _, _, _) = parsed(&["index", "x.jb", "--full", "--level", "1"]).unwrap() else {
             panic!()
         };
         assert_eq!(o.light, Some(false));
         assert!(!o.light_for(true));
-        let Cli::Index(_, o, _, _) = parsed(&["index", "x.jb", "--lod"]).unwrap() else {
+        let Cli::Index(_, o, _, _, _) = parsed(&["index", "x.jb", "--lod"]).unwrap() else {
             panic!()
         };
         assert_eq!(o.light, None);
@@ -835,7 +884,7 @@ mod tests {
     #[test]
     fn invalid_or_unported_requests_never_launch_native() {
         for format in ["1", "2"] {
-            let Cli::Index(_, o, _, _) = parsed(&[
+            let Cli::Index(_, o, _, _, _) = parsed(&[
                 "index",
                 "x",
                 "--representatives-format",

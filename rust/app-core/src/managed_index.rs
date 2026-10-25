@@ -232,7 +232,7 @@ fn run(
 ) -> Result<()> {
     source.validate(flag)?;
     let entries = if source.deck {
-        let plan = DeckIndexPlan::prepare(source.path(), levels, options, flag)?;
+        let plan = DeckIndexPlan::prepare(source.path(), levels, None, options, flag)?;
         check_cancelled(flag)?;
         // No managed writer can alter the classification while the planning
         // reads are held. Reject *all* conflicts before the first native child;

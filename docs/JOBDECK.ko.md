@@ -316,8 +316,16 @@ floe2 index deck.jb --force --lod --jobs 16
 (n/N) ok <src> (Ts; M:SS elapsed, ~M:SS left)`를 찍는다(N = 이번 실행이 처리할
 소스 수, 남은 시간은 지금까지의 소스당 평균; 실패는 `FAILED <src> (exit E; …)`).
 마지막 줄은 `[jobdeck] index : B built, F failed, K kept`.
-`--level 1,3`을 추가하면 그 레벨이 참조하는 소스만 처리한다. `--lod`는
-각 소스의 인덱싱 명령에 전달되며, 생략하면 기존 기본값인 LOD 미생성을
+`--level 1,3`을 추가하면 그 레벨이 참조하는 소스만 처리한다. **칩 단위 선택(0.12.402, 사용자
+2026-10-25: 덱 색인을 칩으로 나눠 여러 호스트에서 동시에 돌리기 위해 — 이 덱의 EBEAM 파일은 칩마다
+달라 나눈 부분이 소스를 공유하지 않는다)**: `--chipid ID,…`는 그 id의 CHIP 블록이 배치하는 소스만
+(id는 정확히, 또는 `render --chip`과 같은 `*` `?` `[..]` 패턴), `--chipnumber N,N-M,…`은 덱 순서로 1부터
+세는 CHIP 블록 번호(범위 가능)로 고른다. 두 목록은 합집합이고 `--level`과는 교집합이다; 덱에 없는 id나
+번호, 레이아웃 소스에 붙인 옵션은 입력 오류로 거절한다. 출력에 `[jobdeck] chips : K of M CHIP block(s):
+n:ID,…`(앞의 32개) 한 줄이 붙는다. 같은 소스를 두 실행이 만나면 뒤의 것은 busy로 건너뛰고(`--wait`면
+대기) 마지막 줄에 `N busy`로 세므로, 끝에 플래그 없는 `floe2 index deck.jb`를 한 번 더 돌리면 빠진 것만
+채워진다(`JobDeck::sources_in`, `ChipSelection`, 게이트 `test_chip_selectors_index_the_chips_sources_only`).
+`--lod`는 각 소스의 인덱싱 명령에 전달되며, 생략하면 기존 기본값인 LOD 미생성을
 유지한다. 현재 캐시는 `--lod`만으로 교체하지 않으므로 LOD 없이 만든
 캐시를 갱신하려면 `--force`가 필요하다. 원본 OASIS는 변경하지 않는다.
 

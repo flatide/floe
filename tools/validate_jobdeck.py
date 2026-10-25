@@ -956,6 +956,60 @@ class LightSummaryTests(unittest.TestCase):
 
 
 class JobdeckIndexLodTests(unittest.TestCase):
+    def test_chip_selectors_index_the_chips_sources_only(self):
+        """`floe2 index deck.jb --chipid ID,.. --chipnumber N,N-M,..` (0.12.402,
+        user 2026-10-25: a deck's index split by chips, the parts run at once
+        on several hosts): the sources the named CHIP blocks place alone -
+        ids exact or as render --chip's patterns, numbers 1-based in deck
+        order - a chip in either list in, --level across; an id or a number
+        the deck has not is refused (floe2's input error, exit 1); a malformed
+        list and the options on a layout are argument errors (exit 2, as
+        --level's are)."""
+        binary = ROOT / "rust" / "target" / "release" / "floe-index"
+        self.assertTrue(binary.is_file(), "release floe-index is not built")
+        env = {"FLOE_INDEX_BIN": str(binary)}
+        with tempfile.TemporaryDirectory(prefix="jobdeck chips ") as td:
+            work = Path(td)
+            names = ("chipA.oas", "chipB.oas", "mark.oas")
+            for name in names:
+                build_thin_oas(work / name)
+            deck = work / "test.jb"
+            deck.write_text(DECK, encoding="utf-8")
+
+            def indexed():
+                return {name for name in names
+                        if Path(vfs_cache_dir(work / name)).is_dir()}
+
+            # CHIP block 2 (ID002) places chipA and chipB
+            r = run_floe2("index", deck, "--chipnumber", "2", "--jobs", "2", env=env, ok=0)
+            self.assertIn("[jobdeck] chips     : 1 of 3 CHIP block(s): 2:ID002", r.stdout)
+            self.assertIn("2 built, 0 failed, 0 kept", r.stdout)
+            self.assertEqual(indexed(), {"chipA.oas", "chipB.oas"})
+            # ID003 places chipA (kept) and mark (built)
+            r = run_floe2("index", deck, "--chipid", "ID003", "--jobs", "2", env=env, ok=0)
+            self.assertIn("1 of 3 CHIP block(s): 3:ID003", r.stdout)
+            self.assertIn("1 built, 0 failed, 1 kept", r.stdout)
+            self.assertEqual(indexed(), set(names))
+            # a pattern, cut by --level: ID001 and ID003 place mark alone at level 3
+            r = run_floe2("index", deck, "--chipid", "ID00[13]", "--level", "3", "--jobs", "2", env=env, ok=0)
+            self.assertIn("[jobdeck] levels    : 3 of ", r.stdout)
+            self.assertIn("2 of 3 CHIP block(s): 1:ID001,3:ID003", r.stdout)
+            self.assertIn("0 built, 0 failed, 1 kept", r.stdout)
+            # a chip in either list is in: ID001 by id, block 2 by number
+            r = run_floe2("index", deck, "--chipid", "ID001", "--chipnumber", "2", "--jobs", "2", env=env, ok=0)
+            self.assertIn("2 of 3 CHIP block(s): 1:ID001,2:ID002", r.stdout)
+            self.assertIn("0 built, 0 failed, 3 kept", r.stdout)
+            # refusals
+            r = run_floe2("index", deck, "--chipid", "NOPE", env=env, ok=1)
+            self.assertIn("chip id(s) NOPE not in the deck (3 CHIP block(s)", r.stderr)
+            self.assertIn("info DECK --chips", r.stderr)
+            r = run_floe2("index", deck, "--chipnumber", "4,1", env=env, ok=1)
+            self.assertIn("chip number(s) 4 not in the deck (it has 3 CHIP block(s)", r.stderr)
+            r = run_floe2("index", deck, "--chipnumber", "0", env=env, ok=2)
+            self.assertIn("--chipnumber", r.stderr)
+            r = run_floe2("index", work / "chipA.oas", "--chipid", "ID001", env=env, ok=2)
+            self.assertIn("require a .jb source", r.stderr)
+
     def test_lod_reaches_each_source_and_preserves_force_and_level_selection(self):
         from validate_vfs import read_ovm
 

@@ -2,7 +2,7 @@ use crate::{ready::Waiter, Out};
 use floe_app_core::{
     check_cancelled,
     index::{Action, IndexOptions},
-    jobdeck::index::{DeckIndexEntry, DeckIndexPlan},
+    jobdeck::index::{ChipSelection, DeckIndexEntry, DeckIndexPlan},
     ErrorKind, Result,
 };
 use std::collections::BTreeSet;
@@ -13,17 +13,33 @@ use std::time::Instant;
 pub fn run(
     source: &Path,
     levels: Option<BTreeSet<i64>>,
+    chips: Option<ChipSelection>,
     options: &IndexOptions,
     waiter: &mut Waiter,
     cancelled: &AtomicUsize,
 ) -> Result<i32> {
-    let plan = DeckIndexPlan::prepare(source, levels, options, cancelled)?;
+    let plan = DeckIndexPlan::prepare(source, levels, chips.as_ref(), options, cancelled)?;
     let list = |ids: &BTreeSet<i64>| ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
     if let Some(ids) = &plan.selected {
         println!(
             "[jobdeck] levels    : {} of {}",
             list(ids),
             list(&plan.levels)
+        );
+    }
+    // the CHIP blocks --chipid / --chipnumber picked, as n:ID (the first 32)
+    if let Some(pick) = &plan.chips {
+        let shown: Vec<&str> = pick.labels.iter().take(32).map(String::as_str).collect();
+        println!(
+            "[jobdeck] chips     : {} of {} CHIP block(s): {}{}",
+            pick.blocks.len(),
+            pick.total,
+            shown.join(","),
+            if pick.labels.len() > shown.len() {
+                format!(",... (+{})", pick.labels.len() - shown.len())
+            } else {
+                String::new()
+            }
         );
     }
     for info in plan.catalog.infos.values().filter(|i| !i.ok()) {

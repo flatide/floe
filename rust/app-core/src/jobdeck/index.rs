@@ -1,7 +1,7 @@
 //! One native index job at a time, each with its own requested worker count.
 //! Planning takes no write leases; each source is rechecked under its lease
 //! immediately before starting, through the ordinary PreparedIndex service.
-use super::{parser::JobDeck, sources::SourceCatalog};
+use super::{chips::wildcard, parser::JobDeck, sources::SourceCatalog};
 use crate::{cache, check_cancelled, index::IndexOptions, Error, ErrorKind, Result};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -44,6 +44,128 @@ pub fn validate_levels(deck: &JobDeck, selected: Option<&BTreeSet<i64>>) -> Resu
     }
     Ok(())
 }
+/// The CHIP blocks `floe2 index DECK` works on when `--chipid` /
+/// `--chipnumber` say (user 2026-10-25: a deck's index split by chips, the
+/// parts run at once on several hosts - a jobdeck's EBEAM files are each one
+/// chip's, so the parts share no source): ids as the CHIP lines give them -
+/// exact, or a pattern with `*`, `?`, `[..]` as `render --chip` takes - and
+/// 1-based block numbers in deck order, singly or as `A-B` ranges. A chip in
+/// either list is in; `--level` cuts across the result. Every id must name a
+/// block and every number must be within the deck (`resolve`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ChipSelection {
+    pub ids: Vec<String>,
+    /// inclusive 1-based ranges, as given
+    pub numbers: Vec<(usize, usize)>,
+}
+impl ChipSelection {
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty() && self.numbers.is_empty()
+    }
+    /// `--chipid ID,ID,..`
+    pub fn add_ids(&mut self, value: &str) -> Result<()> {
+        let before = self.ids.len();
+        self.ids.extend(
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from),
+        );
+        if self.ids.len() == before {
+            return Err(Error::input("--chipid: the chip id list is empty"));
+        }
+        Ok(())
+    }
+    /// `--chipnumber N,N-M,..`
+    pub fn add_numbers(&mut self, value: &str) -> Result<()> {
+        let bad = || {
+            Error::input(
+                "--chipnumber: the list takes 1-based CHIP block numbers N or ranges N-M (deck order)",
+            )
+        };
+        let before = self.numbers.len();
+        for token in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            let (lo, hi) = match token.split_once('-') {
+                Some((a, b)) => (
+                    a.trim().parse::<usize>().map_err(|_| bad())?,
+                    b.trim().parse::<usize>().map_err(|_| bad())?,
+                ),
+                None => {
+                    let n = token.parse::<usize>().map_err(|_| bad())?;
+                    (n, n)
+                }
+            };
+            if lo == 0 || hi < lo {
+                return Err(bad());
+            }
+            self.numbers.push((lo, hi));
+        }
+        if self.numbers.len() == before {
+            return Err(bad());
+        }
+        Ok(())
+    }
+    /// The blocks the selection names in `deck`: 0-based indices in deck
+    /// order with `n:ID` labels (n 1-based); an id naming no block, or a
+    /// number past the deck's blocks, is an input error naming them.
+    pub fn resolve(&self, deck: &JobDeck) -> Result<ChipPick> {
+        let total = deck.chips.len();
+        let mut blocks = BTreeSet::new();
+        let mut unknown = Vec::new();
+        for id in &self.ids {
+            let wild = id.contains(['*', '?', '[']);
+            let mut hit = false;
+            for (i, chip) in deck.chips.iter().enumerate() {
+                let same = if wild { wildcard(id, &chip.id) } else { chip.id == *id };
+                if same {
+                    blocks.insert(i);
+                    hit = true;
+                }
+            }
+            if !hit {
+                unknown.push(id.as_str());
+            }
+        }
+        if !unknown.is_empty() {
+            return Err(Error::input(format!(
+                "chip id(s) {} not in the deck ({total} CHIP block(s); `{} info DECK --chips` lists them; `*`, `?`, `[..]` match as render --chip)",
+                unknown.join(","),
+                crate::program()
+            )));
+        }
+        let over: Vec<String> = self
+            .numbers
+            .iter()
+            .filter(|(_, hi)| *hi > total)
+            .map(|(lo, hi)| if lo == hi { lo.to_string() } else { format!("{lo}-{hi}") })
+            .collect();
+        if !over.is_empty() {
+            return Err(Error::input(format!(
+                "chip number(s) {} not in the deck (it has {total} CHIP block(s), numbered 1..{total} in deck order)",
+                over.join(",")
+            )));
+        }
+        for &(lo, hi) in &self.numbers {
+            blocks.extend(lo - 1..hi);
+        }
+        let labels = blocks
+            .iter()
+            .map(|&i| format!("{}:{}", i + 1, deck.chips[i].id))
+            .collect();
+        Ok(ChipPick { blocks, total, labels })
+    }
+}
+/// What a `ChipSelection` came to in a deck.
+#[derive(Clone, Debug)]
+pub struct ChipPick {
+    /// 0-based CHIP block indices, deck order
+    pub blocks: BTreeSet<usize>,
+    /// the deck's CHIP block count
+    pub total: usize,
+    /// `n:ID` per block picked, deck order
+    pub labels: Vec<String>,
+}
 #[derive(Debug)]
 pub struct DeckIndexEntry {
     pub tc: String,
@@ -57,6 +179,8 @@ pub struct DeckIndexPlan {
     pub kept: usize,
     pub levels: BTreeSet<i64>,
     pub selected: Option<BTreeSet<i64>>,
+    /// the CHIP blocks `--chipid` / `--chipnumber` picked (None: every block)
+    pub chips: Option<ChipPick>,
     pub aliases: usize,
     /// light caches an explicit --full rebuilds as the full index (0.12.390;
     /// `prepare` - the auto-index's `prepare_for_open` rebuilds none)
@@ -71,10 +195,11 @@ impl DeckIndexPlan {
     pub fn prepare(
         path: &Path,
         selected: Option<BTreeSet<i64>>,
+        chips: Option<&ChipSelection>,
         options: &IndexOptions,
         cancelled: &AtomicUsize,
     ) -> Result<Self> {
-        Self::plan(path, selected, options, true, cancelled)
+        Self::plan(path, selected, chips, options, true, cancelled)
     }
 
     /// The auto-index's plan (app-cli ready.rs: a read command that opens a
@@ -95,12 +220,13 @@ impl DeckIndexPlan {
         options: &IndexOptions,
         cancelled: &AtomicUsize,
     ) -> Result<Self> {
-        Self::plan(path, selected, options, false, cancelled)
+        Self::plan(path, selected, None, options, false, cancelled)
     }
 
     fn plan(
         path: &Path,
         selected: Option<BTreeSet<i64>>,
+        chips: Option<&ChipSelection>,
         options: &IndexOptions,
         rebuild_light_under_full: bool,
         cancelled: &AtomicUsize,
@@ -130,11 +256,19 @@ impl DeckIndexPlan {
         let path = cache::absolute(path)?;
         let deck = JobDeck::read(&path, true, cancelled)?;
         validate_levels(&deck, selected.as_ref())?;
+        // the CHIP blocks --chipid / --chipnumber pick (every block unsaid)
+        let chips = chips
+            .filter(|c| !c.is_empty())
+            .map(|c| c.resolve(&deck))
+            .transpose()?;
         let mut catalog = SourceCatalog::new(
             path.parent()
                 .ok_or_else(|| Error::input("jobdeck has no parent directory"))?,
         )?;
-        catalog.probe_all(deck.sources(selected.as_ref()), cancelled)?;
+        catalog.probe_all(
+            deck.sources_in(selected.as_ref(), chips.as_ref().map(|p| &p.blocks)),
+            cancelled,
+        )?;
         let (mut todo, mut kept, mut aliases, mut full_over_light) = (Vec::new(), 0, 0, 0);
         let mut destinations = BTreeSet::new();
         for (tc, info) in &catalog.infos {
@@ -195,6 +329,7 @@ impl DeckIndexPlan {
             kept,
             levels: deck.levels(),
             selected,
+            chips,
             aliases,
             full_over_light,
         })
@@ -213,5 +348,53 @@ mod tests {
         assert!(parse_levels("1.0").is_err());
         let deck = JobDeck::parse("x", "CHIP A\n$ (1,A)", true, &AtomicUsize::new(0)).unwrap();
         assert!(validate_levels(&deck, Some(&BTreeSet::from([2]))).is_err());
+    }
+    #[test]
+    fn chip_selectors_pick_blocks_by_id_and_number() {
+        let deck = JobDeck::parse(
+            "x",
+            "CHIP A\n$ (1,A,TC=a.oas)\nCHIP B2\n$ (1,B,TC=b.oas)\n$ (2,B,TC=c.oas)\nCHIP C\n$ (2,C,TC=d.oas)",
+            true,
+            &AtomicUsize::new(0),
+        )
+        .unwrap();
+        // ids: exact, or a pattern as render --chip's
+        let mut sel = ChipSelection::default();
+        sel.add_ids("A, B?").unwrap();
+        let pick = sel.resolve(&deck).unwrap();
+        assert_eq!(
+            (pick.blocks.clone(), pick.total, pick.labels.clone()),
+            (BTreeSet::from([0, 1]), 3, vec!["1:A".to_string(), "2:B2".to_string()])
+        );
+        assert_eq!(deck.sources_in(None, Some(&pick.blocks)), ["a.oas", "b.oas", "c.oas"]);
+        // --level cuts across the chips
+        assert_eq!(
+            deck.sources_in(Some(&BTreeSet::from([2])), Some(&pick.blocks)),
+            ["c.oas"]
+        );
+        // numbers: 1-based, deck order, ranges
+        let mut sel = ChipSelection::default();
+        sel.add_numbers("3, 1-1").unwrap();
+        assert_eq!(sel.numbers, [(3, 3), (1, 1)]);
+        let pick = sel.resolve(&deck).unwrap();
+        assert_eq!(deck.sources_in(None, Some(&pick.blocks)), ["a.oas", "d.oas"]);
+        // a chip in either list is in
+        sel.add_ids("B2").unwrap();
+        assert_eq!(sel.resolve(&deck).unwrap().blocks, BTreeSet::from([0, 1, 2]));
+        assert_eq!(deck.sources_in(None, None), deck.sources(None));
+        // what the deck has not is said
+        let mut bad = ChipSelection::default();
+        bad.add_ids("Z*").unwrap();
+        let e = bad.resolve(&deck).unwrap_err();
+        assert!(e.message.contains("chip id(s) Z* not in the deck (3 CHIP block(s)"), "{}", e.message);
+        let mut bad = ChipSelection::default();
+        bad.add_numbers("2-4").unwrap();
+        let e = bad.resolve(&deck).unwrap_err();
+        assert!(e.message.contains("chip number(s) 2-4 not in the deck (it has 3 CHIP block(s)"), "{}", e.message);
+        assert!(ChipSelection::default().add_numbers("0").is_err());
+        assert!(ChipSelection::default().add_numbers("3-2").is_err());
+        assert!(ChipSelection::default().add_numbers("x").is_err());
+        assert!(ChipSelection::default().add_ids(" , ").is_err());
+        assert!(ChipSelection::default().is_empty());
     }
 }

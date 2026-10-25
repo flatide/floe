@@ -350,10 +350,22 @@ impl JobDeck {
             .collect()
     }
     pub fn sources(&self, selected: Option<&BTreeSet<i64>>) -> Vec<&str> {
+        self.sources_in(selected, None)
+    }
+    /// The sources the selected levels place in the selected CHIP blocks
+    /// (0-based indices in deck order; None: every block), each once, in
+    /// deck order (`floe2 index DECK --chipid / --chipnumber`, 0.12.402).
+    pub fn sources_in(
+        &self,
+        selected: Option<&BTreeSet<i64>>,
+        chips: Option<&BTreeSet<usize>>,
+    ) -> Vec<&str> {
         let mut seen = BTreeSet::new();
         self.chips
             .iter()
-            .flat_map(|c| &c.entries)
+            .enumerate()
+            .filter(|(i, _)| chips.is_none_or(|blocks| blocks.contains(i)))
+            .flat_map(|(_, c)| &c.entries)
             .filter(|e| selected.is_none_or(|ids| ids.contains(&e.idx)))
             .filter_map(|e| seen.insert(e.tc.as_str()).then_some(e.tc.as_str()))
             .collect()
