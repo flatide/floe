@@ -3405,9 +3405,10 @@ class Viewer:
 
     def _jobdeck_levels_dialog(self, path, rows, current):
         """The level-selection dialog: one check row per mask level
-        (number, MTITLE name, CHIPs, instances, sources), all / none
-        buttons, Open / Cancel. Returns the selection (None = all
-        levels) or False for Cancel."""
+        (`level N` and its MTITLE name - user call 2026-10-26, it read
+        `$N` -, CHIPs, instances, sources), all / none buttons, Open /
+        Cancel. Returns the selection (None = all levels) or False for
+        Cancel."""
         dlg = Gtk.Dialog(title="load jobdeck levels", transient_for=self.window,
                          modal=True)
         dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
@@ -3428,8 +3429,10 @@ class Viewer:
         checks = []
         grid = Gtk.Grid(column_spacing=12, row_spacing=2)
         for r, row in enumerate(rows):
-            chk = Gtk.CheckButton(label="$%d %s" % (row["level"],
-                                                   row["name"] or ""))
+            label = "level %d" % row["level"]
+            if row["name"]:
+                label += " " + row["name"]
+            chk = Gtk.CheckButton(label=label)
             chk.set_active(want is None or row["level"] in want)
             checks.append((row["level"], chk))
             grid.attach(chk, 0, r, 1, 1)

@@ -353,9 +353,10 @@ n:ID,…`(앞의 32개) 한 줄이 붙는다. 같은 소스를 두 실행이 만
   view에서는 level view로; 덱이 아니면 상태줄 안내만). gate
   `JobdeckShortcutTests`.
 - **레벨 선택 로드**(사용자 요청 2026-09-10, Calibre MDPView처럼): 덱을 열 때
-  먼저 "load jobdeck levels" 대화상자가 mask level마다 한 줄(`$n 이름`, CHIP 수,
-  인스턴스 수, 소스)을 체크 목록으로 보여 주고(all/none), 고른 level만 플랜·
-  인덱싱·표시한다. File > load jobdeck…, `floe2 view deck.jb`(항상 창을 거쳐
+  먼저 "load jobdeck levels" 대화상자가 mask level마다 한 줄(`level n 이름`, CHIP 수,
+  인스턴스 수, 소스; 2026-10-26 사용자 요청으로 `$n`에서 `level n`으로)을 체크 목록으로
+  보여 주고(all/none), 고른 level만 플랜·인덱싱·표시한다. File > load jobdeck…,
+  `floe2 view deck.jb`(항상 창을 거쳐
   연다), 실행 중인 창으로 forward된 열기 모두 같다. `floe2 view deck.jb --level
   1,3`은 묻지 않고 그 level로 열고, 스크립트·gate는 `FLOE_JOBDECK_LEVELS=all|
   N[,N...]`로 답한다(기본 `ask`; level이 하나뿐인 덱은 묻지 않음). 현장

@@ -39,7 +39,8 @@ coordinates as it moves; Esc clears it (cell_status).
 The file dialogs' browser (2026-10-26): a symbolic link is a row `name@`
 under the filters its own name passes, among the files by name, its own
 text the tooltip; a link to a folder is entered, one to a file picked
-(browse_dialog).
+(browse_dialog). The jobdeck level dialog labels a level `level N`, its
+MTITLE after it (levels_dialog).
 """
 
 
@@ -575,6 +576,44 @@ def browse_dialog(v):
           "entered, a deck link picked" % (len(seen[0]), len(seen[1])))
 
 
+def levels_dialog(v):
+    """User 2026-10-26 ("jobdeck을 로드할 때 레벨 선택 다이얼로그에서 레벨이 $1 $2로
+    표시되는데 이 부분을 level 1, level 2로 수정해줘"): the GTK dialog of gui.py
+    `_jobdeck_levels_dialog` labels a mask level `level N`, the deck's
+    MTITLE after it when there is one; the levels left checked are the
+    answer. The dialog's run() is the gate's while it looks."""
+    from floe import gui
+    Gtk = gui.Gtk
+    rows = [{"level": 1, "name": "", "chips": ["ID001"], "instances": 2,
+             "sources": ["/data/a.oas"]},
+            {"level": 2, "name": "METAL1", "chips": ["ID001", "ID002"],
+             "instances": 3, "sources": ["/data/a.oas", "/data/b.oas"]},
+            {"level": 13, "name": "VIA 1", "chips": ["ID002"], "instances": 1,
+             "sources": ["/data/b.oas"]}]
+    labels = []
+
+    def look(dlg):
+        kids = dlg.get_content_area().get_children()
+        grid = [k for k in kids if isinstance(k, Gtk.ScrolledWindow)][0].get_child()
+        if not isinstance(grid, Gtk.Grid):
+            grid = grid.get_child()        # the viewport GTK puts between
+        checks = [grid.get_child_at(0, r) for r in range(len(rows))]
+        labels.extend(c.get_label() for c in checks)
+        checks[1].set_active(False)
+        return Gtk.ResponseType.OK
+
+    run = Gtk.Dialog.run
+    try:
+        Gtk.Dialog.run = look
+        picked = v._jobdeck_levels_dialog("/data/deck.jb", rows, None)
+    finally:
+        Gtk.Dialog.run = run
+    check(labels == ["level 1", "level 2 METAL1", "level 13 VIA 1"],
+          "the level dialog's labels: %s" % labels)
+    check(picked == [1, 13], "the levels left checked: %r" % (picked,))
+    print("level dialog: %s" % ", ".join(labels))
+
+
 def gtk_ready():
     """Whether the viewer's windows can open here (GuiSmokeTests' rule)."""
     try:
@@ -769,6 +808,7 @@ def gui_viewer(src, ref):
         strike_and_palettes(v)
         cell_status(v, answers)
         browse_dialog(v)
+        levels_dialog(v)
     finally:
         v._quit()
         v.window.destroy()
