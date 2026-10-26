@@ -1352,6 +1352,17 @@ def_range 전체를 파싱한 뒤 그 셀의 조각만 골랐다. 범위는 셀�
   deck.jb --occupancy-only --occupancy-max-work 274877906944`처럼 올린다.
 - **정정.** `floe2 view --render-debug`는 현재 아무것도 찍지 않는다(gui.py에서 미사용, 뷰 컨트롤러가 debug를 끔);
   긴 perf 줄의 `, K passes without summary`가 nofile/invalid/near/layers 거부 수다(depth/off/exact는 무음).
+- **현장 확인(2026-10-25~26, 사용자 붙여넣기).** 레벨 4·5(각 134칩, 소스 = 서로 다른 EBEAM 파일)의 캐시를 그대로 둔 채
+  바이너리만 올린 상태: `loaded in 535.0 s 522515 ms = 129198 load + 351646 draw deck 268 passes, summary 199 passes (not
+  pickable) bin 243 items cut<495um evict 623k` — 69 pass가 요약 없이(옛 한도로 만든 design.ovo의 레이어가 `none:*`).
+  레벨 4의 요약을 `--occupancy-only`로 다시 만든 뒤 레벨 4만: `loaded in 8.2s 224 ms = 0 load + 99 draw deck 134 passes,
+  summary 134 passes` — 페이지 디코드 0, 8 s는 경량 소스 134개의 open. 줌 6~9회에서도 느려짐 없음. 10.6 × 7.4 mm 뷰
+  (7.6 µm/px)부터는 22 pass 중 21개가 `near`로 페이지 경로(`41880 ms = 10036 load + 28282 draw`, 8,056 페이지, 49
+  슬라이스 스트리밍): 50 GB EBEAM의 요약은 `base_um = 2, layers = 5`이고 배치 배율 `mag = SF × AD / unit`로 보이는 셀이
+  커지는 것이라, 덱 색인이 소스마다 `--occupancy-um = 4 µm / mag`를 넘기는 것이 후속 후보(사용자: 덱은 캡처 우선, 보류).
+  레벨 5는 요약을 모두 만든 뒤에도 `summary 133 passes`로 1 pass가 남아 745.5 s — 어느 소스인지는 소스별
+  `floe-index occupancy CACHE`(identity·레이어 status·`layers=`)로 가린다; 이 명령이 경량 캐시에서 design.ovm을 찾아
+  늘 `identity=mismatch`를 내던 결함은 0.12.403에서 고쳤다(SPEC-INDEXER의 occupancy 명령 항목).
 
 ### 8.19 요약 상한의 기본값 2^32·4 GiB, 합본 평면 캐시의 바이트 상한 (0.12.396 / floe-index·renderd 0.12.354, 2026-10-24; 사용자 "요약을 더 적극적으로" 검토 → "진행해줘")
 

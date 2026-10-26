@@ -3952,9 +3952,15 @@ pub fn occupancy_cmd(args: &[String]) {
         eprintln!("occupancy: {}", e);
         std::process::exit(1);
     });
+    // the full index's design.ovm, or a light cache's inventory (0.12.403:
+    // until then a light cache - no design.ovm - read identity=mismatch here
+    // while the viewer, validating against its synthesized index, used it)
     let identity = match floe_ovm::Ovm::open(&format!("{}/design.ovm", dir)) {
         Ok(ovm) => f.validate_against(&ovm),
-        Err(e) => Err(format!("design.ovm: {}", e)),
+        Err(e) => match floe_vfs::light::LightIndex::open(&dir) {
+            Ok(light) => light.validate_summary(&f),
+            Err(light_error) => Err(format!("design.ovm: {}; light cache: {}", e, light_error)),
+        },
     };
     println!(
         "occupancy file={} version={} unit={} cell_dbu={} base_um={} bbox={},{},{},{} \

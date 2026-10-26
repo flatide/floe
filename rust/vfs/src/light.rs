@@ -572,6 +572,43 @@ impl LightIndex {
         std::fs::symlink_metadata(Path::new(dir).join(invfile::FILE_NAME)).is_ok()
     }
 
+    /// Whether `summary` (the directory's design.ovo) was built from this
+    /// light cache's source: `OvoFile::validate_against`'s checks - the
+    /// source's size and mtime, the top cell, the layer table - against the
+    /// inventory, which is what the summary pass and the viewer's
+    /// synthesized index carry (0.12.403: `floe-index occupancy` on a light
+    /// cache; until then it looked for design.ovm and every light cache read
+    /// `identity=mismatch`).
+    pub fn validate_summary(&self, summary: &crate::occupancy::OvoFile) -> Result<(), String> {
+        if summary.src_size != self.identity.src_size || summary.src_mtime != self.identity.src_mtime {
+            return Err(format!(
+                "occupancy was built for source {}/{}, the light cache has {}/{}",
+                summary.src_size, summary.src_mtime, self.identity.src_size, self.identity.src_mtime
+            ));
+        }
+        let top = self.inv.cells.get(self.inv.top).map(|c| c.name.as_str()).unwrap_or("");
+        if summary.top != top {
+            return Err(format!("occupancy top {:?}, light cache top {:?}", summary.top, top));
+        }
+        if summary.layers.len() != self.inv.layer_order.len() {
+            return Err(format!(
+                "occupancy has {} layers, light cache {}",
+                summary.layers.len(),
+                self.inv.layer_order.len()
+            ));
+        }
+        for (k, e) in summary.layers.iter().enumerate() {
+            let (l, d) = self.inv.layer_order[k];
+            if (l, d) != (e.layer, e.dt) {
+                return Err(format!(
+                    "occupancy layer {} is {}/{}, light cache {}/{}",
+                    k, e.layer, e.dt, l, d
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub fn open(dir: &str) -> Result<LightIndex, String> {
         let inv_path = Path::new(dir).join(invfile::FILE_NAME);
         let seg_path = Path::new(dir).join(segfile::FILE_NAME);

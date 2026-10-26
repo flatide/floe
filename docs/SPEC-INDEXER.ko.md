@@ -676,7 +676,9 @@ floe-index svrf <deck> [-o OUT] [--scan] [-D NAME[=VAL]]… [-I DIR]… [--follo
   base_um= bbox= grid=WxH levels= layers= src_size= src_mtime= identity=ok|mismatch
   top=NAME`(mismatch면 `identity_error=` 줄과 exit 1), 레이어마다 `layer idx=
   ld=L/D status= work= level0=WxH set=n0,n1,…`, `--dump`는 `dump ld= level= w= h=`
-  뒤에 h줄의 0/1. 잘린 파일·헤더 불일치는 stderr 메시지와 exit 1.
+  뒤에 h줄의 0/1. 잘린 파일·헤더 불일치는 stderr 메시지와 exit 1. identity는 전체 색인이면
+  design.ovm, 경량 캐시면 design.inv의 지문·탑 셀·레이어 표로 판정한다(`LightIndex::validate_summary`,
+  0.12.403; 그 전에는 경량 캐시에 design.ovm이 없어 늘 mismatch였다 — 뷰어는 합성 인덱스로 판정해 썼다).
 - 게이트 `tools/validate_occupancy.py`: fixture(L자·구멍 링·대각 띠·삼각형·
   확장 path·대각 path·U 경로·격자선 위 박스·면적 0·회전/미러/중첩 배치·간격 <
   셀 / ≥ 셀 축 배열·대각 벡터 배열·떨어진 두 집단)와 valmini(4 µm 셀)의 level 0

@@ -301,6 +301,20 @@ def check_fixture(name, src, work):
             fail("%s: %s differs between the streaming build and floe-index light" % (name, f))
     if (light / "design.ovm").exists():
         fail("%s: the light directory holds a design.ovm" % name)
+    # `floe-index occupancy` on the light cache judges the identity on the
+    # inventory (0.12.403; before, the missing design.ovm read mismatch); a
+    # source touched after the build is a mismatch (exit 1, identity_error=)
+    r = run([BIN, "occupancy", light], what="floe-index occupancy (light cache)")
+    if "identity=ok" not in r.stdout or "status=ok" not in r.stdout:
+        fail("%s: occupancy on the light cache: %s" % (name, r.stdout[:300]))
+    st = src.stat()
+    try:
+        os.utime(src, (st.st_atime, st.st_mtime + 7))
+        r = run([BIN, "occupancy", light], ok=(1,), what="floe-index occupancy (light cache, source touched)")
+        if "identity=mismatch" not in r.stdout or "identity_error=" not in r.stdout:
+            fail("%s: a touched source was not a mismatch: %s" % (name, (r.stdout + r.stderr)[-300:]))
+    finally:
+        os.utime(src, (st.st_atime, st.st_mtime))
     # --occupancy-only adds the same summary to a light cache without one;
     # on a full index or no light cache it is refused
     plain = work / ("%s_plain" % src.stem)
