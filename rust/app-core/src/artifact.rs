@@ -3,11 +3,53 @@
 use crate::{cache, catalog::Layout, check_cancelled, Error, Result};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 static SERIAL: AtomicU64 = AtomicU64::new(0);
+
+/// The published artifact's permission bits (user 2026-10-26: a render
+/// capture came out rw------- - the staging file is created 0600 so a
+/// partial file stays private, and the rename kept that mode - and the
+/// group could not open it): owner and group read and write, others
+/// nothing, whatever the umask (set on the open file, which no umask
+/// masks). Every export through this module takes it: render's PNGs,
+/// mosaic tiles and report, clip, fe-embed, the jobdeck analysis report,
+/// the SVRF rules. `FLOE_ARTIFACT_MODE=NNN` (octal, the owner's read and
+/// write required: 600 is the old private files, 664 lets others read)
+/// overrides.
+pub const DEFAULT_ARTIFACT_MODE: u32 = 0o660;
+
+/// `FLOE_ARTIFACT_MODE`'s value as permission bits: octal digits, at most
+/// 0o777, with the owner's read and write; None otherwise (unset included)
+pub fn parse_artifact_mode(value: Option<&str>) -> Option<u32> {
+    let v = value?.trim();
+    if v.is_empty() || !v.bytes().all(|b| (b'0'..=b'7').contains(&b)) {
+        return None;
+    }
+    let mode = u32::from_str_radix(v, 8).ok()?;
+    (mode <= 0o777 && mode & 0o600 == 0o600).then_some(mode)
+}
+
+/// The mode an artifact is published with: `FLOE_ARTIFACT_MODE` when it is
+/// valid, else DEFAULT_ARTIFACT_MODE (an invalid value said once).
+pub fn artifact_mode() -> u32 {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    match std::env::var("FLOE_ARTIFACT_MODE") {
+        Err(_) => DEFAULT_ARTIFACT_MODE,
+        Ok(v) => parse_artifact_mode(Some(&v)).unwrap_or_else(|| {
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                eprintln!(
+                    "[{}] FLOE_ARTIFACT_MODE={v:?} ignored: octal permission bits with the owner's read and write (660, 664, 600, ...); the outputs are {:o}",
+                    crate::program(),
+                    DEFAULT_ARTIFACT_MODE
+                );
+            }
+            DEFAULT_ARTIFACT_MODE
+        }),
+    }
+}
 /// Resolve the existing prefix, preserving a missing source/cache suffix.
 /// This permits reports for missing sources without allowing those reports
 /// to replace the very source/cache paths they diagnose.
@@ -247,6 +289,10 @@ impl StagedArtifact {
             target: path.to_owned(),
         };
         write(&mut file)?;
+        // complete: the published mode (artifact_mode) on the open file - no
+        // umask narrows it and no path can be swapped in between - before
+        // the data and the mode are synced and the rename publishes both
+        file.set_permissions(fs::Permissions::from_mode(artifact_mode()))?;
         file.sync_all()?;
         check_cancelled(cancelled)?;
         Ok(staged)
@@ -290,6 +336,60 @@ mod tests {
     impl Drop for Temp {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+    #[test]
+    fn published_artifacts_are_owner_and_group_read_write() {
+        // user 2026-10-26: captures were rw------- (the staging file's mode
+        // kept through the rename)
+        let dir = Temp::new();
+        let flag = AtomicUsize::new(0);
+        let output = dir.0.join("shot.png");
+        // the staging file stays private while it is written
+        StagedArtifact::write(&output, &flag, |f| {
+            assert_eq!(f.metadata()?.permissions().mode() & 0o777, 0o600);
+            f.write_all(b"png")?;
+            Ok(())
+        })
+        .unwrap()
+        .commit(&flag)
+        .unwrap();
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&output), artifact_mode());
+        // publish() and publish_reader() take the same path
+        let report = dir.0.join("report.json");
+        publish(&report, b"{}", &flag).unwrap();
+        assert_eq!(mode(&report), artifact_mode());
+        let clip = dir.0.join("clip.oas");
+        publish_reader(&clip, &mut Cursor::new(b"oasis".to_vec()), 5, &flag).unwrap();
+        assert_eq!(mode(&clip), artifact_mode());
+        // an existing output of another mode is replaced with the published one
+        fs::set_permissions(&report, fs::Permissions::from_mode(0o644)).unwrap();
+        publish(&report, b"{ }", &flag).unwrap();
+        assert_eq!(mode(&report), artifact_mode());
+        if std::env::var_os("FLOE_ARTIFACT_MODE").is_none() {
+            assert_eq!(artifact_mode(), 0o660);
+        }
+    }
+    #[test]
+    fn the_artifact_mode_is_octal_with_the_owners_read_and_write() {
+        for (value, want) in [
+            (None, None),
+            (Some(""), None),
+            (Some("660"), Some(0o660)),
+            (Some(" 0664 "), Some(0o664)),
+            (Some("600"), Some(0o600)),
+            (Some("644"), Some(0o644)),
+            (Some("777"), Some(0o777)),
+            (Some("400"), None),
+            (Some("060"), None),
+            (Some("1777"), None),
+            (Some("8"), None),
+            (Some("0o660"), None),
+            (Some("rw-rw----"), None),
+            (Some("99999999999999999999"), None),
+        ] {
+            assert_eq!(parse_artifact_mode(value), want, "{value:?}");
         }
     }
     #[test]

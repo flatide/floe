@@ -462,6 +462,12 @@ floe2 render deck.jb --batch shots.txt --out shots/ --report shots/report.json
   - 예전 기본인 보관용 모양(solid 채움, 컷 0, 프레임·라벨 없음; 참조 툴 cli-spec)은 `--archival`이다. `FLOE_RENDER_DEFAULTS=archival`이면 그것이 기본이 된다.
   - 이 문서의 M4 검사들(jobdeck 게이트의 `run_floe2`)은 그 변수로 보관용 모양에서 돈다.
 - 단일 shot은 renderd의 PNG 그대로, mosaic은 raw 타일을 stdlib zlib으로 PNG 인코딩(Pillow 불필요).
+- 출력 파일의 권한(0.12.406, 사용자 2026-10-26: "render로 캡쳐한 파일의 그룹권한도 rw-"): 소유자·그룹 rw, 그 외 없음
+  (`rw-rw----`, umask와 무관). 쓰는 동안의 임시 파일(`.floe-shot-*.tmp`)은 0600으로 남에게 보이지 않고, 다 쓴 뒤 열린 파일에
+  모드를 주고 rename으로 게시한다 — 0.12.405까지는 그 0600이 그대로 남아 `rw-------`였다. app-core `artifact`를 거치는 모든
+  출력이 같다: render의 PNG·mosaic 타일·`--report`, `clip`, `fe-embed`, `floe2 jobdeck`의 보고서, SVRF 규칙 JSON.
+  `FLOE_ARTIFACT_MODE=NNN`(8진수, 소유자 rw 필수: `600`은 예전처럼 비공개, `664`는 그 외에 읽기)이 바꾸고, 잘못된 값은
+  stderr에 한 번 알리고 기본을 쓴다. 출력 디렉터리(`--batch`의 `--out DIR`을 만들 때)는 mkdir처럼 umask를 따른다.
 
 ### 칩 on/off 캡처 (사용자 2026-10-06)
 

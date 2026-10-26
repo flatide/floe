@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -240,6 +241,25 @@ def validate_rust_cli(base, fixture):
             x0, y0, (x0 + x1) / 2, (y0 + y1) / 2), "--out", clipped)
         check(clipped.is_file() and clipped.stat().st_size > 0,
               "floe2 clip wrote nothing")
+        # the published outputs are owner and group read/write (0.12.406,
+        # user 2026-10-26: a capture came out rw------- - the staging file's
+        # private mode kept through the rename - and the group could not open
+        # it); FLOE_ARTIFACT_MODE overrides, an invalid value said and ignored
+        for out in (png, clipped):
+            mode = stat.S_IMODE(out.stat().st_mode)
+            check(mode == 0o660, "%s: mode %o, not 660" % (out.name, mode))
+        private_png, private_report = work / "rust cli private.png", work / "rust cli private.json"
+        rust(dict(env, FLOE_ARTIFACT_MODE="600"), "render", source, "--px", "64",
+             "--out", private_png, "--report", private_report)
+        for out in (private_png, private_report):
+            mode = stat.S_IMODE(out.stat().st_mode)
+            check(mode == 0o600, "FLOE_ARTIFACT_MODE=600: %s mode %o" % (out.name, mode))
+        odd_png = work / "rust cli odd.png"
+        odd = rust(dict(env, FLOE_ARTIFACT_MODE="rw-rw----"), "render", source, "--px", "64",
+                   "--out", odd_png)
+        mode = stat.S_IMODE(odd_png.stat().st_mode)
+        check(mode == 0o660 and "FLOE_ARTIFACT_MODE" in odd.stderr,
+              "an invalid FLOE_ARTIFACT_MODE was not said and ignored: %o %s" % (mode, odd.stderr[-300:]))
         check(not called.exists(),
               "floe2 ran Python for a non-UI command: %s" % (
                   called.read_text() if called.exists() else ""))
