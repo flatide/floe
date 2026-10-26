@@ -286,7 +286,10 @@ GTK 열기는 모달 색인 한 번이다: `floe2 index deck.jb [--level …]`�
 (요약 없는 캐시만 있으면 빠진 요약만), 그 뒤 연다(SPEC-VIEWER §7; 0.12.384~0.12.387의 두 단계와
 백그라운드 요약은 뺐다). `floe2 info deck.jb --json`의 `metadata.jobdeck`에
 `light_sources`·`summary_missing`, 준비 질의(`ready`)에 `summary_missing`. 게이트
-`LightSummaryTests`.
+`LightSummaryTests`. 파일은 있는데 쓰이지 않는 pass(identity 불일치, 레이어 `none:*`, pass의 LY/DT 미수록)를
+소스별로 가리는 것은 `tools/check_deck_summaries.py DECK.jb LEVEL[,..] [floe-index]`(0.12.404; 소스마다
+OK/NOFILE/INVALID/LAYER 한 줄, identity는 요약 머리의 src_size/src_mtime을 소스 파일과 직접 비교, 문제가 있으면 exit 1;
+게이트 `test_check_deck_summaries_names_the_sources_without_a_usable_summary`).
 
 `floe-index vfs deck.jb [--level N,..] [--jobs N] [--force] [--wait]`(2026-10-18,
 app 0.12.359)도 같은 덱 인덱싱이다(소스마다 이 규칙). floe-index가 옆의 floe2에 `index deck.jb …`로

@@ -88,6 +88,35 @@ ROWS 95000.0/45020.0
 END
 """
 
+# tools/check_deck_summaries.py's deck: level 1 places the three thin
+# sources on their one layer 1/0, level 2 asks chipA for a layer it has not
+CHECK_DECK = """SLICE 1,17
+RETICLE
+* check.jb
+OPTION PA, AA=0.0200, BA=0.002000, SA=80
+MTITLE 1,METAL1
+MTITLE 2,VIA1
+*PLACE-INFO
+*
+CHIP ID001, * MAIN 1.0000
+*
+$ (1, METAL1, AD=0.00020, SF=1, TC=chipA.oas, LY={1}, DT={0}, BX=0.0, BY=0.0, UX=2000.0, UY=2550.0 )
+$ (2, VIA1, AD=0.00020, SF=1, TC=chipA.oas, LY={9}, DT={0}, BX=0.0, BY=0.0, UX=2000.0, UY=2550.0 )
+ROWS 85120.0/45020.0
+*
+CHIP ID002, * MAIN2 1.0000
+*
+$ (1, METAL1, AD=0.00020, SF=1, TC=chipB.oas, LY={1}, DT={0}, BX=0.0, BY=0.0, UX=1000.0, UY=1000.0 )
+ROWS 90000.0/45020.0
+*
+CHIP ID003, * MAIN3 1.0000
+*
+$ (1, METAL1, AD=0.00020, SF=1, TC=mark.oas, LY={1}, DT={0}, BX=0.0, BY=0.0, UX=100.0, UY=100.0 )
+ROWS 95000.0/45020.0
+*END-PLACE
+END
+"""
+
 # the same CHIPA geometry in every container the probe must classify,
 # plus a junk file and a missing one for the skip ledger
 FORMAT_DECK = """SLICE 1,17
@@ -956,6 +985,62 @@ class LightSummaryTests(unittest.TestCase):
 
 
 class JobdeckIndexLodTests(unittest.TestCase):
+    def test_check_deck_summaries_names_the_sources_without_a_usable_summary(self):
+        """tools/check_deck_summaries.py (user 2026-10-26, after the field hunt
+        for the one pass of 134 that drew without its summary): per level,
+        every source's design.ovo judged - OK, NOFILE, INVALID (another
+        source's or unreadable), LAYER (the pass's L/D not summarized) -
+        exit 0 when all are OK, 1 otherwise, 3 for a level that places
+        nothing; the identity judged on the source file's size and mtime."""
+        binary = ROOT / "rust" / "target" / "release" / "floe-index"
+        script = ROOT / "tools" / "check_deck_summaries.py"
+        env = {"FLOE_INDEX_BIN": str(binary)}
+        with tempfile.TemporaryDirectory(prefix="jobdeck summaries ") as td:
+            work = Path(td)
+            names = ("chipA.oas", "chipB.oas", "mark.oas")
+            for name in names:
+                build_thin_oas(work / name)
+            deck = work / "check.jb"
+            deck.write_text(CHECK_DECK, encoding="utf-8")
+            run_floe2("index", deck, "--jobs", "2", env=env, ok=0)
+
+            def check(levels, want):
+                r = subprocess.run([sys.executable, str(script), str(deck), levels, str(binary)],
+                                   cwd=ROOT, capture_output=True, text=True, timeout=600)
+                self.assertEqual(r.returncode, want, r.stdout + r.stderr)
+                return r.stdout
+
+            out = check("1", 0)
+            self.assertEqual(len([l for l in out.splitlines() if l.startswith("OK       ")]), 3, out)
+            self.assertIn("level 1: 3 source(s), 0 with a problem", out)
+            # level 2 asks chipA for layer 9/0, which its summary (1/0) has not
+            out = check("2", 1)
+            self.assertIn("LAYER    %s" % (work / "chipA.oas"), out)
+            self.assertIn("9/0 not in the summary", out)
+            # levels in one run: the worst exit; a level that places nothing
+            out = check("1,2", 1)
+            self.assertIn("level 1: 3 source(s), 0 with a problem", out)
+            self.assertIn("level 2: 1 source(s), 1 with a problem", out)
+            self.assertEqual(check("7", 3).strip(), "no entries of level 7 in %s" % deck)
+            # the summary gone, truncated, or built from another source
+            (Path(vfs_cache_dir(work / "mark.oas")) / "design.ovo").unlink()
+            out = check("1", 1)
+            self.assertIn("NOFILE   %s  (no design.ovo)" % (work / "mark.oas"), out)
+            chipb = Path(vfs_cache_dir(work / "chipB.oas")) / "design.ovo"
+            chipb.write_bytes(chipb.read_bytes()[:-9])
+            out = check("1", 1)
+            self.assertIn("INVALID  %s" % (work / "chipB.oas"), out)
+            self.assertIn("truncated", out)
+            src = work / "chipA.oas"
+            st = src.stat()
+            os.utime(src, (st.st_atime, st.st_mtime + 7))
+            try:
+                out = check("1", 1)
+            finally:
+                os.utime(src, (st.st_atime, st.st_mtime))
+            self.assertIn("INVALID  %s" % src, out)
+            self.assertIn("level 1: 3 source(s), 3 with a problem", out)
+
     def test_chip_selectors_index_the_chips_sources_only(self):
         """`floe2 index deck.jb --chipid ID,.. --chipnumber N,N-M,..` (0.12.402,
         user 2026-10-25: a deck's index split by chips, the parts run at once

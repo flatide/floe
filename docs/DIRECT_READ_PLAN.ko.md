@@ -1360,8 +1360,9 @@ def_range 전체를 파싱한 뒤 그 셀의 조각만 골랐다. 범위는 셀�
   (7.6 µm/px)부터는 22 pass 중 21개가 `near`로 페이지 경로(`41880 ms = 10036 load + 28282 draw`, 8,056 페이지, 49
   슬라이스 스트리밍): 50 GB EBEAM의 요약은 `base_um = 2, layers = 5`이고 배치 배율 `mag = SF × AD / unit`로 보이는 셀이
   커지는 것이라, 덱 색인이 소스마다 `--occupancy-um = 4 µm / mag`를 넘기는 것이 후속 후보(사용자: 덱은 캡처 우선, 보류).
-  레벨 5는 요약을 모두 만든 뒤에도 `summary 133 passes`로 1 pass가 남아 745.5 s — 어느 소스인지는 소스별
-  `floe-index occupancy CACHE`(identity·레이어 status·`layers=`)로 가린다; 이 명령이 경량 캐시에서 design.ovm을 찾아
+  레벨 5는 요약을 모두 만든 뒤에도 `summary 133 passes`로 1 pass가 남아 745.5 s — 어느 소스인지는
+  `tools/check_deck_summaries.py deck.jb 5`(0.12.404: 소스별 `floe-index occupancy`의 identity·레이어 status를 pass의 LY/DT와
+  맞춰 OK/NOFILE/INVALID/LAYER 한 줄씩, 문제가 있으면 exit 1)로 가린다; 이 명령이 경량 캐시에서 design.ovm을 찾아
   늘 `identity=mismatch`를 내던 결함은 0.12.403에서 고쳤다(SPEC-INDEXER의 occupancy 명령 항목).
 
 ### 8.19 요약 상한의 기본값 2^32·4 GiB, 합본 평면 캐시의 바이트 상한 (0.12.396 / floe-index·renderd 0.12.354, 2026-10-24; 사용자 "요약을 더 적극적으로" 검토 → "진행해줘")
