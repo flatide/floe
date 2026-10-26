@@ -23,7 +23,13 @@ makes it the default, as before 0.12.350).
   --anchor center|lb          Aspect/position anchor (default center)
   --px W|WxH                 Default 1200; height follows aspect
   --stretch                  Do not expand bbox to explicit WxH aspect
-  --layers NAME,L/D,...       Layer names/aliases or pairs (default all)
+  --layers NAME,L/D,...       Layer names/aliases or pairs (default all); a
+                            jobdeck's level by its name (the MTITLE; LEVELn
+                            without one), a chip by its file name. --layer:
+                            the same
+  --layerid ID,...            Layers by the layer panel's number: N or N.D; a
+                            jobdeck's N is level N (every chip of it). With
+                            --layers, both
   --level N,N,...             Jobdeck: load these mask levels only
   --depth N                  0=top, 999/omit=full
   --detail exact|low|medium|high  Size cut 0/5/3/1 px (default medium, the
@@ -100,8 +106,9 @@ summary unless --occupancy on asks for it -, its output on stderr; a changed
 source keeps its cache (index --force rebuilds it).
 Lengths: bare/um/µm/μm, nm, mm, cm, m. Fractional DBU is preserved.
 Batch: NAME key=value ...; quotes supported, full-line # comments. Region fields
-override the CLI region. Keys: bbox at size anchor px stretch layers depth mosaic
-corners line linecolor keep_tiles chip chip_off fit_chip; corners=fit. Limit 16 MiB/4096 shots; no shell expansion.
+override the CLI region. Keys: bbox at size anchor px stretch layers (layer)
+layerid depth mosaic corners line linecolor keep_tiles chip chip_off fit_chip;
+corners=fit. Limit 16 MiB/4096 shots; no shell expansion.
 DRC uses the width from --px even for WxH; frames/labels are on (deck labels off),
 the viewer's fills. --detail/--thin/--density/--occupancy/--label-font-px are honored.
 No batch/mosaic/region/report with DRC. Local/global/path TSV.
@@ -176,6 +183,8 @@ pub fn parse(args: &[String]) -> Result<Command> {
     let mut drc_requested = false;
     let mut capture_only = false;
     let mut layers_explicit = false;
+    // --layers / --layer (names) and --layerid (the panel's numbers)
+    let mut layers = shots::LayerChoice::default();
     let mut json = false;
     let mut chips = false;
     let mut levels = None;
@@ -336,14 +345,13 @@ pub fn parse(args: &[String]) -> Result<Command> {
                     _ => return Err(Error::input("invalid thin policy")),
                 }
             }
-            "--layers" => {
+            "--layers" | "--layer" => {
                 layers_explicit = true;
-                let v = value()?;
-                shot.layers = if v.is_empty() || v == "all" {
-                    None
-                } else {
-                    Some(v.into())
-                };
+                layers.names(value()?);
+            }
+            "--layerid" => {
+                layers_explicit = true;
+                layers.ids(value()?)?;
             }
             "--label-font-px" => shot.font_px = super::number(value()?, flag)?,
             "--out" => out = value()?.into(),
@@ -440,6 +448,9 @@ pub fn parse(args: &[String]) -> Result<Command> {
         }
     }
     let source = source.ok_or_else(|| Error::input(format!("{kind} requires SOURCE")))?;
+    if layers.said() {
+        shot.layers = layers.spec();
+    }
     // the export look: cut 0, solid fills, no overlays - what the options
     // given do not say otherwise
     if archival {
@@ -777,6 +788,53 @@ mod tests {
     use super::*;
     fn parsed(args: &[&str]) -> Result<Command> {
         parse(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+    #[test]
+    fn layers_by_name_or_by_the_panels_number() {
+        // user 2026-10-26: --layer is --layers; --layerid N[.D] is the
+        // layer panel's number (a jobdeck's level N); both in the order given
+        for (args, want) in [
+            (&["render", "a.jb", "--layer", "METAL1"][..], Some("METAL1")),
+            (
+                &["render", "a.jb", "--layers=METAL1,VIA1"][..],
+                Some("METAL1,VIA1"),
+            ),
+            (&["render", "a.jb", "--layerid", "1,3"][..], Some("1/0,3/0")),
+            (
+                &["render", "a.jb", "--layerid=2.1", "--layer", "ALIGN"][..],
+                Some("2/1,ALIGN"),
+            ),
+            (
+                &["render", "a.jb", "--layer", "METAL1", "--layerid", "3"][..],
+                Some("METAL1,3/0"),
+            ),
+            (
+                &["render", "a.jb", "--layers", "all", "--layerid", "2"][..],
+                Some("2/0"),
+            ),
+            (&["render", "a.jb", "--layer", "all"][..], None),
+            (&["render", "a.jb"][..], None),
+        ] {
+            let Command::Render { capture, .. } = parsed(args).unwrap() else {
+                panic!()
+            };
+            assert_eq!(capture.shot.layers.as_deref(), want, "{args:?}");
+        }
+        assert!(parsed(&["render", "a.jb", "--layerid", "METAL1"]).is_err());
+        assert!(parsed(&["render", "a.jb", "--layerid"]).is_err());
+        // a DRC capture's explicit layers, by id too
+        let Command::Render { drc: Some(drc), .. } = parsed(&[
+            "render",
+            "a.oas",
+            "--drc=db",
+            "--drc-rule=R",
+            "--layerid",
+            "7.1",
+        ])
+        .unwrap() else {
+            panic!()
+        };
+        assert_eq!(drc.layers.as_deref(), Some("7/1"));
     }
     #[test]
     fn read_commands_are_strict() {

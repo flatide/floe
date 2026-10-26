@@ -732,7 +732,7 @@ def run_shots(cache, shots, out, report=None, frames=False, labels=False,
     # 2026-09-09 P1-1: a thinner PNG must never look complete)
     def brief(recs):
         return "; ".join(
-            "CHIP %s $%d %s %s" % (r["chip"], r["idx"], r["tc"],
+            "CHIP %s level %d %s %s" % (r["chip"], r["idx"], r["tc"],
                                    r["reason"]) for r in recs[:5]) + (
             " ..." if len(recs) > 5 else "")
     if lacking and log:

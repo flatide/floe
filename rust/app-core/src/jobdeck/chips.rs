@@ -616,10 +616,10 @@ impl<'a> ChipTable<'a> {
     pub fn listing(&self) -> Vec<String> {
         let mut out = Vec::new();
         for level in self.levels() {
-            out.push(format!(
-                "${level} {}",
-                self.titles.get(&level).map(String::as_str).unwrap_or("")
-            ));
+            out.push(match self.titles.get(&level).filter(|t| !t.is_empty()) {
+                Some(title) => format!("level {level} {title}"),
+                None => format!("level {level}"),
+            });
             for (r, row) in self
                 .rows
                 .iter()

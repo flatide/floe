@@ -106,6 +106,16 @@ pub struct OrderRow {
     pub name: String,
     pub source: String,
 }
+impl OrderRow {
+    /// The key as the text says it: a level's `$N` - the deck's notation,
+    /// which the report's `key` keeps - reads `level N` (user 2026-10-26).
+    pub fn label(&self) -> String {
+        match self.key.strip_prefix('$') {
+            Some(n) => format!("level {n}"),
+            None => self.key.clone(),
+        }
+    }
+}
 #[derive(Debug)]
 pub struct ColorMap {
     pub values: BTreeMap<ColorKey, String>,

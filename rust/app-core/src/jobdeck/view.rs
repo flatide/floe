@@ -299,7 +299,18 @@ impl ViewRows {
                         .map_err(|_| Error::input("invalid deck datatype"))?,
                 )]
             } else {
-                return Err(Error::input(format!("unknown deck layer: {token:?}")));
+                // `level N` is how the texts say a level (user 2026-10-26):
+                // its number goes to --layerid
+                let level = token
+                    .get(..6)
+                    .filter(|p| p.eq_ignore_ascii_case("level "))
+                    .and_then(|_| token[6..].trim().parse::<i64>().ok());
+                return Err(Error::input(match level {
+                    Some(n) => format!(
+                        "unknown deck layer: {token:?} (a level by its number: --layerid {n})"
+                    ),
+                    None => format!("unknown deck layer: {token:?}"),
+                }));
             };
             for key in named {
                 let keys_to_add = if heads.contains(&key) {

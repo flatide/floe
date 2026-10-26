@@ -240,7 +240,7 @@ impl Analysis {
                     .iter()
                     .map(|r| format!(
                         "{} {}{}",
-                        r.key,
+                        r.label(),
                         r.name,
                         if r.source == "pinned" {
                             " (pinned)"
@@ -262,13 +262,13 @@ impl Analysis {
         }
         for r in &stats.skipped {
             lines.push(format!(
-                "skipped   : CHIP {} ${} {}: {} ({}, {} row(s))",
+                "skipped   : CHIP {} level {} {}: {} ({}, {} row(s))",
                 r.chip, r.idx, r.tc, r.reason, r.detail, r.rows
             ));
         }
         for r in &stats.deck_issues {
             lines.push(format!(
-                "outside   : CHIP {} ${} {}: {} (not selected)",
+                "outside   : CHIP {} level {} {}: {} (not selected)",
                 r.chip, r.idx, r.tc, r.reason
             ));
         }
@@ -302,7 +302,7 @@ impl Analysis {
     }
     pub fn placement_line(&self, p: &geom::Placement) -> String {
         format!(
-            "{:<8} ${:<3} {:<4} {:<24} {:<8} {:<9} {:16.4} {:16.4} {:>8}",
+            "{:<8} {:<5} {:<4} {:<24} {:<8} {:<9} {:16.4} {:16.4} {:>8}",
             p.chip,
             p.idx,
             p.row,

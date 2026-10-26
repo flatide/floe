@@ -1,5 +1,5 @@
 //! Python shots' named capture grammar. No shell expansion or execution.
-use super::{lengths, normalize, pixels, Anchor, Shot};
+use super::{lengths, normalize, pixels, Anchor, LayerChoice, Shot};
 use crate::{Error, Result};
 use std::collections::BTreeSet;
 
@@ -311,9 +311,14 @@ pub fn parse(text: &str, defaults: &Capture) -> Result<Vec<NamedCapture>> {
                 c.mosaic = None;
                 c.corners = None;
             }
-            // and a line's own say of what is on: its layers replace the
-            // defaults' chips, its chips the defaults' layers
-            if fields.iter().any(|(key, _)| *key == "layers") {
+            // and a line's own say of what is on: its layers (by name or
+            // id) replace the defaults' chips and layers, its chips the
+            // defaults' layers
+            let says_layers = fields
+                .iter()
+                .any(|(key, _)| matches!(*key, "layers" | "layer" | "layerid"));
+            let mut layers = LayerChoice::default();
+            if says_layers {
                 c.chip = None;
                 c.chip_off = None;
             }
@@ -344,13 +349,8 @@ pub fn parse(text: &str, defaults: &Capture) -> Result<Vec<NamedCapture>> {
                             _ => return Err(Error::input("anchor must be center or lb")),
                         }
                     }
-                    "layers" => {
-                        c.shot.layers = if matches!(v, "" | "all") {
-                            None
-                        } else {
-                            Some(v.into())
-                        }
-                    }
+                    "layers" | "layer" => layers.names(v),
+                    "layerid" => layers.ids(v)?,
                     "depth" => {
                         c.shot.depth = if matches!(v, "" | "full") {
                             None
@@ -377,6 +377,9 @@ pub fn parse(text: &str, defaults: &Capture) -> Result<Vec<NamedCapture>> {
                     "linecolor" => c.line_color = v.into(),
                     _ => return Err(Error::input(format!("unknown batch key: {key}"))),
                 }
+            }
+            if layers.said() {
+                c.shot.layers = layers.spec();
             }
             c.validate()?;
             Ok(NamedCapture {
@@ -474,5 +477,34 @@ mod tests {
         ] {
             assert!(parse(bad, &defaults).is_err(), "{bad}");
         }
+    }
+    #[test]
+    fn a_line_names_its_layers_by_name_or_id() {
+        // user 2026-10-26: layer= is layers=, layerid= the layer panel's
+        // numbers; a line that says either replaces the defaults' layers
+        let mut defaults = Capture::default();
+        defaults.shot.layers = Some("ALIGN".into());
+        let parsed = parse(
+            "a layerid=2\nb layer=METAL1 layerid=3.1\nc layers=all layerid=1\n\
+             d\ne layer=VIA1\nf chip=x\ng layer=all",
+            &defaults,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed
+                .iter()
+                .map(|c| c.capture.shot.layers.as_deref())
+                .collect::<Vec<_>>(),
+            [
+                Some("2/0"),
+                Some("METAL1,3/1"),
+                Some("1/0"),
+                Some("ALIGN"),
+                Some("VIA1"),
+                None,
+                None
+            ]
+        );
+        assert!(parse("a layerid=METAL1", &defaults).is_err());
     }
 }

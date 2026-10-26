@@ -134,7 +134,7 @@ fn brief(records: &[&crate::jobdeck::geom::Skipped]) -> String {
     let mut text = records
         .iter()
         .take(5)
-        .map(|r| format!("CHIP {} ${} {} {}", r.chip, r.idx, r.tc, r.reason))
+        .map(|r| format!("CHIP {} level {} {} {}", r.chip, r.idx, r.tc, r.reason))
         .collect::<Vec<_>>()
         .join("; ");
     if records.len() > 5 {

@@ -186,8 +186,8 @@ pub fn run(command: Command, cancelled: &AtomicUsize) -> Result<i32> {
     }
     if a.placements {
         println!(
-            "{:<8} {:<4} {:<4} {:<24} {:<8} {:<9} {:>16} {:>16} {:>8}",
-            "chip", "idx", "row", "tc", "ly/dt", "mag", "dx_um", "dy_um", "colour"
+            "{:<8} {:<5} {:<4} {:<24} {:<8} {:<9} {:>16} {:>16} {:>8}",
+            "chip", "level", "row", "tc", "ly/dt", "mag", "dx_um", "dy_um", "colour"
         );
         for p in &analysis.model.placements {
             check_cancelled(cancelled)?;
@@ -226,7 +226,7 @@ pub fn run(command: Command, cancelled: &AtomicUsize) -> Result<i32> {
         }
         for r in &s.skipped {
             println!(
-                "[jobdeck] skipped   : CHIP {} ${} {}: {} ({})",
+                "[jobdeck] skipped   : CHIP {} level {} {}: {} ({})",
                 r.chip, r.idx, r.tc, r.reason, r.detail
             );
         }

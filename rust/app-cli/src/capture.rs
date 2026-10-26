@@ -123,7 +123,7 @@ fn render(
     // again by the exit status (floe/cli.py open_cache)
     for r in dataset.skipped() {
         println!(
-            "[jobdeck] skipped   : CHIP {} ${} {}: {} ({})",
+            "[jobdeck] skipped   : CHIP {} level {} {}: {} ({})",
             r.chip, r.idx, r.tc, r.reason, r.detail
         );
     }

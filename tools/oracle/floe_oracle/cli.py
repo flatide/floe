@@ -143,7 +143,7 @@ def open_cache(src, args):
         # without dbu, a cache without the entry's LY/DT): said here,
         # at every open, and again by render's exit code
         for rec in _deck_skipped(c):
-            print("[jobdeck] skipped   : CHIP %s $%d %s: %s (%s)" % (
+            print("[jobdeck] skipped   : CHIP %s level %d %s: %s (%s)" % (
                 rec["chip"], rec["idx"], rec["tc"], rec["reason"],
                 rec["detail"]))
         return c
@@ -670,7 +670,7 @@ def cmd_info(args):
                                  c.scheme):
             print("[jobdeck] " + line)
         for rec in c.ledger:
-            print("[jobdeck] skipped   : CHIP %s $%d %s: %s (%s)" % (
+            print("[jobdeck] skipped   : CHIP %s level %d %s: %s (%s)" % (
                 rec["chip"], rec["idx"], rec["tc"], rec["reason"],
                 rec["detail"]))
         if _deck_skipped(c):
@@ -1527,7 +1527,7 @@ def cmd_jobdeck(args):
         except ValueError as exc:
             raise SystemExit("floe: %s" % exc)
         for rec in ledger:
-            print("[jobdeck] skipped   : CHIP %s $%d %s: %s (%s)" % (
+            print("[jobdeck] skipped   : CHIP %s level %d %s: %s (%s)" % (
                 rec["chip"], rec["idx"], rec["tc"], rec["reason"],
                 rec["detail"]))
         with open(args.spec) as fh:

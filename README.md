@@ -148,7 +148,8 @@ floe2 clip data/testchip_1g5.oas --bbox 5000,5000,5100,5100 --out region.oas
 floe view data/testchip_1g5.oas            # 개발용 KLayout 셸 (동결, 비교·선행 검증)
 ```
 
-- `--bbox`는 µm 단위 `X0,Y0,X1,Y1`. `--layers`는 이름 또는 `layer/datatype` 목록.
+- `--bbox`는 µm 단위 `X0,Y0,X1,Y1`. `--layers`(`--layer`도 같음)는 이름 또는 `layer/datatype` 목록,
+  `--layerid`는 레이어 패널의 번호(`N`, `N.D`; jobdeck은 레벨 번호) 목록이다(docs/JOBDECK.ko.md).
 - 뷰어의 렌더 루프(무엇을 언제 그릴지, 이동이 멈춘 뒤 그리기, 이전 렌더 취소,
   여백, Esc)와 내비게이션·미니맵은 웹과 같은 Rust 컨트롤러가 정한다
   (0.12.337~0.12.338, docs/SHARED_APP_LAYER.ko.md §7 P4d·P4e). 예전 Python 루프와

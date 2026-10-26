@@ -440,16 +440,16 @@ def _post_checks(deck: JobDeck) -> None:
         for e in c.entries:
             if e.ad is None:
                 deck.warnings.append(
-                    (e.lineno, "chip %s $%d: AD missing; placement will "
+                    (e.lineno, "chip %s level %d: AD missing; placement will "
                                "raise" % (c.id, e.idx)))
             if e.width <= 0 or e.height <= 0:
                 deck.warnings.append(
-                    (e.lineno, "chip %s $%d: degenerate bbox %gx%g um "
+                    (e.lineno, "chip %s level %d: degenerate bbox %gx%g um "
                                "(BX..UY missing?)"
                                % (c.id, e.idx, e.width, e.height)))
             if not e.ly:
                 deck.warnings.append(
-                    (e.lineno, "chip %s $%d: no LY given" % (c.id, e.idx)))
+                    (e.lineno, "chip %s level %d: no LY given" % (c.id, e.idx)))
         if not c.rows:
             deck.warnings.append(
                 (c.lineno, "chip %s: no ROWS; nothing will be placed"

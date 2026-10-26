@@ -148,6 +148,66 @@ pub struct Shot {
     /// (Dataset::styles(archival)); false: the viewer's fills.
     pub archival: bool,
 }
+/// `--layerid` / a batch line's `layerid=` (user 2026-10-26: "--layerid 1"):
+/// layers by the layer panel's number - `N` (datatype 0) or `N.D` (`N/D`
+/// too), comma-separated; a jobdeck's level head is `N` (level N, every chip
+/// of it, as its panel row). The pair spec the layer resolvers take
+/// (`1/0,3/2`), None for an empty value.
+pub fn layer_ids(text: &str) -> Result<Option<String>> {
+    let mut out = Vec::new();
+    for token in text.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+        let (l, d) = token.split_once(&['.', '/'][..]).unwrap_or((token, "0"));
+        let number = |s: &str| s.trim().parse::<u32>().ok();
+        let (Some(l), Some(d)) = (number(l), number(d)) else {
+            return Err(Error::input(format!(
+                "invalid layer id {token:?}: N or N.D, the layer panel's number \
+                 (a jobdeck's level N is N)"
+            )));
+        };
+        out.push(format!("{l}/{d}"));
+    }
+    Ok((!out.is_empty()).then(|| out.join(",")))
+}
+/// What a shot draws, said by name (`--layers` / `--layer`; all or empty:
+/// none named) and by id (`--layerid`, layer_ids): each the last given, the
+/// two in the order they were given - a legend lists them so; nothing named
+/// is every layer.
+#[derive(Default)]
+pub struct LayerChoice {
+    names: Option<String>,
+    ids: Option<String>,
+    ids_first: bool,
+    said: bool,
+}
+impl LayerChoice {
+    pub fn names(&mut self, value: &str) {
+        self.said = true;
+        self.names = (!matches!(value, "" | "all")).then(|| value.to_string());
+        self.ids_first = true;
+    }
+    pub fn ids(&mut self, value: &str) -> Result<()> {
+        self.said = true;
+        self.ids = layer_ids(value)?;
+        self.ids_first = false;
+        Ok(())
+    }
+    /// Whether either was given at all (the shot's own say).
+    pub fn said(&self) -> bool {
+        self.said
+    }
+    /// The spec the layer resolvers take, None for every layer.
+    pub fn spec(self) -> Option<String> {
+        let (a, b) = if self.ids_first {
+            (self.ids, self.names)
+        } else {
+            (self.names, self.ids)
+        };
+        match (a, b) {
+            (Some(a), Some(b)) => Some(format!("{a},{b}")),
+            (a, b) => a.or(b),
+        }
+    }
+}
 /// The density's start where no one said (user 2026-10-12: "turn the density
 /// on by default"; gui.py density_on, the same rule): on, but off for the
 /// export look (`--archival`, as before 0.12.351). FLOE_RUST_DENSITY_STACK, the
@@ -286,6 +346,50 @@ impl Shot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn layer_ids_are_the_layer_panels_numbers() {
+        assert_eq!(layer_ids("1").unwrap().as_deref(), Some("1/0"));
+        assert_eq!(
+            layer_ids(" 1, 3.2 ,4/5").unwrap().as_deref(),
+            Some("1/0,3/2,4/5")
+        );
+        assert_eq!(layer_ids("").unwrap(), None);
+        assert_eq!(layer_ids(" , ").unwrap(), None);
+        for bad in ["x", "1.x", "-1", "1.2.3", "1/", "METAL1", "$1"] {
+            let e = layer_ids(bad).unwrap_err();
+            assert!(e.to_string().contains("invalid layer id"), "{bad}: {e}");
+        }
+        // names and ids: each the last given, the two in the given order
+        let spec = |steps: &[(&str, &str)]| {
+            let mut c = LayerChoice::default();
+            for &(kind, v) in steps {
+                if kind == "id" {
+                    c.ids(v).unwrap();
+                } else {
+                    c.names(v);
+                }
+            }
+            (c.said(), c.spec())
+        };
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(spec(&[]), (false, None));
+        assert_eq!(
+            spec(&[("name", "METAL1"), ("id", "2")]),
+            (true, s("METAL1,2/0"))
+        );
+        assert_eq!(
+            spec(&[("id", "2"), ("name", "ALIGN")]),
+            (true, s("2/0,ALIGN"))
+        );
+        assert_eq!(
+            spec(&[("name", "A"), ("id", "1"), ("name", "B")]),
+            (true, s("1/0,B"))
+        );
+        assert_eq!(spec(&[("name", "A"), ("name", "B")]), (true, s("B")));
+        assert_eq!(spec(&[("name", "all"), ("id", "2")]), (true, s("2/0")));
+        assert_eq!(spec(&[("name", "all")]), (true, None));
+        assert_eq!(spec(&[("id", "")]), (true, None));
+    }
     #[test]
     fn auto_keeps_thin_pages_for_layouts_and_decks() {
         use floe_worker_client::ThinPolicy as P;

@@ -178,7 +178,7 @@ def write_deck_spec(path, deck, placements, stats, scheme, colormap,
                                     colormap, catalog)
     if not any(l.startswith("placement ") for l in lines):
         raise ValueError("no placement can be drawn: %s" % (
-            ", ".join("%s $%d %s" % (r["chip"], r["idx"], r["reason"])
+            ", ".join("%s level %d %s" % (r["chip"], r["idx"], r["reason"])
                       for r in ledger) or "empty selection"))
     with open(path, "w", encoding="ascii") as fh:
         fh.write("\n".join(lines) + "\n")

@@ -87,9 +87,11 @@ jobdeck 문법 자료로 용어의 실체를 확정했다:
 - 소스 순번·기본 색은 전체 덱 기준으로 고정한다. 로드 레벨을 줄여도
   달라지지 않는다. 칩뷰 팔레트는 레벨 다음 소스 등장 순서이며, 실제
   Calibre 색 배정과의 완전 일치는 아직 검증하지 않았다.
-- 기존 `--layers '$1 TITLE'`/`'$1'`은 별칭으로 유지한다. `level/0`은 해당
-  레벨의 칩 전체를 선택한다. 소스 이름으로 선택하면 모든 일치 행을
-  선택한다. 기존 `CHIP C01` 선택은 새 목록의 제어 단위가 아니므로 오류다.
+- 캡처는 레벨을 이름(`--layer METAL1`; MTITLE이 없으면 `LEVEL5`)이나 번호
+  (`--layerid 1`)로 고른다(2026-10-26). 예전 `--layers '$1 TITLE'`/`'$1'`도
+  그대로 받는다. `level/0`(= `--layerid level`)은 해당 레벨의 칩 전체를
+  선택한다. 소스 이름으로 선택하면 모든 일치 행을 선택한다. 기존 `CHIP C01`
+  선택은 새 목록의 제어 단위가 아니므로 오류다.
 - 기존 칩뷰 layerprops는 다른 키 공간이므로 적용하지 않는다. 새 파일은
   `<deck>.chip-by-level.jb.layerprops`; 옛 파일을 삭제하거나 덮어쓰지 않는다.
   레벨뷰의 기존 부모 색·채움·선폭·숨김 설정은 하위 칩에 적용된다.
@@ -251,7 +253,7 @@ pick/snap/clip(덱에서는 오류 응답), 배치별 회전/미러(포맷 미�
 floe2 index  deck.jb                 # 덱이 참조하는 모든 TC 소스를 인덱싱(최신 캐시는 유지)
 floe2 view   deck.jb                 # 뷰어에서 열기 (단일 인스턴스 포워딩·File > load layout… 동일)
 floe2 info   deck.jb                 # 덱 요약 + 뷰 레이어 표
-floe2 render deck.jb --bbox X0,Y0,X1,Y1 --px 1200 --out d.png [--layers "$1 METAL1,$3 ALIGN"]
+floe2 render deck.jb --bbox X0,Y0,X1,Y1 --px 1200 --out d.png [--layer METAL1,ALIGN | --layerid 1,3]
 floe2 jobdeck deck.jb [--report r.json] [--spec s.spec]   # 분석·보고만
 ```
 
@@ -438,7 +440,7 @@ floe2 render deck.jb --batch shots.txt --out shots/ --report shots/report.json
   중심으로 `floor(W/2)`px는 양쪽 불투명, 나머지는 양쪽 1px 혼합(`--line 0`은
   없음). `--keep-tiles`로 `<out>_tl/_tr/_bl/_br.png`도 남긴다.
 - `--batch FILE`(`-`=stdin): 줄마다 `NAME key=value …`(bbox at size anchor px
-  stretch layers depth mosaic corners line linecolor keep_tiles; 빈 키는 명령행
+  stretch layers(layer) layerid depth mosaic corners line linecolor keep_tiles; 빈 키는 명령행
   값). 워커를 한 번만 열고 모두 찍는다(`--out`은 디렉터리). `--report`는 shot별
   영역·픽셀·시간(mosaic은 타일 영역과 선 규칙) JSON.
 - 디코드 예산(레이아웃 소스, 2026-10-12 현장):
@@ -453,10 +455,23 @@ floe2 render deck.jb --batch shots.txt --out shots/ --report shots/report.json
   - 기본은 켜짐이다(0.12.351, 사용자 2026-10-12: "밀도는 기본으로 켜지게 해줘"; 그전에는 `FLOE_RUST_DENSITY_STACK=top`일 때만).
     - `--detail exact`, `--archival`, jobdeck은 꺼짐이다. `FLOE_RUST_DENSITY_STACK=off`면 뷰어와 함께 기본이 꺼짐이다.
   - jobdeck에서 `--density on`은 거부한다. 덱 패스는 밀도를 그리지 않는다.
+- 레이어 지정(사용자 2026-10-26: "캡쳐 레이어 지정은 --layer "METAL1"으로 이름만 지정하거나 --layerid 1로 형태로
+  지정할 수 있게 해줘"):
+  - `--layer NAME,…`은 `--layers`와 같다. 이름(레이아웃의 레이어 이름·별칭, 덱 레벨의 MTITLE이나 `LEVELn`, 칩의 파일
+    이름)이나 `L/D` 쌍이다.
+  - `--layerid ID,…`는 레이어 패널의 번호 칸이다. `N`(datatype 0)이나 `N.D`(`N/D`도)이고, 덱의 `N`은 레벨 N 전체다.
+    숫자가 아니면 명령행에서 거부(exit 2), 덱에 없는 번호는 찍을 때 거부(exit 1)한다.
+  - 둘을 함께 주면 둘 다 그리고, 범례는 준 순서를 따른다. 각 옵션을 여러 번 주면 마지막 것이다.
+  - 배치 줄의 키는 `layer`(= `layers`)와 `layerid`다. 줄이 둘 중 하나라도 말하면 명령행의 레이어 지정을 대신한다.
+  - 예전 `--layers "$1 METAL1"`·`"$1"`도 그대로 받는다. 이름에 `level 2`처럼 주면 `--layerid 2`를 쓰라고 알린다.
+- 덱의 레벨 표기(2026-10-26, 사용자: "상태줄등 $1로 표기되는 곳은 level 1으로 고치고"): 뷰어 상태줄, 건너뛴 배치 줄
+  (`skipped   : CHIP ID001 level 2 chipA.oas: …`), `info --chips` 목록(`level 1 METAL1`), `jobdeck --placements` 표의
+  `level` 열, 분석의 `view` 줄(`level 1 blue, …`), 덱 경고(`chip ID001 level 2: AD missing`)가 `$N` 대신 `level N`이다.
+  보고 JSON의 색 순서 키(`order[].key`)는 식별자라 `$N` 그대로다. 덱 문법의 `$` 항목 줄을 가리키는 `unknown $`도 그대로다.
 - `--layer-colors row|group`(레이아웃, 2026-10-13): 레이어 기본 색을 패널 줄마다(row, 기본) 또는 layer 번호마다(group,
   예전 방식) 정한다. `FLOE_LAYER_COLORS`가 기본값이다. jobdeck은 자기 색 체계를 쓰므로 거부한다.
 - `--legend`(2026-10-13): 그린 레이어의 레전드(`box 색 fill 이름 L/D`)를 이미지마다 flateyes 메타데이터로 넣는다.
-  - 덱은 레벨 보기처럼 레벨마다 한 줄(머리 행, 레벨 색)이다. 칩 행은 그 레벨 아래에 묶인다. `--layers '$2,ALIGN'`이면 그 레벨들만 준 순서로 넣는다.
+  - 덱은 레벨 보기처럼 레벨마다 한 줄(머리 행, 레벨 색)이다. 칩 행은 그 레벨 아래에 묶인다. `--layerid 2 --layer ALIGN`(예전 `--layers '$2,ALIGN'`)이면 그 레벨들만 준 순서로 넣는다.
   - 픽셀은 그대로다. `floe2 fe-embed --dump`로 읽고, flateyes로 열면 보인다.
 - 그림 모양(0.12.350, 사용자 2026-10-12: "캡쳐도 동일한 결과가 나와야 함"):
   - 기본은 뷰어를 같은 영역으로 연 그림이다. detail medium, thin keep, 밀도 켬(뷰어의 시작값), 뷰어의 채움·layerprops, 셀 프레임과 라벨(덱은 라벨 없음).

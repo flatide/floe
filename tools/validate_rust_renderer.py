@@ -2907,6 +2907,19 @@ class IndexOnOpenTests(unittest.TestCase):
         self.assertEqual(calls[0], ("open", "/x/deck.jb", None))
         self.assertNotIn("levels", [c[0] for c in calls])
 
+    def test_a_deck_says_its_skipped_placements_by_level(self):
+        """User 2026-10-26 ("상태줄등 $1로 표기되는 곳은 level 1으로 고치고"): the
+        status line of a deck with placements not drawn names the first
+        by `level N`, not the deck's `$N`."""
+        from floe import gui
+        note = gui.deck_skipped_note([
+            {"chip": "ID001", "idx": 2, "tc": "chipA.oas",
+             "reason": "empty_layer"},
+            {"chip": "ID002", "idx": 3, "tc": "chipB.oas",
+             "reason": "missing"}])
+        self.assertEqual(note, "jobdeck: 2 placement(s) not drawn - CHIP "
+                               "ID001 level 2 chipA.oas: empty_layer")
+
     def test_load_browser_hides_caches_and_sidecars(self):
         """User call 2026-09-10: the load dialog's folder listing never
         shows a layout's <src>.floe cache or a DRC db's .ice sidecar

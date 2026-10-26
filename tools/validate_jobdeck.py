@@ -805,8 +805,12 @@ class CliTests(unittest.TestCase):
                       "--mode", "chip", "--id", "2", ok=0)
         self.assertIn("[jobdeck] instances : 5 placed of 17 (selection [2])",
                       res.stdout)
-        self.assertIn("CHIP:ID001 blue, $2 yellow, CHIP:ID002 red",
+        self.assertIn("CHIP:ID001 blue, level 2 yellow, CHIP:ID002 red",
                       res.stdout)
+        # the placements table names the level by its number (user
+        # 2026-10-26: not the deck's `$N`)
+        self.assertIn("\nchip     level row  tc ", res.stdout)
+        self.assertIn("\nID001    2     0    chipA.oas ", res.stdout)
         self.assertIn("no index yet; run: floe2 index", res.stdout)
         r = json.loads(rep.read_text())
         self.assertEqual(r["plan"]["instances"], 5)
@@ -819,7 +823,7 @@ class CliTests(unittest.TestCase):
 
     def test_2_missing_source_exit_codes(self):
         res = run_cli(CLI / "test_formats.jb", ok=3)
-        self.assertIn("skipped   : CHIP ID002 $8 absent.oas: missing",
+        self.assertIn("skipped   : CHIP ID002 level 8 absent.oas: missing",
                       res.stdout)
         self.assertIn("junk.bin: unknown_format", res.stdout)
         self.assertIn("chipA.gds: unsupported", res.stdout)
@@ -2870,12 +2874,65 @@ class ShotTests(unittest.TestCase):
         run_floe2("render", CLI / "test.jb", "--legend", "--layers",
                   "$2,ALIGN", "--px", "320", "--out", some, env=self.env, ok=0)
         self.assertEqual(legend(some), [want[1], want[2]])
+        # the same by id and name (user 2026-10-26), in the order given
+        some = CLI / "legend-deck-ids.png"
+        run_floe2("render", CLI / "test.jb", "--legend", "--layerid", "2",
+                  "--layer", "ALIGN", "--px", "320", "--out", some,
+                  env=self.env, ok=0)
+        self.assertEqual(legend(some), [want[1], want[2]])
+        run_floe2("render", CLI / "test.jb", "--legend", "--layer", "ALIGN",
+                  "--layerid", "2", "--px", "320", "--out", some,
+                  env=self.env, ok=0)
+        self.assertEqual(legend(some), [want[2], want[1]])
         plain = CLI / "legend-deck-plain.png"
         run_floe2("render", CLI / "test.jb", "--px", "320", "--out", plain,
                   env=self.env, ok=0)
         self.assertEqual(legend(plain), [])
         run_floe2("fe-embed", "--strip", out, ok=0)
         self.assertEqual(out.read_bytes(), plain.read_bytes())
+
+
+    def test_a_capture_names_levels_by_name_or_id(self):
+        """User 2026-10-26 ("캡쳐 레이어 지정은 --layer "METAL1"으로 이름만 지정하거나
+        --layerid 1로 형태로 지정할 수 있게 해줘"): --layer is --layers - a
+        level by its name (its MTITLE; LEVELn without one) -, --layerid a
+        layer by the layer panel's number (a deck's level N is N, all its
+        chips), both together; the deck's old `$N` forms draw the same
+        picture; an id the deck has not is refused when the capture runs
+        (exit 1), one that is not a number on the command line (exit 2),
+        a name `level N` with the --layerid to use; a batch line takes
+        layer= and layerid= too."""
+        common = ("--bbox", "40000,80000,60000,95000", "--px", "300")
+
+        def shot(name, *opts, ok=0):
+            out = CLI / ("names-%s.png" % name)
+            res = run_floe2("render", CLI / "test.jb", *(common + opts),
+                            "--out", out, env=self.env, ok=ok)
+            return out.read_bytes() if ok == 0 else res
+
+        old = shot("old", "--layers", "$1 METAL1,$3 ALIGN")
+        self.assertEqual(shot("name", "--layer", "METAL1,ALIGN"), old)
+        self.assertEqual(shot("id", "--layerid", "1,3"), old)
+        self.assertEqual(shot("both", "--layer", "METAL1", "--layerid", "3"),
+                         old)
+        self.assertEqual(shot("panel", "--layerid", "1.0,3"), old)
+        self.assertNotEqual(shot("one", "--layerid", "1"), old)
+        self.assertEqual(shot("level5", "--layer", "LEVEL5"),
+                         shot("id5", "--layerid", "5"))
+        res = shot("nine", "--layerid", "9", ok=1)
+        self.assertIn('unknown deck layer: "9/0"', res.stderr)
+        res = shot("word", "--layerid", "METAL1", ok=2)
+        self.assertIn("invalid layer id", res.stderr)
+        # `level N`, as the texts say a level, is a number for --layerid
+        res = shot("said", "--layer", "level 1", ok=1)
+        self.assertIn("(a level by its number: --layerid 1)", res.stderr)
+        batch = CLI / "names.batch"
+        batch.write_text("byname layer=METAL1,ALIGN\nbyid layerid=1,3\n")
+        outdir = CLI / "names-batch"
+        run_floe2("render", CLI / "test.jb", *common, "--batch", batch,
+                  "--out", outdir, env=self.env, ok=0)
+        self.assertEqual((outdir / "byname.png").read_bytes(), old)
+        self.assertEqual((outdir / "byid.png").read_bytes(), old)
 
 
 class ChipShotTests(unittest.TestCase):
@@ -3155,6 +3212,10 @@ class ChipShotTests(unittest.TestCase):
         res = run_floe2("info", self.dir / "test.jb", "--chips",
                         env=self.env, ok=0)
         self.assertIn("chip rows : 5 in levels 1,2,3,5", res.stdout)
+        # each level by `level N` and its name (user 2026-10-26: not `$N`)
+        self.assertIn("\n  level 1 METAL1\n", res.stdout)
+        self.assertIn("\n  level 5 LEVEL5\n", res.stdout)
+        self.assertNotRegex(res.stdout, r"\$\d")
         marks = [("ID001", 3, 0), ("ID001", 3, 1), ("ID003", 3, 0)]
         self.assertIn("3/2 mark.oas  CHIP ID001,ID003  3 placements  %s um"
                       % box_text(self.h(marks)), res.stdout)
@@ -3188,7 +3249,7 @@ class ReviewFixTests(unittest.TestCase):
         res = run_floe2("render", CLI / "test_missing_layer.jb", "--px",
                         "100", "--out", out, "--report", rep, env=self.env,
                         ok=3)
-        self.assertIn("skipped   : CHIP ID001 $2 chipA.oas: empty_layer",
+        self.assertIn("skipped   : CHIP ID001 level 2 chipA.oas: empty_layer",
                       res.stdout)
         self.assertIn("WARNING: 1 jobdeck placement(s) not drawn",
                       res.stdout)

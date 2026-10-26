@@ -172,7 +172,7 @@ impl Dataset {
         for r in self.skipped() {
             writeln!(
                 text,
-                "[jobdeck] skipped   : CHIP {} ${} {}: {} ({})",
+                "[jobdeck] skipped   : CHIP {} level {} {}: {} ({})",
                 r.chip, r.idx, r.tc, r.reason, r.detail
             )
             .unwrap();
@@ -183,7 +183,7 @@ impl Dataset {
         for r in &d.spec.skipped {
             writeln!(
                 text,
-                "[jobdeck] skipped   : CHIP {} ${} {}: {} ({})",
+                "[jobdeck] skipped   : CHIP {} level {} {}: {} ({})",
                 r.chip, r.idx, r.tc, r.reason, r.detail
             )
             .unwrap();

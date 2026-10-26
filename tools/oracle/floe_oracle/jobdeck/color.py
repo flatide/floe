@@ -281,8 +281,11 @@ class ColorScheme:
 
 
 def order_text(rows) -> str:
-    """'CHIP:ID001 blue, $2 yellow, ...' from order_table rows."""
-    return ", ".join("%s %s%s" % (r["key"], r["name"],
+    """'CHIP:ID001 blue, level 2 yellow, ...' from order_table rows (a
+    level's key `$N` reads `level N`, user 2026-10-26)."""
+    return ", ".join("%s %s%s" % ("level " + r["key"][1:]
+                                  if r["key"].startswith("$") else r["key"],
+                                  r["name"],
                                   " (pinned)" if r["source"] == "pinned"
                                   else "")
                      for r in rows)

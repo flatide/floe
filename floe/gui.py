@@ -1917,6 +1917,16 @@ def offset_screen_segment(a, b, distance=EDGE_RULER_OFFSET_PX):
             (b[0] + ox, b[1] + oy))
 
 
+def deck_skipped_note(skipped):
+    """The status line of a deck whose placements are not all drawn: how
+    many, and the first by its CHIP, level, source and reason (the deck's
+    `$N` reads `level N`, user 2026-10-26)."""
+    first = skipped[0]
+    return "jobdeck: %d placement(s) not drawn - CHIP %s level %d %s: %s" % (
+        len(skipped), first["chip"], first["idx"], first["tc"],
+        first["reason"])
+
+
 def _level_row_text(row, keep=3):
     """(summary, full) for one level row of the load dialog: the summary
     names at most `keep` sources and counts the rest (review 2026-09-10
@@ -3067,11 +3077,7 @@ class Viewer:
                    " · %d NOT DRAWN" % len(jb["skipped"])
                    if jb.get("skipped") else ""))
             if jb.get("skipped"):
-                first = jb["skipped"][0]
-                self._set_live_status(
-                    "jobdeck: %d placement(s) not drawn - CHIP %s $%d %s: "
-                    "%s" % (len(jb["skipped"]), first["chip"],
-                            first["idx"], first["tc"], first["reason"]))
+                self._set_live_status(deck_skipped_note(jb["skipped"]))
         else:
             src = self.meta["src"]
             self._title_base = (

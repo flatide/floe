@@ -304,7 +304,7 @@ impl JobDeck {
                     self.warnings.push((
                         e.lineno,
                         format!(
-                            "chip {} ${}: AD missing; placement will raise",
+                            "chip {} level {}: AD missing; placement will raise",
                             chip.id, e.idx
                         ),
                     ));
@@ -313,7 +313,7 @@ impl JobDeck {
                     self.warnings.push((
                         e.lineno,
                         format!(
-                            "chip {} ${}: degenerate bbox {}x{} um (BX..UY missing?)",
+                            "chip {} level {}: degenerate bbox {}x{} um (BX..UY missing?)",
                             chip.id,
                             e.idx,
                             general(e.ux - e.bx),
@@ -324,7 +324,7 @@ impl JobDeck {
                 if e.ly.is_empty() {
                     self.warnings.push((
                         e.lineno,
-                        format!("chip {} ${}: no LY given", chip.id, e.idx),
+                        format!("chip {} level {}: no LY given", chip.id, e.idx),
                     ));
                 }
             }

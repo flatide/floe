@@ -315,7 +315,9 @@ class ChipTable:
         form --bbox and --corners take."""
         out = []
         for level in self.levels:
-            out.append("$%d %s" % (level, self.titles.get(level, "")))
+            title = self.titles.get(level, "")
+            out.append("level %d %s" % (level, title) if title
+                       else "level %d" % level)
             for row in (r for r in self.rows if r.level == level):
                 insts = self.instances([(row, None)])
                 ext = union(i.bbox for i in insts)

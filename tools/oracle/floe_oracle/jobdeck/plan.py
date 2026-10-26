@@ -144,11 +144,11 @@ def deck_summary(deck, catalog, placements, stats, scheme) -> list[str]:
             lines.append("source    : %s %s (%s)" % (
                 info["tc"], info["status"].upper(), info["error"]))
     for rec in stats["skipped"]:
-        lines.append("skipped   : CHIP %s $%d %s: %s (%s, %d row(s))" % (
+        lines.append("skipped   : CHIP %s level %d %s: %s (%s, %d row(s))" % (
             rec["chip"], rec["idx"], rec["tc"], rec["reason"],
             rec["detail"], rec["rows"]))
     for rec in stats["deck_issues"]:
-        lines.append("outside   : CHIP %s $%d %s: %s (not selected)" % (
+        lines.append("outside   : CHIP %s level %d %s: %s (not selected)" % (
             rec["chip"], rec["idx"], rec["tc"], rec["reason"]))
     for ln, msg in deck.warnings:
         lines.append("warning   : line %d: %s" % (ln, msg))
@@ -163,11 +163,11 @@ def deck_summary(deck, catalog, placements, stats, scheme) -> list[str]:
 
 
 def placement_lines(placements, scheme, colormap) -> list[str]:
-    out = ["%-8s %-4s %-4s %-24s %-8s %-9s %16s %16s %8s" % (
-        "chip", "idx", "row", "tc", "ly/dt", "mag", "dx_um", "dy_um",
+    out = ["%-8s %-5s %-4s %-24s %-8s %-9s %16s %16s %8s" % (
+        "chip", "level", "row", "tc", "ly/dt", "mag", "dx_um", "dy_um",
         "colour")]
     for p in placements:
-        out.append("%-8s $%-3d %-4d %-24s %-8s %-9g %16.4f %16.4f %8s" % (
+        out.append("%-8s %-5d %-4d %-24s %-8s %-9g %16.4f %16.4f %8s" % (
             p.chip, p.idx, p.row, p.tc, "%d/%d" % (p.ly, p.dt), p.mag,
             p.dx_um, p.dy_um, scheme.color_of(colormap, p)))
     return out
