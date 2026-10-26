@@ -1561,19 +1561,21 @@ BROWSE_HIDDEN_SUFFIXES = (".floe", ".ice")
 
 def list_browse_entries(folder, patterns):
     """(folders, files, links) of `folder` for the file dialogs' browser.
-    Folders are names; files are (name, size, mtime) admitted by one
-    of the fnmatch `patterns` (case-insensitive); links are
-    (name, target) for every symbolic link, whatever it points to.
-    Dotfiles, *.floe and *.ice are never listed; each list sorts
-    case-insensitively. An unreadable folder lists nothing.
+    Folders are names; files are (name, size, mtime) and symbolic links
+    (name, target) admitted by one of the fnmatch `patterns` on their
+    own name (case-insensitive). Dotfiles, *.floe and *.ice are never
+    listed; each list sorts case-insensitively. An unreadable folder
+    lists nothing.
 
     Nothing here follows a symbolic link (user call 2026-10-21): a
     data folder of links to other volumes made the dialog stat every
     link's target before it opened - an automount or an unreachable
-    NFS server per link. Only following a link tells a folder from a
-    file, so a link is listed as a link under every filter, with the
-    text of the link itself (readlink) for the user to tell; the
-    browser follows the one link the user activates."""
+    NFS server per link. So a link is judged by its own name, as a
+    file is (user call 2026-10-26: under the .jb filter every link of
+    the folder was listed), with the text of the link itself
+    (readlink) beside it; the browser follows the one link the user
+    activates. A link to a folder is a name too: the all-files filter
+    lists it."""
     import fnmatch
     folders, files, links = [], [], []
     try:
@@ -1588,20 +1590,21 @@ def list_browse_entries(folder, patterns):
                     BROWSE_HIDDEN_SUFFIXES):
                 continue
             try:
-                if e.is_symlink():
-                    try:
-                        target = os.readlink(e.path)
-                    except OSError:
-                        target = ""
-                    links.append((name, target))
-                    continue
-                is_dir = e.is_dir(follow_symlinks=False)
+                is_link = e.is_symlink()
+                is_dir = not is_link and e.is_dir(follow_symlinks=False)
             except OSError:
                 continue
             if is_dir:
                 folders.append(name)
                 continue
             if not any(fnmatch.fnmatch(name.lower(), p) for p in lowered):
+                continue
+            if is_link:
+                try:
+                    target = os.readlink(e.path)
+                except OSError:
+                    target = ""
+                links.append((name, target))
                 continue
             try:
                 st = e.stat(follow_symlinks=False)
@@ -1612,6 +1615,35 @@ def list_browse_entries(folder, patterns):
     files.sort(key=lambda t: t[0].lower())
     links.sort(key=lambda t: t[0].lower())
     return folders, files, links
+
+
+def browse_rows(folder, patterns):
+    """The file dialogs' browser rows of `folder` under `patterns`:
+    (display, size, modified, is_dir, name, is_link, tip). Folders come
+    first as `name/`; then the files and the symbolic links the
+    patterns admit (list_browse_entries) in one name order, a link as
+    `name@` (ls -F; user call 2026-10-26) with no size or time - its
+    target is not looked at - and its own text `name -> target` for
+    the tip; the tip of the others is the display. Tips are plain text
+    (the dialog escapes them for the tooltip's markup)."""
+    folders, files, links = list_browse_entries(folder, patterns)
+    rows = [(name + "/", "", "", True, name, False, name + "/")
+            for name in folders]
+    entries = [(name, size, mtime, None) for name, size, mtime in files]
+    entries += [(name, -1, 0, target) for name, target in links]
+    entries.sort(key=lambda t: (t[0].lower(), t[0]))
+    for name, size, mtime, target in entries:
+        if target is not None:
+            rows.append((name + "@", "", "", False, name, True,
+                         "%s -> %s" % (name, target or "?")))
+        elif size < 0:
+            rows.append((name, "", "", False, name, False, name))
+        else:
+            rows.append((name, fmt_bytes(size),
+                         time.strftime("%Y-%m-%d %H:%M",
+                                       time.localtime(mtime)),
+                         False, name, False, name))
+    return rows
 
 
 def fmt_bytes(n):
@@ -6673,18 +6705,20 @@ class Viewer:
     def _browse_file_dialog(self, title, folder, filters, first=0):
         """A file browser of our own - every dialog that opens a file
         (load layout / jobdeck, DRC .db, clusters, rule metadata,
-        notes, layer properties): folder list first, then the symbolic
-        links, then the files the current filter admits;
-        `list_browse_entries` hides dotfiles, pre-rename <src>.floe
-        caches and .ice packs (user call 2026-09-10 - GTK's chooser
-        applies no filter to folders) and follows no link (user call
-        2026-10-21 - GTK's chooser stats every link's target, which a
-        folder of links to other volumes turned into a wait per link);
-        a link row reads `name -> target` and is followed, alone, when
-        activated. Up / home buttons, an editable path (Enter navigates
-        to a folder or accepts a file), type-ahead on the name column,
-        a filter combo. Returns the picked path, or None. Saving (a
-        name to type) and the reviewers' multi-pick keep GTK's chooser."""
+        notes, layer properties): folder list first, then the files and
+        the symbolic links the current filter admits by name, in one
+        name order (`browse_rows`); `list_browse_entries` hides
+        dotfiles, pre-rename <src>.floe caches and .ice packs (user call
+        2026-09-10 - GTK's chooser applies no filter to folders) and
+        follows no link (user call 2026-10-21 - GTK's chooser stats
+        every link's target, which a folder of links to other volumes
+        turned into a wait per link); a link row reads `name@`, its own
+        text `name -> target` the tooltip (user call 2026-10-26), and is
+        followed, alone, when activated. Up / home buttons, an editable
+        path (Enter navigates to a folder or accepts a file), type-ahead
+        on the name column, a filter combo. Returns the picked path, or
+        None. Saving (a name to type) and the reviewers' multi-pick keep
+        GTK's chooser."""
         dlg = Gtk.Dialog(title=title, transient_for=self.window, modal=True)
         dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
                         "Open", Gtk.ResponseType.OK)
@@ -6704,8 +6738,8 @@ class Viewer:
         bar.pack_start(home, False, False, 0)
         bar.pack_start(entry, True, True, 0)
         box.pack_start(bar, False, False, 0)
-        # display, size, modified, is_dir, name, is_link
-        store = Gtk.ListStore(str, str, str, bool, str, bool)
+        # display, size, modified, is_dir, name, is_link, tooltip markup
+        store = Gtk.ListStore(str, str, str, bool, str, bool, str)
         view = Gtk.TreeView(model=store)
         for j, (label, expand) in enumerate((("name", True), ("size", False),
                                              ("modified", False))):
@@ -6717,7 +6751,8 @@ class Viewer:
             view.append_column(col)
         view.set_enable_search(True)
         view.set_search_column(0)
-        view.set_tooltip_column(0)   # the whole text behind an ellipsis
+        # the whole text behind an ellipsis; a link's own text
+        view.set_tooltip_column(6)
         sc = Gtk.ScrolledWindow()
         # no sideways scrolling: the name column ellipsizes instead, so
         # size and modified stay in view
@@ -6735,20 +6770,12 @@ class Viewer:
         def fill():
             store.clear()
             pats = filters[combo.get_active()][1]
-            folders, files, links = list_browse_entries(state["folder"],
-                                                        pats)
-            for name in folders:
-                store.append([name + "/", "", "", True, name, False])
-            # a link is listed as one, with what it points to, never
-            # followed to tell a folder from a file (user call 2026-10-21)
-            for name, target in links:
-                store.append(["%s -> %s" % (name, target or "?"), "", "",
-                              False, name, True])
-            for name, size, mtime in files:
-                store.append([name, fmt_bytes(size) if size >= 0 else "",
-                              time.strftime("%Y-%m-%d %H:%M",
-                                            time.localtime(mtime)),
-                              False, name, False])
+            # a link is judged by its own name, as a file is, and reads
+            # `name@`, never followed to tell a folder from a file (user
+            # calls 2026-10-21, 2026-10-26); the tooltip is markup
+            for row in browse_rows(state["folder"], pats):
+                store.append(list(row[:6]) +
+                             [GLib.markup_escape_text(row[6])])
             entry.set_text(state["folder"])
             if len(store):
                 view.get_selection().select_path(Gtk.TreePath.new_first())

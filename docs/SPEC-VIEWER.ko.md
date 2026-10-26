@@ -302,10 +302,14 @@
   (Enter = 폴더 이동 또는 파일 선택), 이름 열 type-ahead, 필터 콤보. **심볼릭 링크는
   따라가지 않는다**(사용자 요청 2026-10-21, app 0.12.372 — 다른 볼륨을 가리키는
   링크가 많은 데이터 폴더에서 링크마다 대상을 stat 하느라(automount, 응답 없는 NFS)
-  대화상자가 늦게 떴다): 링크는 가리키는 것이 무엇이든 모든 필터에서 `이름 -> 대상`
-  행(readlink 텍스트; 크기·수정 시각 없음)으로 폴더 뒤, 파일 앞에 나열되고, 사용자가
-  그 행을 활성화할 때만 그 하나를 따라가 폴더면 들어가고 파일이면 선택하며 끊긴
-  링크면 아무 일도 없다. 나열에 드는 호출은 항목마다 d_type/lstat와 링크의 readlink뿐.
+  대화상자가 늦게 떴다): 링크는 파일처럼 자기 이름으로 현재 필터를 거친다(사용자 요청
+  2026-10-26, app 0.12.407 — .jb 필터에서도 폴더의 링크가 모두 `이름 -> 대상`으로
+  나열됐다). 필터를 통과한 링크는 폴더 뒤에 파일과 한 이름순으로 `이름@` 행(`ls -F`;
+  크기·수정 시각 없음)이 되고, 툴팁이 링크 자체의 텍스트 `이름 -> 대상`(readlink)이다.
+  사용자가 그 행을 활성화할 때만 그 하나를 따라가 폴더면 들어가고 파일이면 선택하며
+  끊긴 링크면 아무 일도 없다. 대상을 보지 않으므로 폴더를 가리키는 링크도 이름으로
+  걸러진다: all files 필터에서 보이고, 경로 입력란에 쳐서 들어갈 수도 있다. 나열에 드는
+  호출은 항목마다 d_type/lstat와 필터를 통과한 링크의 readlink뿐.
   이 브라우저를 쓰는 대화상자: load layout, load jobdeck, DRC open .db, load DRC
   clusters, open rule metadata, load notes, load layer properties. 저장 대화상자
   (export review statistics, save notes/waives, save layer properties, save clip)와
@@ -313,8 +317,10 @@
   바꿀 수 없다; 이름을 치는 저장 모드는 미구현). 웹의 picker(app-core `browse`,
   `fstatat(AT_SYMLINK_NOFOLLOW)`)는 링크를 아예 건너뛴다(`skipped_links`). 게이트:
   rust_renderer `test_load_browser_hides_caches_and_sidecars`(폴더 링크가 폴더 행이
-  아니고 레이아웃 링크가 파일 행이 아니며 링크는 모든 필터에서 이름순·대상 포함,
-  열기 대화상자마다 `_browse_file_dialog`).
+  아니고 레이아웃 링크가 파일 행이 아니며 링크는 자기 이름이 통과하는 필터에서만
+  이름순·대상 포함, 행은 파일과 한 이름순의 `이름@`, 열기 대화상자마다
+  `_browse_file_dialog`), gtk_view `browse_dialog`(GTK 대화상자 그대로: .jb 필터의 행,
+  all files의 행, 툴팁의 마크업 이스케이프, 폴더 링크로 들어가기, 덱 링크 선택).
 - **색인 잠금**(2026-10-09, app 0.12.323 / RENDERD 0.12.297; CACHE-NAMING §5,
   SPEC-INDEXER §4.5).
   - **열기 전 확인:** 다른 실행이 레이아웃 캐시를 통째로 색인 중이면 상태줄에

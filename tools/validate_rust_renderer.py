@@ -2912,9 +2912,12 @@ class IndexOnOpenTests(unittest.TestCase):
         shows a layout's <src>.floe cache or a DRC db's .ice sidecar
         (nor dotfiles); folders come first, files follow the filter.
         User call 2026-10-21: the listing follows no symbolic link - a
-        link is a link row under every filter, a link to a folder is
-        not a folder row, a link to a layout not a file row - and every
-        dialog that opens a file is this browser."""
+        link to a folder is not a folder row, a link to a layout not a
+        file row - and every dialog that opens a file is this browser.
+        User call 2026-10-26: a link is listed under the filters its own
+        name passes, as a file is (the .jb filter listed every link of
+        the folder), and reads `name@` among the files by name, its own
+        text `name -> target` the tip."""
         import tempfile
         from floe import gui
         layouts = ("*.oas", "*.oas.gz", "*.gds", "*.gds.gz")
@@ -2939,15 +2942,29 @@ class IndexOnOpenTests(unittest.TestCase):
                              "all files: still no .ice, no dotfile")
             self.assertEqual(gui.list_browse_entries(
                 os.path.join(d, "nope"), ("*",)), ([], [], []))
-            # links: to a folder, to a layout (absolute), dangling, a
-            # loop, and two the name rules hide (dotfile, *.floe)
+            # links: to a folder, to a layout (absolute), to the deck
+            # (two names the .jb filter passes, the case aside, and one
+            # it does not), dangling, a loop, and two the name rules
+            # hide (dotfile, *.floe)
             for name, target in (("to_sub", "Sub"),
                                  ("to_a.oas", os.path.join(d, "a.oas")),
+                                 ("linked.jb", "deck.jb"),
+                                 ("LOUD.JB", "deck.jb"),
+                                 ("current", "deck.jb"),
                                  ("dangling", "nowhere"), ("loop", "loop"),
                                  (".hidden_link", "a.oas"),
                                  ("old.oas.floe", "a.oas")):
                 os.symlink(target, os.path.join(d, name))
-            for pats in (layouts, ("*.jb",), ("*",)):
+            every = [("current", "deck.jb"), ("dangling", "nowhere"),
+                     ("linked.jb", "deck.jb"), ("loop", "loop"),
+                     ("LOUD.JB", "deck.jb"),
+                     ("to_a.oas", os.path.join(d, "a.oas")),
+                     ("to_sub", "Sub")]
+            for pats, admitted in (
+                    (layouts, [("to_a.oas", os.path.join(d, "a.oas"))]),
+                    (("*.jb",), [("linked.jb", "deck.jb"),
+                                 ("LOUD.JB", "deck.jb")]),
+                    (("*",), every)):
                 folders, files, links = gui.list_browse_entries(d, pats)
                 self.assertEqual(
                     folders, ["Sub"],
@@ -2956,10 +2973,35 @@ class IndexOnOpenTests(unittest.TestCase):
                     "to_a.oas", [f[0] for f in files],
                     "a link to a layout is not followed into a file row")
                 self.assertEqual(
-                    links, [("dangling", "nowhere"), ("loop", "loop"),
-                            ("to_a.oas", os.path.join(d, "a.oas")),
-                            ("to_sub", "Sub")],
-                    "every link under every filter, name-sorted, with its target")
+                    links, admitted,
+                    "%s: the links whose own name the filter passes, "
+                    "name-sorted, with their targets" % (pats,))
+            # the rows: folders, then the files and the links in one
+            # name order, a link `name@` with no size or time
+            rows = gui.browse_rows(d, ("*.jb",))
+            self.assertEqual([r[0] for r in rows],
+                             ["Sub/", "deck.jb", "linked.jb@", "LOUD.JB@"])
+            self.assertEqual(rows[0], ("Sub/", "", "", True, "Sub", False,
+                                       "Sub/"))
+            self.assertEqual(rows[1][1], "1 B")
+            self.assertEqual(rows[1][3:], (False, "deck.jb", False,
+                                           "deck.jb"))
+            self.assertEqual(rows[2], ("linked.jb@", "", "", False,
+                                       "linked.jb", True,
+                                       "linked.jb -> deck.jb"))
+            self.assertEqual(
+                [r[0] for r in gui.browse_rows(d, layouts)],
+                ["Sub/", "a.oas", "b.GDS", "to_a.oas@"])
+            rows = gui.browse_rows(d, ("*",))
+            self.assertEqual(
+                [r[0] for r in rows],
+                ["Sub/", "a.oas", "b.GDS", "current@", "dangling@", "deck.jb",
+                 "linked.jb@", "loop@", "LOUD.JB@", "notes.txt", "to_a.oas@",
+                 "to_sub@", "x.db"],
+                "all files: every link, folder links too, among the files")
+            self.assertEqual([r[6] for r in rows if r[5]],
+                             ["%s -> %s" % link for link in every])
+            self.assertFalse([r for r in rows if " -> " in r[0]])
         self.assertEqual(gui.fmt_bytes(1023), "1023 B")
         self.assertEqual(gui.fmt_bytes(4300), "4.2 KB")
         self.assertEqual(gui.fmt_bytes(1.3 * 1024 ** 2), "1.3 MB")
@@ -2977,6 +3019,9 @@ class IndexOnOpenTests(unittest.TestCase):
         src = inspect.getsource(gui.list_browse_entries)
         self.assertNotIn("e.is_dir()", src, "the listing follows no link")
         self.assertNotIn("e.stat()", src, "the listing follows no link")
+        src = inspect.getsource(gui.browse_rows)
+        self.assertNotIn("stat(", src, "the rows follow no link")
+        self.assertNotIn("os.path.is", src, "the rows follow no link")
 
     def test_load_dialog_routes_a_deck_through_the_level_question(self):
         """File > load jobdeck… (field 2026-09-10): an INDEXED deck

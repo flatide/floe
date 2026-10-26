@@ -35,6 +35,11 @@ The cell tree's status line (2026-10-15): a selected cell says the
 service's cell_info text (app-core view::cell_info) - a cell placed once
 its place, one placed 2.25 million times its count -, behind the cursor's
 coordinates as it moves; Esc clears it (cell_status).
+
+The file dialogs' browser (2026-10-26): a symbolic link is a row `name@`
+under the filters its own name passes, among the files by name, its own
+text the tooltip; a link to a folder is entered, one to a file picked
+(browse_dialog).
 """
 
 
@@ -491,6 +496,85 @@ def cell_status(v, answers):
           "Esc left %r on the status line" % v.status.get_text())
 
 
+def browse_dialog(v):
+    """User 2026-10-26 ("필터가 .jb 혹은 다른 것일때는 보이지 않아야 하며 해당할
+    경우에도 @file 혹은 file@ 형태로 보이면 좋겠음"): the GTK dialog of
+    gui.py `_browse_file_dialog` - under the .jb filter the links named
+    *.jb alone, as `name@` among the files by name, `name -> target` the
+    tooltip (markup-escaped: an & in a name); under all files every link,
+    the one to a folder too; activating that one enters the folder, a
+    link to a deck is picked as the link's path. The dialog's run() is
+    the gate's while it looks (the rows are the store's)."""
+    from floe import gui
+    Gtk = gui.Gtk
+    with tempfile.TemporaryDirectory(prefix="floe-browse-") as d:
+        os.mkdir(os.path.join(d, "Sub"))
+        for name in ("deck.jb", "a.oas", os.path.join("Sub", "inner.jb")):
+            with open(os.path.join(d, name), "w") as fh:
+                fh.write("x")
+        for name, target in (("linked.jb", "deck.jb"), ("R&D.jb", "deck.jb"),
+                             ("current", "deck.jb"), ("to_a.oas", "a.oas"),
+                             ("to_sub", "Sub")):
+            os.symlink(target, os.path.join(d, name))
+        filters = [("jobdecks (*.jb)", ("*.jb",)), ("all files", ("*",))]
+        seen = []
+
+        def parts(dlg):
+            kids = dlg.get_content_area().get_children()
+            view = [k for k in kids if isinstance(k, Gtk.ScrolledWindow)][0]
+            combo = [k for k in kids if isinstance(k, Gtk.ComboBoxText)][0]
+            return view.get_child(), combo
+
+        def rows(view):
+            tip = view.get_tooltip_column()
+            return [(r[0], r[tip]) for r in view.get_model()]
+
+        def activate(view, display):
+            for i, r in enumerate(view.get_model()):
+                if r[0] == display:
+                    path = Gtk.TreePath.new_from_indices([i])
+                    view.get_selection().select_path(path)
+                    view.row_activated(path, view.get_column(0))
+                    return
+            check(False, "no row %r in %s" % (display, rows(view)))
+
+        def look(dlg):
+            view, combo = parts(dlg)
+            seen.append(rows(view))
+            combo.set_active(1)
+            seen.append(rows(view))
+            activate(view, "to_sub@")
+            seen.append(rows(view))
+            return Gtk.ResponseType.CANCEL
+
+        def pick(dlg):
+            activate(parts(dlg)[0], "linked.jb@")
+            return Gtk.ResponseType.OK
+
+        run = Gtk.Dialog.run
+        try:
+            Gtk.Dialog.run = look
+            none = v._browse_file_dialog("browse", d, filters)
+            Gtk.Dialog.run = pick
+            picked = v._browse_file_dialog("browse", d, filters)
+        finally:
+            Gtk.Dialog.run = run
+        check(none is None and len(seen) == 3, "the dialog's runs: %r %r" % (none, seen))
+        check(seen[0] == [("Sub/", "Sub/"), ("deck.jb", "deck.jb"),
+                          ("linked.jb@", "linked.jb -&gt; deck.jb"),
+                          ("R&D.jb@", "R&amp;D.jb -&gt; deck.jb")],
+              "the .jb filter's rows: %s" % seen[0])
+        check([r[0] for r in seen[1]] == ["Sub/", "a.oas", "current@", "deck.jb",
+                                          "linked.jb@", "R&D.jb@", "to_a.oas@",
+                                          "to_sub@"],
+              "all files' rows: %s" % seen[1])
+        check(seen[2] == [("inner.jb", "inner.jb")],
+              "the folder behind to_sub@: %s" % seen[2])
+        check(picked == os.path.join(d, "linked.jb"), "picked %r" % picked)
+    print("file dialog: %d rows under *.jb, %d under all files, a folder link "
+          "entered, a deck link picked" % (len(seen[0]), len(seen[1])))
+
+
 def gtk_ready():
     """Whether the viewer's windows can open here (GuiSmokeTests' rule)."""
     try:
@@ -684,6 +768,7 @@ def gui_viewer(src, ref):
         print("viewer: %d frame(s), perf %r" % (len(frames), last["perf"][1]))
         strike_and_palettes(v)
         cell_status(v, answers)
+        browse_dialog(v)
     finally:
         v._quit()
         v.window.destroy()
