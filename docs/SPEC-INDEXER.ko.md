@@ -615,7 +615,11 @@ floe-index svrf <deck> [-o OUT] [--scan] [-D NAME[=VAL]]… [-I DIR]… [--follo
   포인터 하나와 Vec 여유 용량·희소 맵이며(geometry·반복 배열 복사 없음), 레이어가
   끝나면 그 참조 목록을 해제한다. 레이어마다 재귀 레이어 존재 집합으로
   가지치기하고, 존재하지 않는 레이어는 순회 없이 `empty`. 배치 반복의 멤버는
-  열거하면서 하나씩 charge·walk한다(오프셋 벡터 없음, 2차 리뷰 P1-1). 상위 레벨은
+  열거하면서 하나씩 charge·walk한다(오프셋 벡터 없음, 2차 리뷰 P1-1). 도형 반복은
+  사각형의 조밀한 축 정렬 격자가 외곽 사각형 한 번(정확)이고, `--occupancy-prune 1`(기본)에서는 다각형·경로의
+  조밀한 축 정렬 격자도 멤버 bbox가 셀 이하이면 외곽 한 번이다(prune 계약 안의 superset: 멤버가 2×2 셀을 넘지
+  않고 틈이 셀보다 좁다; 0.12.405, 현장에서 fill 배열의 레이어가 4 µm·16 µm 모두 2^36 마크 상한에 걸림;
+  `FLOE_OCCUPANCY_GRID_FILL=off`가 킬 스위치, `--occupancy-prune 0`은 종전대로 멤버별). 상위 레벨은
   OR 풀링, 격자가 64 × 64 이하가 될 때까지. 로그 `[vfs] occupancy cell= … ok=K
   empty=E jobs=N SIZE (Ts)`. 진행(2026-09-16, 현장: 150 MB 실칩의 마킹 5분이
   무음): 레이어 마킹 중 10 s마다 `[vfs] occupancy L/D marking: u/U units work

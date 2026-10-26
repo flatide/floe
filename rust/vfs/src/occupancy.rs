@@ -1379,8 +1379,9 @@ impl<'a> Marker<'a> {
                         return false;
                     }
                 }
+                let prune = self.prune.is_some();
                 for p in &cell.polys[polys.0..polys.1] {
-                    if poly_splits(p, split) {
+                    if poly_splits(p, &u.xf, c, prune, split) {
                         continue;
                     }
                     if !self.mark_poly_rec(p, &u.xf) {
@@ -1388,7 +1389,7 @@ impl<'a> Marker<'a> {
                     }
                 }
                 for p in &cell.paths[paths.0..paths.1] {
-                    if path_splits(p, split) {
+                    if path_splits(p, &u.xf, c, prune, split) {
                         continue;
                     }
                     if !self.mark_path_rec(p, &u.xf) {
@@ -1741,12 +1742,24 @@ impl<'a> Marker<'a> {
         m1: u64,
     ) -> bool {
         let mut world = std::mem::take(&mut self.scratch.world);
-        let mut shifted = std::mem::take(&mut self.scratch.shifted);
         world.clear();
         world.extend(local.iter().map(|&(x, y)| {
             let (wx, wy) = xf.apply(x, y);
             (wx as i128, wy as i128)
         }));
+        // under the prune a dense axis grid of a member no wider than the
+        // cell is its footprint in one fill, done by the range holding
+        // member 0 (grid_fill_closed_form; the rect grids' rule since
+        // 2026-09-16, the shape grids' since 2026-10-26)
+        if self.prune.is_some() {
+            if let Some((x0, y0, x1, y1)) =
+                points_bbox(&world).and_then(|b| grid_fill_closed_form(rep, xf, self.c, b))
+            {
+                self.scratch.world = world;
+                return m0 > 0 || self.mark_world_rect(x0, y0, x1, y1);
+            }
+        }
+        let mut shifted = std::mem::take(&mut self.scratch.shifted);
         shifted.clear();
         shifted.extend_from_slice(&world);
         let ok = self.for_each_member_range(rep, xf, m0, m1, |m, dx, dy| {
@@ -1948,7 +1961,99 @@ fn rect_world(r: &RectRec, xf: &Xf) -> (i128, i128, i128, i128) {
 /// generator asks the same question with the same xf and cell, so a
 /// record on this path is never split (one fill, not members).
 fn rect_closed_form(r: &RectRec, xf: &Xf, c: i64) -> Option<(i128, i128, i128, i128)> {
-    let Rep::Grid { na, nb, va, vb } = &r.rep else {
+    if !matches!(r.rep, Rep::Grid { .. }) {
+        return None;
+    }
+    grid_closed_form(&r.rep, xf, c, rect_world(r, xf))
+}
+
+/// `FLOE_OCCUPANCY_GRID_FILL=off`: the kill switch of the prune's footprint
+/// fill of dense shape grids (`grid_fill_closed_form`, 2026-10-26) - their
+/// members are marked one by one again, as before.
+pub fn grid_fill_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_OCCUPANCY_GRID_FILL").map_or(true, |v| v != "off"))
+}
+
+/// The prune's closed form of a polygon or path grid (2026-10-26; field:
+/// one EBEAM layer's marking stopped at the 2^36 cap at 4 um and at 16 um
+/// alike, every member of its fill arrays charged a mark): an axis-aligned
+/// Grid of at least two members whose world bbox `m` is no wider than the
+/// cell on either axis, dense as `grid_closed_form` asks, is its footprint
+/// in one fill. The fill is the member bboxes' footprint, a superset of
+/// the shapes' cells within one cell (a member spans at most a 2 x 2
+/// block, and a gap narrower than the cell lies beside one): the prune's
+/// contract (Opts::prune), under which alone it is used; the exact walk
+/// (`--occupancy-prune 0`) and wider members mark member by member - a
+/// member wider than the cell in a dense grid is at most four members a
+/// cell, so that count is bounded by the cells.
+fn grid_fill_closed_form(
+    rep: &Rep,
+    xf: &Xf,
+    c: i64,
+    m: (i128, i128, i128, i128),
+) -> Option<(i128, i128, i128, i128)> {
+    if !grid_fill_enabled() || rep_members(rep) < 2 {
+        return None;
+    }
+    let c128 = c as i128;
+    if m.2 - m.0 > c128 || m.3 - m.1 > c128 {
+        return None;
+    }
+    grid_closed_form(rep, xf, c, m)
+}
+
+/// world bbox of a polygon's points (None below three)
+fn points_bbox(pts: &[(i128, i128)]) -> Option<(i128, i128, i128, i128)> {
+    if pts.len() < 3 {
+        return None;
+    }
+    let mut b = (pts[0].0, pts[0].1, pts[0].0, pts[0].1);
+    for &(x, y) in &pts[1..] {
+        b.0 = b.0.min(x);
+        b.1 = b.1.min(y);
+        b.2 = b.2.max(x);
+        b.3 = b.3.max(y);
+    }
+    Some(b)
+}
+
+/// whether a polygon record (local points) under `xf` is one footprint
+/// fill under the prune (the unit generator and the Shapes runner ask
+/// this with the same xf and cell, so such a record is never split)
+fn poly_grid_fills(local: &[(i64, i64)], rep: &Rep, xf: &Xf, c: i64) -> bool {
+    if !matches!(rep, Rep::Grid { .. }) || rep_members(rep) < 2 {
+        return false;
+    }
+    let world: Vec<(i128, i128)> = local
+        .iter()
+        .map(|&(x, y)| {
+            let (wx, wy) = xf.apply(x, y);
+            (wx as i128, wy as i128)
+        })
+        .collect();
+    points_bbox(&world).is_some_and(|b| grid_fill_closed_form(rep, xf, c, b).is_some())
+}
+
+fn path_grid_fills(p: &PathRec, xf: &Xf, c: i64) -> bool {
+    if p.hw <= 0 || !matches!(p.rep, Rep::Grid { .. }) {
+        return false;
+    }
+    match path_outline_any(&p.pts, p.hw, p.es, p.ee) {
+        Ok(hull) => poly_grid_fills(&hull, &p.rep, xf, c),
+        Err(_) => false,
+    }
+}
+
+/// `rect_closed_form` on any member bbox `m` (world): the footprint of an
+/// axis-aligned grid dense on both axes, None otherwise.
+fn grid_closed_form(
+    rep: &Rep,
+    xf: &Xf,
+    c: i64,
+    m: (i128, i128, i128, i128),
+) -> Option<(i128, i128, i128, i128)> {
+    let Rep::Grid { na, nb, va, vb } = rep else {
         return None;
     };
     let wa = xf.apply_vec(va.0, va.1);
@@ -1956,7 +2061,7 @@ fn rect_closed_form(r: &RectRec, xf: &Xf, c: i64) -> Option<(i128, i128, i128, i
     if !is_axis(&wa, &wb) {
         return None;
     }
-    let (mx0, my0, mx1, my1) = rect_world(r, xf);
+    let (mx0, my0, mx1, my1) = m;
     let (px, nx, py, ny) = if wa.1 == 0 && wb.0 == 0 {
         (wa.0.abs(), *na, wb.1.abs(), *nb)
     } else {
@@ -1997,12 +2102,12 @@ fn rect_splits(r: &RectRec, xf: &Xf, c: i64, split_above: u64) -> bool {
     r.w > 0 && r.h > 0 && rep_members(&r.rep) > split_above && rect_closed_form(r, xf, c).is_none()
 }
 
-fn poly_splits(p: &PolyRec, split_above: u64) -> bool {
-    rep_members(&p.rep) > split_above
+fn poly_splits(p: &PolyRec, xf: &Xf, c: i64, prune: bool, split_above: u64) -> bool {
+    rep_members(&p.rep) > split_above && !(prune && poly_grid_fills(&p.pts, &p.rep, xf, c))
 }
 
-fn path_splits(p: &PathRec, split_above: u64) -> bool {
-    p.hw > 0 && rep_members(&p.rep) > split_above
+fn path_splits(p: &PathRec, xf: &Xf, c: i64, prune: bool, split_above: u64) -> bool {
+    p.hw > 0 && rep_members(&p.rep) > split_above && !(prune && path_grid_fills(p, xf, c))
 }
 
 /// member k's offset in the parent frame, in the walk's enumeration
@@ -2227,14 +2332,14 @@ fn collect_units_weighted(
         }
     }
     for (idx, p) in shapes[ci].polys.iter().enumerate() {
-        if poly_splits(p, budget) {
+        if poly_splits(p, &xf, c, small.is_some(), budget) {
             giants.push((1, idx, rep_members(&p.rep)));
         } else {
             own = own.saturating_add(rep_members(&p.rep));
         }
     }
     for (idx, p) in shapes[ci].paths.iter().enumerate() {
-        if path_splits(p, budget) {
+        if path_splits(p, &xf, c, small.is_some(), budget) {
             giants.push((2, idx, rep_members(&p.rep)));
         } else {
             own = own.saturating_add(rep_members(&p.rep));
@@ -5382,6 +5487,88 @@ mod tests {
         assert_eq!(plane.depth, 1);
         let l0 = &plane.levels[0];
         assert_eq!(l0.count(), (occ.w as u64) * (occ.h as u64));
+    }
+
+    #[test]
+    fn a_dense_grid_of_small_shapes_is_one_footprint_under_the_prune() {
+        // 2026-10-26 (field: one EBEAM layer's marking stopped at the 2^36
+        // cap at 4 um and at 16 um alike - its fill arrays charged a mark a
+        // member): under the prune a dense axis grid of a polygon or path no
+        // wider than the cell is its footprint in one fill, a superset of the
+        // exact marking within one cell; the exact walk marks per member, as
+        // do a member wider than the cell and a sparse grid under the prune
+        let tri = |pts: Vec<(i64, i64)>, rep: Rep| PolyRec { layer: 1, dt: 0, pts, rep };
+        let grid = |na, nb, va, vb| Rep::Grid { na, nb, va, vb };
+        let within_one_cell = |p: &Level, e: &Level| {
+            assert_eq!((p.w, p.h), (e.w, e.h));
+            let mut extra = 0u64;
+            for j in 0..p.h {
+                for i in 0..p.w {
+                    if e.get(i, j) {
+                        assert!(p.get(i, j), "exact cell {i},{j} missing");
+                    } else if p.get(i, j) {
+                        extra += 1;
+                        let near = (i.saturating_sub(1)..=(i + 1).min(p.w - 1)).any(|a| {
+                            (j.saturating_sub(1)..=(j + 1).min(p.h - 1)).any(|b| e.get(a, b))
+                        });
+                        assert!(near, "pruned cell {i},{j} beyond one cell of the exact marking");
+                    }
+                }
+            }
+            extra
+        };
+        let both = |top: Cell| {
+            let d = doc_with(vec![top], 0, vec![(1, 0)]);
+            let pruned = build(&d, 0, 0, &opts(0.01)).unwrap();
+            let exact = build(&d, 0, 0, &Opts { prune: false, ..opts(0.01) }).unwrap();
+            assert_eq!((pruned.cell_dbu, exact.cell_dbu), (10, 10));
+            assert_eq!((pruned.layers[0].status, exact.layers[0].status), (STATUS_OK, STATUS_OK));
+            (pruned, exact)
+        };
+        // a 4 dbu triangle at pitch 9 x 7 (gaps 5 and 3 < the 10 dbu cell), 400 x 300
+        let mut top = cell("T");
+        top.polys.push(tri(vec![(0, 0), (4, 0), (0, 4)], grid(400, 300, (9, 0), (0, 7))));
+        let (pruned, exact) = both(top);
+        let (p, e) = (pruned.layers[0].level(0).unwrap(), exact.layers[0].level(0).unwrap());
+        assert_eq!(p.count(), (p.w as u64) * (p.h as u64), "the footprint: every cell of the extent");
+        within_one_cell(&p, &e);
+        // the work is the cells set (the fill's spans), not the members
+        let cells = (p.w as u64) * (p.h as u64);
+        assert!(pruned.layers[0].work <= cells + 16, "one fill: work {} for {} cells", pruned.layers[0].work, cells);
+        assert!(exact.layers[0].work >= 120_000, "per member: work {}", exact.layers[0].work);
+        // a path the same (its outline 6 x 2 dbu at pitch 8 x 5), rotated by the placement
+        let mut top = cell("T");
+        let mut child = cell("C");
+        child.paths.push(PathRec {
+            layer: 1,
+            dt: 0,
+            pts: vec![(0, 0), (4, 0)],
+            hw: 1,
+            es: 1,
+            ee: 1,
+            rep: grid(200, 100, (8, 0), (0, 5)),
+        });
+        top.places.push(PlaceRec { cell: 1, x: 30, y: 10, rot: 1, flip: false, rep: Rep::One });
+        let d = doc_with(vec![top, child], 0, vec![(1, 0)]);
+        let pruned = build(&d, 0, 0, &opts(0.01)).unwrap();
+        let exact = build(&d, 0, 0, &Opts { prune: false, ..opts(0.01) }).unwrap();
+        let (p, e) = (pruned.layers[0].level(0).unwrap(), exact.layers[0].level(0).unwrap());
+        within_one_cell(&p, &e);
+        let cells = (p.w as u64) * (p.h as u64);
+        assert!(pruned.layers[0].work <= cells + 16, "one fill: work {} for {} cells", pruned.layers[0].work, cells);
+        assert!(exact.layers[0].work >= 20_000, "per member: work {}", exact.layers[0].work);
+        // a member wider than the cell (25 dbu) in a dense grid, and a small
+        // member in a sparse grid (pitch 30: gap >= the cell): per member
+        // under the prune too - the pruned planes are the exact ones
+        for rep in [grid(40, 30, (20, 0), (0, 20)), grid(40, 30, (30, 0), (0, 30))] {
+            let wide = matches!(rep, Rep::Grid { va: (20, 0), .. });
+            let pts = if wide { vec![(0, 0), (25, 0), (0, 25)] } else { vec![(0, 0), (4, 0), (0, 4)] };
+            let mut top = cell("T");
+            top.polys.push(tri(pts, rep));
+            let (pruned, exact) = both(top);
+            assert_eq!(pruned.layers[0].level(0).unwrap(), exact.layers[0].level(0).unwrap());
+            assert!(pruned.layers[0].work >= 1_200, "per member: work {}", pruned.layers[0].work);
+        }
     }
 
     #[test]

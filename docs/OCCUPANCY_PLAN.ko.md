@@ -1133,3 +1133,17 @@ makes it")로 거절하고, 밀도 스택은 캐시에 design.ovs가 없으면 �
 `density_none=nofile`; 킬 스위치 `FLOE_RUST_DENSITY_OCC=off`만 플랜 유지). 뷰어는 토글과 시작 옵션을 파일 유무로 거절한다
 (gui.py `_density_available`/`_occupancy_available`). 말하지 않은 요청(`FLOE_RUST_OCCUPANCY=on`의 레이아웃, 덱 pass의
 `summary_building` 규칙)은 그대로다. 상세는 DIRECT_READ_PLAN §8.24, SPEC-VIEWER §5, CUT_DENSITY_DESIGN §10.17.
+
+### 2026-10-26 — 조밀한 도형 격자의 외곽 채움 (0.12.405 / RENDERD 0.12.361, 사용자 "변경 진행해줘")
+
+현장: 레벨 5의 한 EBEAM 소스에서 레이어 45/0·45/300의 마킹이 `--occupancy-um 16`으로 다시 만들어도 2^36 마크 상한에서
+멈췄다(`work=68719508999`). 마킹의 작업량은 칠한 셀 + 멤버 + 변 행인데, 다각형·경로의 반복 배열은 조밀해도 멤버마다
+charge·스캔 변환을 했으므로 fill 배열의 레이어는 셀 크기와 무관하게 멤버 수만큼 들었다(사각형 격자만 2026-09-16부터
+외곽 한 번). 이제 `--occupancy-prune 1`(기본)에서 축 정렬 Grid의 멤버 bbox가 셀 이하이고 틈이 셀보다 좁으면 다각형·경로도
+외곽 사각형 한 번으로 칠한다(`grid_fill_closed_form`; unit 생성기와 러너가 같은 판정이라 그런 레코드는 Members unit으로
+쪼개지 않는다). 그림은 prune 계약(exact ≤ pruned ≤ dilate(exact, 1셀)) 안이다: 멤버가 2×2 셀을 넘지 않고 틈 옆에는 늘
+멤버 bbox가 있다. 멤버가 셀보다 큰 조밀 격자는 셀당 멤버가 최대 넷이라 멤버 수가 셀 수에 묶이고, 성긴 격자(틈 ≥ 셀)도
+멤버 수 ≤ 셀 수이므로 종전 경로가 그대로다. `FLOE_OCCUPANCY_GRID_FILL=off`가 킬 스위치. 단위 테스트
+`a_dense_grid_of_small_shapes_is_one_footprint_under_the_prune`(삼각형 400×300과 회전 배치된 경로 200×100: 외곽 전부 채움,
+exact의 한 셀 안 superset, 작업량 한 자릿수 차이; 큰 멤버·성긴 격자는 exact와 평면 동일), 게이트 `occupancy`
+PruneContractTests의 fixture에 4/0·5/0 도형 격자(1,200 멤버씩; 계약·깊이 평면·작업량 감소 검사).

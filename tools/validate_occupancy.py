@@ -376,7 +376,11 @@ def write_prune(path):
     places it singly under every rotation/mirror, as a dense grid (pitch
     0.5 x 0.7 um <= the cell: one footprint fill), as a sparse grid (3 um:
     member bboxes), and inside BIG (12 um, not small; placed twice, once
-    rotated). 3/0 is the top's own box (exact path)."""
+    rotated). 3/0 is the top's own box (exact path). 4/0 and 5/0 (2026-10-26)
+    are dense shape grids of small members in the top - a 0.3 um triangle at
+    pitch 0.5 x 0.7 um and a 0.4 x 0.2 um path at pitch 0.6 x 0.5 um, 40 x 30
+    each, written as OASIS repetitions - whose footprint the prune fills in
+    one go (the exact walk marks their 1,200 members one by one)."""
     ly = db.Layout()
     ly.dbu = 0.001
     top = ly.create_cell("PRUNE")
@@ -401,7 +405,17 @@ def write_prune(path):
                                 db.Vector(900, 0), db.Vector(0, 900), 10, 8))
     top.insert(db.CellInstArray(big.cell_index(), db.Trans(db.Vector(45 * UM, 5 * UM))))
     top.insert(db.CellInstArray(big.cell_index(), db.Trans(1, False, 70 * UM, 30 * UM)))
-    ly.write(str(path))
+    l4, l5 = ly.layer(4, 0), ly.layer(5, 0)
+    for j in range(30):
+        for i in range(40):
+            x, y = 60 * UM + i * 500, 2 * UM + j * 700
+            top.shapes(l4).insert(db.Polygon([P(x, y), P(x + 300, y), P(x, y + 300)]))
+            x, y = 60 * UM + i * 600, 30 * UM + j * 500
+            top.shapes(l5).insert(db.Path([P(x, y + 100), P(x + 400, y + 100)], 200))
+    opt = db.SaveLayoutOptions()
+    opt.format = "OASIS"
+    opt.oasis_compression_level = 10
+    ly.write(str(path), opt)
     ly._destroy()
 
 
@@ -688,14 +702,22 @@ class PruneContractTests(unittest.TestCase):
         for (key, depth) in self.planes(self.pruned):
             depths.setdefault(key, set()).add(depth)
         # 3/0: the top's own box; 1/0: BIG's box and LEAF under the top (1),
-        # LEAF under BIG (2); 2/0: SUB under LEAF under the top (2), under BIG (3)
-        self.assertEqual(depths, {(3, 0): {0}, (1, 0): {1, 2}, (2, 0): {2, 3}})
+        # LEAF under BIG (2); 2/0: SUB under LEAF under the top (2), under BIG (3);
+        # 4/0 and 5/0: the top's own shape grids
+        self.assertEqual(depths, {(3, 0): {0}, (1, 0): {1, 2}, (2, 0): {2, 3},
+                                  (4, 0): {0}, (5, 0): {0}})
 
     def test_the_work_drops_and_the_file_does_not_depend_on_jobs_or_the_split(self):
         work = {l["key"]: l["work"] for l in self.exact["layers"]}
         pruned = {l["key"]: l["work"] for l in self.pruned["layers"]}
         self.assertLess(pruned[(1, 0)], work[(1, 0)])
         self.assertLess(pruned[(2, 0)], work[(2, 0)])
+        # the dense shape grids (2026-10-26): the exact walk charges their
+        # 1,200 members (the OASIS repetition must be there for this), the
+        # prune fills the footprint once
+        for key in ((4, 0), (5, 0)):
+            self.assertGreaterEqual(work[key], 1200, "%s: the fixture's repetition" % (key,))
+            self.assertLess(pruned[key] * 4, work[key], "%s: pruned %d exact %d" % (key, pruned[key], work[key]))
         shas = {sha(self.pruned_cache / "design.ovo")}
         for extra in (("--jobs", "1"), ("--jobs", "4", "--occupancy-balance", "0")):
             out = TMP / ("prune_alt_%s" % "_".join(a.strip("-") for a in extra))
