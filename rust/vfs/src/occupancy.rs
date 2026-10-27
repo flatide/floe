@@ -464,8 +464,8 @@ fn none_cells_note(gw: i128, gh: i128, base_um: f64, max_cells: u64) -> String {
 pub fn status_hint(status: u8, opts: &Opts) -> String {
     match status {
         STATUS_NONE_WORK => format!(
-            " - over --occupancy-max-work {} marks (a flat file marks once per shape: raise it)",
-            opts.max_work
+            " - over --occupancy-max-work {} marks (by default {} per byte of the file, at least {}: raise it)",
+            opts.max_work, WORK_PER_SOURCE_BYTE, DEFAULT_MAX_WORK
         ),
         STATUS_NONE_SIZE => format!(
             " - the file's bitmaps reached --occupancy-max-bytes {} (raise it, or a coarser --occupancy-um)",
@@ -497,8 +497,22 @@ pub const DEFAULT_MAX_CELLS: u64 = 1 << 32;
 /// 2026-10-23), so their summaries ended `none:work` and the first frame
 /// took eight minutes. 2^36 bounds the marking of one layer at about a
 /// quarter of an hour at the measured 80 M marks/s; `--occupancy-max-work`
-/// sets it.
+/// sets it, and floe-index raises it for a large source (`default_max_work`).
 pub const DEFAULT_MAX_WORK: u64 = 1 << 36;
+/// marks per byte of the source a layer may take when
+/// `--occupancy-max-work` is not given (2026-10-27; field: a 290 GB
+/// EBEAM file's polygon layer stopped at 2^36 after an hour's pass). The
+/// floor stays DEFAULT_MAX_WORK, so only a source over 16 GiB gets more:
+/// its marks are its shapes - one to four a member no wider than the cell
+/// since `small_member_box` - and take about as long as reading it, while
+/// a small file whose repetitions expand to billions keeps the fixed bound.
+pub const WORK_PER_SOURCE_BYTE: u64 = 4;
+
+/// the work cap of a source of `src_size` bytes when none is given:
+/// WORK_PER_SOURCE_BYTE a byte, at least DEFAULT_MAX_WORK
+pub fn default_max_work(src_size: u64) -> u64 {
+    DEFAULT_MAX_WORK.max(src_size.saturating_mul(WORK_PER_SOURCE_BYTE))
+}
 /// bitmap bytes over all layers before the rest is `none:size`: 4 GiB
 /// since 2026-10-24 (1 GiB until 0.12.395), to go with the cell cap above
 /// - a whole-reticle layer at 4 um is 242 MB a plane with its pyramid, so
@@ -1589,13 +1603,7 @@ impl<'a> Marker<'a> {
             return true;
         }
         // zero-area (colinear) polygons: KLayout's region is empty
-        let mut area2 = 0i128;
-        for k in 0..n {
-            let (x1, y1) = pts[k];
-            let (x2, y2) = pts[(k + 1) % n];
-            area2 += x1 * y2 - x2 * y1;
-        }
-        if area2 == 0 {
+        if twice_area(pts) == 0 {
             return true;
         }
         let c = self.c as i128;
@@ -1757,6 +1765,14 @@ impl<'a> Marker<'a> {
             {
                 self.scratch.world = world;
                 return m0 > 0 || self.mark_world_rect(x0, y0, x1, y1);
+            }
+            // a member no wider than the cell is its bbox's cells
+            // (small_member_box, 2026-10-27)
+            if let Some(b) = small_member_box(&world, self.c) {
+                self.scratch.world = world;
+                return self.for_each_member_range(rep, xf, m0, m1, |m, dx, dy| {
+                    m.mark_world_rect(b.0 + dx, b.1 + dy, b.2 + dx, b.3 + dy)
+                });
             }
         }
         let mut shifted = std::mem::take(&mut self.scratch.shifted);
@@ -2001,6 +2017,48 @@ fn grid_fill_closed_form(
         return None;
     }
     grid_closed_form(rep, xf, c, m)
+}
+
+/// `FLOE_OCCUPANCY_SMALL_BOX=off`: the kill switch of the prune's bbox
+/// mark of a small polygon or path (`small_member_box`, 2026-10-27) - each
+/// member is scan-converted again, as before.
+pub fn small_box_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FLOE_OCCUPANCY_SMALL_BOX").map_or(true, |v| v != "off"))
+}
+
+/// The prune's mark of a polygon or path outline (world points) no wider
+/// than the cell on either axis: its bbox, whose cells are what each member
+/// marks (2026-10-27; field: a 290 GB EBEAM file's polygon layer stopped at
+/// the 2^36 cap - the scan conversion charged a member its edges and rows,
+/// about 32 marks for a 20-vertex OPC shape, for the one to four cells it
+/// sets). The bbox spans at most a 2 x 2 block of cells and holds the
+/// polygon's own cells, so the mark is a superset of the exact one within
+/// one cell: the prune's contract (Opts::prune), under which alone it is
+/// used. A zero-area outline gets None and marks nothing on the exact path,
+/// as there; a wider one is scan-converted.
+fn small_member_box(world: &[(i128, i128)], c: i64) -> Option<(i128, i128, i128, i128)> {
+    if !small_box_enabled() {
+        return None;
+    }
+    let b = points_bbox(world)?;
+    let c = c as i128;
+    if b.2 - b.0 > c || b.3 - b.1 > c || twice_area(world) == 0 {
+        return None;
+    }
+    Some(b)
+}
+
+/// twice the signed area of a polygon (0: colinear, nothing to mark)
+fn twice_area(pts: &[(i128, i128)]) -> i128 {
+    let n = pts.len();
+    let mut area2 = 0i128;
+    for k in 0..n {
+        let (x1, y1) = pts[k];
+        let (x2, y2) = pts[(k + 1) % n];
+        area2 += x1 * y2 - x2 * y1;
+    }
+    area2
 }
 
 /// world bbox of a polygon's points (None below three)
@@ -5489,6 +5547,30 @@ mod tests {
         assert_eq!(l0.count(), (occ.w as u64) * (occ.h as u64));
     }
 
+    /// the prune's contract on one level-0 plane: every exact cell is set
+    /// in `p`, every other cell of `p` lies beside an exact one; the count
+    /// of those extra cells
+    fn within_one_cell(p: &Level, e: &Level) -> u64 {
+        assert_eq!((p.w, p.h), (e.w, e.h));
+        let mut extra = 0u64;
+        for j in 0..p.h {
+            for i in 0..p.w {
+                if e.get(i, j) {
+                    assert!(p.get(i, j), "exact cell {i},{j} missing");
+                } else if p.get(i, j) {
+                    extra += 1;
+                    let near = (i.saturating_sub(1)..=(i + 1).min(p.w - 1))
+                        .any(|a| (j.saturating_sub(1)..=(j + 1).min(p.h - 1)).any(|b| e.get(a, b)));
+                    assert!(
+                        near,
+                        "pruned cell {i},{j} beyond one cell of the exact marking"
+                    );
+                }
+            }
+        }
+        extra
+    }
+
     #[test]
     fn a_dense_grid_of_small_shapes_is_one_footprint_under_the_prune() {
         // 2026-10-26 (field: one EBEAM layer's marking stopped at the 2^36
@@ -5499,24 +5581,6 @@ mod tests {
         // do a member wider than the cell and a sparse grid under the prune
         let tri = |pts: Vec<(i64, i64)>, rep: Rep| PolyRec { layer: 1, dt: 0, pts, rep };
         let grid = |na, nb, va, vb| Rep::Grid { na, nb, va, vb };
-        let within_one_cell = |p: &Level, e: &Level| {
-            assert_eq!((p.w, p.h), (e.w, e.h));
-            let mut extra = 0u64;
-            for j in 0..p.h {
-                for i in 0..p.w {
-                    if e.get(i, j) {
-                        assert!(p.get(i, j), "exact cell {i},{j} missing");
-                    } else if p.get(i, j) {
-                        extra += 1;
-                        let near = (i.saturating_sub(1)..=(i + 1).min(p.w - 1)).any(|a| {
-                            (j.saturating_sub(1)..=(j + 1).min(p.h - 1)).any(|b| e.get(a, b))
-                        });
-                        assert!(near, "pruned cell {i},{j} beyond one cell of the exact marking");
-                    }
-                }
-            }
-            extra
-        };
         let both = |top: Cell| {
             let d = doc_with(vec![top], 0, vec![(1, 0)]);
             let pruned = build(&d, 0, 0, &opts(0.01)).unwrap();
@@ -5569,6 +5633,148 @@ mod tests {
             assert_eq!(pruned.layers[0].level(0).unwrap(), exact.layers[0].level(0).unwrap());
             assert!(pruned.layers[0].work >= 1_200, "per member: work {}", pruned.layers[0].work);
         }
+    }
+
+    #[test]
+    fn a_small_shape_is_its_bbox_under_the_prune() {
+        // 2026-10-27 (field: a 290 GB EBEAM file's polygon layer stopped at
+        // the 2^36 cap after an hour's pass - the scan conversion charged a
+        // member its edges and rows for the cell or two it sets): under the
+        // prune a polygon or path no wider than the cell marks its bbox's
+        // cells, one to four marks a member, a superset of the exact marking
+        // within one cell; a wider one is scan-converted, a zero-area one
+        // marks nothing
+        let poly = |pts: Vec<(i64, i64)>, rep: Rep| PolyRec {
+            layer: 1,
+            dt: 0,
+            pts,
+            rep,
+        };
+        let at = |dx: i64, dy: i64| -> Vec<(i64, i64)> {
+            // an OPC-like shape 8 x 6 dbu with a jog on each long side
+            [
+                (0, 0),
+                (2, 0),
+                (2, 1),
+                (4, 1),
+                (4, 0),
+                (8, 0),
+                (8, 6),
+                (6, 6),
+                (6, 5),
+                (4, 5),
+                (4, 6),
+                (0, 6),
+            ]
+            .iter()
+            .map(|&(x, y)| (x + dx, y + dy))
+            .collect()
+        };
+        let both = |top: Cell| {
+            let d = doc_with(vec![top], 0, vec![(1, 0)]);
+            let pruned = build(&d, 0, 0, &opts(0.01)).unwrap();
+            let exact = build(
+                &d,
+                0,
+                0,
+                &Opts {
+                    prune: false,
+                    ..opts(0.01)
+                },
+            )
+            .unwrap();
+            assert_eq!((pruned.cell_dbu, exact.cell_dbu), (10, 10));
+            (pruned, exact)
+        };
+        let mut top = cell("T");
+        // the grid's origin at (0, 0): the layout's lower left corner
+        top.rects.push(rect(1, 0, 0, 1, 1, Rep::One));
+        // 60 records one by one, most across a cell line
+        for i in 0..10 {
+            for j in 0..6 {
+                top.polys.push(poly(at(13 * i + 3, 11 * j + 7), Rep::One));
+            }
+        }
+        // one record repeated at 40 irregular offsets
+        let offsets: Vec<(i64, i64)> = (0..40).map(|k| (k * 23 % 170, k * 37 % 130)).collect();
+        top.polys.push(poly(at(150, 90), Rep::Pts(offsets.into())));
+        // a triangle on the corner (400, 200): three cells exact, its bbox's four
+        top.polys
+            .push(poly(vec![(398, 198), (402, 198), (398, 202)], Rep::One));
+        // a path whose outline is 8 x 2
+        top.paths.push(PathRec {
+            layer: 1,
+            dt: 0,
+            pts: vec![(300, 23), (306, 23)],
+            hw: 1,
+            es: 1,
+            ee: 1,
+            rep: Rep::One,
+        });
+        let members = 1 + 60 + 40 + 1 + 1;
+        let (pruned, exact) = both(top);
+        assert_eq!(
+            (pruned.layers[0].status, exact.layers[0].status),
+            (STATUS_OK, STATUS_OK)
+        );
+        let (p, e) = (
+            pruned.layers[0].level(0).unwrap(),
+            exact.layers[0].level(0).unwrap(),
+        );
+        let extra = within_one_cell(&p, &e);
+        assert!(extra >= 1, "the corner triangle's fourth cell");
+        assert!(
+            e.get(39, 19) && e.get(40, 19) && e.get(39, 20),
+            "the triangle's own cells"
+        );
+        assert!(
+            p.get(40, 20) && !e.get(40, 20),
+            "the bbox's cell beyond the hypotenuse"
+        );
+        let (pw, ew) = (pruned.layers[0].work, exact.layers[0].work);
+        assert!(
+            pw <= 5 * members,
+            "bbox marks: work {pw} for {members} members"
+        );
+        assert!(ew >= 4 * pw, "the scan conversion: work {ew} against {pw}");
+        // wider than the cell (25 dbu): scan-converted, the exact cells
+        let mut top = cell("T");
+        top.polys
+            .push(poly(vec![(3, 3), (28, 3), (3, 28)], Rep::One));
+        let (pruned, exact) = both(top);
+        assert_eq!(
+            pruned.layers[0].level(0).unwrap(),
+            exact.layers[0].level(0).unwrap()
+        );
+        // zero area: nothing, as on the exact path
+        let mut top = cell("T");
+        top.polys.push(poly(vec![(1, 1), (5, 1), (9, 1)], Rep::One));
+        let (pruned, exact) = both(top);
+        assert_eq!(
+            (pruned.layers[0].status, exact.layers[0].status),
+            (STATUS_EMPTY, STATUS_EMPTY)
+        );
+    }
+
+    #[test]
+    fn a_large_source_gets_a_work_cap_by_its_size() {
+        // 2026-10-27: 4 marks a byte past 16 GiB, the fixed 2^36 below it
+        assert_eq!(default_max_work(0), DEFAULT_MAX_WORK);
+        assert_eq!(default_max_work(10 << 30), DEFAULT_MAX_WORK);
+        assert_eq!(default_max_work(16 << 30), DEFAULT_MAX_WORK);
+        assert_eq!(default_max_work(290_000_000_000), 1_160_000_000_000);
+        assert_eq!(default_max_work(u64::MAX), u64::MAX);
+        let hint = status_hint(
+            STATUS_NONE_WORK,
+            &Opts {
+                max_work: 100,
+                ..Opts::default()
+            },
+        );
+        assert!(
+            hint.contains("--occupancy-max-work 100 marks") && hint.contains("4 per byte"),
+            "{hint}"
+        );
     }
 
     #[test]

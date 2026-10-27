@@ -40,6 +40,7 @@ pub fn light_cmd(args: &[String]) {
     let mut hold_at: Option<String> = None;
     let mut occ_opts = floe_vfs::occupancy::Opts::default();
     occ_opts.base_um = floe_vfs::occupancy::BASE_AUTO;
+    let mut max_work_given = false;
     let mut i = 0;
     let need = |i: usize, what: &str| -> String {
         args.get(i + 1).cloned().unwrap_or_else(|| {
@@ -97,6 +98,7 @@ pub fn light_cmd(args: &[String]) {
             }
             "--occupancy-max-work" => {
                 occ_opts.max_work = need(i, "a number").parse().expect("occupancy max work");
+                max_work_given = true;
                 i += 1;
             }
             "--occupancy-max-bytes" => {
@@ -159,6 +161,11 @@ pub fn light_cmd(args: &[String]) {
     let t0 = std::time::Instant::now();
     occ_opts.jobs = jobs;
     occ_opts.progress = Some(|m: &str| eprintln!("[vfs] occupancy {}", m));
+    if !max_work_given {
+        // a source over 16 GiB gets a cap by its size (2026-10-27)
+        let size = std::fs::metadata(&src).map_or(0, |m| m.len());
+        occ_opts.max_work = floe_vfs::occupancy::default_max_work(size);
+    }
     // ---- the cache's locks, before the source is read (SPEC-INDEXER §4.5)
     if let Some(parent) = Path::new(&outdir).parent().filter(|p| !p.as_os_str().is_empty()) {
         let _ = std::fs::create_dir_all(parent);

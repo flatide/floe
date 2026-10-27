@@ -141,9 +141,9 @@ const INDEX_HELP: &str = "Usage: floe2-web index SOURCE [OPTIONS]
   --occupancy-balance 0|1    Marking work split; default 1, byte-neutral diagnostic
   --occupancy-prune 0|1      Sub-cell bbox marking; default 1, 0 walks exact geometry
   --occupancy-max-work N     Marks per layer before it has no summary (none:work);
-                             default 2^36 - a flat file marks once per shape
+                             default 4 per byte of the file, at least 2^36
   --occupancy-max-bytes N    Bitmap bytes per file before the rest has none (none:size);
-                             default 1G; K/M/G suffixes
+                             default 4G; K/M/G suffixes
   --representatives          Add bounded representative points (plain layout only)
   --representatives-only     Rebuild only points on a current cache
   --representatives-points N Group sample cap, 1..4194304; implies representatives

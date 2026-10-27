@@ -619,7 +619,11 @@ floe-index svrf <deck> [-o OUT] [--scan] [-D NAME[=VAL]]… [-I DIR]… [--follo
   사각형의 조밀한 축 정렬 격자가 외곽 사각형 한 번(정확)이고, `--occupancy-prune 1`(기본)에서는 다각형·경로의
   조밀한 축 정렬 격자도 멤버 bbox가 셀 이하이면 외곽 한 번이다(prune 계약 안의 superset: 멤버가 2×2 셀을 넘지
   않고 틈이 셀보다 좁다; 0.12.405, 현장에서 fill 배열의 레이어가 4 µm·16 µm 모두 2^36 마크 상한에 걸림;
-  `FLOE_OCCUPANCY_GRID_FILL=off`가 킬 스위치, `--occupancy-prune 0`은 종전대로 멤버별). 상위 레벨은
+  `FLOE_OCCUPANCY_GRID_FILL=off`가 킬 스위치, `--occupancy-prune 0`은 종전대로 멤버별). 같은 prune에서
+  두 축 모두 셀 이하인 다각형·경로(외곽선)는 반복이든 아니든 멤버마다 bbox가 닿는 셀(최대 2×2)을 칠한다 —
+  스캔 변환이 멤버마다 변과 행을 charge하던 것(20꼭짓점 OPC 도형 하나에 약 32)이 1~4가 된다(`small_member_box`;
+  0.12.410, 현장: 290 GB EBEAM 파일의 다각형 레이어가 2^36에서 멈춤; 계약 안의 superset, 넓이 0은 칠하지 않음;
+  `FLOE_OCCUPANCY_SMALL_BOX=off`가 킬 스위치). 상위 레벨은
   OR 풀링, 격자가 64 × 64 이하가 될 때까지. 로그 `[vfs] occupancy cell= … ok=K
   empty=E jobs=N SIZE (Ts)`. 진행(2026-09-16, 현장: 150 MB 실칩의 마킹 5분이
   무음): 레이어 마킹 중 10 s마다 `[vfs] occupancy L/D marking: u/U units work
@@ -635,8 +639,9 @@ floe-index svrf <deck> [-o OUT] [--scan] [-D NAME[=VAL]]… [-I DIR]… [--follo
   (기본 **2^32**; 0.12.395까지 2^30 — 152 mm 레티클 전체 bbox가 4 µm를 지키도록,
   2026-10-24, DIRECT_READ_PLAN §8.19)면 모든 레이어 `none:cells`(파일은 만들어져 이유를 남기고, 빌드 로그에
   `every layer none:cells: WxH cells at Uum exceed --occupancy-max-cells N` 한 줄);
-  마킹 작업(켠 셀 + 멤버 + 변 행) > `--occupancy-max-work`(기본 **2^36**; 0.12.394까지
-  2^31 — 평탄한 EBEAM 파일은 도형 하나가 마크 하나라 현장의 가장 큰 소스가 한
+  마킹 작업(켠 셀 + 멤버 + 변 행) > `--occupancy-max-work`(기본 **소스 1바이트당 4, 최소 2^36** —
+  16 GiB를 넘는 소스만 커진다, 0.12.410(`occupancy::default_max_work`, DIRECT_READ_PLAN §8.26); 0.12.409까지
+  2^36, 0.12.394까지 2^31 — 평탄한 EBEAM 파일은 도형마다 마크라 현장의 가장 큰 소스가 한
   레이어에서 넘었다, DIRECT_READ_PLAN §8.18)면 그 레이어 `none:work`; 누적 비트맵
   바이트가 `--occupancy-max-bytes`(기본 **4 GiB**; 0.12.395까지 1 GiB; K/M/G 접미사)를 넘는 순서부터
   `none:size`(`empty`·`none:*` 레이어는 자리를 차지하지 않는다). 요약 없는 레이어의

@@ -439,6 +439,7 @@ geometry/placement/text x·y, W/H, 점 목록, 경로 확장, 반복, 배치 대
 | 레이아웃의 요약 가지치기 | 사용자 2026-10-25: 맥북에서 경량 캐시의 fit이 오래 걸리고 `+` 8~9회부터 20초 넘게 걸림(밀도 off면 빠른 듯) | **완료 0.12.400(§8.23)**: 레이아웃 경로 일곱 곳의 `!frames`를 덱과 같은 `prune_summary_when`으로 — 요약이 그리는 뷰에서 걷기·probe·채움이 사라짐; 측정은 §8.23 |
 | 파일이 없으면 거부 | 사용자 2026-10-25: ".ovs가 없으면 density on을 거부하고 ovo가 없으면 occupancy on을 거부하는게 맞는 동작"; 캡처의 명시적 `--occupancy on`은 요약을 먼저 만들고 그림 | **완료 0.12.401(§8.24)**: renderd가 design.ovs 없는 캐시의 밀도 요청을 끔으로 그리고(`density_none=nofile`, 플랜 폴백 없음) design.ovo 없는 명시적 `occupancy=on`을 오류로 거절; 캡처 `density_for`(입력 오류)와 뷰어 토글·시작 옵션의 거절; 게이트 density_stack·occupancy·light_cache |
 | 조밀한 도형 격자의 외곽 채움 | 현장 2026-10-26: 레벨 5의 한 EBEAM 레이어 두 개가 `--occupancy-um 16`으로도 2^36 마크 상한(`work=68719508999`)에서 멈춤 — fill 배열의 다각형·경로가 멤버마다 charge | **완료 0.12.405(§8.25)**: prune에서 멤버 bbox ≤ 셀인 조밀 축 정렬 Grid의 다각형·경로를 외곽 한 번으로(prune 계약 안); `FLOE_OCCUPANCY_GRID_FILL=off` 킬 스위치; 단위 테스트 + occupancy 게이트 fixture |
+| 작은 도형의 bbox 마킹, 크기 비례 상한 | 현장 2026-10-27: 290 GB EBEAM 파일의 레이어 3134/0이 0.12.405 뒤에도 `none:work`(`work 68719514762`, 빌드 3618 s) — 평탄한 다각형 레코드가 멤버마다 스캔 변환 | **완료 0.12.410(§8.26)**: prune에서 두 축 모두 셀 이하인 다각형·경로는 멤버마다 bbox의 셀(최대 2×2)을 칠함(`small_member_box`, 계약 안; `FLOE_OCCUPANCY_SMALL_BOX=off`), `--occupancy-max-work`를 주지 않으면 상한 = 소스 1바이트당 4, 최소 2^36(`default_max_work`); 단위 테스트 |
 | L7 후속 | 요약 패스 1패스화/마킹 가속, ovs 합치기(레이아웃 밀도), B안(정규 페이지), 세그먼트 캐시 디스크 보존(방문한 셀의 디코드 결과를 남겨 다음 세션 가속), 1패스 경량 생성(셀 로컬 점유 격자 합성) | 각각 — **L7a 완료 0.12.386(§8.9)**: 이미지 증분 합성(제자리 성장, 채움 시점 노드 마스크, 채움 바이트 해제), 세그먼트 pread 묶음·병렬 인코딩; **L7b 완료 0.12.387(§8.10)**: 요약 패스의 마커가 셀을 직접 파싱(리더 풀·상주 창 없음, 묶음이 안 쓰는 셀은 읽지 않음), 다각형 스캔 변환 버퍼 재사용, 크기 예산 밖의 레이어는 마킹하지 않음; 나머지(1패스 경량 생성은 §8.10의 정확성 논거로 보류)는 사용자 지시에 따라 |
 
 L0는 하루, L1~L3는 S1~S3와 비슷한 크기(재고 코드 위의 확장), L4가 본체다.
@@ -1713,6 +1714,38 @@ OASIS 반복으로 더해 계약(exact ≤ pruned ≤ dilate 1셀)·깊이 평�
 
 **남은 것.** 멤버가 셀보다 크고 bbox보다 훨씬 작은 도형(대각 띠 등)의 조밀 격자는 멤버별 그대로다(셀 수에 묶여 있어 비용은
 유한). 현장 소스의 재생성 결과(45/0·45/300의 `work=`와 시간)는 사용자 보고를 기다린다.
+
+### 8.26 작은 도형은 bbox로, 상한은 소스 크기에 비례 (0.12.410 / floe-index·renderd 0.12.362, 2026-10-27; 현장)
+
+**현장.** 0.12.405 이후 빌드로 290 GB EBEAM 파일의 요약을 만들었는데 레이어 3134/0이 여전히 `none:work`였다:
+`[vfs] occupancy cell=2um (40000 dbu, auto) grid=3000x3350 levels=7 layers=6 ok=3 empty=2 jobs=12 4.8M (3618.2s)`,
+`layer 3134/0 none:work (work 68719514762) - over --occupancy-max-work 68719476736 marks`. §8.25는 반복 배열만 다뤘다.
+평탄한 EBEAM 데이터는 대부분 반복 없는 POLYGON 레코드와 임의 오프셋 반복(타입 10/11)이고(2026-10-19 50 GB 소스의 scan:
+POLYGON 85%, 점 목록 반복 2.38억), 그 멤버는 하나하나 스캔 변환을 했다 — 변마다 행 charge, 행마다 활성 변 + 1 —
+셀 하나를 켜는 작은 도형에 수십 charge였다.
+
+**변경.** (1) `--occupancy-prune 1`(기본)에서 다각형·경로 외곽선의 world bbox가 두 축 모두 셀 이하이면 멤버마다
+그 bbox가 닿는 셀을 칠한다(`small_member_box` → `mark_world_rect`; 레코드 하나든 반복이든, 경로는 hull로 같은 길).
+bbox는 최대 2×2 셀이고 도형이 닿는 셀을 모두 담으니 prune 계약(exact ≤ pruned ≤ dilate(exact, 1셀)) 안이다. 넓이 0
+외곽선은 정확 경로와 같이 아무것도 칠하지 않고(`twice_area`), 셀보다 큰 도형과 `--occupancy-prune 0`(오라클 게이트)은
+그대로 스캔 변환한다. 킬 스위치 `FLOE_OCCUPANCY_SMALL_BOX=off`. (2) `--occupancy-max-work`를 주지 않으면 floe-index(`light`·
+`vfs`)가 상한을 소스 1바이트당 4, 최소 2^36으로 잡는다(`occupancy::default_max_work`, `WORK_PER_SOURCE_BYTE`) — 16 GiB 이하는
+종전과 같고 290 GB는 1.16조. 이 레이어의 마크는 도형이라 파일을 읽는 시간에 비례하고, 작은 파일이 반복으로 수십억 멤버로
+불어나는 경우는 고정 하한이 막는다. 요약 없는 레이어의 로그는 `- over --occupancy-max-work N marks (by default 4 per byte
+of the file, at least 68719476736: raise it)`.
+
+**측정**(합성: 20꼭짓점 OPC형 도형 0.3~1.5 µm, 4 mm 정사각형에 반복 없는 레코드 100만 + 2,000개 도형 × 500 오프셋의 점 목록
+반복 = 멤버 200만, 57 MB, dbu 0.05 nm; `floe-index light --occupancy --occupancy-um 2 --jobs 4`, 옛 경로는 킬 스위치): work
+64,989,991 → 4,951,225(13.1배; 멤버당 32.5 → 2.5), 마킹 1.5 s → 0.2 s; 레벨 0 점등 2,507,418 → 2,510,406 셀(+2,988, 0.12%) —
+정확 표시의 셀은 하나도 빠지지 않고 늘어난 셀은 모두 한 셀 안. `--occupancy-prune 0`의 design.ovo는 바이트 동일. 같은
+비율이면 현장 레이어는 상한에 닿을 때까지 멤버 약 21억을 처리했고, 이제 같은 멤버가 약 53억 charge다.
+
+**검증.** 단위 테스트 `a_small_shape_is_its_bbox_under_the_prune`(12꼭짓점 도형 레코드 60개 + 40 오프셋 반복 + 셀 모서리의 삼각형
++ 8×2 경로: exact의 한 셀 안 superset, 삼각형의 네 번째 셀, pruned work ≤ 멤버 × 5, exact ≥ 4배; 25 dbu 삼각형은 exact와 평면
+동일; 넓이 0은 둘 다 empty — 킬 스위치를 켜면 실패), `a_large_source_gets_a_work_cap_by_its_size`. §8.25 테스트의 계약 검사를
+모듈 함수 `within_one_cell`로 옮겨 함께 쓴다.
+
+**남은 것.** 현장 파일의 재생성 결과(3134/0의 status·`work=`와 빌드 시간)를 기다린다.
 
 ## 9. 검토한 대안
 

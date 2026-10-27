@@ -1147,3 +1147,13 @@ charge·스캔 변환을 했으므로 fill 배열의 레이어는 셀 크기와 
 `a_dense_grid_of_small_shapes_is_one_footprint_under_the_prune`(삼각형 400×300과 회전 배치된 경로 200×100: 외곽 전부 채움,
 exact의 한 셀 안 superset, 작업량 한 자릿수 차이; 큰 멤버·성긴 격자는 exact와 평면 동일), 게이트 `occupancy`
 PruneContractTests의 fixture에 4/0·5/0 도형 격자(1,200 멤버씩; 계약·깊이 평면·작업량 감소 검사).
+
+### 2026-10-27 — 작은 도형의 bbox 마킹과 소스 크기에 비례하는 작업 상한 (0.12.410 / RENDERD 0.12.362)
+
+현장: 290 GB EBEAM 파일의 레이어 3134/0이 0.12.405 뒤에도 2^36에서 `none:work`(빌드 3618 s). 평탄한 다각형 레코드와
+임의 오프셋 반복의 멤버는 하나하나 스캔 변환을 했고, 셀 하나를 켜는 20꼭짓점 도형이 약 32 charge였다. 이제
+`--occupancy-prune 1`(기본)에서 두 축 모두 셀 이하인 다각형·경로는 멤버마다 bbox가 닿는 셀(최대 2×2)을 칠한다
+(`small_member_box`; 계약 안의 superset, 넓이 0은 칠하지 않음, `FLOE_OCCUPANCY_SMALL_BOX=off`가 킬 스위치,
+`--occupancy-prune 0`은 그대로). 그리고 `--occupancy-max-work`를 주지 않으면 상한이 소스 1바이트당 4, 최소 2^36이다
+(`default_max_work`; 16 GiB 이하는 종전과 같다). 합성 200만 멤버: work 13.1배 감소, 마킹 1.5 s → 0.2 s, 늘어난 셀
+0.12%가 모두 한 셀 안. 상세는 DIRECT_READ_PLAN §8.26.

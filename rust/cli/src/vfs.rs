@@ -85,6 +85,9 @@ pub fn vfs_cmd(args: &[String]) {
     // the base cell follows the chip size unless --occupancy-um says
     // otherwise (2026-09-16; occupancy::auto_base_um_for_span)
     occ_opts.base_um = floe_vfs::occupancy::BASE_AUTO;
+    // the work cap follows a large source's size unless
+    // --occupancy-max-work says otherwise (2026-10-27; default_max_work)
+    let mut max_work_given = false;
     // rev 46b: recompute the meta.json minimap frontier from an
     // existing cache's design.ovm - no source parse, seconds even
     // on the 9.8G class
@@ -224,6 +227,7 @@ pub fn vfs_cmd(args: &[String]) {
             }
             "--occupancy-max-work" => {
                 occ_opts.max_work = args[i + 1].parse().expect("occupancy max work");
+                max_work_given = true;
                 i += 2;
             }
             "--occupancy-balance" => {
@@ -501,6 +505,10 @@ pub fn vfs_cmd(args: &[String]) {
         std::process::exit(2);
     }
     occ_opts.jobs = jobs;
+    if !max_work_given {
+        occ_opts.max_work =
+            floe_vfs::occupancy::default_max_work(std::fs::metadata(&src).map_or(0, |m| m.len()));
+    }
     // progress on stderr (field 2026-09-16: five silent minutes on a
     // 150 MB chip): a heartbeat every 10 s per layer, one line per
     // slow or summary-less layer
