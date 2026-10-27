@@ -144,7 +144,11 @@ design.ovo를 더하는데, 인스턴스의 배치는 파일 전체를 다시 �
 디렉터리의 배치 플래그 세그먼트에서 읽는다(바이트는 `vfs --occupancy`의 design.ovo와
 같다 — 게이트 `light_cache`; 0.12.387부터 마커 스레드가 셀을 직접 파싱하고 묶음이 안 쓰는
 셀은 읽지 않는다 — STREAMING_INDEX_PLAN §4.6, DIRECT_READ_PLAN §8.10); `--occupancy-only`는 경량 캐시에 design.ovo를 더한다
-(identity 확인; 전체 색인이나 경량 캐시 없는 디렉터리는 종료 1). design.ovm이 있는
+(identity 확인; 전체 색인이나 경량 캐시 없는 디렉터리는 종료 1). 0.12.411부터 그 재고는
+캐시의 design.inv에서 읽고 소스를 다시 훑지 않는다 — 훑어도 같은 재고가 나오고 design.seg가
+이 파일과 짝이다(현장 290 GB 소스에서 30분 넘게 걸리던 패스, DIRECT_READ_PLAN §8.27).
+design.inv가 헤더 뒤에서 깨졌거나 지금의 소스를 가리키지 않으면 아무것도 쓰지 않고 종료 1
+("rebuild the light cache"); `FLOE_LIGHT_INV_REUSE=off`는 예전처럼 소스를 훑는다. design.ovm이 있는
 디렉터리는 `--force`에만 손댄다(전체 색인의 파일을 지우고 경량으로 교체). 잠금은 `vfs`와
 같다(§4.5). 덱은 옆의 floe2에 `index DECK --light`로 넘긴다. 두 파일은 스트리밍 빌드가
 캐시 옆에 두는 것과 같은 바이트다. 렌더러(render-core `Cache::open`)는 design.ovm이 없고
@@ -218,6 +222,15 @@ STREAMING_INDEX_PLAN §11. 소스를 읽어 캐시를 만드는 실행은 **스�
 기본**이다: 재고 패스(파일 매핑 한 번 훑기, 도형은 버림) 뒤 셀을 파일 순서로 읽어
 기존 플래너·커미터·인코더에 넘기고, 상주 바이트를 `--mem GiB` 안에 둔다. 출력은
 전체 파싱 빌드와 바이트 동일하다(게이트 `vfs_stream`).
+- 재고 패스의 매핑(0.12.411, DIRECT_READ_PLAN §8.27): 훑은 페이지는 매핑이 풀릴 때까지
+  프로세스에 상주하고 Linux는 이를 rss(RssFile)로 센다 — 현장 290 GB 소스가 1920초에
+  `rss 216G`, 힙은 몇 GB. 걷기마다(skim, head, 워커별 셀 묶음) 지나간 구간을 32 MiB마다
+  돌려준다(`floe_oasis::Release`, madvise DONTNEED: page cache는 남고 다시 닿으면 다시
+  매핑된다; `FLOE_INVENTORY_RELEASE=off`는 예전처럼 쥔다). 결과 파일은 같다(게이트
+  `light_cache`). 진행 줄은 `inventory... (1920s; skimmed 290G of 290G, parsed 120G of
+  290G; rss 2.3G: heap 2.1G, file 0.2G)` — Linux에서 rss를 힙(RssAnon)과 파일(RssFile)로
+  나눈다(그 필드가 없는 커널은 statm의 resident·shared; macOS는 `rss X`. macOS의 madvise는
+  파일 매핑의 상주를 줄이지 않는다). 메모리 가드는 전부터 힙만 센다(§4.6).
 - `--stream`: 스트리밍을 고집한다. 전체 파싱이 필요한 실행(`--coverage`,
   `--representatives`, 프로파일, `--frontier-only`)과 함께면 종료 2.
 - `--in-memory`: 이전의 전체 파싱 빌드. `FLOE_INDEX_STREAM=off`가 기본을 이것으로

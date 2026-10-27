@@ -14,7 +14,8 @@
 //! the budget, 0.12.398 - until 0.12.397 every placement was held in
 //! memory and a source past a cap had its summary skipped), not from a
 //! pass over the whole file. `--occupancy-only` adds design.ovo to a
-//! light cache that has none.
+//! light cache that has none (or replaces it), its inventory read from the
+//! cache's design.inv instead of a walk over the source (2026-10-27).
 //! The renderer opens such a directory - no design.ovm, design.inv beside -
 //! through floe_vfs::light and reads the geometry from the source.
 //!
@@ -218,7 +219,12 @@ pub fn light_cmd(args: &[String]) {
         );
         std::process::exit(1);
     }
-    // ---- the inventory pass over the mapped source (the streaming build's)
+    // ---- the inventory pass over the mapped source (the streaming build's);
+    // an occupancy-only run takes the one the light cache holds (2026-10-27:
+    // the field's 290 GB source was walked again for over half an hour, its
+    // pages counted in the rss; FLOE_LIGHT_INV_REUSE=off walks it)
+    let inv_file = Path::new(&outdir).join(floe_oasis::invfile::FILE_NAME);
+    let cached = (occupancy_only && light_inv_reuse_enabled()).then_some(inv_file.as_path());
     let a = crate::vfs::StreamArgs {
         src: src.clone(),
         outdir: outdir.clone(),
@@ -249,7 +255,7 @@ pub fn light_cmd(args: &[String]) {
         mtime,
         inventory_s,
         segs,
-    } = match crate::vfs::stream_open(&a) {
+    } = match crate::vfs::stream_open(&a, cached) {
         Ok(o) => o,
         Err(d) => {
             eprintln!("[light] {}", d.why);
@@ -385,6 +391,13 @@ pub fn light_cmd(args: &[String]) {
         },
         if occupancy_only { "; occupancy-only" } else { "" }
     );
+}
+
+/// FLOE_LIGHT_INV_REUSE=off: `--occupancy-only` walks the source for its
+/// inventory instead of reading the light cache's design.inv (as before
+/// 0.12.411)
+fn light_inv_reuse_enabled() -> bool {
+    std::env::var("FLOE_LIGHT_INV_REUSE").map_or(true, |v| v != "off")
 }
 
 /// The light cache's files removed before a build writes them anew; with

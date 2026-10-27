@@ -1279,29 +1279,109 @@ fn declined(a: &StreamArgs, d: StreamDecline) -> Option<String> {
     std::process::exit(d.exit);
 }
 
-/// the streaming build's opening, shared by the whole build and the
-/// occupancy-only run: pass 1, the inventory over a read-only mapping of
-/// the file (one sequential sweep, nothing of the geometry kept), the
-/// budget (--mem, or the default raised to the file's need when the host
-/// has it) and the streaming store. Nothing of the cache is touched; a
-/// decline says whether the in-memory build may take the file.
-pub(crate) fn stream_open(a: &StreamArgs) -> Result<StreamOpen, StreamDecline> {
-    let file = std::fs::File::open(&a.src).map_err(|e| StreamDecline {
-        why: format!("open {}: {}", a.src, e),
-        fallback: false,
-        exit: 1,
-    })?;
-    let (size, mtime) = source_identity(&a.src);
-    crate::guard::set_mode(crate::guard::Mode::Streaming);
-    crate::guard::check("start", crate::guard::CACHE_UNCHANGED);
-    // ---- pass 1: the inventory (the mapping goes before pass 2 starts)
-    eprintln!("[vfs] stream: inventory pass over {} ({})...", a.src, fmt_size(size));
-    let t1 = std::time::Instant::now();
-    let ticking = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+/// how far apart the inventory walk hands the source's pages back
+/// (`walk_inventory`, 2026-10-27): a walk holds about this much of the
+/// mapping resident, each worker and the skim its own
+const INVENTORY_RELEASE_STEP: u64 = 32 << 20;
+
+/// FLOE_INVENTORY_RELEASE=off: the inventory walk keeps every page it
+/// touched until the mapping goes (as before 0.12.411)
+fn inventory_release_enabled() -> bool {
+    std::env::var("FLOE_INVENTORY_RELEASE").map_or(true, |v| v != "off")
+}
+
+/// the host's page size, to which the walk's releases round
+fn page_bytes() -> u64 {
+    // SAFETY: sysconf reads a constant of the system
+    let p = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if p > 0 {
+        p as u64
+    } else {
+        4096
+    }
+}
+
+/// the rss with its heap and file parts where Linux says them -
+/// `rss 2.3G: heap 2.1G, file 0.2G` - else `rss X` (`rss()`): the
+/// inventory walk's heartbeat (2026-10-27), whose mapped source counted
+/// in the rss
+pub(crate) fn rss_parts() -> String {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let statm = std::fs::read_to_string("/proc/self/statm").unwrap_or_default();
+    match rss_parts_of(&status, &statm, page_bytes()) {
+        Some((total, heap, file)) => format!(
+            "rss {}: heap {}, file {}",
+            fmt_size(total),
+            fmt_size(heap),
+            fmt_size(file)
+        ),
+        None => format!("rss {}", rss()),
+    }
+}
+
+/// (resident, heap, file) bytes from /proc/self/status's VmRSS, RssAnon
+/// and RssFile, or from /proc/self/statm's resident and shared pages on a
+/// kernel without those (before 4.5); None off Linux
+fn rss_parts_of(status: &str, statm: &str, page: u64) -> Option<(u64, u64, u64)> {
+    let kb = |key: &str| {
+        status
+            .lines()
+            .find_map(|l| l.strip_prefix(key))
+            .and_then(|rest| {
+                rest.trim()
+                    .trim_end_matches("kB")
+                    .trim()
+                    .parse::<u64>()
+                    .ok()
+            })
+            .map(|k| k * 1024)
+    };
+    if let (Some(rss), Some(anon), Some(file)) = (kb("VmRSS:"), kb("RssAnon:"), kb("RssFile:")) {
+        return Some((rss, anon, file));
+    }
+    let mut pages = statm
+        .split_whitespace()
+        .skip(1)
+        .map(|v| v.parse::<u64>().ok());
+    let resident = pages.next()??;
+    let shared = pages.next()??;
+    Some((
+        resident * page,
+        resident.saturating_sub(shared) * page,
+        shared * page,
+    ))
+}
+
+/// the inventory pass's result: the inventory, the segment directory
+type Walked = (
+    floe_oasis::inventory::Inventory,
+    Option<floe_oasis::segments::SegCollector>,
+);
+
+/// pass 1 over the source: one walk over a read-only mapping of the file
+/// (floe_oasis::inventory_segments_with), nothing of the geometry kept.
+/// Every page a walk touches stays resident in the process until the
+/// mapping goes, and Linux counts it in the rss (RssFile): the field's
+/// 290 GB source said `rss 216G` at 1920 s (2026-10-27), its heap a few
+/// GB. So the walk hands the pages it has passed back every
+/// INVENTORY_RELEASE_STEP (madvise DONTNEED: the page cache keeps them and
+/// a later touch maps them again; FLOE_INVENTORY_RELEASE=off keeps them),
+/// and its heartbeat says how far the skim and the parse have come and the
+/// rss's heap and file parts.
+fn walk_inventory(a: &StreamArgs, file: &std::fs::File, size: u64) -> Result<Walked, StreamDecline> {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+    eprintln!(
+        "[vfs] stream: inventory pass over {} ({})...",
+        a.src,
+        fmt_size(size)
+    );
+    let ticking = std::sync::Arc::new(AtomicBool::new(true));
+    // the bytes each phase has walked (floe_oasis::RELEASE_SKIM, RELEASE_PARSE)
+    let walked = std::sync::Arc::new([AtomicU64::new(0), AtomicU64::new(0)]);
     {
         let ticking = ticking.clone();
+        let walked = walked.clone();
         std::thread::spawn(move || {
-            use std::sync::atomic::Ordering::Relaxed;
             let t = std::time::Instant::now();
             let mut last = 0u64;
             loop {
@@ -1313,60 +1393,165 @@ pub(crate) fn stream_open(a: &StreamArgs) -> Result<StreamOpen, StreamDecline> {
                 let e = t.elapsed().as_secs();
                 if e >= last + 10 {
                     last = e;
-                    eprintln!("[vfs] stream: inventory... ({}s, rss {})", e, rss());
+                    let skim = walked[floe_oasis::RELEASE_SKIM as usize].load(Relaxed);
+                    let parse = walked[floe_oasis::RELEASE_PARSE as usize].load(Relaxed);
+                    eprintln!(
+                        "[vfs] stream: inventory... ({}s; {}parsed {} of {}; {})",
+                        e,
+                        if skim > 0 {
+                            format!("skimmed {} of {}, ", fmt_size(skim), fmt_size(size))
+                        } else {
+                            String::new()
+                        },
+                        fmt_size(parse),
+                        fmt_size(size),
+                        rss_parts()
+                    );
                 }
             }
         });
     }
-    let inv = {
-        // SAFETY: a private read-only mapping of a file this process
-        // only reads; a concurrent writer would corrupt any reader of
-        // this file, mapped or not (the cache locks keep our own runs out)
-        let map = match unsafe { memmap2::Mmap::map(&file) } {
-            Ok(m) => m,
-            Err(e) => {
-                ticking.store(false, std::sync::atomic::Ordering::Relaxed);
-                return Err(StreamDecline {
-                    why: format!("map {}: {}", a.src, e),
-                    fallback: true,
-                    exit: 1,
-                });
-            }
+    // SAFETY: a read-only shared mapping of a file this process only
+    // reads; a concurrent writer would corrupt any reader of this file,
+    // mapped or not (the cache locks keep our own runs out)
+    let map = match unsafe { memmap2::Mmap::map(file) } {
+        Ok(m) => m,
+        Err(e) => {
+            ticking.store(false, Relaxed);
+            return Err(StreamDecline {
+                why: format!("map {}: {}", a.src, e),
+                fallback: true,
+                exit: 1,
+            });
+        }
+    };
+    let release_on = inventory_release_enabled();
+    let page = page_bytes();
+    let refused = AtomicBool::new(false);
+    let give_back = |phase: u8, from: u64, to: u64| {
+        if let Some(w) = walked.get(phase as usize) {
+            w.fetch_add(to - from, Relaxed);
+        }
+        let (lo, hi) = (from / page * page, to / page * page);
+        if !release_on || hi <= lo {
+            return;
+        }
+        // SAFETY: the mapping is read-only and shared: a page dropped here
+        // comes back from the file, unchanged, when a walk touches it again
+        let r = unsafe {
+            map.unchecked_advise_range(
+                memmap2::UncheckedAdvice::DontNeed,
+                lo as usize,
+                (hi - lo) as usize,
+            )
         };
-        let walked = if a.seg {
-            floe_oasis::inventory_segments(&map[..], a.jobs, a.seg_bytes).map(|(inv, col)| (inv, Some(col)))
-        } else {
-            floe_oasis::inventory(&map[..], a.jobs).map(|inv| (inv, None))
-        };
-        match walked {
-            Ok(v) => v,
-            Err(e) => {
-                // what the inventory refuses (a reference number defined
-                // twice, which the geometry parser resolves by position)
-                // or cannot read: the in-memory build may still take the
-                // file (the default mode), or report its own error
-                ticking.store(false, std::sync::atomic::Ordering::Relaxed);
-                return Err(StreamDecline {
-                    why: format!("inventory {}: {}", a.src, e),
-                    fallback: true,
-                    exit: 1,
-                });
+        if let Err(e) = r {
+            if !refused.swap(true, Relaxed) {
+                eprintln!(
+                    "[vfs] stream: the inventory walk keeps the source's pages (madvise: {}) - the rss counts them",
+                    e
+                );
             }
         }
     };
-    let (inv, segs) = inv;
-    ticking.store(false, std::sync::atomic::Ordering::Relaxed);
+    let release = floe_oasis::Release {
+        step: INVENTORY_RELEASE_STEP,
+        f: &give_back,
+    };
+    let walked_inv = if a.seg {
+        floe_oasis::inventory_segments_with(&map[..], a.jobs, a.seg_bytes, Some(&release))
+            .map(|(inv, col)| (inv, Some(col)))
+    } else {
+        floe_oasis::inventory_with(&map[..], a.jobs, Some(&release)).map(|inv| (inv, None))
+    };
+    ticking.store(false, Relaxed);
+    // what the inventory refuses (a reference number defined twice, which
+    // the geometry parser resolves by position) or cannot read: the
+    // in-memory build may still take the file (the default mode), or
+    // report its own error
+    walked_inv.map_err(|e| StreamDecline {
+        why: format!("inventory {}: {}", a.src, e),
+        fallback: true,
+        exit: 1,
+    })
+}
+
+/// a light cache's design.inv as the inventory of its source (the light
+/// occupancy-only run, 2026-10-27): the walk over the source makes the
+/// same one - the source's bytes are all it reads, and design.seg is
+/// paired with this file - and over the field's 290 GB source that walk
+/// took more than half an hour with the file's pages in the rss. It must
+/// decode and name the source as it is now; else the run stops (exit 1).
+fn cached_inventory(
+    path: &std::path::Path,
+    size: u64,
+    mtime: u64,
+) -> Result<floe_oasis::inventory::Inventory, StreamDecline> {
+    let refused = |why: String| StreamDecline {
+        why: format!("{}; rebuild the light cache", why),
+        fallback: false,
+        exit: 1,
+    };
+    let (id, inv) = floe_oasis::invfile::read(path)
+        .map_err(|e| refused(format!("{}: {}", path.display(), e)))?;
+    if (id.src_size, id.src_mtime) != (size, mtime) {
+        return Err(refused(format!(
+            "{} was made for source {}/{} but the source is now {}/{}",
+            path.display(),
+            id.src_size,
+            id.src_mtime,
+            size,
+            mtime
+        )));
+    }
+    Ok(inv)
+}
+
+/// the streaming build's opening, shared by the whole build and the
+/// occupancy-only runs: pass 1, the inventory over a read-only mapping of
+/// the file (one sequential sweep, nothing of the geometry kept;
+/// `walk_inventory`) - or, given `inv_file`, the inventory a light cache
+/// holds (its occupancy-only run, 2026-10-27: `cached_inventory`) -, the
+/// budget (--mem, or the default raised to the file's need when the host
+/// has it) and the streaming store. Nothing of the cache is touched; a
+/// decline says whether the in-memory build may take the file.
+pub(crate) fn stream_open(
+    a: &StreamArgs,
+    inv_file: Option<&std::path::Path>,
+) -> Result<StreamOpen, StreamDecline> {
+    let file = std::fs::File::open(&a.src).map_err(|e| StreamDecline {
+        why: format!("open {}: {}", a.src, e),
+        fallback: false,
+        exit: 1,
+    })?;
+    let (size, mtime) = source_identity(&a.src);
+    crate::guard::set_mode(crate::guard::Mode::Streaming);
+    crate::guard::check("start", crate::guard::CACHE_UNCHANGED);
+    // ---- pass 1: the inventory (the mapping goes before pass 2 starts)
+    let t1 = std::time::Instant::now();
+    let (inv, segs, read) = match inv_file {
+        Some(path) => (
+            cached_inventory(path, size, mtime)?,
+            None,
+            "from design.inv in",
+        ),
+        None => {
+            let (inv, segs) = walk_inventory(a, &file, size)?;
+            (inv, segs, "in")
+        }
+    };
     let inventory_s = t1.elapsed().as_secs_f64();
     let (budget, budget_how) = match a.mem_gib {
         Some(g) => ((g * (1u64 << 30) as f64) as u64, "from --mem"),
         None => default_stream_budget(),
     };
     eprintln!(
-        "[vfs] stream: inventory {} cells, {} layers, {} records in {:.1}s \
+        "[vfs] stream: inventory {} cells, {} layers, {} records {} {:.1}s \
          (Doc estimate {}; budget {} {}; rss {}){}",
         inv.cells.len(),
         inv.layer_order.len(),
         inv.scan.records,
+        read,
         inventory_s,
         fmt_size(inv.scan.doc_bytes),
         fmt_size(budget),
@@ -1499,7 +1684,7 @@ fn vfs_stream(
         mtime,
         inventory_s,
         segs,
-    } = match stream_open(a) {
+    } = match stream_open(a, None) {
         Ok(o) => o,
         Err(d) => return declined(a, d),
     };
@@ -1774,7 +1959,7 @@ fn vfs_stream_occupancy_only(a: &StreamArgs, t0: std::time::Instant) -> Option<S
         mtime,
         inventory_s,
         segs: _,
-    } = match stream_open(a) {
+    } = match stream_open(a, None) {
         Ok(o) => o,
         Err(d) => return declined(a, d),
     };
@@ -11841,6 +12026,37 @@ mod mode_tests {
         let (m, _, note) = resolve_build_mode(false, false, Some("maybe")).unwrap();
         assert_eq!(m, BuildMode::Auto);
         assert!(note.unwrap().contains("FLOE_INDEX_STREAM=maybe"));
+    }
+}
+
+#[cfg(test)]
+mod rss_parts_tests {
+    use super::rss_parts_of;
+
+    /// the inventory heartbeat's rss parts (2026-10-27): status's VmRSS,
+    /// RssAnon and RssFile; statm's resident and shared pages on a kernel
+    /// without those; nothing off Linux
+    #[test]
+    fn the_rss_splits_into_heap_and_file() {
+        let status = "Name:\tfloe-index\nVmHWM:\t 9000 kB\nVmRSS:\t  226492416 kB\n\
+                      RssAnon:\t 3145728 kB\nRssFile:\t 223346688 kB\nRssShmem:\t 0 kB\n";
+        assert_eq!(
+            rss_parts_of(status, "", 4096),
+            Some((226_492_416 << 10, 3_145_728 << 10, 223_346_688 << 10))
+        );
+        // a 3.10 kernel: VmRSS alone, so statm (size resident shared ...)
+        let old = "Name:\tfloe-index\nVmRSS:\t 4000 kB\n";
+        assert_eq!(
+            rss_parts_of(old, "900000 1000 600 50 0 400 0\n", 4096),
+            Some((1000 * 4096, 400 * 4096, 600 * 4096))
+        );
+        assert_eq!(
+            rss_parts_of("", "10 5 9", 16384),
+            Some((5 * 16384, 0, 9 * 16384))
+        );
+        assert_eq!(rss_parts_of("", "", 4096), None);
+        assert_eq!(rss_parts_of("VmRSS: 12 kB\n", "7", 4096), None);
+        assert_eq!(rss_parts_of("", "1 x 2", 4096), None);
     }
 }
 

@@ -12,9 +12,14 @@ strict mode) and two generated files (tools/gen_route_chip.py --scale
     vfs` leaves them beside the full cache), a design.ovo byte for byte
     the streaming occupancy pass's (its instances from the segment
     directory's placements), and a meta.json with the full index's keys
-    (dbu, top_cell, bbox, layers) and `"cache": "light"`; `--occupancy-only`
+    (dbu, top_cell, bbox, layers) and `"cache": "light"`, the same files
+    when the walk keeps the source's pages (FLOE_INVENTORY_RELEASE=off;
+    by default it hands them back as it goes, 2026-10-27); `--occupancy-only`
     adds the same summary to a light cache (refused on a full index or
-    where no light cache is); `--force` replaces a full index;
+    where no light cache is) with the inventory read from its design.inv -
+    the walk over the source (FLOE_LIGHT_INV_REUSE=off) gives the same
+    bytes, a design.inv damaged past its header stops it (exit 1);
+    `--force` replaces a full index;
   - floe-render-cli renders the full cache and the light directory at
     exact detail (cut 0): the whole extent, a near window, the near window
     at depth 1 with hierarchy frames, two layers alone - identical PNGs
@@ -322,12 +327,47 @@ def check_fixture(name, src, work):
     run([BIN, "light", src, "--out", plain, "--jobs", "2"], what="floe-index light (no summary)")
     if (plain / "design.ovo").exists():
         fail("%s: a light build without --occupancy wrote design.ovo" % name)
-    run([BIN, "light", src, "--out", plain, "--occupancy-only", "--jobs", "2"], what="floe-index light --occupancy-only")
+    # (the walk hands the source's pages back as it goes, 2026-10-27: the
+    # files are those of a walk that keeps them, FLOE_INVENTORY_RELEASE=off)
+    kept = work / ("%s_kept" % src.stem)
+    shutil.rmtree(kept, ignore_errors=True)
+    run([BIN, "light", src, "--out", kept, "--jobs", "2"], env=dict(os.environ, FLOE_INVENTORY_RELEASE="off"),
+        what="floe-index light, FLOE_INVENTORY_RELEASE=off")
+    for f in ("design.inv", "design.seg"):
+        if (kept / f).read_bytes() != (plain / f).read_bytes():
+            fail("%s: %s differs when the walk keeps its pages" % (name, f))
+    # its inventory is the cache's design.inv, not a walk over the source
+    # (2026-10-27: the field's 290 GB source took over half an hour);
+    # FLOE_LIGHT_INV_REUSE=off walks it, to the same summary
+    walked = work / ("%s_walked" % src.stem)
+    shutil.rmtree(walked, ignore_errors=True)
+    shutil.copytree(plain, walked)
+    damaged = work / ("%s_damaged" % src.stem)
+    shutil.rmtree(damaged, ignore_errors=True)
+    shutil.copytree(plain, damaged)
+    r = run([BIN, "light", src, "--out", plain, "--occupancy-only", "--jobs", "2"], what="floe-index light --occupancy-only")
+    if "records from design.inv in" not in r.stderr or "inventory pass over" in r.stderr:
+        fail("%s: --occupancy-only walked the source: %s" % (name, r.stderr[-300:]))
     if (plain / "design.ovo").read_bytes() != (full / "design.ovo").read_bytes():
         fail("%s: --occupancy-only's design.ovo differs" % name)
     for f in ("design.inv", "design.seg", "meta.json"):
         if (plain / f).read_bytes() != (light / f).read_bytes():
             fail("%s: --occupancy-only touched %s" % (name, f))
+    r = run([BIN, "light", src, "--out", walked, "--occupancy-only", "--jobs", "2"],
+            env=dict(os.environ, FLOE_LIGHT_INV_REUSE="off"), what="light --occupancy-only, FLOE_LIGHT_INV_REUSE=off")
+    if "inventory pass over" not in r.stderr:
+        fail("%s: FLOE_LIGHT_INV_REUSE=off did not walk the source: %s" % (name, r.stderr[-300:]))
+    if (walked / "design.ovo").read_bytes() != (full / "design.ovo").read_bytes():
+        fail("%s: the walking --occupancy-only's design.ovo differs" % name)
+    # a design.inv damaged past its header (the cache's check reads the
+    # headers) stops the run before anything is written
+    inv = bytearray((damaged / "design.inv").read_bytes())
+    inv[-1] ^= 0xFF
+    (damaged / "design.inv").write_bytes(bytes(inv))
+    r = run([BIN, "light", src, "--out", damaged, "--occupancy-only", "--jobs", "2"], ok=(1,),
+            what="light --occupancy-only, design.inv damaged")
+    if "rebuild the light cache" not in r.stderr or (damaged / "design.ovo").exists():
+        fail("%s: a damaged design.inv: %s" % (name, r.stderr[-300:]))
     r = run([BIN, "light", src, "--out", full, "--occupancy-only"], ok=(1,), what="light --occupancy-only on a full index")
     if "adds design.ovo to a light cache" not in r.stderr:
         fail("%s: --occupancy-only on a full index: %s" % (name, r.stderr[-200:]))
@@ -412,7 +452,8 @@ def check_fixture(name, src, work):
     if r.returncode == 0 or "does not say which source" not in r.stderr:
         fail("%s: a nameless light directory was not refused: %s" % (name, r.stderr[-300:]))
     print("OK  %-22s %d layers: %d exact views identical (same cells, edges, frames), cut view %d of %d lit pixels differ, "
-          "light files + design.ovo = the streaming build's, --occupancy-only, --force, meta.json, refusals (%.1fs)"
+          "light files + design.ovo = the streaming build's (pages kept or not), --occupancy-only from design.inv "
+          "= walked, --force, meta.json, refusals (%.1fs)"
           % (name, len(mf["layers"]), len(views), diff, lit, time.time() - t0))
 
 

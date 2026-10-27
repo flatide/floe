@@ -1901,7 +1901,7 @@ pub fn inflate_cblock_record(bytes: &[u8], base: usize) -> Result<Vec<u8>> {
 }
 
 pub fn scan(data: &[u8]) -> Result<ScanStats> {
-    scan_with(data, 1, false, None)
+    scan_with(data, 1, false, None, None)
 }
 
 /// Parallel scan: a cheap skim pass (CBLOCK bodies skipped, not
@@ -1911,7 +1911,7 @@ pub fn scan(data: &[u8]) -> Result<ScanStats> {
 /// GIL, no shared state: the whole file's parse work spreads over
 /// `jobs` OS threads.
 pub fn scan_parallel(data: &[u8], jobs: usize) -> Result<ScanStats> {
-    scan_with(data, jobs, false, None)
+    scan_with(data, jobs, false, None, None)
 }
 
 /// The scan with the segment statistics (segments.rs; `floe-index
@@ -1919,7 +1919,7 @@ pub fn scan_parallel(data: &[u8], jobs: usize) -> Result<ScanStats> {
 /// `span_bytes` between them reported with its box, layers and the
 /// modal lists it carries over from earlier segments.
 pub fn scan_segments(data: &[u8], jobs: usize, span_bytes: u64) -> Result<ScanStats> {
-    scan_with(data, jobs, false, Some(span_bytes))
+    scan_with(data, jobs, false, Some(span_bytes), None)
 }
 
 /// The streaming build's first pass (docs/STREAMING_INDEX_PLAN.ko.md
@@ -1927,7 +1927,16 @@ pub fn scan_segments(data: &[u8], jobs: usize, span_bytes: u64) -> Result<ScanSt
 /// into the Inventory (inventory.rs: cell table, layer order, per-cell
 /// boxes / masks / edges, the hierarchy fold).
 pub fn inventory(data: &[u8], jobs: usize) -> Result<inventory::Inventory> {
-    let st = scan_with(data, jobs, true, None)?;
+    inventory_with(data, jobs, None)
+}
+
+/// `inventory`, the bytes walked handed back through `release`
+pub fn inventory_with(
+    data: &[u8],
+    jobs: usize,
+    release: Option<&Release<'_>>,
+) -> Result<inventory::Inventory> {
+    let st = scan_with(data, jobs, true, None, release)?;
     inventory::finish(st)
 }
 
@@ -1941,10 +1950,84 @@ pub fn inventory_segments(
     jobs: usize,
     span_bytes: u64,
 ) -> Result<(inventory::Inventory, segments::SegCollector)> {
-    let mut st = scan_with(data, jobs, true, Some(span_bytes))?;
+    inventory_segments_with(data, jobs, span_bytes, None)
+}
+
+/// `inventory_segments`, the bytes walked handed back through `release`
+pub fn inventory_segments_with(
+    data: &[u8],
+    jobs: usize,
+    span_bytes: u64,
+    release: Option<&Release<'_>>,
+) -> Result<(inventory::Inventory, segments::SegCollector)> {
+    let mut st = scan_with(data, jobs, true, Some(span_bytes), release)?;
     let seg = st.seg.take().map(|b| *b).unwrap_or_default();
     let inv = inventory::finish(st)?;
     Ok((inv, seg))
+}
+
+/// What a walk hands back as it goes (2026-10-27). The streaming build
+/// walks the source through a read-only mapping, and every page a walk
+/// touches stays resident in the process until the mapping goes - Linux
+/// counts it in the rss (RssFile): 216 GB of a 290 GB source at 1920 s
+/// in the field. `f(phase, from, to)` gets the file range [from, to) a
+/// walk has passed, about every `step` bytes and once at its end; phase
+/// RELEASE_SKIM is the cell-boundary skim of a parallel walk,
+/// RELEASE_PARSE the records' parse (the whole walk under one job, else
+/// the head and each worker's cell group). The ranges of one phase do
+/// not overlap and together cover the bytes it walked.
+pub struct Release<'a> {
+    pub step: u64,
+    pub f: &'a (dyn Fn(u8, u64, u64) + Sync),
+}
+
+/// Release::f's phases
+pub const RELEASE_SKIM: u8 = 0;
+pub const RELEASE_PARSE: u8 = 1;
+
+/// one walk's position against its Release: a compare a record, nothing
+/// handed back without one
+struct Behind<'r, 'a> {
+    release: Option<&'r Release<'a>>,
+    phase: u8,
+    from: u64,
+    next: u64,
+}
+
+impl<'r, 'a> Behind<'r, 'a> {
+    fn new(release: Option<&'r Release<'a>>, phase: u8, from: usize) -> Self {
+        let from = from as u64;
+        let next = release.map_or(u64::MAX, |r| from.saturating_add(r.step.max(1)));
+        Behind {
+            release,
+            phase,
+            from,
+            next,
+        }
+    }
+
+    /// the walk is at `pos`
+    #[inline]
+    fn at(&mut self, pos: usize) {
+        if pos as u64 >= self.next {
+            self.give(pos as u64);
+        }
+    }
+
+    /// the walk ended at `pos`
+    fn end(&mut self, pos: usize) {
+        if pos as u64 > self.from {
+            self.give(pos as u64);
+        }
+    }
+
+    fn give(&mut self, pos: u64) {
+        if let Some(r) = self.release {
+            (r.f)(self.phase, self.from, pos);
+            self.from = pos;
+            self.next = pos.saturating_add(r.step.max(1));
+        }
+    }
 }
 
 /// The scan frame: one record walk over the whole file, CBLOCKs
@@ -1952,12 +2035,14 @@ pub fn inventory_segments(
 /// boundaries, the head (tables before the first cell) parses inline,
 /// workers run the full parser over contiguous cell groups (the same
 /// grouping as the parallel geometry parse) and the results merge in
-/// file order. `inventory` attaches the per-cell geometry collector.
+/// file order. `inventory` attaches the per-cell geometry collector;
+/// `release` gets the bytes each walk has passed.
 fn scan_with(
     data: &[u8],
     jobs: usize,
     inventory: bool,
     segments: Option<u64>,
+    release: Option<&Release<'_>>,
 ) -> Result<ScanStats> {
     if data.len() < MAGIC.len() || &data[..MAGIC.len()] != MAGIC {
         return err(0, "not an OASIS file (bad magic)");
@@ -1970,17 +2055,21 @@ fn scan_with(
             ..ScanStats::tracking_with(inventory, segments)
         };
         let mut modal = Modal::default();
+        let mut behind = Behind::new(release, RELEASE_PARSE, MAGIC.len());
         while !c.at_end() {
             if record(&mut c, &mut modal, &mut st, true)? == Rec::End {
+                behind.end(c.here());
                 let end = st.end_at;
                 st.close_inv(end);
                 st.finish();
                 return Ok(st); // END reached
             }
+            behind.at(c.here());
         }
         return err(c.here(), "stream ended without END record");
     }
-    let (head_end, cuts, end_at) = cell_cuts(body, MAGIC.len())?;
+    let mut skim = Behind::new(release, RELEASE_SKIM, MAGIC.len());
+    let (head_end, cuts, end_at) = cell_cuts_with(body, MAGIC.len(), &mut skim)?;
     let mut st = ScanStats {
         file_bytes: data.len() as u64,
         ..ScanStats::tracking_with(inventory, segments)
@@ -1988,9 +2077,12 @@ fn scan_with(
     {
         let mut hc = Cur::new(&body[..head_end], MAGIC.len());
         let mut hm = Modal::default();
+        let mut hb = Behind::new(release, RELEASE_PARSE, MAGIC.len());
         while !hc.at_end() {
             record(&mut hc, &mut hm, &mut st, true)?;
+            hb.at(hc.here());
         }
+        hb.end(hc.here());
     }
     // a CELL record inside a CBLOCK ahead of the first visible one (the
     // skim does not inflate, so it belongs to the head) is still open
@@ -2021,6 +2113,7 @@ fn scan_with(
                         let mut wc = Cur::new(&body[a..b], MAGIC.len() + a);
                         let mut wm = Modal::default();
                         let mut ws = ScanStats::tracking_with(inventory, segments);
+                        let mut wb = Behind::new(release, RELEASE_PARSE, MAGIC.len() + a);
                         ws.n3 = n3;
                         ws.n5 = n5;
                         while !wc.at_end() {
@@ -2029,10 +2122,12 @@ fn scan_with(
                             {
                                 return err(wc.here(), "END inside group");
                             }
+                            wb.at(wc.here());
                         }
                         ws.close_cell();
                         ws.seg_close((MAGIC.len() + b) as u64, &body[a..b], (MAGIC.len() + a) as u64, &wm);
                         ws.close_inv((MAGIC.len() + b) as u64);
+                        wb.end(MAGIC.len() + b);
                         Ok(ws)
                     })
                 })
@@ -2111,6 +2206,19 @@ pub(crate) fn cell_cuts(
     body: &[u8],
     file_off: usize,
 ) -> Result<(usize, Vec<(usize, u64, u64)>, usize)> {
+    cell_cuts_with(
+        body,
+        file_off,
+        &mut Behind::new(None, RELEASE_SKIM, file_off),
+    )
+}
+
+/// `cell_cuts`, the bytes skimmed handed back through `behind`
+fn cell_cuts_with(
+    body: &[u8],
+    file_off: usize,
+    behind: &mut Behind<'_, '_>,
+) -> Result<(usize, Vec<(usize, u64, u64)>, usize)> {
     let mut c = Cur::new(body, file_off);
     let mut st = ScanStats::default(); // discarded
     let mut modal = Modal::default();
@@ -2134,6 +2242,7 @@ pub(crate) fn cell_cuts(
                 cuts.push((at, n3, n5));
             }
             Rec::End => {
+                behind.end(c.here());
                 let end_at = at;
                 return Ok((head_end.unwrap_or(end_at), cuts, end_at));
             }
@@ -2145,6 +2254,7 @@ pub(crate) fn cell_cuts(
                 }
             }
         }
+        behind.at(c.here());
     }
 }
 

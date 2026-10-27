@@ -304,7 +304,9 @@ doc_bytes_est를 알므로 **바이트**로 입장시킨다: 상주 셀(파싱 �
 stream.rs `StreamStore`), `floe2 index SRC --stream [--mem GiB]`가
 그대로 넘긴다. 1차 패스는 파일을 읽기 전용으로 mmap해 한 번 훑는
 `floe_oasis::inventory`(매핑은 2차 패스 전에 내려놓는다; NFS에서 순차
-한 번의 스윕이라 §4.1의 pread 선호와 충돌하지 않는다). 2차 패스의
+한 번의 스윕이라 §4.1의 pread 선호와 충돌하지 않는다. 0.12.411부터 걷기가
+지나간 페이지를 32 MiB마다 돌려준다 — 매핑의 상주 페이지가 rss로 세어져 현장
+290 GB 소스가 `rss 216G`를 보였다; DIRECT_READ_PLAN §8.27). 2차 패스의
 `StreamStore`는 재고와 파일 핸들을 들고, `jobs`개의 리더가 범위(헤드,
 그리고 셀 범위들)를 파일 순서로 잡아 `read_exact_at`으로 읽고
 `parse_cell_bytes`로 파싱해 조각을 모으며, `def_ranges`의 범위가 모두

@@ -1083,6 +1083,73 @@ mod tests {
         }
     }
 
+    /// the walk hands back the bytes it has passed (2026-10-27): the
+    /// inventory and the segments are those of a walk without a release,
+    /// and each phase's ranges follow one another without overlap from the
+    /// magic on - the skim's past the END record's id, the parse's to the
+    /// END record (a parallel walk) or past its id (one job)
+    #[test]
+    fn a_walk_hands_back_what_it_passed() {
+        use crate::segments::SegStat;
+        type Ranges = Vec<(u8, u64, u64)>;
+        let magic = b"%SEMI-OASIS\r\n".len() as u64;
+        for (name, data) in streams() {
+            let end_rec = crate::inventory(&data, 1).unwrap().scan.end_at;
+            for jobs in [1usize, 3] {
+                let walk = |segs: bool| -> (Vec<u8>, Option<Vec<SegStat>>, Ranges) {
+                    let got = std::sync::Mutex::new(Vec::new());
+                    let f =
+                        |phase: u8, from: u64, to: u64| got.lock().unwrap().push((phase, from, to));
+                    let release = crate::Release { step: 7, f: &f };
+                    let (inv, col) = if segs {
+                        let (inv, col) =
+                            crate::inventory_segments_with(&data, jobs, 64, Some(&release))
+                                .expect(name);
+                        (inv, Some(col.segs))
+                    } else {
+                        let inv = crate::inventory_with(&data, jobs, Some(&release)).expect(name);
+                        (inv, None)
+                    };
+                    (encode(&inv, ID), col, got.into_inner().unwrap())
+                };
+                let plain = encode(&crate::inventory(&data, jobs).unwrap(), ID);
+                let (_, plain_segs) = crate::inventory_segments(&data, jobs, 64).unwrap();
+                for segs in [false, true] {
+                    let (bytes, col, ranges) = walk(segs);
+                    let what = format!("{} jobs {} segments {}", name, jobs, segs);
+                    assert_eq!(bytes, plain, "{}", what);
+                    if let Some(col) = col {
+                        assert_eq!(col, plain_segs.segs, "{}", what);
+                    }
+                    for phase in [crate::RELEASE_SKIM, crate::RELEASE_PARSE] {
+                        let mut r: Vec<(u64, u64)> = ranges
+                            .iter()
+                            .filter(|g| g.0 == phase)
+                            .map(|g| (g.1, g.2))
+                            .collect();
+                        r.sort_unstable();
+                        if phase == crate::RELEASE_SKIM && jobs == 1 {
+                            assert!(r.is_empty(), "{}: one job does not skim", what);
+                            continue;
+                        }
+                        assert!(r.len() > 1, "{}: phase {} in steps of 7", what, phase);
+                        assert_eq!(r[0].0, magic, "{}: phase {} from the magic on", what, phase);
+                        for w in r.windows(2) {
+                            assert_eq!(w[0].1, w[1].0, "{}: phase {} follows on", what, phase);
+                        }
+                        assert!(r.iter().all(|g| g.0 < g.1), "{}: an empty range", what);
+                        let end = r.last().unwrap().1;
+                        if phase == crate::RELEASE_PARSE && jobs > 1 {
+                            assert_eq!(end, end_rec, "{}: the parse ends at the END record", what);
+                        } else {
+                            assert_eq!(end, end_rec + 1, "{}: phase {} past END's id", what, phase);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn the_loader_refuses_damage() {
         let data = adversarial(false, true);

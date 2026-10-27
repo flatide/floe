@@ -440,6 +440,7 @@ geometry/placement/text x·y, W/H, 점 목록, 경로 확장, 반복, 배치 대
 | 파일이 없으면 거부 | 사용자 2026-10-25: ".ovs가 없으면 density on을 거부하고 ovo가 없으면 occupancy on을 거부하는게 맞는 동작"; 캡처의 명시적 `--occupancy on`은 요약을 먼저 만들고 그림 | **완료 0.12.401(§8.24)**: renderd가 design.ovs 없는 캐시의 밀도 요청을 끔으로 그리고(`density_none=nofile`, 플랜 폴백 없음) design.ovo 없는 명시적 `occupancy=on`을 오류로 거절; 캡처 `density_for`(입력 오류)와 뷰어 토글·시작 옵션의 거절; 게이트 density_stack·occupancy·light_cache |
 | 조밀한 도형 격자의 외곽 채움 | 현장 2026-10-26: 레벨 5의 한 EBEAM 레이어 두 개가 `--occupancy-um 16`으로도 2^36 마크 상한(`work=68719508999`)에서 멈춤 — fill 배열의 다각형·경로가 멤버마다 charge | **완료 0.12.405(§8.25)**: prune에서 멤버 bbox ≤ 셀인 조밀 축 정렬 Grid의 다각형·경로를 외곽 한 번으로(prune 계약 안); `FLOE_OCCUPANCY_GRID_FILL=off` 킬 스위치; 단위 테스트 + occupancy 게이트 fixture |
 | 작은 도형의 bbox 마킹, 크기 비례 상한 | 현장 2026-10-27: 290 GB EBEAM 파일의 레이어 3134/0이 0.12.405 뒤에도 `none:work`(`work 68719514762`, 빌드 3618 s) — 평탄한 다각형 레코드가 멤버마다 스캔 변환 | **완료 0.12.410(§8.26)**: prune에서 두 축 모두 셀 이하인 다각형·경로는 멤버마다 bbox의 셀(최대 2×2)을 칠함(`small_member_box`, 계약 안; `FLOE_OCCUPANCY_SMALL_BOX=off`), `--occupancy-max-work`를 주지 않으면 상한 = 소스 1바이트당 4, 최소 2^36(`default_max_work`); 단위 테스트 |
+| 재고 매핑의 페이지, occupancy-only의 재고 재사용 | 현장 2026-10-27: 290 GB 파일의 `--occupancy-only`가 재고 패스에서 `rss 216G`(1920 s) — "stream이어도 어쩔 수 없는건지" → "진행해줘" | **완료 0.12.411(§8.27)**: `light --occupancy-only`는 캐시의 design.inv를 재고로 읽고 소스를 훑지 않음(`FLOE_LIGHT_INV_REUSE=off`), 재고 걷기가 지나간 페이지를 32 MiB마다 돌려줌(`floe_oasis::Release`, madvise DONTNEED; `FLOE_INVENTORY_RELEASE=off`), 진행 줄에 skim·parse 진행과 rss의 heap·file; 단위 테스트 + 게이트 light_cache |
 | L7 후속 | 요약 패스 1패스화/마킹 가속, ovs 합치기(레이아웃 밀도), B안(정규 페이지), 세그먼트 캐시 디스크 보존(방문한 셀의 디코드 결과를 남겨 다음 세션 가속), 1패스 경량 생성(셀 로컬 점유 격자 합성) | 각각 — **L7a 완료 0.12.386(§8.9)**: 이미지 증분 합성(제자리 성장, 채움 시점 노드 마스크, 채움 바이트 해제), 세그먼트 pread 묶음·병렬 인코딩; **L7b 완료 0.12.387(§8.10)**: 요약 패스의 마커가 셀을 직접 파싱(리더 풀·상주 창 없음, 묶음이 안 쓰는 셀은 읽지 않음), 다각형 스캔 변환 버퍼 재사용, 크기 예산 밖의 레이어는 마킹하지 않음; 나머지(1패스 경량 생성은 §8.10의 정확성 논거로 보류)는 사용자 지시에 따라 |
 
 L0는 하루, L1~L3는 S1~S3와 비슷한 크기(재고 코드 위의 확장), L4가 본체다.
@@ -1746,6 +1747,49 @@ of the file, at least 68719476736: raise it)`.
 모듈 함수 `within_one_cell`로 옮겨 함께 쓴다.
 
 **남은 것.** 현장 파일의 재생성 결과(3134/0의 status·`work=`와 빌드 시간)를 기다린다.
+
+### 8.27 재고 매핑의 페이지와 occupancy-only의 재고 재사용 (0.12.411 / floe-index·renderd 0.12.363, 2026-10-27; 현장 질문 → "진행해줘")
+
+**현장.** 290 GB EBEAM 파일에 0.12.410으로 `floe2 index <file> --occupancy-only`를 돌리니 재고 패스가
+`[vfs] stream: inventory... (1920s, rss 216G)`를 보였다. 사용자 질문: 스트리밍인데도 rss가 200 GB를 넘는 게 어쩔 수 없는지.
+
+**원인.** `stream_open`은 소스 전체를 읽기 전용으로 매핑해(memmap2, MAP_SHARED) `inventory_segments`로 훑는다. 훑은 페이지는
+매핑이 풀릴 때까지 프로세스에 상주하고, 진행 줄의 rss(`/proc/self/statm`의 resident)는 이 파일 페이지(RssFile)를 포함한다. 힙
+(RssAnon)은 셀 표와 세그먼트 목록뿐이라 몇 GB다(세그먼트당 0.5~1 KB × CBLOCK 수백만 개). 메모리 가드는 전부터 RssAnon만 본다.
+매핑은 재고가 끝나면 풀리고 이후 패스는 pread로 읽는다(page cache, rss 아님). 맥(floe-index 0.12.362, `light --jobs 4`)에서 2.2 GB
+비압축 합성 칩(gen_route_chip `--scale 8`)의 ps rss는 단일 스레드 skim 동안 초당 약 140 MB로 2.14 GB(파일 크기)까지 오르고 parse
+내내 그대로였고, 힙(phys_footprint)은 끝에 14 MB였다. 그리고 `--occupancy-only`는 경량 캐시가 이미 design.inv로 들고 있는 재고를
+얻으려고 소스를 처음부터 다시 훑고 있었다.
+
+**변경.** (1) `light --occupancy-only`는 재고를 캐시의 design.inv에서 읽는다(`vfs::cached_inventory`: `invfile::read`에 지금
+소스의 크기·mtime 대조; 디코드나 identity가 틀리면 아무것도 쓰지 않고 "rebuild the light cache"로 종료 1). 재고는 소스 바이트만으로
+정해지고 design.seg는 design.inv의 CRC로 짝이 맞으니 훑은 것과 같은 재고다(소비자가 읽는 필드는
+`the_round_trip_is_byte_identical_and_field_identical`가 고정). 로그는 `inventory ... records from design.inv in 0.0s`. 킬 스위치
+`FLOE_LIGHT_INV_REUSE=off`. 전체 색인의 `vfs --occupancy-only`는 그대로 훑는다(그 design.inv는 design.ovm의 짝이 아닌 옆 파일).
+(2) 재고 걷기가 지나간 바이트를 돌려준다: `inventory_with`·`inventory_segments_with`가 `floe_oasis::Release { step, f }`를 받아
+걷기마다(단일 job의 걷기, 병렬의 skim·head·워커별 셀 묶음) 약 `step` 바이트마다와 끝에서 `f(phase, from, to)`를 부르고(`Behind`,
+레코드마다 비교 한 번), floe-index는 그 구간을 페이지 경계로 madvise(DONTNEED)한다(`INVENTORY_RELEASE_STEP` 32 MiB;
+`FLOE_INVENTORY_RELEASE=off`면 쥔다). 읽기 전용 공유 매핑이라 다시 닿은 페이지는 파일 내용 그대로 다시 매핑되고, page cache는
+남으니 skim 뒤의 parse가 디스크를 다시 읽지도 않는다. 걷기 하나가 쥐는 매핑은 약 32 MiB(워커 12개면 약 400 MB). (3) 진행 줄은
+`inventory... (1920s; skimmed 290G of 290G, parsed 120G of 290G; rss 2.3G: heap 2.1G, file 0.2G)` — 돌려준 양으로 진행을
+보이고(전에는 rss가 사실상 진행 표시였다), Linux에서 rss를 RssAnon과 RssFile로 나눈다(그 필드가 없는 4.5 이전 커널은 statm의
+resident·shared; macOS는 `rss X`).
+
+**측정**(맥, release, `--jobs 4`). 280 MB 합성 칩(gen_route_chip `--scale 1`)의 경량 캐시에 `--occupancy-only`: 재고 3.4 s →
+0.0 s, 전체 6.8 s → 3.6 s, design.ovo는 옛 바이너리·새 바이너리·킬 스위치 셋이 바이트 동일; KLayout CBLOCK 파일(57 MB)도 셋이
+동일. 페이지 반납은 맥에서 보이지 않는다: 2.2 GB 칩의 ps rss가 반납을 켜도 꺼도 2.14 GB — macOS의 madvise(DONTNEED)는 파일 매핑의
+페이지를 비활성 목록으로 옮길 뿐 프로세스에서 떼지 않는다. Linux는 호출하는 즉시 프로세스의 rss가 준다(madvise(2); memmap2 문서
+"The resident set size (RSS) of the calling process will be immediately reduced") — 현장 진행 줄의 `file`로 확인한다.
+design.inv·design.seg는 반납 유무로 바이트 동일.
+
+**검증.** floe-oasis `a_walk_hands_back_what_it_passed`(fixture 5종 × jobs 1·3 × 세그먼트 유무: 재고·세그먼트가 반납 없는 걷기와
+같고, phase마다 구간이 겹치지 않고 magic부터 이어지며, skim은 END의 id 뒤에서, parse는 병렬이면 END 앞·단일 job이면 END의 id
+뒤에서 끝남; 7바이트 step이라 여러 번), floe-index `the_rss_splits_into_heap_and_file`; 게이트 `light_cache`: `--occupancy-only`가
+`records from design.inv in`이고 소스를 훑지 않음, 킬 스위치로 훑은 것과 design.ovo 동일, 헤더 뒤가 깨진 design.inv는 종료 1에
+design.ovo 없음, `FLOE_INVENTORY_RELEASE=off`로 만든 경량 캐시와 design.inv·design.seg 동일.
+
+**남은 것.** 병렬 걷기는 셀 개수로 묶으므로(`per = n_units.div_ceil(jobs)`) 한 셀이 대부분인 파일은 skim 뒤 parse도 사실상 한
+스레드다. 경량 캐시를 처음 만들 때의 재고 시간이 현장에서 문제가 되면 다음 순서다.
 
 ## 9. 검토한 대안
 
