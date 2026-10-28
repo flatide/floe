@@ -28,8 +28,9 @@ the GTK viewer shows them.
       selection, a waive of a selection past the page as a service job
       with the counts after it, Tab hiding the markers' hit map;
       DB descriptions alone supply no CD pick or delta groups, while
-      loading SVRF metadata restores those results; per-rule SVRF status
-      follows real #IFDEF conversion without changing the selected scope.
+      loading SVRF metadata restores those results; a checkmark before
+      matched rule names follows real #IFDEF conversion without changing
+      the selected scope.
 
 usage: .venv/bin/python tools/validate_drc_analysis.py
 """
@@ -405,13 +406,18 @@ def a5(temp):
         pump(v, lambda: v.last_frame is not None, "first frame")
         check(v.load_drc(str(d / "sample.db")), "load_drc")
         store = v._drcwin._rstore
-        check(v._drcwin._svrf_column.get_visible()
-              and all(r[4] == "SVRF ✓" and r[0] in r[5] for r in store)
+        name_column = v._drcwin._rules.get_column(0)
+        name_column.cell_set_cell_data(store, store.get_iter_first(), False, False)
+        check(len(v._drcwin._rules.get_columns()) == 2
+              and [r[0] for r in store] == [c.name for c in v._drc.checks]
+              and all(r[4] == "✓ " + r[0] and r[0] in r[5] for r in store)
+              and name_column.get_cells()[0].get_property("text") == store[0][4]
               and v._drcwin._rules.get_tooltip_column() == 5,
-              "auto-loaded SVRF marks matching rules and keeps full names in tooltips")
+              "auto-loaded SVRF prefixes names with a checkmark and keeps raw names")
         children = [(c[0], c[1]) for c in store[0].iterchildren()]
         check(children == [("클러스터 1", "5/0"), ("클러스터 2", "4/0"),
-                           ("클러스터 3", "3/0"), ("Unclustered", "8/0")],
+                           ("클러스터 3", "3/0"), ("Unclustered", "8/0")]
+              and all(c[4] == c[0] for r in store for c in r.iterchildren()),
               "the rule tree's cluster children", children)
         v._drcwin._rules.set_cursor(store[0].path, None, False)
         pump(v, lambda: v._drc_delta_groups is not None, "delta groups", 60)
@@ -487,11 +493,13 @@ def a5(temp):
             pump(v, lambda: v._drc_delta_groups is not None, "retained cluster groups", 60)
             notch = next(r for r in store if r[0] == "M1.NOTCH")
             label, explanation = v._drc_svrf_status("M1.NOTCH")
-            check(notch[4] == label == ("SVRF ✓" if enabled else "SVRF —")
+            check(label == ("✓" if enabled else "")
+                  and notch[4] == ("✓ M1.NOTCH" if enabled else "M1.NOTCH")
                   and "M1.NOTCH" in notch[5] and explanation in notch[5]
                   and (enabled or "#IFDEF" in explanation)
-                  and all(r[4] == "SVRF ✓" for r in store if r[0] != "M1.NOTCH"),
-                  "rule status follows #IFDEF and explains a missing match", (label, explanation))
+                  and all(r[4] == "✓ " + r[0] for r in store if r[0] != "M1.NOTCH")
+                  and all(c[4] == c[0] for r in store for c in r.iterchildren()),
+                  "rule checkmarks follow #IFDEF and cluster names stay plain", (label, explanation))
             check(v._drcwin._rstore is store and v._drc_open == scope[0]
                   and v._drc_cluster is scope[1]
                   and v._drcwin._rules.get_cursor()[0].to_string() == selected_path
@@ -505,7 +513,7 @@ def a5(temp):
         v._drc_show_detail(notch_ci, 0)
         check(v._drc_rules_load(str(sidecars[False])), "reload with the displayed rule excluded")
         notch = next(r for r in store if r[0] == "M1.NOTCH")
-        check(notch[4] == "SVRF —" and v._drc_open == notch_ci
+        check(notch[4] == "M1.NOTCH" and v._drc_open == notch_ci
               and v._drc_delta_groups is None and not v._drc_delta_busy
               and v._drc_cd_info(v._drc.checks[notch_ci].errors[0], "M1.NOTCH")["pick"] is None
               and "#IFDEF" in v._drcwin._detail.get_text(*v._drcwin._detail.get_bounds(), True),
@@ -515,8 +523,8 @@ def a5(temp):
         empty_path = d / "empty-notch.rules.json"
         empty_path.write_text(json.dumps(empty))
         check(v._drc_rules_load(str(empty_path)), "load a matched rule with empty metadata")
-        check(next(r for r in store if r[0] == "M1.NOTCH")[4] == "SVRF ✓"
-              and v._drc_svrf_status("M1.NOTCH")[0] == "SVRF ✓"
+        check(next(r for r in store if r[0] == "M1.NOTCH")[4] == "✓ M1.NOTCH"
+              and v._drc_svrf_status("M1.NOTCH")[0] == "✓"
               and v._drc_delta_groups is None,
               "SVRF applied status uses rule-name membership, even without constraints")
         check(v._drc_rules_load(str(sidecars[True])), "reload with the displayed rule enabled")
@@ -545,10 +553,10 @@ def a5(temp):
               and v._drc_cd_info(e, "M1.NOTCH")["pick"] is None
               and v._drc_meta_lines("M1.NOTCH", e) == [],
               "GUI does not infer CD or delta groups from a rule description")
-        check(not v._drcwin._svrf_column.get_visible()
-              and all(r[4] == "" and r[0] in r[5] for r in v._drcwin._rstore)
+        check(len(v._drcwin._rules.get_columns()) == 2
+              and all(r[4] == r[0] and r[0] in r[5] for r in v._drcwin._rstore)
               and v._drc_svrf_status("M1.NOTCH") == ("", "SVRF: not loaded"),
-              "without metadata the SVRF column is hidden and all statuses are blank")
+              "without metadata rule names have no checkmarks or extra column")
         svc = Svc()
         try:
             h = svc("drc_open", path=str(db), mode="load")["handle"]
@@ -564,8 +572,7 @@ def a5(temp):
         pump(v, lambda: v._drc_delta_groups is not None, "SVRF groups restored", 60)
         check(v._drc_cd_info(e, "M1.NOTCH")["pick"]["ticks"] == [2000, 5000, 3000]
               and len(v._drcwin._delta_store) > 1
-              and v._drcwin._svrf_column.get_visible()
-              and all(r[4] == "SVRF ✓" for r in v._drcwin._rstore),
+              and all(r[4] == "✓ " + r[0] for r in v._drcwin._rstore),
               "SVRF metadata restores CD measurement and delta groups")
         small = d / "small.db"
         small.write_text("MAIN 100000\nSMALL.ONE\n0 0 0\nSMALL.TWO\n0 0 0\n")
@@ -575,13 +582,12 @@ def a5(temp):
         r = run([INDEX, "drc", str(small)])
         check(r.returncode == 0, "smaller DB fixture packed", r.stderr)
         check(v.load_drc(str(small)) and len(v._drcwin._rstore) == 2
-              and v._drcwin._svrf_column.get_visible()
-              and all(r[4] == "SVRF ✓" and r[0] in r[5] for r in v._drcwin._rstore),
+              and all(r[4] == "✓ " + r[0] and r[0] in r[5] for r in v._drcwin._rstore),
               "switching to a smaller DB safely refreshes auto-loaded SVRF statuses")
         v._drc_release()
         check(v._drc is None and len(v._drcwin._rstore) == 0
-              and not v._drcwin._svrf_column.get_visible(),
-              "releasing the DB clears rule rows and hides the SVRF column")
+              and len(v._drcwin._rules.get_columns()) == 2,
+              "releasing the DB clears rule rows and keeps the two-column tree")
     finally:
         v._quit()
         v.window.destroy()
