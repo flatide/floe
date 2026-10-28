@@ -272,7 +272,7 @@ P4b(perf 줄)는 따로 진행 중이다. 이 단계에서 GTK는 아직 그대�
     - 자원 한도는 `RenderOptions::local()`(`FLOE_RUST_*`)이 요구하는 만큼이다. 데스크톱에는 함께 쓰는 사용자가 없다.
   - `view_edit {view, patch, base?}`: base가 없으면 현재 `state_rev`를 쓴다. 뷰를 고치는 쪽은 뷰어 하나뿐이다.
   - `view_cancel`(Esc), `view_snapshot`, `view_close`.
-  - 패치 JSON은 웹 `PatchDto`의 이름을 그대로 쓰고 `density`를 더했다. 항목은 navigation(fit·pan·zoom·goto·minimap·band), pixels, depth·depth_step, detail, thin, layers, layer_change, frames, labels, font_px, mono, density, style_deltas, root이고, 모르는 필드는 거절한다.
+  - 패치 JSON은 웹 `PatchDto`의 이름을 그대로 쓰고 `density`를 더했다. 항목은 navigation(fit·pan·zoom·goto·minimap·band), pixels, depth·depth_step, detail, cut_px, thin, layers, layer_change, frames, labels, font_px, mono, density, occupancy, style_deltas, root이고, 모르는 필드는 거절한다. `cut_px`(2026-10-28)는 데스크톱 detail 대화상자의 cut 입력이다: (0, 100] px(`view::MAX_CUT_PX`)를 `ViewState::cut_px`에 두어 detail의 5/3/1 px 대신 쓰고, `detail`이 오면 끝난다(한 패치에 둘 다 있으면 detail 다음 cut); 범위 밖·숫자 아님은 input 오류. 웹 `PatchDto`에는 아직 없다(`Patch` 리터럴에 `cut_px: None`).
 - **이벤트**(응답 사이에 한 줄씩, stdout은 줄 단위로 잠근다):
   - 뷰마다 펌프 스레드가 5 ms 간격으로 컨트롤러를 본다.
   - `{"event":"frame"}`: 새 전경·여백 프레임이다. 바이트(FLOERAW1 헤더 + RGBA, 또는 PNG)를 뷰 폴더(`$TMP/floe2-view-<pid>-<n>`, 0700)에 임시 이름으로 쓰고 이름을 바꾼 뒤 그 경로를 보낸다. 뷰어가 읽고 지운다. 넘기지 못한 파일은 4개까지만 남긴다.

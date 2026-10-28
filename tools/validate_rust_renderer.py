@@ -178,6 +178,43 @@ class WorkerContractTests(unittest.TestCase):
                 self.assertRaises(SystemExit):
             cli.parser().parse_args(["--layer-colors", "groups", "x.oas"])
 
+    def test_a_cut_of_ones_own_rides_on_the_nearest_level(self):
+        """User 2026-10-28 ("테스트를 위해 detail cut을 입력받을 수 있게
+        수정해줘. 0.1px까지 테스트해보려고 함"): the `d` dialog's own cut goes
+        to the view controller as cut_px beside the nearest level, which
+        the controller takes first; a level chosen again ends it."""
+        from floe import gui
+        v = _policy_viewer(deck=True)
+        v.detail = 1
+        self.assertNotIn("cut_px", gui.Viewer._ctl_policy(v))
+        self.assertEqual(gui.Viewer._detail_text(v), "medium")
+        self.assertIsNone(gui.Viewer._set_cut_px(v, " 0.1 ", redraw=False))
+        p = gui.Viewer._ctl_policy(v)
+        self.assertEqual((p["detail"], p["cut_px"]), ("high", 0.1))
+        self.assertEqual(gui.Viewer._detail_text(v), "0.1px")
+        self.assertIsNone(gui.Viewer._set_cut_px(v, "4.5", redraw=False))
+        p = gui.Viewer._ctl_policy(v)
+        self.assertEqual((p["detail"], p["cut_px"]), ("low", 4.5))
+        for bad in ("0", "-1", "100.5", "abc", "nan", "inf", ""):
+            self.assertIsNotNone(gui.Viewer._set_cut_px(v, bad, redraw=False), bad)
+            self.assertEqual(v.cut_custom, 4.5, bad)
+        self.assertIsNone(gui.Viewer._set_cut_px(v, "100", redraw=False))
+        gui.Viewer._set_detail(v, 2, redraw=False)
+        self.assertIsNone(v.cut_custom)
+        p = gui.Viewer._ctl_policy(v)
+        self.assertNotIn("cut_px", p)
+        self.assertEqual(p["detail"], "high")
+        # what the viewer sends: only the fields that changed, so the end
+        # of a cut sends its level again (the controller drops cut_px on a
+        # detail; a field left out is no change)
+        v._ctl_sent = dict(p, cut_px=0.1)
+        self.assertEqual(gui.Viewer._ctl_policy_diff(v)[1], {"detail": "high"})
+        v._ctl_sent = dict(p)
+        self.assertEqual(gui.Viewer._ctl_policy_diff(v)[1], {})
+        gui.Viewer._set_cut_px(v, "0.2", redraw=False)
+        v._ctl_sent = dict(p, cut_px=0.1)
+        self.assertEqual(gui.Viewer._ctl_policy_diff(v)[1], {"cut_px": 0.2})
+
     def test_render_key_carries_the_thin_policy(self):
         """Review 2026-09-11 P1-1: toggling View > keep thin shapes must
         invalidate the displayed frame (and the margin frame, which

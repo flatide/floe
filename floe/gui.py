@@ -36,6 +36,9 @@ from .gtkservice import CELL_QUERY_KINDS
 # is the shared app layer's (app-core shots::Detail::cut_px)
 DETAIL_LEVELS = ("low", "medium", "high")
 DETAIL_PX = (5.0, 3.0, 1.0)
+# the `d` dialog's own cut, px: over 0 and at most this (app-core
+# view::MAX_CUT_PX, which refuses a larger one)
+MAX_CUT_PX = 100.0
 DEFAULT_DETAIL = 1              # medium
 
 
@@ -2406,6 +2409,10 @@ class Viewer:
         self.detail = (DEFAULT_DETAIL if detail is None else
                        max(0, min(len(DETAIL_PX) - 1, int(detail))))
         self.cut_px = DETAIL_PX[self.detail]
+        # a cut of the user's own, screen px (the `d` dialog's entry, user
+        # 2026-10-28: a jobdeck's near views tried down to 0.1 px): in place
+        # of the level's until a level is chosen again; None = the level's
+        self.cut_custom = None
         # live-render span budget, scaled to the cache's tile size
         # (finer --tile-mb grids allow proportionally more tiles);
         # the real value lands in _apply_cache (cache may be None -
@@ -3645,7 +3652,8 @@ class Viewer:
             if "=" in field:
                 key, value = field.split("=", 1)
                 opts[key] = value
-        before = (self.detail, self.depth_value, self.lod_on,
+        before = (self.detail, getattr(self, "cut_custom", None),
+                  self.depth_value, self.lod_on,
                   self.frames_on, self.labels_on, self.label_font_px,
                   getattr(self, "thin_mode", "auto"),
                   getattr(self, "density_on", None),
@@ -3701,7 +3709,8 @@ class Viewer:
                     MIN_LABEL_FONT_PX <= label_px <= MAX_LABEL_FONT_PX:
                 self._set_label_font_px(label_px, redraw=False)
         changed = before != (
-            self.detail, self.depth_value, self.lod_on,
+            self.detail, getattr(self, "cut_custom", None),
+            self.depth_value, self.lod_on,
             self.frames_on, self.labels_on, self.label_font_px,
             getattr(self, "thin_mode", "auto"),
             getattr(self, "density_on", None),
@@ -3806,8 +3815,18 @@ class Viewer:
         return env == "on"
 
     def _effective_cut_px(self):
-        """Screen-space detail cut is independent of merged LOD."""
-        return self.cut_px
+        """Screen-space detail cut is independent of merged LOD: the
+        user's own (the `d` dialog's entry) or the level's."""
+        custom = getattr(self, "cut_custom", None)
+        return self.cut_px if custom is None else custom
+
+    def _detail_text(self):
+        """The detail the status line names: the level, or the user's own
+        cut as `0.1px`."""
+        custom = getattr(self, "cut_custom", None)
+        if custom is not None:
+            return "%gpx" % custom
+        return DETAIL_LEVELS[self.detail]
 
     def _structure_visible(self):
         """A finite VFS depth has a hierarchy frontier of its own."""
@@ -4549,6 +4568,10 @@ class Viewer:
             "density": bool(getattr(self, "density_on", False)) and self._density_available()
             and cut > 0 and not deck,
         }
+        # the user's own cut rides on the nearest level: the controller
+        # takes the level, then the cut in its place
+        if getattr(self, "cut_custom", None) is not None:
+            patch["cut_px"] = float(self.cut_custom)
         # the occupancy summary (View > occupancy summary, `o`): the user's
         # choice once made, else nothing - renderd's rule (a jobdeck's
         # passes draw it, a plain layout's frames do not)
@@ -4666,8 +4689,13 @@ class Viewer:
         """(the policy now, its fields that differ from the last sent)."""
         sent = self._ctl_sent if self._ctl_sent is not None else {}
         policy = self._ctl_policy()
-        return policy, {k: v for k, v in policy.items()
-                        if k not in sent or sent[k] != v}
+        diff = {k: v for k, v in policy.items()
+                if k not in sent or sent[k] != v}
+        # an own cut ends with its level sent again: the controller drops
+        # cut_px on a detail, and a field left out is no change
+        if "cut_px" in sent and "cut_px" not in policy:
+            diff["detail"] = policy["detail"]
+        return policy, diff
 
     def _ctl_redraw(self):
         """redraw() under the controller: the edit, then the frame on
@@ -5731,7 +5759,7 @@ class Viewer:
         maximum = "?" if cap is None else str(cap)
         lbl = "depth: %s/%s" % (current, maximum)
         if self.meta.get("bands") or self.meta.get("vfs"):
-            lbl += " · detail: %s" % DETAIL_LEVELS[self.detail]
+            lbl += " · detail: %s" % self._detail_text()
         if self.meta.get("vfs"):
             # the page hairline policy in force: cull = thin shapes
             # may be omitted at wide views (plain layout default)
@@ -5792,8 +5820,23 @@ class Viewer:
     def _set_detail(self, n, redraw=True):
         self.detail = max(0, min(len(DETAIL_PX) - 1, int(n)))
         self.cut_px = DETAIL_PX[self.detail]
+        self.cut_custom = None
         if redraw:
             self._on_depth()  # same refresh: status label + re-render
+
+    def _set_cut_px(self, text, redraw=True):
+        """The `d` dialog's own cut: a number of screen px in
+        (0, MAX_CUT_PX]. Returns None when set, else why it was refused."""
+        try:
+            px = float(str(text).strip())
+        except ValueError:
+            return "not a number: %r" % (text,)
+        if not (0.0 < px <= MAX_CUT_PX):
+            return "a cut is over 0 and at most %g px" % MAX_CUT_PX
+        self.cut_custom = px
+        if redraw:
+            self._on_depth()
+        return None
 
     def _toggle_abstract(self):
         # klayout abstract mode: sub-10px cells draw as empty frames -
@@ -6118,7 +6161,6 @@ class Viewer:
         btns = []
         for lvl, nm in enumerate(DETAIL_LEVELS):
             b = Gtk.ToggleButton(label=nm)
-            b.set_active(lvl == self.detail)
 
             def _apply(w, n=lvl):
                 if not w.get_active():   # ignore the untoggle event
@@ -6127,15 +6169,44 @@ class Viewer:
                     if i != n and other.get_active():
                         other.set_active(False)
                 self._set_detail(n)
+            b.set_active(lvl == self.detail and self.cut_custom is None)
             b.connect("toggled", _apply)
             btns.append(b)
             row.pack_start(b, False, False, 0)
+        # a cut of one's own, px (user 2026-10-28: for a test down to
+        # 0.1 px): Enter or `set` applies it, a level button ends it
+        own = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        box.pack_start(own, False, False, 0)
+        own.pack_start(Gtk.Label(label="cut px"), False, False, 0)
+        entry = Gtk.Entry()
+        entry.set_width_chars(8)
+        entry.set_text("%g" % self._effective_cut_px())
+        own.pack_start(entry, False, False, 0)
+        set_btn = Gtk.Button(label="set")
+        own.pack_start(set_btn, False, False, 0)
+        why = Gtk.Label()
+        why.set_xalign(0.0)
+        # (named for the gtk_view gate, which types in the entry)
+        entry.set_name("detail-cut")
+        why.set_name("detail-cut-why")
+        box.pack_start(why, False, False, 0)
+
+        def _own(*_a):
+            refused = self._set_cut_px(entry.get_text())
+            why.set_text(refused or "")
+            if refused is None:
+                for b in btns:
+                    if b.get_active():
+                        b.set_active(False)
+        entry.connect("activate", _own)
+        set_btn.connect("clicked", _own)
         note = Gtk.Label()
         note.set_markup(
             "<small>lower detail hides finer features from live "
             "renders;\nshapes below the cut are not drawn. snap/pick/clip "
             "stay exact.\nthe status line shows the physical cut "
-            "(cut&lt;0.35um).\nkeys: d = this dialog</small>")
+            "(cut&lt;0.35um).\nlow/medium/high = 5/3/1 px; cut px sets "
+            "one of your own.\nkeys: d = this dialog</small>")
         note.set_xalign(0.0)
         box.pack_start(note, False, False, 0)
         ok = Gtk.Button(label="ok")

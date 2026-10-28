@@ -102,11 +102,11 @@ class Reference:
         self.gen = 0
 
     def frame(self, f, density=None, labels=True, view=None, frames=False,
-              depth=None, occupancy=None):
+              depth=None, occupancy=None, cut_px=1.0):
         self.gen += 1
         job = {"kind": "render", "gen": self.gen, "scope": "live",
                "bbox": tuple(f["bbox"]), "view": view, "w": f["width"],
-               "h": f["height"], "depth": depth, "cut_px": 1.0,
+               "h": f["height"], "depth": depth, "cut_px": cut_px,
                "frames": frames, "labels": labels, "label_font_px": 14,
                "lod": False, "abstract": False, "visible": None,
                "thin": "keep", "frame_cache": True, "frame_format": "raw"}
@@ -614,6 +614,28 @@ def levels_dialog(v):
     print("level dialog: %s" % ", ".join(labels))
 
 
+def own_cut(v, text):
+    """The `d` dialog's own cut (user 2026-10-28: "테스트를 위해 detail cut을
+    입력받을 수 있게 수정해줘. 0.1px까지 테스트해보려고 함"): `text` typed in
+    its entry and Enter. The level buttons and the refusal line after it."""
+    from floe import gui
+    Gtk = gui.Gtk
+    v._detail_dialog()
+
+    def walk(w):
+        yield w
+        if isinstance(w, Gtk.Container):
+            for k in w.get_children():
+                for d in walk(k):
+                    yield d
+    kids = list(walk(v._cdlg))
+    named = dict((k.get_name(), k) for k in kids)
+    named["detail-cut"].set_text(text)
+    named["detail-cut"].emit("activate")
+    levels = [k for k in kids if isinstance(k, Gtk.ToggleButton)]
+    return levels, named["detail-cut-why"].get_text()
+
+
 def gtk_ready():
     """Whether the viewer's windows can open here (GuiSmokeTests' rule)."""
     try:
@@ -767,6 +789,9 @@ def gui_viewer(src, ref):
                  # the picture is the page path's either way)
                  ("the occupancy summary", v._toggle_occupancy,
                   {"occupancy": True}),
+                 # the `d` dialog's own cut (2026-10-28)
+                 ("a cut of one's own", lambda: own_cut(v, "0.1"),
+                  {"cut_px": 0.1}),
                  ("the grayscale", lambda: v._set_mono(True, announce=False),
                   {"mono": True}))
         for what, step, policy in steps:
@@ -782,7 +807,8 @@ def gui_viewer(src, ref):
                 ref.worker.submit({"kind": "mono", "on": True})
             same(on_screen, ref.frame(f, density=v.density_on, frames=True,
                                       depth=v._depth(),
-                                      occupancy=v.occupancy_on), what)
+                                      occupancy=v.occupancy_on,
+                                      cut_px=v._effective_cut_px()), what)
             if policy.get("mono"):
                 ref.worker.submit({"kind": "mono", "on": False})
             for key, value in policy.items():
@@ -805,6 +831,26 @@ def gui_viewer(src, ref):
             got.get(k) == want.get(k) for k in ("found", "x", "y", "snap")),
             "snap: viewer %r, adapter %r" % (got, want))
         print("viewer: %d frame(s), perf %r" % (len(frames), last["perf"][1]))
+        # the own cut: no level lit, the status line says it; a refused
+        # entry keeps it; a level button ends it
+        levels, why = own_cut(v, "abc")
+        check(not any(b.get_active() for b in levels) and v.cut_custom == 0.1
+              and why.startswith("not a number")
+              and "detail: 0.1px" in v.dstatus.get_text(),
+              "the own cut: levels %s, refusal %r, status %r" % (
+                  [b.get_active() for b in levels], why, v.dstatus.get_text()))
+        levels, why = own_cut(v, "200")
+        check(v.cut_custom == 0.1 and "at most 100" in why, "200 px: %r" % why)
+        rev = v.worker.snapshot["render_rev"]
+        levels[2].set_active(True)
+        pump(v, lambda: settled(v, frames)
+             and v.worker.snapshot["render_rev"] != rev, "the level after the own cut")
+        check(v.cut_custom is None and v.worker.snapshot["state"]["cut_px"] is None
+              and "detail: high" in v.dstatus.get_text(),
+              "high after the own cut: %r, state %r" % (
+                  v.dstatus.get_text(), v.worker.snapshot["state"]["cut_px"]))
+        v._cdlg.destroy()
+        print("detail dialog: a 0.1 px cut of its own, refusals said, high ends it")
         strike_and_palettes(v)
         cell_status(v, answers)
         browse_dialog(v)
@@ -1042,6 +1088,27 @@ def main():
             print("density: %d round(s), %d pixel(s) changed" % (len(rounds), changed))
             off = s.edit(density=False)
             until(s, final_frame(off["state_rev"]))
+            # a cut of the viewer's own (the `d` dialog's entry, 2026-10-28):
+            # in place of the level's until a level is set again
+            own = s.edit(cut_px=0.1)
+            check(own["state"]["cut_px"] == 0.1 and own["state"]["detail"] == "high",
+                  "cut_px: %s" % own["state"])
+            fine = until(s, final_frame(own["state_rev"]))[-1]
+            same(fine["pixels"], ref.frame(fine, cut_px=0.1), "the 0.1 px cut")
+            finer = sum(1 for i in range(0, len(first["pixels"]), 4)
+                        if first["pixels"][i:i + 4] != fine["pixels"][i:i + 4])
+            check(finer > 0, "the 0.1 px cut drew what the 1 px cut drew")
+            for refused in (0, -1, 101, "0.1"):
+                try:
+                    s.edit(cut_px=refused)
+                    check(False, "cut_px %r was taken" % (refused,))
+                except gtkservice.ServiceError as exc:
+                    check(exc.kind == "input", "cut_px %r: %s %s" % (refused, exc.kind, exc))
+            back = s.edit(detail="high")
+            check(back["state"]["cut_px"] is None and back["state"]["detail"] == "high",
+                  "a level after the cut: %s" % back["state"])
+            until(s, final_frame(back["state_rev"]))
+            print("cut_px: 0.1 px changed %d pixel(s) of the 1 px fit" % finer)
             # the desktop's bounds (gui.py _clamp_view): the fit view is wider
             # than the die and 10% around it, so a pan there stays centred
             still = s.edit(navigation={"kind": "pan", "x": 0.25, "y": 0.0, "snap": True})

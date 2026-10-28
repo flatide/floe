@@ -343,12 +343,20 @@ pub enum RootEdit {
 pub const ROOT_UNSUPPORTED: &str = "root_unsupported";
 pub const CELL_WITHOUT_SHAPES: &str = "cell_without_shapes";
 pub const CELL_TIMEOUT: &str = "cell_timeout";
+/// The largest size cut a viewer may set (Patch::cut_px), px.
+pub const MAX_CUT_PX: f64 = 100.;
 #[derive(Default, Clone, Debug)]
 pub struct Patch {
     pub navigation: Option<Navigation>,
     pub pixels: Option<(u32, u32)>,
     pub depth: Option<Depth>,
     pub detail: Option<Detail>,
+    /// A size cut of the viewer's own, screen px in (0, MAX_CUT_PX] (the
+    /// desktop viewer's detail dialog, user 2026-10-28: a jobdeck's near
+    /// views tried down to 0.1 px): it stands for the detail's 5 / 3 / 1 px
+    /// until a detail is set again. Applied after `detail`, so a patch with
+    /// both keeps this cut.
+    pub cut_px: Option<f64>,
     pub thin: Option<Thin>,
     pub layers: Option<Layers>,
     /// A panel checkbox is a bounded delta, not a round-trip of all layer IDs.
@@ -403,6 +411,8 @@ pub struct ViewState {
     pub viewport: Viewport,
     pub depth: Option<u32>,
     pub detail: Detail,
+    /// The viewer's own size cut (Patch::cut_px), px: None = the detail's.
+    pub cut_px: Option<f64>,
     pub thin: Thin,
     pub layers: Layers,
     // Controller snapshots are frequent; never copy the saved pair list on a
@@ -654,6 +664,7 @@ impl ViewState {
             viewport: Viewport::fit(model.bbox, width, height)?,
             depth: None,
             detail: Detail::Medium,
+            cut_px: None,
             thin: Thin::Auto,
             layers: model.initial_layers.clone(),
             isolated_from: None,
@@ -761,6 +772,15 @@ impl ViewState {
         }
         if let Some(detail) = patch.detail {
             s.detail = detail;
+            s.cut_px = None;
+        }
+        if let Some(cut) = patch.cut_px {
+            if !(cut.is_finite() && cut > 0. && cut <= MAX_CUT_PX) {
+                return Err(Error::input(format!(
+                    "cut_px is a size cut in pixels, over 0 and at most {MAX_CUT_PX}"
+                )));
+            }
+            s.cut_px = Some(cut);
         }
         if let Some(thin) = patch.thin {
             s.thin = thin;
@@ -961,6 +981,7 @@ impl ViewState {
         self.root == other.root
             && self.depth == other.depth
             && self.detail == other.detail
+            && self.cut_px == other.cut_px
             && self.thin.effective(deck) == other.thin.effective(deck)
             && self.layers == other.layers
             && self.frames == other.frames
@@ -977,7 +998,7 @@ impl ViewState {
             width: self.viewport.width,
             height: self.viewport.height,
             depth: self.depth,
-            cut_px: self.detail.cut_px(),
+            cut_px: self.cut_px.unwrap_or_else(|| self.detail.cut_px()),
             thin: self.thin.effective(model.deck),
             layers: self.layers.clone(),
             frames: self.frames,

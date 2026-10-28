@@ -62,3 +62,64 @@ fn revision_state_preserves_every_field_and_rejects_reinterpreted_planes() {
     next.pairs.insert((2, 0));
     assert!(state.for_index_revision(&old, &next).is_err());
 }
+
+#[test]
+fn a_cut_of_its_own_stands_for_the_detail_until_a_detail_is_set() {
+    let m = model();
+    let cut = |s: &ViewState| s.request(&m, RenderRequest::default()).cut_px;
+    let s = ViewState::initial(&m, 100, 100).unwrap();
+    assert_eq!(cut(&s), 3.);
+    let own = s
+        .edit(
+            &m,
+            Patch {
+                cut_px: Some(0.1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        (own.detail, own.cut_px, cut(&own)),
+        (Detail::Medium, Some(0.1), 0.1)
+    );
+    assert!(!own.same_policy(&s, true), "another cut is another frame");
+    // the state carries it across an index revision
+    assert_eq!(own.for_index_revision(&m, &m).unwrap(), own);
+    // a detail ends it; a patch with both keeps the cut
+    let high = Patch {
+        detail: Some(Detail::High),
+        ..Default::default()
+    };
+    let back = own.edit(&m, high.clone()).unwrap();
+    assert_eq!(
+        (back.detail, back.cut_px, cut(&back)),
+        (Detail::High, None, 1.)
+    );
+    let both = Patch {
+        cut_px: Some(0.5),
+        ..high
+    };
+    assert_eq!(cut(&own.edit(&m, both).unwrap()), 0.5);
+    for bad in [0., -1., f64::NAN, f64::INFINITY, MAX_CUT_PX + 1.] {
+        let refused = own.edit(
+            &m,
+            Patch {
+                cut_px: Some(bad),
+                ..Default::default()
+            },
+        );
+        assert!(refused.is_err(), "{bad}");
+    }
+    assert_eq!(
+        cut(&own
+            .edit(
+                &m,
+                Patch {
+                    cut_px: Some(MAX_CUT_PX),
+                    ..Default::default()
+                }
+            )
+            .unwrap()),
+        MAX_CUT_PX
+    );
+}

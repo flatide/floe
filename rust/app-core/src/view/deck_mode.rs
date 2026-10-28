@@ -88,6 +88,7 @@ impl DeckModeMemory {
         next.viewport = state.viewport;
         next.depth = state.depth;
         next.detail = state.detail;
+        next.cut_px = state.cut_px;
         next.thin = state.thin;
         // the occupancy summary toggle stays across a deck's mode switch
         next.occupancy = state.occupancy;

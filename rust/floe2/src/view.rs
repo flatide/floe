@@ -963,6 +963,7 @@ pub fn snapshot_json(s: &Snapshot) -> Value {
                          "height": st.viewport.height},
             "depth": st.depth,
             "detail": detail_name(st.detail),
+            "cut_px": st.cut_px,
             "thin": thin_name(st.thin),
             "layers": layers_json(&st.layers),
             "layers_isolated": st.layers_isolated(),
@@ -1094,6 +1095,7 @@ pub fn patch(v: &Value) -> Result<Patch> {
         "depth",
         "depth_step",
         "detail",
+        "cut_px",
         "thin",
         "layers",
         "layer_change",
@@ -1159,6 +1161,11 @@ pub fn patch(v: &Value) -> Result<Patch> {
             Some("high") => Detail::High,
             _ => return Err(bad("detail")),
         });
+    }
+    // a size cut of the viewer's own, px (the detail dialog's entry); the
+    // view state refuses one out of range
+    if let Some(c) = o.get("cut_px") {
+        p.cut_px = Some(c.as_f64().ok_or_else(|| bad("cut_px"))?);
     }
     if let Some(t) = o.get("thin") {
         p.thin = Some(match t.as_str() {
@@ -1255,6 +1262,14 @@ mod tests {
         assert!(matches!(p.depth, Some(Depth::Levels(3))));
         assert_eq!(p.density, Some(true));
         assert_eq!(p.occupancy, Some(false));
+        assert_eq!(p.cut_px, None);
+        assert_eq!(
+            patch(&json!({"detail": "medium", "cut_px": 0.1}))
+                .unwrap()
+                .cut_px,
+            Some(0.1)
+        );
+        assert!(patch(&json!({"cut_px": "0.1"})).is_err());
         assert_eq!(p.layers, Some(Layers::Only(vec![(1, 0), (2, 0)])));
         assert_eq!(p.style_deltas.len(), 1);
         assert_eq!(p.style_deltas[0].color, Some([255, 0, 0, 255]));

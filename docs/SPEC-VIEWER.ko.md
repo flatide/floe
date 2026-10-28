@@ -106,6 +106,14 @@
     - 덱: `deck N passes`.
   - 로드 직후 첫 프레임은 `loaded in X s · `만 앞에 붙는다. 내역은 로그에 있다.
   - depth는 위 줄(`depth: d/max · detail: …`)에 있다.
+  - detail은 low/medium/high(cut 5/3/1 px) 말고도 `d` 대화상자의 `cut px` 입력으로 임의의 cut을
+    줄 수 있다(사용자 요청 2026-10-28: 덱의 근접 구간을 0.1 px까지 시험): (0, 100] px, Enter나 `set`으로
+    적용하고 그동안 레벨 버튼은 모두 꺼지며 위 줄은 `detail: 0.1px`; 숫자가 아니거나 범위 밖이면 입력란 아래
+    줄에 이유를 쓰고 값을 바꾸지 않는다; 레벨 버튼을 누르면 끝난다. 컨트롤러 패치에는 가장 가까운 레벨과 함께
+    `cut_px`로 간다(`_ctl_policy`, SHARED_APP_LAYER §패치 JSON). gate rust_renderer
+    `test_a_cut_of_ones_own_rides_on_the_nearest_level`, gtk_view(서비스의 `cut_px` 0.1 = 기준 렌더 cut 0.1,
+    1 px fit과 다른 픽셀, 0·-1·101·문자열 거절, detail로 해제; 실제 대화상자 `own_cut`: 0.1 입력 → 상태줄·
+    컨트롤러 상태, `abc`·`200` 거절 문구, high 버튼으로 해제).
   - 팬·캐시 프레임(`live (N tiles)`), `no layers visible` 같은 짧은 상태는 그대로 보인다.
 
 ## 3. 스트리밍 라운드 (service._svc_render_vfs)
