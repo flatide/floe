@@ -43,6 +43,11 @@ sh tools/validate_rust.sh --only quick path/to.oas
     - 문서(`docs/`, `*.md`), 게이트가 쓰지 않는 도구(벤치·실험·생성기): 없음. 전부 그런 파일이면 아무것도 돌리지
       않고 `RUST VALIDATION: ALL OK (--changed; gates: none)`으로 끝난다.
     - `tools/validate_<게이트>.py`: 그 게이트.
+    - description 측정 조건: `tools/validate_drc_description.py`와 오라클
+      `tools/oracle/floe_oracle/drc_description.py`는 `drc_analysis`, Rust
+      `drc/description.rs`·`drc/analysis/measure.rs`·`app-cli/src/drc_prepare.rs`는
+      `unit`, `drc_analysis`를 실행한다. 제품 Python 모듈이나 구형 `drc_delta`
+      게이트를 다시 추가하지 않는다.
     - 버전 줄만 바뀐 `floe/__init__.py`·`Cargo.toml`·`Cargo.lock`(푸시마다 바뀐다): `rust_renderer`, `floe2`,
       `index_cli`. 다른 줄도 바뀌었으면 전체.
     - `floe/gui.py` 등 뷰어: `rust_renderer`, `floe2`, `jobdeck`, `density_stack`, `index_lock`, `perf_parity`, `gtk_view`(P4d부터 렌더 루프가 컨트롤러의 것, P4f부터 그것뿐).
@@ -799,6 +804,19 @@ frames_keep_rep`/`dense_frames_stay_per_member…`(rev 34/39),
 과소선택 금지 — 술어는 hairline 0.5를 미러: 규칙 변경 시 동기화),
 `deterministic_plans`. ovm: `cell_sink_append_is_byte_identical`,
 `split_max_min_detects_hairline_pages`. cli: 분할/파이프라인 13개.
+
+### description 기반 CD 검증
+
+`drc_analysis`는 기존 Rust 서비스·도형·마커·GTK 검증에 더해 description 파서의
+보수적 조건 추출을 오라클과 비교한다. `validate_drc_analysis.py --description-only`는
+작은 CLI·서비스·GTK 통합 사례만 실행한다: `--svrf` 없는 Rust CD/두 델타 그룹 준비,
+추정 플래그, 캐시 재사용, SVRF 조건 우선순위, 명시적인 잘못된 메타데이터 오류,
+조건부·기준 누락 설명의 스킵, 빈 룰 100개의 빠른 처리, 공간 전용 처리와
+개인 검토 상태 무변경. ASCII·packed 메타데이터 일치, SVRF 레이어 정보 보존,
+중복 룰명의 서로 다른 설명에 대한 추정 억제, 닫힌 핸들 거부도 확인한다.
+GTK에서는 SVRF 없는 그룹·추정 CD·룰러를 확인한 뒤 SVRF 로딩 시 조건과 그룹이
+갱신되고 레이어 정보가 SVRF에서만 오는지 검증한다. Python description 파서는 `tools/oracle/`의 개발 검증용이며
+배포 제품은 Rust `app-core`를 사용한다.
 
 ## 4. 결정성 게이트
 

@@ -534,7 +534,7 @@ print(json.dumps([instance.APP, instance.socket_address(":77"),
               "coverage.py", "view_policy.py", "cli.py", "service.py",
               "__main__.py",
               # the Python renderd adapter and perf line (P4f: the gates')
-              "rust_render.py", "perf_line.py"}
+              "rust_render.py", "perf_line.py", "drc_description.py"}
     check(not (shipped & oracle) and not any(f.startswith("jobdeck")
                                                for f in shipped),
           "the floe2 bundle ships oracle modules: %s" % sorted(shipped & oracle))

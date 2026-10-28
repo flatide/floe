@@ -28,8 +28,8 @@ database (or FLOE_DRC_ANALYSIS_ROOT/<hash>, e.g. a local SSD for a
 read-only results folder; set it for the viewer too). The pack, the waive
 and note files are not changed. Rules without errors are skipped.
 
-  --svrf RULES_JSON   the deck's floe-index svrf sidecar (required for the
-                      CD/delta caches; not the SVRF text itself)
+  --svrf RULES_JSON   optional floe-index svrf metadata; without it, use
+                      supported DB descriptions for CD/delta conditions
   --rule NAME         prepare this rule only (repeatable; default: all)
   --jobs N            workers within a rule, 1..256 (default min(4, CPUs),
                       or FLOE_DRC_JOBS)
@@ -111,11 +111,6 @@ pub fn parse(args: &[String]) -> Result<Command> {
     c.spatial = !delta_only;
     c.delta = !spatial_only;
     c.source = source.ok_or_else(|| Error::input("a DRC .db or pack is required (see --help)"))?;
-    if c.delta && c.rules_json.is_none() {
-        return Err(Error::input(
-            "--svrf <rules.json> is required for CD/delta preprocessing; use --spatial-only for the marker centres alone",
-        ));
-    }
     worker_count(c.jobs)?;
     Ok(c)
 }
@@ -205,17 +200,22 @@ fn prepare(c: &Command, stop: &AtomicUsize, report: &(dyn Fn(String) + Sync)) ->
             }
         }
         if c.delta {
-            let constraints: Vec<Value> = metadata
-                .as_ref()
-                .and_then(|m| m.get("checks"))
-                .and_then(|checks| checks.get(names[ci]))
-                .and_then(|r| r.get("constraints"))
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
+            let constraints = floe_app_core::drc::description::constraints_for(
+                names[ci],
+                &pack.checks[ci].desc,
+                metadata.as_ref(),
+            );
             if constraints.is_empty() {
-                report("  CD skipped: no matching measurement constraints".into());
+                report(
+                    "  CD skipped: no matching SVRF or unambiguous description constraints".into(),
+                );
                 continue;
+            }
+            if constraints
+                .iter()
+                .any(|c| c.get("source").and_then(Value::as_str) == Some("description"))
+            {
+                report("  CD source: DB description (estimated)".into());
             }
             let table = Arc::new(Table::measure(
                 &source,

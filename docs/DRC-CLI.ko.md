@@ -41,12 +41,15 @@ no-op. 좌표 토큰이 정수가 아닌 db는 명확한 메시지와 함께 거
 ### 대규모 룰의 마커 중심·CD/델타 사전 준비 (`drc-prepare`)
 
 ```bash
+# SVRF 없이 description에서 얻은 명확한 측정 조건으로 준비
+floe2 drc-prepare results.db
+# SVRF가 제공하는 측정 조건 우선, 없는 룰은 description으로 보완
 floe2 drc-prepare results.db --svrf deck.svrf.rules.json
 # 한 룰 안의 좌표 블록을 작업자 4개로 병렬 처리
 floe2 drc-prepare results.db --svrf deck.svrf.rules.json --jobs 4
 # 특정 룰만 준비 (--rule 반복 가능)
 floe2 drc-prepare results.db --svrf deck.svrf.rules.json --rule M1.SPACE
-# SVRF 없이 마커 중심만 준비
+# CD 측정 없이 마커 중심만 준비
 floe2 drc-prepare results.db --spatial-only
 # 브랜치의 명령도 그대로: floe-index가 옆의 floe2에 넘긴다
 floe-index drc-prepare results.db --svrf deck.svrf.rules.json
@@ -61,7 +64,12 @@ waive/notes는 변경하지 않는다. pack이 없거나 낡으면 중단하며 
 취소는 Ctrl+C(종료 코드 130)이며 완료된 룰의 캐시는 재실행 때 사용한다. 진행 중인
 룰은 다시 준비한다. 실제 에러가 0개인 룰은 건너뛰고, 완료 메시지에서 준비한 룰 수와
 건너뛴 룰 수를 따로 표시한다. `--svrf`에는 원문 SVRF가 아니라 `floe-index svrf`로
-생성한 `.rules.json`을 지정한다(없으면 `--spatial-only`만 가능).
+생성한 `.rules.json`을 지정한다. 이 옵션이 없으면 DB description의 명확한
+측정 종류·기준값·단위·위반 방향을 이용하며, 설명이 불명확한 룰은 `CD skipped`로
+보고한다. 설명에서 얻은 값은 추정으로 표시하고 실제 CD는 에러 도형에서 측정한다.
+SVRF 조건이 있으면 우선 사용하고, 레이어 매핑은 description에서 추측하지 않는다.
+명시적으로 지정한 SVRF 메타데이터의 읽기 실패는 오류다. `--spatial-only`는
+description과 SVRF 측정 조건을 읽지 않는다.
 
 `--jobs N`은 룰 내부 병렬 작업자 수(1~256), 기본은 CPU 수와 4 중 작은 값이다.
 환경변수 `FLOE_DRC_JOBS=N`으로 뷰어의 측정·마커 작업에도 같은 수를 적용할 수 있다.

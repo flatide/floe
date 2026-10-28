@@ -103,6 +103,8 @@ gates_for() {
             echo ALL ;;
         tools/validate_klayout_oracle.py)
             echo klayout ;;
+        tools/validate_drc_description.py)
+            echo drc_analysis ;;
         tools/validate_drc_team_gui.py)
             echo drc_team ;;
         tools/validate_*.py)
@@ -173,6 +175,8 @@ gates_for() {
             # the viewer's frame report and perf line (P4b), held to the
             # Python's byte for byte; its unit tests run in the gate
             echo perf_parity ;;
+        rust/app-core/src/drc/description.rs|rust/app-core/src/drc/analysis/measure.rs|rust/app-cli/src/drc_prepare.rs)
+            echo "unit drc_analysis" ;;
         rust/app-core/*|rust/notices/*)
             # the application policy under the Rust command line floe2,
             # which every CLI gate runs (P1c, docs/SHARED_APP_LAYER.ko.md),
@@ -540,6 +544,7 @@ if gate drc_ice; then RAN="$RAN drc_ice"; lap drc_ice
 # CD delta groups, markers, selections, drc-prepare = the Python reference;
 # the viewer showing them
 if gate drc_analysis; then RAN="$RAN drc_analysis"; lap drc_analysis
+    .venv/bin/python tools/validate_drc_description.py
     .venv/bin/python tools/validate_drc_analysis.py; fi
 if gate drc_team; then RAN="$RAN drc_team"; lap drc_team
     .venv/bin/python tools/validate_drc_team.py; fi

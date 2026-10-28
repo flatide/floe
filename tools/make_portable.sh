@@ -596,6 +596,8 @@ info/render/clip/probe/drc/jobdeck 명령만 - 뷰어는 floe2 view, KLayout
     /opt/${FLOE_PORTABLE_PRODUCT}-portable/selfcheck
     /opt/${FLOE_PORTABLE_PRODUCT}-portable/floe2 view /path/to/chip.oas
     /opt/${FLOE_PORTABLE_PRODUCT}-portable/floe2 index /path/to/chip.oas
+    # SVRF 없이 DB description의 측정 조건으로 CD 준비
+    /opt/${FLOE_PORTABLE_PRODUCT}-portable/floe2 drc-prepare /path/to/results.db --jobs 4
     /opt/${FLOE_PORTABLE_PRODUCT}-portable/floe2 drc-prepare /path/to/results.db --svrf /path/to/deck.rules.json --jobs 4
     # KLayout 포함 floe-portable에서만 (동결 floe 셸, 명령만):
     /opt/floe-portable/floe render /path/to/chip.oas --out frame.png
