@@ -3,7 +3,7 @@
 //! immediately before starting, through the ordinary PreparedIndex service.
 use super::{chips::wildcard, parser::JobDeck, sources::SourceCatalog};
 use crate::{cache, check_cancelled, index::IndexOptions, Error, ErrorKind, Result};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
 
@@ -185,13 +185,20 @@ pub struct DeckIndexPlan {
     /// light caches an explicit --full rebuilds as the full index (0.12.390;
     /// `prepare` - the auto-index's `prepare_for_open` rebuilds none)
     pub full_over_light: usize,
+    /// summaries `prepare` builds again because their cell is coarser than
+    /// the one the deck's mag asks for (`summary_coarser`; the auto-index
+    /// keeps them)
+    pub coarse_summaries: usize,
 }
 impl DeckIndexPlan {
     /// The plan of `floe2 index DECK` (and the viewer's and the service's
     /// index of a deck): the sources of the levels selected, each as
     /// `options` ask - a source without a cache built, one with a current
     /// cache kept, a light cache under an explicit `--full` built over as
-    /// the full index (0.12.390), a missing occupancy summary added.
+    /// the full index (0.12.390), a missing occupancy summary added, a
+    /// summary coarser than the source's mag asks for built again
+    /// (2026-10-28). Every entry carries its source's largest mag in the
+    /// deck (`source_mags`) for the automatic cell.
     pub fn prepare(
         path: &Path,
         selected: Option<BTreeSet<i64>>,
@@ -223,12 +230,16 @@ impl DeckIndexPlan {
         Self::plan(path, selected, None, options, false, cancelled)
     }
 
+    /// `explicit`: `floe2 index DECK` (`prepare`), not the auto-index of an
+    /// open (`prepare_for_open`) - a light cache under `--full` is built
+    /// over, and a summary coarser than the source's mag asks for is built
+    /// again; an open takes the caches as they are.
     fn plan(
         path: &Path,
         selected: Option<BTreeSet<i64>>,
         chips: Option<&ChipSelection>,
         options: &IndexOptions,
-        rebuild_light_under_full: bool,
+        explicit: bool,
         cancelled: &AtomicUsize,
     ) -> Result<Self> {
         options.validate()?;
@@ -269,7 +280,9 @@ impl DeckIndexPlan {
             deck.sources_in(selected.as_ref(), chips.as_ref().map(|p| &p.blocks)),
             cancelled,
         )?;
-        let (mut todo, mut kept, mut aliases, mut full_over_light) = (Vec::new(), 0, 0, 0);
+        let mags = source_mags(&deck, &catalog);
+        let (mut todo, mut kept, mut aliases, mut full_over_light, mut coarse_summaries) =
+            (Vec::new(), 0, 0, 0, 0);
         let mut destinations = BTreeSet::new();
         for (tc, info) in &catalog.infos {
             check_cancelled(cancelled)?;
@@ -283,13 +296,22 @@ impl DeckIndexPlan {
                 continue;
             }
             let mut current = options.clone();
+            // the source's largest mag in the deck: floe-index's automatic
+            // cell is at most 4 um of the deck (user 2026-10-28, a deck at
+            // mag 4: "18147x12578um 뷰에서 요약이 하나만 쓰이면서 디테일이
+            // 없어져버림"); mag 1 and below change nothing and are not said
+            let mag = mags
+                .get(tc)
+                .copied()
+                .filter(|&m| floe_vfs::occupancy::placed_ceiling_um(m).is_some());
+            current.occupancy_mag = mag;
             // an explicit --full over a light cache: the full index is built
             // in its place (decide() builds over a light cache under a full
             // request); the plan kept the source as indexed before, so
             // `floe2 index deck.jb --full` ended with "kept" and the caches
             // light (review 2026-10-23, 0.12.390). Not for the auto-index
             // (`prepare_for_open`): it opens a cache as it is
-            let light_under_full = rebuild_light_under_full
+            let light_under_full = explicit
                 && options.light == Some(false)
                 && info.indexed
                 && cache::cache_kind(&info.cache_dir) == Some(cache::CacheKind::Light);
@@ -309,6 +331,14 @@ impl DeckIndexPlan {
                 || ((options.occupancy.unwrap_or(true) || options.occupancy_um.is_some())
                     && !info.cache_dir.join("design.ovo").is_file())
             {
+                current.occupancy = Some(false);
+                current.occupancy_only = true;
+            } else if explicit
+                && options.occupancy.unwrap_or(true)
+                && options.occupancy_um.is_none()
+                && mag.is_some_and(|m| summary_coarser(&info.cache_dir, m, &options))
+            {
+                coarse_summaries += 1;
                 current.occupancy = Some(false);
                 current.occupancy_only = true;
             } else if info.cache_dir == cache::default_cache_path(&info.path)? {
@@ -332,8 +362,62 @@ impl DeckIndexPlan {
             chips,
             aliases,
             full_over_light,
+            coarse_summaries,
         })
     }
+}
+
+/// Each source's largest mag in the whole deck (every level and CHIP block,
+/// so one source's cell does not hang on the selection): SF x AD / the
+/// source's dbu, as geom::plan places it; an entry without AD (geom refuses
+/// it) or a source that did not probe has none.
+pub fn source_mags(deck: &JobDeck, catalog: &SourceCatalog) -> BTreeMap<String, f64> {
+    let mut mags: BTreeMap<String, f64> = BTreeMap::new();
+    for e in deck.chips.iter().flat_map(|c| &c.entries) {
+        let Some(dbu) = catalog.infos.get(&e.tc).and_then(|i| i.dbu) else {
+            continue;
+        };
+        let Some(ad) = e.ad else {
+            continue;
+        };
+        let mag = e.sf * ad / dbu;
+        if !(mag.is_finite() && mag > 0.) {
+            continue;
+        }
+        let slot = mags.entry(e.tc.clone()).or_insert(mag);
+        *slot = slot.max(mag);
+    }
+    mags
+}
+
+/// Whether the design.ovo in `dir` has a cell coarser than the one a build
+/// at `mag` picks now - floe-index's automatic choice over the file's own
+/// top box and layer count under the caps such a build gets (the default
+/// cell cap; `--occupancy-max-bytes` or its default): a summary built
+/// before the mag rule, or by an index of the source alone. A file that
+/// does not read is left as it is (the renderer says it, the occupancy
+/// check names it).
+fn summary_coarser(dir: &Path, mag: f64, options: &IndexOptions) -> bool {
+    use floe_vfs::occupancy as occ;
+    let Some(path) = dir.join("design.ovo").to_str().map(String::from) else {
+        return false;
+    };
+    let Ok(file) = occ::OvoFile::open(&path) else {
+        return false;
+    };
+    let (x0, y0, x1, y1) = file.bbox;
+    let (um, _) = occ::auto_base_um_placed(
+        (x1 as i128 - x0 as i128).max(0),
+        (y1 as i128 - y0 as i128).max(0),
+        file.unit,
+        file.layers.len(),
+        occ::DEFAULT_MAX_CELLS,
+        options
+            .occupancy_max_bytes
+            .unwrap_or(occ::DEFAULT_MAX_BYTES),
+        mag,
+    );
+    file.cell_dbu > occ::cell_dbu_of(um, file.unit)
 }
 
 #[cfg(test)]
@@ -348,6 +432,62 @@ mod tests {
         assert!(parse_levels("1.0").is_err());
         let deck = JobDeck::parse("x", "CHIP A\n$ (1,A)", true, &AtomicUsize::new(0)).unwrap();
         assert!(validate_levels(&deck, Some(&BTreeSet::from([2]))).is_err());
+    }
+    #[test]
+    fn a_source_takes_its_largest_mag_in_the_deck() {
+        // a.oas at 1 nm: AD 0.004 / dbu 0.001 = 4 (level 1), SF 2 at AD
+        // 0.001 = 2 (level 2, another CHIP); b.oas 1 nm at mag 1; c.oas did
+        // not probe; d.oas's entry has no AD
+        let deck = JobDeck::parse(
+            "x",
+            "CHIP A\n$ (1,A,AD=0.004,TC=a.oas)\n$ (3,B,AD=0.001,TC=b.oas)\n\
+             CHIP B\n$ (2,A,AD=0.001,SF=2,TC=a.oas)\n$ (1,C,AD=0.004,TC=c.oas)\n$ (1,D,TC=d.oas)",
+            true,
+            &AtomicUsize::new(0),
+        )
+        .unwrap();
+        let dir = std::env::temp_dir();
+        let mut catalog = SourceCatalog::new(&dir).unwrap();
+        for (tc, dbu) in [
+            ("a.oas", Some(0.001)),
+            ("b.oas", Some(0.001)),
+            ("c.oas", None),
+            ("d.oas", Some(0.001)),
+        ] {
+            catalog.infos.insert(
+                tc.into(),
+                super::super::sources::SourceInfo {
+                    tc: tc.into(),
+                    path: dir.join(tc),
+                    status: if dbu.is_some() {
+                        "ok".into()
+                    } else {
+                        "missing".into()
+                    },
+                    dbu,
+                    version: String::new(),
+                    format: String::new(),
+                    gzipped: false,
+                    bytes: 0,
+                    probe: String::new(),
+                    probe_s: 0.,
+                    error: String::new(),
+                    indexed: false,
+                    cache_dir: dir.join(format!(".{tc}.ice")),
+                    busy: String::new(),
+                },
+            );
+        }
+        let mags = source_mags(&deck, &catalog);
+        assert_eq!(mags.len(), 2, "{mags:?}");
+        assert!((mags["a.oas"] - 4.0).abs() < 1e-12, "{mags:?}");
+        assert!((mags["b.oas"] - 1.0).abs() < 1e-12, "{mags:?}");
+        // the plan says a mag past 1 only
+        assert_eq!(
+            floe_vfs::occupancy::placed_ceiling_um(mags["a.oas"]),
+            Some(1.0)
+        );
+        assert_eq!(floe_vfs::occupancy::placed_ceiling_um(mags["b.oas"]), None);
     }
     #[test]
     fn chip_selectors_pick_blocks_by_id_and_number() {

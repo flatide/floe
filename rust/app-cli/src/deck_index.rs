@@ -62,6 +62,12 @@ pub fn run(
             plan.full_over_light
         );
     }
+    if plan.coarse_summaries > 0 {
+        println!(
+            "[jobdeck] occupancy : {} summary(ies) built again - their cell is coarser than the deck's mag asks for (4 um of the deck)",
+            plan.coarse_summaries
+        );
+    }
     if plan.aliases > 0 {
         println!(
             "[jobdeck] aliases   : {} source name(s) share a cache destination",

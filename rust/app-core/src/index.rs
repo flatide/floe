@@ -30,6 +30,11 @@ pub struct IndexOptions {
     pub occupancy: Option<bool>,
     pub occupancy_only: bool,
     pub occupancy_um: Option<f64>,
+    /// the mag a jobdeck draws the source at (`floe-index --occupancy-mag`;
+    /// jobdeck::index sets its placements' largest): the automatic cell is
+    /// at most floe_vfs::occupancy::placed_ceiling_um(mag), so the summary
+    /// reaches the deck view's 4 um/px; an explicit `occupancy_um` wins
+    pub occupancy_mag: Option<f64>,
     pub occupancy_balance: Option<bool>,
     pub occupancy_prune: Option<bool>,
     /// the summary generator's caps (floe_vfs::occupancy::Opts
@@ -99,6 +104,7 @@ impl Default for IndexOptions {
             occupancy: None,
             occupancy_only: false,
             occupancy_um: None,
+            occupancy_mag: None,
             occupancy_balance: None,
             occupancy_prune: None,
             occupancy_max_work: None,
@@ -241,6 +247,12 @@ impl IndexOptions {
             .is_some_and(|n| n.checked_mul(1 << 20).is_none())
         {
             return Err(Error::input("p2-shard-limit-mb overflows bytes"));
+        }
+        if self
+            .occupancy_mag
+            .is_some_and(|v| !v.is_finite() || v <= 0.)
+        {
+            return Err(Error::input("occupancy-mag must be finite/positive"));
         }
         if self.occupancy_um.is_some_and(|v| !v.is_finite() || v <= 0.)
             || self.slow_cell_s.is_some_and(|v| !v.is_finite() || v < 0.)
@@ -595,6 +607,8 @@ fn mode_args(a: &mut Vec<OsString>, o: &IndexOptions) {
 fn occupancy_args(a: &mut Vec<OsString>, o: &IndexOptions) {
     if let Some(v) = o.occupancy_um {
         a.extend(["--occupancy-um".into(), format!("{v:?}").into()]);
+    } else if let Some(v) = o.occupancy_mag {
+        a.extend(["--occupancy-mag".into(), format!("{v:?}").into()]);
     }
     if let Some(v) = o.occupancy_balance {
         a.extend(["--occupancy-balance".into(), u8::from(v).to_string().into()]);
@@ -1349,6 +1363,73 @@ mod tests {
             words,
             ["light", "/x/s.oas", "--out", "/x/.s.oas.ice", "--jobs", "12", "--occupancy-only", "--occupancy-um", "2.0", "--mem", "1.5"]
         );
+        // a deck's mag (jobdeck::index): passed for the automatic cell, an
+        // explicit cell wins; not finite or not positive is refused
+        let words = |o: &IndexOptions, action: &Action| -> Vec<String> {
+            arguments(
+                Path::new("/x/s.oas"),
+                Path::new("/x/.s.oas.ice"),
+                o,
+                action,
+                true,
+            )
+            .unwrap()
+            .iter()
+            .map(|w| w.to_string_lossy().into_owned())
+            .collect()
+        };
+        let mut placed = IndexOptions {
+            occupancy: Some(true),
+            occupancy_mag: Some(4.0),
+            ..Default::default()
+        };
+        assert_eq!(
+            words(&placed, &Action::OccupancyOnly),
+            [
+                "light",
+                "/x/s.oas",
+                "--out",
+                "/x/.s.oas.ice",
+                "--jobs",
+                "12",
+                "--occupancy-only",
+                "--occupancy-mag",
+                "4.0"
+            ]
+        );
+        assert_eq!(
+            words(&placed, &Action::Build),
+            [
+                "light",
+                "/x/s.oas",
+                "--out",
+                "/x/.s.oas.ice",
+                "--jobs",
+                "12",
+                "--occupancy",
+                "--occupancy-mag",
+                "4.0"
+            ]
+        );
+        placed.occupancy_um = Some(2.0);
+        assert_eq!(
+            words(&placed, &Action::OccupancyOnly),
+            [
+                "light",
+                "/x/s.oas",
+                "--out",
+                "/x/.s.oas.ice",
+                "--jobs",
+                "12",
+                "--occupancy-only",
+                "--occupancy-um",
+                "2.0"
+            ]
+        );
+        for bad in [0.0, -4.0, f64::NAN, f64::INFINITY] {
+            placed.occupancy_mag = Some(bad);
+            assert!(placed.validate().is_err(), "{bad}");
+        }
         // the rule: a layout full, a deck's source light, an option of the
         // full index's picks it, --light with one is refused
         let o = IndexOptions::default();

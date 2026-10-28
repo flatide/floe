@@ -11,10 +11,19 @@ loaded in 745 s with 133 of 134 passes summarized). For every TC a level
 places this reads the cache next to the source (.<name>.ice) with
 `floe-index occupancy` and prints one line per source:
 
-  OK       tc  base_um=.. layers=.. unit=..
+  OK       tc  base_um=.. layers=.. unit=.. mag=.. deck_cell_um=..
   NOFILE   tc  (no cache | no design.ovo)
   INVALID  tc  the summary is not this source's (size/mtime), or unreadable
   LAYER    tc  L/D not in the summary | L/D status=none:...
+  COARSE   tc  base_um x mag past 4 um of the deck
+
+mag is the source's largest SF x AD / dbu over the level's entries, the deck's
+cell the summary's base cell times it: a deck view finer than that many um a
+pixel draws the source without its summary, its pages under the size cut left
+out (user 2026-10-28: a deck at mag 4 whose 27 mm sources had 4 um cells, 16 um
+in the deck - an 18 mm view drew 21 of its 25 passes so). `floe2 index DECK`
+builds such a summary again at most 4 um of the deck (0.12.414) unless the
+caps keep it coarser.
 
 The identity is judged here from the summary header's src_size/src_mtime
 against the source file (a floe-index before 0.12.403 reported every light
@@ -30,10 +39,26 @@ import subprocess
 import sys
 
 
+PLACED_CELL_UM = 4.0   # floe_vfs::occupancy::PLACED_CELL_UM
+
+
+def _number(text, key, default):
+    m = re.search(r"\b%s\s*=\s*([-+0-9.eE]+)" % key, text)
+    if not m:
+        return default
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return default
+
+
 def level_entries(deck, level):
-    """source path -> set of 'L/D' the level's entries draw from it."""
+    """source path -> set of 'L/D' the level's entries draw from it, and
+    source path -> its largest SF x AD there (the mag times the source's dbu;
+    an entry without AD has none)."""
     deck_dir = os.path.dirname(os.path.abspath(deck))
     entries = {}
+    scales = {}
     with open(deck, "r", errors="replace") as f:
         for line in f:
             s = line.strip()
@@ -56,7 +81,12 @@ def level_entries(deck, level):
             for l in lys:
                 for d in dts:
                     lds.add(l + "/" + d)
-    return entries
+            ad = _number(s, "AD", None)
+            if ad is not None and ad > 0:
+                scale = _number(s, "SF", 1.0) * ad
+                key = os.path.normpath(path)
+                scales[key] = max(scales.get(key, 0.0), scale)
+    return entries, scales
 
 
 def occupancy(tool, cache):
@@ -78,7 +108,7 @@ def occupancy(tool, cache):
 
 
 def check_level(deck, level, tool, out):
-    entries = level_entries(deck, level)
+    entries, scales = level_entries(deck, level)
     if not entries:
         out("no entries of level %s in %s" % (level, deck))
         return None
@@ -125,8 +155,23 @@ def check_level(deck, level, tool, out):
                 bad.append("%s not in the summary" % ld)
             elif status != "ok":
                 bad.append("%s status=%s" % (ld, status))
+        # the source's cell in the deck: the base cell at its mag
+        mag = None
+        try:
+            if scales.get(src):
+                mag = scales[src] * float(head.get("unit", ""))
+            deck_cell = float(head.get("base_um", "")) * mag if mag else None
+        except ValueError:
+            mag = deck_cell = None
+        if mag:
+            brief += " mag=%g deck_cell_um=%g" % (mag, deck_cell)
         if bad:
             out("LAYER    %s  %s  %s" % (src, brief, "; ".join(bad)))
+            problems += 1
+        elif deck_cell and deck_cell > PLACED_CELL_UM * (1 + 1e-9):
+            out("COARSE   %s  %s  no summary at deck views under %g um a pixel; "
+                "floe2 index DECK builds it again at most %g um of the deck "
+                "unless the caps keep it" % (src, brief, deck_cell, PLACED_CELL_UM))
             problems += 1
         else:
             out("OK       %s  %s" % (src, brief))

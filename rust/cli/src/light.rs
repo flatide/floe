@@ -93,6 +93,17 @@ pub fn light_cmd(args: &[String]) {
                 occ_opts.base_um = um;
                 i += 1;
             }
+            "--occupancy-mag" => {
+                // the mag a jobdeck draws the source at: the automatic cell
+                // is at most occupancy::PLACED_CELL_UM / mag (2026-10-28)
+                let mag: f64 = need(i, "a magnification").parse().unwrap_or(f64::NAN);
+                if !(mag > 0.0) || !mag.is_finite() {
+                    eprintln!("--occupancy-mag must be a positive number");
+                    std::process::exit(2);
+                }
+                occ_opts.mag = mag;
+                i += 1;
+            }
             "--occupancy-max-cells" => {
                 occ_opts.max_cells = need(i, "a number").parse().expect("occupancy max cells");
                 i += 1;
@@ -141,7 +152,7 @@ pub fn light_cmd(args: &[String]) {
     let Some(src) = src else {
         eprintln!(
             "usage: floe-index light <file.oas> [--out DIR] [--jobs N] [--seg-bytes N] \
-             [--occupancy [--occupancy-um UM] [--occupancy-balance 0|1] [--occupancy-prune 0|1]] \
+             [--occupancy [--occupancy-um UM] [--occupancy-mag M] [--occupancy-balance 0|1] [--occupancy-prune 0|1]] \
              [--occupancy-only] [--mem GiB] [--force]  \
              (the light cache: design.inv + design.seg + meta.json from one inventory pass, \
              design.ovo from the streaming occupancy pass with --occupancy; DIR defaults to \

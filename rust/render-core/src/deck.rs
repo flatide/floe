@@ -251,6 +251,9 @@ struct DeckSource {
     light: bool,
     /// the source's dbu per micron (the OASIS unit)
     unit: f64,
+    /// its placements' largest mag in the spec (`placed_mags`): the
+    /// summary floe2 index builds for it has the automatic cell for it
+    mag: f64,
 }
 
 impl DeckSource {
@@ -260,8 +263,9 @@ impl DeckSource {
     /// source whole at a wide view - and the frame says so
     /// (DeckRenderReport::summary_building_passes). The view is judged by
     /// the base cell `floe-index light --occupancy` picks for this source
-    /// (floe_vfs::occupancy::auto_base_um: the top's sides and layer count
-    /// under the generator's default caps), as the file would be judged
+    /// (floe_vfs::occupancy::auto_base_um_placed: the top's sides and layer
+    /// count under the generator's default caps, at the placements' mag the
+    /// deck's index passes - 2026-10-28), as the file would be judged
     /// (summary::level_for): a nearer view takes the page path as it does
     /// with the summary at hand.
     fn summary_pending(
@@ -278,13 +282,14 @@ impl DeckSource {
         }
         let span_x = (self.top_bbox.x1 as i128 - self.top_bbox.x0 as i128).max(0);
         let span_y = (self.top_bbox.y1 as i128 - self.top_bbox.y0 as i128).max(0);
-        let (base_um, _) = floe_vfs::occupancy::auto_base_um(
+        let (base_um, _) = floe_vfs::occupancy::auto_base_um_placed(
             span_x,
             span_y,
             self.unit,
             self.layers.len(),
             floe_vfs::occupancy::DEFAULT_MAX_CELLS,
             floe_vfs::occupancy::DEFAULT_MAX_BYTES,
+            self.mag,
         );
         let cell_dbu = floe_vfs::occupancy::cell_dbu_of(base_um, self.unit);
         level_for(cell_dbu, plan_request.px_per_dbu, 1, max_cell_px()).is_some()
@@ -619,10 +624,32 @@ fn open_source(path: &str, budget_bytes: u64) -> Result<DeckSource, String> {
         pages: DecodedPageCache::new(budget_bytes),
         light: cache.is_light(),
         unit: info.unit,
+        mag: 1.0,
         cache,
         top_bbox,
         max_depth: info.max_depth,
     })
+}
+
+/// Each source's largest mag over the spec's placements: source microns to
+/// deck microns, `unit` (source dbu per um) x `scale` (deck dbu per source
+/// dbu) x the deck's unit (um per deck dbu) - the SF x AD / dbu of the
+/// deck's placement (app-core jobdeck::index::source_mags); 1 for a source
+/// nothing places.
+pub fn placed_mags(spec: &DeckSpec, source_units: &[f64]) -> Vec<f64> {
+    let mut mags = vec![0.0f64; source_units.len()];
+    for placement in &spec.placements {
+        let Some(&unit) = source_units.get(placement.source) else {
+            continue;
+        };
+        let mag = unit * placement.scale * spec.unit;
+        if mag.is_finite() && mag > mags[placement.source] {
+            mags[placement.source] = mag;
+        }
+    }
+    mags.into_iter()
+        .map(|m| if m > 0.0 { m } else { 1.0 })
+        .collect()
 }
 
 /// An open that failed on the process's open-file limit (EMFILE: `Too many
@@ -729,7 +756,11 @@ impl Deck {
             .collect();
         let lock = floe_vfs::lock::readers(&keys, &floe_vfs::lock::reader_label("floe-renderd"))
             .map_err(|busy| format!("{}{}", floe_vfs::lock::LOCKED, busy))?;
-        let sources = open_sources(&spec.sources, budget_bytes, open_workers(jobs))?;
+        let mut sources = open_sources(&spec.sources, budget_bytes, open_workers(jobs))?;
+        let units: Vec<f64> = sources.iter().map(|source| source.unit).collect();
+        for (source, mag) in sources.iter_mut().zip(placed_mags(&spec, &units)) {
+            source.mag = mag;
+        }
         let mut placements = Vec::with_capacity(spec.placements.len());
         for placement in spec.ordered_placements() {
             let source = &sources[placement.source];
@@ -2367,6 +2398,47 @@ mod tests {
             &transform_bbox(&BBox::EMPTY, &p),
             &[0.0, 0.0, 1e9, 1e9]
         ));
+    }
+
+    #[test]
+    fn a_source_takes_its_placements_largest_mag() {
+        // deck dbu 1 nm; source 0 (1 nm) placed at 4x and 1x, source 1
+        // (0.25 nm: 4000 dbu a um) at scale 0.5 - mag 2, source 2 nowhere
+        let spec = DeckSpec::parse(&format!(
+            "deck unit=0.001\n\
+             source path_hex={}\n\
+             source path_hex={}\n\
+             source path_hex={}\n\
+             layer out=0 name_hex={} color=#0000ff fill=solid width=1\n\
+             placement source=0 layer=1/0 out=0 scale=1 dx=0 dy=0 order=0\n\
+             placement source=0 layer=1/0 out=0 scale=4 dx=0 dy=0 order=1\n\
+             placement source=1 layer=1/0 out=0 scale=0.5 dx=0 dy=0 order=2\n",
+            hex("/a.oas.floe"),
+            hex("/b.oas.floe"),
+            hex("/c.oas.floe"),
+            hex("L1"),
+        ))
+        .unwrap();
+        let mags = placed_mags(&spec, &[1000.0, 4000.0, 1000.0]);
+        assert_eq!(mags.len(), 3);
+        assert!((mags[0] - 4.0).abs() < 1e-12, "{mags:?}");
+        assert!((mags[1] - 2.0).abs() < 1e-12, "{mags:?}");
+        assert_eq!(mags[2], 1.0);
+        // the cell the pending check expects: a 27 x 34 mm 1 nm source with
+        // 6 layers at 4 um alone, 1 um at the mag 4 the deck's index passes
+        let auto = |mag: f64| {
+            floe_vfs::occupancy::auto_base_um_placed(
+                27_041_000,
+                34_431_000,
+                1000.0,
+                6,
+                floe_vfs::occupancy::DEFAULT_MAX_CELLS,
+                floe_vfs::occupancy::DEFAULT_MAX_BYTES,
+                mag,
+            )
+            .0
+        };
+        assert_eq!((auto(1.0), auto(mags[0])), (4.0, 1.0));
     }
 
     #[test]

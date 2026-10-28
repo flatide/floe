@@ -212,7 +212,16 @@ pub fn plan_cell_dbu(unit: f64, bbox: (i64, i64, i64, i64), layers: usize, opts:
     let base_um = if opts.base_um > 0.0 {
         opts.base_um
     } else {
-        auto_base_um(span_x, span_y, unit, layers, opts.max_cells, opts.max_bytes).0
+        auto_base_um_placed(
+            span_x,
+            span_y,
+            unit,
+            layers,
+            opts.max_cells,
+            opts.max_bytes,
+            opts.mag,
+        )
+        .0
     };
     cell_dbu_of(base_um, unit)
 }
@@ -332,6 +341,34 @@ pub fn auto_base_um_for_span(span_um: f64) -> f64 {
     }
     AUTO_CANDIDATES_UM[AUTO_CANDIDATES_UM.len() - 1]
 }
+
+/// The automatic cell of a source drawn magnified (`Opts::mag`, a jobdeck
+/// placement's mag) is at most this many of the drawing's microns: the
+/// 4 um a source wider than 8 mm keeps at mag 1, so every source's summary
+/// reaches the same 4 um/px of a deck view (field 2026-10-28: a deck placing
+/// all its sources at mag 4 had its large ones at 4 um - 16 um in the deck -
+/// and an 18 mm view drew 21 of its 25 passes on the page path, their pages
+/// under the 3 px cut left out: "18147x12578um 뷰에서 요약이 하나만 쓰이면서
+/// 디테일이 없어져버림").
+pub const PLACED_CELL_UM: f64 = 4.0;
+
+/// The coarsest of AUTO_CANDIDATES_UM whose cell at `mag` is at most
+/// PLACED_CELL_UM (the finest when none is); None at mag 1 or below, where
+/// the span's choice is never coarser. A part in 10^9 of slack keeps a mag
+/// that reads 4.000000001 after the deck's unit arithmetic at 1 um.
+pub fn placed_ceiling_um(mag: f64) -> Option<f64> {
+    if !(mag > 1.0) || !mag.is_finite() {
+        return None;
+    }
+    let limit = PLACED_CELL_UM * (1.0 + 1e-9);
+    Some(
+        AUTO_CANDIDATES_UM
+            .iter()
+            .copied()
+            .find(|&um| um * mag <= limit)
+            .unwrap_or(AUTO_CANDIDATES_UM[AUTO_CANDIDATES_UM.len() - 1]),
+    )
+}
 /// The coarser cells the automatic choice climbs to when the grid of
 /// `auto_base_um_for_span`'s cell would exceed the cell cap, or one plane
 /// per layer of the file the size cap (field 2026-10-23, DIRECT_READ_PLAN
@@ -350,6 +387,8 @@ pub enum AutoWhy {
     Target,
     Cells,
     Size,
+    /// finer than the target for the drawing's mag (`placed_ceiling_um`)
+    Mag,
 }
 
 impl AutoWhy {
@@ -359,6 +398,7 @@ impl AutoWhy {
             AutoWhy::Target => ", auto",
             AutoWhy::Cells => ", auto for the cell cap",
             AutoWhy::Size => ", auto for the size cap",
+            AutoWhy::Mag => ", auto for the placement mag",
         }
     }
 }
@@ -411,9 +451,27 @@ pub fn auto_base_um(
     max_cells: u64,
     max_bytes: u64,
 ) -> (f64, AutoWhy) {
+    auto_base_um_placed(
+        span_x_dbu, span_y_dbu, unit, layers, max_cells, max_bytes, 1.0,
+    )
+}
+
+/// `auto_base_um` of a source drawn at `mag`: the first choice is also at
+/// most `placed_ceiling_um(mag)` (`AutoWhy::Mag` when that made it finer
+/// and it fits); the caps climb from it as from the target's.
+pub fn auto_base_um_placed(
+    span_x_dbu: i128,
+    span_y_dbu: i128,
+    unit: f64,
+    layers: usize,
+    max_cells: u64,
+    max_bytes: u64,
+    mag: f64,
+) -> (f64, AutoWhy) {
     let (span_x, span_y) = (span_x_dbu.max(0), span_y_dbu.max(0));
     let unit = if unit > 0.0 && unit.is_finite() { unit } else { 1.0 };
-    let first = auto_base_um_for_span(span_x.max(span_y) as f64 / unit);
+    let target = auto_base_um_for_span(span_x.max(span_y) as f64 / unit);
+    let first = placed_ceiling_um(mag).map_or(target, |c| c.min(target));
     let over = |um: f64| -> Option<AutoWhy> {
         let cell = cell_dbu_of(um, unit) as i128;
         let gw = ceil_div(span_x, cell);
@@ -431,7 +489,14 @@ pub fn auto_base_um(
         None
     };
     let Some(why) = over(first) else {
-        return (first, AutoWhy::Target);
+        return (
+            first,
+            if first < target {
+                AutoWhy::Mag
+            } else {
+                AutoWhy::Target
+            },
+        );
     };
     let mut last = first;
     for um in AUTO_CANDIDATES_UM
@@ -614,6 +679,12 @@ pub struct Opts {
     /// walk take hours). false = the exact walk
     /// (`--occupancy-prune 0`; the oracle gates use it)
     pub prune: bool,
+    /// the mag the source is drawn at (`--occupancy-mag`; a jobdeck sets
+    /// its placements' largest): the automatic cell is at most
+    /// `placed_ceiling_um(mag)`, so the summary reaches the deck view's
+    /// PLACED_CELL_UM per pixel; 1 (the default) leaves the choice to the
+    /// span; an explicit `base_um` ignores it
+    pub mag: f64,
 }
 
 impl Default for Opts {
@@ -627,6 +698,7 @@ impl Default for Opts {
             progress: None,
             balanced_units: true,
             prune: true,
+            mag: 1.0,
         }
     }
 }
@@ -2836,13 +2908,14 @@ pub fn build(doc: &Doc, src_size: u64, src_mtime: u64, opts: &Opts) -> Result<Oc
     let base_um = if opts.base_um > 0.0 {
         opts.base_um
     } else {
-        auto_base_um(
+        auto_base_um_placed(
             span_x,
             span_y,
             doc.unit,
             doc.layer_order.len(),
             opts.max_cells,
             opts.max_bytes,
+            opts.mag,
         )
         .0
     };
@@ -3134,13 +3207,14 @@ impl StreamOcc {
         let base_um = if opts.base_um > 0.0 {
             opts.base_um
         } else {
-            auto_base_um(
+            auto_base_um_placed(
                 span_x,
                 span_y,
                 unit,
                 nl,
                 opts.max_cells,
                 opts.max_bytes,
+                opts.mag,
             )
             .0
         };
@@ -6182,6 +6256,96 @@ mod tests {
             }
         )
         .is_err());
+    }
+
+    #[test]
+    fn a_source_drawn_at_a_mag_takes_a_cell_for_it() {
+        use super::AutoWhy::{Cells, Mag, Size, Target};
+        let (cells, bytes) = (DEFAULT_MAX_CELLS, DEFAULT_MAX_BYTES);
+        assert_eq!(placed_ceiling_um(1.0), None);
+        assert_eq!(placed_ceiling_um(0.5), None);
+        assert_eq!(placed_ceiling_um(f64::NAN), None);
+        assert_eq!(placed_ceiling_um(f64::INFINITY), None);
+        assert_eq!(placed_ceiling_um(4.0), Some(1.0));
+        assert_eq!(
+            placed_ceiling_um(4.000000001),
+            Some(1.0),
+            "the deck's unit arithmetic"
+        );
+        assert_eq!(placed_ceiling_um(4.1), Some(0.5));
+        assert_eq!(placed_ceiling_um(1.5), Some(2.0));
+        assert_eq!(
+            placed_ceiling_um(32.0),
+            Some(0.25),
+            "the finest when none reaches"
+        );
+        // a 1 nm file's sides in microns, 6 layers
+        let at = |sx_um: f64, sy_um: f64, layers: usize, mag: f64| {
+            auto_base_um_placed(
+                (sx_um * 1000.0).round() as i128,
+                (sy_um * 1000.0).round() as i128,
+                1000.0,
+                layers,
+                cells,
+                bytes,
+                mag,
+            )
+        };
+        // the field's 27 x 34 mm sources: 4 um, 16 um at the deck's mag 4
+        // - now 1 um, 4 um in the deck
+        assert_eq!(at(27_041.0, 34_431.0, 6, 1.0), (4.0, Target));
+        assert_eq!(at(27_041.0, 34_431.0, 6, 4.0), (1.0, Mag));
+        assert_eq!(at(27_041.0, 34_431.0, 6, 2.0), (2.0, Mag));
+        assert_eq!(at(27_041.0, 34_431.0, 6, 3.0), (1.0, Mag));
+        assert_eq!(at(27_041.0, 34_431.0, 6, 0.25), (4.0, Target));
+        assert_eq!(
+            at(27_041.0, 34_431.0, 6, 1.0),
+            auto_base_um(27_041_000, 34_431_000, 1000.0, 6, cells, bytes),
+            "mag 1 is the span's rule"
+        );
+        // a source the span already gives a fine cell keeps it
+        assert_eq!(at(2_252.0, 1_552.0, 3, 4.0), (1.0, Target));
+        assert_eq!(at(800.0, 600.0, 3, 4.0), (0.25, Target));
+        // the caps climb from the mag's cell: a 152 mm plate at 1 um is
+        // 23 G cells and 2 um 5.8 G, past 2^32; 40 layers of the 27 mm
+        // source at 1 um are 6 GB of planes, past 4 GiB
+        assert_eq!(at(152_400.0, 152_400.0, 1, 4.0), (4.0, Cells));
+        assert_eq!(at(27_041.0, 34_431.0, 40, 4.0), (2.0, Size));
+        // through the builders: the in-memory build and the plan's cell
+        // (the streaming build's) at mag 4; an explicit cell ignores it
+        let mut top = cell("T");
+        top.rects
+            .push(rect(1, 0, 0, 10_000_000, 3_000_000, Rep::One)); // 10 x 3 mm at unit 1000
+        let d = doc_with(vec![top], 0, vec![(1, 0)]);
+        let placed = |base_um: f64, mag: f64| Opts {
+            base_um,
+            jobs: 2,
+            mag,
+            ..Opts::default()
+        };
+        assert_eq!(
+            build(&d, 0, 0, &placed(BASE_AUTO, 1.0)).unwrap().cell_dbu,
+            4000
+        );
+        assert_eq!(
+            build(&d, 0, 0, &placed(BASE_AUTO, 4.0)).unwrap().cell_dbu,
+            1000
+        );
+        assert_eq!(build(&d, 0, 0, &placed(2.0, 4.0)).unwrap().cell_dbu, 2000);
+        assert_eq!(
+            plan_cell_dbu(
+                1000.0,
+                (0, 0, 10_000_000, 3_000_000),
+                1,
+                &placed(BASE_AUTO, 4.0)
+            ),
+            1000
+        );
+        assert_eq!(
+            plan_cell_dbu(1000.0, (0, 0, 10_000_000, 3_000_000), 1, &placed(2.0, 4.0)),
+            2000
+        );
+        assert_eq!(Mag.note(), ", auto for the placement mag");
     }
 
     #[test]

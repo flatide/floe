@@ -441,6 +441,7 @@ geometry/placement/text x·y, W/H, 점 목록, 경로 확장, 반복, 배치 대
 | 조밀한 도형 격자의 외곽 채움 | 현장 2026-10-26: 레벨 5의 한 EBEAM 레이어 두 개가 `--occupancy-um 16`으로도 2^36 마크 상한(`work=68719508999`)에서 멈춤 — fill 배열의 다각형·경로가 멤버마다 charge | **완료 0.12.405(§8.25)**: prune에서 멤버 bbox ≤ 셀인 조밀 축 정렬 Grid의 다각형·경로를 외곽 한 번으로(prune 계약 안); `FLOE_OCCUPANCY_GRID_FILL=off` 킬 스위치; 단위 테스트 + occupancy 게이트 fixture |
 | 작은 도형의 bbox 마킹, 크기 비례 상한 | 현장 2026-10-27: 290 GB EBEAM 파일의 레이어 3134/0이 0.12.405 뒤에도 `none:work`(`work 68719514762`, 빌드 3618 s) — 평탄한 다각형 레코드가 멤버마다 스캔 변환 | **완료 0.12.410(§8.26)**: prune에서 두 축 모두 셀 이하인 다각형·경로는 멤버마다 bbox의 셀(최대 2×2)을 칠함(`small_member_box`, 계약 안; `FLOE_OCCUPANCY_SMALL_BOX=off`), `--occupancy-max-work`를 주지 않으면 상한 = 소스 1바이트당 4, 최소 2^36(`default_max_work`); 단위 테스트 |
 | 재고 매핑의 페이지, occupancy-only의 재고 재사용 | 현장 2026-10-27: 290 GB 파일의 `--occupancy-only`가 재고 패스에서 `rss 216G`(1920 s) — "stream이어도 어쩔 수 없는건지" → "진행해줘" | **완료 0.12.411(§8.27)**: `light --occupancy-only`는 캐시의 design.inv를 재고로 읽고 소스를 훑지 않음(`FLOE_LIGHT_INV_REUSE=off`), 재고 걷기가 지나간 페이지를 32 MiB마다 돌려줌(`floe_oasis::Release`, madvise DONTNEED; `FLOE_INVENTORY_RELEASE=off`), 진행 줄에 skim·parse 진행과 rss의 heap·file; 단위 테스트 + 게이트 light_cache |
+| 덱 배율의 자동 셀 | 현장 2026-10-28: 모든 배치가 mag 4인 덱의 18147 × 12578 µm 뷰에서 `summary 4 passes ..., 21 passes without summary` — 27 mm 소스의 4 µm 셀이 덱에서 16 µm(`check_deck_summaries`: 135 소스 OK, base_um 0.5~4) | **완료 0.12.414(§8.28)**: 자동 셀이 배율을 본다(덱 셀 ≤ 4 µm: `placed_ceiling_um`, `--occupancy-mag`), `floe2 index DECK`가 소스의 최대 배율을 넘기고 그보다 굵은 요약을 다시 만듦, renderd의 대기 판정도 같은 셀, 점검 스크립트의 `mag`·`deck_cell_um`·`COARSE`; 단위 테스트 + 게이트 jobdeck |
 | L7 후속 | 요약 패스 1패스화/마킹 가속, ovs 합치기(레이아웃 밀도), B안(정규 페이지), 세그먼트 캐시 디스크 보존(방문한 셀의 디코드 결과를 남겨 다음 세션 가속), 1패스 경량 생성(셀 로컬 점유 격자 합성) | 각각 — **L7a 완료 0.12.386(§8.9)**: 이미지 증분 합성(제자리 성장, 채움 시점 노드 마스크, 채움 바이트 해제), 세그먼트 pread 묶음·병렬 인코딩; **L7b 완료 0.12.387(§8.10)**: 요약 패스의 마커가 셀을 직접 파싱(리더 풀·상주 창 없음, 묶음이 안 쓰는 셀은 읽지 않음), 다각형 스캔 변환 버퍼 재사용, 크기 예산 밖의 레이어는 마킹하지 않음; 나머지(1패스 경량 생성은 §8.10의 정확성 논거로 보류)는 사용자 지시에 따라 |
 
 L0는 하루, L1~L3는 S1~S3와 비슷한 크기(재고 코드 위의 확장), L4가 본체다.
@@ -1790,6 +1791,46 @@ design.ovo 없음, `FLOE_INVENTORY_RELEASE=off`로 만든 경량 캐시와 desig
 
 **남은 것.** 병렬 걷기는 셀 개수로 묶으므로(`per = n_units.div_ceil(jobs)`) 한 셀이 대부분인 파일은 skim 뒤 parse도 사실상 한
 스레드다. 경량 캐시를 처음 만들 때의 재고 시간이 현장에서 문제가 되면 다음 순서다.
+
+### 8.28 덱 배율의 자동 셀 (0.12.414 / floe-index·renderd 0.12.364, 2026-10-28; 현장 → 배율 확인)
+
+**현장.** 덱의 18147 × 12578 µm 뷰(창 약 1300 px, 14 µm/px)에서 "요약이 하나만 쓰이면서 디테일이 없어져버림", 상태줄은
+`summary 4 passes 3.1M cells, 21 passes without summary`. `tools/check_deck_summaries.py`로 level 9의 135 소스를 보니 문제는
+원본 파일이 없는 EBEAM 하나(NOFILE, pass 없음)뿐이고 나머지는 OK, base_um은 0.5·1·2·4. `floe2 jobdeck`의 `mag : [4.0]`.
+
+**원인.** 요약 구간의 끝은 덱 좌표의 셀이 1 px이 되는 곳이고, 덱 좌표의 셀 = 소스 셀 × 배치 배율(SF × AD / 소스 dbu)이다. 자동 셀
+(`auto_base_um_for_span`, 2026-09-16)은 소스 자신의 긴 변만 보고 8 mm 넘는 소스에 4 µm를 고르므로, mag 4로 놓인 27 mm 소스의 셀은
+덱에서 16 µm다. 14 µm/px 뷰에서 그런 pass는 `none (near)`로 페이지 경로에 가고, 3 px cut(42 µm)에 걸린 페이지는 빠진다(덱 wash는
+2026-09-16부터 꺼짐). 같은 덱의 작은 소스(0.5~1 µm → 덱 2~4 µm)만 요약으로 남아 "요약이 하나만" 보였다.
+
+**변경.** (1) floe-vfs `placed_ceiling_um(mag)`: 덱 셀이 `PLACED_CELL_UM`(4 µm, mag 1에서 8 mm 넘는 소스가 갖는 셀) 이하인 가장 굵은
+후보(4/2/1/0.5/0.25, 없으면 0.25; mag ≤ 1이면 없음). `auto_base_um_placed`는 첫 선택을 그 값과 스팬 규칙의 작은 쪽으로 하고, 상한
+사다리는 그대로 거기서 오른다(`AutoWhy::Mag`, 로그 `cell=1um (… dbu, auto for the placement mag)`). `Opts.mag`(기본 1), floe-index
+`light`·`vfs`의 `--occupancy-mag M`; 명시 `--occupancy-um`이 이긴다. (2) app-core `IndexOptions.occupancy_mag`(floe2의 옵션은 아님),
+`jobdeck::index::source_mags`: 소스마다 덱 전체(모든 level·CHIP) 항목의 최대 SF × AD / dbu — 선택에 따라 셀이 바뀌지 않게. 배율이 1보다
+크면 그 소스의 빌드·요약 추가에 `--occupancy-mag`를 붙인다. `floe2 index DECK`(`prepare`)는 있는 design.ovo의 셀이 그 배율의 자동
+셀(파일 자신의 top 상자·레이어 수, 기본 셀 상한, `--occupancy-max-bytes` 또는 기본)보다 굵으면 occupancy-only로 다시 만들고
+`[jobdeck] occupancy : N summary(ies) built again - …`로 센다. 여는 쪽의 자동 색인(`prepare_for_open`)은 있는 요약을 그대로 쓴다 —
+290 GB 소스의 마킹을 뷰어 열기가 시작하지 않게. (3) renderd `DeckSource.mag`(`placed_mags`: 소스 unit × scale × 덱 unit의 최대):
+요약이 아직 없는 경량 소스의 대기 판정(§5.5)이 색인이 고를 셀로 본다. (4) `check_deck_summaries.py`: OK 줄에 `mag=… deck_cell_um=…`,
+덱 셀이 4 µm를 넘으면 `COARSE`(exit 1).
+
+**비용.** 27 × 34 mm 소스에 1 µm은 레이어당 9.2억 셀, level 0 평면 115 MB(피라미드 포함 153 MB) — 셀 상한 2^32 안, 레이어 26개까지
+바이트 상한 4 GiB 안(넘으면 사다리가 2 µm로). 마킹은 도형당 표시라 셀 크기와 거의 무관하다.
+
+**측정**(맥, release, 합성: 1 µm 상자 200 × 200개를 50 µm 피치로 10 mm에, dbu 0.05 nm; 같은 소스를 AD로 mag 1·4에 놓은 두 덱).
+mag 1 덱의 색인은 `cell=4um (auto)`; mag 4 덱의 2400 µm 뷰(300 px, 8 µm/px — 상자는 덱에서 4 µm, 반 픽셀)는 그 요약으로 0 px
+(페이지 경로, cut 아래), `floe2 index mag4.jb`가 그 요약만 0.1 s에 다시 만들어 `cell=1um (… auto for the placement mag)`, 같은
+뷰가 144 px(상자 12 × 12개, 하나에 한 픽셀); 다시 돌리면 두 덱 모두 kept.
+
+**검증.** floe-vfs `a_source_drawn_at_a_mag_takes_a_cell_for_it`(천장 값, 27 mm 소스 mag 1/2/3/4/0.25, 이미 고운 소스, 상한에서 오름 —
+152 mm 판은 `Cells`로 4 µm, 40레이어는 `Size`로 2 µm —, 두 빌더의 셀, 명시 셀), render-core `a_source_takes_its_placements_largest_mag`,
+app-core `a_source_takes_its_largest_mag_in_the_deck`와 `the_light_cache_decisions`(인자: `--occupancy-mag 4.0`, 명시 셀이 이김, 0·음수·
+NaN·inf 거절); 게이트 jobdeck `test_a_deck_at_mag_4_builds_its_summaries_for_the_mag`(위 측정의 0 → 144 px, COARSE → OK, kept, 자동 색인은
+굵은 요약 유지, 명시 `--occupancy-um 2`가 이기고 다음 `index`가 다시 1 µm).
+
+**남은 것.** 현장의 굵은 요약은 `floe2 index deck.jb`로 다시 만들어야 한다(소스별 occupancy-only, 재고는 design.inv에서). 요약이 그리는
+pass의 1비트 셀이 조밀한 마스크에서 한 면으로 차는 문제(농담)는 별개다.
 
 ## 9. 검토한 대안
 

@@ -81,7 +81,7 @@ PATH다(app-core `native::Discovery`). GTK 뷰어는 자기를 띄운 floe2
 floe-index vfs <src.oas> [outdir=.<src>.ice] [--jobs N] [--plan-batch N]
     [--encode-batch N] [--page-target-mb N] [--no-lod] [--no-page-occupancy]
     [--coverage | --coverage-only] [--frontier-only] [--kill-at P]
-    [--occupancy | --occupancy-only] [--occupancy-um F] [--occupancy-balance 0|1]
+    [--occupancy | --occupancy-only] [--occupancy-um F] [--occupancy-mag M] [--occupancy-balance 0|1]
     [--occupancy-max-cells N] [--occupancy-max-work N] [--occupancy-max-bytes N[K|M|G]]
     [--slow-cell-s S] [--p2-shard-limit-mb N] [--stream | --in-memory] [--mem GiB]
     [--profile-cell NAME | --profile-cell-ci N]
@@ -135,7 +135,7 @@ bbox 합집합, 도형 치수 최대)를 Doc에서 같은 식으로 계산한 �
 있으면 새 디렉터리와 같은 바이트인지(`"identical"`) 본다(0.12.380, L2 §8.3).
 
 `floe-index light <src.oas> [--out DIR] [--jobs N] [--seg-bytes N] [--occupancy
-[--occupancy-um UM] [--occupancy-balance 0|1] [--occupancy-prune 0|1]] [--occupancy-only]
+[--occupancy-um UM] [--occupancy-mag M] [--occupancy-balance 0|1] [--occupancy-prune 0|1]] [--occupancy-only]
 [--mem GiB] [--force]`(0.12.382 L4, 0.12.383 L5; DIRECT_READ_PLAN §8.5·§8.6)는 경량
 캐시를 만든다: 소스를 매핑한 재고 패스 한 번(스트리밍 빌드의 1차 패스)으로 design.inv와
 design.seg(짝)를, 그리고 전체 색인의 키에 `"cache": "light"`를 더한 meta.json(커밋 마커,
@@ -575,6 +575,9 @@ floe-index vfs <src> [outdir] --occupancy-only [--occupancy-um F] # 기존 캐�
 # --occupancy-um 생략 = 자동(2026-09-16): top의 긴 변이 2,048셀 이상이 되는 가장
 # 굵은 4/2/1/0.5/0.25 µm(8 mm 초과 칩은 4 µm, 2.25 mm 칩은 1 µm, 1 mm 미만은 0.25
 # µm; occupancy::auto_base_um_for_span). 로그 `cell=…um (… dbu, auto)`.
+# --occupancy-mag M(2026-10-28): 덱이 소스를 M배로 그린다 — 자동 셀은 덱에서 4 µm 이하
+# (occupancy::placed_ceiling_um: mag 4면 1 µm; 로그 `auto for the placement mag`);
+# `floe2 index DECK`가 소스의 최대 배율로 넘긴다. 명시 --occupancy-um이 이긴다.
 floe-index occupancy <outdir> [--layer L/D] [--level N] [--depth N] [--dump]  # 검사(--depth: 그 depth 이하 평면의 OR)
 floe-index hier <outdir> [--check]     # design.ovh(셀 트리 색인, SPEC-FORMATS) 추가·교체 / --check = identity 보고; `floe2 index --hier-only <src>`. 빌드는 기본으로 쓰고 `--no-hier`로 생략
 floe-index svrf <deck> [-o OUT] [--scan] [-D NAME[=VAL]]… [-I DIR]… [--follow-verbatim] [--no-env-switches]   # SVRF 룰덱 서브셋 → <deck>.rules.json (2026-09-29 `floe svrf`에서 이동; SPEC-FORMATS, DRC-CLI §4)

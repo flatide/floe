@@ -275,7 +275,7 @@ fn main() {
              floe-index inventory <file.oas> [--jobs N] [--check] [--check-cells] [--cells] [--out design.inv] [--seg design.seg] [--seg-bytes N] [--check-seg]  \
              (the streaming build's first pass: cell table, layer order, hierarchy fold; --check holds it to the Doc pre-passes, --check-cells the cell parser to the Doc's cells; --out writes it as design.inv, FLOEINV1, and reads it back; --seg writes the segment directory design.seg, FLOESEG1, of the same walk and --check-seg holds its per-layer statistics to the Doc)\n       \
              floe-index inventory --load design.inv [--load-seg design.seg] [<file.oas>] [--cells] [--check]  (the files read back; with the source, compared to fresh ones)\n       \
-             floe-index light <file.oas> [--out DIR] [--jobs N] [--seg-bytes N] [--occupancy [--occupancy-um UM] [--occupancy-balance 0|1] [--occupancy-prune 0|1] [--occupancy-max-cells N] [--occupancy-max-work N] [--occupancy-max-bytes N[K|M|G]]] [--occupancy-only] [--mem GiB] [--force]  (the light cache: design.inv + design.seg + meta.json from one inventory pass into DIR, default .<file.oas>.ice, and design.ovo from the streaming occupancy pass with --occupancy; --occupancy-only adds design.ovo to a light cache; --force replaces a full index; the renderer reads the geometry from the source - docs/DIRECT_READ_PLAN.ko.md L4-L5; a jobdeck is handed to `floe2 index DECK --light`)\n       \
+             floe-index light <file.oas> [--out DIR] [--jobs N] [--seg-bytes N] [--occupancy [--occupancy-um UM] [--occupancy-mag M] [--occupancy-balance 0|1] [--occupancy-prune 0|1] [--occupancy-max-cells N] [--occupancy-max-work N] [--occupancy-max-bytes N[K|M|G]]] [--occupancy-only] [--mem GiB] [--force]  (the light cache: design.inv + design.seg + meta.json from one inventory pass into DIR, default .<file.oas>.ice, and design.ovo from the streaming occupancy pass with --occupancy; --occupancy-only adds design.ovo to a light cache; --force replaces a full index; the renderer reads the geometry from the source - docs/DIRECT_READ_PLAN.ko.md L4-L5; a jobdeck is handed to `floe2 index DECK --light`)\n       \
              floe-index tile <file.oas> <outdir> \
              --grid x0,y0,tw,th,nx,ny --edges e0,e1,e2\n       \
              floe-index index <file.oas> [outdir] [--mem GB] \
@@ -284,7 +284,7 @@ fn main() {
              [--plan-batch N] [--encode-batch N] \
              [--page-target-mb N] \
              [--coverage | --coverage-only] [--no-lod] [--no-hier] [--no-ovs] [--frontier-only] \
-             [--occupancy | --occupancy-only] [--occupancy-um F] [--occupancy-balance 0|1] [--occupancy-prune 0|1] \
+             [--occupancy | --occupancy-only] [--occupancy-um F] [--occupancy-mag M] [--occupancy-balance 0|1] [--occupancy-prune 0|1] \
              [--occupancy-max-cells N] [--occupancy-max-work N] [--occupancy-max-bytes N[K|M|G]] \
              [--slow-cell-s S] [--p2-shard-limit-mb N] \
              [--profile-cell NAME | --profile-cell-ci N] \

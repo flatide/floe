@@ -1045,6 +1045,98 @@ class JobdeckIndexLodTests(unittest.TestCase):
             self.assertIn("INVALID  %s" % src, out)
             self.assertIn("level 1: 3 source(s), 3 with a problem", out)
 
+    def test_a_deck_at_mag_4_builds_its_summaries_for_the_mag(self):
+        """A source a deck draws magnified gets the summary cell for its mag
+        (user 2026-10-28: every placement of the field deck at mag 4, its
+        27 mm sources' 4 um cells 16 um in the deck - "18147x12578um 뷰에서
+        요약이 하나만 쓰이면서 디테일이 없어져버림", 21 of 25 passes on the
+        page path): `floe2 index DECK` passes the source's largest mag
+        (--occupancy-mag), the automatic cell is at most 4 um of the deck; a
+        summary built coarser (by a mag-1 deck, or alone) is built again and
+        then kept; the view the coarse cell left to the page path - its boxes
+        under the size cut, nothing drawn - draws the summary; the auto-index
+        of an open keeps a coarse one; an explicit --occupancy-um wins; the
+        check names COARSE with the mag and the deck's cell."""
+        binary = ROOT / "rust" / "target" / "release" / "floe-index"
+        script = ROOT / "tools" / "check_deck_summaries.py"
+        env = {"FLOE_INDEX_BIN": str(binary),
+               "FLOE_RENDERD_BIN": str(ROOT / "rust" / "target" / "release" / "floe-renderd")}
+        with tempfile.TemporaryDirectory(prefix="jobdeck mag ") as td:
+            work = Path(td)
+            # 1 um boxes at a 50 um pitch over 10 mm: 4 um alone (> 8 mm)
+            build_tiny_oas(work / "wide.oas", pitch_um=50.0, n=200)
+            cache = Path(vfs_cache_dir(work / "wide.oas"))
+            decks = {}
+            for mag, ad in ((1, "0.00005"), (4, "0.00020")):
+                decks[mag] = work / ("mag%d.jb" % mag)
+                decks[mag].write_text(
+                    "MTITLE 1,TINY\n*PLACE-INFO\nCHIP W1\n"
+                    "$ (1, TINY, AD=%s, SF=1, TC=wide.oas, LY={1}, DT={0}, BX=0.0, BY=0.0, "
+                    "UX=10000.0, UY=10000.0 )\nROWS 50000.0/50000.0\n*END-PLACE\nEND\n" % ad,
+                    encoding="utf-8")
+
+            def base_um():
+                r = subprocess.run([str(binary), "occupancy", str(cache)],
+                                   capture_output=True, text=True, timeout=120)
+                head = next(l for l in r.stdout.splitlines() if l.startswith("occupancy "))
+                return dict(kv.split("=", 1) for kv in head.split()[1:] if "=" in kv)["base_um"]
+
+            def lit(*extra):
+                # 2400 um of the mag-4 deck on 300 px: 8 um a pixel, the
+                # placed boxes 4 um (half a pixel, under the 3 px cut) at a
+                # 200 um pitch - 12 x 12 of them
+                out = work / "near.png"
+                run_floe2("render", decks[4], "--bbox", "40000,40000,42400,42400", "--px", "300",
+                          "--detail", "medium", "--out", out, *extra, env=env, ok=0)
+                return _png_lit_pixels(out)
+
+            def check(want):
+                r = subprocess.run([sys.executable, str(script), str(decks[4]), "1", str(binary)],
+                                   cwd=ROOT, capture_output=True, text=True, timeout=600)
+                self.assertEqual(r.returncode, want, r.stdout + r.stderr)
+                return r.stdout
+
+            res = run_floe2("index", decks[1], "--jobs", "2", env=env, ok=0)
+            self.assertNotIn("--occupancy-mag", res.stdout + res.stderr)
+            self.assertEqual(base_um(), "4")
+            # the mag-4 deck over the 4 um summary: 16 um in the deck, the
+            # 8 um/px view on the page path, every box under the cut
+            self.assertEqual(lit("--no-index"), 0)
+            out = check(1)
+            self.assertIn("COARSE   %s" % (work / "wide.oas"), out)
+            self.assertIn("mag=4 deck_cell_um=16", out)
+            res = run_floe2("index", decks[4], "--jobs", "2", env=env, ok=0)
+            both = res.stdout + res.stderr
+            self.assertIn("1 summary(ies) built again", res.stdout)
+            self.assertIn("1 built, 0 failed, 0 kept", res.stdout)
+            self.assertIn("--occupancy-only --occupancy-mag 4.0", both)
+            self.assertIn("auto for the placement mag", both)
+            self.assertEqual(base_um(), "1")
+            self.assertEqual(lit("--no-index"), 144)
+            self.assertIn("mag=4 deck_cell_um=4", check(0))
+            # kept from now on, by either deck
+            for mag in (4, 1):
+                res = run_floe2("index", decks[mag], "--jobs", "2", env=env, ok=0)
+                self.assertIn("0 built, 0 failed, 1 kept", res.stdout)
+                self.assertNotIn("built again", res.stdout)
+            self.assertEqual(base_um(), "1")
+            # a summary of the source alone at 4 um: the open's auto-index
+            # draws with it as it is, `floe2 index DECK` builds it again
+            run_floe2("index", work / "wide.oas", "--occupancy-only", "--occupancy-um", "4",
+                      env=env, ok=0)
+            self.assertEqual(lit(), 0)
+            self.assertEqual(base_um(), "4")
+            # an explicit cell wins over the mag
+            res = run_floe2("index", decks[4], "--occupancy-only", "--occupancy-um", "2",
+                            "--jobs", "2", env=env, ok=0)
+            self.assertIn("--occupancy-um 2.0", res.stdout + res.stderr)
+            self.assertNotIn("--occupancy-mag", res.stdout + res.stderr)
+            self.assertEqual(base_um(), "2")
+            res = run_floe2("index", decks[4], "--jobs", "2", env=env, ok=0)
+            self.assertIn("1 summary(ies) built again", res.stdout)
+            self.assertEqual(base_um(), "1")
+            self.assertEqual(lit(), 144)
+
     def test_chip_selectors_index_the_chips_sources_only(self):
         """`floe2 index deck.jb --chipid ID,.. --chipnumber N,N-M,..` (0.12.402,
         user 2026-10-25: a deck's index split by chips, the parts run at once

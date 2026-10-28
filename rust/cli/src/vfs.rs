@@ -221,6 +221,20 @@ pub fn vfs_cmd(args: &[String]) {
                 occ_opts.base_um = um;
                 i += 2;
             }
+            "--occupancy-mag" => {
+                // the mag a jobdeck draws the source at: the automatic cell
+                // is at most occupancy::PLACED_CELL_UM / mag (2026-10-28)
+                let mag: f64 = args
+                    .get(i + 1)
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(f64::NAN);
+                if !(mag > 0.0) || !mag.is_finite() {
+                    eprintln!("--occupancy-mag must be a positive number");
+                    std::process::exit(2);
+                }
+                occ_opts.mag = mag;
+                i += 2;
+            }
             "--occupancy-max-cells" => {
                 occ_opts.max_cells = args[i + 1].parse().expect("occupancy max cells");
                 i += 2;
@@ -3561,13 +3575,14 @@ fn publish_ovo(
         } else {
             // the automatic cell's reason, as the build chose it
             let (x0, y0, x1, y1) = built.bbox;
-            occ::auto_base_um(
+            occ::auto_base_um_placed(
                 (x1 as i128 - x0 as i128).max(0),
                 (y1 as i128 - y0 as i128).max(0),
                 built.unit,
                 built.layers.len(),
                 opts.max_cells,
                 opts.max_bytes,
+                opts.mag,
             )
             .1
             .note()

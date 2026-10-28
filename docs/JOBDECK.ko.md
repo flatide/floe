@@ -290,8 +290,16 @@ GTK 열기는 모달 색인 한 번이다: `floe2 index deck.jb [--level …]`�
 `light_sources`·`summary_missing`, 준비 질의(`ready`)에 `summary_missing`. 게이트
 `LightSummaryTests`. 파일은 있는데 쓰이지 않는 pass(identity 불일치, 레이어 `none:*`, pass의 LY/DT 미수록)를
 소스별로 가리는 것은 `tools/check_deck_summaries.py DECK.jb LEVEL[,..] [floe-index]`(0.12.404; 소스마다
-OK/NOFILE/INVALID/LAYER 한 줄, identity는 요약 머리의 src_size/src_mtime을 소스 파일과 직접 비교, 문제가 있으면 exit 1;
+OK/NOFILE/INVALID/LAYER/COARSE 한 줄, identity는 요약 머리의 src_size/src_mtime을 소스 파일과 직접 비교, 문제가 있으면 exit 1;
 게이트 `test_check_deck_summaries_names_the_sources_without_a_usable_summary`).
+
+**배율과 요약 셀(2026-10-28, app 0.12.414; DIRECT_READ_PLAN §8.28).** 요약은 덱 좌표에서 셀이 1 px이 되는
+뷰까지 그리고, 덱 좌표의 셀은 소스 셀 × 배치 배율(SF × AD / 소스 dbu)이다. `floe2 index deck.jb`는 소스마다
+덱 전체에서 가장 큰 배율을 floe-index에 넘기고(`--occupancy-mag`), 자동 셀은 덱에서 4 µm 이하가 된다(mag 4의
+27 mm 소스: 4 µm → 1 µm). 이미 있는 요약이 그보다 굵으면 그 소스만 다시 만든다(`[jobdeck] occupancy : N
+summary(ies) built again`, 재고는 design.inv에서). 뷰어·캡처의 자동 색인은 있는 요약을 그대로 쓴다. 점검 스크립트의
+OK 줄은 `mag=…  deck_cell_um=…`을 보이고, 덱 셀이 4 µm를 넘으면 `COARSE`다. 게이트
+`test_a_deck_at_mag_4_builds_its_summaries_for_the_mag`.
 
 `floe-index vfs deck.jb [--level N,..] [--jobs N] [--force] [--wait]`(2026-10-18,
 app 0.12.359)도 같은 덱 인덱싱이다(소스마다 이 규칙). floe-index가 옆의 floe2에 `index deck.jb …`로
