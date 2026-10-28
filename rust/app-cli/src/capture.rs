@@ -2,6 +2,7 @@ use crate::ready::Waiter;
 use floe_app_core::{
     captures::{self, ExportOptions},
     check_cancelled,
+    dataset::Dataset,
     render::RenderOptions,
     shots::batch::{self, Capture, NamedCapture},
     styles::LayerColors,
@@ -45,6 +46,7 @@ pub fn run(
     legend: bool,
     index: bool,
     light: Option<bool>,
+    temp: Option<&std::path::Path>,
     waiter: &mut Waiter,
     cancelled: &Arc<AtomicUsize>,
 ) -> Result<i32> {
@@ -91,6 +93,7 @@ pub fn run(
             layer_colors,
             index,
             light,
+            temp,
             waiter,
             cancelled,
         )
@@ -105,6 +108,7 @@ fn render(
     layer_colors: Option<LayerColors>,
     index: bool,
     light: Option<bool>,
+    temp: Option<&std::path::Path>,
     waiter: &mut Waiter,
     cancelled: &Arc<AtomicUsize>,
 ) -> Result<i32> {
@@ -113,7 +117,16 @@ fn render(
     // summaries built first, the default capture none (DIRECT_READ_PLAN
     // §8.11: a capture is drawn once)
     let summaries = shots.iter().any(|s| s.capture.shot.occupancy == Some(true));
-    let mut dataset = crate::read::dataset(source, levels, index, light, summaries, waiter, cancelled)?;
+    let mut dataset = crate::read::dataset(
+        source,
+        levels.clone(),
+        index,
+        light,
+        summaries,
+        temp,
+        waiter,
+        cancelled,
+    )?;
     // --layer-colors over FLOE_LAYER_COLORS (the open's)
     if let Some(mode) = layer_colors {
         dataset.set_layer_colors(mode);
@@ -127,14 +140,41 @@ fn render(
             r.chip, r.idx, r.tc, r.reason, r.detail
         );
     }
-    let summary = captures::run_summary(
-        &dataset,
-        shots,
-        &options,
-        RenderOptions::local()?,
-        cancelled,
-        |line| println!("{line}"),
-    )?;
+    let draw = |dataset: &Dataset, cancelled: &Arc<AtomicUsize>| {
+        captures::run_summary(
+            dataset,
+            shots,
+            &options,
+            RenderOptions::local()?,
+            cancelled,
+            |line| println!("{line}"),
+        )
+    };
+    let mut summary = draw(&dataset, cancelled)?;
+    // a temporary index (--temp-index): no later `floe2 index DECK.jb` adds
+    // the summaries a deck's wide passes wait for (DIRECT_READ_PLAN §5.5),
+    // so the capture builds the missing ones of the levels loaded there -
+    // the renderer's own judgment of which passes wait, a near capture
+    // builds none - and draws again (with --occupancy off on every shot no
+    // pass uses a summary: the pages instead, nothing waits)
+    if temp.is_some()
+        && summary.summary_building > 0
+        && dataset.is_deck()
+        && shots
+            .iter()
+            .any(|s| s.capture.shot.occupancy != Some(false))
+    {
+        eprintln!(
+            "[jobdeck] {} pass(es) of light source(s) wait for their occupancy summary - building the missing summaries in the temporary index and drawing again (--occupancy off: the pages instead)",
+            summary.summary_building
+        );
+        dataset =
+            crate::read::dataset(source, levels, index, light, true, temp, waiter, cancelled)?;
+        if let Some(mode) = layer_colors {
+            dataset.set_layer_colors(mode);
+        }
+        summary = draw(&dataset, cancelled)?;
+    }
     // what the images lack: the skipped placements of the chips on, the
     // pages over the decode budget, the passes of light sources whose
     // occupancy summary is not built yet (DIRECT_READ_PLAN §5.5)

@@ -206,7 +206,7 @@ impl DeckIndexPlan {
         options: &IndexOptions,
         cancelled: &AtomicUsize,
     ) -> Result<Self> {
-        Self::plan(path, selected, chips, options, true, cancelled)
+        Self::plan(path, selected, chips, options, true, None, cancelled)
     }
 
     /// The auto-index's plan (app-cli ready.rs: a read command that opens a
@@ -221,13 +221,17 @@ impl DeckIndexPlan {
     /// caches built no summary and the capture ended incomplete (exit 3,
     /// `summary_building=`) where the same command without `--full`
     /// succeeded (review 2026-10-23, 0.12.392).
+    /// `temp`: the run's temporary index (cache::TempIndex root; `render
+    /// --temp-index`): a source with no cache beside it gets its entry
+    /// built under it (`IndexOptions::out_dir`), and is read from there.
     pub fn prepare_for_open(
         path: &Path,
         selected: Option<BTreeSet<i64>>,
         options: &IndexOptions,
+        temp: Option<&Path>,
         cancelled: &AtomicUsize,
     ) -> Result<Self> {
-        Self::plan(path, selected, None, options, false, cancelled)
+        Self::plan(path, selected, None, options, false, temp, cancelled)
     }
 
     /// `explicit`: `floe2 index DECK` (`prepare`), not the auto-index of an
@@ -240,6 +244,7 @@ impl DeckIndexPlan {
         chips: Option<&ChipSelection>,
         options: &IndexOptions,
         explicit: bool,
+        temp: Option<&Path>,
         cancelled: &AtomicUsize,
     ) -> Result<Self> {
         options.validate()?;
@@ -276,6 +281,7 @@ impl DeckIndexPlan {
             path.parent()
                 .ok_or_else(|| Error::input("jobdeck has no parent directory"))?,
         )?;
+        catalog.temp = temp.map(Path::to_path_buf);
         catalog.probe_all(
             deck.sources_in(selected.as_ref(), chips.as_ref().map(|p| &p.blocks)),
             cancelled,
@@ -296,6 +302,9 @@ impl DeckIndexPlan {
                 continue;
             }
             let mut current = options.clone();
+            // a source whose cache is the run's temporary index: its entry
+            // builds there (and leaves nothing beside the source)
+            current.out_dir = info.temp.then(|| info.cache_dir.clone());
             // the source's largest mag in the deck: floe-index's automatic
             // cell is at most 4 um of the deck (user 2026-10-28, a deck at
             // mag 4: "18147x12578um 뷰에서 요약이 하나만 쓰이면서 디테일이
@@ -341,7 +350,7 @@ impl DeckIndexPlan {
                 coarse_summaries += 1;
                 current.occupancy = Some(false);
                 current.occupancy_only = true;
-            } else if info.cache_dir == cache::default_cache_path(&info.path)? {
+            } else if info.temp || info.cache_dir == cache::default_cache_path(&info.path)? {
                 kept += 1;
                 continue;
             }
@@ -475,6 +484,7 @@ mod tests {
                     indexed: false,
                     cache_dir: dir.join(format!(".{tc}.ice")),
                     busy: String::new(),
+                    temp: false,
                 },
             );
         }

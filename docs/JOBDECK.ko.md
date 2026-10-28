@@ -492,6 +492,15 @@ floe2 render deck.jb --batch shots.txt --out shots/ --report shots/report.json
   출력이 같다: render의 PNG·mosaic 타일·`--report`, `clip`, `fe-embed`, `floe2 jobdeck`의 보고서, SVRF 규칙 JSON.
   `FLOE_ARTIFACT_MODE=NNN`(8진수, 소유자 rw 필수: `600`은 예전처럼 비공개, `664`는 그 외에 읽기)이 바꾸고, 잘못된 값은
   stderr에 한 번 알리고 기본을 쓴다. 출력 디렉터리(`--batch`의 `--out DIR`을 만들 때)는 mkdir처럼 umask를 따른다.
+- **인덱스 없는 덱의 캡처와 임시 인덱스 (2026-10-28, app 0.12.416; 사용자 "인덱싱이 되어 있지 않더라도 캡쳐할 수 있게").**
+  인덱스 없는 덱은 0.12.359부터 자동 색인(소스마다 경량 캐시) 뒤에 그려지지만, 소스 폴더에 쓸 수 없으면 실패했고
+  광역 캡처는 요약이 없어 빈 채 3으로 끝났다(§8.11의 "캡처는 요약을 만들지 않는다"). `floe2 render deck.jb --temp-index[=DIR]`은
+  소스의 경량 캐시를 이 실행만의 폴더(DIR, 없으면 `$TMPDIR`)에 만들어 읽고, 첫 그림에서 요약을 기다린 pass가 있으면
+  (`summary_building`) 빠진 요약을 거기 만들고 다시 그린 뒤, 끝나면 폴더째 지운다 - 소스 옆에는 아무것도 남지 않는다
+  (근접 캡처는 요약을 만들지 않고, `--occupancy off`면 요약 없이 페이지로 그린다). 비용은 영구 색인과 같다(소스마다 재고 1 pass, 광역이면
+  요약 1 pass 더): 같은 덱을 다시 찍을 것이면 `floe2 index deck.jb`가 낫고, 임시 인덱스는 쓸 수 없는 폴더나 정말 한 번뿐일
+  때다(측정과 판정은 DIRECT_READ_PLAN §8.29, 배관은 SHARED_APP_LAYER §12). 게이트 `jobdeck` LightSummaryTests
+  `test_a_temporary_index_draws_an_unindexed_deck`.
 
 ### 칩 on/off 캡처 (사용자 2026-10-06)
 

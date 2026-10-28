@@ -64,13 +64,26 @@ impl DeckSnapshot {
         levels: Option<BTreeSet<i64>>,
         cancelled: &AtomicUsize,
     ) -> Result<Self> {
-        Self::open_pinned(source, mode, levels, None, cancelled)
+        Self::open_pinned(source, mode, levels, None, None, cancelled)
+    }
+    /// `open` with the run's temporary index (`temp`: cache::TempIndex
+    /// root): a source with no cache beside it is read from its cache under
+    /// it (app-cli ready.rs builds it there first).
+    pub fn open_temp(
+        source: &Path,
+        mode: Mode,
+        levels: Option<BTreeSet<i64>>,
+        temp: Option<&Path>,
+        cancelled: &AtomicUsize,
+    ) -> Result<Self> {
+        Self::open_pinned(source, mode, levels, None, temp, cancelled)
     }
     pub(crate) fn open_pinned(
         source: &Path,
         mode: Mode,
         levels: Option<BTreeSet<i64>>,
         pinned: Option<std::sync::Arc<cache::revision::set::Snapshot>>,
+        temp: Option<&Path>,
         cancelled: &AtomicUsize,
     ) -> Result<Self> {
         let source = cache::absolute(source)?;
@@ -82,6 +95,7 @@ impl DeckSnapshot {
                 mode,
                 load_ids: levels.clone(),
                 skip_missing: true,
+                temp: temp.map(Path::to_path_buf),
                 ..Default::default()
             },
             pinned,

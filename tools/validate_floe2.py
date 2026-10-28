@@ -354,6 +354,52 @@ def validate_rust_cli(base, fixture):
               "render's default auto-index did not build the full index: %s" % res.stderr[-300:])
         res = rust(env, "render", auto_full, "--light", "--full", "--px", "64", ok=False)
         check("exclusive" in res.stderr, "--light --full was not refused: %s" % res.stderr[-200:])
+        # the temporary index (0.12.416, user 2026-10-28: "인덱싱이 되어 있지
+        # 않더라도 캡쳐할 수 있게"): --temp-index[=DIR] indexes a source with
+        # no index in a folder of the run's own and removes it after - a
+        # source folder that cannot be written captures too, the picture is
+        # the one over the index beside the source, nothing lands beside it;
+        # info and --light take it; not with --no-index, not an absent DIR
+        reference = work / "temp reference.png"
+        rust(env, "render", auto_full, "--px", "64", "--out", reference)
+        held_dir = work / "held"
+        held_dir.mkdir()
+        held = held_dir / "temp index 설계.oas"
+        shutil.copy2(fixture, held)
+        scratch = work / "scratch"
+        scratch.mkdir()
+        held_dir.chmod(0o555)
+        try:
+            refused = rust(env, "render", held, "--px", "64", "--out", work / "held.png", ok=False)
+            check(refused.returncode != 0 and "its index is written beside it" in refused.stderr,
+                  "the auto-index in a folder that cannot be written did not say so: %d %s" % (
+                      refused.returncode, refused.stderr[-300:]))
+            temp_png = work / "temp index.png"
+            res = rust(env, "render", held, "--temp-index=%s" % scratch, "--px", "64", "--out", temp_png)
+            check("indexing it first in a temporary folder (--temp-index" in res.stderr,
+                  "render --temp-index did not say where it indexes: %s" % res.stderr[-300:])
+            check(temp_png.read_bytes() == reference.read_bytes(),
+                  "the temporary index's capture differs from the one over the index beside the source")
+            check(sorted(p.name for p in held_dir.iterdir()) == [held.name],
+                  "render --temp-index wrote beside the source: %s" % sorted(p.name for p in held_dir.iterdir()))
+            check(not any(scratch.iterdir()),
+                  "the temporary index was not removed: %s" % sorted(p.name for p in scratch.iterdir()))
+            info = json.loads(rust(env, "info", held, "--temp-index=%s" % scratch, "--json").stdout)
+            check(info["cache"].startswith(str(scratch)) and info["cache_kind"] == "full"
+                  and not any(scratch.iterdir()),
+                  "info --temp-index did not read a temporary full index: %s" % info.get("cache"))
+            res = rust(env, "render", held, "--temp-index=%s" % scratch, "--light", "--px", "64",
+                       "--detail", "exact", "--out", work / "temp light.png")
+            check("(--light: the light cache) in a temporary folder" in res.stderr and not any(scratch.iterdir()),
+                  "render --temp-index --light did not build the light cache there: %s" % res.stderr[-300:])
+            res = rust(env, "render", held, "--temp-index", "--no-index", "--px", "64", ok=False)
+            check(res.returncode == 2 and "exclusive" in res.stderr,
+                  "--temp-index --no-index was not refused: %d %s" % (res.returncode, res.stderr[-200:]))
+            res = rust(env, "render", held, "--temp-index=%s" % (scratch / "absent"), "--px", "64", ok=False)
+            check(res.returncode != 0 and "is not a directory" in res.stderr,
+                  "--temp-index with an absent folder was not refused: %d %s" % (res.returncode, res.stderr[-200:]))
+        finally:
+            held_dir.chmod(0o755)
         # the banded exact capture (DIRECT_READ_PLAN section 8.12, 0.12.389):
         # an exact capture whose pages pass half the decode budget is drawn
         # in bands of device rows - byte-equal to the capture under the

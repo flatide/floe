@@ -32,6 +32,7 @@ impl Dataset {
                 mode,
                 set.levels().clone(),
                 Some(std::sync::Arc::clone(&set)),
+                None,
                 stop,
             )?))
         } else {
@@ -55,15 +56,36 @@ impl Dataset {
         mode: Mode,
         cancelled: &AtomicUsize,
     ) -> Result<Self> {
+        Self::open_temp(source, levels, mode, None, cancelled)
+    }
+    /// `open` with the run's temporary index (`temp`: the cache::TempIndex
+    /// root a read command builds the missing caches under - app-cli
+    /// ready.rs `--temp-index`): a layout with no cache beside it is opened
+    /// from its cache there (`cache::resolve_under`), a deck's sources
+    /// likewise; a cache beside the source is opened as it is.
+    pub fn open_temp(
+        source: &Path,
+        levels: Option<BTreeSet<i64>>,
+        mode: Mode,
+        temp: Option<&Path>,
+        cancelled: &AtomicUsize,
+    ) -> Result<Self> {
         if is_deck(source) {
-            Ok(Self::Deck(Box::new(DeckSnapshot::open(
-                source, mode, levels, cancelled,
+            Ok(Self::Deck(Box::new(DeckSnapshot::open_temp(
+                source, mode, levels, temp, cancelled,
             )?)))
         } else {
             if levels.is_some() || mode != Mode::Level {
                 return Err(Error::input("level/deck mode selection requires a jobdeck"));
             }
-            Ok(Self::Layout(Box::new(Layout::open(source, cancelled)?)))
+            let layout = match temp {
+                Some(root) => {
+                    let (directory, _) = crate::cache::resolve_under(root, source)?;
+                    Layout::open_directory(source, directory, cancelled)?
+                }
+                None => Layout::open(source, cancelled)?,
+            };
+            Ok(Self::Layout(Box::new(layout)))
         }
     }
     pub fn is_deck(&self) -> bool {

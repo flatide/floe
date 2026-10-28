@@ -18,6 +18,9 @@ const HELP: &str = "Usage: floe2-web clip SOURCE --bbox X0,Y0,X1,Y1 [OPTIONS]
   --exact              Compatibility flag: Rust clip is always exact
   --no-index           A source with no index yet is refused, not indexed first
                        (FLOE_AUTO_INDEX=off: the default)
+  --temp-index[=DIR]   A source with no index is indexed (the full index) in a
+                       folder of this run's own under DIR ($TMPDIR unless given),
+                       removed when the clip ends: nothing is written beside it
   --wait[=SECONDS]     A source another run indexes: wait for it instead of exit 75
                        (SECONDS bounds it; FLOE_LOCK_WAIT=on|SECONDS); --no-wait
   -h, --help           Show this help
@@ -149,9 +152,22 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         println!("{}", crate::named(HELP));
         return Ok(0);
     };
+    // the run's temporary index (--temp-index): the full index there, gone
+    // after the clip
+    let temp = ready.temp_index()?;
     let mut waiter = Waiter::new(ready.wait, cancelled);
     crate::read::again(&source, &mut waiter, |waiter| {
-        clip(&source, bbox, layers.as_deref(), &out, &cell, ready.index, waiter, cancelled)
+        clip(
+            &source,
+            bbox,
+            layers.as_deref(),
+            &out,
+            &cell,
+            ready.index,
+            temp.as_ref().map(|t| t.root()),
+            waiter,
+            cancelled,
+        )
     })
 }
 #[allow(clippy::too_many_arguments)]
@@ -162,14 +178,23 @@ fn clip(
     out: &std::path::Path,
     cell: &str,
     index: bool,
+    temp: Option<&std::path::Path>,
     waiter: &mut Waiter,
     cancelled: &Arc<AtomicUsize>,
 ) -> Result<i32> {
     // indexed first when it has none (ready.rs) - the full index, whatever
     // --light says: a clip reads the pages a light cache has not (it is
     // refused below); a layout - parse refused a deck
-    let Dataset::Layout(layout) =
-        crate::ready::open(source, None, index, Some(false), false, waiter, cancelled)?
+    let Dataset::Layout(layout) = crate::ready::open(
+        source,
+        None,
+        index,
+        Some(false),
+        false,
+        temp,
+        waiter,
+        cancelled,
+    )?
     else {
         return Err(Error::new(
             ErrorKind::Unsupported,

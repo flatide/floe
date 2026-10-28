@@ -90,6 +90,17 @@ makes it the default, as before 0.12.350).
   --floe-reviewer TAG       Read existing waive status; no review writes
   --no-index                A source with no index yet is refused, not indexed
                             first (FLOE_AUTO_INDEX=off: the default)
+  --temp-index[=DIR]        A source with no index is indexed in a folder of
+                            this run's own under DIR ($TMPDIR unless given),
+                            read from there, and the folder is removed when
+                            the command ends: nothing is written beside the
+                            source (a folder that cannot be written, a one-off
+                            capture). The kind is --light / --full or the
+                            rule's; a cache beside the source is opened as it
+                            is. A jobdeck capture whose wide passes wait for
+                            their occupancy summary builds the missing
+                            summaries there and draws again (--occupancy off:
+                            the pages instead, no summary). Not with --no-index
   --light | --full          The cache the auto-index builds for a source with
                             none: the light cache (design.inv + design.seg, the
                             geometry read from the source - an EBEAM file
@@ -120,19 +131,21 @@ Mosaic final image is four tiles (up to 64 Mpx). Outputs must not collide.
 Cancelled/failed frames never replace an existing PNG. Jobdeck known skipped
 placements/over-budget pages may publish a flagged incomplete PNG (exit 3).
 Other incomplete frames preserve the previous output.";
-const INFO_HELP: &str = "Usage: floe2-web info SOURCE [--level N,N,...] [--json] [--chips] [--no-index] [--light|--full] [--wait[=SECONDS]]
+const INFO_HELP: &str = "Usage: floe2-web info SOURCE [--level N,N,...] [--json] [--chips] [--no-index] [--temp-index[=DIR]] [--light|--full] [--wait[=SECONDS]]
 --chips (jobdeck): every chip of the levels loaded - its CHIP blocks,
 placements (#K) and extents, the names render --chip/--fit-chip take.
 Read layout/cache summary. --json emits metadata plus source_stale.
 A source with no index is indexed first (its output on stderr; --no-index or
-FLOE_AUTO_INDEX=off: refused instead); one another run indexes is refused (75)
-unless --wait[=SECONDS] (FLOE_LOCK_WAIT=on|SECONDS; --no-wait). Jobdeck info
-includes the skip ledger and virtual layers;
+FLOE_AUTO_INDEX=off: refused instead; --temp-index[=DIR]: in a temporary
+folder of this run's own, removed at its end, as render's); one another run
+indexes is refused (75) unless --wait[=SECONDS] (FLOE_LOCK_WAIT=on|SECONDS;
+--no-wait). Jobdeck info includes the skip ledger and virtual layers;
 --level is a jobdeck load selection. --json uses cache:null for composites.";
-const PROBE_HELP: &str = "Usage: floe2-web probe SOURCE [--no-index] [--light|--full] [--wait[=SECONDS]]
+const PROBE_HELP: &str = "Usage: floe2-web probe SOURCE [--no-index] [--temp-index[=DIR]] [--light|--full] [--wait[=SECONDS]]
 Headless ready/open/style + fit/center frame checks; no output files.
 This validates the worker, not browser display or ETX performance.
-A source with no index is indexed first (--no-index: refused; --light / --full the
+A source with no index is indexed first (--no-index: refused; --temp-index[=DIR]:
+in a temporary folder of this run's own, removed at its end; --light / --full the
 kind, as render's; no occupancy summary is built); --wait as render's.";
 
 pub enum Command {
@@ -552,20 +565,25 @@ pub fn parse(args: &[String]) -> Result<Command> {
 }
 /// `source` opened (ready.rs: indexed first when it has no index, waited
 /// for when `waiter` waits), its staleness said.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn dataset(
     source: &std::path::Path,
     levels: Option<BTreeSet<i64>>,
     index: bool,
     light: Option<bool>,
     summaries: bool,
+    temp: Option<&std::path::Path>,
     waiter: &mut Waiter,
     cancelled: &AtomicUsize,
 ) -> Result<Dataset> {
     // (`light`: the kind the auto-index builds - --light / --full;
     // `summaries`: a render with --occupancy on has a source's missing
     // occupancy summary added too - DIRECT_READ_PLAN §5.5 / §8.11; by
-    // default a capture builds none, and info reads the caches as they are)
-    let l = ready::open(source, levels, index, light, summaries, waiter, cancelled)?;
+    // default a capture builds none, and info reads the caches as they are;
+    // `temp`: the run's temporary index - `--temp-index`, ready.rs)
+    let l = ready::open(
+        source, levels, index, light, summaries, temp, waiter, cancelled,
+    )?;
     if l.source_stale() {
         eprintln!("[{}][warn] source changed; displaying cached geometry. Rebuild with index --force, then reopen.", floe_app_core::program());
     }
@@ -590,9 +608,22 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
                     source.display()
                 )));
             }
+            // the run's temporary index (--temp-index), gone after the
+            // command - the dataset first
+            let temp = ready.temp_index()?;
             let mut waiter = Waiter::new(ready.wait, cancelled);
             again(&source, &mut waiter, |waiter| {
-                info(&source, json, levels.clone(), chips, ready.index, ready.light, waiter, cancelled)
+                info(
+                    &source,
+                    json,
+                    levels.clone(),
+                    chips,
+                    ready.index,
+                    ready.light,
+                    temp.as_ref().map(|t| t.root()),
+                    waiter,
+                    cancelled,
+                )
             })
         }
         Command::Render {
@@ -605,6 +636,7 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
             ready,
             ..
         } => {
+            let temp = ready.temp_index()?;
             let mut waiter = Waiter::new(ready.wait, cancelled);
             again(&source, &mut waiter, |waiter| {
                 let mut dataset = dataset(
@@ -613,6 +645,7 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
                     ready.index,
                     ready.light,
                     capture.shot.occupancy == Some(true),
+                    temp.as_ref().map(|t| t.root()),
                     waiter,
                     cancelled,
                 )?;
@@ -645,6 +678,7 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
         } => {
             // its shots read once (`--batch -` is stdin), the captures run
             // again there
+            let temp = ready.temp_index()?;
             let mut waiter = Waiter::new(ready.wait, cancelled);
             crate::capture::run(
                 source,
@@ -657,13 +691,24 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
                 legend,
                 ready.index,
                 ready.light,
+                temp.as_ref().map(|t| t.root()),
                 &mut waiter,
                 cancelled,
             )
         }
         Command::Probe { source, ready } => {
+            let temp = ready.temp_index()?;
             let mut waiter = Waiter::new(ready.wait, cancelled);
-            again(&source, &mut waiter, |waiter| probe(&source, ready.index, ready.light, waiter, cancelled))
+            again(&source, &mut waiter, |waiter| {
+                probe(
+                    &source,
+                    ready.index,
+                    ready.light,
+                    temp.as_ref().map(|t| t.root()),
+                    waiter,
+                    cancelled,
+                )
+            })
         }
     }
 }
@@ -681,6 +726,7 @@ pub(crate) fn again(
         }
     }
 }
+#[allow(clippy::too_many_arguments)]
 fn info(
     source: &std::path::Path,
     json: bool,
@@ -688,10 +734,11 @@ fn info(
     chips: bool,
     index: bool,
     light: Option<bool>,
+    temp: Option<&std::path::Path>,
     waiter: &mut Waiter,
     cancelled: &Arc<AtomicUsize>,
 ) -> Result<i32> {
-    let l = dataset(source, levels, index, light, false, waiter, cancelled)?;
+    let l = dataset(source, levels, index, light, false, temp, waiter, cancelled)?;
     if json {
         println!(
             "{}",
@@ -726,11 +773,12 @@ fn probe(
     source: &std::path::Path,
     index: bool,
     light: Option<bool>,
+    temp: Option<&std::path::Path>,
     waiter: &mut Waiter,
     cancelled: &Arc<AtomicUsize>,
 ) -> Result<i32> {
     // (a probe builds no summary: its frames are a check, drawn once)
-    let l = dataset(source, None, index, light, false, waiter, cancelled)?;
+    let l = dataset(source, None, index, light, false, temp, waiter, cancelled)?;
     let mut session =
         RenderSession::open(&l, RenderOptions::local()?, false, Arc::clone(cancelled))?;
     println!(

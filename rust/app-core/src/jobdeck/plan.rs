@@ -24,6 +24,9 @@ pub struct AnalysisOptions {
     pub cross: bool,
     pub skip_missing: bool,
     pub strict: bool,
+    /// the run's temporary index (cache::TempIndex root): the sources'
+    /// caches resolved under it when none is beside them
+    pub temp: Option<PathBuf>,
 }
 impl Default for AnalysisOptions {
     fn default() -> Self {
@@ -36,6 +39,7 @@ impl Default for AnalysisOptions {
             cross: true,
             skip_missing: false,
             strict: true,
+            temp: None,
         }
     }
 }
@@ -67,6 +71,7 @@ impl Analysis {
                 .unwrap_or(path.parent().expect("absolute path")),
         )?;
         catalog.pinned = pinned;
+        catalog.temp = options.temp.clone();
         // Empty LOAD means all, as in the GTK load dialog. Empty ANALYSIS
         // selection means no placements and must not be silently widened.
         let load = options.load_ids.as_ref().filter(|ids| !ids.is_empty());

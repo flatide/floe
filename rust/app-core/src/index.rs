@@ -85,6 +85,11 @@ pub struct IndexOptions {
     /// stream (floe_vfs::light::UNSUITABLE_EXIT); one asked for with
     /// `--light` does not.
     pub deck_source: bool,
+    /// the folder the cache is built in, in place of the one beside the
+    /// source: a read command's temporary index (app-cli ready.rs
+    /// `--temp-index`; cache::TempIndex) - its lease and locks are its
+    /// own, no legacy name is migrated. Not a `floe2 index` option.
+    pub out_dir: Option<PathBuf>,
 }
 /// how `floe-index vfs` builds: see `IndexOptions::mode`
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -127,6 +132,7 @@ impl Default for IndexOptions {
             mem_gib: None,
             light: None,
             deck_source: false,
+            out_dir: None,
         }
     }
 }
@@ -772,7 +778,16 @@ impl PreparedIndex {
         }
         cache::fingerprint(&source)?;
         indexer.verify(cancelled)?;
-        let mut directory = cache::cache_path(&source)?;
+        // the run's own folder (a temporary index) in place of the one
+        // beside the source: no legacy spelling to look for or migrate
+        let own = match &options.out_dir {
+            Some(dir) => Some(cache::absolute(dir)?),
+            None => None,
+        };
+        let mut directory = match &own {
+            Some(dir) => dir.clone(),
+            None => cache::cache_path(&source)?,
+        };
         if let Some(snapshot) = &options.profile_snapshot {
             let snapshot = cache::absolute(snapshot)?;
             let name = snapshot
@@ -810,12 +825,18 @@ impl PreparedIndex {
         }
         let lease = if profiling {
             Vec::new()
+        } else if let Some(dir) = &own {
+            // the temporary index's lease beside its own folder
+            if let Some(parent) = dir.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            vec![WriteLease::acquire(dir)?]
         } else {
             WriteLease::acquire_aliases(&cache::cache_paths(&source)?)?
         };
         // Resolution must be rechecked under both writer locks. Read-only
         // profile intentionally acquires neither locks nor migration authority.
-        if !profiling {
+        if !profiling && own.is_none() {
             directory = cache::cache_path(&source)?;
         }
         let mut before = None;
@@ -873,7 +894,7 @@ impl PreparedIndex {
                 "index cancelled during cache validation",
             ));
         }
-        let destination = if profiling {
+        let destination = if profiling || own.is_some() {
             directory.clone()
         } else {
             cache::default_cache_path(&source)?

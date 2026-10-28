@@ -460,6 +460,22 @@ P4d처럼 컨트롤러 루프에서만 바뀐다. `FLOE_GTK_LOOP=legacy`는 예�
   - **판정:** 덱 인덱스는 하나다(app-core `jobdeck::index`). 옵션은 `floe2 index`의 것이고 OUTDIR은 없다(종료 2). 종료 코드는 0·2(실패)·75(busy) 그대로다. `drc-prepare`와 같은 방식이다.
 - **웹:** floe2-web도 같은 app-cli라 CLI에서는 같다. 웹 서버의 관리 인덱스(`managed_index`)는 바뀌지 않았다.
 - **게이트:** `index_lock` K10~K12(CLI 자동 인덱싱, `--wait`의 거절·한도·신호·한 번만 빌드, 독자 대기, 덱 대기, `floe-index vfs DECK.jb`). 단위 테스트는 app-cli `ready`, vfs `lock`이다.
+- **임시 인덱스 `--temp-index[=DIR]` (2026-10-28, app 0.12.416; 사용자 "인덱싱이 되어 있지 않더라도 캡쳐할 수 있게"):**
+  `render`·`info`·`probe`·`clip`. 인덱스 없는 소스를 원본 옆이 아니라 이 실행만의 폴더(DIR, 없으면 `$TMPDIR` 아래
+  `floe2-temp-index-<pid>-<n>`; app-core `cache::TempIndex`, 소스마다 `<절대 경로의 FNV 해시>/.NAME.ice`)에 색인해 거기서
+  읽고, 명령이 끝나면 폴더째 지운다(Drop; 데이터셋과 renderd가 닫힌 뒤). 쓸 수 없는 폴더의 소스, 한 번만 찍는 캡처용이다.
+  종류는 규칙 또는 `--light`/`--full` 그대로(레이아웃 전체, 덱 소스 경량)이고, 옆에 커밋된 캐시가 있거나 다른 실행이
+  쓰는 중이면 옆 것을 있는 대로 연다(`cache::resolve_under`; 반쯤 만들다 만 옆 폴더는 건드리지 않는다). 덱 캡처에서
+  광역 pass가 요약을 기다리면(`summary_building`) 임시 인덱스에 빠진 요약을 만들고 다시 그린다(capture.rs - 나중에
+  `floe2 index DECK.jb`가 더해 줄 수 없으므로; renderd의 판정을 그대로 써서 근접 캡처는 요약을 만들지 않는다;
+  `--occupancy off`면 요약 없이 페이지로 그리므로 기다리는 pass가 없다). `--no-index`와 배타, `FLOE_AUTO_INDEX=off`보다
+  우선. 배관: `IndexOptions.out_dir`
+  (`PreparedIndex`가 그 폴더에 리스와 잠금, 이름 이전 없음), `SourceCatalog.temp`/`SourceInfo.temp`, `AnalysisOptions.temp`,
+  `Dataset::open_temp`, `DeckIndexPlan::prepare_for_open(.., temp)`, `cache::found`(ready.rs에서 옮김). 게이트: `floe2`
+  (쓸 수 없는 폴더의 레이아웃 - 기본은 `its index is written beside it` 거절, `--temp-index`는 옆 인덱스의 캡처와 바이트
+  동일·옆에 아무것도 없음·임시 폴더 제거; info, `--light`, `--no-index` 배타, 없는 DIR), `jobdeck` LightSummaryTests
+  (덱: 광역 캡처가 요약을 만들고 다시 그려 영구 인덱스의 그림과 동일, 근접은 요약 없이, `--occupancy off`는 페이지로, info).
+  1회성 캡처의 비용 판단은 DIRECT_READ_PLAN §8.29.
 
 ## 13. 레이아웃 뷰의 점유 요약 옵션 (2026-10-20, app 0.12.371 / RENDERD 0.12.336) — 정책은 공유 Rust, 켜고 끄기는 UI
 

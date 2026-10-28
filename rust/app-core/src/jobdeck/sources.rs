@@ -149,6 +149,9 @@ pub struct SourceInfo {
     /// opening reader is told - the source is left out, not failed
     /// (floe/jobdeck/sources.py `busy`).
     pub busy: String,
+    /// `cache_dir` is the run's temporary index (`SourceCatalog::temp`),
+    /// not a folder beside the source
+    pub temp: bool,
 }
 impl SourceInfo {
     pub fn ok(&self) -> bool {
@@ -160,6 +163,9 @@ pub struct SourceCatalog {
     pub directory: PathBuf,
     pub infos: BTreeMap<String, SourceInfo>,
     pub(crate) pinned: Option<std::sync::Arc<cache::revision::set::Snapshot>>,
+    /// the run's temporary index (cache::TempIndex root): a source with no
+    /// cache beside it has its cache under here (`cache::resolve_under`)
+    pub temp: Option<PathBuf>,
 }
 impl SourceCatalog {
     pub fn new(directory: &Path) -> Result<Self> {
@@ -167,6 +173,7 @@ impl SourceCatalog {
             directory: cache::absolute(directory)?,
             infos: BTreeMap::new(),
             pinned: None,
+            temp: None,
         })
     }
     pub fn resolve(&self, tc: &str) -> PathBuf {
@@ -192,6 +199,7 @@ impl SourceCatalog {
                 indexed: false,
                 cache_dir: PathBuf::new(),
                 busy: String::new(),
+                temp: false,
             };
             match std::fs::metadata(&path) {
                 Ok(m) if m.is_file() => {
@@ -237,6 +245,10 @@ impl SourceCatalog {
                         pin.validate()?;
                         pin.source_unchanged()?;
                         pin.directory()
+                    } else if let Some(root) = &self.temp {
+                        let (dir, temp) = cache::resolve_under(root, &path)?;
+                        info.temp = temp;
+                        dir
                     } else {
                         cache::cache_path(&path)?
                     };

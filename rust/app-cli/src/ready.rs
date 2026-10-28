@@ -18,9 +18,19 @@
 //! `--no-wait` none) polls the locks' probes until that run is done and goes
 //! on - a cache it made is used, not made again; past the bound it ends 75 as
 //! before, and a signal ends the wait as it ends the command.
+//!
+//! `--temp-index[=DIR]` (user 2026-10-28: "인덱싱이 되어 있지 않더라도 캡쳐할 수
+//! 있게"): what has no index is indexed in a folder of the run's own under
+//! DIR (the system's temporary directory unless given) and read from there,
+//! and the folder goes with the command (cache::TempIndex) - a source folder
+//! that cannot be written, a one-off capture that leaves nothing behind. The
+//! kind is the one the rule or `--light` / `--full` says; a cache beside the
+//! source is opened as it is. A deck capture whose passes wait for their
+//! occupancy summary has the summaries built there and is drawn again
+//! (capture.rs), since no later `floe2 index DECK.jb` will add them.
 use crate::Out;
 use floe_app_core::{
-    cache::{self, CacheState},
+    cache::{self, found, Found, TempIndex},
     dataset::Dataset,
     index::IndexOptions,
     jobdeck::{
@@ -31,7 +41,7 @@ use floe_app_core::{
 };
 use floe_vfs::lock::{self, Busy, Key};
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -83,7 +93,7 @@ impl Wait {
 }
 
 /// What a read command does about its source's index.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Ready {
     /// index what has none first (`--no-index`, FLOE_AUTO_INDEX=off: no)
     pub index: bool,
@@ -93,6 +103,13 @@ pub struct Ready {
     /// layout full - IndexOptions::light_for; user 2026-10-22: an EBEAM
     /// file captured on its own takes `--light`)
     pub light: Option<bool>,
+    /// `--temp-index[=DIR]`: the base the run's temporary index is made
+    /// under (cache::TempIndex) - what has no index is indexed there and
+    /// read from there, nothing is written beside the source
+    pub temp: Option<PathBuf>,
+    /// `--no-index` was given (not FLOE_AUTO_INDEX=off): exclusive with
+    /// `--temp-index`
+    refused: bool,
 }
 impl Ready {
     /// The defaults: FLOE_AUTO_INDEX (on unless off/no/0), FLOE_LOCK_WAIT.
@@ -109,10 +126,22 @@ impl Ready {
             index,
             wait: Wait::from_env()?,
             light: None,
+            temp: None,
+            refused: false,
         })
     }
+    /// The run's temporary index when `--temp-index` asked for one: made
+    /// now, removed when it is dropped - after the dataset and the renderer
+    /// that read it.
+    pub(crate) fn temp_index(&self) -> Result<Option<TempIndex>> {
+        self.temp
+            .as_deref()
+            .map(|base| TempIndex::create(Some(base)))
+            .transpose()
+    }
     /// Take `flag` when it is one of these options (`--no-index`, `--wait`,
-    /// `--wait=SECONDS`, `--no-wait`, `--light`, `--full`): whether it was.
+    /// `--wait=SECONDS`, `--no-wait`, `--light`, `--full`,
+    /// `--temp-index[=DIR]`): whether it was.
     pub fn take(&mut self, flag: &str, inline: Option<&str>) -> Result<bool> {
         let no_value = || match inline {
             Some(_) => Err(Error::input(format!("{flag} takes no value"))),
@@ -121,7 +150,23 @@ impl Ready {
         match flag {
             "--no-index" => {
                 no_value()?;
+                if self.temp.is_some() {
+                    return Err(Error::input("--no-index and --temp-index are exclusive"));
+                }
                 self.index = false;
+                self.refused = true;
+            }
+            "--temp-index" => {
+                if self.refused {
+                    return Err(Error::input("--no-index and --temp-index are exclusive"));
+                }
+                self.temp = Some(match inline {
+                    Some(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
+                    Some(_) => return Err(Error::input("--temp-index=DIR names a directory")),
+                    None => std::env::temp_dir(),
+                });
+                // the flag over FLOE_AUTO_INDEX=off: it asks for the index
+                self.index = true;
             }
             "--wait" => self.wait = Wait::flag(inline)?,
             "--no-wait" => {
@@ -155,10 +200,11 @@ fn hms(elapsed: Duration) -> String {
 
 /// A source's cache lock (floe_vfs::lock), by the cache name it has.
 pub(crate) fn layout_key(source: &Path) -> Result<Key> {
-    Ok(lock::key(
-        lock::Kind::Vfs,
-        &cache::cache_path(source)?.to_string_lossy(),
-    ))
+    Ok(dir_key(&cache::cache_path(source)?))
+}
+/// A cache directory's lock (the one beside the source, or the run's own).
+fn dir_key(directory: &Path) -> Key {
+    lock::key(lock::Kind::Vfs, &directory.to_string_lossy())
 }
 
 fn file_name(path: &Path) -> String {
@@ -306,35 +352,6 @@ impl<'a> Waiter<'a> {
     }
 }
 
-/// What a source has of a cache, for its index first.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Found {
-    /// none under either name
-    None,
-    /// a real folder without its commit (no meta.json): a build that
-    /// stopped half-way left it - or one runs now (the locks tell)
-    Incomplete,
-    /// one: current, of a changed source, or one this build cannot read
-    There,
-}
-fn found(source: &Path) -> Result<Found> {
-    let directory = cache::cache_path(source)?;
-    if cache::inspect(source, &directory)? == CacheState::Missing {
-        return Ok(Found::None);
-    }
-    let real = std::fs::symlink_metadata(&directory)
-        .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink());
-    let uncommitted = matches!(
-        std::fs::symlink_metadata(directory.join("meta.json")),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound
-    );
-    Ok(if real && uncommitted {
-        Found::Incomplete
-    } else {
-        Found::There
-    })
-}
-
 /// A layout with no cache indexed now, as `index SOURCE [--light|--full]`
 /// would (`light`: the kind asked for, None = the rule) - a folder a build
 /// stopped half-way left rebuilt (`index --force`); with `summaries`
@@ -342,11 +359,15 @@ fn found(source: &Path) -> Result<Found> {
 /// (`index --occupancy` adds design.ovo to a current cache: the light
 /// cache's by the light command, the full index's by `vfs
 /// --occupancy-only` - the kind is kept, `decide` would build the full
-/// index over a light cache under a full request).
+/// index over a light cache under a full request). With `temp` (the run's
+/// temporary index) a source with no cache beside it is indexed under it
+/// (`cache::resolve_under`), and a half-built folder beside it is left
+/// alone.
 fn index_layout(
     source: &Path,
     light: Option<bool>,
     summaries: bool,
+    temp: Option<&Path>,
     waiter: &mut Waiter,
     cancelled: &AtomicUsize,
 ) -> Result<()> {
@@ -355,18 +376,24 @@ fn index_layout(
     if !source.is_file() {
         return Err(Error::input(format!("source not found: {}", source.display())));
     }
+    // where its cache is: beside it, or the run's own folder
+    let (directory, own) = match temp {
+        Some(root) => cache::resolve_under(root, &source)?,
+        None => (cache::cache_path(&source)?, false),
+    };
+    let key = dir_key(&directory);
+    let out_dir = own.then(|| directory.clone());
     let mut said = false;
     loop {
-        let state = found(&source)?;
+        let state = found(&source, &directory)?;
         // another run builds it: the open waits for it or says who
-        if lock::writing_refusal(&layout_key(&source)?).is_some() {
+        if lock::writing_refusal(&key).is_some() {
             return Ok(());
         }
         let (options, what) = if state == Found::There {
             if !summaries {
                 return Ok(());
             }
-            let directory = cache::cache_path(&source)?;
             if directory.join("design.ovo").is_file() {
                 return Ok(());
             }
@@ -375,6 +402,7 @@ fn index_layout(
                 IndexOptions {
                     light: Some(kind_light),
                     occupancy: Some(true),
+                    out_dir: out_dir.clone(),
                     ..IndexOptions::default()
                 },
                 "has no occupancy summary yet - adding it first (--occupancy on)".to_string(),
@@ -384,6 +412,7 @@ fn index_layout(
                 force: state == Found::Incomplete,
                 light,
                 occupancy: summaries.then_some(true),
+                out_dir: out_dir.clone(),
                 ..IndexOptions::default()
             };
             let kind = match light {
@@ -391,17 +420,27 @@ fn index_layout(
                 Some(false) => " (--full)",
                 None => "",
             };
-            let what = if options.force {
-                format!("has an incomplete index (a build stopped half-way) - rebuilding it first{kind}")
+            let place = if own {
+                " in a temporary folder (--temp-index: nothing is written beside it)"
             } else {
-                format!("has no index yet - indexing it first{kind}")
+                ""
+            };
+            let what = if options.force {
+                format!("has an incomplete index (a build stopped half-way) - rebuilding it first{kind}{place}")
+            } else {
+                format!("has no index yet - indexing it first{kind}{place}")
             };
             (options, what)
         };
         if !said {
             eprintln!(
-                "[{}] {name} {what} (--no-index: refuse instead)",
-                floe_app_core::program()
+                "[{}] {name} {what}{}",
+                floe_app_core::program(),
+                if own {
+                    ""
+                } else {
+                    " (--no-index: refuse instead)"
+                }
             );
             said = true;
         }
@@ -447,7 +486,7 @@ fn index_layout(
             return Err(refused);
         }
         // a cache with no index yet has no readers to wait for
-        waiter.wait_to_write(&layout_key(&source)?, false)?;
+        waiter.wait_to_write(&key, false)?;
     }
 }
 
@@ -467,10 +506,10 @@ fn deck_state(
     let mut busy = Vec::new();
     for info in catalog.infos.values() {
         if !info.busy.is_empty() {
-            busy.push(lock::key(lock::Kind::Vfs, &info.cache_dir.to_string_lossy()));
+            busy.push(dir_key(&info.cache_dir));
         } else if !needs && info.ok() {
             if !info.indexed {
-                needs = found(&info.path)? != Found::There;
+                needs = found(&info.path, &info.cache_dir)? != Found::There;
             } else if summaries && !info.cache_dir.join("design.ovo").is_file() {
                 needs = true;
             }
@@ -492,7 +531,12 @@ fn index_deck(
     let mut todo = Vec::new();
     let (mut without_index, mut without_summary) = (0usize, 0usize);
     for mut entry in plan.todo {
-        match found(&entry.source)? {
+        // the entry's cache: beside the source, or the run's temporary index
+        let directory = match &entry.options.out_dir {
+            Some(dir) => dir.clone(),
+            None => cache::cache_path(&entry.source)?,
+        };
+        match found(&entry.source, &directory)? {
             Found::None => {
                 without_index += 1;
                 todo.push(entry);
@@ -525,9 +569,15 @@ fn index_deck(
             without_summary
         ));
     }
+    let own = todo.iter().any(|e| e.options.out_dir.is_some());
     eprintln!(
-        "[jobdeck] {} - indexing them first (--no-index: draw without them)",
-        what.join(", ")
+        "[jobdeck] {} - indexing them first{}",
+        what.join(", "),
+        if own {
+            " in a temporary folder (--temp-index: nothing is written beside them)"
+        } else {
+            " (--no-index: draw without them)"
+        }
     );
     crate::deck_index::run_entries(&todo, 0, Out::Stderr, waiter, cancelled)?;
     Ok(())
@@ -550,14 +600,17 @@ fn deck_options(light: Option<bool>, summaries: bool) -> IndexOptions {
 
 /// `source` opened for a read command: what has no index indexed first
 /// (`index`, as `light` asks; with `summaries` - `render --occupancy on` -
-/// a source's missing occupancy summary as well), what another run indexes
+/// a source's missing occupancy summary as well; under `temp`, the run's
+/// temporary index, built and read there), what another run indexes
 /// waited for (`waiter`) or refused.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn open(
     source: &Path,
     levels: Option<BTreeSet<i64>>,
     index: bool,
     light: Option<bool>,
     summaries: bool,
+    temp: Option<&Path>,
     waiter: &mut Waiter,
     cancelled: &AtomicUsize,
 ) -> Result<Dataset> {
@@ -565,9 +618,9 @@ pub(crate) fn open(
     let mut deck_indexed = false;
     loop {
         if index && !deck {
-            index_layout(source, light, summaries, waiter, cancelled)?;
+            index_layout(source, light, summaries, temp, waiter, cancelled)?;
         }
-        let opened = Dataset::open(source, levels.clone(), Mode::Level, cancelled);
+        let opened = Dataset::open_temp(source, levels.clone(), Mode::Level, temp, cancelled);
         let (none, busy, refused) = match opened {
             Ok(dataset) => {
                 let Dataset::Deck(snapshot) = &dataset else {
@@ -594,6 +647,7 @@ pub(crate) fn open(
                     source,
                     levels.clone(),
                     &deck_options(light, summaries),
+                    temp,
                     cancelled,
                 )?;
                 let (none, busy) = deck_state(&plan.catalog, summaries)?;
@@ -618,6 +672,7 @@ pub(crate) fn open(
                 source,
                 levels.clone(),
                 &deck_options(light, summaries),
+                temp,
                 cancelled,
             )?;
             index_deck(plan, summaries, waiter, cancelled)?;
@@ -643,11 +698,14 @@ mod tests {
         for bad in ["0", "-1", "nan", "inf", "x", ""] {
             assert!(Wait::flag(Some(bad)).is_err(), "{bad}");
         }
-        let mut ready = Ready {
+        let fresh = || Ready {
             index: true,
             wait: Wait::No,
             light: None,
+            temp: None,
+            refused: false,
         };
+        let mut ready = fresh();
         assert!(ready.take("--wait", Some("10")).unwrap());
         assert_eq!(ready.wait, Wait::For(Duration::from_secs(10)));
         assert!(ready.take("--no-wait", None).unwrap());
@@ -656,6 +714,20 @@ mod tests {
         assert!(!ready.index);
         assert!(ready.take("--no-index", Some("1")).is_err());
         assert!(!ready.take("--px", Some("1")).unwrap());
+        // --temp-index[=DIR] (2026-10-28): the run's temporary index, the
+        // flag over FLOE_AUTO_INDEX=off; not beside --no-index
+        assert!(ready.take("--temp-index", None).is_err());
+        let mut temp = fresh();
+        temp.index = false;
+        assert!(temp.take("--temp-index", None).unwrap());
+        assert_eq!(temp.temp, Some(std::env::temp_dir()));
+        assert!(temp.index);
+        assert!(temp.take("--temp-index", Some("/scratch/x")).unwrap());
+        assert_eq!(temp.temp.as_deref(), Some(Path::new("/scratch/x")));
+        assert!(temp.take("--temp-index", Some(" ")).is_err());
+        assert!(temp.take("--no-index", None).is_err());
+        assert!(temp.index);
+        assert!(fresh().temp_index().unwrap().is_none());
         // the auto-index's cache kind (2026-10-22): --light / --full, exclusive
         assert_eq!(ready.light, None);
         assert!(ready.take("--light", None).unwrap());
@@ -663,11 +735,7 @@ mod tests {
         assert!(ready.take("--light", None).unwrap());
         assert!(ready.take("--full", None).is_err());
         assert!(ready.take("--light", Some("1")).is_err());
-        let mut full = Ready {
-            index: true,
-            wait: Wait::No,
-            light: None,
-        };
+        let mut full = fresh();
         assert!(full.take("--full", None).unwrap());
         assert_eq!(full.light, Some(false));
         assert_eq!(hms(Duration::from_secs(5)), "0:05");

@@ -891,6 +891,80 @@ class LightSummaryTests(unittest.TestCase):
         cls.caches = [Path(vfs_cache_dir(cls.dir / n))
                       for n in ("chipA.oas", "chipB.oas", "mark.oas")]
 
+    def test_a_temporary_index_draws_an_unindexed_deck(self):
+        """--temp-index (0.12.416, user 2026-10-28: "인덱싱이 되어 있지 않더라도
+        캡쳐할 수 있게"): a deck whose sources have no index - in a folder
+        that cannot be written - is captured from light caches built in a
+        folder of the run's own: a wide capture has the summaries its passes
+        wait for built there and is drawn again (the picture of the capture
+        over the index beside the sources), a near one builds none,
+        --occupancy off draws from the pages and builds none; nothing is
+        written beside the sources and the folder is gone after."""
+        names = ("chipA.oas", "chipB.oas", "mark.oas", "test.jb")
+        ref_dir = TMP / "temp_index_ref"
+        ref_dir.mkdir()
+        held = TMP / "temp_index_held"
+        held.mkdir()
+        for name in names:
+            shutil.copy2(TMP / name, ref_dir / name)
+            shutil.copy2(TMP / name, held / name)
+        scratch = TMP / "temp_index_scratch"
+        scratch.mkdir()
+        # the reference: the same captures over the index beside the sources
+        run_floe2("index", ref_dir / "test.jb", "--jobs", "2", env=self.env, ok=0)
+        wide_args = ("--bbox", "40000,80000,60000,95000", "--px", "300", "--detail", "medium")
+        near_args = ("--bbox", "38000,81000,38010,81010", "--px", "300", "--detail", "medium")
+        ref_wide = ref_dir / "wide.png"
+        ref_near = ref_dir / "near.png"
+        run_floe2("render", ref_dir / "test.jb", *wide_args, "--out", ref_wide, env=self.env, ok=0)
+        run_floe2("render", ref_dir / "test.jb", *near_args, "--out", ref_near, env=self.env, ok=0)
+        held.chmod(0o555)
+        try:
+            # the plain auto-index cannot write beside the sources
+            out = TMP / "temp_index_wide.png"
+            res = run_floe2("render", held / "test.jb", *wide_args, "--out", out, env=self.env)
+            self.assertNotEqual(res.returncode, 0, res.stderr)
+            self.assertFalse(out.exists())
+            # the temporary index: light caches, then the summaries the wide
+            # passes wait for, drawn again - the persistent index's picture
+            res = run_floe2("render", held / "test.jb", "--temp-index=%s" % scratch, *wide_args,
+                            "--out", out, env=self.env, ok=0)
+            self.assertIn("have no index yet - indexing them first in a temporary folder (--temp-index",
+                          res.stderr)
+            self.assertIn("wait for their occupancy summary - building the missing summaries in the temporary index",
+                          res.stderr)
+            self.assertIn("have no occupancy summary yet - indexing them first in a temporary folder",
+                          res.stderr)
+            self.assertNotIn("summary_building=", res.stderr)
+            self.assertEqual(out.read_bytes(), ref_wide.read_bytes())
+            self.assertEqual(sorted(p.name for p in held.iterdir()), sorted(names))
+            self.assertEqual(list(scratch.iterdir()), [])
+            # a near capture: the light caches alone, no summary built
+            near = TMP / "temp_index_near.png"
+            res = run_floe2("render", held / "test.jb", "--temp-index=%s" % scratch, *near_args,
+                            "--out", near, env=self.env, ok=0)
+            self.assertIn("indexing them first in a temporary folder", res.stderr)
+            self.assertNotIn("building the missing summaries", res.stderr)
+            self.assertEqual(near.read_bytes(), ref_near.read_bytes())
+            self.assertEqual(list(scratch.iterdir()), [])
+            # --occupancy off: no summary at all - the wide passes draw from
+            # the pages, nothing waits and nothing is built
+            res = run_floe2("render", held / "test.jb", "--temp-index=%s" % scratch, "--occupancy", "off",
+                            *wide_args, "--out", out, env=self.env, ok=0)
+            self.assertNotIn("summary_building=", res.stderr)
+            self.assertNotIn("building the missing summaries", res.stderr)
+            self.assertNotIn("occupancy summary", res.stderr)
+            self.assertEqual(list(scratch.iterdir()), [])
+            # info reads through a temporary index too and leaves nothing
+            info = json.loads(run_floe2("info", held / "test.jb", "--temp-index=%s" % scratch, "--json",
+                                        env=self.env, ok=0).stdout)
+            self.assertEqual((info["metadata"]["jobdeck"]["light_sources"],
+                              info["metadata"]["jobdeck"]["summary_missing"]), (3, 3))
+            self.assertEqual(list(scratch.iterdir()), [])
+            self.assertEqual(sorted(p.name for p in held.iterdir()), sorted(names))
+        finally:
+            held.chmod(0o755)
+
     def test_the_summaries_come_after_the_inventory(self):
         res = run_floe2("index", self.deck, "--no-occupancy", "--jobs", "2",
                         env=self.env, ok=0)
