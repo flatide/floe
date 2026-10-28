@@ -59,6 +59,149 @@ fn lex_bounds_are_contiguous_and_ascii_safe() {
     assert!(signed("9223372036854775808").is_err());
 }
 #[test]
+fn comments_follow_source_order_and_preserve_quoted_literals() {
+    for (input, expected) in [
+        ("//******** /* never opened", ""),
+        ("LAYER M 1 // /* ignored", "LAYER M 1 "),
+        ("/* // } */ INT/**/M < .1 // tail", "  INT M < .1 "),
+        ("/* done */ //********", "  "),
+        (
+            r#"INCLUDE "한글//path/*literal*/" // tail"#,
+            r#"INCLUDE "한글//path/*literal*/" "#,
+        ),
+        (
+            r#"TEXT "a\" // /*" 'b\' // /*' // real /*"#,
+            r#"TEXT "a\" // /*" 'b\' // /*' "#,
+        ),
+        (r#"TEXT "a\\" // /*"#, r#"TEXT "a\\" "#),
+        ("  @ literal // /* }", "  @ literal // /* }"),
+        ("/* prefix */ @ literal // /* }", "  @ literal // /* }"),
+    ] {
+        let mut in_block = false;
+        assert_eq!(strip_comments(input, &mut in_block), expected, "{input}");
+        assert!(!in_block, "{input}");
+    }
+    let mut in_block = false;
+    assert_eq!(strip_comments("INT M /* opens", &mut in_block), "INT M  ");
+    assert!(in_block);
+    assert_eq!(strip_comments("// still block }", &mut in_block), "");
+    assert!(in_block);
+    assert_eq!(
+        strip_comments("*/ @ literal /* //", &mut in_block),
+        " @ literal /* //"
+    );
+    assert!(!in_block);
+}
+#[test]
+fn decorative_comments_keep_includes_and_following_rules() {
+    let tmp = Temp::new();
+    tmp.file("child.cal", "LAYER M 1\nCHILD { INT M < .1 }\n");
+    let path = tmp.file(
+        "main.cal",
+        "//********\nINCLUDE \"child.cal\" //********\nLAYER N 2 // /* ignored\nMAIN { INT N < .2 }\n",
+    );
+    for scan_all in [false, true] {
+        let d = parse_deck(
+            &path,
+            &Options {
+                scan_all,
+                env_switches: false,
+                ..Options::default()
+            },
+            &AtomicUsize::new(0),
+        )
+        .unwrap();
+        assert!(d.warnings.is_empty(), "{:?}", d.warnings);
+        assert_eq!(d.stat("files"), 2);
+        assert_eq!(d.check_count(), 2);
+        assert_eq!(d.checks["CHILD"].constraints[0].value, Some(0.1));
+        assert_eq!(d.checks["MAIN"].constraints[0].value, Some(0.2));
+    }
+}
+#[test]
+fn directives_keep_quoted_comment_markers() {
+    let d = parsed(concat!(
+        "#DEFINE PATH \"a//b\" // trailing comment\n",
+        "#DEFINE MARK '/* literal */' // trailing comment\n",
+        "#DEFINE ESC \"a\\\"//b\" // trailing comment\n",
+        "#IFDEF PATH \"a//b\" // matching literal\n",
+        "MATCH { INT M < .1 }\n",
+        "#ENDIF\n",
+    ));
+    assert!(d.warnings.is_empty(), "{:?}", d.warnings);
+    assert_eq!(d.defines["PATH"].as_deref(), Some("a//b"));
+    assert_eq!(d.defines["MARK"].as_deref(), Some("/* literal */"));
+    assert_eq!(d.defines["ESC"].as_deref(), Some("a\\\"//b"));
+    assert!(d.checks.contains_key("MATCH"));
+}
+#[test]
+fn block_comments_separate_tokens_and_descriptions_remain_literal() {
+    let d = parsed(concat!(
+        "/* banner // {\n@ ignored /*\n*/\n",
+        "LAYER/**/M/**/7\nR {\n",
+        "/* prefix */ @ literal // /* }\n",
+        "INT/**/M < .1 /* } */\n}\n",
+        "AFTER { INT M < .2 }\n",
+    ));
+    assert!(d.warnings.is_empty(), "{:?}", d.warnings);
+    assert_eq!(d.check_count(), 2);
+    assert_eq!(d.checks["R"].desc, "literal // /* }");
+    assert_eq!(d.checks["R"].source_gds, vec![(7, None)]);
+    assert_eq!(d.checks["R"].constraints[0].value, Some(0.1));
+    assert_eq!(d.checks["AFTER"].constraints[0].value, Some(0.2));
+}
+#[test]
+fn included_files_have_independent_block_comment_state() {
+    let tmp = Temp::new();
+    tmp.file(
+        "child.cal",
+        "LAYER M 1\nCHILD { INT M < .1 }\n/* child never closes\nHIDDEN_CHILD { INT M < 9 }\n",
+    );
+    let path = tmp.file(
+        "parent.cal",
+        "INCLUDE \"child.cal\" /* parent banner\nHIDDEN_PARENT { INT M < 9 }\n*/\nPARENT { INT M < .2 }\n",
+    );
+    let d = parse_deck(&path, &Options::default(), &AtomicUsize::new(0)).unwrap();
+    assert_eq!(d.warnings, vec!["unclosed /* comment at end of child.cal"]);
+    assert_eq!(d.check_count(), 2);
+    assert_eq!(d.checks["CHILD"].constraints[0].value, Some(0.1));
+    assert_eq!(d.checks["PARENT"].constraints[0].value, Some(0.2));
+}
+#[test]
+fn commented_braces_preserve_macro_and_verbatim_include_policy() {
+    let tmp = Temp::new();
+    tmp.file("child.cal", "CHILD { INT M < .1 }\n");
+    let path = tmp.file(
+        "main.cal",
+        concat!(
+            "DMACRO SKIP {\n//******** }\nFAKE { INT M < 9 }\n}\n",
+            "VERBATIM {\n/* } // */\n//******** }\nINCLUDE child.cal\n}\n",
+            "REAL { INT M < .2 }\n",
+        ),
+    );
+    for follow_verbatim in [false, true] {
+        let d = parse_deck(
+            &path,
+            &Options {
+                follow_verbatim,
+                env_switches: false,
+                ..Options::default()
+            },
+            &AtomicUsize::new(0),
+        )
+        .unwrap();
+        assert!(d.checks.contains_key("REAL"));
+        assert!(!d.checks.contains_key("FAKE"));
+        assert_eq!(d.checks.contains_key("CHILD"), follow_verbatim);
+        assert_eq!(d.verbatim_includes, vec!["child.cal"]);
+        assert!(
+            !d.warnings.iter().any(|w| w.contains("unclosed")),
+            "{:?}",
+            d.warnings
+        );
+    }
+}
+#[test]
 fn define_boundaries_longest_first_and_nonrecursive() {
     let mut sub = Substitution::default();
     sub.rebuild(&BTreeMap::from([

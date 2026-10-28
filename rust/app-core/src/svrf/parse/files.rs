@@ -161,6 +161,8 @@ impl Parser<'_> {
         self.d.inc("files");
         let mut reader = BufReader::with_capacity(65536, file);
         let mut skip_lf = false;
+        // Comments belong to this source file, not a recursively read INCLUDE.
+        let mut in_block = false;
         chain.push(real);
         while let Some(s) = line(
             &mut reader,
@@ -170,7 +172,7 @@ impl Parser<'_> {
             self.stop,
         )? {
             self.d.inc("lines");
-            self.feed_line(&s, path, chain)?;
+            self.feed_line(&s, path, chain, &mut in_block)?;
         }
         chain.pop();
         if Stamp::from(reader.get_ref().metadata()?) != stamp
@@ -194,39 +196,22 @@ impl Parser<'_> {
             ))?;
             self.verbatim_depth = 0;
         }
-        if self.in_comment {
+        if in_block {
             self.warn(format!("unclosed /* comment at end of {basename}"))?;
-            self.in_comment = false;
         }
         if !self.cond.is_empty() && chain.is_empty() {
             self.warn("unbalanced #IFDEF at end of deck".into())?;
         }
         Ok(())
     }
-    fn feed_line(&mut self, raw: &str, path: &Path, chain: &mut Vec<PathBuf>) -> Result<()> {
-        let mut s = trim(raw).to_owned();
-        if s.is_empty() {
-            return Ok(());
-        }
-        if self.in_comment {
-            let Some((_, rest)) = s.split_once("*/") else {
-                return Ok(());
-            };
-            s = trim(rest).into();
-            self.in_comment = false;
-        }
-        while !s.starts_with('@') {
-            let Some(i) = s.find("/*") else {
-                break;
-            };
-            if let Some(j) = s[i + 2..].find("*/") {
-                s = trim(&format!("{} {}", &s[..i], &s[i + 2 + j + 2..])).into();
-            } else {
-                s = s[..i].trim_end_matches(whitespace).into();
-                self.in_comment = true;
-                break;
-            }
-        }
+    fn feed_line(
+        &mut self,
+        raw: &str,
+        path: &Path,
+        chain: &mut Vec<PathBuf>,
+        in_block: &mut bool,
+    ) -> Result<()> {
+        let mut s = trim(&strip_comments(raw, in_block)).to_owned();
         if s.is_empty() {
             return Ok(());
         }
@@ -237,10 +222,6 @@ impl Parser<'_> {
             return Ok(());
         }
         if !s.starts_with('@') {
-            s = trim(s.split_once("//").map_or(s.as_str(), |(a, _)| a)).into();
-            if s.is_empty() {
-                return Ok(());
-            }
             s = self.substitution.apply(&s)?;
         }
         if head_rest(&s).0.eq_ignore_ascii_case("INCLUDE") {

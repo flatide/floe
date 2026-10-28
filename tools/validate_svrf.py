@@ -30,7 +30,8 @@ against).
       read as constraints; zero-lower-bound chains (> 0 < v);
       leading-dot values; comparator-leading next lines continue
       the wrapped measurement (multi-line too), without leaking
-      across a block close.
+      across a block close; line/block comment precedence, quoted
+      delimiters and file-local block state through INCLUDE.
   R3c dimensional metrics: two-layer INTERNAL overlap, one-layer
       EXTERNAL NOTCH, ENCLOSURE for enclosure/extension; intersection
       OVERLAP options do not rename a metric. Wrapped options remain
@@ -617,6 +618,54 @@ def r3b(tmp):
           d.stats["unknown_in_block"] == 0, str(dict(d.unknown)))
     check("NET/FLATTEN ignored", d.stats["unknown"] == 0,
           str(dict(d.unknown)))
+    # A // banner's second slash must not open a /* block. Quotes and
+    # standalone @ descriptions keep literal delimiters; an INCLUDE's
+    # child starts outside its parent's trailing multiline comment.
+    p = os.path.join(tmp, "comment-main.cal")
+    sub = os.path.join(tmp, "inc", "comment-child.cal")
+    os.makedirs(os.path.dirname(sub), exist_ok=True)
+    url = "http://host/*literal*/"
+    escaped = r'escaped\"//literal /* marker'
+    single = "path//literal/*text*/"
+    description = "literal // and /* stay in @ text"
+    w(sub,
+      "//******** child banner\n"
+      "LAYER CHILD 13 // trailing /* is a line comment\n"
+      "CHILD.RULE {\n  INT CHILD < .13 //********\n}\n")
+    w(p,
+      "//******** main banner\n"
+      '#DEFINE URL "%s"\n'
+      '#DEFINE ESC "%s" // trailing /* is ignored\n'
+      "#DEFINE SINGLE '%s'\n"
+      "LAYER/* separator */ROOT/* separator */11\n"
+      'INCLUDE "inc/comment-child.cal" /* parent block starts\n'
+      "LAYER HIDDEN 99\n"
+      "// still inside the block\n"
+      "*/ LAYER AFTER 12\n"
+      "/* real block // does not hide its closing */\n"
+      "ROOT.RULE {\n  @ %s\n  INT ROOT < .11 // /* ignored\n}\n"
+      "AFTER.RULE {\n  INT AFTER < .12\n}\n"
+      % (url, escaped, single, description))
+    for scan in (False, True):
+        parsed = svrf.parse_deck(p, scan_all=scan)
+        label = "scan" if scan else "normal"
+        check("%s: comment banners preserve rules and INCLUDE" % label,
+              set(parsed.checks) == {"CHILD.RULE", "ROOT.RULE", "AFTER.RULE"}
+              and set(parsed.layers) == {"CHILD", "ROOT", "AFTER"}
+              and parsed.stats["files"] == 2 and len(parsed.includes) == 1
+              and not parsed.warnings and not parsed.unknown,
+              str((list(parsed.checks), list(parsed.layers), parsed.includes,
+                   parsed.warnings, dict(parsed.unknown))))
+        check("%s: quoted comment markers and escaped quote survive" % label,
+              all(parsed.defines.get(k) == value for k, value in
+                  (("URL", url), ("ESC", escaped), ("SINGLE", single))),
+              str(dict(parsed.defines)))
+        root = parsed.checks.get("ROOT.RULE")
+        check("%s: @ text and measurement after comments survive" % label,
+              root is not None and root.desc == [description]
+              and [(c["op"], c["value"]) for c in root.constraints] == [("<", .11)]
+              and root.source_gds == [(11, None)],
+              str(None if root is None else (root.desc, root.constraints, root.source_gds)))
     p = os.path.join(tmp, "opencmt.svrf")
     w(p, "LAYER m1 1\n/* never closed\nLAYER m2 2\n")
     d = svrf.parse_deck(p)

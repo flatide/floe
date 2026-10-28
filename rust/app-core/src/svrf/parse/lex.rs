@@ -9,6 +9,57 @@ pub(super) fn whitespace(c: char) -> bool {
 pub(super) fn trim(s: &str) -> &str {
     s.trim_matches(whitespace)
 }
+/// Strip comments in source order. Only block-comment state crosses physical
+/// lines; quoted text and standalone @ descriptions remain literal.
+pub(super) fn strip_comments(line: &str, in_block: &mut bool) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    let mut quote = None;
+    let mut leading = true;
+    while let Some(c) = chars.next() {
+        if *in_block {
+            if c == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                *in_block = false;
+            }
+            continue;
+        }
+        if let Some(end) = quote {
+            out.push(c);
+            if c == '\\' {
+                if let Some(escaped) = chars.next() {
+                    out.push(escaped);
+                }
+            } else if c == end {
+                quote = None;
+            }
+            continue;
+        }
+        if leading && c == '@' {
+            out.push(c);
+            out.extend(chars);
+            break;
+        }
+        if c == '/' {
+            match chars.peek() {
+                Some('/') => break,
+                Some('*') => {
+                    chars.next();
+                    out.push(' ');
+                    *in_block = true;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        if matches!(c, '\'' | '"') {
+            quote = Some(c);
+        }
+        leading &= whitespace(c);
+        out.push(c);
+    }
+    out
+}
 pub(super) fn tokens(s: &str) -> impl Iterator<Item = &str> {
     s.split(whitespace).filter(|s| !s.is_empty())
 }

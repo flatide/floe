@@ -523,7 +523,6 @@ struct Parser<'a> {
     macro_depth: i64,
     macro_pending: bool,
     verbatim_depth: i64,
-    in_comment: bool,
     icont: bool,
     cont: Option<Continuation>,
     acont: Option<(String, Option<String>)>,
@@ -552,7 +551,6 @@ impl<'a> Parser<'a> {
             macro_depth: 0,
             macro_pending: false,
             verbatim_depth: 0,
-            in_comment: false,
             icont: false,
             cont: None,
             acont: None,
@@ -625,7 +623,7 @@ impl<'a> Parser<'a> {
         Ok((false, None))
     }
     fn directive(&mut self, s: &str) -> Result<()> {
-        let toks: Vec<_> = tokens(s.split_once("//").map_or(s, |(a, _)| a)).collect();
+        let toks: Vec<_> = tokens(s).collect();
         let Some(head) = toks.first() else {
             return Ok(());
         };

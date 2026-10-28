@@ -1118,6 +1118,58 @@ fn read_lines(path: &str) -> std::io::Result<Vec<String>> {
     Ok(text.split_inclusive('\n').map(|l| l.to_string()).collect())
 }
 
+/// Read comments in lexical order: a // banner may itself contain /*.
+/// Block state belongs to one file; quoted text and @ descriptions are literal.
+fn strip_comments(line: &str, in_block: &mut bool) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.char_indices().peekable();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut only_space = true;
+    while let Some((i, c)) = chars.next() {
+        if *in_block {
+            if c == '*' && chars.peek().map(|&(_, next)| next) == Some('/') {
+                chars.next();
+                *in_block = false;
+            }
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        if c == '@' && only_space {
+            out.push_str(&line[i..]);
+            break;
+        }
+        if c == '/' {
+            match chars.peek().map(|&(_, next)| next) {
+                Some('/') => break,
+                Some('*') => {
+                    chars.next();
+                    *in_block = true;
+                    out.push(' ');
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        if c == '\'' || c == '"' {
+            quote = Some(c);
+        }
+        only_space &= py_isspace(c);
+        out.push(c);
+    }
+    out
+}
+
 // ------------------------------------------------------------- the parser
 
 pub struct Options {
@@ -1151,8 +1203,6 @@ struct Parser {
     macro_pending: bool,
     /// >0: inside a VERBATIM/Tcl block
     verbatim_depth: i64,
-    /// inside a /* ... */ banner
-    in_comment: bool,
     /// last statement was IGNORED: its wrapped continuation lines are
     /// classified quietly too
     icont: bool,
@@ -1259,8 +1309,7 @@ impl Parser {
     }
 
     fn directive(&mut self, s: &str) {
-        // comments ride on directive lines too: `#DEFINE W 5 // um`
-        let s = py_strip(s.split("//").next().unwrap_or(""));
+        let s = py_strip(s);
         if s.is_empty() {
             return;
         }
@@ -1351,39 +1400,10 @@ impl Parser {
         self.d.stats.add("files", 1);
         let mut sub_chain: Vec<String> = chain.to_vec();
         sub_chain.push(real);
+        let mut in_comment = false;
         for line in &lines {
             self.d.stats.add("lines", 1);
-            let mut s: String = py_strip(line).to_string();
-            if s.is_empty() {
-                continue;
-            }
-            // /* ... */ block comments
-            if self.in_comment {
-                match s.find("*/") {
-                    None => continue,
-                    Some(j) => {
-                        s = py_strip(&s[j + 2..]).to_string();
-                        self.in_comment = false;
-                        if s.is_empty() {
-                            continue;
-                        }
-                    }
-                }
-            }
-            while !s.starts_with('@') && s.contains("/*") {
-                let i = s.find("/*").unwrap();
-                match s[i + 2..].find("*/") {
-                    None => {
-                        s = py_rstrip(&s[..i]).to_string();
-                        self.in_comment = true;
-                        break;
-                    }
-                    Some(off) => {
-                        let j = i + 2 + off;
-                        s = py_strip(&format!("{} {}", &s[..i], &s[j + 2..])).to_string();
-                    }
-                }
-            }
+            let mut s = py_strip(&strip_comments(line, &mut in_comment)).to_string();
             if s.is_empty() {
                 continue;
             }
@@ -1393,12 +1413,6 @@ impl Parser {
             }
             if !self.active() {
                 continue;
-            }
-            if !s.starts_with('@') {
-                s = py_strip(s.split("//").next().unwrap_or("")).to_string();
-                if s.is_empty() {
-                    continue;
-                }
             }
             if !self.sub_names.is_empty() && !s.starts_with('@') {
                 s = self.substitute(&s);
@@ -1468,9 +1482,8 @@ impl Parser {
             self.d.warnings.push(format!("unclosed VERBATIM/Tcl block at end of {} (brace drift?)", base));
             self.verbatim_depth = 0;
         }
-        if self.in_comment {
+        if in_comment {
             self.d.warnings.push(format!("unclosed /* comment at end of {}", base));
-            self.in_comment = false;
         }
         if !self.cond.is_empty() && chain.is_empty() {
             self.d.warnings.push("unbalanced #IFDEF at end of deck".to_string());
@@ -1922,7 +1935,6 @@ pub fn parse_deck(path: &str, opts: &Options) -> Result<Deck, String> {
         macro_depth: 0,
         macro_pending: false,
         verbatim_depth: 0,
-        in_comment: false,
         icont: false,
         follow_verbatim: opts.follow_verbatim,
         env_switches: opts.env_switches,
@@ -2162,6 +2174,42 @@ pub fn svrf_cmd(args: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn comments_follow_lexical_order_and_preserve_literals() {
+        for (line, want) in [
+            ("//***********", ""),
+            ("//* TEST FILE", ""),
+            ("LAYER M 1 // /* never closed", "LAYER M 1 "),
+            ("INT/**/M < .1", "INT M < .1"),
+            ("/* // } */ //********", "  "),
+            (
+                r#"#DEFINE URL "http://host/*literal*/" // tail"#,
+                r#"#DEFINE URL "http://host/*literal*/" "#,
+            ),
+            (r#"#DEFINE ESC "a\"//text /* text" // tail"#, r#"#DEFINE ESC "a\"//text /* text" "#),
+            (r#"#DEFINE ESC 'a\'//text /* text' // tail"#, r#"#DEFINE ESC 'a\'//text /* text' "#),
+            (r#"INCLUDE "dir\\" // tail"#, r#"INCLUDE "dir\\" "#),
+            ("  @ 설명 // /* literal", "  @ 설명 // /* literal"),
+            ("/* banner */ @ 설명 // /* literal", "  @ 설명 // /* literal"),
+            ("한글 /* comment */ 값 // tail", "한글   값 "),
+        ] {
+            let mut in_block = false;
+            assert_eq!(strip_comments(line, &mut in_block), want, "{line}");
+            assert!(!in_block, "{line}");
+        }
+    }
+
+    #[test]
+    fn block_comments_continue_across_lines() {
+        let mut in_block = false;
+        assert_eq!(strip_comments("LAYER M 1 /* start", &mut in_block), "LAYER M 1  ");
+        assert!(in_block);
+        assert_eq!(strip_comments("// \" @ } still comment", &mut in_block), "");
+        assert!(in_block);
+        assert_eq!(strip_comments("*/ LAYER N 2 // /* ignored", &mut in_block), " LAYER N 2 ");
+        assert!(!in_block);
+    }
 
     #[test]
     fn floats_print_as_python_repr() {
