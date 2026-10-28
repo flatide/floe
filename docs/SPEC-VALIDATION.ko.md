@@ -44,7 +44,7 @@ sh tools/validate_rust.sh --only quick path/to.oas
       않고 `RUST VALIDATION: ALL OK (--changed; gates: none)`으로 끝난다.
     - `tools/validate_<게이트>.py`: 그 게이트. 여러 스크립트를 묶는 DRC 게이트는 별도 경로 표를 먼저 적용한다.
       `validate_drc_cluster_spatial.py`는 `drc_clusters`, points·marker GUI·selection·status_bulk·spatial은
-      `drc_markers`, delta·native·analysis·prepare_cli·large_gui는 `drc_delta`다. 다른 테스트의 GUI 픽스처를
+      `drc_markers`, description·delta·native·analysis·prepare_cli·large_gui는 `drc_delta`다. 다른 테스트의 GUI 픽스처를
       제공하는 `validate_drc_clusters.py`와 `validate_drc_marker_gui.py`는 `drc_delta`도 실행한다.
       `validate_drc_review*.py`, `validate_drc_team*.py`, `floe/drc_review.py`,
       `floe/drc_team.py`, `floe/drc_migrate.py`는 `drc_review`를 실행하며,
@@ -56,7 +56,7 @@ sh tools/validate_rust.sh --only quick path/to.oas
       `gui.py`는 DRC GUI가 들어 있는 `drc_review`, `drc_clusters`, `drc_markers`, `drc_delta`도 실행한다.
       제품 DRC 지원 모듈 `fe_embed.py`는 `drc_ice`, `drc_delta`, `hangul.py`는 `drc_ice`를 추가한다.
     - DRC 공통 reader·캐시 identity(`drc.py`, `drc_analysis.py`)는 DRC 게이트 전체,
-      `drc_clusters.py`는 네 DRC GUI 게이트, delta·prepare 모듈은 `drc_delta`,
+      `drc_clusters.py`는 네 DRC GUI 게이트, description·delta·prepare 모듈은 `drc_delta`,
       marker·points·spatial·query·selection·native 모듈은 `drc_markers`, `drc_delta`를 실행한다.
       `svrf.py`는 `drc_ice`, `svrf`, `drc_delta`다. `sample.db`·`sample.svrf.rules.json` 변경도
       이 파일을 사용하는 준비 CLI·분석 테스트가 든 `drc_delta`를 실행한다.
@@ -862,6 +862,11 @@ sh tools/validate_rust.sh --only quick path/to.oas
   상태줄의 다섯 자리 표시도 검사한다.
   area 전용/혼합 검사의 면적 라벨, 사각형·삼각형·오목 폴리곤의 실제
   면적, GUI 라벨 수명주기 및 PNG 텍스트 주석도 검사한다.
+  `validate_drc_description.py`는 설명의 최소/최대 요구와 위반 조건 구분,
+  단위 정규화, 룰 유형 보완, 불명확·조건부 설명과 CD 예시 거절을 검증한다.
+  `validate_drc_analysis.py`와 `validate_drc_prepare_cli.py`는 `--svrf` 없는
+  실제 Rust 전처리·추정 플래그·캐시 재사용, SVRF 우선순위, 해석 불가 스킵,
+  개인 검토 파일 무변경, 빈 룰/공간 전용 준비에서 설명 해석 생략을 검사한다.
 
 `sh tools/validate_rust.sh --only drc_clusters,drc_markers,drc_delta`로 실행한다.
 

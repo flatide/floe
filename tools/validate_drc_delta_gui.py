@@ -1,4 +1,4 @@
-"""Headless integration gate for the SVRF delta grouping controls.
+"""Headless integration gate for rule-aware delta grouping controls.
 
 Runs real Viewer methods with real numeric group memberships and simple
 widget adapters; no GTK window or graphics context is created.
@@ -138,6 +138,173 @@ def rule_tree_fixture():
     viewer._drc_delta_worker.poll.return_value = (viewer._drc_delta_key, groups, None)
     viewer._drc_delta_poll()
     return viewer
+
+
+class DescriptionDeltaViewerTests(unittest.TestCase):
+    @staticmethod
+    def description_viewer(description, errors=None):
+        viewer = use_auto(fixture(errors or [rect(0.02, 0.1)]))
+        viewer._drc_rmeta = None
+        viewer._drc.checks[0].desc = description
+        return viewer
+
+    @staticmethod
+    def finish_request(viewer):
+        key, db, ci, constraints, step, mode, cluster = (
+            viewer._drc_delta_worker.submit.call_args.args)
+        groups = delta.DeltaIndex(db, ci, constraints).measure().group(
+            step, mode=mode, cluster=cluster)
+        viewer._drc_delta_worker.poll.return_value = (key, groups, None)
+        viewer._drc_delta_poll()
+        viewer._drc_delta_worker.poll.return_value = None
+        return groups
+
+    def test_description_without_svrf_drives_groups_detail_and_selected_ruler(self):
+        viewer = self.description_viewer("Minimum width 0.05000 um")
+        self.assertTrue(viewer._drc_delta_sync())
+        constraints = viewer._drc_delta_worker.submit.call_args.args[3]
+        self.assertEqual([(c["metric"], c["op"], c["value"]) for c in constraints],
+                         [("width", "<", 0.05)])
+        self.assertEqual(constraints[0]["source"], "description")
+        groups = self.finish_request(viewer)
+        self.assertIs(viewer._drc_delta_groups, groups)
+        self.assertEqual(groups.index.measured_ticks.tolist(), [2000])
+        self.assertEqual(groups.estimated_total, 1)
+        self.assertEqual(groups[0].page(0, 1000), [0])
+        error = viewer._drc.checks[0].errors[0]
+        text = "\n".join(viewer._drc_meta_lines("R", error))
+        self.assertIn("estimated CD: 0.02000 um vs < 0.05000", text)
+        self.assertIn("Δ 0.03000 (60.00000%)", text)
+        self.assertIn("description", text.lower())
+        rulers = viewer._drc_cd_ruler(error, "R")
+        self.assertEqual(len(rulers), 1)
+        x0, y0, x1, y1 = rulers[0]
+        self.assertAlmostEqual(math.hypot(x1 - x0, y1 - y0) * viewer.dbu, 0.02)
+        self.assertIsNone(viewer._drc_rmeta, "measurement inference must not invent SVRF metadata")
+
+    def test_description_area_uses_same_value_for_groups_detail_and_annotation(self):
+        error = rect(0.04, 0.1)
+        viewer = self.description_viewer("Area < 0.01000 um^2", [error])
+        viewer._drc_delta_sync()
+        groups = self.finish_request(viewer)
+        self.assertEqual(groups.index.measured_ticks.tolist(), [400])
+        self.assertEqual(groups.estimated_total, 1)
+        text = "\n".join(viewer._drc_meta_lines("R", error))
+        self.assertIn("estimated CD: 0.00400 um2 vs < 0.01000", text)
+        self.assertIn("Δ 0.00600 (60.00000%)", text)
+        rulers = viewer._drc_cd_ruler(error, "R")
+        self.assertEqual(len(rulers), 1)
+        self.assertIsInstance(rulers[0], gui._DrcAreaLabel)
+        self.assertEqual(rulers[0].text, "area 0.00400 µm²")
+
+    def test_loading_svrf_replaces_description_bound_and_rejects_old_group_reply(self):
+        viewer = self.description_viewer("Minimum width 0.05000 um")
+        viewer._drc_delta_sync()
+        old_key = viewer._drc_delta_key
+        old_groups = self.finish_request(viewer)
+        previous_worker = viewer._drc_delta_worker
+        viewer._drc_types_rebuild = Mock()
+        viewer._drc_delta_scope_refresh = Mock()
+        metadata = {"checks": {"R": {"constraints": [constraint(bound=0.08)]}}}
+        worker = Mock()
+        worker.poll.return_value = None
+        with patch("floe.svrf.load_rules", return_value=metadata), \
+                patch("floe.drc_delta_worker.DeltaWorker", return_value=worker):
+            self.assertTrue(viewer._drc_rules_load("/tmp/description-test.rules.json"))
+        previous_worker.close.assert_called_once()
+        self.assertNotEqual(old_key, viewer._drc_delta_key)
+        self.assertEqual(worker.submit.call_args.args[3], metadata["checks"]["R"]["constraints"])
+        worker.poll.return_value = (old_key, old_groups, None)
+        viewer._drc_delta_poll()
+        self.assertIsNone(viewer._drc_delta_groups)
+        groups = self.finish_request(viewer)
+        self.assertIs(viewer._drc_delta_groups, groups)
+        text = "\n".join(viewer._drc_meta_lines("R", viewer._drc.checks[0].errors[0]))
+        self.assertIn("vs < 0.08000", text)
+        self.assertIn("Δ 0.06000 (75.00000%)", text)
+        self.assertNotIn("description", text.lower())
+
+    def test_description_does_not_invent_layers_and_keeps_explicit_svrf_layers(self):
+        viewer = self.description_viewer("Minimum width 0.05000 um")
+        viewer.meta = {"layers": [{"layer": 1, "datatype": 0},
+                                  {"layer": 7, "datatype": 0}]}
+        viewer.visible = {(1, 0), (7, 0)}
+        viewer._layer_rows = {key: Mock() for key in viewer.visible}
+        viewer._drc_lyr_saved = None
+        viewer._drc_delta_sync()
+        self.assertIsNone(viewer._drc_isolate_layers("R"))
+        self.assertIsNone(viewer._drc_lyr_saved)
+        for row in viewer._layer_rows.values():
+            row.set_active.assert_not_called()
+        error = viewer._drc.checks[0].errors[0]
+        text = "\n".join(viewer._drc_meta_lines("R", error))
+        self.assertNotIn("layers:", text)
+        self.assertNotIn("gds:", text)
+        # A sidecar may supply layers without a supported measurement.
+        # Its layer data remains authoritative alongside description CD.
+        metadata = {"checks": {"R": {"layers": ["M7"], "source_gds": [[7, 0]]}}}
+        viewer._drc_rmeta = metadata
+        viewer._drc_delta_sync()
+        self.assertEqual(viewer._drc_delta_worker.submit.call_args.args[3][0]["source"],
+                         "description")
+        self.assertEqual(viewer._drc_isolate_layers("R"), 1)
+        viewer._layer_rows[(1, 0)].set_active.assert_called_once_with(False)
+        viewer._layer_rows[(7, 0)].set_active.assert_called_once_with(True)
+        text = "\n".join(viewer._drc_meta_lines("R", error))
+        self.assertIn("layers: M7", text)
+        self.assertIn("gds: 7/0", text)
+        self.assertNotIn("constraints", metadata["checks"]["R"],
+                         "fallback must not mutate the SVRF layer record")
+
+    def test_absent_or_ambiguous_description_does_not_invent_cd(self):
+        for description in ("", "Width < 0.05000 um or Width > 0.08000 um"):
+            with self.subTest(description=description):
+                viewer = self.description_viewer(description)
+                viewer._drc_delta_sync()
+                viewer._drc_delta_worker.submit.assert_not_called()
+                self.assertFalse(viewer._drc_delta_busy)
+                self.assertIsNone(viewer._drc_delta_groups)
+                error = viewer._drc.checks[0].errors[0]
+                text = "\n".join(viewer._drc_meta_lines("R", error))
+                self.assertNotIn("measured:", text)
+                self.assertNotIn("estimated CD:", text)
+                self.assertEqual(len(viewer._drc_cd_ruler(error, "R")), 2)
+
+    def test_switching_db_replaces_cached_description_with_same_rule_name(self):
+        viewer = self.description_viewer("Minimum width 0.05000 um")
+        viewer._drc_delta_sync()
+        old_key = viewer._drc_delta_key
+        viewer._drc = Database([rect(0.02, 0.1)])
+        viewer._drc.checks[0].desc = "Minimum width 0.08000 um"
+        viewer._drc_delta_sync()
+        self.assertNotEqual(viewer._drc_delta_key, old_key)
+        self.assertEqual(viewer._drc_delta_worker.submit.call_args.args[3][0]["value"], 0.08)
+        text = "\n".join(viewer._drc_meta_lines("R", viewer._drc.checks[0].errors[0]))
+        self.assertIn("vs < 0.08000", text)
+
+    def test_description_is_parsed_once_across_group_detail_and_ruler_refreshes(self):
+        from floe.drc_description import constraints_for
+        viewer = self.description_viewer("Minimum width 0.05000 um")
+        error = viewer._drc.checks[0].errors[0]
+        with patch("floe.drc_description.constraints_for", wraps=constraints_for) as parse:
+            viewer._drc_delta_sync()
+            for _ in range(3):
+                viewer._drc_meta_lines("R", error)
+                viewer._drc_cd_ruler(error, "R")
+                viewer._drc_delta_sync()
+            parse.assert_called_once()
+        viewer._drc_delta_worker.submit.assert_called_once()
+
+    def test_duplicate_rule_names_with_conflicting_descriptions_remain_unknown(self):
+        viewer = self.description_viewer("Minimum width 0.05000 um")
+        error = viewer._drc.checks[0].errors[0]
+        viewer._drc.checks.append(SimpleNamespace(name="R", errors=[error],
+            desc="Maximum width 0.08000 um"))
+        viewer._drc_delta_sync()
+        viewer._drc_delta_worker.submit.assert_not_called()
+        text = "\n".join(viewer._drc_meta_lines("R", error))
+        self.assertNotIn("estimated CD:", text)
+        self.assertEqual(len(viewer._drc_cd_ruler(error, "R")), 2)
 
 
 class DeltaViewerTests(unittest.TestCase):

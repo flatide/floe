@@ -25,15 +25,13 @@ def prepare(source, rules=None, selected=(), spatial=True, delta=True, report=pr
     from .drc_delta import DeltaIndex
     from .drc_delta_cache import process_measure, prepare_group_cache
     from .drc_native import worker_count
+    from .drc_description import constraints_for
     from .drc_spatial import prepare_rule
     from .svrf import load_rules
     if backend not in ("auto", "rust", "python"):
         raise ValueError("unknown DRC preprocessing backend %r" % backend)
     jobs = worker_count(jobs)
-    if delta and not rules:
-        raise ValueError("--svrf <rules.json> is required for CD/delta preprocessing; "
-                         "use --spatial-only for geometry alone")
-    metadata = load_rules(rules).get("checks", {}) if delta else {}
+    metadata = load_rules(rules) if delta and rules is not None else None
     db = open_pack(source)
     try:
         names = set(selected)
@@ -67,10 +65,12 @@ def prepare(source, rules=None, selected=(), spatial=True, delta=True, report=pr
                 prepare_rule(db, ci, progress=spatial_progress)
                 report("  spatial ready")
             if delta:
-                constraints = metadata.get(check.name, {}).get("constraints") or []
+                constraints = constraints_for(check, metadata)
                 if not constraints:
-                    report("  CD skipped: no matching measurement constraints")
+                    report("  CD skipped: no matching SVRF or unambiguous description constraints")
                     continue
+                if any(con.get("source") == "description" for con in constraints):
+                    report("  CD source: DB description (estimated)")
                 index = DeltaIndex(db, ci, constraints)
                 process_measure(index, progress=lambda value: report("  " + value),
                                 backend=backend, jobs=jobs)
@@ -86,7 +86,8 @@ def prepare(source, rules=None, selected=(), spatial=True, delta=True, report=pr
 
 def add_arguments(parser):
     parser.add_argument("db", help="DRC .db with a fresh pack, or the .tray pack itself")
-    parser.add_argument("--svrf", metavar="RULES_JSON", help="SVRF .rules.json metadata")
+    parser.add_argument("--svrf", metavar="RULES_JSON",
+                        help="optional SVRF .rules.json; otherwise use supported DB descriptions")
     parser.add_argument("--rule", action="append", default=[], metavar="NAME",
                         help="prepare only this rule (repeatable); default: all rules")
     parser.add_argument("--jobs", type=int, metavar="N",

@@ -170,7 +170,7 @@ SITE="$("$PYBIN" -c 'import site;print(site.getsitepackages()[0])')"
 # The product combines the GTK/controller client with the DRC reader and
 # analysis workers. The frozen renderer and CLI remain in floe_oracle.
 # The explicit list also includes modules launched with python -m.
-FLOE2_PRODUCT_FILES="__init__.py gtkview.py viewcli.py gui.py gtkservice.py vfsclient.py instance.py product.py hangul.py fillpat.py colornames.def fillpatterns.def cachepath.py indexlock.py svrf.py fe_embed.py drc.py drc_analysis.py drc_clusters.py drc_delta.py drc_delta_cache.py drc_delta_worker.py drc_marker_style.py drc_marker_worker.py drc_markers.py drc_native.py drc_points.py drc_prepare.py drc_query_worker.py drc_review.py drc_team.py drc_migrate.py drc_selection.py drc_spatial.py"
+FLOE2_PRODUCT_FILES="__init__.py gtkview.py viewcli.py gui.py gtkservice.py vfsclient.py instance.py product.py hangul.py fillpat.py colornames.def fillpatterns.def cachepath.py indexlock.py svrf.py fe_embed.py drc.py drc_analysis.py drc_clusters.py drc_delta.py drc_delta_cache.py drc_delta_worker.py drc_description.py drc_marker_style.py drc_marker_worker.py drc_markers.py drc_native.py drc_points.py drc_prepare.py drc_query_worker.py drc_review.py drc_team.py drc_migrate.py drc_selection.py drc_spatial.py"
 rm -rf "$SITE/floe" "$SITE/floe2" "$SITE/floe_oracle"
 mkdir -p "$SITE/floe"
 for f in $FLOE2_PRODUCT_FILES; do cp "$REPO/floe/$f" "$SITE/floe/$f"; done
@@ -578,6 +578,8 @@ info/render/clip/probe/drc/jobdeck 명령만 - 뷰어는 floe2 view, KLayout
     /opt/${FLOE_PORTABLE_PRODUCT}-portable/selfcheck
     /opt/${FLOE_PORTABLE_PRODUCT}-portable/floe2 view /path/to/chip.oas
     /opt/${FLOE_PORTABLE_PRODUCT}-portable/floe2 index /path/to/chip.oas
+    # SVRF 없이 DB description으로 CD 준비; 선택적으로 --svrf로 룰 메타데이터 지정
+    /opt/${FLOE_PORTABLE_PRODUCT}-portable/runtime/bin/floe-index drc-prepare /path/to/results.db --jobs 4
     /opt/${FLOE_PORTABLE_PRODUCT}-portable/runtime/bin/floe-index drc-prepare /path/to/results.db --svrf /path/to/deck.rules.json --jobs 4
     # KLayout 포함 floe-portable에서만 (동결 floe 셸, 명령만):
     /opt/floe-portable/floe render /path/to/chip.oas --out frame.png

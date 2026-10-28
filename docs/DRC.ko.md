@@ -34,6 +34,10 @@ rust/target/release/floe-index drc results.db [--jobs N]
 # 룰덱 메타 (새 덱은 --scan 먼저; 실런과 동일한 -D 세트 필수)
 rust/target/release/floe-index svrf deck.cal --scan
 rust/target/release/floe-index svrf deck.cal -D SWITCH...
+# 공간·CD/델타 전처리: SVRF가 없으면 해석 가능한 DB description을 사용
+rust/target/release/floe-index drc-prepare results.db --jobs 4
+# SVRF의 측정 조건이 있으면 우선 사용하고, 없는 룰은 description으로 보완
+rust/target/release/floe-index drc-prepare results.db --svrf deck.cal.rules.json --jobs 4
 # 실행
 rust/target/release/floe2 view chip.oas --drc results.db
 ```
@@ -429,6 +433,24 @@ CD는 에러 마커에서 재측정한다. 직사각형은 가로·세로를 후
 선택값·후보·선택 이유를 표시한다. eqDRC 데이터는 사용하지 않는다.
 그 외 더블클릭 레이어 격리와 룰 유형 필터의 분류 원천.
 
+**DB description을 이용한 CD 측정**(2026-10-28): GTK 뷰어와
+`floe-index drc-prepare`는 해당 룰의 SVRF 측정 조건이 없으면 `.db`의
+description에서 명확한 측정 종류·비교 조건·기준값·단위를 추출한다.
+description은 `.tray`에도 보존되므로 새 팩 포맷이나 원본 SVRF가 필요하지 않다.
+기존 SVRF 조건이 있으면 그대로 우선 사용하며, 지원하지 못하는 SVRF 조건을
+설명으로 덮어쓰지 않는다. 원천 레이어 추출·격리는 계속 SVRF 메타데이터를 사용한다.
+
+예를 들어 `Notch < 0.05000 um`, `Area < 0.01000 um^2`는 위반 조건으로,
+`Minimum width 0.05000 um`은 최소 요구에 못 미치는 `< 0.05000` 조건으로
+정규화한다. 실제 CD는 설명에 적힌 숫자를 복사하지 않고 에러 도형에서 측정한다.
+단위가 없거나 조건부·상충하는 조건·변수 등으로 해석이 불명확하면 해당 룰의
+CD 전처리를 건너뛴다. 설명의 CD 예시·예상 델타·waiver 문구는 기준값으로 쓰지 않는다.
+설명에서 얻은 조건을 사용하는 측정값은 설명 기반 추정으로 표시하며,
+사각형의 후보 선택과 소수점 다섯 자리 계산은 기존 경로를 그대로 사용한다.
+`drc-prepare`의 `--svrf`는 선택 사항이고, 명시적으로 지정한 잘못된 메타데이터는
+오류로 보고한다. `--spatial-only`는 설명이나 SVRF 측정 조건을 읽지 않는다.
+설명 해석은 에러마다 반복하지 않으며, 빈 룰은 기존처럼 즉시 건너뛴다.
+
 notch(`EXTERNAL … NOTCH`)와 두 레이어 overlap(`INTERNAL A B …`)도
 동일한 마커 거리 측정 경로를 사용한다. `ENCLOSURE`는 enclosure와
 extension 검사를 함께 포함하므로 둘을 문장만으로 임의 분리하지 않는다.
@@ -437,7 +459,7 @@ extension 검사를 함께 포함하므로 둘을 문장만으로 임의 분리�
 **사각형 CD 룰러**(2026-10-06): 가로·세로 각각에 오류 조건을 적용한다.
 한 방향만 조건에 맞으면 해당 룰러만, 양쪽 모두 맞으면 두 룰러를 표시한다.
 이는 그룹 계산에서 더 불리한 CD 한 개를 선택하는 정책과 별개다.
-메타데이터가 없거나 미해석 제약·거리/형상 옵션이 남거나 맞는 방향을 찾지 못하면
+SVRF와 description 모두에서 조건을 얻지 못하거나 미해석 제약·거리/형상 옵션이 남거나 맞는 방향을 찾지 못하면
 두 방향을 유지한다. **area 전용 룰은 길이 룰러 대신 실제 폴리곤 면적을
 `area 0.12345 µm²` 형식으로 표시한다.** 바운딩 박스 면적이 아니라
 상세·그룹 계산과 같은 신발끈 면적이며, 삼각형·오목 폴리곤에도 적용한다.
@@ -452,7 +474,7 @@ area와 치수 검사가 섞인 룰은 면적 라벨과 기존 길이 룰러를 
 `REGION`, `OPPOSITE` 등의 형상·거리 조건과 `RECTANGLE ENCLOSURE`의
 다중측면 조건을 Calibre처럼 재계산하는 기능은 포함하지 않는다.
 
-**측정 차이 그룹**(2026-10-05) — SVRF 메타데이터가 있는 룰을
+**측정 차이 그룹**(2026-10-05) — SVRF 또는 description에서 측정 조건을 얻은 룰을
 선택하면 에러 그리드 위에서 `Δ absolute` 그룹화가 자동으로 활성화된다.
 `Δ ratio (%)`로 기준을 바꾸거나 `no grouping`으로 해제할 수 있다.
 

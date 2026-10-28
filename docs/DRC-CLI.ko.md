@@ -41,12 +41,15 @@ no-op. 좌표 토큰이 정수가 아닌 db는 명확한 메시지와 함께 거
 ### 대규모 룰의 공간·CD/델타 사전 준비
 
 ```bash
+# SVRF 없이 DB description의 명확한 측정 조건으로 준비
+floe-index drc-prepare results.db
+# SVRF 조건 우선, 조건이 없는 룰은 description으로 보완
 floe-index drc-prepare results.db --svrf deck.svrf.rules.json
 # Rust CD 측정을 사용하고 한 룰 안의 좌표 블록을 작업자 4개로 병렬 처리
 floe-index drc-prepare results.db --svrf deck.svrf.rules.json --backend rust --jobs 4
 # 특정 룰만 준비 (--rule 반복 가능)
 floe-index drc-prepare results.db --svrf deck.svrf.rules.json --rule M1.SPACE
-# SVRF 없이 공간 인덱스만 준비
+# CD 측정 없이 공간 인덱스만 준비
 floe-index drc-prepare results.db --spatial-only
 ```
 
@@ -57,6 +60,11 @@ floe-index drc-prepare results.db --spatial-only
 완료된 캐시는 재실행 때 사용한다. 진행 중인 룰은 다시 준비한다.
 실제 에러가 0개인 룰은 전처리·캐시 생성·자식 프로세스 실행을 건너뛰고,
 완료 메시지에서 준비한 룰 수와 건너뛴 룰 수를 따로 표시한다.
+`--svrf`는 선택 사항이다. description의 측정 종류·기준값·단위·위반 방향이
+명확한 경우에만 CD/델타를 준비하며, 불명확한 룰은 `CD skipped`로 보고한다.
+설명 기반 값은 추정으로 표시하고 실제 CD는 에러 도형에서 측정한다.
+기존 SVRF 측정 조건이 있으면 우선 사용하고, 레이어 매핑은 description에서
+추측하지 않는다. 명시적으로 지정한 SVRF 메타데이터의 읽기 실패는 오류다.
 
 `floe-index drc-prepare`는 Rust CD 엔진과 기존 Python/NumPy 캐시 관리 계층을
 함께 실행한다. Portable에서는 `runtime/bin/floe-index` 옆의 Python을 자동으로

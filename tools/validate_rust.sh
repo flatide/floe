@@ -119,7 +119,7 @@ gates_for() {
             echo drc_review ;;
         tools/validate_drc_points.py|tools/validate_drc_selection.py|tools/validate_drc_status_bulk.py|tools/validate_drc_spatial.py)
             echo drc_markers ;;
-        tools/validate_drc_delta*.py|tools/validate_drc_native.py|tools/validate_drc_analysis.py|tools/validate_drc_prepare_cli.py|tools/validate_drc_large_gui.py)
+        tools/validate_drc_delta*.py|tools/validate_drc_description.py|tools/validate_drc_native.py|tools/validate_drc_analysis.py|tools/validate_drc_prepare_cli.py|tools/validate_drc_large_gui.py)
             echo drc_delta ;;
         tools/validate_drc_ice.py)
             echo drc_ice ;;
@@ -243,7 +243,7 @@ gates_for() {
             echo drc_review ;;
         floe/drc_clusters.py)
             echo "$DRC_VIEW_GATES" ;;
-        floe/drc_delta*.py|floe/drc_prepare.py)
+        floe/drc_delta*.py|floe/drc_description.py|floe/drc_prepare.py)
             echo drc_delta ;;
         floe/drc_markers.py|floe/drc_marker_*.py|floe/drc_points.py|floe/drc_spatial.py|floe/drc_query_worker.py|floe/drc_selection.py|floe/drc_native.py)
             # drc_delta also owns the real-process large GUI integration.
@@ -587,6 +587,7 @@ if gate drc_markers; then RAN="$RAN drc_markers"; lap drc_markers
     .venv/bin/python tools/validate_drc_spatial.py; fi
 # Fixed-precision CD delta groups, worker cancellation, and viewer scopes.
 if gate drc_delta; then RAN="$RAN drc_delta"; lap drc_delta
+    .venv/bin/python tools/validate_drc_description.py
     .venv/bin/python tools/validate_drc_delta.py
     .venv/bin/python tools/validate_drc_delta_worker.py
     .venv/bin/python tools/validate_drc_delta_gui.py

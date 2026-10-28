@@ -20,6 +20,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from floe import cachepath, drc, drc_delta, drc_delta_cache, svrf  # noqa: E402
+from floe.drc_description import constraints_for  # noqa: E402
 
 BIN = ROOT / "rust/target/release/floe-index"
 
@@ -255,11 +256,68 @@ class PrepareCommandTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
                 self.assertNotIn("Traceback", result.stderr)
 
+    def test_description_only_native_preparation_reuses_cache_without_review_files(self):
+        source, packed, rules = self.sample()
+        rules.unlink()
+        original = packed.read_bytes()
+        arguments = (source, "--rule", "M1.NOTCH", "--delta-only", "--backend", "rust")
+        result = self.command(*arguments)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("CD source: DB description (estimated)", result.stderr)
+        self.assertIn("absolute:", result.stderr)
+        self.assertIn("percent:", result.stderr)
+        with patch.dict(os.environ, self.env):
+            db = drc.IcePack(str(packed), review=False)
+            self.addCleanup(db.close)
+            ci = next(i for i, check in enumerate(db.checks) if check.name == "M1.NOTCH")
+            index = drc_delta.DeltaIndex(db, ci, constraints_for(db.checks[ci]))
+            self.assertTrue(drc_delta_cache.load_measurements(index))
+            self.assertEqual(index.measured_ticks.tolist(), [2000, 2000, 2345])
+            self.assertEqual(index.estimated_flags.tolist(), [1, 1, 1])
+            directory = Path(cachepath.drc_analysis_dir(packed))
+            stamps = {path: path.stat().st_mtime_ns
+                      for path in directory.rglob("*") if path.is_file()}
+        warm = self.command(*arguments)
+        self.assertEqual(warm.returncode, 0, warm.stdout + warm.stderr)
+        self.assertEqual({path: path.stat().st_mtime_ns for path in stamps}, stamps)
+        self.assertEqual(packed.read_bytes(), original)
+        self.assertFalse(any(".waive" in path.name or ".review." in path.name
+                             for path in self.folder.rglob("*")))
+
+    def test_description_without_a_bound_is_skipped_and_explicit_svrf_takes_precedence(self):
+        source, packed, rules = self.sample()
+        missing = self.command(source, "--rule", "M1.SPACE.1", "--delta-only")
+        self.assertEqual(missing.returncode, 0, missing.stdout + missing.stderr)
+        self.assertIn("CD skipped:", missing.stderr)
+        self.assertNotIn("groups ready", missing.stderr)
+        # A different explicit bound must determine the cache identity and
+        # measurements, even though the same rule has a usable description.
+        metadata = svrf.load_rules(str(rules))
+        constraints = [{"metric": "notch", "op": "<", "value": 0.08,
+                        "text": "EXTERNAL M1 < 0.08 NOTCH"}]
+        metadata["checks"]["M1.NOTCH"]["constraints"] = constraints
+        rules.write_text(json.dumps(metadata))
+        result = self.command(source, "--svrf", rules, "--rule", "M1.NOTCH", "--delta-only")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("CD source: DB description", result.stderr)
+        with patch.dict(os.environ, self.env):
+            db = drc.IcePack(str(packed), review=False)
+            self.addCleanup(db.close)
+            ci = next(i for i, check in enumerate(db.checks) if check.name == "M1.NOTCH")
+            authoritative = drc_delta.DeltaIndex(db, ci, constraints)
+            self.assertTrue(drc_delta_cache.load_measurements(authoritative))
+            self.assertEqual(authoritative.bound_ticks, (8000,))
+            inferred = drc_delta.DeltaIndex(db, ci, constraints_for(db.checks[ci]))
+            self.assertFalse(drc_delta_cache.load_measurements(inferred))
+        self.assertFalse(any(".waive" in path.name or ".review." in path.name
+                             for path in self.folder.rglob("*")))
+
     def test_preparation_errors_have_clean_failure_exit_codes(self):
         source, _packed, rules = self.sample()
         arguments = [(source, "--spatial-only", "--jobs", "0"),
                      (source, "--svrf", rules, "--rule", "missing rule 없는 룰"),
-                     (source,),
+                     (source, "--svrf", self.folder / "absent.rules.json"),
+                     (source, "--svrf", ""),
                      (self.folder / "absent.db", "--spatial-only")]
         for case in arguments:
             with self.subTest(arguments=case):

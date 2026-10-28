@@ -19,6 +19,7 @@ BIN = ROOT / "rust/target/release/floe-index"
 sys.path.insert(0, str(ROOT))
 from floe import cachepath, drc, drc_analysis, drc_prepare  # noqa: E402
 from floe import drc_delta, drc_delta_cache, drc_spatial, svrf  # noqa: E402
+from floe import drc_description  # noqa: E402
 
 
 class AnalysisTests(unittest.TestCase):
@@ -106,6 +107,23 @@ class AnalysisTests(unittest.TestCase):
         for path, stamp in files.items():
             self.assertEqual(os.stat(path).st_mtime_ns, stamp, "prepared geometry was rebuilt")
 
+    def test_ambiguous_description_is_resolved_once_and_skips_measurement(self):
+        db = drc_prepare.open_pack(self.source)
+        self.addCleanup(db.close)
+        check = next(check for check in db.checks if check.name == "M1.NOTCH")
+        check.desc = "Minimum notch 0.050 um if wire width > 0.100 um"
+        reports = []
+        with patch.object(drc_prepare, "open_pack", return_value=db), \
+                patch.object(drc_description, "constraints_for",
+                             wraps=drc_description.constraints_for) as resolve, \
+                patch.object(drc_delta_cache, "process_measure") as measure:
+            drc_prepare.prepare(self.source, selected=(check.name,), spatial=False,
+                                report=reports.append)
+        self.assertEqual(resolve.call_count, 1)
+        measure.assert_not_called()
+        self.assertTrue(any("CD skipped:" in line for line in reports))
+        self.assertFalse(os.path.exists(drc.waive_autosave_path(self.pack)))
+
 
 class EmptyPreparationTests(unittest.TestCase):
     """Empty checks must not start per-rule analysis, even with SVRF bounds."""
@@ -152,6 +170,7 @@ class EmptyPreparationTests(unittest.TestCase):
         reports = []
         forbidden = AssertionError("empty rule started per-rule analysis")
         with patch.object(drc_spatial, "prepare_rule", side_effect=forbidden), \
+                patch.object(drc_description, "constraints_for", side_effect=forbidden), \
                 patch.object(drc_delta, "DeltaIndex", side_effect=forbidden), \
                 patch.object(drc_delta_cache, "process_measure", side_effect=forbidden), \
                 patch.object(drc_delta_cache, "prepare_group_cache", side_effect=forbidden):
@@ -160,6 +179,17 @@ class EmptyPreparationTests(unittest.TestCase):
         self.assertEqual(reports[-1],
                          "DRC analysis ready: 0 rules prepared; 100 empty rules skipped")
         self.assertLess(len(reports), 6, "empty rules should not produce per-rule progress noise")
+
+    def test_empty_rules_without_svrf_and_spatial_only_skip_description_parsing(self):
+        forbidden = AssertionError("description parsing started for an ineligible rule")
+        with patch.object(drc_description, "constraints_for", side_effect=forbidden):
+            reports = []
+            drc_prepare.prepare(self.empty, report=reports.append)
+            self.assertIn("Skipping 100 empty rules", reports)
+            with patch.object(drc_spatial, "prepare_rule") as spatial:
+                drc_prepare.prepare(self.mixed, rules="absent.rules.json", delta=False,
+                                    report=lambda _: None)
+                self.assertEqual(spatial.call_count, 1)
 
     def test_mixed_selected_and_single_mode_preparation_touch_only_actual_errors(self):
         cases = [

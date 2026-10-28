@@ -1,6 +1,6 @@
 """Bounded Rust CD measurement over existing, read-only DRC packs.
 
-Python compiles SVRF statement chains once. Rust receives only numeric
+Python compiles rule conditions once. Rust receives only numeric
 predicates and fills the same immutable measurement arrays as Python.
 """
 
@@ -71,7 +71,10 @@ def write_plan(index, path):
     selector = index._selector
     with open(path, "wb") as stream:
         stream.write(b"FDRCMS01")
-        stream.write(struct.pack("<BI", selector._uncertain_alternatives,
+        # The plan's global uncertainty flag affects provenance only. An
+        # inferred description must stay estimated even for a unique gap.
+        stream.write(struct.pack("<BI", selector._uncertain_alternatives or
+                                 selector._description_based,
                                  len(selector._chains)))
         for metric, representative, predicates, options in selector._chains:
             ci, op, _original, bound = representative

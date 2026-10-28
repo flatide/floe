@@ -212,6 +212,29 @@ class NativeMeasurementTests(unittest.TestCase):
                     (actual.measured_ticks, actual.constraint_indices, actual.estimated_flags)))
         self.assertEqual(results[0], results[1])
 
+    def test_description_provenance_matches_python_and_has_a_distinct_cache(self):
+        ci = self.by_name["AREA"]
+        original = self.specs[ci][1]
+        inferred = [dict(con, source="description",
+                         description="Area < 0.01000 um^2") for con in original]
+        reference = delta.DeltaIndex(self.db, ci, inferred).measure()
+        actual = cache.process_measure(delta.DeltaIndex(self.db, ci, inferred),
+                                       backend="rust", jobs=2)
+        self.assert_measurement_equal(actual, reference)
+        known = actual.constraint_indices >= 0
+        self.assertTrue(np.any(known))
+        self.assertTrue(np.all(actual.estimated_flags[known]))
+        # A unique area previously measured from authoritative metadata is
+        # not an inferred condition. It must not reuse the description cache.
+        authoritative = self.index("AREA").measure()
+        self.assertFalse(np.any(authoritative.estimated_flags[
+            authoritative.constraint_indices >= 0]))
+        self.assertNotEqual(cache._rule_key(actual), cache._rule_key(authoritative))
+        with patch.object(native, "measure", side_effect=AssertionError("cache rebuilt")):
+            reopened = cache.process_measure(delta.DeltaIndex(self.db, ci, inferred),
+                                              backend="rust", jobs=1)
+        self.assert_measurement_equal(reopened, reference)
+
     def test_seeded_skew_edgepairs_match_python(self):
         rng = np.random.default_rng(20261006)
         shapes = []

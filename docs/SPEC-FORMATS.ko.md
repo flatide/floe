@@ -575,6 +575,15 @@ waive 페이지/rank/변경은 최대 1M 에러 단위 청크를 사용하며 �
   원문; 뷰어가 `svrf.rhs_operands()`로 체인 워크)/`checks`(이름→
   desc·constraints[{metric,op,value,text}]·layers·source_gds·
   unresolved)/`stats`(스킵·CMACRO·경고 — 침묵 절단 금지).
+- **description 측정 조건**(2026-10-28): GTK/CD 전처리에서 해당 룰의
+  `constraints`가 비어 있거나 없으면 팩에 이미 보존된 룰 설명을 해석한다.
+  지원되는 명확한 설명은 같은 `{metric,op,value,text}` 형태로 정규화하되
+  `source: "description"`과 원문 근거 `description`을 함께 둔다.
+  정규화 `text`에는 비교 조건만 넣고 원문의 단위·예시·해설과 분리한다.
+  요구 조건은 위반 조건으로 변환하며 거리/면적 단위는 각각 µm/µm²로 맞춘다.
+  이 정보는 메모리·분석 캐시에 사용하며 `.tray`와 `.rules.json`의 포맷 버전을
+  바꾸지 않는다. 캐시 키에는 출처를 포함한 정규화 제약이 들어가므로 다른
+  기준값이나 SVRF 조건의 측정 캐시와 혼동하지 않는다.
 - 뷰어 연동: .db 로드 시 자동 탐색(체크 desc의 Rule File Pathname
   베이스네임 기준 **db 옆** `<deck>.rules.json` 우선 — 덱 절대
   경로는 Calibre 런 머신 기준이라 뷰잉 머신에 없기 일쑤 — 그다음

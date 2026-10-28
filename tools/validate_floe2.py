@@ -373,7 +373,7 @@ print(json.dumps([instance.APP, instance.socket_address(":77"),
     drc_product = {
         "cachepath.py", "indexlock.py", "svrf.py", "fe_embed.py", "drc.py",
         "drc_analysis.py", "drc_clusters.py", "drc_delta.py", "drc_delta_cache.py",
-        "drc_delta_worker.py", "drc_marker_style.py", "drc_marker_worker.py",
+        "drc_delta_worker.py", "drc_description.py", "drc_marker_style.py", "drc_marker_worker.py",
         "drc_markers.py", "drc_native.py", "drc_points.py", "drc_prepare.py",
         "drc_query_worker.py", "drc_review.py", "drc_team.py", "drc_migrate.py",
         "drc_selection.py", "drc_spatial.py",
