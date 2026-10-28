@@ -144,7 +144,7 @@ LEFT_PANE_PX = 260
 class _DrcPanel(object):
     """Widget refs of the embedded DRC browser (attribute bag)."""
     __slots__ = ("_info", "_review_info", "_conflict", "_conflict_info",
-                 "_rules", "_rstore", "_grid", "_gstore",
+                 "_rules", "_rstore", "_svrf_column", "_grid", "_gstore",
                  "_detail", "_hl", "_wf", "_selv", "_search",
                  "_tf", "_plabel", "_pprev", "_pnext", "_delta_mode",
                  "_delta_step", "_delta_store", "_delta_tree", "_delta_label",
@@ -7211,9 +7211,11 @@ class Viewer:
         # regardless of rule-title widths.
         # A rule with a cluster sidecar has selectable children. Parent
         # rows retain the complete rule, including unclassified errors.
-        rstore = Gtk.TreeStore(str, str, int, object)  # name, count, ci, cluster
+        # Keep the rule/cluster identity columns stable; status is metadata only.
+        rstore = Gtk.TreeStore(str, str, int, object, str, str)
+        # name, count, ci, cluster, SVRF status, tooltip
         rules = Gtk.TreeView(model=rstore)
-        for j, expand in ((0, True), (1, False)):
+        for j, expand in ((0, True), (4, False), (1, False)):
             cell = Gtk.CellRendererText()
             if j == 0:
                 # long rule names truncate so the error count
@@ -7223,9 +7225,12 @@ class Viewer:
             col = Gtk.TreeViewColumn("", cell, text=j)
             col.set_expand(expand)
             rules.append_column(col)
+            if j == 4:
+                win._svrf_column = col
+                col.set_visible(self._drc_rmeta is not None)
         rules.set_headers_visible(False)
         rules.set_enable_search(False)
-        rules.set_tooltip_column(0)
+        rules.set_tooltip_column(5)
         rules.get_selection().connect("changed",
                                       self._on_drc_rule_sel)
         rsc = Gtk.ScrolledWindow()
@@ -8379,6 +8384,7 @@ class Viewer:
         if w is not None:
             w._hl.set_active(False)
             w._rstore.clear()
+            w._svrf_column.set_visible(False)
             w._gstore.clear()
             w._detail.set_text("")
             w._info.set_text("no results database loaded")
@@ -8715,8 +8721,8 @@ class Viewer:
 
     def _drc_rules_load(self, path, silent=False):
         """Attach a <deck>.rules.json metadata sidecar to the open
-        db; the detail pane then shows constraint / measured /
-        source layers per error."""
+        db; show each rule's match status and the detail pane's
+        constraint / measured / source layers per error."""
         db = self._drc
         if db is None:
             if not silent:
@@ -8733,6 +8739,7 @@ class Viewer:
         matched = sum(1 for c in db.checks if c.name in meta)
         self._drc_rmeta = data
         self._drc_rmatch = (matched, len(db.checks))
+        self._drc_svrf_refresh()
         # A replaced deck may define different bounds under the same name.
         # Preserve parent/file-cluster picks, discard obsolete delta scopes.
         self._drc_sels = {key: value for key, value in self._drc_sels.items()
@@ -8782,14 +8789,53 @@ class Viewer:
             return True
         return False
 
+    def _drc_svrf_status(self, name):
+        """Whether this name has loaded metadata, not whether CD is measurable.
+
+        Sidecars contain active checks only, without excluded-rule provenance.
+        Missing names therefore cannot be labelled as definitely IFDEF-disabled.
+        """
+        meta = self._drc_rmeta
+        if meta is None:
+            return "", "SVRF: not loaded"
+        checks = meta.get("checks") or {}
+        if name not in checks:
+            return ("SVRF —", "SVRF: no matching rule in loaded metadata\n"
+                    "Possible causes: #IFDEF/#IFNDEF settings, a different deck, "
+                    "or unsupported syntax. The exclusion reason is not recorded.")
+        detail = "SVRF: applied (rule name matched)"
+        if not (checks[name] or {}).get("constraints"):
+            detail += "\nCD: no parsed measurement constraints"
+        return "SVRF ✓", detail
+
+    def _drc_svrf_refresh(self):
+        """Update visible statuses without changing selection, counts or scopes."""
+        win, db = self._drcwin, self._drc
+        if win is None:
+            return
+        win._svrf_column.set_visible(self._drc_rmeta is not None)
+        if db is None:
+            return
+        for row in win._rstore:
+            # Auto-loading a new DB's metadata may precede rebuilding this tree.
+            name = row[0]
+            status, detail = self._drc_svrf_status(name)
+            row[4] = status
+            row[5] = GLib.markup_escape_text(name + "\n" + detail)
+            for child in row.iterchildren():
+                child[4] = ""
+                child[5] = GLib.markup_escape_text(
+                    child[0] + "\nrule: " + name + "\n" + detail)
+
     def _drc_fill(self, preserve=False):
-        """Rules list: NAME + total/waived counts (user call
+        """Rules list: NAME + SVRF status + total/waived counts (user call
         2026-08-18); under a waive filter rules with no matching
         errors are hidden (2026-08-14). No waived state exists in
         real data yet, so every error counts as Not Waived until
         Calibre's notation is known."""
         win, db = self._drcwin, self._drc
         rstore = win._rstore
+        win._svrf_column.set_visible(self._drc_rmeta is not None)
         keep = (self._drc_open, self._drc_cluster)
         if self._drc_open is not None and self._drc_sel is not None:
             self._drc_sels[self._drc_scope_key()] = self._drc_sel
@@ -8832,8 +8878,11 @@ class Viewer:
             # both are O(1) ([wcount] table - the perf contract)
             wv = (db.status_counts(ci)[0]
                   if hasattr(db, "status_counts") else 0)
+            svrf_status, svrf_detail = self._drc_svrf_status(c.name)
             parent = rstore.append(None, [c.name,
-                           "%d/%d" % (len(c.errors), wv), ci, None])
+                           "%d/%d" % (len(c.errors), wv), ci, None,
+                           svrf_status, GLib.markup_escape_text(
+                               c.name + "\n" + svrf_detail)])
             clusters = (self._drc_clusters.rules.get(ci, ())
                         if self._drc_clusters is not None else ())
             if clusters:
@@ -8844,7 +8893,10 @@ class Viewer:
                             cw if self._drc_wfilter == "waived" else ct - cw)
                 if matching or self._drc_wfilter == "all":
                     rstore.append(parent, [cluster.name, "%d/%d" % (ct, cw),
-                                           ci, cluster])
+                                           ci, cluster, "",
+                                           GLib.markup_escape_text(
+                                               cluster.name + "\nrule: " + c.name
+                                               + "\n" + svrf_detail)])
             shown += 1
         win._rules.set_model(rstore)
         win._rules.get_selection().unselect_all()
@@ -10800,6 +10852,7 @@ class Viewer:
         lines = ["rule: %s" % c.name,
                  "errors: %d (declared %d)"
                  % (len(c.errors), c.declared)]
+        lines.extend(self._drc_svrf_status(c.name)[1].splitlines())
         if self._drc_cluster is not None:
             lines.append("cluster: %s (%d errors)"
                          % (self._drc_cluster.name, self._drc_cluster.total))
@@ -10827,6 +10880,7 @@ class Viewer:
                       2: "reserved"}.get(s, "status %d" % s)
         lines = ["#%d(%d)  [%s]" % (ei + 1, e.num, status),
                  "rule: %s" % c.name]
+        lines.extend(self._drc_svrf_status(c.name)[1].splitlines())
         if hasattr(db, "review_flags"):
             flags = self._drc_review_flags(db, ci, ei)
             if flags is None:
