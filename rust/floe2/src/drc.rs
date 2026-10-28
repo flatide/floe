@@ -18,7 +18,6 @@
 //!   drc_set_note / drc_clear_note {handle, gids[, text]}
 //!   drc_note_export / drc_note_import / drc_waive_export / drc_waive_import {handle, path}
 //!   drc_cd {handle, check, error}; drc_cd_info {constraints, handle+check+error | markers}
-//!   drc_measurement_meta {handle, metadata?}; drc_description_constraints {name, description}
 //!   drc_clusters_load {handle, path?}      the `<db>.clusters` beside the db when no path
 //!   drc_cluster_counts {handle, check}     [[waived, total], ...] of its clusters
 //!   drc_scope_count / drc_scope_page / drc_scope_rank / drc_scope_contains
@@ -418,14 +417,6 @@ impl Drcs {
                 return Ok(if pack.exists() { json!(pack) } else { Value::Null });
             }
             "drc_open" => return self.open(request, cancelled),
-            "drc_description_constraints" => {
-                return Ok(json!(
-                    floe_app_core::drc::description::description_constraints(
-                        text(request, "name")?,
-                        text(request, "description")?
-                    )
-                ));
-            }
             "drc_cd_info" if request.get("markers").is_some() => {
                 let selector = Selector::new(&constraints_of(request)?);
                 let markers = request["markers"]
@@ -571,68 +562,6 @@ impl Session {
     fn request(&mut self, op: &str, request: &Value, cancelled: &AtomicUsize) -> Result<Value> {
         let shared = Arc::clone(&self.shared);
         match op {
-            "drc_measurement_meta" => {
-                let metadata = request.get("metadata").filter(|v| !v.is_null());
-                let mut result = match metadata {
-                    Some(Value::Object(m)) => m.clone(),
-                    None => serde_json::Map::new(),
-                    _ => return Err(Error::input("metadata must be an object")),
-                };
-                let mut checks = match result.get("checks") {
-                    Some(Value::Object(m)) => m.clone(),
-                    None | Some(Value::Null) => serde_json::Map::new(),
-                    _ => return Err(Error::input("metadata checks must be an object")),
-                };
-                let mut inferred: BTreeMap<String, Option<Vec<Value>>> = BTreeMap::new();
-                let mut resolve = |name: &str, desc: &str| {
-                    if checks
-                        .get(name)
-                        .and_then(|c| c.get("constraints"))
-                        .and_then(Value::as_array)
-                        .is_some_and(|c| !c.is_empty())
-                    {
-                        return;
-                    }
-                    let constraints =
-                        floe_app_core::drc::description::constraints_for(name, desc, metadata);
-                    // Name-based detail lookup cannot distinguish duplicate
-                    // checks with different inferred conditions or evidence.
-                    inferred
-                        .entry(name.to_owned())
-                        .and_modify(|old| {
-                            if old.as_ref() != Some(&constraints) {
-                                *old = None;
-                            }
-                        })
-                        .or_insert(Some(constraints));
-                };
-                let opened = shared.opened.lock().unwrap();
-                match &*opened {
-                    Opened::Pack(r) => {
-                        for c in &r.pack.checks {
-                            resolve(&c.name, &c.desc);
-                        }
-                    }
-                    Opened::Ascii(a) => {
-                        for c in &a.checks {
-                            resolve(&c.name, &c.desc);
-                        }
-                    }
-                }
-                for (name, constraints) in inferred {
-                    if let Some(constraints) = constraints.filter(|c| !c.is_empty()) {
-                        let mut check = checks
-                            .get(&name)
-                            .and_then(Value::as_object)
-                            .cloned()
-                            .unwrap_or_default();
-                        check.insert("constraints".into(), json!(constraints));
-                        checks.insert(name, Value::Object(check));
-                    }
-                }
-                result.insert("checks".into(), Value::Object(checks));
-                Ok(Value::Object(result))
-            }
             "drc_errors" => {
                 let (check, start, count) = (
                     number(request, "check")? as usize,

@@ -2526,7 +2526,6 @@ class Viewer:
         self._drc_search = ""       # rule-name substring filter
         self._drc_rmeta = None      # <deck>.rules.json dict (the
                                     # `floe-index svrf` sidecar metadata)
-        self._drc_cd_meta_cache = None  # measurement-only description fallback
         self._drc_rmatch = (0, 0)   # sidecar-matched / db rules
         self._drc_tfilter = "all"   # rule-type filter (svrf metric)
         self._drc_rtypes = None     # rule name -> metric frozenset
@@ -8353,7 +8352,6 @@ class Viewer:
         self._drc_clusters = None
         self._drc_cluster = None
         self._drc_rmeta = None
-        self._drc_cd_meta_cache = None
         self._drc_rmatch = (0, 0)
         self._drc_tfilter = "all"
         self._drc_rtypes = None
@@ -8694,7 +8692,6 @@ class Viewer:
         CALIBRE RUN machine, so <deck basename>.rules.json NEXT TO
         THE DB is searched first, the recorded path second."""
         self._drc_rmeta = None
-        self._drc_cd_meta_cache = None
         self._drc_rmatch = (0, 0)
         deck = None
         for c in self._drc.checks[:50]:
@@ -8735,7 +8732,6 @@ class Viewer:
         meta = data.get("checks", {})
         matched = sum(1 for c in db.checks if c.name in meta)
         self._drc_rmeta = data
-        self._drc_cd_meta_cache = None
         self._drc_rmatch = (matched, len(db.checks))
         # A replaced deck may define different bounds under the same name.
         # Preserve parent/file-cluster picks, discard obsolete delta scopes.
@@ -8752,22 +8748,6 @@ class Viewer:
                 "rules metadata %s: %d/%d rules matched"
                 % (os.path.basename(path), matched, len(db.checks)))
         return True
-
-    def _drc_measurement_meta(self):
-        """Resolve rule conditions once, without inferring layout layers.
-
-        Keep the loaded SVRF metadata separate: only it can supply source
-        layers and derivations for isolation. Descriptions fill missing
-        measurement conditions and never override an explicit SVRF check.
-        """
-        db = getattr(self, "_drc", None)
-        meta = getattr(self, "_drc_rmeta", None)
-        cached = getattr(self, "_drc_cd_meta_cache", None)
-        if cached is not None and cached[0] is db and cached[1] is meta:
-            return cached[2]
-        result = db.measurement_meta(meta) if db is not None else dict(meta or {})
-        self._drc_cd_meta_cache = (db, meta, result)
-        return result
 
     def _drc_rules_dialog(self):
         """DRC > SVRF rules…: the viewer's own browser (user call
@@ -9045,7 +9025,7 @@ class Viewer:
         key = (self._drc_open, self._drc_cluster)
         group = getattr(self, "_drc_delta_group", None)
         if group is not None:
-            key += (id(self._drc_measurement_meta()), self._drc_delta_mode,
+            key += (id(self._drc_rmeta), self._drc_delta_mode,
                     self._drc_delta_step, group.key)
         if getattr(self, "_drc_conflict_only", False):
             key += ("conflict", id(getattr(self, "_drc_conflict_source", None)),
@@ -9086,7 +9066,7 @@ class Viewer:
         """Request grouping once per rule/cluster, basis and interval."""
         db, ci = self._drc, self._drc_open
         mode = getattr(self, "_drc_delta_mode", "absolute")
-        meta = self._drc_measurement_meta()
+        meta = self._drc_rmeta
         cons = ((meta.get("checks", {}).get(db.checks[ci].name, {})
                  .get("constraints") or [])
                 if db is not None and ci is not None and meta else [])
@@ -9165,7 +9145,7 @@ class Viewer:
             elif self._drc_open is None:
                 message = "select a rule for CD groups"
             elif groups is None:
-                message = "no CD condition in description / SVRF"
+                message = "load matching SVRF metadata for CD groups"
             else:
                 message = "groups %d / %d · %d groups" % (page + 1, pages, total)
                 if getattr(groups, "auto_step", False):
@@ -9173,11 +9153,6 @@ class Viewer:
                 estimated = getattr(groups, "estimated_total", 0)
                 if estimated:
                     message += " · %d estimated (all statuses)" % estimated
-                name = self._drc.checks[groups.ci].name
-                constraints = (self._drc_measurement_meta().get("checks", {})
-                               .get(name, {}).get("constraints") or [])
-                if any(c.get("source") == "description" for c in constraints):
-                    message += " · rule description"
         win._delta_label.set_text(message)
         win._delta_label.set_tooltip_text(message)
         win._delta_prev.set_sensitive(page > 0)
@@ -11263,22 +11238,17 @@ class Viewer:
                     return
 
     def _drc_meta_lines(self, name, e):
-        """Detail-pane block from SVRF or a supported rule description: the
-        resolved constraint and this violation's own
+        """Detail-pane block from the `floe-index svrf` sidecar: the
+        constraint as written in the deck, this violation's own
         measured dimension vs the bound (the waive-decision aid),
         the referenced layer names + source gds, and the derivation
         chain that produced them."""
-        meta = self._drc_measurement_meta()
+        meta = self._drc_rmeta
         mc = meta.get("checks", {}).get(name) if meta else None
         if not mc:
             return []
         lines = [""]
         cons = mc.get("constraints") or []
-        evidence = list(dict.fromkeys(c.get("description", "") for c in cons
-                                     if c.get("source") == "description"))
-        if evidence:
-            lines.append("CD source: rule description (estimated)")
-            lines.extend("description: " + text for text in evidence if text)
         for t in dict.fromkeys(c.get("text", "") for c in cons):
             if t:
                 lines.append("constraint: %s" % t)
@@ -11338,9 +11308,9 @@ class Viewer:
 
     def _drc_cd_info(self, e, name):
         """The rule-aware rulers, an AREA rule's label and the CD pick of
-        one violation (gtk-service drc_cd_info), with the rule's effective
+        one violation (gtk-service drc_cd_info), with the rule's sidecar
         constraints; none when the service refuses."""
-        meta = self._drc_measurement_meta()
+        meta = self._drc_rmeta or {}
         cons = ((meta.get("checks", {}).get(name) or {}).get("constraints")
                 or [])
         try:

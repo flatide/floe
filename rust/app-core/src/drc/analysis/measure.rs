@@ -545,7 +545,6 @@ pub struct Selector {
     chains: Vec<Chain>,
     uncertain_alternatives: bool,
     uncertain_ruler_options: bool,
-    description_based: bool,
 }
 
 fn text_of(con: &Value) -> String {
@@ -609,9 +608,6 @@ impl Selector {
             chains: Vec::new(),
             uncertain_alternatives: false,
             uncertain_ruler_options,
-            description_based: constraints.iter().any(|con| {
-                con.get("source").and_then(Value::as_str) == Some("description")
-            }),
         };
         for chain in chains {
             let metric = chain.metric.as_str().unwrap_or("");
@@ -810,9 +806,6 @@ impl Selector {
                     .into(),
             );
         }
-        if self.description_based {
-            reasons.push("measurement condition inferred from the rule description".into());
-        }
         Some(Pick {
             estimated: !reasons.is_empty(),
             reason: reasons.join("; "),
@@ -939,26 +932,6 @@ mod tests {
         assert_eq!(cd_segments('e', &far).len(), 3);
         let crossing = [[0.0, 0.0], [1.0, 1.0], [0.0, 1.0], [1.0, 0.0]];
         assert!(cd_segments('e', &crossing).is_empty());
-    }
-
-    #[test]
-    fn description_provenance_marks_single_gap_and_area_as_estimated() {
-        let edge = [[0.0, 0.0], [0.1, 0.0], [0.0, 0.02], [0.1, 0.02]];
-        let explicit = con("notch", "<", 0.05, "notch < 0.05");
-        let exact = Selector::new(&[explicit.clone()]).pick('e', &edge).unwrap();
-        assert!(!exact.estimated);
-        let mut inferred = explicit;
-        inferred["source"] = json!("description");
-        let estimate = Selector::new(&[inferred]).pick('e', &edge).unwrap();
-        assert!(estimate.estimated);
-        assert_eq!(estimate.reason, "measurement condition inferred from the rule description");
-        assert_eq!(measurement_ticks(&estimate), measurement_ticks(&exact));
-        let mut area = con("area", "<", 0.01, "area < 0.01");
-        area["source"] = json!("description");
-        let selector = Selector::new(&[area]);
-        assert!(selector.pick('p', &rect(0.1, 0.04)).unwrap().estimated);
-        assert!(selector.ruler_segments('p', &rect(0.1, 0.04)).is_empty());
-        assert!(selector.pick('p', &rect(1.0, 1.0)).is_none());
     }
 
     #[test]

@@ -482,10 +482,6 @@ class _Drc(object):
         _flush_drops()
         return service().request(op, handle=self._handle, **fields)
 
-    def measurement_meta(self, metadata=None):
-        """Resolve CD conditions in Rust from SVRF and this DB's descriptions."""
-        return self._request("drc_measurement_meta", metadata=metadata)
-
     def close(self):
         """Let the service close it (and the pack's reader lock with it)."""
         handle, self._handle = self._handle, None

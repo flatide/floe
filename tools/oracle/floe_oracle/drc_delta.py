@@ -1,4 +1,4 @@
-"""Fixed-precision rule measurement differences and lazy DRC groups.
+"""Fixed-precision SVRF measurement differences and lazy DRC groups.
 
 One numeric measurement table belongs to a rule. Changing grouping step,
 basis, cluster or review filter never decodes its geometry again. Group
@@ -236,8 +236,6 @@ class MeasurementSelector:
 
     def __init__(self, constraints):
         self.constraints = tuple(dict(con) for con in constraints)
-        self._description_based = any(con.get("source") == "description"
-                                      for con in self.constraints)
         chains = []
         self._uncertain_ruler_options = False
         for ci, con in enumerate(self.constraints):
@@ -377,8 +375,6 @@ class MeasurementSelector:
         # an otherwise unique association provisional.
         reasons = list(dict.fromkeys(reason for _criterion, pick in matches
                                      for reason in pick.reason.split("; ") if reason))
-        if self._description_based:
-            reasons.append("measurement condition inferred from rule description")
         if numerical_uncertainty:
             reasons.append("comparison is within floating-point roundoff of the bound")
         if self._uncertain_alternatives:

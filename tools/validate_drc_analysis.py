@@ -20,27 +20,20 @@ the GTK viewer shows them.
   A3  clusters files that are wrong are refused naming file and line.
   A4  `floe2 drc-prepare` writes the centres and the delta caches (both
       bases), FLOE_DRC_ANALYSIS_ROOT moves them, an unknown rule and a
-      explicitly missing sidecar are refused; `floe-index drc-prepare`
-      hands over to floe2. Without --svrf, supported descriptions supply
-      inferred measurement conditions.
+      missing sidecar are refused; `floe-index drc-prepare` hands over
+      to floe2.
   A5  the viewer (pycairo blocked): the rule tree's cluster children, the
       delta list and its label, the marker picture and its info line,
       the details' CD lines, a cluster child's grid, a whole-view box
       selection, a waive of a selection past the page as a service job
-      with the counts after it, Tab hiding the markers' hit map.
-  A6  description-only preparation, explicit SVRF precedence and cache
-      reuse, unsupported descriptions and empty rules, no review writes.
-  A7  ASCII/packed description metadata, preservation of SVRF layers,
-      explicit conditions, ambiguous duplicate names and closed handles.
-  A8  the viewer without SVRF: inferred groups, detail provenance and
-      rulers; a loaded SVRF replaces conditions and supplies layers.
+      with the counts after it, Tab hiding the markers' hit map;
+      DB descriptions alone supply no CD pick or delta groups, while
+      loading SVRF metadata restores those results.
 
 usage: .venv/bin/python tools/validate_drc_analysis.py
 """
 
-import argparse
 import json
-import struct
 import os
 import shutil
 import subprocess
@@ -382,9 +375,8 @@ def a4(temp, db, heavy, name):
     r = run([FLOE2, "drc-prepare", str(db), "--svrf", str(d / "big.svrf.rules.json"),
              "--rule", "NOPE"], env=env)
     check(r.returncode != 0 and "unknown DRC rules: NOPE" in r.stderr, "an unknown rule is refused", r.stderr)
-    r = run([FLOE2, "drc-prepare", str(db), "--svrf", str(temp / "absent.rules.json")], env=env)
-    check(r.returncode != 0 and "DRC preprocessing failed" in r.stderr,
-          "an explicitly missing sidecar is refused", r.stderr)
+    r = run([FLOE2, "drc-prepare", str(db)], env=env)
+    check(r.returncode != 0 and "--svrf" in r.stderr, "the CD caches need --svrf", r.stderr)
     r = run([INDEX, "drc-prepare", str(db), "--spatial-only", "--rule", name], env=env)
     check(r.returncode == 0 and "marker centres ready" in r.stderr,
           "floe-index drc-prepare hands over to floe2", r.stdout + r.stderr)
@@ -469,240 +461,63 @@ def a5(temp):
         pump(v, lambda: v._drc_cluster is not None and v._drc_delta_groups is not None,
              "cluster groups", 60)
         check(v._drc_grid_map == [2, 4, 10, 15, 16], "a cluster child's grid", v._drc_grid_map)
-    finally:
-        v.window.destroy()
-
-
-def a6_description(temp):
-    print("[A6] description-only Rust CD preparation")
-    d = temp / "description"
-    d.mkdir()
-    db = d / "sample.db"
-    shutil.copy(ROOT / "sample.db", db)
-    r = run([INDEX, "drc", str(db)])
-    check(r.returncode == 0, "description fixture packed", r.stderr)
-    pack = d / ".sample.db.tray"
-    original = pack.read_bytes()
-    cache = temp / "description-cache"
-    env = dict(os.environ, FLOE_DRC_ANALYSIS_ROOT=str(cache))
-    args = ["drc-prepare", str(db), "--delta-only", "--rule", "M1.NOTCH"]
-    r = run([FLOE2, *args], env=env)
-    check(r.returncode == 0 and "CD source: DB description (estimated)" in r.stderr,
-          "no --svrf: description supplies inferred CD", r.stderr)
-    tables = list(cache.glob("*/delta/*/measure/complete.json"))
-    check(len(tables) == 1, "one description measurement table", tables)
-    if len(tables) == 1:
-        folder = tables[0].parent
-        key = json.loads(tables[0].read_text())["key"]
-        check(all(c.get("source") == "description" for c in key["constraints"]),
-              "description provenance is part of the cache key", key)
-        check(struct.unpack("<3q", (folder / "values.bin").read_bytes()) == (2000, 2000, 2345)
-              and (folder / "estimated.bin").read_bytes() == b"\1\1\1",
-              "geometry supplies CDs and every description result is estimated")
-    check("absolute:" in r.stderr and "percent:" in r.stderr,
-          "both delta bases prepared without a sidecar", r.stderr)
-    stamps = {p: p.stat().st_mtime_ns for p in cache.rglob("*") if p.is_file()}
-    r = run([INDEX, *args], env=env)
-    check(r.returncode == 0 and all(p.stat().st_mtime_ns == stamp for p, stamp in stamps.items()),
-          "floe-index handoff reuses description caches", r.stderr)
-    r = run([FLOE2, "drc-prepare", str(db), "--delta-only", "--rule", "M1.SPACE.1"], env=env)
-    check(r.returncode == 0 and "CD skipped:" in r.stderr and "groups ready" not in r.stderr,
-          "CD example numbers without a limit do not become a condition", r.stderr)
-    # An explicit SVRF bound overrides a usable description, and its table
-    # must be distinct from the description cache built above.
-    rules = d / "override.rules.json"
-    constraint = {"metric": "notch", "op": "<", "value": 0.08,
-                  "text": "EXTERNAL M1 < 0.08 NOTCH"}
-    rules.write_text(json.dumps({"format": "floe-svrf-rules", "version": 1,
-        "checks": {"M1.NOTCH": {"constraints": [constraint]}}}))
-    r = run([FLOE2, *args, "--svrf", str(rules)], env=env)
-    keys = [json.loads(p.read_text())["key"] for p in cache.glob("*/delta/*/measure/complete.json")]
-    check(r.returncode == 0 and "CD source: DB description" not in r.stderr
-          and len(keys) == 2 and any(k["constraints"] == [constraint] for k in keys),
-          "explicit SVRF wins without reusing the inferred table", r.stderr)
-    for value in (str(d / "absent.rules.json"), ""):
-        r = run([FLOE2, *args, "--svrf", value], env=env)
-        check(r.returncode != 0 and "DRC preprocessing failed" in r.stderr,
-              "an explicit invalid metadata path is an error: %r" % value, r.stderr)
-    # This also pins the zero-rule fast path when neither a bound nor a
-    # metadata file is supplied. It must not generate per-rule caches.
-    empty = d / "empty.db"
-    empty.write_text("MAIN 100000\n" + "".join("EMPTY.%03d\n0 0 1\nMinimum width 0.05 um\n" % n
-                                                for n in range(100)))
-    r = run([INDEX, "drc", str(empty)])
-    check(r.returncode == 0, "empty description fixture packed", r.stderr)
-    empty_cache = temp / "empty-description-cache"
-    empty_env = dict(env, FLOE_DRC_ANALYSIS_ROOT=str(empty_cache))
-    r = run([FLOE2, "drc-prepare", str(empty)], env=empty_env)
-    check(r.returncode == 0 and "Skipping 100 empty rules" in r.stderr
-          and "groups ready" not in r.stderr and "marker centres ready" not in r.stderr
-          and not list(empty_cache.rglob("complete.json")),
-          "100 empty rules skip all analysis without --svrf", r.stderr)
-    ambiguous = d / "ambiguous.db"
-    ambiguous.write_text("MAIN 100000\nM1.NOTCH\n1 1 1\n"
-                         "Minimum notch 0.050 um if wire width > 0.100 um\n"
-                         "p 1 4\n0 0\n2000 0\n2000 10000\n0 10000\n")
-    r = run([INDEX, "drc", str(ambiguous)])
-    check(r.returncode == 0, "conditional description fixture packed", r.stderr)
-    r = run([FLOE2, "drc-prepare", str(ambiguous), "--delta-only"], env=env)
-    check(r.returncode == 0 and "CD skipped:" in r.stderr and "groups ready" not in r.stderr,
-          "conditional descriptions stay unmeasured", r.stderr)
-    r = run([FLOE2, "drc-prepare", str(ambiguous), "--spatial-only",
-             "--svrf", str(d / "absent.rules.json")], env=env)
-    check(r.returncode == 0 and "marker centres ready" in r.stderr,
-          "spatial-only preparation ignores measurement metadata", r.stderr)
-    check(pack.read_bytes() == original and not any(".waive." in p.name or ".review." in p.name
-                                                  for p in d.rglob("*")),
-          "description preparation preserves the pack and creates no personal review state")
-
-
-def a7_description_meta(temp):
-    print("[A7] description metadata through the Rust service")
-    d = temp / "description-service"
-    d.mkdir()
-    db = d / "sample.db"
-    shutil.copy(ROOT / "sample.db", db)
-    svc = Svc()
-    try:
-        answers = []
-        for packed in (False, True):
-            if packed:
-                r = run([INDEX, "drc", str(db)])
-                check(r.returncode == 0, "service fixture packed", r.stderr)
-            opened = svc("drc_open", path=str(db), mode="load")
-            h = opened["handle"]
-            resolved = svc("drc_measurement_meta", handle=h)
-            answers.append(resolved)
-            cons = resolved.get("checks", {}).get("M1.NOTCH", {}).get("constraints", [])
-            check(opened["packed"] == packed and cons
-                  and all(c.get("source") == "description" for c in cons),
-                  "%s metadata infers description conditions" % ("packed" if packed else "ASCII"),
-                  resolved)
-            layer_info = {"constraints": [], "layers": ["M1"], "source_gds": [[7, 0]],
-                          "unresolved": ["OTHER"]}
-            metadata = {"checks": {"M1.NOTCH": layer_info}, "derived": {"M1": "COPY RAW"}}
-            before = json.dumps(metadata, sort_keys=True)
-            merged = svc("drc_measurement_meta", handle=h, metadata=metadata)
-            mc = merged["checks"]["M1.NOTCH"]
-            check(mc["constraints"] == cons and merged["derived"] == metadata["derived"]
-                  and all(mc[k] == value for k, value in layer_info.items() if k != "constraints")
-                  and json.dumps(metadata, sort_keys=True) == before,
-                  "empty SVRF conditions fall back without changing layer metadata")
-            explicit = [{"metric": "notch", "op": "<", "value": 0.08,
-                         "text": "EXTERNAL M1 < 0.08 NOTCH"}]
-            metadata["checks"]["M1.NOTCH"]["constraints"] = explicit
-            merged = svc("drc_measurement_meta", handle=h, metadata=metadata)
-            check(merged["checks"]["M1.NOTCH"] == metadata["checks"]["M1.NOTCH"],
-                  "nonempty SVRF conditions and layers retain precedence")
-            svc("drc_close", handle=h)
-            try:
-                svc("drc_measurement_meta", handle=h)
-                check(False, "closed measurement-metadata handle is refused")
-            except gtkservice.ServiceError:
-                check(True, "closed measurement-metadata handle is refused")
-        check(answers[0] == answers[1], "ASCII and packed description metadata agree")
-        dup = d / "duplicate.db"
-        dup.write_text("MAIN 100000\n" + "".join(
-            "DUP\n1 1 1\nMinimum width %s um\np 1 4\n0 0\n2000 0\n2000 10000\n0 10000\n" % bound
-            for bound in ("0.05", "0.08")))
-        for packed in (False, True):
-            if packed:
-                r = run([INDEX, "drc", str(dup)])
-                check(r.returncode == 0, "duplicate-name fixture packed", r.stderr)
-            h = svc("drc_open", path=str(dup), mode="load")["handle"]
-            merged = svc("drc_measurement_meta", handle=h)
-            check(not merged["checks"].get("DUP", {}).get("constraints"),
-                  "%s conflicting duplicate descriptions are not inferred" % ("packed" if packed else "ASCII"))
-            svc("drc_close", handle=h)
-    finally:
-        svc.close()
-
-
-def a8_description_viewer(temp):
-    print("[A8] description-only viewer and SVRF replacement")
-    from validate_gtk_view import NoCairo, gtk_ready, pump
-    if not gtk_ready():
-        return
-    sys.meta_path.insert(0, NoCairo())
-    from floe import gui
-    gui.import_gtk()
-    d = temp / "description-gui"
-    d.mkdir()
-    shutil.copy(ROOT / "sample.oas", d / "sample.oas")
-    # A unique absolute deck path prevents auto-discovery from finding
-    # the repository's sample.svrf.rules.json through the process cwd.
-    (d / "sample.db").write_text((ROOT / "sample.db").read_text().replace(
-        "Rule File Pathname: sample.svrf", "Rule File Pathname: " + str(d / "missing.svrf")))
-    for args in ([FLOE2, "index", str(d / "sample.oas")], [INDEX, "drc", str(d / "sample.db")]):
-        r = run(args)
-        check(r.returncode == 0, "description viewer fixture indexed", r.stderr)
-    cache = gtkservice.ServiceCache(str(d / "sample.oas"))
-    cache.load()
-    v = gui.Viewer(cache, detail=2)
-    try:
-        pump(v, lambda: v.last_frame is not None, "description first frame")
-        check(v.load_drc(str(d / "sample.db")), "description-only load_drc")
+        no_svrf = temp / "without-svrf"
+        no_svrf.mkdir()
+        db = no_svrf / "sample.db"
+        # Do not let auto-discovery find sample.svrf.rules.json through cwd.
+        db.write_text((ROOT / "sample.db").read_text().replace(
+            "Rule File Pathname: sample.svrf",
+            "Rule File Pathname: " + str(no_svrf / "absent.svrf")))
+        r = run([INDEX, "drc", str(db)])
+        check(r.returncode == 0, "description-only fixture packed", r.stderr)
+        check(v.load_drc(str(db)), "load DB with descriptions and no SVRF")
         ci = next(i for i, c in enumerate(v._drc.checks) if c.name == "M1.NOTCH")
         v._drc_select_row(ci)
-        pump(v, lambda: v._drc_delta_groups is not None, "description groups", 60)
-        label = v._drcwin._delta_label.get_text()
-        inferred = v._drc_measurement_meta()
-        check(v._drc_rmeta is None and "rule description" in label
-              and len(v._drcwin._delta_store) > 1,
-              "description-only rule selection populates inferred groups", label)
+        pump(v, lambda: v._drc_grid_ci == ci, "rule without SVRF")
         e = v._drc.checks[ci].errors[0]
-        lines = v._drc_meta_lines("M1.NOTCH", e)
-        info = v._drc_cd_info(e, "M1.NOTCH")
-        check("CD source: rule description (estimated)" in lines
-              and any(s.startswith("estimated CD: 0.02000 um vs < 0.05000") for s in lines)
-              and info["pick"]["ticks"] == [2000, 5000, 3000]
-              and len(v._drc_cd_ruler(e, "M1.NOTCH")) == 1,
-              "description detail shows provenance, geometry CD and the violating ruler", lines)
-        check(not inferred["checks"]["M1.NOTCH"].get("layers")
-              and not inferred["checks"]["M1.NOTCH"].get("source_gds"),
-              "description conditions do not invent layout layers")
-        deck = d / "override.svrf"
-        deck.write_text("LAYER M1 7\nM1.NOTCH {\n EXTERNAL M1 < 0.08000 NOTCH\n}\n")
-        r = run([INDEX, "svrf", str(deck)])
-        check(r.returncode == 0, "replacement SVRF indexed", r.stderr)
-        check(v._drc_rules_load(str(deck) + ".rules.json"), "load replacement SVRF metadata")
-        pump(v, lambda: v._drc_delta_groups is not None, "replacement groups", 60)
-        effective = v._drc_measurement_meta()
-        mc = effective["checks"]["M1.NOTCH"]
-        lines = v._drc_meta_lines("M1.NOTCH", e)
-        check(effective is not inferred and mc == v._drc_rmeta["checks"]["M1.NOTCH"]
-              and mc["layers"] == ["M1"] and mc["source_gds"] == [[7, None]]
-              and v._drc_cd_info(e, "M1.NOTCH")["pick"]["ticks"] == [2000, 8000, 6000]
-              and "rule description" not in v._drcwin._delta_label.get_text()
-              and "CD source: rule description (estimated)" not in lines,
-              "SVRF load refreshes conditions/groups and retains only its real layers", (mc, lines))
+        check(v._drc_rmeta is None and v._drc_delta_groups is None
+              and not v._drc_delta_busy
+              and [(r[0], r[1]) for r in v._drcwin._delta_store] == [("All errors", "3")]
+              and v._drc_cd_info(e, "M1.NOTCH")["pick"] is None
+              and v._drc_meta_lines("M1.NOTCH", e) == [],
+              "GUI does not infer CD or delta groups from a rule description")
+        svc = Svc()
+        try:
+            h = svc("drc_open", path=str(db), mode="load")["handle"]
+            info = svc("drc_cd_info", handle=h, check=ci, error=0)
+            event = svc.job(h, "drc_delta", check=ci, basis="absolute")
+            check(info["pick"] is None and event["state"] == "done"
+                  and event.get("measurable") is False and "group" not in event,
+                  "service leaves description-only CD/delta unmeasurable", (info, event))
+            svc("drc_close", handle=h)
+        finally:
+            svc.close()
+        check(v._drc_rules_load(str(d / "sample.svrf.rules.json")), "load SVRF for the same DB")
+        pump(v, lambda: v._drc_delta_groups is not None, "SVRF groups restored", 60)
+        check(v._drc_cd_info(e, "M1.NOTCH")["pick"]["ticks"] == [2000, 5000, 3000]
+              and len(v._drcwin._delta_store) > 1,
+              "SVRF metadata restores CD measurement and delta groups")
     finally:
+        v._quit()
         v.window.destroy()
+        cache.close()
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--description-only", action="store_true",
-                        help="run the small description CLI, service and viewer integration checks only")
-    options = parser.parse_args()
     os.environ["FLOE_INDEX_BIN"] = INDEX
     os.environ["FLOE_RENDERD_BIN"] = str(ROOT / "rust/target/release/floe-renderd")
     with tempfile.TemporaryDirectory(prefix="floe-drc-analysis-") as t:
         temp = Path(t)
-        if not options.description_only:
-            svc = Svc()
-            try:
-                d = sample_dir(temp)
-                a1(svc, d)
-                _d, db, heavy, name = a2(svc, temp)
-                a3(svc, temp)
-                a4(temp, db, heavy, name)
-            finally:
-                svc.close()
-            a5(temp)
-        a6_description(temp)
-        a7_description_meta(temp)
-        a8_description_viewer(temp)
+        svc = Svc()
+        try:
+            d = sample_dir(temp)
+            a1(svc, d)
+            _d, db, heavy, name = a2(svc, temp)
+            a3(svc, temp)
+            a4(temp, db, heavy, name)
+        finally:
+            svc.close()
+        a5(temp)
     if FAILED:
         print("validate_drc_analysis: FAIL (%d): %s" % (len(FAILED), ", ".join(FAILED)))
         sys.exit(1)
