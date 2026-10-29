@@ -30,9 +30,10 @@ the GTK viewer shows them.
       DB descriptions alone supply no CD pick or delta groups, while
       loading SVRF metadata restores those results; a checkmark before
       matched rule names follows real #IFDEF conversion without changing
-      the selected scope. Whole-rule CD group counts load from prepared
-      caches or completed jobs; the grouped-rule filter excludes unknown,
-      unmeasurable and empty rules and follows the basis and manual step.
+      the selected scope. Whole-rule CD group counts are prepared before
+      selecting a rule and reused on reopen without full membership caches;
+      the grouped-rule filter excludes unmeasurable and empty rules and
+      follows the basis and manual step. Grouping off does not prefill.
 
 usage: .venv/bin/python tools/validate_drc_analysis.py
 """
@@ -82,7 +83,7 @@ class Svc(object):
     def __call__(self, op, **fields):
         return self.svc.request(op, **fields)
 
-    def job(self, handle, op, **fields):
+    def job(self, handle, op, events=None, **fields):
         self.svc.drc_watch(handle)
         job = self.svc.request(op, handle=handle, **fields)["job"]
         deadline = time.monotonic() + 600
@@ -91,6 +92,8 @@ class Svc(object):
                 if e["job"] != job:
                     gtkservice._discard_files([e])
                     continue
+                if events is not None:
+                    events.append(e)
                 if e["state"] in ("done", "error", "cancelled"):
                     return e
                 gtkservice._discard_files([e])
@@ -146,6 +149,19 @@ def a1(svc, d):
           and all(r["count"] is None for r in cached["rows"])
           and not list(Path(opened["analysis"]).glob("delta/*/measure/complete.json")),
           "cached group summary leaves unprepared rules unknown without measuring")
+    events = []
+    prepared = svc.job(h, "drc_delta_cached", checks=cached_checks, basis="absolute",
+                       prepare=True, events=events)
+    snapshots = [{r["check"]: r["count"] for r in e["rows"] if r["count"] is not None}
+                 for e in events if "rows" in e]
+    expected = {ci: count for ci, count in enumerate((5, 1, 2, 2, 2, 2, 2, 3))}
+    check(prepared["state"] == "done" and snapshots and snapshots[0] == {}
+          and snapshots[-1] == expected
+          and any(0 < len(s) < len(expected) for s in snapshots)
+          and all(a.items() <= b.items() for a, b in zip(snapshots, snapshots[1:]))
+          and any(e["state"] == "progress" and any(r["count"] is not None for r in e.get("rows", []))
+                  for e in events),
+          "cold prepare:true publishes cumulative rule counts before the final done event", snapshots)
     bad = []
     for ci, c in enumerate(od.checks):
         cons = (rules["checks"].get(c.name) or {}).get("constraints") or []
@@ -408,8 +424,19 @@ def a4(temp, db, heavy, name):
           "floe-index drc-prepare hands over to floe2", r.stdout + r.stderr)
 
 
+def analysis_dir(path):
+    svc = Svc()
+    try:
+        opened = svc("drc_open", path=str(path), mode="load")
+        svc("drc_close", handle=opened["handle"])
+        return Path(opened["analysis"])
+    finally:
+        svc.close()
+
+
 def grouped_rules_ui(v, d, pump):
     """Prepared, unmeasurable, unprepared and empty rules in the same tree."""
+    from floe import gui
     db = d / "groups.db"
     edge = "e %d 2\n0 0 10000 0\n0 %d 10000 %d\n"
     db.write_text("MAIN 100000\nGROUP.KNOWN\n3 3 0\n"
@@ -429,19 +456,62 @@ def grouped_rules_ui(v, d, pump):
     r = run([INDEX, "drc-prepare", str(db), "--svrf", str(metadata), "--delta-only",
              "--rule", "GROUP.KNOWN", "--rule", "GROUP.UNKNOWN", "--jobs", "2"])
     check(r.returncode == 0, "positive and unmeasurable caches prepared", r.stderr[-800:])
+    analysis = analysis_dir(db)
+    v._drcwin._delta_mode.set_active_id("off")
     check(v.load_drc(str(db)), "load mixed group-count fixture")
-    pump(v, lambda: v._drc_group_cache_key is None, "mixed cached group counts", 60)
-    check([v._drc_group_count(ci) for ci in range(3)] == [3, 0, None]
+    check(v._drc_group_cache_key is None and not v._drc_group_counts
+          and len(list(analysis.glob("delta/*/measure/complete.json"))) == 2,
+          "loading metadata with grouping off does not prepare missing rules")
+    v._drcwin._delta_mode.set_active_id("absolute")
+    pump(v, lambda: v._drc_group_cache_key is None, "mixed prepared group counts", 60)
+    check([v._drc_group_count(ci) for ci in range(3)] == [3, 0, 1]
           and not v._drc_group_count(3) and v._drc_open is None and not v._drc_delta_busy
           and [r[4] for r in v._drcwin._rstore] == ["✓ (3) GROUP.KNOWN", "✓ GROUP.UNKNOWN",
-                                                  "✓ GROUP.UNPREPARED", "✓ GROUP.ZERO"],
-          "only positive measurable counts are shown; zero and unknown omit parentheses")
+                                                  "✓ (1) GROUP.UNPREPARED", "✓ GROUP.ZERO"],
+          "background preparation fills missing positive counts and omits zero parentheses")
+    # A cancelled prefill can leave a cache-miss row from its first progress
+    # snapshot. Model that state directly, without depending on worker timing.
+    v._drc_group_counts[(2, "absolute", None)] = None
+    v._drcwin._delta_mode.set_active_id("off")
+    v._drcwin._delta_mode.set_active_id("absolute")
+    check(v._drc_group_cache_key is not None and v._drc_open is None,
+          "re-enabling grouping retries a pending None count without a rule click")
+    pump(v, lambda: v._drc_group_cache_key is None, "resumed pending count", 60)
+    check(v._drc_group_count(2) == 1, "resumed prefill replaces the pending count")
     v._drcwin._tf.set_active_id("__grouped__")
-    check(v._drcwin._tf.get_active_text() == "CD grouped (1)"
-          and [r[0] for r in v._drcwin._rstore] == ["GROUP.KNOWN"]
+    check(v._drcwin._tf.get_active_text() == "CD grouped (2)"
+          and [r[0] for r in v._drcwin._rstore] == ["GROUP.KNOWN", "GROUP.UNPREPARED"]
           and all(c[4] == c[0] for c in v._drcwin._rstore[0].iterchildren())
-          and v._drc_open is None and not v._drc_delta_busy and v._drc_group_count(2) is None,
-          "CD grouped filter hides unmeasurable, unprepared and empty rules without measuring")
+          and v._drc_open is None and not v._drc_delta_busy,
+          "CD grouped filter includes the newly prepared rule before any rule selection")
+    # Complete another rule while reviewing a later page inside a cluster.
+    # Inject the count transition so this cannot race the tiny fixture's job.
+    v._drc_group_counts[(2, "absolute", None)] = None
+    v._drc_group_ui_refresh()
+    page = gui.DRC_PAGE
+    gui.DRC_PAGE = 1
+    try:
+        store = v._drcwin._rstore
+        parent_ref = gui.Gtk.TreeRowReference.new(store, store[0].path)
+        cluster = next(c[3] for c in store[0].iterchildren() if c[0] == "Unclustered")
+        v._drc_select_row(0, cluster)
+        pump(v, lambda: v._drc_delta_groups is not None, "cluster before count arrival", 60)
+        v._drc_goto_cell(0, 2)
+        v._drc_sel_click(0, 0, 0, 0, 2, False)
+        pump(v, lambda: v._drc_selection_key is None, "error selection before count arrival", 60)
+        v._drc_jump(0, 2)
+        selected, mark, rulers, grid = v._drc_sel, v.drc_mark, v._drc_ruler, v._drc_grid_map
+        cursor = (v._drc_open, v._drc_page, v._drc_pos, v._drc_cell, v._drc_focus)
+        v._drc_group_counts[(2, "absolute", None)] = 1
+        v._drc_group_ui_refresh()
+        check(parent_ref.valid() and [r[2] for r in store] == [0, 2]
+              and v._drc_cluster is cluster and selected is not None and mark is not None and rulers
+              and v._drc_sel is selected and v.drc_mark is mark and v._drc_ruler is rulers
+              and v._drc_grid_map is grid and list(grid) == [2] and v._drc_page == 1
+              and (v._drc_open, v._drc_page, v._drc_pos, v._drc_cell, v._drc_focus) == cursor,
+              "a newly grouped rule is inserted without resetting the current error, cluster or page")
+    finally:
+        gui.DRC_PAGE = page
     v._drc_select_row(0)
     pump(v, lambda: v._drc_delta_groups is not None, "known whole-rule groups", 60)
     v._drcwin._delta_step.set_text("0.05000")
@@ -498,22 +568,34 @@ def a5(temp):
         shutil.copy(ROOT / n, d / n)
     run([FLOE2, "index", str(d / "sample.oas")])
     run([INDEX, "drc", str(d / "sample.db")])
-    r = run([INDEX, "drc-prepare", str(d / "sample.db"), "--svrf",
-             str(d / "sample.svrf.rules.json"), "--delta-only", "--jobs", "2"])
-    check(r.returncode == 0, "sample whole-rule group caches prepared", r.stderr[-800:])
+    analysis = analysis_dir(d / "sample.db")
+    check(not list(analysis.glob("delta/*/measure/complete.json")), "sample has no prepared CD cache")
     cache = gtkservice.ServiceCache(str(d / "sample.oas"))
     cache.load()
     v = gui.Viewer(cache, detail=2)
     try:
         pump(v, lambda: v.last_frame is not None, "first frame")
         check(v.load_drc(str(d / "sample.db")), "load_drc")
-        pump(v, lambda: v._drc_group_cache_key is None, "prepared group counts", 60)
-        store = v._drcwin._rstore
+        pump(v, lambda: v._drc_group_cache_key is None, "background group counts", 60)
         expected_counts = [5, 1, 2, 2, 2, 2, 2, 3]
         check([v._drc_group_count(ci) for ci in range(8)] == expected_counts
               and v._drc_open is None and v._drc_delta_worker is None
               and not v._drc_delta_busy,
-              "prepared counts appear before selecting a rule without starting CD measurement")
+              "cold-open counts appear for every rule before any rule is selected")
+        check(len(list(analysis.glob("delta/*/measure/complete.json"))) == 8
+              and len(list(analysis.glob("delta/*/summaries/*/complete.json"))) == 8
+              and not list(analysis.glob("delta/*/groups/*/complete.json")),
+              "background prefill persists small-rule measurements and tiny summaries, not full groups")
+        before = {str(p): (p.stat().st_size, p.stat().st_mtime_ns)
+                  for p in analysis.rglob("*") if p.is_file()}
+        check(v.load_drc(str(d / "sample.db")), "reopen DB with summary caches")
+        pump(v, lambda: v._drc_group_cache_key is None, "warm group counts", 60)
+        after = {str(p): (p.stat().st_size, p.stat().st_mtime_ns)
+                 for p in analysis.rglob("*") if p.is_file()}
+        check([v._drc_group_count(ci) for ci in range(8)] == expected_counts
+              and before == after and v._drc_open is None and v._drc_delta_worker is None,
+              "warm reopen reuses unchanged summaries before selecting any rule")
+        store = v._drcwin._rstore
         name_column = v._drcwin._rules.get_column(0)
         name_column.cell_set_cell_data(store, store.get_iter_first(), False, False)
         check(len(v._drcwin._rules.get_columns()) == 2
@@ -691,7 +773,8 @@ def a5(temp):
         check(v._drc_cd_info(e, "M1.NOTCH")["pick"]["ticks"] == [2000, 5000, 3000]
               and len(v._drcwin._delta_store) > 1
               and next(r for r in v._drcwin._rstore if r[2] == ci)[4] == "✓ (2) M1.NOTCH"
-              and all(r[4] == "✓ " + r[0] for r in v._drcwin._rstore if r[2] != ci),
+              and all(r[4] == "✓ (%d) %s" % (expected_counts[r[2]], r[0])
+                      for r in v._drcwin._rstore),
               "SVRF metadata restores CD measurement and delta groups")
         grouped_rules_ui(v, d, pump)
         small = d / "small.db"

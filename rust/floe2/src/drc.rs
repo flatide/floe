@@ -23,7 +23,7 @@
 //!   drc_scope_count / drc_scope_page / drc_scope_rank / drc_scope_contains
 //!       {handle, check, scope: {cluster} | {group, row} | {selection}, waived?, ...}
 //!   drc_delta {handle, check, constraints, basis, step?, cluster?}      job "delta"
-//!   drc_delta_cached {handle, basis, checks:[{check,constraints,step?}]} job "delta_cached"
+//!   drc_delta_cached {handle, basis, checks:[{check,constraints,step?}], prepare?} job "delta_cached"
 //!   drc_delta_rows {handle, group, start, limit, waived?}; drc_delta_find {handle, group, key}
 //!   drc_delta_drop {handle, group}
 //!   drc_markers {handle, check, bounds, width, height, scope?, waived?, selection?}  job "markers"
@@ -936,6 +936,7 @@ impl Session {
 
     fn delta_cached(&mut self, request: &Value) -> Result<Value> {
         let basis = Basis::parse(request.get("basis").and_then(Value::as_str).unwrap_or("absolute"))?;
+        let prepare = request.get("prepare").and_then(Value::as_bool).unwrap_or(false);
         let checks = request.get("checks").and_then(Value::as_array)
             .ok_or_else(|| Error::input("checks must be a list"))?;
         let mut wanted = Vec::with_capacity(checks.len());
@@ -954,20 +955,81 @@ impl Session {
             };
             wanted.push((check, constraints, step));
         }
+        let jobs = worker_count(None)?.clamp(1, 4);
         Ok(json!({"job": self.start("delta_cached", move |shared, id, stop| {
             let result = (|| -> Result<Value> {
-                let mut rows = Vec::with_capacity(wanted.len());
-                for (check, constraints, step) in wanted {
+                let total = wanted.len();
+                let mut rows: Vec<Value> = wanted.iter().map(|(check, _, step)|
+                    json!({"check":check,"count":null,"step":step})).collect();
+                let mut missing = Vec::new();
+                let mut processed = 0usize;
+                let mut last = std::time::Instant::now();
+                // Finish the entire cheap pass before the first cold rule so
+                // a large early rule cannot delay already-prepared badges.
+                for (i, (check, constraints, step)) in wanted.iter().enumerate() {
                     floe_app_core::check_cancelled(&stop)?;
-                    let summary = shared.cache.as_ref().map(|cache| Groups::cached_summary(
-                        cache, check, shared.source.count(check), &constraints, step, basis,
-                    ));
-                    let count = summary.as_ref().and_then(|s| s.count);
-                    let resolved = summary.as_ref().and_then(|s| s.step).or(step);
-                    rows.push(json!({"check": check, "count": count, "step": resolved}));
+                    let n = shared.source.count(*check);
+                    let trivial = prepare && (n == 0 || !Selector::new(constraints).can_measure());
+                    let summary = if trivial { None } else {
+                        shared.cache.as_ref().map(|cache| Groups::cached_summary(
+                            cache, *check, n, constraints, *step, basis,
+                        ))
+                    };
+                    let count = if trivial { Some(0) } else { summary.as_ref().and_then(|s| s.count) };
+                    let resolved = if trivial { Some(step.unwrap_or(1)) } else {
+                        summary.as_ref().and_then(|s| s.step).or(*step)
+                    };
+                    rows[i] = json!({"check":check,"count":count,"step":resolved});
+                    if count.is_some() || !prepare {
+                        processed += 1;
+                    } else {
+                        missing.push((n, i));
+                    }
+                    if last.elapsed().as_millis() >= 500 {
+                        shared.event(id, "delta_cached", "progress", json!({
+                            "rows":rows,"processed":processed,"total":total,
+                            "text":format!("Checking cached CD groups {} / {total}", i + 1),
+                        }));
+                        last = std::time::Instant::now();
+                    }
                 }
                 floe_app_core::check_cancelled(&stop)?;
-                Ok(json!({"rows": rows}))
+                shared.event(id, "delta_cached", "progress", json!({
+                    "rows":rows,"processed":processed,"total":total,
+                    "text":format!("CD groups ready {processed} / {total}"),
+                }));
+                missing.sort_unstable();
+                let mut errors = 0usize;
+                for (_, i) in missing {
+                    floe_app_core::check_cancelled(&stop)?;
+                    let (check, constraints, step) = &wanted[i];
+                    let progress = |text: String| shared.event(id, "delta_cached", "progress", json!({
+                        "rows":rows,"processed":processed,"total":total,
+                        "text":format!("CD groups {processed} / {total}, rule {}: {text}", check + 1),
+                    }));
+                    match Groups::prepare_summary(&*shared.source, *check, constraints,
+                        shared.cache.as_ref(), *step, basis, jobs, &stop, &progress) {
+                        Ok(summary) => {
+                            rows[i] = json!({"check":check,"count":summary.count,"step":summary.step});
+                        }
+                        Err(e) if e.kind == ErrorKind::Cancelled => return Err(e),
+                        Err(e) => {
+                            errors += 1;
+                            rows[i]["error"] = json!(e.message);
+                        }
+                    }
+                    processed += 1;
+                    let text = if let Some(error) = rows[i].get("error").and_then(Value::as_str) {
+                        format!("CD groups {processed} / {total}, rule {}: {error}", check + 1)
+                    } else {
+                        format!("CD groups ready {processed} / {total}")
+                    };
+                    shared.event(id, "delta_cached", "progress", json!({
+                        "rows":rows,"processed":processed,"total":total,"text":text,
+                    }));
+                }
+                floe_app_core::check_cancelled(&stop)?;
+                Ok(json!({"rows":rows,"processed":processed,"total":total,"errors":errors}))
             })();
             match result {
                 Ok(v) => shared.event(id, "delta_cached", "done", v),

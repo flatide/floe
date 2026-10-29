@@ -1230,11 +1230,12 @@ class DeltaWorker(_Worker):
 
 
 class DeltaCachedWorker(_Worker):
-    """Read existing group directories without measuring any errors."""
+    """Prepare missing CD counts and stream completed rules to the viewer."""
     kind = "delta_cached"
 
     def submit(self, key, db, checks, mode):
-        self._submit(key, db, "drc_delta_cached", checks=checks, basis=mode)
+        self._submit(key, db, "drc_delta_cached", checks=checks, basis=mode,
+                     prepare=True)
 
     def poll(self):
         failed, e = self._event()
@@ -1242,8 +1243,10 @@ class DeltaCachedWorker(_Worker):
             return failed[0], None, failed[1]
         if e is None:
             return None
-        if e["state"] == "done":
-            return self._key, e.get("rows", []), None
+        if e["state"] in ("progress", "done"):
+            return self._key, e, None
+        if e["state"] == "cancelled":
+            return self._key, None, "CD group count preparation cancelled"
         if e["state"] == "error":
             return self._key, None, e.get("message")
         return None

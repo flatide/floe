@@ -14,7 +14,7 @@ use super::store::{self, BuildLock, Column, Sink, Staging};
 use super::ticks::{format_ticks, json_ticks, percent_ticks, SCALE};
 use crate::{check_cancelled, Error, ErrorKind, Result};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
@@ -29,6 +29,7 @@ const VERSION: u32 = 1;
 const TASK: u64 = 1 << 16;
 const PAGE_CHUNK: u64 = 4096;
 const DENSE_BINS: u64 = 1 << 24;
+const SUMMARY_SPARSE_BINS: usize = 1 << 18;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Basis {
@@ -146,6 +147,50 @@ impl Table {
                "rule": check, "count": count, "constraints": constraints})
     }
 
+    fn empty(check: usize, count: u64, constraints: &[Value]) -> Self {
+        Self {
+            check, count, constraints: constraints.to_vec(),
+            bound_ticks: constraints.iter().map(|c| c.get("value").and_then(json_ticks)).collect(),
+            values: Column::Owned(Vec::new()), choices: Column::Owned(Vec::new()),
+            estimated: Column::Owned(Vec::new()),
+            ranges: [vec![None; constraints.len()], vec![None; constraints.len()]],
+            folder: None, measurable: Selector::new(constraints).can_measure(),
+        }
+    }
+
+    /// Existing measurement only; never decode geometry on a cache miss.
+    pub fn cached(cache: &Cache, check: usize, count: u64, constraints: &[Value]) -> Option<Self> {
+        let base = Self::empty(check, count, constraints);
+        let key = Self::key(check, count, constraints, cache);
+        let folder = cache.dir.join("delta").join(store::digest(&key));
+        let table = Self::load(&base, &folder.join("measure"), &key)?;
+        Some(Self { folder: Some(folder), ..table })
+    }
+
+    /// Background preparation requires disk-backed columns. An unwritable
+    /// cache is an error, never a fallback allocating arrays for every error.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_cached(
+        source: &dyn Source, check: usize, constraints: &[Value], cache: &Cache,
+        jobs: usize, stop: &AtomicUsize, progress: &(dyn Fn(String) + Sync),
+    ) -> Result<Self> {
+        check_cancelled(stop)?;
+        let count = source.count(check);
+        let base = Self::empty(check, count, constraints);
+        if !base.measurable || count == 0 {
+            return Ok(base);
+        }
+        if let Some(table) = Self::cached(cache, check, count, constraints) {
+            return Ok(table);
+        }
+        let key = Self::key(check, count, constraints, cache);
+        let folder = cache.dir.join("delta").join(store::digest(&key));
+        let selector = Selector::new(constraints);
+        let table = Self::build_cached(&base, &selector, source, &folder.join("measure"),
+                                      &key, jobs.clamp(1, 4), stop, progress)?;
+        Ok(Self { folder: Some(folder), ..table })
+    }
+
     /// Measure rule `check` (or read its cached table): parallel on `jobs`
     /// threads; `progress` hears how far it got.
     pub fn measure(
@@ -159,24 +204,9 @@ impl Table {
         progress: &(dyn Fn(String) + Sync),
     ) -> Result<Table> {
         let count = source.count(check);
-        let bound_ticks: Vec<Option<i64>> = constraints
-            .iter()
-            .map(|c| c.get("value").and_then(json_ticks))
-            .collect();
         let selector = Selector::new(constraints);
         let measurable = selector.can_measure();
-        let base = Table {
-            check,
-            count,
-            constraints: constraints.to_vec(),
-            bound_ticks,
-            values: Column::Owned(Vec::new()),
-            choices: Column::Owned(Vec::new()),
-            estimated: Column::Owned(Vec::new()),
-            ranges: [vec![None; constraints.len()], vec![None; constraints.len()]],
-            folder: None,
-            measurable,
-        };
+        let base = Self::empty(check, count, constraints);
         if let Some(cache) = cache.filter(|_| count > 0 && measurable) {
             let key = Self::key(check, count, constraints, cache);
             let folder = cache.dir.join("delta").join(store::digest(&key));
@@ -228,7 +258,8 @@ impl Table {
         let m = store::manifest(dir, key)?;
         let n = base.count as usize;
         let ranges = serde_json::from_value::<[Vec<Option<(i64, i64)>>; 2]>(m.get("ranges")?.clone()).ok()?;
-        if ranges.iter().any(|r| r.len() != base.constraints.len()) {
+        if ranges.iter().any(|r| r.len() != base.constraints.len()
+            || r.iter().flatten().any(|&(lo, hi)| lo < 0 || hi < lo)) {
             return None;
         }
         Some(Table {
@@ -465,6 +496,60 @@ fn cached_u64(file: &File, index: u64) -> Option<u64> {
     Some(u64::from_le_bytes(bytes))
 }
 
+struct SummaryBins {
+    dense: Vec<Option<(i64, u64, Vec<u64>)>>,
+    sparse: HashSet<(usize, i64)>,
+    sparse_limit: usize,
+    count: u64,
+    step: i64,
+}
+
+impl SummaryBins {
+    fn new(ranges: &[Option<(i64, i64)>], step: i64, sparse_limit: usize) -> Self {
+        let mut bits = 0u64;
+        let dense = ranges.iter().map(|range| {
+            let (lo, hi) = (*range)?;
+            let first = lo / step;
+            let length = (hi / step - first) as u64 + 1;
+            if length > DENSE_BINS.saturating_sub(bits) {
+                return None;
+            }
+            bits += length;
+            Some((first, length, vec![0u64; length.div_ceil(64) as usize]))
+        }).collect();
+        Self { dense, sparse: HashSet::new(), sparse_limit, count: 0, step }
+    }
+
+    fn insert(&mut self, constraint: usize, delta: i64) -> Result<()> {
+        let bin = delta / self.step;
+        let slot = self.dense.get_mut(constraint)
+            .ok_or_else(|| Error::new(ErrorKind::Cache, "invalid cached CD constraint index"))?;
+        let inserted = if let Some((first, length, bits)) = slot {
+            let offset = bin.checked_sub(*first).filter(|&v| v >= 0).map(|v| v as u64)
+                .filter(|&v| v < *length)
+                .ok_or_else(|| Error::new(ErrorKind::Cache, "cached CD difference lies outside its range"))?;
+            let mask = 1u64 << (offset % 64);
+            let word = &mut bits[(offset / 64) as usize];
+            let fresh = *word & mask == 0;
+            *word |= mask;
+            fresh
+        } else {
+            let key = (constraint, bin);
+            if self.sparse.contains(&key) {
+                false
+            } else {
+                if self.sparse.len() >= self.sparse_limit {
+                    return Err(Error::new(ErrorKind::Unsupported,
+                        "too many sparse CD bins for background preparation; use a larger grouping step"));
+                }
+                self.sparse.insert(key)
+            }
+        };
+        self.count += u64::from(inserted);
+        Ok(())
+    }
+}
+
 impl Groups {
     fn key(step: i64, basis: Basis, members_key: &str) -> Value {
         json!({"version": VERSION, "step": step, "mode": basis.name(), "members": members_key})
@@ -504,6 +589,15 @@ impl Groups {
             let resolved = step.unwrap_or_else(|| auto_step_ranges(&ranges[basis.index()]));
             summary.step = Some(resolved);
             let key = Self::key(resolved, basis, "all");
+            let summary_dir = folder.join("summaries").join(store::digest(&key));
+            if let Some(saved) = store::manifest(&summary_dir, &key) {
+                if saved.get("table") == Some(&table_key)
+                    && saved.get("total").and_then(Value::as_u64) == Some(count) {
+                    if let Some(known) = saved.get("cd_groups").and_then(Value::as_u64).filter(|&n| n <= count) {
+                        return Some(known);
+                    }
+                }
+            }
             let dir = folder.join("groups").join(store::digest(&key));
             let manifest = store::manifest(&dir, &key)?;
             let groups = manifest.get("groups")?.as_u64()?;
@@ -543,6 +637,65 @@ impl Groups {
             Some(known)
         })();
         summary
+    }
+
+    /// Prepare only a whole-rule CD-bin count, preserving the measured table
+    /// for a later selection. No group IDs, row membership or status columns
+    /// are created. Automatic steps need at most ten occupied bins per bound.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_summary(
+        source: &dyn Source, check: usize, constraints: &[Value], cache: Option<&Cache>,
+        step: Option<i64>, basis: Basis, jobs: usize, stop: &AtomicUsize,
+        progress: &(dyn Fn(String) + Sync),
+    ) -> Result<CachedGroupSummary> {
+        check_cancelled(stop)?;
+        if step.is_some_and(|s| s <= 0) {
+            return Err(Error::input("grouping step must be positive fixed-precision ticks"));
+        }
+        let count = source.count(check);
+        if count == 0 || !Selector::new(constraints).can_measure() {
+            return Ok(CachedGroupSummary { count: Some(0), step: Some(step.unwrap_or(1)) });
+        }
+        let cache = cache.ok_or_else(|| Error::new(ErrorKind::Unsupported,
+            "background CD preparation needs a writable analysis cache"))?;
+        let ready = Self::cached_summary(cache, check, count, constraints, step, basis);
+        if ready.count.is_some() {
+            return Ok(ready);
+        }
+        let table = Table::prepare_cached(source, check, constraints, cache, jobs, stop, progress)?;
+        let resolved = step.unwrap_or_else(|| table.auto_step(basis));
+        let key = Self::key(resolved, basis, "all");
+        let folder = table.folder.as_ref()
+            .ok_or_else(|| Error::new(ErrorKind::Cache, "CD measurement cache is unavailable"))?;
+        let dir = folder.join("summaries").join(store::digest(&key));
+        let _lock = BuildLock::take(&dir, stop)?;
+        let ready = Self::cached_summary(cache, check, count, constraints, step, basis);
+        if ready.count.is_some() {
+            return Ok(ready);
+        }
+        let mut bins = SummaryBins::new(&table.ranges[basis.index()], resolved, SUMMARY_SPARSE_BINS);
+        let mut last = std::time::Instant::now();
+        progress(format!("Counting CD groups 0 / {count}"));
+        for start in (0..count).step_by(TASK as usize) {
+            check_cancelled(stop)?;
+            let end = (start + TASK).min(count);
+            for ei in start..end {
+                if let Some(delta) = table.difference(ei, basis) {
+                    bins.insert(table.choice(ei) as usize, delta)?;
+                }
+            }
+            if last.elapsed().as_millis() >= 500 || end == count {
+                progress(format!("Counting CD groups {end} / {count}"));
+                last = std::time::Instant::now();
+            }
+        }
+        check_cancelled(stop)?;
+        std::fs::create_dir_all(&dir)?;
+        store::write_manifest(&dir, &json!({
+            "key":key, "table":Table::key(check, count, constraints, cache),
+            "cd_groups":bins.count, "total":count,
+        }))?;
+        Ok(CachedGroupSummary { count: Some(bins.count), step: Some(resolved) })
     }
 
     /// Group `table` (restricted to `members` when given; `members_key` names
@@ -1117,6 +1270,7 @@ pub const TICKS_PER_UNIT: i64 = SCALE;
 #[cfg(test)]
 mod cached_summary_tests {
     use super::*;
+    use crate::drc::analysis::source::ErrorBox;
 
     static NEXT: AtomicUsize = AtomicUsize::new(0);
 
@@ -1244,5 +1398,121 @@ mod cached_summary_tests {
         assert_eq!(groups.len(), 3);
         assert_eq!(groups.cd_group_count(), 2);
         assert_eq!(groups.row(2).constraint, UNKNOWN);
+    }
+
+    struct SyntheticSource {
+        count: u64,
+        visits: AtomicUsize,
+    }
+
+    impl Source for SyntheticSource {
+        fn check_count(&self) -> usize { 2 }
+        fn count(&self, _: usize) -> u64 { self.count }
+        fn precision(&self) -> f64 { 100000.0 }
+        fn visit(&self, _: usize, start: u64, end: u64, stop: &AtomicUsize,
+                 visit: &mut dyn FnMut(u64, char, &[[f64; 2]]) -> Result<()>) -> Result<()> {
+            self.visits.fetch_add(1, Ordering::Relaxed);
+            for ei in start..end {
+                check_cancelled(stop)?;
+                if ei % 4 == 3 {
+                    visit(ei, 'p', &[[0.0, 0.0], [0.1, 0.0], [0.0, 0.1]])?;
+                } else {
+                    let width = [0.02, 0.03, 0.04][(ei % 4) as usize];
+                    visit(ei, 'p', &[[0.0, 0.0], [width, 0.0], [width, 0.1], [0.0, 0.1]])?;
+                }
+            }
+            Ok(())
+        }
+        fn visit_boxes(&self, _: usize, _: u64, _: u64, _: &AtomicUsize,
+                       _: &mut dyn FnMut(u64, ErrorBox) -> Result<()>) -> Result<()> {
+            panic!("CD summary must not visit marker boxes")
+        }
+    }
+
+    #[test]
+    fn cold_summary_persists_small_tables_without_group_members_and_warm_never_visits() {
+        let f = Fixture::new(8, &[0], "all");
+        std::fs::remove_dir_all(&f.cache.dir).unwrap();
+        let source = SyntheticSource { count: 8, visits: AtomicUsize::new(0) };
+        let stop = AtomicUsize::new(0);
+        let summary = Groups::prepare_summary(&source, 0, &f.constraints, Some(&f.cache),
+            None, Basis::Absolute, 4, &stop, &|_| {}).unwrap();
+        assert_eq!(summary, CachedGroupSummary { count: Some(3), step: Some(223) });
+        assert!(source.visits.load(Ordering::Relaxed) > 0);
+        let visits = source.visits.load(Ordering::Relaxed);
+        let folder = f.measure.parent().unwrap();
+        assert!(f.measure.join("values.bin").is_file());
+        assert!(!folder.join("groups").exists());
+        let table = Table::cached(&f.cache, 0, 8, &f.constraints).unwrap();
+        assert!(matches!(table.values, Column::Mapped(..)));
+        let summaries = folder.join("summaries");
+        assert_eq!(std::fs::read_dir(&summaries).unwrap()
+            .filter(|entry| entry.as_ref().unwrap().file_type().unwrap().is_dir()).count(), 1);
+        let dir = summaries.join(store::digest(&Groups::key(223, Basis::Absolute, "all")));
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        let warm = Groups::prepare_summary(&source, 0, &f.constraints, Some(&f.cache),
+            None, Basis::Absolute, 4, &stop, &|_| panic!("warm summary has no work")).unwrap();
+        assert_eq!(warm, summary);
+        assert_eq!(source.visits.load(Ordering::Relaxed), visits);
+        assert_eq!(Groups::prepare_summary(&source, 0, &f.constraints, Some(&f.cache),
+            Some(5000), Basis::Absolute, 4, &stop, &|_| {}).unwrap().count, Some(1));
+        assert_eq!(Groups::prepare_summary(&source, 0, &f.constraints, Some(&f.cache),
+            None, Basis::Percent, 4, &stop, &|_| {}).unwrap().count, Some(3));
+        assert_eq!(source.visits.load(Ordering::Relaxed), visits);
+        assert!(!folder.join("groups").exists());
+    }
+
+    #[test]
+    fn cancellation_keeps_completed_rule_and_does_not_publish_incomplete_summary() {
+        let f = Fixture::new(8, &[0], "all");
+        std::fs::remove_dir_all(&f.cache.dir).unwrap();
+        let source = SyntheticSource { count: 8, visits: AtomicUsize::new(0) };
+        let stop = AtomicUsize::new(0);
+        Groups::prepare_summary(&source, 0, &f.constraints, Some(&f.cache),
+            None, Basis::Absolute, 1, &stop, &|_| {}).unwrap();
+        let result = Groups::prepare_summary(&source, 1, &f.constraints, Some(&f.cache),
+            None, Basis::Absolute, 1, &stop, &|text| {
+                if text.starts_with("Counting CD groups 0") {
+                    stop.store(1, Ordering::Relaxed);
+                }
+            });
+        assert!(matches!(result, Err(Error { kind: ErrorKind::Cancelled, .. })));
+        assert_eq!(Groups::cached_summary(&f.cache, 0, 8, &f.constraints, None, Basis::Absolute).count, Some(3));
+        assert_eq!(Groups::cached_summary(&f.cache, 1, 8, &f.constraints, None, Basis::Absolute).count, None);
+        assert!(Table::cached(&f.cache, 1, 8, &f.constraints).is_some());
+    }
+
+    #[test]
+    fn unsupported_empty_and_unwritable_preparation_never_decode_or_allocate_per_error_arrays() {
+        let f = Fixture::new(8, &[0], "all");
+        let source = SyntheticSource { count: 200_000_000, visits: AtomicUsize::new(0) };
+        let stop = AtomicUsize::new(0);
+        let unsupported = vec![json!({"metric":"density","op":"<","value":1})];
+        assert_eq!(Groups::prepare_summary(&source, 0, &unsupported, None,
+            None, Basis::Absolute, 4, &stop, &|_| {}).unwrap().count, Some(0));
+        let empty = SyntheticSource { count: 0, visits: AtomicUsize::new(0) };
+        assert_eq!(Groups::prepare_summary(&empty, 0, &f.constraints, None,
+            None, Basis::Absolute, 4, &stop, &|_| {}).unwrap().count, Some(0));
+        let path = f.root.join("not-a-directory");
+        File::create(&path).unwrap();
+        let blocked = Cache { dir: path, ..f.cache.clone() };
+        assert!(Groups::prepare_summary(&source, 0, &f.constraints, Some(&blocked),
+            None, Basis::Absolute, 4, &stop, &|_| {}).is_err());
+        assert!(Groups::prepare_summary(&source, 0, &f.constraints, None,
+            None, Basis::Absolute, 4, &stop, &|_| {}).is_err());
+        assert_eq!(source.visits.load(Ordering::Relaxed), 0);
+        assert_eq!(empty.visits.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn summary_occupancy_counts_holes_and_bounds_sparse_manual_bins() {
+        let mut dense = SummaryBins::new(&[Some((100, 190))], 10, 2);
+        for delta in [100, 100, 130, 190] { dense.insert(0, delta).unwrap(); }
+        assert_eq!(dense.count, 3);
+        let mut sparse = SummaryBins::new(&[Some((0, (DENSE_BINS * 10) as i64))], 1, 2);
+        for delta in [0, 0, 1] { sparse.insert(0, delta).unwrap(); }
+        assert_eq!(sparse.count, 2);
+        assert!(sparse.insert(0, 2).is_err());
+        assert_eq!(sparse.sparse.len(), 2);
     }
 }

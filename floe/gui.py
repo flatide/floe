@@ -2578,6 +2578,7 @@ class Viewer:
         self._drc_group_counts = {}  # (rule, basis, requested step) -> count/unknown
         self._drc_group_cache_worker = None
         self._drc_group_cache_key = None
+        self._drc_group_cache_progress = None
         self._drc_delta_group = None
         self._drc_delta_busy = False
         self._drc_delta_ui_busy = False
@@ -7454,7 +7455,7 @@ class Viewer:
         tf.set_sensitive(False)   # enabled once rules.json attaches
         tf.set_tooltip_text("Filter by SVRF measurement type, or CD grouped: "
                             "rules with completed/prepared CD groups for the current "
-                            "basis and interval. This filter does not start measurement.")
+                            "basis and interval. Rules appear as background preparation completes.")
         tf.connect("changed", self._on_drc_tfilter)
         nav.add(tf)
         win._tf = tf
@@ -8856,19 +8857,52 @@ class Viewer:
         # Hiding it here would cancel the measurement that supplies its count.
         if ("__grouped__" in (old_filter, self._drc_tfilter)
                 and not (self._drc_tfilter == "__grouped__" and self._drc_delta_busy)):
+            if self._drc_tfilter == "__grouped__" and self._drc_group_rows_refresh():
+                return
             self._drc_fill(preserve=True)
         else:
             self._drc_svrf_refresh()
 
+    def _drc_group_rows_refresh(self):
+        """Add newly prepared rules without disturbing the active error view."""
+        win, db = self._drcwin, self._drc
+        expected = [ci for ci, check in enumerate(db.checks)
+                    if self._drc_group_count(ci)
+                    and (not self._drc_search or self._drc_search in check.name.lower())
+                    and (self._drc_wfilter == "all" or self._drc_wf_count(db, ci) > 0)]
+        current = [row[2] for row in win._rstore]
+        present = set(current)
+        if current != [ci for ci in expected if ci in present]:
+            return False  # A configuration change removes visible rules.
+        if any(row[0] != db.checks[row[2]].name for row in win._rstore):
+            return False  # The old DB's tree has not been rebuilt yet.
+        selection = win._rules.get_selection()
+        had_selection = selection.get_selected()[1] is not None
+        busy = self._drc_rules_busy
+        self._drc_rules_busy = True
+        try:
+            for position, ci in enumerate(expected):
+                if ci not in present:
+                    self._drc_insert_rule(ci, position)
+            # GTK may select its first inserted row automatically.
+            if not had_selection:
+                selection.unselect_all()
+        finally:
+            self._drc_rules_busy = busy
+        self._drc_shown = len(expected)
+        self._drc_svrf_refresh()
+        self._drc_info_refresh()
+        return True
+
     def _drc_group_cache_sync(self):
-        """Probe ready whole-rule caches asynchronously; never create groups."""
+        """Read warm counts, then prepare missing counts without blocking GTK."""
         db, meta, mode = self._drc, self._drc_rmeta, self._drc_delta_mode
         requests = []
         if db is not None and meta is not None and mode != "off":
             checks = meta.get("checks") or {}
             for ci, check in enumerate(db.checks):
                 step = self._drc_delta_steps.get((ci, mode))
-                if (ci, mode, step) in self._drc_group_counts:
+                if self._drc_group_counts.get((ci, mode, step)) is not None:
                     continue
                 cons = (checks.get(check.name) or {}).get("constraints") or []
                 if cons and len(check.errors):
@@ -8878,6 +8912,8 @@ class Viewer:
             if worker is not None:
                 worker.cancel()
             self._drc_group_cache_key = None
+            self._drc_group_cache_progress = None
+            self._drc_info_refresh()
             return
         key = (id(db), id(meta), mode,
                tuple((r["check"], r["step"]) for r in requests))
@@ -8887,28 +8923,76 @@ class Viewer:
             from .gtkservice import DeltaCachedWorker
             worker = self._drc_group_cache_worker = DeltaCachedWorker()
         self._drc_group_cache_key = key
+        self._drc_group_cache_progress = "preparing CD group counts…"
         worker.submit(key, db, requests, mode)
+        self._drc_info_refresh()
 
     def _drc_group_cache_poll(self):
         worker = self._drc_group_cache_worker
         result = worker.poll() if worker is not None else None
         if result is None:
             return
-        key, rows, error = result
+        key, event, error = result
         if key != self._drc_group_cache_key:
             return
-        self._drc_group_cache_key = None
         if error:
+            self._drc_group_cache_key = None
+            self._drc_group_cache_progress = None
             self._set_live_status("CD group counts unavailable: %s" % error)
+            self._drc_info_refresh()
             return
+        done = event["state"] == "done"
+        if done:
+            self._drc_group_cache_key = None
+        self._drc_group_cache_progress = None if done else event.get("text")
         steps = dict(key[3])
+        changed = False
+        rows = event.get("rows") or []
         for row in rows:
             ci = row["check"]
             setting = (ci, key[2], steps[ci])
             # A live grouping may have completed while the cache probe ran.
-            if setting not in self._drc_group_counts:
-                self._drc_group_counts[setting] = row.get("count")
-        self._drc_group_ui_refresh()
+            count = row.get("count")
+            if count is not None or setting not in self._drc_group_counts:
+                changed |= self._drc_group_counts.get(setting) != count
+                self._drc_group_counts[setting] = count
+        if changed:
+            self._drc_group_ui_refresh()
+        self._drc_info_refresh()
+        errors = [row["error"] for row in rows if row.get("error")]
+        if done and errors:
+            self._set_live_status("CD group counts unavailable for %d rule(s): %s"
+                                  % (len(errors), errors[0]))
+
+    def _drc_insert_rule(self, ci, position=None):
+        """Insert one parent and its clusters into the existing rule model."""
+        db, rstore = self._drc, self._drcwin._rstore
+        c = db.checks[ci]
+        # count column = total/waived; both are O(1) cached counts.
+        wv = db.status_counts(ci)[0] if hasattr(db, "status_counts") else 0
+        _, svrf_detail = self._drc_svrf_status(c.name)
+        group_count = self._drc_group_count(ci)
+        if group_count:
+            svrf_detail += "\nCD groups: %d (whole rule; excludes Unmeasurable)" % group_count
+        values = [c.name, "%d/%d" % (len(c.errors), wv), ci, None,
+                  self._drc_rule_label(c.name, ci),
+                  GLib.markup_escape_text(c.name + "\n" + svrf_detail)]
+        parent = (rstore.append(None, values) if position is None
+                  else rstore.insert(None, position, values))
+        clusters = (self._drc_clusters.rules.get(ci, ())
+                    if self._drc_clusters is not None else ())
+        if clusters:
+            self._drc_clusters.prepare_counts(ci)
+        for cluster in clusters:
+            cw, ct = cluster.status_counts()
+            matching = (ct if self._drc_wfilter == "all" else
+                        cw if self._drc_wfilter == "waived" else ct - cw)
+            if matching or self._drc_wfilter == "all":
+                rstore.append(parent, [cluster.name, "%d/%d" % (ct, cw),
+                                       ci, cluster, cluster.name,
+                                       GLib.markup_escape_text(
+                                           cluster.name + "\nrule: " + c.name
+                                           + "\n" + svrf_detail)])
 
     def _drc_fill(self, preserve=False):
         """Rules list: NAME + SVRF status + total/waived counts (user call
@@ -8959,33 +9043,7 @@ class Viewer:
             # call 2026-08-14); the waive filters hide empty rules
             if cnt <= 0 and self._drc_wfilter != "all":
                 continue
-            # count column = total/waived (user call 2026-08-18);
-            # both are O(1) ([wcount] table - the perf contract)
-            wv = (db.status_counts(ci)[0]
-                  if hasattr(db, "status_counts") else 0)
-            svrf_status, svrf_detail = self._drc_svrf_status(c.name)
-            group_count = self._drc_group_count(ci)
-            if group_count:
-                svrf_detail += "\nCD groups: %d (whole rule; excludes Unmeasurable)" % group_count
-            parent = rstore.append(None, [c.name,
-                           "%d/%d" % (len(c.errors), wv), ci, None,
-                           self._drc_rule_label(c.name, ci),
-                           GLib.markup_escape_text(
-                               c.name + "\n" + svrf_detail)])
-            clusters = (self._drc_clusters.rules.get(ci, ())
-                        if self._drc_clusters is not None else ())
-            if clusters:
-                self._drc_clusters.prepare_counts(ci)
-            for cluster in clusters:
-                cw, ct = cluster.status_counts()
-                matching = (ct if self._drc_wfilter == "all" else
-                            cw if self._drc_wfilter == "waived" else ct - cw)
-                if matching or self._drc_wfilter == "all":
-                    rstore.append(parent, [cluster.name, "%d/%d" % (ct, cw),
-                                           ci, cluster, cluster.name,
-                                           GLib.markup_escape_text(
-                                               cluster.name + "\nrule: " + c.name
-                                               + "\n" + svrf_detail)])
+            self._drc_insert_rule(ci)
             shown += 1
         win._rules.set_model(rstore)
         win._rules.get_selection().unselect_all()
@@ -9032,6 +9090,8 @@ class Viewer:
             rules = " · svrf %d/%d" % self._drc_rmatch
         if self._drc_clusters is not None:
             rules += " · clusters %d rules" % len(self._drc_clusters.rules)
+        if self._drc_group_cache_progress:
+            rules += " · " + self._drc_group_cache_progress
         busy = getattr(self, "_drc_marker_busy", False)
         if busy:
             rules += " · markers…"
@@ -9202,6 +9262,7 @@ class Viewer:
                 self._drc_group_cache_worker = None
             self._drc_group_counts = {}
             self._drc_group_cache_key = None
+            self._drc_group_cache_progress = None
             self._drc_delta_steps = {}
             self._drc_delta_auto_steps = {}
             self._drc_delta_step_scope = None
