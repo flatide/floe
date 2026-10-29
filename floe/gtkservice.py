@@ -1163,6 +1163,7 @@ class DeltaGroups(object):
         self.total = event["total"]
         self.estimated_total = event["estimated_total"]
         self._len = event["groups"]
+        self.cd_count = event["cd_groups"]
 
     def __len__(self):
         return self._len
@@ -1225,6 +1226,26 @@ class DeltaWorker(_Worker):
             return key, DeltaGroups(self._db, self._ci, e), None
         if e["state"] == "error":
             return key, None, e.get("message")
+        return None
+
+
+class DeltaCachedWorker(_Worker):
+    """Read existing group directories without measuring any errors."""
+    kind = "delta_cached"
+
+    def submit(self, key, db, checks, mode):
+        self._submit(key, db, "drc_delta_cached", checks=checks, basis=mode)
+
+    def poll(self):
+        failed, e = self._event()
+        if failed is not None:
+            return failed[0], None, failed[1]
+        if e is None:
+            return None
+        if e["state"] == "done":
+            return self._key, e.get("rows", []), None
+        if e["state"] == "error":
+            return self._key, None, e.get("message")
         return None
 
 

@@ -238,7 +238,11 @@ python -m floe render chip.oas --drc results.db \
 `파일명 [pack v4] — cell · 표시/전체 룰 · 에러 · svrf N/M`.
 
 **룰 목록** — 이름 + `에러수/waived`(예: 30/20, 둘 다 O(1)).
-- SVRF 메타데이터가 적용된 룰은 이름 앞에 `✓`만 표시한다(예: `✓ M1.SPACE.1`).
+- SVRF 메타데이터가 적용된 룰은 이름 앞에 `✓`를 표시한다. 현재 설정으로 계산된
+  CD 그룹이 있으면 개수를 함께 표시한다(예: `✓ (5) M1.SPACE.1`). 이 개수는
+  **룰 전체의 측정 가능한 그룹 수**이며 `Unmeasurable` 그룹은 제외한다.
+  클러스터나 waive 필터의 일부 개수가 아니며, 0개이거나 아직 계산되지 않았으면
+  괄호를 생략한다. `no grouping`일 때도 개수를 표시하지 않는다.
   매칭되지 않거나 SVRF를 로드하지 않은 룰과 클러스터 이름에는 표시를 붙이지 않는다.
   툴팁과 룰·에러 상세에는 적용 상태를 안내하며, 클러스터 툴팁은 부모 룰의 상태를 따른다.
   `#IFDEF`/`#IFNDEF`로 제외된 룰은 체크가 없지만, 다른 덱을 로드했거나
@@ -249,6 +253,12 @@ python -m floe render chip.oas --drc results.db \
 - 검색 박스(목록 상단): 이름 부분일치 실시간 필터.
 - 유형 콤보: SVRF 측정문 metric별 분류(width/space/notch/enclosure/overlap/extension/
   area/density/…; rules.json 필요, 다중 측정문 룰은 각 유형 매칭).
+  `CD grouped (N)`을 선택하면 CD 그룹이 1개 이상인 것으로 확인된 룰만 표시한다.
+  `N`은 해당 룰의 수이며, 현재 절대/비율 기준과 룰별 스텝 설정을 따른다.
+  그룹 개수는 `drc-prepare` 등으로 완료된 캐시에서 읽거나 룰 전체의 그룹 계산이
+  끝났을 때 갱신한다. 목록이나 필터를 위해 모든 룰을 새로 측정하지 않으므로,
+  미계산 룰은 이 필터에서 제외된다. SVRF 미로딩 또는 `no grouping`에서는
+  `CD grouped` 항목을 표시하지 않는다.
 - All/Not Waived/Waived 콤보: status 기준(All은 에러 0 룰도 표시).
 - 세 필터는 **교집합**. 룰 선택 = 열기(한 번에 한 룰).
 

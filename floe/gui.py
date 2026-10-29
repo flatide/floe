@@ -2575,6 +2575,9 @@ class Viewer:
         self._drc_delta_worker = None
         self._drc_delta_key = None
         self._drc_delta_groups = None
+        self._drc_group_counts = {}  # (rule, basis, requested step) -> count/unknown
+        self._drc_group_cache_worker = None
+        self._drc_group_cache_key = None
         self._drc_delta_group = None
         self._drc_delta_busy = False
         self._drc_delta_ui_busy = False
@@ -4954,6 +4957,7 @@ class Viewer:
         # the DRC analysis jobs' answers (gtk-service; feature/jobdeck-drc)
         for name, poll in (("marker", self._drc_marker_poll),
                            ("delta", self._drc_delta_poll),
+                           ("delta_cached", self._drc_group_cache_poll),
                            ("conflict", self._drc_conflict_poll),
                            ("selection", self._drc_selection_poll),
                            ("review", self._drc_review_poll),
@@ -7448,8 +7452,9 @@ class Viewer:
         tf.append("all", "all types")
         tf.set_active_id("all")
         tf.set_sensitive(False)   # enabled once rules.json attaches
-        tf.set_tooltip_text("filter rules by their SVRF measurement "
-                            "type (needs the .rules.json sidecar)")
+        tf.set_tooltip_text("Filter by SVRF measurement type, or CD grouped: "
+                            "rules with completed/prepared CD groups for the current "
+                            "basis and interval. This filter does not start measurement.")
         tf.connect("changed", self._on_drc_tfilter)
         nav.add(tf)
         win._tf = tf
@@ -8735,7 +8740,6 @@ class Viewer:
         matched = sum(1 for c in db.checks if c.name in meta)
         self._drc_rmeta = data
         self._drc_rmatch = (matched, len(db.checks))
-        self._drc_svrf_refresh()
         # A replaced deck may define different bounds under the same name.
         # Preserve parent/file-cluster picks, discard obsolete delta scopes.
         self._drc_sels = {key: value for key, value in self._drc_sels.items()
@@ -8744,7 +8748,8 @@ class Viewer:
         self._drc_delta_sync()
         if self._drc_open is not None:
             self._drc_delta_scope_refresh()
-        self._drc_types_rebuild()
+        self._drc_group_ui_refresh()
+        self._drc_group_cache_sync()
         self._drc_info_refresh()
         if not silent or matched:
             self._set_live_status(
@@ -8814,13 +8819,96 @@ class Viewer:
         for row in win._rstore:
             # Auto-loading a new DB's metadata may precede rebuilding this tree.
             name = row[0]
-            status, detail = self._drc_svrf_status(name)
-            row[4] = (status + " " if status else "") + name
+            _, detail = self._drc_svrf_status(name)
+            ci = row[2]
+            if ci >= len(db.checks) or db.checks[ci].name != name:
+                ci = None
+            row[4] = self._drc_rule_label(name, ci)
+            count = self._drc_group_count(ci)
+            if count:
+                detail += "\nCD groups: %d (whole rule; excludes Unmeasurable)" % count
             row[5] = GLib.markup_escape_text(name + "\n" + detail)
             for child in row.iterchildren():
                 child[4] = child[0]
                 child[5] = GLib.markup_escape_text(
                     child[0] + "\nrule: " + name + "\n" + detail)
+
+    def _drc_group_count(self, ci):
+        if ci is None or self._drc_delta_mode == "off":
+            return None
+        setting = (ci, self._drc_delta_mode)
+        return self._drc_group_counts.get(
+            setting + (self._drc_delta_steps.get(setting),))
+
+    def _drc_rule_label(self, name, ci):
+        prefix = self._drc_svrf_status(name)[0]
+        count = self._drc_group_count(ci)
+        if count:
+            prefix += " (%d)" % count
+        return (prefix + " " if prefix else "") + name
+
+    def _drc_group_ui_refresh(self):
+        old_filter = self._drc_tfilter
+        self._drc_types_rebuild()
+        if self._drc is None or self._drcwin is None:
+            return
+        # Keep the active rule visible while its new interval/basis is pending.
+        # Hiding it here would cancel the measurement that supplies its count.
+        if ("__grouped__" in (old_filter, self._drc_tfilter)
+                and not (self._drc_tfilter == "__grouped__" and self._drc_delta_busy)):
+            self._drc_fill(preserve=True)
+        else:
+            self._drc_svrf_refresh()
+
+    def _drc_group_cache_sync(self):
+        """Probe ready whole-rule caches asynchronously; never create groups."""
+        db, meta, mode = self._drc, self._drc_rmeta, self._drc_delta_mode
+        requests = []
+        if db is not None and meta is not None and mode != "off":
+            checks = meta.get("checks") or {}
+            for ci, check in enumerate(db.checks):
+                step = self._drc_delta_steps.get((ci, mode))
+                if (ci, mode, step) in self._drc_group_counts:
+                    continue
+                cons = (checks.get(check.name) or {}).get("constraints") or []
+                if cons and len(check.errors):
+                    requests.append({"check": ci, "constraints": cons, "step": step})
+        worker = self._drc_group_cache_worker
+        if not requests:
+            if worker is not None:
+                worker.cancel()
+            self._drc_group_cache_key = None
+            return
+        key = (id(db), id(meta), mode,
+               tuple((r["check"], r["step"]) for r in requests))
+        if key == self._drc_group_cache_key:
+            return
+        if worker is None:
+            from .gtkservice import DeltaCachedWorker
+            worker = self._drc_group_cache_worker = DeltaCachedWorker()
+        self._drc_group_cache_key = key
+        worker.submit(key, db, requests, mode)
+
+    def _drc_group_cache_poll(self):
+        worker = self._drc_group_cache_worker
+        result = worker.poll() if worker is not None else None
+        if result is None:
+            return
+        key, rows, error = result
+        if key != self._drc_group_cache_key:
+            return
+        self._drc_group_cache_key = None
+        if error:
+            self._set_live_status("CD group counts unavailable: %s" % error)
+            return
+        steps = dict(key[3])
+        for row in rows:
+            ci = row["check"]
+            setting = (ci, key[2], steps[ci])
+            # A live grouping may have completed while the cache probe ran.
+            if setting not in self._drc_group_counts:
+                self._drc_group_counts[setting] = row.get("count")
+        self._drc_group_ui_refresh()
 
     def _drc_fill(self, preserve=False):
         """Rules list: NAME + SVRF status + total/waived counts (user call
@@ -8858,7 +8946,10 @@ class Viewer:
             if self._drc_search \
                     and self._drc_search not in c.name.lower():
                 continue
-            if self._drc_tfilter != "all":
+            if self._drc_tfilter == "__grouped__":
+                if not self._drc_group_count(ci):
+                    continue
+            elif self._drc_tfilter != "all":
                 ts = (self._drc_rtypes or {}).get(c.name)
                 if not ts or self._drc_tfilter not in ts:
                     continue
@@ -8873,9 +8964,12 @@ class Viewer:
             wv = (db.status_counts(ci)[0]
                   if hasattr(db, "status_counts") else 0)
             svrf_status, svrf_detail = self._drc_svrf_status(c.name)
+            group_count = self._drc_group_count(ci)
+            if group_count:
+                svrf_detail += "\nCD groups: %d (whole rule; excludes Unmeasurable)" % group_count
             parent = rstore.append(None, [c.name,
                            "%d/%d" % (len(c.errors), wv), ci, None,
-                           (svrf_status + " " if svrf_status else "") + c.name,
+                           self._drc_rule_label(c.name, ci),
                            GLib.markup_escape_text(
                                c.name + "\n" + svrf_detail)])
             clusters = (self._drc_clusters.rules.get(ci, ())
@@ -8980,8 +9074,11 @@ class Viewer:
                 for m in ms:
                     counts[m] = counts.get(m, 0) + 1
             self._drc_rtypes = types
-        if self._drc_tfilter != "all" and self._drc_tfilter \
-                not in counts:
+        grouped_available = (self._drc_rmeta is not None
+                             and self._drc_delta_mode != "off")
+        if (self._drc_tfilter == "__grouped__" and not grouped_available
+                or self._drc_tfilter not in ("all", "__grouped__")
+                and self._drc_tfilter not in counts):
             self._drc_tfilter = "all"
         if win is None:
             return
@@ -8990,12 +9087,16 @@ class Viewer:
         try:
             tf.remove_all()
             tf.append("all", "all types")
+            if grouped_available:
+                grouped = sum(bool(self._drc_group_count(ci))
+                              for ci in range(len(db.checks))) if db is not None else 0
+                tf.append("__grouped__", "CD grouped" + (" (%d)" % grouped if grouped else ""))
             ordered = [m for m in DRC_METRICS if m in counts]
             ordered += sorted(set(counts) - set(DRC_METRICS))
             for m in ordered:
                 tf.append(m, "%s (%d)" % (m, counts[m]))
             tf.set_active_id(self._drc_tfilter)
-            tf.set_sensitive(bool(counts))
+            tf.set_sensitive(bool(counts) or grouped_available)
         finally:
             self._drc_tf_busy = False
 
@@ -9095,6 +9196,12 @@ class Viewer:
             else:
                 worker.cancel()
         if drop_worker:
+            cached = self._drc_group_cache_worker
+            if cached is not None:
+                cached.close()
+                self._drc_group_cache_worker = None
+            self._drc_group_counts = {}
+            self._drc_group_cache_key = None
             self._drc_delta_steps = {}
             self._drc_delta_auto_steps = {}
             self._drc_delta_step_scope = None
@@ -9226,6 +9333,8 @@ class Viewer:
             return
         self._drc_delta_busy = False
         self._drc_delta_groups = groups
+        if groups is not None and key[3] is None:
+            self._drc_group_counts[(key[1], key[4], key[5])] = groups.cd_count
         self._drc_delta_error = "CD grouping failed: %s" % error if error else None
         if groups is not None:
             self._drc_delta_step = groups.step_ticks
@@ -9244,8 +9353,9 @@ class Viewer:
                 self._drc_delta_restore = None
                 self._drc_delta_scope_refresh()
         self._drc_delta_refresh()
+        self._drc_group_ui_refresh()
         if error:
-            self._set_live_status(self._drc_delta_error)
+            self._set_live_status("CD grouping failed: %s" % error)
 
     def _drc_delta_scope_refresh(self):
         """A new scope starts at page one, with only its own saved picks."""
@@ -9290,7 +9400,9 @@ class Viewer:
         if self._drc_sel is not None:
             self._drc_sels[self._drc_scope_key()] = self._drc_sel
         self._drc_delta_mode = mode
+        self._drc_group_cache_sync()
         self._drc_delta_sync()
+        self._drc_group_ui_refresh()
         self._drc_delta_scope_refresh()
 
     def _on_drc_delta_step(self, _widget=None):
@@ -9319,7 +9431,9 @@ class Viewer:
             self._drc_delta_steps.pop(setting, None)
         else:
             self._drc_delta_steps[setting] = step
+        self._drc_group_cache_sync()
         self._drc_delta_sync()
+        self._drc_group_ui_refresh()
         self._drc_delta_scope_refresh()
 
     def _drc_delta_status_changed(self, ci, eis=None):
@@ -12753,6 +12867,9 @@ class Viewer:
         delta_worker = getattr(self, "_drc_delta_worker", None)
         if delta_worker is not None:
             delta_worker.close()
+        cached_worker = getattr(self, "_drc_group_cache_worker", None)
+        if cached_worker is not None:
+            cached_worker.close()
         query_worker = getattr(self, "_drc_query_worker", None)
         if query_worker is not None:
             query_worker.close()

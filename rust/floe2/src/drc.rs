@@ -23,6 +23,7 @@
 //!   drc_scope_count / drc_scope_page / drc_scope_rank / drc_scope_contains
 //!       {handle, check, scope: {cluster} | {group, row} | {selection}, waived?, ...}
 //!   drc_delta {handle, check, constraints, basis, step?, cluster?}      job "delta"
+//!   drc_delta_cached {handle, basis, checks:[{check,constraints,step?}]} job "delta_cached"
 //!   drc_delta_rows {handle, group, start, limit, waived?}; drc_delta_find {handle, group, key}
 //!   drc_delta_drop {handle, group}
 //!   drc_markers {handle, check, bounds, width, height, scope?, waived?, selection?}  job "markers"
@@ -452,7 +453,11 @@ impl Drcs {
             _ => (),
         }
         let session = self.session(request)?;
-        session.settle(cancelled)?;
+        // Cached CD bin counts depend only on geometry and constraints. Do not
+        // scan pending review changes before this read-only background probe.
+        if op != "drc_delta_cached" {
+            session.settle(cancelled)?;
+        }
         session.request(op, request, cancelled)
     }
 
@@ -725,6 +730,7 @@ impl Session {
                 self.scope_request(op, request)
             }
             "drc_delta" => self.delta(request),
+            "drc_delta_cached" => self.delta_cached(request),
             "drc_delta_rows" => {
                 let g = number(request, "group")?;
                 let (start, limit) = (number(request, "start")?, number(request, "limit")?.min(1000));
@@ -928,6 +934,48 @@ impl Session {
         Err(Error::input("scope names a cluster, a group row or a selection"))
     }
 
+    fn delta_cached(&mut self, request: &Value) -> Result<Value> {
+        let basis = Basis::parse(request.get("basis").and_then(Value::as_str).unwrap_or("absolute"))?;
+        let checks = request.get("checks").and_then(Value::as_array)
+            .ok_or_else(|| Error::input("checks must be a list"))?;
+        let mut wanted = Vec::with_capacity(checks.len());
+        for entry in checks {
+            let check = usize::try_from(number(entry, "check")?)
+                .map_err(|_| Error::input("DRC check index out of range"))?;
+            if check >= self.shared.source.check_count() {
+                return Err(Error::input("DRC check index out of range"));
+            }
+            let constraints = constraints_of(entry)?;
+            let step = match entry.get("step") {
+                None | Some(Value::Null) => None,
+                Some(v) => Some(v.as_i64().filter(|s| *s > 0).ok_or_else(|| {
+                    Error::input("grouping step must be positive fixed-precision ticks")
+                })?),
+            };
+            wanted.push((check, constraints, step));
+        }
+        Ok(json!({"job": self.start("delta_cached", move |shared, id, stop| {
+            let result = (|| -> Result<Value> {
+                let mut rows = Vec::with_capacity(wanted.len());
+                for (check, constraints, step) in wanted {
+                    floe_app_core::check_cancelled(&stop)?;
+                    let summary = shared.cache.as_ref().map(|cache| Groups::cached_summary(
+                        cache, check, shared.source.count(check), &constraints, step, basis,
+                    ));
+                    let count = summary.as_ref().and_then(|s| s.count);
+                    let resolved = summary.as_ref().and_then(|s| s.step).or(step);
+                    rows.push(json!({"check": check, "count": count, "step": resolved}));
+                }
+                floe_app_core::check_cancelled(&stop)?;
+                Ok(json!({"rows": rows}))
+            })();
+            match result {
+                Ok(v) => shared.event(id, "delta_cached", "done", v),
+                Err(e) => job_error(&shared, id, "delta_cached", e),
+            }
+        })}))
+    }
+
     fn delta(&mut self, request: &Value) -> Result<Value> {
         let check = number(request, "check")? as usize;
         let constraints = constraints_of(request)?;
@@ -999,6 +1047,7 @@ impl Session {
                 let status = GroupStatus::new(Arc::clone(&groups), &shared.statuses, &stop)?;
                 let gid = shared.next_id();
                 let out = json!({"measurable": true, "group": gid, "groups": groups.len(),
+                                 "cd_groups": groups.cd_group_count(),
                                  "step": groups.step, "auto": groups.auto, "total": groups.total,
                                  "estimated_total": groups.estimated_total(), "basis": basis.name()});
                 let mut all = shared.groups.lock().unwrap();

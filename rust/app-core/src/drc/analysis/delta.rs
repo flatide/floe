@@ -15,6 +15,8 @@ use super::ticks::{format_ticks, json_ticks, percent_ticks, SCALE};
 use crate::{check_cancelled, Error, ErrorKind, Result};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::fs::File;
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -113,6 +115,29 @@ fn merge_range(into: &mut Option<(i64, i64)>, v: i64) {
         None => (v, v),
         Some((lo, hi)) => (lo.min(v), hi.max(v)),
     });
+}
+
+fn auto_step_ranges(ranges: &[Option<(i64, i64)>]) -> i64 {
+    let ranges: Vec<(i128, i128)> = ranges
+        .iter()
+        .flatten()
+        .map(|&(lo, hi)| (i128::from(lo), i128::from(hi)))
+        .collect();
+    let mut step = ranges
+        .iter()
+        .map(|(lo, hi)| (hi - lo + 10) / 10)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    if ranges.iter().any(|(lo, hi)| hi / step - lo / step + 1 > 10) {
+        step = ranges
+            .iter()
+            .map(|(lo, hi)| (hi - lo + 8) / 9)
+            .max()
+            .unwrap_or(1)
+            .max(1);
+    }
+    i64::try_from(step).unwrap_or(i64::MAX)
 }
 
 impl Table {
@@ -362,26 +387,7 @@ impl Table {
     /// The whole rule's automatic step: the widest constraint's range over
     /// ten, widened when zero-anchored bins would make an eleventh.
     pub fn auto_step(&self, basis: Basis) -> i64 {
-        let ranges: Vec<(i128, i128)> = self.ranges[basis.index()]
-            .iter()
-            .flatten()
-            .map(|&(lo, hi)| (i128::from(lo), i128::from(hi)))
-            .collect();
-        let mut step = ranges
-            .iter()
-            .map(|(lo, hi)| (hi - lo + 10) / 10)
-            .max()
-            .unwrap_or(1)
-            .max(1);
-        if ranges.iter().any(|(lo, hi)| hi / step - lo / step + 1 > 10) {
-            step = ranges
-                .iter()
-                .map(|(lo, hi)| (hi - lo + 8) / 9)
-                .max()
-                .unwrap_or(1)
-                .max(1);
-        }
-        i64::try_from(step).unwrap_or(i64::MAX)
+        auto_step_ranges(&self.ranges[basis.index()])
     }
 }
 
@@ -433,7 +439,112 @@ pub struct Groups {
     row_of: Column<i32>,
 }
 
+/// A cached whole-rule directory summary. None is unavailable, not zero:
+/// callers must not present an unprepared rule as a measured zero-group rule.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct CachedGroupSummary {
+    pub count: Option<u64>,
+    pub step: Option<i64>,
+}
+
+/// Check a published column's length without mapping or reading its contents.
+fn cached_column_len(dir: &Path, name: &str, count: u64, width: u64) -> Option<()> {
+    let metadata = std::fs::metadata(dir.join(name)).ok()?;
+    (metadata.is_file() && metadata.len() == count.checked_mul(width)?).then_some(())
+}
+
+fn cached_i32(file: &File, index: u64) -> Option<i32> {
+    let mut bytes = [0u8; 4];
+    file.read_exact_at(&mut bytes, index.checked_mul(4)?).ok()?;
+    Some(i32::from_le_bytes(bytes))
+}
+
+fn cached_u64(file: &File, index: u64) -> Option<u64> {
+    let mut bytes = [0u8; 8];
+    file.read_exact_at(&mut bytes, index.checked_mul(8)?).ok()?;
+    Some(u64::from_le_bytes(bytes))
+}
+
 impl Groups {
+    fn key(step: i64, basis: Basis, members_key: &str) -> Value {
+        json!({"version": VERSION, "step": step, "mode": basis.name(), "members": members_key})
+    }
+
+    /// Read only an already-published whole-rule grouping. This deliberately
+    /// never calls Table::measure/Groups::build: their cache-miss paths scan
+    /// every error. Only manifests, file lengths and a few directory endpoints
+    /// are read, with no per-error columns mapped and no review state opened.
+    pub fn cached_summary(
+        cache: &Cache,
+        check: usize,
+        count: u64,
+        constraints: &[Value],
+        step: Option<i64>,
+        basis: Basis,
+    ) -> CachedGroupSummary {
+        let mut summary = CachedGroupSummary { count: None, step };
+        summary.count = (|| -> Option<u64> {
+            if step.is_some_and(|s| s <= 0) {
+                return None;
+            }
+            let table_key = Table::key(check, count, constraints, cache);
+            let folder = cache.dir.join("delta").join(store::digest(&table_key));
+            let measure = folder.join("measure");
+            let manifest = store::manifest(&measure, &table_key)?;
+            let ranges = serde_json::from_value::<[Vec<Option<(i64, i64)>>; 2]>(
+                manifest.get("ranges")?.clone(),
+            ).ok()?;
+            if ranges.iter().any(|r| r.len() != constraints.len()
+                || r.iter().flatten().any(|&(lo, hi)| lo < 0 || hi < lo)) {
+                return None;
+            }
+            for (name, width) in [("values.bin", 8), ("choices.bin", 4), ("estimated.bin", 1)] {
+                cached_column_len(&measure, name, count, width)?;
+            }
+            let resolved = step.unwrap_or_else(|| auto_step_ranges(&ranges[basis.index()]));
+            summary.step = Some(resolved);
+            let key = Self::key(resolved, basis, "all");
+            let dir = folder.join("groups").join(store::digest(&key));
+            let manifest = store::manifest(&dir, &key)?;
+            let groups = manifest.get("groups")?.as_u64()?;
+            let total = manifest.get("total")?.as_u64()?;
+            let narrow = manifest.get("narrow")?.as_bool()?;
+            if total != count || groups > count || (count > 0 && groups == 0)
+                || narrow != (count <= u64::from(u32::MAX)) {
+                return None;
+            }
+            for (name, n, width) in [
+                ("constraint.bin", groups, 4), ("bins.bin", groups, 8),
+                ("offsets.bin", groups.checked_add(1)?, 8), ("estimated.bin", groups, 8),
+                ("ids.bin", total, if narrow { 4 } else { 8 }), ("rows.bin", count, 4),
+            ] {
+                cached_column_len(&dir, name, n, width)?;
+            }
+            let offsets = File::open(dir.join("offsets.bin")).ok()?;
+            if cached_u64(&offsets, 0)? != 0 || cached_u64(&offsets, groups)? != total {
+                return None;
+            }
+            if groups == 0 {
+                return Some(0);
+            }
+            let constraints_file = File::open(dir.join("constraint.bin")).ok()?;
+            let last = cached_i32(&constraints_file, groups - 1)?;
+            let known = groups - u64::from(last == UNKNOWN);
+            if last != UNKNOWN && (last < 0 || last as usize >= constraints.len()) {
+                return None;
+            }
+            if known > 0 {
+                let first = cached_i32(&constraints_file, 0)?;
+                let final_known = cached_i32(&constraints_file, known - 1)?;
+                if first < 0 || final_known < first || final_known as usize >= constraints.len() {
+                    return None;
+                }
+            }
+            Some(known)
+        })();
+        summary
+    }
+
     /// Group `table` (restricted to `members` when given; `members_key` names
     /// that restriction for the cache) by `step` ticks (None: the automatic
     /// step) and `basis`.
@@ -452,7 +563,7 @@ impl Groups {
             Some(_) => return Err(Error::input("grouping step must be positive fixed-precision ticks")),
             None => table.auto_step(basis),
         };
-        let key = json!({"version": VERSION, "step": step, "mode": basis.name(), "members": members_key});
+        let key = Self::key(step, basis, members_key);
         let folder = table
             .folder
             .as_ref()
@@ -673,6 +784,10 @@ impl Groups {
 
     pub fn len(&self) -> usize {
         self.constraint.len()
+    }
+    /// Actual CD bins; the optional trailing unmeasurable row is not a bin.
+    pub fn cd_group_count(&self) -> usize {
+        self.len() - usize::from(self.constraint.as_slice().last() == Some(&UNKNOWN))
     }
     pub fn is_empty(&self) -> bool {
         self.len() == 0
@@ -998,3 +1113,136 @@ impl GroupStatus {
 
 /// `SCALE` re-exported for callers formatting steps.
 pub const TICKS_PER_UNIT: i64 = SCALE;
+
+#[cfg(test)]
+mod cached_summary_tests {
+    use super::*;
+
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+
+    struct Fixture {
+        root: PathBuf,
+        cache: Cache,
+        constraints: Vec<Value>,
+        count: u64,
+        measure: PathBuf,
+        groups: PathBuf,
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn sparse(path: &Path, count: u64, width: u64) {
+        File::create(path).unwrap().set_len(count * width).unwrap();
+    }
+
+    impl Fixture {
+        fn new(count: u64, rows: &[i32], members: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "floe-cached-cd-summary-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed),
+            ));
+            std::fs::create_dir(&root).unwrap();
+            let cache = Cache { dir: root.join("analysis"), identity: "pack-one".into() };
+            let constraints = vec![json!({"metric":"width", "op":"<", "value":0.05, "text":"INT M1 < 0.05"})];
+            let key = Table::key(0, count, &constraints, &cache);
+            let folder = cache.dir.join("delta").join(store::digest(&key));
+            let measure = folder.join("measure");
+            std::fs::create_dir_all(&measure).unwrap();
+            let known = rows.iter().any(|&r| r >= 0);
+            let ranges = if known {
+                [vec![Some((100, 199))], vec![Some((1000, 1999))]]
+            } else {
+                [vec![None], vec![None]]
+            };
+            store::write_manifest(&measure, &json!({"key":key,"ranges":ranges,"backend":"rust"})).unwrap();
+            for (name, width) in [("values.bin",8), ("choices.bin",4), ("estimated.bin",1)] {
+                sparse(&measure.join(name), count, width);
+            }
+            let group_key = Groups::key(if known { 10 } else { 1 }, Basis::Absolute, members);
+            let groups = folder.join("groups").join(store::digest(&group_key));
+            std::fs::create_dir_all(&groups).unwrap();
+            store::write_column(&groups.join("constraint.bin"), rows).unwrap();
+            store::write_column(&groups.join("bins.bin"), &vec![0i64; rows.len()]).unwrap();
+            store::write_column(&groups.join("estimated.bin"), &vec![0u64; rows.len()]).unwrap();
+            let mut offsets: Vec<u64> = (0..rows.len() as u64).collect();
+            offsets.push(count);
+            store::write_column(&groups.join("offsets.bin"), &offsets).unwrap();
+            let narrow = count <= u64::from(u32::MAX);
+            sparse(&groups.join("ids.bin"), count, if narrow { 4 } else { 8 });
+            sparse(&groups.join("rows.bin"), count, 4);
+            // The old published format has no extra cd_groups summary field.
+            store::write_manifest(&groups, &json!({"key":group_key,"groups":rows.len(),"total":count,"narrow":narrow})).unwrap();
+            Self { root, cache, constraints, count, measure, groups }
+        }
+
+        fn summary(&self, step: Option<i64>, basis: Basis) -> CachedGroupSummary {
+            Groups::cached_summary(&self.cache, 0, self.count, &self.constraints, step, basis)
+        }
+    }
+
+    #[test]
+    fn old_cache_summary_excludes_unknown_without_reading_error_columns() {
+        // Sparse multi-GB columns contain no actual measured values or IDs.
+        // A summary needs only their lengths and the tiny directory endpoints.
+        let f = Fixture::new(200_000_000, &[0, 0, UNKNOWN], "all");
+        assert_eq!(f.summary(None, Basis::Absolute), CachedGroupSummary { count: Some(2), step: Some(10) });
+        assert_eq!(f.summary(Some(10), Basis::Absolute).count, Some(2));
+        let unknown = Fixture::new(10, &[UNKNOWN], "all");
+        assert_eq!(unknown.summary(None, Basis::Absolute), CachedGroupSummary { count: Some(0), step: Some(1) });
+    }
+
+    #[test]
+    fn summary_requires_exact_basis_step_identity_constraints_and_whole_rule_scope() {
+        let f = Fixture::new(10, &[0, UNKNOWN], "all");
+        assert_eq!(f.summary(Some(20), Basis::Absolute), CachedGroupSummary { count: None, step: Some(20) });
+        assert_eq!(f.summary(None, Basis::Percent), CachedGroupSummary { count: None, step: Some(100) });
+        let other = Cache { identity: "pack-replaced".into(), ..f.cache.clone() };
+        assert_eq!(Groups::cached_summary(&other, 0, f.count, &f.constraints, None, Basis::Absolute).count, None);
+        let mut changed = f.constraints.clone();
+        changed[0]["text"] = json!("INT M2 < 0.05");
+        assert_eq!(Groups::cached_summary(&f.cache, 0, f.count, &changed, None, Basis::Absolute).count, None);
+        assert_eq!(Groups::cached_summary(&f.cache, 1, f.count, &f.constraints, None, Basis::Absolute).count, None);
+        assert_eq!(Groups::cached_summary(&f.cache, 0, f.count + 1, &f.constraints, None, Basis::Absolute).count, None);
+        let cluster = Fixture::new(10, &[0], "cluster-subset");
+        assert_eq!(cluster.summary(None, Basis::Absolute).count, None);
+    }
+
+    #[test]
+    fn summary_refuses_missing_truncated_and_incomplete_cache_without_building() {
+        let f = Fixture::new(10, &[0, UNKNOWN], "all");
+        std::fs::remove_file(f.groups.join("rows.bin")).unwrap();
+        assert_eq!(f.summary(None, Basis::Absolute).count, None);
+        assert!(!f.groups.join("rows.bin").exists());
+        sparse(&f.groups.join("rows.bin"), f.count, 4);
+        File::options().write(true).open(f.measure.join("values.bin")).unwrap().set_len(1).unwrap();
+        assert_eq!(f.summary(None, Basis::Absolute).count, None);
+        sparse(&f.measure.join("values.bin"), f.count, 8);
+        std::fs::remove_file(f.measure.join("complete.json")).unwrap();
+        assert_eq!(f.summary(None, Basis::Absolute), CachedGroupSummary { count: None, step: None });
+        assert!(!f.measure.join("complete.json").exists());
+        let missing = Cache { dir: f.root.join("missing"), ..f.cache.clone() };
+        assert_eq!(Groups::cached_summary(&missing, 0, f.count, &f.constraints, None, Basis::Absolute).count, None);
+        assert!(!missing.dir.exists());
+    }
+
+    #[test]
+    fn live_cd_group_count_excludes_only_the_unmeasurable_row() {
+        let table = Arc::new(Table {
+            check: 0, count: 3,
+            constraints: vec![json!({"metric":"width","op":"<","value":0.05})],
+            bound_ticks: vec![Some(5000)],
+            values: Column::Owned(vec![1000, 2000, 0]),
+            choices: Column::Owned(vec![0, 0, UNKNOWN]),
+            estimated: Column::Owned(vec![0, 0, 0]),
+            ranges: [vec![Some((3000, 4000))], vec![Some((6_000_000, 8_000_000))]],
+            folder: None, measurable: true,
+        });
+        let groups = Groups::build(table, Some(1000), Basis::Absolute, None, "all", &AtomicUsize::new(0)).unwrap();
+        assert_eq!(groups.len(), 3);
+        assert_eq!(groups.cd_group_count(), 2);
+        assert_eq!(groups.row(2).constraint, UNKNOWN);
+    }
+}
