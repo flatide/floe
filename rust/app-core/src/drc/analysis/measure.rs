@@ -206,6 +206,38 @@ fn orient(a: Point, b: Point, c: Point) -> f64 {
     (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
 }
 
+/// A shared point of two finite edges, without a near-zero tolerance. Keep
+/// original endpoints for overlap/touch, and compute the proper intersection
+/// only when both segments straddle each other's supporting line.
+pub(crate) fn edge_pair_zero_point(a0: Point, a1: Point, b0: Point, b1: Point) -> Option<Point> {
+    if [a0, a1, b0, b1].iter().flatten().any(|v| !v.is_finite()) {
+        return None;
+    }
+    let on_segment = |p: Point, a: Point, b: Point| {
+        orient(a, b, p) == 0.0
+            && (0..2).all(|axis| a[axis].min(b[axis]) <= p[axis] && p[axis] <= a[axis].max(b[axis]))
+    };
+    for (p, a, b) in [(a0, b0, b1), (a1, b0, b1), (b0, a0, a1), (b1, a0, a1)] {
+        if on_segment(p, a, b) {
+            return Some(p);
+        }
+    }
+    if !((orient(a0, a1, b0) > 0.0) != (orient(a0, a1, b1) > 0.0)
+        && (orient(b0, b1, a0) > 0.0) != (orient(b0, b1, a1) > 0.0)) {
+        return None;
+    }
+    let (dx, dy) = (a1[0] - a0[0], a1[1] - a0[1]);
+    let (vx, vy) = (b1[0] - b0[0], b1[1] - b0[1]);
+    let (wx, wy) = (b0[0] - a0[0], b0[1] - a0[1]);
+    let denominator = dx * vy - dy * vx;
+    if denominator == 0.0 || !denominator.is_finite() {
+        return None;
+    }
+    let t = (wx * vy - wy * vx) / denominator;
+    let p = [a0[0] + t * dx, a0[1] + t * dy];
+    (t.is_finite() && p.iter().all(|v| v.is_finite())).then_some(p)
+}
+
 fn seg(p: Point, q: Point) -> Segment {
     [p[0], p[1], q[0], q[1]]
 }
@@ -232,6 +264,9 @@ pub fn cd_segments(kind: char, pts: &[Point]) -> Vec<Segment> {
         }
         ('e', 4) => {
             let (a0, a1, b0, b1) = (pts[0], pts[1], pts[2], pts[3]);
+            if let Some(p) = edge_pair_zero_point(a0, a1, b0, b1) {
+                return vec![seg(p, p)];
+            }
             if (orient(a0, a1, b0) > 0.0) != (orient(a0, a1, b1) > 0.0)
                 && (orient(b0, b1, a0) > 0.0) != (orient(b0, b1, a1) > 0.0)
             {
@@ -252,9 +287,6 @@ pub fn cd_segments(kind: char, pts: &[Point]) -> Vec<Segment> {
                     best = i;
                     dmin = d;
                 }
-            }
-            if dmin <= 0.0 {
-                return vec![];
             }
             let (p, q) = cand[best];
             let (adx, ady) = (a1[0] - a0[0], a1[1] - a0[1]);
@@ -931,7 +963,66 @@ mod tests {
         let far = [[0.0, 0.0], [2.0, 0.0], [3.0, 1000.0], [4.0, 1000.0]];
         assert_eq!(cd_segments('e', &far).len(), 3);
         let crossing = [[0.0, 0.0], [1.0, 1.0], [0.0, 1.0], [1.0, 0.0]];
-        assert!(cd_segments('e', &crossing).is_empty());
+        assert_eq!(cd_segments('e', &crossing), vec![[0.5, 0.5, 0.5, 0.5]]);
+    }
+
+    #[test]
+    fn coincident_pair_is_zero_cd_not_its_own_edge_length() {
+        let pts = [[2626.7775, 1734.6100], [2626.7775, 1734.6060],
+                   [2626.7775, 1734.6100], [2626.7775, 1734.6060]];
+        let selector = Selector::new(&[con("space", "<", 0.0275, "EXT M1 < 0.0275")]);
+        for order in [[0, 1, 2, 3], [1, 0, 2, 3], [0, 1, 3, 2], [3, 2, 1, 0]] {
+            let points = order.map(|i| pts[i]);
+            let pick = selector.pick('e', &points).unwrap();
+            assert_eq!(pick.cd, 0.0);
+            assert_eq!(pick.candidates, vec![0.0]);
+            assert_eq!(measurement_ticks(&pick).unwrap(), (0, 2750, 2750));
+            assert_eq!(ticks::percent_ticks(2750, 2750), Some(10_000_000));
+            assert!(!pick.estimated);
+            let rulers = selector.ruler_segments('e', &points);
+            assert_eq!(rulers.len(), 1);
+            assert_eq!(rulers[0][..2], rulers[0][2..]);
+        }
+        let length = Selector::new(&[con("length", "<", 0.0275, "LENGTH M1 < 0.0275")]);
+        assert_eq!(measurement_ticks(&length.pick('e', &pts[..2]).unwrap()).unwrap(), (400, 2750, 2350));
+        assert!(selector.pick('e', &pts[..2]).is_none());
+    }
+
+    #[test]
+    fn overlapping_touching_and_crossing_pairs_obey_zero_comparisons() {
+        for points in [
+            [[0.0, 0.0], [3.0, 0.0], [1.0, 0.0], [4.0, 0.0]],
+            [[0.0, 0.0], [3.0, 4.0], [1.5, 2.0], [4.5, 6.0]],
+            [[0.0, 0.0], [3.0, 0.0], [3.0, 0.0], [4.0, 1.0]],
+            [[0.0, 0.0], [2.0, 2.0], [0.0, 2.0], [2.0, 0.0]],
+            [[0.0, 0.0]; 4],
+        ] {
+            for (op, matches) in [("<", false), ("<=", true), (">", false),
+                                   (">=", true), ("==", true), ("!=", false)] {
+                let selector = Selector::new(&[con("space", op, 0.0, &format!("EXT M1 {op} 0"))]);
+                assert_eq!(selector.pick('e', &points).map(|p| p.cd), matches.then_some(0.0), "{op}: {points:?}");
+            }
+            let rulers = cd_segments('e', &points);
+            assert_eq!(rulers.len(), 1);
+            assert_eq!(rulers[0][..2], rulers[0][2..]);
+            assert!(rulers[0].iter().all(|v| v.is_finite()));
+        }
+        let crossing = [[0.0, 0.0], [2.0, 2.0], [0.0, 2.0], [2.0, 0.0]];
+        assert_eq!(cd_segments('e', &crossing), vec![[1.0, 1.0, 1.0, 1.0]]);
+    }
+
+    #[test]
+    fn positive_edge_gaps_are_not_snapped_to_zero() {
+        let selector = Selector::new(&[con("space", "<", 0.168, "EXT M1 < 0.168")]);
+        let disjoint = [[25.4810, 188.9700], [25.5275, 188.9700],
+                        [25.3355, 189.0460], [25.3820, 189.0460]];
+        assert_eq!(measurement_ticks(&selector.pick('e', &disjoint).unwrap()).unwrap(), (12481, 16800, 4319));
+        assert_eq!(selector.ruler_segments('e', &disjoint).len(), 3);
+        let tiny = [[0.0, 0.0], [0.1, 0.0], [0.0, 1e-9], [0.1, 1e-9]];
+        assert_eq!(selector.pick('e', &tiny).unwrap().cd, 1e-9);
+        let greater = Selector::new(&[con("space", ">", 0.0, "EXT M1 > 0")]);
+        assert_eq!(greater.pick('e', &tiny).unwrap().cd, 1e-9);
+        assert!(cd_segments('e', &[[0.0, 0.0]; 2]).is_empty());
     }
 
     #[test]

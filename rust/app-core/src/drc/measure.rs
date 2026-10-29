@@ -31,6 +31,9 @@ fn simple(kind: char, p: &[Point]) -> Vec<Segment> {
     match (kind, p) {
         ('e', [a, b]) if distance(*a, *b) > 0. => vec![[*a, *b]],
         ('e', [a0, a1, b0, b1]) => {
+            if let Some(point) = super::analysis::measure::edge_pair_zero_point(*a0, *a1, *b0, *b1) {
+                return vec![[point, point]];
+            }
             if (orient(*a0, *a1, *b0) > 0.) != (orient(*a0, *a1, *b1) > 0.)
                 && (orient(*b0, *b1, *a0) > 0.) != (orient(*b0, *b1, *a1) > 0.)
             {
@@ -51,9 +54,6 @@ fn simple(kind: char, p: &[Point]) -> Vec<Segment> {
                     best = *c;
                     dmin = d;
                 }
-            }
-            if dmin <= 0. {
-                return vec![];
             }
             let [adx, ady] = [a1[0] - a0[0], a1[1] - a0[1]];
             let [bdx, bdy] = [b1[0] - b0[0], b1[1] - b0[1]];
@@ -105,7 +105,8 @@ fn simple(kind: char, p: &[Point]) -> Vec<Segment> {
 
 /// At most three complete rulers, in legacy order: edge length; closest
 /// gap then optional X/Y diagnostics; or rectangle width then height.
-/// Unsupported, coincident/touching/crossing, and complex shapes return none.
+/// Coincident/touching/crossing pairs return a zero gap at their shared point.
+/// Unsupported and complex shapes return none.
 pub fn cd_segments(kind: char, points_dbu: &[[i64; 2]], precision: f64) -> Result<Vec<CdSegment>> {
     if !precision.is_finite() || precision <= 0. {
         return Err(Error::input("invalid DRC measurement precision"));
@@ -132,10 +133,10 @@ pub fn cd_segments(kind: char, points_dbu: &[[i64; 2]], precision: f64) -> Resul
         .map(|v| v.unsigned_abs())
         .max()
         .unwrap();
-    if extent == 0 {
+    if extent == 0 && !(kind == 'e' && points_dbu.len() == 4) {
         return Ok(vec![]);
     }
-    let scale = 2f64.powi((128 - extent.leading_zeros()) as i32);
+    let scale = if extent == 0 { 1.0 } else { 2f64.powi((128 - extent.leading_zeros()) as i32) };
     let points: Vec<_> = deltas.iter().map(|p| p.map(|v| v as f64 / scale)).collect();
     let segments = simple(kind, &points);
     segments
@@ -151,7 +152,7 @@ pub fn cd_segments(kind: char, points_dbu: &[[i64; 2]], precision: f64) -> Resul
             let distance_um = distance(s[0], s[1]) * scale / precision;
             if !endpoints_um.iter().flatten().all(|v| v.is_finite())
                 || !distance_um.is_finite()
-                || distance_um <= 0.
+                || (distance_um <= 0. && !(kind == 'e' && points_dbu.len() == 4 && s[0] == s[1]))
             {
                 return Err(Error::input("unrepresentable DRC measurement"));
             }
@@ -342,7 +343,7 @@ pub fn cd_segments_um(kind: char, points: &[Point], stop: &AtomicUsize) -> Resul
             let distance_um = distance(s[0], s[1]) * scale;
             if !endpoints_um.iter().flatten().all(|n| n.is_finite())
                 || !distance_um.is_finite()
-                || distance_um <= 0.
+                || (distance_um <= 0. && !(kind == 'e' && points.len() == 4 && s[0] == s[1]))
             {
                 return Err(Error::input("unrepresentable ASCII DRC measurement"));
             }
@@ -444,19 +445,45 @@ mod tests {
         assert!(cd_segments('e', &[[0, 0], [3, 4]], 1000.).unwrap()[0].offset);
     }
     #[test]
-    fn no_invented_rulers_for_complex_zero_touch_or_cross() {
+    fn no_invented_rulers_for_complex_shapes_or_zero_single_edges() {
         for (kind, p) in [
             ('p', vec![[0, 0], [1, 0], [0, 1]]),
             ('p', vec![[0, 0], [1, 1], [0, 2], [-1, 1]]),
             ('p', vec![[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]),
             ('e', vec![[3, 4], [3, 4]]),
-            ('e', vec![[0, 0], [3, 0], [3, 0], [4, 0]]),
-            ('e', vec![[0, 0], [3, 0], [1, -1], [1, 1]]),
-            ('e', vec![[0, 0], [3, 0], [1, 0], [2, 0]]),
             ('x', vec![[0, 0], [3, 4]]),
         ] {
             assert!(ends(kind, &p).is_empty(), "{kind} {p:?}");
         }
+    }
+    #[test]
+    fn zero_pair_gaps_are_measured_in_integer_and_ascii_apis() {
+        let stop = AtomicUsize::new(0);
+        for p in [
+            [[262677750, 173461000], [262677750, 173460600],
+             [262677750, 173461000], [262677750, 173460600]],
+            [[0, 0], [3, 0], [3, 0], [0, 0]],
+            [[0, 0], [3, 0], [1, 0], [4, 0]],
+            [[0, 0], [3, 0], [3, 0], [4, 1]],
+            [[0, 0], [2, 2], [0, 2], [2, 0]],
+            [[7, 9]; 4],
+        ] {
+            let rulers = cd_segments('e', &p, 100000.0).unwrap();
+            assert_eq!(rulers.len(), 1, "{p:?}");
+            assert_eq!(rulers[0].distance_um, 0.0);
+            assert_eq!(rulers[0].endpoints_um[0], rulers[0].endpoints_um[1]);
+            assert!(!rulers[0].offset);
+            assert_eq!(measured('e', &p, 100000.0, "space", &stop).unwrap(), Some(0.0));
+            let um = p.map(|point| point.map(|v| v as f64 / 100000.0));
+            assert_eq!(measured_um('e', &um, "space", &stop).unwrap(), Some(0.0));
+            let rulers_um = cd_segments_um('e', &um, &stop).unwrap();
+            assert_eq!(rulers_um.len(), 1);
+            assert_eq!(rulers_um[0].distance_um, 0.0);
+            assert_eq!(rulers_um[0].endpoints_um[0], rulers_um[0].endpoints_um[1]);
+        }
+        assert_eq!(ends('e', &[[0, 0], [2, 2], [0, 2], [2, 0]]), vec![[[1.0, 1.0], [1.0, 1.0]]]);
+        let tiny = [[0, 0], [1000, 0], [0, 1], [1000, 1]];
+        assert_eq!(cd_segments('e', &tiny, 1e9).unwrap()[0].distance_um, 1e-9);
     }
     #[test]
     fn local_delta_keeps_small_edges_at_large_origins_and_precision_extremes() {

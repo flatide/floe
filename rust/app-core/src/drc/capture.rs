@@ -194,6 +194,12 @@ fn document(
     for s in selector.ruler_segments(e.kind, &points) {
         check_cancelled(stop)?;
         let (mut a, mut b) = (project([s[0], s[1]]), project([s[2], s[3]]));
+        if s[0] == s[2] && s[1] == s[3] {
+            doc.annotations.push(Annotation::from_json(
+                json!({"kind":"text", "at":a, "text":"0.00000 um"}),
+            )?);
+            continue;
+        }
         if a == b {
             continue;
         }
@@ -561,6 +567,77 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn zero_gap_is_a_point_label_but_collapsed_positive_gap_is_not_zero() {
+        let path = std::env::temp_dir().join(format!(
+            "floe-zero-gap-capture-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        fs::write(
+            &path,
+            "MAIN 100000\nSPACE\n2 2 0\n\
+            e 1 2\n0 0 100000 0\n100000 0 200000 0\n\
+            e 2 2\n0 0 100000 0\n0 1 100000 1\n",
+        )
+        .unwrap();
+        let stop = AtomicUsize::new(0);
+        let mut db = Database::open_explicit(&path, None, &stop).unwrap();
+        let hits = db.errors(0, 0, 2, &stop).unwrap().hits;
+        drop(db);
+        fs::remove_file(path).unwrap();
+        let selector = Selector::new(&[json!({
+            "metric":"space","op":"<","value":0.05,"text":"EXT M1 < 0.05",
+        })]);
+        let zero = document(
+            &hits[0],
+            [-0.5, -0.5, 2.5, 0.5],
+            300,
+            "SPACE",
+            None,
+            &selector,
+            &stop,
+        )
+        .unwrap();
+        assert_eq!(zero.annotations.iter().filter(|a|
+            a.as_line().starts_with("text=") && a.as_line().ends_with(",0.00000 um")).count(), 1);
+        assert!(!zero
+            .annotations
+            .iter()
+            .any(|a| a.as_line().starts_with("ruler=")));
+        let positive = document(
+            &hits[1],
+            [-0.5, -0.5, 2.5, 0.5],
+            300,
+            "SPACE",
+            None,
+            &selector,
+            &stop,
+        )
+        .unwrap();
+        assert!(positive
+            .annotations
+            .iter()
+            .any(|a| a.as_line().starts_with("ruler=")));
+        let collapsed = document(
+            &hits[1],
+            [-1e30, -1e30, 3e30, 3e30],
+            300,
+            "SPACE",
+            None,
+            &selector,
+            &stop,
+        )
+        .unwrap();
+        assert!(!collapsed
+            .annotations
+            .iter()
+            .any(|a| a.as_line().starts_with("ruler=") || a.as_line().contains("0.00000 um")));
+    }
+
     #[test]
     fn ranges_are_streamed_and_only_all_is_capped() {
         assert_eq!(selection("all", 1000, 200).unwrap(), 0..200);

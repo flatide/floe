@@ -34,6 +34,8 @@ the GTK viewer shows them.
       selecting a rule and reused on reopen without full membership caches;
       the grouped-rule filter excludes unmeasurable and empty rules and
       follows the basis and manual step. Grouping off does not prefill.
+      Coincident, overlapping, touching and crossing edge pairs measure zero
+      unless the SVRF range excludes it; service/group/detail/ruler agree.
 
 usage: .venv/bin/python tools/validate_drc_analysis.py
 """
@@ -553,6 +555,92 @@ def grouped_rules_ui(v, d, pump):
           "a completed Unmeasurable-only group does not count as a CD group")
 
 
+def zero_gap_ui(v, d, pump):
+    """Zero is a measurable distance, distinct from unknown and one DBU."""
+    from floe import gui
+    db, deck = d / "zero-gap.db", d / "zero-gap.svrf"
+    metadata = d / "zero-gap.db.rules.json"
+    first = (100000, 100000, 110000, 100000)
+    seconds = [first, (110000, 100000, 100000, 100000),
+               (105000, 100000, 115000, 100000), (110000, 100000, 110000, 105000),
+               (105000, 95000, 105000, 105000), (100000, 100001, 110000, 100001)]
+    records = "".join("e %d 2\n%s\n%s\n" % (
+        i, " ".join(map(str, first)), " ".join(map(str, second)))
+        for i, second in enumerate(seconds, 1))
+    names = ("ZERO.SPACE", "ZERO.STRICT")
+    db.write_text("SAMPLE 100000\n" + "".join(name + "\n6 6 0\n" + records for name in names))
+    deck.write_text("PRECISION 100000\nLAYER M1 1\n"
+                    "ZERO.SPACE {\n EXTERNAL M1 < 0.02750\n}\n"
+                    "ZERO.STRICT {\n EXTERNAL M1 > 0 < 0.02750\n}\n")
+    for args in ([INDEX, "drc", str(db)],
+                 [INDEX, "svrf", str(deck), "--no-env-switches", "-o", str(metadata)]):
+        r = run(args)
+        check(r.returncode == 0, "zero-gap fixture indexed/converted", r.stderr)
+    rules = json.loads(metadata.read_text())["checks"]
+    constraints = [rules[name]["constraints"] for name in names]
+    svc = Svc()
+    try:
+        opened = svc("drc_open", path=str(db), mode="load")
+        h = opened["handle"]
+        info = [svc("drc_cd_info", handle=h, check=0, error=ei, constraints=constraints[0])
+                for ei in range(6)]
+        check(all(row["pick"] is not None and row["pick"]["ticks"] == [0, 2750, 2750]
+                  and row["pick"]["ratio"] == 10000000
+                  and any(s[:2] == s[2:] for s in row["rulers"]) for row in info[:5]),
+              "identical/reversed/overlapping/touching/crossing edges have CD 0, delta .02750, ratio 100%",
+              info[:5])
+        check(info[5]["pick"] is not None and info[5]["pick"]["ticks"] == [1, 2750, 2749]
+              and info[5]["pick"]["ratio"] == 9996364,
+              "a nearby .00001 um gap stays positive", info[5])
+        strict = [svc("drc_cd_info", handle=h, check=1, error=ei, constraints=constraints[1])
+                  for ei in range(6)]
+        check(all(row["pick"] is None for row in strict[:5])
+              and strict[5]["pick"] is not None and strict[5]["pick"]["ticks"] == [1, 2750, 2749],
+              "the combined > 0 and < .02750 range excludes zero but includes one DBU", strict)
+        checks = [dict(check=ci, constraints=cons, step=None) for ci, cons in enumerate(constraints)]
+        for basis in ("absolute", "percent"):
+            prepared = svc.job(h, "drc_delta_cached", checks=checks, basis=basis, prepare=True)
+            cached = svc.job(h, "drc_delta_cached", checks=checks, basis=basis)
+            check([r["count"] for r in prepared["rows"]] == [2, 1]
+                  and cached["rows"] == prepared["rows"],
+                  "zero-gap prefill and warm summary counts agree (%s)" % basis, (prepared, cached))
+            for ci, cons in enumerate(constraints):
+                event = svc.job(h, "drc_delta", check=ci, constraints=cons, basis=basis)
+                rows = svc("drc_delta_rows", handle=h, group=event["group"], start=0, limit=100)
+                unknown = [r for r in rows if r["key"][0] < 0]
+                members = [svc("drc_scope_page", handle=h, check=ci,
+                               scope={"group": event["group"], "row": r["row"]}, start=0, limit=10)
+                           for r in rows]
+                check(event["cd_groups"] == (2 if ci == 0 else 1)
+                      and sorted(members) == [[0, 1, 2, 3, 4], [5]]
+                      and (not unknown if ci == 0 else len(unknown) == 1 and unknown[0]["total"] == 5),
+                      "zero-gap live groups honor the SVRF range (%s, %s)" % (names[ci], basis), rows)
+        svc("drc_close", handle=h)
+    finally:
+        svc.close()
+    check(v.load_drc(str(db)), "load zero-gap DB with SVRF")
+    pump(v, lambda: v._drc_group_cache_key is None, "zero-gap cached counts", 60)
+    check([v._drc_group_count(ci) for ci in range(2)] == [2, 1] and v._drc_open is None,
+          "zero-gap cached counts populate the GUI before selection")
+    v._drc_select_row(0)
+    pump(v, lambda: v._drc_delta_groups is not None, "zero-gap GUI groups", 60)
+    e = v._drc.checks[0].errors[0]
+    lines = v._drc_meta_lines("ZERO.SPACE", e)
+    v._drc_goto_cell(0, 0)
+    v._drc_jump(0, 0)
+    check(any("0.00000 um vs < 0.02750 · Δ 0.02750 (100.00000%)" in line for line in lines)
+          and any(isinstance(r, gui._DrcAreaLabel) and r.text == "0.00000 um" for r in v._drc_ruler),
+          "GUI detail and the point ruler display zero CD with the full delta",
+          (lines, [getattr(r, "text", None) for r in v._drc_ruler]))
+    for basis in ("percent", "absolute"):
+        v._drcwin._delta_mode.set_active_id(basis)
+        pump(v, lambda: not v._drc_delta_busy and v._drc_group_cache_key is None,
+             "zero-gap GUI %s groups" % basis, 60)
+        check(v._drc_group_count(0) == 2 and v._drc_delta_groups.cd_count == 2
+              and all(g.key[0] >= 0 for g in v._drc_delta_groups.page(0, 10)),
+              "GUI zero distances stay in measurable groups (%s)" % basis)
+
+
 def a5(temp):
     print("[A5] the viewer")
     from validate_gtk_view import NoCairo, gtk_ready, pump
@@ -777,6 +865,7 @@ def a5(temp):
                       for r in v._drcwin._rstore),
               "SVRF metadata restores CD measurement and delta groups")
         grouped_rules_ui(v, d, pump)
+        zero_gap_ui(v, d, pump)
         small = d / "small.db"
         small.write_text("MAIN 100000\nSMALL.ONE\n0 0 0\nSMALL.TWO\n0 0 0\n")
         (d / "small.db.rules.json").write_text(json.dumps({

@@ -1293,8 +1293,8 @@ def format_um5(value):
 
 
 class _DrcAreaLabel(object):
-    """An AREA rule's readout at a point: shown as a distance chip, kept
-    with the auto rulers (Tab/Esc/k/the next jump), drawn without a line."""
+    """An area or zero-gap readout at a point, kept with the auto rulers
+    (Tab/Esc/k/the next jump) and drawn without a line or arrowheads."""
     __slots__ = ("point", "text")
 
     def __init__(self, x, y, text):
@@ -11544,13 +11544,17 @@ class Viewer:
             return {"rulers": [], "area": None, "pick": None}
 
     def _drc_cd_ruler(self, e, name=None):
-        """Auto CD rulers as dbu 4-tuples, an AREA rule's readout as a
+        """Auto CD rulers as dbu 4-tuples, area/zero-gap point readouts as
         _DrcAreaLabel - the rectangle directions the rule flags (both
         when it cannot tell), SHARED with the CLI snapshot embeds."""
         info = self._drc_cd_info(e, name)
         k = self.dbu
-        rulers = [(x0 / k, y0 / k, x1 / k, y1 / k)
-                  for x0, y0, x1, y1 in info.get("rulers") or []]
+        rulers = []
+        for x0, y0, x1, y1 in info.get("rulers") or []:
+            if x0 == x1 and y0 == y1:
+                rulers.append(_DrcAreaLabel(x0 / k, y0 / k, "0.00000 um"))
+            else:
+                rulers.append((x0 / k, y0 / k, x1 / k, y1 / k))
         if info.get("area"):
             x, y, text = info["area"]
             rulers.append(_DrcAreaLabel(x / k, y / k, text))

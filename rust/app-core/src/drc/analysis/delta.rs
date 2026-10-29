@@ -25,7 +25,8 @@ use std::sync::{Arc, Mutex};
 pub const UNKNOWN: i32 = -1;
 /// Cache tables of rules this large (smaller ones measure in a moment).
 pub const CACHE_THRESHOLD: u64 = 100_000;
-const VERSION: u32 = 1;
+// v2 measures valid touching/intersecting edge pairs as CD zero.
+const VERSION: u32 = 2;
 const TASK: u64 = 1 << 16;
 const PAGE_CHUNK: u64 = 4096;
 const DENSE_BINS: u64 = 1 << 24;
@@ -1460,6 +1461,116 @@ mod cached_summary_tests {
             None, Basis::Percent, 4, &stop, &|_| {}).unwrap().count, Some(3));
         assert_eq!(source.visits.load(Ordering::Relaxed), visits);
         assert!(!folder.join("groups").exists());
+    }
+
+    #[test]
+    fn v1_unknown_measurements_groups_and_summaries_are_not_reused_for_zero_gap() {
+        struct ContactSource(AtomicUsize);
+        impl Source for ContactSource {
+            fn check_count(&self) -> usize {
+                1
+            }
+            fn count(&self, _: usize) -> u64 {
+                1
+            }
+            fn precision(&self) -> f64 {
+                100000.0
+            }
+            fn visit(
+                &self,
+                _: usize,
+                start: u64,
+                end: u64,
+                stop: &AtomicUsize,
+                visit: &mut dyn FnMut(u64, char, &[[f64; 2]]) -> Result<()>,
+            ) -> Result<()> {
+                check_cancelled(stop)?;
+                self.0.fetch_add(1, Ordering::Relaxed);
+                for ei in start..end {
+                    visit(ei, 'e', &[[0.0, 0.0], [1.0, 0.0], [1.0, 0.0], [2.0, 0.0]])?;
+                }
+                Ok(())
+            }
+            fn visit_boxes(
+                &self,
+                _: usize,
+                _: u64,
+                _: u64,
+                _: &AtomicUsize,
+                _: &mut dyn FnMut(u64, ErrorBox) -> Result<()>,
+            ) -> Result<()> {
+                panic!("CD preparation must not visit marker boxes")
+            }
+        }
+
+        let f = Fixture::new(1, &[UNKNOWN], "all");
+        let current_folder = f.measure.parent().unwrap();
+        let mut old_table_key = Table::key(0, 1, &f.constraints, &f.cache);
+        old_table_key["version"] = json!(1);
+        let mut old_group_key = Groups::key(1, Basis::Absolute, "all");
+        old_group_key["version"] = json!(1);
+        let old_folder = f
+            .cache
+            .dir
+            .join("delta")
+            .join(store::digest(&old_table_key));
+        store::write_column(&f.measure.join("choices.bin"), &[UNKNOWN]).unwrap();
+        store::write_manifest(
+            &f.measure,
+            &json!({
+                "key":old_table_key,"ranges":[[null],[null]],"backend":"rust",
+            }),
+        )
+        .unwrap();
+        store::write_manifest(
+            &f.groups,
+            &json!({
+                "key":old_group_key,"groups":1,"total":1,"narrow":true,
+            }),
+        )
+        .unwrap();
+        let old_group_dir = current_folder
+            .join("groups")
+            .join(store::digest(&old_group_key));
+        std::fs::rename(&f.groups, &old_group_dir).unwrap();
+        let old_summary = current_folder
+            .join("summaries")
+            .join(store::digest(&old_group_key));
+        std::fs::create_dir_all(&old_summary).unwrap();
+        store::write_manifest(
+            &old_summary,
+            &json!({
+                "key":old_group_key,"table":old_table_key,"cd_groups":0,"total":1,
+            }),
+        )
+        .unwrap();
+        std::fs::rename(current_folder, &old_folder).unwrap();
+        let old_measure = old_folder.join("measure").join("complete.json");
+        let old_bytes = std::fs::read(&old_measure).unwrap();
+
+        assert!(Table::cached(&f.cache, 0, 1, &f.constraints).is_none());
+        assert_eq!(f.summary(None, Basis::Absolute).count, None);
+        let source = ContactSource(AtomicUsize::new(0));
+        let summary = Groups::prepare_summary(
+            &source,
+            0,
+            &f.constraints,
+            Some(&f.cache),
+            None,
+            Basis::Absolute,
+            1,
+            &AtomicUsize::new(0),
+            &|_| {},
+        )
+        .unwrap();
+        assert_eq!(summary.count, Some(1));
+        assert!(source.0.load(Ordering::Relaxed) > 0);
+        let table = Table::cached(&f.cache, 0, 1, &f.constraints).unwrap();
+        assert_eq!((table.value(0), table.choice(0)), (0, 0));
+        assert_eq!(table.difference(0, Basis::Absolute), Some(5000));
+        assert_eq!(table.difference(0, Basis::Percent), Some(10_000_000));
+        assert_eq!(f.summary(None, Basis::Absolute).count, Some(1));
+        assert_eq!(std::fs::read(old_measure).unwrap(), old_bytes);
     }
 
     #[test]

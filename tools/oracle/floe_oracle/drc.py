@@ -157,16 +157,34 @@ def cd_segments(e):
         def orient(a, b, c):
             return ((b[0] - a[0]) * (c[1] - a[1])
                     - (b[1] - a[1]) * (c[0] - a[0]))
+
+        def on_segment(p, a, b):
+            return (orient(a, b, p) == 0
+                    and min(a[0], b[0]) <= p[0] <= max(a[0], b[0])
+                    and min(a[1], b[1]) <= p[1] <= max(a[1], b[1]))
+
+        for p, a, b in ((a0, b0, b1), (a1, b0, b1),
+                        (b0, a0, a1), (b1, a0, a1)):
+            if on_segment(p, a, b):
+                return [seg(p, p)]
         if (orient(a0, a1, b0) > 0) != (orient(a0, a1, b1) > 0) \
                 and (orient(b0, b1, a0) > 0) != (orient(b0, b1,
                                                         a1) > 0):
-            return []   # edges properly cross: gap is zero
+            dx, dy = a1[0] - a0[0], a1[1] - a0[1]
+            vx, vy = b1[0] - b0[0], b1[1] - b0[1]
+            wx, wy = b0[0] - a0[0], b0[1] - a0[1]
+            denominator = dx * vy - dy * vx
+            if not math.isfinite(denominator) or denominator == 0:
+                return []
+            t = (wx * vy - wy * vx) / denominator
+            p = (a0[0] + t * dx, a0[1] + t * dy)
+            if not math.isfinite(t) or not all(math.isfinite(v) for v in p):
+                return []
+            return [seg(p, p)]
         cand = [(p, foot(p, b0, b1)) for p in (a0, a1)]
         cand += [(foot(p, a0, a1), p) for p in (b0, b1)]
         p, q = min(cand, key=lambda c: dist(c[0], c[1]))
         dmin = dist(p, q)
-        if dmin <= 0:
-            return []   # touching edges: no gap
         adx, ady = a1[0] - a0[0], a1[1] - a0[1]
         bdx, bdy = b1[0] - b0[0], b1[1] - b0[1]
         al2, bl2 = adx * adx + ady * ady, bdx * bdx + bdy * bdy
