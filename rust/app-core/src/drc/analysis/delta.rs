@@ -1023,7 +1023,7 @@ impl Groups {
         let r = lo + b[lo..hi].partition_point(|&v| v < bin);
         (r < hi && b[r] == bin).then_some(r)
     }
-    /// Compact label; numbering is local to the condition, not a UI page.
+    /// Compact upper-bound label; numbering is local to the condition.
     pub fn label(&self, r: usize) -> String {
         let constraints = self.constraint.as_slice();
         let constraint = constraints[r];
@@ -1035,25 +1035,14 @@ impl Groups {
         }
         let known = self.cd_group_count();
         let first = constraints[..known].partition_point(|&c| c < constraint);
-        let unit = match self.basis {
-            Basis::Percent => "%",
-            Basis::Absolute
-                if self.table.constraints[constraint as usize]
-                    .get("metric")
-                    .and_then(Value::as_str)
-                    == Some("area") =>
-            {
-                "µm²"
-            }
-            Basis::Absolute => "µm",
-        };
-        let low = self.bins.as_slice()[r].saturating_mul(self.step);
+        let upper = self.bins.as_slice()[r]
+            .saturating_mul(self.step)
+            .saturating_add(self.step);
         format!(
-            "C{} #{} Δ[{}, {}) {unit}",
+            "C{} #{} <={}",
             constraint as usize + 1,
             r - first + 1,
-            format_ticks(low, false),
-            format_ticks(low.saturating_add(self.step), false)
+            format_ticks(upper, false)
         )
     }
     /// Its directory name (floe_oracle drc_delta `DeltaGroup.name`).

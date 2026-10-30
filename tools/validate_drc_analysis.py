@@ -815,7 +815,7 @@ def a5(temp):
         pump(v, lambda: v._drc_delta_groups is not None, "delta groups", 60)
         rows = [(r[0], r[1]) for r in v._drcwin._delta_store]
         check(len(rows) == 6 and rows[0] == ("All errors", "20")
-              and rows[1][0] == "C1 #1 Δ[0.02000, 0.02200) µm"
+              and rows[1][0] == "C1 #1 <=0.02200"
               and v._drcwin._delta_store[1][3].startswith(gui.GLib.markup_escape_text(
                   "Group #1 · condition 1 · space < 0.05000: [0.02000, 0.02200) um")),
               "the delta list", rows[:2])
