@@ -839,6 +839,16 @@ impl<'a> Parser<'a> {
                     self.acont = None;
                     self.icont = false;
                     self.measurement(s, self.cur.clone())?;
+                } else if self.acont.is_some() && self.acont_open && self.try_acont(s)? {
+                    self.icont = false;
+                } else if let Some(input) = layer_output_operands(s) {
+                    self.cont = None;
+                    self.acont = None;
+                    self.icont = false;
+                    let names = self.names(input)?;
+                    let check = self.cur.clone().unwrap();
+                    self.add_operands(&check, &names)?;
+                    self.d.inc("layer_output");
                 } else if self.try_acont(s)? {
                     self.icont = false;
                 } else if self.cont.is_some() && keyword(&head) {

@@ -233,6 +233,142 @@ fn graph_cycles_maps_redefinitions_and_wrapped_bounds() {
     assert_eq!(d.stat("meas_no_bound"), 0);
 }
 #[test]
+fn standalone_shape_outputs_resolve_provenance_without_cd_constraints() {
+    let d = parsed(concat!(
+        "LAYER Base 100\nLAYER MAP 31 DATATYPE 2 100\n",
+        "LAYER Aux 200\nLAYER MAP 32 DATATYPE 7 200\n",
+        "dGRFILL.C.7_P1_temp1 = Base OR Missing\n",
+        "dGRFILL.C.7 { NOT RECTANGLE dGRFILL.C.7_P1_temp1 ORTHOGONAL ONLY }\n",
+        "SHAPE { RECTANGLE [Base] >= .1 BY <= .4 ASPECT > 1 ORTHOGONAL ONLY }\n",
+        "EXTENTS { RECTANGLE (Aux) MEASURE EXTENTS }\n",
+        "COPIED { COPY Aux }\n",
+    ));
+    let rule = &d.checks["dGRFILL.C.7"];
+    assert_eq!(rule.layers, vec!["dGRFILL.C.7_P1_temp1"]);
+    assert_eq!(rule.source_gds, vec![(31, Some(2))]);
+    assert_eq!(rule.unresolved, vec!["Missing"]);
+    assert_eq!(d.checks["SHAPE"].layers, vec!["Base"]);
+    assert_eq!(d.checks["SHAPE"].source_gds, vec![(31, Some(2))]);
+    for name in ["EXTENTS", "COPIED"] {
+        assert_eq!(d.checks[name].layers, vec!["Aux"]);
+        assert_eq!(d.checks[name].source_gds, vec![(32, Some(7))]);
+    }
+    assert!(d.checks.values().all(|r| r.constraints.is_empty()));
+    assert_eq!(d.stat("layer_output"), 4);
+    assert_eq!(d.stat("unknown_in_block"), 0);
+}
+#[test]
+fn standalone_boolean_outputs_do_not_extend_previous_assignments() {
+    let d = parsed(concat!(
+        "LAYER a 1\nLAYER b 2\nLAYER c 3\nLAYER d 4\n",
+        "R {\n tmp = a OR b\n",
+        " NOT RECTANGLE c ORTHOGONAL ONLY\n COPY d\n",
+        " AND a c\n OR b d\n XOR a d\n NOT a b\n",
+        " a AND b\n b OR c\n c NOT d\n d XOR a\n}\n",
+    ));
+    assert_eq!(d.derived["tmp"], "a OR b");
+    assert_eq!(d.derived_ops["tmp"], vec!["a", "b"]);
+    let rule = &d.checks["R"];
+    assert_eq!(rule.layers, vec!["a", "b", "c", "d"]);
+    assert_eq!(
+        rule.source_gds,
+        vec![(1, None), (2, None), (3, None), (4, None)]
+    );
+    assert!(rule.constraints.is_empty());
+    assert_eq!(d.stat("layer_output"), 10);
+    assert_eq!(d.stat("unknown_in_block"), 0);
+}
+#[test]
+fn standalone_outputs_end_old_measurements_but_keep_existing_wraps() {
+    let d = parsed(concat!(
+        "LAYER a 1\nLAYER b 2\nLAYER c 3\nLAYER d 4\n",
+        "MIX {\n EXT a b < .2\n",
+        " NOT RECTANGLE c ORTHOGONAL ONLY\n COPY d\n}\n",
+        "WRAP {\n EXT a b\n NOT a\n < .05\n}\n",
+        "ASSIGN_WRAP {\n tmp = a AND\n b\n NOT c\n COPY d\n INT tmp < .1\n}\n",
+    ));
+    let mix = &d.checks["MIX"];
+    assert_eq!(mix.constraints.len(), 1);
+    assert_eq!(mix.constraints[0].value, Some(0.2));
+    assert_eq!(mix.constraints[0].text, "EXT a b < .2");
+    assert_eq!(mix.layers, vec!["a", "b", "c", "d"]);
+    let wrap = &d.checks["WRAP"];
+    assert_eq!(wrap.constraints.len(), 1);
+    assert_eq!(wrap.constraints[0].value, Some(0.05));
+    assert_eq!(wrap.layers, vec!["a", "b"]);
+    assert_eq!(d.derived["tmp"], "a AND b NOT c");
+    assert_eq!(d.derived_ops["tmp"], vec!["a", "b", "c"]);
+    assert_eq!(d.checks["ASSIGN_WRAP"].constraints[0].value, Some(0.1));
+}
+#[test]
+fn open_assignments_keep_infix_wraps_and_later_layer_provenance() {
+    let d = parsed(concat!(
+        "LAYER A 1\nLAYER B 2\nLAYER C 3\nLAYER D 4\n",
+        "BUILD {\n tmp = A AND\n B OR C\n",
+        " closed = A OR B\n C NOT D\n}\n",
+        "OPEN_USE { COPY tmp }\nCLOSED_USE { COPY closed }\n",
+    ));
+    assert_eq!(d.derived["tmp"], "A AND B OR C");
+    assert_eq!(d.derived_ops["tmp"], vec!["A", "B", "C"]);
+    assert_eq!(
+        d.checks["OPEN_USE"].source_gds,
+        vec![(1, None), (2, None), (3, None)]
+    );
+    assert_eq!(d.derived["closed"], "A OR B");
+    assert_eq!(d.derived_ops["closed"], vec!["A", "B"]);
+    assert_eq!(
+        d.checks["CLOSED_USE"].source_gds,
+        vec![(1, None), (2, None)]
+    );
+    assert!(d.checks["OPEN_USE"].unresolved.is_empty());
+    assert!(d.checks["CLOSED_USE"].unresolved.is_empty());
+}
+#[test]
+fn standalone_recognizer_keeps_ambiguous_options_and_unknown_text_out() {
+    for input in [
+        "NOT a",
+        "NOT CONNECTED",
+        "AND a",
+        "OR a CONNECTED",
+        "XOR a ASPECT",
+        "NOT a NOT_CONNECTED",
+        "a OR b OR c",
+        "COPY a b",
+        "COPY (a)",
+        "RECTANGLE a UnknownOption",
+        "RECTANGLE ((a))",
+        "Mystery a b",
+    ] {
+        assert_eq!(layer_output_operands(input), None, "{input}");
+    }
+    let d = parsed(concat!(
+        "LAYER Base 1\n",
+        "SAFE {\n DFM RDB ignored\n arbitrary Missing\n}\n",
+        "UNKNOWN { Unsupported Base Missing }\n",
+    ));
+    assert!(d.checks.values().all(|r| r.layers.is_empty()));
+    assert!(d.checks.values().all(|r| r.constraints.is_empty()));
+    assert!(d.unknown.index.contains_key("UNSUPPORTED"));
+    assert!(!d.unknown.index.contains_key("ARBITRARY"));
+}
+#[test]
+fn standalone_outputs_keep_check_operand_limits() {
+    let tmp = Temp::new();
+    let mut text = String::from("R {\n");
+    for i in 0..4097 {
+        text.push_str(&format!("COPY M{i}\n"));
+    }
+    text.push_str("}\n");
+    let path = tmp.file("bounded.cal", text);
+    let error = parse_deck(&path, &Options::default(), &AtomicUsize::new(0))
+        .err()
+        .expect("4097 standalone inputs must exceed the per-check limit");
+    assert!(
+        error.message.contains("check operands exceed 4096"),
+        "{error}"
+    );
+}
+#[test]
 fn empty_descriptions_universal_newlines_and_invalid_utf8() {
     let tmp = Temp::new();
     let path = tmp.file("mixed", b"LAYER M 7\rR {\r\n@\n@\xff\rINT M < .5\n}");

@@ -37,6 +37,9 @@ against).
       OVERLAP options do not rename a metric. Wrapped options remain
       in statement text and cannot introduce a second primary bound.
       The reader refines old v1 sidecars with preserved statement text.
+  R3d standalone layer outputs: NOT RECTANGLE, COPY and explicit logical
+      operations retain input references through INCLUDE, derivations and
+      LAYER MAP without inventing CD constraints or parsing descriptions.
   R4  end-to-end vs gen_drcdb --svrf: every db check name resolves
       in the sidecar, constraint values match the generator formula
       through all five emitted syntax styles (spaced/fused/range/
@@ -763,6 +766,79 @@ def r3c(tmp):
           not d.checks["X"].constraints and d.stats["unknown_in_block"] == 3)
 
 
+def r3d(tmp):
+    print("[R3d] standalone layer-output references")
+    inc = os.path.join(tmp, "output-inputs.cal")
+    w(inc,
+      "LAYER MAP 10 DATATYPE 2 100\n"
+      "LAYER os_FILL_SG_SMALL 100\n"
+      "LAYER os_FILL_SG_FLEX 11.3\n"
+      "LAYER os_FILL_SG_CORE_T 12\n"
+      "LAYER EXTRA 13\n"
+      "fill_alias = os_FILL_SG_SMALL OR os_FILL_SG_FLEX\n"
+      "dGRFILL.C.7_P1_temp1 = fill_alias\n OR os_FILL_SG_CORE_T\n")
+    p = os.path.join(tmp, "layer-outputs.cal")
+    desc = ("Union [os_FILL_SG_SMALL, os_FILL_SG_FLEX, "
+            "(os_FILL_SG_CORE_T touching os_FILL_SG_SMALL)] "
+            "must be an orthogonal rectangle.")
+    w(p,
+      'INCLUDE "output-inputs.cal"\n'
+      "#IFDEF ENABLE_FILL\n"
+      "GRFILL.C.7 {\n@ " + desc + "\n"
+      "NOT RECTANGLE dGRFILL.C.7_P1_temp1 ORTHOGONAL ONLY}\n"
+      "#ENDIF\n"
+      "COPY.RULE { COPY dGRFILL.C.7_P1_temp1 }\n"
+      "BOOL.RULE { dGRFILL.C.7_P1_temp1 NOT EXTRA }\n"
+      "MISSING.RULE { NOT RECTANGLE missing_input ORTHOGONAL ONLY }\n"
+      "UNKNOWN.RULE { FROBNICATE os_FILL_SG_SMALL }\n"
+      "WRAPPED.RULE {\n"
+      " wrapped_input = os_FILL_SG_SMALL OR\n"
+      " os_FILL_SG_FLEX OR os_FILL_SG_CORE_T\n"
+      " COPY wrapped_input\n}\n"
+      "NEXT.RULE { INT EXTRA < .2 }\n")
+    base = [(10, 2), (11, 3), (12, None)]
+    off = svrf.parse_deck(p, env_switches=False)
+    check("inactive shape rule is excluded without a define",
+          "GRFILL.C.7" not in off.checks)
+    for scan in (False, True):
+        d = svrf.parse_deck(p, defines={"ENABLE_FILL": None},
+                            scan_all=scan, env_switches=False)
+        c = d.checks["GRFILL.C.7"]
+        label = "scan" if scan else "normal"
+        check("%s: exact NOT RECTANGLE rule resolves included source GDS" % label,
+              c.desc == [desc] and c.layers == ["dGRFILL.C.7_P1_temp1"]
+              and c.source_gds == base and c.constraints == [] and not c.unresolved,
+              str((c.layers, c.source_gds, c.constraints, c.unresolved)))
+        check("%s: COPY and layer-first boolean outputs reach their inputs" % label,
+              d.checks["COPY.RULE"].source_gds == base
+              and d.checks["BOOL.RULE"].layers == ["dGRFILL.C.7_P1_temp1", "EXTRA"]
+              and d.checks["BOOL.RULE"].source_gds == base + [(13, None)]
+              and not d.checks["BOOL.RULE"].constraints,
+              str(d.checks["BOOL.RULE"].source_gds))
+        check("%s: missing operands are reported instead of lost" % label,
+              d.checks["MISSING.RULE"].layers == ["missing_input"]
+              and d.checks["MISSING.RULE"].unresolved == ["missing_input"]
+              and d.checks["MISSING.RULE"].source_gds == [])
+        check("%s: unknown statements stay unknown and next measurements work" % label,
+              not d.checks["UNKNOWN.RULE"].layers
+              and d.unknown.get("FROBNICATE", 0) == 1
+              and not d.unknown.get("NOT", 0)
+              and d.checks["NEXT.RULE"].source_gds == [(13, None)]
+              and len(d.checks["NEXT.RULE"].constraints) == 1,
+              str(dict(d.unknown)))
+        check("%s: an open assignment keeps a logical continuation in its graph" % label,
+              d.derived_ops["wrapped_input"]
+              == ["os_FILL_SG_SMALL", "os_FILL_SG_FLEX", "os_FILL_SG_CORE_T"]
+              and d.checks["WRAPPED.RULE"].source_gds == base,
+              str(d.derived_ops["wrapped_input"]))
+        if not scan:
+            loaded = reader.load_rules(d.sidecar[0])["checks"]["GRFILL.C.7"]
+            check("published rules.json preserves shape-rule refs without numeric constraints",
+                  loaded["layers"] == ["dGRFILL.C.7_P1_temp1"]
+                  and loaded["source_gds"] == [[10, 2], [11, 3], [12, None]]
+                  and loaded["constraints"] == [], loaded)
+
+
 def r4(tmp):
     print("[R4] end-to-end vs gen_drcdb --svrf")
     db = os.path.join(tmp, "e2e.db")
@@ -905,6 +981,7 @@ def main():
         r3(tmp)
         r3b(tmp)
         r3c(tmp)
+        r3d(tmp)
         r4(tmp)
         r5(tmp)
     print("validate_svrf:", "FAIL" if FAIL else "all green")

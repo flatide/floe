@@ -210,6 +210,54 @@ fn rhs_operands(w: &Words, rhs: &str) -> Vec<String> {
     id_findall(rhs).into_iter().filter(|t| !w.keyword(&upper(t))).collect()
 }
 
+/// Input references of a small, explicit layer-output subset. This does not
+/// interpret shape predicates as CD bounds or guess operands of unknown heads.
+fn layer_output_operands(w: &Words, text: &str) -> Option<Vec<String>> {
+    let words = py_split(text);
+    let plain = |name: &str| {
+        name.chars().next().map(is_id_start).unwrap_or(false)
+            && name.chars().all(is_id_char)
+            && !w.keyword(&upper(name))
+            && !matches!(upper(name).as_str(), "CONNECTED" | "NOT_CONNECTED" | "ASPECT")
+    };
+    let head = upper(words.first()?);
+    let rectangle_operand = match head.as_str() {
+        "RECTANGLE" => Some(1),
+        "NOT" if words.get(1).is_some_and(|word| upper(word) == "RECTANGLE") => Some(2),
+        _ => None,
+    };
+    if let Some(at) = rectangle_operand {
+        let name = *words.get(at)?;
+        let name = if (name.starts_with('(') && name.ends_with(')'))
+            || (name.starts_with('[') && name.ends_with(']')) {
+            &name[1..name.len() - 1]
+        } else {
+            name
+        };
+        if !plain(name) {
+            return None;
+        }
+        if let Some(option) = words.get(at + 1) {
+            if !option.starts_with(['<', '>', '=', '!'])
+                && !matches!(upper(option).as_str(), "ORTHOGONAL" | "ONLY" | "ASPECT" | "MEASURE" | "EXTENTS" | "BY") {
+                return None;
+            }
+        }
+        return Some(vec![name.to_string()]);
+    }
+    if words.len() == 3 && plain(words[0]) && plain(words[2])
+        && matches!(upper(words[1]).as_str(), "AND" | "OR" | "NOT" | "XOR") {
+        return Some(vec![words[0].to_string(), words[2].to_string()]);
+    }
+    match head.as_str() {
+        "COPY" if words.len() == 2 && plain(words[1]) => Some(vec![words[1].to_string()]),
+        "AND" | "OR" | "NOT" | "XOR" if words.len() >= 3 && words[1..].iter().all(|word| plain(word)) => {
+            Some(words[1..].iter().map(|word| word.to_string()).collect())
+        }
+        _ => None,
+    }
+}
+
 const OPS: [&str; 6] = ["<=", ">=", "==", "!=", "<", ">"];
 
 /// `(?<![A-Za-z_])`
@@ -1655,6 +1703,18 @@ impl Parser {
                     self.icont = false;
                     let cur = self.cur;
                     self.measurement(&s, cur);
+                } else if self.acont.is_some() && self.acont_open && self.try_acont(&s) {
+                    // An operator-ended RHS explicitly requires this next line.
+                    self.icont = false;
+                } else if let Some(names) = layer_output_operands(&self.w, &s) {
+                    // A new output is not a wrapped option or assignment RHS.
+                    self.cont = None;
+                    self.acont = None;
+                    self.icont = false;
+                    for n in names {
+                        push_unique(&mut self.cur_check().layers, &n);
+                    }
+                    self.d.stats.add("layer_output", 1);
                 } else if self.try_acont(&s) {
                     self.icont = false;
                 } else if self.cont.is_some() && self.w.keyword(&head) {
@@ -2174,6 +2234,132 @@ pub fn svrf_cmd(args: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse_text(text: &str) -> Deck {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "floe-svrf-layer-output-{}-{}.svrf", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed),
+        ));
+        std::fs::write(&path, text).unwrap();
+        let result = parse_deck(path.to_str().unwrap(), &Options {
+            defines: Vec::new(), include_dirs: Vec::new(), scan_all: false,
+            follow_verbatim: false, env_switches: false,
+        });
+        std::fs::remove_file(path).unwrap();
+        result.unwrap()
+    }
+
+    #[test]
+    fn standalone_layer_outputs_extract_only_explicit_supported_operands() {
+        let words = Words::new();
+        for (text, expected) in [
+            ("NOT RECTANGLE tmp.1 ORTHOGONAL ONLY", vec!["tmp.1"]),
+            ("rectangle (tmp.1) ASPECT >= ratio", vec!["tmp.1"]),
+            ("RECTANGLE [M1] < .2 <= .3", vec!["M1"]),
+            ("COPY M1", vec!["M1"]),
+            ("AND M1 M2", vec!["M1", "M2"]),
+            ("OR M1 M2 M3", vec!["M1", "M2", "M3"]),
+            ("XOR M1 M2", vec!["M1", "M2"]),
+            ("NOT M1 M2", vec!["M1", "M2"]),
+            ("M1 AND M2", vec!["M1", "M2"]),
+            ("M1 or M2", vec!["M1", "M2"]),
+            ("M1 NOT M2", vec!["M1", "M2"]),
+            ("M1 XOR M2", vec!["M1", "M2"]),
+        ] {
+            assert_eq!(layer_output_operands(&words, text),
+                Some(expected.into_iter().map(str::to_string).collect()), "{text}");
+        }
+        for text in [
+            "UNKNOWN M1 M2", "LAYER M1 1", "NOT M1", "NOT CONNECTED",
+            "NOT CONNECTED M1", "AND M1", "OR M1 M2 CONNECTED",
+            "AND M1 M2 >= .1", "COPY M1 M2", "COPY (M1)", "COPY \"M1\"",
+            "RECTANGLE M1 M2", "RECTANGLE (M1 AND M2)", "RECTANGLE (M1",
+            "RECTANGLE M1 unknown_option", "RECTANGLE ASPECT", "M1 AND BY",
+            "M1 NOT M2 extra", "M1 NOT M2 AND M3",
+        ] {
+            assert_eq!(layer_output_operands(&words, text), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn shape_outputs_resolve_derived_input_layers_without_cd_inference() {
+        let deck = parse_text(concat!(
+            "LAYER A 1\nLAYER B 2\nLAYER C 3\n",
+            "tmp.1 = A OR B\n",
+            "SHAPE {\n@ Union [A, B] must be an orthogonal rectangle.\n",
+            "NOT RECTANGLE tmp.1 ORTHOGONAL ONLY\n}\n",
+            "ASPECT {\nRECTANGLE (tmp.1) ASPECT > ratio\n}\n",
+            "WRAPPED {\nNOT RECTANGLE tmp.1\nORTHOGONAL ONLY\n}\n",
+            "MISSING {\nNOT RECTANGLE missing_input ORTHOGONAL ONLY\n}\n",
+            "COPIED { COPY C }\n",
+            "LOGIC {\nNOT A B\nA XOR C\n}\n",
+            "UNKNOWN {\n@ COPY A\nUNSUPPORTED A B\n}\n",
+        ));
+        for rule in ["SHAPE", "ASPECT", "WRAPPED"] {
+            let check = deck.check(rule).unwrap();
+            assert!(check.constraints.is_empty(), "{rule}");
+            assert_eq!(check.layers, vec!["tmp.1"], "{rule}");
+            assert_eq!(check.source_gds, vec![(1, None), (2, None)], "{rule}");
+            assert!(check.unresolved.is_empty(), "{rule}");
+        }
+        assert_eq!(deck.check("SHAPE").unwrap().desc,
+            vec!["Union [A, B] must be an orthogonal rectangle."]);
+        let missing = deck.check("MISSING").unwrap();
+        assert_eq!(missing.layers, vec!["missing_input"]);
+        assert_eq!(missing.unresolved, vec!["missing_input"]);
+        assert!(missing.source_gds.is_empty() && missing.constraints.is_empty());
+        assert_eq!(deck.check("COPIED").unwrap().source_gds, vec![(3, None)]);
+        assert_eq!(deck.check("LOGIC").unwrap().layers, vec!["A", "B", "C"]);
+        assert_eq!(deck.check("LOGIC").unwrap().source_gds, vec![(1, None), (2, None), (3, None)]);
+        assert!(deck.check("LOGIC").unwrap().constraints.is_empty());
+        assert!(deck.check("UNKNOWN").unwrap().layers.is_empty());
+        assert!(deck.check("UNKNOWN").unwrap().constraints.is_empty());
+    }
+
+    #[test]
+    fn explicit_outputs_do_not_capture_measurement_or_assignment_continuations() {
+        let deck = parse_text(concat!(
+            "LAYER A 1\nLAYER B 2\nLAYER C 3\n",
+            "MEASURE_WRAP {\nEXT A B\nNOT A\n< .05\n}\n",
+            "MEASURE_OPTION {\nEXT A B < .05\nNOT CONNECTED\n}\n",
+            "NEW_OUTPUT {\nEXT A B < .05\nNOT RECTANGLE C ORTHOGONAL ONLY\n}\n",
+            "ASSIGN_WRAP {\nlocal.1 = A\nOR B\nNOT RECTANGLE C ORTHOGONAL ONLY\n}\n",
+            "OPEN_ASSIGN {\nlocal.2 = A OR\nB\nCOPY C\n}\n",
+            "INFIX_OUTPUT {\nlocal.3 = A\nB NOT C\n}\n",
+            "OPEN_INFIX {\nlocal.4 = A AND\nB OR C\n}\n",
+            "LATER_USE { COPY local.4 }\n",
+        ));
+        let wrap = deck.check("MEASURE_WRAP").unwrap();
+        assert_eq!(wrap.constraints.len(), 1);
+        assert_eq!(wrap.constraints[0].value, Some(0.05));
+        assert_eq!(wrap.constraints[0].text, "EXT A B NOT A < .05");
+        assert_eq!(wrap.layers, vec!["A", "B"]);
+        let option = deck.check("MEASURE_OPTION").unwrap();
+        assert_eq!(option.constraints.len(), 1);
+        assert_eq!(option.constraints[0].text, "EXT A B < .05 NOT CONNECTED");
+        let output = deck.check("NEW_OUTPUT").unwrap();
+        assert_eq!(output.constraints.len(), 1);
+        assert_eq!(output.constraints[0].text, "EXT A B < .05");
+        assert_eq!(output.layers, vec!["A", "B", "C"]);
+        for name in ["local.1", "local.2"] {
+            assert_eq!(deck.derived.get(name).unwrap(), "A OR B");
+            assert_eq!(deck.derived_ops.get(name).unwrap(), &vec!["A".to_string(), "B".to_string()]);
+        }
+        assert_eq!(deck.derived.get("local.3").unwrap(), "A");
+        assert_eq!(deck.derived_ops.get("local.3").unwrap(), &vec!["A".to_string()]);
+        assert_eq!(deck.derived.get("local.4").unwrap(), "A AND B OR C");
+        assert_eq!(deck.derived_ops.get("local.4").unwrap(),
+            &vec!["A".to_string(), "B".to_string(), "C".to_string()]);
+        assert_eq!(deck.check("LATER_USE").unwrap().layers, vec!["local.4"]);
+        assert_eq!(deck.check("LATER_USE").unwrap().source_gds,
+            vec![(1, None), (2, None), (3, None)]);
+        assert!(deck.check("LATER_USE").unwrap().unresolved.is_empty());
+        for name in ["ASSIGN_WRAP", "OPEN_ASSIGN", "INFIX_OUTPUT"] {
+            assert_eq!(deck.check(name).unwrap().layers, vec!["A", "B", "C"]);
+            assert!(deck.check(name).unwrap().constraints.is_empty());
+        }
+    }
 
     #[test]
     fn comments_follow_lexical_order_and_preserve_literals() {

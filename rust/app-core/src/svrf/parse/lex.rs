@@ -97,6 +97,75 @@ pub(super) fn metric(s: &str) -> Option<&'static str> {
         _ => return None,
     })
 }
+/// A small set of unambiguous standalone layer outputs. These reference
+/// input layers but do not supply a numeric CD constraint. In particular,
+/// generic `NOT layer` stays available to the existing wrap handling.
+pub(super) fn layer_output_operands(s: &str) -> Option<&str> {
+    let plain = |name: &str| {
+        let mut chars = name.chars();
+        chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+            && !super::keyword(name)
+            && !["ASPECT", "CONNECTED", "NOT_CONNECTED"]
+                .iter()
+                .any(|word| name.eq_ignore_ascii_case(word))
+    };
+    let (head, rest) = head_rest(s);
+    let (head, rest) = if head.eq_ignore_ascii_case("NOT")
+        && head_rest(rest).0.eq_ignore_ascii_case("RECTANGLE")
+    {
+        let (next, rest) = head_rest(rest);
+        (next, rest)
+    } else {
+        (head, rest)
+    };
+    if head.eq_ignore_ascii_case("RECTANGLE") {
+        let (input, tail) = head_rest(rest);
+        let input = if (input.starts_with('(') && input.ends_with(')'))
+            || (input.starts_with('[') && input.ends_with(']'))
+        {
+            &input[1..input.len() - 1]
+        } else {
+            input
+        };
+        if !plain(input) {
+            return None;
+        }
+        let option = head_rest(tail).0;
+        let shape_tail = tail.is_empty()
+            || tail.starts_with(['<', '>', '=', '!'])
+            || ["ORTHOGONAL", "ONLY", "ASPECT", "MEASURE", "EXTENTS", "BY"]
+                .iter()
+                .any(|word| option.eq_ignore_ascii_case(word));
+        return shape_tail.then_some(input);
+    }
+    if head.eq_ignore_ascii_case("COPY") {
+        let (input, tail) = head_rest(rest);
+        return (plain(input) && tail.is_empty()).then_some(input);
+    }
+    let logical = |head: &str| {
+        ["AND", "OR", "NOT", "XOR"]
+            .iter()
+            .any(|word| head.eq_ignore_ascii_case(word))
+    };
+    if plain(head) {
+        let (op, rest) = head_rest(rest);
+        let (input, tail) = head_rest(rest);
+        if logical(op) && plain(input) && tail.is_empty() {
+            return Some(s);
+        }
+    }
+    if logical(head) {
+        let mut inputs = tokens(rest);
+        if !plain(inputs.next()?) || !plain(inputs.next()?) || !inputs.all(plain) {
+            return None;
+        }
+        return Some(rest);
+    }
+    None
+}
 pub(super) fn ignored(s: &str) -> bool {
     "PRECISION RESOLUTION TITLE DRC LAYOUT TEXT CONNECT SCONNECT VIRTUAL ATTACH MASK LVS ERC PEX SOURCE GROUND UNIT FLAG GROUP PORT EXCLUDE CAPACITANCE RESISTANCE DEVICE TRACE SVRF PUSHDOWN POLYGON FILTER DFM RDB DVPARAMS OFFGRID NET FLATTEN"
         .split_ascii_whitespace().any(|k| k == s)

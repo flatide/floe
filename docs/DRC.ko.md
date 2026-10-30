@@ -392,6 +392,14 @@ python -m floe render chip.oas --drc results.db \
   comparator+value 체인만(`> 0 < v` = 2건). 옵션 비교값(`ABUT<90`,
   `ABUT>0<90`, `OPPOSITE EXTENDED < x`)은 구조적으로 제외.
   비교연산자로 시작하는 다음 줄 = 직전 측정문의 연속(감싼 한계).
+- 독립 출력문 `[NOT] RECTANGLE layer ...`, `COPY layer`, 명확한 전위 논리 연산
+  (`AND/OR/NOT/XOR layer1 layer2 ...`)과 두 레이어의 중위 논리 연산
+  (`layer1 NOT layer2` 등)에서도 입력 레이어를 수집한다. 예를 들어
+  `NOT RECTANGLE dGRFILL.C.7_P1_temp1 ORTHOGONAL ONLY`는 해당 임시 레이어를
+  `layers`에 남기고 그 정의와 `LAYER`/`LAYER MAP`을 따라 `source_gds`를 찾는다.
+  정의가 없으면 입력 이름을 `unresolved`에 기록한다. 형상 조건을 CD 수치 제약으로
+  추정하지 않으므로 해당 문장만 있는 룰의 `constraints`는 빈 배열일 수 있다.
+  description은 설명문으로 유지하며 원본 덱의 정의를 대신해 레이어를 추정하지 않는다.
 - 의도적 공백: DMACRO/CMACRO 비전개(카운트만), TVF는 생성된 SVRF를
   입력으로, 피연산자 줄바꿈 분리는 미지 히스토그램행. 새 덱은
   `--scan`(양쪽 #IFDEF 분기 워크, 인벤토리 출력)으로 구멍 확인.
