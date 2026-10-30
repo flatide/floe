@@ -425,7 +425,8 @@ pick/snap/clip이 덱에서 꺼져 있는 것과 달리 셀 질의는 덱에서�
 
 참조 툴의 cli-spec에서 결정된 규칙을 floe2의 기존 명령에 얹었다. 덱 전용
 플래그가 아니라 `floe2 render`의 일반 옵션이며 레이아웃에도 그대로 쓰인다
-(`floe/shots.py`).
+(app-core `shots/batch.rs`·`shots/mosaic.rs`·`captures.rs`; 예전 `floe/shots.py`는 P2d에서 제거됐다).
+이 절은 결정의 이력이고, 옵션 전체를 쓰임새별로 묶은 레퍼런스는 [CAPTURE-CLI.ko.md](CAPTURE-CLI.ko.md)다.
 
 ```sh
 floe2 render deck.jb --at 53.02mm,92.61mm --size 32mm,25.6mm --px 1200x900 --out a.png
@@ -522,7 +523,7 @@ floe2 render deck.jb --batch shots.txt --out shots/ --report shots/report.json
 캡쳐할 수 있어야 함. 그리고 네 모서리를 캡쳐해서 하나의 이미지로", 그리고 "칩을
 여러 개 지정할 수 있어야 함. 즉, 칩 on/off". 레벨 선택(`--level`)과 네 모서리
 mosaic(`--corners`)은 위에서 본 대로 이미 있었다. 이번에 칩 단위 on/off와 칩으로
-정하는 영역을 더했다(`floe/jobdeck/chips.py`).
+정하는 영역을 더했다(지금은 app-core `jobdeck/chips.rs`, 예전 `floe/jobdeck/chips.py`).
 
 ```sh
 floe2 info   deck.jb --level 2 --chips      # 레벨 2의 칩: 이름, CHIP, 배치 #K와 범위

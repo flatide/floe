@@ -7,15 +7,19 @@
 실행 형태는 환경에 따라:
 
 ```bash
-.venv/bin/python -m floe <cmd> ...     # 소스 체크아웃
-floe <cmd> ... / floe-index drc|svrf ...    # floe-portable 번들
+rust/target/release/floe2 <cmd> ...          # 소스 체크아웃
+floe2 <cmd> ... / floe-index drc|svrf ...    # floe2-portable 번들
 ```
+
+0.12.333(P3)부터 제품 명령은 `floe2`다. 예전 문서의 `floe drc`·`floe render`는 아래의 `floe2 drc`·`floe2 render`와
+같은 명령이고, Python 셸 `floe`는 개발용 오라클로만 남았다. 캡처의 일반 옵션(영역·크기·레이어·모양·인덱스)과
+종료 코드·환경 변수는 [CAPTURE-CLI.ko.md](CAPTURE-CLI.ko.md)에 있다.
 
 **공통 규약**
 
-- stdout = 데이터(JSON/TSV)만. 진행·경고(`[floe] ...`)는 전부
+- stdout = 데이터(JSON/TSV)만. 진행·경고(`[floe2] ...`, `[drc] ...`)는 전부
   stderr — 스크립트는 stdout만 파싱하면 된다.
-- 실패 = 비-0 exit + stderr `floe: ...` 한 줄.
+- 실패 = 비-0 exit + stderr `floe2: ...` 한 줄(명령행 오류 2, 실행 중 입력 오류 1).
 - 에러 번호는 두 종류: **local** = 룰 안 1-based 순번(뷰어
   그리드와 동일), **global** = 파일 순서 전역 번호(Calibre RVE
   스타일, 뷰어 상세의 `#local(global)`).
@@ -98,10 +102,10 @@ floe2 drc-match --protocol        # 2
 매핑해 대상 에러까지만 디코딩하고 작업자들이 나눠 한다. Apple M4에서 작업 상태가 모두
 있는 2백만 에러 룰이 4개 작업자로 2.7초(1개 6.6초)였다.
 
-## 1. 룰 목록: `floe drc <db> --rules`
+## 1. 룰 목록: `floe2 drc <db> --rules`
 
 ```bash
-floe drc results.db --rules > rules.json
+floe2 drc results.db --rules > rules.json
 ```
 
 JSON 배열, 룰당 한 객체:
@@ -116,10 +120,10 @@ JSON 배열, 룰당 한 객체:
 플래그 없이 실행하면 사람용 요약(셀·precision·룰별 카운트),
 `--list`는 에러별 중심/크기(um)까지 출력한다.
 
-## 2. 한 룰의 에러 목록: `floe drc <db> --errs RULE`
+## 2. 한 룰의 에러 목록: `floe2 drc <db> --errs RULE`
 
 ```bash
-floe drc results.db --errs M1.SPACE.1 > errs.json
+floe2 drc results.db --errs M1.SPACE.1 > errs.json
 ```
 
 JSON 배열(객체 단위 스트리밍 — 수백만 에러 룰도 상주 메모리
@@ -141,10 +145,10 @@ JSON 배열(객체 단위 스트리밍 — 수백만 에러 룰도 상주 메모
 환경(ProperTee는 ~1MiB)에서는 반드시 **파일로 리다이렉션한 뒤
 json_parse** 할 것. 파이프 직캡처는 지원 경로가 아니다.
 
-## 3. 에러 스냅샷 PNG: `floe render --drc`
+## 3. 에러 스냅샷 PNG: `floe2 render --drc`
 
 ```bash
-floe render chip.oas --drc results.db --drc-rule M1.SPACE.1 \
+floe2 render chip.oas --drc results.db --drc-rule M1.SPACE.1 \
     --drc-err 1-50 --px 800 --out snap.png > made.tsv
 ```
 
@@ -160,7 +164,8 @@ floe render chip.oas --drc results.db --drc-rule M1.SPACE.1 \
 | `--depth N` | full | 계층 깊이 (기본 = 전체 전개, 뷰어 "99") |
 | `--layers ...` | 자동 | 명시하면 svrf 격리보다 우선 |
 | `--drc-rules RULES.json` | 자동 탐색 | svrf 사이드카 직접 지정 |
-| `--floe-reviewer NAME` | DISPLAY/SSH 유도 | waive 자동 저장의 리뷰어 태그 (`floe drc`/`view`에도 있음; FLOE_REVIEWER env 동치) |
+| `--detail`, `--density`, `--thin`, `--occupancy`, `--label-font-px`, `--layer-colors`, `--legend`, `--archival`, `--no-index`, `--temp-index`, `--light`/`--full`, `--wait` | 일반 캡처와 같음 | [CAPTURE-CLI.ko.md](CAPTURE-CLI.ko.md) §1.3·§1.5. 영역(`--bbox`/`--at`/mosaic)·`--batch`·`--report`·`--chipid`/`--chipnumber`와는 함께 쓸 수 없다 |
+| `--floe-reviewer NAME` | DISPLAY/SSH 유도 | 기존 waive 상태를 읽는 리뷰어 태그; 캡처는 리뷰를 쓰지 않는다 (`floe2 drc`/`view`에도 있음; FLOE_REVIEWER env 동치) |
 
 - **픽셀 = 뷰어와 동일**: 뷰어의 렌더 서비스 경로(상주 vfsd
   세션 + detail medium 컷/헤어라인/LOD/커버리지) 그대로, depth만
@@ -232,15 +237,15 @@ mkdir -p snap
 
 floe-index drc "$DB" --jobs 8                      # 0. pack
 floe-index svrf "$DECK" -o "$DB.rules.json"        # 1. 사이드카(1회)
-floe drc "$DB" --rules > rules.json                # 2. 룰 목록
+floe2 drc "$DB" --rules > rules.json                # 2. 룰 목록
 
 # 3. 에러 있는 룰마다 앞 20개 스냅샷
 for RULE in $(python3 -c "
 import json
 for r in json.load(open('rules.json')):
     if r['errors']: print(r['name'])"); do
-  floe drc "$DB" --errs "$RULE" > "errs_$RULE.json"
-  floe render "$SRC" --drc "$DB" --drc-rule "$RULE" \
+  floe2 drc "$DB" --errs "$RULE" > "errs_$RULE.json"
+  floe2 render "$SRC" --drc "$DB" --drc-rule "$RULE" \
       --drc-err 1-20 --px 800 --out "snap/$RULE.png" \
       >> made.tsv
 done

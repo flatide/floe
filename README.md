@@ -241,7 +241,8 @@ floe2 jobdeck deck.jb --level 2 --mode chip --placements --report r.json   # 분
 `render`의 `--at/--size/--anchor`, 단위 접미사(nm/um/mm/cm/m), `--px WxH`,
 mosaic, `--batch`는 레이아웃(.oas/.gds)에도 그대로 쓰인다. 칩 on/off
 (`--chip/--chip-off/--fit-chip`, 이름·`N:이름`·CHIP id·와일드카드)는 덱
-전용이다(`docs/JOBDECK.ko.md` §7).
+전용이다(`docs/JOBDECK.ko.md` §7). 캡처 명령의 옵션 전체와 batch 문법, 보고서 JSON, 종료 코드,
+환경 변수를 쓰임새별로 묶은 레퍼런스는 [`docs/CAPTURE-CLI.ko.md`](docs/CAPTURE-CLI.ko.md)다.
 
 **캡처 기본값 = 뷰어**(0.12.350, 2026-10-12 사용자: "캡쳐도 동일한 결과가 나와야 함")
 - `floe2 render`는 뷰어를 같은 영역으로 연 그림(`floe2 view --goto`, depth full)을 그대로 그린다.
