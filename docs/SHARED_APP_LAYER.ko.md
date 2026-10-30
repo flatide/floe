@@ -476,6 +476,20 @@ P4d처럼 컨트롤러 루프에서만 바뀐다. `FLOE_GTK_LOOP=legacy`는 예�
   동일·옆에 아무것도 없음·임시 폴더 제거; info, `--light`, `--no-index` 배타, 없는 DIR), `jobdeck` LightSummaryTests
   (덱: 광역 캡처가 요약을 만들고 다시 그려 영구 인덱스의 그림과 동일, 근접은 요약 없이, `--occupancy off`는 페이지로, info).
   1회성 캡처의 비용 판단은 DIRECT_READ_PLAN §8.29.
+- **캡처 창 (2026-10-29, app 0.12.421; 사용자 "특정 위치를 캡쳐한다고 할때, jobdeck의 경우 해당하는 EBEAM 파일만 읽어서
+  처리하도록"; DIRECT_READ_PLAN §8.30):** `render`의 덱 캡처는 열기 전에 app-cli `capture.rs deck_reads`가 샷들의 영역을 덱 µm
+  창으로 모은다(app-core `captures::deck_window` - `run_summary`와 같은 `shot_region`으로 샷의 자기 영역이나 칩 extent의
+  타일 상자; 칩 이름의 extent는 덱과 헤더만 읽는 `Analysis::open`의 칩 표에서). 그것을 `jobdeck::window::DeckReads{chips,
+  window}`로 `read::dataset` → `ready::open(.., reads, ..)` → `Dataset::open_reads` → `DeckSnapshot::open_reads` →
+  `AnalysisOptions{chips, window}`에 넘긴다. `Analysis`는 `window_sources`(창이 닿는 배치의 소스)를 들고
+  `reads(&Placement)`/`reads_source(tc)`로 답한다. `spec::compose`는 창 밖 배치를 뺀다(`CompositeSpec.outside`; 스펙의 소스도
+  그만큼만 열리므로 renderd의 open도 준다). `DeckIndexPlan::prepare_for_open(.., reads)`는 창이 닿는 소스만 todo에 넣고
+  (`window_sources`, `outside`), ready.rs `deck_state(.., reads)`도 그 소스만 본다. `require_drawable`은 창이 아무 배치에도
+  닿지 않으면 입력 오류다. `geom::PlanOptions.chips`(`--chipid`/`--chipnumber`의 블록 선택, `ChipSelection` 그대로)는 로드하지
+  않은 레벨처럼 다른 블록의 배치를 빼되 격자·extent는 덱 전체로 둔다. 메타 `jobdeck.chip_blocks`/`jobdeck.window`
+  (`WindowInfo`), 보고서 `jobdeck.window`, `[jobdeck] window`/`blocks` 줄. `info`·`probe`·`clip`·DRC 캡처·뷰어·웹은 `reads`
+  없음(변화 없음). 킬 스위치 `FLOE_DECK_WINDOW=off`. 게이트 `jobdeck` LightSummaryTests
+  `test_a_capture_reads_the_sources_its_region_reaches`, 단위 테스트 app-core `window`·`geom`, app-cli `read`.
 
 ## 13. 레이아웃 뷰의 점유 요약 옵션 (2026-10-20, app 0.12.371 / RENDERD 0.12.336) — 정책은 공유 Rust, 켜고 끄기는 UI
 

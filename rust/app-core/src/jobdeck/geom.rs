@@ -121,6 +121,11 @@ pub struct PlanOptions {
     pub cross: bool,
     pub by_chip: bool,
     pub selected: Option<BTreeSet<i64>>,
+    /// the CHIP blocks placed (0-based indices in deck order; None: every
+    /// block) - `render --chipid` / `--chipnumber` (jobdeck::window): a
+    /// block left out is visited for the deck's grid and extent and counted,
+    /// as a level not selected is, and places nothing
+    pub chips: Option<BTreeSet<usize>>,
     pub skip_missing: bool,
     /// Explicit resource failures, never a successfully truncated deck.
     pub max_placements: usize,
@@ -135,6 +140,7 @@ impl Default for PlanOptions {
             cross: true,
             by_chip: false,
             selected: None,
+            chips: None,
             skip_missing: false,
             max_placements: 2_000_000,
             max_pairs: 65_536,
@@ -333,7 +339,7 @@ pub fn plan(
     let mut seen_skip = BTreeSet::new();
     let mut extent: Option<f64> = None;
     let mut total = 0u64;
-    for c in &deck.chips {
+    for (block, c) in deck.chips.iter().enumerate() {
         // Reuse LY/DT pairs for all ROWS of one entry, without changing order.
         let pairs = c
             .entries
@@ -346,7 +352,8 @@ pub fn plan(
                 let selected = options
                     .selected
                     .as_ref()
-                    .is_none_or(|ids| ids.contains(&e.idx));
+                    .is_none_or(|ids| ids.contains(&e.idx))
+                    && options.chips.as_ref().is_none_or(|b| b.contains(&block));
                 let Some(&source_dbu) = source_dbus.get(&e.tc) else {
                     let issue = bad.get(&e.tc);
                     let reason = issue.map_or("missing", |i| i.reason.as_str());
@@ -583,5 +590,45 @@ mod tests {
             .unwrap_err()
             .message
             .contains("memory limit"));
+    }
+    #[test]
+    fn chip_blocks_select_like_levels() {
+        // render --chipid / --chipnumber (2026-10-29): a block left out
+        // places nothing, is counted, and still decides the grid
+        let flag = AtomicUsize::new(0);
+        let deck = JobDeck::parse("x", "CHIP C\n$ (1,A,AD=0.001,SF=0.5,TC=a,LY=7,UX=4,UY=8)\nROWS 100/200\nCHIP D\n$ (1,A,AD=0.001,SF=0.5,TC=b,LY=7,UX=4,UY=8)\nROWS 300/400, 500/600",true,&flag).unwrap();
+        let dbus = BTreeMap::from([("a".into(), 0.001), ("b".into(), 0.002)]);
+        let all = plan(
+            &deck,
+            &dbus,
+            &BTreeMap::new(),
+            &PlanOptions::default(),
+            &flag,
+        )
+        .unwrap();
+        let second = plan(
+            &deck,
+            &dbus,
+            &BTreeMap::new(),
+            &PlanOptions {
+                chips: Some(BTreeSet::from([1])),
+                ..Default::default()
+            },
+            &flag,
+        )
+        .unwrap();
+        assert_eq!(all.stats.instances, 3);
+        assert_eq!(second.stats.instances, 2);
+        assert_eq!(second.stats.instances_total, 3);
+        assert!(second
+            .placements
+            .iter()
+            .all(|p| p.chip == "D" && p.tc == "b"));
+        assert_eq!(all.stats.dbu, second.stats.dbu);
+        assert_eq!(
+            all.stats.dbu_choice.extent_um,
+            second.stats.dbu_choice.extent_um
+        );
+        assert!(second.stats.skipped.is_empty() && second.stats.deck_issues.is_empty());
     }
 }

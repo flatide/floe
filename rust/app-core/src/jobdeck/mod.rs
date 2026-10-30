@@ -10,3 +10,4 @@ pub mod plan;
 pub mod sources;
 pub mod spec;
 pub mod view;
+pub mod window;

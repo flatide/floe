@@ -1,7 +1,13 @@
 //! One native index job at a time, each with its own requested worker count.
 //! Planning takes no write leases; each source is rechecked under its lease
 //! immediately before starting, through the ordinary PreparedIndex service.
-use super::{chips::wildcard, parser::JobDeck, sources::SourceCatalog};
+use super::{
+    chips::wildcard,
+    geom::{self, PlanOptions},
+    parser::JobDeck,
+    sources::SourceCatalog,
+    window::{DeckReads, DeckWindow},
+};
 use crate::{cache, check_cancelled, index::IndexOptions, Error, ErrorKind, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -189,6 +195,11 @@ pub struct DeckIndexPlan {
     /// the one the deck's mag asks for (`summary_coarser`; the auto-index
     /// keeps them)
     pub coarse_summaries: usize,
+    /// a capture's window (jobdeck::window; `prepare_for_open`): the
+    /// sources of the placements it reaches are the plan's, the rest of the
+    /// level - `outside` - is left as it is (None: every source)
+    pub window_sources: Option<BTreeSet<String>>,
+    pub outside: usize,
 }
 impl DeckIndexPlan {
     /// The plan of `floe2 index DECK` (and the viewer's and the service's
@@ -206,7 +217,7 @@ impl DeckIndexPlan {
         options: &IndexOptions,
         cancelled: &AtomicUsize,
     ) -> Result<Self> {
-        Self::plan(path, selected, chips, options, true, None, cancelled)
+        Self::plan(path, selected, chips, None, options, true, None, cancelled)
     }
 
     /// The auto-index's plan (app-cli ready.rs: a read command that opens a
@@ -224,24 +235,39 @@ impl DeckIndexPlan {
     /// `temp`: the run's temporary index (cache::TempIndex root; `render
     /// --temp-index`): a source with no cache beside it gets its entry
     /// built under it (`IndexOptions::out_dir`), and is read from there.
+    /// `reads`: what the capture reads of the deck (jobdeck::window) - the
+    /// CHIP blocks named, and the window whose placements' sources alone
+    /// are planned.
     pub fn prepare_for_open(
         path: &Path,
         selected: Option<BTreeSet<i64>>,
         options: &IndexOptions,
         temp: Option<&Path>,
+        reads: Option<&DeckReads>,
         cancelled: &AtomicUsize,
     ) -> Result<Self> {
-        Self::plan(path, selected, None, options, false, temp, cancelled)
+        Self::plan(
+            path,
+            selected,
+            reads.and_then(|r| r.chips.as_ref()),
+            reads.and_then(|r| r.window.as_ref()),
+            options,
+            false,
+            temp,
+            cancelled,
+        )
     }
 
     /// `explicit`: `floe2 index DECK` (`prepare`), not the auto-index of an
     /// open (`prepare_for_open`) - a light cache under `--full` is built
     /// over, and a summary coarser than the source's mag asks for is built
     /// again; an open takes the caches as they are.
+    #[allow(clippy::too_many_arguments)]
     fn plan(
         path: &Path,
         selected: Option<BTreeSet<i64>>,
         chips: Option<&ChipSelection>,
+        window: Option<&DeckWindow>,
         options: &IndexOptions,
         explicit: bool,
         temp: Option<&Path>,
@@ -287,12 +313,39 @@ impl DeckIndexPlan {
             cancelled,
         )?;
         let mags = source_mags(&deck, &catalog);
+        // a capture's window (render; jobdeck::window): the sources of the
+        // placements it reaches are planned, the rest of the level is left
+        // as it is - the placements from the deck and the headers probed,
+        // as the open places them (a source without a dbu places nothing
+        // and is not planned either way)
+        let within = window
+            .map(|w| {
+                geom::plan(
+                    &deck,
+                    &catalog.dbus(),
+                    &catalog.bad(),
+                    &PlanOptions {
+                        selected: selected.clone(),
+                        chips: chips.as_ref().map(|p| p.blocks.clone()),
+                        skip_missing: true,
+                        ..Default::default()
+                    },
+                    cancelled,
+                )
+                .map(|model| w.sources(&model.placements))
+            })
+            .transpose()?;
         let (mut todo, mut kept, mut aliases, mut full_over_light, mut coarse_summaries) =
             (Vec::new(), 0, 0, 0, 0);
+        let mut outside = 0usize;
         let mut destinations = BTreeSet::new();
         for (tc, info) in &catalog.infos {
             check_cancelled(cancelled)?;
             if !info.ok() {
+                continue;
+            }
+            if within.as_ref().is_some_and(|s| !s.contains(tc)) {
+                outside += 1;
                 continue;
             }
             // Deduplicate lexical aliases for the same cache destination, but
@@ -372,6 +425,8 @@ impl DeckIndexPlan {
             aliases,
             full_over_light,
             coarse_summaries,
+            window_sources: within,
+            outside,
         })
     }
 }

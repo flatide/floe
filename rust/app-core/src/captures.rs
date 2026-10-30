@@ -4,7 +4,11 @@ use crate::{
     artifact::{self, StagedArtifact},
     check_cancelled,
     dataset::Dataset,
-    jobdeck::chips::{ChipTable, Selection},
+    jobdeck::{
+        chips::{ChipTable, Selection},
+        plan::Analysis,
+        window::DeckWindow,
+    },
     render::{budget_fit, budget_fit_brief, require_complete, RenderOptions, RenderSession},
     shots::{
         batch::{NamedCapture, TILE_NAMES},
@@ -143,6 +147,86 @@ fn brief(records: &[&crate::jobdeck::geom::Skipped]) -> String {
     text
 }
 
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// A shot's chips and region: the chips its options name (a jobdeck's chip
+/// table; a layout has none), and the region - the shot's own, else the
+/// extent of the chips named, else `default_box` (the whole source).
+fn shot_region(
+    named: &NamedCapture,
+    table: Option<&ChipTable>,
+    source_name: &str,
+    default_box: [f64; 4],
+) -> Result<(Option<Selection>, [f64; 4])> {
+    let capture = &named.capture;
+    let mut selection = None;
+    if capture.names_chips() {
+        let Some(table) = table else {
+            return Err(Error::input(format!(
+                "{}: --chip, --chip-off and --fit-chip name a jobdeck's chips; {source_name} is a layout",
+                named.name
+            )));
+        };
+        selection = Some(table.select(
+            capture.chip.as_deref(),
+            capture.chip_off.as_deref(),
+            capture.fit_chip.as_deref(),
+        )?);
+    }
+    let mut region = default_box;
+    if let Some(sel) = &selection {
+        if !capture.explicit_region() {
+            region = sel.region.ok_or_else(|| {
+                Error::input(format!(
+                    "{}: the chips on have nothing placed (their sources are skipped: see 'skipped' above)",
+                    named.name
+                ))
+            })?;
+        }
+    }
+    Ok((selection, region))
+}
+
+/// The window of a run of captures over a deck (jobdeck::window, user
+/// 2026-10-29): every shot's tiles' regions as `run_summary` frames them -
+/// the shot's own region, or the extent of the chips it names (the chip
+/// table of the deck's placements, from the deck and the sources' headers:
+/// `analysis`, no geometry read) - in deck um, for the open that follows.
+/// None when a shot has no region of its own and names no chips (it draws
+/// the whole deck), or the deck places nothing (the open says so).
+pub fn deck_window(
+    analysis: &Analysis,
+    shots: &[NamedCapture],
+    cancelled: &AtomicUsize,
+) -> Result<Option<DeckWindow>> {
+    if shots
+        .iter()
+        .any(|s| !(s.capture.explicit_region() || s.capture.names_chips()))
+    {
+        return Ok(None);
+    }
+    let Some(deck_box) = analysis.model.stats.bbox_um else {
+        return Ok(None);
+    };
+    let rows = analysis.view_rows(cancelled)?;
+    let layers = rows.metadata(&analysis.model.placements)?;
+    let table = ChipTable::new(&analysis.deck, &analysis.model.placements, &layers);
+    let source_name = file_name(Path::new(&analysis.deck.path));
+    let mut rects = Vec::new();
+    for named in shots {
+        check_cancelled(cancelled)?;
+        let (_, region) = shot_region(named, Some(&table), &source_name, deck_box)?;
+        for tile in named.capture.tiles(region)? {
+            rects.push(tile.bbox.expect("fitted tile"));
+        }
+    }
+    DeckWindow::new(rects).map(Some)
+}
+
 /// `run`, and what the images lack.
 pub fn run_summary(
     dataset: &Dataset,
@@ -194,29 +278,13 @@ pub fn run_summary(
         Dataset::Layout(_) => None,
     };
     let mut plans = Vec::new();
+    let source_name = file_name(dataset.source());
     // every shot's layers, chips and region before the worker starts: a
     // name that resolves to nothing stops the run here
     for named in shots {
         let capture = &named.capture;
-        let mut selection = None;
-        if capture.names_chips() {
-            let Some(table) = &table else {
-                return Err(Error::input(format!(
-                    "{}: --chip, --chip-off and --fit-chip name a jobdeck's chips; {} is a layout",
-                    named.name,
-                    dataset
-                        .source()
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default()
-                )));
-            };
-            selection = Some(table.select(
-                capture.chip.as_deref(),
-                capture.chip_off.as_deref(),
-                capture.fit_chip.as_deref(),
-            )?);
-        }
+        let (selection, region) =
+            shot_region(named, table.as_ref(), &source_name, dataset.bbox_um())?;
         // the chips on are the view's L/D pairs: the visible set
         let layers = match selection.as_ref().and_then(|s| s.keys.as_ref()) {
             Some(keys) => Some(
@@ -227,17 +295,6 @@ pub fn run_summary(
             ),
             None => capture.shot.layers.clone(),
         };
-        let mut region = dataset.bbox_um();
-        if let Some(sel) = &selection {
-            if !capture.explicit_region() {
-                region = sel.region.ok_or_else(|| {
-                    Error::input(format!(
-                        "{}: the chips on have nothing placed (their sources are skipped: see 'skipped' above)",
-                        named.name
-                    ))
-                })?;
-            }
-        }
         let mut tiles = capture.tiles(region)?;
         for tile in &mut tiles {
             tile.layers = layers.clone();
@@ -608,7 +665,13 @@ pub fn run_summary(
                 .ok_or_else(|| Error::input("report page count overflow"))?;
             doc["jobdeck"] = serde_json::json!({"complete":complete,"skipped":lacking,"skipped_off":off,"over_budget_pages":over_budget,
                 "summary_building":summary_building_total,
-                "view":deck.metadata.jobdeck.mode,"levels":deck.metadata.jobdeck.levels});
+                "view":deck.metadata.jobdeck.mode,"levels":deck.metadata.jobdeck.levels,
+                // what the capture read of the deck (jobdeck::window): the
+                // CHIP blocks --chipid / --chipnumber placed, the window's
+                // regions and the sources and placements it reached (null:
+                // the whole load)
+                "chip_blocks":deck.metadata.jobdeck.chip_blocks,
+                "window":deck.metadata.jobdeck.window});
         }
         let result = (|| {
             let bytes = artifact::json_bytes(&doc, cancelled)?;

@@ -6,6 +6,7 @@ use super::{
     plan::{Analysis, AnalysisOptions},
     spec::{self, CompositeSpec},
     view::{LayerMetadata, ViewRows},
+    window::{DeckReads, WindowInfo},
 };
 use crate::{
     cache,
@@ -47,6 +48,13 @@ pub struct DeckInfo {
     /// banner, the background summary build; L6).
     pub light_sources: usize,
     pub summary_missing: usize,
+    /// a capture's reads (jobdeck::window; `render`): the CHIP blocks
+    /// `--chipid` / `--chipnumber` placed, as `n:ID`, and what the window
+    /// of its regions came to - the sources and placements read
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chip_blocks: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window: Option<WindowInfo>,
 }
 #[derive(Debug)]
 pub struct DeckSnapshot {
@@ -64,7 +72,7 @@ impl DeckSnapshot {
         levels: Option<BTreeSet<i64>>,
         cancelled: &AtomicUsize,
     ) -> Result<Self> {
-        Self::open_pinned(source, mode, levels, None, None, cancelled)
+        Self::open_pinned(source, mode, levels, None, None, None, cancelled)
     }
     /// `open` with the run's temporary index (`temp`: cache::TempIndex
     /// root): a source with no cache beside it is read from its cache under
@@ -76,7 +84,21 @@ impl DeckSnapshot {
         temp: Option<&Path>,
         cancelled: &AtomicUsize,
     ) -> Result<Self> {
-        Self::open_pinned(source, mode, levels, None, temp, cancelled)
+        Self::open_pinned(source, mode, levels, None, temp, None, cancelled)
+    }
+    /// `open_temp` with what a capture reads of the deck (`reads`:
+    /// jobdeck::window - the CHIP blocks `--chipid` / `--chipnumber` name,
+    /// and the window of its regions, whose placements alone go to the spec;
+    /// the model and the ledger hold the whole load).
+    pub fn open_reads(
+        source: &Path,
+        mode: Mode,
+        levels: Option<BTreeSet<i64>>,
+        temp: Option<&Path>,
+        reads: Option<&DeckReads>,
+        cancelled: &AtomicUsize,
+    ) -> Result<Self> {
+        Self::open_pinned(source, mode, levels, None, temp, reads, cancelled)
     }
     pub(crate) fn open_pinned(
         source: &Path,
@@ -84,6 +106,7 @@ impl DeckSnapshot {
         levels: Option<BTreeSet<i64>>,
         pinned: Option<std::sync::Arc<cache::revision::set::Snapshot>>,
         temp: Option<&Path>,
+        reads: Option<&DeckReads>,
         cancelled: &AtomicUsize,
     ) -> Result<Self> {
         let source = cache::absolute(source)?;
@@ -96,6 +119,8 @@ impl DeckSnapshot {
                 load_ids: levels.clone(),
                 skip_missing: true,
                 temp: temp.map(Path::to_path_buf),
+                chips: reads.and_then(|r| r.chips.clone()),
+                window: reads.and_then(|r| r.window.clone()),
                 ..Default::default()
             },
             pinned,
@@ -165,8 +190,14 @@ impl DeckSnapshot {
         } else {
             analysis.deck.name().into()
         };
+        // of the sources read (the capture's window leaves the rest alone)
         let (mut light_sources, mut summary_missing) = (0usize, 0usize);
-        for info in analysis.catalog.infos.values().filter(|i| i.ok() && i.indexed) {
+        for info in analysis
+            .catalog
+            .infos
+            .values()
+            .filter(|i| i.ok() && i.indexed && analysis.reads_source(&i.tc))
+        {
             if cache::cache_kind(&info.cache_dir) == Some(cache::CacheKind::Light) {
                 light_sources += 1;
             }
@@ -204,6 +235,8 @@ impl DeckSnapshot {
                 colour_order: analysis.colors.order.clone(),
                 light_sources,
                 summary_missing,
+                chip_blocks: analysis.chips.as_ref().map(|p| p.labels.clone()),
+                window: analysis.window_info(),
             },
         };
         check_cancelled(cancelled)?;

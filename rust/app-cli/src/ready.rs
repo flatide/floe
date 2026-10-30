@@ -36,6 +36,7 @@ use floe_app_core::{
     jobdeck::{
         color::Mode,
         index::{is_deck, DeckIndexPlan},
+        window::DeckReads,
     },
     Error, ErrorKind, Result,
 };
@@ -497,14 +498,20 @@ fn index_layout(
 /// probe - not info), an indexed one without its occupancy summary
 /// (design.ovo) as well - a deck's wide view draws nothing of a light
 /// source without it (DIRECT_READ_PLAN §5.5), and `floe2 index DECK` adds
-/// it; and the sources another run rebuilds.
+/// it; and the sources another run rebuilds. `reads`: the sources a
+/// capture's window reaches (jobdeck::window) - the others are left as they
+/// are, whatever their state (None: every source).
 fn deck_state(
     catalog: &floe_app_core::jobdeck::sources::SourceCatalog,
     summaries: bool,
+    reads: Option<&BTreeSet<String>>,
 ) -> Result<(bool, Vec<Key>)> {
     let mut needs = false;
     let mut busy = Vec::new();
     for info in catalog.infos.values() {
+        if reads.is_some_and(|s| !s.contains(&info.tc)) {
+            continue;
+        }
         if !info.busy.is_empty() {
             busy.push(dir_key(&info.cache_dir));
         } else if !needs && info.ok() {
@@ -530,6 +537,8 @@ fn index_deck(
 ) -> Result<()> {
     let mut todo = Vec::new();
     let (mut without_index, mut without_summary) = (0usize, 0usize);
+    // the sources of the level the capture's window does not reach
+    let outside = plan.outside;
     for mut entry in plan.todo {
         // the entry's cache: beside the source, or the run's temporary index
         let directory = match &entry.options.out_dir {
@@ -571,12 +580,19 @@ fn index_deck(
     }
     let own = todo.iter().any(|e| e.options.out_dir.is_some());
     eprintln!(
-        "[jobdeck] {} - indexing them first{}",
+        "[jobdeck] {} - indexing them first{}{}",
         what.join(", "),
         if own {
             " in a temporary folder (--temp-index: nothing is written beside them)"
         } else {
             " (--no-index: draw without them)"
+        },
+        if outside > 0 {
+            format!(
+                "; {outside} source(s) the capture's region does not reach are left as they are"
+            )
+        } else {
+            String::new()
         }
     );
     crate::deck_index::run_entries(&todo, 0, Out::Stderr, waiter, cancelled)?;
@@ -602,7 +618,9 @@ fn deck_options(light: Option<bool>, summaries: bool) -> IndexOptions {
 /// (`index`, as `light` asks; with `summaries` - `render --occupancy on` -
 /// a source's missing occupancy summary as well; under `temp`, the run's
 /// temporary index, built and read there), what another run indexes
-/// waited for (`waiter`) or refused.
+/// waited for (`waiter`) or refused. `reads`: what a capture reads of a
+/// deck (jobdeck::window) - the index and the open take the sources its
+/// window reaches, the rest of the levels loaded is left as it is.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn open(
     source: &Path,
@@ -611,6 +629,7 @@ pub(crate) fn open(
     light: Option<bool>,
     summaries: bool,
     temp: Option<&Path>,
+    reads: Option<&DeckReads>,
     waiter: &mut Waiter,
     cancelled: &AtomicUsize,
 ) -> Result<Dataset> {
@@ -620,13 +639,18 @@ pub(crate) fn open(
         if index && !deck {
             index_layout(source, light, summaries, temp, waiter, cancelled)?;
         }
-        let opened = Dataset::open_temp(source, levels.clone(), Mode::Level, temp, cancelled);
+        let opened =
+            Dataset::open_reads(source, levels.clone(), Mode::Level, temp, reads, cancelled);
         let (none, busy, refused) = match opened {
             Ok(dataset) => {
                 let Dataset::Deck(snapshot) = &dataset else {
                     return Ok(dataset);
                 };
-                let (none, busy) = deck_state(&snapshot.analysis.catalog, summaries)?;
+                let (none, busy) = deck_state(
+                    &snapshot.analysis.catalog,
+                    summaries,
+                    snapshot.analysis.window_sources.as_ref(),
+                )?;
                 if !(index && !deck_indexed && none) && !(waiter.on() && !busy.is_empty()) {
                     return Ok(dataset);
                 }
@@ -648,9 +672,11 @@ pub(crate) fn open(
                     levels.clone(),
                     &deck_options(light, summaries),
                     temp,
+                    reads,
                     cancelled,
                 )?;
-                let (none, busy) = deck_state(&plan.catalog, summaries)?;
+                let (none, busy) =
+                    deck_state(&plan.catalog, summaries, plan.window_sources.as_ref())?;
                 if !(index && !deck_indexed && none) && !(waiter.on() && !busy.is_empty()) {
                     return Err(e);
                 }
@@ -673,6 +699,7 @@ pub(crate) fn open(
                 levels.clone(),
                 &deck_options(light, summaries),
                 temp,
+                reads,
                 cancelled,
             )?;
             index_deck(plan, summaries, waiter, cancelled)?;

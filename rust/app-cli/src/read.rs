@@ -1,7 +1,10 @@
 use crate::ready::{self, Ready, Waiter};
 use floe_app_core::{
     dataset::Dataset,
-    jobdeck::index::{is_deck, parse_levels},
+    jobdeck::{
+        index::{is_deck, parse_levels, ChipSelection},
+        window::DeckReads,
+    },
     render::{require_complete, RenderOptions, RenderSession},
     shots::{self, batch::Capture, Anchor, Detail, Shot, Thin},
     styles::LayerColors,
@@ -80,6 +83,11 @@ makes it the default, as before 0.12.350).
   --chip-off NAME[,...]     These chips off, the others on
   --fit-chip NAME[#K][,...] The region is these chips' extent (on or not); #K
                             their K-th placement alone, deck order (info --chips)
+  --chipid ID,ID,...        Jobdeck: these CHIP blocks' sources and placements
+                            alone are opened, indexed and drawn (ids exact, or
+                            * ? [..] patterns); the other blocks place nothing
+  --chipnumber N,N-M,...    The same by block number, 1.. in deck order (ranges
+                            N-M); with --chipid a block in either list is in
   --line W --line-color RGB  Separator width (default 2), color (default #ffffff)
   --keep-tiles              Keep mosaic _tl/_tr/_bl/_br PNGs after all renders succeed
   --drc DB --drc-rule NAME   Square per-error PNGs, live style + flateyes metadata
@@ -115,6 +123,11 @@ A source with no index (a jobdeck: its sources of the levels loaded) is indexed
 first, as `floe2-web index [--light|--full]` builds it - without the occupancy
 summary unless --occupancy on asks for it -, its output on stderr; a changed
 source keeps its cache (index --force rebuilds it).
+A jobdeck capture with a region (--bbox, --at, --mosaic-at, --corners X0,.., or
+the chips' extent of --chip / --fit-chip) opens, indexes and draws the sources
+whose placements - the deck's BX..UY extents - the region reaches; the rest of
+the levels loaded is left alone (FLOE_DECK_WINDOW=off: every source, as before
+0.12.421). A region that reaches no placement is refused.
 Lengths: bare/um/µm/μm, nm, mm, cm, m. Fractional DBU is preserved.
 Batch: NAME key=value ...; quotes supported, full-line # comments. Region fields
 override the CLI region. Keys: bbox at size anchor px stretch layers (layer)
@@ -167,6 +180,9 @@ pub enum Command {
         drc: Option<Box<floe_app_core::drc::capture::Options>>,
         layer_colors: Option<LayerColors>,
         legend: bool,
+        /// `--chipid` / `--chipnumber`: a jobdeck's CHIP blocks to read
+        /// (jobdeck::window)
+        chips: Option<ChipSelection>,
         ready: Ready,
     },
     Probe {
@@ -200,6 +216,8 @@ pub fn parse(args: &[String]) -> Result<Command> {
     let mut layers = shots::LayerChoice::default();
     let mut json = false;
     let mut chips = false;
+    // --chipid / --chipnumber: the CHIP blocks a deck's capture reads
+    let mut chip_blocks = ChipSelection::default();
     let mut levels = None;
     // --layer-colors (a layout's default layer colours; the open's
     // FLOE_LAYER_COLORS without it)
@@ -286,6 +304,8 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 | "--chip"
                 | "--chip-off"
                 | "--fit-chip"
+                | "--chipid"
+                | "--chipnumber"
                 | "--line"
                 | "--line-color"
                 | "--keep-tiles"
@@ -401,6 +421,9 @@ pub fn parse(args: &[String]) -> Result<Command> {
             "--chip" => capture.chip = Some(value()?.to_string()).filter(|v| !v.is_empty()),
             "--chip-off" => capture.chip_off = Some(value()?.to_string()).filter(|v| !v.is_empty()),
             "--fit-chip" => capture.fit_chip = Some(value()?.to_string()).filter(|v| !v.is_empty()),
+            // the CHIP blocks to read (2026-10-29), as `index DECK` takes them
+            "--chipid" => chip_blocks.add_ids(value()?)?,
+            "--chipnumber" => chip_blocks.add_numbers(value()?)?,
             "--line" => capture.line = super::number(value()?, flag)?,
             "--line-color" => capture.line_color = value()?.into(),
             "--keep-tiles" => {
@@ -461,6 +484,10 @@ pub fn parse(args: &[String]) -> Result<Command> {
         }
     }
     let source = source.ok_or_else(|| Error::input(format!("{kind} requires SOURCE")))?;
+    let chip_blocks = (!chip_blocks.is_empty()).then_some(chip_blocks);
+    if chip_blocks.is_some() && !is_deck(&source) {
+        return Err(Error::input("--chipid / --chipnumber require a .jb source"));
+    }
     if layers.said() {
         shot.layers = layers.spec();
     }
@@ -558,6 +585,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 drc,
                 layer_colors,
                 legend,
+                chips: chip_blocks,
                 ready,
             })
         }
@@ -573,6 +601,7 @@ pub(crate) fn dataset(
     light: Option<bool>,
     summaries: bool,
     temp: Option<&std::path::Path>,
+    reads: Option<&DeckReads>,
     waiter: &mut Waiter,
     cancelled: &AtomicUsize,
 ) -> Result<Dataset> {
@@ -580,9 +609,10 @@ pub(crate) fn dataset(
     // `summaries`: a render with --occupancy on has a source's missing
     // occupancy summary added too - DIRECT_READ_PLAN §5.5 / §8.11; by
     // default a capture builds none, and info reads the caches as they are;
-    // `temp`: the run's temporary index - `--temp-index`, ready.rs)
+    // `temp`: the run's temporary index - `--temp-index`, ready.rs;
+    // `reads`: what a capture reads of a deck - jobdeck::window)
     let l = ready::open(
-        source, levels, index, light, summaries, temp, waiter, cancelled,
+        source, levels, index, light, summaries, temp, reads, waiter, cancelled,
     )?;
     if l.source_stale() {
         eprintln!("[{}][warn] source changed; displaying cached geometry. Rebuild with index --force, then reopen.", floe_app_core::program());
@@ -646,6 +676,7 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
                     ready.light,
                     capture.shot.occupancy == Some(true),
                     temp.as_ref().map(|t| t.root()),
+                    None,
                     waiter,
                     cancelled,
                 )?;
@@ -674,6 +705,7 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
             drc: None,
             layer_colors,
             legend,
+            chips,
             ready,
         } => {
             // its shots read once (`--batch -` is stdin), the captures run
@@ -687,6 +719,7 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
                 report,
                 batch,
                 levels,
+                chips,
                 layer_colors,
                 legend,
                 ready.index,
@@ -738,7 +771,9 @@ fn info(
     waiter: &mut Waiter,
     cancelled: &Arc<AtomicUsize>,
 ) -> Result<i32> {
-    let l = dataset(source, levels, index, light, false, temp, waiter, cancelled)?;
+    let l = dataset(
+        source, levels, index, light, false, temp, None, waiter, cancelled,
+    )?;
     if json {
         println!(
             "{}",
@@ -778,7 +813,9 @@ fn probe(
     cancelled: &Arc<AtomicUsize>,
 ) -> Result<i32> {
     // (a probe builds no summary: its frames are a check, drawn once)
-    let l = dataset(source, None, index, light, false, temp, waiter, cancelled)?;
+    let l = dataset(
+        source, None, index, light, false, temp, None, waiter, cancelled,
+    )?;
     let mut session =
         RenderSession::open(&l, RenderOptions::local()?, false, Arc::clone(cancelled))?;
     println!(
@@ -883,6 +920,42 @@ mod tests {
             panic!()
         };
         assert_eq!(drc.layers.as_deref(), Some("7/1"));
+    }
+    #[test]
+    fn render_reads_the_chip_blocks_named() {
+        // render --chipid / --chipnumber (2026-10-29): a deck's capture
+        // opens those blocks' sources alone, as `index DECK` takes them; a
+        // layout and a malformed list are argument errors, DRC excludes them
+        let Command::Render { chips, .. } = parsed(&[
+            "render",
+            "a.jb",
+            "--chipid",
+            "ID001,ID00[23]",
+            "--chipnumber=2,4-5",
+            "--bbox=0,0,1,1",
+        ])
+        .unwrap() else {
+            panic!()
+        };
+        let chips = chips.unwrap();
+        assert_eq!(chips.ids, ["ID001", "ID00[23]"]);
+        assert_eq!(chips.numbers, [(2, 2), (4, 5)]);
+        let Command::Render { chips, .. } = parsed(&["render", "a.jb"]).unwrap() else {
+            panic!()
+        };
+        assert!(chips.is_none());
+        assert!(parsed(&["render", "a.oas", "--chipid", "ID001"]).is_err());
+        assert!(parsed(&["render", "a.jb", "--chipnumber", "0"]).is_err());
+        assert!(parsed(&["render", "a.jb", "--chipid", ","]).is_err());
+        assert!(parsed(&[
+            "render",
+            "a.jb",
+            "--chipid",
+            "ID001",
+            "--drc=db",
+            "--drc-rule=R"
+        ])
+        .is_err());
     }
     #[test]
     fn read_commands_are_strict() {

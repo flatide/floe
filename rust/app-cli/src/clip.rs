@@ -192,6 +192,7 @@ fn clip(
         Some(false),
         false,
         temp,
+        None,
         waiter,
         cancelled,
     )?

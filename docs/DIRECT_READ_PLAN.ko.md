@@ -443,6 +443,7 @@ geometry/placement/text x·y, W/H, 점 목록, 경로 확장, 반복, 배치 대
 | 재고 매핑의 페이지, occupancy-only의 재고 재사용 | 현장 2026-10-27: 290 GB 파일의 `--occupancy-only`가 재고 패스에서 `rss 216G`(1920 s) — "stream이어도 어쩔 수 없는건지" → "진행해줘" | **완료 0.12.411(§8.27)**: `light --occupancy-only`는 캐시의 design.inv를 재고로 읽고 소스를 훑지 않음(`FLOE_LIGHT_INV_REUSE=off`), 재고 걷기가 지나간 페이지를 32 MiB마다 돌려줌(`floe_oasis::Release`, madvise DONTNEED; `FLOE_INVENTORY_RELEASE=off`), 진행 줄에 skim·parse 진행과 rss의 heap·file; 단위 테스트 + 게이트 light_cache |
 | 덱 배율의 자동 셀 | 현장 2026-10-28: 모든 배치가 mag 4인 덱의 18147 × 12578 µm 뷰에서 `summary 4 passes ..., 21 passes without summary` — 27 mm 소스의 4 µm 셀이 덱에서 16 µm(`check_deck_summaries`: 135 소스 OK, base_um 0.5~4) | **완료 0.12.414(§8.28)**: 자동 셀이 배율을 본다(덱 셀 ≤ 4 µm: `placed_ceiling_um`, `--occupancy-mag`), `floe2 index DECK`가 소스의 최대 배율을 넘기고 그보다 굵은 요약을 다시 만듦, renderd의 대기 판정도 같은 셀, 점검 스크립트의 `mag`·`deck_cell_um`·`COARSE`; 단위 테스트 + 게이트 jobdeck |
 | 인덱스 없는 캡처 | 사용자 2026-10-28: 인덱스 없는 레이아웃·잡덱도 `render`로 찍을 수 있게, 1회성이면 색인을 건너뛰는 것이 유리한지 | **완료 0.12.416(§8.29)**: `--temp-index[=DIR]`(이 실행만의 폴더에 색인·읽기·삭제, 옆에 아무것도 남기지 않음; 덱 광역 캡처는 기다리는 요약을 거기 만들고 다시 그림), 측정 - 캡처는 최소 경량 재고 pass 1회이고 색인을 "안 하는" 것은 디스크에 안 남기는 것일 뿐 시간은 같음; 게이트 `floe2`·`jobdeck` |
+| 캡처 창 | 사용자 2026-10-29: 위치 캡처가 그 자리의 EBEAM 파일만 읽는지 - 그리기는 그랬지만 열기·자동 색인·임시 인덱스의 요약은 로드 레벨의 모든 소스(현장 레벨 9 = 135 소스 ~1 TB) | **완료 0.12.421(§8.30)**: 샷들의 영역을 덱 µm 창으로 모아(덱의 BX..UY extent, 소스 읽기 없음) 창이 닿는 배치의 소스만 스펙·색인 계획·요약 2단계에; `render --chipid/--chipnumber`; 빈 영역은 거절; `FLOE_DECK_WINDOW=off`; 3칩 덱 근접 9.3 → 4.7 s, 광역 15.4 → 6.9 s, 그림 바이트 동일; 게이트 `jobdeck` |
 | L7 후속 | 요약 패스 1패스화/마킹 가속, ovs 합치기(레이아웃 밀도), B안(정규 페이지), 세그먼트 캐시 디스크 보존(방문한 셀의 디코드 결과를 남겨 다음 세션 가속), 1패스 경량 생성(셀 로컬 점유 격자 합성) | 각각 — **L7a 완료 0.12.386(§8.9)**: 이미지 증분 합성(제자리 성장, 채움 시점 노드 마스크, 채움 바이트 해제), 세그먼트 pread 묶음·병렬 인코딩; **L7b 완료 0.12.387(§8.10)**: 요약 패스의 마커가 셀을 직접 파싱(리더 풀·상주 창 없음, 묶음이 안 쓰는 셀은 읽지 않음), 다각형 스캔 변환 버퍼 재사용, 크기 예산 밖의 레이어는 마킹하지 않음; 나머지(1패스 경량 생성은 §8.10의 정확성 논거로 보류)는 사용자 지시에 따라 |
 
 L0는 하루, L1~L3는 S1~S3와 비슷한 크기(재고 코드 위의 확장), L4가 본체다.
@@ -1878,6 +1879,58 @@ pass의 1비트 셀이 조밀한 마스크에서 한 면으로 차는 문제(농
   가능성이 있으면 영구 색인(`floe2 index deck.jb`)이 맞고, 임시 인덱스는 쓸 수 없는 폴더나 정말 한 번뿐일 때다.
 - 2.24 GB 칩의 요약·전체 색인이 이 24 GB 호스트에서 메모리 상한(71)에 걸린 것은 단일 셀 18 GB 상주의 스트리밍 빌드 한계로
   별건이다(STREAMING_INDEX_PLAN §5); 경량 캐시와 그 위의 캡처는 8.5 GB rss로 끝났다.
+
+### 8.30 캡처 창 - 위치 캡처는 그 자리의 소스만 읽는다 (0.12.421, 2026-10-29; 사용자 "특정 위치를 캡쳐한다고 할때, jobdeck의 경우 해당하는 EBEAM 파일만 읽어서 처리하도록 되어 있는지 확인해줘" → "그렇게 수정해줘")
+
+**확인.** 그리기는 이미 해당 소스만 읽었다: renderd가 배치마다 뷰를 소스 좌표로 옮겨 소스 경계와 자르고, 겹치지 않는 배치는
+plan도 fill도 페이지 읽기도 없이 건너뛴다(`source_plan_request` None → `passes_skipped`). 3칩 덱(280 MB 라우팅 칩 세 벌,
+경량 + 요약 색인, 1200 px)에서 칩 A 근접 0.67 s = 칩 하나뿐인 덱의 0.66 s, 칩 사이 빈 영역 0.03 s. 열기는 로드한 레벨의
+모든 소스를 건드리지만(헤더 4 KB, 캐시 meta.json, renderd의 design.inv/seg 읽기와 소스 파일 open 1회) 도형은 읽지 않는다.
+공백은 인덱스가 없을 때였다: 자동 색인과 `--temp-index`는 `DeckIndexPlan::prepare_for_open`이 레벨만 받아 캐시 없는 소스를
+모두 색인했고(근접 캡처에 3 소스 × 2.8 s, 합계 9.3 s), 광역 캡처의 2단계도 renderd는 기다리는 pass를 하나로 바로 판정했는데
+로드한 레벨의 경량 소스 전부의 요약을 만들었다(3 × 2.3 s 더, 합계 15.4 s). 범위를 줄이는 옵션도 없었다(`--chip`/`--chip-off`/
+`--fit-chip`은 열기 뒤에 보이는 칩과 영역만, `--chipid`/`--chipnumber`는 `floe2 index`에만, `--level 9`는 그 레벨의 135개
+소스 그대로). 현장 레벨 9(135개 소스 ~1 TB)의 한 위치를 `--temp-index`로 찍으면 레벨 전체를 한 번(광역은 두 번) 읽는
+셈이었다.
+
+**수정 - 캡처 창(app-core `jobdeck::window`).** 덱만으로 배치의 extent를 안다(`Placement.bbox_um` = BX/BY/UX/UY를 AD·SF·ROWS와
+헤더 dbu로 배치한 값; 소스 도형은 읽지 않는다). `floe2 render`는 열기 전에 샷들의 영역(자기 영역, 또는 `--chip`/`--fit-chip`이
+고른 칩의 extent - 덱과 헤더만 읽는 사전 분석 `Analysis::open`의 칩 표에서, `run_summary`와 같은 `shot_region`으로)을 타일
+상자째 덱 µm 창으로 모으고(`captures::deck_window`), 열기·자동 색인·임시 인덱스의 요약 2단계가 그 창과 겹치는 배치의 소스만
+다룬다: `AnalysisOptions.window` → 스펙에는 창 안의 배치와 그 소스만(`CompositeSpec.outside`; renderd가 여는 소스도 그만큼),
+`DeckIndexPlan::prepare_for_open(.., reads)`의 todo도 그 소스만(`outside`는 그대로 둠), ready.rs `deck_state`도 그 소스만
+본다. 모델과 장부는 로드 전체 그대로라 칩 표·skipped·색은 바뀌지 않고, 그림은 덱 전체를 연 것과 바이트 동일하다(창이 빼는
+배치는 renderd의 cull이 건너뛰던 배치다). 겹침은 닫힌 구간(변이 닿으면 포함)이고, extent가 퇴화한 항목(BX..UY 없음 - 파서
+경고)은 알 수 없는 범위로 보고 항상 읽는다. 창이 아무 배치에도 닿지 않으면 입력 오류로 거절한다(exit 1; 예전에는 레벨
+전체를 색인한 뒤 빈 그림 - 현장에서는 bbox 오타 한 번이 1 TB였다). `FLOE_DECK_WINDOW=off`면 예전처럼 모두 읽는다.
+`render --chipid ID,.. --chipnumber N,N-M,..`(FIX M의 `ChipSelection` 그대로, `geom::PlanOptions.chips`)은 그 CHIP 블록의
+소스와 배치만 열고 그린다 - 다른 블록은 로드하지 않은 레벨처럼 격자·extent에만 참여한다(BX..UY가 없는 덱의 수동 제어). 출력:
+stdout `[jobdeck] window    : N of M source(s) read - P of Q placement(s) in the capture's region(s)`와 `[jobdeck] blocks    :
+..`, stderr의 색인 줄에 `; K source(s) the capture's region does not reach are left as they are`, 보고서 `jobdeck.window`
+(rects_um, sources, sources_total, placements, placements_total)와 `jobdeck.chip_blocks`, `info --json`의
+`metadata.jobdeck.window`(창이 있을 때만; 뷰어·info·probe·clip·DRC 캡처는 창 없음). 배관은 SHARED_APP_LAYER §12.
+
+**측정** (Mac 8코어 24 GB, release; tools/gen_route_chip.py scale 1 = 280 MB 칩 세 벌을 가로로 놓은 3칩 덱, 1200 px, 인덱스
+없는 상태에서 `--temp-index`; 그림은 모두 영구 색인 위의 덱 전체 캡처와 바이트 동일):
+
+| 캡처 | 0.12.420 | 0.12.421 |
+| --- | --- | --- |
+| 칩 A 근접 2000 µm | 3 소스 색인, 9.3 s | 1 소스 색인, 4.7 s |
+| 칩 A 전체 10000 µm (요약 2단계) | 3 색인 + 3 요약, 15.4 s | 1 색인 + 1 요약, 6.9 s |
+| 칩 A·B에 걸친 영역 | 3 + 3 | 2 + 2, 13.9 s |
+| `--fit-chip B` | 3 + 3 | 1 + 1, 6.9 s |
+| `--chipnumber 2` (영역은 덱 전체) | - | 1 + 1, 7.1 s |
+| 칩 사이 빈 영역 | 3 색인 뒤 빈 그림 | 거절(exit 1), 색인 없음 |
+
+**판정.** 현장 레벨 9의 한 위치는 그 자리의 EBEAM 한두 개만 재고 pass(광역이면 요약 pass도)를 치른다 - 135개 중. 290 GB 파일이
+그 자리에 있으면 그 파일은 여전히 30분 이상이고(§8.27), 그 자리에 없으면 읽지 않는다. 인덱스가 있는 덱은 전과 같다(그리기는
+이미 해당 소스만; 열린 소스 수가 창 안으로 줄어 renderd의 design.inv/seg 읽기만 준다). 전제는 덱의 BX..UY가 소스의 실제
+범위를 담는다는 것이다 - MDPView가 칩을 놓는 값이라 현장 덱에는 있고, 없는 항목은 항상 읽으며, 의심스러우면
+`FLOE_DECK_WINDOW=off`나 `--chipid`다. 게이트 `jobdeck` LightSummaryTests `test_a_capture_reads_the_sources_its_region_reaches`
+(근접·칩 B 위·`--fit-chip mark.oas#3`·`--chipnumber 2`의 소스 수와 보고서, 그림 바이트 동일, 빈 영역 거절, 킬 스위치, 레이아웃
+거절); 기존 두 테스트의 "근접" 영역 38000,81000은 모든 칩 옆의 빈 자리였으므로 칩 안(42000,81000)으로 옮기고 옛 영역은
+거절 사례로 쓴다. 단위 테스트 app-core `window`(닿음·퇴화 extent·소스 집합)·`geom`(블록 선택이 격자를 움직이지 않음), app-cli
+`read`(`--chipid`/`--chipnumber` 해석, 레이아웃·DRC 거절).
 
 ## 9. 검토한 대안
 

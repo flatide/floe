@@ -3,7 +3,9 @@
 use crate::{
     artifact,
     catalog::{self, Grid, Layout},
-    jobdeck::{color::Mode, dataset::DeckSnapshot, geom::Skipped, index::is_deck},
+    jobdeck::{
+        color::Mode, dataset::DeckSnapshot, geom::Skipped, index::is_deck, window::DeckReads,
+    },
     styles, Error, Result,
 };
 use floe_worker_client::{Layers, Style};
@@ -32,6 +34,7 @@ impl Dataset {
                 mode,
                 set.levels().clone(),
                 Some(std::sync::Arc::clone(&set)),
+                None,
                 None,
                 stop,
             )?))
@@ -70,9 +73,22 @@ impl Dataset {
         temp: Option<&Path>,
         cancelled: &AtomicUsize,
     ) -> Result<Self> {
+        Self::open_reads(source, levels, mode, temp, None, cancelled)
+    }
+    /// `open_temp` with what a capture reads of a deck (`reads`:
+    /// jobdeck::window - the CHIP blocks `render --chipid` / `--chipnumber`
+    /// name, and the window of its regions; a layout reads it whole).
+    pub fn open_reads(
+        source: &Path,
+        levels: Option<BTreeSet<i64>>,
+        mode: Mode,
+        temp: Option<&Path>,
+        reads: Option<&DeckReads>,
+        cancelled: &AtomicUsize,
+    ) -> Result<Self> {
         if is_deck(source) {
-            Ok(Self::Deck(Box::new(DeckSnapshot::open_temp(
-                source, mode, levels, temp, cancelled,
+            Ok(Self::Deck(Box::new(DeckSnapshot::open_reads(
+                source, mode, levels, temp, reads, cancelled,
             )?)))
         } else {
             if levels.is_some() || mode != Mode::Level {

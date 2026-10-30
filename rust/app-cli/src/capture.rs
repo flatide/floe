@@ -3,6 +3,12 @@ use floe_app_core::{
     captures::{self, ExportOptions},
     check_cancelled,
     dataset::Dataset,
+    jobdeck::{
+        color::Mode,
+        index::{is_deck, ChipSelection},
+        plan::{Analysis, AnalysisOptions},
+        window::{window_enabled, DeckReads},
+    },
     render::RenderOptions,
     shots::batch::{self, Capture, NamedCapture},
     styles::LayerColors,
@@ -10,7 +16,7 @@ use floe_app_core::{
 };
 use std::{
     collections::BTreeSet,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{atomic::AtomicUsize, mpsc, Arc},
     time::Duration,
 };
@@ -42,6 +48,7 @@ pub fn run(
     report: Option<PathBuf>,
     batch: Option<String>,
     levels: Option<BTreeSet<i64>>,
+    chips: Option<ChipSelection>,
     layer_colors: Option<LayerColors>,
     legend: bool,
     index: bool,
@@ -90,6 +97,7 @@ pub fn run(
                 legend,
             },
             levels.clone(),
+            chips.as_ref(),
             layer_colors,
             index,
             light,
@@ -99,12 +107,62 @@ pub fn run(
         )
     })
 }
+
+/// What a capture reads of a deck (jobdeck::window; user 2026-10-29: a
+/// location's capture reads the EBEAM files there alone): the CHIP blocks
+/// `--chipid` / `--chipnumber` name, and the window of the shots' regions -
+/// so the open, the auto-index and the temporary index's summaries take the
+/// sources those regions reach, not every source of the levels loaded. None
+/// for a layout, for a shot of the whole deck (no region, no chips) and
+/// under FLOE_DECK_WINDOW=off (the chips named still count). The regions of
+/// the shots that name chips come from the deck's placements, read from the
+/// deck and the sources' headers as the open reads them (no geometry).
+fn deck_reads(
+    source: &Path,
+    shots: &[NamedCapture],
+    levels: Option<&BTreeSet<i64>>,
+    chips: Option<&ChipSelection>,
+    temp: Option<&Path>,
+    cancelled: &AtomicUsize,
+) -> Result<Option<DeckReads>> {
+    if !is_deck(source) {
+        return Ok(None);
+    }
+    let chips = chips.filter(|c| !c.is_empty()).cloned();
+    let windowed = window_enabled()
+        && shots
+            .iter()
+            .all(|s| s.capture.explicit_region() || s.capture.names_chips());
+    let window = if windowed {
+        let analysis = Analysis::open(
+            source,
+            &AnalysisOptions {
+                mode: Mode::Level,
+                load_ids: levels.cloned(),
+                skip_missing: true,
+                temp: temp.map(Path::to_path_buf),
+                chips: chips.clone(),
+                ..Default::default()
+            },
+            cancelled,
+        )?;
+        captures::deck_window(&analysis, shots, cancelled)?
+    } else {
+        None
+    };
+    if chips.is_none() && window.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(DeckReads { chips, window }))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render(
     source: &std::path::Path,
     shots: &[NamedCapture],
     options: ExportOptions,
     levels: Option<BTreeSet<i64>>,
+    chips: Option<&ChipSelection>,
     layer_colors: Option<LayerColors>,
     index: bool,
     light: Option<bool>,
@@ -115,8 +173,10 @@ fn render(
     // indexed first when it has none (`light`: the kind), its staleness
     // said (read::dataset); a shot with --occupancy on has the missing
     // summaries built first, the default capture none (DIRECT_READ_PLAN
-    // §8.11: a capture is drawn once)
+    // §8.11: a capture is drawn once); a deck's sources those the shots'
+    // regions reach (`reads`)
     let summaries = shots.iter().any(|s| s.capture.shot.occupancy == Some(true));
+    let reads = deck_reads(source, shots, levels.as_ref(), chips, temp, cancelled)?;
     let mut dataset = crate::read::dataset(
         source,
         levels.clone(),
@@ -124,12 +184,37 @@ fn render(
         light,
         summaries,
         temp,
+        reads.as_ref(),
         waiter,
         cancelled,
     )?;
     // --layer-colors over FLOE_LAYER_COLORS (the open's)
     if let Some(mode) = layer_colors {
         dataset.set_layer_colors(mode);
+    }
+    // what the capture reads of the deck: the CHIP blocks placed, and the
+    // sources and placements of the levels loaded its regions reach
+    if let Dataset::Deck(deck) = &dataset {
+        if let Some(labels) = &deck.metadata.jobdeck.chip_blocks {
+            let shown: Vec<&str> = labels.iter().take(32).map(String::as_str).collect();
+            println!(
+                "[jobdeck] blocks    : {} of {} CHIP block(s) placed (--chipid / --chipnumber): {}{}",
+                labels.len(),
+                deck.metadata.jobdeck.chips,
+                shown.join(","),
+                if labels.len() > shown.len() {
+                    format!(",... (+{})", labels.len() - shown.len())
+                } else {
+                    String::new()
+                }
+            );
+        }
+        if let Some(w) = &deck.metadata.jobdeck.window {
+            println!(
+                "[jobdeck] window    : {} of {} source(s) read - {} of {} placement(s) in the capture's region(s) (FLOE_DECK_WINDOW=off reads them all)",
+                w.sources, w.sources_total, w.placements, w.placements_total
+            );
+        }
     }
     // what the deck asked for that will not be drawn (a source without
     // dbu, a cache without the entry's LY/DT): said at every open, and
@@ -168,8 +253,17 @@ fn render(
             "[jobdeck] {} pass(es) of light source(s) wait for their occupancy summary - building the missing summaries in the temporary index and drawing again (--occupancy off: the pages instead)",
             summary.summary_building
         );
-        dataset =
-            crate::read::dataset(source, levels, index, light, true, temp, waiter, cancelled)?;
+        dataset = crate::read::dataset(
+            source,
+            levels,
+            index,
+            light,
+            true,
+            temp,
+            reads.as_ref(),
+            waiter,
+            cancelled,
+        )?;
         if let Some(mode) = layer_colors {
             dataset.set_layer_colors(mode);
         }

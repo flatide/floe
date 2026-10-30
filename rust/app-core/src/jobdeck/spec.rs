@@ -16,16 +16,25 @@ pub struct CompositeSpec {
     pub text: String,
     pub skipped: Vec<Skipped>,
     pub placements: usize,
+    /// the placements of the load the capture's window leaves unread
+    /// (jobdeck::window): not in the spec, not skipped - out of the picture
+    pub outside: usize,
 }
 impl CompositeSpec {
     pub fn require_drawable(&self) -> Result<()> {
-        if self.placements == 0 {
-            Err(Error::input(
-                "no placement can be drawn (empty selection or no fresh source/layer cache)",
-            ))
-        } else {
-            Ok(())
+        if self.placements > 0 {
+            return Ok(());
         }
+        // a window that reaches no placement: the region misses the deck
+        // (an input error - not the auto-index's "nothing indexed yet")
+        if self.outside > 0 && self.skipped.is_empty() {
+            return Err(Error::input(
+                "no placement of the levels loaded is in the capture's region (the deck's BX..UY extents decide; FLOE_DECK_WINDOW=off reads the deck whole)",
+            ));
+        }
+        Err(Error::input(
+            "no placement can be drawn (empty selection or no fresh source/layer cache)",
+        ))
     }
 }
 fn hex(s: &str) -> String {
@@ -74,11 +83,12 @@ pub fn compose(analysis: &Analysis, cancelled: &AtomicUsize) -> Result<Composite
     let mut key_bytes = 0usize;
     for p in &analysis.model.placements {
         check_cancelled(cancelled)?;
-        if !analysis
-            .catalog
-            .infos
-            .get(&p.tc)
-            .is_some_and(|i| i.ok() && i.indexed)
+        if !analysis.reads(p)
+            || !analysis
+                .catalog
+                .infos
+                .get(&p.tc)
+                .is_some_and(|i| i.ok() && i.indexed)
         {
             continue;
         }
@@ -107,6 +117,7 @@ pub fn compose(analysis: &Analysis, cancelled: &AtomicUsize) -> Result<Composite
     let mut sources: BTreeMap<&str, SourceLayers> = BTreeMap::new();
     let mut placement_text = String::new();
     let mut count = 0;
+    let mut outside = 0usize;
     let mut skipped = Vec::new();
     let mut seen = BTreeSet::new();
     // what a source without a fresh cache is told to run (2026-10-15: it
@@ -121,6 +132,11 @@ pub fn compose(analysis: &Analysis, cancelled: &AtomicUsize) -> Result<Composite
     );
     for p in &analysis.model.placements {
         check_cancelled(cancelled)?;
+        // out of the capture's window: not drawn, and nothing to say
+        if !analysis.reads(p) {
+            outside += 1;
+            continue;
+        }
         let info = analysis.catalog.infos.get(&p.tc);
         if info.is_none_or(|i| !i.ok() || !i.indexed) {
             if seen.insert((&p.chip, p.idx, &p.tc, None)) {
@@ -215,5 +231,6 @@ pub fn compose(analysis: &Analysis, cancelled: &AtomicUsize) -> Result<Composite
         text,
         skipped,
         placements: count,
+        outside,
     })
 }

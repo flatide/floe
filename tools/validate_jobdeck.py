@@ -913,7 +913,10 @@ class LightSummaryTests(unittest.TestCase):
         # the reference: the same captures over the index beside the sources
         run_floe2("index", ref_dir / "test.jb", "--jobs", "2", env=self.env, ok=0)
         wide_args = ("--bbox", "40000,80000,60000,95000", "--px", "300", "--detail", "medium")
-        near_args = ("--bbox", "38000,81000,38010,81010", "--px", "300", "--detail", "medium")
+        # a near region inside CHIP ID001's chipA (0.12.421: the region
+        # decides what is read - 38000,81000 lay beside every chip, which a
+        # capture now refuses; test_a_capture_reads_the_sources_its_region_reaches)
+        near_args = ("--bbox", "42000,81000,42010,81010", "--px", "300", "--detail", "medium")
         ref_wide = ref_dir / "wide.png"
         ref_near = ref_dir / "near.png"
         run_floe2("render", ref_dir / "test.jb", *wide_args, "--out", ref_wide, env=self.env, ok=0)
@@ -944,6 +947,8 @@ class LightSummaryTests(unittest.TestCase):
             res = run_floe2("render", held / "test.jb", "--temp-index=%s" % scratch, *near_args,
                             "--out", near, env=self.env, ok=0)
             self.assertIn("indexing them first in a temporary folder", res.stderr)
+            # the region's source alone (0.12.421), the whole deck's picture
+            self.assertIn("1 source(s) have no index yet", res.stderr)
             self.assertNotIn("building the missing summaries", res.stderr)
             self.assertEqual(near.read_bytes(), ref_near.read_bytes())
             self.assertEqual(list(scratch.iterdir()), [])
@@ -964,6 +969,118 @@ class LightSummaryTests(unittest.TestCase):
             self.assertEqual(sorted(p.name for p in held.iterdir()), sorted(names))
         finally:
             held.chmod(0o755)
+
+    def test_a_capture_reads_the_sources_its_region_reaches(self):
+        """The capture's window (0.12.421, user 2026-10-29: "특정 위치를
+        캡쳐한다고 할때, jobdeck의 경우 해당하는 EBEAM 파일만 읽어서 처리하도록"):
+        a deck capture with a region - its own, or the chips' extent - opens,
+        indexes (here --temp-index) and summarizes the sources whose
+        placements (the deck's BX..UY) the region reaches, the rest of the
+        levels loaded is left alone, and the picture is the whole deck's
+        byte for byte; `render --chipid / --chipnumber` reads those CHIP
+        blocks alone; a region that reaches nothing is refused (exit 1);
+        FLOE_DECK_WINDOW=off reads every source as before."""
+        names = ("chipA.oas", "chipB.oas", "mark.oas", "test.jb")
+        ref_dir = TMP / "window_ref"
+        work = TMP / "window_work"
+        outs = TMP / "window_out"
+        scratch = TMP / "window_scratch"
+        for d in (ref_dir, work, outs, scratch):
+            d.mkdir()
+        for name in names:
+            shutil.copy2(TMP / name, ref_dir / name)
+            shutil.copy2(TMP / name, work / name)
+        # CHIP ID002 alone: the deck --chipnumber 2 draws
+        only2 = (DECK.split("CHIP ID001")[0] + "CHIP ID002"
+                 + DECK.split("CHIP ID002")[1].split("CHIP ID003")[0] + "*END-PLACE\nEND\n")
+        (ref_dir / "only2.jb").write_text(only2, encoding="utf-8")
+        run_floe2("index", ref_dir / "test.jb", "--jobs", "2", env=self.env, ok=0)
+        px = ("--px", "300", "--detail", "medium")
+
+        def ref(name, *args, deck="test.jb"):
+            out = ref_dir / ("%s.png" % name)
+            run_floe2("render", ref_dir / deck, *args, *px, "--out", out, env=self.env, ok=0)
+            return out.read_bytes()
+
+        def windowed(name, *args, env=None, ok=0):
+            e = dict(self.env)
+            e.update(env or {})
+            out = outs / ("%s.png" % name)
+            report = outs / ("%s.json" % name)
+            res = run_floe2("render", work / "test.jb", "--temp-index=%s" % scratch, *args, *px,
+                            "--out", out, "--report", report, env=e, ok=ok)
+            # nothing beside the sources, nothing left in the temporary folder
+            self.assertEqual(sorted(p.name for p in work.iterdir()), sorted(names))
+            self.assertEqual(list(scratch.iterdir()), [])
+            return res, out, (json.loads(report.read_text()) if report.is_file() else None)
+
+        # a near region inside CHIP ID001's chipA alone (levels 1 and 2 place
+        # it there): chipA is indexed, chipB and mark are left alone, and the
+        # picture is the whole deck's
+        near = ("--bbox", "42000,81000,42010,81010")
+        near_ref = ref("near", *near)
+        res, out, report = windowed("near", *near)
+        self.assertIn("1 source(s) have no index yet - indexing them first in a temporary folder",
+                      res.stderr)
+        self.assertIn("2 source(s) the capture's region does not reach are left as they are",
+                      res.stderr)
+        self.assertNotIn("building the missing summaries", res.stderr)
+        self.assertIn("[jobdeck] window    : 1 of 3 source(s) read - 2 of 17 placement(s)", res.stdout)
+        self.assertEqual(out.read_bytes(), near_ref)
+        self.assertEqual(report["jobdeck"]["window"],
+                         {"rects_um": [[42000.0, 81000.0, 42010.0, 81010.0]], "sources": 1,
+                          "sources_total": 3, "placements": 2, "placements_total": 17})
+        self.assertIsNone(report["jobdeck"]["chip_blocks"])
+        # a region over chipB (CHIP ID002, levels 2 and 5), under chipA's
+        # placements too: both are read, mark is not
+        over_b = ("--bbox", "43500,88500,44500,89500")
+        res, out, report = windowed("over_b", *over_b)
+        self.assertIn("2 source(s) have no index yet", res.stderr)
+        self.assertIn("1 source(s) the capture's region does not reach", res.stderr)
+        self.assertEqual((report["jobdeck"]["window"]["sources"],
+                          report["jobdeck"]["window"]["sources_total"]), (2, 3))
+        self.assertEqual(out.read_bytes(), ref("over_b", *over_b))
+        # the region of --fit-chip: mark's third placement (CHIP ID003), whose
+        # 20 um lie over CHIP ID002's and ID003's chipA
+        fit = ("--fit-chip", "mark.oas#3")
+        res, out, report = windowed("fit", *fit)
+        self.assertIn("2 source(s) have no index yet", res.stderr)
+        self.assertEqual(report["jobdeck"]["window"]["sources"], 2)
+        self.assertEqual(out.read_bytes(), ref("fit", *fit))
+        # --chipnumber 2: CHIP ID002's sources (chipA, chipB) and placements
+        # alone, whatever the region covers - the picture of the deck that
+        # holds that block alone
+        whole = ("--bbox", "40000,80000,70000,96000")
+        res, out, report = windowed("block2", "--chipnumber", "2", *whole)
+        self.assertIn("2 source(s) have no index yet", res.stderr)
+        self.assertNotIn("does not reach", res.stderr)
+        self.assertIn("[jobdeck] blocks    : 1 of 3 CHIP block(s) placed (--chipid / --chipnumber): 2:ID002",
+                      res.stdout)
+        self.assertEqual(report["jobdeck"]["chip_blocks"], ["2:ID002"])
+        self.assertEqual((report["jobdeck"]["window"]["sources"],
+                          report["jobdeck"]["window"]["sources_total"],
+                          report["jobdeck"]["window"]["placements_total"]), (2, 2, 9))
+        res, out, report = windowed("block2_l1", "--chipid", "ID002", "--level", "1", *whole)
+        self.assertIn("[jobdeck] blocks    : 1 of 3 CHIP block(s)", res.stdout)
+        self.assertEqual(out.read_bytes(), ref("only2_l1", "--level", "1", *whole, deck="only2.jb"))
+        # a region that reaches no placement is refused, before any index
+        res, out, report = windowed("gap", "--bbox", "38000,81000,38010,81010", ok=1)
+        self.assertIn("no placement of the levels loaded is in the capture's region", res.stderr)
+        self.assertNotIn("indexing them first", res.stderr)
+        self.assertFalse(out.exists())
+        # the kill switch: every source, as before 0.12.421
+        res, out, report = windowed("off", *near, env={"FLOE_DECK_WINDOW": "off"})
+        self.assertIn("3 source(s) have no index yet", res.stderr)
+        self.assertNotIn("[jobdeck] window", res.stdout)
+        self.assertIsNone(report["jobdeck"]["window"])
+        self.assertEqual(out.read_bytes(), near_ref)
+        # a plain open has no window; a layout takes no CHIP blocks (an
+        # argument error, as index's)
+        info = json.loads(run_floe2("info", ref_dir / "test.jb", "--json", env=self.env, ok=0).stdout)
+        self.assertNotIn("window", info["metadata"]["jobdeck"])
+        r = run_floe2("render", ref_dir / "chipA.oas", "--chipid", "ID001", "--out", outs / "x.png",
+                      env=self.env, ok=2)
+        self.assertIn("require a .jb source", r.stderr)
 
     def test_the_summaries_come_after_the_inventory(self):
         res = run_floe2("index", self.deck, "--no-occupancy", "--jobs", "2",
@@ -989,7 +1106,7 @@ class LightSummaryTests(unittest.TestCase):
         wide.unlink()
         # a near capture draws: the summary is the wide view's alone
         near = self.dir / "near.png"
-        run_floe2("render", self.deck, "--bbox", "38000,81000,38010,81010",
+        run_floe2("render", self.deck, "--bbox", "42000,81000,42010,81010",
                   "--px", "300", "--detail", "medium", "--no-index", "--out", near,
                   env=self.env, ok=0)
         self.assertTrue(near.is_file())

@@ -2,11 +2,12 @@
 //! deliberately different: only the former splice historical CHIP colors.
 use super::{
     color::{ColorMap, ColorScheme, Mode},
-    geom::{self, PlanOptions, PlannedDeck},
-    index::validate_levels,
+    geom::{self, Placement, PlanOptions, PlannedDeck},
+    index::{validate_levels, ChipPick, ChipSelection},
     parser::JobDeck,
     sources::SourceCatalog,
     view::ViewRows,
+    window::{DeckWindow, WindowInfo},
 };
 use crate::{artifact, cache, check_cancelled, format_general as general, Result};
 use serde_json::{json, Value};
@@ -27,6 +28,14 @@ pub struct AnalysisOptions {
     /// the run's temporary index (cache::TempIndex root): the sources'
     /// caches resolved under it when none is beside them
     pub temp: Option<PathBuf>,
+    /// `render --chipid` / `--chipnumber` (jobdeck::window): these CHIP
+    /// blocks' sources and placements alone; the other blocks are visited
+    /// for the deck's grid and extent, as levels not loaded are
+    pub chips: Option<ChipSelection>,
+    /// a capture's window (jobdeck::window): the placements it reaches are
+    /// read - the spec, the index plans, the summaries - and the rest of
+    /// the load is left alone; the model holds them all
+    pub window: Option<DeckWindow>,
 }
 impl Default for AnalysisOptions {
     fn default() -> Self {
@@ -40,6 +49,8 @@ impl Default for AnalysisOptions {
             skip_missing: false,
             strict: true,
             temp: None,
+            chips: None,
+            window: None,
         }
     }
 }
@@ -50,10 +61,48 @@ pub struct Analysis {
     pub model: PlannedDeck,
     pub scheme: ColorScheme,
     pub colors: ColorMap,
+    /// the CHIP blocks `--chipid` / `--chipnumber` picked (None: every block)
+    pub chips: Option<ChipPick>,
+    /// the capture's window, and the sources of the placements it reaches
+    /// (None: the whole load is read)
+    pub window: Option<DeckWindow>,
+    pub window_sources: Option<BTreeSet<String>>,
 }
 impl Analysis {
     pub fn open(path: &Path, options: &AnalysisOptions, cancelled: &AtomicUsize) -> Result<Self> {
         Self::open_pinned(path, options, None, cancelled)
+    }
+    /// Whether a placement of the load is read (the spec, renderd): in the
+    /// capture's window, or no window.
+    pub fn reads(&self, p: &Placement) -> bool {
+        self.window.as_ref().is_none_or(|w| w.reaches(&p.bbox_um))
+    }
+    /// Whether a source of the load is read: one of a placement the window
+    /// reaches, or no window.
+    pub fn reads_source(&self, tc: &str) -> bool {
+        self.window_sources.as_ref().is_none_or(|s| s.contains(tc))
+    }
+    /// What the window came to (None: no window).
+    pub fn window_info(&self) -> Option<WindowInfo> {
+        let (window, sources) = (self.window.as_ref()?, self.window_sources.as_ref()?);
+        let total: BTreeSet<&str> = self
+            .model
+            .placements
+            .iter()
+            .map(|p| p.tc.as_str())
+            .collect();
+        Some(WindowInfo {
+            rects_um: window.rects.clone(),
+            sources: sources.len(),
+            sources_total: total.len(),
+            placements: self
+                .model
+                .placements
+                .iter()
+                .filter(|p| self.reads(p))
+                .count(),
+            placements_total: self.model.placements.len(),
+        })
     }
     pub(crate) fn open_pinned(
         path: &Path,
@@ -76,9 +125,18 @@ impl Analysis {
         // selection means no placements and must not be silently widened.
         let load = options.load_ids.as_ref().filter(|ids| !ids.is_empty());
         validate_levels(&deck, load)?;
-        catalog.probe_all(deck.sources(load), cancelled)?;
+        // the CHIP blocks --chipid / --chipnumber pick (every block unsaid):
+        // their sources are probed, the others' headers read for the grid
+        let chips = options
+            .chips
+            .as_ref()
+            .filter(|c| !c.is_empty())
+            .map(|c| c.resolve(&deck))
+            .transpose()?;
+        let blocks = chips.as_ref().map(|p| &p.blocks);
+        catalog.probe_all(deck.sources_in(load, blocks), cancelled)?;
         let mut dbus = catalog.dbus();
-        if load.is_some() {
+        if load.is_some() || blocks.is_some() {
             for tc in deck.sources(None) {
                 if !catalog.infos.contains_key(tc) {
                     if let Some(dbu) = catalog.header_dbu(tc, cancelled)? {
@@ -102,12 +160,18 @@ impl Analysis {
                 cross: scheme.cross_ly_dt,
                 by_chip: scheme.mode == Mode::Chip,
                 selected: load.or(options.ids.as_ref()).cloned(),
+                chips: blocks.cloned(),
                 skip_missing: options.skip_missing,
                 ..Default::default()
             },
             cancelled,
         )?;
         let colors = scheme.build(&deck, options.ids.as_ref())?;
+        // the capture's window: the sources of the placements it reaches
+        let window_sources = options
+            .window
+            .as_ref()
+            .map(|w| w.sources(&model.placements));
         check_cancelled(cancelled)?;
         Ok(Self {
             deck,
@@ -115,6 +179,9 @@ impl Analysis {
             model,
             scheme,
             colors,
+            chips,
+            window: options.window.clone(),
+            window_sources,
         })
     }
     pub fn view_rows(&self, cancelled: &AtomicUsize) -> Result<ViewRows> {
@@ -257,6 +324,25 @@ impl Analysis {
                     .join(", ")
             ),
         ];
+        if let Some(pick) = &self.chips {
+            lines.push(format!(
+                "blocks    : {} of {} CHIP block(s) placed (--chipid / --chipnumber): {}",
+                pick.blocks.len(),
+                pick.total,
+                pick.labels
+                    .iter()
+                    .take(32)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
+        }
+        if let Some(w) = self.window_info() {
+            lines.push(format!(
+                "window    : {} of {} source(s) read - {} of {} placement(s) in the capture's region(s)",
+                w.sources, w.sources_total, w.placements, w.placements_total
+            ));
+        }
         for i in self.catalog.infos.values().filter(|i| i.status != "ok") {
             lines.push(format!(
                 "source    : {} {} ({})",

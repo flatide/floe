@@ -501,6 +501,20 @@ floe2 render deck.jb --batch shots.txt --out shots/ --report shots/report.json
   요약 1 pass 더): 같은 덱을 다시 찍을 것이면 `floe2 index deck.jb`가 낫고, 임시 인덱스는 쓸 수 없는 폴더나 정말 한 번뿐일
   때다(측정과 판정은 DIRECT_READ_PLAN §8.29, 배관은 SHARED_APP_LAYER §12). 게이트 `jobdeck` LightSummaryTests
   `test_a_temporary_index_draws_an_unindexed_deck`.
+- **캡처 창 - 위치 캡처는 그 자리의 소스만 읽는다 (2026-10-29, app 0.12.421; 사용자 "특정 위치를 캡쳐한다고 할때, jobdeck의 경우
+  해당하는 EBEAM 파일만 읽어서 처리하도록").** 그리기는 전부터 해당 소스만 읽었다(renderd가 뷰 밖 배치를 plan 전에 건너뛴다).
+  열기·자동 색인·`--temp-index`·광역 캡처의 요약 2단계는 로드한 레벨의 모든 소스를 다뤘다. 이제 영역이 있는 덱 캡처(`--bbox`,
+  `--at`, `--mosaic-at`, `--corners X0,..`, 또는 `--chip`/`--fit-chip`이 정하는 칩 extent)는 샷들의 영역을 덱 µm 창으로 모아, 그
+  창과 겹치는 배치(덱의 BX..UY를 배치한 extent; BX..UY가 없어 퇴화한 항목은 항상 포함)의 소스만 스펙에 넣어 열고, 자동 색인과
+  임시 인덱스의 요약도 그 소스만 만든다. 나머지 소스는 그대로 둔다. 모델과 장부는 로드 전체 그대로라 칩 표·skipped·색은 바뀌지
+  않고 그림은 덱 전체를 연 것과 바이트 동일하다. 영역이 아무 배치에도 닿지 않으면 거절한다(exit 1; 예전에는 빈 그림).
+  `render --chipid ID,.. --chipnumber N,N-M,..`은 `index`와 같은 선택으로 그 CHIP 블록의 소스와 배치만 열고 그린다(다른 블록은
+  로드하지 않은 레벨처럼 격자·extent에만 참여). `FLOE_DECK_WINDOW=off`면 예전처럼 모두 연다. 출력은 stdout의
+  `[jobdeck] window    : N of M source(s) read - P of Q placement(s) ...`와 `[jobdeck] blocks    : ...`, stderr 색인 줄의
+  `; K source(s) the capture's region does not reach are left as they are`, 보고서 `jobdeck.window`(rects_um, sources,
+  sources_total, placements, placements_total)와 `jobdeck.chip_blocks`다. 3칩 덱(280 MB 칩 셋, 인덱스 없음, `--temp-index`)에서
+  근접 캡처 9.3 → 4.7 s(색인 3 → 1), 광역 15.4 → 6.9 s(색인·요약 3+3 → 1+1), 그림 동일. 측정과 판정은 DIRECT_READ_PLAN §8.30,
+  배관은 SHARED_APP_LAYER §12. 게이트 `jobdeck` LightSummaryTests `test_a_capture_reads_the_sources_its_region_reaches`.
 
 ### 칩 on/off 캡처 (사용자 2026-10-06)
 
