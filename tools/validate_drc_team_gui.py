@@ -124,7 +124,7 @@ def r7(temp, check):
         pump(v, lambda: db.review_flags(0, 0) == gtkservice.VISITED, "the flags", 30)
         v._drc_grid_fill(0)
         cells = [c for row in v._drcwin._gstore for c in row if c]
-        check(any(">V 1<" in c or "V 1<" in c for c in cells), "V on the visited error's cell",
+        check(any("<u>1</u>" in c for c in cells), "underline on the visited error's number",
               cells[:3])
         stats = v._drcwin._review_info.get_text()
         check("Whole DB: total 38 · visited 2 · not for review 0" in stats
@@ -140,7 +140,8 @@ def r7(temp, check):
               and db.review_flags(0, 1) == gtkservice.NOT_REQUIRED, "not for review set",
               db.review_counts(0))
         cells = [c for row in v._drcwin._gstore for c in row if c]
-        check(any("X 2<" in c for c in cells), "X on its cells", cells[:4])
+        check(any("<s>2</s>" in c and "foreground='#9e9e9e'" in c for c in cells),
+              "gray strikethrough on excluded numbers", cells[:4])
         out = d / "stats.csv"
         v._drc_review_export_start(str(out))
         pump(v, lambda: v._drc_review_job is None, "statistics export", 30)

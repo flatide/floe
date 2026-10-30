@@ -44,7 +44,7 @@ use floe_app_core::{
     drc::analysis::{
         clusters::{self, ClusterFile, NoStatuses},
         delta::{Basis, Cache, GroupStatus, Groups, Table, CACHE_THRESHOLD},
-        measure::{area_label, measurement_ticks, Selector},
+        measure::{area_label, marker_length_ticks, measurement_ticks, Selector},
         points,
         scope::{Membership, Scope, Selection},
         select,
@@ -152,7 +152,8 @@ fn marker(m: &Value) -> Result<(char, Vec<[f64; 2]>)> {
 
 /// The detail pane's and the rulers' answer for one marker: its rulers, an
 /// AREA rule's label, the CD the rule flagged with its ticks (measured,
-/// bound, delta), the ratio and the candidates' ticks.
+/// bound, delta), the ratio, the candidates' ticks and a single edge's
+/// marker length independently of whether its rule-aware CD is resolved.
 fn cd_info(selector: &Selector, kind: char, pts: &[[f64; 2]]) -> Value {
     let rulers = selector.ruler_segments(kind, pts);
     let area = area_label(kind, pts, selector.constraints()).map(|(x, y, t)| json!([x, y, t]));
@@ -169,7 +170,8 @@ fn cd_info(selector: &Selector, kind: char, pts: &[[f64; 2]]) -> Value {
             "ratio": ticks.and_then(|(_, b, d)| ticks::percent_ticks(d, b)),
         })
     });
-    json!({"rulers": rulers, "area": area, "pick": pick})
+    json!({"rulers": rulers, "area": area, "pick": pick,
+           "marker_length_ticks": marker_length_ticks(kind, pts)})
 }
 
 /// A grouping handed to the viewer: its directory and review counts.
@@ -744,7 +746,8 @@ impl Session {
                         .map(|r| {
                             let r = r as usize;
                             let row = gr.row(r);
-                            json!({"row": r, "name": gr.name(r), "count": view.status.count(r, waived),
+                            json!({"row": r, "name": gr.name(r), "label": gr.label(r),
+                                   "count": view.status.count(r, waived),
                                    "total": row.total, "estimated": row.estimated,
                                    "key": [row.constraint, row.bin]})
                         })
@@ -1099,7 +1102,7 @@ impl Session {
                 if !table.measurable {
                     return Ok(json!({"measurable": false}));
                 }
-                progress("Grouping CD deltas".into());
+                progress("Grouping CD deltas and unresolved edge lengths".into());
                 let (members, key) = match &cluster {
                     Some((runs, key)) => (Some(&**runs as &dyn Membership), key.clone()),
                     None => (None, "all".to_string()),
@@ -1110,6 +1113,7 @@ impl Session {
                 let gid = shared.next_id();
                 let out = json!({"measurable": true, "group": gid, "groups": groups.len(),
                                  "cd_groups": groups.cd_group_count(),
+                                 "geometry_groups": groups.geometry_group_count(),
                                  "step": groups.step, "auto": groups.auto, "total": groups.total,
                                  "estimated_total": groups.estimated_total(), "basis": basis.name()});
                 let mut all = shared.groups.lock().unwrap();

@@ -120,6 +120,9 @@ DRC_GOLD = 0xFFD700FF      # box-selected errors (canvas marker + grid cell)
 # ~4.9 against gold - while the canvas marker colours stay as they are
 DRC_RED_ON_GOLD = 0xB00020FF
 DRC_GREEN_ON_GOLD = 0x006B3CFF
+DRC_NOT_REQUIRED = 0x9E9E9EFF       # excluded numbers; neutral across waive states
+DRC_NOT_REQUIRED_ON_GOLD = 0x555555FF
+DRC_NOT_REQUIRED_CURRENT = 0xE6E6E6FF
 
 # cell tree (SPEC-VIEWER §8c): the selected cell's instances are outlined
 # on the canvas in this colour (2 px, like the DRC marks; cyan so it reads
@@ -7192,7 +7195,7 @@ class Viewer:
         info.set_ellipsize(Pango.EllipsizeMode.START)
         top.pack_start(info, True, True, 2)
         win._info = info
-        review_info = Gtk.Label(label="V visited · X not for review · * note")
+        review_info = Gtk.Label(label="underline: visited · strikethrough: not for review · * note")
         review_info.set_xalign(0.0)
         review_info.set_line_wrap(True)
         review_info.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
@@ -7312,7 +7315,9 @@ class Viewer:
         delta_mode.set_active_id(self._drc_delta_mode)
         delta_mode.set_tooltip_text(
             "|CD − bound|, or |CD − bound| / |bound| × 100; "
-            "group intervals start at zero")
+            "group intervals start at zero. Single edges with unresolved CD "
+            "are grouped by exact marker length in um (5 decimal places), "
+            "independently of delta mode and step.")
         delta_mode.connect("changed", self._on_drc_delta_mode)
         delta_controls.add(delta_mode)
         delta_step = Gtk.Entry()
@@ -7322,14 +7327,15 @@ class Viewer:
             "Automatic interval targets 10 groups from this rule's full delta range. "
             "Enter a positive value (up to 5 decimal places) to override for this rule, "
             "or auto / an empty value to reset. Absolute: um (area: um²); "
-            "ratio: percentage points. Enter to apply.")
+            "ratio: percentage points. Enter to apply. Unresolved single-edge "
+            "length groups use exact lengths in um; this step does not apply.")
         delta_step.connect("activate", self._on_drc_delta_step)
         delta_controls.add(delta_step)
         delta_apply = Gtk.Button(label="set step")
         delta_apply.connect("clicked", self._on_drc_delta_step)
         delta_controls.add(delta_apply)
         gbox.pack_start(delta_controls, False, False, 0)
-        delta_store = Gtk.ListStore(str, str, object)
+        delta_store = Gtk.ListStore(str, str, object, str)
         delta_tree = Gtk.TreeView(model=delta_store)
         for j in (0, 1):
             cell = Gtk.CellRendererText()
@@ -7340,7 +7346,7 @@ class Viewer:
             delta_tree.append_column(col)
         delta_tree.set_headers_visible(False)
         delta_tree.set_enable_search(False)
-        delta_tree.set_tooltip_column(0)
+        delta_tree.set_tooltip_column(3)
         delta_tree.get_selection().connect("changed", self._on_drc_delta_sel)
         delta_sc = Gtk.ScrolledWindow()
         delta_sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -9337,11 +9343,12 @@ class Viewer:
         try:
             store = win._delta_store
             store.clear()
-            selected = store.append(["All errors", str(count), None])
+            selected = store.append(["All errors", str(count), None, "All errors"])
             active = getattr(self, "_drc_delta_group", None)
             if groups is not None:
                 for group in groups.page(page * 50, 50, want):
-                    it = store.append([group.name, str(group.count(want)), group])
+                    it = store.append([group.label, str(group.count(want)), group,
+                                       GLib.markup_escape_text(group.name)])
                     if active is not None and active.key == group.key:
                         selected = it
             # Paging the group directory does not change the selected scope.
@@ -9365,6 +9372,9 @@ class Viewer:
                 message = "groups %d / %d · %d groups" % (page + 1, pages, total)
                 if getattr(groups, "auto_step", False):
                     message += " · auto step %s" % format_ticks(groups.step_ticks)
+                geometry = getattr(groups, "geometry_count", 0)
+                if geometry:
+                    message += " · %d edge-length groups (um; CD unresolved)" % geometry
                 estimated = getattr(groups, "estimated_total", 0)
                 if estimated:
                     message += " · %d estimated (all statuses)" % estimated
@@ -9458,11 +9468,14 @@ class Viewer:
         mode = combo.get_active_id() or "absolute"
         if mode == self._drc_delta_mode:
             return
+        active = getattr(self, "_drc_delta_group", None)
         if self._drc_sel is not None:
             self._drc_sels[self._drc_scope_key()] = self._drc_sel
         self._drc_delta_mode = mode
         self._drc_group_cache_sync()
         self._drc_delta_sync()
+        if mode != "off" and active is not None and active.key[0] == -2:
+            self._drc_delta_restore = (self._drc_delta_key, active.key)
         self._drc_group_ui_refresh()
         self._drc_delta_scope_refresh()
 
@@ -9486,6 +9499,7 @@ class Viewer:
             self._drc_delta_error = None
             self._drc_delta_refresh()
             return
+        active = getattr(self, "_drc_delta_group", None)
         if self._drc_sel is not None:
             self._drc_sels[self._drc_scope_key()] = self._drc_sel
         if step is None:
@@ -9494,6 +9508,8 @@ class Viewer:
             self._drc_delta_steps[setting] = step
         self._drc_group_cache_sync()
         self._drc_delta_sync()
+        if active is not None and active.key[0] == -2:
+            self._drc_delta_restore = (self._drc_delta_key, active.key)
         self._drc_group_ui_refresh()
         self._drc_delta_scope_refresh()
 
@@ -9732,7 +9748,7 @@ class Viewer:
         maxloc = (max(eis) + 1) if eis else 1
         probe = win._grid.create_pango_layout(
             "0" * (max(2, len(str(maxloc))) + (1 if noted else 0)
-                   + (3 if hasattr(db, "review_flags") else 0)))
+                   + (2 if hasattr(db, "review_flags") else 0)))
         self._drc_cellw = probe.get_pixel_size()[0] + 18
         avail = win._grid.get_allocation().width
         n = max(1, min(24, avail // max(24, self._drc_cellw)))
@@ -10043,7 +10059,7 @@ class Viewer:
         if label is None:
             return
         db = getattr(self, "_drc", None)
-        legend = "V visited · X not for review · * note"
+        legend = "underline: visited · strikethrough: not for review · * note"
         if db is None or not hasattr(db, "review_counts"):
             label.set_text(legend)
             return
@@ -10904,28 +10920,33 @@ class Viewer:
         for waived errors, so a waived number went green -> cyan the
         moment the mark moved to another cell."""
         t = "%d" % (ei + 1)          # rule-local numbering
+        flags = self._drc_review_flags(db, ci, ei)
+        not_required = flags is not None and bool(flags & gtkservice.NOT_REQUIRED)
+        if flags is not None:
+            if flags & gtkservice.VISITED:
+                t = "<u>%s</u>" % t
+            if flags & gtkservice.NOT_REQUIRED:
+                t = "<s>%s</s>" % t
         if noted:
             t = "*" + t              # note present (user call 2026-08-28)
-        flags = self._drc_review_flags(db, ci, ei)
         if flags is None:
             t = "? " + t
-        elif flags:
-            prefix = (("V" if flags & gtkservice.VISITED else "")
-                      + ("X" if flags & gtkservice.NOT_REQUIRED else ""))
-            if prefix:
-                t = prefix + " " + t
         if current:
+            fg = (self._rgb_hex(DRC_NOT_REQUIRED_CURRENT)
+                  if not_required else "#ffffff")
             return ("<span background='#3465a4' "
-                    "foreground='#ffffff'>%s</span>" % t)
+                    "foreground='%s'>%s</span>" % (fg, t))
         waived = self._drc_waived(db, ci, ei)
         if ei in eset:
             # gold like the canvas marker of a box-selected error, the
             # number in the darkened hue that reads on it
-            fg = self._rgb_hex(DRC_GREEN_ON_GOLD if waived
+            fg = self._rgb_hex(DRC_NOT_REQUIRED_ON_GOLD if not_required
+                               else DRC_GREEN_ON_GOLD if waived
                                else DRC_RED_ON_GOLD)
             return ("<span background='%s' foreground='%s'>%s</span>"
                     % (self._rgb_hex(DRC_GOLD), fg, t))
-        fg = self._rgb_hex(DRC_GREEN if waived else DRC_RED)
+        fg = self._rgb_hex(DRC_NOT_REQUIRED if not_required
+                           else DRC_GREEN if waived else DRC_RED)
         return "<span foreground='%s'>%s</span>" % (fg, t)
 
     def _drc_cell_mark(self, row, j):
@@ -11479,7 +11500,8 @@ class Viewer:
         # the CD the rule's condition flagged on this marker, its bound and
         # their difference in five-decimal ticks (app-core drc::analysis -
         # the delta groups' numbers; feature/jobdeck-drc 2026-10-06)
-        pick = self._drc_cd_info(e, name).get("pick")
+        info = self._drc_cd_info(e, name)
+        pick = info.get("pick")
         ticks = pick.get("ticks") if pick else None
         if ticks:
             mv, v, delta = ticks
@@ -11503,6 +11525,9 @@ class Viewer:
         elif cons:
             lines.append("CD unavailable: geometry or rule condition "
                          "unresolved")
+        if pick is None and info.get("marker_length_ticks") is not None:
+            lines.append("Marker edge length: %s um (CD unresolved)"
+                         % format_ticks(info["marker_length_ticks"]))
         lays = mc.get("layers") or []
         if lays:
             lines.append("layers: %s" % ", ".join(lays))

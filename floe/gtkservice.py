@@ -1133,13 +1133,14 @@ class MarkerWorker(_Worker):
 
 class DeltaGroup(DrcScope):
     """One CD delta group row."""
-    __slots__ = ("row", "key", "name", "total", "estimated_count", "_count")
+    __slots__ = ("row", "key", "name", "label", "total", "estimated_count", "_count")
 
     def __init__(self, db, ci, gid, row, waived=None):
         super().__init__(db, ci, {"group": gid, "row": row["row"]})
         self.row = row["row"]
         self.key = tuple(row["key"])
         self.name = row["name"]
+        self.label = row.get("label", self.name)
         self.total = row["total"]
         self.estimated_count = row["estimated"]
         self._count = (waived, row["count"])
@@ -1164,6 +1165,7 @@ class DeltaGroups(object):
         self.estimated_total = event["estimated_total"]
         self._len = event["groups"]
         self.cd_count = event["cd_groups"]
+        self.geometry_count = event.get("geometry_groups", 0)
 
     def __len__(self):
         return self._len

@@ -28,7 +28,8 @@ must match row for row (snapshots: all but the reviewer, id and time).
       snapshot as the source; waives embedded in an old pack; refusals
       (same pack, same result, no review).
   R6  `floe2 drc-match` (protocol 2) = the branch's own test cases.
-  R7  the viewer (pycairo blocked): V/X marks and the review statistics,
+  R7  the viewer (pycairo blocked): visited underlines / not-required strikethroughs
+      and the review statistics,
       a visit recorded only when an error's geometry is drawn, not for
       review from the list's menu, the statistics CSV; the reviewers
       window (load a peer, refresh, pages, safe apply, conflict only);

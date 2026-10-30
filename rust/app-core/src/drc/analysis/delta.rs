@@ -5,9 +5,11 @@
 //! difference to that constraint's bound, `|CD - bound|` (absolute) or
 //! `|CD - bound| / |bound| * 100` (ratio), in zero-anchored half-open bins
 //! of a step: by default the whole rule's widest constraint range over ten.
+//! Unresolved single output edges retain their geometric length in separate,
+//! exact five-decimal groups; those values are never CD deltas or ratios.
 //! Grouping, its step, basis or cluster never measure again; group pages,
 //! ranks and waive-filtered counts never list a group's members.
-use super::measure::{measurement_ticks, Selector};
+use super::measure::{marker_length_ticks, measurement_ticks, Selector};
 use super::scope::Membership;
 use super::source::{parallel, Source, Statuses};
 use super::store::{self, BuildLock, Column, Sink, Staging};
@@ -23,10 +25,12 @@ use std::sync::{Arc, Mutex};
 
 /// No measurable CD (or no usable ratio).
 pub const UNKNOWN: i32 = -1;
+/// An output edge's length when the rule-aware CD could not be determined.
+pub const GEOMETRY_LENGTH: i32 = -2;
 /// Cache tables of rules this large (smaller ones measure in a moment).
 pub const CACHE_THRESHOLD: u64 = 100_000;
-// v2 measures valid touching/intersecting edge pairs as CD zero.
-const VERSION: u32 = 2;
+// v3 preserves single-edge lengths separately from unmeasurable CD values.
+const VERSION: u32 = 3;
 const TASK: u64 = 1 << 16;
 const PAGE_CHUNK: u64 = 4096;
 const DENSE_BINS: u64 = 1 << 24;
@@ -346,22 +350,22 @@ impl Table {
                 };
                 source.visit(base.check, start, end, stop, &mut |ei, kind, pts| {
                     let j = (ei - start) as usize;
-                    let Some(pick) = selector.pick(kind, pts) else {
-                        return Ok(());
-                    };
-                    if base.bound_ticks[pick.constraint].is_none() {
-                        return Ok(());
-                    }
-                    let Ok((measured, _, _)) = measurement_ticks(&pick) else {
-                        return Ok(());
-                    };
-                    part.values[j] = measured;
-                    part.choices[j] = pick.constraint as i32;
-                    part.estimated[j] = u8::from(pick.estimated);
-                    for basis in [Basis::Absolute, Basis::Percent] {
-                        if let Some(d) = difference(measured, pick.constraint as i32, &base.bound_ticks, basis) {
-                            merge_range(&mut part.ranges[basis.index()][pick.constraint], d);
+                    if let Some((pick, measured)) = selector.pick(kind, pts).and_then(|pick| {
+                        base.bound_ticks[pick.constraint]?;
+                        let (measured, _, _) = measurement_ticks(&pick).ok()?;
+                        Some((pick, measured))
+                    }) {
+                        part.values[j] = measured;
+                        part.choices[j] = pick.constraint as i32;
+                        part.estimated[j] = u8::from(pick.estimated);
+                        for basis in [Basis::Absolute, Basis::Percent] {
+                            if let Some(d) = difference(measured, pick.constraint as i32, &base.bound_ticks, basis) {
+                                merge_range(&mut part.ranges[basis.index()][pick.constraint], d);
+                            }
                         }
+                    } else if let Some(length) = marker_length_ticks(kind, pts) {
+                        part.values[j] = length;
+                        part.choices[j] = GEOMETRY_LENGTH;
                     }
                     Ok(())
                 })?;
@@ -449,8 +453,9 @@ impl Ids {
 /// One group row of the directory.
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct Row {
-    /// the constraint index, UNKNOWN for the unmeasurable group (last)
+    /// Constraint index, then GEOMETRY_LENGTH rows, then UNKNOWN (last).
     pub constraint: i32,
+    /// Delta/step for CD rows; raw length ticks for GEOMETRY_LENGTH.
     pub bin: i64,
     pub total: u64,
     pub estimated: u64,
@@ -624,14 +629,40 @@ impl Groups {
             }
             let constraints_file = File::open(dir.join("constraint.bin")).ok()?;
             let last = cached_i32(&constraints_file, groups - 1)?;
-            let known = groups - u64::from(last == UNKNOWN);
-            if last != UNKNOWN && (last < 0 || last as usize >= constraints.len()) {
+            if last != UNKNOWN && last != GEOMETRY_LENGTH
+                && (last < 0 || last as usize >= constraints.len()) {
                 return None;
             }
+            // Older manifests lack cd_groups. Find the nonnegative prefix
+            // with O(log groups) reads, without mapping a large directory.
+            let known = if let Some(known) = manifest.get("cd_groups") {
+                known.as_u64().filter(|&n| n <= groups)?
+            } else {
+                let (mut lo, mut hi) = (0, groups);
+                while lo < hi {
+                    let mid = lo + (hi - lo) / 2;
+                    if cached_i32(&constraints_file, mid)? >= 0 {
+                        lo = mid + 1;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                lo
+            };
             if known > 0 {
                 let first = cached_i32(&constraints_file, 0)?;
                 let final_known = cached_i32(&constraints_file, known - 1)?;
                 if first < 0 || final_known < first || final_known as usize >= constraints.len() {
+                    return None;
+                }
+            }
+            if known < groups {
+                let first_geometry = cached_i32(&constraints_file, known)?;
+                let geometry_end = groups - u64::from(last == UNKNOWN);
+                if known == geometry_end {
+                    if first_geometry != UNKNOWN { return None; }
+                } else if first_geometry != GEOMETRY_LENGTH
+                    || cached_i32(&constraints_file, geometry_end - 1)? != GEOMETRY_LENGTH {
                     return None;
                 }
             }
@@ -755,11 +786,12 @@ impl Groups {
     ) -> Result<Built> {
         let n = table.count;
         let k = table.constraints.len() as i64;
-        // (sort choice, bin) of a member: unknown sorts after every constraint
+        // CD bins, then exact output-edge lengths, then unknown.
         let key_of = |ei: u64| -> (i64, i64) {
             match table.difference(ei, basis) {
                 Some(d) => (i64::from(table.choice(ei)), d / step),
-                None => (k, 0),
+                None if table.choice(ei) == GEOMETRY_LENGTH => (k, table.value(ei)),
+                None => (k + 1, 0),
             }
         };
         // dense bin counts per constraint where the rule's range allows
@@ -798,8 +830,12 @@ impl Groups {
                 }
                 total += 1;
                 let (c, bin) = key_of(start + j as u64);
-                if c == k {
+                if c == k + 1 {
                     unknown += 1;
+                    continue;
+                }
+                if c == k {
+                    *sparse.entry((c, bin)).or_insert(0) += 1;
                     continue;
                 }
                 match &mut dense[c as usize] {
@@ -809,7 +845,7 @@ impl Groups {
             }
             start += len as u64;
         }
-        // the directory: constraints in order, bins ascending, unknown last
+        // The directory keeps all real CD rows in a nonnegative prefix.
         let mut rows: Vec<(i64, i64, u64)> = Vec::new();
         for (c, d) in dense.iter().enumerate() {
             match d {
@@ -831,8 +867,13 @@ impl Groups {
                 }
             }
         }
+        let mut lengths: Vec<(i64, u64)> = sparse.iter()
+            .filter(|((c, _), _)| *c == k)
+            .map(|((_, length), &count)| (*length, count)).collect();
+        lengths.sort_unstable();
+        rows.extend(lengths.into_iter().map(|(length, count)| (k, length, count)));
         if unknown > 0 {
-            rows.push((k, 0, unknown));
+            rows.push((k + 1, 0, unknown));
         }
         if rows.len() as u64 >= i32::MAX as u64 {
             return Err(Error::input("too many distinct delta groups for this rule"));
@@ -876,7 +917,7 @@ impl Groups {
         Ok(Built {
             constraint: rows
                 .iter()
-                .map(|&(c, _, _)| if c == k { UNKNOWN } else { c as i32 })
+                .map(|&(c, _, _)| if c == k { GEOMETRY_LENGTH } else if c == k + 1 { UNKNOWN } else { c as i32 })
                 .collect(),
             bins: rows.iter().map(|&(_, b, _)| b).collect(),
             offsets,
@@ -904,7 +945,8 @@ impl Groups {
         check_cancelled(stop)?;
         store::write_manifest(
             &staging.dir,
-            &json!({"key": key, "groups": b.constraint.len(), "total": b.total, "narrow": b.narrow}),
+            &json!({"key": key, "groups": b.constraint.len(), "total": b.total, "narrow": b.narrow,
+                "cd_groups": b.constraint.partition_point(|&c| c >= 0)}),
         )?;
         staging.publish()
     }
@@ -939,9 +981,13 @@ impl Groups {
     pub fn len(&self) -> usize {
         self.constraint.len()
     }
-    /// Actual CD bins; the optional trailing unmeasurable row is not a bin.
+    /// Actual CD bins, excluding geometric lengths and unknown values.
     pub fn cd_group_count(&self) -> usize {
-        self.len() - usize::from(self.constraint.as_slice().last() == Some(&UNKNOWN))
+        self.constraint.as_slice().partition_point(|&c| c >= 0)
+    }
+    pub fn geometry_group_count(&self) -> usize {
+        self.len() - self.cd_group_count()
+            - usize::from(self.constraint.as_slice().last() == Some(&UNKNOWN))
     }
     pub fn is_empty(&self) -> bool {
         self.len() == 0
@@ -962,19 +1008,60 @@ impl Groups {
     pub fn find(&self, constraint: i32, bin: i64) -> Option<usize> {
         let c = self.constraint.as_slice();
         let b = self.bins.as_slice();
-        if constraint < 0 {
+        if constraint == UNKNOWN {
             return (bin == 0 && c.last() == Some(&UNKNOWN)).then(|| c.len() - 1);
         }
-        let known = c.len() - usize::from(c.last() == Some(&UNKNOWN));
-        let lo = c[..known].partition_point(|&v| v < constraint);
-        let hi = c[..known].partition_point(|&v| v <= constraint);
+        let known = self.cd_group_count();
+        let (lo, hi) = if constraint == GEOMETRY_LENGTH {
+            (known, known + self.geometry_group_count())
+        } else if constraint >= 0 {
+            (c[..known].partition_point(|&v| v < constraint),
+             c[..known].partition_point(|&v| v <= constraint))
+        } else {
+            return None;
+        };
         let r = lo + b[lo..hi].partition_point(|&v| v < bin);
         (r < hi && b[r] == bin).then_some(r)
+    }
+    /// Compact label; numbering is local to the condition, not a UI page.
+    pub fn label(&self, r: usize) -> String {
+        let constraints = self.constraint.as_slice();
+        let constraint = constraints[r];
+        if constraint == GEOMETRY_LENGTH {
+            return format!("C? #{}", r - self.cd_group_count() + 1);
+        }
+        if constraint < 0 {
+            return "Unmeasurable".into();
+        }
+        let known = self.cd_group_count();
+        let first = constraints[..known].partition_point(|&c| c < constraint);
+        let unit = match self.basis {
+            Basis::Percent => "%",
+            Basis::Absolute
+                if self.table.constraints[constraint as usize]
+                    .get("metric")
+                    .and_then(Value::as_str)
+                    == Some("area") =>
+            {
+                "µm²"
+            }
+            Basis::Absolute => "µm",
+        };
+        let low = self.bins.as_slice()[r].saturating_mul(self.step);
+        format!(
+            "C{} #{} Δ[{}, {}) {unit}",
+            constraint as usize + 1,
+            r - first + 1,
+            format_ticks(low, false),
+            format_ticks(low.saturating_add(self.step), false)
+        )
     }
     /// Its directory name (floe_oracle drc_delta `DeltaGroup.name`).
     pub fn name(&self, r: usize) -> String {
         let row = self.row(r);
-        let name = if row.constraint < 0 {
+        let name = if row.constraint == GEOMETRY_LENGTH {
+            format!("{} um · edge length · CD unresolved", format_ticks(row.bin, false))
+        } else if row.constraint < 0 {
             match self.basis {
                 Basis::Percent => "Unmeasurable / ratio unavailable".to_string(),
                 Basis::Absolute => "Unmeasurable".to_string(),
@@ -1347,6 +1434,13 @@ mod cached_summary_tests {
         assert_eq!(f.summary(Some(10), Basis::Absolute).count, Some(2));
         let unknown = Fixture::new(10, &[UNKNOWN], "all");
         assert_eq!(unknown.summary(None, Basis::Absolute), CachedGroupSummary { count: Some(0), step: Some(1) });
+        for rows in [vec![0, 0, GEOMETRY_LENGTH, GEOMETRY_LENGTH, UNKNOWN],
+                     vec![0, 0, GEOMETRY_LENGTH], vec![GEOMETRY_LENGTH, UNKNOWN],
+                     vec![GEOMETRY_LENGTH, GEOMETRY_LENGTH]] {
+            let f = Fixture::new(200_000_000, &rows, "all");
+            let known = rows.iter().filter(|&&c| c >= 0).count() as u64;
+            assert_eq!(f.summary(None, Basis::Absolute).count, Some(known));
+        }
     }
 
     #[test]
@@ -1384,7 +1478,7 @@ mod cached_summary_tests {
     }
 
     #[test]
-    fn live_cd_group_count_excludes_only_the_unmeasurable_row() {
+    fn live_cd_group_count_excludes_the_unmeasurable_row() {
         let table = Arc::new(Table {
             check: 0, count: 3,
             constraints: vec![json!({"metric":"width","op":"<","value":0.05})],
@@ -1399,6 +1493,191 @@ mod cached_summary_tests {
         assert_eq!(groups.len(), 3);
         assert_eq!(groups.cd_group_count(), 2);
         assert_eq!(groups.row(2).constraint, UNKNOWN);
+    }
+
+    struct GeometrySource {
+        shapes: Vec<(char, Vec<[f64; 2]>)>,
+        visits: AtomicUsize,
+    }
+
+    impl GeometrySource {
+        fn new(shapes: Vec<(char, Vec<[f64; 2]>)>) -> Self {
+            Self { shapes, visits: AtomicUsize::new(0) }
+        }
+    }
+
+    impl Source for GeometrySource {
+        fn check_count(&self) -> usize { 1 }
+        fn count(&self, _: usize) -> u64 { self.shapes.len() as u64 }
+        fn precision(&self) -> f64 { 100000.0 }
+        fn visit(&self, _: usize, start: u64, end: u64, stop: &AtomicUsize,
+                 visit: &mut dyn FnMut(u64, char, &[[f64; 2]]) -> Result<()>) -> Result<()> {
+            self.visits.fetch_add(1, Ordering::Relaxed);
+            for ei in start..end {
+                check_cancelled(stop)?;
+                let (kind, points) = &self.shapes[ei as usize];
+                visit(ei, *kind, points)?;
+            }
+            Ok(())
+        }
+        fn visit_boxes(&self, _: usize, _: u64, _: u64, _: &AtomicUsize,
+                       _: &mut dyn FnMut(u64, ErrorBox) -> Result<()>) -> Result<()> {
+            panic!("geometry grouping must not revisit marker boxes")
+        }
+    }
+
+    fn single_edge(length: f64) -> (char, Vec<[f64; 2]>) {
+        ('e', vec![[0.0, 0.0], [length, 0.0]])
+    }
+
+    fn measured_pair() -> (char, Vec<[f64; 2]>) {
+        ('e', vec![[0.0, 0.0], [0.1, 0.0], [0.0, 0.02], [0.1, 0.02]])
+    }
+
+    fn unknown_triangle() -> (char, Vec<[f64; 2]>) {
+        ('p', vec![[0.0, 0.0], [0.1, 0.0], [0.0, 0.1]])
+    }
+
+    fn width_constraint() -> Vec<Value> {
+        vec![json!({"metric":"width","op":"<","value":0.05,"text":"INT M1 < 0.05"})]
+    }
+
+    #[test]
+    fn fallback_lengths_keep_five_decimals_without_replacing_valid_cd() {
+        let a = [425.6735, 1517.0725];
+        let b = [425.9110, 1517.0725];
+        let source = GeometrySource::new(vec![('e', vec![a, b]), ('e', vec![b, a]),
+            single_edge(0.237509), single_edge(0.25750), measured_pair(), unknown_triangle()]);
+        let stop = AtomicUsize::new(0);
+        let table = Table::measure(&source, 0, &width_constraint(), None, false, 2, &stop, &|_| {}).unwrap();
+        assert_eq!(table.values.as_slice(), &[23750, 23750, 23751, 25750, 2000, 0]);
+        assert_eq!(table.choices.as_slice(), &[GEOMETRY_LENGTH, GEOMETRY_LENGTH,
+            GEOMETRY_LENGTH, GEOMETRY_LENGTH, 0, UNKNOWN]);
+        for ei in 0..4 {
+            assert_eq!(table.difference(ei, Basis::Absolute), None);
+            assert_eq!(table.difference(ei, Basis::Percent), None);
+            assert!(!table.estimated(ei));
+        }
+        assert_eq!(table.difference(4, Basis::Absolute), Some(3000));
+        assert_eq!(table.ranges[0], vec![Some((3000, 3000))]);
+        let length_constraint = vec![json!({"metric":"length","op":"<","value":0.3})];
+        let length_cd = Table::measure(&source, 0, &length_constraint, None, false, 1, &stop, &|_| {}).unwrap();
+        for ei in 0..4 {
+            assert_eq!(length_cd.choice(ei), 0);
+            assert!(length_cd.difference(ei, Basis::Absolute).is_some());
+        }
+        assert_eq!(marker_length_ticks('e', &[[0.0, 0.0], [0.3, 0.4]]), Some(50000));
+        assert_eq!(marker_length_ticks('e', &[[0.0, 0.0], [f64::NAN, 0.0]]), None);
+        assert_eq!(marker_length_ticks('e', &[[0.0, 0.0], [1.0e14, 0.0]]), None);
+        assert_eq!(marker_length_ticks('p', &[[0.0, 0.0], [0.2, 0.0]]), None);
+        assert_eq!(marker_length_ticks('e', &measured_pair().1), None);
+    }
+
+    #[test]
+    fn length_directory_sorts_over_fifty_rows_and_preserves_scope_status_and_basis() {
+        use crate::drc::analysis::scope::Runs;
+        let mut shapes: Vec<_> = (0..61).rev().map(|i| single_edge((10000 + i) as f64 / 100000.0)).collect();
+        shapes.extend([single_edge(0.1), measured_pair(), unknown_triangle()]);
+        let source = GeometrySource::new(shapes);
+        let stop = AtomicUsize::new(0);
+        let table = Arc::new(Table::measure(&source, 0, &width_constraint(), None, false, 1, &stop, &|_| {}).unwrap());
+        let groups = Arc::new(Groups::build(Arc::clone(&table), Some(5000), Basis::Absolute, None, "all", &stop).unwrap());
+        assert_eq!((groups.len(), groups.cd_group_count(), groups.geometry_group_count()), (63, 1, 61));
+        for i in 0..61 {
+            let row = i + 1;
+            assert_eq!(groups.find(GEOMETRY_LENGTH, 10000 + i as i64), Some(row));
+            assert_eq!(groups.row(row).constraint, GEOMETRY_LENGTH);
+            assert_eq!(groups.row(row).bin, 10000 + i as i64);
+            assert!(groups.name(row).starts_with(&format!("Group #{} · {} um", row + 1,
+                format_ticks(10000 + i as i64, false))));
+            assert!(groups.name(row).ends_with("edge length · CD unresolved"));
+        }
+        assert_eq!(groups.find(GEOMETRY_LENGTH, 9999), None);
+        assert_eq!(groups.find(UNKNOWN, 0), Some(62));
+        assert_eq!(groups.find(-3, 0), None);
+        let percent = Groups::build(Arc::clone(&table), Some(1), Basis::Percent, None, "all", &stop).unwrap();
+        for row in 1..62 {
+            assert_eq!(percent.row(row), groups.row(row));
+            assert_eq!(percent.name(row), groups.name(row));
+        }
+        let mut status = GroupStatus::new(Arc::clone(&groups), &Statuses::None, &stop).unwrap();
+        assert_eq!(status.page(1, 0, 1000, None), vec![60, 61]);
+        status.changed(60, true);
+        assert_eq!(status.count(1, Some(true)), 1);
+        assert_eq!(status.page(1, 0, 1000, Some(false)), vec![61]);
+        assert_eq!(status.rank(1, 60, Some(true)), Some(0));
+        let membership = groups.members(1);
+        assert!(membership.contains(60) && membership.contains(61));
+        assert!(!membership.contains(0));
+        let cluster = Runs::new(vec![0, 61], vec![1, 62]);
+        let subset = Groups::build(table, Some(100000), Basis::Percent, Some(&cluster), "cluster", &stop).unwrap();
+        assert_eq!((subset.total, subset.cd_group_count(), subset.geometry_group_count()), (2, 0, 2));
+        assert_eq!(subset.find(GEOMETRY_LENGTH, 10000), Some(0));
+        assert_eq!(subset.find(GEOMETRY_LENGTH, 10060), Some(1));
+        assert_eq!(subset.row_of(0), Some(1));
+        assert_eq!(subset.row_of(1), None);
+    }
+
+    #[test]
+    fn cached_geometry_lengths_never_inflate_cd_summaries_or_repeat_geometry_visits() {
+        for mixed in [false, true] {
+            let mut shapes = vec![single_edge(0.2375), single_edge(0.2575)];
+            if mixed { shapes.extend([measured_pair(), unknown_triangle()]); }
+            let source = GeometrySource::new(shapes);
+            let count = source.count(0);
+            let f = Fixture::new(count, &[UNKNOWN], "all");
+            std::fs::remove_dir_all(&f.cache.dir).unwrap();
+            let stop = AtomicUsize::new(0);
+            let summary = Groups::prepare_summary(&source, 0, &f.constraints, Some(&f.cache),
+                None, Basis::Absolute, 1, &stop, &|_| {}).unwrap();
+            assert_eq!(summary.count, Some(u64::from(mixed)));
+            let visits = source.visits.load(Ordering::Relaxed);
+            assert!(!f.measure.parent().unwrap().join("groups").exists());
+            let table = Arc::new(Table::cached(&f.cache, 0, count, &f.constraints).unwrap());
+            assert_eq!((table.value(0), table.choice(0)), (23750, GEOMETRY_LENGTH));
+            assert_eq!(table.difference(0, Basis::Absolute), None);
+            let groups = Groups::build(Arc::clone(&table), None, Basis::Absolute, None, "all", &stop).unwrap();
+            assert_eq!(groups.cd_group_count(), usize::from(mixed));
+            assert_eq!(groups.geometry_group_count(), 2);
+            std::fs::remove_dir_all(f.measure.parent().unwrap().join("summaries")).unwrap();
+            assert_eq!(f.summary(None, Basis::Absolute).count, Some(u64::from(mixed)));
+            let group_dir = f.measure.parent().unwrap().join("groups")
+                .join(store::digest(&Groups::key(groups.step, Basis::Absolute, "all")));
+            let mut manifest = store::manifest(&group_dir, &Groups::key(groups.step, Basis::Absolute, "all")).unwrap();
+            manifest.as_object_mut().unwrap().remove("cd_groups");
+            store::write_manifest(&group_dir, &manifest).unwrap();
+            assert_eq!(f.summary(None, Basis::Absolute).count, Some(u64::from(mixed)));
+            let warm = Groups::prepare_summary(&source, 0, &f.constraints, Some(&f.cache),
+                None, Basis::Absolute, 1, &stop, &|_| panic!("warm grouping must not remeasure")).unwrap();
+            assert_eq!(warm, summary);
+            let loaded = Groups::build(table, None, Basis::Absolute, None, "all", &stop).unwrap();
+            assert_eq!(loaded.find(GEOMETRY_LENGTH, 25750), Some(usize::from(mixed) + 1));
+            assert_eq!(source.visits.load(Ordering::Relaxed), visits);
+        }
+    }
+
+    #[test]
+    fn v2_unknown_single_edges_are_remeasured_as_geometry_lengths() {
+        let f = Fixture::new(2, &[UNKNOWN], "all");
+        store::write_column(&f.measure.join("choices.bin"), &[UNKNOWN, UNKNOWN]).unwrap();
+        let mut old_key = Table::key(0, 2, &f.constraints, &f.cache);
+        old_key["version"] = json!(2);
+        store::write_manifest(&f.measure,
+            &json!({"key":old_key,"ranges":[[null],[null]],"backend":"rust"})).unwrap();
+        let old_folder = f.cache.dir.join("delta").join(store::digest(&old_key));
+        std::fs::rename(f.measure.parent().unwrap(), &old_folder).unwrap();
+        let old_measure = old_folder.join("measure").join("complete.json");
+        let old_bytes = std::fs::read(&old_measure).unwrap();
+        assert!(Table::cached(&f.cache, 0, 2, &f.constraints).is_none());
+        assert_eq!(f.summary(None, Basis::Absolute).count, None);
+        let source = GeometrySource::new(vec![single_edge(0.2375), single_edge(0.2575)]);
+        let summary = Groups::prepare_summary(&source, 0, &f.constraints, Some(&f.cache),
+            None, Basis::Absolute, 1, &AtomicUsize::new(0), &|_| {}).unwrap();
+        assert_eq!(summary.count, Some(0));
+        let table = Table::cached(&f.cache, 0, 2, &f.constraints).unwrap();
+        assert_eq!(table.choices.as_slice(), &[GEOMETRY_LENGTH, GEOMETRY_LENGTH]);
+        assert_eq!(table.values.as_slice(), &[23750, 25750]);
+        assert_eq!(std::fs::read(old_measure).unwrap(), old_bytes);
     }
 
     struct SyntheticSource {

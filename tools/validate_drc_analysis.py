@@ -36,6 +36,9 @@ the GTK viewer shows them.
       follows the basis and manual step. Grouping off does not prefill.
       Coincident, overlapping, touching and crossing edge pairs measure zero
       unless the SVRF range excludes it; service/group/detail/ruler agree.
+      CD-unresolved single edges have exact five-decimal marker-length
+      groups without inventing a CD, delta or ratio; pagination, cluster
+      scopes, waives and cached CD-only counts remain consistent.
 
 usage: .venv/bin/python tools/validate_drc_analysis.py
 """
@@ -641,6 +644,116 @@ def zero_gap_ui(v, d, pump):
               "GUI zero distances stay in measurable groups (%s)" % basis)
 
 
+def marker_length_groups(svc, temp):
+    """Two user-visible length families stay separate without a width CD."""
+    print("[A4b] CD-unresolved single-edge length groups")
+    d = temp / "marker-length"
+    d.mkdir()
+    db, deck, metadata = (d / "length.db", d / "length.cal", d / "length.db.rules.json")
+    records = []
+    for i, length in enumerate([23750] * 1001 + [25750] * 2 + [23751], 1):
+        y = 151707250 + i
+        a, b = (42567350, y), (42567350 + length, y)
+        if i % 2 == 0:
+            a, b = b, a
+        records.append("e %d 1\n%d %d %d %d\n" % (i, *a, *b))
+    records += ["e 1005 2\n0 0 23750 0\n0 7900 23750 7900\n",
+                "p 1006 3\n0 0\n1000 0\n0 1000\n"]
+    db.write_text("MAIN 100000\nEDGE.UNKNOWN\n1006 1006 0\n" + "".join(records))
+    deck.write_text("PRECISION 100000\nLAYER dGRM1.xx 1\nLAYER d_gen_pedge 2\n"
+                    "EDGE.UNKNOWN {\n ANGLE dGRM1.xx == 0\n"
+                    " INT (d_gen_pedge) == 0.079 ABUT < 90 OPPOSITE SYMMETRIC\n}\n")
+    (d / "length.db.clusters").write_text("[EDGE.UNKNOWN]\nlast = 1000-1004\n")
+    for args in ([INDEX, "drc", str(db)],
+                 [INDEX, "svrf", str(deck), "--no-env-switches", "-o", str(metadata)]):
+        r = run(args)
+        check(r.returncode == 0, "single-edge fixture indexed/converted", r.stderr)
+    cons = json.loads(metadata.read_text())["checks"]["EDGE.UNKNOWN"]["constraints"]
+    check([(c["metric"], c["op"], c["value"]) for c in cons]
+          == [("angle", "==", 0), ("width", "==", 0.079)],
+          "ABUT angle is not mistaken for a second CD constraint", cons)
+    opened = svc("drc_open", path=str(db), mode="load")
+    h = opened["handle"]
+    svc("drc_clusters_load", handle=h)
+    info = [svc("drc_cd_info", handle=h, check=0, error=ei, constraints=cons)
+            for ei in (0, 1001, 1003)]
+    check(all(i["pick"] is None for i in info)
+          and [i["marker_length_ticks"] for i in info] == [23750, 25750, 23751],
+          "marker lengths are available while width CD stays unresolved", info)
+    checks = [dict(check=0, constraints=cons, step=None)]
+    for basis in ("absolute", "percent"):
+        prepared = svc.job(h, "drc_delta_cached", checks=checks, basis=basis, prepare=True)
+        check(prepared["state"] == "done" and prepared["rows"][0]["count"] == 1,
+              "background count excludes marker-length groups (%s)" % basis, prepared)
+        for step in (None, 100000):
+            event = svc.job(h, "drc_delta", check=0, constraints=cons, basis=basis, step=step)
+            rows = svc("drc_delta_rows", handle=h, group=event["group"], start=0, limit=50)
+            geometry = [r for r in rows if r["key"][0] == -2]
+            check(event["cd_groups"] == 1 and event["geometry_groups"] == 3
+                  and [(r["key"][1], r["total"]) for r in geometry]
+                  == [(23750, 1001), (23751, 1), (25750, 2)]
+                  and [r["label"] for r in geometry] == ["C? #1", "C? #2", "C? #3"]
+                  and all("CD unresolved" in r["name"] and "edge length" in r["name"]
+                          and "um" in r["name"] and "%" not in r["name"] for r in geometry)
+                  and rows[-1]["key"] == [-1, 0] and rows[-1]["total"] == 1,
+                  "exact lengths survive basis/step changes (%s, %s)" % (basis, step), rows)
+            first = geometry[0]
+            scope = {"group": event["group"], "row": first["row"]}
+            check(svc("drc_scope_page", handle=h, check=0, scope=scope, start=0, limit=1000)
+                  == list(range(1000))
+                  and svc("drc_scope_page", handle=h, check=0, scope=scope, start=1000, limit=1000)
+                  == [1000]
+                  and svc("drc_delta_find", handle=h, group=event["group"], key=first["key"])
+                  == first["row"],
+                  "1,000-error pages and stable negative-key lookup (%s, %s)" % (basis, step))
+        svc("drc_set_status", handle=h, check=0, errors=[0, 1000, 1001], status=1)
+        check(svc("drc_scope_count", handle=h, check=0, scope=scope, waived=True) == 2
+              and svc("drc_scope_page", handle=h, check=0, scope=scope,
+                      start=0, limit=1000, waived=False) == list(range(1, 1000))
+              and svc("drc_scope_rank", handle=h, check=0, scope=scope, error=1000) == 1000,
+              "length-group waive counts, filtered pages and ranks (%s)" % basis)
+        event = svc.job(h, "drc_delta", check=0, constraints=cons, basis=basis, cluster=0)
+        rows = svc("drc_delta_rows", handle=h, group=event["group"], start=0, limit=50)
+        check(event["total"] == 5 and event["cd_groups"] == 0 and event["geometry_groups"] == 3
+              and [(r["key"][1], r["total"]) for r in rows] == [(23750, 2), (23751, 1), (25750, 2)],
+              "cluster intersection keeps only its exact length members (%s)" % basis, rows)
+        cached = svc.job(h, "drc_delta_cached", checks=checks, basis=basis)
+        check(cached["rows"] == prepared["rows"], "warm summary keeps CD-only count (%s)" % basis)
+    svc("drc_close", handle=h)
+
+
+def marker_length_ui(v, temp, pump):
+    db = temp / "marker-length" / "length.db"
+    v._drcwin._wf.set_active_id("all")
+    v._drcwin._delta_mode.set_active_id("absolute")
+    check(v.load_drc(str(db)), "load single-edge length groups in the viewer")
+    v._drc_select_row(0)
+    pump(v, lambda: v._drc_delta_groups is not None and v._drc_group_cache_key is None,
+         "single-edge groups", 60)
+    groups = v._drc_delta_groups
+    first = next(g for g in groups.page(0, 50) if g.key == (-2, 23750))
+    check(groups.cd_count == 1 and groups.geometry_count == 3
+          and "3 edge-length groups" in v._drcwin._delta_label.get_text(),
+          "viewer distinguishes marker-length groups from CD groups")
+    lines = v._drc_meta_lines("EDGE.UNKNOWN", v._drc.checks[0].errors[0])
+    check(any("CD unavailable" in line for line in lines)
+          and "Marker edge length: 0.23750 um (CD unresolved)" in lines
+          and not any("Δ" in line for line in lines),
+          "detail displays marker length without a false CD delta", lines)
+    v._drc_delta_choose(first)
+    pump(v, lambda: len(v._drc_grid_map) == 1000, "first length-group page", 60)
+    check(v._drc_grid_map == list(range(1000)), "length group shows its first 1,000 errors")
+    v._drc_page_step(1)
+    pump(v, lambda: v._drc_grid_map == [1000], "second length-group page", 60)
+    check(v._drc_page == 1, "length group has a final one-error page")
+    v._drcwin._delta_mode.set_active_id("percent")
+    pump(v, lambda: not v._drc_delta_busy and v._drc_group_cache_key is None,
+         "length-group ratio switch", 60)
+    check(v._drc_delta_group is not None and v._drc_delta_group.key == (-2, 23750)
+          and v._drc_delta_group.total == 1001,
+          "switching delta basis preserves the selected marker-length group")
+
+
 def a5(temp):
     print("[A5] the viewer")
     from validate_gtk_view import NoCairo, gtk_ready, pump
@@ -702,7 +815,9 @@ def a5(temp):
         pump(v, lambda: v._drc_delta_groups is not None, "delta groups", 60)
         rows = [(r[0], r[1]) for r in v._drcwin._delta_store]
         check(len(rows) == 6 and rows[0] == ("All errors", "20")
-              and rows[1][0].startswith("Group #1 · condition 1 · space < 0.05000: [0.02000, 0.02200) um"),
+              and rows[1][0] == "C1 #1 Δ[0.02000, 0.02200) µm"
+              and v._drcwin._delta_store[1][3].startswith(gui.GLib.markup_escape_text(
+                  "Group #1 · condition 1 · space < 0.05000: [0.02000, 0.02200) um")),
               "the delta list", rows[:2])
         label = v._drcwin._delta_label.get_text()
         check("5 groups" in label and "auto step 0.00200" in label, "its label", label)
@@ -866,6 +981,7 @@ def a5(temp):
               "SVRF metadata restores CD measurement and delta groups")
         grouped_rules_ui(v, d, pump)
         zero_gap_ui(v, d, pump)
+        marker_length_ui(v, temp, pump)
         small = d / "small.db"
         small.write_text("MAIN 100000\nSMALL.ONE\n0 0 0\nSMALL.TWO\n0 0 0\n")
         (d / "small.db.rules.json").write_text(json.dumps({
@@ -899,6 +1015,7 @@ def main():
             _d, db, heavy, name = a2(svc, temp)
             a3(svc, temp)
             a4(temp, db, heavy, name)
+            marker_length_groups(svc, temp)
         finally:
             svc.close()
         a5(temp)

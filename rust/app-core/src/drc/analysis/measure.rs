@@ -338,6 +338,14 @@ pub fn cd_segments(kind: char, pts: &[Point]) -> Vec<Segment> {
     }
 }
 
+/// A single output edge's geometric length, without interpreting it as a CD.
+pub fn marker_length_ticks(kind: char, pts: &[Point]) -> Option<i64> {
+    if kind != 'e' || pts.len() != 2 {
+        return None;
+    }
+    ticks::value_ticks(hypot(pts[1][0] - pts[0][0], pts[1][1] - pts[0][1])).ok()
+}
+
 /// The marker's distinct finite CDs for `metric`, ascending: a polygon's
 /// area (`area`); a rectangle's two spans or an edge pair's closest gap
 /// (the CD metrics - the gap's X/Y rulers are not candidates); a single
