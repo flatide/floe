@@ -178,6 +178,64 @@ class WorkerContractTests(unittest.TestCase):
                 self.assertRaises(SystemExit):
             cli.parser().parse_args(["--layer-colors", "groups", "x.oas"])
 
+    def test_userid_selects_review_identity_in_an_independent_window(self):
+        """An explicit review ID must not be forwarded to a window whose
+        service already owns another reviewer's files on the same DISPLAY."""
+        from floe import instance
+        from floe import viewcli as cli
+
+        for option in ("--userid", "--floe-reviewer"):
+            with self.subTest(option=option), \
+                    mock.patch.dict(os.environ, {"FLOE_RENDERER": "rust",
+                                                 "FLOE_REVIEWER": "display-name"}), \
+                    mock.patch.object(instance, "try_forward", return_value=0) as forward, \
+                    mock.patch("floe.gui.run_viewer") as run_viewer:
+                cli.main([option, "  user-42  "])
+                self.assertEqual(os.environ["FLOE_REVIEWER"], "user-42")
+                forward.assert_not_called()
+                run_viewer.assert_called_once()
+                self.assertIsNone(run_viewer.call_args.args[1],
+                                  "an explicit user does not own the default instance socket")
+
+    def test_userid_omitted_keeps_environment_and_default_forwarding(self):
+        from floe import instance
+        from floe import viewcli as cli
+
+        for configured in (None, "existing-user"):
+            with self.subTest(configured=configured), \
+                    mock.patch.dict(os.environ, {"FLOE_RENDERER": "rust"}), \
+                    mock.patch.object(instance, "display_key", return_value=":test"), \
+                    mock.patch.object(instance, "socket_address", return_value="/tmp/floe-id.sock"), \
+                    mock.patch.object(instance, "try_forward", return_value=0) as forward, \
+                    mock.patch("floe.gui.run_viewer") as run_viewer:
+                if configured is None:
+                    os.environ.pop("FLOE_REVIEWER", None)
+                else:
+                    os.environ["FLOE_REVIEWER"] = configured
+                with self.assertRaises(SystemExit) as stopped:
+                    cli.main([])
+                self.assertEqual(stopped.exception.code, 0)
+                self.assertEqual(os.environ.get("FLOE_REVIEWER"), configured)
+                forward.assert_called_once()
+                run_viewer.assert_not_called()
+
+    def test_empty_userid_is_refused_before_opening_a_window(self):
+        from floe import instance
+        from floe import viewcli as cli
+
+        for option in ("--userid", "--floe-reviewer"):
+            with self.subTest(option=option), \
+                    mock.patch.dict(os.environ, {"FLOE_RENDERER": "rust",
+                                                 "FLOE_REVIEWER": "keep-user"}), \
+                    mock.patch.object(instance, "try_forward") as forward, \
+                    mock.patch("floe.gui.run_viewer") as run_viewer:
+                with self.assertRaises(SystemExit) as stopped:
+                    cli.main([option, "  "])
+                self.assertIn("must not be empty", str(stopped.exception))
+                self.assertEqual(os.environ["FLOE_REVIEWER"], "keep-user")
+                forward.assert_not_called()
+                run_viewer.assert_not_called()
+
     def test_a_cut_of_ones_own_rides_on_the_nearest_level(self):
         """User 2026-10-28 ("테스트를 위해 detail cut을 입력받을 수 있게
         수정해줘. 0.1px까지 테스트해보려고 함"): the `d` dialog's own cut goes

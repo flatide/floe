@@ -70,7 +70,8 @@
 use crate::drcice::{
     ints_prefix, is_geom_header, parse_f64, parse_i64, tokens, trim, Lines, StrTab, MAGIC,
 };
-use std::io::Write;
+use std::io::{Read, Write};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
 const BLOCK: usize = 64;
 
@@ -352,6 +353,114 @@ fn final_tmp_path(out: &str) -> String {
     format!("{}.tmpw", out)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PackStamp {
+    dev: u64,
+    ino: u64,
+    len: u64,
+    mtime: (i64, i64),
+    ctime: (i64, i64),
+}
+
+impl PackStamp {
+    fn of(m: &std::fs::Metadata) -> Self {
+        Self {
+            dev: m.dev(),
+            ino: m.ino(),
+            len: m.len(),
+            mtime: (m.mtime(), m.mtime_nsec()),
+            ctime: (m.ctime(), m.ctime_nsec()),
+        }
+    }
+}
+
+struct PreviousPack {
+    file: std::fs::File,
+    stamp: PackStamp,
+    compared: u64,
+}
+
+/// Compare against the old pack as the new one is written, without a second
+/// pass over the candidate or memory proportional to its size. An identical
+/// rebuild keeps the old inode and mtime, to which existing review files bind.
+struct ComparedWriter<W> {
+    writer: W,
+    previous: Option<PreviousPack>,
+    scratch: Vec<u8>,
+}
+
+impl<W: Write> ComparedWriter<W> {
+    fn new(writer: W, out: &str) -> Self {
+        // Inspect the opened object, without hanging if out is a FIFO (or a
+        // symlink to one). O_NONBLOCK has no effect on regular pack reads.
+        let previous = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(out)
+            .ok()
+            .and_then(|file| {
+                let m = file.metadata().ok()?;
+                m.is_file().then(|| PreviousPack {
+                    file,
+                    stamp: PackStamp::of(&m),
+                    compared: 0,
+                })
+            });
+        let scratch = if previous.is_some() {
+            vec![0; 64 << 10]
+        } else {
+            Vec::new()
+        };
+        Self {
+            writer,
+            previous,
+            scratch,
+        }
+    }
+
+    fn compare(&mut self, bytes: &[u8]) {
+        let Some(previous) = &mut self.previous else {
+            return;
+        };
+        for part in bytes.chunks(self.scratch.len()) {
+            let old = &mut self.scratch[..part.len()];
+            if previous.file.read_exact(old).is_err() || old != part {
+                // A read failure is not evidence of equality. Once different,
+                // stop reading the old pack and finish the normal atomic build.
+                self.previous = None;
+                return;
+            }
+            previous.compared += part.len() as u64;
+        }
+    }
+
+    fn identical(&mut self, out: &str) -> bool {
+        let Some(previous) = &mut self.previous else {
+            return false;
+        };
+        if previous.compared != previous.stamp.len || previous.file.read(&mut [0]).ok() != Some(0) {
+            return false;
+        }
+        // The writer lock excludes cooperating changes. Also reject a file
+        // changed or replaced outside it while its bytes were being compared.
+        [previous.file.metadata(), std::fs::metadata(out)]
+            .into_iter()
+            .all(|m| m.is_ok_and(|m| m.is_file() && PackStamp::of(&m) == previous.stamp))
+    }
+}
+
+impl<W: Write> Write for ComparedWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let n = self.writer.write(bytes)?;
+        self.compare(&bytes[..n]);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.writer.flush()
+    }
+}
+
 // qbox quantization: outward-rounded u8 lattice coordinate over the
 // check bbox. Shared by the resident and streaming encoders - the
 // bytes must match whichever path runs (D5b).
@@ -585,7 +694,7 @@ fn encode(
     // a partial file behind on any failure
     let tmp = final_tmp_path(out);
     let wf = std::fs::File::create(&tmp).map_err(|e| format!("create {}: {}", tmp, e))?;
-    let mut w = std::io::BufWriter::with_capacity(8 << 20, wf);
+    let mut w = std::io::BufWriter::with_capacity(8 << 20, ComparedWriter::new(wf, out));
     let mut header = Vec::with_capacity(40);
     header.extend_from_slice(MAGIC);
     header.extend_from_slice(&4u32.to_le_bytes());
@@ -845,14 +954,144 @@ fn encode(
     foot.extend_from_slice(MAGIC);
     w.write_all(&foot).map_err(|e| e.to_string())?;
     w.flush().map_err(|e| e.to_string())?;
+    let identical = w.get_mut().identical(out);
     drop(w);
-    std::fs::rename(&tmp, out).map_err(|e| format!("rename {} -> {}: {}", tmp, out, e))?;
+    if identical {
+        std::fs::remove_file(&tmp).map_err(|e| format!("remove {}: {}", tmp, e))?;
+    } else {
+        std::fs::rename(&tmp, out).map_err(|e| format!("rename {} -> {}: {}", tmp, out, e))?;
+    }
     Ok((blk_cnt, err_total))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Previous {
+        dir: std::path::PathBuf,
+        path: String,
+    }
+
+    impl Previous {
+        fn new(bytes: &[u8]) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "floe-drc-compare-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&dir).unwrap();
+            let path = dir.join("old.tray").to_string_lossy().into_owned();
+            std::fs::write(&path, bytes).unwrap();
+            Self { dir, path }
+        }
+    }
+
+    impl Drop for Previous {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn rebuild_preserves_only_a_complete_byte_match() {
+        let bytes = vec![0x5a; (64 << 10) + 17];
+        let old = Previous::new(&bytes);
+        let mut same = ComparedWriter::new(Vec::new(), &old.path);
+        same.write_all(&bytes).unwrap();
+        same.flush().unwrap();
+        assert!(same.identical(&old.path));
+        assert_eq!(same.writer, bytes);
+        for candidate in [&bytes[..bytes.len() - 1], &b"different"[..]] {
+            let mut different = ComparedWriter::new(Vec::new(), &old.path);
+            different.write_all(candidate).unwrap();
+            assert!(!different.identical(&old.path));
+            assert_eq!(different.writer, candidate);
+        }
+        let mut longer = ComparedWriter::new(Vec::new(), &old.path);
+        longer.write_all(&bytes).unwrap();
+        longer.write_all(b"extra").unwrap();
+        assert!(!longer.identical(&old.path));
+        assert!(longer.previous.is_none());
+    }
+
+    #[test]
+    fn same_size_changes_stop_old_reads_and_keep_writing() {
+        let old = Previous::new(b"abcdef");
+        let mut changed = ComparedWriter::new(Vec::new(), &old.path);
+        changed.write_all(b"ab").unwrap();
+        changed.write_all(b"X").unwrap();
+        assert!(changed.previous.is_none());
+        changed.write_all(b"def").unwrap();
+        assert_eq!(changed.writer, b"abXdef");
+        assert!(!changed.identical(&old.path));
+    }
+
+    #[test]
+    fn partial_writes_compare_only_the_accepted_prefix() {
+        struct Short(Vec<u8>);
+        impl Write for Short {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                let n = bytes.len().min(3);
+                self.0.extend_from_slice(&bytes[..n]);
+                Ok(n)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let bytes = b"a complete pack";
+        let old = Previous::new(bytes);
+        let mut output = ComparedWriter::new(Short(Vec::new()), &old.path);
+        output.write_all(bytes).unwrap();
+        assert!(output.identical(&old.path));
+        assert_eq!(output.writer.0, bytes);
+    }
+
+    #[test]
+    fn changed_or_replaced_old_files_are_not_preserved() {
+        let old = Previous::new(b"abcdef");
+        let mut output = ComparedWriter::new(Vec::new(), &old.path);
+        output.write_all(b"abcdef").unwrap();
+        std::fs::rename(&old.path, old.dir.join("moved.tray")).unwrap();
+        std::fs::write(&old.path, b"abcdef").unwrap();
+        assert!(!output.identical(&old.path));
+
+        let mut output = ComparedWriter::new(Vec::new(), &old.path);
+        output.write_all(b"abcdef").unwrap();
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&old.path)
+            .unwrap();
+        file.set_len(5).unwrap();
+        assert!(!output.identical(&old.path));
+
+        std::fs::remove_file(&old.path).unwrap();
+        let mut output = ComparedWriter::new(Vec::new(), &old.path);
+        output.write_all(b"abcdef").unwrap();
+        assert!(!output.identical(&old.path));
+    }
+
+    #[test]
+    fn a_fifo_output_does_not_wait_for_a_writer() {
+        let old = Previous::new(b"");
+        std::fs::remove_file(&old.path).unwrap();
+        let path = std::ffi::CString::new(old.path.as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        let (send, receive) = std::sync::mpsc::channel();
+        let name = old.path.clone();
+        // A regression to blocking open must fail the test rather than hang
+        // the entire runner waiting for a FIFO producer that does not exist.
+        std::thread::spawn(move || {
+            let output = ComparedWriter::new(Vec::new(), &name);
+            let _ = send.send(output.previous.is_none());
+        });
+        assert!(receive
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap());
+    }
 
     #[test]
     fn varint_zigzag_roundtrip() {

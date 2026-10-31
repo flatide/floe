@@ -68,15 +68,15 @@ def _add_level_option(p):
 
 
 def _add_reviewer_option(p):
-    """Commands that open DRC packs (view/drc/render) take the
-    reviewer tag as a parameter: the shared server account cannot
+    """The viewer takes a review user ID: a shared server account cannot
     distinguish reviewers, and launcher scripts prefer an explicit
     argument over exporting FLOE_REVIEWER (which stays honored)."""
-    p.add_argument("--floe-reviewer", default=None, metavar="NAME",
-                   help="reviewer tag for the per-reviewer waive "
-                        "autosave next to the DRC pack (overrides "
-                        "the DISPLAY/SSH-derived tag; sets "
-                        "FLOE_REVIEWER - the env var still works)")
+    p.add_argument("--userid", "--floe-reviewer", dest="floe_reviewer",
+                   default=None, metavar="ID",
+                   help="user ID for DRC review, waive and note files "
+                        "(sets FLOE_REVIEWER and overrides automatic "
+                        "DISPLAY/SSH identification; opens an independent "
+                        "instance; default: existing identification)")
 
 
 def _is_deck(src):
@@ -188,12 +188,15 @@ def cmd_view(args):
     # Render-process construction parameters cannot be retrofitted into
     # a running single instance. Open an independent viewer when one is
     # explicitly supplied; live request controls are forwarded below.
+    # An explicit review ID also belongs to this process: forwarding to
+    # an existing window would silently use that window's reviewer.
     process_options = (stream_kb is not None
                        or args.stream_target_ms != 500
                        or args.render_debug
                        or args.frame_cache == "off"
                        or args.margin == "on"
-                       or layer_colors is not None)
+                       or layer_colors is not None
+                       or getattr(args, "floe_reviewer", None) is not None)
     server = None
     if not args.multi and not process_options:
         # flateyes-style single instance per (uid, DISPLAY)
@@ -510,7 +513,7 @@ def main(argv=None):
     if reviewer is not None:
         reviewer = reviewer.strip()
         if not reviewer:
-            raise SystemExit("floe2: --floe-reviewer must not be empty")
+            raise SystemExit("floe2: --userid/--floe-reviewer must not be empty")
         os.environ["FLOE_REVIEWER"] = reviewer
     # what this viewer's readers say they are in the cache locks
     os.environ.setdefault("FLOE_LOCK_WHAT", "floe2 view")

@@ -388,7 +388,90 @@ def r1_identity(d):
         os.environ.pop("FLOE_DRC_REVIEW_ROOT", None)
 
 
+def r1_reindex(d):
+    print("[R1c] unchanged reindex preserves the pack and its review")
+    folder = d / "reindex"
+    folder.mkdir()
+    src, pack = folder / "same.db", folder / ".same.db.tray"
+    write_db(src, [("M1.S", [_poly(100, 100), _poly(200, 100), _edge(300, 100)])])
+    r = run([INDEX, "drc", str(src)])
+    check(r.returncode == 0, "initial reindex fixture", r.stderr)
+    # Pin an old ns timestamp before creating any review. Replacing a
+    # byte-identical pack will deterministically invalidate that review.
+    stamp = 1_700_000_000_123_456_789
+    os.utime(pack, ns=(stamp, stamp))
+    before = pack.read_bytes()
+    stat = pack.stat()
+    identity = (stat.st_dev, stat.st_ino, stat.st_mtime_ns)
+    svc = Svc()
+    try:
+        h = rs_open(svc, src, "reindex")["handle"]
+        svc("drc_visit", handle=h, check=0, error=0)
+        svc.visits(h, 1)
+        e = svc.job(h, "drc_review", check=0, action="not-required", errors=[0, 1], on=True)
+        check(e["state"] == "done", "exclude errors before reindex", e)
+        svc("drc_set_status", handle=h, check=0, errors=[1], status=1)
+        svc("drc_set_note", handle=h, gids=[2], text="keep this note")
+        counts = svc("drc_review_counts", handle=h)
+        flags = svc("drc_review_flags", handle=h, check=0, errors=[0, 1, 2])
+        review_path = Path(svc("drc_review_path", handle=h)["path"])
+        svc("drc_close", handle=h)
+    finally:
+        svc.close()
+    review_bytes = review_path.read_bytes()
+    for jobs, stream in ((1, False), (4, True)):
+        env = dict(os.environ)
+        if stream:
+            env["FLOE_DRC_QBOX_RESIDENT"] = "0"
+        r = run([INDEX, "drc", str(src), "--jobs", str(jobs)], env=env)
+        check(r.returncode == 0, "reindex with jobs=%d" % jobs, r.stderr)
+        stat = pack.stat()
+        check((stat.st_dev, stat.st_ino, stat.st_mtime_ns) == identity
+              and pack.read_bytes() == before, "identical reindex keeps pack inode and ns mtime")
+        svc = Svc()
+        try:
+            reopened = rs_open(svc, src, "reindex")
+            h = reopened["handle"]
+            try:
+                check(svc("drc_review_counts", handle=h) == counts
+                      and svc("drc_review_flags", handle=h, check=0, errors=[0, 1, 2]) == flags,
+                      "visited and not-required flags survive unchanged reindex")
+            except gtkservice.ServiceError as exc:
+                check(False, "visited and not-required flags survive unchanged reindex", exc)
+            check(svc("drc_status", handle=h, check=0, start=0, count=3) == "000100",
+                  "waive state survives unchanged reindex")
+            check(any(n["text"] == "keep this note" for n in reopened["notes"]),
+                  "note survives unchanged reindex")
+            svc("drc_close", handle=h)
+        finally:
+            svc.close()
+    # Same source stamp, rule/count metadata and file length, but one
+    # coordinate differs: only a full byte comparison can retain the pack.
+    src_stat = src.stat()
+    text = src.read_text()
+    src.write_text(text.replace("100 100", "101 100", 1))
+    os.utime(src, ns=(src_stat.st_atime_ns, src_stat.st_mtime_ns))
+    r = run([INDEX, "drc", str(src)])
+    after = pack.read_bytes()
+    check(r.returncode == 0 and after != before and len(after) == len(before)
+          and after[:40] == before[:40] and after[-136:] == before[-136:],
+          "a coordinate change replaces the pack despite matching source stamp", r.stderr)
+    check(review_path.read_bytes() == review_bytes, "reindex never rewrites a saved review")
+    svc = Svc()
+    try:
+        h = rs_open(svc, src, "reindex")["handle"]
+        try:
+            svc("drc_review_flags", handle=h, check=0, errors=[0])
+            check(False, "changed geometry still refuses old review")
+        except gtkservice.ServiceError as exc:
+            check("another DRC result" in str(exc), "changed geometry still refuses old review", exc)
+        svc("drc_close", handle=h)
+    finally:
+        svc.close()
+
+
 # ---- R2 ------------------------------------------------------------------
+
 
 def team_load(svc, h, paths):
     e = svc.job(h, "drc_team_load", paths=[str(p) for p in paths])
@@ -858,8 +941,9 @@ def r8(temp):
 
 
 def main():
-    global r1, r1_identity, r2, r3, r4, r5, r6, r8
-    r1, r1_identity, r2, r3, r4, r5, r6, r8 = map(timed, (r1, r1_identity, r2, r3, r4, r5, r6, r8))
+    global r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8
+    r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8 = map(
+        timed, (r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8))
     temp = Path(tempfile.mkdtemp(prefix="floe-drc-team-"))
     try:
         d = temp / "runs"
@@ -869,6 +953,7 @@ def main():
         try:
             h = r1(svc, d)
             r1_identity(d)
+            r1_reindex(d)
             r2(svc, d, h)
             pp, sids = r3(svc, d, h)
             r4(svc, d, h, pp, sids)

@@ -116,12 +116,17 @@ python -m floe render chip.oas --drc results.db \
   floe를 실행해 화면만 사용자 DISPLAY로 보내는 운용에서는 홈
   접근이 보장되지 않으므로, 모든 리뷰어가 닿는 결과 폴더가 저장
   위치다. **리뷰어 태그**: 공유 서버 계정이라 계정명은 유일하지
-  않음 → `--floe-reviewer NAME` 파라미터(view/drc/render, 런처
+  않음 → `view --userid ID`(`--floe-reviewer ID`도 같은 옵션),
+  drc/render의 `--floe-reviewer NAME` 파라미터(런처
   스크립트용 명시 지정 — `FLOE_REVIEWER` 환경변수도 유지) >
   DISPLAY 호스트부(직결 X, `ws-kim:0` → `ws-kim`; localhost류
   포워딩 번호는 로그인마다 바뀌므로 무시) > SSH 접속원
   IP(`SSH_CONNECTION` — 포워딩이어도 자리 머신 IP는 안정) >
   계정명(단일 사용자 환경) 순으로 안정 신호를 채택.
+  예: `floe2 view layout.oas --drc results.db --userid kim`은
+  `.results.db.review.kim.sqlite3`, `.results.db.waive.kim` 및 같은 ID의 note 파일을
+  사용한다. 명시한 ID는 기존 창으로 전달하지 않고 별도 창을 열어 적용한다.
+  ID를 생략하면 기존 환경변수·DISPLAY·SSH·계정명 순서를 유지한다.
   pack은 다시는 쓰지 않으므로 **공유/읽기 전용 pack도 사용자마다
   독립 리뷰** 가능. `save waives as…`는 waive 전용 파일을 저장한다.
   `load waives…`는 2026-10-11부터 내 상태를 갈아끼우지 않고 공동 검토 창
@@ -176,6 +181,16 @@ python -m floe render chip.oas --drc results.db \
   `.<db>.review.<리뷰어>.sqlite3`(4,096개 단위 두 비트맵과 증분 카운터; 도형을 읽지
   않고 에러 수만큼 메모리를 쓰지 않는다. SPEC-FORMATS). waive/note 파일은 이 상태를
   담지 않는다. 결과 폴더에 쓸 수 없으면 `$XDG_DATA_HOME/floe/review/`로 간다.
+  같은 `.db`를 `floe-index drc`로 다시 인덱싱할 때는 새로 만든 pack을 기존
+  `.tray`와 쓰는 도중 순차 비교한다. 전체 바이트와 길이가 같으면 기존 파일을
+  유지하므로 수정시간에 묶인 방문·검토 제외 기록도 계속 읽힌다. 비교 메모리는
+  고정 크기이며 첫 불일치 이후에는 기존 pack을 더 읽지 않는다. 좌표가 하나라도
+  달라지면 새 pack으로 교체하고 기존 검토 파일의 결과 일치 검사를 유지한다.
+  목록의 `?`와 `Review statistics unavailable: ... another DRC result`는
+  글꼴 문제가 아니라 검토 파일과 pack 지문의 불일치다. 이미 재생성된 pack에
+  예전 검토를 강제 연결하지 않는다. 테스트 기록을 초기화하려면 뷰어를 닫고
+  오류에 표시된 `.review.<리뷰어>.sqlite3`를 다른 이름으로 보관한 뒤 다시 연다
+  (방문·검토 제외 기록만 초기화되며 waive·note 파일과는 별개).
 - **여러 리뷰어의 공동 검토**(DRC 메뉴 `reviewers…`; app-core `drc::team::snapshot`):
   각자 자기 waive·방문·검토 제외 파일을 지키면서 다른 사람의 작업을 따로 불러와 비교한다.
   남의 원본은 바꾸지 않고, 적용한 waive·검토 제외 판단만 내 작업에 기록한다. 내
