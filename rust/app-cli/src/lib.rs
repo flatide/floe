@@ -16,6 +16,8 @@ mod read;
 mod ready;
 pub mod selfcheck;
 mod svrf;
+mod workdir;
+pub use workdir::take as take_workdir;
 use floe_app_core::{
     index::{Action, IndexMode, IndexOptions, PreparedIndex, ProfileCell},
     jobdeck::index::{is_deck, parse_levels, ChipSelection},
@@ -98,6 +100,7 @@ Usage: floe2-web index SOURCE [OPTIONS]
        floe2-web svrf DECK [OPTIONS]
        floe2-web selfcheck [--adjacent] [--metadata-only]
        floe2-web --version
+       floe2-web --workdir DIR COMMAND ...        (any command, anywhere on the line)
 
 Implemented: layout/jobdeck index/info/render/probe, occupancy, profiling,
 and jobdeck analysis/spec + source indexing with level selection.
@@ -106,6 +109,11 @@ FLOE_AUTO_INDEX=off: refuse instead; --light / --full the kind of cache, else th
 rule; a capture builds no occupancy summary unless render --occupancy on asks); a
 source another run indexes is refused (exit 75) unless --wait[=SECONDS]
 (FLOE_LOCK_WAIT=on|SECONDS) waits for it.
+--workdir DIR (FLOE_WORKDIR): every derived file - a source's .NAME.ice cache, a
+results database's .NAME.db.tray pack, their review and analysis sidecars, revisions
+and locks - is read and written under DIR at the source's absolute path
+(/a/b/x.oas -> DIR/a/b/.x.oas.ice), nothing beside the source; DIR is made when it is
+not there, and the processes this one starts place their files the same way.
 Indexing streams the source by default (0.12.370: an inventory pass, then the cells in file
 order behind --mem GiB; --in-memory or FLOE_INDEX_STREAM=off is the whole-parse build). A
 jobdeck's sources get the light cache (design.inv + design.seg + design.ovo, the geometry
@@ -180,6 +188,9 @@ const INDEX_HELP: &str = "Usage: floe2-web index SOURCE [OPTIONS]
                             with it open): wait for it instead of exit 75; SECONDS
                             bounds the wait (FLOE_LOCK_WAIT=on|SECONDS: the default)
   --no-wait                  Refuse at once (exit 75) whatever FLOE_LOCK_WAIT says
+  --workdir DIR              Read and write the cache under DIR at the source's
+                             absolute path (DIR/a/b/.x.oas.ice), not beside it
+                             (FLOE_WORKDIR; every command's, anywhere on the line)
   -h, --help                Show this help
 
 .jb sources are indexed sequentially; each source uses --jobs workers.
@@ -689,6 +700,13 @@ pub fn main(host: &'static Host, args: Vec<OsString>) -> ! {
     let _ = HOST.set(host);
     floe_app_core::set_program(host.name);
     let program = floe_app_core::program();
+    // --workdir DIR / FLOE_WORKDIR: every command's, taken before the
+    // command parses the rest (workdir.rs)
+    let mut args = args;
+    if let Err(e) = workdir::take(&mut args) {
+        eprintln!("{program}: {e}");
+        std::process::exit(2);
+    }
     let command = args.first().and_then(|a| a.to_str()).map(str::to_string);
     let cli = match parse(args) {
         Ok(v) => v,

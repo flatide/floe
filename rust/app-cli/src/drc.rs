@@ -19,6 +19,11 @@ const HELP: &str = "Usage: floe2-web drc RESULTS.db|.RESULTS.db.tray [OPTIONS]
   --build                 Explicitly build/reuse .RESULTS.db.tray, migrate legacy name
   --force                 With --build: allow atomic replacement of old pack
   --jobs N                With --build: native workers 1..16 (default 12)
+  --workdir DIR           Read and write the pack and what follows it (the
+                          .analysis folder, the review .sqlite3 / waive / notes
+                          sidecars) under DIR at the database's absolute path
+                          (DIR/a/.r.db.tray), not beside the database
+                          (FLOE_WORKDIR; every command's, anywhere on the line)
 
 Without --build: read-only, no renaming, automatic indexing or autosave creation.
 Uses a fresh layout-4 .tray pack (or legacy .ice) when available, otherwise bounded read-only

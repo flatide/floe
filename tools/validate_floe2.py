@@ -200,7 +200,7 @@ def validate_rust_cli(base, fixture):
         called = work / "python-called"
         for name in ("python", "python3"):
             script = trap / name
-            script.write_text("#!/bin/sh\necho \"$@\" >> %s\nexit 99\n" % called)
+            script.write_text("#!/bin/sh\necho \"$@ [FLOE_WORKDIR=$FLOE_WORKDIR]\" >> %s\nexit 99\n" % called)
             script.chmod(0o755)
         env = {"PATH": "%s:/usr/bin:/bin" % trap, "HOME": base.get("HOME", td),
                "FLOE_INDEX_BIN": str(indexer), "FLOE_RENDERD_BIN": str(renderer),
@@ -435,6 +435,118 @@ def validate_rust_cli(base, fixture):
         check(not called.exists(),
               "floe2 ran Python for the light cache: %s" % (
                   called.read_text() if called.exists() else ""))
+        # the work directory (0.12.427, user 2026-10-31: "--workdir로 .ice,
+        # .tray, .sqlite등의 파일을 읽고 쓰는 위치를 지정할 수 있게"): the
+        # cache goes under DIR at the source's absolute path and nothing
+        # beside the source; the option is any command's, anywhere on the
+        # line, FLOE_WORKDIR its default; DIR is made when it is not there;
+        # the locks follow the cache; a bad value is a command line error
+        wd_src = work / "rust cli workdir 설계.oas"
+        shutil.copy2(fixture, wd_src)
+        workdir = work / "work" / "dir"
+        before = set(work.iterdir())
+        rust(env, "index", wd_src, "--workdir", workdir, "--jobs", "2")
+        mirrored = workdir / Path(vfs_cache_dir(wd_src)).relative_to("/")
+        check((mirrored / "design.ovm").is_file() and (mirrored / "meta.json").is_file(),
+              "floe2 index --workdir did not put the cache under the work directory: %s" % mirrored)
+        beside = set(work.iterdir()) - before
+        check(not Path(vfs_cache_dir(wd_src)).exists() and beside == {workdir.parent},
+              "floe2 index --workdir left something beside the source: %s" % sorted(p.name for p in beside))
+        check(Path(str(mirrored) + ".index.lock").is_file() and (mirrored.parent / ".floe-lock").is_dir(),
+              "the locks did not follow the cache under the work directory: %s" % sorted(
+                  p.name for p in mirrored.parent.iterdir()))
+        wd_info = rust(env, "info", wd_src, "--workdir=%s" % workdir)
+        check("top cell" in wd_info.stdout and "stored shapes" in wd_info.stdout,
+              "floe2 info --workdir=DIR did not read the cache under the work directory")
+        check(json.loads(rust(dict(env, FLOE_WORKDIR=str(workdir)), "info", wd_src, "--json").stdout)["cache_kind"] == "full",
+              "FLOE_WORKDIR did not place the cache")
+        check("top cell" in rust(env, "--workdir", workdir, "info", wd_src).stdout,
+              "--workdir before the command was not taken")
+        refused = rust(env, "info", wd_src, "--no-index", ok=False)
+        check(refused.returncode != 0 and not Path(vfs_cache_dir(wd_src)).exists(),
+              "without the work directory the source had a cache beside it: %d" % refused.returncode)
+        wd_png = work / "rust cli workdir.png"
+        rust(env, "render", wd_src, "--px", "64", "--workdir", workdir, "--out", wd_png)
+        check(wd_png.read_bytes().startswith(b"\x89PNG\r\n\x1a\n"),
+              "floe2 render --workdir did not publish a PNG")
+        check(not Path(vfs_cache_dir(wd_src)).exists(), "render --workdir wrote beside the source")
+        # a fresh work directory: its first write is a pack (the output
+        # check canonicalizes the pack's folder before the lease would make
+        # it - found 2026-10-31 checking the locks) or a capture's auto-index
+        fresh = work / "fresh work"
+        wd_db = work / "rust cli workdir.db"
+        shutil.copy2(ROOT / "sample.db", wd_db)
+        before_db = set(work.iterdir())
+        built = rust(env, "drc", wd_db, "--build", "--workdir", fresh, "--jobs", "2")
+        pack = fresh / Path(os.path.abspath(wd_db)).relative_to("/").parent / ".rust cli workdir.db.tray"
+        check(pack.is_file() and set(work.iterdir()) - before_db == {fresh},
+              "floe2 drc --build --workdir into a fresh directory: pack %s, new beside %s: %s" % (
+                  pack.is_file(), sorted(p.name for p in set(work.iterdir()) - before_db), built.stderr[-300:]))
+        check(Path(str(pack) + ".index.lock").is_file(),
+              "the pack's lease did not follow it into the work directory")
+        rules = rust(env, "drc", wd_db, "--rules", "--workdir", fresh)
+        check(json.loads(rules.stdout) and not (work / ".rust cli workdir.db.tray").exists(),
+              "floe2 drc --rules --workdir did not read the pack from the work directory: %s" % rules.stdout[:200])
+        fresh2 = work / "fresh work 2"
+        wd_src2 = work / "rust cli workdir 2 설계.oas"
+        shutil.copy2(fixture, wd_src2)
+        shot = rust(env, "render", wd_src2, "--px", "64", "--workdir", fresh2, "--out", work / "fresh.png")
+        mirrored2 = fresh2 / Path(vfs_cache_dir(wd_src2)).relative_to("/")
+        check("indexing it first" in shot.stderr and (work / "fresh.png").read_bytes().startswith(b"\x89PNG")
+              and (mirrored2 / "meta.json").is_file() and not Path(vfs_cache_dir(wd_src2)).exists(),
+              "a capture's auto-index into a fresh work directory: %s" % shot.stderr[-300:])
+        # floe-index itself takes --workdir / FLOE_WORKDIR (user 2026-10-31
+        # "floe-index에도 --workdir을 넣어줘"; the rule is floe_vfs::workdir,
+        # the app layer's too): its default .<file>.ice / .<db>.tray go under
+        # the work directory; an explicit --out stays as given
+        def native(*args, env=env, ok=True, timeout=90):
+            result = subprocess.run([str(indexer)] + [str(a) for a in args], env=env,
+                                    capture_output=True, text=True, timeout=timeout)
+            if ok and result.returncode:
+                raise AssertionError("floe-index failed: %r\nstderr:\n%s" % (args, result.stderr[-500:]))
+            return result
+        fresh3 = work / "fresh work 3"
+        fi_src = work / "rust cli workdir fi 설계.oas"
+        shutil.copy2(fixture, fi_src)
+        fi_dir = fresh3 / Path(vfs_cache_dir(fi_src)).relative_to("/")
+        native("light", fi_src, "--workdir", fresh3, "--jobs", "2")
+        check((fi_dir / "design.inv").is_file() and (fi_dir / "meta.json").is_file()
+              and not Path(vfs_cache_dir(fi_src)).exists(),
+              "floe-index light --workdir did not write the light cache under the work directory: %s" % fi_dir)
+        fi_src2 = work / "rust cli workdir fi2 설계.oas"
+        shutil.copy2(fixture, fi_src2)
+        fi_dir2 = fresh3 / Path(vfs_cache_dir(fi_src2)).relative_to("/")
+        native("--workdir", fresh3, "vfs", fi_src2, "--jobs", "2")
+        check((fi_dir2 / "design.ovm").is_file() and not Path(vfs_cache_dir(fi_src2)).exists(),
+              "floe-index --workdir vfs (the option before the command) did not build under the work directory")
+        fi_pack = fresh3 / Path(os.path.abspath(wd_db)).relative_to("/").parent / ".rust cli workdir.db.tray"
+        native("drc", wd_db, "--jobs", "2", env=dict(env, FLOE_WORKDIR=str(fresh3)))
+        check(fi_pack.is_file() and not (work / ".rust cli workdir.db.tray").exists(),
+              "FLOE_WORKDIR did not place floe-index drc's pack under the work directory")
+        explicit = work / "explicit out"
+        native("light", fi_src, "--workdir", fresh3, "--out", explicit, "--jobs", "2")
+        check((explicit / "design.inv").is_file(), "an explicit --out was moved by --workdir")
+        bad = native("light", fi_src, "--workdir", ok=False, timeout=30)
+        check(bad.returncode == 2 and "workdir" in bad.stderr,
+              "floe-index --workdir without a value was not a usage error: %d %s" % (bad.returncode, bad.stderr[-200:]))
+        check(not called.exists(), "floe-index ran Python: %s" % (called.read_text() if called.exists() else ""))
+        for bad in (["info", wd_src, "--workdir"], ["info", wd_src, "--workdir="],
+                    ["--workdir", wd_png, "info", wd_src], ["info", "--workdir", "/", wd_src]):
+            res = rust(env, *bad, ok=False)
+            check(res.returncode == 2 and "workdir" in res.stderr,
+                  "a bad --workdir was not a command line error: %s -> %d %s" % (
+                      [str(a) for a in bad], res.returncode, res.stderr[-200:]))
+        check(not called.exists(),
+              "floe2 ran Python under --workdir: %s" % (
+                  called.read_text() if called.exists() else ""))
+        # the viewer gets the arguments without --workdir and FLOE_WORKDIR set
+        handed = rust(env, "view", "--workdir", workdir, "frobnicate", ok=False)
+        check(handed.returncode == 99 and called.exists(), "floe2 view --workdir did not reach the GTK entry")
+        recorded = called.read_text()
+        check("--workdir" not in recorded and "frobnicate" in recorded
+              and "[FLOE_WORKDIR=%s]" % workdir in recorded,
+              "floe2 view did not strip --workdir and hand FLOE_WORKDIR down: %s" % recorded)
+        called.unlink()
         unknown = rust(env, "frobnicate", ok=False)
         check(unknown.returncode == 99 and called.exists(),
               "floe2 did not hand an unknown word to the GTK viewer as a source")

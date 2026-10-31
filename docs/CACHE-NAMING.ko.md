@@ -1,8 +1,12 @@
 # 캐시·pack 파일 이름 규칙 (2026-09-16 개명 완료)
 
-정본 코드: `floe/cachepath.py`(Python 쪽 유일한 이름 규칙), `rust/cli/src/vfs.rs`
-`default_outdir`/`hidden_sibling`(Rust 기본값). 이 두 곳 외에는 어디에도
-접미사를 쓰지 않는다. 이력·결정 과정은 §4.
+정본 코드: app-core `rust/app-core/src/cache/names.rs`(floe2·floe2-web·GTK 서비스가
+쓰는 모든 파생 이름; Python이 빠진 뒤 유일한 규칙), `rust/cli/src/vfs.rs`
+`default_outdir`/`hidden_sibling`(floe-index를 단독으로 돌릴 때의 기본값), 두 곳이
+함께 쓰는 작업 디렉터리 규칙 `rust/vfs/src/workdir.rs`(§6), 동결 오라클
+`tools/oracle/floe_oracle/cachepath.py`(게이트의 참조). 이 밖에는 어디에도
+접미사를 쓰지 않는다. 이력·결정 과정은 §4, 소스 옆이 아닌 작업 디렉터리에 두는
+`--workdir`는 §6.
 
 ## 1. 규칙
 
@@ -13,7 +17,8 @@
 | 색인 잠금 (2026-10-09, §5) | **`.floe-lock/`** — 대상과 같은 디렉터리의 숨김 폴더, 대상마다 `<키>.build`·`<키>.use` | `.chipA.oas.ice/` → `.floe-lock/chipA.oas.vfs.build` | — |
 | DRC 리뷰 사이드카 (리뷰어별 waive·note) | `.<db>.waive.<user>`, `.<db>.notes.<user>.fe` — **db 이름** 기준 | `.results.db.waive.jkim` | 같음 (pack 이름에서 `.ice`를 벗겨 만들던 것을 db 이름 기준으로 바꿈; 결과는 동일) |
 
-- "숨김"은 기본 이름 앞에 `.`를 붙인 것이다. 별도 폴더로 옮기지 않는다.
+- "숨김"은 기본 이름 앞에 `.`를 붙인 것이다. 별도 폴더로 옮기지 않는다(`--workdir`가 있으면
+  이름은 같고 폴더만 작업 디렉터리 아래의 미러다, §6).
 - 폴더 안의 파일(`design.ovm/ovp/ovt/ovo`, `meta.json`)과 pack 내부 포맷
   (`FLOEICE` 매직, 레이아웃 버전 4)은 그대로다. 바뀐 것은 이름뿐이다.
 - 명시 outdir(`floe-index vfs <src> <outdir>`, `floe-index drc <db> <out>`)은 어떤
@@ -133,3 +138,65 @@
   - 킬 스위치 `FLOE_LOCK=off`.
 - 누가 무엇을 쥐는지(명령별)는 SPEC-INDEXER §4.5, 뷰어의 동작은 SPEC-VIEWER를 본다.
   게이트는 `index_lock`이다.
+
+## 6. 작업 디렉터리 `--workdir DIR` (2026-10-31, app 0.12.427)
+
+사용자(2026-10-31): "--workdir로 .ice, .tray, .sqlite등의 파일을 읽고 쓰는 위치를
+지정할 수 있게 해줘."
+
+- **옵션:** `--workdir DIR`은 floe2의 모든 명령(`index`·`info`·`render`·`probe`·`clip`·
+  `jobdeck`·`drc`·`drc-prepare`·`svrf`·`view`·`gtk-service`)이 받고, 명령 앞이든 뒤든 줄
+  어디에 있어도 된다(`floe2 --workdir /ssd/w render x.oas …`, `floe2 index x.oas --workdir=/ssd/w`).
+  기본값은 환경 변수 `FLOE_WORKDIR`(빈 값은 없는 것)이고 옵션이 환경보다 우선한다. `~/`는
+  셸처럼 풀고, 상대 경로는 현재 디렉터리 기준이다. DIR이 없으면 만들고(`mkdir -p`), 파일이거나
+  만들 수 없거나 `/`이면 명령행 오류로 2로 끝난다. floe-index도 같은 옵션과 `FLOE_WORKDIR`을
+  받아(`floe-index [--workdir DIR] light x.oas`, `floe-index drc r.db`, 줄 어디서나) 기본
+  `.<file>.ice`·`.<db>.tray`를 같은 자리에 둔다. 명시한 outdir·`--out DIR`·`[out.tray]`는
+  옮기지 않는다. 구현은 한 곳 `rust/vfs/src/workdir.rs`(`workdir()`·`set`·`under`·
+  `lexical_absolute`·`take_option`·`apply`)이고, floe-app-cli `workdir.rs`와 floe-index의
+  main이 명령 파서 앞에서 옵션을 떼어내며, app-core `cache/names.rs`와 floe-index
+  `hidden_sibling`이 그 규칙으로 이름을 놓는다.
+- **규칙:** 파생 이름은 §1 그대로이고, 놓이는 폴더만 DIR 아래 **소스의 절대 경로 자리**다.
+  소스 `/proj/a/x.oas`의 캐시는 `/proj/a/.x.oas.ice/`가 아니라 `DIR/proj/a/.x.oas.ice/`다.
+  이름에서 만들어지는 것은 전부 따라간다.
+
+  | 대상 | `--workdir DIR`일 때의 위치 |
+  |---|---|
+  | 레이아웃·덱 소스의 캐시 `.x.oas.ice/`(전체 인덱스, 경량 캐시, 요약), 구 이름 `x.oas.floe/` | `DIR/<소스 폴더>/.x.oas.ice/` |
+  | 캐시의 revisions `.x.oas.ice.revisions/` | 캐시 옆, 즉 DIR 아래 |
+  | DRC pack `.r.db.tray`, 구 이름 `r.db.ice` | `DIR/<db 폴더>/.r.db.tray` |
+  | pack의 `.r.db.analysis/`(drc-prepare; `FLOE_DRC_ANALYSIS_ROOT`가 있으면 그쪽) | pack 옆, 즉 DIR 아래 |
+  | 리뷰 `.r.db.review.<user>.sqlite3`(`FLOE_DRC_REVIEW_ROOT`가 있으면 그쪽), `.r.db.waive.<user>`, `.r.db.notes.<user>.fe` | pack 옆, 즉 DIR 아래 |
+  | 잠금 `<캐시>.index.lock`, `.floe-lock/` | 캐시·pack 옆, 즉 DIR 아래 |
+  | 출력(`--out`의 PNG·보고서·clip OASIS), 입력(`<db>.clusters`, `--drc-rules`) | 바뀌지 않는다. `.clusters`는 db 옆에서 먼저 찾고 없으면 DIR의 미러에서 찾는다 |
+
+- **소스 옆은 읽지도 쓰지도 않는다.** 작업 디렉터리에 캐시가 없으면 소스 옆에 캐시가 있어도 다시
+  색인한다(옆의 캐시를 쓰려면 `--workdir` 없이 돌린다). 같은 캐시를 여럿이 공유하려면 모두가 같은
+  DIR을 준다. 잠금 키는 경로 기준이라 DIR의 캐시와 옆의 캐시는 서로 다른 잠금이고, 같은 DIR의 같은
+  소스는 예전처럼 서로 막는다(§5).
+- **자식 프로세스:** floe2는 받은 DIR을 `FLOE_WORKDIR`로 내보내므로 floe-index·floe-renderd·GTK
+  뷰어와 `gtk-service`가 같은 자리를 쓴다. floe-index도 덱이나 drc-prepare를 floe2에 넘길 때 같은
+  변수를 넘긴다. floe2가 floe-index를 부를 때는 캐시 폴더를 명시해 넘기므로 floe-index 쪽 규칙은
+  단독 실행에서만 쓰인다.
+- **접근 범위:** 캐시·pack을 쓰는 명령의 AccessScope(`registered.rs`)에 작업 디렉터리가 자동으로
+  들어간다. 웹 호스트가 등록 루트 밖의 DIR을 주어도 거기에 쓸 수 있다.
+- **`--temp-index`와 함께:** 작업 디렉터리에 캐시가 있으면 그것을 열고, 없으면 임시 폴더에
+  만들어 끝나면 지운다(임시 폴더의 해시 이름 규칙은 그대로).
+- **왜 미러인가:** 임시 인덱스의 `<경로 해시>/.x.oas.ice`는 실행과 함께 사라지지만 작업
+  디렉터리는 사람이 들여다보고 지운다. 미러는 같은 이름의 소스가 다른 폴더에 있어도 겹치지 않고,
+  `ls DIR/proj/a`로 무엇의 캐시인지 보이며, 프로젝트 단위로 `rm -rf DIR/proj/a`가 된다.
+  캐시의 `meta.json`이 소스를 적으므로 캐시가 소스 옆에 없어도 읽는 쪽은 소스를 찾는다
+  (임시 인덱스 0.12.416과 같은 성질).
+- **검증:** 게이트 `floe2`(tools/validate_floe2.py의 workdir 블록: 미러 위치, 소스 옆 무변화, 잠금
+  위치, `--workdir=`·앞자리·`FLOE_WORKDIR`, `--no-index` 거절, render, 잘못된 값의 2, `view`의
+  전달, 새 작업 디렉터리에의 첫 pack 빌드와 `--rules` 읽기, 새 작업 디렉터리로의 캡처 자동 색인,
+  floe-index 단독의 `light --workdir`·`--workdir vfs`·`FLOE_WORKDIR`의 `drc`·명시 `--out` 유지·값 없는
+  `--workdir`의 2)와 단위 테스트 floe-vfs workdir.rs, app-core names.rs
+  `a_work_directory_mirrors_the_absolute_path_under_itself`, app-cli workdir.rs.
+  잠금은 2026-10-31 손으로 확인했다: 미러의 `.floe-lock/<키>.build`를 쥔 작성자가 `--workdir` 재색인을
+  75로 막고(`FLOE_WORKDIR`로도 같다), 통째 재색인 중이면 미러의 캐시를 여는 render도 75, 미러의 캐시를
+  읽는 등록(`use.<host>.<pid>.<n>`)이 `--force`를 75로 막고, `--wait`는 미러의 작성자를 기다린 뒤
+  다시 만들며, 미러의 `.index.lock`을 쥔 쪽은 "another Rust application" 75다. 소스 옆에 쥔 잠금은
+  `--workdir` 실행에 아무 영향이 없고(다른 키), 옆으로 돌린 같은 실행은 막힌다. pack의
+  `.floe-lock` 작성자 잠금은 floe-index가 스테이징 파일 경로로 잡는 기존 동작이라 작업 디렉터리와
+  무관하게 `.tray` 이름의 키를 쓰지 않는다(lease `.tray.index.lock`은 미러에 놓인다).

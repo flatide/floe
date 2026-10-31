@@ -1,11 +1,40 @@
 //! Derived names shared by CLI, readers, protected outputs and resource leases.
 //! Resolution is read-only. Migration must not hide a write inside a read scope.
+//!
+//! The work directory (`--workdir DIR` / FLOE_WORKDIR, user 2026-10-31:
+//! "--workdir로 .ice, .tray, .sqlite등의 파일을 읽고 쓰는 위치를 지정할 수
+//! 있게"): when one is set, every derived name is placed under it at the
+//! source's absolute path - `/a/b/x.oas` has its cache at
+//! `DIR/a/b/.x.oas.ice`, `/a/r.db` its pack at `DIR/a/.r.db.tray` - and the
+//! files derived from those (the review and analysis sidecars, the
+//! revisions, the locks) follow them there. Nothing is read from or written
+//! beside the source; a source that has a cache beside it is indexed again
+//! under the work directory. The mirror keeps two sources of one name in
+//! different folders apart and a folder of it readable by its path. The
+//! rule itself is floe_vfs::workdir, shared with floe-index's defaults.
 use super::absolute;
 use crate::{Error, Result};
 use std::{
     fs,
     path::{Path, PathBuf},
 };
+
+pub use floe_vfs::workdir::{expand_user, original_of, under as under_workdir, workdir};
+
+/// Set the work directory before any derived name is made (the CLI's
+/// `--workdir DIR`, floe-app-cli workdir.rs): whether it took.
+pub fn set_workdir(dir: PathBuf) -> bool {
+    floe_vfs::workdir::set(dir)
+}
+/// A derived name where it goes: as made beside the source, or under the
+/// work directory (floe_vfs::workdir - the one rule with floe-index's
+/// `hidden_sibling`).
+fn placed(path: PathBuf) -> PathBuf {
+    match workdir() {
+        Some(root) => under_workdir(root, &path),
+        None => path,
+    }
+}
 
 fn hidden(source: &Path, suffix: &str) -> Result<PathBuf> {
     let path = absolute(source)?;
@@ -15,15 +44,27 @@ fn hidden(source: &Path, suffix: &str) -> Result<PathBuf> {
     let mut output = std::ffi::OsString::from(".");
     output.push(name);
     output.push(suffix);
-    Ok(path.with_file_name(output))
+    Ok(placed(path.with_file_name(output)))
 }
 fn appended(source: &Path, suffix: &str) -> Result<PathBuf> {
     let mut path = absolute(source)?.into_os_string();
     path.push(suffix);
-    Ok(path.into())
+    Ok(placed(path.into()))
 }
 pub fn default_cache_path(source: &Path) -> Result<PathBuf> {
     hidden(source, ".ice")
+}
+/// Make the folder `source`'s derived names go in when a work directory
+/// mirrors it (the first cache or pack of that folder there; nothing is
+/// made beside a source, whose own folder exists): for a write that checks
+/// its output's folder before its lease makes it (drc::build's pack).
+pub fn ensure_workdir_folder(source: &Path) -> Result<()> {
+    if workdir().is_some() {
+        if let Some(parent) = default_cache_path(source)?.parent() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    Ok(())
 }
 pub fn cache_paths(source: &Path) -> Result<[PathBuf; 2]> {
     Ok([default_cache_path(source)?, appended(source, ".floe")?])
@@ -141,5 +182,50 @@ mod tests {
             database_path(Path::new("/tmp/custom.tray")).unwrap(),
             PathBuf::from("/tmp/custom.tray")
         );
+    }
+
+    #[test]
+    fn a_work_directory_mirrors_the_absolute_path_under_itself() {
+        // the mapping itself (the process-wide setting is the CLI's: read
+        // once, so no test sets it)
+        let root = Path::new("/ssd/work");
+        assert_eq!(
+            under_workdir(root, Path::new("/proj/a/.x.oas.ice")),
+            PathBuf::from("/ssd/work/proj/a/.x.oas.ice")
+        );
+        assert_eq!(
+            under_workdir(root, Path::new("/proj/a/x.oas.floe")),
+            PathBuf::from("/ssd/work/proj/a/x.oas.floe")
+        );
+        assert_eq!(
+            under_workdir(root, Path::new("/r/.run.db.tray")),
+            PathBuf::from("/ssd/work/r/.run.db.tray")
+        );
+        // a source inside the work directory mirrors too (no special case)
+        assert_eq!(
+            under_workdir(root, Path::new("/ssd/work/x/.y.oas.ice")),
+            PathBuf::from("/ssd/work/ssd/work/x/.y.oas.ice")
+        );
+        // a relative or dotted path is still placed (absolute() ran before)
+        assert_eq!(
+            under_workdir(root, Path::new("a/./b/../c.ice")),
+            PathBuf::from("/ssd/work/a/c.ice")
+        );
+        // `~` as the shell would give it
+        if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+            assert_eq!(
+                expand_user(PathBuf::from("~/floe-work")),
+                PathBuf::from(home).join("floe-work")
+            );
+        }
+        assert_eq!(expand_user(PathBuf::from("/abs/~x")), PathBuf::from("/abs/~x"));
+        // without a work directory the names are beside the source
+        if workdir().is_none() {
+            assert_eq!(
+                cache_paths(Path::new("/tmp/a.oas")).unwrap(),
+                [PathBuf::from("/tmp/.a.oas.ice"), PathBuf::from("/tmp/a.oas.floe")]
+            );
+            assert_eq!(original_of(Path::new("/tmp/.a.oas.ice")), None);
+        }
     }
 }

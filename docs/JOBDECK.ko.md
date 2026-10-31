@@ -516,6 +516,11 @@ floe2 render deck.jb --batch shots.txt --out shots/ --report shots/report.json
   sources_total, placements, placements_total)와 `jobdeck.chip_blocks`다. 3칩 덱(280 MB 칩 셋, 인덱스 없음, `--temp-index`)에서
   근접 캡처 9.3 → 4.7 s(색인 3 → 1), 광역 15.4 → 6.9 s(색인·요약 3+3 → 1+1), 그림 동일. 측정과 판정은 DIRECT_READ_PLAN §8.30,
   배관은 SHARED_APP_LAYER §12. 게이트 `jobdeck` LightSummaryTests `test_a_capture_reads_the_sources_its_region_reaches`.
+- **작업 디렉터리 (2026-10-31, app 0.12.427; 사용자 "--workdir로 .ice, .tray, .sqlite등의 파일을 읽고 쓰는 위치를 지정할 수
+  있게").** `--workdir DIR`(모든 floe2 명령, 줄 어디서나; 기본 `FLOE_WORKDIR`)이면 덱의 모든 소스 캐시와 DRC pack·사이드카·잠금이
+  소스 옆이 아니라 DIR 아래 소스의 절대 경로 자리에 읽고 쓰인다. 임시 인덱스(0.12.416)가 실행과 함께 사라지는 폴더라면 작업
+  디렉터리는 남는 폴더다: 소스 폴더에 쓸 수 없는 NFS 덱을 로컬 디스크에 색인해 두고 다시 찍는 경우다. 규칙과 표는
+  CACHE-NAMING.ko.md §6, 게이트는 `floe2`(validate_floe2.py workdir 블록).
 
 ### 칩 on/off 캡처 (사용자 2026-10-06)
 

@@ -119,6 +119,11 @@ makes it the default, as before 0.12.350).
   --wait[=SECONDS]          A source another run indexes: wait for it instead of
                             exit 75 (SECONDS bounds it; FLOE_LOCK_WAIT=on|SECONDS)
   --no-wait                 Refuse at once (exit 75) whatever FLOE_LOCK_WAIT says
+  --workdir DIR             Read and write the caches (a jobdeck: every source's)
+                            under DIR at the source's absolute path
+                            (DIR/a/b/.x.oas.ice), not beside the source; DIR is
+                            made when it is not there (FLOE_WORKDIR; every
+                            command's, anywhere on the line)
 A source with no index (a jobdeck: its sources of the levels loaded) is indexed
 first, as `floe2-web index [--light|--full]` builds it - without the occupancy
 summary unless --occupancy on asks for it -, its output on stderr; a changed
@@ -144,7 +149,7 @@ Mosaic final image is four tiles (up to 64 Mpx). Outputs must not collide.
 Cancelled/failed frames never replace an existing PNG. Jobdeck known skipped
 placements/over-budget pages may publish a flagged incomplete PNG (exit 3).
 Other incomplete frames preserve the previous output.";
-const INFO_HELP: &str = "Usage: floe2-web info SOURCE [--level N,N,...] [--json] [--chips] [--no-index] [--temp-index[=DIR]] [--light|--full] [--wait[=SECONDS]]
+const INFO_HELP: &str = "Usage: floe2-web info SOURCE [--level N,N,...] [--json] [--chips] [--no-index] [--temp-index[=DIR]] [--light|--full] [--wait[=SECONDS]] [--workdir DIR]
 --chips (jobdeck): every chip of the levels loaded - its CHIP blocks,
 placements (#K) and extents, the names render --chip/--fit-chip take.
 Read layout/cache summary. --json emits metadata plus source_stale.
@@ -153,13 +158,15 @@ FLOE_AUTO_INDEX=off: refused instead; --temp-index[=DIR]: in a temporary
 folder of this run's own, removed at its end, as render's); one another run
 indexes is refused (75) unless --wait[=SECONDS] (FLOE_LOCK_WAIT=on|SECONDS;
 --no-wait). Jobdeck info includes the skip ledger and virtual layers;
---level is a jobdeck load selection. --json uses cache:null for composites.";
-const PROBE_HELP: &str = "Usage: floe2-web probe SOURCE [--no-index] [--temp-index[=DIR]] [--light|--full] [--wait[=SECONDS]]
+--level is a jobdeck load selection. --json uses cache:null for composites.
+--workdir DIR (FLOE_WORKDIR): the caches under DIR at the source's absolute
+path, as render's.";
+const PROBE_HELP: &str = "Usage: floe2-web probe SOURCE [--no-index] [--temp-index[=DIR]] [--light|--full] [--wait[=SECONDS]] [--workdir DIR]
 Headless ready/open/style + fit/center frame checks; no output files.
 This validates the worker, not browser display or ETX performance.
 A source with no index is indexed first (--no-index: refused; --temp-index[=DIR]:
 in a temporary folder of this run's own, removed at its end; --light / --full the
-kind, as render's; no occupancy summary is built); --wait as render's.";
+kind, as render's; no occupancy summary is built); --wait and --workdir as render's.";
 
 pub enum Command {
     Help(&'static str),

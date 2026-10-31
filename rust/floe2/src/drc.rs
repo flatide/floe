@@ -826,12 +826,21 @@ impl Session {
                     Opened::Pack(r) => floe_app_core::cache::database_path(&r.pack.path)?,
                     Opened::Ascii(a) => a.path.clone(),
                 };
-                let mut p = db.into_os_string();
-                p.push(".clusters");
-                let p = PathBuf::from(p);
-                if !p.is_file() {
-                    return Ok(Value::Null);
-                }
+                let beside = |db: PathBuf| {
+                    let mut p = db.into_os_string();
+                    p.push(".clusters");
+                    PathBuf::from(p)
+                };
+                // under a work directory the pack mirrors the database's
+                // folder; the clusters file is the user's, beside the
+                // database itself
+                let p = match beside(db.clone()) {
+                    p if p.is_file() => p,
+                    _ => match floe_app_core::cache::original_of(&db).map(beside) {
+                        Some(o) if o.is_file() => o,
+                        _ => return Ok(Value::Null),
+                    },
+                };
                 p
             }
         };

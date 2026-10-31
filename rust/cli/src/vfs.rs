@@ -11999,7 +11999,9 @@ pub fn default_outdir(src: &str) -> String {
     hidden_sibling(src, ".ice")
 }
 
-/// `.<basename><suffix>` in the same directory as `path`.
+/// `.<basename><suffix>` in the same directory as `path` - or, under a work
+/// directory (`--workdir DIR` / FLOE_WORKDIR, floe_vfs::workdir), at that
+/// absolute path below it: `/a/b/x.oas` -> `DIR/a/b/.x.oas.ice`.
 pub(crate) fn hidden_sibling(path: &str, suffix: &str) -> String {
     let p = std::path::Path::new(path);
     let name = p
@@ -12007,9 +12009,18 @@ pub(crate) fn hidden_sibling(path: &str, suffix: &str) -> String {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.to_string());
     let hidden = format!(".{}{}", name, suffix);
-    match p.parent() {
+    let beside = match p.parent() {
         Some(dir) if !dir.as_os_str().is_empty() => dir.join(hidden).to_string_lossy().into_owned(),
         _ => hidden,
+    };
+    match floe_vfs::workdir::workdir() {
+        Some(root) => floe_vfs::workdir::under(
+            root,
+            &floe_vfs::workdir::lexical_absolute(std::path::Path::new(&beside)),
+        )
+        .to_string_lossy()
+        .into_owned(),
+        None => beside,
     }
 }
 

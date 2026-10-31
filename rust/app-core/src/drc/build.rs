@@ -97,6 +97,10 @@ pub struct Build {
 }
 pub fn output_path(source: &Path) -> Result<PathBuf> {
     let source = cache::absolute(source)?;
+    // the work directory's mirror of the database's folder, before the
+    // output check canonicalizes it (cache::workdir; the lease that makes
+    // it for a cache comes later here)
+    cache::ensure_workdir_folder(&source)?;
     let output = cache::pack_paths(&source)?[0].clone();
     artifact::protected_output(&output, &[source], &[])
 }

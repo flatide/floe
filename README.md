@@ -137,6 +137,7 @@ alias floe="env PYTHONPATH=$PWD/tools/oracle:$PWD .venv/bin/python -m floe_oracl
 # tcsh: alias floe2 /path/to/floe2/rust/target/release/floe2
 
 floe2 index data/testchip_1g5.oas          # 1회: 공유 .<src>.ice/ 생성(소스 옆 숨김 폴더)
+floe2 index data/testchip_1g5.oas --workdir /ssd/floe-work  # 캐시를 소스 옆이 아니라 작업 디렉터리 아래에(모든 명령; FLOE_WORKDIR)
 floe2 index data/testchip_1g5.oas --jobs 1 # 병렬 끄기
 floe2 info  data/testchip_1g5.oas          # 인덱스가 없으면 먼저 만든다(render/probe/clip도; --no-index로 끔)
 floe2 view  data/testchip_1g5.oas
@@ -162,6 +163,12 @@ floe view data/testchip_1g5.oas            # 개발용 KLayout 셸 (동결, 비�
   - 원본이 바뀐 캐시는 다시 만들지 않는다. 예전처럼 경고와 함께 옛 캐시로 그리고,
     `floe2 index --force`가 다시 만든다.
   - `--no-index` 또는 `FLOE_AUTO_INDEX=off`이면 예전처럼 거절한다.
+- **작업 디렉터리(0.12.427, 2026-10-31).** `--workdir DIR`(모든 명령, 줄 어디서나; 기본
+  `FLOE_WORKDIR`)이면 캐시 `.x.oas.ice/`, DRC pack `.r.db.tray`, 리뷰·분석 사이드카, 잠금이
+  소스 옆이 아니라 DIR 아래 소스의 절대 경로 자리에 읽고 쓰인다(`/proj/a/x.oas` →
+  `DIR/proj/a/.x.oas.ice/`). 소스 폴더에 쓸 수 없거나 NFS 소스의 캐시를 로컬 디스크에 둘 때
+  쓴다. DIR은 없으면 만들고, 자식 프로세스(floe-index·renderd·GTK)에 `FLOE_WORKDIR`로
+  전해진다. 단독으로 돌리는 `floe-index`도 같은 옵션을 받는다(docs/CACHE-NAMING.ko.md §6).
 - `floe2 index`와 `floe index`는 같은 `floe-index vfs`를 실행한다. 같은 source
   fingerprint의 정상 캐시는 재사용하며 기존·불완전·stale 캐시 교체는 명시적
   `--force`가 있어야 한다. `--page-target-mb`, `--no-lod`, `--slow-cell-s`,

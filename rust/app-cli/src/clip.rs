@@ -23,6 +23,9 @@ const HELP: &str = "Usage: floe2-web clip SOURCE --bbox X0,Y0,X1,Y1 [OPTIONS]
                        removed when the clip ends: nothing is written beside it
   --wait[=SECONDS]     A source another run indexes: wait for it instead of exit 75
                        (SECONDS bounds it; FLOE_LOCK_WAIT=on|SECONDS); --no-wait
+  --workdir DIR        Read and write the cache under DIR at the source's absolute
+                       path (DIR/a/b/.x.oas.ice), not beside it (FLOE_WORKDIR;
+                       every command's, anywhere on the line)
   -h, --help           Show this help
 
 Uses the source's cache (indexed first when it has none, its output on stderr),

@@ -213,7 +213,17 @@ fn drc_prepare_handover(rest: &[String]) {
 
 fn main() {
     exit_quietly_on_broken_pipe();
-    let args: Vec<String> = std::env::args().collect();
+    let mut args: Vec<String> = std::env::args().collect();
+    // --workdir DIR / FLOE_WORKDIR (floe_vfs::workdir; user 2026-10-31): the
+    // default .<file>.ice / .<db>.tray go under it at the source's absolute
+    // path (vfs::hidden_sibling); any command, anywhere on the line; handed
+    // down as FLOE_WORKDIR to the floe2 a deck or drc-prepare is passed to
+    let mut rest = args.split_off(1);
+    if let Err(e) = floe_vfs::workdir::take_option(&mut rest) {
+        eprintln!("floe-index: {e}");
+        std::process::exit(2);
+    }
+    args.extend(rest);
     if args.len() >= 2 && (args[1] == "--version" || args[1] == "-V") {
         println!("{}", version());
         return;
@@ -271,7 +281,8 @@ fn main() {
     }
     if args.len() < 3 || args[1] != "scan" {
         eprintln!(
-            "usage: floe-index scan <file.oas> [jobs] [--seg-bytes N]  (sizing + segment statistics, docs/DIRECT_READ_PLAN.ko.md §8.1)\n       \
+            "usage: floe-index [--workdir DIR] <command> ...  (the default .<file>.ice / .<db>.tray under DIR at the source's absolute path instead of beside it - DIR/a/b/.x.oas.ice; an explicit outdir / --out / out.tray stays as given; FLOE_WORKDIR is the default; any command, anywhere on the line)\n       \
+             floe-index scan <file.oas> [jobs] [--seg-bytes N]  (sizing + segment statistics, docs/DIRECT_READ_PLAN.ko.md §8.1)\n       \
              floe-index inventory <file.oas> [--jobs N] [--check] [--check-cells] [--cells] [--out design.inv] [--seg design.seg] [--seg-bytes N] [--check-seg]  \
              (the streaming build's first pass: cell table, layer order, hierarchy fold; --check holds it to the Doc pre-passes, --check-cells the cell parser to the Doc's cells; --out writes it as design.inv, FLOEINV1, and reads it back; --seg writes the segment directory design.seg, FLOESEG1, of the same walk and --check-seg holds its per-layer statistics to the Doc)\n       \
              floe-index inventory --load design.inv [--load-seg design.seg] [<file.oas>] [--cells] [--check]  (the files read back; with the source, compared to fresh ones)\n       \

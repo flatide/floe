@@ -124,6 +124,7 @@ layerprops, 셀 프레임과 라벨(덱은 라벨 없음, 밀도 없음).
 | `--temp-index[=DIR]` | 이 실행만의 폴더(DIR, 없으면 `$TMPDIR`)에 색인해 읽고 끝나면 폴더째 지운다. 소스 옆에는 아무것도 남지 않는다. 덱 캡처의 광역 pass가 요약을 기다리면 거기 요약을 만들고 다시 그린다(`--occupancy off`면 요약 없이). `--no-index`와 함께 쓸 수 없다 |
 | `--light` / `--full` | 자동 색인이 만드는 캐시의 종류. 말하지 않으면 덱의 소스는 light, 레이아웃은 full(`FLOE_INDEX_LIGHT=on\|off`). 이미 있는 캐시는 그대로 연다 |
 | `--wait[=SECONDS]` / `--no-wait` | 다른 실행이 색인 중인 소스를 75로 거부하지 않고 기다린다(`FLOE_LOCK_WAIT=on\|SECONDS`) |
+| `--workdir DIR` | 캐시(덱이면 모든 소스의)를 소스 옆이 아니라 DIR 아래 소스의 절대 경로 자리에서 읽고 쓴다(`/proj/a/x.oas` → `DIR/proj/a/.x.oas.ice/`). 소스 옆은 읽지도 쓰지도 않는다. DIR은 없으면 만든다. 모든 floe2 명령이 받고 줄 어디에 있어도 된다(`FLOE_WORKDIR`이 기본; [CACHE-NAMING.ko.md](CACHE-NAMING.ko.md) §6) |
 
 - 자동 색인은 `floe2 index`의 기본값(스트리밍, `--mem`, 요약 상한)으로 돈다. 다르게 만들려면 미리
   `floe2 index SOURCE [--light|--full] [--occupancy] [--level N] …`을 돌린다.
@@ -316,6 +317,7 @@ floe2: indexing SOURCE first failed (exit 71 …; see above)
 | 변수 | 기본 | 뜻 |
 |---|---|---|
 | `FLOE_AUTO_INDEX` | on | `off`면 인덱스 없는 소스를 거부(`--no-index`) |
+| `FLOE_WORKDIR` | 없음(소스 옆) | 캐시·pack·사이드카를 읽고 쓰는 작업 디렉터리(`--workdir DIR`; §1.5). floe2가 자식 프로세스에 내보내는 것이기도 하다 |
 | `FLOE_INDEX_LIGHT` | 덱 on, 레이아웃 off | 자동 색인이 만드는 캐시의 종류(`--light`/`--full`) |
 | `FLOE_LOCK_WAIT` | off | `on`이나 초: 색인 중인 소스를 기다린다(`--wait`) |
 | `FLOE_DECK_WINDOW` | on | `off`면 덱 캡처가 로드한 레벨의 모든 소스를 연다(§4.4) |
@@ -403,6 +405,7 @@ csh/tcsh 호스트에서는 `(floe2 render … > render.out) >& render.err`처�
 | [JOBDECK.ko.md](JOBDECK.ko.md) §7 | `floe2 render`의 M4 이력: 영역·mosaic·batch 규칙, 칩 on/off, 임시 인덱스, 캡처 창 |
 | [DRC-CLI.ko.md](DRC-CLI.ko.md) §3 | DRC 에러 스냅샷 |
 | [DIRECT_READ_PLAN.ko.md](DIRECT_READ_PLAN.ko.md) §8.11, §8.29, §8.30 | 캡처는 요약을 만들지 않는다, 임시 인덱스, 캡처 창의 측정과 판정 |
+| [CACHE-NAMING.ko.md](CACHE-NAMING.ko.md) | 캐시·pack·사이드카의 이름과 잠금, `--workdir`의 작업 디렉터리(§6) |
 | [SHARED_APP_LAYER.ko.md](SHARED_APP_LAYER.ko.md) §12 | 읽기 명령의 자동 색인과 대기, 캡처 창의 배관 |
 | [SPEC-VIEWER.ko.md](SPEC-VIEWER.ko.md) | 뷰어의 키(Ctrl+C 클립보드 복사)와 렌더 파이프라인 |
 | [OCCUPANCY_PLAN.ko.md](OCCUPANCY_PLAN.ko.md), [CUT_DENSITY_DESIGN.ko.md](CUT_DENSITY_DESIGN.ko.md) | 점유 요약과 컷 아래 밀도의 설계 |

@@ -46,6 +46,16 @@ impl AccessScope {
             }
             resolved.insert(p);
         }
+        // the work directory (cache::workdir): the caches, the packs and
+        // their sidecars go under it, so every scope reaches it
+        if let Some(work) = cache::workdir() {
+            let p = fs::canonicalize(work)
+                .map_err(|e| Error::input(format!("work directory {}: {e}", work.display())))?;
+            if !p.is_dir() || p.parent().is_none() {
+                return Err(Error::input("the work directory must be a non-root directory"));
+            }
+            resolved.insert(p);
+        }
         Ok(Arc::new(Self {
             roots: resolved.into_iter().collect(),
         }))

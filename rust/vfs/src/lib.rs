@@ -14,6 +14,7 @@ pub mod occupancy;
 pub mod places;
 pub mod representatives;
 pub mod text;
+pub mod workdir;
 
 use floe_ovm::{BBox, Ovm};
 use floe_tiler::Xf;

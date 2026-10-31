@@ -22,7 +22,14 @@ static HOST: Host = Host {
 };
 
 fn main() {
-    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let mut args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    // --workdir DIR / FLOE_WORKDIR (floe-app-cli workdir.rs): every
+    // command's, the viewer's and its service's too - taken here, before the
+    // command is known, and handed down as FLOE_WORKDIR
+    if let Err(e) = floe_app_cli::take_workdir(&mut args) {
+        eprintln!("floe2: {e}");
+        std::process::exit(2);
+    }
     let first = args.first().and_then(|a| a.to_str()).unwrap_or("");
     // the GTK viewer's non-UI answers (P2): spawned by floe/gtkservice.py
     if first == "gtk-service" {

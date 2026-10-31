@@ -646,6 +646,14 @@ impl WriteLease {
         Self::open(directory, false)
     }
     fn open(directory: &Path, create: bool) -> Result<Self> {
+        // the folder the lock and the cache go in: the source's, there
+        // already, or the work directory's mirror of it (cache::workdir),
+        // made by the first writer
+        if create {
+            if let Some(parent) = directory.parent().filter(|p| !p.as_os_str().is_empty()) {
+                fs::create_dir_all(parent)?;
+            }
+        }
         let mut path = directory.as_os_str().to_owned();
         path.push(".index.lock");
         // Persistent zero-byte inode: unlink-on-unlock would allow a second

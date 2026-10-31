@@ -304,7 +304,11 @@ def parser():
     p = argparse.ArgumentParser(
         prog="floe2 view",
         description="native desktop viewer (GTK3); one instance per (uid, "
-                    "DISPLAY) - later calls forward the path to it")
+                    "DISPLAY) - later calls forward the path to it",
+        epilog="--workdir DIR (every floe2 command, anywhere on the line; "
+               "FLOE_WORKDIR): the caches are read and written under DIR at "
+               "the source's absolute path, not beside the source; floe2 "
+               "takes it before this entry")
     p.add_argument("src", nargs="?", default=None,
                    help="OASIS source (omit to start empty and use "
                         "File > load layout…)")
