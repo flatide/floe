@@ -136,6 +136,15 @@
   - NFS `nolock`·`local_lock=` 마운트면 처음 한 번 "이 호스트 안에서만"이라고
     경고한다(`/proc/mounts`).
   - 킬 스위치 `FLOE_LOCK=off`.
+- **pack 빌드 `floe2 drc DB --build`(2026-11-01, app 0.12.428):** floe2의 pack 빌드도 pack의
+  키(`X.db.pack`, `.X.db.tray` 경로에서; `--workdir`이면 미러의 `.floe-lock/`)로 `.build`를 실행
+  내내 쥐고, 기존 pack을 바꾸거나 구 이름을 개명하기 직전부터 `.use`를 배타로 쥔다. 그대로
+  재사용하는 `--build`는 `.build`만 쥐어 리뷰로 연 쪽을 건드리지 않는다. 0.12.427까지는
+  floe-index를 비공개 스테이징 경로에 `FLOE_LOCK=off`로 돌리고 lease `.tray.index.lock`만
+  쥐었으므로 pack의 `.build`를 쥔 쪽도, 리뷰로 연 쪽도 floe2의 재빌드를 막지 못했다. 거절은
+  `[floe2] DRC build: …`와 `[lock] …` 두 줄(쥔 사람을 댄다), 종료 75다. 사용자(2026-11-01):
+  "pack의 .floe-lock 잠금도 .tray 키로 잡게 고쳐줘." 게이트 `index_lock` K8, 단위 테스트
+  app-core drc/build/tests.rs.
 - 누가 무엇을 쥐는지(명령별)는 SPEC-INDEXER §4.5, 뷰어의 동작은 SPEC-VIEWER를 본다.
   게이트는 `index_lock`이다.
 
@@ -198,5 +207,6 @@
   읽는 등록(`use.<host>.<pid>.<n>`)이 `--force`를 75로 막고, `--wait`는 미러의 작성자를 기다린 뒤
   다시 만들며, 미러의 `.index.lock`을 쥔 쪽은 "another Rust application" 75다. 소스 옆에 쥔 잠금은
   `--workdir` 실행에 아무 영향이 없고(다른 키), 옆으로 돌린 같은 실행은 막힌다. pack의
-  `.floe-lock` 작성자 잠금은 floe-index가 스테이징 파일 경로로 잡는 기존 동작이라 작업 디렉터리와
-  무관하게 `.tray` 이름의 키를 쓰지 않는다(lease `.tray.index.lock`은 미러에 놓인다).
+  `.floe-lock` 잠금은 0.12.427까지 floe2의 빌드가 잡지 않았고(floe-index를 스테이징 경로에
+  `FLOE_LOCK=off`로 돌려 lease `.tray.index.lock`만 미러에 놓였다), 0.12.428부터 `floe2 drc --build`가
+  `.tray` 경로의 키로 미러의 `.floe-lock/`에 잡는다(§5 pack 빌드; 게이트 `index_lock` K8).

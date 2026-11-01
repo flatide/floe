@@ -84,6 +84,9 @@ impl Snapshot {
 }
 struct State {
     snapshot: Snapshot,
+    /// why the run failed, in its words (the pack's lock names who is in
+    /// the way)
+    failure_message: Option<String>,
     // The same mutex serializes cancel and publication. A late cancel must not
     // turn an already published output into a cancelled/ambiguous job result.
     sealed: bool,
@@ -134,6 +137,7 @@ impl Build {
         let stop = Arc::new(AtomicUsize::new(0));
         let state = Arc::new(Mutex::new(State {
             sealed: false,
+            failure_message: None,
             snapshot: Snapshot {
                 id,
                 phase: Phase::Preparing,
@@ -165,6 +169,7 @@ impl Build {
                     Err(e) => {
                         eprintln!("[{}] DRC build: {e}", crate::program());
                         s.snapshot.failure = Some(e.kind);
+                        s.failure_message = Some(e.message.clone());
                         s.snapshot.phase = if e.kind == ErrorKind::Cancelled {
                             Phase::Cancelled
                         } else {
@@ -190,6 +195,11 @@ impl Build {
             s.elapsed_ms = millis(self.started);
         }
         s
+    }
+    /// Why the build failed, in its words (a refused lock says who holds
+    /// the pack): None until it has failed.
+    pub fn failure_message(&self) -> Option<String> {
+        self.state.lock().unwrap().failure_message.clone()
     }
     pub fn cancel(&self) {
         cancel(&self.state, &self.stop);
@@ -273,6 +283,42 @@ fn unchanged_target(target: &Path, old: Option<&Input>) -> Result<()> {
         )),
     }
 }
+/// The pack's lock key (floe_vfs::lock, kind Pack): `.floe-lock/<db>.pack`
+/// beside the pack - in the work directory's mirror under --workdir - the
+/// key a `floe-index drc` and the pack's readers (local.rs pack_reader)
+/// use; the legacy `<db>.ice` shares it.
+fn pack_key(target: &Path) -> floe_vfs::lock::Key {
+    floe_vfs::lock::key(floe_vfs::lock::Kind::Pack, &target.to_string_lossy())
+}
+/// Hold the pack's `.build` for the run: a second build of it - another
+/// floe2, a `floe-index drc` - is refused naming this one, and refuses
+/// this one (ErrorKind::Busy, exit 75); a lock that cannot be taken is an
+/// Io error with what to do (FLOE_LOCK=off runs without it).
+fn pack_writer(key: &floe_vfs::lock::Key) -> Result<floe_vfs::lock::WriterGuard> {
+    floe_vfs::lock::writer(
+        key,
+        floe_vfs::lock::Mode::Additive,
+        &format!("{} drc --build", crate::program()),
+    )
+    .map_err(busy_error)
+}
+/// Hold the pack's readers out (`.use` exclusive) before the run replaces
+/// or renames the pack: one holding it - a viewer, a review, a DRC read -
+/// refuses the run as in use, and a reader coming in is refused until the
+/// run ends.
+fn exclude_pack_readers(
+    lock: &mut floe_vfs::lock::WriterGuard,
+    key: &floe_vfs::lock::Key,
+) -> Result<()> {
+    lock.exclude_readers(key).map_err(busy_error)
+}
+fn busy_error(busy: floe_vfs::lock::Busy) -> Error {
+    let kind = match busy {
+        floe_vfs::lock::Busy::Error { .. } => ErrorKind::Io,
+        _ => ErrorKind::Busy,
+    };
+    Error::new(kind, busy.to_string())
+}
 fn run(
     scope: &AccessScope,
     source: &Path,
@@ -296,6 +342,19 @@ fn run(
         ));
     }
     let _leases = WriteLease::acquire_aliases(&cache::pack_paths(source)?)?;
+    // the pack's own lock (floe_vfs::lock, kind Pack; user 2026-11-01:
+    // "pack의 .floe-lock 잠금도 .tray 키로 잡게 고쳐줘"): keyed on the pack
+    // - `.r.db.tray` -> `.floe-lock/r.db.pack.*` beside it, in the work
+    // directory's mirror under --workdir - as a `floe-index drc` and the
+    // pack's readers key theirs. The indexer runs on a private staging path
+    // with its own locks off (PRIVATE_TARGET), so until 0.12.427 a floe2
+    // build held the app lease alone: a pack's build lock did not refuse
+    // it, and it refused neither a `floe-index drc` nor a reader. `.build`
+    // is held for the whole run; `.use` exclusive from the point the run
+    // replaces or renames the pack (exclude_pack_readers) - a build that
+    // reuses the pack as it is leaves its readers be.
+    let key = pack_key(target);
+    let mut lock = pack_writer(&key)?;
     // output_path resolves the parent but preserves the logical source name.
     // Compare candidates in that same namespace: /var vs /private/var (or any
     // directory symlink) is not a legacy rename. Do not resolve the cache leaf;
@@ -323,6 +382,10 @@ fn run(
         }
         input.unchanged_at(source)?;
         unchanged_target(&selected, old.as_ref())?;
+        if selected != target {
+            // the legacy pack is renamed: not under a reader of it
+            exclude_pack_readers(&mut lock, &key)?;
+        }
         let mut s = state.lock().unwrap();
         check_cancelled(stop)?;
         if selected != target {
@@ -343,6 +406,9 @@ fn run(
             directory_synced: s.snapshot.migration.is_none_or(|m| m.directory_synced),
         });
     }
+    // the pack is built anew and the one there replaced (a legacy one
+    // renamed): its readers must be out, before the indexer's work
+    exclude_pack_readers(&mut lock, &key)?;
     indexer.verify(stop)?;
     if selected != target {
         input.unchanged_at(source)?;

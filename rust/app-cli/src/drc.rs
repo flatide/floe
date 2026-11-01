@@ -349,9 +349,13 @@ fn build_pack(
                 return Ok(0);
             }
             let message = if s.native.drc_noninteger {
-                "DRC pack requires integer DBU coordinate tokens; keep using read-only ASCII for fractional input"
+                "DRC pack requires integer DBU coordinate tokens; keep using read-only ASCII for fractional input".to_string()
+            } else if s.failure == Some(ErrorKind::Busy) {
+                // the pack's lock refused the build (app-core drc/build.rs):
+                // the `[lock]` line says who is in the way, as floe-index does
+                job.failure_message().unwrap_or_default()
             } else {
-                "DRC pack build did not publish an output"
+                "DRC pack build did not publish an output".to_string()
             };
             return Err(Error::new(s.failure.unwrap_or(ErrorKind::Worker), message));
         }

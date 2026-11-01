@@ -433,6 +433,7 @@ CACHE-NAMING §5에 있다.
 | `light --occupancy-only` | 배타 | 새 design.ovo면 — ; 기존 design.ovo를 바꾸면 배타 |
 | `vfsd` | — | 공유 + 등록 |
 | `drc <db> [out]`(DRC 팩, 0.12.324) | 배타(임시 파일 쓸기 전부터) | 배타(팩 리더 `IcePack`이 연 동안은 거절) |
+| `floe2 drc <db> --build`(app-core drc/build.rs, 0.12.428) | 배타(lease 다음, 끝까지; 같은 키 `X.db.pack`) | 기존 pack을 바꾸거나 구 이름을 개명하기 직전부터 배타; 그대로 재사용하면 — |
 | `svrf <deck> [-o out]`(0.12.324) | 배타(쓰기 직전; `--scan`은 없음) | — |
 
 - 독자가 mmap하는 기존 파일(`design.ovh/.ovo/.ovr`)을 바꾸는 실행은 use를 배타로 쥔다
@@ -462,6 +463,10 @@ CACHE-NAMING §5에 있다.
   (`FLOE_LOCK_WAIT=on|SECONDS`)는 거절된 뒤 앞선 실행이 끝날 때까지 탐침으로 기다렸다가
   다시 시도한다. 다시 만들기라면 연 사람이 닫을 때까지다. 잠금 자체는 여전히 기다리지
   않는다. 읽기 명령은 인덱스가 아예 없는 원본을 먼저 인덱싱한다(SHARED_APP_LAYER §12).
+- `floe2 drc --build`는 floe-index를 비공개 스테이징 경로에 `FLOE_LOCK=off`로 돌린다
+  (app-core index.rs PRIVATE_TARGET: 스테이징 폴더 안에 `.floe-lock`이 생기면 정리가
+  거절한다). 그래서 0.12.427까지는 pack의 `.build`를 쥔 쪽도 리뷰로 연 쪽도 floe2의 재빌드를
+  막지 못했다. 0.12.428부터 floe2가 최종 pack 경로의 키로 직접 쥔다(CACHE-NAMING §5).
 - 프로파일 실행(`--profile-cell`)은 캐시를 쓰지 않으므로 잡지 않는다.
 - 같은 실행 안에서 그 잠금을 쥔 채 덧붙이는 단계(`write_hier`, ovs)는 함수 호출이라
   다시 잡지 않는다.

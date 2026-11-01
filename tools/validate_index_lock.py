@@ -44,7 +44,11 @@ another user would (FLOE_REVIEWER=ws_kim_01):
       refuses a re-pack naming it, closed it packs; the pack's build lock
       held refuses `floe-index drc` and leaves the pack byte for byte, and
       opening it (`floe2 drc`, the viewer) says "being indexed"; a failed
-      pack (an unreadable .db) leaves the published pack
+      pack (an unreadable .db) leaves the published pack; `floe2 drc
+      --build` takes the pack's lock too (0.12.428): the build lock held
+      refuses `--force` naming the holder, a review holding the pack lets
+      a reuse by and refuses a replacement as in use, the lock says
+      `floe2 drc --build`, and under --workdir it sits in the mirror
   K9  a rule deck's sidecar: its build lock held refuses `floe-index
       svrf`, the rules file byte for byte
   K10 (2026-10-18) render / info --json / probe / clip on a source with no
@@ -962,6 +966,63 @@ class PackLockTests(unittest.TestCase):
         res = floe2("drc", self.db)
         self.assertEqual(res.returncode, 75, res.stderr)
         self.assertIn("run.db is being indexed by %s" % HOLDER, lock_line(res))
+
+    def test_k8_floe2_build_holds_the_packs_lock(self):
+        # `floe2 drc --build` takes the pack's own lock, keyed on the pack
+        # (0.12.428; user 2026-11-01: "pack의 .floe-lock 잠금도 .tray 키로
+        # 잡게 고쳐줘"): it ran floe-index on a private staging path with
+        # FLOE_LOCK=off and held the app lease alone, so the pack's build
+        # lock did not refuse it, nor did its readers
+        from floe_oracle import drc
+        before = self.pack.read_bytes()
+        build_file = self.pack.parent / ".floe-lock" / "run.db.pack.build"
+        lock = indexlock.try_writer(indexlock.PACK, str(self.pack), full=False,
+                                    what="gate_holder pack", create=True)
+        self.assertIsNotNone(lock)
+        try:
+            res = floe2("drc", self.db, "--build", "--force", "--jobs", "2")
+            self.assertEqual(res.returncode, 75, res.stderr)
+            self.assertIn("run.db is being indexed by %s" % HOLDER, lock_line(res))
+            self.assertIn("(gate_holder pack)", lock_line(res))
+            self.assertEqual(self.pack.read_bytes(), before, "the published pack is kept")
+        finally:
+            lock.close()
+        review = drc.load_db(str(self.db))
+        self.assertIsInstance(review, drc.IcePack)
+        try:
+            # a build that reuses the pack as it is leaves the review be
+            res = floe2("drc", self.db, "--build", "--jobs", "2", ok=0)
+            self.assertTrue(json.loads(res.stdout)["reused"], res.stdout)
+            # one that replaces it is refused as in use, naming the review
+            res = floe2("drc", self.db, "--build", "--force", "--jobs", "2")
+            self.assertEqual(res.returncode, 75, res.stderr)
+            line = lock_line(res)
+            self.assertIn("run.db is in use by %s" % HOLDER, line)
+            self.assertIn("pid %d" % os.getpid(), line)
+            self.assertEqual(self.pack.read_bytes(), before)
+        finally:
+            review.close()
+        # free: the rebuild runs under the pack's lock, which says who it was
+        res = floe2("drc", self.db, "--build", "--force", "--jobs", "2", ok=0)
+        self.assertFalse(json.loads(res.stdout)["reused"], res.stdout)
+        self.assertIn("what=floe2 drc --build", build_file.read_text())
+        # under --workdir the lock sits in the mirror, keyed the same: a
+        # holder there refuses the --workdir build and leaves the one
+        # beside the db alone (CACHE-NAMING §6)
+        wd = self.dir / "wd"
+        mirror = wd / Path(os.path.abspath(str(self.db))).relative_to("/").parent / ".run.db.tray"
+        floe2("drc", self.db, "--build", "--workdir", wd, "--jobs", "2", ok=0)
+        self.assertTrue((mirror.parent / ".floe-lock" / "run.db.pack.build").is_file(), mirror)
+        lock = indexlock.try_writer(indexlock.PACK, str(mirror), full=False,
+                                    what="gate_holder mirror", create=True)
+        self.assertIsNotNone(lock)
+        try:
+            res = floe2("drc", self.db, "--build", "--force", "--workdir", wd, "--jobs", "2")
+            self.assertEqual(res.returncode, 75, res.stderr)
+            self.assertIn("(gate_holder mirror)", lock_line(res))
+            floe2("drc", self.db, "--build", "--jobs", "2", ok=0)
+        finally:
+            lock.close()
 
     def test_k8_a_failed_pack_keeps_the_published_one(self):
         before = self.pack.read_bytes()

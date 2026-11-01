@@ -39,7 +39,10 @@ floe-index drc results.db [out.tray] [--jobs N]
 발견 시 자동 개명)를 만든다. `floe2 … --workdir DIR`(또는 `FLOE_WORKDIR`)이면 pack과
 그 뒤를 잇는 `.results.db.analysis/`·리뷰 `.sqlite3`·waive·notes 사이드카가 db 옆이 아니라
 DIR 아래 db의 절대 경로 자리에 놓인다(CACHE-NAMING.ko.md §6). `floe-index drc`를 단독으로
-돌릴 때도 같은 `--workdir`과 `FLOE_WORKDIR`을 받고, 명시한 `[out.tray]`는 그대로다. 이후 모든 명령이 신선한
+돌릴 때도 같은 `--workdir`과 `FLOE_WORKDIR`을 받고, 명시한 `[out.tray]`는 그대로다. `floe2 drc DB --build`
+(명시 빌드·재사용·구 이름 개명)는 0.12.428부터 pack의 `.floe-lock` 잠금을 `floe-index drc`와 같은 키로
+쥔다. 다른 빌드가 쥐고 있으면 75로 누가 쥐었는지 대고, 리뷰어가 연 pack은 `--force` 교체를 "in use"로
+거절하며, 그대로 재사용하는 `--build`는 지나간다(CACHE-NAMING.ko.md §5). 이후 모든 명령이 신선한
 pack을 자동 사용한다(소스 size/mtime 대조). pack이 없거나 낡으면
 **ASCII 전체 파스로 폴백**(stderr 안내) — 수백 MB급부터 매우
 느리므로 스크립트는 pack을 먼저 만들 것. `--pack`은 호환용

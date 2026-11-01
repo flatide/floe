@@ -20,6 +20,7 @@ impl Drop for Folder {
 fn state() -> Mutex<State> {
     Mutex::new(State {
         sealed: false,
+        failure_message: None,
         snapshot: Snapshot {
             id: 1,
             phase: Phase::Preparing,
@@ -137,4 +138,67 @@ fn cancellation_and_commit_have_one_winner_and_creation_never_clobbers() {
     fs::write(&target, b"other writer").unwrap();
     assert!(commit(&tmp, &target, false, &state(), &AtomicUsize::new(0)).is_err());
     assert_eq!(fs::read(&target).unwrap(), b"other writer");
+}
+#[test]
+fn the_pack_lock_is_keyed_on_the_pack_and_refuses_a_writer_or_readers_under_a_replacement() {
+    // user 2026-11-01: "pack의 .floe-lock 잠금도 .tray 키로 잡게 고쳐줘"
+    let folder = Folder::new();
+    let source = folder.0.join("input.db");
+    fs::write(&source, b"TOP 1000\n").unwrap();
+    let target = output_path(&source).unwrap();
+    let key = pack_key(&target);
+    assert_eq!(
+        (key.dir.clone(), key.name.as_str(), key.subject.as_str()),
+        (folder.0.join(".floe-lock"), "input.db.pack", "input.db")
+    );
+    let scope = AccessScope::new(&[folder.0.clone()]).unwrap();
+    let indexer = Indexer::discover(&crate::native::Discovery {
+        override_path: Some(PathBuf::from("/bin/sh")),
+        development_root: None,
+        executable: PathBuf::from("/unused"),
+        search_path: None,
+    })
+    .unwrap();
+    let stop = AtomicUsize::new(0);
+    let attempt = |force: bool| {
+        run(
+            &scope,
+            &source,
+            &target,
+            Options { jobs: 2, force },
+            &indexer,
+            &stop,
+            &state(),
+        )
+    };
+    // another build of this pack holds its .build: refused, naming it
+    let other =
+        floe_vfs::lock::writer(&key, floe_vfs::lock::Mode::Additive, "floe-index drc").unwrap();
+    let e = attempt(false).unwrap_err();
+    assert_eq!(e.kind, ErrorKind::Busy, "{}", e.message);
+    assert!(e.message.starts_with("input.db is being indexed by "), "{}", e.message);
+    assert!(
+        e.message.ends_with("(floe-index drc) - try again when it finishes"),
+        "{}",
+        e.message
+    );
+    drop(other);
+    // a reader holds the pack: a build that would replace it is refused as
+    // in use, naming the reader - before the indexer runs
+    let reader = floe_vfs::lock::readers(&[key.clone()], "floe2 view").unwrap();
+    let e = attempt(true).unwrap_err();
+    assert_eq!(e.kind, ErrorKind::Busy, "{}", e.message);
+    assert!(e.message.starts_with("input.db is in use by "), "{}", e.message);
+    assert!(e.message.contains("(floe2 view)"), "{}", e.message);
+    drop(reader);
+    // nothing in the way: the run goes on to its indexer (/bin/sh is none)
+    // under the pack's lock, which says who it was
+    let e = attempt(true).unwrap_err();
+    assert_ne!(e.kind, ErrorKind::Busy, "{}", e.message);
+    let text = fs::read_to_string(key.dir.join("input.db.pack.build")).unwrap();
+    assert!(
+        text.contains(&format!("what={} drc --build", crate::program())),
+        "{text}"
+    );
+    assert!(!target.exists());
 }
