@@ -625,8 +625,8 @@ floe2 view chip.oas --drc run1/results.db          # 이전 실행
 
 ## 3. 방문·검토 제외·통계 (현재 실행, 내 리뷰는 비어 있다)
 
-- 에러를 열어 도형이 화면에 그려지면 목록 번호 앞에 `V`, 우클릭
-  `mark not for review`로 `X`. Tab으로 오버레이를 숨긴 채 연 에러는 방문이 아니다.
+- 에러를 열어 도형이 화면에 그려지면 목록 번호에 밑줄, 우클릭
+  `mark not for review`로 회색 표시. Tab으로 오버레이를 숨긴 채 연 에러는 방문이 아니다.
 - 패널의 Whole DB / Whole rule 통계, `export review statistics…`(CSV).
 
 ## 4. 공동 검토 (DRC > reviewers…)

@@ -7195,7 +7195,7 @@ class Viewer:
         info.set_ellipsize(Pango.EllipsizeMode.START)
         top.pack_start(info, True, True, 2)
         win._info = info
-        review_info = Gtk.Label(label="underline: visited · strikethrough: not for review · * note")
+        review_info = Gtk.Label(label="underline: visited · gray: not for review · * note")
         review_info.set_xalign(0.0)
         review_info.set_line_wrap(True)
         review_info.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
@@ -7276,6 +7276,11 @@ class Viewer:
         grid.set_headers_visible(False)
         grid.set_enable_search(False)
         grid.get_selection().set_mode(Gtk.SelectionMode.NONE)
+        # Some GTK3 versions replace markup underlines with NONE for a
+        # prelit row. This grid owns its clicked/selected cell styles and
+        # has no hover selection, drag or tooltip: keep its markup intact.
+        grid.connect("enter-notify-event", lambda *_: True)
+        grid.connect("motion-notify-event", lambda *_: True)
         grid.connect("button-press-event", self._on_drc_grid_click)
         # the number array REFLOWS to the pane width instead of
         # scrolling horizontally (user call 2026-08-13)
@@ -10059,7 +10064,7 @@ class Viewer:
         if label is None:
             return
         db = getattr(self, "_drc", None)
-        legend = "underline: visited · strikethrough: not for review · * note"
+        legend = "underline: visited · gray: not for review · * note"
         if db is None or not hasattr(db, "review_counts"):
             label.set_text(legend)
             return
@@ -10922,11 +10927,8 @@ class Viewer:
         t = "%d" % (ei + 1)          # rule-local numbering
         flags = self._drc_review_flags(db, ci, ei)
         not_required = flags is not None and bool(flags & gtkservice.NOT_REQUIRED)
-        if flags is not None:
-            if flags & gtkservice.VISITED:
-                t = "<u>%s</u>" % t
-            if flags & gtkservice.NOT_REQUIRED:
-                t = "<s>%s</s>" % t
+        if flags is not None and flags & gtkservice.VISITED:
+            t = "<u>%s</u>" % t
         if noted:
             t = "*" + t              # note present (user call 2026-08-28)
         if flags is None:

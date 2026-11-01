@@ -173,9 +173,10 @@ python -m floe render chip.oas --drc results.db \
   현재 에러 또는 선택 전체에 지정·해제한다. 두 플래그는 함께 켜질 수 있고
   waive·waiver criteria와 **독립**이다. 검토 제외를 풀어도 방문 기록은 남고, 도형을
   봤다는 것이 승인·waive를 뜻하지 않는다. 방문한 에러는 목록 숫자 아래 밑줄,
-  검토 제외는 waived 여부와 관계없이 회색 숫자와 취소선으로 표시하며,
-  둘 다 해당하면 밑줄과 취소선을 함께
-  표시한다. 패널의 전체 DB·현재
+  검토 제외는 waived 여부와 관계없이 회색 숫자로 표시한다.
+  둘 다 해당하면 회색 숫자에 방문 밑줄을 함께 표시한다. 마우스가 행 위에 있어도
+  이 표시는 유지되며 클릭한 셀과 선택된 에러의 강조 표시는 별도로 유지한다.
+  패널의 전체 DB·현재
   **룰 전체** 통계와 룰별 CSV(`export review statistics…`). 미방문 검토 대상 =
   전체 − 검토 제외 − visited + 둘 다. 저장은 pack 옆 리뷰어별
   `.<db>.review.<리뷰어>.sqlite3`(4,096개 단위 두 비트맵과 증분 카운터; 도형을 읽지
@@ -669,7 +670,7 @@ floe2 view data/drc_samples/chip.oas --drc data/drc_samples/run2/results.db
 (이동·중복·순서·이름이 바뀐 룰)과 sample.db로 방문·검토 제외 파일, `.floereview`,
 집계·conflict, 적용, 이전 실행 승계, `floe2 drc-match`를 브랜치의 Python 모듈
 (`drc_review.py`, `drc_team.py`, `drc_migrate.py`)과 파일 행 단위로 대조하고 뷰어의
-방문 밑줄·검토 제외 취소선·리뷰어 창·승계 창을 띄워 본다.
+방문 밑줄·검토 제외 회색 표시·리뷰어 창·승계 창을 띄워 본다.
 
 ```sh
 # 실디자인 정렬 세트 (testchip_1g5.oas, 레이어 격리까지 검증)

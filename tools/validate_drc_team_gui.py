@@ -74,6 +74,69 @@ def _previous(d, check):
     return prev / "sample.db"
 
 
+def _review_grid_hover(v, check, pump):
+    """Hover must not let GTK replace the review markup on a whole row.
+    Exercise real widget signals without a Python cairo render callback."""
+    from floe import gui
+    grid = v._drcwin._grid
+    model = v._drcwin._gstore
+    before = [tuple(row) for row in model]
+    members = list(v._drc_grid_map)
+    path = gui.Gtk.TreePath.new_from_indices([0])
+    area = grid.get_cell_area(path, grid.get_columns()[0])
+    device = gui.Gdk.Display.get_default().get_default_seat().get_pointer()
+
+    def event(kind):
+        e = gui.Gdk.Event.new(kind)
+        e.window = grid.get_bin_window()
+        e.send_event = True
+        e.x, e.y = area.x + 3, area.y + area.height / 2
+        e.set_device(device)
+        return e
+
+    reached = []
+    handlers = [grid.connect_after(name, lambda *_: reached.append(True) or False)
+                for name in ("enter-notify-event", "motion-notify-event")]
+    try:
+        for name, kind in (("enter-notify-event", gui.Gdk.EventType.ENTER_NOTIFY),
+                           ("motion-notify-event", gui.Gdk.EventType.MOTION_NOTIFY)):
+            check(grid.emit(name, event(kind)), "review grid consumes " + name)
+        check(not reached, "hover stops before GTK's default row prelight")
+    finally:
+        for handler in handlers:
+            grid.disconnect(handler)
+    check([tuple(row) for row in model] == before and v._drc_grid_map == members,
+          "hover preserves visited underline and excluded gray markup")
+    click = event(gui.Gdk.EventType.BUTTON_PRESS)
+    click.button, click.state = 1, gui.Gdk.ModifierType(0)
+    grid.event(click)
+    release = event(gui.Gdk.EventType.BUTTON_RELEASE)
+    release.button, release.state = 1, gui.Gdk.ModifierType(0)
+    grid.event(release)
+    check(v._drc_cell == (0, 0), "click still marks one error cell after hover")
+    check(grid.emit("motion-notify-event", event(gui.Gdk.EventType.MOTION_NOTIFY)),
+          "hover remains guarded after a click")
+    # Hide the intermediate error's geometry so navigation cannot add an
+    # unrelated visit to R7's statistics expectations.
+    v.overlay_mode = 2
+    v._drc_step(1)
+    check(v._drc_pos == v._drc_cum[0] + 1, "next-error navigation still works")
+    v._drc_step(-1)
+    v.overlay_mode = 0
+    position, cols = v._lpaned.get_position(), v._drc_gridw
+    v._lpaned.set_position(position + 180)
+    pump(v, lambda: v._drc_gridw != cols, "review grid reflow")
+    cells = [c for row in v._drcwin._gstore for c in row if c]
+    check(v._drc_grid_map == members and any("<u>1</u>" in c for c in cells)
+          and any(">2</span>" in c and "foreground='#9e9e9e'" in c
+                  and "<s>" not in c for c in cells),
+          "resize keeps review marks and the same error membership")
+    check(grid.emit("motion-notify-event", event(gui.Gdk.EventType.MOTION_NOTIFY)),
+          "reflowed grid keeps the hover guard")
+    v._lpaned.set_position(position)
+    pump(v, lambda: v._drc_gridw == cols, "review grid width restored")
+
+
 def r7(temp, check):
     print("[R7] the viewer")
     sys.path[:0] = [str(ROOT / "tools"), str(ROOT)]
@@ -140,8 +203,10 @@ def r7(temp, check):
               and db.review_flags(0, 1) == gtkservice.NOT_REQUIRED, "not for review set",
               db.review_counts(0))
         cells = [c for row in v._drcwin._gstore for c in row if c]
-        check(any("<s>2</s>" in c and "foreground='#9e9e9e'" in c for c in cells),
-              "gray strikethrough on excluded numbers", cells[:4])
+        check(any(">2</span>" in c and "foreground='#9e9e9e'" in c
+                  and "<s>" not in c for c in cells),
+              "gray without strikethrough on excluded numbers", cells[:4])
+        _review_grid_hover(v, check, pump)
         out = d / "stats.csv"
         v._drc_review_export_start(str(out))
         pump(v, lambda: v._drc_review_job is None, "statistics export", 30)
