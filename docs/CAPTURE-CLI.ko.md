@@ -131,6 +131,10 @@ layerprops, 셀 프레임과 라벨(덱은 라벨 없음, 밀도 없음).
 - 같은 덱을 다시 찍을 것이면 `floe2 index deck.jb`가 낫다. 임시 인덱스는 쓸 수 없는 폴더나 정말 한 번뿐일
   때를 위한 것이고, 비용은 영구 색인과 같다(DIRECT_READ_PLAN §8.29).
 - 영역이 있는 덱 캡처는 그 영역이 닿는 배치의 소스만 열고 색인한다(§4.4).
+- 소스 옆에 쓸 수 없는 폴더면 자동 색인은 `indexing x.oas first: cannot write beside x.oas, in /proj/a:
+  Permission denied (os error 13) - … --workdir DIR (or FLOE_WORKDIR) puts them under a directory this
+  account can write, at the source's absolute path: DIR/proj/a/`로 1로 끝난다(0.12.430; `floe2 index`와
+  `drc --build`도 같은 말). `--workdir DIR`이나 `--temp-index`를 준다(CACHE-NAMING.ko.md §6).
 
 ---
 

@@ -368,19 +368,39 @@ def validate_rust_cli(base, fixture):
         shutil.copy2(fixture, held)
         scratch = work / "scratch"
         scratch.mkdir()
+        held_db = held_dir / "temp index.db"
+        shutil.copy2(ROOT / "sample.db", held_db)
         held_dir.chmod(0o555)
         try:
-            refused = rust(env, "render", held, "--px", "64", "--out", work / "held.png", ok=False)
-            check(refused.returncode != 0 and "its index is written beside it" in refused.stderr,
-                  "the auto-index in a folder that cannot be written did not say so: %d %s" % (
-                      refused.returncode, refused.stderr[-300:]))
+            # a folder this account cannot write: index, the auto-index of a
+            # capture and drc --build all say the folder, --workdir DIR and
+            # the mirror the folder would get, on their last line (0.12.430,
+            # user 2026-11-03: "세 명령 모두 --workdir 안내 메시지로 맞춰줘";
+            # before: "Permission denied (os error 13)" alone, "its index is
+            # written beside it" for render, "did not publish an output")
+            spellings = {str(held_dir), os.path.realpath(held_dir)}
+            for args in (("index", held, "--jobs", "2"),
+                         ("render", held, "--px", "64", "--out", work / "held.png"),
+                         ("drc", held_db, "--build", "--jobs", "2")):
+                refused = rust(env, *args, ok=False)
+                lines = refused.stderr.strip().splitlines()
+                last = lines[-1] if lines else ""
+                check(refused.returncode == 1
+                      and any("cannot write beside %s, in %s: " % (args[1].name, d) in last for d in spellings)
+                      and "Permission denied" in last and "--workdir DIR (or FLOE_WORKDIR)" in last
+                      and any(" DIR%s/" % d in last for d in spellings)
+                      and not (args[0] == "render" and "written beside it" in last),
+                      "floe2 %s in a folder that cannot be written did not name the folder and --workdir: %d %s" % (
+                          args[0], refused.returncode, last[-400:]))
+            check(sorted(p.name for p in held_dir.iterdir()) == sorted([held.name, held_db.name]),
+                  "a refused write left something in the folder: %s" % sorted(p.name for p in held_dir.iterdir()))
             temp_png = work / "temp index.png"
             res = rust(env, "render", held, "--temp-index=%s" % scratch, "--px", "64", "--out", temp_png)
             check("indexing it first in a temporary folder (--temp-index" in res.stderr,
                   "render --temp-index did not say where it indexes: %s" % res.stderr[-300:])
             check(temp_png.read_bytes() == reference.read_bytes(),
                   "the temporary index's capture differs from the one over the index beside the source")
-            check(sorted(p.name for p in held_dir.iterdir()) == [held.name],
+            check(sorted(p.name for p in held_dir.iterdir()) == sorted([held.name, held_db.name]),
                   "render --temp-index wrote beside the source: %s" % sorted(p.name for p in held_dir.iterdir()))
             check(not any(scratch.iterdir()),
                   "the temporary index was not removed: %s" % sorted(p.name for p in scratch.iterdir()))
@@ -495,6 +515,24 @@ def validate_rust_cli(base, fixture):
         check("indexing it first" in shot.stderr and (work / "fresh.png").read_bytes().startswith(b"\x89PNG")
               and (mirrored2 / "meta.json").is_file() and not Path(vfs_cache_dir(wd_src2)).exists(),
               "a capture's auto-index into a fresh work directory: %s" % shot.stderr[-300:])
+        # a work directory this account cannot write: the refusal names it
+        # and says to use another (cache::write_refusal; the mirror's folder
+        # is the lease's to make for a cache, output_path's for a pack)
+        ro_work = work / "ro work"
+        ro_work.mkdir()
+        ro_work.chmod(0o555)
+        try:
+            for args in (("index", wd_src, "--workdir", ro_work, "--jobs", "2"),
+                         ("drc", wd_db, "--build", "--workdir", ro_work, "--jobs", "2")):
+                res = rust(env, *args, ok=False)
+                lines = res.stderr.strip().splitlines()
+                last = lines[-1] if lines else ""
+                check(res.returncode == 1 and ("cannot write under the work directory %s, in %s" % (ro_work, ro_work)) in last
+                      and "use a work directory this account can write" in last,
+                      "floe2 %s --workdir into a directory that cannot be written did not name it: %d %s" % (
+                          args[0], res.returncode, last[-400:]))
+        finally:
+            ro_work.chmod(0o755)
         # floe-index itself takes --workdir / FLOE_WORKDIR (user 2026-10-31
         # "floe-index에도 --workdir을 넣어줘"; the rule is floe_vfs::workdir,
         # the app layer's too): its default .<file>.ice / .<db>.tray go under

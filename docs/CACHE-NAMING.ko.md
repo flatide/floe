@@ -196,6 +196,24 @@
   `ls DIR/proj/a`로 무엇의 캐시인지 보이며, 프로젝트 단위로 `rm -rf DIR/proj/a`가 된다.
   캐시의 `meta.json`이 소스를 적으므로 캐시가 소스 옆에 없어도 읽는 쪽은 소스를 찾는다
   (임시 인덱스 0.12.416과 같은 성질).
+- **쓸 수 없는 폴더의 안내(2026-11-03, app 0.12.430).** 사용자: "세 명령 모두 --workdir 안내 메시지로
+  맞춰줘." 소스 옆에 쓸 수 없는 폴더(EACCES·EPERM·EROFS)에서 `floe2 index`, 캡처의 자동 색인
+  (`render`·`info`·`probe`·`clip`), `floe2 drc --build`는 lease를 만들다 거절되는데, 전에는 각각
+  `Permission denied (os error 13)`뿐, `indexing X first: Permission denied (its index is written
+  beside it, in DIR)`, `DRC pack build did not publish an output`였다. 이제 셋 다 마지막 줄이
+  `cannot write beside x.oas, in /proj/a: Permission denied (os error 13) - the index, the pack and
+  the locks go beside the source; --workdir DIR (or FLOE_WORKDIR) puts them under a directory this
+  account can write, at the source's absolute path: DIR/proj/a/`이고 종료 1이다(render 등은
+  `indexing x.oas first:` 뒤에 같은 말). 작업 디렉터리를 주었는데 그 미러를 만들 수 없으면
+  `cannot write under the work directory DIR, in DIR/proj/a: Permission denied (os error 13) - the
+  index, the pack and the locks of x.oas go there (--workdir / FLOE_WORKDIR); use a work directory
+  this account can write`다. 권한이 아닌 오류(디스크 가득 등)는 위치만 댄다. 구현은 app-core
+  `cache::write_refusal`(names.rs)이고, 소스의 캐시·pack lease `WriteLease::acquire_aliases`
+  (index.rs; index·cell_index·drc build)와 미러 폴더를 만드는 `ensure_workdir_folder`가 쓴다.
+  `floe2 drc --build`의 마지막 줄은 Busy처럼 Io 실패도 빌드의 말을 그대로 낸다(app-cli drc.rs).
+  floe-index 단독 실행의 `[lock] … cannot take its lock … (FLOE_LOCK=off runs without the lock)`는
+  그대로다(floe2를 거치면 lease가 먼저 거절한다). 게이트 `floe2`(읽기 전용 폴더의 세 명령, 쓸 수
+  없는 작업 디렉터리), 단위 테스트 names.rs·index.rs.
 - **검증:** 게이트 `floe2`(tools/validate_floe2.py의 workdir 블록: 미러 위치, 소스 옆 무변화, 잠금
   위치, `--workdir=`·앞자리·`FLOE_WORKDIR`, `--no-index` 거절, render, 잘못된 값의 2, `view`의
   전달, 새 작업 디렉터리에의 첫 pack 빌드와 `--rules` 읽기, 새 작업 디렉터리로의 캡처 자동 색인,

@@ -350,10 +350,14 @@ fn build_pack(
             }
             let message = if s.native.drc_noninteger {
                 "DRC pack requires integer DBU coordinate tokens; keep using read-only ASCII for fractional input".to_string()
-            } else if s.failure == Some(ErrorKind::Busy) {
+            } else if matches!(s.failure, Some(ErrorKind::Busy | ErrorKind::Io)) {
                 // the pack's lock refused the build (app-core drc/build.rs):
-                // the `[lock]` line says who is in the way, as floe-index does
-                job.failure_message().unwrap_or_default()
+                // the `[lock]` line says who is in the way, as floe-index
+                // does; a folder that cannot be written (Io): the lease's
+                // words name it and --workdir (cache::write_refusal)
+                job.failure_message()
+                    .filter(|m| !m.is_empty())
+                    .unwrap_or_else(|| "DRC pack build did not publish an output".to_string())
             } else {
                 "DRC pack build did not publish an output".to_string()
             };

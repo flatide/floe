@@ -632,27 +632,42 @@ fn occupancy_args(a: &mut Vec<OsString>, o: &IndexOptions) {
 
 pub(crate) struct WriteLease(File);
 impl WriteLease {
-    pub(crate) fn acquire_aliases(paths: &[PathBuf]) -> Result<Vec<Self>> {
+    /// The leases of `source`'s cache or pack under both spellings; a
+    /// folder that cannot be written is refused naming it and --workdir
+    /// (cache::write_refusal).
+    pub(crate) fn acquire_aliases(source: &Path, paths: &[PathBuf]) -> Result<Vec<Self>> {
         // Fixed lexical order and both spellings serialize old/new writers.
         // Keep stable lock inodes; never remove them after a rename.
         let ordered: std::collections::BTreeSet<_> = paths.iter().collect();
-        ordered.into_iter().map(|p| Self::acquire(p)).collect()
+        ordered
+            .into_iter()
+            .map(|p| Self::open(p, true, Some(source)))
+            .collect()
     }
     pub(crate) fn acquire(directory: &Path) -> Result<Self> {
-        Self::open(directory, true)
+        Self::open(directory, true, None)
     }
     /// Read-only preparation/reclamation must not invent a missing lock inode.
     pub(crate) fn acquire_existing(directory: &Path) -> Result<Self> {
-        Self::open(directory, false)
+        Self::open(directory, false, None)
     }
-    fn open(directory: &Path, create: bool) -> Result<Self> {
+    fn open(directory: &Path, create: bool, source: Option<&Path>) -> Result<Self> {
+        // a folder the lease cannot be made in, said with where and what
+        // to do when it is a source's (user 2026-11-03: the read-only
+        // source folders of a site, --workdir the way)
+        let folder = directory
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("/"));
+        let refused = |e: std::io::Error| match source {
+            Some(s) => cache::write_refusal(e, s, folder),
+            None => Error::from(e),
+        };
         // the folder the lock and the cache go in: the source's, there
         // already, or the work directory's mirror of it (cache::workdir),
         // made by the first writer
         if create {
-            if let Some(parent) = directory.parent().filter(|p| !p.as_os_str().is_empty()) {
-                fs::create_dir_all(parent)?;
-            }
+            fs::create_dir_all(folder).map_err(refused)?;
         }
         let mut path = directory.as_os_str().to_owned();
         path.push(".index.lock");
@@ -665,7 +680,8 @@ impl WriteLease {
             .truncate(false)
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(PathBuf::from(path))?;
+            .open(PathBuf::from(path))
+            .map_err(refused)?;
         let m = f.metadata()?;
         if !m.is_file() || m.nlink() != 1 {
             return Err(Error::input("index lock must be a private regular file"));
@@ -840,7 +856,7 @@ impl PreparedIndex {
             }
             vec![WriteLease::acquire(dir)?]
         } else {
-            WriteLease::acquire_aliases(&cache::cache_paths(&source)?)?
+            WriteLease::acquire_aliases(&source, &cache::cache_paths(&source)?)?
         };
         // Resolution must be rechecked under both writer locks. Read-only
         // profile intentionally acquires neither locks nor migration authority.
@@ -1318,6 +1334,38 @@ mod tests {
             assert_eq!(done, code);
             assert_eq!(dir.join("design.ovo.tmp").exists(), kept, "exit {code}");
         }
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn a_lease_in_a_folder_this_account_cannot_write_names_the_folder_and_workdir() {
+        // the read-only source folders of a site (user 2026-11-03): the
+        // refusal says the folder and --workdir instead of the bare
+        // "Permission denied (os error 13)"; nothing is made there
+        if cache::workdir().is_some() || unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let dir = scratch("read-only-lease");
+        let source = dir.join("x.oas");
+        fs::write(&source, b"").unwrap();
+        let mode = |m: u32| {
+            fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(m)).unwrap()
+        };
+        mode(0o555);
+        let refused = WriteLease::acquire_aliases(&source, &cache::cache_paths(&source).unwrap())
+            .err()
+            .expect("a lease in a read-only folder");
+        mode(0o755);
+        assert_eq!(refused.kind, ErrorKind::Io);
+        assert!(
+            refused.message.starts_with(&format!("cannot write beside x.oas, in {}: ", dir.display())),
+            "{}",
+            refused.message
+        );
+        assert!(refused.message.contains("--workdir DIR"), "{}", refused.message);
+        assert_eq!(
+            fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect::<Vec<_>>(),
+            vec![std::ffi::OsString::from("x.oas")]
+        );
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]

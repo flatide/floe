@@ -13,7 +13,7 @@
 //! different folders apart and a folder of it readable by its path. The
 //! rule itself is floe_vfs::workdir, shared with floe-index's defaults.
 use super::absolute;
-use crate::{Error, Result};
+use crate::{Error, ErrorKind, Result};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -61,10 +61,59 @@ pub fn default_cache_path(source: &Path) -> Result<PathBuf> {
 pub fn ensure_workdir_folder(source: &Path) -> Result<()> {
     if workdir().is_some() {
         if let Some(parent) = default_cache_path(source)?.parent() {
-            fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent).map_err(|e| write_refusal(e, source, parent))?;
         }
     }
     Ok(())
+}
+/// An I/O error writing a derived file of `source` - its lease, its cache
+/// or pack, the mirror's folder - in `folder`, said with where and what to
+/// do (user 2026-11-03, a site whose sources are readable only with one
+/// folder to write under: "세 명령 모두 --workdir 안내 메시지로 맞춰줘"; the
+/// bare "Permission denied (os error 13)" of `index` and `drc --build`
+/// said neither where nor that --workdir is the way). Beside the source,
+/// a folder this account may not write (EACCES / EPERM / EROFS) names
+/// `--workdir DIR` and the mirror the source's folder would get; under a
+/// work directory it names the directory to change. Other errors say
+/// where. The kind stays Io.
+pub fn write_refusal(e: std::io::Error, source: &Path, folder: &Path) -> Error {
+    use std::io::ErrorKind as K;
+    let name = source
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| source.display().to_string());
+    let denied = matches!(e.kind(), K::PermissionDenied | K::ReadOnlyFilesystem);
+    let message = match workdir() {
+        Some(root) => format!(
+            "cannot write under the work directory {}, in {}: {e}{}",
+            root.display(),
+            folder.display(),
+            if denied {
+                format!(
+                    " - the index, the pack and the locks of {name} go there (--workdir / FLOE_WORKDIR); use a work directory this account can write"
+                )
+            } else {
+                String::new()
+            }
+        ),
+        None => format!(
+            "cannot write beside {name}, in {}: {e}{}",
+            folder.display(),
+            if denied {
+                let mirror = under_workdir(
+                    Path::new("DIR"),
+                    &floe_vfs::workdir::lexical_absolute(folder),
+                );
+                format!(
+                    " - the index, the pack and the locks go beside the source; --workdir DIR (or FLOE_WORKDIR) puts them under a directory this account can write, at the source's absolute path: {}/",
+                    mirror.display()
+                )
+            } else {
+                String::new()
+            }
+        ),
+    };
+    Error::new(ErrorKind::Io, message)
 }
 pub fn cache_paths(source: &Path) -> Result<[PathBuf; 2]> {
     Ok([default_cache_path(source)?, appended(source, ".floe")?])
@@ -226,6 +275,29 @@ mod tests {
                 [PathBuf::from("/tmp/.a.oas.ice"), PathBuf::from("/tmp/a.oas.floe")]
             );
             assert_eq!(original_of(Path::new("/tmp/.a.oas.ice")), None);
+        }
+    }
+
+    #[test]
+    fn a_folder_this_account_cannot_write_names_the_work_directory_option() {
+        // beside the source (no work directory in this process): the
+        // folder, --workdir DIR and the mirror the folder would get
+        if workdir().is_none() {
+            let denied = std::io::Error::from_raw_os_error(libc::EACCES);
+            let e = write_refusal(denied, Path::new("/proj/a/x.oas"), Path::new("/proj/a"));
+            assert_eq!(e.kind, ErrorKind::Io);
+            assert!(e.message.starts_with("cannot write beside x.oas, in /proj/a: "), "{}", e.message);
+            assert!(e.message.contains("Permission denied"), "{}", e.message);
+            assert!(e.message.contains("--workdir DIR (or FLOE_WORKDIR)"), "{}", e.message);
+            assert!(e.message.ends_with(": DIR/proj/a/"), "{}", e.message);
+            let read_only = std::io::Error::from_raw_os_error(libc::EROFS);
+            let e = write_refusal(read_only, Path::new("/r/run.db"), Path::new("/r"));
+            assert!(e.message.contains("--workdir DIR"), "{}", e.message);
+            // another error says where and no more
+            let full = std::io::Error::from_raw_os_error(libc::ENOSPC);
+            let e = write_refusal(full, Path::new("/proj/a/x.oas"), Path::new("/proj/a"));
+            assert!(e.message.starts_with("cannot write beside x.oas, in /proj/a: "), "{}", e.message);
+            assert!(!e.message.contains("--workdir"), "{}", e.message);
         }
     }
 }

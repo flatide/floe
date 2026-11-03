@@ -465,16 +465,22 @@ fn index_layout(
             }
             Err(e) if e.kind == ErrorKind::Busy => e,
             Err(e) if e.kind == ErrorKind::Cancelled => return Err(e),
-            // where it was to write (a folder this account may not write)
+            // where it was to write (a folder this account may not write),
+            // unless the refusal says so already - the lease's names the
+            // folder and --workdir (cache::write_refusal, 2026-11-03)
             Err(e) if e.kind == ErrorKind::Io => {
+                let place = if e.message.starts_with("cannot write") {
+                    String::new()
+                } else {
+                    format!(
+                        " (its index is written beside it, in {})",
+                        source.parent().unwrap_or(Path::new("/")).display()
+                    )
+                };
                 return Err(Error::new(
                     e.kind,
-                    format!(
-                        "indexing {name} first: {} (its index is written beside it, in {})",
-                        e.message,
-                        source.parent().unwrap_or(Path::new("/")).display()
-                    ),
-                ))
+                    format!("indexing {name} first: {}{place}", e.message),
+                ));
             }
             Err(e) => {
                 return Err(Error::new(

@@ -341,7 +341,7 @@ fn run(
             "DRC build requires an ASCII source, not an ICE pack",
         ));
     }
-    let _leases = WriteLease::acquire_aliases(&cache::pack_paths(source)?)?;
+    let _leases = WriteLease::acquire_aliases(source, &cache::pack_paths(source)?)?;
     // the pack's own lock (floe_vfs::lock, kind Pack; user 2026-11-01:
     // "pack의 .floe-lock 잠금도 .tray 키로 잡게 고쳐줘"): keyed on the pack
     // - `.r.db.tray` -> `.floe-lock/r.db.pack.*` beside it, in the work

@@ -472,7 +472,8 @@ P4d처럼 컨트롤러 루프에서만 바뀐다. `FLOE_GTK_LOOP=legacy`는 예�
   우선. 배관: `IndexOptions.out_dir`
   (`PreparedIndex`가 그 폴더에 리스와 잠금, 이름 이전 없음), `SourceCatalog.temp`/`SourceInfo.temp`, `AnalysisOptions.temp`,
   `Dataset::open_temp`, `DeckIndexPlan::prepare_for_open(.., temp)`, `cache::found`(ready.rs에서 옮김). 게이트: `floe2`
-  (쓸 수 없는 폴더의 레이아웃 - 기본은 `its index is written beside it` 거절, `--temp-index`는 옆 인덱스의 캡처와 바이트
+  (쓸 수 없는 폴더의 레이아웃 - 기본은 `cannot write beside …` 거절(0.12.430부터 `--workdir` 안내; 전에는 `its index is
+  written beside it`), `--temp-index`는 옆 인덱스의 캡처와 바이트
   동일·옆에 아무것도 없음·임시 폴더 제거; info, `--light`, `--no-index` 배타, 없는 DIR), `jobdeck` LightSummaryTests
   (덱: 광역 캡처가 요약을 만들고 다시 그려 영구 인덱스의 그림과 동일, 근접은 요약 없이, `--occupancy off`는 페이지로, info).
   1회성 캡처의 비용 판단은 DIRECT_READ_PLAN §8.29.

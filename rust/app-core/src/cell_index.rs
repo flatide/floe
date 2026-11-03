@@ -151,7 +151,7 @@ fn ensure_verified(
         ));
     }
     cache::fingerprint(&source)?;
-    let _lease = WriteLease::acquire_aliases(&cache::cache_paths(&source)?)?;
+    let _lease = WriteLease::acquire_aliases(&source, &cache::cache_paths(&source)?)?;
     // Resolve under both writer locks. Never migrate a legacy name here: an
     // open view reads the cache under the name it resolved.
     let directory = cache::cache_path(&source)?;
@@ -544,7 +544,7 @@ mod tests {
         assert_eq!(e.kind, ErrorKind::Cancelled);
         // Another writer holds the cache: refused, not waited for.
         flag.store(0, Ordering::Relaxed);
-        let held = WriteLease::acquire_aliases(&cache::cache_paths(&source).unwrap()).unwrap();
+        let held = WriteLease::acquire_aliases(&source, &cache::cache_paths(&source).unwrap()).unwrap();
         let e = ensure_verified(&source, &never, &flag, &mut |_| panic!("pass")).unwrap_err();
         assert_eq!(e.kind, ErrorKind::Busy);
         drop(held);

@@ -12,7 +12,7 @@ mod temp;
 pub(crate) use migration::rename_legacy;
 pub use migration::Migration;
 pub use names::{
-    cache_path, cache_paths, database_path, default_cache_path, ensure_workdir_folder,
+    cache_path, cache_paths, database_path, default_cache_path, ensure_workdir_folder, write_refusal,
     expand_user, original_of, pack_path, pack_paths, set_workdir, under_workdir, workdir,
 };
 pub use temp::{cache_dir_under, found, resolve_under, Found, TempIndex};

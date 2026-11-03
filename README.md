@@ -167,7 +167,10 @@ floe view data/testchip_1g5.oas            # 개발용 KLayout 셸 (동결, 비�
   `FLOE_WORKDIR`)이면 캐시 `.x.oas.ice/`, DRC pack `.r.db.tray`, 리뷰·분석 사이드카, 잠금이
   소스 옆이 아니라 DIR 아래 소스의 절대 경로 자리에 읽고 쓰인다(`/proj/a/x.oas` →
   `DIR/proj/a/.x.oas.ice/`). 소스 폴더에 쓸 수 없거나 NFS 소스의 캐시를 로컬 디스크에 둘 때
-  쓴다. DIR은 없으면 만들고, 자식 프로세스(floe-index·renderd·GTK)에 `FLOE_WORKDIR`로
+  쓴다. 소스 옆에 쓸 수 없으면 `index`·캡처의 자동 색인·`drc --build`가 `cannot write beside
+  x.oas, in /proj/a: Permission denied … --workdir DIR (or FLOE_WORKDIR) puts them under a directory
+  this account can write …`로 `--workdir`을 안내한다(0.12.430). DIR은 없으면 만들고, 자식
+  프로세스(floe-index·renderd·GTK)에 `FLOE_WORKDIR`로
   전해진다. 단독으로 돌리는 `floe-index`도 같은 옵션을 받는다(docs/CACHE-NAMING.ko.md §6).
 - `floe2 index`와 `floe index`는 같은 `floe-index vfs`를 실행한다. 같은 source
   fingerprint의 정상 캐시는 재사용하며 기존·불완전·stale 캐시 교체는 명시적
