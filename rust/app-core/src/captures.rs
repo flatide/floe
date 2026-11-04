@@ -45,6 +45,9 @@ struct Plan<'a> {
     /// the chips the capture names, and the default region they frame
     chips: Option<Selection>,
     region: [f64; 4],
+    /// the size asked when the 16 Mpx limit reduced the tiles (Shot::frame):
+    /// the report's `pixel_requested`
+    asked: Option<(u64, u64)>,
 }
 /// What a run of captures drew: whether every image is whole, and what
 /// they lack - the skipped placements of the chips some shot had on, the
@@ -295,7 +298,8 @@ pub fn run_summary(
             ),
             None => capture.shot.layers.clone(),
         };
-        let mut tiles = capture.tiles(region)?;
+        let planned = capture.plan(region)?;
+        let mut tiles = planned.shots;
         for tile in &mut tiles {
             tile.layers = layers.clone();
         }
@@ -322,6 +326,19 @@ pub fn run_summary(
             options.out.clone()
         };
         let target = check_target(&display)?;
+        // a frame over the 16 Mpx limit is drawn at the largest size of its
+        // aspect within it, said here with the size asked and the region
+        // (user 2026-11-04; FLOE_CAPTURE_REDUCE=off refuses it instead)
+        if let Some(text) = planned.frame.over_limit_text() {
+            log(&format!(
+                "[{}] WARNING: {}{}: {text} - drawn at {}x{} (FLOE_CAPTURE_REDUCE=off refuses it)",
+                crate::program(),
+                display.display(),
+                if capture.is_mosaic() { " each tile" } else { "" },
+                planned.frame.width,
+                planned.frame.height
+            ));
+        }
         let keep = if named.capture.is_mosaic() && named.capture.keep_tiles {
             sidecars(&display)?
                 .iter()
@@ -339,6 +356,7 @@ pub fn run_summary(
             lacks,
             chips: selection,
             region,
+            asked: planned.frame.asked,
         });
     }
     let report = options
@@ -484,6 +502,9 @@ pub fn run_summary(
             let staged = if let Some(canvas) = canvas {
                 let (rgba, info) = canvas.finish(capture.line, &capture.line_color, cancelled)?;
                 row["pixel"] = serde_json::json!([width * 2, height * 2]);
+                if let Some((aw, ah)) = plan.asked {
+                    row["pixel_requested"] = serde_json::json!([aw * 2, ah * 2]);
+                }
                 row["mosaic"] = info;
                 row["tiles"] = TILE_NAMES
                     .iter()
@@ -502,6 +523,9 @@ pub fn run_summary(
                 }
             } else {
                 row["bbox_um"] = serde_json::json!(plan.tiles[0].bbox.unwrap());
+                if let Some((aw, ah)) = plan.asked {
+                    row["pixel_requested"] = serde_json::json!([aw, ah]);
+                }
                 if let Some(doc) = &legend_doc {
                     annotations::png::stage(&plan.target, png.as_ref().unwrap(), doc, cancelled)?
                 } else {

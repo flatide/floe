@@ -295,7 +295,21 @@ impl Shot {
         }
         Ok(())
     }
+    /// The frame as the options ask, fitted to the limit: the policy for a
+    /// frame over it from the environment (over_limit).
     pub fn fitted(&self, default_box: [f64; 4]) -> Result<([f64; 4], u32, u32)> {
+        self.frame(default_box, over_limit())
+            .map(|f| (f.bbox, f.width, f.height))
+    }
+    /// The region drawn and its size in px: `--px W` derives the height from
+    /// the region's aspect, `--px WxH` widens the region to W:H unless
+    /// `--stretch`. A frame over MAX_PIXELS is drawn at the largest size of
+    /// its aspect within the limit, `asked` keeping the size the options
+    /// derived (user 2026-11-04: "16MPixel이 넘어갈 경우 가능한 최대 크기로
+    /// 줄여서 저장"), or refused naming that size and the region
+    /// (OverLimit::Refuse - FLOE_CAPTURE_REDUCE=off; before 0.12.431 every
+    /// frame over the limit was, with the bare "frame exceeds 16 Mpx limit").
+    pub fn frame(&self, default_box: [f64; 4], policy: OverLimit) -> Result<Fitted> {
         self.validate()?;
         let b = if let Some([x, y]) = self.at {
             let [w, h] = self.size.unwrap();
@@ -308,22 +322,29 @@ impl Shot {
         };
         let mut b = normalize(b)?;
         let (w, h) = self.pixels;
-        let h = if let Some(h) = h {
-            h
-        } else {
-            let n = (f64::from(w) * (b[3] - b[1]) / (b[2] - b[0]))
-                .round_ties_even()
-                .max(1.);
-            if n > f64::from(u32::MAX) {
-                return Err(Error::input("derived image height overflow"));
+        let asked_w = f64::from(w);
+        let asked_h = match h {
+            Some(h) => f64::from(h),
+            None => {
+                let n = (asked_w * (b[3] - b[1]) / (b[2] - b[0]))
+                    .round_ties_even()
+                    .max(1.);
+                if !n.is_finite() {
+                    return Err(Error::input("derived image height overflow"));
+                }
+                n
             }
-            n as u32
         };
-        if u64::from(w) * u64::from(h) > MAX_PIXELS {
-            return Err(Error::input("frame exceeds 16 Mpx limit"));
-        }
+        let (w, h, asked) = if asked_w * asked_h > MAX_PIXELS as f64 {
+            let (rw, rh) = reduced(asked_w, asked_h);
+            (rw, rh, Some((asked_w as u64, asked_h as u64)))
+        } else {
+            (w, asked_h as u32, None)
+        };
         if self.pixels.1.is_some() && !self.stretch {
-            let want = f64::from(w) / f64::from(h);
+            // the region to W:H as asked (the reduced size keeps that aspect
+            // to a pixel)
+            let want = asked_w / asked_h;
             let have = (b[2] - b[0]) / (b[3] - b[1]);
             if (want - have).abs() >= 1e-12 {
                 let (bw, bh) = if have < want {
@@ -340,9 +361,86 @@ impl Shot {
                 };
             }
         }
-        Ok((normalize(b)?, w, h))
+        let fitted = Fitted {
+            bbox: normalize(b)?,
+            width: w,
+            height: h,
+            asked,
+        };
+        if policy == OverLimit::Refuse {
+            if let Some(text) = fitted.over_limit_text() {
+                return Err(Error::input(format!(
+                    "frame {text}; --px {w}x{h} fits (FLOE_CAPTURE_REDUCE=off: refused, not reduced)"
+                )));
+            }
+        }
+        Ok(fitted)
     }
 }
+/// A shot's frame as fitted: the region drawn, its size in px and, when the
+/// limit reduced it, the size the options derived.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Fitted {
+    pub bbox: [f64; 4],
+    pub width: u32,
+    pub height: u32,
+    /// the size asked (derived from `--px` and the region), when it was over
+    /// MAX_PIXELS and the frame is the largest of its aspect within the limit
+    pub asked: Option<(u64, u64)>,
+}
+impl Fitted {
+    /// What the limit reduced, for the capture's warning and the refusal:
+    /// `1280x13440 px for 40.0000x420.0000 um (0.0000,0.0000,40.0000,420.0000 um)
+    /// exceeds 16 Mpx`; None when the frame is as asked.
+    pub fn over_limit_text(&self) -> Option<String> {
+        let (aw, ah) = self.asked?;
+        let [x0, y0, x1, y1] = self.bbox;
+        Some(format!(
+            "{aw}x{ah} px for {:.4}x{:.4} um ({x0:.4},{y0:.4},{x1:.4},{y1:.4} um) exceeds 16 Mpx",
+            x1 - x0,
+            y1 - y0
+        ))
+    }
+}
+/// What a frame over MAX_PIXELS becomes: the largest of its aspect within
+/// the limit (the default since 0.12.431), or a refusal naming the size and
+/// the region (`FLOE_CAPTURE_REDUCE=off`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverLimit {
+    Reduce,
+    Refuse,
+}
+pub fn over_limit() -> OverLimit {
+    if std::env::var_os("FLOE_CAPTURE_REDUCE").is_some_and(|v| v == "off") {
+        OverLimit::Refuse
+    } else {
+        OverLimit::Reduce
+    }
+}
+/// The largest size of `width:height`'s aspect within MAX_PIXELS: the widest
+/// width whose height, derived as `--px W` derives it (half-even), keeps the
+/// product within the limit - the product grows with the width, so it is
+/// found by bisection. An aspect too tall for a 1 px width gets the limit as
+/// its height.
+pub fn reduced(width: f64, height: f64) -> (u32, u32) {
+    let limit = MAX_PIXELS as f64;
+    let derived = |rw: u64| ((rw as f64) * height / width).round_ties_even().max(1.);
+    let fits = |rw: u64| rw as f64 * derived(rw) <= limit;
+    let (mut lo, mut hi) = (1u64, (width as u64).min(MAX_PIXELS));
+    if !fits(lo) {
+        return (1, MAX_PIXELS as u32);
+    }
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if fits(mid) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    (lo as u32, derived(lo) as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,11 +543,90 @@ mod tests {
             pixels: (65536, Some(65536)),
             ..Default::default()
         };
-        assert!(s.fitted([0., 0., 1., 1.]).is_err());
+        assert!(s.frame([0., 0., 1., 1.], OverLimit::Refuse).is_err());
+        let f = s.frame([0., 0., 1., 1.], OverLimit::Reduce).unwrap();
+        assert_eq!((f.width, f.height, f.asked), (4096, 4096, Some((65536, 65536))));
         assert!(normalize([0., 0., 0., 1.]).is_err());
         assert!(normalize([-1e308, 0., 1e308, 1.]).is_err());
     }
 
+    #[test]
+    fn a_frame_over_the_limit_is_the_largest_of_its_aspect_or_refused_with_its_size_and_region() {
+        // --px 1280 over a 40 x 420 um strip derives 1280x13440 = 17.2 Mpx
+        let s = Shot {
+            bbox: Some([0., 0., 40., 420.]),
+            pixels: (1280, None),
+            ..Default::default()
+        };
+        let f = s.frame([0.; 4], OverLimit::Reduce).unwrap();
+        assert_eq!(f.asked, Some((1280, 13440)));
+        assert_eq!(f.bbox, [0., 0., 40., 420.]);
+        assert!(u64::from(f.width) * u64::from(f.height) <= MAX_PIXELS);
+        // the aspect to a pixel, and no wider width keeps the limit
+        let derived = |w: u32| (f64::from(w) * 10.5).round_ties_even() as u64;
+        assert_eq!(u64::from(f.height), derived(f.width));
+        assert!(u64::from(f.width + 1) * derived(f.width + 1) > MAX_PIXELS);
+        assert_eq!((f.width, f.height), (1264, 13272));
+        let text = f.over_limit_text().unwrap();
+        assert_eq!(
+            text,
+            "1280x13440 px for 40.0000x420.0000 um (0.0000,0.0000,40.0000,420.0000 um) exceeds 16 Mpx"
+        );
+        let e = s.frame([0.; 4], OverLimit::Refuse).unwrap_err().to_string();
+        assert!(e.starts_with(&format!("frame {text}; --px 1264x13272 fits")), "{e}");
+        assert!(e.contains("FLOE_CAPTURE_REDUCE=off"), "{e}");
+        // a frame within the limit is as asked, nothing to say
+        let f = Shot {
+            bbox: Some([0., 0., 40., 420.]),
+            pixels: (1200, None),
+            ..Default::default()
+        }
+        .frame([0.; 4], OverLimit::Refuse)
+        .unwrap();
+        assert_eq!((f.width, f.height, f.asked), (1200, 12600, None));
+        assert_eq!(f.over_limit_text(), None);
+        // --px WxH: the region widened to W:H as asked, the size reduced
+        let s = Shot {
+            bbox: Some([0., 0., 100., 100.]),
+            pixels: (8000, Some(4000)),
+            ..Default::default()
+        };
+        let f = s.frame([0.; 4], OverLimit::Reduce).unwrap();
+        assert_eq!(f.bbox, [-50., 0., 150., 100.]);
+        assert_eq!((f.width, f.height, f.asked), (5793, 2896, Some((8000, 4000))));
+        assert_eq!((f.width, f.height), reduced(8000., 4000.));
+        // the default policy reads FLOE_CAPTURE_REDUCE: unset reduces
+        if std::env::var_os("FLOE_CAPTURE_REDUCE").is_none() {
+            assert_eq!(s.fitted([0.; 4]).unwrap().1, 5793);
+        }
+    }
+    #[test]
+    fn the_reduced_size_is_within_the_limit_and_the_widest_of_its_aspect() {
+        for (w, h) in [
+            (1280., 13440.),
+            (5000., 5000.),
+            (5000., 5531.),
+            (32768., 1024.),
+            (4097., 4096.),
+            (3., 1e8),
+            (1., 1e12),
+            (1e6, 1e6),
+        ] {
+            let (rw, rh) = reduced(w, h);
+            let pixels = u64::from(rw) * u64::from(rh);
+            assert!(pixels <= MAX_PIXELS && rw >= 1 && rh >= 1, "{w}x{h}: {rw}x{rh}");
+            let derived = |x: u32| (f64::from(x) * h / w).round_ties_even().max(1.);
+            if rw > 1 {
+                assert_eq!(f64::from(rh), derived(rw), "{w}x{h}");
+                assert!(f64::from(rw + 1) * derived(rw + 1) > MAX_PIXELS as f64, "{w}x{h}: {rw}x{rh} is not the widest");
+            }
+        }
+        assert_eq!(reduced(1., 1e12), (1, MAX_PIXELS as u32));
+        assert_eq!(reduced(5000., 5000.), (4096, 4096));
+        assert_eq!(reduced(1280., 13440.), (1264, 13272));
+        // a width over the limit at 1 px of height: the limit wide
+        assert_eq!(reduced(2e7, 1.), (MAX_PIXELS as u32, 1));
+    }
     #[test]
     fn json_coordinates_keep_full_f64_precision() {
         for text in [

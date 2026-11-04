@@ -67,7 +67,11 @@ floe2 render deck.jb  --level 2 --chip MAIN.oas --out main.png             # 그
 | `--depth N` | full | 계층 깊이. 0은 top만, 999나 생략은 전체 |
 | `--fit-chip NAME[#K]` | | 덱. 영역을 그 칩의 배치 범위로(§4.2). 좌표 영역과 함께 쓸 수 없다 |
 
-- 한 프레임은 16 Mpx까지다. 넘으면 줄이지 않고 거부한다.
+- 한 프레임은 16 Mpx(4096×4096)까지다. 넘으면 같은 종횡비로 그 안에 드는 가장 큰 크기로 그리고(0.12.431),
+  stdout의 `WARNING: a.png: 1280x13440 px for 40.0000x420.0000 um (0.0000,0.0000,40.0000,420.0000 um)
+  exceeds 16 Mpx - drawn at 1264x13272`로 요청한 크기와 영역을 말하며 보고서에 `pixel_requested`를 남긴다.
+  `FLOE_CAPTURE_REDUCE=off`면 줄이지 않고 거부하되 같은 수치를 댄다(`floe2: frame … exceeds 16 Mpx; --px 1264x13272
+  fits …`, exit 1). `--px W`만 주면 높이가 영역의 종횡비에서 나오므로 가로의 10.24배보다 긴 영역은 1280으로도 넘는다.
 - `--bbox`, `--at`, `--mosaic-at`, `--corners`는 서로 배타다.
 
 ### 1.2 무엇을 그릴지
@@ -192,7 +196,8 @@ floe2 render deck.jb --mosaic-at "X,Y;X,Y;X,Y;X,Y" --size W,H --line 3 --keep-ti
 | `--line-color RGB` | #ffffff | 구분선 색 |
 | `--keep-tiles` | | 네 타일 PNG(`<out>_tl/_tr/_bl/_br.png`)도 남긴다. 모든 렌더가 성공했을 때만 |
 
-- 타일마다 `--px`이고 결과는 가로세로 두 배(tl,tr / bl,br), 최종 이미지는 64 Mpx까지다.
+- 타일마다 `--px`이고 결과는 가로세로 두 배(tl,tr / bl,br), 최종 이미지는 64 Mpx까지다. 타일이 16 Mpx를 넘으면
+  네 타일이 같이 줄어든다(§1.1; WARNING은 `quad.png each tile: …`, 보고서의 `pixel_requested`는 합친 크기).
 - `--legend`는 합친 최종 이미지에 들어간다. 보고서에는 `mosaic`과 `tiles`(타일별 bbox)가 남는다.
 
 ---
@@ -274,6 +279,7 @@ capture's region`). 영역 없는 전체 샷과 `info`·`probe`·`clip`·DRC 캡
 | 키 | 뜻 |
 |---|---|
 | `name`, `out`, `pixel` | 샷 이름, 출력 경로, [W,H](mosaic은 합친 크기) |
+| `pixel_requested` | 16 Mpx 상한에 걸려 줄였을 때만: 요청한 [W,H](mosaic은 합친 크기; §1.1) |
 | `bbox_um` | 단일 샷의 영역. mosaic은 대신 `mosaic`(width, height, tile, line, line_pixels, line_color)과 `tiles`(tl/tr/bl/br의 bbox) |
 | `layers`, `depth` | 그린 레이어 지정과 깊이 |
 | `ms` | 걸린 시간 ms |
@@ -293,6 +299,8 @@ stdout:
 ```
 [floe2] rendered a.png (800x600, 0.0000,0.0000,2000.0000,1500.0000 um) in 0.42s
 [floe2] rendered quad.png (1200x900 mosaic of 4 x 600x450, line 1 solid on each side) in 1.10s
+[floe2] WARNING: a.png: 1280x13440 px for 40.0000x420.0000 um (0.0000,0.0000,40.0000,420.0000 um) exceeds 16 Mpx - drawn at 1264x13272 (FLOE_CAPTURE_REDUCE=off refuses it)
+[floe2] WARNING: DRC frame 5000x5000 px exceeds 16 Mpx - drawn at 4096x4096 (FLOE_CAPTURE_REDUCE=off refuses it)
 [floe2] WARNING: a.png thinned to fit the render budget: …; FLOE_RUST_BUDGET_MB raises it
 [floe2] WARNING: a.png stopped at the page budget: N page(s) not drawn
 [floe2] WARNING: N jobdeck placement(s) not drawn: …
@@ -312,6 +320,7 @@ stderr:
 [jobdeck] 1 pass(es) of light source(s) wait for their occupancy summary - building the missing summaries in the temporary index and drawing again (--occupancy off: the pages instead)
 floe2: rendered incomplete - 0 jobdeck placement(s) missing, 0 page(s) over the decode budget, summary_building=1 … [exit 3]
 floe2: indexing SOURCE first failed (exit 71 …; see above)
+floe2: frame 1280x13440 px for 40.0000x420.0000 um (0.0000,0.0000,40.0000,420.0000 um) exceeds 16 Mpx; --px 1264x13272 fits (FLOE_CAPTURE_REDUCE=off: refused, not reduced) [FLOE_CAPTURE_REDUCE=off, exit 1]
 ```
 
 ---
@@ -325,6 +334,7 @@ floe2: indexing SOURCE first failed (exit 71 …; see above)
 | `FLOE_INDEX_LIGHT` | 덱 on, 레이아웃 off | 자동 색인이 만드는 캐시의 종류(`--light`/`--full`) |
 | `FLOE_LOCK_WAIT` | off | `on`이나 초: 색인 중인 소스를 기다린다(`--wait`) |
 | `FLOE_DECK_WINDOW` | on | `off`면 덱 캡처가 로드한 레벨의 모든 소스를 연다(§4.4) |
+| `FLOE_CAPTURE_REDUCE` | on | `off`면 16 Mpx를 넘는 프레임을 줄이지 않고 거부한다(§1.1; DRC 스냅샷도) |
 | `FLOE_RENDER_DEFAULTS` | | `archival`이면 보관용 모양이 기본(0.12.349까지의 동작) |
 | `FLOE_LAYER_COLORS` | row | `--layer-colors`의 기본 |
 | `FLOE_RUST_DENSITY_STACK` | | `off`면 뷰어와 캡처의 밀도 기본이 off |

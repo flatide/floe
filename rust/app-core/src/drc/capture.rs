@@ -408,9 +408,28 @@ pub fn run(
     options.validate()?;
     shot.validate()?;
     let px = shot.pixels.0;
-    if u64::from(px) * u64::from(px) > MAX_PIXELS {
-        return Err(Error::input("DRC square frame exceeds 16 Mpx"));
-    }
+    // the square frame over the 16 Mpx limit: the largest square within it
+    // (user 2026-11-04), or refused with FLOE_CAPTURE_REDUCE=off
+    let px = if u64::from(px) * u64::from(px) > MAX_PIXELS {
+        let side = (MAX_PIXELS as f64).sqrt().floor() as u32;
+        match crate::shots::over_limit() {
+            crate::shots::OverLimit::Refuse => {
+                return Err(Error::input(format!(
+                    "DRC frame {px}x{px} px exceeds 16 Mpx; --px {side} is the largest square \
+                     (FLOE_CAPTURE_REDUCE=off: refused, not reduced)"
+                )))
+            }
+            crate::shots::OverLimit::Reduce => {
+                log(&format!(
+                    "[{}] WARNING: DRC frame {px}x{px} px exceeds 16 Mpx - drawn at {side}x{side} (FLOE_CAPTURE_REDUCE=off refuses it)",
+                    crate::program()
+                ));
+                side
+            }
+        }
+    } else {
+        px
+    };
     if !dataset.skipped().is_empty() {
         return Err(Error::new(
             ErrorKind::Incomplete,

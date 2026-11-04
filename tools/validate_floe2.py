@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -260,6 +261,38 @@ def validate_rust_cli(base, fixture):
         mode = stat.S_IMODE(odd_png.stat().st_mode)
         check(mode == 0o660 and "FLOE_ARTIFACT_MODE" in odd.stderr,
               "an invalid FLOE_ARTIFACT_MODE was not said and ignored: %o %s" % (mode, odd.stderr[-300:]))
+        # a frame over the 16 Mpx limit (0.12.431, user 2026-11-04: "16MPixel이
+        # 넘어갈 경우 가능한 최대 크기로 줄여서 저장"): --px 1280 over a 40 x 420 um
+        # strip derives 1280x13440; it is drawn at the largest size of that
+        # aspect within the limit, the size asked and the region said on
+        # stdout, the report keeps pixel_requested; FLOE_CAPTURE_REDUCE=off
+        # refuses it naming the same and the size that fits
+        def png_size(path):
+            head = path.read_bytes()[:24]
+            check(head[:8] == b"\x89PNG\r\n\x1a\n" and head[12:16] == b"IHDR", "%s is not a PNG" % path)
+            return struct.unpack(">II", head[16:24])
+        big_png, big_report = work / "rust cli big.png", work / "rust cli big.json"
+        res = rust(env, "render", source, "--bbox", "0,0,40,420", "--px", "1280",
+                   "--out", big_png, "--report", big_report)
+        said = ("1280x13440 px for 40.0000x420.0000 um (0.0000,0.0000,40.0000,420.0000 um) "
+                "exceeds 16 Mpx - drawn at 1264x13272 (FLOE_CAPTURE_REDUCE=off refuses it)")
+        check(("[floe2] WARNING: %s: %s" % (big_png, said)) in res.stdout,
+              "a frame over 16 Mpx did not say the size asked and the region: %s" % res.stdout[-500:])
+        check(png_size(big_png) == (1264, 13272), "the reduced frame is %r, not 1264x13272" % (png_size(big_png),))
+        row = json.loads(big_report.read_text())["shots"][0]
+        check(row["pixel"] == [1264, 13272] and row["pixel_requested"] == [1280, 13440]
+              and row["bbox_um"] == [0, 0, 40, 420],
+              "the report's pixel / pixel_requested / bbox_um: %r %r %r" % (row["pixel"], row.get("pixel_requested"), row["bbox_um"]))
+        check("pixel_requested" not in json.loads(private_report.read_text())["shots"][0],
+              "a frame within the limit has a pixel_requested")
+        refused_png = work / "rust cli refused.png"
+        res = rust(dict(env, FLOE_CAPTURE_REDUCE="off"), "render", source, "--bbox", "0,0,40,420", "--px", "1280",
+                   "--out", refused_png, ok=1)
+        last = res.stderr.strip().splitlines()[-1]
+        check(last == ("floe2: frame 1280x13440 px for 40.0000x420.0000 um (0.0000,0.0000,40.0000,420.0000 um) "
+                       "exceeds 16 Mpx; --px 1264x13272 fits (FLOE_CAPTURE_REDUCE=off: refused, not reduced)")
+              and not refused_png.exists(),
+              "FLOE_CAPTURE_REDUCE=off did not refuse naming the size and the region: %r" % last)
         check(not called.exists(),
               "floe2 ran Python for a non-UI command: %s" % (
                   called.read_text() if called.exists() else ""))

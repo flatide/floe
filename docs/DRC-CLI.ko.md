@@ -168,7 +168,7 @@ floe2 render chip.oas --drc results.db --drc-rule M1.SPACE.1 \
 | `--drc-err N\|A-B\|all` | all | local 번호(1-based). 명시 N/A-B는 **전량** 렌더 |
 | `--drc-cap N` | 200 | `all`일 때만 적용되는 상한 (초과분 stderr 경고) |
 | `--drc-frac F` | 0.3 | 프레임 대비 에러 스팬 비율(뷰어 점프 프레이밍 동일) |
-| `--px N` | 1200 | 정사각 한 변 px |
+| `--px N` | 1200 | 정사각 한 변 px. 4096까지이고 넘으면 4096으로 줄여 그리며 stdout에 WARNING을 낸다(0.12.431; `FLOE_CAPTURE_REDUCE=off`면 거부) |
 | `--out PATH` | 룰명.png | 출력 스템: 1장 = 그대로, 여러 장 = `stem_<local>.png` |
 | `--depth N` | full | 계층 깊이 (기본 = 전체 전개, 뷰어 "99") |
 | `--layers ...` | 자동 | 명시하면 svrf 격리보다 우선 |

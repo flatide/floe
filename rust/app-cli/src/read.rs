@@ -144,7 +144,9 @@ No batch/mosaic/region/report with DRC. Local/global/path TSV.
 Only complete DRC frames are saved; all-layer shots omit the layer legend
 unless --legend.
 Annotate existing PNGs with fe-embed. Jobdeck labels unsupported.
-Frames exceeding 16 Mpx are rejected, not silently rescaled.
+A frame over 16 Mpx (4096x4096) is drawn at the largest size of its aspect
+within it, said as a WARNING with the size asked and the region, and in the
+report as pixel_requested (FLOE_CAPTURE_REDUCE=off: refused naming them).
 Mosaic final image is four tiles (up to 64 Mpx). Outputs must not collide.
 Cancelled/failed frames never replace an existing PNG. Jobdeck known skipped
 placements/over-budget pages may publish a flagged incomplete PNG (exit 3).

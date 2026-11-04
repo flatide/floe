@@ -1,5 +1,5 @@
 //! Python shots' named capture grammar. No shell expansion or execution.
-use super::{lengths, normalize, pixels, Anchor, LayerChoice, Shot};
+use super::{lengths, normalize, over_limit, pixels, Anchor, Fitted, LayerChoice, Shot};
 use crate::{Error, Result};
 use std::collections::BTreeSet;
 
@@ -155,6 +155,11 @@ impl Capture {
     /// Return already-fitted row-major tiles. All requests use the first tile's
     /// pixel size, as Python tile_boxes does (including fractional DBU views).
     pub fn tiles(&self, default_box: [f64; 4]) -> Result<Vec<Shot>> {
+        self.plan(default_box).map(|t| t.shots)
+    }
+    /// The tiles, and the first's frame as fitted (Shot::frame): its `asked`
+    /// says the 16 Mpx limit reduced them - every tile has the first's size.
+    pub fn plan(&self, default_box: [f64; 4]) -> Result<Tiles> {
         self.validate()?;
         let mut tiles = Vec::new();
         if let Some(p) = self.mosaic {
@@ -179,19 +184,30 @@ impl Capture {
         } else {
             tiles.push(self.shot.clone());
         }
+        let policy = over_limit();
         let fitted = tiles
             .iter()
-            .map(|s| s.fitted(default_box))
+            .map(|s| s.frame(default_box, policy))
             .collect::<Result<Vec<_>>>()?;
-        let (_, width, height) = fitted[0];
-        for (shot, (bbox, _, _)) in tiles.iter_mut().zip(fitted) {
+        let frame = fitted[0];
+        for (shot, f) in tiles.iter_mut().zip(fitted) {
             shot.at = None;
-            shot.bbox = Some(bbox);
-            shot.pixels = (width, Some(height));
+            shot.bbox = Some(f.bbox);
+            shot.pixels = (frame.width, Some(frame.height));
             shot.stretch = true;
         }
-        Ok(tiles)
+        Ok(Tiles {
+            shots: tiles,
+            frame,
+        })
     }
+}
+/// A capture's tiles as fitted (Capture::plan): one for a shot, four for a
+/// mosaic, every one of the first's size.
+pub struct Tiles {
+    pub shots: Vec<Shot>,
+    /// the first tile's frame: `asked` when the limit reduced the size
+    pub frame: Fitted,
 }
 /// `corners=fit`: the corners of the default region.
 pub fn is_fit(value: &str) -> bool {
