@@ -31,7 +31,13 @@ rust/target/release/floe-index svrf deck.cal --scan
 rust/target/release/floe-index svrf deck.cal -D SWITCH...
 # 실행
 .venv/bin/python -m floe view chip.oas --drc results.db
+# 이미 인덱싱된 룰 JSON을 함께 지정
+floe2 view chip.oas --drc results.db --rules deck.cal.rules.json
 ```
+
+`view --rules`는 `--drc`와 함께 사용하며 지정한 JSON을 자동 탐색보다 우선한다.
+기존 `.rules.json`만 읽고 `.cal`을 자동 인덱싱하지 않는다. 명시한 파일을 읽지
+못하면 DB 열기를 중단하고 오류를 표시한다. `--drc` 시작은 별도 창으로 실행된다.
 
 **셸 스크립팅 표면**(2026-08-19): 룰 목록·에러 목록은 JSON,
 스냅샷은 룰/에러 지정 PNG 렌더 — 리포트 자동화용. **캡처 상한이
@@ -284,7 +290,7 @@ python -m floe render chip.oas --drc results.db \
   UI에서는 다른 작업을 계속할 수 있다. `no grouping`으로 바꾸거나 DB를 닫으면
   진행 중인 사전 계산을 취소하며 완료된 캐시는 유지한다. SVRF 미로딩 또는
   `no grouping`에서는 사전 계산을 시작하지 않고 `CD grouped` 항목도 표시하지 않는다.
-- All/Not Waived/Waived 콤보: status 기준(All은 에러 0 룰도 표시).
+- All/Not Waived/Waived 콤보: status 기준. DB를 열 때 기본값은 Not Waived이며, All은 에러 0 룰도 표시한다.
 - 세 필터는 **교집합**. 룰 선택 = 열기(한 번에 한 룰).
 
 **사용자 클러스터**(2026-10-05) — DB 옆 `results.db.clusters`가

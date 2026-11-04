@@ -126,6 +126,13 @@ def cmd_view(args):
         src = os.path.abspath(args.src)
         if not os.path.isfile(src):
             raise SystemExit(f"floe2: no such file: {src}")
+    rules = getattr(args, "rules", None)
+    if rules is not None:
+        if not args.drc:
+            raise SystemExit("floe2: --rules requires --drc")
+        rules = os.path.abspath(rules)
+        if not os.path.isfile(rules):
+            raise SystemExit(f"floe2: no such rules metadata file: {rules}")
     # documented entry for the frame-tuning knobs: the flags set
     # the env vars vfsclient reads per request (children inherit;
     # a forwarded running instance keeps its own values)
@@ -196,7 +203,8 @@ def cmd_view(args):
                        or args.frame_cache == "off"
                        or args.margin == "on"
                        or layer_colors is not None
-                       or getattr(args, "floe_reviewer", None) is not None)
+                       or getattr(args, "floe_reviewer", None) is not None
+                       or bool(args.drc))
     server = None
     if not args.multi and not process_options:
         # flateyes-style single instance per (uid, DISPLAY)
@@ -282,7 +290,7 @@ def cmd_view(args):
         c = _service_open(src) if src else None
     # PyGObject/GTK3 problems are reported inside import_gtk (exit 3)
     from .gui import run_viewer
-    run_viewer(c, server, goto=goto, drc=args.drc,
+    run_viewer(c, server, goto=goto, drc=args.drc, rules=rules,
                detail=detail, dump=args.dump, depth=depth,
                frames=args.frames == "on",
                labels=args.labels == "on",
@@ -325,6 +333,10 @@ def parser():
                         "open the error browser (new instance only; "
                         "a fresh pack (.FILE.db.tray) built by "
                         "'floe-index drc' is used automatically)")
+    p.add_argument("--rules", default=None, metavar="FILE.rules.json",
+                   help="load existing SVRF rule metadata with --drc "
+                        "(overrides automatic rules lookup; does not "
+                        "index an SVRF deck)")
     detail_help = (
         "starting detail level (default: medium; higher = finer, heavier "
         "wide views - lower levels omit finer features below the cut). "

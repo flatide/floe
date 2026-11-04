@@ -464,6 +464,7 @@ def grouped_rules_ui(v, d, pump):
     analysis = analysis_dir(db)
     v._drcwin._delta_mode.set_active_id("off")
     check(v.load_drc(str(db)), "load mixed group-count fixture")
+    v._drcwin._wf.set_active_id("all")  # include zero-error rule metadata
     check(v._drc_group_cache_key is None and not v._drc_group_counts
           and len(list(analysis.glob("delta/*/measure/complete.json"))) == 2,
           "loading metadata with grouping off does not prepare missing rules")
@@ -722,11 +723,40 @@ def marker_length_groups(svc, temp):
     svc("drc_close", handle=h)
 
 
+def explicit_rules_ui(v, d, pump):
+    folder = d / "explicit rules"
+    folder.mkdir()
+    rules = folder / "deck.cal.rules.json"
+    original = json.loads((d / "sample.svrf.rules.json").read_text())
+    rules.write_text(json.dumps({"format": "floe-svrf-rules", "version": 1,
+        "checks": {"M1.NOTCH": original["checks"]["M1.NOTCH"]}}))
+    db = d / "sample.db"
+    v._drc_open_db(str(db), rules=str(rules))
+    check(v._drc_rmatch == (1, 8) and set(v._drc_rmeta["checks"]) == {"M1.NOTCH"}
+          and not (folder / "deck.cal").exists(),
+          "explicit rules JSON overrides automatic metadata without a source deck")
+    ci = next(i for i, c in enumerate(v._drc.checks) if c.name == "M1.NOTCH")
+    v._drc_select_row(ci)
+    pump(v, lambda: v._drc_delta_groups is not None, "explicit rules CD groups", 60)
+    check(v._drc_cd_info(v._drc.checks[ci].errors[0], "M1.NOTCH")["pick"]["ticks"]
+          == [2000, 5000, 3000], "explicit rules supply the measured CD constraints")
+    previous_db, previous_meta = v._drc, v._drc_rmeta
+    raw = folder / "raw.cal"
+    raw.write_text("M1.NOTCH { INT M1 < 0.03 }\n")
+    check(not v.load_drc(str(db), rules=str(raw)) and v._drc is previous_db
+          and v._drc_rmeta is previous_meta
+          and v.status.get_text().startswith("rules metadata load failed:")
+          and not (folder / "raw.cal.rules.json").exists(),
+          "raw SVRF is refused without indexing or replacing the current review")
+    check(v.load_drc(str(db)) and v._drc_rmatch == (8, 8),
+          "omitting explicit rules keeps automatic JSON discovery")
+
+
 def marker_length_ui(v, temp, pump):
     db = temp / "marker-length" / "length.db"
-    v._drcwin._wf.set_active_id("all")
     v._drcwin._delta_mode.set_active_id("absolute")
     check(v.load_drc(str(db)), "load single-edge length groups in the viewer")
+    v._drcwin._wf.set_active_id("all")  # include waived length-group members
     v._drc_select_row(0)
     pump(v, lambda: v._drc_delta_groups is not None and v._drc_group_cache_key is None,
          "single-edge groups", 60)
@@ -790,6 +820,7 @@ def a5(temp):
         before = {str(p): (p.stat().st_size, p.stat().st_mtime_ns)
                   for p in analysis.rglob("*") if p.is_file()}
         check(v.load_drc(str(d / "sample.db")), "reopen DB with summary caches")
+        v._drcwin._wf.set_active_id("all")  # inspect the rule after waiving it entirely
         pump(v, lambda: v._drc_group_cache_key is None, "warm group counts", 60)
         after = {str(p): (p.stat().st_size, p.stat().st_mtime_ns)
                  for p in analysis.rglob("*") if p.is_file()}
@@ -979,6 +1010,7 @@ def a5(temp):
               and all(r[4] == "✓ (%d) %s" % (expected_counts[r[2]], r[0])
                       for r in v._drcwin._rstore),
               "SVRF metadata restores CD measurement and delta groups")
+        explicit_rules_ui(v, d, pump)
         grouped_rules_ui(v, d, pump)
         zero_gap_ui(v, d, pump)
         marker_length_ui(v, temp, pump)
@@ -989,7 +1021,9 @@ def a5(temp):
             "checks": {"SMALL.ONE": {}, "SMALL.TWO": {}}}))
         r = run([INDEX, "drc", str(small)])
         check(r.returncode == 0, "smaller DB fixture packed", r.stderr)
-        check(v.load_drc(str(small)) and len(v._drcwin._rstore) == 2
+        small_loaded = v.load_drc(str(small))
+        v._drcwin._wf.set_active_id("all")  # inspect both zero-error rules
+        check(small_loaded and len(v._drcwin._rstore) == 2
               and all(r[4] == "✓ " + r[0] and r[0] in r[5] for r in v._drcwin._rstore)
               and not v._drc_group_counts,
               "switching to a smaller DB safely refreshes auto-loaded SVRF statuses")

@@ -238,7 +238,8 @@ def r7(temp, check):
         check(db.get_status(0, 4) == 1 and db.get_status(0, 0) == 1,
               "the peer's waive carried, one's own decision kept",
               (db.get_status(0, 4), db.get_status(0, 0)))
-        # conflict only in the main list
+        # The fixture conflict is waived; include both waive states.
+        v._drcwin._wf.set_active_id("all")
         v._drcwin._conflict.set_active(True)
         pump(v, lambda: v._drc_conflict_job is None and v._drc_conflict_members is not None
              and len(v._drc_conflict_members) == 1, "conflict only", 30)

@@ -236,6 +236,93 @@ class WorkerContractTests(unittest.TestCase):
                 forward.assert_not_called()
                 run_viewer.assert_not_called()
 
+    def test_explicit_rules_reach_a_new_viewer_for_ready_or_pending_layouts(self):
+        from floe import instance
+        from floe import viewcli as cli
+
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "layout with spaces.oas"
+            rules = Path(td) / "deck with spaces.cal.rules.json"
+            source.write_bytes(b"fixture")
+            rules.write_text("{}")
+            relative_rules = os.path.relpath(rules)
+            for ready in (True, False):
+                with self.subTest(ready=ready), \
+                        mock.patch.object(cli, "_cache_ready", return_value=ready), \
+                        mock.patch.object(cli, "_service_open", return_value=None), \
+                        mock.patch.object(instance, "try_forward", return_value=0) as forward, \
+                        mock.patch("floe.gui.run_viewer") as run_viewer:
+                    cli.cmd_view(cli.parser().parse_args([
+                        str(source), "--drc", "results.db", "--rules", relative_rules]))
+                    forward.assert_not_called()
+                    options = run_viewer.call_args.kwargs
+                    self.assertEqual(options["rules"], str(rules))
+                    self.assertEqual(options["drc"], "results.db")
+                    self.assertEqual(options["pending_open"], None if ready else str(source))
+
+    def test_rules_need_a_drc_target_and_an_existing_metadata_file(self):
+        from floe import instance
+        from floe import viewcli as cli
+
+        with tempfile.TemporaryDirectory() as td:
+            rules = Path(td) / "deck.cal.rules.json"
+            rules.write_text("{}")
+            for words, message in ((["--rules", str(rules)], "requires --drc"),
+                                   (["--drc", "results.db", "--rules", str(rules) + ".missing"],
+                                    "no such rules metadata file")):
+                with self.subTest(words=words), \
+                        mock.patch.object(instance, "try_forward") as forward, \
+                        mock.patch("floe.gui.run_viewer") as run_viewer:
+                    with self.assertRaisesRegex(SystemExit, message):
+                        cli.cmd_view(cli.parser().parse_args(words))
+                    forward.assert_not_called()
+                    run_viewer.assert_not_called()
+
+    def test_drc_without_explicit_rules_keeps_discovery_in_its_own_window(self):
+        from floe import instance
+        from floe import viewcli as cli
+
+        with mock.patch.object(instance, "try_forward", return_value=0) as forward, \
+                mock.patch("floe.gui.run_viewer") as run_viewer:
+            cli.cmd_view(cli.parser().parse_args(["--drc", "results.db"]))
+            forward.assert_not_called()
+            self.assertIsNone(run_viewer.call_args.kwargs["rules"])
+            self.assertEqual(run_viewer.call_args.kwargs["drc"], "results.db")
+
+    def test_startup_rules_wait_for_the_pending_layout_open(self):
+        from floe import gui
+
+        for pending in (None, "/layout/chip.oas"):
+            calls, idles = [], []
+
+            def open_layout(path, fields, then):
+                calls.append(("layout", path, fields))
+                then()
+
+            viewer = SimpleNamespace(
+                _quit=mock.Mock(), _open_or_index=open_layout,
+                _drc_open_db=lambda path, rules=None: calls.append(("drc", path, rules)))
+
+            def main_loop():
+                while idles:
+                    callback, args = idles.pop(0)
+                    callback(*args)
+
+            glib = SimpleNamespace(PRIORITY_DEFAULT=0, unix_signal_add=mock.Mock(),
+                                   idle_add=lambda callback, *args: idles.append((callback, args)))
+            with self.subTest(pending=pending), mock.patch.dict(os.environ), \
+                    mock.patch.object(gui, "import_gtk"), \
+                    mock.patch.object(gui, "Viewer", return_value=viewer), \
+                    mock.patch.object(gui, "GLib", glib), \
+                    mock.patch.object(gui, "Gtk", SimpleNamespace(main=main_loop)):
+                os.environ.pop("FLOE_GUI_SMOKE_MS", None)
+                gui.run_viewer(None, drc="results dir/run.db", rules="rules dir/deck.rules.json",
+                               pending_open=pending, pending_fields=("detail=high",))
+            expected = [] if pending is None else [("layout", pending, ["detail=high"])]
+            expected.append(("drc", os.path.abspath("results dir/run.db"),
+                             os.path.abspath("rules dir/deck.rules.json")))
+            self.assertEqual(calls, expected)
+
     def test_a_cut_of_ones_own_rides_on_the_nearest_level(self):
         """User 2026-10-28 ("테스트를 위해 detail cut을 입력받을 수 있게
         수정해줘. 0.1px까지 테스트해보려고 함"): the `d` dialog's own cut goes
@@ -3229,9 +3316,9 @@ class IndexOnOpenTests(unittest.TestCase):
                 v = Viewer.__new__(Viewer)
                 calls = []
                 v._ask_yes_no = lambda text: (calls.append("ask"), True)[1]
-                v._drc_pack_and_load = lambda path: calls.append("pack")
+                v._drc_pack_and_load = lambda path, rules=None: calls.append("pack")
                 v._set_live_status = lambda msg: calls.append("status")
-                v.load_drc = lambda path, db=None: calls.append("load")
+                v.load_drc = lambda path, db=None, rules=None: calls.append("load")
                 os.environ["FLOE_INDEX_ON_OPEN"] = policy
                 try:
                     Viewer._drc_open_db(v, db)
@@ -3241,6 +3328,69 @@ class IndexOnOpenTests(unittest.TestCase):
                 self.assertEqual(calls.count("pack"), packed, policy)
                 if not packed:
                     self.assertIn("status", calls)
+
+    def test_explicit_rules_follow_a_fresh_pack_adoption(self):
+        from floe import gui
+
+        for side in ("results.tray", None):
+            v = gui.Viewer.__new__(gui.Viewer)
+            v.load_drc = mock.Mock(return_value=True)
+            v._drc_pack_and_load = mock.Mock()
+            v._index_consent = mock.Mock(return_value=True)
+            pack = object()
+            with self.subTest(side=side), \
+                    mock.patch.object(gui.gtkservice, "drc_busy", return_value=None), \
+                    mock.patch.object(gui.gtkservice, "drc_find", return_value=side), \
+                    mock.patch.object(gui.gtkservice, "drc_open_pack", return_value=pack):
+                gui.Viewer._drc_open_db(v, "results.db", rules="deck.cal.rules.json")
+            if side is not None:
+                v.load_drc.assert_called_once_with("results.db", db=pack, rules="deck.cal.rules.json")
+                v._drc_pack_and_load.assert_not_called()
+            else:
+                v.load_drc.assert_not_called()
+                v._drc_pack_and_load.assert_called_once_with("results.db", rules="deck.cal.rules.json")
+
+    def test_explicit_rules_follow_the_completed_pack_build_only(self):
+        from floe import gui
+
+        for loaded in (True, False):
+            v = gui.Viewer.__new__(gui.Viewer)
+            v._drc = SimpleNamespace(packed=True) if loaded else None
+            v.load_drc = mock.Mock(return_value=loaded)
+            v._index_modal = mock.Mock()
+            v._set_live_status = mock.Mock()
+            with self.subTest(loaded=loaded), \
+                    mock.patch("floe.vfsclient.find_binary", return_value="floe-index"), \
+                    mock.patch.object(gui.gtkservice, "drc_find", return_value=None):
+                gui.Viewer._drc_pack_and_load(v, "results.db", rules="deck.cal.rules.json")
+                v.load_drc.assert_not_called()
+                arguments = v._index_modal.call_args.args
+                self.assertEqual(arguments[1], ["floe-index", "drc", "results.db", "--jobs", "12"])
+                arguments[2]()
+                v.load_drc.assert_called_once_with("results.db", rules="deck.cal.rules.json")
+                v._set_live_status.assert_not_called()
+
+    def test_bad_explicit_rules_preserve_the_current_review_and_close_only_a_new_pack(self):
+        from floe import gui
+
+        for candidate in ("none", "current", "new"):
+            current = SimpleNamespace(close=mock.Mock())
+            new = SimpleNamespace(close=mock.Mock())
+            adopted = {"none": None, "current": current, "new": new}[candidate]
+            metadata = {"checks": {"OLD.RULE": {}}}
+            v = gui.Viewer.__new__(gui.Viewer)
+            v._drc, v._drc_rmeta = current, metadata
+            v._set_live_status = mock.Mock()
+            with self.subTest(candidate=candidate), \
+                    mock.patch.object(gui.gtkservice, "svrf_rules", side_effect=ValueError("invalid JSON")), \
+                    mock.patch.object(gui.gtkservice, "drc_load") as load:
+                self.assertFalse(gui.Viewer.load_drc(v, "new.db", db=adopted, rules="bad.rules.json"))
+                load.assert_not_called()
+            self.assertIs(v._drc, current)
+            self.assertIs(v._drc_rmeta, metadata)
+            current.close.assert_not_called()
+            self.assertEqual(new.close.call_count, int(candidate == "new"))
+            self.assertIn("invalid JSON", v._set_live_status.call_args.args[0])
 
     def test_declined_or_forbidden_leaves_the_file_unopened(self):
         from floe.gui import Viewer

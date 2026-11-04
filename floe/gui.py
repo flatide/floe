@@ -2525,7 +2525,7 @@ class Viewer:
         self._drc_page_marks = []   # this grid page's (ci, ei,
                                     # kind, pts dbu) for the canvas
         self._drc_grid_base = None  # filtered ei base (None = all)
-        self._drc_wfilter = "all"   # all | notwaived | waived
+        self._drc_wfilter = "notwaived"   # all | notwaived | waived
         self._drc_search = ""       # rule-name substring filter
         self._drc_rmeta = None      # <deck>.rules.json dict (the
                                     # `floe-index svrf` sidecar metadata)
@@ -7475,7 +7475,7 @@ class Viewer:
                          ("notwaived", "Not Waived"),
                          ("waived", "Waived")):
             wf.append(wid, lbl)
-        wf.set_active_id("all")
+        wf.set_active_id(self._drc_wfilter)
         wf.connect("changed", self._on_drc_wfilter)
         nav.add(wf)
         win._wf = wf
@@ -8410,7 +8410,7 @@ class Viewer:
             except Exception:
                 pass
 
-    def _drc_open_db(self, path):
+    def _drc_open_db(self, path, rules=None):
         """Dialog flow (user call 2026-08-14): the user PICKS the
         ASCII .db, floe LOADS only its pack. When no usable
         pack exists (missing, stale or an old layout/v1 sidecar) it
@@ -8435,7 +8435,7 @@ class Viewer:
                     self._set_live_status(str(exc))
                     return
             else:
-                self.load_drc(path, db=db)  # adopt the fresh pack
+                self.load_drc(path, db=db, rules=rules)  # adopt the fresh pack
                 return
         if not self._index_consent(
                 "No DRC index for\n%s\n\nBuild it now?"
@@ -8444,9 +8444,9 @@ class Viewer:
                 "DRC index needed: floe-index drc %s"
                 % os.path.basename(path))
             return
-        self._drc_pack_and_load(path)
+        self._drc_pack_and_load(path, rules=rules)
 
-    def _drc_pack_and_load(self, path):
+    def _drc_pack_and_load(self, path, rules=None):
         """Run `floe-index drc <db>` with its log in a MODAL
         dialog, then load the pack."""
         from .vfsclient import find_binary
@@ -8468,7 +8468,8 @@ class Viewer:
             self.redraw(immediate=True)
 
         def on_success():
-            self.load_drc(path)
+            if not self.load_drc(path, rules=rules):
+                return
             if not getattr(self._drc, "packed", False):
                 # the indexer that just ran wrote a layout the reader
                 # refuses: it is an OUTDATED binary
@@ -8590,11 +8591,25 @@ class Viewer:
 
         threading.Thread(target=pump, daemon=True).start()
 
-    def load_drc(self, path, db=None):
+    def load_drc(self, path, db=None, rules=None):
         """Open a Calibre DRC db (.ice index-aware) and populate the
         browser. `db` = an already-opened backend to adopt (the
         dialog preflight verifies the pack by opening it - opening
         twice pays the block-table bbox scan twice)."""
+        rules_data = None
+        if rules is not None:
+            try:
+                rules_data = gtkservice.svrf_rules(rules)
+            except (OSError, ValueError) as exc:
+                if db is not None and db is not self._drc:
+                    close = getattr(db, "close", None)
+                    if close is not None:
+                        try:
+                            close()
+                        except Exception:
+                            pass
+                self._set_live_status("rules metadata load failed: %s" % exc)
+                return False
         if db is None:
             try:
                 db = gtkservice.drc_load(path)
@@ -8636,7 +8651,13 @@ class Viewer:
         self._drc_sels = {}
         self._esel_start = None
         self._drc_tfilter = "all"   # new db = new type census
-        self._drc_rules_auto(path)
+        self._drc_wfilter = "notwaived"
+        if self._drcwin is not None:
+            self._drcwin._wf.set_active_id(self._drc_wfilter)
+        if rules is None:
+            self._drc_rules_auto(path)
+        else:
+            self._drc_rules_load(rules, silent=True, data=rules_data)
         cluster_error = self._drc_clusters_auto(path)
         self._drc_types_rebuild()   # no-sidecar case: combo empties
         if self._drcwin is not None:
@@ -8732,7 +8753,7 @@ class Viewer:
                 self._drc_rules_load(p, silent=True)
                 return
 
-    def _drc_rules_load(self, path, silent=False):
+    def _drc_rules_load(self, path, silent=False, data=None):
         """Attach a <deck>.rules.json metadata sidecar to the open
         db; show each rule's match status and the detail pane's
         constraint / measured / source layers per error."""
@@ -8741,13 +8762,14 @@ class Viewer:
             if not silent:
                 self._set_live_status("open a DRC .db first")
             return False
-        try:
-            data = gtkservice.svrf_rules(path)
-        except (OSError, ValueError) as exc:
-            if not silent:
-                self._set_live_status(
-                    "rules metadata load failed: %s" % exc)
-            return False
+        if data is None:
+            try:
+                data = gtkservice.svrf_rules(path)
+            except (OSError, ValueError) as exc:
+                if not silent:
+                    self._set_live_status(
+                        "rules metadata load failed: %s" % exc)
+                return False
         meta = data.get("checks", {})
         matched = sum(1 for c in db.checks if c.name in meta)
         self._drc_rmeta = data
@@ -12983,7 +13005,7 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
                frame_cache=True, margin=False,
                stream_kb=None, stream_target_ms=500,
                render_debug=False, pending_open=None, pending_fields=(),
-               thin="auto", density=None, occupancy=None):
+               thin="auto", density=None, occupancy=None, rules=None):
     """`pending_open`: a layout/jobdeck given on the command line that
     has no index yet - the viewer starts empty, asks, indexes and
     opens it (user call 2026-09-09), then applies `pending_fields`
@@ -13037,6 +13059,7 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
     # and packed first, as the DRC > open dialog does (user call
     # 2026-09-09).
     drc_path = os.path.abspath(drc) if drc else None
+    rules_path = os.path.abspath(rules) if rules else None
     if pending_open is not None:
         # the window is up; the question, the index log and the open
         # need the main loop. The --drc load runs AFTER that open: an
@@ -13045,10 +13068,10 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
         # (4th) P2-1)
         GLib.idle_add(viewer._open_or_index, pending_open,
                       list(pending_fields),
-                      (lambda: viewer._drc_open_db(drc_path))
+                      (lambda: viewer._drc_open_db(drc_path, rules=rules_path))
                       if drc_path else None)
     elif drc_path:
-        GLib.idle_add(lambda: (viewer._drc_open_db(drc_path), False)[1])
+        GLib.idle_add(lambda: (viewer._drc_open_db(drc_path, rules=rules_path), False)[1])
     try:
         import signal as _signal
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, _signal.SIGINT,
