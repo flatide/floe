@@ -61,7 +61,8 @@ floe2 render deck.jb  --level 2 --chip MAIN.oas --out main.png             # 그
 |---|---|---|
 | `--bbox X0,Y0,X1,Y1` | 소스 전체 | 영역. 덱에서 `--chip`/`--chip-off`를 줬으면 기본은 켠 칩들의 배치 범위 |
 | `--at X,Y --size W,H` | | 같은 영역을 점과 크기로. `--anchor center`(기본)면 X,Y가 중심, `lb`면 왼쪽 아래 꼭짓점 |
-| `--px W` | 1200 | 가로 px. 높이는 영역의 종횡비에서 나온다 |
+| `--px W` | max | 가로 px. 높이는 영역의 종횡비에서 나온다 |
+| `--px max` | | 영역의 종횡비로 16 Mpx(4096×4096) 안에 드는 가장 큰 크기. 생략과 같다(0.12.433) |
 | `--px WxH` | | 가로·세로 px. 영역을 그 종횡비로 **넓힌다**(center는 중심 고정, lb는 꼭짓점 고정) |
 | `--stretch` | | `--px WxH`일 때 영역을 넓히지 않고 그대로 늘여 그린다 |
 | `--depth N` | full | 계층 깊이. 0은 top만, 999나 생략은 전체 |
@@ -72,6 +73,10 @@ floe2 render deck.jb  --level 2 --chip MAIN.oas --out main.png             # 그
   exceeds 16 Mpx - drawn at 1264x13272`로 요청한 크기와 영역을 말하며 보고서에 `pixel_requested`를 남긴다.
   `FLOE_CAPTURE_REDUCE=off`면 줄이지 않고 거부하되 같은 수치를 댄다(`floe2: frame … exceeds 16 Mpx; --px 1264x13272
   fits …`, exit 1). `--px W`만 주면 높이가 영역의 종횡비에서 나오므로 가로의 10.24배보다 긴 영역은 1280으로도 넘는다.
+- `--px`를 생략하면 영역의 종횡비로 상한 안에 드는 가장 큰 크기로 그린다(0.12.433; 그 전은 가로 1200). 정사각
+  영역은 4096×4096, 403×446 um의 소스 전체는 3895×4307, 40×420 um 띠는 1264×13272다. 전과 같은 1200을
+  쓰려면 `--px 1200`을 주거나 `FLOE_CAPTURE_PX=1200`(§7)을 둔다. `--drc` 스냅샷의 기본은 그대로 1200 정사각이다
+  ([DRC-CLI.ko.md](DRC-CLI.ko.md) §3).
 - `--bbox`, `--at`, `--mosaic-at`, `--corners`는 서로 배타다.
 
 ### 1.2 무엇을 그릴지
@@ -101,7 +106,7 @@ layerprops, 셀 프레임과 라벨(덱은 라벨 없음, 밀도 없음).
 | `--occupancy on\|off` | 말하지 않음 | 광역 뷰를 점유 요약(`design.ovo`)으로. `on`은 요약 없는 소스의 요약을 먼저 만들고(자동 색인), `off`는 덱도 요약 없이 페이지로. 말하지 않으면 덱은 있는 요약을 쓰고 만들지는 않으며(경량 소스의 광역 pass는 비고 exit 3), 레이아웃은 off. 컷이 있어야 한다 |
 | `--frames[=on\|off]` `--labels[=on\|off]` | on | 셀 프레임, 설계 텍스트. 덱의 라벨은 지원하지 않는다 |
 | `--layer-colors row\|group` | row | 레이아웃의 기본 레이어 색. row는 패널 줄마다, group은 layer 번호마다 한 색. `FLOE_LAYER_COLORS`가 기본값. 덱은 거부 |
-| `--legend` | | 그린 레이어의 범례(색, 채움, 이름 L/D)를 이미지마다 flateyes 메타데이터로. 픽셀은 그대로다. `floe2 fe-embed --dump`로 읽는다 |
+| `--legend` | | 그린 레이어의 범례(색, 채움, 이름 L/D)를 이미지마다 flateyes 메타데이터로, 배율 `ppu`(가로 px/um)와 `unit=um`과 함께(0.12.433; DRC 스냅샷과 같다). 픽셀은 그대로다. `floe2 fe-embed --dump`로 읽는다 |
 | `--archival` | | 보관용 모양: 컷 0, solid 채움, 밀도·프레임·라벨 없음(0.12.349까지의 기본). 함께 준 옵션이 이긴다. `FLOE_RENDER_DEFAULTS=archival`이면 이것이 기본 |
 | `--label-font-px N` | 14 | 라벨 글자 크기 6..96 |
 
@@ -167,7 +172,8 @@ quad       mosaic="40000,95000;60000,95000;60000,80000;40000,80000" size=4mm,3mm
   `linecolor=#ff0000`은 값이다.
 - 키: `bbox` `at` `size` `anchor` `px` `stretch` `layers`(=`layer`) `layerid` `depth` `mosaic` `corners`
   `line` `linecolor` `keep_tiles` `chip` `chip_off` `fit_chip`. 없는 키는 명령행 값을 쓴다. 켜고 끄는 값은
-  `1`/`on`/`true`/`yes`. `corners=fit`은 기본 영역의 네 모서리다.
+  `1`/`on`/`true`/`yes`. `corners=fit`은 기본 영역의 네 모서리다. `px=max`는 영역 종횡비의 가장 큰 크기(§1.1)라
+  명령행의 `--px 1200`을 줄 하나에서 되돌릴 수 있다.
 - 영역 대체 규칙: 줄에 자기 좌표 영역(`bbox`, `at`, `mosaic`, 좌표 `corners`)이 있으면 명령행의 영역
   키를 `fit_chip`까지 모두 버린다. 줄에 `fit_chip`이나 `corners=fit`만 있으면 명령행의 좌표 영역만
   버린다.
@@ -198,6 +204,7 @@ floe2 render deck.jb --mosaic-at "X,Y;X,Y;X,Y;X,Y" --size W,H --line 3 --keep-ti
 
 - 타일마다 `--px`이고 결과는 가로세로 두 배(tl,tr / bl,br), 최종 이미지는 64 Mpx까지다. 타일이 16 Mpx를 넘으면
   네 타일이 같이 줄어든다(§1.1; WARNING은 `quad.png each tile: …`, 보고서의 `pixel_requested`는 합친 크기).
+  `--px`를 생략하면 타일마다 그 종횡비의 가장 큰 크기라 정사각 타일의 최종 이미지는 8192×8192, 64 Mpx다(0.12.433).
 - `--legend`는 합친 최종 이미지에 들어간다. 보고서에는 `mosaic`과 `tiles`(타일별 bbox)가 남는다.
 
 ---
@@ -279,6 +286,7 @@ capture's region`). 영역 없는 전체 샷과 `info`·`probe`·`clip`·DRC 캡
 | 키 | 뜻 |
 |---|---|
 | `name`, `out`, `pixel` | 샷 이름, 출력 경로, [W,H](mosaic은 합친 크기) |
+| `ppu`, `ppu_y` | 배율 px/um, 가로와 세로(0.12.433). 렌더러는 축마다 따로 맞추므로 `--stretch`가 아니면 둘은 한 픽셀 안에서 같다. mosaic은 타일의 배율이라 구분선을 건너는 거리에는 `line_pixels`만큼 어긋난다. `--legend`의 메타데이터 `ppu`는 가로 값이다 |
 | `pixel_requested` | 16 Mpx 상한에 걸려 줄였을 때만: 요청한 [W,H](mosaic은 합친 크기; §1.1) |
 | `bbox_um` | 단일 샷의 영역. mosaic은 대신 `mosaic`(width, height, tile, line, line_pixels, line_color)과 `tiles`(tl/tr/bl/br의 bbox) |
 | `layers`, `depth` | 그린 레이어 지정과 깊이 |
@@ -334,6 +342,7 @@ floe2: frame 1280x13440 px for 40.0000x420.0000 um (0.0000,0.0000,40.0000,420.00
 | `FLOE_INDEX_LIGHT` | 덱 on, 레이아웃 off | 자동 색인이 만드는 캐시의 종류(`--light`/`--full`) |
 | `FLOE_LOCK_WAIT` | off | `on`이나 초: 색인 중인 소스를 기다린다(`--wait`) |
 | `FLOE_DECK_WINDOW` | on | `off`면 덱 캡처가 로드한 레벨의 모든 소스를 연다(§4.4) |
+| `FLOE_CAPTURE_PX` | max | `--px`를 생략했을 때의 크기. `--px`와 같은 `W`·`WxH`·`max`(§1.1). `1200`이면 0.12.432까지의 기본. DRC 스냅샷의 기본 1200에는 적용되지 않는다 |
 | `FLOE_CAPTURE_REDUCE` | on | `off`면 16 Mpx를 넘는 프레임을 줄이지 않고 거부한다(§1.1; DRC 스냅샷도) |
 | `FLOE_RENDER_DEFAULTS` | | `archival`이면 보관용 모양이 기본(0.12.349까지의 동작) |
 | `FLOE_LAYER_COLORS` | row | `--layer-colors`의 기본 |

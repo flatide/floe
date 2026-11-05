@@ -7,7 +7,7 @@ use crate::{
     artifact, check_cancelled,
     dataset::Dataset,
     render::{require_complete, RenderOptions, RenderSession},
-    shots::{Shot, MAX_PIXELS},
+    shots::{Pixels, Shot, MAX_PIXELS},
     styles::LayerProps,
     svrf::Rules,
     Error, ErrorKind, Result,
@@ -396,6 +396,8 @@ fn layers(o: &Options, dataset: &Dataset, rules: Option<&Rules>) -> Result<Layer
         Ok(Layers::Only(keys))
     }
 }
+/// The square side of a DRC snapshot when `--px` is not given.
+pub const DRC_DEFAULT_PX: u32 = 1200;
 pub fn run(
     dataset: &Dataset,
     shot: &Shot,
@@ -407,7 +409,14 @@ pub fn run(
 ) -> Result<()> {
     options.validate()?;
     shot.validate()?;
-    let px = shot.pixels.0;
+    // a DRC snapshot's own default stays 1200 square (its frames are many
+    // and small; the region capture's unsaid --px is the largest of its
+    // aspect since 0.12.433); --px max is the largest square, WxH its width
+    let px = match shot.pixels {
+        Pixels::Width(w) | Pixels::Size(w, _) => w,
+        Pixels::Unsaid => DRC_DEFAULT_PX,
+        Pixels::Largest => (MAX_PIXELS as f64).sqrt().floor() as u32,
+    };
     // the square frame over the 16 Mpx limit: the largest square within it
     // (user 2026-11-04), or refused with FLOE_CAPTURE_REDUCE=off
     let px = if u64::from(px) * u64::from(px) > MAX_PIXELS {

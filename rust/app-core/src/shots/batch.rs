@@ -1,5 +1,5 @@
 //! Python shots' named capture grammar. No shell expansion or execution.
-use super::{lengths, normalize, over_limit, pixels, Anchor, Fitted, LayerChoice, Shot};
+use super::{lengths, normalize, over_limit, pixels, Anchor, Fitted, LayerChoice, Pixels, Shot};
 use crate::{Error, Result};
 use std::collections::BTreeSet;
 
@@ -193,7 +193,7 @@ impl Capture {
         for (shot, f) in tiles.iter_mut().zip(fitted) {
             shot.at = None;
             shot.bbox = Some(f.bbox);
-            shot.pixels = (frame.width, Some(frame.height));
+            shot.pixels = Pixels::Size(frame.width, frame.height);
             shot.stretch = true;
         }
         Ok(Tiles {

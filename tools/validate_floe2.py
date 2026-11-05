@@ -293,6 +293,60 @@ def validate_rust_cli(base, fixture):
                        "exceeds 16 Mpx; --px 1264x13272 fits (FLOE_CAPTURE_REDUCE=off: refused, not reduced)")
               and not refused_png.exists(),
               "FLOE_CAPTURE_REDUCE=off did not refuse naming the size and the region: %r" % last)
+        # --px unsaid (0.12.433, user 2026-11-05: "지정하지 않을 경우 가능한 최대
+        # 해상도로"): the frame is the largest size of the region's aspect
+        # within 16 Mpx - nothing asked, nothing to warn about, no
+        # pixel_requested; --px max says the same; FLOE_CAPTURE_PX gives the
+        # unsaid size (1200: the default before), and a bad value is refused
+        # naming it; a DRC snapshot keeps its own 1200 square (checked below
+        # with the pack)
+        full_png, full_report = work / "rust cli full.png", work / "rust cli full.json"
+        res = rust(env, "render", source, "--out", full_png, "--report", full_report)
+        row = json.loads(full_report.read_text())["shots"][0]
+        fw, fh = png_size(full_png)
+        bw, bh = row["bbox_um"][2] - row["bbox_um"][0], row["bbox_um"][3] - row["bbox_um"][1]
+        derived = lambda w: max(1, round(w * bh / bw))
+        check(fw * fh <= 16 * 1024 * 1024 and fh == derived(fw) and (fw + 1) * derived(fw + 1) > 16 * 1024 * 1024
+              and fw > 1200 and row["pixel"] == [fw, fh] and "pixel_requested" not in row
+              and "WARNING" not in res.stdout,
+              "--px unsaid is not the largest size of the region's aspect: %dx%d for %r, %s" % (fw, fh, row["bbox_um"], res.stdout[-300:]))
+        max_png = work / "rust cli max.png"
+        rust(env, "render", source, "--px", "max", "--out", max_png)
+        check(png_size(max_png) == (fw, fh), "--px max differs from --px unsaid: %r" % (png_size(max_png),))
+        # the frame's scale (0.12.433, user 2026-11-05: "메타데이터에 ppu도
+        # 추가해줘"): the report's ppu / ppu_y are px per um along x and y;
+        # with --legend the flateyes metadata carries ppu (the x scale) and
+        # unit=um beside the legend; a stretched frame keeps the two apart
+        close = lambda a, b: abs(a - b) <= 1e-9 * max(1.0, abs(b))
+        check(close(row["ppu"], fw / bw) and close(row["ppu_y"], fh / bh),
+              "the report's ppu / ppu_y: %r / %r, not %r / %r" % (row.get("ppu"), row.get("ppu_y"), fw / bw, fh / bh))
+        legend_png, legend_report = work / "rust cli legend.png", work / "rust cli legend.json"
+        rust(env, "render", source, "--px", "400", "--legend", "--out", legend_png, "--report", legend_report)
+        dump = dict(line.split("=", 1) for line in rust(env, "fe-embed", "--dump", legend_png).stdout.splitlines()
+                    if "=" in line and not line.startswith("#") and not line.startswith("legend="))
+        lrow = json.loads(legend_report.read_text())["shots"][0]
+        check(close(float(dump.get("ppu", "nan")), 400 / bw) and dump.get("unit") == "um" and lrow.get("legend")
+              and close(lrow["ppu"], 400 / bw),
+              "--legend metadata without the scale: %r (report ppu %r)" % (dump, lrow.get("ppu")))
+        stretched_png, stretched_report = work / "rust cli stretched.png", work / "rust cli stretched.json"
+        rust(env, "render", source, "--bbox", "0,0,100,50", "--px", "200x200", "--stretch", "--legend",
+             "--out", stretched_png, "--report", stretched_report)
+        srow = json.loads(stretched_report.read_text())["shots"][0]
+        sdump = dict(line.split("=", 1) for line in rust(env, "fe-embed", "--dump", stretched_png).stdout.splitlines()
+                     if "=" in line and not line.startswith("#") and not line.startswith("legend="))
+        check(srow["ppu"] == 2 and srow["ppu_y"] == 4 and srow["bbox_um"] == [0, 0, 100, 50]
+              and float(sdump.get("ppu", "nan")) == 2,
+              "a stretched frame's ppu / ppu_y: %r / %r, metadata %r" % (srow.get("ppu"), srow.get("ppu_y"), sdump))
+        old_png = work / "rust cli old.png"
+        rust(dict(env, FLOE_CAPTURE_PX="1200"), "render", source, "--out", old_png)
+        check(png_size(old_png) == (1200, derived(1200)), "FLOE_CAPTURE_PX=1200 did not give the old default: %r" % (png_size(old_png),))
+        res = rust(dict(env, FLOE_CAPTURE_PX="big"), "render", source, "--out", work / "rust cli bad.png", ok=1)
+        last = res.stderr.strip().splitlines()[-1]
+        check(last == "floe2: FLOE_CAPTURE_PX=big: the default frame size is positive W, WxH or max"
+              and not (work / "rust cli bad.png").exists(),
+              "a bad FLOE_CAPTURE_PX was not refused naming it: %r" % last)
+        res = rust(env, "render", source, "--px", "max1", "--out", work / "rust cli bad.png", ok=2)
+        check("--px must be positive W, WxH or max" in res.stderr, "--px max1 was not refused: %r" % res.stderr[-200:])
         check(not called.exists(),
               "floe2 ran Python for a non-UI command: %s" % (
                   called.read_text() if called.exists() else ""))
@@ -540,6 +594,15 @@ def validate_rust_cli(base, fixture):
         rules = rust(env, "drc", wd_db, "--rules", "--workdir", fresh)
         check(json.loads(rules.stdout) and not (work / ".rust cli workdir.db.tray").exists(),
               "floe2 drc --rules --workdir did not read the pack from the work directory: %s" % rules.stdout[:200])
+        # a DRC snapshot's unsaid --px stays 1200 square while a region
+        # capture's became the largest of its aspect (0.12.433); --px max is
+        # the largest square
+        rule = json.loads(rules.stdout)[0]["name"]
+        snap, snap_max = work / "rust cli snap.png", work / "rust cli snap max.png"
+        rust(env, "render", source, "--drc", wd_db, "--drc-rule", rule, "--drc-err", "1", "--workdir", fresh, "--out", snap)
+        rust(env, "render", source, "--drc", wd_db, "--drc-rule", rule, "--drc-err", "1", "--workdir", fresh, "--px", "max", "--out", snap_max)
+        check(png_size(snap) == (1200, 1200) and png_size(snap_max) == (4096, 4096),
+              "a DRC snapshot's unsaid / max --px: %r / %r, not 1200x1200 / 4096x4096" % (png_size(snap), png_size(snap_max)))
         fresh2 = work / "fresh work 2"
         wd_src2 = work / "rust cli workdir 2 설계.oas"
         shutil.copy2(fixture, wd_src2)

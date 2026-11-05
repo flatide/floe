@@ -3,7 +3,7 @@ use floe_app_core::{
     jobdeck::color::Mode,
     managed::{Limits, ManagedDataset, Resources},
     render::{require_complete, RenderOptions, RenderSession},
-    shots::{Detail, Shot, Thin},
+    shots::{Detail, Pixels, Shot, Thin},
     styles,
     view::{
         deck_mode::DeckModeMemory, LayerIsolation, Model, Patch, Phase, StyleDelta, ViewController,
@@ -81,7 +81,7 @@ fn snapshots_styles_and_native_frames_match_python() {
         .unwrap();
         let shot = Shot {
             bbox: Some(serde_json::from_value(case["bbox"].clone()).unwrap()),
-            pixels: (103, Some(91)),
+            pixels: Pixels::Size(103, 91),
             stretch: true,
             ..Default::default()
         };

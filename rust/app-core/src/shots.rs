@@ -85,8 +85,13 @@ pub fn lengths<const N: usize>(text: &str) -> Result<[f64; N]> {
         .try_into()
         .map_err(|_| Error::input(format!("expected {N} coordinates")))
 }
-pub fn pixels(text: &str) -> Result<(u32, Option<u32>)> {
+/// `--px`: `W` (the height from the region's aspect), `WxH`, or `max` (the
+/// largest size of the region's aspect within MAX_PIXELS).
+pub fn pixels(text: &str) -> Result<Pixels> {
     let s = text.trim().to_lowercase();
+    if s == "max" {
+        return Ok(Pixels::Largest);
+    }
     let (w, h) = s
         .split_once('x')
         .map_or((s.as_str(), None), |(w, h)| (w, Some(h)));
@@ -95,9 +100,51 @@ pub fn pixels(text: &str) -> Result<(u32, Option<u32>)> {
             .parse::<u32>()
             .ok()
             .filter(|n| *n > 0)
-            .ok_or_else(|| Error::input("--px must be positive W or WxH"))
+            .ok_or_else(|| Error::input("--px must be positive W, WxH or max"))
     };
-    Ok((parse(w)?, h.map(parse).transpose()?))
+    Ok(match (parse(w)?, h.map(parse).transpose()?) {
+        (w, Some(h)) => Pixels::Size(w, h),
+        (w, None) => Pixels::Width(w),
+    })
+}
+/// The frame size `--px` names, or none. Unsaid, a capture's frame is the
+/// largest size of its region's aspect within MAX_PIXELS (user 2026-11-05:
+/// "지정하지 않을 경우 가능한 최대 해상도로"; 1200 wide before 0.12.433),
+/// or what `FLOE_CAPTURE_PX` says (default_pixels). A DRC snapshot keeps its
+/// own 1200 square (drc::capture).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Pixels {
+    #[default]
+    Unsaid,
+    Largest,
+    Width(u32),
+    Size(u32, u32),
+}
+impl Pixels {
+    /// This size with an unsaid one resolved: `FLOE_CAPTURE_PX` as `--px`
+    /// would read it, else the largest.
+    pub fn resolved(self) -> Result<Pixels> {
+        match self {
+            Pixels::Unsaid => default_pixels(),
+            said => Ok(said),
+        }
+    }
+}
+/// The frame size when `--px` is not given: `FLOE_CAPTURE_PX` (`W`, `WxH` or
+/// `max`; a site that wants the 1200 of before 0.12.433 sets it so), else
+/// the largest size of the region's aspect within MAX_PIXELS.
+pub fn default_pixels() -> Result<Pixels> {
+    default_pixels_from(std::env::var("FLOE_CAPTURE_PX").ok().as_deref())
+}
+fn default_pixels_from(value: Option<&str>) -> Result<Pixels> {
+    match value.map(str::trim).filter(|v| !v.is_empty()) {
+        None => Ok(Pixels::Largest),
+        Some(v) => pixels(v).map_err(|_| {
+            Error::input(format!(
+                "FLOE_CAPTURE_PX={v}: the default frame size is positive W, WxH or max"
+            ))
+        }),
+    }
 }
 pub fn normalize(b: [f64; 4]) -> Result<[f64; 4]> {
     if !b.iter().all(|v| v.is_finite()) || b[0] == b[2] || b[1] == b[3] {
@@ -122,7 +169,7 @@ pub struct Shot {
     pub at: Option<[f64; 2]>,
     pub size: Option<[f64; 2]>,
     pub anchor: Anchor,
-    pub pixels: (u32, Option<u32>),
+    pub pixels: Pixels,
     pub stretch: bool,
     pub layers: Option<String>,
     pub depth: Option<u32>,
@@ -227,7 +274,7 @@ impl Default for Shot {
             at: None,
             size: None,
             anchor: Anchor::Center,
-            pixels: (1200, None),
+            pixels: Pixels::Unsaid,
             stretch: false,
             layers: None,
             depth: None,
@@ -290,7 +337,7 @@ impl Shot {
         if !(6..=96).contains(&self.font_px) {
             return Err(Error::input("--label-font-px must be 6..96"));
         }
-        if self.pixels.0 == 0 || self.pixels.1 == Some(0) {
+        if matches!(self.pixels, Pixels::Width(0) | Pixels::Size(0, _) | Pixels::Size(_, 0)) {
             return Err(Error::input("--px must be positive"));
         }
         Ok(())
@@ -321,30 +368,39 @@ impl Shot {
             self.bbox.unwrap_or(default_box)
         };
         let mut b = normalize(b)?;
-        let (w, h) = self.pixels;
-        let asked_w = f64::from(w);
-        let asked_h = match h {
-            Some(h) => f64::from(h),
-            None => {
-                let n = (asked_w * (b[3] - b[1]) / (b[2] - b[0]))
+        let said = self.pixels.resolved()?;
+        // the size asked: `WxH`, or a width with its height from the region's
+        // aspect (half-even, as the Python shots derived it); none when the
+        // frame is the largest of the region's aspect (`--px max`, and `--px`
+        // unsaid since 0.12.433)
+        let size = match said {
+            Pixels::Size(w, h) => Some((f64::from(w), f64::from(h))),
+            Pixels::Width(w) => {
+                let n = (f64::from(w) * (b[3] - b[1]) / (b[2] - b[0]))
                     .round_ties_even()
                     .max(1.);
                 if !n.is_finite() {
                     return Err(Error::input("derived image height overflow"));
                 }
-                n
+                Some((f64::from(w), n))
             }
+            Pixels::Largest | Pixels::Unsaid => None,
         };
-        let (w, h, asked) = if asked_w * asked_h > MAX_PIXELS as f64 {
-            let (rw, rh) = reduced(asked_w, asked_h);
-            (rw, rh, Some((asked_w as u64, asked_h as u64)))
-        } else {
-            (w, asked_h as u32, None)
+        let (w, h, asked) = match size {
+            None => {
+                let (w, h) = largest(b[2] - b[0], b[3] - b[1]);
+                (w, h, None)
+            }
+            Some((aw, ah)) if aw * ah > MAX_PIXELS as f64 => {
+                let (rw, rh) = reduced(aw, ah);
+                (rw, rh, Some((aw as u64, ah as u64)))
+            }
+            Some((aw, ah)) => (aw as u32, ah as u32, None),
         };
-        if self.pixels.1.is_some() && !self.stretch {
+        if let (Pixels::Size(aw, ah), false) = (said, self.stretch) {
             // the region to W:H as asked (the reduced size keeps that aspect
             // to a pixel)
-            let want = asked_w / asked_h;
+            let want = f64::from(aw) / f64::from(ah);
             let have = (b[2] - b[0]) / (b[3] - b[1]);
             if (want - have).abs() >= 1e-12 {
                 let (bw, bh) = if have < want {
@@ -389,6 +445,14 @@ pub struct Fitted {
     pub asked: Option<(u64, u64)>,
 }
 impl Fitted {
+    /// The frame's scale in px per um along x and along y: the renderer maps
+    /// each axis on its own (raster sx / sy), so the two agree within a pixel
+    /// over the frame unless `--stretch` drew a region of another aspect.
+    /// The x scale is the flateyes metadata's `ppu` (user 2026-11-05).
+    pub fn ppu(&self) -> (f64, f64) {
+        let [x0, y0, x1, y1] = self.bbox;
+        (f64::from(self.width) / (x1 - x0), f64::from(self.height) / (y1 - y0))
+    }
     /// What the limit reduced, for the capture's warning and the refusal:
     /// `1280x13440 px for 40.0000x420.0000 um (0.0000,0.0000,40.0000,420.0000 um)
     /// exceeds 16 Mpx`; None when the frame is as asked.
@@ -421,12 +485,20 @@ pub fn over_limit() -> OverLimit {
 /// width whose height, derived as `--px W` derives it (half-even), keeps the
 /// product within the limit - the product grows with the width, so it is
 /// found by bisection. An aspect too tall for a 1 px width gets the limit as
-/// its height.
+/// its height. The frame of `--px max`, and of `--px` unsaid (0.12.433).
+pub fn largest(width: f64, height: f64) -> (u32, u32) {
+    widest(width, height, MAX_PIXELS)
+}
+/// A size over MAX_PIXELS reduced: the largest of its aspect within the
+/// limit, no wider than it was asked.
 pub fn reduced(width: f64, height: f64) -> (u32, u32) {
+    widest(width, height, (width as u64).min(MAX_PIXELS))
+}
+fn widest(width: f64, height: f64, hi: u64) -> (u32, u32) {
     let limit = MAX_PIXELS as f64;
     let derived = |rw: u64| ((rw as f64) * height / width).round_ties_even().max(1.);
     let fits = |rw: u64| rw as f64 * derived(rw) <= limit;
-    let (mut lo, mut hi) = (1u64, (width as u64).min(MAX_PIXELS));
+    let (mut lo, mut hi) = (1u64, hi.max(1));
     if !fits(lo) {
         return (1, MAX_PIXELS as u32);
     }
@@ -523,11 +595,11 @@ mod tests {
         );
         let mut s = Shot {
             bbox: Some([0., 0., 10., 25.]),
-            pixels: (1, None),
+            pixels: Pixels::Width(1),
             ..Default::default()
         };
         assert_eq!(s.fitted([0.; 4]).unwrap(), ([0., 0., 10., 25.], 1, 2));
-        s.pixels = (100, Some(100));
+        s.pixels = Pixels::Size(100, 100);
         assert_eq!(s.fitted([0.; 4]).unwrap().0, [-7.5, 0., 17.5, 25.]);
         s.anchor = Anchor::LowerLeft;
         assert_eq!(s.fitted([0.; 4]).unwrap().0, [0., 0., 25., 25.]);
@@ -540,7 +612,7 @@ mod tests {
             assert!(length(text).is_err());
         }
         let s = Shot {
-            pixels: (65536, Some(65536)),
+            pixels: Pixels::Size(65536, 65536),
             ..Default::default()
         };
         assert!(s.frame([0., 0., 1., 1.], OverLimit::Refuse).is_err());
@@ -555,7 +627,7 @@ mod tests {
         // --px 1280 over a 40 x 420 um strip derives 1280x13440 = 17.2 Mpx
         let s = Shot {
             bbox: Some([0., 0., 40., 420.]),
-            pixels: (1280, None),
+            pixels: Pixels::Width(1280),
             ..Default::default()
         };
         let f = s.frame([0.; 4], OverLimit::Reduce).unwrap();
@@ -578,7 +650,7 @@ mod tests {
         // a frame within the limit is as asked, nothing to say
         let f = Shot {
             bbox: Some([0., 0., 40., 420.]),
-            pixels: (1200, None),
+            pixels: Pixels::Width(1200),
             ..Default::default()
         }
         .frame([0.; 4], OverLimit::Refuse)
@@ -588,7 +660,7 @@ mod tests {
         // --px WxH: the region widened to W:H as asked, the size reduced
         let s = Shot {
             bbox: Some([0., 0., 100., 100.]),
-            pixels: (8000, Some(4000)),
+            pixels: Pixels::Size(8000, 4000),
             ..Default::default()
         };
         let f = s.frame([0.; 4], OverLimit::Reduce).unwrap();
@@ -626,6 +698,89 @@ mod tests {
         assert_eq!(reduced(1280., 13440.), (1264, 13272));
         // a width over the limit at 1 px of height: the limit wide
         assert_eq!(reduced(2e7, 1.), (MAX_PIXELS as u32, 1));
+        // largest: the same property with no asked width to stay under
+        for (w, h) in [
+            (100., 100.),
+            (40., 420.),
+            (403.378, 446.051),
+            (0.3, 0.1),
+            (1., 1e12),
+            (2e7, 1.),
+        ] {
+            let (rw, rh) = largest(w, h);
+            let pixels = u64::from(rw) * u64::from(rh);
+            assert!(pixels <= MAX_PIXELS && rw >= 1 && rh >= 1, "{w}x{h}: {rw}x{rh}");
+            let derived = |x: u32| (f64::from(x) * h / w).round_ties_even().max(1.);
+            if rw > 1 && u64::from(rw) < MAX_PIXELS {
+                assert_eq!(f64::from(rh), derived(rw), "{w}x{h}");
+                assert!(f64::from(rw + 1) * derived(rw + 1) > MAX_PIXELS as f64, "{w}x{h}: {rw}x{rh} is not the largest");
+            }
+        }
+        assert_eq!(largest(100., 100.), (4096, 4096));
+        assert_eq!(largest(40., 420.), (1264, 13272));
+        assert_eq!(largest(1., 1e12), (1, MAX_PIXELS as u32));
+        assert_eq!(largest(2e7, 1.), (MAX_PIXELS as u32, 1));
+    }
+    #[test]
+    fn unsaid_or_max_the_frame_is_the_largest_of_the_regions_aspect() {
+        assert_eq!(pixels("max").unwrap(), Pixels::Largest);
+        assert_eq!(pixels(" MAX ").unwrap(), Pixels::Largest);
+        assert_eq!(pixels("1200").unwrap(), Pixels::Width(1200));
+        assert_eq!(pixels("1200x900").unwrap(), Pixels::Size(1200, 900));
+        for bad in ["", "0", "max1", "1200x", "1200x0", "-1"] {
+            let e = pixels(bad).unwrap_err().to_string();
+            assert_eq!(e, "--px must be positive W, WxH or max", "{bad}");
+        }
+        // the default: FLOE_CAPTURE_PX as --px reads it, else the largest
+        assert_eq!(default_pixels_from(None).unwrap(), Pixels::Largest);
+        assert_eq!(default_pixels_from(Some(" ")).unwrap(), Pixels::Largest);
+        assert_eq!(default_pixels_from(Some("max")).unwrap(), Pixels::Largest);
+        assert_eq!(default_pixels_from(Some("1200")).unwrap(), Pixels::Width(1200));
+        assert_eq!(default_pixels_from(Some(" 1200x900 ")).unwrap(), Pixels::Size(1200, 900));
+        let e = default_pixels_from(Some("big")).unwrap_err().to_string();
+        assert_eq!(e, "FLOE_CAPTURE_PX=big: the default frame size is positive W, WxH or max");
+        assert_eq!(Shot::default().pixels, Pixels::Unsaid);
+        assert_eq!(Pixels::Width(7).resolved().unwrap(), Pixels::Width(7));
+        // --px max: the strip of the 1280 case at its aspect's largest, no
+        // size asked, nothing to warn about, the region as given
+        let f = Shot {
+            bbox: Some([0., 0., 40., 420.]),
+            pixels: Pixels::Largest,
+            ..Default::default()
+        }
+        .frame([0.; 4], OverLimit::Refuse)
+        .unwrap();
+        assert_eq!((f.bbox, f.width, f.height, f.asked), ([0., 0., 40., 420.], 1264, 13272, None));
+        assert_eq!(f.over_limit_text(), None);
+        assert_eq!(f.ppu(), (31.6, 13272. / 420.));
+        // a stretched frame: the two scales apart
+        let f = Shot {
+            bbox: Some([0., 0., 100., 50.]),
+            pixels: Pixels::Size(200, 200),
+            stretch: true,
+            ..Default::default()
+        }
+        .frame([0.; 4], OverLimit::Refuse)
+        .unwrap();
+        assert_eq!((f.bbox, f.ppu()), ([0., 0., 100., 50.], (2., 4.)));
+        // unsaid, the same (the environment's default read in the process)
+        if std::env::var_os("FLOE_CAPTURE_PX").is_none() {
+            let f = Shot {
+                bbox: Some([0., 0., 100., 100.]),
+                ..Default::default()
+            }
+            .frame([0.; 4], OverLimit::Refuse)
+            .unwrap();
+            assert_eq!((f.bbox, f.width, f.height, f.asked), ([0., 0., 100., 100.], 4096, 4096, None));
+            assert_eq!(f.ppu(), (40.96, 40.96));
+            // the gate fixture's whole bbox: within the limit, the largest
+            let f = Shot::default()
+                .frame([0.023, 0.214, 403.401, 446.265], OverLimit::Refuse)
+                .unwrap();
+            assert!(u64::from(f.width) * u64::from(f.height) <= MAX_PIXELS);
+            assert_eq!((f.width, f.height), largest(403.378, 446.051));
+            assert_eq!(f.bbox, [0.023, 0.214, 403.401, 446.265]);
+        }
     }
     #[test]
     fn json_coordinates_keep_full_f64_precision() {

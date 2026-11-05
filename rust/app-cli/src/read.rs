@@ -24,7 +24,11 @@ makes it the default, as before 0.12.350).
   --bbox X0,Y0,X1,Y1          Region (default whole source)
   --at X,Y --size W,H         Alternative region form
   --anchor center|lb          Aspect/position anchor (default center)
-  --px W|WxH                 Default 1200; height follows aspect
+  --px W|WxH|max              Width (the height from the region's aspect),
+                            both, or max: the largest size of the region's
+                            aspect within 16 Mpx (4096x4096). Default max
+                            (FLOE_CAPTURE_PX sets it; 1200 before 0.12.433);
+                            --drc snapshots default to 1200 square
   --stretch                  Do not expand bbox to explicit WxH aspect
   --layers NAME,L/D,...       Layer names/aliases or pairs (default all); a
                             jobdeck's level by its name (the MTITLE; LEVELn
@@ -66,7 +70,8 @@ makes it the default, as before 0.12.350).
                             FLOE_LAYER_COLORS sets the default; layouts
   --legend                  Each image carries the legend of the layers it
                             draws (colour, fill, name L/D; every layer on: the
-                            layer panel's rows) as flateyes metadata - the
+                            layer panel's rows) and its scale (ppu: px per um
+                            along x; unit um) as flateyes metadata - the
                             pixels stay as drawn; fe-embed --dump prints it
   --archival                The export look; the options given still win
   --label-font-px N          6..96 (default 14)

@@ -45,9 +45,9 @@ struct Plan<'a> {
     /// the chips the capture names, and the default region they frame
     chips: Option<Selection>,
     region: [f64; 4],
-    /// the size asked when the 16 Mpx limit reduced the tiles (Shot::frame):
-    /// the report's `pixel_requested`
-    asked: Option<(u64, u64)>,
+    /// the tiles' frame (Shot::frame): the size drawn, and the size asked
+    /// when the 16 Mpx limit reduced it - the report's `pixel_requested`
+    frame: crate::shots::Fitted,
 }
 /// What a run of captures drew: whether every image is whole, and what
 /// they lack - the skipped placements of the chips some shot had on, the
@@ -356,7 +356,7 @@ pub fn run_summary(
             lacks,
             chips: selection,
             region,
-            asked: planned.frame.asked,
+            frame: planned.frame,
         });
     }
     let report = options
@@ -423,7 +423,7 @@ pub fn run_summary(
                     table.describe(sel)
                 ));
             }
-            let (width, height) = (plan.tiles[0].pixels.0, plan.tiles[0].pixels.1.unwrap());
+            let (width, height) = (plan.frame.width, plan.frame.height);
             // --legend: the layers this shot draws, as the picture paints them
             let legend = legend_styles
                 .as_ref()
@@ -435,8 +435,15 @@ pub fn run_summary(
                     )
                 })
                 .transpose()?;
+            // the frame's scale, px per um along x and y (Fitted::ppu): the
+            // report's ppu / ppu_y, and with the legend the flateyes
+            // metadata's ppu and unit, as a DRC snapshot's (user 2026-11-05:
+            // "메타데이터에 ppu도 추가해줘")
+            let (ppu, ppu_y) = plan.frame.ppu();
             let legend_doc = legend.as_ref().filter(|l| !l.is_empty()).map(|l| Document {
                 legend: Some(l.clone()),
+                ppu: Some(ppu),
+                unit: Some("um".into()),
                 ..Document::default()
             });
             let mut canvas = capture
@@ -488,6 +495,7 @@ pub fn run_summary(
                 session.close()?;
             }
             let mut row = serde_json::json!({"name":plan.named.name,"out":plan.display,"pixel":[width,height],
+                "ppu":ppu,"ppu_y":ppu_y,
                 "layers":capture.shot.layers,"depth":capture.shot.depth,"over_budget_pages":deferred,
                 "summary_building":summary_building,
                 "skipped_placements":plan.lacks.len(),"complete":all_complete});
@@ -502,7 +510,7 @@ pub fn run_summary(
             let staged = if let Some(canvas) = canvas {
                 let (rgba, info) = canvas.finish(capture.line, &capture.line_color, cancelled)?;
                 row["pixel"] = serde_json::json!([width * 2, height * 2]);
-                if let Some((aw, ah)) = plan.asked {
+                if let Some((aw, ah)) = plan.frame.asked {
                     row["pixel_requested"] = serde_json::json!([aw * 2, ah * 2]);
                 }
                 row["mosaic"] = info;
@@ -523,7 +531,7 @@ pub fn run_summary(
                 }
             } else {
                 row["bbox_um"] = serde_json::json!(plan.tiles[0].bbox.unwrap());
-                if let Some((aw, ah)) = plan.asked {
+                if let Some((aw, ah)) = plan.frame.asked {
                     row["pixel_requested"] = serde_json::json!([aw, ah]);
                 }
                 if let Some(doc) = &legend_doc {
