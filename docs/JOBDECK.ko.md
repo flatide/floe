@@ -426,7 +426,8 @@ pick/snap/clip이 덱에서 꺼져 있는 것과 달리 셀 질의는 덱에서�
 참조 툴의 cli-spec에서 결정된 규칙을 floe2의 기존 명령에 얹었다. 덱 전용
 플래그가 아니라 `floe2 render`의 일반 옵션이며 레이아웃에도 그대로 쓰인다
 (app-core `shots/batch.rs`·`shots/mosaic.rs`·`captures.rs`; 예전 `floe/shots.py`는 P2d에서 제거됐다).
-이 절은 결정의 이력이고, 옵션 전체를 쓰임새별로 묶은 레퍼런스는 [CAPTURE-CLI.ko.md](CAPTURE-CLI.ko.md)다.
+이 절은 결정의 이력이고, 옵션 전체를 쓰임새별로 묶은 레퍼런스는 [CAPTURE-CLI.ko.md](CAPTURE-CLI.ko.md),
+덱 캡처를 케이스별로 묶어 준비 여부와 미비를 적은 정리는 [JOBDECK-CAPTURE.ko.md](JOBDECK-CAPTURE.ko.md)다.
 
 ```sh
 floe2 render deck.jb --at 53.02mm,92.61mm --size 32mm,25.6mm --px 1200x900 --out a.png

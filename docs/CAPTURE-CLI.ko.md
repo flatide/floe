@@ -211,6 +211,9 @@ floe2 render deck.jb --mosaic-at "X,Y;X,Y;X,Y;X,Y" --size W,H --line 3 --keep-ti
 
 ## 4. jobdeck 캡처
 
+케이스별(덱 전체, 레벨, 칩, 배치, CHIP 블록, 위치, 네 모서리, 여러 장, 해상도, 요약, 인덱스 없는 덱)로 필요한
+옵션과 확인 결과, 미비한 것을 묶은 정리는 [JOBDECK-CAPTURE.ko.md](JOBDECK-CAPTURE.ko.md)다.
+
 ```sh
 floe2 info   deck.jb --level 2 --chips                       # 칩 이름, CHIP, 배치 #K와 범위(--bbox/--corners 형식)
 floe2 render deck.jb --level 2 --chip MAIN.oas,FRAME.oas --fit-chip MAIN.oas --corners --size 300um,300um --out main4.png
@@ -426,6 +429,7 @@ csh/tcsh 호스트에서는 `(floe2 render … > render.out) >& render.err`처�
 |---|---|
 | README.md "floe2 사용법" | 명령 예시 묶음, 캡처 기본값 = 뷰어, 디코드 예산, `--density`, `--legend`의 결정 |
 | [JOBDECK.ko.md](JOBDECK.ko.md) §7 | `floe2 render`의 M4 이력: 영역·mosaic·batch 규칙, 칩 on/off, 임시 인덱스, 캡처 창 |
+| [JOBDECK-CAPTURE.ko.md](JOBDECK-CAPTURE.ko.md) | 덱 캡처를 케이스별로: 필요한 옵션, 확인 결과, 미비와 주의 (2026-11-09) |
 | [DRC-CLI.ko.md](DRC-CLI.ko.md) §3 | DRC 에러 스냅샷 |
 | [DIRECT_READ_PLAN.ko.md](DIRECT_READ_PLAN.ko.md) §8.11, §8.29, §8.30 | 캡처는 요약을 만들지 않는다, 임시 인덱스, 캡처 창의 측정과 판정 |
 | [CACHE-NAMING.ko.md](CACHE-NAMING.ko.md) | 캐시·pack·사이드카의 이름과 잠금, `--workdir`의 작업 디렉터리(§6) |
