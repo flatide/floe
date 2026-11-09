@@ -3631,6 +3631,101 @@ class ChipShotTests(unittest.TestCase):
         self.assertIn("level 1,2 chipA.oas mag 4 at 41020,80020; level 3 "
                       "mark.oas mag 0.2 at 45010,85110 (um)", res.stderr)
 
+    def test_mode_draws_the_decks_view(self):
+        # --mode level|chip|layer (user 2026-11-09: "chip view 모드로 캡쳐
+        # 하려면"): the viewer's Jobdeck menu for a capture - the level view
+        # colours a level's chips alike, the chip view each source chip its
+        # own; the view's own layerprops file applies; the legend lists what
+        # the picture shows (the chip view's chips, no level head)
+        from PIL import Image
+        from floe import fillpat
+        out = self.out
+
+        def pixels(name):
+            return list(Image.open(out / name).convert("RGB").getdata())
+
+        def colours(name):
+            return {px for px in pixels(name) if px != (0, 0, 0)}
+
+        def lit(name):
+            return [i for i, px in enumerate(pixels(name)) if px != (0, 0, 0)]
+
+        def legend(name):
+            dump = run_floe2("fe-embed", "--dump", out / name, ok=0).stdout
+            return [x[len("legend="):] for x in dump.split("\n")
+                    if x.startswith("legend=")]
+
+        def rgb(text):
+            return tuple(int(text[i:i + 2], 16) for i in (1, 3, 5))
+
+        args = ("--level", "2", "--archival", "--px", "320", "--legend")
+        self.render("mode_level.png", *args, "--report",
+                    out / "mode_level.json")
+        self.render("mode_chip.png", "--mode", "chip", *args, "--report",
+                    out / "mode_chip.json")
+        views = [json.loads((out / n).read_text())["jobdeck"]["view"]
+                 for n in ("mode_level.json", "mode_chip.json")]
+        self.assertEqual(views, ["level", "chip"])
+        # the same pixels lit, their colours the view's: level 2's one
+        # colour, then one a chip (chipA.oas and chipB.oas are its chips)
+        self.assertEqual(lit("mode_level.png"), lit("mode_chip.png"))
+        self.assertEqual(len(colours("mode_level.png")), 1)
+        self.assertEqual(len(colours("mode_chip.png")), 2)
+        # the legend is what the picture shows: the level's line, or the
+        # chips' lines (file name, L/D) and no level head
+        rows = json.loads(run_floe2(
+            "info", self.dir / "test.jb", "--level", "2", "--chips",
+            "--json", env=self.env, ok=0).stdout)["chips"]["rows"]
+        keys = {r["name"]: r["key"] for r in rows}
+        self.assertEqual(set(keys), {"chipA.oas", "chipB.oas"})
+        level = legend("mode_level.png")
+        self.assertEqual(len(level), 1, level)
+        self.assertTrue(level[0].endswith(" VIA1 2/0"), level)
+        self.assertEqual({rgb(level[0].split()[1])},
+                         colours("mode_level.png"))
+        chip = legend("mode_chip.png")
+        self.assertEqual(sorted(x.split()[3:] for x in chip),
+                         sorted([n, k.replace("/", "/")]
+                                for n, k in keys.items()), chip)
+        self.assertEqual({rgb(x.split()[1]) for x in chip},
+                         colours("mode_chip.png"))
+        # the chip view's own layerprops file applies to it alone
+        l, d = map(int, keys["chipA.oas"].split("/"))
+        props = self.dir / "test.chip-by-level.jb.layerprops"
+        props.write_text(fillpat.format_layerprops(
+            [((l, d), "#123456", "solid", "chipA.oas", "1", "1")]))
+        self.addCleanup(lambda: props.exists() and props.unlink())
+        self.render("mode_chip_props.png", "--mode", "chip", *args)
+        self.render("mode_level_props.png", *args)
+        self.assertIn((0x12, 0x34, 0x56), colours("mode_chip_props.png"))
+        self.assertEqual(colours("mode_level_props.png"),
+                         colours("mode_level.png"))
+        # --chip: the legend lists the chips on alone (before 0.12.436 every
+        # row of the levels loaded, JOBDECK-CAPTURE §17 item 8) - the chip
+        # view its chip's line, the level view its level's
+        self.render("mode_chip_one.png", "--mode", "chip", "--chip",
+                    "2:chipB.oas", *args)
+        self.assertEqual([x.split()[3:] for x in legend("mode_chip_one.png")],
+                         [["chipB.oas", keys["chipB.oas"]]])
+        self.assertEqual(colours("mode_chip_one.png"),
+                         {rgb(legend("mode_chip_one.png")[0].split()[1])})
+        self.render("mode_level_one.png", "--chip", "2:chipB.oas", *args)
+        self.assertEqual([x.split()[3:] for x in legend("mode_level_one.png")],
+                         [["VIA1", "2/0"]])
+        # the source layer view draws too
+        self.render("mode_layer.png", "--mode", "layer", *args, "--report",
+                    out / "mode_layer.json")
+        self.assertEqual(json.loads((out / "mode_layer.json").read_text())
+                         ["jobdeck"]["view"], "layer")
+        # a word not a view's, and a layout: argument errors
+        res = run_floe2("render", self.dir / "test.jb", "--mode", "chips?",
+                        "--out", out / "mode_bad.png", env=self.env, ok=2)
+        self.assertIn("--mode must be level, chip or layer", res.stderr)
+        res = run_floe2("render", self.dir / "chipA.oas", "--mode", "chip",
+                        "--out", out / "mode_bad.png", env=self.env, ok=2)
+        self.assertIn("chipA.oas is a layout", res.stderr)
+        self.assertFalse((out / "mode_bad.png").exists())
+
     def test_info_json_carries_the_chips(self):
         # info --json --chips (2026-11-09): one JSON document with the chips
         # as `chips` - before, the table followed the JSON as text and the

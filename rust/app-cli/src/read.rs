@@ -2,6 +2,7 @@ use crate::ready::{self, Ready, Waiter};
 use floe_app_core::{
     dataset::Dataset,
     jobdeck::{
+        color::Mode,
         index::{is_deck, parse_levels, ChipSelection},
         window::DeckReads,
     },
@@ -38,6 +39,14 @@ makes it the default, as before 0.12.350).
                             jobdeck's N is level N (every chip of it). With
                             --layers, both
   --level N,N,...             Jobdeck: load these mask levels only
+  --mode level|chip|layer    Jobdeck: the view drawn, as the viewer's Jobdeck
+                            menu - level (default): one colour a mask level;
+                            chip: one a source chip under its level (chip
+                            view); layer: one a source layer LY/DT. The
+                            view's own saved layer properties apply
+                            (<deck>.jb.layerprops, <deck>.chip-by-level.jb.
+                            layerprops, <deck>.layer.jb.layerprops); the
+                            report's jobdeck.view says it
   --depth N                  0=top, 999/omit=full
   --detail exact|low|medium|high  Size cut 0/5/3/1 px (default medium, the
                             viewer's; --archival: exact)
@@ -203,6 +212,9 @@ pub enum Command {
         report: Option<PathBuf>,
         batch: Option<String>,
         levels: Option<BTreeSet<i64>>,
+        /// `--mode`: a jobdeck's view - the colours and saved layer
+        /// properties of its level, chip or layer view (2026-11-09)
+        mode: Mode,
         drc: Option<Box<floe_app_core::drc::capture::Options>>,
         layer_colors: Option<LayerColors>,
         legend: bool,
@@ -245,6 +257,8 @@ pub fn parse(args: &[String]) -> Result<Command> {
     // --chipid / --chipnumber: the CHIP blocks a deck's capture reads
     let mut chip_blocks = ChipSelection::default();
     let mut levels = None;
+    // --mode: a jobdeck's view - level, chip or layer colours (2026-11-09)
+    let mut mode = None;
     // --layer-colors (a layout's default layer colours; the open's
     // FLOE_LAYER_COLORS without it)
     let mut layer_colors = None;
@@ -497,6 +511,13 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 no_value()?;
                 legend = true;
             }
+            // the deck's view: its colours and saved layer properties
+            "--mode" => {
+                mode = Some(
+                    Mode::parse(value()?)
+                        .map_err(|_| Error::input("--mode must be level, chip or layer"))?,
+                )
+            }
             "--layer-colors" => {
                 layer_colors = Some(LayerColors::parse(value()?).ok_or_else(|| {
                     Error::input("--layer-colors must be row or group")
@@ -556,6 +577,13 @@ pub fn parse(args: &[String]) -> Result<Command> {
     if levels.is_some() && !is_deck(&source) {
         return Err(Error::input("--level requires a jobdeck"));
     }
+    // a jobdeck's views; a layout has one look
+    if mode.is_some() && !is_deck(&source) {
+        return Err(Error::input(format!(
+            "--mode names a jobdeck's view (level, chip or layer); {} is a layout",
+            source.display()
+        )));
+    }
     if is_deck(&source) && shot.labels {
         return Err(Error::new(
             ErrorKind::Unsupported,
@@ -611,6 +639,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 report,
                 batch,
                 levels,
+                mode: mode.unwrap_or_default(),
                 drc,
                 layer_colors,
                 legend,
@@ -626,6 +655,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
 pub(crate) fn dataset(
     source: &std::path::Path,
     levels: Option<BTreeSet<i64>>,
+    mode: Mode,
     index: bool,
     light: Option<bool>,
     summaries: bool,
@@ -639,9 +669,10 @@ pub(crate) fn dataset(
     // occupancy summary added too - DIRECT_READ_PLAN §5.5 / §8.11; by
     // default a capture builds none, and info reads the caches as they are;
     // `temp`: the run's temporary index - `--temp-index`, ready.rs;
-    // `reads`: what a capture reads of a deck - jobdeck::window)
+    // `reads`: what a capture reads of a deck - jobdeck::window; `mode`: a
+    // jobdeck's view - `render --mode` - whose colours the open takes)
     let l = ready::open(
-        source, levels, index, light, summaries, temp, reads, waiter, cancelled,
+        source, levels, mode, index, light, summaries, temp, reads, waiter, cancelled,
     )?;
     if l.source_stale() {
         eprintln!("[{}][warn] source changed; displaying cached geometry. Rebuild with index --force, then reopen.", floe_app_core::program());
@@ -690,6 +721,7 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
             capture,
             out,
             levels,
+            mode,
             drc: Some(drc),
             layer_colors,
             ready,
@@ -701,6 +733,7 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
                 let mut dataset = dataset(
                     &source,
                     levels.clone(),
+                    mode,
                     ready.index,
                     ready.light,
                     capture.shot.occupancy == Some(true),
@@ -731,6 +764,7 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
             report,
             batch,
             levels,
+            mode,
             drc: None,
             layer_colors,
             legend,
@@ -748,6 +782,7 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
                 report,
                 batch,
                 levels,
+                mode,
                 chips,
                 layer_colors,
                 legend,
@@ -801,7 +836,16 @@ fn info(
     cancelled: &Arc<AtomicUsize>,
 ) -> Result<i32> {
     let l = dataset(
-        source, levels, index, light, false, temp, None, waiter, cancelled,
+        source,
+        levels,
+        Mode::Level,
+        index,
+        light,
+        false,
+        temp,
+        None,
+        waiter,
+        cancelled,
     )?;
     // what `render --chip / --chip-off / --fit-chip / --in-chip` name: the
     // chip view's rows, their CHIP blocks and placements
@@ -852,7 +896,16 @@ fn probe(
 ) -> Result<i32> {
     // (a probe builds no summary: its frames are a check, drawn once)
     let l = dataset(
-        source, None, index, light, false, temp, None, waiter, cancelled,
+        source,
+        None,
+        Mode::Level,
+        index,
+        light,
+        false,
+        temp,
+        None,
+        waiter,
+        cancelled,
     )?;
     let mut session =
         RenderSession::open(&l, RenderOptions::local()?, false, Arc::clone(cancelled))?;
@@ -998,6 +1051,26 @@ mod tests {
             "--drc-rule=R"
         ])
         .is_err());
+    }
+    #[test]
+    fn render_takes_the_jobdecks_view() {
+        // --mode level|chip|layer (user 2026-11-09: "chip view 모드로
+        // 캡쳐"): the deck's view, its colours; a layout has one look, a
+        // word not a view's is an argument error
+        let mode = |args: &[&str]| match parsed(args) {
+            Ok(Command::Render { mode, .. }) => Ok(mode),
+            Ok(_) => panic!(),
+            Err(e) => Err(e.to_string()),
+        };
+        assert_eq!(mode(&["render", "a.jb"]), Ok(Mode::Level));
+        assert_eq!(mode(&["render", "a.jb", "--mode", "chip"]), Ok(Mode::Chip));
+        assert_eq!(mode(&["render", "a.jb", "--mode=LAYER"]), Ok(Mode::Layer));
+        assert_eq!(mode(&["render", "a.jb", "--mode=levels"]), Ok(Mode::Level));
+        let bad = mode(&["render", "a.jb", "--mode", "chips?"]).unwrap_err();
+        assert!(bad.contains("--mode must be level, chip or layer"), "{bad}");
+        let layout = mode(&["render", "a.oas", "--mode", "chip"]).unwrap_err();
+        assert!(layout.contains("a.oas is a layout"), "{layout}");
+        assert!(mode(&["render", "a.jb", "--mode"]).is_err());
     }
     #[test]
     fn render_reads_the_chip_blocks_named() {

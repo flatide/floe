@@ -107,7 +107,8 @@ layerprops, 셀 프레임과 라벨(덱은 라벨 없음, 밀도 없음).
 | `--occupancy on\|off` | 말하지 않음 | 광역 뷰를 점유 요약(`design.ovo`)으로. `on`은 요약 없는 소스의 요약을 먼저 만들고(자동 색인), `off`는 덱도 요약 없이 페이지로. 말하지 않으면 덱은 있는 요약을 쓰고 만들지는 않으며(경량 소스의 광역 pass는 비고 exit 3), 레이아웃은 off. 컷이 있어야 한다 |
 | `--frames[=on\|off]` `--labels[=on\|off]` | on | 셀 프레임, 설계 텍스트. 덱의 라벨은 지원하지 않는다 |
 | `--layer-colors row\|group` | row | 레이아웃의 기본 레이어 색. row는 패널 줄마다, group은 layer 번호마다 한 색. `FLOE_LAYER_COLORS`가 기본값. 덱은 거부 |
-| `--legend` | | 그린 레이어의 범례(색, 채움, 이름 L/D)를 이미지마다 flateyes 메타데이터로, 배율 `ppu`(가로 px/um)와 `unit=um`과 함께(0.12.433; DRC 스냅샷과 같다). 픽셀은 그대로다. `floe2 fe-embed --dump`로 읽는다 |
+| `--mode level\|chip\|layer` | level | 덱의 뷰. 뷰어의 Jobdeck 메뉴와 같다. level은 마스크 레벨마다 한 색, chip은 레벨 아래 소스 칩마다 한 색(chip view), layer는 소스 레이어 LY/DT마다 한 색. 그 뷰에서 저장한 layerprops(`<deck>.jb.layerprops`, `<deck>.chip-by-level.jb.layerprops`, `<deck>.layer.jb.layerprops`)가 적용된다(§4.6). 레이아웃은 거부 (0.12.436) |
+| `--legend` | | 그린 레이어의 범례(색, 채움, 이름 L/D)를 이미지마다 flateyes 메타데이터로, 배율 `ppu`(가로 px/um)와 `unit=um`과 함께(0.12.433; DRC 스냅샷과 같다). 픽셀은 그대로다. `floe2 fe-embed --dump`로 읽는다. 덱에서 `--chip`으로 고르면 켠 칩의 줄만(0.12.436), chip view(`--mode chip`)에서는 칩 줄(§4.6) |
 | `--archival` | | 보관용 모양: 컷 0, solid 채움, 밀도·프레임·라벨 없음(0.12.349까지의 기본). 함께 준 옵션이 이긴다. `FLOE_RENDER_DEFAULTS=archival`이면 이것이 기본 |
 | `--label-font-px N` | 14 | 라벨 글자 크기 6..96 |
 
@@ -225,13 +226,14 @@ floe2 render deck.jb --level 2 --chip-off 'TEST*' --out level2.png
 floe2 render deck.jb --chip '2:*' --fit-chip 'MARK.oas#3' --px 600 --out mark3.png
 floe2 render deck.jb --chipnumber 2 --level 1 --bbox 40000,80000,70000,96000 --out block2.png
 floe2 render deck.jb --temp-index --level 9 --at 53.02mm,92.61mm --size 2mm,2mm --out spot.png
+floe2 render deck.jb --level 2 --mode chip --legend --out level2_chips.png             # chip view: 칩마다 다른 색
 ```
 
 ### 4.1 레벨
 
 `--level N,N`은 그 마스크 레벨만 로드한다. 로드하지 않은 레벨의 소스는 열지 않고 색인도 하지
 않는다. 레벨은 `--layers`에서 이름(MTITLE, 없으면 `LEVELn`)으로, `--layerid N`에서 번호로 고른다.
-색은 뷰어의 level view와 같다(레벨마다 한 색, 칩마다 다른 색이 아니다).
+색은 기본이 뷰어의 level view다(레벨마다 한 색). `--mode chip`이면 chip view로 칩마다 다른 색이다(§4.6).
 
 ### 4.2 칩 on/off와 칩으로 정하는 영역
 
@@ -291,6 +293,29 @@ capture's region`). 영역 없는 전체 샷과 `info`·`probe`·`clip`·DRC 캡
 (요약 포함), `render --occupancy on`(요약을 먼저 만든다), `--temp-index`(임시 폴더에 요약을 만들고 다시
 그린다). `--occupancy off`면 요약 없이 페이지로 그린다. 근접 캡처는 요약을 쓰지 않는다.
 
+### 4.6 뷰: level / chip / layer 색 (`--mode`)
+
+```sh
+floe2 render deck.jb --level 2 --mode chip --legend --out level2_chips.png      # 칩마다 다른 색
+floe2 render deck.jb --mode chip --chip '2:*' --fit-chip 'MAIN.oas#1' --out main_chipview.png
+floe2 render deck.jb --mode layer --out layers.png                               # 소스 레이어 LY/DT마다 한 색
+```
+
+- 기본은 뷰어의 level view다. 마스크 레벨마다 한 색이고 그 레벨의 칩은 모두 그 색이다.
+- `--mode chip`은 뷰어의 chip view다(0.12.436). 레벨 아래 소스 칩마다 한 색이다. 팔레트는 뷰어와 같다. 레벨들이
+  앞 색을 차지하고 그 뒤를 소스가 덱에 처음 나오는 순서로 받으므로, 어떤 레벨을 로드하든 같은 소스는 같은 색이다.
+- `--mode layer`는 source layer view다. 소스 레이어 LY/DT마다 한 색이다.
+- 그 뷰에서 저장한 layerprops가 적용된다. level view는 `<deck>.jb.layerprops`, chip view는
+  `<deck>.chip-by-level.jb.layerprops`, layer view는 `<deck>.layer.jb.layerprops`다. 키 공간이 다르므로 서로 섞이지
+  않는다.
+- `--legend`는 그 뷰가 보여 주는 줄을 적는다. level view는 레벨 줄, chip view는 칩 줄(색, 채움, 파일 이름, `L/D`)이고
+  레벨 머리 줄은 적지 않는다(그 색으로 그려진 것이 없다). `--chip`으로 고르면 켠 칩의 줄만 적는다(0.12.436; 전에는
+  로드한 레벨 전부).
+- `--chip`, `--chip-off`, `--fit-chip`, `--in-chip`, `--layerid`, `--layer`는 뷰와 무관하게 같다. 켜고 끄는 단위는
+  어느 뷰에서나 레벨 아래의 소스 칩이다.
+- 뷰는 한 실행에 하나다. batch 키가 아니므로 level view와 chip view를 함께 찍으려면 두 번 돌린다.
+- 보고서 `jobdeck.view`가 `level|chip|layer`를 말한다. 레이아웃에는 `--mode`가 없다(인수 오류, exit 2).
+
 ---
 
 ## 5. 보고서 JSON (`--report FILE`)
@@ -303,7 +328,7 @@ capture's region`). 영역 없는 전체 샷과 `info`·`probe`·`clip`·DRC 캡
 | `shots[]` | 샷마다 한 행(아래) |
 | `cut_px`, `thin`, `density`, `occupancy`, `layer_colors`, `legend`, `archival` | 그림 모양. `occupancy`는 말하지 않았으면 null, `layer_colors`는 덱이면 null |
 | `complete` | 모든 샷이 완전한가 |
-| `jobdeck` | 덱만: `complete`, `skipped[]`(캡처가 빠뜨린 배치), `skipped_off[]`(꺼진 칩의 skip), `over_budget_pages`, `summary_building`, `view`, `levels`, `chip_blocks`(`--chipid`/`--chipnumber`의 `n:ID` 목록, 없으면 null), `window`(`rects_um`, `sources`, `sources_total`, `placements`, `placements_total`; 창이 없으면 null) |
+| `jobdeck` | 덱만: `complete`, `skipped[]`(캡처가 빠뜨린 배치), `skipped_off[]`(꺼진 칩의 skip), `over_budget_pages`, `summary_building`, `view`(`--mode`의 뷰: level|chip|layer), `levels`, `chip_blocks`(`--chipid`/`--chipnumber`의 `n:ID` 목록, 없으면 null), `window`(`rects_um`, `sources`, `sources_total`, `placements`, `placements_total`; 창이 없으면 null) |
 
 샷 행:
 
@@ -441,7 +466,7 @@ csh/tcsh 호스트에서는 `(floe2 render … > render.out) >& render.err`처�
   (값 없는 `--corners`와는 된다). `--in-chip`은 `--fit-chip`과 함께 쓸 수 없다(둘 다 기본 영역을 정한다).
 - `--layers`(`--layer`, `--layerid`)와 `--chip`/`--chip-off`는 하나만.
 - `--density on`은 `--detail exact`·덱과, `--occupancy on`은 `--detail exact`와 함께 쓸 수 없다.
-- `--layer-colors`, `--density`, `--labels on`은 덱에서 거부한다. `--level`, `--chip*`, `--fit-chip`, `--in-chip`,
+- `--layer-colors`, `--density`, `--labels on`은 덱에서 거부한다. `--level`, `--mode`, `--chip*`, `--fit-chip`, `--in-chip`,
   `--chipid`, `--chipnumber`는 덱에서만 받는다.
 - `--temp-index`는 `--no-index`와, DRC 옵션은 영역·batch·mosaic·report·`--chipid`/`--chipnumber`와 함께 쓸 수 없다.
 - mosaic에는 `--size`가 필요하다.

@@ -2,7 +2,7 @@ use crate::ready::{Ready, Waiter};
 use floe_app_core::{
     clip::{export, ClipOptions},
     dataset::Dataset,
-    jobdeck::index::is_deck,
+    jobdeck::{color::Mode, index::is_deck},
     Error, ErrorKind, Result,
 };
 use std::path::PathBuf;
@@ -191,6 +191,7 @@ fn clip(
     let Dataset::Layout(layout) = crate::ready::open(
         source,
         None,
+        Mode::Level,
         index,
         Some(false),
         false,

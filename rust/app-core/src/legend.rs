@@ -3,7 +3,8 @@
 //! `legend=` lines, `box COLOUR FILL NAME L/D`, made from the styles the
 //! frame is drawn with, so the legend is what the picture shows - the layer
 //! properties' colours and patterns, --layer-colors, --archival's solid
-//! fills, a jobdeck's level colours. Embedded as metadata (annotations::png)
+//! fills, a jobdeck's level colours or its chip view's chip colours.
+//! Embedded as metadata (annotations::png)
 //! beside the pixels, never in them; flateyes shows it, `fe-embed --dump`
 //! prints it.
 use crate::{annotations, dataset::Dataset, styles, Error, Result};
@@ -18,6 +19,10 @@ struct Row<'a> {
     /// the row it stands under (a jobdeck row its level view hides: the
     /// level's head)
     under: Option<(u32, u32)>,
+    /// a jobdeck level's head whose chips are listed on their own (the chip
+    /// view hides none): a group with no shapes of its own and no colour
+    /// of the picture, never listed (2026-11-09)
+    group: bool,
 }
 
 fn pair(layer: i64, datatype: i64) -> Result<(u32, u32)> {
@@ -40,6 +45,7 @@ fn rows(dataset: &Dataset) -> Result<Vec<Row<'_>>> {
                 name: &l.name,
                 listed: l.stored_shapes > 0,
                 under: None,
+                group: false,
             })
             .collect()),
         Dataset::Deck(d) => {
@@ -50,19 +56,30 @@ fn rows(dataset: &Dataset) -> Result<Vec<Row<'_>>> {
                 .filter(|r| r.jobdeck_head)
                 .map(|r| Ok((r.layer, pair(r.layer, r.datatype)?)))
                 .collect::<Result<BTreeMap<_, _>>>()?;
+            // the levels whose chips are shown on their own (the chip view
+            // hides none): their heads are groups, not colours of the picture
+            let shown: BTreeSet<i64> = d
+                .metadata
+                .layers
+                .iter()
+                .filter(|r| !r.jobdeck_head && !r.jobdeck_hidden)
+                .map(|r| r.layer)
+                .collect();
             d.metadata
                 .layers
                 .iter()
                 .map(|r| {
+                    let group = r.jobdeck_head && shown.contains(&r.layer);
                     Ok(Row {
                         key: pair(r.layer, r.datatype)?,
                         name: &r.name,
-                        listed: !r.jobdeck_hidden,
+                        listed: !r.jobdeck_hidden && !group,
                         under: if r.jobdeck_hidden {
                             heads.get(&r.layer).copied()
                         } else {
                             None
                         },
+                        group,
                     })
                 })
                 .collect()
@@ -91,7 +108,8 @@ pub fn fill_name(fill: &Fill) -> String {
 /// pairs in their order, or with every layer on the layer panel's rows - a
 /// layout's pairs that hold something, a jobdeck's shown rows - in (layer,
 /// datatype) order. A row the jobdeck's level view hides stands under its
-/// level's head, once. Empty: nothing to list.
+/// level's head, once; in the chip view the chips are listed and the level
+/// heads, groups of no shapes, are not. Empty: nothing to list.
 pub fn lines(dataset: &Dataset, styles: &[Style], layers: &Layers) -> Result<Vec<String>> {
     let rows = rows(dataset)?;
     let by_key: BTreeMap<_, _> = rows.iter().map(|r| (r.key, r)).collect();
@@ -106,6 +124,7 @@ pub fn lines(dataset: &Dataset, styles: &[Style], layers: &Layers) -> Result<Vec
             let mut seen = BTreeSet::new();
             keys.iter()
                 .filter_map(|k| by_key.get(k))
+                .filter(|r| !r.group)
                 .map(|r| r.under.unwrap_or(r.key))
                 .filter(|k| seen.insert(*k))
                 .collect()

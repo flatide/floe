@@ -48,6 +48,7 @@ pub fn run(
     report: Option<PathBuf>,
     batch: Option<String>,
     levels: Option<BTreeSet<i64>>,
+    mode: Mode,
     chips: Option<ChipSelection>,
     layer_colors: Option<LayerColors>,
     legend: bool,
@@ -97,6 +98,7 @@ pub fn run(
                 legend,
             },
             levels.clone(),
+            mode,
             chips.as_ref(),
             layer_colors,
             index,
@@ -136,6 +138,8 @@ fn deck_reads(
         let analysis = Analysis::open(
             source,
             &AnalysisOptions {
+                // the window reads the placements' extents, the same in
+                // every view
                 mode: Mode::Level,
                 load_ids: levels.cloned(),
                 skip_missing: true,
@@ -161,6 +165,7 @@ fn render(
     shots: &[NamedCapture],
     options: ExportOptions,
     levels: Option<BTreeSet<i64>>,
+    mode: Mode,
     chips: Option<&ChipSelection>,
     layer_colors: Option<LayerColors>,
     index: bool,
@@ -173,12 +178,14 @@ fn render(
     // said (read::dataset); a shot with --occupancy on has the missing
     // summaries built first, the default capture none (DIRECT_READ_PLAN
     // §8.11: a capture is drawn once); a deck's sources those the shots'
-    // regions reach (`reads`)
+    // regions reach (`reads`); its view `mode` - level, chip or layer
+    // colours (--mode)
     let summaries = shots.iter().any(|s| s.capture.shot.occupancy == Some(true));
     let reads = deck_reads(source, shots, levels.as_ref(), chips, temp, cancelled)?;
     let mut dataset = crate::read::dataset(
         source,
         levels.clone(),
+        mode,
         index,
         light,
         summaries,
@@ -255,6 +262,7 @@ fn render(
         dataset = crate::read::dataset(
             source,
             levels,
+            mode,
             index,
             light,
             true,

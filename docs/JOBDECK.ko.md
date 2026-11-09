@@ -557,6 +557,9 @@ floe2 render deck.jb --chip '2:*' --fit-chip 'MARK.oas#3' --px 600 --out mark3.p
 - `--corners`를 값 없이(또는 `fit`으로) 쓰면 기본 영역의 네 모서리를 찍는다. 기본 영역은 칩 범위이고, 칩을 고르지 않았으면 소스 전체다. 타일은 위의 규칙대로 영역 안쪽에 놓인다.
 - `--in-chip NAME[#K]`(0.12.435)는 영역의 좌표와 길이를 그 배치의 칩 좌표(소스의 µm)로 읽어 덱이 그 칩을 놓는 대로 놓는다(`X = dx + mag·x`, 길이는 mag배). `--bbox`, `--at`, `--size`, `--mosaic-at`, 좌표 `--corners`에 적용되고, 영역 없이 주면 그 배치 자체다. 배치 하나여야 하므로 여러 번 놓인 칩은 `#K`, 레벨마다 다르게 놓인 칩은 `N:NAME#K`로 준다. `--fit-chip`과는 함께 쓸 수 없다. 자세한 것은 [JOBDECK-CAPTURE.ko.md](JOBDECK-CAPTURE.ko.md) §8.
 
+**뷰(색)**
+- 색은 기본이 뷰어의 level view다(레벨마다 한 색). `--mode chip`(0.12.436)은 chip view로 레벨 아래 소스 칩마다 다른 색, `--mode layer`는 source layer view로 LY/DT마다 한 색이다. 뷰어의 Jobdeck 메뉴와 같은 팔레트와 그 뷰에서 저장한 layerprops 파일(`<deck>.jb.layerprops`, `<deck>.chip-by-level.jb.layerprops`, `<deck>.layer.jb.layerprops`)을 쓴다. 뷰는 한 실행에 하나이고 report의 `jobdeck.view`가 말한다. `--legend`는 chip view에서 칩 줄들을, `--chip`으로 고르면 켠 칩의 줄만 적는다(0.12.436). 자세한 것은 [JOBDECK-CAPTURE.ko.md](JOBDECK-CAPTURE.ko.md) §12.
+
 **누락 처리**
 - 캡처는 켠 칩의 skip만 부족한 것으로 센다.
 - 꺼진 칩의 skip은 `note:` 한 줄과 report의 `jobdeck.skipped_off`에만 남고, 종료 코드는 0이다.
@@ -575,7 +578,7 @@ floe2 render deck.jb --chip '2:*' --fit-chip 'MARK.oas#3' --px 600 --out mark3.p
   - `floe2 info deck.jb --chips --json`은 JSON 문서 하나에 `chips`(rows, 배치마다 mag/dx_um/dy_um)를 담는다(0.12.435).
   - `jobdeck.skipped`는 캡처들이 실제로 빠뜨린 것만 담는다.
   - `jobdeck.skipped_off`는 어떤 캡처도 켜지 않은 칩의 skip을 담는다.
-- 색은 render의 level view 그대로다(칩마다 다른 색이 아니다).
+- 색은 `--mode`의 뷰다(기본 level view; 위 **뷰(색)**).
 
 **검증**: gate `ChipShotTests`(6개).
 - 해석: 이름·레벨·와일드카드·CHIP id를 해석하고, 잘못된 입력을 거부한다. 거부하는 경우는 없는 이름, on/off에 쓴 `#K`, 덱에 없는 레벨, 로드하지 않은 레벨, 켠 칩이 하나도 남지 않을 때다.

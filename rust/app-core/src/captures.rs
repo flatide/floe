@@ -472,13 +472,15 @@ pub fn run_summary(
             }
             let (width, height) = (plan.frame.width, plan.frame.height);
             // --legend: the layers this shot draws, as the picture paints them
+            // - the tiles' (the chips on, with --chip; JOBDECK-CAPTURE §17
+            // item 8 before 0.12.436: every row of the levels loaded)
             let legend = legend_styles
                 .as_ref()
                 .map(|styles| {
                     crate::legend::lines(
                         dataset,
                         styles,
-                        &dataset.resolve_layers(capture.shot.layers.as_deref())?,
+                        &dataset.resolve_layers(plan.tiles[0].layers.as_deref())?,
                     )
                 })
                 .transpose()?;

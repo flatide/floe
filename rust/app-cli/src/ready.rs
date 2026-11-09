@@ -626,11 +626,14 @@ fn deck_options(light: Option<bool>, summaries: bool) -> IndexOptions {
 /// temporary index, built and read there), what another run indexes
 /// waited for (`waiter`) or refused. `reads`: what a capture reads of a
 /// deck (jobdeck::window) - the index and the open take the sources its
-/// window reaches, the rest of the levels loaded is left as it is.
+/// window reaches, the rest of the levels loaded is left as it is. `mode`:
+/// a jobdeck's view (`render --mode`: level, chip or layer), whose colours
+/// and saved layer properties the open takes.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn open(
     source: &Path,
     levels: Option<BTreeSet<i64>>,
+    mode: Mode,
     index: bool,
     light: Option<bool>,
     summaries: bool,
@@ -646,7 +649,7 @@ pub(crate) fn open(
             index_layout(source, light, summaries, temp, waiter, cancelled)?;
         }
         let opened =
-            Dataset::open_reads(source, levels.clone(), Mode::Level, temp, reads, cancelled);
+            Dataset::open_reads(source, levels.clone(), mode, temp, reads, cancelled);
         let (none, busy, refused) = match opened {
             Ok(dataset) => {
                 let Dataset::Deck(snapshot) = &dataset else {

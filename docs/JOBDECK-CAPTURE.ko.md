@@ -22,6 +22,7 @@ jobdeck 게이트의 합성 덱(`tools/validate_jobdeck.py`의 test.jb: 소스 3
 | 여러 장 한 번에: 칩마다·레벨마다·위치마다 (§10) | `--batch FILE --out DIR --report FILE`, 줄은 `info --chips --json`에서 만든다 | 준비, 줄 생성은 스크립트 |
 | 해상도 (§11) | `--px W\|WxH\|max` (기본 max), `--stretch`, `FLOE_CAPTURE_PX` | 준비 |
 | 그림 모양 (§12) | `--detail`, `--thin`, `--archival`, `--depth` + `--frames`, `--legend`, `<deck>.jb.layerprops` | 준비, 덱 제한 있음 |
+| chip view 색: 칩마다 다른 색 (§12) | `--mode chip` (0.12.436; `--mode layer`는 소스 레이어 색) | 준비 |
 | 광역과 점유 요약 (§13) | `--occupancy on\|off` | 준비, `--workdir`는 주의 |
 | 인덱스 없는 덱, 쓸 수 없는 폴더 (§14) | `--temp-index[=DIR]`, `--workdir DIR`, `--light\|--full`, `--wait`, `--no-index` | 준비 |
 | 누락·불완전 처리 (§15) | exit 3, WARNING, 보고서 `jobdeck.skipped` | 준비 |
@@ -239,10 +240,17 @@ floe2 render deck.jb --batch perchip.txt --out perchip/ --report perchip/report.
 - `--frames`는 덱에서 `--depth N` 컷 아래의 셀에만 나타난다. 기본(full depth)에서는 컷 아래가 없어 프레임도 없다.
   `--labels on`은 거절한다(`jobdeck labels are not supported`, exit 2).
 - `--density`와 `--layer-colors`는 레이아웃용이라 덱에서 거절한다(exit 2).
-- 뷰어의 level view에서 저장한 `<deck>.jb.layerprops`의 색·채움·선폭은 캡처에도 적용된다. 숨김(visibility 0)은
-  적용되지 않으니 숨길 레벨은 `--layerid`나 `--chip-off`로 뺀다.
+- 색은 기본이 뷰어의 level view다(레벨마다 한 색). `--mode chip`(0.12.436)은 chip view로 레벨 아래 소스 칩마다 다른
+  색, `--mode layer`는 source layer view로 소스 레이어 LY/DT마다 한 색이다. 뷰어의 Jobdeck 메뉴와 같은 팔레트이고,
+  레벨을 몇 개 로드하든 같은 소스는 같은 색이다. 뷰는 한 실행에 하나다(batch 키가 아니다). 보고서 `jobdeck.view`가
+  뷰를 말한다. 레이아웃에는 없다(exit 2).
+- 뷰어의 level view에서 저장한 `<deck>.jb.layerprops`의 색·채움·선폭은 캡처에도 적용된다. chip view의
+  `<deck>.chip-by-level.jb.layerprops`와 layer view의 `<deck>.layer.jb.layerprops`는 그 뷰의 `--mode`에서 적용된다.
+  숨김(visibility 0)은 적용되지 않으니 숨길 레벨은 `--layerid`나 `--chip-off`로 뺀다.
 - `--legend`는 그린 레벨의 범례(색, 채움, 이름, N/0)와 축척(`ppu`, `unit`)을 flateyes 메타데이터로 넣는다.
-  `floe2 fe-embed --dump a.png`로 읽는다. 픽셀은 그대로다.
+  `floe2 fe-embed --dump a.png`로 읽는다. 픽셀은 그대로다. chip view에서는 칩 줄(색, 채움, 파일 이름, L/D)이고 레벨
+  머리 줄은 없다(그 색으로 그려진 것이 없다). `--chip`으로 고르면 켠 칩의 줄만 적는다(0.12.436; 전에는 로드한 레벨
+  전부).
 
 ## 13. 광역과 점유 요약
 
@@ -293,7 +301,7 @@ floe2 render deck.jb --no-index --out x.png                                     
 
 `--report FILE`의 샷 항목: `bbox_um`, `pixel`, `ppu`, `ppu_y`, `layers`, `depth`, `chips`(chip, chip_off, fit_chip, on,
 placements, region_um), `in_chip`(§8), `tiles`(mosaic), `skipped_placements`, `summary_building`, `over_budget_pages`, `complete`,
-`ms`, `out`. 덱 항목 `jobdeck`: `levels`, `view`(레벨 색), `window`, `chip_blocks`, `skipped`, `skipped_off`,
+`ms`, `out`. 덱 항목 `jobdeck`: `levels`, `view`(`--mode`의 뷰: level|chip|layer), `window`, `chip_blocks`, `skipped`, `skipped_off`,
 `complete`. 상위: `source`, `dbu`, `cut_px`, `thin`, `density`, `occupancy`, `archival`, `legend`, `layer_colors`,
 `complete`.
 
@@ -310,15 +318,15 @@ stdout 줄: `[jobdeck] window    : …`, `[jobdeck] blocks    : …`, `[floe2] N
 2. **칩마다·레벨마다 자동으로 한 장씩**: §10의 batch 줄 생성(`info --chips --json` + `jq`).
 3. ~~**`info --json --chips`**~~: 0.12.435부터 JSON 문서 하나에 `chips`가 든다(§10). 전에는 JSON 뒤에 표가 텍스트로
    붙었고 JSON 안에 칩이 없었다.
-4. **칩뷰 색**(칩마다 다른 색): 캡처는 레벨 색만이다.
+4. ~~**칩뷰 색**~~: 0.12.436의 `--mode chip`(§12)으로 해결. `--mode layer`(소스 레이어 색)도 있다.
 5. **미러·회전·톤 반전**: 옵션이 없다. 덱 포맷에서 해당 필드를 본 적이 없다(JOBDECK.ko.md §1 미확정).
 6. **눈에 보이는 스케일바·격자**: 없다. 축척은 메타데이터(`ppu`)이고, `fe-embed --ruler`도 메타데이터 주석이다.
 7. **2×2보다 잘게**: mosaic은 네 타일까지다(§2).
 
 주의(동작은 하되 알아 둘 것):
 
-8. `--chip`으로 고른 캡처의 `--legend`는 켠 칩의 레벨만이 아니라 **로드한 레벨 전부**를 적는다(`--layerid`로
-   고르면 그 레벨만).
+8. ~~`--chip`으로 고른 캡처의 `--legend`가 로드한 레벨 전부를 적던 것~~: 0.12.436부터 켠 칩의 줄만 적는다(level view는
+   그 레벨 줄, chip view는 그 칩 줄).
 9. `<deck>.jb.layerprops`의 숨김(visibility 0)은 캡처에 적용되지 않는다(§12).
 10. `--frames`는 `--depth N` 컷 아래에만 나타나고, `--labels on`, `--density`, `--layer-colors`는 덱에서 거절한다(exit 2).
 11. `--layerid N`만 주면 전 레벨을 로드한다. `--level N`을 같이 준다(§3).
@@ -333,3 +341,6 @@ stdout 줄: `[jobdeck] window    : …`, `[jobdeck] blocks    : …`, `[floe2] N
 같은 규칙을 게이트 `jobdeck`(ShotTests, ChipShotTests, LightSummaryTests)과 `floe2`(validate_floe2.py)가 지킨다.
 2026-11-09 0.12.435: §8의 `--in-chip`과 §10의 `info --chips --json`을 더해 같은 덱으로 확인했다(ChipShotTests의
 `test_in_chip_reads_the_region_in_the_placements_coordinates`, `test_info_json_carries_the_chips`).
+2026-11-09 0.12.436: §12의 `--mode level|chip|layer`를 더해 같은 덱으로 확인했다(ChipShotTests의
+`test_mode_draws_the_decks_view`: level view는 한 색, chip view는 칩마다 한 색에 같은 픽셀, chip view의 layerprops
+파일, 범례의 칩 줄과 `--chip`의 켠 칩만, 거절).
