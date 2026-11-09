@@ -34,8 +34,8 @@ SHARED_APP_LAYER.ko.md). 도움말과 메시지의 프로그램 이름만 다르
 
 | 코드 | 뜻 |
 |---|---|
-| 0 | 모든 샷이 완전하다 |
-| 3 | 그림은 나왔지만 빠진 것이 있다: 켠 칩의 건너뛴 배치, 디코드 예산을 넘긴 페이지, 점유 요약을 기다린 pass(`summary_building`). stderr `rendered incomplete - … [exit 3]` |
+| 0 | 모든 샷이 나왔다. 빠진 것이 있어도 그림이 나왔으면 0이다(0.12.437): 켠 칩의 건너뛴 배치, 디코드 예산을 넘긴 페이지, 점유 요약을 기다린 pass(`summary_building`)는 stdout의 `WARNING: N jobdeck placement(s) not drawn`, stderr 마지막 줄 `floe2: WARNING: rendered incomplete - …`, 보고서 `complete=false`로 알린다 |
+| 3 | `FLOE_RENDER_INCOMPLETE_EXIT=3`(§7)을 두었을 때만: 그림은 나왔지만 빠진 것이 있다(0.12.436까지의 기본). stderr `rendered incomplete - … [exit 3]` |
 | 2 | 명령행 오류: 모르는 옵션, 잘못된 값, 함께 쓸 수 없는 옵션, 레이아웃에 준 `--level`·`--chipid`·`--layer-colors`·`--density on`, 덱에 준 `--labels on` |
 | 1 | 실행 중 입력 오류와 실패: 없는 파일, 덱에 없는 레벨·레이어 번호·칩 이름, 레이아웃에 준 `--chip`/`--fit-chip`, 아무 배치에도 닿지 않는 영역, 자동 색인 실패(`indexing NAME first failed (exit N …)`), 렌더러 오류. `floe2-web`은 2 |
 | 75 | 다른 실행이 그 소스를 색인 중이다(`--wait`로 기다릴 수 있다) |
@@ -104,7 +104,7 @@ layerprops, 셀 프레임과 라벨(덱은 라벨 없음, 밀도 없음).
 | `--detail exact\|low\|medium\|high` | medium | 크기 컷 0/5/3/1 px. `exact`는 모든 도형을 그리거나 예산 초과로 실패한다 |
 | `--thin auto\|keep\|cull` | auto(=keep) | 광역에서 가는 도형을 1 px 헤어라인으로 남길지(keep) 버릴지(cull) |
 | `--density on\|off` | 레이아웃 on | 컷이 버린 도형을 덮는 면적만큼의 밝기로. 컷이 있어야 하고(`--detail low\|medium\|high`), 캐시에 `design.ovs`가 있어야 한다(전체 인덱스; 경량 캐시에는 없어 `on`을 거부, `floe-index ovs CACHE`가 더한다). 덱은 거부. `--archival`은 off. `FLOE_RUST_DENSITY_STACK=off`면 기본 off |
-| `--occupancy on\|off` | 말하지 않음 | 광역 뷰를 점유 요약(`design.ovo`)으로. `on`은 요약 없는 소스의 요약을 먼저 만들고(자동 색인), `off`는 덱도 요약 없이 페이지로. 말하지 않으면 덱은 있는 요약을 쓰고 만들지는 않으며(경량 소스의 광역 pass는 비고 exit 3), 레이아웃은 off. 컷이 있어야 한다 |
+| `--occupancy on\|off` | 말하지 않음 | 광역 뷰를 점유 요약(`design.ovo`)으로. `on`은 요약 없는 소스의 요약을 먼저 만들고(자동 색인), `off`는 덱도 요약 없이 페이지로. 말하지 않으면 덱은 있는 요약을 쓰고 만들지는 않으며(경량 소스의 광역 pass는 비고 불완전으로 알린다), 레이아웃은 off. 컷이 있어야 한다 |
 | `--frames[=on\|off]` `--labels[=on\|off]` | on | 셀 프레임, 설계 텍스트. 덱의 라벨은 지원하지 않는다 |
 | `--layer-colors row\|group` | row | 레이아웃의 기본 레이어 색. row는 패널 줄마다, group은 layer 번호마다 한 색. `FLOE_LAYER_COLORS`가 기본값. 덱은 거부 |
 | `--mode level\|chip\|layer` | level | 덱의 뷰. 뷰어의 Jobdeck 메뉴와 같다. level은 마스크 레벨마다 한 색, chip은 레벨 아래 소스 칩마다 한 색(chip view), layer는 소스 레이어 LY/DT마다 한 색. 그 뷰에서 저장한 layerprops(`<deck>.jb.layerprops`, `<deck>.chip-by-level.jb.layerprops`, `<deck>.layer.jb.layerprops`)가 적용된다(§4.6). 레이아웃은 거부 (0.12.436) |
@@ -262,8 +262,8 @@ floe2 render deck.jb --in-chip 'MAIN.oas#2' --at 1234.5,678.9 --size 100,100 --o
 floe2 render deck.jb --in-chip '2:MAIN.oas#2' --chip '2:MAIN.oas' --bbox 0,0,1000,1000 --out ll.png
 floe2 render deck.jb --in-chip 'ID002#1' --corners --size 50,50 --px 400x400 --out corners.png
 ```
-- 캡처는 **켠 칩**의 건너뛴 배치만 부족한 것으로 센다(WARNING, `complete=false`, exit 3). 꺼진 칩의
-  skip은 `note:` 한 줄과 보고서의 `jobdeck.skipped_off`에만 남고 exit 0이다.
+- 캡처는 **켠 칩**의 건너뛴 배치만 부족한 것으로 센다(WARNING, stderr `rendered incomplete`, `complete=false`; exit는
+  0, §0 종료 코드). 꺼진 칩의 skip은 `note:` 한 줄과 보고서의 `jobdeck.skipped_off`에만 남는다.
 
 ### 4.3 CHIP 블록으로 자르기: `--chipid` / `--chipnumber`
 
@@ -289,7 +289,7 @@ capture's region`). 영역 없는 전체 샷과 `info`·`probe`·`clip`·DRC 캡
 ### 4.5 광역 캡처와 점유 요약
 
 덱의 광역 pass는 경량 소스의 점유 요약(`design.ovo`)에서 그린다. 요약이 없는 소스의 광역 pass는 비고
-`summary_building`으로 세어 exit 3이다(캡처는 한 번 그리고 만다). 길은 셋이다: 미리 `floe2 index deck.jb`
+`summary_building`으로 세어 불완전으로 알린다(exit 0; 캡처는 한 번 그리고 만다). 길은 셋이다: 미리 `floe2 index deck.jb`
 (요약 포함), `render --occupancy on`(요약을 먼저 만든다), `--temp-index`(임시 폴더에 요약을 만들고 다시
 그린다). `--occupancy off`면 요약 없이 페이지로 그린다. 근접 캡처는 요약을 쓰지 않는다.
 
@@ -376,7 +376,7 @@ stderr:
 [jobdeck] 2 source(s) have no index yet - indexing them first …; 1 source(s) the capture's region does not reach are left as they are
 [floe2][warn] source changed; displaying cached geometry. Rebuild with index --force, then reopen.
 [jobdeck] 1 pass(es) of light source(s) wait for their occupancy summary - building the missing summaries in the temporary index and drawing again (--occupancy off: the pages instead)
-floe2: rendered incomplete - 0 jobdeck placement(s) missing, 0 page(s) over the decode budget, summary_building=1 … [exit 3]
+floe2: WARNING: rendered incomplete - 0 jobdeck placement(s) missing, 0 page(s) over the decode budget, summary_building=1 … (see above; exit 0 - FLOE_RENDER_INCOMPLETE_EXIT=3 exits 3 as before)
 floe2: indexing SOURCE first failed (exit 71 …; see above)
 floe2: frame 1280x13440 px for 40.0000x420.0000 um (0.0000,0.0000,40.0000,420.0000 um) exceeds 16 Mpx; --px 1264x13272 fits (FLOE_CAPTURE_REDUCE=off: refused, not reduced) [FLOE_CAPTURE_REDUCE=off, exit 1]
 ```
@@ -388,6 +388,7 @@ floe2: frame 1280x13440 px for 40.0000x420.0000 um (0.0000,0.0000,40.0000,420.00
 | 변수 | 기본 | 뜻 |
 |---|---|---|
 | `FLOE_AUTO_INDEX` | on | `off`면 인덱스 없는 소스를 거부(`--no-index`) |
+| `FLOE_RENDER_INCOMPLETE_EXIT` | 0 | 그림은 나왔지만 빠진 것이 있는 캡처(켠 칩의 건너뛴 배치, 예산 초과 페이지, `summary_building`)의 종료 코드. 기본 0이고 메시지와 보고서 `complete=false`로 알린다(0.12.437). `3`이면 0.12.436까지처럼 3으로 끝난다(1..125) |
 | `FLOE_WORKDIR` | 없음(소스 옆) | 캐시·pack·사이드카를 읽고 쓰는 작업 디렉터리(`--workdir DIR`; §1.5). floe2가 자식 프로세스에 내보내는 것이기도 하다 |
 | `FLOE_INDEX_LIGHT` | 덱 on, 레이아웃 off | 자동 색인이 만드는 캐시의 종류(`--light`/`--full`) |
 | `FLOE_LOCK_WAIT` | off | `on`이나 초: 색인 중인 소스를 기다린다(`--wait`) |

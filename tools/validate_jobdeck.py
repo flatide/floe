@@ -1095,11 +1095,13 @@ class LightSummaryTests(unittest.TestCase):
         self.assertEqual((deck["light_sources"], deck["summary_missing"]), (3, 3))
         # a wide capture without the auto-index: its passes wait for the
         # summary - the picture is written with those passes empty, said
-        # incomplete (exit 3, as a deck capture with skipped placements)
+        # incomplete (as a deck capture with skipped placements; exit 0
+        # since 0.12.437, the lack in the messages and the report)
         wide = self.dir / "wide.png"
         res = run_floe2("render", self.deck, "--bbox", "40000,80000,60000,95000",
                         "--px", "300", "--detail", "medium", "--no-index", "--out", wide,
-                        env=self.env, ok=3)
+                        env=self.env, ok=0)
+        self.assertIn("WARNING: rendered incomplete", res.stderr)
         self.assertIn("summary_building=", res.stderr)
         self.assertIn("occupancy summary", res.stderr)
         self.assertTrue(wide.is_file())
@@ -1113,10 +1115,10 @@ class LightSummaryTests(unittest.TestCase):
         for c in self.caches:
             self.assertFalse((c / "design.ovo").exists(), c)
         # the plain capture builds no summary either (0.12.388): the picture
-        # with those passes empty, exit 3, the way out named
+        # with those passes empty, said incomplete, the way out named
         res = run_floe2("render", self.deck, "--bbox", "40000,80000,60000,95000",
                         "--px", "300", "--detail", "medium", "--out", wide,
-                        env=self.env, ok=3)
+                        env=self.env, ok=0)
         self.assertNotIn("indexing them first", res.stderr)
         self.assertIn("summary_building=", res.stderr)
         self.assertIn("--occupancy on", res.stderr)
@@ -3426,20 +3428,36 @@ class ChipShotTests(unittest.TestCase):
                          ["empty_layer"])
         self.assertIn("in chips no shot had on", res.stdout)
         self.assertNotIn("WARNING", res.stdout)
-        # its own chip on: incomplete, exit 3
+        # its own chip on: incomplete - the WARNING, the stderr line and the
+        # report say so; the exit code is 0 (user 2026-11-09: a picture that
+        # was drawn is no failure), 3 as before 0.12.437 only when
+        # FLOE_RENDER_INCOMPLETE_EXIT asks for it
         res = self.render("ml.png", "--chip", "2:*", "--px", "100",
                           "--report", rep, deck="test_missing_layer.jb",
-                          ok=3)
+                          ok=0)
         doc = json.loads(rep.read_text())
         self.assertFalse(doc["shots"][0]["complete"])
         self.assertEqual(doc["shots"][0]["skipped_placements"], 1)
+        self.assertIn("WARNING: 1 jobdeck placement(s) not drawn", res.stdout)
+        self.assertIn("WARNING: rendered incomplete - 1 jobdeck placement(s) "
+                      "missing", res.stderr)
+        self.assertIn("exit 0 - FLOE_RENDER_INCOMPLETE_EXIT=3 exits 3 as before",
+                      res.stderr)
+        res = run_floe2("render", self.dir / "test_missing_layer.jb", "--chip",
+                        "2:*", "--px", "100", "--out", self.out / "ml.png",
+                        env=dict(self.env, FLOE_RENDER_INCOMPLETE_EXIT="3"),
+                        ok=3)
         self.assertIn("rendered incomplete - 1 jobdeck placement(s) missing",
                       res.stderr)
+        self.assertIn("[exit 3]", res.stderr)
+        self.assertNotIn("WARNING: rendered", res.stderr)
         # --layers alike; every chip on as before
         self.render("ml.png", "--layers", "METAL1", "--px", "100",
                     deck="test_missing_layer.jb")
-        self.render("ml.png", "--px", "100", deck="test_missing_layer.jb",
-                    ok=3)
+        res = self.render("ml.png", "--px", "100",
+                          deck="test_missing_layer.jb", ok=0)
+        self.assertIn("WARNING: rendered incomplete - 1 jobdeck placement(s) "
+                      "missing", res.stderr)
 
     def test_batch_chip_keys(self):
         from floe_oracle import shots as sh
@@ -3812,12 +3830,16 @@ class ReviewFixTests(unittest.TestCase):
         for deck in ("test.jb", "dense.jb", "hier.jb"):
             run_floe2("index", CLI / deck, "--jobs", "2", env=cls.env, ok=0)
 
-    def test_p1_1_incomplete_render_is_said_and_exits_3(self):
+    def test_p1_1_incomplete_render_is_said(self):
+        # (exit 3 until 0.12.436; exit 0 since - user 2026-11-09: a picture
+        # that was drawn is no failure - the lack said on stdout, stderr and
+        # in the report; FLOE_RENDER_INCOMPLETE_EXIT=3 restores the code)
         out = CLI / "ghost.png"
         rep = CLI / "ghost.json"
         res = run_floe2("render", CLI / "test_missing_layer.jb", "--px",
                         "100", "--out", out, "--report", rep, env=self.env,
-                        ok=3)
+                        ok=0)
+        self.assertIn("WARNING: rendered incomplete", res.stderr)
         self.assertIn("skipped   : CHIP ID001 level 2 chipA.oas: empty_layer",
                       res.stdout)
         self.assertIn("WARNING: 1 jobdeck placement(s) not drawn",

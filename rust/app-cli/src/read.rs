@@ -68,7 +68,8 @@ makes it the default, as before 0.12.350).
                             needs --detail low|medium|high. Unsaid: a jobdeck
                             draws from the file where it is and builds none
                             (a capture is drawn once: a wide pass of a light
-                            source without it stays empty, exit 3), a layout
+                            source without it stays empty, said incomplete), a
+                            layout
                             off; FLOE_RUST_OCCUPANCY=off|on where unsaid
   --frames[=on|off] --labels[=on|off]  Cell frames, design text (default on,
                             as the viewer; jobdeck labels unsupported)
@@ -173,8 +174,10 @@ within it, said as a WARNING with the size asked and the region, and in the
 report as pixel_requested (FLOE_CAPTURE_REDUCE=off: refused naming them).
 Mosaic final image is four tiles (up to 64 Mpx). Outputs must not collide.
 Cancelled/failed frames never replace an existing PNG. Jobdeck known skipped
-placements/over-budget pages may publish a flagged incomplete PNG (exit 3).
-Other incomplete frames preserve the previous output.";
+placements/over-budget pages publish a flagged incomplete PNG, said in the
+WARNING lines, the last stderr line and the report (complete=false), exit 0
+(FLOE_RENDER_INCOMPLETE_EXIT=3: exit 3, as before 0.12.437). Other incomplete
+frames preserve the previous output.";
 const INFO_HELP: &str = "Usage: floe2-web info SOURCE [--level N,N,...] [--json] [--chips] [--no-index] [--temp-index[=DIR]] [--light|--full] [--wait[=SECONDS]] [--workdir DIR]
 --chips (jobdeck): every chip of the levels loaded - its CHIP blocks,
 placements (#K) and extents, the names render --chip/--fit-chip/--in-chip

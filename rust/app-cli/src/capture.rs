@@ -278,11 +278,19 @@ fn render(
     }
     // what the images lack: the skipped placements of the chips on, the
     // pages over the decode budget, the passes of light sources whose
-    // occupancy summary is not built yet (DIRECT_READ_PLAN §5.5)
+    // occupancy summary is not built yet (DIRECT_READ_PLAN §5.5) - said
+    // here, in the WARNING lines above and in the report (complete=false);
+    // the pictures were published, so the exit code is 0 (user 2026-11-09:
+    // "치명적 오류가 아니라면 exit code는 0으로"), or the code
+    // FLOE_RENDER_INCOMPLETE_EXIT asks for (3 before 0.12.437, review
+    // 2026-09-09 P1-1: a thinner PNG must never look complete - the lines
+    // and the report keep saying so)
+    let code = incomplete_exit();
     if summary.lacking > 0 || summary.over_budget > 0 || summary.summary_building > 0 {
         eprintln!(
-            "{}: rendered incomplete - {} jobdeck placement(s) missing, {} page(s) over the decode budget{} (see above)  [exit 3]",
+            "{}: {}rendered incomplete - {} jobdeck placement(s) missing, {} page(s) over the decode budget{} (see above{}",
             floe_app_core::program(),
+            if code == 0 { "WARNING: " } else { "" },
             summary.lacking,
             summary.over_budget,
             if summary.summary_building > 0 {
@@ -293,8 +301,47 @@ fn render(
                 )
             } else {
                 String::new()
+            },
+            if code == 0 {
+                "; exit 0 - FLOE_RENDER_INCOMPLETE_EXIT=3 exits 3 as before)".to_string()
+            } else {
+                format!(")  [exit {code}]")
             }
         );
     }
-    Ok(if summary.complete { 0 } else { 3 })
+    Ok(if summary.complete { 0 } else { code })
+}
+
+/// The exit code of a capture drawn incomplete - a placement of a chip on
+/// skipped, a page over the decode budget, a pass waiting for its light
+/// source's occupancy summary - whose pictures were published flagged: 0
+/// (user 2026-11-09: a picture that was drawn is no failure; the WARNING
+/// lines, the stderr line and the report's complete=false carry the lack),
+/// or FLOE_RENDER_INCOMPLETE_EXIT's code, 1..=125 (3 was the exit before
+/// 0.12.437; a script that read it sets it back).
+pub(crate) fn incomplete_exit() -> i32 {
+    incomplete_exit_of(std::env::var("FLOE_RENDER_INCOMPLETE_EXIT").ok().as_deref())
+}
+fn incomplete_exit_of(value: Option<&str>) -> i32 {
+    value
+        .and_then(|v| v.trim().parse::<i32>().ok())
+        .filter(|c| (0..=125).contains(c))
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod incomplete_exit_tests {
+    use super::incomplete_exit_of;
+    #[test]
+    fn an_incomplete_capture_exits_zero_unless_a_code_is_asked() {
+        assert_eq!(incomplete_exit_of(None), 0);
+        assert_eq!(incomplete_exit_of(Some("")), 0);
+        assert_eq!(incomplete_exit_of(Some("0")), 0);
+        assert_eq!(incomplete_exit_of(Some(" 3 ")), 3);
+        assert_eq!(incomplete_exit_of(Some("125")), 125);
+        // not a code of the shell's: as unset
+        assert_eq!(incomplete_exit_of(Some("126")), 0);
+        assert_eq!(incomplete_exit_of(Some("-1")), 0);
+        assert_eq!(incomplete_exit_of(Some("three")), 0);
+    }
 }

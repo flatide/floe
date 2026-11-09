@@ -274,7 +274,7 @@ sample9급 소스 4 s), 뷰어·`render`·`info`는 render-core가 그 디렉터
 배너).** 덱 pass의 소스가 경량인데 design.ovo가 없으면, 그 소스의 자동 기준 셀로 보아 요약이
 그릴 광역 뷰에서는 pass를 비워 두고 프레임 줄에 `summary_building=N`을 낸다(근접 뷰는 세그먼트
 경로로 그린다). 뷰어는 배너를 띄우고 3 s마다 다시 그리며, `floe2 render`는 그 pass를 비운
-그림을 쓰고 미완으로 끝낸다(종료 3, 누락 배치가 있는 덱 캡처와 같다; stderr `rendered
+그림을 쓰고 미완으로 끝낸다(누락 배치가 있는 덱 캡처와 같다, 0.12.437부터 종료 0; stderr `rendered
 incomplete - … summary_building=N pass(es) of light
 source(s) whose occupancy summary is not built yet …`, 보고서 JSON의 shot 행과 `jobdeck`에
 `summary_building`). 0.12.388(DIRECT_READ_PLAN §8.11)부터 자동 색인은 캡처의 요약을 만들지
@@ -305,7 +305,7 @@ OK 줄은 `mag=…  deck_cell_um=…`을 보이고, 덱 셀이 4 µm를 넘으�
 app 0.12.359)도 같은 덱 인덱싱이다(소스마다 이 규칙). floe-index가 옆의 floe2에 `index deck.jb …`로
 넘기고, 소스마다 이 floe-index로 빌드한다(SPEC-INDEXER §1). `info`·`render`·`probe`는
 고른 level의 소스 중 인덱스가 아예 없는 것을 먼저 인덱싱하고 그린다. 다른 실행이
-인덱싱 중인 소스는 장부에 누가 하는지 적고 빼고 그린다(종료 3). `--wait`면 끝날
+인덱싱 중인 소스는 장부에 누가 하는지 적고 빼고 그린다(미완; 0.12.437부터 종료 0). `--wait`면 끝날
 때까지 기다렸다가 다 그린다. `--no-index`면 예전처럼 인덱스 없는 소스를 장부에 적고
 빼며, 이유는 `no fresh index cache (run: floe2 index deck.jb)`다
 (SHARED_APP_LAYER §12).
@@ -563,7 +563,7 @@ floe2 render deck.jb --chip '2:*' --fit-chip 'MARK.oas#3' --px 600 --out mark3.p
 **누락 처리**
 - 캡처는 켠 칩의 skip만 부족한 것으로 센다.
 - 꺼진 칩의 skip은 `note:` 한 줄과 report의 `jobdeck.skipped_off`에만 남고, 종료 코드는 0이다.
-- 켠 칩에 skip이 있으면 이전과 같다. WARNING, `complete=false`, exit 3이다.
+- 켠 칩에 skip이 있으면 WARNING, stderr `rendered incomplete`, `complete=false`다. 종료 코드는 0.12.437부터 0이다(그림이 나왔으면 치명적 오류가 아니다; `FLOE_RENDER_INCOMPLETE_EXIT=3`이면 전처럼 3).
 - `--layers`로 고른 캡처도 같은 규칙을 따른다. 이전에는 로드한 덱의 skip을 모두 세어, 꺼 둔 레벨 때문에 exit 3이 났다.
 
 **batch와 report**
@@ -590,7 +590,7 @@ floe2 render deck.jb --chip '2:*' --fit-chip 'MARK.oas#3' --px 600 --out mark3.p
   - batch의 한 줄과, 같은 옵션의 단일 캡처.
 - 그 밖에:
   - 그림에는 켠 칩의 레벨 색만 나온다.
-  - 꺼진 칩의 skip은 exit 0, 켠 칩의 skip은 exit 3이다.
+  - 꺼진 칩의 skip은 note만, 켠 칩의 skip은 WARNING과 `complete=false`다(종료 코드는 둘 다 0, 0.12.437).
   - batch 키의 대체 규칙을 지킨다.
   - `info --chips`가 칩 목록을 낸다.
 - 변이 확인: 꺼진 칩의 skip을 세게 바꾸거나 칩 범위를 무시하게 바꾸면 테스트가 실패한다.

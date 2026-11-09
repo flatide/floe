@@ -25,7 +25,7 @@ jobdeck 게이트의 합성 덱(`tools/validate_jobdeck.py`의 test.jb: 소스 3
 | chip view 색: 칩마다 다른 색 (§12) | `--mode chip` (0.12.436; `--mode layer`는 소스 레이어 색) | 준비 |
 | 광역과 점유 요약 (§13) | `--occupancy on\|off` | 준비, `--workdir`는 주의 |
 | 인덱스 없는 덱, 쓸 수 없는 폴더 (§14) | `--temp-index[=DIR]`, `--workdir DIR`, `--light\|--full`, `--wait`, `--no-index` | 준비 |
-| 누락·불완전 처리 (§15) | exit 3, WARNING, 보고서 `jobdeck.skipped` | 준비 |
+| 누락·불완전 처리 (§15) | WARNING, stderr `rendered incomplete`, 보고서 `jobdeck.skipped`; exit 0 (0.12.437, `FLOE_RENDER_INCOMPLETE_EXIT=3`이면 3) | 준비 |
 | 보고서·메타데이터 (§16) | `--report FILE` (ppu, chips, window …), `--legend` (ppu, unit) | 준비 |
 
 미비와 주의 목록은 §17.
@@ -34,7 +34,7 @@ jobdeck 게이트의 합성 덱(`tools/validate_jobdeck.py`의 test.jb: 소스 3
 
 - **좌표**는 덱 µm다(ROWS와 BX..UY를 배치한 값, `floe2 info DECK`의 `bbox um`). 길이에 `nm`/`um`/`mm`
   접미사를 붙일 수 있고 없으면 µm다.
-- **소스**는 평문 OASIS만 읽는다. `.gds`, `.oas.gz` 같은 소스의 배치는 `unsupported`로 건너뛰고 캡처는 exit 3이다(§15).
+- **소스**는 평문 OASIS만 읽는다. `.gds`, `.oas.gz` 같은 소스의 배치는 `unsupported`로 건너뛰고 캡처는 불완전으로 알린다(§15).
 - **인덱스**: 소스마다 경량 캐시(`.<src>.ice`: design.inv + design.seg)와 점유 요약(design.ovo)이 있어야 광역이
   그려진다. `floe2 index DECK.jb`가 모두 만든다(`--level`, `--chipid`, `--chipnumber`로 나눠 돌릴 수 있다). 없는 채로
   찍으면 자동 색인하되 요약은 `--occupancy on`일 때만 만든다(§13).
@@ -54,7 +54,7 @@ floe2 render deck.jb --px 1200 --out small.png
 - 영역을 주지 않으면 덱의 extent(모든 배치의 BX..UY)다. `--px`를 주지 않으면 그 종횡비로 16 Mpx 안에 드는
   가장 큰 크기다(32×25.2 mm 덱이면 4617×3633).
 - 전체는 광역 pass라 소스의 점유 요약에서 그린다. 요약이 없는 소스의 pass는 `summary_building`으로 세어
-  exit 3이다(§13).
+  불완전으로 알린다(§13).
 - 16 Mpx보다 크게 찍으려면 영역을 넷으로 나눈 2×2 mosaic이다. 타일마다 16 Mpx, 합쳐 64 Mpx까지.
 
 ```sh
@@ -260,14 +260,14 @@ floe2 render deck.jb --batch perchip.txt --out perchip/ --report perchip/report.
 | 상태 | 결과 |
 |---|---|
 | `floe2 index deck.jb`를 미리 했다 | 광역 완료, exit 0 |
-| 색인 없이 `render` (자동 색인) | 경량 캐시는 만들되 요약은 만들지 않아 광역은 exit 3, `summary_building=N pass(es)` |
+| 색인 없이 `render` (자동 색인) | 경량 캐시는 만들되 요약은 만들지 않아 광역은 비고 `summary_building=N pass(es)`로 알린다(exit 0) |
 | `render --occupancy on` | 요약을 먼저 만들고 그린다, exit 0 |
 | `render --temp-index` | 임시 폴더에 요약까지 만들고 다시 그린다, exit 0 (끝나면 지운다) |
-| `render --workdir DIR`만 | 자동 색인과 같아 광역은 exit 3. `--occupancy on`을 함께 주거나 `index deck.jb --workdir DIR`을 먼저 |
+| `render --workdir DIR`만 | 자동 색인과 같아 광역은 빈다. `--occupancy on`을 함께 주거나 `index deck.jb --workdir DIR`을 먼저 |
 | `render --occupancy off` | 요약 없이 페이지로 그린다(느리지만 완전), exit 0 |
 
-합성 덱 측정: `--workdir`만의 광역은 exit 3, `--workdir --occupancy on`은 exit 0이고 DIR 아래에 design.ovo 셋이
-생겼고, 그 뒤 `--workdir`만으로도 exit 0이었다.
+합성 덱 측정(0.12.434): `--workdir`만의 광역은 `summary_building=3`으로 불완전(당시 exit 3, 0.12.437부터 exit 0),
+`--workdir --occupancy on`은 완전하고 DIR 아래에 design.ovo 셋이 생겼고, 그 뒤 `--workdir`만으로도 완전했다.
 
 ## 14. 인덱스 없는 덱, 쓸 수 없는 소스 폴더
 
@@ -292,9 +292,11 @@ floe2 render deck.jb --no-index --out x.png                                     
 ## 15. 누락·불완전
 
 - 켠 칩의 배치가 그려지지 않으면(소스 없음, 지원하지 않는 포맷, 레이어 없음) WARNING에 배치마다 사유를 적고 그림은
-  불완전으로 표시해 내며 exit 3이다. 보고서 `complete=false`, `jobdeck.skipped[]`(chip, idx, tc, reason, detail,
-  anchors). 꺼진 칩의 누락은 `note:` 한 줄과 `jobdeck.skipped_off`에만 남고 exit 0이다.
-- 디코드 예산을 넘긴 페이지는 `over_budget_pages`, 요약 대기는 `summary_building`으로 센다(exit 3).
+  불완전으로 표시해 낸다. stderr 마지막 줄 `floe2: WARNING: rendered incomplete - …`, 보고서 `complete=false`,
+  `jobdeck.skipped[]`(chip, idx, tc, reason, detail, anchors). 종료 코드는 0이다(0.12.437; 그림이 나왔으면 치명적
+  오류가 아니다. `FLOE_RENDER_INCOMPLETE_EXIT=3`이면 전처럼 3). 꺼진 칩의 누락은 `note:` 한 줄과
+  `jobdeck.skipped_off`에만 남는다.
+- 디코드 예산을 넘긴 페이지는 `over_budget_pages`, 요약 대기는 `summary_building`으로 센다(같이 불완전).
 - 지원 포맷: 소스는 평문 OASIS다. `.gds`, `.gz`는 `unsupported`(detail `floe-index reads plain OASIS only`)다.
 
 ## 16. 보고서와 stdout
@@ -308,7 +310,8 @@ placements, region_um), `in_chip`(§8), `tiles`(mosaic), `skipped_placements`, `
 stdout 줄: `[jobdeck] window    : …`, `[jobdeck] blocks    : …`, `[floe2] NAME: region X0,Y0,X1,Y1 um (--fit-chip …)`,
 `[floe2] NAME: in chip NAME#K (CHIP …, level N, mag M, origin X,Y um): … chip um -> … um`,
 `[floe2] rendered FILE (WxH, bbox um) in T s`, `[floe2] WARNING: N jobdeck placement(s) not drawn: …`. 불완전이면
-마지막 줄이 `floe2: rendered incomplete - …  [exit 3]`이다.
+마지막 줄이 `floe2: WARNING: rendered incomplete - … (see above; exit 0 - FLOE_RENDER_INCOMPLETE_EXIT=3 exits 3 as
+before)`이다(0.12.437; 그 전은 `floe2: rendered incomplete - …  [exit 3]`).
 
 ## 17. 미비와 주의 (2026-11-09)
 
@@ -330,7 +333,7 @@ stdout 줄: `[jobdeck] window    : …`, `[jobdeck] blocks    : …`, `[floe2] N
 9. `<deck>.jb.layerprops`의 숨김(visibility 0)은 캡처에 적용되지 않는다(§12).
 10. `--frames`는 `--depth N` 컷 아래에만 나타나고, `--labels on`, `--density`, `--layer-colors`는 덱에서 거절한다(exit 2).
 11. `--layerid N`만 주면 전 레벨을 로드한다. `--level N`을 같이 준다(§3).
-12. `--workdir`만으로 광역을 찍으면 exit 3이다(§13).
+12. `--workdir`만으로 광역을 찍으면 요약 없이 비어 불완전이다(§13).
 13. `--no-index` 덱의 거절 메시지가 원인을 말하지 않는다(§14).
 14. `--layers`와 `--chip`의 충돌은 인수 충돌이지만 exit 1이다.
 
@@ -344,3 +347,6 @@ stdout 줄: `[jobdeck] window    : …`, `[jobdeck] blocks    : …`, `[floe2] N
 2026-11-09 0.12.436: §12의 `--mode level|chip|layer`를 더해 같은 덱으로 확인했다(ChipShotTests의
 `test_mode_draws_the_decks_view`: level view는 한 색, chip view는 칩마다 한 색에 같은 픽셀, chip view의 layerprops
 파일, 범례의 칩 줄과 `--chip`의 켠 칩만, 거절).
+2026-11-09 0.12.437: 불완전 캡처의 종료 코드를 3에서 0으로 바꾸고(§15; 사용자 "치명적 오류가 아니라면 exit code는
+0으로") 같은 덱으로 확인했다(ChipShotTests, LightSummaryTests: stderr `WARNING: rendered incomplete`, 보고서
+`complete=false`, `FLOE_RENDER_INCOMPLETE_EXIT=3`이면 3).
