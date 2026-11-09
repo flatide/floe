@@ -17,8 +17,15 @@
 //! lists them, their ROWS in turn); a CHIP id frames that block's placements
 //! alone. Extents are the deck's own (the entries' BX..UY placed), so
 //! nothing is read to know them.
+//!
+//! `--in-chip NAME[#K]` (user 2026-11-09: "칩 좌표 옵션") names one placement
+//! as the frame of a capture's region: the lengths given are the chip's own
+//! coordinates - the source's um, as its layout has them - and are placed as
+//! the deck places that chip (ChipFrame; geom::plan's `X = dx + mag * x`,
+//! no mirror or rotation: the deck fields seen carry none).
 use super::{geom::Placement, parser::JobDeck, view::normalize_tc, view::LayerMetadata};
 use crate::{Error, Result};
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Names an error message lists before "+N more".
@@ -153,6 +160,114 @@ pub fn wildcard(pattern: &str, text: &str) -> bool {
         }
     }
     p[i..].iter().all(|&c| c == '*')
+}
+
+/// One placement's frame, what `--in-chip NAME[#K]` names: the chip's own
+/// coordinates (the source's um) placed as the deck places that chip -
+/// `X = dx_um + mag * x`, a length `mag` times its own (geom::plan).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ChipFrame {
+    /// the token as given
+    pub chip: String,
+    /// the CHIP block, its ROWS position (1-based) and the placement's #K
+    pub chip_id: String,
+    pub rows: usize,
+    pub n: usize,
+    /// the source placed, its path normalised
+    pub tc: String,
+    /// the levels that place it so (several when the token names no level)
+    pub levels: Vec<i64>,
+    pub mag: f64,
+    pub dx_um: f64,
+    pub dy_um: f64,
+    /// the placement's extent, deck um
+    pub extent_um: [f64; 4],
+}
+impl ChipFrame {
+    /// A point of the chip's, in the deck.
+    pub fn point(&self, p: [f64; 2]) -> [f64; 2] {
+        [self.dx_um + self.mag * p[0], self.dy_um + self.mag * p[1]]
+    }
+    /// A rectangle of the chip's, in the deck.
+    pub fn rect(&self, b: [f64; 4]) -> [f64; 4] {
+        let [x0, y0] = self.point([b[0], b[1]]);
+        let [x1, y1] = self.point([b[2], b[3]]);
+        [x0, y0, x1, y1]
+    }
+    /// A rectangle of the deck's, in the chip's coordinates.
+    pub fn chip_rect(&self, b: [f64; 4]) -> [f64; 4] {
+        [
+            (b[0] - self.dx_um) / self.mag,
+            (b[1] - self.dy_um) / self.mag,
+            (b[2] - self.dx_um) / self.mag,
+            (b[3] - self.dy_um) / self.mag,
+        ]
+    }
+    /// One log line's worth: the placement and its frame, and the region
+    /// drawn (`region`: deck um) in the chip's coordinates and the deck's.
+    pub fn describe(&self, region: Option<[f64; 4]>) -> String {
+        let mut text = format!(
+            "in chip {} (CHIP {} ROWS {}, level {}, mag {}, origin {},{} um)",
+            self.chip,
+            self.chip_id,
+            self.rows,
+            self.levels
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+            um(self.mag),
+            um(self.dx_um),
+            um(self.dy_um)
+        );
+        if let Some(r) = region {
+            text.push_str(&format!(
+                ": {} chip um -> {} um",
+                box_text(self.chip_rect(r)),
+                box_text(r)
+            ));
+        }
+        text
+    }
+}
+
+/// `info --chips --json`: the chip view's rows of the load, each with its
+/// placements and their frames (mag, dx_um, dy_um: `X = dx + mag * x`).
+#[derive(Clone, Debug, Serialize)]
+pub struct Listing {
+    pub levels: Vec<i64>,
+    pub rows: Vec<RowListing>,
+}
+#[derive(Clone, Debug, Serialize)]
+pub struct RowListing {
+    pub level: i64,
+    /// the level's title (the MTITLE; LEVELn without one)
+    pub level_name: String,
+    /// the view's L/D key, `1/1`
+    pub key: String,
+    /// what the chip view lists: the source's file name
+    pub name: String,
+    /// the source path, normalised
+    pub source: String,
+    /// CHIP ids, deck order
+    pub chips: Vec<String>,
+    pub placements: Vec<PlacementListing>,
+    /// the placements' extent, deck um (None: the source is skipped)
+    pub extent_um: Option<[f64; 4]>,
+}
+#[derive(Clone, Debug, Serialize)]
+pub struct PlacementListing {
+    /// 1-based, deck order: `--fit-chip NAME#K` / `--in-chip NAME#K`
+    pub n: usize,
+    /// the CHIP block and its ROWS position (1-based)
+    pub chip: String,
+    pub rows: usize,
+    /// the ROWS position, um
+    pub at_um: [f64; 2],
+    pub bbox_um: [f64; 4],
+    pub mag: f64,
+    pub dx_um: f64,
+    pub dy_um: f64,
 }
 
 /// One placement of a chip: a CHIP block at one of its ROWS.
@@ -520,6 +635,115 @@ impl<'a> ChipTable<'a> {
         Ok((region, count))
     }
 
+    /// The frames of one placement (`inst`: its CHIP block and ROWS
+    /// position) among the rows `picks` name: one for each way its levels
+    /// place it - one alone when they place it alike (a deck places a chip
+    /// at one mag, as a rule) - in the rows' order, `chip` left empty.
+    fn frames_of(&self, picks: &[(usize, Option<Vec<String>>)], inst: &Instance) -> Vec<ChipFrame> {
+        let mut out: Vec<ChipFrame> = Vec::new();
+        for (r, _) in picks {
+            let row = &self.rows[*r];
+            for &i in &row.places {
+                let p = &self.placements[i];
+                if p.chip != inst.chip || p.row != inst.row {
+                    continue;
+                }
+                match out.iter_mut().find(|f| {
+                    f.mag == p.mag && f.dx_um == p.dx_um && f.dy_um == p.dy_um && f.tc == row.tc
+                }) {
+                    Some(f) => {
+                        if !f.levels.contains(&p.idx) {
+                            f.levels.push(p.idx);
+                        }
+                        f.extent_um = union([f.extent_um, p.bbox_um]).unwrap();
+                    }
+                    None => out.push(ChipFrame {
+                        chip: String::new(),
+                        chip_id: p.chip.clone(),
+                        rows: p.row + 1,
+                        n: inst.n,
+                        tc: row.tc.clone(),
+                        levels: vec![p.idx],
+                        mag: p.mag,
+                        dx_um: p.dx_um,
+                        dy_um: p.dy_um,
+                        extent_um: p.bbox_um,
+                    }),
+                }
+            }
+        }
+        out
+    }
+
+    /// The frame `--in-chip NAME[#K]` names: one placement - a chip placed
+    /// once needs no #K, one placed more than once its #K (deck order, as
+    /// --fit-chip's), and one its levels place differently (another mag or
+    /// origin) the level, `N:NAME#K`.
+    pub fn frame(&self, token: &str) -> Result<ChipFrame> {
+        let token = token.trim();
+        let (picks, k) = self.matches(token, true)?;
+        let insts = self.instances(&picks);
+        if insts.is_empty() {
+            return Err(Error::input(format!(
+                "chip {} has nothing placed (its source is skipped: see 'skipped' above)",
+                quoted(token)
+            )));
+        }
+        let inst = match k {
+            Some(k) => {
+                if !(1..=insts.len()).contains(&k) {
+                    return Err(Error::input(format!(
+                        "chip {}: it has {} placement{} (#1..#{}; `{} info DECK --chips` lists them)",
+                        quoted(token),
+                        insts.len(),
+                        if insts.len() == 1 { "" } else { "s" },
+                        insts.len(),
+                        crate::program()
+                    )));
+                }
+                &insts[k - 1]
+            }
+            None if insts.len() == 1 => &insts[0],
+            None => {
+                return Err(Error::input(format!(
+                    "chip {}: --in-chip takes one placement - it has {} (#1..#{}; `{} info DECK --chips` lists them): {token}#K",
+                    quoted(token),
+                    insts.len(),
+                    insts.len(),
+                    crate::program()
+                )));
+            }
+        };
+        let mut frames = self.frames_of(&picks, inst);
+        if frames.len() > 1 {
+            let ways = frames
+                .iter()
+                .map(|f| {
+                    format!(
+                        "level {} {} mag {} at {},{}",
+                        f.levels
+                            .iter()
+                            .map(i64::to_string)
+                            .collect::<Vec<_>>()
+                            .join(","),
+                        f.tc,
+                        um(f.mag),
+                        um(f.dx_um),
+                        um(f.dy_um)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(Error::input(format!(
+                "chip {}: its levels place it differently - {ways} (um); give the level: N:NAME#K",
+                quoted(token)
+            )));
+        }
+        let mut frame = frames.swap_remove(0);
+        frame.chip = token.to_string();
+        Ok(frame)
+    }
+
     /// A capture's chips: `on`'s (every chip loaded when only `off` is
     /// given) less `off`'s, and the region - `fit`'s placements, else those
     /// of the chips on (no rows: the options name no chips).
@@ -665,6 +889,51 @@ impl<'a> ChipTable<'a> {
         }
         out
     }
+
+    /// `floe2 info deck.jb --chips --json`: the listing as data - every row
+    /// with every placement (the text lists them for a chip placed more than
+    /// once) and the placement's frame, so a script needs no `--placements`
+    /// table beside it (user 2026-11-09: the table came after the JSON as
+    /// text).
+    pub fn listing_json(&self) -> Listing {
+        let mut rows = Vec::new();
+        for (r, row) in self.rows.iter().enumerate() {
+            let picks = [(r, None)];
+            let insts = self.instances(&picks);
+            let placements = insts
+                .iter()
+                .filter_map(|i| {
+                    // one row is one level and one source: one frame
+                    let f = self.frames_of(&picks, i).into_iter().next()?;
+                    Some(PlacementListing {
+                        n: i.n,
+                        chip: i.chip.clone(),
+                        rows: i.row + 1,
+                        at_um: i.at,
+                        bbox_um: i.bbox,
+                        mag: f.mag,
+                        dx_um: f.dx_um,
+                        dy_um: f.dy_um,
+                    })
+                })
+                .collect();
+            rows.push(RowListing {
+                level: row.level,
+                level_name: self.titles.get(&row.level).cloned().unwrap_or_default(),
+                key: format!("{}/{}", row.key.0, row.key.1),
+                name: row.name.clone(),
+                source: row.tc.clone(),
+                chips: row.chips.clone(),
+                placements,
+                extent_um: union(insts.iter().map(|i| i.bbox)),
+            });
+        }
+        rows.sort_by_key(|r| r.level);
+        Listing {
+            levels: self.levels(),
+            rows,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -690,6 +959,36 @@ mod tests {
         ] {
             assert_eq!(wildcard(p, t), want, "{p} {t}");
         }
+    }
+
+    #[test]
+    fn a_chip_frame_places_the_chips_lengths_as_the_deck_does() {
+        // --in-chip (2026-11-09): X = dx + mag * x, a length mag times its
+        // own, and back; the log line names the placement and both regions
+        let f = ChipFrame {
+            chip: "2:chipB.oas#1".into(),
+            chip_id: "ID002".into(),
+            rows: 1,
+            n: 1,
+            tc: "chipB.oas".into(),
+            levels: vec![2],
+            mag: 2.,
+            dx_um: 43020.,
+            dy_um: 88000.,
+            extent_um: [43020., 88000., 45020., 90000.],
+        };
+        assert_eq!(f.point([100., 200.]), [43220., 88400.]);
+        assert_eq!(f.rect([100., 200., 300., 400.]), [43220., 88400., 43620., 88800.]);
+        assert_eq!(f.chip_rect([43220., 88400., 43620., 88800.]), [100., 200., 300., 400.]);
+        assert_eq!(
+            f.describe(Some([43220., 88400., 43620., 88800.])),
+            "in chip 2:chipB.oas#1 (CHIP ID002 ROWS 1, level 2, mag 2, origin 43020,88000 um): \
+             100,200,300,400 chip um -> 43220,88400,43620,88800 um"
+        );
+        assert_eq!(
+            f.describe(None),
+            "in chip 2:chipB.oas#1 (CHIP ID002 ROWS 1, level 2, mag 2, origin 43020,88000 um)"
+        );
     }
 
     #[test]

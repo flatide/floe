@@ -129,10 +129,9 @@ fn deck_reads(
         return Ok(None);
     }
     let chips = chips.filter(|c| !c.is_empty()).cloned();
-    let windowed = window_enabled()
-        && shots
-            .iter()
-            .all(|s| s.capture.explicit_region() || s.capture.names_chips());
+    // (a shot with a region: its own, its chips' extent or its --in-chip
+    // placement's)
+    let windowed = window_enabled() && shots.iter().all(|s| s.capture.has_region());
     let window = if windowed {
         let analysis = Analysis::open(
             source,

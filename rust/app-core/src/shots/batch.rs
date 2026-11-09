@@ -59,6 +59,11 @@ pub struct Capture {
     pub chip_off: Option<String>,
     /// the default region is these chips' extent (`NAME#K`: one placement)
     pub fit_chip: Option<String>,
+    /// `--in-chip NAME[#K]` (jobdeck::chips::ChipFrame, user 2026-11-09):
+    /// the region's lengths are this placement's chip coordinates - the
+    /// source's um, placed as the deck places it (`in_frame`); alone, the
+    /// region is the placement itself
+    pub in_chip: Option<String>,
 }
 impl Default for Capture {
     fn default() -> Self {
@@ -73,6 +78,7 @@ impl Default for Capture {
             chip: None,
             chip_off: None,
             fit_chip: None,
+            in_chip: None,
         }
     }
 }
@@ -116,6 +122,43 @@ impl Capture {
     pub fn names_chips(&self) -> bool {
         self.chip.is_some() || self.chip_off.is_some() || self.fit_chip.is_some()
     }
+    /// A region at all - its own, its chips' extent or its `--in-chip`
+    /// placement's: what a deck's capture window takes (jobdeck::window);
+    /// without one the shot draws the whole source.
+    pub fn has_region(&self) -> bool {
+        self.explicit_region() || self.names_chips() || self.in_chip.is_some()
+    }
+    /// The capture with its region placed as the frame places it
+    /// (`--in-chip`: jobdeck::chips::ChipFrame) - a point `(dx + mag * x,
+    /// dy + mag * y)`, a length `mag` times its own: --bbox, --at, --size,
+    /// --mosaic-at and --corners X0,Y0,X1,Y1 alike; what is not a length
+    /// (px, line, the chips, the layers) stays. A frame that takes a length
+    /// out of the finite is refused.
+    pub fn in_frame(&self, mag: f64, dx: f64, dy: f64) -> Result<Capture> {
+        let point = |p: [f64; 2]| [dx + mag * p[0], dy + mag * p[1]];
+        let rect = |b: [f64; 4]| [dx + mag * b[0], dy + mag * b[1], dx + mag * b[2], dy + mag * b[3]];
+        let mut c = self.clone();
+        c.shot.bbox = self.shot.bbox.map(rect);
+        c.shot.at = self.shot.at.map(point);
+        c.shot.size = self.shot.size.map(|s| [mag * s[0], mag * s[1]]);
+        c.mosaic = self.mosaic.map(|points| points.map(point));
+        c.corners = self.corners.map(rect);
+        let finite = c
+            .shot
+            .bbox
+            .iter()
+            .chain(c.corners.iter())
+            .flatten()
+            .chain(c.shot.at.iter().chain(c.shot.size.iter()).flatten())
+            .chain(c.mosaic.iter().flatten().flatten())
+            .all(|v| v.is_finite());
+        if !finite {
+            return Err(Error::input(
+                "the region in the chip's coordinates is not finite in the deck",
+            ));
+        }
+        Ok(c)
+    }
     pub fn validate(&self) -> Result<()> {
         self.shot.validate()?;
         if [
@@ -139,6 +182,11 @@ impl Capture {
         if self.fit_chip.is_some() && self.explicit_region() {
             return Err(Error::input(
                 "--fit-chip frames the default region; --bbox, --at, --mosaic-at and --corners X1,Y1,X2,Y2 give a region of their own",
+            ));
+        }
+        if self.in_chip.is_some() && self.fit_chip.is_some() {
+            return Err(Error::input(
+                "--in-chip NAME#K frames its placement in the chip's coordinates; --fit-chip frames another region - give one",
             ));
         }
         if self.shot.layers.is_some() && (self.chip.is_some() || self.chip_off.is_some()) {
@@ -327,6 +375,16 @@ pub fn parse(text: &str, defaults: &Capture) -> Result<Vec<NamedCapture>> {
                 c.mosaic = None;
                 c.corners = None;
             }
+            // a line's own frame (in_chip) replaces the command line's
+            // fit_chip, its fit_chip the command line's frame: each frames
+            // the default region; a line's coordinates keep the command
+            // line's frame - they are read in it
+            if fields.iter().any(|(key, _)| *key == "fit_chip") {
+                c.in_chip = None;
+            }
+            if fields.iter().any(|(key, _)| *key == "in_chip") {
+                c.fit_chip = None;
+            }
             // and a line's own say of what is on: its layers (by name or
             // id) replace the defaults' chips and layers, its chips the
             // defaults' layers
@@ -357,6 +415,7 @@ pub fn parse(text: &str, defaults: &Capture) -> Result<Vec<NamedCapture>> {
                     "chip" => c.chip = (!v.is_empty()).then(|| v.to_string()),
                     "chip_off" => c.chip_off = (!v.is_empty()).then(|| v.to_string()),
                     "fit_chip" => c.fit_chip = (!v.is_empty()).then(|| v.to_string()),
+                    "in_chip" => c.in_chip = (!v.is_empty()).then(|| v.to_string()),
                     "px" => c.shot.pixels = pixels(v)?,
                     "anchor" => {
                         c.shot.anchor = match v {
@@ -493,6 +552,78 @@ mod tests {
         ] {
             assert!(parse(bad, &defaults).is_err(), "{bad}");
         }
+    }
+    #[test]
+    fn a_frame_places_the_regions_lengths_and_a_line_keeps_or_replaces_it() {
+        // --in-chip (2026-11-09): every length of the region in the chip's
+        // um placed as the deck places the chip; what is not a length stays
+        let mut c = Capture::default();
+        c.shot.bbox = Some([100., 200., 300., 400.]);
+        c.shot.size = Some([10., 20.]);
+        c.corners = Some([0., 0., 1000., 1000.]);
+        c.mosaic = Some([[0., 0.], [1., 0.], [1., 1.], [0., 1.]]);
+        c.line = 3.;
+        c.in_chip = Some("2:chipB.oas#1".into());
+        let d = c.in_frame(2., 43020., 88000.).unwrap();
+        assert_eq!(d.shot.bbox, Some([43220., 88400., 43620., 88800.]));
+        assert_eq!(d.shot.size, Some([20., 40.]));
+        assert_eq!(d.corners, Some([43020., 88000., 45020., 90000.]));
+        assert_eq!(
+            d.mosaic,
+            Some([
+                [43020., 88000.],
+                [43022., 88000.],
+                [43022., 88002.],
+                [43020., 88002.]
+            ])
+        );
+        assert_eq!((d.line, d.in_chip.as_deref()), (3., Some("2:chipB.oas#1")));
+        let mut at = Capture::default();
+        at.shot.at = Some([250., 250.]);
+        at.shot.size = Some([100., 100.]);
+        let d = at.in_frame(4., 43020., 88000.).unwrap();
+        assert_eq!((d.shot.at, d.shot.size), (Some([44020., 89000.]), Some([400., 400.])));
+        assert!(at.in_frame(f64::INFINITY, 0., 0.).is_err());
+        // a frame alone has a region (the placement's); with --fit-chip refused
+        let mut alone = Capture::default();
+        alone.in_chip = Some("ID002#2".into());
+        assert!(alone.has_region() && !alone.explicit_region() && !alone.names_chips());
+        assert!(alone.validate().is_ok());
+        alone.fit_chip = Some("ID001".into());
+        assert!(alone.validate().is_err());
+        assert!(!Capture::default().has_region());
+        // batch: the command line's frame holds for a line's coordinates; a
+        // line's own in_chip or fit_chip replaces it, an empty one clears it
+        let mut defaults = Capture::default();
+        defaults.in_chip = Some("2:chipB.oas#1".into());
+        let parsed = parse(
+            "a bbox=100,200,300,400\nb in_chip=5:chipB.oas#1 at=1,1 size=2,2\n\
+             c fit_chip=ID002#2\nd in_chip= bbox=0,0,1,1\ne corners=fit size=5,5",
+            &defaults,
+        )
+        .unwrap();
+        let frames: Vec<_> = parsed
+            .iter()
+            .map(|c| (c.capture.in_chip.as_deref(), c.capture.fit_chip.as_deref()))
+            .collect();
+        assert_eq!(
+            frames,
+            [
+                (Some("2:chipB.oas#1"), None),
+                (Some("5:chipB.oas#1"), None),
+                (None, Some("ID002#2")),
+                (None, None),
+                (Some("2:chipB.oas#1"), None)
+            ]
+        );
+        assert_eq!(parsed[0].capture.shot.bbox, Some([100., 200., 300., 400.]));
+        let mut fit = Capture::default();
+        fit.fit_chip = Some("ID001".into());
+        assert_eq!(
+            parse("x in_chip=ID002#1", &fit).unwrap()[0].capture.fit_chip,
+            None
+        );
+        assert!(parse("x in_chip=ID002#1 fit_chip=ID001", &fit).is_err());
     }
     #[test]
     fn a_line_names_its_layers_by_name_or_id() {

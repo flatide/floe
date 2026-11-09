@@ -88,6 +88,14 @@ makes it the default, as before 0.12.350).
   --chip-off NAME[,...]     These chips off, the others on
   --fit-chip NAME[#K][,...] The region is these chips' extent (on or not); #K
                             their K-th placement alone, deck order (info --chips)
+  --in-chip NAME[#K]        Jobdeck: the region is given in this placement's
+                            chip coordinates - the source's um, placed as the
+                            deck places the chip (X = dx + mag * x; --bbox,
+                            --at, --size, --mosaic-at, --corners X0,.. alike);
+                            alone, the region is the placement, as --fit-chip.
+                            NAME as --fit-chip's; #K the K-th placement when
+                            the chip is placed more than once; N:NAME the
+                            level when its levels place it differently
   --chipid ID,ID,...        Jobdeck: these CHIP blocks' sources and placements
                             alone are opened, indexed and drawn (ids exact, or
                             * ? [..] patterns); the other blocks place nothing
@@ -141,8 +149,10 @@ the levels loaded is left alone (FLOE_DECK_WINDOW=off: every source, as before
 Lengths: bare/um/µm/μm, nm, mm, cm, m. Fractional DBU is preserved.
 Batch: NAME key=value ...; quotes supported, full-line # comments. Region fields
 override the CLI region. Keys: bbox at size anchor px stretch layers (layer)
-layerid depth mosaic corners line linecolor keep_tiles chip chip_off fit_chip;
-corners=fit. Limit 16 MiB/4096 shots; no shell expansion.
+layerid depth mosaic corners line linecolor keep_tiles chip chip_off fit_chip
+in_chip; corners=fit. A line's coordinates are read in the command line's
+--in-chip frame; its own in_chip replaces it (in_chip= none). Limit 16 MiB/4096
+shots; no shell expansion.
 DRC uses the width from --px even for WxH; frames/labels are on (deck labels off),
 the viewer's fills. --detail/--thin/--density/--occupancy/--label-font-px are honored.
 No batch/mosaic/region/report with DRC. Local/global/path TSV.
@@ -158,7 +168,9 @@ placements/over-budget pages may publish a flagged incomplete PNG (exit 3).
 Other incomplete frames preserve the previous output.";
 const INFO_HELP: &str = "Usage: floe2-web info SOURCE [--level N,N,...] [--json] [--chips] [--no-index] [--temp-index[=DIR]] [--light|--full] [--wait[=SECONDS]] [--workdir DIR]
 --chips (jobdeck): every chip of the levels loaded - its CHIP blocks,
-placements (#K) and extents, the names render --chip/--fit-chip take.
+placements (#K) and extents, the names render --chip/--fit-chip/--in-chip
+take; with --json, one JSON document whose `chips` holds the rows and every
+placement with its frame (mag, dx_um, dy_um: X = dx + mag * x).
 Read layout/cache summary. --json emits metadata plus source_stale.
 A source with no index is indexed first (its output on stderr; --no-index or
 FLOE_AUTO_INDEX=off: refused instead; --temp-index[=DIR]: in a temporary
@@ -318,6 +330,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 | "--chip"
                 | "--chip-off"
                 | "--fit-chip"
+                | "--in-chip"
                 | "--chipid"
                 | "--chipnumber"
                 | "--line"
@@ -435,6 +448,8 @@ pub fn parse(args: &[String]) -> Result<Command> {
             "--chip" => capture.chip = Some(value()?.to_string()).filter(|v| !v.is_empty()),
             "--chip-off" => capture.chip_off = Some(value()?.to_string()).filter(|v| !v.is_empty()),
             "--fit-chip" => capture.fit_chip = Some(value()?.to_string()).filter(|v| !v.is_empty()),
+            // the region in a placement's chip coordinates (2026-11-09)
+            "--in-chip" => capture.in_chip = Some(value()?.to_string()).filter(|v| !v.is_empty()),
             // the CHIP blocks to read (2026-10-29), as `index DECK` takes them
             "--chipid" => chip_blocks.add_ids(value()?)?,
             "--chipnumber" => chip_blocks.add_numbers(value()?)?,
@@ -788,23 +803,32 @@ fn info(
     let l = dataset(
         source, levels, index, light, false, temp, None, waiter, cancelled,
     )?;
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&l.info())
-                .map_err(|e| Error::input(e.to_string()))?
-        );
-    } else {
-        print!("{}", l.summary(cancelled)?);
-    }
-    if let (true, Dataset::Deck(deck)) = (chips, &l) {
-        // what `render --chip / --chip-off / --fit-chip` name: the
-        // chip view's rows, their CHIP blocks and placements
-        let table = floe_app_core::jobdeck::chips::ChipTable::new(
+    // what `render --chip / --chip-off / --fit-chip / --in-chip` name: the
+    // chip view's rows, their CHIP blocks and placements
+    let table = match (chips, &l) {
+        (true, Dataset::Deck(deck)) => Some(floe_app_core::jobdeck::chips::ChipTable::new(
             &deck.analysis.deck,
             &deck.analysis.model.placements,
             &deck.metadata.layers,
+        )),
+        _ => None,
+    };
+    if json {
+        // one document: the chips in it as `chips` (before 0.12.435 the
+        // table followed the JSON as text)
+        let mut doc = l.info();
+        if let Some(table) = &table {
+            doc["chips"] = serde_json::to_value(table.listing_json())
+                .map_err(|e| Error::input(e.to_string()))?;
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&doc).map_err(|e| Error::input(e.to_string()))?
         );
+        return Ok(0);
+    }
+    print!("{}", l.summary(cancelled)?);
+    if let Some(table) = &table {
         let levels = table.levels();
         println!(
             "[jobdeck] chip rows : {} in level{} {} - the chips render --chip / --chip-off / --fit-chip NAME[#K] name",
@@ -934,6 +958,46 @@ mod tests {
             panic!()
         };
         assert_eq!(drc.layers.as_deref(), Some("7/1"));
+    }
+    #[test]
+    fn render_reads_the_region_in_a_placements_chip_coordinates() {
+        // --in-chip NAME[#K] (2026-11-09): the capture's frame, checked
+        // against the deck when it runs; with --fit-chip refused by the
+        // capture's own rules, a batch key in_chip
+        let Command::Render { capture, .. } = parsed(&[
+            "render",
+            "a.jb",
+            "--in-chip",
+            "2:chipB.oas#1",
+            "--bbox=100,200,300,400",
+        ])
+        .unwrap() else {
+            panic!()
+        };
+        assert_eq!(capture.in_chip.as_deref(), Some("2:chipB.oas#1"));
+        assert!(capture.validate().is_ok() && capture.has_region());
+        let Command::Render { capture, .. } =
+            parsed(&["render", "a.jb", "--in-chip=ID002#2", "--fit-chip", "ID001"]).unwrap()
+        else {
+            panic!()
+        };
+        assert!(capture.validate().is_err());
+        let Command::Render { capture, .. } =
+            parsed(&["render", "a.jb", "--in-chip", ""]).unwrap()
+        else {
+            panic!()
+        };
+        assert!(capture.in_chip.is_none());
+        assert!(parsed(&["render", "a.jb", "--in-chip"]).is_err());
+        assert!(parsed(&[
+            "render",
+            "a.oas",
+            "--in-chip",
+            "x",
+            "--drc=db",
+            "--drc-rule=R"
+        ])
+        .is_err());
     }
     #[test]
     fn render_reads_the_chip_blocks_named() {

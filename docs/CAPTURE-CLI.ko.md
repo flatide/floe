@@ -67,6 +67,7 @@ floe2 render deck.jb  --level 2 --chip MAIN.oas --out main.png             # 그
 | `--stretch` | | `--px WxH`일 때 영역을 넓히지 않고 그대로 늘여 그린다 |
 | `--depth N` | full | 계층 깊이. 0은 top만, 999나 생략은 전체 |
 | `--fit-chip NAME[#K]` | | 덱. 영역을 그 칩의 배치 범위로(§4.2). 좌표 영역과 함께 쓸 수 없다 |
+| `--in-chip NAME[#K]` | | 덱. 영역 좌표를 그 배치의 **칩 좌표**(소스의 µm)로 읽어 덱이 그 칩을 놓는 대로 놓는다(`X = dx + mag·x`, 길이는 mag배). `--bbox`, `--at`, `--size`, `--mosaic-at`, 좌표 `--corners`에 모두 적용. 영역 없이 주면 그 배치 자체(§4.2). `--fit-chip`과 함께 쓸 수 없다 (0.12.435) |
 
 - 한 프레임은 16 Mpx(4096×4096)까지다. 넘으면 같은 종횡비로 그 안에 드는 가장 큰 크기로 그리고(0.12.431),
   stdout의 `WARNING: a.png: 1280x13440 px for 40.0000x420.0000 um (0.0000,0.0000,40.0000,420.0000 um)
@@ -171,12 +172,15 @@ quad       mosaic="40000,95000;60000,95000;60000,80000;40000,80000" size=4mm,3mm
 - 값은 셸처럼 따옴표로 묶을 수 있다(`'…'`, `"…"`, `\` 이스케이프). `#`은 줄 첫머리에서만 주석이라
   `linecolor=#ff0000`은 값이다.
 - 키: `bbox` `at` `size` `anchor` `px` `stretch` `layers`(=`layer`) `layerid` `depth` `mosaic` `corners`
-  `line` `linecolor` `keep_tiles` `chip` `chip_off` `fit_chip`. 없는 키는 명령행 값을 쓴다. 켜고 끄는 값은
+  `line` `linecolor` `keep_tiles` `chip` `chip_off` `fit_chip` `in_chip`. 없는 키는 명령행 값을 쓴다. 켜고 끄는 값은
   `1`/`on`/`true`/`yes`. `corners=fit`은 기본 영역의 네 모서리다. `px=max`는 영역 종횡비의 가장 큰 크기(§1.1)라
   명령행의 `--px 1200`을 줄 하나에서 되돌릴 수 있다.
 - 영역 대체 규칙: 줄에 자기 좌표 영역(`bbox`, `at`, `mosaic`, 좌표 `corners`)이 있으면 명령행의 영역
   키를 `fit_chip`까지 모두 버린다. 줄에 `fit_chip`이나 `corners=fit`만 있으면 명령행의 좌표 영역만
   버린다.
+- 칩 좌표 틀(`in_chip`, 0.12.435): 명령행의 `--in-chip`은 줄의 좌표(`bbox`, `at`, `size`, `mosaic`, `corners`)에도
+  적용된다. 줄의 `in_chip=NAME#K`는 명령행의 틀을 바꾸고, `in_chip=`(빈 값)은 덱 좌표로 되돌린다. 줄의 `fit_chip`은
+  명령행의 `in_chip`을, 줄의 `in_chip`은 명령행의 `fit_chip`을 버린다.
 - 켤 것의 대체 규칙: 줄의 `layers`/`layerid`는 명령행의 `chip`/`chip_off`를, 줄의 `chip`/`chip_off`는
   명령행의 `layers`를 버린다.
 - 한도: 파일 16 MiB, 4096 샷. 셸 확장은 없다.
@@ -239,6 +243,23 @@ floe2 render deck.jb --temp-index --level 9 --at 53.02mm,92.61mm --size 2mm,2mm 
 - 영역을 주지 않으면 켠 칩들의 배치 범위다(덱의 BX..UY를 배치한 값이라 소스를 읽지 않는다).
   `--fit-chip NAME[#K]`는 영역만 그 칩의 배치로 정한다(켜져 있지 않아도 된다). `#K`는 덱 순서(CHIP 블록
   순서, 그 안에서 ROWS 순서)의 K번째 배치 하나다. `floe2 info deck.jb --chips`가 번호와 범위를 보여 준다.
+- **칩 좌표로 영역 주기** `--in-chip NAME[#K]`(0.12.435): 영역의 좌표와 길이를 그 배치의 칩 좌표, 곧 소스
+  레이아웃의 µm로 읽고, 덱이 그 칩을 놓는 대로 놓는다(`X = dx + mag·x`, `Y = dy + mag·y`, 길이는 mag배;
+  미러·회전은 없다). `--bbox`, `--at`, `--size`, `--mosaic-at`, 좌표 `--corners`에 모두 적용되고 `--px`는 픽셀이라
+  그대로다. 영역 없이 주면 그 배치 자체가 영역이라 `--fit-chip NAME#K`와 같고, 값 없는 `--corners --size W,H`면
+  그 배치의 네 모서리를 칩 µm의 타일 크기로 찍는다. 이름은 `--fit-chip`과 같은 것을 받되 **배치 하나**여야 한다.
+  여러 번 놓인 칩은 `#K`를, 레벨마다 다르게(다른 mag나 원점) 놓인 칩은 레벨을 `N:NAME#K`로 준다(안 주면
+  `its levels place it differently - level 2 chipB.oas mag 2 at 43020,88000; level 5 … (um); give the level: N:NAME#K`,
+  exit 1). 그릴 칩은 바꾸지 않는다. 그 자리의 그 칩만 보려면 `--chip`을 함께 준다. stdout에
+  `[floe2] NAME: in chip 2:chipB.oas#1 (CHIP ID002 ROWS 1, level 2, mag 2, origin 43020,88000 um): 100,200,300,400 chip um -> 43220,88400,43620,88800 um`,
+  보고서에 `in_chip`(§6)이 남는다. `floe2 info deck.jb --chips --json`의 `chips.rows[].placements[]`가 배치마다
+  mag, dx_um, dy_um를 준다.
+
+```sh
+floe2 render deck.jb --in-chip 'MAIN.oas#2' --at 1234.5,678.9 --size 100,100 --out spot.png   # 칩 (1234.5, 678.9) 주위 100 µm
+floe2 render deck.jb --in-chip '2:MAIN.oas#2' --chip '2:MAIN.oas' --bbox 0,0,1000,1000 --out ll.png
+floe2 render deck.jb --in-chip 'ID002#1' --corners --size 50,50 --px 400x400 --out corners.png
+```
 - 캡처는 **켠 칩**의 건너뛴 배치만 부족한 것으로 센다(WARNING, `complete=false`, exit 3). 꺼진 칩의
   skip은 `note:` 한 줄과 보고서의 `jobdeck.skipped_off`에만 남고 exit 0이다.
 
@@ -252,8 +273,8 @@ stdout `[jobdeck] blocks    : N of M CHIP block(s) placed …`.
 
 ### 4.4 캡처 창: 위치 캡처는 그 자리의 소스만 읽는다
 
-영역이 있는 덱 캡처(`--bbox`, `--at`, `--mosaic-at`, 좌표 `--corners`, 또는 `--chip`/`--fit-chip`이
-정하는 칩 범위)는 샷들의 영역을 덱 µm의 창으로 모아, 그 창에 닿는 배치(덱의 BX..UY를 배치한 extent,
+영역이 있는 덱 캡처(`--bbox`, `--at`, `--mosaic-at`, 좌표 `--corners`, 또는 `--chip`/`--fit-chip`/`--in-chip`이
+정하는 칩 범위)는 샷들의 영역을 덱 µm의 창으로 모아(`--in-chip`의 좌표는 덱 좌표로 놓은 뒤), 그 창에 닿는 배치(덱의 BX..UY를 배치한 extent,
 닿기만 해도 포함, BX..UY가 없는 항목은 항상 포함)의 소스만 열고, 자동 색인과 `--temp-index`의 색인·요약도
 그 소스만 만든다. 로드한 레벨의 나머지 소스는 그대로 둔다(stderr 색인 줄의 `; K source(s) the capture's
 region does not reach are left as they are`). 칩 표·건너뛴 배치·색은 덱 전체를 연 것과 같고 그림은 바이트
@@ -297,6 +318,7 @@ capture's region`). 영역 없는 전체 샷과 `info`·`probe`·`clip`·DRC 캡
 | `complete`, `skipped_placements`, `over_budget_pages`, `summary_building` | 빠진 것의 수 |
 | `budget_fit` | 예산에 맞춰 성기게 그렸을 때만(renderd의 `fit_*`; mosaic은 타일별) |
 | `chips` | 덱에서 칩을 골랐을 때: `on`(`N:이름`), `chip`, `chip_off`, `fit_chip`, `region_um`(칩으로 정한 영역), `placements` |
+| `in_chip` | `--in-chip`을 줬을 때(0.12.435): `chip`(준 이름), `chip_id`, `rows`(ROWS 번호), `n`(#K), `tc`, `levels`, `mag`, `dx_um`, `dy_um`, `extent_um`(그 배치의 덱 범위), 그린 영역을 칩 좌표로 되돌린 `bbox_chip_um`(mosaic은 `tiles_chip_um`) |
 | `legend[]` | `--legend`의 줄들 |
 
 보고서도 출력이라 실패하면 `PNG was saved; report failed: …`로 끝난다(PNG는 남는다).
@@ -365,8 +387,11 @@ floe2: frame 1280x13440 px for 40.0000x420.0000 um (0.0000,0.0000,40.0000,420.00
 ## 8. 관련 명령
 
 - **`floe2 info SOURCE [--level N] [--chips] [--json]`**: 소스 요약. 덱의 `--chips`는 로드한 레벨의 칩마다
-  CHIP 블록, 배치 `#K`, 범위를 `--bbox`/`--corners` 형식으로 보여 준다(`--chip`/`--fit-chip`이 받는 이름).
-  `--json`은 메타데이터와 `source_stale`. `--no-index`·`--temp-index`·`--light|--full`·`--wait`는 render와 같다.
+  CHIP 블록, 배치 `#K`, 범위를 `--bbox`/`--corners` 형식으로 보여 준다(`--chip`/`--fit-chip`/`--in-chip`이 받는 이름).
+  `--json`은 메타데이터와 `source_stale`. `--json --chips`는 JSON 문서 하나로 `chips`를 함께 낸다(0.12.435; 전에는
+  표가 JSON 뒤에 텍스트로 붙었다): `levels`와 `rows[]`(`level`, `level_name`, `key`, `name`, `source`, `chips`(CHIP id),
+  `extent_um`, `placements[]`: `n`, `chip`, `rows`, `at_um`, `bbox_um`, `mag`, `dx_um`, `dy_um`). 배치마다 한 장 찍는
+  batch 줄을 만들 때 `jq`로 읽는다. `--no-index`·`--temp-index`·`--light|--full`·`--wait`는 render와 같다.
 - **`floe2 index SOURCE [--light|--full] [--occupancy] [--level N] [--chipid|--chipnumber] [--force]`**: 캡처
   전에 캐시를 만들어 두는 길. 덱은 레벨이나 CHIP 블록 단위로 나눠 돌릴 수 있다.
 - **`floe2 fe-embed [OPTIONS] PNG…`**: 찍은 PNG에 주석을 넣거나 읽는다. 픽셀은 건드리지 않고 flateyes
@@ -413,10 +438,10 @@ csh/tcsh 호스트에서는 `(floe2 render … > render.out) >& render.err`처�
 ## 10. 함께 쓸 수 없는 것
 
 - `--bbox` / `--at` / `--mosaic-at` / `--corners`는 하나만. `--fit-chip`은 좌표 영역과 함께 쓸 수 없다
-  (값 없는 `--corners`와는 된다).
+  (값 없는 `--corners`와는 된다). `--in-chip`은 `--fit-chip`과 함께 쓸 수 없다(둘 다 기본 영역을 정한다).
 - `--layers`(`--layer`, `--layerid`)와 `--chip`/`--chip-off`는 하나만.
 - `--density on`은 `--detail exact`·덱과, `--occupancy on`은 `--detail exact`와 함께 쓸 수 없다.
-- `--layer-colors`, `--density`, `--labels on`은 덱에서 거부한다. `--level`, `--chip*`, `--fit-chip`,
+- `--layer-colors`, `--density`, `--labels on`은 덱에서 거부한다. `--level`, `--chip*`, `--fit-chip`, `--in-chip`,
   `--chipid`, `--chipnumber`는 덱에서만 받는다.
 - `--temp-index`는 `--no-index`와, DRC 옵션은 영역·batch·mosaic·report·`--chipid`/`--chipnumber`와 함께 쓸 수 없다.
 - mosaic에는 `--size`가 필요하다.

@@ -555,6 +555,7 @@ floe2 render deck.jb --chip '2:*' --fit-chip 'MARK.oas#3' --px 600 --out mark3.p
   - CHIP id로 고르면 그 블록의 배치만 영역에 들어간다.
   - `floe2 info deck.jb --chips`가 칩마다 배치 번호와 범위를 `--bbox`/`--corners` 형식으로 보여 준다.
 - `--corners`를 값 없이(또는 `fit`으로) 쓰면 기본 영역의 네 모서리를 찍는다. 기본 영역은 칩 범위이고, 칩을 고르지 않았으면 소스 전체다. 타일은 위의 규칙대로 영역 안쪽에 놓인다.
+- `--in-chip NAME[#K]`(0.12.435)는 영역의 좌표와 길이를 그 배치의 칩 좌표(소스의 µm)로 읽어 덱이 그 칩을 놓는 대로 놓는다(`X = dx + mag·x`, 길이는 mag배). `--bbox`, `--at`, `--size`, `--mosaic-at`, 좌표 `--corners`에 적용되고, 영역 없이 주면 그 배치 자체다. 배치 하나여야 하므로 여러 번 놓인 칩은 `#K`, 레벨마다 다르게 놓인 칩은 `N:NAME#K`로 준다. `--fit-chip`과는 함께 쓸 수 없다. 자세한 것은 [JOBDECK-CAPTURE.ko.md](JOBDECK-CAPTURE.ko.md) §8.
 
 **누락 처리**
 - 캡처는 켠 칩의 skip만 부족한 것으로 센다.
@@ -563,13 +564,15 @@ floe2 render deck.jb --chip '2:*' --fit-chip 'MARK.oas#3' --px 600 --out mark3.p
 - `--layers`로 고른 캡처도 같은 규칙을 따른다. 이전에는 로드한 덱의 skip을 모두 세어, 꺼 둔 레벨 때문에 exit 3이 났다.
 
 **batch와 report**
-- `--batch`에 키 `chip`, `chip_off`, `fit_chip`과 값 `corners=fit`을 더했다.
+- `--batch`에 키 `chip`, `chip_off`, `fit_chip`과 값 `corners=fit`을 더했다. 0.12.435에 `in_chip`을 더했다. 명령행의 `--in-chip`은 모든 줄의 좌표에 적용되고, 줄의 `in_chip`은 명령행의 `fit_chip`을, 줄의 `fit_chip`은 명령행의 `in_chip`을 버린다.
 - 영역 키의 대체 규칙:
   - 줄에 자기 영역(bbox, at, mosaic, corners 좌표)이 있으면, 명령행의 영역 키를 fit_chip까지 모두 버린다.
   - 줄에 fit_chip이나 corners=fit만 있으면, 명령행의 좌표 영역만 버린다.
 - 켤 칩 키의 대체 규칙: 줄의 layers는 명령행의 chip/chip_off를, 줄의 chip/chip_off는 명령행의 layers를 버린다.
 - report:
   - shot마다 `chips` 항목이 붙는다. 켠 칩 목록(`N:이름`), chip/chip_off/fit_chip, region_um, placements다.
+  - `--in-chip`을 준 shot에는 `in_chip` 항목이 붙는다. chip, chip_id, rows, n, tc, levels, mag, dx_um, dy_um, extent_um, bbox_chip_um(mosaic은 tiles_chip_um)이다.
+  - `floe2 info deck.jb --chips --json`은 JSON 문서 하나에 `chips`(rows, 배치마다 mag/dx_um/dy_um)를 담는다(0.12.435).
   - `jobdeck.skipped`는 캡처들이 실제로 빠뜨린 것만 담는다.
   - `jobdeck.skipped_off`는 어떤 캡처도 켜지 않은 칩의 skip을 담는다.
 - 색은 render의 level view 그대로다(칩마다 다른 색이 아니다).

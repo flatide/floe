@@ -17,9 +17,9 @@ jobdeck 게이트의 합성 덱(`tools/validate_jobdeck.py`의 test.jb: 소스 3
 | 배치 하나, 반복 중 K번째 (§5) | `--fit-chip NAME#K`, 번호는 `info --chips` | 준비 |
 | CHIP 블록 단위 (§6) | `--chipid ID`, `--chipnumber N,N-M` (`index`와 같은 선택) | 준비 |
 | 마스크 좌표의 위치 (§7) | `--at X,Y --size W,H [--anchor]`, `--bbox`, 단위 접미사 | 준비 |
-| 칩(소스) 좌표의 위치 (§8) | 없음. `jobdeck --placements`의 mag/dx/dy로 계산 | 미비 |
+| 칩(소스) 좌표의 위치 (§8) | `--in-chip NAME[#K]` + `--bbox`/`--at --size`/`--corners`/`--mosaic-at` (0.12.435) | 준비 |
 | 칩의 네 모서리 (§9) | `--fit-chip NAME --corners --size W,H`, `--mosaic-at`, `--line`, `--keep-tiles` | 준비 |
-| 여러 장 한 번에: 칩마다·레벨마다·위치마다 (§10) | `--batch FILE --out DIR --report FILE`, 줄은 `info --chips`에서 만든다 | 준비, 줄 생성은 스크립트 |
+| 여러 장 한 번에: 칩마다·레벨마다·위치마다 (§10) | `--batch FILE --out DIR --report FILE`, 줄은 `info --chips --json`에서 만든다 | 준비, 줄 생성은 스크립트 |
 | 해상도 (§11) | `--px W\|WxH\|max` (기본 max), `--stretch`, `FLOE_CAPTURE_PX` | 준비 |
 | 그림 모양 (§12) | `--detail`, `--thin`, `--archival`, `--depth` + `--frames`, `--legend`, `<deck>.jb.layerprops` | 준비, 덱 제한 있음 |
 | 광역과 점유 요약 (§13) | `--occupancy on\|off` | 준비, `--workdir`는 주의 |
@@ -143,19 +143,41 @@ floe2 render deck.jb --level 9 --at 53.02mm,92.61mm --size 2mm,2mm --out spot9.p
   빈 그림을 내지 않는다.
 - `--px WxH`는 영역을 그 종횡비로 넓힌다. `--stretch`면 넓히지 않고 눌러 그린다.
 
-## 8. 칩(소스) 좌표의 위치: 옵션 없음
+## 8. 칩(소스) 좌표의 위치: `--in-chip`
 
-칩 안의 설계 좌표 (x, y)를 바로 받는 옵션은 없다. 배치 하나의 mag와 원점으로 덱 좌표를 계산해 `--at`이나
-`--bbox`에 준다.
+칩 안의 설계 좌표 (x, y)를 바로 받는다(0.12.435). `--in-chip NAME[#K]`를 주면 영역의 좌표와 길이를 그 배치의 칩
+좌표, 곧 소스 레이아웃의 µm로 읽고, 덱이 그 칩을 놓는 대로 놓는다.
 
 ```
-X_deck = dx + mag · x_chip        Y_deck = dy + mag · y_chip
+X_deck = dx + mag · x_chip        Y_deck = dy + mag · y_chip        W_deck = mag · w_chip
 ```
 
-`floe2 jobdeck deck.jb --placements`가 배치마다 `mag`, `dx_um`, `dy_um`을 표로 낸다(칩 원점 BX,BY가 0이면
-dx,dy가 칩 원점의 덱 좌표다). 예: mag 4, dx 41020, dy 80020인 배치에서 칩 좌표 (500, 1000)은 덱 (43020, 84020)이다.
-배치가 여럿이면 K번째를 골라야 하고(`info --chips`의 `#K`가 같은 순서다), 미러·회전 필드는 덱 포맷에서 본 적이
-없어 식에 없다(JOBDECK.ko.md §1). 이 식을 옵션으로 넣을지는 미결이다(§17).
+```sh
+floe2 render deck.jb --in-chip 'MAIN.oas#2' --at 1234.5,678.9 --size 100,100 --out spot.png    # 칩 (1234.5, 678.9) 주위 100 µm
+floe2 render deck.jb --in-chip '2:MAIN.oas#2' --bbox 0,0,1000,1000 --chip '2:MAIN.oas' --out ll.png   # 그 자리의 그 칩만
+floe2 render deck.jb --in-chip 'ID002#1' --corners --size 50,50 --px 400x400 --out corners.png  # 배치의 네 모서리, 타일 50 칩 µm
+floe2 render deck.jb --in-chip 'ID002#1' --out whole.png                                       # 영역 없이: 그 배치 자체 (= --fit-chip)
+```
+
+- `--bbox`, `--at`, `--size`, `--mosaic-at`, 좌표 `--corners`에 모두 적용된다. `--px`, `--line`은 픽셀이라 그대로다.
+- 이름은 `--fit-chip`과 같은 것(소스 파일 이름, TC 경로, CHIP id, `N:` 접두, 와일드카드)을 받되 **배치 하나**여야
+  한다. 여러 번 놓인 칩은 `#K`(덱 순서, `info --chips`의 번호)를 주지 않으면 `--in-chip takes one placement - it has 3
+  (#1..#3 …): NAME#K`로 거절한다(exit 1). 같은 칩을 레벨마다 다른 mag나 원점으로 놓은 덱이면 레벨을 `N:NAME#K`로
+  준다. 안 주면 `its levels place it differently - level 2 chipB.oas mag 2 at 43020,88000; level 5 chipB.oas mag 4 at
+  43020,88000 (um); give the level: N:NAME#K`로 거절한다. 레벨들이 같게 놓으면(필드 덱은 mag 4 하나) 레벨 없이 된다.
+- 그릴 칩은 바꾸지 않는다(그 자리에 겹친 다른 레벨도 그려진다). 그 칩만 보려면 `--chip`을 함께 준다. `--fit-chip`과는
+  함께 쓸 수 없다.
+- 캡처 창(§7)은 덱 좌표로 놓은 영역에 적용된다. 영역이 아무 배치에도 닿지 않으면 §7과 같이 거절한다.
+- stdout `[floe2] NAME: in chip 2:chipB.oas#1 (CHIP ID002 ROWS 1, level 2, mag 2, origin 43020,88000 um):
+  100,200,300,400 chip um -> 43220,88400,43620,88800 um`. 보고서 샷 항목 `in_chip`: `chip`, `chip_id`, `rows`, `n`, `tc`,
+  `levels`, `mag`, `dx_um`, `dy_um`, `extent_um`, 그린 영역을 칩 좌표로 되돌린 `bbox_chip_um`(mosaic은 `tiles_chip_um`).
+- batch(§10): 명령행의 `--in-chip`은 모든 줄의 좌표에 적용되고, 줄의 `in_chip=NAME#K`가 틀을 바꾸며 `in_chip=`은 덱
+  좌표로 되돌린다.
+- 미러·회전 필드는 덱 포맷에서 본 적이 없어 식에 없다(JOBDECK.ko.md §1). 배치마다의 mag, dx, dy는
+  `floe2 info deck.jb --chips --json`의 `chips.rows[].placements[]`나 `floe2 jobdeck deck.jb --placements`가 준다.
+- 확인(합성 덱, 2026-11-09): `--in-chip 2:chipB.oas#1 --bbox 100,200,300,400`이 `--bbox 43220,88400,43620,88800`과
+  바이트 동일, `--at 250,250 --size 100,100`이 덱 `--at 43520,88500 --size 200,200`과 동일, 영역 없는 `--in-chip
+  2:chipB.oas#2`가 `--fit-chip 2:chipB.oas#2`와 동일. 게이트 `jobdeck`의 ChipShotTests가 같은 것을 지킨다.
 
 ## 9. 칩의 네 모서리
 
@@ -175,9 +197,10 @@ floe2 render deck.jb --mosaic-at "X,Y;X,Y;X,Y;X,Y" --size W,H --out quad.png   #
 
 ```sh
 cat > shots.txt <<'SHOTS'
-# NAME key=value ...  키: bbox at size anchor px stretch layer layerid depth mosaic corners line linecolor keep_tiles chip chip_off fit_chip
+# NAME key=value ...  키: bbox at size anchor px stretch layer layerid depth mosaic corners line linecolor keep_tiles chip chip_off fit_chip in_chip
 main        chip=MAIN.oas px=1600
 main_3      fit_chip=MAIN.oas#3 px=max
+spot        in_chip=MAIN.oas#3 at=1234.5,678.9 size=100,100 px=800
 align_box   layerid=3 bbox=41020,80020,49020,90220 px=600
 corners     layerid=1 corners=fit size=1000,1000 px=400
 SHOTS
@@ -187,16 +210,18 @@ floe2 render deck.jb --batch shots.txt --out shots/ --report shots/report.json
 - 덱을 한 번 열고 모두 찍는다. 줄의 영역 키는 명령행의 영역을, 줄의 `layer`/`layerid`는 명령행의 `--chip`을(그
   반대도) 대신한다. `level`은 줄의 키가 아니다. 로드는 명령행 `--level`로 한 번 정한다.
 - 이름은 유일해야 한다(`batch shot names must be unique`, exit 1).
-- **칩마다·배치마다 한 장**은 `info --chips`에서 줄을 만든다(자동으로 만드는 옵션은 없다, §17). 배치 줄은
-  `#K CHIP ID ROWS n at X,Y: X0,Y0,X1,Y1 um` 형식이다.
+- **칩마다·배치마다 한 장**은 `info --chips --json`에서 줄을 만든다(자동으로 만드는 옵션은 없다, §17). 0.12.435부터
+  `--json --chips`가 JSON 문서 하나로 `chips.rows[].placements[]`(`n`, `chip`, `rows`, `bbox_um`, `mag`, `dx_um`,
+  `dy_um`)를 주므로 `jq`로 읽는다.
 
 ```sh
-floe2 info deck.jb --chips | awk '/^  level /{lv=$2} /^    [0-9]+\/[0-9]+ /{src=$2}
-  /^        #/{k=substr($1,2); print "L" lv "_" src "_" $3 "_" k " bbox=" $(NF-1) " px=1200"}' > perchip.txt
+floe2 info deck.jb --chips --json | jq -r '.chips.rows[] as $r | $r.placements[]
+  | "L\($r.level)_\($r.name)_\(.chip)_\(.n) bbox=\(.bbox_um | map(tostring) | join(",")) px=1200"' > perchip.txt
 floe2 render deck.jb --batch perchip.txt --out perchip/ --report perchip/report.json
 ```
 
-합성 덱의 17 배치가 17장이 됐다. 레벨마다 한 장은 `layerid=N` 줄 하나씩이다.
+합성 덱의 17 배치가 17장이 됐다. 레벨마다 한 장은 `layerid=N` 줄 하나씩이다. `jq`가 없으면 `--chips`의 텍스트를
+`awk`로 읽을 수 있다. 배치 줄은 `#K CHIP ID ROWS n at X,Y: X0,Y0,X1,Y1 um` 형식이다(배치가 둘 이상인 칩에만 나온다).
 
 ## 11. 해상도
 
@@ -267,12 +292,13 @@ floe2 render deck.jb --no-index --out x.png                                     
 ## 16. 보고서와 stdout
 
 `--report FILE`의 샷 항목: `bbox_um`, `pixel`, `ppu`, `ppu_y`, `layers`, `depth`, `chips`(chip, chip_off, fit_chip, on,
-placements, region_um), `tiles`(mosaic), `skipped_placements`, `summary_building`, `over_budget_pages`, `complete`,
+placements, region_um), `in_chip`(§8), `tiles`(mosaic), `skipped_placements`, `summary_building`, `over_budget_pages`, `complete`,
 `ms`, `out`. 덱 항목 `jobdeck`: `levels`, `view`(레벨 색), `window`, `chip_blocks`, `skipped`, `skipped_off`,
 `complete`. 상위: `source`, `dbu`, `cut_px`, `thin`, `density`, `occupancy`, `archival`, `legend`, `layer_colors`,
 `complete`.
 
 stdout 줄: `[jobdeck] window    : …`, `[jobdeck] blocks    : …`, `[floe2] NAME: region X0,Y0,X1,Y1 um (--fit-chip …)`,
+`[floe2] NAME: in chip NAME#K (CHIP …, level N, mag M, origin X,Y um): … chip um -> … um`,
 `[floe2] rendered FILE (WxH, bbox um) in T s`, `[floe2] WARNING: N jobdeck placement(s) not drawn: …`. 불완전이면
 마지막 줄이 `floe2: rendered incomplete - …  [exit 3]`이다.
 
@@ -280,10 +306,10 @@ stdout 줄: `[jobdeck] window    : …`, `[jobdeck] blocks    : …`, `[floe2] N
 
 없는 것(우회해야 한다):
 
-1. **칩 좌표 입력**: §8의 계산.
-2. **칩마다·레벨마다 자동으로 한 장씩**: §10의 batch 줄 생성.
-3. **`info --json --chips`**: `--json`과 `--chips`를 함께 주면 JSON 객체 뒤에 칩 표가 **텍스트로** 붙어 한 덩이로
-   파싱되지 않고, JSON 안에는 칩이 없다. 스크립트는 `--chips`의 텍스트를 읽는다(§10).
+1. ~~**칩 좌표 입력**~~: 0.12.435의 `--in-chip NAME[#K]`(§8)로 해결.
+2. **칩마다·레벨마다 자동으로 한 장씩**: §10의 batch 줄 생성(`info --chips --json` + `jq`).
+3. ~~**`info --json --chips`**~~: 0.12.435부터 JSON 문서 하나에 `chips`가 든다(§10). 전에는 JSON 뒤에 표가 텍스트로
+   붙었고 JSON 안에 칩이 없었다.
 4. **칩뷰 색**(칩마다 다른 색): 캡처는 레벨 색만이다.
 5. **미러·회전·톤 반전**: 옵션이 없다. 덱 포맷에서 해당 필드를 본 적이 없다(JOBDECK.ko.md §1 미확정).
 6. **눈에 보이는 스케일바·격자**: 없다. 축척은 메타데이터(`ppu`)이고, `fe-embed --ruler`도 메타데이터 주석이다.
@@ -305,3 +331,5 @@ stdout 줄: `[jobdeck] window    : …`, `[jobdeck] blocks    : …`, `[floe2] N
 2026-11-09, floe2 0.12.433(floe-index/renderd 0.12.370), 합성 덱 test.jb(`tools/validate_jobdeck.py`가 만드는 것)에
 위 케이스의 명령 70개 남짓을 release 바이너리로 실행해 종료 코드·그림 크기·보고서·메타데이터를 확인했다.
 같은 규칙을 게이트 `jobdeck`(ShotTests, ChipShotTests, LightSummaryTests)과 `floe2`(validate_floe2.py)가 지킨다.
+2026-11-09 0.12.435: §8의 `--in-chip`과 §10의 `info --chips --json`을 더해 같은 덱으로 확인했다(ChipShotTests의
+`test_in_chip_reads_the_region_in_the_placements_coordinates`, `test_info_json_carries_the_chips`).

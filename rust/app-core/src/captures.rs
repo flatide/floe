@@ -5,19 +5,20 @@ use crate::{
     check_cancelled,
     dataset::Dataset,
     jobdeck::{
-        chips::{ChipTable, Selection},
+        chips::{ChipFrame, ChipTable, Selection},
         plan::Analysis,
         window::DeckWindow,
     },
     render::{budget_fit, budget_fit_brief, require_complete, RenderOptions, RenderSession},
     shots::{
-        batch::{NamedCapture, TILE_NAMES},
+        batch::{Capture, NamedCapture, TILE_NAMES},
         mosaic::{self, Mosaic},
     },
     Error, ErrorKind, Result,
 };
 use floe_worker_client::{FrameFormat, Layers};
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
@@ -44,6 +45,8 @@ struct Plan<'a> {
     lacks: Vec<usize>,
     /// the chips the capture names, and the default region they frame
     chips: Option<Selection>,
+    /// `--in-chip`: the placement whose chip coordinates the region is in
+    in_chip: Option<ChipFrame>,
     region: [f64; 4],
     /// the tiles' frame (Shot::frame): the size drawn, and the size asked
     /// when the 16 Mpx limit reduced it - the report's `pixel_requested`
@@ -156,16 +159,42 @@ fn file_name(path: &Path) -> String {
         .unwrap_or_default()
 }
 
+/// A shot as it is drawn: its capture with the region in deck um (the
+/// `--in-chip` frame applied, else the capture as given), the chips its
+/// options name and the region.
+struct Framed<'a> {
+    capture: Cow<'a, Capture>,
+    chips: Option<Selection>,
+    in_chip: Option<ChipFrame>,
+    region: [f64; 4],
+}
+
 /// A shot's chips and region: the chips its options name (a jobdeck's chip
 /// table; a layout has none), and the region - the shot's own, else the
-/// extent of the chips named, else `default_box` (the whole source).
-fn shot_region(
-    named: &NamedCapture,
+/// `--in-chip` placement's extent, else the extent of the chips named, else
+/// `default_box` (the whole source). A region in a chip's coordinates
+/// (`--in-chip NAME#K`, jobdeck::chips::ChipFrame) is placed as the deck
+/// places that chip first, so the window, the tiles and the report see
+/// deck um.
+fn shot_region<'a>(
+    named: &'a NamedCapture,
     table: Option<&ChipTable>,
     source_name: &str,
     default_box: [f64; 4],
-) -> Result<(Option<Selection>, [f64; 4])> {
-    let capture = &named.capture;
+) -> Result<Framed<'a>> {
+    let mut capture = Cow::Borrowed(&named.capture);
+    let mut in_chip = None;
+    if let Some(token) = &named.capture.in_chip {
+        let Some(table) = table else {
+            return Err(Error::input(format!(
+                "{}: --in-chip names a jobdeck's placement; {source_name} is a layout",
+                named.name
+            )));
+        };
+        let frame = table.frame(token)?;
+        capture = Cow::Owned(named.capture.in_frame(frame.mag, frame.dx_um, frame.dy_um)?);
+        in_chip = Some(frame);
+    }
     let mut selection = None;
     if capture.names_chips() {
         let Some(table) = table else {
@@ -181,8 +210,11 @@ fn shot_region(
         )?);
     }
     let mut region = default_box;
-    if let Some(sel) = &selection {
-        if !capture.explicit_region() {
+    if !capture.explicit_region() {
+        if let Some(frame) = &in_chip {
+            // --in-chip alone frames its placement, as --fit-chip NAME#K
+            region = frame.extent_um;
+        } else if let Some(sel) = &selection {
             region = sel.region.ok_or_else(|| {
                 Error::input(format!(
                     "{}: the chips on have nothing placed (their sources are skipped: see 'skipped' above)",
@@ -191,7 +223,12 @@ fn shot_region(
             })?;
         }
     }
-    Ok((selection, region))
+    Ok(Framed {
+        capture,
+        chips: selection,
+        in_chip,
+        region,
+    })
 }
 
 /// The window of a run of captures over a deck (jobdeck::window, user
@@ -206,10 +243,7 @@ pub fn deck_window(
     shots: &[NamedCapture],
     cancelled: &AtomicUsize,
 ) -> Result<Option<DeckWindow>> {
-    if shots
-        .iter()
-        .any(|s| !(s.capture.explicit_region() || s.capture.names_chips()))
-    {
+    if shots.iter().any(|s| !s.capture.has_region()) {
         return Ok(None);
     }
     let Some(deck_box) = analysis.model.stats.bbox_um else {
@@ -222,8 +256,8 @@ pub fn deck_window(
     let mut rects = Vec::new();
     for named in shots {
         check_cancelled(cancelled)?;
-        let (_, region) = shot_region(named, Some(&table), &source_name, deck_box)?;
-        for tile in named.capture.tiles(region)? {
+        let framed = shot_region(named, Some(&table), &source_name, deck_box)?;
+        for tile in framed.capture.tiles(framed.region)? {
             rects.push(tile.bbox.expect("fitted tile"));
         }
     }
@@ -285,9 +319,10 @@ pub fn run_summary(
     // every shot's layers, chips and region before the worker starts: a
     // name that resolves to nothing stops the run here
     for named in shots {
-        let capture = &named.capture;
-        let (selection, region) =
-            shot_region(named, table.as_ref(), &source_name, dataset.bbox_um())?;
+        let framed = shot_region(named, table.as_ref(), &source_name, dataset.bbox_um())?;
+        // the capture with its region in deck um (--in-chip's frame applied)
+        let capture: &Capture = &framed.capture;
+        let (selection, region) = (framed.chips, framed.region);
         // the chips on are the view's L/D pairs: the visible set
         let layers = match selection.as_ref().and_then(|s| s.keys.as_ref()) {
             Some(keys) => Some(
@@ -355,6 +390,7 @@ pub fn run_summary(
             keep,
             lacks,
             chips: selection,
+            in_chip: framed.in_chip,
             region,
             frame: planned.frame,
         });
@@ -421,6 +457,17 @@ pub fn run_summary(
                     crate::program(),
                     plan.named.name,
                     table.describe(sel)
+                ));
+            }
+            // --in-chip: the placement whose coordinates the region was
+            // given in, and the region both ways (a mosaic's tiles in the
+            // report)
+            if let Some(frame) = &plan.in_chip {
+                log(&format!(
+                    "[{}] {}: {}",
+                    crate::program(),
+                    plan.named.name,
+                    frame.describe((!capture.is_mosaic()).then(|| plan.tiles[0].bbox.unwrap()))
                 ));
             }
             let (width, height) = (plan.frame.width, plan.frame.height);
@@ -506,6 +553,25 @@ pub fn run_summary(
                     "fit_chip": capture.fit_chip,
                     "region_um": if capture.explicit_region() { None } else { Some(plan.region) },
                     "placements": sel.placements});
+            }
+            if let Some(frame) = &plan.in_chip {
+                // the frame (chip, chip_id, rows, n, tc, levels, mag, dx_um,
+                // dy_um, extent_um) and the region drawn in the chip's um
+                let mut doc = serde_json::to_value(frame)
+                    .map_err(|e| Error::input(format!("report: {e}")))?;
+                if capture.is_mosaic() {
+                    doc["tiles_chip_um"] = TILE_NAMES
+                        .iter()
+                        .zip(&plan.tiles)
+                        .map(|(tag, tile)| {
+                            (tag.to_string(), serde_json::json!(frame.chip_rect(tile.bbox.unwrap())))
+                        })
+                        .collect::<serde_json::Map<_, _>>()
+                        .into();
+                } else {
+                    doc["bbox_chip_um"] = serde_json::json!(frame.chip_rect(plan.tiles[0].bbox.unwrap()));
+                }
+                row["in_chip"] = doc;
             }
             let staged = if let Some(canvas) = canvas {
                 let (rgba, info) = canvas.finish(capture.line, &capture.line_color, cancelled)?;

@@ -3490,6 +3490,197 @@ class ChipShotTests(unittest.TestCase):
         self.assertEqual((out / "b2.png").read_bytes(),
                          (self.out / "b2.png").read_bytes())
 
+    def test_in_chip_reads_the_region_in_the_placements_coordinates(self):
+        # --in-chip NAME[#K] (user 2026-11-09: "칩 좌표 옵션"): the region's
+        # lengths are the chip's own um, placed as the deck places that one
+        # placement - X = dx + mag * x, W = mag * w (jobdeck_expected.json's
+        # mag/dx/dy); ID002 ROWS 1 on level 2 places chipB.oas at mag 2
+        from floe_oracle.jobdeck.chips import box_text
+        out = self.out
+        mag, dx, dy = 2.0, 43020.0, 88000.0
+        self.assertIn({"chip": "ID002", "idx": 2, "row": 0, "mag": mag,
+                       "dx": dx, "dy": dy}, EXPECTED["placements"])
+        deck_box = (dx + mag * 100, dy + mag * 200, dx + mag * 300,
+                    dy + mag * 400)
+        res = self.render("inchip.png", "--in-chip", "2:chipB.oas#1",
+                          "--bbox", "100,200,300,400", "--px", "200",
+                          "--report", out / "inchip.json")
+        self.assertIn("inchip: in chip 2:chipB.oas#1 (CHIP ID002 ROWS 1, "
+                      "level 2, mag 2, origin 43020,88000 um): "
+                      "100,200,300,400 chip um -> %s um" % box_text(deck_box),
+                      res.stdout)
+        # the capture's window is the region placed: the placements it
+        # reaches, of the deck's 17
+        reached = [k for k, b in self.hand.items()
+                   if b[0] <= deck_box[2] and b[2] >= deck_box[0]
+                   and b[1] <= deck_box[3] and b[3] >= deck_box[1]]
+        self.assertIn("%d of 17 placement(s) in the capture's region"
+                      % len(reached), res.stdout)
+        self.render("deckbox.png", "--bbox", box_text(deck_box), "--px",
+                    "200")
+        self.assertEqual((out / "inchip.png").read_bytes(),
+                         (out / "deckbox.png").read_bytes(),
+                         "the same picture as the deck-um region")
+        shot = json.loads((out / "inchip.json").read_text())["shots"][0]
+        self.assertEqual(shot["bbox_um"], list(deck_box))
+        ic = shot["in_chip"]
+        self.assertEqual((ic["chip"], ic["chip_id"], ic["rows"], ic["n"],
+                          ic["tc"], ic["levels"], ic["mag"], ic["dx_um"],
+                          ic["dy_um"]),
+                         ("2:chipB.oas#1", "ID002", 1, 1, "chipB.oas", [2],
+                          mag, dx, dy))
+        self.assertEqual(ic["bbox_chip_um"], [100, 200, 300, 400])
+        self.assertEqual(ic["extent_um"], list(self.h([("ID002", 2, 0)])))
+        # --at/--size in the chip's um: the size scales with mag
+        self.render("at.png", "--in-chip", "2:chipB.oas#1", "--at",
+                    "250,250", "--size", "100,100", "--px", "200")
+        self.render("at_deck.png", "--at", "%s,%s" % (dx + mag * 250,
+                                                       dy + mag * 250),
+                    "--size", "200,200", "--px", "200")
+        self.assertEqual((out / "at.png").read_bytes(),
+                         (out / "at_deck.png").read_bytes())
+        # alone: the placement itself, as --fit-chip frames it
+        self.render("alone.png", "--in-chip", "2:chipB.oas#2", "--px", "200")
+        self.render("fit2.png", "--fit-chip", "2:chipB.oas#2", "--px", "200")
+        self.assertEqual((out / "alone.png").read_bytes(),
+                         (out / "fit2.png").read_bytes())
+        # --corners alone: the placement's corners, the tiles' size in chip um
+        self.render("quad_ic.png", "--in-chip", "2:chipB.oas#1", "--corners",
+                    "--size", "100,100", "--px", "50x50", "--report",
+                    out / "quad_ic.json")
+        shot = json.loads((out / "quad_ic.json").read_text())["shots"][0]
+        x0, y0, x1, y1 = self.h([("ID002", 2, 0)])
+        self.assertEqual(shot["tiles"]["tl"], [x0, y1 - 200, x0 + 200, y1])
+        self.assertEqual(shot["in_chip"]["tiles_chip_um"]["br"],
+                         [(x1 - dx) / mag - 100, (y0 - dy) / mag,
+                          (x1 - dx) / mag, (y0 - dy) / mag + 100])
+        self.assertNotIn("bbox_chip_um", shot["in_chip"])
+        # a batch reads every line's coordinates in the command line's
+        # frame; a line's own in_chip or fit_chip replaces it, in_chip= none
+        mag5, dx5, dy5 = 4.0, 43020.0, 88000.0
+        self.assertIn({"chip": "ID002", "idx": 5, "row": 0, "mag": mag5,
+                       "dx": dx5, "dy": dy5}, EXPECTED["placements"])
+        batch = out / "inchip.txt"
+        batch.write_text("a bbox=100,200,300,400\n"
+                         "b in_chip=5:chipB.oas#1 bbox=100,200,300,400\n"
+                         "c fit_chip=ID002#2\n"
+                         "d in_chip= bbox=%s\n" % box_text(deck_box))
+        bdir = out / "inchip_batch"
+        run_floe2("render", self.dir / "test.jb", "--in-chip", "2:chipB.oas#1",
+                  "--batch", batch, "--px", "200", "--out", bdir, "--report",
+                  bdir / "r.json", env=self.env, ok=0)
+        rows = {r["name"]: r for r in json.loads(
+            (bdir / "r.json").read_text())["shots"]}
+        self.assertEqual(rows["a"]["bbox_um"], list(deck_box))
+        self.assertEqual(rows["a"]["in_chip"]["chip"], "2:chipB.oas#1")
+        self.assertEqual(rows["b"]["bbox_um"],
+                         [dx5 + mag5 * 100, dy5 + mag5 * 200,
+                          dx5 + mag5 * 300, dy5 + mag5 * 400])
+        self.assertEqual(rows["b"]["in_chip"]["levels"], [5])
+        self.assertEqual(rows["c"]["bbox_um"],
+                         list(self.h([("ID002", i, 1) for i in (1, 2, 5)])))
+        self.assertNotIn("in_chip", rows["c"])
+        self.assertNotIn("in_chip", rows["d"])
+        self.assertEqual(rows["d"]["bbox_um"], list(deck_box))
+        self.assertEqual((bdir / "a.png").read_bytes(),
+                         (out / "inchip.png").read_bytes())
+        # refused before anything is drawn: a chip placed more than once
+        # without #K, one its levels place differently without the level,
+        # a #K past its placements, with --fit-chip, a layout, a region
+        # that reaches no placement
+        res = self.render("x.png", "--in-chip", "chipB.oas", "--bbox",
+                          "0,0,1,1", ok=1)
+        self.assertIn("chip 'chipB.oas': --in-chip takes one placement - it "
+                      "has 3 (#1..#3; `floe2 info DECK --chips` lists them): "
+                      "chipB.oas#K", res.stderr)
+        res = self.render("x.png", "--in-chip", "chipB.oas#1", "--bbox",
+                          "0,0,1,1", ok=1)
+        self.assertIn("chip 'chipB.oas#1': its levels place it differently - "
+                      "level 2 chipB.oas mag 2 at 43020,88000; level 5 "
+                      "chipB.oas mag 4 at 43020,88000 (um); give the level: "
+                      "N:NAME#K", res.stderr)
+        res = self.render("x.png", "--in-chip", "2:chipB.oas#4", "--bbox",
+                          "0,0,1,1", ok=1)
+        self.assertIn("it has 3 placements (#1..#3", res.stderr)
+        res = self.render("x.png", "--in-chip", "2:chipB.oas#1", "--fit-chip",
+                          "ID001", ok=1)
+        self.assertIn("--fit-chip frames another region - give one",
+                      res.stderr)
+        res = run_floe2("render", self.dir / "chipA.oas", "--in-chip", "x",
+                        "--bbox", "0,0,1,1", "--out", out / "x.png",
+                        env=self.env, ok=1)
+        self.assertIn("--in-chip names a jobdeck's placement", res.stderr)
+        res = self.render("x.png", "--in-chip", "2:chipB.oas#1", "--bbox",
+                          "100000,100000,100001,100001", ok=1)
+        self.assertIn("no placement of the levels loaded is in the capture's "
+                      "region", res.stderr)
+        self.assertFalse((out / "x.png").exists())
+        # a chip placed alike on its levels needs no level: chipA.oas#1 is
+        # ID001 ROWS 1 on levels 1 and 2 (mag 4 at 41020,80020 both); the
+        # CHIP id names its mark.oas on level 3 too (mag 0.2), so ID001#1
+        # alone is refused
+        res = self.render("alike.png", "--in-chip", "chipA.oas#1", "--chip",
+                          "chipA.oas", "--bbox", "0,0,500,500", "--px", "100",
+                          "--report", out / "alike.json")
+        ic = json.loads((out / "alike.json").read_text())["shots"][0]["in_chip"]
+        self.assertEqual((ic["levels"], ic["mag"], ic["dx_um"], ic["dy_um"]),
+                         ([1, 2], 4.0, 41020.0, 80020.0))
+        self.assertIn("level 1,2, mag 4, origin 41020,80020 um", res.stdout)
+        res = self.render("x.png", "--in-chip", "ID001#1", "--bbox",
+                          "0,0,1,1", ok=1)
+        self.assertIn("level 1,2 chipA.oas mag 4 at 41020,80020; level 3 "
+                      "mark.oas mag 0.2 at 45010,85110 (um)", res.stderr)
+
+    def test_info_json_carries_the_chips(self):
+        # info --json --chips (2026-11-09): one JSON document with the chips
+        # as `chips` - before, the table followed the JSON as text and the
+        # JSON had no chips
+        res = run_floe2("info", self.dir / "test.jb", "--json", "--chips",
+                        env=self.env, ok=0)
+        doc = json.loads(res.stdout)
+        self.assertNotIn("chip rows", res.stdout)
+        chips = doc["chips"]
+        self.assertEqual(chips["levels"], [1, 2, 3, 5])
+        rows = {(r["level"], r["name"]): r for r in chips["rows"]}
+        self.assertEqual(sorted(rows), [(1, "chipA.oas"), (2, "chipA.oas"),
+                                        (2, "chipB.oas"), (3, "mark.oas"),
+                                        (5, "chipB.oas")])
+        mark = rows[(3, "mark.oas")]
+        self.assertEqual((mark["key"], mark["level_name"], mark["source"],
+                          mark["chips"]),
+                         ("3/2", "ALIGN", "mark.oas", ["ID001", "ID003"]))
+        marks = [("ID001", 3, 0), ("ID001", 3, 1), ("ID003", 3, 0)]
+        self.assertEqual(mark["extent_um"], list(self.h(marks)))
+        self.assertEqual([(p["n"], p["chip"], p["rows"])
+                          for p in mark["placements"]],
+                         [(1, "ID001", 1), (2, "ID001", 2), (3, "ID003", 1)])
+        second = mark["placements"][1]
+        self.assertEqual((second["mag"], second["dx_um"], second["dy_um"]),
+                         (0.2, 55010.0, 85110.0))
+        self.assertEqual(second["at_um"], [55020, 85120])
+        self.assertEqual(second["bbox_um"], list(self.h(marks[1:2])))
+        # every placement's frame is the hand-computed one
+        seen = 0
+        for r in chips["rows"]:
+            for p in r["placements"]:
+                e = [q for q in EXPECTED["placements"]
+                     if (q["chip"], q["idx"], q["row"]) ==
+                     (p["chip"], r["level"], p["rows"] - 1)]
+                self.assertEqual(len(e), 1, (r["level"], p))
+                self.assertEqual((p["mag"], p["dx_um"], p["dy_um"]),
+                                 (e[0]["mag"], e[0]["dx"], e[0]["dy"]))
+                seen += 1
+        self.assertEqual(seen, len(EXPECTED["placements"]))
+        # --json alone has no chips; a level load lists its rows alone
+        doc = json.loads(run_floe2("info", self.dir / "test.jb", "--json",
+                                   env=self.env, ok=0).stdout)
+        self.assertNotIn("chips", doc)
+        doc = json.loads(run_floe2("info", self.dir / "test.jb", "--level",
+                                   "2", "--json", "--chips", env=self.env,
+                                   ok=0).stdout)
+        self.assertEqual([r["name"] for r in doc["chips"]["rows"]],
+                         ["chipA.oas", "chipB.oas"])
+
     def test_info_lists_the_chips(self):
         from floe_oracle.jobdeck.chips import box_text
         res = run_floe2("info", self.dir / "test.jb", "--chips",
