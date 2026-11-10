@@ -162,6 +162,36 @@ fn file_name(path: &Path) -> String {
 /// A shot as it is drawn: its capture with the region in deck um (the
 /// `--in-chip` frame applied, else the capture as given), the chips its
 /// options name and the region.
+/// Whether a deck capture's legend lists the rows placed in its frame
+/// alone (`FLOE_LEGEND_IN_VIEW=off`: no - every row of the levels loaded,
+/// as before 0.12.438).
+fn legend_in_view() -> bool {
+    std::env::var("FLOE_LEGEND_IN_VIEW").map_or(true, |v| v != "off")
+}
+
+/// Of a deck, the view's L/D pairs with a placement in the capture's frame -
+/// the tiles' regions (a mosaic's four together), judged as the capture
+/// window judges what it reads (DeckWindow::reaches: a touched edge counts,
+/// an unknown extent always) - for the legend, which lists these rows
+/// alone: a chip none of whose placements is in the frame, or a level none
+/// of whose is, is not in the picture (user 2026-11-10: "칩 모드로 캡쳐할
+/// 경우 레전드에 해당 레벨 칩이 모두 나오는데 현재 캡쳐된 화면에 있는 것들만
+/// 레전드에 포함되게"). None: every row of the load - a layout, or
+/// FLOE_LEGEND_IN_VIEW=off.
+fn placed_pairs(
+    dataset: &Dataset,
+    tiles: &[crate::shots::Shot],
+) -> Result<Option<BTreeSet<(u32, u32)>>> {
+    let Dataset::Deck(deck) = dataset else {
+        return Ok(None);
+    };
+    if !legend_in_view() {
+        return Ok(None);
+    }
+    let window = DeckWindow::new(tiles.iter().map(|t| t.bbox.unwrap()))?;
+    deck.placed_pairs(&window).map(Some)
+}
+
 struct Framed<'a> {
     capture: Cow<'a, Capture>,
     chips: Option<Selection>,
@@ -473,14 +503,17 @@ pub fn run_summary(
             let (width, height) = (plan.frame.width, plan.frame.height);
             // --legend: the layers this shot draws, as the picture paints them
             // - the tiles' (the chips on, with --chip; JOBDECK-CAPTURE §17
-            // item 8 before 0.12.436: every row of the levels loaded)
+            // item 8 before 0.12.436: every row of the levels loaded), and of
+            // a deck the rows with a placement in the frame (placed_pairs)
             let legend = legend_styles
                 .as_ref()
                 .map(|styles| {
+                    let placed = placed_pairs(dataset, &plan.tiles)?;
                     crate::legend::lines(
                         dataset,
                         styles,
                         &dataset.resolve_layers(plan.tiles[0].layers.as_deref())?,
+                        placed.as_ref(),
                     )
                 })
                 .transpose()?;

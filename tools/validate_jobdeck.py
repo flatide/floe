@@ -3744,6 +3744,76 @@ class ChipShotTests(unittest.TestCase):
         self.assertIn("chipA.oas is a layout", res.stderr)
         self.assertFalse((out / "mode_bad.png").exists())
 
+
+    def test_a_legend_lists_the_rows_placed_in_the_frame(self):
+        # the legend is what the frame shows (user 2026-11-10: "현재 캡쳐된
+        # 화면에 있는 것들만 레전드에 포함되게"): of a deck, the rows with a
+        # placement in the capture's region - judged as the capture window
+        # judges what it reads - and not every chip of the levels loaded;
+        # FLOE_LEGEND_IN_VIEW=off lists them all, as before 0.12.438
+        out = self.out
+
+        def legend(name):
+            dump = run_floe2("fe-embed", "--dump", out / name, ok=0).stdout
+            return [x[len("legend="):].split()[3:] for x in dump.split("\n")
+                    if x.startswith("legend=")]
+
+        def shot(name, *args, env=None):
+            rep = out / (name + ".json")
+            res = run_floe2("render", self.dir / "test.jb", "--level", "2,3",
+                            "--px", "100", "--legend", *args, "--out",
+                            out / name, "--report", rep,
+                            env=env or self.env, ok=0)
+            doc = json.loads(rep.read_text())["shots"][0]
+            # the report's legend is the metadata's
+            self.assertEqual([x.split()[3:] for x in doc["legend"]],
+                             legend(name))
+            return res
+
+        # levels 2 and 3: chipA.oas 2/1 (two placements, 41020..59020 x
+        # 80020..90220 um), chipB.oas 2/3 (three, 43020..65020 x
+        # 88000..90000) and mark.oas 3/2 (three 20 um marks); a region inside
+        # chipA's first placement, under chipB's row and left of the marks
+        a = ("--bbox", "41500,80500,44500,84500")
+        shot("placed_chip.png", "--mode", "chip", *a)
+        self.assertEqual(legend("placed_chip.png"), [["chipA.oas", "2/1"]])
+        shot("placed_level.png", *a)
+        self.assertEqual(legend("placed_level.png"), [["VIA1", "2/0"]])
+        # chipB's third placement alone (right of chipA's second)
+        shot("placed_b.png", "--mode", "chip", "--bbox",
+             "63500,88500,64500,89500")
+        self.assertEqual(legend("placed_b.png"), [["chipB.oas", "2/3"]])
+        # a mark alone: level 3's chip row, the level view its head
+        m = ("--bbox", "45000,94980,45040,95020")
+        shot("placed_mark.png", "--mode", "chip", *m)
+        self.assertEqual(legend("placed_mark.png"), [["mark.oas", "3/2"]])
+        shot("placed_mark_level.png", *m)
+        self.assertEqual(legend("placed_mark_level.png"), [["ALIGN", "3/0"]])
+        # a region touching an extent's corner counts, as the window reads it
+        shot("placed_edge.png", "--mode", "chip", "--bbox",
+             "40000,79000,41020,80020")
+        self.assertEqual(legend("placed_edge.png"), [["chipA.oas", "2/1"]])
+        # a mosaic: the four tiles' regions together (tl and bl in chipA's
+        # first placement, tr in chipB's third, br in nothing)
+        shot("placed_mosaic.png", "--mode", "chip", "--corners",
+             "41500,80500,64500,89500", "--size", "1000,1000")
+        self.assertEqual(legend("placed_mosaic.png"),
+                         [["chipA.oas", "2/1"], ["chipB.oas", "2/3"]])
+        # the chips on are listed when in the frame: chipB on over chipA's
+        # region lists nothing - the picture is empty, a note says so
+        res = shot("placed_off.png", "--mode", "chip", "--chip",
+                   "2:chipB.oas", *a)
+        self.assertEqual(legend("placed_off.png"), [])
+        self.assertIn("no layer to list - no legend", res.stdout)
+        # FLOE_LEGEND_IN_VIEW=off: every row of the levels loaded, as before
+        off = dict(self.env, FLOE_LEGEND_IN_VIEW="off")
+        shot("placed_all.png", "--mode", "chip", *a, env=off)
+        self.assertEqual(legend("placed_all.png"),
+                         [["chipA.oas", "2/1"], ["chipB.oas", "2/3"],
+                          ["mark.oas", "3/2"]])
+        shot("placed_all_level.png", *a, env=off)
+        self.assertEqual(legend("placed_all_level.png"),
+                         [["VIA1", "2/0"], ["ALIGN", "3/0"]])
     def test_info_json_carries_the_chips(self):
         # info --json --chips (2026-11-09): one JSON document with the chips
         # as `chips` - before, the table followed the JSON as text and the

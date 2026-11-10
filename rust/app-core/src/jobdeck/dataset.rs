@@ -6,7 +6,7 @@ use super::{
     plan::{Analysis, AnalysisOptions},
     spec::{self, CompositeSpec},
     view::{LayerMetadata, ViewRows},
-    window::{DeckReads, WindowInfo},
+    window::{DeckReads, DeckWindow, WindowInfo},
 };
 use crate::{
     cache,
@@ -260,6 +260,32 @@ impl DeckSnapshot {
     }
     pub fn resolve_layers(&self, spec: Option<&str>) -> Result<Layers> {
         self.rows.resolve_layers(&self.analysis.deck, spec)
+    }
+    /// The view's L/D pairs with a placement `window` reaches - what a
+    /// capture of that window shows of the deck, for its legend
+    /// (captures.rs placed_pairs; user 2026-11-10: "현재 캡쳐된 화면에
+    /// 있는 것들만 레전드에 포함되게"). A placement counts as the window
+    /// reads it (DeckWindow::reaches: a touched edge counts, an unknown
+    /// extent always).
+    pub fn placed_pairs(&self, window: &DeckWindow) -> Result<BTreeSet<(u32, u32)>> {
+        let pairs: BTreeMap<usize, (u32, u32)> = self
+            .rows
+            .rows
+            .iter()
+            .map(|r| Ok((r.out, r.native_pair()?)))
+            .collect::<Result<_>>()?;
+        self.analysis
+            .model
+            .placements
+            .iter()
+            .filter(|p| window.reaches(&p.bbox_um))
+            .map(|p| {
+                pairs
+                    .get(&self.rows.output_layer(p)?)
+                    .copied()
+                    .ok_or_else(|| Error::input("placement has no deck view row"))
+            })
+            .collect()
     }
     pub fn skipped(&self) -> &[Skipped] {
         &self.metadata.jobdeck.skipped

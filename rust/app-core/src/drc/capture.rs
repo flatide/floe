@@ -492,7 +492,7 @@ pub fn run(
     // the layers' legend (crate::legend, from the styles the frames are
     // drawn with): an isolated capture's, every layer's with --legend
     let legend = if options.legend || matches!(visible, Layers::Only(_)) {
-        let lines = crate::legend::lines(dataset, &dataset.styles(false)?, &visible)?;
+        let lines = crate::legend::lines(dataset, &dataset.styles(false)?, &visible, None)?;
         (!lines.is_empty()).then_some(lines)
     } else {
         None
