@@ -310,6 +310,9 @@ python -m floe render chip.oas --drc results.db \
   `Conflict only needs a reviewer snapshot: …`, 룰을 고르지 않았으면 `Conflict only: select a rule.`,
   준비 중 `Conflict only: a / b processed`, 끝나면 `Conflict only: N errors in this scope · snapshot
   <시각>`, 실패는 `Conflict filter failed: …`.
+  **`Conflict only` 체크는 0.12.444부터 패널에 나오지 않는다**(사용자 2026-11-11: "Conflict only는
+  우선 숨기고(해당 기능 오픈은 추후에 할 예정임)"). 필터와 그 상태 줄, 공동 검토 창의 집계는
+  그대로 있고, 체크를 필터 줄에 다시 넣으면 열린다.
 - **DRC 재수행 후 검토 승계**(DRC 메뉴 `review from previous run…`; app-core
   `drc::team::migrate`·`drc::matcher`): 새 결과를 연 뒤 이전 `.db` 또는 `.tray`를
   고른다. 이전 결과의 내 검토 파일(review SQLite·waive)을 자동으로 찾으며, 보관한
@@ -405,6 +408,11 @@ python -m floe render chip.oas --drc results.db \
   `off`에서는 사전 계산을 시작하지 않고 `CD grouped` 항목도 표시하지 않는다.
 - All/Not Waived/Waived 콤보: status 기준. DB를 열 때 기본값은 Not Waived이며, All은 에러 0 룰도 표시한다.
 - 세 필터는 **교집합**. 룰 선택 = 열기(한 번에 한 룰).
+- **필터 줄은 한 줄이다**(0.12.444, 사용자 2026-11-11: "in view와 selected 간격도 너무 큼 … 크기를
+  줄여서 한줄에 나올 수 있게"). 패널 맨 아래에 `in view`·`selected` 체크와 유형 콤보, waive 콤보
+  넷이 왼쪽부터 제 폭으로 6px 간격을 두고 선다. 그 전에는 다섯 컨트롤이 두 줄로 나뉘고 패널 폭에
+  맞춰 벌어졌다. 패널이 넷의 폭보다 좁으면 예전처럼 줄을 바꾼다(글자를 줄이거나 자르지 않는다).
+- **패널의 버튼은 낮다**(0.12.444): 페이지 화살표, CD 컨트롤, 필터 콤보가 글자 한 줄 높이다.
 
 **사용자 클러스터**(2026-10-05) — DB 옆 `results.db.clusters`가
 있으면 자동으로 읽는다. 다른 경로의 파일이나 수정한 파일은 DRC 메뉴
@@ -437,7 +445,8 @@ python -m floe render chip.oas --drc results.db \
 문법과 성능 계약은 [포맷 규격](SPEC-FORMATS.ko.md)의 `<db>.clusters` 절에 정의한다.
 
 **에러 그리드** — 룰-로컬 번호(1부터; Calibre 전역 번호는 상세의
-`#로컬(전역)`), 1000셀 페이지(◀ 페이지/전체 ▶), pane 폭에 맞춘
+`#로컬(전역)`), 1000셀 페이지(그리드 **아래**의 `◀ 1/3 ▶`; 0.12.444, 사용자 2026-11-11.
+그 전에는 그리드 위에 `◀ 1 / 3 ▶`), pane 폭에 맞춘
 열 재배치, 숫자도 상태색(red=not waived / green=waived).
 
 **에러 조작**
@@ -454,7 +463,9 @@ python -m floe render chip.oas --drc results.db \
 | 캔버스 마커 더블클릭 | **번호 더블클릭과 동일** — 점프(30% 프레이밍)+CD 룰러+레이어 격리, 그리드 동행 |
 | `e` + 두 클릭 | 박스 선택(Esc까지 유지; Shift 추가, Ctrl 토글; 룰/클러스터/CD 그룹 전체, 개수 제한 없음; 범위별 보존; gold 표시) |
 | Ctrl/Shift + 셀 클릭 | 선택 추가/토글 |
-| 우클릭 | waive/unwaive 메뉴(gold 선택 시 일괄) — [status] 제자리 기록, 카운트·색·필터 즉시 연동 |
+| 우클릭 | waive/unwaive 메뉴(gold 선택 시 일괄) — [status] 제자리 기록, 카운트·색·필터 즉시 연동. 맨 아래 `SVRF info…`는 그 에러의 SVRF 정보 창을 연다(0.12.444, §4) |
+| 그룹 목록 우클릭 | `All errors`나 그룹 행의 에러 전체에 select all / deselect all / waive all / unwaive all / mark not for review all / clear not for review all (0.12.444, §4 측정 차이 그룹) |
+| `i` | SVRF 정보 창 열기/닫기(0.12.444, §4) |
 | `w` | **waive 토글** — gold 선택이 있으면 선택 전체 일괄(전부 waived → 해제, 혼합/미waive → 전부 waive), 없으면 현재 에러(단클릭/./, 포커스 우선, 없으면 점프 위치). 우클릭 메뉴와 동일 경로로 기록·갱신, v1은 pack 안내 |
 | 더블클릭 상세 | note 있는 에러는 하단 상세 패널에 `note:` 줄 표시 |
 | 체크박스 | in view(공간 쿼리, 뷰 추적) · selected(선택만) |
@@ -507,8 +518,9 @@ python -m floe render chip.oas --drc results.db \
 실제 칩의 꼭짓점 수, 파일 저장장치, CPU 및 화면 크기에 따라 달라진다.
 
 **상세 pane** — `#로컬(전역) [상태]` + 룰 텍스트 + edge/polygon
-좌표(pathname/title 줄 제외). rules.json이 붙으면 §4의 메타 블록
-추가. 좁은 pane에서는 줄바꿈(내용 잘림 금지 규약).
+좌표(pathname/title 줄 제외). rules.json이 붙어도 여기에는 `SVRF: applied …` 한 줄만
+있고, §4의 메타 블록은 **SVRF 정보 창**에서 본다(0.12.444; 그 전에는 에러를 고를 때마다
+이 pane에 붙었다). 좁은 pane에서는 줄바꿈(내용 잘림 금지 규약).
 
 ## 4. SVRF 룰 메타데이터 (.rules.json) — waive 판단 보조
 
@@ -541,7 +553,19 @@ python -m floe render chip.oas --drc results.db \
   `--scan`(양쪽 #IFDEF 분기 워크, 인벤토리 출력)으로 구멍 확인.
 
 **뷰어 연동**: db 옆 `<덱 베이스네임>.rules.json` 자동 부착(수동
-DRC 메뉴 load SVRF rules…), 상세에 추가되는 블록:
+DRC 메뉴 load SVRF rules…). 에러마다의 메타 블록은 **SVRF 정보 창**에 나온다(0.12.444,
+사용자 2026-11-11: "하단의 룰 설명 부분에서 에러를 선택했을때 SVRF가 적용된 경우 추가로 붙게
+되는 constraint나 레이어 관련 정보를 제거하고 별도 팝업으로 확인"). 여는 길은 셋이다:
+`i` 키, DRC 메뉴 `SVRF info…`, 에러 그리드 우클릭 메뉴의 `SVRF info…`.
+
+- 창은 막지 않는다. 열어 둔 채 에러를 고르거나 `.` / `,`로 넘기면 상세 pane의 에러를 따라
+  바뀐다. 창에 포커스가 있어도 뷰어의 키가 그대로 듣는다. Esc나 `i`로 닫는다.
+- 첫 줄은 `룰 이름  #로컬(전역)`이고 그 아래가 블록이다. 에러 없이 룰만 골랐으면 측정 줄을
+  뺀 나머지(constraint, layers, gds, derivation)가 나온다. 메타데이터에 없는 룰이면 그 사실을
+  말한다(`SVRF: not loaded`, `SVRF: no matching rule in loaded metadata …`).
+- 처음 열리는 자리는 주 창의 왼쪽 아래, 상세 pane 위다. 보고 있는 에러를 가리지 않는다.
+
+블록:
 ```
 constraint: ENC via1_drawn m6_drawn > 0 < 0.105
 measured: 0.03990 um vs < 0.10500 · Δ 0.06510 (62.00000%)
@@ -588,9 +612,17 @@ area와 치수 검사가 섞인 룰은 면적 라벨과 기존 길이 룰러를 
 
 **측정 차이 그룹**(2026-10-05) — SVRF 메타데이터가 있는 룰을
 선택하면 에러 그리드 위에 **CD 부분**이 나타나고 `absolute` 그룹화가 자동으로
-활성화된다. CD 부분은 세 줄이다. 기준 콤보(`absolute`·`ratio`·`off`)와 `step` 버튼이
-왼쪽에 제 폭으로 붙어 선 컨트롤 한 줄, 그룹 목록, 목록의 페이지 줄(`◀ groups 1 / 1 · 5
-groups · auto step 0.00200 ▶`). 콤보에서 `ratio`로 기준을 바꾸거나 `off`로 그룹화를 끈다.
+활성화된다. CD 부분은 기준 콤보(`absolute`·`ratio`·`off`)와 `step` 버튼이
+왼쪽에 제 폭으로 붙어 선 컨트롤 한 줄과 그 아래 그룹 목록이다. 콤보에서 `ratio`로 기준을
+바꾸거나 `off`로 그룹화를 끈다.
+그룹 목록 아래의 페이지 줄 `◀ 1/3 ▶`은 그룹이 50개를 넘어 **두 페이지 이상일 때만** 나온다
+(0.12.444, 사용자 2026-11-11: "1페이지 이상이 있을때만 … 버튼의 높이를 줄이고 표시도 1/3
+형태로"). 0.12.443까지는 `◀ groups 1 / 1 · 5 groups · auto step 0.00200 ▶`이 늘 있었다. 그
+줄이 말하던 그룹 수·간격·에지 길이 그룹 수·추정 CD 수는 `All errors` 행의 툴팁이 말한다
+(`All errors · 5 groups · auto step 0.00200 · 20 estimated (all statuses)`).
+그룹 목록과 에러 그리드 사이의 선을 끌어 **둘의 높이를 나눈다**(0.12.444). 처음에는 그룹
+목록이 108px(다섯 줄쯤)이고 두 줄 아래로는 줄지 않는다. CD 부분이 없는 룰에서는 그리드가
+전체 높이를 쓴다.
 (0.12.443, 사용자 2026-11-10: "CD 델타 컨트롤 각 항목이 너무 자리를 많이 차지하니
 absolute/ratio 콤보박스의 문구를 단순화하여 크기를 줄이고 step 입력창을 제거하고 set step
 버튼을 step 으로 변경하고 누르면 step을 입력받는 작은 모달이 뜨도록". 그 전에는 콤보
@@ -600,7 +632,7 @@ absolute/ratio 콤보박스의 문구를 단순화하여 크기를 줄이고 ste
 
 - **CD 그룹이 없는 룰에는 CD 부분이 없다**(0.12.443, 같은 요청: "CD 그룹이 없는 에러는
   CD 델타 컨트롤과 그룹 목록을 모두 제거"). 컨트롤 줄도 그룹 목록도 나오지 않고 에러
-  페이지 줄(`◀ 1 / 1 ▶`)이 그리드 쪽의 첫 줄이 된다. 해당하는 경우:
+  그리드가 그 자리까지 올라온다. 해당하는 경우:
   룰을 고르지 않았을 때, SVRF 메타데이터가 없거나 그 룰이 매칭되지 않았을 때, 파싱된
   측정 조건이 없거나 그 조건으로 측정할 수 없을 때, 측정된 에러가 하나도 없어 목록에
   `Unmeasurable`뿐일 때, 에러가 0개일 때. 클러스터를 골랐으면 그 클러스터의 에러로 판단한다.
@@ -615,8 +647,11 @@ absolute/ratio 콤보박스의 문구를 단순화하여 크기를 줄이고 ste
 - `off`에서는 나열할 그룹이 없으므로 목록과 페이지 줄은 숨기고 컨트롤 줄만 남긴다. 다시
   켜는 길이기 때문이다. 그 컨트롤 줄도 측정 조건과 에러가 있고 그룹이 없다고 확인된 적이
   없는 룰에서만 나온다. `step` 버튼은 꺼져 있다.
-- 그룹화가 실패하면 CD 부분을 남기고 페이지 줄에 `CD grouping failed: …`를 적는다(상태
-  줄에도 나온다).
+- 그룹화가 실패하면 CD 부분을 남기고 상태 줄에 `CD grouping failed: …`를 적는다. 같은
+  문구가 `All errors` 행의 툴팁에 남는다.
+- 측정이 0.7초를 넘기면 상태 줄에 `CD groups: CD measurement a / b …`로 어디까지 왔는지
+  말하고, 끝나면 `CD groups: N groups · auto step …`으로 마친다. 금방 끝나는 측정은 아무 말도
+  하지 않는다(0.12.444; 그 전에는 목록 아래 줄에 나왔다).
 - 숨긴 상태에 있던 안내 문구 셋은 이제 나오지 않는다: `select a rule for CD groups`,
   `grouping off`, `load matching SVRF metadata for CD groups`. 룰에 SVRF가 적용됐는지와
   측정 조건이 있는지는 룰 이름의 `✓`, 툴팁, 룰 상세의 `SVRF: …` 줄이 말한다.
@@ -628,14 +663,13 @@ absolute/ratio 콤보박스의 문구를 단순화하여 크기를 줄이고 ste
   길이 계열은 `um`, 면적은 `um2`, 비율은 `%`로 표시한다.
 - CD와 한계값을 먼저 소수점 다섯 자리로 반올림한 뒤 차이와 비율을
   계산한다. 반올림은 `ROUND_HALF_UP`(정확히 절반이면 0에서 멀어지는
-  방향)이며 비율도 다섯 자리로 반올림한다. 상세 창과 그룹이 같은
+  방향)이며 비율도 다섯 자리로 반올림한다. SVRF 정보 창과 그룹이 같은
   계산을 사용하며 CD 룰러의 수치 라벨도 소수점 다섯 자리로 표시한다.
 - 기본 간격은 **해당 룰 전체의 CD 델타 범위에서 약 10개 그룹**이
   되도록 자동 계산한다. 절대 차이와 비율 차이를 각각 계산하며,
-  클러스터나 waive 필터를 바꿔도 간격은 유지된다. 지금 쓰는 간격은 목록의 페이지
-  줄에 소수점 다섯 자리로 나온다. 자동이면 `auto step 0.00200`, 직접 지정했으면
-  `step 0.05000`이다. `step` 버튼의 툴팁도 같은 값을 말한다(`CD group step: 0.00200
-  (automatic). …`).
+  클러스터나 waive 필터를 바꿔도 간격은 유지된다. 지금 쓰는 간격은 소수점 다섯 자리로
+  두 툴팁에 나온다. `step` 버튼(`CD group step: 0.00200 (automatic). …`)과 `All errors`
+  행(자동이면 `auto step 0.00200`, 직접 지정했으면 `step 0.05000`)이다.
   내부적으로 다섯 자리 정수 단위에서 제약별 `[최솟값, 최댓값]` 범위의
   가장 큰 폭을 10등분하고 올림한다. 0을 기준으로 나누어 11번째 구간이
   생기면 간격을 늘려 제약마다 최대 10개 구간이 되도록 한다.
@@ -677,7 +711,7 @@ absolute/ratio 콤보박스의 문구를 단순화하여 크기를 줄이고 ste
   `0.23750 um`과 `0.25750 um`은 서로 다른 그룹이다. 목록에는 `C? #1`,
   `C? #2`처럼 표시하고 정확한 길이와 CD 미확정 사유는 툴팁에서 확인한다.
   이는 출력된 선분의 길이이며 `INT` 등이 검사한 폭 CD로 추정하지 않는다.
-  상세 창에는 `CD unavailable`과 `Marker edge length`를 함께 표시하며,
+  SVRF 정보 창에는 `CD unavailable`과 `Marker edge length`를 함께 표시하며,
   이 길이로 기준값·델타·비율을 계산하지 않는다. 길이 그룹은 정확한 표시값별로
   나누므로 델타 간격이나 절대/비율 모드가 바뀌어도 합쳐지지 않는다.
   그룹 선택·클러스터 교집합·waive 필터·1000개씩 페이지 이동은 동일하게 동작한다.
@@ -697,6 +731,23 @@ absolute/ratio 콤보박스의 문구를 단순화하여 크기를 줄이고 ste
   제약 번호와 구간으로 된 내부 키를 사용한다. 비율 모드에서
   한계값이 `0.00000`이면 비율을 계산하지 않고
   `Unmeasurable / ratio unavailable`에 포함한다.
+- **그룹 목록의 우클릭 메뉴**(0.12.444, 사용자 2026-11-11: "CD 그룹에서 All errors나 각
+  그룹에서 오른쪽 버튼을 클릭하면 … 해당하는 에러들을 모두 선택하거나 waive등을 할 수 있게").
+  행을 오른쪽 클릭하면 그 행이 그리드의 범위가 되고(왼쪽 클릭과 같다) 메뉴가 뜬다:
+  `select all` / `deselect all` / `waive all` / `unwaive all` / `mark not for review all` /
+  `clear not for review all`. `All errors`는 룰 전체가 대상이고 클러스터를 골랐으면 그
+  클러스터다. 그룹 행은 그 그룹이다.
+  - `select all`은 그리드에 나열된 것을 모든 페이지에 걸쳐 선택한다. 박스 선택처럼 waive
+    필터를 따른다. `deselect all`은 선택을 지운다.
+  - 나머지 넷은 waive 필터와 무관하게 **범위의 모든 에러**에 한다. `waive all` 뒤에는 그룹
+    전체가 waived, `unwaive all` 뒤에는 전체가 not waived다. 그래서 어느 필터에서든 하나가
+    다른 하나를 되돌린다. Not Waived에서는 waive한 에러가 목록에서 빠지므로, 목록 기준이었다면
+    되돌릴 대상이 없었을 것이다.
+  - 그리드의 선택은 건드리지 않는다. 서비스가 범위의 에러를 모으고(select 작업) 그 결과에
+    명령을 한다(review 작업). 1000개를 넘는 범위도 백그라운드 작업 한 번이다.
+  - 상태 줄: 모으는 동안 `waive all: collecting the errors… (Esc cancels)`, 끝나면 `waived N
+    error(s) in <룰>`, `not for review set on N errors` 등. 범위에 에러가 없으면 `…: no error
+    in this scope`.
 - 그룹 목록은 50개씩 넘겨 보며 `All errors`로 현재 룰 또는 파일 클러스터의
   전체 에러를 볼 수 있다. 한 그룹을 선택하면 그 그룹의 에러를 기존과
   같이 1000개씩 페이지로 표시한다. 파일 클러스터, waive, selected,

@@ -551,12 +551,26 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
 - **좁은 pane 열화 규약**(2026-08-18): 내용이 옆으로 잘리거나
   패닝되면 안 됨 — 룰 목록 hscroll NEVER(이름 열 ellipsize END로
   "…" 줄임), 상세 TextView WORD_CHAR 줄바꿈 + hscroll NEVER,
-  필터 컨트롤 행 = **FlowBox**(좁으면 여러 줄로 래핑, 1~4열).
+  필터 컨트롤 행 = **FlowBox**(좁으면 여러 줄로 래핑). 0.12.444(사용자 2026-11-11)부터 이
+  행은 `in view`·`selected`·유형 콤보·waive 콤보 넷이 **한 줄**이다: FlowBox가 넷을 한 줄에
+  놓는 폭을 청하고 그만큼만 받는다(min 2 / max 4 children per line, halign START). 채우게 두면
+  남는 폭을 열마다 나눠 벌어졌고, 다섯째 컨트롤이 둘째 줄을 만들면 그 줄의 콤보가 `in view`와
+  `selected`가 선 열을 넓혔다. 넷의 폭보다 좁은 pane에서는 둘씩 접힌다. `Conflict only` 체크는
+  만들고 연결하되 어느 행에도 넣지 않는다(기능을 열 때까지; `_conflict`).
   lpaned pack1 shrink=True + 검색 박스 width_chars 8이 pane 폭
   하한을 낮게 유지(실질 하한 = 미니맵 196px).
 - **룰|그리드 분할 = 비율 유지**(2026-08-18): hsplit 위치는 고정
-  px가 아니라 **pane 폭의 분수**(초기 0.45) — 드래그가 분수를
+  px가 아니라 **pane 폭의 분수**(초기 0.44) — 드래그가 분수를
   재고정하고 size-allocate가 재적용(guard 플래그로 루프 차단).
+  분수는 끌기 전까지 이 값이다(0.12.444): GTK가 양쪽의 청한 폭으로 정하는 첫 위치를 끌기로
+  받아들여, 그리드 쪽 내용이 바뀔 때마다 분할이 따라 움직였다(초기값 0.45는 쓰인 적이 없고
+  실제 위치가 0.44였다).
+- **그리드 쪽의 배치**(0.12.444, 사용자 2026-11-11): 위에서부터 CD 컨트롤 줄, 세로 Paned
+  (`_vsplit`: 위 = 그룹 목록과 그 페이지 줄 `_delta_list`, 아래 = 에러 그리드와 **그 아래의**
+  에러 페이지 줄). 구분선을 끌어 두 목록의 높이를 나눈다(처음 `DRC_GROUPS_PX` 108, 그룹 목록의
+  하한 두 줄; CD 부분이 숨으면 그리드가 전부). 그룹 페이지 줄(`_delta_bar`)은 두 페이지 이상일
+  때만 보이고 `1/3`만 적는다. 에러 페이지 줄도 `1/3` 꼴이다. 패널의 버튼은 낮다
+  (PANEL_CSS `.floe-drc-low button`: 페이지 화살표, CD 컨트롤, 필터 콤보).
   구 고정 220px는 시작 pane(196px)을 통째로 삼켜 그리드가 0폭으로
   숨고 핸들이 가장자리에 붙던 원인.
 - **룰 행 카운트 = 에러수/waived**(2026-08-18, "30/20" 형태):
@@ -569,7 +583,11 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   차선) + DRC 메뉴 load SVRF rules… 수동 로드. 매칭 수는 자동 탐색이면 로드의 상태 줄
   `· svrf 매칭/전체`, 수동 로드면 그때의 상태 줄 `rules metadata <파일>: N/M rules matched`
   (패널 정보줄은 2026-11-10에 뺐다).
-  상세 pane 하단(`_drc_meta_lines`): 덱 원문 제약(constraint:) ·
+  이 블록은 0.12.444부터 상세 pane에 붙지 않고 **SVRF 정보 창**에 나온다
+  (`_drc_svrf_dialog`: `i`, DRC 메뉴 `SVRF info…`, 에러 그리드 우클릭 메뉴; 막지 않는 창으로
+  상세 pane의 에러 `_drc_detail_at`을 따라 바뀌고, 뷰어의 키를 넘겨받으며, Esc/`i`로 닫는다;
+  에러 없이 룰만 고르면 측정 줄을 뺀 블록, 메타데이터에 없는 룰이면 그 사실).
+  블록(`_drc_meta_lines`): 덱 원문 제약(constraint:) ·
   **measured / estimated CD** = 마커 치수 vs 한계값과 Δ/%(waive 판단
   보조; 에지쌍=실제 최소 갭·단일 에지=길이·area=신발끈,
   직사각형=가로/세로 후보 중 룰 조건으로 선택, 복잡 도형은 생략).
@@ -594,8 +612,15 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   간격은 `step` 버튼의 모달 `CD group step`(`_drc_step_dialog`: 지금 간격에서 시작,
   단위 표시, Enter/`ok` 적용, 거절 사유는 모달 안에, Esc/`cancel`은 그대로)에서 받는다.
   패널의 입력란과 `set step` 버튼, 숨긴 상태의 안내 문구(`select a rule for CD groups`,
-  `grouping off`, `load matching SVRF metadata for CD groups`)는 없다. 지금 간격은 페이지
-  줄의 `auto step N` / `step N`과 버튼 툴팁에 나온다.
+  `grouping off`, `load matching SVRF metadata for CD groups`)는 없다. 지금 간격은 버튼
+  툴팁과 `All errors` 행의 툴팁(`_drc_delta_summary`: 그룹 수 · `auto step N` / `step N` · 에지
+  길이 그룹 수 · 추정 CD 수; 0.12.443에는 목록 아래 줄)에 나온다. 0.7초(`DRC_SAY_AFTER_S`)를
+  넘기는 측정은 상태 줄에 `CD groups: …`로 진행과 완료를 말한다.
+  **그룹 목록의 우클릭 메뉴**(0.12.444, `_on_drc_delta_menu`): 행이 범위가 되고 select all /
+  deselect all / waive all / unwaive all / mark not for review all / clear not for review all
+  (`_drc_scope_all`). select all은 나열된 것(waive 필터 적용), 나머지 넷은 필터와 무관하게
+  범위 전체이며 그리드의 선택을 건드리지 않는다: select 작업으로 범위를 모으고
+  (`_drc_selection_submit(then=)`) 그 결과에 review 작업을 한다(`_drc_scope_apply`).
   기본 간격은 룰 전체의 델타 범위에서 약 10개 그룹이 되도록 자동 계산한다.
   제약별 범위를 사용해 서로 다른 단위를 섞지 않고, 가장 넓은 범위를
   기준으로 공통 간격을 정해 각 제약당 최대 10개 구간으로 나눈다.
@@ -677,7 +702,7 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   — capped 표기도 필터 후 개수 기준이라 누락을 숨겼음)(실데이터의 waived
   표기법 미파악 상태라 현재는 전부 Not Waived; v1은 status 없음 →
   Waived 항상 빈 목록). 그리드는 **DRC_PAGE(1000)셀 페이지** —
-  ◀ "start – stop / count" ▶ 바, n/p 스텝이 자동으로 페이지를
+  ◀ `페이지/전체` ▶ 바(0.12.444부터 그리드 아래), n/p 스텝이 자동으로 페이지를
   넘김(`_drc_goto_cell`). 대형 룰 클릭 시 그리드가 계속 갱신되던
   루프는 vscrollbar 폭 진동이 원인 — 그리드 스크롤러 vscroll
   ALWAYS로 고정.

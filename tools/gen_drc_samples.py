@@ -608,7 +608,8 @@ floe2 view chip.oas --drc run1/results.db          # 이전 실행
 
 - 룰 목록: M1.S.1 3000, M1.W.1 1500, M2.S.1 {heavy}, V1.EN.1 800, M1.A.1 400,
   M2.NOTCH.1 300, M1.M2.OVL 200, DUP.NAME 5 × 2, NEW.RULE 20, EMPTY.RULE 0.
-- 더블클릭·`.`/`,`: 에러로 이동, CD 룰러와 상세의 `measured CD … vs < 0.070 · Δ … (%)`.
+- 더블클릭·`.`/`,`: 에러로 이동, CD 룰러. `i`로 SVRF 정보 창을 열어 두면 에러를 따라
+  `measured … vs < 0.070 · Δ … (%)`가 나온다(상세 pane에는 붙지 않는다).
   M1.W.1은 4개 중 1개가 세로 사각형, M1.A.1은 면적 라벨(`area 0.00… µm²`),
   V1.EN.1은 좌/우 한쪽 enclosure, M1.M2.OVL은 두 레이어 overlap.
 - 클러스터: M1.S.1 아래 Block A/B, Edge cases, Unclustered; M2.S.1 아래 Upper half.
@@ -637,7 +638,8 @@ V/NR이 `—`(모름)이다. `Refresh`(나 + 3명, 내 리뷰가 비어 있을 �
 - M1.S.1에서 alice(0~799 방문, 짝수 waive, 700~799 제외)와 bob(500~1299 방문,
   3의 배수 waive, 750~849 제외)이 겹치는 500~799가 conflict 후보다.
 - `Apply all peer work safely` 뒤 내가 방문한 에러의 다른 판단은 건너뛴다(먼저 몇 개를
-  열고 waive해 두면 import protected가 생긴다). 메인 목록 `Conflict only`.
+  열고 waive해 두면 import protected가 생긴다). 메인 목록의 `Conflict only` 체크는 아직
+  내놓지 않는다(0.12.444).
 
 | 룰 | 전체 | 팀 visited | waived | 제외 | conflicts | 승계 일치 | 부분 합의 | 모호 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|

@@ -795,7 +795,7 @@ def marker_length_ui(v, temp, pump):
     groups = v._drc_delta_groups
     first = next(g for g in groups.page(0, 50) if g.key == (-2, 23750))
     check(groups.cd_count == 1 and groups.geometry_count == 3
-          and "3 edge-length groups" in v._drcwin._delta_label.get_text(),
+          and "3 edge-length groups" in v._drcwin._delta_store[0][3],
           "viewer distinguishes marker-length groups from CD groups")
     lines = v._drc_meta_lines("EDGE.UNKNOWN", v._drc.checks[0].errors[0])
     check(any("CD unavailable" in line for line in lines)
@@ -824,6 +824,369 @@ def marker_length_ui(v, temp, pump):
           and cd_part(v) == (True, True),
           "a cluster with edge-length groups alone keeps the CD part",
           (v._drc_delta_groups.cd_count, v._drc_delta_groups.geometry_count, cd_part(v)))
+    # the group menu's `waive all` on a scope past a page of 1,000: the
+    # service's review job on the scope's selection, any filter
+    def done():
+        return (v._drc_selection_key is None and v._drc_review_job is None
+                and not v._drc_delta_busy and v._drc_group_cache_key is None)
+    v._drc_select_row(0)
+    pump(v, lambda: v._drc_cluster is None and done(), "the whole length rule", 60)
+    waived = v._drc.status_counts(0)[0]
+    v._drc_scope_all("waive", True)
+    job = v._drc_selection_then
+    pump(v, done, "waive all of 1,006 errors", 60)
+    said = v.status.get_text()
+    all_waived = v._drc.status_counts(0)[0]
+    v._drc_scope_all("waive", False)
+    pump(v, done, "unwaive all of 1,006 errors", 60)
+    check(job == ("waive", True) and all_waived == 1006 and "1006" in said
+          and v._drc.status_counts(0)[0] == 0 and v._drc_sel is None and 0 < waived < 1006,
+          "waive all / unwaive all of a rule past a page are the service's review job",
+          (job, waived, all_waived, said, v._drc.status_counts(0)[0]))
+
+
+def pane_ui(v, d, pump):
+    """The DRC pane's lower half and its lists (user 2026-11-11, six calls:
+    the filters on one line with `Conflict only` out of sight; a menu on
+    the group rows - select all / deselect all / waive all / unwaive all /
+    mark not for review all / clear not for review all; the group pager
+    only for a second page, low, `1/3`; the error pager under its list,
+    low; the group list's and the error list's heights by a divider; the
+    SVRF lines of an error out of the detail pane, in a window)."""
+    from floe import gui
+    Gtk, Gdk = gui.Gtk, gui.Gdk
+    db = d / "pane.db"
+    pair = "e %d 2\n0 0 10000 0\n0 %d 10000 %d\n"
+    db.write_text(
+        "MAIN 100000\nPANE.MANY\n120 120 0\n"
+        + "".join(pair % (i, 1000 + i, 1000 + i) for i in range(1, 121))
+        + "PANE.FEW\n4 4 0\n"
+        + "".join(pair % (i, gap, gap) for i, gap in enumerate((1000, 1000, 2000, 3000), 1))
+        + "PANE.NOMETA\n1 1 0\n" + pair % (1, 1000, 1000))
+    space = {"metric": "space", "op": "<", "value": 0.05, "text": "EXTERNAL M1_drawn < 0.05"}
+    (d / "pane.db.rules.json").write_text(json.dumps({
+        "format": "floe-svrf-rules", "version": 1,
+        "checks": {"PANE.MANY": {"constraints": [space]},
+                   "PANE.FEW": {"constraints": [space], "layers": ["M1_drawn"],
+                                "source_gds": [[1, 0]]}},
+        "derived": {"M1_drawn": "M1 NOT FILL"}}))
+    (d / "pane.db.clusters").write_text("[PANE.FEW]\nfirst = 1-2\n")
+    r = run([INDEX, "drc", str(db)])
+    check(r.returncode == 0, "pane fixture packed", r.stderr)
+    w = v._drcwin
+    w._delta_mode.set_active_id("absolute")
+    check(v.load_drc(str(db)), "load the pane fixture")
+
+    def done():
+        return (v._drc_selection_key is None and v._drc_review_job is None
+                and not v._drc_delta_busy and v._drc_group_cache_key is None)
+
+    def settle(what):
+        pump(v, done, what, 60)
+
+    def pick(ci, cluster=None):
+        v._drc_select_row(ci, cluster)
+        pump(v, lambda: v._drc_open == ci and v._drc_cluster is cluster and done(),
+             "pane: %s" % v._drc.checks[ci].name, 60)
+
+    def detail():
+        buf = w._detail
+        return buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False)
+
+    settle("pane counts")
+    check(v._drc_wfilter == "notwaived" and [v._drc_group_count(ci) for ci in range(3)][2] is None,
+          "the pane fixture opens under Not Waived")
+
+    # ---- 1. the filters: one line, `Conflict only` in no row
+    nav = w._hl.get_parent().get_parent()
+    kids = [c.get_child() for c in nav.get_children()]
+    check(kids == [w._hl, w._selv, w._tf, w._wf] and isinstance(nav, Gtk.FlowBox)
+          and nav.get_halign() == Gtk.Align.START
+          and w._conflict.get_parent() is None and not w._conflict.get_mapped()
+          and (w._hl.get_label(), w._selv.get_label()) == ("in view", "selected"),
+          "the filter row holds in view, selected and the two combos; Conflict only is in no row",
+          [type(k).__name__ for k in kids])
+    pump(v, lambda: w._wf.get_allocation().width > 1, "the filter row laid out", 10)
+    cells = [k.get_parent().get_allocation() for k in kids]
+    need = nav.get_preferred_width()[1]
+    room = nav.get_parent().get_allocated_width()
+    check(room < need
+          or (len(set(c.y for c in cells)) == 1 and cells[0].x == 0
+              and all(b.x == a.x + a.width + 6 for a, b in zip(cells, cells[1:]))
+              and [c.width for c in cells] == [k.get_preferred_width()[1] for k in kids]
+              and nav.get_allocated_width() == need),
+          "the four stand on one line from the left, at their own widths, 6 px apart",
+          ([(c.x, c.y, c.width) for c in cells], need, room))
+    check(nav.get_preferred_width()[0] < gui.LEFT_PANE_PX,
+          "(narrower than the four it wraps: it asks the left pane for less than its start width)",
+          tuple(nav.get_preferred_width()))
+
+    # ---- 3-5. the pagers and the divider
+    pick(1)
+    plain = Gtk.Button(label="◀")
+    plain.show()
+    tall = plain.get_preferred_height()[1]
+    ebox = w._pprev.get_parent().get_parent()
+    order = [type(k).__name__ for k in ebox.get_children()]
+    pump(v, lambda: w._pprev.get_allocation().height > 1, "the error pager laid out", 10)
+    check(order == ["ScrolledWindow", "Box"] and ebox.get_children()[0].get_child() is w._grid
+          and ebox.get_children()[1] is w._pprev.get_parent()
+          and w._plabel.get_text() == "1/1"
+          and w._pprev.get_allocated_height() < tall and w._pnext.get_allocated_height() < tall,
+          "the error pager is under its grid, its arrows lower than a plain button, `1/1`",
+          (order, w._plabel.get_text(), w._pprev.get_allocated_height(), tall))
+    split = w._vsplit
+    check(isinstance(split, Gtk.Paned) and split.get_orientation() == Gtk.Orientation.VERTICAL
+          and split.get_child1() is w._delta_list and split.get_child2() is ebox
+          and split.get_position() == gui.DRC_GROUPS_PX
+          and w._delta_list.get_allocated_height() == gui.DRC_GROUPS_PX,
+          "the group list stands over the error grid in a divider, %d px at first"
+          % gui.DRC_GROUPS_PX, (split.get_position(), w._delta_list.get_allocated_height()))
+    whole = split.get_allocated_height()
+    split.set_position(180)
+    pump(v, lambda: w._delta_list.get_allocated_height() == 180, "the divider moved", 10)
+    grown = (w._delta_list.get_allocated_height(), ebox.get_allocated_height())
+    split.set_position(5)
+    pump(v, lambda: w._delta_list.get_allocated_height() < 100, "the divider moved up", 10)
+    least = w._delta_list.get_allocated_height()
+    split.set_position(gui.DRC_GROUPS_PX)
+    pump(v, lambda: w._delta_list.get_allocated_height() == gui.DRC_GROUPS_PX, "the divider back", 10)
+    check(grown[0] == 180 and 0 < grown[1] < whole - 180 and 30 < least < gui.DRC_GROUPS_PX,
+          "the divider gives the group list more or less of the height, never under two rows",
+          (grown, least, whole))
+    pick(2)
+    pump(v, lambda: ebox.get_allocated_height() == split.get_allocated_height(),
+         "the grid alone", 10)
+    check(cd_part(v) == (False, False)
+          and ebox.get_allocated_height() == split.get_allocated_height(),
+          "a rule without CD groups: the error grid has the divider's whole height")
+    pick(1)
+    check(cd_part(v) == (True, True) and split.get_position() == gui.DRC_GROUPS_PX
+          and not w._delta_bar.get_visible() and w._delta_label.get_text() == "1/1"
+          and len(v._drc_delta_groups) == 3,
+          "three groups: no group pager", (len(v._drc_delta_groups), w._delta_label.get_text()))
+    pick(0)
+    check(not w._delta_bar.get_visible() and len(v._drc_delta_groups) <= 50,
+          "the automatic step's groups are a page: no group pager", len(v._drc_delta_groups))
+    check(v._drc_delta_set_step("0.00001") is None, "a step that makes 120 groups")
+    settle("120 groups")
+    pump(v, lambda: w._delta_prev.get_allocation().height > 1, "the group pager laid out", 10)
+    first = (len(v._drc_delta_groups), w._delta_bar.get_visible(), w._delta_label.get_text(),
+             len(w._delta_store), w._delta_prev.get_sensitive(), w._delta_next.get_sensitive())
+    low = w._delta_prev.get_allocated_height()
+    tip = w._delta_store[0][3]
+    w._delta_next.clicked()
+    second = (w._delta_label.get_text(), w._delta_store[1][0], w._delta_prev.get_sensitive())
+    w._delta_next.clicked()
+    third = (w._delta_label.get_text(), len(w._delta_store), w._delta_next.get_sensitive())
+    check(first == (120, True, "1/3", 51, False, True) and low < tall
+          and second[0] == "2/3" and second[1].startswith("C1 #51 ") and second[2]
+          and third == ("3/3", 21, False)
+          and tip == "All errors · 120 groups · step 0.00001",
+          "more than a page of groups: the pager, low, reads page/pages; the rest is the tooltip",
+          (first, low, tall, second, third, tip))
+    check(v._drc_delta_set_step("auto") is None, "the automatic step again")
+    settle("few groups again")
+    check(not w._delta_bar.get_visible() and w._delta_label.get_text() == "1/1",
+          "back to one page: the pager is gone")
+
+    # ---- 2. the menu on the group rows
+    def right_click(row):
+        """A right click on a row of the group list: the menu's labels,
+        the menu left up for an item to be picked."""
+        tree = w._delta_tree
+        path = Gtk.TreePath.new_from_indices([row])
+        pump(v, lambda: tree.get_cell_area(path, tree.get_column(0)).height > 1,
+             "the group list laid out", 10)
+        area = tree.get_cell_area(path, tree.get_column(0))
+        e = Gdk.Event.new(Gdk.EventType.BUTTON_PRESS)
+        e.window = tree.get_bin_window()
+        e.send_event = True
+        e.x, e.y = area.x + 3, area.y + area.height / 2
+        e.button, e.state = 3, Gdk.ModifierType(0)
+        e.set_device(Gdk.Display.get_default().get_default_seat().get_pointer())
+        v._drc_menu = None
+        tree.event(e)
+        menu = v._drc_menu
+        return menu, ([] if menu is None else
+                      ["-" if isinstance(i, Gtk.SeparatorMenuItem) else i.get_label()
+                       for i in menu.get_children()])
+
+    def choose(row, label, what):
+        menu, labels = right_click(row)
+        next(i for i in menu.get_children()
+             if not isinstance(i, Gtk.SeparatorMenuItem) and i.get_label() == label).activate()
+        menu.popdown()
+        settle(what)
+
+    pick(1)
+    rows = [(r[0].split(" ")[1] if r[2] is not None else r[0], r[1]) for r in w._delta_store]
+    check(rows == [("All errors", "4"), ("#1", "1"), ("#2", "1"), ("#3", "2")]
+          and v._drc_delta_group is None and v._drc_grid_map == [0, 1, 2, 3],
+          "the fixture's groups", rows)
+    menu, labels = right_click(3)
+    scope = (None if v._drc_delta_group is None else v._drc_delta_group.total, v._drc_grid_map)
+    if menu is not None:
+        menu.popdown()
+    check(labels == ["select all", "deselect all", "-", "waive all", "unwaive all", "-",
+                     "mark not for review all", "clear not for review all"]
+          and scope == (2, [0, 1]) and w._delta_tree.get_selection().get_selected()[1] is not None
+          and w._delta_store[w._delta_tree.get_selection().get_selected()[1]][0].startswith("C1 #3"),
+          "a right click on a group row makes it the grid's scope and offers the six commands",
+          (labels, scope))
+    choose(3, "select all", "select all")
+    sel = v._drc_sel
+    check(sel is not None and sel[0] == 1 and list(sel[1]) == [0, 1]
+          and v.status.get_text() == "error select PANE.FEW: 2 selected",
+          "select all: the group's errors are the selection", v.status.get_text())
+    choose(3, "deselect all", "deselect all")
+    check(v._drc_sel is None and v.status.get_text() == "error select PANE.FEW: none selected",
+          "deselect all drops it", v.status.get_text())
+    choose(3, "waive all", "waive all")
+    rows = [r[1] for r in w._delta_store]
+    check(v._drc.status_counts(1)[0] == 2 and [v._drc.get_status(1, ei) for ei in range(4)]
+          == [1, 1, 0, 0] and rows == ["2", "1", "1", "0"] and v._drc_grid_map == []
+          and v._drc_sel is None and v.status.get_text() == "waived 2 error(s) in PANE.FEW",
+          "waive all: every error of the group is waived (Not Waived lists none of it now)",
+          (rows, v.status.get_text()))
+    choose(3, "unwaive all", "unwaive all")
+    rows = [r[1] for r in w._delta_store]
+    check(v._drc.status_counts(1)[0] == 0 and rows == ["4", "1", "1", "2"]
+          and v._drc_grid_map == [0, 1]
+          and v.status.get_text() == "unwaived 2 error(s) in PANE.FEW",
+          "unwaive all undoes it under the same filter: the scope's errors, not the listed ones",
+          (rows, v.status.get_text()))
+    choose(3, "mark not for review all", "mark not for review all")
+    marked = (v._drc.review_counts(1)["not_required"],
+              [v._drc.review_flags(1, ei) & gtkservice.NOT_REQUIRED for ei in range(4)])
+    choose(3, "clear not for review all", "clear not for review all")
+    check(marked == (2, [gtkservice.NOT_REQUIRED, gtkservice.NOT_REQUIRED, 0, 0])
+          and v._drc.review_counts(1)["not_required"] == 0,
+          "mark / clear not for review all: the group's errors", marked)
+    # `All errors`: the rule; the selection in the grid is not the command's
+    w._wf.set_active_id("all")
+    pick(1)
+    menu, _labels = right_click(0)       # (the scope: the rule, not the group)
+    menu.popdown()
+    settle("the rule's scope")
+    v._drc_selection_submit(1, None, gtkservice.ListMembers([2]), "replace")
+    settle("one error selected")
+    check(v._drc_delta_group is None and v._drc_sel is not None and list(v._drc_sel[1]) == [2],
+          "(one error selected in the rule's scope)")
+    choose(0, "waive all", "waive all of the rule")
+    sel = v._drc_sel
+    check(v._drc_delta_group is None and v._drc.status_counts(1)[0] == 4
+          and sel is not None and list(sel[1]) == [2],
+          "waive all on `All errors`: the whole rule; the selection in the grid stays as it was",
+          (v._drc.status_counts(1)[0], None if sel is None else list(sel[1])))
+    choose(0, "unwaive all", "unwaive all of the rule")
+    choose(0, "deselect all", "deselect all")
+    check(v._drc.status_counts(1)[0] == 0 and v._drc_sel is None, "(and undone)")
+    # a cluster picked: `All errors` is the cluster
+    clusters = dict((c[0], c[3]) for c in w._rstore[1].iterchildren())
+    pick(1, clusters["first"])
+    choose(0, "waive all", "waive all of the cluster")
+    in_cluster = [v._drc.get_status(1, ei) for ei in range(4)]
+    choose(0, "unwaive all", "unwaive all of the cluster")
+    check(in_cluster == [1, 1, 0, 0] and v._drc.status_counts(1)[0] == 0,
+          "with a cluster picked `All errors` is the cluster's errors", in_cluster)
+    w._wf.set_active_id("notwaived")
+    pick(1)
+
+    # ---- 6. the SVRF lines: out of the detail pane, in a window
+    v._drc_goto_cell(1, 2)
+    v._drc_show_detail(1, 2)
+    pane = detail()
+    errors = v._drc.checks[1].errors
+    heads = ["PANE.FEW  #%d(%d)" % (ei + 1, errors[ei].num) for ei in range(4)]
+    block = v._drc_meta_lines("PANE.FEW", errors[2])
+    check(pane.startswith("#3(%d)  [none]\nrule: PANE.FEW\nSVRF: applied (rule name matched)\n"
+                          % errors[2].num)
+          and "edge (um):" in pane and v._drc_detail_at == (1, 2)
+          and not any(word in pane for word in ("constraint:", "measured", "layers:", "gds:",
+                                                "derivation:"))
+          and block[1:] == ["constraint: EXTERNAL M1_drawn < 0.05",
+                            "measured: 0.02000 um vs < 0.05000 · Δ 0.03000 (60.00000%)",
+                            "layers: M1_drawn", "gds: 1/0", "derivation:",
+                            "  M1_drawn = M1 NOT FILL"],
+          "the detail pane of an error has no SVRF lines", (pane, block))
+    check(v._svrfdlg is None, "(no SVRF window until it is asked for)")
+    v._drc_svrf_dialog()
+    dlg = v._svrfdlg
+
+    def shown():
+        buf = dlg._buffer
+        return buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False).split("\n")
+    check(dlg is not None and dlg.get_title() == "SVRF info" and not dlg.get_modal()
+          and dlg.get_transient_for() is v.window
+          and shown() == [heads[2]] + block[1:],
+          "the SVRF window shows them, and does not block", shown())
+    v._drc_svrf_dialog()
+    check(v._svrfdlg is dlg, "asked again: the same window")
+    v._drc_show_detail(1, 3)
+    follows = shown()
+    v._drc_show_rule(1)
+    rule = shown()
+    pick(2)
+    none = shown()
+    check(follows[0] == heads[3]
+          and follows[2] == "measured: 0.03000 um vs < 0.05000 · Δ 0.02000 (40.00000%)"
+          and rule == ["PANE.FEW", "constraint: EXTERNAL M1_drawn < 0.05", "layers: M1_drawn",
+                       "gds: 1/0", "derivation:", "  M1_drawn = M1 NOT FILL"]
+          and none[0] == "PANE.NOMETA" and none[1].startswith("SVRF: no matching rule"),
+          "it follows the error in the pane; a rule alone has no measurement; one without "
+          "metadata says so", (follows, rule, none))
+    # the viewer's keys work from it: `.` steps to the next error
+    pick(1)
+    v._drc_goto_cell(1, 0)
+    v._drc_jump(1, 0)
+
+    def key(name):
+        e = Gdk.Event.new(Gdk.EventType.KEY_PRESS)
+        e.window = dlg.get_window()
+        e.keyval = Gdk.keyval_from_name(name)
+        return dlg.emit("key-press-event", e)
+    stepped = (key("period"), v._drc_detail_at, shown()[0])
+    check(stepped == (True, (1, 1), heads[1]),
+          "a key pressed in the SVRF window is the viewer's: `.` steps, the window follows",
+          stepped)
+    closed = (key("Escape"), v._svrfdlg)
+    v._drc_svrf_dialog(toggle=True)
+    opened = v._svrfdlg
+    v._drc_svrf_dialog(toggle=True)
+    check(closed == (True, None) and opened is not None and v._svrfdlg is None,
+          "Esc closes it; i opens and closes it")
+
+    # ---- the pane has no line for a measurement in the making: a slow
+    # one says where it is in the status line, a quick one nothing
+    class Slow(object):
+        progress = "CD measurement 5 / 10 (Rust, up to 2 workers)"
+
+        def poll(self):
+            return None
+
+        def cancel(self):
+            pass
+
+        def close(self):
+            pass
+    worker, busy, since = v._drc_delta_worker, v._drc_delta_busy, v._drc_delta_since
+    try:
+        v._drc_delta_worker, v._drc_delta_busy = Slow(), True
+        v._drc_delta_progress = None
+        v._set_live_status("-")
+        v._drc_delta_since = time.monotonic()
+        v._drc_delta_poll()
+        quick = v.status.get_text()
+        v._drc_delta_progress = None
+        v._drc_delta_since = time.monotonic() - 5.0
+        v._drc_delta_poll()
+        slow = (v.status.get_text(), v._drc_delta_said)
+    finally:
+        v._drc_delta_worker, v._drc_delta_busy, v._drc_delta_since = worker, busy, since
+        v._drc_delta_said = False
+    check(quick == "-" and slow == ("CD groups: CD measurement 5 / 10 (Rust, up to 2 workers)", True),
+          "a CD measurement that takes its time says where it is in the status line", (quick, slow))
 
 
 def cd_part_ui(v, d, pump):
@@ -931,7 +1294,7 @@ def cd_part_ui(v, d, pump):
                     (True, off, on), (True, on, on), (True, off, off)],
           "CD part by rule: with CD or edge-length groups, and not without", first)
     check([(r[0], r[1]) for r in w._delta_store] == [("All errors", "0")]
-          and w._delta_label.get_text().startswith("groups 1 / 1 · 0 groups"),
+          and w._delta_store[0][3].startswith("All errors · 0 groups"),
           "(the list of the rule without errors, out of sight)")
     # the second visit: as it was, from the pick on
     again = [pick(ci) for ci in range(7)]
@@ -1002,10 +1365,10 @@ def cd_part_ui(v, d, pump):
           "on a narrow pane the controls' texts shorten instead of the line being cut off",
           (least, need))
     auto = gui.format_ticks(v._drc_delta_groups.step_ticks)
-    label = w._delta_label.get_text()
+    label = w._delta_store[0][3]
     check("· auto step %s" % auto in label
           and w._delta_step.get_tooltip_text().startswith("CD group step: %s (automatic)." % auto),
-          "the automatic step is read in the group label and the button's tooltip",
+          "the automatic step is read in the `All errors` row's tooltip and the button's",
           (label, w._delta_step.get_tooltip_text()[:50]))
     named = step_dialog(v)
     dlg = v._sdlg
@@ -1030,12 +1393,12 @@ def cd_part_ui(v, d, pump):
           "Enter sets the step and closes the dialog; the CD part stays while it is grouped",
           (took, v._drc_delta_steps, cd_part(v)))
     pump(v, lambda: not v._drc_delta_busy and v._drc_group_cache_key is None, "the step set", 60)
-    label = w._delta_label.get_text()
+    label = w._delta_store[0][3]
     check(v._drc_delta_groups.step_ticks == 5000 and not v._drc_delta_groups.auto_step
           and "· step 0.05000" in label and "auto step" not in label
           and w._delta_step.get_tooltip_text().startswith("CD group step: 0.05000. ")
           and v._drc_group_count(0) == 1 and cd_part(v) == on,
-          "a step of one's own is read in the group label and the button's tooltip",
+          "a step of one's own is read in the `All errors` row's tooltip and the button's",
           (label, w._delta_step.get_tooltip_text()[:40]))
     named = step_dialog(v)
     check(named["drc-step"].get_text() == "0.05000", "the dialog starts from the step set",
@@ -1049,9 +1412,9 @@ def cd_part_ui(v, d, pump):
     took = step_dialog(v, " AUTO ")
     pump(v, lambda: not v._drc_delta_busy and v._drc_group_cache_key is None, "automatic again", 60)
     check(took is None and v._drc_delta_steps == {}
-          and "· auto step %s" % auto in w._delta_label.get_text()
+          and "· auto step %s" % auto in w._delta_store[0][3]
           and v._drc_group_count(0) == 3,
-          "auto (or nothing) is the automatic step again", w._delta_label.get_text())
+          "auto (or nothing) is the automatic step again", w._delta_store[0][3])
     took = step_dialog(v, "")
     check(took is None and v._sdlg is None and v._drc_delta_steps == {} and not v._drc_delta_busy,
           "the automatic step asked again changes nothing")
@@ -1132,8 +1495,12 @@ def a5(temp):
               and v._drcwin._delta_store[1][3].startswith(gui.GLib.markup_escape_text(
                   "Group #1 · condition 1 · space < 0.05000: [0.02000, 0.02200) um")),
               "the delta list", rows[:2])
-        label = v._drcwin._delta_label.get_text()
-        check("5 groups" in label and "auto step 0.00200" in label, "its label", label)
+        label = v._drcwin._delta_store[0][3]
+        check(label == "All errors · 5 groups · auto step 0.00200 · 20 estimated (all statuses)"
+              and v._drcwin._delta_label.get_text() == "1/1"
+              and not v._drcwin._delta_bar.get_visible(),
+              "the grouping in a line is the `All errors` row's tooltip; one page: no pager",
+              label)
         check(cd_part(v) == (True, True), "a rule with CD groups shows the pane's CD part")
         v._display()
         pump(v, lambda: v._drc_marker_result is not None and not v._drc_marker_busy, "markers", 60)
@@ -1330,6 +1697,7 @@ def a5(temp):
         zero_gap_ui(v, d, pump)
         marker_length_ui(v, temp, pump)
         cd_part_ui(v, d, pump)
+        pane_ui(v, d, pump)
         small = d / "small.db"
         small.write_text("MAIN 100000\nSMALL.ONE\n0 0 0\nSMALL.TWO\n0 0 0\n")
         (d / "small.db.rules.json").write_text(json.dumps({

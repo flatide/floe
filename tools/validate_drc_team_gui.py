@@ -175,6 +175,14 @@ def r7(temp, check):
         # statistics
         kinds = [type(c).__name__ for c in v._left_nb.get_nth_page(1).get_children()]
         check(kinds == ["Paned", "Separator", "FlowBox"], "nothing above the DRC lists", kinds)
+        # `Conflict only` is not offered yet (user 2026-11-11: hidden until
+        # the feature opens); the filter itself is driven below as before
+        filters = v._left_nb.get_nth_page(1).get_children()[2]
+        labels = [getattr(c.get_child(), "get_label", lambda: None)()
+                  for c in filters.get_children()]
+        check(v._drcwin._conflict.get_parent() is None and labels[:2] == ["in view", "selected"]
+              and "Conflict only" not in labels,
+              "the Conflict only check is in no row of the pane", labels)
         check(not any(hasattr(v._drcwin, n) for n in
                       ("_info", "_reviewer_info", "_review_info", "_conflict_info"))
               and not hasattr(v, "_drc_review_export_stats"),

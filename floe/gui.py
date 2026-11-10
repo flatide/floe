@@ -74,6 +74,8 @@ DRC_RED = 0xFF5252FF       # NOT-WAIVED errors (geometry+numbers)
 
 DRC_PAGE = 1000            # error-grid cells per page
 DRC_GRID_W = 5             # error numbers per browser grid row
+DRC_GROUPS_PX = 108        # the CD group list's start height (about 5 rows)
+DRC_SAY_AFTER_S = 0.7      # a CD measurement longer than this says where it is
 DRC_VIEW_FRACTION = 0.3    # error extent ~30% of the view on a jump
 DRC_HL_CAP = 1000          # highlight-in-view marker budget
 DRC_LARGE_RULE = 100000    # in-view lists of rules this large: a service job
@@ -152,7 +154,7 @@ class _DrcPanel(object):
                  "_tf", "_plabel", "_pprev", "_pnext", "_delta_mode",
                  "_delta_step", "_delta_store", "_delta_tree", "_delta_label",
                  "_delta_prev", "_delta_next", "_delta_controls",
-                 "_delta_list")
+                 "_delta_list", "_delta_bar", "_vsplit")
 
 
 class _DrcTeamWindow:
@@ -1019,6 +1021,11 @@ PANEL_CSS = (
     # bare Gtk.Separator nearly invisible
     b".floe-drc-rule { background-color: #808080; min-height: 1px; "
     b"margin: 2px 0; } "
+    # the DRC pane's buttons are low (user call 2026-11-11: the pagers'
+    # arrows, and with them the CD controls and the filter row's combos)
+    # - about a text line, where the theme's are 34 px
+    b".floe-drc-low button { min-height: 0; padding: 1px 8px; } "
+    b".floe-drc-low flowboxchild { padding: 0; } "
     # DRC note panel: flateyes-style translucent top-left chip
     b".floe-note-panel { background-color: rgba(0,0,0,0.6); "
     b"color: #f0f0f0; padding: 4px 10px; border-radius: 4px; "
@@ -2491,6 +2498,8 @@ class Viewer:
         self._cdlg = None
         self._fontdlg = None
         self._sdlg = None           # the CD group step's modal
+        self._svrfdlg = None        # the SVRF info window (i)
+        self._drc_detail_at = None  # (rule, error or None) the detail pane shows
         self._digit_last = None     # depth digit-pair state ('99' = full)
         self._digit_t = 0.0
         # DRC results browser ('e' key)
@@ -2596,6 +2605,8 @@ class Viewer:
         self._drc_delta_page = 0    # group pages are separate from error pages
         self._drc_delta_error = None
         self._drc_delta_seen = {}   # (rule, cluster) -> its CD part was in sight
+        self._drc_delta_since = 0.0  # when the grouping in the making was asked
+        self._drc_delta_said = False  # ... and whether the status line told of it
         self._labels = []           # Gtk.Label pool for ruler distances
         self._note_panel = None     # top-left translucent DRC note panel
 
@@ -5703,6 +5714,8 @@ class Viewer:
             self._set_mono(not self._mono)
         elif name == "e":
             self._esel_toggle()
+        elif name == "i":
+            self._drc_svrf_dialog(toggle=True)
         elif name == "w":
             self._drc_waive_key()
         elif name == "n":
@@ -6485,8 +6498,15 @@ class Viewer:
             else:
                 worker.cancel()
         self._drc_selection_key = None
+        self._drc_selection_then = None
 
-    def _drc_selection_submit(self, ci, bounds, membership, mode="replace"):
+    def _drc_selection_submit(self, ci, bounds, membership, mode="replace",
+                              then=None):
+        """Ask the service for a selection of the scope. `then` (an
+        action, on) makes it the first half of a command on every error
+        of the scope (_drc_scope_all): the errors are collected whatever
+        the waive filter lists, and the result is that command's target,
+        not the selection in the grid."""
         if (getattr(self, "_drc_review_job", None) is not None or
                 getattr(self, "_drc_team_write", None) is not None):
             self._set_live_status("review update in progress; select after it finishes")
@@ -6514,11 +6534,15 @@ class Viewer:
             worker = self._drc_selection_worker = gtkservice.SelectionWorker()
         key = (object(), id(db), self._drc_scope_key(), self._drc_wfilter)
         self._drc_selection_key = key
+        self._drc_selection_then = then
         worker.submit(key, db, ci, bounds, membership=membership,
-                      waived=(None if conflict_only or self._drc_wfilter == "all" else
+                      waived=(None if then is not None or conflict_only
+                              or self._drc_wfilter == "all" else
                               self._drc_wfilter == "waived"),
-                      previous=previous, mode=mode)
-        self._set_live_status("error select: selecting… (Esc cancels)")
+                      previous=None if then is not None else previous, mode=mode)
+        self._set_live_status("%s… (Esc cancels)" % (
+            "error select: selecting" if then is None else
+            "%s: collecting the errors" % self._drc_scope_words(*then)))
 
     def _drc_selection_poll(self):
         worker = getattr(self, "_drc_selection_worker", None)
@@ -6532,14 +6556,21 @@ class Viewer:
             self._drc_selection_cancel()
             return
         if isinstance(selected, gtkservice.SelectionProgress):
-            self._set_live_status("error select: %d / %d processed · %d matches (Esc cancels)"
-                                  % (selected.processed, selected.total, selected.count))
+            then = getattr(self, "_drc_selection_then", None)
+            self._set_live_status("%s: %d / %d processed · %d matches (Esc cancels)" % (
+                "error select" if then is None else self._drc_scope_words(*then),
+                selected.processed, selected.total, selected.count))
             return
         self._drc_selection_key = None
+        then = getattr(self, "_drc_selection_then", None)
+        self._drc_selection_then = None
         if error:
             self._set_live_status("error selection failed: %s" % error)
             return
         ci = self._drc_sel_check()
+        if then is not None:
+            self._drc_scope_apply(ci, selected, *then)
+            return
         self._drc_set_sel((ci, selected, (), selected) if selected else None)
         self._drc_focus = None
         self._drc_grid_fill(ci)
@@ -6711,6 +6742,7 @@ class Viewer:
         m = top("DRC")
         item(m, "open results .db…", self._drc_open_dialog)
         item(m, "load SVRF rules…", self._drc_rules_dialog)
+        item(m, "SVRF info…\ti", self._drc_svrf_dialog)
         item(m, "load clusters…", self._drc_clusters_dialog)
         sep(m)
         item(m, "next error\t.", lambda: self._drc_step(1))
@@ -7277,6 +7309,7 @@ class Viewer:
         _remote_x_scroll_repaint(gsc)
         pbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
                        spacing=2)
+        pbar.get_style_context().add_class("floe-drc-low")
         pprev = Gtk.Button(label="◀")
         pnext = Gtk.Button(label="▶")
         plabel = Gtk.Label(label="")
@@ -7300,6 +7333,7 @@ class Viewer:
         # at its edge (user call 2026-08-18).
         delta_controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
                                  spacing=4)
+        delta_controls.get_style_context().add_class("floe-drc-low")
         delta_mode = Gtk.ComboBoxText()
         for mid, label in (("absolute", "absolute"), ("percent", "ratio"),
                            ("off", "off")):
@@ -7338,14 +7372,22 @@ class Viewer:
         delta_tree.set_enable_search(False)
         delta_tree.set_tooltip_column(3)
         delta_tree.get_selection().connect("changed", self._on_drc_delta_sel)
+        delta_tree.connect("button-press-event", self._on_drc_delta_menu)
         delta_sc = Gtk.ScrolledWindow()
         delta_sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        delta_sc.set_size_request(-1, 86)
+        # (the least the divider under the list leaves it: two rows)
+        delta_sc.set_size_request(-1, 44)
         delta_sc.add(delta_tree)
         _remote_x_scroll_repaint(delta_sc)
         delta_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        delta_list.pack_start(delta_sc, False, False, 0)
+        delta_list.pack_start(delta_sc, True, True, 0)
+        # the group pager: there only when the groups fill more than one
+        # page of 50, its arrows low, its text `page/pages` (user call
+        # 2026-11-11; the line read `groups 1 / 1 · 5 groups · auto step
+        # 0.00200 · …` for every rule - that is the `All errors` row's
+        # tooltip now, _drc_delta_summary)
         delta_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        delta_bar.get_style_context().add_class("floe-drc-low")
         delta_label = Gtk.Label(label="")
         delta_label.set_ellipsize(Pango.EllipsizeMode.END)
         delta_prev, delta_next = Gtk.Button(label="◀"), Gtk.Button(label="▶")
@@ -7357,10 +7399,22 @@ class Viewer:
         delta_bar.pack_start(delta_label, True, True, 0)
         delta_bar.pack_start(delta_next, False, False, 0)
         delta_list.pack_start(delta_bar, False, False, 0)
-        gbox.pack_start(delta_list, False, False, 0)
-        # out of sight until a rule with CD groups is in the grid: the
-        # window's show_all must not bring the two up
-        for part in (delta_controls, delta_list):
+        # the group list over the error grid, the line between them dragged
+        # to give either more of the pane's height (user call 2026-11-11);
+        # the error pager under its grid (the same call - it stood over it)
+        ebox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        ebox.pack_start(gsc, True, True, 0)
+        ebox.pack_start(pbar, False, False, 0)
+        vsplit = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL)
+        vsplit.pack1(delta_list, resize=False, shrink=False)
+        vsplit.pack2(ebox, resize=True, shrink=True)
+        vsplit.set_position(DRC_GROUPS_PX)
+        gbox.pack_start(vsplit, True, True, 0)
+        # out of sight until a rule with CD groups is in the grid (and
+        # the pager until there is a second page): the window's show_all
+        # must not bring them up. With the list hidden the divider is the
+        # grid's alone.
+        for part in (delta_bar, delta_controls, delta_list):
             part.show_all()
             part.set_no_show_all(True)
             part.hide()
@@ -7369,8 +7423,7 @@ class Viewer:
         win._delta_label = delta_label
         win._delta_prev, win._delta_next = delta_prev, delta_next
         win._delta_controls, win._delta_list = delta_controls, delta_list
-        gbox.pack_start(pbar, False, False, 0)
-        gbox.pack_start(gsc, True, True, 0)
+        win._delta_bar, win._vsplit = delta_bar, vsplit
         hsplit = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         hsplit.pack1(rbox, resize=True, shrink=True)
         hsplit.pack2(gbox, resize=True, shrink=True)
@@ -7379,12 +7432,17 @@ class Viewer:
         # the grid with the handle stuck at the edge): the divider
         # keeps its FRACTION of the pane - drags update it, resizes
         # (like the auto-widen on db load) re-apply it
-        frac = [0.45]
+        # (the fraction is this one until the divider is dragged: GTK's
+        # own first position - from the widths the two sides ask for,
+        # which followed every change of the grid side's content - is not
+        # taken for a drag; 0.44 is where that used to put it)
+        frac = [0.44]
         guard = [False]
+        placed = [False]
 
         def _hs_pos(wdg, _pspec):
             w = wdg.get_allocated_width()
-            if not guard[0] and w > 1:
+            if not guard[0] and placed[0] and w > 1:
                 frac[0] = wdg.get_position() / float(w)
 
         def _hs_alloc(wdg, alloc):
@@ -7395,6 +7453,7 @@ class Viewer:
                 wdg.set_position(int(alloc.width * frac[0]))
             finally:
                 guard[0] = False
+            placed[0] = True
 
         hsplit.connect("notify::position", _hs_pos)
         hsplit.connect("size-allocate", _hs_alloc)
@@ -7426,14 +7485,25 @@ class Viewer:
         rule = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
         rule.get_style_context().add_class("floe-drc-rule")
         box.pack_start(rule, False, False, 0)
-        # filter controls in a FlowBox: on a narrow pane they WRAP
-        # onto extra rows instead of clipping (user call 2026-08-18)
+        # the filters on ONE line (user call 2026-11-11): the two checks
+        # and the two combos side by side at their own widths, from the
+        # left. The row is a FlowBox that asks for the width of its four
+        # in a line and is given no more (halign START), so nothing is
+        # spread - left to fill, it shared the pane's spare width out
+        # between its columns, and with a fifth control its second line's
+        # combos widened the columns `in view` and `selected` stood in.
+        # On a pane too narrow for the four it wraps, two a line, as
+        # before - nothing shortened, nothing cut off at the pane's edge
+        # (user call 2026-08-18) - and so asks the left pane for no more
+        # than its two widest.
         nav = Gtk.FlowBox()
         nav.set_selection_mode(Gtk.SelectionMode.NONE)
-        nav.set_min_children_per_line(1)
+        nav.set_min_children_per_line(2)
         nav.set_max_children_per_line(4)
-        nav.set_column_spacing(4)
+        nav.set_column_spacing(6)
         nav.set_row_spacing(2)
+        nav.set_halign(Gtk.Align.START)
+        nav.get_style_context().add_class("floe-drc-low")
         box.pack_start(nav, False, False, 2)
         hl = Gtk.CheckButton(label="in view")
         hl.set_active(self._drc_hl)
@@ -7448,11 +7518,15 @@ class Viewer:
         selv.connect("toggled", self._on_drc_selview)
         nav.add(selv)
         win._selv = selv
+        # `Conflict only` is not offered yet (the same call: "우선 숨기고 -
+        # 해당 기능 오픈은 추후에"): the check is made and wired as before -
+        # the filter, its job and the reviewers window's snapshot are
+        # untouched - and is in no row. To offer it: nav.add(conflict)
+        # after `selected`.
         conflict = Gtk.CheckButton(label="Conflict only")
         conflict.set_tooltip_text("Global judgement conflicts among visited reviewers in the last Reviewers snapshot. "
             "Intersects the current cluster, CD group and waive filter; rule/group counts remain unfiltered.")
         conflict.connect("toggled", self._on_drc_conflict)
-        nav.add(conflict)
         win._conflict = conflict
         tf = Gtk.ComboBoxText()
         tf.append("all", "all types")
@@ -7473,6 +7547,8 @@ class Viewer:
         wf.connect("changed", self._on_drc_wfilter)
         nav.add(wf)
         win._wf = wf
+        for child in nav.get_children():
+            child.set_can_focus(False)   # the controls take the focus
         win._rules, win._rstore = rules, rstore
         win._grid, win._gstore = grid, gstore
         win._plabel, win._pprev, win._pnext = plabel, pprev, pnext
@@ -8394,6 +8470,8 @@ class Viewer:
             w._rstore.clear()
             w._gstore.clear()
             w._detail.set_text("")
+            self._drc_detail_at = None
+            self._drc_svrf_show()
             self._drc_types_rebuild()   # empty+disable type combo
         close = getattr(old, "close", None)
         if close is not None:
@@ -9090,6 +9168,8 @@ class Viewer:
                     self.rulers.remove(ruler)
             self._drc_ruler = []
             win._detail.set_text("")
+            self._drc_detail_at = None
+            self._drc_svrf_show()
             win._plabel.set_text("")
             win._pprev.set_sensitive(False)
             win._pnext.set_sensitive(False)
@@ -9332,6 +9412,7 @@ class Viewer:
         self._drc_delta_page = 0
         self._drc_delta_error = None
         self._drc_delta_busy = bool(ci is not None and cons and mode != "off")
+        self._drc_delta_since, self._drc_delta_said = time.monotonic(), False
         worker = getattr(self, "_drc_delta_worker", None)
         if self._drc_delta_busy:
             from .gtkservice import DeltaWorker
@@ -9363,7 +9444,9 @@ class Viewer:
         try:
             store = win._delta_store
             store.clear()
-            selected = store.append(["All errors", str(count), None, "All errors"])
+            summary = self._drc_delta_summary()
+            selected = store.append(["All errors", str(count), None, GLib.markup_escape_text(
+                "All errors" + (" · " + summary if summary else ""))])
             active = getattr(self, "_drc_delta_group", None)
             if groups is not None:
                 for group in groups.page(page * 50, 50, want):
@@ -9377,39 +9460,42 @@ class Viewer:
                 win._delta_tree.get_selection().select_iter(selected)
         finally:
             self._drc_delta_ui_busy = False
-        # (a rule not picked, grouping off and a rule without groups have
-        # no label to read: the list and its pager are out of sight then)
-        message = getattr(self, "_drc_delta_error", None)
-        if not message:
-            if getattr(self, "_drc_delta_busy", False):
-                progress = getattr(getattr(self, "_drc_delta_worker", None), "progress", None)
-                message = progress if isinstance(progress, str) and progress else "measuring CD / grouping…"
-            elif groups is None:
-                message = ""
-            else:
-                message = "groups %d / %d · %d groups" % (page + 1, pages, total)
-                # the step in use is read here and in the step button's
-                # tooltip: the pane has no entry showing it
-                step = getattr(groups, "step_ticks", None)
-                if step is not None:
-                    message += " · %sstep %s" % (
-                        "auto " if getattr(groups, "auto_step", False) else "",
-                        format_ticks(step))
-                geometry = getattr(groups, "geometry_count", 0)
-                if geometry:
-                    message += " · %d edge-length groups (um; CD unresolved)" % geometry
-                estimated = getattr(groups, "estimated_total", 0)
-                if estimated:
-                    message += " · %d estimated (all statuses)" % estimated
-        win._delta_label.set_text(message)
-        win._delta_label.set_tooltip_text(message or None)
+        # the pager: `page/pages`, and there only for a second page
+        win._delta_label.set_text("%d/%d" % (page + 1, pages))
         win._delta_prev.set_sensitive(page > 0)
         win._delta_next.set_sensitive(page + 1 < pages)
         controls, listed = self._drc_delta_shown()
         win._delta_controls.set_visible(controls)
         win._delta_list.set_visible(listed)
+        win._delta_bar.set_visible(pages > 1)
         win._delta_step.set_sensitive(
             getattr(self, "_drc_delta_mode", "absolute") != "off")
+
+    def _drc_delta_summary(self):
+        """A grouping in a line - the `All errors` row's tooltip, where the
+        group pager's line read it for every rule until 2026-11-11: the
+        groups, the step in use (also the step button's tooltip), the
+        edge-length groups, the estimated CDs; of a grouping that failed,
+        why; nothing while there is none."""
+        error = getattr(self, "_drc_delta_error", None)
+        if error:
+            return error
+        groups = getattr(self, "_drc_delta_groups", None)
+        if groups is None:
+            return ""
+        message = "%d groups" % len(groups)
+        step = getattr(groups, "step_ticks", None)
+        if step is not None:
+            message += " · %sstep %s" % (
+                "auto " if getattr(groups, "auto_step", False) else "",
+                format_ticks(step))
+        geometry = getattr(groups, "geometry_count", 0)
+        if geometry:
+            message += " · %d edge-length groups (um; CD unresolved)" % geometry
+        estimated = getattr(groups, "estimated_total", 0)
+        if estimated:
+            message += " · %d estimated (all statuses)" % estimated
+        return message
 
     def _drc_delta_shown(self):
         """(controls, list): what of the pane's CD part is in sight for the
@@ -9427,8 +9513,8 @@ class Viewer:
         waive. With grouping off the list has nothing to list, and the
         controls stay - the way to turn grouping on again - where the rule
         has errors and constraints to group them by and was not seen to
-        have no group. A grouping that failed keeps the part, whose label
-        says why."""
+        have no group. A grouping that failed keeps the part - the
+        `All errors` row's tooltip says why, as the status line did."""
         ci = self._drc_open
         if self._drc is None or ci is None:
             return False, False
@@ -9468,7 +9554,13 @@ class Viewer:
             if (getattr(self, "_drc_delta_busy", False) and isinstance(progress, str)
                     and progress != getattr(self, "_drc_delta_progress", None)):
                 self._drc_delta_progress = progress
-                self._drc_delta_refresh()
+                # the pane has no line for it (2026-11-11): a measurement
+                # that takes its time says where it is in the status line,
+                # and then that it is done; one made at once says nothing
+                if (time.monotonic() - getattr(self, "_drc_delta_since", 0.0)
+                        >= DRC_SAY_AFTER_S):
+                    self._drc_delta_said = True
+                    self._set_live_status("CD groups: %s" % progress)
             return
         key, groups, error = result
         if key != getattr(self, "_drc_delta_key", None):
@@ -9494,6 +9586,10 @@ class Viewer:
         self._drc_group_ui_refresh()
         if error:
             self._set_live_status("CD grouping failed: %s" % error)
+        elif getattr(self, "_drc_delta_said", False):
+            self._set_live_status("CD groups: %s" % (
+                self._drc_delta_summary() or "none for this rule"))
+        self._drc_delta_said = False
 
     def _drc_delta_scope_refresh(self):
         """A new scope starts at page one, with only its own saved picks."""
@@ -9530,6 +9626,108 @@ class Viewer:
         model, it = selection.get_selected()
         if it is not None:
             self._drc_delta_choose(model.get_value(it, 2))
+
+    def _on_drc_delta_menu(self, tree, ev):
+        """Right click on a row of the group list (user call 2026-11-11):
+        the row becomes the grid's scope, as a click on it makes it, and a
+        menu offers what is done to all its errors at once - `All errors`
+        the rule's or the cluster's, a group row the group's: select all /
+        deselect all, waive all / unwaive all, mark / clear not for review
+        all (_drc_scope_all)."""
+        if ev.button != 3 or ev.type != Gdk.EventType.BUTTON_PRESS:
+            return False
+        hit = tree.get_path_at_pos(int(ev.x), int(ev.y))
+        db, ci = self._drc, self._drc_open
+        if hit is None or db is None or ci is None:
+            return False
+        # (the selection's own handler makes the row the scope)
+        tree.get_selection().select_path(hit[0])
+        entries = [("select", None), ("deselect", None), None,
+                   ("waive", True), ("waive", False)]
+        if hasattr(db, "review_flags"):
+            entries += [None, ("not-required", True), ("not-required", False)]
+        menu = Gtk.Menu()
+        for entry in entries:
+            if entry is None:
+                menu.append(Gtk.SeparatorMenuItem())
+                continue
+            it = Gtk.MenuItem(label=self._drc_scope_words(*entry))
+            it.connect("activate", lambda _i, a=entry[0], o=entry[1], d=db, c=ci:
+                       self._drc_scope_all(a, o)
+                       if self._drc is d and self._drc_open == c else None)
+            menu.append(it)
+        self._drc_menu = menu
+
+        def released(_menu):
+            if self._drc_menu is menu:
+                self._drc_menu = None
+
+        menu.connect("deactivate", released)
+        menu.show_all()
+        if hasattr(menu, "popup_at_pointer"):
+            menu.popup_at_pointer(ev)
+        else:
+            menu.popup(None, None, None, None, ev.button, ev.time)
+        return True
+
+    @staticmethod
+    def _drc_scope_words(action, on=None):
+        """A group menu command as its item reads."""
+        return {("select", False): "select all", ("deselect", False): "deselect all",
+                ("waive", True): "waive all", ("waive", False): "unwaive all",
+                ("not-required", True): "mark not for review all",
+                ("not-required", False): "clear not for review all"}[(action, bool(on))]
+
+    def _drc_scope_all(self, action, on=None):
+        """A group menu command on the scope in the grid - the rule, the
+        cluster or the CD group picked in the group list. `select all`
+        selects what the grid lists, all its pages - the scope under the
+        waive filter, as a box selection does - and `deselect all` drops
+        the selection. The other four are done to EVERY error of the scope
+        whatever the waive filter lists: `waive all` leaves the whole group
+        waived and `unwaive all` not waived, so the one undoes the other
+        under any filter (under Not Waived the errors a `waive all` took
+        are no longer listed to be picked again). They do not touch the
+        selection in the grid: the service collects the scope's errors
+        (the select job) and the command is done to that (the review
+        job), in the background for a scope of any size."""
+        db, ci = self._drc, self._drc_open
+        if db is None or ci is None:
+            return
+        if action == "deselect":
+            if getattr(self, "_drc_selection_key", None) is not None:
+                self._drc_selection_cancel()
+            self._drc_set_sel(None)
+            self._drc_grid_fill(ci)
+            self._set_live_status("error select %s: none selected"
+                                  % db.checks[ci].name)
+            self._display()
+            return
+        if action == "waive" and not hasattr(db, "set_status"):
+            self._set_live_status("waive needs a packed index: "
+                                  "floe-index drc <db>")
+            return
+        if action == "not-required" and not hasattr(db, "review_flags"):
+            self._set_live_status("review flags need a packed index: "
+                                  "floe-index drc <db>")
+            return
+        if action != "select" and self._drc_review_pending():
+            return
+        self._drc_selection_submit(
+            ci, None, self._drc_active_members(), "replace",
+            then=None if action == "select" else (action, on))
+
+    def _drc_scope_apply(self, ci, targets, action, on):
+        """The second half of a group menu command: the scope's errors are
+        collected (`targets`, the service's selection), now the command."""
+        if not targets:
+            self._set_live_status("%s: no error in this scope"
+                                  % self._drc_scope_words(action, on))
+            return
+        if action == "waive":
+            self._drc_set_waived(ci, targets, on)
+        else:
+            self._drc_set_not_required(ci, targets, on)
 
     def _on_drc_delta_mode(self, combo):
         mode = combo.get_active_id() or "absolute"
@@ -9877,8 +10075,7 @@ class Viewer:
         else:
             eis = base[start:stop]
         self._drc_grid_map = eis
-        win._plabel.set_text("%d / %d" % (self._drc_page + 1,
-                                          pages))
+        win._plabel.set_text("%d/%d" % (self._drc_page + 1, pages))
         win._pprev.set_sensitive(self._drc_page > 0)
         win._pnext.set_sensitive(self._drc_page < pages - 1)
         sel = self._drc_sel
@@ -10002,6 +10199,10 @@ class Viewer:
                            self._drc_set_not_required(ci, t, o)
                            if self._drc is d else None)
                 menu.append(it)
+        menu.append(Gtk.SeparatorMenuItem())
+        it = Gtk.MenuItem(label="SVRF info…")
+        it.connect("activate", lambda _i: self._drc_svrf_dialog())
+        menu.append(it)
         self._drc_menu = menu
 
         def released(_menu):
@@ -11180,10 +11381,16 @@ class Viewer:
             lines.append("")
             lines += c.desc.split("\n")
         win._detail.set_text("\n".join(lines))
+        self._drc_detail_at = (ci, None)
+        self._drc_svrf_show()
 
     def _drc_show_detail(self, ci, ei):
         """Bottom pane: rule description, kind, coordinates and the
-        review status of one violation."""
+        review status of one violation. What the SVRF metadata adds of it
+        - the constraint, the measured CD against its bound, the layers,
+        their gds numbers and derivations - is not listed here (user call
+        2026-11-11): the SVRF info window shows it (_drc_svrf_dialog, i),
+        following the error in this pane while it is open."""
         win, db = self._drcwin, self._drc
         if win is None or db is None:
             return
@@ -11215,7 +11422,6 @@ class Viewer:
             lines += [ln for ln in c.desc.split("\n")
                       if not ln.startswith(("Rule File Pathname:",
                                             "Rule File Title:"))]
-        lines += self._drc_meta_lines(c.name, e)
         pts = e.pts
         if e.kind == "e":
             lines.append("edge (um):")
@@ -11233,6 +11439,99 @@ class Viewer:
             if len(pts) > 64:
                 lines.append("  … %d more" % (len(pts) - 64))
         win._detail.set_text("\n".join(lines))
+        self._drc_detail_at = (ci, ei)
+        self._drc_svrf_show()
+
+    def _drc_svrf_text(self):
+        """The SVRF info window's text: of the error in the detail pane
+        the constraint as the deck writes it, its measured CD against the
+        bound, the layers with their gds numbers and derivations; of a
+        rule without an error picked the same less the measurement; of a
+        rule the metadata does not have, that."""
+        db, at = self._drc, getattr(self, "_drc_detail_at", None)
+        if db is None or at is None or at[0] >= len(db.checks):
+            return "pick a rule or an error in the DRC pane"
+        ci, ei = at
+        c = db.checks[ci]
+        e = c.errors[ei] if ei is not None and ei < len(c.errors) else None
+        head = c.name if e is None else "%s  #%d(%d)" % (c.name, ei + 1, e.num)
+        lines = self._drc_meta_lines(c.name, e)[1:]
+        return "\n".join([head] + (lines or self._drc_svrf_status(c.name)[1].splitlines()))
+
+    def _drc_svrf_show(self):
+        """Keep the SVRF info window, when it is open, to the detail pane."""
+        dlg = getattr(self, "_svrfdlg", None)
+        if dlg is not None:
+            dlg._buffer.set_text(self._drc_svrf_text())
+
+    def _drc_svrf_dialog(self, toggle=False):
+        """DRC > SVRF info (i; also the error grid's menu): a window of
+        its own for what the SVRF metadata says of the rule and the error
+        in the detail pane (user call 2026-11-11 - the pane listed it under
+        every error). It does not block: left open it follows the error
+        picked or stepped to, the viewer's keys work from it, Esc or i
+        closes it."""
+        dlg = getattr(self, "_svrfdlg", None)
+        if dlg is not None:
+            if toggle:
+                dlg.destroy()
+            else:
+                dlg.present()
+            return
+        if self._drc is None:
+            self._set_live_status("SVRF info: open a DRC .db first")
+            return
+        dlg = Gtk.Window(title="SVRF info")
+        dlg.set_transient_for(self.window)
+        dlg.set_type_hint(Gdk.WindowTypeHint.DIALOG)
+        dlg.set_default_size(460, 230)
+        view = Gtk.TextView()
+        view.set_editable(False)
+        view.set_cursor_visible(False)
+        view.set_monospace(True)
+        view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        view.set_left_margin(6)
+        view.set_right_margin(6)
+        sc = Gtk.ScrolledWindow()
+        sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sc.add(view)
+        dlg.add(sc)
+        dlg._buffer = view.get_buffer()
+        self._svrfdlg = dlg
+        self._drc_svrf_show()
+
+        def on_key(_w, ev):
+            name = self._command_key(ev)
+            if name in ("Escape", "i"):
+                dlg.destroy()
+                return True
+            if ev.state & Gdk.ModifierType.CONTROL_MASK:
+                return False        # Ctrl+C on the text is the window's own
+            return self._on_key(self.window, ev)
+        dlg.connect("key-press-event", on_key)
+
+        def _gone(*_a):
+            self._svrfdlg = None
+            self._restore_keys()
+        dlg.connect("destroy", _gone)
+
+        def _place(*_a):
+            # over the detail pane, at the main window's lower left - not
+            # over the error being looked at
+            par = self.window
+            if not (par.get_realized() and dlg.get_realized()):
+                return False
+            px, py = par.get_position()
+            _pw, ph = par.get_size()
+            dh = dlg.get_allocated_height()
+            if dh <= 1:
+                dh = dlg.get_preferred_size()[1].height
+            dlg.move(px + 12, py + max(0, ph - dh - 70))
+            return False
+        dlg.set_position(Gtk.WindowPosition.NONE)
+        dlg.connect("realize", _place)
+        dlg.connect("map", _place)
+        dlg.show_all()
 
     def _drc_jump(self, ci, ei, isolate=False):
         db = self._drc
@@ -11638,8 +11937,9 @@ class Viewer:
                 lines.append("constraint: %s" % t)
         # the CD the rule's condition flagged on this marker, its bound and
         # their difference in five-decimal ticks (app-core drc::analysis -
-        # the delta groups' numbers; feature/jobdeck-drc 2026-10-06)
-        info = self._drc_cd_info(e, name)
+        # the delta groups' numbers; feature/jobdeck-drc 2026-10-06);
+        # without a marker (the rule alone) none of that
+        info = self._drc_cd_info(e, name) if e is not None else {}
         pick = info.get("pick")
         ticks = pick.get("ticks") if pick else None
         if ticks:
@@ -11661,7 +11961,7 @@ class Viewer:
                         for t in cticks), unit))
                 if pick.get("reason"):
                     lines.append("CD selection: %s" % pick["reason"])
-        elif cons:
+        elif cons and e is not None:
             lines.append("CD unavailable: geometry or rule condition "
                          "unresolved")
         if pick is None and info.get("marker_length_ticks") is not None:
