@@ -23,6 +23,10 @@ floe2 <cmd> ... / floe-index drc|svrf ...    # floe2-portable 번들
 - 에러 번호는 두 종류: **local** = 룰 안 1-based 순번(뷰어
   그리드와 동일), **global** = 파일 순서 전역 번호(Calibre RVE
   스타일, 뷰어 상세의 `#local(global)`).
+- 리뷰어: waive 상태(`waived`, `status`)는 `--floe-reviewer ID`(또는 `FLOE_REVIEWER`)의 것을
+  읽는다. 주지 않으면 DISPLAY 호스트·SSH 접속원·계정명 순으로 얻은 ID인데, 스크립트에서는 대개
+  아무의 리뷰도 아니므로 0이 나온다. `FLOE_REVIEWER_REQUIRED=1`인 환경에서는 ID 없이 읽는 명령이
+  1로 끝난다(0.12.440). 리뷰어 전원의 수치는 §2b의 `--review-stats`가 낸다.
 - status: `0` = not waived, `1` = waived. waive 변경은 뷰어
   전용(우클릭 메뉴 / `w` 키) — CLI 쓰기 표면은 없고, 재-pack 시
   초기화된다.
@@ -154,6 +158,80 @@ JSON 배열(객체 단위 스트리밍 — 수백만 에러 룰도 상주 메모
 환경(ProperTee는 ~1MiB)에서는 반드시 **파일로 리다이렉션한 뒤
 json_parse** 할 것. 파이프 직캡처는 지원 경로가 아니다.
 
+## 2b. 리뷰어 통계: `floe2 drc <db> --review-stats` (0.12.440)
+
+```bash
+floe2 drc results.db --review-stats > review_stats.json
+floe2 drc results.db --review-stats --floe-reviewer kim,lee > two.json   # 이 리뷰어들만
+floe2 --workdir /work/floe drc results.db --review-stats > stats.json     # 리뷰가 workdir에 있을 때
+```
+
+뷰어 없이 리뷰어 전원의 검토 수치와 팀 합계를 JSON 한 문서로 낸다(사용자 2026-11-10: TeeBox가
+같은 레이아웃·db를 검토하는 사람들의 통계를 수집). 쓰는 것은 없다.
+
+- **리뷰어 찾기**: pack 옆(결과 폴더, `--workdir`이면 그 미러)의 작업 파일에서 찾는다. waive
+  사이드카 `.<db>.waive.<ID>`와 방문·검토 제외 `.<db>.review.<ID>.sqlite3`다. 결과 폴더에 쓸 수
+  없어 이 계정이 다른 곳에 둔 것도 본다: 임시 폴더의 waive 사이드카(`waive_location: temp`),
+  `FLOE_DRC_REVIEW_ROOT`나 사용자 데이터 폴더의 방문 기록(`review-root`, `user-data`). 임시 폴더는
+  호스트마다 다르므로 그런 리뷰는 그 호스트에서 돌려야 보인다. 치워 둔 `.stale-<시각>`과 만드는
+  중인 `.tmp-<pid>`는 리뷰어가 아니다.
+- **다시 센다**: waived는 사이드카의 상태 바이트를 읽어 센 값이다. 저장된 카운터는 비교만 해서
+  `counters_match`로 알린다. 0.12.439까지 같은 ID의 두 세션이 카운터를 어긋나게 둘 수 있었고,
+  `--rules`의 `waived`는 그 카운터다. 방문·검토 제외는 비트맵에서 센다.
+- **팀 합계**: 뷰어 공동 검토 창(`reviewers…`)에서 전원을 불러와 본 수치와 같다. 방문은 합집합,
+  waive와 검토 제외는 누구든 한 것이되, **둘 다 방문한 리뷰어의 판단이 서로 다른 에러는 conflict**
+  로 따로 세고 waived·not_required에서 뺀다. waive 파일만 있는 리뷰어(방문 기록 없음)는 conflict를
+  만들지 않는다. `pending` = 전체 − (방문했거나 검토 제외인 에러)다. 방문 없이 일괄 waive한 에러는
+  pending에 남는다(방문과 waive는 독립).
+- **pack이 현재 것이어야 한다**: pack이 없거나 `.db`가 인덱싱 뒤 바뀌었으면(크기·시각) 0을 내지 않고
+  1로 끝나며 무엇을 할지 말한다. 다른 실행이 pack을 만드는 중이면 75다. `--rules`·`--errs`·
+  `--list`·`--build`와 함께 쓸 수 없다(종료 2).
+- **다른 결과의 파일**: pack 지문이 다른 사이드카(재실행 전의 것 등)는 세지 않고 `skipped`에
+  이유와 함께 적는다.
+- **비용**: 리뷰어마다 에러당 1바이트를 읽는다. 14억 에러 결과에 열 명이면 14 GB를 읽는다.
+
+```json
+{
+  "type": "floe-drc-review-statistics", "version": 1,
+  "generated": "2026-11-10T09:30:09Z",
+  "database": "/r/results.db", "pack": "/r/.results.db.tray",
+  "fingerprint": "b701…", "cell": "TOP", "errors": 9100,
+  "rules": [{"index": 1, "name": "A.WIDTH", "errors": 6000}, …],
+  "reviewers": [
+    {"id": "kim", "present": true,
+     "waive_known": true, "visited_known": true, "not_required_known": true,
+     "waived": 10, "visited": 5, "not_required": 10, "visited_not_required": 0, "pending": 9085,
+     "counters_match": true,
+     "waive_file": "/r/.results.db.waive.kim", "waive_location": "results",
+     "waive_modified": "2026-11-10T08:42:20Z",
+     "review_file": "/r/.results.db.review.kim.sqlite3", "review_location": "results",
+     "review_modified": "2026-11-10T08:42:21Z",
+     "rules": [{"index": 1, "name": "A.WIDTH", "waived": 10, "visited": 5,
+                "not_required": 10, "visited_not_required": 0, "pending": 5985}]},
+    {"id": "park", "present": true, "waive_known": true, "visited_known": false,
+     "not_required_known": false, "waived": 0, "counters_match": true, …, "rules": []}
+  ],
+  "team": {"reviewers": 3, "errors": 9100, "visited": 7, "waived": 15, "not_required": 10,
+           "conflicts": 1, "pending": 9083,
+           "rules": [{"index": 1, "name": "A.WIDTH", "errors": 6000, "visited": 7, "waived": 14,
+                      "not_required": 10, "conflicts": 1, "pending": 5983}, …]},
+  "skipped": [{"reviewer": "ghost", "file": "/r/.results.db.waive.ghost",
+               "reason": "waive file of another DRC result (its header or size is not this pack's)"}]
+}
+```
+
+| 필드 | 의미 |
+|---|---|
+| `reviewers[].rules` | 그 리뷰어가 작업한 룰만(waived·visited·not_required 중 하나라도 0이 아닌 룰). 없는 룰은 0 |
+| `reviewers[].present` | `--floe-reviewer`로 지정했는데 작업 파일이 없는 ID는 `false`이고 수치가 없다 |
+| `*_known` | 그 차원의 파일이 있는지. waive 파일만 있으면 방문·검토 제외는 0이 아니라 모름이라 키가 없다 |
+| `counters_match`, `counter_mismatch[]` | 저장된 waived 카운터가 센 값과 같은지, 다르면 룰별 `stored`·`counted` |
+| `waive_modified`, `review_modified` | 파일의 마지막 수정 시각(UTC). 마지막 작업 시각의 근사 |
+| `team.rules` | 모든 룰. `team.reviewers`는 센 리뷰어 수 |
+
+키는 사전순으로 나온다. ProperTee처럼 캡처 상한이 있는 호출자는 파일로 받아 `json_parse`한다(§2).
+같은 ID로 두 세션을 열 수 없게 된 것(세션 잠금)과 ID 요구 스위치는 DRC.ko.md §2에 있다.
+
 ## 3. 에러 스냅샷 PNG: `floe2 render --drc`
 
 ```bash
@@ -174,7 +252,7 @@ floe2 render chip.oas --drc results.db --drc-rule M1.SPACE.1 \
 | `--layers ...` | 자동 | 명시하면 svrf 격리보다 우선 |
 | `--drc-rules RULES.json` | 자동 탐색 | svrf 사이드카 직접 지정 |
 | `--detail`, `--density`, `--thin`, `--occupancy`, `--label-font-px`, `--layer-colors`, `--legend`, `--archival`, `--no-index`, `--temp-index`, `--light`/`--full`, `--wait` | 일반 캡처와 같음 | [CAPTURE-CLI.ko.md](CAPTURE-CLI.ko.md) §1.3·§1.5. 영역(`--bbox`/`--at`/mosaic)·`--batch`·`--report`·`--chipid`/`--chipnumber`와는 함께 쓸 수 없다 |
-| `--floe-reviewer NAME` | DISPLAY/SSH 유도 | 기존 waive 상태를 읽는 리뷰어 태그; 캡처는 리뷰를 쓰지 않는다 (`floe2 drc`/`view`에도 있음; FLOE_REVIEWER env 동치) |
+| `--floe-reviewer NAME` | DISPLAY/SSH 유도 | 기존 waive 상태를 읽는 리뷰어 태그; 캡처는 리뷰를 쓰지 않는다 (`floe2 drc`/`view`에도 있음; FLOE_REVIEWER env 동치). `FLOE_REVIEWER_REQUIRED=1`이면 필수(0.12.440) |
 
 - **픽셀 = 뷰어와 동일**: 뷰어의 렌더 서비스 경로(상주 vfsd
   세션 + detail medium 컷/헤어라인/LOD/커버리지) 그대로, depth만

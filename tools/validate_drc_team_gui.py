@@ -163,8 +163,40 @@ def r7(temp, check):
     v = gui.Viewer(cache, detail=2)
     try:
         pump(v, lambda: v.last_frame is not None, "first frame")
+        # one session a reviewer (2026-11-10): while another process has
+        # this reviewer's review of the database open, the viewer does not
+        # open it - it says who has it, in the panel and a dialog
+        held = gtkservice.Service(FLOE2)
+        try:
+            held.request("drc_open", path=str(d / "sample.db"), mode="load", reviewer="gui")
+            check(not v.load_drc(str(d / "sample.db")) and v._drc is None,
+                  "a review open in another session is not opened again")
+            said = v._drcwin._info.get_text()
+            dialog = getattr(v, "_drc_refusal_dialog", None)
+            check("gui's review of sample.db is already open in another session" in said
+                  and "pid %d" % held._proc.pid in said and dialog is not None,
+                  "... and the viewer says who has it", said)
+            if dialog is not None:
+                dialog.response(gui.Gtk.ResponseType.CLOSE)
+        finally:
+            held.close()
         check(v.load_drc(str(d / "sample.db")), "load_drc")
         db = v._drc
+        # whose review it is, in sight: the id the files are kept by; one
+        # that was not stated (--userid, FLOE_REVIEWER) is said to be where
+        # the viewer runs
+        who = v._drcwin._reviewer_info
+        check(who.get_visible() and who.get_text() == "reviewer: gui",
+              "the panel shows the reviewer id", who.get_text())
+
+        class Derived(object):
+            _reviewer, _reviewer_source, _reviewer_stated = "etx01", "DISPLAY host", False
+            read_only, _waive_path = False, "/r/.sample.db.waive.etx01"
+        text, tip = v._drc_reviewer_text(Derived())
+        check("etx01" in text and "not a personal ID" in text and "--userid" in text
+              and "DISPLAY host" in tip and "waive.etx01" in tip,
+              "an id that was not stated is said so", (text, tip))
+        check(v._drc_reviewer_text(None) is None, "no review, no reviewer line")
         store = v._drcwin._rules.get_model()
         v._drcwin._rules.set_cursor(store[0].path, None, False)
         pump(v, lambda: v._drc_open == 0, "the first rule")

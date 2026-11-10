@@ -20,9 +20,9 @@
 //! A sidecar is bound to the pack's fingerprint (source size/mtime, error
 //! count), not to its inode: a re-pack of the same .db keeps its review.
 use super::{
-    local::{pack_reader, reviewer_tag, waive_paths},
+    local::{pack_reader, required_reviewer, waive_paths, ReviewerSource},
     review::Layout,
-    Pack, Violation,
+    session, Pack, Violation,
 };
 use crate::{annotations, check_cancelled, Error, ErrorKind, Result};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -72,6 +72,12 @@ pub struct Review {
     /// the reviewer tag the sidecars are named by (drc::team names the
     /// visited/not-required store and snapshots by it too)
     pub reviewer: String,
+    /// how that tag was found: stated (`--userid`, FLOE_REVIEWER) or taken
+    /// from where the viewer runs - the viewer shows it (2026-11-10)
+    pub reviewer_source: ReviewerSource,
+    /// this review's hold on its waive sidecar (drc::session): a second
+    /// session of the reviewer on this result is refused while it lives
+    _session: Option<std::sync::Arc<session::Session>>,
     /// bumped on every status write (a worker reading statuses apart
     /// knows whether they moved under it)
     generation: u64,
@@ -198,7 +204,9 @@ impl Review {
             }
         }
         let header = Layout::from_pack(&pack)?.header();
-        let tag = reviewer_tag(reviewer);
+        // (a stated id where FLOE_REVIEWER_REQUIRED asks for one)
+        let who = required_reviewer(reviewer)?;
+        let tag = who.tag.clone();
         let waive = waive_paths(&pack.path, &tag)?;
         let [note_beside, note_temp] = note_paths(&waive);
         let mut notices = Vec::new();
@@ -225,6 +233,21 @@ impl Review {
                     (pack.path.clone(), status_section, wcount_section)
                 }
             },
+        };
+        // one session a reviewer and result: the sidecar's counters are kept
+        // in memory by the session that writes them (drc::session); the
+        // pack's own embedded statuses are read-only and need none
+        let session = if waive_path == pack.path {
+            None
+        } else {
+            let database = crate::cache::database_path(&pack.path)?;
+            session::hold(
+                &waive_path,
+                &tag,
+                &database.file_name().unwrap_or_default().to_string_lossy(),
+                &floe_vfs::lock::reader_label(&format!("{} drc review", crate::program())),
+                &mut notices,
+            )?
         };
         let reader = File::open(&waive_path)?;
         let mut raw = vec![0u8; pack.checks.len() * 4];
@@ -253,6 +276,8 @@ impl Review {
             note_tag,
             notices,
             reviewer: tag,
+            reviewer_source: who.source,
+            _session: session,
             generation: 0,
         };
         review.load_notes();
@@ -1067,7 +1092,15 @@ impl Opened {
         if side.exists() {
             match Review::open(&side, Some(path), reviewer, cancelled) {
                 Ok(review) => return Ok((Self::Pack(Box::new(review)), Vec::new())),
-                Err(e) if matches!(e.kind, ErrorKind::Busy | ErrorKind::Cancelled) => {
+                // a pack being rebuilt, a review open in another session, a
+                // reviewer id required and not given: said as they are, never
+                // answered with the ASCII file (which has no review)
+                Err(e)
+                    if matches!(
+                        e.kind,
+                        ErrorKind::Busy | ErrorKind::Cancelled | ErrorKind::Admission
+                    ) =>
+                {
                     return Err(e)
                 }
                 Err(e) => warnings.push(format!(

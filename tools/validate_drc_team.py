@@ -37,6 +37,16 @@ must match row for row (snapshots: all but the reviewer, id and time).
   R8  tools/gen_drc_samples.py (the manual-test samples): its files, the
       layout indexed, the reviewers' conflicts and the previous run's
       matches it promises.
+  R9  one session a reviewer and result (drc::session): a second process
+      of the same reviewer id is refused and told who has it, the same
+      process and a later session are not, a killed holder holds nothing;
+      FLOE_REVIEWER_REQUIRED refuses a review and a waive read without a
+      stated id (2026-11-10).
+  R10 `floe2 drc --review-stats`: every reviewer found by the working
+      files, each one's counts and the team's - by hand, and the reviewers
+      window's; stored counters compared and never counted, leftovers and
+      another result's files, the reviewers named, a stale or missing pack
+      refused, --workdir (2026-11-10).
 
 usage: .venv/bin/python tools/validate_drc_team.py
 """
@@ -940,10 +950,359 @@ def r8(temp):
               "--legend: every layer's", legend("--layers", "all", "--legend"))
 
 
+# ---- R9, R10 (2026-11-10: one session a reviewer, the reviewers' statistics) ----
+
+REVIEW_ENV = ("FLOE_REVIEWER", "FLOE_REVIEWER_REQUIRED", "FLOE_REVIEW_SESSION_LOCK",
+              "FLOE_WORKDIR", "SSH_CONNECTION", "SSH_CLIENT")
+
+
+def svc_with(env):
+    """A service started under `env` (its process takes the environment
+    of its first request), without the review switches of this shell."""
+    saved = dict(os.environ)
+    try:
+        for k in REVIEW_ENV:
+            os.environ.pop(k, None)
+        os.environ.update(env)
+        s = Svc()
+        try:
+            s("drc_find", db="/nonexistent/x.db")
+        except Exception:
+            pass
+        return s
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
+def run_env(args, env):
+    e = dict(os.environ)
+    for k in REVIEW_ENV:
+        e.pop(k, None)
+    e.update(env)
+    return run(args, env=e)
+
+
+def refusal(svc, **fields):
+    try:
+        svc("drc_open", **fields)
+    except gtkservice.ServiceError as exc:
+        return exc.kind, str(exc)
+    return None
+
+
+def r9(temp):
+    print("[R9] one session a reviewer and result; a reviewer id where it is required")
+    d = temp / "session"
+    d.mkdir()
+    write_db(d / "s.db", [("A", [_poly(100 * i, 0) for i in range(300)]),
+                          ("B", [_edge(0, 100 * i) for i in range(50)])])
+    r = run([INDEX, "drc", str(d / "s.db")])
+    check(r.returncode == 0, "floe-index drc s.db", r.stderr)
+    db, tray = str(d / "s.db"), str(d / ".s.db.tray")
+    a, b = svc_with(dict(DISPLAY="etx01:15.0")), svc_with(dict(DISPLAY="etx01:27.0"))
+    others = []
+    try:
+        oa = a("drc_open", path=db, mode="load", reviewer="kim")
+        check((oa["reviewer"], oa["reviewer_source"], oa["reviewer_stated"])
+              == ("kim", "given", True), "an id given is said as given", oa.get("reviewer_source"))
+        a("drc_set_status", handle=oa["handle"], check=0, errors=[1, 2, 3], status=1)
+        # the same reviewer from another process: refused, told who has it -
+        # by the .db and by its pack - and nothing written
+        for fields in (dict(path=db, mode="load"), dict(path=tray, mode="pack", source=db)):
+            got = refusal(b, reviewer="kim", **fields)
+            check(got is not None and got[0] == "busy"
+                  and "kim's review of s.db is already open in another session" in got[1]
+                  and "pid %d" % a.svc._proc.pid in got[1] and "--userid" in got[1],
+                  "a second session of the reviewer is refused (%s)" % fields["mode"], got)
+        ob = b("drc_open", path=db, mode="load", reviewer="lee")
+        check(ob["reviewer"] == "lee", "another reviewer opens beside it")
+        # the same process again (a viewer reloading its database): shared
+        oa2 = a("drc_open", path=db, mode="load", reviewer="kim")
+        check(oa2["counts"][0][0] == 3, "the reviewer's own process opens it again", oa2["counts"])
+        a("drc_close", handle=oa["handle"])
+        check(refusal(b, path=db, mode="load", reviewer="kim") is not None,
+              "held while one handle of the process is open")
+        a("drc_close", handle=oa2["handle"])
+        ob2 = b("drc_open", path=db, mode="load", reviewer="kim")
+        check(ob2["counts"][0][0] == 3, "let go with the last handle: the next session opens",
+              ob2["counts"])
+        b("drc_set_status", handle=ob2["handle"], check=0, errors=[10], status=1)
+        b("drc_close", handle=ob2["handle"])
+        oa3 = a("drc_open", path=db, mode="load", reviewer="kim")
+        check(oa3["counts"][0][0] == 4, "sessions one after another keep one count", oa3["counts"])
+        # a holder that dies lets go (a kernel lock: nothing stale)
+        c = svc_with(dict(DISPLAY="etx01:31.0"))
+        c("drc_open", path=db, mode="load", reviewer="park")
+        c.svc._proc.kill()
+        c.svc._proc.wait()
+        op = b("drc_open", path=db, mode="load", reviewer="park")
+        check(op["reviewer"] == "park", "a killed session holds nothing")
+        # the switch: as before 0.12.440
+        off = svc_with(dict(DISPLAY="etx01:33.0", FLOE_REVIEW_SESSION_LOCK="off"))
+        others.append(off)
+        check(refusal(off, path=db, mode="load", reviewer="kim") is None,
+              "FLOE_REVIEW_SESSION_LOCK=off opens a second session")
+        check((d / ".floe-lock" / "s.db.waive.kim.session.build").exists(),
+              "the session's lock beside the sidecar")
+        # no id given: the DISPLAY host, said as not stated
+        plain = svc_with(dict(DISPLAY="etx01:35.0"))
+        others.append(plain)
+        o = plain("drc_open", path=db, mode="load")
+        check((o["reviewer"], o["reviewer_source"], o["reviewer_stated"])
+              == ("etx01", "DISPLAY host", False), "an id taken from the DISPLAY host is said so",
+              (o["reviewer"], o.get("reviewer_source")))
+        # FLOE_REVIEWER_REQUIRED: no review without a stated id - refused,
+        # not answered with the ASCII file
+        need = svc_with(dict(DISPLAY="etx01:37.0", FLOE_REVIEWER_REQUIRED="1"))
+        others.append(need)
+        for fields in (dict(path=db, mode="load"), dict(path=tray, mode="pack", source=db)):
+            got = refusal(need, **fields)
+            check(got is not None and got[0] == "admission" and "FLOE_REVIEWER_REQUIRED" in got[1]
+                  and '"etx01" (the DISPLAY host)' in got[1] and "--userid" in got[1],
+                  "a reviewer id is required (%s)" % fields["mode"], got)
+        o = need("drc_open", path=db, mode="load", reviewer="choi")
+        check(o["reviewer"] == "choi" and o["packed"], "with an id given it opens")
+        env_id = svc_with(dict(DISPLAY="etx01:39.0", FLOE_REVIEWER_REQUIRED="on",
+                               FLOE_REVIEWER="han"))
+        others.append(env_id)
+        o = env_id("drc_open", path=db, mode="load")
+        check((o["reviewer"], o["reviewer_source"], o["reviewer_stated"])
+              == ("han", "FLOE_REVIEWER", True), "FLOE_REVIEWER states it (the viewer's --userid)",
+              (o["reviewer"], o.get("reviewer_source")))
+    finally:
+        for s in [a, b] + others:
+            s.close()
+    need = dict(DISPLAY="etx01:41.0", FLOE_REVIEWER_REQUIRED="1")
+    r = run_env([FLOE2, "drc", db, "--rules"], need)
+    check(r.returncode == 1 and not r.stdout and "FLOE_REVIEWER_REQUIRED" in r.stderr,
+          "floe2 drc --rules without an id: refused where one is required",
+          (r.returncode, r.stderr[-300:]))
+    r = run_env([FLOE2, "drc", db, "--rules", "--floe-reviewer", "kim"], need)
+    try:
+        waived = [x["waived"] for x in json.loads(r.stdout)]
+    except ValueError:
+        waived = None
+    check(r.returncode == 0 and waived == [4, 0], "... and read with one", (r.returncode, waived))
+    r = run_env([FLOE2, "drc", db, "--review-stats"], need)
+    check(r.returncode == 0, "the statistics name no reviewer: not refused", r.stderr[-300:])
+
+
+def brute(sizes, people):
+    """The statistics by hand: people = {id: (waived, visited, excluded,
+    flags known)} with {rule: set}; (own counts, team counts by rule)."""
+    own, team = {}, []
+    for name, (w, v, n, known) in people.items():
+        rows = []
+        for ci, size in enumerate(sizes):
+            ws, vs, ns = w.get(ci, set()), v.get(ci, set()), n.get(ci, set())
+            row = {"waived": len(ws)}
+            if known:
+                row.update(visited=len(vs), not_required=len(ns),
+                           visited_not_required=len(vs & ns), pending=size - len(vs | ns))
+            rows.append(row)
+        own[name] = rows
+    for ci, size in enumerate(sizes):
+        visited, waived, excluded, conflict = set(), set(), set(), set()
+        for w, v, n, known in people.values():
+            visited |= v.get(ci, set())
+            waived |= w.get(ci, set())
+            excluded |= n.get(ci, set())
+        voters = [(w.get(ci, set()), v.get(ci, set()), n.get(ci, set()))
+                  for w, v, n, known in people.values() if known]
+        for e in visited:
+            seen = [(e in w, e in n) for w, v, n in voters if e in v]
+            if len({x[0] for x in seen}) > 1 or len({x[1] for x in seen}) > 1:
+                conflict.add(e)
+        excluded -= conflict
+        team.append({"errors": size, "visited": len(visited), "waived": len(waived - conflict),
+                     "not_required": len(excluded), "conflicts": len(conflict),
+                     "pending": size - len(visited | excluded)})
+    return own, team
+
+
+def stats_of(db, *more, env=None):
+    r = run_env([FLOE2, "drc", str(db), "--review-stats"] + list(more), env or {})
+    try:
+        return r, json.loads(r.stdout)
+    except ValueError:
+        return r, None
+
+
+def r10(temp):
+    print("[R10] floe2 drc --review-stats: every reviewer's counts and the team's")
+    d = temp / "stats"
+    d.mkdir()
+    sizes = [9000, 5000, 10]
+    write_db(d / "t.db", [("A.W", [_poly(100 * (i % 120), 60 * (i // 120)) for i in range(9000)]),
+                          ("B.S", [_edge(200 * (i % 50), 100 * (i // 50)) for i in range(5000)]),
+                          ("C,odd \"name\"", [_poly(7 * i, 3 * i, 5, 5) for i in range(10)])])
+    r = run([INDEX, "drc", str(d / "t.db")])
+    check(r.returncode == 0, "floe-index drc t.db", r.stderr)
+    db = d / "t.db"
+    # kim and lee review with flags, across the 4096-error chunks; park only
+    # opens it (a waive file alone: visits unknown); error 0 of A is a
+    # conflict (both visited, one waived), B's 1 too (one excluded it)
+    people = {
+        "kim": ({0: set(range(0, 10)) | set(range(4090, 4100)), 2: {9}},
+                {0: {0, 1, 2, 3, 4, 4095, 4096, 8999}, 1: {1}},
+                {0: set(range(100, 110)), 1: {1, 2}}, True),
+        "lee": ({0: set(range(5, 15)) | {8999}, 1: {7}},
+                {0: {0, 5, 20, 4096}, 1: {1, 7}},
+                {0: {4096}}, True),
+        "park": ({}, {}, {}, False),
+    }
+    svc = Svc()
+    try:
+        h = {}
+        for name, (w, v, n, known) in people.items():
+            h[name] = rs_open(svc, db, name)["handle"]
+            for ci, errs in w.items():
+                svc("drc_set_status", handle=h[name], check=ci, errors=sorted(errs), status=1)
+            count = 0
+            for ci, errs in v.items():
+                for e in sorted(errs):
+                    svc("drc_visit", handle=h[name], check=ci, error=e)
+                    count += 1
+            svc.visits(h[name], count)
+            for ci, errs in n.items():
+                e = svc.job(h[name], "drc_review", check=ci, action="not-required",
+                            errors=sorted(errs), on=True)
+                check(e["state"] == "done", "%s: not for review" % name, e)
+        want_own, want_team = brute(sizes, people)
+        r, got = stats_of(db)
+        check(r.returncode == 0 and got is not None and got["type"] == "floe-drc-review-statistics"
+              and got["version"] == 1, "the report", r.stderr[-300:])
+        if got is None:
+            return
+        check([x["id"] for x in got["reviewers"]] == ["kim", "lee", "park"] and not got["skipped"],
+              "the reviewers found by their working files", [x["id"] for x in got["reviewers"]])
+        check((got["errors"], [(x["index"], x["name"], x["errors"]) for x in got["rules"]])
+              == (14010, [(1, "A.W", 9000), (2, "B.S", 5000), (3, "C,odd \"name\"", 10)]),
+              "the result's rules", got["rules"])
+        keys = ("waived", "visited", "not_required", "visited_not_required", "pending")
+        for person in got["reviewers"]:
+            name = person["id"]
+            rows = want_own[name]
+            whole = {k: sum(x[k] for x in rows) for k in rows[0]}
+            check({k: person.get(k) for k in keys if k in whole} == whole
+                  and all(k in whole or k not in person for k in keys),
+                  "%s: the whole database" % name, ({k: person.get(k) for k in keys}, whole))
+            sparse = {x["index"] - 1: {k: x[k] for k in keys if k in x} for x in person["rules"]}
+            active = {ci: x for ci, x in enumerate(rows)
+                      if x["waived"] or x.get("visited") or x.get("not_required")}
+            check(sparse == active, "%s: its rules with work, each" % name, (sparse, active))
+            check(person["counters_match"] and person["waive_location"] == "results"
+                  and person["waive_modified"].endswith("Z"), "%s: its waive file" % name)
+        park = got["reviewers"][2]
+        check(park["waive_known"] and not park["visited_known"] and "visited" not in park
+              and "pending" not in park, "a waive file alone: visits not known, not zero", park)
+        team = got["team"]
+        check([{k: x[k] for k in want_team[0]} for x in team["rules"]] == want_team,
+              "the team by rule = by hand", (team["rules"], want_team))
+        whole = {k: sum(x[k] for x in want_team) for k in want_team[0]}
+        check({k: team[k] for k in whole} == whole and team["reviewers"] == 3
+              and team["conflicts"] == 3, "the team's whole database", (team, whole))
+        # ... and the reviewers window's numbers: kim loads the others
+        e = svc.job(h["kim"], "drc_team_load",
+                    paths=[str(d / ".t.db.review.lee.sqlite3"), str(d / ".t.db.waive.park")])
+        sids = [x["snapshot"] for x in e.get("loaded") or []]
+        e = svc.job(h["kim"], "drc_team_aggregate", sources=sids)
+        gui_whole = e.get("counts") or {}
+        check(len(sids) == 2 and all(gui_whole.get(k) == team[k] for k in
+              ("visited", "waived", "not_required", "conflicts", "pending", "reviewers")),
+              "the team's numbers are the reviewers window's", (gui_whole, team))
+        by_rule = [svc("drc_snapshot_counts", handle=h["kim"], snapshot=e["snapshot"], check=ci)
+                   for ci in range(len(sizes))]
+        check(all(by_rule[ci].get(k) == team["rules"][ci][k] for ci in range(len(sizes))
+                  for k in ("visited", "waived", "not_required", "conflicts", "pending")),
+              "... rule by rule", (by_rule, team["rules"]))
+        for name in ("kim", "lee"):
+            mine = svc("drc_review_counts", handle=h[name])
+            person = [x for x in got["reviewers"] if x["id"] == name][0]
+            check(all(mine[k] == person[k] for k in
+                      ("visited", "not_required", "visited_not_required", "pending")),
+                  "%s: the viewer's own review statistics" % name, (mine, person))
+    finally:
+        svc.close()
+    # the statuses are counted again: stored counters two sessions left
+    # wrong (before 0.12.440) are said, and do not change the counts
+    side = d / ".t.db.waive.lee"
+    data = bytearray(side.read_bytes())
+    at = 40 + sum(sizes)
+    data[at:at + 4] = struct.pack("<I", 3)
+    side.write_bytes(bytes(data))
+    r, bad = stats_of(db)
+    lee = [x for x in bad["reviewers"] if x["id"] == "lee"][0] if bad else {}
+    check(lee.get("counters_match") is False and lee.get("waived") == 12
+          and lee.get("counter_mismatch") == [{"index": 1, "name": "A.W", "stored": 3,
+                                               "counted": 11}]
+          and bad["team"] == got["team"], "stored counters are compared, never counted",
+          lee.get("counter_mismatch"))
+    rr = run_env([FLOE2, "drc", str(db), "--rules", "--floe-reviewer", "lee"], {})
+    check(json.loads(rr.stdout)[0]["waived"] == 3, "(--rules still reads the stored counter)")
+    # leftovers are no reviewers; a file of another result is said, not counted
+    shutil.copy(d / ".t.db.waive.kim", d / ".t.db.waive.kim.stale-1794300165")
+    shutil.copy(d / ".t.db.waive.kim", d / ".t.db.waive.kim.tmp-4242")
+    ghost = bytearray((d / ".t.db.waive.kim").read_bytes())
+    ghost[12] ^= 0xFF
+    (d / ".t.db.waive.ghost").write_bytes(bytes(ghost))
+    r, g2 = stats_of(db)
+    check([x["id"] for x in g2["reviewers"]] == ["kim", "lee", "park"]
+          and [(x["reviewer"], Path(x["file"]).name) for x in g2["skipped"]]
+          == [("ghost", ".t.db.waive.ghost")] and "another DRC result" in g2["skipped"][0]["reason"],
+          "leftovers ignored, another result's file skipped with its reason", g2["skipped"])
+    # the reviewers named: these alone, one that never opened it as absent
+    r, some = stats_of(db, "--floe-reviewer", "kim,nobody")
+    _, one_team = brute(sizes, {"kim": people["kim"]})
+    check([(x["id"], x["present"]) for x in some["reviewers"]] == [("kim", True), ("nobody", False)]
+          and some["team"]["reviewers"] == 1
+          and [{k: x[k] for k in one_team[0]} for x in some["team"]["rules"]] == one_team,
+          "--floe-reviewer ID,ID: these alone", some["team"])
+    # the pack must be the current one: a stale or missing pack is an error,
+    # never zeros
+    st = os.stat(db)
+    os.utime(db, (st.st_atime, st.st_mtime + 5))
+    r, none = stats_of(db)
+    check(r.returncode == 1 and not r.stdout and "stale DRC pack" in r.stderr,
+          "a stale pack: refused, nothing printed", (r.returncode, r.stderr[-300:]))
+    os.utime(db, (st.st_atime, st.st_mtime))
+    r, again = stats_of(db)
+    check(r.returncode == 0 and again["team"] == got["team"], "(the .db as indexed: read again)")
+    bare = d / "bare"
+    bare.mkdir()
+    shutil.copy(db, bare / "t.db")
+    r, none = stats_of(bare / "t.db")
+    check(r.returncode == 1 and not r.stdout and "no DRC pack" in r.stderr,
+          "no pack: refused", (r.returncode, r.stderr[-300:]))
+    r = run_env([FLOE2, "drc", str(db), "--review-stats", "--rules"], {})
+    check(r.returncode == 2 and "--review-stats is a report of its own" in r.stderr,
+          "not with the other reports (an argument error)", (r.returncode, r.stderr[-200:]))
+    # --workdir: the reviews kept under it are the ones read with it
+    work = d / "work"
+    r = run_env([FLOE2, "--workdir", str(work), "drc", str(db), "--build"], {})
+    check(r.returncode == 0, "a pack under --workdir", r.stderr[-300:])
+    ws = svc_with(dict(FLOE_WORKDIR=str(work)))
+    try:
+        o = ws("drc_open", path=str(db), mode="load", reviewer="yoon")
+        ws("drc_set_status", handle=o["handle"], check=1, errors=[3, 4], status=1)
+        check(str(work) in o["waive_path"], "a review under the work directory", o["waive_path"])
+    finally:
+        ws.close()
+    r, w = stats_of(db, env=dict(FLOE_WORKDIR=str(work)))
+    check(w is not None and [(x["id"], x["waived"]) for x in w["reviewers"]] == [("yoon", 2)]
+          and str(work) in w["pack"], "its statistics with the same work directory",
+          w and w["reviewers"])
+    r, beside = stats_of(db)
+    check([x["id"] for x in beside["reviewers"]] == ["kim", "lee", "park"],
+          "... and the reviews beside the .db without it")
+
+
+
 def main():
-    global r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8
-    r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8 = map(
-        timed, (r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8))
+    global r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10
+    r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10 = map(
+        timed, (r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10))
     temp = Path(tempfile.mkdtemp(prefix="floe-drc-team-"))
     try:
         d = temp / "runs"
@@ -962,6 +1321,8 @@ def main():
         r5(d)
         r6(temp)
         r8(temp)
+        r9(temp)
+        r10(temp)
         if "--no-gui" not in sys.argv:
             from validate_drc_team_gui import r7
             timed(r7)(temp, check)

@@ -13,3 +13,8 @@ floe-app-core = { path = "../app-core" }
 floe-worker-client = { path = "../worker-client" }
 floe-notices = { path = "../notices" }
 signal-hook = { version = "=0.4.4", default-features = false }
+
+[features]
+# `drc --review-stats` reads the reviewers' flags (SQLite) through app-core's
+# drc::team: floe2 turns it on; a build without it says the option is not here
+review-sqlite = ["floe-app-core/review-sqlite"]

@@ -147,6 +147,33 @@ python -m floe render chip.oas --drc results.db \
   디렉터리로 폴백(stderr 안내 — 이때는 save as로 남길 것), 그마저
   안 되면 pack에 내장된 상태를 읽기만 하고 waive는 거부한다 — 한 리뷰어를 위해
   공유 결과를 고치지 않는다(2026-10-09 브랜치, Rust 서비스 2026-10-11).
+- **리뷰어 ID 표시·세션 잠금·ID 요구**(2026-11-10, app 0.12.440; 사용자: TeeBox처럼 한 계정으로
+  여러 사람의 뷰어를 띄워 같은 레이아웃·db를 검토하는 운용 점검).
+  - **표시**: DRC 패널 정보 줄 아래에 `reviewer: <ID>`가 늘 보인다. 툴팁은 ID의 출처와 waive 파일
+    경로다. ID를 명시하지 않아(`--userid`·`FLOE_REVIEWER` 없음) DISPLAY 호스트·SSH 접속원·계정명에서
+    얻은 것이면 경고색으로 `(the DISPLAY host - not a personal ID; start with --userid ID)`를
+    붙인다. 같은 ETX 노드의 사용자들은 DISPLAY 호스트가 같아 한 ID와 한 waive 파일을 쓰게 되기
+    때문이다. 공동 검토 창 제목에도 `mine: <ID>`가 붙는다. 서비스의 `drc_open` 응답에
+    `reviewer_source`(`given`·`FLOE_REVIEWER`·`DISPLAY host`·`ssh client`·`account`)와
+    `reviewer_stated`가 있다(app-core `drc::reviewer`).
+  - **세션 잠금**: 한 리뷰어의 한 결과 리뷰는 한 세션만 연다(app-core `drc::session`; 잠금 파일은
+    CACHE-NAMING.ko.md §5). waive 사이드카는 제자리 수정이고 룰별 waived 카운터를 세션이 메모리에
+    쥐고 쓰므로, 같은 ID의 두 세션이 쓰면 카운터가 상태와 어긋났다(재현: 파일에는 3건이 waive인데
+    카운터와 `--rules`는 0). `--userid`를 준 뷰어는 늘 독립 프로세스라 한 사람이 두 번 띄워도
+    생겼다. 이제 두 번째 프로세스는 `kim's review of results.db is already open in another
+    session: kim (from …) on <host>, pid N, since … - close it there first, or start with another
+    reviewer ID (--userid)`로 거절되고, 뷰어는 패널과 대화상자로 알린다. 같은 프로세스가 다시 여는
+    것(뷰어의 재로드)과 앞 세션이 닫힌 뒤의 세션은 연다. 방문·검토 제외(SQLite)는 원래 여러
+    세션에 안전했다. `FLOE_REVIEW_SESSION_LOCK=off`면 0.12.439까지처럼 연다.
+  - **ID 요구**: `FLOE_REVIEWER_REQUIRED=1`(`on`·`yes`·`true`)이면 명시한 ID 없이는 리뷰를 열지
+    않는다. 뷰어는 `a reviewer ID is required for DRC review here (FLOE_REVIEWER_REQUIRED): start
+    the viewer with --userid ID, … - without one the review would be kept as "etx01" (the DISPLAY
+    host), which is not one person's`로 거절하고 ASCII로 대신 열지도 않는다. 리뷰어의 waive를
+    읽는 `floe2 drc --rules`·`--errs`·`render --drc`도 ID 없이는 1로 끝난다. 런처 환경에 이
+    변수를 두면 ID를 빠뜨린 실행이 조용히 섞이지 않는다.
+  - **통계 명령**: `floe2 drc DB --review-stats`가 리뷰어 전원의 수치와 팀 합계를 JSON으로 낸다
+    (app-core `drc::team::stats`; DRC-CLI.ko.md §2b). 뷰어 없이 스크립트가 수집하는 표면이다.
+  - 게이트 `drc_team` R9(잠금·ID 요구), R10(통계), R7(뷰어의 표시와 거절).
 - **에러 note = 리뷰어별 flateyes `.fe` 사이드카**(2026-08-28,
   D10): `n`으로 선택/현재 에러에 **공유 note** 입력. 저장 위치 =
   pack 옆 `.<db>.notes.<리뷰어>.fe`(waive와 같은 siting·리뷰어

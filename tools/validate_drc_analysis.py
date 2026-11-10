@@ -992,7 +992,11 @@ def a5(temp):
               "without metadata rule names have no checkmarks or extra column")
         svc = Svc()
         try:
-            h = svc("drc_open", path=str(db), mode="load")["handle"]
+            # (the viewer above has this reviewer's review of the database
+            # open: another process opens it as another reviewer - one
+            # session a reviewer and result, 0.12.440)
+            h = svc("drc_open", path=str(db), mode="load",
+                    reviewer="drc-analysis-service")["handle"]
             info = svc("drc_cd_info", handle=h, check=ci, error=0)
             event = svc.job(h, "drc_delta", check=ci, basis="absolute")
             check(info["pick"] is None and event["state"] == "done"

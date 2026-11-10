@@ -418,6 +418,7 @@ floe2: frame 1280x13440 px for 40.0000x420.0000 um (0.0000,0.0000,40.0000,420.00
 | `FLOE_RSS_CEILING` | 90 | 자동 색인의 메모리 상한(MemTotal의 %, 또는 `300G`, `off`). 넘으면 색인이 71로 멈추고 캡처는 1로 끝난다 |
 | `FLOE_INDEX_BIN`, `FLOE_RENDERD_BIN` | 옆의 바이너리 | `floe-index`·`floe-renderd`의 위치를 바꿀 때만 |
 | `FLOE_REVIEWER` | | DRC 캡처의 리뷰어 태그(`--floe-reviewer`) |
+| `FLOE_REVIEWER_REQUIRED` | off | `1`·`on`·`yes`·`true`면 리뷰어 ID를 명시해야 한다(0.12.440). `--floe-reviewer`나 `FLOE_REVIEWER` 없이 리뷰어의 waive를 읽는 `render --drc`·`floe2 drc`는 1로 끝난다(DRC-CLI.ko.md) |
 
 ---
 

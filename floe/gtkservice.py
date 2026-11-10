@@ -577,6 +577,11 @@ class PackDrc(_Drc):
         self._waive_path = self.waive_path
         self.note_path = result.get("note_path")
         self._reviewer = result.get("reviewer")
+        # how the id was found ("given", "FLOE_REVIEWER", "DISPLAY host",
+        # "ssh client", "account") and whether it was stated - --userid or
+        # FLOE_REVIEWER - rather than taken from where the viewer runs
+        self._reviewer_source = result.get("reviewer_source")
+        self._reviewer_stated = bool(result.get("reviewer_stated", True))
         self.read_only = bool(result.get("read_only"))
         self._flags = {}
         self._set_notes(result.get("notes") or [])

@@ -14,6 +14,7 @@ mod measure;
 mod pack;
 pub mod review;
 mod selection;
+pub mod session;
 #[cfg(feature = "review-sqlite")]
 pub mod team;
 pub use ascii::{Ascii, AsciiCheck, AsciiViolation};
@@ -23,8 +24,10 @@ pub use database::{
 };
 pub use filters::{ListPage, ListRequest};
 pub use local::{
-    is_packed_source, open_current, reviewer_tag, select_current_source, select_review,
-    waive_paths, ReadSelection, SourceSelection,
+    is_packed_source, open_current, open_pack, required_reviewer, reviewer, reviewer_required,
+    reviewer_tag,
+    select_current_source, select_review, waive_paths, ReadSelection, Reviewer, ReviewerSource,
+    SourceSelection,
 };
 pub use measure::{cd_segments, cd_segments_um, measured, measured_um, CdSegment};
 pub use pack::{

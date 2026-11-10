@@ -495,6 +495,10 @@ impl Drcs {
             Opened::Pack(r) => {
                 result["counts"] = counts(r)?;
                 result["reviewer"] = json!(r.reviewer);
+                // how the id was found, and whether it was stated (--userid,
+                // FLOE_REVIEWER) - the viewer shows both
+                result["reviewer_source"] = json!(r.reviewer_source.text());
+                result["reviewer_stated"] = json!(r.reviewer_source.stated());
                 result["read_only"] = json!(r.read_only());
                 result["waive_path"] = json!(r.waive_path);
                 result["note_path"] = json!(r.note_path);

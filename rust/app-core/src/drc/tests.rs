@@ -896,6 +896,15 @@ fn reviewer_paths_are_bounded_and_deterministic() {
     assert!(waive_paths(&p, "../other").is_err());
     assert!(waive_paths(&p, &"x".repeat(201)).is_err());
     assert_eq!(reviewer_tag(Some("  Kim / 김  ")), "Kim___김");
+    // an id given is said as given, whatever the environment; one taken
+    // from where the viewer runs is not a stated one (2026-11-10)
+    let who = reviewer(Some(" kim@corp "));
+    assert_eq!(who.tag, "kim_corp");
+    assert!(who.source == ReviewerSource::Given && who.source.stated());
+    assert!(ReviewerSource::Environment.stated());
+    for guessed in [ReviewerSource::Display, ReviewerSource::Ssh, ReviewerSource::Account] {
+        assert!(!guessed.stated(), "{}", guessed.text());
+    }
 }
 
 fn replace_one_blob(blob: &[u8]) -> Vec<u8> {

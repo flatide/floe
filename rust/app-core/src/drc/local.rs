@@ -12,11 +12,62 @@ use std::{
     sync::atomic::AtomicUsize,
 };
 
-pub fn reviewer_tag(explicit: Option<&str>) -> String {
-    let configured = explicit
-        .map(str::to_owned)
-        .or_else(|| env::var("FLOE_REVIEWER").ok())
-        .unwrap_or_default();
+/// How a review's reviewer id was found (`reviewer`'s order).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReviewerSource {
+    /// `--userid` / `--floe-reviewer`, or a caller's own
+    Given,
+    /// FLOE_REVIEWER (the viewer's `--userid` sets it for its service)
+    Environment,
+    /// the DISPLAY's host - everyone shown from that host shares it
+    Display,
+    /// the ssh client's address
+    Ssh,
+    /// the account - shared where a launcher runs every user's viewer
+    Account,
+}
+impl ReviewerSource {
+    /// As the viewer and the refusal say it.
+    pub fn text(self) -> &'static str {
+        match self {
+            Self::Given => "given",
+            Self::Environment => "FLOE_REVIEWER",
+            Self::Display => "DISPLAY host",
+            Self::Ssh => "ssh client",
+            Self::Account => "account",
+        }
+    }
+    /// Said by the user or the launcher, not guessed from where the viewer
+    /// runs.
+    pub fn stated(self) -> bool {
+        matches!(self, Self::Given | Self::Environment)
+    }
+}
+
+/// A review's reviewer: the tag its sidecars are named by, and how it was
+/// found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reviewer {
+    pub tag: String,
+    pub source: ReviewerSource,
+}
+
+/// The reviewer of this process's DRC review: `explicit`, else
+/// FLOE_REVIEWER, else the DISPLAY's host (not a local one), else the ssh
+/// client, else the account - a stable name where nothing was said, but one
+/// several people share when a launcher runs the viewer for them (an ETX
+/// node's display host, a service account; user 2026-11-10: TeeBox). The
+/// tag keeps letters, digits, `.`, `_` and `-`; anything else becomes `_`.
+pub fn reviewer(explicit: Option<&str>) -> Reviewer {
+    // an id given - even a blank one - keeps FLOE_REVIEWER out, as it always
+    // did; a blank one then falls to where the viewer runs
+    let (configured, source) = match explicit {
+        Some(given) => (given.to_owned(), ReviewerSource::Given),
+        None => (
+            env::var("FLOE_REVIEWER").unwrap_or_default(),
+            ReviewerSource::Environment,
+        ),
+    };
     let display = env::var("DISPLAY").unwrap_or_default();
     // no colon: the whole value is the host, as floe/drc.py read it
     let host = display
@@ -27,20 +78,23 @@ pub fn reviewer_tag(explicit: Option<&str>) -> String {
         .filter(|s| !s.is_empty())
         .or_else(|| env::var("SSH_CLIENT").ok())
         .unwrap_or_default();
-    let tag = if !configured.trim().is_empty() {
-        configured.trim().to_owned()
+    let (tag, source) = if !configured.trim().is_empty() {
+        (configured.trim().to_owned(), source)
     } else if !host.is_empty()
         && !host.starts_with('/')
         && !["localhost", "127.0.0.1", "::1", "unix"].contains(&host)
     {
-        host.to_owned()
+        (host.to_owned(), ReviewerSource::Display)
     } else if let Some(ip) = ssh.split_whitespace().next() {
-        ip.to_owned()
+        (ip.to_owned(), ReviewerSource::Ssh)
     } else {
-        ["LOGNAME", "USER", "LNAME", "USERNAME"]
-            .into_iter()
-            .find_map(|k| env::var(k).ok().filter(|s| !s.is_empty()))
-            .unwrap_or_else(account_name)
+        (
+            ["LOGNAME", "USER", "LNAME", "USERNAME"]
+                .into_iter()
+                .find_map(|k| env::var(k).ok().filter(|s| !s.is_empty()))
+                .unwrap_or_else(account_name),
+            ReviewerSource::Account,
+        )
     };
     let s: String = tag
         .chars()
@@ -52,11 +106,53 @@ pub fn reviewer_tag(explicit: Option<&str>) -> String {
             }
         })
         .collect();
-    if s.is_empty() {
-        "user".into()
-    } else {
-        s
+    Reviewer {
+        tag: if s.is_empty() { "user".into() } else { s },
+        source,
     }
+}
+
+/// `reviewer`'s tag.
+pub fn reviewer_tag(explicit: Option<&str>) -> String {
+    reviewer(explicit).tag
+}
+
+/// FLOE_REVIEWER_REQUIRED (`1`, `on`, `yes`, `true`): a DRC review, and a
+/// command that reads a reviewer's waives, needs a stated reviewer id -
+/// `--userid` / `--floe-reviewer` or FLOE_REVIEWER (user 2026-11-10: a
+/// launcher that runs everyone's viewer under one account on shared display
+/// hosts; without an id two people's reviews are one file).
+pub fn reviewer_required() -> bool {
+    required_of(env::var("FLOE_REVIEWER_REQUIRED").ok().as_deref())
+}
+
+fn required_of(value: Option<&str>) -> bool {
+    matches!(
+        value.unwrap_or_default().trim().to_ascii_lowercase().as_str(),
+        "1" | "on" | "yes" | "true"
+    )
+}
+
+/// `reviewer`, refused when a stated id is required here and none was given
+/// (`reviewer_required`): the refusal says what the id would have been and
+/// why that is not one person's.
+pub fn required_reviewer(explicit: Option<&str>) -> Result<Reviewer> {
+    let found = reviewer(explicit);
+    if reviewer_required() && !found.source.stated() {
+        return Err(unstated(&found));
+    }
+    Ok(found)
+}
+
+fn unstated(found: &Reviewer) -> Error {
+    Error::new(
+        ErrorKind::Admission,
+        format!(
+            "a reviewer ID is required for DRC review here (FLOE_REVIEWER_REQUIRED): start the viewer with --userid ID, or give --floe-reviewer ID or FLOE_REVIEWER - without one the review would be kept as \"{}\" (the {}), which is not one person's",
+            found.tag,
+            found.source.text()
+        ),
+    )
 }
 fn account_name() -> String {
     // SAFETY: getuid has no pointer arguments; getpwuid_r only writes into
@@ -235,6 +331,57 @@ fn current_pack(source: &Path, cancelled: &AtomicUsize) -> Result<(Option<Pack>,
     };
     Ok((Some(pack), None))
 }
+/// The current pack of `source` (a .db or its pack), held as a reader, for a
+/// command that must not answer from the ASCII file - the review statistics:
+/// no pack, or one of an older .db, is an error that says how to make it
+/// (a pack being made is busy, as for every reader).
+pub fn open_pack(source: &Path, cancelled: &AtomicUsize) -> Result<Pack> {
+    crate::check_cancelled(cancelled)?;
+    let source = cache::absolute(source)?;
+    if is_packed_source(&source)? {
+        let reader = pack_reader(&source)?;
+        let mut pack = Pack::open(&source, cancelled)?;
+        pack.hold(reader);
+        return Ok(pack);
+    }
+    let path = cache::pack_path(&source)?;
+    let build = format!(
+        "{} drc {} --build (or floe-index drc)",
+        crate::program(),
+        source.display()
+    );
+    match fs::metadata(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let key = floe_vfs::lock::key(floe_vfs::lock::Kind::Pack, &path.to_string_lossy());
+            if let Some(busy) = floe_vfs::lock::opening_refusal(&key) {
+                return Err(Error::new(ErrorKind::Busy, busy.to_string()));
+            }
+            return Err(Error::new(
+                ErrorKind::Cache,
+                format!(
+                    "{}: no DRC pack - the review statistics need it; make it first: {build}",
+                    source.display()
+                ),
+            ));
+        }
+        Err(e) => return Err(e.into()),
+        Ok(_) => (),
+    }
+    let reader = pack_reader(&path)?;
+    let mut pack = Pack::open(&path, cancelled)?;
+    pack.hold(reader);
+    if !pack.source_matches(&source)? {
+        return Err(Error::new(
+            ErrorKind::Cache,
+            format!(
+                "{}: stale DRC pack - {} changed (size or time) since it was indexed. The reviews are bound to the result as indexed: index it again for the new result's statistics ({build}) - the earlier reviewers' files are then listed as another result's",
+                path.display(),
+                source.display()
+            ),
+        ));
+    }
+    Ok(pack)
+}
 pub fn open_current(
     source: &Path,
     reviewer: Option<&str>,
@@ -244,7 +391,7 @@ pub fn open_current(
     let Some(mut pack) = pack else {
         return Ok(Database::ascii(Ascii::open(source, cancelled)?, warning));
     };
-    for path in waive_paths(&pack.path, &reviewer_tag(reviewer))? {
+    for path in waive_paths(&pack.path, &required_reviewer(reviewer)?.tag)? {
         match fs::metadata(&path) {
             Ok(_) => {
                 pack.attach_waives(&path)?;
@@ -256,4 +403,33 @@ pub fn open_current(
     }
     pack.unchanged()?;
     Ok(Database::packed(pack))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stated_id_is_required_only_where_the_switch_says() {
+        for on in ["1", "on", "ON", " yes ", "true"] {
+            assert!(required_of(Some(on)), "{on}");
+        }
+        for off in ["", "0", "off", "no", "false", "maybe"] {
+            assert!(!required_of(Some(off)), "{off}");
+        }
+        assert!(!required_of(None));
+        // the refusal says what the id would have been and whose it is not
+        let e = unstated(&Reviewer {
+            tag: "etx01".into(),
+            source: ReviewerSource::Display,
+        });
+        assert!(e.kind == ErrorKind::Admission);
+        assert!(
+            e.message.contains("FLOE_REVIEWER_REQUIRED")
+                && e.message.contains("\"etx01\" (the DISPLAY host)")
+                && e.message.contains("--userid"),
+            "{}",
+            e.message
+        );
+    }
 }

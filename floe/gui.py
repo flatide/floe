@@ -146,7 +146,8 @@ LEFT_PANE_PX = 260
 
 class _DrcPanel(object):
     """Widget refs of the embedded DRC browser (attribute bag)."""
-    __slots__ = ("_info", "_review_info", "_conflict", "_conflict_info",
+    __slots__ = ("_info", "_reviewer_info", "_review_info", "_conflict",
+                 "_conflict_info",
                  "_rules", "_rstore", "_grid", "_gstore",
                  "_detail", "_hl", "_wf", "_selv", "_search",
                  "_tf", "_plabel", "_pprev", "_pnext", "_delta_mode",
@@ -163,7 +164,8 @@ class _DrcTeamWindow:
         self.import_conflicts, self.import_source = None, None
         self.job, self.closed, self.page = None, False, 0
         self._guard = False
-        self.window = Gtk.Window(title="DRC reviewers")
+        self.window = Gtk.Window(title="DRC reviewers - mine: %s"
+                                 % getattr(viewer._drc, "_reviewer", "?"))
         self.window.set_transient_for(viewer.window)
         self.window.set_default_size(970, 650)
         viewer._only_close_button(self.window)
@@ -7195,6 +7197,17 @@ class Viewer:
         info.set_ellipsize(Pango.EllipsizeMode.START)
         top.pack_start(info, True, True, 2)
         win._info = info
+        # whose review this is (user 2026-11-10: a launcher starts everyone's
+        # viewer under one account - the id the waives are kept by must be
+        # in sight, and one not stated must look wrong)
+        reviewer_info = Gtk.Label()
+        reviewer_info.set_xalign(0.0)
+        reviewer_info.set_line_wrap(True)
+        reviewer_info.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        reviewer_info.set_max_width_chars(40)
+        reviewer_info.set_no_show_all(True)
+        box.pack_start(reviewer_info, False, False, 0)
+        win._reviewer_info = reviewer_info
         review_info = Gtk.Label(label="underline: visited · gray: not for review · * note")
         review_info.set_xalign(0.0)
         review_info.set_line_wrap(True)
@@ -8431,8 +8444,12 @@ class Viewer:
             try:
                 db = gtkservice.drc_open_pack(side, source=path)
             except gtkservice.ServiceError as exc:
-                if exc.kind == "busy":
-                    self._set_live_status(str(exc))
+                # busy: the pack is being indexed, or this reviewer's
+                # review is open in another session; admission: a reviewer
+                # ID is required here and none was given - none of them is
+                # a pack to build again
+                if exc.kind in ("busy", "admission"):
+                    self._drc_refused(exc)
                     return
             else:
                 self.load_drc(path, db=db, rules=rules)  # adopt the fresh pack
@@ -8614,9 +8631,12 @@ class Viewer:
             try:
                 db = gtkservice.drc_load(path)
             except Exception as exc:
-                # a pack another run re-packs says who (floe_vfs::lock)
-                msg = (str(exc) if getattr(exc, "kind", None) == "busy"
-                       else "DRC load failed: %s" % exc)
+                # a pack another run re-packs says who (floe_vfs::lock); a
+                # review open in another session, a reviewer ID required
+                if getattr(exc, "kind", None) in ("busy", "admission"):
+                    self._drc_refused(exc)
+                    return False
+                msg = "DRC load failed: %s" % exc
                 if self._drcwin is not None:
                     self._drcwin._info.set_text(msg)
                 self._set_live_status(msg)
@@ -10080,7 +10100,66 @@ class Viewer:
                 self._drc_show_detail(ci, shown)
         self._drc_review_stats_refresh()
 
+    @staticmethod
+    def _drc_reviewer_text(db):
+        """(markup, tooltip) of the DRC panel's reviewer line: the id this
+        review's waive, visit and note files are kept by; one that was not
+        stated (--userid, FLOE_REVIEWER) is said to be where the viewer
+        runs, in the warning colour. None: no review (no pack loaded)."""
+        reviewer = getattr(db, "_reviewer", None)
+        if db is None or not reviewer:
+            return None
+        esc = GLib.markup_escape_text
+        source = getattr(db, "_reviewer_source", None) or ""
+        text = "reviewer: <b>%s</b>" % esc(str(reviewer))
+        if not getattr(db, "_reviewer_stated", True):
+            text = ('<span foreground="#e8a000">%s (the %s - not a personal '
+                    'ID; start with --userid ID)</span>' % (text, esc(source)))
+        if getattr(db, "read_only", False):
+            text += " · read-only (no waive file could be made)"
+        tip = "ID from: %s" % (source or "?")
+        waive = getattr(db, "_waive_path", None)
+        if waive:
+            tip += "\nwaives: %s" % waive
+        return text, tip
+
+    def _drc_reviewer_refresh(self):
+        win = getattr(self, "_drcwin", None)
+        label = getattr(win, "_reviewer_info", None) if win is not None else None
+        if label is None:
+            return
+        shown = self._drc_reviewer_text(getattr(self, "_drc", None))
+        if shown is None:
+            label.hide()
+            return
+        label.set_markup(shown[0])
+        label.set_tooltip_text(shown[1])
+        label.show()
+
+    def _drc_refused(self, exc):
+        """A DRC open the service refused for who asks, not for the pack:
+        the review open in another session (busy), a reviewer ID required
+        and not given (admission), a pack being indexed (busy). Said in the
+        status line and the panel, and - it stops the user's review - in a
+        dialog that does not block the viewer."""
+        msg = str(exc)
+        self._set_live_status(msg)
+        win = getattr(self, "_drcwin", None)
+        if win is not None and getattr(self, "_drc", None) is None:
+            win._info.set_text(msg)
+        if getattr(exc, "kind", None) == "busy" and "being indexed" in msg:
+            return
+        dlg = Gtk.MessageDialog(
+            transient_for=self.window, modal=False,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.CLOSE, text="DRC review not opened")
+        dlg.format_secondary_text(msg)
+        dlg.connect("response", lambda d, *_: d.destroy())
+        self._drc_refusal_dialog = dlg
+        dlg.show()
+
     def _drc_review_stats_refresh(self):
+        self._drc_reviewer_refresh()
         win = getattr(self, "_drcwin", None)
         label = getattr(win, "_review_info", None) if win is not None else None
         if label is None:

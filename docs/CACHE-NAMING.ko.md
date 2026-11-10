@@ -145,6 +145,14 @@
   `[floe2] DRC build: …`와 `[lock] …` 두 줄(쥔 사람을 댄다), 종료 75다. 사용자(2026-11-01):
   "pack의 .floe-lock 잠금도 .tray 키로 잡게 고쳐줘." 게이트 `index_lock` K8, 단위 테스트
   app-core drc/build/tests.rs.
+- **DRC 리뷰 세션(2026-11-10, app 0.12.440):** 뷰어가 pack을 리뷰로 열면 그 리뷰어의 waive 사이드카 옆
+  `.floe-lock/<db>.waive.<ID>.session.build`를 리뷰가 열려 있는 동안 배타로 쥔다(app-core `drc::session`,
+  위와 같은 flock·쥔 사람 기록). 같은 ID로 같은 결과를 여는 두 번째 프로세스는 거절되고 누가 열고 있는지
+  듣는다. 한 프로세스의 핸들끼리는 나눠 쥐고, 쥔 프로세스가 죽으면 커널이 푼다. 결과 폴더가 읽기 전용이라
+  사이드카가 임시 폴더로 간 경우 잠금도 그 옆이다. 잠금을 만들 수 없으면 알리고 잠금 없이 연다.
+  `FLOE_REVIEW_SESSION_LOCK=off`(와 `FLOE_LOCK=off`)는 쥐지 않는다. 사용자(2026-11-10): TeeBox처럼 한
+  계정으로 여러 사람의 뷰어를 띄우면 같은 ID의 두 세션이 한 waive 파일의 카운터를 서로 덮어썼다
+  (DRC.ko.md §2). 게이트 `drc_team` R9.
 - 누가 무엇을 쥐는지(명령별)는 SPEC-INDEXER §4.5, 뷰어의 동작은 SPEC-VIEWER를 본다.
   게이트는 `index_lock`이다.
 

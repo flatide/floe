@@ -11,7 +11,7 @@ name = "floe2"
 path = "src/main.rs"
 
 [dependencies]
-floe-app-cli = { path = "../app-cli" }
+floe-app-cli = { path = "../app-cli", features = ["review-sqlite"] }
 serde_json = "=1.0.151"
 floe-app-core = { path = "../app-core", features = ["review-sqlite"] }
 floe-worker-client = { path = "../worker-client" }

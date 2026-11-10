@@ -76,7 +76,10 @@ def _add_reviewer_option(p):
                    help="user ID for DRC review, waive and note files "
                         "(sets FLOE_REVIEWER and overrides automatic "
                         "DISPLAY/SSH identification; opens an independent "
-                        "instance; default: existing identification)")
+                        "instance; default: existing identification - the "
+                        "DISPLAY host, shared by everyone on it; "
+                        "FLOE_REVIEWER_REQUIRED=1 refuses a review without "
+                        "an ID; one ID reviews a result in one session)")
 
 
 def _is_deck(src):

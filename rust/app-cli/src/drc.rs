@@ -15,6 +15,17 @@ const HELP: &str = "Usage: floe2-web drc RESULTS.db|.RESULTS.db.tray [OPTIONS]
   --rules                 Rule JSON [{name,errors,waived},...]
   --errs RULE             Stream one rule's error JSON (first duplicate)
   --floe-reviewer TAG     Existing per-reviewer waive sidecar selection
+                          (required where FLOE_REVIEWER_REQUIRED is set)
+  --review-stats          Review statistics JSON of every reviewer found by
+                          the working files beside the pack - each one's
+                          waived (the statuses counted again, not the stored
+                          counters), visited, not for review and pending,
+                          whole and by rule - and the team's as the viewer's
+                          reviewers window counts them (visits united,
+                          conflicts between visited reviewers); with
+                          --floe-reviewer ID[,ID...] these reviewers alone.
+                          Needs the current pack: none or a stale one is an
+                          error (exit 1), never an answer of zeros
   --svrf-rules FILE       Explicit rules.json metadata for --rules / --errs
   --build                 Explicitly build/reuse .RESULTS.db.tray, migrate legacy name
   --force                 With --build: allow atomic replacement of old pack
@@ -45,6 +56,7 @@ pub struct Command {
     build: bool,
     force: bool,
     jobs: Option<usize>,
+    review_stats: bool,
 }
 pub fn parse(args: &[String]) -> Result<Command> {
     let mut c = Command {
@@ -57,6 +69,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
         build: false,
         force: false,
         jobs: None,
+        review_stats: false,
     };
     let mut i = 1;
     let mut positional = false;
@@ -94,6 +107,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
                     c.rules = true
                 }
             }
+            "--review-stats" if inline.is_none() => c.review_stats = true,
             "--errs" | "--floe-reviewer" | "--svrf-rules" | "--jobs" => {
                 let value = if let Some(s) = inline {
                     s
@@ -131,13 +145,24 @@ pub fn parse(args: &[String]) -> Result<Command> {
         return Err(Error::input("drc requires a database"));
     }
     if c.build {
-        if c.list || c.rules || c.errs.is_some() || c.reviewer.is_some() || c.svrf_rules.is_some() {
+        if c.list
+            || c.rules
+            || c.errs.is_some()
+            || c.reviewer.is_some()
+            || c.svrf_rules.is_some()
+            || c.review_stats
+        {
             return Err(Error::input(
                 "--build cannot be combined with DRC read/reviewer options",
             ));
         }
     } else if c.force || c.jobs.is_some() {
         return Err(Error::input("--force/--jobs require explicit --build"));
+    }
+    if c.review_stats && (c.list || c.rules || c.errs.is_some() || c.svrf_rules.is_some()) {
+        return Err(Error::input(
+            "--review-stats is a report of its own: without --list / --rules / --errs / --svrf-rules",
+        ));
     }
     if c.svrf_rules.is_some() && (c.list || (c.rules == c.errs.is_some())) {
         return Err(Error::input(
@@ -168,6 +193,9 @@ pub fn run(command: Command, cancelled: &AtomicUsize) -> Result<i32> {
             },
             cancelled,
         );
+    }
+    if command.review_stats {
+        return review_stats(&source, command.reviewer.as_deref(), cancelled);
     }
     let mut p = open_current(&source, command.reviewer.as_deref(), cancelled)?;
     for warning in &p.warnings {
@@ -288,6 +316,44 @@ pub fn run(command: Command, cancelled: &AtomicUsize) -> Result<i32> {
     out.flush()?;
     Ok(0)
 }
+/// `--review-stats`: the reviewers' statistics of the database's current
+/// pack as one JSON document on stdout (app-core drc::team::stats).
+#[cfg(feature = "review-sqlite")]
+fn review_stats(
+    source: &std::path::Path,
+    reviewers: Option<&str>,
+    cancelled: &AtomicUsize,
+) -> Result<i32> {
+    let only: Option<Vec<String>> = reviewers.map(|list| {
+        list.split(',')
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .map(str::to_owned)
+            .collect()
+    });
+    if only.as_ref().is_some_and(Vec::is_empty) {
+        return Err(Error::input("--floe-reviewer names no reviewer"));
+    }
+    let report =
+        floe_app_core::drc::team::stats::collect(source, only.as_deref(), cancelled)?;
+    let mut out = io::BufWriter::new(io::stdout().lock());
+    serde_json::to_writer_pretty(&mut out, &report)
+        .map_err(|e| Error::new(ErrorKind::Io, e.to_string()))?;
+    writeln!(out)?;
+    out.flush()?;
+    Ok(0)
+}
+#[cfg(not(feature = "review-sqlite"))]
+fn review_stats(
+    _source: &std::path::Path,
+    _reviewers: Option<&str>,
+    _cancelled: &AtomicUsize,
+) -> Result<i32> {
+    Err(Error::new(
+        ErrorKind::Unsupported,
+        "--review-stats is not in this build (the reviewers' flags are read by floe2)",
+    ))
+}
 fn build_pack(
     source: &std::path::Path,
     options: build::Options,
@@ -393,6 +459,17 @@ mod tests {
         assert!(parse_str(&["drc", "a", "--svrf-rules", "x", "--rules", "--errs", "r"]).is_err());
         assert!(parse_str(&["drc", "a", "--svrf-rules", "x", "--rules", "--list"]).is_err());
         assert!(parse_str(&["drc", "a", "--svrf-rules=한 글.rules.json", "--rules"]).is_ok());
+        // the reviewers' statistics: a report of its own, of everyone or of
+        // the reviewers named
+        let c = parse_str(&["drc", "a.db", "--review-stats"]).unwrap();
+        assert!(c.review_stats && c.reviewer.is_none());
+        let c = parse_str(&["drc", "a.db", "--review-stats", "--floe-reviewer", "kim,lee"]).unwrap();
+        assert_eq!(c.reviewer.as_deref(), Some("kim,lee"));
+        for with in ["--rules", "--list", "--errs=R", "--build", "--svrf-rules=x"] {
+            assert!(parse_str(&["drc", "a.db", "--review-stats", with]).is_err(), "{with}");
+        }
+        assert!(parse_str(&["drc", "a.db", "--review-stats=on"]).is_err());
+        assert!(!parse_str(&["drc", "a.db", "--rules"]).unwrap().review_stats);
         let c = parse_str(&["drc", "a.db", "--build", "--force", "--jobs=16"]).unwrap();
         assert!(c.build && c.force);
         assert_eq!(c.jobs, Some(16));

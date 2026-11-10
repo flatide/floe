@@ -11,6 +11,8 @@
 //!   decisions to one's own review;
 //! - `migrate`: carrying review from a previous DRC run to the errors with
 //!   exactly the same geometry (drc::matcher).
+//! - `stats`: every reviewer's counts and the team's of one result, read
+//!   from the working files without a viewer (`floe2 drc --review-stats`).
 //!
 //! SQLite (rusqlite's bundled amalgamation) behind the app-core feature
 //! `review-sqlite`; floe2 turns it on.
@@ -18,6 +20,7 @@ pub mod bits;
 pub mod flags;
 pub mod migrate;
 pub mod snapshot;
+pub mod stats;
 
 use crate::drc::desktop::{Opened, Review, StatusReader};
 use crate::{Error, ErrorKind, Result};
