@@ -166,7 +166,7 @@ dependencies = [
 
 [[package]]
 name = "floe-index"
-version = "0.12.439"
+version = "0.12.441"
 dependencies = [
  "crc32fast",
  "floe-oasis",
@@ -175,6 +175,7 @@ dependencies = [
  "floe-vfs",
  "libc",
  "memmap2",
+ "sha2",
 ]
 
 [[package]]
@@ -226,7 +227,7 @@ dependencies = [
 
 [[package]]
 name = "floe-renderd"
-version = "0.12.439"
+version = "0.12.441"
 dependencies = [
  "floe-oasis",
  "floe-render-core",

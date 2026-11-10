@@ -78,15 +78,27 @@ fn bounded(what: &str) -> Error {
     )
 }
 
+/// What a waive file and a notes file are bound to: the result's content -
+/// the first 16 bytes of the pack's content id (Pack::content_id; what the
+/// errors are) - and its error count. Until 0.12.440 it was the source's
+/// size and time: a copy, a restore or a touch of the .db orphaned every
+/// reviewer's files (FLOEWAIV version 1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Fingerprint {
-    pub source_size: u64,
-    pub source_mtime: u64,
+    pub content: [u8; 16],
     pub total: u64,
 }
 impl Fingerprint {
-    fn tag(self) -> String {
-        format!("{},{},{}", self.source_size, self.source_mtime, self.total)
+    pub fn of(pack: &super::Pack) -> Self {
+        Self {
+            content: pack.content_id[..16].try_into().expect("16 of 32 bytes"),
+            total: pack.total,
+        }
+    }
+    /// The notes file's `floe_pack=` value.
+    pub(crate) fn tag(self) -> String {
+        let hex: String = self.content.iter().map(|b| format!("{b:02x}")).collect();
+        format!("{hex},{}", self.total)
     }
 }
 
@@ -124,23 +136,20 @@ impl Layout {
     pub fn from_pack(pack: &super::Pack) -> Result<Self> {
         pack.unchanged()?;
         Self::new(
-            Fingerprint {
-                source_size: pack.source_size,
-                source_mtime: pack.source_mtime,
-                total: pack.total,
-            },
+            Fingerprint::of(pack),
             &pack.checks.iter().map(|c| c.count).collect::<Vec<_>>(),
         )
     }
     pub fn fingerprint(&self) -> Fingerprint {
         self.fingerprint
     }
+    /// FLOEWAIV version 2 (0.12.441): magic | u32 2 | 16 B content id
+    /// prefix | u64 errors | u32 rules - 40 bytes, the statuses after it.
     pub fn header(&self) -> [u8; 40] {
         let mut h = [0; 40];
         h[..8].copy_from_slice(b"FLOEWAIV");
-        h[8..12].copy_from_slice(&1u32.to_le_bytes());
-        h[12..20].copy_from_slice(&self.fingerprint.source_size.to_le_bytes());
-        h[20..28].copy_from_slice(&self.fingerprint.source_mtime.to_le_bytes());
+        h[8..12].copy_from_slice(&2u32.to_le_bytes());
+        h[12..28].copy_from_slice(&self.fingerprint.content);
         h[28..36].copy_from_slice(&self.fingerprint.total.to_le_bytes());
         h[36..40].copy_from_slice(&(self.counts.len() as u32).to_le_bytes());
         h
@@ -152,7 +161,7 @@ pub struct WaiveStats {
     pub waived: u64,
     pub per_rule: Vec<u32>,
 }
-/// Validate/import and optionally edit a FLOEWAIV v1 stream. Counter bytes are
+/// Validate/import and optionally edit a FLOEWAIV stream. Counter bytes are
 /// never trusted: recompute status==1 counts, preserving every reserved byte.
 /// `output` MUST be an unpublished staging sink: an EOF/I/O/cancel failure can
 /// leave a prefix there. Ok is not a filesystem commit or durability receipt.

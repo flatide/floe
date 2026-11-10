@@ -50,7 +50,16 @@ DIR 아래 db의 절대 경로 자리에 놓인다(CACHE-NAMING.ko.md §6). `flo
 `--build`는 `cannot write beside results.db, in /r: Permission denied (os error 13) - … --workdir DIR (or
 FLOE_WORKDIR) puts them under a directory this account can write, at the source's absolute path: DIR/r/`로
 1로 끝나 `--workdir`을 안내한다(0.12.430; CACHE-NAMING.ko.md §6). 이후 모든 명령이 신선한
-pack을 자동 사용한다(소스 size/mtime 대조). pack이 없거나 낡으면
+pack을 자동 사용한다. 신선함은 .db가 색인한 그 파일인지다(0.12.441). 크기와 시각이 색인 때와 같으면
+그대로 쓰고, 크기는 같고 시각만 다르면 .db를 한 번 읽어 pack에 적힌 CRC-32와 견준다(복사, 복원,
+touch는 같은 파일이다). 이 문서의 명령들은 .db의 크기와 무관하게 견준다. 견준 결과는 pack 옆
+`.results.db.tray.source`에 남아 다음부터는 읽지 않는다. `floe2 drc DB --build`도 같은 확인을 하고
+같으면 pack을 그대로 둔다(`reused: true`). `FLOE_DRC_VERIFY_MB`(MiB, 기본 1024)는 뷰어가 메뉴에서
+.db를 골라 pack을 열 때 읽을 크기의 상한일 뿐이다(DRC.ko.md §2). 내용이 다른 .db에는
+`--build`가 `existing DRC pack is stale (the source is not the file that was indexed); explicit
+--force is required`로 1로 끝나고, `--build --force`나 `floe-index drc`가 다시 색인한다. 다시 색인한
+pack의 에러가 같으면 리뷰는 그대로 붙는다(내용 ID; DRC.ko.md §2 '결과 식별 = 내용'). 레이아웃 4
+pack(0.12.440까지)은 읽지 않으므로 다시 색인한다. pack이 없거나 낡으면
 **ASCII 전체 파스로 폴백**(stderr 안내) — 수백 MB급부터 매우
 느리므로 스크립트는 pack을 먼저 만들 것. `--pack`은 호환용
 no-op. 좌표 토큰이 정수가 아닌 db는 명확한 메시지와 함께 거부.
@@ -183,11 +192,12 @@ floe2 --workdir /work/floe drc results.db --review-stats > stats.json     # 리�
   로 따로 세고 waived·not_required에서 뺀다. waive 파일만 있는 리뷰어(방문 기록 없음)는 conflict를
   만들지 않는다. `pending` = 전체 − (방문했거나 검토 제외인 에러)다. 방문 없이 일괄 waive한 에러는
   pending에 남는다(방문과 waive는 독립).
-- **pack이 현재 것이어야 한다**: pack이 없거나 `.db`가 인덱싱 뒤 바뀌었으면(크기·시각) 0을 내지 않고
-  1로 끝나며 무엇을 할지 말한다. 다른 실행이 pack을 만드는 중이면 75다. `--rules`·`--errs`·
+- **pack이 현재 것이어야 한다**: pack이 없거나 `.db`가 인덱싱 뒤 바뀌었으면(크기나 내용; 시각만
+  바뀐 `.db`는 현재 것이다, 0.12.441, §0) 0을 내지 않고 1로 끝나며 무엇을 할지 말한다. 다른 실행이 pack을 만드는 중이면 75다. `--rules`·`--errs`·
   `--list`·`--build`와 함께 쓸 수 없다(종료 2).
-- **다른 결과의 파일**: pack 지문이 다른 사이드카(재실행 전의 것 등)는 세지 않고 `skipped`에
-  이유와 함께 적는다.
+- **다른 결과의 파일**: pack 지문(내용 ID)이 다른 사이드카는 세지 않고 `skipped`에 이유와 함께
+  적는다. 에러가 달라진 재실행 전의 파일이 그렇다. 그 리뷰어가 새 결과를 열면 파일은
+  `.stale-<시각>`으로 치워지고(0.12.441) 그 뒤로는 새 리뷰가 세어진다.
 - **비용**: 리뷰어마다 에러당 1바이트를 읽는다. 14억 에러 결과에 열 명이면 14 GB를 읽는다.
 
 ```json
@@ -222,6 +232,7 @@ floe2 --workdir /work/floe drc results.db --review-stats > stats.json     # 리�
 
 | 필드 | 의미 |
 |---|---|
+| `fingerprint` | pack의 내용 ID(hex 64자, 0.12.441): 에러가 무엇인지의 SHA-256. 에러가 같은 결과는 값이 같다(복사본, 다시 만든 pack, 같은 에러가 나온 재실행). 수집하는 쪽에서 두 보고서가 같은 결과의 것인지 견주는 키다 |
 | `reviewers[].rules` | 그 리뷰어가 작업한 룰만(waived·visited·not_required 중 하나라도 0이 아닌 룰). 없는 룰은 0 |
 | `reviewers[].present` | `--floe-reviewer`로 지정했는데 작업 파일이 없는 ID는 `false`이고 수치가 없다 |
 | `*_known` | 그 차원의 파일이 있는지. waive 파일만 있으면 방문·검토 제외는 0이 아니라 모름이라 키가 없다 |

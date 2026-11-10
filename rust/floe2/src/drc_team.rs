@@ -55,6 +55,9 @@ impl TeamCtx {
     pub fn new(review: &floe_app_core::drc::desktop::Review) -> Result<Self> {
         let id = Identity::of(review)?;
         let flags = FlagStore::new(&review.pack.path, id.sizes.clone(), id.fingerprint.clone(), &id.reviewer)?;
+        // a flags file of the result before (the DRC ran again): moved aside
+        // as the waive sidecar was, so this review starts (0.12.441)
+        flags.retire_other_result()?;
         Ok(Self {
             id,
             flags,

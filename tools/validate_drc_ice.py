@@ -10,9 +10,11 @@ pack; D2 keeps the retirement honest.)
       dropped when empty / kept when they carry errors) -> IcePack
       equals load_ascii check-for-check and error-for-error
       (kind/num/pts exact, global file-order numbering).
-  D2  dispatch: load_db(<db>) auto-picks a fresh pack; a stale
-      pack (source mtime bumped) and a retired v1 sidecar both
-      fall back to the ASCII parse (v1 opened directly raises).
+  D2  dispatch: load_db(<db>) auto-picks a fresh pack - also one
+      whose source's time alone changed (the content's CRC-32
+      decides, 0.12.441); a stale pack (other bytes of the same
+      size) and a retired v1 sidecar both fall back to the ASCII
+      parse (v1 opened directly raises).
       Corrupt packs (12-byte stub, truncated mid-file, wild
       footer offset) all raise ValueError - never struct.error -
       and a corrupt SIDE pack falls back to ASCII.
@@ -24,6 +26,12 @@ pack; D2 keeps the retirement honest.)
       gen_drcdb asset). D5b: FLOE_DRC_QBOX_RESIDENT=0 forces the
       big-rule streaming qbox path (bbox pre-pass + per-block
       rows) for every check - bytes must equal the default pack.
+  D5c the identity a pack keeps (layout 5): the footer's CRC-32 =
+      the source file's, its content id = SHA-256 of what the
+      errors are, recomputed here from the pack's own sections;
+      the same errors under other header dates and description
+      lines have one content id (and another CRC), a moved
+      coordinate or a renamed rule another.
   D6  IcePack.query_rect == brute-force bbox scan on random rects;
       D6b: the waived= filter applies INSIDE the query, before the
       cap (regression: a capped post-filter lost matches hiding
@@ -184,6 +192,39 @@ def compare(ref, ice):
             eq(re_.kind, xe.kind, tag + " err[%d] kind" % ei)
             eq(re_.num, xe.num, tag + " err[%d] num" % ei)
             eq(re_.pts, xe.pts, tag + " err[%d] pts" % ei)
+
+
+def stored_identity(pack):
+    """(source CRC-32, content id) of a pack's footer."""
+    foot = drc._ICE2_FOOTER.unpack(pack[-drc._ICE2_FOOTER.size:])
+    return foot[16], foot[17]
+
+
+def content_id_of(pack):
+    """A pack's content id by its definition (rust/cli/src/drcpack.rs),
+    from the pack's own sections: the tag, the precision, the cell, the
+    coordinate blob, its length, then each check's name and error count."""
+    import hashlib
+    precision = drc._ICE_HEADER.unpack(pack[:drc._ICE_HEADER.size])[3]
+    foot = drc._ICE2_FOOTER.unpack(pack[-drc._ICE2_FOOTER.size:])
+    blob_off, blob_len, dir_off, check_cnt, str_off, cell_ref = (
+        foot[0], foot[1], foot[8], foot[9], foot[12], foot[15])
+
+    def raw(ref):
+        (n,) = struct.unpack_from("<I", pack, str_off + ref)
+        return pack[str_off + ref + 4:str_off + ref + 4 + n]
+
+    h = hashlib.sha256(b"floe-drc-content-v1\0")
+    h.update(struct.pack("<d", precision))
+    cell = raw(cell_ref)
+    h.update(struct.pack("<Q", len(cell)) + cell)
+    h.update(pack[blob_off:blob_off + blob_len])
+    h.update(struct.pack("<QQ", blob_len, check_cnt))
+    for ci in range(check_cnt):
+        rec = drc._ICE2_CHECK.unpack_from(pack, dir_off + ci * drc._ICE2_CHECK.size)
+        name = raw(rec[0])
+        h.update(struct.pack("<Q", len(name)) + name + struct.pack("<Q", rec[5]))
+    return h.digest()
 
 
 def validate_names(tmp, db, side):
@@ -460,8 +501,27 @@ def main():
     auto = drc.load_db(db)
     if not isinstance(auto, drc.IcePack):
         fail("fresh pack not auto-picked")
+    # (0.12.441: stale is the source's content - a .db whose time alone
+    # changed is the file that was indexed, by the CRC-32 the pack keeps;
+    # other bytes of its size, or another size, are not)
     st = os.stat(db)
     os.utime(db, (st.st_atime, st.st_mtime + 10))
+    try:
+        drc.IcePack(side, src_path=db, verify_src=True).close()
+    except ValueError:
+        fail("a source whose time alone changed made its pack stale")
+    touched = drc.load_db(db)
+    if not isinstance(touched, drc.IcePack):
+        fail("a source whose time alone changed fell back to ASCII")
+    touched.close()
+    raw = open(db, "rb").read()
+    body = raw.rstrip(b"\n")
+    if not body[-1:].isdigit():
+        fail("fixture drifted: the .db does not end in a coordinate")
+    with open(db, "wb") as f:        # one coordinate digit, the same size
+        f.write(body[:-1] + (b"1" if body[-1:] != b"1" else b"2")
+                + raw[len(body):])
+    os.utime(db, (st.st_atime, st.st_mtime + 20))
     try:
         drc.IcePack(side, src_path=db, verify_src=True)
         fail("stale pack accepted")
@@ -470,7 +530,11 @@ def main():
     stale = drc.load_db(db)
     if not isinstance(stale, drc.DrcDb):
         fail("stale pack did not fall back to ASCII")
-    compare(ref, stale)
+    if stale.total != ref.total:
+        fail("the ASCII fallback of the changed .db lost errors")
+    with open(db, "wb") as f:        # the .db as it was, its time changed
+        f.write(raw)
+    os.utime(db, (st.st_atime, st.st_mtime + 10))
     good = open(side, "rb").read()   # structurally valid pack bytes
     with open(side, "wb") as f:      # fake RETIRED v1 sidecar
         f.write(b"FLOEICE\0" + (1).to_bytes(4, "little") + b"\0" * 68)
@@ -600,6 +664,44 @@ def main():
     if open(sp, "rb").read() != gpacks[1]:
         fail("streaming qbox encoder changed pack bytes")
     print("D5b OK: forced-streaming pack byte-identical")
+
+    # D5c: the identity a pack keeps (layout 5, 0.12.441)
+    import zlib
+    for src, pack, what in ((db, packs[1], "fixture"), (gdb, gpacks[1], "gen")):
+        crc, cid = stored_identity(pack)
+        with open(src, "rb") as f:
+            if crc != zlib.crc32(f.read()) & 0xFFFFFFFF:
+                fail("%s: the pack's CRC-32 is not its source's" % what)
+        if cid != content_id_of(pack):
+            fail("%s: the pack's content id is not its definition's" % what)
+
+    def identity_of(body, name):
+        p = os.path.join(tmp, name + ".db")
+        with open(p, "w", newline="") as f:
+            f.write(body)
+        out = os.path.join(tmp, name + ".ice")
+        r = subprocess.run([BIN, "drc", p, out], capture_output=True, text=True)
+        if r.returncode != 0:
+            fail("%s rc=%d: %s" % (name, r.returncode, r.stderr.strip()))
+        with open(out, "rb") as f:
+            return stored_identity(f.read())
+
+    base = identity_of(text, "id-base")
+    if base != stored_identity(packs[1]):
+        fail("the same bytes under another name: another identity")
+    rerun = identity_of(text.replace("Jul 11", "Aug 12")
+                        .replace("sfa14.drc.cal", "/another/run/sfa14.drc.cal"),
+                        "id-rerun")
+    if rerun[1] != base[1] or rerun[0] == base[0]:
+        fail("the same errors under other dates and rule file paths: "
+             "not one content id and another CRC")
+    moved = identity_of(text.replace("100 200\n", "101 200\n", 1), "id-moved")
+    renamed = identity_of(text.replace("NOCOUNT.CHECK", "NOCOUNT.OTHER"),
+                          "id-renamed")
+    if base[1] in (moved[1], renamed[1]) or moved[1] == renamed[1]:
+        fail("a moved coordinate or a renamed rule kept the content id")
+    print("D5c OK: source CRC-32 + content id = their definitions; the "
+          "same errors one id, other errors another")
 
     # D6: query_rect == brute force bbox scan
     import random

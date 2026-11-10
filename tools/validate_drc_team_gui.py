@@ -197,6 +197,21 @@ def r7(temp, check):
               and "DISPLAY host" in tip and "waive.etx01" in tip,
               "an id that was not stated is said so", (text, tip))
         check(v._drc_reviewer_text(None) is None, "no review, no reviewer line")
+        # a review of other DRC results under this one's name (the DRC ran
+        # again) is moved aside at the open (0.12.441): the open's object
+        # keeps the notices and the panel's line says it, not stderr alone
+        (d / ".sample.db.waive.rerun").write_bytes(b"FLOEWAIV" + bytes(40))
+        rerun = gtkservice.drc_load(str(d / "sample.db"), reviewer="rerun")
+        try:
+            text, tip = v._drc_reviewer_text(rerun)
+            check(len(rerun.moved_aside) == 1 and "1 file(s) moved aside" in text
+                  and "starts anew" in text and ".sample.db.waive.rerun.stale-" in tip
+                  and len(list(d.glob(".sample.db.waive.rerun.stale-*"))) == 1,
+                  "a review of other results moved aside is said in the panel", (text, tip))
+        finally:
+            rerun.close()
+        check(not getattr(db, "moved_aside", None) and "moved aside" not in who.get_text(),
+              "... and a review that goes on says nothing of it")
         store = v._drcwin._rules.get_model()
         v._drcwin._rules.set_cursor(store[0].path, None, False)
         pump(v, lambda: v._drc_open == 0, "the first rule")

@@ -485,7 +485,7 @@ fn native_note_and_waive_publication_can_be_polled_and_reloaded_without_observer
 fn normalization_legacy_confirmation_and_stale_revision_are_preserved() {
     let f = Fixture::new();
     let m = f.open(store::Kind::Notes);
-    fs::write(m.target(), b"floe_pack=1234,5678,65\nfloe_note=0|legacy\n").unwrap();
+    fs::write(m.target(), b"floe_pack=abababababababababababababababab,65\nfloe_note=0|legacy\n").unwrap();
     let d = f.note(&m, "must confirm");
     assert!(d.legacy_unverified());
     assert_eq!(kind(d.publish(false)), ErrorKind::Unsupported);
@@ -493,7 +493,7 @@ fn normalization_legacy_confirmation_and_stale_revision_are_preserved() {
     let (d, report) = m
         .snapshot(flag())
         .unwrap()
-        .prepare_notes_import("floe_pack=1234,5678,65\nfloe_note=0|imported\n")
+        .prepare_notes_import("floe_pack=abababababababababababababababab,65\nfloe_note=0|imported\n")
         .unwrap();
     assert_eq!(report.invalid_members, 0);
     let mut job = d.publish(true).unwrap();

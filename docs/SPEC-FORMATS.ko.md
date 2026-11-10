@@ -364,8 +364,9 @@ ovm 헤더와 meta.src 모두 소스 절대경로/size/mtime을 기록. `Vfs::op
 폴더 `.<src>.ice/`의 접미사; 2026-08-13까지는 레거시 타일 캐시 이름).
 
 ```
-[헤더 40B]  version=4(레이아웃 개정 카운터), flags=1
-            (+precision/src size·mtime 정보성)
+[헤더 40B]  version=5(레이아웃 개정 카운터), flags=1
+            (+precision/src size·mtime: 소스가 색인한 그 파일인지의
+            첫 판정)
 [좌표 블롭] 64에러 블록 단위 varint 스트림, **파일 기록순**:
             레코드 = uv((점수<<1)|종류) · zz(첫점 델타, 직전 에러
             기준) · 이후 점들은 직전 점 델타. 블록 시작에서 델타
@@ -382,8 +383,36 @@ ovm 헤더와 meta.src 모두 소스 절대경로/size/mtime을 기록. `Vfs::op
             증분 유지, 필터 카운트는 [status] 재스캔 없이 O(1)
             (2026-08-14: 필터 전환마다 GB 스캔하던 지연 제거).
 [블록 테이블] 블록당 48B: 블롭 오프셋·개수·i64 bbox(dbu)
-[체크 디렉토리 64B/체크][desc refs][문자열 테이블][푸터 136B]
+[체크 디렉토리 64B/체크][desc refs][문자열 테이블]
+[푸터 168B] u64 15개(blob_off, blob_len, qbox_off, qbox_len,
+            status_off, wcount_off, blk_off, blk_cnt, dir_off,
+            check_cnt, descref_off, descref_cnt, str_off, str_len,
+            err_total) | u32 cell_ref | u32 src_crc32 |
+            내용 ID 32B | 매직 8B
 ```
+
+- **식별 필드**(레이아웃 5, 2026-11-10, app/floe-index 0.12.441; 레이아웃 4의 푸터는 136B로
+  `u32 reserved`가 `cell_ref` 뒤에 있었고 내용 ID가 없었다).
+  - `src_crc32`: 소스 .db 전체 바이트의 CRC-32(IEEE, zlib와 같은 값). 색인 작업자가 자기 바이트
+    구간(작업자 0은 파일 첫 바이트부터)을 파싱하면서 4 MiB씩 계산하고 코디네이터가 순서대로 합친다
+    (`crc32fast` combine). `--jobs`와 무관하게 같은 값이다. 리더는 소스의 크기가 헤더와 같고 시각만
+    다를 때 소스를 읽어 이 값과 견준다(`Pack::source_current`는 크기 무관: CLI의 읽기, 통계, 뷰어의
+    로드, `floe2 drc --build`. `Pack::source_matches`는 `FLOE_DRC_VERIFY_MB` MiB까지: 뷰어가 .db를 골라
+    pack을 여는 경우).
+  - **내용 ID**: SHA-256. 입력은 순서대로 `"floe-drc-content-v1\0"`(20바이트), precision(f64 LE),
+    셀 이름 길이(u64 LE)와 바이트, 좌표 블롭 전체(파일의 `blob_off`부터 `blob_len`바이트, 기록된
+    그대로), `blob_len`(u64 LE), `check_cnt`(u64 LE), 체크마다 이름 길이(u64 LE)·이름 바이트·에러
+    수(u64 LE). 소스의 크기·시각·CRC, 설명 줄, 선언 개수, [status]/[wcount]는 넣지 않는다. 같은
+    에러가 같은 순서로 든 두 결과는 ID가 같다(헤더 날짜나 룰 파일 경로만 다른 재실행 포함).
+    `Pack::review_fingerprint`가 이 값의 hex다.
+  - `.<db>.tray.source`: 견줘서 같다고 확인한 소스의 기록. 텍스트 두 줄 `floe-drc-source 1`,
+    `<크기> <mtime s> <CRC-32 hex 8자>`. 크기·시각이 지금의 소스와 같고 CRC가 pack의 것과 같을
+    때만 읽지 않고 통과시킨다. 임시 파일 `.source.tmp-<pid>`로 쓰고 이름을 바꾼다. 쓸 수 없는
+    폴더면 남기지 않고 열 때마다 다시 견준다. 다른 pack의 기록이 남아 있어도 CRC가 달라 무시된다.
+  - waive 사이드카 `.<db>.waive.<리뷰어>` 헤더 40B(버전 2): `FLOEWAIV` | u32 2 | 내용 ID 앞 16B |
+    u64 err_total | u32 check_cnt. 뒤에 status 1B/에러, wcount u32/체크. 버전 1(0.12.440까지)은
+    `u64 src_size | u64 src_mtime | u64 err_total | u32 check_cnt`였다. note `.fe`의 `floe_pack=`은
+    `<내용 ID 앞 16B의 hex 32자>,<err_total>`이다.
 
 - **에러 번호 = 전역 파일순 순번**(Calibre RVE 방식, 2026-08-13
   사용자 규정): 저장이 파일순이므로 번호는 `err_start + 블록 내
@@ -431,7 +460,7 @@ ovm 헤더와 meta.src 모두 소스 절대경로/size/mtime을 기록. `Vfs::op
 - 리더 디스패치: 헤더 version 필드(1=폐기된 v1 오프셋 사이드카 →
   직접 오픈 거부·사이드는 ASCII 폴백, ≥2=IcePack).
   **레이아웃 개정 규율**: pack 섹션 배치가 바뀌면 version을 올린다.
-  리더는 현재 값(4)만 수용하고 옛 pack은 재-pack 안내와 함께 거부 —
+  리더는 현재 값(5)만 수용하고 옛 pack은 재-pack 안내와 함께 거부 —
   구(2) pack을 새 리더가 읽으면 푸터 크기 차이로 qbox가 40B 밀려
   **작은 사각형 쿼리만 조용히 빗나가는** 사고가 실제로 있었음
   (2026-08-13, #5/#8 하이라이트 실종).
@@ -446,7 +475,10 @@ SQLite는 rusqlite의 bundled amalgamation; 참조 `tools/oracle/floe_oracle/drc
 
 - 스키마(참조와 바이트 단위로 같은 문장):
   - `metadata(id=1, value)` = `{"version":1,"fingerprint":"<pack 리뷰 지문>","sizes":[룰별 에러 수]}`
-    (공백 없는 JSON). 문자열이 다르면 다른 결과의 파일로 보고 거부하며 파일은 그대로 둔다.
+    (공백 없는 JSON). 문자열이 다르면 다른 결과의 파일이다. 그 리뷰어가 리뷰를 열 때
+    `.stale-<시각>`으로 치우고(남은 롤백 저널도 함께) 새로 시작하며 `notices`에 알린다
+    (0.12.441, `FlagStore::retire_other_result`; 그 전에는 그 자리에서 거절하고 그대로 두었다).
+    읽기 전용인 `--review-stats`는 치우지 않고 `skipped`에 적는다.
   - `totals(id=1, visited, nr, both)`, `rules(ci, visited, nr, both)`.
   - `chunks(ci, chunk, visited, nr) WITHOUT ROWID`: 손댄 4,096개 에러 구간만.
     비트 i(리틀엔디언 바이트)가 그 구간의 i번째 에러다. 빈 평면은 빈 BLOB이다.
@@ -463,9 +495,10 @@ SQLite는 rusqlite의 bundled amalgamation; 참조 `tools/oracle/floe_oracle/drc
 - 읽기는 파일을 만들지 않는다. 읽기는 SQLite·첫 생성 잠금을 50ms까지만 기다리고,
   실패는 1초 동안 같은 오류로 되풀이한다(목록 1,000행이 같은 실패를 반복하지 않게).
   실패를 0건으로 보이지 않는다. 쓰기는 별도 연결이며 10초까지 기다린다.
-- 리뷰 지문(`Pack::review_fingerprint`): pack 헤더 40B·푸터 136B·룰 디렉터리·설명
-  참조·문자열 섹션에 이어 `<QQ`(파일 크기, mtime ns)의 sha256 hex. 장치·inode·ctime은
-  넣지 않으므로 복사·이름 변경은 같은 기록, 다시 만든 pack은 다른 기록이다.
+- 리뷰 지문(`Pack::review_fingerprint`): pack 푸터의 내용 ID hex 64자(0.12.441, 위 pack 절의
+  식별 필드). 복사, 이름 변경, 다시 만든 pack, 시각만 바뀐 .db, 같은 에러가 나온 재실행은 같은
+  기록이고 에러가 달라지면 다른 기록이다. 0.12.440까지는 pack 헤더·푸터·룰 디렉터리·설명
+  참조·문자열 섹션과 `<QQ`(pack 파일 크기, mtime ns)의 sha256이라 다시 만든 pack은 다른 기록이었다.
 - 일괄 지정(검토 제외)은 65,536개 단위 트랜잭션이다. 취소·실패 전에 완료한 청크와
   그 카운터는 남는다.
 

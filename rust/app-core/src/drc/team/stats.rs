@@ -633,7 +633,7 @@ fn open_flags(path: &Path, id: &Identity) -> Result<Connection> {
     {
         return Err(Error::new(
             ErrorKind::Cache,
-            "review flags of another DRC result (the pack was made again since they were written)",
+            "review flags of another DRC result (their content id or rule sizes are not this pack's)",
         ));
     }
     conn.execute_batch("BEGIN").map_err(sql)?;

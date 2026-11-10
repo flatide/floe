@@ -272,6 +272,26 @@ pub fn is_packed_source(source: &Path) -> Result<bool> {
         Err(e) => Err(e.into()),
     }
 }
+/// Where a review file of another result is moved: `<path>.stale-<epoch>`,
+/// the first such name not taken. Two files moved in one second must not
+/// share a name - the rename would replace the review kept first - so a
+/// taken name gives way to the next number; the name stays `stale-<digits>`,
+/// what the statistics skip as a leftover (drc::team::stats).
+pub(crate) fn aside_path(path: &Path) -> PathBuf {
+    let mut stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    loop {
+        let mut name = path.as_os_str().to_owned();
+        name.push(format!(".stale-{stamp}"));
+        let candidate = PathBuf::from(name);
+        if fs::symlink_metadata(&candidate).is_err() {
+            return candidate;
+        }
+        stamp += 1;
+    }
+}
 /// The pack's reader lock (floe_vfs::lock, kind Pack): refused - as
 /// ErrorKind::Busy, with who - while a run re-packs it.
 pub(crate) fn pack_reader(path: &Path) -> Result<floe_vfs::lock::ReaderGuard> {
@@ -309,7 +329,9 @@ fn current_pack(source: &Path, cancelled: &AtomicUsize) -> Result<(Option<Pack>,
                     Ok(p)
                 })
                 .and_then(|p| {
-                    if p.source_matches(source)? {
+                    // (the ASCII file would be read whole otherwise: a
+                    // source whose time changed is compared whatever its size)
+                    if p.source_current(source, cancelled)? {
                         Ok(p)
                     } else {
                         Err(Error::new(ErrorKind::Cache, "stale DRC pack"))
@@ -370,12 +392,14 @@ pub fn open_pack(source: &Path, cancelled: &AtomicUsize) -> Result<Pack> {
     let reader = pack_reader(&path)?;
     let mut pack = Pack::open(&path, cancelled)?;
     pack.hold(reader);
-    if !pack.source_matches(&source)? {
+    if !pack.source_current(&source, cancelled)? {
         return Err(Error::new(
             ErrorKind::Cache,
             format!(
-                "{}: stale DRC pack - {} changed (size or time) since it was indexed. The reviews are bound to the result as indexed: index it again for the new result's statistics ({build}) - the earlier reviewers' files are then listed as another result's",
+                "{}: stale DRC pack - {} is not the file that was indexed (its size or its content changed). Index it again: {} drc {} --build --force (or floe-index drc)",
                 path.display(),
+                source.display(),
+                crate::program(),
                 source.display()
             ),
         ));

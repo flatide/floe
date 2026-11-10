@@ -105,7 +105,7 @@ pub(super) fn bytes(n: u64) -> Vec<u8> {
 fn geometry_bytes(n: u64, vertices: usize) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend(MAGIC);
-    push32(&mut out, 4);
+    push32(&mut out, 5);
     push32(&mut out, 1);
     out.extend(1000f64.to_le_bytes());
     push64(&mut out, 1234);
@@ -190,9 +190,164 @@ fn geometry_bytes(n: u64, vertices: usize) -> Vec<u8> {
         push64(&mut out, v);
     }
     push32(&mut out, top);
-    push32(&mut out, 0);
+    // the source's CRC-32 and the content id (layout 5): the fixture's id
+    // is 0xab.. - its first 16 bytes are the waive and notes files' tag -
+    // with the error count in its last bytes, so packs of other sizes are
+    // other results
+    push32(&mut out, 0x1234_abcd);
+    let mut content = [0xabu8; 32];
+    content[24..].copy_from_slice(&n.to_le_bytes());
+    out.extend(content);
     out.extend(MAGIC);
     out
+}
+/// The fixture pack stamped as made of `source`: its size, time and CRC-32.
+fn pack_of(source: &std::path::Path, n: u64) -> Vec<u8> {
+    use std::os::unix::fs::MetadataExt;
+    let m = fs::metadata(source).unwrap();
+    let mut packed = bytes(n);
+    packed[24..32].copy_from_slice(&m.len().to_le_bytes());
+    packed[32..40].copy_from_slice(&(m.mtime() as u64).to_le_bytes());
+    let crc = packed.len() - 168 + 124;
+    packed[crc..crc + 4]
+        .copy_from_slice(&crc32fast::hash(&fs::read(source).unwrap()).to_le_bytes());
+    packed
+}
+fn set_time(path: &std::path::Path, seconds: u64) {
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds))
+        .unwrap();
+}
+#[test]
+fn a_source_whose_time_changed_is_known_by_its_content() {
+    const TEXT: &str = "synthetic ASCII source\n";
+    let f = Fixture::new(&bytes(3));
+    let source = f.dir.join("sample");
+    fs::write(&source, TEXT).unwrap();
+    set_time(&source, 1_700_000_000);
+    fs::write(&f.path, pack_of(&source, 3)).unwrap();
+    let stop = AtomicUsize::new(0);
+    let p = Pack::open(&f.path, &stop).unwrap();
+    let crc = crc32fast::hash(TEXT.as_bytes());
+    assert_eq!(
+        (p.source_size, p.source_mtime, p.source_crc),
+        (TEXT.len() as u64, 1_700_000_000, crc)
+    );
+    let hint = f.dir.join("sample.ice.source");
+    let stamp = |time: u64| format!("floe-drc-source 1\n{} {time} {crc:08x}\n", TEXT.len());
+    // as indexed: nothing read, nothing kept
+    assert!(p.source_matches(&source).unwrap() && !hint.exists());
+    // another time, the same bytes. An open that must not wait does not
+    // read a source over its limit: stale, nothing kept ...
+    set_time(&source, 1_700_000_007);
+    let size = TEXT.len() as u64;
+    assert!(!p.source_check(&source, Some(0), &stop).unwrap());
+    assert!(!p.source_check(&source, Some(size - 1), &stop).unwrap() && !hint.exists());
+    // ... within the limit, and for a caller that reads a source of any
+    // size, the content decides and its stamp is kept
+    assert!(p.source_check(&source, Some(size), &stop).unwrap());
+    assert_eq!(fs::read_to_string(&hint).unwrap(), stamp(1_700_000_007));
+    fs::remove_file(&hint).unwrap();
+    assert!(p.source_current(&source, &stop).unwrap());
+    assert_eq!(fs::read_to_string(&hint).unwrap(), stamp(1_700_000_007));
+    // (the kept stamp answers where nothing may be read, too)
+    assert!(p.source_check(&source, Some(0), &stop).unwrap());
+    // the kept stamp answers with nothing read - other bytes under that size
+    // and time pass, the trust a size and a time always had ...
+    fs::write(&source, "SYNTHETIC ascii source\n").unwrap();
+    set_time(&source, 1_700_000_007);
+    assert!(p.source_matches(&source).unwrap());
+    // ... and under another time they are read: not the file, no stamp of it
+    set_time(&source, 1_700_000_009);
+    assert!(!p.source_current(&source, &stop).unwrap() && !p.source_verified(&source, &stop).unwrap());
+    assert_eq!(fs::read_to_string(&hint).unwrap(), stamp(1_700_000_007));
+    // a stamp of another pack (its CRC), of another format or a cut one is
+    // no answer
+    for text in [
+        format!("floe-drc-source 1\n{} 1700000009 {:08x}\n", TEXT.len(), crc ^ 1),
+        format!("floe-drc-source 2\n{} 1700000009 {crc:08x}\n", TEXT.len()),
+        format!("floe-drc-source 1\n{} 1700000009 {crc:08x} more\n", TEXT.len()),
+        format!("floe-drc-source 1\n{} 1700000009\n", TEXT.len()),
+        String::new(),
+    ] {
+        fs::write(&hint, &text).unwrap();
+        assert!(!p.source_current(&source, &stop).unwrap(), "{text:?}");
+    }
+    // the file as it was, its time changed again: read once more, the stamp
+    // renewed; a cancelled read says so
+    fs::write(&source, TEXT).unwrap();
+    set_time(&source, 1_700_000_011);
+    assert!(matches!(
+        p.source_verified(&source, &AtomicUsize::new(1)),
+        Err(crate::Error {
+            kind: crate::ErrorKind::Cancelled,
+            ..
+        })
+    ));
+    assert!(p.source_verified(&source, &stop).unwrap());
+    assert_eq!(fs::read_to_string(&hint).unwrap(), stamp(1_700_000_011));
+    // another size is never the file, whatever a stamp says
+    fs::write(&source, "a longer synthetic ASCII source\n").unwrap();
+    set_time(&source, 1_700_000_011);
+    assert!(!p.source_current(&source, &stop).unwrap() && !p.source_matches(&source).unwrap());
+    // a source that is not there is an error, as before
+    fs::remove_file(&source).unwrap();
+    assert!(p.source_matches(&source).is_err() && p.source_current(&source, &stop).is_err());
+}
+#[test]
+fn a_file_moved_aside_never_takes_a_name_in_use() {
+    // two review files moved in one second: the second must not replace
+    // the first (a rename onto its name would), and both names stay
+    // `stale-<digits>` - what the statistics skip as leftovers
+    let f = Fixture::new(&bytes(3));
+    let side = f.dir.join(".r.db.waive.kim");
+    let number = |p: &PathBuf| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_prefix(".r.db.waive.kim.stale-"))
+            .and_then(|n| n.parse::<u64>().ok())
+            .expect("stale-<digits>")
+    };
+    let first = local::aside_path(&side);
+    fs::write(&first, b"kept first").unwrap();
+    let second = local::aside_path(&side);
+    fs::write(&second, b"kept second").unwrap();
+    let third = local::aside_path(&side);
+    assert!(number(&first) < number(&second) && number(&second) < number(&third));
+    assert_eq!(fs::read(&first).unwrap(), b"kept first");
+}
+#[test]
+fn the_inline_verify_limit_is_megabytes_with_a_default() {
+    use super::pack::verify_limit_of;
+    assert_eq!(verify_limit_of(None), 1024 << 20);
+    assert_eq!(verify_limit_of(Some(" 8 ")), 8 << 20);
+    assert_eq!(verify_limit_of(Some("0")), 0);
+    assert_eq!(verify_limit_of(Some("many")), 1024 << 20);
+    assert_eq!(verify_limit_of(Some("18446744073709551615")), u64::MAX);
+}
+#[test]
+fn a_pack_says_its_source_crc_and_content_id() {
+    let f = Fixture::new(&bytes(65));
+    let p = Pack::open(&f.path, &AtomicUsize::new(0)).unwrap();
+    let mut content = [0xab; 32];
+    content[24..].copy_from_slice(&65u64.to_le_bytes());
+    assert_eq!((p.source_crc, p.content_id), (0x1234_abcd, content));
+    // the review identity is the content id; the waive and notes files
+    // carry its first 16 bytes with the error count
+    assert_eq!(
+        p.review_fingerprint().unwrap(),
+        format!("{}4100000000000000", "ab".repeat(24))
+    );
+    let tag = review::Fingerprint::of(&p);
+    assert_eq!((tag.content, tag.total), ([0xab; 16], 65));
+    // a layout of before is refused whole
+    let mut old = bytes(65);
+    old[8..12].copy_from_slice(&4u32.to_le_bytes());
+    fs::write(&f.path, &old).unwrap();
+    assert!(Pack::open(&f.path, &AtomicUsize::new(0)).is_err());
 }
 #[test]
 fn metadata_query_shares_geometry_members_but_not_its_copy_budget() {
@@ -220,7 +375,7 @@ fn metadata_query_shares_geometry_members_but_not_its_copy_budget() {
 fn rule_list_and_step_intersect_selection_waive_and_bounds_before_limits() {
     use std::collections::BTreeSet;
     let mut b = bytes(130);
-    let offset = b.len() - 136 + 4 * 8;
+    let offset = b.len() - 168 + 4 * 8;
     let at = u64::from_le_bytes(b[offset..offset + 8].try_into().unwrap()) as usize;
     for i in 0..130 {
         b[at + i] = if i % 3 == 0 {
@@ -519,7 +674,7 @@ fn selection_candidates_are_page_bounded_and_do_not_clone_coordinates() {
 #[test]
 fn circular_step_matches_filtered_file_order_across_blocks_and_resumes() {
     let mut b = bytes(130);
-    let offset = b.len() - 136 + 4 * 8;
+    let offset = b.len() - 168 + 4 * 8;
     let statuses = u64::from_le_bytes(b[offset..offset + 8].try_into().unwrap()) as usize;
     for i in 0..130 {
         b[statuses + i] = if i % 3 == 0 {
@@ -770,10 +925,9 @@ fn waive_filter_is_inside_query_and_never_writes_pack_or_sidecar() {
     let mut p = Pack::open(&f.path, &flag).unwrap();
     let mut side = Vec::new();
     side.extend(b"FLOEWAIV");
-    push32(&mut side, 1);
-    for v in [1234, 5678, 130] {
-        push64(&mut side, v);
-    }
+    push32(&mut side, 2);
+    side.extend([0xab; 16]);
+    push64(&mut side, 130);
     push32(&mut side, 3);
     side.extend([0; 130]);
     side[40 + 128] = 1;
@@ -818,7 +972,7 @@ fn damaged_packs_fail_without_panic_or_unbounded_allocation() {
     }
     for field in 0..15 {
         let mut b = original.clone();
-        let off = b.len() - 136 + field * 8;
+        let off = b.len() - 168 + field * 8;
         b[off..off + 8].copy_from_slice(&u64::MAX.to_le_bytes());
         let f = Fixture::new(&b);
         assert!(Pack::open(&f.path, &flag).is_err(), "footer {field}");
@@ -909,11 +1063,11 @@ fn reviewer_paths_are_bounded_and_deterministic() {
 
 fn replace_one_blob(blob: &[u8]) -> Vec<u8> {
     let mut b = bytes(1);
-    let foot = b.len() - 136;
+    let foot = b.len() - 168;
     let old = u64::from_le_bytes(b[foot + 16..foot + 24].try_into().unwrap()) as usize;
     let shift = blob.len() as i64 - (old - 40) as i64;
     b.splice(40..old, blob.iter().copied());
-    let foot = b.len() - 136;
+    let foot = b.len() - 168;
     for field in [1, 2, 4, 5, 6, 8, 10, 12] {
         let off = foot + field * 8;
         let v = u64::from_le_bytes(b[off..off + 8].try_into().unwrap());

@@ -585,6 +585,74 @@ impl FlagStore {
         Self::read_chunk(&mut r, check, chunk)
     }
 
+    /// Move aside a flags file of another DRC result - its metadata is not
+    /// this result's content id and rule sizes - as `<file>.stale-<epoch>`,
+    /// the way a waive sidecar of another result is (drc::desktop): the
+    /// review of a result run again starts at once, and what was recorded
+    /// for the result before stays on disk (user 2026-11-10: until 0.12.440
+    /// the file was refused where it lay - "belongs to another DRC result" -
+    /// and the reviewer's statistics stayed out until someone renamed a
+    /// hidden file by hand). Called once when the review opens, by the
+    /// session that holds the reviewer's files (drc::session). A file that
+    /// cannot be read as a flags file of this format, or cannot be moved, is
+    /// left where it is and refused on use as before. The notice, when one
+    /// was moved.
+    pub fn retire_other_result(&self) -> Result<Option<String>> {
+        let mut r = self.reader.lock().unwrap_or_else(|p| p.into_inner());
+        if r.conn.is_some() || !exists(&r.path)? {
+            return Ok(None);
+        }
+        let found: Option<String> = {
+            let Ok(conn) = open_read_only(&r.path, Duration::from_millis(500)) else {
+                return Ok(None);
+            };
+            match conn
+                .query_row("SELECT value FROM metadata WHERE id=1", [], |row| row.get(0))
+                .optional()
+            {
+                Ok(v) => v,
+                Err(_) => return Ok(None),
+            }
+        };
+        // only a file this build can judge is moved: one of this format
+        // whose result (content id, rule sizes) is another. A file without
+        // its metadata row (one being made) or of another format version is
+        // left where it is.
+        let Some(found) = found else { return Ok(None) };
+        if found == self.metadata() {
+            return Ok(None);
+        }
+        let version = serde_json::from_str::<serde_json::Value>(&found)
+            .ok()
+            .and_then(|v| v.get("version").and_then(serde_json::Value::as_u64));
+        if version != Some(VERSION) {
+            return Ok(None);
+        }
+        let journal_of = |p: &Path| {
+            let mut name = p.as_os_str().to_owned();
+            name.push("-journal");
+            PathBuf::from(name)
+        };
+        // (a name not taken: a file moved earlier is never replaced)
+        let moved = crate::drc::local::aside_path(&r.path);
+        if std::fs::rename(&r.path, &moved).is_err() {
+            return Ok(None);
+        }
+        // (a rollback journal left beside it belongs to the file moved)
+        let journal = journal_of(&r.path);
+        if exists(&journal).unwrap_or(false) {
+            let _ = std::fs::rename(&journal, journal_of(&moved));
+        }
+        r.error = None;
+        r.missing_until = None;
+        let notice = format!(
+            "[drc] review flags do not match this pack (DRC re-run?); moved aside: {}",
+            moved.display()
+        );
+        self.notices.lock().unwrap().push(notice.clone());
+        Ok(Some(notice))
+    }
+
     /// Whether the store's file exists (opening it for reads).
     pub fn present(&self) -> Result<bool> {
         let mut r = self.reader.lock().unwrap();
@@ -797,3 +865,114 @@ impl FlagStore {
 
 /// The store's write lock and its connection.
 pub struct WriteGuard<'a>(MutexGuard<'a, Option<Connection>>);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    struct Folder(PathBuf);
+    impl Folder {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "floe-drc-flags-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&dir).unwrap();
+            Self(dir)
+        }
+        fn aside(&self) -> Vec<String> {
+            let mut names: Vec<String> = fs::read_dir(&self.0)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|n| n.contains(".stale-"))
+                .collect();
+            names.sort();
+            names
+        }
+    }
+    impl Drop for Folder {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A flags file of other errors (another content id, or other rule
+    /// sizes) is moved aside whole when its reviewer opens the result, and
+    /// the review starts; a file this build cannot judge stays where it is.
+    #[test]
+    fn a_flags_file_of_another_result_is_moved_aside_and_no_other() {
+        let folder = Folder::new();
+        let pack = folder.0.join(".r.db.tray");
+        let store = |id: &str, sizes: &[u64]| {
+            FlagStore::new(&pack, sizes.to_vec(), id.repeat(32), "kim").unwrap()
+        };
+        let first = store("aa", &[3, 2]);
+        first.mark_visited(0, 1).unwrap();
+        let path = first.path();
+        assert_eq!(path, folder.0.join(".r.db.review.kim.sqlite3"));
+        first.close();
+        // the same result (the pack made again, the folder copied): kept
+        let same = store("aa", &[3, 2]);
+        assert!(same.retire_other_result().unwrap().is_none() && folder.aside().is_empty());
+        assert_eq!(same.counts(None).unwrap().visited, 1);
+        same.close();
+        // other errors: moved aside with its bytes, said, and a new review
+        // (a journal left empty beside it goes with it; a hot one - a writer
+        // died - keeps the file from being read here, so it is left and the
+        // writer's open deals with it as before)
+        let bytes = fs::read(&path).unwrap();
+        fs::write(folder.0.join(".r.db.review.kim.sqlite3-journal"), b"").unwrap();
+        let other = store("bb", &[3, 2]);
+        let notice = other.retire_other_result().unwrap().expect("moved");
+        let aside = folder.aside();
+        assert_eq!(aside.len(), 2, "{aside:?}");
+        assert!(aside[0].starts_with(".r.db.review.kim.sqlite3.stale-") && !aside[0].ends_with("-journal"));
+        assert_eq!(aside[1], format!("{}-journal", aside[0]));
+        assert!(
+            notice.starts_with("[drc] review flags do not match this pack (DRC re-run?); moved aside: ")
+                && notice.ends_with(&aside[0])
+        );
+        assert_eq!(std::mem::take(&mut *other.notices.lock().unwrap()), vec![notice]);
+        assert_eq!(fs::read(folder.0.join(&aside[0])).unwrap(), bytes);
+        assert!(!path.exists());
+        assert_eq!(other.counts(None).unwrap().visited, 0);
+        other.mark_visited(1, 0).unwrap();
+        assert!(path.exists() && other.retire_other_result().unwrap().is_none());
+        other.close();
+        // other rule sizes under one id are another result too
+        let sized = store("bb", &[3, 3]);
+        assert!(sized.retire_other_result().unwrap().is_some() && folder.aside().len() == 3);
+        sized.close();
+        // what cannot be judged is left where it is, and refused on use as
+        // before: another format version, no metadata row, not a database
+        let kept = |text: Option<&str>| {
+            let s = store("bb", &[3, 2]);
+            s.mark_visited(0, 0).unwrap();
+            s.close();
+            let conn = Connection::open(&path).unwrap();
+            match text {
+                Some(text) => conn.execute("UPDATE metadata SET value=?1 WHERE id=1", params![text]),
+                None => conn.execute("DELETE FROM metadata", []),
+            }
+            .unwrap();
+            drop(conn);
+            let before = folder.aside().len();
+            let s = store("bb", &[3, 2]);
+            assert!(s.retire_other_result().unwrap().is_none(), "{text:?}");
+            assert!(path.exists() && folder.aside().len() == before && s.counts(None).is_err());
+            s.close();
+            fs::remove_file(&path).unwrap();
+        };
+        kept(Some(&format!("{{\"version\":2,\"fingerprint\":\"{}\",\"sizes\":[3,2]}}", "cc".repeat(32))));
+        kept(Some("not json"));
+        kept(None);
+        fs::write(&path, b"not a database").unwrap();
+        let s = store("bb", &[3, 2]);
+        assert!(s.retire_other_result().unwrap().is_none() && path.exists());
+        s.close();
+    }
+}

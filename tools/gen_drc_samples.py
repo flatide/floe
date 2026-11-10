@@ -5,11 +5,10 @@ previous DRC run, user clusters, and review files of three other reviewers
 and of the user's own previous review - then the numbers the viewer should
 show, measured through floe2 gtk-service, in GUIDE.ko.md.
 
-The review files are bound to their pack's fingerprint (its mtime in ns
-among others), so the set is made on the machine it is used on, after the
-packs - copying it elsewhere drops the reviews (the viewer refuses them as
-"another DRC result"). It needs Python 3.6+ and the built binaries only (no
-KLayout, no NumPy):
+The review files are bound to their pack's content id (what the errors are;
+0.12.441 - until then the pack file's mtime among others), so the set may be
+copied elsewhere with its reviews. It needs Python 3.6+ and the built
+binaries only (no KLayout, no NumPy):
 
     python3 tools/gen_drc_samples.py                     # -> data/drc_samples
     python3 tools/gen_drc_samples.py --heavy 2000000     # a 2M-error rule
@@ -586,9 +585,8 @@ def write_guide(out, me, heavy, names, team, team_db, summary, per_rule):
 
 GUIDE = """# floe2 DRC 샘플 (tools/gen_drc_samples.py)
 
-이 폴더는 생성한 머신에서 그대로 쓴다. 리뷰 파일은 pack 지문(파일 mtime 포함)에
-묶여 있어 다른 곳으로 복사하면 "another DRC result"로 거절된다 - 그때는 그 머신에서
-다시 생성한다. 내 리뷰어 태그: `{me}` (이 이름으로 이전 실행 리뷰를 만들었다; 다르면
+리뷰 파일은 pack의 내용 지문(에러 내용; 0.12.441)에 묶여 있어 이 폴더를 다른 곳으로
+복사해도 리뷰가 그대로 붙는다. 내 리뷰어 태그: `{me}` (이 이름으로 이전 실행 리뷰를 만들었다; 다르면
 `FLOE_REVIEWER={me}`로 실행하거나 `--me`로 다시 생성).
 
 ```sh

@@ -14,13 +14,14 @@
 |---|---|---|---|
 | 레이아웃 인덱스 폴더 (VFS 캐시, `floe-index vfs` 산출) | **`.<src>.ice/`** — 소스와 같은 디렉터리의 숨김 폴더 | `chipA.oas` → `.chipA.oas.ice/` | `chipA.oas.floe/` |
 | Calibre DRC 결과 pack (`floe-index drc` 산출) | **`.<db>.tray`** — db와 같은 디렉터리의 숨김 파일 | `results.db` → `.results.db.tray` | `results.db.ice` |
+| DRC pack의 소스 확인 기록 (2026-11-10, app 0.12.441) | **`.<db>.tray.source`** — pack 이름에 `.source`. 시각만 바뀐 `.db`의 내용(CRC-32)을 견줘 같다고 확인한 크기·시각 두 줄 텍스트(DRC.ko.md §2 '결과 식별 = 내용', SPEC-FORMATS). 지워도 된다: 다음 열기가 다시 견준다 | `.results.db.tray.source` | — |
 | 색인 잠금 (2026-10-09, §5) | **`.floe-lock/`** — 대상과 같은 디렉터리의 숨김 폴더, 대상마다 `<키>.build`·`<키>.use` | `.chipA.oas.ice/` → `.floe-lock/chipA.oas.vfs.build` | — |
 | DRC 리뷰 사이드카 (리뷰어별 waive·note) | `.<db>.waive.<user>`, `.<db>.notes.<user>.fe` — **db 이름** 기준 | `.results.db.waive.jkim` | 같음 (pack 이름에서 `.ice`를 벗겨 만들던 것을 db 이름 기준으로 바꿈; 결과는 동일) |
 
 - "숨김"은 기본 이름 앞에 `.`를 붙인 것이다. 별도 폴더로 옮기지 않는다(`--workdir`가 있으면
   이름은 같고 폴더만 작업 디렉터리 아래의 미러다, §6).
 - 폴더 안의 파일(`design.ovm/ovp/ovt/ovo`, `meta.json`)과 pack 내부 포맷
-  (`FLOEICE` 매직, 레이아웃 버전 4)은 그대로다. 바뀐 것은 이름뿐이다.
+  (`FLOEICE` 매직, 당시 레이아웃 버전 4; 0.12.441부터 5)은 그대로다. 바뀐 것은 이름뿐이다.
 - 명시 outdir(`floe-index vfs <src> <outdir>`, `floe-index drc <db> <out>`)은 어떤
   이름이든 된다. 규칙은 outdir을 생략했을 때와 Python이 경로를 계산할 때 적용된다.
 
@@ -181,7 +182,7 @@
   |---|---|
   | 레이아웃·덱 소스의 캐시 `.x.oas.ice/`(전체 인덱스, 경량 캐시, 요약), 구 이름 `x.oas.floe/` | `DIR/<소스 폴더>/.x.oas.ice/` |
   | 캐시의 revisions `.x.oas.ice.revisions/` | 캐시 옆, 즉 DIR 아래 |
-  | DRC pack `.r.db.tray`, 구 이름 `r.db.ice` | `DIR/<db 폴더>/.r.db.tray` |
+  | DRC pack `.r.db.tray`와 그 소스 확인 기록 `.r.db.tray.source`, 구 이름 `r.db.ice` | `DIR/<db 폴더>/.r.db.tray` |
   | pack의 `.r.db.analysis/`(drc-prepare; `FLOE_DRC_ANALYSIS_ROOT`가 있으면 그쪽) | pack 옆, 즉 DIR 아래 |
   | 리뷰 `.r.db.review.<user>.sqlite3`(`FLOE_DRC_REVIEW_ROOT`가 있으면 그쪽), `.r.db.waive.<user>`, `.r.db.notes.<user>.fe` | pack 옆, 즉 DIR 아래 |
   | 잠금 `<캐시>.index.lock`, `.floe-lock/` | 캐시·pack 옆, 즉 DIR 아래 |

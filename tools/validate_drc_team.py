@@ -153,6 +153,14 @@ def write_db(path, rules, precision=1000):
     Path(path).write_text("".join(out))
 
 
+def other_bytes(raw):
+    """A .db's bytes with its last coordinate digit changed: the same size,
+    another result."""
+    body = raw.rstrip(b"\n")
+    assert body[-1:].isdigit(), body[-20:]
+    return body[:-1] + (b"1" if body[-1:] != b"1" else b"2") + raw[len(body):]
+
+
 def runs(d):
     """run1 (the previous result) and run2 (this one)."""
     a = [_poly(100 * (i % 120), 60 * (i // 120)) for i in range(9000)]
@@ -319,7 +327,10 @@ def r1_identity(d):
     print("[R1b] a file of another result, read-only results, FLOE_DRC_REVIEW_ROOT")
     other = Svc()
     try:
-        # a run1 flags file copied over run2's name: refused, kept
+        # a run1 flags file under run2's name (the DRC ran again in place):
+        # of another result - moved aside as the waive sidecar is, its bytes
+        # kept, and this result's review starts (0.12.441; until then the
+        # file was refused where it lay and the statistics stayed out)
         h = rs_open(other, d / "run1.db", "copy")["handle"]
         other("drc_visit", handle=h, check=0, error=0)
         other.visits(h, 1)
@@ -328,14 +339,22 @@ def r1_identity(d):
         dst = d / ".run2.db.review.copy.sqlite3"
         shutil.copy(src, dst)
         before = dst.read_bytes()
-        h = rs_open(other, d / "run2.db", "copy")["handle"]
-        try:
-            other("drc_review_counts", handle=h)
-            check(False, "another result's flags refused")
-        except gtkservice.ServiceError as exc:
-            check("another DRC result" in str(exc), "another result's flags refused", exc)
-        check(dst.read_bytes() == before, "the refused file is kept as it was")
+        opened = rs_open(other, d / "run2.db", "copy")
+        h = opened["handle"]
+        aside = sorted(d.glob(".run2.db.review.copy.sqlite3.stale-*"))
+        check(len(aside) == 1 and aside[0].read_bytes() == before and not dst.exists(),
+              "another result's flags are moved aside, kept as they were", aside)
+        check(any("review flags do not match this pack" in n for n in opened["notices"]),
+              "... and the open says so", opened["notices"])
+        check(other("drc_review_counts", handle=h)["visited"] == 0,
+              "this result's review starts empty")
+        other("drc_visit", handle=h, check=0, error=1)
+        other.visits(h, 1)
+        check(other("drc_review_counts", handle=h)["visited"] == 1 and dst.exists(),
+              "... and records anew")
         other("drc_close", handle=h)
+        for path in aside + [dst]:
+            path.unlink()
     finally:
         other.close()
     # a results folder and temp folder that cannot be written: the pack's
@@ -457,6 +476,9 @@ def r1_reindex(d):
             svc.close()
     # Same source stamp, rule/count metadata and file length, but one
     # coordinate differs: only a full byte comparison can retain the pack.
+    # Layout 5's footer: 15 u64 | u32 cell | u32 source CRC-32 | 32 B content
+    # id | 8 B magic - the sections lie where they lay, and the CRC and the
+    # content id are another file's and other errors'.
     src_stat = src.stat()
     text = src.read_text()
     src.write_text(text.replace("100 100", "101 100", 1))
@@ -464,17 +486,36 @@ def r1_reindex(d):
     r = run([INDEX, "drc", str(src)])
     after = pack.read_bytes()
     check(r.returncode == 0 and after != before and len(after) == len(before)
-          and after[:40] == before[:40] and after[-136:] == before[-136:],
+          and after[:40] == before[:40] and after[-168:-44] == before[-168:-44]
+          and after[-8:] == before[-8:],
           "a coordinate change replaces the pack despite matching source stamp", r.stderr)
+    check(after[-44:-40] != before[-44:-40] and after[-40:-8] != before[-40:-8],
+          "... with another source CRC and another content id")
     check(review_path.read_bytes() == review_bytes, "reindex never rewrites a saved review")
+    waive_path = folder / ".same.db.waive.reindex"
+    waive_bytes = waive_path.read_bytes()
     svc = Svc()
     try:
-        h = rs_open(svc, src, "reindex")["handle"]
-        try:
-            svc("drc_review_flags", handle=h, check=0, errors=[0])
-            check(False, "changed geometry still refuses old review")
-        except gtkservice.ServiceError as exc:
-            check("another DRC result" in str(exc), "changed geometry still refuses old review", exc)
+        # other errors: the review of the result before is moved aside whole
+        # (0.12.441; until then the flags file was refused where it lay) and
+        # this result's starts - `review from a previous run` carries it over
+        opened = rs_open(svc, src, "reindex")
+        h = opened["handle"]
+        flags_aside = sorted(folder.glob(review_path.name + ".stale-*"))
+        waive_aside = sorted(folder.glob(waive_path.name + ".stale-*"))
+        check(len(flags_aside) == 1 and flags_aside[0].read_bytes() == review_bytes
+              and not review_path.exists(),
+              "changed geometry moves the old review's flags aside, kept as they were", flags_aside)
+        check(len(waive_aside) == 1 and waive_aside[0].read_bytes() == waive_bytes,
+              "... and its waives", waive_aside)
+        check(any("review flags do not match this pack" in n for n in opened["notices"])
+              and any("waive autosave does not match this pack" in n for n in opened["notices"]),
+              "... and the open says both", opened["notices"])
+        blank = svc("drc_review_counts", handle=h)
+        check(blank["visited"] == 0 and blank["not_required"] == 0
+              and svc("drc_status", handle=h, check=0, start=0, count=3) == "000000"
+              and not any(n["text"] == "keep this note" for n in opened["notes"]),
+              "... and this result's review starts empty", (blank, opened["notes"]))
         svc("drc_close", handle=h)
     finally:
         svc.close()
@@ -787,7 +828,7 @@ def r5(d):
             check(r.returncode == 0, "floe-index drc emb/%s" % name, r.stderr)
         epack = Path(odrc.cachepath.pack_path(str(emb / "run1.db")))
         data = bytearray(epack.read_bytes())
-        footer = struct.unpack_from("<15QII8s", data, len(data) - 136)
+        footer = struct.unpack_from("<15QII32s8s", data, len(data) - 168)
         status_off, wcount_off = footer[4], footer[5]
         for gid in (0, 1, 2, 9003, 9004):
             data[status_off + gid] = 1
@@ -953,7 +994,7 @@ def r8(temp):
 # ---- R9, R10 (2026-11-10: one session a reviewer, the reviewers' statistics) ----
 
 REVIEW_ENV = ("FLOE_REVIEWER", "FLOE_REVIEWER_REQUIRED", "FLOE_REVIEW_SESSION_LOCK",
-              "FLOE_WORKDIR", "SSH_CONNECTION", "SSH_CLIENT")
+              "FLOE_WORKDIR", "FLOE_DRC_VERIFY_MB", "SSH_CONNECTION", "SSH_CLIENT")
 
 
 def svc_with(env):
@@ -1260,12 +1301,21 @@ def r10(temp):
           and [{k: x[k] for k in one_team[0]} for x in some["team"]["rules"]] == one_team,
           "--floe-reviewer ID,ID: these alone", some["team"])
     # the pack must be the current one: a stale or missing pack is an error,
-    # never zeros
+    # never zeros. Current is the .db's content (0.12.441): a .db whose time
+    # alone changed is the file that was indexed, other bytes of its size
+    # are not
     st = os.stat(db)
+    raw = db.read_bytes()
     os.utime(db, (st.st_atime, st.st_mtime + 5))
+    r, touched = stats_of(db)
+    check(r.returncode == 0 and touched is not None and touched["team"] == got["team"],
+          "a .db whose time alone changed: its pack is current", (r.returncode, r.stderr[-300:]))
+    db.write_bytes(other_bytes(raw))
+    os.utime(db, (st.st_atime, st.st_mtime + 9))
     r, none = stats_of(db)
     check(r.returncode == 1 and not r.stdout and "stale DRC pack" in r.stderr,
           "a stale pack: refused, nothing printed", (r.returncode, r.stderr[-300:]))
+    db.write_bytes(raw)
     os.utime(db, (st.st_atime, st.st_mtime))
     r, again = stats_of(db)
     check(r.returncode == 0 and again["team"] == got["team"], "(the .db as indexed: read again)")
@@ -1299,10 +1349,235 @@ def r10(temp):
 
 
 
+# ---- R11 -----------------------------------------------------------------
+
+
+def write_run(path, rules, date="Nov 10 12:00:00 2026", deck="rules/a.drc"):
+    """A result as a DRC run writes it: each rule's header carries the run's
+    date, its text the rule file's path."""
+    out = ["TOP 1000\n"]
+    for name, records in rules:
+        out.append("%s\n%d %d 2 %s\nRule File Pathname: %s\n%s check\n"
+                   % (name, len(records), len(records), date, deck, name))
+        for i, rec in enumerate(records):
+            kind, _num, rest = rec.split(" ", 2)
+            out.append("%s %d %s" % (kind, i + 1, rest))
+    Path(path).write_text("".join(out))
+
+
+def review_of(svc, db, who):
+    """What a reviewer's review of `db` holds, as its open shows it."""
+    opened = rs_open(svc, db, who)
+    h = opened["handle"]
+    try:
+        if not opened["packed"]:
+            return {"packed": False}
+        return {
+            "packed": True,
+            "counts": svc("drc_review_counts", handle=h),
+            "flags": svc("drc_review_flags", handle=h, check=0, errors=[0, 1, 2, 3]),
+            "status": [svc("drc_status", handle=h, check=ci, start=0, count=4) for ci in (0, 1)],
+            "notes": sorted(n["text"] for n in opened["notes"]),
+            "moved": [n for n in opened["notices"] if "moved aside" in n],
+        }
+    finally:
+        svc("drc_close", handle=h)
+
+
+def numbers(stats):
+    """A statistics report without its paths and times."""
+    if stats is None:
+        return None
+    keys = ("id", "present", "waived", "visited", "not_required", "visited_not_required",
+            "pending", "counters_match")
+    return ([{k: x.get(k) for k in keys} for x in stats["reviewers"]], stats["team"],
+            stats["fingerprint"], [x["reviewer"] for x in stats["skipped"]])
+
+
+def r11(temp):
+    print("[R11] a result is known by its content: the .db's CRC-32, the pack's content id")
+    import zlib
+    d = temp / "identity"
+    d.mkdir()
+    db, pack, hint = d / "a.db", d / ".a.db.tray", d / ".a.db.tray.source"
+    rules = [("M1.S", [_poly(100 * i, 0) for i in range(40)]),
+             ("M2.W", [_edge(0, 100 * i) for i in range(30)])]
+    write_run(db, rules)
+    r = run([INDEX, "drc", str(db)])
+    check(r.returncode == 0, "floe-index drc a.db", r.stderr)
+    content = pack.read_bytes()[-40:-8]
+    svc = svc_with({})
+    try:
+        h = rs_open(svc, db, "kim")["handle"]
+        for e in (0, 1):
+            svc("drc_visit", handle=h, check=0, error=e)
+        svc.visits(h, 2)
+        e = svc.job(h, "drc_review", check=0, action="not-required", errors=[2], on=True)
+        check(e["state"] == "done", "kim's review", e)
+        svc("drc_set_status", handle=h, check=0, errors=[1], status=1)
+        svc("drc_set_status", handle=h, check=1, errors=[0, 3], status=1)
+        svc("drc_set_note", handle=h, gids=[3], text="kept")
+        svc("drc_close", handle=h)
+        want = review_of(svc, db, "kim")
+        r, s0 = stats_of(db)
+        base = numbers(s0)
+        check(want["packed"] and want["counts"]["visited"] == 2
+              and want["status"] == ["00010000", "01000001"]
+              and want["notes"] == ["kept"] and not want["moved"]
+              and r.returncode == 0 and base[2] == content.hex()
+              and [(x["id"], x["waived"], x["visited"], x["not_required"]) for x in base[0]]
+              == [("kim", 3, 2, 1)], "the review and its statistics, bound to the content id",
+              (want, base))
+
+        # 1. the .db's time alone changes (a copy back, a restore, a touch)
+        raw = db.read_bytes()
+        crc = "%08x" % (zlib.crc32(raw) & 0xFFFFFFFF)
+        t1 = int(os.stat(db).st_mtime) + 7
+        os.utime(db, (t1, t1))
+        r, s = stats_of(db)
+        check(r.returncode == 0 and numbers(s) == base,
+              "a .db whose time alone changed: its pack is current, the statistics the same",
+              (r.returncode, r.stderr[-300:]))
+        check(hint.exists() and hint.read_text() == "floe-drc-source 1\n%d %d %s\n" % (len(raw), t1, crc),
+              "... its content was compared (CRC-32) and the stamp kept beside the pack",
+              hint.read_text() if hint.exists() else None)
+        check(review_of(svc, db, "kim") == want, "... and the review is as it was")
+        # the inline limit (FLOE_DRC_VERIFY_MB) is for the open that must
+        # not wait - the viewer opening a pack chosen with its .db, where a
+        # stale pack is asked about: the kept stamp answers it with nothing
+        # read; without the stamp a source over the limit is not read
+        stamp = (pack.read_bytes(), pack.stat().st_mtime_ns, pack.stat().st_ino)
+        limited = dict(FLOE_DRC_VERIFY_MB="0")
+        off = svc_with(limited)
+        try:
+            o = off("drc_open", path=str(pack), mode="pack", source=str(db), reviewer="kim")
+            check(o["packed"], "the kept stamp answers an open that may read nothing")
+            off("drc_close", handle=o["handle"])
+            hint.unlink()
+            kind = refusal(off, path=str(pack), mode="pack", source=str(db), reviewer="kim")
+            check(kind is not None and kind[0] == "cache" and "stale pack" in kind[1]
+                  and not hint.exists(),
+                  "over the inline limit: the viewer's open of the pack does not read it - stale",
+                  kind)
+            # ... and whatever would read the .db anyway compares one of any
+            # size: a load (else it parses the ASCII file), the statistics,
+            # the reads, an explicit build
+            check(review_of(off, db, "kim") == want and hint.exists(),
+                  "... a load compares it whatever its size: the pack and the review")
+        finally:
+            off.close()
+        hint.unlink()
+        r, s = stats_of(db, env=limited)
+        check(r.returncode == 0 and numbers(s) == base and hint.exists(),
+              "... and the statistics", (r.returncode, r.stderr[-300:]))
+        hint.unlink()
+        r = run_env([FLOE2, "drc", str(db), "--rules", "--floe-reviewer", "kim"], limited)
+        try:
+            waived = [x["waived"] for x in json.loads(r.stdout)]
+        except ValueError:
+            waived = None
+        check(r.returncode == 0 and waived == [1, 2] and "parsing ASCII" not in r.stderr
+              and hint.exists(), "... and --rules, with no ASCII fallback",
+              (r.returncode, waived, r.stderr[-300:]))
+        hint.unlink()
+        r = run_env([FLOE2, "drc", str(db), "--build"], limited)
+        try:
+            out = json.loads(r.stdout)
+        except ValueError:
+            out = {}
+        check(r.returncode == 0 and out.get("reused") is True
+              and (pack.read_bytes(), pack.stat().st_mtime_ns, pack.stat().st_ino) == stamp
+              and hint.exists(), "... and floe2 drc --build, which keeps the pack",
+              (r.returncode, r.stderr[-300:]))
+
+        # 2. other bytes of the same size: another file
+        os.utime(db, (t1 + 1, t1 + 1))
+        db.write_bytes(other_bytes(raw))
+        os.utime(db, (t1 + 2, t1 + 2))
+        r, s = stats_of(db)
+        check(r.returncode == 1 and "stale DRC pack" in r.stderr and "--build --force" in r.stderr,
+              "other bytes of the same size: stale, and what to do", (r.returncode, r.stderr[-300:]))
+        r = run_env([FLOE2, "drc", str(db), "--build"], {})
+        check(r.returncode == 1 and "is stale" in r.stderr and "--force" in r.stderr
+              and (pack.read_bytes(), pack.stat().st_mtime_ns, pack.stat().st_ino) == stamp,
+              "... --build refuses to replace the pack without --force, and says so",
+              (r.returncode, r.stderr[-300:]))
+        db.write_bytes(raw)
+        t3 = t1 + 3
+        os.utime(db, (t3, t3))
+        check(review_of(svc, db, "kim") == want and "%d %d %s" % (len(raw), t3, crc) in hint.read_text(),
+              "the file as it was, another time again: current, the stamp renewed")
+
+        # 3. the pack removed and made again (a cache clean-up): another
+        # file, another time - the same content id, the same review
+        pack.unlink()
+        hint.unlink()
+        r = run([INDEX, "drc", str(db)])
+        check(r.returncode == 0 and pack.read_bytes()[-40:-8] == content
+              and pack.stat().st_mtime_ns != stamp[1],
+              "the pack made again: another file, the same content id", r.stderr)
+        r, s = stats_of(db)
+        check(review_of(svc, db, "kim") == want and numbers(s) == base,
+              "... flags, waives and notes are as they were", numbers(s))
+
+        # 4. the folder copied elsewhere, its files' times not kept
+        copy = temp / "identity-copy"
+        shutil.copytree(str(d), str(copy), copy_function=shutil.copy)
+        t4 = t3 - 5000
+        os.utime(copy / "a.db", (t4, t4))
+        os.utime(copy / ".a.db.tray", (t4 + 60, t4 + 60))
+        r, s = stats_of(copy / "a.db")
+        check(review_of(svc, copy / "a.db", "kim") == want and numbers(s) == base,
+              "a copy of the results folder: the review came with it", numbers(s))
+
+        # 5. the DRC run again with the same errors: other header dates,
+        # another rule file path, another size - the same content id
+        write_run(db, rules, date="Nov 11 09:30:15 2026", deck="/proj/other/place/rules/a.drc")
+        check(len(db.read_bytes()) != len(raw), "(the run again: a .db of another size)")
+        r, s = stats_of(db)
+        check(r.returncode == 1 and "stale DRC pack" in r.stderr, "the run again: its pack is stale")
+        r = run([INDEX, "drc", str(db)])
+        check(r.returncode == 0 and pack.read_bytes()[-40:-8] == content
+              and pack.read_bytes()[-44:-40] != bytes.fromhex(crc)[::-1],
+              "indexed again: another CRC-32, the same content id", r.stderr)
+        r, s = stats_of(db)
+        check(review_of(svc, db, "kim") == want and numbers(s) == base,
+              "the same errors found again: the review goes on", numbers(s))
+
+        # 6. the run again with other errors: the review files are another
+        # result's - listed so, and moved aside when their reviewer opens it
+        # (`review from a previous run` carries a review over, R5)
+        moved = list(rules)
+        moved[0] = ("M1.S", [_poly(100 * i + 1, 0) for i in range(40)])
+        write_run(db, moved, date="Nov 12 10:00:00 2026")
+        r = run([INDEX, "drc", str(db)])
+        check(r.returncode == 0 and pack.read_bytes()[-40:-8] != content,
+              "other errors: another content id", r.stderr)
+        r, s = stats_of(db)
+        check(r.returncode == 0 and s is not None and not [x for x in s["reviewers"] if x.get("present")]
+              and sorted(Path(x["file"]).name for x in s["skipped"])
+              == [".a.db.review.kim.sqlite3", ".a.db.waive.kim"]
+              and all("another DRC result" in x["reason"] for x in s["skipped"]),
+              "its statistics list the old review files as another result's", s and s["skipped"])
+        after = review_of(svc, db, "kim")
+        check(after["packed"] and after["counts"]["visited"] == 0
+              and after["status"] == ["00000000", "00000000"] and not after["notes"]
+              and len(after["moved"]) == 3
+              and all(len(list(d.glob(name + ".stale-*"))) == 1 for name in
+                      (".a.db.review.kim.sqlite3", ".a.db.waive.kim", ".a.db.notes.kim.fe")),
+              "kim's open moves them aside - flags, waives, notes - and starts anew", after)
+        r, s = stats_of(db)
+        check(r.returncode == 0 and s is not None and not s["skipped"]
+              and [(x["id"], x["waived"]) for x in s["reviewers"]] == [("kim", 0)],
+              "... and the statistics count the new review", s and (s["reviewers"], s["skipped"]))
+    finally:
+        svc.close()
+
+
 def main():
-    global r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10
-    r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10 = map(
-        timed, (r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10))
+    global r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11
+    r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11 = map(
+        timed, (r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11))
     temp = Path(tempfile.mkdtemp(prefix="floe-drc-team-"))
     try:
         d = temp / "runs"
@@ -1323,6 +1598,7 @@ def main():
         r8(temp)
         r9(temp)
         r10(temp)
+        r11(temp)
         if "--no-gui" not in sys.argv:
             from validate_drc_team_gui import r7
             timed(r7)(temp, check)

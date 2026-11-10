@@ -38,7 +38,11 @@ pub use selection::{SelectionMode, Selections, SELECTION_INPUT, SELECTION_ITEMS}
 
 use crate::{Error, ErrorKind};
 pub const MAGIC: &[u8; 8] = b"FLOEICE\0";
-pub const VERSION: u32 = 4;
+/// The pack's layout revision: 5 since 0.12.441 (the footer carries the
+/// source's CRC-32 and the content id reviews bind to).
+pub const VERSION: u32 = 5;
+/// The pack's footer.
+pub const FOOTER_BYTES: u64 = 168;
 pub const META_BYTES: usize = 64 * 1024 * 1024;
 pub const BLOCK_BYTES: usize = 16 * 1024 * 1024;
 pub const BLOCK_POINTS: usize = 1024 * 1024;

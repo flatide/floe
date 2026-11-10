@@ -374,10 +374,13 @@ fn run(
                 )
             }
         })?;
-        if !pack.source_matches(source)? {
+        // a source whose time alone changed is read, whatever its size, to
+        // see whether it is the file that was indexed: the pack and the
+        // reviews bound to it are kept (0.12.441)
+        if !pack.source_current(source, stop)? {
             return Err(Error::new(
                 ErrorKind::Cache,
-                "existing DRC pack is stale; explicit --force is required",
+                "existing DRC pack is stale (the source is not the file that was indexed); explicit --force is required",
             ));
         }
         input.unchanged_at(source)?;

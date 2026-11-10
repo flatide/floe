@@ -1,7 +1,7 @@
 //! The desktop viewer's DRC review: floe/drc.py IcePack's review state, for
 //! `floe2 gtk-service` (docs/SHARED_APP_LAYER.ko.md P2b). The files are the
 //! review store's (`review`): the per-reviewer waive sidecar
-//! `.<db>.waive.<tag>` (FLOEWAIV v1) and the notes `.<db>.notes.<tag>.fe`
+//! `.<db>.waive.<tag>` (FLOEWAIV, version 2) and the notes `.<db>.notes.<tag>.fe`
 //! beside the pack, byte for byte. What differs from the web's transactional
 //! store is how they are kept, as the GTK viewer always kept them:
 //!
@@ -17,10 +17,12 @@
 //! - notes are rewritten whole on every edit and the file removed when the
 //!   last note goes; the reader takes what Python wrote (lenient lines).
 //!
-//! A sidecar is bound to the pack's fingerprint (source size/mtime, error
-//! count), not to its inode: a re-pack of the same .db keeps its review.
+//! A sidecar is bound to the result's content (the pack's content id and
+//! error count - what the errors are), not to a file's time or inode: a
+//! re-pack, a copy of the folder, a .db whose time alone changed and a
+//! re-run with the same errors keep their review (0.12.441).
 use super::{
-    local::{pack_reader, required_reviewer, waive_paths, ReviewerSource},
+    local::{aside_path, pack_reader, required_reviewer, waive_paths, ReviewerSource},
     review::Layout,
     session, Pack, Violation,
 };
@@ -87,13 +89,6 @@ fn io(e: Error) -> std::io::Error {
     std::io::Error::other(e.message)
 }
 
-fn epoch() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut s = path.as_os_str().to_owned();
     s.push(suffix);
@@ -152,7 +147,7 @@ fn ensure_sidecar(
             if ok {
                 return Ok(side.to_path_buf());
             }
-            let aside = with_suffix(side, &format!(".stale-{}", epoch()));
+            let aside = aside_path(side);
             fs::rename(side, &aside)?;
             notices.push(format!(
                 "[drc] waive autosave does not match this pack (DRC re-run?); moved aside: {}",
@@ -189,15 +184,34 @@ impl Review {
         reviewer: Option<&str>,
         cancelled: &AtomicUsize,
     ) -> Result<Self> {
+        Self::open_with(pack_path, source, reviewer, cancelled, false)
+    }
+    /// `open`. `whole`: a source whose time changed is read and compared
+    /// whatever its size (Pack::source_current) - the load that would parse
+    /// the ASCII file were the pack stale. Without it the read stops at the
+    /// inline limit (Pack::source_matches): the open of a pack chosen with
+    /// its .db, where a stale pack is asked about instead.
+    fn open_with(
+        pack_path: &Path,
+        source: Option<&Path>,
+        reviewer: Option<&str>,
+        cancelled: &AtomicUsize,
+        whole: bool,
+    ) -> Result<Self> {
         let lock = pack_reader(pack_path)?;
         let mut pack = Pack::open(pack_path, cancelled)?;
         pack.hold(lock);
         if let Some(source) = source {
-            if !pack.source_matches(source)? {
+            let current = if whole {
+                pack.source_current(source, cancelled)?
+            } else {
+                pack.source_matches(source)?
+            };
+            if !current {
                 return Err(Error::new(
                     ErrorKind::Cache,
                     format!(
-                        "{}: stale pack (source size/mtime changed)",
+                        "{}: stale pack (the source is not the file that was indexed)",
                         pack_path.display()
                     ),
                 ));
@@ -256,7 +270,8 @@ impl Review {
             .chunks_exact(4)
             .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
             .collect();
-        let note_tag = format!("{},{},{}", pack.source_size, pack.source_mtime, pack.total);
+        // (the result's content, as the waive file's header: review.rs)
+        let note_tag = super::review::Fingerprint::of(&pack).tag();
         let mut review = Self {
             pack,
             header,
@@ -343,7 +358,7 @@ impl Review {
         self.waive_path == self.pack.path
     }
 
-    /// The 40-byte header of this pack's waive files (FLOEWAIV v1).
+    /// The 40-byte header of this pack's waive files (FLOEWAIV, version 2).
     pub fn waive_header(&self) -> [u8; 40] {
         self.header
     }
@@ -914,7 +929,7 @@ impl Review {
             if self.parse_notes(&text) {
                 self.note_path = path;
             } else {
-                let aside = with_suffix(&path, &format!(".stale-{}", epoch()));
+                let aside = aside_path(&path);
                 if fs::rename(&path, &aside).is_ok() {
                     self.notices.push(format!(
                         "[drc] note sidecar does not match this pack (DRC re-run?); moved aside: {}",
@@ -1090,7 +1105,7 @@ impl Opened {
         let mut warnings = Vec::new();
         let side = crate::cache::pack_path(path)?;
         if side.exists() {
-            match Review::open(&side, Some(path), reviewer, cancelled) {
+            match Review::open_with(&side, Some(path), reviewer, cancelled, true) {
                 Ok(review) => return Ok((Self::Pack(Box::new(review)), Vec::new())),
                 // a pack being rebuilt, a review open in another session, a
                 // reviewer id required and not given: said as they are, never

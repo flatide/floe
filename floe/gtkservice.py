@@ -473,6 +473,11 @@ class _Drc(object):
         self.precision = result["precision"]
         self.checks = [DrcCheck(self, ci, row)
                        for ci, row in enumerate(result["checks"])]
+        # what this open moved aside - the review files of other DRC
+        # results under this one's name (the DRC ran again): the viewer
+        # says it in its panel, not on stderr alone
+        self.moved_aside = [line for line in result.get("notices") or []
+                            if "moved aside" in line]
         for line in result.get("notices") or []:
             sys.stderr.write(line + "\n")
 

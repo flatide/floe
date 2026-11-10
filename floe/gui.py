@@ -8692,9 +8692,12 @@ class Viewer:
                 self._drcwin._rules.get_selection().unselect_all()
             finally:
                 self._drc_rules_busy = False
+        moved = getattr(db, "moved_aside", None) or []
         self._set_live_status(cluster_error or
-            ("DRC %s: %d checks, %d errors (. / , = step)"
-             % (os.path.basename(path), len(db.checks), db.total)))
+            ("DRC %s: %d checks, %d errors (. / , = step)%s"
+             % (os.path.basename(path), len(db.checks), db.total,
+                " - a review of other results moved aside (%d file(s), see "
+                "the DRC panel)" % len(moved) if moved else "")))
         if old is not None and old is not db:
             # the db it replaces lets go of its pack now, not at some GC
             # (floe/indexlock.py: its reader's lock goes with it)
@@ -10121,6 +10124,14 @@ class Viewer:
         waive = getattr(db, "_waive_path", None)
         if waive:
             tip += "\nwaives: %s" % waive
+        moved = getattr(db, "moved_aside", None) or []
+        if moved:
+            # this open found a review of other errors under this result's
+            # name (the DRC ran again) and moved its files aside
+            text += ('\n<span foreground="#e8a000">a review of other DRC '
+                     'results was here: %d file(s) moved aside (.stale-…), '
+                     'this review starts anew</span>' % len(moved))
+            tip += "\n" + "\n".join(str(line) for line in moved)
         return text, tip
 
     def _drc_reviewer_refresh(self):

@@ -4,8 +4,7 @@ use std::sync::atomic::Ordering;
 
 fn fp(total: u64) -> Fingerprint {
     Fingerprint {
-        source_size: 123,
-        source_mtime: 456,
+        content: [0xab; 16],
         total,
     }
 }
@@ -198,7 +197,7 @@ fn notes_import_guards_identity_reports_loss_and_does_not_resurrect_groups() {
     for text in [
         "floe_note=0|x".into(),
         format!("floe_pack={tag}\nfloe_pack={tag}\n"),
-        "floe_pack=123,456,6\n".into(),
+        "floe_pack=abababababababababababababababab,6\n".into(),
     ] {
         assert!(Notes::parse(&text, fp(5), &stop).is_err());
     }

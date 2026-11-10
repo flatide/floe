@@ -82,7 +82,7 @@ python -m floe render chip.oas --drc results.db \
     --drc-rule M1.SPACE.1 --drc-err 1-50 --px 800 --out snap.png
 ```
 
-## 2. pack `.<db>.tray` (v2, 레이아웃 버전 4) — 유일한 인덱스 포맷
+## 2. pack `.<db>.tray` (v2, 레이아웃 버전 5) — 유일한 인덱스 포맷
 
 - **잠금**(2026-10-09, app 0.12.324; 사용자: "동일 파일을 먼저 인덱싱하고 있거나
   사용하고 있는 경우에는 다른 사용자가 실행하더라도 리젝"; CACHE-NAMING §5).
@@ -137,12 +137,14 @@ python -m floe render chip.oas --drc results.db \
   독립 리뷰** 가능. `save waives as…`는 waive 전용 파일을 저장한다.
   `load waives…`는 2026-10-11부터 내 상태를 갈아끼우지 않고 공동 검토 창
   (`reviewers…`)의 불러오기로 간다 — waive 전용 파일에는 방문·검토 제외가
-  없으므로 전체 공동 검토 기록은 `.floereview`로 나눈다. 다른 pack에서 기록된
-  파일은 거부한다. 파일 = 헤더(매직+버전+pack 지문: 소스
-  size/mtime·err_total·check_cnt) + status + wcount. 같은 DB의
-  재-pack에는 리뷰가 유지되고, 지문 불일치(DRC 재실행 = 에러 번호
-  재부여)면 기존 자동 저장을 `.stale-<시각>`로 옆에 치우고 새로
-  시작(리뷰 기록을 지우지 않음). 첫 생성 시 pack에 남은 구-방식
+  없으므로 전체 공동 검토 기록은 `.floereview`로 나눈다. 다른 결과에서 기록된
+  파일은 거부한다. 파일 = 헤더(매직+버전 2+pack 지문: 내용 ID의 앞
+  16바이트·err_total·check_cnt) + status + wcount. 에러가 같은 pack이면
+  (재-pack, 복사, 시각만 바뀐 .db, 같은 에러가 나온 재실행) 리뷰가
+  유지되고, 지문 불일치(에러가 달라진 재실행 = 에러 번호 재부여)면
+  기존 자동 저장을 `.stale-<시각>`로 옆에 치우고 새로 시작(리뷰 기록을
+  지우지 않음). 0.12.440까지의 헤더는 소스 size/mtime이라 .db의 시각만
+  바뀌어도 치워졌다(아래 '결과 식별 = 내용'). 첫 생성 시 pack에 남은 구-방식
   내장 status는 시드로 승계. 결과 폴더가 읽기 전용이면 시스템 임시
   디렉터리로 폴백(stderr 안내 — 이때는 save as로 남길 것), 그마저
   안 되면 pack에 내장된 상태를 읽기만 하고 waive는 거부한다 — 한 리뷰어를 위해
@@ -174,6 +176,57 @@ python -m floe render chip.oas --drc results.db \
   - **통계 명령**: `floe2 drc DB --review-stats`가 리뷰어 전원의 수치와 팀 합계를 JSON으로 낸다
     (app-core `drc::team::stats`; DRC-CLI.ko.md §2b). 뷰어 없이 스크립트가 수집하는 표면이다.
   - 게이트 `drc_team` R9(잠금·ID 요구), R10(통계), R7(뷰어의 표시와 거절).
+- **결과 식별 = 내용**(2026-11-10, app 0.12.441, floe-index 0.12.441, pack 레이아웃 5; 사용자: "그
+  방향으로 4번 구현해줘" - TeeBox 점검의 4번, 리뷰를 시각이 아닌 내용으로 식별한다).
+  0.12.440까지 리뷰는 시각에 묶여 있었다. waive·note는 .db의 size/mtime에, 방문·검토 제외는 pack
+  파일의 size/mtime(ns)에 묶여서, .db를 복사하거나 touch하면 pack이 stale이 되고 다시 색인하면 waive가
+  치워졌으며, pack만 지웠다 다시 만들어도 방문 기록이 `another DRC result`로 거절됐다. 이제 두 단계로
+  본다.
+  - **같은 파일인가 (.db와 pack)**: 색인할 때 .db 바이트의 CRC-32를 pack 푸터에 적는다. 색인
+    작업자들이 자기 구간을 파싱하면서 계산해 합치므로 파일을 한 번 더 읽지 않고 `--jobs`와 무관하다.
+    열 때 .db의 크기와 시각이 색인 때와 같으면 전처럼 아무것도 읽지 않는다. 크기는 같고 시각만 다르면
+    .db를 읽어 CRC-32를 견주고, 같으면 pack은 현재 것이다. 견준 결과는 pack 옆 `.<db>.tray.source`에
+    적어(`floe-drc-source 1` 줄과 `<크기> <시각 s> <CRC hex 8자>` 줄) 다음부터는 읽지 않는다. 크기가
+    다르면 읽지 않고 stale이다. CRC-32만으로는 식별이 얇아 크기와 함께 쓰며, 이것은 같은 파일인지의
+    보조 확인일 뿐 리뷰를 묶는 값이 아니다.
+  - **누가 읽는가**: pack이 stale이면 어차피 .db를 통째로 읽게 되는 쪽은 .db의 크기와 무관하게
+    견준다(`Pack::source_current`). `floe2 drc`의 `--rules`·`--errs`·`--list`·`--review-stats`,
+    `render --drc`, `drc-prepare`, `floe2 view … --drc DB`의 로드(stale이면 ASCII를 파싱한다),
+    `review from a previous run`이 고른 이전 결과, 그리고 `floe2 drc DB --build`다. `--build`는 같으면
+    pack을 그대로 두고 `.source`만 적으므로 리뷰어가 pack을 열고 있어도 된다. 뷰어의 메뉴에서 .db를
+    골라 pack을 여는 경우만 다르다(`Pack::source_matches`). 그 열기는 읽는 동안 창이 멈추고, stale이면
+    `Build it now?`를 묻고 진행 창에서 다시 색인하므로, `FLOE_DRC_VERIFY_MB`(MiB, 기본 1024, 0이면
+    읽지 않는다)보다 큰 .db는 읽지 않고 stale로 둔다. 다시 색인해도 리뷰는 유지된다(아래 내용 ID가
+    같다). 위의 어느 명령이든 한 번 견주고 나면 `.source` 덕에 그 열기도 읽지 않고 통과한다.
+  - **같은 결과인가 (pack과 리뷰 파일)**: pack 푸터의 **내용 ID**(32바이트)는 에러가 무엇인지의
+    SHA-256이다. 도메인 태그, precision, 셀 이름, 저장된 좌표 블롭, 룰 이름과 에러 수를 순서대로
+    넣는다(SPEC-FORMATS). .db의 크기와 시각, 설명 줄(룰 파일 경로 등), 룰 헤더의 날짜는 넣지 않는다.
+    waive 사이드카와 note 파일은 그 앞 16바이트와 에러 수를, 방문·검토 제외 `.sqlite3`와 `.floereview`
+    스냅숏은 전체(hex 64자)를 지문으로 쓴다. 그래서 pack을 지웠다 다시 만들어도, 결과 폴더를 통째로
+    복사해도, 같은 에러가 다시 나온 재실행(헤더 날짜와 룰 파일 경로만 다른 .db)에도 리뷰가 그대로
+    붙는다. `--review-stats`의 `fingerprint`가 이 값이라 수집하는 쪽에서 두 결과가 같은 결과인지 견줄
+    수 있다.
+  - **에러가 달라진 재실행**: 내용 ID가 다르다. 리뷰를 열 때 그 리뷰어의 세 파일(waive, note,
+    방문·검토 제외 `.sqlite3`)을 모두 `.stale-<시각>`으로 옆에 치우고 새로 시작하며, 열기 응답의
+    `notices`에 파일마다 한 줄을 남긴다. 뷰어는 DRC 패널의 `reviewer:` 줄 아래에 경고색으로
+    `a review of other DRC results was here: N file(s) moved aside (.stale-…), this review starts
+    anew`를 보이고(툴팁에 치운 파일의 경로) 상태 줄에도 알린다. 0.12.440까지 `.sqlite3`는 치우지 않고
+    그 자리에서 거절해서, 누가 숨김 파일의 이름을 손으로 바꿀 때까지 그 리뷰어의 방문 통계가 막혀
+    있었다. 치운 기록을 새 결과로 옮기는 것은 `review from a previous run`이다(이전 pack이 있어야
+    한다). 치울 이름
+    `.stale-<시각>`이 이미 있으면 다음 번호를 쓴다. 같은 초에 두 번 치워도 먼저 치운 기록을 덮어쓰지
+    않는다(0.12.440까지는 waive·note의 두 번째 보관이 첫 번째를 대체했다). 판단할 수 없는 `.sqlite3`
+    (메타데이터 행이 없거나 형식 버전이 다른 것, 복구할 저널이 남은 것)는 치우지 않고 전처럼 그 자리에서
+    거절한다.
+  - **이전 pack과 리뷰 파일**: 레이아웃 4 pack은 읽지 않으므로 다시 색인한다(`floe-index drc DB`,
+    또는 `floe2 drc DB --build --force`). 0.12.440까지의 리뷰 파일은 지문이 달라 새 pack에 붙지 않고
+    열 때 치워진다(사용자: 아직 테스트 중이므로 기존 리뷰 파일은 고려하지 않는다).
+  - 한계: 색인 때와 같은 초에 같은 크기로 다시 쓰인 .db는 전처럼 크기와 시각만으로 같은 파일로
+    본다. `.source`에 적힌 크기·시각의 일치도 같은 신뢰다.
+  - 게이트 `drc_ice` D2(시각만 바뀐 .db), D5c(CRC-32와 내용 ID를 정의대로 다시 계산, 같은 에러는 한
+    ID), `drc_team` R1b·R1c(다른 결과의 파일을 치움), R11(touch, 상한, `--build`, pack 재생성, 폴더
+    복사, 같은 에러의 재실행, 달라진 재실행과 통계), 단위 테스트 app-core drc/tests.rs, floe-index
+    drcpack.rs.
 - **에러 note = 리뷰어별 flateyes `.fe` 사이드카**(2026-08-28,
   D10): `n`으로 선택/현재 에러에 **공유 note** 입력. 저장 위치 =
   pack 옆 `.<db>.notes.<리뷰어>.fe`(waive와 같은 siting·리뷰어
@@ -181,7 +234,8 @@ python -m floe render chip.oas --drc results.db \
   사이드카** — note마다 멤버 에러의 um 중심에 `text=` 주석(ppu=1
   unit=um)을 써서 flateyes와 미래 drawing이 그대로 렌더하고,
   flateyes가 무시하는 floe 전용 두 줄이 나머지를 담는다:
-  `floe_pack=<size>,<mtime>,<err_total>`(지문),
+  `floe_pack=<내용 ID 앞 16바이트의 hex 32자>,<err_total>`(지문;
+  0.12.440까지는 `<size>,<mtime>,<err_total>`),
   `floe_note=<gid,gid,…>|<escaped 텍스트>`(공유 note+멤버). floe는
   `floe_note=`(전역 에러 id 키)로 정본 복원, `text=`는 렌더 미러.
   삭제 = 빈 내용 입력 또는 "clear note of selection"(그룹 선택
@@ -217,14 +271,15 @@ python -m floe render chip.oas --drc results.db \
   담지 않는다. 결과 폴더에 쓸 수 없으면 `$XDG_DATA_HOME/floe/review/`로 간다.
   같은 `.db`를 `floe-index drc`로 다시 인덱싱할 때는 새로 만든 pack을 기존
   `.tray`와 쓰는 도중 순차 비교한다. 전체 바이트와 길이가 같으면 기존 파일을
-  유지하므로 수정시간에 묶인 방문·검토 제외 기록도 계속 읽힌다. 비교 메모리는
-  고정 크기이며 첫 불일치 이후에는 기존 pack을 더 읽지 않는다. 좌표가 하나라도
-  달라지면 새 pack으로 교체하고 기존 검토 파일의 결과 일치 검사를 유지한다.
-  목록의 `?`와 `Review statistics unavailable: ... another DRC result`는
-  글꼴 문제가 아니라 검토 파일과 pack 지문의 불일치다. 이미 재생성된 pack에
-  예전 검토를 강제 연결하지 않는다. 테스트 기록을 초기화하려면 뷰어를 닫고
-  오류에 표시된 `.review.<리뷰어>.sqlite3`를 다른 이름으로 보관한 뒤 다시 연다
-  (방문·검토 제외 기록만 초기화되며 waive·note 파일과는 별개).
+  유지한다(열려 있는 리더의 매핑이 그대로다). 비교 메모리는 고정 크기이며 첫
+  불일치 이후에는 기존 pack을 더 읽지 않는다. 방문·검토 제외 기록은 0.12.441부터
+  pack의 내용 ID에 묶이므로 pack 파일이 바뀌어도 에러가 같으면 계속 읽힌다
+  (0.12.440까지는 pack의 수정시간에 묶여 있었다). 좌표가 하나라도 달라지면 내용
+  ID가 달라지고, 기존 검토 파일은 다른 결과의 것이다. 리뷰를 열 때
+  `.stale-<시각>`으로 치우고 새로 시작한다(위 '결과 식별 = 내용'; 0.12.440까지는
+  치우지 않고 `Review statistics unavailable: ... another DRC result`로 거절했다).
+  다른 결과의 검토를 새 pack에 강제 연결하지 않는다. 옮기려면
+  `review from a previous run`을 쓴다.
 - **여러 리뷰어의 공동 검토**(DRC 메뉴 `reviewers…`; app-core `drc::team::snapshot`):
   각자 자기 waive·방문·검토 제외 파일을 지키면서 다른 사람의 작업을 따로 불러와 비교한다.
   남의 원본은 바꾸지 않고, 적용한 waive·검토 제외 판단만 내 작업에 기록한다. 내
@@ -656,8 +711,9 @@ rust/target/release/floe-index drc sample.db
 열 때는 `sample.svrf.rules.json`을 선택한다.
 
 **전 기능 수동 확인 세트**(2026-10-12, `tools/gen_drc_samples.py`): 대용량·공동 검토·
-재수행 승계까지 손으로 확인할 샘플을 만든다. 리뷰 파일은 pack 지문(mtime 포함)에
-묶이므로 저장소에 넣지 않고, 확인할 머신에서 만든다(Python 3.6+와 빌드한 floe2·
+재수행 승계까지 손으로 확인할 샘플을 만든다. 리뷰 파일은 pack의 내용 ID에
+묶이므로(0.12.441; 그 전에는 mtime이 든 지문) 복사해도 붙지만, 샘플이 크므로
+저장소에 넣지 않고 확인할 머신에서 만든다(Python 3.6+와 빌드한 floe2·
 floe-index만; KLayout·NumPy 불필요, 기본 크기 약 4초).
 
 ```sh

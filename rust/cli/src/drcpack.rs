@@ -4,10 +4,11 @@
 //!
 //! Layout (LE; header/string sections shared with v1):
 //!
-//!   [header 40B]   magic | u32 version=4 | u32 flags=1 | f64
+//!   [header 40B]   magic | u32 version=5 | u32 flags=1 | f64
 //!                  precision | u64 src_size | u64 src_mtime
 //!                  (version counts LAYOUT revisions: 2/3 = the
-//!                  short-lived earlier packs; the reader refuses
+//!                  short-lived earlier packs, 4 = the footer
+//!                  without the identity fields; the reader refuses
 //!                  anything but the current value - a stale pack
 //!                  once shifted the qbox section by 40B and
 //!                  silently broke small-rect queries)
@@ -47,11 +48,26 @@
 //!                  | u64 err_start, err_cnt, declared, original,
 //!                  block_start, block_cnt
 //!   [desc refs][string table]   as v1 (line-level dedup)
-//!   [footer 136B]  15 u64 (blob_off, blob_len, qbox_off,
+//!   [footer 168B]  15 u64 (blob_off, blob_len, qbox_off,
 //!                  qbox_len, status_off, wcount_off, blk_off,
 //!                  blk_cnt, dir_off, check_cnt, descref_off,
 //!                  descref_cnt, str_off, str_len, err_total)
-//!                  | u32 cell_ref | u32 reserved | magic
+//!                  | u32 cell_ref | u32 src_crc32 | 32B content id
+//!                  | magic
+//!
+//! Identity (layout 5, 2026-11-10; user: reviews were bound to the
+//! .db's and the pack's times - a copy, a touch or a cache clean-up
+//! orphaned every reviewer's work):
+//! - `src_crc32`: the CRC-32 (IEEE) of the source file's bytes. With
+//!   `src_size` it answers "is this the file that was indexed?" when
+//!   only its time changed - the reader then checks the content once
+//!   instead of calling the pack stale.
+//! - content id: SHA-256 over what the errors ARE - a domain tag, the
+//!   precision, the cell name, the coordinate blob as stored, then each
+//!   check's name and error count. Not the source's size or time, not
+//!   the description lines (rule file paths), not the dates of the
+//!   check headers (never stored): two results with the same errors in
+//!   the same order have one id, and review files bind to it.
 //!
 //! Parallel build: the file is split into --jobs byte segments;
 //! each worker syncs onto a speculative check header (name line +
@@ -74,6 +90,50 @@ use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
 const BLOCK: usize = 64;
+/// The pack's layout revision (the header's version field).
+pub(crate) const LAYOUT: u32 = 5;
+/// What the content id's hash starts with.
+const CONTENT_TAG: &[u8] = b"floe-drc-content-v1\0";
+
+/// One worker's share `[pos, end)` of the source's CRC-32, taken as the
+/// worker's parse passes over the bytes - the pages are read once, also
+/// when the file is larger than the page cache.
+struct SourceCrc {
+    hasher: crc32fast::Hasher,
+    pos: usize,
+    end: usize,
+}
+
+impl SourceCrc {
+    const STEP: usize = 4 << 20;
+
+    fn new(start: usize, end: usize) -> Self {
+        Self {
+            hasher: crc32fast::Hasher::new(),
+            pos: start.min(end),
+            end,
+        }
+    }
+
+    /// Take the bytes up to `upto` (within the share) once a step of them
+    /// lies behind the parse.
+    #[inline]
+    fn reach(&mut self, data: &[u8], upto: usize) {
+        let upto = upto.min(self.end);
+        if upto >= self.pos + Self::STEP {
+            self.hasher.update(&data[self.pos..upto]);
+            self.pos = upto;
+        }
+    }
+
+    /// The rest of the share.
+    fn finish(mut self, data: &[u8]) -> crc32fast::Hasher {
+        if self.pos < self.end {
+            self.hasher.update(&data[self.pos..self.end]);
+        }
+        self.hasher
+    }
+}
 
 fn zz(v: i64) -> u64 {
     ((v << 1) ^ (v >> 63)) as u64
@@ -128,7 +188,9 @@ struct SpanOut {
 
 /// Parse whole check blocks from `start` until the first check that
 /// begins at/after `stop_at`. Raw records go to `tw` as absolute
-/// zigzag varints. The state machine is the drcice/drc.py twin.
+/// zigzag varints. The state machine is the drcice/drc.py twin. `crc`,
+/// when given, takes the bytes of its share as the parse passes them.
+#[allow(clippy::too_many_arguments)]
 fn parse_span(
     data: &[u8],
     start: usize,
@@ -137,6 +199,7 @@ fn parse_span(
     tw: &mut std::io::BufWriter<std::fs::File>,
     cursor: &mut u64,
     progress: Option<&str>,
+    mut crc: Option<&mut SourceCrc>,
 ) -> Result<SpanOut, String> {
     let mut lines = Lines::new(data);
     lines.pos = start;
@@ -255,6 +318,9 @@ fn parse_span(
                 tw.write_all(&rec).map_err(|e| e.to_string())?;
                 *cursor += rec.len() as u64;
                 err_cnt += 1;
+            }
+            if let Some(crc) = crc.as_deref_mut() {
+                crc.reach(data, lines.pos);
             }
             if let Some(tag) = progress {
                 if last_log.elapsed().as_secs() >= 15 {
@@ -556,8 +622,11 @@ pub fn pack(src: &str, out: &str, jobs: usize) -> Result<(usize, u64, u64), Stri
         .map(|k| body + (data.len() - body) * k / n)
         .collect();
 
-    // phase 1: parallel speculative parse to per-worker temp files
-    let mut outs: Vec<Option<(SpanOut, u64)>> = (0..n).map(|_| None).collect();
+    // phase 1: parallel speculative parse to per-worker temp files; each
+    // worker also takes the CRC-32 of its own byte range of the source
+    // (worker 0 from the file's first byte) - combined below, the same
+    // value whatever --jobs
+    let mut outs: Vec<Option<(SpanOut, u64, crc32fast::Hasher)>> = (0..n).map(|_| None).collect();
     let errs: Vec<String> = std::thread::scope(|sc| {
         let mut handles = Vec::new();
         for (k, slot) in outs.iter_mut().enumerate() {
@@ -572,6 +641,7 @@ pub fn pack(src: &str, out: &str, jobs: usize) -> Result<(usize, u64, u64), Stri
                 let mut tw = std::io::BufWriter::with_capacity(4 << 20, tf);
                 let mut cursor = 0u64;
                 let tag = format!("w{}", k);
+                let mut crc = SourceCrc::new(if k == 0 { 0 } else { bound[k] }, bound[k + 1]);
                 let so = parse_span(
                     data,
                     start.min(data.len()),
@@ -580,9 +650,10 @@ pub fn pack(src: &str, out: &str, jobs: usize) -> Result<(usize, u64, u64), Stri
                     &mut tw,
                     &mut cursor,
                     Some(&tag),
+                    Some(&mut crc),
                 )?;
                 tw.flush().map_err(|e| e.to_string())?;
-                *slot = Some((so, cursor));
+                *slot = Some((so, cursor, crc.finish(data)));
                 Ok::<(), String>(())
             }));
         }
@@ -606,13 +677,17 @@ pub fn pack(src: &str, out: &str, jobs: usize) -> Result<(usize, u64, u64), Stri
     let fb_id = n; // fallback temp file id
     let mut fbw: Option<std::io::BufWriter<std::fs::File>> = None;
     let mut trusted_end;
+    let mut src_crc = crc32fast::Hasher::new();
     {
-        let (so, _) = outs[0].take().unwrap();
+        let (so, _, crc) = outs[0].take().unwrap();
+        src_crc.combine(&crc);
         trusted_end = so.end_off;
         all.extend(so.checks);
     }
     for (k, o) in outs.iter_mut().enumerate().skip(1) {
-        let (so, _) = o.take().unwrap();
+        let (so, _, crc) = o.take().unwrap();
+        // (the bytes' CRC stands whatever the parse made of them)
+        src_crc.combine(&crc);
         if so.end_off <= trusted_end {
             continue; // segment fully covered by a prior worker
         }
@@ -636,6 +711,7 @@ pub fn pack(src: &str, out: &str, jobs: usize) -> Result<(usize, u64, u64), Stri
                     fbw.as_mut().unwrap(),
                     &mut fb_cursor,
                     None,
+                    None,
                 )?;
                 all.extend(so2.checks);
                 trusted_end = so2.end_off;
@@ -647,7 +723,16 @@ pub fn pack(src: &str, out: &str, jobs: usize) -> Result<(usize, u64, u64), Stri
     }
 
     // phase 2: sequential encode of the final file
-    let res = encode(out, &all, n, precision, src_size, src_mtime, &cell);
+    let res = encode(
+        out,
+        &all,
+        n,
+        precision,
+        src_size,
+        src_mtime,
+        src_crc.finalize(),
+        &cell,
+    );
     for k in 0..=n {
         let _ = std::fs::remove_file(temp_path(out, k));
     }
@@ -664,6 +749,7 @@ pub fn pack(src: &str, out: &str, jobs: usize) -> Result<(usize, u64, u64), Stri
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn encode(
     out: &str,
     checks: &[RawCheck],
@@ -671,8 +757,10 @@ fn encode(
     precision: f64,
     src_size: u64,
     src_mtime: u64,
+    src_crc: u32,
     cell: &[u8],
 ) -> Result<(u64, u64), String> {
+    use sha2::Digest;
     let mut temps: Vec<Option<memmap2::Mmap>> = Vec::new();
     for k in 0..=n_temps {
         let p = temp_path(out, k);
@@ -697,12 +785,19 @@ fn encode(
     let mut w = std::io::BufWriter::with_capacity(8 << 20, ComparedWriter::new(wf, out));
     let mut header = Vec::with_capacity(40);
     header.extend_from_slice(MAGIC);
-    header.extend_from_slice(&4u32.to_le_bytes());
+    header.extend_from_slice(&LAYOUT.to_le_bytes());
     header.extend_from_slice(&1u32.to_le_bytes());
     header.extend_from_slice(&precision.to_le_bytes());
     header.extend_from_slice(&src_size.to_le_bytes());
     header.extend_from_slice(&src_mtime.to_le_bytes());
     w.write_all(&header).map_err(|e| e.to_string())?;
+    // the content id (see the module doc): the precision and the cell,
+    // then the blob as its blocks are written, then the checks
+    let mut content = sha2::Sha256::new();
+    content.update(CONTENT_TAG);
+    content.update(precision.to_le_bytes());
+    content.update((cell.len() as u64).to_le_bytes());
+    content.update(cell);
 
     let mut strtab = StrTab::default();
     let cell_ref = strtab.intern(cell);
@@ -824,6 +919,7 @@ fn encode(
                     by1 = by1.max(ey1);
                 }
                 w.write_all(&buf).map_err(|e| e.to_string())?;
+                content.update(&buf);
                 let mut rec = [0u8; 48];
                 rec[..8].copy_from_slice(&blob.to_le_bytes());
                 rec[8..12].copy_from_slice(&cnt.to_le_bytes());
@@ -929,7 +1025,15 @@ fn encode(
     let str_off = descref_off + desc_refs.len() as u64 * 4;
     w.write_all(&strtab.bytes).map_err(|e| e.to_string())?;
 
-    let mut foot = Vec::with_capacity(136);
+    content.update((blob - 40).to_le_bytes());
+    content.update((checks.len() as u64).to_le_bytes());
+    for c in checks {
+        content.update((c.name.len() as u64).to_le_bytes());
+        content.update(&c.name);
+        content.update(c.err_cnt.to_le_bytes());
+    }
+    let content_id = content.finalize();
+    let mut foot = Vec::with_capacity(168);
     for v in [
         40u64,
         blob - 40,
@@ -950,7 +1054,8 @@ fn encode(
         foot.extend_from_slice(&v.to_le_bytes());
     }
     foot.extend_from_slice(&cell_ref.to_le_bytes());
-    foot.extend_from_slice(&0u32.to_le_bytes());
+    foot.extend_from_slice(&src_crc.to_le_bytes());
+    foot.extend_from_slice(&content_id);
     foot.extend_from_slice(MAGIC);
     w.write_all(&foot).map_err(|e| e.to_string())?;
     w.flush().map_err(|e| e.to_string())?;
@@ -993,6 +1098,47 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.dir);
         }
+    }
+
+    #[test]
+    fn the_workers_shares_combine_to_the_sources_crc() {
+        // shares larger than a step, so the parse's `reach` takes bytes as
+        // it goes (a gate fixture's share ends within one step: `finish`
+        // alone), with a parse that overruns its share and one that never
+        // gets to it
+        let data: Vec<u8> = (0..(11usize << 20) + 12_345)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        let whole = crc32fast::hash(&data);
+        for bounds in [
+            vec![0, data.len()],
+            vec![0, 5 << 20, data.len()],
+            vec![0, 1, (4 << 20) + 1, (9 << 20) + 7, data.len(), data.len()],
+        ] {
+            let mut combined = crc32fast::Hasher::new();
+            for (k, share) in bounds.windows(2).enumerate() {
+                let mut crc = SourceCrc::new(share[0], share[1]);
+                // records of 700 KiB from a header found past the share's
+                // start; every other share's parse runs 3 MiB past its end
+                let overrun = if k % 2 == 0 { 3 << 20 } else { 0 };
+                let mut pos = share[0] + 1000;
+                while pos < (share[1] + overrun).min(data.len()) {
+                    crc.reach(&data, pos);
+                    assert!(crc.pos <= share[1] && crc.pos >= share[0]);
+                    pos += 700 << 10;
+                }
+                let part = crc.finish(&data);
+                assert_eq!(part.clone().finalize(), crc32fast::hash(&data[share[0]..share[1]]));
+                combined.combine(&part);
+            }
+            assert_eq!(combined.finalize(), whole, "{bounds:?}");
+        }
+        // a share the parse walked in steps has taken bytes before its end
+        let mut crc = SourceCrc::new(0, data.len());
+        crc.reach(&data, (4 << 20) - 1);
+        assert_eq!(crc.pos, 0);
+        crc.reach(&data, 4 << 20);
+        assert_eq!(crc.pos, 4 << 20);
     }
 
     #[test]

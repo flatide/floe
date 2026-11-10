@@ -412,11 +412,15 @@ class IceCheck(object):
 
 # ---- .ice v2 packed reader ----------------------------------------------
 
-# footer: blob_off blob_len qbox_off qbox_len status_off
-#         wcount_off blk_off blk_cnt dir_off check_cnt descref_off
-#         descref_cnt str_off str_len err_total | u32 cell_ref
-#         | u32 reserved | magic
-_ICE2_FOOTER = struct.Struct("<15QII8s")
+# footer (layout 5, 0.12.441): blob_off blob_len qbox_off qbox_len
+#         status_off wcount_off blk_off blk_cnt dir_off check_cnt
+#         descref_off descref_cnt str_off str_len err_total
+#         | u32 cell_ref | u32 src_crc32 | 32B content id | magic
+# src_crc32 = CRC-32 of the source's bytes; content id = SHA-256 over
+# what the errors are (floe-index drcpack.rs) - the identity review
+# files bind to, whatever the files' times.
+_ICE2_FOOTER = struct.Struct("<15QII32s8s")
+_ICE2_LAYOUT = 5
 
 # per-error review status byte ([status] section; app-defined >2)
 STATUS_NONE = 0
@@ -461,14 +465,16 @@ DRC_NOTE_COLOR = "#FFD819"
 # reviewer reaches. Durable records are the files the user saves
 # EXPLICITLY (DRC menu save waives as…, same format). Layout:
 #   header | status[err_total] u8 | wcount[check_cnt] u32
-# header: magic | u32 version | u64 src_size | u64 src_mtime
-#         | u64 err_total | u32 check_cnt
-# (src_size/src_mtime = the PACK's source fingerprint: a re-run DRC
-# renumbers errors, so statuses recorded against the old pack must
-# not silently apply to the new one.)
+# header (version 2, 0.12.441): magic | u32 version
+#         | 16B content id prefix | u64 err_total | u32 check_cnt
+# (the pack's content id: a re-run DRC with other errors renumbers
+# them, so statuses recorded against the old result must not silently
+# apply to the new one - while a copy, a re-pack or a .db whose time
+# alone changed is the same result. Version 1 held the source's size
+# and mtime.)
 _WAIVE_MAGIC = b"FLOEWAIV"
-_WAIVE_HEADER = struct.Struct("<8sIQQQI")
-_WAIVE_VERSION = 1
+_WAIVE_HEADER = struct.Struct("<8sI16sQI")
+_WAIVE_VERSION = 2
 
 
 def _waive_user():
@@ -541,7 +547,7 @@ def _waive_tmp_fallback(pack_path, reviewer=None):
 # centre (ppu=1 unit=um), which flateyes (and a future drawing pass)
 # renders verbatim. Two floe-namespaced lines carry what flateyes has no
 # slot for and skips as unknown keys:
-#   floe_pack=<src_size>,<src_mtime>,<err_total>   pack fingerprint
+#   floe_pack=<content id prefix, 32 hex>,<err_total>   pack fingerprint
 #   floe_note=<gid,gid,...>|<escaped text>         one shared note + members
 # floe reloads the notes from `floe_note=` (authoritative, keyed by the
 # global error id), never from the `text=` mirror.
@@ -605,6 +611,18 @@ class _PackErrors(object):
         if not 0 <= i < self._count:
             raise IndexError(i)
         return self._db._perr(self._start + i)
+
+
+def _file_crc32(path):
+    """CRC-32 (IEEE) of a file's bytes - what a pack keeps of its source."""
+    import zlib
+    crc = 0
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(4 << 20)
+            if not chunk:
+                return crc & 0xFFFFFFFF
+            crc = zlib.crc32(chunk, crc)
 
 
 class IcePack(object):
@@ -710,7 +728,7 @@ class IcePack(object):
              src_mtime) = _ICE_HEADER.unpack(head)
             if magic != _ICE_MAGIC or version < 2:
                 raise ValueError("%s: not a packed .ice" % path)
-            if version != 4:
+            if version != _ICE2_LAYOUT:
                 # the packed layout revved (file order, status,
                 # wcount, footer size); a stale pack misaligns
                 # sections and SILENTLY breaks queries - refuse it
@@ -729,7 +747,7 @@ class IcePack(object):
             (_blob_off, _blob_len, qbox_off, _qbox_len,
              status_off, wcount_off, blk_off, blk_cnt, dir_off,
              check_cnt, descref_off, descref_cnt, str_off, str_len,
-             err_total, cell_ref, _resv, fmagic) = \
+             err_total, cell_ref, _src_crc, content_id, fmagic) = \
                 _ICE2_FOOTER.unpack(footer)
             if fmagic != _ICE_MAGIC:
                 raise ValueError("%s: truncated .ice (bad footer)"
@@ -755,22 +773,22 @@ class IcePack(object):
             descbuf = f.read(descref_cnt * 4)
             f.seek(str_off)
             strbuf = f.read(str_len)
-            # Durable review identity excludes device/inode/ctime, so copied
-            # results and legacy pack renames retain their flags. Recreated
-            # results change mtime or metadata. Never scan error geometry.
-            import hashlib
-            stat = os.fstat(f.fileno())
-            digest = hashlib.sha256()
-            for part in (head, footer, dirbuf, descbuf, strbuf,
-                         struct.pack("<QQ", stat.st_size, stat.st_mtime_ns)):
-                digest.update(part)
-            self._review_fingerprint = digest.hexdigest()
+            # The durable review identity is the pack's content id (what
+            # the errors are): copies, a pack made again and a source whose
+            # time alone changed keep their flags; other errors change it.
+            # (Until 0.12.440: a hash of the metadata sections with the
+            # pack file's size and mtime.)
+            self._review_fingerprint = content_id.hex()
         if verify_src and src_path is not None:
+            # the file that was indexed: its size and time, or - another
+            # time (a copy, a touch) - its content's CRC-32 (0.12.441)
             st = os.stat(src_path)
-            if st.st_size != src_size or int(st.st_mtime) != src_mtime:
+            if st.st_size != src_size or (
+                    int(st.st_mtime) != src_mtime
+                    and _file_crc32(src_path) != _src_crc):
                 raise ValueError(
-                    "%s: stale pack (source size/mtime changed)"
-                    % path)
+                    "%s: stale pack (the source is not the file that was "
+                    "indexed)" % path)
 
         def s(ref):
             (n,) = struct.unpack_from("<I", strbuf, ref)
@@ -802,7 +820,7 @@ class IcePack(object):
         # embedded sections so the viewer still opens without changing a
         # shared result on behalf of one reviewer.
         self._waive_hdr = _WAIVE_HEADER.pack(
-            _WAIVE_MAGIC, _WAIVE_VERSION, src_size, src_mtime,
+            _WAIVE_MAGIC, _WAIVE_VERSION, content_id[:16],
             err_total, check_cnt)
         wstatus_off = _WAIVE_HEADER.size
         wwcount_off = _WAIVE_HEADER.size + err_total
@@ -859,7 +877,7 @@ class IcePack(object):
         self._wcount_off = wwcount_off
         self._wfd = None
         # per-reviewer error notes (flateyes .fe sidecar beside the pack)
-        self._note_tag = "%d,%d,%d" % (src_size, src_mtime, err_total)
+        self._note_tag = "%s,%d" % (content_id[:16].hex(), err_total)
         self._notes = {}      # note_id -> {"text": str, "members": set(gid)}
         self._note_of = {}    # gid -> note_id
         self._note_next = 1

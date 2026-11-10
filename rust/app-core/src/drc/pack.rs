@@ -444,6 +444,25 @@ impl Blocks {
     }
 }
 
+/// The first line of `<pack>.source`.
+const SOURCE_HINT: &str = "floe-drc-source 1";
+
+/// Where an open must not wait long (`Pack::source_matches`: the viewer
+/// opening a pack chosen with its .db), a source whose time changed is read
+/// and its CRC-32 compared only when it is no larger than this
+/// (`FLOE_DRC_VERIFY_MB`, default 1024; 0: never). The callers that would
+/// read the source anyway compare one of any size (`Pack::source_current`).
+pub fn verify_inline_limit() -> u64 {
+    verify_limit_of(std::env::var("FLOE_DRC_VERIFY_MB").ok().as_deref())
+}
+
+pub(super) fn verify_limit_of(value: Option<&str>) -> u64 {
+    value
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(1024)
+        .saturating_mul(1 << 20)
+}
+
 pub struct Pack {
     pub path: PathBuf,
     pub cell: String,
@@ -451,6 +470,14 @@ pub struct Pack {
     pub total: u64,
     pub source_size: u64,
     pub source_mtime: u64,
+    /// CRC-32 (IEEE) of the source's bytes as indexed: with `source_size`,
+    /// whether a source whose time changed is still that file
+    /// (`source_matches`)
+    pub source_crc: u32,
+    /// SHA-256 over what the errors are (floe-index drcpack.rs): the
+    /// identity review files bind to, whatever the source's or the pack's
+    /// times
+    pub content_id: [u8; 32],
     pub checks: Vec<Check>,
     input: Input,
     blob_end: u64,
@@ -496,7 +523,7 @@ impl Pack {
     pub fn open(path: &Path, cancelled: &AtomicUsize) -> Result<Self> {
         check_cancelled(cancelled)?;
         let input = Input::open(path)?;
-        if input.stamp.len < 176 {
+        if input.stamp.len < 40 + super::FOOTER_BYTES {
             return Err(corrupt("truncated header/footer"));
         }
         let mut head = [0; 40];
@@ -517,11 +544,11 @@ impl Pack {
         if !precision.is_finite() || precision <= 0.0 {
             return Err(corrupt("precision"));
         }
-        let end = input.stamp.len - 136;
-        let mut foot = [0; 136];
+        let end = input.stamp.len - super::FOOTER_BYTES;
+        let mut foot = [0; super::FOOTER_BYTES as usize];
         input.read(end, &mut foot)?;
-        if &foot[128..] != MAGIC || u32at(&foot, 124) != 0 {
-            return Err(corrupt("footer magic/reserved"));
+        if &foot[160..] != MAGIC {
+            return Err(corrupt("footer magic"));
         }
         let f: Vec<_> = (0..15).map(|i| u64at(&foot, i * 8)).collect();
         if f[3] != mul(f[14], 4)? {
@@ -624,6 +651,8 @@ impl Pack {
             total: f[14],
             source_size: u64at(&head, 24),
             source_mtime: u64at(&head, 32),
+            source_crc: u32at(&foot, 124),
+            content_id: foot[128..160].try_into().unwrap(),
             input,
             blob_end: f[2],
             qbox: f[2],
@@ -691,34 +720,14 @@ impl Pack {
         Ok(p)
     }
     /// The review identity of the pack (floe_oracle drc.py
-    /// `_review_fingerprint`): sha256 over its header, footer, rule
-    /// directory, description references and strings, then its size and
-    /// mtime in ns (`<QQ`), as hex. Copies and renames keep it (no device,
-    /// inode or ctime); a re-run changes it. No geometry is read.
+    /// `_review_fingerprint`): its content id as hex - what the errors are,
+    /// not when or where the files were written. A copy of the result, a
+    /// pack made again, a source whose time alone changed and a re-run with
+    /// the same errors keep it; other errors change it. (Until 0.12.440: a
+    /// hash of the pack's metadata sections with the pack file's size and
+    /// time - a cache clean-up orphaned the visit records.)
     pub fn review_fingerprint(&self) -> Result<String> {
-        use sha2::{Digest, Sha256};
-        let len = self.input.stamp.len;
-        let end = len - 136;
-        let mut foot = [0; 136];
-        self.input.read(end, &mut foot)?;
-        let f = |i: usize| u64at(&foot, i * 8);
-        let mut head = [0; 40];
-        self.input.read(0, &mut head)?;
-        let mut digest = Sha256::new();
-        digest.update(head);
-        digest.update(foot);
-        for (off, n) in [(f(8), f(9) * 64), (f(10), f(11) * 4), (f(12), f(13))] {
-            digest.update(self.input.bytes(off, usize_of(n)?, META_BYTES)?);
-        }
-        let (s, ns) = self.input.stamp.modified;
-        let mtime_ns = i128::from(s) * 1_000_000_000 + i128::from(ns);
-        digest.update(len.to_le_bytes());
-        digest.update((mtime_ns as u64).to_le_bytes());
-        Ok(digest
-            .finalize()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect())
+        Ok(self.content_id.iter().map(|b| format!("{b:02x}")).collect())
     }
     /// The coordinate blocks, for worker threads (drc::analysis).
     pub fn blocks(&self) -> Result<Blocks> {
@@ -853,21 +862,130 @@ impl Pack {
                 remaining: self.checks.len() as u64 * 4,
             }))
     }
+    /// Whether `path` is the source this pack was made of. Its size and time
+    /// as indexed: yes, nothing read. The size as indexed and another time
+    /// (a copy, a restore, a touch): its content decides - the stamp a run
+    /// verified before (`<pack>.source`), else its CRC-32 read now against
+    /// the pack's. Another size: no.
+    ///
+    /// For a caller that would read the source anyway were the pack stale -
+    /// a command that then parses the ASCII file, the statistics, an
+    /// explicit build: a source of any size is read.
+    pub fn source_current(&self, path: &Path, cancelled: &AtomicUsize) -> Result<bool> {
+        self.source_check(path, None, cancelled)
+    }
+    /// `source_current` for an open that must not wait long - the viewer
+    /// opening a pack chosen with its .db (a stale pack is asked about and
+    /// indexed again under a progress window), the web's recheck: a source
+    /// larger than `verify_inline_limit` whose time changed is not read
+    /// here, and the pack is said stale.
     pub fn source_matches(&self, path: &Path) -> Result<bool> {
+        self.source_check(path, Some(verify_inline_limit()), &AtomicUsize::new(0))
+    }
+    pub(super) fn source_check(
+        &self,
+        path: &Path,
+        limit: Option<u64>,
+        cancelled: &AtomicUsize,
+    ) -> Result<bool> {
         let m = fs::metadata(path)?;
-        Ok(m.len() == self.source_size && u64::try_from(m.mtime()).ok() == Some(self.source_mtime))
+        if m.len() != self.source_size {
+            return Ok(false);
+        }
+        let mtime = u64::try_from(m.mtime()).ok();
+        if mtime == Some(self.source_mtime) {
+            return Ok(true);
+        }
+        let Some(mtime) = mtime else { return Ok(false) };
+        if self.source_hint() == Some((self.source_size, mtime, self.source_crc)) {
+            return Ok(true);
+        }
+        if limit.is_some_and(|limit| m.len() > limit) {
+            return Ok(false);
+        }
+        self.source_verified(path, cancelled)
+    }
+    /// Read `path` and compare its size and CRC-32 with the pack's: the same
+    /// bytes as indexed, whatever its time. A match is remembered beside the
+    /// pack (`<pack>.source`: size, time, CRC) so the next open reads
+    /// nothing; a folder that cannot be written just verifies again.
+    pub(super) fn source_verified(&self, path: &Path, cancelled: &AtomicUsize) -> Result<bool> {
+        use std::io::Read;
+        let mut file = fs::File::open(path)?;
+        let before = file.metadata()?;
+        if !before.is_file() || before.len() != self.source_size {
+            return Ok(false);
+        }
+        let mut hasher = crc32fast::Hasher::new();
+        let mut buffer = vec![0u8; 4 << 20];
+        let mut left = self.source_size;
+        while left > 0 {
+            check_cancelled(cancelled)?;
+            let n = file.read(&mut buffer)?;
+            if n == 0 {
+                return Ok(false);
+            }
+            hasher.update(&buffer[..n]);
+            left = left.saturating_sub(n as u64);
+        }
+        let after = fs::metadata(path)?;
+        if file.read(&mut buffer[..1])? != 0
+            || after.len() != before.len()
+            || after.mtime() != before.mtime()
+            || hasher.finalize() != self.source_crc
+        {
+            return Ok(false);
+        }
+        if let Ok(mtime) = u64::try_from(after.mtime()) {
+            if mtime != self.source_mtime {
+                self.write_source_hint(mtime);
+            }
+        }
+        Ok(true)
+    }
+    /// `<pack>.source`: the stamp of a source verified against this pack.
+    fn source_hint_path(&self) -> PathBuf {
+        let mut name = self.path.as_os_str().to_owned();
+        name.push(".source");
+        PathBuf::from(name)
+    }
+    /// (size, time s, CRC-32) of the verified source, when the file is there
+    /// and whole.
+    fn source_hint(&self) -> Option<(u64, u64, u32)> {
+        let text = fs::read_to_string(self.source_hint_path()).ok()?;
+        let mut lines = text.lines();
+        if lines.next()? != SOURCE_HINT {
+            return None;
+        }
+        let mut fields = lines.next()?.split(' ');
+        let size = fields.next()?.parse().ok()?;
+        let mtime = fields.next()?.parse().ok()?;
+        let crc = u32::from_str_radix(fields.next()?, 16).ok()?;
+        fields.next().is_none().then_some((size, mtime, crc))
+    }
+    /// Best effort (a results folder that cannot be written keeps none).
+    fn write_source_hint(&self, mtime: u64) {
+        let path = self.source_hint_path();
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(format!(".tmp-{}", std::process::id()));
+        let tmp = PathBuf::from(tmp);
+        let text = format!(
+            "{SOURCE_HINT}\n{} {mtime} {:08x}\n",
+            self.source_size, self.source_crc
+        );
+        if fs::write(&tmp, text)
+            .and_then(|()| fs::rename(&tmp, &path))
+            .is_err()
+        {
+            let _ = fs::remove_file(&tmp);
+        }
     }
     pub fn attach_waives(&mut self, path: &Path) -> Result<()> {
         self.unchanged()?;
         let r = Input::open(path)?;
         let mut h = [0; 40];
         r.read(0, &mut h)?;
-        if &h[..8] != b"FLOEWAIV"
-            || u32at(&h, 8) != 1
-            || u64at(&h, 12) != self.source_size
-            || u64at(&h, 20) != self.source_mtime
-            || u64at(&h, 28) != self.total
-            || u32at(&h, 36) as usize != self.checks.len()
+        if h != super::review::Layout::from_pack(self)?.header()
             || r.stamp.len != add(add(40, self.total)?, mul(self.checks.len() as u64, 4)?)?
         {
             return Err(crate::Error::input(

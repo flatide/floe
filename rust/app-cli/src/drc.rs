@@ -27,7 +27,12 @@ const HELP: &str = "Usage: floe2-web drc RESULTS.db|.RESULTS.db.tray [OPTIONS]
                           Needs the current pack: none or a stale one is an
                           error (exit 1), never an answer of zeros
   --svrf-rules FILE       Explicit rules.json metadata for --rules / --errs
-  --build                 Explicitly build/reuse .RESULTS.db.tray, migrate legacy name
+  --build                 Explicitly build/reuse .RESULTS.db.tray, migrate legacy name.
+                          A pack is reused when the database is the file that
+                          was indexed: its size and time, or - another time (a
+                          copy, a touch) - its content, compared here whatever
+                          its size (CRC-32); a database that did change is
+                          refused without --force
   --force                 With --build: allow atomic replacement of old pack
   --jobs N                With --build: native workers 1..16 (default 12)
   --workdir DIR           Read and write the pack and what follows it (the
@@ -37,9 +42,15 @@ const HELP: &str = "Usage: floe2-web drc RESULTS.db|.RESULTS.db.tray [OPTIONS]
                           (FLOE_WORKDIR; every command's, anywhere on the line)
 
 Without --build: read-only, no renaming, automatic indexing or autosave creation.
-Uses a fresh layout-4 .tray pack (or legacy .ice) when available, otherwise bounded read-only
+Uses a fresh layout-5 .tray pack (or legacy .ice) when available, otherwise bounded read-only
 ASCII parsing (including fractional coordinates). Stale/corrupt adjacent
 packs are reported but never overwritten by read commands.
+Fresh: the database has the size and time it was indexed with, or the same
+content under another time (a copy, a touch) - then it is read once and
+compared (CRC-32), and the answer kept as .RESULTS.db.tray.source so the next
+open reads nothing. Reviews are bound to the pack's content id (what the
+errors are): a pack made again, a copied folder and a re-run with the same
+errors keep them.
 --build uses the existing integer-DBU pack format; fractional coordinates fail
 without changing the old pack. It preserves review files and emits JSON.
 Name migration is reported separately and is not rolled back if rebuilding fails.

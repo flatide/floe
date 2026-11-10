@@ -765,10 +765,20 @@ class ReadyTests(unittest.TestCase):
         self.assertEqual(res.returncode, 1, res.stderr)
         self.assertIn("no placement can be drawn", res.stderr)
         floe2("index", self.dir / "srcA.oas", ok=0)
+        # one source indexed: the capture is drawn without the other and says
+        # so. Since 0.12.437 that is no failure (exit 0, the lack in the
+        # WARNING lines); FLOE_RENDER_INCOMPLETE_EXIT=3 is the code of before
+        # (this gate kept the old code until 0.12.441 - it was not among the
+        # gates run with that change)
         res = floe2("render", deck, "--no-index", "--out", self.dir / "d.png")
-        self.assertEqual(res.returncode, 3, res.stdout + res.stderr)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertIn("srcB.oas: not_indexed (no fresh index cache (run: floe2 index lock.jb))",
                       res.stdout)
+        self.assertIn("floe2: WARNING: rendered incomplete - 1 jobdeck placement(s) missing",
+                      res.stderr)
+        res = floe2("render", deck, "--no-index", "--out", self.dir / "d.png",
+                    env=run_env(FLOE_RENDER_INCOMPLETE_EXIT="3"))
+        self.assertEqual(res.returncode, 3, res.stdout + res.stderr)
 
     def test_k11_a_busy_source_is_refused_or_waited_for(self):
         src = self.layout()
@@ -854,9 +864,12 @@ class ReadyTests(unittest.TestCase):
         deck = self.deck()
         floe2("index", self.dir / "srcA.oas", ok=0)
         lock = self.hold(self.dir / "srcB.oas")
+        # (drawn without the busy source, and said: exit 0 since 0.12.437)
         res = floe2("render", deck, "--px", "160", "--out", self.dir / "d.png")
-        self.assertEqual(res.returncode, 3, res.stdout + res.stderr)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertIn("srcB.oas: not_indexed (srcB.oas is being indexed by %s" % HOLDER, res.stdout)
+        self.assertIn("floe2: WARNING: rendered incomplete - 1 jobdeck placement(s) missing",
+                      res.stderr)
         log = self.dir / "deck.log"
         # (--occupancy on: the fit view of the light source draws its summary,
         # built by the auto-index after the wait; srcA's full index gets its

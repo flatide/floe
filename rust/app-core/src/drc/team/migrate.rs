@@ -485,10 +485,10 @@ pub fn prepare(
     let mut old = Pack::open(&old_pack, cancelled)?;
     old.hold(lock);
     if let Some(db) = &source_db {
-        if !old.source_matches(db)? {
+        if !old.source_current(db, cancelled)? {
             return Err(Error::new(
                 ErrorKind::Cache,
-                format!("{}: stale pack (source size/mtime changed)", old_pack.display()),
+                format!("{}: stale pack (the source is not the file that was indexed)", old_pack.display()),
             ));
         }
     }

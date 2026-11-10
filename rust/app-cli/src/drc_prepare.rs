@@ -132,7 +132,7 @@ fn pack_of(source: &Path) -> Result<PathBuf> {
     }
     let pack = floe_app_core::cache::pack_path(source)?;
     let stop = AtomicUsize::new(0);
-    let fresh = Pack::open(&pack, &stop).and_then(|p| p.source_matches(source));
+    let fresh = Pack::open(&pack, &stop).and_then(|p| p.source_current(source, &stop));
     match fresh {
         Ok(true) => Ok(pack),
         _ => Err(Error::input(format!(

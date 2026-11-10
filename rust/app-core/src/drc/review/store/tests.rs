@@ -851,7 +851,7 @@ fn notes_use_real_pack_centers_and_clear_is_an_empty_compatible_tombstone() {
     assert_eq!(empty.notes().unwrap().member_count(), 0);
     assert!(fs::read_to_string(s.target())
         .unwrap()
-        .contains("floe_pack=1234,5678,65"));
+        .contains("floe_pack=abababababababababababababababab,65"));
     f.clean();
 }
 #[test]
@@ -866,7 +866,7 @@ fn note_import_reports_normalization_and_rejects_foreign_data_without_write() {
         .prepare_notes_import("floe_pack=0,0,0\nfloe_note=0|bad", &f.stop)
         .is_err());
     assert_eq!(fs::read(s.target()).unwrap(), before);
-    let input="floe_pack=1234,5678,65\nfloe_note=0,1|first\nfloe_note=1,2,999|last\nfloe_note=malformed\n";
+    let input="floe_pack=abababababababababababababababab,65\nfloe_note=0,1|first\nfloe_note=1,2,999|last\nfloe_note=malformed\n";
     let (d, report) = s
         .snapshot(&f.stop)
         .unwrap()
@@ -1205,7 +1205,7 @@ fn concurrent_cooperating_publishers_have_exactly_one_winner() {
 fn legacy_adoption_is_explicit_and_new_pack_registration_does_not_inherit_review() {
     let f = Fixture::new();
     let s = f.store(Kind::Notes);
-    fs::write(s.target(), b"floe_pack=1234,5678,65\nfloe_note=0|legacy\n").unwrap();
+    fs::write(s.target(), b"floe_pack=abababababababababababababababab,65\nfloe_note=0|legacy\n").unwrap();
     assert!(s.snapshot(&f.stop).unwrap().legacy_unverified());
     let old = fs::read(s.target()).unwrap();
     assert_eq!(
