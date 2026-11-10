@@ -857,8 +857,34 @@ def a5(temp):
         m = v._drc_marker_result[1]
         check((m.visible_count, m.total_count) == (20, 20), "the marker picture",
               (m.visible_count, m.total_count))
-        check("20 errors / %d markers in view" % m.occupied_count in v._drcwin._info.get_text(),
-              "its info line", v._drcwin._info.get_text())
+        # the panel has no info line (2026-11-10): a picture long enough in
+        # the making to show a part says so in the status line and then
+        # that it is done - a part must not pass for the whole; a quick one
+        # says nothing
+
+        class Replies(object):
+            def __init__(self, replies):
+                self.replies = list(replies)
+
+            def poll(self):
+                return self.replies.pop(0) if self.replies else None
+        worker, key = v._drc_marker_worker, v._drc_marker_key
+        v._drc_marker_worker = Replies([(key, gtkservice.MarkerProgress(m), None),
+                                        (key, m, None), (key, m, None)])
+        try:
+            v._drc_marker_poll()
+            part, busy = v.status.get_text(), v._drc_marker_busy
+            v._drc_marker_poll()
+            done = v.status.get_text()
+            v._set_live_status("-")
+            v._drc_marker_poll()
+            quick = v.status.get_text()
+        finally:
+            v._drc_marker_worker = worker
+        check(part == "DRC markers: %d / 20 errors processed (partial)…" % m.processed_count
+              and busy and done == "DRC markers: 20 errors / %d markers in view" % m.occupied_count
+              and quick == "-" and not v._drc_marker_busy and v._drc_marker_result[1] is m,
+              "a marker picture in the making says so in the status line", (part, done, quick))
         lines = v._drc_meta_lines(v._drc.checks[0].name, v._drc.checks[0].errors[0])
         check("estimated CD: 0.01001 um vs < 0.05000 · Δ 0.03999 (79.98000%)" in lines
               and "CD selection: SVRF options are not geometrically evaluated" in lines,

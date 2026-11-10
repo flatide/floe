@@ -475,7 +475,8 @@ class _Drc(object):
                        for ci, row in enumerate(result["checks"])]
         # what this open moved aside - the review files of other DRC
         # results under this one's name (the DRC ran again): the viewer
-        # says it in its panel, not on stderr alone
+        # says it in its status line and where the error details go, not
+        # on stderr alone
         self.moved_aside = [line for line in result.get("notices") or []
                             if "moved aside" in line]
         for line in result.get("notices") or []:
@@ -2083,9 +2084,3 @@ def apply_migration(db, plan, cancelled=None, progress=None):
         db.review_flags_changed()
     plan.summary = dict(event.get("summary") or plan.summary)
     return event["result"]
-
-
-def review_stats_export(db, path, cancelled=None, progress=None):
-    """One's own review statistics (database and rules) as CSV."""
-    _job(db, "review", "drc_review_stats", cancelled, progress,
-         path=os.path.abspath(path))

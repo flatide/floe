@@ -151,11 +151,15 @@ python -m floe render chip.oas --drc results.db \
   공유 결과를 고치지 않는다(2026-10-09 브랜치, Rust 서비스 2026-10-11).
 - **리뷰어 ID 표시·세션 잠금·ID 요구**(2026-11-10, app 0.12.440; 사용자: TeeBox처럼 한 계정으로
   여러 사람의 뷰어를 띄워 같은 레이아웃·db를 검토하는 운용 점검).
-  - **표시**: DRC 패널 정보 줄 아래에 `reviewer: <ID>`가 늘 보인다. 툴팁은 ID의 출처와 waive 파일
-    경로다. ID를 명시하지 않아(`--userid`·`FLOE_REVIEWER` 없음) DISPLAY 호스트·SSH 접속원·계정명에서
-    얻은 것이면 경고색으로 `(the DISPLAY host - not a personal ID; start with --userid ID)`를
+  - **표시**: .db를 로드하면 상태 줄 `DRC <파일>: N checks, M errors (. / , = step) …`이 끝에
+    `· reviewer <ID>`로 누구의 리뷰인지 말한다. ID를 명시하지 않아(`--userid`·`FLOE_REVIEWER` 없음) DISPLAY 호스트·SSH
+    접속원·계정명에서 얻은 것이면 `(the DISPLAY host - not a personal ID; start with --userid ID)`를
     붙인다. 같은 ETX 노드의 사용자들은 DISPLAY 호스트가 같아 한 ID와 한 waive 파일을 쓰게 되기
-    때문이다. 공동 검토 창 제목에도 `mine: <ID>`가 붙는다. 서비스의 `drc_open` 응답에
+    때문이다. waive 파일을 만들 수 없는 리뷰에는 `· read-only (no waive file could be made)`가 붙는다.
+    공동 검토 창 제목에도 `mine: <ID>`가 붙는다. 0.12.440·0.12.441에는 DRC 패널 정보 줄 아래에
+    `reviewer: <ID>` 줄이 늘 있었고, 0.12.442에서 패널 위쪽 줄을 모두 뺐다(사용자 2026-11-10: DRC UI
+    정리, §3). 상태 줄은 커서가 캔버스 위에서 움직이면 좌표로 바뀌므로 ID가 늘 보이지는 않는다. ID를
+    빠뜨리지 못하게 하려면 아래의 `FLOE_REVIEWER_REQUIRED`를 쓴다. 서비스의 `drc_open` 응답에
     `reviewer_source`(`given`·`FLOE_REVIEWER`·`DISPLAY host`·`ssh client`·`account`)와
     `reviewer_stated`가 있다(app-core `drc::reviewer`).
   - **세션 잠금**: 한 리뷰어의 한 결과 리뷰는 한 세션만 연다(app-core `drc::session`; 잠금 파일은
@@ -208,9 +212,11 @@ python -m floe render chip.oas --drc results.db \
     수 있다.
   - **에러가 달라진 재실행**: 내용 ID가 다르다. 리뷰를 열 때 그 리뷰어의 세 파일(waive, note,
     방문·검토 제외 `.sqlite3`)을 모두 `.stale-<시각>`으로 옆에 치우고 새로 시작하며, 열기 응답의
-    `notices`에 파일마다 한 줄을 남긴다. 뷰어는 DRC 패널의 `reviewer:` 줄 아래에 경고색으로
-    `a review of other DRC results was here: N file(s) moved aside (.stale-…), this review starts
-    anew`를 보이고(툴팁에 치운 파일의 경로) 상태 줄에도 알린다. 0.12.440까지 `.sqlite3`는 치우지 않고
+    `notices`에 파일마다 한 줄을 남긴다. 뷰어는 로드의 상태 줄에 `· a review of other DRC results
+    moved aside (N file(s), .stale-…)`를 붙이고, 에러 상세 영역에 `a review of other DRC results was
+    here: N file(s) moved aside (.stale-…), this review starts anew`와 `notices`의 줄(치운 파일의
+    경로)을 적는다. 상세 영역의 안내는 룰을 고를 때까지 남는다(0.12.441에는 패널의 `reviewer:` 줄
+    아래에 있었다; 0.12.442, §3). 0.12.440까지 `.sqlite3`는 치우지 않고
     그 자리에서 거절해서, 누가 숨김 파일의 이름을 손으로 바꿀 때까지 그 리뷰어의 방문 통계가 막혀
     있었다. 치운 기록을 새 결과로 옮기는 것은 `review from a previous run`이다(이전 pack이 있어야
     한다). 치울 이름
@@ -263,8 +269,10 @@ python -m floe render chip.oas --drc results.db \
   검토 제외는 waived 여부와 관계없이 회색 숫자로 표시한다.
   둘 다 해당하면 회색 숫자에 방문 밑줄을 함께 표시한다. 마우스가 행 위에 있어도
   이 표시는 유지되며 클릭한 셀과 선택된 에러의 강조 표시는 별도로 유지한다.
-  패널의 전체 DB·현재
-  **룰 전체** 통계와 룰별 CSV(`export review statistics…`). 미방문 검토 대상 =
+  통계는 `floe2 drc <db> --review-stats`(리뷰어 전원과 팀, JSON; DRC-CLI §2b)와 공동 검토 창의
+  집계·`Statistics CSV…`로 본다. 패널의 전체 DB·현재 룰 통계 줄과 `export review statistics…`
+  (패널 버튼, DRC 메뉴 항목)는 0.12.442에서 뺐다(사용자 2026-11-10: DRC UI 정리, §3; 서비스의
+  `drc_review_stats` 작업은 남아 있고 게이트 R1이 확인한다). 미방문 검토 대상 =
   전체 − 검토 제외 − visited + 둘 다. 저장은 pack 옆 리뷰어별
   `.<db>.review.<리뷰어>.sqlite3`(4,096개 단위 두 비트맵과 증분 카운터; 도형을 읽지
   않고 에러 수만큼 메모리를 쓰지 않는다. SPEC-FORMATS). waive/note 파일은 이 상태를
@@ -298,6 +306,10 @@ python -m floe render chip.oas --drc results.db \
   집계의 conflict만 보이며 클러스터·CD 그룹·waive·selected·in view와 교집합이고,
   마커와 박스 선택도 같은 범위를 쓴다. import protected(구형 파일의 보호만으로
   생긴 항목)는 포함하지 않는다. 룰 트리·CD 그룹 제목의 개수는 기존 범위의 개수다.
+  필터의 상태는 상태 줄에 나온다(0.12.442; 그 전에는 패널 위쪽의 줄): 스냅숏이 없으면
+  `Conflict only needs a reviewer snapshot: …`, 룰을 고르지 않았으면 `Conflict only: select a rule.`,
+  준비 중 `Conflict only: a / b processed`, 끝나면 `Conflict only: N errors in this scope · snapshot
+  <시각>`, 실패는 `Conflict filter failed: …`.
 - **DRC 재수행 후 검토 승계**(DRC 메뉴 `review from previous run…`; app-core
   `drc::team::migrate`·`drc::matcher`): 새 결과를 연 뒤 이전 `.db` 또는 `.tray`를
   고른다. 이전 결과의 내 검토 파일(review SQLite·waive)을 자동으로 찾으며, 보관한
@@ -341,8 +353,27 @@ python -m floe render chip.oas --drc results.db \
 **열기** — open .db… 다이얼로그(.db만 표시, 로딩은 pack만; 부재/
 스테일/구 레이아웃이면 **"Build it now?" 확인 후** 인덱싱 + 모달
 로그 — load layout의 VFS 인덱싱과 같은 흐름), `--drc` 시작
-옵션. 로드 직후 = 무선택 상태. 정보줄:
-`파일명 [pack v4] — cell · 표시/전체 룰 · 에러 · svrf N/M`.
+옵션. 로드 직후 = 무선택 상태.
+
+**패널 위쪽은 비어 있다**(0.12.442; 사용자 2026-11-10: "뷰어에서 DRC 관련 UI가 복잡해서 정리하려고
+함. 특히 drc pane 상단의 정보들과 export review statistics...등은 모두 제거"). 검색 박스와 룰 목록이
+패널의 첫 줄이다. 그 전에 위쪽에 있던 것과 지금 볼 곳:
+
+| 있던 것 | 지금 |
+|---|---|
+| 정보줄 `파일명 [pack v4] — cell · 표시/전체 룰 · 에러 · svrf N/M` | 로드의 상태 줄 `DRC <파일>: N checks, M errors (. / , = step) · svrf N/M · reviewer <ID>`. `svrf N/M`은 .db 옆에서 자동으로 붙은 룰 메타데이터의 매칭 수이고(손으로 붙이면 그때의 상태 줄 `rules metadata <파일>: N/M rules matched`), 매칭된 룰은 이름 앞에 `✓`가 있다. 인덱스 없이 ASCII로 읽었으면 `· ASCII read, no index`가 붙는다 |
+| 정보줄의 CD 그룹 준비 진행 | 표시하지 않는다. 그룹 수는 준비되는 대로 룰 이름 앞 `(n)`에 나타난다 |
+| 정보줄의 마커 진행(`markers… a / b processed`, `에러 수 / 마커 수 in view`, `(partial)`) | 일부만 그린 그림을 내보일 만큼 오래 걸리는 계산만 상태 줄에 `DRC markers: a / b errors processed (partial)…`, 끝나면 `DRC markers: N errors / M markers in view`. 한 번에 끝나는 계산은 아무 말도 하지 않는다 |
+| `reviewer: <ID>` 줄, 리뷰를 치웠다는 안내 | 로드의 상태 줄(§2 리뷰어 ID 표시). 치웠다는 안내와 치운 파일의 경로는 에러 상세 영역에도 적힌다(룰을 고를 때까지) |
+| 범례 `underline: visited · gray: not for review · * note`, 전체 DB·현재 룰 통계 줄 | 표시하지 않는다. 표시 규칙은 §2의 방문·검토 제외 항목, 수치는 `floe2 drc <db> --review-stats`와 공동 검토 창 |
+| `export review statistics…` 버튼과 DRC 메뉴의 같은 항목 | 없다. `floe2 drc <db> --review-stats`(JSON), 공동 검토 창의 `Statistics CSV…` |
+| `Conflict only`의 상태 줄들 | 상태 줄(§2 공동 검토) |
+| 로드 실패·거절 문구(`DRC load failed: …`, 다른 세션이 연 리뷰, ID 요구) | 상태 줄. 로드된 결과가 없으면 에러 상세 영역에도 적힌다(상태 줄은 커서가 움직이면 좌표로 바뀐다). 거절은 대화상자도 그대로 뜬다 |
+| `no results database loaded` | 표시하지 않는다(빈 목록) |
+
+게이트: `drc_team` R7(패널의 첫 자식이 목록, 정보 줄·통계 내보내기 없음, DRC 메뉴에 통계 항목 없음,
+로드·거절·치움의 상태 줄과 상세 영역, Conflict only의 상태 줄), `drc_analysis` A5(오래 걸리는 마커
+계산의 상태 줄).
 
 **룰 목록** — 이름 + `에러수/waived`(예: 30/20, 둘 다 O(1)).
 - SVRF 메타데이터가 적용된 룰은 이름 앞에 `✓`를 표시한다. 현재 설정으로 계산된
@@ -451,13 +482,14 @@ python -m floe render chip.oas --drc results.db \
   픽셀별 선택 정보만 전달한다. 에러마다 UI 객체를 만들지 않는다.
 - 계산이 오래 걸리면 **약 0.5초마다 누적 결과를 표시**한다.
   처음 좌표 캐시를 만드는 중에도 완료된 구간부터 원형 마커가 나타난다.
-  정보줄에 `처리한 수 / 전체 수 processed`와 현재 화면의 에러·마커 수,
-  `(partial)`을 표시한다. 최종 결과는 주기를 기다리지 않고 즉시 표시한다.
+  중간 결과를 내보이는 동안 상태 줄에 `DRC markers: 처리한 수 / 전체 수 errors processed
+  (partial)…`을 표시한다. 최종 결과는 주기를 기다리지 않고 즉시 표시한다.
   줌·룰·필터가 바뀌면 이전 작업의 중간 결과를 버리며, 오류가 나면
-  미완성 화면을 지워 완료된 결과로 오인하지 않도록 한다.
-- 정보줄은 계산 중 `markers…`, 중간 결과와 완료 결과에는
-  `에러 수 / 마커 수 in view`를 표시한다. 중복 표시를 생략한 원본 에러도
-  에러 수에 포함되므로, 표시한 원의 수와 구분할 수 있다.
+  미완성 화면을 지워 완료된 결과로 오인하지 않도록 한다(상태 줄 `DRC markers failed: …`).
+- 중간 결과를 내보였던 계산이 끝나면 상태 줄에 `DRC markers: 에러 수 / 마커 수 in view`를
+  표시한다. 중복 표시를 생략한 원본 에러도 에러 수에 포함되므로, 표시한 원의 수와 구분할 수
+  있다. 한 번에 끝나는 계산은 상태 줄을 건드리지 않는다(0.12.441까지는 패널 정보줄이 모든
+  계산의 진행과 수를 늘 표시했다; 0.12.442, §3).
 - 박스 선택은 전체 룰/클러스터/CD 그룹을 대상으로 정확한 bbox 교차를
   조회하며 **선택 개수 제한이 없다**. 선택 조회는 백그라운드에서 실행하고,
   Esc로 취소하면 이전 선택을 유지한다. Shift 추가·Ctrl 토글도 지원한다.

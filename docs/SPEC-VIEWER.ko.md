@@ -182,7 +182,8 @@
   이미지 안쪽 1 px에서 잘리고, 테두리 클릭은 가장 가까운 다이 가장자리로
   센터링(`_minimap_world_point`). 테스트
   `test_minimap_die_outline_keeps_a_margin_from_the_edge_and_the_view_box`. fit/clip·
-  open .db…·rules… 버튼은 2026-08-22 메뉴 바로 이전(패널 정보줄만 잔류).
+  open .db…·rules… 버튼은 2026-08-22 메뉴 바로 이전(패널 정보줄만 잔류; 그 정보줄도
+  2026-11-10에 뺐다, §8b).
 - **레이어 목록에 넣는 것(2026-10-08, app 0.12.322; 사용자: 현장 EBEAM 파일을 레이아웃 모드로 열면
   Calibre는 3.0·3.300만, floe는 3.0·3.1·3.2·3.300을 보이고 3.1·3.2에는 도형이 없음).**
   - 원인: 파일의 LAYERNAME 표가 3/1·3/2를 이름으로 두고 그 위의 도형·텍스트는 없다. 색인은 KLayout처럼 그런 쌍도
@@ -320,7 +321,7 @@
   호출은 항목마다 d_type/lstat와 필터를 통과한 링크의 readlink뿐.
   이 브라우저를 쓰는 대화상자: load layout, load jobdeck, DRC open .db, load DRC
   clusters, open rule metadata, load notes, load layer properties. 저장 대화상자
-  (export review statistics, save notes/waives, save layer properties, save clip)와
+  (save notes/waives, save layer properties, save clip)와
   Reviewers 창의 다중 선택은 GTK chooser 그대로다(GIO가 항목마다 링크 대상을 stat 하며
   바꿀 수 없다; 이름을 치는 저장 모드는 미구현). 웹의 picker(app-core `browse`,
   `fstatat(AT_SYMLINK_NOFOLLOW)`)는 링크를 아예 건너뛴다(`skipped_links`). 게이트:
@@ -478,8 +479,20 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   `검토대상 아님`은 에러 번호 우클릭(현재/선택 전체)과 DRC 메뉴
   `mark/clear not for review`로 지정·해제한다(서비스 review 작업, 마커·그룹·선택은
   그대로). 목록은 번호 앞에 `V`/`X`(읽기 실패는 `?`)를 붙이고 waive·선택 색은 그대로다.
-  상세에 `visited: … · not for review: …` 줄, 패널에 전체 DB·현재 룰 전체 통계와
-  `export review statistics…`(CSV, 서비스가 접수한 방문을 쓴 뒤 작성)를 둔다.
+  상세에 `visited: … · not for review: …` 줄을 둔다. 패널의 전체 DB·현재 룰 통계 줄과
+  `export review statistics…`(패널 버튼, DRC 메뉴 항목)는 2026-11-10(app 0.12.442)에 뺐다:
+  수치는 `floe2 drc <db> --review-stats`와 공동 검토 창으로 본다. 서비스의 `drc_review_stats`
+  작업(CSV, 접수한 방문을 쓴 뒤 작성)은 남아 있다.
+- **패널 위쪽에는 아무 줄도 없다**(2026-11-10, app 0.12.442; 사용자: DRC UI 정리).
+  `_build_drc_panel`의 첫 자식이 룰 목록·에러 그리드의 Paned다. 정보줄, `reviewer:` 줄, 범례·통계
+  줄, 통계 내보내기 버튼, `Conflict only` 상태 줄이 있던 자리다. 로드가 말할 것은 상태 줄에
+  낸다(`_drc_loaded_text`: 파일·룰 수·에러 수, `· ASCII read, no index`, `· svrf N/M`, `· reviewer <ID>`와 명시하지
+  않은 ID의 안내, read-only, 치운 리뷰의 파일 수). 상태 줄은 커서가 움직이면 좌표로 바뀌므로,
+  열리지 않은 로드(`_drc_not_loaded`: 실패·거절, 로드된 결과가 없을 때)와 치운 리뷰의 안내
+  (`_drc_moved_aside_text`: `notices`의 줄)는 에러 상세 영역에도 적는다. 상세 영역은 룰을 고르기
+  전까지 비어 있는 곳이라 그때까지 남는다. `Conflict only`의 상태(`_on_drc_conflict`,
+  `_drc_conflict_poll`)와 오래 걸리는 마커 계산의 진행·완료(`_drc_marker_poll`)도 상태 줄이다.
+  표 형태의 대응은 DRC.ko.md §3.
 - **공동 검토**(DRC 메뉴 `reviewers…`; `load waives…`도 이 창의 불러오기로 간다 —
   내 상태를 갈아끼우지 않는다): 다른 리뷰어의 `.floereview`, 작업 review SQLite,
   waive 파일을 읽기 전용으로 불러와(`drc_team_load`) 내 상태와 비교한다. 리뷰어마다
@@ -553,7 +566,9 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
 - **SVRF 룰 메타데이터**(2026-08-15, SPEC-FORMATS `<deck>.rules.json`
   참조): db 로드 시 자동 탐색(`_drc_rules_auto` — Rule File Pathname
   베이스네임의 **db 옆** 사이드카 우선, 기록 경로·`<db>.rules.json`
-  차선) + DRC 메뉴 load SVRF rules… 수동 로드. 정보줄에 `svrf 매칭/전체`.
+  차선) + DRC 메뉴 load SVRF rules… 수동 로드. 매칭 수는 자동 탐색이면 로드의 상태 줄
+  `· svrf 매칭/전체`, 수동 로드면 그때의 상태 줄 `rules metadata <파일>: N/M rules matched`
+  (패널 정보줄은 2026-11-10에 뺐다).
   상세 pane 하단(`_drc_meta_lines`): 덱 원문 제약(constraint:) ·
   **measured / estimated CD** = 마커 치수 vs 한계값과 Δ/%(waive 판단
   보조; 에지쌍=실제 최소 갭·단일 에지=길이·area=신발끈,
@@ -746,7 +761,9 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   마커 리스트나 에러당 GTK 호출을 생성하지 않는다. GUI는 마커
   레이어를 캐시하고 프레임마다 한 번 합성한다. 포인터 주변 13×13 픽셀만
   확인해 선택하며 같은 거리에서는 포커스/gold를 우선한다. Tab 숨김은
-  픽셀 hit map도 비운다. 정보줄은 원본 에러 수와 실제 표시 중심 수를 구분한다.
+  픽셀 hit map도 비운다. 중간 결과를 내보였던 계산은 끝날 때 상태 줄에 원본 에러 수와 실제
+  표시 중심 수를 구분해 말한다(`DRC markers: N errors / M markers in view`; 패널 정보줄은
+  2026-11-10에 뺐다).
   마커 작업은 DB마다 하나이며 새 요청이 앞선 작업을 취소한다(GUI의
   `gtkservice.MarkerWorker`가 마지막 요청만 기다린다). 뷰/캔버스 크기/DB/룰/클러스터/CD 그룹/
   status revision/selected 소속이 키이며, 현재 키와 다른 결과는 버린다.

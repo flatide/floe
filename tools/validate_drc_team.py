@@ -302,7 +302,9 @@ def r1(svc, d):
             bad.append(("flags", ci))
     check(not bad and svc("drc_review_counts", handle=h) == dict(od.review_counts()),
           "every error's flags, counts per rule and database", bad)
-    # the statistics CSV (the viewer's export, the reference's rows)
+    # the statistics CSV (the service's job against the reference's rows; the
+    # viewer's menu and panel no longer ask for it, 2026-11-10 - the numbers
+    # of every reviewer are `floe2 drc DB --review-stats`)
     out = d / "stats.csv"
     e = svc.job(h, "drc_review_stats", path=str(out))
     import csv

@@ -74,6 +74,12 @@ def _previous(d, check):
     return prev / "sample.db"
 
 
+def _detail(v):
+    """The error-detail area's text."""
+    buf = v._drcwin._detail
+    return buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False)
+
+
 def _review_grid_hover(v, check, pump):
     """Hover must not let GTK replace the review markup on a whole row.
     Exercise real widget signals without a Python cairo render callback."""
@@ -163,55 +169,88 @@ def r7(temp, check):
     v = gui.Viewer(cache, detail=2)
     try:
         pump(v, lambda: v.last_frame is not None, "first frame")
+        # the panel is plain (user 2026-11-10): nothing above the lists - no
+        # info line, no reviewer line, no review statistics with their
+        # export button, no conflict state - and the DRC menu exports no
+        # statistics
+        kinds = [type(c).__name__ for c in v._left_nb.get_nth_page(1).get_children()]
+        check(kinds == ["Paned", "Separator", "FlowBox"], "nothing above the DRC lists", kinds)
+        check(not any(hasattr(v._drcwin, n) for n in
+                      ("_info", "_reviewer_info", "_review_info", "_conflict_info"))
+              and not hasattr(v, "_drc_review_export_stats"),
+              "the panel keeps no info line and the viewer no statistics export")
+        menu = [m for m in v._menubar.get_children() if m.get_label() == "DRC"]
+        labels = [i.get_label() or "" for i in menu[0].get_submenu().get_children()] if menu else []
+        check("reviewers…" in labels and "open results .db…" in labels
+              and not any("statistics" in label for label in labels),
+              "the DRC menu has no statistics export", labels)
         # one session a reviewer (2026-11-10): while another process has
         # this reviewer's review of the database open, the viewer does not
-        # open it - it says who has it, in the panel and a dialog
+        # open it - it says who has it: the status line, a dialog and -
+        # the status line is the cursor's - where the error details go
+        # while nothing is loaded
         held = gtkservice.Service(FLOE2)
         try:
             held.request("drc_open", path=str(d / "sample.db"), mode="load", reviewer="gui")
             check(not v.load_drc(str(d / "sample.db")) and v._drc is None,
                   "a review open in another session is not opened again")
-            said = v._drcwin._info.get_text()
+            said = v.status.get_text()
             dialog = getattr(v, "_drc_refusal_dialog", None)
             check("gui's review of sample.db is already open in another session" in said
-                  and "pid %d" % held._proc.pid in said and dialog is not None,
-                  "... and the viewer says who has it", said)
+                  and "pid %d" % held._proc.pid in said and dialog is not None
+                  and _detail(v) == said,
+                  "... and the viewer says who has it", (said, _detail(v)))
             if dialog is not None:
                 dialog.response(gui.Gtk.ResponseType.CLOSE)
         finally:
             held.close()
-        check(v.load_drc(str(d / "sample.db")), "load_drc")
-        db = v._drc
-        # whose review it is, in sight: the id the files are kept by; one
-        # that was not stated (--userid, FLOE_REVIEWER) is said to be where
-        # the viewer runs
-        who = v._drcwin._reviewer_info
-        check(who.get_visible() and who.get_text() == "reviewer: gui",
-              "the panel shows the reviewer id", who.get_text())
-
-        class Derived(object):
-            _reviewer, _reviewer_source, _reviewer_stated = "etx01", "DISPLAY host", False
-            read_only, _waive_path = False, "/r/.sample.db.waive.etx01"
-        text, tip = v._drc_reviewer_text(Derived())
-        check("etx01" in text and "not a personal ID" in text and "--userid" in text
-              and "DISPLAY host" in tip and "waive.etx01" in tip,
-              "an id that was not stated is said so", (text, tip))
-        check(v._drc_reviewer_text(None) is None, "no review, no reviewer line")
         # a review of other DRC results under this one's name (the DRC ran
-        # again) is moved aside at the open (0.12.441): the open's object
-        # keeps the notices and the panel's line says it, not stderr alone
+        # again) is moved aside at the open (0.12.441): the load says it in
+        # the status line and names the files where the error details go -
+        # there until a rule is picked - not on stderr alone
         (d / ".sample.db.waive.rerun").write_bytes(b"FLOEWAIV" + bytes(40))
         rerun = gtkservice.drc_load(str(d / "sample.db"), reviewer="rerun")
-        try:
-            text, tip = v._drc_reviewer_text(rerun)
-            check(len(rerun.moved_aside) == 1 and "1 file(s) moved aside" in text
-                  and "starts anew" in text and ".sample.db.waive.rerun.stale-" in tip
-                  and len(list(d.glob(".sample.db.waive.rerun.stale-*"))) == 1,
-                  "a review of other results moved aside is said in the panel", (text, tip))
-        finally:
-            rerun.close()
-        check(not getattr(db, "moved_aside", None) and "moved aside" not in who.get_text(),
-              "... and a review that goes on says nothing of it")
+        check(v.load_drc(str(d / "sample.db"), db=rerun) and v._drc is rerun,
+              "load_drc of a review found beside another result's files")
+        said, kept = v.status.get_text(), _detail(v)
+        check(len(rerun.moved_aside) == 1 and "· reviewer rerun" in said
+              and "a review of other DRC results moved aside (1 file(s)" in said
+              and kept.startswith("a review of other DRC results was here: 1 file(s) moved aside")
+              and "this review starts anew" in kept
+              and ".sample.db.waive.rerun.stale-" in kept
+              and len(list(d.glob(".sample.db.waive.rerun.stale-*"))) == 1,
+              "a review of other results moved aside is said by the load", (said, kept))
+        check(v.load_drc(str(d / "sample.db")), "load_drc")
+        db = v._drc
+        # whose review it is: the load's status line says the id the files
+        # are kept by (the panel has no line for it); a review that goes on
+        # says nothing more
+        said = v.status.get_text()
+        check(db is not rerun and v._drc_rmatch == (len(db.checks), len(db.checks))
+              and said == "DRC sample.db: %d checks, 38 errors (. / , = step) · svrf %d/%d"
+              " · reviewer gui" % ((len(db.checks),) + v._drc_rmatch) and _detail(v) == ""
+              and v._drc_moved_aside_text(db) is None,
+              "the load says whose review it is, and nothing of one that goes on",
+              (said, _detail(v)))
+
+        # one that was not stated (--userid, FLOE_REVIEWER) is said to be
+        # where the viewer runs; so are a review that cannot be written and
+        # a results file read without its index
+        class Derived(object):
+            _reviewer, _reviewer_source, _reviewer_stated = "etx01", "DISPLAY host", False
+            read_only, packed, checks, total, moved_aside = True, True, (), 0, ()
+        text = v._drc_loaded_text(Derived(), "/r/results.db")
+        check("· reviewer etx01 (the DISPLAY host - not a personal ID; start with --userid ID)"
+              in text and "· read-only (no waive file could be made)" in text
+              and "ASCII" not in text and "moved aside" not in text,
+              "an id that was not stated is said so", text)
+
+        class Plain(object):
+            packed, checks, total = False, (), 0
+        text = v._drc_loaded_text(Plain(), "/r/results.db", (3, 12))
+        check(text == "DRC results.db: 0 checks, 0 errors (. / , = step) · ASCII read, no index"
+              " · svrf 3/12" and v._drc_loaded_text(Plain(), "/r/results.db").endswith("no index"),
+              "a results file read without its index is said so, and the rules matched", text)
         store = v._drcwin._rules.get_model()
         v._drcwin._rules.set_cursor(store[0].path, None, False)
         pump(v, lambda: v._drc_open == 0, "the first rule")
@@ -236,9 +275,10 @@ def r7(temp, check):
         cells = [c for row in v._drcwin._gstore for c in row if c]
         check(any("<u>1</u>" in c for c in cells), "underline on the visited error's number",
               cells[:3])
-        stats = v._drcwin._review_info.get_text()
-        check("Whole DB: total 38 · visited 2 · not for review 0" in stats
-              and "Whole rule" in stats, "the review statistics", stats)
+        whole, rule = db.review_counts(), db.review_counts(0)
+        check((whole["total"], whole["visited"], whole["not_required"]) == (38, 2, 0)
+              and (rule["visited"], rule["not_required"]) == (2, 0),
+              "the review's counts", (whole, rule))
         v._drc_show_detail(0, 0)
         detail = v._drcwin._detail
         text = detail.get_text(detail.get_start_iter(), detail.get_end_iter(), False)
@@ -254,12 +294,9 @@ def r7(temp, check):
                   and "<s>" not in c for c in cells),
               "gray without strikethrough on excluded numbers", cells[:4])
         _review_grid_hover(v, check, pump)
-        out = d / "stats.csv"
-        v._drc_review_export_start(str(out))
-        pump(v, lambda: v._drc_review_job is None, "statistics export", 30)
-        rows = list(csv.reader(open(out, newline=""))) if out.exists() else []
-        check(rows and rows[1][:7] == ["database", "", "", "38", "2", "2", "0"]
-              and len(rows) == 2 + len(db.checks), "the statistics CSV", rows[:2])
+        whole = db.review_counts()
+        check((whole["total"], whole["visited"], whole["not_required"]) == (38, 2, 2),
+              "the review's counts with the exclusions", whole)
         # the viewer's own waive of 0 (visited): the peer's visit says no
         v._drc_set_waived(0, [0], True)
         # reviewers: load the peer, refresh, the page, a safe application
@@ -290,6 +327,11 @@ def r7(temp, check):
         v._drcwin._conflict.set_active(True)
         pump(v, lambda: v._drc_conflict_job is None and v._drc_conflict_members is not None
              and len(v._drc_conflict_members) == 1, "conflict only", 30)
+        # the filter's state is the status line's (the panel's lines for it
+        # are gone, 2026-11-10)
+        said = v.status.get_text()
+        check(said.startswith("Conflict only: 1 errors in this scope · snapshot "),
+              "the conflict filter says its count in the status line", said)
         v._drc_grid_fill(0)
         check(v._drc_grid_map == [0], "conflict only lists the conflict", v._drc_grid_map)
         v._drcwin._conflict.set_active(False)

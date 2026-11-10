@@ -616,7 +616,7 @@ floe2 view chip.oas --drc run1/results.db          # 이전 실행
 
 ## 2. 대용량: 마커·박스 선택·대량 waive·drc-prepare (M2.S.1, {heavy}개)
 
-- 룰을 고르면 전체 범위 원형 마커가 그려지고 정보줄에 처리 수가 보인다.
+- 룰을 고르면 전체 범위 원형 마커가 그려진다(오래 걸리면 상태 줄에 처리 수가 보인다).
 - `e`로 박스 선택(개수 제한 없음), `w`로 선택 전체 waive(서비스 작업).
 - `floe2 drc-prepare run2/results.db --svrf run2/deck.svrf.rules.json`로 중심·CD 캐시를
   미리 만든 뒤 다시 열면 바로 그려진다.
@@ -625,7 +625,7 @@ floe2 view chip.oas --drc run1/results.db          # 이전 실행
 
 - 에러를 열어 도형이 화면에 그려지면 목록 번호에 밑줄, 우클릭
   `mark not for review`로 회색 표시. Tab으로 오버레이를 숨긴 채 연 에러는 방문이 아니다.
-- 패널의 Whole DB / Whole rule 통계, `export review statistics…`(CSV).
+- 통계: `floe2 drc run2/results.db --review-stats`(JSON, 리뷰어 전원과 팀).
 
 ## 4. 공동 검토 (DRC > reviewers…)
 

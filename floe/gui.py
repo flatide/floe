@@ -146,8 +146,7 @@ LEFT_PANE_PX = 260
 
 class _DrcPanel(object):
     """Widget refs of the embedded DRC browser (attribute bag)."""
-    __slots__ = ("_info", "_reviewer_info", "_review_info", "_conflict",
-                 "_conflict_info",
+    __slots__ = ("_conflict",
                  "_rules", "_rstore", "_grid", "_gstore",
                  "_detail", "_hl", "_wf", "_selv", "_search",
                  "_tf", "_plabel", "_pprev", "_pnext", "_delta_mode",
@@ -2535,7 +2534,6 @@ class Viewer:
         self._drc_tfilter = "all"   # rule-type filter (svrf metric)
         self._drc_rtypes = None     # rule name -> metric frozenset
         self._drc_tf_busy = False   # rebuilding the type combo
-        self._drc_shown = 0         # rules listed (info line)
         self._drc_lyr_saved = None  # visibility snapshot before a
                                     # double-click layer isolation
         self._drc_show_sel = False  # 'selected' list filter
@@ -2568,13 +2566,13 @@ class Viewer:
         self._drc_conflict_job = None
         self._drc_conflict_retired = []
         self._drc_conflict_revision = 0
-        self._drc_conflict_error = None
         self._drc_conflict_stamp = ""
         self._drc_marker_revision = 0
         self._drc_marker_key = None
         self._drc_marker_result = None
         self._drc_marker_overlay = None
         self._drc_marker_busy = False
+        self._drc_marker_said = None  # the job whose partial picture the status line told
         self._drc_query_worker = None
         self._drc_hl_key = None
         self._drc_delta_worker = None
@@ -2583,7 +2581,6 @@ class Viewer:
         self._drc_group_counts = {}  # (rule, basis, requested step) -> count/unknown
         self._drc_group_cache_worker = None
         self._drc_group_cache_key = None
-        self._drc_group_cache_progress = None
         self._drc_delta_group = None
         self._drc_delta_busy = False
         self._drc_delta_ui_busy = False
@@ -6723,7 +6720,6 @@ class Viewer:
         item(m, "review from previous run…", self._drc_migration_dialog)
         item(m, "mark not for review", lambda: self._drc_not_required_key(True))
         item(m, "clear not for review", lambda: self._drc_not_required_key(False))
-        item(m, "export review statistics…", self._drc_review_export_stats)
         sep(m)
         item(m, "note (add/edit)\tn", self._drc_note_key)
         item(m, "clear note of selection", self._drc_note_clear)
@@ -7187,44 +7183,14 @@ class Viewer:
         available; formerly a separate window)."""
         win = _DrcPanel()
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        box.pack_start(top, False, False, 2)
-        # open .db…/rules… buttons retired 2026-08-22: the DRC menu
-        # (open results .db… / load SVRF rules…) owns them now; the
-        # info line stays
-        info = Gtk.Label(label="no results database loaded")
-        info.set_xalign(0.0)
-        info.set_ellipsize(Pango.EllipsizeMode.START)
-        top.pack_start(info, True, True, 2)
-        win._info = info
-        # whose review this is (user 2026-11-10: a launcher starts everyone's
-        # viewer under one account - the id the waives are kept by must be
-        # in sight, and one not stated must look wrong)
-        reviewer_info = Gtk.Label()
-        reviewer_info.set_xalign(0.0)
-        reviewer_info.set_line_wrap(True)
-        reviewer_info.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
-        reviewer_info.set_max_width_chars(40)
-        reviewer_info.set_no_show_all(True)
-        box.pack_start(reviewer_info, False, False, 0)
-        win._reviewer_info = reviewer_info
-        review_info = Gtk.Label(label="underline: visited · gray: not for review · * note")
-        review_info.set_xalign(0.0)
-        review_info.set_line_wrap(True)
-        review_info.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
-        review_info.set_max_width_chars(40)
-        box.pack_start(review_info, False, False, 2)
-        win._review_info = review_info
-        export_stats = Gtk.Button(label="export review statistics…")
-        export_stats.connect("clicked", lambda *_: self._drc_review_export_stats())
-        box.pack_start(export_stats, False, False, 0)
-        conflict_info = Gtk.Label()
-        conflict_info.set_xalign(0)
-        conflict_info.set_line_wrap(True)
-        conflict_info.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
-        conflict_info.set_max_width_chars(40)
-        box.pack_start(conflict_info, False, False, 0)
-        win._conflict_info = conflict_info
+        # nothing above the lists (user 2026-11-10: the DRC UI is to be
+        # plain). The info line, the reviewer line, the review statistics
+        # with their export button and the conflict filter's state lines
+        # left the panel: what a load has to say is in the status line
+        # (_drc_loaded_text), and a load that did not happen or a review
+        # moved aside is also written where the error details go, which is
+        # empty until a rule is picked (_drc_not_loaded,
+        # _drc_moved_aside_text).
         # top pane = rules list (left) | error-number grid (right);
         # bottom pane = per-error detail. Selecting a rule shows its
         # grid alone (one rule at a time = the accordion ask), and
@@ -8413,8 +8379,6 @@ class Viewer:
             w._rstore.clear()
             w._gstore.clear()
             w._detail.set_text("")
-            w._info.set_text("no results database loaded")
-            self._drc_review_stats_refresh()
             self._drc_types_rebuild()   # empty+disable type combo
         close = getattr(old, "close", None)
         if close is not None:
@@ -8636,10 +8600,7 @@ class Viewer:
                 if getattr(exc, "kind", None) in ("busy", "admission"):
                     self._drc_refused(exc)
                     return False
-                msg = "DRC load failed: %s" % exc
-                if self._drcwin is not None:
-                    self._drcwin._info.set_text(msg)
-                self._set_live_status(msg)
+                self._drc_not_loaded("DRC load failed: %s" % exc)
                 return False
         old = self._drc
         for window in (getattr(self, "_drc_team", None),
@@ -8692,12 +8653,16 @@ class Viewer:
                 self._drcwin._rules.get_selection().unselect_all()
             finally:
                 self._drc_rules_busy = False
-        moved = getattr(db, "moved_aside", None) or []
-        self._set_live_status(cluster_error or
-            ("DRC %s: %d checks, %d errors (. / , = step)%s"
-             % (os.path.basename(path), len(db.checks), db.total,
-                " - a review of other results moved aside (%d file(s), see "
-                "the DRC panel)" % len(moved) if moved else "")))
+        said = self._drc_loaded_text(
+            db, path, self._drc_rmatch if self._drc_rmeta is not None else None)
+        self._set_live_status("%s · %s" % (cluster_error, said)
+                              if cluster_error else said)
+        moved = self._drc_moved_aside_text(db)
+        if moved and self._drcwin is not None:
+            # in sight until a rule is picked: cursor motion replaces the
+            # status line, and the reviewer has to know where the review
+            # of the run before went
+            self._drcwin._detail.set_text(moved)
         if old is not None and old is not db:
             # the db it replaces lets go of its pack now, not at some GC
             # (floe/indexlock.py: its reader's lock goes with it)
@@ -8807,7 +8772,6 @@ class Viewer:
             self._drc_delta_scope_refresh()
         self._drc_group_ui_refresh()
         self._drc_group_cache_sync()
-        self._drc_info_refresh()
         if not silent or matched:
             self._set_live_status(
                 "rules metadata %s: %d/%d rules matched"
@@ -8945,9 +8909,7 @@ class Viewer:
                 selection.unselect_all()
         finally:
             self._drc_rules_busy = busy
-        self._drc_shown = len(expected)
         self._drc_svrf_refresh()
-        self._drc_info_refresh()
         return True
 
     def _drc_group_cache_sync(self):
@@ -8968,8 +8930,6 @@ class Viewer:
             if worker is not None:
                 worker.cancel()
             self._drc_group_cache_key = None
-            self._drc_group_cache_progress = None
-            self._drc_info_refresh()
             return
         key = (id(db), id(meta), mode,
                tuple((r["check"], r["step"]) for r in requests))
@@ -8979,9 +8939,7 @@ class Viewer:
             from .gtkservice import DeltaCachedWorker
             worker = self._drc_group_cache_worker = DeltaCachedWorker()
         self._drc_group_cache_key = key
-        self._drc_group_cache_progress = "preparing CD group counts…"
         worker.submit(key, db, requests, mode)
-        self._drc_info_refresh()
 
     def _drc_group_cache_poll(self):
         worker = self._drc_group_cache_worker
@@ -8993,14 +8951,11 @@ class Viewer:
             return
         if error:
             self._drc_group_cache_key = None
-            self._drc_group_cache_progress = None
             self._set_live_status("CD group counts unavailable: %s" % error)
-            self._drc_info_refresh()
             return
         done = event["state"] == "done"
         if done:
             self._drc_group_cache_key = None
-        self._drc_group_cache_progress = None if done else event.get("text")
         steps = dict(key[3])
         changed = False
         rows = event.get("rows") or []
@@ -9014,7 +8969,6 @@ class Viewer:
                 self._drc_group_counts[setting] = count
         if changed:
             self._drc_group_ui_refresh()
-        self._drc_info_refresh()
         errors = [row["error"] for row in rows if row.get("error")]
         if done and errors:
             self._set_live_status("CD group counts unavailable for %d rule(s): %s"
@@ -9132,40 +9086,6 @@ class Viewer:
                    (_t1 - _t0) * 1e3, _tc * 1e3,
                    (time.perf_counter() - _t1 - _tc) * 1e3))
             sys.stderr.flush()
-        self._drc_shown = shown
-        self._drc_info_refresh()
-
-    def _drc_info_refresh(self):
-        win, db = self._drcwin, self._drc
-        if win is None or db is None:
-            return
-        backend = ("pack v4" if getattr(db, "packed", False)
-                   else "ASCII - NO INDEX")
-        rules = ""
-        if self._drc_rmeta is not None:
-            rules = " · svrf %d/%d" % self._drc_rmatch
-        if self._drc_clusters is not None:
-            rules += " · clusters %d rules" % len(self._drc_clusters.rules)
-        if self._drc_group_cache_progress:
-            rules += " · " + self._drc_group_cache_progress
-        busy = getattr(self, "_drc_marker_busy", False)
-        if busy:
-            rules += " · markers…"
-        if getattr(self, "_drc_marker_result", None) is not None:
-            markers = self._drc_marker_result[1]
-            count, shown = markers.visible_count, markers.occupied_count
-            if busy and markers.total_count:
-                rules += " %d / %d processed" % (
-                    markers.processed_count, markers.total_count)
-            rules += " · %d errors / %d markers in view" % (
-                count, shown)
-            if busy:
-                rules += " (partial)"
-        win._info.set_text(
-            "%s [%s] — cell %s · %d/%d rules · %d errors%s"
-            % (os.path.basename(db.path), backend, db.cell,
-               self._drc_shown, len(db.checks), db.total, rules))
-        self._drc_review_stats_refresh()
 
     def _drc_types_rebuild(self):
         """Classify every rule by its SVRF measurement metrics
@@ -9318,7 +9238,6 @@ class Viewer:
                 self._drc_group_cache_worker = None
             self._drc_group_counts = {}
             self._drc_group_cache_key = None
-            self._drc_group_cache_progress = None
             self._drc_delta_steps = {}
             self._drc_delta_auto_steps = {}
             self._drc_delta_step_scope = None
@@ -10101,63 +10020,69 @@ class Viewer:
                     shown = pos - cumulative[ci]
             if shown is not None:
                 self._drc_show_detail(ci, shown)
-        self._drc_review_stats_refresh()
 
     @staticmethod
-    def _drc_reviewer_text(db):
-        """(markup, tooltip) of the DRC panel's reviewer line: the id this
-        review's waive, visit and note files are kept by; one that was not
-        stated (--userid, FLOE_REVIEWER) is said to be where the viewer
-        runs, in the warning colour. None: no review (no pack loaded)."""
+    def _drc_loaded_text(db, path, svrf=None):
+        """The status line of a DRC load: the results, the rules metadata
+        found beside them (`svrf` = matched / all rules; a hand-loaded one
+        says its own line), then whose review it is - the id its waive,
+        visit and note files are kept by; one that was not stated
+        (--userid, FLOE_REVIEWER) is said to be where the viewer runs - and
+        what the open found amiss. The panel keeps no line of it (user
+        2026-11-10)."""
+        text = "DRC %s: %d checks, %d errors (. / , = step)" % (
+            os.path.basename(path), len(db.checks), db.total)
+        if not getattr(db, "packed", False):
+            # no waives, no review, no in-view filter: each says so when
+            # asked, and the load says it once
+            text += " · ASCII read, no index"
+        if svrf is not None:
+            text += " · svrf %d/%d" % tuple(svrf)
         reviewer = getattr(db, "_reviewer", None)
-        if db is None or not reviewer:
-            return None
-        esc = GLib.markup_escape_text
-        source = getattr(db, "_reviewer_source", None) or ""
-        text = "reviewer: <b>%s</b>" % esc(str(reviewer))
-        if not getattr(db, "_reviewer_stated", True):
-            text = ('<span foreground="#e8a000">%s (the %s - not a personal '
-                    'ID; start with --userid ID)</span>' % (text, esc(source)))
-        if getattr(db, "read_only", False):
-            text += " · read-only (no waive file could be made)"
-        tip = "ID from: %s" % (source or "?")
-        waive = getattr(db, "_waive_path", None)
-        if waive:
-            tip += "\nwaives: %s" % waive
+        if reviewer:
+            text += " · reviewer %s" % reviewer
+            if not getattr(db, "_reviewer_stated", True):
+                text += (" (the %s - not a personal ID; start with --userid ID)"
+                         % (getattr(db, "_reviewer_source", None) or "host"))
+            if getattr(db, "read_only", False):
+                text += " · read-only (no waive file could be made)"
         moved = getattr(db, "moved_aside", None) or []
         if moved:
-            # this open found a review of other errors under this result's
-            # name (the DRC ran again) and moved its files aside
-            text += ('\n<span foreground="#e8a000">a review of other DRC '
-                     'results was here: %d file(s) moved aside (.stale-…), '
-                     'this review starts anew</span>' % len(moved))
-            tip += "\n" + "\n".join(str(line) for line in moved)
-        return text, tip
+            text += (" · a review of other DRC results moved aside (%d "
+                     "file(s), .stale-…)" % len(moved))
+        return text
 
-    def _drc_reviewer_refresh(self):
+    @staticmethod
+    def _drc_moved_aside_text(db):
+        """What the error-detail area says after an open that found a review
+        of other errors under this result's name (the DRC ran again): the
+        service moved the reviewer's files aside and named them in the
+        open's notices. None when the review goes on."""
+        moved = getattr(db, "moved_aside", None) or []
+        if not moved:
+            return None
+        return "\n".join(
+            ["a review of other DRC results was here: %d file(s) moved aside "
+             "(.stale-…), this review starts anew" % len(moved), ""]
+            + [str(line) for line in moved])
+
+    def _drc_not_loaded(self, msg):
+        """A DRC open that did not happen: the status line says it, and -
+        cursor motion replaces that line - so does the error-detail area
+        while no results are loaded (the panel has no line of its own)."""
+        self._set_live_status(msg)
         win = getattr(self, "_drcwin", None)
-        label = getattr(win, "_reviewer_info", None) if win is not None else None
-        if label is None:
-            return
-        shown = self._drc_reviewer_text(getattr(self, "_drc", None))
-        if shown is None:
-            label.hide()
-            return
-        label.set_markup(shown[0])
-        label.set_tooltip_text(shown[1])
-        label.show()
+        if win is not None and getattr(self, "_drc", None) is None:
+            win._detail.set_text(msg)
 
     def _drc_refused(self, exc):
         """A DRC open the service refused for who asks, not for the pack:
         the review open in another session (busy), a reviewer ID required
-        and not given (admission), a pack being indexed (busy). Said in the
-        status line and the panel, and - it stops the user's review - in a
-        dialog that does not block the viewer."""
+        and not given (admission), a pack being indexed (busy). Said as any
+        open that did not happen (_drc_not_loaded) and - it stops the user's
+        review - in a dialog that does not block the viewer."""
         msg = str(exc)
-        self._set_live_status(msg)
-        win = getattr(self, "_drcwin", None)
-        if win is not None and getattr(self, "_drc", None) is None:
-            win._info.set_text(msg)
+        self._drc_not_loaded(msg)
         if getattr(exc, "kind", None) == "busy" and "being indexed" in msg:
             return
         dlg = Gtk.MessageDialog(
@@ -10168,72 +10093,6 @@ class Viewer:
         dlg.connect("response", lambda d, *_: d.destroy())
         self._drc_refusal_dialog = dlg
         dlg.show()
-
-    def _drc_review_stats_refresh(self):
-        self._drc_reviewer_refresh()
-        win = getattr(self, "_drcwin", None)
-        label = getattr(win, "_review_info", None) if win is not None else None
-        if label is None:
-            return
-        db = getattr(self, "_drc", None)
-        legend = "underline: visited · gray: not for review · * note"
-        if db is None or not hasattr(db, "review_counts"):
-            label.set_text(legend)
-            return
-
-        def line(scope, counts):
-            return ("%s: total %d · visited %d · not for review %d · unvisited targets %d"
-                    % (scope, counts["total"], counts["visited"],
-                       counts["not_required"], counts["pending"]))
-        try:
-            lines = [legend, line("Whole DB", db.review_counts())]
-            ci = getattr(self, "_drc_open", None)
-            if ci is not None:
-                lines.append(line("Whole rule %s" % db.checks[ci].name,
-                                  db.review_counts(ci)))
-            label.set_text("\n".join(lines))
-        except Exception as exc:
-            label.set_text(legend + "\nReview statistics unavailable: %s" % exc)
-
-    def _drc_review_export_stats(self):
-        if self._drc_review_pending():
-            return
-        db = getattr(self, "_drc", None)
-        if db is None or not hasattr(db, "review_counts"):
-            self._set_live_status("review statistics need a packed index")
-            return
-        dlg = Gtk.FileChooserDialog(title="export review statistics",
-                                    parent=self.window,
-                                    action=Gtk.FileChooserAction.SAVE)
-        dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Save", Gtk.ResponseType.OK)
-        dlg.set_do_overwrite_confirmation(True)
-        dlg.set_current_folder(os.path.dirname(os.path.abspath(db.path)))
-        from .gtkservice import db_name_of
-        dlg.set_current_name(db_name_of(db.path) + ".review.csv")
-        path = dlg.get_filename() if dlg.run() == Gtk.ResponseType.OK else None
-        dlg.destroy()
-        self._restore_keys()
-        if path and self._drc is not db:
-            self._set_live_status("DRC changed; reopen the review statistics export")
-        elif path:
-            self._drc_review_export_start(path)
-
-    def _drc_review_export_start(self, path):
-        """The statistics CSV, written by the service's review job after
-        the visits it accepted (drc_review_stats)."""
-        if self._drc_review_pending():
-            return
-        db = getattr(self, "_drc", None)
-        if db is None or not hasattr(db, "review_counts"):
-            return
-        try:
-            db._start("review", "drc_review_stats", path=os.path.abspath(path))
-        except gtkservice.ServiceError as exc:
-            self._set_live_status("review export failed: %s" % exc)
-            return
-        self._drc_review_job = dict(db=db, ci=None, targets=(), operation="review-export",
-                                    on=None, path=path)
-        self._set_live_status("exporting whole-DB and per-rule review statistics…")
 
     def _drc_conflict_retired_jobs(self):
         """Keep canceled readers alive until their final pack access finishes."""
@@ -10252,7 +10111,6 @@ class Viewer:
         self._drc_conflict_job = None
         self._drc_conflict_key = None
         self._drc_conflict_members = None
-        self._drc_conflict_error = None
         if drop_source:
             source = getattr(self, "_drc_conflict_source", None)
             self._drc_conflict_source = None
@@ -10267,7 +10125,6 @@ class Viewer:
                     button.set_active(False)
                 finally:
                     self._drc_conflict_guard = False
-        self._drc_conflict_label()
 
     def _drc_conflict_clear_scope(self):
         """A new conflict scope must never inherit all-rule picks or hits."""
@@ -10286,31 +10143,6 @@ class Viewer:
             query.cancel()
         self._drc_marker_invalidate()
 
-    def _drc_conflict_label(self):
-        label = getattr(getattr(self, "_drcwin", None), "_conflict_info", None)
-        if label is None:
-            return
-        if not getattr(self, "_drc_conflict_only", False):
-            label.set_text("")
-            return
-        error = getattr(self, "_drc_conflict_error", None)
-        job = getattr(self, "_drc_conflict_job", None)
-        if error:
-            state = "Conflict filter failed: " + error
-        elif getattr(self, "_drc_conflict_source", None) is None:
-            state = "Conflict only: load peer work and Refresh in Reviewers."
-        elif job is not None:
-            progress = job.get("progress")
-            state = "Conflict only: preparing…" if progress is None else "Conflict only: %d / %d processed" % progress
-        elif self._drc_open is None:
-            state = "Conflict only: select a rule."
-        else:
-            members = getattr(self, "_drc_conflict_members", None)
-            state = "Conflict only: %d errors in this scope" % (len(members) if members is not None else 0)
-        label.set_text(state + "\nSnapshot %s · Refresh in Reviewers after edits/visits. "
-            "Rule and CD-group counts are unfiltered." %
-            (getattr(self, "_drc_conflict_stamp", "") or "not loaded"))
-
     def _on_drc_conflict(self, button):
         if getattr(self, "_drc_conflict_guard", False):
             return
@@ -10323,9 +10155,14 @@ class Viewer:
         if self._drc_open is not None:
             self._drc_grid_fill(self._drc_open)
         self._display()
+        # the filter's state is said in the status line (the panel keeps no
+        # line of it, user 2026-11-10): what it needs here, its progress,
+        # its failure and its count in _drc_conflict_poll
         if on and getattr(self, "_drc_conflict_source", None) is None:
             self._set_live_status("Conflict only needs a reviewer snapshot: load peer work, then Refresh.")
             self._drc_waive_load_dialog()
+        elif on and self._drc_open is None:
+            self._set_live_status("Conflict only: select a rule.")
 
     def _drc_conflict_publish(self, aggregate, stamp):
         """Retain the last published comparison independently of its window."""
@@ -10341,7 +10178,6 @@ class Viewer:
             if self._drc_open is not None:
                 self._drc_grid_fill(self._drc_open)
             self._display()
-        self._drc_conflict_label()
 
     def _drc_conflict_status_changed(self):
         if not getattr(self, "_drc_conflict_only", False):
@@ -10377,7 +10213,6 @@ class Viewer:
         self._drc_conflict_members = gtkservice.EmptyScope(db, ci)
         self._drc_conflict_clear_scope()
         if source is None:
-            self._drc_conflict_label()
             return self._drc_conflict_members
         cancel = threading.Event()
         job = dict(key=key, db=db, ci=ci, cancel=cancel, done=False,
@@ -10385,8 +10220,8 @@ class Viewer:
         try:
             lease = source.lease()
         except Exception as exc:
-            self._drc_conflict_error = str(exc)
-            self._drc_conflict_label()
+            # said once: the key above keeps the next poll from asking again
+            self._set_live_status("Conflict filter failed: %s" % exc)
             return self._drc_conflict_members
         self._drc_conflict_job = job
         want = None if self._drc_wfilter == "all" else self._drc_wfilter == "waived"
@@ -10403,7 +10238,6 @@ class Viewer:
                 lease.close()
                 job["done"] = True
         threading.Thread(target=run, name="drc-conflict-filter", daemon=True).start()
-        self._drc_conflict_label()
         return self._drc_conflict_members
 
     def _drc_conflict_poll(self):
@@ -10416,23 +10250,31 @@ class Viewer:
         if job is None:
             return
         if not job["done"]:
-            self._drc_conflict_label()
+            progress = job.get("progress")
+            if progress is not None and progress != job.get("said"):
+                # each step once: the line is the cursor's between them
+                job["said"] = progress
+                self._set_live_status("Conflict only: %d / %d processed" % progress)
             return
         if (job["cancel"].is_set() or job["db"] is not self._drc or
                 job["key"] != self._drc_conflict_key):
             return
         self._drc_conflict_job = None
-        self._drc_conflict_error = job["error"]
-        if job["error"]:
-            self._set_live_status("Conflict filter failed: " + job["error"])
-        else:
+        if not job["error"]:
             self._drc_conflict_members = job["result"]
         self._drc_hl_res, self._drc_hl_key = None, None
         self._drc_marker_invalidate()
         if self._drc_open == job["ci"]:
             self._drc_grid_fill(job["ci"])
-        self._drc_conflict_label()
         self._display()
+        # after the grid and the frame, which may write the line themselves
+        if job["error"]:
+            self._set_live_status("Conflict filter failed: " + job["error"])
+        else:
+            self._set_live_status(
+                "Conflict only: %d errors in this scope · snapshot %s"
+                % (len(job["result"]),
+                   getattr(self, "_drc_conflict_stamp", "") or "not loaded"))
 
     def _drc_base_members(self):
         """A delta group already intersects the selected file cluster."""
@@ -10507,8 +10349,6 @@ class Viewer:
                     self._drc_show_detail(mci, self._drc_pos - self._drc_cum[mci])
         if ci is not None:
             self._drc_review_flags_refresh(ci)
-        else:
-            self._drc_review_stats_refresh()
         self._display()
 
     def _drc_review_pending(self):
@@ -10568,10 +10408,7 @@ class Viewer:
             return
         ci, targets, operation = job["ci"], job["targets"], job["operation"]
         db = self._drc
-        if operation == "review-export":
-            self._set_live_status(("review export failed: %s" % error)
-                                  if error else "review statistics exported: %s" % job["path"])
-        elif operation == "not-required":
+        if operation == "not-required":
             # a failed batch may have committed earlier chunks: show the
             # flags as they are, markers, groups and selection untouched
             db.review_flags_changed(ci)
@@ -11168,7 +11005,6 @@ class Viewer:
             lines.append("")
             lines += c.desc.split("\n")
         win._detail.set_text("\n".join(lines))
-        self._drc_review_stats_refresh()
 
     def _drc_show_detail(self, ci, ei):
         """Bottom pane: rule description, kind, coordinates and the
@@ -11417,7 +11253,6 @@ class Viewer:
                          waived=(None if conflict_only or self._drc_wfilter == "all" else
                                  self._drc_wfilter == "waived"))
             worker.submit(key, db, query)
-            self._drc_info_refresh()
         result = getattr(self, "_drc_marker_result", None)
         return result[1] if result is not None and result[0] == key else []
 
@@ -11445,7 +11280,22 @@ class Viewer:
                 markers = markers.markers
             self._drc_marker_result = (key, markers)
             self._drc_marker_overlay = None
-        self._drc_info_refresh()
+            # a picture still being made must not pass for the whole one
+            # (the panel's info line said `(partial)` until 2026-11-10): a
+            # computation long enough to show a part says in the status
+            # line how far it is and, having said so, that it is done; a
+            # quick one says nothing
+            if partial:
+                self._drc_marker_said = key
+                self._set_live_status(
+                    "DRC markers: %d / %d errors processed (partial)…"
+                    % (markers.processed_count, markers.total_count)
+                    if markers.total_count else "DRC markers (partial)…")
+            elif getattr(self, "_drc_marker_said", None) == key:
+                self._drc_marker_said = None
+                self._set_live_status(
+                    "DRC markers: %d errors / %d markers in view"
+                    % (markers.visible_count, markers.occupied_count))
         self._display()
 
     def _drc_stamp_markers(self, disp, obox, ospp):
