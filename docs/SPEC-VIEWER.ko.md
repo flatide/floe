@@ -579,8 +579,23 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   (`derived` 맵을 `svrf.rhs_operands`로 워크, 6줄 캡). 메타 없는
   룰/사이드카 부재 시 상세는 기존 그대로(추가 줄 0).
 - **측정 차이 그룹**(2026-10-05): SVRF 메타데이터가 있는 룰에서
-  룰을 선택하면 에러 그리드 위의 `Δ absolute`가 자동 활성화된다.
-  `Δ ratio (%)`로 기준을 바꾸고 `no grouping`으로 해제한다.
+  룰을 선택하면 에러 그리드 위의 `absolute`가 자동 활성화된다.
+  `ratio`로 기준을 바꾸고 `off`로 해제한다.
+  그리드 위의 CD 부분(0.12.443, 사용자 2026-11-10)은 컨트롤 한 줄
+  (`_delta_controls`: 기준 콤보 `absolute`·`ratio`·`off`와 `step` 버튼, 가로 Box에
+  제 폭으로; 좁은 패널에서는 두 글자가 `…`로 줄어 줄이 잘리지 않는다)과 그룹
+  목록·페이지 줄(`_delta_list`)이며, **CD 그룹이 없는 룰에서는 둘 다
+  숨긴다**(`_drc_delta_shown` → `_drc_delta_refresh`): 룰 미선택, SVRF 조건 없음,
+  측정 불가, 측정된 에러 없음(`Unmeasurable`뿐), 에러 0개. CD 그룹이나 에지 길이 그룹이
+  있으면 보이고, 룰 전체에서는 서비스가 `has_cd`(어느 에러든 CD가 측정됨)라고 하면
+  비율 기준에 그룹이 없어도 보인다(한계값 0). 측정 중에는 그 룰에서 직전에 본 결과
+  (`_drc_delta_seen`), 없으면 룰 전체 개수(`_drc_group_count`: 0이면 숨김, 모르면 보임).
+  `off`에서는 목록을 숨기고, 그룹이 없다고 확인된 적 없는 룰에 한해 컨트롤 줄만 둔다.
+  간격은 `step` 버튼의 모달 `CD group step`(`_drc_step_dialog`: 지금 간격에서 시작,
+  단위 표시, Enter/`ok` 적용, 거절 사유는 모달 안에, Esc/`cancel`은 그대로)에서 받는다.
+  패널의 입력란과 `set step` 버튼, 숨긴 상태의 안내 문구(`select a rule for CD groups`,
+  `grouping off`, `load matching SVRF metadata for CD groups`)는 없다. 지금 간격은 페이지
+  줄의 `auto step N` / `step N`과 버튼 툴팁에 나온다.
   기본 간격은 룰 전체의 델타 범위에서 약 10개 그룹이 되도록 자동 계산한다.
   제약별 범위를 사용해 서로 다른 단위를 섞지 않고, 가장 넓은 범위를
   기준으로 공통 간격을 정해 각 제약당 최대 10개 구간으로 나눈다.

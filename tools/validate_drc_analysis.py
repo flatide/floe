@@ -439,6 +439,38 @@ def analysis_dir(path):
         svc.close()
 
 
+def cd_part(v):
+    """(controls, list): what of the DRC pane's CD part is in sight."""
+    w = v._drcwin
+    return w._delta_controls.get_visible(), w._delta_list.get_visible()
+
+
+def step_dialog(v, text=None):
+    """The step button's modal (user 2026-11-10: "step 입력창을 제거하고 set
+    step 버튼을 step 으로 변경하고 누르면 step을 입력받는 작은 모달이 뜨도록"):
+    the button pressed when the dialog is not up, `text` typed in its entry
+    and Enter. What the dialog says in refusal - it stays up then - or None
+    when it took the step and closed. Without `text` the dialog's named
+    widgets, nothing typed."""
+    from floe import gui
+    Gtk = gui.Gtk
+    if v._sdlg is None:
+        v._drcwin._delta_step.clicked()
+
+    def walk(w):
+        yield w
+        if isinstance(w, Gtk.Container):
+            for k in w.get_children():
+                for kid in walk(k):
+                    yield kid
+    named = dict((k.get_name(), k) for k in walk(v._sdlg))
+    if text is None:
+        return named
+    named["drc-step"].set_text(text)
+    named["drc-step"].emit("activate")
+    return None if v._sdlg is None else named["drc-step-why"].get_text()
+
+
 def grouped_rules_ui(v, d, pump):
     """Prepared, unmeasurable, unprepared and empty rules in the same tree."""
     from floe import gui
@@ -520,10 +552,9 @@ def grouped_rules_ui(v, d, pump):
         gui.DRC_PAGE = page
     v._drc_select_row(0)
     pump(v, lambda: v._drc_delta_groups is not None, "known whole-rule groups", 60)
-    v._drcwin._delta_step.set_text("0.05000")
-    v._on_drc_delta_step()
-    check(v._drc_group_count(0) is None and v._drc_open == 0,
-          "a new uncached step drops the old count and keeps the active grouped rule")
+    refused = step_dialog(v, "0.05000")
+    check(refused is None and v._drc_group_count(0) is None and v._drc_open == 0,
+          "a new uncached step drops the old count and keeps the active grouped rule", refused)
     pump(v, lambda: not v._drc_delta_busy and v._drc_group_cache_key is None,
          "manual absolute group count", 60)
     check(v._drc_group_count(0) == 1 and v._drcwin._rstore[0][4] == "✓ (1) GROUP.KNOWN",
@@ -555,7 +586,8 @@ def grouped_rules_ui(v, d, pump):
     v._drc_select_row(1)
     pump(v, lambda: v._drc_delta_groups is not None, "unmeasurable-only groups", 60)
     check(len(v._drc_delta_groups) == 1 and v._drc_delta_groups[0].key[0] < 0
-          and v._drc_group_count(1) == 0 and v._drcwin._rstore[1][4] == "✓ GROUP.UNKNOWN",
+          and v._drc_group_count(1) == 0 and v._drcwin._rstore[1][4] == "✓ GROUP.UNKNOWN"
+          and cd_part(v) == (False, False),
           "a completed Unmeasurable-only group does not count as a CD group")
 
 
@@ -782,6 +814,256 @@ def marker_length_ui(v, temp, pump):
     check(v._drc_delta_group is not None and v._drc_delta_group.key == (-2, 23750)
           and v._drc_delta_group.total == 1001,
           "switching delta basis preserves the selected marker-length group")
+    # edge-length groups are groups to pick: a cluster with nothing else
+    # keeps the pane's CD part
+    cluster = next(c[3] for c in v._drcwin._rstore[0].iterchildren() if c[0] == "last")
+    v._drc_select_row(0, cluster)
+    pump(v, lambda: v._drc_delta_groups is not None and not v._drc_delta_busy,
+         "length cluster groups", 60)
+    check(v._drc_delta_groups.cd_count == 0 and v._drc_delta_groups.geometry_count == 3
+          and cd_part(v) == (True, True),
+          "a cluster with edge-length groups alone keeps the CD part",
+          (v._drc_delta_groups.cd_count, v._drc_delta_groups.geometry_count, cd_part(v)))
+
+
+def cd_part_ui(v, d, pump):
+    """The pane's CD part (user 2026-11-10: "CD 델타 컨트롤 각 항목이 너무
+    자리를 많이 차지하니 absolute/ratio 콤보박스의 문구를 단순화하여 크기를
+    줄이고 step 입력창을 제거하고 set step 버튼을 step 으로 변경하고 누르면
+    step을 입력받는 작은 모달이 뜨도록 변경해줘. CD 그룹이 없는 에러는 CD 델타
+    컨트롤과 그룹 목록을 모두 제거해줘."): two small controls on a line, the
+    step asked in a modal, and neither controls nor list for a rule with no
+    CD group."""
+    from floe import gui
+    Gtk = gui.Gtk
+    db = d / "cdpart.db"
+    pair = "e %d 2\n0 0 10000 0\n0 %d 10000 %d\n"
+    names = ("PART.KNOWN", "PART.UNKNOWN", "PART.NOMETA", "PART.ZEROBOUND",
+             "PART.EDGES", "PART.MIXED", "PART.EMPTY")
+    db.write_text(
+        "MAIN 100000\nPART.KNOWN\n3 3 0\n"
+        + "".join(pair % (i, gap, gap) for i, gap in enumerate((1000, 2000, 3000), 1))
+        # an AREA constraint cannot measure an edge pair
+        + "PART.UNKNOWN\n1 1 0\n" + pair % (1, 1000, 1000)
+        # no metadata of this one
+        + "PART.NOMETA\n1 1 0\n" + pair % (1, 1000, 1000)
+        # touching edges against a bound of zero: a CD, and no ratio
+        + "PART.ZEROBOUND\n2 2 0\n" + pair % (1, 0, 0) + pair % (2, 0, 0)
+        # single edges: no CD, their lengths
+        + "PART.EDGES\n2 2 0\ne 1 1\n0 0 23750 0\ne 2 1\n0 100 25750 100\n"
+        # one error measured, one that cannot be
+        + "PART.MIXED\n2 2 0\n" + pair % (1, 1000, 1000) + "p 2 3\n0 0\n1000 0\n0 1000\n"
+        + "PART.EMPTY\n0 0 0\n")
+    space = {"metric": "space", "op": "<", "value": 0.05, "text": "EXTERNAL M1 < 0.05"}
+    meta = {"PART.KNOWN": [space],
+            "PART.UNKNOWN": [{"metric": "area", "op": "<", "value": 0.01, "text": "AREA M1 < 0.01"}],
+            "PART.ZEROBOUND": [{"metric": "space", "op": "<=", "value": 0,
+                                "text": "EXTERNAL M1 <= 0"}],
+            "PART.EDGES": [space], "PART.MIXED": [space], "PART.EMPTY": [space]}
+    (d / "cdpart.db.rules.json").write_text(json.dumps({
+        "format": "floe-svrf-rules", "version": 1,
+        "checks": {name: {"constraints": cons} for name, cons in meta.items()}}))
+    (d / "cdpart.db.clusters").write_text("[PART.MIXED]\npoly = 2\n")
+    r = run([INDEX, "drc", str(db)])
+    check(r.returncode == 0, "CD part fixture packed", r.stderr)
+    # what the service says of each rule: groups, CD groups, edge-length
+    # groups, and whether a CD was measured at all
+    svc = Svc()
+    try:
+        h = svc("drc_open", path=str(db), mode="load", reviewer="drc-analysis-service")["handle"]
+        said = {}
+        for basis in ("absolute", "percent"):
+            for ci, name in enumerate(names):
+                if name in meta:
+                    e = svc.job(h, "drc_delta", check=ci, constraints=meta[name], basis=basis)
+                    said[(name, basis)] = (e.get("groups"), e.get("cd_groups"),
+                                           e.get("geometry_groups"), e.get("has_cd"))
+        svc("drc_close", handle=h)
+    finally:
+        svc.close()
+    both = {"PART.KNOWN": (3, 3, 0, True), "PART.UNKNOWN": (1, 0, 0, False),
+            "PART.EDGES": (2, 0, 2, False), "PART.MIXED": (2, 1, 0, True),
+            "PART.EMPTY": (0, 0, 0, False)}
+    expected = {(name, basis): row for name, row in both.items()
+                for basis in ("absolute", "percent")}
+    expected[("PART.ZEROBOUND", "absolute")] = (1, 1, 0, True)
+    expected[("PART.ZEROBOUND", "percent")] = (1, 0, 0, True)
+    check(said == expected,
+          "the service says whether a rule's CD was measured, whatever the basis makes of it",
+          sorted(said.items()))
+
+    w = v._drcwin
+    w._delta_mode.set_active_id("absolute")
+    check(v.load_drc(str(db)), "load the CD part fixture")
+    w._wf.set_active_id("all")      # the rule without errors is listed
+    pump(v, lambda: v._drc_group_cache_key is None, "CD part counts", 60)
+    check([v._drc_group_count(ci) for ci in range(7)] == [3, 0, None, 1, 0, 1, None]
+          and v._drc_open is None, "the fixture's whole-rule counts",
+          [v._drc_group_count(ci) for ci in range(7)])
+    # the controls: a combo of three short words and a button
+    kids = w._delta_controls.get_children()
+    check([type(k).__name__ for k in kids] == ["ComboBoxText", "Button"]
+          and kids[0] is w._delta_mode and kids[1] is w._delta_step
+          and [(row[1], row[0]) for row in w._delta_mode.get_model()]
+          == [("absolute", "absolute"), ("percent", "ratio"), ("off", "off")]
+          and w._delta_step.get_label() == "step"
+          and isinstance(w._delta_controls, Gtk.Box)
+          and w._delta_controls.get_orientation() == Gtk.Orientation.HORIZONTAL,
+          "the CD controls are a basis combo and a step button on one line",
+          [type(k).__name__ for k in kids])
+    check(cd_part(v) == (False, False), "no rule picked: no CD part", cd_part(v))
+
+    def pick(ci, cluster=None):
+        """The CD part right after the pick - the rule being measured - and
+        once its groups are there."""
+        v._drc_select_row(ci, cluster)
+        busy, early = v._drc_delta_busy, cd_part(v)
+        pump(v, lambda: v._drc_open == ci and v._drc_cluster is cluster
+             and not v._drc_delta_busy, "CD part of %s" % names[ci], 60)
+        return busy, early, cd_part(v)
+
+    on, off, bar = (True, True), (False, False), (True, False)
+    # the first visit: a rule known to have groups is in sight from the
+    # pick, one known to have none is never in sight, and one whose count
+    # says none but has edge-length groups comes in sight with them
+    first = [pick(ci) for ci in range(7)]
+    check(first == [(True, on, on), (True, off, off), (False, off, off), (True, on, on),
+                    (True, off, on), (True, on, on), (True, off, off)],
+          "CD part by rule: with CD or edge-length groups, and not without", first)
+    check([(r[0], r[1]) for r in w._delta_store] == [("All errors", "0")]
+          and w._delta_label.get_text().startswith("groups 1 / 1 · 0 groups"),
+          "(the list of the rule without errors, out of sight)")
+    # the second visit: as it was, from the pick on
+    again = [pick(ci) for ci in range(7)]
+    check(again == [(True, on, on), (True, off, off), (False, off, off), (True, on, on),
+                    (True, on, on), (True, on, on), (True, off, off)],
+          "a rule seen before keeps its CD part while it is measured again", again)
+    # a cluster is judged by its own errors
+    v._drcwin._rules.expand_row(w._rstore[5].path, False)
+    clusters = dict((c[0], c[3]) for c in w._rstore[5].iterchildren())
+    check(sorted(clusters) == ["Unclustered", "poly"], "the fixture's clusters", sorted(clusters))
+    check(pick(5, clusters["poly"])[2] == off and len(v._drc_delta_groups) == 1
+          and v._drc_delta_groups.has_cd
+          and pick(5, clusters["Unclustered"])[2] == on and pick(5)[2] == on,
+          "a cluster whose errors have no CD has no CD part, its rule and the other cluster have")
+    # the ratio basis: no group of a zero bound, and the rule keeps the
+    # part - its CD is measured, and the combo is the way back
+    w._delta_mode.set_active_id("percent")
+    pump(v, lambda: not v._drc_delta_busy and v._drc_group_cache_key is None, "ratio counts", 60)
+    ratio = [pick(ci)[2] for ci in range(7)]
+    check(ratio == [on, off, off, on, on, on, off], "CD part by rule in the ratio basis", ratio)
+    pick(3)
+    check(v._drc_group_count(3) == 0 and v._drc_delta_groups.cd_count == 0
+          and v._drc_delta_groups.has_cd and cd_part(v) == on
+          and [(r[0], r[1]) for r in w._delta_store] == [("All errors", "2"), ("Unmeasurable", "2")]
+          and w._delta_store[1][3].endswith("Unmeasurable / ratio unavailable"),
+          "a rule measured against a zero bound keeps the CD part in the ratio basis",
+          [(r[0], r[1], r[3]) for r in w._delta_store])
+    check(pick(5, clusters["poly"])[2] == off, "(a cluster without CD: none in the ratio basis either)")
+    # grouping off: nothing to list; the controls - the way to turn it on
+    # again - for a rule that was not seen to have no group, the step
+    # button of no use
+    w._delta_mode.set_active_id("off")
+    quiet = []
+    for ci in range(7):
+        v._drc_select_row(ci)
+        quiet.append((v._drc_delta_busy, cd_part(v)))
+    check(quiet == [(False, bar), (False, off), (False, off), (False, bar),
+                    (False, bar), (False, bar), (False, off)]
+          and not w._delta_step.get_sensitive(),
+          "grouping off: the controls alone, for a rule that has groups", quiet)
+    w._delta_step.clicked()
+    check(v._sdlg is None, "grouping off: the step button opens nothing")
+    w._delta_mode.set_active_id("absolute")
+    pump(v, lambda: not v._drc_delta_busy and v._drc_group_cache_key is None, "absolute again", 60)
+
+    # the step's modal
+    check(pick(0)[2] == on and w._delta_step.get_sensitive() and v._drc_delta_steps == {},
+          "a rule with groups: the step button is live")
+    # side by side at their own widths where the pane has the room (the
+    # FlowBox there was stretched each over the pane, one a line when narrow)
+    pump(v, lambda: w._delta_step.get_allocation().width > 1, "the controls laid out", 10)
+    a, b = w._delta_mode.get_allocation(), w._delta_step.get_allocation()
+    row = w._delta_controls.get_allocation()
+    need = w._delta_controls.get_preferred_width()[1]
+    check(row.width < need
+          or (a.y == b.y and a.x == row.x and b.x == a.x + a.width + 4
+              and a.width == w._delta_mode.get_preferred_width()[1]
+              and b.width == w._delta_step.get_preferred_width()[1]
+              and a.width + 4 + b.width == need and need < row.width),
+          "the two controls stand side by side at the left, at their own widths",
+          ((a.x, a.y, a.width), (b.x, b.y, b.width), (row.x, row.width), need))
+    # ... and on a pane narrower than the two their texts shorten: the
+    # line asks for less than it would like, so the pane is not cut off
+    least = w._delta_controls.get_preferred_width()[0]
+    check(w._delta_mode.get_cells()[0].get_property("ellipsize") == gui.Pango.EllipsizeMode.END
+          and w._delta_step.get_child().get_ellipsize() == gui.Pango.EllipsizeMode.END
+          and 0 < least < need,
+          "on a narrow pane the controls' texts shorten instead of the line being cut off",
+          (least, need))
+    auto = gui.format_ticks(v._drc_delta_groups.step_ticks)
+    label = w._delta_label.get_text()
+    check("· auto step %s" % auto in label
+          and w._delta_step.get_tooltip_text().startswith("CD group step: %s (automatic)." % auto),
+          "the automatic step is read in the group label and the button's tooltip",
+          (label, w._delta_step.get_tooltip_text()[:50]))
+    named = step_dialog(v)
+    dlg = v._sdlg
+    check(dlg is not None and dlg.get_modal() and dlg.get_title() == "CD group step"
+          and dlg.get_transient_for() is v.window and not dlg.get_resizable()
+          and named["drc-step"].get_text() == auto
+          and named["drc-step-unit"].get_text() == "um"
+          and "auto" in named["drc-step-why"].get_text(),
+          "the step button opens a small modal that starts from the step in use",
+          (named["drc-step"].get_text(), named["drc-step-why"].get_text()))
+    w._delta_step.clicked()
+    check(v._sdlg is dlg, "pressed again: the same dialog")
+    refusals = [step_dialog(v, text) for text in ("abc", "0", "-1", "0.000001")]
+    check(refusals == ["invalid grouping step", "step must be a positive finite number",
+                       "step must be a positive finite number",
+                       "step supports at most five decimal places"]
+          and v._sdlg is dlg and v._drc_delta_steps == {} and not v._drc_delta_busy,
+          "a step that is refused is said in the dialog, which stays; nothing changes", refusals)
+    took = step_dialog(v, "0.05")
+    check(took is None and v._sdlg is None and v._drc_delta_steps == {(0, "absolute"): 5000}
+          and v._drc_delta_busy and cd_part(v) == on,
+          "Enter sets the step and closes the dialog; the CD part stays while it is grouped",
+          (took, v._drc_delta_steps, cd_part(v)))
+    pump(v, lambda: not v._drc_delta_busy and v._drc_group_cache_key is None, "the step set", 60)
+    label = w._delta_label.get_text()
+    check(v._drc_delta_groups.step_ticks == 5000 and not v._drc_delta_groups.auto_step
+          and "· step 0.05000" in label and "auto step" not in label
+          and w._delta_step.get_tooltip_text().startswith("CD group step: 0.05000. ")
+          and v._drc_group_count(0) == 1 and cd_part(v) == on,
+          "a step of one's own is read in the group label and the button's tooltip",
+          (label, w._delta_step.get_tooltip_text()[:40]))
+    named = step_dialog(v)
+    check(named["drc-step"].get_text() == "0.05000", "the dialog starts from the step set",
+          named["drc-step"].get_text())
+    named["drc-step"].set_text("0.01")
+    key = gui.Gdk.EventKey.new(gui.Gdk.EventType.KEY_PRESS)
+    key.keyval = gui.Gdk.KEY_Escape
+    v._sdlg.emit("key-press-event", key)
+    check(v._sdlg is None and v._drc_delta_steps == {(0, "absolute"): 5000}
+          and not v._drc_delta_busy, "Esc closes the dialog and leaves the step")
+    took = step_dialog(v, " AUTO ")
+    pump(v, lambda: not v._drc_delta_busy and v._drc_group_cache_key is None, "automatic again", 60)
+    check(took is None and v._drc_delta_steps == {}
+          and "· auto step %s" % auto in w._delta_label.get_text()
+          and v._drc_group_count(0) == 3,
+          "auto (or nothing) is the automatic step again", w._delta_label.get_text())
+    took = step_dialog(v, "")
+    check(took is None and v._sdlg is None and v._drc_delta_steps == {} and not v._drc_delta_busy,
+          "the automatic step asked again changes nothing")
+    # the unit is the basis'
+    w._delta_mode.set_active_id("percent")
+    pump(v, lambda: not v._drc_delta_busy and v._drc_group_cache_key is None, "ratio", 60)
+    named = step_dialog(v)
+    unit = named["drc-step-unit"].get_text()
+    v._sdlg.destroy()
+    check(unit == "%" and v._sdlg is None, "the dialog's unit in the ratio basis", unit)
+    w._delta_mode.set_active_id("absolute")
+    pump(v, lambda: not v._drc_delta_busy and v._drc_group_cache_key is None, "absolute", 60)
 
 
 def a5(temp):
@@ -852,6 +1134,7 @@ def a5(temp):
               "the delta list", rows[:2])
         label = v._drcwin._delta_label.get_text()
         check("5 groups" in label and "auto step 0.00200" in label, "its label", label)
+        check(cd_part(v) == (True, True), "a rule with CD groups shows the pane's CD part")
         v._display()
         pump(v, lambda: v._drc_marker_result is not None and not v._drc_marker_busy, "markers", 60)
         m = v._drc_marker_result[1]
@@ -1009,7 +1292,8 @@ def a5(temp):
               and not v._drc_delta_busy
               and [(r[0], r[1]) for r in v._drcwin._delta_store] == [("All errors", "3")]
               and v._drc_cd_info(e, "M1.NOTCH")["pick"] is None
-              and v._drc_meta_lines("M1.NOTCH", e) == [],
+              and v._drc_meta_lines("M1.NOTCH", e) == []
+              and cd_part(v) == (False, False),
               "GUI does not infer CD or delta groups from a rule description")
         check(len(v._drcwin._rules.get_columns()) == 2
               and all(r[4] == r[0] and r[0] in r[5] for r in v._drcwin._rstore)
@@ -1040,10 +1324,12 @@ def a5(temp):
               and all(r[4] == "✓ (%d) %s" % (expected_counts[r[2]], r[0])
                       for r in v._drcwin._rstore),
               "SVRF metadata restores CD measurement and delta groups")
+        check(cd_part(v) == (True, True), "and the pane's CD part with them")
         explicit_rules_ui(v, d, pump)
         grouped_rules_ui(v, d, pump)
         zero_gap_ui(v, d, pump)
         marker_length_ui(v, temp, pump)
+        cd_part_ui(v, d, pump)
         small = d / "small.db"
         small.write_text("MAIN 100000\nSMALL.ONE\n0 0 0\nSMALL.TWO\n0 0 0\n")
         (d / "small.db.rules.json").write_text(json.dumps({

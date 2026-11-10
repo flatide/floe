@@ -1127,6 +1127,7 @@ impl Session {
                 let out = json!({"measurable": true, "group": gid, "groups": groups.len(),
                                  "cd_groups": groups.cd_group_count(),
                                  "geometry_groups": groups.geometry_group_count(),
+                                 "has_cd": table.has_cd(),
                                  "step": groups.step, "auto": groups.auto, "total": groups.total,
                                  "estimated_total": groups.estimated_total(), "basis": basis.name()});
                 let mut all = shared.groups.lock().unwrap();

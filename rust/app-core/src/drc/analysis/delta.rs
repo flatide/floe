@@ -425,6 +425,15 @@ impl Table {
     pub fn auto_step(&self, basis: Basis) -> i64 {
         auto_step_ranges(&self.ranges[basis.index()])
     }
+
+    /// Whether the CD of some error of the rule was measured against a
+    /// bound: what the absolute basis groups. The ratio basis may have no
+    /// group of such a rule - there is no ratio to a zero bound - so a
+    /// viewer asks this, not the groups of the basis in use, to tell a rule
+    /// with CD groups from one without.
+    pub fn has_cd(&self) -> bool {
+        self.ranges[Basis::Absolute.index()].iter().any(Option::is_some)
+    }
 }
 
 /// Group member ids: u32 when the rule allows.
@@ -1478,10 +1487,46 @@ mod cached_summary_tests {
             ranges: [vec![Some((3000, 4000))], vec![Some((6_000_000, 8_000_000))]],
             folder: None, measurable: true,
         });
+        assert!(table.has_cd());
         let groups = Groups::build(table, Some(1000), Basis::Absolute, None, "all", &AtomicUsize::new(0)).unwrap();
         assert_eq!(groups.len(), 3);
         assert_eq!(groups.cd_group_count(), 2);
         assert_eq!(groups.row(2).constraint, UNKNOWN);
+    }
+
+    #[test]
+    fn a_rule_measured_against_a_zero_bound_has_cd_but_no_ratio_group() {
+        // the absolute basis groups it; the ratio basis has the one row of
+        // what it cannot say - and the rule is still one with a measured CD
+        let table = Arc::new(Table {
+            check: 0, count: 3,
+            constraints: vec![json!({"metric":"space","op":"<=","value":0.0})],
+            bound_ticks: vec![Some(0)],
+            values: Column::Owned(vec![0, 0, 0]),
+            choices: Column::Owned(vec![0, 0, UNKNOWN]),
+            estimated: Column::Owned(vec![0, 0, 0]),
+            ranges: [vec![Some((0, 0))], vec![None]],
+            folder: None, measurable: true,
+        });
+        let stop = AtomicUsize::new(0);
+        assert!(table.has_cd());
+        let absolute = Groups::build(Arc::clone(&table), None, Basis::Absolute, None, "all", &stop).unwrap();
+        assert_eq!((absolute.len(), absolute.cd_group_count(), absolute.geometry_group_count()), (2, 1, 0));
+        let ratio = Groups::build(Arc::clone(&table), None, Basis::Percent, None, "all", &stop).unwrap();
+        assert_eq!((ratio.len(), ratio.cd_group_count(), ratio.geometry_group_count()), (1, 0, 0));
+        assert_eq!(ratio.row(0).constraint, UNKNOWN);
+        // nothing measured: no CD in either basis
+        let none = Table {
+            check: 0, count: 1,
+            constraints: vec![json!({"metric":"width","op":"<","value":0.05})],
+            bound_ticks: vec![Some(5000)],
+            values: Column::Owned(vec![23750]),
+            choices: Column::Owned(vec![GEOMETRY_LENGTH]),
+            estimated: Column::Owned(vec![0]),
+            ranges: [vec![None], vec![None]],
+            folder: None, measurable: true,
+        };
+        assert!(!none.has_cd());
     }
 
     struct GeometrySource {

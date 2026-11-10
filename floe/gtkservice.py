@@ -1177,6 +1177,9 @@ class DeltaGroups(object):
         self._len = event["groups"]
         self.cd_count = event["cd_groups"]
         self.geometry_count = event.get("geometry_groups", 0)
+        # the CD of some error of the rule was measured - whatever the
+        # basis in use makes of it (no ratio group of a zero bound)
+        self.has_cd = bool(event.get("has_cd", self.cd_count > 0))
 
     def __len__(self):
         return self._len

@@ -151,7 +151,8 @@ class _DrcPanel(object):
                  "_detail", "_hl", "_wf", "_selv", "_search",
                  "_tf", "_plabel", "_pprev", "_pnext", "_delta_mode",
                  "_delta_step", "_delta_store", "_delta_tree", "_delta_label",
-                 "_delta_prev", "_delta_next")
+                 "_delta_prev", "_delta_next", "_delta_controls",
+                 "_delta_list")
 
 
 class _DrcTeamWindow:
@@ -2489,6 +2490,7 @@ class Viewer:
         self._gdlg = None
         self._cdlg = None
         self._fontdlg = None
+        self._sdlg = None           # the CD group step's modal
         self._digit_last = None     # depth digit-pair state ('99' = full)
         self._digit_t = 0.0
         # DRC results browser ('e' key)
@@ -2593,6 +2595,7 @@ class Viewer:
         self._drc_delta_step_text = "auto"
         self._drc_delta_page = 0    # group pages are separate from error pages
         self._drc_delta_error = None
+        self._drc_delta_seen = {}   # (rule, cluster) -> its CD part was in sight
         self._labels = []           # Gtk.Label pool for ruler distances
         self._note_panel = None     # top-left translucent DRC note panel
 
@@ -7286,39 +7289,42 @@ class Viewer:
         pbar.pack_start(pnext, False, False, 0)
         gbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
                        spacing=2)
-        # Keep the group browser bounded as well as the 1,000-error grid.
-        # A tiny step may produce one distinct group per error.
-        delta_controls = Gtk.FlowBox()
-        delta_controls.set_selection_mode(Gtk.SelectionMode.NONE)
-        delta_controls.set_min_children_per_line(1)
-        delta_controls.set_max_children_per_line(3)
+        # The pane's CD part - the basis and the step, the group list and
+        # its pager - is in sight for a rule with CD groups alone (user
+        # call 2026-11-10: _drc_delta_shown decides, _drc_delta_refresh
+        # shows and hides). The two controls stand at the left at their
+        # own widths, on one line (the same call: the three there were, in
+        # a FlowBox that stretched each over the pane and wrapped them one
+        # a line, took too much room each). On a pane narrower than the two
+        # their texts shorten to "…" - the pane's content is never cut off
+        # at its edge (user call 2026-08-18).
+        delta_controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                                 spacing=4)
         delta_mode = Gtk.ComboBoxText()
-        for mid, label in (("absolute", "Δ absolute"),
-                           ("percent", "Δ ratio (%)"), ("off", "no grouping")):
+        for mid, label in (("absolute", "absolute"), ("percent", "ratio"),
+                           ("off", "off")):
             delta_mode.append(mid, label)
+        for cell in delta_mode.get_cells():
+            cell.set_property("ellipsize", Pango.EllipsizeMode.END)
         delta_mode.set_active_id(self._drc_delta_mode)
         delta_mode.set_tooltip_text(
-            "|CD − bound|, or |CD − bound| / |bound| × 100; "
-            "group intervals start at zero. Single edges with unresolved CD "
+            "What the CD groups are made by: absolute = |CD − bound|, "
+            "ratio = |CD − bound| / |bound| × 100 (%), off = no grouping. "
+            "Group intervals start at zero. Single edges with unresolved CD "
             "are grouped by exact marker length in um (5 decimal places), "
-            "independently of delta mode and step.")
+            "independently of this and of the step.")
         delta_mode.connect("changed", self._on_drc_delta_mode)
-        delta_controls.add(delta_mode)
-        delta_step = Gtk.Entry()
-        delta_step.set_width_chars(9)
-        delta_step.set_text(self._drc_delta_step_text)
-        delta_step.set_tooltip_text(
-            "Automatic interval targets 10 groups from this rule's full delta range. "
-            "Enter a positive value (up to 5 decimal places) to override for this rule, "
-            "or auto / an empty value to reset. Absolute: um (area: um²); "
-            "ratio: percentage points. Enter to apply. Unresolved single-edge "
-            "length groups use exact lengths in um; this step does not apply.")
-        delta_step.connect("activate", self._on_drc_delta_step)
-        delta_controls.add(delta_step)
-        delta_apply = Gtk.Button(label="set step")
-        delta_apply.connect("clicked", self._on_drc_delta_step)
-        delta_controls.add(delta_apply)
+        delta_controls.pack_start(delta_mode, False, False, 0)
+        # the step is asked in a small modal (the same call: the pane kept
+        # an entry and a `set step` button for it)
+        delta_step = Gtk.Button(label="step")
+        delta_step.get_child().set_ellipsize(Pango.EllipsizeMode.END)
+        delta_step.set_tooltip_text(self._drc_step_tip())
+        delta_step.connect("clicked", self._drc_step_dialog)
+        delta_controls.pack_start(delta_step, False, False, 0)
         gbox.pack_start(delta_controls, False, False, 0)
+        # Keep the group browser bounded as well as the 1,000-error grid.
+        # A tiny step may produce one distinct group per error.
         delta_store = Gtk.ListStore(str, str, object, str)
         delta_tree = Gtk.TreeView(model=delta_store)
         for j in (0, 1):
@@ -7337,9 +7343,10 @@ class Viewer:
         delta_sc.set_size_request(-1, 86)
         delta_sc.add(delta_tree)
         _remote_x_scroll_repaint(delta_sc)
-        gbox.pack_start(delta_sc, False, False, 0)
+        delta_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        delta_list.pack_start(delta_sc, False, False, 0)
         delta_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
-        delta_label = Gtk.Label(label="select a rule for CD groups")
+        delta_label = Gtk.Label(label="")
         delta_label.set_ellipsize(Pango.EllipsizeMode.END)
         delta_prev, delta_next = Gtk.Button(label="◀"), Gtk.Button(label="▶")
         for button, direction in ((delta_prev, -1), (delta_next, 1)):
@@ -7349,11 +7356,19 @@ class Viewer:
         delta_bar.pack_start(delta_prev, False, False, 0)
         delta_bar.pack_start(delta_label, True, True, 0)
         delta_bar.pack_start(delta_next, False, False, 0)
-        gbox.pack_start(delta_bar, False, False, 0)
+        delta_list.pack_start(delta_bar, False, False, 0)
+        gbox.pack_start(delta_list, False, False, 0)
+        # out of sight until a rule with CD groups is in the grid: the
+        # window's show_all must not bring the two up
+        for part in (delta_controls, delta_list):
+            part.show_all()
+            part.set_no_show_all(True)
+            part.hide()
         win._delta_mode, win._delta_step = delta_mode, delta_step
         win._delta_store, win._delta_tree = delta_store, delta_tree
         win._delta_label = delta_label
         win._delta_prev, win._delta_next = delta_prev, delta_next
+        win._delta_controls, win._delta_list = delta_controls, delta_list
         gbox.pack_start(pbar, False, False, 0)
         gbox.pack_start(gsc, True, True, 0)
         hsplit = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
@@ -9216,12 +9231,49 @@ class Viewer:
                     getattr(self, "_drc_conflict_revision", 0), self._drc_wfilter)
         return key
 
+    def _drc_constraints(self, ci):
+        """The measurement constraints the loaded SVRF metadata has of rule
+        `ci` - what its CD is measured and grouped by; none without."""
+        db, meta = self._drc, self._drc_rmeta
+        if db is None or ci is None or not meta:
+            return []
+        return ((meta.get("checks") or {}).get(db.checks[ci].name)
+                or {}).get("constraints") or []
+
+    def _drc_step_tip(self):
+        """The step button's tooltip: the step in use, and what to type."""
+        text = self._drc_delta_step_text
+        ci = getattr(self, "_drc_open", None)
+        manual = (ci is not None
+                  and (ci, self._drc_delta_mode) in self._drc_delta_steps)
+        now = ("automatic" if text == "auto" else
+               "%s%s" % (text, "" if manual else " (automatic)"))
+        return ("CD group step: %s. Click to set one for this rule - a "
+                "positive value of up to 5 decimal places (absolute: um, "
+                "area: um²; ratio: percentage points) - or the automatic "
+                "one again, which targets 10 groups from the rule's full "
+                "delta range. Unresolved single-edge length groups use "
+                "exact lengths in um; the step does not apply to them."
+                % now)
+
+    def _drc_step_unit(self):
+        """The unit a step of the rule in the grid is typed in."""
+        if self._drc_delta_mode == "percent":
+            return "%"
+        metrics = set(c.get("metric")
+                      for c in self._drc_constraints(self._drc_open))
+        if metrics == {"area"}:
+            return "um²"
+        return "um (area: um²)" if "area" in metrics else "um"
+
     def _drc_delta_write_step(self, step):
-        text = "auto" if step is None else format_ticks(step)
-        self._drc_delta_step_text = text
+        """Keep the step in use as text: what the step dialog starts from
+        and the step button's tooltip says (the pane has no entry for it)."""
+        self._drc_delta_step_text = ("auto" if step is None
+                                     else format_ticks(step))
         win = self._drcwin
         if win is not None and hasattr(win, "_delta_step"):
-            win._delta_step.set_text(text)
+            win._delta_step.set_tooltip_text(self._drc_step_tip())
 
     def _drc_delta_reset(self, drop_worker=False):
         worker = getattr(self, "_drc_delta_worker", None)
@@ -9242,6 +9294,7 @@ class Viewer:
             self._drc_delta_auto_steps = {}
             self._drc_delta_step_scope = None
             self._drc_delta_step = None
+            self._drc_delta_seen = {}
             self._drc_delta_write_step(None)
         self._drc_delta_key = None
         self._drc_delta_groups = self._drc_delta_group = None
@@ -9257,9 +9310,7 @@ class Viewer:
         db, ci = self._drc, self._drc_open
         mode = getattr(self, "_drc_delta_mode", "absolute")
         meta = self._drc_rmeta
-        cons = ((meta.get("checks", {}).get(db.checks[ci].name, {})
-                 .get("constraints") or [])
-                if db is not None and ci is not None and meta else [])
+        cons = self._drc_constraints(ci)
         setting = (ci, mode)
         requested_step = self._drc_delta_steps.get(setting)
         self._drc_delta_step = (requested_step if requested_step is not None
@@ -9326,21 +9377,24 @@ class Viewer:
                 win._delta_tree.get_selection().select_iter(selected)
         finally:
             self._drc_delta_ui_busy = False
+        # (a rule not picked, grouping off and a rule without groups have
+        # no label to read: the list and its pager are out of sight then)
         message = getattr(self, "_drc_delta_error", None)
         if not message:
             if getattr(self, "_drc_delta_busy", False):
                 progress = getattr(getattr(self, "_drc_delta_worker", None), "progress", None)
                 message = progress if isinstance(progress, str) and progress else "measuring CD / grouping…"
-            elif getattr(self, "_drc_delta_mode", "absolute") == "off":
-                message = "grouping off"
-            elif self._drc_open is None:
-                message = "select a rule for CD groups"
             elif groups is None:
-                message = "load matching SVRF metadata for CD groups"
+                message = ""
             else:
                 message = "groups %d / %d · %d groups" % (page + 1, pages, total)
-                if getattr(groups, "auto_step", False):
-                    message += " · auto step %s" % format_ticks(groups.step_ticks)
+                # the step in use is read here and in the step button's
+                # tooltip: the pane has no entry showing it
+                step = getattr(groups, "step_ticks", None)
+                if step is not None:
+                    message += " · %sstep %s" % (
+                        "auto " if getattr(groups, "auto_step", False) else "",
+                        format_ticks(step))
                 geometry = getattr(groups, "geometry_count", 0)
                 if geometry:
                     message += " · %d edge-length groups (um; CD unresolved)" % geometry
@@ -9348,11 +9402,59 @@ class Viewer:
                 if estimated:
                     message += " · %d estimated (all statuses)" % estimated
         win._delta_label.set_text(message)
-        win._delta_label.set_tooltip_text(message)
+        win._delta_label.set_tooltip_text(message or None)
         win._delta_prev.set_sensitive(page > 0)
         win._delta_next.set_sensitive(page + 1 < pages)
-        win._delta_step.set_sensitive(self._drc_open is not None and
-                                     getattr(self, "_drc_delta_mode", "absolute") != "off")
+        controls, listed = self._drc_delta_shown()
+        win._delta_controls.set_visible(controls)
+        win._delta_list.set_visible(listed)
+        win._delta_step.set_sensitive(
+            getattr(self, "_drc_delta_mode", "absolute") != "off")
+
+    def _drc_delta_shown(self):
+        """(controls, list): what of the pane's CD part is in sight for the
+        rule or cluster in the grid. A rule without CD groups has neither
+        (user call 2026-11-10) - no rule picked, no SVRF metadata of it, no
+        constraint that can be measured, no error of it measured. A rule
+        has them when its grouping has a CD group or an edge-length group
+        to pick, and a whole rule also when the CD of some error of it was
+        measured though the basis in use makes no group of it (the ratio to
+        a zero bound: the basis control is the way back to the absolute
+        one). While a rule is measured the answer is what it was the last
+        time (_drc_delta_seen), else what the whole rule's count says -
+        hidden when that is known to be none, in sight when not yet known
+        - so the part does not come and go with every step, basis or
+        waive. With grouping off the list has nothing to list, and the
+        controls stay - the way to turn grouping on again - where the rule
+        has errors and constraints to group them by and was not seen to
+        have no group. A grouping that failed keeps the part, whose label
+        says why."""
+        ci = self._drc_open
+        if self._drc is None or ci is None:
+            return False, False
+        scope = (ci, self._drc_cluster)
+        # what can be said before a rule is measured: there is something
+        # to measure, and it was not seen to come to nothing
+        may = (bool(self._drc_constraints(ci))
+               and len(self._drc.checks[ci].errors) > 0
+               and self._drc_delta_seen.get(scope) is not False)
+        if getattr(self, "_drc_delta_mode", "absolute") == "off":
+            return may, False
+        if getattr(self, "_drc_delta_error", None):
+            return True, True
+        groups = getattr(self, "_drc_delta_groups", None)
+        if groups is not None:
+            shown = bool(getattr(groups, "cd_count", 0)
+                         or getattr(groups, "geometry_count", 0)
+                         or (self._drc_cluster is None
+                             and getattr(groups, "has_cd", False)))
+            self._drc_delta_seen[scope] = shown
+        elif getattr(self, "_drc_delta_busy", False):
+            shown = may and (scope in self._drc_delta_seen
+                             or self._drc_group_count(ci) != 0)
+        else:
+            shown = False
+        return shown, shown
 
     def _drc_delta_page_step(self, delta):
         self._drc_delta_page = max(0, self._drc_delta_page + delta)
@@ -9381,11 +9483,7 @@ class Viewer:
             if groups.auto_step:
                 setting = (self._drc_open, self._drc_delta_mode)
                 self._drc_delta_auto_steps[setting] = groups.step_ticks
-            win = self._drcwin
-            if (win is not None and hasattr(win, "_delta_step") and
-                    win._delta_step.get_text() == self._drc_delta_step_text):
-                # Preserve a draft typed while the worker was measuring.
-                self._drc_delta_write_step(groups.step_ticks)
+            self._drc_delta_write_step(groups.step_ticks)
             restore = getattr(self, "_drc_delta_restore", None)
             if restore is not None and restore[0] == key:
                 row = groups.find(restore[1])
@@ -9448,26 +9546,98 @@ class Viewer:
         self._drc_group_ui_refresh()
         self._drc_delta_scope_refresh()
 
-    def _on_drc_delta_step(self, _widget=None):
+    def _drc_step_dialog(self, _widget=None):
+        """The step button's modal (user call 2026-11-10: a small one in
+        place of the pane's entry): the CD group step of the rule in the
+        grid, starting from the one in use, in the basis' unit. Enter or
+        ok sets it and closes; an empty value or `auto` is the automatic
+        step again; a value that is refused is said in the dialog, which
+        stays; Esc, cancel or the window's close leave the step as it is."""
+        ci, mode = self._drc_open, self._drc_delta_mode
+        if mode == "off" or ci is None:
+            return
+        if self._sdlg is not None:
+            self._sdlg.present()
+            return
+        dlg = Gtk.Window(title="CD group step")
+        self._dialog_setup(dlg)
+        self._sdlg = dlg
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_margin_top(10)
+        box.set_margin_bottom(10)
+        box.set_margin_start(14)
+        box.set_margin_end(14)
+        dlg.add(box)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        box.pack_start(row, False, False, 0)
+        entry = Gtk.Entry()
+        entry.set_width_chars(12)
+        entry.set_text(self._drc_delta_step_text)
+        row.pack_start(entry, False, False, 0)
+        unit = Gtk.Label(label=self._drc_step_unit())
+        row.pack_start(unit, False, False, 0)
+        # the hint, and in its place why a value was refused (one width
+        # for both: the dialog must not change size under the cursor)
+        why = Gtk.Label()
+        why.set_xalign(0.0)
+        why.set_width_chars(30)
+        why.set_markup("<small>empty or auto: the automatic step</small>")
+        box.pack_start(why, False, False, 0)
+        # (named for the drc_analysis gate, which types in the entry)
+        entry.set_name("drc-step")
+        unit.set_name("drc-step-unit")
+        why.set_name("drc-step-why")
+        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        box.pack_start(buttons, False, False, 0)
+        ok = Gtk.Button(label="ok")
+        cancel = Gtk.Button(label="cancel")
+        buttons.pack_end(ok, False, False, 0)
+        buttons.pack_end(cancel, False, False, 0)
+
+        def _set(*_a):
+            # the rule and the basis the dialog was opened for, or nothing
+            if (self._drc_open, self._drc_delta_mode) != (ci, mode):
+                dlg.destroy()
+                return
+            refused = self._drc_delta_set_step(entry.get_text())
+            if refused is None:
+                dlg.destroy()
+            else:
+                why.set_markup("<small>%s</small>"
+                               % GLib.markup_escape_text(refused))
+        entry.connect("activate", _set)
+        ok.connect("clicked", _set)
+        cancel.connect("clicked", lambda *_: dlg.destroy())
+
+        def on_dialog_key(_w, ev):
+            if Gdk.keyval_name(ev.keyval) == "Escape":
+                dlg.destroy()
+                return True
+            return False
+        dlg.connect("key-press-event", on_dialog_key)
+
+        def _gone(*_a):
+            self._sdlg = None
+            self._restore_keys()
+        dlg.connect("destroy", _gone)
+        self._dialog_show(dlg, entry)
+
+    def _drc_delta_set_step(self, text):
+        """Set the CD group step of the rule in the grid from what was
+        typed (`auto` or nothing: the automatic one). None, or why the
+        text is refused - nothing changes then."""
         from .gtkservice import parse_step
         if self._drc_delta_mode == "off" or self._drc_open is None:
-            return
-        text = self._drcwin._delta_step.get_text().strip()
+            return None
+        text = text.strip()
         try:
             step = None if text.lower() in ("", "auto") else parse_step(text)
         except ValueError as exc:
-            self._drc_delta_error = str(exc)
-            self._drc_delta_refresh()
-            self._set_live_status("CD group step: %s" % exc)
-            return
+            return str(exc)
         setting = (self._drc_open, self._drc_delta_mode)
         previous = self._drc_delta_steps.get(setting)
-        resolved = step if step is not None else self._drc_delta_auto_steps.get(setting)
-        self._drc_delta_write_step(resolved)
         if step == previous:
-            self._drc_delta_error = None
-            self._drc_delta_refresh()
-            return
+            return None
         active = getattr(self, "_drc_delta_group", None)
         if self._drc_sel is not None:
             self._drc_sels[self._drc_scope_key()] = self._drc_sel
@@ -9475,12 +9645,17 @@ class Viewer:
             self._drc_delta_steps.pop(setting, None)
         else:
             self._drc_delta_steps[setting] = step
+        # (until the new grouping says its step: the one asked, or the
+        # automatic one where it is known)
+        self._drc_delta_write_step(
+            step if step is not None else self._drc_delta_auto_steps.get(setting))
         self._drc_group_cache_sync()
         self._drc_delta_sync()
         if active is not None and active.key[0] == -2:
             self._drc_delta_restore = (self._drc_delta_key, active.key)
         self._drc_group_ui_refresh()
         self._drc_delta_scope_refresh()
+        return None
 
     def _drc_delta_status_changed(self, ci, eis=None):
         if ci != self._drc_open:
