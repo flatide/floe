@@ -159,25 +159,40 @@ fn file_name(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// A shot as it is drawn: its capture with the region in deck um (the
-/// `--in-chip` frame applied, else the capture as given), the chips its
-/// options name and the region.
-/// Whether a deck capture's legend lists the rows placed in its frame
-/// alone (`FLOE_LEGEND_IN_VIEW=off`: no - every row of the levels loaded,
-/// as before 0.12.438).
-fn legend_in_view() -> bool {
-    std::env::var("FLOE_LEGEND_IN_VIEW").map_or(true, |v| v != "off")
+/// Which rows a deck capture's legend lists (`FLOE_LEGEND_IN_VIEW`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LegendRows {
+    /// the rows a pixel of the picture shows, as the renderer says them
+    /// (Frame::drawn; the default since 0.12.439 - user 2026-11-10: "실제
+    /// 그려진 것만 레전드를 추가하도록")
+    Drawn,
+    /// `placed`: the rows with a placement in the frame (the rule of
+    /// 0.12.438 - a chip placed there with no shape in the frame is listed)
+    Placed,
+    /// `off`: every row of the levels loaded (before 0.12.438)
+    Every,
+}
+
+fn legend_rows() -> LegendRows {
+    legend_rows_of(std::env::var("FLOE_LEGEND_IN_VIEW").ok().as_deref())
+}
+
+fn legend_rows_of(value: Option<&str>) -> LegendRows {
+    match value.map(str::trim) {
+        Some("off") => LegendRows::Every,
+        Some("placed") => LegendRows::Placed,
+        _ => LegendRows::Drawn,
+    }
 }
 
 /// Of a deck, the view's L/D pairs with a placement in the capture's frame -
 /// the tiles' regions (a mosaic's four together), judged as the capture
 /// window judges what it reads (DeckWindow::reaches: a touched edge counts,
-/// an unknown extent always) - for the legend, which lists these rows
-/// alone: a chip none of whose placements is in the frame, or a level none
-/// of whose is, is not in the picture (user 2026-11-10: "칩 모드로 캡쳐할
-/// 경우 레전드에 해당 레벨 칩이 모두 나오는데 현재 캡쳐된 화면에 있는 것들만
-/// 레전드에 포함되게"). None: every row of the load - a layout, or
-/// FLOE_LEGEND_IN_VIEW=off.
+/// an unknown extent always). The legend's rows under
+/// `FLOE_LEGEND_IN_VIEW=placed` (the rule of 0.12.438; user 2026-11-10: "칩
+/// 모드로 캡쳐할 경우 레전드에 해당 레벨 칩이 모두 나오는데 현재 캡쳐된
+/// 화면에 있는 것들만 레전드에 포함되게"), and what stands in for a frame
+/// that does not say what it shows. None: a layout - every row.
 fn placed_pairs(
     dataset: &Dataset,
     tiles: &[crate::shots::Shot],
@@ -185,13 +200,13 @@ fn placed_pairs(
     let Dataset::Deck(deck) = dataset else {
         return Ok(None);
     };
-    if !legend_in_view() {
-        return Ok(None);
-    }
     let window = DeckWindow::new(tiles.iter().map(|t| t.bbox.unwrap()))?;
     deck.placed_pairs(&window).map(Some)
 }
 
+/// A shot as it is drawn: its capture with the region in deck um (the
+/// `--in-chip` frame applied, else the capture as given), the chips its
+/// options name and the region.
 struct Framed<'a> {
     capture: Cow<'a, Capture>,
     chips: Option<Selection>,
@@ -501,33 +516,19 @@ pub fn run_summary(
                 ));
             }
             let (width, height) = (plan.frame.width, plan.frame.height);
-            // --legend: the layers this shot draws, as the picture paints them
-            // - the tiles' (the chips on, with --chip; JOBDECK-CAPTURE §17
-            // item 8 before 0.12.436: every row of the levels loaded), and of
-            // a deck the rows with a placement in the frame (placed_pairs)
-            let legend = legend_styles
-                .as_ref()
-                .map(|styles| {
-                    let placed = placed_pairs(dataset, &plan.tiles)?;
-                    crate::legend::lines(
-                        dataset,
-                        styles,
-                        &dataset.resolve_layers(plan.tiles[0].layers.as_deref())?,
-                        placed.as_ref(),
-                    )
-                })
-                .transpose()?;
             // the frame's scale, px per um along x and y (Fitted::ppu): the
             // report's ppu / ppu_y, and with the legend the flateyes
             // metadata's ppu and unit, as a DRC snapshot's (user 2026-11-05:
             // "메타데이터에 ppu도 추가해줘")
             let (ppu, ppu_y) = plan.frame.ppu();
-            let legend_doc = legend.as_ref().filter(|l| !l.is_empty()).map(|l| Document {
-                legend: Some(l.clone()),
-                ppu: Some(ppu),
-                unit: Some("um".into()),
-                ..Document::default()
-            });
+            // --legend of a deck lists the rows the picture shows: each tile's
+            // frame is asked which deck layers are left with a pixel of it
+            // (RenderRequest::drawn), a mosaic's four together. None: not
+            // asked, or a frame did not say
+            let legend_rows = legend_rows();
+            let ask_drawn =
+                legend_styles.is_some() && dataset.is_deck() && legend_rows == LegendRows::Drawn;
+            let mut drawn: Option<BTreeSet<(u32, u32)>> = ask_drawn.then(BTreeSet::new);
             let mut canvas = capture
                 .is_mosaic()
                 .then(|| Mosaic::new(width, height))
@@ -544,7 +545,18 @@ pub fn run_summary(
                 if canvas.is_some() {
                     request.format = FrameFormat::Raw;
                 }
+                request.drawn = ask_drawn;
                 let frame = session.capture(request)?;
+                if ask_drawn {
+                    let said = frame.drawn()?;
+                    drawn = match (drawn.take(), said) {
+                        (Some(mut rows), Some(pairs)) => {
+                            rows.extend(pairs);
+                            Some(rows)
+                        }
+                        _ => None,
+                    };
+                }
                 if let Some(fit) = budget_fit(&frame) {
                     fits.push((i, fit));
                 }
@@ -576,6 +588,34 @@ pub fn run_summary(
             if index + 1 == plans.len() {
                 session.close()?;
             }
+            // --legend: the layers this shot draws, as the picture paints them
+            // - the tiles' (the chips on, with --chip; JOBDECK-CAPTURE §17
+            // item 8 before 0.12.436: every row of the levels loaded), and of
+            // a deck those the picture shows: the rows the frames said a pixel
+            // of theirs is left to (0.12.439), under FLOE_LEGEND_IN_VIEW=placed
+            // those with a placement in the frame (0.12.438), =off every row
+            let legend = legend_styles
+                .as_ref()
+                .map(|styles| {
+                    let shown = match (legend_rows, drawn) {
+                        (LegendRows::Every, _) => None,
+                        (LegendRows::Drawn, Some(rows)) => Some(rows),
+                        _ => placed_pairs(dataset, &plan.tiles)?,
+                    };
+                    crate::legend::lines(
+                        dataset,
+                        styles,
+                        &dataset.resolve_layers(plan.tiles[0].layers.as_deref())?,
+                        shown.as_ref(),
+                    )
+                })
+                .transpose()?;
+            let legend_doc = legend.as_ref().filter(|l| !l.is_empty()).map(|l| Document {
+                legend: Some(l.clone()),
+                ppu: Some(ppu),
+                unit: Some("um".into()),
+                ..Document::default()
+            });
             let mut row = serde_json::json!({"name":plan.named.name,"out":plan.display,"pixel":[width,height],
                 "ppu":ppu,"ppu_y":ppu_y,
                 "layers":capture.shot.layers,"depth":capture.shot.depth,"over_budget_pages":deferred,
@@ -830,4 +870,23 @@ pub fn run_summary(
         over_budget: over_budget_total,
         summary_building: summary_building_total,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_deck_legend_lists_what_the_picture_shows_unless_the_switch_says_otherwise() {
+        // the default: the rows the renderer says a pixel is left to
+        assert_eq!(legend_rows_of(None), LegendRows::Drawn);
+        assert_eq!(legend_rows_of(Some("")), LegendRows::Drawn);
+        assert_eq!(legend_rows_of(Some("on")), LegendRows::Drawn);
+        assert_eq!(legend_rows_of(Some("drawn")), LegendRows::Drawn);
+        // the rules of before: 0.12.438's placements in the frame, and every
+        // row of the levels loaded
+        assert_eq!(legend_rows_of(Some("placed")), LegendRows::Placed);
+        assert_eq!(legend_rows_of(Some(" placed ")), LegendRows::Placed);
+        assert_eq!(legend_rows_of(Some("off")), LegendRows::Every);
+    }
 }

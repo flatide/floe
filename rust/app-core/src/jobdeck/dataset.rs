@@ -262,11 +262,13 @@ impl DeckSnapshot {
         self.rows.resolve_layers(&self.analysis.deck, spec)
     }
     /// The view's L/D pairs with a placement `window` reaches - what a
-    /// capture of that window shows of the deck, for its legend
-    /// (captures.rs placed_pairs; user 2026-11-10: "현재 캡쳐된 화면에
-    /// 있는 것들만 레전드에 포함되게"). A placement counts as the window
-    /// reads it (DeckWindow::reaches: a touched edge counts, an unknown
-    /// extent always).
+    /// capture of that window may show of the deck (captures.rs
+    /// placed_pairs: a legend's rows under FLOE_LEGEND_IN_VIEW=placed, the
+    /// rule of 0.12.438 - user 2026-11-10: "현재 캡쳐된 화면에 있는 것들만
+    /// 레전드에 포함되게"; since 0.12.439 the legend lists what the frame
+    /// says it shows). A placement counts as the window reads it
+    /// (DeckWindow::reaches: a touched edge counts, an unknown extent
+    /// always).
     pub fn placed_pairs(&self, window: &DeckWindow) -> Result<BTreeSet<(u32, u32)>> {
         let pairs: BTreeMap<usize, (u32, u32)> = self
             .rows

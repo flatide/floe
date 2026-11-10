@@ -599,6 +599,23 @@ budget fit memory's key gained the layers the summary draws
 (`PlanRequest::summary_layers`), since the fit over the pages left is another
 decision than the fit over them all.
 
+Since 0.12.439 a render command may carry `drawn=1` (worker-client
+`RenderRequest::drawn`; user 2026-11-10: a capture's legend lists only what is
+actually drawn): the frame line then says which layers show in the frame,
+`drawn=L/D,L/D,...` by the layers' keys, or `drawn=none` when no layer does
+(`Frame::drawn`). A jobdeck frame says it: while the passes are laid over the
+composite the frame keeps one u32 a pixel, the id of the deck layer whose pass
+painted the pixel last (`overlay_window_owned`), and at the end the layers
+left with a pixel - less the pixels the white frame band covers
+(`shown_owners`) - are the frame's `DeckRenderReport::drawn`. A layer painted
+over whole, one with no shape in the view and one whose pass stayed empty
+(`summary_building`) are not among them; hierarchy frames are no layer's
+pixels. The map costs 4 bytes a pixel for the frame's time, so only a capture
+that embeds a legend asks (`floe2 render DECK --legend`); the viewer's frames
+never do, and their line is unchanged. A plain layout's frame carries no
+`drawn=` (its planes' density mixes colours a pixel; not said yet), which the
+asker reads as not said.
+
 A historical cold-daemon gate on a 303-page dense `sample9` mid-zoom view measured
 first/final frame latency of 17/290ms, 17/159ms, 21/122ms, and 31/99ms for
 `round_pages=32/64/128/256` respectively at 600x600 with eight workers. The

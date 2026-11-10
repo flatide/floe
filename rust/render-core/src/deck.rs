@@ -400,6 +400,64 @@ pub fn overlay_window(composite: &mut [u8], width: u32, pass: &[u8], window: (u3
     }
 }
 
+/// `overlay_window` that notes whose pixels they are (DeckRenderRequest::
+/// drawn): with `owner` - the frame's, one id a pixel, 0 = no pass - every
+/// pixel the pass replaces takes `id`, so at the frame's end a pixel's id is
+/// that of the pass that painted it last. Without it, `overlay_window`.
+pub fn overlay_window_owned(
+    composite: &mut [u8],
+    owner: Option<&mut [u32]>,
+    width: u32,
+    pass: &[u8],
+    window: (u32, u32, u32, u32),
+    id: u32,
+) {
+    let Some(owner) = owner else {
+        return overlay_window(composite, width, pass, window);
+    };
+    let (col0, row0, w, h) = window;
+    let len = w as usize * 4;
+    for row in 0..h as usize {
+        // the window row's first pixel in the frame
+        let first = (row0 as usize + row) * width as usize + col0 as usize;
+        let at = first * 4;
+        for ((dst, src), own) in composite[at..at + len]
+            .chunks_exact_mut(4)
+            .zip(pass[row * len..(row + 1) * len].chunks_exact(4))
+            .zip(&mut owner[first..first + w as usize])
+        {
+            if src[3] != 0 {
+                dst.copy_from_slice(src);
+                *own = id;
+            }
+        }
+    }
+}
+
+/// The ids (1..=`ids`) that own a pixel of the frame the frame shows
+/// (`shown[id]`; `shown[0]` is never set): `owner` as the passes left it
+/// (`overlay_window_owned`), less the pixels a hierarchy frame's white band
+/// (`over`, the plane laid over the geometry at the end) covers.
+pub fn shown_owners(owner: &[u32], over: Option<&[u8]>, ids: usize) -> Vec<bool> {
+    let mut shown = vec![false; ids + 1];
+    match over {
+        Some(over) => {
+            for (&id, px) in owner.iter().zip(over.chunks_exact(4)) {
+                if px[3] == 0 {
+                    shown[id as usize] = true;
+                }
+            }
+        }
+        None => {
+            for &id in owner {
+                shown[id as usize] = true;
+            }
+        }
+    }
+    shown[0] = false;
+    shown
+}
+
 /// `split_frame_planes` of a window-sized pass into the full-frame
 /// under/over planes.
 pub fn split_frame_planes_window(
@@ -536,6 +594,11 @@ pub struct DeckRenderRequest {
     /// (DeckRenderReport::light_pending) - renderd draws it again. None:
     /// the fills run to the end (a capture).
     pub light_deadline: Option<std::time::Instant>,
+    /// The frame says which deck layers show in it (DeckRenderReport::drawn;
+    /// `drawn=1`, a capture's legend - user 2026-11-10: "실제 그려진 것만
+    /// 레전드를 추가하도록"). It costs the frame one u32 a pixel, the
+    /// pixel's owner, so the viewer leaves it off.
+    pub drawn: bool,
 }
 
 pub struct DeckRenderReport {
@@ -604,6 +667,14 @@ pub struct DeckRenderReport {
     /// still to fill: the frame is of the images so far (DIRECT_READ_PLAN
     /// §5.4; renderd draws the frame again).
     pub light_pending: bool,
+    /// With DeckRenderRequest::drawn: the deck layers (`out`, ascending) a
+    /// pixel of the frame shows - the layer whose pass painted the pixel
+    /// last (the passes are laid opaque-over in placement order), unless a
+    /// hierarchy frame's white band then covers it. A layer whose pixels
+    /// are all painted over, or that painted none (no shape of it in the
+    /// view, its source's summary still building), is not among them.
+    /// None: not asked.
+    pub drawn: Option<Vec<u32>>,
 }
 
 /// DeckSource::prune_summary_for's rule: no hierarchy frame can come of a
@@ -990,6 +1061,20 @@ impl Deck {
         // that are laid down in three phases at the end.
         let mut frames_under = request.frames.then(|| vec![0u8; byte_len]);
         let mut frames_over = request.frames.then(|| vec![0u8; byte_len]);
+        // DeckRenderRequest::drawn: whose each pixel of the composite is -
+        // the id (1.., the deck layers in `out` order) of the layer whose
+        // pass painted it last, 0 where none did. The legend of a capture
+        // lists the layers left with a pixel (`shown_owners`).
+        let owner_ids: BTreeMap<u32, u32> = if request.drawn {
+            self.layers
+                .keys()
+                .enumerate()
+                .map(|(index, &out)| (out, index as u32 + 1))
+                .collect()
+        } else {
+            BTreeMap::new()
+        };
+        let mut owner = request.drawn.then(|| vec![0u32; byte_len / 4]);
         let mut stats = RenderStats::default();
         let mut passes = 0u32;
         let mut passes_skipped = 0u32;
@@ -1061,6 +1146,7 @@ impl Deck {
                     outline_width: layer.outline_width,
                 }
             };
+            let owner_id = owner_ids.get(&out).copied().unwrap_or(0);
             let source_view = source_view(&request.view, &self.placements[placed_index].spec)?;
             // the plan view is the source view clipped to the source's
             // own bounds (in f64, BEFORE any integer conversion - review
@@ -1267,6 +1353,7 @@ impl Deck {
                             generation,
                             cancellation,
                             &mut composite,
+                            owner.as_deref_mut(),
                             frames_under.as_deref_mut(),
                             frames_over.as_deref_mut(),
                             &mut tally,
@@ -1288,8 +1375,10 @@ impl Deck {
                                 request,
                                 generation,
                                 cancellation,
+                                owner: owner_id,
                             },
                             &mut composite,
+                            owner.as_deref_mut(),
                             frames_under.as_deref_mut(),
                             frames_over.as_deref_mut(),
                             &mut tally,
@@ -1348,6 +1437,7 @@ impl Deck {
                     generation,
                     cancellation,
                     &mut composite,
+                    owner.as_deref_mut(),
                     frames_under.as_deref_mut(),
                     frames_over.as_deref_mut(),
                     &mut tally,
@@ -1361,6 +1451,7 @@ impl Deck {
                 window,
                 source_view,
                 frames,
+                owner: owner_id,
             });
             batch_bytes = batch_bytes.saturating_add(charge);
             batch_bytes_max = batch_bytes_max.max(batch_bytes);
@@ -1372,6 +1463,7 @@ impl Deck {
                 generation,
                 cancellation,
                 &mut composite,
+                owner.as_deref_mut(),
                 frames_under.as_deref_mut(),
                 frames_over.as_deref_mut(),
                 &mut tally,
@@ -1408,6 +1500,16 @@ impl Deck {
         if let Some(over) = frames_over.as_ref() {
             overlay(&mut layered, over);
         }
+        // the layers left with a pixel the frame shows (the white frame
+        // band lies over the geometry)
+        let drawn = owner.map(|owner| {
+            let shown = shown_owners(&owner, frames_over.as_deref(), owner_ids.len());
+            owner_ids
+                .iter()
+                .filter(|(_, &id)| shown[id as usize])
+                .map(|(&out, _)| out)
+                .collect::<Vec<u32>>()
+        });
         composite_us = composite_us.saturating_add(layering_started.elapsed().as_micros() as u64);
         Ok(DeckRenderReport {
             frame: RgbaFrame::from_pixels(request.width, request.height, layered)?,
@@ -1443,6 +1545,7 @@ impl Deck {
             summary_cells: tally.summary_cells,
             summary_building_passes,
             light_pending,
+            drawn,
         })
     }
 }
@@ -1474,6 +1577,8 @@ struct StreamTarget<'a> {
     request: &'a DeckRenderRequest,
     generation: u64,
     cancellation: &'a RenderCancellation,
+    /// the pass's id in the frame's owner map (0: none kept)
+    owner: u32,
 }
 
 struct StreamReport {
@@ -1499,6 +1604,7 @@ fn stream_pass(
     slice_limit: u64,
     target: StreamTarget<'_>,
     composite: &mut [u8],
+    mut owner: Option<&mut [u32]>,
     mut frames_under: Option<&mut [u8]>,
     mut frames_over: Option<&mut [u8]>,
     tally: &mut Tally,
@@ -1612,7 +1718,14 @@ fn stream_pass(
             .saturating_add(raster_started.elapsed().as_micros() as u64);
         drop(scene);
         let overlay_started = std::time::Instant::now();
-        overlay_window(composite, request.width, out.frame.pixels(), target.window);
+        overlay_window_owned(
+            composite,
+            owner.as_deref_mut(),
+            request.width,
+            out.frame.pixels(),
+            target.window,
+            target.owner,
+        );
         tally.composite_us = tally
             .composite_us
             .saturating_add(overlay_started.elapsed().as_micros() as u64);
@@ -1671,6 +1784,8 @@ struct PreparedPass {
     window: (u32, u32, u32, u32),
     source_view: RasterViewBox,
     frames: bool,
+    /// the pass's id in the frame's owner map (0: none kept)
+    owner: u32,
 }
 
 struct PassOutput {
@@ -1776,6 +1891,7 @@ fn raster_batch(
     generation: u64,
     cancellation: &RenderCancellation,
     composite: &mut [u8],
+    mut owner: Option<&mut [u32]>,
     mut frames_under: Option<&mut [u8]>,
     mut frames_over: Option<&mut [u8]>,
     tally: &mut Tally,
@@ -1858,11 +1974,13 @@ fn raster_batch(
             tally.frame_passes += 1;
         }
         let overlay_started = std::time::Instant::now();
-        overlay_window(
+        overlay_window_owned(
             composite,
+            owner.as_deref_mut(),
             request.width,
             out.geometry.frame.pixels(),
             pass.window,
+            pass.owner,
         );
         tally.composite_us = tally
             .composite_us
@@ -2491,6 +2609,7 @@ mod tests {
             thin_keep: true,
             occupancy: None,
             light_deadline: None,
+            drawn: false,
         };
         let p = placement(4.0, 0.0, 0.0);
         let sv = source_view(&request.view, &p).unwrap();
@@ -2558,6 +2677,7 @@ mod tests {
             thin_keep: true,
             occupancy: None,
             light_deadline: None,
+            drawn: false,
         };
         let p = placement(0.001, 1e16, 1e16);
         let sv = source_view(&request.view, &p).unwrap();
@@ -2594,6 +2714,7 @@ mod tests {
             thin_keep: true,
             occupancy: None,
             light_deadline: None,
+            drawn: false,
         };
         let big = 1i64 << 60;
         // the placement puts the deck view's origin at the source's
@@ -2772,6 +2893,57 @@ mod tests {
             &[0, 0, 0, 0],
             "outside the window"
         );
+    }
+
+    #[test]
+    fn the_owner_map_keeps_the_last_painter_and_what_shows() {
+        // a 4 x 2 frame; pass 1 paints the left 3 columns of row 0, pass 2
+        // (laid later) the columns 1..3 of both rows through a 2 x 2 window
+        let px = |c: u8| [c, c, c, 255];
+        let mut composite = vec![0u8; 4 * 2 * 4];
+        let mut owner = vec![0u32; 4 * 2];
+        let mut first = vec![0u8; 4 * 2 * 4];
+        for col in 0..3 {
+            first[col * 4..col * 4 + 4].copy_from_slice(&px(10));
+        }
+        overlay_window_owned(&mut composite, Some(&mut owner), 4, &first, (0, 0, 4, 2), 1);
+        assert_eq!(owner, vec![1, 1, 1, 0, 0, 0, 0, 0]);
+        let second: Vec<u8> = [px(20), px(20), px(20), [0, 0, 0, 0]].concat();
+        overlay_window_owned(&mut composite, Some(&mut owner), 4, &second, (1, 0, 2, 2), 2);
+        // the later pass owns what it painted; its alpha-0 pixel leaves the
+        // owner (and the composite) as they were
+        assert_eq!(owner, vec![1, 2, 2, 0, 0, 2, 0, 0]);
+        assert_eq!(composite[4..8], px(20));
+        assert_eq!(composite[0..4], px(10));
+        assert_eq!(composite[6 * 4..7 * 4], [0, 0, 0, 0]);
+        // without an owner map the pixels are overlay_window's
+        let mut plain = vec![0u8; 4 * 2 * 4];
+        overlay_window(&mut plain, 4, &first, (0, 0, 4, 2));
+        overlay_window(&mut plain, 4, &second, (1, 0, 2, 2));
+        let mut unowned = vec![0u8; 4 * 2 * 4];
+        overlay_window_owned(&mut unowned, None, 4, &first, (0, 0, 4, 2), 1);
+        overlay_window_owned(&mut unowned, None, 4, &second, (1, 0, 2, 2), 2);
+        assert_eq!(unowned, plain);
+        assert_eq!(composite, plain);
+        // both ids show; a third that painted nothing does not
+        assert_eq!(shown_owners(&owner, None, 3), vec![false, true, true, false]);
+        // a pass painted over whole does not show: pass 3 covers pass 1's one
+        // pixel left
+        let third: Vec<u8> = px(30).to_vec();
+        overlay_window_owned(&mut composite, Some(&mut owner), 4, &third, (0, 0, 1, 1), 3);
+        assert_eq!(shown_owners(&owner, None, 3), vec![false, false, true, true]);
+        // the white frame band over the geometry hides what it covers: over
+        // every pixel pass 2 owns, pass 2 does not show either
+        let mut over = vec![0u8; 4 * 2 * 4];
+        for at in [1usize, 2, 5] {
+            over[at * 4..at * 4 + 4].copy_from_slice(&[255, 255, 255, 255]);
+        }
+        assert_eq!(
+            shown_owners(&owner, Some(&over), 3),
+            vec![false, false, false, true]
+        );
+        // nothing painted: nothing shows
+        assert_eq!(shown_owners(&[0, 0], None, 2), vec![false, false, false]);
     }
 
     #[test]

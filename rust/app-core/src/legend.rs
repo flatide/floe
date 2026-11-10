@@ -4,18 +4,22 @@
 //! frame is drawn with, so the legend is what the picture shows - the layer
 //! properties' colours and patterns, --layer-colors, --archival's solid
 //! fills, a jobdeck's level colours or its chip view's chip colours - and,
-//! of a jobdeck, the rows with a placement in the frame (user 2026-11-10:
-//! "현재 캡쳐된 화면에 있는 것들만 레전드에 포함되게"; captures.rs
-//! placed_pairs). Embedded as metadata (annotations::png) beside the
-//! pixels, never in them; flateyes shows it, `fe-embed --dump` prints it.
+//! of a jobdeck, the rows the picture shows alone (user 2026-11-10: "현재
+//! 캡쳐된 화면에 있는 것들만 레전드에 포함되게", then "실제 그려진 것만
+//! 레전드를 추가하도록"): the rows the renderer says a pixel of the frame is
+//! left to (captures.rs; floe_worker_client::Frame::drawn). Embedded as
+//! metadata (annotations::png) beside the pixels, never in them; flateyes
+//! shows it, `fe-embed --dump` prints it.
 use crate::{annotations, dataset::Dataset, styles, Error, Result};
 use floe_worker_client::{Fill, Layers, Style};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The view's L/D pairs with a placement in the frame (a jobdeck's; the
+/// The view's L/D pairs the frame shows (a jobdeck's): those a pixel of the
+/// picture is left to, as the renderer says them (the default), or under
+/// FLOE_LEGEND_IN_VIEW=placed those with a placement in the frame (the
 /// capture window's judgment, jobdeck::window::DeckWindow::reaches). None:
 /// every row of the load - a layout, a DRC capture, FLOE_LEGEND_IN_VIEW=off.
-pub type Placed<'a> = Option<&'a BTreeSet<(u32, u32)>>;
+pub type Shown<'a> = Option<&'a BTreeSet<(u32, u32)>>;
 
 struct Row<'a> {
     key: (u32, u32),
@@ -30,15 +34,15 @@ struct Row<'a> {
     /// view hides none): a group with no shapes of its own and no colour
     /// of the picture, never listed (2026-11-09)
     group: bool,
-    /// a placement of it in the frame - a head's: one of its level's; a
+    /// the frame shows it (`Shown`) - a head: one of its level's rows; a
     /// layout's rows always (2026-11-10)
-    placed: bool,
+    in_frame: bool,
 }
 impl Row<'_> {
-    /// Listed when every layer is on: shown, a colour of the picture, in
-    /// the frame.
+    /// Listed when every layer is on: on the panel, a colour of the
+    /// picture, in the frame.
     fn listed(&self) -> bool {
-        self.shown && !self.group && self.placed
+        self.shown && !self.group && self.in_frame
     }
 }
 
@@ -49,7 +53,7 @@ fn pair(layer: i64, datatype: i64) -> Result<(u32, u32)> {
     ))
 }
 
-fn rows<'a>(dataset: &'a Dataset, placed: Placed) -> Result<Vec<Row<'a>>> {
+fn rows<'a>(dataset: &'a Dataset, in_frame: Shown) -> Result<Vec<Row<'a>>> {
     match dataset {
         // a layout's pairs that hold no shape or text (the LAYERNAME table's
         // alone) are not on the panel (desktop::list_layers)
@@ -63,7 +67,7 @@ fn rows<'a>(dataset: &'a Dataset, placed: Placed) -> Result<Vec<Row<'a>>> {
                 shown: l.stored_shapes > 0,
                 under: None,
                 group: false,
-                placed: true,
+                in_frame: true,
             })
             .collect()),
         Dataset::Deck(d) => {
@@ -88,9 +92,9 @@ fn rows<'a>(dataset: &'a Dataset, placed: Placed) -> Result<Vec<Row<'a>>> {
                 .iter()
                 .map(|r| {
                     let key = pair(r.layer, r.datatype)?;
-                    // in the frame: a placement of the row's own, or of a
-                    // head's level
-                    let placed = placed.is_none_or(|p| {
+                    // in the frame: the row itself, or a row of a head's
+                    // level
+                    let in_frame = in_frame.is_none_or(|p| {
                         if r.jobdeck_head {
                             p.range((key.0, 0)..=(key.0, u32::MAX)).next().is_some()
                         } else {
@@ -107,7 +111,7 @@ fn rows<'a>(dataset: &'a Dataset, placed: Placed) -> Result<Vec<Row<'a>>> {
                             None
                         },
                         group: r.jobdeck_head && own_rows.contains(&r.layer),
-                        placed,
+                        in_frame,
                     })
                 })
                 .collect()
@@ -116,8 +120,8 @@ fn rows<'a>(dataset: &'a Dataset, placed: Placed) -> Result<Vec<Row<'a>>> {
 }
 
 /// The pairs listed, in order: the given ones as given (a hidden row as its
-/// head, once; a group, or a row with no placement in the frame, skipped),
-/// or with every layer on the listed rows in (layer, datatype) order.
+/// head, once; a group, or a row the frame does not show, skipped), or with
+/// every layer on the listed rows in (layer, datatype) order.
 fn picks(rows: &[Row], layers: &Layers) -> Vec<(u32, u32)> {
     match layers {
         Layers::None => Vec::new(),
@@ -131,7 +135,7 @@ fn picks(rows: &[Row], layers: &Layers) -> Vec<(u32, u32)> {
             let mut seen = BTreeSet::new();
             keys.iter()
                 .filter_map(|k| by_key.get(k))
-                .filter(|r| !r.group && r.placed)
+                .filter(|r| !r.group && r.in_frame)
                 .map(|r| r.under.unwrap_or(r.key))
                 .filter(|k| seen.insert(*k))
                 .collect()
@@ -161,16 +165,16 @@ pub fn fill_name(fill: &Fill) -> String {
 /// layout's pairs that hold something, a jobdeck's shown rows - in (layer,
 /// datatype) order. A row the jobdeck's level view hides stands under its
 /// level's head, once; in the chip view the chips are listed and the level
-/// heads, groups of no shapes, are not. Of a jobdeck, with `placed` the
-/// rows with a placement in the frame alone: a chip one of whose placements
-/// is in it, a level one of whose placements is. Empty: nothing to list.
+/// heads, groups of no shapes, are not. Of a jobdeck, with `in_frame` the
+/// rows the frame shows alone: a chip that is among them, a level one of
+/// whose chips is. Empty: nothing to list.
 pub fn lines(
     dataset: &Dataset,
     styles: &[Style],
     layers: &Layers,
-    placed: Placed,
+    in_frame: Shown,
 ) -> Result<Vec<String>> {
-    let rows = rows(dataset, placed)?;
+    let rows = rows(dataset, in_frame)?;
     let by_key: BTreeMap<_, _> = rows.iter().map(|r| (r.key, r)).collect();
     let picks = picks(&rows, layers);
     let styles: BTreeMap<_, _> = styles.iter().map(|s| (s.layer, s)).collect();
@@ -224,7 +228,7 @@ mod tests {
         shown: bool,
         under: Option<(u32, u32)>,
         group: bool,
-        placed: bool,
+        in_frame: bool,
     ) -> Row<'static> {
         Row {
             key,
@@ -232,15 +236,15 @@ mod tests {
             shown,
             under,
             group,
-            placed,
+            in_frame,
         }
     }
 
     #[test]
     fn the_rows_listed_are_the_pictures_and_in_the_frame() {
         // a deck's level view: level 2's head over its two chips, hidden
-        // under it, and level 3's head over one chip; of the placements only
-        // level 2's first chip is in the frame
+        // under it, and level 3's head over one chip; the frame shows only
+        // level 2's first chip
         let level = [
             row((2, 0), true, None, false, true),
             row((2, 1), false, Some((2, 0)), false, true),
@@ -270,7 +274,7 @@ mod tests {
             vec![(2, 1)]
         );
         assert!(picks(&chip, &Layers::None).is_empty());
-        // every row placed (a layout; a deck with FLOE_LEGEND_IN_VIEW=off):
+        // every row in the frame (a layout; a deck with FLOE_LEGEND_IN_VIEW=off):
         // the view's rows as before - the level view's heads, the chip
         // view's chips, in (layer, datatype) order
         let every = |rows: &[Row<'static>]| -> Vec<Row<'static>> {

@@ -558,7 +558,7 @@ floe2 render deck.jb --chip '2:*' --fit-chip 'MARK.oas#3' --px 600 --out mark3.p
 - `--in-chip NAME[#K]`(0.12.435)는 영역의 좌표와 길이를 그 배치의 칩 좌표(소스의 µm)로 읽어 덱이 그 칩을 놓는 대로 놓는다(`X = dx + mag·x`, 길이는 mag배). `--bbox`, `--at`, `--size`, `--mosaic-at`, 좌표 `--corners`에 적용되고, 영역 없이 주면 그 배치 자체다. 배치 하나여야 하므로 여러 번 놓인 칩은 `#K`, 레벨마다 다르게 놓인 칩은 `N:NAME#K`로 준다. `--fit-chip`과는 함께 쓸 수 없다. 자세한 것은 [JOBDECK-CAPTURE.ko.md](JOBDECK-CAPTURE.ko.md) §8.
 
 **뷰(색)**
-- 색은 기본이 뷰어의 level view다(레벨마다 한 색). `--mode chip`(0.12.436)은 chip view로 레벨 아래 소스 칩마다 다른 색, `--mode layer`는 source layer view로 LY/DT마다 한 색이다. 뷰어의 Jobdeck 메뉴와 같은 팔레트와 그 뷰에서 저장한 layerprops 파일(`<deck>.jb.layerprops`, `<deck>.chip-by-level.jb.layerprops`, `<deck>.layer.jb.layerprops`)을 쓴다. 뷰는 한 실행에 하나이고 report의 `jobdeck.view`가 말한다. `--legend`는 chip view에서 칩 줄들을, `--chip`으로 고르면 켠 칩의 줄만 적는다(0.12.436). 어느 뷰에서나 틀 안에 배치가 있는 줄만 적는다(0.12.438; `FLOE_LEGEND_IN_VIEW=off`면 로드한 레벨 전부). 자세한 것은 [JOBDECK-CAPTURE.ko.md](JOBDECK-CAPTURE.ko.md) §12.
+- 색은 기본이 뷰어의 level view다(레벨마다 한 색). `--mode chip`(0.12.436)은 chip view로 레벨 아래 소스 칩마다 다른 색, `--mode layer`는 source layer view로 LY/DT마다 한 색이다. 뷰어의 Jobdeck 메뉴와 같은 팔레트와 그 뷰에서 저장한 layerprops 파일(`<deck>.jb.layerprops`, `<deck>.chip-by-level.jb.layerprops`, `<deck>.layer.jb.layerprops`)을 쓴다. 뷰는 한 실행에 하나이고 report의 `jobdeck.view`가 말한다. `--legend`는 chip view에서 칩 줄들을, `--chip`으로 고르면 켠 칩의 줄만 적는다(0.12.436). 어느 뷰에서나 그림에 실제로 보이는 줄만 적는다(0.12.439; `FLOE_LEGEND_IN_VIEW=placed`면 틀 안에 배치가 있는 줄, `off`면 로드한 레벨 전부). 자세한 것은 [JOBDECK-CAPTURE.ko.md](JOBDECK-CAPTURE.ko.md) §12.
 
 **누락 처리**
 - 캡처는 켠 칩의 skip만 부족한 것으로 센다.

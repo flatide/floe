@@ -3745,75 +3745,174 @@ class ChipShotTests(unittest.TestCase):
         self.assertFalse((out / "mode_bad.png").exists())
 
 
-    def test_a_legend_lists_the_rows_placed_in_the_frame(self):
-        # the legend is what the frame shows (user 2026-11-10: "현재 캡쳐된
-        # 화면에 있는 것들만 레전드에 포함되게"): of a deck, the rows with a
-        # placement in the capture's region - judged as the capture window
-        # judges what it reads - and not every chip of the levels loaded;
-        # FLOE_LEGEND_IN_VIEW=off lists them all, as before 0.12.438
+    def test_a_legend_lists_what_the_picture_shows(self):
+        # the legend is what the picture shows (user 2026-11-10: "현재 캡쳐된
+        # 화면에 있는 것들만 레전드에 포함되게", then "실제 그려진 것만 레전드를
+        # 추가하도록"): of a deck, the rows a pixel of the picture is left to,
+        # as the renderer says them (renderd `drawn=`: the owner of every
+        # pixel of the composite) - not every chip of the levels loaded
+        # (before 0.12.438: FLOE_LEGEND_IN_VIEW=off) nor every chip placed in
+        # the region (0.12.438: =placed)
+        from PIL import Image
+        from floe import fillpat
         out = self.out
 
         def legend(name):
             dump = run_floe2("fe-embed", "--dump", out / name, ok=0).stdout
-            return [x[len("legend="):].split()[3:] for x in dump.split("\n")
+            return [x[len("legend="):].split() for x in dump.split("\n")
                     if x.startswith("legend=")]
 
-        def shot(name, *args, env=None):
+        def names(name):
+            return [x[3:] for x in legend(name)]
+
+        def colours(name):
+            return {"#%02x%02x%02x" % px for px in
+                    Image.open(out / name).convert("RGB").getdata()
+                    if px != (0, 0, 0)}
+
+        def shot(name, *args, env=None, deck="test.jb"):
             rep = out / (name + ".json")
-            res = run_floe2("render", self.dir / "test.jb", "--level", "2,3",
-                            "--px", "100", "--legend", *args, "--out",
-                            out / name, "--report", rep,
-                            env=env or self.env, ok=0)
+            res = run_floe2("render", self.dir / deck, "--px", "100",
+                            "--legend", *args, "--out", out / name,
+                            "--report", rep, env=env or self.env, ok=0)
             doc = json.loads(rep.read_text())["shots"][0]
             # the report's legend is the metadata's
-            self.assertEqual([x.split()[3:] for x in doc["legend"]],
-                             legend(name))
+            self.assertEqual([x.split() for x in doc["legend"]], legend(name))
             return res
 
-        # levels 2 and 3: chipA.oas 2/1 (two placements, 41020..59020 x
-        # 80020..90220 um), chipB.oas 2/3 (three, 43020..65020 x
-        # 88000..90000) and mark.oas 3/2 (three 20 um marks); a region inside
-        # chipA's first placement, under chipB's row and left of the marks
-        a = ("--bbox", "41500,80500,44500,84500")
-        shot("placed_chip.png", "--mode", "chip", *a)
-        self.assertEqual(legend("placed_chip.png"), [["chipA.oas", "2/1"]])
-        shot("placed_level.png", *a)
-        self.assertEqual(legend("placed_level.png"), [["VIA1", "2/0"]])
-        # chipB's third placement alone (right of chipA's second)
-        shot("placed_b.png", "--mode", "chip", "--bbox",
-             "63500,88500,64500,89500")
-        self.assertEqual(legend("placed_b.png"), [["chipB.oas", "2/3"]])
-        # a mark alone: level 3's chip row, the level view its head
-        m = ("--bbox", "45000,94980,45040,95020")
-        shot("placed_mark.png", "--mode", "chip", *m)
-        self.assertEqual(legend("placed_mark.png"), [["mark.oas", "3/2"]])
-        shot("placed_mark_level.png", *m)
-        self.assertEqual(legend("placed_mark_level.png"), [["ALIGN", "3/0"]])
-        # a region touching an extent's corner counts, as the window reads it
-        shot("placed_edge.png", "--mode", "chip", "--bbox",
-             "40000,79000,41020,80020")
-        self.assertEqual(legend("placed_edge.png"), [["chipA.oas", "2/1"]])
-        # a mosaic: the four tiles' regions together (tl and bl in chipA's
-        # first placement, tr in chipB's third, br in nothing)
-        shot("placed_mosaic.png", "--mode", "chip", "--corners",
-             "41500,80500,64500,89500", "--size", "1000,1000")
-        self.assertEqual(legend("placed_mosaic.png"),
-                         [["chipA.oas", "2/1"], ["chipB.oas", "2/3"]])
-        # the chips on are listed when in the frame: chipB on over chipA's
-        # region lists nothing - the picture is empty, a note says so
-        res = shot("placed_off.png", "--mode", "chip", "--chip",
-                   "2:chipB.oas", *a)
-        self.assertEqual(legend("placed_off.png"), [])
+        placed = dict(self.env, FLOE_LEGEND_IN_VIEW="placed")
+        every = dict(self.env, FLOE_LEGEND_IN_VIEW="off")
+        # level 2 places chipA.oas's 456/0 - a box 800 um inside the chip's
+        # 8000 x 10200 um extent, the first at 41020,80020 - and chipB.oas's
+        # (the whole 2000 um chip), level 3 the 20 um marks
+        a = ("--bbox", "41500,80500,44500,84500")    # over the box's corner
+        margin = ("--bbox", "41100,80100,41700,80700")   # the chip's, no shape
+        chips = ("--level", "2,3", "--mode", "chip")
+        shot("shown_chip.png", *chips, *a)
+        self.assertEqual(names("shown_chip.png"), [["chipA.oas", "2/1"]])
+        self.assertEqual({x[1] for x in legend("shown_chip.png")},
+                         colours("shown_chip.png"))
+        # the placement reaches the region but no shape of it does: nothing
+        # is drawn and nothing listed (0.12.438 listed the chip), in either
+        # view; the note says so
+        res = shot("shown_margin.png", *chips, *margin)
+        self.assertEqual(colours("shown_margin.png"), set())
+        self.assertEqual(names("shown_margin.png"), [])
         self.assertIn("no layer to list - no legend", res.stdout)
-        # FLOE_LEGEND_IN_VIEW=off: every row of the levels loaded, as before
-        off = dict(self.env, FLOE_LEGEND_IN_VIEW="off")
-        shot("placed_all.png", "--mode", "chip", *a, env=off)
-        self.assertEqual(legend("placed_all.png"),
+        shot("shown_margin_level.png", "--level", "2,3", *margin)
+        self.assertEqual(names("shown_margin_level.png"), [])
+        # ... the rules of before, by the switch
+        shot("shown_margin_placed.png", *chips, *margin, env=placed)
+        self.assertEqual(names("shown_margin_placed.png"),
+                         [["chipA.oas", "2/1"]])
+        shot("shown_margin_every.png", *chips, *margin, env=every)
+        self.assertEqual(names("shown_margin_every.png"),
                          [["chipA.oas", "2/1"], ["chipB.oas", "2/3"],
                           ["mark.oas", "3/2"]])
-        shot("placed_all_level.png", *a, env=off)
-        self.assertEqual(legend("placed_all_level.png"),
+        shot("shown_level_every.png", "--level", "2,3", *margin, env=every)
+        self.assertEqual(names("shown_level_every.png"),
                          [["VIA1", "2/0"], ["ALIGN", "3/0"]])
+        # a region touching the extent's corner: placed, not drawn
+        corner = ("--bbox", "40000,79000,41020,80020")
+        shot("shown_corner.png", *chips, *corner)
+        self.assertEqual(names("shown_corner.png"), [])
+        shot("shown_corner_placed.png", *chips, *corner, env=placed)
+        self.assertEqual(names("shown_corner_placed.png"),
+                         [["chipA.oas", "2/1"]])
+        # chipB's third placement alone, a mark alone (the level view: its
+        # level's line)
+        shot("shown_b.png", *chips, "--bbox", "63500,88500,64500,89500")
+        self.assertEqual(names("shown_b.png"), [["chipB.oas", "2/3"]])
+        m = ("--bbox", "45000,94980,45040,95020")
+        shot("shown_mark.png", *chips, *m)
+        self.assertEqual(names("shown_mark.png"), [["mark.oas", "3/2"]])
+        shot("shown_mark_level.png", "--level", "2,3", *m)
+        self.assertEqual(names("shown_mark_level.png"), [["ALIGN", "3/0"]])
+        # a mosaic: what its four tiles show together (tl and bl in chipA's
+        # box, tr in chipB's third placement, br in nothing)
+        shot("shown_mosaic.png", *chips, "--corners",
+             "41500,80500,64500,89500", "--size", "1000,1000")
+        self.assertEqual(names("shown_mosaic.png"),
+                         [["chipA.oas", "2/1"], ["chipB.oas", "2/3"]])
+        # the chips on are listed when they show: chipB on over chipA's
+        # region shows nothing
+        res = shot("shown_off.png", *chips, "--chip", "2:chipB.oas", *a)
+        self.assertEqual(names("shown_off.png"), [])
+        self.assertIn("no layer to list - no legend", res.stdout)
+        # a row painted over whole is not in the picture: inside the box,
+        # level 2's chipA covers level 1's - solid over solid in the export
+        # look (these checks' default, run_floe2), the same speckle over it in
+        # the viewer's - and the level view lists VIA1 alone, its colour the
+        # picture's one; over the box's edge and in the margin level 1 shows
+        inside = ("--bbox", "42000,81000,44000,83000")
+        viewer = dict(self.env, FLOE_RENDER_DEFAULTS="viewer")
+        for tag, look in (("arch", self.env), ("view", viewer)):
+            name = "shown_over_%s.png" % tag
+            shot(name, "--level", "1,2", *inside, env=look)
+            self.assertEqual(names(name), [["VIA1", "2/0"]], tag)
+            self.assertEqual({x[1] for x in legend(name)}, colours(name))
+            name = "shown_edge_%s.png" % tag
+            shot(name, "--level", "1,2", *a, env=look)
+            self.assertEqual(names(name),
+                             [["METAL1", "1/0"], ["VIA1", "2/0"]], tag)
+            self.assertEqual({x[1] for x in legend(name)}, colours(name))
+            name = "shown_under_%s.png" % tag
+            shot(name, "--level", "1,2", *margin, env=look)
+            self.assertEqual(names(name), [["METAL1", "1/0"]], tag)
+        # 0.12.438's rule lists the level painted over too
+        shot("shown_over_placed.png", "--level", "1,2", *inside, env=placed)
+        self.assertEqual(names("shown_over_placed.png"),
+                         [["METAL1", "1/0"], ["VIA1", "2/0"]])
+        # every row its own colour (the chip view's layerprops, solid): the
+        # rows listed are exactly those whose colour is in the picture -
+        # the whole deck, regions over one chip or several levels of chips,
+        # a mosaic (its seam line is no row's colour)
+        rows = json.loads(run_floe2(
+            "info", self.dir / "test.jb", "--chips", "--json", env=self.env,
+            ok=0).stdout)["chips"]["rows"]
+        palette = ("#ff0000", "#00ff00", "#0000ff", "#ffff00", "#00ffff")
+        own = {r["key"]: palette[i] for i, r in enumerate(rows)}
+        self.assertEqual(len(own), 5, rows)
+        props = self.dir / "test.chip-by-level.jb.layerprops"
+        props.write_text(fillpat.format_layerprops(
+            [(tuple(int(v) for v in r["key"].split("/")), own[r["key"]],
+              "solid", r["name"], "1", "1") for r in rows]))
+        self.addCleanup(lambda: props.exists() and props.unlink())
+        seen_rows = set()
+        for i, region in enumerate((
+                (), a, inside, margin, corner,
+                ("--bbox", "43000,87900,47100,92100"),
+                ("--bbox", "44900,89900,45100,90100"),
+                ("--bbox", "36000,79000,70000,106000"),
+                ("--corners", "41500,80500,64500,91900", "--size",
+                 "1500,1500"))):
+            name = "shown_own_%d.png" % i
+            shot(name, "--mode", "chip", *region)
+            seen = colours(name)
+            listed = {(x[4], x[1]) for x in legend(name)}
+            self.assertEqual(listed, {(k, c) for k, c in own.items()
+                                      if c in seen}, (region, seen))
+            seen_rows.update(k for k, _ in listed)
+        # (every row was in some picture, and some picture lacked some)
+        self.assertEqual(seen_rows, set(own))
+        props.unlink()
+        # hierarchy frames are no row's pixels: under a depth cut, in the
+        # viewer's look (frames on), the deck's one chip is drawn as its
+        # frame alone - a picture with pixels, and nothing listed
+        for name in ("hier.jb", "hier.oas"):
+            shutil.copy2(TMP / name, self.dir / name)
+        run_floe2("index", self.dir / "hier.jb", "--jobs", "2", env=self.env,
+                  ok=0)
+        shot("shown_hier.png", deck="hier.jb", env=viewer)
+        self.assertEqual(names("shown_hier.png"), [["KID", "1/0"]])
+        self.assertEqual({x[1] for x in legend("shown_hier.png")},
+                         colours("shown_hier.png"))
+        res = shot("shown_hier_frames.png", "--depth", "0", deck="hier.jb",
+                   env=viewer)
+        self.assertEqual(colours("shown_hier_frames.png"), {"#ffffff"})
+        self.assertEqual(names("shown_hier_frames.png"), [])
+        self.assertIn("no layer to list - no legend", res.stdout)
+
     def test_info_json_carries_the_chips(self):
         # info --json --chips (2026-11-09): one JSON document with the chips
         # as `chips` - before, the table followed the JSON as text and the

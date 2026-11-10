@@ -108,7 +108,7 @@ layerprops, 셀 프레임과 라벨(덱은 라벨 없음, 밀도 없음).
 | `--frames[=on\|off]` `--labels[=on\|off]` | on | 셀 프레임, 설계 텍스트. 덱의 라벨은 지원하지 않는다 |
 | `--layer-colors row\|group` | row | 레이아웃의 기본 레이어 색. row는 패널 줄마다, group은 layer 번호마다 한 색. `FLOE_LAYER_COLORS`가 기본값. 덱은 거부 |
 | `--mode level\|chip\|layer` | level | 덱의 뷰. 뷰어의 Jobdeck 메뉴와 같다. level은 마스크 레벨마다 한 색, chip은 레벨 아래 소스 칩마다 한 색(chip view), layer는 소스 레이어 LY/DT마다 한 색. 그 뷰에서 저장한 layerprops(`<deck>.jb.layerprops`, `<deck>.chip-by-level.jb.layerprops`, `<deck>.layer.jb.layerprops`)가 적용된다(§4.6). 레이아웃은 거부 (0.12.436) |
-| `--legend` | | 그린 레이어의 범례(색, 채움, 이름 L/D)를 이미지마다 flateyes 메타데이터로, 배율 `ppu`(가로 px/um)와 `unit=um`과 함께(0.12.433; DRC 스냅샷과 같다). 픽셀은 그대로다. `floe2 fe-embed --dump`로 읽는다. 덱에서 `--chip`으로 고르면 켠 칩의 줄만(0.12.436), chip view(`--mode chip`)에서는 칩 줄, 어느 뷰에서나 틀 안에 배치가 있는 줄만(0.12.438; `FLOE_LEGEND_IN_VIEW=off`면 로드한 레벨 전부)(§4.6) |
+| `--legend` | | 그린 레이어의 범례(색, 채움, 이름 L/D)를 이미지마다 flateyes 메타데이터로, 배율 `ppu`(가로 px/um)와 `unit=um`과 함께(0.12.433; DRC 스냅샷과 같다). 픽셀은 그대로다. `floe2 fe-embed --dump`로 읽는다. 덱에서 `--chip`으로 고르면 켠 칩의 줄만(0.12.436), chip view(`--mode chip`)에서는 칩 줄, 어느 뷰에서나 그림에 실제로 보이는 줄만(0.12.439; `FLOE_LEGEND_IN_VIEW=placed`면 틀 안에 배치가 있는 줄, `off`면 로드한 레벨 전부)(§4.6) |
 | `--archival` | | 보관용 모양: 컷 0, solid 채움, 밀도·프레임·라벨 없음(0.12.349까지의 기본). 함께 준 옵션이 이긴다. `FLOE_RENDER_DEFAULTS=archival`이면 이것이 기본 |
 | `--label-font-px N` | 14 | 라벨 글자 크기 6..96 |
 
@@ -210,7 +210,7 @@ floe2 render deck.jb --mosaic-at "X,Y;X,Y;X,Y;X,Y" --size W,H --line 3 --keep-ti
 - 타일마다 `--px`이고 결과는 가로세로 두 배(tl,tr / bl,br), 최종 이미지는 64 Mpx까지다. 타일이 16 Mpx를 넘으면
   네 타일이 같이 줄어든다(§1.1; WARNING은 `quad.png each tile: …`, 보고서의 `pixel_requested`는 합친 크기).
   `--px`를 생략하면 타일마다 그 종횡비의 가장 큰 크기라 정사각 타일의 최종 이미지는 8192×8192, 64 Mpx다(0.12.433).
-- `--legend`는 합친 최종 이미지에 들어간다. 덱이면 네 타일 영역 중 하나에라도 배치가 있는 줄이다(0.12.438). 보고서에는 `mosaic`과 `tiles`(타일별 bbox)가 남는다.
+- `--legend`는 합친 최종 이미지에 들어간다. 덱이면 네 타일 중 하나에라도 실제로 보이는 줄이다(0.12.439). 보고서에는 `mosaic`과 `tiles`(타일별 bbox)가 남는다.
 
 ---
 
@@ -311,11 +311,16 @@ floe2 render deck.jb --mode layer --out layers.png                              
 - `--legend`는 그 뷰가 보여 주는 줄을 적는다. level view는 레벨 줄, chip view는 칩 줄(색, 채움, 파일 이름, `L/D`)이고
   레벨 머리 줄은 적지 않는다(그 색으로 그려진 것이 없다). `--chip`으로 고르면 켠 칩의 줄만 적는다(0.12.436; 전에는
   로드한 레벨 전부).
-- 틀 안에 배치가 있는 줄만 적는다(0.12.438; 사용자 "현재 캡쳐된 화면에 있는 것들만 레전드에 포함되게"). 칩은 자기
-  배치 하나라도 캡처 영역에 닿을 때, 레벨은 그 레벨의 배치가 닿을 때다. 판정은 캡처 창(§4.4)과 같다: 덱의 BX..UY
-  범위가 영역에 닿으면 포함이고 모서리만 닿아도 포함, 범위를 모르는 배치는 늘 포함이다. mosaic은 네 타일 영역을 합쳐
-  본다. 켠 칩이 틀 밖이면 줄이 없고 `note: … no layer to list - no legend`가 난다. `FLOE_LEGEND_IN_VIEW=off`면 전처럼
-  로드한 레벨의 줄 전부다.
+- 그림에 실제로 보이는 줄만 적는다(0.12.439; 사용자 "실제 그려진 것만 레전드를 추가하도록"). 렌더러가 프레임을
+  합성하면서 픽셀마다 마지막으로 칠한 줄을 기억했다가, 픽셀이 하나라도 남은 줄을 프레임과 함께 알려 준다(renderd
+  `drawn=`). 그래서 배치는 영역에 닿지만 그 자리에 그 레이어의 도형이 없는 칩, 위에 그린 줄에 전부 덮인 줄, 요약을
+  기다리느라 비워 둔 pass의 줄은 적지 않는다. 셀 프레임 선은 줄의 색이 아니므로 세지 않는다. 레벨 줄은 그 레벨의 칩
+  가운데 하나라도 보일 때 적는다. mosaic은 네 타일을 합쳐 본다. 보이는 줄이 없으면 범례가 없고
+  `note: … no layer to list - no legend`가 난다. 이 판정에 렌더러가 프레임을 그리는 동안 픽셀당 4바이트를 더 쓴다
+  (16 Mpx 프레임이면 64 MB). `--legend`를 준 덱 캡처에서만이다.
+- `FLOE_LEGEND_IN_VIEW=placed`면 0.12.438의 규칙이다: 틀 안에 배치가 있는 줄(덱의 BX..UY 범위가 영역에 닿으면 포함,
+  모서리만 닿아도, 범위를 모르는 배치는 늘; 캡처 창 §4.4의 판정). `off`면 로드한 레벨의 줄 전부다(0.12.437까지).
+  레이아웃 캡처의 범례는 이 규칙 밖이다: 전처럼 무언가 든 레이어를 모두 적는다.
 - `--chip`, `--chip-off`, `--fit-chip`, `--in-chip`, `--layerid`, `--layer`는 뷰와 무관하게 같다. 켜고 끄는 단위는
   어느 뷰에서나 레벨 아래의 소스 칩이다.
 - 뷰는 한 실행에 하나다. batch 키가 아니므로 level view와 chip view를 함께 찍으려면 두 번 돌린다.
@@ -398,7 +403,7 @@ floe2: frame 1280x13440 px for 40.0000x420.0000 um (0.0000,0.0000,40.0000,420.00
 | `FLOE_INDEX_LIGHT` | 덱 on, 레이아웃 off | 자동 색인이 만드는 캐시의 종류(`--light`/`--full`) |
 | `FLOE_LOCK_WAIT` | off | `on`이나 초: 색인 중인 소스를 기다린다(`--wait`) |
 | `FLOE_DECK_WINDOW` | on | `off`면 덱 캡처가 로드한 레벨의 모든 소스를 연다(§4.4) |
-| `FLOE_LEGEND_IN_VIEW` | on | `off`면 덱 캡처의 `--legend`가 틀 안에 배치가 있는 줄만이 아니라 로드한 레벨의 줄 전부를 적는다(§4.6; 0.12.437까지의 동작) |
+| `FLOE_LEGEND_IN_VIEW` | drawn | 덱 캡처의 `--legend`가 적는 줄. 기본은 그림에 실제로 보이는 줄(0.12.439). `placed`면 틀 안에 배치가 있는 줄(0.12.438의 규칙), `off`면 로드한 레벨의 줄 전부(0.12.437까지의 동작)(§4.6) |
 | `FLOE_CAPTURE_PX` | max | `--px`를 생략했을 때의 크기. `--px`와 같은 `W`·`WxH`·`max`(§1.1). `1200`이면 0.12.432까지의 기본. DRC 스냅샷의 기본 1200에는 적용되지 않는다 |
 | `FLOE_CAPTURE_REDUCE` | on | `off`면 16 Mpx를 넘는 프레임을 줄이지 않고 거부한다(§1.1; DRC 스냅샷도) |
 | `FLOE_RENDER_DEFAULTS` | | `archival`이면 보관용 모양이 기본(0.12.349까지의 동작) |

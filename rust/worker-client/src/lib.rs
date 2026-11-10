@@ -186,6 +186,14 @@ impl Frame {
             && !self.labels_truncated
             && self.summary_building == 0
     }
+    /// The layers that show in the frame, as their L/D keys (`drawn=`, asked
+    /// with RenderRequest::drawn): a jobdeck frame's deck layers left with
+    /// a pixel of the composite - a layer painted over whole, or with no
+    /// shape in the view, is not among them. None: the frame does not say
+    /// (not asked, or a plain layout's frame).
+    pub fn drawn(&self) -> Result<Option<Vec<(u32, u32)>>> {
+        protocol::parse_drawn(self.fields.get("drawn"))
+    }
 }
 
 #[derive(Debug)]

@@ -250,9 +250,11 @@ floe2 render deck.jb --batch perchip.txt --out perchip/ --report perchip/report.
 - `--legend`는 그린 레벨의 범례(색, 채움, 이름, N/0)와 축척(`ppu`, `unit`)을 flateyes 메타데이터로 넣는다.
   `floe2 fe-embed --dump a.png`로 읽는다. 픽셀은 그대로다. chip view에서는 칩 줄(색, 채움, 파일 이름, L/D)이고 레벨
   머리 줄은 없다(그 색으로 그려진 것이 없다). `--chip`으로 고르면 켠 칩의 줄만 적는다(0.12.436; 전에는 로드한 레벨
-  전부). 어느 뷰에서나 틀 안에 배치가 있는 줄만 적는다(0.12.438): 칩은 배치 하나라도 캡처 영역에 닿을 때, 레벨은 그
-  레벨의 배치가 닿을 때이고, 판정은 캡처 창(§7)과 같다(모서리만 닿아도, 범위를 모르는 배치는 늘). mosaic은 네 타일
-  영역을 합쳐 본다. `FLOE_LEGEND_IN_VIEW=off`면 로드한 레벨 전부다.
+  전부). 어느 뷰에서나 그림에 실제로 보이는 줄만 적는다(0.12.439): 렌더러가 픽셀마다 마지막으로 칠한 줄을 기억해
+  픽셀이 남은 줄만 알려 준다. 배치가 영역에 닿아도 그 자리에 도형이 없는 칩, 위에 그린 줄에 전부 덮인 줄, 셀 프레임만
+  그려진 줄은 적지 않는다. 레벨 줄은 그 레벨의 칩 가운데 하나라도 보일 때 적는다. mosaic은 네 타일을 합쳐 본다.
+  `FLOE_LEGEND_IN_VIEW=placed`면 틀 안에 배치가 있는 줄(0.12.438의 규칙, 캡처 창 §7의 판정), `off`면 로드한 레벨
+  전부다.
 
 ## 13. 광역과 점유 요약
 
@@ -331,8 +333,9 @@ before)`이다(0.12.437; 그 전은 `floe2: rendered incomplete - …  [exit 3]`
 주의(동작은 하되 알아 둘 것):
 
 8. ~~`--chip`으로 고른 캡처의 `--legend`가 로드한 레벨 전부를 적던 것~~: 0.12.436부터 켠 칩의 줄만 적는다(level view는
-   그 레벨 줄, chip view는 그 칩 줄). ~~chip view의 `--legend`가 로드한 레벨의 칩 전부를 적던 것~~: 0.12.438부터 어느
-   뷰에서나 틀 안에 배치가 있는 줄만 적는다(§12; `FLOE_LEGEND_IN_VIEW=off`면 전부).
+   그 레벨 줄, chip view는 그 칩 줄). ~~chip view의 `--legend`가 로드한 레벨의 칩 전부를 적던 것~~: 0.12.438부터 틀
+   안에 배치가 있는 줄만, 0.12.439부터는 어느 뷰에서나 그림에 실제로 보이는 줄만 적는다(§12;
+   `FLOE_LEGEND_IN_VIEW=placed`면 0.12.438의 배치 기준, `off`면 전부).
 9. `<deck>.jb.layerprops`의 숨김(visibility 0)은 캡처에 적용되지 않는다(§12).
 10. `--frames`는 `--depth N` 컷 아래에만 나타나고, `--labels on`, `--density`, `--layer-colors`는 덱에서 거절한다(exit 2).
 11. `--layerid N`만 주면 전 레벨을 로드한다. `--level N`을 같이 준다(§3).
@@ -357,3 +360,8 @@ before)`이다(0.12.437; 그 전은 `floe2: rendered incomplete - …  [exit 3]`
 레전드에 포함되게") 같은 덱으로 확인했다(ChipShotTests의 `test_a_legend_lists_the_rows_placed_in_the_frame`: chipA의
 배치 하나만 든 영역, chipB만, 마크만, 모서리 접촉, mosaic 네 타일의 합, 켠 칩이 틀 밖일 때의 빈 범례,
 `FLOE_LEGEND_IN_VIEW=off`).
+2026-11-10 0.12.439: `--legend`가 그림에 실제로 보이는 줄만 적도록 바꾸고(§12; 사용자 "실제 그려진 것만 레전드를
+추가하도록"; floe-index/renderd 0.12.439) 같은 덱으로 확인했다(ChipShotTests의
+`test_a_legend_lists_what_the_picture_shows`: 배치는 닿지만 도형이 없는 여백과 모서리 접촉은 빈 범례, 위 레벨에 전부
+덮인 레벨은 빠짐, 줄마다 다른 색을 준 chip view에서 아홉 영역의 범례가 그림에 있는 색의 줄과 정확히 같음, 깊이 컷의
+프레임만 있는 그림은 빈 범례, `FLOE_LEGEND_IN_VIEW=placed`와 `off`).

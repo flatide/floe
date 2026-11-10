@@ -120,6 +120,32 @@ pub(crate) fn parse_line(bytes: &[u8]) -> Result<Line> {
     })
 }
 
+/// A frame's `drawn=` (asked with RenderRequest::drawn): the layers that
+/// show in the frame, as their L/D keys - `1/0,2/3`, or `none` when no layer
+/// does. None: the frame does not say (not asked, or a plain layout's).
+pub(crate) fn parse_drawn(value: Option<&str>) -> Result<Option<Vec<(u32, u32)>>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value == "none" {
+        return Ok(Some(Vec::new()));
+    }
+    value
+        .split(',')
+        .map(|pair| {
+            let (layer, datatype) = pair.split_once('/')?;
+            let number = |text: &str| {
+                (!text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()))
+                    .then(|| text.parse::<u32>().ok())
+                    .flatten()
+            };
+            Some((number(layer)?, number(datatype)?))
+        })
+        .collect::<Option<Vec<_>>>()
+        .map(Some)
+        .ok_or_else(|| Error::protocol("invalid drawn"))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameFormat {
     Png,
@@ -275,6 +301,13 @@ pub struct RenderRequest {
     /// DIRECT_READ_PLAN §5.4): the viewer's way (true, the default). A
     /// capture sets false (`progressive=0`): its frame waits for the fills.
     pub progressive: bool,
+    /// The frame says which layers show in it (`drawn=1`; Frame::drawn): a
+    /// capture's legend lists them alone (user 2026-11-10: "실제 그려진
+    /// 것만 레전드를 추가하도록"). renderd says it of a jobdeck's frames -
+    /// the deck layers left with a pixel of the composite, at one u32 a
+    /// pixel while the frame is drawn - so only a capture that embeds a
+    /// legend asks; the viewer never does.
+    pub drawn: bool,
 }
 
 impl Default for RenderRequest {
@@ -306,6 +339,7 @@ impl Default for RenderRequest {
             density: None,
             occupancy: None,
             progressive: true,
+            drawn: false,
         }
     }
 }
@@ -374,6 +408,9 @@ impl RenderRequest {
         }
         if !self.progressive {
             command.push_str(" progressive=0");
+        }
+        if self.drawn {
+            command.push_str(" drawn=1");
         }
         if command.len() > MAX_LINE_BYTES {
             return Err(Error::new(
@@ -522,8 +559,36 @@ mod tests {
             .command(1, 1, "/tmp/f", 1_000_000)
             .unwrap()
             .ends_with(" density=on occupancy=on progressive=0"));
+        // a capture's legend asks which layers show in the frame: said only
+        // when asked
+        r.drawn = true;
+        assert!(r
+            .command(1, 1, "/tmp/f", 1_000_000)
+            .unwrap()
+            .ends_with(" density=on occupancy=on progressive=0 drawn=1"));
+        r.drawn = false;
         r.progressive = true;
+        assert!(!r.command(1, 1, "/tmp/f", 1_000_000).unwrap().contains(" drawn="));
         r.viewport = Some((0, 480));
         assert!(r.command(1, 1, "/tmp/f", 1_000_000).is_err());
+    }
+
+    #[test]
+    fn a_frames_drawn_layers_are_read_as_pairs() {
+        // not said: None (not asked, or a plain layout's frame)
+        assert_eq!(parse_drawn(None).unwrap(), None);
+        // said: the keys in the daemon's order; `none` is no layer
+        assert_eq!(parse_drawn(Some("none")).unwrap(), Some(Vec::new()));
+        assert_eq!(
+            parse_drawn(Some("2/1,2/3,10/0")).unwrap(),
+            Some(vec![(2, 1), (2, 3), (10, 0)])
+        );
+        assert_eq!(
+            parse_drawn(Some("4294967295/0")).unwrap(),
+            Some(vec![(u32::MAX, 0)])
+        );
+        for bad in ["2", "2/", "/1", "2/1,", ",2/1", "2/1/3", "a/1", "2/-1", "+2/1", "4294967296/0", "2/1 3/1"] {
+            assert!(parse_drawn(Some(bad)).is_err(), "{bad}");
+        }
     }
 }

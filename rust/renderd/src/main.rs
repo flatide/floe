@@ -559,6 +559,13 @@ struct RenderCommand {
     /// viewer): the frame goes out after FLOE_LIGHT_FIRST_MS of fills and is
     /// drawn again after them (run_render's light attempts).
     progressive: bool,
+    /// `drawn=1`: the frame line says which layers show in the frame
+    /// (`drawn=L/D,...`, `drawn=none`) - a capture's legend lists them alone
+    /// (user 2026-11-10: "실제 그려진 것만 레전드를 추가하도록"). A jobdeck's
+    /// frames say it (floe_render_core::DeckRenderRequest::drawn: the deck
+    /// layers left with a pixel of the composite); a plain layout's frame
+    /// carries no `drawn=`, and the asker reads that as not said.
+    drawn: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -698,6 +705,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                 "density",
                 "occupancy",
                 "progressive",
+                "drawn",
             ]);
             reject_unknown(&fields, &allowed)?;
             let thin_keep = match fields.get("thin").map(|s| s.as_str()) {
@@ -794,6 +802,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                     density: optional_bool(&fields, "density")?,
                     occupancy: optional_bool(&fields, "occupancy")?,
                     progressive: optional_bool(&fields, "progressive")?.unwrap_or(true),
+                    drawn: optional_bool(&fields, "drawn")?.unwrap_or(false),
                 },
             ))))
         }
@@ -2678,9 +2687,15 @@ fn run_deck_render_attempt(
         } else {
             None
         },
+        drawn: command.drawn,
     };
     let report = deck.render(&request, command.generation, cancellation)?;
     check_generation(cancellation, command.generation)?;
+    // `drawn=1`: the deck layers the frame shows, by their keys
+    let drawn = report
+        .drawn
+        .as_ref()
+        .map(|outs| drawn_field(outs, &deck.layers()));
     let pending = report.light_pending;
     let round = published + 1;
     let output = if pending && command.unique_round_paths {
@@ -2804,9 +2819,33 @@ fn run_deck_render_attempt(
         );
     respond(
         responses,
-        format!("{response} {}", QueryContext::default().wire()),
+        format!(
+            "{response}{} {}",
+            drawn.map_or_else(String::new, |drawn| format!(" drawn={drawn}")),
+            QueryContext::default().wire()
+        ),
     );
     Ok(pending)
+}
+
+/// The value of a deck frame's `drawn=`: the keys (`L/D`, the pair the
+/// viewer keys a deck layer by) of the layers `outs` in their order, or
+/// `none` when no layer shows (a field's value is never empty).
+fn drawn_field(outs: &[u32], layers: &[floe_render_core::DeckLayer]) -> String {
+    let keys: BTreeMap<u32, (u32, u32)> = layers
+        .iter()
+        .map(|layer| (layer.out, (layer.layer, layer.datatype)))
+        .collect();
+    let pairs: Vec<String> = outs
+        .iter()
+        .filter_map(|out| keys.get(out))
+        .map(|(layer, datatype)| format!("{layer}/{datatype}"))
+        .collect();
+    if pairs.is_empty() {
+        "none".to_string()
+    } else {
+        pairs.join(",")
+    }
 }
 
 /// Whether a plain layout's plan keeps its sub-cut pages as washes or
@@ -7559,6 +7598,31 @@ mod tests {
             .unwrap(),
         )
         .progressive);
+        // a frame says which layers show in it only when asked (`drawn=1`,
+        // a capture's legend)
+        assert!(!parsed_render.drawn);
+        assert!(render(
+            parse_command(
+                "render gen=7 view=-0.5,-0.5,9.5,9.5 w=10 h=10 depth=full cut=0 exact=1 frames=off layers=1/0 drawn=1 out=/tmp/f.png",
+            )
+            .unwrap()
+            .unwrap(),
+        )
+        .drawn);
+        // a deck frame's `drawn=`: the layers' keys in the order given,
+        // `none` when no layer shows
+        let deck_layer = |out, layer, datatype| floe_render_core::DeckLayer {
+            out,
+            layer,
+            datatype,
+            name: String::new(),
+            color: [0; 4],
+            fill: LayerFill::Solid,
+            outline_width: 1,
+        };
+        let deck_layers = [deck_layer(0, 2, 0), deck_layer(1, 2, 1), deck_layer(2, 2, 3)];
+        assert_eq!(drawn_field(&[1, 2], &deck_layers), "2/1,2/3");
+        assert_eq!(drawn_field(&[], &deck_layers), "none");
         assert!(parsed_render.exact);
         assert!(!parsed_render.frames);
         assert!(!parsed_render.labels);

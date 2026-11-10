@@ -80,11 +80,12 @@ makes it the default, as before 0.12.350).
                             FLOE_LAYER_COLORS sets the default; layouts
   --legend                  Each image carries the legend of the layers it
                             draws (colour, fill, name L/D; every layer on: the
-                            layer panel's rows; a jobdeck's rows with a
-                            placement in the frame - FLOE_LEGEND_IN_VIEW=off
-                            lists every row loaded) and its scale (ppu: px per
-                            um along x; unit um) as flateyes metadata - the
-                            pixels stay as drawn; fe-embed --dump prints it
+                            layer panel's rows; of a jobdeck the rows the
+                            picture shows - FLOE_LEGEND_IN_VIEW=placed: those
+                            with a placement in the frame, =off: every row
+                            loaded) and its scale (ppu: px per um along x;
+                            unit um) as flateyes metadata - the pixels stay
+                            as drawn; fe-embed --dump prints it
   --archival                The export look; the options given still win
   --label-font-px N          6..96 (default 14)
   --out FILE                Default view.png; atomic PNG publication
