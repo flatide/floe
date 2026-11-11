@@ -616,6 +616,36 @@ never do, and their line is unchanged. A plain layout's frame carries no
 `drawn=` (its planes' density mixes colours a pixel; not said yet), which the
 asker reads as not said.
 
+Since 0.12.449 a render command may carry `distinct=layer|datatype|pair`
+(worker-client `RenderRequest::distinct`; user 2026-11-11: the layers a
+picture paints should not share a colour - decide a layer's colour when it is
+actually painted, as far as can be from those painted before). A jobdeck view
+gives its rows the palette's ten colours in turn, so two rows of a picture
+may have one. With the field, `Deck::render` decides a layer's colour when a
+pass of it first leaves a pixel in the frame (`render-core/src/distinct.rs`,
+`pass_swap`): the passes are rastered in the layers' own colours as ever and
+laid opaque-over in placement order, each of one colour, so the pass about to
+be laid is looked at for a pixel and, when its layer is given another colour,
+laid with its pixels changed (`overlay_window_owned`'s `swap`). The colour is
+the layer's own while no layer painted before it has it, else the colour of
+the palette farthest (OKLab, in whole numbers) from every colour in use and
+from the black under them - of the first tier with a colour not in use. The
+value says which rows are one colour and decided together: `layer` the rows of
+a layer number (a level view's level and its chips; a layer view's LY),
+`datatype` those of a datatype number (a chip view's source chip under every
+level), `pair` each L/D its own. `distinct_palette=RRGGBB,..;RRGGBB,..` gives
+the colours in tiers (the view's palette, then the reserve),
+`distinct_fixed=L/D,..` rows whose colour is theirs to keep - their group is
+left as it is and its colours are in use from the frame's start -, and
+`distinct_taken=L/D:RRGGBB,..` the colours the picture's earlier frames decided
+(a mosaic's tiles). The frame line says the layers that painted and the colour
+each was painted in, `distinct=L/D:RRGGBB,..` or `distinct=none`
+(`Frame::distinct`) - also a layer painted over whole later, which `drawn=`
+leaves out. It costs a look over each pass's window for a pixel and no memory.
+A mono frame decides nothing and says nothing; a plain layout's frame takes
+the fields and says nothing. A jobdeck capture asks (`floe2 render DECK`,
+unless `FLOE_DECK_DISTINCT_COLORS=off`); the viewer's frames never do.
+
 A historical cold-daemon gate on a 303-page dense `sample9` mid-zoom view measured
 first/final frame latency of 17/290ms, 17/159ms, 21/122ms, and 31/99ms for
 `round_pages=32/64/128/256` respectively at 600x600 with eight workers. The

@@ -274,6 +274,7 @@ mosaic, `--batch`는 레이아웃(.oas/.gds)에도 그대로 쓰인다. 칩 on/o
   - 한 줄은 `box 색 fill 이름 L/D`다. 그림을 그린 스타일에서 만든다(layerprops 색·패턴, `--layer-colors`, `--archival`의 solid, jobdeck 레벨 색).
   - 모든 레이어를 켜면 레이어 패널의 줄(빈 LAYERNAME 쌍 제외)이고, `--layers`면 그 레이어들을 준 순서로 넣는다. jobdeck은 레벨(머리 행)을 넣고(`--mode chip`이면 칩 줄), 어느 뷰에서나 그림에 실제로 보이는 줄만 넣는다(0.12.439; `FLOE_LEGEND_IN_VIEW=placed`면 틀 안에 배치가 있는 줄, `off`면 로드한 레벨 전부).
   - batch는 샷마다 자기 레이어의 레전드, mosaic은 합친 최종 이미지에 넣는다. report의 shot에 `legend` 줄들이 남는다.
+  - jobdeck 캡처는 그림에 칠해지는 줄끼리 색이 겹치지 않게 한다(0.12.449). 팔레트가 열 색을 돌려 써서 같아진 줄은, 처음 칠해질 때 이미 칠한 색들과 가장 먼 팔레트 색을 받는다. 겹치지 않는 줄과 뷰어의 화면은 뷰의 색 그대로다. `--legend` 유무와 무관하고 report의 shot에 `colors`·`recolored`가 남는다. `FLOE_DECK_DISTINCT_COLORS=off`면 뷰의 색으로 찍는다.
   - 픽셀은 그대로다(`floe2 fe-embed --strip`으로 지우면 `--legend` 없는 캡처와 바이트가 같다). flateyes로 열면 보이고, `floe2 fe-embed --dump x.png`로 읽는다.
   - DRC 캡처는 격리된 레이어면 원래 레전드를 넣고, `--legend`면 전체 레이어 캡처에도 넣는다.
 

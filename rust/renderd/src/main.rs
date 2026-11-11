@@ -566,6 +566,23 @@ struct RenderCommand {
     /// layers left with a pixel of the composite); a plain layout's frame
     /// carries no `drawn=`, and the asker reads that as not said.
     drawn: bool,
+    /// `distinct=layer|datatype|pair` (user 2026-11-11: "실제로 칠할때 색을
+    /// 결정하고 이전에 그린 색과 최대한 겹치지 않게 선택"): the layers a
+    /// jobdeck's frame paints are told apart by their colours - a layer's
+    /// colour is decided when it first paints, its own unless a layer
+    /// painted before it has that one (floe_render_core::DistinctColors).
+    /// The value says which rows are one colour and decided together:
+    /// `layer` those of a layer number (a level view's level), `datatype`
+    /// those of a datatype number (a chip view's source chip under every
+    /// level), `pair` each L/D its own. With it
+    /// `distinct_palette=RRGGBB,..;RRGGBB,..` (the colours to choose from, in
+    /// tiers), `distinct_fixed=L/D,..` (rows whose colour is theirs to keep)
+    /// and `distinct_taken=L/D:RRGGBB,..` (the colours the picture's earlier
+    /// frames decided). The frame line then says the rows that painted and
+    /// their colours, `distinct=L/D:RRGGBB,..` or `distinct=none`. A plain
+    /// layout's frame takes the fields and says nothing; a capture asks, the
+    /// viewer never does.
+    distinct: Option<floe_render_core::DistinctColors>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -706,6 +723,10 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                 "occupancy",
                 "progressive",
                 "drawn",
+                "distinct",
+                "distinct_palette",
+                "distinct_fixed",
+                "distinct_taken",
             ]);
             reject_unknown(&fields, &allowed)?;
             let thin_keep = match fields.get("thin").map(|s| s.as_str()) {
@@ -803,6 +824,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                     occupancy: optional_bool(&fields, "occupancy")?,
                     progressive: optional_bool(&fields, "progressive")?.unwrap_or(true),
                     drawn: optional_bool(&fields, "drawn")?.unwrap_or(false),
+                    distinct: parse_distinct(&fields)?,
                 },
             ))))
         }
@@ -981,6 +1003,80 @@ fn parse_fields<'a>(
         }
     }
     Ok(fields)
+}
+
+/// A render command's `distinct=layer|datatype|pair` and the three fields
+/// that go with it (RenderCommand::distinct). None: not asked.
+fn parse_distinct(
+    fields: &BTreeMap<String, String>,
+) -> Result<Option<floe_render_core::DistinctColors>, String> {
+    const WITH: [&str; 3] = ["distinct_palette", "distinct_fixed", "distinct_taken"];
+    let Some(by) = fields.get("distinct") else {
+        return match WITH.iter().find(|name| fields.contains_key(**name)) {
+            Some(name) => Err(format!("{name} requires distinct=layer|datatype|pair")),
+            None => Ok(None),
+        };
+    };
+    let by = match by.as_str() {
+        "layer" => floe_render_core::RowsBy::Layer,
+        "datatype" => floe_render_core::RowsBy::Datatype,
+        "pair" => floe_render_core::RowsBy::Pair,
+        other => return Err(format!("distinct must be layer, datatype or pair: {other}")),
+    };
+    let color = |text: &str| -> Result<[u8; 4], String> {
+        if text.len() != 6 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(format!("a distinct colour is RRGGBB: {text}"));
+        }
+        let byte = |at: usize| u8::from_str_radix(&text[at..at + 2], 16).unwrap_or(0);
+        Ok([byte(0), byte(2), byte(4), 255])
+    };
+    let key = |text: &str| -> Result<(u32, u32), String> {
+        let number = |part: &str| {
+            (!part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| part.parse::<u32>().ok())
+                .flatten()
+        };
+        text.split_once('/')
+            .and_then(|(layer, datatype)| Some((number(layer)?, number(datatype)?)))
+            .ok_or_else(|| format!("a distinct row is L/D: {text}"))
+    };
+    let mut distinct = floe_render_core::DistinctColors {
+        by,
+        ..Default::default()
+    };
+    if let Some(value) = fields.get("distinct_palette") {
+        for tier in value.split(';') {
+            distinct
+                .palette
+                .push(tier.split(',').map(color).collect::<Result<_, _>>()?);
+        }
+    }
+    if let Some(value) = fields.get("distinct_fixed") {
+        distinct.fixed = value.split(',').map(key).collect::<Result<_, _>>()?;
+    }
+    if let Some(value) = fields.get("distinct_taken") {
+        for entry in value.split(',') {
+            let (row, taken) = entry
+                .split_once(':')
+                .ok_or_else(|| format!("a distinct colour taken is L/D:RRGGBB: {entry}"))?;
+            distinct.taken.insert(key(row)?, color(taken)?);
+        }
+    }
+    Ok(Some(distinct))
+}
+
+/// The value of a deck frame's `distinct=`: the rows that painted and the
+/// colour each was painted in, `L/D:RRGGBB,...` by key, or `none` when no
+/// row painted (a field's value is never empty).
+fn distinct_field(painted: &[((u32, u32), [u8; 4])]) -> String {
+    if painted.is_empty() {
+        return "none".to_string();
+    }
+    painted
+        .iter()
+        .map(|((layer, datatype), [r, g, b, _])| format!("{layer}/{datatype}:{r:02x}{g:02x}{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn reject_unknown(fields: &BTreeMap<String, String>, allowed: &[&str]) -> Result<(), String> {
@@ -2688,6 +2784,7 @@ fn run_deck_render_attempt(
             None
         },
         drawn: command.drawn,
+        distinct: command.distinct.clone(),
     };
     let report = deck.render(&request, command.generation, cancellation)?;
     check_generation(cancellation, command.generation)?;
@@ -2696,6 +2793,8 @@ fn run_deck_render_attempt(
         .drawn
         .as_ref()
         .map(|outs| drawn_field(outs, &deck.layers()));
+    // `distinct=`: the rows that painted, and in which colour
+    let distinct = report.distinct.as_deref().map(distinct_field);
     let pending = report.light_pending;
     let round = published + 1;
     let output = if pending && command.unique_round_paths {
@@ -2820,8 +2919,9 @@ fn run_deck_render_attempt(
     respond(
         responses,
         format!(
-            "{response}{} {}",
+            "{response}{}{} {}",
             drawn.map_or_else(String::new, |drawn| format!(" drawn={drawn}")),
+            distinct.map_or_else(String::new, |distinct| format!(" distinct={distinct}")),
             QueryContext::default().wire()
         ),
     );
@@ -7623,6 +7723,69 @@ mod tests {
         let deck_layers = [deck_layer(0, 2, 0), deck_layer(1, 2, 1), deck_layer(2, 2, 3)];
         assert_eq!(drawn_field(&[1, 2], &deck_layers), "2/1,2/3");
         assert_eq!(drawn_field(&[], &deck_layers), "none");
+        // a frame decides its layers' colours as they paint only when asked
+        // (`distinct=`, a jobdeck capture): how the rows are one colour, the
+        // palette in tiers, the rows to leave, the colours decided before
+        assert_eq!(parsed_render.distinct, None);
+        let distinct = |fields: &str| {
+            parse_command(&format!(
+                "render gen=7 view=-0.5,-0.5,9.5,9.5 w=10 h=10 depth=full cut=0 exact=1 frames=off layers=1/0 {fields} out=/tmp/f.png",
+            ))
+            .map(|command| render(command.unwrap()).distinct)
+        };
+        assert_eq!(
+            distinct("distinct=layer").unwrap(),
+            Some(floe_render_core::DistinctColors {
+                by: floe_render_core::RowsBy::Layer,
+                ..Default::default()
+            })
+        );
+        assert_eq!(
+            distinct("distinct=datatype").unwrap().unwrap().by,
+            floe_render_core::RowsBy::Datatype
+        );
+        assert_eq!(
+            distinct(
+                "distinct=pair distinct_palette=0000ff,FFFF00;418dd9 distinct_fixed=5/0,2/3 distinct_taken=1/0:ff0000,11/2:00ff00"
+            )
+            .unwrap(),
+            Some(floe_render_core::DistinctColors {
+                by: floe_render_core::RowsBy::Pair,
+                palette: vec![
+                    vec![[0, 0, 255, 255], [255, 255, 0, 255]],
+                    vec![[0x41, 0x8d, 0xd9, 255]]
+                ],
+                fixed: [(2, 3), (5, 0)].into_iter().collect(),
+                taken: [((1, 0), [255, 0, 0, 255]), ((11, 2), [0, 255, 0, 255])]
+                    .into_iter()
+                    .collect(),
+            })
+        );
+        for bad in [
+            "distinct=1",
+            "distinct_palette=0000ff",
+            "distinct_fixed=1/0",
+            "distinct_taken=1/0:ff0000",
+            "distinct=pair distinct_palette=#0000ff",
+            "distinct=pair distinct_palette=0000f",
+            "distinct=pair distinct_palette=0000ff,",
+            "distinct=pair distinct_palette=0000ff;",
+            "distinct=pair distinct_fixed=1",
+            "distinct=pair distinct_fixed=1/a",
+            "distinct=pair distinct_fixed=1/0,",
+            "distinct=pair distinct_taken=1/0",
+            "distinct=pair distinct_taken=1/0:ff00",
+            "distinct=pair distinct_taken=1:ff0000",
+        ] {
+            assert!(distinct(bad).is_err(), "{bad}");
+        }
+        // a deck frame's `distinct=`: the rows that painted with their
+        // colours, `none` when none did
+        assert_eq!(
+            distinct_field(&[((1, 0), [0, 0, 255, 255]), ((11, 2), [0x41, 0x8d, 0xd9, 255])]),
+            "1/0:0000ff,11/2:418dd9"
+        );
+        assert_eq!(distinct_field(&[]), "none");
         assert!(parsed_render.exact);
         assert!(!parsed_render.frames);
         assert!(!parsed_render.labels);

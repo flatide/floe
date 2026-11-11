@@ -303,8 +303,29 @@ floe2 render deck.jb --mode layer --out layers.png                              
 
 - 기본은 뷰어의 level view다. 마스크 레벨마다 한 색이고 그 레벨의 칩은 모두 그 색이다.
 - `--mode chip`은 뷰어의 chip view다(0.12.436). 레벨 아래 소스 칩마다 한 색이다. 팔레트는 뷰어와 같다. 레벨들이
-  앞 색을 차지하고 그 뒤를 소스가 덱에 처음 나오는 순서로 받으므로, 어떤 레벨을 로드하든 같은 소스는 같은 색이다.
+  앞 색을 차지하고 그 뒤를 소스가 덱에 처음 나오는 순서로 받으므로, 어떤 레벨을 로드하든 같은 소스는 같은 색이다
+  (한 그림에서 색이 겹쳐 캡처가 바꿔 주는 줄은 예외다: 아래).
 - `--mode layer`는 source layer view다. 소스 레이어 LY/DT마다 한 색이다.
+- **그림에 칠해지는 줄끼리는 색이 겹치지 않게 한다**(0.12.449; 사용자 "가능하면 칠해진 레이어의 색이 겹치지 않아야
+  하는데 현재는 겹치기도 함 … 실제로 칠할때 색을 결정하고 이전에 그린 색과 최대한 겹치지 않게 선택"). 뷰의 팔레트는
+  열 색을 차례로 돌려 쓰므로 열한 번째 줄은 첫 줄과 색이 같고, 그 둘이 한 그림에 나오면 범례에서 구별할 수 없었다.
+  캡처는 줄의 색을 그 줄이 처음 픽셀을 칠하는 순간에 정한다(renderd `distinct=`).
+  - 먼저 칠한 줄 가운데 같은 색이 없으면 뷰의 색 그대로다. 있으면 팔레트에서 아직 안 쓴 색 가운데, 이미 칠한 색들과
+    검은 바탕에서 가장 먼 색을 준다(OKLab 거리). 열 색을 다 쓴 뒤에는 예비 색 43개에서 같은 식으로 고른다.
+  - 그래서 겹치는 줄이 없는 그림은 0.12.448까지와 픽셀이 같고, 겹치던 줄만 색이 바뀐다. 칠하는 순서는 덱의 배치
+    순서(낮은 레벨부터)라 먼저 칠하는 줄이 제 색을 지킨다. 도형이 영역에 없어 칠하지 않는 줄은 색을 차지하지 않는다.
+  - 뷰가 일부러 같은 색으로 그리는 줄은 그대로 한 색이다: level view의 레벨과 그 칩들, chip view에서 여러 레벨에
+    놓인 같은 소스, layer view에서 같은 LY의 DT들. 갈라 주는 것은 팔레트가 한 바퀴 돌아 우연히 같아진 색이다.
+  - layerprops로 뷰의 색과 다르게 준 색은 그 줄의 것으로 두고, 다른 줄에는 주지 않는다. 뷰의 색 그대로 저장된 줄은
+    여느 줄과 같다.
+  - mosaic의 네 타일은 한 그림이다. 뒤 타일은 앞 타일이 정한 색을 이어받는다.
+  - `--legend`와 무관하다: 범례가 있든 없든 픽셀이 같고, 범례의 색은 칠한 색이다. 보고서의 샷 행 `colors`가 칠한
+    줄과 색을, `recolored`가 뷰의 색과 달라진 줄을 말하고(§5), 달라진 줄이 있으면 `note:` 한 줄이 난다(§6).
+  - 뷰어의 화면은 그대로다(뷰의 색). 같은 영역이라도 캡처와 뷰어의 색이 다를 수 있고, 영역이 다르면 같은 줄이 다른
+    색일 수 있다. 줄과 색의 대응은 그 그림의 범례나 보고서로 본다. `FLOE_DECK_DISTINCT_COLORS=off`면 뷰의 색 그대로
+    찍는다(0.12.448까지의 동작).
+  - 한 그림에 줄이 2천 개쯤을 넘는 mosaic은 뒤 타일에 넘길 색 목록이 명령 한 줄에 들어가지 않아 뷰의 색으로 찍고
+    `note: … too many rows are placed in the picture …`로 알린다.
 - 그 뷰에서 저장한 layerprops가 적용된다. level view는 `<deck>.jb.layerprops`, chip view는
   `<deck>.chip-by-level.jb.layerprops`, layer view는 `<deck>.layer.jb.layerprops`다. 키 공간이 다르므로 서로 섞이지
   않는다.
@@ -337,6 +358,7 @@ floe2 render deck.jb --mode layer --out layers.png                              
 | `source`, `dbu` | 소스 경로와 DBU |
 | `shots[]` | 샷마다 한 행(아래) |
 | `cut_px`, `thin`, `density`, `occupancy`, `layer_colors`, `legend`, `archival` | 그림 모양. `occupancy`는 말하지 않았으면 null, `layer_colors`는 덱이면 null |
+| `distinct_colors` | 덱의 칠해지는 줄끼리 색이 겹치지 않게 했는가(0.12.449; §4.6). 레이아웃과 `FLOE_DECK_DISTINCT_COLORS=off`는 false |
 | `complete` | 모든 샷이 완전한가 |
 | `jobdeck` | 덱만: `complete`, `skipped[]`(캡처가 빠뜨린 배치), `skipped_off[]`(꺼진 칩의 skip), `over_budget_pages`, `summary_building`, `view`(`--mode`의 뷰: level|chip|layer), `levels`, `chip_blocks`(`--chipid`/`--chipnumber`의 `n:ID` 목록, 없으면 null), `window`(`rects_um`, `sources`, `sources_total`, `placements`, `placements_total`; 창이 없으면 null) |
 
@@ -355,6 +377,8 @@ floe2 render deck.jb --mode layer --out layers.png                              
 | `chips` | 덱에서 칩을 골랐을 때: `on`(`N:이름`), `chip`, `chip_off`, `fit_chip`, `region_um`(칩으로 정한 영역), `placements` |
 | `in_chip` | `--in-chip`을 줬을 때(0.12.435): `chip`(준 이름), `chip_id`, `rows`(ROWS 번호), `n`(#K), `tc`, `levels`, `mag`, `dx_um`, `dy_um`, `extent_um`(그 배치의 덱 범위), 그린 영역을 칩 좌표로 되돌린 `bbox_chip_um`(mosaic은 `tiles_chip_um`) |
 | `legend[]` | `--legend`의 줄들 |
+| `colors` | 덱(`distinct_colors`가 true일 때): 픽셀을 칠한 줄과 그 색, `{"L/D": "#rrggbb"}`(0.12.449). 키는 범례의 `L/D`와 같다(level view는 레벨 `N/0`, chip view는 칩 줄). 위에 그린 줄에 전부 덮여 범례에서 빠진 줄도 들어 있다 |
+| `recolored[]` | 덱: `colors` 가운데 뷰의 색과 다른 색으로 칠한 줄의 `L/D`. 겹치는 색이 없었으면 빈 배열 |
 
 보고서도 출력이라 실패하면 `PNG was saved; report failed: …`로 끝난다(PNG는 남는다).
 
@@ -374,6 +398,8 @@ stdout:
 [floe2] WARNING: N jobdeck placement(s) not drawn: …
 [floe2] note: N placement(s) the load skips are in chips no shot had on: …
 [floe2] note: a.png: no layer to list - no legend
+[floe2] note: a.png: 2 of the 12 row(s) painted drawn in another colour than the view's - a row painted before had theirs (FLOE_DECK_DISTINCT_COLORS=off keeps the view's)
+[floe2] note: a.png: too many rows are placed in the picture to tell them apart by colour - drawn in the view's colours
 [floe2] report shots/report.json (3 shot(s), INCOMPLETE)
 [jobdeck] blocks    : 1 of 3 CHIP block(s) placed (--chipid / --chipnumber): 2:ID002
 [jobdeck] window    : 1 of 3 source(s) read - 2 of 17 placement(s) in the capture's region(s) (FLOE_DECK_WINDOW=off reads them all)
@@ -404,6 +430,7 @@ floe2: frame 1280x13440 px for 40.0000x420.0000 um (0.0000,0.0000,40.0000,420.00
 | `FLOE_LOCK_WAIT` | off | `on`이나 초: 색인 중인 소스를 기다린다(`--wait`) |
 | `FLOE_DECK_WINDOW` | on | `off`면 덱 캡처가 로드한 레벨의 모든 소스를 연다(§4.4) |
 | `FLOE_LEGEND_IN_VIEW` | drawn | 덱 캡처의 `--legend`가 적는 줄. 기본은 그림에 실제로 보이는 줄(0.12.439). `placed`면 틀 안에 배치가 있는 줄(0.12.438의 규칙), `off`면 로드한 레벨의 줄 전부(0.12.437까지의 동작)(§4.6) |
+| `FLOE_DECK_DISTINCT_COLORS` | on | 덱 캡처가 칠해지는 줄끼리 색이 겹치지 않게 색을 정한다(0.12.449; §4.6). `off`면 뷰의 색 그대로(0.12.448까지의 동작) |
 | `FLOE_CAPTURE_PX` | max | `--px`를 생략했을 때의 크기. `--px`와 같은 `W`·`WxH`·`max`(§1.1). `1200`이면 0.12.432까지의 기본. DRC 스냅샷의 기본 1200에는 적용되지 않는다 |
 | `FLOE_CAPTURE_REDUCE` | on | `off`면 16 Mpx를 넘는 프레임을 줄이지 않고 거부한다(§1.1; DRC 스냅샷도) |
 | `FLOE_RENDER_DEFAULTS` | | `archival`이면 보관용 모양이 기본(0.12.349까지의 동작) |

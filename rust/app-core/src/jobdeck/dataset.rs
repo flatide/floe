@@ -15,7 +15,7 @@ use crate::{
     styles::{self, LayerProps},
     Error, ErrorKind, Result,
 };
-use floe_worker_client::{Fill, Layers, Style};
+use floe_worker_client::{Distinct, Fill, Layers, RowsBy, Style};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -291,6 +291,66 @@ impl DeckSnapshot {
     }
     pub fn skipped(&self) -> &[Skipped] {
         &self.metadata.jobdeck.skipped
+    }
+    /// What a capture asks the renderer to tell the rows it paints apart by
+    /// (floe_worker_client::Distinct; user 2026-11-11: "실제로 칠할때 색을
+    /// 결정하고 이전에 그린 색과 최대한 겹치지 않게 선택"). The view gives
+    /// its rows the palette's colours by their place, ten in turn, so two
+    /// rows of a picture may have one; the renderer decides a row's colour
+    /// when it first paints. Here: which rows are one colour, as the view
+    /// colours them alike on purpose - a level and the chips under it in the
+    /// level view, a source chip under every level in the chip view (its
+    /// place among the deck's sources is its rows' datatype), a source
+    /// layer's datatypes in the layer view -, the colours to choose from -
+    /// the view's palette, then the reserve's that are not in it -, and the
+    /// rows whose colour is not the view's but the layer properties': those
+    /// keep it (`fixed`, every one of the load - a capture leaves out those
+    /// its picture does not reach; of the level view the levels' heads, whose
+    /// colour their chips have).
+    pub fn distinct(&self) -> Result<Distinct> {
+        let mode = self.metadata.jobdeck.mode;
+        let by = match mode {
+            Mode::Level | Mode::Layer => RowsBy::Layer,
+            Mode::Chip => RowsBy::Datatype,
+        };
+        let mut palette: Vec<[u8; 4]> = Vec::new();
+        for color in self.analysis.scheme.palette.iter().filter_map(|c| styles::color(c)) {
+            if !palette.contains(&color) {
+                palette.push(color);
+            }
+        }
+        let mut reserve: Vec<[u8; 4]> = Vec::new();
+        for color in super::color::reserve().iter().filter_map(|c| styles::color(c)) {
+            if !palette.contains(&color) && !reserve.contains(&color) {
+                reserve.push(color);
+            }
+        }
+        let mut fixed = BTreeSet::new();
+        for (view, row) in self.rows.rows.iter().zip(&self.metadata.layers) {
+            // a level view's rows have their head's colour: the heads say
+            // it; the chip view's heads are groups that paint nothing
+            let says = match mode {
+                Mode::Level => row.jobdeck_head,
+                Mode::Chip => !row.jobdeck_head,
+                Mode::Layer => true,
+            };
+            if !says {
+                continue;
+            }
+            if styles::color(&view.color) != styles::color(&row.color) {
+                let layer = u32::try_from(row.layer)
+                    .map_err(|_| Error::input("deck layer must fit u32"))?;
+                let datatype = u32::try_from(row.datatype)
+                    .map_err(|_| Error::input("deck datatype must fit u32"))?;
+                fixed.insert((layer, datatype));
+            }
+        }
+        Ok(Distinct {
+            by,
+            palette: vec![palette, reserve],
+            fixed: fixed.into_iter().collect(),
+            taken: Vec::new(),
+        })
     }
     pub fn styles(&self, archival: bool) -> Result<Vec<Style>> {
         let heads: BTreeSet<_> = self

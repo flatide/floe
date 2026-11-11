@@ -146,6 +146,126 @@ pub(crate) fn parse_drawn(value: Option<&str>) -> Result<Option<Vec<(u32, u32)>>
         .ok_or_else(|| Error::protocol("invalid drawn"))
 }
 
+/// A row - a deck layer by its L/D key - and the colour it was painted in
+/// (`Distinct`, Frame::distinct).
+pub type RowColor = ((u32, u32), [u8; 4]);
+
+/// Which rows are one colour and decided together (`Distinct`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RowsBy {
+    /// every L/D its own
+    #[default]
+    Pair,
+    /// the rows of a layer number (a jobdeck's level view: a level and the
+    /// chips under it; its layer view: a source layer's datatypes)
+    Layer,
+    /// the rows of a datatype number (a jobdeck's chip view: a source chip,
+    /// whose place among the deck's sources is its rows' datatype, under
+    /// every level)
+    Datatype,
+}
+
+impl RowsBy {
+    /// The key the rows that are one colour with `key` share.
+    pub fn group(self, key: (u32, u32)) -> (u32, u32) {
+        match self {
+            Self::Pair => key,
+            Self::Layer => (key.0, 0),
+            Self::Datatype => (0, key.1),
+        }
+    }
+    fn wire(self) -> &'static str {
+        match self {
+            Self::Pair => "pair",
+            Self::Layer => "layer",
+            Self::Datatype => "datatype",
+        }
+    }
+}
+
+/// A frame's `distinct=` (asked with RenderRequest::distinct): the rows that
+/// painted in the frame and the colour each was painted in -
+/// `1/0:0000ff,11/2:418dd9`, or `none` when no row painted. None: the frame
+/// does not say (not asked, or a plain layout's).
+pub(crate) fn parse_distinct(value: Option<&str>) -> Result<Option<Vec<RowColor>>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value == "none" {
+        return Ok(Some(Vec::new()));
+    }
+    value
+        .split(',')
+        .map(|entry| {
+            let (row, color) = entry.split_once(':')?;
+            let (layer, datatype) = row.split_once('/')?;
+            let number = |text: &str| {
+                (!text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()))
+                    .then(|| text.parse::<u32>().ok())
+                    .flatten()
+            };
+            if color.len() != 6 || !color.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+            let byte = |at: usize| u8::from_str_radix(&color[at..at + 2], 16).ok();
+            Some(((number(layer)?, number(datatype)?), [byte(0)?, byte(2)?, byte(4)?, 255]))
+        })
+        .collect::<Option<Vec<_>>>()
+        .map(Some)
+        .ok_or_else(|| Error::protocol("invalid distinct"))
+}
+
+/// RenderRequest::distinct: the layers a jobdeck's frame paints are told
+/// apart by their colours (user 2026-11-11: "실제로 칠할때 색을 결정하고
+/// 이전에 그린 색과 최대한 겹치지 않게 선택"). renderd decides a row's
+/// colour when a pass of it first leaves a pixel in the frame: its own while
+/// no row painted before it has that one, else the colour of `palette`
+/// farthest from those painted so far (floe_render_core::distinct). The
+/// rows a view colours alike on purpose stay one colour (`by`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Distinct {
+    /// the rows that are one colour, decided together
+    pub by: RowsBy,
+    /// the colours to choose from, in tiers: a tier is turned to when every
+    /// colour of those before it is in use
+    pub palette: Vec<Vec<[u8; 4]>>,
+    /// rows whose colour is theirs to keep (the layer properties'): the rows
+    /// that are one colour with such a row are left as they are, and no
+    /// other row is given a colour of theirs
+    pub fixed: Vec<(u32, u32)>,
+    /// the colours the picture's earlier frames decided (a mosaic's tiles),
+    /// by a row of those that are one colour
+    pub taken: Vec<RowColor>,
+}
+
+impl Distinct {
+    fn wire(&self, command: &mut String) {
+        let hex = |[r, g, b, _]: &[u8; 4]| format!("{r:02x}{g:02x}{b:02x}");
+        write!(command, " distinct={}", self.by.wire()).unwrap();
+        let tiers: Vec<String> = self
+            .palette
+            .iter()
+            .filter(|tier| !tier.is_empty())
+            .map(|tier| tier.iter().map(hex).collect::<Vec<_>>().join(","))
+            .collect();
+        if !tiers.is_empty() {
+            write!(command, " distinct_palette={}", tiers.join(";")).unwrap();
+        }
+        if !self.fixed.is_empty() {
+            let rows: Vec<String> = self.fixed.iter().map(|(l, d)| format!("{l}/{d}")).collect();
+            write!(command, " distinct_fixed={}", rows.join(",")).unwrap();
+        }
+        if !self.taken.is_empty() {
+            let rows: Vec<String> = self
+                .taken
+                .iter()
+                .map(|((l, d), color)| format!("{l}/{d}:{}", hex(color)))
+                .collect();
+            write!(command, " distinct_taken={}", rows.join(",")).unwrap();
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameFormat {
     Png,
@@ -308,6 +428,10 @@ pub struct RenderRequest {
     /// pixel while the frame is drawn - so only a capture that embeds a
     /// legend asks; the viewer never does.
     pub drawn: bool,
+    /// The layers the frame paints are told apart by their colours
+    /// (`distinct=`; `Distinct`, Frame::distinct): a jobdeck capture asks,
+    /// the viewer never does. None: every layer in its own colour.
+    pub distinct: Option<Distinct>,
 }
 
 impl Default for RenderRequest {
@@ -340,6 +464,7 @@ impl Default for RenderRequest {
             occupancy: None,
             progressive: true,
             drawn: false,
+            distinct: None,
         }
     }
 }
@@ -411,6 +536,9 @@ impl RenderRequest {
         }
         if self.drawn {
             command.push_str(" drawn=1");
+        }
+        if let Some(distinct) = &self.distinct {
+            distinct.wire(&mut command);
         }
         if command.len() > MAX_LINE_BYTES {
             return Err(Error::new(
@@ -569,8 +697,66 @@ mod tests {
         r.drawn = false;
         r.progressive = true;
         assert!(!r.command(1, 1, "/tmp/f", 1_000_000).unwrap().contains(" drawn="));
+        // a jobdeck capture asks for its layers' colours to be told apart:
+        // said only when asked, the lists only when there is something in
+        // them, an empty tier never
+        assert!(!r.command(1, 1, "/tmp/f", 1_000_000).unwrap().contains(" distinct"));
+        r.distinct = Some(Distinct {
+            by: RowsBy::Layer,
+            ..Distinct::default()
+        });
+        assert!(r
+            .command(1, 1, "/tmp/f", 1_000_000)
+            .unwrap()
+            .ends_with(" density=on occupancy=on distinct=layer"));
+        r.distinct = Some(Distinct {
+            by: RowsBy::Datatype,
+            ..Distinct::default()
+        });
+        assert!(r.command(1, 1, "/tmp/f", 1_000_000).unwrap().ends_with(" distinct=datatype"));
+        assert_eq!(RowsBy::Pair.group((7, 3)), (7, 3));
+        assert_eq!(RowsBy::Layer.group((7, 3)), (7, 0));
+        assert_eq!(RowsBy::Datatype.group((7, 3)), (0, 3));
+        r.distinct = Some(Distinct {
+            by: RowsBy::Pair,
+            palette: vec![
+                vec![[0, 0, 255, 255], [255, 255, 0, 255]],
+                vec![],
+                vec![[0x41, 0x8d, 0xd9, 255]],
+            ],
+            fixed: vec![(5, 0), (2, 3)],
+            taken: vec![((1, 0), [255, 0, 0, 255]), ((11, 2), [0, 255, 0, 7])],
+        });
+        assert!(r.command(1, 1, "/tmp/f", 1_000_000).unwrap().ends_with(
+            " distinct=pair distinct_palette=0000ff,ffff00;418dd9 distinct_fixed=5/0,2/3 distinct_taken=1/0:ff0000,11/2:00ff00"
+        ));
+        // rows past the line's limit: the command is refused, not cut
+        r.distinct = Some(Distinct {
+            taken: (0..6000).map(|n| ((n, 0), [0, 0, 0, 255])).collect(),
+            ..Distinct::default()
+        });
+        assert!(r.command(1, 1, "/tmp/f", 1_000_000).is_err());
+        r.distinct = None;
         r.viewport = Some((0, 480));
         assert!(r.command(1, 1, "/tmp/f", 1_000_000).is_err());
+    }
+
+    #[test]
+    fn a_frames_colours_are_read_by_row() {
+        // not said: None (not asked, or a plain layout's frame)
+        assert_eq!(parse_distinct(None).unwrap(), None);
+        // said: the rows that painted with their colours; `none` is no row
+        assert_eq!(parse_distinct(Some("none")).unwrap(), Some(Vec::new()));
+        assert_eq!(
+            parse_distinct(Some("1/0:0000ff,11/2:418DD9")).unwrap(),
+            Some(vec![((1, 0), [0, 0, 255, 255]), ((11, 2), [0x41, 0x8d, 0xd9, 255])])
+        );
+        for bad in [
+            "1/0", "1/0:", "1/0:0000f", "1/0:0000fff", "1/0:#0000ff", "1:0000ff", "1/a:0000ff",
+            "1/0:0000ff,", ",1/0:0000ff", "1/0:0000gg", "1/0:0000ff 2/0:ff0000", "-1/0:0000ff",
+        ] {
+            assert!(parse_distinct(Some(bad)).is_err(), "{bad}");
+        }
     }
 
     #[test]

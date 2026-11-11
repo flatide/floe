@@ -21,7 +21,10 @@ use files::{wire_path, Workspace};
 use protocol::{
     parse_line, parse_prefix, style_text, Line, LINE_PREFIX_BYTES, MAX_LINE_BYTES, MAX_REPLY_BYTES,
 };
-pub use protocol::{Fields, Fill, FrameFormat, Layers, RenderRequest, Style, ThinPolicy};
+pub use protocol::{
+    Distinct, Fields, Fill, FrameFormat, Layers, RenderRequest, RowColor, RowsBy, Style,
+    ThinPolicy,
+};
 pub use query::{
     PickHit, QueryHit, QueryKind, QueryOperation, QueryReply, QueryRequest, QueryScene,
     QueryStatus, SceneId, SnapHit, SnapKind,
@@ -193,6 +196,15 @@ impl Frame {
     /// (not asked, or a plain layout's frame).
     pub fn drawn(&self) -> Result<Option<Vec<(u32, u32)>>> {
         protocol::parse_drawn(self.fields.get("drawn"))
+    }
+    /// The rows that painted in the frame and the colour each was painted in
+    /// (`distinct=`, asked with RenderRequest::distinct): a jobdeck frame's
+    /// rows as renderd decided their colours - a row's own, or another when
+    /// a row painted before it had that one. A row painted over whole later
+    /// is among them (`drawn` leaves it out). None: the frame does not say
+    /// (not asked, or a plain layout's frame).
+    pub fn distinct(&self) -> Result<Option<Vec<protocol::RowColor>>> {
+        protocol::parse_distinct(self.fields.get("distinct"))
     }
 }
 

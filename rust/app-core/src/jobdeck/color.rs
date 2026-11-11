@@ -28,6 +28,13 @@ const RESERVE: [&str; 49] = [
     "#ffffff",
 ];
 
+/// The colours beyond the palette of ten, in their order (a scheme's
+/// `"palette": "reserve"`): what a capture's rows are given when the palette
+/// is used up (DeckSnapshot::distinct).
+pub fn reserve() -> &'static [&'static str] {
+    &RESERVE
+}
+
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {

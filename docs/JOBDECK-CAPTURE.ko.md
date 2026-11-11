@@ -244,6 +244,13 @@ floe2 render deck.jb --batch perchip.txt --out perchip/ --report perchip/report.
   색, `--mode layer`는 source layer view로 소스 레이어 LY/DT마다 한 색이다. 뷰어의 Jobdeck 메뉴와 같은 팔레트이고,
   레벨을 몇 개 로드하든 같은 소스는 같은 색이다. 뷰는 한 실행에 하나다(batch 키가 아니다). 보고서 `jobdeck.view`가
   뷰를 말한다. 레이아웃에는 없다(exit 2).
+- 그림에 칠해지는 줄끼리는 색이 겹치지 않는다(0.12.449). 팔레트는 열 색을 돌려 쓰므로 열한 번째 줄은 첫 줄과 같은
+  색이다. 캡처는 줄이 처음 픽셀을 칠할 때 색을 정한다: 먼저 칠한 줄에 같은 색이 없으면 뷰의 색, 있으면 팔레트에서
+  이미 칠한 색들과 가장 먼 색(열 색을 다 쓰면 예비 색). 겹치는 줄이 없는 그림은 전과 같다. 뷰가 일부러 같은 색으로
+  그리는 줄(레벨의 칩들, 여러 레벨의 같은 소스)은 한 색 그대로이고, layerprops로 바꾼 색은 그 줄의 것으로 둔다.
+  mosaic은 네 타일이 한 그림이다. 범례의 색은 칠한 색이고 보고서 샷 행의 `colors`와 `recolored`가 말한다.
+  뷰어의 화면은 뷰의 색 그대로라 캡처와 다를 수 있다. `FLOE_DECK_DISTINCT_COLORS=off`면 뷰의 색으로 찍는다.
+  자세한 것은 [CAPTURE-CLI.ko.md](CAPTURE-CLI.ko.md) §4.6.
 - 뷰어의 level view에서 저장한 `<deck>.jb.layerprops`의 색·채움·선폭은 캡처에도 적용된다. chip view의
   `<deck>.chip-by-level.jb.layerprops`와 layer view의 `<deck>.layer.jb.layerprops`는 그 뷰의 `--mode`에서 적용된다.
   숨김(visibility 0)은 적용되지 않으니 숨길 레벨은 `--layerid`나 `--chip-off`로 뺀다.
@@ -337,6 +344,9 @@ before)`이다(0.12.437; 그 전은 `floe2: rendered incomplete - …  [exit 3]`
    안에 배치가 있는 줄만, 0.12.439부터는 어느 뷰에서나 그림에 실제로 보이는 줄만 적는다(§12;
    `FLOE_LEGEND_IN_VIEW=placed`면 0.12.438의 배치 기준, `off`면 전부).
 9. `<deck>.jb.layerprops`의 숨김(visibility 0)은 캡처에 적용되지 않는다(§12).
+9a. 캡처의 색은 그 그림에 칠해지는 줄끼리 겹치지 않게 정해지므로(0.12.449, §12), 색이 겹치던 줄은 뷰어와 다른 색으로
+   나오고 영역이 다른 두 캡처에서 같은 줄이 다른 색일 수 있다. 줄과 색의 대응은 그 그림의 범례(`--legend`)나 보고서
+   `colors`로 읽는다. 뷰어와 같은 색이 필요하면 `FLOE_DECK_DISTINCT_COLORS=off`.
 10. `--frames`는 `--depth N` 컷 아래에만 나타나고, `--labels on`, `--density`, `--layer-colors`는 덱에서 거절한다(exit 2).
 11. `--layerid N`만 주면 전 레벨을 로드한다. `--level N`을 같이 준다(§3).
 12. `--workdir`만으로 광역을 찍으면 요약 없이 비어 불완전이다(§13).
@@ -365,3 +375,10 @@ before)`이다(0.12.437; 그 전은 `floe2: rendered incomplete - …  [exit 3]`
 `test_a_legend_lists_what_the_picture_shows`: 배치는 닿지만 도형이 없는 여백과 모서리 접촉은 빈 범례, 위 레벨에 전부
 덮인 레벨은 빠짐, 줄마다 다른 색을 준 chip view에서 아홉 영역의 범례가 그림에 있는 색의 줄과 정확히 같음, 깊이 컷의
 프레임만 있는 그림은 빈 범례, `FLOE_LEGEND_IN_VIEW=placed`와 `off`).
+2026-11-11 0.12.449: 칠해지는 줄끼리 색이 겹치지 않게 했다(§12; 사용자 "실제로 칠할때 색을 결정하고 이전에 그린 색과
+최대한 겹치지 않게 선택"; floe-index/renderd 0.12.449). 레벨 열둘에 소스와 CHIP 블록을 하나씩 주고 레벨 2를 레벨 1의
+소스로 한 번 더 놓은 합성 덱으로 확인했다(ChipShotTests의 `test_painted_rows_are_told_apart_by_colour`): 뷰의 색은
+열 가지이고 레벨 11·12가 1·2와 같음, 캡처는 열두 색이고 앞의 열은 뷰의 색 그대로, 범례의 색이 그림의 색과 같음,
+보고서 `colors`·`recolored`와 `note:` 줄, `--legend` 없이도 같은 픽셀, 겹치지 않는 영역은 끈 것과 픽셀이 같음, mosaic의
+뒤 타일이 앞 타일의 색을 피해 팔레트의 남은 색을 받음, chip view에서 같은 소스는 두 레벨에서 한 색이고 팔레트가 돌아
+겹친 칩만 갈림, layerprops로 준 색은 그대로이고 그 색을 뷰에서 쓰던 줄이 다른 색을 받음, `FLOE_DECK_DISTINCT_COLORS=off`.

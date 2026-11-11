@@ -10,6 +10,7 @@ mod cancel;
 mod cells;
 mod clip;
 mod deck;
+mod distinct;
 mod font;
 mod layer_decode;
 mod light;
@@ -43,6 +44,7 @@ pub use deck::{
     overlay, prune_summary_when, source_view, transform_bbox, Deck, DeckHierSource, DeckInfo, DeckLayer,
     DeckPlacement, DeckRenderReport, DeckRenderRequest, DeckSpec,
 };
+pub use distinct::{DistinctColors, RowsBy};
 pub use font::{validate_font_px, DEFAULT_LABEL_FONT_PX, MAX_LABEL_FONT_PX, MIN_LABEL_FONT_PX};
 pub use layer_decode::{LayerProbeReport, ProbeMode};
 pub use page_cache::DecodedPageCache;

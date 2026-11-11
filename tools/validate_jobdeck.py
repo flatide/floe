@@ -3913,6 +3913,175 @@ class ChipShotTests(unittest.TestCase):
         self.assertEqual(names("shown_hier_frames.png"), [])
         self.assertIn("no layer to list - no legend", res.stdout)
 
+    def test_painted_rows_are_told_apart_by_colour(self):
+        # a deck view gives its rows the palette's ten colours in turn, so of
+        # the rows a picture shows two may have one (user 2026-11-11: "가능하면
+        # 칠해진 레이어의 색이 겹치지 않아야 하는데 현재는 겹치기도 함 … 실제로
+        # 칠할때 색을 결정하고 이전에 그린 색과 최대한 겹치지 않게 선택"): a
+        # capture's rows take their colours as they come to paint - a row's
+        # own unless a row painted before it has it, then the palette's
+        # farthest from those painted (renderd `distinct=`). The rows a view
+        # colours alike on purpose stay alike; FLOE_DECK_DISTINCT_COLORS=off
+        # keeps the view's colours
+        from PIL import Image
+        from floe import fillpat
+        d = self.dir / "wrap"
+        d.mkdir(exist_ok=True)
+        out = d / "out"
+        out.mkdir(exist_ok=True)
+        # twelve levels, each a source and a CHIP block of its own, 20 um
+        # boxes 150 um apart; a thirteenth block places level 2 once more,
+        # with level 1's source
+        lines = ["SLICE 1,17", "RETICLE", "* wrap.jb",
+                 "OPTION PA, AA=0.0200, BA=0.002000, SA=80"]
+        lines += ["MTITLE %d,L%02d" % (n, n) for n in range(1, 13)]
+        lines += ["*PLACE-INFO", "*"]
+        entry = ("$ (%d, L%02d, AD=0.00020, SF=1, TC=wrap%02d.oas, LY={%d}, "
+                 "DT={0}, BX=0.0, BY=0.0, UX=100.0, UY=100.0 )")
+        for n in range(1, 13):
+            build_oas(d / ("wrap%02d.oas" % n), 0.001, 100.0, 100.0,
+                      [(n, 0)], "WRAP")
+            lines += ["CHIP ID%03d, * C%02d 1.0000" % (n, n), "*",
+                      entry % (n, n, n, n),
+                      "ROWS 45000.0/%.1f" % (45000.0 + 150.0 * n), "*"]
+        lines += ["CHIP ID013, * C13 1.0000", "*", entry % (2, 2, 1, 1),
+                  "ROWS 45000.0/%.1f" % (45000.0 + 150.0 * 13), "*",
+                  "*END-PLACE", "END", ""]
+        deck = d / "wrap.jb"
+        deck.write_text("\n".join(lines))
+        run_floe2("index", deck, "--jobs", "2", env=self.env, ok=0)
+        off = dict(self.env, FLOE_DECK_DISTINCT_COLORS="off")
+
+        def legend(name):
+            dump = run_floe2("fe-embed", "--dump", out / name, ok=0).stdout
+            rows = [x[len("legend="):].split() for x in dump.split("\n")
+                    if x.startswith("legend=")]
+            return {r[4]: r[1] for r in rows}
+
+        def colours(name):
+            return {"#%02x%02x%02x" % c for _, c in
+                    Image.open(out / name).convert("RGB").getcolors(1 << 24)
+                    if c != (0, 0, 0)}
+
+        def pixels(name):
+            return Image.open(out / name).convert("RGB").tobytes()
+
+        def shot(name, *args, env=None, legend=True):
+            rep = out / (name + ".json")
+            res = run_floe2("render", deck, "--px", "1400", *args,
+                            *(("--legend",) if legend else ()), "--out",
+                            out / name, "--report", rep,
+                            env=env or self.env, ok=0)
+            doc = json.loads(rep.read_text())
+            return res, doc, doc["shots"][0]
+
+        note = "drawn in another colour than the view's"
+        levels = ["%d/0" % n for n in range(1, 13)]
+        # ---- the level view: the view's colours turn after ten levels
+        res, doc, row = shot("level_off.png", env=off)
+        view = legend("level_off.png")
+        self.assertEqual(sorted(view, key=lambda k: int(k.split("/")[0])),
+                         levels)
+        self.assertEqual(len(set(view.values())), 10, view)
+        self.assertEqual((view["11/0"], view["12/0"]),
+                         (view["1/0"], view["2/0"]))
+        self.assertEqual(colours("level_off.png"), set(view.values()))
+        self.assertEqual((doc["distinct_colors"], "colors" in row,
+                          "recolored" in row), (False, False, False))
+        self.assertNotIn(note, res.stdout + res.stderr)
+        # ... and every level the picture shows is told apart: the ten
+        # painted first keep the view's colours, the two after them are
+        # given colours no painted row has - the palette used up, others
+        res, doc, row = shot("level.png")
+        told = legend("level.png")
+        self.assertEqual(sorted(told, key=lambda k: int(k.split("/")[0])),
+                         levels)
+        self.assertEqual(len(set(told.values())), 12, told)
+        self.assertEqual({k: told[k] for k in levels[:10]},
+                         {k: view[k] for k in levels[:10]})
+        self.assertFalse({told["11/0"], told["12/0"]} & set(view.values()),
+                         told)
+        # the legend is the picture's: level 2's second chip, placed with
+        # level 1's source, is level 2's colour
+        self.assertEqual(colours("level.png"), set(told.values()))
+        # the report says the rows painted with their colours, and which
+        # were given another than the view's; the log says so too
+        self.assertEqual(doc["distinct_colors"], True)
+        self.assertEqual(row["colors"], told)
+        self.assertEqual(row["recolored"], ["11/0", "12/0"])
+        self.assertIn("2 of the 12 row(s) painted %s" % note,
+                      res.stdout + res.stderr)
+        # the legend embeds what is drawn and changes no pixel
+        shot("level_plain.png", legend=False)
+        self.assertEqual(pixels("level_plain.png"), pixels("level.png"))
+        # ---- a picture whose rows differ already is the view's: levels
+        # 9..12 alone - 11 and 12 in the view's blue and yellow
+        near = ("--bbox", "46300,44990,46810,45010")
+        res, doc, row = shot("near.png", *near)
+        shot("near_off.png", *near, env=off)
+        self.assertEqual(pixels("near.png"), pixels("near_off.png"))
+        self.assertEqual(legend("near.png"),
+                         {k: view[k] for k in levels[8:]})
+        self.assertEqual(row["recolored"], [])
+        self.assertNotIn(note, res.stdout + res.stderr)
+        # ---- a mosaic's four tiles are one picture: the left tiles paint
+        # levels 1..4, the right ones 9..12 - 11 and 12 are given colours
+        # of the palette no row painted in any tile has
+        corners = ("--corners", "45140,44990,46810,45010", "--size", "500,20")
+        res, doc, row = shot("mosaic.png", *corners)
+        tiles = legend("mosaic.png")
+        on = levels[:4] + levels[8:]
+        self.assertEqual(sorted(tiles, key=lambda k: int(k.split("/")[0])), on)
+        self.assertEqual(len(set(tiles.values())), 8, tiles)
+        self.assertEqual({k: tiles[k] for k in on[:6]},
+                         {k: view[k] for k in on[:6]})
+        free = set(view.values()) - {view[k] for k in on[:6]}
+        self.assertTrue({tiles["11/0"], tiles["12/0"]} <= free, (tiles, free))
+        seen = colours("mosaic.png")
+        self.assertTrue(set(tiles.values()) <= seen
+                        and seen - set(tiles.values()) <= {"#ffffff"}, seen)
+        self.assertEqual(row["recolored"], ["11/0", "12/0"])
+        shot("mosaic_off.png", *corners, env=off)
+        self.assertEqual(len(set(legend("mosaic_off.png").values())), 6)
+        # ---- the chip view: a source chip is one colour under every
+        # level - level 1's source is under level 2 too -, and the chips
+        # the palette's turn made alike (the 1st and the 11th, the 2nd and
+        # the 12th) are told apart
+        shot("chip_off.png", "--mode", "chip", env=off)
+        chips_off = legend("chip_off.png")
+        self.assertEqual(len(chips_off), 13, chips_off)
+        self.assertEqual(len(set(chips_off.values())), 10)
+        self.assertEqual((chips_off["11/11"], chips_off["12/12"]),
+                         (chips_off["1/1"], chips_off["2/2"]))
+        res, doc, row = shot("chip.png", "--mode", "chip")
+        chips = legend("chip.png")
+        self.assertEqual(set(chips), set(chips_off))
+        self.assertEqual(chips["2/1"], chips["1/1"])
+        self.assertEqual(len(set(chips.values())), 12, chips)
+        self.assertEqual({k: chips[k] for k in chips if k not in
+                          ("11/11", "12/12")},
+                         {k: chips_off[k] for k in chips if k not in
+                          ("11/11", "12/12")})
+        self.assertEqual(colours("chip.png"), set(chips.values()))
+        self.assertEqual(row["colors"], chips)
+        self.assertEqual(row["recolored"], ["11/11", "12/12"])
+        # ---- a colour the layer properties gave is the row's to keep, and
+        # no other row is given it: level 3 made blue - level 1's colour -
+        # stays blue, and level 1, painted first, takes another
+        props = d / "wrap.jb.layerprops"
+        props.write_text(fillpat.format_layerprops(
+            [((3, 0), view["1/0"], "solid", "L03", "1", "1")]))
+        self.addCleanup(lambda: props.exists() and props.unlink())
+        res, doc, row = shot("level_props.png")
+        kept = legend("level_props.png")
+        self.assertEqual(kept["3/0"], view["1/0"])
+        self.assertNotEqual(kept["1/0"], view["1/0"])
+        self.assertEqual(len(set(kept.values())), 12, kept)
+        self.assertEqual(colours("level_props.png"), set(kept.values()))
+        self.assertNotIn("3/0", row["recolored"])
+        self.assertIn("1/0", row["recolored"])
+        props.unlink()
+
     def test_info_json_carries_the_chips(self):
         # info --json --chips (2026-11-09): one JSON document with the chips
         # as `chips` - before, the table followed the JSON as text and the

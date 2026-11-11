@@ -46,7 +46,13 @@ makes it the default, as before 0.12.350).
                             view's own saved layer properties apply
                             (<deck>.jb.layerprops, <deck>.chip-by-level.jb.
                             layerprops, <deck>.layer.jb.layerprops); the
-                            report's jobdeck.view says it
+                            report's jobdeck.view says it. The rows a picture
+                            paints are told apart: the palette's ten colours
+                            turn, so a row whose colour a row painted before
+                            it has is given the palette's farthest from those
+                            painted (the report's colors / recolored; a colour
+                            the layer properties changed is kept;
+                            FLOE_DECK_DISTINCT_COLORS=off: the view's colours)
   --depth N                  0=top, 999/omit=full
   --detail exact|low|medium|high  Size cut 0/5/3/1 px (default medium, the
                             viewer's; --archival: exact)

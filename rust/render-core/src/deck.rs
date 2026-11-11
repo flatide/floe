@@ -22,6 +22,7 @@ use std::sync::Arc;
 use floe_ovm::BBox;
 
 use crate::cache::DecodedPage;
+use crate::distinct::{DistinctColors, Key, Paints};
 use crate::{
     render_geometry_styled_cancellable_windowed, Cache, CacheLayer, DecodedPageCache, FrameScene,
     GeometryRasterRequest, LayerFill, LayerStyle, PlanRequest, RasterViewBox, RenderCancellation,
@@ -400,10 +401,17 @@ pub fn overlay_window(composite: &mut [u8], width: u32, pass: &[u8], window: (u3
     }
 }
 
+/// A pass's colour changed as the pass is laid over the composite: the
+/// pixels the pass painted in `.0` are laid as `.1` (DeckRenderRequest::
+/// distinct - the pass was rastered in its layer's own colour, and the
+/// colour it shows in is decided when it turns out to paint: `pass_swap`).
+pub type Swap = Option<([u8; 4], [u8; 4])>;
+
 /// `overlay_window` that notes whose pixels they are (DeckRenderRequest::
 /// drawn): with `owner` - the frame's, one id a pixel, 0 = no pass - every
 /// pixel the pass replaces takes `id`, so at the frame's end a pixel's id is
 /// that of the pass that painted it last. Without it, `overlay_window`.
+/// With `swap` the pass's colour is changed on the way (`Swap`).
 pub fn overlay_window_owned(
     composite: &mut [u8],
     owner: Option<&mut [u32]>,
@@ -411,12 +419,28 @@ pub fn overlay_window_owned(
     pass: &[u8],
     window: (u32, u32, u32, u32),
     id: u32,
+    swap: Swap,
 ) {
-    let Some(owner) = owner else {
-        return overlay_window(composite, width, pass, window);
-    };
     let (col0, row0, w, h) = window;
     let len = w as usize * 4;
+    let Some(owner) = owner else {
+        let Some((from, to)) = swap else {
+            return overlay_window(composite, width, pass, window);
+        };
+        let stride = width as usize * 4;
+        for row in 0..h as usize {
+            let at = (row0 as usize + row) * stride + col0 as usize * 4;
+            for (dst, src) in composite[at..at + len]
+                .chunks_exact_mut(4)
+                .zip(pass[row * len..(row + 1) * len].chunks_exact(4))
+            {
+                if src[3] != 0 {
+                    dst.copy_from_slice(if src == from { &to } else { src });
+                }
+            }
+        }
+        return;
+    };
     for row in 0..h as usize {
         // the window row's first pixel in the frame
         let first = (row0 as usize + row) * width as usize + col0 as usize;
@@ -427,11 +451,27 @@ pub fn overlay_window_owned(
             .zip(&mut owner[first..first + w as usize])
         {
             if src[3] != 0 {
-                dst.copy_from_slice(src);
+                dst.copy_from_slice(match &swap {
+                    Some((from, to)) if src == from => to,
+                    _ => src,
+                });
                 *own = id;
             }
         }
     }
+}
+
+/// The colour change of a pass about to be laid (DeckRenderRequest::
+/// distinct): asked of the frame's colours (`paints`) only when the pass
+/// painted a pixel - a layer with no shape in the view takes no colour -,
+/// and None when the layer `key` is painted in its `own`.
+fn pass_swap(paints: Option<&mut Paints<'_>>, key: Key, own: [u8; 4], pass: &[u8]) -> Swap {
+    let paints = paints?;
+    if !pass.chunks_exact(4).any(|pixel| pixel[3] != 0) {
+        return None;
+    }
+    let color = paints.paint(key, own);
+    (color != own).then_some((own, color))
 }
 
 /// The ids (1..=`ids`) that own a pixel of the frame the frame shows
@@ -599,6 +639,14 @@ pub struct DeckRenderRequest {
     /// 레전드를 추가하도록"). It costs the frame one u32 a pixel, the
     /// pixel's owner, so the viewer leaves it off.
     pub drawn: bool,
+    /// The layers the frame paints are told apart by their colours (crate::
+    /// distinct; user 2026-11-11: "실제로 칠할때 색을 결정하고 이전에 그린
+    /// 색과 최대한 겹치지 않게 선택"): a layer's colour is decided when a
+    /// pass of it first leaves a pixel - its own, or when a layer painted
+    /// before it has that one, the palette's farthest from those painted -
+    /// and the frame says the colours (DeckRenderReport::distinct). None:
+    /// every layer in its own colour (the viewer; a mono frame always).
+    pub distinct: Option<DistinctColors>,
 }
 
 pub struct DeckRenderReport {
@@ -675,6 +723,11 @@ pub struct DeckRenderReport {
     /// view, its source's summary still building), is not among them.
     /// None: not asked.
     pub drawn: Option<Vec<u32>>,
+    /// With DeckRenderRequest::distinct: the layers a pass of which left a
+    /// pixel in this frame, by their keys, and the colour each was painted
+    /// in - also those painted over whole later, which `drawn` leaves out.
+    /// None: not asked, or a mono frame.
+    pub distinct: Option<Vec<(Key, [u8; 4])>>,
 }
 
 /// DeckSource::prune_summary_for's rule: no hierarchy frame can come of a
@@ -1075,6 +1128,20 @@ impl Deck {
             BTreeMap::new()
         };
         let mut owner = request.drawn.then(|| vec![0u32; byte_len / 4]);
+        // DeckRenderRequest::distinct: the colours of the layers as they
+        // come to paint (a mono frame has no colours to tell apart)
+        let mut paints = request
+            .distinct
+            .as_ref()
+            .filter(|_| !request.mono)
+            .map(|distinct| {
+                Paints::new(
+                    distinct,
+                    self.layers
+                        .values()
+                        .map(|layer| ((layer.layer, layer.datatype), layer.color)),
+                )
+            });
         let mut stats = RenderStats::default();
         let mut passes = 0u32;
         let mut passes_skipped = 0u32;
@@ -1134,17 +1201,20 @@ impl Deck {
                 continue;
             }
             check_generation(cancellation, generation)?;
-            let style = {
+            let (style, key) = {
                 let layer = self
                     .layers
                     .get(&out)
                     .ok_or_else(|| format!("deck layer {out} vanished"))?;
-                LayerStyle {
-                    layer_idx: self.placements[placed_index].layer_idx,
-                    color: layer.color,
-                    fill: layer.fill,
-                    outline_width: layer.outline_width,
-                }
+                (
+                    LayerStyle {
+                        layer_idx: self.placements[placed_index].layer_idx,
+                        color: layer.color,
+                        fill: layer.fill,
+                        outline_width: layer.outline_width,
+                    },
+                    (layer.layer, layer.datatype),
+                )
             };
             let owner_id = owner_ids.get(&out).copied().unwrap_or(0);
             let source_view = source_view(&request.view, &self.placements[placed_index].spec)?;
@@ -1354,6 +1424,7 @@ impl Deck {
                             cancellation,
                             &mut composite,
                             owner.as_deref_mut(),
+                            paints.as_mut(),
                             frames_under.as_deref_mut(),
                             frames_over.as_deref_mut(),
                             &mut tally,
@@ -1376,9 +1447,11 @@ impl Deck {
                                 generation,
                                 cancellation,
                                 owner: owner_id,
+                                key,
                             },
                             &mut composite,
                             owner.as_deref_mut(),
+                            paints.as_mut(),
                             frames_under.as_deref_mut(),
                             frames_over.as_deref_mut(),
                             &mut tally,
@@ -1438,6 +1511,7 @@ impl Deck {
                     cancellation,
                     &mut composite,
                     owner.as_deref_mut(),
+                    paints.as_mut(),
                     frames_under.as_deref_mut(),
                     frames_over.as_deref_mut(),
                     &mut tally,
@@ -1452,6 +1526,7 @@ impl Deck {
                 source_view,
                 frames,
                 owner: owner_id,
+                key,
             });
             batch_bytes = batch_bytes.saturating_add(charge);
             batch_bytes_max = batch_bytes_max.max(batch_bytes);
@@ -1464,6 +1539,7 @@ impl Deck {
                 cancellation,
                 &mut composite,
                 owner.as_deref_mut(),
+                paints.as_mut(),
                 frames_under.as_deref_mut(),
                 frames_over.as_deref_mut(),
                 &mut tally,
@@ -1546,6 +1622,7 @@ impl Deck {
             summary_building_passes,
             light_pending,
             drawn,
+            distinct: paints.map(|paints| paints.painted()),
         })
     }
 }
@@ -1579,6 +1656,8 @@ struct StreamTarget<'a> {
     cancellation: &'a RenderCancellation,
     /// the pass's id in the frame's owner map (0: none kept)
     owner: u32,
+    /// the pass's layer, for the frame's colours (`pass_swap`)
+    key: Key,
 }
 
 struct StreamReport {
@@ -1605,6 +1684,7 @@ fn stream_pass(
     target: StreamTarget<'_>,
     composite: &mut [u8],
     mut owner: Option<&mut [u32]>,
+    mut paints: Option<&mut Paints<'_>>,
     mut frames_under: Option<&mut [u8]>,
     mut frames_over: Option<&mut [u8]>,
     tally: &mut Tally,
@@ -1718,6 +1798,13 @@ fn stream_pass(
             .saturating_add(raster_started.elapsed().as_micros() as u64);
         drop(scene);
         let overlay_started = std::time::Instant::now();
+        // the layer's colour is the same for every slice once one painted
+        let swap = pass_swap(
+            paints.as_deref_mut(),
+            target.key,
+            target.style.color,
+            out.frame.pixels(),
+        );
         overlay_window_owned(
             composite,
             owner.as_deref_mut(),
@@ -1725,6 +1812,7 @@ fn stream_pass(
             out.frame.pixels(),
             target.window,
             target.owner,
+            swap,
         );
         tally.composite_us = tally
             .composite_us
@@ -1786,6 +1874,8 @@ struct PreparedPass {
     frames: bool,
     /// the pass's id in the frame's owner map (0: none kept)
     owner: u32,
+    /// the pass's layer, for the frame's colours (`pass_swap`)
+    key: Key,
 }
 
 struct PassOutput {
@@ -1892,6 +1982,7 @@ fn raster_batch(
     cancellation: &RenderCancellation,
     composite: &mut [u8],
     mut owner: Option<&mut [u32]>,
+    mut paints: Option<&mut Paints<'_>>,
     mut frames_under: Option<&mut [u8]>,
     mut frames_over: Option<&mut [u8]>,
     tally: &mut Tally,
@@ -1974,6 +2065,14 @@ fn raster_batch(
             tally.frame_passes += 1;
         }
         let overlay_started = std::time::Instant::now();
+        // the passes are laid in placement order: the first of a layer to
+        // paint decides the layer's colour
+        let swap = pass_swap(
+            paints.as_deref_mut(),
+            pass.key,
+            pass.style.color,
+            out.geometry.frame.pixels(),
+        );
         overlay_window_owned(
             composite,
             owner.as_deref_mut(),
@@ -1981,6 +2080,7 @@ fn raster_batch(
             out.geometry.frame.pixels(),
             pass.window,
             pass.owner,
+            swap,
         );
         tally.composite_us = tally
             .composite_us
@@ -2610,6 +2710,7 @@ mod tests {
             occupancy: None,
             light_deadline: None,
             drawn: false,
+            distinct: None,
         };
         let p = placement(4.0, 0.0, 0.0);
         let sv = source_view(&request.view, &p).unwrap();
@@ -2678,6 +2779,7 @@ mod tests {
             occupancy: None,
             light_deadline: None,
             drawn: false,
+            distinct: None,
         };
         let p = placement(0.001, 1e16, 1e16);
         let sv = source_view(&request.view, &p).unwrap();
@@ -2715,6 +2817,7 @@ mod tests {
             occupancy: None,
             light_deadline: None,
             drawn: false,
+            distinct: None,
         };
         let big = 1i64 << 60;
         // the placement puts the deck view's origin at the source's
@@ -2906,10 +3009,10 @@ mod tests {
         for col in 0..3 {
             first[col * 4..col * 4 + 4].copy_from_slice(&px(10));
         }
-        overlay_window_owned(&mut composite, Some(&mut owner), 4, &first, (0, 0, 4, 2), 1);
+        overlay_window_owned(&mut composite, Some(&mut owner), 4, &first, (0, 0, 4, 2), 1, None);
         assert_eq!(owner, vec![1, 1, 1, 0, 0, 0, 0, 0]);
         let second: Vec<u8> = [px(20), px(20), px(20), [0, 0, 0, 0]].concat();
-        overlay_window_owned(&mut composite, Some(&mut owner), 4, &second, (1, 0, 2, 2), 2);
+        overlay_window_owned(&mut composite, Some(&mut owner), 4, &second, (1, 0, 2, 2), 2, None);
         // the later pass owns what it painted; its alpha-0 pixel leaves the
         // owner (and the composite) as they were
         assert_eq!(owner, vec![1, 2, 2, 0, 0, 2, 0, 0]);
@@ -2921,8 +3024,8 @@ mod tests {
         overlay_window(&mut plain, 4, &first, (0, 0, 4, 2));
         overlay_window(&mut plain, 4, &second, (1, 0, 2, 2));
         let mut unowned = vec![0u8; 4 * 2 * 4];
-        overlay_window_owned(&mut unowned, None, 4, &first, (0, 0, 4, 2), 1);
-        overlay_window_owned(&mut unowned, None, 4, &second, (1, 0, 2, 2), 2);
+        overlay_window_owned(&mut unowned, None, 4, &first, (0, 0, 4, 2), 1, None);
+        overlay_window_owned(&mut unowned, None, 4, &second, (1, 0, 2, 2), 2, None);
         assert_eq!(unowned, plain);
         assert_eq!(composite, plain);
         // both ids show; a third that painted nothing does not
@@ -2930,7 +3033,7 @@ mod tests {
         // a pass painted over whole does not show: pass 3 covers pass 1's one
         // pixel left
         let third: Vec<u8> = px(30).to_vec();
-        overlay_window_owned(&mut composite, Some(&mut owner), 4, &third, (0, 0, 1, 1), 3);
+        overlay_window_owned(&mut composite, Some(&mut owner), 4, &third, (0, 0, 1, 1), 3, None);
         assert_eq!(shown_owners(&owner, None, 3), vec![false, false, true, true]);
         // the white frame band over the geometry hides what it covers: over
         // every pixel pass 2 owns, pass 2 does not show either
@@ -2944,6 +3047,67 @@ mod tests {
         );
         // nothing painted: nothing shows
         assert_eq!(shown_owners(&[0, 0], None, 2), vec![false, false, false]);
+    }
+
+    #[test]
+    fn a_pass_is_laid_in_the_colour_decided_when_it_paints() {
+        // DeckRenderRequest::distinct. A 4 x 1 frame; three layers of one
+        // colour, blue, in a palette of blue, red and green.
+        let (blue, red, green) = ([0, 0, 255, 255], [255, 0, 0, 255], [0, 255, 0, 255]);
+        let request = DistinctColors {
+            palette: vec![vec![blue, red, green]],
+            ..DistinctColors::default()
+        };
+        let mut paints = Paints::new(&request, std::iter::empty());
+        let pass = |cols: &[usize]| {
+            let mut pixels = vec![0u8; 4 * 4];
+            for &col in cols {
+                pixels[col * 4..col * 4 + 4].copy_from_slice(&blue);
+            }
+            pixels
+        };
+        let window = (0, 0, 4, 1);
+        let mut composite = vec![0u8; 4 * 4];
+        let mut owner = vec![0u32; 4];
+        // the first layer to paint keeps its colour: nothing to change
+        let first = pass(&[0, 1]);
+        let swap = pass_swap(Some(&mut paints), (1, 0), blue, &first);
+        assert_eq!(swap, None);
+        overlay_window_owned(&mut composite, Some(&mut owner), 4, &first, window, 1, swap);
+        // a pass that paints nothing asks for no colour
+        let empty = pass(&[]);
+        assert_eq!(pass_swap(Some(&mut paints), (2, 0), blue, &empty), None);
+        assert_eq!(paints.painted(), vec![((1, 0), blue)]);
+        // the third layer paints: blue is in use, so its pixels are laid in
+        // the farthest of the palette, and the owner map is as ever
+        let third = pass(&[1, 2]);
+        let swap = pass_swap(Some(&mut paints), (3, 0), blue, &third);
+        assert_eq!(swap, Some((blue, green)));
+        overlay_window_owned(&mut composite, Some(&mut owner), 4, &third, window, 3, swap);
+        assert_eq!(composite, [blue, green, green, [0, 0, 0, 0]].concat());
+        assert_eq!(owner, vec![1, 3, 3, 0]);
+        // the layer skipped comes to paint later: the colour left
+        let second = pass(&[3]);
+        let swap = pass_swap(Some(&mut paints), (2, 0), blue, &second);
+        assert_eq!(swap, Some((blue, red)));
+        // (without an owner map the pixels are the same)
+        let mut unowned = composite.clone();
+        overlay_window_owned(&mut unowned, None, 4, &second, window, 2, swap);
+        overlay_window_owned(&mut composite, Some(&mut owner), 4, &second, window, 2, swap);
+        assert_eq!(composite, [blue, green, green, red].concat());
+        assert_eq!(unowned, composite);
+        assert_eq!(
+            paints.painted(),
+            vec![((1, 0), blue), ((2, 0), red), ((3, 0), green)]
+        );
+        // a pixel that is not the layer's colour is laid as it is
+        let mut odd = pass(&[0]);
+        odd[4..8].copy_from_slice(&[7, 7, 7, 255]);
+        let mut frame = vec![0u8; 4 * 4];
+        overlay_window_owned(&mut frame, None, 4, &odd, window, 2, Some((blue, red)));
+        assert_eq!(frame, [red, [7, 7, 7, 255], [0, 0, 0, 0], [0, 0, 0, 0]].concat());
+        // no colours asked: no change, whatever the pass
+        assert_eq!(pass_swap(None, (3, 0), blue, &third), None);
     }
 
     #[test]

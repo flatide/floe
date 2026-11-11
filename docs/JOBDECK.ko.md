@@ -559,6 +559,7 @@ floe2 render deck.jb --chip '2:*' --fit-chip 'MARK.oas#3' --px 600 --out mark3.p
 
 **뷰(색)**
 - 색은 기본이 뷰어의 level view다(레벨마다 한 색). `--mode chip`(0.12.436)은 chip view로 레벨 아래 소스 칩마다 다른 색, `--mode layer`는 source layer view로 LY/DT마다 한 색이다. 뷰어의 Jobdeck 메뉴와 같은 팔레트와 그 뷰에서 저장한 layerprops 파일(`<deck>.jb.layerprops`, `<deck>.chip-by-level.jb.layerprops`, `<deck>.layer.jb.layerprops`)을 쓴다. 뷰는 한 실행에 하나이고 report의 `jobdeck.view`가 말한다. `--legend`는 chip view에서 칩 줄들을, `--chip`으로 고르면 켠 칩의 줄만 적는다(0.12.436). 어느 뷰에서나 그림에 실제로 보이는 줄만 적는다(0.12.439; `FLOE_LEGEND_IN_VIEW=placed`면 틀 안에 배치가 있는 줄, `off`면 로드한 레벨 전부). 자세한 것은 [JOBDECK-CAPTURE.ko.md](JOBDECK-CAPTURE.ko.md) §12.
+- 캡처는 그림에 칠해지는 줄끼리 색이 겹치지 않게 한다(0.12.449). 팔레트가 열 색을 돌려 쓰므로 생기는 겹침을, 줄이 처음 칠해질 때 이미 칠한 색들과 가장 먼 팔레트 색을 주어 가른다. 겹치지 않는 줄은 뷰의 색 그대로이고 뷰어의 화면은 바뀌지 않는다. 보고서 샷 행의 `colors`·`recolored`가 말하고, `FLOE_DECK_DISTINCT_COLORS=off`면 뷰의 색으로 찍는다. 자세한 것은 [CAPTURE-CLI.ko.md](CAPTURE-CLI.ko.md) §4.6.
 
 **누락 처리**
 - 캡처는 켠 칩의 skip만 부족한 것으로 센다.
