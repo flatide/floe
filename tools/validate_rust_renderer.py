@@ -327,7 +327,8 @@ class WorkerContractTests(unittest.TestCase):
             v.calls = []
             v._request_busy = lambda: busy
             v._index_ready = lambda path, ids=None: ready
-            v.open_file = lambda path, ids=None: (v.calls.append(("open", path)), error)[1]
+            v.open_file = lambda path, ids=None, props=None: (v.calls.append(
+                ("open", path) if props is None else ("open", path, props)), error)[1]
             v._forwarded_view_options = lambda fields: (v.calls.append(("options", list(fields))), False)[1]
             v._forwarded_goto = lambda fields: False
             v._present = lambda: v.calls.append("present")
@@ -644,6 +645,363 @@ class WorkerContractTests(unittest.TestCase):
                     forward.assert_not_called()
                     bind.assert_not_called()
                     run_viewer.assert_not_called()
+
+    def test_layer_properties_go_with_the_launch(self):
+        """User 2026-11-11 ("layer property 파일도 실행 옵션으로 지정할 수 있게
+        해줘"): `floe2 view SRC --layerprops FILE`. The command line: the
+        file needs a layout and has to be there; a link is read through; it
+        rides the request to a running window as `layerprops=`, or is this
+        launch's window's - checked first, a file that cannot be read ends
+        the launch - for a ready layout as run_viewer's `layerprops`, for a
+        pending one among its fields. The window: a forwarded file that
+        cannot be read is refused to the sender before anything is opened;
+        the file goes with the open - the one before the answer, the one
+        after an index - and is the layout's from then on (_props_bound):
+        on the table whenever it is built for that layout, a deck's in its
+        level view alone, gone with another layout; named again unchanged
+        for the layout shown it is not applied again."""
+        from floe import gui
+        from floe import instance
+        from floe import viewcli as cli
+        ServiceError = gui.gtkservice.ServiceError
+
+        self.assertEqual(cli.parser().parse_args(["x.oas", "--layerprops", "a.layerprops"]).layerprops,
+                         "a.layerprops")
+        self.assertIsNone(cli.parser().parse_args(["x.oas"]).layerprops)
+        self.assertIn("--layerprops FILE", cli.parser().format_help())
+
+        with tempfile.TemporaryDirectory() as td:
+            td = os.path.realpath(td)
+            source = Path(td) / "chip.oas"
+            source.write_bytes(b"fixture")
+            props = Path(td) / "my props.layerprops"
+            props.write_text("1.0 red speckle M1 1 1\n")
+            link = Path(td) / "link.layerprops"
+            os.symlink(str(props), str(link))
+
+            def launch(words, running, ready=True, read=None):
+                """The request handed to a running window, or what
+                run_viewer got when there is none (and what was read)."""
+                owned = object()
+                with mock.patch.dict(os.environ, {"FLOE_RENDERER": "rust"}), \
+                        mock.patch.object(cli, "_cache_ready", return_value=ready), \
+                        mock.patch.object(cli, "_service_open", return_value="CACHE"), \
+                        mock.patch.object(instance, "display_key", return_value=":test"), \
+                        mock.patch.object(instance, "socket_address", return_value="\0floe-props"), \
+                        mock.patch.object(instance, "try_forward",
+                                          return_value=0 if running else None) as forward, \
+                        mock.patch.object(instance, "try_bind", return_value=owned) as bind, \
+                        mock.patch("floe.gtkservice.layerprops_read", side_effect=read) as reader, \
+                        mock.patch("floe.gui.run_viewer") as run_viewer:
+                    for name in ("FLOE_NO_FILE_LOAD", "FLOE_REVIEWER"):
+                        os.environ.pop(name, None)
+                    if running:
+                        with self.assertRaises(SystemExit) as stopped:
+                            cli.main(words)
+                        self.assertEqual(stopped.exception.code, 0)
+                        run_viewer.assert_not_called()
+                        reader.assert_not_called()   # the window reads it
+                        return forward.call_args.args[1]
+                    cli.main(words)
+                    return run_viewer.call_args, reader.call_args_list, forward, bind
+
+            # a running window: the request's last field, the file's real path
+            for given in (str(props), os.path.relpath(props), str(link)):
+                with self.subTest(given=given):
+                    sent = launch([str(source), "--layerprops", given, "--no-file-load"],
+                                  running=True).split("\t")
+                    self.assertEqual(sent[0], str(source))
+                    self.assertEqual(sent[-2:], ["noload=1", "layerprops=%s" % props])
+            self.assertNotIn("layerprops", launch([str(source)], running=True))
+            # this launch's window, the layout ready: read first, then the viewer's
+            call, read, _, _ = launch([str(source), "--layerprops", str(link)], running=False)
+            self.assertEqual([c.args for c in read], [(str(props),)])
+            self.assertEqual(call.args[0], "CACHE")
+            self.assertEqual(call.kwargs["layerprops"], str(props))
+            self.assertEqual(call.kwargs["pending_fields"], ())
+            # ... a layout without an index: among the pending open's fields
+            call, read, _, _ = launch([str(source), "--layerprops", str(props)],
+                                      running=False, ready=False)
+            self.assertEqual(len(read), 1)
+            self.assertIsNone(call.args[0])
+            self.assertIsNone(call.kwargs["layerprops"])
+            self.assertEqual(call.kwargs["pending_open"], str(source))
+            self.assertEqual(call.kwargs["pending_fields"][-1], "layerprops=%s" % props)
+            # ... no option: nothing read, nothing passed
+            call, read, _, _ = launch([str(source)], running=False)
+            self.assertEqual((read, call.kwargs["layerprops"]), ([], None))
+            # --multi: a window of its own, with the file
+            call, read, forward, bind = launch([str(source), "--multi", "--layerprops", str(props)],
+                                               running=False)
+            forward.assert_not_called()
+            bind.assert_not_called()
+            self.assertEqual((call.args[1], call.kwargs["layerprops"]), (None, str(props)))
+            # a file that cannot be read: the launch ends, no window
+            for error in (ServiceError("io", "stream did not contain valid UTF-8"),
+                          OSError("service gone")):
+                with self.subTest(error=error), \
+                        self.assertRaisesRegex(SystemExit, "floe2: layer properties file .*my props"
+                                               r"\.layerprops: "):
+                    launch([str(source), "--layerprops", str(props)], running=False, read=error)
+            # the command line's own refusals: before any window is looked for
+            for words, message in ((["--layerprops", str(props)],
+                                    "--layerprops requires a layout or a jobdeck"),
+                                   ([str(source), "--layerprops", str(props) + ".missing"],
+                                    "no such layer properties file"),
+                                   ([str(source), "--layerprops", td],
+                                    "no such layer properties file")):
+                with self.subTest(words=words), \
+                        mock.patch.object(instance, "try_forward") as forward, \
+                        mock.patch.object(instance, "try_bind") as bind, \
+                        mock.patch("floe.gui.run_viewer") as run_viewer:
+                    with self.assertRaisesRegex(SystemExit, message):
+                        cli.cmd_view(cli.parser().parse_args(words))
+                    forward.assert_not_called()
+                    bind.assert_not_called()
+                    run_viewer.assert_not_called()
+
+        # run_viewer hands it to the Viewer
+        viewer = SimpleNamespace(_quit=mock.Mock())
+        glib = SimpleNamespace(PRIORITY_DEFAULT=0, unix_signal_add=mock.Mock(), idle_add=mock.Mock())
+        with mock.patch.dict(os.environ), mock.patch.object(gui, "import_gtk"), \
+                mock.patch.object(gui, "Viewer", return_value=viewer) as made, \
+                mock.patch.object(gui, "GLib", glib), \
+                mock.patch.object(gui, "Gtk", SimpleNamespace(main=lambda: None)):
+            os.environ.pop("FLOE_GUI_SMOKE_MS", None)
+            gui.run_viewer("CACHE", layerprops="/p/a.layerprops")
+            self.assertEqual(made.call_args.kwargs["layerprops"], "/p/a.layerprops")
+            gui.run_viewer("CACHE")
+            self.assertIsNone(made.call_args.kwargs["layerprops"])
+
+        # ---- the window: a forwarded request -----------------------------
+        import socket
+
+        def window(refusal=None, ready=True, error=None):
+            v = gui.Viewer.__new__(gui.Viewer)
+            v._quitting = False
+            v.calls = []
+            v._request_busy = lambda: None
+            v._index_ready = lambda path, ids=None: ready
+            v._props_refusal = lambda path: (v.calls.append(("read", path)), refusal)[1]
+            v.open_file = lambda path, ids=None, props=None: (
+                v.calls.append(("open", path, props)), error)[1]
+            v._forwarded_view_options = lambda fields: False
+            v._forwarded_goto = lambda fields: False
+            v._present = lambda: v.calls.append("present")
+            return v
+
+        def ask(v, request):
+            ours, theirs = socket.socketpair()
+            v.server_sock = SimpleNamespace(accept=lambda: (ours, None))
+            idles = []
+            glib = SimpleNamespace(idle_add=lambda f, *a: idles.append((f, a)),
+                                   timeout_add=lambda ms, f: 7)
+            with mock.patch.object(gui, "GLib", glib):
+                theirs.sendall(request.encode("utf-8") + b"\n")
+                self.assertTrue(gui.Viewer._on_incoming(v, None, None))
+                reply = theirs.recv(4096).decode("utf-8").strip()
+            theirs.close()
+            return reply, idles
+
+        v = window()
+        reply, idles = ask(v, "/d/chip.oas\tdetail=high\tlayerprops=/p/a.layerprops")
+        self.assertEqual((reply, idles), ("OK", []))
+        self.assertEqual(v.calls, [("read", "/p/a.layerprops"),
+                                   ("open", "/d/chip.oas", "/p/a.layerprops"), "present"])
+        # a file that cannot be read: said to the sender, nothing opened or presented
+        v = window(refusal="ERR layer properties file /p/a.layerprops: not text")
+        reply, idles = ask(v, "/d/chip.oas\tdrc=/d/r.db\tlayerprops=/p/a.layerprops")
+        self.assertEqual((reply, idles), ("ERR layer properties file /p/a.layerprops: not text", []))
+        self.assertEqual(v.calls, [("read", "/p/a.layerprops")])
+        # a layout to index first, results: done in the window, the field with the request
+        v = window(ready=False)
+        reply, idles = ask(v, "/d/new.oas\tdepth=0\tlayerprops=/p/a.layerprops")
+        self.assertEqual(reply, "OK")
+        self.assertEqual(idles, [(v._request_run, ("/d/new.oas", ["depth=0", "layerprops=/p/a.layerprops"]))])
+        # no layout (viewcli refuses it; a request of another hand): ignored
+        v = window()
+        reply, _ = ask(v, "\tlayerprops=/p/a.layerprops")
+        self.assertEqual((reply, v.calls), ("OK", ["present"]))
+
+        # _props_refusal: the service's word
+        with mock.patch.object(gui.gtkservice, "layerprops_read", return_value=[]):
+            self.assertIsNone(gui.Viewer._props_refusal("/p/a.layerprops"))
+        with mock.patch.object(gui.gtkservice, "layerprops_read",
+                               side_effect=ServiceError("input", "layerprops exceeds 4 MiB")):
+            self.assertEqual(gui.Viewer._props_refusal("/p/a.layerprops"),
+                             "ERR layer properties file /p/a.layerprops: layerprops exceeds 4 MiB")
+
+        # _request_run keeps the field among the layout's; _open_or_index
+        # takes it out of the view options and gives it to the open
+        v = gui.Viewer.__new__(gui.Viewer)
+        v.calls = []
+        v._open_or_index = lambda path, fields, then=None: v.calls.append((path, list(fields)))
+        gui.Viewer._request_run(v, "/d/chip.oas", ["depth=0", "layerprops=/p/a.layerprops",
+                                                   "userid=kim"])
+        self.assertEqual(v.calls, [("/d/chip.oas", ["depth=0", "layerprops=/p/a.layerprops"])])
+        for ready, deck in ((True, False), (False, False), (False, True)):
+            with self.subTest(ready=ready, deck=deck):
+                path = "/d/deck.jb" if deck else "/d/chip.oas"
+                v = gui.Viewer.__new__(gui.Viewer)
+                v.calls = []
+                v._index_ready = lambda path, ids=None: ready
+                v._index_busy = lambda path: None
+                v._index_consent = lambda question: True
+                v._index_question = lambda path, ids=None: "?"
+                v._jobdeck_pick_levels = lambda path: None
+                v.open_file = lambda path, ids=None, props=None: v.calls.append(("open", path, props))
+                v._vfs_index_and_load = lambda path, after=None, props=None: v.calls.append(
+                    ("index", path, props))
+                v._jobdeck_index_and_load = lambda path, after=None, ids=None, props=None: \
+                    v.calls.append(("deck index", path, props))
+                v._forwarded_view_options = lambda fields: (v.calls.append(("options", list(fields))),
+                                                            False)[1]
+                v._forwarded_goto = lambda fields: False
+                v._present = lambda: None
+                gui.Viewer._open_or_index(v, path, ["depth=0", "layerprops=/p/a.layerprops"])
+                first = ("open" if ready else "deck index" if deck else "index",
+                         path, "/p/a.layerprops")
+                self.assertEqual(v.calls[0], first)
+                if ready:
+                    self.assertEqual(v.calls[1], ("options", ["depth=0"]))
+
+        # open_file: the layout shown takes the file in place; another one
+        # has it for the table its open builds, and no longer after
+        shown = SimpleNamespace(src="/d/chip.oas", is_stale=lambda: False, ids=None)
+        v = gui.Viewer.__new__(gui.Viewer)
+        v.cache, v.calls = shown, []
+        v._props_request = lambda path: v.calls.append(("request", path))
+        self.assertIsNone(gui.Viewer.open_file(v, "/d/chip.oas", props="/p/a.layerprops"))
+        self.assertIsNone(gui.Viewer.open_file(v, "/d/chip.oas"))
+        self.assertEqual(v.calls, [("request", "/p/a.layerprops")])
+        v._loading_show = v._loading_hide = lambda *_a: None
+        for result in (None, "ERR no index"):
+            v._open_file_load = lambda path, ids: (v.calls.append(("load", path, v._props_next)),
+                                                   result)[1]
+            v.calls = []
+            self.assertEqual(gui.Viewer.open_file(v, "/d/other.oas", props="/p/b.layerprops"), result)
+            self.assertEqual(v.calls, [("load", "/d/other.oas", "/p/b.layerprops")])
+            self.assertIsNone(v._props_next)
+
+        # the file is the layout's: on the table whenever it is built for it
+        def table(rows=(("r",),), found=(1, 2)):
+            v = gui.Viewer.__new__(gui.Viewer)
+            v.calls, v._color_epoch = [], 0
+            v._props_stamp = lambda path: ("stamp", path)
+            v._props_tables = lambda got: (v.calls.append(("tables", got)),
+                                           ({(1, 0): "#ff0000"} if found[0] else {}, found[1]))[1]
+            v._refresh_row_fills = lambda: v.calls.append("fills shown")
+            v._fills_job = lambda: {"kind": "repattern"}
+            v._set_live_status = lambda text: v.calls.append(("status", text))
+            v._props_load = lambda path: v.calls.append(("load", path))
+            return v
+
+        layout = SimpleNamespace(src="/d/chip.oas", is_jobdeck=False)
+        other = SimpleNamespace(src="/d/other.oas", is_jobdeck=False)
+        with mock.patch.object(gui.gtkservice, "layerprops_read", return_value=["ROWS"]) as read:
+            v = table()
+            self.assertEqual(gui.Viewer._props_bound_apply(v, layout), [])    # no file named
+            read.assert_not_called()
+            v._props_next = "/p/a.layerprops"                                # the launch's open
+            jobs = gui.Viewer._props_bound_apply(v, layout)
+            self.assertEqual(jobs, [{"kind": "recolor", "colors": [[[1, 0], "#ff0000"]]},
+                                    {"kind": "repattern"}])
+            self.assertEqual(v._props_bound, {"src": "/d/chip.oas", "path": "/p/a.layerprops",
+                                              "stamp": ("stamp", "/p/a.layerprops")})
+            self.assertEqual((v._props_next, v._color_epoch), (None, 1))
+            self.assertEqual(v._props_note,
+                             "layer properties loaded: /p/a.layerprops (1 colors, 2 fills)")
+            self.assertEqual(v.calls, [("tables", ["ROWS"]), "fills shown"])
+            v.calls = []                                                     # the table again
+            self.assertEqual(len(gui.Viewer._props_bound_apply(v, layout)), 2)
+            self.assertEqual(v.calls[0], ("tables", ["ROWS"]))
+            self.assertEqual(gui.Viewer._props_bound_apply(v, None), [])     # let go for a rebuild
+            self.assertEqual(v._props_bound["path"], "/p/a.layerprops")
+            v.calls = []                                                     # another layout
+            self.assertEqual(gui.Viewer._props_bound_apply(v, other), [])
+            self.assertEqual((v._props_bound, v._props_note, v.calls), (None, None, []))
+            # fills alone; nothing of the layout's
+            v = table(found=(0, 3))
+            v._props_next = "/p/a.layerprops"
+            self.assertEqual(gui.Viewer._props_bound_apply(v, layout), [{"kind": "repattern"}])
+            v = table(found=(0, 0))
+            v._props_next = "/p/a.layerprops"
+            self.assertEqual(gui.Viewer._props_bound_apply(v, layout), [])
+            self.assertEqual(v._props_note, "no matching layers in /p/a.layerprops")
+            # a deck: the level view's - the other views keep their own
+            deck = SimpleNamespace(src="/d/deck.jb", is_jobdeck=True, mode="level")
+            v = table()
+            v._props_next = "/p/a.layerprops"
+            self.assertEqual(len(gui.Viewer._props_bound_apply(v, deck)), 2)
+            deck.mode, v.calls = "chip", []
+            self.assertEqual(gui.Viewer._props_bound_apply(v, deck), [])
+            self.assertEqual((v.calls, v._props_bound["path"]), ([], "/p/a.layerprops"))
+            deck.mode = "level"
+            self.assertEqual(len(gui.Viewer._props_bound_apply(v, deck)), 2)
+        # ... a file that has gone bad since: said, the table as the open made it
+        with mock.patch.object(gui.gtkservice, "layerprops_read",
+                               side_effect=ServiceError("io", "No such file or directory")), \
+                mock.patch.object(gui.sys, "stderr", io.StringIO()) as said:
+            v = table()
+            v._props_next = "/p/a.layerprops"
+            self.assertEqual(gui.Viewer._props_bound_apply(v, layout), [])
+            self.assertEqual(v._props_note, "layer properties load failed: No such file or directory")
+            self.assertIn("layer properties load failed", said.getvalue())
+            self.assertEqual(v.calls, [])
+
+        # named again for the layout shown: applied unless it is the file in use
+        v = table()
+        v.cache = layout
+        gui.Viewer._props_request(v, "/p/a.layerprops")                      # none in use
+        self.assertEqual(v.calls, [("load", "/p/a.layerprops")])
+        v.calls = []
+        gui.Viewer._props_request(v, "/p/a.layerprops")                      # the same, unchanged
+        self.assertEqual(v.calls, [])
+        v._props_stamp = lambda path: ("changed", path)
+        gui.Viewer._props_request(v, "/p/a.layerprops")                      # changed
+        self.assertEqual(v.calls, [("load", "/p/a.layerprops")])
+        v.calls = []
+        gui.Viewer._props_request(v, "/p/b.layerprops")                      # another file
+        self.assertEqual((v.calls, v._props_bound["path"]),
+                         ([("load", "/p/b.layerprops")], "/p/b.layerprops"))
+        v._props_stamp = lambda path: None                                   # gone: tried, said
+        v.calls = []
+        gui.Viewer._props_request(v, "/p/b.layerprops")
+        self.assertEqual(v.calls, [("load", "/p/b.layerprops")])
+        v = table()                                                          # a deck in another view
+        v.cache = SimpleNamespace(src="/d/deck.jb", is_jobdeck=True, mode="chip")
+        gui.Viewer._props_request(v, "/p/a.layerprops")
+        self.assertEqual(v.calls, [("status", "layer properties of the level view: /p/a.layerprops")])
+        self.assertEqual(v._props_bound["src"], "/d/deck.jb")
+
+        # the note is said once the view is up
+        v = gui.Viewer.__new__(gui.Viewer)
+        v.worker = worker = object()
+        v._props_note, v._fit_after_worker_start, v._did_fit, said = "layer properties loaded: x", False, False, []
+        v._set_live_status = said.append
+        for name in ("_sync_label_font_capability", "_sync_abstract_capability",
+                     "_sync_density_capability", "_cell_tree_load_roots"):
+            setattr(v, name, lambda: None)
+        gui.Viewer._worker_start_finished(v, worker, None)
+        self.assertEqual((said, v._props_note), (["layer properties loaded: x"], None))
+        # ... and not after a view that failed to open
+        v._props_note, v._load_marks = "layer properties loaded: x", None
+        gui.Viewer._worker_start_finished(v, worker, "renderd ended")
+        self.assertEqual((said[1:], v._props_note),
+                         (["render service open failed: renderd ended"], None))
+
+    def test_the_title_names_a_file_with_its_folder(self):
+        """User 2026-11-11: "창 제목에 폴더도 함께 표시해줘" - two launches'
+        layouts are named alike (/path/1/layout.oas, /path/2/layout.oas)."""
+        from floe import gui
+        name = gui.Viewer._title_name
+        self.assertEqual(name("/path/1/layout.oas"), "1/layout.oas")
+        self.assertEqual(name("/path/2/layout.oas"), "2/layout.oas")
+        self.assertEqual(name("/proj/run 7/deck.jb"), "run 7/deck.jb")
+        self.assertEqual(name("/layout.oas"), "layout.oas")
+        self.assertEqual(name("/a/b/../c/x.oas"), "c/x.oas")
+        with mock.patch.object(gui.os, "getcwd", return_value="/work/here"):
+            self.assertEqual(name("x.oas"), "here/x.oas")
 
     def test_startup_rules_wait_for_the_pending_layout_open(self):
         from floe import gui
@@ -3367,7 +3725,7 @@ class IndexOnOpenTests(unittest.TestCase):
         calls = []
         v._index_ready = lambda path, ids=None: ready
         v._ask_yes_no = lambda text: (calls.append(("ask", text)), answer)[1]
-        v.open_file = lambda path, ids=None: (
+        v.open_file = lambda path, ids=None, props=None: (
             calls.append(("open", path, ids)), None)[1]
         # the level question (user call 2026-09-10): the shell answers
         # "every level" unless a test installs its own
@@ -3384,14 +3742,14 @@ class IndexOnOpenTests(unittest.TestCase):
         v._restore_keys = lambda: calls.append(("keys",))
 
         # like the real helpers: index, open, then report to `after`
-        def index_and_load(path, after=None):
+        def index_and_load(path, after=None, props=None):
             calls.append(("vfs-index", path))
-            after(v.open_file(path))
+            after(v.open_file(path, props=props))
         v._vfs_index_and_load = index_and_load
 
-        def deck_index_and_load(path, after=None, ids=None):
+        def deck_index_and_load(path, after=None, ids=None, props=None):
             calls.append(("deck-index", path, ids))
-            after(v.open_file(path, ids))
+            after(v.open_file(path, ids, props=props))
         v._jobdeck_index_and_load = deck_index_and_load
         return v, calls
 

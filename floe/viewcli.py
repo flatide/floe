@@ -159,6 +159,21 @@ def cmd_view(args):
         drc = os.path.abspath(drc)
         if not os.path.isfile(drc):
             raise SystemExit(f"floe2: no such DRC results file: {drc}")
+    # the layer properties file for the layout this launch opens (user
+    # 2026-11-11: "layer property 파일도 실행 옵션으로 지정할 수 있게 해줘" -
+    # a launcher's viewer has its file loads off, and a design default
+    # cannot be put beside a source in a folder that is not to be written):
+    # a Calibre .layerprops file, applied as Layer > load layer properties…
+    # applies one. A link is read through - the file is this command line's
+    # own (the service reads no link by itself)
+    props = getattr(args, "layerprops", None)
+    if props is not None:
+        if not src:
+            raise SystemExit("floe2: --layerprops requires a layout or a jobdeck")
+        props = os.path.abspath(props)
+        if not os.path.isfile(props):
+            raise SystemExit(f"floe2: no such layer properties file: {props}")
+        props = os.path.realpath(props)
     # documented entry for the frame-tuning knobs: the flags set
     # the env vars vfsclient reads per request (children inherit;
     # a forwarded running instance keeps its own values)
@@ -236,7 +251,8 @@ def cmd_view(args):
     # environment): sent along - a window serves the request under it
     stated = (os.environ.get("FLOE_REVIEWER") or "").strip()
     # (the request is one line of tab-separated fields)
-    unsendable = any(c in text for text in (src or "", drc or "", rules or "", stated)
+    unsendable = any(c in text for text in (src or "", drc or "", rules or "", stated,
+                                            props or "")
                      for c in "\t\r\n")
     process_options = (stream_kb is not None
                        or args.stream_target_ms != 500
@@ -292,6 +308,10 @@ def cmd_view(args):
             request += "\tuserid=" + stated
         if no_load:
             request += "\tnoload=1"
+        # the layout's layer properties file: the window applies it to the
+        # layout the request opens, or to the one it shows when that is it
+        if props:
+            request += "\tlayerprops=" + props
         for _ in range(5):
             code = instance.try_forward(addr, request)
             if code is not None:
@@ -308,6 +328,15 @@ def cmd_view(args):
             import atexit
             atexit.register(lambda: os.path.exists(addr) and os.unlink(addr))
 
+    # this process is the window: a layer properties file that cannot be
+    # read ends the launch here, said where the launcher reads it (a running
+    # window answers a forwarded request the same way, gui.py _on_incoming)
+    if props:
+        from .gtkservice import ServiceError, layerprops_read
+        try:
+            layerprops_read(props)
+        except (OSError, ServiceError) as exc:
+            raise SystemExit("floe2: layer properties file %s: %s" % (props, exc))
     # no index yet: the viewer starts empty, asks, indexes and opens
     # (the request options - goto included - apply after the open)
     pending_open = None
@@ -332,7 +361,8 @@ def cmd_view(args):
             + (["density=" + args.density]
                if getattr(args, "density", None) is not None else [])
             + (["occupancy=" + args.occupancy]
-               if getattr(args, "occupancy", None) is not None else []))
+               if getattr(args, "occupancy", None) is not None else [])
+            + (["layerprops=" + props] if props else []))
         c = None
         goto = None
     elif src and APP == "floe2":
@@ -357,7 +387,8 @@ def cmd_view(args):
                         else args.density == "on"),
                occupancy=(None if getattr(args, "occupancy", None) is None
                           else args.occupancy == "on"),
-               file_load=not no_load)
+               file_load=not no_load,
+               layerprops=props if c is not None else None)
 
 
 def parser():
@@ -365,9 +396,9 @@ def parser():
         prog="floe2 view",
         description="native desktop viewer (GTK3); one instance per (uid, "
                     "DISPLAY) - later calls hand their request (the layout, "
-                    "--drc, --rules, --userid, --no-file-load and the view "
-                    "options) to it and the window switches; --multi opens "
-                    "a window of its own",
+                    "--layerprops, --drc, --rules, --userid, --no-file-load "
+                    "and the view options) to it and the window switches; "
+                    "--multi opens a window of its own",
         epilog="--workdir DIR (every floe2 command, anywhere on the line; "
                "FLOE_WORKDIR): the caches are read and written under DIR at "
                "the source's absolute path, not beside the source; floe2 "
@@ -443,6 +474,21 @@ def parser():
                         "alike (as before 0.12.352). FLOE_LAYER_COLORS sets "
                         "the default for the viewer and floe2 render. Given, "
                         "opens an independent instance")
+    # the layout's layer properties file (user 2026-11-11)
+    p.add_argument("--layerprops", default=None, metavar="FILE",
+                   help="layer properties for SRC: a Calibre .layerprops "
+                        "file (L.D color fill name visible width), applied "
+                        "when the layout or jobdeck opens as Layer > load "
+                        "layer properties… applies one - the colours, fills, "
+                        "line widths and visibility of the layers it lists, "
+                        "over the design default beside the source "
+                        "(SRC.layerprops); the layers it does not list keep "
+                        "theirs. It stays the layout's while the window "
+                        "shows it (a reload, a jobdeck's level view). A file "
+                        "that cannot be read ends the launch. Forwarded to a "
+                        "running instance, which applies it to the layout "
+                        "the request opens; --no-file-load does not turn it "
+                        "off")
     p.add_argument("--refinement", choices=("on", "off"), default="on",
                    help="publish progressive intermediate frames (default "
                         "on); off waits for one settled frame in both floe "
@@ -505,8 +551,9 @@ def parser():
     # a launcher's viewer (user 2026-11-11, TeeBox: one account starts
     # everyone's viewer - a user must not open what that account can read)
     p.add_argument("--no-file-load", action="store_true",
-                   help="load no file but this command line's (SRC, --drc, "
-                        "--rules, and what follows them by name): File > "
+                   help="load no file but this command line's (SRC, "
+                        "--layerprops, --drc, --rules, and what follows them "
+                        "by name): File > "
                         "load layout… / load jobdeck…, DRC > open results "
                         ".db… / load SVRF rules… / load clusters… / load "
                         "waives… / review from previous run… / load notes…, "

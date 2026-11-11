@@ -2343,6 +2343,10 @@ class Viewer:
     _title_drc = ""
     _request_waiting = None
     _request_timer = None
+    # the layer properties file a launch named (floe2 view --layerprops)
+    _props_bound = None
+    _props_next = None
+    _props_note = None
 
     def __init__(self, cache, server_sock=None, show=True, goto=None,
                  detail=None, dump=False, depth=None, lod=DEFAULT_LOD,
@@ -2351,7 +2355,7 @@ class Viewer:
                  frame_cache=True, margin=False,
                  stream_kb=None, stream_target_ms=500,
                  render_debug=False, thin="auto", density=None,
-                 occupancy=None, file_load=True):
+                 occupancy=None, file_load=True, layerprops=None):
         self.server_sock = server_sock
         # False (`floe2 view --no-file-load`, user 2026-11-11: a launcher
         # that starts everyone's viewer under one account must not let a
@@ -2372,6 +2376,17 @@ class Viewer:
         # dialog and of a review write (_request_hold)
         self._request_waiting = None
         self._request_timer = None
+        # the layer properties file a launch names for its layout (`floe2
+        # view SRC --layerprops FILE`, user 2026-11-11: "layer property
+        # 파일도 실행 옵션으로 지정할 수 있게"): _props_next while that layout
+        # is being opened, _props_bound once it is - the file is put on the
+        # layer table whenever that layout's table is built
+        # (_props_bound_apply) -, _props_note what to say of it once the
+        # view is up
+        self._props_bound = None
+        self._props_next = (os.path.realpath(layerprops)
+                            if layerprops and cache is not None else None)
+        self._props_note = None
         self.cx = self.cy = 0
         self.spp = 1.0              # dbu per screen pixel
         self._start_goto = goto     # [x_um, y_um(, window_um)] from the CLI
@@ -3150,7 +3165,8 @@ class Viewer:
             jb = self.meta["jobdeck"]
             self._title_base = (
                 "%s - %s · jobdeck %d CHIPs · %d placements · %s view%s%s"
-                % (APP, os.path.basename(self.meta["src"]["path"]),
+                % (APP, self._title_name(getattr(cache, "src", None)
+                                         or self.meta["src"]["path"]),
                    jb["chips"], jb["placements"],
                    {"layer": "source layer"}.get(jb["mode"], jb["mode"]),
                    " · levels %s of %d" % (
@@ -3165,12 +3181,19 @@ class Viewer:
             src = self.meta["src"]
             self._title_base = (
                 "%s - %s · %.2f GB · grid %dx%d"
-                % (APP, os.path.basename(src["path"]),
+                % (APP, self._title_name(getattr(cache, "src", None)
+                                         or src["path"]),
                    src["size"] / 1e9, self.meta["grid"]["nx"],
                    self.meta["grid"]["ny"]))
         self._title_show()
         self._build_layer_panel()
         self._apply_props_visibility(rows)
+        # the layer properties a launch named for this layout (floe2 view
+        # --layerprops): on the table before the view is made, so that its
+        # first frame draws the layers the file shows - and before a deck's
+        # own session choices, which stay the user's; the colours, fills
+        # and widths go to the view once it is made (below)
+        props_jobs = self._props_bound_apply(cache)
         if getattr(cache, "is_jobdeck", False):
             self.visible = cache.restore_visibility(self.visible)
             self._layers_batch = True
@@ -3204,6 +3227,9 @@ class Viewer:
             else:
                 self.worker.start()
                 self._worker_start_finished(self.worker, None)
+            # (a view that is still opening keeps them until it is open)
+            for job in props_jobs:
+                self.worker.submit(job)
 
     def _worker_start_finished(self, worker, error):
         if worker is not self.worker:
@@ -3214,10 +3240,16 @@ class Viewer:
         hide = getattr(self, "_loading_hide", None)
         if hide is not None:
             hide()
+        # (a stand-in viewer of the worker-contract gate has no note)
+        note = getattr(self, "_props_note", None)
+        self._props_note = None
         if error is not None:
             self._load_marks = None
             self._set_live_status("render service open failed: %s" % error)
             return False
+        if note:
+            # what became of the launch's layer properties file
+            self._set_live_status(note)
         marks = getattr(self, "_load_marks", None)
         if marks is not None and "cache" in marks and "service" not in marks:
             marks["service"] = time.monotonic()
@@ -3356,14 +3388,19 @@ class Viewer:
     def _collapse_all(self):
         self._expand_all(False)
 
-    def open_file(self, path, ids=None):
+    def open_file(self, path, ids=None, props=None):
         """Open another OASIS file (instance-forwarded request or
         File > load layout…; also the FIRST layout of an empty
-        start). `ids`: a jobdeck's mask levels to load (None = all)."""
+        start). `ids`: a jobdeck's mask levels to load (None = all).
+        `props`: the layer properties file the launch names for it (floe2
+        view --layerprops) - on the layer table this open builds, or, for
+        the layout already shown, applied in place (_props_request)."""
         path = os.path.abspath(path)
         if self.cache is not None and path == self.cache.src \
                 and not self.cache.is_stale() \
                 and getattr(self.cache, "ids", None) == ids:
+            if props:
+                self._props_request(props)
             return None
         # the load clock (see _load_note): from the file's selection
         self._load_marks = {"t0": time.monotonic()}
@@ -3374,11 +3411,16 @@ class Viewer:
             "jobdeck " if _is_deck_path(path) else "",
             os.path.basename(path)))
         applied = False
+        # the launch's layer properties, for the table _apply_cache builds
+        # (the file as the command line read it through a link: one name
+        # for it, whichever way it was written)
+        self._props_next = os.path.realpath(props) if props else None
         try:
             err = self._open_file_load(path, ids)
             applied = err is None
             return err
         finally:
+            self._props_next = None
             if not applied:
                 self._loading_hide()
 
@@ -3602,12 +3644,17 @@ class Viewer:
         fields = [f for f in fields if f]
         if ids is not None:
             ask_levels = False
+        props = None
         for f in fields:
             if f.startswith("levels="):
                 ids = sorted({int(t) for t in f[7:].split(",")
                               if t.strip()}) or None
                 ask_levels = False
-        fields = [f for f in fields if not f.startswith("levels=")]
+            elif f.startswith("layerprops="):
+                # the launch's layer properties file (--layerprops)
+                props = f[11:] or None
+        fields = [f for f in fields
+                  if not f.startswith(("levels=", "layerprops="))]
         if _is_deck_path(path) and ask_levels:
             ids = self._jobdeck_pick_levels(path)
             if ids is False:
@@ -3630,7 +3677,7 @@ class Viewer:
 
         if self._index_ready(path, ids):
             try:
-                err = self.open_file(path, ids)
+                err = self.open_file(path, ids, props=props)
             except Exception as exc:
                 err = "ERR %s" % exc
             after_open(err)
@@ -3649,9 +3696,10 @@ class Viewer:
             self._restore_keys()
             return False
         if _is_deck_path(path):
-            self._jobdeck_index_and_load(path, after=after_open, ids=ids)
+            self._jobdeck_index_and_load(path, after=after_open, ids=ids,
+                                         props=props)
         else:
-            self._vfs_index_and_load(path, after=after_open)
+            self._vfs_index_and_load(path, after=after_open, props=props)
         return False
 
     # what a forwarded launch asks for beside its layout and view options
@@ -3706,7 +3754,12 @@ class Viewer:
                 # loads off never leaves this window loading files
                 self._file_load_latch()
             error, kind = None, "present"
-            if path or opts.get("drc"):
+            props = opts.get("layerprops") or None
+            if props and path:
+                # a layer properties file that cannot be read: the sender
+                # is told, and the window stays as it is
+                error = self._props_refusal(props)
+            if error is None and (path or opts.get("drc")):
                 # the newest request is the one the window turns to
                 self._request_waiting = None
                 if self._request_busy() is not None:
@@ -3722,7 +3775,7 @@ class Viewer:
                     kind = "now"
                     self._reviewer = opts.get("userid") or None
                     try:
-                        error = self.open_file(path)
+                        error = self.open_file(path, props=props)
                     except Exception as exc:
                         error = "ERR %s" % exc
             # (a bare launch with an instance running - no layout, no
@@ -3940,6 +3993,17 @@ class Viewer:
                 return True
             return False
         return False
+
+    @staticmethod
+    def _title_name(path):
+        """A file as the title names it: with its folder (user 2026-11-11,
+        after a second launch opened /path/2/layout.oas in the window that
+        showed /path/1/layout.oas and the title read `layout.oas` both
+        times: "창 제목에 폴더도 함께 표시해줘") - `2/layout.oas`, as the
+        results' part has said `run2/sample.db` since 0.12.446."""
+        path = os.path.abspath(path)
+        return os.path.join(os.path.basename(os.path.dirname(path)),
+                            os.path.basename(path))
 
     def _title_show(self):
         """The window's title: the layout (_title_base), the DRC results
@@ -7247,11 +7311,12 @@ class Viewer:
             info.destroy()
             self._restore_keys()
 
-    def _vfs_index_and_load(self, src, after=None):
+    def _vfs_index_and_load(self, src, after=None, props=None):
         """Build the VFS cache for `src` with its log in a modal dialog,
         then open it in place; `after(err)` runs once the open settled
         (err None on success): `floe2 index SRC`, the Rust command line,
-        decides the cache, its options and its locks."""
+        decides the cache, its options and its locks. `props`: the
+        launch's layer properties file for it (open_file)."""
         from .vfsclient import find_floe2
         try:
             argv = [find_floe2(), "index", src, "--jobs", "12"]
@@ -7269,7 +7334,7 @@ class Viewer:
 
         def on_success():
             try:
-                err = self.open_file(src)
+                err = self.open_file(src, props=props)
             except Exception as exc:
                 err = "ERR %s" % exc
             if after is not None:
@@ -7285,14 +7350,15 @@ class Viewer:
         self._index_modal("indexing layout…", argv, on_success,
                           "VFS indexing")
 
-    def _jobdeck_index_and_load(self, path, after=None, ids=None):
+    def _jobdeck_index_and_load(self, path, after=None, ids=None,
+                                props=None):
         """`<APP> index deck.jb [--level N,..]` (every source the deck's
         loaded levels name) with its log in the modal dialog, then
         open the deck in place; `after(err)` runs once the open
-        settled."""
+        settled. `props`: the launch's layer properties file for it."""
         def on_success():
             try:
-                err = self.open_file(path, ids)
+                err = self.open_file(path, ids, props=props)
             except Exception as exc:
                 err = "ERR %s" % exc
             if after is not None:
@@ -8958,9 +9024,7 @@ class Viewer:
         self._drc_source = os.path.abspath(path)
         self._drc_reviewer = self._reviewer
         # (with its folder: one run's results are named like the next's)
-        self._title_drc = " · DRC %s" % os.path.join(
-            os.path.basename(os.path.dirname(self._drc_source)),
-            os.path.basename(self._drc_source))
+        self._title_drc = " · DRC %s" % self._title_name(self._drc_source)
         self._title_show()
         self._drc_marker_invalidate(drop_worker=True)
         self._drc_clusters = None
@@ -13161,17 +13225,22 @@ class Viewer:
                 and 0 <= slot < len(self._fill_patterns)
                 else None)
 
-    def _push_fills(self):
-        """Ship the RESOLVED per-layer bitmaps to the render
-        service and force a fresh frame."""
-        self.worker.submit({
+    def _fills_job(self):
+        """The RESOLVED per-layer bitmaps and widths, as the render
+        service's `repattern` job."""
+        return {
             "kind": "repattern",
             "fills": [[list(k), self._fill_patterns[v]]
                       for k, v in sorted(
                           self._layer_patterns.items())
                       if 0 <= v < len(self._fill_patterns)],
             "widths": [[list(k), w] for k, w in sorted(
-                self._layer_widths.items())]})
+                self._layer_widths.items())]}
+
+    def _push_fills(self):
+        """Ship the RESOLVED per-layer bitmaps to the render
+        service and force a fresh frame."""
+        self.worker.submit(self._fills_job())
         self._color_epoch += 1
         self.redraw(immediate=True)
 
@@ -13313,12 +13382,15 @@ class Viewer:
         path = self._props_chooser(save=False)
         if not path:
             return
-        try:
-            rows = gtkservice.layerprops_read(path)
-        except (OSError, gtkservice.ServiceError) as e:
-            self._set_live_status(
-                "layer properties load failed: %s" % e)
-            return
+        self._props_load(path)
+
+    def _props_tables(self, rows):
+        """A layerprops file's rows on the layer table: the colours, fill
+        assignments and outline widths of the rows the layout has (the
+        others are skipped; a layer the file does not list keeps its
+        state), then the visibility. Returns the colours changed by row
+        and the number of fills assigned - what has to reach the render
+        service."""
         known = set(self._layer_rows)
         recolors = {}
         nfill = 0
@@ -13348,21 +13420,129 @@ class Viewer:
             except ValueError:
                 pass
         self._apply_props_visibility(rows)
+        return recolors, nfill
+
+    @staticmethod
+    def _recolor_job(recolors):
+        return {"kind": "recolor",
+                "colors": [[list(k), v] for k, v in sorted(recolors.items())]}
+
+    def _props_load(self, path):
+        """Apply the layerprops file `path` to the layout shown, in place
+        (Layer > load layer properties…; a launch's --layerprops for the
+        layout the window already shows). Whether it was read."""
+        try:
+            rows = gtkservice.layerprops_read(path)
+        except (OSError, gtkservice.ServiceError) as e:
+            self._set_live_status(
+                "layer properties load failed: %s" % e)
+            return False
+        recolors, nfill = self._props_tables(rows)
         if not recolors and not nfill:
             self._set_live_status(
                 "no matching layers in %s" % path)
             self.redraw(immediate=True)  # visibility may have changed
-            return
+            return True
         if recolors:
-            self.worker.submit({
-                "kind": "recolor",
-                "colors": [[list(k), v] for k, v
-                           in sorted(recolors.items())]})
+            self.worker.submit(self._recolor_job(recolors))
         self._refresh_row_fills()
         self._push_fills()  # repattern + epoch bump + redraw
         self._set_live_status(
             "layer properties loaded: %s (%d colors, %d fills)"
             % (path, len(recolors), nfill))
+        return True
+
+    # ---- a launch's layer properties file (floe2 view --layerprops) ------
+    @staticmethod
+    def _props_stamp(path):
+        """What tells one state of the file from another."""
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        return (st.st_mtime_ns, st.st_size)
+
+    @staticmethod
+    def _props_refusal(path):
+        """Why the layer properties file a launch names cannot be used,
+        else None - asked before anything is opened for it, so that the
+        launch is told (the answer of a forwarded request, floe/viewcli.py
+        for a first launch)."""
+        try:
+            gtkservice.layerprops_read(path)
+        except (OSError, gtkservice.ServiceError) as e:
+            return "ERR layer properties file %s: %s" % (path, e)
+        return None
+
+    def _props_request(self, path):
+        """A launch names `path` for the layout the window already shows
+        (open_file): applied in place, as Layer > load layer properties…
+        does, and the layout's from here on - unless it is the file in
+        use, unchanged: a launcher repeats its command line with every
+        launch, and the table then keeps what the user changed since. A
+        deck shown in another view than the level view - the view a launch
+        opens, the one the file is for - takes it when it is back in that
+        view."""
+        cache = self.cache
+        path = os.path.realpath(path)
+        stamp = self._props_stamp(path)
+        bound = self._props_bound
+        if bound is not None and bound["src"] == cache.src \
+                and bound["path"] == path and stamp is not None \
+                and bound["stamp"] == stamp:
+            return
+        self._props_bound = {"src": cache.src, "path": path, "stamp": stamp}
+        if getattr(cache, "is_jobdeck", False) and cache.mode != "level":
+            self._set_live_status(
+                "layer properties of the level view: %s" % path)
+            return
+        self._props_load(path)
+
+    def _props_bound_apply(self, cache):
+        """The layer properties file a launch named for `cache`, put on the
+        layer table _apply_cache has just built for it - whenever that is:
+        the launch's open, a reload of the layout, a deck's levels chosen
+        again, a deck back in its level view (the view a launch opens; the
+        other views keep their own files). The rows go on the table as
+        Layer > load layer properties… puts them, over the design default.
+        Another layout takes the place of the one the file was named for:
+        the file goes with it. Returns the jobs for the view that is made
+        next (the colours; the fills and widths), and leaves in _props_note
+        what the status line says once that view is up."""
+        named, self._props_next = self._props_next, None
+        self._props_note = None
+        if cache is None:
+            return []
+        bound = self._props_bound
+        if named:
+            bound = self._props_bound = {
+                "src": cache.src, "path": named, "stamp": None}
+        elif bound is not None and bound["src"] != cache.src:
+            bound = self._props_bound = None
+        if bound is None or (getattr(cache, "is_jobdeck", False)
+                             and cache.mode != "level"):
+            return []
+        path = bound["path"]
+        bound["stamp"] = self._props_stamp(path)
+        try:
+            rows = gtkservice.layerprops_read(path)
+        except (OSError, gtkservice.ServiceError) as e:
+            self._props_note = "layer properties load failed: %s" % e
+            print("[%s] %s (%s)" % (APP, self._props_note, path),
+                  file=sys.stderr, flush=True)
+            return []
+        recolors, nfill = self._props_tables(rows)
+        if not recolors and not nfill:
+            self._props_note = "no matching layers in %s" % path
+            return []
+        self._refresh_row_fills()
+        self._color_epoch += 1
+        self._props_note = (
+            "layer properties loaded: %s (%d colors, %d fills)"
+            % (path, len(recolors), nfill))
+        jobs = [self._recolor_job(recolors)] if recolors else []
+        jobs.append(self._fills_job())
+        return jobs
 
     def _save_props_dialog(self):
         """Layer menu: export the current layer table as a Calibre
@@ -13702,13 +13882,15 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
                stream_kb=None, stream_target_ms=500,
                render_debug=False, pending_open=None, pending_fields=(),
                thin="auto", density=None, occupancy=None, rules=None,
-               file_load=True):
+               file_load=True, layerprops=None):
     """`pending_open`: a layout/jobdeck given on the command line that
     has no index yet - the viewer starts empty, asks, indexes and
     opens it (user call 2026-09-09), then applies `pending_fields`
     (the request options as `key=value` strings, goto included).
     `file_load` False (--no-file-load): the viewer loads no file but
-    these - `cache` / `pending_open`, `drc`, `rules`."""
+    these - `cache` / `pending_open`, `drc`, `rules`, `layerprops`.
+    `layerprops` (--layerprops): the layer properties file for `cache`;
+    a `pending_open` carries it among its fields (`layerprops=`)."""
     import_gtk()
     viewer = Viewer(cache, server_sock, goto=goto, detail=detail,
                     dump=dump, depth=depth, lod=lod, frames=frames,
@@ -13717,7 +13899,8 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
                     stream_kb=stream_kb,
                     stream_target_ms=stream_target_ms,
                     render_debug=render_debug, thin=thin, density=density,
-                    occupancy=occupancy, file_load=file_load)
+                    occupancy=occupancy, file_load=file_load,
+                    layerprops=layerprops)
     smoke_ms = os.environ.get("FLOE_GUI_SMOKE_MS")
     smoke_error = []
     if smoke_ms is not None:

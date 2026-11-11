@@ -1176,7 +1176,7 @@ def forwarded_requests(src, temp):
         check(send(other, depth=999, drc=db1, userid="lee") == 0, "refused")
         showing(other, db1, "the other layout and its results")
         title = v.window.get_title()
-        check(title.startswith("%s - other.oas" % gui.APP)
+        check(title.startswith("%s - requests/other.oas · " % gui.APP)
               and title.endswith(" · DRC run1/sample.db") and not v._file_load,
               "another layout: %r, loads %s" % (title, v._file_load))
         # a dialog open: the request waits for it
@@ -1281,6 +1281,200 @@ def cells_while_opening(src, temp):
         os.environ["FLOE_RENDERD_BIN"] = saved
         svc.close()
     print("cells while opening: answered once the view opened")
+
+
+def layer_properties_option(src, temp):
+    """User 2026-11-11, after a second launch had opened /path/2/layout.oas
+    in the window showing /path/1/layout.oas: "창 제목에 폴더도 함께 표시해줘.
+    그리고 layer property 파일도 실행 옵션으로 지정할 수 있게 해줘." A real
+    window owning a real instance socket; later launches are the real
+    command line. The title names the layout with its folder. `floe2 view
+    SRC --layerprops FILE`: the window that starts with the file has its
+    colours, fills, widths and visibility on the layer table and in its
+    frames - the first one included -, says so, and keeps them when the
+    layout's table is built again; the same file named again leaves what
+    the user changed since, a changed file is applied in place; another
+    layout takes its own file, opened before the launch is answered; a
+    launch without the option opens a layout by its defaults; a link is read
+    through; a file that cannot be read, one that is not there and the
+    option without a layout end the launch with 1 and its reason, the window
+    as it was."""
+    import threading
+    from floe import gui, instance
+    Gtk = gui.Gtk
+    d = Path(temp) / "props"
+    one, two = d / "1" / "layout.oas", d / "2" / "layout.oas"
+    for layout in (one, two):
+        layout.parent.mkdir(parents=True)
+        layout.write_bytes(Path(src).read_bytes())
+        done = subprocess.run([FLOE2, "index", str(layout), "--jobs", "2"], cwd=ROOT,
+                              capture_output=True, text=True, timeout=600)
+        check(done.returncode == 0, done.stdout + done.stderr)
+    a, b = d / "a.layerprops", d / "b.layerprops"
+    # (77.0: a layer the layout does not have)
+    a.write_text("# the launch's\n63.63 #ff00ff diagonal_1 MARK 1 3\n"
+                 "7.0 blue speckle M7 0 1\n77.0 green speckle none 1 1\n")
+    b.write_text("63.63 #00ffff wave MARK 1 2\n")
+    link, bad = d / "link.layerprops", d / "bad.layerprops"
+    os.symlink(str(b), str(link))
+    # (the window names a file by its real path: the temporary folder is
+    # itself behind a link on macOS)
+    real_a, real_b, real_bad = (os.path.realpath(str(f)) for f in (a, b, bad))
+    bad.write_bytes(b"63.63 red speckle \xff\xfe\n")
+    display = ":gate-props-%d" % os.getpid()
+    addr = instance.socket_address(instance.normalize_display(display))
+    server = instance.try_bind(addr)
+    check(server is not None, "the gate's instance socket %r is taken" % addr)
+    plain = gtkservice.ServiceCache(str(one))
+    plain.load()
+    default = {(l["layer"], l["datatype"]): l["color"] for l in plain.meta["layers"]}
+    plain.close()
+    cache = gtkservice.ServiceCache(str(one))
+    cache.load()
+    v = gui.Viewer(cache, server, layerprops=str(a))
+    asked = []
+    v._ask_yes_no = lambda question, *_a, **_k: (asked.append(question), False)[1]
+    mark, m7 = (63, 63), (7, 0)
+
+    def colour(key):
+        return [l["color"] for l in v.meta["layers"]
+                if (l["layer"], l["datatype"]) == key][0]
+
+    def painted(rgb):
+        """Whether the frame shown has a pixel of exactly this colour."""
+        pix = v.last_frame[0]
+        n, stride, w = pix.get_n_channels(), pix.get_rowstride(), pix.get_width()
+        data, want = bytes(pix.get_pixels()), bytes(rgb)
+        for y in range(pix.get_height()):
+            row = data[y * stride: y * stride + w * n]
+            if any(row[x:x + 3] == want for x in range(0, w * n, n)):
+                return True
+        return False
+
+    def rgb(text):
+        return tuple(int(text[i:i + 2], 16) for i in (1, 3, 5))
+
+    def launch(words, env_display=display):
+        """A later launch, the real command line: (exit code, its output)."""
+        got = []
+
+        def run():
+            env = dict(os.environ, DISPLAY=env_display)
+            env.pop("FLOE_GUI_SMOKE_MS", None)
+            done = subprocess.run([FLOE2, "view"] + [str(w) for w in words], cwd=ROOT, env=env,
+                                  capture_output=True, text=True, timeout=120)
+            got.append((done.returncode, (done.stdout + done.stderr).strip()))
+        thread = threading.Thread(target=run)
+        thread.start()
+        pump(v, lambda: not thread.is_alive(), "the answer to %s" % (words,), 60)
+        return got[0]
+
+    def showing(layout, what):
+        pump(v, lambda: v.cache is not None and v.cache.src == str(layout)
+             and v._request_waiting is None and settled(v), what, 60)
+
+    try:
+        # the view was opened without the layer the file hides: its first
+        # frame is not drawn with every layer and then again
+        opened = v.worker._args[2]["layers"]
+        check(isinstance(opened, list) and [7, 0] not in opened and [63, 63] in opened,
+              "the layers the view was opened with: %s" % (opened,))
+        pump(v, lambda: settled(v), "the first frame")
+        # the title: the layout with its folder
+        title = v.window.get_title()
+        check(title.startswith("%s - 1/layout.oas · " % gui.APP),
+              "the title of a layout: %r" % title)
+        # the file is on the table ...
+        check(colour(mark) == "#ff00ff" and colour(m7) == "#0000ff",
+              "the file's colours: %s %s" % (colour(mark), colour(m7)))
+        check(gui.fillpat.FILL_NAMES[v._layer_patterns[mark]] == "diagonal_1"
+              and v._layer_widths == {mark: 3},
+              "the file's fill and width: %s %s" % (v._layer_patterns, v._layer_widths))
+        check(m7 not in v.visible and mark in v.visible
+              and not v._layer_rows[m7].get_active(),
+              "the file's visibility: %s" % sorted(v.visible))
+        check(v.status.get_text() == "layer properties loaded: %s (2 colors, 2 fills)" % real_a,
+              "what the status line says of it: %r" % v.status.get_text())
+        check(v._props_bound is not None and v._props_bound["path"] == real_a
+              and v._props_bound["src"] == str(one), "the file is the layout's: %s" % v._props_bound)
+        # ... and in the frames: the marker layer in the file's colour, none in
+        # its default; the hidden layer not asked for
+        layers = v.worker.snapshot["state"]["layers"]
+        check(isinstance(layers, list) and [7, 0] not in layers and [63, 63] in layers,
+              "the view's layers: %s" % (layers,))
+        check(painted((255, 0, 255)) and not painted(rgb(default[mark])),
+              "the frame is not in the file's colours (default %s)" % default[mark])
+        # the layout's table built again (a reload): the file is on it again
+        v._layer_rows[m7].set_active(True)
+        pump(v, lambda: m7 in v.visible, "the row shown by hand")
+        v._apply_cache(v.cache)
+        pump(v, lambda: settled(v), "the reload")
+        check(colour(mark) == "#ff00ff" and m7 not in v.visible and v._layer_widths == {mark: 3}
+              and painted((255, 0, 255)),
+              "a reload lost the launch's layer properties: %s %s" % (colour(mark), sorted(v.visible)))
+        # the same launch again: nothing is applied - what the user changed stays
+        v._layer_rows[mark].set_active(False)
+        pump(v, lambda: mark not in v.visible and settled(v), "the row hidden by hand")
+        held = v.cache
+        code, text = launch([one, "--layerprops", a])
+        check(code == 0 and not text, "the same launch again: %s %r" % (code, text))
+        end = time.monotonic() + 0.4
+        pump(v, lambda: time.monotonic() > end, "the same launch")
+        check(v.cache is held and mark not in v.visible and m7 not in v.visible,
+              "the same file named again changed the table: %s" % sorted(v.visible))
+        # the file changed: applied in place
+        time.sleep(0.02)
+        a.write_text("63.63 #ffff00 speckle MARK 1 1\n7.0 blue speckle M7 1 1\n")
+        code, text = launch([one, "--layerprops", a])
+        check(code == 0 and not text, "a changed file: %s %r" % (code, text))
+        pump(v, lambda: colour(mark) == "#ffff00" and mark in v.visible and m7 in v.visible
+             and settled(v) and painted((255, 255, 0)), "the changed file", 30)
+        check(v.cache is held and v._layer_widths == {} and not painted((255, 0, 255)),
+              "the changed file in place: %s" % v._layer_widths)
+        # another layout with its own file, through a link: opened before
+        # the launch is answered, the title its folder's
+        code, text = launch([two, "--layerprops", link])
+        check(code == 0 and not text, "another layout: %s %r" % (code, text))
+        check(v.cache.src == str(two), "another layout was not open when its launch was answered")
+        showing(two, "the other layout")
+        title = v.window.get_title()
+        check(title.startswith("%s - 2/layout.oas · " % gui.APP), "its title: %r" % title)
+        check(colour(mark) == "#00ffff" and colour(m7) == default[m7]
+              and v._layer_widths == {mark: 2} and m7 in v.visible
+              and v._props_bound["path"] == real_b and painted((0, 255, 255)),
+              "the other layout's file (the link's target): %s %s" % (colour(mark), v._props_bound))
+        check(v.status.get_text() == "layer properties loaded: %s (1 colors, 1 fills)" % real_b,
+              "the status line: %r" % v.status.get_text())
+        # a file that cannot be read, one that is not there, no layout: the
+        # launch says so with 1 and the window is as it was
+        held = v.cache
+        for words, reason in (([one, "--layerprops", bad],
+                               "ERR layer properties file %s: " % real_bad),
+                              ([one, "--layerprops", d / "none.layerprops"],
+                               "floe2: no such layer properties file: "),
+                              (["--layerprops", a], "floe2: --layerprops requires a layout")):
+            code, text = launch(words)
+            check(code == 1 and text.startswith(reason), "%s: %s %r" % (words, code, text))
+        end = time.monotonic() + 0.3
+        pump(v, lambda: time.monotonic() > end, "the refused launches")
+        check(v.cache is held and colour(mark) == "#00ffff" and v._props_bound["path"] == real_b,
+              "a refused launch changed the window")
+        # a layout without the option: its defaults, no file
+        code, text = launch([one])
+        check(code == 0 and not text, "a plain launch: %s %r" % (code, text))
+        showing(one, "the first layout by itself")
+        check(colour(mark) == default[mark] and v._props_bound is None and v._layer_widths == {}
+              and painted(rgb(default[mark])) and not asked,
+              "a layout opened without the option: %s %s, asked %s"
+              % (colour(mark), v._props_bound, asked))
+        print("layer properties option: the title's folder, the file on the table and in the "
+              "frames, the same / a changed / another file, the refusals")
+    finally:
+        v._quit()
+        v.window.destroy()
+        cache.close()
+        if not addr.startswith("\0") and os.path.exists(addr):
+            os.unlink(addr)
 
 
 def same(a, b, what):
@@ -1540,6 +1734,7 @@ def main():
                 light_status(src, temp)
                 file_loads_off(src, temp)
                 forwarded_requests(src, temp)
+                layer_properties_option(src, temp)
         finally:
             ref.stop()
             svc.close()

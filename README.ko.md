@@ -66,10 +66,11 @@ rust/target/release/floe2                            # 인자 없음 = view
 | `--depth N` | 시작 깊이 (기본 0; 999=full; --goto 시 full) |
 | `--detail low\|medium\|high` | 시작 디테일 (기본 medium) |
 | `--lod on\|off`, `--frames on\|off`, `--labels on\|off` | 시작 토글 |
-| `--drc FILE.db` | Calibre ASCII DRC 결과 브라우저 프리로드 (옆에 신선한 `FILE.db.ice` 인덱스가 있으면 자동 사용 — 수백 GB도 즉시 오픈). 같은 DISPLAY에 창이 떠 있으면 그 창이 묻지 않고 이 결과로 바뀐다(0.12.446. 리뷰는 할 때마다 저장되어 있다). `--userid`·`--rules`·`--no-file-load`도 요청과 함께 간다 |
+| `--drc FILE.db` | Calibre ASCII DRC 결과 브라우저 프리로드 (옆에 신선한 `FILE.db.ice` 인덱스가 있으면 자동 사용 — 수백 GB도 즉시 오픈). 같은 DISPLAY에 창이 떠 있으면 그 창이 묻지 않고 이 결과로 바뀐다(0.12.446. 리뷰는 할 때마다 저장되어 있다). `--userid`·`--rules`·`--no-file-load`·`--layerprops`도 요청과 함께 간다. 창 제목은 레이아웃과 결과를 폴더와 함께 적는다(`floe2 - 2/layout.oas · … · DRC run2/results.db`, 0.12.451) |
+| `--layerprops FILE` | 이 실행이 여는 레이아웃·jobdeck의 레이어 속성 파일(0.12.451). Calibre `.layerprops`를 레이어 메뉴의 load layer properties…처럼 적용한다: 파일에 있는 레이어의 색·fill·선 굵기·표시 여부가 소스 옆 디자인 기본값(`SRC.layerprops`) 위에 덮이고, 없는 레이어는 그대로다. 창이 그 레이아웃을 보여 주는 동안 유지된다(다시 읽기, jobdeck의 level view). 읽을 수 없는 파일이면 실행이 1로 끝난다. 떠 있는 창으로 넘어간 요청이면 그 창이 요청의 레이아웃에 적용하고, `--no-file-load`와 함께 쓸 수 있다. 링크는 대상을 읽는다(docs/SPEC-VIEWER.ko.md §7) |
 | `--stream-kb KB` | 점진 페인트 라운드 예산 고정 (0=비활성; 기본 적응형 24576) |
 | `--multi` | 단일 인스턴스 소켓 무시하고 새 창 |
-| `--no-file-load` | 뷰어 안에서 고른 파일을 읽지 않는다(0.12.445). File 메뉴의 load layout…·load jobdeck…, DRC 메뉴의 로드 명령 여섯 개, 레이어 메뉴의 load layer properties…가 비활성이다. 명령줄의 소스·`--drc`·`--rules`는 그대로 읽고 저장·내보내기도 그대로다. 한 계정으로 여러 사람의 뷰어를 띄우는 런처용이며 환경변수 `FLOE_NO_FILE_LOAD=1`도 같다. 떠 있는 창으로 넘어간 요청이면 그 창의 로드가 꺼지고 다시 켜지지 않는다(docs/SPEC-VIEWER.ko.md §7) |
+| `--no-file-load` | 뷰어 안에서 고른 파일을 읽지 않는다(0.12.445). File 메뉴의 load layout…·load jobdeck…, DRC 메뉴의 로드 명령 여섯 개, 레이어 메뉴의 load layer properties…가 비활성이다. 명령줄의 소스·`--layerprops`·`--drc`·`--rules`는 그대로 읽고 저장·내보내기도 그대로다. 한 계정으로 여러 사람의 뷰어를 띄우는 런처용이며 환경변수 `FLOE_NO_FILE_LOAD=1`도 같다. 떠 있는 창으로 넘어간 요청이면 그 창의 로드가 꺼지고 다시 켜지지 않는다(docs/SPEC-VIEWER.ko.md §7) |
 
 터미널에는 스트리밍 라운드마다 `[perf] gen=.. round=.. new=.. bytes=..
 plan=..ms delta=..ms apply=..ms draw=..ms total=..ms lod=.. refining=..

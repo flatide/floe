@@ -357,8 +357,10 @@ n:ID,…`(앞의 32개) 한 줄이 붙는다. 같은 소스를 두 실행이 만
   세분을 유지.)
 - 메뉴 **Jobdeck > level view / chip view / source layer view**(§1a): `DeckCache.
   set_mode()`로 재플랜·스펙 재작성 후 레이어 패널을 다시 만들고 워커를 새
-  스펙으로 재시작한다(현재 뷰 유지). 창 제목은 `deck.jb · jobdeck N CHIPs · M
-  placements · level view`. **Ctrl+,** (메뉴 "toggle level view / chip view",
+  스펙으로 재시작한다(현재 뷰 유지). 창 제목은 `<폴더>/deck.jb · jobdeck N CHIPs · M
+  placements · level view`(폴더는 0.12.451부터). `floe2 view deck.jb --layerprops FILE`(0.12.451)의 파일은
+  level view의 것이다: level view의 레이어 표를 만들 때마다 올리고, chip view와 source layer view는 각자의
+  파일을 쓴다(SPEC-VIEWER.ko.md §7). **Ctrl+,** (메뉴 "toggle level view / chip view",
   사용자 요청 2026-09-10)는 level view ↔ chip view를 바로 바꾼다(source layer
   view에서는 level view로; 덱이 아니면 상태줄 안내만). gate
   `JobdeckShortcutTests`.

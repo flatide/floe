@@ -388,7 +388,8 @@
     부르든 None). 파일을 고르기 전에 창부터 여는 둘은 따로 막는다: `review from previous run…`은 창을 열지 않고(그
     창은 읽을 경로 둘을 받는 입력란이 전부다), `load waives…`는 공동 검토 창을 열지 않는다. 공동 검토 창의 선택기
     (`_DrcTeamWindow._choose`)는 읽을 파일을 고를 때만 거절한다. 로드에 묶인 키는 없다.
-  - 그대로인 것: 명령줄의 소스(색인이 없으면 묻고 만든 뒤 연다), `--drc`(pack이 없으면 묻고 만든다), `--rules`.
+  - 그대로인 것: 명령줄의 소스(색인이 없으면 묻고 만든 뒤 연다), `--drc`(pack이 없으면 묻고 만든다), `--rules`,
+    `--layerprops`(0.12.451, 아래 "레이어 속성 파일 지정").
     이름으로 따라오는 것도 그대로다 - jobdeck의 level 선택(Jobdeck 메뉴 `select levels to load…` 포함), .db 옆의
     rules.json·clusters 자동 부착, 디자인 기본 layerprops, 셀 인덱스 빌드.
   - 대상이 아닌 것: 저장과 내보내기. `clip region…`, `save waives as…`, `save notes as…`, 공동 검토 창의
@@ -407,7 +408,7 @@
   프로세스였다(뷰어·gtk-service·renderd 한 벌씩, 작은 샘플에서 234 MB).
   - 요청 한 줄(`viewcli.cmd_view`): `경로\tkey=value…`. 뷰 옵션(`goto`·`detail`·`depth`·`frames`·`labels`·`labelpx`·
     `levels`·`thin`·`density`·`occupancy`)에 더해 `drc=`(결과 .db의 절대 경로), `rules=`, `userid=`(그 실행이 명시한
-    리뷰어: `--userid`나 `FLOE_REVIEWER`), `noload=1`이 간다. `--drc`가 없는 파일이면 보내기 전에 1로 끝난다
+    리뷰어: `--userid`나 `FLOE_REVIEWER`), `noload=1`, `layerprops=`(0.12.451: 레이어 속성 파일의 실제 경로)가 간다. `--drc`가 없는 파일이면 보내기 전에 1로 끝난다
     (`no such DRC results file`). 넘긴 요청은 창이 결과를 열어 보기 전에 답을 받기 때문이다. 탭이나 줄바꿈이 든
     경로·ID는 한 줄에 실을 수 없어 독립 창으로 뜬다. `--multi`와 렌더 프로세스 옵션(`--stream-kb`·
     `--stream-target-ms`·`--render-debug`·`--frame-cache off`·`--margin on`·`--layer-colors`)은 전과 같이 독립 창이다.
@@ -431,11 +432,56 @@
   - 창 제목이 검토 중인 결과를 말한다: `… · DRC <폴더>/<파일>`(`_title_show`. 실행마다 결과 파일 이름이 같으므로
     폴더까지 적는다). 한 창이 결과를 바꿔 가며 보이므로 무엇을 검토 중인지가 늘 보여야 하고, 패널에는 그 줄이
     없다. jobdeck의 제목도 `_title_base`에 둔다(뷰 루트를 바꾸면 이전 레이아웃의 제목으로 돌아가던 것이 고쳐진다).
+  - 레이아웃과 jobdeck도 폴더와 함께 적는다(2026-11-11, app 0.12.451; 사용자: "창 제목에 폴더도 함께 표시해줘").
+    `/path/1/layout.oas`를 보던 창이 두 번째 실행의 `/path/2/layout.oas`로 바뀌어도 제목은 둘 다 `layout.oas`였다.
+    이제 `floe2 - 2/layout.oas · 0.02 GB · grid 4x4`, `floe2 - run3/deck.jb · jobdeck 3 CHIPs · …`다
+    (`Viewer._title_name`: 파일이 있는 폴더의 이름과 파일 이름. 결과 부분과 같은 규칙이다. 경로는 창이 연 절대
+    경로이고, 링크로 연 소스는 링크의 폴더다).
   - 고친 것: 소스 없는 실행(`floe2`만)의 요청은 첫 필드가 비어 있는데, 받는 쪽이 줄 전체를 strip()해서 첫 옵션을
     경로로 읽었다. 실행 중인 창이 `No VFS index for detail=medium. Build it now?`를 물었다. 줄 끝만 자른다.
   - 테스트: 게이트 gtk_view `forwarded_requests`(실제 창과 실제 소켓), rust_renderer
     `test_a_running_window_takes_the_whole_request`·`test_userid_goes_with_the_request`·
-    `test_results_and_rules_reach_the_window_running_or_new`·`test_rules_need_a_drc_target_and_the_files_must_exist`.
+    `test_results_and_rules_reach_the_window_running_or_new`·`test_rules_need_a_drc_target_and_the_files_must_exist`·
+    `test_the_title_names_a_file_with_its_folder`.
+- **레이어 속성 파일 지정**(2026-11-11, app 0.12.451; 사용자: "layer property 파일도 실행 옵션으로 지정할 수 있게
+  해줘"): `floe2 view SRC --layerprops FILE`. 런처가 띄운 뷰어는 파일 로드가 꺼져 있어 레이어 메뉴의 load를 쓸 수
+  없고, 쓰기 권한이 없는 폴더의 소스 옆에는 디자인 기본값(`SRC.layerprops`)을 둘 수 없었다.
+  - 파일은 Calibre `.layerprops`다(`L.D 색 fill 이름 표시 굵기`). 적용은 레이어 메뉴의 `load layer properties…`와
+    같다(`_props_tables`): 레이아웃에 있는 레이어의 색·fill·선 굵기·표시 여부를 디자인 기본값 위에 덮고, 파일에
+    없는 레이어는 그대로 두며, 레이아웃에 없는 행은 건너뛴다. 파일은 서비스가 읽는다(`layerprops_read`).
+  - 명령줄(`viewcli.cmd_view`): 소스가 있어야 하고(`--layerprops requires a layout or a jobdeck`), 파일이 있어야
+    한다(`no such layer properties file`). 링크면 대상의 실제 경로로 바꿔 넘긴다. 서비스는 링크를 따라가지 않지만
+    이 파일은 명령줄이 직접 가리킨 것이다. 독립 창을 만드는 옵션이 아니다: 요청의 `layerprops=`로 떠 있는 창에
+    간다. 이 실행이 창이 되는 경우에는 창을 만들기 전에 읽어 보고, 읽을 수 없으면 `floe2: layer properties file
+    <경로>: <이유>`로 끝난다(1). 색인이 없는 소스(창이 빈 채로 떠서 묻고 만든 뒤 연다)는 대기 중인 열기의 필드로
+    싣는다.
+  - 떠 있는 창(`_on_incoming`): 읽을 수 없는 파일이면 아무것도 열지 않고 `ERR layer properties file <경로>:
+    <이유>`로 답하며 보낸 쪽은 1로 끝난다. 읽히면 요청의 레이아웃을 여는 데 함께 준다(`open_file(path, props=)`.
+    색인을 만든 뒤 여는 경로와 덱도 같다: `_open_or_index`가 `layerprops=`를 뷰 옵션에서 떼어 넘긴다).
+  - 그 파일은 그 레이아웃의 것이 된다(`_props_bound`: 소스 경로, 파일 경로, 파일의 mtime·크기). 레이어 표를 만들
+    때마다 올린다(`_apply_cache`의 `_props_bound_apply`): 처음 열 때, 같은 레이아웃을 다시 읽을 때, 덱의 level을
+    다시 고를 때, 덱이 level view로 돌아올 때. 표에는 뷰를 만들기 전에 올린다. 뷰를 여는 패치의 `layers`가 파일의
+    표시 여부를 따르므로 첫 프레임부터 숨긴 레이어를 그리지 않는다. 색·fill·굵기는 뷰가 만들어지면 `recolor`·
+    `repattern` 잡으로 간다(열리는 중이면 `ViewWorker`가 쥐고 있다가 보낸다). 덱에서는 사용자가 그 뷰에서 고른
+    표시 여부가 파일보다 뒤에 적용된다.
+  - 덱은 level view의 파일이다. 실행이 여는 뷰가 level view이고, chip view와 source layer view는 행의 키가 달라
+    각자의 파일을 쓴다(JOBDECK.ko.md). 다른 뷰에 있는 동안 온 요청은 묶어 두기만 하고 상태 줄이
+    `layer properties of the level view: <경로>`라 한다.
+  - 다른 레이아웃을 열면 그 파일은 따라가지 않는다. `--layerprops` 없는 요청으로 연 레이아웃은 기본값이다.
+  - 같은 파일을 다시 지정한 요청(`_props_request`): 창이 이미 그 레이아웃을 그 파일로 보여 주고 파일이 바뀌지
+    않았으면 다시 적용하지 않는다. 런처는 실행할 때마다 같은 명령줄을 반복하므로, 다시 적용하면 사용자가 그동안
+    바꾼 표시 여부와 색이 매번 되돌아간다. 파일이 바뀌었거나 다른 파일이면 보이는 레이아웃에 바로 적용한다
+    (`_props_load`: 메뉴의 load와 같은 경로). 이때는 지금 표 위에 덮으므로 앞 파일에만 있던 레이어의 값은 남아
+    있다가, 그 레이아웃의 표를 다시 만들 때 새 파일만 적용된다. 결과·자·뷰를 그대로 두려고 다시 열지 않는다.
+  - 무엇이 적용됐는지는 뷰가 뜬 뒤 상태 줄이 말한다: `layer properties loaded: <경로> (N colors, M fills)`, 맞는
+    레이어가 없으면 `no matching layers in <경로>`(`_props_note`, `_worker_start_finished`). 창이 뜬 뒤에 파일이
+    없어졌거나 깨졌으면 다시 읽을 때 `layer properties load failed: <이유>`를 상태 줄과 stderr에 쓰고 기본값으로
+    연다.
+  - `--no-file-load`와 함께 쓸 수 있다. 꺼지는 것은 뷰어 안에서 고르는 로드이고, 이 파일은 명령줄의 것이다.
+  - 캡처(`floe2 render`)에는 이 옵션이 없다. 캡처는 소스 옆의 디자인 기본값만 읽는다.
+  - 테스트: 게이트 gtk_view `layer_properties_option`(실제 창과 실제 명령줄: 표와 프레임의 색, 뷰를 연 레이어,
+    다시 읽기, 같은 파일·바뀐 파일·다른 레이아웃의 파일, 링크, 거절 셋), rust_renderer
+    `test_layer_properties_go_with_the_launch`(명령줄, 요청, 창의 처리, 묶임의 규칙).
 - **밀도 켜기/끄기**(2026-10-05, 0.12.298; 사용자: "뷰어에서 밀도 켜기/끄기 옵션을 추가해줘"): floe2(Rust 렌더러)의
   View > **density under the cut**(체크, `v`). 컷 아래 도형을 덮인 면적의 밀도로 그리는 renderd의 밀도 스택
   (CUT_DENSITY_DESIGN §10.12)을 켜고 끈다. `_toggle_density`가 `density_on`을 뒤집고 `_on_depth`(상태줄과 다시
