@@ -12086,6 +12086,34 @@ mod rss_parts_tests {
     }
 }
 
+/// Make the folder a default name goes in under the work directory - the
+/// mirror of its source's folder (floe_vfs::workdir), made with the first
+/// file of that folder there - before the file's lock is taken: a lock's
+/// `.floe-lock` is made one level deep and no deeper (user 2026-11-11:
+/// `floe-index svrf DECK --workdir DIR` on a deck in a folder this account
+/// cannot write; a `floe-index drc DB` of a fresh work directory ended on
+/// `cannot take its lock: ... No such file or directory` the same way).
+/// Without a work directory nothing is made: the name is beside its
+/// source, whose folder is there. Err: where and why, a run's last line.
+pub(crate) fn make_mirror_folder(path: &str) -> Result<(), String> {
+    let Some(root) = floe_vfs::workdir::workdir() else {
+        return Ok(());
+    };
+    let Some(parent) = std::path::Path::new(path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+    else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(parent).map_err(|e| {
+        format!(
+            "cannot write under the work directory {}, in {}: {e} (--workdir / FLOE_WORKDIR)",
+            root.display(),
+            parent.display()
+        )
+    })
+}
+
 #[cfg(test)]
 mod naming_tests {
     use super::*;

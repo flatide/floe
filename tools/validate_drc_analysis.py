@@ -1319,6 +1319,72 @@ def detail_ui(v, d, pump):
           "the SVRF window's", (rows, marks, tips, bare_svrf, nometa_svrf))
 
 
+def rules_lookup_ui(v, d, temp):
+    """Where a results database's rules sidecar is looked for (0.12.450;
+    user 2026-11-11: a deck in a folder that may not be written is compiled
+    with `floe-index svrf DECK --workdir DIR`, which writes
+    DIR/<the deck's absolute path>.rules.json): beside the database and the
+    deck as ever, then - under a work directory - at the same paths below
+    it. The service says the places (app-core svrf::rules_candidates, the
+    DRC capture's list) and the viewer's load reads the first that is a
+    file."""
+    db = d / "sample.db"
+    deck = "/calibre/run/deck.svrf"
+    beside = [str(d / "deck.svrf.rules.json"), deck + ".rules.json", str(db) + ".rules.json"]
+    work = temp / "rules work"
+    work.mkdir()
+
+    def listed(workdir, **fields):
+        before = os.environ.pop("FLOE_WORKDIR", None)
+        if workdir is not None:
+            os.environ["FLOE_WORKDIR"] = str(workdir)
+        svc = Svc()
+        try:
+            return svc("svrf_rules_candidates", **fields)
+        finally:
+            svc.close()
+            os.environ.pop("FLOE_WORKDIR", None)
+            if before is not None:
+                os.environ["FLOE_WORKDIR"] = before
+    plain = (listed(None, db=str(db), deck=deck), listed(None, db=str(db)),
+             listed(None, db=str(db), deck=""))
+    check(plain == (beside, beside[2:], beside[2:]),
+          "a sidecar is looked for beside the database and the deck", plain)
+    mirrored = listed(work, db=str(db), deck=deck)
+    check(mirrored == beside + [str(work) + p for p in beside],
+          "... and under a work directory at the same paths below it, after those", mirrored)
+    # the viewer's load reads the first of the service's places that is a
+    # file: a database with no sidecar beside it or its deck
+    lone = temp / "without-svrf" / "sample.db"
+    elsewhere = temp / "rules elsewhere"
+    elsewhere.mkdir()
+    shutil.copy(d / "sample.svrf.rules.json", elsewhere / "deck.rules.json")
+    real, asked = gtkservice.rules_candidates, []
+    try:
+        check(v.load_drc(str(lone)) and v._drc_rmeta is None,
+              "(a database with no sidecar beside it loads without one)")
+
+        def says(path, deck=None):
+            asked.append((path, deck))
+            return [str(elsewhere / "none.rules.json"), str(elsewhere / "deck.rules.json")]
+        gtkservice.rules_candidates = says
+        check(v.load_drc(str(lone)) and v._drc_rmeta is not None and v._drc_rmatch == (8, 8)
+              and asked == [(str(lone), str(lone.parent / "absent.svrf"))]
+              and "svrf 8/8" in v.status.get_text(),
+              "the viewer's load reads the first of the places the service says that is a file",
+              (asked, v._drc_rmatch, v.status.get_text()))
+
+        # a service that cannot say leaves the places beside the files
+        def refuses(path, deck=None):
+            raise gtkservice.ServiceError("input", "no")
+        gtkservice.rules_candidates = refuses
+        check(v.load_drc(str(lone)) and v._drc_rmeta is None
+              and v.load_drc(str(db)) and v._drc_rmeta is not None and v._drc_rmatch == (8, 8),
+              "a service that cannot say them leaves the three beside the files")
+    finally:
+        gtkservice.rules_candidates = real
+
+
 def cd_part_ui(v, d, pump):
     """The pane's CD part (user 2026-11-10: "CD 델타 컨트롤 각 항목이 너무
     자리를 많이 차지하니 absolute/ratio 콤보박스의 문구를 단순화하여 크기를
@@ -1835,6 +1901,7 @@ def a5(temp):
         cd_part_ui(v, d, pump)
         pane_ui(v, d, pump)
         detail_ui(v, d, pump)
+        rules_lookup_ui(v, d, temp)
         small = d / "small.db"
         small.write_text("MAIN 100000\nSMALL.ONE\n0 0 0\nSMALL.TWO\n0 0 0\n")
         (d / "small.db.rules.json").write_text(json.dumps({

@@ -33,7 +33,7 @@
 //!                                          job "review"
 //!   drc_inview {handle, check, bbox, cap, scope?, waived?}                 job "inview"
 //!   drc_cancel {handle, kind}; drc_close {handle}; drc_parse_step {text}
-//!   svrf_rules {path}, svrf_operands {rhs}
+//!   svrf_rules {path}, svrf_operands {rhs}, svrf_rules_candidates {db, deck?}
 //! and drc_team.rs's (review flags, snapshots, team, migration).
 #[path = "drc_team.rs"]
 mod team;
@@ -445,6 +445,22 @@ impl Drcs {
             }
             "svrf_operands" => {
                 return Ok(json!(floe_app_core::svrf::rhs_operands(text(request, "rhs")?)));
+            }
+            // where the rules sidecar of a database is looked for, in order
+            // (the viewer's load reads the first that is a file): beside the
+            // database and the deck, then under the work directory
+            "svrf_rules_candidates" => {
+                let deck = request
+                    .get("deck")
+                    .and_then(Value::as_str)
+                    .filter(|deck| !deck.is_empty())
+                    .map(Path::new);
+                let paths =
+                    floe_app_core::svrf::rules_candidates(Path::new(text(request, "db")?), deck)?;
+                return Ok(json!(paths
+                    .iter()
+                    .map(|path| path.to_string_lossy())
+                    .collect::<Vec<_>>()));
             }
             "drc_close" => {
                 if let Some(s) = self.sessions.remove(&number(request, "handle")?) {

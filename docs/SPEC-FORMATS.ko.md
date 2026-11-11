@@ -677,7 +677,9 @@ waive 페이지/rank/변경은 최대 1M 에러 단위 청크를 사용하며 �
 - 뷰어 연동: .db 로드 시 자동 탐색(체크 desc의 Rule File Pathname
   베이스네임 기준 **db 옆** `<deck>.rules.json` 우선 — 덱 절대
   경로는 Calibre 런 머신 기준이라 뷰잉 머신에 없기 일쑤 — 그다음
-  기록된 경로·`<db>.rules.json`) + DRC 패널 `rules…` 수동 로드.
+  기록된 경로·`<db>.rules.json`; 작업 디렉터리가 있으면 이어서 그 셋의 DIR 아래 자리 —
+  `floe-index svrf DECK --workdir DIR`의 기본 출력이 가는 곳, 0.12.450, CACHE-NAMING §6)
+  + DRC 패널 `rules…` 수동 로드.
   정보줄 `svrf N/M` = 매칭된 룰 수.
 
 ## 선택 대표 파일 design.ovr (OVR1)

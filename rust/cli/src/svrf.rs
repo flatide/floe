@@ -2104,16 +2104,76 @@ pub fn format_scan(d: &Deck) -> String {
     l.join("\n")
 }
 
-fn write_atomic(out: &str, text: &str) -> Result<(), String> {
+/// The error text, and whether it is of the place - a folder that is not
+/// there or may not be written - and not of the writing (a full disk).
+fn write_atomic(out: &str, text: &str) -> Result<(), (String, bool)> {
+    use std::io::ErrorKind as K;
+    let place = |e: &std::io::Error| {
+        matches!(e.kind(), K::PermissionDenied | K::ReadOnlyFilesystem | K::NotFound)
+    };
     let tmp = format!("{}.tmp", out);
-    std::fs::write(&tmp, text).map_err(|e| format!("{}: {}", tmp, e))?;
+    std::fs::write(&tmp, text).map_err(|e| (format!("{}: {}", tmp, e), place(&e)))?;
     std::fs::rename(&tmp, out).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
-        format!("{} -> {}: {}", tmp, out, e)
+        (format!("{} -> {}: {}", tmp, out, e), place(&e))
     })
 }
 
-const USAGE: &str = "usage: floe-index svrf <deck> [-o OUT] [--scan] [-D NAME[=VAL]]... [-I DIR]... [--follow-verbatim] [--no-env-switches]";
+/// The sidecar `svrf <deck>` writes when no -o names one: `<deck>.rules.json`
+/// beside the deck, or - under a work directory (`--workdir DIR` /
+/// FLOE_WORKDIR, floe_vfs::workdir) - at the deck's absolute path below it,
+/// `/p/deck.cal` -> `DIR/p/deck.cal.rules.json`, as a source's cache and a
+/// database's pack go (user 2026-11-11: "--workdir을 주었으니 lock파일도
+/// /user/path/.floe-lock으로 만들어야 할 것 같은데 원본 폴더에서 lock 생성하는
+/// 것 같음" - the option moved nothing of svrf's until 0.12.450). Its lock
+/// is beside it, so in the mirror too. The viewer and the DRC capture look
+/// there after the places beside the database and the deck (app-core
+/// svrf::rules_candidates).
+fn default_out_in(deck: &str, workdir: Option<&std::path::Path>) -> String {
+    let beside = format!("{}.rules.json", deck);
+    match workdir {
+        Some(root) => floe_vfs::workdir::under(
+            root,
+            &floe_vfs::workdir::lexical_absolute(std::path::Path::new(&beside)),
+        )
+        .to_string_lossy()
+        .into_owned(),
+        None => beside,
+    }
+}
+
+/// What to do about a rules file that cannot be written where it goes: the
+/// place and why it is that one, and the ways out (user 2026-11-11: the
+/// command run in the deck's own folder, which its reader may not write,
+/// with `-o test.rules.json` and --workdir - the refusal named a lock's
+/// folder, not that -o had put the file in the current directory, which
+/// --workdir does not move).
+fn place_advice(out: &str, explicit: bool, deck: &str, workdir: Option<&std::path::Path>) -> String {
+    let at = floe_vfs::workdir::lexical_absolute(std::path::Path::new(out));
+    match (explicit, workdir) {
+        (true, Some(root)) => format!(
+            "svrf: the rules file goes to {} as -o says (a name without a folder is in the current directory, and --workdir does not move a file -o names) - give -o a folder this account can write, or leave -o out: the file then goes under the work directory, to {}",
+            at.display(),
+            default_out_in(deck, Some(root))
+        ),
+        (true, None) => format!(
+            "svrf: the rules file goes to {} as -o says (a name without a folder is in the current directory) - give -o a folder this account can write",
+            at.display()
+        ),
+        (false, Some(root)) => format!(
+            "svrf: the rules file goes under the work directory {}, to {} (--workdir / FLOE_WORKDIR) - use a work directory this account can write, or name the file with -o",
+            root.display(),
+            at.display()
+        ),
+        (false, None) => format!(
+            "svrf: the rules file goes beside the deck, to {} - -o FILE names another place, and --workdir DIR (or FLOE_WORKDIR) puts it under a directory this account can write, at the deck's absolute path: DIR{}",
+            at.display(),
+            at.display()
+        ),
+    }
+}
+
+const USAGE: &str = "usage: floe-index svrf <deck> [-o OUT] [--scan] [-D NAME[=VAL]]... [-I DIR]... [--follow-verbatim] [--no-env-switches]  (OUT defaults to <deck>.rules.json beside the deck - under --workdir DIR / FLOE_WORKDIR to DIR/<the deck's absolute path>.rules.json; -o is written where it says)";
 
 /// `floe-index svrf <deck> ...` (the options `floe svrf` had).
 pub fn svrf_cmd(args: &[String]) {
@@ -2193,7 +2253,7 @@ pub fn svrf_cmd(args: &[String]) {
         }
     };
     if let Some(path) = &dump_state {
-        if let Err(e) = write_atomic(path, &d.state_json().dump()) {
+        if let Err((e, _)) = write_atomic(path, &d.state_json().dump()) {
             eprintln!("svrf: {}", e);
             std::process::exit(1);
         }
@@ -2202,12 +2262,39 @@ pub fn svrf_cmd(args: &[String]) {
         println!("{}", format_scan(&d));
         return;
     }
-    let out = out.unwrap_or_else(|| format!("{}.rules.json", deck));
+    // -o is written where it says; the default sidecar goes beside the deck
+    // or, under a work directory, in the mirror of the deck's folder
+    // (default_out_in), which is made when this is its first file
+    let workdir = floe_vfs::workdir::workdir();
+    let explicit = out.is_some();
+    let out = out.unwrap_or_else(|| default_out_in(&deck, workdir));
+    if !explicit {
+        if let Err(e) = crate::vfs::make_mirror_folder(&out) {
+            eprintln!("svrf: {}", e);
+            std::process::exit(1);
+        }
+    }
     // the sidecar's writer lock (floe_vfs::lock; user 2026-10-09): another
-    // run compiling to it refuses this one (they shared `<out>.tmp`)
-    let _lock = crate::vfs::lock_writer(floe_vfs::lock::Kind::Rules, &out, floe_vfs::lock::Mode::Additive, "floe-index svrf");
-    if let Err(e) = write_atomic(&out, &d.to_json().dump()) {
+    // run compiling to it refuses this one (they shared `<out>.tmp`). It is
+    // beside the sidecar; one that cannot be made at all is a matter of
+    // where the sidecar goes, said with it
+    let key = floe_vfs::lock::key(floe_vfs::lock::Kind::Rules, &out);
+    let _lock = match floe_vfs::lock::writer(&key, floe_vfs::lock::Mode::Additive, "floe-index svrf") {
+        Ok(guard) => guard,
+        Err(busy) => {
+            eprintln!("[lock] {}", busy);
+            if let floe_vfs::lock::Busy::Error { .. } = busy {
+                eprintln!("{}", place_advice(&out, explicit, &deck, workdir));
+                std::process::exit(1);
+            }
+            std::process::exit(floe_vfs::lock::BUSY_EXIT);
+        }
+    };
+    if let Err((e, place)) = write_atomic(&out, &d.to_json().dump()) {
         eprintln!("svrf: {}", e);
+        if place {
+            eprintln!("{}", place_advice(&out, explicit, &deck, workdir));
+        }
         std::process::exit(1);
     }
     println!(
@@ -2234,6 +2321,37 @@ pub fn svrf_cmd(args: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_default_sidecar_goes_beside_the_deck_or_under_the_work_directory() {
+        use std::path::Path;
+        // beside the deck, as the deck was named
+        assert_eq!(default_out_in("/p/deck.cal", None), "/p/deck.cal.rules.json");
+        assert_eq!(default_out_in("rel/deck.cal", None), "rel/deck.cal.rules.json");
+        // under a work directory: at the deck's absolute path below it, as
+        // a source's cache and a database's pack go (floe_vfs::workdir)
+        let w = Path::new("/user");
+        assert_eq!(default_out_in("/p/deck.cal", Some(w)), "/user/p/deck.cal.rules.json");
+        assert_eq!(default_out_in("/p/a/../deck.cal", Some(w)), "/user/p/deck.cal.rules.json");
+        let here = std::env::current_dir().unwrap();
+        assert_eq!(
+            default_out_in("deck.cal", Some(w)),
+            floe_vfs::workdir::under(w, &here.join("deck.cal.rules.json")).to_string_lossy()
+        );
+        // what a refusal says: where the file goes and why, and the way out
+        let named = place_advice("/p/test.rules.json", true, "/p/deck.cal", Some(w));
+        assert!(named.contains("goes to /p/test.rules.json as -o says"), "{named}");
+        assert!(named.contains("--workdir does not move a file -o names"), "{named}");
+        assert!(named.ends_with("to /user/p/deck.cal.rules.json"), "{named}");
+        let bare = place_advice("test.rules.json", true, "/p/deck.cal", None);
+        assert!(bare.contains(&format!("goes to {}", here.join("test.rules.json").display())), "{bare}");
+        assert!(!bare.contains("workdir"), "{bare}");
+        let mirrored = place_advice("/user/p/deck.cal.rules.json", false, "/p/deck.cal", Some(w));
+        assert!(mirrored.contains("under the work directory /user, to /user/p/deck.cal.rules.json"), "{mirrored}");
+        let beside = place_advice("/p/deck.cal.rules.json", false, "/p/deck.cal", None);
+        assert!(beside.contains("beside the deck, to /p/deck.cal.rules.json"), "{beside}");
+        assert!(beside.ends_with("DIR/p/deck.cal.rules.json"), "{beside}");
+    }
 
     fn parse_text(text: &str) -> Deck {
         use std::sync::atomic::{AtomicUsize, Ordering};

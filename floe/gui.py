@@ -9071,7 +9071,13 @@ class Viewer:
         """Auto-pick the `floe-index svrf` rule-metadata sidecar: the
         deck's Rule File Pathname is an absolute path from the
         CALIBRE RUN machine, so <deck basename>.rules.json NEXT TO
-        THE DB is searched first, the recorded path second."""
+        THE DB is searched first, the recorded path second, <db>.rules.json
+        third - and under a work directory (--workdir / FLOE_WORKDIR) the
+        same three below it, where `floe-index svrf DECK` writes when the
+        deck's folder is not to be written (user 2026-11-11). The service
+        says the places (gtkservice.rules_candidates, app-core
+        svrf::rules_candidates - the DRC capture's list); one that cannot
+        answer leaves the three beside the files."""
         self._drc_rmeta = None
         self._drc_rmatch = (0, 0)
         deck = None
@@ -9082,13 +9088,16 @@ class Viewer:
                     break
             if deck:
                 break
-        dbdir = os.path.dirname(os.path.abspath(db_path))
-        cands = []
-        if deck:
-            cands.append(os.path.join(
-                dbdir, os.path.basename(deck) + ".rules.json"))
-            cands.append(deck + ".rules.json")
-        cands.append(db_path + ".rules.json")
+        try:
+            cands = gtkservice.rules_candidates(db_path, deck)
+        except (gtkservice.ServiceError, OSError, ValueError):
+            dbdir = os.path.dirname(os.path.abspath(db_path))
+            cands = []
+            if deck:
+                cands.append(os.path.join(
+                    dbdir, os.path.basename(deck) + ".rules.json"))
+                cands.append(deck + ".rules.json")
+            cands.append(db_path + ".rules.json")
         for p in cands:
             if os.path.isfile(p):
                 self._drc_rules_load(p, silent=True)

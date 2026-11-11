@@ -1346,6 +1346,16 @@ def svrf_operands(rhs):
     return service().request("svrf_operands", rhs=rhs)
 
 
+def rules_candidates(db, deck=None):
+    """Where the rules sidecar of the results database `db` is looked for,
+    in order (`deck`: its Rule File Pathname): beside the database and the
+    deck, then - under a work directory (--workdir / FLOE_WORKDIR) - at the
+    same paths below it, where `floe-index svrf DECK` writes its default
+    sidecar (app-core svrf::rules_candidates)."""
+    return service().request("svrf_rules_candidates", db=os.path.abspath(db),
+                             deck=deck or "")
+
+
 def db_name_of(path):
     """The results database's name for a pack or .db path (a hidden
     `.<db>.tray` and a legacy `<db>.ice` both give `<db>`)."""

@@ -321,22 +321,8 @@ fn sidecars(o: &Options, db: &Database) -> Result<Vec<PathBuf>> {
             break;
         }
     }
-    let mut paths = Vec::new();
-    if let Some(deck) = deck {
-        if let Some(name) = deck.file_name() {
-            let adjacent = crate::cache::absolute(&o.database)?
-                .parent()
-                .unwrap()
-                .join(name);
-            paths.push(PathBuf::from(format!("{}.rules.json", adjacent.display())));
-        }
-        paths.push(PathBuf::from(format!("{}.rules.json", deck.display())));
-    }
-    paths.push(PathBuf::from(format!(
-        "{}.rules.json",
-        o.database.display()
-    )));
-    Ok(paths)
+    // beside the database and the deck, then under the work directory
+    crate::svrf::rules_candidates(&o.database, deck.as_deref())
 }
 /// The rules.json sidecar the capture reads: for the layer isolation and the
 /// rulers alike - an explicit --layers still takes the rulers' constraints.

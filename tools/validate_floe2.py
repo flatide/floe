@@ -663,6 +663,93 @@ def validate_rust_cli(base, fixture):
         bad = native("light", fi_src, "--workdir", ok=False, timeout=30)
         check(bad.returncode == 2 and "workdir" in bad.stderr,
               "floe-index --workdir without a value was not a usage error: %d %s" % (bad.returncode, bad.stderr[-200:]))
+        # a pack that is the first file of its folder in a work directory:
+        # floe-index makes the mirror folder before the pack's lock (the
+        # check above found it made by the caches before it; 0.12.450)
+        fresh5 = work / "fresh work 5"
+        native("drc", wd_db, "--jobs", "2", "--workdir", fresh5)
+        check((fresh5 / Path(os.path.abspath(wd_db)).relative_to("/").parent / ".rust cli workdir.db.tray").is_file(),
+              "floe-index drc into a fresh work directory did not make the pack's folder")
+        # the rules sidecar follows the work directory too (0.12.450; user
+        # 2026-11-11, a deck in a folder its reader may not write:
+        # "--workdir을 주었으니 lock파일도 /user/path/.floe-lock으로 만들어야 할
+        # 것 같은데 원본 폴더에서 lock 생성하는 것 같음"): `floe-index svrf
+        # DECK` without -o writes DIR/<the deck's absolute path>.rules.json,
+        # its lock beside it there and nothing beside the deck; -o is written
+        # where it says; a DRC capture looks under the work directory after
+        # the places beside the database and the deck (the viewer's load
+        # too: gate drc_analysis)
+        deck_dir = work / "ro deck"
+        deck_dir.mkdir()
+        deck = deck_dir / "origin.cal"
+        shutil.copy2(ROOT / "sample.svrf", deck)
+        rules_db = work / "rust cli rules.db"
+        rules_db.write_text((ROOT / "sample.db").read_text().replace(
+            "Rule File Pathname: sample.svrf", "Rule File Pathname: %s" % deck))
+        fresh4, fresh6 = work / "fresh work 4", work / "fresh work 6"
+        rust(env, "drc", rules_db, "--build", "--workdir", fresh4, "--jobs", "2")
+        snap = ("render", source, "--drc", rules_db, "--drc-rule", rule, "--drc-err", "1",
+                "--workdir", fresh4, "--out")
+        bare = rust(env, *snap, work / "rules snap 0.png")
+        check("no rules.json sidecar found" in bare.stderr,
+              "a DRC capture found a rules sidecar where none is: %s" % bare.stderr[-300:])
+
+        def svrf(*args, cwd, env=env, ok=True):
+            result = subprocess.run([str(indexer), "svrf"] + [str(a) for a in args], cwd=str(cwd), env=env,
+                                    capture_output=True, text=True, timeout=60)
+            if ok and result.returncode:
+                raise AssertionError("floe-index svrf failed: %r\nstderr:\n%s" % (args, result.stderr[-500:]))
+            return result
+
+        def last(result):
+            lines = result.stderr.strip().splitlines()
+            return lines[-1] if lines else ""
+        mirror = fresh4 / deck_dir.relative_to("/")
+        sidecar = mirror / "origin.cal.rules.json"
+        deck_dir.chmod(0o555)
+        try:
+            # run in the deck's own folder, which may not be written
+            made = svrf(deck, "--follow-verbatim", "--workdir", fresh4, cwd=deck_dir)
+            check(sidecar.is_file() and (mirror / ".floe-lock" / "origin.cal.rules.build").is_file()
+                  and [p.name for p in deck_dir.iterdir()] == ["origin.cal"] and str(sidecar) in made.stdout,
+                  "floe-index svrf --workdir did not write its default sidecar and lock under the work directory: %s / %s" % (
+                      made.stdout[-300:], made.stderr[-300:]))
+            # FLOE_WORKDIR, the deck named from its folder (the mirror is of
+            # the folder as the system names it)
+            real_dir = Path(os.path.realpath(deck_dir))
+            svrf("origin.cal", cwd=deck_dir, env=dict(env, FLOE_WORKDIR=str(fresh6)))
+            check((fresh6 / real_dir.relative_to("/") / "origin.cal.rules.json").is_file(),
+                  "FLOE_WORKDIR did not place floe-index svrf's default sidecar")
+            # -o is written where it says: a name alone, in the folder that
+            # may not be written, is refused saying where the file goes and
+            # the way out
+            res = svrf(deck, "-o", "test.rules.json", "--workdir", fresh4, cwd=deck_dir, ok=False)
+            check(res.returncode == 1 and "[lock] test.rules.json: cannot take its lock" in res.stderr
+                  and ("svrf: the rules file goes to %s as -o says" % (real_dir / "test.rules.json")) in last(res)
+                  and "--workdir does not move a file -o names" in last(res)
+                  and last(res).endswith("to %s" % sidecar),
+                  "a rules file named into a folder that cannot be written was not refused with its place: %d %s" % (
+                      res.returncode, res.stderr[-500:]))
+            # ... a folder that can be written takes it, its lock beside it
+            named = work / "named.rules.json"
+            svrf(deck, "-o", named, "--workdir", fresh4, cwd=deck_dir)
+            check(named.is_file() and (work / ".floe-lock" / "named.rules.build").is_file()
+                  and not (fresh4 / named.relative_to("/")).exists(),
+                  "an explicit -o was moved by --workdir")
+            # no work directory: beside the deck - refused there, naming
+            # --workdir and where the file would then go
+            res = svrf(deck, cwd=work, ok=False)
+            check(res.returncode == 1
+                  and ("svrf: the rules file goes beside the deck, to %s.rules.json" % deck) in last(res)
+                  and last(res).endswith("--workdir DIR (or FLOE_WORKDIR) puts it under a directory this account can write, "
+                                         "at the deck's absolute path: DIR%s.rules.json" % deck),
+                  "a sidecar that cannot be written beside its deck did not name --workdir: %d %s" % (
+                      res.returncode, res.stderr[-500:]))
+        finally:
+            deck_dir.chmod(0o755)
+        found = rust(env, *snap, work / "rules snap 1.png")
+        check("no rules.json sidecar found" not in found.stderr and "[drc] svrf isolate" in found.stderr,
+              "a DRC capture did not read the rules sidecar under the work directory: %s" % found.stderr[-300:])
         check(not called.exists(), "floe-index ran Python: %s" % (called.read_text() if called.exists() else ""))
         for bad in (["info", wd_src, "--workdir"], ["info", wd_src, "--workdir="],
                     ["--workdir", wd_png, "info", wd_src], ["info", "--workdir", "/", wd_src]):

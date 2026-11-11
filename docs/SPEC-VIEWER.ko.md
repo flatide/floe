@@ -643,7 +643,9 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
 - **SVRF 룰 메타데이터**(2026-08-15, SPEC-FORMATS `<deck>.rules.json`
   참조): db 로드 시 자동 탐색(`_drc_rules_auto` — Rule File Pathname
   베이스네임의 **db 옆** 사이드카 우선, 기록 경로·`<db>.rules.json`
-  차선) + DRC 메뉴 load SVRF rules… 수동 로드. 매칭 수는 자동 탐색이면 로드의 상태 줄
+  차선; 작업 디렉터리가 있으면 이어서 그 셋의 DIR 아래 자리, 0.12.450 — 자리는 서비스의
+  `svrf_rules_candidates`가 대고(app-core `svrf::rules_candidates`, DRC 캡처와 같은 목록) 뷰어는 그 가운데
+  첫 파일을 읽는다) + DRC 메뉴 load SVRF rules… 수동 로드. 매칭 수는 자동 탐색이면 로드의 상태 줄
   `· svrf 매칭/전체`, 수동 로드면 그때의 상태 줄 `rules metadata <파일>: N/M rules matched`
   (패널 정보줄은 2026-11-10에 뺐다).
   이 블록은 0.12.444부터 상세 pane에 붙지 않고 **SVRF 정보 창**에 나온다

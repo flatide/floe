@@ -281,8 +281,8 @@ floe2 render chip.oas --drc results.db --drc-rule M1.SPACE.1 \
 - **`--layer-colors row|group`**(2026-10-13): 레이어 기본 색. row(기본)는 패널 줄마다 다른 색, group은 layer 번호마다 한 색이다.
   범례(fe-embed) 색도 같다. `FLOE_LAYER_COLORS`가 기본값이다.
 - **레이어 격리**: rules.json 사이드카가 발견되면(탐색 순서 =
-  db 옆 덱 basename → 기록된 덱 경로 → `<db>.rules.json`, 또는
-  `--drc-rules`) 그 룰의 원천 GDS 레이어만 켠다 — 뷰어 더블클릭
+  db 옆 덱 basename → 기록된 덱 경로 → `<db>.rules.json`, 작업 디렉터리가 있으면 이어서 그 셋의
+  DIR 아래 자리(0.12.450), 또는 `--drc-rules`) 그 룰의 원천 GDS 레이어만 켠다 — 뷰어 더블클릭
   격리와 동일. 없으면 전 레이어 + stderr 안내.
 - **stdout = TSV**, 저장 파일당 한 줄:
 
@@ -319,6 +319,10 @@ floe-index svrf deck.cal --follow-verbatim # 실런과 같은 환경으로 생�
 
 - 출력 기본 `<deck>.rules.json` (`-o`로 변경). db 옆에 두면 자동
   탐색된다.
+- `--workdir DIR`(또는 `FLOE_WORKDIR`)이면 기본 출력이 덱 옆이 아니라 `DIR/<덱의 절대 경로>.rules.json`으로
+  가고 잠금도 그 옆에 생긴다(0.12.450). 덱 폴더에 쓸 수 없는 곳에서는 `-o` 없이 이렇게 돌린다. 뷰어와
+  스냅샷은 db 옆과 덱 옆에서 못 찾으면 DIR의 같은 자리에서 찾는다. `-o FILE`은 준 자리에 그대로 쓴다.
+  폴더 없이 이름만 주면 현재 디렉터리이고 `--workdir`이 옮겨 주지 않는다(CACHE-NAMING.ko.md §6).
 - `-D NAME[=V]` 반복 지정 = 실런 스위치 재현(-D가 환경변수보다
   우선). 환경변수 폴백이 기본이므로 sourceme를 source 한 셸에서
   돌리면 -D 나열이 거의 필요 없다(`--no-env-switches`로 끔).

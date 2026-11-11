@@ -225,3 +225,68 @@ fn measurement_only_supported_shapes_and_exact_translated_area() {
         assert!(measured('p', &[], precision, "area", &stop()).is_err());
     }
 }
+
+#[test]
+fn a_sidecar_is_looked_for_beside_the_files_then_under_the_work_directory() {
+    let paths = |database: &str, deck: Option<&str>, workdir: Option<&str>| -> Vec<String> {
+        rules_candidates_in(
+            Path::new(database),
+            Path::new(database),
+            deck.map(Path::new),
+            workdir.map(Path::new),
+        )
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect()
+    };
+    // beside the files, as ever: the deck's name in the database's folder
+    // (the recorded path is the machine's Calibre ran on), the recorded
+    // path, the database's own
+    assert_eq!(
+        paths("/run/r.db", Some("/calibre/deck.cal"), None),
+        [
+            "/run/deck.cal.rules.json",
+            "/calibre/deck.cal.rules.json",
+            "/run/r.db.rules.json"
+        ]
+    );
+    // a database that names no deck: its own alone
+    assert_eq!(paths("/run/r.db", None, None), ["/run/r.db.rules.json"]);
+    // under a work directory the same three follow at their absolute paths
+    // below it - `floe-index svrf /calibre/deck.cal --workdir /user` writes
+    // the second of them - and a sidecar beside the files still wins
+    assert_eq!(
+        paths("/run/r.db", Some("/calibre/deck.cal"), Some("/user")),
+        [
+            "/run/deck.cal.rules.json",
+            "/calibre/deck.cal.rules.json",
+            "/run/r.db.rules.json",
+            "/user/run/deck.cal.rules.json",
+            "/user/calibre/deck.cal.rules.json",
+            "/user/run/r.db.rules.json"
+        ]
+    );
+    assert_eq!(
+        paths("/run/r.db", None, Some("/user")),
+        ["/run/r.db.rules.json", "/user/run/r.db.rules.json"]
+    );
+    // a deck beside its database is one place, said once
+    assert_eq!(
+        paths("/run/r.db", Some("/run/deck.cal"), Some("/user")),
+        [
+            "/run/deck.cal.rules.json",
+            "/run/r.db.rules.json",
+            "/user/run/deck.cal.rules.json",
+            "/user/run/r.db.rules.json"
+        ]
+    );
+    // a deck recorded by a relative name is read against the current
+    // directory, and mirrored from there
+    let here = std::env::current_dir().unwrap();
+    let relative = paths("/run/r.db", Some("deck.cal"), Some("/user"));
+    assert_eq!(relative[1], "deck.cal.rules.json");
+    assert_eq!(
+        relative[4],
+        floe_vfs::workdir::under(Path::new("/user"), &here.join("deck.cal.rules.json")).to_string_lossy()
+    );
+}

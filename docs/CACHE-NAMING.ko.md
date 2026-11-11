@@ -169,8 +169,8 @@
   셸처럼 풀고, 상대 경로는 현재 디렉터리 기준이다. DIR이 없으면 만들고(`mkdir -p`), 파일이거나
   만들 수 없거나 `/`이면 명령행 오류로 2로 끝난다. floe-index도 같은 옵션과 `FLOE_WORKDIR`을
   받아(`floe-index [--workdir DIR] light x.oas`, `floe-index drc r.db`, 줄 어디서나) 기본
-  `.<file>.ice`·`.<db>.tray`를 같은 자리에 둔다. 명시한 outdir·`--out DIR`·`[out.tray]`는
-  옮기지 않는다. 구현은 한 곳 `rust/vfs/src/workdir.rs`(`workdir()`·`set`·`under`·
+  `.<file>.ice`·`.<db>.tray`와 `svrf`의 기본 출력 `<deck>.rules.json`(0.12.450)을 같은 자리에 둔다.
+  명시한 outdir·`--out DIR`·`[out.tray]`·`svrf -o FILE`은 옮기지 않는다. 구현은 한 곳 `rust/vfs/src/workdir.rs`(`workdir()`·`set`·`under`·
   `lexical_absolute`·`take_option`·`apply`)이고, floe-app-cli `workdir.rs`와 floe-index의
   main이 명령 파서 앞에서 옵션을 떼어내며, app-core `cache/names.rs`와 floe-index
   `hidden_sibling`이 그 규칙으로 이름을 놓는다.
@@ -185,7 +185,8 @@
   | DRC pack `.r.db.tray`와 그 소스 확인 기록 `.r.db.tray.source`, 구 이름 `r.db.ice` | `DIR/<db 폴더>/.r.db.tray` |
   | pack의 `.r.db.analysis/`(drc-prepare; `FLOE_DRC_ANALYSIS_ROOT`가 있으면 그쪽) | pack 옆, 즉 DIR 아래 |
   | 리뷰 `.r.db.review.<user>.sqlite3`(`FLOE_DRC_REVIEW_ROOT`가 있으면 그쪽), `.r.db.waive.<user>`, `.r.db.notes.<user>.fe` | pack 옆, 즉 DIR 아래 |
-  | 잠금 `<캐시>.index.lock`, `.floe-lock/` | 캐시·pack 옆, 즉 DIR 아래 |
+  | SVRF 룰 메타데이터 `deck.cal.rules.json`(`floe-index svrf deck.cal`의 기본 출력; 0.12.450) | `DIR/<덱 폴더>/deck.cal.rules.json`. 폴더는 처음 쓸 때 만든다. 읽는 쪽(뷰어의 db 로드, DRC 캡처)은 db 옆과 덱 옆을 먼저 보고 없으면 DIR의 같은 자리를 본다 |
+  | 잠금 `<캐시>.index.lock`, `.floe-lock/` | 캐시·pack·rules.json 옆, 즉 DIR 아래 |
   | 출력(`--out`의 PNG·보고서·clip OASIS), 입력(`<db>.clusters`, `--drc-rules`) | 바뀌지 않는다. `.clusters`는 db 옆에서 먼저 찾고 없으면 DIR의 미러에서 찾는다 |
 
 - **소스 옆은 읽지도 쓰지도 않는다.** 작업 디렉터리에 캐시가 없으면 소스 옆에 캐시가 있어도 다시
@@ -229,6 +230,36 @@
   floe-index 단독의 `light --workdir`·`--workdir vfs`·`FLOE_WORKDIR`의 `drc`·명시 `--out` 유지·값 없는
   `--workdir`의 2)와 단위 테스트 floe-vfs workdir.rs, app-core names.rs
   `a_work_directory_mirrors_the_absolute_path_under_itself`, app-cli workdir.rs.
+- **SVRF 룰 메타데이터(2026-11-11, app 0.12.450).** 사용자: 읽기 전용 폴더의 덱에
+  `floe-index svrf /path/origin.cal --follow-verbatim -o test.rules.json --workdir /user`를 그 폴더에서
+  돌리니 `[lock] test.rules.json: cannot take its lock: /path/.floe-lock: Permission denied`. "--workdir을
+  주었으니 lock파일도 /user/path/.floe-lock으로 만들어야 할 것 같은데 원본 폴더에서 lock 생성하는 것 같음."
+  0.12.449까지 `--workdir`은 svrf의 아무것도 옮기지 않았다: 기본 출력 `<deck>.rules.json`은 덱 옆,
+  잠금은 출력 옆이었다. 결정(사용자): 기본 출력은 미러로 보내고, 읽는 쪽도 미러를 보게 하고, 명시한
+  `-o`는 준 그대로 둔다.
+  - `-o` 없는 `floe-index svrf DECK`은 작업 디렉터리가 있으면 `DIR/<덱의 절대 경로>.rules.json`에 쓴다
+    (svrf.rs `default_out_in`). 미러 폴더는 잠금보다 먼저 만든다(vfs.rs `make_mirror_folder`; 잠금의
+    `.floe-lock`은 한 단계만 만든다). 잠금은 그 옆 `DIR/<덱 폴더>/.floe-lock/<deck>.rules.build`다. 덱 옆에는
+    아무것도 만들지 않으므로 덱 폴더에 쓸 수 없어도 된다.
+  - `-o FILE`은 준 자리에 쓰고 잠금도 그 옆이다(다른 명령의 `--out`과 같은 규칙). 폴더 없이 이름만 주면
+    현재 디렉터리다. 그 자리에 쓸 수 없으면 `[lock] …` 줄 뒤에 한 줄이 더 난다(종료 1):
+    `svrf: the rules file goes to /path/test.rules.json as -o says (a name without a folder is in the current
+    directory, and --workdir does not move a file -o names) - give -o a folder this account can write, or
+    leave -o out: the file then goes under the work directory, to /user/path/origin.cal.rules.json`.
+    작업 디렉터리 없이 덱 옆에 쓸 수 없을 때는 `… goes beside the deck, to … - -o FILE names another place,
+    and --workdir DIR (or FLOE_WORKDIR) puts it under a directory this account can write, at the deck's
+    absolute path: DIR/path/origin.cal.rules.json`이다.
+  - 읽는 쪽: 뷰어의 db 로드와 DRC 캡처는 전처럼 db 옆의 `<덱 이름>.rules.json`, 기록된 덱 경로의
+    `<deck>.rules.json`, `<db>.rules.json`을 차례로 보고, 작업 디렉터리가 있으면 그 셋의 미러를 이어서 본다
+    (app-core `svrf::rules_candidates`; 뷰어는 서비스의 `svrf_rules_candidates`로 같은 목록을 받는다). 옆에
+    있는 것이 이긴다(`.clusters`와 같다).
+  - 함께 고친 것: `floe-index drc DB`를 단독으로 새 작업 디렉터리에 돌리면 미러 폴더가 없어
+    `cannot take its lock: … No such file or directory`로 끝났다(floe2를 거친 빌드는 app-core가 폴더를 만든다).
+    이제 pack의 미러 폴더도 잠금 전에 만든다.
+  - 게이트 `floe2`(읽기 전용 덱 폴더에서의 기본 출력과 잠금 위치, `FLOE_WORKDIR`과 상대 덱 이름, `-o`
+    이름만 준 거절과 그 문구, 쓸 수 있는 `-o`는 그대로, 작업 디렉터리 없는 거절의 안내, 캡처가 미러의
+    사이드카를 읽음, 새 작업 디렉터리의 `floe-index drc`), `drc_analysis` A5(`rules_lookup_ui`: 서비스가
+    대는 자리, 뷰어의 로드가 그 가운데 첫 파일을 읽음), 단위 테스트 floe-index svrf.rs, app-core svrf/tests.rs.
   잠금은 2026-10-31 손으로 확인했다: 미러의 `.floe-lock/<키>.build`를 쥔 작성자가 `--workdir` 재색인을
   75로 막고(`FLOE_WORKDIR`로도 같다), 통째 재색인 중이면 미러의 캐시를 여는 render도 75, 미러의 캐시를
   읽는 등록(`use.<host>.<pid>.<n>`)이 `--force`를 75로 막고, `--wait`는 미러의 작성자를 기다린 뒤

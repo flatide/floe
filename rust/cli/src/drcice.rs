@@ -166,8 +166,15 @@ pub fn drc_cmd(args: &[String]) {
     let out = if pos.len() == 2 {
         pos[1].clone()
     } else {
-        // the hidden sibling .<db>.tray (floe/cachepath.py; 2026-09-16)
-        crate::vfs::hidden_sibling(src, ".tray")
+        // the hidden sibling .<db>.tray (floe/cachepath.py; 2026-09-16) -
+        // under a work directory in the mirror of the database's folder,
+        // made here when the pack is the first file of it
+        let out = crate::vfs::hidden_sibling(src, ".tray");
+        if let Err(e) = crate::vfs::make_mirror_folder(&out) {
+            eprintln!("drc {}: {}", src, e);
+            std::process::exit(1);
+        }
+        out
     };
     // the pack's locks (floe_vfs::lock; user 2026-10-09): another run
     // packing it, or a reader holding it open (the viewer maps it for its

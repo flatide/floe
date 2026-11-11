@@ -11,7 +11,7 @@ use std::{
     io::Read,
     marker::PhantomData,
     os::unix::fs::{MetadataExt, OpenOptionsExt},
-    path::Path,
+    path::{Path, PathBuf},
     sync::atomic::AtomicUsize,
 };
 
@@ -456,6 +456,65 @@ impl Rules {
 
 /// Same ASCII identifier/operator subset as floe.svrf.rhs_operands. This only
 /// follows the already parsed derivation graph for the six-line detail pane.
+/// The places the rules sidecar of a results `database` is looked for, in
+/// order - the first that is a file is the one read (the viewer's load of a
+/// database, a DRC capture). `deck`: the database's `Rule File Pathname:`,
+/// an absolute path of the machine Calibre ran on. Beside the files first:
+/// `<deck's name>.rules.json` in the database's folder, the recorded
+/// `<deck>.rules.json`, `<database>.rules.json`. Then, under a work
+/// directory (`--workdir DIR` / FLOE_WORKDIR), the same three at their
+/// absolute paths below it - where `floe-index svrf <deck>` writes its
+/// default sidecar when the deck's folder is not to be written
+/// (`DIR/<deck's absolute path>.rules.json`; user 2026-11-11: "--workdir을
+/// 주었으니 … /user/path/…으로 만들어야 할 것 같은데", then of the readers "1,
+/// 2번 수정해줘"). A sidecar beside the files wins, as the clusters file of
+/// a database does: it is the one someone put there.
+pub fn rules_candidates(database: &Path, deck: Option<&Path>) -> Result<Vec<PathBuf>> {
+    Ok(rules_candidates_in(
+        &crate::cache::absolute(database)?,
+        database,
+        deck,
+        crate::cache::workdir(),
+    ))
+}
+
+/// `rules_candidates` of a database whose absolute path is `absolute`,
+/// under `workdir`.
+fn rules_candidates_in(
+    absolute: &Path,
+    database: &Path,
+    deck: Option<&Path>,
+    workdir: Option<&Path>,
+) -> Vec<PathBuf> {
+    let sidecar = |path: &Path| {
+        let mut name = path.as_os_str().to_owned();
+        name.push(".rules.json");
+        PathBuf::from(name)
+    };
+    let mut beside = Vec::new();
+    if let Some(deck) = deck {
+        if let (Some(name), Some(folder)) = (deck.file_name(), absolute.parent()) {
+            beside.push(sidecar(&folder.join(name)));
+        }
+        beside.push(sidecar(deck));
+    }
+    beside.push(sidecar(database));
+    let mut paths: Vec<PathBuf> = Vec::new();
+    let mirrored: Vec<PathBuf> = match workdir {
+        Some(root) => beside
+            .iter()
+            .map(|p| floe_vfs::workdir::under(root, &floe_vfs::workdir::lexical_absolute(p)))
+            .collect(),
+        None => Vec::new(),
+    };
+    for path in beside.into_iter().chain(mirrored) {
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    paths
+}
+
 /// Operand names of a derivation's right-hand side - operators, options and
 /// numbers dropped (floe/svrf.py rhs_operands; the viewer walks a sidecar's
 /// derivation text with it).

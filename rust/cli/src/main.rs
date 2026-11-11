@@ -281,7 +281,7 @@ fn main() {
     }
     if args.len() < 3 || args[1] != "scan" {
         eprintln!(
-            "usage: floe-index [--workdir DIR] <command> ...  (the default .<file>.ice / .<db>.tray under DIR at the source's absolute path instead of beside it - DIR/a/b/.x.oas.ice; an explicit outdir / --out / out.tray stays as given; FLOE_WORKDIR is the default; any command, anywhere on the line)\n       \
+            "usage: floe-index [--workdir DIR] <command> ...  (the default .<file>.ice / .<db>.tray / <deck>.rules.json under DIR at the source's absolute path instead of beside it - DIR/a/b/.x.oas.ice; an explicit outdir / --out / out.tray / -o stays as given; FLOE_WORKDIR is the default; any command, anywhere on the line)\n       \
              floe-index scan <file.oas> [jobs] [--seg-bytes N]  (sizing + segment statistics, docs/DIRECT_READ_PLAN.ko.md §8.1)\n       \
              floe-index inventory <file.oas> [--jobs N] [--check] [--check-cells] [--cells] [--out design.inv] [--seg design.seg] [--seg-bytes N] [--check-seg]  \
              (the streaming build's first pass: cell table, layer order, hierarchy fold; --check holds it to the Doc pre-passes, --check-cells the cell parser to the Doc's cells; --out writes it as design.inv, FLOEINV1, and reads it back; --seg writes the segment directory design.seg, FLOESEG1, of the same walk and --check-seg holds its per-layer statistics to the Doc)\n       \
