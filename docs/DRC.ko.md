@@ -546,19 +546,20 @@ python -m floe render chip.oas --drc results.db \
 포함하지 않았다. 0.5초보다 오래 걸리는 작업은 그동안 중간 그림을 보낸다.
 실제 칩의 꼭짓점 수, 파일 저장장치, CPU 및 화면 크기에 따라 달라진다.
 
-**상세 pane** — 룰을 고르면 `rule: 이름`과 룰 텍스트가 나온다. 클러스터를 골랐으면 이름
-아래에 `cluster: 이름 (N errors)`가 붙는다. 에러를 고르면 `#로컬(전역) [상태]`, `rule: 이름`,
+**상세 pane** — 룰을 고르면 `rule: 이름`과 룰 텍스트가 나온다. 클러스터나 CD 그룹을 골라도
+줄이 늘지 않는다. 에러를 고르면 `#로컬(전역) [상태]`, `rule: 이름`,
 리뷰 줄(`visited: … · not for review: …`), note, 룰 텍스트, edge/polygon 좌표 순이다.
 §4의 메타 블록은 **SVRF 정보 창**에서 본다(0.12.444; 그 전에는 에러를 고를 때마다 이 pane에
 붙었다). 좁은 pane에서는 줄바꿈(내용 잘림 금지 규약).
 
-0.12.447에 이 pane에서 뺀 줄(사용자 2026-11-11: "rule 설명부분에서 errors, SVRF, delta group,
-Rule File Pathname, Rule File Title을 제거해줘"):
+0.12.447과 0.12.448에 이 pane에서 뺀 줄(사용자 2026-11-11: "rule 설명부분에서 errors, SVRF,
+delta group, Rule File Pathname, Rule File Title을 제거해줘", 이어서 "cluster 줄도 제거해줘"):
 
 | 빠진 줄 | 지금 읽는 곳 |
 |---|---|
 | `errors: N (declared N)` | 에러 수는 룰 목록의 `에러수/waived` 열. 결과 파일의 룰 머리가 적은 수(`declared`)는 뷰어 어디에도 나오지 않는다 |
 | `SVRF: applied …`, `CD: no parsed measurement constraints`, `SVRF: not loaded`, `SVRF: no matching rule …` (룰과 에러 양쪽) | 룰 이름 앞의 `✓`, 룰 행의 툴팁, SVRF 정보 창(`i`) |
+| `cluster: 이름 (N errors)` (0.12.448) | 룰 목록에서 룰 아래 고른 클러스터 행. 이름과 `에러수/waived`가 나온다 |
 | `delta group: 이름 (N errors)` | CD 그룹 목록에서 고른 행 |
 | `Rule File Pathname: …`, `Rule File Title: …` | 뷰어 어디에도 나오지 않는다. 덱 경로는 `floe2 drc <db>`가 룰마다 찍는 설명 첫 줄에 있다. 에러 상세에서는 2026-08-15부터 빠져 있었다 |
 

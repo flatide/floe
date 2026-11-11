@@ -1193,8 +1193,9 @@ def detail_ui(v, d, pump):
     """The detail pane says a rule's name and text, and an error's number,
     status, review and coordinates - not what the lists beside it say
     (user 2026-11-11: "rule 설명부분에서 errors, SVRF, delta group, Rule File
-    Pathname, Rule File Title을 제거해줘"): no `errors: N (declared N)`, no
-    SVRF status, no `delta group: …`, no deck path or title line."""
+    Pathname, Rule File Title을 제거해줘", then "cluster 줄도 제거해줘"): no
+    `errors: N (declared N)`, no SVRF status, no `cluster: …`, no `delta
+    group: …`, no deck path or title line."""
     from floe import gui
     Gtk = gui.Gtk
     db = d / "detail.db"
@@ -1259,13 +1260,17 @@ def detail_ui(v, d, pump):
           "a CD group picked adds no line: its row in the group list names it", (grouped, row))
     w._delta_tree.get_selection().select_path(Gtk.TreePath.new_from_indices([0]))
     pump(v, lambda: v._drc_delta_group is None and done(), "All errors again", 60)
-    # a cluster picked: its line stays
+    # a cluster picked under the rule: the same lines
     clusters = dict((c[0], c[3]) for c in w._rstore[0].iterchildren())
     pick(0, clusters["first"])
     clustered = detail()
+    chosen = w._rules.get_selection().get_selected()[1]
+    row = None if chosen is None else (w._rstore[chosen][0], w._rstore[chosen][1],
+                                       w._rstore[chosen][3] is clusters["first"])
     panes.append(clustered)
-    check(clustered == "rule: DETAIL.TEXT\ncluster: first (2 errors)\n\n" + "\n".join(text),
-          "a cluster picked is named under the rule", clustered)
+    check(clustered == rule and row == ("first", "2/0", True) and v._drc_grid_map == [0, 1],
+          "a cluster picked adds no line: its row under the rule names it with its count",
+          (clustered, row, v._drc_grid_map))
     # an error: number and status, rule, review, text, coordinates
     pick(0)
     lines = error(0, 1)
@@ -1292,10 +1297,11 @@ def detail_ui(v, d, pump):
     panes.append(nometa)
     check(nometa == "rule: DETAIL.NOMETA\n\nnot in the metadata",
           "a rule without metadata says no more of it here", nometa)
-    gone = ("errors:", "declared", "SVRF", "CD:", "delta group", "Rule File")
+    gone = ("errors", "declared", "SVRF", "CD:", "cluster", "delta group", "Rule File")
     said = [(word, pane) for pane in panes for word in gone if word in pane]
     check(len(panes) == 7 and not said,
-          "no count, SVRF status, delta group, deck path or deck title in any of them", said)
+          "no count, SVRF status, cluster, delta group, deck path or deck title in any of them",
+          said)
     # ... and where they are read: the rules list, its tooltips, the SVRF window
     rows = [(r[0], r[1]) for r in w._rstore]
     marks = [r[4] for r in w._rstore]

@@ -11640,21 +11640,18 @@ class Viewer:
                 if not ln.startswith(("Rule File Pathname:", "Rule File Title:"))]
 
     def _drc_show_rule(self, ci):
-        """Bottom pane of a rule picked without an error: its name, the
-        cluster picked and the rule's text. Out of it (user call
-        2026-11-11): `errors: N (declared N)` - the count is the rules
-        list's -, the SVRF status - the rule's check mark, its tooltip and
-        the SVRF info window say it -, `delta group: …` - the row picked
-        in the group list - and the deck's path and title lines
-        (_drc_desc_lines)."""
+        """Bottom pane of a rule picked without an error: its name and
+        the rule's text. Out of it (user calls 2026-11-11): `errors: N
+        (declared N)` - the count is the rules list's -, the SVRF status -
+        the rule's check mark, its tooltip and the SVRF info window say it
+        -, `cluster: …` - the row picked under the rule, with its count -,
+        `delta group: …` - the row picked in the group list - and the
+        deck's path and title lines (_drc_desc_lines)."""
         win, db = self._drcwin, self._drc
         if win is None or db is None:
             return
         c = db.checks[ci]
         lines = ["rule: %s" % c.name]
-        if self._drc_cluster is not None:
-            lines.append("cluster: %s (%d errors)"
-                         % (self._drc_cluster.name, self._drc_cluster.total))
         text = self._drc_desc_lines(c)
         if text:
             lines.append("")
