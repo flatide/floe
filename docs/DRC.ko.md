@@ -37,7 +37,8 @@ floe2 view chip.oas --drc results.db --rules deck.cal.rules.json
 
 `view --rules`는 `--drc`와 함께 사용하며 지정한 JSON을 자동 탐색보다 우선한다.
 기존 `.rules.json`만 읽고 `.cal`을 자동 인덱싱하지 않는다. 명시한 파일을 읽지
-못하면 DB 열기를 중단하고 오류를 표시한다. `--drc` 시작은 별도 창으로 실행된다.
+못하면 DB 열기를 중단하고 오류를 표시한다. `--drc` 실행은 같은 DISPLAY에 떠 있는 창으로 넘어가고
+그 창이 결과를 바꿔 연다(0.12.446. 0.12.445까지는 늘 별도 창이었다. `--multi`는 별도 창).
 
 **셸 스크립팅 표면**(2026-08-19): 룰 목록·에러 목록은 JSON,
 스냅샷은 룰/에러 지정 PNG 렌더 — 리포트 자동화용. **캡처 상한이
@@ -131,7 +132,8 @@ python -m floe render chip.oas --drc results.db \
   계정명(단일 사용자 환경) 순으로 안정 신호를 채택.
   예: `floe2 view layout.oas --drc results.db --userid kim`은
   `.results.db.review.kim.sqlite3`, `.results.db.waive.kim` 및 같은 ID의 note 파일을
-  사용한다. 명시한 ID는 기존 창으로 전달하지 않고 별도 창을 열어 적용한다.
+  사용한다. 명시한 ID는 요청과 함께 떠 있는 창으로 가고, 그 창은 이후의 결과를 그 ID의
+  리뷰로 연다(0.12.446. 그 전에는 별도 창을 열어 적용했다).
   ID를 생략하면 기존 환경변수·DISPLAY·SSH·계정명 순서를 유지한다.
   pack은 다시는 쓰지 않으므로 **공유/읽기 전용 pack도 사용자마다
   독립 리뷰** 가능. `save waives as…`는 waive 전용 파일을 저장한다.
@@ -165,7 +167,7 @@ python -m floe render chip.oas --drc results.db \
   - **세션 잠금**: 한 리뷰어의 한 결과 리뷰는 한 세션만 연다(app-core `drc::session`; 잠금 파일은
     CACHE-NAMING.ko.md §5). waive 사이드카는 제자리 수정이고 룰별 waived 카운터를 세션이 메모리에
     쥐고 쓰므로, 같은 ID의 두 세션이 쓰면 카운터가 상태와 어긋났다(재현: 파일에는 3건이 waive인데
-    카운터와 `--rules`는 0). `--userid`를 준 뷰어는 늘 독립 프로세스라 한 사람이 두 번 띄워도
+    카운터와 `--rules`는 0). `--userid`를 준 뷰어는 0.12.445까지 늘 독립 프로세스라 한 사람이 두 번 띄워도
     생겼다. 이제 두 번째 프로세스는 `kim's review of results.db is already open in another
     session: kim (from …) on <host>, pid N, since … - close it there first, or start with another
     reviewer ID (--userid)`로 거절되고, 뷰어는 패널과 대화상자로 알린다. 같은 프로세스가 다시 여는
@@ -187,6 +189,24 @@ python -m floe render chip.oas --drc results.db \
     .db 옆의 rules.json·clusters 자동 부착, waive·방문·note의 자동 저장, `save waives as…`·`save notes as…`·
     `Export my review…`·`Statistics CSV…`는 그대로다. 동료의 작업을 읽어 올 길이 없으므로 이 모드의 공동 검토 창은
     내 검토의 내보내기와 통계까지다. 범위와 구현은 SPEC-VIEWER.ko.md §7, 게이트는 gtk_view `file_loads_off`.
+  - **창 하나**(2026-11-11, app 0.12.446; 사용자: "이미 떠있는 floe 창을 이용하는게 좋을 것 같음 … 자동저장
+    방식이라면 전환 확인을 물을 필요는 없음. DISPLAY가 동일할 경우 전환하는 flateyes 방식을 따르면 될 것 같음"):
+    같은 DISPLAY에서 `floe2 view <레이아웃> --drc <결과> --userid <ID> --no-file-load`를 다시 실행하면 새
+    프로세스를 띄우지 않고 떠 있는 창이 그 레이아웃과 결과로 바뀐다. 묻지 않는다: 리뷰는 할 때마다 저장되어
+    있다. 이미 열린 결과면 창만 앞으로 온다(전에는 두 번째 창이 세션 잠금으로 거절됐다). 대화상자가 열려 있거나
+    리뷰 쓰기가 도는 동안은 요청이 기다린다. 창 제목이 검토 중인 결과를 `· DRC <폴더>/<파일>`로 말한다. 요청의
+    필드와 처리 규칙은 SPEC-VIEWER.ko.md §7 "창 하나".
+  - **waive 동기화**(0.12.446; 사용자: "waive 처리 작업을 매번 자동 저장"): waive는 클릭마다 사이드카에 바로
+    쓰였지만 디스크 동기화가 없었다. 프로세스가 죽어도 남되, 호스트가 죽으면 최근 수십 초분을 잃을 수 있었고 NFS의
+    다른 호스트에서는 그만큼 늦게 보였다. 이제 요청 하나(클릭, 일괄 작업, 동료 작업 적용, 승계 적용, waive 파일
+    읽기)가 끝날 때 한 번 동기화한다(app-core `Review::sync_waives`, `fdatasync`). 방문·검토 제외(SQLite,
+    synchronous FULL)와 note(임시 파일에 쓰고 fsync한 뒤 교체)는 원래 그랬다. `FLOE_WAIVE_SYNC=off`면 0.12.445까지처럼
+    커널에 맡긴다. 강제 종료 실험: 단건 작업 뒤 뷰어와 서비스를 함께 kill -9 해도 waive·방문·검토 제외·note가 남고,
+    200만 건 `waive all` 직후 뷰어만 죽이면 서비스가 끝까지 쓴다. 서비스 자체가 죽을 때만 큐의 방문과 진행 중인
+    일괄 작업을 잃는다. 단위 테스트 `a_waive_request_is_flushed_once_and_the_switch_turns_it_off`.
+  - **통계는 별도 명령**(사용자 2026-11-11): 창을 재사용하면 뷰어의 종료가 한 결과의 검토 끝을 뜻하지 않으므로,
+    런처는 필요할 때 `floe2 drc <db> --review-stats`를 부른다(DRC-CLI.ko.md §2b). 뷰어가 그 결과를 열고 있는
+    동안에도 읽는다.
   - 게이트 `drc_team` R9(잠금·ID 요구), R10(통계), R7(뷰어의 표시와 거절).
 - **결과 식별 = 내용**(2026-11-10, app 0.12.441, floe-index 0.12.441, pack 레이아웃 5; 사용자: "그
   방향으로 4번 구현해줘" - TeeBox 점검의 4번, 리뷰를 시각이 아닌 내용으로 식별한다).

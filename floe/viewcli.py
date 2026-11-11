@@ -75,11 +75,13 @@ def _add_reviewer_option(p):
                    default=None, metavar="ID",
                    help="user ID for DRC review, waive and note files "
                         "(sets FLOE_REVIEWER and overrides automatic "
-                        "DISPLAY/SSH identification; opens an independent "
-                        "instance; default: existing identification - the "
-                        "DISPLAY host, shared by everyone on it; "
-                        "FLOE_REVIEWER_REQUIRED=1 refuses a review without "
-                        "an ID; one ID reviews a result in one session)")
+                        "DISPLAY/SSH identification; default: existing "
+                        "identification - the DISPLAY host, shared by "
+                        "everyone on it; FLOE_REVIEWER_REQUIRED=1 refuses a "
+                        "review without an ID; one ID reviews a result in "
+                        "one session). Forwarded to a running instance, "
+                        "which opens the results that follow as this ID's "
+                        "review")
 
 
 def file_load_off(args, environ=None):
@@ -149,6 +151,14 @@ def cmd_view(args):
         rules = os.path.abspath(rules)
         if not os.path.isfile(rules):
             raise SystemExit(f"floe2: no such rules metadata file: {rules}")
+    # the results are said to be missing here, where the launcher reads it:
+    # a request handed to a running window answers before that window has
+    # tried to load them
+    drc = args.drc
+    if drc:
+        drc = os.path.abspath(drc)
+        if not os.path.isfile(drc):
+            raise SystemExit(f"floe2: no such DRC results file: {drc}")
     # documented entry for the frame-tuning knobs: the flags set
     # the env vars vfsclient reads per request (children inherit;
     # a forwarded running instance keeps its own values)
@@ -211,21 +221,30 @@ def cmd_view(args):
     # Render-process construction parameters cannot be retrofitted into
     # a running single instance. Open an independent viewer when one is
     # explicitly supplied; live request controls are forwarded below.
-    # An explicit review ID also belongs to this process: forwarding to
-    # an existing window would silently use that window's reviewer.
-    # So do the file loads turned off (--no-file-load): forwarded, the
-    # source would open in a window that loads anything; and a window with
-    # its loads off owns no instance socket - it takes no forwarded open.
+    # The DRC results, the rules metadata, the reviewer and the file loads
+    # turned off are part of the request since 0.12.446 (user 2026-11-11:
+    # "이미 떠있는 floe 창을 이용하는게 좋을 것 같음 ... DISPLAY가 동일할 경우
+    # 전환하는 flateyes 방식"): the running window opens the results as the
+    # stated reviewer's and turns its own file loads off (floe/gui.py
+    # _on_incoming), so a launcher's --drc --userid --no-file-load launches
+    # share one window - one viewer, one service and one renderer a display
+    # - where each was a set of its own. A review loses nothing by the
+    # switch: every waive, visit, exclusion and note is on the disk when it
+    # is made. --multi still opens a window of its own.
     no_load = file_load_off(args)
+    # the reviewer this launch states (main() put --userid in the
+    # environment): sent along - a window serves the request under it
+    stated = (os.environ.get("FLOE_REVIEWER") or "").strip()
+    # (the request is one line of tab-separated fields)
+    unsendable = any(c in text for text in (src or "", drc or "", rules or "", stated)
+                     for c in "\t\r\n")
     process_options = (stream_kb is not None
                        or args.stream_target_ms != 500
                        or args.render_debug
                        or args.frame_cache == "off"
                        or args.margin == "on"
                        or layer_colors is not None
-                       or getattr(args, "floe_reviewer", None) is not None
-                       or no_load
-                       or bool(args.drc))
+                       or unsendable)
     server = None
     if not args.multi and not process_options:
         # flateyes-style single instance per (uid, DISPLAY)
@@ -262,6 +281,17 @@ def cmd_view(args):
         # an explicit --occupancy too (2026-10-20)
         if getattr(args, "occupancy", None) is not None:
             request += "\toccupancy=" + args.occupancy
+        # the review this launch asks for (0.12.446): the results, the rules
+        # metadata named for them, whose review it is, and the file loads
+        # turned off - the window that takes the request turns its own off
+        if drc:
+            request += "\tdrc=" + drc
+        if rules:
+            request += "\trules=" + rules
+        if stated:
+            request += "\tuserid=" + stated
+        if no_load:
+            request += "\tnoload=1"
         for _ in range(5):
             code = instance.try_forward(addr, request)
             if code is not None:
@@ -311,7 +341,7 @@ def cmd_view(args):
         c = _service_open(src) if src else None
     # PyGObject/GTK3 problems are reported inside import_gtk (exit 3)
     from .gui import run_viewer
-    run_viewer(c, server, goto=goto, drc=args.drc, rules=rules,
+    run_viewer(c, server, goto=goto, drc=drc, rules=rules,
                detail=detail, dump=args.dump, depth=depth,
                frames=args.frames == "on",
                labels=args.labels == "on",
@@ -334,7 +364,10 @@ def parser():
     p = argparse.ArgumentParser(
         prog="floe2 view",
         description="native desktop viewer (GTK3); one instance per (uid, "
-                    "DISPLAY) - later calls forward the path to it",
+                    "DISPLAY) - later calls hand their request (the layout, "
+                    "--drc, --rules, --userid, --no-file-load and the view "
+                    "options) to it and the window switches; --multi opens "
+                    "a window of its own",
         epilog="--workdir DIR (every floe2 command, anywhere on the line; "
                "FLOE_WORKDIR): the caches are read and written under DIR at "
                "the source's absolute path, not beside the source; floe2 "
@@ -351,14 +384,17 @@ def parser():
                         "W = view width in um (omitted = fit view). "
                         "Forwarded to a running instance too.")
     p.add_argument("--drc", default=None, metavar="FILE.db",
-                   help="preload a Calibre ASCII DRC results db and "
-                        "open the error browser (new instance only; "
-                        "a fresh pack (.FILE.db.tray) built by "
-                        "'floe-index drc' is used automatically)")
+                   help="load a Calibre ASCII DRC results db and open "
+                        "the error browser (a fresh pack (.FILE.db.tray) "
+                        "built by 'floe-index drc' is used automatically). "
+                        "Forwarded to a running instance, which opens it in "
+                        "place of the results it shows - their review is on "
+                        "the disk as it stands, nothing is asked; results "
+                        "already open there only bring the window forward")
     p.add_argument("--rules", default=None, metavar="FILE.rules.json",
                    help="load existing SVRF rule metadata with --drc "
                         "(overrides automatic rules lookup; does not "
-                        "index an SVRF deck)")
+                        "index an SVRF deck). Forwarded with --drc")
     detail_help = (
         "starting detail level (default: medium; higher = finer, heavier "
         "wide views - lower levels omit finer features below the cut). "
@@ -479,9 +515,9 @@ def parser():
                         "and refuse. For a launcher that starts viewers "
                         "under a shared account; FLOE_NO_FILE_LOAD=1 (on / "
                         "yes / true) in its environment does the same. "
-                        "Opens an independent instance, which takes no "
-                        "forwarded open either. Saving and exporting are "
-                        "not affected")
+                        "Forwarded to a running instance, whose file loads "
+                        "go off with it and stay off. Saving and exporting "
+                        "are not affected")
     return p
 
 

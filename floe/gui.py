@@ -196,13 +196,9 @@ class _DrcTeamWindow:
             return widget
 
         top = row()
-        load = button(top, "Load peer work…", self._load_dialog)
+        self.load_button = button(top, "Load peer work…", self._load_dialog)
         if not viewer._file_load:
-            # --no-file-load: off for good - not one of the controls a
-            # finished job makes sensitive again
-            self.controls.remove(load)
-            load.set_sensitive(False)
-            load.set_tooltip_text(NO_FILE_LOAD)
+            self.file_load_off()
         button(top, "Export my review…", self._export)
         button(top, "Refresh", self._refresh)
         button(top, "Statistics CSV…", self._csv)
@@ -280,6 +276,17 @@ class _DrcTeamWindow:
         self.status.set_max_width_chars(100)
         box.pack_start(self.status, False, False, 0)
         self.window.show_all()
+
+    def file_load_off(self):
+        """--no-file-load: the load button is off for good - not one of the
+        controls a finished job makes sensitive again. At the window's
+        start, or when a forwarded launch turns the viewer's loads off
+        while it is open (Viewer._file_load_latch)."""
+        load = self.load_button
+        if load in self.controls:
+            self.controls.remove(load)
+        load.set_sensitive(False)
+        load.set_tooltip_text(NO_FILE_LOAD)
 
     def _valid(self):
         return not self.closed and self.viewer._drc is self.db
@@ -2328,6 +2335,14 @@ class LayerRow(object):
 class Viewer:
     # the file loads are on unless the start says otherwise (__init__)
     _file_load = True
+    # (a viewer made without __init__ - the gates' - has the rest too)
+    _load_items = ()
+    _reviewer = None
+    _drc_source = None
+    _drc_reviewer = None
+    _title_drc = ""
+    _request_waiting = None
+    _request_timer = None
 
     def __init__(self, cache, server_sock=None, show=True, goto=None,
                  detail=None, dump=False, depth=None, lod=DEFAULT_LOD,
@@ -2344,6 +2359,19 @@ class Viewer:
         # its command line named and loads no file picked here - the load
         # commands are insensitive in the menus and refuse (_load_refused)
         self._file_load = bool(file_load)
+        self._load_items = []       # the menus' load commands (_build_menubar)
+        # the reviewer a forwarded launch stated (its --userid /
+        # FLOE_REVIEWER): the id the DRC opens that follow ask the service
+        # for; None = the service's own - this process' FLOE_REVIEWER, else
+        # where it runs
+        self._reviewer = None
+        self._drc_source = None     # the results file the open db was asked by
+        self._drc_reviewer = None   # the reviewer that open asked for
+        self._title_drc = ""        # the title's part while results are loaded
+        # a forwarded request held back until the window is free of a
+        # dialog and of a review write (_request_hold)
+        self._request_waiting = None
+        self._request_timer = None
         self.cx = self.cy = 0
         self.spp = 1.0              # dbu per screen pixel
         self._start_goto = goto     # [x_um, y_um(, window_um)] from the CLI
@@ -3118,10 +3146,9 @@ class Viewer:
         # 2026-08-22: the side pane's floe/source header is gone)
         if cache is None:
             self._title_base = "%s - no layout (File > load layout…)" % APP
-            self.window.set_title(self._title_base)
         elif self.meta.get("jobdeck"):
             jb = self.meta["jobdeck"]
-            self.window.set_title(
+            self._title_base = (
                 "%s - %s · jobdeck %d CHIPs · %d placements · %s view%s%s"
                 % (APP, os.path.basename(self.meta["src"]["path"]),
                    jb["chips"], jb["placements"],
@@ -3141,7 +3168,7 @@ class Viewer:
                 % (APP, os.path.basename(src["path"]),
                    src["size"] / 1e9, self.meta["grid"]["nx"],
                    self.meta["grid"]["ny"]))
-            self.window.set_title(self._title_base)
+        self._title_show()
         self._build_layer_panel()
         self._apply_props_visibility(rows)
         if getattr(cache, "is_jobdeck", False):
@@ -3627,7 +3654,31 @@ class Viewer:
             self._vfs_index_and_load(path, after=after_open)
         return False
 
+    # what a forwarded launch asks for beside its layout and view options
+    # (floe/viewcli.py cmd_view): the DRC results, the rules metadata named
+    # for them, whose review it is, the file loads turned off
+    REQUEST_KEYS = ("drc", "rules", "userid", "noload")
+
+    @staticmethod
+    def _request_opts(fields):
+        opts = {}
+        for field in fields:
+            if "=" in field:
+                key, value = field.split("=", 1)
+                opts[key] = value
+        return opts
+
     def _on_incoming(self, _source, _cond):
+        """A later launch on this display hands its request to this window
+        (floe/instance.py): `path[\tkey=value...]`, answered `OK` or
+        `ERR ...`. The window switches to it, nothing asked (user
+        2026-11-11: "자동저장 방식이라면 전환 확인을 물을 필요는 없음.
+        DISPLAY가 동일할 경우 전환하는 flateyes 방식"): the layout when it is
+        another one, then the DRC results as --drc opens them at a start
+        (_request_run). A plain indexed layout is opened before the answer,
+        so the sender is told when it cannot be; whatever needs a question,
+        an index or the results is done after it. While a dialog is open or
+        a review write runs the request waits (_request_hold)."""
         # like _poll: any exception here would make GLib drop the watch,
         # silently killing single-instance forwarding for the session
         try:
@@ -3642,45 +3693,57 @@ class Viewer:
                 if not chunk:
                     break
                 data += chunk
-            line = data.decode("utf-8", "replace").strip()
+            # (the line's end alone is cut: a launch without a layout
+            # sends an empty first field, and a strip() of the whole line
+            # took its first option for a path - a bare `floe2` beside a
+            # running window asked to index "detail=medium")
+            line = data.decode("utf-8", "replace").rstrip("\r\n")
             fields = line.split("\t")
             path = fields[0].strip()
-            deferred = None
-            if not path:
-                # bare `floe` with an instance already running:
-                # present the window, change nothing else (the
-                # request's option fields are ignored on purpose -
-                # they are only the sender's defaults)
-                error = None
-                fields = [path]
-            elif _is_deck_path(path) or not self._index_ready(
-                    os.path.abspath(path)):
-                # no index yet: answer the sender now (its wait is
-                # short) and ask the user in the window; the index
-                # build, the open and the request's options follow.
-                # A jobdeck always takes this path: it asks which
-                # levels to load first (or reads levels= from the
-                # forwarded --level)
-                error = None
-                deferred = [path, fields[1:]]
-                fields = [path]
-            else:
-                try:
-                    error = self.open_file(path)
-                except Exception as exc:
-                    error = "ERR %s" % exc
+            opts = self._request_opts(fields[1:])
+            if opts.get("noload") == "1":
+                # whatever becomes of the request: a launch with its file
+                # loads off never leaves this window loading files
+                self._file_load_latch()
+            error, kind = None, "present"
+            if path or opts.get("drc"):
+                # the newest request is the one the window turns to
+                self._request_waiting = None
+                if self._request_busy() is not None:
+                    kind = "wait"
+                elif opts.get("drc") or _is_deck_path(path) \
+                        or not self._index_ready(os.path.abspath(path)):
+                    # the results (a pack to ask about, a review to open),
+                    # an index to ask about and build, a deck's levels:
+                    # answer the sender now (its wait is short) and do it
+                    # in the window
+                    kind = "idle"
+                else:
+                    kind = "now"
+                    self._reviewer = opts.get("userid") or None
+                    try:
+                        error = self.open_file(path)
+                    except Exception as exc:
+                        error = "ERR %s" % exc
+            # (a bare launch with an instance running - no layout, no
+            # results: present the window, change nothing else; the
+            # request's option fields are only the sender's defaults)
             try:
                 conn.sendall((error or "OK").encode("utf-8") + b"\n")
             except OSError:
                 pass
-            if deferred:
+            if kind == "wait":
+                self._request_hold(path, fields[1:])
                 self._present()
-                GLib.idle_add(self._open_or_index, deferred[0], deferred[1])
+            elif kind == "idle":
+                self._present()
+                GLib.idle_add(self._request_run, path, fields[1:])
             elif not error:
-                changed = self._forwarded_view_options(fields[1:])
-                jumped = self._forwarded_goto(fields[1:])
-                if changed and not jumped:
-                    self.redraw(immediate=True)
+                if kind == "now":
+                    changed = self._forwarded_view_options(fields[1:])
+                    jumped = self._forwarded_goto(fields[1:])
+                    if changed and not jumped:
+                        self.redraw(immediate=True)
                 self._present()
         except Exception:
             import traceback
@@ -3688,6 +3751,97 @@ class Viewer:
         finally:
             conn.close()
         return True
+
+    def _request_busy(self):
+        """Why a forwarded request has to wait, else None. A dialog or a
+        menu is open (GTK's grab): what is typed there belongs to what the
+        window shows now - a note written under results that were swapped
+        meanwhile would land on the new results' errors of the same numbers.
+        A review write runs: it ends on the results it was asked for (the
+        service finishes it either way; the window says how it ended)."""
+        if Gtk.grab_get_current() is not None:
+            return "a dialog or a menu is open"
+        if getattr(self, "_drc_review_job", None) is not None \
+                or getattr(self, "_drc_team_write", None) is not None:
+            return "a review update is running"
+        return None
+
+    def _request_hold(self, path, fields):
+        """Keep a forwarded request until the window is free (the newest
+        one alone: a launcher asks for one thing at a time)."""
+        self._request_waiting = (path, list(fields))
+        what = self._request_opts(fields).get("drc") or path
+        self._set_live_status("open request waiting (%s): %s" % (
+            self._request_busy() or "busy", os.path.basename(what)))
+        if self._request_timer is None:
+            self._request_timer = GLib.timeout_add(250, self._request_poll)
+
+    def _request_poll(self):
+        waiting = self._request_waiting
+        if waiting is None or self._quitting:
+            self._request_timer = None
+            return False
+        if self._request_busy() is not None:
+            return True
+        self._request_waiting = None
+        self._request_timer = None
+        self._request_run(*waiting)
+        return False
+
+    def _request_run(self, path, fields):
+        """Do a forwarded launch's request in the window: the reviewer it
+        states is the one the results that follow are opened as; the
+        layout is opened unless it is the one shown (asked about and
+        indexed first when it has no index, a deck's levels chosen), its
+        view options applied; then the DRC results (_drc_request). A layout
+        that cannot be opened leaves the window as it is, results and all.
+        Returns False (GLib.idle_add)."""
+        opts = self._request_opts(fields)
+        view = [f for f in fields
+                if f.split("=", 1)[0] not in self.REQUEST_KEYS]
+        self._reviewer = opts.get("userid") or None
+        drc, rules = opts.get("drc"), opts.get("rules")
+        then = (lambda: self._drc_request(drc, rules)) if drc else None
+        if path:
+            self._open_or_index(path, view, then=then)
+        elif then is not None:
+            then()
+        return False
+
+    def _drc_request(self, path, rules=None):
+        """The DRC results a forwarded launch names, opened as --drc opens
+        them at a start, in place of the results shown - nothing asked: the
+        review of those is on the disk as it stands (every waive, visit,
+        exclusion and note is written when it is made; the service ends a
+        write in progress and its queued visits before it lets the old
+        results go). Results already open - the same file, its pack still
+        the current one, the same reviewer - stay as they are: the window
+        comes forward, and rules metadata named with them is attached."""
+        path = os.path.abspath(path)
+        db = self._drc
+        # the same reviewer: asked for as these results were, or the id
+        # their review is kept under (a window started with --userid serves
+        # its own id's request without opening the review again)
+        same = db is not None and (
+            self._reviewer == self._drc_reviewer
+            or (self._reviewer is not None
+                and self._reviewer == getattr(db, "_reviewer", None)))
+        if (same and self._drc_source is not None
+                and os.path.realpath(path) == os.path.realpath(self._drc_source)):
+            try:
+                side = gtkservice.drc_find(path)
+            except gtkservice.ServiceError:
+                side = None
+            held = getattr(db, "path", None)
+            if side and held and os.path.realpath(side) == os.path.realpath(held):
+                self._left_show("drc")
+                if rules:
+                    self._drc_rules_load(rules)
+                else:
+                    self._set_live_status(
+                        "DRC %s: already open" % os.path.basename(path))
+                return
+        self._drc_open_db(path, rules=rules)
 
     def _forwarded_view_options(self, fields):
         """Apply request-scoped CLI controls without intermediate renders.
@@ -3786,6 +3940,18 @@ class Viewer:
                 return True
             return False
         return False
+
+    def _title_show(self):
+        """The window's title: the layout (_title_base), the DRC results
+        loaded - one window shows one results file after another when a
+        launcher's requests switch it, and what is being reviewed must be
+        in sight (user 2026-11-11; the panel keeps no line of it) - and the
+        view root."""
+        title = getattr(self, "_title_base", APP) + getattr(self, "_title_drc", "")
+        root = getattr(self, "_view_root", None)
+        if root is not None:
+            title += " · root %s" % root["name"]
+        self.window.set_title(title)
 
     def _present(self):
         self.window.deiconify()
@@ -6636,6 +6802,7 @@ class Viewer:
         mb = Gtk.MenuBar()
         self._menu_checks = []   # (CheckMenuItem, live-state getter)
         self._menu_guard = False
+        self._load_items = []
 
         def item(menu, label, cb):
             it = Gtk.MenuItem(label=label)
@@ -6645,11 +6812,10 @@ class Viewer:
 
         def load(menu, label, cb):
             # a command that loads a file picked in the viewer: insensitive
-            # in one started with --no-file-load (its handler refuses too)
+            # with the file loads off (_file_load_show; its handler refuses
+            # too)
             it = item(menu, label, cb)
-            if not self._file_load:
-                it.set_sensitive(False)
-                it.set_tooltip_text(NO_FILE_LOAD)
+            self._load_items.append(it)
             return it
 
         def check(menu, label, cb, state):
@@ -6822,7 +6988,33 @@ class Viewer:
         item(m, "About %s" % APP, self._about_dialog)
         item(m, "Open Source Licenses", self._licenses_dialog)
         self._menubar = mb
+        self._file_load_show()
         return mb
+
+    def _file_load_show(self):
+        """The menus' load commands as the switch stands: insensitive, the
+        reason their tooltip, with the file loads off."""
+        for it in self._load_items:
+            it.set_sensitive(self._file_load)
+            it.set_tooltip_text(None if self._file_load else NO_FILE_LOAD)
+
+    def _file_load_latch(self):
+        """A forwarded launch with its file loads off (--no-file-load /
+        FLOE_NO_FILE_LOAD) turns this window's off too, and they stay off:
+        a launcher's request must not land in a window that loads anything,
+        and a later launch without the option does not turn them on again.
+        The reviewers window loses its load button, the window of a previous
+        run - paths to read and nothing else - goes."""
+        if not self._file_load:
+            return
+        self._file_load = False
+        self._file_load_show()
+        team = getattr(self, "_drc_team", None)
+        if team is not None and not team.closed:
+            team.file_load_off()
+        migration = getattr(self, "_drc_migration", None)
+        if migration is not None and not migration.closed:
+            migration.window.destroy()
 
     def _load_refused(self, what):
         """Whether `what`, a command that loads a file picked in the viewer,
@@ -8161,9 +8353,7 @@ class Viewer:
         self._cell_hl = None
         self._cell_hl_key = None
         root = self._view_root
-        base = getattr(self, "_title_base", APP)
-        self.window.set_title(base if root is None
-                              else "%s · root %s" % (base, root["name"]))
+        self._title_show()
         # the depth counts from the root: its deepest level is the root's
         # height (the depth itself is kept, so the top restores the view)
         dstatus = getattr(self, "dstatus", None)
@@ -8491,6 +8681,11 @@ class Viewer:
         self._drc_conflict_reset(drop_source=True)
         self.drc_mark = None
         self._drc = None
+        self._drc_source = None
+        self._drc_reviewer = None
+        if self._title_drc:
+            self._title_drc = ""
+            self._title_show()
         self._drc_marker_invalidate(drop_worker=True)
         self._drc_delta_reset(drop_worker=True)
         self._drc_clusters = None
@@ -8554,7 +8749,8 @@ class Viewer:
             return
         if side is not None:
             try:
-                db = gtkservice.drc_open_pack(side, source=path)
+                db = gtkservice.drc_open_pack(side, source=path,
+                                              reviewer=self._reviewer)
             except gtkservice.ServiceError as exc:
                 # busy: the pack is being indexed, or this reviewer's
                 # review is open in another session; admission: a reviewer
@@ -8741,7 +8937,7 @@ class Viewer:
                 return False
         if db is None:
             try:
-                db = gtkservice.drc_load(path)
+                db = gtkservice.drc_load(path, reviewer=self._reviewer)
             except Exception as exc:
                 # a pack another run re-packs says who (floe_vfs::lock); a
                 # review open in another session, a reviewer ID required
@@ -8757,6 +8953,15 @@ class Viewer:
                 window.window.destroy()
         self._drc_conflict_reset(drop_source=True)
         self._drc = db
+        # what a forwarded request compares its own with (_drc_request),
+        # and the title's part
+        self._drc_source = os.path.abspath(path)
+        self._drc_reviewer = self._reviewer
+        # (with its folder: one run's results are named like the next's)
+        self._title_drc = " · DRC %s" % os.path.join(
+            os.path.basename(os.path.dirname(self._drc_source)),
+            os.path.basename(self._drc_source))
+        self._title_show()
         self._drc_marker_invalidate(drop_worker=True)
         self._drc_clusters = None
         self._drc_cluster = None

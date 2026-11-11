@@ -6,7 +6,11 @@
 //! store is how they are kept, as the GTK viewer always kept them:
 //!
 //! - every waive click is written at once - one status byte and the rule's
-//!   waived counter, in place (a sidecar of 100M errors is never rewritten);
+//!   waived counter, in place (a sidecar of 100M errors is never rewritten) -
+//!   and flushed to the disk before the request answers (`sync_waives`,
+//!   0.12.446: the statistics are read by a command of their own while the
+//!   viewer runs, on any host; FLOE_WAIVE_SYNC=off leaves the bytes to the
+//!   kernel's writeback as before);
 //! - a sidecar of another DRC run (header or size) is moved aside
 //!   (`.stale-<epoch>`) and a fresh one seeded from the pack's embedded
 //!   sections; the first open creates it;
@@ -83,6 +87,29 @@ pub struct Review {
     /// bumped on every status write (a worker reading statuses apart
     /// knows whether they moved under it)
     generation: u64,
+    /// whether the in-place waive writes are flushed to the disk at the end
+    /// of the request or job that made them (FLOE_WAIVE_SYNC at the open)
+    sync: bool,
+    /// status bytes written since the last flush
+    unsynced: bool,
+    /// flushes made (what the tests count)
+    syncs: u64,
+}
+
+/// FLOE_WAIVE_SYNC: on unless `off` (`0`, `no`, `false`) - the kill switch of
+/// the flush after each waive request (0.12.446).
+pub(super) fn waive_sync_of(value: Option<&str>) -> bool {
+    !matches!(
+        value.unwrap_or_default().trim().to_ascii_lowercase().as_str(),
+        "off" | "0" | "no" | "false"
+    )
+}
+
+impl Drop for Review {
+    /// What an error left unflushed goes to the disk with the review.
+    fn drop(&mut self) {
+        let _ = self.sync_waives();
+    }
 }
 
 fn io(e: Error) -> std::io::Error {
@@ -294,6 +321,9 @@ impl Review {
             reviewer_source: who.source,
             _session: session,
             generation: 0,
+            sync: waive_sync_of(std::env::var("FLOE_WAIVE_SYNC").ok().as_deref()),
+            unsynced: false,
+            syncs: 0,
         };
         review.load_notes();
         Ok(review)
@@ -376,6 +406,7 @@ impl Review {
             ));
         }
         self.generation += 1;
+        self.unsynced = true;
         if self.writer.is_none() {
             self.writer = Some(
                 OpenOptions::new()
@@ -387,8 +418,51 @@ impl Review {
         Ok(self.writer.as_ref().expect("opened"))
     }
 
+    /// Flush the waive writes made since the last flush to the disk: the
+    /// request or the job that made them ends with this (user 2026-11-11:
+    /// "waive 처리 작업을 매번 자동 저장" - every click was written at once
+    /// but stayed in the page cache until the kernel wrote it back, which a
+    /// host that goes down loses and a reader on another host of an NFS
+    /// folder does not see for tens of seconds; the statistics are read by a
+    /// command of their own while the viewer runs). One flush a request or a
+    /// job, whatever its size. FLOE_WAIVE_SYNC=off: none, as before 0.12.446.
+    pub fn sync_waives(&mut self) -> Result<()> {
+        if !std::mem::take(&mut self.unsynced) || !self.sync {
+            return Ok(());
+        }
+        let Some(writer) = &self.writer else {
+            return Ok(());
+        };
+        match writer.sync_data() {
+            Ok(()) => {
+                self.syncs += 1;
+                Ok(())
+            }
+            // a file system without the call writes back in its own time
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::Unsupported | std::io::ErrorKind::InvalidInput
+                ) =>
+            {
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// The flushes `sync_waives` made.
+    pub fn waive_syncs(&self) -> u64 {
+        self.syncs
+    }
+
+    /// Turn the flushes on or off (FLOE_WAIVE_SYNC decides at the open).
+    pub fn set_waive_sync(&mut self, on: bool) {
+        self.sync = on;
+    }
+
     /// Set the status of check `check`'s errors `errors` to `value`, in
-    /// place, keeping the rule's waived counter in step.
+    /// place, keeping the rule's waived counter in step; flushed.
     pub fn set_status(&mut self, check: usize, errors: &[u64], value: u8) -> Result<()> {
         let (start, n) = self.check(check)?;
         if errors.iter().any(|&e| e >= n) {
@@ -420,7 +494,7 @@ impl Review {
                 }
             }
         }
-        Ok(())
+        self.sync_waives()
     }
 
     /// One chunk of `set_status_members`: errors `a..a+len` of rule `check`;
@@ -495,12 +569,17 @@ impl Review {
         let mut changed = 0u64;
         let mut a = 0;
         while a < n {
-            check_cancelled(cancelled)?;
+            if let Err(e) = check_cancelled(cancelled) {
+                // the chunks written so far stay: flushed with the rest
+                self.sync_waives()?;
+                return Err(e);
+            }
             let len = (n - a).min(CHUNK);
             changed += self.set_status_range(check, members, value, a, len)?;
             a += len;
             progress(a, n);
         }
+        self.sync_waives()?;
         Ok(changed)
     }
 
@@ -1019,6 +1098,7 @@ impl Review {
         }
         self.wcount = counts;
         self.chunks.clear();
+        self.sync_waives()?;
         Ok(status.iter().filter(|&&s| s == STATUS_WAIVED).count() as u64)
     }
 }

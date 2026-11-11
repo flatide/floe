@@ -698,6 +698,11 @@ pub fn apply(
             run(batch_ci.unwrap(), &batch, &mut result)?;
             report.report_text(result.processed, total, "Apply unchanged-error review", false);
         }
+        {
+            // the waives carried over reach the disk with the application
+            let mut g = own.lock();
+            review(&mut g)?.sync_waives()?;
+        }
         check_cancelled(cancelled)?;
     }
     plan.refresh_conflicts(own, cancelled, progress)?;

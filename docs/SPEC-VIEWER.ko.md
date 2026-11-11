@@ -394,11 +394,48 @@
   - 대상이 아닌 것: 저장과 내보내기. `clip region…`, `save waives as…`, `save notes as…`, 공동 검토 창의
     `Export my review…`·`Statistics CSV…`, 레이어 메뉴의 `save layer properties…`는 GTK 파일 선택기를 그대로 연다.
     그 선택기에서는 폴더를 둘러보고 임의의 경로에 쓸 수 있다.
-  - 독립 창으로 뜬다(`process_options`). 로드를 끈 실행을 이미 떠 있는 창(무엇이든 여는 창)에 넘기지 않고, 로드를 끈
-    창은 인스턴스 소켓을 갖지 않아 다른 실행이 넘기는 열기 요청도 받지 않는다.
+  - 요청과 함께 간다(0.12.446, 아래 "창 하나"). 로드를 끈 실행의 요청(`noload=1`)을 받은 창은 자기 로드를 끄고
+    다시 켜지 않는다(`_file_load_latch`: 메뉴 항목, 공동 검토 창의 버튼, 승계 창). 나중에 옵션 없이 온 요청도 켜지
+    못한다. 0.12.445에서는 독립 창으로 떴고 인스턴스 소켓을 갖지 않았다.
   - 테스트: 게이트 gtk_view `file_loads_off`(실제 GTK에서 일반 뷰어와 나란히: 메뉴, 핸들러, 레이어 메뉴, 공동 검토
-    창), rust_renderer `test_no_file_load_starts_a_window_of_its_own_with_its_loads_off`(옵션과 환경값, 독립 창,
-    소켓 없음, `Viewer`까지의 전달, 브라우저의 거절).
+    창), rust_renderer `test_no_file_load_goes_with_the_request_and_the_window_keeps_it`(옵션과 환경값, 요청의
+    `noload=1`, 첫 실행이 되는 창, `Viewer`까지의 전달, 브라우저의 거절, 창의 로드가 꺼져 유지되는 것).
+- **창 하나(요청 전달)**(2026-11-11, app 0.12.446; 사용자: "사용자가 TeeBox를 이용해서 floe를 열 경우, 이미 떠있는
+  floe 창을 이용하는게 좋을 것 같음 … 자동저장 방식이라면 전환 확인을 물을 필요는 없음. DISPLAY가 동일할 경우
+  전환하는 flateyes 방식을 따르면 될 것 같음"): 같은 (uid, DISPLAY)의 나중 실행은 요청을 실행 중인 창에 넘기고
+  끝나며, 창은 묻지 않고 그 요청으로 바뀐다. 0.12.445까지 `--drc`·`--userid`·`--no-file-load` 실행은 늘 독립
+  프로세스였다(뷰어·gtk-service·renderd 한 벌씩, 작은 샘플에서 234 MB).
+  - 요청 한 줄(`viewcli.cmd_view`): `경로\tkey=value…`. 뷰 옵션(`goto`·`detail`·`depth`·`frames`·`labels`·`labelpx`·
+    `levels`·`thin`·`density`·`occupancy`)에 더해 `drc=`(결과 .db의 절대 경로), `rules=`, `userid=`(그 실행이 명시한
+    리뷰어: `--userid`나 `FLOE_REVIEWER`), `noload=1`이 간다. `--drc`가 없는 파일이면 보내기 전에 1로 끝난다
+    (`no such DRC results file`). 넘긴 요청은 창이 결과를 열어 보기 전에 답을 받기 때문이다. 탭이나 줄바꿈이 든
+    경로·ID는 한 줄에 실을 수 없어 독립 창으로 뜬다. `--multi`와 렌더 프로세스 옵션(`--stream-kb`·
+    `--stream-target-ms`·`--render-debug`·`--frame-cache off`·`--margin on`·`--layer-colors`)은 전과 같이 독립 창이다.
+  - 소켓 이름은 `floe2-2-<uid>-<DISPLAY>`다(`instance.socket_address`). 이전 버전의 창은 레이아웃만 열고 나머지를
+    버리므로 이 요청을 받지 않게 이름을 갈랐다.
+  - 창의 처리(`_on_incoming`): 레이아웃도 결과도 없는 빈 실행은 창만 앞으로 가져온다. 색인된 일반 레이아웃은 답하기
+    전에 열어 실패를 보낸 쪽에 알린다(전과 같다). 결과가 있거나 덱이거나 색인이 없으면 `OK`로 답하고 창 안에서
+    한다(`_request_run`): 요청의 리뷰어를 창의 리뷰어로 삼고(`_reviewer`. 이후의 DRC 열기가 서비스에 그 ID를
+    준다. ID를 말하지 않은 요청은 창이 처음 뜰 때의 ID 규칙으로 돌아간다), 보이는 레이아웃이 아니면 연 뒤(색인이
+    없으면 묻고 만든다) 뷰 옵션을 적용하고, 결과를 연다(`_drc_request`). 레이아웃을 열지 못하면 창은 결과까지
+    그대로다.
+  - 결과 전환은 묻지 않는다. waive·방문·검토 제외·note는 할 때마다 디스크에 있고(DRC.ko.md §2), 서비스는 이전
+    결과를 놓기 전에 진행 중인 리뷰 쓰기를 끝내고 방문 큐를 비운다(`Session::close`). 이미 열린 결과(같은 파일,
+    pack이 현재 것, 같은 리뷰어)는 다시 열지 않고 상태 줄에 `DRC <파일>: already open`이라 하며 함께 온 `rules=`만
+    붙인다.
+  - 기다리는 요청(`_request_busy`·`_request_hold`): 대화상자나 메뉴가 열려 있으면(GTK grab) 닫힐 때까지, 리뷰
+    쓰기(`_drc_review_job`, 공동 검토의 쓰기 작업)가 돌면 끝날 때까지 요청을 쥐고 250 ms마다 본다. 보낸 쪽은 바로
+    `OK`를 받고 상태 줄이 `open request waiting (a dialog or a menu is open): <파일>`이라 한다. 가장 나중 요청
+    하나만 남는다. 그러지 않으면 note 대화상자가 열린 채 결과가 바뀌어, 입력한 note가 버려지거나 새 결과의 같은
+    번호 에러에 쓰일 수 있었다.
+  - 창 제목이 검토 중인 결과를 말한다: `… · DRC <폴더>/<파일>`(`_title_show`. 실행마다 결과 파일 이름이 같으므로
+    폴더까지 적는다). 한 창이 결과를 바꿔 가며 보이므로 무엇을 검토 중인지가 늘 보여야 하고, 패널에는 그 줄이
+    없다. jobdeck의 제목도 `_title_base`에 둔다(뷰 루트를 바꾸면 이전 레이아웃의 제목으로 돌아가던 것이 고쳐진다).
+  - 고친 것: 소스 없는 실행(`floe2`만)의 요청은 첫 필드가 비어 있는데, 받는 쪽이 줄 전체를 strip()해서 첫 옵션을
+    경로로 읽었다. 실행 중인 창이 `No VFS index for detail=medium. Build it now?`를 물었다. 줄 끝만 자른다.
+  - 테스트: 게이트 gtk_view `forwarded_requests`(실제 창과 실제 소켓), rust_renderer
+    `test_a_running_window_takes_the_whole_request`·`test_userid_goes_with_the_request`·
+    `test_results_and_rules_reach_the_window_running_or_new`·`test_rules_need_a_drc_target_and_the_files_must_exist`.
 - **밀도 켜기/끄기**(2026-10-05, 0.12.298; 사용자: "뷰어에서 밀도 켜기/끄기 옵션을 추가해줘"): floe2(Rust 렌더러)의
   View > **density under the cut**(체크, `v`). 컷 아래 도형을 덮인 면적의 밀도로 그리는 renderd의 밀도 스택
   (CUT_DENSITY_DESIGN §10.12)을 켜고 끈다. `_toggle_density`가 `density_on`을 뒤집고 `_on_depth`(상태줄과 다시

@@ -48,6 +48,14 @@ load commands of the File and DRC menus insensitive, each handler
 refusing without a dialog, the layer menu's load, the reviewers window's
 load button, the window of a previous run not opened; a plain viewer
 beside it loads as ever (file_loads_off).
+
+One window a display (2026-11-11): a later launch's request - layout, DRC
+results, reviewer, file loads off - handed over the instance socket to a
+real window, which switches to it without asking; results already open
+stay; a request waits while a dialog is open or a review write runs (a
+note typed meanwhile lands on the results it was typed for); the review
+written before a switch is what `floe2 drc --review-stats` reads
+(forwarded_requests).
 """
 
 
@@ -1059,6 +1067,195 @@ def file_loads_off(src, temp):
                                           len(handlers) + 2))
 
 
+def forwarded_requests(src, temp):
+    """User 2026-11-11 ("사용자가 TeeBox를 이용해서 floe를 열 경우, 이미 떠있는
+    floe 창을 이용하는게 좋을 것 같음 ... 자동저장 방식이라면 전환 확인을 물을
+    필요는 없음. DISPLAY가 동일할 경우 전환하는 flateyes 방식을 따르면 될 것
+    같음. 통계는 별도의 cli 명령으로"): floe/gui.py's Viewer owning a real
+    instance socket (floe/instance.py), the requests of later launches
+    sent as floe/viewcli.py sends them. The window: leaves results already
+    open as they are; opens other results in their place, nothing asked,
+    its title naming them with their folder; serves the reviewer a request
+    states and turns its file loads off with a request that has them off,
+    for good; opens another layout and the results after it; holds a
+    request back while a dialog is open - the note typed in that dialog is
+    written to the results it was typed for, not to those of the request -
+    and while a review write runs; presents itself alone for a bare launch
+    (no index question: the first option was once taken for a path); opens
+    a plain layout before it answers. The waives made before a switch are
+    what `floe2 drc DB --review-stats` reads while the viewer runs."""
+    import json
+    import threading
+    from floe import gui, instance
+    Gtk = gui.Gtk
+    d = Path(temp) / "requests"
+    for run in ("run1", "run2"):
+        (d / run).mkdir(parents=True)
+        for name in ("sample.db", "sample.db.clusters", "sample.svrf.rules.json"):
+            (d / run / name).write_bytes((ROOT / name).read_bytes())
+        done = subprocess.run([os.environ["FLOE_INDEX_BIN"], "drc", str(d / run / "sample.db")],
+                              cwd=ROOT, capture_output=True, text=True, timeout=300)
+        check(done.returncode == 0, done.stdout + done.stderr)
+    other = d / "other.oas"
+    other.write_bytes(Path(src).read_bytes())
+    done = subprocess.run([FLOE2, "index", str(other), "--jobs", "2"], cwd=ROOT,
+                          capture_output=True, text=True, timeout=600)
+    check(done.returncode == 0, done.stdout + done.stderr)
+    db1, db2 = str(d / "run1" / "sample.db"), str(d / "run2" / "sample.db")
+    addr = instance.socket_address("gate-%d" % os.getpid())
+    server = instance.try_bind(addr)
+    check(server is not None, "the gate's instance socket %r is taken" % addr)
+    cache = gtkservice.ServiceCache(str(src))
+    cache.load()
+    v = gui.Viewer(cache, server)
+    asked = []
+    v._ask_yes_no = lambda question: (asked.append(question), False)[1]
+
+    def quiet():
+        return (v._drc_selection_key is None and v._drc_review_job is None
+                and not v._drc_delta_busy and v._drc_group_cache_key is None)
+
+    def send(layout, **fields):
+        """A later launch's request, as viewcli sends it; its exit code."""
+        request = "\t".join([str(layout)] + ["%s=%s" % kv for kv in fields.items()])
+        got = []
+        thread = threading.Thread(
+            target=lambda: got.append(instance.try_forward(addr, request)))
+        thread.start()
+        pump(v, lambda: not thread.is_alive(), "the answer to %r" % request, 30)
+        return got[0]
+
+    def showing(layout, results, what):
+        pump(v, lambda: v.cache is not None and v.cache.src == str(layout)
+             and v._drc_source == results and v._drc is not None and quiet()
+             and v._request_waiting is None and settled(v), what, 60)
+
+    def stats(results, who):
+        out = subprocess.run([FLOE2, "drc", results, "--review-stats", "--floe-reviewer", who],
+                             cwd=ROOT, capture_output=True, text=True, timeout=120)
+        check(out.returncode == 0, out.stdout + out.stderr)
+        return json.loads(out.stdout)["reviewers"][0]
+
+    run = Gtk.Dialog.run
+    try:
+        pump(v, lambda: settled(v), "first frame")
+        v._drc_open_db(db1)
+        showing(src, db1, "the start's results")
+        who = v._drc._reviewer
+        title = v.window.get_title()
+        check(title.endswith(" · DRC run1/sample.db"), "the title of a review: %r" % title)
+        v._drc_set_waived(0, [0, 1], True)
+        # the same results again: the window as it is
+        held = v._drc
+        check(send(src, depth=999, drc=db1) == 0, "the same results were refused")
+        pump(v, lambda: v.status.get_text() == "DRC sample.db: already open",
+             "results already open", 30)
+        check(v._drc is held and v._drc_source == db1, "results already open were opened again")
+        # other results: in their place, nothing asked; the review made is on the disk
+        check(send(src, depth=999, drc=db2) == 0, "other results were refused")
+        showing(src, db2, "the other results")
+        check(v._drc is not held and v.window.get_title().endswith(" · DRC run2/sample.db")
+              and not asked, "the switch: %r, asked %s" % (v.window.get_title(), asked))
+        mine = stats(db1, who)
+        check(mine["waived"] == 2 and mine["counters_match"],
+              "the review left behind, read by the statistics command: %s"
+              % {k: mine.get(k) for k in ("waived", "counters_match")})
+        # a request's reviewer, and its file loads off - which stay off
+        check(v._file_load and all(i.get_sensitive() for i in v._load_items),
+              "the window's loads before a request turns them off")
+        check(send(src, depth=999, drc=db2, userid="lee", noload=1) == 0, "refused")
+        pump(v, lambda: v._drc is not None and v._drc._reviewer == "lee" and quiet(),
+             "the request's reviewer", 60)
+        check((d / "run2" / ".sample.db.waive.lee").is_file() and v._drc_source == db2,
+              "the review of the reviewer the request states")
+        check(not v._file_load and v._load_items
+              and not any(i.get_sensitive() for i in v._load_items)
+              and all(i.get_tooltip_text() == gui.NO_FILE_LOAD for i in v._load_items),
+              "a request with the file loads off left the window loading")
+        # another layout, then its results (no noload: the loads stay off)
+        check(send(other, depth=999, drc=db1, userid="lee") == 0, "refused")
+        showing(other, db1, "the other layout and its results")
+        title = v.window.get_title()
+        check(title.startswith("%s - other.oas" % gui.APP)
+              and title.endswith(" · DRC run1/sample.db") and not v._file_load,
+              "another layout: %r, loads %s" % (title, v._file_load))
+        # a dialog open: the request waits for it
+        v.window.grab_add()
+        check(send(other, depth=999, drc=db2, userid="lee") == 0, "a waiting request's answer")
+        check(v._request_waiting is not None and v._drc_source == db1
+              and v.status.get_text().startswith(
+                  "open request waiting (a dialog or a menu is open): sample.db"),
+              "a request under a grab: %r, %r" % (v._request_waiting, v.status.get_text()))
+        v.window.grab_remove()
+        showing(other, db2, "the request after the grab")
+        # the note dialog: what is typed while a request waits is written to
+        # the results it was typed for
+        v._drcwin._wf.set_active_id("all")
+        v._drc_select_row(0)
+        pump(v, quiet, "the rule", 60)
+        v._drc_selection_submit(0, None, gtkservice.ListMembers([2]), "replace")
+        pump(v, lambda: v._drc_sel is not None and quiet(), "an error selected", 60)
+        seen = {}
+
+        def note_run(dlg):
+            seen["grab"] = Gtk.grab_get_current() is not None
+            seen["answer"] = send(other, depth=999, drc=db1, userid="lee")
+            seen["waiting"] = v._request_waiting is not None and v._drc_source == db2
+            scroll = [k for k in dlg.get_content_area().get_children()
+                      if isinstance(k, Gtk.ScrolledWindow)][0]
+            scroll.get_child().get_buffer().set_text("typed while a request waited")
+            return Gtk.ResponseType.OK
+
+        Gtk.Dialog.run = note_run
+        v._drc_note_key()
+        Gtk.Dialog.run = run
+        check(seen == {"grab": True, "answer": 0, "waiting": True},
+              "a request while the note dialog was open: %s" % seen)
+        note = d / "run2" / ".sample.db.notes.lee.fe"
+        check(note.is_file() and "typed while a request waited" in note.read_text(),
+              "the note typed for run2's results is not in their notes")
+        showing(other, db1, "the request after the note dialog")
+        check(not (d / "run1" / ".sample.db.notes.lee.fe").exists(),
+              "the note followed the request to the other results")
+        # a review write running: the request waits for its end
+        v._drc_review_job = dict(db=v._drc, ci=0, targets=[0], operation="waive", on=True)
+        check(send(other, depth=999, drc=db2, userid="lee") == 0, "a waiting request's answer")
+        check(v._request_waiting is not None and v._drc_source == db1
+              and "a review update is running" in v.status.get_text(),
+              "a request beside a review write: %r" % v.status.get_text())
+        v._drc_review_job = None
+        showing(other, db2, "the request after the review write")
+        # a bare launch: the window comes forward, nothing else
+        held, text = v._drc, v.status.get_text()
+        check(send("", detail="medium", depth=0, frames="on") == 0, "a bare launch's answer")
+        end = time.monotonic() + 0.5
+        pump(v, lambda: time.monotonic() > end, "a bare launch")
+        check(v._drc is held and v.cache.src == str(other) and v._request_waiting is None
+              and v.status.get_text() == text and not asked,
+              "a bare launch changed the window: %r, asked %s" % (v.status.get_text(), asked))
+        # a plain indexed layout: opened before the answer; the results of
+        # the layout before go with it
+        check(send(src, detail="medium", depth=0) == 0, "a plain layout's answer")
+        check(v.cache.src == str(src), "a plain layout was not open when its request was answered")
+        pump(v, lambda: settled(v), "the plain layout")
+        check(v._drc is None and v._drc_source is None
+              and " · DRC " not in v.window.get_title() and not asked,
+              "after a plain layout: %r, asked %s" % (v.window.get_title(), asked))
+    finally:
+        Gtk.Dialog.run = run
+        v._drc_release()
+        v._quit()
+        v.window.destroy()
+        cache.close()
+        if not addr.startswith("\0") and os.path.exists(addr):
+            os.unlink(addr)
+    print("one window a display: results already open kept, others opened in their place, "
+          "a reviewer and the loads off taken from a request, another layout, a request "
+          "held under a dialog and a review write, a note typed meanwhile on its own "
+          "results, a bare launch, a plain layout; the review left behind read by "
+          "--review-stats")
+
+
 def cells_while_opening(src, temp):
     """The cell tree's first question comes as soon as the view exists,
     while its worker still opens (renderd on a big cache takes seconds):
@@ -1342,6 +1539,7 @@ def main():
                 capture_parity(src, temp)
                 light_status(src, temp)
                 file_loads_off(src, temp)
+                forwarded_requests(src, temp)
         finally:
             ref.stop()
             svc.close()

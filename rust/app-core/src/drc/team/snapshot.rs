@@ -1336,6 +1336,11 @@ pub fn apply(
         result.processed = if check.is_none() { offsets[rule] } else { 0 } + sizes[rule].min((k + 1) * CHUNK);
         report.report(result.processed);
     }
+    {
+        // the waives this application wrote reach the disk with it
+        let mut g = own.lock();
+        review(&mut g)?.sync_waives()?;
+    }
     check_cancelled(cancelled)?;
     result.processed = total;
     report.finish(total);

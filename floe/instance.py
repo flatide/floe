@@ -1,10 +1,12 @@
 """Single-instance plumbing, mirroring flateyes.
 
 One viewer window per (uid, DISPLAY). The first invocation opens the
-window; later invocations on the same DISPLAY hand the OASIS path to the
-running window over a unix socket and exit immediately. Different DISPLAY
-values get independent windows, so many user displays on one Linux host
-coexist. `--multi` opts out.
+window; later invocations on the same DISPLAY hand their request - the
+layout, and since 0.12.446 the DRC results, the rules metadata, the reviewer
+and the file loads turned off - to the running window over a unix socket and
+exit immediately; the window switches to it. Different DISPLAY values get
+independent windows, so many user displays on one Linux host coexist.
+`--multi` opts out.
 
 stdlib only - the forward path must never import GTK or klayout, so
 repeat invocations stay fast.
@@ -43,7 +45,11 @@ def normalize_display(display):
 
 
 def socket_address(display):
-    key = "%s-%d-%s" % (APP, os.getuid(), display)
+    # "2": since 0.12.446 a request carries more than a layout - the DRC
+    # results, the rules metadata, the reviewer, the file loads turned off.
+    # A window of an earlier version would open the layout and drop the
+    # rest, so it is not the one these requests are handed to.
+    key = "%s-2-%d-%s" % (APP, os.getuid(), display)
     if sys.platform.startswith("linux"):
         # Abstract namespace: no socket file on disk, vanishes with the
         # process, so stale sockets are impossible.

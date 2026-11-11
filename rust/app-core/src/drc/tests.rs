@@ -213,6 +213,63 @@ fn pack_of(source: &std::path::Path, n: u64) -> Vec<u8> {
         .copy_from_slice(&crc32fast::hash(&fs::read(source).unwrap()).to_le_bytes());
     packed
 }
+/// User 2026-11-11 ("waive 처리 작업을 매번 자동 저장"): a waive request's
+/// bytes are flushed to the disk before it answers - once a request, whatever
+/// it wrote, and not at all when nothing changed; a span written chunk by
+/// chunk waits for its job's flush; FLOE_WAIVE_SYNC=off writes as before.
+#[test]
+fn a_waive_request_is_flushed_once_and_the_switch_turns_it_off() {
+    use super::desktop::{waive_sync_of, Review, STATUS_NONE, STATUS_WAIVED};
+    let dir = std::env::temp_dir().join(format!(
+        "floe-waive-sync-{}-{}",
+        std::process::id(),
+        SERIAL.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&dir).unwrap();
+    let pack = dir.join(".results.db.tray");
+    fs::write(&pack, bytes(8)).unwrap();
+    let stop = AtomicUsize::new(0);
+    // (the fixture's rules: an empty one, `check` with the errors, an empty tail)
+    let mut r = Review::open(&pack, None, Some("kim"), &stop).unwrap();
+    assert!(!r.read_only(), "{:?}", r.notices);
+    r.set_waive_sync(true); // whatever FLOE_WAIVE_SYNC says where the tests run
+    assert_eq!(r.waive_syncs(), 0);
+    // one request, three errors: one flush
+    r.set_status(1, &[0, 1, 2], STATUS_WAIVED).unwrap();
+    assert_eq!(r.waive_syncs(), 1);
+    // nothing changes: nothing written, nothing flushed
+    r.set_status(1, &[0, 1, 2], STATUS_WAIVED).unwrap();
+    assert_eq!(r.waive_syncs(), 1);
+    // a span (an application's chunk) waits for the flush its job asks for
+    let before = r.statuses(1, 0, 4).unwrap();
+    r.write_status_span(1, 0, &before, &[STATUS_NONE; 4]).unwrap();
+    assert_eq!(r.waive_syncs(), 1);
+    r.sync_waives().unwrap();
+    assert_eq!(r.waive_syncs(), 2);
+    r.sync_waives().unwrap();
+    assert_eq!(r.waive_syncs(), 2, "nothing was written since");
+    // the switch: written at once as ever, left to the kernel's writeback
+    r.set_waive_sync(false);
+    r.set_status(1, &[5], STATUS_WAIVED).unwrap();
+    assert_eq!(r.waive_syncs(), 2);
+    assert_eq!(r.status(1, 5).unwrap(), STATUS_WAIVED);
+    assert_eq!(r.status_counts(1).unwrap().0, 1);
+    for (value, on) in [
+        (None, true),
+        (Some(""), true),
+        (Some("on"), true),
+        (Some("1"), true),
+        (Some("off"), false),
+        (Some(" OFF "), false),
+        (Some("0"), false),
+        (Some("no"), false),
+        (Some("false"), false),
+    ] {
+        assert_eq!(waive_sync_of(value), on, "{value:?}");
+    }
+    drop(r);
+    fs::remove_dir_all(&dir).unwrap();
+}
 fn set_time(path: &std::path::Path, seconds: u64) {
     fs::File::options()
         .write(true)

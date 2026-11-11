@@ -1336,6 +1336,13 @@ impl Session {
                                 break;
                             }
                         }
+                        {
+                            // one flush for the job (app-core drc::desktop
+                            // sync_waives): the bytes are on the disk when
+                            // it says it is done
+                            let mut o = shared.opened.lock().unwrap();
+                            review(&mut o)?.sync_waives()?;
+                        }
                         shared.dirty.lock().unwrap().insert(check);
                         let counts = {
                             let o = shared.opened.lock().unwrap();

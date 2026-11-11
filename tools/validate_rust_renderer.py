@@ -178,17 +178,18 @@ class WorkerContractTests(unittest.TestCase):
                 self.assertRaises(SystemExit):
             cli.parser().parse_args(["--layer-colors", "groups", "x.oas"])
 
-    def test_no_file_load_starts_a_window_of_its_own_with_its_loads_off(self):
+    def test_no_file_load_goes_with_the_request_and_the_window_keeps_it(self):
         """--no-file-load / FLOE_NO_FILE_LOAD (user 2026-11-11: "TeeBox에서
         floe를 열 경우 사용자가 임의의 파일을 로드할 수 없게 하려고 함. 메뉴에서
         레이아웃, db등 파일 로드 관련을 disable 상태로 만들기 위한 옵션을
         추가해줘"): the flag, or the launcher's environment, starts a viewer
-        with its file loads off, in a window of its own - its source is not
-        handed to a running window (one that loads anything) and it owns no
-        instance socket (no forwarded open reaches it). Without either the
-        request is forwarded as before, and a window of its own loads as
-        ever. The switch reaches the Viewer; a viewer with it off refuses
-        in the one browser every load goes through, before any dialog."""
+        with its file loads off. Since 0.12.446 (the same day: "이미 떠있는
+        floe 창을 이용하는게 좋을 것 같음") it is part of the request a
+        running window takes - `noload=1` - and that window turns its own
+        loads off and keeps them off; with no window running the launch
+        becomes the display's window, loads off. The switch reaches the
+        Viewer; a viewer with it off refuses in the one browser every load
+        goes through, before any dialog."""
         from floe import gui
         from floe import instance
         from floe import viewcli as cli
@@ -207,42 +208,57 @@ class WorkerContractTests(unittest.TestCase):
         self.assertIn("--no-file-load", cli.parser().format_help())
         self.assertIn("FLOE_NO_FILE_LOAD", cli.parser().format_help())
 
-        for words, environ in ((["--no-file-load"], {}),
-                               ([], {"FLOE_NO_FILE_LOAD": "1"})):
-            with self.subTest(words=words, environ=environ), \
-                    mock.patch.dict(os.environ, {"FLOE_RENDERER": "rust"}), \
+        def launch(words, environ, running):
+            """The request handed to a running window, or what run_viewer
+            got when there is none."""
+            owned = object()
+            with mock.patch.dict(os.environ, {"FLOE_RENDERER": "rust"}), \
                     mock.patch.object(cli.os.path, "isfile", return_value=True), \
                     mock.patch.object(cli, "_cache_ready", return_value=True), \
                     mock.patch.object(cli, "_service_open", return_value=None), \
-                    mock.patch.object(instance, "try_forward") as forward, \
-                    mock.patch.object(instance, "try_bind") as bind, \
+                    mock.patch.object(instance, "display_key", return_value=":test"), \
+                    mock.patch.object(instance, "socket_address",
+                                      return_value="\0floe-test"), \
+                    mock.patch.object(instance, "try_forward",
+                                      return_value=0 if running else None) as forward, \
+                    mock.patch.object(instance, "try_bind", return_value=owned), \
                     mock.patch("floe.gui.run_viewer") as run_viewer:
-                os.environ.pop("FLOE_NO_FILE_LOAD", None)
+                for name in ("FLOE_NO_FILE_LOAD", "FLOE_REVIEWER"):
+                    os.environ.pop(name, None)
                 os.environ.update(environ)
-                cli.main(["/tmp/locked.oas"] + words)
-                forward.assert_not_called()
-                bind.assert_not_called()
-                run_viewer.assert_called_once()
-                self.assertIsNone(run_viewer.call_args.args[1],
-                                  "a viewer with its loads off owns no instance socket")
-                self.assertIs(run_viewer.call_args.kwargs["file_load"], False)
+                if running:
+                    with self.assertRaises(SystemExit) as stopped:
+                        cli.main(["/tmp/chip.oas"] + words)
+                    self.assertEqual(stopped.exception.code, 0)
+                    run_viewer.assert_not_called()
+                    return forward.call_args.args[1]
+                cli.main(["/tmp/chip.oas"] + words)
+                self.assertIs(run_viewer.call_args.args[1], owned,
+                              "the first launch of a display owns its socket")
+                return run_viewer.call_args.kwargs
+
+        for words, environ in ((["--no-file-load"], {}),
+                               ([], {"FLOE_NO_FILE_LOAD": "1"})):
+            with self.subTest(words=words, environ=environ):
+                request = launch(words, environ, running=True)
+                self.assertTrue(request.startswith("/tmp/chip.oas\t"), request)
+                self.assertIn("\tnoload=1", request)
+                self.assertIs(launch(words, environ, running=False)["file_load"], False)
+        self.assertNotIn("noload", launch([], {}, running=True))
+        self.assertIs(launch([], {}, running=False)["file_load"], True)
+        # --multi: a window of its own, as ever
         with mock.patch.dict(os.environ, {"FLOE_RENDERER": "rust"}), \
                 mock.patch.object(cli.os.path, "isfile", return_value=True), \
                 mock.patch.object(cli, "_cache_ready", return_value=True), \
                 mock.patch.object(cli, "_service_open", return_value=None), \
-                mock.patch.object(instance, "display_key", return_value=":test"), \
-                mock.patch.object(instance, "socket_address",
-                                  return_value="/tmp/floe-load.sock"), \
-                mock.patch.object(instance, "try_forward", return_value=0) as forward, \
+                mock.patch.object(instance, "try_forward") as forward, \
+                mock.patch.object(instance, "try_bind") as bind, \
                 mock.patch("floe.gui.run_viewer") as run_viewer:
-            os.environ.pop("FLOE_NO_FILE_LOAD", None)
-            with self.assertRaises(SystemExit) as stopped:
-                cli.main(["/tmp/plain.oas"])
-            self.assertEqual(stopped.exception.code, 0)
-            forward.assert_called_once()
-            run_viewer.assert_not_called()
-            cli.main(["/tmp/plain.oas", "--multi"])
-            self.assertIs(run_viewer.call_args.kwargs["file_load"], True)
+            cli.main(["/tmp/chip.oas", "--no-file-load", "--multi"])
+            forward.assert_not_called()
+            bind.assert_not_called()
+            self.assertIsNone(run_viewer.call_args.args[1])
+            self.assertIs(run_viewer.call_args.kwargs["file_load"], False)
 
         for file_load in (True, False):
             viewer = SimpleNamespace(_quit=mock.Mock())
@@ -268,46 +284,258 @@ class WorkerContractTests(unittest.TestCase):
         self.assertEqual(said, ["load layout: " + gui.NO_FILE_LOAD,
                                 "load notes: " + gui.NO_FILE_LOAD])
 
-    def test_userid_selects_review_identity_in_an_independent_window(self):
-        """An explicit review ID must not be forwarded to a window whose
-        service already owns another reviewer's files on the same DISPLAY."""
+        # a request with the loads off turns a loading window's off, once
+        # and for good: the menus' items, the reviewers window's button,
+        # the window of a previous run
+        v = gui.Viewer.__new__(gui.Viewer)
+        v._load_items = [mock.Mock(), mock.Mock()]
+        v._drc_team = SimpleNamespace(closed=False, file_load_off=mock.Mock())
+        v._drc_migration = SimpleNamespace(closed=False, window=mock.Mock())
+        self.assertTrue(v._file_load)
+        gui.Viewer._file_load_latch(v)
+        self.assertFalse(v._file_load)
+        for it in v._load_items:
+            it.set_sensitive.assert_called_once_with(False)
+            it.set_tooltip_text.assert_called_once_with(gui.NO_FILE_LOAD)
+        v._drc_team.file_load_off.assert_called_once_with()
+        v._drc_migration.window.destroy.assert_called_once_with()
+        gui.Viewer._file_load_latch(v)
+        v._drc_team.file_load_off.assert_called_once_with()
+        for it in v._load_items:
+            it.set_sensitive.assert_called_once_with(False)
+
+    def test_a_running_window_takes_the_whole_request(self):
+        """User 2026-11-11 ("이미 떠있는 floe 창을 이용하는게 좋을 것 같음 ...
+        자동저장 방식이라면 전환 확인을 물을 필요는 없음. DISPLAY가 동일할 경우
+        전환하는 flateyes 방식"): the window a later launch hands its request
+        to (Viewer._on_incoming) - a bare launch presents it and changes
+        nothing (its first option was taken for a path: a strip() of the
+        whole line); a plain indexed layout is opened before the answer and
+        an error goes back to the sender; a request with DRC results, a
+        deck or an unindexed layout is answered at once and done in the
+        window; one that finds a dialog open or a review write running
+        waits, the newest alone; the request's reviewer and its file loads
+        turned off are the window's from then on. _request_run opens the
+        layout with the view options alone and the results after it;
+        _drc_request leaves results already open as they are."""
+        import socket
+        from floe import gui
+
+        def window(busy=None, ready=True, error=None):
+            v = gui.Viewer.__new__(gui.Viewer)
+            v._quitting = False
+            v.calls = []
+            v._request_busy = lambda: busy
+            v._index_ready = lambda path, ids=None: ready
+            v.open_file = lambda path, ids=None: (v.calls.append(("open", path)), error)[1]
+            v._forwarded_view_options = lambda fields: (v.calls.append(("options", list(fields))), False)[1]
+            v._forwarded_goto = lambda fields: False
+            v._present = lambda: v.calls.append("present")
+            v._set_live_status = lambda text: v.calls.append(("status", text))
+            v._file_load_latch = lambda: v.calls.append("latch")
+            v.redraw = lambda **_k: v.calls.append("redraw")
+            return v
+
+        def ask(v, request):
+            ours, theirs = socket.socketpair()
+            v.server_sock = SimpleNamespace(accept=lambda: (ours, None))
+            idles, timers = [], []
+            glib = SimpleNamespace(idle_add=lambda f, *a: idles.append((f, a)),
+                                   timeout_add=lambda ms, f: (timers.append((ms, f)), 7)[1])
+            with mock.patch.object(gui, "GLib", glib):
+                theirs.sendall(request.encode("utf-8") + b"\n")
+                self.assertTrue(gui.Viewer._on_incoming(v, None, None))
+                reply = theirs.recv(4096).decode("utf-8").strip()
+            theirs.close()
+            return reply, idles, timers
+
+        # a bare launch (no layout, the sender's defaults): present only
+        v = window()
+        reply, idles, _ = ask(v, "\tdetail=medium\tdepth=0\tframes=on")
+        self.assertEqual((reply, idles, v.calls), ("OK", [], ["present"]))
+        self.assertIsNone(v._reviewer)
+        # ... and with the loads off it still turns this window's off
+        v = window()
+        reply, idles, _ = ask(v, "\tdetail=medium\tnoload=1")
+        self.assertEqual((reply, idles, v.calls), ("OK", [], ["latch", "present"]))
+        # a plain indexed layout: opened before the answer, its options after
+        v = window()
+        reply, idles, _ = ask(v, "/d/chip.oas\tdetail=high\tuserid=kim")
+        self.assertEqual(reply, "OK")
+        self.assertEqual(v.calls, [("open", "/d/chip.oas"),
+                                   ("options", ["detail=high", "userid=kim"]), "present"])
+        self.assertEqual((idles, v._reviewer), ([], "kim"))
+        # ... the sender is told when it cannot be opened
+        v = window(error="ERR cache is being rebuilt")
+        reply, idles, _ = ask(v, "/d/chip.oas\tdetail=high")
+        self.assertEqual((reply, idles), ("ERR cache is being rebuilt", []))
+        self.assertEqual(v.calls, [("open", "/d/chip.oas")])
+        # results, a deck, an unindexed layout: answered, then done in the window
+        for request, ready in (("/d/chip.oas\tdepth=999\tdrc=/d/run/r.db\tuserid=kim", True),
+                               ("\tdrc=/d/run/r.db", True),
+                               ("/d/deck.jb\tdepth=999", True),
+                               ("/d/new.oas\tdepth=0", False)):
+            with self.subTest(request=request):
+                v = window(ready=ready)
+                reply, idles, _ = ask(v, request)
+                fields = request.split("\t")
+                self.assertEqual((reply, v.calls), ("OK", ["present"]))
+                self.assertEqual(idles, [(v._request_run, (fields[0], fields[1:]))])
+        # busy: the request waits - the newest one alone - and the sender is answered
+        v = window(busy="a dialog or a menu is open")
+        reply, idles, timers = ask(v, "/d/chip.oas\tdrc=/d/run1/r.db")
+        self.assertEqual((reply, idles), ("OK", []))
+        self.assertEqual(v._request_waiting, ("/d/chip.oas", ["drc=/d/run1/r.db"]))
+        self.assertEqual(v.calls, [("status", "open request waiting (a dialog or a menu "
+                                               "is open): r.db"), "present"])
+        self.assertEqual((len(timers), timers[0][0], v._request_timer), (1, 250, 7))
+        reply, _, timers = ask(v, "/d/chip.oas\tdrc=/d/run2/r.db")
+        self.assertEqual(v._request_waiting, ("/d/chip.oas", ["drc=/d/run2/r.db"]))
+        self.assertEqual(timers, [], "one timer waits for the window")
+        # ... still busy: it keeps waiting; free: it runs, once
+        ran = []
+        v._request_run = lambda path, fields: ran.append((path, fields))
+        self.assertTrue(gui.Viewer._request_poll(v))
+        self.assertEqual(ran, [])
+        v._request_busy = lambda: None
+        self.assertFalse(gui.Viewer._request_poll(v))
+        self.assertEqual(ran, [("/d/chip.oas", ["drc=/d/run2/r.db"])])
+        self.assertEqual((v._request_waiting, v._request_timer), (None, None))
+        self.assertFalse(gui.Viewer._request_poll(v))
+        self.assertEqual(len(ran), 1)
+        # a request that comes when the window is free again replaces one waiting
+        v = window()
+        v._request_waiting = ("/d/old.oas", [])
+        ask(v, "/d/chip.oas\tdetail=high")
+        self.assertIsNone(v._request_waiting)
+
+        # the wait's reasons
+        v = gui.Viewer.__new__(gui.Viewer)
+        grab = [None]
+        with mock.patch.object(gui, "Gtk", SimpleNamespace(grab_get_current=lambda: grab[0])):
+            self.assertIsNone(gui.Viewer._request_busy(v))
+            grab[0] = object()
+            self.assertEqual(gui.Viewer._request_busy(v), "a dialog or a menu is open")
+            grab[0] = None
+            v._drc_review_job = {"operation": "waive"}
+            self.assertEqual(gui.Viewer._request_busy(v), "a review update is running")
+            v._drc_review_job = None
+            v._drc_team_write = {"label": "Apply"}
+            self.assertEqual(gui.Viewer._request_busy(v), "a review update is running")
+            v._drc_team_write = None
+            v._drc_team_busy = {"label": "Refresh"}    # a read: the switch cancels it
+            self.assertIsNone(gui.Viewer._request_busy(v))
+
+        # _request_run: the reviewer, the layout with the view options alone, then the results
+        v = gui.Viewer.__new__(gui.Viewer)
+        v.calls = []
+        v._open_or_index = lambda path, fields, then=None: (
+            v.calls.append(("layout", path, list(fields))), then and then())
+        v._drc_request = lambda path, rules=None: v.calls.append(("drc", path, rules))
+        self.assertFalse(gui.Viewer._request_run(
+            v, "/d/chip.oas", ["depth=999", "drc=/d/run/r.db", "rules=/d/deck.rules.json",
+                               "userid=kim", "noload=1", "goto=1.0,2.0"]))
+        self.assertEqual(v.calls, [("layout", "/d/chip.oas", ["depth=999", "goto=1.0,2.0"]),
+                                   ("drc", "/d/run/r.db", "/d/deck.rules.json")])
+        self.assertEqual(v._reviewer, "kim")
+        v.calls = []
+        gui.Viewer._request_run(v, "", ["drc=/d/run/r.db"])     # results alone: onto the layout shown
+        self.assertEqual((v.calls, v._reviewer), ([("drc", "/d/run/r.db", None)], None))
+        v.calls = []
+        gui.Viewer._request_run(v, "/d/chip.oas", ["depth=0"])
+        self.assertEqual(v.calls, [("layout", "/d/chip.oas", ["depth=0"])])
+
+        # _drc_request: results already open stay; anything else is opened
+        with tempfile.TemporaryDirectory() as td:
+            db, pack, other = (os.path.join(td, n) for n in ("r.db", ".r.db.tray", "s.db"))
+            for path in (db, pack, other):
+                Path(path).write_text("x")
+
+            def reviewing(reviewer_asked, tag):
+                v = gui.Viewer.__new__(gui.Viewer)
+                v.calls = []
+                v._drc = SimpleNamespace(path=pack, _reviewer=tag)
+                v._drc_source, v._drc_reviewer = db, reviewer_asked
+                v._drc_open_db = lambda path, rules=None: v.calls.append(("open", path, rules))
+                v._drc_rules_load = lambda path: v.calls.append(("rules", path))
+                v._left_show = lambda page: v.calls.append(("show", page))
+                v._set_live_status = lambda text: v.calls.append(("status", text))
+                return v
+
+            with mock.patch.object(gui.gtkservice, "drc_find", return_value=pack):
+                v = reviewing(None, "kim")           # started with --userid kim
+                v._reviewer = "kim"                   # ... and asked for as kim
+                gui.Viewer._drc_request(v, db)
+                self.assertEqual(v.calls, [("show", "drc"), ("status", "DRC r.db: already open")])
+                v.calls = []
+                gui.Viewer._drc_request(v, db, "/d/deck.rules.json")
+                self.assertEqual(v.calls, [("show", "drc"), ("rules", "/d/deck.rules.json")])
+                v.calls = []
+                gui.Viewer._drc_request(v, other)     # other results
+                self.assertEqual(v.calls, [("open", other, None)])
+                v.calls = []
+                v._reviewer = "lee"                   # the same results, another reviewer
+                gui.Viewer._drc_request(v, db)
+                self.assertEqual(v.calls, [("open", db, None)])
+            v = reviewing(None, "kim")
+            v._reviewer = "kim"
+            with mock.patch.object(gui.gtkservice, "drc_find", return_value=None):
+                gui.Viewer._drc_request(v, db)        # its pack is stale: asked about, built, opened
+            self.assertEqual(v.calls, [("open", db, None)])
+            v = gui.Viewer.__new__(gui.Viewer)        # nothing loaded
+            v.calls = []
+            v._drc = None
+            v._drc_open_db = lambda path, rules=None: v.calls.append(("open", path, rules))
+            gui.Viewer._drc_request(v, db, "/d/deck.rules.json")
+            self.assertEqual(v.calls, [("open", db, "/d/deck.rules.json")])
+
+    def test_userid_goes_with_the_request(self):
+        """An explicit review ID travels with the request (0.12.446): the
+        running window opens the results that follow as that reviewer's
+        (it was a window of its own while a window's reviewer could not
+        change); FLOE_REVIEWER of the launch's environment is stated the
+        same way, and a launch that states none sends none."""
         from floe import instance
         from floe import viewcli as cli
 
-        for option in ("--userid", "--floe-reviewer"):
-            with self.subTest(option=option), \
-                    mock.patch.dict(os.environ, {"FLOE_RENDERER": "rust",
-                                                 "FLOE_REVIEWER": "display-name"}), \
-                    mock.patch.object(instance, "try_forward", return_value=0) as forward, \
-                    mock.patch("floe.gui.run_viewer") as run_viewer:
-                cli.main([option, "  user-42  "])
-                self.assertEqual(os.environ["FLOE_REVIEWER"], "user-42")
-                forward.assert_not_called()
-                run_viewer.assert_called_once()
-                self.assertIsNone(run_viewer.call_args.args[1],
-                                  "an explicit user does not own the default instance socket")
-
-    def test_userid_omitted_keeps_environment_and_default_forwarding(self):
-        from floe import instance
-        from floe import viewcli as cli
-
-        for configured in (None, "existing-user"):
-            with self.subTest(configured=configured), \
-                    mock.patch.dict(os.environ, {"FLOE_RENDERER": "rust"}), \
+        def request(words, configured):
+            with mock.patch.dict(os.environ, {"FLOE_RENDERER": "rust"}), \
                     mock.patch.object(instance, "display_key", return_value=":test"), \
-                    mock.patch.object(instance, "socket_address", return_value="/tmp/floe-id.sock"), \
+                    mock.patch.object(instance, "socket_address", return_value="\0floe-id"), \
                     mock.patch.object(instance, "try_forward", return_value=0) as forward, \
                     mock.patch("floe.gui.run_viewer") as run_viewer:
+                os.environ.pop("FLOE_NO_FILE_LOAD", None)
                 if configured is None:
                     os.environ.pop("FLOE_REVIEWER", None)
                 else:
                     os.environ["FLOE_REVIEWER"] = configured
                 with self.assertRaises(SystemExit) as stopped:
-                    cli.main([])
+                    cli.main(words)
                 self.assertEqual(stopped.exception.code, 0)
-                self.assertEqual(os.environ.get("FLOE_REVIEWER"), configured)
                 forward.assert_called_once()
                 run_viewer.assert_not_called()
+                return forward.call_args.args[1], os.environ.get("FLOE_REVIEWER")
+
+        for option in ("--userid", "--floe-reviewer"):
+            with self.subTest(option=option):
+                sent, environ = request([option, "  user-42  "], "display-name")
+                self.assertEqual(environ, "user-42")
+                self.assertTrue(sent.endswith("\tuserid=user-42"), sent)
+        sent, environ = request([], "existing-user")
+        self.assertEqual(environ, "existing-user")
+        self.assertTrue(sent.endswith("\tuserid=existing-user"), sent)
+        sent, environ = request([], None)
+        self.assertIsNone(environ)
+        self.assertNotIn("userid", sent)
+        # an id the one-line request cannot carry: a window of its own
+        with mock.patch.dict(os.environ, {"FLOE_RENDERER": "rust"}), \
+                mock.patch.object(instance, "try_forward") as forward, \
+                mock.patch.object(instance, "try_bind") as bind, \
+                mock.patch("floe.gui.run_viewer") as run_viewer:
+            cli.main(["--userid", "a\tb"])
+            forward.assert_not_called()
+            bind.assert_not_called()
+            self.assertIsNone(run_viewer.call_args.args[1])
 
     def test_empty_userid_is_refused_before_opening_a_window(self):
         from floe import instance
@@ -326,58 +554,96 @@ class WorkerContractTests(unittest.TestCase):
                 forward.assert_not_called()
                 run_viewer.assert_not_called()
 
-    def test_explicit_rules_reach_a_new_viewer_for_ready_or_pending_layouts(self):
+    def test_results_and_rules_reach_the_window_running_or_new(self):
+        """--drc and --rules: handed to a running window as `drc=` and
+        `rules=` (absolute), or given to the window this launch becomes -
+        ready or pending layout alike."""
         from floe import instance
         from floe import viewcli as cli
 
         with tempfile.TemporaryDirectory() as td:
             source = Path(td) / "layout with spaces.oas"
             rules = Path(td) / "deck with spaces.cal.rules.json"
+            results = Path(td) / "run 1" / "results.db"
+            results.parent.mkdir()
             source.write_bytes(b"fixture")
             rules.write_text("{}")
+            results.write_text("x")
             relative_rules = os.path.relpath(rules)
+            relative_results = os.path.relpath(results)
             for ready in (True, False):
-                with self.subTest(ready=ready), \
-                        mock.patch.object(cli, "_cache_ready", return_value=ready), \
-                        mock.patch.object(cli, "_service_open", return_value=None), \
-                        mock.patch.object(instance, "try_forward", return_value=0) as forward, \
-                        mock.patch("floe.gui.run_viewer") as run_viewer:
-                    cli.cmd_view(cli.parser().parse_args([
-                        str(source), "--drc", "results.db", "--rules", relative_rules]))
-                    forward.assert_not_called()
-                    options = run_viewer.call_args.kwargs
-                    self.assertEqual(options["rules"], str(rules))
-                    self.assertEqual(options["drc"], "results.db")
-                    self.assertEqual(options["pending_open"], None if ready else str(source))
+                for running in (True, False):
+                    owned = object()
+                    with self.subTest(ready=ready, running=running), \
+                            mock.patch.dict(os.environ), \
+                            mock.patch.object(cli, "_cache_ready", return_value=ready), \
+                            mock.patch.object(cli, "_service_open", return_value=None), \
+                            mock.patch.object(instance, "display_key", return_value=":test"), \
+                            mock.patch.object(instance, "socket_address",
+                                              return_value="\0floe-rules"), \
+                            mock.patch.object(instance, "try_forward",
+                                              return_value=0 if running else None) as forward, \
+                            mock.patch.object(instance, "try_bind", return_value=owned), \
+                            mock.patch("floe.gui.run_viewer") as run_viewer:
+                        for name in ("FLOE_REVIEWER", "FLOE_NO_FILE_LOAD"):
+                            os.environ.pop(name, None)
+                        words = cli.parser().parse_args([
+                            str(source), "--drc", relative_results, "--rules", relative_rules])
+                        if running:
+                            with self.assertRaises(SystemExit) as stopped:
+                                cli.cmd_view(words)
+                            self.assertEqual(stopped.exception.code, 0)
+                            run_viewer.assert_not_called()
+                            sent = forward.call_args.args[1].split("\t")
+                            self.assertEqual(sent[0], str(source))
+                            self.assertEqual(sent[-2:], ["drc=%s" % results, "rules=%s" % rules])
+                            self.assertIn("depth=999", sent, "a review is looked at full depth")
+                            continue
+                        cli.cmd_view(words)
+                        self.assertIs(run_viewer.call_args.args[1], owned)
+                        options = run_viewer.call_args.kwargs
+                        self.assertEqual(options["rules"], str(rules))
+                        self.assertEqual(options["drc"], str(results))
+                        self.assertEqual(options["pending_open"], None if ready else str(source))
+            # results alone: the rules are found by the window that loads them
+            with mock.patch.dict(os.environ), \
+                    mock.patch.object(instance, "display_key", return_value=":test"), \
+                    mock.patch.object(instance, "socket_address", return_value="\0floe-rules"), \
+                    mock.patch.object(instance, "try_forward", return_value=None), \
+                    mock.patch.object(instance, "try_bind", return_value=object()), \
+                    mock.patch("floe.gui.run_viewer") as run_viewer:
+                for name in ("FLOE_REVIEWER", "FLOE_NO_FILE_LOAD"):
+                    os.environ.pop(name, None)
+                cli.cmd_view(cli.parser().parse_args(["--drc", str(results)]))
+                self.assertIsNone(run_viewer.call_args.kwargs["rules"])
+                self.assertEqual(run_viewer.call_args.kwargs["drc"], str(results))
 
-    def test_rules_need_a_drc_target_and_an_existing_metadata_file(self):
+    def test_rules_need_a_drc_target_and_the_files_must_exist(self):
         from floe import instance
         from floe import viewcli as cli
 
         with tempfile.TemporaryDirectory() as td:
             rules = Path(td) / "deck.cal.rules.json"
             rules.write_text("{}")
+            results = Path(td) / "results.db"
+            results.write_text("x")
             for words, message in ((["--rules", str(rules)], "requires --drc"),
-                                   (["--drc", "results.db", "--rules", str(rules) + ".missing"],
-                                    "no such rules metadata file")):
+                                   (["--drc", str(results), "--rules", str(rules) + ".missing"],
+                                    "no such rules metadata file"),
+                                   # said where the launcher reads it: a request handed to
+                                   # a running window answers before the results are tried
+                                   (["--drc", str(results) + ".missing"],
+                                    "no such DRC results file"),
+                                   (["--drc", td], "no such DRC results file")):
                 with self.subTest(words=words), \
                         mock.patch.object(instance, "try_forward") as forward, \
+                        mock.patch.object(instance, "try_bind") as bind, \
                         mock.patch("floe.gui.run_viewer") as run_viewer:
                     with self.assertRaisesRegex(SystemExit, message):
                         cli.cmd_view(cli.parser().parse_args(words))
                     forward.assert_not_called()
+                    bind.assert_not_called()
                     run_viewer.assert_not_called()
-
-    def test_drc_without_explicit_rules_keeps_discovery_in_its_own_window(self):
-        from floe import instance
-        from floe import viewcli as cli
-
-        with mock.patch.object(instance, "try_forward", return_value=0) as forward, \
-                mock.patch("floe.gui.run_viewer") as run_viewer:
-            cli.cmd_view(cli.parser().parse_args(["--drc", "results.db"]))
-            forward.assert_not_called()
-            self.assertIsNone(run_viewer.call_args.kwargs["rules"])
-            self.assertEqual(run_viewer.call_args.kwargs["drc"], "results.db")
 
     def test_startup_rules_wait_for_the_pending_layout_open(self):
         from floe import gui
