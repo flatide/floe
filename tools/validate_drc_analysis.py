@@ -1100,8 +1100,8 @@ def pane_ui(v, d, pump):
     errors = v._drc.checks[1].errors
     heads = ["PANE.FEW  #%d(%d)" % (ei + 1, errors[ei].num) for ei in range(4)]
     block = v._drc_meta_lines("PANE.FEW", errors[2])
-    check(pane.startswith("#3(%d)  [none]\nrule: PANE.FEW\nSVRF: applied (rule name matched)\n"
-                          % errors[2].num)
+    check(pane.startswith("#3(%d)  [none]\nrule: PANE.FEW\n" % errors[2].num)
+          and "SVRF" not in pane
           and "edge (um):" in pane and v._drc_detail_at == (1, 2)
           and not any(word in pane for word in ("constraint:", "measured", "layers:", "gds:",
                                                 "derivation:"))
@@ -1187,6 +1187,130 @@ def pane_ui(v, d, pump):
         v._drc_delta_said = False
     check(quick == "-" and slow == ("CD groups: CD measurement 5 / 10 (Rust, up to 2 workers)", True),
           "a CD measurement that takes its time says where it is in the status line", (quick, slow))
+
+
+def detail_ui(v, d, pump):
+    """The detail pane says a rule's name and text, and an error's number,
+    status, review and coordinates - not what the lists beside it say
+    (user 2026-11-11: "rule 설명부분에서 errors, SVRF, delta group, Rule File
+    Pathname, Rule File Title을 제거해줘"): no `errors: N (declared N)`, no
+    SVRF status, no `delta group: …`, no deck path or title line."""
+    from floe import gui
+    Gtk = gui.Gtk
+    db = d / "detail.db"
+    pair = "e %d 2\n0 0 10000 0\n0 %d 10000 %d\n"
+    deck = "Rule File Pathname: /deck/detail.svrf\nRule File Title: the detail deck\n"
+    text = ["spacing of the first metal", "its second line"]
+    db.write_text(
+        "MAIN 100000\nDETAIL.TEXT\n3 3 4\n" + deck + "\n".join(text) + "\n"
+        + "".join(pair % (i, gap, gap) for i, gap in enumerate((1000, 2000, 3000), 1))
+        + "DETAIL.BARE\n1 1 2\n" + deck + pair % (1, 1000, 1000)
+        + "DETAIL.NOMETA\n1 1 1\nnot in the metadata\n" + pair % (1, 1000, 1000))
+    space = {"metric": "space", "op": "<", "value": 0.05, "text": "EXTERNAL M1_drawn < 0.05"}
+    (d / "detail.db.rules.json").write_text(json.dumps({
+        "format": "floe-svrf-rules", "version": 1,
+        "checks": {"DETAIL.TEXT": {"constraints": [space]}, "DETAIL.BARE": {}}}))
+    (d / "detail.db.clusters").write_text("[DETAIL.TEXT]\nfirst = 1-2\n")
+    r = run([INDEX, "drc", str(db)])
+    check(r.returncode == 0, "detail fixture packed", r.stderr)
+    w = v._drcwin
+    w._delta_mode.set_active_id("absolute")
+    check(v.load_drc(str(db)), "load the detail fixture")
+
+    def done():
+        return (v._drc_selection_key is None and v._drc_review_job is None
+                and not v._drc_delta_busy and v._drc_group_cache_key is None)
+
+    def pick(ci, cluster=None):
+        v._drc_select_row(ci, cluster)
+        pump(v, lambda: v._drc_open == ci and v._drc_cluster is cluster and done(),
+             "detail: %s" % v._drc.checks[ci].name, 60)
+
+    def detail():
+        buf = w._detail
+        return buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False)
+
+    def error(ci, ei):
+        v._drc_goto_cell(ci, ei)
+        v._drc_show_detail(ci, ei)
+        return detail().split("\n")
+
+    pump(v, done, "detail counts", 60)
+    checks = v._drc.checks
+    review = "visited: no · not for review: no"
+    panes = []
+
+    # a rule: its name and its text
+    pick(0)
+    pump(v, lambda: v._drc_delta_groups is not None and done(), "the detail fixture's groups", 60)
+    rule = detail()
+    panes.append(rule)
+    check(rule == "rule: DETAIL.TEXT\n\n" + "\n".join(text),
+          "a rule's detail is its name and its text", rule)
+    # a CD group picked in the group list: the same lines
+    w._delta_tree.get_selection().select_path(Gtk.TreePath.new_from_indices([1]))
+    pump(v, lambda: v._drc_delta_group is not None and done(), "a CD group picked", 60)
+    group = v._drc_delta_group
+    grouped = detail()
+    chosen = w._delta_tree.get_selection().get_selected()[1]
+    row = None if chosen is None else (w._delta_store[chosen][2].name, w._delta_store[chosen][1])
+    panes.append(grouped)
+    check(grouped == rule and row == (group.name, str(group.total)) and group.total >= 1,
+          "a CD group picked adds no line: its row in the group list names it", (grouped, row))
+    w._delta_tree.get_selection().select_path(Gtk.TreePath.new_from_indices([0]))
+    pump(v, lambda: v._drc_delta_group is None and done(), "All errors again", 60)
+    # a cluster picked: its line stays
+    clusters = dict((c[0], c[3]) for c in w._rstore[0].iterchildren())
+    pick(0, clusters["first"])
+    clustered = detail()
+    panes.append(clustered)
+    check(clustered == "rule: DETAIL.TEXT\ncluster: first (2 errors)\n\n" + "\n".join(text),
+          "a cluster picked is named under the rule", clustered)
+    # an error: number and status, rule, review, text, coordinates
+    pick(0)
+    lines = error(0, 1)
+    panes.append("\n".join(lines))
+    check(lines[:6] == ["#2(%d)  [none]" % checks[0].errors[1].num, "rule: DETAIL.TEXT", review]
+          + text + ["edge (um):"]
+          and len(lines) == 8 and all(ln.startswith("  (") for ln in lines[6:]),
+          "an error's detail: number and status, rule, review, text, coordinates", lines)
+    # a description of the deck's two lines alone, metadata without constraints
+    pick(1)
+    bare = detail()
+    bare_svrf = v._drc_svrf_text().split("\n")
+    lines = error(1, 0)
+    panes += [bare, "\n".join(lines)]
+    check(bare == "rule: DETAIL.BARE"
+          and lines[:4] == ["#1(%d)  [none]" % checks[1].errors[0].num, "rule: DETAIL.BARE",
+                            review, "edge (um):"] and len(lines) == 6,
+          "a description of the deck's path and title alone leaves the name alone, no empty line",
+          (bare, lines))
+    # a rule the metadata does not have
+    pick(2)
+    nometa = detail()
+    nometa_svrf = v._drc_svrf_text().split("\n")
+    panes.append(nometa)
+    check(nometa == "rule: DETAIL.NOMETA\n\nnot in the metadata",
+          "a rule without metadata says no more of it here", nometa)
+    gone = ("errors:", "declared", "SVRF", "CD:", "delta group", "Rule File")
+    said = [(word, pane) for pane in panes for word in gone if word in pane]
+    check(len(panes) == 7 and not said,
+          "no count, SVRF status, delta group, deck path or deck title in any of them", said)
+    # ... and where they are read: the rules list, its tooltips, the SVRF window
+    rows = [(r[0], r[1]) for r in w._rstore]
+    marks = [r[4] for r in w._rstore]
+    tips = [r[5] for r in w._rstore]
+    check(rows == [("DETAIL.TEXT", "3/0"), ("DETAIL.BARE", "1/0"), ("DETAIL.NOMETA", "1/0")]
+          and marks[0].startswith("✓ ") and marks[0].endswith(" DETAIL.TEXT")
+          and marks[1:] == ["✓ DETAIL.BARE", "DETAIL.NOMETA"]
+          and "SVRF: applied (rule name matched)" in tips[0]
+          and "CD: no parsed measurement constraints" in tips[1]
+          and "SVRF: no matching rule in loaded metadata" in tips[2]
+          and bare_svrf == ["DETAIL.BARE", "SVRF: applied (rule name matched)",
+                            "CD: no parsed measurement constraints"]
+          and nometa_svrf[:2] == ["DETAIL.NOMETA", "SVRF: no matching rule in loaded metadata"],
+          "the count is the rules list's; the SVRF status its check mark's, its tooltip's and "
+          "the SVRF window's", (rows, marks, tips, bare_svrf, nometa_svrf))
 
 
 def cd_part_ui(v, d, pump):
@@ -1620,11 +1744,14 @@ def a5(temp):
         v._drc_show_detail(notch_ci, 0)
         check(v._drc_rules_load(str(sidecars[False])), "reload with the displayed rule excluded")
         notch = next(r for r in store if r[0] == "M1.NOTCH")
+        shown = v._drcwin._detail.get_text(*v._drcwin._detail.get_bounds(), True)
         check(notch[4] == "M1.NOTCH" and v._drc_open == notch_ci
               and v._drc_delta_groups is None and not v._drc_delta_busy
               and v._drc_cd_info(v._drc.checks[notch_ci].errors[0], "M1.NOTCH")["pick"] is None
-              and "#IFDEF" in v._drcwin._detail.get_text(*v._drcwin._detail.get_bounds(), True),
-              "excluded rule loses CD groups and its current detail explains the missing SVRF")
+              and "#IFDEF" in notch[5] and "#IFDEF" in v._drc_svrf_text()
+              and shown.startswith("rule: M1.NOTCH") and "SVRF" not in shown,
+              "excluded rule loses CD groups; its tooltip and the SVRF window explain the "
+              "missing SVRF, the detail pane says the rule alone", (notch[5], shown))
         empty = json.loads(sidecars[False].read_text())
         empty["checks"]["M1.NOTCH"] = {}
         empty_path = d / "empty-notch.rules.json"
@@ -1637,10 +1764,13 @@ def a5(temp):
               "SVRF applied status uses rule-name membership, even without constraints")
         check(v._drc_rules_load(str(sidecars[True])), "reload with the displayed rule enabled")
         pump(v, lambda: v._drc_delta_groups is not None, "enabled notch groups", 60)
+        notch = next(r for r in store if r[0] == "M1.NOTCH")
         check(v._drc_cd_info(v._drc.checks[notch_ci].errors[0], "M1.NOTCH")["pick"]["ticks"]
               == [2000, 5000, 3000]
-              and "#IFDEF" not in v._drcwin._detail.get_text(*v._drcwin._detail.get_bounds(), True),
-              "enabling the rule restores CD and refreshes its displayed detail")
+              and "#IFDEF" not in notch[5] and "#IFDEF" not in v._drc_svrf_text()
+              and "SVRF: applied" in notch[5],
+              "enabling the rule restores CD and its tooltip's and the SVRF window's words",
+              notch[5])
         no_svrf = temp / "without-svrf"
         no_svrf.mkdir()
         db = no_svrf / "sample.db"
@@ -1698,6 +1828,7 @@ def a5(temp):
         marker_length_ui(v, temp, pump)
         cd_part_ui(v, d, pump)
         pane_ui(v, d, pump)
+        detail_ui(v, d, pump)
         small = d / "small.db"
         small.write_text("MAIN 100000\nSMALL.ONE\n0 0 0\nSMALL.TWO\n0 0 0\n")
         (d / "small.db.rules.json").write_text(json.dumps({

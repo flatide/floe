@@ -658,7 +658,9 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   `CD unavailable`로 표시한다. eqDRC 데이터는 사용하지 않는다.
   layers(직접 피연산자) · gds(원천 레이어 폐쇄) · derivation 체인
   (`derived` 맵을 `svrf.rhs_operands`로 워크, 6줄 캡). 메타 없는
-  룰/사이드카 부재 시 상세는 기존 그대로(추가 줄 0).
+  룰/사이드카 부재 시 상세는 기존 그대로(추가 줄 0). 적용 상태 줄(`SVRF: applied …`,
+  `SVRF: not loaded` 등, `_drc_svrf_status`)도 0.12.447부터 상세 pane에 없다: 룰 이름의 `✓`,
+  룰 행 툴팁, SVRF 정보 창이 말한다.
 - **측정 차이 그룹**(2026-10-05): SVRF 메타데이터가 있는 룰에서
   룰을 선택하면 에러 그리드 위의 `absolute`가 자동 활성화된다.
   `ratio`로 기준을 바꾸고 `off`로 해제한다.
@@ -803,10 +805,15 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   유지). 셀 = 전역 에러 번호(레코드 디코드 없음
   — 번호 = cum[ci]+i+1), 행 선택 모드 NONE — 클릭한 **셀 하나만**
   마킹(markup 배경, `_drc_cell_mark`).
-  셀 단클릭 = 하단 상세(`#번호 [상태]`·룰 설명 전문·`edge (um):`/
+  셀 단클릭 = 하단 상세(`#번호 [상태]`·`rule:`·리뷰 줄·note·룰 설명·`edge (um):`/
   `polygon (um):` 좌표 목록[상한 64~128줄]; bbox·종류 표기는 없음 —
   waive 상태는 v2 get_status, v1은 '-'), 더블클릭 = 점프(점프도
-  상세 갱신). 룰 행 클릭 = 룰 정보 표시. 상한
+  상세 갱신). 룰 행 클릭 = 룰 이름(`rule:`)·고른 클러스터(`cluster:`)·룰 설명
+  (`_drc_show_rule`). 룰 설명은 양쪽 모두 덱의 `Rule File Pathname:`·`Rule File Title:` 줄을
+  뺀 것이고(`_drc_desc_lines`), 그 둘뿐이면 이름 줄만 남는다. 0.12.447에 룰 상세의
+  `errors: N (declared N)`·`delta group: …`·덱 경로와 제목 줄, 그리고 양쪽의 SVRF 상태 줄을
+  뺐다(사용자 2026-11-11; 수는 룰 목록의 열, 상태는 `✓`·툴팁·SVRF 정보 창, 그룹은 그룹 목록의
+  행; 결과 파일이 적은 `declared` 수와 덱 제목은 뷰어에 나오지 않는다). 상한
   DRC_LIST_MAX 셀, 초과분 "… more" 행; n/p 스텝은 룰 선택·셀
   마킹·스크롤을 동기화한다.
 - **더블클릭 레이어 격리**(2026-08-15, rules.json 필요): 점프 시

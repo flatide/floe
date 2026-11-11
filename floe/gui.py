@@ -9096,8 +9096,9 @@ class Viewer:
 
     def _drc_rules_load(self, path, silent=False, data=None):
         """Attach a <deck>.rules.json metadata sidecar to the open
-        db; show each rule's match status and the detail pane's
-        constraint / measured / source layers per error."""
+        db; each rule's match status is its check mark and tooltip, and
+        the SVRF info window shows the constraint / measured / source
+        layers per error."""
         db = self._drc
         if db is None:
             if not silent:
@@ -11627,24 +11628,37 @@ class Viewer:
         self._display()
         return False
 
+    @staticmethod
+    def _drc_desc_lines(check):
+        """A rule's text as the detail pane shows it: its description less
+        the two lines every rule of a run repeats, the deck's `Rule File
+        Pathname:` and `Rule File Title:` (out of an error's detail since
+        2026-08-15, out of a rule's since 2026-11-11)."""
+        if not check.desc:
+            return []
+        return [ln for ln in check.desc.split("\n")
+                if not ln.startswith(("Rule File Pathname:", "Rule File Title:"))]
+
     def _drc_show_rule(self, ci):
+        """Bottom pane of a rule picked without an error: its name, the
+        cluster picked and the rule's text. Out of it (user call
+        2026-11-11): `errors: N (declared N)` - the count is the rules
+        list's -, the SVRF status - the rule's check mark, its tooltip and
+        the SVRF info window say it -, `delta group: …` - the row picked
+        in the group list - and the deck's path and title lines
+        (_drc_desc_lines)."""
         win, db = self._drcwin, self._drc
         if win is None or db is None:
             return
         c = db.checks[ci]
-        lines = ["rule: %s" % c.name,
-                 "errors: %d (declared %d)"
-                 % (len(c.errors), c.declared)]
-        lines.extend(self._drc_svrf_status(c.name)[1].splitlines())
+        lines = ["rule: %s" % c.name]
         if self._drc_cluster is not None:
             lines.append("cluster: %s (%d errors)"
                          % (self._drc_cluster.name, self._drc_cluster.total))
-        group = getattr(self, "_drc_delta_group", None)
-        if group is not None:
-            lines.append("delta group: %s (%d errors)" % (group.name, group.total))
-        if c.desc:
+        text = self._drc_desc_lines(c)
+        if text:
             lines.append("")
-            lines += c.desc.split("\n")
+            lines += text
         win._detail.set_text("\n".join(lines))
         self._drc_detail_at = (ci, None)
         self._drc_svrf_show()
@@ -11655,7 +11669,9 @@ class Viewer:
         - the constraint, the measured CD against its bound, the layers,
         their gds numbers and derivations - is not listed here (user call
         2026-11-11): the SVRF info window shows it (_drc_svrf_dialog, i),
-        following the error in this pane while it is open."""
+        following the error in this pane while it is open. Nor is the
+        SVRF status line (`SVRF: applied …`; the same day's second call):
+        the rule's check mark, its tooltip and that window say it."""
         win, db = self._drcwin, self._drc
         if win is None or db is None:
             return
@@ -11668,7 +11684,6 @@ class Viewer:
                       2: "reserved"}.get(s, "status %d" % s)
         lines = ["#%d(%d)  [%s]" % (ei + 1, e.num, status),
                  "rule: %s" % c.name]
-        lines.extend(self._drc_svrf_status(c.name)[1].splitlines())
         if hasattr(db, "review_flags"):
             flags = self._drc_review_flags(db, ci, ei)
             if flags is None:
@@ -11681,12 +11696,7 @@ class Viewer:
             note = db.get_note(ci, ei)
             if note:
                 lines.append("note: %s" % note.replace("\n", "\n      "))
-        if c.desc:
-            # pathname/title already show in the RULE info (user
-            # call 2026-08-15)
-            lines += [ln for ln in c.desc.split("\n")
-                      if not ln.startswith(("Rule File Pathname:",
-                                            "Rule File Title:"))]
+        lines += self._drc_desc_lines(c)
         pts = e.pts
         if e.kind == "e":
             lines.append("edge (um):")

@@ -413,11 +413,12 @@ python -m floe render chip.oas --drc results.db \
   클러스터나 waive 필터의 일부 개수가 아니며, 0개이거나 아직 계산되지 않았으면
   괄호를 생략한다. 그룹화를 끈 `off`일 때도 개수를 표시하지 않는다.
   매칭되지 않거나 SVRF를 로드하지 않은 룰과 클러스터 이름에는 표시를 붙이지 않는다.
-  툴팁과 룰·에러 상세에는 적용 상태를 안내하며, 클러스터 툴팁은 부모 룰의 상태를 따른다.
+  적용 상태는 툴팁이 안내하며(상세 pane의 `SVRF: …` 줄은 0.12.447에 뺐다), 클러스터 툴팁은
+  부모 룰의 상태를 따른다.
   `#IFDEF`/`#IFNDEF`로 제외된 룰은 체크가 없지만, 다른 덱을 로드했거나
   파서가 지원하지 않는 구문도 같은 표시가 된다. 현재 `.rules.json`에는 제외 사유가
   없어 `IFDEF 비활성`으로 단정하지 않는다. `✓`는 CD 측정 가능 여부와 별개이며,
-  파싱된 측정 조건이 없는 룰은 상세에 별도로 안내한다. 메타데이터를 다시 로드하면
+  파싱된 측정 조건이 없는 룰은 툴팁과 SVRF 정보 창이 별도로 안내한다. 메타데이터를 다시 로드하면
   룰 이름·클러스터 선택을 유지한 채 상태를 갱신한다.
 - 검색 박스(목록 상단): 이름 부분일치 실시간 필터.
 - 유형 콤보: SVRF 측정문 metric별 분류(width/space/notch/enclosure/overlap/extension/
@@ -545,10 +546,24 @@ python -m floe render chip.oas --drc results.db \
 포함하지 않았다. 0.5초보다 오래 걸리는 작업은 그동안 중간 그림을 보낸다.
 실제 칩의 꼭짓점 수, 파일 저장장치, CPU 및 화면 크기에 따라 달라진다.
 
-**상세 pane** — `#로컬(전역) [상태]` + 룰 텍스트 + edge/polygon
-좌표(pathname/title 줄 제외). rules.json이 붙어도 여기에는 `SVRF: applied …` 한 줄만
-있고, §4의 메타 블록은 **SVRF 정보 창**에서 본다(0.12.444; 그 전에는 에러를 고를 때마다
-이 pane에 붙었다). 좁은 pane에서는 줄바꿈(내용 잘림 금지 규약).
+**상세 pane** — 룰을 고르면 `rule: 이름`과 룰 텍스트가 나온다. 클러스터를 골랐으면 이름
+아래에 `cluster: 이름 (N errors)`가 붙는다. 에러를 고르면 `#로컬(전역) [상태]`, `rule: 이름`,
+리뷰 줄(`visited: … · not for review: …`), note, 룰 텍스트, edge/polygon 좌표 순이다.
+§4의 메타 블록은 **SVRF 정보 창**에서 본다(0.12.444; 그 전에는 에러를 고를 때마다 이 pane에
+붙었다). 좁은 pane에서는 줄바꿈(내용 잘림 금지 규약).
+
+0.12.447에 이 pane에서 뺀 줄(사용자 2026-11-11: "rule 설명부분에서 errors, SVRF, delta group,
+Rule File Pathname, Rule File Title을 제거해줘"):
+
+| 빠진 줄 | 지금 읽는 곳 |
+|---|---|
+| `errors: N (declared N)` | 에러 수는 룰 목록의 `에러수/waived` 열. 결과 파일의 룰 머리가 적은 수(`declared`)는 뷰어 어디에도 나오지 않는다 |
+| `SVRF: applied …`, `CD: no parsed measurement constraints`, `SVRF: not loaded`, `SVRF: no matching rule …` (룰과 에러 양쪽) | 룰 이름 앞의 `✓`, 룰 행의 툴팁, SVRF 정보 창(`i`) |
+| `delta group: 이름 (N errors)` | CD 그룹 목록에서 고른 행 |
+| `Rule File Pathname: …`, `Rule File Title: …` | 뷰어 어디에도 나오지 않는다. 덱 경로는 `floe2 drc <db>`가 룰마다 찍는 설명 첫 줄에 있다. 에러 상세에서는 2026-08-15부터 빠져 있었다 |
+
+덱 경로와 제목뿐인 설명은 이름 줄만 남는다. 게이트 `drc_analysis` A5(`detail_ui`)가 이 줄들을
+확인한다.
 
 ## 4. SVRF 룰 메타데이터 (.rules.json) — waive 판단 보조
 
@@ -682,7 +697,8 @@ absolute/ratio 콤보박스의 문구를 단순화하여 크기를 줄이고 ste
   하지 않는다(0.12.444; 그 전에는 목록 아래 줄에 나왔다).
 - 숨긴 상태에 있던 안내 문구 셋은 이제 나오지 않는다: `select a rule for CD groups`,
   `grouping off`, `load matching SVRF metadata for CD groups`. 룰에 SVRF가 적용됐는지와
-  측정 조건이 있는지는 룰 이름의 `✓`, 툴팁, 룰 상세의 `SVRF: …` 줄이 말한다.
+  측정 조건이 있는지는 룰 이름의 `✓`, 그 툴팁, SVRF 정보 창이 말한다(룰 상세의 `SVRF: …`
+  줄은 0.12.447에 뺐다).
 
 - 절대 차이 = `abs(측정 CD - 룰 한계값)`, 비율 차이 =
   `abs(측정 CD - 룰 한계값) / abs(룰 한계값) × 100`이다.
