@@ -41,6 +41,13 @@ under the filters its own name passes, among the files by name, its own
 text the tooltip; a link to a folder is entered, one to a file picked
 (browse_dialog). The jobdeck level dialog labels a level `level N`, its
 MTITLE after it (levels_dialog).
+
+The file loads turned off (2026-11-11, `floe2 view --no-file-load`): the
+viewer loads what its start names and nothing picked in it - the eight
+load commands of the File and DRC menus insensitive, each handler
+refusing without a dialog, the layer menu's load, the reviewers window's
+load button, the window of a previous run not opened; a plain viewer
+beside it loads as ever (file_loads_off).
 """
 
 
@@ -879,6 +886,179 @@ def gui_viewer(src, ref):
     cache.close()
 
 
+def file_loads_off(src, temp):
+    """User 2026-11-11 ("TeeBox에서 floe를 열 경우 사용자가 임의의 파일을 로드할 수
+    없게 하려고 함. 메뉴에서 레이아웃, db등 파일 로드 관련을 disable 상태로 만들기
+    위한 옵션을 추가해줘"): floe/gui.py's Viewer as `floe2 view --no-file-load`
+    starts it (file_load=False), beside a plain one. What the start names
+    is loaded by both - the layout, the DRC results as --drc opens them,
+    and by their names the rules metadata and the clusters beside them.
+    The locked one: the load commands of the File and DRC menus are
+    insensitive with the reason as their tooltip, the rest of the two
+    menus as in the plain viewer (the saves among them); every load
+    handler says the refusal in the status line and makes no dialog; the
+    layer menu's `load layer properties…` is insensitive, its save is not;
+    `review from previous run…` opens no window, `load waives…` neither;
+    the reviewers window opens with `Load peer work…` insensitive - and
+    still so after a job has made its controls sensitive again - and its
+    loader makes no chooser. The dialogs' run() is the gate's (a dialog
+    made is a dialog counted)."""
+    from floe import gui
+    Gtk, Gdk = gui.Gtk, gui.Gdk
+    d = Path(temp) / "no-file-load"
+    d.mkdir()
+    for name in ("sample.db", "sample.db.clusters", "sample.svrf.rules.json"):
+        (d / name).write_bytes((ROOT / name).read_bytes())
+    db = d / "sample.db"
+    done = subprocess.run([os.environ["FLOE_INDEX_BIN"], "drc", str(db)], cwd=ROOT,
+                          capture_output=True, text=True, timeout=300)
+    check(done.returncode == 0, done.stdout + done.stderr)
+    loads = {"File": ["load layout…", "load jobdeck…"],
+             "DRC": ["open results .db…", "load SVRF rules…", "load clusters…",
+                     "load waives…", "review from previous run…", "load notes…"]}
+    handlers = (("load layout", "_load_layout_dialog"),
+                ("load jobdeck", "_load_jobdeck_dialog"),
+                ("open DRC results (.db)", "_drc_open_dialog"),
+                ("open rule metadata (*.rules.json)", "_drc_rules_dialog"),
+                ("load DRC clusters", "_drc_clusters_dialog"),
+                ("load notes", "_drc_note_load_dialog"),
+                ("load layer properties", "_load_props_dialog"))
+    off = gui.NO_FILE_LOAD
+
+    def menus(v):
+        return {root.get_label(): {
+            item.get_label().split("\t")[0]: (item.get_sensitive(), item.get_tooltip_text())
+            for item in root.get_submenu().get_children()
+            if not isinstance(item, Gtk.SeparatorMenuItem)}
+            for root in v._menubar.get_children()}
+
+    def quiet(v):
+        return (v._drc_selection_key is None and v._drc_review_job is None
+                and not v._drc_delta_busy and v._drc_group_cache_key is None)
+
+    def layer_menu(v):
+        e = Gdk.Event.new(Gdk.EventType.BUTTON_PRESS)
+        e.window = v.window.get_window()
+        e.send_event = True
+        e.x, e.y = 5, 5
+        e.button, e.state = 3, Gdk.ModifierType(0)
+        e.set_device(Gdk.Display.get_default().get_default_seat().get_pointer())
+        v._popup_layer_menu(e)
+        items = {i.get_label(): i.get_sensitive() for i in v._layer_menu.get_children()
+                 if not isinstance(i, Gtk.SeparatorMenuItem)}
+        v._layer_menu.popdown()
+        return items
+
+    def buttons(widget, out):
+        if isinstance(widget, Gtk.Button):
+            out[widget.get_label()] = widget
+        elif isinstance(widget, Gtk.Container):
+            widget.forall(lambda child: buttons(child, out))
+        return out
+
+    made, plain = [], {}
+    run = Gtk.Dialog.run
+    Gtk.Dialog.run = lambda dlg: (made.append(dlg.get_title()), Gtk.ResponseType.CANCEL)[1]
+    try:
+        for locked in (False, True):
+            cache = gtkservice.ServiceCache(str(src))
+            cache.load()
+            v = gui.Viewer(cache, file_load=not locked)
+            try:
+                pump(v, lambda: settled(v), "first frame")
+                check(v._file_load is (not locked), "the switch: %r" % v._file_load)
+                # the start's own loads: the results as --drc opens them, the
+                # rules metadata and the clusters found beside them by name
+                v._drc_open_db(str(db))
+                pump(v, lambda: v._drc is not None and quiet(v), "the results", 60)
+                check(v._drc_total > 0 and v._drc_rmeta is not None
+                      and v._drc_clusters is not None and not made,
+                      "the start's loads (locked %s): %s errors, rules %s, clusters %s, dialogs %s"
+                      % (locked, v._drc_total, v._drc_rmeta is not None,
+                         v._drc_clusters is not None, made))
+                bar, layer = menus(v), layer_menu(v)
+                if not locked:
+                    plain = bar
+                    check(all(bar[m][label] == (True, None)
+                              for m, labels in loads.items() for label in labels),
+                          "a plain viewer's load commands: %s" % {m: bar[m] for m in loads})
+                    check(layer["load layer properties…"] and layer["save layer properties…"],
+                          "a plain viewer's layer menu: %s" % layer)
+                    v._load_layout_dialog()
+                    check(made == ["load layout"] and v.status.get_text() != "load layout: " + off,
+                          "a plain viewer's load dialog: %s, %r" % (made, v.status.get_text()))
+                    del made[:]
+                    w = v._drc_team_dialog()
+                    load = buttons(w.window, {})["Load peer work…"]
+                    check(load.get_sensitive() and load in w.controls,
+                          "a plain viewer's reviewers window: its load button")
+                    w.window.destroy()
+                    continue
+                for m, labels in loads.items():
+                    for label, state in bar[m].items():
+                        want = (False, off) if label in labels else plain[m][label]
+                        check(state == want, "%s > %s: %s, not %s" % (m, label, state, want))
+                    check(set(labels) <= set(bar[m]), "%s lacks %s" % (m, set(labels) - set(bar[m])))
+                check(all(bar[m][label][0] for m, label in (
+                    ("File", "clip region…"), ("DRC", "save waives as…"),
+                    ("DRC", "save notes as…"), ("DRC", "reviewers…"))),
+                      "the saves and the reviewers window are not this switch's: %s" % bar["DRC"])
+                check(layer["load layer properties…"] is False
+                      and layer["save layer properties…"] is True,
+                      "the layer menu: %s" % layer)
+                for what, name in handlers:
+                    v._set_live_status("")
+                    getattr(v, name)()
+                    check(not made and v.status.get_text() == "%s: %s" % (what, off),
+                          "%s: dialogs %s, status %r" % (name, made, v.status.get_text()))
+                # the two commands that open a window first
+                v._set_live_status("")
+                check(v._drc_migration_dialog() is None
+                      and getattr(v, "_drc_migration", None) is None
+                      and v.status.get_text() == "review from previous run: " + off,
+                      "the window of a previous run: %r" % v.status.get_text())
+                v._drc_waive_load_dialog()
+                check(getattr(v, "_drc_team", None) is None and not made
+                      and v.status.get_text() == "load waives: " + off,
+                      "load waives: %r" % v.status.get_text())
+                # the reviewers window: exports and statistics, no load
+                w = v._drc_team_dialog()
+                check(w is not None, "the reviewers window did not open")
+                b = buttons(w.window, {})
+                load = b["Load peer work…"]
+                others = [b[k] for k in ("Export my review…", "Refresh", "Statistics CSV…")]
+                check(not load.get_sensitive() and load not in w.controls
+                      and load.get_tooltip_text() == off
+                      and all(o.get_sensitive() for o in others)
+                      and w.status.get_text()
+                      == "Loading peer work is off in this viewer (--no-file-load).",
+                      "the reviewers window: load %s, the others %s, %r" % (
+                          load.get_sensitive(), [o.get_sensitive() for o in others],
+                          w.status.get_text()))
+                w._load_dialog()
+                check(not made and w.status.get_text()
+                      == "Load peer review bundles or waiver files: " + off,
+                      "the reviewers window's loader: %s, %r" % (made, w.status.get_text()))
+                w._refresh()
+                check(w.job is not None, "the reviewers window's refresh did not start")
+                pump(v, lambda: w.job is None, "the reviewers window's refresh", 60)
+                check(not load.get_sensitive() and all(o.get_sensitive() for o in others),
+                      "after a job: load %s, the others %s" % (
+                          load.get_sensitive(), [o.get_sensitive() for o in others]))
+                w.window.destroy()
+            finally:
+                v._drc_release()
+                v._quit()
+                v.window.destroy()
+                cache.close()
+    finally:
+        Gtk.Dialog.run = run
+    print("file loads off: %d menu commands insensitive, %d handlers refuse, the layer "
+          "menu's load, the reviewers window's load button; the start's loads and the "
+          "saves as in a plain viewer" % (sum(len(v) for v in loads.values()),
+                                          len(handlers) + 2))
+
+
 def cells_while_opening(src, temp):
     """The cell tree's first question comes as soon as the view exists,
     while its worker still opens (renderd on a big cache takes seconds):
@@ -1161,6 +1341,7 @@ def main():
                 gui_viewer(src, ref)
                 capture_parity(src, temp)
                 light_status(src, temp)
+                file_loads_off(src, temp)
         finally:
             ref.stop()
             svc.close()

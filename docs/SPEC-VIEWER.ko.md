@@ -373,6 +373,32 @@
   실상태(frames_on/abstract/coverage_on/_mono/snap_on/mode)를
   반영하며 `_menu_guard`로 set_active의 핸들러 역발화를 차단.
   단, floe2는 density coverage 상태와 메뉴/키 입력 자체를 노출하지 않는다.
+- **파일 로드 끄기**(2026-11-11, app 0.12.445; 사용자: "TeeBox에서 floe를 열 경우 사용자가 임의의 파일을 로드할 수
+  없게 하려고 함. 메뉴에서 레이아웃, db등 파일 로드 관련을 disable 상태로 만들기 위한 옵션을 추가해줘"):
+  `floe2 view --no-file-load`, 또는 런처 환경의 `FLOE_NO_FILE_LOAD=1`(`on`·`yes`·`true`; `viewcli.file_load_off`)로
+  띄운 뷰어는 시작이 가리킨 것만 읽고 뷰어 안에서 고른 파일은 읽지 않는다(`Viewer(file_load=False)`, `_file_load`).
+  한 계정으로 여러 사람의 뷰어를 띄우는 런처에서는 그 계정이 읽을 수 있는 모든 파일을 사용자가 열 수 있었다.
+  - 꺼지는 명령은 메뉴에서 비활성이고 툴팁이 이유(`loading files is off in this viewer (--no-file-load)`)다.
+    File의 `load layout…`·`load jobdeck…`, DRC의 `open results .db…`·`load SVRF rules…`·`load clusters…`·
+    `load waives…`·`review from previous run…`·`load notes…`(`_build_menubar`의 `load()`), 레이어 우클릭 메뉴의
+    `load layer properties…`, 공동 검토 창의 `Load peer work…` 버튼이다. 그 버튼은 작업이 끝나 다른 컨트롤이 다시
+    켜져도 꺼진 채다(창의 `controls`에 넣지 않는다).
+  - 핸들러도 거절한다(`_load_refused`). 상태 줄에 `<명령>: loading files is off in this viewer (--no-file-load)`를
+    쓰고 대화상자를 만들지 않는다. 뷰어의 로드는 모두 `_browse_file_dialog`를 지나므로 거기서 한 번 막는다(누가
+    부르든 None). 파일을 고르기 전에 창부터 여는 둘은 따로 막는다: `review from previous run…`은 창을 열지 않고(그
+    창은 읽을 경로 둘을 받는 입력란이 전부다), `load waives…`는 공동 검토 창을 열지 않는다. 공동 검토 창의 선택기
+    (`_DrcTeamWindow._choose`)는 읽을 파일을 고를 때만 거절한다. 로드에 묶인 키는 없다.
+  - 그대로인 것: 명령줄의 소스(색인이 없으면 묻고 만든 뒤 연다), `--drc`(pack이 없으면 묻고 만든다), `--rules`.
+    이름으로 따라오는 것도 그대로다 - jobdeck의 level 선택(Jobdeck 메뉴 `select levels to load…` 포함), .db 옆의
+    rules.json·clusters 자동 부착, 디자인 기본 layerprops, 셀 인덱스 빌드.
+  - 대상이 아닌 것: 저장과 내보내기. `clip region…`, `save waives as…`, `save notes as…`, 공동 검토 창의
+    `Export my review…`·`Statistics CSV…`, 레이어 메뉴의 `save layer properties…`는 GTK 파일 선택기를 그대로 연다.
+    그 선택기에서는 폴더를 둘러보고 임의의 경로에 쓸 수 있다.
+  - 독립 창으로 뜬다(`process_options`). 로드를 끈 실행을 이미 떠 있는 창(무엇이든 여는 창)에 넘기지 않고, 로드를 끈
+    창은 인스턴스 소켓을 갖지 않아 다른 실행이 넘기는 열기 요청도 받지 않는다.
+  - 테스트: 게이트 gtk_view `file_loads_off`(실제 GTK에서 일반 뷰어와 나란히: 메뉴, 핸들러, 레이어 메뉴, 공동 검토
+    창), rust_renderer `test_no_file_load_starts_a_window_of_its_own_with_its_loads_off`(옵션과 환경값, 독립 창,
+    소켓 없음, `Viewer`까지의 전달, 브라우저의 거절).
 - **밀도 켜기/끄기**(2026-10-05, 0.12.298; 사용자: "뷰어에서 밀도 켜기/끄기 옵션을 추가해줘"): floe2(Rust 렌더러)의
   View > **density under the cut**(체크, `v`). 컷 아래 도형을 덮인 면적의 밀도로 그리는 renderd의 밀도 스택
   (CUT_DENSITY_DESIGN §10.12)을 켜고 끈다. `_toggle_density`가 `density_on`을 뒤집고 `_on_depth`(상태줄과 다시

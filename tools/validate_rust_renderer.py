@@ -178,6 +178,96 @@ class WorkerContractTests(unittest.TestCase):
                 self.assertRaises(SystemExit):
             cli.parser().parse_args(["--layer-colors", "groups", "x.oas"])
 
+    def test_no_file_load_starts_a_window_of_its_own_with_its_loads_off(self):
+        """--no-file-load / FLOE_NO_FILE_LOAD (user 2026-11-11: "TeeBox에서
+        floe를 열 경우 사용자가 임의의 파일을 로드할 수 없게 하려고 함. 메뉴에서
+        레이아웃, db등 파일 로드 관련을 disable 상태로 만들기 위한 옵션을
+        추가해줘"): the flag, or the launcher's environment, starts a viewer
+        with its file loads off, in a window of its own - its source is not
+        handed to a running window (one that loads anything) and it owns no
+        instance socket (no forwarded open reaches it). Without either the
+        request is forwarded as before, and a window of its own loads as
+        ever. The switch reaches the Viewer; a viewer with it off refuses
+        in the one browser every load goes through, before any dialog."""
+        from floe import gui
+        from floe import instance
+        from floe import viewcli as cli
+
+        for word, off in (("1", True), ("on", True), ("yes", True), ("true", True),
+                          (" TRUE ", True), ("On", True), ("", False), ("0", False),
+                          ("off", False), ("no", False), ("false", False), ("2", False)):
+            self.assertEqual(cli.file_load_off(SimpleNamespace(no_file_load=False),
+                                               {"FLOE_NO_FILE_LOAD": word}), off, repr(word))
+        self.assertFalse(cli.file_load_off(SimpleNamespace(), {}))
+        self.assertTrue(cli.file_load_off(SimpleNamespace(no_file_load=True), {}))
+        self.assertTrue(cli.file_load_off(SimpleNamespace(no_file_load=True),
+                                          {"FLOE_NO_FILE_LOAD": "off"}))
+        self.assertTrue(cli.parser().parse_args(["--no-file-load", "x.oas"]).no_file_load)
+        self.assertFalse(cli.parser().parse_args(["x.oas"]).no_file_load)
+        self.assertIn("--no-file-load", cli.parser().format_help())
+        self.assertIn("FLOE_NO_FILE_LOAD", cli.parser().format_help())
+
+        for words, environ in ((["--no-file-load"], {}),
+                               ([], {"FLOE_NO_FILE_LOAD": "1"})):
+            with self.subTest(words=words, environ=environ), \
+                    mock.patch.dict(os.environ, {"FLOE_RENDERER": "rust"}), \
+                    mock.patch.object(cli.os.path, "isfile", return_value=True), \
+                    mock.patch.object(cli, "_cache_ready", return_value=True), \
+                    mock.patch.object(cli, "_service_open", return_value=None), \
+                    mock.patch.object(instance, "try_forward") as forward, \
+                    mock.patch.object(instance, "try_bind") as bind, \
+                    mock.patch("floe.gui.run_viewer") as run_viewer:
+                os.environ.pop("FLOE_NO_FILE_LOAD", None)
+                os.environ.update(environ)
+                cli.main(["/tmp/locked.oas"] + words)
+                forward.assert_not_called()
+                bind.assert_not_called()
+                run_viewer.assert_called_once()
+                self.assertIsNone(run_viewer.call_args.args[1],
+                                  "a viewer with its loads off owns no instance socket")
+                self.assertIs(run_viewer.call_args.kwargs["file_load"], False)
+        with mock.patch.dict(os.environ, {"FLOE_RENDERER": "rust"}), \
+                mock.patch.object(cli.os.path, "isfile", return_value=True), \
+                mock.patch.object(cli, "_cache_ready", return_value=True), \
+                mock.patch.object(cli, "_service_open", return_value=None), \
+                mock.patch.object(instance, "display_key", return_value=":test"), \
+                mock.patch.object(instance, "socket_address",
+                                  return_value="/tmp/floe-load.sock"), \
+                mock.patch.object(instance, "try_forward", return_value=0) as forward, \
+                mock.patch("floe.gui.run_viewer") as run_viewer:
+            os.environ.pop("FLOE_NO_FILE_LOAD", None)
+            with self.assertRaises(SystemExit) as stopped:
+                cli.main(["/tmp/plain.oas"])
+            self.assertEqual(stopped.exception.code, 0)
+            forward.assert_called_once()
+            run_viewer.assert_not_called()
+            cli.main(["/tmp/plain.oas", "--multi"])
+            self.assertIs(run_viewer.call_args.kwargs["file_load"], True)
+
+        for file_load in (True, False):
+            viewer = SimpleNamespace(_quit=mock.Mock())
+            glib = SimpleNamespace(PRIORITY_DEFAULT=0, unix_signal_add=mock.Mock(),
+                                   idle_add=mock.Mock())
+            with self.subTest(file_load=file_load), mock.patch.dict(os.environ), \
+                    mock.patch.object(gui, "import_gtk"), \
+                    mock.patch.object(gui, "Viewer", return_value=viewer) as made, \
+                    mock.patch.object(gui, "GLib", glib), \
+                    mock.patch.object(gui, "Gtk", SimpleNamespace(main=lambda: None)):
+                os.environ.pop("FLOE_GUI_SMOKE_MS", None)
+                gui.run_viewer(None, file_load=file_load)
+            self.assertIs(made.call_args.kwargs["file_load"], file_load)
+
+        v = gui.Viewer.__new__(gui.Viewer)
+        said = []
+        v._set_live_status = said.append
+        self.assertFalse(gui.Viewer._load_refused(v, "load layout"),
+                         "a viewer loads unless its start says otherwise")
+        v._file_load = False
+        self.assertTrue(gui.Viewer._load_refused(v, "load layout"))
+        self.assertIsNone(gui.Viewer._browse_file_dialog(v, "load notes", "/", []))
+        self.assertEqual(said, ["load layout: " + gui.NO_FILE_LOAD,
+                                "load notes: " + gui.NO_FILE_LOAD])
+
     def test_userid_selects_review_identity_in_an_independent_window(self):
         """An explicit review ID must not be forwarded to a window whose
         service already owns another reviewer's files on the same DISPLAY."""

@@ -82,6 +82,19 @@ def _add_reviewer_option(p):
                         "an ID; one ID reviews a result in one session)")
 
 
+def file_load_off(args, environ=None):
+    """Whether this viewer is to load no file but its command line's (user
+    2026-11-11: a launcher that starts everyone's viewer under one account
+    - TeeBox - must not let a user open whatever that account can read):
+    `--no-file-load`, or FLOE_NO_FILE_LOAD set to `1`, `on`, `yes` or
+    `true` in the launcher's environment (the words FLOE_REVIEWER_REQUIRED
+    takes)."""
+    environ = os.environ if environ is None else environ
+    word = (environ.get("FLOE_NO_FILE_LOAD") or "").strip().lower()
+    return bool(getattr(args, "no_file_load", False)) or word in (
+        "1", "on", "yes", "true")
+
+
 def _is_deck(src):
     return bool(src) and str(src).lower().endswith(".jb")
 
@@ -200,6 +213,10 @@ def cmd_view(args):
     # explicitly supplied; live request controls are forwarded below.
     # An explicit review ID also belongs to this process: forwarding to
     # an existing window would silently use that window's reviewer.
+    # So do the file loads turned off (--no-file-load): forwarded, the
+    # source would open in a window that loads anything; and a window with
+    # its loads off owns no instance socket - it takes no forwarded open.
+    no_load = file_load_off(args)
     process_options = (stream_kb is not None
                        or args.stream_target_ms != 500
                        or args.render_debug
@@ -207,6 +224,7 @@ def cmd_view(args):
                        or args.margin == "on"
                        or layer_colors is not None
                        or getattr(args, "floe_reviewer", None) is not None
+                       or no_load
                        or bool(args.drc))
     server = None
     if not args.multi and not process_options:
@@ -308,7 +326,8 @@ def cmd_view(args):
                density=(None if getattr(args, "density", None) is None
                         else args.density == "on"),
                occupancy=(None if getattr(args, "occupancy", None) is None
-                          else args.occupancy == "on"))
+                          else args.occupancy == "on"),
+               file_load=not no_load)
 
 
 def parser():
@@ -447,6 +466,22 @@ def parser():
                         "(XQuartz black-view diagnosis; new instance only)"
                         % "floe2")
     _add_reviewer_option(p)
+    # a launcher's viewer (user 2026-11-11, TeeBox: one account starts
+    # everyone's viewer - a user must not open what that account can read)
+    p.add_argument("--no-file-load", action="store_true",
+                   help="load no file but this command line's (SRC, --drc, "
+                        "--rules, and what follows them by name): File > "
+                        "load layout… / load jobdeck…, DRC > open results "
+                        ".db… / load SVRF rules… / load clusters… / load "
+                        "waives… / review from previous run… / load notes…, "
+                        "the layer menu's load layer properties… and the "
+                        "reviewers window's Load peer work… are insensitive "
+                        "and refuse. For a launcher that starts viewers "
+                        "under a shared account; FLOE_NO_FILE_LOAD=1 (on / "
+                        "yes / true) in its environment does the same. "
+                        "Opens an independent instance, which takes no "
+                        "forwarded open either. Saving and exporting are "
+                        "not affected")
     return p
 
 

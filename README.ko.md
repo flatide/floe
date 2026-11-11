@@ -69,6 +69,7 @@ rust/target/release/floe2                            # 인자 없음 = view
 | `--drc FILE.db` | Calibre ASCII DRC 결과 브라우저 프리로드 (옆에 신선한 `FILE.db.ice` 인덱스가 있으면 자동 사용 — 수백 GB도 즉시 오픈) |
 | `--stream-kb KB` | 점진 페인트 라운드 예산 고정 (0=비활성; 기본 적응형 24576) |
 | `--multi` | 단일 인스턴스 소켓 무시하고 새 창 |
+| `--no-file-load` | 뷰어 안에서 고른 파일을 읽지 않는다(0.12.445). File 메뉴의 load layout…·load jobdeck…, DRC 메뉴의 로드 명령 여섯 개, 레이어 메뉴의 load layer properties…가 비활성이다. 명령줄의 소스·`--drc`·`--rules`는 그대로 읽고 저장·내보내기도 그대로다. 한 계정으로 여러 사람의 뷰어를 띄우는 런처용이며 환경변수 `FLOE_NO_FILE_LOAD=1`도 같다. 독립 창으로 뜬다(docs/SPEC-VIEWER.ko.md §7) |
 
 터미널에는 스트리밍 라운드마다 `[perf] gen=.. round=.. new=.. bytes=..
 plan=..ms delta=..ms apply=..ms draw=..ms total=..ms lod=.. refining=..
@@ -155,6 +156,7 @@ fit·clip·open .db·rules 기능을 노출한다(구 패널 버튼들은 메뉴
 | `FLOE_THIN_UM` | rev 45 프레임 격자 피치 µm (기본 7.0, **0 = rev41+43 완전 복원**) |
 | `FLOE_XQUARTZ` 계열 | XQuartz XRender 흑화 우회 (런처가 `CAIRO_DEBUG=xrender-version=-1` 설정) |
 | `FLOE_CLICK_DEBUG` | 팔레트/미니맵 클릭 경로 stderr 트레이스 (`[click]` 줄) |
+| `FLOE_NO_FILE_LOAD` | `1`·`on`·`yes`·`true`면 `floe2 view --no-file-load`와 같다: 뷰어의 파일 로드 명령을 끈다(런처 환경용, 0.12.445) |
 | `FLOE_PANEL_DEBUG`, `FLOE_MOSAIC`, `FLOE_WS`, `FLOE_CLIP`, `FLOE_REGION`, `FLOE_TESTCHIP` | 디버그/테스트용 |
 
 ## 7. 기타 CLI

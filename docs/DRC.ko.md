@@ -179,6 +179,14 @@ python -m floe render chip.oas --drc results.db \
     변수를 두면 ID를 빠뜨린 실행이 조용히 섞이지 않는다.
   - **통계 명령**: `floe2 drc DB --review-stats`가 리뷰어 전원의 수치와 팀 합계를 JSON으로 낸다
     (app-core `drc::team::stats`; DRC-CLI.ko.md §2b). 뷰어 없이 스크립트가 수집하는 표면이다.
+  - **파일 로드 끄기**(2026-11-11, app 0.12.445): `floe2 view … --no-file-load`나 런처 환경의
+    `FLOE_NO_FILE_LOAD=1`로 띄운 뷰어는 명령줄이 준 레이아웃·`--drc`·`--rules`만 읽는다. DRC 메뉴의
+    `open results .db…`·`load SVRF rules…`·`load clusters…`·`load waives…`·`review from previous run…`·
+    `load notes…`와 공동 검토 창의 `Load peer work…`가 비활성이고, 부르면 상태 줄에 `… loading files is off in
+    this viewer (--no-file-load)`라고 답한다. 한 계정이 읽을 수 있는 모든 파일을 사용자가 열 수 있던 것을 막는다.
+    .db 옆의 rules.json·clusters 자동 부착, waive·방문·note의 자동 저장, `save waives as…`·`save notes as…`·
+    `Export my review…`·`Statistics CSV…`는 그대로다. 동료의 작업을 읽어 올 길이 없으므로 이 모드의 공동 검토 창은
+    내 검토의 내보내기와 통계까지다. 범위와 구현은 SPEC-VIEWER.ko.md §7, 게이트는 gtk_view `file_loads_off`.
   - 게이트 `drc_team` R9(잠금·ID 요구), R10(통계), R7(뷰어의 표시와 거절).
 - **결과 식별 = 내용**(2026-11-10, app 0.12.441, floe-index 0.12.441, pack 레이아웃 5; 사용자: "그
   방향으로 4번 구현해줘" - TeeBox 점검의 4번, 리뷰를 시각이 아닌 내용으로 식별한다).

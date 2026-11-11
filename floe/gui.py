@@ -146,6 +146,11 @@ CELL_VIEW_FRACTION = 0.8
 LEFT_PANE_PX = 260
 
 
+# A viewer started with `floe2 view --no-file-load` (FLOE_NO_FILE_LOAD):
+# what a command that would load a file picked in the viewer says instead
+NO_FILE_LOAD = "loading files is off in this viewer (--no-file-load)"
+
+
 class _DrcPanel(object):
     """Widget refs of the embedded DRC browser (attribute bag)."""
     __slots__ = ("_conflict",
@@ -191,7 +196,13 @@ class _DrcTeamWindow:
             return widget
 
         top = row()
-        button(top, "Load peer work…", self._load_dialog)
+        load = button(top, "Load peer work…", self._load_dialog)
+        if not viewer._file_load:
+            # --no-file-load: off for good - not one of the controls a
+            # finished job makes sensitive again
+            self.controls.remove(load)
+            load.set_sensitive(False)
+            load.set_tooltip_text(NO_FILE_LOAD)
         button(top, "Export my review…", self._export)
         button(top, "Refresh", self._refresh)
         button(top, "Statistics CSV…", self._csv)
@@ -260,7 +271,9 @@ class _DrcTeamWindow:
         help_label.set_xalign(0)
         help_label.set_line_wrap(True)
         box.pack_start(help_label, False, False, 0)
-        self.status = Gtk.Label(label="Load peer work to compare reviews.")
+        self.status = Gtk.Label(
+            label="Load peer work to compare reviews." if viewer._file_load
+            else "Loading peer work is off in this viewer (--no-file-load).")
         self.status.set_xalign(0)
         self.status.set_line_wrap(True)
         self.status.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
@@ -380,6 +393,10 @@ class _DrcTeamWindow:
 
     def _choose(self, title, save=False, multiple=False, default=None):
         if not self._valid() or self.job is not None:
+            return None
+        if not save and self.viewer._load_refused(title):
+            # --no-file-load: no chooser of a file to read
+            self.status.set_text("%s: %s" % (title, NO_FILE_LOAD))
             return None
         dialog = Gtk.FileChooserDialog(title=title, parent=self.window,
             action=Gtk.FileChooserAction.SAVE if save else Gtk.FileChooserAction.OPEN)
@@ -846,6 +863,9 @@ class _DrcMigrationWindow(_DrcTeamWindow):
 
     def _prepare(self):
         from .gtkservice import prepare_migration
+        if self.viewer._load_refused("review from previous run"):
+            self.status.set_text("review from previous run: " + NO_FILE_LOAD)
+            return
         old_path = self.previous.get_text().strip()
         state_path = self.review_file.get_text().strip() or None
         if not old_path:
@@ -2306,6 +2326,9 @@ class LayerRow(object):
 
 
 class Viewer:
+    # the file loads are on unless the start says otherwise (__init__)
+    _file_load = True
+
     def __init__(self, cache, server_sock=None, show=True, goto=None,
                  detail=None, dump=False, depth=None, lod=DEFAULT_LOD,
                  frames=DEFAULT_FRAMES, labels=DEFAULT_LABELS,
@@ -2313,8 +2336,14 @@ class Viewer:
                  frame_cache=True, margin=False,
                  stream_kb=None, stream_target_ms=500,
                  render_debug=False, thin="auto", density=None,
-                 occupancy=None):
+                 occupancy=None, file_load=True):
         self.server_sock = server_sock
+        # False (`floe2 view --no-file-load`, user 2026-11-11: a launcher
+        # that starts everyone's viewer under one account must not let a
+        # user open whatever that account can read): the viewer shows what
+        # its command line named and loads no file picked here - the load
+        # commands are insensitive in the menus and refuse (_load_refused)
+        self._file_load = bool(file_load)
         self.cx = self.cy = 0
         self.spp = 1.0              # dbu per screen pixel
         self._start_goto = goto     # [x_um, y_um(, window_um)] from the CLI
@@ -6614,6 +6643,15 @@ class Viewer:
             menu.append(it)
             return it
 
+        def load(menu, label, cb):
+            # a command that loads a file picked in the viewer: insensitive
+            # in one started with --no-file-load (its handler refuses too)
+            it = item(menu, label, cb)
+            if not self._file_load:
+                it.set_sensitive(False)
+                it.set_tooltip_text(NO_FILE_LOAD)
+            return it
+
         def check(menu, label, cb, state):
             it = Gtk.CheckMenuItem(label=label)
 
@@ -6639,8 +6677,8 @@ class Viewer:
             return menu
 
         m = top("File")
-        item(m, "load layout…", self._load_layout_dialog)
-        item(m, "load jobdeck…", self._load_jobdeck_dialog)
+        load(m, "load layout…", self._load_layout_dialog)
+        load(m, "load jobdeck…", self._load_jobdeck_dialog)
         item(m, "clip region…", self._clip_dialog)
         item(m, "copy view to clipboard\tCtrl+C", self._copy_view)
         sep(m)
@@ -6740,26 +6778,26 @@ class Viewer:
         item(m, "clear rulers\tShift+K", self._rulers_clear)
 
         m = top("DRC")
-        item(m, "open results .db…", self._drc_open_dialog)
-        item(m, "load SVRF rules…", self._drc_rules_dialog)
+        load(m, "open results .db…", self._drc_open_dialog)
+        load(m, "load SVRF rules…", self._drc_rules_dialog)
         item(m, "SVRF info…\ti", self._drc_svrf_dialog)
-        item(m, "load clusters…", self._drc_clusters_dialog)
+        load(m, "load clusters…", self._drc_clusters_dialog)
         sep(m)
         item(m, "next error\t.", lambda: self._drc_step(1))
         item(m, "previous error\t,", lambda: self._drc_step(-1))
         item(m, "waive/unwaive current error\tw",
              self._drc_waive_key)
         item(m, "save waives as…", self._drc_waive_save_dialog)
-        item(m, "load waives…", self._drc_waive_load_dialog)
+        load(m, "load waives…", self._drc_waive_load_dialog)
         item(m, "reviewers…", self._drc_team_dialog)
-        item(m, "review from previous run…", self._drc_migration_dialog)
+        load(m, "review from previous run…", self._drc_migration_dialog)
         item(m, "mark not for review", lambda: self._drc_not_required_key(True))
         item(m, "clear not for review", lambda: self._drc_not_required_key(False))
         sep(m)
         item(m, "note (add/edit)\tn", self._drc_note_key)
         item(m, "clear note of selection", self._drc_note_clear)
         item(m, "save notes as…", self._drc_note_save_dialog)
-        item(m, "load notes…", self._drc_note_load_dialog)
+        load(m, "load notes…", self._drc_note_load_dialog)
         sep(m)
         check(m, "error box-select mode\te", self._esel_toggle,
               lambda: self.mode == "esel")
@@ -6785,6 +6823,20 @@ class Viewer:
         item(m, "Open Source Licenses", self._licenses_dialog)
         self._menubar = mb
         return mb
+
+    def _load_refused(self, what):
+        """Whether `what`, a command that loads a file picked in the viewer,
+        is off: the viewer was started with `floe2 view --no-file-load`
+        (FLOE_NO_FILE_LOAD; user 2026-11-11: "TeeBox에서 floe를 열 경우
+        사용자가 임의의 파일을 로드할 수 없게 하려고 함"). Said in the status
+        line. What the command line named - the source, --drc, --rules - and
+        what follows those by name (a deck's levels, the rules metadata and
+        the clusters beside the results, the design's layer properties) is
+        loaded as ever; saving is not this switch's."""
+        if self._file_load:
+            return False
+        self._set_live_status("%s: %s" % (what, NO_FILE_LOAD))
+        return True
 
     def _load_jobdeck_dialog(self):
         """File > load jobdeck… (user call 2026-09-09): the load dialog
@@ -6839,7 +6891,10 @@ class Viewer:
         path (Enter navigates to a folder or accepts a file), type-ahead
         on the name column, a filter combo. Returns the picked path, or
         None. Saving (a name to type) and the reviewers' multi-pick keep
-        GTK's chooser."""
+        GTK's chooser. In a viewer started with --no-file-load it opens
+        nothing and returns None, whoever asks (_load_refused)."""
+        if self._load_refused(title):
+            return None
         dlg = Gtk.Dialog(title=title, transient_for=self.window, modal=True)
         dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
                         "Open", Gtk.ResponseType.OK)
@@ -10658,6 +10713,9 @@ class Viewer:
         return group if group is not None else self._drc_cluster
 
     def _drc_migration_dialog(self):
+        if self._load_refused("review from previous run"):
+            # the window is two paths to read and nothing else
+            return None
         db = getattr(self, "_drc", None)
         if db is None or not hasattr(db, "review_counts"):
             self._set_live_status("review migration needs a packed index: floe-index drc <db>")
@@ -11228,6 +11286,8 @@ class Viewer:
 
     def _drc_waive_load_dialog(self):
         """Load an external snapshot for comparison; never replace my state."""
+        if self._load_refused("load waives"):
+            return
         window = self._drc_team_dialog()
         if window is not None:
             # A comparison may still be running. Queue the chooser after it
@@ -13209,7 +13269,7 @@ class Viewer:
         menu.append(wroot)
         menu.append(Gtk.SeparatorMenuItem())
         add_item("load layer properties\u2026",
-                 self._load_props_dialog)
+                 self._load_props_dialog, self._file_load)
         add_item("save layer properties\u2026",
                  self._save_props_dialog)
         # dev-only, like the fill bitmap editor: publishing the design
@@ -13420,11 +13480,14 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
                frame_cache=True, margin=False,
                stream_kb=None, stream_target_ms=500,
                render_debug=False, pending_open=None, pending_fields=(),
-               thin="auto", density=None, occupancy=None, rules=None):
+               thin="auto", density=None, occupancy=None, rules=None,
+               file_load=True):
     """`pending_open`: a layout/jobdeck given on the command line that
     has no index yet - the viewer starts empty, asks, indexes and
     opens it (user call 2026-09-09), then applies `pending_fields`
-    (the request options as `key=value` strings, goto included)."""
+    (the request options as `key=value` strings, goto included).
+    `file_load` False (--no-file-load): the viewer loads no file but
+    these - `cache` / `pending_open`, `drc`, `rules`."""
     import_gtk()
     viewer = Viewer(cache, server_sock, goto=goto, detail=detail,
                     dump=dump, depth=depth, lod=lod, frames=frames,
@@ -13433,7 +13496,7 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
                     stream_kb=stream_kb,
                     stream_target_ms=stream_target_ms,
                     render_debug=render_debug, thin=thin, density=density,
-                    occupancy=occupancy)
+                    occupancy=occupancy, file_load=file_load)
     smoke_ms = os.environ.get("FLOE_GUI_SMOKE_MS")
     smoke_error = []
     if smoke_ms is not None:
