@@ -316,6 +316,15 @@ pub(super) fn request(
             Layers::Only(pairs)
         }
     };
+    // A pick's candidates fit the view: a shape wider or taller than what
+    // is shown has no outline on the screen to show for a selection, and at
+    // a point of a chip there are many such over the shape that was clicked.
+    // (As wide as the view is still in; whole dbu, so the extent is floored.)
+    let limited = pick_view_limit(std::env::var("FLOE_PICK_VIEW_LIMIT").ok().as_deref());
+    let pick_max = match input.operation {
+        QueryOperation::Pick { .. } if limited => Some([integer(x1 - x0)?, integer(y1 - y0)?]),
+        _ => None,
+    };
     Ok(QueryRequest {
         scene,
         operation: input.operation,
@@ -323,5 +332,25 @@ pub(super) fn request(
         y,
         radius,
         layers,
+        pick_max,
     })
+}
+
+/// `FLOE_PICK_VIEW_LIMIT=off`: a pick takes shapes of any size again, as
+/// until 0.12.454 (the smallest are still the first). Anything else, or
+/// nothing: the view's limit.
+fn pick_view_limit(switch: Option<&str>) -> bool {
+    switch != Some("off")
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_view_limit_of_a_pick_is_on_unless_switched_off() {
+        assert!(super::pick_view_limit(None));
+        for on in ["", "on", "1", "OFF", "no"] {
+            assert!(super::pick_view_limit(Some(on)), "{on}");
+        }
+        assert!(!super::pick_view_limit(Some("off")));
+    }
 }

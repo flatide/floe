@@ -50,6 +50,11 @@
 //!   view_clip {view, seq, bbox (dbu, the root's coordinates), layers?,
 //!              cell_name?, out}       -> null; a `clip` event when written
 //!
+//! A pick's candidates are the shapes over the point that fit the view,
+//! the smallest first (`nth` goes round them); its answer says how many
+//! larger ones it left out (`larger`) and the limit it asked with
+//! (`request.max` = [width, height], dbu).
+//!
 //! Events, between replies, one JSON object per line:
 //!   {"event": "view", "view": N, "snapshot": {...}}   the state, phase,
 //!       counters or a failure changed
@@ -648,11 +653,18 @@ fn query_json(kind: &str, r: &ViewQueryResult) -> Value {
     o.insert("kind".into(), json!(kind));
     o.insert("id".into(), json!(r.id));
     o.insert("found".into(), json!(false));
-    // the world point and radius the controller asked (dbu, the root's)
-    o.insert(
-        "request".into(),
-        json!({"x": r.reply.request.x, "y": r.reply.request.y, "r": r.reply.request.radius}),
-    );
+    // the world point and radius the controller asked (dbu, the root's),
+    // and a pick's size limit - the view's extent, when it has one
+    let mut asked =
+        json!({"x": r.reply.request.x, "y": r.reply.request.y, "r": r.reply.request.radius});
+    if let Some(max) = r.reply.request.pick_max {
+        asked["max"] = json!(max);
+    }
+    o.insert("request".into(), asked);
+    if kind == "pick" {
+        // shapes over the point left out for being larger than the view
+        o.insert("larger".into(), json!(r.reply.pick_larger));
+    }
     if r.reply.status != QueryStatus::Ok {
         o.insert(
             "err".into(),

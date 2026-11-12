@@ -611,6 +611,10 @@ struct PickCommand {
     radius: i64,
     nth: i64,
     visible_layers: Option<Vec<String>>,
+    /// `max_w=` and `max_h=`: a shape wider or taller than this (dbu) is no
+    /// candidate - the view's size, so that what does not fit the view is
+    /// not picked in it. None: any size.
+    max_extent: Option<[i64; 2]>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -871,6 +875,8 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                     "scene_gen",
                     "scene_round",
                     "incomplete",
+                    "max_w",
+                    "max_h",
                 ],
             )?;
             Ok(Some(InputCommand::Pick(PickCommand {
@@ -882,6 +888,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                 radius: required_parse::<i64>(&fields, "r")?.max(1),
                 nth: optional_parse(&fields, "nth")?.unwrap_or(0),
                 visible_layers: parse_layers(fields.get("layers"))?,
+                max_extent: pick_extent(&fields)?,
             })))
         }
         "clip" => {
@@ -1077,6 +1084,20 @@ fn distinct_field(painted: &[((u32, u32), [u8; 4])]) -> String {
         .map(|((layer, datatype), [r, g, b, _])| format!("{layer}/{datatype}:{r:02x}{g:02x}{b:02x}"))
         .collect::<Vec<_>>()
         .join(",")
+}
+
+/// A pick's size limit: `max_w` and `max_h` together, neither negative, or
+/// neither of them.
+fn pick_extent(fields: &BTreeMap<String, String>) -> Result<Option<[i64; 2]>, String> {
+    match (
+        optional_parse::<i64>(fields, "max_w")?,
+        optional_parse::<i64>(fields, "max_h")?,
+    ) {
+        (None, None) => Ok(None),
+        (Some(w), Some(h)) if w >= 0 && h >= 0 => Ok(Some([w, h])),
+        (Some(_), Some(_)) => Err("max_w and max_h must not be negative".to_string()),
+        _ => Err("max_w and max_h go together".to_string()),
+    }
 }
 
 fn reject_unknown(fields: &BTreeMap<String, String>, allowed: &[&str]) -> Result<(), String> {
@@ -2429,6 +2450,8 @@ fn handle_pick(
         .expected_scene
         .and_then(|id| context.rejection_with(id, 0, command.incomplete_ok));
     let mut requested_summaries = 0;
+    // shapes over the point left out for their size (`max_w`, `max_h`)
+    let mut larger = 0;
     let result: Result<Option<PickWireResponse>, String> = (|| {
         if let Some(code) = refusal {
             return Err(code.into());
@@ -2436,7 +2459,7 @@ fn handle_pick(
         let Some(published) = published? else {
             return Ok(None);
         };
-        let request = scene_query_request(
+        let mut request = scene_query_request(
             &published,
             command.x,
             command.y,
@@ -2445,6 +2468,7 @@ fn handle_pick(
             PICK_CANDIDATE_CAP,
             QUERY_MEMBER_CAP,
         )?;
+        request.max_extent = command.max_extent;
         requested_summaries = request
             .layers
             .iter()
@@ -2460,6 +2484,7 @@ fn handle_pick(
             }
             None => pick_scene(&published.scene, &request, command.nth)?,
         };
+        larger = pick.larger;
         let Some(candidate) = pick.candidate else {
             return Ok(None);
         };
@@ -2492,7 +2517,7 @@ fn handle_pick(
         Ok(Some(pick)) => respond(
             responses,
             format!(
-                "pick seq={} found=1 count={} index={} layer={} datatype={} lname_hex={} cell_hex={} area={} bbox={},{},{},{} points={} points_truncated={} {suffix}",
+                "pick seq={} found=1 count={} index={} layer={} datatype={} lname_hex={} cell_hex={} area={} bbox={},{},{},{} points={} points_truncated={} larger={larger} {suffix}",
                 command.sequence,
                 pick.count,
                 pick.index,
@@ -2511,7 +2536,10 @@ fn handle_pick(
         ),
         Ok(None) => respond(
             responses,
-            format!("pick seq={} found=0 count=0 {suffix}", command.sequence),
+            format!(
+                "pick seq={} found=0 count=0 larger={larger} {suffix}",
+                command.sequence
+            ),
         ),
         Err(error) => respond(
             responses,
@@ -2592,6 +2620,7 @@ fn scene_query_request(
         layers,
         shape_cap,
         member_cap,
+        max_extent: None,
     })
 }
 
@@ -7403,6 +7432,7 @@ mod tests {
             radius: 3,
             nth: 0,
             visible_layers: None,
+            max_extent: None,
         }))
         .unwrap();
         tx.send(QueryCommand::Snap(SnapCommand {
@@ -7886,8 +7916,29 @@ mod tests {
                 radius: 3,
                 nth: -1,
                 visible_layers: None,
+                max_extent: None,
             }
         );
+        // a pick's size limit: both of them or neither, not negative
+        assert_eq!(
+            pick(
+                parse_command("pick seq=5 x=1 y=2 r=3 max_w=640 max_h=0")
+                    .unwrap()
+                    .unwrap()
+            )
+            .max_extent,
+            Some([640, 0])
+        );
+        for bad in [
+            "pick seq=5 x=1 y=2 r=3 max_w=640",
+            "pick seq=5 x=1 y=2 r=3 max_h=640",
+            "pick seq=5 x=1 y=2 r=3 max_w=-1 max_h=5",
+            "pick seq=5 x=1 y=2 r=3 max_w=5 max_h=-1",
+            "pick seq=5 x=1 y=2 r=3 max_w=wide max_h=5",
+            "snap seq=5 x=1 y=2 r=3 max_w=5 max_h=5",
+        ] {
+            assert!(parse_command(bad).is_err(), "{bad}");
+        }
         assert!(
             snap(
                 parse_command("snap seq=4 x=1 y=2 r=3 scene_gen=7 scene_round=2 incomplete=ok")

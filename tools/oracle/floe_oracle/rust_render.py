@@ -893,10 +893,16 @@ class RustRenderWorker:
             max(1, int(job["r"])), self._query_layers(job)))
 
     def _submit_pick(self, job):
-        self._send("pick seq=%d x=%d y=%d r=%d nth=%d layers=%s" % (
+        line = "pick seq=%d x=%d y=%d r=%d nth=%d layers=%s" % (
             int(job.get("seq", -1)), int(job["x"]), int(job["y"]),
             max(1, int(job["r"])), int(job.get("nth", 0)),
-            self._query_layers(job)))
+            self._query_layers(job))
+        # a pick's size limit (0.12.455): job["max"] = (width, height), the
+        # view's extent in dbu - a larger shape is no candidate
+        if job.get("max") is not None:
+            line += " max_w=%d max_h=%d" % (int(job["max"][0]),
+                                            int(job["max"][1]))
+        self._send(line)
 
     def _submit_cell_query(self, job):
         """The cell tree's queries (docs/SPEC-VIEWER.ko.md §8c): one line
@@ -1206,6 +1212,9 @@ class RustRenderWorker:
             "seq": _wire_int(fields, "seq", -1),
             "found": _wire_int(fields, "found") != 0,
             "count": _wire_int(fields, "count"),
+            # shapes over the point left out for their size (job["max"])
+            "larger": _wire_int(fields, "larger") if "larger" in fields
+            else 0,
         }
         try:
             if "err_hex" in fields:

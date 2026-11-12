@@ -34,6 +34,7 @@ fn request(scene: SceneId, operation: QueryOperation) -> QueryRequest {
         y: 1,
         radius: 2,
         layers: Layers::All,
+        pick_max: None,
     }
 }
 fn query(w: &mut WorkerClient, req: QueryRequest) -> QueryReply {

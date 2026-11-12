@@ -275,6 +275,7 @@ fn render_queries(runtime: &Runtime, source: &Path) {
                 y,
                 radius,
                 layers: Layers::All,
+                pick_max: None,
             })
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);

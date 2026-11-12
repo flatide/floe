@@ -568,3 +568,16 @@ P4d처럼 컨트롤러 루프에서만 바뀐다. `FLOE_GTK_LOOP=legacy`는 예�
 - **GTK 뷰어(UI):** 화면에 도형으로 그려진 점프 에러의 선분 가운데 커서 근처의 것을 질의에 싣는다(`_snap_shapes`, SPEC-VIEWER §9).
 - **웹(나중):** 브로커가 snap 질의를 만들 때 화면의 에러 도형 선분을 `ViewQuery.overlay`에 넣고, 결과를 내보낼 때 `overlay`를 `reply.hit`보다 먼저 보면 된다. `measure`는 그대로 쓴다. `ViewQuery`와 `ViewQueryResult`에 필드가 하나씩 늘었으므로, 머지할 때 웹의 생성 자리(`rust/web/src/query.rs`, `query_tests.rs`, `sharing/query.rs`)에 `overlay: Vec::new()`와 `overlay: None`을 넣어야 빌드된다.
 - **게이트:** `gtk_view`의 `overlay_snaps`(채널의 답 = 기준 구현 `floe_oracle/overlay_snap.py`, 거절)와 `error_shape_snaps`(실제 뷰어), `drc_analysis`의 `error_shape_snap_ui`(실제 점프와 손 룰러); 단위 app-core `view::overlay` 3개와 컨트롤러의 `a_snap_lands_on_the_shapes_drawn_over_the_frame`.
+
+## 16. pick의 순서와 화면 크기 제한 (2026-11-12, app 0.12.455 / floe-index·renderd 0.12.455) — 규칙은 공유 Rust, 문구는 UI
+
+사용자: "레이아웃 도형 picking 순서를 변경하고 싶음. pick한 위치에 여러 도형이 겹쳐있을 경우 가장 작은 도형부터 순환하도록 할 수 있을까? 그리고 도형이 어느 방향이라도 화면보다 클 경우에는 pick 대상에서 제외해줘."
+
+- **render-core `pick_scene`:** 점을 포함하는 도형을 모두 재고 `(면적, 레이어, 데이터타입, 만난 순서)`로 가장 작은 `shape_cap`(64)개를 남긴다. 0.12.454까지는 만난 처음 64개에서 순회를 멈췄다. `SceneQueryRequest::max_extent`가 있으면 bbox가 그보다 넓거나 높은 도형은 후보가 아니고 `ScenePick::larger`로 센다.
+- **renderd:** `pick`이 `max_w=`·`max_h=`(둘 다 또는 둘 다 없음, 음수 아님)를 받고, 답에 `larger=N`을 싣는다(찾았을 때도, `found=0`일 때도). 없으면 예전 클라이언트의 줄 그대로다.
+- **worker-client:** `QueryRequest::pick_max: Option<[i64; 2]>`(snap에 주면 입력 오류)와 `QueryReply::pick_larger`.
+- **컨트롤러(app-core `view::query`):** pick의 `pick_max`를 그 상태의 뷰포트 크기(정수 dbu로 내림)로 정한다. 호스트가 줄 것은 없다. `FLOE_PICK_VIEW_LIMIT=off`면 `None`이다.
+- **서비스:** `query` 이벤트의 pick 답에 `larger`, `request.max`.
+- **GTK 뷰어(UI):** 후보가 없고 `larger`가 있으면 상태 줄이 `no object here (N larger than the view)`다(SPEC-VIEWER §9).
+- **웹(나중):** 머지하면 pick이 같은 순서와 제한으로 답한다. 바꿀 곳은 `QueryRequest`·`QueryReply` 리터럴에 늘어난 필드(`pick_max: None`, `pick_larger: 0`; `rust/web/src/query_tests.rs`, `sharing/query.rs`)와, 원하면 `pick_larger`를 화면에 말하는 것이다.
+- **게이트:** `gtk_view`의 `pick_order`(판 70겹과 작은 도형 4개: 순서, 64개, 배율 다섯에서의 제한, 스위치)와 `pick_order_ui`(실제 뷰어의 클릭과 상태 줄), `rust_renderer`의 KLayout 기준 대조(`max` 여섯 가지); 단위 render-core 3개, renderd 명령, worker-client `a_pick_says_its_size_limit_and_reads_what_was_left_out`, app-core `a_pick_is_asked_for_the_shapes_that_fit_the_view`.

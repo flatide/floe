@@ -261,6 +261,194 @@ def overlay_snaps(s, frame):
           % (len(cases), scene["snap"], scene["x"], scene["y"], r))
 
 
+def pick_layout(temp):
+    """Seventy plates over the whole die, one a layer, and four small shapes
+    on the layers after them at the die's middle - more shapes over a point
+    than a pick keeps, the ones a click is meant for met last by the walk."""
+    import klayout.db as db
+    d = Path(temp) / "pick"
+    d.mkdir()
+    layout = db.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    for n in range(1, 71):
+        top.shapes(layout.layer(db.LayerInfo(n, 0))).insert(db.Box(0, 0, 40000, 40000))
+    # (the smallest is some pixels wide with the whole die in a 400 px view:
+    # a shape under the cut is not drawn, and what is not drawn is not picked)
+    for n, box in ((71, (18700, 18700, 21700, 21700)),     # 3 x 3 um
+                   (72, (19700, 19700, 20700, 20700)),     # 1 x 1 um
+                   (73, (20000, 20000, 20400, 20400)),     # 0.4 x 0.4 um
+                   (74, (12200, 19900, 28200, 20500))):    # 16 x 0.6 um, a wire
+        top.shapes(layout.layer(db.LayerInfo(n, 0))).insert(db.Box(*box))
+    src = d / "plates.oas"
+    layout.write(str(src))
+    done = subprocess.run([FLOE2, "index", str(src), "--jobs", "1"], cwd=ROOT,
+                          capture_output=True, text=True, timeout=600)
+    check(done.returncode == 0, done.stdout + done.stderr)
+    return src
+
+
+PICK_AT = (20200, 20200)        # pick_layout: a point of all four small shapes
+PICK_SMALL = [(73, 400, 400), (72, 1000, 1000), (71, 3000, 3000), (74, 16000, 600)]
+
+
+def pick_order(src, svc):
+    """User 2026-11-12: "pick한 위치에 여러 도형이 겹쳐있을 경우 가장 작은
+    도형부터 순환하도록 할 수 있을까? 그리고 도형이 어느 방향이라도 화면보다 클
+    경우에는 pick 대상에서 제외해줘." Until 0.12.454 a pick took the first 64
+    shapes over the point as the walk met them, in layer order, and sorted
+    those: under the plates of 70 layers the small shape clicked on was
+    never a candidate. Now every shape over the point is weighed and the
+    smallest are the candidates, the smallest first; and a shape wider or
+    taller than the view is none (the answer counts them: `larger`)."""
+    def cycle(s, frame):
+        """The picks at PICK_AT from nth 0 until the cycle is round; the
+        answer that ended it (the first again, or nothing found)."""
+        box = frame["bbox"]
+        px = (PICK_AT[0] - box[0]) / (box[2] - box[0]) * W
+        py = (box[3] - PICK_AT[1]) / (box[3] - box[1]) * H
+        out = []
+        for nth in range(70):
+            qid = s.query(frame["id"], "pick", px, py, 3, nth=nth)
+            got = answer(s, "query", lambda v, qid=qid: v["id"] == qid)
+            if not got["found"] or (nth and got["index"] == 0):
+                return out, got
+            out.append(got)
+        raise AssertionError("pick: the cycle did not come round: %r" % out[-1])
+
+    def shapes(picks):
+        return [(a["layer"], a["bbox"][2] - a["bbox"][0], a["bbox"][3] - a["bbox"][1])
+                for a in picks]
+
+    def view(s, width_um):
+        snap = s.edit(navigation={"kind": "goto", "center_um": [20.2, 20.2],
+                                  "width_um": width_um})
+        return until(s, final_frame(snap["state_rev"]))[-1]
+
+    def limit(frame):
+        box = frame["bbox"]
+        return [int(box[2] - box[0]), int(box[3] - box[1])]
+    plates = [(n, 40000, 40000) for n in range(1, 71)]
+    s = gtkservice.ViewSession(src, W, H, patch={"detail": "high"}, svc=svc)
+    frame = until(s, final_frame(1))[-1]
+    # the whole die in view: every shape fits; the smallest first, the
+    # plates after them by their layers, 64 in all, and round again
+    picks, again = cycle(s, frame)
+    check(shapes(picks) == PICK_SMALL + plates[:60]
+          and [a["index"] for a in picks] == list(range(64))
+          and all(a["count"] == 64 and a["larger"] == 0 for a in picks)
+          and shapes([again]) == PICK_SMALL[:1]
+          and [a["area"] for a in picks] == sorted(a["area"] for a in picks),
+          "the fit view's picks: %r" % shapes(picks))
+    check(all(a["request"]["max"] == limit(frame) for a in picks),
+          "the limit is the view's extent: %r, view %r" % (picks[0]["request"], frame["bbox"]))
+    # zoomed in: what is wider or taller than the view is no candidate -
+    # the plates at 20 um, the 16 um wire too at 10 um, the 3 um square at 2
+    for width_um, kept, larger in ((20.0, 4, 70), (10.0, 3, 71), (2.0, 2, 72)):
+        frame = view(s, width_um)
+        picks, again = cycle(s, frame)
+        check(shapes(picks) == PICK_SMALL[:kept] and shapes([again]) == PICK_SMALL[:1]
+              and all(a["count"] == kept and a["larger"] == larger
+                      and a["request"]["max"] == limit(frame) for a in picks),
+              "a %g um view's picks: %r" % (width_um, [(shapes([a]), a["count"], a["larger"])
+                                                        for a in picks]))
+    # a view smaller than the smallest shape: nothing to pick, and the
+    # answer says what lies there
+    frame = view(s, 0.3)
+    picks, none = cycle(s, frame)
+    check(picks == [] and none["found"] is False and none["count"] == 0
+          and none["larger"] == 74 and "err" not in none
+          and none["request"]["max"] == limit(frame) == [300, 225],
+          "a 0.3 um view's pick: %r" % none)
+    s.close()
+    until(s, lambda kind, v: kind == "closed", 30)
+    # FLOE_PICK_VIEW_LIMIT=off: any size again, the smallest still first
+    os.environ["FLOE_PICK_VIEW_LIMIT"] = "off"
+    off = gtkservice.Service(FLOE2)
+    try:
+        t = gtkservice.ViewSession(src, W, H, patch={"detail": "high"}, svc=off)
+        until(t, final_frame(1))
+        picks, again = cycle(t, view(t, 10.0))
+        check(shapes(picks) == PICK_SMALL + plates[:60]
+              and all(a["count"] == 64 and a["larger"] == 0 and "max" not in a["request"]
+                      for a in picks),
+              "without the view's limit: %r" % shapes(picks)[:6])
+        t.close()
+    finally:
+        os.environ.pop("FLOE_PICK_VIEW_LIMIT", None)
+        off.close()
+    print("pick order: the smallest first of 74 shapes over a point, the view's limit at 5 zooms")
+
+
+def pick_order_ui(src):
+    """pick_order in the real viewer: clicks at one spot go from the
+    smallest shape to the next ones and round again; another spot starts
+    anew; under shapes larger than the view alone the status line says so."""
+    from types import SimpleNamespace
+    from floe import gui
+    cache = gtkservice.ServiceCache(str(src))
+    cache.load()
+    v = gui.Viewer(cache, None)
+    frames, answers = [], []
+    take, took = v._ctl_frame, v._on_pick_result
+    v._ctl_frame = lambda f: (frames.append(f), take(f))
+    v._on_pick_result = lambda res: (answers.append(res), took(res))[1]
+
+    def show(width_um):
+        # (a pick is asked of the frame on the screen: the view's own, final)
+        rev = v.worker.snapshot["render_rev"]
+        v.goto(20.2, 20.2, width_um)
+        pump(v, lambda: settled(v, frames) and v.worker.snapshot["render_rev"] != rev,
+             "the %g um view" % width_um)
+
+    def click(x=PICK_AT[0], y=PICK_AT[1]):
+        """A plain click at a point of the layout: the pick's answer."""
+        box = v.view_bbox()
+        del answers[:]
+        v._pick_click(SimpleNamespace(x=(x - box[0]) / v.spp, y=(box[3] - y) / v.spp,
+                                      state=gui.Gdk.ModifierType(0)))
+        try:
+            pump(v, lambda: bool(answers), "a pick's answer", 10)
+        except AssertionError:
+            raise AssertionError("no pick answer at (%s, %s): status %r, view %r, 1 px = %s dbu, "
+                                 "shown %r, snapshot %r" % (
+                                     x, y, v.status.get_text(), box, v.spp, v.worker.shown,
+                                     {k: v.worker.snapshot[k] for k in ("phase", "state_rev", "render_rev")}))
+        sel = v.selection
+        return (None if sel is None else
+                (sel["layer"], sel["bbox"][2] - sel["bbox"][0], sel["bbox"][3] - sel["bbox"][1]),
+                v.status.get_text())
+    try:
+        pump(v, lambda: settled(v, frames), "the pick layout's first frame")
+        show(10.0)
+        seen = [click() for _ in range(4)]
+        check([shape for shape, _ in seen] == PICK_SMALL[:3] + PICK_SMALL[:1]
+              and [said.rsplit(" · ", 1)[-1] for _, said in seen] == ["1/3", "2/3", "3/3", "1/3"]
+              and "0.400 x 0.400 um" in seen[0][1],
+              "clicks at one spot: %r" % seen)
+        # another spot starts from the smallest there (off the 0.4 um square)
+        shape, said = click(20600, 20600)
+        check(shape == PICK_SMALL[1] and said.endswith(" · 1/2"),
+              "a click elsewhere: %r %r" % (shape, said))
+        # nothing that fits the view: the selection goes, the line says why
+        show(0.3)
+        shape, said = click()
+        check(shape is None and said == "no object here (74 larger than the view)",
+              "a click under larger shapes alone: %r %r" % (shape, said))
+        # and where nothing lies at all, the plain words (off the die)
+        show(60.0)
+        shape, said = click(-4000, -4000)
+        check(shape is None and said == "no object here",
+              "a click on nothing: %r %r" % (shape, said))
+        print("pick clicks: %s, then %s" % (
+            ", ".join(said.rsplit(" · ", 1)[-1] for _, said in seen),
+            "no object here (74 larger than the view)"))
+    finally:
+        v._quit()
+        v.window.destroy()
+        cache.close()
+
+
 def queries_and_cells(s, ref, frame, temp):
     """snap, pick, the cell tree and a clip through the channel = the
     viewer's adapter's answers for the same request."""
@@ -269,11 +457,19 @@ def queries_and_cells(s, ref, frame, temp):
         got = answer(s, "query", lambda v, qid=qid: v["id"] == qid)
         req = got["request"]
         job = {"kind": kind, "seq": 900 + n, "x": req["x"], "y": req["y"], "r": req["r"]}
+        # a pick is asked for the shapes that fit the view (0.12.455): the
+        # controller's limit is the view's extent in whole dbu, a snap has none
+        box = frame["bbox"]
+        check(req.get("max") == ([int(box[2] - box[0]), int(box[3] - box[1])]
+                                 if kind == "pick" else None),
+              "%s's size limit: %r for the view %r" % (kind, req.get("max"), box))
+        if "max" in req:
+            job["max"] = req["max"]
         job.update(extra)
         want = reference_answer(ref, job, kind)
         keys = ("found", "x", "y", "snap") if kind == "snap" else (
             "found", "count", "index", "layer", "datatype", "lname", "cell",
-            "area", "bbox", "points")
+            "area", "bbox", "points", "larger")
         for key in keys:
             a, b = got.get(key), want.get(key)
             if key == "points":
@@ -1920,8 +2116,11 @@ def main():
             stay = list(Path(tempfile.gettempdir()).glob(
                 "floe2-view-%d-*" % svc._proc.pid))
             check(not stay, "closed views left their folders: %s" % stay)
+            plates = pick_layout(temp)
+            pick_order(plates, svc)
             if gtk_ready():
                 gui_viewer(src, ref)
+                pick_order_ui(plates)
                 capture_parity(src, temp)
                 light_status(src, temp)
                 file_loads_off(src, temp)

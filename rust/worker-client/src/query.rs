@@ -80,6 +80,10 @@ pub struct QueryRequest {
     pub y: i64,
     pub radius: i64,
     pub layers: Layers,
+    /// A pick's size limit, `[width, height]` in dbu: a shape wider or
+    /// taller is no candidate - the view's size, so that what does not fit
+    /// the view is not picked in it. None: any size. A snap takes none.
+    pub pick_max: Option<[i64; 2]>,
 }
 impl QueryRequest {
     pub(crate) fn command(&self, sequence: u64) -> Result<String> {
@@ -95,8 +99,15 @@ impl QueryRequest {
             QueryOperation::Snap => String::new(),
             QueryOperation::Pick { nth } => format!(" nth={nth}"),
         };
+        let limit = match (self.operation, self.pick_max) {
+            (_, None) => String::new(),
+            (QueryOperation::Pick { .. }, Some([w, h])) if w >= 0 && h >= 0 => {
+                format!(" max_w={w} max_h={h}")
+            }
+            _ => return Err(Error::input("invalid pick size limit")),
+        };
         Ok(format!(
-            "{} seq={sequence} x={} y={} r={} layers={} scene_gen={} scene_round={}{nth}",
+            "{} seq={sequence} x={} y={} r={} layers={} scene_gen={} scene_round={}{nth}{limit}",
             self.operation.name(),
             self.x,
             self.y,
@@ -157,6 +168,10 @@ pub struct QueryReply {
     pub hit: Option<QueryHit>,
     /// Native local diagnostic. A future HTTP adapter must map to safe codes.
     pub error: Option<String>,
+    /// Shapes over the point that a pick left out for their size
+    /// (`QueryRequest::pick_max`): with no hit, the point is not empty.
+    /// 0 for a snap and for a pick without a limit.
+    pub pick_larger: u64,
 }
 fn int(s: &str) -> Result<i64> {
     s.parse()
@@ -338,6 +353,14 @@ pub(crate) fn parse_reply_with(
             }))
         }
     };
+    let pick_larger = match f.get("larger") {
+        None => 0,
+        Some(_) if kind == "pick" => counter(&f, "larger")?,
+        Some(_) => return Err(Error::protocol("snap result with a pick count")),
+    };
+    if pick_larger != 0 && (request.pick_max.is_none() || status != QueryStatus::Ok) {
+        return Err(Error::protocol("pick left shapes out without a limit"));
+    }
     Ok(QueryReply {
         sequence,
         request,
@@ -346,6 +369,7 @@ pub(crate) fn parse_reply_with(
         summary_layers,
         hit,
         error,
+        pick_larger,
     })
 }
 
@@ -363,6 +387,7 @@ mod tests {
             y: 2,
             radius: 3,
             layers: Layers::Only(vec![(7, 0), (3, 300), (7, 0)]),
+            pick_max: None,
         }
     }
     fn fields(text: &str) -> Fields {
@@ -531,5 +556,60 @@ mod tests {
                 ..
             }))
         ));
+    }
+    #[test]
+    fn a_pick_says_its_size_limit_and_reads_what_was_left_out() {
+        let mut req = request();
+        req.operation = QueryOperation::Pick { nth: 1 };
+        req.layers = Layers::All;
+        // no limit, no word of it: the line an older worker read
+        assert_eq!(
+            req.command(5).unwrap(),
+            "pick seq=5 x=1 y=2 r=3 layers=all scene_gen=7 scene_round=2 nth=1"
+        );
+        req.pick_max = Some([640, 0]);
+        assert_eq!(
+            req.command(5).unwrap(),
+            "pick seq=5 x=1 y=2 r=3 layers=all scene_gen=7 scene_round=2 nth=1 max_w=640 max_h=0"
+        );
+        for bad in [[-1, 4], [4, -1]] {
+            let mut r = req.clone();
+            r.pick_max = Some(bad);
+            assert!(r.command(5).is_err(), "{bad:?}");
+        }
+        let mut snap_request = request();
+        snap_request.pick_max = Some([4, 4]);
+        assert!(snap_request.command(5).is_err());
+        // the answer: a hit beside shapes left out, and no hit under them
+        let hit = "pick seq=5 found=1 count=2 index=1 layer=7 datatype=0 lname_hex=372f30 cell_hex=544f50 area=100 bbox=0,0,10,10 points=0,0;0,10;10,0 points_truncated=0 larger=3 scene_gen=7 scene_round=2 scene_complete=1 scene_summary=0 query_status=ok";
+        let r = parse_reply("pick", fields(hit), req.clone()).unwrap();
+        assert_eq!(r.pick_larger, 3);
+        assert!(r.hit.is_some());
+        let none = "pick seq=5 found=0 count=0 larger=101 scene_gen=7 scene_round=2 scene_complete=1 scene_summary=0 query_status=ok";
+        let r = parse_reply("pick", fields(none), req.clone()).unwrap();
+        assert_eq!((r.pick_larger, r.hit.is_none()), (101, true));
+        // a reply without the count is none left out
+        let plain = none.replace(" larger=101", "");
+        assert_eq!(
+            parse_reply("pick", fields(&plain), req.clone())
+                .unwrap()
+                .pick_larger,
+            0
+        );
+        // a count that is no number, one without a limit asked, one on a
+        // refusal and one in a snap's answer are not the worker's protocol
+        for bad in ["larger=-1", "larger=many", "larger=01"] {
+            let f = fields(&none.replace("larger=101", bad));
+            assert!(parse_reply("pick", f, req.clone()).is_err(), "{bad}");
+        }
+        let mut unlimited = req.clone();
+        unlimited.pick_max = None;
+        assert!(parse_reply("pick", fields(none), unlimited.clone()).is_err());
+        assert!(parse_reply("pick", fields(&none.replace("=101", "=0")), unlimited).is_ok());
+        let refused = "pick seq=5 found=0 count=0 larger=2 err_hex=6572726f72 scene_gen=7 scene_round=2 scene_complete=1 scene_summary=1 query_status=scene_summary";
+        assert!(parse_reply("pick", fields(refused), req.clone()).is_err());
+        let mut f = snap();
+        f.0.insert("larger".into(), "0".into());
+        assert!(parse_reply("snap", f, request()).is_err());
     }
 }

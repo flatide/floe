@@ -27,11 +27,16 @@ pub struct SceneQueryRequest {
     /// Stable OVM layer order. Snap ties retain this traversal order while
     /// pick candidates are sorted by the numeric layer/datatype pair.
     pub layers: Vec<SceneQueryLayer>,
-    /// Snap: maximum shapes examined. Pick: maximum containing candidates.
+    /// Snap: maximum shapes examined. Pick: the candidates kept - the
+    /// smallest of all the shapes that hold the point.
     pub shape_cap: usize,
     /// Maximum repetition members examined, including members outside the
     /// query box. This bounds sparse explicit-point repetitions.
     pub member_cap: usize,
+    /// Pick: a shape wider (`[0]`) or taller (`[1]`) than this is no
+    /// candidate - what does not fit the view is not picked in it. None:
+    /// any size. A snap has no use for it.
+    pub max_extent: Option<[i64; 2]>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,6 +59,9 @@ impl SceneQueryRequest {
         }
         if self.member_cap == 0 {
             return Err("query member_cap must be positive".to_string());
+        }
+        if self.max_extent.is_some_and(|[w, h]| w < 0 || h < 0) {
+            return Err("query max_extent must be non-negative".to_string());
         }
         let unique: BTreeSet<_> = self.layers.iter().map(|layer| layer.index).collect();
         if unique.len() != self.layers.len() {
@@ -106,6 +114,9 @@ pub struct ScenePick {
     pub index: usize,
     pub candidate: Option<ScenePickCandidate>,
     pub shapes_tested: usize,
+    /// Shapes that hold the point and were left out for their size
+    /// (`SceneQueryRequest::max_extent`).
+    pub larger: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -235,58 +246,82 @@ fn pick_scene_impl(
     cancellation: Option<(u64, &RenderCancellation)>,
 ) -> Result<ScenePick, String> {
     request.validate()?;
-    let mut candidates = Vec::<(f64, u32, u32, usize, ScenePickCandidate)>::new();
-    let mut tested = 0usize;
-    visit_query_shapes(scene, request, cancellation, |shape| {
-        tested += 1;
-        if point_inclusive(&shape.points, request.x, request.y)? {
-            let area2 = polygon_area2(&shape.points)?;
-            let area = (area2 / 2) as f64;
-            candidates.push((
-                area,
-                shape.layer,
-                shape.datatype,
-                candidates.len(),
-                ScenePickCandidate {
-                    layer_idx: shape.layer_idx,
-                    cell_id: shape.cell_id,
-                    area,
-                    bbox: polygon_bbox(&shape.points).expect("query polygon has a bbox"),
-                    points_truncated: shape.points.len() > 512,
-                    points: shape.points.into_iter().take(512).collect(),
-                },
-            ));
-            if candidates.len() >= request.shape_cap {
-                return Err(QUERY_STOP.to_string());
-            }
-        }
-        Ok(())
-    })?;
-    // Python's sort is stable. The source ordinal makes that stability
-    // explicit and independent of the standard library sort implementation.
-    candidates.sort_by(|left, right| {
+    // The smallest first; equal areas by their layer numbers, then as the
+    // walk found them (the ordinal makes a stable sort's order explicit).
+    type Rank = (f64, u32, u32, usize);
+    fn before(left: &Rank, right: &Rank) -> bool {
         left.0
             .total_cmp(&right.0)
             .then_with(|| left.1.cmp(&right.1))
             .then_with(|| left.2.cmp(&right.2))
             .then_with(|| left.3.cmp(&right.3))
-    });
-    if candidates.is_empty() {
+            .is_lt()
+    }
+    // Every shape that holds the point is weighed and the smallest
+    // `shape_cap` are kept, in their order. (Until 0.12.454 the walk stopped
+    // at the first `shape_cap` it met, in layer order: where more shapes
+    // than that lay over a point - the plates of a few hundred layers - the
+    // small shape clicked on was never a candidate and the "smallest" was
+    // the smallest plate of the first layers.)
+    let mut kept = Vec::<(Rank, ScenePickCandidate)>::new();
+    let (mut tested, mut held, mut larger) = (0usize, 0usize, 0usize);
+    visit_query_shapes(scene, request, cancellation, |shape| {
+        tested += 1;
+        if !point_inclusive(&shape.points, request.x, request.y)? {
+            return Ok(());
+        }
+        let bbox = polygon_bbox(&shape.points).expect("query polygon has a bbox");
+        if let Some([width, height]) = request.max_extent {
+            if i128::from(bbox.x1) - i128::from(bbox.x0) > i128::from(width)
+                || i128::from(bbox.y1) - i128::from(bbox.y0) > i128::from(height)
+            {
+                larger += 1;
+                return Ok(());
+            }
+        }
+        let area = (polygon_area2(&shape.points)? / 2) as f64;
+        let rank = (area, shape.layer, shape.datatype, held);
+        held += 1;
+        if kept.len() >= request.shape_cap && kept.last().is_some_and(|last| !before(&rank, &last.0))
+        {
+            return Ok(());
+        }
+        let at = kept.partition_point(|(other, _)| before(other, &rank));
+        kept.insert(
+            at,
+            (
+                rank,
+                ScenePickCandidate {
+                    layer_idx: shape.layer_idx,
+                    cell_id: shape.cell_id,
+                    area,
+                    bbox,
+                    points_truncated: shape.points.len() > 512,
+                    points: shape.points.into_iter().take(512).collect(),
+                },
+            ),
+        );
+        kept.truncate(request.shape_cap);
+        Ok(())
+    })?;
+    if kept.is_empty() {
         return Ok(ScenePick {
             count: 0,
             index: 0,
             candidate: None,
             shapes_tested: tested,
+            larger,
         });
     }
-    let count = candidates.len();
+    let count = kept.len();
     let index = nth.rem_euclid(count as i64) as usize;
-    let candidate = candidates.swap_remove(index).4;
+    let candidate = kept.swap_remove(index).1;
     Ok(ScenePick {
         count,
         index,
         candidate: Some(candidate),
         shapes_tested: tested,
+        larger,
     })
 }
 
@@ -936,6 +971,7 @@ mod tests {
             ],
             shape_cap: 400,
             member_cap: 400,
+            max_extent: None,
         }
     }
 
@@ -1053,15 +1089,218 @@ mod tests {
     }
 
     #[test]
-    fn pick_cap_counts_candidates_not_examined_shapes() {
+    fn pick_cap_keeps_the_smallest_candidates_not_the_first_met() {
         let scene = query_scene();
         let mut capped = request(5, 5);
         capped.shape_cap = 1;
         let picked = pick_scene(&scene, &capped, 0).unwrap();
-        assert_eq!((picked.count, picked.shapes_tested), (1, 1));
-        // Parent KLayout stops as soon as the cap is reached, before it can
-        // discover the later numerically lower layer.
-        assert_eq!(picked.candidate.unwrap().layer_idx, 0);
+        // Both shapes are weighed, and of two as large the numerically
+        // lower layer is kept - the walk meets it second. (The parent
+        // KLayout loop stopped at the cap and never saw it.)
+        assert_eq!((picked.count, picked.shapes_tested), (1, 2));
+        assert_eq!(picked.candidate.unwrap().layer_idx, 1);
+    }
+
+    /// One layer a rectangle `[x0, y0, x1, y1]`, in the order given: layer
+    /// index n is layer number n + 1.
+    fn stack(rects: &[[i64; 4]]) -> (FrameScene, SceneQueryRequest) {
+        let top = (0, REM_FULL);
+        let mut pages = Vec::new();
+        let mut around = BBox {
+            x0: 0,
+            y0: 0,
+            x1: 1,
+            y1: 1,
+        };
+        for (n, r) in rects.iter().enumerate() {
+            let bbox = BBox {
+                x0: r[0],
+                y0: r[1],
+                x1: r[2],
+                y1: r[3],
+            };
+            around = BBox {
+                x0: around.x0.min(bbox.x0),
+                y0: around.y0.min(bbox.y0),
+                x1: around.x1.max(bbox.x1),
+                y1: around.y1.max(bbox.y1),
+            };
+            let doc = Doc {
+                unit: 1.0,
+                cells: vec![Cell {
+                    name: format!("P{n}"),
+                    rects: vec![RectRec {
+                        layer: n as u32,
+                        dt: 0,
+                        x: r[0],
+                        y: r[1],
+                        w: r[2] - r[0],
+                        h: r[3] - r[1],
+                        rep: Rep::One,
+                    }],
+                    ..Cell::default()
+                }],
+                top: 0,
+                layer_order: vec![(n as u32, 0)],
+                norm_s: 0.0,
+                layer_names: HashMap::new(),
+                layer_aliases: HashMap::new(),
+            };
+            pages.push(Arc::new(DecodedPage {
+                page_id: n as u32,
+                layer_idx: n as u32,
+                bbox,
+                encoded_bytes: 1,
+                records: 1,
+                members: 1,
+                index: crate::PageIndex::build(&doc),
+                doc,
+                grown_bytes: 0,
+            }));
+        }
+        let ids: Vec<u32> = (0..rects.len() as u32).collect();
+        let plan = HierPlan {
+            top,
+            wcells: vec![WsCell {
+                key: top,
+                pages: ids.clone(),
+                page_levels: Vec::new(),
+                insts: Vec::new(),
+                frames: Vec::new(),
+                washes: Vec::new(),
+                dot_counts: Vec::new(),
+                reps: Vec::new(),
+            }],
+            page_prio: vec![0; ids.len()],
+            pages: ids.clone(),
+            stats: HierStats::default(),
+            explain: Vec::new(),
+        };
+        let mut bounds = BTreeMap::new();
+        bounds.insert(top, around);
+        let scene = FrameScene::from_test_parts(plan, pages, bounds).unwrap();
+        let request = SceneQueryRequest {
+            x: 0,
+            y: 0,
+            radius: 2,
+            layers: ids
+                .iter()
+                .map(|&index| SceneQueryLayer {
+                    index,
+                    layer: index + 1,
+                    datatype: 0,
+                })
+                .collect(),
+            shape_cap: 64,
+            member_cap: 4096,
+            max_extent: None,
+        };
+        (scene, request)
+    }
+
+    #[test]
+    fn pick_cycles_from_the_smallest_of_every_shape_over_the_point() {
+        // Plates on the first layers, the small shapes on the last ones: the
+        // walk meets the plates first, and more of them than a pick keeps.
+        let mut rects: Vec<[i64; 4]> = (0..70).map(|n| [-900 - n, -900, 900, 900]).collect();
+        rects.extend([[-30, -30, 30, 30], [-10, -10, 10, 10], [-2, -2, 2, 2]]);
+        let (scene, request) = stack(&rects);
+        let picks: Vec<ScenePick> = (0..65)
+            .map(|nth| pick_scene(&scene, &request, nth).unwrap())
+            .collect();
+        assert!(picks
+            .iter()
+            .all(|p| (p.count, p.shapes_tested, p.larger) == (64, 73, 0)));
+        let layer = |p: &ScenePick| p.candidate.as_ref().unwrap().layer_idx;
+        let area = |p: &ScenePick| p.candidate.as_ref().unwrap().area;
+        // the smallest first, then the next ones; the plates after them
+        // from the narrowest, and the cycle ends where it began
+        assert_eq!(
+            picks[..4].iter().map(layer).collect::<Vec<_>>(),
+            [72, 71, 70, 0]
+        );
+        assert_eq!(
+            picks[..3].iter().map(area).collect::<Vec<_>>(),
+            [16., 400., 3600.]
+        );
+        assert_eq!(
+            picks.iter().map(|p| p.index).collect::<Vec<_>>(),
+            (0..64).chain([0]).collect::<Vec<_>>()
+        );
+        assert!(picks.windows(2).take(63).all(|w| area(&w[0]) <= area(&w[1])));
+        assert_eq!(layer(&picks[63]), 60);
+        assert_eq!(layer(&picks[64]), 72);
+        assert_eq!(pick_scene(&scene, &request, -1).unwrap().index, 63);
+        // of two as large the lower layer number, whichever the walk met
+        let (scene, mut request) = stack(&[[-5, -5, 5, 5], [-5, -5, 5, 5], [-5, -5, 5, 5]]);
+        request.layers[0].layer = 9;
+        let order: Vec<u32> = (0..3)
+            .map(|nth| layer(&pick_scene(&scene, &request, nth).unwrap()))
+            .collect();
+        assert_eq!(order, [1, 2, 0]);
+    }
+
+    #[test]
+    fn pick_leaves_out_what_is_larger_than_the_view() {
+        // 10 x 10, 30 x 8 (wide), 8 x 30 (tall), 50 x 50 over the point
+        let rects = [
+            [-5, -5, 5, 5],
+            [-15, -4, 15, 4],
+            [-4, -15, 4, 15],
+            [-25, -25, 25, 25],
+        ];
+        let (scene, mut request) = stack(&rects);
+        let order = |request: &SceneQueryRequest| {
+            let first = pick_scene(&scene, request, 0).unwrap();
+            let layers: Vec<u32> = (0..first.count as i64)
+                .map(|nth| {
+                    pick_scene(&scene, request, nth)
+                        .unwrap()
+                        .candidate
+                        .unwrap()
+                        .layer_idx
+                })
+                .collect();
+            (layers, first.larger)
+        };
+        // no limit: every one of them, the smallest first
+        assert_eq!(order(&request), (vec![0, 1, 2, 3], 0));
+        // larger in either direction is out; as large as the view is in
+        for (limit, kept, larger) in [
+            ([20, 20], vec![0], 3),
+            ([10, 10], vec![0], 3),
+            ([9, 10], vec![], 4),
+            ([10, 9], vec![], 4),
+            ([30, 10], vec![0, 1], 2),
+            ([30, 8], vec![1], 3),
+            ([10, 30], vec![0, 2], 2),
+            ([8, 30], vec![2], 3),
+            ([30, 30], vec![0, 1, 2], 1),
+            ([50, 50], vec![0, 1, 2, 3], 0),
+            ([49, 500], vec![0, 1, 2], 1),
+            ([0, 0], vec![], 4),
+        ] {
+            request.max_extent = Some(limit);
+            assert_eq!(order(&request), (kept, larger), "{limit:?}");
+        }
+        let none = pick_scene(&scene, &request, 0).unwrap();
+        assert_eq!((none.count, none.index, none.larger), (0, 0, 4));
+        assert!(none.candidate.is_none());
+        // those left out take no place among the candidates kept
+        request.max_extent = Some([30, 30]);
+        request.shape_cap = 2;
+        let capped = pick_scene(&scene, &request, 1).unwrap();
+        assert_eq!((capped.count, capped.larger), (2, 1));
+        assert_eq!(capped.candidate.unwrap().layer_idx, 1);
+        request.max_extent = Some([-1, 5]);
+        assert!(pick_scene(&scene, &request, 0)
+            .unwrap_err()
+            .contains("max_extent"));
+        // a snap takes no notice of the limit
+        request.max_extent = Some([1, 1]);
+        assert!(snap_scene(&scene, &SceneQueryRequest { x: 5, y: 5, ..request })
+            .unwrap()
+            .is_some());
     }
 
     #[test]

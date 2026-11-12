@@ -97,6 +97,7 @@ fn synchronous_capture_refuses_pending_queries_without_closing_the_worker() {
             y: 1,
             radius: 10,
             layers: Layers::All,
+            pick_max: None,
         })
         .unwrap();
     assert_eq!(session.pending_queries(), 1);

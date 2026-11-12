@@ -171,6 +171,7 @@ mod tests {
             y,
             radius,
             layers: Layers::All,
+            pick_max: None,
         }
     }
     fn segments(ends: &[[f64; 4]]) -> Vec<SnapSegment> {
