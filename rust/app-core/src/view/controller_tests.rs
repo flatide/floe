@@ -40,6 +40,10 @@ struct Control {
     geometry_partial: AtomicBool,
     query_requests: Mutex<Vec<(u64, QueryRequest)>>,
     query_cancels: Mutex<Vec<QueryKind>>,
+    /// What the scene answers a snap (None: nothing in reach).
+    snap_hit: Mutex<Option<floe_worker_client::SnapHit>>,
+    /// The scene under a snap is summarized: no answer, status Summary.
+    snap_summary: AtomicBool,
     cell_requests: Mutex<Vec<(u64, CellRequest)>>,
     /// The `cells` answer's bbox for any cell; None = no shapes.
     cell_bbox: Mutex<Option<[f64; 4]>>,
@@ -75,6 +79,8 @@ impl Default for Control {
             geometry_partial: AtomicBool::new(false),
             query_requests: Mutex::new(Vec::new()),
             query_cancels: Mutex::new(Vec::new()),
+            snap_hit: Mutex::new(None),
+            snap_summary: AtomicBool::new(false),
             cell_requests: Mutex::new(Vec::new()),
             cell_bbox: Mutex::new(Some([100., 200., 300., 260.])),
             cell_nohier: AtomicBool::new(false),
@@ -213,22 +219,38 @@ impl Engine for Fake {
         if self.control.query_reply.load(Ordering::Relaxed) {
             if let Some((seq, request)) = self.queries.pop_first() {
                 let superseded = self.query_frontiers[&request.operation.kind()] > seq;
+                let snap = request.operation.kind() == QueryKind::Snap && !superseded;
+                let summary = snap && self.control.snap_summary.load(Ordering::Relaxed);
+                let hit = self
+                    .control
+                    .snap_hit
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .filter(|_| snap && !summary)
+                    .map(floe_worker_client::QueryHit::Snap);
                 return Ok(Some(Event::Query(QueryReply {
                     sequence: seq,
                     scene: QueryScene {
                         id: Some(request.scene),
                         complete: true,
-                        summary_layers: 0,
+                        summary_layers: u64::from(summary),
                     },
                     request,
                     status: if superseded {
                         QueryStatus::Superseded
+                    } else if summary {
+                        QueryStatus::Summary
                     } else {
                         QueryStatus::Ok
                     },
-                    summary_layers: 0,
-                    hit: None,
-                    error: superseded.then(|| "superseded".into()),
+                    summary_layers: u64::from(summary),
+                    hit,
+                    error: if superseded {
+                        Some("superseded".into())
+                    } else {
+                        summary.then(|| "summarized".into())
+                    },
                 })));
             }
         }

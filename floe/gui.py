@@ -69,6 +69,8 @@ BAND_OUT = 0xFFFFFFFF      # call 2026-08-09; direction no longer
 RULER_CORE = 0xFFFFFFFF    # plain white solid ruler (same call)
 SNAP_VERTEX = 0xFFFFFFFF   # plain white (user call 2026-08-09;
 SNAP_EDGE = 0xFFFFFFFF     # vertex/edge no longer color-coded)
+SNAP_SHAPES_MAX = 256      # segments of a drawn shape one snap is given
+                           # (app-core view::overlay SNAP_SEGMENTS_MAX)
 SEL_CORE = 0xFFFFFFFF
 DRC_RED = 0xFF5252FF       # NOT-WAIVED errors (geometry+numbers)
 
@@ -12770,6 +12772,44 @@ class Viewer:
             self._ruler_start = None
         self._display()
 
+    def _snap_shapes(self, x, y, r):
+        """The segments (x0, y0, x1, y1; dbu) of the error shape on the
+        canvas that a snap around (x, y) may land on - the view channel's
+        `overlay` (user 2026-11-12: the ruler's snap passed the error's
+        shape by, the shape being the viewer's own drawing and no part of
+        the layout the snap is answered from). The jumped error's edges -
+        a polygon's outline, an edge record's edges - where _draw_overlays
+        draws them as the shape: not where the error is its marker circle,
+        not with the overlays off (Tab). Only the segments in reach of the
+        snap are handed over, so a long outline costs what is near the
+        cursor; the rule itself (a vertex before an edge, the nearer, with
+        the layout's answer) is the service's (app-core view::overlay)."""
+        mark = self.drc_mark
+        if mark is None or self.overlay_mode == 2 or not mark.get("pts"):
+            return []
+        pts = mark["pts"]
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        spp = self._drc_display_view()[1]   # the scale it is drawn at
+        if ((max(xs) - min(xs)) / spp < DRC_MARK_PX
+                and (max(ys) - min(ys)) / spp < DRC_MARK_PX):
+            return []   # drawn as the marker, not as its shape
+        if mark["kind"] == "p":
+            pairs = zip(pts, pts[1:] + pts[:1])
+        else:
+            pairs = ((pts[j], pts[j + 1])
+                     for j in range(0, len(pts) - 1, 2))
+        reach = r + 2   # the service asks around the whole dbu under (x, y)
+        out = []
+        for (ax, ay), (bx, by) in pairs:
+            if (max(ax, bx) < x - reach or min(ax, bx) > x + reach
+                    or max(ay, by) < y - reach or min(ay, by) > y + reach):
+                continue
+            out.append((ax, ay, bx, by))
+            if len(out) == SNAP_SHAPES_MAX:
+                break
+        return out
+
     def _request_snap(self):
         if not self.snap_on:
             return
@@ -12778,14 +12818,26 @@ class Viewer:
             return
         x, y = self._cursor
         r = max(1, int(10 * self.spp))
-        if self.tiles_spanned((x - r, y - r, x + r, y + r)) > 4:
-            return  # too far out for meaningful geometry snapping
+        shapes = self._snap_shapes(x, y, r)
+        # too far out for meaningful geometry snapping: the layout's is
+        # not asked - an error's shape drawn there still is
+        layout = self.tiles_spanned((x - r, y - r, x + r, y + r)) <= 4
+        if not layout and not shapes:
+            # nothing is asked here: no mark left behind from where the
+            # shape was in reach, and no late answer to bring one back
+            self._snap_res = None
+            self._snap_seq += 1
+            return
         self._snap_sent = now
         self._snap_seq += 1
-        self.worker.submit({
-            "kind": "snap", "seq": self._snap_seq,
-            "x": int(x), "y": int(y), "r": r,
-            "layers": self._layers_arg()})
+        job = {"kind": "snap", "seq": self._snap_seq,
+               "x": int(x), "y": int(y), "r": r,
+               "layers": self._layers_arg()}
+        if shapes:
+            job["overlay"] = shapes
+        if not layout:
+            job["layout"] = False
+        self.worker.submit(job)
 
     @property
     def selection(self):

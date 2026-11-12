@@ -736,6 +736,158 @@ def diagonal_gap_ui(v, d, pump):
     check(shown == [[0.64031], [0.14142]]
           and any("measured: 0.64031 um vs < 0.70000" in line for line in lines),
           "the viewer draws a diagonal gap as one ruler, the measured CD's", (shown, lines))
+    error_shape_snap_ui(v, d, pump)
+
+
+def error_shape_snap_ui(v, d, pump):
+    """The ruler's snap takes the error's shape (0.12.454, user 2026-11-12:
+    "룰러의 스냅이 에러 표시 도형에는 적용되지 않는데 적용되게 할 수 있을까?"):
+    the jumped error's edges are the viewer's own drawing and no part of the
+    layout a snap is answered from, so the snap passed their ends by. Now
+    they go with the snap's question, and a ruler drawn by hand from one end
+    of a diagonal gap to the other reads the CD and its X and Y parts. Two
+    edge pairs with diagonal_gap_ui's gaps, placed inside the sample's die
+    (the view does not leave the die, and a pointer is always in the view)."""
+    import math
+    from types import SimpleNamespace
+    from floe import gui
+    from floe_oracle import overlay_snap
+    db = d / "snap.db"
+    db.write_text("SAMPLE 100000\nSNAP.SPACE\n2 2 0\n"
+                  "e 1 2\n100000 320000 150000 320000\n200000 360000 250000 360000\n"   # corner to corner
+                  "e 2 2\n100000 550000 120000 570000\n130000 560000 150000 580000\n")  # 45 degrees
+    r = run([INDEX, "drc", str(db)])
+    check(r.returncode == 0, "snap fixture indexed", r.stderr)
+    check(v.load_drc(str(db)), "load the snap fixture")
+    pump(v, lambda: v._drc_group_cache_key is None, "snap fixture counts", 60)
+    v._drc_select_row(0)
+    ctx = gui.GLib.MainContext.default()
+    answers = []
+    handle = v._handle_result
+    v._handle_result = lambda res: (answers.append(res), handle(res))[1]
+
+    def hover(x_um, y_um, shift=False):
+        """The pointer at a point: its motion event and the snap's answer
+        there (a motion asks again while the frame shown is not the view's
+        yet - nothing is asked of a frame on its way)."""
+        box = v.view_bbox()
+        ev = SimpleNamespace(
+            x=(x_um / v.dbu - box[0]) / v.spp, y=(box[3] - y_um / v.dbu) / v.spp,
+            state=gui.Gdk.ModifierType.SHIFT_MASK if shift else gui.Gdk.ModifierType(0))
+        deadline = time.monotonic() + 60
+        said = []
+        while time.monotonic() < deadline:
+            del answers[:]
+            v._snap_sent = 0.0
+            v._on_motion(None, ev)
+            end = time.monotonic() + 0.25
+            while time.monotonic() < end:
+                while ctx.iteration(False):
+                    pass
+                got = [a for a in answers
+                       if a.get("kind") == "snap" and a.get("seq") == v._snap_seq]
+                if got:
+                    return ev, got[-1]
+                time.sleep(0.002)
+            said = answers[:] or said
+        raise AssertionError("no snap answer at (%g, %g) um: %r" % (x_um, y_um, said[-3:]))
+
+    def status_at(ev):
+        """The status line with the pointer moved once more where it is: the
+        line is written at a motion, from the snap known by then."""
+        v._on_motion(None, ev)
+        return v.status.get_text()
+
+    def probe(x_um, y_um):
+        """The snap at a point with the error's shape and without it, and
+        the reference's answer for the two."""
+        mark, v.drc_mark = v.drc_mark, None
+        try:
+            _, scene = hover(x_um, y_um)
+        finally:
+            v.drc_mark = mark
+        _, got = hover(x_um, y_um)
+        asked = got["request"]
+        shapes = v._snap_shapes(*v._cursor, max(1, int(10 * v.spp)))
+        want = overlay_snap.snap(shapes, asked["x"], asked["y"], asked["r"], scene)
+        same = (got["found"] == want["found"] and bool(got.get("overlay")) == bool(want.get("overlay"))
+                and (not want["found"] or (got["snap"] == want["snap"]
+                                           and abs(got["x"] - want["x"]) <= 1e-6
+                                           and abs(got["y"] - want["y"]) <= 1e-6)))
+        return got, scene, want, same
+
+    def at(got, x_um, y_um, kind):
+        return (got["found"] and got["snap"] == kind
+                and abs(got["x"] - x_um / v.dbu) <= 1e-6 and abs(got["y"] - y_um / v.dbu) <= 1e-6)
+    try:
+        if v.mode != "ruler":
+            v._toggle_ruler()
+        # 45-degree edges facing in part, (1, 5.5)-(1.2, 5.7) and (1.3, 5.6)-
+        # (1.5, 5.8): the gap's two ends, a point of an edge, a point away
+        v.drc_mark = None    # a viewing session of its own: the jump frames the error
+        v._drc_jump(0, 1)
+        seen = []
+        for what, x_um, y_um, kind in (("the first edge's end at the gap", 1.2, 5.7, "vertex"),
+                                       ("the second edge's end at the gap", 1.3, 5.6, "vertex"),
+                                       ("the first edge's far end", 1.0, 5.5, "vertex"),
+                                       ("the middle of the first edge", 1.1, 5.6, "edge"),
+                                       ("the middle of the second edge", 1.4, 5.7, "edge"),
+                                       ("a point off the shape", 1.25, 5.95, None)):
+            got, scene, want, same = probe(x_um, y_um)
+            check(same, "the snap at %s = the reference's" % what, (got, scene, want))
+            if kind is not None and got.get("overlay"):
+                check(at(got, x_um, y_um, kind), "the snap at %s is the shape's %s" % (what, kind), got)
+            if kind is None:
+                check(not got.get("overlay"), "off the shape the snap is not on it", got)
+            seen.append((what, bool(got.get("overlay"))))
+        check(all(on for what, on in seen[:3]),
+              "the error's edge ends are snapped to (no layout vertex is there)", seen)
+        # a ruler by hand between the gap's ends reads the CD, the status
+        # line its X and Y parts (free angle: Shift)
+        v._rulers_clear()
+        ev, got = hover(1.2, 5.7)
+        v._ruler_click(ev)
+        check(v._ruler_start is not None and at(got, 1.2, 5.7, "vertex")
+              and v._ruler_start == (got["x"], got["y"]),
+              "the ruler starts at the error edge's end", (v._ruler_start, got))
+        ev, got = hover(1.3, 5.6, shift=True)
+        said = status_at(ev)
+        v._ruler_click(ev)
+        ruler = v.rulers[-1] if v.rulers else None
+        check(ruler is not None and v._ruler_start is None
+              and round(math.hypot(ruler[2] - ruler[0], ruler[3] - ruler[1]) * v.dbu, 5) == 0.14142
+              and "measure 0.14142 um (dx 0.10000, dy -0.10000)" in said,
+              "a hand ruler from end to end of the gap reads the CD and its parts", (ruler, said))
+        # corner to corner, (1, 3.2)-(1.5, 3.2) and (2, 3.6)-(2.5, 3.6): the
+        # same ruler without Shift is the gap's longer part, the horizontal
+        v._rulers_clear()
+        v.drc_mark = None
+        v._drc_jump(0, 0)
+        ev, got = hover(1.5, 3.2)
+        v._ruler_click(ev)
+        ev, got = hover(2.0, 3.6)
+        said = status_at(ev)
+        check(at(got, 2.0, 3.6, "vertex") and "measure 0.50000 um (dx 0.50000, dy 0.00000)" in said,
+              "the ruler held to an axis reads the gap's horizontal part", (got, said))
+        ev, got = hover(2.0, 3.6, shift=True)
+        said = status_at(ev)
+        v._ruler_click(ev)
+        ruler = v.rulers[-1] if v.rulers else None
+        check(ruler is not None
+              and round(math.hypot(ruler[2] - ruler[0], ruler[3] - ruler[1]) * v.dbu, 5) == 0.64031
+              and "measure 0.64031 um (dx 0.50000, dy 0.40000)" in said,
+              "and with Shift the gap itself, the CD", (ruler, said))
+        # Tab's clean look hides the shape: it is no target then
+        v.overlay_mode = 2
+        check(v._snap_shapes(2.0 / v.dbu, 3.6 / v.dbu, max(1, int(10 * v.spp))) == [],
+              "overlays off: the error's shape is not offered")
+        v.overlay_mode = 0
+    finally:
+        v._handle_result = handle
+        v.overlay_mode = 0
+        v._rulers_clear()
+        if v.mode == "ruler":
+            v._toggle_ruler()
 
 
 def marker_length_groups(svc, temp):

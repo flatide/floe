@@ -336,7 +336,7 @@ P4b(perf 줄)는 따로 진행 중이다. 이 단계에서 GTK는 아직 그대�
 - **worker-client:** `WorkerClient::set_incomplete_queries`(`RenderSession`도)가 snap·pick 줄에 `incomplete=ok`를 붙이고, 그 답(`scene_complete=0`인 ok)을 받는다. 웹이 리터럴로 만드는 `QueryRequest`는 그대로 두었다.
 - **renderd(0.12.310):** snap·pick이 `incomplete=ok`를 받는다. 없으면 예전처럼 `scene_incomplete`로 거절한다.
 - **`floe2 gtk-service` 뷰 채널:**
-  - `view_query {view, frame, kind: snap|pick, x, y, r_px, nth?, layers?}`: x·y는 뷰포트 px, frame은 화면의 프레임 id다. 답은 `query` 이벤트.
+  - `view_query {view, frame, kind: snap|pick, x, y, r_px, nth?, layers?}`: x·y는 뷰포트 px, frame은 화면의 프레임 id다. 답은 `query` 이벤트. 0.12.454부터 snap은 `overlay`와 `layout`도 받는다(§15).
   - `view_cells {view, seq, kind, src?, cell?, pattern?, limit?, box?, cap?, root?}`: 답은 `cells` 이벤트(rust_render의 사전). 뷰의 워커가 아직 열리는 중이면(큰 캐시의 renderd 열기) 열릴 때까지 기다렸다가 묻고, 컨트롤러의 셀 대기열이 차 있으면 60초까지 다시 낸다. 다른 거절도 같은 seq의 `cells` 이벤트로 온다(0.12.340: 전에는 요청 오류로 돌아와 셀 트리가 `loading…`에 멈췄다 — main01, 2026-10-10).
   - `view_clip {view, seq, bbox, layers?, cell_name?, out}`: 쓰고 나면 `clip` 이벤트.
   - 프레임 이벤트에 `report`(Python 결과 사전 모양), `perf`([긴 줄, 짧은 줄]), `depth`가 붙는다.
@@ -557,3 +557,14 @@ P4d처럼 컨트롤러 루프에서만 바뀐다. `FLOE_GTK_LOOP=legacy`는 예�
   색인을 채운다), jobdeck(test_3 경량 기본, LOD 테스트의 `--full`, L6의 LightSummaryTests), index_lock
   K13, light_cache(ovo 동일·occupancy-only·force); 단위 테스트 app-core `the_light_cache_decisions`,
   app-cli `the_light_cache_is_a_mode_of_its_own`.
+
+## 15. 에러 도형의 스냅 (2026-11-12, app 0.12.454) — 규칙은 공유 Rust, 도형을 넘기는 것은 UI
+
+사용자: "룰러의 스냅이 에러 표시 도형에는 적용되지 않는데 적용되게 할 수 있을까?"
+
+- **app-core `view::overlay`:** `SnapSegment::new([x0, y0, x1, y1])`는 뷰 좌표(dbu)의 선분이고 정수가 아니어도 된다. 정수 dbu에서 1e-6 안이면 그 정수로 본다(호스트는 도형을 µm로 들고 있다). `OverlaySnap {x, y, kind}`, `SNAP_SEGMENTS_MAX` 256. 규칙은 `over(segments, request, scene_hit)` 하나다: 워커에 물은 그 점과 반경 안에서 끝점이 먼저이고 없으면 선분 위의 점이며, 장면의 답과는 vertex가 먼저, 같은 종류면 가까운 쪽, 거리가 같으면 장면의 것이다. 워커는 이 선분을 모른다(프로토콜과 renderd는 그대로다).
+- **컨트롤러:** `ViewQuery.overlay`는 snap만 받는다(pick에 주거나 한도를 넘으면 입력 오류). `ViewQueryResult.overlay`는 답이 선분 위일 때 `Some`이고, `reply.hit`에는 장면의 답이 그대로 남는다. 장면이 답하지 못해도(요약, 불완전, 오류) 선분의 답은 낸다. `measure(…, snap_id)`는 `overlay`가 있으면 그 점을 쓰고(`RulerPoint`의 소수 좌표), 없으면 전과 같다.
+- **서비스:** `view_query`의 `overlay: [[x0, y0, x1, y1], ..]`와 `layout: false`(장면은 묻지 않는다). 답이 선분 위이면 `x`·`y`가 소수일 수 있고 `overlay: true`가 붙는다.
+- **GTK 뷰어(UI):** 화면에 도형으로 그려진 점프 에러의 선분 가운데 커서 근처의 것을 질의에 싣는다(`_snap_shapes`, SPEC-VIEWER §9).
+- **웹(나중):** 브로커가 snap 질의를 만들 때 화면의 에러 도형 선분을 `ViewQuery.overlay`에 넣고, 결과를 내보낼 때 `overlay`를 `reply.hit`보다 먼저 보면 된다. `measure`는 그대로 쓴다. `ViewQuery`와 `ViewQueryResult`에 필드가 하나씩 늘었으므로, 머지할 때 웹의 생성 자리(`rust/web/src/query.rs`, `query_tests.rs`, `sharing/query.rs`)에 `overlay: Vec::new()`와 `overlay: None`을 넣어야 빌드된다.
+- **게이트:** `gtk_view`의 `overlay_snaps`(채널의 답 = 기준 구현 `floe_oracle/overlay_snap.py`, 거절)와 `error_shape_snaps`(실제 뷰어), `drc_analysis`의 `error_shape_snap_ui`(실제 점프와 손 룰러); 단위 app-core `view::overlay` 3개와 컨트롤러의 `a_snap_lands_on_the_shapes_drawn_over_the_frame`.

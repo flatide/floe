@@ -1414,14 +1414,25 @@ class ViewSession:
         self.snapshot = self._svc.request("view_cancel", view=self.view)
         return self.snapshot
 
-    def query(self, frame, kind, x, y, r_px, nth=0, layers=None):
+    def query(self, frame, kind, x, y, r_px, nth=0, layers=None,
+              overlay=None, layout=True):
         """A snap or pick at viewport pixel (x, y) of the frame shown
         (its id); the controller's query id - the answer is a ("query",
-        result) event carrying it."""
+        result) event carrying it. `overlay`: the segments [x0, y0, x1,
+        y1] (dbu, the view's) of what the viewer draws over the frame
+        around the point - a snap lands on them as on the layout's
+        geometry (app-core view::overlay; its answer then has `overlay`:
+        True). `layout` False: the layout's geometry is not asked."""
+        more = {}
+        if overlay:
+            more["overlay"] = [[float(v) for v in seg] for seg in overlay]
+        if not layout:
+            more["layout"] = False
         return self._svc.request(
             "view_query", view=self.view, frame=int(frame), kind=kind,
             x=float(x), y=float(y), r_px=float(r_px), nth=int(nth),
-            layers=[list(l) for l in layers] if layers else None)["id"]
+            layers=[list(l) for l in layers] if layers else None,
+            **more)["id"]
 
     def minimap(self, depth=None, bbox=None):
         """The overview's base image for `depth` (None: full) and the die's
@@ -1677,7 +1688,9 @@ class ViewWorker:
                     qid = self.session.query(
                         self.shown, kind, px, py, r_px,
                         nth=int(job.get("nth", 0)),
-                        layers=job.get("layers"))
+                        layers=job.get("layers"),
+                        overlay=job.get("overlay"),
+                        layout=job.get("layout", True))
                 except ServiceError as exc:
                     if exc.kind == "busy":
                         return      # the frame shown is not this state's

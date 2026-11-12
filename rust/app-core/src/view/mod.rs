@@ -8,6 +8,7 @@ pub mod deck_mode;
 mod fill_slots;
 pub mod margin;
 pub mod minimap;
+mod overlay;
 mod palette;
 mod palette_style;
 pub mod perf;
@@ -32,6 +33,7 @@ pub use floe_worker_client::{
     CellReply, CellRequest, CellSource, QueryKind, QueryOperation,
 };
 use floe_worker_client::{Layers, RenderRequest, Style};
+pub use overlay::{OverlaySnap, SnapSegment, SNAP_SEGMENTS_MAX};
 pub use palette::{LayerAction, LayerBatch};
 pub use palette_style::{StyleBatch, WidthEdit};
 pub use query::{QueryAnchor, QuerySnapshot, ViewQuery, ViewQueryResult};

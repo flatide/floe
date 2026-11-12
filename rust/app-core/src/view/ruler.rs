@@ -125,6 +125,11 @@ impl RulerPoint {
     pub(super) fn snapped(x: i64, y: i64) -> Self {
         Self([Coordinate::Integer(x), Coordinate::Integer(y)])
     }
+    /// A snap on a shape drawn over the frame (`overlay::over`): its own
+    /// coordinates, on the dbu grid or off it.
+    pub(super) fn drawn(x: f64, y: f64) -> Result<Self> {
+        Ok(Self([Coordinate::number(x)?, Coordinate::number(y)?]))
+    }
     pub(super) fn cursor(v: Viewport, position: [f64; 2]) -> Result<Self> {
         if !position
             .iter()

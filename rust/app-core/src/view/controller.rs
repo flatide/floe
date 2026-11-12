@@ -992,6 +992,8 @@ impl ViewController {
     /// this does not require an exact scene (including deck/summary views).
     /// A supplied snap ID must still be the current successful query at this
     /// position and anchor; a refusal is never converted to an unsnapped point.
+    /// A snap that landed on a shape the query was given (`ViewQuery::overlay`)
+    /// is that shape's point whatever the scene answered.
     pub fn measure(
         &self,
         anchor: QueryAnchor,
@@ -1021,25 +1023,33 @@ impl ViewController {
                     position,
                     radius_px: 0.,
                     layers: floe_worker_client::Layers::All,
+                    overlay: Vec::new(),
                 },
                 &self.model,
             )?;
             if result.reply.request.x != native.x || result.reply.request.y != native.y {
                 return Err(Error::input("snap position changed"));
             }
-            if result.reply.status != QueryStatus::Ok {
-                return Err(Error::new(
-                    ErrorKind::Incomplete,
-                    "snap did not complete successfully",
-                ));
-            }
-            match &result.reply.hit {
-                Some(QueryHit::Snap(hit)) => {
-                    point = super::RulerPoint::snapped(hit.x, hit.y);
-                    snap = Some(hit.kind);
+            if let Some(drawn) = result.overlay {
+                // on a shape drawn over the frame: its own coordinates, and
+                // no question of what the scene could say
+                point = super::RulerPoint::drawn(drawn.x, drawn.y)?;
+                snap = Some(drawn.kind);
+            } else {
+                if result.reply.status != QueryStatus::Ok {
+                    return Err(Error::new(
+                        ErrorKind::Incomplete,
+                        "snap did not complete successfully",
+                    ));
                 }
-                None => (),
-                _ => return Err(Error::new(ErrorKind::Worker, "invalid snap result")),
+                match &result.reply.hit {
+                    Some(QueryHit::Snap(hit)) => {
+                        point = super::RulerPoint::snapped(hit.x, hit.y);
+                        snap = Some(hit.kind);
+                    }
+                    None => (),
+                    _ => return Err(Error::new(ErrorKind::Worker, "invalid snap result")),
+                }
             }
         }
         super::ruler::measure(start, point, free_angle, self.model.dbu, snap)
@@ -1630,10 +1640,17 @@ fn consume_query(s: &mut Shared, reply: QueryReply, model: &Model) -> Result<()>
     if s.queries.slots[k].latest != Some(ticket.id) || !s.anchor_valid(ticket.input.anchor, model) {
         s.queries.discard(&ticket);
     } else {
+        // the shapes the host draws over the frame, with the scene's answer
+        let scene = match &reply.hit {
+            Some(floe_worker_client::QueryHit::Snap(hit)) => Some(hit),
+            _ => None,
+        };
+        let overlay = super::overlay::over(&ticket.input.overlay, &reply.request, scene);
         s.queries.slots[k].result = Some(Arc::new(ViewQueryResult {
             id: ticket.id,
             anchor: ticket.input.anchor,
             reply,
+            overlay,
         }));
     }
     Ok(())

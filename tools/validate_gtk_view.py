@@ -75,6 +75,7 @@ sys.path.insert(0, str(ROOT / "tools" / "oracle"))  # floe_oracle (P3)
 from floe import gtkservice  # noqa: E402
 from floe_oracle.rust_render import RustRenderWorker  # noqa: E402
 from floe_oracle.cache import Cache  # noqa: E402
+from floe_oracle import overlay_snap  # noqa: E402
 from floe_oracle.perf_line import perf_status  # noqa: E402
 
 W, H = 400, 300
@@ -170,6 +171,96 @@ def reference_answer(ref, job, kind):
     raise AssertionError("reference %s timeout" % kind)
 
 
+def overlay_snaps(s, frame):
+    """A snap takes what the viewer draws over the frame too (0.12.454, user
+    2026-11-12: "룰러의 스냅이 에러 표시 도형에는 적용되지 않는데 적용되게 할
+    수 있을까?"): the segments of an error's shape go with the question
+    (`overlay`) and are judged with the layout's answer by its own rule, a
+    vertex before an edge and then the nearer - = the reference's
+    (floe_oracle/overlay_snap.py) for the same segments and that answer."""
+    def snap(**more):
+        qid = s.query(frame["id"], "snap", W / 2, H / 2, 10, **more)
+        return answer(s, "query", lambda v, qid=qid: v["id"] == qid)
+
+    def same(got, want):
+        if not want["found"]:
+            return got.get("found") is False and "overlay" not in got
+        return all(got.get(k) == want.get(k)
+                   for k in ("found", "x", "y", "snap", "overlay"))
+    scene = snap()
+    x, y, r = (scene["request"][k] for k in ("x", "y", "r"))
+    check(scene["found"] and "overlay" not in scene and r >= 8,
+          "the fixture's snap at the centre: %r" % scene)
+    um = 0.001   # a host holds its shapes in micrometres: not whole dbu again
+    cases = (
+        ("a segment out of reach",
+         [[x + 3 * r, y + 3 * r, x + 5 * r, y + 3 * r]]),
+        ("an end beside the cursor, off the grid",
+         [[x + 0.25, y - 0.5, x + 4 * r, y - 0.5]]),
+        ("an end at the reach's rim", [[x + r, y, x + 3 * r, y]]),
+        ("an end a dbu past the rim", [[x + r + 1, y, x + 3 * r, y]]),
+        ("a segment through the reach, its ends out of it",
+         [[x - 3 * r, y + 1.5, x + 3 * r, y + 1.5]]),
+        ("a slanted segment",
+         [[x - 2 * r, y - 2 * r + 2, x + 2 * r, y + 2 * r + 2]]),
+        ("a point from micrometres",
+         [[(x + 2) * um / um, (y + 3) * um / um] * 2]),
+        ("several, the nearest end of them",
+         [[x + 3 * r, y, x + 5 * r, y], [x - 4, y - 3, x - 4, y - 3 * r],
+          [x - 3 * r, y + 1.5, x + 3 * r, y + 1.5], [x + 2, y + 3, x + r, y + 3]]),
+    )
+    with_layout, alone = [], []
+    for what, segments in cases:
+        got = snap(overlay=segments)
+        want = overlay_snap.snap(segments, x, y, r, scene)
+        check(same(got, want), "snap with %s: channel %r, reference %r (the layout's %r)"
+              % (what, got, want, scene))
+        with_layout.append(got)
+        # the layout not asked (a view too far out for its geometry)
+        got = snap(overlay=segments, layout=False)
+        want = overlay_snap.snap(segments, x, y, r)
+        check(same(got, want), "snap with %s alone: channel %r, reference %r"
+              % (what, got, want))
+        alone.append(got)
+    check(same(with_layout[0], scene) and same(with_layout[3], scene),
+          "a segment out of reach leaves the layout's answer: %r" % with_layout[:4])
+    check(with_layout[1].get("overlay") and with_layout[1]["snap"] == "vertex"
+          and (with_layout[1]["x"], with_layout[1]["y"]) == (x + 0.25, y - 0.5),
+          "an end beside the cursor is the snap, as it is: %r" % with_layout[1])
+    check([(a["found"], a.get("snap"), a.get("x"), a.get("y")) for a in alone] == [
+        (False, "", 0, 0), (True, "vertex", x + 0.25, y - 0.5), (True, "vertex", x + r, y),
+        (False, "", 0, 0), (True, "edge", x, y + 1.5), (True, "edge", x - 1, y + 1),
+        (True, "vertex", x + 2, y + 3), (True, "vertex", x + 2, y + 3)]
+        and all(a.get("overlay") for a in alone if a["found"]),
+        "the segments alone: %r" % alone)
+    check(snap(layout=False)["found"] is False, "nothing asked, nothing found")
+    check(same(snap(overlay=[[x + 2, y + 3, x + r, y + 3]] * 256, layout=False), alone[-1]),
+          "256 segments are taken")
+
+    def refused(kind="snap", **fields):
+        try:
+            s._svc.request("view_query", view=s.view, frame=int(frame["id"]), kind=kind,
+                           x=W / 2.0, y=H / 2.0, r_px=10.0, **fields)
+        except gtkservice.ServiceError as exc:
+            return "%s: %s" % (exc.kind, exc)
+        return None
+    one = [x, y, x + 1, y]
+    for what, fields in (("no list", {"overlay": "near"}),
+                         ("three numbers", {"overlay": [one[:3]]}),
+                         ("a word among them", {"overlay": [one[:3] + ["x"]]}),
+                         ("a number out of range", {"overlay": [[1e300, 0, 1, 1]]}),
+                         ("more than 256", {"overlay": [one] * 257}),
+                         ("a layout neither on nor off", {"layout": "no"})):
+        said = refused(**fields)
+        check(said is not None and said.startswith("input: "),
+              "view_query with %s: %r" % (what, said))
+    said = refused(kind="pick", overlay=[one])
+    check(said is not None and "only a snap takes overlay segments" in said,
+          "a pick with overlay segments: %r" % said)
+    print("overlay snaps: %d cases with the layout's answer %s (%s, %s), reach %d dbu"
+          % (len(cases), scene["snap"], scene["x"], scene["y"], r))
+
+
 def queries_and_cells(s, ref, frame, temp):
     """snap, pick, the cell tree and a clip through the channel = the
     viewer's adapter's answers for the same request."""
@@ -189,6 +280,7 @@ def queries_and_cells(s, ref, frame, temp):
                 a, b = [list(p) for p in a or []], [list(p) for p in b or []]
             check(a == b, "%s %s: channel %r, adapter %r" % (kind, key, a, b))
         check(got["found"], "%s at the view's centre found nothing" % kind)
+    overlay_snaps(s, frame)
     for n, (kind, fields) in enumerate((
             ("cell_sources", {}), ("cells", {"src": 0}),
             ("cell_find", {"src": -1, "pattern": "", "limit": 50}))):
@@ -464,6 +556,105 @@ def border_parity(v):
     check(v.overlay_mode == 0 and v._border_shown is not None, "the border did not return")
     print("scale border: %d + %d segments of %s, the corners' chips, a pan, off, Tab"
           % (len(border["x"]), len(border["y"]), border["label"]))
+
+
+def error_shape_snaps(v, answers, x, y, scene):
+    """The ruler's snap takes the error shape drawn over the frame (0.12.454):
+    the jumped error's edges - the viewer's own drawing, no part of the
+    layout a snap is answered from - go with the snap's question where they
+    are drawn as the shape, and the answer is the one snap of the two
+    (floe_oracle/overlay_snap.py). `scene`: the layout's own answer at the
+    view's centre (x, y), just asked."""
+    from floe import gui
+    X, Y = int(x), int(y)
+    r = max(1, int(10 * v.spp))
+    # the whole dbu and the reach the controller asks about for this pixel
+    RX, RY, reach = (scene["request"][k] for k in ("x", "y", "r"))
+    check(r >= 4 and abs(RX - X) <= 1 and abs(RY - Y) <= 1,
+          "the fixture's snap: reach %d dbu, asked at (%d, %d) for (%d, %d)" % (r, RX, RY, X, Y))
+    check(v.drc_mark is None and v._snap_shapes(x, y, r) == [],
+          "no error jumped to: nothing drawn to snap to")
+    sent = []
+    submit = v.worker.submit
+    v.worker.submit = lambda job: (sent.append(job), submit(job))[1]
+
+    def ask(expect_sent=True):
+        """One hover at the centre: the job sent and its answer."""
+        v._cursor = (x, y)
+        v._snap_sent = 0.0
+        del sent[:], answers[:]
+        seq = v._snap_seq
+        v._request_snap()
+        if not expect_sent:
+            return (sent[:], seq)
+        check(len(sent) == 1 and v._snap_seq == seq + 1, "a snap asked: %r" % sent)
+        pump(v, lambda: any(a.get("kind") in ("snap", "error") for a in answers),
+             "snap answer", 60)
+        return sent[0], [a for a in answers if a.get("kind") in ("snap", "error")][-1]
+
+    def same(got, want):
+        if got.get("kind") != "snap":
+            return False
+        if not want["found"]:
+            return got.get("found") is False and "overlay" not in got
+        return all(got.get(k) == want.get(k)
+                   for k in ("found", "x", "y", "snap", "overlay"))
+    try:
+        # an edge pair: one edge ends beside the cursor, the other is away
+        near = (X - 2 * r, Y + 1.5, X + 0.25, Y + 1.5)
+        v.drc_mark = {"kind": "e", "pts": [near[:2], near[2:], (X + 3 * r, Y - 3 * r),
+                                           (X + 3 * r, Y + 3 * r)]}
+        check(v._snap_shapes(x, y, r) == [near],
+              "the error's edges in reach of the snap: %r" % v._snap_shapes(x, y, r))
+        job, got = ask()
+        want = overlay_snap.snap([near], RX, RY, reach, scene)
+        check(job.get("overlay") == [near] and "layout" not in job and same(got, want)
+              and got.get("overlay") and (got["x"], got["y"]) == (X + 0.25, Y + 1.5)
+              and v._snap_res is got and v._cursor_snapped() == (X + 0.25, Y + 1.5),
+              "the snap lands on the error edge's end: job %r, answer %r, reference %r"
+              % (job, got, want))
+        # a polygon: its outline, the closing edge with it
+        tip, a, b = (X + 0.25, Y + 1.5), (X + 3 * r, Y + 3 * r), (X - 3 * r, Y + 3 * r)
+        v.drc_mark = {"kind": "p", "pts": [tip, a, b]}
+        shapes = v._snap_shapes(x, y, r)
+        check(shapes == [tip + a, b + tip], "a polygon's edges in reach: %r" % shapes)
+        job, got = ask()
+        check(job.get("overlay") == shapes and same(got, overlay_snap.snap(shapes, RX, RY, reach, scene)),
+              "the snap on a polygon's corner: %r" % got)
+        # too far out for the layout's geometry: the shape alone is asked
+        tiles = v.tiles_spanned
+        v.tiles_spanned = lambda box: 99
+        try:
+            job, got = ask()
+            check(job.get("layout") is False and job.get("overlay") == shapes
+                  and same(got, overlay_snap.snap(shapes, RX, RY, reach)),
+                  "too far out: the error's shape alone: job %r, answer %r" % (job, got))
+            # ... and with nothing drawn in reach nothing is asked, and no
+            # snap is left behind
+            v.drc_mark = None
+            check(v._snap_res is not None, "a snap is held")
+            jobs, seq = ask(expect_sent=False)
+            check(jobs == [] and v._snap_res is None and v._snap_seq == seq + 1,
+                  "too far out and nothing drawn: jobs %r, held %r" % (jobs, v._snap_res))
+        finally:
+            v.tiles_spanned = tiles
+        # an error drawn as its marker circle is no shape to snap to; nor
+        # is one hidden with the overlays (Tab)
+        v.drc_mark = {"kind": "e", "pts": [(X, Y), (X + (gui.DRC_MARK_PX - 1) * v.spp, Y)]}
+        check(v._snap_shapes(x, y, r) == [], "an error drawn as its marker is not offered")
+        v.drc_mark = {"kind": "e", "pts": [(X, Y), (X + (gui.DRC_MARK_PX + 1) * v.spp, Y)]}
+        check(len(v._snap_shapes(x, y, r)) == 1, "one drawn as its shape is")
+        v.overlay_mode = 2
+        check(v._snap_shapes(x, y, r) == [], "overlays off: nothing drawn to snap to")
+        job, got = ask()
+        check("overlay" not in job and same(got, scene),
+              "overlays off: the layout's answer as it was: %r" % got)
+        v.overlay_mode = 0
+    finally:
+        v.worker.submit = submit
+        v.drc_mark = None
+        v.overlay_mode = 0
+        v._snap_res = None
 
 
 def cell_status(v, answers):
@@ -845,6 +1036,7 @@ def gui_viewer(src, ref):
         check(got["kind"] == "snap" and got["seq"] == 41 and all(
             got.get(k) == want.get(k) for k in ("found", "x", "y", "snap")),
             "snap: viewer %r, adapter %r" % (got, want))
+        error_shape_snaps(v, answers, x, y, got)
         print("viewer: %d frame(s), perf %r" % (len(frames), last["perf"][1]))
         # the own cut: no level lit, the status line says it; a refused
         # entry keeps it; a level button ends it

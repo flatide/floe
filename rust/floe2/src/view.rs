@@ -14,10 +14,21 @@
 //!                                         progress stops)
 //!   view_snapshot {view}               -> snapshot
 //!   view_close {view}                  -> null
-//!   view_query {view, frame, kind: snap|pick, x, y, r_px, nth?, layers?}
-//!                                      -> {id}; the answer is a `query` event
+//!   view_query {view, frame, kind: snap|pick, x, y, r_px, nth?, layers?,
+//!               overlay?, layout?}     -> {id}; the answer is a `query` event
 //!                                         (x, y in viewport px from its
-//!                                         top-left; frame = the frame shown)
+//!                                         top-left; frame = the frame shown;
+//!                                         overlay = [[x0, y0, x1, y1], ..],
+//!                                         the segments of what the viewer
+//!                                         draws over the frame around the
+//!                                         cursor (a DRC error's shape; dbu,
+//!                                         the view's) - a snap lands on them
+//!                                         as on the layout's geometry and
+//!                                         its answer then has `overlay`:
+//!                                         true (app-core view::overlay);
+//!                                         layout = false: the layout's
+//!                                         geometry is not asked, the
+//!                                         segments alone)
 //!   view_cells {view, seq, kind: cell_sources|cells|cell_find|cell_bbox|
 //!               cell_insts|cell_info, src?, cell?, pattern?, limit?, box?,
 //!               cap?, root?}       -> null; the answer is a `cells` event
@@ -62,8 +73,8 @@ use floe_app_core::{
     view::{
         border, cell_info, minimap, perf, CellOutcome, CellReply, CellRequest, ControllerOptions, Depth,
         DesktopPolicy, DisplayFrame, Model, Navigation, Patch, Phase, Purpose, QueryOperation,
-        RootEdit, Snapshot, StyleDelta, ViewController, ViewQuery, ViewQueryResult, ViewState,
-        Viewport,
+        RootEdit, SnapSegment, Snapshot, StyleDelta, ViewController, ViewQuery, ViewQueryResult,
+        ViewState, Viewport,
     },
     Error, ErrorKind, Result,
 };
@@ -204,6 +215,13 @@ impl Views {
                     }
                     Some(_) => return Err(Error::input("layers must be a list")),
                 };
+                // a view too far out for the layout's geometry still has
+                // what is drawn over it
+                let layers = match request.get("layout") {
+                    None | Some(Value::Null) | Some(Value::Bool(true)) => layers,
+                    Some(Value::Bool(false)) => Layers::None,
+                    Some(_) => return Err(Error::input("layout must be true or false")),
+                };
                 let id = view.controller.query(ViewQuery {
                     anchor,
                     operation,
@@ -213,6 +231,7 @@ impl Views {
                     ],
                     radius_px: num("r_px")?,
                     layers,
+                    overlay: overlay_segments(request.get("overlay"))?,
                 })?;
                 Ok(json!({"id": id}))
             }
@@ -598,8 +617,31 @@ fn frame_json(frame: &DisplayFrame, path: &PathBuf) -> Value {
     })
 }
 
+/// The segments of what the viewer draws over the frame, for a snap:
+/// `[[x0, y0, x1, y1], ..]` in the view's dbu, whole or not.
+fn overlay_segments(v: Option<&Value>) -> Result<Vec<SnapSegment>> {
+    let bad = || Error::input("overlay must be a list of [x0, y0, x1, y1]");
+    match v {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(segments)) => segments
+            .iter()
+            .map(|s| {
+                let ends = s
+                    .as_array()
+                    .filter(|a| a.len() == 4)
+                    .and_then(|a| a.iter().map(Value::as_f64).collect::<Option<Vec<_>>>())
+                    .ok_or_else(bad)?;
+                SnapSegment::new([ends[0], ends[1], ends[2], ends[3]])
+            })
+            .collect(),
+        Some(_) => Err(bad()),
+    }
+}
+
 /// A snap or pick answer as floe_oracle/rust_render.py gave it (`id` is the
-/// controller's query id; `seq` stays the viewer's to set).
+/// controller's query id; `seq` stays the viewer's to set). A snap that
+/// landed on a segment it was given says that point - the segment's own
+/// coordinates, whole dbu or not - and `overlay`: true.
 fn query_json(kind: &str, r: &ViewQueryResult) -> Value {
     use floe_worker_client::QueryStatus;
     let mut o = Map::new();
@@ -621,18 +663,24 @@ fn query_json(kind: &str, r: &ViewQueryResult) -> Value {
                 .unwrap_or_else(|| format!("{:?}", r.reply.status).to_lowercase())),
         );
     }
+    let snap_kind = |kind: SnapKind| match kind {
+        SnapKind::Vertex => "vertex",
+        SnapKind::Edge => "edge",
+    };
+    if let Some(drawn) = r.overlay.filter(|_| kind == "snap") {
+        o.insert("found".into(), json!(true));
+        o.insert("x".into(), json!(drawn.x));
+        o.insert("y".into(), json!(drawn.y));
+        o.insert("snap".into(), json!(snap_kind(drawn.kind)));
+        o.insert("overlay".into(), json!(true));
+        return Value::Object(o);
+    }
     match &r.reply.hit {
         Some(QueryHit::Snap(h)) => {
             o.insert("found".into(), json!(true));
             o.insert("x".into(), json!(h.x));
             o.insert("y".into(), json!(h.y));
-            o.insert(
-                "snap".into(),
-                json!(match h.kind {
-                    SnapKind::Vertex => "vertex",
-                    SnapKind::Edge => "edge",
-                }),
-            );
+            o.insert("snap".into(), json!(snap_kind(h.kind)));
         }
         Some(QueryHit::Pick(p)) => {
             o.insert("found".into(), json!(true));

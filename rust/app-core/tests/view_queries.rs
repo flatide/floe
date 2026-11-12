@@ -49,6 +49,7 @@ fn request(
         ],
         radius_px: 1.,
         layers,
+        overlay: Vec::new(),
     }
 }
 fn answer(v: &ViewController, q: ViewQuery) -> Arc<ViewQueryResult> {

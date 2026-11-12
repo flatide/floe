@@ -30,6 +30,7 @@ fn input(v: &ViewController, operation: super::super::super::QueryOperation) -> 
         position: [0.5, 0.5],
         radius_px: 10.,
         layers: Layers::All,
+        overlay: Vec::new(),
     }
 }
 fn result(v: &ViewController, id: u64, kind: QueryKind) -> Arc<ViewQueryResult> {
@@ -210,6 +211,124 @@ fn manual_measurements_only_reuse_current_successful_snap_at_same_point() {
 }
 
 #[test]
+fn a_snap_lands_on_the_shapes_drawn_over_the_frame() {
+    use crate::view::{OverlaySnap, RulerPoint, SnapSegment, SNAP_SEGMENTS_MAX};
+    use floe_worker_client::{SnapHit, SnapKind};
+    let (r, c, mut v) = setup(false);
+    // the fixture's view is one dbu a pixel: its middle is (400, 320) and a
+    // snap reaches 10 dbu
+    let ask = |v: &ViewController, overlay: Vec<SnapSegment>| {
+        let mut q = input(v, QueryOperation::Snap);
+        q.overlay = overlay;
+        let id = v.query(q.clone()).unwrap();
+        (q, id, result(v, id, QueryKind::Snap))
+    };
+    let edge = vec![SnapSegment::new([300., 317.5, 404., 317.5]).unwrap()];
+    let end = Some(OverlaySnap {
+        x: 404.,
+        y: 317.5,
+        kind: SnapKind::Vertex,
+    });
+    // nothing of the scene in reach: the shape's end, off the grid as it is
+    let (q, id, got) = ask(&v, edge.clone());
+    assert!(got.reply.hit.is_none());
+    assert_eq!(got.overlay, end);
+    let at = v
+        .measure(q.anchor, q.position, None, false, Some(id))
+        .unwrap();
+    assert_eq!(at.point.strings(), ["404", "317.5"]);
+    assert_eq!(at.snap, Some(SnapKind::Vertex));
+    let start = RulerPoint::parse(["300", "317.5"]).unwrap();
+    let ruler = v
+        .measure(q.anchor, q.position, Some(start), false, Some(id))
+        .unwrap()
+        .segment
+        .unwrap();
+    assert_eq!(ruler.delta_um, [104. * v.model.dbu, 0.]);
+    // the scene's vertex nearer than the shape's end: the scene's stands
+    *c.snap_hit.lock().unwrap() = Some(SnapHit {
+        x: 401,
+        y: 320,
+        kind: SnapKind::Vertex,
+    });
+    let (q, id, got) = ask(&v, edge.clone());
+    assert_eq!(got.overlay, None);
+    assert_eq!(
+        v.measure(q.anchor, q.position, None, false, Some(id))
+            .unwrap()
+            .point
+            .strings(),
+        ["401", "320"]
+    );
+    // the scene's edge and the shape's end: a vertex before an edge, and
+    // the scene's own answer stays beside the one taken
+    *c.snap_hit.lock().unwrap() = Some(SnapHit {
+        x: 400,
+        y: 321,
+        kind: SnapKind::Edge,
+    });
+    let (q, id, got) = ask(&v, edge.clone());
+    assert_eq!(got.overlay, end);
+    assert!(got.reply.hit.is_some());
+    assert_eq!(
+        v.measure(q.anchor, q.position, None, false, Some(id))
+            .unwrap()
+            .point
+            .strings(),
+        ["404", "317.5"]
+    );
+    // a scene that cannot answer has no say about the shape; without a
+    // shape the ruler refuses its answer as it did
+    *c.snap_hit.lock().unwrap() = None;
+    c.snap_summary.store(true, Ordering::Relaxed);
+    let (q, id, got) = ask(&v, edge.clone());
+    assert_eq!(got.reply.status, QueryStatus::Summary);
+    assert_eq!(got.overlay, end);
+    assert_eq!(
+        v.measure(q.anchor, q.position, None, false, Some(id))
+            .unwrap()
+            .point
+            .strings(),
+        ["404", "317.5"]
+    );
+    let (q, id, got) = ask(&v, Vec::new());
+    assert_eq!(got.overlay, None);
+    assert_eq!(
+        v.measure(q.anchor, q.position, None, false, Some(id))
+            .unwrap_err()
+            .kind,
+        ErrorKind::Incomplete
+    );
+    c.snap_summary.store(false, Ordering::Relaxed);
+    // a shape out of reach is no answer
+    let away = vec![SnapSegment::new([300., 300., 380., 300.]).unwrap()];
+    assert_eq!(ask(&v, away).2.overlay, None);
+    // the worker is asked what it always was: the shapes are not its
+    assert!(c
+        .query_requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|(_, r)| (r.x, r.y, r.radius) == (400, 320, 10)));
+    // a pick takes none, and a snap no more than its limit - refused
+    // before anything is asked
+    let before = v.query_snapshot().accepted;
+    let mut bad = input(&v, QueryOperation::Pick { nth: 0 });
+    bad.overlay = edge.clone();
+    assert_eq!(v.query(bad).unwrap_err().kind, ErrorKind::InvalidInput);
+    let mut bad = input(&v, QueryOperation::Snap);
+    bad.overlay = vec![edge[0]; SNAP_SEGMENTS_MAX + 1];
+    assert_eq!(v.query(bad).unwrap_err().kind, ErrorKind::InvalidInput);
+    assert_eq!(v.query_snapshot().accepted, before);
+    let mut most = input(&v, QueryOperation::Snap);
+    most.overlay = vec![edge[0]; SNAP_SEGMENTS_MAX];
+    let id = v.query(most).unwrap();
+    assert_eq!(result(&v, id, QueryKind::Snap).overlay, end);
+    v.close().unwrap();
+    assert_eq!(r.usage(), Usage::default());
+}
+
+#[test]
 fn cursor_measurement_is_independent_of_deck_and_incomplete_geometry() {
     for deck in [false, true] {
         let r = Resources::new(Limits::default()).unwrap();
@@ -346,6 +465,7 @@ fn input_from_anchor(anchor: QueryAnchor) -> ViewQuery {
         position: [0.5, 0.5],
         radius_px: 10.,
         layers: Layers::All,
+        overlay: Vec::new(),
     }
 }
 

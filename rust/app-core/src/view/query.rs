@@ -1,5 +1,5 @@
 //! Display-anchored queries. No frame bytes, file paths or network authority.
-use super::{margin, DisplayFrame, Model, Snapshot, Viewport};
+use super::{margin, overlay, DisplayFrame, Model, OverlaySnap, SnapSegment, Snapshot, Viewport};
 use crate::{Error, ErrorKind, Result};
 use floe_worker_client::{Layers, QueryKind, QueryOperation, QueryReply, QueryRequest, QueryScene};
 use std::{collections::BTreeMap, sync::Arc};
@@ -25,6 +25,11 @@ pub struct ViewQuery {
     pub radius_px: f64,
     /// All means the current visible selection. Explicit pairs must be visible.
     pub layers: Layers,
+    /// A snap's other targets: the segments of what the host draws over the
+    /// frame around this position (a DRC error's marker), in the view's
+    /// coordinates. They are judged with the scene's answer (`overlay::over`);
+    /// a pick takes none.
+    pub overlay: Vec<SnapSegment>,
 }
 #[derive(Clone, Debug)]
 pub struct ViewQueryResult {
@@ -32,6 +37,12 @@ pub struct ViewQueryResult {
     pub anchor: QueryAnchor,
     /// Native errors are local diagnostics; transports must map safe codes.
     pub reply: QueryReply,
+    /// The snap's answer when it is on a shape the query was given
+    /// (`ViewQuery::overlay`) and not the scene's `reply.hit` - which is then
+    /// the scene's own, a worse one or none. Its being there does not wait
+    /// for `reply.status`: a scene that could not answer has no say about
+    /// what is drawn over it.
+    pub overlay: Option<OverlaySnap>,
 }
 #[derive(Clone, Debug, Default)]
 pub struct QuerySnapshot {
@@ -261,6 +272,10 @@ pub(super) fn request(
             "published query scene is incomplete",
         ));
     }
+    if !input.overlay.is_empty() && input.operation.kind() != QueryKind::Snap {
+        return Err(Error::input("only a snap takes overlay segments"));
+    }
+    overlay::validate(&input.overlay)?;
     if !input
         .position
         .iter()
