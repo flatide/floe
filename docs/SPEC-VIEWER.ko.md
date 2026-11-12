@@ -410,10 +410,20 @@
   프로세스였다(뷰어·gtk-service·renderd 한 벌씩, 작은 샘플에서 234 MB).
   - 요청 한 줄(`viewcli.cmd_view`): `경로\tkey=value…`. 뷰 옵션(`goto`·`detail`·`depth`·`frames`·`labels`·`labelpx`·
     `levels`·`thin`·`density`·`occupancy`)에 더해 `drc=`(결과 .db의 절대 경로), `rules=`, `userid=`(그 실행이 명시한
-    리뷰어: `--userid`나 `FLOE_REVIEWER`), `noload=1`, `layerprops=`(0.12.451: 레이어 속성 파일의 실제 경로)가 간다. `--drc`가 없는 파일이면 보내기 전에 1로 끝난다
+    리뷰어: `--userid`나 `FLOE_REVIEWER`), `noload=1`, `layerprops=`(0.12.451: 레이어 속성 파일의 실제 경로), `drcrule=`와 `drcerr=`(0.12.461: 결과에서 선택할 룰 이름과 그 룰의 에러 번호; 아래 "룰과 에러 지정")가 간다. `--drc`가 없는 파일이면 보내기 전에 1로 끝난다
     (`no such DRC results file`). 넘긴 요청은 창이 결과를 열어 보기 전에 답을 받기 때문이다. 탭이나 줄바꿈이 든
     경로·ID는 한 줄에 실을 수 없어 독립 창으로 뜬다. `--multi`와 렌더 프로세스 옵션(`--stream-kb`·
     `--stream-target-ms`·`--render-debug`·`--frame-cache off`·`--margin on`·`--layer-colors`)은 전과 같이 독립 창이다.
+  - 룰과 에러 지정(0.12.461, `--drc-rule NAME` / `--drc-err N`; `Viewer._drc_launch_pick`): 결과가 열린 뒤 룰
+    행을 선택하고(`_drc_select_row` = 클릭), 번호가 있으면 그 에러로 `_drc_goto_cell` + `_drc_jump(isolate=True)`
+    (= 번호 더블클릭)한다. 룰은 이름이 같은 첫 check, 번호는 룰 안의 1부터의 순번이다(스냅샷의 `--drc-err`와
+    같다). 새 창이면 `run_viewer(drc_pick=)`가 `_drc_open_db(pick=)`으로 넘기고(색인을 물어 만드는 경우 포함),
+    `load_drc(pick=)`가 로드 끝에 적용한다. 넘어온 요청이면 `_request_pick`이 필드를 읽어 `_drc_request(pick=)`로
+    가고, 이미 열린 결과에는 다시 열지 않고 바로 적용한다. 필터: 행이 목록에 없으면 검색과 종류 필터를 지우고,
+    그래도 없으면 waive 필터를 All로 돌린다. 에러가 지금의 waive 필터에 안 걸리면 All로 돌린다. 없는 룰과
+    없는 번호는 상태줄과 stderr에 말하고 False다. 에러로 이동한 로드의 상태줄에는 점프의 줄 뒤에 리뷰어
+    부분(`· reviewer ID …`)을 덧붙인다: 로드의 줄이 읽히기 전에 점프의 줄로 바뀌기 때문이다. 0.12.460까지의
+    창은 두 필드를 모르므로 결과만 열고 선택하지 않는다(소켓 이름은 그대로 두었다).
   - 소켓 이름은 `floe2-2-<uid>-<DISPLAY>`다(`instance.socket_address`). 이전 버전의 창은 레이아웃만 열고 나머지를
     버리므로 이 요청을 받지 않게 이름을 갈랐다.
   - 창의 처리(`_on_incoming`): 레이아웃도 결과도 없는 빈 실행은 창만 앞으로 가져온다. 색인된 일반 레이아웃은 답하기

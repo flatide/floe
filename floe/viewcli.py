@@ -159,6 +159,27 @@ def cmd_view(args):
         drc = os.path.abspath(drc)
         if not os.path.isfile(drc):
             raise SystemExit(f"floe2: no such DRC results file: {drc}")
+    # the rule, and the error of it, to select in the results as they open
+    # (user 2026-11-12: "오픈과 동시에 특정 룰이 선택되게 하거나 특정 룰의 특정 에러가
+    # 선택되게") - the names a DRC snapshot takes (floe2 render --drc DB
+    # --drc-rule NAME --drc-err N). Whether the results have the rule and the
+    # error is known once they are open: the window says so then.
+    drc_rule = getattr(args, "drc_rule", None)
+    drc_err = getattr(args, "drc_err", None)
+    if drc_rule is not None:
+        if not drc:
+            raise SystemExit("floe2: --drc-rule requires --drc")
+        if not drc_rule.strip():
+            raise SystemExit("floe2: --drc-rule must name a rule")
+    if drc_err is not None:
+        if drc_rule is None:
+            raise SystemExit("floe2: --drc-err requires --drc-rule")
+        if drc_err < 1:
+            raise SystemExit("floe2: --drc-err is an error's number in its "
+                             "rule's list, from 1")
+        if args.goto:
+            raise SystemExit("floe2: --goto and --drc-err both place the "
+                             "view - give one of them")
     # the layer properties file for the layout this launch opens (user
     # 2026-11-11: "layer property 파일도 실행 옵션으로 지정할 수 있게 해줘" -
     # a launcher's viewer has its file loads off, and a design default
@@ -252,7 +273,7 @@ def cmd_view(args):
     stated = (os.environ.get("FLOE_REVIEWER") or "").strip()
     # (the request is one line of tab-separated fields)
     unsendable = any(c in text for text in (src or "", drc or "", rules or "", stated,
-                                            props or "")
+                                            props or "", drc_rule or "")
                      for c in "\t\r\n")
     process_options = (stream_kb is not None
                        or args.stream_target_ms != 500
@@ -304,6 +325,11 @@ def cmd_view(args):
             request += "\tdrc=" + drc
         if rules:
             request += "\trules=" + rules
+        # the rule, and the error of it, to select in them (0.12.461)
+        if drc_rule:
+            request += "\tdrcrule=" + drc_rule
+            if drc_err is not None:
+                request += "\tdrcerr=%d" % drc_err
         if stated:
             request += "\tuserid=" + stated
         if no_load:
@@ -388,7 +414,8 @@ def cmd_view(args):
                occupancy=(None if getattr(args, "occupancy", None) is None
                           else args.occupancy == "on"),
                file_load=not no_load,
-               layerprops=props if c is not None else None)
+               layerprops=props if c is not None else None,
+               drc_pick=(drc_rule, drc_err) if drc_rule else None)
 
 
 def parser():
@@ -396,7 +423,8 @@ def parser():
         prog="floe2 view",
         description="native desktop viewer (GTK3); one instance per (uid, "
                     "DISPLAY) - later calls hand their request (the layout, "
-                    "--layerprops, --drc, --rules, --userid, --no-file-load "
+                    "--layerprops, --drc, --rules, --drc-rule, --drc-err, "
+                    "--userid, --no-file-load "
                     "and the view options) to it and the window switches; "
                     "--multi opens a window of its own",
         epilog="--workdir DIR (every floe2 command, anywhere on the line; "
@@ -426,6 +454,19 @@ def parser():
                    help="load existing SVRF rule metadata with --drc "
                         "(overrides automatic rules lookup; does not "
                         "index an SVRF deck). Forwarded with --drc")
+    p.add_argument("--drc-rule", dest="drc_rule", default=None, metavar="NAME",
+                   help="with --drc: open the results with this rule "
+                        "selected - its errors listed, its markers drawn "
+                        "(NAME as the rules list shows it; 'floe2 drc DB "
+                        "--rules' lists the names). Forwarded with --drc: "
+                        "results already open there are not opened again")
+    p.add_argument("--drc-err", dest="drc_err", type=int, default=None,
+                   metavar="N",
+                   help="with --drc-rule: that rule's error N - its number "
+                        "in the rule's list, from 1 - is jumped to as a "
+                        "double-click on it jumps: framed, its CD rulers "
+                        "drawn, the rule's layers alone on (Esc restores). "
+                        "Forwarded with --drc")
     detail_help = (
         "starting detail level (default: medium; higher = finer, heavier "
         "wide views - lower levels omit finer features below the cut). "

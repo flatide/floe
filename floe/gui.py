@@ -3706,8 +3706,22 @@ class Viewer:
 
     # what a forwarded launch asks for beside its layout and view options
     # (floe/viewcli.py cmd_view): the DRC results, the rules metadata named
-    # for them, whose review it is, the file loads turned off
-    REQUEST_KEYS = ("drc", "rules", "userid", "noload")
+    # for them, whose review it is, the file loads turned off, the rule and
+    # the error of it to select in the results (0.12.461)
+    REQUEST_KEYS = ("drc", "rules", "userid", "noload", "drcrule", "drcerr")
+
+    @staticmethod
+    def _request_pick(opts):
+        """The rule, and the error of it, a launch names with its results
+        (--drc-rule NAME, --drc-err N): (name, N or None), or None."""
+        rule = opts.get("drcrule")
+        if not rule:
+            return None
+        try:
+            err = int(opts["drcerr"]) if opts.get("drcerr") else None
+        except ValueError:
+            err = None
+        return (rule, err)
 
     @staticmethod
     def _request_opts(fields):
@@ -3856,14 +3870,15 @@ class Viewer:
                 if f.split("=", 1)[0] not in self.REQUEST_KEYS]
         self._reviewer = opts.get("userid") or None
         drc, rules = opts.get("drc"), opts.get("rules")
-        then = (lambda: self._drc_request(drc, rules)) if drc else None
+        pick = self._request_pick(opts)
+        then = (lambda: self._drc_request(drc, rules, pick)) if drc else None
         if path:
             self._open_or_index(path, view, then=then)
         elif then is not None:
             then()
         return False
 
-    def _drc_request(self, path, rules=None):
+    def _drc_request(self, path, rules=None, pick=None):
         """The DRC results a forwarded launch names, opened as --drc opens
         them at a start, in place of the results shown - nothing asked: the
         review of those is on the disk as it stands (every waive, visit,
@@ -3871,7 +3886,10 @@ class Viewer:
         write in progress and its queued visits before it lets the old
         results go). Results already open - the same file, its pack still
         the current one, the same reviewer - stay as they are: the window
-        comes forward, and rules metadata named with them is attached."""
+        comes forward, and rules metadata named with them is attached.
+        `pick`: the rule, and the error of it, the launch names
+        (_drc_launch_pick) - selected in the results once they are open, and
+        in the ones already open without opening them again."""
         path = os.path.abspath(path)
         db = self._drc
         # the same reviewer: asked for as these results were, or the id
@@ -3892,11 +3910,13 @@ class Viewer:
                 self._left_show("drc")
                 if rules:
                     self._drc_rules_load(rules)
-                else:
+                if pick is not None:
+                    self._drc_launch_pick(*pick)
+                elif not rules:
                     self._set_live_status(
                         "DRC %s: already open" % os.path.basename(path))
                 return
-        self._drc_open_db(path, rules=rules)
+        self._drc_open_db(path, rules=rules, pick=pick)
 
     def _forwarded_view_options(self, fields):
         """Apply request-scoped CLI controls without intermediate renders.
@@ -8798,11 +8818,13 @@ class Viewer:
             except Exception:
                 pass
 
-    def _drc_open_db(self, path, rules=None):
+    def _drc_open_db(self, path, rules=None, pick=None):
         """Dialog flow (user call 2026-08-14): the user PICKS the
         ASCII .db, floe LOADS only its pack. When no usable
         pack exists (missing, stale or an old layout/v1 sidecar) it
-        ASKS before building one (user call 2026-08-28)."""
+        ASKS before building one (user call 2026-08-28). `pick`: what a
+        launch asks to be selected once the results are open
+        (_drc_launch_pick)."""
         # another run packs this db (floe_vfs::lock): say who - no open
         # of a pack being replaced, no second build beside it (the
         # decisions and the review are floe2 gtk-service's, P2b)
@@ -8828,7 +8850,8 @@ class Viewer:
                     self._drc_refused(exc)
                     return
             else:
-                self.load_drc(path, db=db, rules=rules)  # adopt the fresh pack
+                # adopt the fresh pack
+                self.load_drc(path, db=db, rules=rules, pick=pick)
                 return
         if not self._index_consent(
                 "No DRC index for\n%s\n\nBuild it now?"
@@ -8837,9 +8860,9 @@ class Viewer:
                 "DRC index needed: floe-index drc %s"
                 % os.path.basename(path))
             return
-        self._drc_pack_and_load(path, rules=rules)
+        self._drc_pack_and_load(path, rules=rules, pick=pick)
 
-    def _drc_pack_and_load(self, path, rules=None):
+    def _drc_pack_and_load(self, path, rules=None, pick=None):
         """Run `floe-index drc <db>` with its log in a MODAL
         dialog, then load the pack."""
         from .vfsclient import find_binary
@@ -8861,7 +8884,7 @@ class Viewer:
             self.redraw(immediate=True)
 
         def on_success():
-            if not self.load_drc(path, rules=rules):
+            if not self.load_drc(path, rules=rules, pick=pick):
                 return
             if not getattr(self._drc, "packed", False):
                 # the indexer that just ran wrote a layout the reader
@@ -8984,11 +9007,13 @@ class Viewer:
 
         threading.Thread(target=pump, daemon=True).start()
 
-    def load_drc(self, path, db=None, rules=None):
+    def load_drc(self, path, db=None, rules=None, pick=None):
         """Open a Calibre DRC db (.ice index-aware) and populate the
         browser. `db` = an already-opened backend to adopt (the
         dialog preflight verifies the pack by opening it - opening
-        twice pays the block-table bbox scan twice)."""
+        twice pays the block-table bbox scan twice). `pick`: the rule, and
+        the error of it, a launch asks to be selected in the results
+        (_drc_launch_pick) - without one a db opens with no rule selected."""
         rules_data = None
         if rules is not None:
             try:
@@ -9091,6 +9116,68 @@ class Viewer:
                     close()
                 except Exception:
                     pass
+        if pick is not None and self._drc_launch_pick(*pick) and pick[1] is not None:
+            # the jump's line took the load's place before anyone read it:
+            # whose review this is stays said
+            who = self._drc_reviewer_text(db)
+            if who:
+                self._set_live_status(self.status.get_text() + who)
+        return True
+
+    def _drc_launch_pick(self, rule, err=None):
+        """What a launch asks to be selected in the results it opens (floe2
+        view --drc DB --drc-rule NAME [--drc-err N]; user 2026-11-12: "오픈과
+        동시에 특정 룰이 선택되게 하거나 특정 룰의 특정 에러가 선택되게"). The rule's
+        row is selected as a click on it selects it - its errors listed, its
+        markers drawn; with N the rule's error N - the number its list shows,
+        from 1 - is jumped to as a double-click on that number jumps: framed,
+        its CD rulers drawn, the rule's layers alone on (Esc restores),
+        visited once it is drawn. What the list's filters hide is brought
+        into it first - the search and the rule type cleared for a rule they
+        leave out, the waive filter turned to All for a rule or an error it
+        leaves out. A rule or an error the results do not have is said in
+        the status line (and on stderr, where a launcher's log is) and the
+        results stay as they opened - a rule that is there is selected even
+        when its error is not. True when done as asked."""
+        db, win = self._drc, self._drcwin
+        if db is None:
+            return False
+        name = os.path.basename(getattr(self, "_drc_source", None) or db.path)
+
+        def refused(text):
+            self._set_live_status(text)
+            print("[%s] %s" % (APP, text), file=sys.stderr, flush=True)
+            return False
+        ci = next((i for i, c in enumerate(db.checks) if c.name == rule), None)
+        if ci is None:
+            return refused("DRC %s: no rule %s" % (name, rule))
+        if win is not None:
+            self._drc_page = 0
+            if not self._drc_select_row(ci):
+                if self._drc_search:
+                    # (the entry's own handler comes later, and finds the
+                    # text as it is here)
+                    self._drc_search = ""
+                    win._search.set_text("")
+                    self._drc_fill(preserve=True)
+                if self._drc_tfilter != "all":
+                    win._tf.set_active_id("all")
+                if not self._drc_select_row(ci) and self._drc_wfilter != "all":
+                    win._wf.set_active_id("all")
+                    self._drc_select_row(ci)
+        n = len(db.checks[ci].errors)
+        if err is None:
+            return True
+        if not 1 <= err <= n:
+            return refused("DRC %s: rule %s has %d error(s), no error %d" % (name, rule, n, err))
+        ei = err - 1
+        if win is not None and self._drc_wfilter != "all" \
+                and self._drc_waived(db, ci, ei) != (self._drc_wfilter == "waived"):
+            # the list as it stands leaves this error out
+            win._wf.set_active_id("all")
+        if win is not None:
+            self._drc_goto_cell(ci, ei)
+        self._drc_jump(ci, ei, isolate=True)
         return True
 
     def _drc_clusters_auto(self, db_path):
@@ -10754,18 +10841,26 @@ class Viewer:
             text += " · ASCII read, no index"
         if svrf is not None:
             text += " · svrf %d/%d" % tuple(svrf)
-        reviewer = getattr(db, "_reviewer", None)
-        if reviewer:
-            text += " · reviewer %s" % reviewer
-            if not getattr(db, "_reviewer_stated", True):
-                text += (" (the %s - not a personal ID; start with --userid ID)"
-                         % (getattr(db, "_reviewer_source", None) or "host"))
-            if getattr(db, "read_only", False):
-                text += " · read-only (no waive file could be made)"
+        text += Viewer._drc_reviewer_text(db)
         moved = getattr(db, "moved_aside", None) or []
         if moved:
             text += (" · a review of other DRC results moved aside (%d "
                      "file(s), .stale-…)" % len(moved))
+        return text
+
+    @staticmethod
+    def _drc_reviewer_text(db):
+        """The part of a load's status line that says whose review it is
+        (` · reviewer ID …`), or nothing for results without a review."""
+        reviewer = getattr(db, "_reviewer", None)
+        if not reviewer:
+            return ""
+        text = " · reviewer %s" % reviewer
+        if not getattr(db, "_reviewer_stated", True):
+            text += (" (the %s - not a personal ID; start with --userid ID)"
+                     % (getattr(db, "_reviewer_source", None) or "host"))
+        if getattr(db, "read_only", False):
+            text += " · read-only (no waive file could be made)"
         return text
 
     @staticmethod
@@ -13952,7 +14047,7 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
                stream_kb=None, stream_target_ms=500,
                render_debug=False, pending_open=None, pending_fields=(),
                thin="auto", density=None, occupancy=None, rules=None,
-               file_load=True, layerprops=None):
+               file_load=True, layerprops=None, drc_pick=None):
     """`pending_open`: a layout/jobdeck given on the command line that
     has no index yet - the viewer starts empty, asks, indexes and
     opens it (user call 2026-09-09), then applies `pending_fields`
@@ -13960,7 +14055,9 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
     `file_load` False (--no-file-load): the viewer loads no file but
     these - `cache` / `pending_open`, `drc`, `rules`, `layerprops`.
     `layerprops` (--layerprops): the layer properties file for `cache`;
-    a `pending_open` carries it among its fields (`layerprops=`)."""
+    a `pending_open` carries it among its fields (`layerprops=`).
+    `drc_pick` (--drc-rule, --drc-err): (rule name, error number or None)
+    to select in the `drc` results once they are open."""
     import_gtk()
     viewer = Viewer(cache, server_sock, goto=goto, detail=detail,
                     dump=dump, depth=depth, lod=lod, frames=frames,
@@ -14020,10 +14117,12 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
         # (4th) P2-1)
         GLib.idle_add(viewer._open_or_index, pending_open,
                       list(pending_fields),
-                      (lambda: viewer._drc_open_db(drc_path, rules=rules_path))
+                      (lambda: viewer._drc_open_db(drc_path, rules=rules_path,
+                                                   pick=drc_pick))
                       if drc_path else None)
     elif drc_path:
-        GLib.idle_add(lambda: (viewer._drc_open_db(drc_path, rules=rules_path), False)[1])
+        GLib.idle_add(lambda: (viewer._drc_open_db(drc_path, rules=rules_path,
+                                                   pick=drc_pick), False)[1])
     try:
         import signal as _signal
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, _signal.SIGINT,

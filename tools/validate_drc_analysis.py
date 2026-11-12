@@ -1782,6 +1782,161 @@ def rules_lookup_ui(v, d, temp):
     check(v.load_drc(str(lone)) and v._drc_rmeta is None, "(no note: no rules, as before)")
 
 
+def launch_pick_ui(v, d, temp, pump):
+    """`floe2 view SRC --drc DB --drc-rule NAME [--drc-err N]` (0.12.461; user
+    2026-11-12: "floe2 view layout.oas --drc some.db 로 실행할때 오픈과 동시에 특정
+    룰이 선택되게 하거나 특정 룰의 특정 에러가 선택되게"): the results open with the
+    rule selected as a click on it selects it, and with N its error N - the
+    number the rule's list shows - jumped to as a double-click on that number
+    jumps. The names are the DRC snapshot's (`floe2 render --drc DB --drc-rule
+    NAME --drc-err N`). A running window is handed the two with the results
+    and selects in the ones it has open without opening them again."""
+    from floe import gui, instance, viewcli
+    from validate_gtk_view import settled
+    layout, db = str(d / "sample.oas"), str(d / "sample.db")
+    # ---- the command line
+    args = viewcli.parser().parse_args([layout, "--drc", db, "--drc-rule", "M1.NOTCH", "--drc-err", "2"])
+    check((args.drc_rule, args.drc_err) == ("M1.NOTCH", 2), "the launch options are read",
+          (args.drc_rule, args.drc_err))
+    for bad, want in (
+            (["--drc-rule", "M1.NOTCH"], "--drc-rule requires --drc"),
+            (["--drc", db, "--drc-err", "2"], "--drc-err requires --drc-rule"),
+            (["--drc", db, "--drc-rule", "M1.NOTCH", "--drc-err", "0"], "from 1"),
+            (["--drc", db, "--drc-rule", " "], "--drc-rule must name a rule"),
+            (["--drc", db, "--drc-rule", "M1.NOTCH", "--drc-err", "2", "--goto", "1,2"],
+             "--goto and --drc-err both place the view")):
+        try:
+            viewcli.cmd_view(viewcli.parser().parse_args([layout] + bad))
+            check(False, "refused: %s" % want)
+        except SystemExit as exc:
+            check(want in str(exc), "refused: %s" % want, exc)
+    # the request a running window is handed: the two fields with the results
+    real = (instance.display_key, instance.socket_address, instance.try_forward)
+    sent = []
+    instance.display_key = lambda: "gate"
+    instance.socket_address = lambda display: "gate-address"
+    instance.try_forward = lambda addr, request: (sent.append(request), 0)[1]
+    try:
+        for extra in (["--drc-rule", "M1.NOTCH", "--drc-err", "2"], ["--drc-rule", "M1.NOTCH"], []):
+            try:
+                viewcli.cmd_view(viewcli.parser().parse_args([layout, "--drc", db] + extra))
+            except SystemExit:
+                pass
+    finally:
+        instance.display_key, instance.socket_address, instance.try_forward = real
+    fields = [request.split("\t") for request in sent]
+    check(len(fields) == 3 and all("drc=" + db in f for f in fields)
+          and [[x for x in f if x.startswith(("drcrule=", "drcerr="))] for f in fields]
+          == [["drcrule=M1.NOTCH", "drcerr=2"], ["drcrule=M1.NOTCH"], []],
+          "a running window is handed the rule and the error with the results", fields)
+    check(gui.Viewer._request_pick({"drcrule": "A", "drcerr": "7"}) == ("A", 7)
+          and gui.Viewer._request_pick({"drcrule": "A"}) == ("A", None)
+          and gui.Viewer._request_pick({"drcrule": "A", "drcerr": "x"}) == ("A", None)
+          and gui.Viewer._request_pick({"drcerr": "7"}) is None
+          and {"drcrule", "drcerr"} <= set(gui.Viewer.REQUEST_KEYS),
+          "... and reads them back")
+
+    # ---- the window
+    def selected():
+        model, it = v._drcwin._rules.get_selection().get_selected()
+        return None if it is None else model.get_value(it, 2)
+
+    def centred(e):
+        cx, cy = e.center()
+        x0, y0, x1, y1 = [c * v.dbu for c in v.view_bbox()]
+        return abs((x0 + x1) / 2 - cx) < 1e-3 and abs((y0 + y1) / 2 - cy) < 1e-3
+    visible = set(v.visible)
+    # a rule alone: selected as a click selects it, no error, the load's line stays
+    check(v.load_drc(db, pick=("M1.NOTCH", None)), "the results open with a rule named")
+    names = [c.name for c in v._drc.checks]
+    ci = names.index("M1.NOTCH")
+    count = len(v._drc.checks[ci].errors)
+    was = [v._drc.get_status(ci, ei) for ei in range(count)]
+    v._drc.set_statuses(ci, range(count), 0)
+    check(v.load_drc(db, pick=("M1.NOTCH", None)) and v._drc_open == ci and v._drc_grid_ci == ci
+          and selected() == ci and v.drc_mark is None and v._drc_pos == -1
+          and len(v._drc_grid_map) == count
+          and v.status.get_text().startswith("DRC sample.db:") and "reviewer" in v.status.get_text(),
+          "--drc-rule: the rule is selected as a click selects it, its errors listed",
+          (v._drc_open, selected(), v.status.get_text()))
+    # a rule and an error: jumped to as a double-click jumps
+    check(v.load_drc(db, pick=("M1.NOTCH", 2)), "the results open with an error named")
+    e = v._drc.checks[ci].errors[1]
+    pump(v, lambda: settled(v) and centred(e), "the jump to the named error")
+    said = v.status.get_text()
+    check(v._drc_open == ci and selected() == ci and v._drc_pos == v._drc_cum[ci] + 1
+          and v.drc_mark is not None and v.drc_mark["review_target"][1:] == (ci, 1)
+          and v.drc_mark["pts"] == [(x / v.dbu, y / v.dbu) for x, y in e.pts]
+          and v._drc_cell == divmod(1, v._drc_gridw) and bool(v._drc_ruler)
+          and v._drc_lyr_saved is not None and set(v.visible) != visible
+          and said.startswith("DRC M1.NOTCH #2(") and "Esc restores" in said and "reviewer" in said,
+          "--drc-err: that error is jumped to - framed, marked, its rulers and its layers alone",
+          (v._drc_pos, v._drc_cell, said))
+    v._drc_restore_layers()
+    check(set(v.visible) == visible, "(Esc's restore puts the layers back)")
+    # what the results do not have is said, and they stay as they opened
+    check(v.load_drc(db, pick=("NOPE", 1)) and v._drc_open is None and selected() is None
+          and v.drc_mark is None and v.status.get_text() == "DRC sample.db: no rule NOPE",
+          "a rule the results do not have is said, nothing selected", v.status.get_text())
+    check(v.load_drc(db, pick=("M1.NOTCH", 99)) and v._drc_open == ci and selected() == ci
+          and v.drc_mark is None
+          and v.status.get_text() == "DRC sample.db: rule M1.NOTCH has %d error(s), no error 99" % count,
+          "an error the rule does not have is said, the rule selected", v.status.get_text())
+    # a waived error is not in the list a results file opens with: the list is
+    # turned to All and the error shown; a rule with nothing under the filter too
+    v._drc.set_statuses(ci, [0], gui.STATUS_WAIVED)
+    check(v.load_drc(db, pick=("M1.NOTCH", 1)) and v._drc_wfilter == "all"
+          and v._drcwin._wf.get_active_id() == "all" and v._drc_open == ci
+          and v._drc_pos == v._drc_cum[ci] and v._drc_cell == (0, 0)
+          and v.drc_mark is not None and v.drc_mark["color"] == gui.DRC_GREEN,
+          "a waived error named: the list turns to All and the error is jumped to",
+          (v._drc_wfilter, v._drc_pos, v._drc_cell))
+    v._drc_restore_layers()
+    v._drc.set_statuses(ci, range(count), gui.STATUS_WAIVED)
+    check(v.load_drc(db) and v._drc_wfilter == "notwaived"
+          and ci not in [row[2] for row in v._drcwin._rstore],
+          "(a rule waived whole is not in the list as the results open)")
+    check(v._drc_launch_pick("M1.NOTCH") and v._drc_wfilter == "all" and v._drc_open == ci
+          and selected() == ci, "a rule the waive filter hides is brought into the list")
+    v._drc.set_statuses(ci, range(count), 0)
+    # the search and the rule type: cleared for a rule they leave out, kept for one they list
+    check(v.load_drc(db), "(results open again)")
+    # (every rule listed whatever the checks before this one waived)
+    v._drcwin._wf.set_active_id("all")
+    v._drcwin._search.set_text("space")
+    v._on_drc_search(v._drcwin._search)
+    check([row[0] for row in v._drcwin._rstore] == ["M1.SPACE.1"], "(a search that lists one rule)",
+          [row[0] for row in v._drcwin._rstore])
+    check(v._drc_launch_pick("M1.SPACE.1") and v._drc_search == "space"
+          and v._drc_open == names.index("M1.SPACE.1"),
+          "a rule the search lists is selected, the search kept")
+    check(v._drc_launch_pick("M1.NOTCH") and v._drc_search == "" and v._drcwin._search.get_text() == ""
+          and v._drc_open == ci and selected() == ci and len(v._drcwin._rstore) == len(names),
+          "a rule the search leaves out: the search is cleared and the rule selected",
+          (v._drc_search, v._drc_open))
+    # ---- a running window: the request's fields select in the open results
+    held = v._drc
+    v._request_run("", ["detail=high", "drc=" + db, "drcrule=M1.SPACE.1", "drcerr=3"])
+    space = names.index("M1.SPACE.1")
+    pump(v, lambda: settled(v) and centred(v._drc.checks[space].errors[2]), "the handed jump")
+    check(v._drc is held and v._drc_open == space and v._drc_pos == v._drc_cum[space] + 2
+          and v.status.get_text().startswith("DRC M1.SPACE.1 #3("),
+          "a handed request selects in the results already open, not opened again",
+          (v._drc is held, v._drc_pos, v.status.get_text()))
+    v._request_run("", ["drc=" + db, "drcrule=M1.NOTCH"])
+    check(v._drc is held and v._drc_open == ci and v.drc_mark is None,
+          "... and a rule alone moves the selection to it")
+    v._request_run("", ["drc=" + db])
+    check(v._drc is held and v._drc_open == ci and v.status.get_text() == "DRC sample.db: already open",
+          "... and results named alone leave the selection as it is")
+    v._drc_restore_layers()
+    v._drc.set_statuses(ci, range(count), 0)
+    for ei, status in enumerate(was):
+        if status:
+            v._drc.set_status(ci, ei, status)
+    check(set(v.visible) == visible, "(the layers as they were)")
+
+
 def cd_part_ui(v, d, pump):
     """The pane's CD part (user 2026-11-10: "CD 델타 컨트롤 각 항목이 너무
     자리를 많이 차지하니 absolute/ratio 콤보박스의 문구를 단순화하여 크기를
@@ -2300,6 +2455,7 @@ def a5(temp):
         pane_ui(v, d, pump)
         detail_ui(v, d, pump)
         rules_lookup_ui(v, d, temp)
+        launch_pick_ui(v, d, temp, pump)
         small = d / "small.db"
         small.write_text("MAIN 100000\nSMALL.ONE\n0 0 0\nSMALL.TWO\n0 0 0\n")
         (d / "small.db.rules.json").write_text(json.dumps({
