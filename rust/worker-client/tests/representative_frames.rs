@@ -85,7 +85,7 @@ fn representative_cursor_preserves_scene_completion_and_nonpickable_samples() {
             y: 1000,
             radius: 1000,
             layers: Layers::All,
-            pick_seen: false,
+            seen: false,
         })
         .unwrap();
     loop {

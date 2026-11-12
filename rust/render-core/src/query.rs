@@ -34,10 +34,12 @@ pub struct SceneQueryRequest {
     /// Maximum repetition members examined, including members outside the
     /// query box. This bounds sparse explicit-point repetitions.
     pub member_cap: usize,
-    /// Pick: what shows of each layer around the point in the frame on the
-    /// screen (`raster::seen_planes_around`) - a shape whose layer shows no
-    /// pixel within the shape there is no candidate: it is on, and under
-    /// others. None: every shape over the point. A snap has no use for it.
+    /// What shows of each layer around the point in the frame on the screen
+    /// (`raster::seen_planes_around`). Pick: a shape whose layer shows no
+    /// pixel within the shape there is no candidate - it is on, and under
+    /// others. Snap: a vertex or a point of an edge where its layer shows no
+    /// pixel is no answer - the corner under another shape is not snapped
+    /// to (0.12.457). None: every shape.
     pub seen: Option<Arc<SeenPlanes>>,
 }
 
@@ -167,11 +169,23 @@ fn snap_scene_impl(
             return Err(QUERY_STOP.to_string());
         }
         tested += 1;
+        // what is snapped to is what is seen: a corner or a point of an
+        // edge that the layers above cover is passed by (the nearer of
+        // those that show is taken, not the nearest and then nothing)
+        let shows = |x: f64, y: f64| {
+            request
+                .seen
+                .as_ref()
+                .is_none_or(|seen| seen.shows_at(shape.layer_idx, x, y))
+        };
         for &(x, y) in &shape.points {
             let dx = (x as i128 - request.x as i128) as f64;
             let dy = (y as i128 - request.y as i128) as f64;
             let distance2 = dx * dx + dy * dy;
-            if distance2 <= radius2 && best_vertex.is_none_or(|current| distance2 < current.0) {
+            if distance2 <= radius2
+                && best_vertex.is_none_or(|current| distance2 < current.0)
+                && shows(x as f64, y as f64)
+            {
                 best_vertex = Some((distance2, x, y));
             }
         }
@@ -193,7 +207,10 @@ fn snap_scene_impl(
             let dx = qx - request.x as f64;
             let dy = qy - request.y as f64;
             let distance2 = dx * dx + dy * dy;
-            if distance2 <= radius2 && best_edge.is_none_or(|current| distance2 < current.0) {
+            if distance2 <= radius2
+                && best_edge.is_none_or(|current| distance2 < current.0)
+                && shows(qx, qy)
+            {
                 best_edge = Some((distance2, qx, qy));
             }
         }
@@ -1358,14 +1375,92 @@ mod tests {
         let bare = frame_of(&[(4, Clear)]);
         let none = picks(&bare, 0, 0, true);
         assert_eq!(none, (vec![], 1));
-        // a snap takes no notice of what shows
-        let mut snap = SceneQueryRequest { x: 10, y: 10, ..base.clone() };
-        snap.seen = Some(Arc::new(
-            crate::seen_planes_around(&scene, &over, (10, 10), crate::SEEN_REACH_PX, None)
+    }
+
+    #[test]
+    fn snap_passes_by_what_does_not_show() {
+        use crate::LayerFill::{Clear, Solid, Speckle};
+        // from the bottom: a plate, a small square, a solid square over it
+        // that reaches further right, and a large outline over them all
+        let rects = [
+            [-200, -200, 200, 200],
+            [-10, -10, 10, 10],
+            [-40, -40, 60, 40],
+            [-150, -150, 150, 150],
+        ];
+        let (scene, base) = stack(&rects);
+        let snap = |styled: &crate::StyledGeometryRasterRequest, x: i64, y: i64, seen: bool| {
+            let mut request = SceneQueryRequest {
+                x,
+                y,
+                radius: 6,
+                ..base.clone()
+            };
+            request
+                .layers
+                .retain(|layer| styled.layers.iter().any(|style| style.layer_idx == layer.index));
+            if seen {
+                request.seen = Some(Arc::new(
+                    crate::seen_planes_around(&scene, styled, (x, y), 6 + 3, None)
+                        .unwrap()
+                        .unwrap(),
+                ));
+            }
+            snap_scene(&scene, &request)
                 .unwrap()
-                .unwrap(),
-        ));
-        assert!(snap_scene(&scene, &snap).unwrap().is_some());
+                .map(|hit| (hit.x, hit.y, hit.kind))
+        };
+        let covered = frame_of(&[(0, Speckle), (1, Speckle), (2, Solid), (3, Clear)]);
+        // the small square's corner is under the solid square: every shape's
+        // corners are snapped to, the ones that show alone are not
+        assert_eq!(snap(&covered, 12, 12, false), Some((10, 10, SceneSnapKind::Vertex)));
+        assert_eq!(snap(&covered, 12, 12, true), None);
+        // its edge likewise
+        assert_eq!(snap(&covered, 0, 12, false), Some((0, 10, SceneSnapKind::Edge)));
+        assert_eq!(snap(&covered, 0, 12, true), None);
+        // the solid square's own corner and edge show
+        assert_eq!(snap(&covered, 58, 38, true), Some((60, 40, SceneSnapKind::Vertex)));
+        assert_eq!(snap(&covered, 20, 38, true), Some((20, 40, SceneSnapKind::Edge)));
+        // of two corners in reach the nearer one that shows: the covered
+        // corner at (10, 10) is nearer to (13, 13) than nothing else is,
+        // and with the solid square off it shows again
+        let open = frame_of(&[(0, Speckle), (1, Speckle), (3, Clear)]);
+        assert_eq!(snap(&open, 12, 12, true), Some((10, 10, SceneSnapKind::Vertex)));
+        assert_eq!(snap(&open, 0, 12, true), Some((0, 10, SceneSnapKind::Edge)));
+        // a speckle above leaves every other pixel of an outline: the small
+        // square under a speckled one is still snapped to
+        let speckled = frame_of(&[(0, Speckle), (1, Speckle), (2, Speckle), (3, Clear)]);
+        assert_eq!(snap(&speckled, 12, 12, true), Some((10, 10, SceneSnapKind::Vertex)));
+        assert_eq!(snap(&speckled, 0, 12, true), Some((0, 10, SceneSnapKind::Edge)));
+        // the outline over everything shows, and the plate's corner under
+        // nothing does
+        assert_eq!(snap(&covered, 148, 148, true), Some((150, 150, SceneSnapKind::Vertex)));
+        assert_eq!(snap(&covered, 198, 198, true), Some((200, 200, SceneSnapKind::Vertex)));
+        // a covered corner nearer than one that shows: the one that shows,
+        // where every shape gives the covered one
+        let near = [[-200, -200, 200, 200], [-10, -10, 10, 10], [-40, -40, 14, 14]];
+        let (scene, base) = stack(&near);
+        let request = |seen: bool| {
+            let styled = frame_of(&[(0, Speckle), (1, Speckle), (2, Solid)]);
+            let mut request = SceneQueryRequest {
+                x: 12,
+                y: 12,
+                radius: 6,
+                ..base.clone()
+            };
+            if seen {
+                request.seen = Some(Arc::new(
+                    crate::seen_planes_around(&scene, &styled, (12, 12), 9, None)
+                        .unwrap()
+                        .unwrap(),
+                ));
+            }
+            snap_scene(&scene, &request)
+                .unwrap()
+                .map(|hit| (hit.x, hit.y, hit.kind))
+        };
+        assert_eq!(request(false), Some((10, 10, SceneSnapKind::Vertex)));
+        assert_eq!(request(true), Some((14, 14, SceneSnapKind::Vertex)));
     }
 
     #[test]

@@ -888,9 +888,14 @@ class RustRenderWorker:
             set(_layer_key(layer) for layer in layers)))
 
     def _submit_snap(self, job):
-        self._send("snap seq=%d x=%d y=%d r=%d layers=%s" % (
+        line = "snap seq=%d x=%d y=%d r=%d layers=%s" % (
             int(job.get("seq", -1)), int(job["x"]), int(job["y"]),
-            max(1, int(job["r"])), self._query_layers(job)))
+            max(1, int(job["r"])), self._query_layers(job))
+        # a snap of what shows (0.12.457): job["seen"] - a corner or a point
+        # of an edge that the published frame's upper layers cover is passed
+        if job.get("seen"):
+            line += " seen=1"
+        self._send(line)
 
     def _submit_pick(self, job):
         line = "pick seq=%d x=%d y=%d r=%d nth=%d layers=%s" % (

@@ -188,7 +188,7 @@ fn query_request(operation: QueryOperation) -> QueryRequest {
         y: 1,
         radius: 2,
         layers: Layers::All,
-        pick_seen: false,
+        seen: false,
     }
 }
 fn query_reply(w: &mut WorkerClient) -> QueryReply {

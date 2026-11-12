@@ -60,7 +60,7 @@ pub use raster::{
     render_geometry_styled_unbinned_cancellable, seen_planes_around, DensityScenes, FrameReuse,
     GeometryRasterReport, GeometryRasterRequest, LayerFill, LayerRasterSession, LayerStyle,
     RasterViewBox, RgbaFrame, SeenPlanes, StyledGeometryRasterRequest, DEFAULT_TILE_SIZE,
-    MAX_TILE_SIZE, SEEN_REACH_PX,
+    MAX_TILE_SIZE, SEEN_NEAR_PX, SEEN_REACH_MAX_PX, SEEN_REACH_PX,
 };
 pub use request::{PlanRequest, ViewBox, FULL_DEPTH};
 pub use scene::FrameScene;

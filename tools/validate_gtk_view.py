@@ -262,10 +262,11 @@ def overlay_snaps(s, frame):
 
 
 def pick_layout(temp):
-    """Shapes over one another, a layer each, to pick among (layer numbers
-    in paint order, the last on top): two plates over the die (1, 2), a 6 um
-    square (3) with a 2 um square on it (4), a 30 um square over them all
-    (5), and beside the die a square of its own (6)."""
+    """Shapes over one another, a layer each, to pick among and snap to
+    (layers in paint order, the last on top): two plates over the die (1,
+    2), a 1 um square (2/5) under a 6 um square (3) that has a 2 um square
+    on it (4), a 30 um square over them all (5), and beside the die a square
+    of its own (6)."""
     import klayout.db as db
     d = Path(temp) / "pick"
     d.mkdir()
@@ -276,6 +277,7 @@ def pick_layout(temp):
                    (3, (17000, 17000, 23000, 23000)), (4, (19000, 19000, 21000, 21000)),
                    (5, (5000, 5000, 35000, 35000)), (6, (42000, 5000, 48000, 35000))):
         top.shapes(layout.layer(db.LayerInfo(n, 0))).insert(db.Box(*box))
+    top.shapes(layout.layer(db.LayerInfo(2, 5))).insert(db.Box(21500, 21500, 22500, 22500))
     src = d / "plates.oas"
     layout.write(str(src))
     done = subprocess.run([FLOE2, "index", str(src), "--jobs", "1"], cwd=ROOT,
@@ -289,6 +291,21 @@ def pick_layout(temp):
 PICK_FILLS = [{"pair": [3, 0], "fill": {"kind": "solid"}},
               {"pair": [5, 0], "fill": {"kind": "clear"}},
               {"pair": [6, 0], "fill": {"kind": "clear"}}]
+# a snap at a point (um) of that view: the answer with the solid square on,
+# with every shape snapped to, and the answer with the solid square off
+SNAP_CASES = [
+    # the corner and an edge of the 1 um square under the solid one: passed
+    # by while it is covered, snapped to when the solid square is off
+    ("a covered corner", (21.6, 21.6), None, ("vertex", 21500, 21500), ("vertex", 21500, 21500)),
+    ("a covered edge", (22.0, 21.45), None, ("edge", 22000, 21500), ("edge", 22000, 21500)),
+    # the small square on top and the solid square itself show
+    ("a corner on top", (21.05, 21.05), ("vertex", 21000, 21000), ("vertex", 21000, 21000),
+     ("vertex", 21000, 21000)),
+    ("the solid square's corner", (22.9, 22.9), ("vertex", 23000, 23000),
+     ("vertex", 23000, 23000), None),
+    ("the solid square's edge", (23.1, 20.0), ("edge", 23000, 20000), ("edge", 23000, 20000),
+     None),
+]
 # a point (um), the layers picked there from the smallest, the shapes over
 # the point that do not show - in a view 20 um wide around the die's middle
 PICK_CASES = [
@@ -334,6 +351,16 @@ def pick_order(src, svc):
 
     def said(picks, last):
         return ([a["layer"] for a in picks], (picks[0] if picks else last)["hidden"])
+
+    def snap(s, frame, at):
+        """A snap at a point (um), 10 px around it: (kind, x, y) or None."""
+        box = frame["bbox"]
+        qid = s.query(frame["id"], "snap",
+                      (at[0] * 1000 - box[0]) / (box[2] - box[0]) * W,
+                      (box[3] - at[1] * 1000) / (box[3] - box[1]) * H, 10)
+        got = answer(s, "query", lambda v, qid=qid: v["id"] == qid)
+        return ((got["snap"], got["x"], got["y"]) if got["found"] else None,
+                got["request"]["seen"])
     s = gtkservice.ViewSession(src, W, H, patch={"detail": "high"}, svc=svc)
     until(s, final_frame(1))
     frame = view(s, 20.0, style_deltas=PICK_FILLS)
@@ -345,6 +372,17 @@ def pick_order(src, svc):
               and again["layer"] == layers[0]
               and [a["area"] for a in picks] == sorted(a["area"] for a in picks),
               "a pick at %s %r: %r" % (what, at, said(picks, again)))
+    # a snap is of what shows too (0.12.457, user 2026-11-12: "스냅도 가려진
+    # 도형에는 붙지 않도록 할 수 있을까?"): the corner and the edge of a shape
+    # under the solid square are passed by; what is on top and the solid
+    # square itself are snapped to as ever
+    for what, at, shown, _every, _open in SNAP_CASES:
+        got = snap(s, frame, at)
+        check(got == (shown, True), "a snap at %s %r: %r" % (what, at, got))
+    # the pick there: the solid square, and four shapes under it
+    picks, again = cycle(s, frame, (22.0, 22.0))
+    check(said(picks, again) == ([3], 4), "a pick over the covered square: %r"
+          % (said(picks, again),))
     # the 30 um square is its outline: on it, and within the few pixels
     # around it that a pick looks at, it is picked - and the plate with it -,
     # further inside it is not
@@ -367,29 +405,43 @@ def pick_order(src, svc):
     picks, again = cycle(s, frame, (48.0, 20.0))
     check(said(picks, again) == ([6], 0), "a pick on that outline: %r" % (said(picks, again),))
     # the upper plate off: the lower one shows and is picked
-    off = s.edit(layers=[[1, 0], [3, 0], [4, 0], [5, 0], [6, 0]])
+    off = s.edit(layers=[[1, 0], [2, 5], [3, 0], [4, 0], [5, 0], [6, 0]])
     frame = until(s, final_frame(off["state_rev"]))[-1]
     frame = view(s, 20.0)
     picks, again = cycle(s, frame, (27.0, 20.0))
     check(said(picks, again) == ([1], 1), "the upper plate off: %r" % (said(picks, again),))
+    # the solid square off: what it covered shows, and is snapped to
+    off = s.edit(layers=[[1, 0], [2, 0], [2, 5], [4, 0], [5, 0], [6, 0]])
+    frame = until(s, final_frame(off["state_rev"]))[-1]
+    for what, at, _shown, _every, opened in SNAP_CASES:
+        got = snap(s, frame, at)
+        check(got == (opened, True), "the solid square off, a snap at %s %r: %r"
+              % (what, at, got))
     s.close()
     until(s, lambda kind, v: kind == "closed", 30)
-    # FLOE_PICK_VISIBLE=off: every shape over the point, the smallest first
-    os.environ["FLOE_PICK_VISIBLE"] = "off"
+    # FLOE_PICK_VISIBLE=off: every shape over the point, the smallest first;
+    # FLOE_SNAP_VISIBLE=off: every corner and edge
+    os.environ["FLOE_PICK_VISIBLE"] = os.environ["FLOE_SNAP_VISIBLE"] = "off"
     every = gtkservice.Service(FLOE2)
     try:
         t = gtkservice.ViewSession(src, W, H, patch={"detail": "high"}, svc=every)
         until(t, final_frame(1))
-        picks, again = cycle(t, view(t, 20.0, style_deltas=PICK_FILLS), (20.0, 20.0))
+        frame = view(t, 20.0, style_deltas=PICK_FILLS)
+        picks, again = cycle(t, frame, (20.0, 20.0))
         check(said(picks, again) == ([4, 3, 5, 1, 2], 0)
               and all(a["request"]["seen"] is False for a in picks),
               "every shape over the point: %r" % (said(picks, again),))
+        for what, at, _shown, all_shapes, _open in SNAP_CASES:
+            got = snap(t, frame, at)
+            check(got == (all_shapes, False), "every shape, a snap at %s %r: %r"
+                  % (what, at, got))
         t.close()
     finally:
         os.environ.pop("FLOE_PICK_VISIBLE", None)
+        os.environ.pop("FLOE_SNAP_VISIBLE", None)
         every.close()
-    print("pick order: what shows at %d points, the smallest first; the rest counted"
-          % (len(PICK_CASES) + 6))
+    print("pick order: what shows at %d points, the smallest first; the rest counted; "
+          "snaps at %d points pass by what is covered" % (len(PICK_CASES) + 7, len(SNAP_CASES)))
 
 
 def pick_order_ui(src):
@@ -451,6 +503,27 @@ def pick_order_ui(src):
         layer, said = click(40.9, 20.0)
         check(layer is None and said == "no object here",
               "a click on nothing: %r %r" % (layer, said))
+        # the ruler's snap passes by a covered corner and takes one that shows
+        shown(lambda: v.goto(20.0, 20.0, 20.0), "the 20 um view again")
+        heard = []
+        handle = v._handle_result
+        v._handle_result = lambda res: (heard.append(res), handle(res))[1]
+        v.mode = "ruler"
+
+        def hover(x_um, y_um):
+            v._cursor = (x_um * 1000, y_um * 1000)
+            v._snap_sent = 0.0
+            del heard[:]
+            v._request_snap()
+            pump(v, lambda: any(a.get("kind") in ("snap", "error") for a in heard),
+                 "a snap's answer", 30)
+            res = v._snap_res
+            return None if res is None else (res["snap"], res["x"], res["y"])
+        snaps = [hover(21.6, 21.6), hover(22.9, 22.9)]
+        check(snaps == [None, ("vertex", 23000, 23000)],
+              "the ruler's snap at a covered corner and at one that shows: %r" % snaps)
+        v.mode = "normal"
+        v._snap_res = None
         print("pick clicks: %s, then %s" % (
             ", ".join(said.rsplit(" · ", 1)[-1] for _, said in seen),
             "no visible object here (1 hidden)"))
@@ -468,12 +541,10 @@ def queries_and_cells(s, ref, frame, temp):
         got = answer(s, "query", lambda v, qid=qid: v["id"] == qid)
         req = got["request"]
         job = {"kind": kind, "seq": 900 + n, "x": req["x"], "y": req["y"], "r": req["r"]}
-        # a pick is asked for the shapes that show (0.12.456): the adapter
-        # asks its own frame of the same view the same, a snap is not asked so
-        check(req.get("seen") == (True if kind == "pick" else None),
-              "%s's request: %r" % (kind, req))
-        if req.get("seen"):
-            job["seen"] = True
+        # a query is of what shows (a pick 0.12.456, a snap 0.12.457): the
+        # adapter asks its own frame of the same view the same
+        check(req.get("seen") is True, "%s's request: %r" % (kind, req))
+        job["seen"] = True
         job.update(extra)
         want = reference_answer(ref, job, kind)
         keys = ("found", "x", "y", "snap") if kind == "snap" else (
@@ -1237,7 +1308,7 @@ def gui_viewer(src, ref):
              "snap answer", 60)
         got = [a for a in answers if a.get("kind") in ("snap", "error")][-1]
         want = reference_answer(ref, {"kind": "snap", "seq": 1042, "x": int(x),
-                                      "y": int(y), "r": r}, "snap")
+                                      "y": int(y), "r": r, "seen": True}, "snap")
         check(got["kind"] == "snap" and got["seq"] == 41 and all(
             got.get(k) == want.get(k) for k in ("found", "x", "y", "snap")),
             "snap: viewer %r, adapter %r" % (got, want))

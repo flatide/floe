@@ -211,28 +211,25 @@ fn manual_measurements_only_reuse_current_successful_snap_at_same_point() {
 }
 
 #[test]
-fn a_pick_is_asked_for_the_shapes_that_show() {
+fn a_query_is_asked_for_what_shows() {
     let (r, c, mut v) = setup(false);
-    // the worker is asked for what shows, and what it left out is handed on
+    // a pick: the worker is asked for the shapes that show, and what it
+    // left out is handed on
     let id = v.query(input(&v, QueryOperation::Pick { nth: 2 })).unwrap();
     let got = result(&v, id, QueryKind::Pick);
-    assert!(got.reply.request.pick_seen);
+    assert!(got.reply.request.seen);
     assert_eq!(got.reply.pick_hidden, 0);
     c.pick_hidden.store(101, Ordering::Relaxed);
     let id = v.query(input(&v, QueryOperation::Pick { nth: 0 })).unwrap();
     let got = result(&v, id, QueryKind::Pick);
     assert!(got.reply.hit.is_none());
     assert_eq!(got.reply.pick_hidden, 101);
-    // a snap is of every shape: a covered shape's corner is snapped to
+    // a snap: asked for the corners and edges that show; it counts nothing
     let id = v.query(input(&v, QueryOperation::Snap)).unwrap();
     let got = result(&v, id, QueryKind::Snap);
-    assert_eq!((got.reply.request.pick_seen, got.reply.pick_hidden), (false, 0));
-    assert!(c
-        .query_requests
-        .lock()
-        .unwrap()
-        .iter()
-        .all(|(_, q)| q.pick_seen == (q.operation.kind() == QueryKind::Pick)));
+    assert!(got.reply.request.seen);
+    assert_eq!(got.reply.pick_hidden, 0);
+    assert!(c.query_requests.lock().unwrap().iter().all(|(_, q)| q.seen));
     v.close().unwrap();
     assert_eq!(r.usage(), Usage::default());
 }

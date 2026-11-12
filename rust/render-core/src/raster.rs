@@ -5073,9 +5073,18 @@ fn raster_tile(
 /// any pixel has one of them in it.
 pub const SEEN_REACH_PX: u32 = 8;
 
+/// How near a point a layer's pixel has to be for the layer to show at it,
+/// px: the rim of a shape is drawn within a pixel of its corner or edge, and
+/// under a speckle of a layer above every other pixel of it is left.
+pub const SEEN_NEAR_PX: f64 = 2.5;
+
+/// The widest window `seen_planes_around` paints, px each way.
+pub const SEEN_REACH_MAX_PX: u32 = 96;
+
 /// What shows of each plane in a small device window of a styled frame
 /// (0.12.456, user 2026-11-12: a pick takes the shapes that are seen - a
-/// layer that is on but lies under others at the point is not picked). A
+/// layer that is on but lies under others at the point is not picked; a
+/// snap likewise, 0.12.457). A
 /// frame is painted top plane first, each pixel written once, so the pixels
 /// a plane wrote are the ones the planes above it left open: the window is
 /// painted again by the frame's own passes and rules, and each plane's
@@ -5085,10 +5094,12 @@ pub struct SeenPlanes {
     view: RasterViewBox,
     width: u32,
     height: u32,
-    /// `[col0, row0, col1, row1)` of the frame, at most 64 columns
+    /// `[col0, row0, col1, row1)` of the frame
     window: [u32; 4],
-    /// layer index -> its outline's width and, a word a window row, the
-    /// pixels it wrote (bit c = column col0 + c)
+    /// the words of a window row: 64 columns a word
+    words: usize,
+    /// layer index -> its outline's width and the pixels it wrote, row by
+    /// row (bit c of a row = column col0 + c)
     planes: BTreeMap<u32, (u8, Vec<u64>)>,
 }
 
@@ -5115,21 +5126,63 @@ impl SeenPlanes {
             (self.view.y1 - bbox.y1 as f64) / per_row - grow,
             (self.view.y1 - bbox.y0 as f64) / per_row + grow,
         );
-        rows.iter().enumerate().any(|(index, &word)| {
+        rows.chunks(self.words).enumerate().any(|(index, row_words)| {
             let row = f64::from(self.window[1]) + index as f64 + 0.5;
-            if word == 0 || row < rows_in.0 || row > rows_in.1 {
+            if row < rows_in.0 || row > rows_in.1 {
                 return false;
             }
-            let mut left = word;
-            while left != 0 {
-                let col = f64::from(self.window[0] + left.trailing_zeros()) + 0.5;
-                if col >= cols.0 && col <= cols.1 {
+            row_words.iter().enumerate().any(|(word_index, &word)| {
+                let mut left = word;
+                while left != 0 {
+                    let col = f64::from(self.window[0])
+                        + (word_index * 64) as f64
+                        + f64::from(left.trailing_zeros())
+                        + 0.5;
+                    if col >= cols.0 && col <= cols.1 {
+                        return true;
+                    }
+                    left &= left - 1;
+                }
+                false
+            })
+        })
+    }
+
+    /// Whether the layer shows at a point (dbu, the frame's world): it wrote
+    /// a pixel of the window whose centre is within `SEEN_NEAR_PX` of the
+    /// point - what is seen of a corner or of a point of an edge. A point
+    /// off the window shows nothing.
+    pub fn shows_at(&self, layer_idx: u32, x: f64, y: f64) -> bool {
+        let Some((_, rows)) = self.planes.get(&layer_idx) else {
+            return false;
+        };
+        let px = (x - self.view.x0) * f64::from(self.width) / (self.view.x1 - self.view.x0);
+        let py = (self.view.y1 - y) * f64::from(self.height) / (self.view.y1 - self.view.y0);
+        if !(px.is_finite() && py.is_finite()) {
+            return false;
+        }
+        let [c0, r0, c1, r1] = self.window;
+        // the pixels whose centres (col + 0.5, row + 0.5) can be that near
+        let col_lo = (px - SEEN_NEAR_PX - 0.5).ceil().max(f64::from(c0));
+        let col_hi = (px + SEEN_NEAR_PX - 0.5).floor().min(f64::from(c1) - 1.0);
+        let row_lo = (py - SEEN_NEAR_PX - 0.5).ceil().max(f64::from(r0));
+        let row_hi = (py + SEEN_NEAR_PX - 0.5).floor().min(f64::from(r1) - 1.0);
+        if col_lo > col_hi || row_lo > row_hi {
+            return false;
+        }
+        for row in row_lo as u32..=row_hi as u32 {
+            for col in col_lo as u32..=col_hi as u32 {
+                let (dx, dy) = (f64::from(col) + 0.5 - px, f64::from(row) + 0.5 - py);
+                if dx * dx + dy * dy > SEEN_NEAR_PX * SEEN_NEAR_PX {
+                    continue;
+                }
+                let (index, bit) = ((row - r0) as usize, (col - c0) as usize);
+                if rows[index * self.words + bit / 64] >> (bit % 64) & 1 == 1 {
                     return true;
                 }
-                left &= left - 1;
             }
-            false
-        })
+        }
+        false
     }
 
     /// The layers that show in the window and the pixels each wrote.
@@ -5160,8 +5213,10 @@ pub fn seen_planes_around(
     guard: Option<(u64, &RenderCancellation)>,
 ) -> Result<Option<SeenPlanes>, String> {
     styled.validate()?;
-    if !(1..=32).contains(&reach) {
-        return Err(format!("seen-planes reach must be in 1..=32 px, got {reach}"));
+    if !(1..=SEEN_REACH_MAX_PX).contains(&reach) {
+        return Err(format!(
+            "seen-planes reach must be in 1..={SEEN_REACH_MAX_PX} px, got {reach}"
+        ));
     }
     let request = &styled.raster;
     let (px, py) = world_px(request, point.0, point.1);
@@ -5226,13 +5281,13 @@ pub fn seen_planes_around(
         else {
             continue;
         };
-        // (a window of up to 64 columns is one word a row; the columns past
-        // it were never open and are in neither mask's difference)
+        // (the columns past the window were never open and are in neither
+        // mask's difference)
         let wrote: Vec<u64> = once
             .bits
-            .chunks(once.words)
-            .zip(before.chunks(once.words))
-            .map(|(now, was)| now[0] & !was[0])
+            .iter()
+            .zip(&before)
+            .map(|(now, was)| now & !was)
             .collect();
         if wrote.iter().any(|&word| word != 0) {
             let layer = &styled.layers[plane];
@@ -5245,6 +5300,7 @@ pub fn seen_planes_around(
         width: request.width,
         height: request.height,
         window,
+        words: ((window[2] - window[0]) as usize).div_ceil(64),
         planes,
     }))
 }
@@ -12585,7 +12641,7 @@ mod tests {
             [0, 0, 255, 255],
             [255, 255, 0, 255],
         ];
-        let (mut windows, mut shown, mut under) = (0u32, 0u32, 0u32);
+        let (mut windows, mut shown, mut under, mut wide, mut points) = (0u32, 0u32, 0u32, 0u32, 0u32);
         for (seed, dense) in [(1u64, false), (2, true), (3, true)] {
             for shift in 0..4usize {
                 for (width, height, tile_size, view) in [
@@ -12635,9 +12691,12 @@ mod tests {
                             (view.0 + (col + 0.5) * span_x / f64::from(width)).floor() as i64,
                             (view.3 - (row + 0.5) * span_y / f64::from(height)).ceil() as i64,
                         );
+                        // a pick's window, and a snap's wider one (more
+                        // than a word of columns where the frame is as wide)
+                        let reach = if fx == 0.5 { 44 } else { SEEN_REACH_PX };
                         // the frame's switch does not reach the window
                         let seen = with_write_once(shift % 2 == 1, || {
-                            seen_planes_around(&scene, &request, point, SEEN_REACH_PX, None)
+                            seen_planes_around(&scene, &request, point, reach, None)
                         })
                         .unwrap()
                         .unwrap();
@@ -12648,23 +12707,63 @@ mod tests {
                             "the window {:?} is around the point's pixel ({px}, {py})",
                             seen.window()
                         );
-                        assert!(c1 - c0 <= 2 * SEEN_REACH_PX && r1 - r0 <= 2 * SEEN_REACH_PX);
+                        assert!(c1 - c0 <= 2 * reach && r1 - r0 <= 2 * reach);
+                        assert_eq!(seen.words, ((c1 - c0) as usize).div_ceil(64));
+                        wide += u32::from(seen.words > 1);
                         windows += 1;
+                        let in_frame = |col: u32, row: u32, color: &[u8; 4]| {
+                            let at = (row * width + col) as usize * 4;
+                            &frame.pixels()[at..at + 4] == color
+                        };
                         for row in r0..r1 {
                             for col in c0..c1 {
-                                let at = (row * width + col) as usize * 4;
-                                let pixel = &frame.pixels()[at..at + 4];
                                 for (layer, color) in colors.iter().enumerate() {
+                                    let bit = (col - c0) as usize;
                                     let wrote = seen.planes.get(&(layer as u32)).is_some_and(
-                                        |(_, rows)| rows[(row - r0) as usize] >> (col - c0) & 1 == 1,
+                                        |(_, rows)| {
+                                            rows[(row - r0) as usize * seen.words + bit / 64]
+                                                >> (bit % 64)
+                                                & 1
+                                                == 1
+                                        },
                                     );
                                     assert_eq!(
                                         wrote,
-                                        pixel == color,
-                                        "seed {seed} shift {shift} {width}x{height} point {point:?} pixel ({col}, {row}) layer {layer}: frame {pixel:?}"
+                                        in_frame(col, row, color),
+                                        "seed {seed} shift {shift} {width}x{height} point {point:?} pixel ({col}, {row}) layer {layer}"
                                     );
                                     shown += u32::from(wrote);
                                 }
+                            }
+                        }
+                        // a layer shows at a point where the frame has a
+                        // pixel of its colour that near, in the window
+                        for (step, (col, row)) in (r0..r1)
+                            .flat_map(|row| (c0..c1).map(move |col| (col, row)))
+                            .enumerate()
+                        {
+                            if step % 7 != 0 {
+                                continue;
+                            }
+                            let at = (
+                                view.0 + (f64::from(col) + 0.25) * span_x / f64::from(width),
+                                view.3 - (f64::from(row) + 0.75) * span_y / f64::from(height),
+                            );
+                            for (layer, color) in colors.iter().enumerate() {
+                                let near = (r0..r1).any(|other_row| {
+                                    (c0..c1).any(|other_col| {
+                                        let dx = f64::from(other_col) + 0.5 - (f64::from(col) + 0.25);
+                                        let dy = f64::from(other_row) + 0.5 - (f64::from(row) + 0.75);
+                                        dx * dx + dy * dy <= SEEN_NEAR_PX * SEEN_NEAR_PX
+                                            && in_frame(other_col, other_row, color)
+                                    })
+                                });
+                                assert_eq!(
+                                    seen.shows_at(layer as u32, at.0, at.1),
+                                    near,
+                                    "seed {seed} shift {shift} {width}x{height} at ({col}, {row}) layer {layer}"
+                                );
+                                points += 1;
                             }
                         }
                         // a layer that is under the others all over the
@@ -12694,7 +12793,10 @@ mod tests {
                 }
             }
         }
-        assert!(windows > 200 && shown > 5_000 && under > 50, "{windows} {shown} {under}");
+        assert!(
+            windows > 200 && shown > 5_000 && under > 50 && wide > 10 && points > 5_000,
+            "{windows} {shown} {under} {wide} {points}"
+        );
         let scene = once_scene(1, false);
         let request = StyledGeometryRasterRequest {
             raster: request(),
@@ -12702,7 +12804,7 @@ mod tests {
             hierarchy_frames: false,
             mono: false,
         };
-        for reach in [0, 33] {
+        for reach in [0, SEEN_REACH_MAX_PX + 1] {
             assert!(seen_planes_around(&scene, &request, (5, 5), reach, None).is_err());
         }
         // a pick superseded while the window is painted stops there
@@ -12733,6 +12835,7 @@ mod tests {
             width: 100,
             height: 100,
             window: [8, 8, 24, 24],
+            words: 1,
             planes,
         };
         let boxed = |x0, y0, x1, y1| BBox { x0, y0, x1, y1 };
@@ -12750,6 +12853,17 @@ mod tests {
         assert!(seen.shows(7, boxed(11, 91, 12, 95)));
         assert!(!seen.shows(7, boxed(11, 92, 12, 95)));
         assert_eq!(seen.layers(), vec![(7, 2)]);
+        // at a point: a pixel the layer wrote within SEEN_NEAR_PX of it -
+        // pixel (11, 10) has its centre at world (11.5, 89.5)
+        assert!(seen.shows_at(7, 11.5, 89.5));
+        assert!(seen.shows_at(7, 13.9, 89.5));
+        assert!(!seen.shows_at(7, 14.1, 89.5));
+        assert!(seen.shows_at(7, 11.5, 91.9));
+        assert!(!seen.shows_at(7, 13.5, 91.5));
+        assert!(!seen.shows_at(8, 11.5, 89.5));
+        // off the window nothing shows, however near a pixel would be
+        assert!(!seen.shows_at(7, 200.0, 89.5));
+        assert!(!seen.shows_at(7, f64::NAN, 89.5));
     }
 
     /// The density stack (CUT_DENSITY_DESIGN §10.10) over the write-once

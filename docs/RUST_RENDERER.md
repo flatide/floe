@@ -110,7 +110,7 @@ open cache=/abs/.valmini.oas.ice budget_mb=64 jobs=4
 style epoch=1 path=/tmp/valmini.styles
 render gen=10 view=0,0,404000,447000 w=1200 h=800 depth=full cut=0 exact=0 layers=1/0,2/0 frames=on labels=on font_px=14 mono=off frame_cache=1 jobs=4 decode_jobs=8 tile_px=384 decode_pages=99 round_pages=32 style_epoch=1 out=/tmp/frame.png
 clip seq=12 box=0,0,404000,447000 layers=1/0,2/0 jobs=4 out=/tmp/clip.oas
-snap seq=20 x=1000 y=2000 r=10 layers=1/0,2/0
+snap seq=20 x=1000 y=2000 r=10 layers=1/0,2/0 seen=1
 pick seq=21 x=1000 y=2000 r=3 nth=0 layers=1/0,2/0 seen=1
 cell_sources seq=30
 cells seq=31 src=0 cell=17
@@ -232,6 +232,11 @@ wrote no pixel within the shape's box there is under the layers above it and
 is no candidate. The reply counts them: `hidden=N` on a hit and on `found=0`
 alike, so a point under covered shapes alone is not an empty one. A frame
 without styled planes has no such window and every shape is a candidate.
+A snap's `seen=1` (0.12.457) judges the same window, as wide as the snap's
+radius and 3 px, by the point it would land on: a vertex or the foot on an
+edge where the shape's layer wrote no pixel within 2.5 px
+(`SeenPlanes::shows_at`) is passed by, and the nearest of those that show is
+the answer - a vertex before an edge, as ever.
 
 Renderer repetition traversal rejects collinear or zero-vector two-dimensional
 grids explicitly before enumerating them; the normal one-dimensional grid forms

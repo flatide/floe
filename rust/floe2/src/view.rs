@@ -53,7 +53,9 @@
 //! A pick's candidates are the shapes over the point that show in the frame
 //! on the screen, the smallest first (`nth` goes round them); its answer
 //! says how many shapes over the point it left out because other layers
-//! cover them there (`hidden`), and `request.seen` that it was asked so.
+//! cover them there (`hidden`). A snap lands on a corner or a point of an
+//! edge that shows, and passes by the covered ones. `request.seen` says a
+//! query was asked so.
 //!
 //! Events, between replies, one JSON object per line:
 //!   {"event": "view", "view": N, "snapshot": {...}}   the state, phase,
@@ -653,16 +655,17 @@ fn query_json(kind: &str, r: &ViewQueryResult) -> Value {
     o.insert("kind".into(), json!(kind));
     o.insert("id".into(), json!(r.id));
     o.insert("found".into(), json!(false));
-    // the world point and radius the controller asked (dbu, the root's)
-    let mut asked =
-        json!({"x": r.reply.request.x, "y": r.reply.request.y, "r": r.reply.request.radius});
+    // the world point and radius the controller asked (dbu, the root's),
+    // and whether it asked for what shows in the frame alone
+    o.insert(
+        "request".into(),
+        json!({"x": r.reply.request.x, "y": r.reply.request.y, "r": r.reply.request.radius,
+               "seen": r.reply.request.seen}),
+    );
     if kind == "pick" {
-        // whether the pick was of the shapes that show, and how many shapes
-        // over the point it left out because they do not
-        asked["seen"] = json!(r.reply.request.pick_seen);
+        // the shapes over the point a pick left out because they do not show
         o.insert("hidden".into(), json!(r.reply.pick_hidden));
     }
-    o.insert("request".into(), asked);
     if r.reply.status != QueryStatus::Ok {
         o.insert(
             "err".into(),

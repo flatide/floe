@@ -8,7 +8,7 @@ use floe_render_core::{
     HierPlan, LayerFill, LayerProbeReport, LayerRasterSession, LayerStyle, PlanRequest, ProbeMode,
     RasterViewBox, RenderCancellation, RenderLabel, RgbaFrame, SceneQueryLayer, SceneQueryRequest,
     SceneSnapKind, StyledGeometryRasterRequest, SummarySelection, ViewBox, DEFAULT_LABEL_FONT_PX,
-    DEFAULT_TILE_SIZE, FULL_DEPTH, MAX_TILE_SIZE, SEEN_REACH_PX,
+    DEFAULT_TILE_SIZE, FULL_DEPTH, MAX_TILE_SIZE, SEEN_NEAR_PX, SEEN_REACH_MAX_PX, SEEN_REACH_PX,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufRead, Write};
@@ -602,6 +602,9 @@ struct SnapCommand {
     y: i64,
     radius: i64,
     visible_layers: Option<Vec<String>>,
+    /// `seen=1`: a corner or a point of an edge that the layers above cover
+    /// in the frame on the screen is not snapped to (0.12.457).
+    seen: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -854,6 +857,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                     "scene_gen",
                     "scene_round",
                     "incomplete",
+                    "seen",
                 ],
             )?;
             Ok(Some(InputCommand::Snap(SnapCommand {
@@ -864,6 +868,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                 y: required_parse(&fields, "y")?,
                 radius: required_parse::<i64>(&fields, "r")?.max(1),
                 visible_layers: parse_layers(fields.get("layers"))?,
+                seen: seen_flag(&fields)?,
             })))
         }
         "pick" => {
@@ -891,11 +896,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                 radius: required_parse::<i64>(&fields, "r")?.max(1),
                 nth: optional_parse(&fields, "nth")?.unwrap_or(0),
                 visible_layers: parse_layers(fields.get("layers"))?,
-                seen: match fields.get("seen").map(String::as_str) {
-                    None => false,
-                    Some("1") => true,
-                    Some(other) => return Err(format!("invalid seen value: {other}")),
-                },
+                seen: seen_flag(&fields)?,
             })))
         }
         "clip" => {
@@ -1091,6 +1092,31 @@ fn distinct_field(painted: &[((u32, u32), [u8; 4])]) -> String {
         .map(|((layer, datatype), [r, g, b, _])| format!("{layer}/{datatype}:{r:02x}{g:02x}{b:02x}"))
         .collect::<Vec<_>>()
         .join(",")
+}
+
+/// A query's `seen=1` (the only value; absent = false): the query is of
+/// what shows in the frame on the screen.
+fn seen_flag(fields: &BTreeMap<String, String>) -> Result<bool, String> {
+    match fields.get("seen").map(String::as_str) {
+        None => Ok(false),
+        Some("1") => Ok(true),
+        Some(other) => Err(format!("invalid seen value: {other}")),
+    }
+}
+
+/// The window a snap looks at for what shows, px each way around its point:
+/// its radius in the frame's pixels and the reach of `SEEN_NEAR_PX` past it.
+fn snap_seen_reach(styled: &StyledGeometryRasterRequest, radius: i64) -> u32 {
+    let raster = &styled.raster;
+    let per_px = ((raster.view.x1 - raster.view.x0) / f64::from(raster.width))
+        .min((raster.view.y1 - raster.view.y0) / f64::from(raster.height));
+    let px = if per_px > 0.0 {
+        (radius as f64 / per_px).ceil()
+    } else {
+        0.0
+    };
+    (px.clamp(0.0, f64::from(SEEN_REACH_MAX_PX)) as u32 + SEEN_NEAR_PX.ceil() as u32)
+        .clamp(1, SEEN_REACH_MAX_PX)
 }
 
 fn reject_unknown(fields: &BTreeMap<String, String>, allowed: &[&str]) -> Result<(), String> {
@@ -2361,7 +2387,7 @@ fn handle_snap(
         let Some(published) = published? else {
             return Ok(None);
         };
-        let request = scene_query_request(
+        let mut request = scene_query_request(
             &published,
             command.x,
             command.y,
@@ -2376,6 +2402,20 @@ fn handle_snap(
             },
             QUERY_MEMBER_CAP,
         )?;
+        if let (true, Some(styled)) = (command.seen, published.styled.as_ref()) {
+            // what shows within the snap's reach in the frame on the screen:
+            // that window painted again by the frame's own request (a point
+            // off the frame has none, and every shape is snapped to)
+            request.seen = seen_planes_around(
+                &published.scene,
+                styled,
+                (command.x, command.y),
+                snap_seen_reach(styled, command.radius),
+                cancellation,
+            )
+            .map_err(superseded)?
+            .map(Arc::new);
+        }
         requested_summaries = request
             .layers
             .iter()
@@ -7457,6 +7497,7 @@ mod tests {
             y: 2,
             radius: 3,
             visible_layers: None,
+            seen: false,
         }))
         .unwrap();
         let pick = answers.recv().unwrap();
@@ -7913,6 +7954,7 @@ mod tests {
                 y: 7,
                 radius: 1,
                 visible_layers: Some(vec!["2/0".to_string(), "1/3".to_string()]),
+                seen: false,
             }
         );
         assert_eq!(
@@ -7946,10 +7988,20 @@ mod tests {
             "pick seq=5 x=1 y=2 r=3 seen=0",
             "pick seq=5 x=1 y=2 r=3 seen=yes",
             "pick seq=5 x=1 y=2 r=3 max_w=5 max_h=5",
-            "snap seq=5 x=1 y=2 r=3 seen=1",
+            "snap seq=5 x=1 y=2 r=3 seen=0",
+            "snap seq=5 x=1 y=2 r=3 seen=on",
         ] {
             assert!(parse_command(bad).is_err(), "{bad}");
         }
+        // a snap of what shows, as a pick's
+        assert!(
+            snap(
+                parse_command("snap seq=5 x=1 y=2 r=3 seen=1")
+                    .unwrap()
+                    .unwrap()
+            )
+            .seen
+        );
         assert!(
             snap(
                 parse_command("snap seq=4 x=1 y=2 r=3 scene_gen=7 scene_round=2 incomplete=ok")

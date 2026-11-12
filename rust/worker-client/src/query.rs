@@ -80,12 +80,13 @@ pub struct QueryRequest {
     pub y: i64,
     pub radius: i64,
     pub layers: Layers,
-    /// A pick takes the shapes that show: of the shapes over the point,
-    /// those whose layer has a pixel of the frame on the screen within them
-    /// around the point - a layer that is on and lies under others there is
-    /// not picked (the worker paints that window of the frame again to
-    /// see). False: every shape over the point. A snap takes none.
-    pub pick_seen: bool,
+    /// The query is of what shows in the frame on the screen (the worker
+    /// paints the window around the point again to see). A pick takes, of
+    /// the shapes over the point, those whose layer has a pixel within them
+    /// there - a layer that is on and lies under others is not picked. A
+    /// snap passes by a corner or a point of an edge where its layer has no
+    /// pixel. False: every shape.
+    pub seen: bool,
 }
 impl QueryRequest {
     pub(crate) fn command(&self, sequence: u64) -> Result<String> {
@@ -101,13 +102,7 @@ impl QueryRequest {
             QueryOperation::Snap => String::new(),
             QueryOperation::Pick { nth } => format!(" nth={nth}"),
         };
-        let seen = match (self.operation, self.pick_seen) {
-            (_, false) => "",
-            (QueryOperation::Pick { .. }, true) => " seen=1",
-            (QueryOperation::Snap, true) => {
-                return Err(Error::input("only a pick takes the shapes that show"))
-            }
-        };
+        let seen = if self.seen { " seen=1" } else { "" };
         Ok(format!(
             "{} seq={sequence} x={} y={} r={} layers={} scene_gen={} scene_round={}{nth}{seen}",
             self.operation.name(),
@@ -171,7 +166,7 @@ pub struct QueryReply {
     /// Native local diagnostic. A future HTTP adapter must map to safe codes.
     pub error: Option<String>,
     /// Shapes over the point that a pick left out because they do not show
-    /// (`QueryRequest::pick_seen`): with no hit, the point is not empty.
+    /// (`QueryRequest::seen`): with no hit, the point is not empty.
     /// 0 for a snap and for a pick of every shape.
     pub pick_hidden: u64,
 }
@@ -360,7 +355,7 @@ pub(crate) fn parse_reply_with(
         Some(_) if kind == "pick" => counter(&f, "hidden")?,
         Some(_) => return Err(Error::protocol("snap result with a pick count")),
     };
-    if pick_hidden != 0 && (!request.pick_seen || status != QueryStatus::Ok) {
+    if pick_hidden != 0 && (!request.seen || status != QueryStatus::Ok) {
         return Err(Error::protocol("pick left shapes out unasked"));
     }
     Ok(QueryReply {
@@ -389,7 +384,7 @@ mod tests {
             y: 2,
             radius: 3,
             layers: Layers::Only(vec![(7, 0), (3, 300), (7, 0)]),
-            pick_seen: false,
+            seen: false,
         }
     }
     fn fields(text: &str) -> Fields {
@@ -569,14 +564,19 @@ mod tests {
             req.command(5).unwrap(),
             "pick seq=5 x=1 y=2 r=3 layers=all scene_gen=7 scene_round=2 nth=1"
         );
-        req.pick_seen = true;
+        req.seen = true;
         assert_eq!(
             req.command(5).unwrap(),
             "pick seq=5 x=1 y=2 r=3 layers=all scene_gen=7 scene_round=2 nth=1 seen=1"
         );
+        // a snap of what shows says the same word
         let mut snap_request = request();
-        snap_request.pick_seen = true;
-        assert!(snap_request.command(5).is_err());
+        snap_request.seen = true;
+        assert_eq!(
+            snap_request.command(5).unwrap(),
+            "snap seq=5 x=1 y=2 r=3 layers=3/300,7/0 scene_gen=7 scene_round=2 seen=1"
+        );
+        assert!(parse_reply("snap", snap(), snap_request).is_ok());
         // the answer: a hit beside shapes that do not show, and no hit
         // under them
         let hit = "pick seq=5 found=1 count=2 index=1 layer=7 datatype=0 lname_hex=372f30 cell_hex=544f50 area=100 bbox=0,0,10,10 points=0,0;0,10;10,0 points_truncated=0 hidden=3 scene_gen=7 scene_round=2 scene_complete=1 scene_summary=0 query_status=ok";
@@ -601,7 +601,7 @@ mod tests {
             assert!(parse_reply("pick", f, req.clone()).is_err(), "{bad}");
         }
         let mut every = req.clone();
-        every.pick_seen = false;
+        every.seen = false;
         assert!(parse_reply("pick", fields(none), every.clone()).is_err());
         assert!(parse_reply("pick", fields(&none.replace("=101", "=0")), every).is_ok());
         let refused = "pick seq=5 found=0 count=0 hidden=2 err_hex=6572726f72 scene_gen=7 scene_round=2 scene_complete=1 scene_summary=1 query_status=scene_summary";

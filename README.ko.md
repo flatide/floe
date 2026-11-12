@@ -160,6 +160,7 @@ fit·clip·open .db·rules 기능을 노출한다(구 패널 버튼들은 메뉴
 | `FLOE_NO_FILE_LOAD` | `1`·`on`·`yes`·`true`면 `floe2 view --no-file-load`와 같다: 뷰어의 파일 로드 명령을 끈다(런처 환경용, 0.12.445) |
 | `FLOE_WAIVE_SYNC` | `off`면 waive 쓰기를 요청마다 디스크에 동기화하지 않고 커널에 맡긴다(0.12.445까지의 동작. 기본은 동기화, 0.12.446) |
 | `FLOE_PICK_VISIBLE` | `off`면 pick이 그 자리에서 다른 레이어에 가려 보이지 않는 도형도 후보로 삼는다(0.12.455까지의 대상. 기본은 눈에 보이는 도형만, 0.12.456). 작은 것부터 순환하는 순서는 어느 쪽이든 같다 |
+| `FLOE_SNAP_VISIBLE` | `off`면 룰러의 스냅이 다른 레이어에 가려 보이지 않는 꼭짓점과 변에도 붙는다(0.12.456까지의 대상. 기본은 눈에 보이는 것만, 0.12.457) |
 | `FLOE_PANEL_DEBUG`, `FLOE_MOSAIC`, `FLOE_WS`, `FLOE_CLIP`, `FLOE_REGION`, `FLOE_TESTCHIP` | 디버그/테스트용 |
 
 ## 7. 기타 CLI

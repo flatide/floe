@@ -3473,7 +3473,8 @@ assert not hasattr(gui, "live_caps")
             self.assertEqual(
                 commands[1],
                 "pick seq=8 x=5 y=6 r=1 nth=-1 layers=all")
-            # a pick of what shows in the frame (0.12.456)
+            # a pick of what shows in the frame (0.12.456), a snap likewise
+            # (0.12.457)
             worker._submit_pick({
                 "seq": 8, "x": 5, "y": 6, "r": 3, "nth": 2,
                 "layers": [(2, 0)], "seen": True,
@@ -3481,6 +3482,12 @@ assert not hasattr(gui, "live_caps")
             self.assertEqual(
                 commands[2],
                 "pick seq=8 x=5 y=6 r=3 nth=2 layers=2/0 seen=1")
+            worker._submit_snap({
+                "seq": 7, "x": 11, "y": -3, "r": 4, "layers": [],
+                "seen": True,
+            })
+            self.assertEqual(
+                commands[3], "snap seq=7 x=11 y=-3 r=4 layers=all seen=1")
 
             kind, fields = _parse_wire_line(
                 "snap seq=7 found=1 x=10 y=-2 snap=vertex")
