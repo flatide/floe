@@ -12903,11 +12903,13 @@ class Viewer:
         self._display()
 
     def _pick_click(self, ev):
-        """A click picks the layout shape under the pointer: the smallest of
-        the shapes over the point that fit the view, and a click at the
-        same spot the next larger one, round again from the smallest (the
-        order and the view's limit are the service's: render-core
-        pick_scene, app-core view::query; SPEC-VIEWER §9)."""
+        """A click picks the layout shape seen under the pointer: of the
+        shapes over the point, those that show in the frame there - a layer
+        that is on but lies under others at the point is not picked -, the
+        smallest first; a click at the same spot takes the next larger one,
+        round again from the smallest (the rule is the service's: render-core
+        pick_scene and seen_planes_around, app-core view::query; SPEC-VIEWER
+        §9)."""
         self._update_cursor(ev)
         x, y = self._cursor
         state = getattr(ev, "state", 0)
@@ -12970,13 +12972,14 @@ class Viewer:
                 # the silent-empty path hid a starvation defect)
                 self._set_live_status("pick error: %s" % res["err"])
                 return
-            # shapes over the point that are larger than the view are no
-            # objects to pick in it (0.12.455, user 2026-11-12): said, so
-            # that a point under a plate does not pass for an empty one
-            larger = res.get("larger") or 0
+            # a pick takes what is seen (0.12.456, user 2026-11-12): shapes
+            # over the point whose layers are on but lie under others there
+            # are not picked - said, so that the point does not pass for an
+            # empty one (turning the layers above off shows them)
+            hidden = res.get("hidden") or 0
             self._set_live_status(
-                "no object here (%d larger than the view)" % larger
-                if larger else "no object here")
+                "no visible object here (%d hidden)" % hidden
+                if hidden else "no object here")
         elif mode == "replace":
             self.selections = [res]
             self._refresh_sel_status()

@@ -1,4 +1,4 @@
-use crate::raster::checked_path_outline;
+use crate::raster::{checked_path_outline, SeenPlanes};
 use crate::repetition::for_each_visible_offset_query;
 use crate::scene::FrameScene;
 use crate::transform::OrthoTransform;
@@ -7,6 +7,7 @@ use floe_ovm::BBox;
 use floe_vfs::hier::WsKey;
 use std::cell::Cell;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 const QUERY_STOP: &str = "__floe_query_cap__";
 
@@ -19,7 +20,7 @@ const QUERY_STOP: &str = "__floe_query_cap__";
 /// "no object here" everywhere.
 const QUERY_MEMBER_LIMIT: &str = "query member limit exceeded: overly dense query region";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SceneQueryRequest {
     pub x: i64,
     pub y: i64,
@@ -33,10 +34,11 @@ pub struct SceneQueryRequest {
     /// Maximum repetition members examined, including members outside the
     /// query box. This bounds sparse explicit-point repetitions.
     pub member_cap: usize,
-    /// Pick: a shape wider (`[0]`) or taller (`[1]`) than this is no
-    /// candidate - what does not fit the view is not picked in it. None:
-    /// any size. A snap has no use for it.
-    pub max_extent: Option<[i64; 2]>,
+    /// Pick: what shows of each layer around the point in the frame on the
+    /// screen (`raster::seen_planes_around`) - a shape whose layer shows no
+    /// pixel within the shape there is no candidate: it is on, and under
+    /// others. None: every shape over the point. A snap has no use for it.
+    pub seen: Option<Arc<SeenPlanes>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,9 +61,6 @@ impl SceneQueryRequest {
         }
         if self.member_cap == 0 {
             return Err("query member_cap must be positive".to_string());
-        }
-        if self.max_extent.is_some_and(|[w, h]| w < 0 || h < 0) {
-            return Err("query max_extent must be non-negative".to_string());
         }
         let unique: BTreeSet<_> = self.layers.iter().map(|layer| layer.index).collect();
         if unique.len() != self.layers.len() {
@@ -114,9 +113,9 @@ pub struct ScenePick {
     pub index: usize,
     pub candidate: Option<ScenePickCandidate>,
     pub shapes_tested: usize,
-    /// Shapes that hold the point and were left out for their size
-    /// (`SceneQueryRequest::max_extent`).
-    pub larger: usize,
+    /// Shapes that hold the point and do not show there
+    /// (`SceneQueryRequest::seen`).
+    pub hidden: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -264,18 +263,19 @@ fn pick_scene_impl(
     // small shape clicked on was never a candidate and the "smallest" was
     // the smallest plate of the first layers.)
     let mut kept = Vec::<(Rank, ScenePickCandidate)>::new();
-    let (mut tested, mut held, mut larger) = (0usize, 0usize, 0usize);
+    let (mut tested, mut held, mut hidden) = (0usize, 0usize, 0usize);
     visit_query_shapes(scene, request, cancellation, |shape| {
         tested += 1;
         if !point_inclusive(&shape.points, request.x, request.y)? {
             return Ok(());
         }
         let bbox = polygon_bbox(&shape.points).expect("query polygon has a bbox");
-        if let Some([width, height]) = request.max_extent {
-            if i128::from(bbox.x1) - i128::from(bbox.x0) > i128::from(width)
-                || i128::from(bbox.y1) - i128::from(bbox.y0) > i128::from(height)
-            {
-                larger += 1;
+        // what is picked is what is seen (0.12.456): a shape whose layer
+        // shows nothing of it around the point - the layers above cover it -
+        // is no candidate, however small
+        if let Some(seen) = &request.seen {
+            if !seen.shows(shape.layer_idx, bbox) {
+                hidden += 1;
                 return Ok(());
             }
         }
@@ -310,7 +310,7 @@ fn pick_scene_impl(
             index: 0,
             candidate: None,
             shapes_tested: tested,
-            larger,
+            hidden,
         });
     }
     let count = kept.len();
@@ -321,7 +321,7 @@ fn pick_scene_impl(
         index,
         candidate: Some(candidate),
         shapes_tested: tested,
-        larger,
+        hidden,
     })
 }
 
@@ -971,7 +971,7 @@ mod tests {
             ],
             shape_cap: 400,
             member_cap: 400,
-            max_extent: None,
+            seen: None,
         }
     }
 
@@ -1193,7 +1193,7 @@ mod tests {
                 .collect(),
             shape_cap: 64,
             member_cap: 4096,
-            max_extent: None,
+            seen: None,
         };
         (scene, request)
     }
@@ -1210,7 +1210,7 @@ mod tests {
             .collect();
         assert!(picks
             .iter()
-            .all(|p| (p.count, p.shapes_tested, p.larger) == (64, 73, 0)));
+            .all(|p| (p.count, p.shapes_tested, p.hidden) == (64, 73, 0)));
         let layer = |p: &ScenePick| p.candidate.as_ref().unwrap().layer_idx;
         let area = |p: &ScenePick| p.candidate.as_ref().unwrap().area;
         // the smallest first, then the next ones; the plates after them
@@ -1240,67 +1240,132 @@ mod tests {
         assert_eq!(order, [1, 2, 0]);
     }
 
+    /// A frame of the `stack` scene, a dbu a pixel: `fills` by layer index,
+    /// in paint order (the last on top), each a colour of its own.
+    fn frame_of(fills: &[(u32, crate::LayerFill)]) -> crate::StyledGeometryRasterRequest {
+        crate::StyledGeometryRasterRequest {
+            raster: crate::GeometryRasterRequest {
+                view: crate::RasterViewBox::new(-256.0, -256.0, 256.0, 256.0).unwrap(),
+                width: 512,
+                height: 512,
+                background: [0, 0, 0, 255],
+                foreground: [255, 255, 255, 255],
+                workers: 1,
+                tile_size: crate::DEFAULT_TILE_SIZE,
+                area_true: true,
+                width_c: 1.0,
+                survivor_list: true,
+                place_lattice: false,
+                density_stack: false,
+                density_claim_lit: false,
+                density_top_planes: 1,
+                density_shapes_first: false,
+                density_bright: 0.0,
+                density_pattern: false,
+            },
+            layers: fills
+                .iter()
+                .map(|&(layer_idx, fill)| crate::LayerStyle {
+                    layer_idx,
+                    color: [40 + layer_idx as u8 * 30, 200, 255 - layer_idx as u8 * 30, 255],
+                    fill,
+                    outline_width: 1,
+                })
+                .collect(),
+            hierarchy_frames: false,
+            mono: false,
+        }
+    }
+
     #[test]
-    fn pick_leaves_out_what_is_larger_than_the_view() {
-        // 10 x 10, 30 x 8 (wide), 8 x 30 (tall), 50 x 50 over the point
+    fn pick_takes_the_shapes_that_show() {
+        use crate::LayerFill::{Clear, Solid, Speckle};
+        // from the bottom: two plates, a solid square, a small square on it,
+        // and over them all a large square that is its outline alone
         let rects = [
-            [-5, -5, 5, 5],
-            [-15, -4, 15, 4],
-            [-4, -15, 4, 15],
-            [-25, -25, 25, 25],
+            [-200, -200, 200, 200],
+            [-200, -200, 200, 200],
+            [-40, -40, 40, 40],
+            [-10, -10, 10, 10],
+            [-150, -150, 150, 150],
         ];
-        let (scene, mut request) = stack(&rects);
-        let order = |request: &SceneQueryRequest| {
-            let first = pick_scene(&scene, request, 0).unwrap();
-            let layers: Vec<u32> = (0..first.count as i64)
+        let (scene, base) = stack(&rects);
+        let fills = [(0, Speckle), (1, Speckle), (2, Solid), (3, Speckle), (4, Clear)];
+        let picks = |styled: &crate::StyledGeometryRasterRequest, x: i64, y: i64, seen: bool| {
+            let mut request = SceneQueryRequest { x, y, ..base.clone() };
+            request
+                .layers
+                .retain(|layer| styled.layers.iter().any(|style| style.layer_idx == layer.index));
+            if seen {
+                let around = crate::seen_planes_around(&scene, styled, (x, y), crate::SEEN_REACH_PX, None)
+                    .unwrap()
+                    .unwrap();
+                request.seen = Some(Arc::new(around));
+            }
+            let first = pick_scene(&scene, &request, 0).unwrap();
+            let order: Vec<u32> = (0..first.count as i64)
                 .map(|nth| {
-                    pick_scene(&scene, request, nth)
+                    pick_scene(&scene, &request, nth)
                         .unwrap()
                         .candidate
                         .unwrap()
                         .layer_idx
                 })
                 .collect();
-            (layers, first.larger)
+            (order, first.hidden)
         };
-        // no limit: every one of them, the smallest first
-        assert_eq!(order(&request), (vec![0, 1, 2, 3], 0));
-        // larger in either direction is out; as large as the view is in
-        for (limit, kept, larger) in [
-            ([20, 20], vec![0], 3),
-            ([10, 10], vec![0], 3),
-            ([9, 10], vec![], 4),
-            ([10, 9], vec![], 4),
-            ([30, 10], vec![0, 1], 2),
-            ([30, 8], vec![1], 3),
-            ([10, 30], vec![0, 2], 2),
-            ([8, 30], vec![2], 3),
-            ([30, 30], vec![0, 1, 2], 1),
-            ([50, 50], vec![0, 1, 2, 3], 0),
-            ([49, 500], vec![0, 1, 2], 1),
-            ([0, 0], vec![], 4),
-        ] {
-            request.max_extent = Some(limit);
-            assert_eq!(order(&request), (kept, larger), "{limit:?}");
-        }
-        let none = pick_scene(&scene, &request, 0).unwrap();
-        assert_eq!((none.count, none.index, none.larger), (0, 0, 4));
-        assert!(none.candidate.is_none());
-        // those left out take no place among the candidates kept
-        request.max_extent = Some([30, 30]);
-        request.shape_cap = 2;
-        let capped = pick_scene(&scene, &request, 1).unwrap();
-        assert_eq!((capped.count, capped.larger), (2, 1));
-        assert_eq!(capped.candidate.unwrap().layer_idx, 1);
-        request.max_extent = Some([-1, 5]);
-        assert!(pick_scene(&scene, &request, 0)
-            .unwrap_err()
-            .contains("max_extent"));
-        // a snap takes no notice of the limit
-        request.max_extent = Some([1, 1]);
-        assert!(snap_scene(&scene, &SceneQueryRequest { x: 5, y: 5, ..request })
-            .unwrap()
-            .is_some());
+        let all = frame_of(&fills);
+        // every shape over the point, the smallest first: the rule without
+        // the frame (of two plates as large the lower layer number)
+        assert_eq!(picks(&all, 0, 0, false), (vec![3, 2, 4, 0, 1], 0));
+        // at the middle the small square shows, and between its speckles
+        // the solid square under it; the outline of the large square is far
+        // away and the plates are under the solid one
+        assert_eq!(picks(&all, 0, 0, true), (vec![3, 2], 3));
+        // on the solid square beside the small one: it alone
+        assert_eq!(picks(&all, 30, 0, true), (vec![2], 3));
+        // off the solid square: the upper plate - the lower one has the
+        // same speckle and lights no pixel the upper one left
+        assert_eq!(picks(&all, 100, 0, true), (vec![1], 2));
+        // on the large square's outline: it, and the plate around it
+        assert_eq!(picks(&all, 150, 0, true), (vec![4, 1], 1));
+        assert_eq!(picks(&all, 149, 60, true), (vec![4, 1], 1));
+        // a few pixels inside the outline it is still in the window
+        assert_eq!(picks(&all, 144, 0, true), (vec![4, 1], 1));
+        assert_eq!(picks(&all, 130, 0, true), (vec![1], 2));
+        // the upper plate off: the lower one shows
+        let lower = frame_of(&[fills[0], fills[2], fills[3], fills[4]]);
+        assert_eq!(picks(&lower, 100, 0, true), (vec![0], 1));
+        // the small square solid: nothing of the square under it shows at
+        // its middle; near its edge the square under it does
+        let solid = frame_of(&[fills[0], fills[1], fills[2], (3, Solid), fills[4]]);
+        assert_eq!(picks(&solid, 0, 0, true), (vec![3], 4));
+        assert_eq!(picks(&solid, 8, 0, true), (vec![3, 2], 3));
+        // the large square filled: it is over everything
+        let over = frame_of(&[fills[0], fills[1], fills[2], fills[3], (4, Solid)]);
+        assert_eq!(picks(&over, 0, 0, true), (vec![4], 4));
+        // those that do not show take no place among the candidates kept
+        let mut capped = SceneQueryRequest { x: 0, y: 0, shape_cap: 1, ..base.clone() };
+        capped.seen = Some(Arc::new(
+            crate::seen_planes_around(&scene, &all, (0, 0), crate::SEEN_REACH_PX, None)
+                .unwrap()
+                .unwrap(),
+        ));
+        let one = pick_scene(&scene, &capped, 0).unwrap();
+        assert_eq!((one.count, one.hidden), (1, 3));
+        assert_eq!(one.candidate.unwrap().layer_idx, 3);
+        // nothing shows: nothing is picked, and the holders are counted
+        let bare = frame_of(&[(4, Clear)]);
+        let none = picks(&bare, 0, 0, true);
+        assert_eq!(none, (vec![], 1));
+        // a snap takes no notice of what shows
+        let mut snap = SceneQueryRequest { x: 10, y: 10, ..base.clone() };
+        snap.seen = Some(Arc::new(
+            crate::seen_planes_around(&scene, &over, (10, 10), crate::SEEN_REACH_PX, None)
+                .unwrap()
+                .unwrap(),
+        ));
+        assert!(snap_scene(&scene, &snap).unwrap().is_some());
     }
 
     #[test]

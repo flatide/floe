@@ -57,9 +57,10 @@ pub use raster::{
     render_geometry_occupancy, render_geometry_occupancy_cancellable, render_geometry_styled,
     render_geometry_styled_cancellable, render_geometry_styled_cancellable_reuse,
     render_geometry_styled_cancellable_windowed, render_geometry_styled_unbinned,
-    render_geometry_styled_unbinned_cancellable, DensityScenes, FrameReuse, GeometryRasterReport,
-    GeometryRasterRequest, LayerFill, LayerRasterSession, LayerStyle, RasterViewBox, RgbaFrame,
-    StyledGeometryRasterRequest, DEFAULT_TILE_SIZE, MAX_TILE_SIZE,
+    render_geometry_styled_unbinned_cancellable, seen_planes_around, DensityScenes, FrameReuse,
+    GeometryRasterReport, GeometryRasterRequest, LayerFill, LayerRasterSession, LayerStyle,
+    RasterViewBox, RgbaFrame, SeenPlanes, StyledGeometryRasterRequest, DEFAULT_TILE_SIZE,
+    MAX_TILE_SIZE, SEEN_REACH_PX,
 };
 pub use request::{PlanRequest, ViewBox, FULL_DEPTH};
 pub use scene::FrameScene;

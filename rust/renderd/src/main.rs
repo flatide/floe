@@ -2,13 +2,13 @@ use floe_render_core::{
     pick_scene, pick_scene_cancellable, render_geometry_occupancy_cancellable,
     render_geometry_styled_cancellable, render_geometry_styled_cancellable_reuse,
     render_geometry_styled_cancellable_windowed, render_geometry_styled_unbinned_cancellable,
-    snap_scene, snap_scene_cancellable,
+    seen_planes_around, snap_scene, snap_scene_cancellable,
     validate_font_px, Cache, CacheLayer, ClipGeometry, Deck, DeckRenderRequest, DeckSpec, DeckXf,
     DecodedPageCache, FrameReuse, FrameScene, GeometryRasterRequest, HierError, HierHandle,
     HierPlan, LayerFill, LayerProbeReport, LayerRasterSession, LayerStyle, PlanRequest, ProbeMode,
     RasterViewBox, RenderCancellation, RenderLabel, RgbaFrame, SceneQueryLayer, SceneQueryRequest,
     SceneSnapKind, StyledGeometryRasterRequest, SummarySelection, ViewBox, DEFAULT_LABEL_FONT_PX,
-    DEFAULT_TILE_SIZE, FULL_DEPTH, MAX_TILE_SIZE,
+    DEFAULT_TILE_SIZE, FULL_DEPTH, MAX_TILE_SIZE, SEEN_REACH_PX,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufRead, Write};
@@ -53,6 +53,10 @@ struct PublishedScene {
     /// may leave it published only when it still serves the request.
     key: RetainedKey,
     view: [f64; 4],
+    /// The frame's own paint request, pass 1: a pick paints a small window of
+    /// it again to see which planes show there (`seen_planes_around`). None:
+    /// a frame without styled planes.
+    styled: Option<Arc<StyledGeometryRasterRequest>>,
 }
 
 type SharedPublishedScene = Arc<RwLock<Option<Arc<PublishedScene>>>>;
@@ -611,10 +615,10 @@ struct PickCommand {
     radius: i64,
     nth: i64,
     visible_layers: Option<Vec<String>>,
-    /// `max_w=` and `max_h=`: a shape wider or taller than this (dbu) is no
-    /// candidate - the view's size, so that what does not fit the view is
-    /// not picked in it. None: any size.
-    max_extent: Option<[i64; 2]>,
+    /// `seen=1`: the candidates are the shapes that show in the frame on the
+    /// screen around the point - a shape whose layer is on and lies under
+    /// others there is none (0.12.456).
+    seen: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -875,8 +879,7 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                     "scene_gen",
                     "scene_round",
                     "incomplete",
-                    "max_w",
-                    "max_h",
+                    "seen",
                 ],
             )?;
             Ok(Some(InputCommand::Pick(PickCommand {
@@ -888,7 +891,11 @@ fn parse_command(line: &str) -> Result<Option<InputCommand>, String> {
                 radius: required_parse::<i64>(&fields, "r")?.max(1),
                 nth: optional_parse(&fields, "nth")?.unwrap_or(0),
                 visible_layers: parse_layers(fields.get("layers"))?,
-                max_extent: pick_extent(&fields)?,
+                seen: match fields.get("seen").map(String::as_str) {
+                    None => false,
+                    Some("1") => true,
+                    Some(other) => return Err(format!("invalid seen value: {other}")),
+                },
             })))
         }
         "clip" => {
@@ -1084,20 +1091,6 @@ fn distinct_field(painted: &[((u32, u32), [u8; 4])]) -> String {
         .map(|((layer, datatype), [r, g, b, _])| format!("{layer}/{datatype}:{r:02x}{g:02x}{b:02x}"))
         .collect::<Vec<_>>()
         .join(",")
-}
-
-/// A pick's size limit: `max_w` and `max_h` together, neither negative, or
-/// neither of them.
-fn pick_extent(fields: &BTreeMap<String, String>) -> Result<Option<[i64; 2]>, String> {
-    match (
-        optional_parse::<i64>(fields, "max_w")?,
-        optional_parse::<i64>(fields, "max_h")?,
-    ) {
-        (None, None) => Ok(None),
-        (Some(w), Some(h)) if w >= 0 && h >= 0 => Ok(Some([w, h])),
-        (Some(_), Some(_)) => Err("max_w and max_h must not be negative".to_string()),
-        _ => Err("max_w and max_h go together".to_string()),
-    }
 }
 
 fn reject_unknown(fields: &BTreeMap<String, String>, allowed: &[&str]) -> Result<(), String> {
@@ -2450,8 +2443,8 @@ fn handle_pick(
         .expected_scene
         .and_then(|id| context.rejection_with(id, 0, command.incomplete_ok));
     let mut requested_summaries = 0;
-    // shapes over the point left out for their size (`max_w`, `max_h`)
-    let mut larger = 0;
+    // shapes over the point that do not show there (`seen=1`)
+    let mut hidden = 0;
     let result: Result<Option<PickWireResponse>, String> = (|| {
         if let Some(code) = refusal {
             return Err(code.into());
@@ -2468,7 +2461,20 @@ fn handle_pick(
             PICK_CANDIDATE_CAP,
             QUERY_MEMBER_CAP,
         )?;
-        request.max_extent = command.max_extent;
+        if let (true, Some(styled)) = (command.seen, published.styled.as_ref()) {
+            // what shows around the point in the frame on the screen: its
+            // window painted again by the frame's own request (a point off
+            // the frame has none, and every shape over it is a candidate)
+            request.seen = seen_planes_around(
+                &published.scene,
+                styled,
+                (command.x, command.y),
+                SEEN_REACH_PX,
+                cancellation,
+            )
+            .map_err(superseded)?
+            .map(Arc::new);
+        }
         requested_summaries = request
             .layers
             .iter()
@@ -2484,7 +2490,7 @@ fn handle_pick(
             }
             None => pick_scene(&published.scene, &request, command.nth)?,
         };
-        larger = pick.larger;
+        hidden = pick.hidden;
         let Some(candidate) = pick.candidate else {
             return Ok(None);
         };
@@ -2517,7 +2523,7 @@ fn handle_pick(
         Ok(Some(pick)) => respond(
             responses,
             format!(
-                "pick seq={} found=1 count={} index={} layer={} datatype={} lname_hex={} cell_hex={} area={} bbox={},{},{},{} points={} points_truncated={} larger={larger} {suffix}",
+                "pick seq={} found=1 count={} index={} layer={} datatype={} lname_hex={} cell_hex={} area={} bbox={},{},{},{} points={} points_truncated={} hidden={hidden} {suffix}",
                 command.sequence,
                 pick.count,
                 pick.index,
@@ -2537,7 +2543,7 @@ fn handle_pick(
         Ok(None) => respond(
             responses,
             format!(
-                "pick seq={} found=0 count=0 larger={larger} {suffix}",
+                "pick seq={} found=0 count=0 hidden={hidden} {suffix}",
                 command.sequence
             ),
         ),
@@ -2620,7 +2626,7 @@ fn scene_query_request(
         layers,
         shape_cap,
         member_cap,
-        max_extent: None,
+        seen: None,
     })
 }
 
@@ -5179,6 +5185,14 @@ fn run_render_attempt(
                 cell_names: Arc::clone(&query_cell_names),
                 key: RetainedKey::with_summary(command, state.style_epoch, summary_key.clone()),
                 view: command.view,
+                styled: (!(styles.is_empty() && !command.frames)).then(|| {
+                    Arc::new(StyledGeometryRasterRequest {
+                        raster: raster_request,
+                        layers: styles.clone(),
+                        hierarchy_frames: command.frames,
+                        mono: command.mono,
+                    })
+                }),
             }));
         }
         if final_round {
@@ -7432,7 +7446,7 @@ mod tests {
             radius: 3,
             nth: 0,
             visible_layers: None,
-            max_extent: None,
+            seen: false,
         }))
         .unwrap();
         tx.send(QueryCommand::Snap(SnapCommand {
@@ -7916,26 +7930,23 @@ mod tests {
                 radius: 3,
                 nth: -1,
                 visible_layers: None,
-                max_extent: None,
+                seen: false,
             }
         );
-        // a pick's size limit: both of them or neither, not negative
-        assert_eq!(
+        // a pick of what shows: `seen=1` and nothing else; a snap has none
+        assert!(
             pick(
-                parse_command("pick seq=5 x=1 y=2 r=3 max_w=640 max_h=0")
+                parse_command("pick seq=5 x=1 y=2 r=3 seen=1")
                     .unwrap()
                     .unwrap()
             )
-            .max_extent,
-            Some([640, 0])
+            .seen
         );
         for bad in [
-            "pick seq=5 x=1 y=2 r=3 max_w=640",
-            "pick seq=5 x=1 y=2 r=3 max_h=640",
-            "pick seq=5 x=1 y=2 r=3 max_w=-1 max_h=5",
-            "pick seq=5 x=1 y=2 r=3 max_w=5 max_h=-1",
-            "pick seq=5 x=1 y=2 r=3 max_w=wide max_h=5",
-            "snap seq=5 x=1 y=2 r=3 max_w=5 max_h=5",
+            "pick seq=5 x=1 y=2 r=3 seen=0",
+            "pick seq=5 x=1 y=2 r=3 seen=yes",
+            "pick seq=5 x=1 y=2 r=3 max_w=5 max_h=5",
+            "snap seq=5 x=1 y=2 r=3 seen=1",
         ] {
             assert!(parse_command(bad).is_err(), "{bad}");
         }

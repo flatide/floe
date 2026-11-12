@@ -44,8 +44,8 @@ struct Control {
     snap_hit: Mutex<Option<floe_worker_client::SnapHit>>,
     /// The scene under a snap is summarized: no answer, status Summary.
     snap_summary: AtomicBool,
-    /// Shapes a pick left out for their size, as the worker says.
-    pick_larger: AtomicUsize,
+    /// Shapes a pick left out because they do not show, as the worker says.
+    pick_hidden: AtomicUsize,
     cell_requests: Mutex<Vec<(u64, CellRequest)>>,
     /// The `cells` answer's bbox for any cell; None = no shapes.
     cell_bbox: Mutex<Option<[f64; 4]>>,
@@ -83,7 +83,7 @@ impl Default for Control {
             query_cancels: Mutex::new(Vec::new()),
             snap_hit: Mutex::new(None),
             snap_summary: AtomicBool::new(false),
-            pick_larger: AtomicUsize::new(0),
+            pick_hidden: AtomicUsize::new(0),
             cell_requests: Mutex::new(Vec::new()),
             cell_bbox: Mutex::new(Some([100., 200., 300., 260.])),
             cell_nohier: AtomicBool::new(false),
@@ -232,8 +232,8 @@ impl Engine for Fake {
                     .clone()
                     .filter(|_| snap && !summary)
                     .map(floe_worker_client::QueryHit::Snap);
-                let larger = if request.operation.kind() == QueryKind::Pick && !superseded {
-                    self.control.pick_larger.load(Ordering::Relaxed) as u64
+                let hidden = if request.operation.kind() == QueryKind::Pick && !superseded {
+                    self.control.pick_hidden.load(Ordering::Relaxed) as u64
                 } else {
                     0
                 };
@@ -259,7 +259,7 @@ impl Engine for Fake {
                     } else {
                         summary.then(|| "summarized".into())
                     },
-                    pick_larger: larger,
+                    pick_hidden: hidden,
                 })));
             }
         }

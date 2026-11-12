@@ -1,6 +1,6 @@
 use floe_ovm::BBox;
 use floe_vfs::hier::WsKey;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -5066,6 +5066,187 @@ fn raster_tile(
     }
     check_cancelled(guard)?;
     Ok(work.output())
+}
+
+/// How far around a point a pick looks for what shows, px each way: the
+/// window is one period of a 16 x 16 stipple, so a plane whose fill lights
+/// any pixel has one of them in it.
+pub const SEEN_REACH_PX: u32 = 8;
+
+/// What shows of each plane in a small device window of a styled frame
+/// (0.12.456, user 2026-11-12: a pick takes the shapes that are seen - a
+/// layer that is on but lies under others at the point is not picked). A
+/// frame is painted top plane first, each pixel written once, so the pixels
+/// a plane wrote are the ones the planes above it left open: the window is
+/// painted again by the frame's own passes and rules, and each plane's
+/// writes are read off the written mask.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SeenPlanes {
+    view: RasterViewBox,
+    width: u32,
+    height: u32,
+    /// `[col0, row0, col1, row1)` of the frame, at most 64 columns
+    window: [u32; 4],
+    /// layer index -> its outline's width and, a word a window row, the
+    /// pixels it wrote (bit c = column col0 + c)
+    planes: BTreeMap<u32, (u8, Vec<u64>)>,
+}
+
+impl SeenPlanes {
+    /// Whether a shape of the layer shows: the layer wrote a pixel of the
+    /// window whose centre is in the shape's box (dbu), the box grown by the
+    /// layer's outline. A shape's own pixels are in its box; of two shapes
+    /// of one layer over a pixel neither can be told from the other.
+    pub fn shows(&self, layer_idx: u32, bbox: BBox) -> bool {
+        let Some((outline, rows)) = self.planes.get(&layer_idx) else {
+            return false;
+        };
+        let per_col = (self.view.x1 - self.view.x0) / f64::from(self.width);
+        let per_row = (self.view.y1 - self.view.y0) / f64::from(self.height);
+        if !(per_col > 0.0 && per_row > 0.0) {
+            return false;
+        }
+        let grow = f64::from(*outline) + 0.5;
+        let cols = (
+            (bbox.x0 as f64 - self.view.x0) / per_col - grow,
+            (bbox.x1 as f64 - self.view.x0) / per_col + grow,
+        );
+        let rows_in = (
+            (self.view.y1 - bbox.y1 as f64) / per_row - grow,
+            (self.view.y1 - bbox.y0 as f64) / per_row + grow,
+        );
+        rows.iter().enumerate().any(|(index, &word)| {
+            let row = f64::from(self.window[1]) + index as f64 + 0.5;
+            if word == 0 || row < rows_in.0 || row > rows_in.1 {
+                return false;
+            }
+            let mut left = word;
+            while left != 0 {
+                let col = f64::from(self.window[0] + left.trailing_zeros()) + 0.5;
+                if col >= cols.0 && col <= cols.1 {
+                    return true;
+                }
+                left &= left - 1;
+            }
+            false
+        })
+    }
+
+    /// The layers that show in the window and the pixels each wrote.
+    pub fn layers(&self) -> Vec<(u32, u32)> {
+        self.planes
+            .iter()
+            .map(|(&layer, (_, rows))| (layer, rows.iter().map(|word| word.count_ones()).sum()))
+            .collect()
+    }
+
+    /// The window read: `[col0, row0, col1, row1)` of the frame.
+    pub fn window(&self) -> [u32; 4] {
+        self.window
+    }
+}
+
+/// `SeenPlanes` of the window `reach` px each way around a world point of
+/// the frame `styled` draws from `scene`; None when the point is not in the
+/// frame. One small tile, each plane by its hierarchy walk culled to it (the
+/// reference path of the work bin: the same pixels); the labels, which lie
+/// over the planes, are not part of it, and neither is a density pass - it
+/// fills what the shapes left and hides none of them.
+pub fn seen_planes_around(
+    scene: &FrameScene,
+    styled: &StyledGeometryRasterRequest,
+    point: (i64, i64),
+    reach: u32,
+    guard: Option<(u64, &RenderCancellation)>,
+) -> Result<Option<SeenPlanes>, String> {
+    styled.validate()?;
+    if !(1..=32).contains(&reach) {
+        return Err(format!("seen-planes reach must be in 1..=32 px, got {reach}"));
+    }
+    let request = &styled.raster;
+    let (px, py) = world_px(request, point.0, point.1);
+    if !(px >= 0.0 && py >= 0.0 && px < f64::from(request.width) && py < f64::from(request.height))
+    {
+        return Ok(None);
+    }
+    let (col, row) = (px as u32, py as u32);
+    let window = [
+        col.saturating_sub(reach),
+        row.saturating_sub(reach),
+        (col + reach).min(request.width),
+        (row + reach).min(request.height),
+    ];
+    let guard = guard.map(|(generation, cancellation)| RenderGuard {
+        generation,
+        cancellation,
+    });
+    let stroke_pixels = styled
+        .layers
+        .iter()
+        .map(|layer| layer.outline_width)
+        .max()
+        .unwrap_or(1);
+    // write-once whatever the frame's switch says: the two orders give the
+    // same pixels, and this one says who wrote them
+    let mut work = TileWork::new(
+        request,
+        stroke_pixels,
+        true,
+        None,
+        window[0],
+        window[2],
+        window[1],
+        window[3],
+    )?;
+    let passes = styled_passes(scene, styled, None, true, false);
+    let mut planes = BTreeMap::new();
+    for (done, &pass) in passes.iter().enumerate() {
+        if work.full {
+            break;
+        }
+        let before = match (pass, work.band.once.as_ref()) {
+            (TilePass::Plane(_), Some(once)) => Some(once.bits.clone()),
+            _ => None,
+        };
+        raster_tile_pass(
+            scene,
+            request,
+            styled,
+            None,
+            None,
+            None,
+            &mut work,
+            pass,
+            passes.len() - done,
+            stroke_pixels,
+            guard,
+        )?;
+        let (TilePass::Plane(plane), Some(before), Some(once)) =
+            (pass, before, work.band.once.as_ref())
+        else {
+            continue;
+        };
+        // (a window of up to 64 columns is one word a row; the columns past
+        // it were never open and are in neither mask's difference)
+        let wrote: Vec<u64> = once
+            .bits
+            .chunks(once.words)
+            .zip(before.chunks(once.words))
+            .map(|(now, was)| now[0] & !was[0])
+            .collect();
+        if wrote.iter().any(|&word| word != 0) {
+            let layer = &styled.layers[plane];
+            planes.insert(layer.layer_idx, (layer.outline_width, wrote));
+        }
+    }
+    check_cancelled(guard)?;
+    Ok(Some(SeenPlanes {
+        view: request.view,
+        width: request.width,
+        height: request.height,
+        window,
+        planes,
+    }))
 }
 
 /// Runs `f` on every tile, over `workers` threads that take the next tile as
@@ -12379,6 +12560,196 @@ mod tests {
             full_tiles > 0,
             "the dense scenes must fill tiles, or the early exits are untested"
         );
+    }
+
+    /// `seen_planes_around` against the frame itself: over the write-once
+    /// scenes, with every fill, outlines of 1 to 3 px and the hierarchy
+    /// frames on and off, a plane has a pixel of a window exactly when the
+    /// frame shows that pixel in the plane's colour - under the frame's own
+    /// tiles, bins and overwrite order, which the window does not share.
+    #[test]
+    fn seen_planes_are_the_planes_whose_colour_the_frame_shows() {
+        let mut stipple = [0u16; 16];
+        for (row, word) in stipple.iter_mut().enumerate() {
+            *word = 0x8421u16.rotate_left(row as u32);
+        }
+        let fills = [
+            LayerFill::Solid,
+            LayerFill::Speckle,
+            LayerFill::Pattern(stipple),
+            LayerFill::Clear,
+        ];
+        let colors = [
+            [255, 0, 0, 255],
+            [0, 255, 0, 255],
+            [0, 0, 255, 255],
+            [255, 255, 0, 255],
+        ];
+        let (mut windows, mut shown, mut under) = (0u32, 0u32, 0u32);
+        for (seed, dense) in [(1u64, false), (2, true), (3, true)] {
+            for shift in 0..4usize {
+                for (width, height, tile_size, view) in [
+                    (96u32, 80u32, 16u16, (0.0, 0.0, 330.0, 275.0)),
+                    (67, 53, 64, (-20.0, 10.0, 181.0, 169.0)),
+                    (48, 48, 8, (100.0, 100.0, 148.0, 148.0)),
+                ] {
+                    let request = StyledGeometryRasterRequest {
+                        raster: GeometryRasterRequest {
+                            view: RasterViewBox::new(view.0, view.1, view.2, view.3).unwrap(),
+                            width,
+                            height,
+                            workers: 3,
+                            tile_size,
+                            ..request()
+                        },
+                        layers: (0..4usize)
+                            .map(|layer| LayerStyle {
+                                layer_idx: layer as u32,
+                                color: colors[layer],
+                                fill: fills[(layer + shift) % 4],
+                                outline_width: 1 + ((layer + shift) % 3) as u8,
+                            })
+                            .collect(),
+                        hierarchy_frames: shift % 2 == 0,
+                        mono: false,
+                    };
+                    let scene = once_scene(seed, dense);
+                    let frame = with_write_once(false, || {
+                        render_geometry_styled(&scene, &request).unwrap()
+                    })
+                    .frame;
+                    let (span_x, span_y) = (view.2 - view.0, view.3 - view.1);
+                    // world points of six pixels of the frame, its corners
+                    // among them
+                    for (fx, fy) in [
+                        (0.0, 1.0),
+                        (1.0, 0.0),
+                        (0.5, 0.5),
+                        (0.21, 0.67),
+                        (0.83, 0.12),
+                        (0.4, 0.95),
+                    ] {
+                        let col = (fx * f64::from(width - 1)).round();
+                        let row = (fy * f64::from(height - 1)).round();
+                        let point = (
+                            (view.0 + (col + 0.5) * span_x / f64::from(width)).floor() as i64,
+                            (view.3 - (row + 0.5) * span_y / f64::from(height)).ceil() as i64,
+                        );
+                        // the frame's switch does not reach the window
+                        let seen = with_write_once(shift % 2 == 1, || {
+                            seen_planes_around(&scene, &request, point, SEEN_REACH_PX, None)
+                        })
+                        .unwrap()
+                        .unwrap();
+                        let [c0, r0, c1, r1] = seen.window();
+                        let (px, py) = world_px(&request.raster, point.0, point.1);
+                        assert!(
+                            c0 <= px as u32 && (px as u32) < c1 && r0 <= py as u32 && (py as u32) < r1,
+                            "the window {:?} is around the point's pixel ({px}, {py})",
+                            seen.window()
+                        );
+                        assert!(c1 - c0 <= 2 * SEEN_REACH_PX && r1 - r0 <= 2 * SEEN_REACH_PX);
+                        windows += 1;
+                        for row in r0..r1 {
+                            for col in c0..c1 {
+                                let at = (row * width + col) as usize * 4;
+                                let pixel = &frame.pixels()[at..at + 4];
+                                for (layer, color) in colors.iter().enumerate() {
+                                    let wrote = seen.planes.get(&(layer as u32)).is_some_and(
+                                        |(_, rows)| rows[(row - r0) as usize] >> (col - c0) & 1 == 1,
+                                    );
+                                    assert_eq!(
+                                        wrote,
+                                        pixel == color,
+                                        "seed {seed} shift {shift} {width}x{height} point {point:?} pixel ({col}, {row}) layer {layer}: frame {pixel:?}"
+                                    );
+                                    shown += u32::from(wrote);
+                                }
+                            }
+                        }
+                        // a layer that is under the others all over the
+                        // window is none of the planes seen
+                        under += (0..4u32)
+                            .filter(|layer| !seen.planes.contains_key(layer))
+                            .count() as u32;
+                        assert_eq!(
+                            seen.layers().iter().map(|(_, pixels)| pixels).sum::<u32>(),
+                            seen.planes
+                                .values()
+                                .flat_map(|(_, rows)| rows.iter().map(|word| word.count_ones()))
+                                .sum::<u32>()
+                        );
+                    }
+                    // a point off the frame has no window; the reach is bounded
+                    for off in [
+                        (view.0 as i64 - 5, view.1 as i64 + 1),
+                        (view.2 as i64 + 5, view.1 as i64 + 1),
+                        (view.0 as i64 + 1, view.3 as i64 + 5),
+                    ] {
+                        assert_eq!(
+                            seen_planes_around(&scene, &request, off, SEEN_REACH_PX, None).unwrap(),
+                            None
+                        );
+                    }
+                }
+            }
+        }
+        assert!(windows > 200 && shown > 5_000 && under > 50, "{windows} {shown} {under}");
+        let scene = once_scene(1, false);
+        let request = StyledGeometryRasterRequest {
+            raster: request(),
+            layers: Vec::new(),
+            hierarchy_frames: false,
+            mono: false,
+        };
+        for reach in [0, 33] {
+            assert!(seen_planes_around(&scene, &request, (5, 5), reach, None).is_err());
+        }
+        // a pick superseded while the window is painted stops there
+        let cancellation = RenderCancellation::new();
+        cancellation.cancel_before(8);
+        assert!(
+            seen_planes_around(&scene, &request, (5, 5), 8, Some((7, &cancellation)))
+                .unwrap_err()
+                .starts_with("render cancelled")
+        );
+        assert!(seen_planes_around(&scene, &request, (5, 5), 8, Some((8, &cancellation))).is_ok());
+    }
+
+    /// `SeenPlanes::shows`: a shape shows where its layer wrote a pixel
+    /// within the shape's box, the outline's width around it.
+    #[test]
+    fn a_shape_shows_where_its_layer_wrote_a_pixel_within_its_box() {
+        // a 16 x 16 window at (8, 8) of a 100 x 100 px frame, a dbu a pixel,
+        // the y axis up: pixel (col, row) is the world square [col, col + 1)
+        // x (99 - row, 100 - row]
+        let mut planes = BTreeMap::new();
+        let mut rows = vec![0u64; 16];
+        rows[2] = 1 << 3; // pixel (11, 10): world x 11..12, y 89..90
+        rows[9] = 1 << 12; // pixel (20, 17): world x 20..21, y 82..83
+        planes.insert(7u32, (1u8, rows));
+        let seen = SeenPlanes {
+            view: RasterViewBox::new(0.0, 0.0, 100.0, 100.0).unwrap(),
+            width: 100,
+            height: 100,
+            window: [8, 8, 24, 24],
+            planes,
+        };
+        let boxed = |x0, y0, x1, y1| BBox { x0, y0, x1, y1 };
+        // the box holds a pixel the layer wrote
+        assert!(seen.shows(7, boxed(10, 85, 14, 95)));
+        assert!(seen.shows(7, boxed(0, 0, 100, 100)));
+        assert!(seen.shows(7, boxed(20, 82, 21, 83)));
+        // another layer wrote nothing; a box away from both pixels shows none
+        assert!(!seen.shows(8, boxed(0, 0, 100, 100)));
+        assert!(!seen.shows(7, boxed(14, 84, 18, 88)));
+        assert!(!seen.shows(7, boxed(30, 30, 60, 60)));
+        // the outline's width around the box: 1.5 px for a 1 px outline
+        assert!(seen.shows(7, boxed(13, 89, 16, 90)));
+        assert!(!seen.shows(7, boxed(14, 89, 16, 90)));
+        assert!(seen.shows(7, boxed(11, 91, 12, 95)));
+        assert!(!seen.shows(7, boxed(11, 92, 12, 95)));
+        assert_eq!(seen.layers(), vec![(7, 2)]);
     }
 
     /// The density stack (CUT_DENSITY_DESIGN §10.10) over the write-once

@@ -170,12 +170,13 @@ def _svc_pick(cache, mosaic, job, res):
     job['nth'] cycles through overlapping candidates. Every shape over
     the point is weighed and the _PICK_CAP smallest are the candidates
     (0.12.455; until then the loop stopped at the first _PICK_CAP it met,
-    so under more shapes than that the smallest was never reached);
-    job['max'] = (width, height): a shape wider or taller is no candidate
-    and is counted in `larger`."""
+    so under more shapes than that the smallest was never reached).
+    `hidden` is the renderer's count of shapes left out because they do
+    not show in its frame (0.12.456, job['seen']): this reference has no
+    frame and takes every shape, so it is 0 here."""
     _load_klayout_backend()
     out = {"kind": "pick", "seq": job.get("seq", -1), "found": False,
-           "count": 0, "larger": 0}
+           "count": 0, "hidden": 0}
     try:
         px, py, r = job["x"], job["y"], max(1, job["r"])
         box = db.Box(px - r, py - r, px + r, py + r)
@@ -184,17 +185,11 @@ def _svc_pick(cache, mosaic, job, res):
         p = db.Point(px, py)
         ly = mosaic.ly
         cands = []
-        limit = job.get("max")
         for poly, tpos, li, cell in _iter_global_polys(mosaic, sel, box):
             if poly is None:
                 if abs(tpos[0] - px) <= r and abs(tpos[1] - py) <= r:
                     cands.append((0.0, li, cell, None, tpos))
             elif poly.inside(p):
-                bb = poly.bbox()
-                if limit is not None and (bb.width() > limit[0]
-                                          or bb.height() > limit[1]):
-                    out["larger"] += 1
-                    continue
                 cands.append((float(poly.area()), li, cell, poly, None))
         if not cands:
             res.put(out)

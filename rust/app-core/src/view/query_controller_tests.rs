@@ -211,42 +211,28 @@ fn manual_measurements_only_reuse_current_successful_snap_at_same_point() {
 }
 
 #[test]
-fn a_pick_is_asked_for_the_shapes_that_fit_the_view() {
+fn a_pick_is_asked_for_the_shapes_that_show() {
     let (r, c, mut v) = setup(false);
-    // the fixture's view is one dbu a pixel, 800 x 640: the worker is told
-    // that extent, and what it left out for it is handed on
+    // the worker is asked for what shows, and what it left out is handed on
     let id = v.query(input(&v, QueryOperation::Pick { nth: 2 })).unwrap();
     let got = result(&v, id, QueryKind::Pick);
-    assert_eq!(got.reply.request.pick_max, Some([800, 640]));
-    assert_eq!(got.reply.pick_larger, 0);
-    c.pick_larger.store(101, Ordering::Relaxed);
+    assert!(got.reply.request.pick_seen);
+    assert_eq!(got.reply.pick_hidden, 0);
+    c.pick_hidden.store(101, Ordering::Relaxed);
     let id = v.query(input(&v, QueryOperation::Pick { nth: 0 })).unwrap();
     let got = result(&v, id, QueryKind::Pick);
     assert!(got.reply.hit.is_none());
-    assert_eq!(got.reply.pick_larger, 101);
-    // a snap has no size limit: a large shape's corner is snapped to
+    assert_eq!(got.reply.pick_hidden, 101);
+    // a snap is of every shape: a covered shape's corner is snapped to
     let id = v.query(input(&v, QueryOperation::Snap)).unwrap();
     let got = result(&v, id, QueryKind::Snap);
-    assert_eq!((got.reply.request.pick_max, got.reply.pick_larger), (None, 0));
+    assert_eq!((got.reply.request.pick_seen, got.reply.pick_hidden), (false, 0));
     assert!(c
         .query_requests
         .lock()
         .unwrap()
         .iter()
-        .all(|(_, q)| q.pick_max.is_some() == (q.operation.kind() == QueryKind::Pick)));
-    v.close().unwrap();
-    assert_eq!(r.usage(), Usage::default());
-    // the limit is the view shown, in whole dbu: as wide as the view is in
-    let m = model(false);
-    let mut initial = ViewState::initial(&m, 800, 640).unwrap();
-    initial.viewport = Viewport::new([-10.75, -5.5, 10.15, 10.75], 800, 640).unwrap();
-    let mut v = start(&r, m, initial, Arc::new(Control::default()));
-    wait(|| v.latest().is_some());
-    let id = v.query(input(&v, QueryOperation::Pick { nth: 0 })).unwrap();
-    assert_eq!(
-        result(&v, id, QueryKind::Pick).reply.request.pick_max,
-        Some([20, 16])
-    );
+        .all(|(_, q)| q.pick_seen == (q.operation.kind() == QueryKind::Pick)));
     v.close().unwrap();
     assert_eq!(r.usage(), Usage::default());
 }

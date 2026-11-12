@@ -262,23 +262,19 @@ def overlay_snaps(s, frame):
 
 
 def pick_layout(temp):
-    """Seventy plates over the whole die, one a layer, and four small shapes
-    on the layers after them at the die's middle - more shapes over a point
-    than a pick keeps, the ones a click is meant for met last by the walk."""
+    """Shapes over one another, a layer each, to pick among (layer numbers
+    in paint order, the last on top): two plates over the die (1, 2), a 6 um
+    square (3) with a 2 um square on it (4), a 30 um square over them all
+    (5), and beside the die a square of its own (6)."""
     import klayout.db as db
     d = Path(temp) / "pick"
     d.mkdir()
     layout = db.Layout()
     layout.dbu = 0.001
     top = layout.create_cell("TOP")
-    for n in range(1, 71):
-        top.shapes(layout.layer(db.LayerInfo(n, 0))).insert(db.Box(0, 0, 40000, 40000))
-    # (the smallest is some pixels wide with the whole die in a 400 px view:
-    # a shape under the cut is not drawn, and what is not drawn is not picked)
-    for n, box in ((71, (18700, 18700, 21700, 21700)),     # 3 x 3 um
-                   (72, (19700, 19700, 20700, 20700)),     # 1 x 1 um
-                   (73, (20000, 20000, 20400, 20400)),     # 0.4 x 0.4 um
-                   (74, (12200, 19900, 28200, 20500))):    # 16 x 0.6 um, a wire
+    for n, box in ((1, (0, 0, 40000, 40000)), (2, (0, 0, 40000, 40000)),
+                   (3, (17000, 17000, 23000, 23000)), (4, (19000, 19000, 21000, 21000)),
+                   (5, (5000, 5000, 35000, 35000)), (6, (42000, 5000, 48000, 35000))):
         top.shapes(layout.layer(db.LayerInfo(n, 0))).insert(db.Box(*box))
     src = d / "plates.oas"
     layout.write(str(src))
@@ -288,25 +284,40 @@ def pick_layout(temp):
     return src
 
 
-PICK_AT = (20200, 20200)        # pick_layout: a point of all four small shapes
-PICK_SMALL = [(73, 400, 400), (72, 1000, 1000), (71, 3000, 3000), (74, 16000, 600)]
+# pick_layout's fills: the plates and the small square the default speckle,
+# the 6 um square solid, the two large squares their outlines alone
+PICK_FILLS = [{"pair": [3, 0], "fill": {"kind": "solid"}},
+              {"pair": [5, 0], "fill": {"kind": "clear"}},
+              {"pair": [6, 0], "fill": {"kind": "clear"}}]
+# a point (um), the layers picked there from the smallest, the shapes over
+# the point that do not show - in a view 20 um wide around the die's middle
+PICK_CASES = [
+    # the small square, and between its speckles the solid square under it;
+    # the plates are under the solid one, the 30 um square's outline far off
+    ("the middle", (20.0, 20.0), [4, 3], 3),
+    # on the solid square beside the small one
+    ("the solid square", (22.0, 20.0), [3], 3),
+    # off it: the upper plate - the lower one has the same speckle and
+    # lights no pixel the upper one left
+    ("the plates", (27.0, 20.0), [2], 2),
+]
 
 
 def pick_order(src, svc):
-    """User 2026-11-12: "pick한 위치에 여러 도형이 겹쳐있을 경우 가장 작은
-    도형부터 순환하도록 할 수 있을까? 그리고 도형이 어느 방향이라도 화면보다 클
-    경우에는 pick 대상에서 제외해줘." Until 0.12.454 a pick took the first 64
-    shapes over the point as the walk met them, in layer order, and sorted
-    those: under the plates of 70 layers the small shape clicked on was
-    never a candidate. Now every shape over the point is weighed and the
-    smallest are the candidates, the smallest first; and a shape wider or
-    taller than the view is none (the answer counts them: `larger`)."""
-    def cycle(s, frame):
-        """The picks at PICK_AT from nth 0 until the cycle is round; the
-        answer that ended it (the first again, or nothing found)."""
+    """A pick takes what is seen (0.12.456). User 2026-11-12, after 0.12.455
+    left shapes larger than the view out of a pick: "화면 밖에 걸쳐있는 도형을
+    제외해 달라는 얘기였는데 생각해보니 이러면 명백하게 보이는 도형도 선택이 안되는
+    문제가 있을 것 같음. 그리고 가능하면 현재 눈에 보이는 도형을 선택하도록 해야 함.
+    레이어가 켜져 있더라도 가려진 레이어의 경우에는 선택되지 않는게 좋을 것 같음."
+    Of the shapes over the point the candidates are those that show in the
+    frame there - the renderer paints the corner of the frame around the
+    point again and reads which layers wrote its pixels -, the smallest
+    first; the others are counted (`hidden`). No size keeps a shape out."""
+    def cycle(s, frame, at):
+        """The picks at a point (um) from nth 0 until the cycle is round."""
         box = frame["bbox"]
-        px = (PICK_AT[0] - box[0]) / (box[2] - box[0]) * W
-        py = (box[3] - PICK_AT[1]) / (box[3] - box[1]) * H
+        px = (at[0] * 1000 - box[0]) / (box[2] - box[0]) * W
+        py = (box[3] - at[1] * 1000) / (box[3] - box[1]) * H
         out = []
         for nth in range(70):
             qid = s.query(frame["id"], "pick", px, py, 3, nth=nth)
@@ -316,74 +327,76 @@ def pick_order(src, svc):
             out.append(got)
         raise AssertionError("pick: the cycle did not come round: %r" % out[-1])
 
-    def shapes(picks):
-        return [(a["layer"], a["bbox"][2] - a["bbox"][0], a["bbox"][3] - a["bbox"][1])
-                for a in picks]
-
-    def view(s, width_um):
-        snap = s.edit(navigation={"kind": "goto", "center_um": [20.2, 20.2],
-                                  "width_um": width_um})
+    def view(s, width_um, **more):
+        snap = s.edit(navigation={"kind": "goto", "center_um": [20.0, 20.0],
+                                  "width_um": width_um}, **more)
         return until(s, final_frame(snap["state_rev"]))[-1]
 
-    def limit(frame):
-        box = frame["bbox"]
-        return [int(box[2] - box[0]), int(box[3] - box[1])]
-    plates = [(n, 40000, 40000) for n in range(1, 71)]
+    def said(picks, last):
+        return ([a["layer"] for a in picks], (picks[0] if picks else last)["hidden"])
     s = gtkservice.ViewSession(src, W, H, patch={"detail": "high"}, svc=svc)
-    frame = until(s, final_frame(1))[-1]
-    # the whole die in view: every shape fits; the smallest first, the
-    # plates after them by their layers, 64 in all, and round again
-    picks, again = cycle(s, frame)
-    check(shapes(picks) == PICK_SMALL + plates[:60]
-          and [a["index"] for a in picks] == list(range(64))
-          and all(a["count"] == 64 and a["larger"] == 0 for a in picks)
-          and shapes([again]) == PICK_SMALL[:1]
-          and [a["area"] for a in picks] == sorted(a["area"] for a in picks),
-          "the fit view's picks: %r" % shapes(picks))
-    check(all(a["request"]["max"] == limit(frame) for a in picks),
-          "the limit is the view's extent: %r, view %r" % (picks[0]["request"], frame["bbox"]))
-    # zoomed in: what is wider or taller than the view is no candidate -
-    # the plates at 20 um, the 16 um wire too at 10 um, the 3 um square at 2
-    for width_um, kept, larger in ((20.0, 4, 70), (10.0, 3, 71), (2.0, 2, 72)):
-        frame = view(s, width_um)
-        picks, again = cycle(s, frame)
-        check(shapes(picks) == PICK_SMALL[:kept] and shapes([again]) == PICK_SMALL[:1]
-              and all(a["count"] == kept and a["larger"] == larger
-                      and a["request"]["max"] == limit(frame) for a in picks),
-              "a %g um view's picks: %r" % (width_um, [(shapes([a]), a["count"], a["larger"])
-                                                        for a in picks]))
-    # a view smaller than the smallest shape: nothing to pick, and the
-    # answer says what lies there
-    frame = view(s, 0.3)
-    picks, none = cycle(s, frame)
+    until(s, final_frame(1))
+    frame = view(s, 20.0, style_deltas=PICK_FILLS)
+    for what, at, layers, hidden in PICK_CASES:
+        picks, again = cycle(s, frame, at)
+        check(said(picks, again) == (layers, hidden)
+              and all(a["count"] == len(layers) and a["hidden"] == hidden
+                      and a["request"]["seen"] is True for a in picks)
+              and again["layer"] == layers[0]
+              and [a["area"] for a in picks] == sorted(a["area"] for a in picks),
+              "a pick at %s %r: %r" % (what, at, said(picks, again)))
+    # the 30 um square is its outline: on it, and within the few pixels
+    # around it that a pick looks at, it is picked - and the plate with it -,
+    # further inside it is not
+    frame = view(s, 44.0)
+    for at, layers, hidden in (((35.0, 20.0), [5, 2], 1), ((34.5, 20.0), [5, 2], 1),
+                               ((33.0, 20.0), [2], 2)):
+        picks, again = cycle(s, frame, at)
+        check(said(picks, again) == (layers, hidden),
+              "a pick at %r by the outline: %r" % (at, said(picks, again)))
+    # a square that is its outline alone, nothing under it: inside it there
+    # is nothing to see, and the answer says that a shape is there
+    picks, none = cycle(s, frame, (40.9, 20.0))
     check(picks == [] and none["found"] is False and none["count"] == 0
-          and none["larger"] == 74 and "err" not in none
-          and none["request"]["max"] == limit(frame) == [300, 225],
-          "a 0.3 um view's pick: %r" % none)
+          and none["hidden"] == 0 and "err" not in none,
+          "a pick beside the die: %r" % none)
+    frame = view(s, 60.0)
+    picks, none = cycle(s, frame, (45.0, 20.0))
+    check(picks == [] and none["found"] is False and none["hidden"] == 1,
+          "a pick inside an outline alone: %r" % none)
+    picks, again = cycle(s, frame, (48.0, 20.0))
+    check(said(picks, again) == ([6], 0), "a pick on that outline: %r" % (said(picks, again),))
+    # the upper plate off: the lower one shows and is picked
+    off = s.edit(layers=[[1, 0], [3, 0], [4, 0], [5, 0], [6, 0]])
+    frame = until(s, final_frame(off["state_rev"]))[-1]
+    frame = view(s, 20.0)
+    picks, again = cycle(s, frame, (27.0, 20.0))
+    check(said(picks, again) == ([1], 1), "the upper plate off: %r" % (said(picks, again),))
     s.close()
     until(s, lambda kind, v: kind == "closed", 30)
-    # FLOE_PICK_VIEW_LIMIT=off: any size again, the smallest still first
-    os.environ["FLOE_PICK_VIEW_LIMIT"] = "off"
-    off = gtkservice.Service(FLOE2)
+    # FLOE_PICK_VISIBLE=off: every shape over the point, the smallest first
+    os.environ["FLOE_PICK_VISIBLE"] = "off"
+    every = gtkservice.Service(FLOE2)
     try:
-        t = gtkservice.ViewSession(src, W, H, patch={"detail": "high"}, svc=off)
+        t = gtkservice.ViewSession(src, W, H, patch={"detail": "high"}, svc=every)
         until(t, final_frame(1))
-        picks, again = cycle(t, view(t, 10.0))
-        check(shapes(picks) == PICK_SMALL + plates[:60]
-              and all(a["count"] == 64 and a["larger"] == 0 and "max" not in a["request"]
-                      for a in picks),
-              "without the view's limit: %r" % shapes(picks)[:6])
+        picks, again = cycle(t, view(t, 20.0, style_deltas=PICK_FILLS), (20.0, 20.0))
+        check(said(picks, again) == ([4, 3, 5, 1, 2], 0)
+              and all(a["request"]["seen"] is False for a in picks),
+              "every shape over the point: %r" % (said(picks, again),))
         t.close()
     finally:
-        os.environ.pop("FLOE_PICK_VIEW_LIMIT", None)
-        off.close()
-    print("pick order: the smallest first of 74 shapes over a point, the view's limit at 5 zooms")
+        os.environ.pop("FLOE_PICK_VISIBLE", None)
+        every.close()
+    print("pick order: what shows at %d points, the smallest first; the rest counted"
+          % (len(PICK_CASES) + 6))
 
 
 def pick_order_ui(src):
-    """pick_order in the real viewer: clicks at one spot go from the
-    smallest shape to the next ones and round again; another spot starts
-    anew; under shapes larger than the view alone the status line says so."""
+    """pick_order in the real viewer: a click picks the smallest shape that
+    shows under the pointer, the same spot the next one and round again;
+    what is under other layers is not picked; where shapes are and none
+    shows the status line says so."""
     from types import SimpleNamespace
     from floe import gui
     cache = gtkservice.ServiceCache(str(src))
@@ -394,55 +407,53 @@ def pick_order_ui(src):
     v._ctl_frame = lambda f: (frames.append(f), take(f))
     v._on_pick_result = lambda res: (answers.append(res), took(res))[1]
 
-    def show(width_um):
+    def shown(step, what):
         # (a pick is asked of the frame on the screen: the view's own, final)
         rev = v.worker.snapshot["render_rev"]
-        v.goto(20.2, 20.2, width_um)
-        pump(v, lambda: settled(v, frames) and v.worker.snapshot["render_rev"] != rev,
-             "the %g um view" % width_um)
+        step()
+        pump(v, lambda: settled(v, frames) and v.worker.snapshot["render_rev"] != rev, what)
 
-    def click(x=PICK_AT[0], y=PICK_AT[1]):
-        """A plain click at a point of the layout: the pick's answer."""
+    def click(x_um, y_um):
+        """A plain click at a point of the layout: the layer picked (None:
+        nothing) and the status line."""
         box = v.view_bbox()
         del answers[:]
-        v._pick_click(SimpleNamespace(x=(x - box[0]) / v.spp, y=(box[3] - y) / v.spp,
+        v._pick_click(SimpleNamespace(x=(x_um * 1000 - box[0]) / v.spp,
+                                      y=(box[3] - y_um * 1000) / v.spp,
                                       state=gui.Gdk.ModifierType(0)))
         try:
             pump(v, lambda: bool(answers), "a pick's answer", 10)
         except AssertionError:
-            raise AssertionError("no pick answer at (%s, %s): status %r, view %r, 1 px = %s dbu, "
-                                 "shown %r, snapshot %r" % (
-                                     x, y, v.status.get_text(), box, v.spp, v.worker.shown,
-                                     {k: v.worker.snapshot[k] for k in ("phase", "state_rev", "render_rev")}))
+            raise AssertionError("no pick answer at (%s, %s): status %r, view %r, shown %r" % (
+                x_um, y_um, v.status.get_text(), box, v.worker.shown))
         sel = v.selection
-        return (None if sel is None else
-                (sel["layer"], sel["bbox"][2] - sel["bbox"][0], sel["bbox"][3] - sel["bbox"][1]),
-                v.status.get_text())
+        return (None if sel is None else sel["layer"]), v.status.get_text()
     try:
         pump(v, lambda: settled(v, frames), "the pick layout's first frame")
-        show(10.0)
-        seen = [click() for _ in range(4)]
-        check([shape for shape, _ in seen] == PICK_SMALL[:3] + PICK_SMALL[:1]
-              and [said.rsplit(" · ", 1)[-1] for _, said in seen] == ["1/3", "2/3", "3/3", "1/3"]
-              and "0.400 x 0.400 um" in seen[0][1],
-              "clicks at one spot: %r" % seen)
-        # another spot starts from the smallest there (off the 0.4 um square)
-        shape, said = click(20600, 20600)
-        check(shape == PICK_SMALL[1] and said.endswith(" · 1/2"),
-              "a click elsewhere: %r %r" % (shape, said))
-        # nothing that fits the view: the selection goes, the line says why
-        show(0.3)
-        shape, said = click()
-        check(shape is None and said == "no object here (74 larger than the view)",
-              "a click under larger shapes alone: %r %r" % (shape, said))
-        # and where nothing lies at all, the plain words (off the die)
-        show(60.0)
-        shape, said = click(-4000, -4000)
-        check(shape is None and said == "no object here",
-              "a click on nothing: %r %r" % (shape, said))
+        shown(lambda: v.worker.edit(style_deltas=PICK_FILLS), "the fills")
+        shown(lambda: v.goto(20.0, 20.0, 20.0), "the 20 um view")
+        seen = [click(20.0, 20.0) for _ in range(3)]
+        check([layer for layer, _ in seen] == [4, 3, 4]
+              and [said.rsplit(" · ", 1)[-1] for _, said in seen] == ["1/2", "2/2", "1/2"]
+              and "2.000 x 2.000 um" in seen[0][1] and "6.000 x 6.000 um" in seen[1][1],
+              "clicks at the middle: %r" % seen)
+        # another spot starts anew: the solid square alone, the plate alone
+        beside = [click(22.0, 20.0), click(27.0, 20.0)]
+        check([layer for layer, _ in beside] == [3, 2]
+              and all(said.endswith(" · 1/1") for _, said in beside),
+              "clicks beside it: %r" % beside)
+        # shapes there, none of them to be seen: the selection goes and the
+        # line says how many; nothing there at all: the plain words
+        shown(lambda: v.goto(30.0, 20.0, 60.0), "the 60 um view")
+        layer, said = click(45.0, 20.0)
+        check(layer is None and said == "no visible object here (1 hidden)",
+              "a click inside an outline alone: %r %r" % (layer, said))
+        layer, said = click(40.9, 20.0)
+        check(layer is None and said == "no object here",
+              "a click on nothing: %r %r" % (layer, said))
         print("pick clicks: %s, then %s" % (
             ", ".join(said.rsplit(" · ", 1)[-1] for _, said in seen),
-            "no object here (74 larger than the view)"))
+            "no visible object here (1 hidden)"))
     finally:
         v._quit()
         v.window.destroy()
@@ -457,19 +468,17 @@ def queries_and_cells(s, ref, frame, temp):
         got = answer(s, "query", lambda v, qid=qid: v["id"] == qid)
         req = got["request"]
         job = {"kind": kind, "seq": 900 + n, "x": req["x"], "y": req["y"], "r": req["r"]}
-        # a pick is asked for the shapes that fit the view (0.12.455): the
-        # controller's limit is the view's extent in whole dbu, a snap has none
-        box = frame["bbox"]
-        check(req.get("max") == ([int(box[2] - box[0]), int(box[3] - box[1])]
-                                 if kind == "pick" else None),
-              "%s's size limit: %r for the view %r" % (kind, req.get("max"), box))
-        if "max" in req:
-            job["max"] = req["max"]
+        # a pick is asked for the shapes that show (0.12.456): the adapter
+        # asks its own frame of the same view the same, a snap is not asked so
+        check(req.get("seen") == (True if kind == "pick" else None),
+              "%s's request: %r" % (kind, req))
+        if req.get("seen"):
+            job["seen"] = True
         job.update(extra)
         want = reference_answer(ref, job, kind)
         keys = ("found", "x", "y", "snap") if kind == "snap" else (
             "found", "count", "index", "layer", "datatype", "lname", "cell",
-            "area", "bbox", "points", "larger")
+            "area", "bbox", "points", "hidden")
         for key in keys:
             a, b = got.get(key), want.get(key)
             if key == "points":

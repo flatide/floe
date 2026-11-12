@@ -50,10 +50,10 @@
 //!   view_clip {view, seq, bbox (dbu, the root's coordinates), layers?,
 //!              cell_name?, out}       -> null; a `clip` event when written
 //!
-//! A pick's candidates are the shapes over the point that fit the view,
-//! the smallest first (`nth` goes round them); its answer says how many
-//! larger ones it left out (`larger`) and the limit it asked with
-//! (`request.max` = [width, height], dbu).
+//! A pick's candidates are the shapes over the point that show in the frame
+//! on the screen, the smallest first (`nth` goes round them); its answer
+//! says how many shapes over the point it left out because other layers
+//! cover them there (`hidden`), and `request.seen` that it was asked so.
 //!
 //! Events, between replies, one JSON object per line:
 //!   {"event": "view", "view": N, "snapshot": {...}}   the state, phase,
@@ -653,18 +653,16 @@ fn query_json(kind: &str, r: &ViewQueryResult) -> Value {
     o.insert("kind".into(), json!(kind));
     o.insert("id".into(), json!(r.id));
     o.insert("found".into(), json!(false));
-    // the world point and radius the controller asked (dbu, the root's),
-    // and a pick's size limit - the view's extent, when it has one
+    // the world point and radius the controller asked (dbu, the root's)
     let mut asked =
         json!({"x": r.reply.request.x, "y": r.reply.request.y, "r": r.reply.request.radius});
-    if let Some(max) = r.reply.request.pick_max {
-        asked["max"] = json!(max);
+    if kind == "pick" {
+        // whether the pick was of the shapes that show, and how many shapes
+        // over the point it left out because they do not
+        asked["seen"] = json!(r.reply.request.pick_seen);
+        o.insert("hidden".into(), json!(r.reply.pick_hidden));
     }
     o.insert("request".into(), asked);
-    if kind == "pick" {
-        // shapes over the point left out for being larger than the view
-        o.insert("larger".into(), json!(r.reply.pick_larger));
-    }
     if r.reply.status != QueryStatus::Ok {
         o.insert(
             "err".into(),

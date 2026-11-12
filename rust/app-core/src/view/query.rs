@@ -316,15 +316,13 @@ pub(super) fn request(
             Layers::Only(pairs)
         }
     };
-    // A pick's candidates fit the view: a shape wider or taller than what
-    // is shown has no outline on the screen to show for a selection, and at
-    // a point of a chip there are many such over the shape that was clicked.
-    // (As wide as the view is still in; whole dbu, so the extent is floored.)
-    let limited = pick_view_limit(std::env::var("FLOE_PICK_VIEW_LIMIT").ok().as_deref());
-    let pick_max = match input.operation {
-        QueryOperation::Pick { .. } if limited => Some([integer(x1 - x0)?, integer(y1 - y0)?]),
-        _ => None,
-    };
+    // A pick takes what is seen: of the shapes over the point, those whose
+    // layer shows in the frame on the screen there. A layer that is on and
+    // lies under others at the point is not picked - the worker knows by
+    // painting that corner of the frame again (render-core
+    // `seen_planes_around`), so the rule is the picture's own.
+    let pick_seen = matches!(input.operation, QueryOperation::Pick { .. })
+        && pick_seen_only(std::env::var("FLOE_PICK_VISIBLE").ok().as_deref());
     Ok(QueryRequest {
         scene,
         operation: input.operation,
@@ -332,25 +330,25 @@ pub(super) fn request(
         y,
         radius,
         layers,
-        pick_max,
+        pick_seen,
     })
 }
 
-/// `FLOE_PICK_VIEW_LIMIT=off`: a pick takes shapes of any size again, as
-/// until 0.12.454 (the smallest are still the first). Anything else, or
-/// nothing: the view's limit.
-fn pick_view_limit(switch: Option<&str>) -> bool {
+/// `FLOE_PICK_VISIBLE=off`: a pick takes every shape over the point again,
+/// the covered ones too (the smallest are still the first). Anything else,
+/// or nothing: the shapes that show.
+fn pick_seen_only(switch: Option<&str>) -> bool {
     switch != Some("off")
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn the_view_limit_of_a_pick_is_on_unless_switched_off() {
-        assert!(super::pick_view_limit(None));
+    fn a_pick_takes_what_shows_unless_switched_off() {
+        assert!(super::pick_seen_only(None));
         for on in ["", "on", "1", "OFF", "no"] {
-            assert!(super::pick_view_limit(Some(on)), "{on}");
+            assert!(super::pick_seen_only(Some(on)), "{on}");
         }
-        assert!(!super::pick_view_limit(Some("off")));
+        assert!(!super::pick_seen_only(Some("off")));
     }
 }

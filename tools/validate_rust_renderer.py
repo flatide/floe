@@ -3473,14 +3473,14 @@ assert not hasattr(gui, "live_caps")
             self.assertEqual(
                 commands[1],
                 "pick seq=8 x=5 y=6 r=1 nth=-1 layers=all")
-            # a pick's size limit (0.12.455): the view's extent goes with it
+            # a pick of what shows in the frame (0.12.456)
             worker._submit_pick({
                 "seq": 8, "x": 5, "y": 6, "r": 3, "nth": 2,
-                "layers": [(2, 0)], "max": (640, 480.0),
+                "layers": [(2, 0)], "seen": True,
             })
             self.assertEqual(
                 commands[2],
-                "pick seq=8 x=5 y=6 r=3 nth=2 layers=2/0 max_w=640 max_h=480")
+                "pick seq=8 x=5 y=6 r=3 nth=2 layers=2/0 seen=1")
 
             kind, fields = _parse_wire_line(
                 "snap seq=7 found=1 x=10 y=-2 snap=vertex")
@@ -3504,7 +3504,7 @@ assert not hasattr(gui, "live_caps")
                 "lname": layer_name, "cell": cell_name, "area": 100.0,
                 "bbox": [0, 0, 10, 10],
                 "points": [(0, 0), (0, 10), (10, 10), (10, 0)],
-                "larger": 0,
+                "hidden": 0,
             })
 
             kind, fields = _parse_wire_line(
@@ -3512,15 +3512,15 @@ assert not hasattr(gui, "live_caps")
             worker._handle_line(kind, fields, "")
             self.assertEqual(worker.res.get_nowait(), {
                 "kind": "pick", "seq": 9, "found": False, "count": 0,
-                "larger": 0,
+                "hidden": 0,
             })
-            # shapes over the point left out for their size are counted
+            # shapes over the point that do not show are counted
             kind, fields = _parse_wire_line(
-                "pick seq=9 found=0 count=0 larger=74")
+                "pick seq=9 found=0 count=0 hidden=74")
             worker._handle_line(kind, fields, "")
             self.assertEqual(worker.res.get_nowait(), {
                 "kind": "pick", "seq": 9, "found": False, "count": 0,
-                "larger": 74,
+                "hidden": 74,
             })
 
             # the cell tree's queries (docs/SPEC-VIEWER.ko.md §8c): one
@@ -5303,46 +5303,37 @@ class RealDaemonIntegrationTests(unittest.TestCase):
         actual_pick = self._query_result(worker, "pick", 701)
         self.assertEqual(actual_pick, expected_pick)
 
-        # a pick's size limit (0.12.455): shapes over the point wider or
-        # taller than it are no candidates and are counted. With every
-        # layer on: no limit, the first candidate's own size (it stays, the
-        # larger ones go), a dbu under its width and its height (it goes
-        # too), no room at all, room for everything.
-        # (the same sequence number as the pick above: this is called
-        # again with the same worker, and a pick older than the newest one
-        # the daemon has seen is superseded)
+        # a pick of what shows (0.12.456): with every layer on, the shapes
+        # over the point that the daemon's frame shows are the candidates,
+        # in the order they have among all of them, and the rest are counted
+        # - none is lost between the two. (The reference has no frame and
+        # takes every shape; the same sequence number as the pick above:
+        # this is called again with the same worker, and a pick older than
+        # the newest one the daemon has seen is superseded.)
         every = dict(pick_job, nth=0, layers=None)
         svc_pick(cache, mosaic, every, expected_queue)
         first = expected_queue.get_nowait()
         self.assertTrue(first["found"], first)
-        self.assertEqual(first["larger"], 0)
-        width = first["bbox"][2] - first["bbox"][0]
-        height = first["bbox"][3] - first["bbox"][1]
-        larger = []
-        for limit in (None, (width, height), (width - 1, height),
-                      (width, height - 1), (0, 0), (10 ** 12, 10 ** 12)):
-            job = dict(every)
-            if limit is not None:
-                job["max"] = limit
-            svc_pick(cache, mosaic, job, expected_queue)
-            expected = expected_queue.get_nowait()
-            worker.submit(job)
-            self.assertEqual(
-                self._query_result(worker, "pick", 701), expected, limit)
-            larger.append((expected["found"], expected["count"],
-                           expected["larger"]))
-        count = first["count"]
-        # the limit at the smallest candidate's size keeps it; a dbu under
-        # it nothing as small is left; no room leaves nothing; room for
-        # everything is no limit
-        self.assertEqual(larger[0], (True, count, 0))
-        self.assertTrue(larger[1][0] and larger[1][1] + larger[1][2] == count,
-                        larger)
-        self.assertEqual(larger[4], (False, 0, count))
-        self.assertEqual(larger[5], (True, count, 0))
-        for kept in larger[2:4]:
-            self.assertEqual(kept[1] + kept[2], count, larger)
-            self.assertGreaterEqual(kept[2], 1, larger)
+        self.assertEqual(first["hidden"], 0)
+
+        def cycle(seen):
+            shapes, hidden = [], 0
+            for nth in range(first["count"]):
+                worker.submit(dict(every, nth=nth, seen=seen))
+                got = self._query_result(worker, "pick", 701)
+                hidden = got["hidden"]
+                if not got["found"] or nth >= got["count"]:
+                    break
+                shapes.append((got["layer"], got["datatype"], got["cell"],
+                               tuple(got["bbox"]), got["area"]))
+            return shapes, hidden
+        everything, none_hidden = cycle(False)
+        shown, hidden = cycle(True)
+        self.assertEqual((len(everything), none_hidden), (first["count"], 0))
+        self.assertEqual(len(shown) + hidden, first["count"])
+        left = iter(everything)
+        self.assertTrue(all(shape in left for shape in shown),
+                        (shown, everything))
         return selected
 
     @staticmethod

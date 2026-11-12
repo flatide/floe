@@ -111,7 +111,7 @@ style epoch=1 path=/tmp/valmini.styles
 render gen=10 view=0,0,404000,447000 w=1200 h=800 depth=full cut=0 exact=0 layers=1/0,2/0 frames=on labels=on font_px=14 mono=off frame_cache=1 jobs=4 decode_jobs=8 tile_px=384 decode_pages=99 round_pages=32 style_epoch=1 out=/tmp/frame.png
 clip seq=12 box=0,0,404000,447000 layers=1/0,2/0 jobs=4 out=/tmp/clip.oas
 snap seq=20 x=1000 y=2000 r=10 layers=1/0,2/0
-pick seq=21 x=1000 y=2000 r=3 nth=0 layers=1/0,2/0 max_w=404000 max_h=447000
+pick seq=21 x=1000 y=2000 r=3 nth=0 layers=1/0,2/0 seen=1
 cell_sources seq=30
 cells seq=31 src=0 cell=17
 cell_find seq=32 src=-1 pat_hex=2a696e763f limit=2000
@@ -224,10 +224,14 @@ nearest edge. Pick is boundary-inclusive, weighs every containing shape and
 retains the 64 smallest by `(integer area, layer, datatype)` and then the
 order found (until 0.12.454 it retained the first 64 it met, so under more
 shapes than that the smallest was never reached), and preserves `nth` overlap
-cycling. `max_w=` and `max_h=` (together, dbu, not negative; 0.12.455) leave
-out the containing shapes wider or taller than that - the client sends the
-view's extent - and the reply counts them: `larger=N` on a hit and on
-`found=0` alike, so a point under large shapes alone is not an empty one.
+cycling. `seen=1` (0.12.456) keeps of those shapes the ones that show: the
+daemon paints the 16 x 16 px window around the point again by the published
+frame's own request - top plane first, each pixel written once - and reads
+which planes wrote its pixels (`seen_planes_around`); a shape whose layer
+wrote no pixel within the shape's box there is under the layers above it and
+is no candidate. The reply counts them: `hidden=N` on a hit and on `found=0`
+alike, so a point under covered shapes alone is not an empty one. A frame
+without styled planes has no such window and every shape is a candidate.
 
 Renderer repetition traversal rejects collinear or zero-vector two-dimensional
 grids explicitly before enumerating them; the normal one-dimensional grid forms
