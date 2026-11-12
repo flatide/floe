@@ -115,8 +115,7 @@ def measurement_candidates(error, metric):
     """Distinct geometry-derived CDs, before applying a rule condition.
 
     Rectangles expose both spans. An edge pair exposes only its true
-    closest gap: later ``cd_segments`` entries are XY ruler diagnostics,
-    never additional CD candidates. Complex geometry stays unmeasurable.
+    closest gap, the pair's one ruler. Complex geometry stays unmeasurable.
     """
     pts = error.pts
     if metric == "area":

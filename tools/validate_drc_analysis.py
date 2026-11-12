@@ -677,6 +677,67 @@ def zero_gap_ui(v, d, pump):
               "GUI zero distances stay in measurable groups (%s)" % basis)
 
 
+def diagonal_gap_ui(v, d, pump):
+    """An edge pair's ruler is its closest gap alone (0.12.453, user
+    2026-11-12: "유클리드 거리로 CD값이 정해지는 경우(주로 대각선) 가로와 세로
+    룰러는 표시하지 않게"): where the gap is a diagonal - parallel edges whose
+    projections do not meet, 45-degree edges facing in part - the CD is that
+    Euclidean distance and the ruler is it, without the horizontal and
+    vertical component rulers that followed it until 0.12.452."""
+    import math
+    db, deck = d / "diagonal.db", d / "diagonal.svrf"
+    metadata = d / "diagonal.db.rules.json"
+    records = ("e 1 2\n0 20000 100000 20000\n150000 60000 250000 60000\n"   # corner to corner
+               "e 2 2\n0 50000 20000 70000\n30000 60000 50000 80000\n"        # 45 degrees, facing in part
+               "e 3 2\n0 300000 100000 300000\n0 330000 100000 330000\n"      # facing
+               "e 4 2\n0 0 10000 0\n20000 10000 30000 20000\n"                # not parallel
+               "p 5 4\n0 900000\n30000 900000\n30000 1400000\n0 1400000\n")  # a rectangle
+    db.write_text("SAMPLE 100000\nDIAG.SPACE\n5 5 0\n" + records)
+    deck.write_text("PRECISION 100000\nLAYER M1 1\nDIAG.SPACE {\n EXTERNAL M1 < 0.70000\n}\n")
+    for args in ([INDEX, "drc", str(db)],
+                 [INDEX, "svrf", str(deck), "--no-env-switches", "-o", str(metadata)]):
+        r = run(args)
+        check(r.returncode == 0, "diagonal-gap fixture indexed/converted", r.stderr)
+    constraints = json.loads(metadata.read_text())["checks"]["DIAG.SPACE"]["constraints"]
+    want = [[[1.0, 0.2, 1.5, 0.6]], [[0.2, 0.7, 0.3, 0.6]], [[0.5, 3.0, 0.5, 3.3]],
+            [[0.1, 0.0, 0.2, 0.1]], [[0.0, 11.5, 0.3, 11.5]]]
+
+    def same(got, wanted):
+        return (len(got) == len(wanted)
+                and all(len(a) == 4 and all(abs(x - y) <= 1e-9 for x, y in zip(a, b))
+                        for a, b in zip(got, wanted)))
+    svc = Svc()
+    try:
+        h = svc("drc_open", path=str(db), mode="load")["handle"]
+        info = [svc("drc_cd_info", handle=h, check=0, error=ei, constraints=constraints)
+                for ei in range(5)]
+        plain = [svc("drc_cd", handle=h, check=0, error=ei) for ei in range(5)]
+        svc("drc_close", handle=h)
+    finally:
+        svc.close()
+    check(all(same(row["rulers"], rulers) for row, rulers in zip(info, want)),
+          "an edge pair's ruler is its closest gap alone: a diagonal gap has no X and Y rulers",
+          [row["rulers"] for row in info])
+    check([row["pick"]["ticks"][0] for row in info] == [64031, 14142, 30000, 14142, 30000],
+          "the CD is the gap's Euclidean distance", [row["pick"] for row in info])
+    check([len(segments) for segments in plain] == [1, 1, 1, 1, 2]
+          and all(same(segments, rulers) for segments, rulers in zip(plain[:4], want)),
+          "the pack's rulers (drc_cd) alike: one a pair, a rectangle's two spans", plain)
+    check(v.load_drc(str(db)), "load diagonal-gap DB with SVRF")
+    pump(v, lambda: v._drc_group_cache_key is None, "diagonal-gap cached counts", 60)
+    v._drc_select_row(0)
+    pump(v, lambda: v._drc_delta_groups is not None, "diagonal-gap GUI groups", 60)
+    shown = []
+    for ei in range(2):
+        v._drc_goto_cell(0, ei)
+        v._drc_jump(0, ei)
+        shown.append([round(math.hypot(r[2] - r[0], r[3] - r[1]) * v.dbu, 5) for r in v._drc_ruler])
+    lines = v._drc_meta_lines("DIAG.SPACE", v._drc.checks[0].errors[0])
+    check(shown == [[0.64031], [0.14142]]
+          and any("measured: 0.64031 um vs < 0.70000" in line for line in lines),
+          "the viewer draws a diagonal gap as one ruler, the measured CD's", (shown, lines))
+
+
 def marker_length_groups(svc, temp):
     """Two user-visible length families stay separate without a width CD."""
     print("[A4b] CD-unresolved single-edge length groups")
@@ -1897,6 +1958,7 @@ def a5(temp):
         explicit_rules_ui(v, d, pump)
         grouped_rules_ui(v, d, pump)
         zero_gap_ui(v, d, pump)
+        diagonal_gap_ui(v, d, pump)
         marker_length_ui(v, temp, pump)
         cd_part_ui(v, d, pump)
         pane_ui(v, d, pump)

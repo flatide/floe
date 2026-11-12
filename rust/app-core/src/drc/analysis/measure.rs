@@ -249,11 +249,15 @@ fn sorted_unique(mut v: Vec<f64>) -> Vec<f64> {
 }
 
 /// The CD rulers of a simple marker, um (floe_oracle drc.py `cd_segments`):
-/// a single edge's length; a facing edge pair's closest gap - at the
+/// a single edge's length; an edge pair's closest gap, one ruler - at the
 /// midpoint when the edges are parallel and that is the minimum itself,
-/// with X/Y components after a diagonal minimum of parallel edges; an
-/// axis-aligned rectangle's width then height through its middle. Complex
-/// shapes get none.
+/// else between the two nearest points, which for parallel edges whose
+/// projections do not meet is the diagonal from end to end: the CD is that
+/// Euclidean distance, and the ruler is it alone (until 0.12.452 its X and
+/// Y components followed it as two rulers more; user 2026-11-12: "유클리드
+/// 거리로 CD값이 정해지는 경우(주로 대각선) 가로와 세로 룰러는 표시하지
+/// 않게"); an axis-aligned rectangle's width then height through its
+/// middle. Complex shapes get none.
 pub fn cd_segments(kind: char, pts: &[Point]) -> Vec<Segment> {
     match (kind, pts.len()) {
         ('e', 2) => {
@@ -299,15 +303,9 @@ pub fn cd_segments(kind: char, pts: &[Point]) -> Vec<Segment> {
             if parallel && dist(mid, fm) == dmin {
                 return vec![seg(mid, fm)];
             }
-            let mut out = vec![seg(p, q)];
-            if parallel && p[0] != q[0] && p[1] != q[1] {
-                // tuple order, then the elbow at (hi.x, lo.y)
-                let (lo, hi) = if (p[0], p[1]) <= (q[0], q[1]) { (p, q) } else { (q, p) };
-                let elbow = [hi[0], lo[1]];
-                out.push(seg(lo, elbow));
-                out.push(seg(elbow, hi));
-            }
-            out
+            // the gap alone, diagonal or not: its X and Y components are
+            // no measure of the rule and are not drawn
+            vec![seg(p, q)]
         }
         ('p', 4) => {
             let xs = sorted_unique(pts.iter().map(|p| p[0]).collect());
@@ -348,8 +346,8 @@ pub fn marker_length_ticks(kind: char, pts: &[Point]) -> Option<i64> {
 
 /// The marker's distinct finite CDs for `metric`, ascending: a polygon's
 /// area (`area`); a rectangle's two spans or an edge pair's closest gap
-/// (the CD metrics - the gap's X/Y rulers are not candidates); a single
-/// edge's length (`length`). Complex geometry has none.
+/// (the CD metrics; the gap is the pair's one ruler); a single edge's
+/// length (`length`). Complex geometry has none.
 pub fn candidates(kind: char, pts: &[Point], metric: &str) -> Vec<f64> {
     let values: Vec<f64> = if metric == "area" {
         if kind != 'p' || pts.len() < 3 {
@@ -968,8 +966,25 @@ mod tests {
         let near = [[0.0, 0.0], [2.0, 0.0], [0.0, 1.0], [2.0, 1.0001]];
         let s = cd_segments('e', &near);
         assert_eq!(hypot(s[0][2] - s[0][0], s[0][3] - s[0][1]), 1.0);
+        // parallel edges whose projections do not meet: the diagonal
+        // from end to end, alone - no X and Y component rulers after it
         let far = [[0.0, 0.0], [2.0, 0.0], [3.0, 1000.0], [4.0, 1000.0]];
-        assert_eq!(cd_segments('e', &far).len(), 3);
+        assert_eq!(cd_segments('e', &far), vec![[2.0, 0.0, 3.0, 1000.0]]);
+        let corner = [[0.0, 0.0], [1.0, 0.0], [2.0, 1.0], [3.0, 1.0]];
+        for order in [[0, 1, 2, 3], [1, 0, 2, 3], [0, 1, 3, 2], [1, 0, 3, 2]] {
+            assert_eq!(cd_segments('e', &order.map(|i| corner[i])), vec![[1.0, 0.0, 2.0, 1.0]]);
+        }
+        // (the pair's edges the other way round: the same ruler, drawn
+        // from its other end)
+        assert_eq!(cd_segments('e', &[corner[2], corner[3], corner[0], corner[1]]),
+                   vec![[2.0, 1.0, 1.0, 0.0]]);
+        // 45-degree edges that face each other in part: the gap is square
+        // to them, a diagonal on the screen, and alone as well
+        let slanted = [[0.0, 0.0], [2.0, 2.0], [3.0, 1.0], [5.0, 3.0]];
+        let s = cd_segments('e', &slanted);
+        assert_eq!(s.len(), 1);
+        assert!(s[0][0] != s[0][2] && s[0][1] != s[0][3]);
+        assert!((hypot(s[0][2] - s[0][0], s[0][3] - s[0][1]) - 2f64.sqrt()).abs() < 1e-12);
         let crossing = [[0.0, 0.0], [1.0, 1.0], [0.0, 1.0], [1.0, 0.0]];
         assert_eq!(cd_segments('e', &crossing), vec![[0.5, 0.5, 0.5, 0.5]]);
     }
@@ -1025,7 +1040,11 @@ mod tests {
         let disjoint = [[25.4810, 188.9700], [25.5275, 188.9700],
                         [25.3355, 189.0460], [25.3820, 189.0460]];
         assert_eq!(measurement_ticks(&selector.pick('e', &disjoint).unwrap()).unwrap(), (12481, 16800, 4319));
-        assert_eq!(selector.ruler_segments('e', &disjoint).len(), 3);
+        // the CD is the diagonal between the two ends, and so is the ruler
+        assert_eq!(
+            selector.ruler_segments('e', &disjoint),
+            vec![[25.4810, 188.9700, 25.3820, 189.0460]]
+        );
         let tiny = [[0.0, 0.0], [0.1, 0.0], [0.0, 1e-9], [0.1, 1e-9]];
         assert_eq!(selector.pick('e', &tiny).unwrap().cd, 1e-9);
         let greater = Selector::new(&[con("space", ">", 0.0, "EXT M1 > 0")]);

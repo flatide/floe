@@ -123,8 +123,9 @@ def cd_segments(e):
     * single edge = its length;
     * facing edge pair = the closest gap, anchored at the midpoint
       when the edges face in parallel (the common spacing shape);
-    * parallel edge pair with diagonal closest endpoints = the primary
-      diagonal ruler followed by horizontal and vertical components;
+    * parallel edge pair with diagonal closest endpoints = that
+      diagonal alone: the CD is its Euclidean distance (its horizontal
+      and vertical components were two rulers more until 0.12.452);
     * axis-aligned rectangle = both spans through the middle.
 
     Complex polygons and edge sets get none.
@@ -199,18 +200,11 @@ def cd_segments(e):
         # parallel projections, changing the displayed five-decimal CD.
         if parallel and dist(mid, fm) == dmin:
             return [seg(mid, fm)]
-        out = [seg(p, q)]
-
         # Disjoint projections of parallel edges produce a diagonal
-        # endpoint-to-endpoint minimum.  Keep that true minimum first,
-        # then expose its X/Y components as an L between the same points.
-        # The sorted endpoints make the elbow independent of record order.
-        if parallel and p[0] != q[0] and p[1] != q[1]:
-            lo, hi = sorted((p, q))
-            elbow = (hi[0], lo[1])
-            out.append(seg(lo, elbow))       # horizontal component
-            out.append(seg(elbow, hi))       # vertical component
-        return out
+        # endpoint-to-endpoint minimum: the CD is that Euclidean distance
+        # and the ruler is it alone (user 2026-11-12; its X/Y components
+        # followed it as an L until 0.12.452).
+        return [seg(p, q)]
     if e.kind == "p" and len(pts) == 4:
         xs = sorted(set(x for x, _ in pts))
         ys = sorted(set(y for _, y in pts))

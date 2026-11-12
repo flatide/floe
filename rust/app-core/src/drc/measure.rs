@@ -69,18 +69,10 @@ fn simple(kind: char, p: &[Point]) -> Vec<Segment> {
             if parallel && distance(mid, fm) == dmin {
                 return vec![[mid, fm]];
             }
-            let mut out = vec![best];
-            if parallel && best[0][0] != best[1][0] && best[0][1] != best[1][1] {
-                let [lo, hi] = if best[0] <= best[1] {
-                    best
-                } else {
-                    [best[1], best[0]]
-                };
-                let elbow = [hi[0], lo[1]];
-                out.push([lo, elbow]);
-                out.push([elbow, hi]);
-            }
-            out
+            // the gap alone, diagonal or not (analysis::measure
+            // cd_segments: the X and Y components of a diagonal gap were
+            // two rulers more until 0.12.452)
+            vec![best]
         }
         ('p', [_, _, _, _]) => {
             let mut xs: Vec<_> = p.iter().map(|v| v[0]).collect();
@@ -103,8 +95,10 @@ fn simple(kind: char, p: &[Point]) -> Vec<Segment> {
     }
 }
 
-/// At most three complete rulers, in legacy order: edge length; closest
-/// gap then optional X/Y diagnostics; or rectangle width then height.
+/// At most two complete rulers: an edge's length; an edge pair's closest
+/// gap, one ruler - the Euclidean distance, a diagonal where the projections
+/// of parallel edges do not meet, without its X/Y components (0.12.453); or
+/// a rectangle's width then height.
 /// Coincident/touching/crossing pairs return a zero gap at their shared point.
 /// Unsupported and complex shapes return none.
 pub fn cd_segments(kind: char, points_dbu: &[[i64; 2]], precision: f64) -> Result<Vec<CdSegment>> {
@@ -417,7 +411,7 @@ mod tests {
             .collect()
     }
     #[test]
-    fn legacy_simple_shapes_and_component_order() {
+    fn simple_shapes_and_a_diagonal_gap_alone() {
         assert_eq!(ends('e', &[[0, 0], [3, 4]]), vec![[[0., 0.], [3., 4.]]]);
         assert_eq!(
             ends('p', &[[0, 0], [4, 0], [4, 2], [0, 2]]),
@@ -427,17 +421,28 @@ mod tests {
             ends('e', &[[0, 0], [3, 0], [0, 1], [3, 1]]),
             vec![[[1.5, 0.], [1.5, 1.]]]
         );
+        // parallel edges whose projections do not meet: the diagonal from
+        // end to end is the CD (the Euclidean distance) and the one ruler -
+        // no X and Y component rulers after it (user 2026-11-12)
         let p = [[0, 0], [1, 0], [2, 1], [3, 1]];
-        let expected = vec![
-            [[1., 0.], [2., 1.]],
-            [[1., 0.], [2., 0.]],
-            [[2., 0.], [2., 1.]],
-        ];
+        let expected = vec![[[1., 0.], [2., 1.]]];
         assert_eq!(ends('e', &p), expected);
         assert_eq!(ends('e', &[p[1], p[0], p[3], p[2]]), expected);
+        // (the pair's edges the other way round: the same ruler, drawn
+        // from its other end)
+        assert_eq!(ends('e', &[p[2], p[3], p[0], p[1]]), vec![[[2., 1.], [1., 0.]]]);
         let v = cd_segments('e', &p, 1000.).unwrap();
+        assert_eq!(v.len(), 1);
         assert!((v[0].distance_um - 2f64.sqrt() / 1000.).abs() < 1e-15);
         assert!(v.iter().all(|s| !s.offset));
+        // the measured CD is that ruler's length, by either path
+        let stop = AtomicUsize::new(0);
+        assert_eq!(measured('e', &p, 1000., "space", &stop).unwrap(), Some(v[0].distance_um));
+        let um = p.map(|q| q.map(|n| n as f64 / 1000.));
+        let v = cd_segments_um('e', &um, &stop).unwrap();
+        assert_eq!(v.len(), 1);
+        assert!((v[0].distance_um - 2f64.sqrt() / 1000.).abs() < 1e-15);
+        assert_eq!(measured_um('e', &um, "space", &stop).unwrap(), Some(v[0].distance_um));
         assert_eq!(
             cd_segments('e', &[[0, 0], [3, 4]], 1000.).unwrap()[0].distance_um,
             0.005

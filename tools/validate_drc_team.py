@@ -1012,6 +1012,38 @@ def r8(temp):
               "a rule without its layers and --layerprops: every layer less the file's hidden one", got)
         got = legend("--layerprops", str(temp / "nope.layerprops"))
         check(got[0] == 1, "a DRC capture with a layer properties file that is not there: refused", got)
+        # a snapshot's embedded rulers (0.12.453, user 2026-11-12: no
+        # horizontal and vertical rulers where the CD is the Euclidean
+        # distance): an edge pair's closest gap alone - a diagonal gap is
+        # one ruler=, not three - and a facing pair's as before
+        diag = temp / "diag.db"
+        diag.write_text("SAMPLE 100000\nDIAG.SPACE\n2 2 0\n"
+                        "e 1 2\n0 20000 100000 20000\n150000 60000 250000 60000\n"
+                        "e 2 2\n0 300000 100000 300000\n0 330000 100000 330000\n")
+        sidecar = temp / "diag.rules.json"
+        sidecar.write_text(json.dumps({"format": "floe-svrf-rules", "version": 1, "checks": {
+            "DIAG.SPACE": {"constraints": [{"metric": "space", "op": "<", "value": 0.7,
+                                            "text": "EXTERNAL M1 < 0.7"}]}}}))
+        r = run([INDEX, "drc", str(diag)])
+        check(r.returncode == 0, "the diagonal-gap results packed", r.stderr[-300:])
+
+        def embedded(err):
+            png = temp / "diag_snap.png"
+            if png.exists():
+                png.unlink()
+            r = run([FLOE2, "render", str(out / "chip.oas"), "--drc", str(diag), "--drc-rule",
+                     "DIAG.SPACE", "--drc-err", str(err), "--drc-rules", str(sidecar),
+                     "--px", "200", "--out", str(temp / "diag_snap")])
+            dump = run([FLOE2, "fe-embed", "--dump", str(png)]).stdout
+            return r.returncode, [[float(n) for n in x.split("=", 1)[1].split(",")[:4]]
+                                  for x in dump.splitlines() if x.startswith("ruler=")]
+        code, rulers = embedded(1)
+        check(code == 0 and len(rulers) == 1 and rulers[0][0] != rulers[0][2]
+              and rulers[0][1] != rulers[0][3],
+              "a DRC snapshot of a diagonal gap embeds the diagonal ruler alone", (code, rulers))
+        code, rulers = embedded(2)
+        check(code == 0 and len(rulers) == 1 and abs(rulers[0][0] - rulers[0][2]) < 1e-9,
+              "a DRC snapshot of a facing pair embeds its one ruler", (code, rulers))
 
 
 # ---- R9, R10 (2026-11-10: one session a reviewer, the reviewers' statistics) ----

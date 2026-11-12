@@ -43,10 +43,11 @@ pack; D2 keeps the retirement honest.)
       and reserved-status writes) so filter counts are O(1); the
       per-chunk waived-count cache (rank/page jumps) stays in
       sync across toggles made after it is built.
-  D8  diagonal closest endpoints of a parallel edge pair retain the
-      true minimum first and add deterministic horizontal + vertical
-      component rulers; midpoint placement never changes the numeric
-      minimum, and facing/non-parallel pairs stay single.
+  D8  diagonal closest endpoints of a parallel edge pair give the true
+      minimum - the Euclidean distance - as the one ruler, whatever the
+      edges' order (no horizontal + vertical component rulers since
+      0.12.453); midpoint placement never changes the numeric minimum,
+      and facing/non-parallel pairs stay single.
   D9  waive autosave (user calls 2026-08-28: per-reviewer dotfile
       BESIDE the pack - server-side floe forwards the display, so
       $HOME may be absent; durable records = explicit save-as; the
@@ -838,22 +839,30 @@ def main():
     re2.set_status(cb, last, drc.STATUS_NONE)
     print("D6b OK: status filter inside query_rect, cap-safe")
 
-    # D8: a parallel pair with disjoint projections needs the true
-    # diagonal minimum plus its two axis components.  The first entry
-    # is the measurement contract consumed by the DRC details panel.
+    # D8: a parallel pair with disjoint projections has the true
+    # diagonal minimum - the Euclidean distance the CD is - as its one
+    # ruler (user 2026-11-12: no horizontal and vertical rulers where
+    # the CD is the Euclidean distance; until 0.12.452 the two axis
+    # components followed it).  The entry is the measurement contract
+    # consumed by the DRC details panel.
     diagonal = drc.DrcError("e", 1,
                             [(0.0, 0.0), (1.0, 0.0),
                              (2.0, 1.0), (3.0, 1.0)])
     eq(drc.cd_segments(diagonal),
-       [(1.0, 0.0, 2.0, 1.0),
-        (1.0, 0.0, 2.0, 0.0),
-        (2.0, 0.0, 2.0, 1.0)],
-       "diagonal edge-pair component rulers")
+       [(1.0, 0.0, 2.0, 1.0)],
+       "a diagonal edge-pair gap is one ruler, without its components")
     reversed_edges = drc.DrcError(
         "e", 2, [(1.0, 0.0), (0.0, 0.0),
                  (3.0, 1.0), (2.0, 1.0)])
     eq(drc.cd_segments(reversed_edges), drc.cd_segments(diagonal),
-       "edge endpoint order changed component rulers")
+       "edge endpoint order changed the diagonal ruler")
+    swapped_edges = drc.DrcError(
+        "e", 2, [(2.0, 1.0), (3.0, 1.0),
+                 (0.0, 0.0), (1.0, 0.0)])
+    # (the pair's edges the other way round: the same ruler, drawn from
+    # its other end)
+    eq(drc.cd_segments(swapped_edges), [(2.0, 1.0, 1.0, 0.0)],
+       "edge order changed the diagonal ruler")
     facing = drc.DrcError("e", 3,
                           [(0.0, 0.0), (3.0, 0.0),
                            (0.0, 1.0), (3.0, 1.0)])
@@ -877,7 +886,7 @@ def main():
                     (3.0, 1000.0), (4.0, 1000.0)]
     for pts, expected, component_count in (
             (near_parallel, 1.0, 1),
-            (far_parallel, math.hypot(1.0, 1000.0), 3)):
+            (far_parallel, math.hypot(1.0, 1000.0), 1)):
         for reverse_a in (False, True):
             for reverse_b in (False, True):
                 a = pts[:2][::-1] if reverse_a else pts[:2]
@@ -885,13 +894,13 @@ def main():
                 for edges in (a + b, b + a):
                     segments = drc.cd_segments(drc.DrcError("e", 5, edges))
                     eq(len(segments), component_count,
-                       "edge reversal changed minimum/component classification")
+                       "an edge pair has one ruler, whatever its edges' order")
                     x0, y0, x1, y1 = segments[0]
                     distance = math.hypot(x1 - x0, y1 - y0)
                     eq(distance, expected, "midpoint changed the numeric minimum")
                     eq("%.5f" % distance, "%.5f" % expected,
                        "minimum CD changed at five decimal places")
-    print("D8 OK: exact minima + safe midpoint + endpoint-invariant components")
+    print("D8 OK: exact minima + safe midpoint + one ruler a pair, the diagonal alone")
 
     # D9: waive autosave - save-as/load, refusal, read-only pack,
     # corrupt-aside, in-pack seed migration
