@@ -593,3 +593,4 @@ P4d처럼 컨트롤러 루프에서만 바뀐다. `FLOE_GTK_LOOP=legacy`는 예�
 - **정리(`Cache::sweep_outdated(remove)`, `store::sweep_outdated`):** 분석 폴더에서 다른 식별값의 항목을 세거나 지운다. 부르기 전에 `drc::pack_idle(pack)`으로 아무도 pack을 열고 있지 않은지 묻는다(리더 잠금을 잡기 전에). 지금 부르는 곳은 `floe2 drc-prepare`뿐이고 뷰어와 서비스는 지우지 않는다.
 - **웹(나중):** 머지하면 웹의 분석 캐시도 같은 식별값을 쓴다. 0.12.458까지의 캐시는 한 번 다시 계산되고, 옛 것은 `drc-prepare`가 지운다.
 - **게이트:** `drc_analysis` A2(같은 에러의 다른 pack 파일 = 같은 캐시, 다른 에러 = 새 캐시), A4(다시 준비, 정리, 복사한 폴더); 단위 `drc::analysis::store`.
+- **준비한 사이드카의 메모(0.12.460):** `store::note_rules(pack, sidecar)`가 분석 폴더의 `rules.path`에 절대 경로 한 줄을 쓰고(`floe2 drc-prepare --svrf`), `store::noted_rules(pack)`가 읽는다. `svrf::rules_candidates(db, deck)`가 그 경로를 목록 맨 앞에 넣으므로 뷰어의 로드, DRC 캡처, 웹의 같은 호출이 모두 그것을 먼저 본다. 호스트가 바꿀 것은 없다. 게이트는 `drc_analysis` A5 `rules_lookup_ui`(준비 전후의 목록, 실제 뷰어의 적용, 없는 파일, 다른 사이드카, `FLOE_DRC_ANALYSIS_ROOT`).

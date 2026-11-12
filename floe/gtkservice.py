@@ -1348,7 +1348,8 @@ def svrf_operands(rhs):
 
 def rules_candidates(db, deck=None):
     """Where the rules sidecar of the results database `db` is looked for,
-    in order (`deck`: its Rule File Pathname): beside the database and the
+    in order (`deck`: its Rule File Pathname): the sidecar `floe2 drc-prepare
+    --svrf` noted for these results (0.12.460), then beside the database and the
     deck, then - under a work directory (--workdir / FLOE_WORKDIR) - at the
     same paths below it, where `floe-index svrf DECK` writes its default
     sidecar (app-core svrf::rules_candidates)."""

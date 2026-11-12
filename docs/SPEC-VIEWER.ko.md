@@ -691,7 +691,8 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   `_drc_wf_count` 그대로. waive/unwaive는 all 필터에서도 해당
   행 텍스트를 제자리 갱신.
 - **SVRF 룰 메타데이터**(2026-08-15, SPEC-FORMATS `<deck>.rules.json`
-  참조): db 로드 시 자동 탐색(`_drc_rules_auto` — Rule File Pathname
+  참조): db 로드 시 자동 탐색(`_drc_rules_auto` — `floe2 drc-prepare --svrf`가 분석 폴더에 적어 둔
+  사이드카가 맨 먼저다(0.12.460); 그다음 Rule File Pathname
   베이스네임의 **db 옆** 사이드카 우선, 기록 경로·`<db>.rules.json`
   차선; 작업 디렉터리가 있으면 이어서 그 셋의 DIR 아래 자리, 0.12.450 — 자리는 서비스의
   `svrf_rules_candidates`가 대고(app-core `svrf::rules_candidates`, DRC 캡처와 같은 목록) 뷰어는 그 가운데

@@ -461,7 +461,15 @@ impl Rules {
 /// database, a DRC capture). `deck`: the database's `Rule File Pathname:`,
 /// an absolute path of the machine Calibre ran on. Beside the files first:
 /// `<deck's name>.rules.json` in the database's folder, the recorded
-/// `<deck>.rules.json`, `<database>.rules.json`. Then, under a work
+/// `<deck>.rules.json`, `<database>.rules.json`. Before them all the
+/// sidecar `floe2 drc-prepare --svrf FILE` was given for these results,
+/// noted in their analysis folder (0.12.460, user 2026-11-12: with the
+/// index, the pack and the analysis caches all prepared the viewer opened
+/// the results without their rules - the sidecar lay where the deck really
+/// is, `floe-index svrf DECK --workdir DIR`'s place, and the database
+/// records the deck's path on the machine Calibre ran on): the file someone
+/// named for this very database, where the others are guessed from names.
+/// Then, under a work
 /// directory (`--workdir DIR` / FLOE_WORKDIR), the same three at their
 /// absolute paths below it - where `floe-index svrf <deck>` writes its
 /// default sidecar when the deck's folder is not to be written
@@ -470,12 +478,38 @@ impl Rules {
 /// 2번 수정해줘"). A sidecar beside the files wins, as the clusters file of
 /// a database does: it is the one someone put there.
 pub fn rules_candidates(database: &Path, deck: Option<&Path>) -> Result<Vec<PathBuf>> {
-    Ok(rules_candidates_in(
-        &crate::cache::absolute(database)?,
-        database,
-        deck,
-        crate::cache::workdir(),
+    Ok(noted_first(
+        noted_rules(database),
+        rules_candidates_in(
+            &crate::cache::absolute(database)?,
+            database,
+            deck,
+            crate::cache::workdir(),
+        ),
     ))
+}
+
+/// The sidecar noted for `database`'s results by `floe2 drc-prepare --svrf`
+/// (drc::analysis::store::noted_rules): in the analysis folder of its pack
+/// - the file itself when a pack was named, else the pack's place, which is
+/// under the work directory when there is one.
+fn noted_rules(database: &Path) -> Option<PathBuf> {
+    let pack = match crate::drc::is_packed_source(database) {
+        Ok(true) => database.to_path_buf(),
+        _ => crate::cache::pack_path(database).ok()?,
+    };
+    crate::drc::analysis::store::noted_rules(&pack)
+}
+
+/// `places` with the noted sidecar before them, each place once.
+fn noted_first(noted: Option<PathBuf>, places: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = noted.into_iter().collect();
+    for path in places {
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    paths
 }
 
 /// `rules_candidates` of a database whose absolute path is `absolute`,

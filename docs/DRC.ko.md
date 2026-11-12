@@ -604,7 +604,8 @@ delta group, Rule File Pathname, Rule File Title을 제거해줘", 이어서 "cl
   `--scan`(양쪽 #IFDEF 분기 워크, 인벤토리 출력)으로 구멍 확인.
 
 **뷰어 연동**: db 옆 `<덱 베이스네임>.rules.json` 자동 부착(수동
-DRC 메뉴 load SVRF rules…). 찾는 순서는 db 옆의 `<덱 이름>.rules.json`, 기록된 덱 경로의
+DRC 메뉴 load SVRF rules…). 찾는 순서는 `floe2 drc-prepare --svrf FILE`이 분석 폴더에 적어 둔
+사이드카(0.12.460; DRC-CLI.ko.md의 `drc-prepare`), db 옆의 `<덱 이름>.rules.json`, 기록된 덱 경로의
 `<deck>.rules.json`, `<db>.rules.json`이고, 작업 디렉터리(`--workdir` / `FLOE_WORKDIR`)가 있으면 그 셋을
 DIR 아래 같은 절대 경로 자리에서 이어서 찾는다(0.12.450). 덱 폴더에 쓸 수 없는 곳에서는
 `floe-index svrf DECK --workdir DIR`이 `-o` 없이 `DIR/<덱의 절대 경로>.rules.json`에 쓰므로 그대로 붙는다

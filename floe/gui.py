@@ -9140,7 +9140,11 @@ class Viewer:
         THE DB is searched first, the recorded path second, <db>.rules.json
         third - and under a work directory (--workdir / FLOE_WORKDIR) the
         same three below it, where `floe-index svrf DECK` writes when the
-        deck's folder is not to be written (user 2026-11-11). The service
+        deck's folder is not to be written (user 2026-11-11). Before them
+        all the sidecar `floe2 drc-prepare --svrf FILE` was given for these
+        results, noted in their analysis folder (0.12.460, user 2026-11-12:
+        everything prepared and the results opened without their rules - the
+        sidecar lay at none of those places). The service
         says the places (gtkservice.rules_candidates, app-core
         svrf::rules_candidates - the DRC capture's list); one that cannot
         answer leaves the three beside the files."""

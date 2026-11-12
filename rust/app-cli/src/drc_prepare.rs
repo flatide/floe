@@ -29,7 +29,9 @@ read-only results folder; set it for the viewer too). The pack, the waive
 and note files are not changed. Rules without errors are skipped.
 
   --svrf RULES_JSON   the deck's floe-index svrf sidecar (required for the
-                      CD/delta caches; not the SVRF text itself)
+                      CD/delta caches; not the SVRF text itself). Its path
+                      is noted in the analysis folder: the viewer's load of
+                      the database and a DRC snapshot read the rules from it
   --rule NAME         prepare this rule only (repeatable; default: all)
   --jobs N            workers within a rule, 1..256 (default min(4, CPUs),
                       or FLOE_DRC_JOBS)
@@ -201,6 +203,21 @@ fn prepare(c: &Command, stop: &AtomicUsize, report: &(dyn Fn(String) + Sync)) ->
                 outdated.entries
             )
         });
+    }
+    // The sidecar the CD caches are measured with is noted in the analysis
+    // folder: the viewer's load of the database and a DRC capture read it
+    // from there first (svrf::rules_candidates) - where it lies is not
+    // always one of the places the database's name and its recorded deck
+    // path give (user 2026-11-12: everything prepared, and the viewer opened
+    // the results without their rules).
+    if let (true, Some(rules)) = (c.delta, &c.rules_json) {
+        match floe_app_core::drc::analysis::store::note_rules(&pack_path, rules) {
+            Ok(noted) => report(format!("Rules sidecar noted for the viewer: {}", noted.display())),
+            Err(e) => report(format!(
+                "Rules sidecar not noted ({}): the viewer finds it by its name or with --rules",
+                e.message
+            )),
+        }
     }
     let source = PackSource(pack.blocks()?);
     let wanted: Vec<usize> = (0..pack.checks.len())

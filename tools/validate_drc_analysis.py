@@ -533,9 +533,16 @@ def a4(temp, db, heavy, name):
     files = tree(copy / ".big.db.analysis")
     r = run([FLOE2, "drc-prepare", str(copy / "big.db"), "--svrf", str(copy / "big.svrf.rules.json"),
              "--rule", name, "--jobs", "2"], env=plain)
+    now = tree(copy / ".big.db.analysis")
     check(r.returncode == 0 and "CD measurement" not in r.stderr and "outdated" not in r.stderr
-          and tree(copy / ".big.db.analysis") == files,
+          and {k: v for k, v in now.items() if k != "rules.path"}
+          == {k: v for k, v in files.items() if k != "rules.path"},
           "a copy of the results folder keeps its caches: nothing measured there", r.stderr[-300:])
+    # (the note that came with the copy named the sidecar of the folder it
+    # was copied from; the run there names its own, 0.12.460)
+    check((copy / ".big.db.analysis" / "rules.path").read_text() == "%s\n" % (copy / "big.svrf.rules.json")
+          and (d / ".big.db.analysis" / "rules.path").read_text() == "%s\n" % (d / "big.svrf.rules.json"),
+          "... and the sidecar noted there is the one that run was given")
     r = run([FLOE2, "drc-prepare", str(db), "--svrf", str(d / "big.svrf.rules.json"),
              "--rule", "NOPE"], env=env)
     check(r.returncode != 0 and "unknown DRC rules: NOPE" in r.stderr, "an unknown rule is refused", r.stderr)
@@ -1713,6 +1720,66 @@ def rules_lookup_ui(v, d, temp):
               "a service that cannot say them leaves the three beside the files")
     finally:
         gtkservice.rules_candidates = real
+    # The sidecar `floe2 drc-prepare --svrf FILE` was given is noted in the
+    # results' analysis folder and looked at first (0.12.460; user 2026-11-12:
+    # the index, the pack and the analysis caches all prepared, "svrf 적용도
+    # 되어 있어야 할 것 같은데 되어 있지 않음" - the sidecar lay where the deck really
+    # is, at none of the places the database's name and its recorded deck
+    # path give, and drc-prepare, which was handed it, left no word of it).
+    prepared = elsewhere / "deck.rules.json"
+    by_name = [str(lone.parent / "absent.svrf.rules.json"), str(lone.parent / "absent.svrf") + ".rules.json",
+               str(lone) + ".rules.json"]
+    by_name = [p for i, p in enumerate(by_name) if p not in by_name[:i]]
+    recorded = str(lone.parent / "absent.svrf")
+    note = lone.parent / ".sample.db.analysis" / "rules.path"
+    check(v.load_drc(str(lone)) and v._drc_rmeta is None and not note.exists()
+          and gtkservice.rules_candidates(str(lone), recorded) == by_name,
+          "(results not prepared yet: the places by name, no rules)",
+          gtkservice.rules_candidates(str(lone), recorded))
+    r = run([FLOE2, "drc-prepare", str(lone), "--svrf", str(prepared), "--jobs", "2"])
+    check(r.returncode == 0 and "Rules sidecar noted for the viewer: %s" % prepared in r.stderr
+          and note.read_text() == "%s\n" % prepared,
+          "drc-prepare notes the sidecar it was given in the analysis folder", r.stderr[-300:])
+    places = gtkservice.rules_candidates(str(lone), recorded)
+    check(places == [str(prepared)] + by_name, "the service says it first, before the places by name", places)
+    check(v.load_drc(str(lone)) and v._drc_rmeta is not None and v._drc_rmatch == (8, 8)
+          and "svrf 8/8" in v.status.get_text(),
+          "the viewer's load applies the sidecar the results were prepared with",
+          (v._drc_rmatch, v.status.get_text()))
+    # the centres alone prepared again: the note stays; the noted file gone:
+    # a place like the others, passed over; another sidecar given: the last
+    r = run([FLOE2, "drc-prepare", str(lone), "--spatial-only"])
+    check(r.returncode == 0 and "noted" not in r.stderr and note.read_text() == "%s\n" % prepared,
+          "--spatial-only leaves the note as it is", r.stderr[-300:])
+    away = elsewhere / "moved.rules.json"
+    os.rename(str(prepared), str(away))
+    check(v.load_drc(str(lone)) and v._drc_rmeta is None,
+          "a noted sidecar that is gone is passed over like any empty place")
+    r = run([FLOE2, "drc-prepare", str(lone), "--svrf", str(away), "--delta-only", "--jobs", "2"])
+    check(r.returncode == 0 and note.read_text() == "%s\n" % away
+          and v.load_drc(str(lone)) and v._drc_rmatch == (8, 8),
+          "prepared with another sidecar: that one is noted and applied", r.stderr[-300:])
+    # under FLOE_DRC_ANALYSIS_ROOT the note goes with the caches, and is
+    # read from there by a service that has the same root
+    root = temp / "rules ssd"
+    env = dict(os.environ, FLOE_DRC_ANALYSIS_ROOT=str(root))
+    r = run([FLOE2, "drc-prepare", str(lone), "--svrf", str(away), "--delta-only", "--jobs", "2"], env=env)
+    notes = sorted(root.glob("*/rules.path"))
+    check(r.returncode == 0 and len(notes) == 1 and notes[0].read_text() == "%s\n" % away,
+          "under FLOE_DRC_ANALYSIS_ROOT the note goes with the caches", (r.stderr[-200:], notes))
+    os.environ["FLOE_DRC_ANALYSIS_ROOT"] = str(root)
+    svc = Svc()
+    try:
+        there = svc("svrf_rules_candidates", db=str(lone), deck=recorded)
+    finally:
+        svc.close()
+        del os.environ["FLOE_DRC_ANALYSIS_ROOT"]
+    check(there == [str(away)] + by_name, "... and a service with that root says it first", there)
+    # (the note taken away again: the checks after this one load these
+    # results without rules)
+    note.unlink()
+    os.rename(str(away), str(prepared))
+    check(v.load_drc(str(lone)) and v._drc_rmeta is None, "(no note: no rules, as before)")
 
 
 def cd_part_ui(v, d, pump):

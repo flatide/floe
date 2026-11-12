@@ -105,6 +105,22 @@ waive/notes는 변경하지 않는다. pack이 없거나 낡으면 중단하며 
 건너뛴 룰 수를 따로 표시한다. `--svrf`에는 원문 SVRF가 아니라 `floe-index svrf`로
 생성한 `.rules.json`을 지정한다(없으면 `--spatial-only`만 가능).
 
+**`--svrf`로 준 사이드카는 뷰어가 찾는다(0.12.460; 사용자: ".ice, .db.tray, .db.analysis가 모두 준비된
+상태에서 floe2 view layout.oas --drc error.db --workdir /user/tmp 로 실행하면 svrf 적용도 되어 있어야
+할 것 같은데 되어 있지 않음").** 뷰어는 사이드카를 db에 기록된 덱 경로와 db 이름으로 찾는데,
+`floe-index svrf DECK --workdir DIR`은 지금 넘긴 덱의 실제 경로 아래에 쓴다. 두 경로가 다르면(Calibre를
+돌린 곳의 마운트 경로, 복사해 온 덱, 상대 경로) 뷰어가 찾지 못했고, `drc-prepare`는 받은 파일을 어디에도
+남기지 않았다. 이제 `drc-prepare`가 받은 사이드카의 절대 경로를 분석 폴더의 `rules.path`에 한 줄로
+적어 두고(`Rules sidecar noted for the viewer: …`), 뷰어의 db 로드와 DRC 스냅샷이 그 자리를 맨 먼저
+본다(app-core `svrf::rules_candidates`).
+- 순서: `--rules FILE`(지정하면 그것만), 적어 둔 사이드카, db 옆의 `<덱 이름>.rules.json`, 기록된 덱
+  경로의 `<deck>.rules.json`, `<db>.rules.json`, 작업 디렉터리가 있으면 그 셋의 미러.
+- 적힌 파일이 없으면 빈 자리로 지나가고 다음 자리를 본다. `--spatial-only`는 메모를 건드리지 않고, 다른
+  사이드카로 다시 준비하면 그것으로 바뀐다. 같은 경로면 파일을 다시 쓰지 않는다.
+- 메모는 분석 폴더와 함께 있다: db 옆(`--workdir`이면 DIR 아래)이나 `FLOE_DRC_ANALYSIS_ROOT`. 절대
+  경로라서 결과 폴더를 다른 곳으로 복사하면 그쪽에서 `drc-prepare`를 다시 돌려야 메모가 그곳의
+  사이드카를 가리킨다(캐시는 그대로 쓰이므로 금방 끝난다).
+
 **분석 캐시는 pack의 내용에 묶인다(0.12.459).** 0.12.458까지는 pack **파일**의 스탬프(크기·시각·inode)에
 묶여, pack을 다시 만들거나 결과 폴더를 복사하거나 touch하면 캐시 전부를 다시 계산했고 옛 캐시는
 남았다. 이제 pack의 내용 ID(에러가 무엇인가; DRC.ko.md §2 '결과 식별 = 내용')에 묶인다(app-core
@@ -356,7 +372,8 @@ floe-index svrf deck.cal --follow-verbatim # 실런과 같은 환경으로 생�
   탐색된다.
 - `--workdir DIR`(또는 `FLOE_WORKDIR`)이면 기본 출력이 덱 옆이 아니라 `DIR/<덱의 절대 경로>.rules.json`으로
   가고 잠금도 그 옆에 생긴다(0.12.450). 덱 폴더에 쓸 수 없는 곳에서는 `-o` 없이 이렇게 돌린다. 뷰어와
-  스냅샷은 db 옆과 덱 옆에서 못 찾으면 DIR의 같은 자리에서 찾는다. `-o FILE`은 준 자리에 그대로 쓴다.
+  스냅샷은 db 옆과 덱 옆에서 못 찾으면 DIR의 같은 자리에서 찾는다(`drc-prepare --svrf`로 적어 둔 사이드카가
+  있으면 그것을 맨 먼저 본다, 0.12.460). `-o FILE`은 준 자리에 그대로 쓴다.
   폴더 없이 이름만 주면 현재 디렉터리이고 `--workdir`이 옮겨 주지 않는다(CACHE-NAMING.ko.md §6).
 - `-D NAME[=V]` 반복 지정 = 실런 스위치 재현(-D가 환경변수보다
   우선). 환경변수 폴백이 기본이므로 sourceme를 source 한 셸에서

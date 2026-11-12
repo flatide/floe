@@ -227,7 +227,7 @@ rust/target/release/floe-index svrf sfa14.drc.cal -D FEOL    # 실런과 같은 
 ```
 
 만든 `.rules.json`을 **.db 옆에 두면** 뷰어가 db를 열 때 자동으로
-붙인다(DRC 메뉴 load SVRF rules…로 수동 로드도 가능, 로드의 상태 줄 `svrf N/M` =
+붙인다(`floe2 drc-prepare DB --svrf FILE`로 준비했으면 그 FILE을 어디에 두었든 먼저 찾아 붙인다, 0.12.460; DRC 메뉴 load SVRF rules…로 수동 로드도 가능, 로드의 상태 줄 `svrf N/M` =
 매칭 룰 수). 이후 **SVRF 정보 창**(`i`, DRC 메뉴 `SVRF info…`, 에러 그리드 우클릭)에 덱 원문
 제약, **이 에러 자체의 측정 치수 vs 한계값(Δ·%)**, 참조/원천 레이어, derivation 체인이 나오고,
 **에러 더블클릭 점프가 그 룰의 원천 레이어만 켜고 나머지를 끈다**

@@ -185,7 +185,7 @@
   | DRC pack `.r.db.tray`와 그 소스 확인 기록 `.r.db.tray.source`, 구 이름 `r.db.ice` | `DIR/<db 폴더>/.r.db.tray` |
   | pack의 `.r.db.analysis/`(drc-prepare; `FLOE_DRC_ANALYSIS_ROOT`가 있으면 그쪽) | pack 옆, 즉 DIR 아래 |
   | 리뷰 `.r.db.review.<user>.sqlite3`(`FLOE_DRC_REVIEW_ROOT`가 있으면 그쪽), `.r.db.waive.<user>`, `.r.db.notes.<user>.fe` | pack 옆, 즉 DIR 아래 |
-  | SVRF 룰 메타데이터 `deck.cal.rules.json`(`floe-index svrf deck.cal`의 기본 출력; 0.12.450) | `DIR/<덱 폴더>/deck.cal.rules.json`. 폴더는 처음 쓸 때 만든다. 읽는 쪽(뷰어의 db 로드, DRC 캡처)은 db 옆과 덱 옆을 먼저 보고 없으면 DIR의 같은 자리를 본다 |
+  | SVRF 룰 메타데이터 `deck.cal.rules.json`(`floe-index svrf deck.cal`의 기본 출력; 0.12.450) | `DIR/<덱 폴더>/deck.cal.rules.json`. 폴더는 처음 쓸 때 만든다. 읽는 쪽(뷰어의 db 로드, DRC 캡처)은 db 옆과 덱 옆을 먼저 보고 없으면 DIR의 같은 자리를 본다. `floe2 drc-prepare --svrf FILE`이 분석 폴더의 `rules.path`에 적어 둔 사이드카가 있으면 그것이 맨 먼저다(0.12.460) |
   | 잠금 `<캐시>.index.lock`, `.floe-lock/` | 캐시·pack·rules.json 옆, 즉 DIR 아래 |
   | 출력(`--out`의 PNG·보고서·clip OASIS), 입력(`<db>.clusters`, `--drc-rules`) | 바뀌지 않는다. `.clusters`는 db 옆에서 먼저 찾고 없으면 DIR의 미러에서 찾는다 |
 
@@ -253,6 +253,9 @@
     `<deck>.rules.json`, `<db>.rules.json`을 차례로 보고, 작업 디렉터리가 있으면 그 셋의 미러를 이어서 본다
     (app-core `svrf::rules_candidates`; 뷰어는 서비스의 `svrf_rules_candidates`로 같은 목록을 받는다). 옆에
     있는 것이 이긴다(`.clusters`와 같다).
+  - 0.12.460: 그 앞에 `floe2 drc-prepare --svrf FILE`이 적어 둔 사이드카를 본다. 분석 폴더(pack 옆, 즉
+    작업 디렉터리가 있으면 DIR 아래; `FLOE_DRC_ANALYSIS_ROOT`가 있으면 그쪽)의 `rules.path` 한 줄이 그 절대
+    경로다. 이름으로 짐작한 자리가 아니라 이 결과에 대해 사용자가 지목한 파일이라서 먼저다.
   - 함께 고친 것: `floe-index drc DB`를 단독으로 새 작업 디렉터리에 돌리면 미러 폴더가 없어
     `cannot take its lock: … No such file or directory`로 끝났다(floe2를 거친 빌드는 app-core가 폴더를 만든다).
     이제 pack의 미러 폴더도 잠금 전에 만든다.

@@ -447,7 +447,8 @@ impl Drcs {
                 return Ok(json!(floe_app_core::svrf::rhs_operands(text(request, "rhs")?)));
             }
             // where the rules sidecar of a database is looked for, in order
-            // (the viewer's load reads the first that is a file): beside the
+            // (the viewer's load reads the first that is a file): the one
+            // `floe2 drc-prepare --svrf` noted for the results, beside the
             // database and the deck, then under the work directory
             "svrf_rules_candidates" => {
                 let deck = request

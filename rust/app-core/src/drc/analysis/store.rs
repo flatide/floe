@@ -132,6 +132,57 @@ pub fn content_identity(pack: &Path) -> Result<String> {
     Ok(hex(&h.finalize()))
 }
 
+/// The file in a pack's analysis folder that names the rules sidecar its
+/// caches were prepared with: one line, the sidecar's absolute path.
+const RULES_NOTE: &str = "rules.path";
+/// A path a note holds at most.
+const RULES_NOTE_BYTES: u64 = 8192;
+
+/// Note `sidecar` as the rules sidecar of `pack`'s results - the file
+/// `floe2 drc-prepare --svrf` was given - in the pack's analysis folder
+/// (made if need be), whole or not at all (a temporary renamed into place).
+/// The viewer's load of the database and a DRC capture look there first
+/// (svrf::rules_candidates; 0.12.460, user 2026-11-12: a sidecar at none of
+/// the places a database's name and its recorded deck path give was found
+/// by neither, though the caches had been prepared with it). A note that
+/// says this path already is left as it is - a run that prepares nothing
+/// new writes nothing. The path as noted, absolute.
+pub fn note_rules(pack: &Path, sidecar: &Path) -> Result<PathBuf> {
+    let sidecar = crate::cache::absolute(sidecar)?;
+    if noted_rules(pack).as_deref() == Some(sidecar.as_path()) {
+        return Ok(sidecar);
+    }
+    let text = sidecar
+        .to_str()
+        .filter(|s| !s.contains('\n') && (s.len() as u64) < RULES_NOTE_BYTES)
+        .ok_or_else(|| Error::input("a rules sidecar's path must be one line of UTF-8"))?;
+    let dir = analysis_dir(pack)?;
+    fs::create_dir_all(&dir)?;
+    let path = dir.join(RULES_NOTE);
+    let tmp = dir.join(format!("{RULES_NOTE}.tmp-{}", std::process::id()));
+    let written = fs::write(&tmp, format!("{text}\n")).and_then(|()| fs::rename(&tmp, &path));
+    if let Err(e) = written {
+        let _ = fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    Ok(sidecar)
+}
+
+/// The rules sidecar noted for `pack`'s results (`note_rules`), when one
+/// is: an absolute path - the file it names may be gone, as any place a
+/// sidecar is looked for may be empty. A note that is not one line naming
+/// an absolute path says nothing.
+pub fn noted_rules(pack: &Path) -> Option<PathBuf> {
+    let path = analysis_dir(pack).ok()?.join(RULES_NOTE);
+    let meta = fs::symlink_metadata(&path).ok()?;
+    if !meta.is_file() || meta.len() > RULES_NOTE_BYTES {
+        return None;
+    }
+    let text = fs::read_to_string(&path).ok()?;
+    let line = text.strip_suffix('\n').unwrap_or(&text);
+    (!line.is_empty() && !line.contains('\n') && Path::new(line).is_absolute()).then(|| PathBuf::from(line))
+}
+
 /// What `sweep_outdated` found.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Outdated {
@@ -532,6 +583,54 @@ mod tests {
             assert!(e.message.contains(what), "{what}: {}", e.message);
         }
         assert!(content_identity(&s.0.join("absent.tray")).is_err());
+    }
+
+    #[test]
+    fn a_prepared_sidecar_is_noted_in_the_analysis_folder() {
+        let s = Scratch::new("note");
+        let pack = s.0.join(".r.db.tray");
+        let folder = analysis_dir(&pack).unwrap();
+        let _ = fs::remove_dir_all(&folder);
+        // nothing noted, no folder
+        assert_eq!(noted_rules(&pack), None);
+        // noted: the folder made, the path absolute, one line of it
+        let sidecar = s.0.join("rules").join("deck.cal.rules.json");
+        assert_eq!(note_rules(&pack, &sidecar).unwrap(), sidecar);
+        assert_eq!(fs::read_to_string(folder.join("rules.path")).unwrap(), format!("{}\n", sidecar.display()));
+        assert_eq!(noted_rules(&pack), Some(sidecar.clone()));
+        // (the file it names need not be there - a place like the others)
+        assert!(!sidecar.exists());
+        // a relative path is noted as the place it means from here, dots resolved
+        let relative = note_rules(&pack, Path::new("some/../other.rules.json")).unwrap();
+        assert!(relative.is_absolute() && relative.ends_with("other.rules.json") && !relative.to_string_lossy().contains(".."));
+        assert_eq!(noted_rules(&pack), Some(relative));
+        // noted again: the last one, no temporary left
+        note_rules(&pack, &sidecar).unwrap();
+        assert_eq!(noted_rules(&pack), Some(sidecar.clone()));
+        // the same path noted again: the file as it was, not written anew
+        use std::os::unix::fs::MetadataExt;
+        let stamp = |p: &Path| fs::metadata(p).map(|m| (m.ino(), m.mtime(), m.mtime_nsec())).unwrap();
+        let before = stamp(&folder.join("rules.path"));
+        note_rules(&pack, &sidecar).unwrap();
+        assert_eq!(stamp(&folder.join("rules.path")), before);
+        let names: Vec<String> = fs::read_dir(&folder).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, ["rules.path"]);
+        // a note that is not one line naming an absolute path says nothing
+        let long = format!("/{}\n", "x".repeat(9000));
+        for junk in ["", "\n", "relative/deck.rules.json\n", "/a.rules.json\n/b.rules.json\n", long.as_str()] {
+            fs::write(folder.join("rules.path"), junk).unwrap();
+            assert_eq!(noted_rules(&pack), None, "{:?}", &junk[..junk.len().min(40)]);
+        }
+        fs::remove_file(folder.join("rules.path")).unwrap();
+        fs::create_dir(folder.join("rules.path")).unwrap();
+        assert_eq!(noted_rules(&pack), None);
+        // a path of two lines is not noted
+        assert!(note_rules(&pack, Path::new("/a\nb.rules.json")).is_err());
+        // the sweep of other identities leaves a note be
+        fs::remove_dir(folder.join("rules.path")).unwrap();
+        note_rules(&pack, &sidecar).unwrap();
+        assert_eq!(sweep_outdated(&folder, &"a".repeat(40), true), Outdated::default());
+        assert_eq!(noted_rules(&pack), Some(sidecar));
     }
 
     #[test]

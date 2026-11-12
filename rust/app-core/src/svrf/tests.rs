@@ -227,6 +227,27 @@ fn measurement_only_supported_shapes_and_exact_translated_area() {
 }
 
 #[test]
+fn the_sidecar_noted_for_a_database_is_looked_at_first() {
+    let places = || vec![PathBuf::from("/run/deck.cal.rules.json"), PathBuf::from("/run/r.db.rules.json")];
+    // none noted: the places as they are
+    assert_eq!(noted_first(None, places()), places());
+    // one noted that is none of them: before them
+    assert_eq!(
+        noted_first(Some(PathBuf::from("/user/tmp/proj/deck.cal.rules.json")), places()),
+        [
+            PathBuf::from("/user/tmp/proj/deck.cal.rules.json"),
+            PathBuf::from("/run/deck.cal.rules.json"),
+            PathBuf::from("/run/r.db.rules.json")
+        ]
+    );
+    // one noted that is one of them: first, and looked at once
+    assert_eq!(
+        noted_first(Some(PathBuf::from("/run/r.db.rules.json")), places()),
+        [PathBuf::from("/run/r.db.rules.json"), PathBuf::from("/run/deck.cal.rules.json")]
+    );
+}
+
+#[test]
 fn a_sidecar_is_looked_for_beside_the_files_then_under_the_work_directory() {
     let paths = |database: &str, deck: Option<&str>, workdir: Option<&str>| -> Vec<String> {
         rules_candidates_in(
