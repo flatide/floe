@@ -56,6 +56,16 @@ pub fn pack_reader_lock(pack: &std::path::Path) -> crate::Result<floe_vfs::lock:
     local::pack_reader(pack)
 }
 
+/// Whether no one holds `pack` now - no reader, no run writing it: what a
+/// clean-up of the files derived from it asks before it removes any (the
+/// analysis caches of other identities, `floe2 drc-prepare`). A probe, as
+/// `floe2 index --force --wait` probes a cache: no lock is kept, and where
+/// no lock can be tried nothing is known and it says yes.
+pub fn pack_idle(pack: &std::path::Path) -> bool {
+    let key = floe_vfs::lock::key(floe_vfs::lock::Kind::Pack, &pack.to_string_lossy());
+    floe_vfs::lock::reader_refusal(&key).is_none() && floe_vfs::lock::writing_refusal(&key).is_none()
+}
+
 fn corrupt(what: &str) -> Error {
     Error::new(
         ErrorKind::Cache,

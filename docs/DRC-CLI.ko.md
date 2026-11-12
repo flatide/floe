@@ -36,8 +36,24 @@ floe2 <cmd> ... / floe-index drc|svrf ...    # floe2-portable 번들
 ## 0. 준비: pack 인덱스
 
 ```bash
-floe-index drc results.db [out.tray] [--jobs N]
+floe-index drc results.db [out.tray] [--force] [--jobs N]
 ```
+
+**현재 pack은 그대로 둔다(0.12.459; 사용자: "floe-index drc도 .tray가 있어도 다시 생성하는 것 같음").**
+0.12.458까지 이 명령은 실행할 때마다 .db 전체를 다시 파싱해 pack 전체를 임시 파일로 다시 썼고,
+끝에서 바이트가 같을 때만 기존 파일을 남겼다. 이제 잠금을 잡기 전에 `floe2 drc DB --build`가 묻는
+것을 스스로 묻는다(`rust/cli/src/drccurrent.rs`).
+- **현재의 뜻:** pack이 리더가 여는 방식으로 온전히 읽히고(app-core `Pack::open`의 구조 검사와 같은
+  검사), .db가 색인한 그 파일이다. 크기와 시각이 pack에 적힌 것과 같으면 읽지 않고 현재다. 시각만
+  다르면 .db를 한 번 읽어 CRC-32를 견주고, 같으면 `.results.db.tray.source`에 적어 둔다.
+- **현재이면:** 아무것도 쓰지 않고 잠금도 잡지 않으며 `… is current … - kept; --force packs it
+  again`을 말하고 0으로 끝난다. 리뷰어가 pack을 열고 있어도 0이다(전에는 75).
+- **다시 만드는 경우:** `--force`(리뷰어가 열고 있으면 전처럼 75), .db가 바뀌었을 때, pack이 온전히
+  읽히지 않거나 다른 레이아웃 버전일 때. 뒤의 둘은 이유를 `… is not current - <이유> - packing it
+  again`으로 말한다.
+- **알아둘 점:** 크기와 시각이 색인 때와 같으면 내용을 읽지 않는다. 같은 초 안에 같은 크기로 내용만
+  바뀐 .db는 `--force`가 필요하다. `floe2 drc --build`와 뷰어도 같은 기준이다.
+- 다른 실행이 pack을 만드는 중이면 묻지 않고 전처럼 75로 거절된다.
 
 `.results.db.tray`(v2 pack, db 옆 숨김 파일; 2026-09-16까지의 `results.db.ice`는
 발견 시 자동 개명)를 만든다. `floe2 … --workdir DIR`(또는 `FLOE_WORKDIR`)이면 pack과
@@ -88,6 +104,21 @@ waive/notes는 변경하지 않는다. pack이 없거나 낡으면 중단하며 
 룰은 다시 준비한다. 실제 에러가 0개인 룰은 건너뛰고, 완료 메시지에서 준비한 룰 수와
 건너뛴 룰 수를 따로 표시한다. `--svrf`에는 원문 SVRF가 아니라 `floe-index svrf`로
 생성한 `.rules.json`을 지정한다(없으면 `--spatial-only`만 가능).
+
+**분석 캐시는 pack의 내용에 묶인다(0.12.459).** 0.12.458까지는 pack **파일**의 스탬프(크기·시각·inode)에
+묶여, pack을 다시 만들거나 결과 폴더를 복사하거나 touch하면 캐시 전부를 다시 계산했고 옛 캐시는
+남았다. 이제 pack의 내용 ID(에러가 무엇인가; DRC.ko.md §2 '결과 식별 = 내용')에 묶인다(app-core
+`store::content_identity`).
+- 같은 결과로 다시 만든 pack, 다른 폴더로 복사한 결과, 시각이 바뀐 파일은 캐시를 그대로 쓴다.
+  에러가 다르면 다른 식별값이다.
+- `drc-prepare`는 시작할 때 다른 식별값의 캐시(0.12.458까지의 것, 같은 이름으로 교체된 예전 결과의
+  것)를 지우고 `Removed N outdated cache entries (… MB)`로 말한다. 그 pack을 연 창이나 실행이 있으면
+  지우지 않고 `N outdated cache entries left …`로 말한다.
+- 지우는 것은 이 캐시의 것이 확실한 항목뿐이다: 다른 식별값을 이름에 가진 중심 폴더와 그 `.lock`,
+  다른 pack을 key에 적은 완성된 측정표 폴더. 아무것도 말하지 않는 항목(측정 중인 표), 다른 도구의
+  파일, 링크는 둔다. 뷰어는 아무것도 지우지 않는다.
+- 제약으로 측정할 것이 없는 룰은 측정 배열을 잡지 않고 바로 `CD skipped`로 건너뛴다(전에는 실행마다
+  배열을 잡고 `CD measurement 0 / N`을 찍은 뒤 건너뛰었다).
 
 `--jobs N`은 룰 내부 병렬 작업자 수(1~256), 기본은 CPU 수와 4 중 작은 값이다.
 환경변수 `FLOE_DRC_JOBS=N`으로 뷰어의 측정·마커 작업에도 같은 수를 적용할 수 있다.

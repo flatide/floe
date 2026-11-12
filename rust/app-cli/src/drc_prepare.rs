@@ -164,6 +164,11 @@ fn prepare(c: &Command, stop: &AtomicUsize, report: &(dyn Fn(String) + Sync)) ->
         _ => None,
     };
     let pack_path = pack_of(&c.source)?;
+    // Whether anyone else has the pack open, asked before this run becomes
+    // a reader of it: the caches of other identities are taken away below
+    // only when no one has (a reader of an older build maps its own, which
+    // are of another identity to this one).
+    let idle = floe_app_core::drc::pack_idle(&pack_path);
     // a reader of the pack (a re-pack waits for it, as for a review)
     let _reader = floe_app_core::drc::pack_reader_lock(&pack_path)?;
     let pack = Pack::open(&pack_path, stop)?;
@@ -179,6 +184,24 @@ fn prepare(c: &Command, stop: &AtomicUsize, report: &(dyn Fn(String) + Sync)) ->
     }
     let cache = Cache::of_pack(&pack_path)?;
     report(format!("Analysis cache: {}", cache.dir.display()));
+    // The caches are bound to what the pack's errors are (0.12.459): those
+    // of other errors - results replaced under the name - and of the pack
+    // file identities of 0.12.458 and before are read by no one any more.
+    let outdated = cache.sweep_outdated(idle);
+    if outdated.entries > 0 {
+        let size = format!("{:.1} MB", outdated.bytes as f64 / 1e6);
+        report(if idle {
+            format!(
+                "Removed {} outdated cache entries ({size}): made for another pack file or for other errors",
+                outdated.entries
+            )
+        } else {
+            format!(
+                "{} outdated cache entries left ({size}): the pack is open elsewhere - run again when it is closed",
+                outdated.entries
+            )
+        });
+    }
     let source = PackSource(pack.blocks()?);
     let wanted: Vec<usize> = (0..pack.checks.len())
         .filter(|&ci| c.rules.is_empty() || c.rules.iter().any(|r| r == names[ci]))
@@ -215,6 +238,13 @@ fn prepare(c: &Command, stop: &AtomicUsize, report: &(dyn Fn(String) + Sync)) ->
                 .unwrap_or_default();
             if constraints.is_empty() {
                 report("  CD skipped: no matching measurement constraints".into());
+                continue;
+            }
+            // (asked before the table: a rule that measures nothing was
+            // given the arrays of a measurement and a `CD measurement 0 / N`
+            // line at every run, then skipped)
+            if !floe_app_core::drc::analysis::measure::Selector::new(&constraints).can_measure() {
+                report("  CD skipped: the rule's constraints measure nothing".into());
                 continue;
             }
             let table = Arc::new(Table::measure(

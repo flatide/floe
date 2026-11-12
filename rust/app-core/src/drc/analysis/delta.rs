@@ -70,11 +70,20 @@ pub struct Cache {
     pub identity: String,
 }
 impl Cache {
+    /// The caches of `pack`: its analysis folder, and the identity they
+    /// bind to - what its errors are (store::content_identity, 0.12.459),
+    /// not the pack file.
     pub fn of_pack(pack: &Path) -> Result<Self> {
         Ok(Self {
             dir: store::analysis_dir(pack)?,
-            identity: store::identity(pack)?,
+            identity: store::content_identity(pack)?,
         })
+    }
+    /// The folder's entries of other identities than this pack's - counted,
+    /// and with `remove` taken away (store::sweep_outdated; the caller has
+    /// asked `drc::pack_idle` first).
+    pub fn sweep_outdated(&self, remove: bool) -> store::Outdated {
+        store::sweep_outdated(&self.dir, &self.identity, remove)
     }
 }
 

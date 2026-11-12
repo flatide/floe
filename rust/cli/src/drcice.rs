@@ -142,10 +142,12 @@ pub fn drc_cmd(args: &[String]) {
     // --pack stays accepted as a no-op for scripts and docs.
     let mut pos = Vec::new();
     let mut jobs = 0usize;
+    let mut force = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--pack" => {}
+            "--force" => force = true,
             "--jobs" => {
                 i += 1;
                 jobs = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -159,7 +161,7 @@ pub fn drc_cmd(args: &[String]) {
         i += 1;
     }
     if pos.is_empty() || pos.len() > 2 {
-        eprintln!("usage: floe-index drc <results.db> [out.tray] [--jobs N]");
+        eprintln!("usage: floe-index drc <results.db> [out.tray] [--force] [--jobs N]");
         std::process::exit(2);
     }
     let src = &pos[0];
@@ -176,6 +178,49 @@ pub fn drc_cmd(args: &[String]) {
         }
         out
     };
+    // A pack that is the database's as it stands is kept (0.12.459, user
+    // 2026-11-12: "floe-index drc도 .tray가 있어도 다시 생성하는 것 같음" - every
+    // run parsed the whole database and wrote the whole pack again, and only
+    // at its end kept the old file when the new bytes were the same): the
+    // question `floe2 drc --build` asks before it runs this packer, asked by
+    // the packer itself (crate::drccurrent). --force packs again. Not while
+    // another run writes the pack: that one goes on to the lock and is
+    // refused as before.
+    if !force && !crate::drccurrent::being_written(&out) {
+        use crate::drccurrent::{Not, Same};
+        match crate::drccurrent::of(src, &out) {
+            Ok((stated, same)) => {
+                let how = match same {
+                    Same::Stamp => format!(
+                        "made of this file as it is: size {}, mtime {}",
+                        stated.src_size, stated.src_mtime
+                    ),
+                    Same::Verified => format!(
+                        "the file's time changed since, its bytes were verified before as those packed: size {}, CRC-32 {:08x}",
+                        stated.src_size, stated.src_crc
+                    ),
+                    Same::Bytes => format!(
+                        "the file's time changed since, its bytes read now are those packed: size {}, CRC-32 {:08x}",
+                        stated.src_size, stated.src_crc
+                    ),
+                };
+                eprintln!(
+                    "[drc] {}: the pack {} is current ({}; pack layout {}; {} checks, {} errors) - kept; --force packs it again",
+                    src,
+                    out,
+                    how,
+                    crate::drcpack::LAYOUT,
+                    stated.checks,
+                    stated.errors
+                );
+                return;
+            }
+            Err(Not::Stale(why)) => {
+                eprintln!("[drc] {}: the pack there is not current - {} - packing it again", out, why)
+            }
+            Err(Not::Absent) => (),
+        }
+    }
     // the pack's locks (floe_vfs::lock; user 2026-10-09): another run
     // packing it, or a reader holding it open (the viewer maps it for its
     // whole session; a re-pack moves its waive sidecar aside), refuses this

@@ -15,6 +15,7 @@ use std::time::Instant;
 mod cellstore;
 mod current;
 mod guard;
+mod drccurrent;
 mod drcice;
 mod drcpack;
 mod light;
@@ -316,7 +317,7 @@ fn main() {
              floe-index hier <outdir> [--check]  (add design.ovh, the cell tree's index, to a cache; --check = report it)\n       \
              floe-index ovs <outdir> [--um F] [--jobs N] [--roots F]  (add design.ovs, the occupancy density pass 2 draws by - FLOE_RUST_DENSITY_OCC=off: the plans; --roots: the cells under the top this share of its box or more get design.ovs.<cell>, default 0.25)\n       \
              floe-index drc <results.db> [out.tray] \
-             [--pack] [--jobs N]\n       \
+             [--force] [--pack] [--jobs N]  (the DRC pack, default .<results.db>.tray: a pack that is the database's as it stands - the pack reads whole, the database's size and time those packed, or its time alone changed and its bytes those packed - is kept and nothing is packed, as `floe2 drc --build` keeps it; --force packs it again)\n       \
              floe-index drc-prepare <results.db|pack> [--svrf RULES_JSON] ...  (runs floe2 drc-prepare)\n       \
              floe-index svrf <deck> [-o OUT] [--scan] [-D NAME[=VAL]]... [-I DIR]... \
              [--follow-verbatim] [--no-env-switches]  (SVRF rule deck subset -> <deck>.rules.json)"

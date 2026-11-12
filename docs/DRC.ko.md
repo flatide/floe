@@ -25,7 +25,7 @@ results.db (Calibre ASCII, 정본)          deck.cal (SVRF 룰덱)
 
 ```sh
 # 1회 변환 (뷰어 open .db…가 자동으로도 수행)
-rust/target/release/floe-index drc results.db [--jobs N]
+rust/target/release/floe-index drc results.db [--force] [--jobs N]   # 현재 pack이면 그대로 둔다(0.12.459)
 # 룰덱 메타 (새 덱은 --scan 먼저; 실런과 동일한 -D 세트 필수)
 rust/target/release/floe-index svrf deck.cal --scan
 rust/target/release/floe-index svrf deck.cal -D SWITCH...
@@ -91,6 +91,9 @@ python -m floe render chip.oas --drc results.db \
   - `floe-index drc`는 임시 파일을 쓸기 전에 팩의 build·use를 배타로 쥔다. 다른
     실행이 팩을 만들고 있거나, 누가 리뷰로 팩을 열고 있으면 종료 75와 `[lock] …`
     한 줄로 거절한다.
+    - 0.12.459부터 현재 팩은 잠금 앞에서 걸러진다. 팩이 .db의 것이면 잠금 없이 0으로
+      끝나므로, 리뷰로 열린 현재 팩에 대한 실행은 75가 아니라 유지다. `--force`와 현재가
+      아닌 팩은 전처럼 잠금으로 간다(DRC-CLI.ko.md §0).
     - 예전에는 두 빌드의 고정 임시 이름(`tmp0..N/tmpw/tmpb/tmpq`)이 겹쳤다.
     - 시작할 때 쓸기가 상대의 임시 파일을 지웠다.
     - 리뷰 중 재팩하면 그 리뷰의 waive 사이드카가 옆으로 치워졌다.
@@ -308,7 +311,8 @@ python -m floe render chip.oas --drc results.db \
   `.<db>.review.<리뷰어>.sqlite3`(4,096개 단위 두 비트맵과 증분 카운터; 도형을 읽지
   않고 에러 수만큼 메모리를 쓰지 않는다. SPEC-FORMATS). waive/note 파일은 이 상태를
   담지 않는다. 결과 폴더에 쓸 수 없으면 `$XDG_DATA_HOME/floe/review/`로 간다.
-  같은 `.db`를 `floe-index drc`로 다시 인덱싱할 때는 새로 만든 pack을 기존
+  (0.12.459부터 `floe-index drc`는 현재 pack이면 pack하지 않는다. 아래는 `--force`로 다시
+  만들 때다.) 같은 `.db`를 `floe-index drc`로 다시 인덱싱할 때는 새로 만든 pack을 기존
   `.tray`와 쓰는 도중 순차 비교한다. 전체 바이트와 길이가 같으면 기존 파일을
   유지한다(열려 있는 리더의 매핑이 그대로다). 비교 메모리는 고정 크기이며 첫
   불일치 이후에는 기존 pack을 더 읽지 않는다. 방문·검토 제외 기록은 0.12.441부터
@@ -832,8 +836,11 @@ absolute/ratio 콤보박스의 문구를 단순화하여 크기를 줄이고 ste
 - `.results.db.analysis/`에 CD 측정표와 절대/비율/수동 스텝·클러스터별 그룹,
   룰별 정확한 중심을 저장한다(10만 건 이상 룰, 또는 `drc-prepare`). 룰을 다시
   선택하거나 뷰어를 다시 열어도 완료된 측정표를 재사용한다. 원래 `.tray`와 리뷰
-  파일 포맷은 유지한다. pack 식별자(파일 stamp와 앞뒤 바이트)·제약 조건·계산 버전으로
-  유효성을 검사하고 완료본만 원자적으로(이름 바꾸기로) 공개한다. 폴더에 쓸 수 없으면
+  파일 포맷은 유지한다. pack 식별자·제약 조건·계산 버전으로
+  유효성을 검사하고 완료본만 원자적으로(이름 바꾸기로) 공개한다. pack 식별자는 0.12.459부터
+  pack의 내용 ID다: 같은 에러면 다시 만든 pack, 복사한 폴더, 시각이 바뀐 파일도 같은 캐시를 쓴다
+  (0.12.458까지는 pack 파일의 stamp와 앞뒤 바이트여서 그때마다 전부 다시 계산했다). 다른
+  식별값의 옛 캐시는 `floe2 drc-prepare`가 지운다(DRC-CLI.ko.md). 폴더에 쓸 수 없으면
   메모리에서 계산한다. 브랜치(Python)의 캐시와는 이름이 달라 섞이지 않는다.
   단일 에지 길이 그룹 지원으로 계산 버전을 3으로 올려 이전 CD 측정·그룹·개수 요약 캐시는
   재사용하지 않고 처음 한 번 다시 계산한다. 마커 중심 캐시와 리뷰 상태는 유지한다.

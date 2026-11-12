@@ -5,9 +5,13 @@
 //!
 //! The folder is `.<db>.analysis` beside the results database, or
 //! `FLOE_DRC_ANALYSIS_ROOT/<hash of the pack path>` (a local SSD for a
-//! read-only results folder). A pack that changes - rebuilt, replaced,
-//! touched - changes its identity, so a stale cache is never read.
-//! Without a writable folder everything is computed in memory instead.
+//! read-only results folder). The caches are bound to what the pack's
+//! errors are (`content_identity`, 0.12.459): a pack made again of the same
+//! results, a copy of it and one whose times changed keep them, other
+//! errors are another identity - so a stale cache is never read. The caches
+//! of other identities are taken away by `floe2 drc-prepare`
+//! (`sweep_outdated`). Without a writable folder everything is computed in
+//! memory instead.
 use crate::{check_cancelled, Error, Result};
 use sha1::{Digest, Sha1};
 use std::fs::{self, File, OpenOptions};
@@ -52,8 +56,11 @@ pub fn digest(key: &serde_json::Value) -> String {
     hex(&Sha1::digest(key.to_string().as_bytes()))
 }
 
-/// The pack's identity: its file stamp and its head and tail bytes - a
-/// constant-size fingerprint, changed by any rebuild or replacement.
+/// The pack FILE's identity: its file stamp and its head and tail bytes - a
+/// constant-size fingerprint, changed by any rebuild or replacement. What a
+/// long operation compares to know that the pack it works on is still the
+/// file it opened (the review migration). The analysis caches were bound to
+/// it until 0.12.458; they bind to `content_identity` now.
 pub fn identity(pack: &Path) -> Result<String> {
     let mut f = File::open(pack)?;
     let m = f.metadata()?;
@@ -80,6 +87,160 @@ pub fn identity(pack: &Path) -> Result<String> {
     h.update(&head);
     h.update(&tail);
     Ok(hex(&h.finalize()))
+}
+
+/// What the identity of the analysis caches starts with (r1 was the file
+/// identity above).
+const CONTENT_TAG: &[u8] = b"floe-drc-analysis-r2:";
+
+/// The identity the analysis caches bind to: what the pack's errors ARE -
+/// its content id (floe-index drcpack.rs: the precision, the cell, the
+/// coordinate blob as stored, each check's name and error count), under a
+/// tag of this cache's own. A pack made again of the same results, a copy
+/// of it in another folder and one whose times changed keep their caches;
+/// other errors are another identity. (0.12.459, user 2026-11-12: until
+/// then the pack file's stamp - `identity` -, so a re-pack, a copy or a
+/// touch had every cache made again and left the old ones behind. Review
+/// files bind to the content id since 0.12.441.)
+pub fn content_identity(pack: &Path) -> Result<String> {
+    let unusable = |what: &str| {
+        Error::new(
+            crate::ErrorKind::Cache,
+            format!("{}: not a DRC pack this build reads ({what})", pack.display()),
+        )
+    };
+    let mut f = File::open(pack)?;
+    let len = f.metadata()?.len();
+    let footer = crate::drc::FOOTER_BYTES;
+    if len < 40 + footer {
+        return Err(unusable("truncated header/footer"));
+    }
+    let mut head = [0u8; 12];
+    f.read_exact(&mut head)?;
+    let mut foot = vec![0u8; footer as usize];
+    f.seek(SeekFrom::Start(len - footer))?;
+    f.read_exact(&mut foot)?;
+    if &head[..8] != crate::drc::MAGIC || &foot[160..] != crate::drc::MAGIC {
+        return Err(unusable("magic"));
+    }
+    if u32::from_le_bytes(head[8..12].try_into().unwrap()) != crate::drc::VERSION {
+        return Err(unusable("layout"));
+    }
+    let mut h = Sha1::new();
+    h.update(CONTENT_TAG);
+    h.update(&foot[128..160]);
+    Ok(hex(&h.finalize()))
+}
+
+/// What `sweep_outdated` found.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Outdated {
+    /// cache entries of other identities (a rule's centres, a rule's
+    /// measurement table with its groups)
+    pub entries: u64,
+    /// the bytes of their files
+    pub bytes: u64,
+}
+
+/// A centre entry's name, `centers-r<N>-<identity>-<rule>`: its identity.
+fn center_identity(name: &str) -> Option<&str> {
+    let rest = name.strip_prefix("centers-r")?;
+    let (revision, rest) = rest.split_once('-')?;
+    let (identity, rule) = rest.split_once('-')?;
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    (digits(revision) && digits(rule) && hex_name(identity)).then_some(identity)
+}
+
+/// A digest as this store names things: 40 lower-case hex digits.
+fn hex_name(s: &str) -> bool {
+    s.len() == 40 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The bytes of the regular files under `path` (links not followed).
+fn tree_bytes(path: &Path) -> u64 {
+    let Ok(m) = fs::symlink_metadata(path) else { return 0 };
+    if m.is_file() {
+        return m.len();
+    }
+    if !m.is_dir() {
+        return 0;
+    }
+    fs::read_dir(path)
+        .map(|entries| entries.flatten().map(|e| tree_bytes(&e.path())).sum())
+        .unwrap_or(0)
+}
+
+/// The entries of the analysis folder `dir` that are of another identity
+/// than `identity` - caches no pack at this place reads any more: of the
+/// file identities of 0.12.458 and before, of results that were replaced
+/// under the same name. With `remove` they are taken away and what was
+/// taken is said; without, what is there is said.
+///
+/// Only what is certainly this store's and certainly of another identity:
+/// a real folder named as a centre entry with another identity in its name
+/// (with its `.lock`, and a dead builder's staging folder of it), and a
+/// `delta/<digest>` folder whose complete measurement table states another
+/// pack in its key. Everything else stays: an entry that states nothing (a
+/// table still being measured), files of other tools, links. The caller
+/// asks first that no one has the pack open (`drc::pack_idle`) - a reader
+/// of an older build maps its entries, which are of another identity here.
+pub fn sweep_outdated(dir: &Path, identity: &str, remove: bool) -> Outdated {
+    let mut found = Outdated::default();
+    let real_dir = |p: &Path| fs::symlink_metadata(p).is_ok_and(|m| m.is_dir());
+    let take = |path: &Path, entry: bool, found: &mut Outdated| {
+        let bytes = tree_bytes(path);
+        let gone = !remove
+            || if real_dir(path) {
+                fs::remove_dir_all(path).is_ok()
+            } else {
+                fs::remove_file(path).is_ok()
+            };
+        if gone {
+            found.entries += u64::from(entry);
+            found.bytes += bytes;
+        }
+    };
+    let Ok(entries) = fs::read_dir(dir) else { return found };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let path = e.path();
+        if let Some(id) = center_identity(&name) {
+            if id != identity && real_dir(&path) {
+                take(&path, true, &mut found);
+            }
+        } else if let Some(id) = name.strip_suffix(".lock").and_then(center_identity) {
+            if id != identity && fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) {
+                take(&path, false, &mut found);
+            }
+        } else if let Some((entry, build)) = name.strip_prefix('.').and_then(|n| n.split_once(".build-")) {
+            // a staging folder (`Staging::new`) of an entry of another
+            // identity, its builder gone
+            let pid = build.split('-').next().and_then(|p| p.parse::<i32>().ok());
+            // SAFETY: kill(pid, 0) only probes whether the process exists.
+            let dead = pid.is_some_and(|p| unsafe { libc::kill(p, 0) } != 0);
+            if center_identity(entry).is_some_and(|id| id != identity) && dead && real_dir(&path) {
+                take(&path, false, &mut found);
+            }
+        }
+    }
+    let delta = dir.join("delta");
+    if real_dir(&delta) {
+        for e in fs::read_dir(&delta).into_iter().flatten().flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let path = e.path();
+            if !hex_name(&name) || !real_dir(&path) {
+                continue;
+            }
+            let stated = fs::read(path.join("measure").join("complete.json"))
+                .ok()
+                .and_then(|text| serde_json::from_slice::<serde_json::Value>(&text).ok())
+                .and_then(|m| m.get("key")?.get("pack")?.as_str().map(str::to_string));
+            if stated.is_some_and(|pack| pack != identity) {
+                take(&path, true, &mut found);
+            }
+        }
+    }
+    found
 }
 
 /// Plain little-endian numbers a column can hold.
@@ -296,4 +457,187 @@ pub fn write_manifest(dir: &Path, value: &serde_json::Value) -> Result<()> {
     fs::write(&tmp, value.to_string())?;
     fs::rename(&tmp, dir.join("complete.json"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Scratch(PathBuf);
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("floe-analysis-store-{}-{name}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// As much of a pack as an identity reads: its header's magic and layout
+    /// and its footer, with `content` as the content id; `body` between.
+    fn pack_bytes(content: [u8; 32], body: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(crate::drc::MAGIC);
+        bytes.extend_from_slice(&crate::drc::VERSION.to_le_bytes());
+        bytes.resize(40, 7);
+        bytes.extend_from_slice(body);
+        let mut foot = vec![3u8; crate::drc::FOOTER_BYTES as usize];
+        foot[128..160].copy_from_slice(&content);
+        foot[160..].copy_from_slice(crate::drc::MAGIC);
+        bytes.extend_from_slice(&foot);
+        bytes
+    }
+
+    #[test]
+    fn the_caches_are_bound_to_what_the_errors_are() {
+        let s = Scratch::new("identity");
+        let (a, b, other) = (s.0.join("a.tray"), s.0.join("b.tray"), s.0.join("other.tray"));
+        fs::write(&a, pack_bytes([1; 32], b"errors")).unwrap();
+        // the same content id in another file - other bytes around it,
+        // another length, other times
+        fs::write(&b, pack_bytes([1; 32], b"the same errors, packed again")).unwrap();
+        fs::write(&other, pack_bytes([2; 32], b"errors")).unwrap();
+        let id = content_identity(&a).unwrap();
+        assert!(hex_name(&id), "{id}");
+        assert_eq!(content_identity(&b).unwrap(), id);
+        assert_ne!(content_identity(&other).unwrap(), id);
+        // the file's identity is another thing: of the file, not of its errors
+        assert_ne!(identity(&a).unwrap(), identity(&b).unwrap());
+        assert_ne!(identity(&a).unwrap(), id);
+        let before = identity(&a).unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(90);
+        File::options().write(true).open(&a).unwrap().set_modified(later).unwrap();
+        assert_ne!(identity(&a).unwrap(), before);
+        assert_eq!(content_identity(&a).unwrap(), id);
+        // what is not a pack of this layout states nothing
+        let bad = s.0.join("bad.tray");
+        for (what, change) in [
+            ("truncated", (&|v: &mut Vec<u8>| v.truncate(100)) as &dyn Fn(&mut Vec<u8>)),
+            ("magic", &|v: &mut Vec<u8>| v[0] ^= 1),
+            ("magic", &|v: &mut Vec<u8>| {
+                let n = v.len();
+                v[n - 1] ^= 1
+            }),
+            ("layout", &|v: &mut Vec<u8>| v[8] ^= 1),
+        ] {
+            let mut bytes = pack_bytes([1; 32], b"errors");
+            change(&mut bytes);
+            fs::write(&bad, bytes).unwrap();
+            let e = content_identity(&bad).unwrap_err();
+            assert!(e.message.contains(what), "{what}: {}", e.message);
+        }
+        assert!(content_identity(&s.0.join("absent.tray")).is_err());
+    }
+
+    #[test]
+    fn the_caches_of_other_identities_are_swept_and_nothing_else() {
+        let s = Scratch::new("sweep");
+        let dir = s.0.join(".r.db.analysis");
+        let (mine, old) = ("a".repeat(40), "b".repeat(40));
+        let entry = |name: &str, files: &[(&str, usize)]| {
+            let d = dir.join(name);
+            fs::create_dir_all(&d).unwrap();
+            for (file, len) in files {
+                fs::write(d.join(file), vec![0u8; *len]).unwrap();
+            }
+            d
+        };
+        let table = |digest: &str, pack: Option<&str>| {
+            let d = entry(&format!("delta/{digest}/measure"), &[("values.bin", 800), ("choices.bin", 400)]);
+            if let Some(pack) = pack {
+                fs::write(d.join("complete.json"), format!("{{\"key\":{{\"pack\":\"{pack}\",\"rule\":0}}}}")).unwrap();
+            }
+            entry(&format!("delta/{digest}/groups/{}", "9".repeat(40)), &[("ids.bin", 100)]);
+            fs::write(dir.join("delta").join(digest).join("measure.lock"), b"").unwrap();
+        };
+        // this pack's: a rule's centres, a table with its groups
+        entry(&format!("centers-r1-{mine}-0"), &[("centers.bin", 160), ("complete.json", 10)]);
+        fs::write(dir.join(format!("centers-r1-{mine}-0.lock")), b"").unwrap();
+        table(&"1".repeat(40), Some(&mine));
+        // another identity's: two rules' centres with their locks, a dead
+        // builder's staging folder, a table with its groups
+        entry(&format!("centers-r1-{old}-0"), &[("centers.bin", 1600), ("complete.json", 10)]);
+        fs::write(dir.join(format!("centers-r1-{old}-0.lock")), b"").unwrap();
+        entry(&format!("centers-r1-{old}-12"), &[("centers.bin", 320)]);
+        entry(&format!(".centers-r1-{old}-3.build-{}-0", i32::MAX), &[("centers.bin", 64)]);
+        table(&"2".repeat(40), Some(&old));
+        // what states nothing, or is not this store's, or is no real folder
+        entry(&format!(".centers-r1-{old}-4.build-{}-0", std::process::id()), &[("centers.bin", 64)]);
+        table(&"3".repeat(40), None);
+        entry("delta/not-a-digest/measure", &[("complete.json", 0)]);
+        fs::write(dir.join("delta").join("4".repeat(40)), b"a file").unwrap();
+        entry(&format!("centers-v3-{}-0", "c".repeat(64)), &[("centers.bin", 16)]);
+        // (not a digest of this store: its names are lower-case hex - said
+        // by a name of other letters, an upper-case one being the same
+        // folder where the file system folds case)
+        entry(&format!("centers-r1-{}-0", "g".repeat(40)), &[("centers.bin", 16)]);
+        assert!(hex_name(&old) && !hex_name(&"B".repeat(40)) && !hex_name(&"b".repeat(39)));
+        entry(&format!("centers-r1-{old}-x"), &[("centers.bin", 16)]);
+        fs::write(dir.join("bounds-1.npy"), b"other tool").unwrap();
+        let elsewhere = entry("../elsewhere", &[("keep", 5)]);
+        std::os::unix::fs::symlink(&elsewhere, dir.join(format!("centers-r1-{old}-7"))).unwrap();
+        let listed = |d: &Path| -> Vec<String> {
+            let mut names = Vec::new();
+            let mut stack = vec![d.to_path_buf()];
+            while let Some(p) = stack.pop() {
+                for e in fs::read_dir(&p).unwrap().flatten() {
+                    let path = e.path();
+                    if fs::symlink_metadata(&path).unwrap().is_dir() {
+                        stack.push(path.clone());
+                    }
+                    names.push(path.strip_prefix(d).unwrap().to_string_lossy().into_owned());
+                }
+            }
+            names.sort();
+            names
+        };
+        let before = listed(&dir);
+        // asked alone: counted, nothing taken
+        let outdated = Outdated { entries: 3, bytes: 1610 + 320 + 64 + 800 + 400 + 31 + 100 };
+        let key_len = format!("{{\"key\":{{\"pack\":\"{old}\",\"rule\":0}}}}").len() as u64;
+        let outdated = Outdated { bytes: outdated.bytes - 31 + key_len, ..outdated };
+        assert_eq!(sweep_outdated(&dir, &mine, false), outdated);
+        assert_eq!(listed(&dir), before);
+        // taken away: the other identity's and nothing else
+        assert_eq!(sweep_outdated(&dir, &mine, true), outdated);
+        let after = listed(&dir);
+        let gone: Vec<&String> = before.iter().filter(|n| !after.contains(n)).collect();
+        assert!(!gone.is_empty() && gone.iter().all(|n| {
+            n.starts_with(&format!("centers-r1-{old}-0"))
+                || n.starts_with(&format!("centers-r1-{old}-12"))
+                || n.starts_with(&format!(".centers-r1-{old}-3.build-"))
+                || n.starts_with(&format!("delta/{}", "2".repeat(40)))
+        }), "{gone:?}");
+        for kept in [
+            format!("centers-r1-{mine}-0/centers.bin"),
+            format!("centers-r1-{mine}-0.lock"),
+            format!("delta/{}/measure/complete.json", "1".repeat(40)),
+            format!("delta/{}/groups/{}/ids.bin", "1".repeat(40), "9".repeat(40)),
+            format!(".centers-r1-{old}-4.build-{}-0/centers.bin", std::process::id()),
+            format!("delta/{}/measure/values.bin", "3".repeat(40)),
+            "delta/not-a-digest/measure/complete.json".to_string(),
+            format!("delta/{}", "4".repeat(40)),
+            format!("centers-v3-{}-0/centers.bin", "c".repeat(64)),
+            format!("centers-r1-{}-0/centers.bin", "g".repeat(40)),
+            format!("centers-r1-{old}-x/centers.bin"),
+            "bounds-1.npy".to_string(),
+            format!("centers-r1-{old}-7"),
+        ] {
+            assert!(after.contains(&kept), "{kept} is gone");
+        }
+        assert!(elsewhere.join("keep").is_file());
+        for name in [format!("centers-r1-{old}-0"), format!("centers-r1-{old}-0.lock"), format!("centers-r1-{old}-12")] {
+            assert!(!dir.join(&name).exists(), "{name} is left");
+        }
+        // nothing more to take; a folder that is not there has nothing
+        assert_eq!(sweep_outdated(&dir, &mine, true), Outdated::default());
+        assert_eq!(sweep_outdated(&s.0.join("absent"), &mine, true), Outdated::default());
+        // the other way round the rest goes, this identity's being the old one's now
+        assert_eq!(sweep_outdated(&dir, &old, true).entries, 2);
+    }
 }

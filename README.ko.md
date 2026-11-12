@@ -188,9 +188,13 @@ fit·clip·open .db·rules 기능을 노출한다(구 패널 버튼들은 메뉴
 한 번 변환하면 뷰어/CLI가 mmap으로 즉시 연다:
 
 ```sh
-rust/target/release/floe-index drc results.db [--jobs N]
+rust/target/release/floe-index drc results.db [--force] [--jobs N]
 rust/target/release/floe2 view chip.oas --drc results.db
 ```
+
+- 같은 .db에 다시 실행하면 pack을 그대로 둔다(0.12.459): pack이 온전하고 .db의 크기와 수정
+  시각이 색인 때와 같으면(시각만 다르면 CRC로 확인) 아무것도 쓰지 않고 0으로 끝난다. `--force`가
+  다시 만든다. .db가 바뀌었으면 이유를 말하고 다시 만든다.
 
 - 실측 1/4~1/5 크기, 변환 후 .db 불필요. 병렬 빌드(--jobs 무관 동일
   바이트).

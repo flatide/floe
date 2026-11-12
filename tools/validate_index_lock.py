@@ -968,15 +968,23 @@ class PackLockTests(unittest.TestCase):
         from floe_oracle import drc
         review = drc.load_db(str(self.db))
         self.assertIsInstance(review, drc.IcePack)
+        before = (self.pack.stat().st_ino, self.pack.stat().st_mtime_ns)
         try:
-            res = floe_index("drc", self.db)
+            # (--force: a re-pack. Without it the packer keeps a pack that
+            # is current since 0.12.459 - no lock asked, the review left be)
+            res = floe_index("drc", self.db, "--force")
             self.assertEqual(res.returncode, 75, res.stderr)
             line = lock_line(res)
             self.assertIn("run.db is in use by %s" % HOLDER, line)
             self.assertIn("pid %d" % os.getpid(), line)
+            res = floe_index("drc", self.db)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertIn("kept; --force packs it again", res.stderr)
+            self.assertNotIn("[lock]", res.stderr)
+            self.assertEqual((self.pack.stat().st_ino, self.pack.stat().st_mtime_ns), before)
         finally:
             review.close()
-        floe_index("drc", self.db, ok=0)
+        floe_index("drc", self.db, "--force", ok=0)
 
     def test_k8_the_pack_build_lock_refuses_drc_and_its_readers(self):
         from floe_oracle import drc
@@ -1056,10 +1064,17 @@ class PackLockTests(unittest.TestCase):
         before = self.pack.read_bytes()
         os.chmod(self.db, 0)
         self.addCleanup(os.chmod, self.db, 0o644)
-        res = floe_index("drc", self.db)
+        # (--force: the pack is the database's by its size and time, and
+        # since 0.12.459 the packer keeps such a one without reading the
+        # database - a run that is to pack says so)
+        res = floe_index("drc", self.db, "--force")
         self.assertEqual(res.returncode, 1, res.stderr)
         self.assertEqual(self.pack.read_bytes(), before)
         self.assertFalse([p for p in os.listdir(self.dir) if ".tray.tmp" in p])
+        res = floe_index("drc", self.db)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("kept; --force packs it again", res.stderr)
+        self.assertEqual(self.pack.read_bytes(), before)
 
     def test_k9_the_rules_sidecars_build_lock_refuses_svrf(self):
         deck = self.dir / "deck.cal"

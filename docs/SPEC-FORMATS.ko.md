@@ -409,6 +409,11 @@ ovm 헤더와 meta.src 모두 소스 절대경로/size/mtime을 기록. `Vfs::op
     `<크기> <mtime s> <CRC-32 hex 8자>`. 크기·시각이 지금의 소스와 같고 CRC가 pack의 것과 같을
     때만 읽지 않고 통과시킨다. 임시 파일 `.source.tmp-<pid>`로 쓰고 이름을 바꾼다. 쓸 수 없는
     폴더면 남기지 않고 열 때마다 다시 견준다. 다른 pack의 기록이 남아 있어도 CRC가 달라 무시된다.
+    0.12.459부터 `floe-index drc`도 현재 pack인지 볼 때 같은 기록을 읽고 쓴다(`rust/cli/src/drccurrent.rs`).
+  - 분석 캐시(`.<db>.analysis/`, app-core `drc::analysis::store`)의 식별값은 0.12.459부터 내용 ID에서
+    만든다: SHA-1(`floe-drc-analysis-r2:` + 내용 ID 32B)의 hex 40자. 중심 폴더 `centers-r1-<식별값>-<룰>`의
+    이름과 측정표 key의 `pack`에 들어간다. 0.12.458까지는 pack 파일의 stamp에서 만들었고(`store::identity`),
+    그 값은 리뷰 이관이 작업 중 pack 파일이 바뀌었는지 보는 데 계속 쓴다.
   - waive 사이드카 `.<db>.waive.<리뷰어>` 헤더 40B(버전 2): `FLOEWAIV` | u32 2 | 내용 ID 앞 16B |
     u64 err_total | u32 check_cnt. 뒤에 status 1B/에러, wcount u32/체크. 버전 1(0.12.440까지)은
     `u64 src_size | u64 src_mtime | u64 err_total | u32 check_cnt`였다. note `.fe`의 `floe_pack=`은

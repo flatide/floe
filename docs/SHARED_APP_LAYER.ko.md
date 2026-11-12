@@ -583,3 +583,13 @@ P4d처럼 컨트롤러 루프에서만 바뀐다. `FLOE_GTK_LOOP=legacy`는 예�
 - **GTK 뷰어(UI):** 후보가 없고 `hidden`이 있으면 상태 줄이 `no visible object here (N hidden)`이다(SPEC-VIEWER §9).
 - **웹(나중):** 머지하면 pick이 같은 규칙으로 답한다. 바꿀 곳은 `QueryRequest`·`QueryReply` 리터럴에 늘어난 필드(`seen: false`, `pick_hidden: 0`; `rust/web/src/query_tests.rs`, `sharing/query.rs`)와, 원하면 `pick_hidden`을 화면에 말하는 것이다. 스냅은 `measure`까지 그대로 쓴다.
 - **게이트:** `gtk_view`의 `pick_order`(겹친 도형 일곱 개에 fill을 주고 열 자리에서 보이는 것과 가려진 수, 스냅 다섯 자리, 레이어를 끈 뒤, 스위치 둘)와 `pick_order_ui`(실제 뷰어의 클릭과 상태 줄, 룰러의 스냅), `rust_renderer`(어댑터 계약, 실제 픽스처에서 보이는 것 + 가려진 것 = 전부이고 순서가 같음); 단위 render-core `seen_planes_are_the_planes_whose_colour_the_frame_shows`(창의 레이어별 픽셀 = 실제 프레임의 그 레이어 색 픽셀)·`a_shape_shows_where_its_layer_wrote_a_pixel_within_its_box`·`pick_takes_the_shapes_that_show`·`snap_passes_by_what_does_not_show`·`pick_cycles_from_the_smallest_of_every_shape_over_the_point`, renderd 명령, worker-client `a_pick_asks_for_the_shapes_that_show_and_reads_what_was_left_out`, app-core `a_query_is_asked_for_what_shows`.
+
+## 17. DRC 분석 캐시의 식별과 정리 (2026-11-12, app 0.12.459) — 식별과 정리 규칙은 공유 Rust
+
+사용자: "floe2 drc-prepare도 중복작업을 하는지도 확인해줘", 확인 뒤 "1, 2번 수정해줘".
+
+- **식별(app-core `drc::analysis::store::content_identity`):** `Cache::of_pack(pack)`의 식별값이 pack 파일의 stamp가 아니라 pack의 내용 ID에서 나온다. 시그니처는 그대로라 호스트가 바꿀 것은 없다. 다시 만든 pack, 복사한 폴더, 시각이 바뀐 파일이 캐시를 그대로 쓴다.
+- **`store::identity`는 그대로다:** 파일 stamp의 지문이고, 리뷰 이관(`team/migrate.rs`)이 작업 중 pack 파일이 바뀌었는지 보는 데 쓴다. 이름과 뜻이 같으니 웹 머지에서 건드릴 것이 없다.
+- **정리(`Cache::sweep_outdated(remove)`, `store::sweep_outdated`):** 분석 폴더에서 다른 식별값의 항목을 세거나 지운다. 부르기 전에 `drc::pack_idle(pack)`으로 아무도 pack을 열고 있지 않은지 묻는다(리더 잠금을 잡기 전에). 지금 부르는 곳은 `floe2 drc-prepare`뿐이고 뷰어와 서비스는 지우지 않는다.
+- **웹(나중):** 머지하면 웹의 분석 캐시도 같은 식별값을 쓴다. 0.12.458까지의 캐시는 한 번 다시 계산되고, 옛 것은 `drc-prepare`가 지운다.
+- **게이트:** `drc_analysis` A2(같은 에러의 다른 pack 파일 = 같은 캐시, 다른 에러 = 새 캐시), A4(다시 준비, 정리, 복사한 폴더); 단위 `drc::analysis::store`.

@@ -373,17 +373,63 @@ def a2(svc, temp):
     check(len(list(analysis.glob("centers-r1-*/complete.json"))) == 1, "its centres published")
     svc("drc_close", handle=h)
     od.close()
-    # a re-built pack: a new identity, a new entry
+    # The caches are bound to what the pack's errors are (0.12.459; user
+    # 2026-11-12: a pack made again, a copied folder, a touched file had
+    # every cache made again - they were bound to the pack FILE's stamp): the
+    # pack made again of the same results - another file, another time -
+    # keeps its table and its centres
+    pack = d / ".big.db.tray"
+    tables = lambda: sorted(analysis.glob("delta/*/measure/complete.json"))  # noqa: E731
+    centres = lambda: sorted(analysis.glob("centers-r1-*/complete.json"))  # noqa: E731
+    stamps = lambda: [(p, p.stat().st_ino, p.stat().st_mtime_ns) for p in tables() + centres()]  # noqa: E731
+    made, was = stamps(), pack.stat().st_ino
+    raw = db.read_bytes()
     later = os.stat(str(db)).st_mtime + 10
     os.utime(str(db), (later, later))
     r = run([INDEX, "drc", str(db)])
-    check(r.returncode == 0, "the pack re-built", r.stderr)
-    opened = svc("drc_open", path=str(db), mode="load")
-    h = opened["handle"]
-    svc.job(h, "drc_delta", check=heavy, constraints=cons, basis="absolute")
-    check(len(list(analysis.glob("delta/*/measure/complete.json"))) == 2,
-          "a re-built pack gets its own table")
-    svc("drc_close", handle=h)
+    check(r.returncode == 0 and "kept; --force packs it again" in r.stderr and pack.stat().st_ino == was,
+          "(the database's time alone changed: the packer keeps the pack)", r.stderr[-300:])
+    r = run([INDEX, "drc", str(db), "--force"])
+    check(r.returncode == 0 and "packed v2" in r.stderr and pack.stat().st_ino != was,
+          "(--force: the pack made again, another file)", r.stderr[-300:])
+
+    def delta_again():
+        opened = svc("drc_open", path=str(db), mode="load")
+        h = opened["handle"]
+        e = svc.job(h, "drc_delta", check=heavy, constraints=cons, basis="absolute")
+        b = odrc.load_db(str(db))
+        box = b._cbb[heavy] / b.precision
+        b.close()
+        gtkservice._discard_files([svc.job(h, "drc_markers", check=heavy,
+                                           bounds=[float(v) for v in box], width=300, height=200)])
+        svc("drc_close", handle=h)
+        return e["state"]
+    check(delta_again() == "done" and stamps() == made,
+          "a pack made again of the same errors keeps its table and its centres",
+          (len(tables()), len(centres())))
+    # other errors: another identity - a table and centres of their own, and
+    # the first ones left as they are (the viewer takes nothing away;
+    # floe2 drc-prepare does, A4)
+    import re
+    text = raw.decode()
+    m = re.search(r"^[pe] \d+ \d+\n(-?\d+) ", text, re.M)
+    db.write_text(text[:m.start(1)] + str(int(m.group(1)) + 1) + text[m.end(1):])
+    os.utime(str(db), (later + 10, later + 10))
+    r = run([INDEX, "drc", str(db)])
+    check(r.returncode == 0 and "is not current - the database has changed since" in r.stderr
+          and "packed v2" in r.stderr, "(other errors: said, and packed)", r.stderr[-300:])
+    check(delta_again() == "done" and len(tables()) == 2 and len(centres()) == 2
+          and [s for s in stamps() if s in made] == made,
+          "other errors get a table and centres of their own", (len(tables()), len(centres())))
+    # the results as they were, packed again: their caches are still theirs
+    both = stamps()
+    db.write_bytes(raw)
+    os.utime(str(db), (later + 20, later + 20))
+    r = run([INDEX, "drc", str(db)])
+    check(r.returncode == 0 and "packed v2" in r.stderr, "(the results as they were, packed again)",
+          r.stderr[-300:])
+    check(delta_again() == "done" and stamps() == both,
+          "the results as they were find their table and centres again")
     return d, db, heavy, name
 
 
@@ -419,6 +465,77 @@ def a4(temp, db, heavy, name):
           and len(list(root.glob("*/delta/*/groups/*/complete.json"))) >= 12,
           "centres and both bases' groups under FLOE_DRC_ANALYSIS_ROOT",
           (list(root.glob("*/centers-r1-*")), r.stderr[-400:]))
+    # prepared again: nothing is measured, no file made or touched
+    sub = [p for p in root.iterdir() if p.is_dir()]
+    check(len(sub) == 1, "(one analysis folder under the root)", sub)
+    sub = sub[0]
+
+    def tree(folder):
+        return {str(p.relative_to(folder)): (p.stat().st_ino, p.stat().st_mtime_ns, p.stat().st_size)
+                for p in sorted(folder.rglob("*")) if p.is_file()}
+    made = tree(sub)
+    r = run([FLOE2, "drc-prepare", str(db), "--svrf", str(d / "big.svrf.rules.json"),
+             "--jobs", "2"], env=env)
+    check(r.returncode == 0 and "CD measurement" not in r.stderr and "outdated" not in r.stderr
+          and tree(sub) == made, "prepared again: every cache as it was, nothing measured",
+          r.stderr[-300:])
+    # the caches of other identities (0.12.459): of the pack FILE stamps of
+    # 0.12.458 and before, of results replaced under the name - no pack at
+    # this place reads them any more. drc-prepare takes them away when no one
+    # else has the pack open, and leaves what is not certainly such a one.
+    from floe_oracle import indexlock
+    pack = d / ".big.db.tray"
+    other = "0" * 40
+    centre = sorted(sub.glob("centers-r1-*-0"))[0]
+    shutil.copytree(str(centre), str(sub / ("centers-r1-%s-0" % other)))
+    (sub / ("centers-r1-%s-0.lock" % other)).write_bytes(b"")
+    table = sorted(p for p in (sub / "delta").iterdir() if (p / "measure" / "complete.json").is_file())[0]
+    old_table = sub / "delta" / ("1" * 40)
+    shutil.copytree(str(table), str(old_table))
+    manifest = json.loads((old_table / "measure" / "complete.json").read_text())
+    manifest["key"]["pack"] = other
+    (old_table / "measure" / "complete.json").write_text(json.dumps(manifest))
+    # what stays: an entry that states nothing, other tools' files
+    (sub / "delta" / ("2" * 40) / "measure").mkdir(parents=True)
+    (sub / "delta" / ("2" * 40) / "measure" / "values.bin").write_bytes(b"x" * 64)
+    (sub / "bounds-gate.npy").write_bytes(b"x" * 8)
+    (sub / ("centers-v3-%s-0" % ("a" * 64))).mkdir()
+    planted = tree(sub)
+    reader = indexlock.hold_readers(indexlock.PACK, [str(pack)], "A4 reader")
+    try:
+        r = run([FLOE2, "drc-prepare", str(db), "--spatial-only"], env=env)
+    finally:
+        reader.close()
+    check(r.returncode == 0 and "2 outdated cache entries left" in r.stderr
+          and "the pack is open elsewhere" in r.stderr and tree(sub) == planted,
+          "outdated caches are left while someone has the pack open, and said", r.stderr[-400:])
+    r = run([FLOE2, "drc-prepare", str(db), "--spatial-only"], env=env)
+    now = tree(sub)
+    gone = sorted(k for k in planted if k not in now)
+    check(r.returncode == 0 and "Removed 2 outdated cache entries" in r.stderr
+          and gone and all(k.startswith(("centers-r1-%s-0" % other, "delta/%s/" % ("1" * 40))) for k in gone)
+          and not (sub / ("centers-r1-%s-0" % other)).exists() and not old_table.exists()
+          and {k: v for k, v in now.items() if k in made} == made
+          and (sub / "delta" / ("2" * 40) / "measure" / "values.bin").is_file()
+          and (sub / "bounds-gate.npy").is_file() and (sub / ("centers-v3-%s-0" % ("a" * 64))).is_dir(),
+          "with no one on the pack they are taken away - they alone", (r.stderr[-300:], gone[:6]))
+    r = run([FLOE2, "drc-prepare", str(db), "--spatial-only"], env=env)
+    check(r.returncode == 0 and "outdated" not in r.stderr, "... and the next run has nothing to take",
+          r.stderr[-300:])
+    # a copy of the results folder - other files, other times - comes with
+    # its caches (beside the database, the default place): nothing measured
+    plain = {k: v for k, v in os.environ.items() if k != "FLOE_DRC_ANALYSIS_ROOT"}
+    r = run([FLOE2, "drc-prepare", str(db), "--svrf", str(d / "big.svrf.rules.json"),
+             "--rule", name, "--jobs", "2"], env=plain)
+    check(r.returncode == 0, "(the heavy rule prepared beside the database)", r.stderr[-300:])
+    copy = temp / "big copy"
+    shutil.copytree(str(d), str(copy), copy_function=shutil.copy)
+    files = tree(copy / ".big.db.analysis")
+    r = run([FLOE2, "drc-prepare", str(copy / "big.db"), "--svrf", str(copy / "big.svrf.rules.json"),
+             "--rule", name, "--jobs", "2"], env=plain)
+    check(r.returncode == 0 and "CD measurement" not in r.stderr and "outdated" not in r.stderr
+          and tree(copy / ".big.db.analysis") == files,
+          "a copy of the results folder keeps its caches: nothing measured there", r.stderr[-300:])
     r = run([FLOE2, "drc-prepare", str(db), "--svrf", str(d / "big.svrf.rules.json"),
              "--rule", "NOPE"], env=env)
     check(r.returncode != 0 and "unknown DRC rules: NOPE" in r.stderr, "an unknown rule is refused", r.stderr)

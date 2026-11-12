@@ -64,6 +64,15 @@ pack; D2 keeps the retirement honest.)
       first autosave; the pack bytes are identical before/after
       everything above.
 
+  D13 `floe-index drc` keeps a pack that is the database's as it stands
+      (0.12.459): a second run packs nothing, leaves the file and says
+      so; --force packs again; a database whose time alone changed is
+      read once (its CRC-32, the stamp `<pack>.source`) and kept; other
+      bytes, another size, a pack that does not read whole are said and
+      packed again; `floe2 drc --build` says the same of each pack; a
+      reader on a current pack no longer refuses the run (--force: 75),
+      another run packing it does.
+
 usage: .venv/bin/python tools/validate_drc_ice.py [floe-index-bin]
 """
 
@@ -374,9 +383,16 @@ def validate_service(tmp):
             if "does not match this pack" not in str(exc):
                 fail("D12 foreign waive file: %s" % exc)
         # the reader lock: a re-pack is refused while the service holds it
+        # (--force: the pack is current, and since 0.12.459 the packer keeps
+        # such a one - no lock asked, the review left be - unless it is told
+        # to pack)
         py.close()
-        r = subprocess.run([BIN, "drc", db], capture_output=True, text=True)
+        r = subprocess.run([BIN, "drc", db, "--force"], capture_output=True, text=True)
         eq(r.returncode, 75, "D12 re-pack under the service's review")
+        r = subprocess.run([BIN, "drc", db], capture_output=True, text=True)
+        if r.returncode != 0 or "kept; --force packs it again" not in r.stderr or "[lock]" in r.stderr:
+            fail("D12 a current pack under the service's review is kept: %d %s"
+                 % (r.returncode, r.stderr[-400:]))
         sdb.close()
         # another run's sidecar is moved aside, a fresh one seeded
         with open(sdb.waive_path, "r+b") as f:
@@ -452,6 +468,191 @@ def validate_service(tmp):
         gtkservice._SERVICE = None
     print("D12 OK: floe2 gtk-service review == IcePack (files, bytes, "
           "answers)")
+
+
+def validate_kept(tmp):
+    """D13 (0.12.459; user 2026-11-12: "floe-index drc도 .tray가 있어도 다시 생성하는
+    것 같음", and after the findings "1, 2번 수정해줘"): the packer parsed the
+    whole database and wrote the whole pack again at every run, and only at
+    its end kept the old file when the new bytes were the same. It asks first
+    now what `floe2 drc --build` asks before it runs the packer
+    (rust/cli drccurrent.rs = app-core Pack::open + Pack::source_current):
+    the pack reads whole, and the database is the file that was packed - its
+    size and time those the pack records, or its time alone changed and its
+    bytes those packed. Then nothing is packed, no lock taken, the run says
+    so and ends 0; --force packs again."""
+    import zlib
+    from floe_oracle import indexlock
+    floe2 = os.environ.get("FLOE2_BIN") or os.path.join(
+        os.path.dirname(__file__), "..", "rust", "target", "release", "floe2")
+    d = os.path.join(tmp, "kept")
+    os.makedirs(d)
+    db = os.path.join(d, "results.db")
+    with open(db, "w") as f:
+        f.write(DB)
+    side = os.path.join(d, ".results.db.tray")
+    hint = side + ".source"
+    env = dict(os.environ)
+    env.pop("FLOE_WORKDIR", None)
+
+    def pack(*args, ok=0, first=()):
+        r = subprocess.run([BIN] + list(first) + ["drc", db] + list(args),
+                           capture_output=True, text=True, env=env)
+        if r.returncode != ok:
+            fail("D13 floe-index drc %r: exit %d, wanted %d\n%s"
+                 % (args, r.returncode, ok, r.stderr[-800:]))
+        return r
+
+    def stamp(path):
+        st = os.stat(path)
+        return (st.st_ino, st.st_mtime_ns, st.st_size)
+
+    def kept(r, before, what, how="made of this file as it is", path=None):
+        temps = [n for n in os.listdir(d) if ".tmp" in n]
+        if not ("is current" in r.stderr and how in r.stderr
+                and "kept; --force packs it again" in r.stderr
+                and "packed v2" not in r.stderr and "[lock]" not in r.stderr
+                and stamp(path or side) == before and not temps):
+            fail("D13 %s was not kept: %s %s" % (what, r.stderr[-600:], temps))
+
+    def packed(r, what, why=None):
+        if "packed v2" not in r.stderr or "kept;" in r.stderr \
+                or (why is not None and "is not current - " + why not in r.stderr):
+            fail("D13 %s was not packed again: %s" % (what, r.stderr[-600:]))
+
+    def build():
+        """`floe2 drc --build` on the same pack: (reused, what it said)"""
+        r = subprocess.run([floe2, "drc", db, "--build"], capture_output=True, text=True, env=env)
+        said = r.stdout + r.stderr
+        return (r.returncode == 0 and '"reused":true' in r.stdout), said
+
+    def other(raw):
+        body = raw.rstrip(b"\n")
+        if not body[-1:].isdigit():
+            fail("D13 fixture drifted: the .db does not end in a coordinate")
+        return body[:-1] + (b"1" if body[-1:] != b"1" else b"2") + raw[len(body):]
+
+    # the first run packs; every run after it keeps - whatever its options
+    packed(pack(), "the first run")
+    a = stamp(side)
+    first_bytes = open(side, "rb").read()
+    for extra in ([], ["--jobs", "3"], ["--pack"], [side]):
+        kept(pack(*extra), a, "a second run %r" % (extra,))
+    reused, said = build()
+    if not reused:
+        fail("D13 floe2 drc --build does not say the same of a current pack: %s" % said[-400:])
+    # --force packs again: the same bytes, so the file is the one that was
+    r = pack("--force")
+    packed(r, "--force")
+    if stamp(side) != a or "is not current" in r.stderr:
+        fail("D13 --force of the same bytes replaced the pack: %s" % r.stderr[-400:])
+    # the database's time alone changed: its bytes are read once, the match
+    # remembered beside the pack, and the next run reads nothing
+    raw = open(db, "rb").read()
+    st = os.stat(db)
+    t1 = int(st.st_mtime) + 10
+    os.utime(db, (t1, t1))
+    kept(pack(), a, "a database whose time alone changed", "its bytes read now are those packed")
+    want = "floe-drc-source 1\n%d %d %08x\n" % (len(raw), t1, zlib.crc32(raw))
+    if open(hint).read() != want:
+        fail("D13 the verified stamp: %r != %r" % (open(hint).read(), want))
+    kept(pack(), a, "... again", "were verified before as those packed")
+    reused, said = build()
+    if not reused:
+        fail("D13 floe2 drc --build on the touched database: %s" % said[-400:])
+    # --force then writes the pack of that time: other header bytes, another file
+    packed(pack("--force"), "--force after the time changed")
+    b = stamp(side)
+    now = open(side, "rb").read()
+    if b[0] == a[0] or now == first_bytes or now[-40:-8] != first_bytes[-40:-8]:
+        fail("D13 --force after the time changed: the pack should be another file of the same content id")
+    kept(pack(), b, "the run after it")
+    # other bytes of the same size at another time, and another size: both
+    # commands say it is not the file packed, and the packer packs
+    for what, change, why in (
+            ("other bytes of the same size", lambda: open(db, "wb").write(other(raw)),
+             "the database has changed since (the same size"),
+            ("another size", lambda: open(db, "wb").write(raw + b"\n"),
+             "the database has changed since (packed at size")):
+        change()
+        t1 += 10
+        os.utime(db, (t1, t1))
+        reused, said = build()
+        if reused or "stale" not in said:
+            fail("D13 floe2 drc --build on %s: %s" % (what, said[-400:]))
+        packed(pack(), what, why)
+        kept(pack(), stamp(side), "the run after " + what)
+        reused, said = build()
+        if not reused:
+            fail("D13 floe2 drc --build after %s was packed: %s" % (what, said[-400:]))
+    # other bytes under the size AND the time that were packed: the first
+    # question every reader asks is the stamp, and it says the same file -
+    # the pack is kept (and floe2 reuses it); --force packs what is there
+    st = os.stat(db)
+    c = stamp(side)
+    before = open(side, "rb").read()
+    open(db, "wb").write(other(raw) + b"\n")
+    os.utime(db, ns=(st.st_atime_ns, st.st_mtime_ns))
+    kept(pack(), c, "other bytes under the packed size and time")
+    reused, said = build()
+    if not reused:
+        fail("D13 floe2 drc --build on other bytes under the packed stamp: %s" % said[-400:])
+    packed(pack("--force"), "--force on other bytes under the packed stamp")
+    if open(side, "rb").read()[-40:-8] == before[-40:-8]:
+        fail("D13 --force did not pack the other errors")
+    # a pack that does not read whole: both commands say so, the packer packs
+    good = open(side, "rb").read()
+    foot = len(good) - 168
+    for what, damaged, why in (
+            ("a pack cut in half", good[:len(good) // 2], "it does not validate ("),
+            ("a pack with another footer magic", good[:-1] + bytes([good[-1] ^ 1]), "it does not validate (footer magic)"),
+            ("a pack of layout 4", good[:8] + (4).to_bytes(4, "little") + good[12:], "it is of pack layout 4 (this packer makes 5)"),
+            ("a pack whose sections do not meet", good[:foot] + (41).to_bytes(8, "little") + good[foot + 8:],
+             "it does not validate (non-contiguous/overlapping sections)"),
+            ("an empty file", b"", "it does not validate (truncated header/footer)")):
+        with open(side, "wb") as f:
+            f.write(damaged)
+        reused, said = build()
+        if reused or "unusable" not in said:
+            fail("D13 floe2 drc --build on %s: %s" % (what, said[-400:]))
+        packed(pack(), what, why)
+        if open(side, "rb").read() != good:
+            fail("D13 %s: the pack made again is not the pack" % what)
+        kept(pack(), stamp(side), "the run after " + what)
+    # an output of one's own and a work directory: each its own pack, kept
+    # by the next run that names the same place
+    own = os.path.join(d, "own.tray")
+    packed(pack(own), "an output of its own")
+    kept(pack(own), stamp(own), "that output again", path=own)
+    kept(pack(), stamp(side), "the default pack beside it")
+    work = os.path.join(tmp, "work")
+    os.makedirs(work)
+    mirrored = work + os.path.abspath(side)
+    packed(pack(first=["--workdir", work]), "under a work directory")
+    kept(pack(first=["--workdir", work]), stamp(mirrored), "the pack under a work directory", path=mirrored)
+    # a reader on the pack - a review holds it for its session: a current
+    # pack is kept all the same (the run was refused with 75 until now, and
+    # is with --force); another run packing it refuses this one as ever
+    held = stamp(side)
+    reader = indexlock.hold_readers(indexlock.PACK, [side], "D13 reader")
+    try:
+        r = pack()
+        kept(r, held, "a current pack under a reader")
+        r = pack("--force", ok=75)
+        if "is in use by" not in r.stderr or stamp(side) != held:
+            fail("D13 --force under a reader: %s" % r.stderr[-400:])
+    finally:
+        reader.close()
+    writer = indexlock.try_writer(indexlock.PACK, side, full=True, what="D13 packer")
+    if writer is None:
+        fail("D13 the pack's build lock could not be taken")
+    with writer:
+        r = pack(ok=75)
+        if "is being indexed by" not in r.stderr or "is current" in r.stderr or stamp(side) != held:
+            fail("D13 a run while another packs: %s" % r.stderr[-400:])
+    kept(pack(), held, "the run after the locks were let go")
+    print("D13 OK: a current pack is kept by floe-index drc itself; --force, a changed "
+          "database and a pack that does not read whole pack again; floe2 drc --build agrees")
 
 
 def main():
@@ -1167,6 +1368,7 @@ def main():
         fail("hangul backspace decomposition wrong")
     print("D11 OK: bundled hangul composer (compose + backspace)")
 
+    validate_kept(tempfile.mkdtemp(prefix="floe-drckept-"))
     validate_service(tempfile.mkdtemp(prefix="floe-drcsvc-"))
     print("DRC ICE VALIDATION: ALL OK")
 

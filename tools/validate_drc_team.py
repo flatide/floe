@@ -450,12 +450,21 @@ def r1_reindex(d):
     finally:
         svc.close()
     review_bytes = review_path.read_bytes()
+    # (0.12.459: a plain run of the packer keeps a pack that is current and
+    # packs nothing - said, the file as it was. The runs below say --force:
+    # the re-pack whose identical bytes keep the file)
+    r = run([INDEX, "drc", str(src)])
+    stat = pack.stat()
+    check(r.returncode == 0 and "kept; --force packs it again" in r.stderr
+          and "packed v2" not in r.stderr
+          and (stat.st_dev, stat.st_ino, stat.st_mtime_ns) == identity and pack.read_bytes() == before,
+          "a plain reindex keeps the current pack without packing", r.stderr)
     for jobs, stream in ((1, False), (4, True)):
         env = dict(os.environ)
         if stream:
             env["FLOE_DRC_QBOX_RESIDENT"] = "0"
-        r = run([INDEX, "drc", str(src), "--jobs", str(jobs)], env=env)
-        check(r.returncode == 0, "reindex with jobs=%d" % jobs, r.stderr)
+        r = run([INDEX, "drc", str(src), "--force", "--jobs", str(jobs)], env=env)
+        check(r.returncode == 0 and "packed v2" in r.stderr, "reindex with jobs=%d" % jobs, r.stderr)
         stat = pack.stat()
         check((stat.st_dev, stat.st_ino, stat.st_mtime_ns) == identity
               and pack.read_bytes() == before, "identical reindex keeps pack inode and ns mtime")
@@ -485,12 +494,19 @@ def r1_reindex(d):
     text = src.read_text()
     src.write_text(text.replace("100 100", "101 100", 1))
     os.utime(src, ns=(src_stat.st_atime_ns, src_stat.st_mtime_ns))
+    # (0.12.459: under the size and the time that were packed a plain run
+    # asks no more - they are every reader's first question, `floe2 drc
+    # --build`'s too - and keeps the pack; --force packs what is there)
     r = run([INDEX, "drc", str(src)])
+    check(r.returncode == 0 and "kept; --force packs it again" in r.stderr
+          and pack.read_bytes() == before,
+          "a coordinate change under the packed stamp: a plain run keeps the pack", r.stderr)
+    r = run([INDEX, "drc", str(src), "--force"])
     after = pack.read_bytes()
     check(r.returncode == 0 and after != before and len(after) == len(before)
           and after[:40] == before[:40] and after[-168:-44] == before[-168:-44]
           and after[-8:] == before[-8:],
-          "a coordinate change replaces the pack despite matching source stamp", r.stderr)
+          "--force replaces the pack: a coordinate change despite the matching source stamp", r.stderr)
     check(after[-44:-40] != before[-44:-40] and after[-40:-8] != before[-40:-8],
           "... with another source CRC and another content id")
     check(review_path.read_bytes() == review_bytes, "reindex never rewrites a saved review")
