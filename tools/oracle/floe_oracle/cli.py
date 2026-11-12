@@ -408,6 +408,11 @@ def _run_rust_index(args, binary, coverage_only=False,
         if getattr(args, "occupancy", False) and not profiling:
             command.append("--occupancy")
             command += _occupancy_args(args)
+        # the builder keeps a current index on its own since 0.12.458: a
+        # rebuild that was asked for is said to it (app-core
+        # index::arguments does the same)
+        if getattr(args, "force", False) and not profiling:
+            command.append("--force")
         # LOD off by default (retirement, 2026-08-28); --lod opts back in
         if not getattr(args, "lod", False):
             command.append("--no-lod")

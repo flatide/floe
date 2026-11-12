@@ -147,12 +147,19 @@ pub fn vfs_cmd(args: &[String]) {
     // deliberately not inferred from the source or mixed with the VFS cache.
     let mut profile_snapshot: Option<String> = None;
     let mut profile_snapshot_refresh = false;
+    // an index that is the source's as it stands is kept (crate::current);
+    // --force builds it again
+    let mut force = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--jobs" => {
                 jobs = Some(args[i + 1].parse().expect("jobs"));
                 i += 2;
+            }
+            "--force" => {
+                force = true;
+                i += 1;
             }
             "--encode-batch" => {
                 encode_batch = Some(args[i + 1].parse::<usize>().expect("encode batch").max(1));
@@ -527,6 +534,59 @@ pub fn vfs_cmd(args: &[String]) {
     // 150 MB chip): a heartbeat every 10 s per layer, one line per
     // slow or summary-less layer
     occ_opts.progress = Some(|m: &str| eprintln!("[vfs] occupancy {}", m));
+    // An index that is the source's as it stands is kept (0.12.458, user
+    // 2026-11-12: a second run on the same layout deleted the first one's
+    // files and made them again): the question `floe2 index` asks before it
+    // runs this builder, asked by the builder itself. Only of the whole
+    // build - an additive run and a profile do what they are told, and so
+    // does a gate's stop inside a build -, and not while another run writes
+    // the cache: that one goes on to the lock and is refused as before.
+    let whole = !(profiling
+        || coverage_only
+        || occupancy_only
+        || representatives_only
+        || frontier_only
+        || kill_at.is_some()
+        || hold_at.is_some());
+    if whole && !force && !crate::current::being_written(&outdir) {
+        match crate::current::of(&src, &outdir, crate::current::Kind::Full) {
+            Ok((size, mtime)) => {
+                // what this run was asked to make beside the index and the
+                // index does not have: then the build runs, as it did
+                let lacks: Vec<&str> = [
+                    ("design.ovo", occupancy, "--occupancy"),
+                    ("design.ovc", coverage, "--coverage"),
+                    ("design.ovr", representatives, "--representatives"),
+                ]
+                .iter()
+                .filter(|(file, asked, _)| {
+                    *asked && !std::path::Path::new(&outdir).join(file).is_file()
+                })
+                .map(|(_, _, flag)| *flag)
+                .collect();
+                if lacks.is_empty() {
+                    eprintln!(
+                        "[vfs] {}: the index in {} is current (built for this file as it is: size {}, mtime {}; cache version {}) - kept; --force builds it again",
+                        src,
+                        outdir,
+                        size,
+                        mtime,
+                        crate::CACHE_VERSION
+                    );
+                    return;
+                }
+                eprintln!(
+                    "[vfs] {}: the index is current but has not what {} asks for - building it again (the -only form of the option adds its file alone)",
+                    outdir,
+                    lacks.join(" and ")
+                );
+            }
+            Err(crate::current::Not::Stale(why)) => {
+                eprintln!("[vfs] {}: the index there is not current - {} - building it again", outdir, why)
+            }
+            Err(crate::current::Not::Absent) => (),
+        }
+    }
     // the cache's locks (floe_vfs::lock; user 2026-10-09: a file being
     // indexed or used is refused to another run), taken before the source
     // is read so a refused run ends in seconds: a whole build excludes the
@@ -3905,7 +3965,7 @@ fn write_ovs(
         Ok(true) => {}
         Ok(false) => {
             return Err(
-                "design.ovb: missing (an index built without the pages' occupancy: index again)"
+                "design.ovb: missing (an index built without the pages' occupancy: index again with --force)"
                     .into(),
             )
         }

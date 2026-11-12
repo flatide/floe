@@ -780,6 +780,171 @@ def validate_rust_cli(base, fixture):
               "floe2 view did not reach the GTK viewer's entry: %s" % view.stdout[:200])
 
 
+def validate_kept_index(base, fixture):
+    """`floe-index vfs` and `floe-index light` keep a cache that is the
+    source's as it stands (0.12.458). User 2026-11-12: "floe-index vfs로 동일
+    레이아웃에 대해 연속으로 인덱싱하니 첫번째에 만들어진 .ice의 파일들을 모두 지우고
+    다시 생성함. 동일 파일이기 때문에 인덱싱이 스킵 되어야 할 것 같은데 왜 다시
+    하는건지 확인해줘" - the builder had no such question, `floe2 index` asked
+    it before running the builder - and then "2번으로 수정해줘": the builder
+    asks it itself. A second run writes nothing and ends 0 saying so; --force
+    builds again; an option asking for a file the index has not builds again
+    with it; a changed source, another cache version, a marker or a meta.json
+    that does not hold are said and built again; an additive run does what it
+    is told; `floe2 index` says the same of the folder, and its --force is
+    handed on."""
+    indexer = ROOT / "rust" / "target" / "release" / "floe-index"
+    renderer = ROOT / "rust" / "target" / "release" / "floe-renderd"
+    with tempfile.TemporaryDirectory(prefix="floe2-kept-") as td:
+        work = Path(td)
+        env = {"PATH": "/usr/bin:/bin", "HOME": base.get("HOME", td),
+               "FLOE_INDEX_BIN": str(indexer), "FLOE_RENDERD_BIN": str(renderer)}
+
+        def index(*args, ok=0):
+            done = subprocess.run([str(indexer), *map(str, args)], cwd=ROOT, env=env,
+                                  capture_output=True, text=True, timeout=120)
+            check(done.returncode == ok, "floe-index %r: exit %d, wanted %d\n%s" % (
+                args, done.returncode, ok, done.stderr[-1500:]))
+            return done
+
+        def files(folder):
+            return {p.name: (p.stat().st_ino, p.stat().st_mtime_ns, p.stat().st_size)
+                    for p in sorted(folder.iterdir()) if p.is_file()}
+
+        def kept(done, made, folder, what, word="the index in"):
+            check(word in done.stderr and "is current" in done.stderr
+                  and "kept; --force builds it again" in done.stderr
+                  and "done in" not in done.stderr and files(folder) == made,
+                  "%s was not kept: %s" % (what, done.stderr[-600:]))
+
+        def built(done, made, folder, what, marker="design.ovm"):
+            now = files(folder)
+            check("done in" in done.stderr and now[marker][0] != made.get(marker, (0,))[0],
+                  "%s was not built: %s" % (what, done.stderr[-600:]))
+            return now
+
+        def later(path, seconds=5):
+            at = path.stat()
+            os.utime(path, ns=(at.st_atime_ns, at.st_mtime_ns + seconds * 10 ** 9))
+        src = work / "chip.oas"
+        shutil.copy2(fixture, src)
+        ice = work / ".chip.oas.ice"
+        made = built(index("vfs", src, "--jobs", "2"), {}, ice, "the first run")
+        # again, with whatever options that ask for nothing more: kept - a
+        # kept index keeps the options it was built with
+        for extra in ([], ["--jobs", "3"], ["--no-lod"], ["--no-ovs", "--page-target-mb", "2"],
+                      [ice, "--jobs", "2"], ["--in-memory"]):
+            kept(index("vfs", src, *extra), made, ice, "a second run %r" % (extra,))
+        said = rust(env, "index", src, "--jobs", "2")
+        check("cache up to date" in said.stdout and files(ice) == made,
+              "floe2 index did not say the same of it: %s" % said.stdout)
+        made = built(index("vfs", src, "--jobs", "2", "--force"), made, ice, "--force")
+        # an option that asks for a file the index has not: built with it,
+        # then kept - and kept by a run that asks for less
+        occ = index("vfs", src, "--jobs", "2", "--occupancy")
+        check("is current but has not what --occupancy asks for" in occ.stderr,
+              "the missing summary was not said: %s" % occ.stderr[-400:])
+        made = built(occ, made, ice, "--occupancy over an index without design.ovo")
+        check("design.ovo" in made, "no design.ovo: %s" % sorted(made))
+        kept(index("vfs", src, "--jobs", "2", "--occupancy"), made, ice, "--occupancy again")
+        kept(index("vfs", src, "--jobs", "2"), made, ice, "a run asking for less")
+        # an additive run does what it is told: the summary made again, the
+        # index beside it as it was
+        index("vfs", src, ice, "--occupancy-only")
+        now = files(ice)
+        check(now["design.ovo"][0] != made["design.ovo"][0] and now["design.ovm"] == made["design.ovm"],
+              "--occupancy-only: %s" % {k: (made.get(k), now[k]) for k in ("design.ovo", "design.ovm")})
+        made = now
+        # the source changed - its time, then the file itself: said, built
+        # again, and current again
+        for what, change in (("a later mtime", lambda: later(src)),
+                             ("another file under the name",
+                              lambda: shutil.copyfile(ROOT / "sample.oas", src))):
+            change()
+            stale = index("vfs", src, "--jobs", "2")
+            check("is not current - the source has changed since" in stale.stderr,
+                  "%s was not said: %s" % (what, stale.stderr[-500:]))
+            made = built(stale, made, ice, what)
+            kept(index("vfs", src, "--jobs", "2"), made, ice, "the run after " + what)
+        # another cache version, a meta.json that is cut short or gone, page
+        # files that are not the marker's: each said and built again
+        meta = ice / "meta.json"
+        version = json.loads(meta.read_text())["version"]
+        for what, damage, word in (
+                ("another cache version",
+                 lambda: meta.write_text(meta.read_text().replace('"version": %d' % version,
+                                                                  '"version": %d' % (version - 1), 1)),
+                 "it is of cache version %d (this indexer makes %d)" % (version - 1, version)),
+                ("a meta.json cut short", lambda: meta.write_text(meta.read_text()[:200]),
+                 "meta.json is not readable"),
+                ("no meta.json", meta.unlink, "meta.json is not readable"),
+                ("page files cut short",
+                 lambda: (ice / "design.ovp").write_bytes((ice / "design.ovp").read_bytes()[:-7]),
+                 "its commit marker does not validate")):
+            damage()
+            again = index("vfs", src, "--jobs", "2")
+            check("is not current - " + word in again.stderr,
+                  "%s was not said: %s" % (what, again.stderr[-500:]))
+            made = built(again, made, ice, what)
+            kept(index("vfs", src, "--jobs", "2"), made, ice, "the run after " + what)
+        # an output folder of one's own and a work directory: each its own
+        # index, kept by the next run that names the same place
+        own = work / "own.ice"
+        own_made = built(index("vfs", src, own, "--jobs", "2"), {}, own, "an output folder of its own")
+        kept(index("vfs", src, own, "--jobs", "2"), own_made, own, "that folder again")
+        kept(index("vfs", src, "--jobs", "2"), made, ice, "the default folder beside it")
+        under = work / "wd"
+        under.mkdir()
+        mirrored = Path(str(under) + str(ice))
+        index("--workdir", under, "vfs", src, "--jobs", "2")
+        wd_made = files(mirrored)
+        kept(index("--workdir", under, "vfs", src, "--jobs", "2"), wd_made, mirrored,
+             "the index under a work directory")
+        # floe2 index: up to date without the builder; --force is handed on
+        said = rust(env, "index", src, "--jobs", "2")
+        check("cache up to date" in said.stdout and "floe-index" not in said.stdout,
+              "floe2 index on a current index: %s" % said.stdout)
+        forced = rust(env, "index", src, "--jobs", "2", "--force")
+        line = forced.stdout.splitlines()[0]
+        check(" vfs " in line and " --force" in line.split(" vfs ", 1)[1]
+              and files(ice)["design.ovm"][0] != made["design.ovm"][0],
+              "floe2 index --force: %s" % line)
+        # the light cache alike
+        lsrc = work / "light.oas"
+        shutil.copy2(fixture, lsrc)
+        lice = work / ".light.oas.ice"
+        inv = "design.inv"
+        lmade = built(index("light", lsrc, "--jobs", "2"), {}, lice, "the first light run", inv)
+        for extra in ([], ["--jobs", "3"], ["--out", lice]):
+            kept(index("light", lsrc, *extra), lmade, lice, "a second light run %r" % (extra,),
+                 "the light cache in")
+        said = rust(env, "index", lsrc, "--light", "--jobs", "2")
+        check("cache up to date" in said.stdout and files(lice) == lmade,
+              "floe2 index --light did not say the same of it: %s" % said.stdout)
+        lmade = built(index("light", lsrc, "--jobs", "2", "--force"), lmade, lice, "light --force", inv)
+        occ = index("light", lsrc, "--jobs", "2", "--occupancy")
+        check("is current but has not what --occupancy asks for" in occ.stderr,
+              "the light cache's missing summary was not said: %s" % occ.stderr[-400:])
+        lmade = built(occ, lmade, lice, "light --occupancy without design.ovo", inv)
+        kept(index("light", lsrc, "--jobs", "2", "--occupancy"), lmade, lice,
+             "light --occupancy again", "the light cache in")
+        later(lsrc)
+        stale = index("light", lsrc, "--jobs", "2")
+        check("is not current - the source has changed since" in stale.stderr,
+              "the light cache's changed source was not said: %s" % stale.stderr[-400:])
+        lmade = built(stale, lmade, lice, "a light cache of a changed source", inv)
+        # the full index over the light cache is a build (there is no index
+        # to keep), and the light command refuses a folder with an index as
+        # it did - the index is not its to keep or replace without --force
+        full = built(index("vfs", lsrc, "--jobs", "2"), {}, lice, "the index over the light cache")
+        refused = index("light", lsrc, "--jobs", "2", ok=1)
+        check("holds a full index" in refused.stderr and files(lice) == full,
+              "light over a full index: %s" % refused.stderr[-300:])
+        kept(index("vfs", lsrc, "--jobs", "2"), full, lice, "that index again")
+    print("kept index: a current index and a current light cache are kept by floe-index itself; "
+          "--force, a missing file asked for, a changed source and a damaged cache build again")
+
+
 def main(fixture=None):
     base = os.environ.copy()
     base.pop("FLOE_PRODUCT", None)
@@ -1171,6 +1336,7 @@ print(json.dumps([instance.APP, instance.socket_address(":77"),
     if fixture is not None:
         validate_runtime(base, Path(fixture).resolve())
         validate_rust_cli(base, Path(fixture).resolve())
+        validate_kept_index(base, Path(fixture).resolve())
     print("FLOE2 PRODUCT VALIDATION: ALL OK")
 
 

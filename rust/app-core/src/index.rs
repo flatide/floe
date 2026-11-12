@@ -551,6 +551,11 @@ fn arguments(
     }
     if *action == Action::Build {
         mode_args(&mut a, o);
+        if o.force {
+            // the builder keeps an index that is current on its own since
+            // 0.12.458: a rebuild that was asked for is said to it
+            a.push("--force".into());
+        }
     }
     if !o.lod {
         a.push("--no-lod".into());
@@ -1669,6 +1674,24 @@ mod tests {
         .unwrap();
         assert!(!a.contains(&OsString::from("--representatives-format")));
         assert!(!a.contains(&OsString::from("--occupancy-prune")));
+        // the builder keeps a current index on its own (floe-index 0.12.458):
+        // a rebuild that was asked for is said to it, and nothing else is
+        assert!(!a.contains(&OsString::from("--force")));
+        let forced = IndexOptions {
+            force: true,
+            ..Default::default()
+        };
+        let words = |action: &Action| -> Vec<String> {
+            arguments(Path::new("/s"), Path::new("/c"), &forced, action, false)
+                .unwrap()
+                .iter()
+                .map(|w| w.to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(words(&Action::Build), ["vfs", "/s", "/c", "--jobs", "12", "--force", "--no-lod"]);
+        for additive in [Action::OccupancyOnly, Action::RepresentativesOnly, Action::HierOnly] {
+            assert!(!words(&additive).contains(&"--force".to_string()), "{additive:?}");
+        }
     }
     #[test]
     fn reuse_force_and_additive_policy() {

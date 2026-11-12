@@ -174,7 +174,8 @@ floe view data/testchip_1g5.oas            # 개발용 KLayout 셸 (동결, 비�
   전해진다. 단독으로 돌리는 `floe-index`도 같은 옵션을 받는다(docs/CACHE-NAMING.ko.md §6).
 - `floe2 index`와 `floe index`는 같은 `floe-index vfs`를 실행한다. 같은 source
   fingerprint의 정상 캐시는 재사용하며 기존·불완전·stale 캐시 교체는 명시적
-  `--force`가 있어야 한다. `--page-target-mb`, `--no-lod`, `--slow-cell-s`,
+  `--force`가 있어야 한다. `floe-index vfs`와 `floe-index light`를 직접 불러도 같은 기준의
+  현재 캐시는 그대로 두고 0으로 끝나며(0.12.458), 다시 만들려면 `--force`를 준다. `--page-target-mb`, `--no-lod`, `--slow-cell-s`,
   `--p2-shard-limit-mb`는 Rust 빌드 옵션이다. floe2는 density coverage를
   생성·표시하지 않으며 공유 cache에 남은 `design.ovc`도 읽지 않는다. 안정판
   `floe`의 KLayout 화면만 `--coverage`/`--coverage-only`를 계속 제공한다.
@@ -1172,6 +1173,7 @@ floe2 index chip.oas --jobs 16 --profile-cell-ci 32810 \
   --profile-snapshot /fast-scratch/monster.floe-profile \
   > monster-profile.json                     # parse/prepare 1회, cache 쓰기 없음
 floe-index vfs chip.oas custom.ice --jobs 12   # 저수준 직접 실행(outdir 생략 시 .chip.oas.ice)
+floe-index vfs chip.oas --force                # 현재 캐시도 다시 만든다(없으면 현재 캐시는 그대로 둔다)
 floe-index scan chip.oas 16                  # JSON 인벤토리 (진단용)
 floe-index --version
 ```

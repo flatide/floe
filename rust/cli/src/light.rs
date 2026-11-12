@@ -156,7 +156,9 @@ pub fn light_cmd(args: &[String]) {
              [--occupancy-only] [--mem GiB] [--force]  \
              (the light cache: design.inv + design.seg + meta.json from one inventory pass, \
              design.ovo from the streaming occupancy pass with --occupancy; DIR defaults to \
-             .<file.oas>.ice beside the source; docs/DIRECT_READ_PLAN.ko.md L4-L5)"
+             .<file.oas>.ice beside the source; a light cache that is the source's as it stands \
+             is kept, --force builds it again and replaces a full index; \
+             docs/DIRECT_READ_PLAN.ko.md L4-L5)"
         );
         std::process::exit(2);
     };
@@ -177,6 +179,39 @@ pub fn light_cmd(args: &[String]) {
         // a source over 16 GiB gets a cap by its size (2026-10-27)
         let size = std::fs::metadata(&src).map_or(0, |m| m.len());
         occ_opts.max_work = floe_vfs::occupancy::default_max_work(size);
+    }
+    // ---- a light cache that is the source's as it stands is kept
+    // (0.12.458, as `floe-index vfs` keeps a current index: crate::current);
+    // --force builds it again. Not an occupancy-only run, which adds what it
+    // is told, nor a gate's stop inside a build, nor while another run
+    // writes the cache - that one goes on to the lock and is refused.
+    if !force && !occupancy_only && hold_at.is_none() && !crate::current::being_written(&outdir) {
+        match crate::current::of(&src, &outdir, crate::current::Kind::Light) {
+            // (a full index in the folder is not this command's to keep: it
+            // is refused below as before)
+            _ if Path::new(&outdir).join("design.ovm").exists() => (),
+            Ok((size, mtime)) => {
+                if !occupancy || Path::new(&outdir).join("design.ovo").is_file() {
+                    eprintln!(
+                        "[light] {}: the light cache in {} is current (built for this file as it is: size {}, mtime {}; cache version {}) - kept; --force builds it again",
+                        src,
+                        outdir,
+                        size,
+                        mtime,
+                        crate::CACHE_VERSION
+                    );
+                    return;
+                }
+                eprintln!(
+                    "[light] {}: the light cache is current but has not what --occupancy asks for - building it again (--occupancy-only adds design.ovo alone)",
+                    outdir
+                );
+            }
+            Err(crate::current::Not::Stale(why)) => {
+                eprintln!("[light] {}: the light cache there is not current - {} - building it again", outdir, why)
+            }
+            Err(crate::current::Not::Absent) => (),
+        }
     }
     // ---- the cache's locks, before the source is read (SPEC-INDEXER §4.5)
     if let Some(parent) = Path::new(&outdir).parent().filter(|p| !p.as_os_str().is_empty()) {

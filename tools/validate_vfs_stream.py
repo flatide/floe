@@ -610,7 +610,9 @@ def main():
         # S6 guards (STREAMING_INDEX_PLAN §5): the memory ceiling stops a
         # build at its first check, the size pre-check refuses an in-memory
         # build of a file larger than MemAvailable - exit 71, the cache as
-        # it was, one line saying what to do; off, the build runs
+        # it was, one line saying what to do; off, the build runs. (--force:
+        # the index there is current, and since 0.12.458 the builder keeps
+        # such a one unless it is told to build)
         keep = work / "valmini_keep"
         r = subprocess.run([str(BIN), "vfs", str(src), str(keep), "--jobs", "2"],
                            capture_output=True, text=True, env=env)
@@ -623,7 +625,7 @@ def main():
                 ("memory ceiling, streaming build", ["--stream", "--mem", "0.5"], {"FLOE_RSS_CEILING": "1M"}, "memory ceiling"),
                 ("memory ceiling, default build", [], {"FLOE_RSS_CEILING": "1M"}, "memory ceiling"),
                 ("size pre-check", ["--in-memory"], {"FLOE_MEM_AVAILABLE_GB": "0.000001"}, "index with --stream")):
-            r = subprocess.run([str(BIN), "vfs", str(src), str(keep), "--jobs", "2"] + extra,
+            r = subprocess.run([str(BIN), "vfs", str(src), str(keep), "--jobs", "2", "--force"] + extra,
                                capture_output=True, text=True, env=dict(env, **more), timeout=120)
             if r.returncode != 71:
                 fail("%s: exit %d, want 71\n%s" % (label, r.returncode, r.stderr[-1500:]))
@@ -631,11 +633,11 @@ def main():
                 fail("%s: the stop line is missing\n%s" % (label, r.stderr[-1500:]))
             if snapshot() != before:
                 fail("%s: the cache changed" % label)
-        r = subprocess.run([str(BIN), "vfs", str(src), str(keep), "--jobs", "2"],
+        r = subprocess.run([str(BIN), "vfs", str(src), str(keep), "--jobs", "2", "--force"],
                            capture_output=True, text=True, env=dict(env, FLOE_RSS_CEILING="off"))
         if r.returncode != 0:
             fail("FLOE_RSS_CEILING=off: the build should run: exit %d\n%s" % (r.returncode, r.stderr[-1500:]))
-        r = subprocess.run([str(BIN), "vfs", str(src), str(keep), "--jobs", "2"],
+        r = subprocess.run([str(BIN), "vfs", str(src), str(keep), "--jobs", "2", "--force"],
                            capture_output=True, text=True, env=dict(env, FLOE_RSS_CEILING="12x"))
         if r.returncode != 0 or "the default ceiling applies" not in r.stderr:
             fail("FLOE_RSS_CEILING=12x: the build should run with a note: exit %d\n%s" % (r.returncode, r.stderr[-1500:]))

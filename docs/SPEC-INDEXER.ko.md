@@ -78,7 +78,7 @@ PATH다(app-core `native::Discovery`). GTK 뷰어는 자기를 띄운 floe2
 ## 1. 명령
 
 ```
-floe-index vfs <src.oas> [outdir=.<src>.ice] [--jobs N] [--plan-batch N]
+floe-index vfs <src.oas> [outdir=.<src>.ice] [--force] [--jobs N] [--plan-batch N]
     [--encode-batch N] [--page-target-mb N] [--no-lod] [--no-page-occupancy]
     [--coverage | --coverage-only] [--frontier-only] [--kill-at P]
     [--occupancy | --occupancy-only] [--occupancy-um F] [--occupancy-mag M] [--occupancy-balance 0|1]
@@ -88,6 +88,27 @@ floe-index vfs <src.oas> [outdir=.<src>.ice] [--jobs N] [--plan-batch N]
     [--profile-jobs N,N,...] [--profile-repeat N]
     [--profile-snapshot PATH] [--profile-snapshot-refresh]
 ```
+
+**현재 캐시는 그대로 둔다(2026-11-12, 0.12.458; 사용자: "floe-index vfs로 동일 레이아웃에 대해
+연속으로 인덱싱하니 첫번째에 만들어진 .ice의 파일들을 모두 지우고 다시 생성함", 확인 뒤 "2번으로
+수정해줘").** 0.12.457까지 이 명령은 만들기만 했다: 폴더에 무엇이 있든 지우고 다시 만들었고,
+"이미 최신인가"는 `floe2 index`만 물었다. 이제 이 명령이 같은 것을 스스로 묻는다(`rust/cli/src/current.rs`).
+- **현재의 뜻:** `floe2 index`의 것과 같다(app-core `cache::inspect`). `meta.json`의 캐시 버전이 이
+  인덱서의 것이고 `vfs`가 1이며, 소스의 크기와 수정 시각(초)이 `meta.json`과 마커(`design.ovm`,
+  읽는 쪽이 여는 방식으로 검증)에 적힌 것과 같다. 두 명령은 한 폴더에 대해 같은 답을 한다.
+- **현재이면:** 아무것도 쓰지 않고 잠금도 잡지 않으며 `… is current … - kept; --force builds it
+  again`을 stderr에 쓰고 0으로 끝난다. 뷰어가 그 캐시를 열고 있어도 0이다(전에는 75). 유지한 캐시는
+  만들 때의 옵션 그대로다(`--no-lod`, `--page-target-mb` 등을 달리 줘도 다시 만들지 않는다).
+- **다시 만드는 경우:** `--force`; 옵션이 요구하는 파일이 없을 때(`--occupancy`인데 `design.ovo`
+  없음, `--coverage`·`--representatives`도 같다 — 그 파일만 더하려면 `-only` 꼴); 현재가 아닐
+  때(소스가 바뀜, 다른 캐시 버전, `meta.json`이 없거나 잘림, 마커 검증 실패 — 이유를
+  `… is not current - <이유> - building it again`으로 말한다).
+- **묻지 않는 경우:** 더하는 실행(`--occupancy-only`, `--coverage-only`, `--representatives-only`,
+  `--frontier-only`)과 프로파일은 시킨 일을 한다. 다른 실행이 그 캐시를 쓰는 중이면(빌드 잠금)
+  묻지 않고 잠금으로 가서 전처럼 75로 거절된다.
+- `floe-index light`도 같다(현재의 경량 캐시는 그대로; `--force`는 다시 만들고 전체 색인도
+  바꾼다). 폴더에 전체 색인이 있으면 전처럼 `--force` 없이는 거절한다.
+- `floe2 index --force`는 빌더에 `--force`를 넘긴다(app-core `index::arguments`).
 
 잡덱(`floe-index vfs <deck.jb> [--level N,..] [--jobs N] [--force] [--wait[=S]] …`,
 2026-10-18, app 0.12.359)이면 직접 빌드하지 않는다. 옆의 floe2(`FLOE2_BIN`, 같은
@@ -459,6 +480,11 @@ CACHE-NAMING §5에 있다.
   - `[lock] X.oas is being indexed by … - try again when it finishes`
   - `[lock] X.oas is in use by … - re-indexing it would pull it from under them; close it there first`
   - 잠금 파일을 열 수 없으면 종료 1과 고치는 법을 알린다.
+- 현재 캐시는 잠금 앞에서 걸러진다(0.12.458, §1): 통째 빌드(`floe-index vfs`·`light`)는 잠금을
+  잡기 전에 캐시가 그 소스의 것인지 보고, 현재이면 잠금 없이 0으로 끝난다. 그래서 뷰어가 연
+  현재 캐시에 대한 실행은 `is in use`(75)가 아니라 유지(0)다. `--force`이거나 현재가 아니면
+  전처럼 잠금으로 가서 거절된다. 다른 실행이 build를 쥐고 있으면 이 판정을 건너뛴다(쓰는 중의
+  캐시는 마커가 없어 "현재 아님"으로 읽히므로, 묻지 않고 잠금의 거절에 맡긴다).
 - 기다리기(0.12.359): `floe2 index`·`render`·`info`·`probe`·`clip`의 `--wait[=SECONDS]`
   (`FLOE_LOCK_WAIT=on|SECONDS`)는 거절된 뒤 앞선 실행이 끝날 때까지 탐침으로 기다렸다가
   다시 시도한다. 다시 만들기라면 연 사람이 닫을 때까지다. 잠금 자체는 여전히 기다리지

@@ -13,6 +13,7 @@
 use std::time::Instant;
 
 mod cellstore;
+mod current;
 mod guard;
 mod drcice;
 mod drcpack;
@@ -286,12 +287,12 @@ fn main() {
              floe-index inventory <file.oas> [--jobs N] [--check] [--check-cells] [--cells] [--out design.inv] [--seg design.seg] [--seg-bytes N] [--check-seg]  \
              (the streaming build's first pass: cell table, layer order, hierarchy fold; --check holds it to the Doc pre-passes, --check-cells the cell parser to the Doc's cells; --out writes it as design.inv, FLOEINV1, and reads it back; --seg writes the segment directory design.seg, FLOESEG1, of the same walk and --check-seg holds its per-layer statistics to the Doc)\n       \
              floe-index inventory --load design.inv [--load-seg design.seg] [<file.oas>] [--cells] [--check]  (the files read back; with the source, compared to fresh ones)\n       \
-             floe-index light <file.oas> [--out DIR] [--jobs N] [--seg-bytes N] [--occupancy [--occupancy-um UM] [--occupancy-mag M] [--occupancy-balance 0|1] [--occupancy-prune 0|1] [--occupancy-max-cells N] [--occupancy-max-work N] [--occupancy-max-bytes N[K|M|G]]] [--occupancy-only] [--mem GiB] [--force]  (the light cache: design.inv + design.seg + meta.json from one inventory pass into DIR, default .<file.oas>.ice, and design.ovo from the streaming occupancy pass with --occupancy; --occupancy-only adds design.ovo to a light cache; --force replaces a full index; the renderer reads the geometry from the source - docs/DIRECT_READ_PLAN.ko.md L4-L5; a jobdeck is handed to `floe2 index DECK --light`)\n       \
+             floe-index light <file.oas> [--out DIR] [--jobs N] [--seg-bytes N] [--occupancy [--occupancy-um UM] [--occupancy-mag M] [--occupancy-balance 0|1] [--occupancy-prune 0|1] [--occupancy-max-cells N] [--occupancy-max-work N] [--occupancy-max-bytes N[K|M|G]]] [--occupancy-only] [--mem GiB] [--force]  (the light cache: design.inv + design.seg + meta.json from one inventory pass into DIR, default .<file.oas>.ice, and design.ovo from the streaming occupancy pass with --occupancy; --occupancy-only adds design.ovo to a light cache; a light cache that is the source's as it stands is kept, --force builds it again and replaces a full index; the renderer reads the geometry from the source - docs/DIRECT_READ_PLAN.ko.md L4-L5; a jobdeck is handed to `floe2 index DECK --light`)\n       \
              floe-index tile <file.oas> <outdir> \
              --grid x0,y0,tw,th,nx,ny --edges e0,e1,e2\n       \
              floe-index index <file.oas> [outdir] [--mem GB] \
              [--jobs N] [--tile-bytes N] [--bands um,um,um]\n       \
-             floe-index vfs <file.oas> [outdir] [--jobs N] \
+             floe-index vfs <file.oas> [outdir] [--force] [--jobs N] \
              [--plan-batch N] [--encode-batch N] \
              [--page-target-mb N] \
              [--coverage | --coverage-only] [--no-lod] [--no-hier] [--no-ovs] [--frontier-only] \
@@ -301,7 +302,7 @@ fn main() {
              [--profile-cell NAME | --profile-cell-ci N] \
              [--profile-jobs N,N,...] [--profile-repeat N] \
              [--profile-snapshot PATH] [--profile-snapshot-refresh] \
-             [--stream | --in-memory] [--mem GiB] [--no-seg] [--seg-bytes N]  (the build's mode: streaming by default since 0.12.370 - the inventory pass, then cells read in file order behind a byte budget of --mem GiB, design.ovo from one more pass; --in-memory or FLOE_INDEX_STREAM=off = the whole-parse build, which coverage, representatives and a profile use anyway; --stream insists; the streaming build leaves design.inv and design.seg beside the cache, --no-seg skips the segment directory)\n       \
+             [--stream | --in-memory] [--mem GiB] [--no-seg] [--seg-bytes N]  (an index that is the source's as it stands - its size and mtime the index's, the cache version this indexer's - is kept and nothing is built, as `floe2 index` keeps it; --force builds it again, and so does an option that asks for a file the index has not: --occupancy, --coverage, --representatives. The build's mode: streaming by default since 0.12.370 - the inventory pass, then cells read in file order behind a byte budget of --mem GiB, design.ovo from one more pass; --in-memory or FLOE_INDEX_STREAM=off = the whole-parse build, which coverage, representatives and a profile use anyway; --stream insists; the streaming build leaves design.inv and design.seg beside the cache, --no-seg skips the segment directory)\n       \
              floe-index vfs <deck.jb> [--level N,N,..] [--jobs N] [--force] [--wait[=S]] \
              [--occupancy-um F] ...  (a jobdeck: its sources that have no index, each beside its source - runs floe2 index)\n       \
              floe-index plan <outdir> --view x0,y0,x1,y1 \

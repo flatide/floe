@@ -36,8 +36,14 @@ rust/target/release/floe-index vfs <design.oas> [outdir] [옵션]
 # outdir 기본값: <design.oas>.floe
 ```
 
+같은 파일에 다시 실행하면 캐시를 그대로 둔다(0.12.458): 캐시가 그 소스의 것이면(캐시 버전,
+소스의 크기와 수정 시각) 아무것도 쓰지 않고 `… is current … - kept`를 말한 뒤 0으로 끝난다.
+`floe2 index`가 `cache up to date`라고 하는 것과 같은 기준이다. 소스가 바뀌었거나 캐시가 온전하지
+않으면 이유를 말하고 다시 만든다. `floe-index light`도 같다.
+
 | 옵션 | 의미 |
 |---|---|
+| `--force` | 현재 캐시도 다시 만든다(0.12.458; 없으면 현재 캐시는 그대로 둔다) |
 | `--jobs N` | 워커 수 (기본: CPU 코어) |
 | `--plan-batch N` / `--encode-batch N` | 파이프라인 윈도/인코드 배치 |
 | `--page-target-mb N` | 페이지 목표 크기 (기본 1MiB) |

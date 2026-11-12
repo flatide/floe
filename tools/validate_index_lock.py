@@ -378,17 +378,32 @@ class IndexLockTests(unittest.TestCase):
         try:
             users = indexlock.state(indexlock.VFS, str(self.cache)).users
             self.assertEqual(len(users), 1)
-            for argv in ([BIN, "vfs", self.src, "--jobs", "2"],
+            for argv in ([BIN, "vfs", self.src, "--jobs", "2", "--force"],
                          [FLOE2, "index", self.src, "--force"]):
                 res = run(argv)
                 self.assertEqual(res.returncode, 75, res.stderr)
                 line = lock_line(res)
                 self.assertIn("chip.oas is in use by %s" % HOLDER, line)
                 self.assertIn("(floe2 view)" if False else "pid %d" % users[0].pid, line)
+            # 0.12.458: without --force the builder asks what `floe2 index`
+            # asks - the index is the source's as it stands - and keeps it:
+            # no lock is asked for, nothing is written, and the reader that
+            # would have refused the rebuild is left as it is
+            marker = self.cache / "design.ovm"
+            before = (marker.stat().st_ino, marker.stat().st_mtime_ns)
+            for argv in ([BIN, "vfs", self.src, "--jobs", "2"], [BIN, "vfs", self.src]):
+                res = run(argv)
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertEqual(lock_line(res), "")
+                self.assertIn("is current", res.stderr)
+                self.assertIn("kept; --force builds it again", res.stderr)
+            self.assertEqual((marker.stat().st_ino, marker.stat().st_mtime_ns), before)
+            self.assertEqual(len(indexlock.state(indexlock.VFS, str(self.cache)).users), 1)
         finally:
             w.stop()
         self.assertEqual(indexlock.state(indexlock.VFS, str(self.cache)).users, [])
-        floe_index("vfs", self.src, "--jobs", "2", ok=0)
+        floe_index("vfs", self.src, "--jobs", "2", "--force", ok=0)
+        self.assertNotEqual(marker.stat().st_ino, before[0])
         # after its commit marker a whole build lets readers in (its ovs
         # step is additive)
         flag = TMP / "committed.go"
@@ -508,7 +523,7 @@ class IndexLockTests(unittest.TestCase):
             self.addCleanup(lambda: hidden.exists() and (os.chmod(hidden, 0o644), hidden.unlink()))
             users = indexlock.state(indexlock.VFS, str(self.cache)).users
             self.assertIn(("someone", "other.host", 4242), [(u.who, u.host, u.pid) for u in users])
-            res = floe_index("vfs", self.src, "--jobs", "2")
+            res = floe_index("vfs", self.src, "--jobs", "2", "--force")
             self.assertEqual(res.returncode, 75, res.stderr)
             self.assertIn("someone on other.host, pid 4242", lock_line(res))
         finally:
@@ -563,7 +578,7 @@ class IndexLockTests(unittest.TestCase):
         w._proc.wait()
         w.stop()
         self.assertTrue((Path(k.dir) / regs[0]).exists())
-        floe_index("vfs", self.src, "--jobs", "2", ok=0)
+        floe_index("vfs", self.src, "--jobs", "2", "--force", ok=0)
         self.assertEqual(indexlock.state(indexlock.VFS, str(self.cache)).users, [])
         self.assertFalse((Path(k.dir) / regs[0]).exists())
 
@@ -576,7 +591,7 @@ class IndexLockTests(unittest.TestCase):
         self.assertFalse((d / ".floe-lock").exists())
         floe2("index", src, "--jobs", "2", ok=0)
         self.hold(full=True, target=cachepath.vfs_cache_dir(str(src)))
-        floe_index("vfs", src, "--jobs", "2", ok=0, env=run_env(FLOE_LOCK="off"))
+        floe_index("vfs", src, "--jobs", "2", "--force", ok=0, env=run_env(FLOE_LOCK="off"))
 
     def test_k7_a_read_only_folder_opens_unlocked(self):
         d = TMP / "ro"
@@ -615,7 +630,7 @@ class IndexLockTests(unittest.TestCase):
             t.start()
         try:
             for _ in range(3):
-                floe_index("vfs", self.src, "--jobs", "2", ok=0)
+                floe_index("vfs", self.src, "--jobs", "2", "--force", ok=0)
         finally:
             stop.set()
             for t in threads:
