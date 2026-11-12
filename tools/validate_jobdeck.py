@@ -3913,6 +3913,112 @@ class ChipShotTests(unittest.TestCase):
         self.assertEqual(names("shown_hier_frames.png"), [])
         self.assertIn("no layer to list - no legend", res.stdout)
 
+    def test_a_named_layer_properties_file_on_the_decks_view(self):
+        # floe2 render DECK --layerprops FILE (user 2026-11-12: "floe2
+        # render에도 --layerprops 추가해줘" - the viewer's `view DECK
+        # --layerprops FILE` for a capture): the file's rows are the view's
+        # (--mode), put over the file that view saved - the level view's N.0
+        # is level N, its chips follow it; a level it hides is left out of a
+        # shot that names neither layers nor chips; the chip view's N.D is a
+        # chip, its N.0 the level's group (fill, width and flag for the
+        # chips that say none of their own)
+        out = self.out
+        deck = self.dir / "test.jb"
+        look = dict(self.env, FLOE_RENDER_DEFAULTS="viewer")
+
+        def shot(name, *args):
+            res = run_floe2("render", deck, "--px", "320", "--legend", "--out",
+                            out / (name + ".png"), "--report",
+                            out / (name + ".json"), *args, env=look, ok=0)
+            dump = run_floe2("fe-embed", "--dump", out / (name + ".png"),
+                             ok=0).stdout
+            rows = [x[len("legend="):].split() for x in dump.split("\n")
+                    if x.startswith("legend=")]
+            return ({r[4]: (r[1], r[2]) for r in rows},
+                    json.loads((out / (name + ".json")).read_text()),
+                    res.stdout)
+
+        base, report, said = shot("props_base")
+        self.assertEqual(sorted(base), ["1/0", "2/0", "3/0", "5/0"])
+        self.assertEqual({fill for _, fill in base.values()}, {"speckle"})
+        self.assertIsNone(report["layerprops"])
+        a = (self.dir / "level.layerprops").resolve()
+        a.write_text("1.0 #ff0000 solid L1 1 1\n2.0 #00ff00 solid L2 0 1\n"
+                     "3.0 #0000ff brick L3 1 3\n9.0 #123456 solid NONE 0 1\n")
+        says = {"file": str(a), "rows": 4, "matched": 3,
+                "hidden": ["2/1", "2/3"]}
+        want = {"1/0": ("#ff0000", "solid"), "3/0": ("#0000ff", "brick"),
+                "5/0": base["5/0"]}
+        got, report, said = shot("props_level", "--layerprops", a)
+        self.assertEqual(got, want)
+        self.assertEqual(report["layerprops"], says)
+        row = report["shots"][0]
+        self.assertEqual((row["layers"], row["colors"], row["recolored"]),
+                         (None, {k: v[0] for k, v in want.items()}, []))
+        self.assertIn("[floe2] layer properties: %s - 3 of its 4 row(s) for "
+                      "layers of this source, 2 hidden" % a, said)
+        # a shot that says what is on is drawn as it says: all, a level
+        # named, chips named - the hidden level's too, in the file's colour
+        level2 = ("#00ff00", "solid")
+        got, report, _ = shot("props_all", "--layerprops", a, "--layers",
+                              "all")
+        self.assertEqual(got, dict(want, **{"2/0": level2}))
+        self.assertEqual(report["shots"][0]["layers"], "all")
+        self.assertEqual(shot("props_id", "--layerprops", a, "--layerid",
+                              "2")[0], {"2/0": level2})
+        self.assertEqual(shot("props_chip", "--layerprops", a, "--chip",
+                              "chipB.oas")[0],
+                         {"2/0": level2, "5/0": base["5/0"]})
+        self.assertEqual(sorted(shot("props_off", "--layerprops", a,
+                                     "--chip-off", "mark.oas")[0]),
+                         ["1/0", "2/0", "5/0"])
+        # over the file the level view saved: the levels the named file
+        # says are its, the others the saved file's
+        own = self.dir / "test.jb.layerprops"
+        own.write_text("1.0 #808080 solid L1 1 4\n5.0 #010203 brick L5 1 1\n")
+        self.addCleanup(lambda: own.exists() and own.unlink())
+        self.assertEqual(shot("props_own")[0]["5/0"], ("#010203", "brick"))
+        self.assertEqual(shot("props_over", "--layerprops", a)[0],
+                         dict(want, **{"5/0": ("#010203", "brick")}))
+        own.unlink()
+
+        # the chip view: a chip's row is the chip's; a level's N.0 is its
+        # group - its flag hides the chips that have none of their own, its
+        # fill is theirs, its colour no chip's
+        chips, _, _ = shot("props_chips", "--mode", "chip")
+        self.assertEqual(sorted(chips), ["1/1", "2/1", "2/3", "3/2", "5/3"])
+        c = (self.dir / "chip.layerprops").resolve()
+        c.write_text("1.1 #ff00ff solid A1 1 1\n2.0 #777777 solid L2 0 1\n"
+                     "2.3 #00ffff brick B2 1 1\n")
+        got, report, _ = shot("props_chip_view", "--mode", "chip",
+                              "--layerprops", c)
+        self.assertEqual(got, {"1/1": ("#ff00ff", "solid"),
+                               "2/3": ("#00ffff", "brick"),
+                               "3/2": chips["3/2"], "5/3": chips["5/3"]})
+        self.assertEqual(report["layerprops"],
+                         {"file": str(c), "rows": 3, "matched": 3,
+                          "hidden": ["2/1"]})
+        self.assertEqual(report["jobdeck"]["view"], "chip")
+        got, _, _ = shot("props_chip_all", "--mode", "chip", "--layerprops",
+                         c, "--layers", "all")
+        self.assertEqual(got["2/1"], (chips["2/1"][0], "solid"))
+        # the level view's file read on the chip view: its rows are the
+        # levels' groups there
+        got, report, _ = shot("props_chip_level", "--mode", "chip",
+                              "--layerprops", a)
+        self.assertEqual(report["layerprops"]["hidden"], ["2/1", "2/3"])
+        self.assertEqual(got, {"1/1": (chips["1/1"][0], "solid"),
+                               "3/2": (chips["3/2"][0], "brick"),
+                               "5/3": chips["5/3"]})
+        # a file that is not there ends the run
+        res = run_floe2("render", deck, "--px", "100", "--out",
+                        out / "props_none.png", "--layerprops",
+                        self.dir / "nope.layerprops", env=look, ok=1)
+        self.assertEqual(res.stderr.strip().split("\n")[-1],
+                         "floe2: layer properties file not found: %s"
+                         % (self.dir / "nope.layerprops"))
+        self.assertFalse((out / "props_none.png").exists())
+
     def test_painted_rows_are_told_apart_by_colour(self):
         # a deck view gives its rows the palette's ten colours in turn, so of
         # the rows a picture shows two may have one (user 2026-11-11: "가능하면

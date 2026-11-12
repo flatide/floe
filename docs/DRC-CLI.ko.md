@@ -266,7 +266,7 @@ floe2 render chip.oas --drc results.db --drc-rule M1.SPACE.1 \
 | `--depth N` | full | 계층 깊이 (기본 = 전체 전개, 뷰어 "99") |
 | `--layers ...` | 자동 | 명시하면 svrf 격리보다 우선 |
 | `--drc-rules RULES.json` | 자동 탐색 | svrf 사이드카 직접 지정 |
-| `--detail`, `--density`, `--thin`, `--occupancy`, `--label-font-px`, `--layer-colors`, `--legend`, `--archival`, `--no-index`, `--temp-index`, `--light`/`--full`, `--wait` | 일반 캡처와 같음 | [CAPTURE-CLI.ko.md](CAPTURE-CLI.ko.md) §1.3·§1.5. 영역(`--bbox`/`--at`/mosaic)·`--batch`·`--report`·`--chipid`/`--chipnumber`와는 함께 쓸 수 없다 |
+| `--detail`, `--density`, `--thin`, `--occupancy`, `--label-font-px`, `--layer-colors`, `--layerprops`, `--legend`, `--archival`, `--no-index`, `--temp-index`, `--light`/`--full`, `--wait` | 일반 캡처와 같음 | [CAPTURE-CLI.ko.md](CAPTURE-CLI.ko.md) §1.3·§1.5. 영역(`--bbox`/`--at`/mosaic)·`--batch`·`--report`·`--chipid`/`--chipnumber`와는 함께 쓸 수 없다 |
 | `--floe-reviewer NAME` | DISPLAY/SSH 유도 | 기존 waive 상태를 읽는 리뷰어 태그; 캡처는 리뷰를 쓰지 않는다 (`floe2 drc`/`view`에도 있음; FLOE_REVIEWER env 동치). `FLOE_REVIEWER_REQUIRED=1`이면 필수(0.12.440) |
 
 - **픽셀 = 뷰어와 동일**: 뷰어의 렌더 서비스 경로(상주 vfsd
@@ -280,6 +280,10 @@ floe2 render chip.oas --drc results.db --drc-rule M1.SPACE.1 \
   - 밀도는 뷰어처럼 기본으로 켜져 컷 아래 도형을 밀도로 그린다(0.12.351). `--density off`나 `FLOE_RUST_DENSITY_STACK=off`로 끈다.
 - **`--layer-colors row|group`**(2026-10-13): 레이어 기본 색. row(기본)는 패널 줄마다 다른 색, group은 layer 번호마다 한 색이다.
   범례(fe-embed) 색도 같다. `FLOE_LAYER_COLORS`가 기본값이다.
+- **`--layerprops FILE`**(0.12.452): 이 실행의 레이어 속성 파일. 일반 캡처와 같이 디자인 기본값 위에 덮는다
+  ([CAPTURE-CLI.ko.md](CAPTURE-CLI.ko.md) §1.3). 색·채움·선폭이 스냅샷과 범례에 쓰인다. 레이어 격리가 고른 레이어와
+  `--layers`로 준 레이어는 파일이 숨긴 것이라도 그린다. 격리할 레이어를 모르는 룰(all layers)은 파일이 숨긴 레이어를
+  빼고 그린다.
 - **레이어 격리**: rules.json 사이드카가 발견되면(탐색 순서 =
   db 옆 덱 basename → 기록된 덱 경로 → `<db>.rules.json`, 작업 디렉터리가 있으면 이어서 그 셋의
   DIR 아래 자리(0.12.450), 또는 `--drc-rules`) 그 룰의 원천 GDS 레이어만 켠다 — 뷰어 더블클릭

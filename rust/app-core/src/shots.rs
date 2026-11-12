@@ -215,20 +215,32 @@ pub fn layer_ids(text: &str) -> Result<Option<String>> {
     }
     Ok((!out.is_empty()).then(|| out.join(",")))
 }
+/// `--layers all`, as a shot keeps it: every layer, said so.
+pub const ALL_LAYERS: &str = "all";
+/// Whether a shot's layers name some (`all` and unsaid name none: a shot's
+/// chips may then say what is on).
+pub fn names_layers(layers: Option<&str>) -> bool {
+    layers.is_some_and(|l| !l.is_empty() && l != ALL_LAYERS)
+}
 /// What a shot draws, said by name (`--layers` / `--layer`; all or empty:
 /// none named) and by id (`--layerid`, layer_ids): each the last given, the
 /// two in the order they were given - a legend lists them so; nothing named
-/// is every layer.
+/// is every layer: `all` every layer as said (spec: `all` - the layers a
+/// layer properties file named for the run hides too, 2026-11-12), an empty
+/// value the default, which leaves those out (Dataset::resolve_layers).
 #[derive(Default)]
 pub struct LayerChoice {
     names: Option<String>,
     ids: Option<String>,
     ids_first: bool,
     said: bool,
+    /// `all` was the last say by name
+    all: bool,
 }
 impl LayerChoice {
     pub fn names(&mut self, value: &str) {
         self.said = true;
+        self.all = value == "all";
         self.names = (!matches!(value, "" | "all")).then(|| value.to_string());
         self.ids_first = true;
     }
@@ -242,8 +254,11 @@ impl LayerChoice {
     pub fn said(&self) -> bool {
         self.said
     }
-    /// The spec the layer resolvers take, None for every layer.
+    /// The spec the layer resolvers take: None for the default (every
+    /// layer, less those a named layer properties file hides), `all` for
+    /// every layer said so.
     pub fn spec(self) -> Option<String> {
+        let all = self.all;
         let (a, b) = if self.ids_first {
             (self.ids, self.names)
         } else {
@@ -251,7 +266,7 @@ impl LayerChoice {
         };
         match (a, b) {
             (Some(a), Some(b)) => Some(format!("{a},{b}")),
-            (a, b) => a.or(b),
+            (a, b) => a.or(b).or_else(|| all.then(|| ALL_LAYERS.to_string())),
         }
     }
 }
@@ -557,7 +572,13 @@ mod tests {
         );
         assert_eq!(spec(&[("name", "A"), ("name", "B")]), (true, s("B")));
         assert_eq!(spec(&[("name", "all"), ("id", "2")]), (true, s("2/0")));
-        assert_eq!(spec(&[("name", "all")]), (true, None));
+        // `all` is every layer, said so (a layer properties file's hidden
+        // ones too); an empty value the default
+        assert_eq!(spec(&[("name", "all")]), (true, s("all")));
+        assert_eq!(spec(&[("name", "")]), (true, None));
+        assert_eq!(spec(&[("name", "all"), ("name", "")]), (true, None));
+        assert!(!names_layers(None) && !names_layers(Some("all")) && !names_layers(Some("")));
+        assert!(names_layers(Some("2/0")));
         assert_eq!(spec(&[("id", "")]), (true, None));
     }
     #[test]

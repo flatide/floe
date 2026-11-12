@@ -21,7 +21,7 @@ jobdeck 게이트의 합성 덱(`tools/validate_jobdeck.py`의 test.jb: 소스 3
 | 칩의 네 모서리 (§9) | `--fit-chip NAME --corners --size W,H`, `--mosaic-at`, `--line`, `--keep-tiles` | 준비 |
 | 여러 장 한 번에: 칩마다·레벨마다·위치마다 (§10) | `--batch FILE --out DIR --report FILE`, 줄은 `info --chips --json`에서 만든다 | 준비, 줄 생성은 스크립트 |
 | 해상도 (§11) | `--px W\|WxH\|max` (기본 max), `--stretch`, `FLOE_CAPTURE_PX` | 준비 |
-| 그림 모양 (§12) | `--detail`, `--thin`, `--archival`, `--depth` + `--frames`, `--legend`, `<deck>.jb.layerprops` | 준비, 덱 제한 있음 |
+| 그림 모양 (§12) | `--detail`, `--thin`, `--archival`, `--depth` + `--frames`, `--legend`, `<deck>.jb.layerprops`, `--layerprops FILE`(0.12.452) | 준비, 덱 제한 있음 |
 | chip view 색: 칩마다 다른 색 (§12) | `--mode chip` (0.12.436; `--mode layer`는 소스 레이어 색) | 준비 |
 | 광역과 점유 요약 (§13) | `--occupancy on\|off` | 준비, `--workdir`는 주의 |
 | 인덱스 없는 덱, 쓸 수 없는 폴더 (§14) | `--temp-index[=DIR]`, `--workdir DIR`, `--light\|--full`, `--wait`, `--no-index` | 준비 |
@@ -254,6 +254,11 @@ floe2 render deck.jb --batch perchip.txt --out perchip/ --report perchip/report.
 - 뷰어의 level view에서 저장한 `<deck>.jb.layerprops`의 색·채움·선폭은 캡처에도 적용된다. chip view의
   `<deck>.chip-by-level.jb.layerprops`와 layer view의 `<deck>.layer.jb.layerprops`는 그 뷰의 `--mode`에서 적용된다.
   숨김(visibility 0)은 적용되지 않으니 숨길 레벨은 `--layerid`나 `--chip-off`로 뺀다.
+- `--layerprops FILE`(0.12.452)은 그 실행의 레이어 속성 파일이다. 덱 폴더에 쓸 수 없을 때, 또는 캡처마다 다른 색을
+  줄 때 쓴다. 파일의 줄은 찍는 뷰의 줄이고(level view의 `N.0`이 레벨 N) 그 뷰의 저장 파일 위에 덮는다: 색·채움·선폭,
+  그리고 이 파일의 숨김은 적용된다. 숨긴 레벨은 `--layerid`·`--layers`·`--chip`·`--chip-off`를 주지 않은 샷에서
+  빠지고, `--layers all`은 숨긴 것까지 그린다. 읽을 수 없는 파일이면 1로 끝난다. 보고서 맨 위 `layerprops`가 파일과
+  숨긴 줄을 말한다. 자세한 것은 [CAPTURE-CLI.ko.md](CAPTURE-CLI.ko.md) §1.3과 §4.6.
 - `--legend`는 그린 레벨의 범례(색, 채움, 이름, N/0)와 축척(`ppu`, `unit`)을 flateyes 메타데이터로 넣는다.
   `floe2 fe-embed --dump a.png`로 읽는다. 픽셀은 그대로다. chip view에서는 칩 줄(색, 채움, 파일 이름, L/D)이고 레벨
   머리 줄은 없다(그 색으로 그려진 것이 없다). `--chip`으로 고르면 켠 칩의 줄만 적는다(0.12.436; 전에는 로드한 레벨
@@ -343,7 +348,8 @@ before)`이다(0.12.437; 그 전은 `floe2: rendered incomplete - …  [exit 3]`
    그 레벨 줄, chip view는 그 칩 줄). ~~chip view의 `--legend`가 로드한 레벨의 칩 전부를 적던 것~~: 0.12.438부터 틀
    안에 배치가 있는 줄만, 0.12.439부터는 어느 뷰에서나 그림에 실제로 보이는 줄만 적는다(§12;
    `FLOE_LEGEND_IN_VIEW=placed`면 0.12.438의 배치 기준, `off`면 전부).
-9. `<deck>.jb.layerprops`의 숨김(visibility 0)은 캡처에 적용되지 않는다(§12).
+9. `<deck>.jb.layerprops`의 숨김(visibility 0)은 캡처에 적용되지 않는다(§12). `--layerprops FILE`(0.12.452)로 준 파일의
+   숨김은 적용된다.
 9a. 캡처의 색은 그 그림에 칠해지는 줄끼리 겹치지 않게 정해지므로(0.12.449, §12), 색이 겹치던 줄은 뷰어와 다른 색으로
    나오고 영역이 다른 두 캡처에서 같은 줄이 다른 색일 수 있다. 줄과 색의 대응은 그 그림의 범례(`--legend`)나 보고서
    `colors`로 읽는다. 뷰어와 같은 색이 필요하면 `FLOE_DECK_DISTINCT_COLORS=off`.
@@ -382,3 +388,9 @@ before)`이다(0.12.437; 그 전은 `floe2: rendered incomplete - …  [exit 3]`
 보고서 `colors`·`recolored`와 `note:` 줄, `--legend` 없이도 같은 픽셀, 겹치지 않는 영역은 끈 것과 픽셀이 같음, mosaic의
 뒤 타일이 앞 타일의 색을 피해 팔레트의 남은 색을 받음, chip view에서 같은 소스는 두 레벨에서 한 색이고 팔레트가 돌아
 겹친 칩만 갈림, layerprops로 준 색은 그대로이고 그 색을 뷰에서 쓰던 줄이 다른 색을 받음, `FLOE_DECK_DISTINCT_COLORS=off`.
+2026-11-12 0.12.452: `--layerprops FILE`을 더했다(§12; 사용자 "floe2 render에도 --layerprops 추가해줘"; app-core와
+app-cli만, floe-index/renderd 0.12.450 그대로). 같은 덱으로 확인했다(ChipShotTests의
+`test_a_named_layer_properties_file_on_the_decks_view`): level view에서 파일의 색·채움이 범례와 보고서 `colors`에 있고
+숨긴 레벨이 빠짐, `--layers all`·`--layerid 2`·`--chip`·`--chip-off`는 숨긴 레벨도 파일의 색으로 그림, 뷰가 저장한
+파일 위에 덮임, chip view에서 칩 줄의 색과 묶음(`N.0`)의 채움·숨김, 자기 표시 여부가 있는 칩은 묶음의 숨김을 따르지
+않음, level view의 파일을 chip view에 주면 묶음의 줄로 읽힘, 없는 파일은 1.

@@ -81,6 +81,9 @@ pub struct Layout {
     pub layer_props: Vec<styles::LayerProps>,
     /// how the layers' default colours were given (set_layer_colors)
     pub layer_colors: styles::LayerColors,
+    /// the layer properties file named for the run, over the design
+    /// default's (set_layer_props; `floe2 render --layerprops`)
+    pub named_props: Option<styles::NamedProps>,
 }
 
 pub(crate) fn regular_file(path: &Path) -> Result<File> {
@@ -214,6 +217,7 @@ impl Layout {
             source_stale,
             layer_props,
             layer_colors: styles::LayerColors::default(),
+            named_props: None,
         };
         layout.set_layer_colors(styles::LayerColors::from_env());
         check_cancelled(cancelled)?;
@@ -236,13 +240,55 @@ impl Layout {
         self.layer_colors = mode;
     }
 
+    /// The layer properties file named for the run (`rows`, read from
+    /// `file`: styles::read_named) over the design default's, as the
+    /// viewer's Layer > load layer properties puts one on a layout that has
+    /// its default (styles::overlay): the colours, fills and line widths of
+    /// the layers it names - the colours at once (set_layer_colors), the
+    /// fills and widths with the styles (layout_styles) -, and the layers it
+    /// hides, which a capture that names no layers leaves out
+    /// (resolve_layers).
+    pub fn set_layer_props(&mut self, file: PathBuf, rows: &[crate::layerprops::Row]) {
+        let known: BTreeSet<_> = self.metadata.layers.iter().map(Layer::key).collect();
+        let hidden = styles::visibility(rows, &known)
+            .into_iter()
+            .filter_map(|(key, visible)| (!visible).then_some(key))
+            .collect();
+        self.layer_props = styles::overlay(&self.layer_props, rows, &known);
+        self.named_props = Some(styles::NamedProps {
+            file,
+            rows: rows.len(),
+            matched: rows.iter().filter(|r| known.contains(&r.layer)).count(),
+            hidden,
+        });
+        self.set_layer_colors(self.layer_colors);
+    }
     pub fn bbox_um(&self) -> [f64; 4] {
         self.metadata.bbox.map(|v| v as f64 * self.metadata.dbu)
     }
+    /// The layers a shot draws: those `spec` names; `all`, every layer;
+    /// unsaid (None, empty), every layer too - less those a layer
+    /// properties file named for the run hides: then the layer panel's rows
+    /// (the pairs that hold a shape or a text) that it leaves on, as the
+    /// viewer draws the layout with the file loaded.
     pub fn resolve_layers(&self, spec: Option<&str>) -> Result<Layers> {
-        let Some(spec) = spec.filter(|s| !s.is_empty() && *s != "all") else {
-            return Ok(Layers::All);
+        let Some(spec) = spec.filter(|s| !s.is_empty()) else {
+            let Some(named) = &self.named_props else {
+                return Ok(Layers::All);
+            };
+            return styles::shown_layers(
+                self.metadata
+                    .layers
+                    .iter()
+                    .filter(|l| l.stored_shapes > 0)
+                    .map(Layer::key)
+                    .collect(),
+                &named.hidden,
+            );
         };
+        if spec == "all" {
+            return Ok(Layers::All);
+        }
         let mut out = Vec::new();
         for token in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
             if let Some((l, d)) = token.split_once('/') {

@@ -189,7 +189,9 @@ impl Capture {
                 "--in-chip NAME#K frames its placement in the chip's coordinates; --fit-chip frames another region - give one",
             ));
         }
-        if self.shot.layers.is_some() && (self.chip.is_some() || self.chip_off.is_some()) {
+        if super::names_layers(self.shot.layers.as_deref())
+            && (self.chip.is_some() || self.chip_off.is_some())
+        {
             return Err(Error::input(
                 "--layers and --chip/--chip-off both say what is on; give one",
             ));
@@ -633,7 +635,7 @@ mod tests {
         defaults.shot.layers = Some("ALIGN".into());
         let parsed = parse(
             "a layerid=2\nb layer=METAL1 layerid=3.1\nc layers=all layerid=1\n\
-             d\ne layer=VIA1\nf chip=x\ng layer=all",
+             d\ne layer=VIA1\nf chip=x\ng layer=all\nh layers=",
             &defaults,
         )
         .unwrap();
@@ -649,6 +651,8 @@ mod tests {
                 Some("ALIGN"),
                 Some("VIA1"),
                 None,
+                // every layer, said so; an empty value: the default
+                Some("all"),
                 None
             ]
         );

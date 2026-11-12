@@ -482,6 +482,9 @@ floe2 render deck.jb --batch shots.txt --out shots/ --report shots/report.json
   보고 JSON의 색 순서 키(`order[].key`)는 식별자라 `$N` 그대로다. 덱 문법의 `$` 항목 줄을 가리키는 `unknown $`도 그대로다.
 - `--layer-colors row|group`(레이아웃, 2026-10-13): 레이어 기본 색을 패널 줄마다(row, 기본) 또는 layer 번호마다(group,
   예전 방식) 정한다. `FLOE_LAYER_COLORS`가 기본값이다. jobdeck은 자기 색 체계를 쓰므로 거부한다.
+- `--layerprops FILE`(0.12.452): 이 실행의 레이어 속성 파일. 덱은 찍는 뷰(`--mode`)의 줄로 읽어 그 뷰의 저장 파일
+  위에 덮는다(level view의 `N.0`이 레벨 N). 파일이 숨긴 레벨은 레이어도 칩도 지정하지 않은 샷에서 빠진다.
+  [CAPTURE-CLI.ko.md](CAPTURE-CLI.ko.md) §1.3, §4.6.
 - `--legend`(2026-10-13): 그린 레이어의 레전드(`box 색 fill 이름 L/D`)를 이미지마다 flateyes 메타데이터로 넣는다.
   - 덱은 레벨 보기처럼 레벨마다 한 줄(머리 행, 레벨 색)이다. 칩 행은 그 레벨 아래에 묶인다. `--layerid 2 --layer ALIGN`(예전 `--layers '$2,ALIGN'`)이면 그 레벨들만 준 순서로 넣는다.
   - 픽셀은 그대로다. `floe2 fe-embed --dump`로 읽고, flateyes로 열면 보인다.

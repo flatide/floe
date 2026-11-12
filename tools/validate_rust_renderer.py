@@ -4442,6 +4442,246 @@ class LegendTests(unittest.TestCase):
             self.assertEqual(floe("render", src, "--legend=on", "--out", d / "x.png",
                                   ok=False).returncode, 2)
 
+    def test_a_named_layer_properties_file_goes_over_the_design_default(self):
+        """floe2 render SRC --layerprops FILE (user 2026-11-12: "floe2 render에도
+        --layerprops 추가해줘" - the viewer's `view SRC --layerprops FILE` of
+        0.12.451 for a capture): a Calibre .layerprops put over the design
+        default beside the source as the viewer's load puts one - the colours,
+        fills and widths of the layers it names; the layers it hides left out
+        of a shot that names none (--layers all: every layer); a layer it does
+        not name keeps the default; read through a link; a file that cannot be
+        read ends the run before the source is opened."""
+        import json
+        import klayout.db as db
+        from PIL import Image
+        from floe_oracle.cache import layer_color
+
+        release = ROOT / "rust" / "target" / "release"
+        floe2 = os.environ.get("FLOE2_BIN") or str(release / "floe2")
+        env = dict(os.environ, FLOE_INDEX_BIN=str(release / "floe-index"),
+                   FLOE_RENDERD_BIN=str(release / "floe-renderd"))
+        for name in ("FLOE_EMPTY_LAYERS", "FLOE_RENDER_DEFAULTS", "FLOE_LAYER_COLORS",
+                     "FLOE_WORKDIR", "FLOE_AUTO_INDEX"):
+            env.pop(name, None)
+
+        def floe(*args, ok=0, cwd=None):
+            done = subprocess.run([floe2, *map(str, args)], env=env, capture_output=True,
+                                  text=True, timeout=120, cwd=cwd)
+            self.assertEqual(done.returncode, ok, done.stdout + done.stderr)
+            return done
+
+        def legend(png):
+            dump = floe("fe-embed", "--dump", png).stdout
+            return [line.split("=", 1)[1] for line in dump.splitlines()
+                    if line.startswith("legend=")]
+
+        # one box a layer, a quadrant each: M1 lower left, M2 lower right,
+        # M3 upper left, MK upper right
+        QUADS = (("M1", (1, 0), (0, 1)), ("M2", (2, 0), (1, 1)),
+                 ("M3", (3, 0), (0, 0)), ("MK", (4, 1), (1, 0)))
+        default = {name: layer_color(i) for i, (name, _, _) in enumerate(QUADS)}
+
+        def quads(png):
+            """a quadrant's colour and how much of its middle it covers: 1 a
+            solid fill, about a half the speckle, 0 nothing drawn"""
+            im = Image.open(png).convert("RGB")
+            w, h = im.size
+            out = {}
+            for name, _, (qx, qy) in QUADS:
+                box = (qx * w // 2 + w // 8, qy * h // 2 + h // 8,
+                       (qx + 1) * w // 2 - w // 8, (qy + 1) * h // 2 - h // 8)
+                colours = im.crop(box).getcolors(maxcolors=1 << 16)
+                total = sum(n for n, _ in colours)
+                lit = sorted((n, c) for n, c in colours if c != (0, 0, 0))
+                self.assertLessEqual(len(lit), 1, (name, colours))
+                out[name] = (("#%02x%02x%02x" % lit[0][1], round(lit[0][0] / total, 1))
+                             if lit else (None, 0))
+            return out
+
+        with tempfile.TemporaryDirectory() as directory:
+            d = Path(directory).resolve()
+            run = d / "run 1"
+            run.mkdir()
+            src = run / "layout.oas"
+            layout = db.Layout()
+            layout.dbu = 0.001
+            top = layout.create_cell("TOP")
+            for name, (layer, datatype), (qx, qy) in QUADS:
+                x, y = qx * 100000, (1 - qy) * 100000
+                top.shapes(layout.layer(db.LayerInfo(layer, datatype, name))).insert(
+                    db.Box(x + 5000, y + 5000, x + 95000, y + 95000))
+            layout.layer(db.LayerInfo(9, 0, "EMPTY"))
+            layout.write(str(src))
+            floe("index", src, "--jobs", "1")
+
+            def capture(name, *extra, legend_too=True):
+                out, report = run / (name + ".png"), run / (name + ".json")
+                done = floe("render", src, "--px", "320", "--out", out, "--report", report,
+                            *((("--legend",) if legend_too else ()) + extra))
+                return out, json.loads(report.read_text()), done.stdout
+
+            def row(name, colour=None, fill="speckle"):
+                key = dict((n, k) for n, k, _ in QUADS)[name]
+                return "box %s %s %s %d/%d" % (colour or default[name], fill, name, *key)
+
+            # the defaults: every row its place's colour, the speckle
+            out, report, said = capture("base")
+            self.assertEqual(quads(out), {n: (default[n], 0.5) for n in default})
+            self.assertEqual(legend(out), [row(n) for n in ("M1", "M2", "M3", "MK")])
+            self.assertIsNone(report["layerprops"])
+            self.assertNotIn("layer properties", said)
+            base = capture("base plain", legend_too=False)[0].read_bytes()
+
+            # the file: a colour and a fill, a hidden layer, a colour by its
+            # name with a width, a layer the layout has not
+            a = d / "a.layerprops"
+            a.write_text("# the review's colours\n1.0 #ff0000 solid M1 1 1\n"
+                         "2.0 #00ff00 solid M2 0 1\n3.0 blue speckle M3 1 3\n"
+                         "77.0 #123456 solid X 1 1\n")
+            text = a.read_text()
+            says = {"file": str(a), "rows": 4, "matched": 3, "hidden": ["2/0"]}
+            line = ("[floe2] layer properties: %s - 3 of its 4 row(s) for layers of this "
+                    "source, 1 hidden (left out where a shot names no layers; --layers all "
+                    "draws every layer)" % a)
+            out, report, said = capture("named", "--layerprops", a)
+            self.assertEqual(quads(out), {"M1": ("#ff0000", 1.0), "M2": (None, 0),
+                                          "M3": ("#0000ff", 0.5), "MK": (default["MK"], 0.5)})
+            self.assertEqual(legend(out), [row("M1", "#ff0000", "solid"), row("M3", "#0000ff"),
+                                           row("MK")])
+            self.assertEqual(report["layerprops"], says)
+            self.assertIsNone(report["shots"][0]["layers"])
+            self.assertEqual(said.count(line), 1, said)
+            self.assertNotIn("WARNING", said)
+            named = capture("named plain", "--layerprops", a, legend_too=False)[0].read_bytes()
+            self.assertNotEqual(named, base)
+
+            # a shot that says its layers is drawn as it says: `all` every
+            # layer - the hidden one too, in the file's colour -, a layer
+            # named, by name or by the panel's number
+            out, report, _ = capture("all", "--layerprops", a, "--layers", "all")
+            self.assertEqual(quads(out), {"M1": ("#ff0000", 1.0), "M2": ("#00ff00", 1.0),
+                                          "M3": ("#0000ff", 0.5), "MK": (default["MK"], 0.5)})
+            self.assertEqual(legend(out), [row("M1", "#ff0000", "solid"),
+                                           row("M2", "#00ff00", "solid"),
+                                           row("M3", "#0000ff"), row("MK")])
+            self.assertEqual((report["shots"][0]["layers"], report["layerprops"]), ("all", says))
+            out, report, _ = capture("one", "--layerprops", a, "--layers", "M2")
+            self.assertEqual(quads(out), {"M1": (None, 0), "M2": ("#00ff00", 1.0),
+                                          "M3": (None, 0), "MK": (None, 0)})
+            out, _, _ = capture("ids", "--layerprops", a, "--layerid", "2,4.1")
+            self.assertEqual(legend(out), [row("M2", "#00ff00", "solid"), row("MK")])
+            # without a file `all` is what it was: every layer
+            self.assertEqual(capture("all plain", "--layers", "all", legend_too=False)[0]
+                             .read_bytes(), base)
+            # each batch line its own say: nothing, an empty value (the
+            # default: the hidden layer out), a layer, all
+            (d / "shots.txt").write_text("whole\nunsaid layers=\nnamed layers=2/0,1/0\n"
+                                         "every layers=all\n")
+            floe("render", src, "--px", "160", "--legend", "--layerprops", a,
+                 "--batch", d / "shots.txt", "--out", d / "batch", "--report", d / "batch.json")
+            shown = [row("M1", "#ff0000", "solid"), row("M3", "#0000ff"), row("MK")]
+            self.assertEqual(legend(d / "batch" / "whole.png"), shown)
+            self.assertEqual(legend(d / "batch" / "unsaid.png"), shown)
+            self.assertEqual(legend(d / "batch" / "named.png"),
+                             [row("M2", "#00ff00", "solid"), row("M1", "#ff0000", "solid")])
+            self.assertEqual(legend(d / "batch" / "every.png"),
+                             [row("M1", "#ff0000", "solid"), row("M2", "#00ff00", "solid"),
+                              row("M3", "#0000ff"), row("MK")])
+            self.assertEqual([s["layers"] for s in json.loads((d / "batch.json").read_text())["shots"]],
+                             [None, None, "2/0,1/0", "all"])
+            # --archival: the file's colours, its fills solid; the hidden
+            # layer still out
+            out, _, _ = capture("archival", "--layerprops", a, "--archival")
+            self.assertEqual(quads(out), {"M1": ("#ff0000", 1.0), "M2": (None, 0),
+                                          "M3": ("#0000ff", 1.0), "MK": (default["MK"], 1.0)})
+            # --layer-colors group gives the layers the file does not name
+            # their group's colour
+            out, _, _ = capture("group", "--layerprops", a, "--layer-colors", "group")
+            self.assertEqual(legend(out), [row("M1", "#ff0000", "solid"), row("M3", "#0000ff"),
+                                           row("MK", layer_color(4))])
+            # read through a link (the file is the command line's own), and
+            # from the run's directory
+            link = d / "link.layerprops"
+            os.symlink(a, link)
+            out, report, said = capture("link", "--layerprops", link, legend_too=False)
+            self.assertEqual((out.read_bytes(), report["layerprops"]), (named, says))
+            self.assertIn(line, said)
+            done = floe("render", "layout.oas", "--px", "320", "--out", "rel.png",
+                        "--layerprops", "../a.layerprops", cwd=str(run))
+            self.assertEqual((run / "rel.png").read_bytes(), named)
+
+            # the picture is the one the same rows give as the design
+            # default beside the source, with the layers it leaves on named
+            # (a design default's own hidden flag is no capture's, as before)
+            beside = run / "layout.oas.layerprops"
+            beside.write_text(text)
+            out, report, said = capture("beside", legend_too=False)
+            self.assertIsNone(report["layerprops"])
+            self.assertEqual(quads(out)["M2"], ("#00ff00", 1.0))
+            self.assertEqual(capture("beside named", "--layers", "1/0,3/0,4/1", legend_too=False)[0]
+                             .read_bytes(), named)
+            # over a design default: the layers the file names are the
+            # file's, the others keep the default's colour and fill
+            beside.write_text("1.0 #808080 clear M1 1 4\n4.1 #ffff00 solid MK 0 2\n")
+            out, _, _ = capture("default")
+            self.assertEqual(legend(out), [row("M1", "#808080", "none"), row("M2"), row("M3"),
+                                           row("MK", "#ffff00", "solid")])
+            out, report, _ = capture("over", "--layerprops", a)
+            self.assertEqual(quads(out), {"M1": ("#ff0000", 1.0), "M2": (None, 0),
+                                          "M3": ("#0000ff", 0.5), "MK": ("#ffff00", 1.0)})
+            self.assertEqual(legend(out), [row("M1", "#ff0000", "solid"), row("M3", "#0000ff"),
+                                           row("MK", "#ffff00", "solid")])
+            self.assertEqual(report["layerprops"], says)
+            beside.unlink()
+
+            # a file that names no layer of the layout: a warning, the
+            # picture the defaults'; one that hides every layer: a picture
+            # of nothing, said
+            b = d / "b.layerprops"
+            b.write_text("5.0 red solid NONE 0 1\n")
+            out, report, said = capture("nomatch", "--layerprops", b, legend_too=False)
+            self.assertEqual(out.read_bytes(), base)
+            self.assertEqual(report["layerprops"],
+                             {"file": str(b), "rows": 1, "matched": 0, "hidden": []})
+            self.assertIn("[floe2] WARNING: layer properties file %s names no layer of %s "
+                          "(1 row(s)) - drawn by the defaults" % (b, src), said)
+            c = d / "c.layerprops"
+            c.write_text("".join("%d.%d red solid %s 0 1\n" % (*key, name) for name, key, _ in QUADS))
+            out, report, said = capture("nothing", "--layerprops", c)
+            self.assertEqual(quads(out), {n: (None, 0) for n in default})
+            self.assertEqual((legend(out), report["layerprops"]["hidden"]),
+                             ([], ["1/0", "2/0", "3/0", "4/1"]))
+            self.assertIn("[floe2] WARNING: layer properties file %s hides every layer of this "
+                          "source" % c, said)
+
+            # what cannot be read ends the run with its name, before the
+            # source is opened: a source without an index is not indexed
+            other = d / "other.oas"
+            shutil.copy2(src, other)
+            binary = d / "bad.layerprops"
+            binary.write_bytes(b"\xff\xfe\x00\x01" * 64)
+            for file, why in ((d / "nope.layerprops",
+                               "floe2: layer properties file not found: %s" % (d / "nope.layerprops")),
+                              (binary, "floe2: layer properties file %s: not a text file (UTF-8)" % binary),
+                              (d, "floe2: layer properties file %s: not a regular file" % d)):
+                done = floe("render", other, "--px", "100", "--out", d / "refused.png",
+                            "--layerprops", file, ok=1)
+                self.assertEqual(done.stderr.strip().splitlines()[-1], why)
+            self.assertEqual(sorted(p.name for p in d.iterdir() if "other" in p.name), ["other.oas"])
+            self.assertFalse((d / "refused.png").exists())
+            done = floe("render", src, "--layerprops=", "--out", d / "refused.png", ok=2)
+            self.assertEqual(done.stderr.strip().splitlines()[-1], "floe2: --layerprops requires a file")
+            # no output takes the file's place
+            done = floe("render", src, "--px", "100", "--layerprops", a, "--out", link, ok=1)
+            done = floe("render", src, "--px", "100", "--layerprops", link, "--out", a, ok=1)
+            self.assertEqual(done.stderr.strip().splitlines()[-1],
+                             "floe2: output would replace a source, color input, or cache lock")
+            self.assertEqual(a.read_text(), text)
+            # render's own: info takes none
+            self.assertEqual(floe("info", src, "--layerprops", a, ok=2).stderr.strip().splitlines()[-1],
+                             "floe2: unsupported info option: --layerprops")
+            self.assertIn("--layerprops FILE", floe("render", "--help").stdout)
+
 
 @unittest.skipUnless(os.environ.get("FLOE_INTEGRATION_SOURCE"),
                      "set FLOE_INTEGRATION_SOURCE for the real daemon test")

@@ -1027,6 +1027,13 @@ pub fn run_summary(
             "occupancy":shots[0].capture.shot.occupancy,
             // a layout's default layer colours (--layer-colors; a jobdeck: null)
             "layer_colors":dataset.layer_colors().map(crate::styles::LayerColors::name),
+            // the layer properties file named for the run (--layerprops;
+            // null without one): its rows, those for a layer of the source,
+            // and the rows it hides - left out of a shot that names neither
+            // layers nor chips (the shots' `layers`: null)
+            "layerprops":dataset.named_props().map(|n| serde_json::json!({
+                "file":n.file.to_string_lossy(),"rows":n.rows,"matched":n.matched,
+                "hidden":n.hidden.iter().map(|(l, d)| format!("{l}/{d}")).collect::<Vec<_>>()})),
             // each image's layer legend embedded (--legend; the shots' `legend`)
             "legend":options.legend,
             // a jobdeck's rows told apart by their colours as they paint

@@ -37,7 +37,7 @@ SHARED_APP_LAYER.ko.md). 도움말과 메시지의 프로그램 이름만 다르
 | 0 | 모든 샷이 나왔다. 빠진 것이 있어도 그림이 나왔으면 0이다(0.12.437): 켠 칩의 건너뛴 배치, 디코드 예산을 넘긴 페이지, 점유 요약을 기다린 pass(`summary_building`)는 stdout의 `WARNING: N jobdeck placement(s) not drawn`, stderr 마지막 줄 `floe2: WARNING: rendered incomplete - …`, 보고서 `complete=false`로 알린다 |
 | 3 | `FLOE_RENDER_INCOMPLETE_EXIT=3`(§7)을 두었을 때만: 그림은 나왔지만 빠진 것이 있다(0.12.436까지의 기본). stderr `rendered incomplete - … [exit 3]` |
 | 2 | 명령행 오류: 모르는 옵션, 잘못된 값, 함께 쓸 수 없는 옵션, 레이아웃에 준 `--level`·`--chipid`·`--layer-colors`·`--density on`, 덱에 준 `--labels on` |
-| 1 | 실행 중 입력 오류와 실패: 없는 파일, 덱에 없는 레벨·레이어 번호·칩 이름, 레이아웃에 준 `--chip`/`--fit-chip`, 아무 배치에도 닿지 않는 영역, 자동 색인 실패(`indexing NAME first failed (exit N …)`), 렌더러 오류. `floe2-web`은 2 |
+| 1 | 실행 중 입력 오류와 실패: 없는 파일, 읽을 수 없는 `--layerprops` 파일, 덱에 없는 레벨·레이어 번호·칩 이름, 레이아웃에 준 `--chip`/`--fit-chip`, 아무 배치에도 닿지 않는 영역, 자동 색인 실패(`indexing NAME first failed (exit N …)`), 렌더러 오류. `floe2-web`은 2 |
 | 75 | 다른 실행이 그 소스를 색인 중이다(`--wait`로 기다릴 수 있다) |
 | 128+signal | 취소됐다(SIGINT 130, SIGTERM 143). 쓰던 출력은 남기지 않는다 |
 
@@ -84,7 +84,7 @@ floe2 render deck.jb  --level 2 --chip MAIN.oas --out main.png             # 그
 
 | 옵션 | 기본 | 의미 |
 |---|---|---|
-| `--layers NAME,L/D,…` / `--layer` | all | 레이어 이름·별칭이나 `L/D` 쌍. 덱은 레벨 이름(MTITLE, 없으면 `LEVELn`)이나 칩의 파일 이름 |
+| `--layers NAME,L/D,…` / `--layer` | all | 레이어 이름·별칭이나 `L/D` 쌍. 덱은 레벨 이름(MTITLE, 없으면 `LEVELn`)이나 칩의 파일 이름. 말하지 않으면 전부이되 `--layerprops` 파일이 숨긴 레이어는 빠진다. `all`은 숨긴 것까지 전부다(0.12.452; §1.3) |
 | `--layerid N,N.D,…` | | 레이어 패널의 번호. `N`은 datatype 0, `N.D`(`N/D`도). 덱의 `N`은 레벨 N 전체. `--layers`와 함께 주면 둘 다 |
 | `--level N,N,…` | 전체 | 덱. 이 마스크 레벨만 로드한다. 로드하지 않은 레벨의 소스는 열지도 색인하지도 않는다 |
 | `--chip NAME,…` | | 덱. 이 칩들만 켠다(§4.2). `--layers`와 함께 쓸 수 없다 |
@@ -107,6 +107,7 @@ layerprops, 셀 프레임과 라벨(덱은 라벨 없음, 밀도 없음).
 | `--occupancy on\|off` | 말하지 않음 | 광역 뷰를 점유 요약(`design.ovo`)으로. `on`은 요약 없는 소스의 요약을 먼저 만들고(자동 색인), `off`는 덱도 요약 없이 페이지로. 말하지 않으면 덱은 있는 요약을 쓰고 만들지는 않으며(경량 소스의 광역 pass는 비고 불완전으로 알린다), 레이아웃은 off. 컷이 있어야 한다 |
 | `--frames[=on\|off]` `--labels[=on\|off]` | on | 셀 프레임, 설계 텍스트. 덱의 라벨은 지원하지 않는다 |
 | `--layer-colors row\|group` | row | 레이아웃의 기본 레이어 색. row는 패널 줄마다, group은 layer 번호마다 한 색. `FLOE_LAYER_COLORS`가 기본값. 덱은 거부 |
+| `--layerprops FILE` | | 이 실행의 레이어 속성 파일(0.12.452). Calibre `.layerprops`를 소스 옆 디자인 기본값 위에 덮는다: 파일에 있는 레이어의 색·채움·선폭, 그리고 숨김. 뷰어의 `floe2 view SOURCE --layerprops FILE`과 같다. 아래 설명 |
 | `--mode level\|chip\|layer` | level | 덱의 뷰. 뷰어의 Jobdeck 메뉴와 같다. level은 마스크 레벨마다 한 색, chip은 레벨 아래 소스 칩마다 한 색(chip view), layer는 소스 레이어 LY/DT마다 한 색. 그 뷰에서 저장한 layerprops(`<deck>.jb.layerprops`, `<deck>.chip-by-level.jb.layerprops`, `<deck>.layer.jb.layerprops`)가 적용된다(§4.6). 레이아웃은 거부 (0.12.436) |
 | `--legend` | | 그린 레이어의 범례(색, 채움, 이름 L/D)를 이미지마다 flateyes 메타데이터로, 배율 `ppu`(가로 px/um)와 `unit=um`과 함께(0.12.433; DRC 스냅샷과 같다). 픽셀은 그대로다. `floe2 fe-embed --dump`로 읽는다. 덱에서 `--chip`으로 고르면 켠 칩의 줄만(0.12.436), chip view(`--mode chip`)에서는 칩 줄, 어느 뷰에서나 그림에 실제로 보이는 줄만(0.12.439; `FLOE_LEGEND_IN_VIEW=placed`면 틀 안에 배치가 있는 줄, `off`면 로드한 레벨 전부)(§4.6) |
 | `--archival` | | 보관용 모양: 컷 0, solid 채움, 밀도·프레임·라벨 없음(0.12.349까지의 기본). 함께 준 옵션이 이긴다. `FLOE_RENDER_DEFAULTS=archival`이면 이것이 기본 |
@@ -115,6 +116,41 @@ layerprops, 셀 프레임과 라벨(덱은 라벨 없음, 밀도 없음).
 - 레이아웃의 디코드 예산(`FLOE_RUST_BUDGET_MB`, 기본 1024)은 뷰어와 같다. 컷이 있으면 뷰어처럼
   예산에 맞춰 성기게 그리고 `WARNING: … thinned to fit the render budget: …`과 보고서의 `budget_fit`으로
   알린다. `exact`는 실패하며 필요한 양과 길(`--detail high`, 좁은 영역, `--layers`, 예산 올리기)을 말한다.
+
+**레이어 속성 파일 지정: `--layerprops FILE`** (0.12.452; 사용자 "floe2 render에도 --layerprops 추가해줘")
+
+```sh
+floe2 render layout.oas --layerprops /user/props/review.layerprops --bbox 0,0,2000,1500 --out a.png
+floe2 render layout.oas --workdir /user/tmp --layerprops review.layerprops --legend --report a.json --out a.png
+floe2 render deck.jb --mode chip --layerprops chips.layerprops --out chips.png
+```
+
+- 쓸 수 없는 폴더의 소스에는 디자인 기본값(`SOURCE.layerprops`)을 둘 수 없다. 이 옵션은 그 파일을 실행에서 지정한다.
+  뷰어의 `floe2 view SOURCE --layerprops FILE`(0.12.451)과 같은 파일을 받는다.
+- 형식은 Calibre `.layerprops`다(`L.D 색 fill 이름 표시 선폭`). 뷰어의 Layer > load layer properties가 올리는 것과 같은
+  규칙으로 디자인 기본값 위에 덮는다.
+  - 파일에 있는 레이어: 색(이름이나 `#rrggbb`), 채움(fill 이름), 선폭(숫자. 1 이하면 기본값의 선폭을 지운다), 표시
+    여부(`0` 숨김, `1` 표시). 뜻이 없는 칸(모르는 색 이름, 모르는 fill, 숫자가 아닌 선폭)은 기본값을 그대로 둔다.
+  - 파일에 없는 레이어는 기본값 그대로다. 소스에 없는 레이어의 줄은 건너뛴다.
+  - `--archival`에서는 색만 쓰인다(채움은 solid, 선폭 1). `--layer-colors`는 파일이 색을 정하지 않은 레이어의 기본 색을
+    정한다.
+- 파일이 숨긴 레이어는 무엇을 그릴지 말하지 않은 샷에서 빠진다. 범례에도 없다.
+  - 샷이 스스로 말하면 그대로 그린다: `--layers`/`--layerid`로 준 레이어, `--chip`/`--chip-off`로 고른 칩은 파일이
+    숨긴 것이라도 그린다. 색과 채움은 파일의 것이다. `--chip-off`의 나머지는 로드한 칩 전부다.
+  - `--layers all`은 숨긴 것까지 전부다. batch 줄의 `layers=all`도 같고, `layers=`(빈 값)은 기본으로 되돌린다.
+  - 모든 레이어를 숨기는 파일이면 그림이 비고 `WARNING: … hides every layer of this source`가 난다.
+  - 소스 옆 디자인 기본값의 숨김은 전처럼 캡처에 적용하지 않는다. 숨김이 적용되는 것은 이 옵션으로 준 파일뿐이다.
+- jobdeck은 찍는 뷰(`--mode`)의 줄로 읽는다(§4.6). level view의 `N.0`이 레벨 N이다.
+- 파일은 소스를 열기 전에 읽는다. 없거나 읽을 수 없으면(텍스트가 아님, 4 MiB 초과, 폴더) 색인도 캡처도 하지 않고 1로
+  끝난다(`floe2: layer properties file not found: PATH`, `floe2: layer properties file PATH: REASON`). 값이 비면 2다.
+  링크는 따라가 읽는다. 상대 경로는 실행한 디렉터리 기준이다.
+- 소스의 레이어를 하나도 가리키지 않는 파일은 오류가 아니다. 기본값으로 그리고
+  `WARNING: … names no layer of SOURCE`로 알린다.
+- 실행에 하나다(batch 키가 아니다). `--drc` 스냅샷에도 쓴다([DRC-CLI.ko.md](DRC-CLI.ko.md) §3). `--out`과 `--report`는
+  이 파일을 덮어쓸 수 없다.
+- stdout에 `[floe2] layer properties: FILE - M of its N row(s) for layers of this source, K hidden`이 한 번 나오고,
+  보고서 맨 위 `layerprops`가 파일·줄 수·숨긴 줄을 말한다(§5).
+- `info`와 `probe`에는 없다. 뷰어 안에서 바꾼 색을 저장한 파일(Layer > save layer properties)을 그대로 줄 수 있다.
 
 ### 1.4 출력
 
@@ -183,7 +219,8 @@ quad       mosaic="40000,95000;60000,95000;60000,80000;40000,80000" size=4mm,3mm
   적용된다. 줄의 `in_chip=NAME#K`는 명령행의 틀을 바꾸고, `in_chip=`(빈 값)은 덱 좌표로 되돌린다. 줄의 `fit_chip`은
   명령행의 `in_chip`을, 줄의 `in_chip`은 명령행의 `fit_chip`을 버린다.
 - 켤 것의 대체 규칙: 줄의 `layers`/`layerid`는 명령행의 `chip`/`chip_off`를, 줄의 `chip`/`chip_off`는
-  명령행의 `layers`를 버린다.
+  명령행의 `layers`를 버린다. `layers=`(빈 값)은 기본으로 되돌리고(전부, `--layerprops` 파일이 숨긴 레이어는 뺀다),
+  `layers=all`은 숨긴 것까지 전부다(0.12.452).
 - 한도: 파일 16 MiB, 4096 샷. 셸 확장은 없다.
 - DRC 옵션과는 함께 쓸 수 없다. 보고서는 샷마다 한 행이다.
 
@@ -329,6 +366,12 @@ floe2 render deck.jb --mode layer --out layers.png                              
 - 그 뷰에서 저장한 layerprops가 적용된다. level view는 `<deck>.jb.layerprops`, chip view는
   `<deck>.chip-by-level.jb.layerprops`, layer view는 `<deck>.layer.jb.layerprops`다. 키 공간이 다르므로 서로 섞이지
   않는다.
+- `--layerprops FILE`(0.12.452, §1.3)의 파일은 찍는 뷰의 줄로 읽어 그 뷰의 저장 파일 위에 덮는다.
+  - level view: `N.0`이 레벨 N이다. 레벨의 칩은 레벨의 색을 따르고, 레벨을 숨기면 그 칩들이 빠진다.
+  - chip view: `N.D`가 칩 줄이다. `N.0`은 그 레벨의 묶음이라 채움·선폭·표시 여부가 자기 줄이 없는 칩에 내려가고,
+    색은 어느 칩의 것도 아니다. 칩 줄의 표시 여부가 묶음의 것보다 먼저다.
+  - 뷰어에서 저장한 파일이 그 뷰의 줄을 그대로 담고 있으므로, level view에서 저장한 파일은 `--mode level`에, chip
+    view에서 저장한 파일은 `--mode chip`에 준다.
 - `--legend`는 그 뷰가 보여 주는 줄을 적는다. level view는 레벨 줄, chip view는 칩 줄(색, 채움, 파일 이름, `L/D`)이고
   레벨 머리 줄은 적지 않는다(그 색으로 그려진 것이 없다). `--chip`으로 고르면 켠 칩의 줄만 적는다(0.12.436; 전에는
   로드한 레벨 전부).
@@ -359,6 +402,7 @@ floe2 render deck.jb --mode layer --out layers.png                              
 | `shots[]` | 샷마다 한 행(아래) |
 | `cut_px`, `thin`, `density`, `occupancy`, `layer_colors`, `legend`, `archival` | 그림 모양. `occupancy`는 말하지 않았으면 null, `layer_colors`는 덱이면 null |
 | `distinct_colors` | 덱의 칠해지는 줄끼리 색이 겹치지 않게 했는가(0.12.449; §4.6). 레이아웃과 `FLOE_DECK_DISTINCT_COLORS=off`는 false |
+| `layerprops` | `--layerprops`의 파일(0.12.452; 주지 않았으면 null): `file`(읽은 파일의 실제 경로), `rows`(파일의 줄 수), `matched`(그 가운데 소스에 있는 레이어의 줄 수), `hidden[]`(파일이 숨긴 줄의 `L/D`; 덱의 level view는 숨긴 레벨의 칩 줄). 샷 행의 `layers`가 null인 샷에서 이 줄들이 빠졌다 |
 | `complete` | 모든 샷이 완전한가 |
 | `jobdeck` | 덱만: `complete`, `skipped[]`(캡처가 빠뜨린 배치), `skipped_off[]`(꺼진 칩의 skip), `over_budget_pages`, `summary_building`, `view`(`--mode`의 뷰: level|chip|layer), `levels`, `chip_blocks`(`--chipid`/`--chipnumber`의 `n:ID` 목록, 없으면 null), `window`(`rects_um`, `sources`, `sources_total`, `placements`, `placements_total`; 창이 없으면 null) |
 
@@ -370,7 +414,7 @@ floe2 render deck.jb --mode layer --out layers.png                              
 | `ppu`, `ppu_y` | 배율 px/um, 가로와 세로(0.12.433). 렌더러는 축마다 따로 맞추므로 `--stretch`가 아니면 둘은 한 픽셀 안에서 같다. mosaic은 타일의 배율이라 구분선을 건너는 거리에는 `line_pixels`만큼 어긋난다. `--legend`의 메타데이터 `ppu`는 가로 값이다 |
 | `pixel_requested` | 16 Mpx 상한에 걸려 줄였을 때만: 요청한 [W,H](mosaic은 합친 크기; §1.1) |
 | `bbox_um` | 단일 샷의 영역. mosaic은 대신 `mosaic`(width, height, tile, line, line_pixels, line_color)과 `tiles`(tl/tr/bl/br의 bbox) |
-| `layers`, `depth` | 그린 레이어 지정과 깊이 |
+| `layers`, `depth` | 그린 레이어 지정과 깊이. `layers`는 말하지 않았으면 null, `--layers all`이면 `"all"`(0.12.452; 전에는 null) |
 | `ms` | 걸린 시간 ms |
 | `complete`, `skipped_placements`, `over_budget_pages`, `summary_building` | 빠진 것의 수 |
 | `budget_fit` | 예산에 맞춰 성기게 그렸을 때만(renderd의 `fit_*`; mosaic은 타일별) |
@@ -400,6 +444,9 @@ stdout:
 [floe2] note: a.png: no layer to list - no legend
 [floe2] note: a.png: 2 of the 12 row(s) painted drawn in another colour than the view's - a row painted before had theirs (FLOE_DECK_DISTINCT_COLORS=off keeps the view's)
 [floe2] note: a.png: too many rows are placed in the picture to tell them apart by colour - drawn in the view's colours
+[floe2] layer properties: /p/a.layerprops - 3 of its 4 row(s) for layers of this source, 1 hidden (left out where a shot names no layers; --layers all draws every layer)
+[floe2] WARNING: layer properties file /p/b.layerprops names no layer of /d/layout.oas (1 row(s)) - drawn by the defaults
+[floe2] WARNING: layer properties file /p/c.layerprops hides every layer of this source - a shot that names no layers draws none (--layers / --layerid name them, --layers all is every layer)
 [floe2] report shots/report.json (3 shot(s), INCOMPLETE)
 [jobdeck] blocks    : 1 of 3 CHIP block(s) placed (--chipid / --chipnumber): 2:ID002
 [jobdeck] window    : 1 of 3 source(s) read - 2 of 17 placement(s) in the capture's region(s) (FLOE_DECK_WINDOW=off reads them all)
@@ -414,6 +461,8 @@ stderr:
 [jobdeck] 1 pass(es) of light source(s) wait for their occupancy summary - building the missing summaries in the temporary index and drawing again (--occupancy off: the pages instead)
 floe2: WARNING: rendered incomplete - 0 jobdeck placement(s) missing, 0 page(s) over the decode budget, summary_building=1 … (see above; exit 0 - FLOE_RENDER_INCOMPLETE_EXIT=3 exits 3 as before)
 floe2: indexing SOURCE first failed (exit 71 …; see above)
+floe2: layer properties file not found: /p/nope.layerprops
+floe2: layer properties file /p/bad.layerprops: not a text file (UTF-8)
 floe2: frame 1280x13440 px for 40.0000x420.0000 um (0.0000,0.0000,40.0000,420.0000 um) exceeds 16 Mpx; --px 1264x13272 fits (FLOE_CAPTURE_REDUCE=off: refused, not reduced) [FLOE_CAPTURE_REDUCE=off, exit 1]
 ```
 

@@ -991,6 +991,27 @@ def r8(temp):
         check(legend("--layers", "all") == (0, []), "an all-layer DRC capture: no legend")
         check(legend("--layers", "all", "--legend") == (0, rows([(31, 0), (32, 0), (51, 0)])),
               "--legend: every layer's", legend("--layers", "all", "--legend"))
+        # the run's layer properties file on a DRC capture (0.12.452, user
+        # 2026-11-12: "floe2 render에도 --layerprops 추가해줘"): its colours and
+        # fills on the layers drawn; the rule's isolated layers are the
+        # rule's, --layers all every layer; a rule whose layers are not known
+        # is drawn with every layer less those the file hides
+        props = temp / "drc.layerprops"
+        props.write_text("31.0 #ff0000 solid M1 1 1\n32.0 #00ff00 solid M2 0 1\n")
+        m1, m2, via = "box #ff0000 solid M1 31/0", "box #00ff00 solid M2 32/0", rows([(51, 0)])[0]
+        got = legend("--layerprops", str(props))
+        check(got == (0, [m1]), "a DRC capture with --layerprops: the isolated layer, the file's colour and fill", got)
+        got = legend("--layerprops", str(props), "--layers", "all", "--legend")
+        check(got == (0, [m1, m2, via]), "--layerprops with --layers all: every layer, the hidden one too", got)
+        none = temp / "none.rules.json"
+        none.write_text('{"version": 1, "rules": {}}')
+        got = legend("--drc-rules", str(none))
+        check(got == (0, []), "a rule without its layers: every layer, no legend", got)
+        got = legend("--drc-rules", str(none), "--layerprops", str(props))
+        check(got == (0, [m1, via]),
+              "a rule without its layers and --layerprops: every layer less the file's hidden one", got)
+        got = legend("--layerprops", str(temp / "nope.layerprops"))
+        check(got[0] == 1, "a DRC capture with a layer properties file that is not there: refused", got)
 
 
 # ---- R9, R10 (2026-11-10: one session a reviewer, the reviewers' statistics) ----

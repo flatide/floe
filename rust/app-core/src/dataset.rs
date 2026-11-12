@@ -150,6 +150,28 @@ impl Dataset {
             Self::Deck(_) => None,
         }
     }
+    /// The layer properties file named for the run (`floe2 render SRC
+    /// --layerprops FILE`, user 2026-11-12; the viewer's `floe2 view SRC
+    /// --layerprops FILE` for a capture): `rows`, read from `file`
+    /// (styles::read_named), over the design default's - a layout's
+    /// `SRC.layerprops`, a jobdeck view's own file - as the viewer's Layer >
+    /// load layer properties puts a file on what it shows: the colours,
+    /// fills and line widths of the layers it names, and the layers it
+    /// hides, which a shot that names neither layers nor chips leaves out
+    /// (resolve_layers). What it came to: named_props.
+    pub fn set_layer_props(&mut self, file: PathBuf, rows: &[crate::layerprops::Row]) -> Result<()> {
+        match self {
+            Self::Layout(l) => l.set_layer_props(file, rows),
+            Self::Deck(d) => d.set_layer_props(file, rows)?,
+        }
+        Ok(())
+    }
+    pub fn named_props(&self) -> Option<&styles::NamedProps> {
+        match self {
+            Self::Layout(l) => l.named_props.as_ref(),
+            Self::Deck(d) => d.named_props.as_ref(),
+        }
+    }
     pub fn skipped(&self) -> &[Skipped] {
         match self {
             Self::Deck(d) => d.skipped(),
@@ -179,11 +201,10 @@ impl Dataset {
                     crate::jobdeck::dataset::props_source(&d.source, d.metadata.jobdeck.mode)?;
                 let mut full = props.as_os_str().to_owned();
                 full.push(".layerprops");
-                d.analysis.output_path_mode(
-                    path,
-                    &[full.into(), props.with_extension("layerprops")],
-                    planned,
-                )
+                let mut inputs = vec![full.into(), props.with_extension("layerprops")];
+                // (the file --layerprops names is an input too)
+                inputs.extend(d.named_props.as_ref().map(|n| n.file.clone()));
+                d.analysis.output_path_mode(path, &inputs, planned)
             }
         }
     }

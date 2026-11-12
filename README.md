@@ -270,6 +270,11 @@ mosaic, `--batch`는 레이아웃(.oas/.gds)에도 그대로 쓰인다. 칩 on/o
   - 주지 않으면 `FLOE_LAYER_COLORS`(없으면 row)를 따른다. 뷰어의 `--layer-colors`와 같은 규칙이다.
   - layerprops의 색이 여전히 먼저다. report 맨 위의 `layer_colors`에 어느 쪽인지 남는다.
   - jobdeck은 자기 색 체계를 쓰므로 거부한다.
+- `--layerprops FILE`(0.12.452): 이 실행의 레이어 속성 파일. 뷰어의 `floe2 view SOURCE --layerprops FILE`과 같다.
+  - Calibre `.layerprops`를 소스 옆 디자인 기본값 위에 덮는다. 파일에 있는 레이어의 색·채움·선폭이 바뀌고, 없는 레이어는 그대로다.
+  - 파일이 숨긴 레이어는 `--layers`·`--layerid`·`--chip`·`--chip-off`를 주지 않은 샷에서 빠진다. `--layers all`은 숨긴 것까지 전부다.
+  - jobdeck은 찍는 뷰(`--mode`)의 줄로 읽는다. level view의 `N.0`이 레벨 N이다.
+  - 읽을 수 없는 파일이면 소스를 열기 전에 1로 끝난다. report 맨 위의 `layerprops`에 파일과 숨긴 줄이 남는다. 자세한 것은 docs/CAPTURE-CLI.ko.md §1.3.
 - `--legend`(2026-10-13): 그린 레이어의 레전드를 이미지마다 flateyes 메타데이터로 넣는다(DRC 캡처와 같은 방식).
   - 한 줄은 `box 색 fill 이름 L/D`다. 그림을 그린 스타일에서 만든다(layerprops 색·패턴, `--layer-colors`, `--archival`의 solid, jobdeck 레벨 색).
   - 모든 레이어를 켜면 레이어 패널의 줄(빈 LAYERNAME 쌍 제외)이고, `--layers`면 그 레이어들을 준 순서로 넣는다. jobdeck은 레벨(머리 행)을 넣고(`--mode chip`이면 칩 줄), 어느 뷰에서나 그림에 실제로 보이는 줄만 넣는다(0.12.439; `FLOE_LEGEND_IN_VIEW=placed`면 틀 안에 배치가 있는 줄, `off`면 로드한 레벨 전부).

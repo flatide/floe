@@ -64,6 +64,9 @@ pub struct DeckSnapshot {
     pub metadata: DeckMetadata,
     pub spec: CompositeSpec,
     pub layer_props: Vec<LayerProps>,
+    /// the layer properties file named for the run, over the view's own
+    /// (set_layer_props; `floe2 render --layerprops`)
+    pub named_props: Option<styles::NamedProps>,
 }
 impl DeckSnapshot {
     pub fn open(
@@ -153,26 +156,7 @@ impl DeckSnapshot {
         let props_source = props_source(&source, mode)?;
         let layer_props = styles::load_props(&props_source)?;
         let mut layers = rows.metadata(&analysis.model.placements)?;
-        let colors: BTreeMap<_, _> = layer_props
-            .iter()
-            .filter_map(|p| p.color.map(|c| (p.layer, c)))
-            .collect();
-        for layer in &mut layers {
-            let key = (layer.layer as u32, layer.datatype as u32);
-            if let Some(&color) = colors.get(&key) {
-                layer.color = styles::color_text(color);
-            }
-        }
-        if mode == Mode::Level {
-            let heads: BTreeMap<_, _> = layers
-                .iter()
-                .filter(|r| r.jobdeck_head)
-                .map(|r| (r.layer, r.color.clone()))
-                .collect();
-            for layer in &mut layers {
-                layer.color = heads[&layer.layer].clone();
-            }
-        }
+        prop_colors(&mut layers, &layer_props, mode);
         let skipped = analysis
             .model
             .stats
@@ -253,12 +237,90 @@ impl DeckSnapshot {
             metadata,
             spec,
             layer_props,
+            named_props: None,
         })
+    }
+    /// The layer properties file named for the run (`rows`, read from
+    /// `file`: styles::read_named) over the file the view saved (the
+    /// open's: props_source), as the viewer's Layer > load layer properties
+    /// puts one on the deck's view (styles::overlay): the rows' colours
+    /// again from the view's (a level view's rows their head's), the fills
+    /// and widths with the styles, and the rows it hides - a level head's
+    /// flag is its chips', a chip's own flag before its head's wherever the
+    /// two stand in the file (gui.py _apply_props_visibility) -, which a
+    /// capture that names neither layers nor chips leaves out
+    /// (resolve_layers). The file's rows are the view's: a level view's
+    /// `N.0` is level N.
+    pub fn set_layer_props(
+        &mut self,
+        file: PathBuf,
+        rows: &[crate::layerprops::Row],
+    ) -> Result<()> {
+        let pairs = self
+            .rows
+            .rows
+            .iter()
+            .map(|r| r.native_pair())
+            .collect::<Result<Vec<_>>>()?;
+        let known: BTreeSet<_> = pairs.iter().copied().collect();
+        self.layer_props = styles::overlay(&self.layer_props, rows, &known);
+        for (layer, view) in self.metadata.layers.iter_mut().zip(&self.rows.rows) {
+            layer.color.clone_from(&view.color);
+        }
+        prop_colors(
+            &mut self.metadata.layers,
+            &self.layer_props,
+            self.metadata.jobdeck.mode,
+        );
+        let flags = styles::visibility(rows, &known);
+        let heads: BTreeSet<(u32, u32)> = self
+            .metadata
+            .layers
+            .iter()
+            .zip(&pairs)
+            .filter(|(row, _)| row.jobdeck_head)
+            .map(|(_, &pair)| pair)
+            .collect();
+        let mut hidden = BTreeSet::new();
+        for (row, &pair) in self.metadata.layers.iter().zip(&pairs) {
+            if row.jobdeck_head {
+                continue;
+            }
+            // its own flag, else its level head's
+            let head = heads.range((pair.0, 0)..=(pair.0, u32::MAX)).next();
+            let visible = flags
+                .get(&pair)
+                .or_else(|| head.and_then(|h| flags.get(h)))
+                .copied()
+                .unwrap_or(true);
+            if !visible {
+                hidden.insert(pair);
+            }
+        }
+        self.named_props = Some(styles::NamedProps {
+            file,
+            rows: rows.len(),
+            matched: rows.iter().filter(|r| known.contains(&r.layer)).count(),
+            hidden,
+        });
+        Ok(())
     }
     pub fn bbox_um(&self) -> [f64; 4] {
         self.metadata.bbox.map(|v| v as f64 * self.metadata.dbu)
     }
+    /// The rows a shot draws: those `spec` names; `all`, every row; unsaid
+    /// (None, empty), every row too - less those a layer properties file
+    /// named for the run hides (set_layer_props): then the others.
     pub fn resolve_layers(&self, spec: Option<&str>) -> Result<Layers> {
+        if let (None | Some(""), Some(named)) = (spec, &self.named_props) {
+            let mut shown = Vec::new();
+            for (row, view) in self.metadata.layers.iter().zip(&self.rows.rows) {
+                if !row.jobdeck_head {
+                    shown.push(view.native_pair()?);
+                }
+            }
+            return styles::shown_layers(shown, &named.hidden);
+        }
         self.rows.resolve_layers(&self.analysis.deck, spec)
     }
     /// The view's L/D pairs with a placement `window` reaches - what a
@@ -406,6 +468,30 @@ impl DeckSnapshot {
         }
         out.sort_by_key(|s| s.layer);
         Ok(out)
+    }
+}
+/// The layer properties' colours on a view's rows: a row named has its
+/// colour, and in the level view every row its level head's.
+fn prop_colors(layers: &mut [LayerMetadata], props: &[LayerProps], mode: Mode) {
+    let colors: BTreeMap<_, _> = props
+        .iter()
+        .filter_map(|p| p.color.map(|c| (p.layer, c)))
+        .collect();
+    for layer in layers.iter_mut() {
+        let key = (layer.layer as u32, layer.datatype as u32);
+        if let Some(&color) = colors.get(&key) {
+            layer.color = styles::color_text(color);
+        }
+    }
+    if mode == Mode::Level {
+        let heads: BTreeMap<_, _> = layers
+            .iter()
+            .filter(|r| r.jobdeck_head)
+            .map(|r| (r.layer, r.color.clone()))
+            .collect();
+        for layer in layers.iter_mut() {
+            layer.color = heads[&layer.layer].clone();
+        }
     }
 }
 /// Mode-specific property namespaces deliberately bypass obsolete CHIP-index

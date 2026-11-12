@@ -478,7 +478,9 @@
     없어졌거나 깨졌으면 다시 읽을 때 `layer properties load failed: <이유>`를 상태 줄과 stderr에 쓰고 기본값으로
     연다.
   - `--no-file-load`와 함께 쓸 수 있다. 꺼지는 것은 뷰어 안에서 고르는 로드이고, 이 파일은 명령줄의 것이다.
-  - 캡처(`floe2 render`)에는 이 옵션이 없다. 캡처는 소스 옆의 디자인 기본값만 읽는다.
+  - 캡처는 `floe2 render SOURCE --layerprops FILE`(0.12.452)이 같은 파일을 받아 같은 규칙으로 덮는다
+    ([CAPTURE-CLI.ko.md](CAPTURE-CLI.ko.md) §1.3). 다른 점: 캡처는 디자인 기본값의 숨김을 적용하지 않고(이 파일의
+    숨김만), 덱은 찍는 뷰(`--mode`)의 줄로 읽는다.
   - 테스트: 게이트 gtk_view `layer_properties_option`(실제 창과 실제 명령줄: 표와 프레임의 색, 뷰를 연 레이어,
     다시 읽기, 같은 파일·바뀐 파일·다른 레이아웃의 파일, 링크, 거절 셋), rust_renderer
     `test_layer_properties_go_with_the_launch`(명령줄, 요청, 창의 처리, 묶임의 규칙).

@@ -31,10 +31,11 @@ makes it the default, as before 0.12.350).
                             (FLOE_CAPTURE_PX sets it; 1200 before 0.12.433);
                             --drc snapshots default to 1200 square
   --stretch                  Do not expand bbox to explicit WxH aspect
-  --layers NAME,L/D,...       Layer names/aliases or pairs (default all); a
-                            jobdeck's level by its name (the MTITLE; LEVELn
-                            without one), a chip by its file name. --layer:
-                            the same
+  --layers NAME,L/D,...       Layer names/aliases or pairs (default all, less
+                            the layers a --layerprops file hides; all: every
+                            layer, those too); a jobdeck's level by its name
+                            (the MTITLE; LEVELn without one), a chip by its
+                            file name. --layer: the same
   --layerid ID,...            Layers by the layer panel's number: N or N.D; a
                             jobdeck's N is level N (every chip of it). With
                             --layers, both
@@ -84,6 +85,24 @@ makes it the default, as before 0.12.350).
                             differ (default); group = one colour per layer
                             number, its datatypes alike (before 0.12.352);
                             FLOE_LAYER_COLORS sets the default; layouts
+  --layerprops FILE         The layer properties file of this run, as the
+                            viewer's `view SOURCE --layerprops FILE`: a Calibre
+                            .layerprops (L.D colour fill name visible width)
+                            put over the design default beside the source
+                            (SOURCE.layerprops; a jobdeck: the file its --mode
+                            view saved) as the viewer's Layer > load layer
+                            properties puts one - the colours, fills and line
+                            widths of the layers it names (--archival: the
+                            colours; its fills are solid), and the layers it
+                            hides are left out of a shot that says neither
+                            --layers / --layerid nor --chip / --chip-off
+                            (--layers all: every layer). A layer it does not
+                            name keeps the default; a row of a layer the
+                            source has not is skipped. Its rows are the
+                            view's: a jobdeck's level view N.0 is level N. A
+                            file that cannot be read ends the run before the
+                            source is opened (1); the report's `layerprops`
+                            says the file, its rows and the rows hidden
   --legend                  Each image carries the legend of the layers it
                             draws (colour, fill, name L/D; every layer on: the
                             layer panel's rows; of a jobdeck the rows the
@@ -229,6 +248,9 @@ pub enum Command {
         mode: Mode,
         drc: Option<Box<floe_app_core::drc::capture::Options>>,
         layer_colors: Option<LayerColors>,
+        /// `--layerprops FILE`: the run's layer properties file, over the
+        /// design default (2026-11-12; the viewer's `view --layerprops`)
+        layer_props: Option<PathBuf>,
         legend: bool,
         /// `--chipid` / `--chipnumber`: a jobdeck's CHIP blocks to read
         /// (jobdeck::window)
@@ -274,6 +296,8 @@ pub fn parse(args: &[String]) -> Result<Command> {
     // --layer-colors (a layout's default layer colours; the open's
     // FLOE_LAYER_COLORS without it)
     let mut layer_colors = None;
+    // --layerprops (the run's layer properties file, over the design default)
+    let mut layer_props: Option<PathBuf> = None;
     // --legend (each image's layer legend as flateyes metadata)
     let mut legend = false;
     // --no-index / --wait / --no-wait over FLOE_AUTO_INDEX / FLOE_LOCK_WAIT
@@ -535,6 +559,13 @@ pub fn parse(args: &[String]) -> Result<Command> {
                     Error::input("--layer-colors must be row or group")
                 })?);
             }
+            "--layerprops" => {
+                let file = value()?;
+                if file.is_empty() {
+                    return Err(Error::input("--layerprops requires a file"));
+                }
+                layer_props = Some(PathBuf::from(file));
+            }
             _ => {
                 return Err(Error::new(
                     ErrorKind::Unsupported,
@@ -654,6 +685,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 mode: mode.unwrap_or_default(),
                 drc,
                 layer_colors,
+                layer_props,
                 legend,
                 chips: chip_blocks,
                 ready,
@@ -736,11 +768,16 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
             mode,
             drc: Some(drc),
             layer_colors,
+            layer_props,
             ready,
             ..
         } => {
+            // the run's layer properties file first: one that cannot be
+            // read ends the run before the source is opened or indexed
+            let props = crate::capture::named_props(layer_props.as_deref())?;
             let temp = ready.temp_index()?;
             let mut waiter = Waiter::new(ready.wait, cancelled);
+            let mut said = false;
             again(&source, &mut waiter, |waiter| {
                 let mut dataset = dataset(
                     &source,
@@ -754,9 +791,7 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
                     waiter,
                     cancelled,
                 )?;
-                if let Some(mode) = layer_colors {
-                    dataset.set_layer_colors(mode);
-                }
+                crate::capture::look(&mut dataset, layer_colors, props.as_ref(), &mut said)?;
                 floe_app_core::drc::capture::run(
                     &dataset,
                     &capture.shot,
@@ -779,6 +814,7 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
             mode,
             drc: None,
             layer_colors,
+            layer_props,
             legend,
             chips,
             ready,
@@ -797,6 +833,7 @@ pub fn run(command: Command, cancelled: &Arc<AtomicUsize>) -> Result<i32> {
                 mode,
                 chips,
                 layer_colors,
+                layer_props,
                 legend,
                 ready.index,
                 ready.light,
@@ -1000,7 +1037,10 @@ mod tests {
                 &["render", "a.jb", "--layers", "all", "--layerid", "2"][..],
                 Some("2/0"),
             ),
-            (&["render", "a.jb", "--layer", "all"][..], None),
+            // every layer, said so (a layer properties file's hidden ones
+            // too); an empty value and nothing said: the default
+            (&["render", "a.jb", "--layer", "all"][..], Some("all")),
+            (&["render", "a.jb", "--layers="][..], None),
             (&["render", "a.jb"][..], None),
         ] {
             let Command::Render { capture, .. } = parsed(args).unwrap() else {
@@ -1308,6 +1348,48 @@ mod tests {
         assert!(capture.shot.frames && source == PathBuf::from("off"));
         assert!(parsed(&["render", "a.oas", "--frames=yes"]).is_err());
         assert!(parsed(&["render", "a.oas", "--archival=on"]).is_err());
+    }
+    #[test]
+    fn a_layer_properties_file_is_named_for_the_run() {
+        // user 2026-11-12: "floe2 render에도 --layerprops 추가해줘"
+        let props = |args: &[&str]| match parsed(args) {
+            Ok(Command::Render { layer_props, drc, .. }) => Ok((layer_props, drc.is_some())),
+            Ok(_) => panic!("render expected"),
+            Err(e) => Err(e),
+        };
+        assert_eq!(props(&["render", "a.oas"]).unwrap(), (None, false));
+        assert_eq!(
+            props(&["render", "a.oas", "--layerprops", "dir/x.layerprops"]).unwrap(),
+            (Some(PathBuf::from("dir/x.layerprops")), false)
+        );
+        // a jobdeck's too, and a DRC capture's
+        assert_eq!(
+            props(&["render", "a.jb", "--mode", "chip", "--layerprops=x.layerprops"]).unwrap(),
+            (Some(PathBuf::from("x.layerprops")), false)
+        );
+        assert_eq!(
+            props(&["render", "a.oas", "--drc=db", "--drc-rule=R", "--layerprops", "x"]).unwrap(),
+            (Some(PathBuf::from("x")), true)
+        );
+        // the last one given
+        assert_eq!(
+            props(&["render", "a.oas", "--layerprops", "x", "--layerprops", "y"]).unwrap().0,
+            Some(PathBuf::from("y"))
+        );
+        let e = props(&["render", "a.oas", "--layerprops="]).unwrap_err();
+        assert_eq!(e.message, "--layerprops requires a file");
+        let e = props(&["render", "a.oas", "--layerprops", "--legend"]).unwrap_err();
+        assert_eq!(e.message, "--layerprops requires a value");
+        // render's alone
+        for kind in ["info", "probe"] {
+            let e = match parsed(&[kind, "a.oas", "--layerprops", "x"]) {
+                Err(e) => e,
+                Ok(_) => panic!("{kind} takes no layer properties file"),
+            };
+            assert_eq!(e.message, format!("unsupported {kind} option: --layerprops"));
+        }
+        // the help says it
+        assert!(RENDER_HELP.contains("--layerprops FILE"));
     }
     #[test]
     fn layer_colors_are_asked_for_a_layout() {

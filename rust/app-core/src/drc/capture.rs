@@ -359,7 +359,8 @@ fn layers(o: &Options, dataset: &Dataset, rules: Option<&Rules>) -> Result<Layer
             "[drc] rule {:?} has no svrf layer metadata - all layers",
             o.rule
         );
-        return Ok(Layers::All);
+        // (less those a layer properties file named for the run hides)
+        return dataset.resolve_layers(None);
     };
     let keys: Vec<_> = rows(dataset)?
         .0
@@ -369,7 +370,7 @@ fn layers(o: &Options, dataset: &Dataset, rules: Option<&Rules>) -> Result<Layer
         .collect();
     if keys.is_empty() {
         eprintln!("[drc][warn] svrf source layers not in this design - all layers");
-        Ok(Layers::All)
+        dataset.resolve_layers(None)
     } else {
         eprintln!(
             "[drc] svrf isolate {}: {}",
@@ -500,6 +501,7 @@ pub fn run(
         PathBuf::from(format!("{}.layerprops", props.display())),
         props.with_extension("layerprops"),
     ]);
+    protected.extend(dataset.named_props().map(|n| n.file.clone()));
     let target = |local| -> Result<(PathBuf, PathBuf)> {
         let display = output(out, &options.rule, local, multiple)?;
         let resolved = dataset.output_path(&display)?;

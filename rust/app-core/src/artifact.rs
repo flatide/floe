@@ -184,6 +184,9 @@ pub(crate) fn layout_output_mode(path: &Path, layout: &Layout, planned: bool) ->
         lock.push(".index.lock");
         files.push(lock.into());
     }
+    // the layer properties file named for the run is an input: no output
+    // takes its place
+    files.extend(layout.named_props.as_ref().map(|n| n.file.clone()));
     protected_output_mode(path, &files, &trees, planned)
 }
 pub fn publish(path: &Path, data: &[u8], cancelled: &AtomicUsize) -> Result<()> {

@@ -51,6 +51,7 @@ pub fn run(
     mode: Mode,
     chips: Option<ChipSelection>,
     layer_colors: Option<LayerColors>,
+    layer_props: Option<PathBuf>,
     legend: bool,
     index: bool,
     light: Option<bool>,
@@ -61,6 +62,10 @@ pub fn run(
     if batch.is_none() {
         capture.validate()?;
     }
+    // the run's layer properties file first: one that cannot be read ends
+    // the run before the source is opened or indexed
+    let props = named_props(layer_props.as_deref())?;
+    let mut said = false;
     let (shots, input) = if let Some(batch) = &batch {
         let text = if batch == "-" {
             stdin_text(cancelled)?
@@ -101,6 +106,8 @@ pub fn run(
             mode,
             chips.as_ref(),
             layer_colors,
+            props.as_ref(),
+            &mut said,
             index,
             light,
             temp,
@@ -108,6 +115,71 @@ pub fn run(
             cancelled,
         )
     })
+}
+
+/// The rows of the file `--layerprops` names, with its real path
+/// (styles::read_named).
+pub(crate) type NamedRows = (PathBuf, Vec<floe_app_core::layerprops::Row>);
+pub(crate) fn named_props(file: Option<&Path>) -> Result<Option<NamedRows>> {
+    file.map(floe_app_core::styles::read_named).transpose()
+}
+/// The run's own say of the layers' look, on a dataset just opened:
+/// `--layer-colors` over FLOE_LAYER_COLORS (the open's), then the file
+/// `--layerprops` names over the design default (Dataset::set_layer_props).
+/// What the file came to is said once a run (`said`): the file, its rows,
+/// those for a layer of the source and the rows it hides; a file that names
+/// no layer of the source is a warning, the picture is the defaults'.
+pub(crate) fn look(
+    dataset: &mut Dataset,
+    layer_colors: Option<LayerColors>,
+    props: Option<&NamedRows>,
+    said: &mut bool,
+) -> Result<()> {
+    if let Some(mode) = layer_colors {
+        dataset.set_layer_colors(mode);
+    }
+    let Some((file, rows)) = props else {
+        return Ok(());
+    };
+    dataset.set_layer_props(file.clone(), rows)?;
+    if std::mem::replace(said, true) {
+        return Ok(());
+    }
+    let named = dataset.named_props().expect("set above");
+    if named.matched == 0 {
+        println!(
+            "[{}] WARNING: layer properties file {} names no layer of {} ({} row(s)) - drawn by the defaults",
+            floe_app_core::program(),
+            named.file.display(),
+            dataset.source().display(),
+            named.rows
+        );
+    } else {
+        println!(
+            "[{}] layer properties: {} - {} of its {} row(s) for layers of this source{}",
+            floe_app_core::program(),
+            named.file.display(),
+            named.matched,
+            named.rows,
+            if named.hidden.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    ", {} hidden (left out where a shot names no layers; --layers all draws every layer)",
+                    named.hidden.len()
+                )
+            }
+        );
+        // (a picture of nothing is drawn as asked, and said)
+        if dataset.resolve_layers(None)? == floe_worker_client::Layers::None {
+            println!(
+                "[{}] WARNING: layer properties file {} hides every layer of this source - a shot that names no layers draws none (--layers / --layerid name them, --layers all is every layer)",
+                floe_app_core::program(),
+                named.file.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// What a capture reads of a deck (jobdeck::window; user 2026-10-29: a
@@ -168,6 +240,8 @@ fn render(
     mode: Mode,
     chips: Option<&ChipSelection>,
     layer_colors: Option<LayerColors>,
+    props: Option<&NamedRows>,
+    said: &mut bool,
     index: bool,
     light: Option<bool>,
     temp: Option<&std::path::Path>,
@@ -194,10 +268,9 @@ fn render(
         waiter,
         cancelled,
     )?;
-    // --layer-colors over FLOE_LAYER_COLORS (the open's)
-    if let Some(mode) = layer_colors {
-        dataset.set_layer_colors(mode);
-    }
+    // --layer-colors over FLOE_LAYER_COLORS (the open's), --layerprops over
+    // the design default
+    look(&mut dataset, layer_colors, props, said)?;
     // what the capture reads of the deck: the CHIP blocks placed, and the
     // sources and placements of the levels loaded its regions reach
     if let Dataset::Deck(deck) = &dataset {
@@ -271,9 +344,7 @@ fn render(
             waiter,
             cancelled,
         )?;
-        if let Some(mode) = layer_colors {
-            dataset.set_layer_colors(mode);
-        }
+        look(&mut dataset, layer_colors, props, said)?;
         summary = draw(&dataset, cancelled)?;
     }
     // what the images lack: the skipped placements of the chips on, the
