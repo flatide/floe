@@ -20,7 +20,9 @@ pub struct Migration {
     pub directory_synced: bool,
 }
 
-/// Caller owns both alias write leases and has validated the selected input.
+/// Caller owns the source's write lease (index::WriteLease::acquire_current:
+/// the current name's, since 0.12.462 the only one) and has validated the
+/// selected input.
 /// Never copy, overwrite a destination, silently fall back, or roll back a
 /// completed rename. Uncoordinated external source replacement is unsupported.
 pub(crate) fn rename_legacy(
@@ -28,6 +30,40 @@ pub(crate) fn rename_legacy(
     new: &Path,
     expected: &Metadata,
     directory: bool,
+    stop: &AtomicUsize,
+) -> Result<Migration> {
+    rename(old, new, expected, directory, None, stop)
+}
+
+/// `rename_legacy` for a caller that holds the target's floe_vfs writer
+/// locks itself: its `.build` and, exclusive, its `.use` - what the rename
+/// would take (drc::build holds the pack's key for its whole run and the
+/// readers out before it renames). Asked for again they are refused by this
+/// very process's own: from 0.12.428, when the pack build began to hold its
+/// key, to 0.12.461 `floe2 drc DB --build` over a legacy-named pack ended 75
+/// with "DB is being indexed by" itself (found 2026-11-13; the web branch's
+/// drc_build test fails on it). A guard that does not hold the readers out
+/// - the locks off, or not supported there, or a caller that did not ask -
+/// is no proof: the rename then takes the locks as `rename_legacy` does,
+/// and under a caller's `.build` alone it is refused rather than done
+/// beside the readers.
+pub(crate) fn rename_legacy_under(
+    old: &Path,
+    new: &Path,
+    expected: &Metadata,
+    directory: bool,
+    held: &floe_vfs::lock::WriterGuard,
+    stop: &AtomicUsize,
+) -> Result<Migration> {
+    rename(old, new, expected, directory, Some(held), stop)
+}
+
+fn rename(
+    old: &Path,
+    new: &Path,
+    expected: &Metadata,
+    directory: bool,
+    held: Option<&floe_vfs::lock::WriterGuard>,
     stop: &AtomicUsize,
 ) -> Result<Migration> {
     check_cancelled(stop)?;
@@ -53,12 +89,19 @@ pub(crate) fn rename_legacy(
     } else {
         floe_vfs::lock::Kind::Pack
     };
-    let _lock = floe_vfs::lock::writer(
-        &floe_vfs::lock::key(kind, &new.to_string_lossy()),
-        floe_vfs::lock::Mode::Full,
-        &format!("{} (legacy name rename)", crate::program()),
-    )
-    .map_err(|busy| Error::new(ErrorKind::Busy, busy.to_string()))?;
+    let _lock = if held.is_some_and(|guard| guard.holds_use()) {
+        // the caller's own: the target's `.build` and `.use` are held
+        None
+    } else {
+        Some(
+            floe_vfs::lock::writer(
+                &floe_vfs::lock::key(kind, &new.to_string_lossy()),
+                floe_vfs::lock::Mode::Full,
+                &format!("{} (legacy name rename)", crate::program()),
+            )
+            .map_err(|busy| Error::new(ErrorKind::Busy, busy.to_string()))?,
+        )
+    };
     let dir = Directory::open(parent)?;
     let file = dir.open_leaf(
         &from,
@@ -310,5 +353,50 @@ mod tests {
         drop(reader);
         rename_legacy(&old, &new, &before, true, &AtomicUsize::new(0)).unwrap();
         assert!(!old.exists() && new.is_dir());
+    }
+    #[test]
+    fn a_caller_that_holds_the_targets_locks_renames_under_them() {
+        // drc::build holds the pack's key for its run (0.12.428): the rename
+        // asking for the locks again was refused by the build's own, and a
+        // legacy-named pack could not be built over (found 2026-11-13)
+        let root = Root::new();
+        let old = root.0.join("r.db.ice");
+        let new = root.0.join(".r.db.tray");
+        fs::write(&old, b"pack bytes").unwrap();
+        let before = fs::symlink_metadata(&old).unwrap();
+        let stop = AtomicUsize::new(0);
+        let key = floe_vfs::lock::key(floe_vfs::lock::Kind::Pack, &new.to_string_lossy());
+        let mut held =
+            floe_vfs::lock::writer(&key, floe_vfs::lock::Mode::Additive, "build").unwrap();
+        // the run's own `.build`: the plain rename is refused by it ...
+        let error = rename_legacy(&old, &new, &before, false, &stop).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Busy, "{}", error.message);
+        assert!(error.message.contains("r.db is being indexed by"), "{}", error.message);
+        // ... and so is the one under a guard that does not hold the readers
+        // out: `.build` alone proves nothing about them
+        assert!(!held.holds_use());
+        let error = rename_legacy_under(&old, &new, &before, false, &held, &stop).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Busy, "{}", error.message);
+        assert!(old.is_file() && !new.exists());
+        // a reader of the pack keeps the caller from holding them out
+        let reader = floe_vfs::lock::readers(std::slice::from_ref(&key), "review").unwrap();
+        assert!(held.exclude_readers(&key).is_err() && !held.holds_use());
+        drop(reader);
+        // the readers held out: renamed under the caller's locks, which stay
+        // the caller's - a reader coming in is refused until they are let go
+        held.exclude_readers(&key).unwrap();
+        assert!(held.holds_use());
+        rename_legacy_under(&old, &new, &before, false, &held, &stop).unwrap();
+        assert!(!old.exists() && fs::read(&new).unwrap() == b"pack bytes");
+        assert!(floe_vfs::lock::readers(std::slice::from_ref(&key), "review").is_err());
+        drop(held);
+        drop(floe_vfs::lock::readers(std::slice::from_ref(&key), "review").unwrap());
+        // no guard's locks at all (FLOE_LOCK=off gives such a guard): the
+        // rename takes them itself, as `rename_legacy` does
+        fs::rename(&new, &old).unwrap();
+        let before = fs::symlink_metadata(&old).unwrap();
+        let none = floe_vfs::lock::WriterGuard::default();
+        rename_legacy_under(&old, &new, &before, false, &none, &stop).unwrap();
+        assert!(!old.exists() && new.is_file());
     }
 }

@@ -444,7 +444,9 @@ jobs 1 vs N sha256 비교(스위트), `cell_sink_append_is_byte_identical`.
 
 같은 캐시를 쓰는 실행은 서로를, 통째로 다시 만드는 실행은 그 캐시를 연 쪽을
 거절한다. 다른 사용자·호스트·공용 계정이어도 같다. 이름·파일·권한은
-CACHE-NAMING §5에 있다.
+CACHE-NAMING §5에 있다. `floe2 index`와 `floe2 drc --build`가 이 잠금에 앞서 잡는
+앱 lease `<캐시>.index.lock`은 CACHE-NAMING §5.1에 있다(0.12.462부터 현재 이름의 것
+하나이고, 구 이름의 `X.oas.floe.index.lock`은 만들지 않는다).
 
 | 명령 | build | use |
 |---|---|---|

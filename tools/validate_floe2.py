@@ -7,6 +7,8 @@ product package since P3 (tools/oracle/floe_oracle)."""
 
 import ast
 
+import contextlib
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -945,6 +947,164 @@ def validate_kept_index(base, fixture):
           "--force, a missing file asked for, a changed source and a damaged cache build again")
 
 
+def validate_lease_names(base, fixture):
+    """The app lease of a cache or a pack is its current name's alone
+    (0.12.462). User 2026-11-13, after asking what `.layout.oas.ice.index.lock`,
+    `layout.oas.floe.index.lock` (not hidden) and `.floe-lock` beside a layout
+    are: "구 캐시는 사용하지 않으니 floe.index.lock은 더 이상 사용하지 않도록
+    해줘". `floe2 index` and `floe2 drc --build` took the lease under both
+    names of the cache - the legacy name's (`X.oas.floe.index.lock`,
+    `X.db.ice.index.lock`) made beside every source, a legacy cache ever
+    there or not. Now the current name's alone is made and taken; it refuses a
+    second run as before; a legacy lease an older build left, held or not, is
+    not asked for and stays as it is; a legacy-named cache or pack is still
+    renamed into place - the pack's by `floe2 drc --build` too, which from
+    0.12.428 to 0.12.461 was refused there by its own lock on the pack."""
+    from floe_oracle import indexlock
+    indexer = ROOT / "rust" / "target" / "release" / "floe-index"
+    renderer = ROOT / "rust" / "target" / "release" / "floe-renderd"
+    with tempfile.TemporaryDirectory(prefix="floe2-lease-") as td:
+        top = Path(td).resolve()
+        work = top / "data"
+        work.mkdir()
+        env = {"PATH": "/usr/bin:/bin", "HOME": base.get("HOME", td),
+               "FLOE_INDEX_BIN": str(indexer), "FLOE_RENDERD_BIN": str(renderer)}
+
+        def names(folder=work):
+            return sorted(p.name for p in folder.iterdir())
+
+        @contextlib.contextmanager
+        def held(path):
+            # another run holding the lease file (made when it is not there)
+            fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                yield
+            finally:
+                os.close(fd)
+
+        def stamp(path):
+            at = path.stat()
+            return at.st_ino, at.st_size, at.st_mtime_ns
+
+        # a layout: the lease is `.chip.oas.ice.index.lock`, private and empty,
+        # and nothing is made under the legacy name
+        src = work / "chip.oas"
+        shutil.copy2(fixture, src)
+        cache, legacy = work / ".chip.oas.ice", work / "chip.oas.floe"
+        lease, old_lease = work / ".chip.oas.ice.index.lock", work / "chip.oas.floe.index.lock"
+        rust(env, "index", src, "--jobs", "2")
+        indexed = [".chip.oas.ice", ".chip.oas.ice.index.lock", ".floe-lock", "chip.oas"]
+        check(names() == indexed, "floe2 index left other files than its cache, its lease and "
+              "the lock folder: %s" % names())
+        check(lease.stat().st_size == 0 and stat.S_IMODE(lease.stat().st_mode) == 0o600,
+              "the lease is not a private empty file")
+        made = stamp(lease)
+        again = rust(env, "index", src)
+        check("cache up to date" in again.stdout and names() == indexed and stamp(lease) == made,
+              "a run over a current cache changed the lease files: %s" % names())
+        # the current name's lease held: a second run is refused, naming the source
+        marker = stamp(cache / "design.ovm")
+        with held(lease):
+            busy = rust(env, "index", src, "--force", ok=75)
+        check("another Rust application is indexing this cache (chip.oas)" in busy.stderr
+              and stamp(cache / "design.ovm") == marker,
+              "a held lease did not refuse the run: %s" % busy.stderr[-300:])
+        # the legacy name's lease as an older build left it, held by one that
+        # still runs: not asked for, and left as it is
+        with held(old_lease):
+            left = stamp(old_lease)
+            rebuilt = rust(env, "index", src, "--force")
+            check(stamp(cache / "design.ovm") != marker and stamp(old_lease) == left,
+                  "a legacy lease another run holds stopped or was touched by the run: %s"
+                  % rebuilt.stderr[-300:])
+        check(names() == sorted(indexed + ["chip.oas.floe.index.lock"]),
+              "the run made or removed a file beside the legacy lease: %s" % names())
+        old_lease.unlink()
+        # a legacy-named cache is still renamed into place and reused - under
+        # the current name's lease alone
+        cache.rename(legacy)
+        moved = rust(env, "index", src)
+        check("renamed legacy cache" in moved.stderr and "cache up to date" in moved.stdout
+              and cache.is_dir() and names() == indexed,
+              "a legacy-named cache was not renamed into place: %s / %s" % (names(), moved.stderr[-300:]))
+        cache.rename(legacy)
+        with held(lease):
+            busy = rust(env, "index", src, ok=75)
+        check("another Rust application" in busy.stderr and legacy.is_dir() and not cache.exists(),
+              "the lease did not hold the rename of a legacy-named cache back: %s" % names())
+        rust(env, "index", src)
+        check(names() == indexed, "the legacy-named cache was not renamed once the lease was free")
+
+        # a pack: `.run.db.tray.index.lock` alone
+        db = work / "run.db"
+        shutil.copy2(ROOT / "sample.db", db)
+        pack, old_pack = work / ".run.db.tray", work / "run.db.ice"
+        pack_lease, old_pack_lease = work / ".run.db.tray.index.lock", work / "run.db.ice.index.lock"
+        first = json.loads(rust(env, "drc", db, "--build", "--jobs", "2").stdout)
+        packed = sorted(indexed + [".run.db.tray", ".run.db.tray.index.lock", "run.db"])
+        check(not first["reused"] and names() == packed,
+              "floe2 drc --build left other files than the pack and its lease: %s" % names())
+        check(pack_lease.stat().st_size == 0 and stat.S_IMODE(pack_lease.stat().st_mode) == 0o600,
+              "the pack's lease is not a private empty file")
+        content = pack.read_bytes()
+        with held(pack_lease):
+            busy = rust(env, "drc", db, "--build", "--force", ok=75)
+        check("another Rust application is indexing this cache" in busy.stderr
+              and pack.read_bytes() == content,
+              "a held pack lease did not refuse the build: %s" % busy.stderr[-300:])
+        with held(old_pack_lease):
+            left = stamp(old_pack_lease)
+            forced = json.loads(rust(env, "drc", db, "--build", "--force").stdout)
+            check(not forced["reused"] and stamp(old_pack_lease) == left,
+                  "a legacy pack lease another run holds stopped or was touched by the build")
+        check(names() == sorted(packed + ["run.db.ice.index.lock"]),
+              "the build made or removed a file beside the legacy pack lease: %s" % names())
+        old_pack_lease.unlink()
+        # a legacy-named pack: `--build` renames it into place and reuses it
+        # (refused by the build's own lock on the pack from 0.12.428 to
+        # 0.12.461: "run.db is being indexed by" itself, exit 75)
+        pack.rename(old_pack)
+        reused = rust(env, "drc", db, "--build")
+        answer = json.loads(reused.stdout)
+        check(answer["reused"] and answer["migration"] and "renamed legacy cache" in reused.stderr
+              and names() == packed and pack.read_bytes() == content,
+              "a legacy-named pack was not renamed into place and reused: %s / %s" % (
+                  names(), reused.stderr[-300:]))
+        # ... and under --force it is renamed, then built again
+        pack.rename(old_pack)
+        forced = rust(env, "drc", db, "--build", "--force")
+        answer = json.loads(forced.stdout)
+        check(not answer["reused"] and answer["migration"] and "renamed legacy cache" in forced.stderr
+              and names() == packed and pack.read_bytes() == content,
+              "a legacy-named pack was not renamed and built again under --force: %s / %s" % (
+                  names(), forced.stderr[-300:]))
+        # a review that has the legacy-named pack open still refuses the
+        # rename: the pack stays under its name until it is closed
+        pack.rename(old_pack)
+        reader = indexlock.hold_readers(indexlock.PACK, [str(old_pack)], "gate review")
+        try:
+            refused = rust(env, "drc", db, "--build", ok=75)
+        finally:
+            reader.close()
+        check("run.db is in use by" in refused.stderr and old_pack.is_file() and not pack.exists(),
+              "a reader of the legacy-named pack did not refuse its rename: %s" % refused.stderr[-300:])
+        rust(env, "drc", db, "--build")
+        check(names() == packed, "the legacy-named pack was not renamed once its reader was gone")
+
+        # under a work directory the mirror has the current names' leases alone
+        beside = names()
+        wd = top / "work dir"
+        rust(env, "index", src, "--workdir", wd, "--jobs", "2")
+        rust(env, "drc", db, "--build", "--workdir", wd, "--jobs", "2")
+        mirror = wd / work.relative_to("/")
+        check(names(mirror) == [".chip.oas.ice", ".chip.oas.ice.index.lock", ".floe-lock",
+                                ".run.db.tray", ".run.db.tray.index.lock"],
+              "the work directory's mirror has other files than the caches, their leases and "
+              "the lock folder: %s" % names(mirror))
+        check(names() == beside, "a run under --workdir made a file beside the sources: %s" % names())
+
+
 def main(fixture=None):
     base = os.environ.copy()
     base.pop("FLOE_PRODUCT", None)
@@ -1337,6 +1497,7 @@ print(json.dumps([instance.APP, instance.socket_address(":77"),
         validate_runtime(base, Path(fixture).resolve())
         validate_rust_cli(base, Path(fixture).resolve())
         validate_kept_index(base, Path(fixture).resolve())
+        validate_lease_names(base, Path(fixture).resolve())
     print("FLOE2 PRODUCT VALIDATION: ALL OK")
 
 

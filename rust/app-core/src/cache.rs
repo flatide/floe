@@ -9,7 +9,7 @@ mod migration;
 mod names;
 pub mod revision;
 mod temp;
-pub(crate) use migration::rename_legacy;
+pub(crate) use migration::{rename_legacy, rename_legacy_under};
 pub use migration::Migration;
 pub use names::{
     cache_path, cache_paths, database_path, default_cache_path, ensure_workdir_folder, write_refusal,

@@ -140,7 +140,10 @@
 - **pack 빌드 `floe2 drc DB --build`(2026-11-01, app 0.12.428):** floe2의 pack 빌드도 pack의
   키(`X.db.pack`, `.X.db.tray` 경로에서; `--workdir`이면 미러의 `.floe-lock/`)로 `.build`를 실행
   내내 쥐고, 기존 pack을 바꾸거나 구 이름을 개명하기 직전부터 `.use`를 배타로 쥔다. 그대로
-  재사용하는 `--build`는 `.build`만 쥐어 리뷰로 연 쪽을 건드리지 않는다. 0.12.427까지는
+  재사용하는 `--build`는 `.build`만 쥐어 리뷰로 연 쪽을 건드리지 않는다. 구 이름 pack
+  `X.db.ice`의 개명은 이 실행이 쥔 잠금 아래에서 한다(`cache::rename_legacy_under`, 0.12.462):
+  0.12.428~0.12.461은 개명이 같은 키를 한 번 더 잡으려다 자기 잠금에 걸려 `X.db is being indexed
+  by`(자기 자신), 75로 끝났다. 0.12.427까지는
   floe-index를 비공개 스테이징 경로에 `FLOE_LOCK=off`로 돌리고 lease `.tray.index.lock`만
   쥐었으므로 pack의 `.build`를 쥔 쪽도, 리뷰로 연 쪽도 floe2의 재빌드를 막지 못했다. 거절은
   `[floe2] DRC build: …`와 `[lock] …` 두 줄(쥔 사람을 댄다), 종료 75다. 사용자(2026-11-01):
@@ -156,6 +159,42 @@
   (DRC.ko.md §2). 게이트 `drc_team` R9.
 - 누가 무엇을 쥐는지(명령별)는 SPEC-INDEXER §4.5, 뷰어의 동작은 SPEC-VIEWER를 본다.
   게이트는 `index_lock`이다.
+
+### 5.1 앱 lease `<캐시>.index.lock` (0.12.462에서 현재 이름 하나로)
+
+`.floe-lock/`과 별개인 두 번째 잠금이다. Rust 앱 계층(app-core `index.rs` `WriteLease`)의 것으로,
+웹 버전에서 왔고 0.12.328부터 `floe2 index`가 Rust라 이쪽에도 생긴다.
+
+- **이름:** 캐시나 pack의 **현재 이름**에 `.index.lock`을 붙인 파일이다. `chipA.oas` →
+  `.chipA.oas.ice.index.lock`, `results.db` → `.results.db.tray.index.lock`. 캐시 옆에 놓이고
+  (`--workdir`이면 미러 폴더), 0바이트에 권한 0600이다. 읽기 명령의 임시 인덱스(`--temp-index`)는
+  그 폴더 이름에 `.index.lock`을 붙인 자기 lease를 쓴다.
+- **누가:** `floe2 index`(뷰어가 인덱스 없는 파일을 열 때 부르는 것 포함)와 `floe2 drc DB --build`가
+  실행 내내 배타로 쥔다. 캐시가 현재라 아무것도 만들지 않는 `floe2 index`도 잡고, 인덱스가 없는
+  소스를 먼저 인덱싱하는 읽기 명령도 그 인덱싱 동안 잡는다. 인덱스가 있는 소스의 읽기 명령과
+  뷰어의 열기, `floe-index`를 직접 돌린 실행은 잡지 않는다(그쪽은 `.floe-lock/`만 쓴다).
+- **거절:** 쥔 동안 두 번째 실행은 `[lock] another Rust application is indexing this cache (chipA.oas) -
+  try again when it finishes`, 종료 75다.
+- **수단과 수명:** flock이고 기다리지 않는다. 프로세스가 끝나면 커널이 푼다. 파일은 지우지 않는다
+  (새 파일은 두 번째 잠금이 된다). `FLOE_LOCK=off`는 이 lease를 끄지 않는다.
+- **구 이름의 lease는 쓰지 않는다(0.12.462).** 0.12.461까지는 구 이름의 lease도 함께 잡아서
+  `chipA.oas.floe.index.lock`, `results.db.ice.index.lock`이 구 캐시가 있든 없든 소스 옆에 생겼다.
+  숨김이 아닌 이름이다. 사용자(2026-11-13): "구 캐시는 사용하지 않으니 floe.index.lock은 더 이상
+  사용하지 않도록 해줘."
+  - 구 이름 lease가 막던 상대는 구 이름만 아는 Rust 색인기, 곧 2026-09-13~09-17의 웹 브랜치 개발
+    빌드뿐이다. 그 뒤의 빌드는 모두 현재 이름의 lease를 잡으므로 그것 하나로 서로 막힌다.
+    0.12.461 이하(둘 다 잡는다)와 0.12.462를 섞어 써도 현재 이름에서 만난다.
+  - 구 이름 캐시(`chipA.oas.floe/`, `results.db.ice`)의 읽기와 제자리 개명(§2)은 그대로다. 개명은
+    현재 이름의 lease와, 두 이름이 키를 나누는 `.floe-lock/` 잠금 아래에서 한다.
+  - 이전 버전이 남긴 `*.floe.index.lock`, `<db>.ice.index.lock`은 보지도 잡지도 지우지도 않는다.
+    빈 파일이라 그 폴더에서 floe2가 돌고 있지 않을 때 지워도 된다.
+    `find DIR -name '*.floe.index.lock' -size 0 -delete`. pack 쪽은 현재 lease도 `.ice.index.lock`으로
+    끝나므로(`.chipA.oas.ice.index.lock`) 점으로 시작하지 않는 이름만 고른다:
+    `find DIR -name '*.ice.index.lock' -not -name '.*' -size 0 -delete`.
+- 출력 경로 보호(app-core `artifact.rs`·`registered.rs`·`jobdeck/plan.rs`의 금지 목록)는 구 이름
+  캐시와 그 lease 이름을 전처럼 산출물 자리로 내주지 않는다. 구 캐시를 읽는 한 그 자리는 캐시의 것이다.
+- 게이트 `floe2`(`validate_lease_names`), 단위 테스트 app-core `index`
+  (`the_lease_of_a_source_is_its_current_names_alone`).
 
 ## 6. 작업 디렉터리 `--workdir DIR` (2026-10-31, app 0.12.427)
 
@@ -186,7 +225,7 @@
   | pack의 `.r.db.analysis/`(drc-prepare; `FLOE_DRC_ANALYSIS_ROOT`가 있으면 그쪽) | pack 옆, 즉 DIR 아래 |
   | 리뷰 `.r.db.review.<user>.sqlite3`(`FLOE_DRC_REVIEW_ROOT`가 있으면 그쪽), `.r.db.waive.<user>`, `.r.db.notes.<user>.fe` | pack 옆, 즉 DIR 아래 |
   | SVRF 룰 메타데이터 `deck.cal.rules.json`(`floe-index svrf deck.cal`의 기본 출력; 0.12.450) | `DIR/<덱 폴더>/deck.cal.rules.json`. 폴더는 처음 쓸 때 만든다. 읽는 쪽(뷰어의 db 로드, DRC 캡처)은 db 옆과 덱 옆을 먼저 보고 없으면 DIR의 같은 자리를 본다. `floe2 drc-prepare --svrf FILE`이 분석 폴더의 `rules.path`에 적어 둔 사이드카가 있으면 그것이 맨 먼저다(0.12.460) |
-  | 잠금 `<캐시>.index.lock`, `.floe-lock/` | 캐시·pack·rules.json 옆, 즉 DIR 아래 |
+  | 잠금 `<캐시>.index.lock`(현재 이름의 것 하나, §5.1), `.floe-lock/` | 캐시·pack·rules.json 옆, 즉 DIR 아래 |
   | 출력(`--out`의 PNG·보고서·clip OASIS), 입력(`<db>.clusters`, `--drc-rules`) | 바뀌지 않는다. `.clusters`는 db 옆에서 먼저 찾고 없으면 DIR의 미러에서 찾는다 |
 
 - **소스 옆은 읽지도 쓰지도 않는다.** 작업 디렉터리에 캐시가 없으면 소스 옆에 캐시가 있어도 다시

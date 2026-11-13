@@ -131,7 +131,7 @@ python을 사용하지 않도록 변경해줘."
   - gen_drcdb 자산(검사 60, 오류 수천): 전체 오류, 무작위 waive 뒤의 카운터·페이지·순위, 상한·필터·검사 부분집합별 질의.
   - 파일: 노트 파일 바이트 = IcePack 직렬화, 다시 열면 같은 노트, 지우면 파일 없음. waive 내보내기 바이트가 같고 남의 파일은 거절. 리뷰 중 재팩은 75. 남의 사이드카는 옮기고 새로 만듦.
   - svrf: 피연산자와 사이드카.
-- **열린 항목:** Rust 색인(app-core index·cell_index·drc build)은 소스 옆에 `X.oas.floe.index.lock`(숨김 아님)과 `.X.oas.ice.index.lock`을 남긴다. webui의 앱 수준 잠금(리비전·등록 세트·산출물 보호가 이 이름을 안다)이며, 0.12.328부터 `floe2 index`가 Rust라 jobdeck 현장에서도 생긴다. floe_vfs 잠금(`.floe-lock/`)으로 옮기는 일은 webui와 함께 정한다.
+- **열린 항목:** Rust 색인(app-core index·cell_index·drc build)은 소스 옆에 `.X.oas.ice.index.lock`을 남긴다. webui의 앱 수준 잠금(리비전·등록 세트·산출물 보호가 이 이름을 안다)이며, 0.12.328부터 `floe2 index`가 Rust라 jobdeck 현장에서도 생긴다. floe_vfs 잠금(`.floe-lock/`)으로 옮기는 일은 webui와 함께 정한다. 0.12.461까지 함께 남기던 구 이름의 `X.oas.floe.index.lock`(숨김 아님)은 0.12.462부터 만들지도 잡지도 않는다(§18).
 
 ### P2c (0.12.331) — 레이어 속성 파일
 
@@ -594,3 +594,16 @@ P4d처럼 컨트롤러 루프에서만 바뀐다. `FLOE_GTK_LOOP=legacy`는 예�
 - **웹(나중):** 머지하면 웹의 분석 캐시도 같은 식별값을 쓴다. 0.12.458까지의 캐시는 한 번 다시 계산되고, 옛 것은 `drc-prepare`가 지운다.
 - **게이트:** `drc_analysis` A2(같은 에러의 다른 pack 파일 = 같은 캐시, 다른 에러 = 새 캐시), A4(다시 준비, 정리, 복사한 폴더); 단위 `drc::analysis::store`.
 - **준비한 사이드카의 메모(0.12.460):** `store::note_rules(pack, sidecar)`가 분석 폴더의 `rules.path`에 절대 경로 한 줄을 쓰고(`floe2 drc-prepare --svrf`), `store::noted_rules(pack)`가 읽는다. `svrf::rules_candidates(db, deck)`가 그 경로를 목록 맨 앞에 넣으므로 뷰어의 로드, DRC 캡처, 웹의 같은 호출이 모두 그것을 먼저 본다. 호스트가 바꿀 것은 없다. 게이트는 `drc_analysis` A5 `rules_lookup_ui`(준비 전후의 목록, 실제 뷰어의 적용, 없는 파일, 다른 사이드카, `FLOE_DRC_ANALYSIS_ROOT`).
+
+## 18. 앱 lease는 현재 이름 하나 (2026-11-13, app 0.12.462) — 구 이름 lease를 그만 쓴다
+
+사용자: `.layout.oas.ice.index.lock`·`layout.oas.floe.index.lock`·`.floe-lock`이 각각 무엇인지 물은 뒤 "구 캐시는 사용하지 않으니 floe.index.lock은 더 이상 사용하지 않도록 해줘".
+
+- **바뀐 것(app-core `index.rs`):** `WriteLease::acquire_aliases(source, 두 이름)`이 `WriteLease::acquire_current(source, 현재 이름)`이 됐다. 부르는 곳은 셋이다: `PreparedIndex::prepare`(`cache::default_cache_path`), `cell_index::ensure_verified`(같음), `drc::build`(`cache::pack_paths(source)[0]`). `X.oas.floe.index.lock`과 `X.db.ice.index.lock`은 만들지도 잡지도 보지도 않는다. 이름·거절 문구·종료 코드, `WriteLease::acquire(dir)`·`acquire_existing`(임시 인덱스, 리비전 저장소)은 그대로다.
+- **왜 안전한가:** 구 이름 lease가 막던 상대는 구 이름만 아는 Rust 색인기(webui 5c8d17b5 이전, 2026-09-13~09-17의 개발 빌드)뿐이다. 그 뒤의 빌드는 모두 현재 이름의 lease를 잡으므로 0.12.461 이하와 섞여도 현재 이름에서 서로 막힌다. 구 이름 캐시의 개명은 현재 이름의 lease와 `rename_legacy`가 잡는 floe_vfs 잠금(두 이름이 키를 나눈다) 아래에서 한다.
+- **그대로인 것:** 구 이름 캐시의 읽기와 개명(`cache::names::select`, `cache::rename_legacy`), 관리형 Resources의 별칭 lease(프로세스 안의 것이고 파일을 만들지 않는다), 산출물 보호 목록(`artifact.rs`·`registered.rs`·`jobdeck/plan.rs`·`registered/set/protection.rs`: 두 이름의 캐시와 그 `.index.lock` 이름을 전처럼 금지한다).
+- **함께 고친 것 — 구 이름 pack의 개명:** `drc::build`가 pack의 키를 실행 내내 쥐기 시작한 0.12.428부터, 구 이름 pack(`X.db.ice`) 위의 `floe2 drc DB --build`는 `rename_legacy`가 같은 키를 한 번 더 잡으려다 자기 잠금에 걸려 75(`X.db is being indexed by` 자기 자신)로 끝났다. `cache::rename_legacy_under(.., held: &WriterGuard, ..)`를 더했다: 부른 쪽이 그 키의 `.build`와 배타 `.use`를 쥐고 있으면(`holds_use()`) 그 아래에서 개명하고, 아니면 `rename_legacy`처럼 스스로 잡는다(`.build`만 쥔 호출은 거절된다). `drc::build`의 두 개명 자리가 이것을 부른다.
+- **웹(머지할 때):**
+  - webui의 `tools/validate_cache_migration.py`는 두 별칭의 lease를 차례로 쥐고 색인이 거절되는지 보고(`for alias in (new, old)`), 멈춰 있는 색인이 두 별칭을 모두 잠갔는지도 본다(`assert_writer_locked(alias)`). 구 이름 쪽은 이제 거절되지도 잠기지도 않으니 두 반복에서 구 이름을 빼고, 구 이름 lease가 생기지 않는지를 보게 한다. `rust/app/README.md`와 `docs/WEBUI_CACHE_MIGRATION.ko.md`·`docs/WEBUI_M1A.ko.md`의 `<src>.floe.index.lock` 설명도 고친다.
+  - webui의 `tools/validate_drc_build.py`가 돌리는 `rust/app-core/tests/drc_build.rs`(ignored)는 0.12.428을 머지하면 구 이름 개명 재사용에서 실패한다. 0.12.462의 `rename_legacy_under`로 통과한다(2026-11-13 그 게이트의 가짜 인덱서와 같은 것으로 이 브랜치에서 돌려 확인: 고치기 전 95행에서 실패, 고친 뒤 통과).
+- **게이트:** `floe2` `validate_lease_names`(실제 바이너리), 단위 app-core `index`(`the_lease_of_a_source_is_its_current_names_alone`)·`cache::migration`(`a_caller_that_holds_the_targets_locks_renames_under_them`).

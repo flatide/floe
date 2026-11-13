@@ -341,7 +341,9 @@ fn run(
             "DRC build requires an ASCII source, not an ICE pack",
         ));
     }
-    let _leases = WriteLease::acquire_aliases(source, &cache::pack_paths(source)?)?;
+    // the pack's lease: the current name's alone (0.12.462,
+    // index::WriteLease::acquire_current)
+    let _lease = WriteLease::acquire_current(source, &cache::pack_paths(source)?[0])?;
     // the pack's own lock (floe_vfs::lock, kind Pack; user 2026-11-01:
     // "pack의 .floe-lock 잠금도 .tray 키로 잡게 고쳐줘"): keyed on the pack
     // - `.r.db.tray` -> `.floe-lock/r.db.pack.*` beside it, in the work
@@ -392,11 +394,13 @@ fn run(
         let mut s = state.lock().unwrap();
         check_cancelled(stop)?;
         if selected != target {
-            s.snapshot.migration = Some(cache::rename_legacy(
+            // under this run's own locks on the pack's key (0.12.462)
+            s.snapshot.migration = Some(cache::rename_legacy_under(
                 &selected,
                 target,
                 &previous.file.metadata()?,
                 false,
+                &lock,
                 stop,
             )?);
         }
@@ -423,8 +427,8 @@ fn run(
             .metadata()?;
         let mut s = state.lock().unwrap();
         check_cancelled(stop)?;
-        s.snapshot.migration = Some(cache::rename_legacy(
-            &selected, target, &expected, false, stop,
+        s.snapshot.migration = Some(cache::rename_legacy_under(
+            &selected, target, &expected, false, &lock, stop,
         )?);
         drop(s);
         // Rename changes ctime. Capture the new stamp, without pretending a

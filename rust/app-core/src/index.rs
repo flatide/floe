@@ -637,17 +637,30 @@ fn occupancy_args(a: &mut Vec<OsString>, o: &IndexOptions) {
 
 pub(crate) struct WriteLease(File);
 impl WriteLease {
-    /// The leases of `source`'s cache or pack under both spellings; a
-    /// folder that cannot be written is refused naming it and --workdir
-    /// (cache::write_refusal).
-    pub(crate) fn acquire_aliases(source: &Path, paths: &[PathBuf]) -> Result<Vec<Self>> {
-        // Fixed lexical order and both spellings serialize old/new writers.
-        // Keep stable lock inodes; never remove them after a rename.
-        let ordered: std::collections::BTreeSet<_> = paths.iter().collect();
-        ordered
-            .into_iter()
-            .map(|p| Self::open(p, true, Some(source)))
-            .collect()
+    /// The lease of `source`'s cache or pack: `<current name>.index.lock`
+    /// beside it (`.x.oas.ice.index.lock`, `.r.db.tray.index.lock`; under
+    /// the work directory when there is one), held by every run of this
+    /// layer that decides about the cache, builds it, renames a legacy one
+    /// into place or adds to it. A folder that cannot be written is refused
+    /// naming it and --workdir (cache::write_refusal).
+    ///
+    /// The current name's alone since 0.12.462 (user 2026-11-13: "구 캐시는
+    /// 사용하지 않으니 floe.index.lock은 더 이상 사용하지 않도록 해줘").
+    /// Until then the legacy name's lease was taken with it -
+    /// `x.oas.floe.index.lock`, `r.db.ice.index.lock`, files that are not
+    /// hidden, made beside every source whether a legacy cache was ever
+    /// there or not - to meet a writer that knew the legacy name alone: the
+    /// web branch's builds of 2026-09-13 to 09-17, never in the field.
+    /// Every build since takes the current name's lease, so that one alone
+    /// keeps two runs apart, a build of 0.12.461 or before (which takes
+    /// both) and this one too. A run that renames a legacy cache into place
+    /// holds the target's floe_vfs lock for the rename besides
+    /// (cache::rename_legacy; the two names share that key). A legacy lease
+    /// file an older build left is not looked at, not taken and not
+    /// removed: an older build that is still run may hold it.
+    pub(crate) fn acquire_current(source: &Path, current: &Path) -> Result<Self> {
+        // Keep the lock inode stable; never remove it.
+        Self::open(current, true, Some(source))
     }
     pub(crate) fn acquire(directory: &Path) -> Result<Self> {
         Self::open(directory, true, None)
@@ -861,10 +874,11 @@ impl PreparedIndex {
             }
             vec![WriteLease::acquire(dir)?]
         } else {
-            WriteLease::acquire_aliases(&source, &cache::cache_paths(&source)?)?
+            vec![WriteLease::acquire_current(&source, &cache::default_cache_path(&source)?)?]
         };
-        // Resolution must be rechecked under both writer locks. Read-only
-        // profile intentionally acquires neither locks nor migration authority.
+        // Resolution must be rechecked under the writer lease (the current
+        // name's, whichever spelling the cache has). Read-only profile
+        // intentionally acquires neither lease nor migration authority.
         if !profiling && own.is_none() {
             directory = cache::cache_path(&source)?;
         }
@@ -1342,6 +1356,97 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]
+    fn the_lease_of_a_source_is_its_current_names_alone() {
+        // 0.12.462 (user 2026-11-13: "구 캐시는 사용하지 않으니 floe.index.lock은
+        // 더 이상 사용하지 않도록 해줘"): the legacy name's lease
+        // (`x.oas.floe.index.lock`, `r.db.ice.index.lock`) is not made, not
+        // taken and not looked at; the current name's keeps two runs apart
+        if cache::workdir().is_some() {
+            return;
+        }
+        let dir = scratch("current-lease");
+        let lock_of = |path: &Path| {
+            let mut name = path.as_os_str().to_owned();
+            name.push(".index.lock");
+            PathBuf::from(name)
+        };
+        let names = || {
+            let mut names: Vec<String> = fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        for (file, current_lock, legacy_lock, paths) in [
+            ("x.oas", ".x.oas.ice.index.lock", "x.oas.floe.index.lock", cache::cache_paths as fn(&Path) -> Result<[PathBuf; 2]>),
+            ("r.db", ".r.db.tray.index.lock", "r.db.ice.index.lock", cache::pack_paths),
+        ] {
+            let source = dir.join(file);
+            fs::write(&source, b"").unwrap();
+            let [current, legacy] = paths(&source).unwrap();
+            assert_eq!(lock_of(&current), dir.join(current_lock));
+            assert_eq!(lock_of(&legacy), dir.join(legacy_lock));
+            let before = names();
+            let held = WriteLease::acquire_current(&source, &current).unwrap();
+            // one file, the current name's: private, empty, and no other
+            let mut expected = before.clone();
+            expected.push(current_lock.to_string());
+            expected.sort();
+            assert_eq!(names(), expected, "{file}");
+            let made = fs::symlink_metadata(dir.join(current_lock)).unwrap();
+            assert!(made.is_file() && made.len() == 0 && made.mode() & 0o777 == 0o600, "{file}");
+            // a second run is refused while the first holds it, naming the source
+            let busy = WriteLease::acquire_current(&source, &current)
+                .err()
+                .expect("a held lease");
+            assert_eq!(busy.kind, ErrorKind::Busy, "{file}");
+            assert!(
+                busy.message.starts_with("another Rust application is indexing this cache ("),
+                "{}",
+                busy.message
+            );
+            drop(held);
+            // free again, the same file kept (never removed: a new file
+            // would be a second lock)
+            drop(WriteLease::acquire_current(&source, &current).unwrap());
+            assert_eq!(fs::symlink_metadata(dir.join(current_lock)).unwrap().ino(), made.ino());
+            // the legacy name's lease as an older build left it, and held by
+            // one that still runs: this run does not ask for it and leaves
+            // the file as it is
+            let old = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .mode(0o600)
+                .open(dir.join(legacy_lock))
+                .unwrap();
+            old.try_lock().unwrap();
+            let left = fs::symlink_metadata(dir.join(legacy_lock)).unwrap();
+            let held = WriteLease::acquire_current(&source, &current).unwrap();
+            let after = fs::symlink_metadata(dir.join(legacy_lock)).unwrap();
+            assert_eq!((after.ino(), after.len(), after.mtime()), (left.ino(), left.len(), left.mtime()));
+            // ... and an older build, which takes both, is still refused by
+            // the current name's while this run holds it
+            assert!(
+                matches!(
+                    File::open(dir.join(current_lock)).unwrap().try_lock(),
+                    Err(std::fs::TryLockError::WouldBlock)
+                ),
+                "{file}"
+            );
+            drop(held);
+            old.unlock().unwrap();
+            // nothing but the two lease files was made
+            let mut expected = before;
+            expected.extend([current_lock.to_string(), legacy_lock.to_string()]);
+            expected.sort();
+            assert_eq!(names(), expected, "{file}");
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
     fn a_lease_in_a_folder_this_account_cannot_write_names_the_folder_and_workdir() {
         // the read-only source folders of a site (user 2026-11-03): the
         // refusal says the folder and --workdir instead of the bare
@@ -1356,7 +1461,7 @@ mod tests {
             fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(m)).unwrap()
         };
         mode(0o555);
-        let refused = WriteLease::acquire_aliases(&source, &cache::cache_paths(&source).unwrap())
+        let refused = WriteLease::acquire_current(&source, &cache::default_cache_path(&source).unwrap())
             .err()
             .expect("a lease in a read-only folder");
         mode(0o755);
