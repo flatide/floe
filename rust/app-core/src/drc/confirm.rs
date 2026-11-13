@@ -32,7 +32,17 @@
 //! change its reason. `Locks` is how that session knows - every confirmer's
 //! file of the result, read as the statistics find them - and
 //! `desktop::Review`'s status writers are where it is kept.
+//!
+//! A confirmer's other verdict is the rejection (0.12.468; user 2026-11-14:
+//! "confirmer가 다른 리뷰어의 waive를 반려할 수 있게 해줘"): the errors
+//! whose waive the confirmer rejected are a log of the confirmer's own,
+//! `.<db>.rejects.<reviewer>` (`drc::reasons`, `Kind::Reject`: which errors,
+//! when, why - an action a line). No waive of a rejected error counts, the
+//! sessions of the reviewers who waived it turn their waive back, and no
+//! session waives it again until its confirmer takes the rejection back.
+//! `Locks` reads those logs too.
 use super::local::aside_path;
+use super::reasons::{Kind as Reason, Reasons};
 use crate::{Error, ErrorKind, Result};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
@@ -66,6 +76,18 @@ pub fn path_beside(waive: &Path) -> PathBuf {
         waive.with_file_name(name.replacen(".waive.", ".confirm.", 1))
     } else {
         waive.with_file_name(format!("{name}.confirm"))
+    }
+}
+
+/// A confirmer's rejects log's name (drc::reasons: the errors whose waive
+/// the confirmer rejected, an action a line), from the waive sidecar's as
+/// `path_beside`.
+pub fn rejects_beside(waive: &Path) -> PathBuf {
+    let name = waive.file_name().unwrap_or_default().to_string_lossy();
+    if name.contains(".waive.") {
+        waive.with_file_name(name.replacen(".waive.", ".rejects.", 1))
+    } else {
+        waive.with_file_name(format!("{name}.rejects"))
     }
 }
 
@@ -386,16 +408,48 @@ pub const LOCK_REFRESH: Duration = Duration::from_secs(1);
 /// result's, or reads no more, locks nothing.
 pub struct Locks {
     /// where confirm files are and how they are named: the folder, the
-    /// name's start and what follows the reviewer in it
-    places: Vec<(PathBuf, String, String)>,
+    /// name's start and what follows the reviewer in it; and the name's
+    /// start of a rejects log there
+    places: Vec<(PathBuf, String, String, String)>,
     header: [u8; 40],
     total: u64,
     /// each rule's first error and its errors
     rules: Vec<(u64, u64)>,
+    /// the result as the rejects logs name it (`floe_pack=`)
+    tag: String,
     /// the confirmers' files as last found: whose, and the file
     files: Vec<(String, File)>,
+    /// the confirmers' rejects logs as last found and read
+    rejects: Vec<Rejects>,
     read: Option<Instant>,
     refresh: Duration,
+}
+
+/// One confirmer's rejects log as it was read.
+struct Rejects {
+    tag: String,
+    path: PathBuf,
+    /// the file's time and size then: read again when they are others
+    stamp: (u64, u64),
+    log: Reasons,
+}
+
+/// Who rejected an error's waive, and why as they said.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct Rejected {
+    pub reviewer: String,
+    pub text: String,
+    /// seconds since the epoch
+    pub time: u64,
+}
+
+fn stamp_of(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = fs::metadata(path).ok()?;
+    Some((
+        (meta.mtime() as u64).wrapping_mul(1_000_000_000).wrapping_add(meta.mtime_nsec() as u64),
+        meta.len(),
+    ))
 }
 
 impl Locks {
@@ -403,22 +457,27 @@ impl Locks {
     /// (`header_of`), for a review whose waive sidecar is `waive[0]` beside
     /// the results or `waive[1]` in the temp folder (`drc::waive_paths` of
     /// `reviewer`): every reviewer's confirm file is named as this one's.
-    pub fn beside(waive: &[PathBuf; 2], reviewer: &str, header: [u8; 40], rules: Vec<(u64, u64)>) -> Self {
-        let name = |p: &Path| {
-            path_beside(p)
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned()
-        };
-        let (near, far) = (name(&waive[0]), name(&waive[1]));
+    ///
+    /// `tag`: the result as the rejects logs name it (the reasons' tag).
+    pub fn beside(
+        waive: &[PathBuf; 2],
+        reviewer: &str,
+        header: [u8; 40],
+        rules: Vec<(u64, u64)>,
+        tag: String,
+    ) -> Self {
+        let name = |p: PathBuf| p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let (near, far) = (name(path_beside(&waive[0])), name(path_beside(&waive[1])));
+        let logs = name(rejects_beside(&waive[0]));
         let mut places = Vec::new();
-        if let (Some(start), Some(folder)) = (near.strip_suffix(reviewer), waive[0].parent()) {
-            places.push((folder.to_path_buf(), start.to_owned(), String::new()));
+        if let (Some(start), Some(log), Some(folder)) =
+            (near.strip_suffix(reviewer), logs.strip_suffix(reviewer), waive[0].parent())
+        {
+            places.push((folder.to_path_buf(), start.to_owned(), String::new(), log.to_owned()));
             // the temp folder's names end in a hash of the database's path
             if let (Some(end), Some(temp)) = (far.strip_prefix(near.as_str()), waive[1].parent()) {
                 if !end.is_empty() && temp != folder {
-                    places.push((temp.to_path_buf(), start.to_owned(), end.to_owned()));
+                    places.push((temp.to_path_buf(), start.to_owned(), end.to_owned(), log.to_owned()));
                 }
             }
         }
@@ -427,7 +486,9 @@ impl Locks {
             header,
             total: rules.iter().map(|r| r.1).sum(),
             rules,
+            tag,
             files: Vec::new(),
+            rejects: Vec::new(),
             read: None,
             refresh: LOCK_REFRESH,
         }
@@ -440,7 +501,9 @@ impl Locks {
             header: [0; 40],
             total: 0,
             rules: vec![(0, 0); rules],
+            tag: String::new(),
             files: Vec::new(),
+            rejects: Vec::new(),
             read: None,
             refresh: LOCK_REFRESH,
         }
@@ -460,21 +523,24 @@ impl Locks {
             .ok_or_else(|| Error::input("DRC check index out of range"))
     }
 
-    /// Every reviewer's confirm file, by reviewer: the results folder's
-    /// before the temp folder's, leftovers (`.stale-N`, `.tmp-N`) left out.
-    fn found(&self) -> BTreeMap<String, PathBuf> {
-        let mut found = BTreeMap::new();
-        for (folder, start, end) in &self.places {
+    /// Every reviewer's confirm file and rejects log, by reviewer: the
+    /// results folder's before the temp folder's, leftovers (`.stale-N`,
+    /// `.tmp-N`) left out.
+    fn found(&self) -> [BTreeMap<String, PathBuf>; 2] {
+        let mut found = [BTreeMap::new(), BTreeMap::new()];
+        for (folder, start, end, log) in &self.places {
             let Ok(entries) = fs::read_dir(folder) else { continue };
             for entry in entries.flatten() {
                 let name = entry.file_name();
-                let tag = name
-                    .to_str()
-                    .and_then(|n| n.strip_prefix(start.as_str()))
-                    .and_then(|n| n.strip_suffix(end.as_str()))
-                    .and_then(super::local::reviewer_of);
-                if let Some(tag) = tag {
-                    found.entry(tag.to_owned()).or_insert_with(|| folder.join(&name));
+                let Some(text) = name.to_str() else { continue };
+                for (slot, start) in [(0, start), (1, log)] {
+                    let tag = text
+                        .strip_prefix(start.as_str())
+                        .and_then(|n| n.strip_suffix(end.as_str()))
+                        .and_then(super::local::reviewer_of);
+                    if let Some(tag) = tag {
+                        found[slot].entry(tag.to_owned()).or_insert_with(|| folder.join(&name));
+                    }
                 }
             }
         }
@@ -487,12 +553,134 @@ impl Locks {
             return;
         }
         let (header, total, rules) = (self.header, self.total, self.rules.len());
-        self.files = self
-            .found()
+        let [files, logs] = self.found();
+        self.files = files
             .into_iter()
             .filter_map(|(tag, path)| read(&path, &header, total, rules).ok().map(|(file, _)| (tag, file)))
             .collect();
+        // a log that stands as it was read is kept as read
+        let mut held = std::mem::take(&mut self.rejects);
+        let sizes: Vec<u64> = self.rules.iter().map(|r| r.1).collect();
+        for (tag, path) in logs {
+            let Some(stamp) = stamp_of(&path) else { continue };
+            match held.iter().position(|r| r.path == path && r.stamp == stamp) {
+                Some(i) => self.rejects.push(held.swap_remove(i)),
+                None => {
+                    // (another result's, or one that does not read: no rejection)
+                    if let Ok(Some(log)) = Reasons::load(&path, &self.tag, &sizes) {
+                        self.rejects.push(Rejects { tag, path, stamp, log });
+                    }
+                }
+            }
+        }
+        self.rejects.sort_by(|a, b| a.tag.cmp(&b.tag));
         self.read = Some(Instant::now());
+    }
+
+    /// The logs held are read again where their file is another now (a
+    /// confirmer's next rejection is a line more).
+    fn reread(&mut self) {
+        let sizes: Vec<u64> = self.rules.iter().map(|r| r.1).collect();
+        let tag = self.tag.clone();
+        self.rejects.retain_mut(|r| match stamp_of(&r.path) {
+            Some(stamp) if stamp == r.stamp => true,
+            Some(stamp) => match Reasons::load(&r.path, &tag, &sizes) {
+                Ok(Some(log)) => {
+                    (r.stamp, r.log) = (stamp, log);
+                    true
+                }
+                _ => false,
+            },
+            None => false,
+        });
+    }
+
+    /// The rejects logs as they stand: read again where they changed, and
+    /// - `look` - looked for anew when what is held is too old.
+    fn logs(&mut self, look: bool) -> &[Rejects] {
+        let listed = self.read;
+        if look {
+            self.fresh();
+        }
+        if listed == self.read {
+            self.reread();
+        }
+        &self.rejects
+    }
+
+    /// Rule `check`'s errors `start..start+len` (clamped): true where a
+    /// confirmer has the error's waive rejected. None when none is.
+    ///
+    /// `waiving`: asked before an error is waived - which lists no folder:
+    /// the logs are the ones found by the last look (`rejections`, which
+    /// the reviewer's host asks as often as it follows the confirmers, or a
+    /// lock's), read again where they changed. A waive click costs no
+    /// listing, and does not keep a list that the lock's next ask would
+    /// take for fresh. A confirmer's first rejection - a new file - is
+    /// therefore known from the next look on; a waive that slips past it
+    /// is turned back by that look.
+    pub fn rejected(&mut self, check: usize, start: u64, len: u64, waiving: bool) -> Result<Option<Vec<bool>>> {
+        let (_, n) = self.rule(check)?;
+        let start = start.min(n);
+        let len = len.min(n - start);
+        let mut out: Option<Vec<bool>> = None;
+        for r in self.logs(!waiving) {
+            for (a, b) in r.log.held(Reason::Reject, check, &[(start, start + len)]) {
+                let out = out.get_or_insert_with(|| vec![false; len as usize]);
+                out[(a - start) as usize..(b - start) as usize].fill(true);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Who has rejected the waive of any of rule `check`'s errors `runs`,
+    /// and why as they said of the first of them (the logs found by the
+    /// last look: no folder is listed for it).
+    pub fn rejected_by(&mut self, check: usize, runs: &[(u64, u64)]) -> Result<Vec<Rejected>> {
+        self.rule(check)?;
+        if runs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        for r in self.logs(false) {
+            let held = r.log.held(Reason::Reject, check, runs);
+            if let Some(entry) = held.first().and_then(|first| r.log.of(Reason::Reject, check, first.0)) {
+                out.push(Rejected { reviewer: r.tag.clone(), text: entry.text.clone(), time: entry.time });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Every rejection that stands: rule by rule, the rejected errors as
+    /// runs - looked for anew now, whatever is held - and what the logs
+    /// were when they said so (their names, times and sizes: the same
+    /// answer while it is the same).
+    pub fn rejections(&mut self) -> (Vec<(usize, Vec<(u64, u64)>)>, Vec<(String, u64, u64)>) {
+        // (this look is what finds a confirmer's first rejection - a new
+        // file - for the writers, who list nothing when they waive)
+        self.read = None;
+        self.fresh();
+        let mut rules: BTreeMap<usize, Vec<(u64, u64)>> = BTreeMap::new();
+        for r in &self.rejects {
+            for check in r.log.checks(Reason::Reject) {
+                let runs = rules.entry(check).or_default();
+                runs.extend(r.log.runs(Reason::Reject, check).into_iter().map(|(a, b, _)| (a, b)));
+            }
+        }
+        for runs in rules.values_mut() {
+            // (two confirmers' runs: sorted, and joined where they meet)
+            runs.sort_unstable();
+            let mut joined: Vec<(u64, u64)> = Vec::with_capacity(runs.len());
+            for &(a, b) in runs.iter() {
+                match joined.last_mut() {
+                    Some(last) if a <= last.1 => last.1 = last.1.max(b),
+                    _ => joined.push((a, b)),
+                }
+            }
+            *runs = joined;
+        }
+        let seen = self.rejects.iter().map(|r| (r.tag.clone(), r.stamp.0, r.stamp.1)).collect();
+        (rules.into_iter().collect(), seen)
     }
 
     /// Rule `check`'s errors `start..start+len` (clamped to the rule): true
@@ -686,7 +874,8 @@ mod tests {
         let header = header_of(&waive_header(9005, 3));
         let waive = [dir.join(".x.db.waive.kim"), temp.join(".x.db.waive.kim-0123456789ab")];
         let confirms = |folder: &Path, name: &str| Confirms::open(folder.join(name), header, rules.clone(), false);
-        let mut locks = Locks::beside(&waive, "kim", header, rules.clone());
+        let tag = "abababababababababababababababab,9005".to_owned();
+        let mut locks = Locks::beside(&waive, "kim", header, rules.clone(), tag.clone());
         locks.set_refresh(Duration::ZERO);
         // nobody has confirmed: nothing is locked, and nothing is made
         assert_eq!(locks.mask(2, 0, 9000).unwrap(), None);
@@ -718,7 +907,7 @@ mod tests {
         assert!(locks.who(2, &[]).unwrap().is_empty() && locks.who(2, &[(8, 100)]).unwrap().is_empty());
         // asking about no error looks for no file: a waive that meets no
         // waived error must not list the folders (nor keep what it found)
-        let mut idle = Locks::beside(&waive, "kim", header, rules.clone());
+        let mut idle = Locks::beside(&waive, "kim", header, rules.clone(), tag.clone());
         idle.set_refresh(Duration::from_secs(3600));
         assert!(idle.who(2, &[]).unwrap().is_empty() && idle.read.is_none());
         assert_eq!(idle.by(2, 7).unwrap(), ["hong", "park"]);
@@ -757,6 +946,61 @@ mod tests {
         assert_eq!(ones(locks.mask(2, 0, 9000).unwrap()), [100, 101, 200]);
         locks.set_refresh(Duration::ZERO);
         assert_eq!(ones(locks.mask(2, 0, 9000).unwrap()), [1, 100, 101, 200]);
+        // the confirmers' rejects logs (0.12.468), found beside the confirm
+        // files - the temp folder's by its hashed name - and read again
+        // when they are others
+        let sizes = vec![5u64, 0, 9000];
+        let rejects = |folder: &Path, name: &str| {
+            Reasons::open_as("# floe drc waive rejections", [folder.join(name), temp.join("unused")], tag.clone(), sizes.clone(), false)
+        };
+        assert!(locks.rejected(2, 0, 9000, false).unwrap().is_none() && locks.rejections().0.is_empty());
+        let mut hong_log = rejects(&dir, ".x.db.rejects.hong");
+        hong_log.set(Reason::Reject, 2, &[(7, 9), (4095, 4097)], "not a dummy", 100).unwrap();
+        let mut choi_log = rejects(&temp, ".x.db.rejects.choi-0123456789ab");
+        choi_log.set(Reason::Reject, 2, &[(8, 10)], "", 200).unwrap();
+        choi_log.set(Reason::Reject, 0, &[(4, 5)], "another rule", 300).unwrap();
+        // (asked before a waive, no folder is listed: the logs are the
+        // ones the last look found - none yet)
+        assert!(locks.rejected(2, 0, 9000, true).unwrap().is_none() && locks.rejected_by(2, &[(8, 9)]).unwrap().is_empty());
+        assert_eq!(ones(locks.rejected(2, 0, 9000, false).unwrap()), [7, 8, 9, 4095, 4096]);
+        assert_eq!(ones(locks.rejected(2, 4090, 10, true).unwrap()), [5, 6]);
+        assert_eq!((ones(locks.rejected(0, 0, 5, false).unwrap()), locks.rejected(1, 0, 5, false).unwrap()), (vec![4], None));
+        let by = |found: Vec<Rejected>| found.into_iter().map(|r| (r.reviewer, r.text, r.time)).collect::<Vec<_>>();
+        assert_eq!(by(locks.rejected_by(2, &[(8, 9)]).unwrap()), [("choi".into(), String::new(), 200), ("hong".into(), "not a dummy".into(), 100)]);
+        assert_eq!(by(locks.rejected_by(2, &[(0, 7), (9, 10)]).unwrap()), [("choi".into(), String::new(), 200)]);
+        assert!(locks.rejected_by(2, &[]).unwrap().is_empty() && locks.rejected_by(2, &[(100, 200)]).unwrap().is_empty());
+        let (rules, seen) = locks.rejections();
+        assert_eq!(rules, [(0, vec![(4, 5)]), (2, vec![(7, 10), (4095, 4097)])], "two confirmers' runs are joined");
+        assert_eq!(seen.iter().map(|s| s.0.as_str()).collect::<Vec<_>>(), ["choi", "hong"]);
+        assert_eq!(locks.rejections().1, seen, "the same answer while the logs stand");
+        // a rejection taken back, and another made: a line more, read at the next ask
+        hong_log.clear(Reason::Reject, 2, &[(7, 8)]);
+        hong_log.flush(400).unwrap();
+        hong_log.set(Reason::Reject, 2, &[(20, 21)], "later", 500).unwrap();
+        assert_eq!(ones(locks.rejected(2, 0, 9000, false).unwrap()), [8, 9, 20, 4095, 4096]);
+        assert_ne!(locks.rejections().1, seen);
+        // read again where the list is not looked for anew: a log held is
+        // asked its time and size at each ask
+        locks.set_refresh(Duration::from_secs(3600));
+        assert_eq!(ones(locks.rejected(2, 0, 30, false).unwrap()), [8, 9, 20]);
+        hong_log.set(Reason::Reject, 2, &[(25, 26)], "", 600).unwrap();
+        assert_eq!(ones(locks.rejected(2, 0, 30, false).unwrap()), [8, 9, 20, 25]);
+        let mut kim_log = rejects(&dir, ".x.db.rejects.kim");
+        kim_log.set(Reason::Reject, 2, &[(1, 2)], "", 700).unwrap();
+        assert_eq!(ones(locks.rejected(2, 0, 30, false).unwrap()), [8, 9, 20, 25], "a new log is found at the next look");
+        locks.set_refresh(Duration::ZERO);
+        assert_eq!(ones(locks.rejected(2, 0, 30, false).unwrap()), [1, 8, 9, 20, 25]);
+        // what is no rejects log of this result rejects nothing
+        let mut other = Reasons::open_as("# floe drc waive rejections", [dir.join(".x.db.rejects.yoon"), temp.join("unused")], "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd,9005".to_owned(), sizes.clone(), false);
+        other.set(Reason::Reject, 2, &[(50, 60)], "another result's", 800).unwrap();
+        fs::write(dir.join(".x.db.rejects.lee.stale-1700000000"), fs::read(dir.join(".x.db.rejects.hong")).unwrap()).unwrap();
+        fs::write(dir.join(".x.db.rejects.cut"), b"not a log").unwrap();
+        fs::write(temp.join(".x.db.rejects.jung-ba9876543210"), fs::read(dir.join(".x.db.rejects.hong")).unwrap()).unwrap();
+        assert_eq!(ones(locks.rejected(2, 0, 9000, false).unwrap()), [1, 8, 9, 20, 25, 4095, 4096]);
+        // a log gone rejects nothing more
+        drop(kim_log);
+        fs::remove_file(dir.join(".x.db.rejects.kim")).unwrap();
+        assert_eq!(ones(locks.rejected(2, 0, 30, false).unwrap()), [8, 9, 20, 25]);
         // a review that writes nothing has no locks to ask
         let mut none = Locks::none(3);
         assert!(none.mask(2, 0, 10).unwrap().is_none() && none.by(0, 0).is_err());

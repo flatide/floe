@@ -638,6 +638,9 @@ class _DrcTeamWindow:
             if result.get("locked"):
                 self._notice += (" Kept %d confirmed waive(s): they are locked."
                                  % result["locked"])
+            if result.get("rejected"):
+                self._notice += (" Left %d error(s) unwaived: their waive is rejected."
+                                 % result["rejected"])
             self._refresh()
             self.status.set_text(self._notice + " Refreshing…")
         self._start("Apply selected peer judgement" if force else "Apply peer work safely",
@@ -685,6 +688,12 @@ class _DrcTeamWindow:
                 # (confirmed waives were left as they were: said as the
                 # main window's status line says it)
                 said = self.viewer._drc_locked_said((count, by), on)
+                self._notice = ((self._notice + " ") if self._notice else "") + \
+                    said.lstrip(" ·") + "."
+            rejected = (self.db.rejected_take() if hasattr(self.db, "rejected_take")
+                        else (0, ()))
+            if rejected[0] and field == "waive":
+                said = self.viewer._drc_rejected_said(rejected)
                 self._notice = ((self._notice + " ") if self._notice else "") + \
                     said.lstrip(" ·") + "."
             self._refresh()
@@ -746,13 +755,18 @@ class _DrcWaivesWindow(_DrcTeamWindow):
     The list is the reviewers' files as the last Refresh read them."""
 
     KINDS = (("unconfirmed", "To confirm"), ("confirmed", "Confirmed"),
-             ("waived", "All team waives"))
+             ("waived", "All team waives"), ("rejected", "Rejected"))
     NOT_CONFIRMER = ("confirming is for a viewer started as a confirmer "
                      "(floe2 view --confirmer)")
     LOCKS = ("a confirmed waive is locked: its reviewer cannot turn it back "
              "or change its reason")
     UNLOCKS = ("takes your confirmation back: a waive no confirmer has "
                "confirmed is its reviewer's to turn back again")
+    REJECTS = ("rejects the selected waives, asking why: they count for "
+               "nothing, their reviewers' viewers turn them back, and nobody "
+               "waives those errors until the rejection is taken back")
+    UNREJECTS = ("takes your rejection of the selected errors back: they "
+                 "are anybody's to waive again")
 
     def __init__(self, viewer):
         self.viewer, self.db = viewer, viewer._drc
@@ -800,10 +814,10 @@ class _DrcWaivesWindow(_DrcTeamWindow):
         top.pack_start(self.mode, False, False, 0)
         self.controls.append(self.mode)
         button(top, "Refresh", self._refresh)
-        self.store = Gtk.ListStore(int, int, str, str, str, str)
+        self.store = Gtk.ListStore(int, int, str, str, str, str, str)
         self.tree = Gtk.TreeView(model=self.store)
         for j, title in ((2, "Error"), (3, "Waived by"), (4, "Reason"),
-                         (5, "Confirmed by")):
+                         (5, "Confirmed by"), (6, "Rejected by")):
             column = Gtk.TreeViewColumn(title, Gtk.CellRendererText(), text=j)
             column.set_expand(j == 4)
             column.set_resizable(True)
@@ -823,15 +837,21 @@ class _DrcWaivesWindow(_DrcTeamWindow):
             button(actions, "Confirm selected", lambda: self._confirm(True)),
             button(actions, "Unconfirm selected", lambda: self._confirm(False)),
             button(actions, "Confirm all of rule", lambda: self._confirm(True, True))]
+        # the confirmer's other verdict (0.12.468)
+        self.reject_buttons = [
+            button(actions, "Reject selected", lambda: self._reject(True)),
+            button(actions, "Unreject selected", lambda: self._reject(False))]
         if not confirmer:
             # (not among the controls a finished job makes sensitive again)
-            for widget in self.confirm_buttons:
+            for widget in self.confirm_buttons + self.reject_buttons:
                 self.controls.remove(widget)
                 widget.set_sensitive(False)
                 widget.set_tooltip_text(self.NOT_CONFIRMER)
         else:
             # a confirmed waive is locked (0.12.467)
             for widget, text in zip(self.confirm_buttons, (self.LOCKS, self.UNLOCKS, self.LOCKS)):
+                widget.set_tooltip_text(text)
+            for widget, text in zip(self.reject_buttons, (self.REJECTS, self.UNREJECTS)):
                 widget.set_tooltip_text(text)
         self.status = Gtk.Label(label="Reading the team's waives…")
         self.status.set_xalign(0)
@@ -881,8 +901,11 @@ class _DrcWaivesWindow(_DrcTeamWindow):
 
     @staticmethod
     def _counts_text(counts):
-        return "waived %d · confirmed %d · to confirm %d" % (
+        text = "waived %d · confirmed %d · to confirm %d" % (
             counts["waived"], counts["confirmed"], counts["unconfirmed"])
+        if counts.get("rejected"):
+            text += " · rejected %d" % counts["rejected"]
+        return text
 
     def _show(self, ci, kind, reply):
         # the rules somebody waived in, and the one shown among them
@@ -903,9 +926,12 @@ class _DrcWaivesWindow(_DrcTeamWindow):
             reasons = row.get("reasons") or []
             why = (reasons[0]["text"] if len(reasons) == 1 else
                    "; ".join("%s: %s" % (w["reviewer"], w["text"]) for w in reasons))
+            rejected = "; ".join(
+                "%s: %s" % (w["reviewer"], w["text"]) if w.get("text") else w["reviewer"]
+                for w in row.get("rejected_by") or [])
             self.store.append((ci, int(row["error"]), "#%d" % (row["error"] + 1),
                                ", ".join(row.get("waived_by") or []), why,
-                               ", ".join(row.get("confirmed_by") or [])))
+                               ", ".join(row.get("confirmed_by") or []), rejected))
         count = reply["count"]
         self.page_label.set_text("%d errors · page %d / %d · %d per page" % (
             count, self.page + 1, max(1, (count + DRC_PAGE - 1) // DRC_PAGE), DRC_PAGE))
@@ -935,9 +961,12 @@ class _DrcWaivesWindow(_DrcTeamWindow):
             if ci not in rules and ci < len(self.db.checks):
                 rules[ci] = dict(waived=0, confirmed=0, unconfirmed=0)
             for check in sorted(rules):
-                self.rule.append(str(check), "%s  (to confirm %d of %d waived)" % (
+                label = "%s  (to confirm %d of %d waived" % (
                     self.db.checks[check].name, rules[check]["unconfirmed"],
-                    rules[check]["waived"]))
+                    rules[check]["waived"])
+                if rules[check].get("rejected"):
+                    label += ", %d rejected" % rules[check]["rejected"]
+                self.rule.append(str(check), label + ")")
             self.rule.set_active_id(str(ci))
         finally:
             self._guard = False
@@ -996,6 +1025,56 @@ class _DrcWaivesWindow(_DrcTeamWindow):
             self._page_load()
             self.viewer._drc_team_waives_changed(self.db)
         self._start("Confirm waives" if on else "Take confirmations back",
+                    work, complete, write=True)
+
+    def _reject(self, on):
+        """Reject the selected rows' waives, asking why (user 2026-11-14:
+        "confirmer가 다른 리뷰어의 waive를 반려할 수 있게 해줘"), or take this
+        confirmer's rejection of the selected rows back. A rejection is one
+        line of the confirmer's own log; the reviewers' viewers turn their
+        waive back when they next look."""
+        if not getattr(self.db, "confirmer", False):
+            self.status.set_text(self.NOT_CONFIRMER)
+            return
+        ci, members = self._selection()
+        if not members:
+            self.status.set_text("Select the rows to %s." % (
+                "reject" if on else "take the rejection back from"))
+            return
+        reason = None
+        if on:
+            viewer = self.viewer
+            try:
+                reply = self.db.reason_read(ci, members, "reject")
+            except Exception as exc:
+                self.status.set_text("Nothing was rejected: %s" % exc)
+                return
+            reason = viewer._drc_reason_dialog(
+                "reject", len(members), viewer._drc_reason_last.get("reject", ""),
+                reply.get("known") or (), parent=self.window)
+            if reason is None or not self._valid():
+                if self._valid():
+                    self.status.set_text("Cancelled; nothing was rejected.")
+                return
+            viewer._drc_reason_last["reject"] = reason
+
+        def work(cancelled, progress):
+            from .gtkservice import reject_waives
+            return reject_waives(self.db, ci, members, on, reason=reason,
+                                 progress=progress)
+
+        def complete(event):
+            changed, skipped = event.get("changed", 0), event.get("skipped", 0)
+            self._notice = ("Rejected %d waive(s)." % changed if on else
+                            "Took back the rejection of %d error(s)." % changed)
+            if skipped:
+                self._notice += " %d are nobody's waive." % skipped
+            self._fresh = True
+            self._page_load()
+            # (the confirmer's own waive of a rejected error went with it)
+            self.viewer._drc_own_statuses_changed(self.db, ci, event.get("counts"))
+            self.viewer._drc_team_waives_changed(self.db)
+        self._start("Reject waives" if on else "Take rejections back",
                     work, complete, write=True)
 
 
@@ -1259,6 +1338,8 @@ class _DrcMigrationWindow(_DrcTeamWindow):
                         ("changed_visited", "changed_waived", "changed_not_required", "conflicts_skipped")))
                 if self._applied.get("locked"):
                     text += " · confirmed waives kept %d" % self._applied["locked"]
+                if self._applied.get("rejected"):
+                    text += " · rejected waives left %d" % self._applied["rejected"]
             self.stats.set_text(text)
         self._start("Read geometry matches", work, complete)
 
@@ -2655,6 +2736,12 @@ class Viewer:
     _drc_team_timer = None
     _drc_team_quiet = False
     _drc_detail_of = None
+    # this reviewer's waives a confirmer rejected (0.12.468): the service is
+    # asked every RETURNED_MS to turn them back (_drc_returned_tick), and
+    # its answer polled (_drc_returned_poll)
+    RETURNED_MS = 2000
+    _drc_returned_timer = None
+    _drc_returned_asked = None
     _drc_source = None
     _drc_reviewer = None
     _title_drc = ""
@@ -9450,6 +9537,9 @@ class Viewer:
             db, path, self._drc_rmatch if self._drc_rmeta is not None else None)
         self._set_live_status("%s · %s" % (cluster_error, said)
                               if cluster_error else said)
+        # (the waives of this reviewer a confirmer has rejected: looked for
+        # now and every couple of seconds from here on)
+        self._drc_returned_start()
         moved = self._drc_moved_aside_text(db)
         if moved and self._drcwin is not None:
             # in sight until a rule is picked: cursor motion replaces the
@@ -11018,17 +11108,19 @@ class Viewer:
                                     reason=reason or None)
             return
         val = STATUS_WAIVED if on else STATUS_NONE
-        error = unkept = locked = None
+        error = unkept = locked = rejected = None
         try:
             # one request for the selection (floe2 gtk-service)
             unkept = db.set_statuses(ci, list(eis), val,
                                      reason=(reason or None) if on else None)
             if hasattr(db, "locked_take"):
                 locked = db.locked_take()
+            if hasattr(db, "rejected_take"):
+                rejected = db.rejected_take()
         except (OSError, gtkservice.ServiceError) as exc:
             error = "%s - is the waive store writable?" % exc
         self._drc_waived_refresh(ci, eis, on, error, reason=reason,
-                                 unkept=unkept, locked=locked)
+                                 unkept=unkept, locked=locked, rejected=rejected)
 
     def _drc_visit_drawn(self, mark, points, width, height):
         """Queue one visit only after individual geometry was painted.
@@ -11584,6 +11676,12 @@ class Viewer:
             # (confirmed is locked: its reviewer's session leaves it waived)
             lines.append("waive confirmed by: %s · locked"
                          % ", ".join(team["confirmed_by"]))
+        if team.get("rejected_by"):
+            # (rejected: no waive of it counts, and nobody waives it until
+            # the confirmer takes the rejection back)
+            lines.append("waive rejected by: %s" % ", ".join(
+                "%s (%s)" % (w["reviewer"], w["text"]) if w.get("text") else w["reviewer"]
+                for w in team["rejected_by"]))
         return lines
 
     def _drc_team_dialog(self):
@@ -11737,7 +11835,9 @@ class Viewer:
                                      error, bulk=True, reason=job.get("reason"),
                                      unkept=event.get("reason_error"),
                                      locked=(event.get("locked") or 0,
-                                             tuple(event.get("locked_by") or ())))
+                                             tuple(event.get("locked_by") or ())),
+                                     rejected=(event.get("rejected") or 0,
+                                               gtkservice._rejecters(event.get("rejected_by"))))
         elif error:
             if operation in ("note", "note-clear"):
                 self._drc_note_refresh(ci, targets, fallback=False)
@@ -11780,8 +11880,26 @@ class Viewer:
         return (" · %d locked: confirmed%s - only a confirmer turns them back"
                 % (count, who))
 
+    @staticmethod
+    def _drc_rejecters_text(by):
+        """Who rejected and why, of ((who, why), ...): `hong (why), park`."""
+        return ", ".join("%s (%s)" % (who, why) if why else who for who, why in by)
+
+    @classmethod
+    def _drc_rejected_said(cls, rejected):
+        """The end of a status line when a waive left errors unwaived
+        because a confirmer has rejected their waive (0.12.468, user
+        2026-11-14: "confirmer가 다른 리뷰어의 waive를 반려할 수 있게
+        해줘"): `rejected` is (how many, ((who, why), ...))."""
+        count, by = rejected or (0, ())
+        if not count:
+            return ""
+        who = " by %s" % cls._drc_rejecters_text(by) if by else ""
+        return " · %d rejected%s: not waived" % (count, who)
+
     def _drc_waived_refresh(self, ci, eis, on, error=None, bulk=False,
-                            reason=None, unkept=None, locked=None):
+                            reason=None, unkept=None, locked=None,
+                            rejected=None, said=None):
         db = self._drc
         self._drc_conflict_status_changed()
         self._drc_marker_invalidate()
@@ -11829,8 +11947,17 @@ class Viewer:
         # (a confirmed waive is not turned back here, nor its reason
         # changed: said, with who confirmed it)
         kept, by = locked or (0, ())
-        if error:
+        refused, rejecters = rejected or (0, ())
+        if said is not None:
+            # (the caller's own word - or none: what is there stays)
+            text = said
+        elif error:
             text = "waive failed: %s" % error
+        elif on and refused and refused >= len(eis):
+            # every target's waive is rejected: nothing was waived
+            text = "rejected: %d error(s) in %s%s - not waived until the rejection is taken back" % (
+                refused, db.checks[ci].name,
+                " by %s" % self._drc_rejecters_text(rejecters) if rejecters else "")
         elif kept and kept >= len(eis):
             # every target is a confirmed waive: nothing was done
             text = "locked: %d waive(s) in %s confirmed%s - %s" % (
@@ -11839,13 +11966,104 @@ class Viewer:
                 "their reason stays as it is" if on
                 else "only a confirmer turns them back")
         else:
-            text = "%s %d error(s) in %s%s%s" % (
+            text = "%s %d error(s) in %s%s%s%s" % (
                 "waived" if on else "unwaived",
-                len(eis) if on else len(eis) - kept, db.checks[ci].name,
+                len(eis) - refused if on else len(eis) - kept, db.checks[ci].name,
                 self._drc_reason_said(reason if on else None, unkept),
-                self._drc_locked_said(locked, on))
-        self._set_live_status(text)
+                self._drc_locked_said(locked, on),
+                self._drc_rejected_said(rejected) if on else "")
+        if text:
+            self._set_live_status(text)
         self._display()
+
+    def _drc_own_statuses_changed(self, db, ci, counts):
+        """The service changed this reviewer's own statuses of rule `ci`
+        beside an action of another kind (a confirmer's rejection turns
+        their own waive of the error back): the lists, the markers and the
+        counts follow; the status line is the action's."""
+        if self._drc is not db or counts is None:
+            return
+        db.statuses_changed(ci, counts)
+        self._drc_waived_refresh(ci, (), False, bulk=True, said="")
+
+    # ---- the waives a confirmer rejected (0.12.468) -----------------------
+    def _drc_returned_start(self):
+        """Results are open: this reviewer's waives that a confirmer has
+        rejected are looked for now, and every RETURNED_MS from here on
+        (app-core desktop::Review take_rejected, the service's job
+        `returned`)."""
+        if self._drc_returned_timer is None:
+            self._drc_returned_timer = GLib.timeout_add(
+                self.RETURNED_MS, self._drc_returned_tick)
+        self._drc_returned_look()
+
+    def _drc_returned_tick(self):
+        """The timer's look: it goes on while results with a review of
+        this reviewer's own are open."""
+        if self._drc_returned_look():
+            return True
+        self._drc_returned_timer = None
+        return False
+
+    def _drc_returned_look(self):
+        """Ask the service once; False when there is no review to ask
+        about (no results, an ASCII file, a pack shown read-only)."""
+        db = self._drc
+        if (db is None or not hasattr(db, "returned_ask")
+                or getattr(db, "read_only", False)):
+            return False
+        if self._drc_returned_asked is not None:
+            self._drc_returned_poll()
+            return True
+        if (getattr(self, "_drc_review_job", None) is not None
+                or getattr(self, "_drc_team_busy", None) is not None):
+            return True     # a write of this viewer's own runs: the next tick
+        try:
+            db.returned_ask()
+        except (OSError, gtkservice.ServiceError):
+            return True
+        self._drc_returned_asked = db
+        GLib.timeout_add(POLL_MS, self._drc_returned_poll)
+        return True
+
+    def _drc_returned_poll(self):
+        """The answer to the look (GLib timer): the waives the service
+        turned back are shown as turned back, and said with who rejected
+        them and why."""
+        db = self._drc_returned_asked
+        if db is None:
+            return False
+        if db is not self._drc:
+            self._drc_returned_asked = None
+            return False
+        try:
+            answer = db.returned_answer()
+        except (OSError, gtkservice.ServiceError):
+            answer = False
+        if answer is None:
+            return True
+        self._drc_returned_asked = None
+        rows = (answer.get("returned") or []) if answer else []
+        if rows:
+            self._drc_returned_show(db, rows)
+        return False
+
+    def _drc_returned_show(self, db, rows):
+        total = sum(int(r["count"]) for r in rows)
+        by = []
+        for r in rows:
+            for who in gtkservice._rejecters(r.get("by")):
+                if who not in by:
+                    by.append(who)
+        where = (db.checks[rows[0]["check"]].name if len(rows) == 1
+                 else "%d rules" % len(rows))
+        said = "%d waive(s) in %s rejected%s: turned back" % (
+            total, where, " by %s" % self._drc_rejecters_text(by) if by else "")
+        for r in rows:
+            db.statuses_changed(int(r["check"]), r.get("counts"))
+        for r in rows[:-1]:
+            self._drc_waived_refresh(int(r["check"]), (), False, bulk=True, said="")
+        self._drc_waived_refresh(int(rows[-1]["check"]), (), False, bulk=True, said=said)
 
     def _drc_waive_key(self):
         """w (user calls 2026-08-20/22): with a gold SELECTION,
@@ -11919,7 +12137,8 @@ class Viewer:
         return ci, [ei]
 
     REASON_TITLES = {"waive": "Waive reason",
-                     "not-required": "Not for review reason"}
+                     "not-required": "Not for review reason",
+                     "reject": "Reject reason"}
 
     def _drc_reason_dialog(self, kind, count, prefill="", known=(),
                            parent=None):

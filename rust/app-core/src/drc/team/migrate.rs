@@ -71,6 +71,11 @@ pub struct Applied {
     /// taken (0.12.467; said only when there are any)
     #[serde(skip_serializing_if = "super::is_zero")]
     pub locked: u64,
+    /// errors the run before had waived whose waive a confirmer has
+    /// rejected: not waived here, nothing of the error taken (0.12.468;
+    /// said only when there are any)
+    #[serde(skip_serializing_if = "super::is_zero")]
+    pub rejected: u64,
 }
 
 fn different(s: &Snapshot, ow: Bits, on: Bits, w: Bits, n: Bits, uw: Bits, un: Bits) -> Bits {
@@ -676,6 +681,15 @@ pub fn apply(
                         eligible &= !kept;
                     }
                 }
+                // nor is an error waived whose waive a confirmer has rejected
+                let forth = if source.waive_known { eligible & !uw & w & !ow } else { Bits::ZERO };
+                if !forth.is_zero() {
+                    if let Some(mask) = r.rejected(ci, k * CHUNK, before.len() as u64)? {
+                        let kept = forth & Bits::from_mask(&mask);
+                        result.rejected += kept.count();
+                        eligible &= !kept;
+                    }
+                }
                 if source.waive_known {
                     let change_w = eligible & !uw & (ow ^ w);
                     if !change_w.is_zero() {
@@ -683,10 +697,12 @@ pub fn apply(
                         for i in change_w.ones() {
                             after[i as usize] = if w.get(i) { STATUS_WAIVED } else { STATUS_NONE };
                         }
-                        // (one confirmed since the look above stays too)
+                        // (one confirmed or rejected since the looks
+                        // above stays too)
                         let kept = r.write_status_span(ci, k * CHUNK, &before, &after)?;
-                        result.changed_waived += change_w.count() - kept;
-                        result.locked += kept;
+                        result.changed_waived += change_w.count() - kept.locked - kept.rejected;
+                        result.locked += kept.locked;
+                        result.rejected += kept.rejected;
                         changed(ci);
                     }
                 }

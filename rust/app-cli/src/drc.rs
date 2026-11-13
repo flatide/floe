@@ -24,7 +24,9 @@ const HELP: &str = "Usage: floe2-web drc RESULTS.db|.RESULTS.db.tray [OPTIONS]
                           reviewers window counts them (visits united,
                           conflicts between visited reviewers; the waives a
                           confirmer has confirmed, and the ones that wait
-                          for it: `confirmed`, `unconfirmed`); with
+                          for it: `confirmed`, `unconfirmed`; the errors
+                          whose waive a confirmer has rejected, which are
+                          none of the team's waives: `rejected`); with
                           --floe-reviewer ID[,ID...] these reviewers alone.
                           Needs the current pack: none or a stale one is an
                           error (exit 1), never an answer of zeros

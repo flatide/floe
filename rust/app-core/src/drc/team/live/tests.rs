@@ -1,7 +1,7 @@
 use super::*;
 use crate::drc::analysis::scope::Runs;
 use crate::drc::changes::{stamp_at, STAMP};
-use crate::drc::desktop::{Review, STATUS_NONE, STATUS_WAIVED};
+use crate::drc::desktop::{Left, Review, STATUS_NONE, STATUS_WAIVED};
 use crate::drc::team::flags::FlagStore;
 use crate::drc::team::stats::collect_from;
 use crate::drc::Pack;
@@ -58,7 +58,7 @@ impl Folder {
         merge_at(&self.pack, &id, &found, now, 10, false, &stop).unwrap()
     }
     /// The exact report's team: a row a rule, and its reviewers.
-    fn exact(&self) -> (Vec<[u64; 7]>, usize) {
+    fn exact(&self) -> (Vec<[u64; 8]>, usize) {
         let stop = AtomicUsize::new(0);
         let pack = Pack::open(&self.pack, &stop).unwrap();
         let id = Identity::of_pack(&pack, "statistics").unwrap();
@@ -69,7 +69,7 @@ impl Folder {
             .unwrap()
             .iter()
             .map(|r| {
-                ["visited", "waived", "not_required", "conflicts", "pending", "confirmed", "unconfirmed"]
+                ["visited", "waived", "not_required", "conflicts", "pending", "confirmed", "unconfirmed", "rejected"]
                     .map(|key| r[key].as_u64().unwrap())
             })
             .collect();
@@ -121,11 +121,11 @@ impl Drop for Folder {
 }
 
 /// The fixture's rule with errors, as `rows` says it.
-fn rows_of(kept: &Kept, id: &Identity) -> [u64; 7] {
+fn rows_of(kept: &Kept, id: &Identity) -> [u64; 8] {
     rows(kept, id)[RULE]
 }
 
-fn rows(kept: &Kept, id: &Identity) -> Vec<[u64; 7]> {
+fn rows(kept: &Kept, id: &Identity) -> Vec<[u64; 8]> {
     kept.rules
         .iter()
         .zip(&id.sizes)
@@ -138,6 +138,7 @@ fn rows(kept: &Kept, id: &Identity) -> Vec<[u64; 7]> {
                 size - t.done,
                 t.confirmed,
                 t.waived_any - t.confirmed,
+                t.rejected,
             ]
         })
         .collect()
@@ -215,7 +216,7 @@ impl Session {
     fn waive_run(&mut self, a: u64, b: u64, on: bool) {
         let (stop, value) = (AtomicUsize::new(0), if on { STATUS_WAIVED } else { STATUS_NONE });
         self.review
-            .set_status_members(RULE, &Runs::new(vec![a], vec![b]), value, &stop, &mut |_, _| {}, &mut Vec::new())
+            .set_status_members(RULE, &Runs::new(vec![a], vec![b]), value, &stop, &mut |_, _| {}, &mut Left::default())
             .unwrap();
     }
     fn visit(&self, error: u64) {
@@ -248,8 +249,8 @@ fn what_a_log_and_its_files_say_against_what_is_kept() {
     let kept = Seen {
         log_id: 7,
         cursor: 48,
-        log_stamp: [100, 200, 0],
-        stamps: [100, 200, 0],
+        log_stamp: [100, 200, 0, 0],
+        stamps: [100, 200, 0, 0],
         suspect: 0,
         known: 3,
         active: BTreeSet::new(),
@@ -260,72 +261,83 @@ fn what_a_log_and_its_files_say_against_what_is_kept() {
         assert_eq!(judge(kept, tail, known, stamps), want, "{what}");
     };
     use Verdict::{Again, Ahead, Said, Unsaid};
-    check(None, None, 1, [5, 0, 0], Again, "new to the counts");
-    check(None, Some(&word), 3, [150, 200, 0], Again, "new to the counts, with a log");
-    check(Some(&kept), Some(&nothing), 3, [100, 200, 0], Said, "nothing changed");
-    check(Some(&kept), Some(&nothing), 1, [100, 0, 0], Again, "their flags went");
-    check(Some(&kept), Some(&word), 3, [150, 200, 0], Said, "as the last word left them");
-    check(Some(&kept), Some(&word), 3, [160, 200, 0], Ahead, "the statuses newer than the last word");
-    check(Some(&kept), Some(&word), 3, [150, 210, 0], Ahead, "the flags newer than the last word");
-    check(Some(&kept), Some(&word), 3, [100, 200, 0], Unsaid, "the log says more than the files show");
-    check(Some(&kept), Some(&word), 3, [160, 190, 0], Unsaid, "one file newer, one not there yet");
-    check(Some(&kept), Some(&nothing), 3, [110, 200, 0], Unsaid, "changed, and nothing said");
-    check(Some(&kept), Some(&nothing), 3, [90, 200, 0], Unsaid, "changed backwards, and nothing said");
+    check(None, None, 1, [5, 0, 0, 0], Again, "new to the counts");
+    check(None, Some(&word), 3, [150, 200, 0, 0], Again, "new to the counts, with a log");
+    check(Some(&kept), Some(&nothing), 3, [100, 200, 0, 0], Said, "nothing changed");
+    check(Some(&kept), Some(&nothing), 1, [100, 0, 0, 0], Again, "their flags went");
+    check(Some(&kept), Some(&word), 3, [150, 200, 0, 0], Said, "as the last word left them");
+    check(Some(&kept), Some(&word), 3, [160, 200, 0, 0], Ahead, "the statuses newer than the last word");
+    check(Some(&kept), Some(&word), 3, [150, 210, 0, 0], Ahead, "the flags newer than the last word");
+    check(Some(&kept), Some(&word), 3, [100, 200, 0, 0], Unsaid, "the log says more than the files show");
+    check(Some(&kept), Some(&word), 3, [160, 190, 0, 0], Unsaid, "one file newer, one not there yet");
+    check(Some(&kept), Some(&nothing), 3, [110, 200, 0, 0], Unsaid, "changed, and nothing said");
+    check(Some(&kept), Some(&nothing), 3, [90, 200, 0, 0], Unsaid, "changed backwards, and nothing said");
     // a settle half seen: what was touched without its stamp yet is judged
     // against the last stamp known
     let half = tail(7, &[(TOUCH, 0, 0)]);
-    check(Some(&kept), Some(&half), 3, [100, 200, 0], Said, "touched, the stamp not seen yet, the files as before");
-    check(Some(&kept), Some(&half), 3, [110, 200, 0], Ahead, "touched, the stamp not seen yet");
-    check(Some(&kept), Some(&tail(7, &[(RESET, 0, 0), (STAMP, 150, 200)])), 3, [150, 200, 0], Again, "a RESET");
-    check(Some(&kept), Some(&tail(8, &[(STAMP, 100, 200)])), 3, [100, 200, 0], Again, "another log");
-    check(Some(&kept), None, 3, [100, 200, 0], Again, "their log is gone");
+    check(Some(&kept), Some(&half), 3, [100, 200, 0, 0], Said, "touched, the stamp not seen yet, the files as before");
+    check(Some(&kept), Some(&half), 3, [110, 200, 0, 0], Ahead, "touched, the stamp not seen yet");
+    check(Some(&kept), Some(&tail(7, &[(RESET, 0, 0), (STAMP, 150, 200)])), 3, [150, 200, 0, 0], Again, "a RESET");
+    check(Some(&kept), Some(&tail(8, &[(STAMP, 100, 200)])), 3, [100, 200, 0, 0], Again, "another log");
+    check(Some(&kept), None, 3, [100, 200, 0, 0], Again, "their log is gone");
     // a reviewer without a log has nothing to wait for
-    let silent = Seen { log_id: 0, cursor: 0, log_stamp: [0; 3], ..kept.clone() };
-    check(Some(&silent), None, 3, [100, 200, 0], Said, "no log, nothing changed");
-    check(Some(&silent), None, 3, [100, 201, 0], Again, "no log, changed");
-    check(Some(&silent), Some(&tail(7, &[(STAMP, 100, 200)])), 3, [100, 200, 0], Again, "their first log");
+    let silent = Seen { log_id: 0, cursor: 0, log_stamp: [0; 4], ..kept.clone() };
+    check(Some(&silent), None, 3, [100, 200, 0, 0], Said, "no log, nothing changed");
+    check(Some(&silent), None, 3, [100, 201, 0, 0], Again, "no log, changed");
+    check(Some(&silent), Some(&tail(7, &[(STAMP, 100, 200)])), 3, [100, 200, 0, 0], Again, "their first log");
     // counted of files older than the log had said: any change counts again
-    let behind = Seen { stamps: [90, 200, 0], ..kept.clone() };
-    check(Some(&behind), Some(&nothing), 3, [90, 200, 0], Said, "behind, nothing changed");
-    check(Some(&behind), Some(&nothing), 3, [100, 200, 0], Again, "behind, the files came to what was said");
-    check(Some(&behind), Some(&word), 3, [150, 200, 0], Again, "behind, more said");
-    check(Some(&behind), Some(&word), 3, [90, 200, 0], Again, "behind, more said and the files as they were");
+    let behind = Seen { stamps: [90, 200, 0, 0], ..kept.clone() };
+    check(Some(&behind), Some(&nothing), 3, [90, 200, 0, 0], Said, "behind, nothing changed");
+    check(Some(&behind), Some(&nothing), 3, [100, 200, 0, 0], Again, "behind, the files came to what was said");
+    check(Some(&behind), Some(&word), 3, [150, 200, 0, 0], Again, "behind, more said");
+    check(Some(&behind), Some(&word), 3, [90, 200, 0, 0], Again, "behind, more said and the files as they were");
     // the confirm file is a file of theirs like the other two (0.12.466)
-    let confirming = Seen { log_stamp: [100, 200, 50], stamps: [100, 200, 50], known: 7, ..kept.clone() };
+    let confirming = Seen { log_stamp: [100, 200, 50, 0], stamps: [100, 200, 50, 0], known: 7, ..kept.clone() };
     let cword = tail(7, &[(TOUCH, 0, 0), (STAMP, 100, 200), (changes::CSTAMP, 60, 0)]);
-    check(Some(&confirming), Some(&nothing), 7, [100, 200, 50], Said, "confirming, nothing changed");
-    check(Some(&confirming), Some(&nothing), 7, [100, 200, 60], Unsaid, "confirmed, and nothing said");
-    check(Some(&confirming), Some(&cword), 7, [100, 200, 60], Said, "confirmed, as the last word left it");
-    check(Some(&confirming), Some(&cword), 7, [100, 200, 50], Unsaid, "the log says a confirmation the file does not show");
-    check(Some(&confirming), Some(&cword), 7, [100, 200, 70], Ahead, "the confirm file newer than the last word");
-    check(Some(&confirming), Some(&word), 7, [150, 200, 50], Said, "a waive said, the confirm file as it was");
-    check(Some(&kept), Some(&cword), 7, [100, 200, 60], Again, "their first confirm file");
-    check(Some(&confirming), Some(&nothing), 3, [100, 200, 0], Again, "their confirm file went");
+    check(Some(&confirming), Some(&nothing), 7, [100, 200, 50, 0], Said, "confirming, nothing changed");
+    check(Some(&confirming), Some(&nothing), 7, [100, 200, 60, 0], Unsaid, "confirmed, and nothing said");
+    check(Some(&confirming), Some(&cword), 7, [100, 200, 60, 0], Said, "confirmed, as the last word left it");
+    check(Some(&confirming), Some(&cword), 7, [100, 200, 50, 0], Unsaid, "the log says a confirmation the file does not show");
+    check(Some(&confirming), Some(&cword), 7, [100, 200, 70, 0], Ahead, "the confirm file newer than the last word");
+    check(Some(&confirming), Some(&word), 7, [150, 200, 50, 0], Said, "a waive said, the confirm file as it was");
+    check(Some(&kept), Some(&cword), 7, [100, 200, 60, 0], Again, "their first confirm file");
+    check(Some(&confirming), Some(&nothing), 3, [100, 200, 0, 0], Again, "their confirm file went");
+    // the rejects log is the fourth (0.12.468): its time is the second
+    // number of the confirm file's record
+    let rejecting = Seen { log_stamp: [100, 200, 50, 30], stamps: [100, 200, 50, 30], known: 15, ..kept.clone() };
+    let rword = tail(7, &[(TOUCH, 0, 0), (STAMP, 100, 200), (changes::CSTAMP, 50, 40)]);
+    check(Some(&rejecting), Some(&nothing), 15, [100, 200, 50, 30], Said, "rejecting, nothing changed");
+    check(Some(&rejecting), Some(&nothing), 15, [100, 200, 50, 40], Unsaid, "rejected, and nothing said");
+    check(Some(&rejecting), Some(&rword), 15, [100, 200, 50, 40], Said, "rejected, as the last word left it");
+    check(Some(&rejecting), Some(&rword), 15, [100, 200, 50, 30], Unsaid, "the log says a rejection the file does not show");
+    check(Some(&rejecting), Some(&rword), 15, [100, 200, 50, 45], Ahead, "the rejects log newer than the last word");
+    check(Some(&confirming), Some(&rword), 15, [100, 200, 50, 40], Again, "their first rejects log");
+    check(Some(&rejecting), Some(&nothing), 7, [100, 200, 50, 0], Again, "their rejects log went");
 }
 
 #[test]
 fn the_cache_file_is_whole_and_this_results_or_no_cache() {
     let mut cache = Cache::empty(3);
-    cache.set(1, 0, [1, 2, 3, 0, 4, 2, 1]);
-    cache.set(1, 7, [4096, 0, 0, 0, 4096, 0, 0]);
-    cache.set(2, 1, [0, 5, 0, 0, 0, 5, 5]);
-    assert_eq!(cache.rules, [[0; 7], [4097, 2, 3, 0, 4100, 2, 1], [0, 5, 0, 0, 0, 5, 5]]);
+    cache.set(1, 0, [1, 2, 3, 0, 4, 2, 1, 0]);
+    cache.set(1, 7, [4096, 0, 0, 0, 4096, 0, 0, 0]);
+    cache.set(2, 1, [0, 5, 0, 0, 0, 5, 5, 0]);
+    assert_eq!(cache.rules, [[0; 8], [4097, 2, 3, 0, 4100, 2, 1, 0], [0, 5, 0, 0, 0, 5, 5, 0]]);
     // a chunk's counts replaced, and one that counts nothing any more
-    cache.set(1, 0, [2, 2, 0, 1, 2, 3, 0]);
-    cache.set(2, 1, [0; 7]);
-    assert_eq!(cache.rules, [[0; 7], [4098, 2, 0, 1, 4098, 3, 0], [0; 7]]);
+    cache.set(1, 0, [2, 2, 0, 1, 2, 3, 0, 0]);
+    cache.set(2, 1, [0; 8]);
+    assert_eq!(cache.rules, [[0; 8], [4098, 2, 0, 1, 4098, 3, 0, 0], [0; 8]]);
     assert_eq!((cache.kept(1), cache.kept(2), cache.chunks.len()), (vec![0, 7], vec![], 2));
     assert_eq!(
         cache.teams()[1],
-        Team { visited: 4098, waived: 2, not_required: 0, conflicts: 1, done: 4098, waived_any: 3, confirmed: 0 }
+        Team { visited: 4098, waived: 2, not_required: 0, conflicts: 1, done: 4098, waived_any: 3, confirmed: 0, rejected: 0 }
     );
     cache.reviewers.insert(
         "kim".into(),
         Seen {
             log_id: 9,
             cursor: 72,
-            log_stamp: [5, 6, 10],
-            stamps: [7, 8, 11],
+            log_stamp: [5, 6, 10, 0],
+            stamps: [7, 8, 11, 0],
             suspect: 3,
             known: 3,
             active: [1u32, 2].into(),
@@ -354,14 +366,14 @@ fn the_cache_file_is_whole_and_this_results_or_no_cache() {
     wrong.rules[1][0] += 1;
     assert!(Cache::of(&wrong.bytes("abc"), "abc", 3).is_none(), "a rule's total is not its chunks'");
     let mut wrong = cache.clone();
-    wrong.chunks.insert((1, 3), [0; 7]);
+    wrong.chunks.insert((1, 3), [0; 8]);
     assert!(Cache::of(&wrong.bytes("abc"), "abc", 3).is_none(), "a chunk that counts nothing");
     let mut wrong = cache.clone();
-    wrong.chunks.insert((1, 3), [4097, 0, 0, 0, 0, 0, 0]);
+    wrong.chunks.insert((1, 3), [4097, 0, 0, 0, 0, 0, 0, 0]);
     wrong.rules[1][0] += 4097;
     assert!(Cache::of(&wrong.bytes("abc"), "abc", 3).is_none(), "a count past a chunk");
     let mut wrong = cache.clone();
-    wrong.chunks.insert((3, 0), [1, 0, 0, 0, 0, 0, 0]);
+    wrong.chunks.insert((3, 0), [1, 0, 0, 0, 0, 0, 0, 0]);
     assert!(Cache::of(&wrong.bytes("abc"), "abc", 3).is_none(), "a rule the result has not");
     // the names
     assert_eq!(path_of(Path::new("/r/.x.db.tray")).unwrap(), Path::new("/r/.x.db.team"));
@@ -455,7 +467,9 @@ fn the_kept_counts_are_the_exact_ones_after_every_change() {
     f.agree(&kept, "a saved file loaded");
     assert!(rows(&kept, &id)[RULE][1] > CHUNK);
     // whatever three reviewers do, in whatever order - park a confirmer,
-    // who confirms what is waived and what is not, and takes it back
+    // who confirms what is waived and what is not and takes it back, and
+    // rejects and takes that back (0.12.468); a reviewer's session turns
+    // its rejected waives back when it looks, which is now and then
     let mut park = Session::open(&f, "park");
     park.review.set_confirmer(true);
     let mut people = [kim, lee, park];
@@ -470,12 +484,13 @@ fn the_kept_counts_are_the_exact_ones_after_every_change() {
     // (a reviewer's first flags, first confirmation and first word in a
     // change log make a file, and a file that comes has its reviewer's
     // rules counted whole, once)
-    let mut confirmed = 0;
+    let (mut confirmed, mut rejected, mut returned) = (0, 0, 0);
     let files = |person: usize| {
         let name = ["kim", "lee", "park"][person];
         [
             f.file(&format!(".results.db.review.{name}.sqlite3")).exists(),
             f.file(&format!(".results.db.confirm.{name}")).exists(),
+            f.file(&format!(".results.db.rejects.{name}")).exists(),
             f.log(name).exists(),
         ]
     };
@@ -486,8 +501,15 @@ fn the_kept_counts_are_the_exact_ones_after_every_change() {
         let a = if next(2) == 0 { next(4) * CHUNK + next(24) } else { next(N) };
         let most = if next(4) == 0 { 6000 } else { 40 };
         let b = (a + 1 + next(most)).min(N);
-        // (park confirms a time in three)
-        let action = if person == 2 && next(3) == 0 { 8 + next(3) } else { next(8) };
+        // (park confirms or rejects a time in three; anyone looks for
+        // rejections of their waives a time in ten)
+        let action = if person == 2 && next(3) == 0 {
+            8 + next(5)
+        } else if next(10) == 0 {
+            13
+        } else {
+            next(8)
+        };
         let had = files(person);
         match action {
             0 => who.waive(&[a], true),
@@ -499,7 +521,10 @@ fn the_kept_counts_are_the_exact_ones_after_every_change() {
             7 => who.exclude(a, b, false),
             8 => who.confirm(a, a + 1, true),
             9 => who.confirm(a, b.min(a + 200), true),
-            _ => who.confirm(a, b.min(a + 200), false),
+            10 => who.confirm(a, b.min(a + 200), false),
+            11 => who.review.reject_set(RULE, &[(a, b.min(a + 200))], "no").unwrap(),
+            12 => drop(who.review.reject_drop(RULE, &[(a, b.min(a + 200))]).unwrap()),
+            _ => returned += who.review.take_rejected().unwrap().iter().map(|r| r.count).sum::<u64>(),
         }
         let kept = f.merged(2000 + step, 10);
         f.agree(&kept, &format!("step {step}"));
@@ -509,6 +534,8 @@ fn the_kept_counts_are_the_exact_ones_after_every_change() {
         let most = match action {
             _ if files(person) != had => N.div_ceil(CHUNK),
             0 | 1 | 4 | 5 | 8 => 1,
+            // (the waives turned back lie wherever a rejection does)
+            13 => N.div_ceil(CHUNK),
             _ => (b - 1) / CHUNK - a / CHUNK + 1,
         };
         assert!(
@@ -518,10 +545,12 @@ fn the_kept_counts_are_the_exact_ones_after_every_change() {
         );
         counted += kept.counted;
         confirmed = confirmed.max(kept.rules[RULE].confirmed);
+        rejected = rejected.max(kept.rules[RULE].rejected);
         conflicts = conflicts.max(kept.rules[RULE].conflicts);
         excluded = excluded.max(kept.rules[RULE].not_required);
     }
     assert!(conflicts > 0 && excluded > 0 && confirmed > 0, "{conflicts} conflicts, {excluded} set aside, {confirmed} confirmed");
+    assert!(rejected > 0 && returned > 0, "{rejected} rejected, {returned} waives turned back");
     assert!(counted >= 150, "{counted} chunks counted in 300 steps");
     assert_eq!(f.merged(2300, 10).reviewers, 3);
     // a session that ends and one that starts say nothing more: the log's
@@ -549,7 +578,7 @@ fn the_teams_waives_are_listed_and_confirmed_by_the_confirmer() {
     let id = f.id();
     let stop = AtomicUsize::new(0);
     let view = || TeamWaives::open(&f.pack, &f.id()).unwrap();
-    let counts = |waived, confirmed| Waives { waived, confirmed, unconfirmed: waived - confirmed };
+    let counts = |waived, confirmed| Waives { waived, confirmed, unconfirmed: waived - confirmed, rejected: 0 };
     // nobody has waived anything: nothing to confirm
     let mut v = view();
     assert_eq!(v.counts(None, &stop).unwrap(), counts(0, 0));
@@ -609,10 +638,10 @@ fn the_teams_waives_are_listed_and_confirmed_by_the_confirmer() {
     assert_eq!(v.rows(RULE, &[2]).unwrap()[0].confirmed_by, ["hong"]);
     let kept = f.merged(1000, 10);
     f.agree(&kept, "confirmed");
-    assert_eq!(rows_of(&kept, &id)[5..], [5, 0]);
+    assert_eq!(rows_of(&kept, &id)[5..7], [5, 0]);
     // a confirmed waive is locked: its reviewer's session does not turn it
     // back (0.12.467), and nothing is counted anew
-    assert_eq!(kim.review.set_status(RULE, &[0, 3], STATUS_NONE).unwrap(), [0], "3 is lee's waive, not kim's");
+    assert_eq!(kim.review.set_status(RULE, &[0, 3], STATUS_NONE).unwrap().locked, [0], "3 is lee's waive, not kim's");
     assert_eq!(view().counts(Some(RULE), &stop).unwrap(), counts(5, 5));
     assert_eq!(f.merged(1001, 10).counted, 0);
     // turned back all the same - by a session with the role, or a build
@@ -625,11 +654,11 @@ fn the_teams_waives_are_listed_and_confirmed_by_the_confirmer() {
     assert_eq!(view().counts(Some(RULE), &stop).unwrap(), counts(4, 4));
     let kept = f.merged(1001, 10);
     f.agree(&kept, "a confirmed waive turned back");
-    assert_eq!((rows_of(&kept, &id)[5..].to_vec(), hong.review.confirms.counts()[RULE]), (vec![4, 0], 5));
+    assert_eq!((rows_of(&kept, &id)[5..7].to_vec(), hong.review.confirms.counts()[RULE]), (vec![4, 0], 5));
     lee.waive(&[0], true);
     assert_eq!(view().counts(Some(RULE), &stop).unwrap(), counts(5, 5));
     f.agree(&f.merged(1002, 10), "waived again");
-    assert_eq!(lee.review.set_status(RULE, &[0], STATUS_NONE).unwrap(), [0]);
+    assert_eq!(lee.review.set_status(RULE, &[0], STATUS_NONE).unwrap().locked, [0]);
     // the confirmer takes one back; a second confirmer's same error is the
     // same error
     assert_eq!(hong.review.confirm_set(RULE, &[1, 7], false).unwrap(), 1);
@@ -648,7 +677,7 @@ fn the_teams_waives_are_listed_and_confirmed_by_the_confirmer() {
     assert!(rows[2].waived_by.is_empty() && rows[2].confirmed_by == ["yoon"]);
     let kept = f.merged(1003, 10);
     f.agree(&kept, "two confirmers");
-    assert_eq!(rows_of(&kept, &id)[5..], [5, 0]);
+    assert_eq!(rows_of(&kept, &id)[5..7], [5, 0]);
     // what each reviewer's row of the exact report says: the errors they
     // confirmed, and of their waives the ones somebody confirmed
     let report = f.report();
@@ -667,7 +696,7 @@ fn the_teams_waives_are_listed_and_confirmed_by_the_confirmer() {
     hong.review.sync_waives().unwrap();
     let kept = f.merged(1004, 10);
     f.agree(&kept, "taken back");
-    assert_eq!(rows_of(&kept, &id)[5..], [3, 2]);
+    assert_eq!(rows_of(&kept, &id)[5..7], [3, 2]);
     // a confirm file of another result is nobody's confirmation of this one
     drop((hong, yoon));
     let mut bytes = fs::read(&file).unwrap();
@@ -763,10 +792,10 @@ fn a_change_nobody_said_is_found_by_the_files_times() {
     // a job still going: what its log said so far is counted, the rest
     // waits for its record
     let all = Runs::new(vec![0], vec![N]);
-    kim.review.set_status_range(RULE, &all, STATUS_WAIVED, 0, CHUNK, &mut Vec::new()).unwrap();
+    kim.review.set_status_range(RULE, &all, STATUS_WAIVED, 0, CHUNK, &mut Left::default()).unwrap();
     kim.review.sync_waives().unwrap();
     let said = stamp_at(&waive);
-    kim.review.set_status_range(RULE, &all, STATUS_WAIVED, CHUNK, CHUNK, &mut Vec::new()).unwrap();
+    kim.review.set_status_range(RULE, &all, STATUS_WAIVED, CHUNK, CHUNK, &mut Left::default()).unwrap();
     moved(&waive, said);
     let kept = f.merged(1080, 10);
     assert!(!kept.current && kept.waiting[0].starts_with("kim is changing their review"), "{:?}", kept.waiting);

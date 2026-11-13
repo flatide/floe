@@ -646,10 +646,14 @@ class PackDrc(_Drc):
         # are (0.12.467): still waived, with the reason they had
         locked = set(reply.get("locked") or ())
         self._locked_said = (len(locked), tuple(reply.get("locked_by") or ()))
+        # ... and the errors whose waive a confirmer has rejected were not
+        # waived (0.12.468)
+        rejected = set(reply.get("rejected") or ())
+        self._rejected_said = (len(rejected), _rejecters(reply.get("rejected_by")))
         with self._cache_lock:
             for ei in eis:
                 chunk = self._status.get((ci, ei // _STATUS_PAGE))
-                if chunk is not None and ei not in locked:
+                if chunk is not None and ei not in locked and ei not in rejected:
                     chunk[ei % _STATUS_PAGE] = int(value) & 0xFF
         self.reasons_changed()
         return reply.get("reason_error")
@@ -664,6 +668,31 @@ class PackDrc(_Drc):
         said = getattr(self, "_locked_said", None) or (0, ())
         self._locked_said = (0, ())
         return said
+
+    def rejected_take(self):
+        """What the last status write of this review did not waive because
+        a confirmer has rejected the waive: (how many errors, ((who, why),
+        ...)). Asked once: the next ask says (0, ())."""
+        said = getattr(self, "_rejected_said", None) or (0, ())
+        self._rejected_said = (0, ())
+        return said
+
+    def returned_ask(self):
+        """Ask the service to turn back this reviewer's waives that a
+        confirmer has rejected (its job reads the confirmers' files: the
+        viewer does not wait for it). The answer comes to `returned_answer`."""
+        self._start("returned", "drc_team_returned")
+
+    def returned_answer(self):
+        """The answer to the last `returned_ask`, once: {"returned":
+        [{"check", "count", "by": [{"reviewer", "text", "time"}],
+        "counts"}]} - a row a rule whose waives were turned back, none for
+        nothing; None while there is no answer yet, False when the ask
+        failed."""
+        event = self.poll("returned")
+        if event is None or event.get("state") == "progress":
+            return None
+        return event if event.get("state") == "done" else False
 
     # ---- reasons (app-core drc::reasons) --------------------------------
     def reason_read(self, ci, eis, kind, toggle=False):
@@ -783,8 +812,10 @@ class PackDrc(_Drc):
     def waive_import(self, src):
         reply = self._request("drc_waive_import", path=os.path.abspath(src))
         self._counts = [tuple(c) for c in reply["counts"]]
-        # (waives the file would have turned back, kept: `locked_take`)
+        # (waives the file would have turned back, kept: `locked_take`;
+        # errors it would have waived, left: `rejected_take`)
         self._locked_said = (int(reply.get("locked") or 0), ())
+        self._rejected_said = (int(reply.get("rejected") or 0), ())
         with self._cache_lock:
             self._status.clear()
             self._reasons.clear()
@@ -2132,10 +2163,18 @@ def set_members(db, ci, errors, field, on, cancelled=None, progress=None,
     finally:
         db.counts_refresh()
         db.review_flags_changed(ci)
-    # (the confirmed waives the job left as they were: `locked_take`)
+    # (the confirmed waives the job left as they were: `locked_take`; the
+    # errors it did not waive because their waive is rejected: `rejected_take`)
     db._locked_said = (int(event.get("locked") or 0),
                        tuple(event.get("locked_by") or ()))
+    db._rejected_said = (int(event.get("rejected") or 0),
+                         _rejecters(event.get("rejected_by")))
     return event.get("reason_error")
+
+
+def _rejecters(rows):
+    """((who, why), ...) of a service answer's `rejected_by`."""
+    return tuple((r.get("reviewer") or "", r.get("text") or "") for r in rows or ())
 
 
 def team_waives(db, ci, kind, start, limit, refresh=False, cancelled=None,
@@ -2166,6 +2205,18 @@ def confirm_waives(db, ci, errors=None, on=True, cancelled=None, progress=None):
     return _job(db, "confirm", "drc_team_confirm", cancelled, progress,
                 check=int(ci), on=bool(on),
                 errors=None if errors is None else [int(e) for e in errors])
+
+
+def reject_waives(db, ci, errors, on=True, reason=None, cancelled=None,
+                  progress=None):
+    """Reject the waive of rule `ci`'s `errors` as this reviewer (a review
+    opened as a confirmer's), `reason` saying why - or take that rejection
+    back: {"changed", "skipped" - asked to reject and nobody's waive,
+    "counts" - this reviewer's own (waived, total) of the rule after it}."""
+    fields = {"reason": reason} if reason and on else {}
+    return _job(db, "confirm", "drc_team_reject", cancelled, progress,
+                check=int(ci), on=bool(on), errors=[int(e) for e in errors],
+                **fields)
 
 
 def prepare_conflict_selection(db, aggregate, ci, membership=None, waived=None,

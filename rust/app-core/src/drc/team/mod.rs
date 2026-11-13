@@ -53,6 +53,13 @@ pub struct Identity {
 }
 
 impl Identity {
+    /// The result as the reviewers' logs of reasons and rejections name it
+    /// (`floe_pack=`: the content id's prefix and the errors).
+    pub fn result_tag(&self) -> String {
+        let hex: String = self.waive_header[12..28].iter().map(|b| format!("{b:02x}")).collect();
+        format!("{hex},{}", self.total())
+    }
+
     pub fn of(review: &Review) -> Result<Self> {
         Ok(Self {
             fingerprint: review.pack.review_fingerprint()?,

@@ -680,3 +680,22 @@ P4d처럼 컨트롤러 루프에서만 바뀐다. `FLOE_GTK_LOOP=legacy`는 예�
 - **웹(머지할 때):** 웹의 리뷰 저장소(`drc::review::store`)는 `desktop::Review`를 거치지 않으므로 잠금을 모른다. 웹이 confirm을 받으면 그 저장소의 상태 쓰기에 같은 판단을 넣어야 한다(`confirm::Locks`는 기능 플래그 없이 쓸 수 있다).
 - **한계:** 잠금은 파일 사이의 검사라 confirm과 되돌리기가 같은 순간에 겹치면 되돌리기가 이길 수 있다(그 confirm은 세지 않는다). 0.12.466 이하의 빌드는 잠금을 모른다. 확인자의 첫 confirm은 다른 세션에 최대 약 1초(NFS면 폴더 캐시만큼 더) 뒤에 보인다.
 - **게이트:** `drc_team` R16·R15·R7, 단위 app-core `drc::confirm`(`the_locks_are_every_confirmers_confirmations_read_anew`), `drc::tests`(`a_confirmed_waive_is_locked_and_only_a_confirmer_turns_it_back`), `drc::reasons`(구간 빼기), `drc::team::live`.
+
+## 24. waive의 반려 (2026-11-14, app 0.12.468) — 기록과 집계·거절은 공유 Rust, 언제 따라갈지는 호스트
+
+사용자: "confirmer가 다른 리뷰어의 waive를 반려할 수 있게 해줘"
+
+- **규칙:** 확인자가 반려한 에러는 누구의 waive로도 세지 않고, 그 에러를 waive한 리뷰어의 세션이 자기 waive를 되돌리며, 반려한 확인자가 풀 때까지 어느 세션도(확인자의 세션도) 다시 waive하지 않는다. confirm된 waive도 반려되면 잠기지 않는다.
+- **기록:** 확인자 자신의 `.<db>.rejects.<리뷰어>`. `drc::reasons`의 기록을 그대로 쓰고 종류 `Kind::Reject`(줄 머리 `r`/`R`)가 늘었다. 이 종류만 사유가 비어도 줄이 된다(`Kind::bare`). 사유 파일과 달리 이 기록이 반려 여부 자체다. `Reasons::open_as(title, …)`로 첫 줄(`# floe drc waive rejections`)만 다르게 연다. `desktop::Review`가 자기 것을 갖는다(`review.rejects`).
+  - 에러당 바이트(confirm 파일의 값 2)로 두지 않은 이유: confirm 파일의 룰별 카운터가 반려를 세지 않아 팀 합계가 그 룰을 건너뛰고, 0.12.466·467의 confirm 취소가 그 바이트를 지우며 카운터를 깎는다. 따로 둔 파일은 옛 빌드가 모른 채로 안전하다.
+- **확인자의 동작(`Review`):** `reject_set(check, runs, text)`와 `reject_drop(check, runs)`(역할이 없으면 거절). 반려는 한 줄이고, 확인자 자신의 그 에러 waive를 되돌리고 자신의 confirm을 지운다. 무엇을 반려할지는 `team::waives::reject_runs(review, view, check, errors, on)`가 정한다(고른 에러 중 누군가의 파일에 waive로 있는 것, 풀 때는 자신이 반려한 것).
+- **읽기(`confirm::Locks`):** confirm 파일과 함께 반려 기록을 찾아 읽는다. 기록은 파일의 시각과 크기가 달라지면 다시 읽는다. waive하기 전의 확인(`rejected(…, waiving = true)`)은 폴더를 훑지 않는다: 마지막 확인이 찾은 기록만 쓴다.
+- **거절(상태 쓰기 함수):** `set_status`는 `Left<u64> { locked, rejected }`를, `set_status_range`는 `&mut Left<Run>`을, `write_status_span`과 `waive_import`는 `Kept { locked, rejected }`를 돌려준다. waive하려는 에러가 반려돼 있으면 그대로 두고 알린다. `snapshot::apply`·`migrate::apply`는 그 에러를 대상에서 빼고 `Applied.rejected`로 센다(0이 아닐 때만 직렬화).
+- **따라가기(`Review::take_rejected`):** 이 리뷰어의 waive 중 반려된 것을 되돌리고 `Returned { check, runs, count, by }`를 돌려준다. 호출이 폴더를 다시 훑으므로 확인자의 첫 반려(새 파일)는 이 호출이 찾는다. 기록과 자기 상태가 그대로면 아무것도 하지 않는다. **호스트는 결과를 열 때 한 번, 그 뒤 원하는 주기로 부른다**(GTK는 2초: 서비스의 `drc_team_returned`, job `returned`). 부르지 않는 호스트의 세션은 반려를 따르지 않는다(통계는 그래도 옳다).
+- **집계:** `stats::Planes.rejected`(반려 기록의 구간을 구간 비트로: `run_bits`), `team_of`가 모든 리뷰어의 waive에서 반려된 에러를 먼저 뺀다. `Team.rejected`, JSON `rejected`. 리뷰어 줄 `rejected`(반려 기록이 있을 때), `waived_rejected`(정확한 보고서). `discover`가 `.rejects.` 이름을 찾는다(`Found.rejects`).
+- **팀 합계 캐시와 변경 기록:** 반려 기록이 리뷰어의 네 번째 파일이다. `changes::Stamps = [u64; 4]`, 레코드 4 `CSTAMP`의 b가 반려 기록의 시각, `.team`은 버전 3(수치 8개, 시각 4개, `known`의 bit 3). 반려는 그 구간들을 `touched`로 말한다.
+- **목록(`team::waives`):** `Kind::Rejected`, `Counts.rejected`(0이 아닐 때만 직렬화), `Row.rejected_by`. `waived`·`unconfirmed`·`confirmed` 목록과 `confirm_chunk`의 대상에서 반려된 에러가 빠진다.
+- **서비스(floe2):** `drc_team_reject {check, errors, on, reason?}`(job `confirm`), `drc_team_returned {}`(job `returned`), `drc_set_status`와 review job의 답에 `rejected`·`rejected_by`, `drc_waive_import`의 답에 `rejected`, `drc_reason_read`의 `reason_of: "reject"`.
+- **웹(머지할 때):** 웹의 리뷰 저장소는 `desktop::Review`를 거치지 않으므로 반려를 모른다. 반려를 받으려면 그 저장소의 상태 쓰기에 같은 거절을 넣고, 세션이 `take_rejected`에 해당하는 일을 해야 한다. 통계(`floe2 drc`)는 공유라 그대로 옳다.
+- **한계:** 반려된 에러를 리뷰어가 다시 올리는 길(재상신)은 없다. 확인자의 첫 반려와 다른 호스트의 반려는 다음 확인에서 보인다. 0.12.467 이하의 뷰어는 반려를 따르지 않는다.
+- **게이트:** `drc_team` R17·R7, 단위 app-core `drc::tests`(`a_rejected_waive_is_turned_back_and_not_waived_until_the_rejection_is_taken_back`), `drc::confirm`(반려 기록 읽기), `drc::changes`(네 번째 시각), `drc::team::live`(판정 표의 7가지, 반려를 섞은 무작위 300단계), `drc::team::stats`(팀 규칙, 구간 비트), `drc::reasons`(세 종류의 무작위 1,500단계).

@@ -635,7 +635,19 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   말하고(`drc_set_status`의 `locked`·`locked_by`, review job의 `locked`·`locked_by`), `PackDrc`는
   잠긴 에러의 캐시 상태를 바꾸지 않으며 `locked_take()`로 마지막 쓰기의 (수, confirm한 사람들)을 한 번
   내준다. 확인자의 창에서는 `Confirm …` 버튼의 툴팁이 잠금을, `Unconfirm selected`의 툴팁이 풀림을
-  말한다. 이 조회는 에러를
+  말한다.
+  **반려**(0.12.468, DRC.ko.md §2): 창의 목록에 `Rejected`가, 확인자의 창에 `Reject selected`(사유를
+  묻는다: `_drc_reason_dialog("reject", …)`, 창 제목 `Reject reason`)와 `Unreject selected`가 있다
+  (`_DrcWaivesWindow._reject`, 서비스의 `drc_team_reject`, job `confirm`). 열에 `Rejected by`(확인자와
+  사유)가 늘었고 수치 줄에 `· rejected N`이 붙는다. 결과를 연 뷰어는 열 때와 그 뒤 2초마다
+  (`RETURNED_MS`) 서비스에 자기 waive 중 반려된 것을 되돌리게 한다(`_drc_returned_start`·`_look`·
+  `_poll`, 서비스의 `drc_team_returned`, job `returned`: 폴더 목록을 읽으므로 작업이다). 되돌린 것이
+  있으면 목록·마커·수치를 고치고 상태 줄에 `N waive(s) in RULE rejected by hong (사유): turned back`을
+  쓴다. 반려된 에러를 waive하려 하면 서비스의 답(`rejected`·`rejected_by`)대로
+  `… · K rejected by hong (사유): not waived`, 전부면
+  `rejected: K error(s) in RULE by hong (사유) - not waived until the rejection is taken back`이다.
+  `PackDrc.rejected_take()`가 마지막 쓰기의 (수, ((누가, 왜), …))를 한 번 내준다. 에러 상세에는
+  `waive rejected by: hong (사유)`가 붙는다. 이 조회는 에러를
   고를 때마다 일어나고 리뷰어들의 파일을 찾느라 폴더 목록을 읽으므로(임시 폴더의 이름 19,000개에서 8 ms)
   서비스의 작업(job `team-row`)으로 한다: 상세는 바로 뜨고 팀 줄은 답이 오면 붙으며, 같은 에러를 다시
   보면 지난 답의 줄이 바로 나온 뒤 새 답으로 고쳐진다(`waive_ask`·`waive_answer`, `_drc_team_poll`). 화면

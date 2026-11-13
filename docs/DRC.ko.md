@@ -417,14 +417,47 @@ python -m floe render chip.oas --drc results.db \
     waive했고 confirm된 에러)와 `unconfirmed`(누군가 waive했고 아직 confirm되지 않은 에러)가,
     확인자의 줄에 `confirmed`가, `--review-stats`의 리뷰어 줄에 `waived_confirmed`(내 waive 중
     confirm된 수)가 있다(DRC-CLI.ko.md §2b·§2c).
-  - **하지 않는 것**: 반려(reject) 상태는 없다: 확인자가 다른 리뷰어의 waive를 무효로 만드는 방법은
-    없고, confirm을 취소해 그 리뷰어가 되돌리게 한다. 메인 목록과 캔버스의 waive 표시는 전처럼 내
-    것이고, 팀의 waive와 confirm 여부는 이 창과 에러 상세에서 본다. `.floereview`·
-    `save waives as…`·`review from previous run…`은 confirm을 싣지 않는다. 에러가 달라진 재실행
-    뒤에는 confirm 파일도 `.stale-<시각>`으로 치워진다(잠금도 함께 없어진다).
-  - 게이트 `drc_team` R15·R16·R7, 단위 테스트 app-core `drc::confirm`, `drc::team::live`
+  - **반려**(0.12.468, 사용자 2026-11-14: "confirmer가 다른 리뷰어의 waive를 반려할 수 있게 해줘"):
+    확인자의 두 번째 판정이다. 확인자가 반려한 에러는 누구의 waive로도 세지 않고, waive한 리뷰어의
+    뷰어가 그 waive를 되돌리며, 반려가 풀릴 때까지 아무도 다시 waive하지 못한다.
+    - **하는 법**: 확인자의 `team waives…` 창에서 행을 고르고 `Reject selected`. 반려 사유를
+      묻는다(한 줄, 비워도 된다. Esc나 Cancel이면 반려하지 않는다). 풀 때는 `Rejected` 목록에서
+      `Unreject selected`. 확인자가 아닌 창에서는 두 버튼이 꺼져 있다.
+    - **대상**: 고른 행 중 누군가 waive하고 있는 에러. 반려도 confirm처럼 에러 단위다. confirm된
+      waive도 반려할 수 있고, 그때 반려가 이긴다(자기 confirm은 반려하면서 함께 지워지고, 다른
+      확인자의 confirm은 그 사람의 파일에 남되 세지 않는다).
+    - **기록**: 확인자 자신의 `.<db>.rejects.<리뷰어>`. 반려 한 번이 한 줄이다(어느 에러, 언제,
+      왜). 수백만 개를 한 번에 반려해도 한 줄이다(SPEC-FORMATS). 다른 사람의 파일은 건드리지 않는다.
+    - **집계는 바로 바뀐다**: 통계는 반려된 에러의 waive를 리뷰어의 파일에 아직 남아 있어도 세지
+      않는다. `team.waived`·`confirmed`·`unconfirmed`·`conflicts`가 모두 그렇고, `team.rejected`가
+      반려된 에러 수다.
+    - **리뷰어의 뷰어가 되돌린다**: 결과를 연 뷰어는 열 때와 그 뒤 2초마다 확인자들의 반려 기록을
+      보고, 자기 waive 중 반려된 것을 되돌린다(상태와 사유, 여느 unwaive와 같다). 상태 줄이
+      `2 waive(s) in RULE rejected by hong (사유): turned back`으로 알린다. confirm되어 잠긴
+      waive도 반려되면 되돌린다. 뷰어를 띄워 두지 않은 리뷰어의 파일은 다음에 열 때 바뀐다.
+    - **다시 waive하지 못한다**: 반려된 에러를 waive하려 하면 그 에러만 남기고 상태 줄이
+      `waived 1 error(s) in RULE · 2 rejected by hong (사유): not waived`(전부 반려면
+      `rejected: 2 error(s) in RULE by hong (사유) - not waived until the rejection is taken back`)
+      로 알린다. 클릭, 선택 작업, 공동 검토 창, 동료 결정 적용, 이전 런 승계, waive 파일 로드가 모두
+      같다. 확인자의 세션도 반려된 에러는 waive하지 못한다. 에러 상세에는
+      `waive rejected by: hong (사유)`가 붙는다.
+    - **푸는 것은 반려한 확인자다**: 각자 자기 반려만 지운다. 두 확인자가 같은 에러를 반려했으면 둘
+      다 풀어야 한다. 풀리면 누구든 다시 waive할 수 있고, 리뷰어의 뷰어가 아직 되돌리지 않은
+      waive는 그대로 살아난다.
+    - **언제 보이나**: 확인자의 첫 반려는 파일을 새로 만든다. 다른 세션은 다음 확인(2초 주기)에서 그
+      파일을 찾고, 그 사이에 한 waive는 그 확인이 되돌린다. 이미 있는 기록에 더해진 반려는 바로
+      안다(같은 호스트). waive할 때는 폴더를 훑지 않는다.
+    - **옛 빌드**: 0.12.467 이하의 뷰어는 반려를 모른다. 그 리뷰어의 waive는 파일에 남고 다시
+      waive하는 것도 막히지 않지만, 0.12.468의 통계는 세지 않는다.
+  - **하지 않는 것**: 반려된 에러를 리뷰어가 사유를 고쳐 다시 올리는 길(재상신)은 없다: 확인자가
+    반려를 풀어야 한다. 메인 목록과 캔버스의 waive 표시는 전처럼 내 것이고, 팀의 waive와 confirm·
+    반려 여부는 이 창과 에러 상세에서 본다. `.floereview`·`save waives as…`·
+    `review from previous run…`은 confirm과 반려를 싣지 않는다. 에러가 달라진 재실행 뒤에는
+    confirm 파일과 반려 기록도 `.stale-<시각>`으로 치워진다(잠금과 반려도 함께 없어진다).
+  - 게이트 `drc_team` R15·R16·R17·R7, 단위 테스트 app-core `drc::confirm`, `drc::team::live`
     (`the_teams_waives_are_listed_and_confirmed_by_the_confirmer`), `drc::tests`
-    (`a_confirmed_waive_is_locked_and_only_a_confirmer_turns_it_back`).
+    (`a_confirmed_waive_is_locked_and_only_a_confirmer_turns_it_back`,
+    `a_rejected_waive_is_turned_back_and_not_waived_until_the_rejection_is_taken_back`).
 - **방문·검토 대상 통계**(2026-10-09 feature/jobdeck-drc; 2026-10-11 Rust 이식 —
   app-core `drc::team::flags`, floe2 gtk-service `rust/floe2/src/drc_team.rs`):
   `visited`는 개별 에러를 열어 그 도형이 실제로 화면에 그려졌다는 기록이다

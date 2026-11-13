@@ -310,6 +310,9 @@ DRC.ko.md §2) 다른 호스트에서 읽어도 방금 한 것까지 들어 있�
 | `unconfirmed` | `team`과 `team.rules[]`: 누군가 waive했고 아직 confirm되지 않은 에러 수. conflict인 waive도 센다(`waived`는 conflict를 뺀 수다) |
 | `waived_confirmed` | 리뷰어 줄(waive 파일이 있을 때): 그 리뷰어의 waive 중 확인자가 confirm한 수 |
 | `confirm_file`, `confirm_location`, `confirm_modified` | confirm 파일(`.<db>.confirm.<리뷰어>`), 그 자리(`results`·`temp`), 마지막 수정 시각 |
+| `rejected` | `team`과 `team.rules[]`: 확인자가 waive를 반려한 에러 수(0.12.468). 이 에러들의 waive는 `waived`·`confirmed`·`unconfirmed`·`conflicts` 어디에도 세지 않는다. 리뷰어 줄(반려 기록이 있을 때): 그 확인자가 반려한 에러 수 |
+| `waived_rejected` | 리뷰어 줄(waive 파일이 있을 때): 그 리뷰어의 파일에 아직 남아 있는 반려된 waive 수. 그 리뷰어의 뷰어가 되돌리면 0이 된다. 리뷰어 줄의 `waived`는 파일의 수라서 이만큼을 포함한다 |
+| `rejects_file`, `rejects_location`, `rejects_modified` | 반려 기록(`.<db>.rejects.<리뷰어>`), 그 자리(`results`·`temp`), 마지막 수정 시각 |
 | `team.rules` | 모든 룰. `team.reviewers`는 센 리뷰어 수 |
 
 키는 사전순으로 나온다. ProperTee처럼 캡처 상한이 있는 호출자는 파일로 받아 `json_parse`한다(§2).
@@ -364,6 +367,12 @@ floe2 drc results.db --review-counts --floe-reviewer kim    # 이 리뷰어만
   conflict인 waive도 여기에 든다(`waived`는 conflict를 뺀 수라서 둘의 합이 `waived`보다 클 수
   있다). confirm은 뷰어의 DRC 메뉴 `team waives…`에서 확인자(`floe2 view --confirmer`)가 하고
   (DRC.ko.md §2), confirm 하나는 구간 하나만 다시 세게 한다.
+- **반려**(0.12.468): `rejected`는 확인자가 waive를 반려한 에러 수다. 반려된 에러의 waive는
+  리뷰어의 파일에 아직 남아 있어도 팀 수치에 들지 않는다: 확인자가 반려하는 순간 `waived`·
+  `confirmed`·`unconfirmed`가 줄고 `rejected`가 는다. 리뷰어 줄의 `waived`는 그 리뷰어 파일의
+  카운터라서 그 리뷰어의 뷰어가 되돌릴 때까지는 반려된 waive를 포함한다(`--review-stats`의
+  `waived_rejected`가 그 수다). 확인자 줄의 `rejected`는 반려 기록을 읽어서 낸다(작업 한 번에 한 줄인
+  작은 파일이다).
 - **누구의 합계인가**: 언제나 리뷰어 전원이다. `--floe-reviewer`는 `reviewers[]`의 줄만 줄인다(§2b는
   지정한 리뷰어들만의 합계를 낸다. 일부의 합집합이 필요하면 §2b를 쓴다).
 - **바로 답하는 방법**: 합집합은 에러 단위로 봐야 해서 카운터를 더해서는 나오지 않는다. 그래서 만들어

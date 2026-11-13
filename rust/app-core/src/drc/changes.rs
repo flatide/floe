@@ -30,7 +30,8 @@
 //!            time (0 = no file). Said after a STAMP, and only when the time
 //!            is another than the one said last - a reviewer who confirms
 //!            nothing never says it (0.12.466; a reader of 0.12.465 passes
-//!            it over)
+//!            it over). b = the time of the reviewer's rejects log likewise
+//!            (0.12.468; 0 until then, and to a reader of before)
 //! ```
 //!
 //! The records of a change are appended when the change is settled - the end
@@ -92,17 +93,17 @@ pub fn stamp_at(path: &Path) -> u64 {
 }
 
 /// A reviewer's files' times as the log says them: the waive sidecar's,
-/// the flags file's, the confirm file's (0: no file).
-pub type Stamps = [u64; 3];
+/// the flags file's, the confirm file's, the rejects log's (0: no file).
+pub type Stamps = [u64; 4];
 
 /// The times the log has said once `records` follow a log that had said
-/// `base`: the last STAMP's two and the last CSTAMP's.
+/// `base`: the last STAMP's two and the last CSTAMP's two.
 pub fn stamps_after(base: Stamps, records: &[Record]) -> Stamps {
     let mut said = base;
     for record in records {
         match record.kind {
             STAMP => (said[0], said[1]) = (record.a, record.b),
-            CSTAMP => said[2] = record.a,
+            CSTAMP => (said[2], said[3]) = (record.a, record.b),
             _ => (),
         }
     }
@@ -220,6 +221,8 @@ pub struct ChangeLog {
     waive: PathBuf,
     flags: Option<PathBuf>,
     confirm: PathBuf,
+    /// the reviewer's rejects log (drc::reasons, a confirmer's)
+    rejects: PathBuf,
     file: Option<File>,
     /// statuses written and not said yet - they are said once flushed, by
     /// `settle`: rule -> inclusive chunk ranges
@@ -249,6 +252,7 @@ impl ChangeLog {
             waive: waive.to_owned(),
             flags: None,
             confirm: super::confirm::path_beside(waive),
+            rejects: super::confirm::rejects_beside(waive),
             file: None,
             written: BTreeMap::new(),
             committed: BTreeMap::new(),
@@ -268,7 +272,7 @@ impl ChangeLog {
                         }
                     }
                     if tail.records.iter().any(|r| r.kind == STAMP) {
-                        me.last = Some(stamps_after([0; 3], &tail.records));
+                        me.last = Some(stamps_after([0; 4], &tail.records));
                     }
                 }
                 None => {
@@ -308,6 +312,7 @@ impl ChangeLog {
             waive: PathBuf::new(),
             flags: None,
             confirm: PathBuf::new(),
+            rejects: PathBuf::new(),
             file: None,
             written: BTreeMap::new(),
             committed: BTreeMap::new(),
@@ -316,6 +321,15 @@ impl ChangeLog {
             sync: false,
             off: true,
             notices: Vec::new(),
+        }
+    }
+
+    /// The reviewer's rejects log is at `rejects` (it goes to the temp
+    /// folder when the results folder refuses it): where the next stamp
+    /// looks.
+    pub fn rejects_at(&mut self, rejects: &Path) {
+        if !self.off && self.rejects != rejects {
+            self.rejects = rejects.to_owned();
         }
     }
 
@@ -329,6 +343,7 @@ impl ChangeLog {
             stamp_at(&self.waive),
             self.flags.as_deref().map_or(0, stamp_at),
             stamp_at(&self.confirm),
+            stamp_at(&self.rejects),
         ]
     }
 
@@ -454,8 +469,8 @@ impl ChangeLog {
             }
         }
         bytes.extend(Record { kind: STAMP, rule: 0, a: stamps[0], b: stamps[1] }.bytes());
-        if stamps[2] != self.last.map_or(0, |last| last[2]) {
-            bytes.extend(Record { kind: CSTAMP, rule: 0, a: stamps[2], b: 0 }.bytes());
+        if stamps[2..] != self.last.map_or([0; 4], |last| last)[2..] {
+            bytes.extend(Record { kind: CSTAMP, rule: 0, a: stamps[2], b: stamps[3] }.bytes());
         }
         match self.append(&bytes) {
             Ok(()) => self.last = Some(stamps),
@@ -666,9 +681,9 @@ mod tests {
         log.settle();
         assert_eq!(f.records()[5..], [(TOUCH, 0, 2, 2), (STAMP, 0, waive, 0)]);
         let all = read(&f.log(), &ID, None).unwrap().records;
-        assert_eq!(stamps_after([0; 3], &all), [waive, 0, said]);
-        assert_eq!(stamps_after([7, 8, 9], &all[..1]), [7, 8, 9]);
-        assert_eq!(stamps_after([7, 8, 9], &all[..2]), [waive, 0, 9]);
+        assert_eq!(stamps_after([0; 4], &all), [waive, 0, said, 0]);
+        assert_eq!(stamps_after([7, 8, 9, 6], &all[..1]), [7, 8, 9, 6]);
+        assert_eq!(stamps_after([7, 8, 9, 6], &all[..2]), [waive, 0, 9, 6]);
         drop(log);
         // the next session finds the three as they were said: no word
         let flags = f.0.join(".x.db.review.kim.sqlite3");
@@ -690,6 +705,42 @@ mod tests {
         let mut log = f.open();
         log.attach_flags(&flags);
         assert_eq!(f.records()[10..], [(RESET, 0, 0, 0), (STAMP, 0, waive, 0), (CSTAMP, 0, 0, 0)]);
+        // the rejects log is the fourth file (0.12.468): its time is the
+        // same record's second number, said when either of the two is
+        // another - beside the confirm file's, and alone
+        let rejects = f.0.join(".x.db.rejects.kim");
+        assert_eq!(crate::drc::confirm::rejects_beside(&f.waive()), rejects);
+        fs::write(&rejects, b"# rejections\n").unwrap();
+        log.touched(0, 3, 3);
+        log.settle();
+        let said = stamp_at(&rejects);
+        assert_eq!(f.records()[13..], [(TOUCH, 0, 3, 3), (STAMP, 0, waive, 0), (CSTAMP, 0, 0, said)]);
+        log.touched(0, 3, 3);
+        log.settle();
+        assert_eq!(f.records()[16..], [(TOUCH, 0, 3, 3), (STAMP, 0, waive, 0)], "no word of what stands");
+        fs::write(&confirm, b"confirm").unwrap();
+        log.touched(0, 4, 4);
+        log.settle();
+        assert_eq!(f.records()[20], (CSTAMP, 0, stamp_at(&confirm), said));
+        let all = read(&f.log(), &ID, None).unwrap().records;
+        assert_eq!(stamps_after([0; 4], &all), [waive, 0, stamp_at(&confirm), said]);
+        drop(log);
+        // changed without a word (a session that ended before it could
+        // say): the next one's RESET, with its time
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(9);
+        File::options().write(true).open(&rejects).unwrap().set_modified(later).unwrap();
+        let mut log = f.open();
+        log.attach_flags(&flags);
+        let now = f.records();
+        assert_eq!((now.len(), now[21], now[23]), (24, (RESET, 0, 0, 0), (CSTAMP, 0, stamp_at(&confirm), stamp_at(&rejects))));
+        // moved to the temp folder (the results folder refused a line):
+        // the stamp looks where it is
+        let other = f.0.join(".x.db.rejects.kim-0123456789ab");
+        fs::write(&other, b"# rejections, elsewhere\n").unwrap();
+        log.rejects_at(&other);
+        log.touched(0, 5, 5);
+        log.settle();
+        assert_eq!(f.records()[26], (CSTAMP, 0, stamp_at(&confirm), stamp_at(&other)));
     }
 
     #[test]

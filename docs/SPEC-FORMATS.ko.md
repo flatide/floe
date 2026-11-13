@@ -540,6 +540,33 @@ n_checks x u32   : 룰별 confirm된 에러 수
 - 누가 confirm할 수 있는지는 파일에 없다: 세션을 연 쪽이 정한다(`floe2 view --confirmer`,
   서비스의 `drc_open {confirmer: true}`).
 
+## `.<db>.rejects.<리뷰어>` — DRC waive의 반려
+
+0.12.468(사용자 2026-11-14: "confirmer가 다른 리뷰어의 waive를 반려할 수 있게 해줘"; app-core
+`drc::reasons`의 `Kind::Reject`, `drc::confirm`의 `Locks`). 확인자가 **어느 에러의 waive를 반려했는지**를
+적는다. 확인자 자신의 파일이고 그 세션만 쓴다. waive 사이드카와 같은 자리에(임시 폴더로 간 리뷰면
+`.<db>.rejects.<리뷰어>-<경로 해시 12자>`) 처음 반려할 때 만든다. 사유 파일(`.reasons`)과 같은 모양의
+텍스트 기록이고, 작업 한 번이 한 줄이다.
+
+```text
+# floe drc waive rejections
+floe_reasons=1
+floe_pack=<내용 ID 앞 32 hex>,<에러 수>
+r <룰> <시각> <구간> [<사유>]     이 에러들의 waive를 반려한다(사유는 없어도 된다)
+R <룰> <시각> <구간>              이 에러들의 반려를 푼다
+```
+
+- `<룰>`·`<시각>`·`<구간>`·`<사유>`의 표기는 사유 파일과 같다(구간은 `간격,길이` 쌍, 뒤 줄이 이긴다).
+- **이 파일이 반려 여부다.** confirm과 달리 에러당 바이트는 없다: 에러는 이 기록이 그 에러를 쥐고
+  있는 동안 반려된 것이고, 사유가 비어 있어도 반려다(사유 파일은 "왜"만 말하지만 이 파일은 "무엇을"도
+  말한다).
+- 읽는 쪽: 통계와 팀 합계(반려된 에러의 waive를 세지 않고 `rejected`로 센다), `team waives…` 창의
+  `Rejected` 목록과 에러 상세, 그리고 모든 리뷰어의 세션(자기 waive 중 반려된 것을 되돌리고, 반려된
+  에러를 waive하지 않는다: `desktop::Review::take_rejected`, 상태 쓰기 함수들).
+- 찢긴 마지막 줄은 건너뛰고 다음 쓰기 전에 자른다. 반려가 하나도 남지 않으면 다음에 열 때 지운다.
+  다른 결과의 파일은 세션이 열 때 `.stale-<시각>`으로 치우고, 통계는 `skipped`에 적는다.
+- 0.12.467 이하는 이 파일을 모른다.
+
 ## `.<db>.changes.<리뷰어>` — DRC 리뷰의 변경 기록
 
 0.12.465(사용자 2026-11-13: ".db를 여러 사람이 검토하고 그 합집합을 실시간으로 받아야 해"; app-core
@@ -558,7 +585,8 @@ waive했는지)은 여기 없다. waive 사이드카와 같은 자리에 있고(
   3 RESET  기록 없이 파일이 바뀌었다: 읽는 쪽은 이 리뷰어의 룰을 통째로 다시 센다
   4 CSTAMP 이 변경들을 쓴 뒤 confirm 파일의 시각: a (epoch ns, 파일이 없으면 0). STAMP 뒤에,
            마지막으로 말한 값과 다를 때만 적는다(0.12.466). confirm하지 않는 리뷰어의 기록에는
-           없고, 0.12.465의 읽는 쪽은 건너뛴다
+           없고, 0.12.465의 읽는 쪽은 건너뛴다. b = 반려 기록(.rejects)의 시각(0.12.468;
+           그 전에는 0이고, 그 전의 읽는 쪽은 보지 않는다). 둘 중 하나라도 달라지면 적는다
 ```
 
 - 헤더의 12~39바이트는 waive 사이드카 헤더의 같은 자리와 같다(결과의 식별). 기록 ID는 파일을 새로
@@ -581,27 +609,30 @@ waive했는지)은 여기 없다. waive 사이드카와 같은 자리에 있고(
 
 0.12.465(app-core `drc::team::live`). `floe2 drc --review-counts`의 `team`이 읽고 고치는 파일이다.
 pack 옆에 하나 있다(리뷰어별이 아니다). 리뷰어 전원의 리뷰를 합친 수치(방문, waive, 검토 제외, conflict,
-done, 그리고 0.12.466부터 누군가 waive한 수와 그중 confirm된 수)를 룰별·구간별로 갖고, 리뷰어마다 변경
-기록을 어디까지 읽었는지와 그때의 파일 시각을 갖는다. 지워도 된다: 다음 조회가 처음부터 센다. 바이너리,
-little-endian. 버전 2(0.12.466)다: 버전 1 파일은 캐시가 아닌 것으로 보고 다시 센다.
+done, 0.12.466부터 누군가 waive한 수와 그중 confirm된 수, 0.12.468부터 반려된 수)를 룰별·구간별로 갖고,
+리뷰어마다 변경 기록을 어디까지 읽었는지와 그때의 파일 시각을 갖는다. 지워도 된다: 다음 조회가 처음부터
+센다. 바이너리, little-endian. 버전 3(0.12.468)이다: 다른 버전의 파일은 캐시가 아닌 것으로 보고 다시
+센다(0.12.467 이하의 명령과 번갈아 물으면 서로 다시 세어 고쳐 쓴다. 수치는 각자 옳다).
 
 ```text
-머리 : "FLOETEAM" | u32 2 | u32 n_checks | u32 길이 + 결과 fingerprint(hex) | u32 리뷰어 수
-       | n_checks x (u64 visited, waived, not_required, conflicts, done, waived_any, confirmed)
-       | 리뷰어마다: u16 길이 + ID | u64 기록 ID | u64 읽은 오프셋 | u64 x3 기록이 말한 시각
-                     | u64 x3 센 파일의 시각(waive, 방문 기록, confirm)
+머리 : "FLOETEAM" | u32 3 | u32 n_checks | u32 길이 + 결과 fingerprint(hex) | u32 리뷰어 수
+       | n_checks x (u64 visited, waived, not_required, conflicts, done, waived_any, confirmed, rejected)
+       | 리뷰어마다: u16 길이 + ID | u64 기록 ID | u64 읽은 오프셋 | u64 x4 기록이 말한 시각
+                     | u64 x4 센 파일의 시각(waive, 방문 기록, confirm, 반려 기록)
                      | u64 어긋남을 처음 본 시각(초, 0 = 없음)
-                     | u8 읽히는 파일(bit0 waive, bit1 방문 기록, bit2 confirm) | u32 n + n x u32 손댄 룰
+                     | u8 읽히는 파일(bit0 waive, bit1 방문 기록, bit2 confirm, bit3 반려 기록)
+                     | u32 n + n x u32 손댄 룰
        | u64 구간 수 | u32 CRC-32(머리)
 구간 : 구간 수 x (u32 룰 | u32 구간 | u16 visited, waived, not_required, conflicts, done,
-                 waived_any, confirmed) | u32 CRC-32(구간)
+                 waived_any, confirmed, rejected) | u32 CRC-32(구간)
 ```
 
 - 구간은 수치가 하나라도 있는 것만 있다(룰, 구간 순). 룰의 합은 그 룰 구간들의 합이다. 두 CRC, 결과의
   fingerprint, 룰 수, 이 합이 하나라도 맞지 않으면 캐시가 아닌 것으로 보고 처음부터 센다.
 - `done`은 방문했거나 검토 제외인 에러 수다. `pending` = 룰의 에러 수 − `done`. `waived_any`는
   누군가 waive한 에러 수(conflict 포함), `confirmed`는 그중 확인자가 confirm한 수다.
-  `unconfirmed` = `waived_any` − `confirmed`.
+  `unconfirmed` = `waived_any` − `confirmed`. `rejected`는 확인자가 waive를 반려한 에러 수이고,
+  그 에러들의 waive는 앞의 어느 수에도 들지 않는다(리뷰어의 파일에 남아 있어도).
 - **고치기**(`live::merge`): 리뷰어마다 변경 기록을 먼저 읽고 그 뒤에 파일을 연다(연 파일은 서버에
   물은 것이라 기록이 말한 비트가 읽는 내용에 들어 있다). 파일 시각은 바이트보다 먼저 묻는다. 그러고
   리뷰어를 넷 중 하나로 판정한다(`judge`).

@@ -48,6 +48,21 @@
 //! torn last line (no line break) is passed over and cut before the next
 //! one; a file much larger than what it still says is written again at the
 //! open.
+//!
+//! A confirmer's rejections are a log of the same shape in a file of its
+//! own, `.<db>.rejects.<reviewer>` (0.12.468; user 2026-11-14: "confirmer가
+//! 다른 리뷰어의 waive를 반려할 수 있게 해줘"):
+//!
+//! ```text
+//! # floe drc waive rejections
+//! r <rule> <time> <runs> [<text>]   these errors' waive is rejected, why
+//! R <rule> <time> <runs>            their rejection is taken back
+//! ```
+//!
+//! There the log says whether, not only why: an error is rejected while its
+//! confirmer's log holds it, with or without a reason (`Kind::Reject`, the
+//! one kind whose text may be empty). Who reads it and what follows is
+//! `confirm::Locks` and `desktop::Review`'s.
 use super::analysis::scope::Membership;
 use super::local::aside_path;
 use crate::{annotations, Error, ErrorKind, Result};
@@ -71,15 +86,18 @@ pub type Run = (u64, u64);
 pub enum Kind {
     Waive,
     NotRequired,
+    /// a confirmer's rejection of the errors' waive (the rejects log)
+    Reject,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 2] = [Kind::Waive, Kind::NotRequired];
+    pub const ALL: [Kind; 3] = [Kind::Waive, Kind::NotRequired, Kind::Reject];
 
     fn slot(self) -> usize {
         match self {
             Kind::Waive => 0,
             Kind::NotRequired => 1,
+            Kind::Reject => 2,
         }
     }
     /// A line's first word: with a reason, and the reason gone.
@@ -87,13 +105,20 @@ impl Kind {
         match self {
             Kind::Waive => ("w", "W"),
             Kind::NotRequired => ("n", "N"),
+            Kind::Reject => ("r", "R"),
         }
+    }
+    /// A line of this kind is an action even without a text: a rejection
+    /// stands whether its confirmer said why or not.
+    fn bare(self) -> bool {
+        self == Kind::Reject
     }
     /// As the statistics name it.
     pub fn name(self) -> &'static str {
         match self {
             Kind::Waive => "waive",
             Kind::NotRequired => "not_required",
+            Kind::Reject => "reject",
         }
     }
     /// From a request's word (the review job's actions, the statistics').
@@ -101,6 +126,7 @@ impl Kind {
         match name {
             "waive" => Some(Kind::Waive),
             "not-required" | "not_required" => Some(Kind::NotRequired),
+            "reject" => Some(Kind::Reject),
             _ => None,
         }
     }
@@ -354,7 +380,9 @@ pub struct Reasons {
     /// the actions read and made, in their order (some hold no error now)
     entries: Vec<Entry>,
     /// per kind and rule: sorted runs naming their action
-    segs: [BTreeMap<usize, Vec<Seg>>; 2],
+    segs: [BTreeMap<usize, Vec<Seg>>; 3],
+    /// the file's first line (a comment: what the log is of)
+    title: &'static str,
     /// what `clear` dropped and the file does not say yet, per kind and rule
     cleared: BTreeMap<(Kind, usize), Vec<Run>>,
     /// the file as read says more than what is held: a line took errors
@@ -383,7 +411,8 @@ impl Reasons {
             tag,
             sizes,
             entries: Vec::new(),
-            segs: [BTreeMap::new(), BTreeMap::new()],
+            segs: [BTreeMap::new(), BTreeMap::new(), BTreeMap::new()],
+            title: "# floe drc review reasons",
             cleared: BTreeMap::new(),
             superseded: false,
             written: 0,
@@ -395,9 +424,15 @@ impl Reasons {
         }
     }
 
+    /// The same store under another first line (the rejects log's).
+    pub fn titled(mut self, title: &'static str) -> Self {
+        self.title = title;
+        self
+    }
+
     fn reset(&mut self) {
         self.entries.clear();
-        self.segs = [BTreeMap::new(), BTreeMap::new()];
+        self.segs = [BTreeMap::new(), BTreeMap::new(), BTreeMap::new()];
         self.cleared.clear();
         self.superseded = false;
         self.written = 0;
@@ -409,8 +444,13 @@ impl Reasons {
     /// file of another result is moved aside as the reviewer's other files
     /// are; one that cannot be read is said and left.
     pub fn open(paths: [PathBuf; 2], tag: String, sizes: Vec<u64>, sync: bool) -> Self {
+        Self::open_as("# floe drc review reasons", paths, tag, sizes, sync)
+    }
+
+    /// `open`, of a log whose first line is `title` (the rejects log).
+    pub fn open_as(title: &'static str, paths: [PathBuf; 2], tag: String, sizes: Vec<u64>, sync: bool) -> Self {
         let [beside, temp] = paths;
-        let mut me = Self::empty(beside.clone(), Some(temp.clone()), tag, sizes, sync);
+        let mut me = Self::empty(beside.clone(), Some(temp.clone()), tag, sizes, sync).titled(title);
         for (i, path) in [beside, temp].into_iter().enumerate() {
             let bytes = match fs::read(&path) {
                 Ok(bytes) => bytes,
@@ -527,8 +567,12 @@ impl Reasons {
         })?;
         let runs = decode(runs, *self.sizes.get(check)?)?;
         let entry = if set {
-            let text = annotations::unescape(text?).trim().to_owned();
-            if text.is_empty() {
+            let text = match text {
+                Some(text) => annotations::unescape(text).trim().to_owned(),
+                None if kind.bare() => String::new(),
+                None => return None,
+            };
+            if text.is_empty() && !kind.bare() {
                 return None;
             }
             self.entries.push(Entry { kind, check, time, text });
@@ -546,10 +590,7 @@ impl Reasons {
     }
 
     fn header(&self) -> String {
-        format!(
-            "# floe drc review reasons\nfloe_reasons={VERSION}\nfloe_pack={}\n",
-            self.tag
-        )
+        format!("{}\nfloe_reasons={VERSION}\nfloe_pack={}\n", self.title, self.tag)
     }
 
     /// The actions that still hold errors with those errors, in their order.
@@ -571,14 +612,7 @@ impl Reasons {
     fn serialize(&self) -> String {
         let mut out = self.header();
         for (entry, runs) in self.live() {
-            out.push_str(&format!(
-                "{} {} {} {} {}\n",
-                entry.kind.tags().0,
-                entry.check,
-                entry.time,
-                encode(&runs),
-                annotations::escape(&entry.text)
-            ));
+            out.push_str(&line_of(entry.kind, entry.check, entry.time, &runs, &entry.text));
         }
         out
     }
@@ -739,22 +773,18 @@ impl Reasons {
     }
 
     /// One action's reason on rule `check`'s `runs` (sorted, disjoint, not
-    /// touching): written, then held. An empty reason or no run is nothing.
+    /// touching): written, then held. An empty reason or no run is nothing -
+    /// but a rejection, which is an action without a reason too.
     pub fn set(&mut self, kind: Kind, check: usize, runs: &[Run], text: &str, time: u64) -> Result<()> {
         let text = clean(text)?;
         self.inside(check, runs)?;
-        if text.is_empty() || runs.is_empty() {
+        if (text.is_empty() && !kind.bare()) || runs.is_empty() {
             return Ok(());
         }
         // (what was taken back before this is said before it: a later line
         // wins, and this reason must not be taken back by an earlier drop)
         self.say_cleared(time)?;
-        let line = format!(
-            "{} {check} {time} {} {}\n",
-            kind.tags().0,
-            encode(runs),
-            annotations::escape(&text)
-        );
+        let line = line_of(kind, check, time, runs, &text);
         self.append(&line)?;
         self.entries.push(Entry { kind, check, time, text });
         let entry = self.entries.len() as u32 - 1;
@@ -842,7 +872,7 @@ impl Reasons {
         self.entries
             .iter()
             .rev()
-            .filter(|e| e.kind == kind)
+            .filter(|e| e.kind == kind && !e.text.is_empty())
             .map(|e| e.text.as_str())
             .filter(|text| seen.insert(*text))
             .take(limit)
@@ -861,6 +891,18 @@ impl Reasons {
             segs.iter().map(|s| (s.start, s.stop, s.entry as usize)).collect()
         })
     }
+}
+
+/// An action's line: `<tag> <rule> <time> <runs> <text>`, the text left out
+/// when there is none (a rejection without a reason).
+fn line_of(kind: Kind, check: usize, time: u64, runs: &[Run], text: &str) -> String {
+    let mut line = format!("{} {check} {time} {}", kind.tags().0, encode(runs));
+    if !text.is_empty() {
+        line.push(' ');
+        line.push_str(&annotations::escape(text));
+    }
+    line.push('\n');
+    line
 }
 
 /// Write a whole file through a temporary beside it: flushed, then renamed.

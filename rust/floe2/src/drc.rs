@@ -55,7 +55,7 @@ use floe_app_core::{
         source::{worker_count, AsciiSource, PackSource, Source, Statuses},
         ticks,
     },
-    drc::desktop::{query_rows, ErrorRow, Opened, Review},
+    drc::desktop::{query_rows, ErrorRow, Left, Opened, Review},
     drc::reasons::{self, Kind},
     Error, ErrorKind, Result,
 };
@@ -171,7 +171,8 @@ fn reason_read(
             "an ASCII results file has no review state",
         ));
     };
-    let held = &r.reasons;
+    // (why a confirmer rejected is in the rejects log, not the reasons)
+    let held = if kind == Kind::Reject { &r.rejects } else { &r.reasons };
     let prefill = if on && held.any(kind, check) {
         held.common(kind, check, &reasons::member_runs(targets, n)).unwrap_or("")
     } else {
@@ -467,7 +468,7 @@ impl Session {
     fn close(mut self) {
         // a review edit in progress finishes; the rest stop
         for (kind, job) in self.jobs.drain() {
-            if !matches!(kind, "review" | "team-write" | "migrate-write" | "confirm") {
+            if !matches!(kind, "review" | "team-write" | "migrate-write" | "confirm" | "returned") {
                 job.cancel();
             }
             if let Some(t) = job.thread {
@@ -772,18 +773,19 @@ impl Session {
                     .map_err(|_| Error::input("status is a byte"))?;
                 let errors = numbers(request, "errors")?;
                 let reason = reason_of(request)?;
-                let (w, t, unkept, free, locked, by) = {
+                let (w, t, unkept, free, locked, by, rejected, rejected_by) = {
                     let mut o = shared.opened.lock().unwrap();
                     let r = review(&mut o)?;
                     // a waive a confirmer has confirmed is not this
                     // session's to turn back, nor to give another reason
-                    // (unless it is a confirmer's): those errors are left
-                    // and said
-                    let locked = r.set_status(check, &errors, status)?;
+                    // (unless it is a confirmer's), and an error whose
+                    // waive a confirmer has rejected is nobody's to waive:
+                    // those errors are left and said
+                    let Left { locked, rejected } = r.set_status(check, &errors, status)?;
                     let free: Vec<u64> = errors
                         .iter()
                         .copied()
-                        .filter(|e| locked.binary_search(e).is_err())
+                        .filter(|e| locked.binary_search(e).is_err() && rejected.binary_search(e).is_err())
                         .collect();
                     // why: one line for the action, every error's of it. The
                     // errors are waived whether it can be kept or not - a
@@ -805,11 +807,19 @@ impl Session {
                     } else {
                         r.confirmers_of(check, &reasons::runs_of(&locked))?
                     };
+                    // (who rejected, and why as they said: asked only
+                    // when something was left)
+                    let rejected_by = if rejected.is_empty() {
+                        Vec::new()
+                    } else {
+                        r.rejected_by(check, &reasons::runs_of(&rejected))?
+                    };
                     let (w, t) = r.status_counts(check)?;
-                    (w, t, unkept, free, locked, by)
+                    (w, t, unkept, free, locked, by, rejected, rejected_by)
                 };
                 self.changed(check, &free, status)?;
-                Ok(json!({"counts": [w, t], "reason_error": unkept, "locked": locked, "locked_by": by}))
+                Ok(json!({"counts": [w, t], "reason_error": unkept, "locked": locked, "locked_by": by,
+                          "rejected": rejected, "rejected_by": rejected_by}))
             }
             "drc_reason_get" => {
                 let (check, error) = (number(request, "check")? as usize, number(request, "error")?);
@@ -913,19 +923,20 @@ impl Session {
             }
             "drc_waive_import" => {
                 let path = PathBuf::from(text(request, "path")?);
-                let (waived, locked, all) = {
+                let (waived, kept, all) = {
                     let mut o = shared.opened.lock().unwrap();
                     let r = review(&mut o)?;
-                    let (waived, locked) = r.waive_import(&path)?;
-                    (waived, locked, counts(r)?)
+                    let (waived, kept) = r.waive_import(&path)?;
+                    (waived, kept, counts(r)?)
                 };
                 let checks = shared.source.check_count();
                 shared.dirty.lock().unwrap().extend(0..checks);
                 self.settle(cancelled)?;
                 shared.team_soon();
                 // (`locked`: waives the file would have turned back, kept
-                // because a confirmer has confirmed them)
-                Ok(json!({"waived": waived, "counts": all, "locked": locked}))
+                // because a confirmer has confirmed them; `rejected`: errors
+                // it would have waived, left because their waive is rejected)
+                Ok(json!({"waived": waived, "counts": all, "locked": kept.locked, "rejected": kept.rejected}))
             }
             "drc_counts" => counts(review(&mut shared.opened.lock().unwrap())?),
             "drc_clusters_load" => self.clusters_load(request),
@@ -1536,15 +1547,16 @@ impl Session {
                         let mut a = 0;
                         let mut last = std::time::Instant::now();
                         let mut settled = std::time::Instant::now();
-                        // the targets whose waive a confirmer has confirmed:
-                        // left as they are (app-core desktop::Review locked)
-                        let mut kept: Vec<reasons::Run> = Vec::new();
+                        // the targets whose waive a confirmer has confirmed
+                        // and the ones whose waive a confirmer has rejected:
+                        // left as they are (app-core desktop::Review)
+                        let mut left: Left<reasons::Run> = Left::default();
                         while a < n {
                             let len = (n - a).min(1 << 16);
                             {
                                 let mut o = shared.opened.lock().unwrap();
                                 let r = review(&mut o)?;
-                                changed += r.set_status_range(check, &*targets, value, a, len, &mut kept)?;
+                                changed += r.set_status_range(check, &*targets, value, a, len, &mut left)?;
                                 // (what a long job changed so far is flushed
                                 // and said in the change log about once a
                                 // second, not only at its end)
@@ -1563,7 +1575,8 @@ impl Session {
                             }
                         }
                         let mut unkept = Value::Null;
-                        let mut by = Vec::new();
+                        let (mut by, mut rejected_by) = (Vec::new(), Vec::new());
+                        let Left { locked: mut kept, rejected } = left;
                         {
                             let mut o = shared.opened.lock().unwrap();
                             let r = review(&mut o)?;
@@ -1573,6 +1586,7 @@ impl Session {
                             // the locked ones: they keep the reason they have
                             if on && !reason.is_empty() {
                                 let runs = reasons::minus(&reasons::member_runs(&*targets, a), &kept);
+                                let runs = reasons::minus(&runs, &rejected);
                                 if let Err(e) = r.reason_set(Kind::Waive, check, &runs, &reason) {
                                     unkept = json!(e.message);
                                 }
@@ -1585,12 +1599,16 @@ impl Session {
                             if !kept.is_empty() {
                                 by = r.confirmers_of(check, &kept)?;
                             }
+                            if !rejected.is_empty() {
+                                rejected_by = r.rejected_by(check, &rejected)?;
+                            }
                             // one flush for the job (app-core drc::desktop
                             // sync_waives): the bytes are on the disk when
                             // it says it is done
                             r.sync_waives()?;
                         }
                         let locked: u64 = kept.iter().map(|r| r.1 - r.0).sum();
+                        let rejected: u64 = rejected.iter().map(|r| r.1 - r.0).sum();
                         shared.dirty.lock().unwrap().insert(check);
                         let counts = {
                             let o = shared.opened.lock().unwrap();
@@ -1600,7 +1618,8 @@ impl Session {
                             }
                         };
                         Ok(json!({"on": on, "changed": changed, "counts": counts, "reason_error": unkept,
-                                  "locked": locked, "locked_by": by}))
+                                  "locked": locked, "locked_by": by,
+                                  "rejected": rejected, "rejected_by": rejected_by}))
                     }
                     "not-required" => {
                         let t = shared.team.as_ref().ok_or_else(|| {

@@ -648,7 +648,12 @@ impl Session {
                         let rules: Vec<Value> = view
                             .rules(&stop)?
                             .into_iter()
-                            .map(|(ci, k)| json!({"check": ci, "waived": k.waived, "confirmed": k.confirmed, "unconfirmed": k.unconfirmed}))
+                            .map(|(ci, k)| {
+                                // (`rejected` when there is any, as the counts say it)
+                                let mut row = json!(k);
+                                row["check"] = json!(ci);
+                                row
+                            })
                             .collect();
                         let skipped: Vec<Value> = view
                             .skipped
@@ -688,7 +693,8 @@ impl Session {
                         Ok(json!({
                             "check": check, "error": error,
                             "waived_by": row.waived_by, "confirmed_by": row.confirmed_by,
-                            "reasons": row.reasons, "confirmer": confirmer, "reviewer": c.id.reviewer,
+                            "reasons": row.reasons, "rejected_by": row.rejected_by,
+                            "confirmer": confirmer, "reviewer": c.id.reviewer,
                         }))
                     })();
                     match result {
@@ -770,6 +776,96 @@ impl Session {
                     match result.and(flushed) {
                         Ok(()) => shared.event(id, "confirm", "done", json!({"check": check, "on": on, "changed": changed, "skipped": skipped})),
                         Err(e) => shared.event(id, "confirm", "error", json!({"message": e.message, "changed": changed, "cancelled": e.kind == ErrorKind::Cancelled})),
+                    }
+                })}))
+            }
+            "drc_team_reject" => {
+                // a confirmer rejects the waive of the errors named - or
+                // takes their rejection back (app-core desktop::Review
+                // reject_set / reject_drop): one line of their rejects log
+                let c = ctx(&shared)?;
+                let check = number(request, "check")? as usize;
+                let size = rule_size(c, check)?;
+                let on = request.get("on").and_then(Value::as_bool).unwrap_or(true);
+                let reason = floe_app_core::drc::reasons::clean(
+                    request.get("reason").and_then(Value::as_str).unwrap_or(""),
+                )?;
+                if !super::review(&mut shared.opened.lock().unwrap())?.confirmer() {
+                    return Err(Error::new(
+                        ErrorKind::Unsupported,
+                        "rejecting waives is the confirmer's: start the viewer with --confirmer",
+                    ));
+                }
+                if self.running("confirm") {
+                    return Err(Error::new(ErrorKind::Busy, "a confirmation is still running"));
+                }
+                let errors = errors_of(request)?;
+                if errors.iter().any(|&e| e >= size) {
+                    return Err(Error::input("DRC error index out of range"));
+                }
+                Ok(json!({"job": self.start("confirm", move |shared, id, _stop| {
+                    let c = shared.team.as_ref().unwrap();
+                    let mut changed = 0u64;
+                    let result = (|| -> Result<Value> {
+                        // the team's waives as their files stand now
+                        let view = TeamWaives::open(&c.id.pack, &c.id)?;
+                        let mut o = shared.opened.lock().unwrap();
+                        let r = super::review(&mut o)?;
+                        let (runs, skipped) = waives::reject_runs(r, &view, check, &errors, on)?;
+                        if on {
+                            r.reject_set(check, &runs, &reason)?;
+                        } else {
+                            r.reject_drop(check, &runs)?;
+                        }
+                        changed = runs.iter().map(|run| run.1 - run.0).sum();
+                        // (the confirmer's own waive of a rejected error is
+                        // turned back with it: the rule's counts go along)
+                        let (waived, total) = r.status_counts(check)?;
+                        Ok(json!({"check": check, "on": on, "verdict": "reject", "changed": changed,
+                                  "skipped": skipped, "counts": [waived, total]}))
+                    })();
+                    shared.dirty.lock().unwrap().insert(check);
+                    *shared.waives.lock().unwrap() = None;
+                    if changed >= super::TEAM_SOON {
+                        shared.team_soon();
+                    }
+                    match result {
+                        Ok(v) => shared.event(id, "confirm", "done", v),
+                        Err(e) => shared.event(id, "confirm", "error", json!({"message": e.message, "changed": changed, "cancelled": e.kind == ErrorKind::Cancelled})),
+                    }
+                })}))
+            }
+            "drc_team_returned" => {
+                // this reviewer's waives that a confirmer has rejected are
+                // turned back (app-core desktop::Review take_rejected), and
+                // said: a job, because the look lists the folders the
+                // confirmers' files are in - the viewer asks every couple of
+                // seconds and must not wait for it
+                ctx(&shared)?;
+                Ok(json!({"job": self.start("returned", move |shared, id, _stop| {
+                    let result = (|| -> Result<Value> {
+                        let mut o = shared.opened.lock().unwrap();
+                        let r = super::review(&mut o)?;
+                        let returned = r.take_rejected()?;
+                        let mut rows = Vec::with_capacity(returned.len());
+                        for back in &returned {
+                            let (waived, total) = r.status_counts(back.check)?;
+                            rows.push(json!({"check": back.check, "count": back.count, "by": back.by,
+                                             "counts": [waived, total]}));
+                        }
+                        drop(o);
+                        if !returned.is_empty() {
+                            shared.dirty.lock().unwrap().extend(returned.iter().map(|b| b.check));
+                            *shared.waives.lock().unwrap() = None;
+                            if returned.iter().map(|b| b.count).sum::<u64>() >= super::TEAM_SOON {
+                                shared.team_soon();
+                            }
+                        }
+                        Ok(json!({"returned": rows}))
+                    })();
+                    match result {
+                        Ok(v) => shared.event(id, "returned", "done", v),
+                        Err(e) => job_error(&shared, id, "returned", e),
                     }
                 })}))
             }

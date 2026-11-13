@@ -29,7 +29,14 @@
 //!   0.12.467): the status writers here leave it as it is - waived, with the
 //!   reason it has - unless the session is a confirmer's, and say which
 //!   errors they left. A confirmer who turns a waive back takes their own
-//!   confirmation of it back with it.
+//!   confirmation of it back with it;
+//! - a waive a confirmer has rejected is no waive (the confirmers' rejects
+//!   logs, 0.12.468): the status writers here do not waive a rejected error
+//!   - whoever's the session is - and say which they left; this reviewer's
+//!   waives that are rejected are turned back by `take_rejected`, which a
+//!   host calls as often as it wants the review to follow (the viewer every
+//!   couple of seconds); a confirmer rejects with `reject_set` and takes it
+//!   back with `reject_drop`.
 //!
 //! A sidecar is bound to the result's content (the pack's content id and
 //! error count - what the errors are), not to a file's time or inode: a
@@ -37,7 +44,7 @@
 //! re-run with the same errors keep their review (0.12.441).
 use super::{
     changes::{ChangeLog, CHUNK as CHANGE_CHUNK},
-    confirm::{self, Confirms, Locks},
+    confirm::{self, Confirms, Locks, Rejected},
     local::{aside_path, pack_reader, required_reviewer, waive_paths, ReviewerSource},
     reasons::{self, Kind, Reasons, Run},
     review::Layout,
@@ -60,6 +67,45 @@ const STATUS_CHUNK: u64 = 1 << 22;
 /// The colour of a note's flateyes text annotation.
 const NOTE_COLOR: &str = "#FFD819";
 const HEADER: u64 = 40;
+
+/// What a status write left as it was: the errors whose waive is locked (a
+/// confirmer has confirmed it, and the session is no confirmer's), and the
+/// errors that were not waived because a confirmer has rejected their waive.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Left<T> {
+    pub locked: Vec<T>,
+    pub rejected: Vec<T>,
+}
+
+impl<T> Left<T> {
+    pub fn is_empty(&self) -> bool {
+        self.locked.is_empty() && self.rejected.is_empty()
+    }
+}
+
+/// `Left`, counted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Kept {
+    pub locked: u64,
+    pub rejected: u64,
+}
+
+/// Waives of this reviewer that `take_rejected` turned back: a rule's, with
+/// who rejected them and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Returned {
+    pub check: usize,
+    pub runs: Vec<Run>,
+    pub count: u64,
+    pub by: Vec<Rejected>,
+}
+
+fn push_run(runs: &mut Vec<Run>, error: u64) {
+    match runs.last_mut() {
+        Some(last) if last.1 == error => last.1 = error + 1,
+        _ => runs.push((error, error + 1)),
+    }
+}
 
 /// One note shared by its member errors (global ids).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -99,6 +145,13 @@ pub struct Review {
     /// a waive one of them has confirmed is locked for a session that is
     /// no confirmer's (0.12.467)
     locks: Locks,
+    /// the waives this reviewer has rejected as a confirmer (0.12.468): a
+    /// log of their own, `.<db>.rejects.<reviewer>` - which errors, when,
+    /// why (`reasons`, `Kind::Reject`)
+    pub rejects: Reasons,
+    /// what the confirmers' rejects logs and this review's statuses were
+    /// when `take_rejected` last looked: nothing to do while they are
+    rejections_seen: Option<(Vec<(String, u64, u64)>, u64)>,
     /// which chunks of which rule this review changed, said as each change
     /// is settled (`changes`; 0.12.465): what the team's kept counts are
     /// brought up to date from. Shared with the flags store, whose changes
@@ -186,6 +239,11 @@ fn note_paths(waive: &[PathBuf; 2]) -> [PathBuf; 2] {
         p.with_file_name(if fe { format!("{name}.fe") } else { name })
     };
     [rename(&waive[0], true), rename(&waive[1], true)]
+}
+
+/// The rejects log's names, from the waive names likewise.
+fn reject_paths(waive: &[PathBuf; 2]) -> [PathBuf; 2] {
+    [confirm::rejects_beside(&waive[0]), confirm::rejects_beside(&waive[1])]
 }
 
 /// The reasons file's names, from the waive names likewise.
@@ -357,6 +415,16 @@ impl Review {
             sync,
         );
         notices.append(&mut reasons.notices);
+        // the rejections this reviewer made as a confirmer: a log of the
+        // same shape, in a file of its own
+        let mut rejects = Reasons::open_as(
+            "# floe drc waive rejections",
+            reject_paths(&waive),
+            note_tag.clone(),
+            pack.checks.iter().map(|c| c.count).collect(),
+            sync,
+        );
+        notices.append(&mut rejects.notices);
         // the confirmations: beside the sidecar in use (a file of another
         // result is moved aside, as the sidecar's was); the pack shown
         // read-only has none to write
@@ -382,6 +450,7 @@ impl Review {
                 &tag,
                 confirm::header_of(&header),
                 pack.checks.iter().map(|c| (c.start, c.count)).collect(),
+                note_tag.clone(),
             )
         };
         // the change log: beside the sidecar in use; the pack shown
@@ -415,6 +484,8 @@ impl Review {
             confirms,
             confirmer: false,
             locks,
+            rejects,
+            rejections_seen: None,
             changes: Arc::new(Mutex::new(changes)),
             notices,
             reviewer: tag,
@@ -537,12 +608,22 @@ impl Review {
             ));
         }
         self.notices.append(&mut self.reasons.notices);
+        // (and the rejections taken back: a line a rule of the rejects log)
+        if let Err(e) = self.rejects.flush(now()) {
+            self.notices.push(format!(
+                "[drc] waive rejections: {} ({})",
+                e.message,
+                self.rejects.path.display()
+            ));
+        }
+        self.notices.append(&mut self.rejects.notices);
         let flushed = self.flush_statuses().and(self.confirms.flush());
         // what this review changed - its statuses and, through the flags
         // store that shares the log, its flags - is said now that the bits
         // are on the disk (`changes`): a line of its own file, so the
         // team's counts are brought up to date from what changed
         let mut log = self.changes.lock().unwrap_or_else(|p| p.into_inner());
+        log.rejects_at(&self.rejects.path);
         log.settle();
         self.notices.append(&mut log.notices);
         flushed
@@ -591,6 +672,7 @@ impl Review {
     pub fn set_waive_sync(&mut self, on: bool) {
         self.sync = on;
         self.reasons.set_sync(on);
+        self.rejects.set_sync(on);
         self.confirms.set_sync(on);
         self.changes.lock().unwrap_or_else(|p| p.into_inner()).set_sync(on);
     }
@@ -619,11 +701,214 @@ impl Review {
     /// confirmer만 되돌릴 수 있게 해줘"). Whether the error is waived here
     /// is the caller's to ask: an error this reviewer has not waived has
     /// nothing to lock.
+    ///
+    /// A waive a confirmer has rejected is never locked, whoever confirmed
+    /// it: it is to be turned back.
     pub fn locked(&mut self, check: usize, start: u64, len: u64) -> Result<Option<Vec<bool>>> {
         if self.confirmer {
             return Ok(None);
         }
-        self.locks.mask(check, start, len)
+        let Some(mut locked) = self.locks.mask(check, start, len)? else {
+            return Ok(None);
+        };
+        if let Some(rejected) = self.rejected_at(check, start, len, false)? {
+            for (l, r) in locked.iter_mut().zip(rejected) {
+                *l &= !r;
+            }
+        }
+        Ok(locked.contains(&true).then_some(locked))
+    }
+
+    // ---- the rejection of a waive (0.12.468) ------------------------------
+
+    /// Rule `check`'s errors `start..start+len` (clamped): true where a
+    /// confirmer has rejected the error's waive - no session waives it
+    /// (user 2026-11-14: "confirmer가 다른 리뷰어의 waive를 반려할 수 있게
+    /// 해줘"). None when none is.
+    pub fn rejected(&mut self, check: usize, start: u64, len: u64) -> Result<Option<Vec<bool>>> {
+        self.rejected_at(check, start, len, true)
+    }
+
+    /// `rejected`: what the confirmers' logs say as the locks read them,
+    /// and what this reviewer's own log holds - which is known here at
+    /// once, where another's first rejection (a new file) is found at the
+    /// next look for files.
+    fn rejected_at(&mut self, check: usize, start: u64, len: u64, waiving: bool) -> Result<Option<Vec<bool>>> {
+        let mut out = self.locks.rejected(check, start, len, waiving)?;
+        let (_, n) = self.check(check)?;
+        let start = start.min(n);
+        let len = len.min(n - start);
+        for (a, b) in self.rejects.held(Kind::Reject, check, &[(start, start + len)]) {
+            let out = out.get_or_insert_with(|| vec![false; len as usize]);
+            out[(a - start) as usize..(b - start) as usize].fill(true);
+        }
+        Ok(out)
+    }
+
+    /// Who has rejected the waive of any of rule `check`'s errors `runs`,
+    /// and why as they said: what the answer of a write that left rejected
+    /// errors says.
+    pub fn rejected_by(&mut self, check: usize, runs: &[Run]) -> Result<Vec<Rejected>> {
+        let mut by = self.locks.rejected_by(check, runs)?;
+        // (this reviewer's own, where the locks have not found its file yet)
+        if !by.iter().any(|r| r.reviewer == self.reviewer) {
+            let held = self.rejects.held(Kind::Reject, check, runs);
+            if let Some(entry) = held.first().and_then(|first| self.rejects.of(Kind::Reject, check, first.0)) {
+                by.push(Rejected { reviewer: self.reviewer.clone(), text: entry.text.clone(), time: entry.time });
+                by.sort_by(|a, b| a.reviewer.cmp(&b.reviewer));
+            }
+        }
+        Ok(by)
+    }
+
+    fn may_reject(&self) -> Result<()> {
+        if !self.confirmer {
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                "rejecting waives is the confirmer's: start the viewer with --confirmer",
+            ));
+        }
+        if self.read_only() {
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                "this review is read-only here: nothing can be rejected",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Reject the waive of rule `check`'s `runs` (sorted, disjoint, not
+    /// touching), `text` saying why (it may be empty): one line of this
+    /// confirmer's rejects log, whatever the number of errors. Their own
+    /// waive of those errors is turned back and their own confirmation of
+    /// them taken back with it; the other reviewers' sessions turn theirs
+    /// back when they look (`take_rejected`). Whose waive the errors are is
+    /// the caller's to ask (drc::team::waives): a rejection is the error's.
+    pub fn reject_set(&mut self, check: usize, runs: &[Run], text: &str) -> Result<()> {
+        self.may_reject()?;
+        let (_, n) = self.check(check)?;
+        if runs.is_empty() {
+            return Ok(());
+        }
+        if runs.last().is_some_and(|r| r.1 > n) {
+            return Err(Error::input("DRC error index out of range"));
+        }
+        let said = self.rejects.set(Kind::Reject, check, runs, text, now());
+        self.notices.append(&mut self.rejects.notices);
+        said.map_err(|e| Error::new(e.kind, format!("{} ({})", e.message, self.rejects.path.display())))?;
+        // (the log's change is a change of every chunk it names: the
+        // team's counts follow)
+        for &(a, b) in runs {
+            self.touched(check, a, b - 1);
+        }
+        self.turn_back(check, runs)?;
+        self.unconfirm_runs(check, runs)?;
+        self.sync_waives()
+    }
+
+    /// This confirmer's own confirmations of rule `check`'s `runs` are
+    /// taken back: a rejection is their other verdict on the same errors.
+    fn unconfirm_runs(&mut self, check: usize, runs: &[Run]) -> Result<()> {
+        const STEP: u64 = 1 << 16;
+        if !self.confirms.present() || self.confirms.counts()[check] == 0 {
+            return Ok(());
+        }
+        for &(a, b) in runs {
+            let mut at = a;
+            while at < b {
+                let len = (b - at).min(STEP);
+                let was = self.confirms.statuses(check, at, len)?;
+                if was.contains(&confirm::CONFIRMED) {
+                    self.confirms.write_span(check, at, &was, &vec![0u8; was.len()])?;
+                }
+                at += len;
+            }
+        }
+        Ok(())
+    }
+
+    /// Take this confirmer's rejection of rule `check`'s `runs` back:
+    /// whether any of them was rejected. The errors are anybody's to waive
+    /// again, and a waive never turned back since stands again.
+    pub fn reject_drop(&mut self, check: usize, runs: &[Run]) -> Result<bool> {
+        self.may_reject()?;
+        self.check(check)?;
+        let held = self.rejects.held(Kind::Reject, check, runs);
+        if held.is_empty() {
+            return Ok(false);
+        }
+        self.rejects.clear(Kind::Reject, check, &held);
+        for &(a, b) in &held {
+            self.touched(check, a, b - 1);
+        }
+        self.sync_waives()?;
+        Ok(true)
+    }
+
+    /// Turn this reviewer's waives among rule `check`'s `runs` back: the
+    /// runs that were waived. (No lock holds a rejected waive.)
+    fn turn_back(&mut self, check: usize, runs: &[Run]) -> Result<Vec<Run>> {
+        const STEP: u64 = 1 << 16;
+        let mut back = Vec::new();
+        if self.wcount[check] == 0 {
+            return Ok(back);
+        }
+        for &(a, b) in runs {
+            let mut at = a;
+            while at < b {
+                let len = (b - at).min(STEP);
+                let before = self.statuses(check, at, len)?;
+                if before.contains(&STATUS_WAIVED) {
+                    let after: Vec<u8> = before
+                        .iter()
+                        .map(|&s| if s == STATUS_WAIVED { STATUS_NONE } else { s })
+                        .collect();
+                    self.write_span(check, at, &before, &after)?;
+                    for (j, &s) in before.iter().enumerate() {
+                        if s == STATUS_WAIVED {
+                            push_run(&mut back, at + j as u64);
+                        }
+                    }
+                }
+                at += len;
+            }
+        }
+        Ok(back)
+    }
+
+    /// This reviewer's waives that a confirmer has rejected are turned
+    /// back - status and reason, as any waive turned back - and said: rule
+    /// by rule what was turned back, who rejected it and why. A host calls
+    /// this when it wants the review to follow the confirmers (at the open,
+    /// and then as often as it likes: the look lists the folders the
+    /// confirmers' files are in and reads the logs that changed, and does
+    /// nothing more while they and this review's statuses are as they were).
+    pub fn take_rejected(&mut self) -> Result<Vec<Returned>> {
+        if self.read_only() {
+            return Ok(Vec::new());
+        }
+        let (rules, seen) = self.locks.rejections();
+        if self.rejections_seen.as_ref().is_some_and(|(logs, generation)| *logs == seen && *generation == self.generation) {
+            return Ok(Vec::new());
+        }
+        let mut returned = Vec::new();
+        for (check, runs) in rules {
+            let back = self.turn_back(check, &runs)?;
+            if !back.is_empty() {
+                let by = self.locks.rejected_by(check, &back)?;
+                returned.push(Returned {
+                    check,
+                    count: back.iter().map(|r| r.1 - r.0).sum(),
+                    runs: back,
+                    by,
+                });
+            }
+        }
+        if !returned.is_empty() {
+            self.sync_waives()?;
+        }
+        self.rejections_seen = Some((seen, self.generation));
+        Ok(returned)
     }
 
     /// Who has rule `check`'s error `error` confirmed.
@@ -754,22 +1039,29 @@ impl Review {
     /// none, and waived here they are waived without one until the caller
     /// gives it (`reason_set`, which is every error's of the action then).
     ///
-    /// The errors of `errors` whose waive is locked (`locked`) are left as
-    /// they are and returned, sorted: not turned back, and - waived again -
-    /// not the caller's to give a reason to.
-    pub fn set_status(&mut self, check: usize, errors: &[u64], value: u8) -> Result<Vec<u64>> {
+    /// The errors of `errors` this write leaves as they are come back,
+    /// each list sorted: the ones whose waive is locked (`locked`) - not
+    /// turned back, and, waived again, not the caller's to give a reason to
+    /// - and the ones a confirmer has rejected the waive of (`rejected`),
+    /// which are not waived here.
+    pub fn set_status(&mut self, check: usize, errors: &[u64], value: u8) -> Result<Left<u64>> {
         let (start, n) = self.check(check)?;
         if errors.iter().any(|&e| e >= n) {
             return Err(Error::input("DRC error index out of range"));
         }
         let mut changed = Vec::new();
-        let (mut kept, mut back) = (Vec::new(), Vec::new());
+        let (mut left, mut back) = (Left::default(), Vec::new());
         for &error in errors {
             let gid = start + error;
             let mut old = [0u8; 1];
             self.reader.read_exact_at(&mut old, self.status_off + gid)?;
-            if old[0] == STATUS_WAIVED && !self.confirmer && self.locks.confirmed(check, error)? {
-                kept.push(error);
+            if value == STATUS_WAIVED && self.rejected_at(check, error, 1, true)?.is_some() {
+                // (waived here or not: a rejected error is not this write's)
+                left.rejected.push(error);
+                continue;
+            }
+            if old[0] == STATUS_WAIVED && self.locked(check, error, 1)?.is_some() {
+                left.locked.push(error);
                 continue;
             }
             if old[0] == value {
@@ -806,15 +1098,18 @@ impl Review {
         }
         self.unconfirm(check, &back)?;
         self.sync_waives()?;
-        kept.sort_unstable();
-        kept.dedup();
-        Ok(kept)
+        for list in [&mut left.locked, &mut left.rejected] {
+            list.sort_unstable();
+            list.dedup();
+        }
+        Ok(left)
     }
 
     /// One chunk of `set_status_members`: errors `a..a+len` of rule `check`;
-    /// the changed count. The members whose waive is locked (`locked`) are
-    /// left as they are and added to `kept` as runs - in order, when the
-    /// chunks are asked in order.
+    /// the changed count. The members this write leaves as they are - the
+    /// ones whose waive is locked (`locked`), the ones not waived because
+    /// their waive is rejected (`rejected`) - are added to `left` as runs,
+    /// in order when the chunks are asked in order.
     pub fn set_status_range(
         &mut self,
         check: usize,
@@ -822,7 +1117,7 @@ impl Review {
         value: u8,
         a: u64,
         len: u64,
-        kept: &mut Vec<Run>,
+        left: &mut Left<Run>,
     ) -> Result<u64> {
         let (start, n) = self.check(check)?;
         let len = len.min(n.saturating_sub(a));
@@ -832,15 +1127,20 @@ impl Review {
             return Ok(0);
         }
         let before = self.statuses(check, a, len)?;
+        if value == STATUS_WAIVED {
+            if let Some(rejected) = self.rejected_at(check, a, len, true)? {
+                for j in (0..len as usize).filter(|&j| rejected[j]) {
+                    if std::mem::take(&mut mask[j]) {
+                        push_run(&mut left.rejected, a + j as u64);
+                    }
+                }
+            }
+        }
         if (0..len as usize).any(|j| mask[j] && before[j] == STATUS_WAIVED) {
             if let Some(locked) = self.locked(check, a, len)? {
                 for j in (0..len as usize).filter(|&j| locked[j] && before[j] == STATUS_WAIVED) {
                     if std::mem::take(&mut mask[j]) {
-                        let error = a + j as u64;
-                        match kept.last_mut() {
-                            Some(last) if last.1 == error => last.1 = error + 1,
-                            _ => kept.push((error, error + 1)),
-                        }
+                        push_run(&mut left.locked, a + j as u64);
                     }
                 }
             }
@@ -900,8 +1200,7 @@ impl Review {
     /// `set_status_members`): each chunk's changed span written in place,
     /// the counter after it; `progress(done, total)` after each chunk;
     /// cancelling leaves the chunks written so far. The changed count; the
-    /// members left as they were because their waive is locked are added
-    /// to `kept`.
+    /// members left as they were - locked, rejected - are added to `left`.
     pub fn set_status_members(
         &mut self,
         check: usize,
@@ -909,7 +1208,7 @@ impl Review {
         value: u8,
         cancelled: &AtomicUsize,
         progress: &mut dyn FnMut(u64, u64),
-        kept: &mut Vec<Run>,
+        left: &mut Left<Run>,
     ) -> Result<u64> {
         const CHUNK: u64 = 1 << 16;
         let (_, n) = self.check(check)?;
@@ -922,7 +1221,7 @@ impl Review {
                 return Err(e);
             }
             let len = (n - a).min(CHUNK);
-            changed += self.set_status_range(check, members, value, a, len, kept)?;
+            changed += self.set_status_range(check, members, value, a, len, left)?;
             a += len;
             progress(a, n);
         }
@@ -933,35 +1232,56 @@ impl Review {
     /// Write rule `check`'s statuses `start..start+after.len()` from
     /// `before` (as read) to `after` in one span, the counters in step
     /// (floe_oracle drc.py `_write_status_span`). A waive `after` would
-    /// turn back stays waived when it is locked (`locked`): how many did.
+    /// turn back stays waived when it is locked (`locked`), and an error
+    /// `after` would waive stays as it is when its waive is rejected
+    /// (`rejected`): how many of each.
     pub fn write_status_span(
         &mut self,
         check: usize,
         start: u64,
         before: &[u8],
         after: &[u8],
-    ) -> Result<u64> {
-        let (first, n) = self.check(check)?;
+    ) -> Result<Kept> {
+        let (_, n) = self.check(check)?;
         if before.len() != after.len() || start + after.len() as u64 > n {
             return Err(Error::input("status span outside its rule"));
         }
         let turned = |b: u8, a: u8| b == STATUS_WAIVED && a != STATUS_WAIVED;
-        let any_back = before.iter().zip(after).any(|(b, a)| turned(*b, *a));
         let mut held: Option<Vec<u8>> = None;
-        let mut kept = 0u64;
-        if any_back {
+        let mut kept = Kept::default();
+        if before.iter().zip(after).any(|(b, a)| turned(*b, *a)) {
             if let Some(locked) = self.locked(check, start, after.len() as u64)? {
-                let mut now = after.to_vec();
+                let now = held.get_or_insert_with(|| after.to_vec());
                 for j in 0..now.len() {
                     if locked[j] && turned(before[j], after[j]) {
                         now[j] = STATUS_WAIVED;
-                        kept += 1;
+                        kept.locked += 1;
                     }
                 }
-                held = Some(now);
             }
         }
-        let after = held.as_deref().unwrap_or(after);
+        if before.iter().zip(after).any(|(b, a)| turned(*a, *b)) {
+            if let Some(rejected) = self.rejected_at(check, start, after.len() as u64, true)? {
+                let now = held.get_or_insert_with(|| after.to_vec());
+                for j in 0..now.len() {
+                    if rejected[j] && turned(after[j], before[j]) {
+                        now[j] = before[j];
+                        kept.rejected += 1;
+                    }
+                }
+            }
+        }
+        self.write_span(check, start, before, held.as_deref().unwrap_or(after))?;
+        Ok(kept)
+    }
+
+    /// `write_status_span`'s write, nothing asked: the bytes, the rule's
+    /// counter, the reasons of what changed, the change log's word - and a
+    /// confirmer's own confirmation of what they turn back.
+    fn write_span(&mut self, check: usize, start: u64, before: &[u8], after: &[u8]) -> Result<()> {
+        let (first, _) = self.check(check)?;
+        let turned = |b: u8, a: u8| b == STATUS_WAIVED && a != STATUS_WAIVED;
+        let any_back = before.iter().zip(after).any(|(b, a)| turned(*b, *a));
         let waived = |s: &[u8]| s.iter().filter(|&&v| v == STATUS_WAIVED).count() as i64;
         let delta = waived(after) - waived(before);
         let (status_off, wcount_off) = (self.status_off, self.wcount_off);
@@ -1003,7 +1323,7 @@ impl Review {
                 }
             }
         }
-        Ok(kept)
+        Ok(())
     }
 
     /// Per-chunk waived counts of one rule: built on the first filtered
@@ -1449,10 +1769,11 @@ impl Review {
     }
 
     /// Replace the review state from a saved file of this pack (header and
-    /// size); the counters recomputed. The waived count, and how many
-    /// waives the file would have turned back stay because they are locked
-    /// (`locked`).
-    pub fn waive_import(&mut self, src: &Path) -> Result<(u64, u64)> {
+    /// size); the counters recomputed. The waived count, and what stays as
+    /// it was: the waives the file would have turned back that are locked
+    /// (`locked`), and the errors it would have waived whose waive is
+    /// rejected (`rejected`).
+    pub fn waive_import(&mut self, src: &Path) -> Result<(u64, Kept)> {
         let data = fs::read(src)?;
         let n = self.pack.total as usize;
         let checks = self.pack.checks.len();
@@ -1474,8 +1795,21 @@ impl Review {
             .iter()
             .map(|c| (c.start as usize, c.count as usize))
             .collect();
-        let mut kept = 0u64;
+        let mut kept = Kept::default();
         for (check, &(first, count)) in rules.iter().enumerate() {
+            // an error the file would waive whose waive is rejected stays
+            // as it is (a rejected waive this review has yet to turn back
+            // is `take_rejected`'s)
+            if (first..first + count).any(|g| status[g] == STATUS_WAIVED) {
+                if let Some(rejected) = self.rejected_at(check, 0, count as u64, true)? {
+                    for j in 0..count {
+                        if rejected[j] && status[first + j] == STATUS_WAIVED && current[first + j] != STATUS_WAIVED {
+                            status[first + j] = current[first + j];
+                            kept.rejected += 1;
+                        }
+                    }
+                }
+            }
             let turned = |g: usize, status: &[u8]| current[g] == STATUS_WAIVED && status[g] != STATUS_WAIVED;
             if !(first..first + count).any(|g| turned(g, &status)) {
                 continue;
@@ -1489,11 +1823,11 @@ impl Review {
                     }
                     self.confirms.write_span(check, 0, &was, &now)?;
                 }
-            } else if let Some(locked) = self.locks.mask(check, 0, count as u64)? {
+            } else if let Some(locked) = self.locked(check, 0, count as u64)? {
                 for j in 0..count {
                     if locked[j] && turned(first + j, &status) {
                         status[first + j] = STATUS_WAIVED;
-                        kept += 1;
+                        kept.locked += 1;
                     }
                 }
             }
