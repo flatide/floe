@@ -26,7 +26,8 @@ floe2 <cmd> ... / floe-index drc|svrf ...    # floe2-portable 번들
 - 리뷰어: waive 상태(`waived`, `status`)는 `--floe-reviewer ID`(또는 `FLOE_REVIEWER`)의 것을
   읽는다. 주지 않으면 DISPLAY 호스트·SSH 접속원·계정명 순으로 얻은 ID인데, 스크립트에서는 대개
   아무의 리뷰도 아니므로 0이 나온다. `FLOE_REVIEWER_REQUIRED=1`인 환경에서는 ID 없이 읽는 명령이
-  1로 끝난다(0.12.440). 리뷰어 전원의 수치는 §2b의 `--review-stats`가 낸다.
+  1로 끝난다(0.12.440). 리뷰어 전원의 수치는 §2b의 `--review-stats`가 내고, 바로 답해야 하는
+  조회에는 §2c의 `--review-counts`를 쓴다(0.12.464).
 - status: `0` = not waived, `1` = waived. waive 변경은 뷰어
   전용(우클릭 메뉴 / `w` 키) — CLI 쓰기 표면은 없고, 재-pack 시
   초기화된다.
@@ -308,6 +309,70 @@ DRC.ko.md §2) 다른 호스트에서 읽어도 방금 한 것까지 들어 있�
 
 키는 사전순으로 나온다. ProperTee처럼 캡처 상한이 있는 호출자는 파일로 받아 `json_parse`한다(§2).
 같은 ID로 두 세션을 열 수 없게 된 것(세션 잠금)과 ID 요구 스위치는 DRC.ko.md §2에 있다.
+
+## 2c. 실시간 수치: `floe2 drc <db> --review-counts` (0.12.464)
+
+리뷰어별 에러 수·waived·방문·검토 제외를 **바로** 답한다(사용자 2026-11-13: "이 통계는 실시간 요청으로
+들어올 거라서 사용자가 waive 할때마다 통계를 만들어두는게 좋을 것 같아"). 만들어 둔 것을 읽는다:
+waive할 때마다 waive 사이드카의 룰별 카운터가, 방문과 검토 제외를 할 때마다 방문 기록(`.sqlite3`)의
+룰별 카운터가 그 작업과 함께 갱신된다(SPEC-FORMATS). 이 명령은 그 카운터만 읽고 에러는 하나도 읽지
+않으므로 걸리는 시간이 에러 수와 무관하다. pack도 룰 목록(이름, 에러 수)과 식별값만 읽는다.
+
+```bash
+floe2 drc results.db --review-counts                        # 전체 룰 합계
+floe2 drc results.db --review-counts --rule M1.S.1          # 그 룰의 수치도
+floe2 drc results.db --review-counts --all-rules            # 모든 룰의 수치도
+floe2 drc results.db --review-counts --floe-reviewer kim    # 이 리뷰어만
+```
+
+- **합계**(옵션 없이): `reviewers[]`의 각 항목이 그 리뷰어의 `errors`(결과의 전체 에러 수), `waived`,
+  `visited`, `not_required`다. `visited_not_required`·`pending`도 §2b와 같은 뜻으로 함께 낸다.
+- **한 룰**(`--rule NAME`): 최상위 `rules[]`에 그 룰의 `index`·`name`·`errors`가, 각 리뷰어의
+  `rules[]`에 그 룰의 `errors`·`waived`·`visited`·`not_required`가 붙는다. 아무도 검토하지 않은
+  결과라도 최상위 `rules[]`는 나오므로 에러 수는 항상 답한다. 같은 이름의 룰이 둘이면 둘 다 나온다
+  (`index`로 구별한다). 결과에 없는 이름은 `no such rule`로 1이다.
+- **모든 룰**(`--all-rules`): 손대지 않은 룰도 한 줄씩 나온다(§2b는 작업이 있는 룰만 낸다).
+- **리뷰어**: §2b처럼 작업 파일로 찾는다. `--floe-reviewer ID[,ID…]`면 그들만이고 파일이 없는 ID는
+  `present: false`다. 아무도 검토하지 않았으면 `reviewers`가 빈 목록이다.
+- **바로 반영**: 뷰어가 그 리뷰를 열고 있는 동안에도 읽는다. waive·방문·검토 제외 하나하나가 그 작업의
+  응답 전에 파일에 있으므로 다음 호출의 답에 들어 있다.
+- **§2b와의 차이**: 세지 않고 저장된 카운터를 읽는다(§2b는 상태 바이트를 다시 세고 `counters_match`로
+  알린다. 0.12.440부터 한 리뷰어의 세션은 하나라서 카운터는 상태와 같다). 에러 단위로 봐야 하는 것은
+  내지 않는다: 팀 합계(여러 리뷰어의 합집합과 conflict)와 사유별 수는 §2b에만 있다. 리뷰어가 여럿이면
+  수치는 리뷰어별이다. 그들을 더한 값은 같은 에러를 두 사람이 waive했을 때 합집합보다 크다.
+- **pack**: §2b와 같은 규칙이다(없거나 `.db`가 바뀌었으면 1, 만드는 중이면 75). 잠금에 리더로
+  등록하지 않고 게시된 pack을 읽으며, 읽는 동안 파일이 바뀌면 1로 끝난다. 룰 수를 넘는 카운터처럼
+  읽을 수 없는 파일은 §2b처럼 `skipped`에 이유와 함께 적는다.
+- **비용**(에러 2,030만·룰 2,000개·리뷰어 3명, 캐시가 데워진 상태에서 호출 한 번): `--review-counts`
+  12 ms, `--all-rules` 20 ms, `--review-stats` 433 ms. 에러 30만의 결과에서도 `--review-counts`는
+  10 ms라서 에러 수에 따라 늘지 않는다. `--review-stats`는 에러 수와 리뷰어 수에 비례한다.
+
+```json
+{
+  "type": "floe-drc-review-counts", "version": 1,
+  "generated": "2026-11-13T08:18:29Z",
+  "database": "/r/results.db", "pack": "/r/.results.db.tray",
+  "fingerprint": "471a…", "cell": "TOP", "errors": 20299635, "rule_count": 2000,
+  "rules": [{"index": 2, "name": "M2.OVERLAP.2", "errors": 20000000}],
+  "reviewers": [
+    {"id": "kim", "present": true, "errors": 20299635,
+     "waived": 6666673, "visited": 40, "not_required": 250000,
+     "visited_not_required": 40, "pending": 20049635,
+     "waive_known": true, "visited_known": true, "not_required_known": true,
+     "waive_file": "/r/.results.db.waive.kim", "waive_location": "results",
+     "waive_modified": "2026-11-13T08:18:13Z",
+     "review_file": "/r/.results.db.review.kim.sqlite3", "review_location": "results",
+     "review_modified": "2026-11-13T08:18:13Z",
+     "rules": [{"index": 2, "name": "M2.OVERLAP.2", "errors": 20000000, "waived": 6666667,
+                "visited": 40, "not_required": 250000, "visited_not_required": 40,
+                "pending": 19750000}]}
+  ],
+  "skipped": []
+}
+```
+
+`rules`(최상위와 리뷰어의)는 `--rule`·`--all-rules`를 줄 때만 있다. `rule_count`는 결과의 룰 수다. 그 밖의
+키는 §2b와 같은 뜻이다.
 
 ## 3. 에러 스냅샷 PNG: `floe2 render --drc`
 

@@ -521,6 +521,21 @@ impl Pack {
     /// Opening is read-only, including legacy embedded statuses. Sidecars are
     /// selected by the trusted local caller, never synthesized or overwritten.
     pub fn open(path: &Path, cancelled: &AtomicUsize) -> Result<Self> {
+        Self::open_with(path, cancelled, true)
+    }
+    /// The pack's directory alone: its rules with their names and error
+    /// counts, its identity and its source's stamp - without the pass over
+    /// the block table that gives each rule its box. That pass reads 48
+    /// bytes a block, three quarters of a byte an error: what a read that
+    /// must answer at once (the reviewers' kept counts, drc::team::stats
+    /// `counts`; user 2026-11-13: "이 통계는 실시간 요청으로 들어올 거라서")
+    /// cannot pay on a result of a billion errors. Every rule's `bbox` is
+    /// None and the block table is not validated: nothing that reads
+    /// geometry is handed such a pack.
+    pub(crate) fn open_directory(path: &Path, cancelled: &AtomicUsize) -> Result<Self> {
+        Self::open_with(path, cancelled, false)
+    }
+    fn open_with(path: &Path, cancelled: &AtomicUsize, boxes: bool) -> Result<Self> {
         check_cancelled(cancelled)?;
         let input = Input::open(path)?;
         if input.stamp.len < 40 + super::FOOTER_BYTES {
@@ -672,7 +687,9 @@ impl Pack {
         // slabs instead of a resident 48B-per-block table. No coordinate decode.
         let mut next_ci = 0;
         let mut previous = None;
-        for first in (0..p.block_count).step_by(4096) {
+        // (not for the directory alone: `open_directory`)
+        let listed = if boxes { p.block_count } else { 0 };
+        for first in (0..listed).step_by(4096) {
             check_cancelled(cancelled)?;
             let n = (p.block_count - first).min(4096);
             let data = p.input.bytes(

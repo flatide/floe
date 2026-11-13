@@ -25,6 +25,17 @@
 //! Nothing is written, no snapshot is made, and the pack must be the
 //! current one: a missing or stale pack is an error, never an answer of
 //! zeros from the ASCII file.
+//!
+//! `counts` (0.12.464) is the same question asked for an answer at once
+//! (user 2026-11-13: "이 통계는 실시간 요청으로 들어올 거라서 사용자가 waive
+//! 할때마다 통계를 만들어두는게 좋을 것 같아"): the numbers a reviewer's
+//! files KEEP - the waive sidecar's counter a rule, the flags' counters a
+//! rule -, which every waive, visit and exclusion brings up to date as it
+//! is written. No status byte and no bit plane is read, and the pack is
+//! opened for its directory alone: the cost is the rules', not the errors'.
+//! What it cannot say for that is what needs an error at a time - the team's
+//! union and conflicts, the reasons' counts - and whether a stored counter
+//! is what its statuses count (`collect` says `counters_match`).
 use super::bits::{Bits, CHUNK};
 use super::flags::{self, open_read_only, sql};
 use super::Identity;
@@ -44,6 +55,19 @@ use std::time::Duration;
 
 pub const TYPE: &str = "floe-drc-review-statistics";
 pub const VERSION: u32 = 1;
+/// The report of `counts`.
+pub const COUNTS_TYPE: &str = "floe-drc-review-counts";
+
+/// Which rules a `counts` report lists beside each reviewer's whole numbers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Listed<'a> {
+    /// none: the whole result's numbers alone
+    Whole,
+    /// the rule of this name - each of them where a result has the name twice
+    Named(&'a str),
+    /// every rule
+    All,
+}
 const READ_BUFFER: usize = 1 << 20;
 
 /// A reviewer's working files as found.
@@ -447,6 +471,191 @@ pub fn collect(source: &Path, only: Option<&[String]>, cancelled: &AtomicUsize) 
     let found = discover(&pack.path)?;
     let report = collect_from(&pack, &id, found, only, cancelled)?;
     pack.unchanged()?;
+    Ok(report)
+}
+
+/// The counts of `source`'s current pack as the reviewers' files keep them
+/// (see the module docs): every reviewer found, or `only` these, each with
+/// the whole result's errors, waived, visited and not for review - and the
+/// rules `listed` with the same four. The pack is asked for as `collect`
+/// asks (none, or one of an older .db, is an error), opened for its
+/// directory alone and without a reader's registration.
+pub fn counts(
+    source: &Path,
+    only: Option<&[String]>,
+    listed: Listed,
+    cancelled: &AtomicUsize,
+) -> Result<Value> {
+    let pack = crate::drc::open_pack_directory(source, cancelled)?;
+    let id = Identity::of_pack(&pack, "statistics")?;
+    let found = discover(&pack.path)?;
+    let report = counts_from(&pack, &id, found, only, listed, cancelled)?;
+    pack.unchanged()?;
+    Ok(report)
+}
+
+/// The flags' counters a rule, as the file keeps them: (visited, not for
+/// review, both) by rule, zeros for a rule without a row. Counters that
+/// cannot be a rule's are an error.
+fn kept_flags(conn: &Connection, sizes: &[u64]) -> Result<Vec<(u64, u64, u64)>> {
+    let mut kept = vec![(0u64, 0u64, 0u64); sizes.len()];
+    let mut statement = conn
+        .prepare("SELECT ci,visited,nr,both FROM rules")
+        .map_err(sql)?;
+    let mut rows = statement.query([]).map_err(sql)?;
+    while let Some(row) = rows.next().map_err(sql)? {
+        let ci: i64 = row.get(0).map_err(sql)?;
+        let stored: (i64, i64, i64) = (
+            row.get(1).map_err(sql)?,
+            row.get(2).map_err(sql)?,
+            row.get(3).map_err(sql)?,
+        );
+        let Some(size) = usize::try_from(ci).ok().and_then(|ci| sizes.get(ci)) else {
+            return Err(Error::new(ErrorKind::Cache, "corrupt review flag counters"));
+        };
+        let c = flags::counts(*size, stored)?;
+        kept[ci as usize] = (c.visited, c.not_required, c.visited_not_required);
+    }
+    Ok(kept)
+}
+
+fn counts_from(
+    pack: &Pack,
+    id: &Identity,
+    mut found: BTreeMap<String, Found>,
+    only: Option<&[String]>,
+    listed: Listed,
+    cancelled: &AtomicUsize,
+) -> Result<Value> {
+    let total = id.total();
+    let names: Vec<&str> = pack.checks.iter().map(|c| c.name.as_str()).collect();
+    let rows: Vec<usize> = match listed {
+        Listed::Whole => Vec::new(),
+        Listed::All => (0..names.len()).collect(),
+        Listed::Named(name) => {
+            let hits: Vec<usize> = (0..names.len()).filter(|&ci| names[ci] == name).collect();
+            if hits.is_empty() {
+                return Err(Error::input(format!("no such rule {name:?} (see --rules)")));
+            }
+            hits
+        }
+    };
+    let mut absent = Vec::new();
+    if let Some(only) = only {
+        let wanted: Vec<String> = only.iter().map(|r| flags::sanitize(r.trim())).collect();
+        found.retain(|tag, _| wanted.contains(tag));
+        for tag in wanted {
+            if !found.contains_key(&tag) && !absent.contains(&tag) {
+                absent.push(tag);
+            }
+        }
+    }
+    let mut skipped = Vec::new();
+    let mut people = Vec::new();
+    for (tag, files) in found {
+        check_cancelled(cancelled)?;
+        // waived: the sidecar's counter a rule (no status byte is read)
+        let mut waive = None;
+        if let Some((path, place)) = files.waive {
+            let kept = open_waive(&path, id).and_then(|(_, stored)| {
+                if stored.iter().zip(&id.sizes).any(|(&w, &size)| u64::from(w) > size) {
+                    return Err(Error::new(
+                        ErrorKind::Cache,
+                        "waive counters past their rules' errors (floe2 drc --review-stats counts the statuses)",
+                    ));
+                }
+                Ok(stored)
+            });
+            match kept {
+                Ok(stored) => waive = Some((path, place, stored)),
+                Err(e) => skipped.push(json!({"reviewer": tag, "file": path, "reason": e.message})),
+            }
+        }
+        // visited, not for review: the flags' counters a rule (no bit plane)
+        let mut marks = None;
+        if let Some((path, place)) = files.review {
+            match open_flags(&path, id).and_then(|conn| kept_flags(&conn, &id.sizes)) {
+                Ok(kept) => marks = Some((path, place, kept)),
+                Err(e) => skipped.push(json!({"reviewer": tag, "file": path, "reason": e.message})),
+            }
+        }
+        if waive.is_none() && marks.is_none() {
+            continue;
+        }
+        let own = |ci: usize| {
+            let (visited, not_required, both) = marks.as_ref().map_or((0, 0, 0), |m| m.2[ci]);
+            Own {
+                waived: waive.as_ref().map_or(0, |w| u64::from(w.2[ci])),
+                visited,
+                not_required,
+                both,
+            }
+        };
+        let (waived, marked) = (waive.is_some(), marks.is_some());
+        let mut all = Own::default();
+        for ci in 0..names.len() {
+            all.add(&own(ci));
+        }
+        let mut person = all.json(total, waived, marked);
+        person["errors"] = json!(total);
+        person["id"] = json!(tag);
+        person["present"] = json!(true);
+        person["waive_known"] = json!(waived);
+        person["visited_known"] = json!(marked);
+        person["not_required_known"] = json!(marked);
+        if let Some((path, place, _)) = &waive {
+            person["waive_file"] = json!(path);
+            person["waive_location"] = json!(place);
+            person["waive_modified"] = json!(modified(path));
+        }
+        if let Some((path, place, _)) = &marks {
+            person["review_file"] = json!(path);
+            person["review_location"] = json!(place);
+            person["review_modified"] = json!(modified(path));
+        }
+        if listed != Listed::Whole {
+            // every rule listed has its row, a rule nobody touched too
+            person["rules"] = rows
+                .iter()
+                .map(|&ci| {
+                    let mut row = own(ci).json(id.sizes[ci], waived, marked);
+                    row["index"] = json!(ci + 1);
+                    row["name"] = json!(names[ci]);
+                    row["errors"] = json!(id.sizes[ci]);
+                    row
+                })
+                .collect();
+        }
+        people.push(person);
+    }
+    for tag in absent {
+        people.push(json!({"id": tag, "present": false}));
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut report = json!({
+        "type": COUNTS_TYPE,
+        "version": VERSION,
+        "generated": utc(now),
+        "database": crate::cache::database_path(&pack.path)?,
+        "pack": pack.path,
+        "fingerprint": id.fingerprint,
+        "cell": pack.cell,
+        "errors": total,
+        "rule_count": names.len(),
+        "reviewers": people,
+        "skipped": skipped,
+    });
+    if listed != Listed::Whole {
+        // the rules asked about, with their errors - also when nobody has
+        // reviewed yet
+        report["rules"] = rows
+            .iter()
+            .map(|&ci| json!({"index": ci + 1, "name": names[ci], "errors": id.sizes[ci]}))
+            .collect();
+    }
     Ok(report)
 }
 

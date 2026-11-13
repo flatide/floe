@@ -26,6 +26,19 @@ const HELP: &str = "Usage: floe2-web drc RESULTS.db|.RESULTS.db.tray [OPTIONS]
                           --floe-reviewer ID[,ID...] these reviewers alone.
                           Needs the current pack: none or a stale one is an
                           error (exit 1), never an answer of zeros
+  --review-counts         The same reviewers' counts for an answer at once
+                          (JSON): each one's errors, waived, visited and not
+                          for review of the whole result, read from the
+                          counters the review files keep - every waive, visit
+                          and exclusion brings them up to date as it is
+                          written -, so no error is read and the time does
+                          not grow with the result. With --rule NAME also the
+                          rule's four numbers, with --all-rules every rule's;
+                          with --floe-reviewer ID[,ID...] these reviewers
+                          alone. Not counted again (--review-stats does), and
+                          no team union or reasons (they need each error)
+  --rule NAME             With --review-counts: list this rule
+  --all-rules             With --review-counts: list every rule
   --svrf-rules FILE       Explicit rules.json metadata for --rules / --errs
   --build                 Explicitly build/reuse .RESULTS.db.tray, migrate legacy name.
                           A pack is reused when the database is the file that
@@ -68,6 +81,9 @@ pub struct Command {
     force: bool,
     jobs: Option<usize>,
     review_stats: bool,
+    review_counts: bool,
+    rule: Option<String>,
+    all_rules: bool,
 }
 pub fn parse(args: &[String]) -> Result<Command> {
     let mut c = Command {
@@ -81,6 +97,9 @@ pub fn parse(args: &[String]) -> Result<Command> {
         force: false,
         jobs: None,
         review_stats: false,
+        review_counts: false,
+        rule: None,
+        all_rules: false,
     };
     let mut i = 1;
     let mut positional = false;
@@ -119,7 +138,9 @@ pub fn parse(args: &[String]) -> Result<Command> {
                 }
             }
             "--review-stats" if inline.is_none() => c.review_stats = true,
-            "--errs" | "--floe-reviewer" | "--svrf-rules" | "--jobs" => {
+            "--review-counts" if inline.is_none() => c.review_counts = true,
+            "--all-rules" if inline.is_none() => c.all_rules = true,
+            "--errs" | "--floe-reviewer" | "--svrf-rules" | "--jobs" | "--rule" => {
                 let value = if let Some(s) = inline {
                     s
                 } else {
@@ -143,6 +164,10 @@ pub fn parse(args: &[String]) -> Result<Command> {
                     );
                 } else if flag == "--errs" {
                     c.errs = Some(value.into())
+                } else if flag == "--rule" {
+                    if c.rule.replace(value.into()).is_some() {
+                        return Err(Error::input("--rule names one rule (--all-rules lists every rule)"));
+                    }
                 } else if flag == "--svrf-rules" {
                     c.svrf_rules = Some(value.into())
                 } else {
@@ -162,6 +187,9 @@ pub fn parse(args: &[String]) -> Result<Command> {
             || c.reviewer.is_some()
             || c.svrf_rules.is_some()
             || c.review_stats
+            || c.review_counts
+            || c.rule.is_some()
+            || c.all_rules
         {
             return Err(Error::input(
                 "--build cannot be combined with DRC read/reviewer options",
@@ -174,6 +202,19 @@ pub fn parse(args: &[String]) -> Result<Command> {
         return Err(Error::input(
             "--review-stats is a report of its own: without --list / --rules / --errs / --svrf-rules",
         ));
+    }
+    if c.review_counts
+        && (c.review_stats || c.list || c.rules || c.errs.is_some() || c.svrf_rules.is_some())
+    {
+        return Err(Error::input(
+            "--review-counts is a report of its own: without --review-stats / --list / --rules / --errs / --svrf-rules",
+        ));
+    }
+    if (c.rule.is_some() || c.all_rules) && !c.review_counts {
+        return Err(Error::input("--rule / --all-rules require --review-counts"));
+    }
+    if c.rule.is_some() && c.all_rules {
+        return Err(Error::input("--rule and --all-rules: one of the two"));
     }
     if c.svrf_rules.is_some() && (c.list || (c.rules == c.errs.is_some())) {
         return Err(Error::input(
@@ -207,6 +248,15 @@ pub fn run(command: Command, cancelled: &AtomicUsize) -> Result<i32> {
     }
     if command.review_stats {
         return review_stats(&source, command.reviewer.as_deref(), cancelled);
+    }
+    if command.review_counts {
+        return review_counts(
+            &source,
+            command.reviewer.as_deref(),
+            command.rule.as_deref(),
+            command.all_rules,
+            cancelled,
+        );
     }
     let mut p = open_current(&source, command.reviewer.as_deref(), cancelled)?;
     for warning in &p.warnings {
@@ -327,14 +377,9 @@ pub fn run(command: Command, cancelled: &AtomicUsize) -> Result<i32> {
     out.flush()?;
     Ok(0)
 }
-/// `--review-stats`: the reviewers' statistics of the database's current
-/// pack as one JSON document on stdout (app-core drc::team::stats).
+/// `--floe-reviewer ID[,ID...]` of a statistics report: the ids named.
 #[cfg(feature = "review-sqlite")]
-fn review_stats(
-    source: &std::path::Path,
-    reviewers: Option<&str>,
-    cancelled: &AtomicUsize,
-) -> Result<i32> {
+fn reviewers_named(reviewers: Option<&str>) -> Result<Option<Vec<String>>> {
     let only: Option<Vec<String>> = reviewers.map(|list| {
         list.split(',')
             .map(str::trim)
@@ -345,6 +390,56 @@ fn review_stats(
     if only.as_ref().is_some_and(Vec::is_empty) {
         return Err(Error::input("--floe-reviewer names no reviewer"));
     }
+    Ok(only)
+}
+/// `--review-counts`: the counts the reviewers' files keep, as one JSON
+/// document on stdout (app-core drc::team::stats `counts`) - the answer at
+/// once: no error of the result is read.
+#[cfg(feature = "review-sqlite")]
+fn review_counts(
+    source: &std::path::Path,
+    reviewers: Option<&str>,
+    rule: Option<&str>,
+    all_rules: bool,
+    cancelled: &AtomicUsize,
+) -> Result<i32> {
+    use floe_app_core::drc::team::stats::{counts, Listed};
+    let only = reviewers_named(reviewers)?;
+    let listed = match rule {
+        Some(name) => Listed::Named(name),
+        None if all_rules => Listed::All,
+        None => Listed::Whole,
+    };
+    let report = counts(source, only.as_deref(), listed, cancelled)?;
+    let mut out = io::BufWriter::new(io::stdout().lock());
+    serde_json::to_writer_pretty(&mut out, &report)
+        .map_err(|e| Error::new(ErrorKind::Io, e.to_string()))?;
+    writeln!(out)?;
+    out.flush()?;
+    Ok(0)
+}
+#[cfg(not(feature = "review-sqlite"))]
+fn review_counts(
+    _source: &std::path::Path,
+    _reviewers: Option<&str>,
+    _rule: Option<&str>,
+    _all_rules: bool,
+    _cancelled: &AtomicUsize,
+) -> Result<i32> {
+    Err(Error::new(
+        ErrorKind::Unsupported,
+        "--review-counts is not in this build (the reviewers' flags are read by floe2)",
+    ))
+}
+/// `--review-stats`: the reviewers' statistics of the database's current
+/// pack as one JSON document on stdout (app-core drc::team::stats).
+#[cfg(feature = "review-sqlite")]
+fn review_stats(
+    source: &std::path::Path,
+    reviewers: Option<&str>,
+    cancelled: &AtomicUsize,
+) -> Result<i32> {
+    let only = reviewers_named(reviewers)?;
     let report =
         floe_app_core::drc::team::stats::collect(source, only.as_deref(), cancelled)?;
     let mut out = io::BufWriter::new(io::stdout().lock());
@@ -480,6 +575,34 @@ mod tests {
             assert!(parse_str(&["drc", "a.db", "--review-stats", with]).is_err(), "{with}");
         }
         assert!(parse_str(&["drc", "a.db", "--review-stats=on"]).is_err());
+        // the kept counts: a report of its own, one rule or every rule with it
+        let c = parse_str(&["drc", "a.db", "--review-counts"]).unwrap();
+        assert!(c.review_counts && c.rule.is_none() && !c.all_rules && !c.review_stats);
+        let c = parse_str(&["drc", "a.db", "--review-counts", "--rule", "M1.S.1", "--floe-reviewer=kim"]).unwrap();
+        assert_eq!((c.rule.as_deref(), c.reviewer.as_deref()), (Some("M1.S.1"), Some("kim")));
+        let c = parse_str(&["drc", "a.db", "--review-counts", "--rule=이름 둘", "--floe-reviewer", "kim,lee"]).unwrap();
+        assert_eq!(c.rule.as_deref(), Some("이름 둘"));
+        assert!(parse_str(&["drc", "a.db", "--review-counts", "--all-rules"]).unwrap().all_rules);
+        for with in ["--review-stats", "--rules", "--list", "--errs=R", "--build", "--svrf-rules=x"] {
+            assert!(parse_str(&["drc", "a.db", "--review-counts", with]).is_err(), "{with}");
+        }
+        for alone in [vec!["--rule", "R"], vec!["--all-rules"], vec!["--review-stats", "--rule=R"]] {
+            let mut args = vec!["drc", "a.db"];
+            args.extend(alone.iter().copied());
+            assert!(parse_str(&args).is_err(), "{alone:?}");
+        }
+        for bad in [
+            vec!["--review-counts", "--rule", "A", "--rule", "B"],
+            vec!["--review-counts", "--rule", "A", "--all-rules"],
+            vec!["--review-counts", "--rule"],
+            vec!["--review-counts", "--rule="],
+            vec!["--review-counts=1"],
+            vec!["--review-counts", "--all-rules=1"],
+        ] {
+            let mut args = vec!["drc", "a.db"];
+            args.extend(bad.iter().copied());
+            assert!(parse_str(&args).is_err(), "{bad:?}");
+        }
         assert!(!parse_str(&["drc", "a.db", "--rules"]).unwrap().review_stats);
         let c = parse_str(&["drc", "a.db", "--build", "--force", "--jobs=16"]).unwrap();
         assert!(c.build && c.force);

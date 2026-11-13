@@ -2039,10 +2039,291 @@ def opened_tag(svc, h, d):
     return raw[12:28].hex()
 
 
+def counts_of(db, *more, env=None):
+    r = run_env([FLOE2, "drc", str(db), "--review-counts"] + list(more), env or {})
+    try:
+        return r, json.loads(r.stdout)
+    except ValueError:
+        return r, None
+
+
+def r13(temp):
+    print("[R13] floe2 drc --review-counts: the counts the review files keep, at once")
+    d = temp / "counts"
+    d.mkdir()
+    sizes = [9000, 5000, 10, 300]
+    names = ["A.W", "B.S", "C,odd \"name\"", "A.W"]      # a name twice
+    write_db(d / "t.db", [(names[0], [_poly(100 * (i % 120), 60 * (i // 120)) for i in range(sizes[0])]),
+                          (names[1], [_edge(200 * (i % 50), 100 * (i // 50)) for i in range(sizes[1])]),
+                          (names[2], [_poly(7 * i, 3 * i, 5, 5) for i in range(sizes[2])]),
+                          (names[3], [_poly(90 * i, 9000) for i in range(sizes[3])])])
+    r = run([INDEX, "drc", str(d / "t.db")])
+    check(r.returncode == 0, "floe-index drc t.db", r.stderr)
+    db = d / "t.db"
+    total = sum(sizes)
+    keys = ("waived", "visited", "not_required", "visited_not_required", "pending")
+    listed = [{"index": ci + 1, "name": names[ci], "errors": sizes[ci]} for ci in range(4)]
+    # ---- nobody has reviewed: the result's errors are said all the same
+    r, got = counts_of(db)
+    check(r.returncode == 0 and got is not None and got["type"] == "floe-drc-review-counts"
+          and got["version"] == 1 and got["errors"] == total and got["rule_count"] == 4
+          and got["reviewers"] == [] and got["skipped"] == [] and "rules" not in got
+          and got["database"] == str(db) and got["pack"] == str(d / ".t.db.tray")
+          and len(got["fingerprint"]) == 64 and got["generated"].endswith("Z"),
+          "a result nobody reviewed: its errors, no reviewer", (r.stderr[-200:], got))
+    r, got = counts_of(db, "--rule", "B.S")
+    check(r.returncode == 0 and got["rules"] == [listed[1]] and got["reviewers"] == []
+          and got["errors"] == total, "... and a rule's errors", got and got.get("rules"))
+    # ---- the reviewers: kim and lee with flags across the 4096-error
+    # chunks and in both rules named A.W, park with a waive file alone
+    people = {
+        "kim": ({0: set(range(0, 10)) | set(range(4090, 4100)), 2: {9}, 3: {0, 299}},
+                {0: {0, 1, 2, 3, 4, 4095, 4096, 8999}, 1: {1}, 3: {5}},
+                {0: set(range(100, 110)), 1: {1, 2}, 3: {5, 6}}, True),
+        "lee": ({0: set(range(5, 15)) | {8999}, 1: {7}},
+                {0: {0, 5, 20, 4096}, 1: {1, 7}},
+                {0: {4096}}, True),
+        "park": ({1: {0}}, {}, {}, False),
+    }
+    svc = Svc()
+    try:
+        h = {}
+        for name, (w, v, n, known) in people.items():
+            h[name] = rs_open(svc, db, name)["handle"]
+            for ci, errs in w.items():
+                svc("drc_set_status", handle=h[name], check=ci, errors=sorted(errs), status=1)
+            count = 0
+            for ci, errs in v.items():
+                for e in sorted(errs):
+                    svc("drc_visit", handle=h[name], check=ci, error=e)
+                    count += 1
+            svc.visits(h[name], count)
+            for ci, errs in n.items():
+                e = svc.job(h[name], "drc_review", check=ci, action="not-required",
+                            errors=sorted(errs), on=True)
+                check(e["state"] == "done", "%s: not for review" % name, e)
+        want_own, _team = brute(sizes, people)
+
+        def row_of(x):
+            return {k: x[k] for k in keys if k in x}
+
+        def whole_of(name):
+            rows = want_own[name]
+            return {k: sum(x[k] for x in rows) for k in rows[0]}
+        # ---- 1. the whole result: each reviewer's four numbers
+        r, got = counts_of(db)
+        check(r.returncode == 0 and [x["id"] for x in got["reviewers"]] == ["kim", "lee", "park"]
+              and not got["skipped"] and "rules" not in got
+              and all("rules" not in x for x in got["reviewers"]),
+              "the reviewers found by their working files; no rule listed unasked",
+              (r.stderr[-200:], [x["id"] for x in got["reviewers"]] if got else None))
+        for person in got["reviewers"]:
+            name = person["id"]
+            check(row_of(person) == whole_of(name) and person["errors"] == total
+                  and person["present"] is True and person["waive_known"] is True
+                  and person["visited_known"] is (name != "park")
+                  and person["not_required_known"] is (name != "park")
+                  and person["waive_location"] == "results" and person["waive_modified"].endswith("Z")
+                  and Path(person["waive_file"]).name == ".t.db.waive.%s" % name
+                  and ("review_file" in person) is (name != "park"),
+                  "%s: the whole result's errors, waived, visited, not for review = by hand" % name,
+                  (row_of(person), whole_of(name)))
+        r2, exact = stats_of(db)
+        check(exact is not None and all(
+            row_of(a) == row_of(b) and a["id"] == b["id"]
+            for a, b in zip(got["reviewers"], exact["reviewers"]))
+            and got["fingerprint"] == exact["fingerprint"] and got["errors"] == exact["errors"],
+            "... and what --review-stats counts from the statuses")
+        # ---- 2. a rule: its four numbers; a name twice is both of them
+        r, one = counts_of(db, "--rule", "B.S")
+        check(r.returncode == 0 and one["rules"] == [listed[1]]
+              and all(len(x["rules"]) == 1 and x["rules"][0]["index"] == 2
+                      and x["rules"][0]["name"] == "B.S" and x["rules"][0]["errors"] == 5000
+                      and row_of(x["rules"][0]) == want_own[x["id"]][1]
+                      and row_of(x) == whole_of(x["id"]) for x in one["reviewers"]),
+              "--rule NAME: the rule's errors, waived, visited, not for review beside the whole",
+              [x["rules"] for x in one["reviewers"]])
+        r, odd = counts_of(db, "--rule", names[2], "--floe-reviewer", "kim")
+        check(r.returncode == 0 and [x["id"] for x in odd["reviewers"]] == ["kim"]
+              and odd["rules"] == [listed[2]]
+              and row_of(odd["reviewers"][0]["rules"][0]) == want_own["kim"][2],
+              "a rule named with a comma and quotes; one reviewer asked",
+              odd and odd["reviewers"])
+        r, twice = counts_of(db, "--rule", "A.W")
+        check(r.returncode == 0 and twice["rules"] == [listed[0], listed[3]]
+              and all([y["index"] for y in x["rules"]] == [1, 4]
+                      and [row_of(y) for y in x["rules"]]
+                      == [want_own[x["id"]][0], want_own[x["id"]][3]] for x in twice["reviewers"]),
+              "a name two rules have: both, each with its own numbers",
+              [x["rules"] for x in twice["reviewers"]])
+        r, _none = counts_of(db, "--rule", "NO.SUCH")
+        check(r.returncode == 1 and not r.stdout and 'no such rule "NO.SUCH"' in r.stderr,
+              "a rule the result does not have: refused, nothing printed", (r.returncode, r.stderr))
+        # every rule: a row each, the ones nobody touched too
+        r, every = counts_of(db, "--all-rules")
+        check(r.returncode == 0 and every["rules"] == listed
+              and all([row_of(y) for y in x["rules"]] == want_own[x["id"]]
+                      and [(y["index"], y["name"], y["errors"]) for y in x["rules"]]
+                      == [(z["index"], z["name"], z["errors"]) for z in listed]
+                      for x in every["reviewers"]),
+              "--all-rules: every rule's four numbers, a rule nobody touched too",
+              [x["rules"] for x in every["reviewers"]][:1])
+        # ---- 3. at once: each action is in the next answer, the review open
+        def kim_now(*more):
+            r, got = counts_of(db, "--floe-reviewer", "kim", *more)
+            x = got["reviewers"][0]
+            return ((x["waived"], x["visited"], x["not_required"]),
+                    [(y["waived"], y["visited"], y["not_required"]) for y in x.get("rules", [])])
+        base, _ = kim_now()
+        steps = []
+        svc("drc_set_status", handle=h["kim"], check=1, errors=[10, 11, 12], status=1, reason="live")
+        steps.append(kim_now("--rule", "B.S"))
+        sel = svc.job(h["kim"], "drc_select", check=1, mode="replace")
+        svc.job(h["kim"], "drc_review", check=1, action="waive", selection=sel["selection"], on=True)
+        steps.append(kim_now("--rule", "B.S"))
+        svc("drc_visit", handle=h["kim"], check=1, error=4096)
+        svc.visits(h["kim"], 1)
+        steps.append(kim_now("--rule", "B.S"))
+        svc.job(h["kim"], "drc_review", check=1, action="not-required",
+                errors=list(range(4000, 4200)), on=True)
+        steps.append(kim_now("--rule", "B.S"))
+        svc.job(h["kim"], "drc_review", check=1, action="waive", selection=sel["selection"], on=False)
+        svc.job(h["kim"], "drc_review", check=1, action="not-required",
+                errors=list(range(4000, 4200)), on=False)
+        svc("drc_set_status", handle=h["kim"], check=1, errors=[10, 11, 12], status=0)
+        steps.append(kim_now("--rule", "B.S"))
+        w0, v0, n0 = base
+        check(steps == [((w0 + 3, v0, n0), [(3, 1, 2)]),
+                        ((w0 + 5000, v0, n0), [(5000, 1, 2)]),
+                        ((w0 + 5000, v0 + 1, n0), [(5000, 2, 2)]),
+                        ((w0 + 5000, v0 + 1, n0 + 200), [(5000, 2, 202)]),
+                        ((w0, v0 + 1, n0), [(0, 2, 2)])],
+              "each waive, visit and exclusion is in the next answer while the review is open",
+              (base, steps))
+        people["kim"][1].setdefault(1, set()).add(4096)        # (the visit stays)
+    finally:
+        svc.close()
+    # ---- 4. what it reads is the counters, never the statuses. A stored
+    # counter that is not what its statuses count (two sessions of one
+    # reviewer could leave one before 0.12.440) is what it says - the exact
+    # report counts and says so
+    side = d / ".t.db.waive.lee"
+    data = bytearray(side.read_bytes())
+    at = 40 + total
+    data[at:at + 4] = struct.pack("<I", 3)
+    side.write_bytes(bytes(data))
+    r, kept = counts_of(db, "--rule", "A.W", "--floe-reviewer", "lee")
+    r2, exact = stats_of(db, "--floe-reviewer", "lee")
+    lee, counted = kept["reviewers"][0], exact["reviewers"][0]
+    check(lee["rules"][0]["waived"] == 3 and lee["waived"] == 3 + 1
+          and counted["waived"] == 12 and counted["counters_match"] is False,
+          "the kept counter is what is said; --review-stats counts the statuses and says they differ",
+          (lee["waived"], counted["waived"], counted.get("counter_mismatch")))
+    data[at:at + 4] = struct.pack("<I", 11)
+    side.write_bytes(bytes(data))
+    # a counter past its rule's errors is no count: left out, and said
+    data[at:at + 4] = struct.pack("<I", sizes[0] + 1)
+    side.write_bytes(bytes(data))
+    r, bad = counts_of(db, "--floe-reviewer", "lee")
+    check(r.returncode == 0 and bad["reviewers"][0]["waive_known"] is False
+          and "waived" not in bad["reviewers"][0] and bad["reviewers"][0]["visited_known"] is True
+          and [(x["reviewer"], Path(x["file"]).name) for x in bad["skipped"]]
+          == [("lee", ".t.db.waive.lee")] and "past their rules' errors" in bad["skipped"][0]["reason"],
+          "a counter that cannot be a rule's is left out and said", bad["skipped"])
+    data[at:at + 4] = struct.pack("<I", 11)
+    side.write_bytes(bytes(data))
+    # ... and no block of the pack: with its block table damaged the pack
+    # does not open for the exact report, and the counts are the same
+    r, before = counts_of(db, "--all-rules")
+    pack = d / ".t.db.tray"
+    raw = bytearray(pack.read_bytes())
+    foot = len(raw) - 168
+    blocks = struct.unpack_from("<Q", raw, foot + 48)[0]
+    raw[blocks + 8] ^= 1
+    whole = pack.read_bytes()
+    pack.write_bytes(bytes(raw))
+    r2, exact = stats_of(db)
+    r, after = counts_of(db, "--all-rules")
+    pack.write_bytes(whole)
+    strip = lambda x: {k: v for k, v in x.items() if k != "generated"}
+    check(r2.returncode == 1 and "block metadata" in r2.stderr
+          and r.returncode == 0 and strip(after) == strip(before),
+          "the pack is opened for its rules alone: its block table is not read",
+          (r2.returncode, r2.stderr[-160:], r.returncode))
+    # ---- 5. whose files: leftovers ignored, another result's said, a
+    # reviewer named who never opened it absent
+    shutil.copy(d / ".t.db.waive.kim", d / ".t.db.waive.kim.stale-1794300165")
+    shutil.copy(d / ".t.db.waive.kim", d / ".t.db.waive.kim.tmp-4242")
+    ghost = bytearray((d / ".t.db.waive.kim").read_bytes())
+    ghost[12] ^= 0xFF
+    (d / ".t.db.waive.ghost").write_bytes(bytes(ghost))
+    r, g2 = counts_of(db)
+    check([x["id"] for x in g2["reviewers"]] == ["kim", "lee", "park"]
+          and [(x["reviewer"], Path(x["file"]).name) for x in g2["skipped"]]
+          == [("ghost", ".t.db.waive.ghost")] and "another DRC result" in g2["skipped"][0]["reason"],
+          "leftovers ignored, another result's file skipped with its reason", g2["skipped"])
+    r, some = counts_of(db, "--floe-reviewer", "kim,nobody", "--rule", "B.S")
+    check([(x["id"], x["present"]) for x in some["reviewers"]] == [("kim", True), ("nobody", False)]
+          and "waived" not in some["reviewers"][1] and some["rules"] == [listed[1]],
+          "--floe-reviewer ID,ID: these alone, one without files absent", some["reviewers"][1])
+    # ---- 6. the pack must be the current one, as for the exact report
+    st = os.stat(db)
+    raw = db.read_bytes()
+    os.utime(db, (st.st_atime, st.st_mtime + 5))
+    r, touched = counts_of(db)
+    check(r.returncode == 0 and touched is not None
+          and [x["waived"] for x in touched["reviewers"]] == [x["waived"] for x in g2["reviewers"]],
+          "a .db whose time alone changed: its pack is current", (r.returncode, r.stderr[-300:]))
+    db.write_bytes(other_bytes(raw))
+    os.utime(db, (st.st_atime, st.st_mtime + 9))
+    r, none = counts_of(db)
+    check(r.returncode == 1 and not r.stdout and "stale DRC pack" in r.stderr,
+          "a stale pack: refused, nothing printed", (r.returncode, r.stderr[-300:]))
+    db.write_bytes(raw)
+    os.utime(db, (st.st_atime, st.st_mtime))
+    bare = d / "bare"
+    bare.mkdir()
+    shutil.copy(db, bare / "t.db")
+    r, none = counts_of(bare / "t.db")
+    check(r.returncode == 1 and not r.stdout and "no DRC pack" in r.stderr,
+          "no pack: refused", (r.returncode, r.stderr[-300:]))
+    # the pack itself named: read without its .db
+    r, direct = counts_of(d / ".t.db.tray", "--floe-reviewer", "kim")
+    check(r.returncode == 0 and direct["reviewers"][0]["waived"] == g2["reviewers"][0]["waived"],
+          "the pack named in place of the .db", (r.returncode, r.stderr[-200:]))
+    for args, want in ((["--review-counts", "--review-stats"], "--review-counts is a report of its own"),
+                       (["--review-counts", "--rules"], "--review-counts is a report of its own"),
+                       (["--rule", "A.W"], "--rule / --all-rules require --review-counts"),
+                       (["--all-rules"], "--rule / --all-rules require --review-counts"),
+                       (["--review-counts", "--rule", "A.W", "--all-rules"], "one of the two"),
+                       (["--review-counts", "--rule", "A.W", "--rule", "B.S"], "--rule names one rule")):
+        r = run_env([FLOE2, "drc", str(db)] + args, {})
+        check(r.returncode == 2 and not r.stdout and want in r.stderr,
+              "refused (an argument error): %s" % " ".join(args), (r.returncode, r.stderr[-200:]))
+    r = run_env([FLOE2, "drc", str(db), "--review-counts", "--floe-reviewer", ","], {})
+    check(r.returncode == 1 and not r.stdout and "names no reviewer" in r.stderr,
+          "a reviewer list that names nobody: refused, as --review-stats refuses it",
+          (r.returncode, r.stderr[-200:]))
+    # ---- 7. --workdir: the reviews kept under it are the ones read with it
+    work = d / "work"
+    r = run_env([FLOE2, "--workdir", str(work), "drc", str(db), "--build"], {})
+    check(r.returncode == 0, "a pack under --workdir", r.stderr[-300:])
+    ws = svc_with(dict(FLOE_WORKDIR=str(work)))
+    try:
+        o = ws("drc_open", path=str(db), mode="load", reviewer="yoon")
+        ws("drc_set_status", handle=o["handle"], check=1, errors=[3, 4], status=1)
+    finally:
+        ws.close()
+    r, w = counts_of(db, "--rule", "B.S", env=dict(FLOE_WORKDIR=str(work)))
+    check(w is not None and [(x["id"], x["waived"], x["rules"][0]["waived"]) for x in w["reviewers"]]
+          == [("yoon", 2, 2)] and str(work) in w["pack"],
+          "its counts with the same work directory", w and w["reviewers"])
+
+
 def main():
-    global r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12
-    r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12 = map(
-        timed, (r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12))
+    global r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12, r13
+    r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12, r13 = map(
+        timed, (r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12, r13))
     temp = Path(tempfile.mkdtemp(prefix="floe-drc-team-"))
     try:
         d = temp / "runs"
@@ -2065,6 +2346,7 @@ def main():
         r10(temp)
         r11(temp)
         r12(temp)
+        r13(temp)
         if "--no-gui" not in sys.argv:
             from validate_drc_team_gui import r7
             timed(r7)(temp, check)

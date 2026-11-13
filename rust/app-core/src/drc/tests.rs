@@ -1313,3 +1313,55 @@ fn a_waive_reason_is_the_actions_and_goes_with_the_status() {
     drop(lee);
     fs::remove_dir_all(&dir).unwrap();
 }
+
+/// The reviewers' kept counts are read for an answer at once (0.12.464, user
+/// 2026-11-13: "이 통계는 실시간 요청으로 들어올 거라서"): the pack is opened
+/// for its directory alone - the rules, their errors, the identity - and the
+/// block table, three quarters of a byte an error, is not read.
+#[test]
+fn a_pack_opened_for_its_directory_reads_no_block() {
+    let f = Fixture::new(&bytes(200));
+    let stop = AtomicUsize::new(0);
+    let whole = Pack::open(&f.path, &stop).unwrap();
+    let light = Pack::open_directory(&f.path, &stop).unwrap();
+    // the same rules, errors and identity
+    let rules = |p: &Pack| {
+        p.checks
+            .iter()
+            .map(|c| (c.name.clone(), c.desc.clone(), c.start, c.count))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(rules(&light), rules(&whole));
+    assert_eq!(light.checks.iter().map(|c| c.count).collect::<Vec<_>>(), [0, 200, 0]);
+    assert_eq!(
+        (light.total, light.content_id, light.source_size, light.source_mtime, light.source_crc),
+        (whole.total, whole.content_id, whole.source_size, whole.source_mtime, whole.source_crc)
+    );
+    assert_eq!(light.cell, whole.cell);
+    assert_eq!(light.review_fingerprint().unwrap(), whole.review_fingerprint().unwrap());
+    // a rule's box is the block table's to give
+    assert!(whole.checks[1].bbox.is_some());
+    assert!(light.checks.iter().all(|c| c.bbox.is_none()));
+    drop((whole, light));
+    // the block table damaged: the pack does not open, its directory does
+    let mut raw = bytes(200);
+    let foot = raw.len() - 168;
+    let blocks = u64::from_le_bytes(raw[foot + 48..foot + 56].try_into().unwrap()) as usize;
+    let count = u64::from_le_bytes(raw[foot + 56..foot + 64].try_into().unwrap());
+    assert_eq!(count, 4, "200 errors, 64 a block");
+    raw[blocks + 8] ^= 1; // the first block's error count
+    fs::write(&f.path, &raw).unwrap();
+    let e = Pack::open(&f.path, &stop).err().expect("a damaged block table");
+    assert!(e.message.contains("block metadata"), "{}", e.message);
+    let light = Pack::open_directory(&f.path, &stop).unwrap();
+    assert_eq!((light.total, light.checks[1].count), (200, 200));
+    drop(light);
+    // what the directory itself says is held to as ever
+    fs::write(&f.path, &raw[..raw.len() - 1]).unwrap();
+    assert!(Pack::open_directory(&f.path, &stop).is_err());
+    let mut raw = bytes(200);
+    let foot = raw.len() - 168;
+    raw[foot + 72] ^= 1; // the footer's rule count
+    fs::write(&f.path, &raw).unwrap();
+    assert!(Pack::open_directory(&f.path, &stop).is_err());
+}

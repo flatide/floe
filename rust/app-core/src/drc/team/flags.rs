@@ -45,7 +45,7 @@ pub struct Counts {
     pub pending: u64,
 }
 
-fn counts(total: u64, (visited, nr, both): (i64, i64, i64)) -> Result<Counts> {
+pub(crate) fn counts(total: u64, (visited, nr, both): (i64, i64, i64)) -> Result<Counts> {
     let total_i = total as i64;
     if !(0 <= both
         && both <= visited.min(nr)

@@ -620,3 +620,14 @@ P4d처럼 컨트롤러 루프에서만 바뀐다. `FLOE_GTK_LOOP=legacy`는 예�
 - **웹(머지할 때):** 웹의 리뷰 저장(`drc::review::store`)은 `desktop::Review`를 거치지 않으므로 사유를 모른다. 웹에서 waive를 되돌린 에러의 사유는 파일에 남지만 GTK와 통계는 상태를 함께 보므로 보이지 않는다. 웹에 사유를 넣으려면 그 저장부의 상태 쓰기에서 `Reasons::set`·`clear`를 부르고(구간은 `runs_of`) 입력창을 웹 UI에 둔다. 같은 파일을 쓰면 `--review-stats`의 `reasons`는 웹에서 준 사유도 그대로 센다.
 - **하지 않은 것:** 동료의 사유 읽기, `.floereview`·waive 파일에 사유 싣기, 이전 실행에서 사유 승계.
 - **게이트:** `drc_team` R12·R7, `drc_analysis` A5 `reason_ui`, 단위 app-core `drc::reasons`·`drc::tests`(`a_waive_reason_is_the_actions_and_goes_with_the_status`)·`drc::team::stats`.
+
+## 20. 리뷰 수치의 즉답 (2026-11-13, app 0.12.464) — 읽는 것은 공유 Rust, 새로 쓰는 것은 없다
+
+사용자: "CLI로 waive 현황 통계가 필요함. 1. 해당 .db에서 전체 룰의 에러 갯수 / waive 갯수 / 방문 에러 수 / not for review 갯수 2. 해당 .db에서 특정 에러의 에러 갯수 / waive 갯수 / 방문 에러 수 / not for review 갯수. 이 통계는 실시간 요청으로 들어올 거라서 사용자가 waive 할때마다 통계를 만들어두는게 좋을 것 같아." ("특정 에러"는 룰 하나로 읽었다.)
+
+- **만들어 두는 것은 이미 있다:** waive 사이드카의 룰별 waived 카운터(`desktop::Review`의 `wcount`: 상태를 쓰는 모든 함수가 함께 쓴다)와 방문 기록의 `rules(ci, visited, nr, both)`(`team::flags`: 비트맵과 한 트랜잭션). 그래서 쓰는 쪽은 바꾸지 않았다.
+- **`drc::team::stats::counts(source, only, listed, cancelled)`**: 그 카운터만 읽는 보고서(`floe-drc-review-counts`). `Listed::{Whole, Named(name), All}`이 룰 행을 정한다. `collect`와 같은 리뷰어 찾기(`discover`)·같은 pack 규칙을 쓰고, 상태 바이트·비트 평면·사유는 읽지 않는다.
+- **`Pack::open_directory`**(crate 안): pack의 룰 목록과 식별값만 연다. `Pack::open`이 룰의 box를 얻으려고 도는 블록 테이블 패스(블록당 48바이트, 에러당 0.75바이트)를 건너뛰므로 `bbox`는 모두 None이다. 도형을 읽는 코드에는 넘기지 않는다. `drc::local::open_pack_directory`는 `open_pack`과 같은 규칙으로 pack을 고르되 리더로 등록하지 않는다.
+- **명령(app-cli `drc.rs`, 웹 바이너리도 같은 코드):** `--review-counts [--rule NAME | --all-rules] [--floe-reviewer ID,…]`.
+- **호스트가 할 일:** 없다. 웹이 같은 수치를 화면에 내려면 `stats::counts`를 부른다. 읽는 것은 waive 사이드카 끝의 카운터 표와 방문 기록의 `rules` 표이므로, 그 두 파일을 쓰는 쪽이 카운터를 함께 쓰는 한 누가 썼든 같은 답이다.
+- **게이트:** `drc_team` R13, 단위 app-core `drc::tests`(`a_pack_opened_for_its_directory_reads_no_block`), app-cli `drc::tests::options`.

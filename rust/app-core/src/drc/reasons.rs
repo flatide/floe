@@ -254,10 +254,10 @@ fn overlap(segs: &[Seg], runs: &[Run]) -> Vec<Run> {
 }
 
 /// `runs` (sorted, disjoint) taken out of `segs`, and given to `entry` when
-/// there is one.
-fn assign(segs: &mut Vec<Seg>, runs: &[Run], entry: Option<u32>) {
+/// there is one. Whether anything held was taken from what held it.
+fn assign(segs: &mut Vec<Seg>, runs: &[Run], entry: Option<u32>) -> bool {
     let (Some(first), Some(last)) = (runs.first(), runs.last()) else {
-        return;
+        return false;
     };
     // the segments that may meet the runs
     let lo = segs.partition_point(|s| s.stop <= first.0);
@@ -284,6 +284,8 @@ fn assign(segs: &mut Vec<Seg>, runs: &[Run], entry: Option<u32>) {
             kept.push(Seg { start: at, stop: s.stop, entry: s.entry });
         }
     }
+    let held = |segs: &[Seg]| segs.iter().map(|s| s.stop - s.start).sum::<u64>();
+    let taken = held(&kept) != held(&segs[lo..hi]);
     let merged = match entry {
         None => kept,
         Some(entry) => {
@@ -302,6 +304,7 @@ fn assign(segs: &mut Vec<Seg>, runs: &[Run], entry: Option<u32>) {
         }
     };
     segs.splice(lo..hi, merged);
+    taken
 }
 
 /// What a file turned out to be.
@@ -328,6 +331,11 @@ pub struct Reasons {
     segs: [BTreeMap<usize, Vec<Seg>>; 2],
     /// what `clear` dropped and the file does not say yet, per kind and rule
     cleared: BTreeMap<(Kind, usize), Vec<Run>>,
+    /// the file as read says more than what is held: a line took errors
+    /// from an earlier one, or took reasons back (what `tidy` asks before
+    /// it weighs a rewrite - a log that only ever added is as short as it
+    /// can be)
+    superseded: bool,
     /// the file's bytes that are whole lines: where the next line goes
     written: u64,
     /// the file ends in a torn line, to be cut before the next one
@@ -351,6 +359,7 @@ impl Reasons {
             entries: Vec::new(),
             segs: [BTreeMap::new(), BTreeMap::new()],
             cleared: BTreeMap::new(),
+            superseded: false,
             written: 0,
             torn: false,
             file: None,
@@ -364,6 +373,7 @@ impl Reasons {
         self.entries.clear();
         self.segs = [BTreeMap::new(), BTreeMap::new()];
         self.cleared.clear();
+        self.superseded = false;
         self.written = 0;
         self.torn = false;
     }
@@ -501,7 +511,8 @@ impl Reasons {
             None
         };
         let segs = self.segs[kind.slot()].entry(check).or_default();
-        assign(segs, &runs, entry);
+        // (a line that takes reasons back is itself more than what is held)
+        self.superseded |= assign(segs, &runs, entry) || !set;
         if segs.is_empty() {
             self.segs[kind.slot()].remove(&check);
         }
@@ -558,10 +569,14 @@ impl Reasons {
             }
             return;
         }
+        if !self.superseded || len <= SLACK {
+            return;
+        }
         let text = self.serialize();
         if len > 2 * text.len() as u64 + SLACK && write_whole(&self.path, text.as_bytes()).is_ok() {
             self.written = text.len() as u64;
             self.torn = false;
+            self.superseded = false;
         }
     }
 

@@ -358,13 +358,32 @@ fn current_pack(source: &Path, cancelled: &AtomicUsize) -> Result<(Option<Pack>,
 /// no pack, or one of an older .db, is an error that says how to make it
 /// (a pack being made is busy, as for every reader).
 pub fn open_pack(source: &Path, cancelled: &AtomicUsize) -> Result<Pack> {
+    open_pack_as(source, cancelled, true)
+}
+/// `open_pack` for a read that must answer at once (the reviewers' kept
+/// counts): the pack's directory alone (`Pack::open_directory` - no pass
+/// over the block table) and no reader registered in the lock folder - it
+/// reads what is published and asks at its end that the file is the one it
+/// opened. The same pack is asked for, by the same rule: none, or one of an
+/// older .db, is an error that says how to make it.
+#[cfg(feature = "review-sqlite")]
+pub(crate) fn open_pack_directory(source: &Path, cancelled: &AtomicUsize) -> Result<Pack> {
+    open_pack_as(source, cancelled, false)
+}
+fn open_pack_as(source: &Path, cancelled: &AtomicUsize, whole: bool) -> Result<Pack> {
+    let open = |path: &Path| -> Result<Pack> {
+        if !whole {
+            return Pack::open_directory(path, cancelled);
+        }
+        let reader = pack_reader(path)?;
+        let mut pack = Pack::open(path, cancelled)?;
+        pack.hold(reader);
+        Ok(pack)
+    };
     crate::check_cancelled(cancelled)?;
     let source = cache::absolute(source)?;
     if is_packed_source(&source)? {
-        let reader = pack_reader(&source)?;
-        let mut pack = Pack::open(&source, cancelled)?;
-        pack.hold(reader);
-        return Ok(pack);
+        return open(&source);
     }
     let path = cache::pack_path(&source)?;
     let build = format!(
@@ -389,9 +408,7 @@ pub fn open_pack(source: &Path, cancelled: &AtomicUsize) -> Result<Pack> {
         Err(e) => return Err(e.into()),
         Ok(_) => (),
     }
-    let reader = pack_reader(&path)?;
-    let mut pack = Pack::open(&path, cancelled)?;
-    pack.hold(reader);
+    let pack = open(&path)?;
     if !pack.source_current(&source, cancelled)? {
         return Err(Error::new(
             ErrorKind::Cache,

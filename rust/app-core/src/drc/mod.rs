@@ -24,6 +24,8 @@ pub use database::{
     ReadViolation,
 };
 pub use filters::{ListPage, ListRequest};
+#[cfg(feature = "review-sqlite")]
+pub(crate) use local::open_pack_directory;
 pub use local::{
     is_packed_source, open_current, open_pack, required_reviewer, reviewer, reviewer_required,
     reviewer_tag,

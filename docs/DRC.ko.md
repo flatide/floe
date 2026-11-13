@@ -185,6 +185,10 @@ python -m floe render chip.oas --drc results.db \
     변수를 두면 ID를 빠뜨린 실행이 조용히 섞이지 않는다.
   - **통계 명령**: `floe2 drc DB --review-stats`가 리뷰어 전원의 수치와 팀 합계를 JSON으로 낸다
     (app-core `drc::team::stats`; DRC-CLI.ko.md §2b). 뷰어 없이 스크립트가 수집하는 표면이다.
+    실시간으로 묻는 쪽에는 `floe2 drc DB --review-counts [--rule NAME]`가 있다(0.12.464, 사용자
+    2026-11-13; DRC-CLI.ko.md §2c): 리뷰어별 에러 수·waived·방문·검토 제외를 전체 합계와 룰 하나에
+    대해 낸다. waive·방문·검토 제외를 할 때마다 리뷰 파일의 룰별 카운터가 함께 갱신되므로 그것만
+    읽고, 에러를 읽지 않아 에러 수와 무관한 시간에 답한다.
   - **파일 로드 끄기**(2026-11-11, app 0.12.445): `floe2 view … --no-file-load`나 런처 환경의
     `FLOE_NO_FILE_LOAD=1`로 띄운 뷰어는 명령줄이 준 레이아웃·`--drc`·`--rules`만 읽는다. DRC 메뉴의
     `open results .db…`·`load SVRF rules…`·`load clusters…`·`load waives…`·`review from previous run…`·
