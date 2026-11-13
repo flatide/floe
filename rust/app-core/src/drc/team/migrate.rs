@@ -645,6 +645,9 @@ pub fn apply(
         let mut batch: Vec<(u64, Bits, Bits, Bits)> = Vec::new();
         let mut batch_ci = None;
         let source = &plan.mapped;
+        // (what a long application changes is said in the change log about
+        // once a second as it goes: drc::changes)
+        let mut settled = std::time::Instant::now();
         let mut run = |ci: usize, batch: &[(u64, Bits, Bits, Bits)], result: &mut Applied| -> Result<()> {
             check_cancelled(cancelled)?;
             plan.validate(own)?;
@@ -687,6 +690,11 @@ pub fn apply(
             // it takes back takes its reason along (drc::reasons)
             for &(k, bits) in set_nr.iter().chain(&clear_nr) {
                 r.reason_drop(crate::drc::reasons::Kind::NotRequired, ci, &super::bit_runs(k, bits));
+            }
+            if settled.elapsed() >= std::time::Duration::from_secs(1) {
+                drop(guard);
+                r.sync_waives()?;
+                settled = std::time::Instant::now();
             }
             Ok(())
         };

@@ -166,6 +166,8 @@ fit·clip·open .db·rules 기능을 노출한다(구 패널 버튼들은 메뉴
 | `FLOE_CLICK_DEBUG` | 팔레트/미니맵 클릭 경로 stderr 트레이스 (`[click]` 줄) |
 | `FLOE_NO_FILE_LOAD` | `1`·`on`·`yes`·`true`면 `floe2 view --no-file-load`와 같다: 뷰어의 파일 로드 명령을 끈다(런처 환경용, 0.12.445) |
 | `FLOE_WAIVE_SYNC` | `off`면 waive 쓰기를 요청마다 디스크에 동기화하지 않고 커널에 맡긴다(0.12.445까지의 동작. 기본은 동기화, 0.12.446) |
+| `FLOE_TEAM_KEEP` | `off`면 DRC 팀 합계를 위해 아무것도 쓰지 않는다: 뷰어는 리뷰의 변경 기록(`.<db>.changes.<리뷰어>`)을 쓰지 않고 있던 것을 지우며, `floe2 drc --review-counts`는 `.<db>.team`을 쓰지 않고 답할 때마다 센다. 수치는 같다(0.12.465) |
+| `FLOE_TEAM_GRACE_S` | `floe2 drc --review-counts`의 팀 합계가, 기록 없이 바뀐 리뷰 파일의 기록을 기다리는 초(기본 10. `0`이면 기다리지 않고 바로 다시 센다. 0.12.465) |
 | `FLOE_PICK_VISIBLE` | `off`면 pick이 그 자리에서 다른 레이어에 가려 보이지 않는 도형도 후보로 삼는다(0.12.455까지의 대상. 기본은 눈에 보이는 도형만, 0.12.456). 작은 것부터 순환하는 순서는 어느 쪽이든 같다 |
 | `FLOE_SNAP_VISIBLE` | `off`면 룰러의 스냅이 다른 레이어에 가려 보이지 않는 꼭짓점과 변에도 붙는다(0.12.456까지의 대상. 기본은 눈에 보이는 것만, 0.12.457) |
 | `FLOE_PANEL_DEBUG`, `FLOE_MOSAIC`, `FLOE_WS`, `FLOE_CLIP`, `FLOE_REGION`, `FLOE_TESTCHIP` | 디버그/테스트용 |

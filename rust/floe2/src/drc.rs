@@ -114,6 +114,10 @@ fn waived_of(request: &Value) -> Option<bool> {
 /// The reasons the dialog offers again: the latest given, each once.
 const KNOWN_REASONS: usize = 20;
 
+/// A review job over this many errors or more has the team's kept counts
+/// brought up to date when it ends (`Shared::team_soon`).
+const TEAM_SOON: u64 = 1 << 16;
+
 /// A request's reason as it is kept - refused, when it cannot be, before
 /// anything is written.
 fn reason_of(request: &Value) -> Result<String> {
@@ -279,9 +283,45 @@ struct Shared {
     out: Arc<Out>,
     handle: u64,
     ids: Arc<AtomicUsize>,
+    /// set when the session closes: a merge of the team's counts running
+    /// apart stops
+    closing: Arc<AtomicUsize>,
+    /// that merge's thread, and the word that it shall look once more
+    merging: Mutex<Option<std::thread::JoinHandle<()>>>,
+    merge_again: Arc<AtomicUsize>,
 }
 
 impl Shared {
+    /// Bring the team's kept counts up to date now, apart (app-core
+    /// drc::team::live): after a job that changed many errors, so that the
+    /// command that is asked for the counts does not find the whole of it
+    /// to count (user 2026-11-13: "사용자가 waive 할때마다 통계를
+    /// 만들어두는게 좋을 것 같아"). The few errors of a click are left to
+    /// whoever asks next: counting them is nothing. Whoever merges, the
+    /// counts are the same.
+    fn team_soon(&self) {
+        let Some(t) = &self.team else { return };
+        if !floe_app_core::drc::changes::enabled() {
+            return; // FLOE_TEAM_KEEP=off: nothing is kept
+        }
+        let mut slot = self.merging.lock().unwrap_or_else(|p| p.into_inner());
+        if slot.as_ref().is_some_and(|thread| !thread.is_finished()) {
+            // one at a time: the one that runs looks once more when it ends
+            self.merge_again.store(1, Ordering::Relaxed);
+            return;
+        }
+        let (id, stop, again) = (t.id.clone(), Arc::clone(&self.closing), Arc::clone(&self.merge_again));
+        *slot = std::thread::Builder::new()
+            .name("drc-team-counts".into())
+            .spawn(move || loop {
+                again.store(0, Ordering::Relaxed);
+                let merged = floe_app_core::drc::team::live::merge(&id.pack, &id, &stop);
+                if merged.is_err() || again.load(Ordering::Relaxed) == 0 {
+                    break;
+                }
+            })
+            .ok();
+    }
     fn event(&self, job: u64, kind: &str, state: &str, mut fields: Value) {
         fields["event"] = json!("drc");
         fields["handle"] = json!(self.handle);
@@ -432,6 +472,13 @@ impl Session {
         }
         if let Some(t) = &self.shared.team {
             t.wait_visits();
+        }
+        // (a merge of the team's counts running apart stops at its next
+        // look; whoever asks next counts what it left)
+        self.shared.closing.store(1, Ordering::Relaxed);
+        let merging = self.shared.merging.lock().unwrap_or_else(|p| p.into_inner()).take();
+        if let Some(thread) = merging {
+            let _ = thread.join();
         }
     }
 }
@@ -630,6 +677,9 @@ impl Drcs {
                     out: Arc::clone(&self.out),
                     handle,
                     ids: Arc::clone(&self.ids),
+                    closing: Arc::new(AtomicUsize::new(0)),
+                    merging: Mutex::new(None),
+                    merge_again: Arc::new(AtomicUsize::new(0)),
                 }),
                 clusters: None,
                 jobs: HashMap::new(),
@@ -840,6 +890,7 @@ impl Session {
                 let checks = shared.source.check_count();
                 shared.dirty.lock().unwrap().extend(0..checks);
                 self.settle(cancelled)?;
+                shared.team_soon();
                 Ok(json!({"waived": waived, "counts": all}))
             }
             "drc_counts" => counts(review(&mut shared.opened.lock().unwrap())?),
@@ -1450,11 +1501,20 @@ impl Session {
                         let mut changed = 0;
                         let mut a = 0;
                         let mut last = std::time::Instant::now();
+                        let mut settled = std::time::Instant::now();
                         while a < n {
                             let len = (n - a).min(1 << 16);
                             {
                                 let mut o = shared.opened.lock().unwrap();
-                                changed += review(&mut o)?.set_status_range(check, &*targets, value, a, len)?;
+                                let r = review(&mut o)?;
+                                changed += r.set_status_range(check, &*targets, value, a, len)?;
+                                // (what a long job changed so far is flushed
+                                // and said in the change log about once a
+                                // second, not only at its end)
+                                if settled.elapsed().as_millis() >= 1000 {
+                                    r.sync_waives()?;
+                                    settled = std::time::Instant::now();
+                                }
                             }
                             a += len;
                             if last.elapsed().as_millis() >= 500 {
@@ -1587,6 +1647,11 @@ impl Session {
                     }
                 }
             })();
+            // a job that changed many errors: the team's counts are brought
+            // up to date apart, now (whatever it changed before an error too)
+            if matches!(op.as_str(), "waive" | "not-required") && targets.total() >= TEAM_SOON {
+                shared.team_soon();
+            }
             match result {
                 Ok(mut v) => {
                     v["action"] = json!(op);

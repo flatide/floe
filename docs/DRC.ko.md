@@ -188,7 +188,15 @@ python -m floe render chip.oas --drc results.db \
     실시간으로 묻는 쪽에는 `floe2 drc DB --review-counts [--rule NAME]`가 있다(0.12.464, 사용자
     2026-11-13; DRC-CLI.ko.md §2c): 리뷰어별 에러 수·waived·방문·검토 제외를 전체 합계와 룰 하나에
     대해 낸다. waive·방문·검토 제외를 할 때마다 리뷰 파일의 룰별 카운터가 함께 갱신되므로 그것만
-    읽고, 에러를 읽지 않아 에러 수와 무관한 시간에 답한다.
+    읽고, 에러를 읽지 않아 에러 수와 무관한 시간에 답한다. 같은 명령이 **팀 합계**(전원의 합집합:
+    방문·waive·검토 제외·conflict·pending, 전체와 룰별)도 `team`으로 바로 답한다(0.12.465, 사용자
+    2026-11-13: ".db를 여러 사람이 검토하고 그 합집합을 실시간으로 받아야 해"). 합집합은 에러 단위로
+    봐야 하므로 만들어 둔다: 리뷰 세션이 자기가 바꾼 구간(에러 4,096개 단위)을 자기 변경 기록
+    `.<db>.changes.<리뷰어>`에 요청마다 덧붙이고(48바이트, `FLOE_WAIVE_SYNC`를 따라 동기화), 합계는
+    pack 옆의 `.<db>.team`에 두어 조회가 바뀐 구간만 전원의 파일로 다시 센다. 에러를 많이 바꾸는
+    작업(65,536개 이상의 job, 동료 결정 적용, 이전 run에서 가져오기, waive 파일 불러오기)은 뷰어가
+    끝내면서 직접 고쳐 둔다. 이전 빌드의 뷰어처럼 기록 없이 바뀐 리뷰는 파일의 시각으로 알아 다시
+    센다(DRC-CLI.ko.md §2c). 뷰어 화면에는 달라지는 것이 없다. `FLOE_TEAM_KEEP=off`로 끈다.
   - **파일 로드 끄기**(2026-11-11, app 0.12.445): `floe2 view … --no-file-load`나 런처 환경의
     `FLOE_NO_FILE_LOAD=1`로 띄운 뷰어는 명령줄이 준 레이아웃·`--drc`·`--rules`만 읽는다. DRC 메뉴의
     `open results .db…`·`load SVRF rules…`·`load clusters…`·`load waives…`·`review from previous run…`·

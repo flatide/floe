@@ -59,6 +59,9 @@ impl TeamCtx {
         // a flags file of the result before (the DRC ran again): moved aside
         // as the waive sidecar was, so this review starts (0.12.441)
         flags.retire_other_result()?;
+        // what the flags' writes change is said in the review's change log,
+        // beside its statuses' (the team's kept counts; 0.12.465)
+        flags.attach_changes(std::sync::Arc::clone(&review.changes));
         Ok(Self {
             id,
             flags,
@@ -485,6 +488,8 @@ impl Session {
                         &mut changed,
                     );
                     let dirty: Vec<usize> = shared.dirty.lock().unwrap().iter().copied().collect();
+                    // (a peer's decisions applied: the team's counts follow)
+                    shared.team_soon();
                     match result {
                         Ok(a) => shared.event(id, "team-write", "done", json!({"action": "apply", "result": a, "rules": dirty})),
                         Err(e) => {
@@ -549,6 +554,7 @@ impl Session {
                     let mut p = plan.lock().unwrap();
                     let result = migrate::apply(&own(&shared, c), &mut p, &stop, &mut progress, &mut changed);
                     let dirty: Vec<usize> = shared.dirty.lock().unwrap().iter().copied().collect();
+                    shared.team_soon();
                     match result {
                         Ok(a) => shared.event(id, "migrate-write", "done", json!({"result": a, "summary": p.summary, "rules": dirty})),
                         Err(e) => shared.event(id, "migrate-write", "error", json!({"message": e.message, "rules": dirty, "cancelled": e.kind == ErrorKind::Cancelled})),

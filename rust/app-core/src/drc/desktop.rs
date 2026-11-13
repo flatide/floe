@@ -31,6 +31,7 @@
 //! re-pack, a copy of the folder, a .db whose time alone changed and a
 //! re-run with the same errors keep their review (0.12.441).
 use super::{
+    changes::{ChangeLog, CHUNK as CHANGE_CHUNK},
     local::{aside_path, pack_reader, required_reviewer, waive_paths, ReviewerSource},
     reasons::{self, Kind, Reasons, Run},
     review::Layout,
@@ -43,6 +44,7 @@ use std::io::{Read, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc, Mutex};
 
 pub const STATUS_NONE: u8 = 0;
 pub const STATUS_WAIVED: u8 = 1;
@@ -81,6 +83,11 @@ pub struct Review {
     note_tag: String,
     /// why errors were waived or set aside, an action at a time (`reasons`)
     pub reasons: Reasons,
+    /// which chunks of which rule this review changed, said as each change
+    /// is settled (`changes`; 0.12.465): what the team's kept counts are
+    /// brought up to date from. Shared with the flags store, whose changes
+    /// it says too (drc::team).
+    pub changes: Arc<Mutex<ChangeLog>>,
     /// what the open had to say (floe/drc.py wrote these to stderr)
     pub notices: Vec<String>,
     /// the reviewer tag the sidecars are named by (drc::team names the
@@ -334,6 +341,16 @@ impl Review {
             sync,
         );
         notices.append(&mut reasons.notices);
+        // the change log: beside the sidecar in use; the pack shown
+        // read-only has no file of its own and says nothing
+        let changes = if waive_path == pack.path {
+            ChangeLog::none()
+        } else if !super::changes::enabled() {
+            ChangeLog::silent(&waive_path)
+        } else {
+            let identity: [u8; 28] = header[12..40].try_into().expect("28 of 40 bytes");
+            ChangeLog::open(&waive_path, identity, sync)
+        };
         let mut review = Self {
             pack,
             header,
@@ -352,6 +369,7 @@ impl Review {
             note_temp,
             note_tag,
             reasons,
+            changes: Arc::new(Mutex::new(changes)),
             notices,
             reviewer: tag,
             reviewer_source: who.source,
@@ -473,6 +491,18 @@ impl Review {
             ));
         }
         self.notices.append(&mut self.reasons.notices);
+        let flushed = self.flush_statuses();
+        // what this review changed - its statuses and, through the flags
+        // store that shares the log, its flags - is said now that the bits
+        // are on the disk (`changes`): a line of its own file, so the
+        // team's counts are brought up to date from what changed
+        let mut log = self.changes.lock().unwrap_or_else(|p| p.into_inner());
+        log.settle();
+        self.notices.append(&mut log.notices);
+        flushed
+    }
+
+    fn flush_statuses(&mut self) -> Result<()> {
         if !std::mem::take(&mut self.unsynced) || !self.sync {
             return Ok(());
         }
@@ -497,6 +527,15 @@ impl Review {
         }
     }
 
+    /// Rule `check`'s errors `first..=last` changed their status: said in
+    /// the change log at the next `sync_waives`.
+    fn touched(&self, check: usize, first: u64, last: u64) {
+        self.changes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .touched(check, first / CHANGE_CHUNK, last / CHANGE_CHUNK);
+    }
+
     /// The flushes `sync_waives` made.
     pub fn waive_syncs(&self) -> u64 {
         self.syncs
@@ -506,6 +545,7 @@ impl Review {
     pub fn set_waive_sync(&mut self, on: bool) {
         self.sync = on;
         self.reasons.set_sync(on);
+        self.changes.lock().unwrap_or_else(|p| p.into_inner()).set_sync(on);
     }
 
     // ---- reasons (0.12.463) --------------------------------------------
@@ -587,6 +627,9 @@ impl Review {
         if self.reasons.any(Kind::Waive, check) {
             self.reason_drop(Kind::Waive, check, &reasons::runs_of(&changed));
         }
+        for &error in &changed {
+            self.touched(check, error, error);
+        }
         self.sync_waives()
     }
 
@@ -636,6 +679,7 @@ impl Review {
             let changed: Vec<u64> = positions.iter().map(|&j| a + j as u64).collect();
             self.reason_drop(Kind::Waive, check, &reasons::runs_of(&changed));
         }
+        self.touched(check, a + lo as u64, a + hi as u64);
         if let Some(chunks) = self.chunks.get_mut(&check) {
             for &j in &positions {
                 let k = ((a + j as u64) / STATUS_CHUNK) as usize;
@@ -709,6 +753,9 @@ impl Review {
                 .map(|(j, _)| start + j as u64)
                 .collect();
             self.reason_drop(Kind::Waive, check, &reasons::runs_of(&changed));
+        }
+        if before != after && !after.is_empty() {
+            self.touched(check, start, start + after.len() as u64 - 1);
         }
         if delta != 0 {
             let cur = (i64::from(self.wcount[check]) + delta).max(0) as u32;
@@ -1217,6 +1264,8 @@ impl Review {
             }
             self.reason_drop(Kind::Waive, check, &reasons::runs_of(&back));
         }
+        // (every status may have changed: the team counts this review again)
+        self.changes.lock().unwrap_or_else(|p| p.into_inner()).everything();
         self.sync_waives()?;
         Ok(status.iter().filter(|&&s| s == STATUS_WAIVED).count() as u64)
     }

@@ -19,13 +19,14 @@
 //! the same error for a second (never shown as "unvisited").
 use super::bits::{Bits, CHUNK};
 use crate::drc::analysis::scope::Membership;
+use crate::drc::changes::ChangeLog;
 use crate::{check_cancelled, Error, ErrorKind, Result};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 pub const VISITED: u8 = 1;
@@ -210,6 +211,11 @@ pub struct FlagStore {
     writer: Mutex<Option<Connection>>,
     /// stderr notices of the reference (fallback in use)
     pub notices: Mutex<Vec<String>>,
+    /// the review's change log (drc::changes), shared with its waive store:
+    /// the chunks a flags write changes are said there, for the team's kept
+    /// counts (0.12.465). None: nothing is said (a store used apart from a
+    /// review - the statistics, the tests).
+    changes: Mutex<Option<Arc<Mutex<ChangeLog>>>>,
 }
 
 fn clone_error(e: &Error) -> Error {
@@ -255,12 +261,37 @@ impl FlagStore {
             }),
             writer: Mutex::new(None),
             notices: Mutex::new(notices),
+            changes: Mutex::new(None),
         })
     }
 
     /// The file holding (or to hold) the flags.
     pub fn path(&self) -> PathBuf {
         self.reader.lock().unwrap().path.clone()
+    }
+
+    /// Say this store's changes in the review's change log `log` from now
+    /// on. The log learns where the flags are, and - nothing written yet in
+    /// this session - whether the reviewer's files are as its last record
+    /// left them (ChangeLog::attach_flags).
+    pub fn attach_changes(&self, log: Arc<Mutex<ChangeLog>>) {
+        log.lock().unwrap_or_else(|p| p.into_inner()).attach_flags(&self.path());
+        *self.changes.lock().unwrap_or_else(|p| p.into_inner()) = Some(log);
+    }
+
+    fn log(&self) -> Option<Arc<Mutex<ChangeLog>>> {
+        self.changes.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// The changes committed since the last settle are said in the change
+    /// log (with the stamp of the files as they stand): the end of a write
+    /// that is a request of its own - a visit, a job's exclusions. Writes
+    /// made inside a longer operation are settled by its end (the review's
+    /// `sync_waives`).
+    pub fn settle(&self) {
+        if let Some(log) = self.log() {
+            log.lock().unwrap_or_else(|p| p.into_inner()).settle_committed();
+        }
     }
 
     pub fn metadata(&self) -> String {
@@ -697,6 +728,7 @@ impl FlagStore {
         let conn = guard.0.as_ref().unwrap();
         conn.execute_batch("BEGIN IMMEDIATE").map_err(sql)?;
         let slot = usize::from(flag != VISITED);
+        let touched = std::cell::RefCell::new(Vec::new());
         let work = || -> Result<(u64, Option<((i64, i64, i64), (i64, i64, i64))>)> {
             let mut changed = 0u64;
             let mut delta = [0i64; 3];
@@ -725,6 +757,7 @@ impl FlagStore {
                     continue;
                 }
                 changed += here;
+                touched.borrow_mut().push(*chunk);
                 let before = [old[0].count(), old[1].count(), (old[0] & old[1]).count()];
                 let after = [new[0].count(), new[1].count(), (new[0] & new[1]).count()];
                 for k in 0..3 {
@@ -792,6 +825,19 @@ impl FlagStore {
             r.rules.insert(check, current);
             r.totals = totals;
         }
+        drop(r);
+        // the chunks this commit changed, for the change log (said when the
+        // operation settles)
+        let touched = touched.into_inner();
+        if !touched.is_empty() {
+            if let Some(log) = self.log() {
+                let mut log = log.lock().unwrap_or_else(|p| p.into_inner());
+                log.flags_at(&path);
+                for chunk in touched {
+                    log.committed(check, chunk, chunk);
+                }
+            }
+        }
         Ok(changed)
     }
 
@@ -804,7 +850,10 @@ impl FlagStore {
         let mut b = Bits::ZERO;
         b.set(error % CHUNK);
         let mut g = self.write_guard();
-        self.change_many(&mut g, check, &[(error / CHUNK, b)], VISITED, true)
+        let changed = self.change_many(&mut g, check, &[(error / CHUNK, b)], VISITED, true);
+        drop(g);
+        self.settle();
+        changed
     }
 
     /// Set or clear not-required for the members of `members` (None: the
@@ -821,6 +870,16 @@ impl FlagStore {
         let size = self.rule(check)?;
         let (mut changed, mut start) = (0u64, 0u64);
         let mut mask = vec![false; SCAN as usize];
+        // (what a long run changes is said about once a second as it goes,
+        // and when it ends - however it ends)
+        let mut settled = Instant::now();
+        struct Settle<'a>(&'a FlagStore);
+        impl Drop for Settle<'_> {
+            fn drop(&mut self) {
+                self.0.settle();
+            }
+        }
+        let _settle = Settle(self);
         while start < size {
             check_cancelled(cancelled)?;
             let count = (size - start).min(SCAN);
@@ -845,6 +904,10 @@ impl FlagStore {
             drop(g);
             start += count;
             progress(start, size, changed);
+            if settled.elapsed() >= Duration::from_secs(1) {
+                self.settle();
+                settled = Instant::now();
+            }
         }
         if size == 0 {
             progress(0, 0, 0);

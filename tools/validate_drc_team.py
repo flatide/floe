@@ -814,6 +814,16 @@ def r5(d):
         check(a == b, "the waive files after it, byte for byte")
         same_files(d / ".run2.db.review.py.sqlite3", d / ".run2.db.review.rs.sqlite3",
                    "the flags tables after it", skip=())
+        # (0.12.465) what the application wrote is said in the review's change
+        # log: the team's kept counts are the exact report's after it (R14)
+        r, kept = counts_of(d / "run2.db", "--all-rules")
+        r2, exact = stats_of(d / "run2.db")
+        check(kept is not None and exact is not None and kept["team"]["current"] is True
+              and kept["team"]["waived"] > 0
+              and all(kept["team"][k] == exact["team"][k] for k in TEAM_KEYS)
+              and [[x[k] for k in TEAM_KEYS] for x in kept["team"]["rules"]]
+              == [[x[k] for k in TEAM_KEYS] for x in exact["team"]["rules"]],
+              "the team's kept counts after it = the exact report's", kept and kept["team"])
         # a snapshot as the source
         od1 = py_db(d / "run1.db", "py")
         snap = d / "run1-py.floereview"
@@ -2320,10 +2330,433 @@ def r13(temp):
           "its counts with the same work directory", w and w["reviewers"])
 
 
+# ---- R14 (2026-11-13: the team's union, kept) ----
+
+TEAM_KEYS = ("errors", "visited", "waived", "not_required", "conflicts", "pending")
+
+
+def team_now(db, *more, env=None):
+    """The team of `--review-counts`: its numbers, the whole object, the report."""
+    r, got = counts_of(db, *more, env=env)
+    if got is None:
+        raise AssertionError("--review-counts: %s" % r.stderr[-400:])
+    t = got["team"]
+    return {k: t[k] for k in TEAM_KEYS}, t, got
+
+
+def file_state(path):
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return st.st_ino, st.st_mtime_ns, st.st_size
+
+
+def r14(temp):
+    print("[R14] floe2 drc --review-counts: the team's union, kept and brought up to date by what changed")
+    d = temp / "live"
+    d.mkdir()
+    sizes = [9000, 5000, 10, 300, 70000]
+    names = ["A.W", "B.S", "C,odd \"name\"", "A.W", "E.BIG"]     # a name twice
+    write_db(d / "t.db", [(names[0], [_poly(100 * (i % 120), 60 * (i // 120)) for i in range(sizes[0])]),
+                          (names[1], [_edge(200 * (i % 50), 100 * (i // 50)) for i in range(sizes[1])]),
+                          (names[2], [_poly(7 * i, 3 * i, 5, 5) for i in range(sizes[2])]),
+                          (names[3], [_poly(90 * i, 9000) for i in range(sizes[3])]),
+                          (names[4], [_poly(60 * (i % 400), 30000 + 40 * (i // 400), 20, 10)
+                                      for i in range(sizes[4])])])
+    r = run([INDEX, "drc", str(d / "t.db")])
+    check(r.returncode == 0, "floe-index drc t.db", r.stderr)
+    db = d / "t.db"
+    total = sum(sizes)
+    starts = [sum(sizes[:ci]) for ci in range(len(sizes))]
+    cache = d / ".t.db.team"
+    lock = d / ".floe-lock" / "t.db.team.build"
+    zero = {"errors": total, "visited": 0, "waived": 0, "not_required": 0, "conflicts": 0,
+            "pending": total}
+    # ---- 0. nobody has reviewed: a team of nobody, and nothing made for it
+    nums, t, got = team_now(db)
+    check(nums == zero and t["reviewers"] == 0 and t["current"] is True and t["kept"] is True
+          and t["counted"] == 0 and "rules" not in t and "waiting" not in t and "skipped" not in t
+          and not cache.exists() and not lock.exists(),
+          "a result nobody reviewed: a team of nobody, nothing kept for it", t)
+    nums, t, got = team_now(db, "--rule", "A.W")
+    check([(x["index"], x["name"], x["errors"], x["pending"], x["waived"]) for x in t["rules"]]
+          == [(1, "A.W", 9000, 9000, 0), (4, "A.W", 300, 300, 0)],
+          "... and the team's row of a rule asked for (a name twice: both)", t.get("rules"))
+    # ---- the reviewers and what they did, by hand: {id: (waived, visited,
+    # set aside, flags known)} with {rule: set}
+    people = {}
+
+    def of(name, slot, ci):
+        return people[name][slot].setdefault(ci, set())
+
+    def want():
+        _own, rows = brute(sizes, people)
+        return {k: sum(x[k] for x in rows) for k in TEAM_KEYS}, rows
+
+    def agree(what, counted=None, env=None, exact_only=False):
+        """The team of --review-counts = by hand = what --review-stats counts
+        from every status byte and bit plane, whole and rule by rule; and
+        how many chunks the answer had to count again."""
+        nums, t, got = team_now(db, "--all-rules", env=env)
+        r2, exact = stats_of(db)
+        et = exact["team"]
+        rows = [{k: x[k] for k in TEAM_KEYS} for x in t["rules"]]
+        ok = (t["current"] is True and "waiting" not in t and t["kept"] is True
+              and {k: et[k] for k in TEAM_KEYS} == nums
+              and [{k: x[k] for k in TEAM_KEYS} for x in et["rules"]] == rows
+              and t["reviewers"] == et["reviewers"]
+              and [(x["index"], x["name"]) for x in t["rules"]]
+              == [(ci + 1, names[ci]) for ci in range(len(sizes))])
+        if not exact_only:
+            whole, by_rule = want()
+            ok = ok and nums == whole and rows == by_rule
+        if counted is not None:
+            ok = ok and t["counted"] == counted
+        check(ok, what, (nums, t.get("waiting"), "counted %s" % t["counted"],
+                         {k: et[k] for k in TEAM_KEYS}, None if exact_only else want()[0]))
+        return t
+
+    a, b = Svc(), Svc()
+    try:
+        # kim and lee in one viewer process, park in another
+        svc_of = {"kim": a, "lee": a, "park": b}
+        h = {}
+        for name in ("kim", "lee", "park"):
+            h[name] = rs_open(svc_of[name], db, name)["handle"]
+            people[name] = ({}, {}, {}, True)
+        t = agree("three sessions that have done nothing: three reviewers with nothing")
+        check(t["reviewers"] == 3 and cache.exists(), "... and their counts are kept", t)
+
+        def waive(name, ci, errs, on=True):
+            svc_of[name]("drc_set_status", handle=h[name], check=ci, errors=sorted(errs),
+                         status=1 if on else 0)
+            (of(name, 0, ci).update if on else of(name, 0, ci).difference_update)(errs)
+
+        def visit(name, ci, errs):
+            for e in sorted(errs):
+                svc_of[name]("drc_visit", handle=h[name], check=ci, error=e)
+            svc_of[name].visits(h[name], len(errs))
+            of(name, 1, ci).update(errs)
+
+        def exclude(name, ci, errs, on=True):
+            e = svc_of[name].job(h[name], "drc_review", check=ci, action="not-required",
+                                 errors=sorted(errs), on=on)
+            check(e["state"] == "done", "%s: not for review" % name, e)
+            (of(name, 2, ci).update if on else of(name, 2, ci).difference_update)(errs)
+
+        # (each reviewer's first waive and first visit make their change log
+        # and their flags file: a file that comes has its reviewer's rules
+        # counted whole, once)
+        for i, name in enumerate(("kim", "lee", "park")):
+            waive(name, 2, {i})
+            visit(name, 2, {i})
+        agree("each reviewer's first waive and visit")
+        for name in ("kim", "lee", "park"):
+            check((d / (".t.db.changes.%s" % name)).exists(), "%s's change log beside their sidecar" % name)
+        # ---- 1. each action is in the next answer, and costs what it changed
+        waive("kim", 0, {0, 1, 2})
+        agree("a click's waive: one chunk counted again", counted=1)
+        waive("kim", 0, {4095, 4096})
+        agree("two errors either side of a chunk's end: two chunks", counted=2)
+        before = (file_state(cache), file_state(lock))
+        agree("nothing changed: nothing counted", counted=0)
+        check((file_state(cache), file_state(lock)) == before and before[0] and before[1],
+              "... the kept file is not written again and no lock is taken", before)
+        # two who visited one error and judged it differently: a conflict,
+        # and no waive of the team's; one of them alone visiting is none
+        visit("lee", 0, {1, 4096})
+        visit("kim", 0, {1})
+        t = agree("visits by two reviewers", counted=2)
+        check(t["rules"][0]["conflicts"] == 1 and t["rules"][0]["waived"] == 4
+              and t["rules"][0]["visited"] == 2, "a conflict: the error is not the team's waive", t["rules"][0])
+        waive("park", 0, {1})
+        t = agree("a third reviewer, in another viewer, who did not visit it: still a conflict", counted=1)
+        check(t["rules"][0]["conflicts"] == 1, "... (their waive is no vote)", t["rules"][0])
+        waive("lee", 0, {1})
+        t = agree("the other visitor waives it too: no conflict", counted=1)
+        check(t["rules"][0]["conflicts"] == 0 and t["rules"][0]["waived"] == 5, "... and the team's waive", t["rules"][0])
+        # an error two reviewers waived is one
+        waive("lee", 0, {0, 2})
+        t = agree("an error two reviewers waived is one of the team's", counted=1)
+        check(t["rules"][0]["waived"] == 5 and t["waived"] == 5 + 3, "... (the union, not the sum)", t)
+        # exclusions, across a chunk's end; visited and judged differently
+        exclude("lee", 1, set(range(4090, 4100)))
+        agree("an exclusion across a chunk's end", counted=2)
+        visit("lee", 1, {4091})
+        visit("kim", 1, {4091})
+        t = agree("an exclusion one visitor made and another did not: a conflict", counted=1)
+        check(t["rules"][1]["conflicts"] == 1 and t["rules"][1]["not_required"] == 9, "... not the team's exclusion", t["rules"][1])
+        # a job over a selection (the whole rule), and its taking back
+        sel = svc_of["kim"].job(h["kim"], "drc_select", check=1, mode="replace")
+        e = svc_of["kim"].job(h["kim"], "drc_review", check=1, action="waive",
+                              selection=sel["selection"], on=True)
+        check(e["state"] == "done", "a job's waive of a rule", e)
+        of("kim", 0, 1).update(range(sizes[1]))
+        agree("a job's waive of 5,000 errors: its two chunks", counted=2)
+        e = svc_of["kim"].job(h["kim"], "drc_review", check=1, action="waive",
+                              selection=sel["selection"], on=False)
+        of("kim", 0, 1).clear()
+        agree("... taken back", counted=2)
+        exclude("lee", 1, {4090, 4091}, on=False)
+        waive("kim", 0, {0}, on=False)
+        agree("an exclusion and a waive taken back", counted=2)
+        # ---- 2. a job that changes many errors: the viewer brings the kept
+        # counts up to date itself when the job ends, so whoever asks next
+        # has nothing to count
+        big = svc_of["park"].job(h["park"], "drc_select", check=4, mode="replace")
+
+        def folded(what, action, on):
+            was = file_state(cache)
+            e = svc_of["park"].job(h["park"], "drc_review", check=4, action=action,
+                                   selection=big["selection"], on=on)
+            check(e["state"] == "done" and e["count"] == sizes[4], "park: %s" % what, e)
+            deadline = time.monotonic() + 30
+            while file_state(cache) == was and time.monotonic() < deadline:
+                time.sleep(0.01)
+            check(file_state(cache) != was, "... the viewer wrote the kept counts when its job ended")
+
+        folded("70,000 errors waived by a job", "waive", True)
+        of("park", 0, 4).update(range(sizes[4]))
+        agree("... and the next answer counts nothing", counted=0)
+        folded("70,000 errors set aside by a job", "not-required", True)
+        of("park", 2, 4).update(range(sizes[4]))
+        t = agree("the same for an exclusion", counted=0)
+        check(t["rules"][4]["waived"] == sizes[4] and t["rules"][4]["not_required"] == sizes[4]
+              and t["rules"][4]["pending"] == 0, "... the rule is done", t["rules"][4])
+        folded("the waive taken back", "waive", False)
+        of("park", 0, 4).clear()
+        agree("... counted by the viewer too", counted=0)
+        # (a smaller job is left to whoever asks: the exclusion of 3,000)
+        exclude("park", 4, set(range(100, 3100)), on=False)
+        agree("a smaller job: counted by the answer", counted=1)
+        # ---- 3. the team is everyone's, whoever is asked about
+        whole, by_rule = want()
+        nums, t, got = team_now(db, "--floe-reviewer", "kim", "--rule", "B.S")
+        check(nums == whole and t["reviewers"] == 3 and [x["id"] for x in got["reviewers"]] == ["kim"]
+              and [{k: x[k] for k in TEAM_KEYS} for x in t["rules"]] == [by_rule[1]]
+              and t["rules"][0]["index"] == 2 and t["rules"][0]["name"] == "B.S",
+              "--floe-reviewer narrows the reviewers' rows, not the team", (nums, whole, t))
+        nums, t, got = team_now(db)
+        check(nums == whole and "rules" not in t, "no rule asked: the team's whole numbers alone", t)
+        # ---- 4. a peer's decisions applied: said by the session that took them
+        e = svc_of["lee"].job(h["lee"], "drc_team_load",
+                              paths=[str(d / ".t.db.review.kim.sqlite3")])
+        sids = [x["snapshot"] for x in e.get("loaded") or []]
+        was = file_state(cache)
+        e = svc_of["lee"].job(h["lee"], "drc_team_apply", source=sids[0], force=False) if sids else {}
+        check(e.get("state") == "done" and e["result"]["applied"] > 0, "lee applies kim's decisions", e)
+        deadline = time.monotonic() + 30
+        while file_state(cache) == was and time.monotonic() < deadline:
+            time.sleep(0.01)
+        agree("the team after an application = the exact report's", counted=0, exact_only=True)
+        # (what lee holds now, read back for the hand count)
+        r2, exact = stats_of(db)
+        check(exact is not None, "the exact report")
+    finally:
+        a.close()
+        b.close()
+    # the hand count goes on from what the files say now (the application's
+    # rules are R4's): each reviewer's statuses and planes, read here
+    def read_people():
+        out = {}
+        for side in sorted(d.glob(".t.db.waive.*")):
+            name = side.name[len(".t.db.waive."):]
+            if "." in name or "-" in name:
+                continue
+            raw = side.read_bytes()
+            if len(raw) != 40 + total + 4 * len(sizes):
+                continue
+            w = {ci: {e for e in range(sizes[ci]) if raw[40 + starts[ci] + e] == 1}
+                 for ci in range(len(sizes))}
+            v, n, known = {}, {}, False
+            flags = d / (".t.db.review.%s.sqlite3" % name)
+            if flags.exists():
+                known = True
+                con = sqlite3.connect("file:%s?mode=ro" % flags, uri=True)
+                for ci, k, vb, nb in con.execute("SELECT ci,chunk,visited,nr FROM chunks"):
+                    for blob, into in ((vb, v), (nb, n)):
+                        for i, byte in enumerate(blob):
+                            for bit in range(8):
+                                if byte >> bit & 1:
+                                    into.setdefault(ci, set()).add(k * 4096 + i * 8 + bit)
+                con.close()
+            out[name] = ({ci: s for ci, s in w.items() if s}, v, n, known)
+        return out
+
+    people.clear()
+    people.update(read_people())
+    agree("the sessions closed: the team by hand from the files, nothing counted", counted=0)
+
+    def poke(name, ci, error, value):
+        """A status written as a writer that says nothing would: the byte
+        and the rule's counter."""
+        side = d / (".t.db.waive.%s" % name)
+        data = bytearray(side.read_bytes())
+        at = 40 + starts[ci] + error
+        old = data[at]
+        data[at] = value
+        c = 40 + total + 4 * ci
+        struct.pack_into("<I", data, c, struct.unpack_from("<I", data, c)[0] + (value == 1) - (old == 1))
+        was = file_state(side)
+        side.write_bytes(bytes(data))
+        while file_state(side) is not None and was is not None and os.stat(side).st_mtime_ns <= was[1]:
+            time.sleep(0.002)
+            os.utime(side)
+        if name in people:
+            (people[name][0].setdefault(ci, set()).add if value == 1
+             else people[name][0].setdefault(ci, set()).discard)(error)
+
+    # ---- 5. a reviewer of a build before the change log - files, no log:
+    # counted again at once, each time their files change
+    head = (d / ".t.db.waive.kim").read_bytes()[:40]
+    (d / ".t.db.waive.old").write_bytes(head + bytes(total + 4 * len(sizes)))
+    people["old"] = ({}, {}, {}, False)
+    poke("old", 0, 5, 1)
+    poke("old", 0, 6, 1)
+    t = agree("a reviewer without a change log: in the team at once")
+    check(t["reviewers"] == 4 and not (d / ".t.db.changes.old").exists(), "... (no log made for them)", t)
+    poke("old", 0, 7, 1)
+    poke("old", 4, 69999, 1)
+    agree("... and each change of their files")
+    agree("... counted once", counted=0)
+    # ---- 6. a reviewer with a log whose files change without a word (a
+    # session of an older build, a run that ended before its record): the
+    # record is waited for - the counts as they were, said not current -
+    # and their rules counted again when the grace ends; at once without one
+    before, _t, _got = team_now(db)
+    poke("kim", 0, 100, 1)
+    nums, t, got = team_now(db)
+    check(nums == before and t["current"] is False and len(t.get("waiting") or []) == 1
+          and t["waiting"][0].startswith("kim's review files") and t["counted"] == 0,
+          "files changed without a record: the counts as they were, said not current", t)
+    was = file_state(cache)
+    nums, t, got = team_now(db)
+    check(nums == before and t["current"] is False and file_state(cache) == was,
+          "... still waiting: nothing written for it", t)
+    grace0 = dict(FLOE_TEAM_GRACE_S="0")
+    agree("FLOE_TEAM_GRACE_S=0: counted again at once", env=grace0)
+    before, _t, _got = team_now(db)
+    poke("kim", 0, 101, 1)
+    grace1 = dict(FLOE_TEAM_GRACE_S="1")
+    nums, t, got = team_now(db, env=grace1)
+    check(nums == before and t["current"] is False, "a grace of a second: waited for", t)
+    time.sleep(1.2)
+    agree("... and counted again when it ended", env=grace1)
+    # the reviewer's next session finds its files changed without a word and
+    # says so before anything else: at once, whatever the grace
+    poke("kim", 0, 102, 1)
+    c = Svc()
+    try:
+        hk = rs_open(c, db, "kim")["handle"]
+        agree("a session that finds its files changed says so: counted at once")
+        c("drc_set_status", handle=hk, check=0, errors=[103], status=1)
+        people["kim"][0].setdefault(0, set()).add(103)
+        agree("... and its own changes cost a chunk again", counted=1)
+        # a record lost between the bits and the word
+        before, _t, _got = team_now(db)
+        c("drc_set_status", handle=hk, check=0, errors=[104], status=1)
+        people["kim"][0][0].add(104)
+        log = d / ".t.db.changes.kim"
+        with open(log, "r+b") as f:
+            f.truncate(os.path.getsize(log) - 48)
+        nums, t, got = team_now(db)
+        check(nums == before and t["current"] is False, "a record lost: the counts as they were, not current", t)
+        agree("... counted again without a grace", env=grace0)
+        c("drc_set_status", handle=hk, check=0, errors=[105], status=1)
+        people["kim"][0][0].add(105)
+        agree("the session goes on saying what it changes", counted=1)
+    finally:
+        c.close()
+    # ---- 7. a reviewer's files removed: their bits go with them
+    (d / ".t.db.waive.old").unlink()
+    del people["old"]
+    t = agree("a reviewer's files removed: no longer in the team")
+    check(t["reviewers"] == 3, "... three reviewers", t["reviewers"])
+    # ---- 8. the kept file damaged or gone: made again
+    raw = bytearray(cache.read_bytes())
+    raw[-5] ^= 1
+    cache.write_bytes(bytes(raw))
+    t = agree("the kept file damaged: counted again")
+    check(t["counted"] > 20, "... (every chunk anyone has a bit in)", t["counted"])
+    agree("... and kept", counted=0)
+    # several asking at once, nothing kept yet: every answer is right
+    cache.unlink()
+    whole, _rows = want()
+    procs = [subprocess.Popen([FLOE2, "drc", str(db), "--review-counts"], stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True) for _ in range(6)]
+    outs = [p.communicate(timeout=120) for p in procs]
+    answers = [json.loads(o[0])["team"] for o in outs if o[0]]
+    check(len(answers) == 6 and all(p.returncode == 0 for p in procs)
+          and all({k: x[k] for k in TEAM_KEYS} == whole and x["current"] for x in answers),
+          "six asking at once with nothing kept: every answer right", [x.get("waiting") for x in answers])
+    agree("... and kept once they are done", counted=0)
+    # ---- 9. a results folder that takes no file: counted for the answer
+    cache.unlink()
+    os.chmod(d, 0o555)
+    try:
+        nums, t, got = team_now(db)
+    finally:
+        os.chmod(d, 0o755)
+    check(nums == whole and t["current"] is True and t["kept"] is False and not cache.exists(),
+          "a folder that cannot be written: the team counted for the answer, kept nowhere", t)
+    agree("... kept again when it can be")
+    check(not list(d.glob(".t.db.team.tmp-*")), "no temporary of the kept file is left")
+    # ---- 9b. FLOE_TEAM_KEEP=off, the switch: a session says nothing in a
+    # change log and removes the one it has, the viewer keeps no counts
+    # after its jobs, and the command counts the team for each answer
+    off = dict(FLOE_TEAM_KEEP="off")
+    check((d / ".t.db.changes.kim").exists(), "(kim has a change log)")
+    s = svc_with(off)
+    try:
+        hk = rs_open(s, db, "kim")["handle"]
+        check(not (d / ".t.db.changes.kim").exists(),
+              "FLOE_TEAM_KEEP=off: the session removes its change log")
+        s("drc_set_status", handle=hk, check=0, errors=[200, 4200], status=1)
+        people["kim"][0][0].update({200, 4200})
+        was = file_state(cache)
+        sel = s.job(hk, "drc_select", check=4, mode="replace")
+        e = s.job(hk, "drc_review", check=4, action="waive", selection=sel["selection"], on=True)
+        check(e["state"] == "done" and e["count"] == sizes[4], "... a job of 70,000 under it", e)
+        people["kim"][0].setdefault(4, set()).update(range(sizes[4]))
+    finally:
+        s.close()
+    time.sleep(0.3)
+    check(not (d / ".t.db.changes.kim").exists() and file_state(cache) == was,
+          "... it says nothing, and its viewer keeps no counts", (file_state(cache), was))
+    whole, by_rule = want()
+    for n in (1, 2):
+        nums, t, got = team_now(db, "--all-rules", env=off)
+        check(nums == whole and [{k: x[k] for k in TEAM_KEYS} for x in t["rules"]] == by_rule
+              and t["current"] is True and t["kept"] is False and t["counted"] > 18
+              and file_state(cache) == was,
+              "... the command counts the team for the answer (%d), the kept file untouched" % n,
+              (nums, whole, t["kept"], t["counted"]))
+    t = agree("the switch on again: the reviewer without a log is counted by their files' times")
+    check(t["counted"] > 18 and file_state(cache) != was, "... and kept", t["counted"])
+    agree("... once", counted=0)
+    # ---- 10. --workdir: kept with the reviews under it, nothing beside the source
+    work = d / "work"
+    r = run_env([FLOE2, "--workdir", str(work), "drc", str(db), "--build"], {})
+    check(r.returncode == 0, "a pack under --workdir", r.stderr[-300:])
+    ws = svc_with(dict(FLOE_WORKDIR=str(work)))
+    try:
+        o = ws("drc_open", path=str(db), mode="load", reviewer="yoon")
+        ws("drc_set_status", handle=o["handle"], check=1, errors=[3, 4], status=1)
+    finally:
+        ws.close()
+    nums, t, got = team_now(db, env=dict(FLOE_WORKDIR=str(work)))
+    kept = [p for p in work.rglob(".t.db.team")]
+    logs = [p for p in work.rglob(".t.db.changes.yoon")]
+    check(nums["waived"] == 2 and t["reviewers"] == 1 and t["current"] is True and len(kept) == 1
+          and len(logs) == 1 and not (d / ".t.db.changes.yoon").exists(),
+          "under --workdir: the team of the reviews kept there, its files with them", (nums, kept, logs))
+
+
 def main():
-    global r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12, r13
-    r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12, r13 = map(
-        timed, (r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12, r13))
+    global r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12, r13, r14
+    r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12, r13, r14 = map(
+        timed, (r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12, r13, r14))
     temp = Path(tempfile.mkdtemp(prefix="floe-drc-team-"))
     try:
         d = temp / "runs"
@@ -2347,6 +2780,7 @@ def main():
         r11(temp)
         r12(temp)
         r13(temp)
+        r14(temp)
         if "--no-gui" not in sys.argv:
             from validate_drc_team_gui import r7
             timed(r7)(temp, check)

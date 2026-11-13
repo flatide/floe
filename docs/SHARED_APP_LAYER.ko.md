@@ -631,3 +631,17 @@ P4d처럼 컨트롤러 루프에서만 바뀐다. `FLOE_GTK_LOOP=legacy`는 예�
 - **명령(app-cli `drc.rs`, 웹 바이너리도 같은 코드):** `--review-counts [--rule NAME | --all-rules] [--floe-reviewer ID,…]`.
 - **호스트가 할 일:** 없다. 웹이 같은 수치를 화면에 내려면 `stats::counts`를 부른다. 읽는 것은 waive 사이드카 끝의 카운터 표와 방문 기록의 `rules` 표이므로, 그 두 파일을 쓰는 쪽이 카운터를 함께 쓰는 한 누가 썼든 같은 답이다.
 - **게이트:** `drc_team` R13, 단위 app-core `drc::tests`(`a_pack_opened_for_its_directory_reads_no_block`), app-cli `drc::tests::options`.
+
+## 21. 팀 합계의 즉답 (2026-11-13, app 0.12.465) — 기록과 병합은 공유 Rust, 호스트는 붙이기만
+
+사용자: ".db를 여러 사람이 검토하고 그 합집합을 실시간으로 받아야 해."
+
+- **왜 새로 쓰는가:** 팀 합계(합집합, conflict)는 에러 단위로 봐야 해서 §20의 카운터로는 나오지 않는다. `stats::collect`처럼 매번 전부 세면 에러 수와 리뷰어 수에 비례한다(에러 2,030만·리뷰어 3명에서 560 ms).
+- **`drc::changes`**(새 모듈): 리뷰어의 변경 기록 `.<db>.changes.<리뷰어>`(SPEC-FORMATS). `ChangeLog`는 `desktop::Review`가 갖는다(`review.changes: Arc<Mutex<ChangeLog>>`). 상태를 쓰는 함수(`set_status`, `set_status_range`, `write_status_span`, `waive_import`)가 바뀐 구간을 `touched`로 알리고, `sync_waives`가 상태를 디스크에 내린 뒤 `settle`로 적는다. 방문 기록 쪽은 `FlagStore::change_many`가 커밋한 구간을 `committed`로 알리고 `mark_visited`·`set_members`가 `settle_committed`로 적는다. 상태의 줄은 자기 flush 뒤의 `settle`에서만 나간다(기록이 비트보다 먼저 읽히면 안 된다).
+- **호스트가 할 일은 하나:** 리뷰의 `FlagStore`를 만든 뒤 `flags.attach_changes(Arc::clone(&review.changes))`를 부른다(floe2 `drc_team.rs`의 `TeamCtx::new`가 그렇게 한다). 부르지 않으면 방문·검토 제외가 기록되지 않는다. 그래도 답은 맞지만(파일 시각으로 안다) 그 리뷰어의 변경은 유예(10초) 뒤에 룰 단위로 다시 세게 된다. `Review`와 `FlagStore`를 거치지 않고 리뷰 파일을 쓰는 호스트도 마찬가지다.
+- **`drc::team::live`**(새 모듈): `.<db>.team`과 `merge(pack, id, cancelled) -> Kept`. 판정(`judge`: said / ahead / unsaid / again)과 읽는 순서(기록을 먼저 읽고, 파일은 그 뒤에 열고, 시각은 바이트보다 먼저 묻는다)는 SPEC-FORMATS에 있다. `stats::counts`가 `merge_found`를 불러 보고서의 `team`을 채운다. 바뀐 것이 없으면 잠금도 쓰기도 없다.
+- **뷰어 서비스(floe2 `drc.rs`):** 에러를 많이 바꾼 작업 뒤에 `Shared::team_soon()`이 별도 스레드로 `live::merge`를 돌린다(65,536개 이상의 `waive`·`not-required` job, `drc_team_apply`, `drc_migrate_apply`, `drc_waive_import`). 한 번에 하나만 돌고, 도는 중에 또 청하면 끝난 뒤 한 번 더 본다. 세션을 닫을 때 멈추게 하고 기다린다. 긴 작업은 약 1초마다 `sync_waives`로 정착시킨다(waive job 루프, `snapshot::apply`, `migrate::apply`, `FlagStore::set_members`). 웹이 같은 일을 하려면 같은 자리에서 `live::merge`를 부르면 된다. 부르지 않아도 조회가 센다.
+- **스위치:** `FLOE_TEAM_KEEP=off`(기록도 캐시도 쓰지 않는다. 답은 매번 센다), `FLOE_TEAM_GRACE_S`(기록을 기다리는 초, 기본 10, 0 = 기다리지 않음).
+- **`floe2 drc`의 읽기 전용 약속:** `--review-counts`는 `.<db>.team` 하나를 pack 옆에 둔다(`.tray.source`처럼 답을 적어 두는 파일이고 리뷰는 건드리지 않는다). 도움말에 적었다. 폴더가 받지 않으면 쓰지 않는다.
+- **웹 병합에서 볼 것:** `desktop.rs`의 `sync_waives`가 `flush_statuses`와 `changes.settle()`로 나뉜 것, `team/stats.rs`에서 `pub(super)`가 된 것(`Found`, `discover`, `Planes`, `team_of`, `waive_of`, `flags_connection`, `collect_from`), `Team::json`의 `pending`이 saturating인 것, `open_waive`가 `waive_of(File)`로 나뉜 것.
+- **게이트:** `drc_team` R14, 단위 app-core `drc::changes`(4), `drc::team::live`(6).

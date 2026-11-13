@@ -1,0 +1,724 @@
+use super::*;
+use crate::drc::analysis::scope::Runs;
+use crate::drc::changes::stamp_at;
+use crate::drc::desktop::{Review, STATUS_NONE, STATUS_WAIVED};
+use crate::drc::team::flags::FlagStore;
+use crate::drc::team::stats::collect_from;
+use crate::drc::Pack;
+use std::os::unix::fs::MetadataExt;
+use std::sync::Arc;
+
+static SERIAL: AtomicU64 = AtomicU64::new(0);
+
+/// The errors of the fixture's one rule that has any - rule 1; rules 0 and
+/// 2 are empty: three whole chunks and a short one.
+const N: u64 = 3 * CHUNK + 100;
+const RULE: usize = 1;
+
+struct Folder {
+    dir: PathBuf,
+    pack: PathBuf,
+}
+
+impl Folder {
+    fn new() -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "floe-team-live-{}-{}",
+            std::process::id(),
+            SERIAL.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&dir).unwrap();
+        let pack = dir.join(".results.db.tray");
+        fs::write(&pack, crate::drc::tests::bytes(N)).unwrap();
+        Self { dir, pack }
+    }
+    fn file(&self, name: &str) -> PathBuf {
+        self.dir.join(name)
+    }
+    fn cache(&self) -> PathBuf {
+        self.file(".results.db.team")
+    }
+    fn log(&self, who: &str) -> PathBuf {
+        self.file(&format!(".results.db.changes.{who}"))
+    }
+    fn id(&self) -> Identity {
+        let stop = AtomicUsize::new(0);
+        Identity::of_pack(&Pack::open(&self.pack, &stop).unwrap(), "statistics").unwrap()
+    }
+    /// The kept counts after a merge at `now` with the grace `grace`.
+    fn merged(&self, now: u64, grace: u64) -> Kept {
+        let (stop, id) = (AtomicUsize::new(0), self.id());
+        let found = discover(&self.pack).unwrap();
+        merge_at(&self.pack, &id, &found, now, grace, true, &stop).unwrap()
+    }
+    /// `merged` that is to keep nothing (FLOE_TEAM_KEEP=off).
+    fn counted(&self, now: u64) -> Kept {
+        let (stop, id) = (AtomicUsize::new(0), self.id());
+        let found = discover(&self.pack).unwrap();
+        merge_at(&self.pack, &id, &found, now, 10, false, &stop).unwrap()
+    }
+    /// The exact report's team: a row a rule, and its reviewers.
+    fn exact(&self) -> (Vec<[u64; 5]>, usize) {
+        let stop = AtomicUsize::new(0);
+        let pack = Pack::open(&self.pack, &stop).unwrap();
+        let id = Identity::of_pack(&pack, "statistics").unwrap();
+        let report = collect_from(&pack, &id, discover(&self.pack).unwrap(), None, &stop).unwrap();
+        let team = &report["team"];
+        let rows = team["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| ["visited", "waived", "not_required", "conflicts", "pending"].map(|key| r[key].as_u64().unwrap()))
+            .collect();
+        (rows, team["reviewers"].as_u64().unwrap() as usize)
+    }
+    /// The kept counts are the exact report's, and cover everything.
+    fn agree(&self, kept: &Kept, what: &str) {
+        assert_eq!((rows(kept, &self.id()), kept.reviewers), self.exact(), "{what}");
+        assert!(kept.current && kept.waiting.is_empty(), "{what}: {:?}", kept.waiting);
+    }
+    fn records(&self, who: &str) -> Vec<changes::Record> {
+        let identity: [u8; 28] = self.id().waive_header[12..40].try_into().unwrap();
+        changes::read(&self.log(who), &identity, None).unwrap().records
+    }
+    /// Say `records` (kind, rule, a, b) in `who`'s log as their session would.
+    fn say(&self, who: &str, records: &[(u32, u32, u64, u64)]) {
+        let mut bytes = Vec::new();
+        for &(kind, rule, a, b) in records {
+            bytes.extend(kind.to_le_bytes());
+            bytes.extend(rule.to_le_bytes());
+            bytes.extend(a.to_le_bytes());
+            bytes.extend(b.to_le_bytes());
+        }
+        File::options().append(true).open(self.log(who)).unwrap().write_all(&bytes).unwrap();
+    }
+    /// A waive sidecar of this result with nothing waived, made by hand.
+    fn sidecar(&self, who: &str) -> PathBuf {
+        let id = self.id();
+        let path = self.file(&format!(".results.db.waive.{who}"));
+        let mut bytes = id.waive_header.to_vec();
+        bytes.resize(40 + id.total() as usize + 4 * id.sizes.len(), 0);
+        fs::write(&path, bytes).unwrap();
+        path
+    }
+}
+
+impl Drop for Folder {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(&self.dir, fs::Permissions::from_mode(0o755));
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn rows(kept: &Kept, id: &Identity) -> Vec<[u64; 5]> {
+    kept.rules
+        .iter()
+        .zip(&id.sizes)
+        .map(|(t, &size)| [t.visited, t.waived, t.not_required, t.conflicts, size - t.done])
+        .collect()
+}
+
+/// A file as a merge that wrote nothing leaves it: the same file, time, size.
+fn state(path: &Path) -> Option<(u64, u64, u64)> {
+    fs::metadata(path).ok().map(|m| (m.ino(), stamp_of(&m), m.len()))
+}
+
+/// See that `path`'s time is past `before`, whatever the clock's grain is:
+/// what a writer that changed the file a moment later leaves.
+fn moved(path: &Path, before: u64) {
+    while stamp_at(path) <= before {
+        std::thread::sleep(Duration::from_millis(2));
+        File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(SystemTime::now())
+            .unwrap();
+    }
+}
+
+/// Set rule 1's error `error` to `value` in the waive sidecar `path` as a
+/// writer that says nothing would - the status byte and the rule's counter -
+/// and leave the file's time at `stamp` (None: the time of the write).
+fn poke(path: &Path, id: &Identity, error: u64, value: u8, stamp: Option<u64>) {
+    let before = stamp_at(path);
+    let file = File::options().read(true).write(true).open(path).unwrap();
+    let at = 40 + id.starts[RULE] + error;
+    let mut old = [0u8];
+    file.read_exact_at(&mut old, at).unwrap();
+    file.write_all_at(&[value], at).unwrap();
+    let counter = 40 + id.total() + 4 * RULE as u64;
+    let mut raw = [0u8; 4];
+    file.read_exact_at(&mut raw, counter).unwrap();
+    let count = i64::from(u32::from_le_bytes(raw)) + i64::from(value == STATUS_WAIVED) - i64::from(old[0] == STATUS_WAIVED);
+    file.write_all_at(&(count as u32).to_le_bytes(), counter).unwrap();
+    drop(file);
+    match stamp {
+        Some(ns) => File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH + Duration::from_nanos(ns))
+            .unwrap(),
+        None => moved(path, before),
+    }
+}
+
+/// A reviewer's session as the service opens it: the review, and its flags
+/// saying their changes in the review's log.
+struct Session {
+    review: Review,
+    flags: FlagStore,
+}
+
+impl Session {
+    fn open(f: &Folder, who: &str) -> Self {
+        let stop = AtomicUsize::new(0);
+        let review = Review::open(&f.pack, None, Some(who), &stop).unwrap();
+        assert!(!review.read_only(), "{:?}", review.notices);
+        let id = Identity::of(&review).unwrap();
+        let flags = FlagStore::new(&f.pack, id.sizes.clone(), id.fingerprint.clone(), who).unwrap();
+        flags.attach_changes(Arc::clone(&review.changes));
+        Self { review, flags }
+    }
+    fn waive(&mut self, errors: &[u64], on: bool) {
+        let value = if on { STATUS_WAIVED } else { STATUS_NONE };
+        self.review.set_status(RULE, errors, value).unwrap();
+    }
+    fn waive_run(&mut self, a: u64, b: u64, on: bool) {
+        let (stop, value) = (AtomicUsize::new(0), if on { STATUS_WAIVED } else { STATUS_NONE });
+        self.review
+            .set_status_members(RULE, &Runs::new(vec![a], vec![b]), value, &stop, &mut |_, _| {})
+            .unwrap();
+    }
+    fn visit(&self, error: u64) {
+        self.flags.mark_visited(RULE, error).unwrap();
+    }
+    fn exclude(&self, a: u64, b: u64, on: bool) {
+        let stop = AtomicUsize::new(0);
+        self.flags
+            .set_members(RULE, Some(&Runs::new(vec![a], vec![b])), on, &stop, &mut |_, _, _| {})
+            .unwrap();
+    }
+}
+
+#[test]
+fn what_a_log_and_its_files_say_against_what_is_kept() {
+    let tail = |log_id: u64, records: &[(u32, u64, u64)]| changes::Tail {
+        log_id,
+        len: changes::HEADER + changes::RECORD * records.len() as u64,
+        records: records
+            .iter()
+            .map(|&(kind, a, b)| changes::Record { kind, rule: 1, a, b })
+            .collect(),
+    };
+    let kept = Seen {
+        log_id: 7,
+        cursor: 48,
+        log_stamp: (100, 200),
+        stamps: (100, 200),
+        suspect: 0,
+        known: 3,
+        active: BTreeSet::new(),
+    };
+    let nothing = tail(7, &[]);
+    let word = tail(7, &[(TOUCH, 0, 0), (STAMP, 150, 200)]);
+    let check = |kept: Option<&Seen>, tail: Option<&changes::Tail>, known: u8, stamps: (u64, u64), want: Verdict, what: &str| {
+        assert_eq!(judge(kept, tail, known, stamps), want, "{what}");
+    };
+    use Verdict::{Again, Ahead, Said, Unsaid};
+    check(None, None, 1, (5, 0), Again, "new to the counts");
+    check(None, Some(&word), 3, (150, 200), Again, "new to the counts, with a log");
+    check(Some(&kept), Some(&nothing), 3, (100, 200), Said, "nothing changed");
+    check(Some(&kept), Some(&nothing), 1, (100, 0), Again, "their flags went");
+    check(Some(&kept), Some(&word), 3, (150, 200), Said, "as the last word left them");
+    check(Some(&kept), Some(&word), 3, (160, 200), Ahead, "the statuses newer than the last word");
+    check(Some(&kept), Some(&word), 3, (150, 210), Ahead, "the flags newer than the last word");
+    check(Some(&kept), Some(&word), 3, (100, 200), Unsaid, "the log says more than the files show");
+    check(Some(&kept), Some(&word), 3, (160, 190), Unsaid, "one file newer, one not there yet");
+    check(Some(&kept), Some(&nothing), 3, (110, 200), Unsaid, "changed, and nothing said");
+    check(Some(&kept), Some(&nothing), 3, (90, 200), Unsaid, "changed backwards, and nothing said");
+    // a settle half seen: what was touched without its stamp yet is judged
+    // against the last stamp known
+    let half = tail(7, &[(TOUCH, 0, 0)]);
+    check(Some(&kept), Some(&half), 3, (100, 200), Said, "touched, the stamp not seen yet, the files as before");
+    check(Some(&kept), Some(&half), 3, (110, 200), Ahead, "touched, the stamp not seen yet");
+    check(Some(&kept), Some(&tail(7, &[(RESET, 0, 0), (STAMP, 150, 200)])), 3, (150, 200), Again, "a RESET");
+    check(Some(&kept), Some(&tail(8, &[(STAMP, 100, 200)])), 3, (100, 200), Again, "another log");
+    check(Some(&kept), None, 3, (100, 200), Again, "their log is gone");
+    // a reviewer without a log has nothing to wait for
+    let silent = Seen { log_id: 0, cursor: 0, log_stamp: (0, 0), ..kept.clone() };
+    check(Some(&silent), None, 3, (100, 200), Said, "no log, nothing changed");
+    check(Some(&silent), None, 3, (100, 201), Again, "no log, changed");
+    check(Some(&silent), Some(&tail(7, &[(STAMP, 100, 200)])), 3, (100, 200), Again, "their first log");
+    // counted of files older than the log had said: any change counts again
+    let behind = Seen { stamps: (90, 200), ..kept.clone() };
+    check(Some(&behind), Some(&nothing), 3, (90, 200), Said, "behind, nothing changed");
+    check(Some(&behind), Some(&nothing), 3, (100, 200), Again, "behind, the files came to what was said");
+    check(Some(&behind), Some(&word), 3, (150, 200), Again, "behind, more said");
+    check(Some(&behind), Some(&word), 3, (90, 200), Again, "behind, more said and the files as they were");
+}
+
+#[test]
+fn the_cache_file_is_whole_and_this_results_or_no_cache() {
+    let mut cache = Cache::empty(3);
+    cache.set(1, 0, [1, 2, 3, 0, 4]);
+    cache.set(1, 7, [4096, 0, 0, 0, 4096]);
+    cache.set(2, 1, [0, 5, 0, 0, 0]);
+    assert_eq!(cache.rules, [[0; 5], [4097, 2, 3, 0, 4100], [0, 5, 0, 0, 0]]);
+    // a chunk's counts replaced, and one that counts nothing any more
+    cache.set(1, 0, [2, 2, 0, 1, 2]);
+    cache.set(2, 1, [0; 5]);
+    assert_eq!(cache.rules, [[0; 5], [4098, 2, 0, 1, 4098], [0; 5]]);
+    assert_eq!((cache.kept(1), cache.kept(2), cache.chunks.len()), (vec![0, 7], vec![], 2));
+    assert_eq!(cache.teams()[1], Team { visited: 4098, waived: 2, not_required: 0, conflicts: 1, done: 4098 });
+    cache.reviewers.insert(
+        "kim".into(),
+        Seen {
+            log_id: 9,
+            cursor: 72,
+            log_stamp: (5, 6),
+            stamps: (7, 8),
+            suspect: 3,
+            known: 3,
+            active: [1u32, 2].into(),
+        },
+    );
+    cache.reviewers.insert("김".into(), Seen::default());
+    let bytes = cache.bytes("abc");
+    assert_eq!(Cache::of(&bytes, "abc", 3), Some(cache.clone()));
+    assert_eq!(Cache::of(&Cache::empty(0).bytes(""), "", 0), Some(Cache::empty(0)));
+    // another result's, another number of rules
+    assert!(Cache::of(&bytes, "abd", 3).is_none() && Cache::of(&bytes, "abc", 4).is_none());
+    // any byte changed, the file cut short, or grown
+    for at in 0..bytes.len() {
+        let mut changed = bytes.clone();
+        changed[at] ^= 0x40;
+        assert!(Cache::of(&changed, "abc", 3).is_none(), "byte {at}");
+    }
+    for len in [0, 7, bytes.len() - 1] {
+        assert!(Cache::of(&bytes[..len], "abc", 3).is_none(), "{len} bytes");
+    }
+    let mut longer = bytes.clone();
+    longer.push(0);
+    assert!(Cache::of(&longer, "abc", 3).is_none());
+    // sums that are right over counts that cannot be
+    let mut wrong = cache.clone();
+    wrong.rules[1][0] += 1;
+    assert!(Cache::of(&wrong.bytes("abc"), "abc", 3).is_none(), "a rule's total is not its chunks'");
+    let mut wrong = cache.clone();
+    wrong.chunks.insert((1, 3), [0; 5]);
+    assert!(Cache::of(&wrong.bytes("abc"), "abc", 3).is_none(), "a chunk that counts nothing");
+    let mut wrong = cache.clone();
+    wrong.chunks.insert((1, 3), [4097, 0, 0, 0, 0]);
+    wrong.rules[1][0] += 4097;
+    assert!(Cache::of(&wrong.bytes("abc"), "abc", 3).is_none(), "a count past a chunk");
+    let mut wrong = cache.clone();
+    wrong.chunks.insert((3, 0), [1, 0, 0, 0, 0]);
+    assert!(Cache::of(&wrong.bytes("abc"), "abc", 3).is_none(), "a rule the result has not");
+    // the names
+    assert_eq!(path_of(Path::new("/r/.x.db.tray")).unwrap(), Path::new("/r/.x.db.team"));
+    let key = lock_key(Path::new("/r/.x.db.team"));
+    assert_eq!(
+        (key.dir.as_path(), key.name.as_str(), key.subject.as_str()),
+        (Path::new("/r/.floe-lock"), "x.db.team", "the team's counts of x.db")
+    );
+    assert_eq!(changes::CHUNK, CHUNK, "the change log's chunk is the flags'");
+}
+
+/// The kept counts are what the exact report counts from every status byte
+/// and bit plane, after each thing a reviewer's session does - and a poll
+/// with nothing changed writes nothing and takes no lock.
+#[test]
+fn the_kept_counts_are_the_exact_ones_after_every_change() {
+    let f = Folder::new();
+    let id = f.id();
+    // nobody has reviewed: nothing to keep, nothing made
+    let kept = f.merged(1000, 10);
+    f.agree(&kept, "nobody");
+    assert!(kept.stored && kept.reviewers == 0 && kept.skipped.is_empty());
+    assert!(!f.cache().exists() && !f.file(".floe-lock").exists());
+    // a session that has done nothing is a reviewer with nothing
+    let mut kim = Session::open(&f, "kim");
+    let kept = f.merged(1000, 10);
+    f.agree(&kept, "a session");
+    assert_eq!(kept.reviewers, 1);
+    kim.waive(&[0, 1, 2, CHUNK + 5, N - 1], true);
+    let kept = f.merged(1000, 10);
+    f.agree(&kept, "clicks");
+    assert_eq!(rows(&kept, &id)[RULE], [0, 5, 0, 0, N]);
+    // nothing changed since: the file is not written again, no lock taken
+    let lock = f.file(".floe-lock/results.db.team.build");
+    let before = (state(&f.cache()), state(&lock));
+    assert!(before.0.is_some() && before.1.is_some());
+    let kept = f.merged(1001, 10);
+    f.agree(&kept, "unchanged");
+    assert_eq!((state(&f.cache()), state(&lock), kept.counted), (before.0, before.1, 0));
+    // (the kept file is made with the pack's mode, whatever the umask)
+    assert_eq!(
+        fs::metadata(f.cache()).unwrap().permissions().mode() & 0o777,
+        fs::metadata(&f.pack).unwrap().permissions().mode() & 0o666 | 0o600
+    );
+    // asked to keep nothing (FLOE_TEAM_KEEP=off): what changed is counted
+    // for the answer, each time, and neither the file nor the lock touched
+    kim.waive(&[3, 2 * CHUNK + 7], true);
+    for now in [1001, 1002] {
+        let kept = f.counted(now);
+        assert_eq!((rows(&kept, &id), kept.reviewers), f.exact(), "nothing kept, at {now}");
+        assert!(kept.current && !kept.stored && kept.counted == 2, "{} counted", kept.counted);
+        assert_eq!((state(&f.cache()), state(&lock)), before);
+    }
+    let kept = f.merged(1002, 10);
+    f.agree(&kept, "kept again");
+    assert!(kept.stored && kept.counted == 2);
+    kim.waive(&[3, 2 * CHUNK + 7], false);
+    f.agree(&f.merged(1002, 10), "as before");
+    // two who visited the same error and judged it differently: a conflict,
+    // and no waive of the team's; an error only one of them visited is none
+    let lee = Session::open(&f, "lee");
+    kim.visit(1);
+    lee.visit(1);
+    lee.visit(CHUNK + 5);
+    let kept = f.merged(1002, 10);
+    f.agree(&kept, "a conflict");
+    assert_eq!(rows(&kept, &id)[RULE], [2, 4, 0, 1, N - 2]);
+    assert_eq!(kept.reviewers, 2);
+    // an exclusion across chunks, a selection waived by a job, parts of
+    // both taken back
+    lee.exclude(CHUNK - 10, 2 * CHUNK + 10, true);
+    f.agree(&f.merged(1003, 10), "an exclusion");
+    kim.waive_run(100, 3 * CHUNK + 50, true);
+    f.agree(&f.merged(1004, 10), "a job's waive");
+    kim.waive_run(CHUNK, 2 * CHUNK, false);
+    lee.exclude(CHUNK, CHUNK + 1, false);
+    kim.waive(&[0], false);
+    f.agree(&f.merged(1005, 10), "taken back");
+    // a saved waive file loaded over the review: everything is counted again
+    let saved = f.file("saved.waive");
+    kim.review.waive_export(&saved).unwrap();
+    kim.waive_run(0, N, false);
+    let kept = f.merged(1006, 10);
+    f.agree(&kept, "all taken back");
+    assert_eq!(rows(&kept, &id)[RULE][1], 0);
+    let said = f.records("kim").len();
+    kim.review.waive_import(&saved).unwrap();
+    kim.review.sync_waives().unwrap();
+    assert_eq!(f.records("kim")[said].kind, RESET);
+    let kept = f.merged(1007, 10);
+    f.agree(&kept, "a saved file loaded");
+    assert!(rows(&kept, &id)[RULE][1] > CHUNK);
+    // whatever three reviewers do, in whatever order
+    let park = Session::open(&f, "park");
+    let mut people = [kim, lee, park];
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let mut next = |n: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % n
+    };
+    let (mut conflicts, mut excluded, mut counted) = (0, 0, 0);
+    // (kim and lee have flags; park's first make their file, and a file
+    // that comes has its reviewer's rules counted whole)
+    let mut flagged = [true, true, false];
+    for step in 0..240 {
+        let person = next(3) as usize;
+        let who = &mut people[person];
+        // (half of the time near a chunk's start, where the others are too)
+        let a = if next(2) == 0 { next(4) * CHUNK + next(24) } else { next(N) };
+        let most = if next(4) == 0 { 6000 } else { 40 };
+        let b = (a + 1 + next(most)).min(N);
+        let action = next(8);
+        match action {
+            0 => who.waive(&[a], true),
+            1 => who.waive(&[a], false),
+            2 => who.waive_run(a, b, true),
+            3 => who.waive_run(a, b, false),
+            4 | 5 => who.visit(a),
+            6 => who.exclude(a, b, true),
+            _ => who.exclude(a, b, false),
+        }
+        let kept = f.merged(2000 + step, 10);
+        f.agree(&kept, &format!("step {step}"));
+        // what is counted again is what changed: the chunk of a click, the
+        // chunks of a run - not the rule
+        let most = match action {
+            _ if action >= 4 && !std::mem::replace(&mut flagged[person], true) => N.div_ceil(CHUNK),
+            0 | 1 | 4 | 5 => 1,
+            _ => (b - 1) / CHUNK - a / CHUNK + 1,
+        };
+        assert!(kept.counted <= most, "step {step}: {} chunks counted, {most} changed", kept.counted);
+        counted += kept.counted;
+        conflicts = conflicts.max(kept.rules[RULE].conflicts);
+        excluded = excluded.max(kept.rules[RULE].not_required);
+    }
+    assert!(conflicts > 0 && excluded > 0, "{conflicts} conflicts, {excluded} set aside");
+    assert!(counted >= 120, "{counted} chunks counted in 240 steps");
+    assert_eq!(f.merged(2300, 10).reviewers, 3);
+    // a session that ends and one that starts say nothing more: the log's
+    // last stamp is how the files stand
+    let names = ["kim", "lee", "park"];
+    let said: Vec<usize> = names.iter().map(|who| f.records(who).len()).collect();
+    drop(people);
+    for (who, &said) in names.iter().zip(&said) {
+        drop(Session::open(&f, who));
+        assert_eq!(f.records(who).len(), said, "{who}");
+    }
+    let before = state(&f.cache());
+    f.agree(&f.merged(3000, 10), "sessions closed and opened");
+    assert_eq!(state(&f.cache()), before);
+}
+
+/// The log makes the answer cheap; the files' times are what makes it right:
+/// a change no record says - a build before the log, a run that ended
+/// between its bits and its word, a record that comes before its bits - is
+/// counted, at once where there is nothing to wait for and after the grace
+/// where there is.
+#[test]
+fn a_change_nobody_said_is_found_by_the_files_times() {
+    let f = Folder::new();
+    let id = f.id();
+    // a reviewer of a build before the change log - files, no log: counted
+    // again at once, each time they change
+    let old = f.sidecar("old");
+    poke(&old, &id, 7, STATUS_WAIVED, None);
+    poke(&old, &id, 2 * CHUNK, STATUS_WAIVED, None);
+    f.agree(&f.merged(1000, 10), "no log");
+    poke(&old, &id, 8, STATUS_WAIVED, None);
+    let kept = f.merged(1001, 10);
+    f.agree(&kept, "no log, changed");
+    assert_eq!(rows(&kept, &id)[RULE][1], 3);
+    // ... their flags too (a store that says nothing, as that build's)
+    let flags = FlagStore::new(&f.pack, id.sizes.clone(), id.fingerprint.clone(), "old").unwrap();
+    flags.mark_visited(RULE, 7).unwrap();
+    let old_flags = flags.path();
+    let kept = f.merged(1002, 10);
+    f.agree(&kept, "no log, flags came");
+    assert_eq!(rows(&kept, &id)[RULE][0], 1);
+    let before = stamp_at(&old_flags);
+    flags.mark_visited(RULE, 3 * CHUNK + 1).unwrap();
+    moved(&old_flags, before);
+    let kept = f.merged(1003, 10);
+    f.agree(&kept, "no log, flags changed");
+    assert_eq!(rows(&kept, &id)[RULE][0], 2);
+    flags.close();
+    drop(flags);
+    // a reviewer with a log, changed by a writer that says nothing: the
+    // record is waited for a grace long - the counts as they were, and said
+    // not to be current - then their rules are counted again
+    let mut kim = Session::open(&f, "kim");
+    kim.waive(&[10, 11], true);
+    kim.visit(10);
+    let kept = f.merged(1010, 10);
+    f.agree(&kept, "a session");
+    let was = rows(&kept, &id);
+    drop(kim);
+    let waive = f.file(".results.db.waive.kim");
+    poke(&waive, &id, 12, STATUS_WAIVED, None);
+    let kept = f.merged(1020, 10);
+    assert!(!kept.current && kept.waiting.len() == 1 && kept.waiting[0].starts_with("kim's review files"), "{:?}", kept.waiting);
+    assert!(rows(&kept, &id) == was && was != f.exact().0);
+    // (still waiting: nothing is written for it, and no lock taken)
+    let before = state(&f.cache());
+    let kept = f.merged(1025, 10);
+    assert!(!kept.current && rows(&kept, &id) == was);
+    assert_eq!(state(&f.cache()), before);
+    f.agree(&f.merged(1030, 10), "the grace ended");
+    // no grace asked (FLOE_TEAM_GRACE_S=0): at once
+    poke(&waive, &id, 13, STATUS_WAIVED, None);
+    f.agree(&f.merged(1040, 0), "no grace");
+    // the reviewer's next session finds its files changed without a word
+    // and says so before anything else: at once, whatever the grace
+    poke(&waive, &id, 14, STATUS_WAIVED, None);
+    let said = f.records("kim").len();
+    let mut kim = Session::open(&f, "kim");
+    let now = f.records("kim");
+    assert_eq!(now.len(), said + 2);
+    assert_eq!((now[said].kind, now[said + 1].kind), (RESET, STAMP));
+    f.agree(&f.merged(1050, 10), "a session's RESET");
+    // a record lost - the run ended between its bits and its word
+    kim.waive(&[20], true);
+    let len = fs::metadata(f.log("kim")).unwrap().len();
+    File::options()
+        .write(true)
+        .open(f.log("kim"))
+        .unwrap()
+        .set_len(len - 2 * changes::RECORD)
+        .unwrap();
+    assert!(!f.merged(1060, 10).current);
+    assert!(!f.merged(1069, 10).current);
+    f.agree(&f.merged(1070, 10), "a lost record");
+    // a job still going: what its log said so far is counted, the rest
+    // waits for its record
+    let all = Runs::new(vec![0], vec![N]);
+    kim.review.set_status_range(RULE, &all, STATUS_WAIVED, 0, CHUNK).unwrap();
+    kim.review.sync_waives().unwrap();
+    let said = stamp_at(&waive);
+    kim.review.set_status_range(RULE, &all, STATUS_WAIVED, CHUNK, CHUNK).unwrap();
+    moved(&waive, said);
+    let kept = f.merged(1080, 10);
+    assert!(!kept.current && kept.waiting[0].starts_with("kim is changing their review"), "{:?}", kept.waiting);
+    let so_far = rows(&kept, &id)[RULE][1];
+    assert!(so_far >= CHUNK && so_far < 2 * CHUNK, "{so_far}");
+    kim.review.sync_waives().unwrap();
+    let kept = f.merged(1081, 10);
+    f.agree(&kept, "the job's end");
+    assert!(rows(&kept, &id)[RULE][1] >= 2 * CHUNK);
+    drop(kim);
+    f.agree(&f.merged(1090, 10), "the session closed");
+    // the log says more than the files show yet - a record read before its
+    // bits can be, as across hosts: nothing of it is taken until the files
+    // are as it says
+    let kim_flags = stamp_at(&f.file(".results.db.review.kim.sqlite3"));
+    assert!(kim_flags > 1);
+    let ahead = (stamp_at(&waive) / 1_000_000_000 + 5) * 1_000_000_000;
+    let before = rows(&f.merged(1090, 10), &id);
+    f.say("kim", &[(TOUCH, RULE as u32, 3, 3), (STAMP, 0, ahead, kim_flags)]);
+    let kept = f.merged(1100, 10);
+    assert!(!kept.current && rows(&kept, &id) == before);
+    poke(&waive, &id, 3 * CHUNK + 50, STATUS_WAIVED, Some(ahead));
+    let kept = f.merged(1101, 10);
+    f.agree(&kept, "the bits came");
+    assert_eq!(rows(&kept, &id)[RULE][1], before[RULE][1] + 1);
+    // ... and where they never come, the files are counted as they are after
+    // the grace, and again whenever they change
+    let further = ahead + 5_000_000_000;
+    f.say("kim", &[(TOUCH, RULE as u32, 0, 0), (STAMP, 0, further, kim_flags)]);
+    assert!(!f.merged(1110, 10).current);
+    f.agree(&f.merged(1120, 10), "the grace of a record without its bits");
+    let before = state(&f.cache());
+    f.agree(&f.merged(1121, 10), "counted of files older than was said, unchanged");
+    assert_eq!(state(&f.cache()), before);
+    poke(&waive, &id, 3 * CHUNK + 51, STATUS_WAIVED, Some(further));
+    f.agree(&f.merged(1122, 10), "counted of files older than was said, changed");
+    // a reviewer's files removed: their bits go with them
+    let with = rows(&f.merged(1122, 10), &id);
+    fs::remove_file(&old).unwrap();
+    fs::remove_file(&old_flags).unwrap();
+    let kept = f.merged(1130, 10);
+    f.agree(&kept, "a reviewer gone");
+    assert!(rows(&kept, &id) != with && kept.reviewers == 1);
+    // the cache damaged, or no cache at all: made again
+    let mut bytes = fs::read(f.cache()).unwrap();
+    let at = bytes.len() - 5;
+    bytes[at] ^= 1;
+    fs::write(f.cache(), &bytes).unwrap();
+    f.agree(&f.merged(1140, 10), "a damaged cache");
+    fs::write(f.cache(), b"FLOETEAM and nothing of it").unwrap();
+    f.agree(&f.merged(1141, 10), "no cache");
+    assert!(Cache::of(&fs::read(f.cache()).unwrap(), &id.fingerprint, id.sizes.len()).is_some());
+    // a folder that takes no file: counted for the answer, kept nowhere
+    fs::remove_file(f.cache()).unwrap();
+    fs::set_permissions(&f.dir, fs::Permissions::from_mode(0o555)).unwrap();
+    let refused = File::create(f.file("probe")).is_err();
+    let kept = f.merged(1150, 10);
+    fs::set_permissions(&f.dir, fs::Permissions::from_mode(0o755)).unwrap();
+    f.agree(&kept, "a folder that cannot be written");
+    if refused {
+        assert!(!kept.stored && !f.cache().exists());
+    }
+}
+
+/// One merge at a time: a second one that finds the first still at work
+/// when its wait ends answers with what is kept, and says so.
+#[test]
+fn a_merge_that_finds_another_at_work_answers_with_what_is_kept() {
+    if lock::disabled() {
+        return;
+    }
+    let f = Folder::new();
+    let id = f.id();
+    let old = f.sidecar("old");
+    poke(&old, &id, 7, STATUS_WAIVED, None);
+    let kept = f.merged(1000, 10);
+    f.agree(&kept, "kept");
+    let was = rows(&kept, &id);
+    poke(&old, &id, 8, STATUS_WAIVED, None);
+    let held = lock::writer(&lock_key(&f.cache()), Mode::Additive, "another merge").unwrap();
+    let started = Instant::now();
+    let kept = f.merged(1001, 10);
+    let waited = started.elapsed();
+    assert!(waited >= WAIT && waited < WAIT * 4, "{waited:?}");
+    assert!(
+        !kept.current
+            && kept.waiting.len() == 1
+            && kept.waiting[0].starts_with("the team's counts are being brought up to date by "),
+        "{:?}",
+        kept.waiting
+    );
+    assert!(rows(&kept, &id) == was && kept.counted == 0 && was != f.exact().0);
+    drop(held);
+    let kept = f.merged(1002, 10);
+    f.agree(&kept, "the other merge ended");
+    assert_eq!(rows(&kept, &id)[RULE][1], 2);
+}
+
+/// Files that are not this result's, or do not read, are left out of the
+/// counts as the exact report leaves them out, said, and not tried at the
+/// cost of a count each time.
+#[test]
+fn files_that_do_not_read_are_left_out_and_said() {
+    let f = Folder::new();
+    let id = f.id();
+    let bad = f.sidecar("bad");
+    poke(&bad, &id, 1, STATUS_WAIVED, None);
+    let flags = f.file(".results.db.review.bad.sqlite3");
+    fs::write(&flags, b"not a database at all").unwrap();
+    let kept = f.merged(1000, 10);
+    f.agree(&kept, "flags that do not read");
+    assert_eq!(rows(&kept, &id)[RULE], [0, 1, 0, 0, N]);
+    assert_eq!(kept.skipped.len(), 1, "{:?}", kept.skipped);
+    assert_eq!((kept.skipped[0].0.as_str(), &kept.skipped[0].1), ("bad", &flags));
+    let before = state(&f.cache());
+    let kept = f.merged(1001, 10);
+    f.agree(&kept, "flags that do not read, again");
+    assert_eq!((kept.skipped.len(), state(&f.cache())), (1, before));
+    // a sidecar of another result is nobody's review of this one
+    let other = f.sidecar("other");
+    let mut bytes = fs::read(&other).unwrap();
+    bytes[20] ^= 1;
+    fs::write(&other, bytes).unwrap();
+    let kept = f.merged(1002, 10);
+    f.agree(&kept, "another result's sidecar");
+    assert_eq!((kept.reviewers, kept.skipped.len(), state(&f.cache())), (1, 2, before));
+    // the flags read now: counted
+    fs::remove_file(&flags).unwrap();
+    let store = FlagStore::new(&f.pack, id.sizes.clone(), id.fingerprint.clone(), "bad").unwrap();
+    store.mark_visited(RULE, 1).unwrap();
+    store.mark_visited(RULE, 2).unwrap();
+    assert_eq!(store.path(), flags);
+    store.close();
+    let kept = f.merged(1003, 10);
+    f.agree(&kept, "flags that read now");
+    assert_eq!(rows(&kept, &id)[RULE], [2, 1, 0, 0, N - 2]);
+    assert_eq!(kept.skipped.len(), 1);
+    // flags that read at the last merge and read no more, their time as it
+    // was: the count that meets them looks once more with every file opened
+    // anew, and leaves them out as the exact report does
+    let stamp = stamp_at(&flags);
+    let whole = fs::read(&flags).unwrap();
+    fs::write(&flags, b"not a database any more").unwrap();
+    File::options()
+        .write(true)
+        .open(&flags)
+        .unwrap()
+        .set_modified(SystemTime::UNIX_EPOCH + Duration::from_nanos(stamp))
+        .unwrap();
+    assert_eq!(stamp_at(&flags), stamp);
+    poke(&bad, &id, 5, STATUS_WAIVED, None);
+    for keep in [false, true] {
+        let kept = if keep { f.merged(1004, 10) } else { f.counted(1004) };
+        assert_eq!((rows(&kept, &id), kept.reviewers), f.exact(), "flags that read no more, kept: {keep}");
+        assert!(kept.current && kept.stored == keep, "{:?}", kept.waiting);
+        assert_eq!(rows(&kept, &id)[RULE], [0, 2, 0, 0, N]);
+        assert_eq!(kept.skipped.len(), 2, "{:?}", kept.skipped);
+    }
+    let before = state(&f.cache());
+    f.agree(&f.merged(1005, 10), "... left out, once");
+    assert_eq!(state(&f.cache()), before);
+    // ... and counted again when they read
+    fs::write(&flags, whole).unwrap();
+    let kept = f.merged(1006, 10);
+    f.agree(&kept, "flags that read again");
+    assert_eq!(rows(&kept, &id)[RULE], [2, 2, 0, 0, N - 2]);
+}

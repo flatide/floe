@@ -1286,6 +1286,9 @@ pub fn apply(
     check_cancelled(cancelled)?;
     let mut stream = source.chunks(check)?;
     let mut mask = vec![false; CHUNK as usize];
+    // (what a long application changes is said in the change log about once
+    // a second as it goes: drc::changes)
+    let mut settled = std::time::Instant::now();
     while let Some((rule, k, [_v, w, n, _c, work])) = stream.next()? {
         check_cancelled(cancelled)?;
         let count = (sizes[rule] - k * CHUNK).min(CHUNK);
@@ -1339,6 +1342,11 @@ pub fn apply(
                 );
             }
             result.applied += changes.count();
+            if settled.elapsed() >= std::time::Duration::from_secs(1) {
+                drop(guard);
+                r.sync_waives()?;
+                settled = std::time::Instant::now();
+            }
         }
         result.processed = if check.is_none() { offsets[rule] } else { 0 } + sizes[rule].min((k + 1) * CHUNK);
         report.report(result.processed);

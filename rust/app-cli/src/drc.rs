@@ -32,11 +32,19 @@ const HELP: &str = "Usage: floe2-web drc RESULTS.db|.RESULTS.db.tray [OPTIONS]
                           counters the review files keep - every waive, visit
                           and exclusion brings them up to date as it is
                           written -, so no error is read and the time does
-                          not grow with the result. With --rule NAME also the
-                          rule's four numbers, with --all-rules every rule's;
-                          with --floe-reviewer ID[,ID...] these reviewers
-                          alone. Not counted again (--review-stats does), and
-                          no team union or reasons (they need each error)
+                          not grow with the result. `team`: everyone's review
+                          united - visited, waived, not for review, conflicts
+                          and pending as --review-stats counts them -, kept
+                          in .DB.team beside the pack and brought up to date
+                          by what the reviewers changed since (`current` is
+                          false while a change is not in it yet). With
+                          --rule NAME also the rule's numbers, with
+                          --all-rules every rule's; with --floe-reviewer
+                          ID[,ID...] these reviewers' rows alone - the team
+                          is always everyone's. The reviewers' own counters
+                          are not counted again (--review-stats does), and no
+                          reasons are counted. FLOE_TEAM_KEEP=off: .DB.team
+                          is not written, the team counted for each answer
   --rule NAME             With --review-counts: list this rule
   --all-rules             With --review-counts: list every rule
   --svrf-rules FILE       Explicit rules.json metadata for --rules / --errs
@@ -64,6 +72,10 @@ compared (CRC-32), and the answer kept as .RESULTS.db.tray.source so the next
 open reads nothing. Reviews are bound to the pack's content id (what the
 errors are): a pack made again, a copied folder and a re-run with the same
 errors keep them.
+--review-counts keeps one file beside the pack, the team's counts
+(.RESULTS.db.team; none where the folder takes no file, or with
+FLOE_TEAM_KEEP=off): a kept answer, like .RESULTS.db.tray.source - no review
+is changed by it.
 --build uses the existing integer-DBU pack format; fractional coordinates fail
 without changing the old pack. It preserves review files and emits JSON.
 Name migration is reported separately and is not rolled back if rebuilding fails.
@@ -392,9 +404,10 @@ fn reviewers_named(reviewers: Option<&str>) -> Result<Option<Vec<String>>> {
     }
     Ok(only)
 }
-/// `--review-counts`: the counts the reviewers' files keep, as one JSON
-/// document on stdout (app-core drc::team::stats `counts`) - the answer at
-/// once: no error of the result is read.
+/// `--review-counts`: the counts the reviewers' files keep and the team's
+/// kept union, as one JSON document on stdout (app-core drc::team::stats
+/// `counts`, drc::team::live) - the answer at once: of the result's errors
+/// only the chunks a reviewer changed since the last answer are read.
 #[cfg(feature = "review-sqlite")]
 fn review_counts(
     source: &std::path::Path,

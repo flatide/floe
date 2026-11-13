@@ -5,6 +5,7 @@ pub mod analysis;
 mod ascii;
 pub mod build;
 pub mod capture;
+pub mod changes;
 mod database;
 pub mod desktop;
 mod filters;

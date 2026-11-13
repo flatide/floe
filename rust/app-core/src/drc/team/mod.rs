@@ -18,6 +18,7 @@
 //! `review-sqlite`; floe2 turns it on.
 pub mod bits;
 pub mod flags;
+pub mod live;
 pub mod migrate;
 pub mod snapshot;
 pub mod stats;

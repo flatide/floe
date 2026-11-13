@@ -33,9 +33,14 @@
 //! rule -, which every waive, visit and exclusion brings up to date as it
 //! is written. No status byte and no bit plane is read, and the pack is
 //! opened for its directory alone: the cost is the rules', not the errors'.
-//! What it cannot say for that is what needs an error at a time - the team's
-//! union and conflicts, the reasons' counts - and whether a stored counter
-//! is what its statuses count (`collect` says `counters_match`).
+//! What it cannot say for that is what needs an error at a time - the
+//! reasons' counts - and whether a stored counter is what its statuses count
+//! (`collect` says `counters_match`). The team's union and conflicts need an
+//! error at a time too, and are in the report all the same (0.12.465, user
+//! 2026-11-13: ".db를 여러 사람이 검토하고 그 합집합을 실시간으로 받아야
+//! 해"): kept in `.<db>.team` and brought up to date by what the reviewers'
+//! change logs say since (`live`) - the one file this report writes, and
+//! does without where the folder takes none.
 use super::bits::{Bits, CHUNK};
 use super::flags::{self, open_read_only, sql};
 use super::Identity;
@@ -72,13 +77,13 @@ const READ_BUFFER: usize = 1 << 20;
 
 /// A reviewer's working files as found.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct Found {
+pub(super) struct Found {
     /// the waive sidecar and where it is (`results`, `temp`)
-    waive: Option<(PathBuf, &'static str)>,
+    pub(super) waive: Option<(PathBuf, &'static str)>,
     /// the flags file and where it is (`results`, `review-root`, `user-data`)
-    review: Option<(PathBuf, &'static str)>,
+    pub(super) review: Option<(PathBuf, &'static str)>,
     /// the reasons file and where it is (`results`, `temp`)
-    reasons: Option<(PathBuf, &'static str)>,
+    pub(super) reasons: Option<(PathBuf, &'static str)>,
 }
 
 /// A tag as the sidecars are named (letters, digits, `.`, `_`, `-`), and not
@@ -132,7 +137,7 @@ fn names(folder: &Path, must: bool) -> Result<Vec<String>> {
 }
 
 /// Every reviewer with a working file of `pack`'s result, by tag.
-fn discover(pack: &Path) -> Result<BTreeMap<String, Found>> {
+pub(super) fn discover(pack: &Path) -> Result<BTreeMap<String, Found>> {
     let database = crate::cache::database_path(pack)?;
     let name = database
         .file_name()
@@ -328,7 +333,7 @@ pub(crate) fn utc(secs: u64) -> String {
 }
 
 /// The status bytes equal to waived, as bits (at most a chunk).
-fn waived_bits(statuses: &[u8]) -> Bits {
+pub(super) fn waived_bits(statuses: &[u8]) -> Bits {
     let mut bits = Bits::ZERO;
     for (word, group) in statuses.chunks(64).enumerate() {
         if group.iter().all(|&b| b == 0) {
@@ -381,47 +386,47 @@ impl Own {
 
 /// The team's counts of a rule (snapshot::Counts' numbers).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct Team {
-    visited: u64,
-    waived: u64,
-    not_required: u64,
-    conflicts: u64,
-    done: u64,
+pub struct Team {
+    pub visited: u64,
+    pub waived: u64,
+    pub not_required: u64,
+    pub conflicts: u64,
+    pub done: u64,
 }
 impl Team {
-    fn add(&mut self, o: &Team) {
+    pub(super) fn add(&mut self, o: &Team) {
         self.visited += o.visited;
         self.waived += o.waived;
         self.not_required += o.not_required;
         self.conflicts += o.conflicts;
         self.done += o.done;
     }
-    fn json(&self, total: u64) -> Value {
+    pub(super) fn json(&self, total: u64) -> Value {
         json!({
             "errors": total,
             "visited": self.visited,
             "waived": self.waived,
             "not_required": self.not_required,
             "conflicts": self.conflicts,
-            "pending": total - self.done,
+            "pending": total.saturating_sub(self.done),
         })
     }
 }
 
 /// One reviewer's planes of a chunk as the team counts them.
 #[derive(Clone, Copy)]
-struct Planes {
-    visited: Bits,
-    waived: Bits,
-    not_required: Bits,
-    visited_known: bool,
-    waive_known: bool,
-    not_required_known: bool,
+pub(super) struct Planes {
+    pub(super) visited: Bits,
+    pub(super) waived: Bits,
+    pub(super) not_required: Bits,
+    pub(super) visited_known: bool,
+    pub(super) waive_known: bool,
+    pub(super) not_required_known: bool,
 }
 
 /// The team's counts of one chunk from its reviewers' planes
 /// (snapshot::aggregate's rule).
-fn team_of(planes: &[Planes]) -> Team {
+pub(super) fn team_of(planes: &[Planes]) -> Team {
     let (mut v, mut w, mut n) = (Bits::ZERO, Bits::ZERO, Bits::ZERO);
     let (mut wy, mut wn, mut ny, mut nn) = (Bits::ZERO, Bits::ZERO, Bits::ZERO, Bits::ZERO);
     for p in planes {
@@ -477,9 +482,11 @@ pub fn collect(source: &Path, only: Option<&[String]>, cancelled: &AtomicUsize) 
 /// The counts of `source`'s current pack as the reviewers' files keep them
 /// (see the module docs): every reviewer found, or `only` these, each with
 /// the whole result's errors, waived, visited and not for review - and the
-/// rules `listed` with the same four. The pack is asked for as `collect`
-/// asks (none, or one of an older .db, is an error), opened for its
-/// directory alone and without a reader's registration.
+/// rules `listed` with the same four; and `team`, the union of everyone's
+/// review as `collect` counts it (`live::merge`), of every reviewer whoever
+/// `only` names. The pack is asked for as `collect` asks (none, or one of
+/// an older .db, is an error), opened for its directory alone and without a
+/// reader's registration.
 pub fn counts(
     source: &Path,
     only: Option<&[String]>,
@@ -489,15 +496,65 @@ pub fn counts(
     let pack = crate::drc::open_pack_directory(source, cancelled)?;
     let id = Identity::of_pack(&pack, "statistics")?;
     let found = discover(&pack.path)?;
-    let report = counts_from(&pack, &id, found, only, listed, cancelled)?;
+    // the team: every reviewer's review united, from the counts kept of it
+    // and brought up to date by what the reviewers' change logs say since
+    // (drc::team::live; 0.12.465) - of everyone, whoever was asked for
+    let kept = super::live::merge_found(&pack.path, &id, &found, cancelled)?;
+    let mut report = counts_from(&pack, &id, found, only, listed, cancelled)?;
+    report["team"] = team_json(&pack, &id, &kept, listed);
     pack.unchanged()?;
     Ok(report)
+}
+
+/// The kept team counts as the report says them: `collect`'s `team` keys -
+/// `errors`, `visited`, `waived`, `not_required`, `conflicts`, `pending`,
+/// `reviewers`, and `rules` for the rules listed - with `current` (they
+/// cover every reviewer's files as they stand; `waiting` says why not),
+/// `kept` (they are in the file), `counted` (the chunks counted again for
+/// this answer) and `skipped` (files left out, as `collect` leaves them).
+fn team_json(pack: &Pack, id: &Identity, kept: &super::live::Kept, listed: Listed) -> Value {
+    let mut whole = Team::default();
+    for rule in &kept.rules {
+        whole.add(rule);
+    }
+    let mut team = whole.json(id.total());
+    team["reviewers"] = json!(kept.reviewers);
+    team["current"] = json!(kept.current);
+    team["kept"] = json!(kept.stored);
+    team["counted"] = json!(kept.counted);
+    if !kept.waiting.is_empty() {
+        team["waiting"] = json!(kept.waiting);
+    }
+    if !kept.skipped.is_empty() {
+        team["skipped"] = kept
+            .skipped
+            .iter()
+            .map(|(reviewer, file, reason)| json!({"reviewer": reviewer, "file": file, "reason": reason}))
+            .collect();
+    }
+    let rows: Vec<usize> = match listed {
+        Listed::Whole => return team,
+        Listed::All => (0..pack.checks.len()).collect(),
+        Listed::Named(name) => (0..pack.checks.len())
+            .filter(|&ci| pack.checks[ci].name == name)
+            .collect(),
+    };
+    team["rules"] = rows
+        .into_iter()
+        .map(|ci| {
+            let mut row = kept.rules[ci].json(id.sizes[ci]);
+            row["index"] = json!(ci + 1);
+            row["name"] = json!(pack.checks[ci].name);
+            row
+        })
+        .collect();
+    team
 }
 
 /// The flags' counters a rule, as the file keeps them: (visited, not for
 /// review, both) by rule, zeros for a rule without a row. Counters that
 /// cannot be a rule's are an error.
-fn kept_flags(conn: &Connection, sizes: &[u64]) -> Result<Vec<(u64, u64, u64)>> {
+pub(super) fn kept_flags(conn: &Connection, sizes: &[u64]) -> Result<Vec<(u64, u64, u64)>> {
     let mut kept = vec![(0u64, 0u64, 0u64); sizes.len()];
     let mut statement = conn
         .prepare("SELECT ci,visited,nr,both FROM rules")
@@ -659,7 +716,7 @@ fn counts_from(
     Ok(report)
 }
 
-fn collect_from(
+pub(super) fn collect_from(
     pack: &Pack,
     id: &Identity,
     mut found: BTreeMap<String, Found>,
@@ -947,8 +1004,12 @@ fn next_flags(rows: &mut Option<rusqlite::Rows<'_>>) -> Result<Option<(u64, Bits
 
 /// A waive sidecar of this result, positioned at its statuses, and its
 /// stored counters.
-fn open_waive(path: &Path, id: &Identity) -> Result<(File, Vec<u32>)> {
-    let mut file = File::open(path)?;
+pub(super) fn open_waive(path: &Path, id: &Identity) -> Result<(File, Vec<u32>)> {
+    waive_of(File::open(path)?, id)
+}
+
+/// `open_waive` of a sidecar already open.
+pub(super) fn waive_of(mut file: File, id: &Identity) -> Result<(File, Vec<u32>)> {
     let (total, rules) = (id.total(), id.sizes.len());
     let mut head = [0u8; 40];
     let matches = file.read_exact_at(&mut head, 0).is_ok()
@@ -972,6 +1033,15 @@ fn open_waive(path: &Path, id: &Identity) -> Result<(File, Vec<u32>)> {
 
 /// A flags file of this result, in a read transaction.
 fn open_flags(path: &Path, id: &Identity) -> Result<Connection> {
+    let conn = flags_connection(path, id)?;
+    conn.execute_batch("BEGIN").map_err(sql)?;
+    Ok(conn)
+}
+
+/// A flags file of this result, open for reading - no transaction begun: a
+/// reader that counts for long begins and ends its own, so the reviewer's
+/// writes are not kept waiting (drc::team::live).
+pub(super) fn flags_connection(path: &Path, id: &Identity) -> Result<Connection> {
     let conn = open_read_only(path, Duration::from_secs(10))?;
     let text: String = conn
         .query_row("SELECT value FROM metadata WHERE id=1", [], |r| r.get(0))
@@ -990,7 +1060,6 @@ fn open_flags(path: &Path, id: &Identity) -> Result<Connection> {
             "review flags of another DRC result (their content id or rule sizes are not this pack's)",
         ));
     }
-    conn.execute_batch("BEGIN").map_err(sql)?;
     Ok(conn)
 }
 
