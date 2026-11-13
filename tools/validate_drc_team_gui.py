@@ -326,8 +326,65 @@ def _team_waives(v, d, check, pump):
     pump(v, lambda: v._drc_review_job is None, "an unwaive", 30)
     w._refresh()
     loaded(w, "the refresh")
+    # ---- a confirmed waive is locked (0.12.467, user 2026-11-13: "confirm된
+    # waive는 되돌릴 수 없게 잠구고 confirmer만 되돌릴 수 있게 해줘")
+    check([b.get_tooltip_text() for b in w.confirm_buttons] == [w.LOCKS, w.UNLOCKS, w.LOCKS],
+          "the confirmer's buttons say what a confirmation locks")
+    side = d / ".sample.db.confirm.gui"
+    if want[left[0]] == ["gui"]:
+        # (the confirmer turned a confirmed waive of their own back above)
+        check(db.get_status(0, left[0]) == 0 and side.read_bytes()[40 + left[0]] == 0
+              and "unwaived 1 error(s)" in v.status.get_text() and "locked" not in v.status.get_text(),
+              "a confirmer turns their own confirmed waive back, and their confirmation goes with it",
+              v.status.get_text())
+    # two more waives of the viewer's reviewer, one of them confirmed
+    spare = [e for e in range(n0 - 1, -1, -1) if e not in want][:2]
+    held, free = spare
+    v._drc_set_waived(0, [held], True, reason="lock me")
+    v._drc_set_waived(0, [free], True, reason="")
+    w.mode.set_active_id("unconfirmed")
+    w._refresh()
+    loaded(w, "the new waives")
+    pick(w, {held})
+    w._confirm(True)
+    loaded(w, "one of them confirmed")
+    check(side.read_bytes()[40 + held] == 1 and side.read_bytes()[40 + free] == 0
+          and db.get_status(0, held) == 1 and db.get_status(0, free) == 1,
+          "(a confirmed waive and one that is not)", rows(w))
     w.window.destroy()
     check(v._drc_waives_win is None, "the window closes")
+    # the same results as a reviewer's again: the confirmation locks
+    v._confirmer = False
+    v._drc_request(path)
+    pump(v, lambda: v._drc is not db and not getattr(v._drc, "confirmer", True), "the reviewer's open", 60)
+    db = v._drc
+    name = db.checks[0].name
+    v._drc_set_waived(0, [held], False)
+    check(db.get_status(0, held) == 1 and v.status.get_text() == (
+        "locked: 1 waive(s) in %s confirmed by gui - only a confirmer turns them back" % name),
+        "a reviewer's unwaive of a confirmed waive: left waived, and the status line says who confirmed it",
+        v.status.get_text())
+    v._drc_set_waived(0, [held, free], False)
+    check(db.get_status(0, held) == 1 and db.get_status(0, free) == 0 and v.status.get_text() == (
+        "unwaived 1 error(s) in %s · 1 locked: confirmed by gui - only a confirmer turns them back" % name),
+        "a selection with one: the other is turned back, the locked one said", v.status.get_text())
+    v._drc_set_waived(0, [held, free], True, reason="other")
+    check(db.reason_get(0, held)[0] == "lock me" and db.reason_get(0, free)[0] == "other"
+          and v.status.get_text() == (
+              "waived 2 error(s) in %s · reason: other · 1 locked: confirmed by gui, reason unchanged" % name),
+          "waived again with a reason: the confirmed waive keeps its own", v.status.get_text())
+    v._drc_set_waived(0, [held], True, reason="other")
+    check(db.reason_get(0, held)[0] == "lock me" and v.status.get_text() == (
+        "locked: 1 waive(s) in %s confirmed by gui - their reason stays as it is" % name),
+        "... alone: nothing changes, said", v.status.get_text())
+    v._drc_show_detail(0, held)
+    pump(v, lambda: "waive confirmed by: gui · locked" in _detail(v), "the lock in the detail", 30)
+    check("waive confirmed by: gui · locked" in _detail(v) and "waive reason: lock me" in _detail(v),
+          "the error's detail says it is confirmed and locked", _detail(v))
+    team = cli()
+    check(team.get("rules") and team["rules"][0]["confirmed"] >= 1
+          and db.status_counts(0)[0] == len([e for e, who in waivers().items() if "gui" in who]),
+          "... and the counts are the files'", team.get("rules", [None])[0])
 
 
 def r7(temp, check):

@@ -88,28 +88,9 @@ pub(super) struct Found {
     pub(super) confirm: Option<(PathBuf, &'static str)>,
 }
 
-/// A tag as the sidecars are named (letters, digits, `.`, `_`, `-`), and not
-/// a leftover of one: `<id>.stale-<epoch>` (another run's sidecar moved
-/// aside) or `<id>.tmp-<pid>` (a sidecar being made).
-fn reviewer_of(tag: &str) -> Option<&str> {
-    if tag.is_empty()
-        || tag.len() > 200
-        || !tag.chars().all(|c| c.is_alphanumeric() || "._-".contains(c))
-    {
-        return None;
-    }
-    if let Some((_, last)) = tag.rsplit_once('.') {
-        for prefix in ["stale-", "tmp-"] {
-            if last
-                .strip_prefix(prefix)
-                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-            {
-                return None;
-            }
-        }
-    }
-    Some(tag)
-}
+// (which names are a reviewer's: the lock's reader asks the same -
+// drc::confirm, which is there without the flags' store)
+use crate::drc::local::reviewer_of;
 
 /// The names in `folder` (missing: none), or the error when `must`.
 fn names(folder: &Path, must: bool) -> Result<Vec<String>> {

@@ -1245,12 +1245,20 @@ pub struct Applied {
     pub conflicts_skipped: u64,
     pub processed: u64,
     pub applied: u64,
+    /// one's own waives the source would have turned back and a confirmer
+    /// has confirmed: left as they are, nothing of the error taken
+    /// (0.12.467; said only when there are any)
+    #[serde(skip_serializing_if = "crate::drc::team::is_zero")]
+    pub locked: u64,
 }
 
 /// Apply `source`'s known waive and not-required decisions over its work
 /// (a rule and a membership of it when given). One's own visited errors
-/// with a different decision are kept unless `force`. Each chunk commits
-/// on its own; `changed(rule)` is told of every rule whose statuses moved.
+/// with a different decision are kept unless `force`; a waive of one's own
+/// that a confirmer has confirmed is kept whatever `force` says, with the
+/// rest of that error's judgement (`desktop::Review::locked`). Each chunk
+/// commits on its own; `changed(rule)` is told of every rule whose
+/// statuses moved.
 #[allow(clippy::too_many_arguments)]
 pub fn apply(
     own: &Own,
@@ -1305,6 +1313,16 @@ pub fn apply(
             check_cancelled(cancelled)?;
             let (ov, ow, on, before) = own_bits(own, r, rule, k)?;
             let diff = different(source, ow, on, w, n);
+            // a waive a confirmer has confirmed is not turned back here:
+            // the error stays as it is, whatever `force` says
+            let back = if source.waive_known { eligible & ow & !w } else { Bits::ZERO };
+            if !back.is_zero() {
+                if let Some(mask) = r.locked(rule, k * CHUNK, count)? {
+                    let kept = back & Bits::from_mask(&mask);
+                    result.locked += kept.count();
+                    eligible &= !kept;
+                }
+            }
             let conflicts = eligible & ov & diff;
             if !force {
                 result.conflicts_skipped += conflicts.count();
@@ -1318,8 +1336,10 @@ pub fn apply(
                     for i in change_w.ones() {
                         after[i as usize] = if w.get(i) { STATUS_WAIVED } else { STATUS_NONE };
                     }
-                    r.write_status_span(rule, k * CHUNK, &before, &after)?;
-                    result.changed_waived += change_w.count();
+                    // (one confirmed since the look above stays too)
+                    let kept = r.write_status_span(rule, k * CHUNK, &before, &after)?;
+                    result.changed_waived += change_w.count() - kept;
+                    result.locked += kept;
                     changed(rule);
                 }
             }

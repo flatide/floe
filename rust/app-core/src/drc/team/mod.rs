@@ -33,6 +33,11 @@ use std::time::{Duration, Instant};
 
 pub use bits::{Bits, CHUNK};
 
+/// (a count a report says only when there is any)
+pub(crate) fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
 /// What the team's files are checked against: one open pack's review.
 #[derive(Clone, Debug)]
 pub struct Identity {

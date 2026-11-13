@@ -25,12 +25,21 @@
 //! The file is made at the first confirmation: a reviewer who confirms
 //! nothing has none. Who may confirm is the launcher's word (`floe2 view
 //! --confirmer`), kept by `desktop::Review`.
+//!
+//! A confirmed waive is locked (0.12.467; user 2026-11-13: "confirm된
+//! waive는 되돌릴 수 없게 잠구고 confirmer만 되돌릴 수 있게 해줘"): the
+//! session of a reviewer who is no confirmer does not turn it back, nor
+//! change its reason. `Locks` is how that session knows - every confirmer's
+//! file of the result, read as the statistics find them - and
+//! `desktop::Review`'s status writers are where it is kept.
 use super::local::aside_path;
 use crate::{Error, ErrorKind, Result};
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 pub const MAGIC: &[u8; 8] = b"FLOECONF";
 pub const VERSION: u32 = 1;
@@ -356,6 +365,215 @@ impl Confirms {
     }
 }
 
+/// How long what `Locks` read of the confirmers' files is used before the
+/// files are found and opened anew.
+pub const LOCK_REFRESH: Duration = Duration::from_secs(1);
+
+/// Which waives of a result are locked: the confirmations of every
+/// confirmer, as the session of a reviewer reads them before it turns a
+/// waive back. An error is locked while a confirmer's file has it confirmed;
+/// whether the reviewer has it waived is the caller's to ask.
+///
+/// The files are the ones the statistics count (drc::team::stats `discover`):
+/// `.<db>.confirm.<reviewer>` beside the results, and the temp folder's
+/// path-hashed names. They are found and opened anew when what is held is
+/// older than `LOCK_REFRESH` - a job of minutes lists the folders once a
+/// second, not once a chunk - and their bytes are read at each ask. An open
+/// asks an NFS server for the file as it is, a read of a file held open may
+/// not: so a confirmation made on another host locks within about that
+/// second, and a confirmer's first one, which makes their file, as late as
+/// the mount's directory cache shows the name. A file that is not this
+/// result's, or reads no more, locks nothing.
+pub struct Locks {
+    /// where confirm files are and how they are named: the folder, the
+    /// name's start and what follows the reviewer in it
+    places: Vec<(PathBuf, String, String)>,
+    header: [u8; 40],
+    total: u64,
+    /// each rule's first error and its errors
+    rules: Vec<(u64, u64)>,
+    /// the confirmers' files as last found: whose, and the file
+    files: Vec<(String, File)>,
+    read: Option<Instant>,
+    refresh: Duration,
+}
+
+impl Locks {
+    /// The locks of the result whose confirm files start with `header`
+    /// (`header_of`), for a review whose waive sidecar is `waive[0]` beside
+    /// the results or `waive[1]` in the temp folder (`drc::waive_paths` of
+    /// `reviewer`): every reviewer's confirm file is named as this one's.
+    pub fn beside(waive: &[PathBuf; 2], reviewer: &str, header: [u8; 40], rules: Vec<(u64, u64)>) -> Self {
+        let name = |p: &Path| {
+            path_beside(p)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        };
+        let (near, far) = (name(&waive[0]), name(&waive[1]));
+        let mut places = Vec::new();
+        if let (Some(start), Some(folder)) = (near.strip_suffix(reviewer), waive[0].parent()) {
+            places.push((folder.to_path_buf(), start.to_owned(), String::new()));
+            // the temp folder's names end in a hash of the database's path
+            if let (Some(end), Some(temp)) = (far.strip_prefix(near.as_str()), waive[1].parent()) {
+                if !end.is_empty() && temp != folder {
+                    places.push((temp.to_path_buf(), start.to_owned(), end.to_owned()));
+                }
+            }
+        }
+        Self {
+            places,
+            header,
+            total: rules.iter().map(|r| r.1).sum(),
+            rules,
+            files: Vec::new(),
+            read: None,
+            refresh: LOCK_REFRESH,
+        }
+    }
+
+    /// The locks of a review that writes nothing: none.
+    pub fn none(rules: usize) -> Self {
+        Self {
+            places: Vec::new(),
+            header: [0; 40],
+            total: 0,
+            rules: vec![(0, 0); rules],
+            files: Vec::new(),
+            read: None,
+            refresh: LOCK_REFRESH,
+        }
+    }
+
+    /// How old what was read may be before it is read anew (`LOCK_REFRESH`;
+    /// zero: at each ask - the tests').
+    pub fn set_refresh(&mut self, every: Duration) {
+        self.refresh = every;
+        self.read = None;
+    }
+
+    fn rule(&self, check: usize) -> Result<(u64, u64)> {
+        self.rules
+            .get(check)
+            .copied()
+            .ok_or_else(|| Error::input("DRC check index out of range"))
+    }
+
+    /// Every reviewer's confirm file, by reviewer: the results folder's
+    /// before the temp folder's, leftovers (`.stale-N`, `.tmp-N`) left out.
+    fn found(&self) -> BTreeMap<String, PathBuf> {
+        let mut found = BTreeMap::new();
+        for (folder, start, end) in &self.places {
+            let Ok(entries) = fs::read_dir(folder) else { continue };
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let tag = name
+                    .to_str()
+                    .and_then(|n| n.strip_prefix(start.as_str()))
+                    .and_then(|n| n.strip_suffix(end.as_str()))
+                    .and_then(super::local::reviewer_of);
+                if let Some(tag) = tag {
+                    found.entry(tag.to_owned()).or_insert_with(|| folder.join(&name));
+                }
+            }
+        }
+        found
+    }
+
+    /// The files found and opened anew, when what is held is too old.
+    fn fresh(&mut self) {
+        if self.read.is_some_and(|at| at.elapsed() < self.refresh) {
+            return;
+        }
+        let (header, total, rules) = (self.header, self.total, self.rules.len());
+        self.files = self
+            .found()
+            .into_iter()
+            .filter_map(|(tag, path)| read(&path, &header, total, rules).ok().map(|(file, _)| (tag, file)))
+            .collect();
+        self.read = Some(Instant::now());
+    }
+
+    /// Rule `check`'s errors `start..start+len` (clamped to the rule): true
+    /// where a confirmer has the error confirmed. None when none of them is.
+    pub fn mask(&mut self, check: usize, start: u64, len: u64) -> Result<Option<Vec<bool>>> {
+        let (first, n) = self.rule(check)?;
+        let start = start.min(n);
+        let len = len.min(n - start) as usize;
+        self.fresh();
+        let mut out: Option<Vec<bool>> = None;
+        let mut bytes = vec![0u8; len];
+        for (_, file) in &self.files {
+            if file.read_exact_at(&mut bytes, HEADER + first + start).is_err() {
+                continue;
+            }
+            if bytes.contains(&CONFIRMED) {
+                let out = out.get_or_insert_with(|| vec![false; len]);
+                for (o, b) in out.iter_mut().zip(&bytes) {
+                    *o |= *b == CONFIRMED;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Who has rule `check`'s error `error` confirmed.
+    pub fn by(&mut self, check: usize, error: u64) -> Result<Vec<String>> {
+        let (first, n) = self.rule(check)?;
+        if error >= n {
+            return Err(Error::input("DRC error index out of range"));
+        }
+        self.fresh();
+        let mut byte = [0u8; 1];
+        Ok(self
+            .files
+            .iter()
+            .filter(|(_, file)| file.read_exact_at(&mut byte, HEADER + first + error).is_ok() && byte[0] == CONFIRMED)
+            .map(|(tag, _)| tag.clone())
+            .collect())
+    }
+
+    /// Whether a confirmer has rule `check`'s error `error` confirmed.
+    pub fn confirmed(&mut self, check: usize, error: u64) -> Result<bool> {
+        Ok(!self.by(check, error)?.is_empty())
+    }
+
+    /// Who has any of rule `check`'s errors `runs` (start, stop) confirmed:
+    /// whom a reviewer asks about the waives a writer left locked.
+    pub fn who(&mut self, check: usize, runs: &[(u64, u64)]) -> Result<Vec<String>> {
+        const STEP: u64 = 1 << 20;
+        let (first, n) = self.rule(check)?;
+        if runs.is_empty() {
+            // (nothing asked: no folder is listed for it)
+            return Ok(Vec::new());
+        }
+        self.fresh();
+        let mut out = Vec::new();
+        let mut bytes = Vec::new();
+        for (tag, file) in &self.files {
+            let found = runs.iter().any(|&(start, stop)| {
+                let (mut at, stop) = (start.min(n), stop.min(n));
+                while at < stop {
+                    bytes.resize((stop - at).min(STEP) as usize, 0);
+                    if file.read_exact_at(&mut bytes, HEADER + first + at).is_err() {
+                        return false;
+                    }
+                    if bytes.contains(&CONFIRMED) {
+                        return true;
+                    }
+                    at += bytes.len() as u64;
+                }
+                false
+            });
+            if found {
+                out.push(tag.clone());
+            }
+        }
+        Ok(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,5 +677,90 @@ mod tests {
         assert!(!none.present() && none.counts() == [0, 0, 0] && none.flush().is_ok());
         assert!(none.set(0, &[0], true).is_err() && none.write_span(0, 0, &[], &[]).unwrap() == 0);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_locks_are_every_confirmers_confirmations_read_anew() {
+        let (dir, temp) = (folder(), folder());
+        let rules = vec![(0u64, 5u64), (5, 0), (5, 9000)];
+        let header = header_of(&waive_header(9005, 3));
+        let waive = [dir.join(".x.db.waive.kim"), temp.join(".x.db.waive.kim-0123456789ab")];
+        let confirms = |folder: &Path, name: &str| Confirms::open(folder.join(name), header, rules.clone(), false);
+        let mut locks = Locks::beside(&waive, "kim", header, rules.clone());
+        locks.set_refresh(Duration::ZERO);
+        // nobody has confirmed: nothing is locked, and nothing is made
+        assert_eq!(locks.mask(2, 0, 9000).unwrap(), None);
+        assert!(!locks.confirmed(2, 7).unwrap() && locks.by(0, 4).unwrap().is_empty());
+        assert!(fs::read_dir(&dir).unwrap().next().is_none());
+        // two confirmers beside the results, one in the temp folder (its
+        // names end in the path's hash), the reviewer's own of another day
+        let mut hong = confirms(&dir, ".x.db.confirm.hong");
+        hong.set(2, &[7, 4096], true).unwrap();
+        let mut park = confirms(&dir, ".x.db.confirm.park");
+        park.set(2, &[7, 8999], true).unwrap();
+        park.set(0, &[4], true).unwrap();
+        let mut choi = confirms(&temp, ".x.db.confirm.choi-0123456789ab");
+        choi.set(2, &[100], true).unwrap();
+        let mut kim = confirms(&dir, ".x.db.confirm.kim");
+        kim.set(2, &[200], true).unwrap();
+        let ones = |mask: Option<Vec<bool>>| -> Vec<usize> {
+            mask.map(|m| (0..m.len()).filter(|&j| m[j]).collect()).unwrap_or_default()
+        };
+        assert_eq!(ones(locks.mask(2, 0, 9000).unwrap()), [7, 100, 200, 4096, 8999]);
+        assert_eq!(ones(locks.mask(2, 4090, 10).unwrap()), [6], "a span is its own");
+        assert_eq!(ones(locks.mask(2, 8990, 100).unwrap()), [9], "clamped to the rule");
+        assert_eq!(locks.mask(2, 300, 3000).unwrap(), None);
+        assert_eq!((ones(locks.mask(0, 0, 5).unwrap()), locks.mask(1, 0, 5).unwrap()), (vec![4], None));
+        assert_eq!(locks.by(2, 7).unwrap(), ["hong", "park"]);
+        assert_eq!(locks.who(2, &[(0, 8), (8999, 9000)]).unwrap(), ["hong", "park"]);
+        assert_eq!(locks.who(2, &[(8, 4096), (4097, 8999)]).unwrap(), ["choi", "kim"]);
+        assert_eq!(locks.who(2, &[(0, 9999)]).unwrap(), ["choi", "hong", "kim", "park"]);
+        assert!(locks.who(2, &[]).unwrap().is_empty() && locks.who(2, &[(8, 100)]).unwrap().is_empty());
+        // asking about no error looks for no file: a waive that meets no
+        // waived error must not list the folders (nor keep what it found)
+        let mut idle = Locks::beside(&waive, "kim", header, rules.clone());
+        idle.set_refresh(Duration::from_secs(3600));
+        assert!(idle.who(2, &[]).unwrap().is_empty() && idle.read.is_none());
+        assert_eq!(idle.by(2, 7).unwrap(), ["hong", "park"]);
+        assert!(idle.read.is_some());
+        assert_eq!((locks.by(2, 100).unwrap(), locks.by(2, 200).unwrap()), (vec!["choi".to_owned()], vec!["kim".to_owned()]));
+        assert!(locks.confirmed(2, 8999).unwrap() && !locks.confirmed(2, 8998).unwrap());
+        assert!(locks.mask(3, 0, 1).is_err() && locks.by(2, 9000).is_err());
+        // taken back by its confirmer: no lock; by one of two: the other's stays
+        hong.set(2, &[7, 4096], false).unwrap();
+        assert_eq!(ones(locks.mask(2, 0, 9000).unwrap()), [7, 100, 200, 8999]);
+        assert_eq!(locks.by(2, 7).unwrap(), ["park"]);
+        // what is no confirm file of this result locks nothing: a leftover
+        // moved aside or being made, another result's, a file cut short, the
+        // temp folder's name of another path, a waive file
+        fs::write(dir.join(".x.db.confirm.lee.stale-1700000000"), fs::read(dir.join(".x.db.confirm.park")).unwrap()).unwrap();
+        fs::write(dir.join(".x.db.confirm.lee.tmp-77"), fs::read(dir.join(".x.db.confirm.park")).unwrap()).unwrap();
+        let mut other = Confirms::open(dir.join(".x.db.confirm.yoon"), header_of(&waive_header(9005, 4)), vec![(0, 5), (5, 0), (5, 9000), (9005, 0)], false);
+        other.set(2, &[300], true).unwrap();
+        fs::write(dir.join(".x.db.confirm.cut"), &fs::read(dir.join(".x.db.confirm.park")).unwrap()[..5000]).unwrap();
+        fs::write(temp.join(".x.db.confirm.jung-ba9876543210"), fs::read(dir.join(".x.db.confirm.park")).unwrap()).unwrap();
+        fs::write(dir.join(".x.db.waive.jung"), fs::read(dir.join(".x.db.confirm.park")).unwrap()).unwrap();
+        assert_eq!(ones(locks.mask(2, 0, 9000).unwrap()), [7, 100, 200, 8999]);
+        // a file gone since it was found locks nothing more once looked for
+        // again; held open it is read as it was (and it was not changed)
+        drop(park);
+        fs::remove_file(dir.join(".x.db.confirm.park")).unwrap();
+        assert_eq!(ones(locks.mask(2, 0, 9000).unwrap()), [100, 200]);
+        // read anew only when what is held is old: a confirmer's first
+        // confirmation - a new file - is seen at the next look, the bytes of
+        // a file already held at once
+        locks.set_refresh(Duration::from_secs(3600));
+        assert_eq!(ones(locks.mask(2, 0, 9000).unwrap()), [100, 200]);
+        let mut shin = confirms(&dir, ".x.db.confirm.shin");
+        shin.set(2, &[1], true).unwrap();
+        choi.set(2, &[101], true).unwrap();
+        assert_eq!(ones(locks.mask(2, 0, 9000).unwrap()), [100, 101, 200]);
+        locks.set_refresh(Duration::ZERO);
+        assert_eq!(ones(locks.mask(2, 0, 9000).unwrap()), [1, 100, 101, 200]);
+        // a review that writes nothing has no locks to ask
+        let mut none = Locks::none(3);
+        assert!(none.mask(2, 0, 10).unwrap().is_none() && none.by(0, 0).is_err());
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&temp);
     }
 }

@@ -185,6 +185,32 @@ pub fn member_runs(members: &dyn Membership, upto: u64) -> Vec<Run> {
     runs
 }
 
+/// `runs` without the errors of `without` (both sorted and disjoint): what
+/// an action's reason is said of when some of its errors were not the
+/// action's to change (a confirmed waive, `confirm::Locks`).
+pub fn minus(runs: &[Run], without: &[Run]) -> Vec<Run> {
+    let mut out = Vec::with_capacity(runs.len());
+    let mut j = 0;
+    for &(start, stop) in runs {
+        let mut at = start;
+        while j < without.len() && without[j].1 <= at {
+            j += 1;
+        }
+        let mut k = j;
+        while k < without.len() && without[k].0 < stop {
+            if without[k].0 > at {
+                out.push((at, without[k].0));
+            }
+            at = at.max(without[k].1);
+            k += 1;
+        }
+        if at < stop {
+            out.push((at, stop));
+        }
+    }
+    out
+}
+
 /// Runs as a line says them: `gap,length` pairs.
 pub fn encode(runs: &[Run]) -> String {
     let mut out = String::with_capacity(runs.len() * 4);

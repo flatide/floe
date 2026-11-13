@@ -370,24 +370,61 @@ python -m floe render chip.oas --drc results.db \
     나서 한다)은 확인자의 창에서만 켜져 있고, 그 밖의 창은 읽기만 한다. `Refresh`가 파일을 다시
     읽는다. 1,000개씩 넘긴다.
   - **상세**: 에러 상세에 `waived by: kim (사유), lee`(나 말고 waive한 사람이 있을 때)와
-    `waive confirmed by: hong`이 붙는다. 자기 waive가 confirm됐는지는 누구나 여기서 본다.
+    `waive confirmed by: hong · locked`가 붙는다. 자기 waive가 confirm됐는지는 누구나 여기서 본다.
   - **저장**: 확인자 자신의 `.<db>.confirm.<리뷰어>`(waive 사이드카와 같은 자리). 에러당 1바이트와
     룰별 카운터이고 처음 confirm할 때 만든다(SPEC-FORMATS). 쓰는 것은 그 확인자의 세션뿐이고 다른
     사람의 파일은 건드리지 않는다. 요청마다 쓰고 동기화한다(`FLOE_WAIVE_SYNC`).
-  - **세는 규칙**: confirm은 누군가 그 에러를 waive하고 있는 동안에만 센다. 리뷰어가 waive를
-    되돌리면 confirm 수에서 빠지고(확인자의 파일에는 남는다), 누가 다시 waive하면 다시 센다.
-    confirm된 waive를 되돌리는 것은 막지 않는다. conflict인 waive(방문한 두 사람의 판단이 다르다)도
-    confirm 대상이고, confirm해도 conflict 수는 그대로다.
+  - **세는 규칙**: confirm은 누군가 그 에러를 waive하고 있는 동안에만 센다. waive가 되돌려지면
+    confirm 수에서 빠지고(확인자의 파일에는 남는다), 누가 다시 waive하면 다시 센다. conflict인
+    waive(방문한 두 사람의 판단이 다르다)도 confirm 대상이고, confirm해도 conflict 수는 그대로다.
+  - **잠금**(0.12.467, 사용자 2026-11-13: "confirm된 waive는 되돌릴 수 없게 잠구고 confirmer만 되돌릴
+    수 있게 해줘"): 확인자가 confirm한 waive는 확인자가 아닌 세션에서 되돌려지지 않는다.
+    - **대상**: 내가 waive했고 확인자 누군가가 confirm한 에러. waive인 채로 남고 사유도 바뀌지
+      않는다(사유를 주며 다시 waive해도 원래 사유가 남는다). 메모, 방문, 검토 제외 표시는 잠기지
+      않는다.
+    - **막는 자리**: 상태를 쓰는 경로 전부다. `w` 키와 메뉴·그리드의 unwaive, 선택 작업, 그룹 목록의
+      `unwaive all`, 공동 검토 창의 `Unwaive selected`, 동료 결정 적용(강제 적용도), 이전 런 승계,
+      서비스의 waive 파일 로드. 잠긴 에러만 남기고 나머지는 그대로 처리한다. 동료 결정 적용과 이전
+      런 승계는 잠긴 에러의 판단을 통째로 건너뛴다(검토 제외도 가져오지 않는다).
+    - **알림**: 상태 줄이다. 일부가 잠겼으면
+      `unwaived 5 error(s) in RULE · 3 locked: confirmed by hong - only a confirmer turns them back`,
+      모두 잠겼으면 `locked: 3 waive(s) in RULE confirmed by hong - only a confirmer turns them back`,
+      사유를 주며 다시 waive했으면 `… · 3 locked: confirmed by hong, reason unchanged`다. 에러 상세의
+      줄은 `waive confirmed by: hong · locked`가 됐다. 공동 검토 창은 자기 상태 줄에, 동료 결정
+      적용은 `Kept N confirmed waive(s): they are locked.`로, 이전 런 승계는
+      `confirmed waives kept N`으로 말한다.
+    - **확인자만 되돌린다**:
+      - 확인자가 confirm을 취소하면(`Unconfirm selected`) 잠금이 풀리고 그 waive는 다시 리뷰어의
+        것이다. 확인자가 둘이면 둘 다 취소해야 풀린다(각자 자기 confirm만 쓴다).
+      - 확인자로 연 세션(`--confirmer`)은 잠금에 걸리지 않는다. 자기 waive는 confirm됐어도
+        되돌리고, 그때 자기 confirm도 함께 지운다(남기면 그 에러가 다시 waive되는 순간 확인자가
+        보지 않은 waive가 confirm으로 세어지고 잠긴다).
+      - 다른 리뷰어의 waive 자체는 확인자도 지우지 않는다(그 리뷰어의 파일은 그 리뷰어의 세션만
+        쓴다). 확인자가 confirm을 취소하고 그 리뷰어가 되돌린다.
+    - **인증이 아니다**: 역할이 런처의 말이므로 `--confirmer`로 띄운 세션은 누구의 것이든 잠금에
+      걸리지 않는다.
+    - **읽는 방법**: 리뷰어의 세션은 이미 waive인 에러를 건드릴 때만 확인자들의 confirm 파일을
+      읽는다(통계가 찾는 것과 같은 파일이다). 새 waive에는 비용이 없다. 파일 목록은 1초에 한 번
+      다시 찾고 바이트는 물을 때마다 읽는다. 그래서 이미 confirm 파일이 있는 확인자의 새 confirm은
+      같은 호스트에서 바로 잠기고, 확인자의 첫 confirm(파일이 새로 생긴다)과 다른 호스트에서 한
+      confirm은 약 1초 안에 잠긴다. NFS에서는 폴더 캐시만큼 더 늦을 수 있다.
+    - **겹칠 때**: confirm과 되돌리기가 같은 순간에 겹치면 되돌리기가 이길 수 있다. 그 confirm은
+      세지 않는 채로 확인자의 파일에 남는다. waive되지 않은 에러에 남은 confirm은(이 겹침, 0.12.466
+      이하 빌드의 되돌리기, 역할로 되돌린 뒤 남은 다른 확인자의 confirm) 그 에러가 다시 waive되는
+      순간 다시 세고 잠근다.
+    - **옛 빌드**: 0.12.466 이하의 뷰어는 잠금을 모른다. 그 세션은 confirm된 waive를 되돌린다.
   - **통계**: `floe2 drc DB --review-counts`와 `--review-stats`의 `team`에 `confirmed`(누군가
     waive했고 confirm된 에러)와 `unconfirmed`(누군가 waive했고 아직 confirm되지 않은 에러)가,
     확인자의 줄에 `confirmed`가, `--review-stats`의 리뷰어 줄에 `waived_confirmed`(내 waive 중
     confirm된 수)가 있다(DRC-CLI.ko.md §2b·§2c).
-  - **하지 않는 것**: 반려(reject) 상태는 없다. 메인 목록과 캔버스의 waive 표시는 전처럼 내 것이고,
-    팀의 waive와 confirm 여부는 이 창과 에러 상세에서 본다. `.floereview`·`save waives as…`·
-    `review from previous run…`은 confirm을 싣지 않는다. 에러가 달라진 재실행 뒤에는 confirm
-    파일도 `.stale-<시각>`으로 치워진다.
-  - 게이트 `drc_team` R15·R7, 단위 테스트 app-core `drc::confirm`, `drc::team::live`
-    (`the_teams_waives_are_listed_and_confirmed_by_the_confirmer`).
+  - **하지 않는 것**: 반려(reject) 상태는 없다: 확인자가 다른 리뷰어의 waive를 무효로 만드는 방법은
+    없고, confirm을 취소해 그 리뷰어가 되돌리게 한다. 메인 목록과 캔버스의 waive 표시는 전처럼 내
+    것이고, 팀의 waive와 confirm 여부는 이 창과 에러 상세에서 본다. `.floereview`·
+    `save waives as…`·`review from previous run…`은 confirm을 싣지 않는다. 에러가 달라진 재실행
+    뒤에는 confirm 파일도 `.stale-<시각>`으로 치워진다(잠금도 함께 없어진다).
+  - 게이트 `drc_team` R15·R16·R7, 단위 테스트 app-core `drc::confirm`, `drc::team::live`
+    (`the_teams_waives_are_listed_and_confirmed_by_the_confirmer`), `drc::tests`
+    (`a_confirmed_waive_is_locked_and_only_a_confirmer_turns_it_back`).
 - **방문·검토 대상 통계**(2026-10-09 feature/jobdeck-drc; 2026-10-11 Rust 이식 —
   app-core `drc::team::flags`, floe2 gtk-service `rust/floe2/src/drc_team.rs`):
   `visited`는 개별 에러를 열어 그 도형이 실제로 화면에 그려졌다는 기록이다

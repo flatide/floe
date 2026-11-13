@@ -631,7 +631,12 @@ def parser():
                         "them (kept in the confirmer's own file, "
                         ".DB.confirm.ID; floe2 drc --review-counts / "
                         "--review-stats say the confirmed and the "
-                        "unconfirmed). Without it the list is read-only. "
+                        "unconfirmed). A confirmed waive is locked: a "
+                        "viewer started without this option does not turn "
+                        "it back or change its reason - its confirmer "
+                        "takes the confirmation back, or a viewer started "
+                        "with this option turns it back. Without it the "
+                        "list is read-only. "
                         "FLOE_CONFIRMER=1 (on / yes / true) in the "
                         "launcher's environment does the same. Forwarded "
                         "to a running instance with the results it opens")

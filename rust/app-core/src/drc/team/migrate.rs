@@ -66,6 +66,11 @@ pub struct Applied {
     pub conflicts_skipped: u64,
     pub applied: u64,
     pub processed: u64,
+    /// one's own waives the run before would have turned back and a
+    /// confirmer has confirmed: left as they are, nothing of the error
+    /// taken (0.12.467; said only when there are any)
+    #[serde(skip_serializing_if = "super::is_zero")]
+    pub locked: u64,
 }
 
 fn different(s: &Snapshot, ow: Bits, on: Bits, w: Bits, n: Bits, uw: Bits, un: Bits) -> Bits {
@@ -659,8 +664,18 @@ pub fn apply(
                 let [v, w, n, _, _] = source.chunk(ci, k)?;
                 let (ov, ow, on, before) = own_bits(own, r, ci, k)?;
                 let conflicts = ov & work & different(source, ow, on, w, n, uw, un);
-                let eligible = work & !conflicts;
+                let mut eligible = work & !conflicts;
                 result.conflicts_skipped += conflicts.count();
+                // a waive a confirmer has confirmed is not turned back by
+                // the run before: the error stays as it is
+                let back = if source.waive_known { eligible & !uw & ow & !w } else { Bits::ZERO };
+                if !back.is_zero() {
+                    if let Some(mask) = r.locked(ci, k * CHUNK, before.len() as u64)? {
+                        let kept = back & Bits::from_mask(&mask);
+                        result.locked += kept.count();
+                        eligible &= !kept;
+                    }
+                }
                 if source.waive_known {
                     let change_w = eligible & !uw & (ow ^ w);
                     if !change_w.is_zero() {
@@ -668,8 +683,10 @@ pub fn apply(
                         for i in change_w.ones() {
                             after[i as usize] = if w.get(i) { STATUS_WAIVED } else { STATUS_NONE };
                         }
-                        r.write_status_span(ci, k * CHUNK, &before, &after)?;
-                        result.changed_waived += change_w.count();
+                        // (one confirmed since the look above stays too)
+                        let kept = r.write_status_span(ci, k * CHUNK, &before, &after)?;
+                        result.changed_waived += change_w.count() - kept;
+                        result.locked += kept;
                         changed(ci);
                     }
                 }

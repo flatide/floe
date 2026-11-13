@@ -2908,17 +2908,26 @@ def r15(temp):
         check((e["changed"], e["skipped"]) == (1, 0), "every waive of a rule confirmed", e)
         confirms["hong"][1] = {7}
         agree("... in the counts")
-        # ---- 5. a confirmed waive turned back by its reviewer no longer
-        # counts - the confirmer's file still has it - and waived again by
-        # anybody it stands again
-        a("drc_set_status", handle=hk, check=0, errors=[0], status=0)
+        # ---- 5. a confirmed waive is locked (0.12.467; R16 has the rest):
+        # its reviewer's session leaves it waived and says who confirmed it.
+        # With the confirmation taken back it is turned back as ever, and
+        # waived by another reviewer it is confirmed anew
+        reply = a("drc_set_status", handle=hk, check=0, errors=[0], status=0)
+        check(reply["locked"] == [0] and reply["locked_by"] == ["hong"] and reply["counts"] == [5, sizes[0]],
+              "a confirmed waive is not turned back by its reviewer: left, and said with who confirmed it", reply)
+        agree("... nothing changed, nothing counted", counted=0)
+        e = b.job(hh, "drc_team_confirm", check=0, errors=[0], on=False)
+        confirms["hong"][0].discard(0)
+        reply = a("drc_set_status", handle=hk, check=0, errors=[0], status=0)
         people["kim"][0][0].discard(0)
-        t, got, exact = agree("a confirmed waive turned back: out of the confirmed", counted=1)
-        check(person(got, "hong")["confirmed"] == 6 and t["rules"][0]["confirmed"] == 4,
-              "... the confirmer's own count is the file's", (person(got, "hong")["confirmed"], t["rules"][0]))
+        check(e["changed"] == 1 and reply["locked"] == [] and reply["counts"] == [4, sizes[0]],
+              "its confirmation taken back, the waive is its reviewer's to turn back", reply)
+        t, got, exact = agree("... out of the waived and the confirmed", counted=1)
         a("drc_set_status", handle=hl, check=0, errors=[0], status=1)
         people["lee"][0][0].add(0)
-        agree("waived again by another reviewer: confirmed again", counted=1)
+        e = b.job(hh, "drc_team_confirm", check=0, errors=[0], on=True)
+        confirms["hong"][0].add(0)
+        agree("waived again by another reviewer and confirmed again", counted=1)
         # ---- 6. taken back; a second confirmer
         e = b.job(hh, "drc_team_confirm", check=0, errors=[2, 3], on=False)
         check((e["changed"], e["skipped"]) == (1, 0), "a confirmation taken back (one of the two was none)", e)
@@ -3028,10 +3037,291 @@ def r15(temp):
           "--floe-reviewer: the confirmer's own counts, whole and of a rule", kept["reviewers"][0])
 
 
+def r16(temp):
+    print("[R16] a confirmed waive is locked: its reviewer's session leaves it, a confirmer's turns it back")
+    d = temp / "lock"
+    d.mkdir()
+    sizes = [9000, 70000]
+    names = ["A.W", "E.BIG"]
+    write_db(d / "t.db", [(names[0], [_poly(100 * (i % 120), 60 * (i // 120)) for i in range(sizes[0])]),
+                          (names[1], [_poly(60 * (i % 400), 30000 + 40 * (i // 400), 20, 10)
+                                      for i in range(sizes[1])])])
+    r = run([INDEX, "drc", str(d / "t.db")])
+    check(r.returncode == 0, "floe-index drc t.db", r.stderr)
+    db = d / "t.db"
+    total = sum(sizes)
+    cache = d / ".t.db.team"
+    side = d / ".t.db.waive.kim"
+    # by hand: who waived and visited what, and who confirmed what
+    people = {n: ({}, {}, {}, True) for n in ("kim", "lee", "hong")}
+    confirms = {}
+
+    def want():
+        _own, rows = brute(sizes, people)
+        for ci in range(len(sizes)):
+            waived = set().union(*[p[0].get(ci, set()) for p in people.values()])
+            marked = set().union(*[c.get(ci, set()) for c in confirms.values()] or [set()])
+            rows[ci]["confirmed"] = len(waived & marked)
+            rows[ci]["unconfirmed"] = len(waived - marked)
+        keys = TEAM_KEYS + ("confirmed", "unconfirmed")
+        return {k: sum(x[k] for x in rows) for k in keys}, [{k: x[k] for k in keys} for x in rows]
+
+    def agree(what, env=None):
+        nums, t, got = team_now(db, "--all-rules", env=env)
+        whole, by_rule = want()
+        keys = tuple(whole)
+        r2, exact = stats_of(db)
+        et = exact["team"]
+        ok = (t["current"] is True and {k: t[k] for k in keys} == whole
+              and [{k: x[k] for k in keys} for x in t["rules"]] == by_rule
+              and {k: et[k] for k in keys} == whole
+              and [{k: x[k] for k in keys} for x in et["rules"]] == by_rule)
+        check(ok, what, ({k: t[k] for k in keys}, whole, t.get("waiting")))
+        return got
+
+    def waived_of(svc, h, ci):
+        raw = bytes.fromhex(svc("drc_status", handle=h, check=ci, start=0, count=sizes[ci]))
+        return {i for i, byte in enumerate(raw) if byte == 1}
+
+    def why(svc, h, ci, e):
+        said = svc("drc_reason_get", handle=h, check=ci, error=e)["waive"]
+        return said["text"] if said else None
+
+    def merged(was):
+        """The viewer's own merge after a large change has written the cache."""
+        deadline = time.monotonic() + 30
+        while file_state(cache) == was and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+    a, b, c = Svc(), Svc(), Svc()   # the reviewers' viewer, the confirmer's, a third
+    try:
+        hk = rs_open(a, db, "kim")["handle"]
+        hl = rs_open(a, db, "lee")["handle"]
+        hh = b("drc_open", path=str(db), mode="load", reviewer="hong", confirmer=True)["handle"]
+        b.svc.drc_watch(hh)
+        mine = [0, 1, 2, 3, 4095, 4096, 5000]
+        a("drc_set_status", handle=hk, check=0, errors=mine, status=1, reason="dummy fill")
+        people["kim"][0][0] = set(mine)
+        a("drc_set_status", handle=hl, check=0, errors=[2, 10], status=1)
+        people["lee"][0][0] = {2, 10}
+        sel = a.job(hk, "drc_select", check=1, mode="replace")
+        was = file_state(cache)
+        e = a.job(hk, "drc_review", check=1, action="waive", selection=sel["selection"], on=True, reason="big")
+        check(e["state"] == "done" and e["changed"] == sizes[1] and e["locked"] == 0 and e["locked_by"] == [],
+              "a rule of 70,000 waived; nothing locked", e)
+        people["kim"][0][1] = set(range(sizes[1]))
+        merged(was)
+        # ---- 1. nothing confirmed: a waive is turned back as ever
+        reply = a("drc_set_status", handle=hk, check=0, errors=[3], status=0)
+        people["kim"][0][0].discard(3)
+        check(reply["locked"] == [] and reply["locked_by"] == [] and reply["counts"] == [6, sizes[0]],
+              "nothing confirmed: nothing is locked", reply)
+        # ---- 2. the confirmer confirms five waives and a rule
+        e = b.job(hh, "drc_team_confirm", check=0, errors=[0, 1, 2, 4095, 4096], on=True)
+        check(e["state"] == "done" and (e["changed"], e["skipped"]) == (5, 0), "five waives confirmed", e)
+        confirms["hong"] = {0: {0, 1, 2, 4095, 4096}}
+        was = file_state(cache)
+        e = b.job(hh, "drc_team_confirm", check=1, on=True)
+        check(e["state"] == "done" and (e["changed"], e["skipped"]) == (sizes[1], 0), "... and a rule of 70,000", e)
+        confirms["hong"][1] = set(range(sizes[1]))
+        merged(was)
+        agree("the team with its confirmed waives")
+        # (a reviewer's session looks for the confirmers' files anew once a
+        # second: a confirmer's first confirmation - a new file - locks then)
+        time.sleep(1.2)
+        # ---- 3. a click: the waive stays, with who confirmed it; nothing written
+        files = (side, d / ".t.db.changes.kim", d / ".t.db.reasons.kim")
+        was = [file_state(p) for p in files]
+        reply = a("drc_set_status", handle=hk, check=0, errors=[0], status=0)
+        check(reply["locked"] == [0] and reply["locked_by"] == ["hong"] and reply["counts"] == [6, sizes[0]]
+              and waived_of(a, hk, 0) == people["kim"][0][0] and why(a, hk, 0, 0) == "dummy fill",
+              "a confirmed waive is not turned back by its reviewer: left as it is, said with who confirmed it", reply)
+        check([file_state(p) for p in files] == was, "... and nothing of the review is written")
+        # ---- 4. a mix: the locked ones stay, the others go
+        reply = a("drc_set_status", handle=hk, check=0, errors=[5000, 1, 4096, 1], status=0)
+        people["kim"][0][0].discard(5000)
+        check(reply["locked"] == [1, 4096] and reply["locked_by"] == ["hong"] and reply["counts"] == [5, sizes[0]]
+              and waived_of(a, hk, 0) == people["kim"][0][0] and why(a, hk, 0, 5000) is None
+              and why(a, hk, 0, 1) == "dummy fill",
+              "a mix: the confirmed waives stay, the others are turned back", reply)
+        agree("... the team as by hand")
+        # ---- 5. waived again with a reason: a locked waive keeps the reason it has
+        reply = a("drc_set_status", handle=hk, check=0, errors=[0, 5000], status=1, reason="new why")
+        people["kim"][0][0].add(5000)
+        last = (d / ".t.db.reasons.kim").read_text().splitlines()[-1].split(" ", 3)
+        check(reply["locked"] == [0] and reply["locked_by"] == ["hong"] and reply["reason_error"] is None
+              and why(a, hk, 0, 0) == "dummy fill" and why(a, hk, 0, 5000) == "new why"
+              and last[:2] == ["w", "0"] and last[3] == "5000,1 new why",
+              "waived again with a reason: the locked waive keeps its own, the line says the other alone", (reply, last))
+        reply = a("drc_set_status", handle=hk, check=0, errors=[0, 1], status=1)
+        check(reply["locked"] == [] and reply["locked_by"] == [],
+              "... and without a reason nothing was withheld: nothing said", reply)
+        # ---- 6. jobs
+        e = a.job(hk, "drc_review", check=0, action="waive", errors=[0, 1, 2, 4095, 4096, 5000], on=False)
+        people["kim"][0][0].discard(5000)
+        check(e["state"] == "done" and e["on"] is False and e["changed"] == 1 and e["locked"] == 5
+              and e["locked_by"] == ["hong"] and e["counts"] == [5, sizes[0]]
+              and waived_of(a, hk, 0) == people["kim"][0][0],
+              "a job that turns back: one error changed, five left locked", e)
+        sel = a.job(hk, "drc_select", check=1, mode="replace")
+        t0 = time.monotonic()
+        e = a.job(hk, "drc_review", check=1, action="waive", selection=sel["selection"], on=False)
+        ms = (time.monotonic() - t0) * 1000
+        check(e["state"] == "done" and e["changed"] == 0 and e["locked"] == sizes[1] and e["locked_by"] == ["hong"]
+              and e["counts"] == [sizes[1], sizes[1]],
+              "a rule of 70,000 confirmed waives is not turned back (%.0f ms)" % ms, e)
+        e = a.job(hk, "drc_review", check=1, action="waive", selection=sel["selection"])
+        check(e["state"] == "done" and e["on"] is False and e["changed"] == 0 and e["locked"] == sizes[1],
+              "the w key's toggle of a selection waived whole goes back - and finds it locked", e)
+        e = a.job(hk, "drc_review", check=0, action="waive", errors=[0, 1, 6000], on=True, reason="job why")
+        people["kim"][0][0].add(6000)
+        check(e["state"] == "done" and e["changed"] == 1 and e["locked"] == 2 and e["locked_by"] == ["hong"]
+              and why(a, hk, 0, 0) == "dummy fill" and why(a, hk, 0, 1) == "dummy fill"
+              and why(a, hk, 0, 6000) == "job why",
+              "a job that waives with a reason: the locked waives keep theirs", e)
+        e = a.job(hk, "drc_review", check=0, action="waive", errors=[0, 1, 6000], on=True)
+        check(e["state"] == "done" and e["changed"] == 0 and e["locked"] == 0, "... and without a reason nothing is said", e)
+        agree("the team after the jobs")
+        # ---- 7. a saved waive file loaded - one with nothing waived
+        hn = rs_open(a, db, "none")["handle"]
+        saved = d / "nothing.waive"
+        a("drc_waive_export", handle=hn, path=str(saved))
+        a("drc_close", handle=hn)
+        was = file_state(cache)
+        reply = a("drc_waive_import", handle=hk, path=str(saved))
+        keep = people["kim"][0][0] & confirms["hong"][0]
+        people["kim"][0][0] = set(keep)
+        check(len(keep) == 5 and reply["locked"] == 5 + sizes[1] and reply["waived"] == 5 + sizes[1]
+              and reply["counts"] == [[5, sizes[0]], [sizes[1], sizes[1]]]
+              and waived_of(a, hk, 0) == keep and why(a, hk, 0, 0) == "dummy fill"
+              and why(a, hk, 0, 6000) is None,
+              "a saved waive file loaded: the confirmed waives stay with their reasons, the rest follows the file",
+              {k: reply[k] for k in ("locked", "waived", "counts")})
+        merged(was)
+        agree("... the team after the file")
+        # ---- 8. a peer's decisions applied: a locked waive stays whatever the peer says
+        a("drc_set_status", handle=hk, check=0, errors=[7000], status=1)
+        people["kim"][0][0].add(7000)
+        for error in (1, 7000):         # lee looked at two of kim's waives and left them
+            a("drc_visit", handle=hl, check=0, error=error)
+        a.visits(hl, 2)
+        people["lee"][1][0] = {1, 7000}
+        e = a.job(hk, "drc_team_load", paths=[str(d / ".t.db.review.lee.sqlite3")])
+        sids = [x["snapshot"] for x in e.get("loaded") or []]
+        before = waived_of(a, hk, 0)
+        was = file_state(cache)
+        e = a.job(hk, "drc_team_apply", source=sids[0], force=False) if sids else {}
+        after = waived_of(a, hk, 0)
+        res = e.get("result") or {}
+        check(e.get("state") == "done" and res.get("locked") == 1 and 1 in after and 7000 not in after
+              and res["changed_waived"] == len(before ^ after),
+              "a peer's decisions applied: the confirmed waive is kept and said, the other follows the peer", res)
+        people["kim"][0][0] = set(after)
+        merged(was)
+        e = a.job(hk, "drc_team_apply", source=sids[0], check=0, errors=[1], force=True) if sids else {}
+        res = e.get("result") or {}
+        check(e.get("state") == "done" and res.get("locked") == 1 and res["changed_waived"] == 0
+              and res["applied"] == 0 and 1 in waived_of(a, hk, 0),
+              "... forced on that error too: kept", res)
+        agree("... the team after the application")
+        # ---- 9. the confirmer takes a confirmation back: its reviewer's again, at once
+        e = b.job(hh, "drc_team_confirm", check=0, errors=[1], on=False)
+        confirms["hong"][0].discard(1)
+        reply = a("drc_set_status", handle=hk, check=0, errors=[1], status=0)
+        people["kim"][0][0].discard(1)
+        check(e["changed"] == 1 and reply["locked"] == [] and 1 not in waived_of(a, hk, 0),
+              "its confirmation taken back, a waive is its reviewer's to turn back", reply)
+        # ---- 10. two confirmers: one taking theirs back leaves the other's lock
+        hy = c("drc_open", path=str(db), mode="load", reviewer="yoon", confirmer=True)["handle"]
+        c.svc.drc_watch(hy)
+        e = c.job(hy, "drc_team_confirm", check=0, errors=[0], on=True)
+        confirms["yoon"] = {0: {0}}
+        time.sleep(1.2)                 # (yoon's file is new)
+        reply = a("drc_set_status", handle=hk, check=0, errors=[0], status=0)
+        check(e["changed"] == 1 and reply["locked"] == [0] and reply["locked_by"] == ["hong", "yoon"],
+              "a waive two confirmers confirmed says both", reply)
+        e = b.job(hh, "drc_team_confirm", check=0, errors=[0], on=False)
+        confirms["hong"][0].discard(0)
+        reply = a("drc_set_status", handle=hk, check=0, errors=[0], status=0)
+        check(reply["locked"] == [0] and reply["locked_by"] == ["yoon"] and 0 in waived_of(a, hk, 0),
+              "one of them taking theirs back leaves the other's lock", reply)
+        agree("... the team")
+        # ---- 11. the role turns it back: the reviewer's own review opened as a confirmer's
+        a("drc_close", handle=hk)
+        hk = c("drc_open", path=str(db), mode="load", reviewer="kim", confirmer=True)["handle"]
+        c.svc.drc_watch(hk)
+        reply = c("drc_set_status", handle=hk, check=0, errors=[0], status=0)
+        people["kim"][0][0].discard(0)
+        check(reply["locked"] == [] and waived_of(c, hk, 0) == people["kim"][0][0],
+              "a session with the role turns a confirmed waive back", reply)
+        e = c.job(hk, "drc_review", check=1, action="waive", errors=list(range(100)), on=False)
+        people["kim"][0][1] -= set(range(100))
+        check(e["state"] == "done" and e["changed"] == 100 and e["locked"] == 0
+              and e["counts"] == [sizes[1] - 100, sizes[1]], "... and a job of it likewise", e)
+        got = agree("... out of the team's confirmed; the confirmers' files still have them")
+        yoon = [x for x in got["reviewers"] if x["id"] == "yoon"][0]
+        check(yoon["confirmed"] == 1 and not (d / ".t.db.confirm.kim").exists(),
+              "(a confirmation left on an error nobody has waived is its confirmer's file's; kim confirmed nothing)", yoon)
+        c("drc_close", handle=hk)
+        hk = rs_open(a, db, "kim")["handle"]
+        # ---- 12. a confirmation left on an error locks it the moment it is waived again
+        a("drc_set_status", handle=hl, check=0, errors=[0], status=1)
+        people["lee"][0][0].add(0)
+        reply = a("drc_set_status", handle=hl, check=0, errors=[0], status=0)
+        check(reply["locked"] == [0] and reply["locked_by"] == ["yoon"],
+              "waived again by another reviewer: confirmed by the confirmation left on it, and locked", reply)
+        agree("... and counted as confirmed again")
+        # ---- 13. a confirmer's own waive: theirs to turn back, and their
+        # own confirmation of it goes with it
+        b("drc_set_status", handle=hh, check=0, errors=[20, 21, 22], status=1)
+        people["hong"][0][0] = {20, 21, 22}
+        e = b.job(hh, "drc_team_confirm", check=0, errors=[20, 21, 22], on=True)
+        confirms["hong"][0] |= {20, 21, 22}
+        reply = b("drc_set_status", handle=hh, check=0, errors=[20], status=0)
+        people["hong"][0][0].discard(20)
+        confirms["hong"][0].discard(20)
+        raw = (d / ".t.db.confirm.hong").read_bytes()
+        check(e["changed"] == 3 and reply["locked"] == [] and (raw[40 + 20], raw[40 + 21], raw[40 + 22]) == (0, 1, 1)
+              and struct.unpack_from("<I", raw, 40 + total)[0] == len(confirms["hong"][0]) == 5,
+              "a confirmer turns their own confirmed waive back: their confirmation of it goes too", reply)
+        e = b.job(hh, "drc_review", check=0, action="waive", errors=[21], on=False)
+        people["hong"][0][0].discard(21)
+        confirms["hong"][0].discard(21)
+        raw = (d / ".t.db.confirm.hong").read_bytes()
+        check(e["state"] == "done" and e["changed"] == 1 and e["locked"] == 0
+              and (raw[40 + 21], raw[40 + 22]) == (0, 1)
+              and struct.unpack_from("<I", raw, 40 + total)[0] == 4, "... by a job likewise", e)
+        agree("... the team: neither waived nor confirmed")
+        # ---- 14. what is no confirm file of this result locks nothing
+        yoons = d / ".t.db.confirm.yoon"
+        whole = yoons.read_bytes()
+        other = bytearray(whole)
+        other[20] ^= 1
+        yoons.write_bytes(bytes(other))
+        time.sleep(1.2)
+        reply = a("drc_set_status", handle=hl, check=0, errors=[0], status=0)
+        people["lee"][0][0].discard(0)
+        check(reply["locked"] == [] and 0 not in waived_of(a, hl, 0),
+              "a confirm file of another result locks nothing", reply)
+        yoons.write_bytes(whole)
+        # ---- 15. the lock is the files': a session opened later finds it
+        a("drc_close", handle=hk)
+        hk = rs_open(a, db, "kim")["handle"]
+        reply = a("drc_set_status", handle=hk, check=0, errors=[2, 4095], status=0)
+        check(reply["locked"] == [2, 4095] and reply["locked_by"] == ["hong"]
+              and waived_of(a, hk, 0) == people["kim"][0][0],
+              "a session opened later: the same lock", reply)
+    finally:
+        a.close()
+        b.close()
+        c.close()
+    agree("the sessions closed: the team as by hand", env=dict(FLOE_TEAM_GRACE_S="0"))
+
+
 def main():
-    global r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12, r13, r14, r15
-    r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12, r13, r14, r15 = map(
-        timed, (r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12, r13, r14, r15))
+    global r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12, r13, r14, r15, r16
+    r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12, r13, r14, r15, r16 = map(
+        timed, (r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12, r13, r14, r15, r16))
     temp = Path(tempfile.mkdtemp(prefix="floe-drc-team-"))
     try:
         d = temp / "runs"
@@ -3057,6 +3347,7 @@ def main():
         r13(temp)
         r14(temp)
         r15(temp)
+        r16(temp)
         if "--no-gui" not in sys.argv:
             from validate_drc_team_gui import r7
             timed(r7)(temp, check)

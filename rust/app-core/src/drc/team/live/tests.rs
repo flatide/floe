@@ -199,8 +199,10 @@ struct Session {
 impl Session {
     fn open(f: &Folder, who: &str) -> Self {
         let stop = AtomicUsize::new(0);
-        let review = Review::open(&f.pack, None, Some(who), &stop).unwrap();
+        let mut review = Review::open(&f.pack, None, Some(who), &stop).unwrap();
         assert!(!review.read_only(), "{:?}", review.notices);
+        // (which waives are locked is looked for at each ask here)
+        review.set_lock_refresh(std::time::Duration::ZERO);
         let id = Identity::of(&review).unwrap();
         let flags = FlagStore::new(&f.pack, id.sizes.clone(), id.fingerprint.clone(), who).unwrap();
         flags.attach_changes(Arc::clone(&review.changes));
@@ -213,7 +215,7 @@ impl Session {
     fn waive_run(&mut self, a: u64, b: u64, on: bool) {
         let (stop, value) = (AtomicUsize::new(0), if on { STATUS_WAIVED } else { STATUS_NONE });
         self.review
-            .set_status_members(RULE, &Runs::new(vec![a], vec![b]), value, &stop, &mut |_, _| {})
+            .set_status_members(RULE, &Runs::new(vec![a], vec![b]), value, &stop, &mut |_, _| {}, &mut Vec::new())
             .unwrap();
     }
     fn visit(&self, error: u64) {
@@ -608,10 +610,18 @@ fn the_teams_waives_are_listed_and_confirmed_by_the_confirmer() {
     let kept = f.merged(1000, 10);
     f.agree(&kept, "confirmed");
     assert_eq!(rows_of(&kept, &id)[5..], [5, 0]);
-    // a waive turned back takes its confirmation out of the count - the
-    // confirmer's file still has it - and waived again, by anybody, it
-    // stands again
-    kim.waive(&[0], false);
+    // a confirmed waive is locked: its reviewer's session does not turn it
+    // back (0.12.467), and nothing is counted anew
+    assert_eq!(kim.review.set_status(RULE, &[0, 3], STATUS_NONE).unwrap(), [0], "3 is lee's waive, not kim's");
+    assert_eq!(view().counts(Some(RULE), &stop).unwrap(), counts(5, 5));
+    assert_eq!(f.merged(1001, 10).counted, 0);
+    // turned back all the same - by a session with the role, or a build
+    // before the lock - it takes its confirmation out of the count; the
+    // confirmer's file still has it, and waived again, by anybody, it
+    // stands again: locked at once
+    kim.review.set_confirmer(true);
+    assert!(kim.review.set_status(RULE, &[0], STATUS_NONE).unwrap().is_empty());
+    kim.review.set_confirmer(false);
     assert_eq!(view().counts(Some(RULE), &stop).unwrap(), counts(4, 4));
     let kept = f.merged(1001, 10);
     f.agree(&kept, "a confirmed waive turned back");
@@ -619,6 +629,7 @@ fn the_teams_waives_are_listed_and_confirmed_by_the_confirmer() {
     lee.waive(&[0], true);
     assert_eq!(view().counts(Some(RULE), &stop).unwrap(), counts(5, 5));
     f.agree(&f.merged(1002, 10), "waived again");
+    assert_eq!(lee.review.set_status(RULE, &[0], STATUS_NONE).unwrap(), [0]);
     // the confirmer takes one back; a second confirmer's same error is the
     // same error
     assert_eq!(hong.review.confirm_set(RULE, &[1, 7], false).unwrap(), 1);
@@ -752,10 +763,10 @@ fn a_change_nobody_said_is_found_by_the_files_times() {
     // a job still going: what its log said so far is counted, the rest
     // waits for its record
     let all = Runs::new(vec![0], vec![N]);
-    kim.review.set_status_range(RULE, &all, STATUS_WAIVED, 0, CHUNK).unwrap();
+    kim.review.set_status_range(RULE, &all, STATUS_WAIVED, 0, CHUNK, &mut Vec::new()).unwrap();
     kim.review.sync_waives().unwrap();
     let said = stamp_at(&waive);
-    kim.review.set_status_range(RULE, &all, STATUS_WAIVED, CHUNK, CHUNK).unwrap();
+    kim.review.set_status_range(RULE, &all, STATUS_WAIVED, CHUNK, CHUNK, &mut Vec::new()).unwrap();
     moved(&waive, said);
     let kept = f.merged(1080, 10);
     assert!(!kept.current && kept.waiting[0].starts_with("kim is changing their review"), "{:?}", kept.waiting);

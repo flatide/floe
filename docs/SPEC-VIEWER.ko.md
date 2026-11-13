@@ -625,7 +625,17 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   켜져 있다(`drc_team_confirm`, job `confirm`: 쓰기 작업이라 창을 닫아도 끝까지 간다). 룰 전체는 묻고
   나서 한다. 그 밖의 창에서는 버튼이 꺼져 있고 툴팁이 이유를 말한다. 목록은 마지막 `Refresh`가 읽은
   상태이고 자기 confirm 뒤에는 다시 읽는다. 에러 상세에는 `waived by: …`(나 말고 waive한 사람과 그
-  사유)와 `waive confirmed by: …`가 붙는다(`drc_team_waive_get`, `_drc_team_lines`). 이 조회는 에러를
+  사유)와 `waive confirmed by: … · locked`가 붙는다(`drc_team_waive_get`, `_drc_team_lines`).
+  **confirm된 waive는 잠긴다**(0.12.467, DRC.ko.md §2): 확인자가 아닌 뷰어의 unwaive는 그 에러를
+  남기고, 사유를 주며 다시 waive해도 원래 사유가 남는다. 뷰어는 상태 줄로 알린다
+  (`_drc_waived_refresh`의 `locked`, `_drc_locked_said`): 일부면
+  `unwaived N error(s) in RULE · K locked: confirmed by hong - only a confirmer turns them back`,
+  전부면 `locked: K waive(s) in RULE confirmed by hong - only a confirmer turns them back`, 사유를 주며
+  다시 waive했으면 `… · K locked: confirmed by hong, reason unchanged`. 서비스의 답이 잠긴 에러를
+  말하고(`drc_set_status`의 `locked`·`locked_by`, review job의 `locked`·`locked_by`), `PackDrc`는
+  잠긴 에러의 캐시 상태를 바꾸지 않으며 `locked_take()`로 마지막 쓰기의 (수, confirm한 사람들)을 한 번
+  내준다. 확인자의 창에서는 `Confirm …` 버튼의 툴팁이 잠금을, `Unconfirm selected`의 툴팁이 풀림을
+  말한다. 이 조회는 에러를
   고를 때마다 일어나고 리뷰어들의 파일을 찾느라 폴더 목록을 읽으므로(임시 폴더의 이름 19,000개에서 8 ms)
   서비스의 작업(job `team-row`)으로 한다: 상세는 바로 뜨고 팀 줄은 답이 오면 붙으며, 같은 에러를 다시
   보면 지난 답의 줄이 바로 나온 뒤 새 답으로 고쳐진다(`waive_ask`·`waive_answer`, `_drc_team_poll`). 화면

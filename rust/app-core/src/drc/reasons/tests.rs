@@ -79,6 +79,18 @@ fn runs_are_said_as_gaps_and_lengths() {
     // ... and only what was handled when a job stopped early
     assert_eq!(member_runs(&members, 65_535), [(3, 4), (65_530, 65_535)]);
     assert_eq!(member_runs(&members, 0), []);
+    // runs without others: what a reason is said of when some of an
+    // action's errors were not the action's to change
+    let runs = [(0u64, 10u64), (20, 30), (40, 41), (50, 60)];
+    assert_eq!(minus(&runs, &[]), runs);
+    assert_eq!(minus(&[], &[(0, 5)]), []);
+    assert_eq!(
+        minus(&runs, &[(0, 1), (3, 5), (9, 22), (29, 30), (40, 41), (45, 47), (55, 70), (80, 90)]),
+        [(1, 3), (5, 9), (22, 29), (50, 55)]
+    );
+    assert_eq!(minus(&runs, &[(0, 100)]), []);
+    assert_eq!(minus(&runs, &[(10, 20), (30, 40), (41, 50)]), runs, "what lies between");
+    assert_eq!(minus(&[(5, 8)], &[(0, 6), (7, 9)]), [(6, 7)]);
 }
 
 #[test]

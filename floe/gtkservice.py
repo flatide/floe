@@ -642,16 +642,28 @@ class PackDrc(_Drc):
         reply = self._request("drc_set_status", check=ci, errors=eis,
                               status=int(value) & 0xFF, **fields)
         self._counts[ci] = tuple(reply["counts"])
+        # the errors whose waive a confirmer has confirmed were left as they
+        # are (0.12.467): still waived, with the reason they had
+        locked = set(reply.get("locked") or ())
+        self._locked_said = (len(locked), tuple(reply.get("locked_by") or ()))
         with self._cache_lock:
             for ei in eis:
                 chunk = self._status.get((ci, ei // _STATUS_PAGE))
-                if chunk is not None:
+                if chunk is not None and ei not in locked:
                     chunk[ei % _STATUS_PAGE] = int(value) & 0xFF
         self.reasons_changed()
         return reply.get("reason_error")
 
     def set_status(self, ci, ei, value, reason=None):
         return self.set_statuses(ci, [ei], value, reason=reason)
+
+    def locked_take(self):
+        """What the last status write of this review left as it was because
+        a confirmer has confirmed the waive: (how many errors, who confirmed
+        them). Asked once: the next ask says (0, ())."""
+        said = getattr(self, "_locked_said", None) or (0, ())
+        self._locked_said = (0, ())
+        return said
 
     # ---- reasons (app-core drc::reasons) --------------------------------
     def reason_read(self, ci, eis, kind, toggle=False):
@@ -771,6 +783,8 @@ class PackDrc(_Drc):
     def waive_import(self, src):
         reply = self._request("drc_waive_import", path=os.path.abspath(src))
         self._counts = [tuple(c) for c in reply["counts"]]
+        # (waives the file would have turned back, kept: `locked_take`)
+        self._locked_said = (int(reply.get("locked") or 0), ())
         with self._cache_lock:
             self._status.clear()
             self._reasons.clear()
@@ -2118,6 +2132,9 @@ def set_members(db, ci, errors, field, on, cancelled=None, progress=None,
     finally:
         db.counts_refresh()
         db.review_flags_changed(ci)
+    # (the confirmed waives the job left as they were: `locked_take`)
+    db._locked_said = (int(event.get("locked") or 0),
+                       tuple(event.get("locked_by") or ()))
     return event.get("reason_error")
 
 

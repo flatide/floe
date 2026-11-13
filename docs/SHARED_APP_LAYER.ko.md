@@ -656,5 +656,27 @@ P4d처럼 컨트롤러 루프에서만 바뀐다. `FLOE_GTK_LOOP=legacy`는 예�
 - **집계:** `stats::Planes`에 `confirmed`, `Team`에 `waived_any`·`confirmed`(JSON은 `confirmed`·`unconfirmed`). `collect`는 리뷰어 줄에 `confirmed`·`waived_confirmed`, `counts`는 confirm 파일의 카운터를 `confirmed`로 낸다. `stats::discover`의 `Found`에 `confirm`.
 - **팀 합계 캐시(`live`)와 변경 기록(`changes`):** confirm 파일이 리뷰어의 세 번째 파일이 됐다. 변경 기록에 레코드 4 `CSTAMP`(confirm 파일의 시각, 바뀔 때만), `changes::Stamps = [u64; 3]`, `.team`은 버전 2(구간·룰마다 수치 7개, 리뷰어마다 시각 3개, `known`의 bit2). 버전 1 캐시는 다시 센다. confirm은 `Review::touched`로 기록되므로 클릭 하나에 구간 하나만 다시 센다.
 - **서비스(floe2 `drc_team.rs`):** `drc_team_waives {check, show, start, limit, refresh?}`(job `team-waives`), `drc_team_waive_get {check, error}`(job `team-row`: 에러 하나의 행. 리뷰어의 파일을 찾는 폴더 목록 읽기가 화면 스레드를 세우지 않도록 작업이다), `drc_team_confirm {check, errors?, on}`(job `confirm`, 쓰기 작업). 65,536개 이상 바꾼 confirm 뒤에는 `team_soon()`이 합계를 고쳐 둔다. `drc_open`의 답에 `confirmer`·`confirm_path`.
-- **정한 규칙(공유 계층의 것):** confirm은 에러 단위다. 누군가 waive하고 있는 동안에만 세고, waive가 되돌려져도 지우지 않는다. confirm된 waive의 되돌림을 막지 않는다(막으려면 상태를 쓰는 모든 경로가 확인자들의 파일을 읽어야 한다). conflict인 waive도 대상이다.
+- **정한 규칙(공유 계층의 것):** confirm은 에러 단위다. 누군가 waive하고 있는 동안에만 세고, waive가 되돌려져도 지우지 않는다. conflict인 waive도 대상이다. confirm된 waive의 되돌림은 0.12.467부터 막는다(§23).
 - **게이트:** `drc_team` R15·R7, 단위 app-core `drc::confirm`(1), `drc::changes`(5), `drc::team::live`(7), `drc::team::stats`.
+
+## 23. confirm된 waive의 잠금 (2026-11-13, app 0.12.467) — 상태를 쓰는 함수가 지킨다
+
+사용자: "confirm된 waive는 되돌릴 수 없게 잠구고 confirmer만 되돌릴 수 있게 해줘"
+
+- **규칙:** 리뷰어가 waive했고 확인자 누군가가 confirm한 에러는, 확인자 역할이 없는 세션에서 상태도 waive 사유도 바뀌지 않는다. 역할이 있는 세션(`Review::set_confirmer(true)`)은 잠금에 걸리지 않는다.
+- **`confirm::Locks`**(새 타입, `desktop::Review`가 갖는다): 그 결과의 confirm 파일 전부를 읽는다. 찾는 이름은 통계의 `stats::discover`와 같다(결과 폴더의 `.<db>.confirm.<리뷰어>`, 임시 폴더의 경로 해시 이름). `drc::team`이 `review-sqlite` 기능 뒤에 있어서 발견은 `confirm` 안에 따로 두었고, 리뷰어 태그 판정(`reviewer_of`)은 `drc::local`로 옮겨 둘이 같이 쓴다.
+  - 파일 목록과 핸들은 `LOCK_REFRESH`(1초)보다 오래되면 다시 찾고 다시 연다. 바이트는 물을 때마다 읽는다. 긴 job이 구간마다 폴더를 읽지 않게 하면서, NFS에서 열린 핸들의 캐시가 오래 묵지 않게 한다.
+  - 이 결과의 것이 아닌 파일, 읽히지 않는 파일, 치워진 파일(`.stale-N`, `.tmp-N`)은 아무것도 잠그지 않는다.
+- **지키는 자리(상태를 쓰는 함수 넷):**
+  - `set_status(check, errors, value) -> Vec<u64>`: 잠긴 에러는 건너뛰고 그 목록을 돌려준다.
+  - `set_status_range(…, kept: &mut Vec<Run>) -> u64`: 잠긴 멤버를 `kept`에 구간으로 더한다.
+  - `write_status_span(…) -> u64`: 되돌리려던 잠긴 waive를 waive로 둔 채 쓰고 그 수를 돌려준다.
+  - `waive_import(src) -> (waived, locked)`.
+  - 이미 waive인 에러를 건드릴 때만 confirm 파일을 본다. 새 waive는 보지 않는다.
+- **사유:** 잠긴 에러는 사유도 그대로여야 한다. 쓰기 함수가 돌려준 잠긴 에러를 호출 쪽이 `reason_set`의 대상에서 뺀다(`reasons::minus(runs, kept)`). 상태를 쓰기 전의 상태로 판단해야 하므로 `reason_set`이 스스로 판단하지 않는다.
+- **적용 두 가지:** `snapshot::apply`와 `migrate::apply`는 잠긴 에러를 대상에서 뺀다(`Review::locked(check, start, len)`). 그 에러의 waive도 검토 제외도 가져오지 않고, `force`도 넘지 못한다. 결과의 `locked`는 0이 아닐 때만 직렬화한다(레퍼런스와 맞추는 게이트의 키가 그대로다).
+- **확인자의 되돌리기:** 역할이 있는 세션이 waive를 되돌리면 같은 에러의 자기 confirm을 함께 지운다(`Review::unconfirm`). 지우지 않으면 그 에러가 다시 waive되는 순간 확인자가 보지 않은 waive가 confirm으로 세어지고 잠긴다. 다른 확인자의 confirm은 남는다.
+- **호스트가 할 일:** 쓰기 함수가 돌려준 잠긴 수를 사용자에게 말하고, 누가 confirm했는지는 `Review::confirmers_of(check, runs)`로 묻는다. 잠긴 것이 없으면 묻지 않는다(물으면 폴더를 읽는다). GTK 서비스는 `drc_set_status`의 답에 `locked`(에러 목록)·`locked_by`, review job의 `done`에 `locked`(수)·`locked_by`, `drc_waive_import`의 답에 `locked`를 싣는다. waive를 사유 없이 다시 건 요청은 잠긴 에러에서 뺏긴 것이 없으므로 `locked`를 비운다.
+- **웹(머지할 때):** 웹의 리뷰 저장소(`drc::review::store`)는 `desktop::Review`를 거치지 않으므로 잠금을 모른다. 웹이 confirm을 받으면 그 저장소의 상태 쓰기에 같은 판단을 넣어야 한다(`confirm::Locks`는 기능 플래그 없이 쓸 수 있다).
+- **한계:** 잠금은 파일 사이의 검사라 confirm과 되돌리기가 같은 순간에 겹치면 되돌리기가 이길 수 있다(그 confirm은 세지 않는다). 0.12.466 이하의 빌드는 잠금을 모른다. 확인자의 첫 confirm은 다른 세션에 최대 약 1초(NFS면 폴더 캐시만큼 더) 뒤에 보인다.
+- **게이트:** `drc_team` R16·R15·R7, 단위 app-core `drc::confirm`(`the_locks_are_every_confirmers_confirmations_read_anew`), `drc::tests`(`a_confirmed_waive_is_locked_and_only_a_confirmer_turns_it_back`), `drc::reasons`(구간 빼기), `drc::team::live`.
