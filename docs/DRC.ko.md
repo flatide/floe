@@ -135,8 +135,8 @@ python -m floe render chip.oas --drc results.db \
   IP(`SSH_CONNECTION` — 포워딩이어도 자리 머신 IP는 안정) >
   계정명(단일 사용자 환경) 순으로 안정 신호를 채택.
   예: `floe2 view layout.oas --drc results.db --userid kim`은
-  `.results.db.review.kim.sqlite3`, `.results.db.waive.kim` 및 같은 ID의 note 파일을
-  사용한다. 명시한 ID는 요청과 함께 떠 있는 창으로 가고, 그 창은 이후의 결과를 그 ID의
+  `.results.db.review.kim.sqlite3`, `.results.db.waive.kim` 및 같은 ID의 note 파일과 사유 파일
+  (`.results.db.reasons.kim`, 0.12.463)을 사용한다. 명시한 ID는 요청과 함께 떠 있는 창으로 가고, 그 창은 이후의 결과를 그 ID의
   리뷰로 연다(0.12.446. 그 전에는 별도 창을 열어 적용했다).
   ID를 생략하면 기존 환경변수·DISPLAY·SSH·계정명 순서를 유지한다.
   pack은 다시는 쓰지 않으므로 **공유/읽기 전용 pack도 사용자마다
@@ -257,8 +257,8 @@ python -m floe render chip.oas --drc results.db \
     복사해도, 같은 에러가 다시 나온 재실행(헤더 날짜와 룰 파일 경로만 다른 .db)에도 리뷰가 그대로
     붙는다. `--review-stats`의 `fingerprint`가 이 값이라 수집하는 쪽에서 두 결과가 같은 결과인지 견줄
     수 있다.
-  - **에러가 달라진 재실행**: 내용 ID가 다르다. 리뷰를 열 때 그 리뷰어의 세 파일(waive, note,
-    방문·검토 제외 `.sqlite3`)을 모두 `.stale-<시각>`으로 옆에 치우고 새로 시작하며, 열기 응답의
+  - **에러가 달라진 재실행**: 내용 ID가 다르다. 리뷰를 열 때 그 리뷰어의 파일(waive, note,
+    방문·검토 제외 `.sqlite3`, 0.12.463부터 사유 `.reasons`)을 모두 `.stale-<시각>`으로 옆에 치우고 새로 시작하며, 열기 응답의
     `notices`에 파일마다 한 줄을 남긴다. 뷰어는 로드의 상태 줄에 `· a review of other DRC results
     moved aside (N file(s), .stale-…)`를 붙이고, 에러 상세 영역에 `a review of other DRC results was
     here: N file(s) moved aside (.stale-…), this review starts anew`와 `notices`의 줄(치운 파일의
@@ -305,6 +305,41 @@ python -m floe render chip.oas --drc results.db \
   `.fe` 포맷, load=전체 대체·타-pack 거부). `notes_list()`가 미래
   note-list 조회 표면(각 note의 텍스트+멤버 gid). drawing 기능
   추가 시 같은 `.fe`에 flateyes 주석으로 합류.
+- **waive·검토 제외의 사유 = 작업 단위의 `.reasons` 사이드카**(0.12.463, 사용자 2026-11-13: "waive와
+  not for waive 처리할 때 사유를 입력할 수 있게 입력창이 뜨도록 … 복수개의 error를 waive할 경우
+  error마다 동일한 note가 생겨서 수백만개의 에러를 waive할 경우 note가 너무 많아지는"). 그 전에는
+  사유를 note로 적었다. note는 에러 단위다: 사이드카에 에러마다 `text=` 주석 한 줄과 멤버 id가
+  들어가고, 주석 자리를 정하려고 에러마다 도형을 읽고, 고칠 때마다 파일 전체를 다시 쓰고, 열 때마다
+  멤버 목록 전체를 뷰어로 보낸다. 사유는 작업의 것이라서 한 번만 적는다.
+  - **입력창**: waive하거나 검토 제외로 둘 때 뜬다(`w`, DRC 메뉴, 그리드 우클릭, 그룹 목록의
+    `waive all`·`mark not for review all`, 공동 검토 창의 `Waive selected`·`Exclude selected`).
+    한 줄이고 1000자까지다. Enter나 OK로 확정하고, Esc나 Cancel은 취소라서 에러를 그대로 둔다. 빈
+    칸으로 확정하면 사유 없이 처리한다. 되돌리는 쪽(unwaive, `clear not for review`)은 묻지 않고,
+    `w`가 선택을 되돌리는 방향일 때도 묻지 않는다.
+  - **시작 값**: 대상 에러가 모두 같은 사유를 갖고 있으면 그 사유(고치는 경우), 아니면 직전에 입력한
+    사유다. 전체가 선택된 채로 뜨므로 바로 치면 바뀌고 Enter만 치면 그대로 간다. 입력란의 목록은 이
+    리뷰에서 준 사유를 최근 것부터 20개까지 보여 준다. 한글 조합기는 note 편집기의 것이다
+    (Shift+Space).
+  - **적용**: 사유를 주면 그 작업의 에러 전부가 그 사유를 갖는다. 이미 waive된 에러의 사유도
+    바뀌므로, waive된 에러를 다시 waive하는 것이 사유를 고치는 방법이다. 사유 없이 waive하면 새로
+    waive되는 에러만 사유 없는 waive가 되고 이미 waive된 에러의 사유는 그대로다. 되돌리면 사유도
+    사라진다. waive 사유와 검토 제외 사유는 따로 있다.
+  - **저장**: waive 사이드카 옆 `.<db>.reasons.<리뷰어>`(같은 siting·리뷰어 태그, 결과 폴더에 쓸 수
+    없으면 임시 폴더). 작업 한 번에 한 줄이고 에러는 구간으로 적는다(SPEC-FORMATS). 룰 전체를
+    waive해도 한 줄이고, 흩어진 100만 건도 건당 몇 바이트다. note 파일은 만들지 않는다. 줄은 그
+    작업이 응답하기 전에 쓰고 동기화한다(`FLOE_WAIVE_SYNC`).
+  - **표시**: 에러 상세에 `waive reason: …`, `not for review reason: …` 줄. 처리 직후 상태 줄에
+    `waived N error(s) in RULE · reason: …`. 통계는 `floe2 drc <db> --review-stats`의
+    `reasons`(DRC-CLI §2b). 캔버스의 note 패널과 그리드의 `*`는 note의 것 그대로다.
+  - **일관성**: 사유 파일은 "왜"만 적고 "여부"는 상태 바이트와 플래그가 말한다. 상태를 쓰는 경로는
+    되돌리는 에러의 사유를 함께 지우고, 사유 없이 상태를 바꾸는 경로(동료 판단 적용, 이전 실행 승계,
+    `load waives…`)가 바꾼 에러는 사유가 없다. 0.12.462 이하 빌드가 같은 리뷰를 고치면 상태만
+    바뀌고 사유 파일은 그대로이므로, 읽는 쪽은 항상 상태를 함께 본다: waive가 아닌 에러의 사유는
+    보이지도 세지도 않는다.
+  - **하지 않는 것**: 동료의 사유는 공동 검토 창에 보이지 않고 `.floereview`·`save waives as…`에
+    실리지 않는다. `review from previous run…`은 waive는 옮기지만 사유는 옮기지 않는다. 에러가
+    달라진 재실행 뒤에는 사유 파일도 `.stale-<시각>`으로 치워진다.
+  - 게이트 `drc_team` R12·R7, `drc_analysis` A5(`reason_ui`), 단위 테스트 app-core `drc::reasons`.
 - **방문·검토 대상 통계**(2026-10-09 feature/jobdeck-drc; 2026-10-11 Rust 이식 —
   app-core `drc::team::flags`, floe2 gtk-service `rust/floe2/src/drc_team.rs`):
   `visited`는 개별 에러를 열어 그 도형이 실제로 화면에 그려졌다는 기록이다
@@ -512,11 +547,12 @@ python -m floe render chip.oas --drc results.db \
 | 캔버스 마커 더블클릭 | **번호 더블클릭과 동일** — 점프(30% 프레이밍)+CD 룰러+레이어 격리, 그리드 동행 |
 | `e` + 두 클릭 | 박스 선택(Esc까지 유지; Shift 추가, Ctrl 토글; 룰/클러스터/CD 그룹 전체, 개수 제한 없음; 범위별 보존; gold 표시) |
 | Ctrl/Shift + 셀 클릭 | 선택 추가/토글 |
+| 사유 입력창 | waive하거나 검토 제외로 둘 때 뜬다(0.12.463, §2 사유): 한 줄, Enter 확정, Esc 취소, 빈 칸은 사유 없음. 직전 사유나 대상이 이미 가진 사유에서 시작하고 목록은 준 사유들. 되돌릴 때는 묻지 않는다 |
 | 우클릭 | waive/unwaive 메뉴(gold 선택 시 일괄) — [status] 제자리 기록, 카운트·색·필터 즉시 연동. 맨 아래 `SVRF info…`는 그 에러의 SVRF 정보 창을 연다(0.12.444, §4) |
 | 그룹 목록 우클릭 | `All errors`나 그룹 행의 에러 전체에 select all / deselect all / waive all / unwaive all / mark not for review all / clear not for review all (0.12.444, §4 측정 차이 그룹) |
 | `i` | SVRF 정보 창 열기/닫기(0.12.444, §4) |
 | `w` | **waive 토글** — gold 선택이 있으면 선택 전체 일괄(전부 waived → 해제, 혼합/미waive → 전부 waive), 없으면 현재 에러(단클릭/./, 포커스 우선, 없으면 점프 위치). 우클릭 메뉴와 동일 경로로 기록·갱신, v1은 pack 안내 |
-| 더블클릭 상세 | note 있는 에러는 하단 상세 패널에 `note:` 줄 표시 |
+| 더블클릭 상세 | note 있는 에러는 하단 상세 패널에 `note:` 줄 표시. 사유를 준 waive·검토 제외는 `waive reason:`·`not for review reason:` 줄(0.12.463) |
 | 체크박스 | in view(공간 쿼리, 뷰 추적) · selected(선택만) |
 | `b` | 레이어 흑백 토글(시인성) |
 | Esc | 단계 해제(…에러 박스선택 → 격리 레이어 복원 → DRC 마크) |

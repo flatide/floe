@@ -119,6 +119,12 @@ pub(crate) fn review<'g>(g: &'g mut MutexGuard<'_, Opened>) -> Result<&'g mut Re
     }
 }
 
+/// A chunk's bits as rule-local runs (what a review reason is said of).
+pub(crate) fn bit_runs(chunk: u64, bits: Bits) -> Vec<crate::drc::reasons::Run> {
+    let errors: Vec<u64> = bits.ones().map(|i| chunk * CHUNK + i).collect();
+    crate::drc::reasons::runs_of(&errors)
+}
+
 /// The bits of `statuses` equal to waived.
 pub(crate) fn waived_bits(statuses: &[u8]) -> Bits {
     let mut b = Bits::ZERO;

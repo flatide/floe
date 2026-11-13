@@ -30,6 +30,7 @@ use super::{job_error, number, numbers, text, waived_of, Session, Shared};
 use floe_app_core::drc::analysis::scope::Selection;
 use floe_app_core::drc::desktop::StatusReader;
 use floe_app_core::drc::matcher;
+pub(super) use floe_app_core::drc::team::flags::NOT_REQUIRED;
 use floe_app_core::drc::team::{
     flags::FlagStore,
     migrate::{self, Plan},

@@ -432,7 +432,9 @@ class WorkerContractTests(unittest.TestCase):
         v.calls = []
         v._open_or_index = lambda path, fields, then=None: (
             v.calls.append(("layout", path, list(fields))), then and then())
-        v._drc_request = lambda path, rules=None: v.calls.append(("drc", path, rules))
+        # (the rule and the error to open on ride with the results, 0.12.461)
+        v._drc_request = lambda path, rules=None, pick=None: v.calls.append(
+            ("drc", path, rules) if pick is None else ("drc", path, rules, pick))
         self.assertFalse(gui.Viewer._request_run(
             v, "/d/chip.oas", ["depth=999", "drc=/d/run/r.db", "rules=/d/deck.rules.json",
                                "userid=kim", "noload=1", "goto=1.0,2.0"]))
@@ -442,6 +444,9 @@ class WorkerContractTests(unittest.TestCase):
         v.calls = []
         gui.Viewer._request_run(v, "", ["drc=/d/run/r.db"])     # results alone: onto the layout shown
         self.assertEqual((v.calls, v._reviewer), ([("drc", "/d/run/r.db", None)], None))
+        v.calls = []
+        gui.Viewer._request_run(v, "", ["drc=/d/run/r.db", "drcrule=M1.S.1", "drcerr=7"])
+        self.assertEqual(v.calls, [("drc", "/d/run/r.db", None, ("M1.S.1", 7))])
         v.calls = []
         gui.Viewer._request_run(v, "/d/chip.oas", ["depth=0"])
         self.assertEqual(v.calls, [("layout", "/d/chip.oas", ["depth=0"])])
@@ -457,8 +462,10 @@ class WorkerContractTests(unittest.TestCase):
                 v.calls = []
                 v._drc = SimpleNamespace(path=pack, _reviewer=tag)
                 v._drc_source, v._drc_reviewer = db, reviewer_asked
-                v._drc_open_db = lambda path, rules=None: v.calls.append(("open", path, rules))
+                v._drc_open_db = lambda path, rules=None, pick=None: v.calls.append(
+                    ("open", path, rules) if pick is None else ("open", path, rules, pick))
                 v._drc_rules_load = lambda path: v.calls.append(("rules", path))
+                v._drc_launch_pick = lambda rule, err: v.calls.append(("pick", rule, err))
                 v._left_show = lambda page: v.calls.append(("show", page))
                 v._set_live_status = lambda text: v.calls.append(("status", text))
                 return v
@@ -471,9 +478,17 @@ class WorkerContractTests(unittest.TestCase):
                 v.calls = []
                 gui.Viewer._drc_request(v, db, "/d/deck.rules.json")
                 self.assertEqual(v.calls, [("show", "drc"), ("rules", "/d/deck.rules.json")])
+                # a rule and an error named with results already open
+                # (0.12.461): selected in them, not opened again
+                v.calls = []
+                gui.Viewer._drc_request(v, db, pick=("M1.S.1", 7))
+                self.assertEqual(v.calls, [("show", "drc"), ("pick", "M1.S.1", 7)])
                 v.calls = []
                 gui.Viewer._drc_request(v, other)     # other results
                 self.assertEqual(v.calls, [("open", other, None)])
+                v.calls = []
+                gui.Viewer._drc_request(v, other, pick=("M1.S.1", None))   # ... with a rule named
+                self.assertEqual(v.calls, [("open", other, None, ("M1.S.1", None))])
                 v.calls = []
                 v._reviewer = "lee"                   # the same results, another reviewer
                 gui.Viewer._drc_request(v, db)
@@ -486,7 +501,7 @@ class WorkerContractTests(unittest.TestCase):
             v = gui.Viewer.__new__(gui.Viewer)        # nothing loaded
             v.calls = []
             v._drc = None
-            v._drc_open_db = lambda path, rules=None: v.calls.append(("open", path, rules))
+            v._drc_open_db = lambda path, rules=None, pick=None: v.calls.append(("open", path, rules))
             gui.Viewer._drc_request(v, db, "/d/deck.rules.json")
             self.assertEqual(v.calls, [("open", db, "/d/deck.rules.json")])
 
@@ -1006,7 +1021,10 @@ class WorkerContractTests(unittest.TestCase):
     def test_startup_rules_wait_for_the_pending_layout_open(self):
         from floe import gui
 
-        for pending in (None, "/layout/chip.oas"):
+        # (`pick`: the rule and the error to open on, 0.12.461 - it waits
+        # for the layout with the results it belongs to)
+        for pending, pick in ((None, None), ("/layout/chip.oas", None),
+                              (None, ("M1.S.1", 2)), ("/layout/chip.oas", ("M1.S.1", None))):
             calls, idles = [], []
 
             def open_layout(path, fields, then):
@@ -1015,7 +1033,8 @@ class WorkerContractTests(unittest.TestCase):
 
             viewer = SimpleNamespace(
                 _quit=mock.Mock(), _open_or_index=open_layout,
-                _drc_open_db=lambda path, rules=None: calls.append(("drc", path, rules)))
+                _drc_open_db=lambda path, rules=None, pick=None: calls.append(
+                    ("drc", path, rules) if pick is None else ("drc", path, rules, pick)))
 
             def main_loop():
                 while idles:
@@ -1024,17 +1043,19 @@ class WorkerContractTests(unittest.TestCase):
 
             glib = SimpleNamespace(PRIORITY_DEFAULT=0, unix_signal_add=mock.Mock(),
                                    idle_add=lambda callback, *args: idles.append((callback, args)))
-            with self.subTest(pending=pending), mock.patch.dict(os.environ), \
+            with self.subTest(pending=pending, pick=pick), mock.patch.dict(os.environ), \
                     mock.patch.object(gui, "import_gtk"), \
                     mock.patch.object(gui, "Viewer", return_value=viewer), \
                     mock.patch.object(gui, "GLib", glib), \
                     mock.patch.object(gui, "Gtk", SimpleNamespace(main=main_loop)):
                 os.environ.pop("FLOE_GUI_SMOKE_MS", None)
                 gui.run_viewer(None, drc="results dir/run.db", rules="rules dir/deck.rules.json",
-                               pending_open=pending, pending_fields=("detail=high",))
+                               pending_open=pending, pending_fields=("detail=high",),
+                               drc_pick=pick)
             expected = [] if pending is None else [("layout", pending, ["detail=high"])]
-            expected.append(("drc", os.path.abspath("results dir/run.db"),
-                             os.path.abspath("rules dir/deck.rules.json")))
+            opened = ("drc", os.path.abspath("results dir/run.db"),
+                      os.path.abspath("rules dir/deck.rules.json"))
+            expected.append(opened if pick is None else opened + (pick,))
             self.assertEqual(calls, expected)
 
     def test_a_cut_of_ones_own_rides_on_the_nearest_level(self):
@@ -4055,9 +4076,9 @@ class IndexOnOpenTests(unittest.TestCase):
                 v = Viewer.__new__(Viewer)
                 calls = []
                 v._ask_yes_no = lambda text: (calls.append("ask"), True)[1]
-                v._drc_pack_and_load = lambda path, rules=None: calls.append("pack")
+                v._drc_pack_and_load = lambda path, rules=None, pick=None: calls.append("pack")
                 v._set_live_status = lambda msg: calls.append("status")
-                v.load_drc = lambda path, db=None, rules=None: calls.append("load")
+                v.load_drc = lambda path, db=None, rules=None, pick=None: calls.append("load")
                 os.environ["FLOE_INDEX_ON_OPEN"] = policy
                 try:
                     Viewer._drc_open_db(v, db)
@@ -4071,42 +4092,50 @@ class IndexOnOpenTests(unittest.TestCase):
     def test_explicit_rules_follow_a_fresh_pack_adoption(self):
         from floe import gui
 
+        # (the rule and the error to open on - `pick`, 0.12.461 - go the
+        # road the rules go: to the load of a pack that is there, through
+        # the build of one that is not)
         for side in ("results.tray", None):
-            v = gui.Viewer.__new__(gui.Viewer)
-            v.load_drc = mock.Mock(return_value=True)
-            v._drc_pack_and_load = mock.Mock()
-            v._index_consent = mock.Mock(return_value=True)
-            pack = object()
-            with self.subTest(side=side), \
-                    mock.patch.object(gui.gtkservice, "drc_busy", return_value=None), \
-                    mock.patch.object(gui.gtkservice, "drc_find", return_value=side), \
-                    mock.patch.object(gui.gtkservice, "drc_open_pack", return_value=pack):
-                gui.Viewer._drc_open_db(v, "results.db", rules="deck.cal.rules.json")
-            if side is not None:
-                v.load_drc.assert_called_once_with("results.db", db=pack, rules="deck.cal.rules.json")
-                v._drc_pack_and_load.assert_not_called()
-            else:
-                v.load_drc.assert_not_called()
-                v._drc_pack_and_load.assert_called_once_with("results.db", rules="deck.cal.rules.json")
+            for pick in (None, ("M1.S.1", 3)):
+                v = gui.Viewer.__new__(gui.Viewer)
+                v.load_drc = mock.Mock(return_value=True)
+                v._drc_pack_and_load = mock.Mock()
+                v._index_consent = mock.Mock(return_value=True)
+                pack = object()
+                with self.subTest(side=side, pick=pick), \
+                        mock.patch.object(gui.gtkservice, "drc_busy", return_value=None), \
+                        mock.patch.object(gui.gtkservice, "drc_find", return_value=side), \
+                        mock.patch.object(gui.gtkservice, "drc_open_pack", return_value=pack):
+                    gui.Viewer._drc_open_db(v, "results.db", rules="deck.cal.rules.json", pick=pick)
+                if side is not None:
+                    v.load_drc.assert_called_once_with(
+                        "results.db", db=pack, rules="deck.cal.rules.json", pick=pick)
+                    v._drc_pack_and_load.assert_not_called()
+                else:
+                    v.load_drc.assert_not_called()
+                    v._drc_pack_and_load.assert_called_once_with(
+                        "results.db", rules="deck.cal.rules.json", pick=pick)
 
     def test_explicit_rules_follow_the_completed_pack_build_only(self):
         from floe import gui
 
-        for loaded in (True, False):
+        for loaded, pick in ((True, None), (False, None), (True, ("M1.S.1", 3))):
             v = gui.Viewer.__new__(gui.Viewer)
             v._drc = SimpleNamespace(packed=True) if loaded else None
             v.load_drc = mock.Mock(return_value=loaded)
             v._index_modal = mock.Mock()
             v._set_live_status = mock.Mock()
-            with self.subTest(loaded=loaded), \
+            with self.subTest(loaded=loaded, pick=pick), \
                     mock.patch("floe.vfsclient.find_binary", return_value="floe-index"), \
                     mock.patch.object(gui.gtkservice, "drc_find", return_value=None):
-                gui.Viewer._drc_pack_and_load(v, "results.db", rules="deck.cal.rules.json")
+                gui.Viewer._drc_pack_and_load(v, "results.db", rules="deck.cal.rules.json", pick=pick)
                 v.load_drc.assert_not_called()
                 arguments = v._index_modal.call_args.args
                 self.assertEqual(arguments[1], ["floe-index", "drc", "results.db", "--jobs", "12"])
                 arguments[2]()
-                v.load_drc.assert_called_once_with("results.db", rules="deck.cal.rules.json")
+                # (the pick with the rules, to the load the build is followed by)
+                v.load_drc.assert_called_once_with(
+                    "results.db", rules="deck.cal.rules.json", pick=pick)
                 v._set_live_status.assert_not_called()
 
     def test_bad_explicit_rules_preserve_the_current_review_and_close_only_a_new_pack(self):

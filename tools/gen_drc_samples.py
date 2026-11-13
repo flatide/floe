@@ -619,6 +619,9 @@ floe2 view chip.oas --drc run1/results.db          # 이전 실행
 
 - 룰을 고르면 전체 범위 원형 마커가 그려진다(오래 걸리면 상태 줄에 처리 수가 보인다).
 - `e`로 박스 선택(개수 제한 없음), `w`로 선택 전체 waive(서비스 작업).
+- waive하거나 검토 제외(`mark not for review`)로 둘 때 사유 입력창이 뜬다. Enter로 확정하고,
+  빈 칸이면 사유 없이 처리하며, Esc는 취소다. 사유는 에러 수와 관계없이 작업 한 번에 한 줄로
+  `.results.db.reasons.<리뷰어 ID>`에 남고, 에러를 클릭하면 상세에 `waive reason: …`으로 보인다.
 - `floe2 drc-prepare run2/results.db --svrf run2/deck.svrf.rules.json`로 중심·CD 캐시를
   미리 만든 뒤 다시 열면 바로 그려진다.
 

@@ -683,6 +683,11 @@ pub fn apply(
             result.changed_not_required += own.flags.change_many(&mut guard, ci, &set_nr, NOT_REQUIRED, true)?;
             result.changed_not_required += own.flags.change_many(&mut guard, ci, &clear_nr, NOT_REQUIRED, false)?;
             result.changed_visited += own.flags.change_many(&mut guard, ci, &visits, VISITED, true)?;
+            // the run before carries exclusions, not their reasons, and one
+            // it takes back takes its reason along (drc::reasons)
+            for &(k, bits) in set_nr.iter().chain(&clear_nr) {
+                r.reason_drop(crate::drc::reasons::Kind::NotRequired, ci, &super::bit_runs(k, bits));
+            }
             Ok(())
         };
         while let Some((ci, k, [work, uw, un, _, _])) = rows.next()? {

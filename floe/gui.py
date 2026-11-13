@@ -28,7 +28,7 @@ from types import SimpleNamespace
 from . import __version__
 from . import gtkservice
 from . import fillpat
-from .hangul import HangulComposer, TextViewEditable
+from .hangul import EntryEditable, HangulComposer, TextViewEditable
 from .product import name as product_name
 from .gtkservice import CELL_QUERY_KINDS
 
@@ -648,10 +648,36 @@ class _DrcTeamWindow:
             self.status.set_text("Select rows to change my judgement.")
             return
 
+        reason = None
+        if on:
+            # why, as the viewer's own waive asks it (0.12.463)
+            kind = "waive" if field == "waive" else "not-required"
+            viewer = self.viewer
+            try:
+                reply = self.db.reason_read(ci, members, kind)
+            except Exception as exc:
+                self.status.set_text("My judgement is unchanged: %s" % exc)
+                return
+            reason = viewer._drc_reason_dialog(
+                kind, len(members),
+                reply.get("prefill") or viewer._drc_reason_last.get(kind, ""),
+                reply.get("known") or (), parent=self.window)
+            if reason is None or not self._valid():
+                if self._valid():
+                    self.status.set_text("Cancelled; my judgement is unchanged.")
+                return
+            viewer._drc_reason_last[kind] = reason
+
         def work(cancelled, progress):
             from .gtkservice import set_members
-            set_members(self.db, ci, members, field, on, progress=progress)
-        self._start("Change my " + field, work, lambda _result: self._refresh(),
+            return set_members(self.db, ci, members, field, on,
+                               progress=progress, reason=reason)
+
+        def complete(unkept):
+            if unkept:
+                self._notice = "The reason was not saved: %s" % unkept
+            self._refresh()
+        self._start("Change my " + field, work, complete,
                     write=True, changed="flags" if field == "not-required" else "waive")
 
     def _export(self):
@@ -673,7 +699,8 @@ class _DrcTeamWindow:
         except Exception as exc:
             self.status.set_text("Cannot verify my review path: %s" % exc)
             return False
-        protected = [self.db.path, getattr(self.db, "_waive_path", None), review_path]
+        protected = [self.db.path, getattr(self.db, "_waive_path", None), review_path,
+                     getattr(self.db, "reason_path", None)]
         for source in self.sources:
             protected.extend((source.path, getattr(source, "original_path", None),
                               source.metadata.get("source_path"),
@@ -2572,6 +2599,7 @@ class Viewer:
         self._cdlg = None
         self._fontdlg = None
         self._sdlg = None           # the CD group step's modal
+        self._drc_reason_last = {}  # kind -> the review reason typed last
         self._svrfdlg = None        # the SVRF info window (i)
         self._drc_detail_at = None  # (rule, error or None) the detail pane shows
         self._digit_last = None     # depth digit-pair state ('99' = full)
@@ -10644,26 +10672,38 @@ class Viewer:
             menu.popup(None, None, None, None, ev.button, ev.time)
         return True
 
-    def _drc_set_waived(self, ci, eis, on):
+    def _drc_set_waived(self, ci, eis, on, reason=None):
         """Write the status of the targets and refresh every dependent
         surface (rule counts, grid, detail, canvas); a selection past a
-        page is one service job (feature/jobdeck-drc)."""
+        page is one service job (feature/jobdeck-drc). Waiving asks why
+        first (user call 2026-11-13, _drc_reason_then): `reason` None is
+        not asked yet, a text - "" for none - is the answer. The reason is
+        the action's, one line whatever the action takes."""
         db = self._drc
         if db is None or not hasattr(db, "set_status"):
             return
         if self._drc_review_pending():
             return
+        if on and reason is None and not getattr(db, "read_only", False):
+            self._drc_reason_then(
+                "waive", ci, eis, lambda _on, text, d=db:
+                self._drc_set_waived(ci, eis, True, reason=text)
+                if self._drc is d else None)
+            return
         if len(eis) > DRC_PAGE:
-            self._drc_review_submit("waive", ci, eis, on=on)
+            self._drc_review_submit("waive", ci, eis, on=on,
+                                    reason=reason or None)
             return
         val = STATUS_WAIVED if on else STATUS_NONE
-        error = None
+        error = unkept = None
         try:
             # one request for the selection (floe2 gtk-service)
-            db.set_statuses(ci, list(eis), val)
+            unkept = db.set_statuses(ci, list(eis), val,
+                                     reason=(reason or None) if on else None)
         except (OSError, gtkservice.ServiceError) as exc:
             error = "%s - is the waive store writable?" % exc
-        self._drc_waived_refresh(ci, eis, on, error)
+        self._drc_waived_refresh(ci, eis, on, error, reason=reason,
+                                 unkept=unkept)
 
     def _drc_visit_drawn(self, mark, points, width, height):
         """Queue one visit only after individual geometry was painted.
@@ -10778,13 +10818,24 @@ class Viewer:
             return
         self._drc_set_not_required(*target, on)
 
-    def _drc_set_not_required(self, ci, targets, on):
+    def _drc_set_not_required(self, ci, targets, on, reason=None):
+        """Set the targets aside from the review, or bring them back.
+        Setting aside asks why first, as waiving does (_drc_set_waived)."""
         db = getattr(self, "_drc", None)
         if db is None or not hasattr(db, "review_flags"):
             self._set_live_status("review flags need a packed index: floe-index drc <db>")
             return
+        if on and reason is None:
+            if self._drc_review_pending():
+                return
+            self._drc_reason_then(
+                "not-required", ci, targets, lambda _on, text, d=db:
+                self._drc_set_not_required(ci, targets, True, reason=text)
+                if self._drc is d else None)
+            return
         # Even one SQLite update runs outside the GTK thread.
-        self._drc_review_submit("not-required", ci, targets, on=bool(on))
+        self._drc_review_submit("not-required", ci, targets, on=bool(on),
+                                reason=(reason or None) if on else None)
 
     def _drc_review_flags(self, db, ci, ei):
         if not hasattr(db, "review_flags"):
@@ -11177,17 +11228,25 @@ class Viewer:
             return True
         return False
 
-    def _drc_review_submit(self, operation, ci, targets, on=None, text=None):
+    def _drc_review_submit(self, operation, ci, targets, on=None, text=None,
+                           reason=None, kind=None, toggle=False, then=None):
         """One review writer (the service's review job); the request keeps
-        its database and targets - a selection of any size."""
+        its database and targets - a selection of any size. `reason`: why
+        the targets are waived or set aside. `reason-read` writes nothing:
+        it reads what the reason dialog of a `kind` action starts from, and
+        `then` goes on from the dialog (_drc_reason_reply)."""
         if self._drc_review_pending():
             return
         db = self._drc
         if not targets:
             return
-        if operation != "not-required":
+        if operation not in ("not-required", "reason-read"):
             self._drc_marker_invalidate()
         fields = dict(check=int(ci), action=operation, on=on, text=text)
+        if reason:
+            fields["reason"] = reason
+        if operation == "reason-read":
+            fields.update(reason_of=kind, toggle=bool(toggle))
         if getattr(targets, "sid", None) is not None:
             fields["selection"] = targets.sid
         else:
@@ -11198,9 +11257,11 @@ class Viewer:
             self._set_live_status("%s failed: %s" % (operation, exc))
             return
         self._drc_review_job = dict(db=db, ci=ci, targets=targets,
-                                    operation=operation, on=on)
+                                    operation=operation, on=on, reason=reason,
+                                    kind=kind, then=then)
         self._set_live_status("%s: processing %d selected errors…"
-                              % (operation, len(targets)))
+                              % (kind if operation == "reason-read"
+                                 else operation, len(targets)))
 
     def _drc_review_poll(self):
         self._drc_visit_poll()
@@ -11222,21 +11283,35 @@ class Viewer:
             return
         ci, targets, operation = job["ci"], job["targets"], job["operation"]
         db = self._drc
-        if operation == "not-required":
+        if operation == "reason-read":
+            # nothing was written: the dialog, then what it was asked for
+            if error:
+                self._set_live_status("%s failed: %s" % (job["kind"], error))
+            else:
+                self._drc_reason_reply(job["kind"], ci, targets, event,
+                                       job["then"])
+        elif operation == "not-required":
             # a failed batch may have committed earlier chunks: show the
             # flags as they are, markers, groups and selection untouched
             db.review_flags_changed(ci)
             self._drc_review_flags_refresh(ci)
+            on = event.get("on", job["on"])
             self._set_live_status(("review update failed: %s" % error)
-                if error else "%s on %d errors" % (
-                    "not for review set" if event.get("on", job["on"]) else "not for review cleared",
-                    len(targets)))
+                if error else "%s on %d errors%s" % (
+                    "not for review set" if on else "not for review cleared",
+                    len(targets),
+                    self._drc_reason_said(job.get("reason") if on else None,
+                                          event.get("reason_error"))))
+            focus = self._drc_focus
+            if focus is not None and focus[0] == ci and not error:
+                self._drc_show_detail(ci, focus[1])
         elif operation == "waive":
             db.statuses_changed(ci, event.get("counts"))
             if self._drc_clusters is not None:
                 self._drc_clusters.status_changed(ci)
             self._drc_waived_refresh(ci, targets, event.get("on", job["on"]),
-                                     error, bulk=True)
+                                     error, bulk=True, reason=job.get("reason"),
+                                     unkept=event.get("reason_error"))
         elif error:
             if operation in ("note", "note-clear"):
                 self._drc_note_refresh(ci, targets, fallback=False)
@@ -11251,7 +11326,20 @@ class Viewer:
             self._drc_note_refresh(ci, targets, fallback=False)
             self._set_live_status("%s: %d errors updated" % (operation, len(targets)))
 
-    def _drc_waived_refresh(self, ci, eis, on, error=None, bulk=False):
+    @staticmethod
+    def _drc_reason_said(reason, unkept=None):
+        """The end of a status line after a waive or an exclusion: the
+        reason it was given, or that the reason could not be kept (the
+        errors are waived or set aside all the same)."""
+        if unkept:
+            return " · reason not saved: %s" % unkept
+        if not reason:
+            return ""
+        return " · reason: %s" % (reason if len(reason) <= 60
+                                  else reason[:59] + "…")
+
+    def _drc_waived_refresh(self, ci, eis, on, error=None, bulk=False,
+                            reason=None, unkept=None):
         db = self._drc
         self._drc_conflict_status_changed()
         self._drc_marker_invalidate()
@@ -11297,8 +11385,9 @@ class Viewer:
         if focus is not None and focus[0] == ci:
             self._drc_show_detail(ci, focus[1])
         self._set_live_status(("waive failed: %s" % error) if error else
-            "%s %d error(s) in %s" % ("waived" if on else "unwaived", len(eis),
-                                       db.checks[ci].name))
+            "%s %d error(s) in %s%s" % (
+                "waived" if on else "unwaived", len(eis), db.checks[ci].name,
+                self._drc_reason_said(reason if on else None, unkept)))
         self._display()
 
     def _drc_waive_key(self):
@@ -11322,8 +11411,17 @@ class Viewer:
         sel = self._drc_sel
         if sel is not None and sel[1]:
             ci, eis = sel[0], sel[1]
-            if len(eis) > DRC_PAGE:
+            if len(eis) > DRC_PAGE and getattr(db, "read_only", False):
                 self._drc_review_submit("waive", ci, eis)
+            elif len(eis) > DRC_PAGE:
+                # which way the toggle goes is the service's to say (a
+                # selection that is not waived whole is waived): waiving
+                # asks why first, turning back asks nothing
+                if not self._drc_review_pending():
+                    self._drc_reason_then(
+                        "waive", ci, eis, lambda on, text, d=db:
+                        self._drc_set_waived(ci, eis, on, reason=text)
+                        if self._drc is d else None, toggle=True)
             else:
                 on = not all(self._drc_waived(db, ci, e) for e in eis)
                 self._drc_set_waived(ci, eis, on)
@@ -11362,6 +11460,121 @@ class Viewer:
                 or ei >= len(db.checks[ci].errors):
             return None
         return ci, [ei]
+
+    REASON_TITLES = {"waive": "Waive reason",
+                     "not-required": "Not for review reason"}
+
+    def _drc_reason_dialog(self, kind, count, prefill="", known=(),
+                           parent=None):
+        """Why the errors are waived, or set aside from the review (user
+        call 2026-11-13: "waive와 not for waive 처리할 때 사유를 입력할 수
+        있게 입력창이 뜨도록"): a small modal with one line. Enter or OK
+        takes it, Esc or Cancel leaves the errors as they were. The reason
+        is the action's - kept once however many errors the action takes
+        (app-core drc::reasons), where a note is kept an error at a time.
+        The line starts from `prefill` - the reason the errors hold
+        already, else the one typed last -, selected, so typing replaces
+        it and Enter keeps it; its list offers the reasons given before
+        (`known`, the latest first); the built-in hangul composer is the
+        note editor's. Returns the text ("" = no reason), None when
+        cancelled."""
+        title = self.REASON_TITLES[kind]
+        if count > 1:
+            title += "  (%d errors)" % count
+        dlg = Gtk.Dialog(title=title, transient_for=parent or self.window,
+                         modal=True)
+        dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dlg.add_button("OK", Gtk.ResponseType.OK)
+        dlg.set_default_response(Gtk.ResponseType.OK)
+        dlg.set_resizable(False)
+        self._center_on_parent(dlg)
+        if known:
+            line = Gtk.ComboBoxText.new_with_entry()
+            for text in known:
+                line.append_text(text)
+            entry = line.get_child()
+        else:
+            line = entry = Gtk.Entry()
+        entry.set_width_chars(46)
+        entry.set_max_length(1000)
+        entry.set_activates_default(True)
+        entry.set_text(prefill or "")
+        # (named for the gates, which type in the entry)
+        entry.set_name("drc-reason")
+        # built-in hangul input for hosts with no IME (the note editor's)
+        hangul = Gtk.CheckButton(label="Hangul (Shift+Space)")
+        editable = EntryEditable(entry)
+        state = {"composer": HangulComposer(), "check": hangul,
+                 "anchor": None}
+        hangul.connect("toggled", lambda *a: state["composer"].reset())
+
+        def on_key(_w, ev):
+            if Gdk.keyval_name(ev.keyval) == "Escape":
+                dlg.response(Gtk.ResponseType.CANCEL)
+                return True
+            return self._note_entry_key(editable, ev, state)
+        entry.connect("key-press-event", on_key)
+        hint = Gtk.Label()
+        hint.set_markup("<small>Enter: OK · Esc: cancel · "
+                        "Shift+Space: 한글 · empty: no reason</small>")
+        hint.set_halign(Gtk.Align.START)
+        box = dlg.get_content_area()
+        box.set_border_width(10)
+        box.set_spacing(6)
+        box.pack_start(line, False, False, 0)
+        box.pack_start(hangul, False, False, 0)
+        box.pack_start(hint, False, False, 0)
+        self._grab_focus_once(dlg, entry)
+        dlg.show_all()
+        ok = dlg.run() == Gtk.ResponseType.OK
+        text = entry.get_text().strip()
+        dlg.destroy()
+        (parent or self.window).present()
+        return text if ok else None
+
+    def _drc_reason_then(self, kind, ci, targets, done, toggle=False):
+        """Ask why before `targets` are waived or set aside from the
+        review (`kind`: "waive", "not-required"), then `done(on, text)`:
+        `on` - the way a `w` toggle goes (`toggle`; True for a command that
+        is no toggle; a toggle that turns the errors back asks nothing) -,
+        `text` - the reason typed, "" for none. A cancelled dialog does
+        nothing. What the dialog starts from is the service's to read: at
+        once for a few errors, as a review job for a selection of any
+        size."""
+        db = self._drc
+        if self._drc_review_pending():
+            return
+        if getattr(targets, "sid", None) is not None or len(targets) > DRC_PAGE:
+            self._drc_review_submit("reason-read", ci, targets, kind=kind,
+                                    toggle=toggle, then=done)
+            return
+        try:
+            reply = db.reason_read(ci, list(targets), kind, toggle)
+        except (OSError, gtkservice.ServiceError) as exc:
+            self._set_live_status("%s failed: %s" % (kind, exc))
+            return
+        self._drc_reason_reply(kind, ci, targets, reply, done)
+
+    def _drc_reason_reply(self, kind, ci, targets, reply, done):
+        """The second half of _drc_reason_then: the dialog, then `done`."""
+        db = self._drc
+        if not reply.get("on", True):
+            done(False, "")
+            return
+        text = self._drc_reason_dialog(
+            kind, len(targets),
+            reply.get("prefill") or self._drc_reason_last.get(kind, ""),
+            reply.get("known") or ())
+        if self._drc is not db:
+            return      # other results came in under the dialog
+        if text is None:
+            self._set_live_status(
+                "%s cancelled: %d error(s) left as they were"
+                % ("waive" if kind == "waive" else "not for review",
+                   len(targets)))
+            return
+        self._drc_reason_last[kind] = text
+        done(True, text)
 
     def _drc_note_key(self):
         """n: add/edit a note SHARED by the selected errors (or the
@@ -11863,6 +12076,16 @@ class Viewer:
                 lines.append("visited: %s · not for review: %s" % (
                     "yes" if flags & gtkservice.VISITED else "no",
                     "yes" if flags & gtkservice.NOT_REQUIRED else "no"))
+        if hasattr(db, "reason_get"):
+            # why it is waived / set aside, when a reason was given
+            try:
+                why = db.reason_get(ci, ei)
+            except (OSError, gtkservice.ServiceError):
+                why = (None, None)
+            for label, text in zip(("waive reason", "not for review reason"),
+                                   why):
+                if text:
+                    lines.append("%s: %s" % (label, text))
         if hasattr(db, "get_note"):
             note = db.get_note(ci, ei)
             if note:

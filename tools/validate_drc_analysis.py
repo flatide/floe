@@ -1180,6 +1180,8 @@ def marker_length_ui(v, temp, pump):
           and v._drc.status_counts(0)[0] == 0 and v._drc_sel is None and 0 < waived < 1006,
           "waive all / unwaive all of a rule past a page are the service's review job",
           (job, waived, all_waived, said, v._drc.status_counts(0)[0]))
+    check(v._drc_reason_dialog.asked[-1][:2] == ("waive", 1006),
+          "... and waive all asked why once, for all 1,006", v._drc_reason_dialog.asked[-1])
 
 
 def pane_ui(v, d, pump):
@@ -1383,9 +1385,10 @@ def pane_ui(v, d, pump):
     rows = [r[1] for r in w._delta_store]
     check(v._drc.status_counts(1)[0] == 2 and [v._drc.get_status(1, ei) for ei in range(4)]
           == [1, 1, 0, 0] and rows == ["2", "1", "1", "0"] and v._drc_grid_map == []
-          and v._drc_sel is None and v.status.get_text() == "waived 2 error(s) in PANE.FEW",
+          and v._drc_sel is None and v.status.get_text() == "waived 2 error(s) in PANE.FEW"
+          and v._drc_reason_dialog.asked[-1][:2] == ("waive", 2),
           "waive all: every error of the group is waived (Not Waived lists none of it now)",
-          (rows, v.status.get_text()))
+          (rows, v.status.get_text(), v._drc_reason_dialog.asked[-1]))
     choose(3, "unwaive all", "unwaive all")
     rows = [r[1] for r in w._delta_store]
     check(v._drc.status_counts(1)[0] == 0 and rows == ["4", "1", "1", "2"]
@@ -1396,10 +1399,13 @@ def pane_ui(v, d, pump):
     choose(3, "mark not for review all", "mark not for review all")
     marked = (v._drc.review_counts(1)["not_required"],
               [v._drc.review_flags(1, ei) & gtkservice.NOT_REQUIRED for ei in range(4)])
+    asked = list(v._drc_reason_dialog.asked)
     choose(3, "clear not for review all", "clear not for review all")
     check(marked == (2, [gtkservice.NOT_REQUIRED, gtkservice.NOT_REQUIRED, 0, 0])
-          and v._drc.review_counts(1)["not_required"] == 0,
-          "mark / clear not for review all: the group's errors", marked)
+          and v._drc.review_counts(1)["not_required"] == 0
+          and asked[-1][:2] == ("not-required", 2) and v._drc_reason_dialog.asked == asked,
+          "mark / clear not for review all: the group's errors; marking asks why, clearing not",
+          (marked, asked[-1]))
     # `All errors`: the rule; the selection in the grid is not the command's
     w._wf.set_active_id("all")
     pick(1)
@@ -1937,6 +1943,364 @@ def launch_pick_ui(v, d, temp, pump):
     check(set(v.visible) == visible, "(the layers as they were)")
 
 
+class ReasonAnswer(object):
+    """The reason dialog answered for a gate that is not about it: what it
+    was asked - (kind, errors, what it started from, the reasons it
+    offered) - and the text it gives (None: cancelled). The dialog itself is
+    reason_ui's."""
+
+    def __init__(self, text=""):
+        self.text, self.asked = text, []
+
+    def __call__(self, kind, count, prefill="", known=(), parent=None):
+        self.asked.append((kind, count, prefill, tuple(known)))
+        return self.text
+
+
+def reason_ui(v, d, pump):
+    """Waiving errors, and setting them aside from the review, asks why
+    (0.12.463; user 2026-11-13: "waive와 not for waive 처리할 때 사유를 입력할 수
+    있게 입력창이 뜨도록 ... 복수개의 error를 waive할 경우 error마다 동일한 note가
+    생겨서 수백만개의 에러를 waive할 경우 note가 너무 많아지는"): a small modal
+    with one line, Enter takes it, Esc leaves the errors as they were. The
+    reason is the action's - one line of `.<db>.reasons.<reviewer>` whatever
+    the action takes, and no note is made -, it is read in the error's
+    detail, and it goes when the error is turned back."""
+    from floe import gui
+    Gtk, Gdk = gui.Gtk, gui.Gdk
+    # (the dialog itself here, not the gate's answer in its place)
+    stand_in = v.__dict__.pop("_drc_reason_dialog", None)
+    db = d / "why.db"
+    pair = "e %d 2\n0 0 10000 0\n0 %d 10000 %d\n"
+    db.write_text(
+        "MAIN 100000\nWHY.MANY\n12 12 0\n"
+        + "".join(pair % (i, 1000 + i, 1000 + i) for i in range(1, 13))
+        + "WHY.FEW\n4 4 0\n"
+        + "".join(pair % (i, 2000 + i, 2000 + i) for i in range(1, 5)))
+    r = run([INDEX, "drc", str(db)])
+    check(r.returncode == 0, "reason fixture packed", r.stderr)
+    w = v._drcwin
+    check(v.load_drc(str(db)), "load the reason fixture")
+    w._wf.set_active_id("all")
+    who = v._drc._reviewer
+    file = d / (".why.db.reasons.%s" % who)
+    check(v._drc.reason_path == str(file) and not file.exists(),
+          "the reasons file is the waive sidecar's neighbour and is not made by the open",
+          v._drc.reason_path)
+
+    def done():
+        return (v._drc_selection_key is None and v._drc_review_job is None
+                and not v._drc_delta_busy and v._drc_group_cache_key is None)
+
+    def settle(what):
+        pump(v, done, what, 60)
+
+    def pick(ci):
+        v._drc_select_row(ci)
+        pump(v, lambda: v._drc_open == ci and done(), "reasons: %s" % v._drc.checks[ci].name, 60)
+
+    def click(ci, ei):
+        """A plain click on the error's number: it is the current error."""
+        v._drc_goto_cell(ci, ei)
+        e = v._drc.checks[ci].errors[ei]
+        v._drc_focus = (ci, ei, e.kind, [(x / v.dbu, y / v.dbu) for x, y in e.pts])
+        v._drc_show_detail(ci, ei)
+
+    def detail(ci, ei):
+        click(ci, ei)
+        buf = w._detail
+        return buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False).split("\n")
+
+    def lines():
+        """The reasons file's action lines, without their times."""
+        if not file.exists():
+            return []
+        out = []
+        for line in file.read_text().split("\n")[3:]:
+            if line:
+                p = line.split(" ", 4)
+                out.append(" ".join(p[:2] + p[3:]))
+        return out
+
+    def waived(ci, n):
+        return [v._drc.get_status(ci, ei) for ei in range(n)]
+
+    def walk(widget):
+        yield widget
+        if isinstance(widget, Gtk.Container):
+            for k in widget.get_children():
+                for kid in walk(k):
+                    yield kid
+
+    def press(entry, name, state=0):
+        e = Gdk.Event.new(Gdk.EventType.KEY_PRESS)
+        e.window = entry.get_window()
+        e.keyval = Gdk.keyval_from_name(name)
+        e.state = Gdk.ModifierType(state)
+        return entry.emit("key-press-event", e)
+
+    shown = []
+    real_run = Gtk.Dialog.run
+
+    def answer(text, typed=None):
+        """The next reason dialog: what it shows is kept, then `text` is in
+        its line and Enter pressed - or Esc for None. `typed`: key names
+        pressed in the line first (the hangul composer's road)."""
+        def run(dlg):
+            entry = dict((k.get_name(), k) for k in walk(dlg))["drc-reason"]
+            # (the line is the entry of a list of the reasons given, when
+            # there are any)
+            combo = entry.get_ancestor(Gtk.ComboBoxText)
+            got = []
+            dlg.connect("response", lambda _d, response: got.append(response))
+            seen = dict(
+                title=dlg.get_title(), modal=dlg.get_modal(), parent=dlg.get_transient_for(),
+                resizable=dlg.get_resizable(), text=entry.get_text(),
+                known=None if combo is None else [row[0] for row in combo.get_model()],
+                limit=entry.get_max_length(),
+                labels=[k.get_label() for k in walk(dlg) if isinstance(k, (Gtk.Button, Gtk.Label))
+                        and k.get_label()],
+                grab=Gtk.grab_get_current() is not None)
+            if typed is not None:
+                entry.set_text("")
+                seen["keys"] = [press(entry, *key) for key in typed]
+                seen["typed"] = entry.get_text()
+            if text is None:
+                seen["esc"] = press(entry, "Escape")
+            else:
+                if typed is None:
+                    entry.set_text(text)
+                # Enter in the line: the dialog's default button is pressed
+                # (GTK lets go of it a moment later - the loop a real run()
+                # would be in)
+                entry.emit("activate")
+                ctx = gui.GLib.MainContext.default()
+                deadline = time.monotonic() + 10
+                while not got and time.monotonic() < deadline:
+                    ctx.iteration(False)
+                    time.sleep(0.002)
+            shown.append(seen)
+            return got[-1] if got else Gtk.ResponseType.NONE
+        Gtk.Dialog.run = run
+
+    try:
+        # ---- 1. the dialog
+        pick(0)
+        answer("dummy fill")
+        v._drc_set_waived(0, [0], True)
+        first = shown[-1]
+        check(first["title"] == "Waive reason" and first["modal"] and first["parent"] is v.window
+              and not first["resizable"] and first["text"] == "" and first["known"] is None
+              and first["limit"] == 1000 and first["grab"]
+              and "Cancel" in first["labels"] and "OK" in first["labels"]
+              and any("Enter: OK · Esc: cancel" in t and "empty: no reason" in t for t in first["labels"])
+              and "Hangul (Shift+Space)" in first["labels"],
+              "waiving asks why: a small modal with one line, nothing typed before", first)
+        said = v.status.get_text()
+        check(waived(0, 3) == [1, 0, 0] and said == "waived 1 error(s) in WHY.MANY · reason: dummy fill"
+              and lines() == ["w 0 0,1 dummy fill"],
+              "Enter takes the reason: the error is waived, the reason one line of the file",
+              (said, lines()))
+        head = file.read_text().split("\n")[:3]
+        check(head[:2] == ["# floe drc review reasons", "floe_reasons=1"]
+              and head[2].startswith("floe_pack=") and head[2].endswith(",16"),
+              "the file names its format and the result it is of", head)
+        got = detail(0, 0)
+        check(got[:4] == ["#1(1)  [waived]", "rule: WHY.MANY", "visited: no · not for review: no",
+                          "waive reason: dummy fill"],
+              "the error's detail says why it is waived", got[:5])
+        # the next one starts from the reason typed last, and offers the ones given
+        answer("dummy fill")
+        v._drc_set_waived(0, [1], True)
+        check(shown[-1]["text"] == "dummy fill" and shown[-1]["known"] == ["dummy fill"]
+              and lines() == ["w 0 0,1 dummy fill", "w 0 1,1 dummy fill"]
+              and detail(0, 1)[3] == "waive reason: dummy fill",
+              "the next dialog starts from the reason typed last and lists the reasons given",
+              (shown[-1], lines()))
+        # Esc: nothing is waived
+        answer(None)
+        v._drc_set_waived(0, [2], True)
+        check(shown[-1]["esc"] is True and waived(0, 3) == [1, 1, 0] and len(lines()) == 2
+              and v.status.get_text() == "waive cancelled: 1 error(s) left as they were",
+              "Esc cancels: the error is left as it was, and the status line says so",
+              (shown[-1], v.status.get_text()))
+        # an empty line: waived without a reason, nothing written
+        answer("  ")
+        v._drc_set_waived(0, [2], True)
+        got = detail(0, 2)
+        check(waived(0, 3) == [1, 1, 1] and len(lines()) == 2
+              and v.status.get_text() == "waived 1 error(s) in WHY.MANY"
+              and got[0] == "#3(3)  [waived]" and not any(l.startswith("waive reason") for l in got),
+              "an empty line waives without a reason: nothing is written, the detail has no line",
+              (v.status.get_text(), got[:4]))
+        answer("seal ring")
+        v._drc_set_waived(0, [3], True)
+        check(shown[-1]["text"] == "" and shown[-1]["known"] == ["dummy fill"],
+              "after a waive without a reason the line starts empty", shown[-1])
+        # errors that hold one reason: the dialog edits it, and the reason
+        # typed is every error's of the action
+        answer("dummy metal fill")
+        v._drc_set_waived(0, [0, 1], True)
+        check(shown[-1]["title"] == "Waive reason  (2 errors)" and shown[-1]["text"] == "dummy fill"
+              and shown[-1]["known"] == ["seal ring", "dummy fill"]
+              and detail(0, 0)[3] == detail(0, 1)[3] == "waive reason: dummy metal fill"
+              and detail(0, 3)[3] == "waive reason: seal ring"
+              and lines()[-1] == "w 0 0,2 dummy metal fill",
+              "waived errors waived again: the dialog starts from their reason, the new one is theirs",
+              (shown[-1], lines()))
+        # the hangul composer of the note editor, in this line
+        answer("", typed=[("space", int(Gdk.ModifierType.SHIFT_MASK)), ("d",), ("k",), ("s",),
+                          ("s",), ("u",), ("d",), ("space", int(Gdk.ModifierType.SHIFT_MASK)),
+                          ("a",)])
+        text = v._drc_reason_dialog("not-required", 1, "", ["a", "b"])
+        check(shown[-1]["title"] == "Not for review reason" and shown[-1]["known"] == ["a", "b"]
+              and shown[-1]["typed"].startswith("안녕") and text is not None and text.startswith("안녕"),
+              "the line composes hangul as the note editor does (Shift+Space)", shown[-1])
+        # ---- 2. turned back: no dialog, and the reason goes
+        asked = len(shown)
+        v._drc_set_waived(0, [1], False)
+        got = detail(0, 1)
+        check(len(shown) == asked and waived(0, 3) == [1, 0, 1]
+              and v.status.get_text() == "unwaived 1 error(s) in WHY.MANY"
+              and got[0] == "#2(2)  [none]" and not any(l.startswith("waive reason") for l in got)
+              and lines()[-1] == "W 0 1,1",
+              "unwaive asks nothing and takes the reason with the status", (got[:4], lines()))
+        # the w key: the error in the detail - waived, it is turned back
+        v._drc_set_sel(None)
+        click(0, 0)
+        v._drc_waive_key()
+        check(len(shown) == asked and waived(0, 1) == [0] and lines()[-1] == "W 0 0,1",
+              "w on a waived error turns it back without a word")
+        answer("by the key")
+        v._drc_waive_key()
+        check(len(shown) == asked + 1 and waived(0, 1) == [1] and shown[-1]["title"] == "Waive reason"
+              and detail(0, 0)[3] == "waive reason: by the key",
+              "w on an error that is not waived asks why", shown[-1])
+        # ---- 3. a selection: one line for all of it
+        v._drc.set_statuses(0, range(12), 0)
+        v._drc_waived_refresh(0, list(range(12)), False)
+        before = len(lines())
+        v._drc_selection_submit(0, None, gtkservice.ListMembers([4, 5, 6, 9]), "replace")
+        settle("four errors selected")
+        answer("four of them")
+        asked = len(shown)
+        v._drc_waive_key()
+        settle("a selection waived")
+        check(len(shown) == asked + 1 and shown[-1]["title"] == "Waive reason  (4 errors)"
+              and waived(0, 12) == [0, 0, 0, 0, 1, 1, 1, 0, 0, 1, 0, 0]
+              and lines()[before:] == ["w 0 4,3,2,1 four of them"]
+              and v.status.get_text() == "waived 4 error(s) in WHY.MANY · reason: four of them",
+              "w on a selection asks once and writes one line for its errors",
+              (shown[-1]["title"], lines()[before:], v.status.get_text()))
+        # a selection past a page: the service reads what the dialog starts
+        # from and which way the toggle goes, then the job writes - one line
+        page = gui.DRC_PAGE
+        gui.DRC_PAGE = 5
+        try:
+            v._drc_selection_submit(0, None, gtkservice.ListMembers(list(range(12))), "replace")
+            settle("the whole rule selected")
+            answer("the whole rule")
+            asked = len(shown)
+            v._drc_waive_key()
+            job = v._drc_review_job
+            settle("the whole rule waived")
+            check(job is not None and job["operation"] == "reason-read" and len(shown) == asked + 1
+                  and shown[-1]["title"] == "Waive reason  (12 errors)" and shown[-1]["text"] == "four of them"
+                  and waived(0, 12) == [1] * 12 and lines()[-1] == "w 0 0,12 the whole rule"
+                  and v.status.get_text() == "waived 12 error(s) in WHY.MANY · reason: the whole rule"
+                  and detail(0, 11)[3] == "waive reason: the whole rule",
+                  "a selection past a page: the service's job, one dialog, one line for the rule",
+                  (job and job["operation"], shown[-1], lines()[-1], v.status.get_text()))
+            # all waived: the toggle turns them back, nothing is asked
+            asked = len(shown)
+            v._drc_waive_key()
+            settle("the whole rule turned back")
+            check(len(shown) == asked and waived(0, 12) == [0] * 12 and lines()[-1] == "W 0 0,12"
+                  and v.status.get_text() == "unwaived 12 error(s) in WHY.MANY"
+                  and not any(l.startswith("waive reason") for l in detail(0, 11)),
+                  "the same key on a selection that is waived whole turns it back unasked",
+                  (lines()[-1], v.status.get_text()))
+            # cancelled: nothing is written by the job that read
+            answer(None)
+            v._drc_waive_key()
+            settle("a cancelled bulk waive")
+            check(waived(0, 12) == [0] * 12 and lines()[-1] == "W 0 0,12"
+                  and v.status.get_text() == "waive cancelled: 12 error(s) left as they were",
+                  "a cancelled dialog of a selection past a page leaves it", v.status.get_text())
+        finally:
+            gui.DRC_PAGE = page
+        v._drc_set_sel(None)
+        v._drc_grid_fill(0)
+        # the group list's `waive all`: the scope's errors, one line
+        pick(1)
+        answer("all of the rule")
+        v._drc_scope_all("waive", True)
+        settle("waive all with a reason")
+        check(shown[-1]["title"] == "Waive reason  (4 errors)" and waived(1, 4) == [1] * 4
+              and lines()[-1] == "w 1 0,4 all of the rule"
+              and v.status.get_text() == "waived 4 error(s) in WHY.FEW · reason: all of the rule",
+              "the group list's waive all asks why and writes one line",
+              (shown[-1]["title"], lines()[-1], v.status.get_text()))
+        v._drc_scope_all("waive", False)
+        settle("unwaive all")
+        check(waived(1, 4) == [0] * 4 and lines()[-1] == "W 1 0,4", "(and unwaive all takes it back)")
+        # ---- 4. not for review: asked the same, kept apart
+        flags = lambda ci, n: [v._drc.review_flags(ci, ei) & gtkservice.NOT_REQUIRED for ei in range(n)]
+        click(1, 2)
+        answer("out of scope")
+        v._drc_not_required_key(True)
+        settle("an error set aside")
+        got = detail(1, 2)
+        check(shown[-1]["title"] == "Not for review reason" and shown[-1]["text"] == ""
+              and shown[-1]["known"] is None
+              and flags(1, 4) == [0, 0, gtkservice.NOT_REQUIRED, 0]
+              and lines()[-1] == "n 1 2,1 out of scope"
+              and got[2:4] == ["visited: no · not for review: yes", "not for review reason: out of scope"]
+              and v.status.get_text() == "not for review set on 1 errors · reason: out of scope",
+              "setting an error aside asks why; its reasons are apart from the waive's",
+              (shown[-1], got[:5], v.status.get_text()))
+        # waived too: both reasons are read
+        answer("and waived")
+        v._drc_set_waived(1, [2], True)
+        got = detail(1, 2)
+        check(got[3:5] == ["waive reason: and waived", "not for review reason: out of scope"],
+              "an error waived and set aside says both", got[:6])
+        asked = len(shown)
+        v._drc_not_required_key(False)
+        settle("back in the review")
+        got = detail(1, 2)
+        check(len(shown) == asked and flags(1, 4) == [0] * 4 and lines()[-1] == "N 1 2,1"
+              and got[2:4] == ["visited: no · not for review: no", "waive reason: and waived"]
+              and v.status.get_text() == "not for review cleared on 1 errors",
+              "back in the review: nothing asked, the reason gone, the waive's left",
+              (got[:5], lines()[-1], v.status.get_text()))
+        answer(None)
+        v._drc_scope_all("not-required", True)
+        settle("a cancelled exclusion")
+        check(flags(1, 4) == [0] * 4
+              and v.status.get_text() == "not for review cancelled: 4 error(s) left as they were",
+              "a cancelled exclusion leaves the errors in the review", v.status.get_text())
+        # ---- 5. what it is not: a note. And it is there at the next open
+        check(not list(d.glob(".why.db.notes.*")) and v._drc.notes_list() == [],
+              "no note is made of a reason", [p.name for p in d.glob(".why.db.*")])
+        kept = lines()
+        check(v.load_drc(str(db)), "the results opened again")
+        w._wf.set_active_id("all")
+        pick(1)
+        check(detail(1, 2)[3] == "waive reason: and waived" and lines() == kept,
+              "the reason is read at the next open, and the open writes nothing", detail(1, 2)[:5])
+        # the line takes 1000 characters; a longer reason (no dialog gives
+        # one) is refused before anything is written
+        v._drc_set_waived(1, [0], True, reason="x" * 1001)
+        check(waived(1, 1) == [0] and "at most 1000 characters" in v.status.get_text()
+              and lines() == kept,
+              "a reason past 1000 characters is refused and nothing is waived", v.status.get_text())
+    finally:
+        Gtk.Dialog.run = real_run
+        if stand_in is not None:
+            v._drc_reason_dialog = stand_in
+
+
 def cd_part_ui(v, d, pump):
     """The pane's CD part (user 2026-11-10: "CD 델타 컨트롤 각 항목이 너무
     자리를 많이 차지하니 absolute/ratio 콤보박스의 문구를 단순화하여 크기를
@@ -2197,6 +2561,9 @@ def a5(temp):
     cache = gtkservice.ServiceCache(str(d / "sample.oas"))
     cache.load()
     v = gui.Viewer(cache, detail=2)
+    # (waiving and setting aside ask why, 0.12.463: answered here with no
+    # reason, and what was asked kept; the dialog itself is reason_ui's)
+    v._drc_reason_dialog = ReasonAnswer()
     try:
         pump(v, lambda: v.last_frame is not None, "first frame")
         check(v.load_drc(str(d / "sample.db")), "load_drc")
@@ -2312,6 +2679,8 @@ def a5(temp):
             pump(v, lambda: v._drc_review_job is None, "review", 60)
         finally:
             gui.DRC_PAGE = page
+        check(v._drc_reason_dialog.asked == [("waive", 20, "", ())],
+              "... which asked why once, for the 20 of them", v._drc_reason_dialog.asked)
         check(v._drc.status_counts(0) == (20, 20) and store[0][1] == "20/20"
               and [c[1] for c in store[0].iterchildren()] == ["5/5", "4/4", "3/3", "8/8"],
               "its counts after it", (v._drc.status_counts(0), store[0][1]))
@@ -2456,6 +2825,7 @@ def a5(temp):
         detail_ui(v, d, pump)
         rules_lookup_ui(v, d, temp)
         launch_pick_ui(v, d, temp, pump)
+        reason_ui(v, d, pump)
         small = d / "small.db"
         small.write_text("MAIN 100000\nSMALL.ONE\n0 0 0\nSMALL.TWO\n0 0 0\n")
         (d / "small.db.rules.json").write_text(json.dumps({

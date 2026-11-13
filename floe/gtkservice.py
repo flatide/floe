@@ -582,6 +582,10 @@ class PackDrc(_Drc):
         self.waive_path = result.get("waive_path")
         self._waive_path = self.waive_path
         self.note_path = result.get("note_path")
+        # why errors were waived or set aside, a line an action (app-core
+        # drc::reasons; 0.12.463)
+        self.reason_path = result.get("reason_path")
+        self._reasons = {}
         self._reviewer = result.get("reviewer")
         # how the id was found ("given", "FLOE_REVIEWER", "DISPLAY host",
         # "ssh client", "account") and whether it was stated - --userid or
@@ -622,22 +626,59 @@ class PackDrc(_Drc):
     def get_status(self, ci, ei):
         return self._status_chunk(ci, ei // _STATUS_PAGE)[ei % _STATUS_PAGE]
 
-    def set_statuses(self, ci, eis, value):
-        """Set the status of rule `ci`'s errors `eis` (written at once)."""
+    def set_statuses(self, ci, eis, value, reason=None):
+        """Set the status of rule `ci`'s errors `eis` (written at once).
+        `reason`: why they are waived - one line for the action, every
+        error's of it. What the service says when the errors are waived
+        but the reason could not be kept, else None."""
         eis = [int(e) for e in eis]
         if not eis:
-            return
+            return None
+        fields = {"reason": reason} if reason else {}
         reply = self._request("drc_set_status", check=ci, errors=eis,
-                              status=int(value) & 0xFF)
+                              status=int(value) & 0xFF, **fields)
         self._counts[ci] = tuple(reply["counts"])
         with self._cache_lock:
             for ei in eis:
                 chunk = self._status.get((ci, ei // _STATUS_PAGE))
                 if chunk is not None:
                     chunk[ei % _STATUS_PAGE] = int(value) & 0xFF
+        self.reasons_changed()
+        return reply.get("reason_error")
 
-    def set_status(self, ci, ei, value):
-        self.set_statuses(ci, [ei], value)
+    def set_status(self, ci, ei, value, reason=None):
+        return self.set_statuses(ci, [ei], value, reason=reason)
+
+    # ---- reasons (app-core drc::reasons) --------------------------------
+    def reason_read(self, ci, eis, kind, toggle=False):
+        """What the reason dialog starts from, for a `kind` ("waive",
+        "not-required") action on rule `ci`'s errors `eis`: {"on" - which
+        way a toggle goes -, "prefill" - the one reason they all hold now -,
+        "known" - the reasons given so far, the latest first}."""
+        return self._request("drc_reason_read", check=int(ci), reason_of=kind,
+                             errors=[int(e) for e in eis], toggle=bool(toggle))
+
+    def reason_get(self, ci, ei):
+        """(why it is waived, why it is set aside from the review) of one
+        error: a text each, None for an error that is not waived / set
+        aside now or was without a reason."""
+        key = (int(ci), int(ei))
+        with self._cache_lock:
+            got = self._reasons.get(key)
+        if got is None:
+            reply = self._request("drc_reason_get", check=key[0], error=key[1])
+            got = tuple((reply.get(k) or {}).get("text")
+                        for k in ("waive", "not_required"))
+            with self._cache_lock:
+                if len(self._reasons) > 4096:
+                    self._reasons.clear()
+                self._reasons[key] = got
+        return got
+
+    def reasons_changed(self):
+        """A review write happened: drop what was read of the reasons."""
+        with self._cache_lock:
+            self._reasons.clear()
 
     def status_counts(self, ci):
         return self._counts[ci]
@@ -702,6 +743,7 @@ class PackDrc(_Drc):
         """A service job rewrote statuses: drop what was read of them."""
         with self._cache_lock:
             self._status.clear()
+            self._reasons.clear()
         if ci is not None and counts is not None:
             self._counts[ci] = tuple(counts)
 
@@ -710,6 +752,7 @@ class PackDrc(_Drc):
         self._counts = [tuple(c) for c in reply["counts"]]
         with self._cache_lock:
             self._status.clear()
+            self._reasons.clear()
         return reply["waived"]
 
     def counts_refresh(self):
@@ -717,6 +760,7 @@ class PackDrc(_Drc):
         self._counts = [tuple(c) for c in self._request("drc_counts")]
         with self._cache_lock:
             self._status.clear()
+            self._reasons.clear()
 
     # ---- visited / not-required (app-core drc::team::flags) -------------
     def review_flags(self, ci, ei):
@@ -738,6 +782,7 @@ class PackDrc(_Drc):
 
     def review_flags_changed(self, ci=None):
         with self._cache_lock:
+            self._reasons.clear()
             if ci is None:
                 self._flags.clear()
             else:
@@ -2036,15 +2081,21 @@ def apply_review(db, source, ci=None, errors=None, force=False, cancelled=None,
     return event["result"]
 
 
-def set_members(db, ci, errors, field, on, cancelled=None, progress=None):
-    """One's own waive or not-required on rule `ci`'s `errors`."""
+def set_members(db, ci, errors, field, on, cancelled=None, progress=None,
+                reason=None):
+    """One's own waive or not-required on rule `ci`'s `errors`, with why
+    (`reason`, one line for the action). What the service says when the
+    reason could not be kept, else None."""
+    fields = {"reason": reason} if reason and on else {}
     try:
-        _job(db, "review", "drc_review", cancelled, progress, check=int(ci),
-             action="waive" if field == "waive" else "not-required",
-             errors=[int(e) for e in errors], on=bool(on))
+        event = _job(db, "review", "drc_review", cancelled, progress,
+                     check=int(ci),
+                     action="waive" if field == "waive" else "not-required",
+                     errors=[int(e) for e in errors], on=bool(on), **fields)
     finally:
         db.counts_refresh()
         db.review_flags_changed(ci)
+    return event.get("reason_error")
 
 
 def prepare_conflict_selection(db, aggregate, ci, membership=None, waived=None,

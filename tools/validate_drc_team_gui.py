@@ -143,6 +143,21 @@ def _review_grid_hover(v, check, pump):
     pump(v, lambda: v._drc_gridw == cols, "review grid width restored")
 
 
+class Why(object):
+    """The reason dialog answered (0.12.463: waiving and setting aside ask
+    why): what it was asked - the kind, the errors, what its line started
+    from, the reasons it offered, the window it belongs to - and the reason
+    it gives (None: cancelled). The dialog itself is the drc_analysis
+    gate's (reason_ui)."""
+
+    def __init__(self, text=""):
+        self.text, self.asked = text, []
+
+    def __call__(self, kind, count, prefill="", known=(), parent=None):
+        self.asked.append((kind, count, prefill, tuple(known), parent))
+        return self.text
+
+
 def r7(temp, check):
     print("[R7] the viewer")
     sys.path[:0] = [str(ROOT / "tools"), str(ROOT)]
@@ -167,6 +182,7 @@ def r7(temp, check):
     cache = gtkservice.ServiceCache(str(d / "sample.oas"))
     cache.load()
     v = gui.Viewer(cache, detail=2)
+    v._drc_reason_dialog = why = Why()
     try:
         pump(v, lambda: v.last_frame is not None, "first frame")
         # the panel is plain (user 2026-11-10): nothing above the lists - no
@@ -291,12 +307,19 @@ def r7(temp, check):
         detail = v._drcwin._detail
         text = detail.get_text(detail.get_start_iter(), detail.get_end_iter(), False)
         check("visited: yes · not for review: no" in text, "the details' review line")
-        # not for review from the list's menu action
+        # not for review from the list's menu action: asked why first
+        why.text = "block boundary"
         v._drc_set_not_required(0, [1, 2], True)
         pump(v, lambda: v._drc_review_job is None, "not for review", 30)
         check(db.review_counts(0)["not_required"] == 2
               and db.review_flags(0, 1) == gtkservice.NOT_REQUIRED, "not for review set",
               db.review_counts(0))
+        check(why.asked == [("not-required", 2, "", (), None)]
+              and db.reason_get(0, 1) == (None, "block boundary")
+              and db.reason_get(0, 3) == (None, None)
+              and v.status.get_text() == "not for review set on 2 errors · reason: block boundary",
+              "setting aside asked why, and the reason is the two errors'",
+              (why.asked, db.reason_get(0, 1), v.status.get_text()))
         cells = [c for row in v._drcwin._gstore for c in row if c]
         check(any(">2</span>" in c and "foreground='#9e9e9e'" in c
                   and "<s>" not in c for c in cells),
@@ -306,7 +329,11 @@ def r7(temp, check):
         check((whole["total"], whole["visited"], whole["not_required"]) == (38, 2, 2),
               "the review's counts with the exclusions", whole)
         # the viewer's own waive of 0 (visited): the peer's visit says no
+        why.text = "ok by design"
         v._drc_set_waived(0, [0], True)
+        check(why.asked[-1] == ("waive", 1, "", (), None)
+              and db.reason_get(0, 0) == ("ok by design", None),
+              "waiving asked why", (why.asked[-1], db.reason_get(0, 0)))
         # reviewers: load the peer, refresh, the page, a safe application
         w = v._drc_team_dialog()
         w._load_paths([str(peer)])
@@ -315,6 +342,43 @@ def r7(temp, check):
         rows = [tuple(r) for r in w.store]
         check(any(r[1] == 0 and r[4].startswith("yes / no") for r in rows),
               "the peer's work listed with its V / W / NR", rows[:3])
+        # the window's own `Waive selected` / `Exclude selected` ask why too,
+        # in a dialog of the window's; a waived error's dialog starts from
+        # its reason, a cancelled one changes nothing, `Unwaive selected`
+        # asks nothing and takes the reason
+
+        def pick_row(ei):
+            chosen = w.tree.get_selection()
+            chosen.unselect_all()
+            for i, row in enumerate(w.store):
+                if row[1] == ei:
+                    chosen.select_path(gui.Gtk.TreePath.new_from_indices([i]))
+
+        def manual(field, on, done, what):
+            pick_row(0)
+            w._manual(field, on)
+            pump(v, lambda: w.job is None and done() and len(w.store) > 0, what, 30)
+        why.text = "second thought"
+        manual("waive", True, lambda: db.reason_get(0, 0)[0] == "second thought",
+               "my waive from the reviewers window")
+        check(why.asked[-1] == ("waive", 1, "ok by design", ("ok by design",), w.window)
+              and db.get_status(0, 0) == 1,
+              "the reviewers window's waive asks why, starting from the reason held",
+              why.asked[-1][:4])
+        why.text = None
+        asked = len(why.asked)
+        pick_row(0)
+        w._manual("not-required", True)
+        check(len(why.asked) == asked + 1 and why.asked[-1][:2] == ("not-required", 1)
+              and w.job is None and not db.review_flags(0, 0) & gtkservice.NOT_REQUIRED
+              and w.status.get_text() == "Cancelled; my judgement is unchanged.",
+              "... and its exclusion cancelled leaves my judgement", w.status.get_text())
+        manual("waive", False, lambda: db.get_status(0, 0) == 0,
+               "my waive taken back from the reviewers window")
+        check(len(why.asked) == asked + 1 and db.reason_get(0, 0) == (None, None),
+              "... and Unwaive selected asks nothing and takes the reason")
+        why.text = "ok by design"
+        manual("waive", True, lambda: db.reason_get(0, 0)[0] == "ok by design", "my waive again")
         check("conflicts 1" in w.stats.get_text(), "one conflict among visited reviewers",
               w.stats.get_text())
         w.mode.set_active_id("conflict")
@@ -330,6 +394,10 @@ def r7(temp, check):
         check(db.get_status(0, 4) == 1 and db.get_status(0, 0) == 1,
               "the peer's waive carried, one's own decision kept",
               (db.get_status(0, 4), db.get_status(0, 0)))
+        check(db.reason_get(0, 0) == ("ok by design", None) and db.reason_get(0, 4) == (None, None)
+              and db.reason_get(0, 1) == (None, "block boundary"),
+              "my reasons stay mine; a peer's waive carried over has none",
+              (db.reason_get(0, 0), db.reason_get(0, 4)))
         # The fixture conflict is waived; include both waive states.
         v._drcwin._wf.set_active_id("all")
         v._drcwin._conflict.set_active(True)

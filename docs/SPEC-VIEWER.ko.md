@@ -625,7 +625,8 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   각 행에 내·동료의 V/W/NR과 conflict 이유를 쓴다. 더블클릭은 내 도형을 연다.
   `Apply all peer work safely`는 내 방문 에러의 다른 판단을 건너뛰고,
   `Use peer judgement on selected rows`는 선택한 행에 강제로 적용한다. 수동
-  버튼(Waive/Unwaive/Exclude/Require selected)은 내 상태를 바꾼다. 상대 visited는
+  버튼(Waive/Unwaive/Exclude/Require selected)은 내 상태를 바꾼다(Waive·Exclude는 사유 입력창을
+  먼저 띄운다, 0.12.463, DRC.ko.md §2 사유). 상대 visited는
   복사하지 않는다. `Export my review…`, `Statistics CSV…`(전체 DB·룰별, conflicts·
   reviewers 열). 모든 불러오기·집계·페이지·저장·적용은 창의 작업 스레드에서 서비스
   작업을 기다리며, 창을 닫으면 읽기 작업은 취소하고 쓰기는 끝까지 간다.

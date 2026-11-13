@@ -249,6 +249,12 @@ DRC.ko.md §2) 다른 호스트에서 읽어도 방금 한 것까지 들어 있�
 - **다른 결과의 파일**: pack 지문(내용 ID)이 다른 사이드카는 세지 않고 `skipped`에 이유와 함께
   적는다. 에러가 달라진 재실행 전의 파일이 그렇다. 그 리뷰어가 새 결과를 열면 파일은
   `.stale-<시각>`으로 치워지고(0.12.441) 그 뒤로는 새 리뷰가 세어진다.
+- **사유**(0.12.463): 리뷰어의 `.<db>.reasons.<ID>`(DRC.ko.md §2)가 있으면 `reasons`에 사유별로
+  낸다. 종류(`waive`, `not_required`)와 문구가 같은 것을 하나로 모으고, 그 사유를 갖고 **지금
+  waive(검토 제외)인** 에러를 상태 바이트와 플래그에서 같은 패스에 센다. 그런 에러가 없는 사유는
+  내지 않는다. `waived_with_reason`·`not_required_with_reason`은 그 합이라서 `waived`에서 빼면
+  사유 없이 waive된 수다. 임시 폴더의 사유 파일도 본다(`reasons_location: temp`). 다른 결과의
+  사유 파일은 `skipped`에 적는다.
 - **비용**: 리뷰어마다 에러당 1바이트를 읽는다. 14억 에러 결과에 열 명이면 14 GB를 읽는다.
 
 ```json
@@ -267,6 +273,12 @@ DRC.ko.md §2) 다른 호스트에서 읽어도 방금 한 것까지 들어 있�
      "waive_modified": "2026-11-10T08:42:20Z",
      "review_file": "/r/.results.db.review.kim.sqlite3", "review_location": "results",
      "review_modified": "2026-11-10T08:42:21Z",
+     "reasons_file": "/r/.results.db.reasons.kim", "reasons_location": "results",
+     "reasons_modified": "2026-11-13T07:01:08Z",
+     "waived_with_reason": 10, "not_required_with_reason": 0,
+     "reasons": [{"kind": "waive", "text": "dummy metal fill", "errors": 10, "actions": 1,
+                  "first": "2026-11-13T07:01:08Z", "last": "2026-11-13T07:01:08Z",
+                  "rules": [{"index": 1, "name": "A.WIDTH", "errors": 10}]}],
      "rules": [{"index": 1, "name": "A.WIDTH", "waived": 10, "visited": 5,
                 "not_required": 10, "visited_not_required": 0, "pending": 5985}]},
     {"id": "park", "present": true, "waive_known": true, "visited_known": false,
@@ -289,6 +301,9 @@ DRC.ko.md §2) 다른 호스트에서 읽어도 방금 한 것까지 들어 있�
 | `*_known` | 그 차원의 파일이 있는지. waive 파일만 있으면 방문·검토 제외는 0이 아니라 모름이라 키가 없다 |
 | `counters_match`, `counter_mismatch[]` | 저장된 waived 카운터가 센 값과 같은지, 다르면 룰별 `stored`·`counted` |
 | `waive_modified`, `review_modified` | 파일의 마지막 수정 시각(UTC). 마지막 작업 시각의 근사 |
+| `reasons[]` (0.12.463) | 사유별 한 항목: `kind`(`waive`·`not_required`), `text`, `errors`(그 사유를 갖고 지금 waive·검토 제외인 에러 수), `actions`(그 사유를 준 작업 수), `first`·`last`(처음·마지막으로 준 시각, UTC), `rules[]`(룰별 `errors`). waive 사유가 먼저, 에러가 많은 순. 사유 파일이 없는 리뷰어는 키가 없다 |
+| `waived_with_reason`, `not_required_with_reason` | 사유가 있는 waive·검토 제외 에러 수 |
+| `reasons_file`, `reasons_location`, `reasons_modified` | 사유 파일, 그 자리(`results`·`temp`), 마지막 수정 시각 |
 | `team.rules` | 모든 룰. `team.reviewers`는 센 리뷰어 수 |
 
 키는 사전순으로 나온다. ProperTee처럼 캡처 상한이 있는 호출자는 파일로 받아 `json_parse`한다(§2).

@@ -1177,3 +1177,139 @@ fn varint_coordinate_overflow_and_trailing_bytes_are_explicit() {
         }
     }
 }
+
+/// User 2026-11-13 ("waive ... 처리할 때 사유를 입력할 수 있게 ... error마다
+/// 동일한 note가 생겨서"): a waive's reason is the action's, kept once in the
+/// reviewer's reasons file, and it goes where the status goes - every writer
+/// of statuses drops the reason of an error it turns back or changes without
+/// one, so a reason is only ever shown of an error that is waived.
+#[test]
+fn a_waive_reason_is_the_actions_and_goes_with_the_status() {
+    use super::analysis::scope::Selection;
+    use super::desktop::{Review, STATUS_NONE, STATUS_WAIVED};
+    use super::reasons::Kind;
+    let dir = std::env::temp_dir().join(format!(
+        "floe-waive-reason-{}-{}",
+        std::process::id(),
+        SERIAL.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&dir).unwrap();
+    let pack = dir.join(".results.db.tray");
+    fs::write(&pack, bytes(8)).unwrap();
+    let stop = AtomicUsize::new(0);
+    let file = dir.join(".results.db.reasons.kim");
+    fn why(r: &Review, error: u64) -> Option<String> {
+        r.waive_reason(1, error).unwrap().map(|e| e.text.clone())
+    }
+    let lines = |file: &std::path::Path| -> Vec<String> {
+        fs::read_to_string(file)
+            .unwrap()
+            .lines()
+            .skip(3)
+            // (the time of each line is the clock's)
+            .map(|l| {
+                let mut p = l.splitn(4, ' ');
+                format!("{} {} {}", p.next().unwrap(), p.next().unwrap(), p.nth(1).unwrap())
+            })
+            .collect()
+    };
+    let mut r = Review::open(&pack, None, Some("kim"), &stop).unwrap();
+    assert!(!r.read_only(), "{:?}", r.notices);
+    // the file is the waive sidecar's neighbour, and is not made by the open
+    assert_eq!(r.reasons.path, file);
+    assert!(dir.join(".results.db.waive.kim").is_file() && !file.exists());
+    // waived without a reason: nothing is written of it
+    r.set_status(1, &[0, 1], STATUS_WAIVED).unwrap();
+    assert!(!file.exists() && why(&r, 0).is_none() && why(&r, 1).is_none());
+    // with one: every error of the action holds it - one waived before too
+    r.set_status(1, &[1, 2, 3], STATUS_WAIVED).unwrap();
+    r.reason_set(Kind::Waive, 1, &[(1, 4)], "  dummy fill\n").unwrap();
+    assert_eq!(
+        (0..5).map(|e| why(&r, e)).collect::<Vec<_>>(),
+        [None, Some("dummy fill".into()), Some("dummy fill".into()), Some("dummy fill".into()), None]
+    );
+    let head = fs::read_to_string(&file).unwrap();
+    assert!(head.starts_with("# floe drc review reasons\nfloe_reasons=1\nfloe_pack="), "{head}");
+    assert_eq!(lines(&file), ["w 1 1,3 dummy fill"]);
+    // turned back: the reason goes with the status, and the file says so
+    r.set_status(1, &[2], STATUS_NONE).unwrap();
+    assert_eq!(why(&r, 2), None);
+    assert_eq!(lines(&file), ["w 1 1,3 dummy fill", "W 1 2,1"]);
+    // waived again without a reason: it has none - not the one it had
+    r.set_status(1, &[2], STATUS_WAIVED).unwrap();
+    assert_eq!(why(&r, 2), None);
+    assert_eq!(why(&r, 3), Some("dummy fill".into()));
+    assert_eq!(lines(&file).len(), 2);
+    // a reason given again replaces the one held
+    r.set_status(1, &[3], STATUS_WAIVED).unwrap();
+    r.reason_set(Kind::Waive, 1, &[(3, 4)], "seal ring").unwrap();
+    assert_eq!((why(&r, 1), why(&r, 3)), (Some("dummy fill".into()), Some("seal ring".into())));
+    // a job's chunks (the service's review job): turned back a chunk at a
+    // time, gone at once, said once when the job's flush comes
+    let all = Selection::from_indices(8, 0..8);
+    assert_eq!(r.set_status_range(1, &all, STATUS_NONE, 0, 4).unwrap(), 4);
+    assert_eq!(r.set_status_range(1, &all, STATUS_NONE, 4, 4).unwrap(), 0);
+    assert!((0..8).all(|e| why(&r, e).is_none()));
+    assert_eq!(lines(&file).len(), 3, "not said before the flush");
+    r.sync_waives().unwrap();
+    assert_eq!(lines(&file).last().unwrap(), "W 1 1,1,1,1", "errors 1 and 3 held one");
+    // a span an application writes (a peer's decision, a previous run's):
+    // the reason of what it changes goes, the rest stays
+    r.set_status(1, &[4, 5, 6], STATUS_WAIVED).unwrap();
+    r.reason_set(Kind::Waive, 1, &[(4, 7)], "seal ring").unwrap();
+    let before = r.statuses(1, 4, 3).unwrap();
+    r.write_status_span(1, 4, &before, &[STATUS_WAIVED, STATUS_NONE, STATUS_WAIVED]).unwrap();
+    r.sync_waives().unwrap();
+    assert_eq!(
+        (4..7).map(|e| why(&r, e)).collect::<Vec<_>>(),
+        [Some("seal ring".into()), None, Some("seal ring".into())]
+    );
+    assert_eq!(lines(&file).last().unwrap(), "W 1 5,1");
+    // a saved waive file loaded over the review: a reason stays with an
+    // error the file has waived too, and goes with one it turns back
+    let saved = dir.join("saved.waive");
+    r.waive_export(&saved).unwrap(); // 4 and 6 waived
+    r.set_status(1, &[4], STATUS_NONE).unwrap();
+    r.set_status(1, &[7], STATUS_WAIVED).unwrap();
+    r.reason_set(Kind::Waive, 1, &[(7, 8)], "later").unwrap();
+    assert_eq!(r.waive_import(&saved).unwrap(), 2);
+    assert_eq!(why(&r, 4), None, "waived again by the file: turned back since, no reason");
+    assert_eq!(why(&r, 6), Some("seal ring".into()));
+    assert_eq!(why(&r, 7), None, "turned back by the file");
+    assert_eq!(r.status(1, 7).unwrap(), STATUS_NONE);
+    // the other kind's reasons are apart from the statuses
+    r.reason_set(Kind::NotRequired, 1, &[(0, 2)], "out of scope").unwrap();
+    r.set_status(1, &[0, 1], STATUS_WAIVED).unwrap();
+    r.set_status(1, &[0, 1], STATUS_NONE).unwrap();
+    assert_eq!(r.reasons.of(Kind::NotRequired, 1, 1).map(|e| e.text.as_str()), Some("out of scope"));
+    r.reason_drop(Kind::NotRequired, 1, &[(1, 2)]);
+    r.sync_waives().unwrap();
+    assert_eq!(lines(&file).last().unwrap(), "N 1 1,1");
+    assert!(r.notices.is_empty(), "{:?}", r.notices);
+    drop(r);
+    // read again: what was kept
+    let said = fs::read_to_string(&file).unwrap();
+    let r = Review::open(&pack, None, Some("kim"), &stop).unwrap();
+    assert_eq!(why(&r, 6), Some("seal ring".into()));
+    assert_eq!(r.reasons.of(Kind::NotRequired, 1, 0).map(|e| e.text.as_str()), Some("out of scope"));
+    assert!(r.reasons.of(Kind::NotRequired, 1, 1).is_none());
+    assert_eq!(fs::read_to_string(&file).unwrap(), said, "an open writes nothing");
+    drop(r);
+    // a reason a file holds for an error that is not waived - a build
+    // before 0.12.463 turned it back, a run ended between its two writes -
+    // is never shown: the readers ask the status
+    fs::write(&file, format!("{said}w 1 99 0,1 left behind\n")).unwrap();
+    let r = Review::open(&pack, None, Some("kim"), &stop).unwrap();
+    assert_eq!(r.reasons.of(Kind::Waive, 1, 0).map(|e| e.text.as_str()), Some("left behind"));
+    assert_eq!(r.status(1, 0).unwrap(), STATUS_NONE);
+    assert_eq!(why(&r, 0), None);
+    drop(r);
+    // another reviewer's are another file
+    let mut lee = Review::open(&pack, None, Some("lee"), &stop).unwrap();
+    assert_eq!(lee.reasons.path, dir.join(".results.db.reasons.lee"));
+    assert!(lee.reasons.is_empty());
+    lee.set_status(1, &[6], STATUS_WAIVED).unwrap();
+    assert_eq!(why(&lee, 6), None);
+    drop(lee);
+    fs::remove_dir_all(&dir).unwrap();
+}

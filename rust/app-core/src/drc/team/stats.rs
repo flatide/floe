@@ -16,6 +16,12 @@
 //! a waive or an exclusion carried unless two reviewers who both visited the
 //! error decided differently - that error is a conflict.
 //!
+//! A reviewer's reasons (`.<db>.reasons.<id>`, drc::reasons; 0.12.463) are
+//! read beside the other two: each reason given with the errors that hold
+//! it and are waived - or set aside - now, counted in the same pass from the
+//! same status bytes and flags, so a reason never counts an error the
+//! reviewer has since turned back by another road.
+//!
 //! Nothing is written, no snapshot is made, and the pack must be the
 //! current one: a missing or stale pack is an error, never an answer of
 //! zeros from the ASCII file.
@@ -23,6 +29,7 @@ use super::bits::{Bits, CHUNK};
 use super::flags::{self, open_read_only, sql};
 use super::Identity;
 use crate::drc::desktop::STATUS_WAIVED;
+use crate::drc::reasons::{Kind, Reasons};
 use crate::drc::Pack;
 use crate::{check_cancelled, Error, ErrorKind, Result};
 use rusqlite::Connection;
@@ -46,6 +53,8 @@ struct Found {
     waive: Option<(PathBuf, &'static str)>,
     /// the flags file and where it is (`results`, `review-root`, `user-data`)
     review: Option<(PathBuf, &'static str)>,
+    /// the reasons file and where it is (`results`, `temp`)
+    reasons: Option<(PathBuf, &'static str)>,
 }
 
 /// A tag as the sidecars are named (letters, digits, `.`, `_`, `-`), and not
@@ -109,6 +118,7 @@ fn discover(pack: &Path) -> Result<BTreeMap<String, Found>> {
     let folder = database.parent().unwrap_or(Path::new(".")).to_path_buf();
     let mut found: BTreeMap<String, Found> = BTreeMap::new();
     let waive_prefix = format!(".{name}.waive.");
+    let reasons_prefix = format!(".{name}.reasons.");
     let review_prefix = format!(".{name}.review.");
     let review_tag = |file: &str| -> Option<String> {
         file.strip_prefix(&review_prefix)
@@ -120,6 +130,8 @@ fn discover(pack: &Path) -> Result<BTreeMap<String, Found>> {
     for file in names(&folder, true)? {
         if let Some(tag) = file.strip_prefix(&waive_prefix).and_then(reviewer_of) {
             found.entry(tag.to_owned()).or_default().waive = Some((folder.join(&file), "results"));
+        } else if let Some(tag) = file.strip_prefix(&reasons_prefix).and_then(reviewer_of) {
+            found.entry(tag.to_owned()).or_default().reasons = Some((folder.join(&file), "results"));
         } else if let Some(tag) = review_tag(&file) {
             found.entry(tag).or_default().review = Some((folder.join(&file), "results"));
         }
@@ -168,10 +180,100 @@ fn discover(pack: &Path) -> Result<BTreeMap<String, Found>> {
                         *slot = Some((temp.join(&file), "temp"));
                     }
                 }
+                // (the reasons go where the waive sidecar goes)
+                let tag = file
+                    .strip_prefix(&reasons_prefix)
+                    .and_then(|rest| rest.strip_suffix(suffix))
+                    .and_then(reviewer_of);
+                if let Some(tag) = tag {
+                    let slot = &mut found.entry(tag.to_owned()).or_default().reasons;
+                    if slot.is_none() {
+                        *slot = Some((temp.join(&file), "temp"));
+                    }
+                }
             }
         }
     }
     Ok(found)
+}
+
+/// Add to `tally` - a count an action - the bits of `set` (a chunk's
+/// waived or set-aside errors, the chunk starting at `start` with `count`
+/// errors) that the reasons' runs `runs` cover. `cursor` walks the runs as
+/// the chunks go by.
+fn count_held(
+    runs: &[(u64, u64, usize)],
+    cursor: &mut usize,
+    start: u64,
+    count: u64,
+    set: &Bits,
+    tally: &mut [u64],
+) {
+    let end = start + count;
+    while *cursor < runs.len() && runs[*cursor].1 <= start {
+        *cursor += 1;
+    }
+    let mut j = *cursor;
+    while j < runs.len() && runs[j].0 < end {
+        let (a, b) = (runs[j].0.max(start) - start, runs[j].1.min(end) - start);
+        tally[runs[j].2] += set.count_below(b) - set.count_below(a);
+        if runs[j].1 > end {
+            break;
+        }
+        j += 1;
+    }
+}
+
+/// A reviewer's reasons as the report lists them: each reason given - by
+/// kind and text - with the errors that hold it and are waived or set aside
+/// now (`tally`, a count an action), the actions it was given in, when it
+/// was first and last given, and its rules. A reason that holds no such
+/// error is not listed. The waive reasons first, the most errors first.
+fn reasons_json(store: &Reasons, tally: &[u64], names: &[String]) -> (Value, [u64; 2]) {
+    struct Group {
+        errors: u64,
+        actions: u64,
+        first: u64,
+        last: u64,
+        rules: BTreeMap<usize, u64>,
+    }
+    let mut groups: BTreeMap<(Kind, &str), Group> = BTreeMap::new();
+    let mut with = [0u64; 2];
+    for (entry, &errors) in store.entries().iter().zip(tally) {
+        if errors == 0 {
+            continue;
+        }
+        with[usize::from(entry.kind == Kind::NotRequired)] += errors;
+        let g = groups.entry((entry.kind, entry.text.as_str())).or_insert(Group {
+            errors: 0,
+            actions: 0,
+            first: entry.time,
+            last: entry.time,
+            rules: BTreeMap::new(),
+        });
+        g.errors += errors;
+        g.actions += 1;
+        g.first = g.first.min(entry.time);
+        g.last = g.last.max(entry.time);
+        *g.rules.entry(entry.check).or_default() += errors;
+    }
+    let mut listed: Vec<_> = groups.into_iter().collect();
+    listed.sort_by(|a, b| (a.0 .0, std::cmp::Reverse(a.1.errors), a.0 .1).cmp(&(b.0 .0, std::cmp::Reverse(b.1.errors), b.0 .1)));
+    let rows = listed
+        .into_iter()
+        .map(|((kind, text), g)| {
+            json!({
+                "kind": kind.name(),
+                "text": text,
+                "errors": g.errors,
+                "actions": g.actions,
+                "first": utc(g.first),
+                "last": utc(g.last),
+                "rules": g.rules.iter().map(|(&ci, &errors)| json!({"index": ci + 1, "name": names[ci], "errors": errors})).collect::<Vec<_>>(),
+            })
+        })
+        .collect::<Vec<_>>();
+    (json!(rows), with)
 }
 
 /// When a file was last changed, UTC (`2026-11-10T07:12:45Z`).
@@ -332,6 +434,9 @@ struct Reviewer {
     flags: Option<(PathBuf, &'static str)>,
     rules: Vec<Own>,
     stored: Option<Vec<u32>>,
+    /// the reasons file, what it says, and the errors each of its actions
+    /// holds that are waived or set aside now
+    reasons: Option<((PathBuf, &'static str), Reasons, Vec<u64>)>,
 }
 
 /// The statistics of `source`'s current pack (see the module docs): every
@@ -379,6 +484,7 @@ fn collect_from(
             flags: None,
             rules: vec![Own::default(); rules],
             stored: None,
+            reasons: None,
         };
         let (mut reader, mut connection) = (None, None);
         if let Some((path, place)) = files.waive {
@@ -397,6 +503,20 @@ fn collect_from(
                     reviewer.flags = Some((path, place));
                     connection = Some(conn);
                 }
+                Err(e) => skip(&tag, &path, e.message),
+            }
+        }
+        // why: beside the files that say whether. One of another result is
+        // left out and said, as theirs are; one that reads is counted
+        // against them - alone it has nothing to be counted against
+        if let Some((path, place)) = files.reasons {
+            let result = crate::drc::review::Fingerprint::of(pack).tag();
+            match Reasons::load(&path, &result, &id.sizes) {
+                Ok(Some(store)) => {
+                    let tally = vec![0u64; store.entries().len()];
+                    reviewer.reasons = Some(((path, place), store, tally));
+                }
+                Ok(None) => (),
                 Err(e) => skip(&tag, &path, e.message),
             }
         }
@@ -433,6 +553,16 @@ fn collect_from(
         }
         let mut owns = vec![Own::default(); reviewers.len()];
         let mut planes = Vec::with_capacity(reviewers.len());
+        // each reviewer's reasons of this rule, as runs, and where the
+        // chunks have come to in them
+        let held: Vec<[Vec<(u64, u64, usize)>; 2]> = reviewers
+            .iter()
+            .map(|r| match &r.reasons {
+                Some((_, store, _)) => [store.runs(Kind::Waive, ci), store.runs(Kind::NotRequired, ci)],
+                None => [Vec::new(), Vec::new()],
+            })
+            .collect();
+        let mut cursors = vec![[0usize; 2]; reviewers.len()];
         let mut start = 0u64;
         while start < size {
             if (start / CHUNK).is_multiple_of(256) {
@@ -465,6 +595,11 @@ fn collect_from(
                 }
                 let limit = Bits::first(count);
                 let (visited, not_required) = (visited & limit, not_required & limit);
+                if let Some((_, _, tally)) = &mut reviewers[i].reasons {
+                    count_held(&held[i][0], &mut cursors[i][0], start, count, &waived, tally);
+                    count_held(&held[i][1], &mut cursors[i][1], start, count, &not_required, tally);
+                }
+                let r = &reviewers[i];
                 let own = &mut owns[i];
                 own.waived += waived.count();
                 own.visited += visited.count();
@@ -531,6 +666,16 @@ fn collect_from(
             person["review_file"] = json!(path);
             person["review_location"] = json!(place);
             person["review_modified"] = json!(modified(path));
+        }
+        if let Some(((path, place), store, tally)) = &r.reasons {
+            let (rows, with) = reasons_json(store, tally, &names);
+            person["reasons_file"] = json!(path);
+            person["reasons_location"] = json!(place);
+            person["reasons_modified"] = json!(modified(path));
+            // of the waived (set aside) errors, those that say why
+            person["waived_with_reason"] = json!(with[0]);
+            person["not_required_with_reason"] = json!(with[1]);
+            person["reasons"] = rows;
         }
         person["rules"] = json!(by_rule);
         people.push(person);
@@ -681,6 +826,67 @@ mod tests {
             b.set(i);
         }
         b
+    }
+
+    /// A reason counts the errors that hold it and are waived (or set
+    /// aside) in the chunk at hand - also a run that crosses chunks.
+    #[test]
+    fn a_reason_counts_the_errors_that_hold_it_and_are_set_now() {
+        let runs = [(0u64, 10u64, 0usize), (4090, 4100, 1), (9000, 9001, 2)];
+        let mut tally = [0u64; 3];
+        let mut cursor = 0;
+        // errors 0..4096: 3 and 9 of the first run (10 is past it), 4090
+        // and 4095 of the second
+        count_held(&runs, &mut cursor, 0, 4096, &bits(&[3, 9, 10, 4090, 4095]), &mut tally);
+        assert_eq!(tally, [2, 2, 0]);
+        // errors 4096..8192: 4096 and 4099 of the second run, 4100 past it
+        count_held(&runs, &mut cursor, 4096, 4096, &bits(&[0, 3, 4]), &mut tally);
+        assert_eq!(tally, [2, 4, 0]);
+        // the rule's last chunk, 900 errors: 9000 of the third run
+        count_held(&runs, &mut cursor, 8192, 900, &bits(&[807, 808, 809]), &mut tally);
+        assert_eq!(tally, [2, 4, 1]);
+        // a whole chunk inside one run, and a chunk no run reaches
+        let wide = [(0u64, 20_000u64, 0usize)];
+        let (mut tally, mut cursor) = ([0u64; 1], 0);
+        count_held(&wide, &mut cursor, 4096, 4096, &Bits::first(4096), &mut tally);
+        count_held(&wide, &mut cursor, 8192, 4096, &bits(&[0, 4095]), &mut tally);
+        count_held(&wide, &mut cursor, 20_480, 4096, &Bits::first(4096), &mut tally);
+        assert_eq!(tally, [4098]);
+        count_held(&[], &mut 0, 0, 4096, &Bits::first(4096), &mut []);
+    }
+
+    /// The report lists a reason once - by kind and text - with the errors
+    /// of every action that gave it; one that holds no error now is left out.
+    #[test]
+    fn reasons_are_listed_by_what_they_say() {
+        let path = std::env::temp_dir().join(format!("floe-reasons-stats-{}", std::process::id()));
+        std::fs::write(
+            &path,
+            "floe_reasons=1\nfloe_pack=T\nw 0 100 0,10 dummy\nw 1 300 0,5 dummy\nw 0 200 20,5 seal\nn 0 50 0,3 scope\nw 1 400 9,1 nobody\n",
+        )
+        .unwrap();
+        let store = Reasons::load(&path, "T", &[100, 100]).unwrap().unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let names = ["A".to_string(), "B".to_string()];
+        let (rows, with) = reasons_json(&store, &[7, 5, 2, 3, 0], &names);
+        assert_eq!(with, [14, 3]);
+        assert_eq!(
+            rows,
+            json!([
+                {"kind": "waive", "text": "dummy", "errors": 12, "actions": 2,
+                 "first": "1970-01-01T00:01:40Z", "last": "1970-01-01T00:05:00Z",
+                 "rules": [{"index": 1, "name": "A", "errors": 7}, {"index": 2, "name": "B", "errors": 5}]},
+                {"kind": "waive", "text": "seal", "errors": 2, "actions": 1,
+                 "first": "1970-01-01T00:03:20Z", "last": "1970-01-01T00:03:20Z",
+                 "rules": [{"index": 1, "name": "A", "errors": 2}]},
+                {"kind": "not_required", "text": "scope", "errors": 3, "actions": 1,
+                 "first": "1970-01-01T00:00:50Z", "last": "1970-01-01T00:00:50Z",
+                 "rules": [{"index": 1, "name": "A", "errors": 3}]},
+            ])
+        );
+        // nothing held: nothing listed
+        let (rows, with) = reasons_json(&store, &[0; 5], &names);
+        assert_eq!((rows, with), (json!([]), [0, 0]));
     }
 
     fn planes(v: &[u64], w: &[u64], n: &[u64], flags: bool, waive: bool) -> Planes {

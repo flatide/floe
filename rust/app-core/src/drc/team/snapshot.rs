@@ -1330,6 +1330,13 @@ pub fn apply(
                     result.changed_not_required +=
                         own.flags.change_many(&mut guard, rule, &[(k, clear)], NOT_REQUIRED, false)?;
                 }
+                // a peer's exclusion carries no reason of mine, and one
+                // taken back takes its reason along (drc::reasons)
+                r.reason_drop(
+                    crate::drc::reasons::Kind::NotRequired,
+                    rule,
+                    &super::bit_runs(k, set | clear),
+                );
             }
             result.applied += changes.count();
         }

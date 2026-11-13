@@ -1612,7 +1612,7 @@ def forwarded_requests(src, temp):
         who = v._drc._reviewer
         title = v.window.get_title()
         check(title.endswith(" · DRC run1/sample.db"), "the title of a review: %r" % title)
-        v._drc_set_waived(0, [0, 1], True)
+        v._drc_set_waived(0, [0, 1], True, reason="")    # (asked why, none given)
         # the same results again: the window as it is
         held = v._drc
         check(send(src, depth=999, drc=db1) == 0, "the same results were refused")

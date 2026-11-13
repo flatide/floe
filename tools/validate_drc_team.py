@@ -1645,10 +1645,404 @@ def r11(temp):
         svc.close()
 
 
+def reasons_read(path, sizes):
+    """A reasons file read by the gate's own reader (app-core drc::reasons'
+    format): its three head lines, its action lines without their times,
+    and - the lines taken in order, a later one winning - per kind (`w`,
+    `n`) and rule a list an error long of the reason held."""
+    text = Path(path).read_text()
+    lines = text.split("\n")
+    table = {k: [[None] * n for n in sizes] for k in "wn"}
+    said = []
+    for line in lines[3:]:
+        if not line:
+            continue
+        tag, ci, _time, rest = line.split(" ", 3)
+        runs, _, why = rest.partition(" ")
+        said.append(" ".join([tag, ci, rest]))
+        numbers = [int(x) for x in runs.split(",")]
+        at = 0
+        for gap, length in zip(numbers[0::2], numbers[1::2]):
+            start = at + gap
+            table[tag.lower()][int(ci)][start:start + length] = (
+                [why if tag in "wn" else None] * length)
+            at = start + length
+    return lines[:3], said, table, len(text.encode())
+
+
+def r12(temp):
+    print("[R12] review reasons: why errors are waived or set aside, a line an action")
+    import random
+    d = temp / "reasons"
+    d.mkdir()
+    sizes = [300000, 5000, 10]
+    write_db(d / "t.db", [("A.W", [_poly(100 * (i % 600), 60 * (i // 600)) for i in range(sizes[0])]),
+                          ("B.S", [_edge(200 * (i % 50), 100 * (i // 50)) for i in range(sizes[1])]),
+                          ("C.X", [_poly(7 * i, 3 * i, 5, 5) for i in range(sizes[2])])])
+    r = run([INDEX, "drc", str(d / "t.db")])
+    check(r.returncode == 0, "floe-index drc t.db", r.stderr)
+    db, file = d / "t.db", d / ".t.db.reasons.kim"
+    svc = Svc()
+    try:
+        opened = rs_open(svc, db, "kim")
+        h = opened["handle"]
+        check(opened["reason_path"] == str(file) and not file.exists(),
+              "the reasons file is the waive sidecar's neighbour, not made by the open",
+              opened.get("reason_path"))
+        get = lambda ci, e: tuple((svc("drc_reason_get", handle=h, check=ci, error=e)[k] or {}).get("text")
+                                  for k in ("waive", "not_required"))
+        # ---- a click's waive: without a reason nothing is written
+        reply = svc("drc_set_status", handle=h, check=1, errors=[0, 1], status=1)
+        check(reply["reason_error"] is None and not file.exists() and get(1, 0) == (None, None),
+              "waived without a reason: nothing is written", reply)
+        # with one: every error of the action holds it, one waived before too
+        reply = svc("drc_set_status", handle=h, check=1, errors=[1, 2, 3, 9], status=1,
+                    reason="  dummy fill\t(approved)\n")
+        head, said, _table, _size = reasons_read(file, sizes)
+        check(reply["reason_error"] is None and reply["counts"] == [5, 5000]
+              and head[:2] == ["# floe drc review reasons", "floe_reasons=1"]
+              and head[2] == "floe_pack=%s,%d" % (opened_tag(svc, h, d), sum(sizes))
+              and said == ["w 1 1,3,5,1 dummy fill (approved)"]
+              and [get(1, e)[0] for e in (0, 1, 2, 3, 4, 9)]
+              == [None] + ["dummy fill (approved)"] * 3 + [None, "dummy fill (approved)"],
+              "waived with a reason: one line, kept as one line of text, every error's of the action",
+              (head, said))
+        time_of = svc("drc_reason_get", handle=h, check=1, error=1)["waive"]["time"]
+        check(abs(time_of - time.time()) < 120, "the line says when", time_of)
+        # what the dialog starts from
+        read = lambda errors, **more: svc("drc_reason_read", handle=h, check=1, reason_of="waive",
+                                          errors=errors, **more)
+        check(read([1, 2, 9]) == {"on": True, "prefill": "dummy fill (approved)",
+                                  "known": ["dummy fill (approved)"]}
+              and read([0, 1])["prefill"] == "" and read([4])["prefill"] == ""
+              and read([1, 2], toggle=True)["on"] is False
+              and read([1, 4], toggle=True) == {"on": True, "prefill": "",
+                                                "known": ["dummy fill (approved)"]},
+              "the dialog starts from the one reason its errors hold; a toggle says its way",
+              (read([1, 2, 9]), read([1, 4], toggle=True)))
+        try:
+            svc("drc_reason_read", handle=h, check=1, reason_of="note", errors=[1])
+            check(False, "an unknown kind refused")
+        except gtkservice.ServiceError as exc:
+            check("reason_of is waive or not-required" in str(exc), "an unknown kind refused", exc)
+        # refused before anything is written: a reason past 1000 characters
+        before = file.read_bytes()
+        for request in (lambda: svc("drc_set_status", handle=h, check=1, errors=[20], status=1,
+                                    reason="x" * 1001),
+                        lambda: svc.job(h, "drc_review", check=1, action="waive", errors=[20],
+                                        on=True, reason="y" * 1001)):
+            try:
+                request()
+                check(False, "a reason past 1000 characters refused")
+            except gtkservice.ServiceError as exc:
+                check("at most 1000 characters" in str(exc), "a reason past 1000 characters refused", exc)
+        check(file.read_bytes() == before and svc("drc_status", handle=h, check=1, start=20, count=1) == "00",
+              "... and nothing was waived or written")
+        svc("drc_set_status", handle=h, check=1, errors=[20], status=1, reason="가" * 1000)
+        check(get(1, 20)[0] == "가" * 1000, "1000 characters are kept, whatever their bytes")
+        # turned back: the reason goes with the status; waived again: none
+        svc("drc_set_status", handle=h, check=1, errors=[2, 20], status=0)
+        said = reasons_read(file, sizes)[1]
+        check(get(1, 2) == (None, None) and said[-1] == "W 1 2,1,17,1",
+              "turned back: the reason is gone and the file says so", said[-1])
+        svc("drc_set_status", handle=h, check=1, errors=[2], status=1)
+        check(get(1, 2) == (None, None) and len(reasons_read(file, sizes)[1]) == len(said),
+              "waived again without a reason it has none - not the one it had")
+        # ---- a job on a selection: one line whatever it takes
+        t0 = time.monotonic()
+        sel = svc.job(h, "drc_select", check=0, mode="replace")
+        e = svc.job(h, "drc_review", check=0, action="waive", selection=sel["selection"], on=True,
+                    reason="whole rule: dummy metal, no electrical function")
+        took = time.monotonic() - t0
+        head, said, _table, size = reasons_read(file, sizes)
+        whole = "whole rule: dummy metal, no electrical function"
+        check(e["state"] == "done" and e["changed"] == sizes[0] and e["reason_error"] is None
+              and said[-1] == "w 0 0,300000 " + whole
+              and get(0, 0)[0] == get(0, 299999)[0] == whole,
+              "300,000 errors waived with a reason: one short line", (e, said[-1]))
+        print("  (300,000 errors waived with their reason in %.0f ms; the reasons file is %d bytes)"
+              % (took * 1e3, size))
+        check(size < 5000 and not list(d.glob(".t.db.notes.*")),
+              "... the file does not grow with the errors, and no note is made", size)
+        # every third error: a run each, a few bytes a run
+        third = svc.job(h, "drc_select", check=0, mode="replace", errors=list(range(0, sizes[0], 3)))
+        e = svc.job(h, "drc_review", check=0, action="waive", selection=third["selection"], on=True,
+                    reason="every third")
+        _head, said, table, grown = reasons_read(file, sizes)
+        check(e["state"] == "done" and e["changed"] == 0 and e["count"] == 100000
+              and said[-1].startswith("w 0 0,1,2,1,2,1,") and said[-1].endswith(" every third")
+              and grown - size < 100000 * 5
+              and [get(0, x)[0] for x in (0, 1, 2, 3, 299997, 299999)]
+              == ["every third", whole, whole, "every third", "every third", whole],
+              "100,000 scattered errors given another reason: one line, under 5 bytes an error",
+              (e, grown - size))
+        check(table["w"][0][::3] == ["every third"] * 100000
+              and set(table["w"][0][1::3]) == {whole},
+              "the file read by the gate's own reader says the same")
+        # the job reads what the dialog starts from, and which way a toggle goes
+        e = svc.job(h, "drc_review", check=0, action="reason-read", reason_of="waive",
+                    selection=third["selection"], toggle=True)
+        check((e["on"], e["prefill"], e["known"][:2]) == (False, "", ["every third", whole]),
+              "reason-read of a selection that is waived whole: the toggle turns it back", e)
+        e = svc.job(h, "drc_review", check=0, action="reason-read", reason_of="waive",
+                    selection=third["selection"])
+        check((e["on"], e["prefill"]) == (True, "every third"),
+              "... and waived again its dialog starts from the reason it holds", e)
+        # turned back by the job: one line for the rule, whatever its chunks
+        lines_before = len(said)
+        e = svc.job(h, "drc_review", check=0, action="waive", selection=sel["selection"], on=False)
+        said = reasons_read(file, sizes)[1]
+        check(e["state"] == "done" and e["changed"] == sizes[0] and said[lines_before:] == ["W 0 0,300000"]
+              and get(0, 0) == get(0, 150000) == (None, None),
+              "300,000 errors turned back: their reasons gone in one line", said[lines_before:])
+        # ---- set aside from the review: asked the same, kept apart
+        e = svc.job(h, "drc_review", check=1, action="not-required", errors=[1, 2, 3, 4000], on=True,
+                    reason="out of scope")
+        said = reasons_read(file, sizes)[1]
+        check(e["state"] == "done" and e["changed"] == 4 and e["reason_error"] is None
+              and said[-1] == "n 1 1,3,3996,1 out of scope"
+              and get(1, 1) == ("dummy fill (approved)", "out of scope")
+              and get(1, 2) == (None, "out of scope") and get(1, 5) == (None, None),
+              "set aside with a reason: its own line, beside the waive's", (e, said[-1]))
+        e = svc.job(h, "drc_review", check=1, action="reason-read", reason_of="not-required",
+                    errors=[1, 2])
+        check((e["on"], e["prefill"], e["known"]) == (True, "out of scope", ["out of scope"]),
+              "the exclusion's dialog starts from its own reasons", e)
+        e = svc.job(h, "drc_review", check=1, action="not-required", errors=[2, 3], on=False)
+        said = reasons_read(file, sizes)[1]
+        check(e["state"] == "done" and said[-1] == "N 1 2,2" and get(1, 2) == (None, None)
+              and get(1, 1) == ("dummy fill (approved)", "out of scope"),
+              "back in the review: the exclusion's reason goes, the waive's stays", said[-1])
+        e = svc.job(h, "drc_review", check=1, action="not-required", errors=[3], on=True)
+        check(get(1, 3) == ("dummy fill (approved)", None) and len(reasons_read(file, sizes)[1]) == len(said),
+              "set aside again without a reason it has none")
+        # ---- a saved waive file loaded: a reason stays with an error the
+        # file has waived too and goes with one it turns back
+        saved = d / "saved.waive"
+        svc("drc_waive_export", handle=h, path=str(saved))
+        svc("drc_set_status", handle=h, check=1, errors=[9], status=0)
+        svc("drc_set_status", handle=h, check=1, errors=[30], status=1, reason="after the save")
+        svc("drc_waive_import", handle=h, path=str(saved))
+        check([get(1, e)[0] for e in (1, 9, 30)] == ["dummy fill (approved)", None, None]
+              and svc("drc_status", handle=h, check=1, start=9, count=1) == "01"
+              and svc("drc_status", handle=h, check=1, start=30, count=1) == "00",
+              "a saved waive file loaded keeps the reasons of what it leaves waived",
+              [get(1, e) for e in (1, 9, 30)])
+        # ---- any sequence of actions: the answers, the file and the
+        # statistics against a table an error long
+        for ci in (0, 1):
+            n = sizes[ci]
+            clear = svc.job(h, "drc_select", check=ci, mode="replace")
+            svc.job(h, "drc_review", check=ci, action="waive", selection=clear["selection"], on=False)
+            svc.job(h, "drc_review", check=ci, action="not-required", selection=clear["selection"],
+                    on=False)
+        n = sizes[1]
+        rng = random.Random(20261113)
+        state = {k: [False] * n for k in "wn"}
+        model = {k: [None] * n for k in "wn"}
+        steps = 0
+        for _ in range(140):
+            kind = rng.choice("wwn")
+            on = rng.random() < 0.7
+            errs = set()
+            for _run in range(rng.randint(1, 4)):
+                a = rng.randrange(n)
+                errs.update(range(a, min(n, a + rng.choice([1, 1, 3, 40, 700]))))
+            errs = sorted(errs)
+            why = rng.choice(["", "", "reason %d" % rng.randrange(6)]) if on else ""
+            fields = {"reason": why} if why else {}
+            if kind == "w" and rng.random() < 0.5:
+                reply = svc("drc_set_status", handle=h, check=1, errors=errs, status=int(on), **fields)
+                ok = reply["reason_error"] is None
+            else:
+                target = {"errors": errs}
+                if rng.random() < 0.5:
+                    target = {"selection": svc.job(h, "drc_select", check=1, mode="replace",
+                                                   errors=errs)["selection"]}
+                e = svc.job(h, "drc_review", check=1, on=on,
+                            action="waive" if kind == "w" else "not-required", **target, **fields)
+                ok = e["state"] == "done" and e["reason_error"] is None
+            steps += ok
+            for x in errs:
+                if not on:
+                    state[kind][x], model[kind][x] = False, None
+                elif why:
+                    state[kind][x], model[kind][x] = True, why
+                elif not state[kind][x]:
+                    state[kind][x], model[kind][x] = True, None
+        probe = sorted(set(range(0, n, 7)) | {n - 1})
+        got = [get(1, x) for x in probe]
+        want = [(model["w"][x], model["n"][x]) for x in probe]
+        bad = [(x, g, w) for x, g, w in zip(probe, got, want) if g != w]
+        check(steps == 140 and not bad and len(set(want)) > 6,
+              "140 actions by clicks, jobs and selections: each error's reasons are the table's",
+              (steps, bad[:3]))
+        _head, said, table, _size = reasons_read(file, sizes)
+        check(table["w"][1] == model["w"] and table["n"][1] == model["n"],
+              "the file, read by the gate's own reader, says the table",
+              [x for x in range(n) if table["w"][1][x] != model["w"][x]][:5])
+        check(all(state[k][x] or table[k][1][x] is None for k in "wn" for x in range(n)),
+              "no error that is not waived (set aside) holds a reason")
+        svc("drc_close", handle=h)
+        # the statistics: each reason with the errors that hold it
+        r, got = stats_of(db, "--floe-reviewer", "kim")
+        person = got["reviewers"][0] if got and got["reviewers"] else {}
+        counted = {}
+        for k, name in (("w", "waive"), ("n", "not_required")):
+            for why in model[k]:
+                if why is not None:
+                    counted[(name, why)] = counted.get((name, why), 0) + 1
+        listed = {(x["kind"], x["text"]): x["errors"] for x in person.get("reasons", [])}
+        check(r.returncode == 0 and listed == counted
+              and person.get("waived_with_reason") == sum(1 for w in model["w"] if w)
+              and person.get("not_required_with_reason") == sum(1 for w in model["n"] if w)
+              and person.get("waived") == sum(state["w"]) and person.get("not_required") == sum(state["n"])
+              and person.get("reasons_file") == str(file) and person.get("reasons_location") == "results"
+              and person.get("reasons_modified", "").endswith("Z"),
+              "floe2 drc --review-stats lists each reason with the errors that hold it",
+              (r.stderr[-200:], sorted(listed.items())[:4], sorted(counted.items())[:4]))
+        order = [(x["kind"], -x["errors"], x["text"]) for x in person.get("reasons", [])]
+        rows = person.get("reasons") or [{}]
+        check(order == sorted(order, key=lambda x: (x[0] != "waive", x[1], x[2]))
+              and all(x["actions"] >= 1 and x["first"] <= x["last"] and x["first"].endswith("Z")
+                      and [y["index"] for y in x["rules"]] == [2] and x["rules"][0]["name"] == "B.S"
+                      and x["rules"][0]["errors"] == x["errors"] for x in rows),
+              "... the waive's first, the most errors first, with its actions, times and rules",
+              rows[:2])
+        # ---- the next open reads them - and writes the file again: it had
+        # grown far past what it still says (the line of 100,000 runs that
+        # were turned back since, every line taken back)
+        grown = file.stat().st_size
+        opened = rs_open(svc, db, "kim")
+        h = opened["handle"]
+        got = [get(1, x) for x in probe]
+        check(got == want and not [n_ for n_ in opened["notices"] if "reason" in n_],
+              "the next open reads the reasons", opened["notices"])
+        _head, said, table, size = reasons_read(file, sizes)
+        check(grown > 400000 and size < 64 * 1024 and table["w"][1] == model["w"]
+              and table["n"][1] == model["n"] and not [x for x in said if x[0] in "WN"],
+              "a file grown far past what it says is written again at the open: what is held, "
+              "no line taken back", (grown, size))
+        lee = rs_open(svc, db, "lee")
+        check(lee["reason_path"] == str(d / ".t.db.reasons.lee")
+              and svc("drc_reason_get", handle=lee["handle"], check=1, error=probe[0])
+              == {"waive": None, "not_required": None}
+              and svc("drc_reason_read", handle=lee["handle"], check=1, reason_of="waive",
+                      errors=[1])["known"] == [],
+              "another reviewer has reasons of their own - none yet")
+        svc("drc_close", handle=lee["handle"])
+        # ---- on the disk when the request answers: the service killed
+        waived = next(x for x in range(n) if not state["w"][x])
+        svc("drc_set_status", handle=h, check=1, errors=[waived], status=1, reason="before the kill")
+        svc.svc._proc.kill()
+        svc.svc._proc.wait()
+    finally:
+        try:
+            svc.close()
+        except Exception:
+            pass
+    svc = Svc()
+    try:
+        opened = rs_open(svc, db, "kim")
+        h = opened["handle"]
+        get = lambda ci, e: tuple((svc("drc_reason_get", handle=h, check=ci, error=e)[k] or {}).get("text")
+                                  for k in ("waive", "not_required"))
+        check(get(1, waived)[0] == "before the kill",
+              "a reason is on the disk when its request answers (the service killed after it)",
+              get(1, waived))
+        svc("drc_close", handle=h)
+        # ---- an error an older build turned back (it knows no reasons):
+        # the status says whether, so its reason is neither shown nor counted
+        side = d / ".t.db.waive.kim"
+        raw = bytearray(side.read_bytes())
+        at = 40 + sizes[0] + waived
+        check(raw[at] == 1, "(the waive sidecar's byte of that error)")
+        raw[at] = 0
+        counter = 40 + sum(sizes) + 4
+        struct.pack_into("<I", raw, counter, struct.unpack_from("<I", raw, counter)[0] - 1)
+        side.write_bytes(bytes(raw))
+        opened = rs_open(svc, db, "kim")
+        h = opened["handle"]
+        r, got = stats_of(db, "--floe-reviewer", "kim")
+        person = got["reviewers"][0] if got and got["reviewers"] else {}
+        check(get(1, waived) == (None, None)
+              and "before the kill" not in [x["text"] for x in person.get("reasons", [])]
+              and person.get("counters_match") is True,
+              "a reason left on an error that is no longer waived is neither shown nor counted",
+              (get(1, waived), [x["text"] for x in person.get("reasons", [])][:3]))
+        svc("drc_close", handle=h)
+        # ---- another result under the name: the reasons are moved aside
+        # with the reviewer's other files
+        kept = file.read_bytes()
+        write_db(db, [("A.W", [_poly(100 * i, 0) for i in range(7)]),
+                      ("B.S", [_edge(200 * i, 0) for i in range(5)])])
+        r = run([INDEX, "drc", str(db), "--force"])
+        check(r.returncode == 0, "another result packed under the name", r.stderr)
+        r, got = stats_of(db, "--floe-reviewer", "kim")
+        skipped = [(x["file"], x["reason"]) for x in (got or {}).get("skipped", [])]
+        check(any(f == str(file) and "review reasons of another DRC result (not this pack's)" in why
+                  for f, why in skipped) and file.read_bytes() == kept,
+              "the statistics leave another result's reasons out, and where they are", skipped)
+        opened = rs_open(svc, db, "kim")
+        aside = sorted(d.glob(".t.db.reasons.kim.stale-*"))
+        check(len(aside) == 1 and aside[0].read_bytes() == kept and not file.exists()
+              and any("review reasons do not match this pack" in x and "moved aside" in x
+                      for x in opened["notices"]),
+              "the review moves them aside, as the waive sidecar and the flags are", opened["notices"])
+        svc("drc_close", handle=opened["handle"])
+    finally:
+        svc.close()
+    # ---- a results folder that cannot be written: the reasons go where the
+    # waive sidecar goes, and the statistics find them there
+    ro = d / "ro"
+    ro.mkdir()
+    write_db(ro / "r.db", [("A.W", [_poly(100 * i, 0) for i in range(7)])])
+    r = run([INDEX, "drc", str(ro / "r.db")])
+    check(r.returncode == 0, "floe-index drc r.db", r.stderr)
+    tmp = d / "tmp"
+    tmp.mkdir()
+    os.chmod(ro, 0o555)
+    saved = os.environ.get("TMPDIR")
+    os.environ["TMPDIR"] = str(tmp)
+    fallback = Svc()
+    try:
+        opened = rs_open(fallback, ro / "r.db", "ro")
+        h = opened["handle"]
+        reply = fallback("drc_set_status", handle=h, check=0, errors=[2, 3], status=1,
+                         reason="kept elsewhere")
+        found = sorted(p.name for p in tmp.iterdir() if ".reasons." in p.name)
+        check(reply["reason_error"] is None and len(found) == 1
+              and found[0].startswith(".r.db.reasons.ro-") and not list(ro.glob(".r.db.reasons.*"))
+              and fallback("drc_reason_get", handle=h, check=0, error=3)["waive"]["text"] == "kept elsewhere",
+              "a results folder that cannot be written: the reasons beside the waive sidecar's fallback",
+              (reply, found))
+        fallback("drc_close", handle=h)
+        r, got = stats_of(ro / "r.db", env={"TMPDIR": str(tmp)})
+        person = got["reviewers"][0] if got and got["reviewers"] else {}
+        check(person.get("reasons_location") == "temp" and person.get("waived_with_reason") == 2
+              and [(x["text"], x["errors"]) for x in person.get("reasons", [])] == [("kept elsewhere", 2)],
+              "... and the statistics find them there", person.get("reasons"))
+    finally:
+        fallback.close()
+        os.chmod(ro, 0o755)
+        if saved is None:
+            os.environ.pop("TMPDIR", None)
+        else:
+            os.environ["TMPDIR"] = saved
+
+
+def opened_tag(svc, h, d):
+    """The result's `floe_pack=` tag without its error count, from the waive
+    sidecar's header (FLOEWAIV version 2: magic, version, 16 bytes of the
+    content id)."""
+    raw = (d / ".t.db.waive.kim").read_bytes()[:28]
+    return raw[12:28].hex()
+
+
 def main():
-    global r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11
-    r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11 = map(
-        timed, (r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11))
+    global r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12
+    r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12 = map(
+        timed, (r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12))
     temp = Path(tempfile.mkdtemp(prefix="floe-drc-team-"))
     try:
         d = temp / "runs"
@@ -1670,6 +2064,7 @@ def main():
         r9(temp)
         r10(temp)
         r11(temp)
+        r12(temp)
         if "--no-gui" not in sys.argv:
             from validate_drc_team_gui import r7
             timed(r7)(temp, check)

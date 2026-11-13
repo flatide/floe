@@ -19,7 +19,12 @@
 //!   embedded statuses are shown read-only - one reviewer never changes a
 //!   shared result (feature/jobdeck-drc 2026-10-09);
 //! - notes are rewritten whole on every edit and the file removed when the
-//!   last note goes; the reader takes what Python wrote (lenient lines).
+//!   last note goes; the reader takes what Python wrote (lenient lines);
+//! - why errors were waived or set aside from the review is said once for
+//!   the action, in `.<db>.reasons.<tag>` (`reasons`, 0.12.463): a line an
+//!   action, whatever its size. The status writers here drop the reason of
+//!   an error they turn back or change without one (`reason_drop`), so a
+//!   reason is only ever held by an error that is waived.
 //!
 //! A sidecar is bound to the result's content (the pack's content id and
 //! error count - what the errors are), not to a file's time or inode: a
@@ -27,6 +32,7 @@
 //! re-run with the same errors keep their review (0.12.441).
 use super::{
     local::{aside_path, pack_reader, required_reviewer, waive_paths, ReviewerSource},
+    reasons::{self, Kind, Reasons, Run},
     review::Layout,
     session, Pack, Violation,
 };
@@ -73,6 +79,8 @@ pub struct Review {
     note_beside: PathBuf,
     note_temp: PathBuf,
     note_tag: String,
+    /// why errors were waived or set aside, an action at a time (`reasons`)
+    pub reasons: Reasons,
     /// what the open had to say (floe/drc.py wrote these to stderr)
     pub notices: Vec<String>,
     /// the reviewer tag the sidecars are named by (drc::team names the
@@ -155,6 +163,23 @@ fn note_paths(waive: &[PathBuf; 2]) -> [PathBuf; 2] {
         p.with_file_name(if fe { format!("{name}.fe") } else { name })
     };
     [rename(&waive[0], true), rename(&waive[1], true)]
+}
+
+/// The reasons file's names, from the waive names likewise.
+fn reason_paths(waive: &[PathBuf; 2]) -> [PathBuf; 2] {
+    let rename = |p: &Path| {
+        let name = p.file_name().unwrap_or_default().to_string_lossy();
+        p.with_file_name(name.replacen(".waive.", ".reasons.", 1))
+    };
+    [rename(&waive[0]), rename(&waive[1])]
+}
+
+/// Seconds since the epoch: an action's time.
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Create or validate the waive sidecar at `side`; returns it. Another run's
@@ -299,6 +324,16 @@ impl Review {
             .collect();
         // (the result's content, as the waive file's header: review.rs)
         let note_tag = super::review::Fingerprint::of(&pack).tag();
+        let sync = waive_sync_of(std::env::var("FLOE_WAIVE_SYNC").ok().as_deref());
+        // the reasons: beside the waive sidecar in use, bound to the result
+        // as the notes are; the pack shown read-only has none to write
+        let mut reasons = Reasons::open(
+            reason_paths(&waive),
+            note_tag.clone(),
+            pack.checks.iter().map(|c| c.count).collect(),
+            sync,
+        );
+        notices.append(&mut reasons.notices);
         let mut review = Self {
             pack,
             header,
@@ -316,12 +351,13 @@ impl Review {
             note_beside,
             note_temp,
             note_tag,
+            reasons,
             notices,
             reviewer: tag,
             reviewer_source: who.source,
             _session: session,
             generation: 0,
-            sync: waive_sync_of(std::env::var("FLOE_WAIVE_SYNC").ok().as_deref()),
+            sync,
             unsynced: false,
             syncs: 0,
         };
@@ -427,6 +463,16 @@ impl Review {
     /// command of their own while the viewer runs). One flush a request or a
     /// job, whatever its size. FLOE_WAIVE_SYNC=off: none, as before 0.12.446.
     pub fn sync_waives(&mut self) -> Result<()> {
+        // (the reasons a job took back with the statuses: said in their
+        // file now, one line a rule, and flushed with them)
+        if let Err(e) = self.reasons.flush(now()) {
+            self.notices.push(format!(
+                "[drc] review reasons: {} ({})",
+                e.message,
+                self.reasons.path.display()
+            ));
+        }
+        self.notices.append(&mut self.reasons.notices);
         if !std::mem::take(&mut self.unsynced) || !self.sync {
             return Ok(());
         }
@@ -459,15 +505,58 @@ impl Review {
     /// Turn the flushes on or off (FLOE_WAIVE_SYNC decides at the open).
     pub fn set_waive_sync(&mut self, on: bool) {
         self.sync = on;
+        self.reasons.set_sync(on);
+    }
+
+    // ---- reasons (0.12.463) --------------------------------------------
+
+    /// The reason of an action - `kind` - on rule `check`'s `runs`: every
+    /// error of them holds it from now, in place of what it held; written
+    /// and flushed. The caller has made the errors waived (or set them
+    /// aside) first: a reason that cannot be kept leaves that done, and the
+    /// error says so.
+    pub fn reason_set(&mut self, kind: Kind, check: usize, runs: &[Run], text: &str) -> Result<()> {
+        let result = self.reasons.set(kind, check, runs, text, now());
+        self.notices.append(&mut self.reasons.notices);
+        result.map_err(|e| {
+            Error::new(
+                e.kind,
+                format!("{} ({})", e.message, self.reasons.path.display()),
+            )
+        })
+    }
+
+    /// The reasons of rule `check`'s `runs` are gone: the errors were turned
+    /// back, or changed by something that gave no reason. No longer shown
+    /// from now; said in the file by the caller's `sync_waives` - the end
+    /// of its request or job -, where a file that cannot be written is said
+    /// in the notices and stops nothing (the readers ask the status besides).
+    pub fn reason_drop(&mut self, kind: Kind, check: usize, runs: &[Run]) {
+        if !runs.is_empty() {
+            self.reasons.clear(kind, check, runs);
+        }
+    }
+
+    /// Why rule `check`'s error `error` is waived: None when it is not
+    /// waived, or was waived without a reason.
+    pub fn waive_reason(&self, check: usize, error: u64) -> Result<Option<&reasons::Entry>> {
+        if self.status(check, error)? != STATUS_WAIVED {
+            return Ok(None);
+        }
+        Ok(self.reasons.of(Kind::Waive, check, error))
     }
 
     /// Set the status of check `check`'s errors `errors` to `value`, in
-    /// place, keeping the rule's waived counter in step; flushed.
+    /// place, keeping the rule's waived counter in step; flushed. The
+    /// errors it changes lose their waive reason: turned back they have
+    /// none, and waived here they are waived without one until the caller
+    /// gives it (`reason_set`, which is every error's of the action then).
     pub fn set_status(&mut self, check: usize, errors: &[u64], value: u8) -> Result<()> {
         let (start, n) = self.check(check)?;
         if errors.iter().any(|&e| e >= n) {
             return Err(Error::input("DRC error index out of range"));
         }
+        let mut changed = Vec::new();
         for &error in errors {
             let gid = start + error;
             let mut old = [0u8; 1];
@@ -475,6 +564,7 @@ impl Review {
             if old[0] == value {
                 continue;
             }
+            changed.push(error);
             let (status_off, wcount_off) = (self.status_off, self.wcount_off);
             self.writer()?.write_all_at(&[value], status_off + gid)?;
             let (was, now) = (old[0] == STATUS_WAIVED, value == STATUS_WAIVED);
@@ -493,6 +583,9 @@ impl Review {
                     }
                 }
             }
+        }
+        if self.reasons.any(Kind::Waive, check) {
+            self.reason_drop(Kind::Waive, check, &reasons::runs_of(&changed));
         }
         self.sync_waives()
     }
@@ -537,6 +630,11 @@ impl Review {
             self.writer()?
                 .write_all_at(&cur.to_le_bytes(), wcount_off + 4 * check as u64)?;
             self.wcount[check] = cur;
+        }
+        // (as `set_status`: what changed holds no reason until one is given)
+        if self.reasons.any(Kind::Waive, check) {
+            let changed: Vec<u64> = positions.iter().map(|&j| a + j as u64).collect();
+            self.reason_drop(Kind::Waive, check, &reasons::runs_of(&changed));
         }
         if let Some(chunks) = self.chunks.get_mut(&check) {
             for &j in &positions {
@@ -601,6 +699,17 @@ impl Review {
         let delta = waived(after) - waived(before);
         let (status_off, wcount_off) = (self.status_off, self.wcount_off);
         self.writer()?.write_all_at(after, status_off + first + start)?;
+        // a peer's decision or a previous run's carries no reason of mine
+        if self.reasons.any(Kind::Waive, check) {
+            let changed: Vec<u64> = before
+                .iter()
+                .zip(after)
+                .enumerate()
+                .filter(|(_, (b, a))| b != a)
+                .map(|(j, _)| start + j as u64)
+                .collect();
+            self.reason_drop(Kind::Waive, check, &reasons::runs_of(&changed));
+        }
         if delta != 0 {
             let cur = (i64::from(self.wcount[check]) + delta).max(0) as u32;
             self.writer()?
@@ -1098,6 +1207,16 @@ impl Review {
         }
         self.wcount = counts;
         self.chunks.clear();
+        // a reason stays with an error the loaded file has waived too, and
+        // goes with one it turns back
+        for check in self.reasons.checks(Kind::Waive) {
+            let first = self.pack.checks[check].start as usize;
+            let mut back = Vec::new();
+            for (a, b, _) in self.reasons.runs(Kind::Waive, check) {
+                back.extend((a..b).filter(|&e| status[first + e as usize] != STATUS_WAIVED));
+            }
+            self.reason_drop(Kind::Waive, check, &reasons::runs_of(&back));
+        }
         self.sync_waives()?;
         Ok(status.iter().filter(|&&s| s == STATUS_WAIVED).count() as u64)
     }

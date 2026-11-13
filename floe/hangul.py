@@ -114,6 +114,37 @@ class HangulComposer(object):
         return self.preedit()
 
 
+class EntryEditable(object):
+    """A Gtk.Entry as the hangul composer writes into it (the one line of
+    the review reason dialog; TextViewEditable's surface)."""
+
+    def __init__(self, entry):
+        self.entry = entry
+
+    def get_text(self):
+        return self.entry.get_text()
+
+    def set_text(self, text):
+        self.entry.set_text(text)
+
+    def get_position(self):
+        return self.entry.get_position()
+
+    def set_position(self, position):
+        self.entry.set_position(position)
+
+    def delete_selection(self):
+        self.entry.delete_selection()
+
+    def replace_span(self, anchor, old_len, new):
+        """Swap the preedit span, the cursor after it. One line: the text
+        is set whole (no call whose shape differs between PyGObject
+        versions - Editable.insert_text's position is an in-out)."""
+        text = self.entry.get_text()
+        self.entry.set_text(text[:anchor] + new + text[anchor + old_len:])
+        self.entry.set_position(anchor + len(new))
+
+
 class TextViewEditable(object):
     """Entry-like facade over a Gtk.TextView for the hangul composer."""
 

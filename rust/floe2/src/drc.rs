@@ -12,7 +12,11 @@
 //!   drc_errors {handle, check, start, count}
 //!   drc_status {handle, check, start, count}   status bytes, hex
 //!   drc_counts {handle}                        [[waived, total], ...] of every rule
-//!   drc_set_status {handle, check, errors, status}
+//!   drc_set_status {handle, check, errors, status, reason?}   `reason`: why
+//!       they are waived - one line for the action (app-core drc::reasons)
+//!   drc_reason_get {handle, check, error}      why it is waived / set aside now
+//!   drc_reason_read {handle, check, reason_of: waive|not-required, errors, toggle?}
+//!       what the reason dialog starts from: {on, prefill, known}
 //!   drc_status_page / drc_status_rank {handle, check, waived, start, limit | error}
 //!   drc_query {handle, bbox, cap, checks?, waived?, check?, scope?}
 //!   drc_set_note / drc_clear_note {handle, gids[, text]}
@@ -29,8 +33,8 @@
 //!   drc_markers {handle, check, bounds, width, height, scope?, waived?, selection?}  job "markers"
 //!   drc_select {handle, check, bounds?, scope?, waived?, previous?, mode, errors?}   job "select"
 //!   drc_selection_page {handle, selection, start, limit}; drc_selection_drop {handle, selection}
-//!   drc_review {handle, check, action: waive|note|note-clear|note-read, selection | errors, on?, text?}
-//!                                          job "review"
+//!   drc_review {handle, check, action: waive|not-required|reason-read|note|note-clear|note-read,
+//!       selection | errors, on?, text?, reason?, reason_of?, toggle?}  job "review"
 //!   drc_inview {handle, check, bbox, cap, scope?, waived?}                 job "inview"
 //!   drc_cancel {handle, kind}; drc_close {handle}; drc_parse_step {text}
 //!   svrf_rules {path}, svrf_operands {rhs}, svrf_rules_candidates {db, deck?}
@@ -52,6 +56,7 @@ use floe_app_core::{
         ticks,
     },
     drc::desktop::{query_rows, ErrorRow, Opened, Review},
+    drc::reasons::{self, Kind},
     Error, ErrorKind, Result,
 };
 use serde_json::{json, Value};
@@ -104,6 +109,71 @@ fn floats<const N: usize>(request: &Value, key: &str) -> Result<[f64; N]> {
 
 fn waived_of(request: &Value) -> Option<bool> {
     request.get("waived").and_then(Value::as_bool)
+}
+
+/// The reasons the dialog offers again: the latest given, each once.
+const KNOWN_REASONS: usize = 20;
+
+/// A request's reason as it is kept - refused, when it cannot be, before
+/// anything is written.
+fn reason_of(request: &Value) -> Result<String> {
+    reasons::clean(request.get("reason").and_then(Value::as_str).unwrap_or(""))
+}
+
+/// Whose reason a request asks about (`reason_of`; `kind` is the jobs').
+fn reason_kind(request: &Value) -> Result<Kind> {
+    Kind::parse(text(request, "reason_of")?)
+        .ok_or_else(|| Error::input("reason_of is waive or not-required"))
+}
+
+fn reason_json(entry: Option<&reasons::Entry>) -> Value {
+    entry.map_or(Value::Null, |e| json!({"text": e.text, "time": e.time}))
+}
+
+/// Whether any of rule `check`'s `targets` is not waived (the `w` key's
+/// rule: a selection that is not waived whole is waived).
+fn any_unwaived(shared: &Shared, check: usize, targets: &Selection, n: u64) -> Result<bool> {
+    let mut mixed = false;
+    let mut a = 0;
+    let mut mask = vec![false; 1 << 16];
+    while a < n && !mixed {
+        let len = (n - a).min(1 << 16);
+        targets.mask(a, &mut mask[..len as usize]);
+        let st = shared.statuses.read(check, a, len)?;
+        mixed = (0..len as usize).any(|j| mask[j] && st[j] != 1);
+        a += len;
+    }
+    Ok(mixed)
+}
+
+/// What the reason dialog starts from, for an action of `kind` on rule
+/// `check`'s `targets`: `on` - which way the `w` key's toggle goes (asked
+/// with `toggle`; an action that is not a toggle is on) -, `prefill` - the
+/// one reason every target holds now, which the dialog then edits -, and
+/// `known` - the reasons given so far.
+fn reason_read(
+    shared: &Shared,
+    check: usize,
+    kind: Kind,
+    targets: &Selection,
+    n: u64,
+    toggle: bool,
+) -> Result<Value> {
+    let on = !toggle || any_unwaived(shared, check, targets, n)?;
+    let o = shared.opened.lock().unwrap();
+    let Opened::Pack(r) = &*o else {
+        return Err(Error::new(
+            ErrorKind::Unsupported,
+            "an ASCII results file has no review state",
+        ));
+    };
+    let held = &r.reasons;
+    let prefill = if on && held.any(kind, check) {
+        held.common(kind, check, &reasons::member_runs(targets, n)).unwrap_or("")
+    } else {
+        ""
+    };
+    Ok(json!({"on": on, "prefill": prefill, "known": held.texts(kind, KNOWN_REASONS)}))
 }
 
 fn rows(rows: &[ErrorRow]) -> Value {
@@ -519,6 +589,7 @@ impl Drcs {
                 result["read_only"] = json!(r.read_only());
                 result["waive_path"] = json!(r.waive_path);
                 result["note_path"] = json!(r.note_path);
+                result["reason_path"] = json!(r.reasons.path);
                 let n = notes(r);
                 result["notes"] = n["notes"].clone();
                 notices.extend(
@@ -637,14 +708,53 @@ impl Session {
                 let status = u8::try_from(number(request, "status")?)
                     .map_err(|_| Error::input("status is a byte"))?;
                 let errors = numbers(request, "errors")?;
-                let (w, t) = {
+                let reason = reason_of(request)?;
+                let (w, t, unkept) = {
                     let mut o = shared.opened.lock().unwrap();
                     let r = review(&mut o)?;
                     r.set_status(check, &errors, status)?;
-                    r.status_counts(check)?
+                    // why: one line for the action, every error's of it. The
+                    // errors are waived whether it can be kept or not - a
+                    // reason that could not be is said beside the counts
+                    let unkept = if status == 1 && !reason.is_empty() {
+                        r.reason_set(Kind::Waive, check, &reasons::runs_of(&errors), &reason)
+                            .err()
+                            .map(|e| e.message)
+                    } else {
+                        None
+                    };
+                    let (w, t) = r.status_counts(check)?;
+                    (w, t, unkept)
                 };
                 self.changed(check, &errors, status)?;
-                Ok(json!({"counts": [w, t]}))
+                Ok(json!({"counts": [w, t], "reason_error": unkept}))
+            }
+            "drc_reason_get" => {
+                let (check, error) = (number(request, "check")? as usize, number(request, "error")?);
+                // (the flags first: never asked under the review's lock)
+                let excluded = shared.team.as_ref().is_some_and(|t| {
+                    t.flags
+                        .flags(check, &[error])
+                        .is_ok_and(|f| f.first().is_some_and(|f| f & team::NOT_REQUIRED != 0))
+                });
+                let mut o = shared.opened.lock().unwrap();
+                let r = review(&mut o)?;
+                let excluded = if excluded {
+                    r.reasons.of(Kind::NotRequired, check, error)
+                } else {
+                    None
+                };
+                Ok(json!({
+                    "waive": reason_json(r.waive_reason(check, error)?),
+                    "not_required": reason_json(excluded),
+                }))
+            }
+            "drc_reason_read" => {
+                let check = number(request, "check")? as usize;
+                let n = shared.source.count(check);
+                let targets = Selection::from_indices(n, numbers(request, "errors")?);
+                let toggle = request.get("toggle").and_then(Value::as_bool).unwrap_or(false);
+                reason_read(&shared, check, reason_kind(request)?, &targets, n, toggle)
             }
             "drc_status_page" => {
                 let waived = waived_of(request).unwrap_or(false);
@@ -1299,13 +1409,24 @@ impl Session {
             None => Arc::new(Selection::from_indices(n, numbers(request, "errors")?)),
         };
         let op = text(request, "action")?.to_string();
-        if !matches!(op.as_str(), "waive" | "note" | "note-clear" | "note-read" | "not-required") {
+        if !matches!(
+            op.as_str(),
+            "waive" | "note" | "note-clear" | "note-read" | "not-required" | "reason-read"
+        ) {
             return Err(Error::input(
-                "review action is waive, note, note-clear, note-read or not-required",
+                "review action is waive, not-required, reason-read, note, note-clear or note-read",
             ));
         }
         let on = request.get("on").and_then(Value::as_bool);
         let note = request.get("text").and_then(Value::as_str).unwrap_or("").to_string();
+        // why the errors are waived or set aside: one line for the action
+        // (refused here, before the job, when it cannot be kept as given)
+        let reason = reason_of(request)?;
+        let kind = match op.as_str() {
+            "reason-read" => Some(reason_kind(request)?),
+            _ => None,
+        };
+        let toggle = request.get("toggle").and_then(Value::as_bool).unwrap_or(false);
         if self.jobs.get("review").is_some_and(|j| j.thread.as_ref().is_some_and(|t| !t.is_finished())) {
             return Err(Error::new(ErrorKind::Busy, "review update is still running"));
         }
@@ -1316,23 +1437,14 @@ impl Session {
                     o.checks().get(check).map(|c| c.start).unwrap_or(0)
                 };
                 match op.as_str() {
+                    "reason-read" => {
+                        reason_read(&shared, check, kind.expect("asked above"), &targets, n, toggle)
+                    }
                     "waive" => {
                         // a mixed selection waives all (the `w` key's rule)
                         let on = match on {
                             Some(on) => on,
-                            None => {
-                                let mut mixed = false;
-                                let mut a = 0;
-                                let mut mask = vec![false; 1 << 16];
-                                while a < n && !mixed {
-                                    let len = (n - a).min(1 << 16);
-                                    targets.mask(a, &mut mask[..len as usize]);
-                                    let st = shared.statuses.read(check, a, len)?;
-                                    mixed = (0..len as usize).any(|j| mask[j] && st[j] != 1);
-                                    a += len;
-                                }
-                                mixed
-                            }
+                            None => any_unwaived(&shared, check, &targets, n)?,
                         };
                         let value = u8::from(on);
                         let mut changed = 0;
@@ -1353,12 +1465,23 @@ impl Session {
                                 break;
                             }
                         }
+                        let mut unkept = Value::Null;
                         {
+                            let mut o = shared.opened.lock().unwrap();
+                            let r = review(&mut o)?;
+                            // why: one line for the action whatever it took -
+                            // the members it handled, as runs (a job that was
+                            // stopped handled the rule up to `a`)
+                            if on && !reason.is_empty() {
+                                let runs = reasons::member_runs(&*targets, a);
+                                if let Err(e) = r.reason_set(Kind::Waive, check, &runs, &reason) {
+                                    unkept = json!(e.message);
+                                }
+                            }
                             // one flush for the job (app-core drc::desktop
                             // sync_waives): the bytes are on the disk when
                             // it says it is done
-                            let mut o = shared.opened.lock().unwrap();
-                            review(&mut o)?.sync_waives()?;
+                            r.sync_waives()?;
                         }
                         shared.dirty.lock().unwrap().insert(check);
                         let counts = {
@@ -1368,17 +1491,53 @@ impl Session {
                                 Opened::Ascii(_) => Value::Null,
                             }
                         };
-                        Ok(json!({"on": on, "changed": changed, "counts": counts}))
+                        Ok(json!({"on": on, "changed": changed, "counts": counts, "reason_error": unkept}))
                     }
                     "not-required" => {
                         let t = shared.team.as_ref().ok_or_else(|| {
                             Error::new(ErrorKind::Unsupported, "review flags need a packed index: floe-index drc <db>")
                         })?;
+                        let on = on.unwrap_or(true);
+                        let holds = {
+                            let mut o = shared.opened.lock().unwrap();
+                            review(&mut o)?.reasons.any(Kind::NotRequired, check)
+                        };
+                        // the members as runs: what a reason is said of, and
+                        // what one is taken back from (asked only when the
+                        // rule holds any)
+                        let runs = if holds || (on && !reason.is_empty()) {
+                            reasons::member_runs(&*targets, n)
+                        } else {
+                            Vec::new()
+                        };
+                        if on && reason.is_empty() && holds {
+                            // set aside without a reason: an error that is not
+                            // set aside now must not come to hold one that a
+                            // run which ended early left on it
+                            let held = {
+                                let mut o = shared.opened.lock().unwrap();
+                                review(&mut o)?.reasons.held(Kind::NotRequired, check, &runs)
+                            };
+                            let mut left = Vec::new();
+                            for (a, b) in held {
+                                let mut e = a;
+                                while e < b {
+                                    let errors: Vec<u64> = (e..(e + 4096).min(b)).collect();
+                                    let flags = t.flags.flags(check, &errors)?;
+                                    left.extend(
+                                        errors.iter().zip(flags).filter(|(_, f)| f & team::NOT_REQUIRED == 0).map(|(e, _)| *e),
+                                    );
+                                    e += errors.len() as u64;
+                                }
+                            }
+                            let mut o = shared.opened.lock().unwrap();
+                            review(&mut o)?.reason_drop(Kind::NotRequired, check, &reasons::runs_of(&left));
+                        }
                         let mut last = std::time::Instant::now();
                         let changed = t.flags.set_members(
                             check,
                             Some(&*targets),
-                            on.unwrap_or(true),
+                            on,
                             &stop,
                             &mut |done, total, _changed| {
                                 if last.elapsed().as_millis() >= 500 {
@@ -1387,7 +1546,22 @@ impl Session {
                                 }
                             },
                         )?;
-                        Ok(json!({"on": on.unwrap_or(true), "changed": changed}))
+                        let mut unkept = Value::Null;
+                        {
+                            let mut o = shared.opened.lock().unwrap();
+                            let r = review(&mut o)?;
+                            if !on {
+                                // back in the review: the reason goes with it
+                                r.reason_drop(Kind::NotRequired, check, &runs);
+                            } else if !reason.is_empty() {
+                                if let Err(e) = r.reason_set(Kind::NotRequired, check, &runs, &reason) {
+                                    unkept = json!(e.message);
+                                }
+                            }
+                            // (the reason lines taken back reach the disk)
+                            r.sync_waives()?;
+                        }
+                        Ok(json!({"on": on, "changed": changed, "reason_error": unkept}))
                     }
                     "note-read" => {
                         let o = shared.opened.lock().unwrap();
