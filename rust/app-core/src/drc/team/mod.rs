@@ -22,6 +22,7 @@ pub mod live;
 pub mod migrate;
 pub mod snapshot;
 pub mod stats;
+pub mod waives;
 
 use crate::drc::desktop::{Opened, Review, StatusReader};
 use crate::{Error, ErrorKind, Result};

@@ -49,7 +49,8 @@
 use super::bits::{Bits, CHUNK};
 use super::stats::{discover, flags_connection, team_of, waive_of, waived_bits, Found, Planes, Team};
 use super::Identity;
-use crate::drc::changes::{self, stamp_of, RESET, STAMP, TOUCH};
+use crate::drc::changes::{self, stamp_of, stamps_after, Stamps, RESET, TOUCH};
+use crate::drc::confirm;
 use crate::{check_cancelled, Error, ErrorKind, Result};
 use floe_vfs::lock::{self, Busy, Key, Mode};
 use rusqlite::{Connection, OptionalExtension};
@@ -63,7 +64,9 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 const MAGIC: &[u8; 8] = b"FLOETEAM";
-const VERSION: u32 = 1;
+/// 2 (0.12.466): the waives anybody made and the confirmed ones of them are
+/// counted too, and a reviewer's confirm file is one of their files.
+const VERSION: u32 = 2;
 /// How long a reviewer's files may differ from what their log says before
 /// their rules are counted again (FLOE_TEAM_GRACE_S; seconds, 0: at once).
 const GRACE: u64 = 10;
@@ -74,11 +77,23 @@ const RECORD_WAIT: Duration = Duration::from_millis(40);
 /// A temporary of a merge that did not end is removed after this long.
 const LEFTOVER: Duration = Duration::from_secs(600);
 
-/// A chunk's team counts: visited, waived, not for review, conflicts, done.
-type Counts = [u16; 5];
+/// The counts kept of a chunk and of a rule.
+const KEPT: usize = 7;
+
+/// A chunk's team counts: visited, waived, not for review, conflicts, done,
+/// waived by anybody, confirmed.
+type Counts = [u16; KEPT];
 
 fn counts_of(t: &Team) -> Counts {
-    [t.visited as u16, t.waived as u16, t.not_required as u16, t.conflicts as u16, t.done as u16]
+    [
+        t.visited as u16,
+        t.waived as u16,
+        t.not_required as u16,
+        t.conflicts as u16,
+        t.done as u16,
+        t.waived_any as u16,
+        t.confirmed as u16,
+    ]
 }
 
 /// What is kept of one reviewer.
@@ -87,13 +102,14 @@ struct Seen {
     /// their change log (0: none) and how far it was read
     log_id: u64,
     cursor: u64,
-    /// the last STAMP read from it ((0, 0): none)
-    log_stamp: (u64, u64),
-    /// their files' times (waive, flags) the kept counts cover
-    stamps: (u64, u64),
+    /// the times the log has said as far as it was read (0: none)
+    log_stamp: Stamps,
+    /// their files' times (waive, flags, confirm) the kept counts cover
+    stamps: Stamps,
     /// since when the files are not as the log says (0: they are)
     suspect: u64,
-    /// bit 0: a waive file that reads, bit 1: a flags file that reads
+    /// bit 0: a waive file that reads, bit 1: a flags file that reads,
+    /// bit 2: a confirm file that reads
     known: u8,
     /// the rules they may have bits in
     active: BTreeSet<u32>,
@@ -102,8 +118,8 @@ struct Seen {
 /// The file `.<db>.team` (see the module docs).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Cache {
-    /// per rule: the five counts
-    rules: Vec<[u64; 5]>,
+    /// per rule: the counts
+    rules: Vec<[u64; KEPT]>,
     reviewers: BTreeMap<String, Seen>,
     /// (rule, chunk) -> counts, for the chunks that count anything
     chunks: BTreeMap<(u32, u32), Counts>,
@@ -144,7 +160,7 @@ impl<'a> Bytes<'a> {
 impl Cache {
     fn empty(rules: usize) -> Self {
         Self {
-            rules: vec![[0; 5]; rules],
+            rules: vec![[0; KEPT]; rules],
             ..Self::default()
         }
     }
@@ -152,7 +168,7 @@ impl Cache {
     /// The file's bytes: a head (the rules' counts, the reviewers) and the
     /// chunks, each closed by its CRC-32.
     fn bytes(&self, content: &str) -> Vec<u8> {
-        let mut out = Vec::with_capacity(64 + self.rules.len() * 40 + self.chunks.len() * 18);
+        let mut out = Vec::with_capacity(64 + self.rules.len() * 8 * KEPT + self.chunks.len() * (8 + 2 * KEPT));
         out.extend(MAGIC);
         put32(&mut out, VERSION);
         put32(&mut out, self.rules.len() as u32);
@@ -167,7 +183,7 @@ impl Cache {
         for (tag, s) in &self.reviewers {
             out.extend((tag.len() as u16).to_le_bytes());
             out.extend(tag.as_bytes());
-            for v in [s.log_id, s.cursor, s.log_stamp.0, s.log_stamp.1, s.stamps.0, s.stamps.1, s.suspect] {
+            for v in [s.log_id, s.cursor].into_iter().chain(s.log_stamp).chain(s.stamps).chain([s.suspect]) {
                 put64(&mut out, v);
             }
             out.push(s.known);
@@ -217,8 +233,8 @@ impl Cache {
             let mut s = Seen {
                 log_id: b.u64()?,
                 cursor: b.u64()?,
-                log_stamp: (b.u64()?, b.u64()?),
-                stamps: (b.u64()?, b.u64()?),
+                log_stamp: [b.u64()?, b.u64()?, b.u64()?],
+                stamps: [b.u64()?, b.u64()?, b.u64()?],
                 suspect: b.u64()?,
                 known: b.u8()?,
                 active: BTreeSet::new(),
@@ -233,27 +249,27 @@ impl Cache {
         if b.u32()? != crc32fast::hash(&bytes[..head]) {
             return None;
         }
-        let body = usize::try_from(chunks).ok()?.checked_mul(18)?;
+        let body = usize::try_from(chunks).ok()?.checked_mul(8 + 2 * KEPT)?;
         let raw = b.take(body)?;
         if b.u32()? != crc32fast::hash(raw) || !b.0.is_empty() {
             return None;
         }
         let mut c = Bytes(raw);
-        let mut sums = vec![[0u64; 5]; rules];
+        let mut sums = vec![[0u64; KEPT]; rules];
         for _ in 0..chunks {
             let key = (c.u32()?, c.u32()?);
-            let mut counts = [0u16; 5];
+            let mut counts = [0u16; KEPT];
             for v in &mut counts {
                 *v = c.u16()?;
             }
             let sum = sums.get_mut(key.0 as usize)?;
-            for i in 0..5 {
+            for i in 0..KEPT {
                 if u64::from(counts[i]) > CHUNK {
                     return None;
                 }
                 sum[i] += u64::from(counts[i]);
             }
-            if counts == [0; 5] || me.chunks.insert(key, counts).is_some() {
+            if counts == [0; KEPT] || me.chunks.insert(key, counts).is_some() {
                 return None;
             }
         }
@@ -263,13 +279,13 @@ impl Cache {
     /// A chunk's counts become `new`: the rule's totals follow.
     fn set(&mut self, rule: usize, chunk: u64, new: Counts) {
         let key = (rule as u32, chunk as u32);
-        let old = if new == [0; 5] {
+        let old = if new == [0; KEPT] {
             self.chunks.remove(&key)
         } else {
             self.chunks.insert(key, new)
         }
-        .unwrap_or([0; 5]);
-        for i in 0..5 {
+        .unwrap_or([0; KEPT]);
+        for i in 0..KEPT {
             self.rules[rule][i] = (self.rules[rule][i] + u64::from(new[i])).saturating_sub(u64::from(old[i]));
         }
     }
@@ -292,6 +308,8 @@ impl Cache {
                 not_required: c[2],
                 conflicts: c[3],
                 done: c[4],
+                waived_any: c[5],
+                confirmed: c[6],
             })
             .collect()
     }
@@ -335,20 +353,16 @@ enum Verdict {
     Again,
 }
 
-fn last_stamp(tail: &changes::Tail) -> Option<(u64, u64)> {
-    tail.records.iter().rev().find(|r| r.kind == STAMP).map(|r| (r.a, r.b))
-}
-
 /// A file of `a` is older than `b` says.
-fn older(a: (u64, u64), b: (u64, u64)) -> bool {
-    a.0 < b.0 || a.1 < b.1
+fn older(a: Stamps, b: Stamps) -> bool {
+    a.iter().zip(b).any(|(&a, b)| a < b)
 }
 
 /// `kept`: what the counts hold of the reviewer (None: nothing yet); `tail`:
 /// their log read from where the counts left it (None: no log of this
 /// result); `known` and `stamps`: their files as they open now - opened
 /// after the log was read.
-fn judge(kept: Option<&Seen>, tail: Option<&changes::Tail>, known: u8, stamps: (u64, u64)) -> Verdict {
+fn judge(kept: Option<&Seen>, tail: Option<&changes::Tail>, known: u8, stamps: Stamps) -> Verdict {
     let Some(kept) = kept else {
         return Verdict::Again; // new to the counts
     };
@@ -382,7 +396,7 @@ fn judge(kept: Option<&Seen>, tail: Option<&changes::Tail>, known: u8, stamps: (
     if behind {
         return Verdict::Again;
     }
-    let said = last_stamp(tail).unwrap_or(kept.log_stamp);
+    let said = stamps_after(kept.log_stamp, &tail.records);
     if stamps == said {
         Verdict::Said
     } else if older(stamps, said) {
@@ -398,9 +412,12 @@ struct Source {
     tag: String,
     waive_path: Option<PathBuf>,
     flags_path: Option<PathBuf>,
+    confirm_path: Option<PathBuf>,
     log: Option<PathBuf>,
     /// the waive sidecar and its stored counter a rule
     waive: Option<(File, Vec<u32>)>,
+    /// the confirm file and its stored counter a rule
+    confirm: Option<(File, Vec<u32>)>,
     /// the flags read (bit 1 of `known`); their connection is opened when a
     /// plane is first asked
     flags_ok: bool,
@@ -409,8 +426,8 @@ struct Source {
     /// reader's lock held for a long count would keep the reviewer's own
     /// writes waiting)
     reading: bool,
-    /// the files' times (waive, flags), asked before their bytes
-    stamps: (u64, u64),
+    /// the files' times (waive, flags, confirm), asked before their bytes
+    stamps: Stamps,
     /// the files left out: which, and why
     skipped: Vec<(PathBuf, String)>,
     /// the flags are held by their writer past the wait
@@ -425,11 +442,13 @@ impl Source {
             log: waive_path.as_deref().map(changes::path_beside),
             waive_path,
             flags_path: files.review.as_ref().map(|(path, _)| path.clone()),
+            confirm_path: files.confirm.as_ref().map(|(path, _)| path.clone()),
             waive: None,
+            confirm: None,
             flags_ok: false,
             flags: None,
             reading: false,
-            stamps: (0, 0),
+            stamps: [0; 3],
             skipped: Vec::new(),
             busy: None,
         }
@@ -443,9 +462,26 @@ impl Source {
     /// their connection is opened when a plane is asked.
     fn load(&mut self, id: &Identity, kept: Option<&Seen>, trust: bool) {
         self.release();
-        (self.waive, self.flags, self.flags_ok) = (None, None, false);
-        (self.stamps, self.busy) = ((0, 0), None);
+        (self.waive, self.confirm, self.flags, self.flags_ok) = (None, None, None, false);
+        (self.stamps, self.busy) = ([0; 3], None);
         self.skipped.clear();
+        if let Some(path) = &self.confirm_path {
+            let opened = File::open(path).and_then(|file| {
+                let stamp = stamp_of(&file.metadata()?);
+                Ok((file, stamp))
+            });
+            let header = confirm::header_of(&id.waive_header);
+            match opened
+                .map_err(Error::from)
+                .and_then(|(file, stamp)| Ok((confirm::read_of(file, &header, id.total(), id.sizes.len())?, stamp)))
+            {
+                Ok((confirm, stamp)) => {
+                    self.confirm = Some(confirm);
+                    self.stamps[2] = stamp;
+                }
+                Err(e) => self.skipped.push((path.clone(), e.message)),
+            }
+        }
         if let Some(path) = &self.waive_path {
             let opened = File::open(path).and_then(|file| {
                 let stamp = stamp_of(&file.metadata()?);
@@ -457,7 +493,7 @@ impl Source {
             {
                 Ok((waive, stamp)) => {
                     self.waive = Some(waive);
-                    self.stamps.0 = stamp;
+                    self.stamps[0] = stamp;
                 }
                 Err(e) => self.skipped.push((path.clone(), e.message)),
             }
@@ -466,13 +502,13 @@ impl Source {
             match File::open(path).and_then(|file| file.metadata()) {
                 Ok(meta) => {
                     let stamp = stamp_of(&meta);
-                    if trust && kept.is_some_and(|k| k.known & 2 != 0 && k.stamps.1 == stamp) {
-                        (self.flags_ok, self.stamps.1) = (true, stamp);
+                    if trust && kept.is_some_and(|k| k.known & 2 != 0 && k.stamps[1] == stamp) {
+                        (self.flags_ok, self.stamps[1]) = (true, stamp);
                     } else {
                         match flags_connection(path, id) {
                             Ok(conn) => {
                                 self.flags = Some(conn);
-                                (self.flags_ok, self.stamps.1) = (true, stamp);
+                                (self.flags_ok, self.stamps[1]) = (true, stamp);
                             }
                             Err(e) if e.kind == ErrorKind::Busy => self.busy = Some(e.message),
                             Err(e) => self.skipped.push((path.clone(), e.message)),
@@ -484,9 +520,10 @@ impl Source {
         }
     }
 
-    /// Bit 0: a waive file that reads; bit 1: flags that read.
+    /// Bit 0: a waive file that reads; bit 1: flags that read; bit 2: a
+    /// confirm file that reads.
     fn known(&self) -> u8 {
-        u8::from(self.waive.is_some()) | u8::from(self.flags_ok) << 1
+        u8::from(self.waive.is_some()) | u8::from(self.flags_ok) << 1 | u8::from(self.confirm.is_some()) << 2
     }
 
     fn named(&self, e: Error) -> Error {
@@ -524,7 +561,7 @@ impl Source {
     /// says, and the ones their flags have a row of (a seek a rule).
     fn active(&mut self, id: &Identity) -> Result<BTreeSet<u32>> {
         let mut rules = BTreeSet::new();
-        if let Some((_, stored)) = &self.waive {
+        for (_, stored) in self.waive.iter().chain(&self.confirm) {
             rules.extend((0..stored.len()).filter(|&ci| stored[ci] > 0).map(|ci| ci as u32));
         }
         let tag = self.tag.clone();
@@ -565,6 +602,16 @@ impl Source {
             }
             _ => Bits::ZERO,
         };
+        let confirmed = match &self.confirm {
+            // (a confirmation is the byte a waive is)
+            Some((file, stored)) if stored[ci] > 0 => {
+                let buffer = &mut buffer[..count as usize];
+                file.read_exact_at(buffer, confirm::HEADER + id.starts[ci] + k * CHUNK)
+                    .map_err(|e| self.named(e.into()))?;
+                waived_bits(buffer)
+            }
+            _ => Bits::ZERO,
+        };
         let waive_known = self.waive.is_some();
         let marked = self.flags_ok;
         let (mut visited, mut not_required) = (Bits::ZERO, Bits::ZERO);
@@ -589,6 +636,7 @@ impl Source {
             visited,
             waived,
             not_required,
+            confirmed,
             visited_known: marked,
             waive_known,
             not_required_known: marked,
@@ -870,7 +918,7 @@ fn pass(
                     seen.active.insert(record.rule);
                 }
             }
-            seen.log_stamp = last_stamp(tail).unwrap_or(seen.log_stamp);
+            seen.log_stamp = stamps_after(seen.log_stamp, &tail.records);
             (seen.log_id, seen.cursor) = (tail.log_id, tail.len);
         };
         let seen = match verdict {
@@ -899,11 +947,11 @@ fn pass(
                 Seen {
                     log_id: tail.as_ref().map_or(0, |t| t.log_id),
                     cursor: tail.as_ref().map_or(0, |t| t.len),
-                    log_stamp: tail
-                        .as_ref()
-                        .and_then(last_stamp)
-                        .or_else(|| kept.filter(|_| same_log).map(|k| k.log_stamp))
-                        .unwrap_or((0, 0)),
+                    // (a log read from its start says its times whole; one
+                    // read on from where it was left adds to what it said)
+                    log_stamp: tail.as_ref().map_or([0; 3], |t| {
+                        stamps_after(kept.filter(|_| same_log).map_or([0; 3], |k| k.log_stamp), &t.records)
+                    }),
                     stamps: src.stamps,
                     suspect: 0,
                     known: src.known(),

@@ -84,6 +84,8 @@ pub(super) struct Found {
     pub(super) review: Option<(PathBuf, &'static str)>,
     /// the reasons file and where it is (`results`, `temp`)
     pub(super) reasons: Option<(PathBuf, &'static str)>,
+    /// the confirm file and where it is (`results`, `temp`)
+    pub(super) confirm: Option<(PathBuf, &'static str)>,
 }
 
 /// A tag as the sidecars are named (letters, digits, `.`, `_`, `-`), and not
@@ -148,6 +150,7 @@ pub(super) fn discover(pack: &Path) -> Result<BTreeMap<String, Found>> {
     let mut found: BTreeMap<String, Found> = BTreeMap::new();
     let waive_prefix = format!(".{name}.waive.");
     let reasons_prefix = format!(".{name}.reasons.");
+    let confirm_prefix = format!(".{name}.confirm.");
     let review_prefix = format!(".{name}.review.");
     let review_tag = |file: &str| -> Option<String> {
         file.strip_prefix(&review_prefix)
@@ -161,6 +164,8 @@ pub(super) fn discover(pack: &Path) -> Result<BTreeMap<String, Found>> {
             found.entry(tag.to_owned()).or_default().waive = Some((folder.join(&file), "results"));
         } else if let Some(tag) = file.strip_prefix(&reasons_prefix).and_then(reviewer_of) {
             found.entry(tag.to_owned()).or_default().reasons = Some((folder.join(&file), "results"));
+        } else if let Some(tag) = file.strip_prefix(&confirm_prefix).and_then(reviewer_of) {
+            found.entry(tag.to_owned()).or_default().confirm = Some((folder.join(&file), "results"));
         } else if let Some(tag) = review_tag(&file) {
             found.entry(tag).or_default().review = Some((folder.join(&file), "results"));
         }
@@ -216,6 +221,17 @@ pub(super) fn discover(pack: &Path) -> Result<BTreeMap<String, Found>> {
                     .and_then(reviewer_of);
                 if let Some(tag) = tag {
                     let slot = &mut found.entry(tag.to_owned()).or_default().reasons;
+                    if slot.is_none() {
+                        *slot = Some((temp.join(&file), "temp"));
+                    }
+                }
+                // (and the confirmations)
+                let tag = file
+                    .strip_prefix(&confirm_prefix)
+                    .and_then(|rest| rest.strip_suffix(suffix))
+                    .and_then(reviewer_of);
+                if let Some(tag) = tag {
+                    let slot = &mut found.entry(tag.to_owned()).or_default().confirm;
                     if slot.is_none() {
                         *slot = Some((temp.join(&file), "temp"));
                     }
@@ -357,6 +373,11 @@ struct Own {
     visited: u64,
     not_required: u64,
     both: u64,
+    /// the errors this reviewer has confirmed (their confirm file's)
+    confirmed: u64,
+    /// of this reviewer's waives, the ones a confirmer has confirmed
+    /// (None: not counted - the kept counters cannot say it)
+    waived_confirmed: Option<u64>,
 }
 impl Own {
     fn add(&mut self, o: &Own) {
@@ -364,14 +385,25 @@ impl Own {
         self.visited += o.visited;
         self.not_required += o.not_required;
         self.both += o.both;
+        self.confirmed += o.confirmed;
+        self.waived_confirmed = match (self.waived_confirmed, o.waived_confirmed) {
+            (None, None) => None,
+            (a, b) => Some(a.unwrap_or(0) + b.unwrap_or(0)),
+        };
     }
     fn any(&self) -> bool {
-        self.waived + self.visited + self.not_required > 0
+        self.waived + self.visited + self.not_required + self.confirmed > 0
     }
-    fn json(&self, total: u64, waive: bool, flags: bool) -> Value {
+    fn json(&self, total: u64, waive: bool, flags: bool, confirm: bool) -> Value {
         let mut v = json!({});
         if waive {
             v["waived"] = json!(self.waived);
+            if let Some(confirmed) = self.waived_confirmed {
+                v["waived_confirmed"] = json!(confirmed);
+            }
+        }
+        if confirm {
+            v["confirmed"] = json!(self.confirmed);
         }
         if flags {
             v["visited"] = json!(self.visited);
@@ -392,6 +424,11 @@ pub struct Team {
     pub not_required: u64,
     pub conflicts: u64,
     pub done: u64,
+    /// the errors somebody has waived - conflicts too: what a confirmer has
+    /// to look at (0.12.466)
+    pub waived_any: u64,
+    /// of those, the ones a confirmer has confirmed
+    pub confirmed: u64,
 }
 impl Team {
     pub(super) fn add(&mut self, o: &Team) {
@@ -400,6 +437,8 @@ impl Team {
         self.not_required += o.not_required;
         self.conflicts += o.conflicts;
         self.done += o.done;
+        self.waived_any += o.waived_any;
+        self.confirmed += o.confirmed;
     }
     pub(super) fn json(&self, total: u64) -> Value {
         json!({
@@ -409,6 +448,10 @@ impl Team {
             "not_required": self.not_required,
             "conflicts": self.conflicts,
             "pending": total.saturating_sub(self.done),
+            // the waives a confirmer has confirmed, and the ones - anybody's,
+            // a conflict's too - that still wait for it
+            "confirmed": self.confirmed,
+            "unconfirmed": self.waived_any.saturating_sub(self.confirmed),
         })
     }
 }
@@ -419,6 +462,8 @@ pub(super) struct Planes {
     pub(super) visited: Bits,
     pub(super) waived: Bits,
     pub(super) not_required: Bits,
+    /// the errors whose waive this reviewer confirmed
+    pub(super) confirmed: Bits,
     pub(super) visited_known: bool,
     pub(super) waive_known: bool,
     pub(super) not_required_known: bool,
@@ -427,12 +472,13 @@ pub(super) struct Planes {
 /// The team's counts of one chunk from its reviewers' planes
 /// (snapshot::aggregate's rule).
 pub(super) fn team_of(planes: &[Planes]) -> Team {
-    let (mut v, mut w, mut n) = (Bits::ZERO, Bits::ZERO, Bits::ZERO);
+    let (mut v, mut w, mut n, mut c) = (Bits::ZERO, Bits::ZERO, Bits::ZERO, Bits::ZERO);
     let (mut wy, mut wn, mut ny, mut nn) = (Bits::ZERO, Bits::ZERO, Bits::ZERO, Bits::ZERO);
     for p in planes {
         v |= p.visited;
         w |= p.waived;
         n |= p.not_required;
+        c |= p.confirmed;
         if p.visited_known {
             if p.waive_known {
                 wy |= p.visited & p.waived;
@@ -452,6 +498,9 @@ pub(super) fn team_of(planes: &[Planes]) -> Team {
         not_required: n.count(),
         conflicts: conflict.count(),
         done: (v | n).count(),
+        // a confirmation counts while somebody has the error waived
+        waived_any: w.count(),
+        confirmed: (w & c).count(),
     }
 }
 
@@ -461,6 +510,7 @@ struct Reviewer {
     tag: String,
     waive: Option<(PathBuf, &'static str)>,
     flags: Option<(PathBuf, &'static str)>,
+    confirm: Option<(PathBuf, &'static str)>,
     rules: Vec<Own>,
     stored: Option<Vec<u32>>,
     /// the reasons file, what it says, and the errors each of its actions
@@ -636,7 +686,15 @@ fn counts_from(
                 Err(e) => skipped.push(json!({"reviewer": tag, "file": path, "reason": e.message})),
             }
         }
-        if waive.is_none() && marks.is_none() {
+        // confirmed: the confirm file's counter a rule
+        let mut confirms = None;
+        if let Some((path, place)) = files.confirm {
+            match open_confirm(&path, id) {
+                Ok((_, kept)) => confirms = Some((path, place, kept)),
+                Err(e) => skipped.push(json!({"reviewer": tag, "file": path, "reason": e.message})),
+            }
+        }
+        if waive.is_none() && marks.is_none() && confirms.is_none() {
             continue;
         }
         let own = |ci: usize| {
@@ -646,20 +704,27 @@ fn counts_from(
                 visited,
                 not_required,
                 both,
+                confirmed: confirms.as_ref().map_or(0, |c| u64::from(c.2[ci])),
+                waived_confirmed: None,
             }
         };
-        let (waived, marked) = (waive.is_some(), marks.is_some());
+        let (waived, marked, confirming) = (waive.is_some(), marks.is_some(), confirms.is_some());
         let mut all = Own::default();
         for ci in 0..names.len() {
             all.add(&own(ci));
         }
-        let mut person = all.json(total, waived, marked);
+        let mut person = all.json(total, waived, marked, confirming);
         person["errors"] = json!(total);
         person["id"] = json!(tag);
         person["present"] = json!(true);
         person["waive_known"] = json!(waived);
         person["visited_known"] = json!(marked);
         person["not_required_known"] = json!(marked);
+        if let Some((path, place, _)) = &confirms {
+            person["confirm_file"] = json!(path);
+            person["confirm_location"] = json!(place);
+            person["confirm_modified"] = json!(modified(path));
+        }
         if let Some((path, place, _)) = &waive {
             person["waive_file"] = json!(path);
             person["waive_location"] = json!(place);
@@ -675,7 +740,7 @@ fn counts_from(
             person["rules"] = rows
                 .iter()
                 .map(|&ci| {
-                    let mut row = own(ci).json(id.sizes[ci], waived, marked);
+                    let mut row = own(ci).json(id.sizes[ci], waived, marked, confirming);
                     row["index"] = json!(ci + 1);
                     row["name"] = json!(names[ci]);
                     row["errors"] = json!(id.sizes[ci]);
@@ -741,6 +806,7 @@ pub(super) fn collect_from(
     };
     let mut reviewers = Vec::new();
     let mut statuses: Vec<Option<BufReader<File>>> = Vec::new();
+    let mut confirmations: Vec<Option<BufReader<File>>> = Vec::new();
     let mut connections: Vec<Option<Connection>> = Vec::new();
     for (tag, files) in found {
         check_cancelled(cancelled)?;
@@ -748,6 +814,7 @@ pub(super) fn collect_from(
             tag: tag.clone(),
             waive: None,
             flags: None,
+            confirm: None,
             rules: vec![Own::default(); rules],
             stored: None,
             reasons: None,
@@ -786,9 +853,26 @@ pub(super) fn collect_from(
                 Err(e) => skip(&tag, &path, e.message),
             }
         }
-        if reader.is_some() || connection.is_some() {
+        // the waives this reviewer confirmed: a byte an error, as the
+        // statuses are (drc::confirm)
+        let mut confirming = None;
+        if let Some((path, place)) = files.confirm {
+            let opened = open_confirm(&path, id).and_then(|(mut file, _)| {
+                file.seek(SeekFrom::Start(crate::drc::confirm::HEADER))?;
+                Ok(file)
+            });
+            match opened {
+                Ok(file) => {
+                    reviewer.confirm = Some((path, place));
+                    confirming = Some(BufReader::with_capacity(READ_BUFFER, file));
+                }
+                Err(e) => skip(&tag, &path, e.message),
+            }
+        }
+        if reader.is_some() || connection.is_some() || confirming.is_some() {
             reviewers.push(reviewer);
             statuses.push(reader);
+            confirmations.push(confirming);
             connections.push(connection);
         }
     }
@@ -817,7 +901,13 @@ pub(super) fn collect_from(
         for r in rows.iter_mut() {
             heads.push(next_flags(r)?);
         }
-        let mut owns = vec![Own::default(); reviewers.len()];
+        let mut owns = vec![
+            Own {
+                waived_confirmed: Some(0),
+                ..Own::default()
+            };
+            reviewers.len()
+        ];
         let mut planes = Vec::with_capacity(reviewers.len());
         // each reviewer's reasons of this rule, as runs, and where the
         // chunks have come to in them
@@ -866,19 +956,39 @@ pub(super) fn collect_from(
                     count_held(&held[i][1], &mut cursors[i][1], start, count, &not_required, tally);
                 }
                 let r = &reviewers[i];
+                let confirmed = match &mut confirmations[i] {
+                    Some(reader) => {
+                        reader.read_exact(&mut buffer[..count as usize]).map_err(|e| {
+                            let path = r.confirm.as_ref().map(|(p, _)| p.display().to_string());
+                            Error::new(ErrorKind::Io, format!("{}: {e}", path.unwrap_or_default()))
+                        })?;
+                        // (a confirmation is the byte a waive is)
+                        waived_bits(&buffer[..count as usize])
+                    }
+                    None => Bits::ZERO,
+                };
                 let own = &mut owns[i];
                 own.waived += waived.count();
                 own.visited += visited.count();
                 own.not_required += not_required.count();
                 own.both += (visited & not_required).count();
+                own.confirmed += confirmed.count();
                 planes.push(Planes {
                     visited,
                     waived,
                     not_required,
+                    confirmed,
                     visited_known: r.flags.is_some(),
                     waive_known: r.waive.is_some(),
                     not_required_known: r.flags.is_some(),
                 });
+            }
+            // of each reviewer's waives, the ones a confirmer has confirmed
+            let any = planes.iter().fold(Bits::ZERO, |c, p| c | p.confirmed);
+            if !any.is_zero() {
+                for (own, p) in owns.iter_mut().zip(&planes) {
+                    *own.waived_confirmed.get_or_insert(0) += (p.waived & any).count();
+                }
             }
             team[ci].add(&team_of(&planes));
             start += count;
@@ -894,14 +1004,14 @@ pub(super) fn collect_from(
     let names: Vec<String> = pack.checks.iter().map(|c| c.name.clone()).collect();
     let mut people = Vec::new();
     for r in &reviewers {
-        let (waive, flags) = (r.waive.is_some(), r.flags.is_some());
+        let (waive, flags, confirm) = (r.waive.is_some(), r.flags.is_some(), r.confirm.is_some());
         let mut all = Own::default();
         let mut by_rule = Vec::new();
         let mut differ = Vec::new();
         for (ci, own) in r.rules.iter().enumerate() {
             all.add(own);
             if own.any() {
-                let mut row = own.json(id.sizes[ci], waive, flags);
+                let mut row = own.json(id.sizes[ci], waive, flags, confirm);
                 row["index"] = json!(ci + 1);
                 row["name"] = json!(names[ci]);
                 by_rule.push(row);
@@ -912,12 +1022,17 @@ pub(super) fn collect_from(
                 }
             }
         }
-        let mut person = all.json(total, waive, flags);
+        let mut person = all.json(total, waive, flags, confirm);
         person["id"] = json!(r.tag);
         person["present"] = json!(true);
         person["waive_known"] = json!(waive);
         person["visited_known"] = json!(flags);
         person["not_required_known"] = json!(flags);
+        if let Some((path, place)) = &r.confirm {
+            person["confirm_file"] = json!(path);
+            person["confirm_location"] = json!(place);
+            person["confirm_modified"] = json!(modified(path));
+        }
         if let Some((path, place)) = &r.waive {
             person["waive_file"] = json!(path);
             person["waive_location"] = json!(place);
@@ -1029,6 +1144,17 @@ pub(super) fn waive_of(mut file: File, id: &Identity) -> Result<(File, Vec<u32>)
         .collect();
     file.seek(SeekFrom::Start(40))?;
     Ok((file, stored))
+}
+
+/// A confirm file of this result, open to read, and its counter a rule
+/// (drc::confirm).
+pub(super) fn open_confirm(path: &Path, id: &Identity) -> Result<(File, Vec<u32>)> {
+    crate::drc::confirm::read(
+        path,
+        &crate::drc::confirm::header_of(&id.waive_header),
+        id.total(),
+        id.sizes.len(),
+    )
 }
 
 /// A flags file of this result, in a read transaction.
@@ -1172,6 +1298,7 @@ mod tests {
             visited: bits(v),
             waived: bits(w),
             not_required: bits(n),
+            confirmed: Bits::ZERO,
             visited_known: flags,
             waive_known: waive,
             not_required_known: flags,
@@ -1190,7 +1317,25 @@ mod tests {
         let t = team_of(&[kim, lee, park]);
         assert_eq!(
             t,
-            Team { visited: 7, waived: 14, not_required: 10, conflicts: 1, done: 17 }
+            Team { visited: 7, waived: 14, not_required: 10, conflicts: 1, done: 17, waived_any: 15, confirmed: 0 }
+        );
+        // a confirmer's confirmations count on the errors somebody has
+        // waived - a conflict's waive too (error 0) - and on no other: of
+        // 0, 3, 12 and 50 confirmed, 50 is nobody's waive. A second
+        // confirmer's same error is the same error
+        let mut hong = planes(&[], &[], &[], false, false);
+        hong.confirmed = bits(&[0, 3, 12, 50]);
+        let mut yoon = planes(&[], &[], &[], false, false);
+        yoon.confirmed = bits(&[3, 14, 60]);
+        let t = team_of(&[kim, lee, park, hong, yoon]);
+        assert_eq!(
+            t,
+            Team { visited: 7, waived: 14, not_required: 10, conflicts: 1, done: 17, waived_any: 15, confirmed: 4 }
+        );
+        assert_eq!(
+            t.json(200),
+            json!({"errors": 200, "visited": 7, "waived": 14, "not_required": 10, "conflicts": 1,
+                   "pending": 183, "confirmed": 4, "unconfirmed": 11})
         );
         // an exclusion two visitors disagree on is a conflict too, and is not
         // counted as excluded; a waive-only file never conflicts
@@ -1200,7 +1345,7 @@ mod tests {
         let t = team_of(&[a, b, c]);
         assert_eq!(
             t,
-            Team { visited: 1, waived: 0, not_required: 0, conflicts: 1, done: 1 }
+            Team { visited: 1, waived: 0, not_required: 0, conflicts: 1, done: 1, waived_any: 1, confirmed: 0 }
         );
         // nobody: nothing
         assert_eq!(team_of(&[]), Team::default());
@@ -1208,7 +1353,7 @@ mod tests {
         let t = team_of(&[planes(&[3], &[3, 4], &[9], true, true)]);
         assert_eq!(
             t,
-            Team { visited: 1, waived: 2, not_required: 1, conflicts: 0, done: 2 }
+            Team { visited: 1, waived: 2, not_required: 1, conflicts: 0, done: 2, waived_any: 2, confirmed: 0 }
         );
     }
 }

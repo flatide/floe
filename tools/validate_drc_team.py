@@ -2753,10 +2753,285 @@ def r14(temp):
           "under --workdir: the team of the reviews kept there, its files with them", (nums, kept, logs))
 
 
+# ---- R15 (2026-11-13: the confirmer and the confirm state) ----
+
+def r15(temp):
+    print("[R15] confirming the team's waives: the confirmer's own file, the lists, the statistics")
+    d = temp / "confirm"
+    d.mkdir()
+    sizes = [9000, 5000, 70000]
+    names = ["A.W", "B.S", "E.BIG"]
+    write_db(d / "t.db", [(names[0], [_poly(100 * (i % 120), 60 * (i // 120)) for i in range(sizes[0])]),
+                          (names[1], [_edge(200 * (i % 50), 100 * (i // 50)) for i in range(sizes[1])]),
+                          (names[2], [_poly(60 * (i % 400), 30000 + 40 * (i // 400), 20, 10)
+                                      for i in range(sizes[2])])])
+    r = run([INDEX, "drc", str(d / "t.db")])
+    check(r.returncode == 0, "floe-index drc t.db", r.stderr)
+    db = d / "t.db"
+    total = sum(sizes)
+    starts = [sum(sizes[:ci]) for ci in range(len(sizes))]
+    cache = d / ".t.db.team"
+    # by hand: who waived, visited and set aside what (brute's people), and
+    # who confirmed what
+    people = {n: ({}, {}, {}, True) for n in ("kim", "lee", "hong")}
+    confirms = {}
+
+    def want():
+        """The team by hand: brute's rows with the confirmed and the
+        unconfirmed - of the errors anybody has waived, a conflict's too."""
+        _own, rows = brute(sizes, people)
+        for ci in range(len(sizes)):
+            waived = set().union(*[p[0].get(ci, set()) for p in people.values()])
+            marked = set().union(*[c.get(ci, set()) for c in confirms.values()] or [set()])
+            rows[ci]["confirmed"] = len(waived & marked)
+            rows[ci]["unconfirmed"] = len(waived - marked)
+        keys = TEAM_KEYS + ("confirmed", "unconfirmed")
+        return {k: sum(x[k] for x in rows) for k in keys}, [{k: x[k] for k in keys} for x in rows]
+
+    def agree(what, counted=None, env=None):
+        nums, t, got = team_now(db, "--all-rules", env=env)
+        whole, by_rule = want()
+        keys = tuple(whole)
+        r2, exact = stats_of(db)
+        et = exact["team"]
+        ok = (t["current"] is True and {k: t[k] for k in keys} == whole
+              and [{k: x[k] for k in keys} for x in t["rules"]] == by_rule
+              and {k: et[k] for k in keys} == whole
+              and [{k: x[k] for k in keys} for x in et["rules"]] == by_rule)
+        if counted is not None:
+            ok = ok and t["counted"] == counted
+        check(ok, what, ({k: t[k] for k in keys}, whole, t.get("waiting"), "counted %s" % t["counted"]))
+        return t, got, exact
+
+    def person(report, name):
+        return [x for x in report["reviewers"] if x["id"] == name][0]
+
+    a, b = Svc(), Svc()         # the reviewers' viewer, the confirmer's
+    try:
+        opened = rs_open(a, db, "kim")
+        hk = opened["handle"]
+        hl = rs_open(a, db, "lee")["handle"]
+        o = b("drc_open", path=str(db), mode="load", reviewer="hong", confirmer=True)
+        hh = o["handle"]
+        side = Path(o["confirm_path"])
+        check(o["confirmer"] is True and opened["confirmer"] is False
+              and side.name == ".t.db.confirm.hong" and not side.exists(),
+              "a session opened as a confirmer's; no confirm file until something is confirmed", o.get("confirmer"))
+        a("drc_set_status", handle=hk, check=0, errors=[0, 1, 2, 4095, 4096], status=1, reason="dummy fill")
+        people["kim"][0][0] = {0, 1, 2, 4095, 4096}
+        a("drc_set_status", handle=hl, check=0, errors=[2, 3], status=1)
+        a("drc_set_status", handle=hl, check=1, errors=[7], status=1, reason="seal ring")
+        people["lee"][0].update({0: {2, 3}, 1: {7}})
+        # a conflict: both visited error 1, one of them waived it
+        for h, name in ((hk, "kim"), (hl, "lee")):
+            a("drc_visit", handle=h, check=0, error=1)
+            a.visits(h, 1)
+            people[name][1][0] = {1}
+        t, got, exact = agree("nothing confirmed: every waive - a conflict's too - waits for it")
+        check(t["conflicts"] == 1 and t["waived"] == 6 and t["unconfirmed"] == 7 and t["confirmed"] == 0
+              and "confirmed" not in person(got, "kim") and person(exact, "kim")["waived_confirmed"] == 0,
+              "... (unconfirmed counts the conflict's waive, waived does not)", t)
+        # ---- 1. the list: every error somebody waived, who and why
+        e = b.job(hh, "drc_team_waives", check=0, show="unconfirmed", start=0, limit=100, refresh=True)
+        rows = {x["error"]: x for x in e.get("rows", [])}
+        check(e["state"] == "done" and e["count"] == 6 and sorted(rows) == [0, 1, 2, 3, 4095, 4096]
+              and rows[2]["waived_by"] == ["kim", "lee"] and rows[3]["waived_by"] == ["lee"]
+              and [(w["reviewer"], w["text"]) for w in rows[2]["reasons"]] == [("kim", "dummy fill")]
+              and rows[3]["reasons"] == [] and all(x["confirmed_by"] == [] for x in rows.values())
+              and e["rule"] == dict(waived=6, confirmed=0, unconfirmed=6)
+              and e["all"] == dict(waived=7, confirmed=0, unconfirmed=7)
+              and e["rules"] == [dict(check=0, waived=6, confirmed=0, unconfirmed=6),
+                                 dict(check=1, waived=1, confirmed=0, unconfirmed=1)]
+              and e["reviewers"] == ["hong", "kim", "lee"] and e["confirmers"] == [] and e["skipped"] == [],
+              "the team's waives listed: an error two reviewers waived is one, with who and why", e)
+        e = b.job(hh, "drc_team_waives", check=0, show="waived", start=4, limit=1)
+        check(e["count"] == 6 and [x["error"] for x in e["rows"]] == [4095], "... a page of it", e.get("rows"))
+        e = b.job(hh, "drc_team_waives", check=0, show="confirmed", start=0, limit=100)
+        check(e["count"] == 0 and e["rows"] == [], "... nothing under confirmed yet")
+        for fields, word in ((dict(check=0, show="everything", start=0, limit=1), "unsupported team waive list"),
+                             (dict(check=9, show="waived", start=0, limit=1), "check index out of range")):
+            try:
+                b("drc_team_waives", handle=hh, **fields)
+                said = None
+            except gtkservice.ServiceError as exc:
+                said = str(exc)
+            check(said is not None and word in said, "refused: %s" % word, said)
+        # ---- 2. only a confirmer's session confirms
+        try:
+            a("drc_team_confirm", handle=hk, check=0, on=True)
+            said = None
+        except gtkservice.ServiceError as exc:
+            said = (exc.kind, str(exc))
+        check(said is not None and "--confirmer" in said[1] and not side.exists()
+              and not (d / ".t.db.confirm.kim").exists(),
+              "a reviewer's session does not confirm: refused, nothing written", said)
+        # ---- 3. errors named: the waived ones are confirmed, the rest said
+        e = b.job(hh, "drc_team_confirm", check=0, errors=[0, 2, 7], on=True)
+        check(e["state"] == "done" and (e["changed"], e["skipped"]) == (2, 1), "confirm three named errors: two waived, one nobody's", e)
+        confirms["hong"] = {0: {0, 2}}
+        t, got, exact = agree("the confirmed in the team's counts, kept and exact")
+        raw = side.read_bytes()
+        check(len(raw) == 40 + total + 4 * len(sizes) and raw[:8] == b"FLOECONF"
+              and struct.unpack_from("<I", raw, 8)[0] == 1
+              and raw[12:40] == (d / ".t.db.waive.hong").read_bytes()[12:40]
+              and [i for i in range(sizes[0]) if raw[40 + i] == 1] == [0, 2]
+              and list(struct.unpack_from("<3I", raw, 40 + total)) == [2, 0, 0],
+              "the confirmer's file: its header, a byte an error, a counter a rule", raw[:12])
+        check(person(got, "hong")["confirmed"] == 2 and Path(person(got, "hong")["confirm_file"]) == side
+              and person(got, "hong")["confirm_location"] == "results"
+              and person(exact, "hong")["confirmed"] == 2
+              and person(exact, "kim")["waived_confirmed"] == 2 and person(exact, "lee")["waived_confirmed"] == 1
+              and "confirmed" not in person(exact, "kim"),
+              "each reviewer's row: what they confirmed, and of their waives the confirmed ones",
+              (person(got, "hong"), person(exact, "kim")))
+        e = b.job(hh, "drc_team_waives", check=0, show="confirmed", start=0, limit=100, refresh=True)
+        check([(x["error"], x["confirmed_by"]) for x in e["rows"]] == [(0, ["hong"]), (2, ["hong"])]
+              and e["confirmers"] == ["hong"] and e["rule"] == dict(waived=6, confirmed=2, unconfirmed=4),
+              "the confirmed list says by whom", e.get("rows"))
+        one = a.job(hk, "drc_team_waive_get", check=0, error=2)
+        check(one["state"] == "done" and (one["check"], one["error"]) == (0, 2)
+              and one["waived_by"] == ["kim", "lee"] and one["confirmed_by"] == ["hong"]
+              and one["confirmer"] is False and one["reviewer"] == "kim"
+              and [(w["reviewer"], w["text"]) for w in one["reasons"]] == [("kim", "dummy fill")],
+              "one error asked from a reviewer's session: who waived, why, who confirmed", one)
+        # ---- 4. what an answer costs is what changed
+        e = b.job(hh, "drc_team_confirm", check=0, errors=[4095, 4096], on=True)
+        confirms["hong"][0] |= {4095, 4096}
+        agree("two errors either side of a chunk's end confirmed: two chunks counted", counted=2)
+        e = b.job(hh, "drc_team_confirm", check=0, errors=[1], on=True)
+        confirms["hong"][0].add(1)
+        t, got, exact = agree("a conflict's waive confirmed: one chunk", counted=1)
+        check(t["rules"][0]["conflicts"] == 1 and t["rules"][0]["confirmed"] == 5,
+              "... confirmed, and still the reviewers' conflict", t["rules"][0])
+        # every waive of a rule
+        e = b.job(hh, "drc_team_confirm", check=1, on=True)
+        check((e["changed"], e["skipped"]) == (1, 0), "every waive of a rule confirmed", e)
+        confirms["hong"][1] = {7}
+        agree("... in the counts")
+        # ---- 5. a confirmed waive turned back by its reviewer no longer
+        # counts - the confirmer's file still has it - and waived again by
+        # anybody it stands again
+        a("drc_set_status", handle=hk, check=0, errors=[0], status=0)
+        people["kim"][0][0].discard(0)
+        t, got, exact = agree("a confirmed waive turned back: out of the confirmed", counted=1)
+        check(person(got, "hong")["confirmed"] == 6 and t["rules"][0]["confirmed"] == 4,
+              "... the confirmer's own count is the file's", (person(got, "hong")["confirmed"], t["rules"][0]))
+        a("drc_set_status", handle=hl, check=0, errors=[0], status=1)
+        people["lee"][0][0].add(0)
+        agree("waived again by another reviewer: confirmed again", counted=1)
+        # ---- 6. taken back; a second confirmer
+        e = b.job(hh, "drc_team_confirm", check=0, errors=[2, 3], on=False)
+        check((e["changed"], e["skipped"]) == (1, 0), "a confirmation taken back (one of the two was none)", e)
+        confirms["hong"][0].discard(2)
+        agree("... out of the counts", counted=1)
+        c = Svc()
+        try:
+            hy = c("drc_open", path=str(db), mode="load", reviewer="yoon", confirmer=True)["handle"]
+            c.svc.drc_watch(hy)
+            e = c.job(hy, "drc_team_confirm", check=0, errors=[2, 3, 4096], on=True)
+            check((e["changed"], e["skipped"]) == (3, 0), "a second confirmer", e)
+            confirms["yoon"] = {0: {2, 3, 4096}}
+            people["yoon"] = ({}, {}, {}, False)
+        finally:
+            c.close()
+        t, got, exact = agree("two confirmers: an error both confirmed is one")
+        e = b.job(hh, "drc_team_waives", check=0, show="confirmed", start=0, limit=100, refresh=True)
+        by = {x["error"]: x["confirmed_by"] for x in e["rows"]}
+        check(by.get(4096) == ["hong", "yoon"] and by.get(3) == ["yoon"] and e["confirmers"] == ["hong", "yoon"],
+              "... and the list names both", by)
+        # ---- 7. a job that confirms many: the viewer keeps the counts itself
+        sel = a.job(hk, "drc_select", check=2, mode="replace")
+        was = file_state(cache)
+        e = a.job(hk, "drc_review", check=2, action="waive", selection=sel["selection"], on=True)
+        check(e["state"] == "done" and e["count"] == sizes[2], "a reviewer waives a rule of 70,000", e)
+        people["kim"][0][2] = set(range(sizes[2]))
+        deadline = time.monotonic() + 30
+        while file_state(cache) == was and time.monotonic() < deadline:
+            time.sleep(0.01)
+        t, got, exact = agree("... 70,000 waives wait for a confirmation", counted=0)
+        was = file_state(cache)
+        e = b.job(hh, "drc_team_confirm", check=2, on=True)
+        check(e["state"] == "done" and (e["changed"], e["skipped"]) == (sizes[2], 0), "the confirmer confirms the rule", e)
+        confirms["hong"][2] = set(range(sizes[2]))
+        deadline = time.monotonic() + 30
+        while file_state(cache) == was and time.monotonic() < deadline:
+            time.sleep(0.01)
+        t, got, exact = agree("... and the next answer counts nothing: the confirmer's viewer kept the counts", counted=0)
+        check(t["rules"][2]["confirmed"] == sizes[2] and t["rules"][2]["unconfirmed"] == 0, "the rule is confirmed", t["rules"][2])
+        e = b.job(hh, "drc_team_confirm", check=2, errors=list(range(100, 300)), on=False)
+        confirms["hong"][2] -= set(range(100, 300))
+        agree("200 of them taken back", counted=1)
+    finally:
+        a.close()
+        b.close()
+    agree("the sessions closed: the same team", counted=0)
+    # the change log says the confirm file's time (record 4) when it changed
+    log = (d / ".t.db.changes.hong").read_bytes()
+    kinds = [struct.unpack_from("<I", log, 48 + 24 * i)[0] for i in range((len(log) - 48) // 24)]
+    last = [i for i, k in enumerate(kinds) if k == 4][-1]
+    check(4 in kinds and struct.unpack_from("<Q", log, 48 + 24 * last + 8)[0] == os.stat(side).st_mtime_ns
+          and 4 not in [struct.unpack_from("<I", (d / ".t.db.changes.kim").read_bytes(), 48 + 24 * i)[0]
+                        for i in range(((d / ".t.db.changes.kim").stat().st_size - 48) // 24)],
+          "the confirmer's change log says the confirm file's time; a reviewer's has no such record", kinds[-6:])
+    # ---- 8. the role is the open's: the same reviewer opened without it
+    # confirms nothing, and what they confirmed stands
+    s = Svc()
+    try:
+        h = rs_open(s, db, "hong")["handle"]
+        try:
+            s("drc_team_confirm", handle=h, check=0, errors=[3], on=False)
+            said = None
+        except gtkservice.ServiceError as exc:
+            said = str(exc)
+        check(said is not None and "--confirmer" in said, "the same reviewer without the role: refused", said)
+    finally:
+        s.close()
+    agree("... and their confirmations stand", counted=0)
+    # ---- 9. a confirmation nobody said (a file changed by hand): waited
+    # for, then counted - at once without a grace
+    before, _t, _got = team_now(db)
+    raw = bytearray(side.read_bytes())
+    raw[40 + starts[0] + 3] = 1
+    struct.pack_into("<I", raw, 40 + total, struct.unpack_from("<I", raw, 40 + total)[0] + 1)
+    was = os.stat(side).st_mtime_ns
+    side.write_bytes(bytes(raw))
+    while os.stat(side).st_mtime_ns <= was:
+        time.sleep(0.002)
+        os.utime(side)
+    confirms["hong"][0].add(3)
+    nums, t, got = team_now(db)
+    check({k: nums[k] for k in TEAM_KEYS} == {k: before[k] for k in TEAM_KEYS} and t["current"] is False
+          and t["confirmed"] == _t["confirmed"] and t["waiting"][0].startswith("hong's review files"),
+          "a confirm file changed without a record: the counts as they were, said not current", t)
+    agree("... counted at once without a grace", env=dict(FLOE_TEAM_GRACE_S="0"))
+    # ---- 10. a confirm file of another result is nobody's confirmation
+    whole = side.read_bytes()
+    other = bytearray(whole)
+    other[20] ^= 1
+    side.write_bytes(bytes(other))
+    nums, t, got = team_now(db, env=dict(FLOE_TEAM_GRACE_S="0"))
+    theirs = len(confirms["yoon"][0] & (people["kim"][0][0] | people["lee"][0][0]))
+    check(t["confirmed"] == theirs and [(x["reviewer"], Path(x["file"]).name) for x in t.get("skipped", [])]
+          == [("hong", ".t.db.confirm.hong")]
+          and [(x["reviewer"], Path(x["file"]).name) for x in got["skipped"]] == [("hong", ".t.db.confirm.hong")]
+          and "another DRC result" in got["skipped"][0]["reason"] and "confirmed" not in person(got, "hong"),
+          "a confirm file of another result: left out and said, the other confirmer's stand", (t.get("confirmed"), t.get("skipped")))
+    side.write_bytes(whole)
+    agree("... back: counted again", env=dict(FLOE_TEAM_GRACE_S="0"))
+    # ---- 11. a reviewer's row alone
+    r, one = stats_of(db, "--floe-reviewer", "hong")
+    r2, kept = counts_of(db, "--floe-reviewer", "hong", "--rule", "A.W")
+    mine = len(confirms["hong"][0]) + len(confirms["hong"][1]) + len(confirms["hong"][2])
+    check(one["reviewers"][0]["confirmed"] == mine and kept["reviewers"][0]["confirmed"] == mine
+          and kept["reviewers"][0]["rules"][0]["confirmed"] == len(confirms["hong"][0])
+          and kept["team"]["rules"][0]["confirmed"] == want()[1][0]["confirmed"],
+          "--floe-reviewer: the confirmer's own counts, whole and of a rule", kept["reviewers"][0])
+
+
 def main():
-    global r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12, r13, r14
-    r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12, r13, r14 = map(
-        timed, (r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12, r13, r14))
+    global r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12, r13, r14, r15
+    r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12, r13, r14, r15 = map(
+        timed, (r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12, r13, r14, r15))
     temp = Path(tempfile.mkdtemp(prefix="floe-drc-team-"))
     try:
         d = temp / "runs"
@@ -2781,6 +3056,7 @@ def main():
         r12(temp)
         r13(temp)
         r14(temp)
+        r15(temp)
         if "--no-gui" not in sys.argv:
             from validate_drc_team_gui import r7
             timed(r7)(temp, check)

@@ -586,6 +586,10 @@ class PackDrc(_Drc):
         # drc::reasons; 0.12.463)
         self.reason_path = result.get("reason_path")
         self._reasons = {}
+        # the waives this reviewer confirmed, and whether this open may
+        # confirm (`floe2 view --confirmer`; app-core drc::confirm, 0.12.466)
+        self.confirm_path = result.get("confirm_path")
+        self.confirmer = bool(result.get("confirmer"))
         self._reviewer = result.get("reviewer")
         # how the id was found ("given", "FLOE_REVIEWER", "DISPLAY host",
         # "ssh client", "account") and whether it was stated - --userid or
@@ -674,6 +678,23 @@ class PackDrc(_Drc):
                     self._reasons.clear()
                 self._reasons[key] = got
         return got
+
+    def waive_ask(self, ci, ei):
+        """Ask the service who on the team has rule `ci`'s error `ei`
+        waived, why, and who confirmed it (its job reads every reviewer's
+        files: an error's detail does not wait for it). The answer comes to
+        `waive_answer`; an earlier ask not yet answered is dropped."""
+        self._start("team-row", "drc_team_waive_get", check=int(ci), error=int(ei))
+
+    def waive_answer(self):
+        """The answer to the last `waive_ask`, once: {"check", "error",
+        "waived_by", "confirmed_by", "reasons": [{"reviewer", "text",
+        "time"}], "confirmer", "reviewer"}; None while there is none yet,
+        False when the ask failed."""
+        event = self.poll("team-row")
+        if event is None or event.get("state") == "progress":
+            return None
+        return event if event.get("state") == "done" else False
 
     def reasons_changed(self):
         """A review write happened: drop what was read of the reasons."""
@@ -1352,19 +1373,21 @@ def drc_find(db):
     return service().request("drc_find", db=os.path.abspath(db))
 
 
-def drc_open_pack(pack, source=None, reviewer=None):
-    """A pack under review; `source` (the .db) must match its fingerprint."""
+def drc_open_pack(pack, source=None, reviewer=None, confirmer=False):
+    """A pack under review; `source` (the .db) must match its fingerprint.
+    `confirmer`: the review is opened to confirm the team's waives."""
     return _drc(service().request(
         "drc_open", path=os.path.abspath(pack), mode="pack",
         source=None if source is None else os.path.abspath(source),
-        reviewer=reviewer))
+        reviewer=reviewer, confirmer=bool(confirmer)))
 
 
-def drc_load(path, reviewer=None):
+def drc_load(path, reviewer=None, confirmer=False):
     """floe/drc.py load_db: a pack given, or the .db's current pack, else
     the ASCII file."""
     return _drc(service().request("drc_open", path=os.path.abspath(path),
-                                  mode="load", reviewer=reviewer))
+                                  mode="load", reviewer=reviewer,
+                                  confirmer=bool(confirmer)))
 
 
 def drc_cd_markers(constraints, markers):
@@ -2096,6 +2119,36 @@ def set_members(db, ci, errors, field, on, cancelled=None, progress=None,
         db.counts_refresh()
         db.review_flags_changed(ci)
     return event.get("reason_error")
+
+
+def team_waives(db, ci, kind, start, limit, refresh=False, cancelled=None,
+                progress=None):
+    """A page of the team's waives of rule `ci` - `kind` "unconfirmed",
+    "confirmed" or "waived" (all of them) - as every reviewer's files say:
+    {"count", "rows": [{"error", "waived_by", "confirmed_by", "reasons"}],
+    "rule", "all" (waived / confirmed / unconfirmed of the rule and of the
+    result), "rules" (the rules somebody waived in), "reviewers",
+    "confirmers", "skipped"}. `refresh`: read the files anew (else the
+    state the last page read)."""
+    return _job(db, "team-waives", "drc_team_waives", cancelled, progress,
+                check=int(ci), show=kind, start=int(start), limit=int(limit),
+                refresh=bool(refresh))
+
+
+def waive_row(db, ci, ei, cancelled=None):
+    """`PackDrc.waive_ask` waited for (a worker thread's, a gate's)."""
+    return _job(db, "team-row", "drc_team_waive_get", cancelled, None,
+                check=int(ci), error=int(ei))
+
+
+def confirm_waives(db, ci, errors=None, on=True, cancelled=None, progress=None):
+    """Confirm the team's waives of rule `ci` - `errors`, or every one -
+    as this reviewer (a review opened as a confirmer's), or take the
+    confirmation back: {"changed", "skipped" - asked for and nobody's
+    waive}."""
+    return _job(db, "confirm", "drc_team_confirm", cancelled, progress,
+                check=int(ci), on=bool(on),
+                errors=None if errors is None else [int(e) for e in errors])
 
 
 def prepare_conflict_selection(db, aggregate, ci, membership=None, waived=None,

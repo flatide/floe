@@ -510,6 +510,32 @@ N <룰> <시각> <구간>            이 에러들의 검토 제외 사유가 �
   탐색이고 에러 단위의 표는 없다. 크기: 2억 건 룰 전체가 160바이트 미만, 흩어진 100만 구간이 약
   6 MB(단위 테스트 `a_reason_of_millions_of_errors_is_one_short_line`).
 
+## `.<db>.confirm.<리뷰어>` — DRC waive의 confirm
+
+0.12.466(사용자 2026-11-13: "사용자중 팀의 모든 waive를 뷰어에서 보고 confirm하는 역할이 필요함";
+app-core `drc::confirm`). 확인자가 **어느 에러의 waive를 confirm했는지**를 적는다. 확인자 자신의
+파일이고 그 확인자의 세션만 쓴다. waive 사이드카와 같은 자리에 있고(pack 옆, 쓸 수 없으면 임시 폴더의
+`.<db>.confirm.<리뷰어>-<경로 해시 12자>`) 처음 confirm할 때 만든다. 바이너리, little-endian.
+모양은 waive 사이드카와 같고 매직만 다르다.
+
+```text
+헤더 40 B        : "FLOECONF" | u32 1 | 내용 ID 앞 16 B | u64 err_total | u32 n_checks
+err_total 바이트 : 1 = 이 리뷰어가 그 에러의 waive를 confirm함 (에러의 전역 번호 순)
+n_checks x u32   : 룰별 confirm된 에러 수
+```
+
+- 헤더의 12~39바이트는 waive 사이드카 헤더의 같은 자리와 같다(결과의 식별). 매직이 달라서 confirm
+  파일을 waive 파일로(또는 그 반대로) 읽는 일은 없다: `load waives…`도 거절한다.
+- 만들 때 헤더만 쓰고 나머지는 길이로 잡는다(구멍). confirm 하나는 바이트 하나와 그 룰의 카운터를
+  제자리에 쓴다. 요청이 끝날 때 동기화한다(`FLOE_WAIVE_SYNC`).
+- **이 파일은 "누가 confirm했나"만 말한다.** 에러가 waive인지는 리뷰어들의 waive 사이드카가 말한다.
+  읽는 쪽(팀 합계, `team waives…` 창)은 누군가 waive하고 있는 에러의 confirm만 세고 보여 준다.
+  waive가 되돌려져도 바이트는 남고, 다시 waive되면 다시 센다.
+- 다른 결과의 파일(헤더나 크기가 다름)은 세션이 열 때 `.stale-<시각>`으로 치우고, 통계는 `skipped`에
+  적는다.
+- 누가 confirm할 수 있는지는 파일에 없다: 세션을 연 쪽이 정한다(`floe2 view --confirmer`,
+  서비스의 `drc_open {confirmer: true}`).
+
 ## `.<db>.changes.<리뷰어>` — DRC 리뷰의 변경 기록
 
 0.12.465(사용자 2026-11-13: ".db를 여러 사람이 검토하고 그 합집합을 실시간으로 받아야 해"; app-core
@@ -526,6 +552,9 @@ waive했는지)은 여기 없다. waive 사이드카와 같은 자리에 있고(
   2 STAMP  이 변경들을 쓴 뒤 리뷰어 파일의 시각: a = waive 사이드카, b = 방문 기록(.sqlite3)
            (epoch ns, 파일이 없으면 0)
   3 RESET  기록 없이 파일이 바뀌었다: 읽는 쪽은 이 리뷰어의 룰을 통째로 다시 센다
+  4 CSTAMP 이 변경들을 쓴 뒤 confirm 파일의 시각: a (epoch ns, 파일이 없으면 0). STAMP 뒤에,
+           마지막으로 말한 값과 다를 때만 적는다(0.12.466). confirm하지 않는 리뷰어의 기록에는
+           없고, 0.12.465의 읽는 쪽은 건너뛴다
 ```
 
 - 헤더의 12~39바이트는 waive 사이드카 헤더의 같은 자리와 같다(결과의 식별). 기록 ID는 파일을 새로
@@ -548,23 +577,27 @@ waive했는지)은 여기 없다. waive 사이드카와 같은 자리에 있고(
 
 0.12.465(app-core `drc::team::live`). `floe2 drc --review-counts`의 `team`이 읽고 고치는 파일이다.
 pack 옆에 하나 있다(리뷰어별이 아니다). 리뷰어 전원의 리뷰를 합친 수치(방문, waive, 검토 제외, conflict,
-done)를 룰별·구간별로 갖고, 리뷰어마다 변경 기록을 어디까지 읽었는지와 그때의 파일 시각을 갖는다.
-지워도 된다: 다음 조회가 처음부터 센다. 바이너리, little-endian.
+done, 그리고 0.12.466부터 누군가 waive한 수와 그중 confirm된 수)를 룰별·구간별로 갖고, 리뷰어마다 변경
+기록을 어디까지 읽었는지와 그때의 파일 시각을 갖는다. 지워도 된다: 다음 조회가 처음부터 센다. 바이너리,
+little-endian. 버전 2(0.12.466)다: 버전 1 파일은 캐시가 아닌 것으로 보고 다시 센다.
 
 ```text
-머리 : "FLOETEAM" | u32 1 | u32 n_checks | u32 길이 + 결과 fingerprint(hex) | u32 리뷰어 수
-       | n_checks x (u64 visited, waived, not_required, conflicts, done)
-       | 리뷰어마다: u16 길이 + ID | u64 기록 ID | u64 읽은 오프셋 | u64 x2 마지막 STAMP
-                     | u64 x2 센 파일의 시각(waive, 방문 기록) | u64 어긋남을 처음 본 시각(초, 0 = 없음)
-                     | u8 읽히는 파일(bit0 waive, bit1 방문 기록) | u32 n + n x u32 손댄 룰
+머리 : "FLOETEAM" | u32 2 | u32 n_checks | u32 길이 + 결과 fingerprint(hex) | u32 리뷰어 수
+       | n_checks x (u64 visited, waived, not_required, conflicts, done, waived_any, confirmed)
+       | 리뷰어마다: u16 길이 + ID | u64 기록 ID | u64 읽은 오프셋 | u64 x3 기록이 말한 시각
+                     | u64 x3 센 파일의 시각(waive, 방문 기록, confirm)
+                     | u64 어긋남을 처음 본 시각(초, 0 = 없음)
+                     | u8 읽히는 파일(bit0 waive, bit1 방문 기록, bit2 confirm) | u32 n + n x u32 손댄 룰
        | u64 구간 수 | u32 CRC-32(머리)
-구간 : 구간 수 x (u32 룰 | u32 구간 | u16 visited, waived, not_required, conflicts, done)
-       | u32 CRC-32(구간)
+구간 : 구간 수 x (u32 룰 | u32 구간 | u16 visited, waived, not_required, conflicts, done,
+                 waived_any, confirmed) | u32 CRC-32(구간)
 ```
 
 - 구간은 수치가 하나라도 있는 것만 있다(룰, 구간 순). 룰의 합은 그 룰 구간들의 합이다. 두 CRC, 결과의
   fingerprint, 룰 수, 이 합이 하나라도 맞지 않으면 캐시가 아닌 것으로 보고 처음부터 센다.
-- `done`은 방문했거나 검토 제외인 에러 수다. `pending` = 룰의 에러 수 − `done`.
+- `done`은 방문했거나 검토 제외인 에러 수다. `pending` = 룰의 에러 수 − `done`. `waived_any`는
+  누군가 waive한 에러 수(conflict 포함), `confirmed`는 그중 확인자가 confirm한 수다.
+  `unconfirmed` = `waived_any` − `confirmed`.
 - **고치기**(`live::merge`): 리뷰어마다 변경 기록을 먼저 읽고 그 뒤에 파일을 연다(연 파일은 서버에
   물은 것이라 기록이 말한 비트가 읽는 내용에 들어 있다). 파일 시각은 바이트보다 먼저 묻는다. 그러고
   리뷰어를 넷 중 하나로 판정한다(`judge`).
@@ -590,7 +623,8 @@ done)를 룰별·구간별로 갖고, 리뷰어마다 변경 기록을 어디까
   모든 리뷰어의 파일을 새로 열어 한 번 더 센다. 읽히지 않는 파일은 그때 빼고 `skipped`에 적는다(정확한
   집계가 빼는 것과 같다).
 - 쓸 수 없는 폴더, `FLOE_TEAM_KEEP=off`: 쓰지 않고 그 답만을 위해 센다(`kept: false`).
-- 크기: 구간당 18바이트, 룰당 40바이트. 에러 2,030만·룰 2,000개에서 168 KB.
+- 크기: 구간당 22바이트, 룰당 56바이트(버전 1은 18바이트, 40바이트였고 에러 2,030만·룰 2,000개에서
+  168 KB였다).
 
 ## `.<db>.review.<리뷰어>.sqlite3` — DRC 방문·검토 제외
 

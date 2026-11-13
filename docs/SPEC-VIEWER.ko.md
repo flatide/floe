@@ -410,7 +410,7 @@
   프로세스였다(뷰어·gtk-service·renderd 한 벌씩, 작은 샘플에서 234 MB).
   - 요청 한 줄(`viewcli.cmd_view`): `경로\tkey=value…`. 뷰 옵션(`goto`·`detail`·`depth`·`frames`·`labels`·`labelpx`·
     `levels`·`thin`·`density`·`occupancy`)에 더해 `drc=`(결과 .db의 절대 경로), `rules=`, `userid=`(그 실행이 명시한
-    리뷰어: `--userid`나 `FLOE_REVIEWER`), `noload=1`, `layerprops=`(0.12.451: 레이어 속성 파일의 실제 경로), `drcrule=`와 `drcerr=`(0.12.461: 결과에서 선택할 룰 이름과 그 룰의 에러 번호; 아래 "룰과 에러 지정")가 간다. `--drc`가 없는 파일이면 보내기 전에 1로 끝난다
+    리뷰어: `--userid`나 `FLOE_REVIEWER`), `noload=1`, `confirmer=1`(0.12.466: `--confirmer`나 `FLOE_CONFIRMER`. 그 요청의 결과를 확인자로 연다. 같은 결과가 다른 역할로 열려 있으면 다시 연다), `layerprops=`(0.12.451: 레이어 속성 파일의 실제 경로), `drcrule=`와 `drcerr=`(0.12.461: 결과에서 선택할 룰 이름과 그 룰의 에러 번호; 아래 "룰과 에러 지정")가 간다. `--drc`가 없는 파일이면 보내기 전에 1로 끝난다
     (`no such DRC results file`). 넘긴 요청은 창이 결과를 열어 보기 전에 답을 받기 때문이다. 탭이나 줄바꿈이 든
     경로·ID는 한 줄에 실을 수 없어 독립 창으로 뜬다. `--multi`와 렌더 프로세스 옵션(`--stream-kb`·
     `--stream-target-ms`·`--render-debug`·`--frame-cache off`·`--margin on`·`--layer-colors`)은 전과 같이 독립 창이다.
@@ -616,6 +616,24 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   전까지 비어 있는 곳이라 그때까지 남는다. `Conflict only`의 상태(`_on_drc_conflict`,
   `_drc_conflict_poll`)와 오래 걸리는 마커 계산의 진행·완료(`_drc_marker_poll`)도 상태 줄이다.
   표 형태의 대응은 DRC.ko.md §3.
+- **팀 waive와 confirm**(DRC 메뉴 `team waives…`, 0.12.466; `_DrcWaivesWindow`, DRC.ko.md §2): 리뷰어
+  전원의 waive를 그들의 작업 파일에서 바로 읽어(`drc_team_waives`: 발견은 통계 명령과 같은
+  `stats::discover`) 룰별로 보인다. 룰 목록은 누군가 waive한 룰만이고, 목록은 `To confirm`(기본)·
+  `Confirmed`·`All team waives`, 행은 에러·waive한 사람들·사유·confirm한 사람들, 1,000개씩이다.
+  더블클릭은 그 에러를 연다(`_drc_jump`). 확인자로 연 결과(`floe2 view --confirmer`, 서비스의
+  `drc_open {confirmer: true}`)에서만 `Confirm selected`·`Unconfirm selected`·`Confirm all of rule`이
+  켜져 있다(`drc_team_confirm`, job `confirm`: 쓰기 작업이라 창을 닫아도 끝까지 간다). 룰 전체는 묻고
+  나서 한다. 그 밖의 창에서는 버튼이 꺼져 있고 툴팁이 이유를 말한다. 목록은 마지막 `Refresh`가 읽은
+  상태이고 자기 confirm 뒤에는 다시 읽는다. 에러 상세에는 `waived by: …`(나 말고 waive한 사람과 그
+  사유)와 `waive confirmed by: …`가 붙는다(`drc_team_waive_get`, `_drc_team_lines`). 이 조회는 에러를
+  고를 때마다 일어나고 리뷰어들의 파일을 찾느라 폴더 목록을 읽으므로(임시 폴더의 이름 19,000개에서 8 ms)
+  서비스의 작업(job `team-row`)으로 한다: 상세는 바로 뜨고 팀 줄은 답이 오면 붙으며, 같은 에러를 다시
+  보면 지난 답의 줄이 바로 나온 뒤 새 답으로 고쳐진다(`waive_ask`·`waive_answer`, `_drc_team_poll`). 화면
+  스레드가 그 목록 읽기를 기다리게 두지 않는다. (그 지연이 드러낸 것: 서비스는 프레임 파일을 최근 4장만
+  두는데, 뷰 편집 사이에 화면 스레드가 늦으면 이미 교체된 프레임을 읽다가 `error: frame event failed`가
+  났다. `_ctl_events`는 파일이 없고 뒤에 새 프레임이 있는 프레임을 건너뛴다. 0.12.466.) 결과를 확인자로
+  열면 로드의 상태 줄 끝에 ` · confirmer`가 붙는다. 메인 목록의 waive 필터와 캔버스의 색은 전처럼
+  내 waive의 것이다.
 - **공동 검토**(DRC 메뉴 `reviewers…`; `load waives…`도 이 창의 불러오기로 간다 —
   내 상태를 갈아끼우지 않는다): 다른 리뷰어의 `.floereview`, 작업 review SQLite,
   waive 파일을 읽기 전용으로 불러와(`drc_team_load`) 내 상태와 비교한다. 리뷰어마다

@@ -306,6 +306,10 @@ DRC.ko.md §2) 다른 호스트에서 읽어도 방금 한 것까지 들어 있�
 | `reasons[]` (0.12.463) | 사유별 한 항목: `kind`(`waive`·`not_required`), `text`, `errors`(그 사유를 갖고 지금 waive·검토 제외인 에러 수), `actions`(그 사유를 준 작업 수), `first`·`last`(처음·마지막으로 준 시각, UTC), `rules[]`(룰별 `errors`). waive 사유가 먼저, 에러가 많은 순. 사유 파일이 없는 리뷰어는 키가 없다 |
 | `waived_with_reason`, `not_required_with_reason` | 사유가 있는 waive·검토 제외 에러 수 |
 | `reasons_file`, `reasons_location`, `reasons_modified` | 사유 파일, 그 자리(`results`·`temp`), 마지막 수정 시각 |
+| `confirmed` (0.12.466) | 리뷰어 줄에서는 그 리뷰어가 confirm해 둔 에러 수다(confirm 파일의 수라서 지금 아무도 waive하지 않는 에러도 들어 있다). confirm 파일이 없는 리뷰어는 키가 없다. `team`과 `team.rules[]`에서는 누군가 waive했고 확인자가 confirm한 에러 수다 |
+| `unconfirmed` | `team`과 `team.rules[]`: 누군가 waive했고 아직 confirm되지 않은 에러 수. conflict인 waive도 센다(`waived`는 conflict를 뺀 수다) |
+| `waived_confirmed` | 리뷰어 줄(waive 파일이 있을 때): 그 리뷰어의 waive 중 확인자가 confirm한 수 |
+| `confirm_file`, `confirm_location`, `confirm_modified` | confirm 파일(`.<db>.confirm.<리뷰어>`), 그 자리(`results`·`temp`), 마지막 수정 시각 |
 | `team.rules` | 모든 룰. `team.reviewers`는 센 리뷰어 수 |
 
 키는 사전순으로 나온다. ProperTee처럼 캡처 상한이 있는 호출자는 파일로 받아 `json_parse`한다(§2).
@@ -330,6 +334,7 @@ floe2 drc results.db --review-counts --floe-reviewer kim    # 이 리뷰어만
 
 - **합계**(옵션 없이): `reviewers[]`의 각 항목이 그 리뷰어의 `errors`(결과의 전체 에러 수), `waived`,
   `visited`, `not_required`다. `visited_not_required`·`pending`도 §2b와 같은 뜻으로 함께 낸다.
+  confirm 파일이 있는 리뷰어(확인자)는 `confirmed`도 낸다(0.12.466. 그 파일의 룰별 카운터다).
 - **한 룰**(`--rule NAME`): 최상위 `rules[]`에 그 룰의 `index`·`name`·`errors`가, 각 리뷰어의
   `rules[]`에 그 룰의 `errors`·`waived`·`visited`·`not_required`가 붙는다. 아무도 검토하지 않은
   결과라도 최상위 `rules[]`는 나오므로 에러 수는 항상 답한다. 같은 이름의 룰이 둘이면 둘 다 나온다
@@ -354,6 +359,11 @@ floe2 drc results.db --review-counts --floe-reviewer kim    # 이 리뷰어만
   사람의 판단(waive, 검토 제외)이 다르면 conflict이고 그 에러는 팀의 waive·검토 제외에 넣지 않는다.
   `pending`은 아무도 방문하지 않았고 검토 제외도 아닌 에러다. `--rule`·`--all-rules`를 주면
   `team.rules[]`에 그 룰들의 같은 수치가 붙는다.
+- **confirm**(0.12.466): `confirmed`는 누군가 waive했고 확인자가 confirm한 에러 수, `unconfirmed`는
+  누군가 waive했고 아직 confirm되지 않은 에러 수다. 둘의 합이 팀에서 waive된 에러 전부이고,
+  conflict인 waive도 여기에 든다(`waived`는 conflict를 뺀 수라서 둘의 합이 `waived`보다 클 수
+  있다). confirm은 뷰어의 DRC 메뉴 `team waives…`에서 확인자(`floe2 view --confirmer`)가 하고
+  (DRC.ko.md §2), confirm 하나는 구간 하나만 다시 세게 한다.
 - **누구의 합계인가**: 언제나 리뷰어 전원이다. `--floe-reviewer`는 `reviewers[]`의 줄만 줄인다(§2b는
   지정한 리뷰어들만의 합계를 낸다. 일부의 합집합이 필요하면 §2b를 쓴다).
 - **바로 답하는 방법**: 합집합은 에러 단위로 봐야 해서 카운터를 더해서는 나오지 않는다. 그래서 만들어
@@ -421,11 +431,11 @@ floe2 drc results.db --review-counts --floe-reviewer kim    # 이 리뷰어만
                 "pending": 19750000}]}
   ],
   "team": {"errors": 20299635, "visited": 41, "waived": 15455919, "not_required": 249966,
-           "conflicts": 34, "pending": 20049634, "reviewers": 3,
-           "current": true, "kept": true, "counted": 0,
+           "conflicts": 34, "pending": 20049634, "confirmed": 0, "unconfirmed": 15455953,
+           "reviewers": 3, "current": true, "kept": true, "counted": 0,
            "rules": [{"index": 2, "name": "M2.OVERLAP.2", "errors": 20000000, "visited": 41,
                       "waived": 15455913, "not_required": 249966, "conflicts": 34,
-                      "pending": 19749999}]},
+                      "pending": 19749999, "confirmed": 0, "unconfirmed": 15455947}]},
   "skipped": []
 }
 ```
@@ -433,6 +443,7 @@ floe2 drc results.db --review-counts --floe-reviewer kim    # 이 리뷰어만
 `rules`(최상위, 리뷰어, `team`의)는 `--rule`·`--all-rules`를 줄 때만 있다. `rule_count`는 결과의 룰 수다.
 `team.waiting`과 `team.skipped`는 있을 때만 나온다. 그 밖의 키는 §2b와 같은 뜻이다. 위 예는
 `--floe-reviewer kim --rule M2.OVERLAP.2`의 답이다: 리뷰어 줄은 하나이고 팀은 세 사람의 것이다.
+confirm은 아직 없어서 `unconfirmed`가 waive된 에러 전부다(conflict 34개의 waive를 더한 수).
 
 ## 3. 에러 스냅샷 PNG: `floe2 render --drc`
 

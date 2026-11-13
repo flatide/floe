@@ -645,3 +645,16 @@ P4d처럼 컨트롤러 루프에서만 바뀐다. `FLOE_GTK_LOOP=legacy`는 예�
 - **`floe2 drc`의 읽기 전용 약속:** `--review-counts`는 `.<db>.team` 하나를 pack 옆에 둔다(`.tray.source`처럼 답을 적어 두는 파일이고 리뷰는 건드리지 않는다). 도움말에 적었다. 폴더가 받지 않으면 쓰지 않는다.
 - **웹 병합에서 볼 것:** `desktop.rs`의 `sync_waives`가 `flush_statuses`와 `changes.settle()`로 나뉜 것, `team/stats.rs`에서 `pub(super)`가 된 것(`Found`, `discover`, `Planes`, `team_of`, `waive_of`, `flags_connection`, `collect_from`), `Team::json`의 `pending`이 saturating인 것, `open_waive`가 `waive_of(File)`로 나뉜 것.
 - **게이트:** `drc_team` R14, 단위 app-core `drc::changes`(4), `drc::team::live`(6).
+
+## 22. waive의 confirm (2026-11-13, app 0.12.466) — 저장·목록·집계는 공유 Rust, 역할과 창은 호스트
+
+사용자: "사용자중 팀의 모든 waive를 뷰어에서 보고 confirm하는 역할이 필요함. 현재 confirm 상태는 없는것 같은데 confirm 상태를 추가해야 함."
+
+- **`drc::confirm`**(새 모듈): 확인자의 파일 `.<db>.confirm.<리뷰어>`(SPEC-FORMATS). `Confirms`는 `desktop::Review`가 갖는다(`review.confirms`): 처음 confirm할 때 파일을 만들고, 바이트와 룰별 카운터를 제자리에 쓴다. 다른 결과의 파일은 열 때 치운다.
+- **역할은 호스트가 정한다:** `Review::set_confirmer(true)`를 부른 세션만 confirm한다(`confirm_set`, `confirm_span`이 아니면 거절). 누구인지는 묻지 않는다(ID처럼 런처의 말이다). GTK는 `floe2 view --confirmer` / `FLOE_CONFIRMER` / 요청의 `confirmer=1`을 서비스의 `drc_open {confirmer: true}`로 넘긴다. 웹은 자기 권한 모델에서 같은 호출을 하면 된다.
+- **`drc::team::waives`**(새 모듈): `TeamWaives::open(pack, id)`이 리뷰어 전원의 waive 사이드카·confirm 파일을 통계 명령처럼 찾아 연다. `counts(rule)`·`rules()`·`page(rule, kind, start, limit)`·`rows(rule, errors)`(waive한 사람, 그 사람의 사유, confirm한 사람). `confirm_chunk(review, view, rule, k, members, on)`이 한 구간의 confirm을 쓴다: confirm은 누군가 waive한 에러만, 취소는 자기가 confirm한 에러만. 스냅숏(`.floereview`)과 그 집계는 건드리지 않았다.
+- **집계:** `stats::Planes`에 `confirmed`, `Team`에 `waived_any`·`confirmed`(JSON은 `confirmed`·`unconfirmed`). `collect`는 리뷰어 줄에 `confirmed`·`waived_confirmed`, `counts`는 confirm 파일의 카운터를 `confirmed`로 낸다. `stats::discover`의 `Found`에 `confirm`.
+- **팀 합계 캐시(`live`)와 변경 기록(`changes`):** confirm 파일이 리뷰어의 세 번째 파일이 됐다. 변경 기록에 레코드 4 `CSTAMP`(confirm 파일의 시각, 바뀔 때만), `changes::Stamps = [u64; 3]`, `.team`은 버전 2(구간·룰마다 수치 7개, 리뷰어마다 시각 3개, `known`의 bit2). 버전 1 캐시는 다시 센다. confirm은 `Review::touched`로 기록되므로 클릭 하나에 구간 하나만 다시 센다.
+- **서비스(floe2 `drc_team.rs`):** `drc_team_waives {check, show, start, limit, refresh?}`(job `team-waives`), `drc_team_waive_get {check, error}`(job `team-row`: 에러 하나의 행. 리뷰어의 파일을 찾는 폴더 목록 읽기가 화면 스레드를 세우지 않도록 작업이다), `drc_team_confirm {check, errors?, on}`(job `confirm`, 쓰기 작업). 65,536개 이상 바꾼 confirm 뒤에는 `team_soon()`이 합계를 고쳐 둔다. `drc_open`의 답에 `confirmer`·`confirm_path`.
+- **정한 규칙(공유 계층의 것):** confirm은 에러 단위다. 누군가 waive하고 있는 동안에만 세고, waive가 되돌려져도 지우지 않는다. confirm된 waive의 되돌림을 막지 않는다(막으려면 상태를 쓰는 모든 경로가 확인자들의 파일을 읽어야 한다). conflict인 waive도 대상이다.
+- **게이트:** `drc_team` R15·R7, 단위 app-core `drc::confirm`(1), `drc::changes`(5), `drc::team::live`(7), `drc::team::stats`.

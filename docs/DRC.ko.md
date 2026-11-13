@@ -352,6 +352,42 @@ python -m floe render chip.oas --drc results.db \
     실리지 않는다. `review from previous run…`은 waive는 옮기지만 사유는 옮기지 않는다. 에러가
     달라진 재실행 뒤에는 사유 파일도 `.stale-<시각>`으로 치워진다.
   - 게이트 `drc_team` R12·R7, `drc_analysis` A5(`reason_ui`), 단위 테스트 app-core `drc::reasons`.
+- **waive의 confirm = 확인자 자신의 `.confirm` 사이드카**(0.12.466, 사용자 2026-11-13: "사용자중 팀의
+  모든 waive를 뷰어에서 보고 confirm하는 역할이 필요함. 현재 confirm 상태는 없는것 같은데 confirm
+  상태를 추가해야 함."). 그 전에는 에러의 상태가 waive 여부 하나였고(방문과 검토 제외는 따로 있다)
+  팀원의 waive를 누가 확인했다는 기록이 없었다.
+  - **뜻**: confirm은 확인자(confirmer)가 "이 에러의 waive를 확인했다"고 남기는 표시다. 에러 단위이고
+    누가 waive했는지와 무관하다: 두 사람이 waive한 에러도 confirm은 하나다.
+  - **역할**: 런처가 정한다. `floe2 view … --confirmer`(또는 런처 환경의 `FLOE_CONFIRMER=1`)로 띄운
+    뷰어만 confirm할 수 있다. 사용자 ID처럼 뷰어는 누구인지 확인하지 않는다. 같은 DISPLAY의 창에
+    넘기는 요청에도 실린다(`confirmer=1`): 리뷰어로 열려 있던 결과를 확인자의 실행이 부르면 확인자로
+    다시 열고, 그 반대도 같다. 결과를 열면 상태 줄 끝에 ` · confirmer`가 붙는다.
+  - **창**: DRC 메뉴 `team waives…`. 팀 전원의 waive를 리뷰어들의 작업 파일에서 바로 읽는다. 동료
+    파일을 불러올 필요가 없고 `--no-file-load`에서도 열린다. 룰 목록에는 누군가 waive한 룰만
+    `이름  (to confirm N of M waived)`로 나오고, 목록은 `To confirm`·`Confirmed`·`All team waives`
+    중에서 고른다. 행은 에러 번호, waive한 사람들, 사유(그 사람이 준 것), confirm한 사람들이다.
+    더블클릭은 그 에러를 연다. `Confirm selected`·`Unconfirm selected`·`Confirm all of rule`(묻고
+    나서 한다)은 확인자의 창에서만 켜져 있고, 그 밖의 창은 읽기만 한다. `Refresh`가 파일을 다시
+    읽는다. 1,000개씩 넘긴다.
+  - **상세**: 에러 상세에 `waived by: kim (사유), lee`(나 말고 waive한 사람이 있을 때)와
+    `waive confirmed by: hong`이 붙는다. 자기 waive가 confirm됐는지는 누구나 여기서 본다.
+  - **저장**: 확인자 자신의 `.<db>.confirm.<리뷰어>`(waive 사이드카와 같은 자리). 에러당 1바이트와
+    룰별 카운터이고 처음 confirm할 때 만든다(SPEC-FORMATS). 쓰는 것은 그 확인자의 세션뿐이고 다른
+    사람의 파일은 건드리지 않는다. 요청마다 쓰고 동기화한다(`FLOE_WAIVE_SYNC`).
+  - **세는 규칙**: confirm은 누군가 그 에러를 waive하고 있는 동안에만 센다. 리뷰어가 waive를
+    되돌리면 confirm 수에서 빠지고(확인자의 파일에는 남는다), 누가 다시 waive하면 다시 센다.
+    confirm된 waive를 되돌리는 것은 막지 않는다. conflict인 waive(방문한 두 사람의 판단이 다르다)도
+    confirm 대상이고, confirm해도 conflict 수는 그대로다.
+  - **통계**: `floe2 drc DB --review-counts`와 `--review-stats`의 `team`에 `confirmed`(누군가
+    waive했고 confirm된 에러)와 `unconfirmed`(누군가 waive했고 아직 confirm되지 않은 에러)가,
+    확인자의 줄에 `confirmed`가, `--review-stats`의 리뷰어 줄에 `waived_confirmed`(내 waive 중
+    confirm된 수)가 있다(DRC-CLI.ko.md §2b·§2c).
+  - **하지 않는 것**: 반려(reject) 상태는 없다. 메인 목록과 캔버스의 waive 표시는 전처럼 내 것이고,
+    팀의 waive와 confirm 여부는 이 창과 에러 상세에서 본다. `.floereview`·`save waives as…`·
+    `review from previous run…`은 confirm을 싣지 않는다. 에러가 달라진 재실행 뒤에는 confirm
+    파일도 `.stale-<시각>`으로 치워진다.
+  - 게이트 `drc_team` R15·R7, 단위 테스트 app-core `drc::confirm`, `drc::team::live`
+    (`the_teams_waives_are_listed_and_confirmed_by_the_confirmer`).
 - **방문·검토 대상 통계**(2026-10-09 feature/jobdeck-drc; 2026-10-11 Rust 이식 —
   app-core `drc::team::flags`, floe2 gtk-service `rust/floe2/src/drc_team.rs`):
   `visited`는 개별 에러를 열어 그 도형이 실제로 화면에 그려졌다는 기록이다

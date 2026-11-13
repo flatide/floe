@@ -289,6 +289,10 @@ struct Shared {
     /// that merge's thread, and the word that it shall look once more
     merging: Mutex<Option<std::thread::JoinHandle<()>>>,
     merge_again: Arc<AtomicUsize>,
+    /// the team's waives as the list last read them (drc_team.rs
+    /// `drc_team_waives`): pages are turned against one state, and a
+    /// refresh - or this session's own confirmation - reads anew
+    waives: Mutex<Option<floe_app_core::drc::team::waives::TeamWaives>>,
 }
 
 impl Shared {
@@ -463,7 +467,7 @@ impl Session {
     fn close(mut self) {
         // a review edit in progress finishes; the rest stop
         for (kind, job) in self.jobs.drain() {
-            if !matches!(kind, "review" | "team-write" | "migrate-write") {
+            if !matches!(kind, "review" | "team-write" | "migrate-write" | "confirm") {
                 job.cancel();
             }
             if let Some(t) = job.thread {
@@ -600,6 +604,9 @@ impl Drcs {
     fn open(&mut self, request: &Value, cancelled: &AtomicUsize) -> Result<Value> {
         let path = PathBuf::from(text(request, "path")?);
         let reviewer = request.get("reviewer").and_then(Value::as_str);
+        // whether this viewer was started to confirm the team's waives
+        // (`floe2 view --confirmer`): the launcher's word, per open
+        let confirmer = request.get("confirmer").and_then(Value::as_bool).unwrap_or(false);
         let (mut opened, mut notices) = match request.get("mode").and_then(Value::as_str) {
             Some("pack") => {
                 let source = request.get("source").and_then(Value::as_str).map(Path::new);
@@ -610,6 +617,9 @@ impl Drcs {
             }
             _ => Opened::load(&path, reviewer, cancelled)?,
         };
+        if let Opened::Pack(r) = &mut opened {
+            r.set_confirmer(confirmer);
+        }
         let mut result = json!({
             "packed": matches!(opened, Opened::Pack(_)),
             "path": opened.path(),
@@ -637,6 +647,8 @@ impl Drcs {
                 result["waive_path"] = json!(r.waive_path);
                 result["note_path"] = json!(r.note_path);
                 result["reason_path"] = json!(r.reasons.path);
+                result["confirm_path"] = json!(r.confirms.path);
+                result["confirmer"] = json!(r.confirmer());
                 let n = notes(r);
                 result["notes"] = n["notes"].clone();
                 notices.extend(
@@ -680,6 +692,7 @@ impl Drcs {
                     closing: Arc::new(AtomicUsize::new(0)),
                     merging: Mutex::new(None),
                     merge_again: Arc::new(AtomicUsize::new(0)),
+                    waives: Mutex::new(None),
                 }),
                 clusters: None,
                 jobs: HashMap::new(),

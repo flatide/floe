@@ -77,6 +77,7 @@ rust/target/release/floe2                            # 인자 없음 = view
 | `--layerprops FILE` | 이 실행이 여는 레이아웃·jobdeck의 레이어 속성 파일(0.12.451). 캡처는 `floe2 render SOURCE --layerprops FILE`(0.12.452)이 같은 파일을 받는다. Calibre `.layerprops`를 레이어 메뉴의 load layer properties…처럼 적용한다: 파일에 있는 레이어의 색·fill·선 굵기·표시 여부가 소스 옆 디자인 기본값(`SRC.layerprops`) 위에 덮이고, 없는 레이어는 그대로다. 창이 그 레이아웃을 보여 주는 동안 유지된다(다시 읽기, jobdeck의 level view). 읽을 수 없는 파일이면 실행이 1로 끝난다. 떠 있는 창으로 넘어간 요청이면 그 창이 요청의 레이아웃에 적용하고, `--no-file-load`와 함께 쓸 수 있다. 링크는 대상을 읽는다(docs/SPEC-VIEWER.ko.md §7) |
 | `--stream-kb KB` | 점진 페인트 라운드 예산 고정 (0=비활성; 기본 적응형 24576) |
 | `--multi` | 단일 인스턴스 소켓 무시하고 새 창 |
+| `--confirmer` | DRC 결과를 확인자(confirmer)로 연다(0.12.466). DRC 메뉴 `team waives…`가 팀 전원의 waive를 누가·왜와 함께 보여 주고, 이 옵션으로 띄운 뷰어만 그것을 confirm한다. 기록은 확인자 자신의 `.<db>.confirm.<ID>`에 남고 `floe2 drc --review-counts`·`--review-stats`가 `confirmed`·`unconfirmed`로 센다. 옵션이 없으면 그 창은 읽기 전용이다. 런처 환경의 `FLOE_CONFIRMER=1`도 같다. 같은 DISPLAY에 창이 떠 있으면 요청과 함께 간다(DRC.ko.md §2) |
 | `--no-file-load` | 뷰어 안에서 고른 파일을 읽지 않는다(0.12.445). File 메뉴의 load layout…·load jobdeck…, DRC 메뉴의 로드 명령 여섯 개, 레이어 메뉴의 load layer properties…가 비활성이다. 명령줄의 소스·`--layerprops`·`--drc`·`--rules`는 그대로 읽고 저장·내보내기도 그대로다. 한 계정으로 여러 사람의 뷰어를 띄우는 런처용이며 환경변수 `FLOE_NO_FILE_LOAD=1`도 같다. 떠 있는 창으로 넘어간 요청이면 그 창의 로드가 꺼지고 다시 켜지지 않는다(docs/SPEC-VIEWER.ko.md §7) |
 
 터미널에는 스트리밍 라운드마다 `[perf] gen=.. round=.. new=.. bytes=..
@@ -166,6 +167,7 @@ fit·clip·open .db·rules 기능을 노출한다(구 패널 버튼들은 메뉴
 | `FLOE_CLICK_DEBUG` | 팔레트/미니맵 클릭 경로 stderr 트레이스 (`[click]` 줄) |
 | `FLOE_NO_FILE_LOAD` | `1`·`on`·`yes`·`true`면 `floe2 view --no-file-load`와 같다: 뷰어의 파일 로드 명령을 끈다(런처 환경용, 0.12.445) |
 | `FLOE_WAIVE_SYNC` | `off`면 waive 쓰기를 요청마다 디스크에 동기화하지 않고 커널에 맡긴다(0.12.445까지의 동작. 기본은 동기화, 0.12.446) |
+| `FLOE_CONFIRMER` | `1`·`on`·`yes`·`true`면 `floe2 view --confirmer`와 같다: 이 뷰어의 사용자는 팀의 waive를 confirm한다(런처 환경용, 0.12.466) |
 | `FLOE_TEAM_KEEP` | `off`면 DRC 팀 합계를 위해 아무것도 쓰지 않는다: 뷰어는 리뷰의 변경 기록(`.<db>.changes.<리뷰어>`)을 쓰지 않고 있던 것을 지우며, `floe2 drc --review-counts`는 `.<db>.team`을 쓰지 않고 답할 때마다 센다. 수치는 같다(0.12.465) |
 | `FLOE_TEAM_GRACE_S` | `floe2 drc --review-counts`의 팀 합계가, 기록 없이 바뀐 리뷰 파일의 기록을 기다리는 초(기본 10. `0`이면 기다리지 않고 바로 다시 센다. 0.12.465) |
 | `FLOE_PICK_VISIBLE` | `off`면 pick이 그 자리에서 다른 레이어에 가려 보이지 않는 도형도 후보로 삼는다(0.12.455까지의 대상. 기본은 눈에 보이는 도형만, 0.12.456). 작은 것부터 순환하는 순서는 어느 쪽이든 같다 |

@@ -97,6 +97,18 @@ def file_load_off(args, environ=None):
         "1", "on", "yes", "true")
 
 
+def confirmer_on(args, environ=None):
+    """Whether this viewer is started to confirm the team's waives (user
+    2026-11-13: "사용자중 팀의 모든 waive를 뷰어에서 보고 confirm하는 역할이
+    필요함"): `--confirmer`, or FLOE_CONFIRMER set to `1`, `on`, `yes` or
+    `true` in the launcher's environment. A role the launcher gives, as it
+    gives the user ID - the viewer does not ask who the user is."""
+    environ = os.environ if environ is None else environ
+    word = (environ.get("FLOE_CONFIRMER") or "").strip().lower()
+    return bool(getattr(args, "confirmer", False)) or word in (
+        "1", "on", "yes", "true")
+
+
 def _is_deck(src):
     return bool(src) and str(src).lower().endswith(".jb")
 
@@ -268,6 +280,7 @@ def cmd_view(args):
     # switch: every waive, visit, exclusion and note is on the disk when it
     # is made. --multi still opens a window of its own.
     no_load = file_load_off(args)
+    confirmer = confirmer_on(args)
     # the reviewer this launch states (main() put --userid in the
     # environment): sent along - a window serves the request under it
     stated = (os.environ.get("FLOE_REVIEWER") or "").strip()
@@ -334,6 +347,9 @@ def cmd_view(args):
             request += "\tuserid=" + stated
         if no_load:
             request += "\tnoload=1"
+        # the results are opened as a confirmer's (--confirmer)
+        if confirmer:
+            request += "\tconfirmer=1"
         # the layout's layer properties file: the window applies it to the
         # layout the request opens, or to the one it shows when that is it
         if props:
@@ -414,6 +430,7 @@ def cmd_view(args):
                occupancy=(None if getattr(args, "occupancy", None) is None
                           else args.occupancy == "on"),
                file_load=not no_load,
+               confirmer=confirmer,
                layerprops=props if c is not None else None,
                drc_pick=(drc_rule, drc_err) if drc_rule else None)
 
@@ -424,7 +441,7 @@ def parser():
         description="native desktop viewer (GTK3); one instance per (uid, "
                     "DISPLAY) - later calls hand their request (the layout, "
                     "--layerprops, --drc, --rules, --drc-rule, --drc-err, "
-                    "--userid, --no-file-load "
+                    "--userid, --no-file-load, --confirmer "
                     "and the view options) to it and the window switches; "
                     "--multi opens a window of its own",
         epilog="--workdir DIR (every floe2 command, anywhere on the line; "
@@ -606,6 +623,18 @@ def parser():
                         "Forwarded to a running instance, whose file loads "
                         "go off with it and stay off. Saving and exporting "
                         "are not affected")
+    # the one who confirms the team's waives (user 2026-11-13)
+    p.add_argument("--confirmer", action="store_true",
+                   help="open the DRC results as a confirmer's: DRC > team "
+                        "waives… lists every reviewer's waives - who waived "
+                        "each error and why - and this viewer may confirm "
+                        "them (kept in the confirmer's own file, "
+                        ".DB.confirm.ID; floe2 drc --review-counts / "
+                        "--review-stats say the confirmed and the "
+                        "unconfirmed). Without it the list is read-only. "
+                        "FLOE_CONFIRMER=1 (on / yes / true) in the "
+                        "launcher's environment does the same. Forwarded "
+                        "to a running instance with the results it opens")
     return p
 
 

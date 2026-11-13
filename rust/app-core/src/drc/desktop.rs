@@ -32,6 +32,7 @@
 //! re-run with the same errors keep their review (0.12.441).
 use super::{
     changes::{ChangeLog, CHUNK as CHANGE_CHUNK},
+    confirm::{self, Confirms},
     local::{aside_path, pack_reader, required_reviewer, waive_paths, ReviewerSource},
     reasons::{self, Kind, Reasons, Run},
     review::Layout,
@@ -83,6 +84,12 @@ pub struct Review {
     note_tag: String,
     /// why errors were waived or set aside, an action at a time (`reasons`)
     pub reasons: Reasons,
+    /// the waives this reviewer has confirmed (`confirm`; 0.12.466): a file
+    /// of their own, made at the first confirmation
+    pub confirms: Confirms,
+    /// whether this session may confirm: the launcher's word (`floe2 view
+    /// --confirmer`), false until the host says so
+    confirmer: bool,
     /// which chunks of which rule this review changed, said as each change
     /// is settled (`changes`; 0.12.465): what the team's kept counts are
     /// brought up to date from. Shared with the flags store, whose changes
@@ -341,6 +348,20 @@ impl Review {
             sync,
         );
         notices.append(&mut reasons.notices);
+        // the confirmations: beside the sidecar in use (a file of another
+        // result is moved aside, as the sidecar's was); the pack shown
+        // read-only has none to write
+        let mut confirms = if waive_path == pack.path {
+            Confirms::none(pack.checks.len())
+        } else {
+            Confirms::open(
+                confirm::path_beside(&waive_path),
+                confirm::header_of(&header),
+                pack.checks.iter().map(|c| (c.start, c.count)).collect(),
+                sync,
+            )
+        };
+        notices.append(&mut confirms.notices);
         // the change log: beside the sidecar in use; the pack shown
         // read-only has no file of its own and says nothing
         let changes = if waive_path == pack.path {
@@ -369,6 +390,8 @@ impl Review {
             note_temp,
             note_tag,
             reasons,
+            confirms,
+            confirmer: false,
             changes: Arc::new(Mutex::new(changes)),
             notices,
             reviewer: tag,
@@ -491,7 +514,7 @@ impl Review {
             ));
         }
         self.notices.append(&mut self.reasons.notices);
-        let flushed = self.flush_statuses();
+        let flushed = self.flush_statuses().and(self.confirms.flush());
         // what this review changed - its statuses and, through the flags
         // store that shares the log, its flags - is said now that the bits
         // are on the disk (`changes`): a line of its own file, so the
@@ -545,7 +568,59 @@ impl Review {
     pub fn set_waive_sync(&mut self, on: bool) {
         self.sync = on;
         self.reasons.set_sync(on);
+        self.confirms.set_sync(on);
         self.changes.lock().unwrap_or_else(|p| p.into_inner()).set_sync(on);
+    }
+
+    // ---- confirmations (0.12.466) ---------------------------------------
+
+    /// Whether this session may confirm waives: what the launcher said
+    /// (`floe2 view --confirmer`, FLOE_CONFIRMER) - a role, not a check of
+    /// who the reviewer is (the ids are the launcher's too).
+    pub fn set_confirmer(&mut self, on: bool) {
+        self.confirmer = on;
+    }
+
+    pub fn confirmer(&self) -> bool {
+        self.confirmer
+    }
+
+    fn may_confirm(&self) -> Result<()> {
+        if self.confirmer {
+            Ok(())
+        } else {
+            Err(Error::new(
+                ErrorKind::Unsupported,
+                "confirming waives is the confirmer's: start the viewer with --confirmer",
+            ))
+        }
+    }
+
+    /// Confirm (`on`) the waives of rule `check`'s `errors`, or take this
+    /// reviewer's confirmation of them back: written in place and flushed;
+    /// the changed count. Whether somebody has the errors waived is the
+    /// caller's to ask (drc::team::waives): a confirmation counts while
+    /// somebody does.
+    pub fn confirm_set(&mut self, check: usize, errors: &[u64], on: bool) -> Result<u64> {
+        self.may_confirm()?;
+        let changed = self.confirms.set(check, errors, on)?;
+        for &error in &changed {
+            self.touched(check, error, error);
+        }
+        self.sync_waives()?;
+        Ok(changed.len() as u64)
+    }
+
+    /// One span of a job that confirms: rule `check`'s confirmation bytes
+    /// `start..` from `before` (as read) to `after`; the changed count. The
+    /// job ends with `sync_waives`.
+    pub fn confirm_span(&mut self, check: usize, start: u64, before: &[u8], after: &[u8]) -> Result<u64> {
+        self.may_confirm()?;
+        let changed = self.confirms.write_span(check, start, before, after)?;
+        if changed > 0 {
+            self.touched(check, start, start + after.len() as u64 - 1);
+        }
+        Ok(changed)
     }
 
     // ---- reasons (0.12.463) --------------------------------------------

@@ -26,6 +26,18 @@
 //!   drc_plan_counts {check?} / _summary / _page {check, kind, start, limit} /
 //!       _get {check, errors} / _contains {check, kind, errors} / _drop
 //!       {handle, plan}
+//!   drc_team_waives {handle, check, show, start, limit, refresh?}
+//!                                                job "team-waives": a page of
+//!       the team's waives (show `waived` | `unconfirmed` | `confirmed`) -
+//!       who waived each error, why, who confirmed it - with the rule's and
+//!       the result's counts (app-core drc::team::waives; 0.12.466)
+//!   drc_team_waive_get {handle, check, error}    job "team-row": one error's
+//!       row, as the reviewers' files say now (a job: finding the files
+//!       lists folders, and an error's detail must not wait for that)
+//!   drc_team_confirm {handle, check, errors?, on} job "confirm": this
+//!       reviewer confirms the team's waives of a rule (`errors`: these;
+//!       none: every one), or takes their confirmation back - a session
+//!       opened as a confirmer's (`drc_open {confirmer: true}`)
 use super::{job_error, number, numbers, text, waived_of, Session, Shared};
 use floe_app_core::drc::analysis::scope::Selection;
 use floe_app_core::drc::desktop::StatusReader;
@@ -35,7 +47,8 @@ use floe_app_core::drc::team::{
     flags::FlagStore,
     migrate::{self, Plan},
     snapshot::{self, Snapshot},
-    Identity, Own,
+    waives::{self, TeamWaives},
+    Identity, Own, CHUNK,
 };
 use floe_app_core::{Error, ErrorKind, Result};
 use serde_json::{json, Value};
@@ -199,6 +212,14 @@ fn visit(shared: &Arc<Shared>, check: usize, error: u64) -> Result<()> {
 
 fn errors_of(request: &Value) -> Result<Vec<u64>> {
     numbers(request, "errors")
+}
+
+/// The errors of rule `check`.
+fn rule_size(c: &TeamCtx, check: usize) -> Result<u64> {
+    c.id.sizes
+        .get(check)
+        .copied()
+        .ok_or_else(|| Error::input("DRC check index out of range"))
 }
 
 /// The statistics CSV of one's own review (whole database and per rule).
@@ -604,6 +625,153 @@ impl Session {
                 let id = number(request, "plan")?;
                 shared.plans.lock().unwrap().remove(&id);
                 Ok(Value::Null)
+            }
+            "drc_team_waives" => {
+                let c = ctx(&shared)?;
+                let check = number(request, "check")? as usize;
+                rule_size(c, check)?;
+                // (`show`, not `kind`: a job's kind is the events' word)
+                let kind = waives::Kind::parse(text(request, "show")?)?;
+                let (start, limit) = (number(request, "start")?, number(request, "limit")?.min(1 << 16));
+                let refresh = request.get("refresh").and_then(Value::as_bool).unwrap_or(false);
+                Ok(json!({"job": self.start("team-waives", move |shared, id, stop| {
+                    let c = shared.team.as_ref().unwrap();
+                    let result = (|| -> Result<Value> {
+                        let mut slot = shared.waives.lock().unwrap();
+                        if refresh || slot.is_none() {
+                            *slot = Some(TeamWaives::open(&c.id.pack, &c.id)?);
+                        }
+                        let view = slot.as_mut().expect("opened");
+                        let (count, ids) = view.page(check, kind, start, limit, &stop)?;
+                        let rows = view.rows(check, &ids)?;
+                        let (rule, all) = (view.counts(Some(check), &stop)?, view.counts(None, &stop)?);
+                        let rules: Vec<Value> = view
+                            .rules(&stop)?
+                            .into_iter()
+                            .map(|(ci, k)| json!({"check": ci, "waived": k.waived, "confirmed": k.confirmed, "unconfirmed": k.unconfirmed}))
+                            .collect();
+                        let skipped: Vec<Value> = view
+                            .skipped
+                            .iter()
+                            .map(|(who, file, why)| json!({"reviewer": who, "file": file, "reason": why}))
+                            .collect();
+                        Ok(json!({
+                            "check": check, "start": start, "count": count, "rows": rows,
+                            "rule": rule, "all": all, "rules": rules,
+                            "reviewers": view.reviewers(), "confirmers": view.confirmers(),
+                            "skipped": skipped,
+                        }))
+                    })();
+                    match result {
+                        Ok(v) => shared.event(id, "team-waives", "done", v),
+                        Err(e) => job_error(&shared, id, "team-waives", e),
+                    }
+                })}))
+            }
+            "drc_team_waive_get" => {
+                let c = ctx(&shared)?;
+                let check = number(request, "check")? as usize;
+                let error = number(request, "error")?;
+                if error >= rule_size(c, check)? {
+                    return Err(Error::input("DRC error index out of range"));
+                }
+                // one error, as every reviewer's files say now - found and
+                // read by the job: listing the folders the files are in (the
+                // temp folder among them) took 8 ms of a temp folder of
+                // 19,000 names, and the viewer asks at every selection
+                Ok(json!({"job": self.start("team-row", move |shared, id, _stop| {
+                    let c = shared.team.as_ref().unwrap();
+                    let result = (|| -> Result<Value> {
+                        let mut view = TeamWaives::open(&c.id.pack, &c.id)?;
+                        let row = view.rows(check, &[error])?.remove(0);
+                        let confirmer = super::review(&mut shared.opened.lock().unwrap())?.confirmer();
+                        Ok(json!({
+                            "check": check, "error": error,
+                            "waived_by": row.waived_by, "confirmed_by": row.confirmed_by,
+                            "reasons": row.reasons, "confirmer": confirmer, "reviewer": c.id.reviewer,
+                        }))
+                    })();
+                    match result {
+                        Ok(v) => shared.event(id, "team-row", "done", v),
+                        Err(e) => job_error(&shared, id, "team-row", e),
+                    }
+                })}))
+            }
+            "drc_team_confirm" => {
+                let c = ctx(&shared)?;
+                let check = number(request, "check")? as usize;
+                let size = rule_size(c, check)?;
+                let on = request.get("on").and_then(Value::as_bool).unwrap_or(true);
+                // (refused before a job is made: the role, a job still running)
+                if !super::review(&mut shared.opened.lock().unwrap())?.confirmer() {
+                    return Err(Error::new(
+                        ErrorKind::Unsupported,
+                        "confirming waives is the confirmer's: start the viewer with --confirmer",
+                    ));
+                }
+                if self.running("confirm") {
+                    return Err(Error::new(ErrorKind::Busy, "a confirmation is still running"));
+                }
+                let named = match request.get("errors").filter(|v| !v.is_null()) {
+                    Some(_) => {
+                        let errors = errors_of(request)?;
+                        if errors.iter().any(|&e| e >= size) {
+                            return Err(Error::input("DRC error index out of range"));
+                        }
+                        Some(errors)
+                    }
+                    None => None,
+                };
+                Ok(json!({"job": self.start("confirm", move |shared, id, stop| {
+                    let c = shared.team.as_ref().unwrap();
+                    let (mut changed, mut skipped) = (0u64, 0u64);
+                    let result = (|| -> Result<()> {
+                        // the team's waives as their files stand now
+                        let view = TeamWaives::open(&c.id.pack, &c.id)?;
+                        let chunks: Vec<u64> = match &named {
+                            Some(errors) => {
+                                let mut ks: Vec<u64> = errors.iter().map(|e| e / CHUNK).collect();
+                                ks.sort_unstable();
+                                ks.dedup();
+                                ks
+                            }
+                            None => (0..size.div_ceil(CHUNK)).collect(),
+                        };
+                        let members = named.as_ref().map(|errors| Selection::from_indices(size, errors.clone()));
+                        let members = members.as_ref().map(|m| m as &dyn floe_app_core::drc::analysis::scope::Membership);
+                        let (mut said, mut settled) = (std::time::Instant::now(), std::time::Instant::now());
+                        for (done, &k) in chunks.iter().enumerate() {
+                            // (what a stopped job wrote stays, and is flushed below)
+                            floe_app_core::check_cancelled(&stop)?;
+                            let mut o = shared.opened.lock().unwrap();
+                            let r = super::review(&mut o)?;
+                            let (c1, s1) = waives::confirm_chunk(r, &view, check, k, members, on)?;
+                            changed += c1;
+                            skipped += s1;
+                            if settled.elapsed().as_millis() >= 1000 {
+                                r.sync_waives()?;
+                                settled = std::time::Instant::now();
+                            }
+                            drop(o);
+                            if said.elapsed().as_millis() >= 500 {
+                                said = std::time::Instant::now();
+                                shared.event(id, "confirm", "progress", json!({"done": done + 1, "total": chunks.len()}));
+                            }
+                        }
+                        Ok(())
+                    })();
+                    // whatever became of the job, what it wrote reaches the
+                    // disk and the change log, and the list reads anew
+                    let flushed = super::review(&mut shared.opened.lock().unwrap()).and_then(|r| r.sync_waives());
+                    *shared.waives.lock().unwrap() = None;
+                    if changed >= super::TEAM_SOON {
+                        shared.team_soon();
+                    }
+                    match result.and(flushed) {
+                        Ok(()) => shared.event(id, "confirm", "done", json!({"check": check, "on": on, "changed": changed, "skipped": skipped})),
+                        Err(e) => shared.event(id, "confirm", "error", json!({"message": e.message, "changed": changed, "cancelled": e.kind == ErrorKind::Cancelled})),
+                    }
+                })}))
             }
             other => Err(Error::new(ErrorKind::Unsupported, format!("unknown request: {other}"))),
         }

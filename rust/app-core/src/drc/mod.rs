@@ -6,6 +6,7 @@ mod ascii;
 pub mod build;
 pub mod capture;
 pub mod changes;
+pub mod confirm;
 mod database;
 pub mod desktop;
 mod filters;

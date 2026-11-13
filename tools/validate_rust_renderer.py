@@ -223,7 +223,7 @@ class WorkerContractTests(unittest.TestCase):
                                       return_value=0 if running else None) as forward, \
                     mock.patch.object(instance, "try_bind", return_value=owned), \
                     mock.patch("floe.gui.run_viewer") as run_viewer:
-                for name in ("FLOE_NO_FILE_LOAD", "FLOE_REVIEWER"):
+                for name in ("FLOE_NO_FILE_LOAD", "FLOE_REVIEWER", "FLOE_CONFIRMER"):
                     os.environ.pop(name, None)
                 os.environ.update(environ)
                 if running:
@@ -246,6 +246,23 @@ class WorkerContractTests(unittest.TestCase):
                 self.assertIs(launch(words, environ, running=False)["file_load"], False)
         self.assertNotIn("noload", launch([], {}, running=True))
         self.assertIs(launch([], {}, running=False)["file_load"], True)
+        # the confirmer's launch (0.12.466, user 2026-11-13: "팀의 모든 waive를
+        # 뷰어에서 보고 confirm하는 역할이 필요함"): --confirmer, or the
+        # launcher's FLOE_CONFIRMER, is part of the request a running window
+        # takes - `confirmer=1` - and of what the first launch's viewer is
+        # made with
+        for word, on in (("1", True), ("on", True), ("yes", True), (" TRUE ", True),
+                         ("", False), ("0", False), ("off", False), ("no", False)):
+            self.assertEqual(cli.confirmer_on(SimpleNamespace(), {"FLOE_CONFIRMER": word}), on, repr(word))
+        self.assertTrue(cli.confirmer_on(SimpleNamespace(confirmer=True), {"FLOE_CONFIRMER": "off"}))
+        for words, environ in ((["--confirmer"], {}), ([], {"FLOE_CONFIRMER": "yes"})):
+            with self.subTest(words=words, environ=environ):
+                self.assertIn("\tconfirmer=1", launch(words, environ, running=True))
+                self.assertIs(launch(words, environ, running=False)["confirmer"], True)
+        self.assertNotIn("confirmer", launch([], {}, running=True))
+        self.assertIs(launch([], {}, running=False)["confirmer"], False)
+        self.assertIn("--confirmer", cli.parser().format_help())
+        self.assertIn("FLOE_CONFIRMER", cli.parser().format_help())
         # --multi: a window of its own, as ever
         with mock.patch.dict(os.environ, {"FLOE_RENDERER": "rust"}), \
                 mock.patch.object(cli.os.path, "isfile", return_value=True), \

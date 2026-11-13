@@ -158,6 +158,178 @@ class Why(object):
         return self.text
 
 
+def _team_waives(v, d, check, pump):
+    """DRC > team waives… (0.12.466, user 2026-11-13: "사용자중 팀의 모든
+    waive를 뷰어에서 보고 confirm하는 역할이 필요함"): every reviewer's waives
+    listed with who and why; a viewer started as a confirmer confirms them,
+    another reads the list."""
+    import json
+    from floe import gui, viewcli
+    db = v._drc
+    path = str(d / "sample.db")
+    n0 = len(db.checks[0].errors)
+
+    def waivers():
+        """Rule 0's waives by hand: {error: [reviewers]} from the sidecars."""
+        out = {}
+        for side in sorted(d.glob(".sample.db.waive.*")):
+            name = side.name[len(".sample.db.waive."):]
+            if ".stale-" in name or ".tmp-" in name:
+                continue
+            raw = side.read_bytes()
+            for e in range(n0):
+                if raw[40 + e] == 1:
+                    out.setdefault(e, []).append(name)
+        return out
+
+    def rows(w):
+        return [tuple(r)[1:] for r in w.store]
+
+    def loaded(w, what):
+        pump(v, lambda: w.job is None, what, 60)
+
+    def pick(w, errors):
+        sel = w.tree.get_selection()
+        sel.unselect_all()
+        for i, r in enumerate(w.store):
+            if r[1] in errors:
+                sel.select_path(gui.Gtk.TreePath.new_from_indices([i]))
+
+    def cli():
+        r = _run([FLOE2, "drc", path, "--review-counts", "--all-rules"])
+        return json.loads(r.stdout)["team"] if r.returncode == 0 else {}
+
+    menu = [m for m in v._menubar.get_children() if m.get_label() == "DRC"]
+    labels = [i.get_label() or "" for i in menu[0].get_submenu().get_children()] if menu else []
+    check("team waives…" in labels and labels.index("team waives…") == labels.index("reviewers…") + 1,
+          "DRC > team waives… beside reviewers…", labels)
+    # ---- a reviewer reads the list and cannot confirm
+    want = waivers()
+    check(len(want) >= 2 and any("peer" in who for who in want.values())
+          and any("gui" in who for who in want.values()),
+          "(the fixture: waives by the viewer's reviewer and by a peer)", want)
+    w = v._drc_waives_dialog()
+    loaded(w, "the team's waives")
+    got = rows(w)
+    check(w.window.get_title() == "DRC team waives - gui"
+          and [r[0] for r in got] == sorted(want)
+          and [r[2].split(", ") for r in got] == [want[e] for e in sorted(want)]
+          and all(r[4] == "" for r in got) and w._ci() == 0
+          and w.mode.get_active_id() == "unconfirmed",
+          "the list: every error somebody waived, with who waived it", (got, want))
+    check(w.page_label.get_text().startswith("%d errors · page 1 / 1" % len(want))
+          and "%s: waived %d · confirmed 0 · to confirm %d" % (db.checks[0].name, len(want), len(want))
+          in w.status.get_text() and "Whole result: waived" in w.status.get_text(),
+          "... its counts in the window's status", (w.page_label.get_text(), w.status.get_text()))
+    # why, where its reviewer said (the viewer's own waive of error 0 asked why)
+    said = {r[0]: r[3] for r in got}
+    mine = db.reason_get(0, 0)[0]
+    check(bool(mine) and said.get(0) == mine, "... and why, as its reviewer said", (said, mine))
+    check(all(not b.get_sensitive() and b.get_tooltip_text() == w.NOT_CONFIRMER
+              for b in w.confirm_buttons), "a reviewer's window does not confirm: the buttons are off")
+    pick(w, {sorted(want)[0]})
+    w._confirm(True)
+    check(w.job is None and w.status.get_text() == w.NOT_CONFIRMER
+          and not (d / ".sample.db.confirm.gui").exists(),
+          "... and its confirm is refused, nothing written", w.status.get_text())
+    theirs = [e for e in sorted(want) if "peer" in want[e]][0]
+    # (the team's lines come with the service's answer: the detail does not
+    # wait for the reviewers' files to be read)
+    v._drc_show_detail(0, theirs)
+    check("waived by" not in _detail(v), "an error's detail is shown at once, the team's lines after it")
+    pump(v, lambda: "waived by: peer" in _detail(v), "the team's lines", 30)
+    check("waived by: peer" in _detail(v) and "confirmed by" not in _detail(v)
+          and v._drc_team_pending is None and v._drc_team_timer is None,
+          "an error's detail says who else waived it", _detail(v))
+    shown = _detail(v)
+    v._drc_show_detail(0, theirs)
+    check(_detail(v) == shown, "... and shown again it has them at once")
+    pump(v, lambda: v._drc_team_pending is None, "the answer", 30)
+    check(_detail(v) == shown, "... the same after the next answer")
+    # ---- the launcher's word: --confirmer, FLOE_CONFIRMER, the request's field
+    args = viewcli.parser().parse_args(["x.oas", "--confirmer"])
+    plain = viewcli.parser().parse_args(["x.oas"])
+    check(viewcli.confirmer_on(args, {}) and not viewcli.confirmer_on(plain, {})
+          and viewcli.confirmer_on(plain, {"FLOE_CONFIRMER": "on"})
+          and not viewcli.confirmer_on(plain, {"FLOE_CONFIRMER": "0"})
+          and "confirmer" in v.REQUEST_KEYS,
+          "floe2 view --confirmer / FLOE_CONFIRMER, handed to a running window")
+    # the same results asked for by a launch that confirms: opened again as
+    # a confirmer's, the list's window with them
+    v._confirmer = True
+    v._drc_request(path)
+    pump(v, lambda: v._drc is not db and getattr(v._drc, "confirmer", False), "the confirmer's open", 60)
+    db = v._drc
+    check(w.closed and v._drc_waives_win is None and " · confirmer" in v.status.get_text(),
+          "results open as a reviewer's are opened again for a confirmer",
+          v.status.get_text())
+    v._drc_request(path)
+    check(v._drc is db, "... and stay as they are for the same role")
+    w = v._drc_waives_dialog()
+    loaded(w, "the confirmer's list")
+    check(w.window.get_title() == "DRC team waives - gui (confirmer)"
+          and all(b.get_sensitive() for b in w.confirm_buttons)
+          and [r[0] for r in rows(w)] == sorted(want),
+          "the confirmer's window: the same list, the buttons on")
+    # ---- confirm the selected rows: gone from To confirm, under Confirmed
+    pick(w, {theirs})
+    w._confirm(True)
+    loaded(w, "a confirmation")
+    left = [e for e in sorted(want) if e != theirs]
+    check([r[0] for r in rows(w)] == left and w.status.get_text().startswith("Confirmed 1 waive(s).")
+          and (d / ".sample.db.confirm.gui").exists(),
+          "Confirm selected: the row leaves the list, the confirmer's file is made",
+          (rows(w), w.status.get_text()))
+    team = cli()
+    check(team.get("confirmed") == 1 and team.get("unconfirmed") is not None
+          and team["rules"][0]["confirmed"] == 1 and team["rules"][0]["unconfirmed"] == len(left),
+          "... and floe2 drc --review-counts says it", team.get("rules", [None])[0])
+    v._drc_show_detail(0, theirs)
+    pump(v, lambda: "waive confirmed by: gui" in _detail(v), "the confirmation in the detail", 30)
+    check("waive confirmed by: gui" in _detail(v) and "waived by: peer" in _detail(v),
+          "... and the error's detail", _detail(v))
+    w.mode.set_active_id("confirmed")
+    loaded(w, "the confirmed list")
+    check([(r[0], r[4]) for r in rows(w)] == [(theirs, "gui")], "the Confirmed list says by whom", rows(w))
+    # a double click opens the error in the viewer
+    w._jump(None, gui.Gtk.TreePath.new_from_indices([0]), None)
+    pump(v, lambda: v._drc_pos == v._drc_cum[0] + theirs, "the jump", 30)
+    check(v._drc_pos == v._drc_cum[0] + theirs, "a double click opens the error")
+    # ---- every waive of the rule, asked first; then one taken back
+    w.mode.set_active_id("unconfirmed")
+    loaded(w, "the list again")
+    asked = []
+    w._ask = lambda text: asked.append(text) or False
+    w._confirm(True, True)
+    check(w.job is None and len(asked) == 1 and asked[0].startswith(
+        "Confirm all %d waives of %s" % (len(left), db.checks[0].name))
+        and cli().get("confirmed") == 1, "Confirm all of rule asks first; refused, nothing changes", asked)
+    w._ask = lambda text: True
+    w._confirm(True, True)
+    loaded(w, "the rule confirmed")
+    check(rows(w) == [] and w.page_label.get_text().startswith("0 errors")
+          and w.status.get_text().startswith("Confirmed %d waive(s)." % len(left))
+          and cli()["rules"][0]["unconfirmed"] == 0,
+          "Confirm all of rule: nothing left to confirm", (rows(w), w.status.get_text()))
+    w.mode.set_active_id("confirmed")
+    loaded(w, "the confirmed list")
+    check([r[0] for r in rows(w)] == sorted(want), "... all of them under Confirmed", rows(w))
+    pick(w, {theirs})
+    w._confirm(False)
+    loaded(w, "a confirmation taken back")
+    check([r[0] for r in rows(w)] == left
+          and w.status.get_text().startswith("Took back the confirmation of 1 waive(s).")
+          and cli()["rules"][0]["unconfirmed"] == 1,
+          "Unconfirm selected: back among the ones to confirm", (rows(w), w.status.get_text()))
+    # a waive its reviewer turns back is no longer in the lists
+    v._drc_set_waived(0, [left[0]], False) if want[left[0]] == ["gui"] else None
+    pump(v, lambda: v._drc_review_job is None, "an unwaive", 30)
+    w._refresh()
+    loaded(w, "the refresh")
+    w.window.destroy()
+    check(v._drc_waives_win is None, "the window closes")
+
+
 def r7(temp, check):
     print("[R7] the viewer")
     sys.path[:0] = [str(ROOT / "tools"), str(ROOT)]
@@ -445,5 +617,6 @@ def r7(temp, check):
               and db.review_flags(0, 2) & gtkservice.VISITED,
               "a moved error carries nothing", (db.get_status(0, 1), db.get_status(0, 3)))
         m.window.destroy()
+        _team_waives(v, d, check, pump)
     finally:
         v.window.destroy()

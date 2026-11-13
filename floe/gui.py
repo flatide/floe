@@ -726,6 +726,260 @@ class _DrcTeamWindow:
 
 
 
+class _DrcWaivesWindow(_DrcTeamWindow):
+    """The team's waives - every reviewer's, with who waived each error and
+    why - and their confirmation (user 2026-11-13: "사용자중 팀의 모든 waive를
+    뷰어에서 보고 confirm하는 역할이 필요함"). Anyone reads the list; a viewer
+    started as a confirmer (`floe2 view --confirmer`) confirms: its own
+    reviewer's mark, kept in that reviewer's file (app-core drc::confirm).
+    The list is the reviewers' files as the last Refresh read them."""
+
+    KINDS = (("unconfirmed", "To confirm"), ("confirmed", "Confirmed"),
+             ("waived", "All team waives"))
+    NOT_CONFIRMER = ("confirming is for a viewer started as a confirmer "
+                     "(floe2 view --confirmer)")
+
+    def __init__(self, viewer):
+        self.viewer, self.db = viewer, viewer._drc
+        self.sources, self.aggregate = [], None
+        self.import_conflicts, self.import_source = None, None
+        self.job, self.closed, self.page = None, False, 0
+        self._guard, self._fresh, self._notice = False, True, ""
+        self._rules = {}            # rule -> its counts, where somebody waived
+        self.controls = []
+        confirmer = bool(getattr(self.db, "confirmer", False))
+        self.window = Gtk.Window(title="DRC team waives - %s%s" % (
+            getattr(self.db, "_reviewer", "?"), " (confirmer)" if confirmer else ""))
+        self.window.set_transient_for(viewer.window)
+        self.window.set_default_size(900, 560)
+        viewer._only_close_button(self.window)
+        viewer._center_on_parent(self.window)
+        self.window.connect("destroy", self._destroy)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_border_width(8)
+        self.window.add(box)
+
+        def row():
+            widget = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
+            box.pack_start(widget, False, False, 0)
+            return widget
+
+        def button(parent, label, callback):
+            widget = Gtk.Button(label=label)
+            widget.connect("clicked", lambda *_: callback())
+            parent.pack_start(widget, False, False, 0)
+            self.controls.append(widget)
+            return widget
+
+        top = row()
+        self.rule = Gtk.ComboBoxText()
+        self.rule.set_hexpand(True)
+        top.pack_start(self.rule, True, True, 0)
+        self.controls.append(self.rule)
+        self.rule.connect("changed", lambda *_: self._changed())
+        self.mode = Gtk.ComboBoxText()
+        for key, title in self.KINDS:
+            self.mode.append(key, title)
+        self.mode.set_active(0)
+        self.mode.connect("changed", lambda *_: self._changed())
+        top.pack_start(self.mode, False, False, 0)
+        self.controls.append(self.mode)
+        button(top, "Refresh", self._refresh)
+        self.store = Gtk.ListStore(int, int, str, str, str, str)
+        self.tree = Gtk.TreeView(model=self.store)
+        for j, title in ((2, "Error"), (3, "Waived by"), (4, "Reason"),
+                         (5, "Confirmed by")):
+            column = Gtk.TreeViewColumn(title, Gtk.CellRendererText(), text=j)
+            column.set_expand(j == 4)
+            column.set_resizable(True)
+            self.tree.append_column(column)
+        self.tree.get_selection().set_mode(Gtk.SelectionMode.MULTIPLE)
+        self.tree.connect("row-activated", self._jump)
+        scroll = Gtk.ScrolledWindow()
+        scroll.add(self.tree)
+        box.pack_start(scroll, True, True, 0)
+        pages = row()
+        self.prev = button(pages, "Previous", lambda: self._turn(-1))
+        self.page_label = Gtk.Label(label="0 errors")
+        pages.pack_start(self.page_label, True, True, 0)
+        self.next = button(pages, "Next", lambda: self._turn(1))
+        actions = row()
+        self.confirm_buttons = [
+            button(actions, "Confirm selected", lambda: self._confirm(True)),
+            button(actions, "Unconfirm selected", lambda: self._confirm(False)),
+            button(actions, "Confirm all of rule", lambda: self._confirm(True, True))]
+        if not confirmer:
+            # (not among the controls a finished job makes sensitive again)
+            for widget in self.confirm_buttons:
+                self.controls.remove(widget)
+                widget.set_sensitive(False)
+                widget.set_tooltip_text(self.NOT_CONFIRMER)
+        self.status = Gtk.Label(label="Reading the team's waives…")
+        self.status.set_xalign(0)
+        self.status.set_line_wrap(True)
+        self.status.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        self.status.set_max_width_chars(100)
+        box.pack_start(self.status, False, False, 0)
+        self.window.show_all()
+        self._page_load()
+
+    def _destroy(self, *_):
+        if getattr(self.viewer, "_drc_waives_win", None) is self:
+            self.viewer._drc_waives_win = None
+        super()._destroy()
+
+    def _refresh(self):
+        """Read the reviewers' files anew."""
+        self._fresh = True
+        self._page_load()
+
+    def _page_load(self):
+        ci = self._ci()
+        if ci is None:
+            # before the first answer: the rule the viewer has open
+            ci = self.viewer._drc_open if self.viewer._drc_open is not None else 0
+        if not self.db.checks:
+            self.status.set_text("No rules in this database.")
+            return
+        kind, page, fresh = self.mode.get_active_id(), self.page, self._fresh
+
+        def work(cancelled, progress):
+            from .gtkservice import team_waives
+            reply = team_waives(self.db, ci, kind, page * DRC_PAGE, DRC_PAGE,
+                                refresh=fresh, cancelled=cancelled, progress=progress)
+            last = max(0, (reply["count"] - 1) // DRC_PAGE)
+            if page > last:
+                # the list is shorter than it was: its last page
+                reply = team_waives(self.db, ci, kind, last * DRC_PAGE, DRC_PAGE,
+                                    cancelled=cancelled, progress=progress)
+            reply["page"] = min(page, last)
+            return reply
+
+        def complete(reply):
+            self._fresh = False
+            self._show(ci, kind, reply)
+        self._start("Read the team's waives", work, complete)
+
+    @staticmethod
+    def _counts_text(counts):
+        return "waived %d · confirmed %d · to confirm %d" % (
+            counts["waived"], counts["confirmed"], counts["unconfirmed"])
+
+    def _show(self, ci, kind, reply):
+        # the rules somebody waived in, and the one shown among them
+        self._rules = {int(r["check"]): r for r in reply.get("rules") or []}
+        if ci not in self._rules and self._rules:
+            # nothing waived in the rule asked about: the first rule that
+            # has what the list shows, else the first with any waive
+            wanted = [c for c, r in sorted(self._rules.items()) if r.get(kind)]
+            ci = (wanted or sorted(self._rules))[0]
+            self._fill_rules(ci)
+            self.page = 0
+            self._page_load()
+            return
+        self._fill_rules(ci)
+        self.page = reply.get("page", 0)
+        self.store.clear()
+        for row in reply["rows"]:
+            reasons = row.get("reasons") or []
+            why = (reasons[0]["text"] if len(reasons) == 1 else
+                   "; ".join("%s: %s" % (w["reviewer"], w["text"]) for w in reasons))
+            self.store.append((ci, int(row["error"]), "#%d" % (row["error"] + 1),
+                               ", ".join(row.get("waived_by") or []), why,
+                               ", ".join(row.get("confirmed_by") or [])))
+        count = reply["count"]
+        self.page_label.set_text("%d errors · page %d / %d · %d per page" % (
+            count, self.page + 1, max(1, (count + DRC_PAGE - 1) // DRC_PAGE), DRC_PAGE))
+        self.prev.set_sensitive(self.page > 0)
+        self.next.set_sensitive((self.page + 1) * DRC_PAGE < count)
+        confirmers = reply.get("confirmers") or []
+        text = "%s: %s\nWhole result: %s · %d reviewer(s)%s" % (
+            self.db.checks[ci].name, self._counts_text(reply["rule"]),
+            self._counts_text(reply["all"]), len(reply.get("reviewers") or []),
+            " · confirmed by %s" % ", ".join(confirmers) if confirmers else "")
+        if reply.get("skipped"):
+            text += "\nNot read: " + "; ".join(
+                "%s (%s)" % (os.path.basename(s["file"]), s["reason"])
+                for s in reply["skipped"][:3])
+        if self._notice:
+            text = self._notice + "\n" + text
+            self._notice = ""
+        self.status.set_text(text)
+
+    def _fill_rules(self, ci):
+        """The rule list: the rules somebody waived in (to confirm / waived
+        beside each name), the shown one selected."""
+        self._guard = True
+        try:
+            self.rule.remove_all()
+            rules = dict(self._rules)
+            if ci not in rules and ci < len(self.db.checks):
+                rules[ci] = dict(waived=0, confirmed=0, unconfirmed=0)
+            for check in sorted(rules):
+                self.rule.append(str(check), "%s  (to confirm %d of %d waived)" % (
+                    self.db.checks[check].name, rules[check]["unconfirmed"],
+                    rules[check]["waived"]))
+            self.rule.set_active_id(str(ci))
+        finally:
+            self._guard = False
+
+    def _jump(self, _tree, path, _column):
+        if not self._valid() or self.job is not None:
+            return
+        row = self.store[path]
+        self.viewer._drc_jump(int(row[0]), int(row[1]), isolate=True)
+
+    def _ask(self, text):
+        dialog = Gtk.MessageDialog(transient_for=self.window, modal=True,
+                                   message_type=Gtk.MessageType.QUESTION,
+                                   buttons=Gtk.ButtonsType.OK_CANCEL, text=text)
+        answer = dialog.run() == Gtk.ResponseType.OK
+        dialog.destroy()
+        return answer
+
+    def _confirm(self, on, everything=False):
+        """Confirm the selected rows' waives (or every waive of the rule that
+        is not confirmed yet), or take this reviewer's confirmation of the
+        selected rows back."""
+        if not getattr(self.db, "confirmer", False):
+            self.status.set_text(self.NOT_CONFIRMER)
+            return
+        ci = self._ci()
+        if ci is None:
+            return
+        if everything:
+            members = None
+            waiting = (self._rules.get(ci) or {}).get("unconfirmed", 0)
+            if not waiting:
+                self.status.set_text("No waive of this rule waits for a confirmation.")
+                return
+            if not self._ask("Confirm all %d waives of %s that are not confirmed yet?"
+                             % (waiting, self.db.checks[ci].name)) or not self._valid():
+                return
+        else:
+            ci, members = self._selection()
+            if not members:
+                self.status.set_text("Select the rows to %s." % (
+                    "confirm" if on else "take the confirmation back from"))
+                return
+
+        def work(cancelled, progress):
+            from .gtkservice import confirm_waives
+            return confirm_waives(self.db, ci, members, on, progress=progress)
+
+        def complete(event):
+            changed, skipped = event.get("changed", 0), event.get("skipped", 0)
+            self._notice = ("Confirmed %d waive(s)." % changed if on else
+                            "Took back the confirmation of %d waive(s)." % changed)
+            if skipped:
+                self._notice += " %d are nobody's waive any more." % skipped
+            self._fresh = True
+            self._page_load()
+            self.viewer._drc_team_waives_changed(self.db)
+        self._start("Confirm waives" if on else "Take confirmations back",
+                    work, complete, write=True)
+
+
 class _DrcMigrationWindow(_DrcTeamWindow):
     """Compare a prior run by exact geometry before transferring own work."""
 
@@ -2367,6 +2621,19 @@ class Viewer:
     # (a viewer made without __init__ - the gates' - has the rest too)
     _load_items = ()
     _reviewer = None
+    # whether a launch said its user confirms the team's waives
+    # (floe2 view --confirmer): what the DRC opens that follow are opened as
+    _confirmer = False
+    _drc_waives_win = None
+    # the error detail's lines of the team's review (_drc_team_lines): the
+    # ask not answered yet, the last answer's lines, the poll's timer, the
+    # error the detail shows
+    _drc_team_pending = None
+    _drc_team_row = None
+    _drc_team_shown = None
+    _drc_team_timer = None
+    _drc_team_quiet = False
+    _drc_detail_of = None
     _drc_source = None
     _drc_reviewer = None
     _title_drc = ""
@@ -2384,8 +2651,13 @@ class Viewer:
                  frame_cache=True, margin=False,
                  stream_kb=None, stream_target_ms=500,
                  render_debug=False, thin="auto", density=None,
-                 occupancy=None, file_load=True, layerprops=None):
+                 occupancy=None, file_load=True, layerprops=None,
+                 confirmer=False):
         self.server_sock = server_sock
+        # `floe2 view --confirmer` (user 2026-11-13: "팀의 모든 waive를
+        # 뷰어에서 보고 confirm하는 역할"): the results are opened as a
+        # confirmer's - DRC > team waives… may confirm
+        self._confirmer = bool(confirmer)
         # False (`floe2 view --no-file-load`, user 2026-11-11: a launcher
         # that starts everyone's viewer under one account must not let a
         # user open whatever that account can read): the viewer shows what
@@ -3736,7 +4008,8 @@ class Viewer:
     # (floe/viewcli.py cmd_view): the DRC results, the rules metadata named
     # for them, whose review it is, the file loads turned off, the rule and
     # the error of it to select in the results (0.12.461)
-    REQUEST_KEYS = ("drc", "rules", "userid", "noload", "drcrule", "drcerr")
+    REQUEST_KEYS = ("drc", "rules", "userid", "noload", "drcrule", "drcerr",
+                    "confirmer")
 
     @staticmethod
     def _request_pick(opts):
@@ -3818,6 +4091,7 @@ class Viewer:
                 else:
                     kind = "now"
                     self._reviewer = opts.get("userid") or None
+                    self._confirmer = opts.get("confirmer") == "1"
                     try:
                         error = self.open_file(path, props=props)
                     except Exception as exc:
@@ -3897,6 +4171,9 @@ class Viewer:
         view = [f for f in fields
                 if f.split("=", 1)[0] not in self.REQUEST_KEYS]
         self._reviewer = opts.get("userid") or None
+        # (the role is the launch's too: a request without --confirmer opens
+        # its results as a reviewer's)
+        self._confirmer = opts.get("confirmer") == "1"
         drc, rules = opts.get("drc"), opts.get("rules")
         pick = self._request_pick(opts)
         then = (lambda: self._drc_request(drc, rules, pick)) if drc else None
@@ -3927,6 +4204,10 @@ class Viewer:
             self._reviewer == self._drc_reviewer
             or (self._reviewer is not None
                 and self._reviewer == getattr(db, "_reviewer", None)))
+        # (... and the same role: results open as a reviewer's are opened
+        # again for a launch that confirms, and the other way round)
+        same = same and (bool(getattr(self, "_confirmer", False))
+                         == bool(getattr(db, "confirmer", False)))
         if (same and self._drc_source is not None
                 and os.path.realpath(path) == os.path.realpath(self._drc_source)):
             try:
@@ -5046,11 +5327,23 @@ class Viewer:
 
     def _ctl_events(self):
         worker = self.worker
-        for kind, value in worker.events():
+        events = worker.events()
+        for i, (kind, value) in enumerate(events):
             if worker is not self.worker:
                 break           # a frame handler replaced the worker
             try:
                 if kind == "frame":
+                    # the service keeps the files of its last few frames and
+                    # removes the ones before: a frame whose file is gone
+                    # was replaced while this loop was away, and a newer
+                    # one follows in what was read - that one is shown. (It
+                    # was read all the same and failed: `error: frame event
+                    # failed`, found 2026-11-13 once an error's detail asked
+                    # the service one thing more between two view edits.) A
+                    # missing file with no frame after it is still an error.
+                    if (not os.path.exists(value.get("path") or "")
+                            and any(k == "frame" for k, _ in events[i + 1:])):
+                        continue
                     self._ctl_frame(value)
                 elif kind == "view":
                     self._ctl_view(value)
@@ -7070,6 +7363,7 @@ class Viewer:
         item(m, "save waives as…", self._drc_waive_save_dialog)
         load(m, "load waives…", self._drc_waive_load_dialog)
         item(m, "reviewers…", self._drc_team_dialog)
+        item(m, "team waives…", self._drc_waives_dialog)
         load(m, "review from previous run…", self._drc_migration_dialog)
         item(m, "mark not for review", lambda: self._drc_not_required_key(True))
         item(m, "clear not for review", lambda: self._drc_not_required_key(False))
@@ -8791,7 +9085,8 @@ class Viewer:
         and a re-pack of it would be refused meanwhile)."""
         old = self._drc
         for window in (getattr(self, "_drc_team", None),
-                       getattr(self, "_drc_migration", None)):
+                       getattr(self, "_drc_migration", None),
+                       getattr(self, "_drc_waives_win", None)):
             if window is not None:
                 window.window.destroy()
         self._drc_conflict_reset(drop_source=True)
@@ -8836,6 +9131,7 @@ class Viewer:
             w._rstore.clear()
             w._gstore.clear()
             w._detail.set_text("")
+            self._drc_detail_of = None
             self._drc_detail_at = None
             self._drc_svrf_show()
             self._drc_types_rebuild()   # empty+disable type combo
@@ -8867,8 +9163,9 @@ class Viewer:
             return
         if side is not None:
             try:
-                db = gtkservice.drc_open_pack(side, source=path,
-                                              reviewer=self._reviewer)
+                db = gtkservice.drc_open_pack(
+                    side, source=path, reviewer=self._reviewer,
+                    confirmer=getattr(self, "_confirmer", False))
             except gtkservice.ServiceError as exc:
                 # busy: the pack is being indexed, or this reviewer's
                 # review is open in another session; admission: a reviewer
@@ -9058,7 +9355,9 @@ class Viewer:
                 return False
         if db is None:
             try:
-                db = gtkservice.drc_load(path, reviewer=self._reviewer)
+                db = gtkservice.drc_load(
+                    path, reviewer=self._reviewer,
+                    confirmer=getattr(self, "_confirmer", False))
             except Exception as exc:
                 # a pack another run re-packs says who (floe_vfs::lock); a
                 # review open in another session, a reviewer ID required
@@ -9069,7 +9368,8 @@ class Viewer:
                 return False
         old = self._drc
         for window in (getattr(self, "_drc_team", None),
-                       getattr(self, "_drc_migration", None)):
+                       getattr(self, "_drc_migration", None),
+                       getattr(self, "_drc_waives_win", None)):
             if window is not None and window.db is not db:
                 window.window.destroy()
         self._drc_conflict_reset(drop_source=True)
@@ -9135,6 +9435,7 @@ class Viewer:
             # status line, and the reviewer has to know where the review
             # of the run before went
             self._drcwin._detail.set_text(moved)
+            self._drc_detail_of = None
         if old is not None and old is not db:
             # the db it replaces lets go of its pack now, not at some GC
             # (floe/indexlock.py: its reader's lock goes with it)
@@ -9623,6 +9924,7 @@ class Viewer:
                     self.rulers.remove(ruler)
             self._drc_ruler = []
             win._detail.set_text("")
+            self._drc_detail_of = None
             self._drc_detail_at = None
             self._drc_svrf_show()
             win._plabel.set_text("")
@@ -10912,6 +11214,9 @@ class Viewer:
                      % (getattr(db, "_reviewer_source", None) or "host"))
         if getattr(db, "read_only", False):
             text += " · read-only (no waive file could be made)"
+        if getattr(db, "confirmer", False):
+            # (floe2 view --confirmer: DRC > team waives… confirms)
+            text += " · confirmer"
         return text
 
     @staticmethod
@@ -11161,6 +11466,100 @@ class Viewer:
             self._drc_migration = window
         window.window.present()
         return window
+
+    def _drc_waives_dialog(self):
+        """DRC > team waives…: every reviewer's waives, and their
+        confirmation (_DrcWaivesWindow)."""
+        db = getattr(self, "_drc", None)
+        if db is None or not hasattr(db, "waive_ask"):
+            self._set_live_status("the team's waives need a packed index: floe-index drc <db>")
+            return None
+        window = getattr(self, "_drc_waives_win", None)
+        if window is not None and (window.closed or window.db is not db):
+            if not window.closed:
+                window.window.destroy()
+            window = None
+        if window is None:
+            window = _DrcWaivesWindow(self)
+            self._drc_waives_win = window
+        window.window.present()
+        return window
+
+    def _drc_team_waives_changed(self, db):
+        """This viewer confirmed waives, or took a confirmation back: the
+        detail of the error shown says who confirmed it."""
+        if self._drc is not db or self._drcwin is None:
+            return
+        if self.drc_mark is not None and self._drc_pos >= 0 and self._drc_cum:
+            mci = bisect.bisect_right(self._drc_cum, self._drc_pos) - 1
+            self._drc_show_detail(mci, self._drc_pos - self._drc_cum[mci])
+
+    def _drc_team_lines(self, db, ci, ei):
+        """The error detail's lines of the team's review - who else has the
+        error waived, who confirmed its waive - as the last answer said them
+        for this error, and the service asked anew: reading every reviewer's
+        files lists folders, and a selection must not wait for that (8 ms of
+        a temp folder of 19,000 names lost a frame of the view). The answer
+        shows the detail again when its lines are other ones
+        (_drc_team_poll)."""
+        known = self._drc_team_row
+        lines = (list(known[3]) if known is not None and known[0] is db
+                 and known[1:3] == (ci, ei) else [])
+        self._drc_team_shown = (db, ci, ei, tuple(lines))
+        if not self._drc_team_quiet:
+            try:
+                db.waive_ask(ci, ei)
+            except (OSError, gtkservice.ServiceError):
+                return lines
+            self._drc_team_pending = (db, ci, ei)
+            if self._drc_team_timer is None:
+                self._drc_team_timer = GLib.timeout_add(POLL_MS, self._drc_team_poll)
+        return lines
+
+    def _drc_team_poll(self):
+        """The answer to the detail's ask (GLib timer): its lines are kept
+        for the error, and the detail shown again when it is still that
+        error's and the lines are new."""
+        pending = self._drc_team_pending
+        if pending is None or pending[0] is not self._drc:
+            self._drc_team_pending = self._drc_team_timer = None
+            return False
+        db, ci, ei = pending
+        try:
+            answer = db.waive_answer()
+        except (OSError, gtkservice.ServiceError):
+            answer = False
+        if answer is None:
+            return True
+        self._drc_team_pending = self._drc_team_timer = None
+        lines = tuple(self._drc_team_text(answer)) if answer else ()
+        self._drc_team_row = (db, ci, ei, lines)
+        shown = self._drc_team_shown
+        if (self._drc_detail_of == (ci, ei) and shown is not None and shown[0] is db
+                and shown[1:3] == (ci, ei) and shown[3] != lines):
+            self._drc_team_quiet = True
+            try:
+                self._drc_show_detail(ci, ei)
+            finally:
+                self._drc_team_quiet = False
+        return False
+
+    @staticmethod
+    def _drc_team_text(team):
+        """An answer's lines: who else has the error waived (with why, where
+        they said), and who confirmed its waive. None for an error nobody
+        else waived and nobody confirmed."""
+        waived = team.get("waived_by") or []
+        why = {w["reviewer"]: w["text"] for w in team.get("reasons") or []}
+        others = [name for name in waived if name != team.get("reviewer")]
+        lines = []
+        if others:
+            lines.append("waived by: %s" % ", ".join(
+                "%s (%s)" % (name, why[name]) if why.get(name) else name
+                for name in others))
+        if waived and team.get("confirmed_by"):
+            lines.append("waive confirmed by: %s" % ", ".join(team["confirmed_by"]))
+        return lines
 
     def _drc_team_dialog(self):
         db = getattr(self, "_drc", None)
@@ -12044,6 +12443,7 @@ class Viewer:
             lines.append("")
             lines += text
         win._detail.set_text("\n".join(lines))
+        self._drc_detail_of = None
         self._drc_detail_at = (ci, None)
         self._drc_svrf_show()
 
@@ -12059,6 +12459,7 @@ class Viewer:
         win, db = self._drcwin, self._drc
         if win is None or db is None:
             return
+        self._drc_detail_of = (ci, ei)
         c = db.checks[ci]
         e = c.errors[ei]
         status = "-"
@@ -12086,6 +12487,9 @@ class Viewer:
                                    why):
                 if text:
                     lines.append("%s: %s" % (label, text))
+        if hasattr(db, "waive_ask"):
+            # the team's: who else waived it, who confirmed its waive
+            lines += self._drc_team_lines(db, ci, ei)
         if hasattr(db, "get_note"):
             note = db.get_note(ci, ei)
             if note:
@@ -14234,7 +14638,8 @@ class Viewer:
             return
         self._quitting = True
         for window in (getattr(self, "_drc_team", None),
-                       getattr(self, "_drc_migration", None)):
+                       getattr(self, "_drc_migration", None),
+                       getattr(self, "_drc_waives_win", None)):
             if window is not None:
                 window.window.destroy()
         self._drc_conflict_reset(drop_source=True)
@@ -14270,7 +14675,8 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
                stream_kb=None, stream_target_ms=500,
                render_debug=False, pending_open=None, pending_fields=(),
                thin="auto", density=None, occupancy=None, rules=None,
-               file_load=True, layerprops=None, drc_pick=None):
+               file_load=True, layerprops=None, drc_pick=None,
+               confirmer=False):
     """`pending_open`: a layout/jobdeck given on the command line that
     has no index yet - the viewer starts empty, asks, indexes and
     opens it (user call 2026-09-09), then applies `pending_fields`
@@ -14290,7 +14696,7 @@ def run_viewer(cache, server_sock=None, goto=None, drc=None,
                     stream_target_ms=stream_target_ms,
                     render_debug=render_debug, thin=thin, density=density,
                     occupancy=occupancy, file_load=file_load,
-                    layerprops=layerprops)
+                    layerprops=layerprops, confirmer=confirmer)
     smoke_ms = os.environ.get("FLOE_GUI_SMOKE_MS")
     smoke_error = []
     if smoke_ms is not None:

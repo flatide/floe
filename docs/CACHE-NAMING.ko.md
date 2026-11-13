@@ -18,6 +18,7 @@
 | 색인 잠금 (2026-10-09, §5) | **`.floe-lock/`** — 대상과 같은 디렉터리의 숨김 폴더, 대상마다 `<키>.build`·`<키>.use` | `.chipA.oas.ice/` → `.floe-lock/chipA.oas.vfs.build` | — |
 | DRC 리뷰 사이드카 (리뷰어별 waive·note) | `.<db>.waive.<user>`, `.<db>.notes.<user>.fe` — **db 이름** 기준 | `.results.db.waive.jkim` | 같음 (pack 이름에서 `.ice`를 벗겨 만들던 것을 db 이름 기준으로 바꿈; 결과는 동일) |
 | DRC waive·검토 제외의 사유 (리뷰어별, 2026-11-13, app 0.12.463) | `.<db>.reasons.<user>` — waive 사이드카와 같은 자리, 작업 한 번에 한 줄(DRC.ko.md §2, SPEC-FORMATS) | `.results.db.reasons.jkim` | — |
+| DRC waive의 confirm (확인자별, 2026-11-13, app 0.12.466) | `.<db>.confirm.<user>` — waive 사이드카와 같은 자리. 그 확인자가 confirm한 에러(에러당 1바이트, 룰별 카운터; DRC.ko.md §2, SPEC-FORMATS). 처음 confirm할 때 만든다 | `.results.db.confirm.jkim` | — |
 | DRC 리뷰의 변경 기록 (리뷰어별, 2026-11-13, app 0.12.465) | `.<db>.changes.<user>` — waive 사이드카와 같은 자리. 그 리뷰어의 세션이 바꾼 구간만 적는다(SPEC-FORMATS). 지워도 된다: 팀 합계가 그 리뷰어의 룰을 다시 센다. `FLOE_TEAM_KEEP=off`면 만들지 않는다 | `.results.db.changes.jkim` | — |
 | DRC 팀 합계의 캐시 (2026-11-13, app 0.12.465) | **`.<db>.team`** — pack 옆에 하나. `floe2 drc --review-counts`의 `team`이 읽고 고친다(DRC-CLI.ko.md §2c, SPEC-FORMATS). 지워도 된다: 다음 조회가 다시 센다. 고치는 동안의 잠금은 `.floe-lock/<db>.team.build` | `.results.db.team` | — |
 
@@ -226,7 +227,7 @@
   | 캐시의 revisions `.x.oas.ice.revisions/` | 캐시 옆, 즉 DIR 아래 |
   | DRC pack `.r.db.tray`와 그 소스 확인 기록 `.r.db.tray.source`, 구 이름 `r.db.ice` | `DIR/<db 폴더>/.r.db.tray` |
   | pack의 `.r.db.analysis/`(drc-prepare; `FLOE_DRC_ANALYSIS_ROOT`가 있으면 그쪽) | pack 옆, 즉 DIR 아래 |
-  | 리뷰 `.r.db.review.<user>.sqlite3`(`FLOE_DRC_REVIEW_ROOT`가 있으면 그쪽), `.r.db.waive.<user>`, `.r.db.notes.<user>.fe`, `.r.db.reasons.<user>`, `.r.db.changes.<user>`, 팀 합계 `.r.db.team` | pack 옆, 즉 DIR 아래 |
+  | 리뷰 `.r.db.review.<user>.sqlite3`(`FLOE_DRC_REVIEW_ROOT`가 있으면 그쪽), `.r.db.waive.<user>`, `.r.db.notes.<user>.fe`, `.r.db.reasons.<user>`, `.r.db.confirm.<user>`, `.r.db.changes.<user>`, 팀 합계 `.r.db.team` | pack 옆, 즉 DIR 아래 |
   | SVRF 룰 메타데이터 `deck.cal.rules.json`(`floe-index svrf deck.cal`의 기본 출력; 0.12.450) | `DIR/<덱 폴더>/deck.cal.rules.json`. 폴더는 처음 쓸 때 만든다. 읽는 쪽(뷰어의 db 로드, DRC 캡처)은 db 옆과 덱 옆을 먼저 보고 없으면 DIR의 같은 자리를 본다. `floe2 drc-prepare --svrf FILE`이 분석 폴더의 `rules.path`에 적어 둔 사이드카가 있으면 그것이 맨 먼저다(0.12.460) |
   | 잠금 `<캐시>.index.lock`(현재 이름의 것 하나, §5.1), `.floe-lock/` | 캐시·pack·rules.json 옆, 즉 DIR 아래 |
   | 출력(`--out`의 PNG·보고서·clip OASIS), 입력(`<db>.clusters`, `--drc-rules`) | 바뀌지 않는다. `.clusters`는 db 옆에서 먼저 찾고 없으면 DIR의 미러에서 찾는다 |

@@ -26,6 +26,11 @@
 //!   3 RESET  the files changed without being said here (a session of an
 //!            older build, a run that ended before it could say): whoever
 //!            reads counts this reviewer's rules again
+//!   4 CSTAMP the reviewer's confirm file as these changes left it: a = its
+//!            time (0 = no file). Said after a STAMP, and only when the time
+//!            is another than the one said last - a reviewer who confirms
+//!            nothing never says it (0.12.466; a reader of 0.12.465 passes
+//!            it over)
 //! ```
 //!
 //! The records of a change are appended when the change is settled - the end
@@ -51,6 +56,7 @@ pub const RECORD: u64 = 24;
 pub const TOUCH: u32 = 1;
 pub const STAMP: u32 = 2;
 pub const RESET: u32 = 3;
+pub const CSTAMP: u32 = 4;
 /// The errors of one chunk (the review flags' and the team counts' unit).
 pub const CHUNK: u64 = 4096;
 /// A log past this size is started again at the next open (its readers count
@@ -83,6 +89,24 @@ pub fn stamp_of(meta: &fs::Metadata) -> u64 {
 /// `stamp_of` the file at `path` (0: none).
 pub fn stamp_at(path: &Path) -> u64 {
     fs::metadata(path).map(|m| stamp_of(&m)).unwrap_or(0)
+}
+
+/// A reviewer's files' times as the log says them: the waive sidecar's,
+/// the flags file's, the confirm file's (0: no file).
+pub type Stamps = [u64; 3];
+
+/// The times the log has said once `records` follow a log that had said
+/// `base`: the last STAMP's two and the last CSTAMP's.
+pub fn stamps_after(base: Stamps, records: &[Record]) -> Stamps {
+    let mut said = base;
+    for record in records {
+        match record.kind {
+            STAMP => (said[0], said[1]) = (record.a, record.b),
+            CSTAMP => said[2] = record.a,
+            _ => (),
+        }
+    }
+    said
 }
 
 /// One record.
@@ -195,6 +219,7 @@ pub struct ChangeLog {
     /// the files a stamp says the times of
     waive: PathBuf,
     flags: Option<PathBuf>,
+    confirm: PathBuf,
     file: Option<File>,
     /// statuses written and not said yet - they are said once flushed, by
     /// `settle`: rule -> inclusive chunk ranges
@@ -203,8 +228,8 @@ pub struct ChangeLog {
     committed: BTreeMap<u32, Vec<(u64, u64)>>,
     /// a RESET to say with the next records
     reset: bool,
-    /// the last STAMP said, or found at the open
-    last: Option<(u64, u64)>,
+    /// the times said last, or found said at the open (None: no STAMP yet)
+    last: Option<Stamps>,
     /// flush what is said to the disk (FLOE_WAIVE_SYNC, as the waive writes)
     sync: bool,
     /// nothing is said (the review is read-only: no file of its own)
@@ -223,6 +248,7 @@ impl ChangeLog {
             identity,
             waive: waive.to_owned(),
             flags: None,
+            confirm: super::confirm::path_beside(waive),
             file: None,
             written: BTreeMap::new(),
             committed: BTreeMap::new(),
@@ -241,12 +267,9 @@ impl ChangeLog {
                             let _ = f.set_len(tail.len);
                         }
                     }
-                    me.last = tail
-                        .records
-                        .iter()
-                        .rev()
-                        .find(|r| r.kind == STAMP)
-                        .map(|r| (r.a, r.b));
+                    if tail.records.iter().any(|r| r.kind == STAMP) {
+                        me.last = Some(stamps_after([0; 3], &tail.records));
+                    }
                 }
                 None => {
                     let _ = fs::remove_file(&path);
@@ -284,6 +307,7 @@ impl ChangeLog {
             identity: [0; 28],
             waive: PathBuf::new(),
             flags: None,
+            confirm: PathBuf::new(),
             file: None,
             written: BTreeMap::new(),
             committed: BTreeMap::new(),
@@ -300,11 +324,12 @@ impl ChangeLog {
         self.sync = on;
     }
 
-    fn stamps(&self) -> (u64, u64) {
-        (
+    fn stamps(&self) -> Stamps {
+        [
             stamp_at(&self.waive),
             self.flags.as_deref().map_or(0, stamp_at),
-        )
+            stamp_at(&self.confirm),
+        ]
     }
 
     /// The session knows its flags file now (`flags`), before it has written
@@ -428,7 +453,10 @@ impl ChangeLog {
                 bytes.extend(Record { kind: TOUCH, rule, a, b }.bytes());
             }
         }
-        bytes.extend(Record { kind: STAMP, rule: 0, a: stamps.0, b: stamps.1 }.bytes());
+        bytes.extend(Record { kind: STAMP, rule: 0, a: stamps[0], b: stamps[1] }.bytes());
+        if stamps[2] != self.last.map_or(0, |last| last[2]) {
+            bytes.extend(Record { kind: CSTAMP, rule: 0, a: stamps[2], b: 0 }.bytes());
+        }
         match self.append(&bytes) {
             Ok(()) => self.last = Some(stamps),
             Err(e) => {
@@ -617,6 +645,51 @@ mod tests {
         // another result's log, or no log, is none
         assert!(read(&f.log(), &[8; 28], None).is_none());
         assert!(read(&f.0.join("none"), &ID, None).is_none());
+    }
+
+    #[test]
+    fn the_confirm_files_time_is_said_when_it_is_another() {
+        let f = Folder::new();
+        let confirm = f.0.join(".x.db.confirm.kim");
+        let mut log = f.open();
+        log.touched(0, 0, 0);
+        log.settle();
+        assert_eq!(f.records().len(), 2, "no confirm file: no word of one");
+        // the file comes (the reviewer's first confirmation): its time after
+        // the STAMP, once
+        fs::write(&confirm, b"confirm").unwrap();
+        log.touched(0, 1, 1);
+        log.settle();
+        let (waive, said) = (stamp_at(&f.waive()), stamp_at(&confirm));
+        assert_eq!(f.records()[2..], [(TOUCH, 0, 1, 1), (STAMP, 0, waive, 0), (CSTAMP, 0, said, 0)]);
+        log.touched(0, 2, 2);
+        log.settle();
+        assert_eq!(f.records()[5..], [(TOUCH, 0, 2, 2), (STAMP, 0, waive, 0)]);
+        let all = read(&f.log(), &ID, None).unwrap().records;
+        assert_eq!(stamps_after([0; 3], &all), [waive, 0, said]);
+        assert_eq!(stamps_after([7, 8, 9], &all[..1]), [7, 8, 9]);
+        assert_eq!(stamps_after([7, 8, 9], &all[..2]), [waive, 0, 9]);
+        drop(log);
+        // the next session finds the three as they were said: no word
+        let flags = f.0.join(".x.db.review.kim.sqlite3");
+        let mut log = f.open();
+        log.attach_flags(&flags);
+        assert_eq!(f.records().len(), 7);
+        drop(log);
+        // the confirm file changed without a word: a RESET, and its time
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        File::options().write(true).open(&confirm).unwrap().set_modified(later).unwrap();
+        let mut log = f.open();
+        log.attach_flags(&flags);
+        let now = f.records();
+        assert_eq!(now.len(), 10);
+        assert_eq!((now[7], now[9]), ((RESET, 0, 0, 0), (CSTAMP, 0, stamp_at(&confirm), 0)));
+        drop(log);
+        // ... and gone: said as no file
+        fs::remove_file(&confirm).unwrap();
+        let mut log = f.open();
+        log.attach_flags(&flags);
+        assert_eq!(f.records()[10..], [(RESET, 0, 0, 0), (STAMP, 0, waive, 0), (CSTAMP, 0, 0, 0)]);
     }
 
     #[test]

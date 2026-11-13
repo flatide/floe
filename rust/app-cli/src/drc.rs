@@ -22,7 +22,9 @@ const HELP: &str = "Usage: floe2-web drc RESULTS.db|.RESULTS.db.tray [OPTIONS]
                           counters), visited, not for review and pending,
                           whole and by rule - and the team's as the viewer's
                           reviewers window counts them (visits united,
-                          conflicts between visited reviewers); with
+                          conflicts between visited reviewers; the waives a
+                          confirmer has confirmed, and the ones that wait
+                          for it: `confirmed`, `unconfirmed`); with
                           --floe-reviewer ID[,ID...] these reviewers alone.
                           Needs the current pack: none or a stale one is an
                           error (exit 1), never an answer of zeros
@@ -33,8 +35,9 @@ const HELP: &str = "Usage: floe2-web drc RESULTS.db|.RESULTS.db.tray [OPTIONS]
                           and exclusion brings them up to date as it is
                           written -, so no error is read and the time does
                           not grow with the result. `team`: everyone's review
-                          united - visited, waived, not for review, conflicts
-                          and pending as --review-stats counts them -, kept
+                          united - visited, waived, not for review, conflicts,
+                          pending, confirmed and unconfirmed as
+                          --review-stats counts them -, kept
                           in .DB.team beside the pack and brought up to date
                           by what the reviewers changed since (`current` is
                           false while a change is not in it yet). With
