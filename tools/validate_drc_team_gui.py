@@ -406,7 +406,7 @@ def _team_waives(v, d, check, pump):
           and all(b.get_sensitive() for b in w.reject_buttons)
           and [b.get_tooltip_text() for b in w.reject_buttons] == [w.REJECTS, w.UNREJECTS]
           and "waives the error again with a reason" in w.REJECTS
-          and [key for key, _title in w.KINDS][-1] == "rejected",
+          and [key for key, _title in w.KINDS][-2:] == ["rejected", "requested"],
           "the confirmer's window: Reject selected, Unreject selected, the Rejected list")
     asked = []
 
@@ -591,6 +591,165 @@ def _team_waives(v, d, check, pump):
         w.window.destroy()
     finally:
         boss.close()
+
+
+def _roles(v, d, check, pump):
+    """The roles' workflow in the viewer (0.12.472, user 2026-11-14: "error ->
+    waive request -> waive -> confirm 의 업무 흐름이며 role은 requester, waiver,
+    confirmer로 나누어야 함"): the launcher's word, the filter's Requested,
+    what `w` does and says in a session of each role - with other sessions'
+    steps followed by the viewer itself."""
+    import json
+    from floe import gtkservice, viewcli
+    home = d / "roles"
+    home.mkdir()
+    shutil.copy(ROOT / "sample.db", home / "sample.db")
+    r = _run([INDEX, "drc", str(home / "sample.db")])
+    check(r.returncode == 0, "floe-index drc of the roles' results", r.stderr)
+    path = str(home / "sample.db")
+    args = viewcli.parser().parse_args(["x.oas", "--role", "waiver"])
+    plain = viewcli.parser().parse_args(["x.oas"])
+    bad = None
+    try:
+        viewcli.role_of(plain, {"FLOE_ROLE": "boss"})
+    except SystemExit as exc:
+        bad = str(exc)
+    check(viewcli.role_of(args, {}) == "waiver" and viewcli.role_of(plain, {}) == ""
+          and viewcli.role_of(plain, {"FLOE_ROLE": " Requester "}) == "requester"
+          and bad is not None and "requester, waiver, confirmer" in bad and "role" in v.REQUEST_KEYS,
+          "floe2 view --role / FLOE_ROLE, handed to a running window; a word that names no role is refused", bad)
+
+    def open_as(role):
+        old = v._drc
+        v._role = role
+        v._drc_request(path)
+        try:
+            pump(v, lambda: v._drc is not old and v._drc is not None
+                 and (getattr(v._drc, "role", "") or "") == role, "the %s's open" % (role or "reviewer"), 20)
+        except AssertionError:
+            check(False, "the %s's open" % (role or "reviewer"), v.status.get_text())
+            raise
+        return v._drc
+
+    def entries():
+        return [(row[1], row[0]) for row in v._drcwin._wf.get_model()]
+
+    def total():
+        r = _run([FLOE2, "drc", path, "--team-counts"])
+        return json.loads(r.stdout)["total"] if r.returncode == 0 else {}
+
+    asked = []
+
+    def why(kind, count, prefill="", known=(), parent=None, rejected_by=(), **more):
+        asked.append((kind, count, more.get("title"), tuple(more.get("requested_by") or ())))
+        return why.answer
+    v._drc_reason_dialog = why
+    five = [("all", "All"), ("notwaived", "Not Waived"), ("waived", "Waived"),
+            ("confirmed", "Confirmed"), ("rejected", "Rejected")]
+    # ---- a requester's viewer
+    db = open_as("requester")
+    name = db.checks[0].name
+    check(" · reviewer gui · requester" in v.status.get_text() and db.role == "requester" and not db.confirmer,
+          "results opened as a requester's: the load says the role", v.status.get_text())
+    check(entries() == five[:2] + [("requested", "Requested")] + five[2:]
+          and v._drcwin._wf.get_tooltip_text() == v.WF_ROLE_TIP and v._drcwin._wf.get_active_id() == "notwaived",
+          "a role's session has Requested in its filter", entries())
+    why.answer = "dummy fill"
+    v._drc_set_waived(0, [1, 2], True)
+    said = v.status.get_text()
+    got = total()
+    check(asked == [("waive", 2, "Request reason", ())]
+          and db.get_state(0, 1) == gtkservice.STATE_REQUESTED and db.get_mark(0, 1) == 1 and db.get_status(0, 1) == 0
+          and said.startswith("waive requested for 2 error(s) in %s" % name)
+          and (home / ".sample.db.request.gui").exists() and not (home / ".sample.db.waive.gui").exists()
+          and got.get("requested") == 2 and got.get("waived") == 0,
+          "a requester's w asks for the waive: the dialog says Request reason, the error is requested", (asked, said, got))
+    n0 = len(db.checks[0].errors)
+    v._drcwin._wf.set_active_id("requested")
+    listed = db.status_page(0, v._drc_wf_class(), 0, n0)
+    row = [r[1] for r in v._drcwin._rstore if r[2] == 0]
+    check(listed == [1, 2] and v._drc_wf_count(db, 0) == 2 and row == ["%d/2" % n0]
+          and v._drc_wf_shows(db, 0, 1) and not v._drc_wf_shows(db, 0, 3),
+          "the Requested filter: counted, listed, the rule's row says its requested errors", (listed, row))
+    v._drcwin._wf.set_active_id("notwaived")
+    check(db.status_page(0, v._drc_wf_class(), 0, n0) == [e for e in range(n0) if e not in (1, 2)],
+          "... Not Waived is the rest: nobody asked, nobody waived")
+    v._drcwin._wf.set_active_id("all")
+    pump(v, lambda: True, "idle")
+    kim, park = gtkservice.Service(FLOE2), gtkservice.Service(FLOE2)
+    try:
+        # a waiver in another process waives one of them: the viewer follows
+        # by itself, and the request under the waive is locked
+        hk = kim.request("drc_open", path=path, mode="load", reviewer="kim", role="waiver")["handle"]
+        reply = kim.request("drc_set_status", handle=hk, check=0, errors=[1, 5], status=1, reason="agreed")
+        check(reply.get("unrequested") == [5], "(another session's waiver: the requested one waived)", reply)
+        pump(v, lambda: db.get_state(0, 1) == gtkservice.STATE_WAIVED, "the viewer following the waiver", 30)
+        v._drc_set_waived(0, [1], False)
+        check(v.status.get_text() == "locked: 1 request(s) in %s waived by kim - not taken back while waived" % name
+              and db.get_mark(0, 1) == 1,
+              "a request under a waive is locked: left, and who waived said", v.status.get_text())
+        v._drc_set_waived(0, [2], False)
+        check(v.status.get_text() == "request taken back for 1 error(s) in %s" % name
+              and db.get_state(0, 2) == gtkservice.STATE_NONE and total().get("requested") == 1,
+              "... and one nobody has waived is taken back", v.status.get_text())
+        # ---- the same results as a waiver's: what another requester asked
+        # for is there at the open
+        hp = park.request("drc_open", path=path, mode="load", reviewer="park", role="requester")["handle"]
+        park.request("drc_set_status", handle=hp, check=0, errors=[3, 6], status=1, reason="seal ring")
+        db = open_as("waiver")
+        check(" · reviewer gui · waiver" in v.status.get_text() and entries()[2] == ("requested", "Requested")
+              and db.get_state(0, 3) == gtkservice.STATE_REQUESTED and db.get_state(0, 1) == gtkservice.STATE_WAIVED
+              and db.get_mark(0, 1) == 0,
+              "opened again as a waiver's: the requests of others, and its own marks are waives", v.status.get_text())
+        asked.clear()
+        why.answer = "ok"
+        v._drc_set_waived(0, [3], True)
+        check(asked == [("waive", 1, None, ("park",))] and db.get_state(0, 3) == gtkservice.STATE_WAIVED
+              and v.status.get_text().startswith("waived 1 error(s) in %s" % name),
+              "a waiver's w waives a requested error: the dialog is told who asked", (asked, v.status.get_text()))
+        v._drc_set_waived(0, [4], True, reason="x")
+        check(v.status.get_text() == ("not requested: 1 error(s) in %s - a waiver waives the errors somebody "
+                                      "asked the waive of" % name) and db.get_state(0, 4) == gtkservice.STATE_NONE,
+              "an error nobody asked the waive of is not waived, and said", v.status.get_text())
+        v._drc_set_waived(0, [6, 4], True, reason="x")
+        check(v.status.get_text().startswith("waived 1 error(s) in %s" % name)
+              and v.status.get_text().endswith(" · 1 not requested") and db.get_state(0, 6) == gtkservice.STATE_WAIVED,
+              "... a selection: the requested waived, the other said", v.status.get_text())
+        v._drc_set_waived(0, [6], False)
+        check(db.get_state(0, 6) == gtkservice.STATE_REQUESTED and v.status.get_text() == "unwaived 1 error(s) in %s" % name,
+              "a waive turned back is requested again", v.status.get_text())
+        v._drc_show_detail(0, 3)
+        pump(v, lambda: "waive requested by: park (seal ring)" in _detail(v), "who asked in the detail", 30)
+        check("waive requested by: park (seal ring)" in _detail(v).splitlines(),
+              "the error's detail says who asked for the waive, and why", _detail(v).splitlines()[:6])
+        got = total()
+        check((got.get("requested"), got.get("waived")) == (3, 2),
+              "floe2 drc --team-counts follows", got)
+        # DRC > team waives…: the Requested list
+        w = v._drc_waives_dialog()
+        pump(v, lambda: w.job is None, "the team's list", 60)
+        w.mode.set_active_id("requested")
+        pump(v, lambda: w.job is None, "the requested list", 60)
+        rows = [tuple(row)[1:] for row in w.store]
+        check(w.KINDS[-1] == ("requested", "Requested") and [(row[0], row[2], row[3]) for row in rows]
+              == [(6, "", "requested by park: seal ring")] and "requested 1" in w.status.get_text(),
+              "the team's Requested list: what waits for a waiver, who asked and why", (rows, w.status.get_text()))
+        w.window.destroy()
+        # ---- a confirmer's viewer waives nothing
+        db = open_as("confirmer")
+        check(" · reviewer gui · confirmer" in v.status.get_text(), "opened as a confirmer's", v.status.get_text())
+        v._drc_set_waived(0, [3], False)
+        check(v.status.get_text().startswith("waive failed: a confirmer's session does not waive")
+              and db.confirmer and db.role == "confirmer" and db.get_state(0, 3) == gtkservice.STATE_WAIVED,
+              "a confirmer's w is refused, and said: a confirmer waives nothing", v.status.get_text())
+    finally:
+        kim.close()
+        park.close()
+    # ---- a launch without a role: a reviewer's viewer, its filter's five
+    db = open_as("")
+    check(entries() == five and db.role == "" and " · requester" not in v.status.get_text()
+          and v._drcwin._wf.get_tooltip_text() == v.WF_TIP,
+          "results opened without a role are a reviewer's again: no Requested in the filter", entries())
 
 
 def r7(temp, check):
@@ -881,5 +1040,6 @@ def r7(temp, check):
               "a moved error carries nothing", (db.get_status(0, 1), db.get_status(0, 3)))
         m.window.destroy()
         _team_waives(v, d, check, pump)
+        _roles(v, d, check, pump)
     finally:
         v.window.destroy()

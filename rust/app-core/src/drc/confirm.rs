@@ -50,6 +50,15 @@
 //! rejection its reviewer has not answered (`unanswered`); a confirmer who
 //! rejects it again makes a new rejection, to be answered anew. Taking a
 //! rejection back, or confirming the error, ends it too.
+//!
+//! Before the waive there is the request (0.12.472; user 2026-11-14: "error
+//! -> waive request -> waive -> confirm 의 업무 흐름이며 role은 requester,
+//! waiver, confirmer로 나누어야 함"): a requester's own mark on an error -
+//! "its waive is asked for" - in a file of the requester's own,
+//! `.<db>.request.<reviewer>`, the waive sidecar's layout under a magic of
+//! its own (`request_header_of`, `request_beside`). A session of a role
+//! reads the stages of everybody (`Locks::follow`, `Peers`): the request
+//! files and the waive files of the result, found as the confirm files are.
 use super::local::aside_path;
 use super::reasons::{Kind as Reason, Reasons};
 use crate::{Error, ErrorKind, Result};
@@ -86,6 +95,30 @@ pub fn path_beside(waive: &Path) -> PathBuf {
         waive.with_file_name(name.replacen(".waive.", ".confirm.", 1))
     } else {
         waive.with_file_name(format!("{name}.confirm"))
+    }
+}
+
+/// A request file's magic: `.<db>.request.<reviewer>` - a byte an error
+/// (1 = this reviewer asked for the error's waive) and a counter a rule.
+pub const REQUEST_MAGIC: &[u8; 8] = b"FLOEREQS";
+pub const REQUEST_VERSION: u32 = 1;
+
+/// The request file's header of the result whose waive sidecars start with
+/// `waive`: the same identity under this file's magic and version.
+pub fn request_header_of(waive: &[u8; 40]) -> [u8; 40] {
+    let mut header = *waive;
+    header[..8].copy_from_slice(REQUEST_MAGIC);
+    header[8..12].copy_from_slice(&REQUEST_VERSION.to_le_bytes());
+    header
+}
+
+/// A request file's name from the waive sidecar's, as `path_beside`.
+pub fn request_beside(waive: &Path) -> PathBuf {
+    let name = waive.file_name().unwrap_or_default().to_string_lossy();
+    if name.contains(".waive.") {
+        waive.with_file_name(name.replacen(".waive.", ".request.", 1))
+    } else {
+        waive.with_file_name(format!("{name}.request"))
     }
 }
 
@@ -481,6 +514,101 @@ pub fn rejecting(standing: &[Standing], answers: Option<&Reasons>, check: usize,
     out
 }
 
+/// A reviewer's request file or waive sidecar as a look found it: one
+/// stage of the workflow, as a session of a role reads the others'.
+#[derive(Clone, Debug)]
+pub struct Peer {
+    /// whose
+    pub tag: String,
+    pub file: Arc<File>,
+    /// the file's count a rule when it was found: a rule it has nothing in
+    /// is not read
+    pub counts: Vec<u32>,
+    /// the file's time and size then
+    pub stamp: (u64, u64),
+    /// (a waive sidecar's) the errors under a rejection its reviewer has
+    /// not answered, by rule: a waive of one of them is rejected. Filled by
+    /// who knows every rejection (`desktop::Review`).
+    pub rejected: BTreeMap<usize, Vec<Run>>,
+}
+
+impl Peer {
+    /// Whether the file had anything in rule `check` when it was found.
+    pub fn any(&self, check: usize) -> bool {
+        self.counts.get(check).is_some_and(|&n| n > 0)
+    }
+
+    /// The file's bytes of the errors `at..at + bytes.len()` (counted over
+    /// the whole result): false when they do not read.
+    pub fn read(&self, at: u64, bytes: &mut [u8]) -> bool {
+        self.file.read_exact_at(bytes, HEADER + at).is_ok()
+    }
+}
+
+/// The request files, the waive sidecars and the confirm files of a result,
+/// as the last look found them (`Locks::follow`): what the states of a
+/// role's session are made of beside its own file.
+#[derive(Clone, Debug, Default)]
+pub struct Peers {
+    pub requests: Vec<Peer>,
+    pub waives: Vec<Peer>,
+    pub confirms: Vec<Peer>,
+}
+
+impl Peers {
+    /// The rules whose errors may be marked otherwise in `self` than in
+    /// `old`: where a file's count of the rule is another, a file came or
+    /// went, a waive sidecar's rejected errors are others - and every rule
+    /// a file has anything in when its time moved and no count did (a mark
+    /// taken here and made there).
+    pub fn moved(&self, old: &Peers) -> std::collections::BTreeSet<usize> {
+        let mut rules = std::collections::BTreeSet::new();
+        for (now, was) in [(&self.requests, &old.requests), (&self.waives, &old.waives), (&self.confirms, &old.confirms)]
+        {
+            let held = |peer: &Peer, rules: &mut std::collections::BTreeSet<usize>| {
+                rules.extend((0..peer.counts.len()).filter(|&ci| peer.counts[ci] > 0));
+                rules.extend(peer.rejected.keys().copied());
+            };
+            for peer in now {
+                match was.iter().find(|p| p.tag == peer.tag) {
+                    None => held(peer, &mut rules),
+                    Some(before) => {
+                        let counts = (0..peer.counts.len().max(before.counts.len()))
+                            .filter(|&ci| peer.counts.get(ci) != before.counts.get(ci));
+                        let before_len = rules.len();
+                        rules.extend(counts);
+                        for check in peer.rejected.keys().chain(before.rejected.keys()) {
+                            if peer.rejected.get(check) != before.rejected.get(check) {
+                                rules.insert(*check);
+                            }
+                        }
+                        if rules.len() == before_len && peer.stamp != before.stamp {
+                            held(peer, &mut rules);
+                        }
+                    }
+                }
+            }
+            for before in was {
+                if !now.iter().any(|p| p.tag == before.tag) {
+                    held(before, &mut rules);
+                }
+            }
+        }
+        rules
+    }
+}
+
+/// Which files of the other stages a role's session reads (`Locks::follow`).
+#[derive(Clone, Copy, Debug)]
+struct Stages {
+    waive: [u8; 40],
+    request: [u8; 40],
+    /// the session's own file of that kind is its status store: read there,
+    /// not here
+    own_waive: bool,
+    own_request: bool,
+}
+
 /// Which waives of a result are locked, and which are rejected: the
 /// confirmations and the rejections of every confirmer, as the session of a
 /// reviewer reads them. An error is locked while a confirmer's file has it
@@ -499,8 +627,18 @@ pub fn rejecting(standing: &[Standing], answers: Option<&Reasons>, check: usize,
 pub struct Locks {
     /// where confirm files are and how they are named: the folder, the
     /// name's start and what follows the reviewer in it; and the name's
-    /// start of a rejects log there
-    places: Vec<(PathBuf, String, String, String)>,
+    /// start of a rejects log, of a waive sidecar and of a request file
+    /// there
+    places: Vec<Place>,
+    /// a role's session: the request files and waive sidecars are found
+    /// too (`follow`)
+    stages: Option<Stages>,
+    /// those files as last found
+    peers: Peers,
+    /// what they were then: whose, the file's time and size, and a sum of
+    /// its counts (a status byte changes neither size nor - within a
+    /// coarse clock's tick - time)
+    peer_stamps: Vec<(String, u64, u64)>,
     header: [u8; 40],
     total: u64,
     /// each rule's first error and its errors
@@ -518,6 +656,27 @@ pub struct Locks {
     rejects: Vec<Rejects>,
     read: Option<Instant>,
     refresh: Duration,
+}
+
+/// A folder the reviewers' files are in, and how they are named there.
+struct Place {
+    folder: PathBuf,
+    /// a confirm file's name up to the reviewer
+    confirm: String,
+    /// what follows the reviewer (the temp folder's names end in a hash)
+    end: String,
+    log: String,
+    waive: String,
+    request: String,
+}
+
+/// The files `Locks::found` finds, by reviewer.
+#[derive(Default)]
+struct Found {
+    confirms: BTreeMap<String, PathBuf>,
+    logs: BTreeMap<String, PathBuf>,
+    waives: BTreeMap<String, PathBuf>,
+    requests: BTreeMap<String, PathBuf>,
 }
 
 /// One reviewer's rejects log as it was read.
@@ -564,20 +723,36 @@ impl Locks {
         let name = |p: PathBuf| p.file_name().unwrap_or_default().to_string_lossy().into_owned();
         let (near, far) = (name(path_beside(&waive[0])), name(path_beside(&waive[1])));
         let logs = name(rejects_beside(&waive[0]));
+        let (waives, requests) = (name(waive[0].clone()), name(request_beside(&waive[0])));
         let mut places = Vec::new();
-        if let (Some(start), Some(log), Some(folder)) =
-            (near.strip_suffix(reviewer), logs.strip_suffix(reviewer), waive[0].parent())
-        {
-            places.push((folder.to_path_buf(), start.to_owned(), String::new(), log.to_owned()));
+        if let (Some(start), Some(log), Some(side), Some(request), Some(folder)) = (
+            near.strip_suffix(reviewer),
+            logs.strip_suffix(reviewer),
+            waives.strip_suffix(reviewer),
+            requests.strip_suffix(reviewer),
+            waive[0].parent(),
+        ) {
+            let place = |folder: &Path, end: &str| Place {
+                folder: folder.to_path_buf(),
+                confirm: start.to_owned(),
+                end: end.to_owned(),
+                log: log.to_owned(),
+                waive: side.to_owned(),
+                request: request.to_owned(),
+            };
+            places.push(place(folder, ""));
             // the temp folder's names end in a hash of the database's path
             if let (Some(end), Some(temp)) = (far.strip_prefix(near.as_str()), waive[1].parent()) {
                 if !end.is_empty() && temp != folder {
-                    places.push((temp.to_path_buf(), start.to_owned(), end.to_owned(), log.to_owned()));
+                    places.push(place(temp, end));
                 }
             }
         }
         Self {
             places,
+            stages: None,
+            peers: Peers::default(),
+            peer_stamps: Vec::new(),
             header,
             total: rules.iter().map(|r| r.1).sum(),
             rules,
@@ -595,6 +770,9 @@ impl Locks {
     pub fn none(rules: usize) -> Self {
         Self {
             places: Vec::new(),
+            stages: None,
+            peers: Peers::default(),
+            peer_stamps: Vec::new(),
             header: [0; 40],
             total: 0,
             rules: vec![(0, 0); rules],
@@ -627,24 +805,60 @@ impl Locks {
             .ok_or_else(|| Error::input("DRC check index out of range"))
     }
 
-    /// Every reviewer's confirm file and rejects log, by reviewer: the
-    /// results folder's before the temp folder's, leftovers (`.stale-N`,
-    /// `.tmp-N`) left out.
-    fn found(&self) -> [BTreeMap<String, PathBuf>; 2] {
-        let mut found = [BTreeMap::new(), BTreeMap::new()];
-        for (folder, start, end, log) in &self.places {
-            let Ok(entries) = fs::read_dir(folder) else { continue };
+    /// A role's session reads the other stages too: every reviewer's
+    /// request file and waive sidecar of the result whose waive sidecars
+    /// start with `waive` are found with the confirm files from now
+    /// (`peers`, `requested`, `waived`). `own_waive` / `own_request`: the
+    /// session's own file of that kind is its status store - its review's
+    /// to read, not one of the files found here.
+    pub fn follow(&mut self, waive: [u8; 40], own_waive: bool, own_request: bool) {
+        self.stages = Some(Stages { waive, request: request_header_of(&waive), own_waive, own_request });
+        self.read = None;
+    }
+
+    /// The request files and waive sidecars as the last look found them
+    /// (none before `follow`).
+    pub fn peers(&self) -> &Peers {
+        &self.peers
+    }
+
+    /// The rejects log of the reviewer `tag` as it was last read: what they
+    /// answered is in it. None when they have none (and for the session's
+    /// own, which its review reads).
+    pub fn answers_of(&self, tag: &str) -> Option<&Reasons> {
+        self.rejects.iter().find(|r| r.tag == tag).map(|r| &r.log)
+    }
+
+    /// Every reviewer's confirm file and rejects log - and, for a role's
+    /// session, waive sidecar and request file -, by reviewer: the results
+    /// folder's before the temp folder's, leftovers (`.stale-N`, `.tmp-N`)
+    /// left out.
+    fn found(&self) -> Found {
+        let mut found = Found::default();
+        let stages = self.stages.is_some();
+        for place in &self.places {
+            let Ok(entries) = fs::read_dir(&place.folder) else { continue };
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let Some(text) = name.to_str() else { continue };
-                for (slot, start) in [(0, start), (1, log)] {
-                    let tag = text
-                        .strip_prefix(start.as_str())
-                        .and_then(|n| n.strip_suffix(end.as_str()))
-                        .and_then(super::local::reviewer_of);
-                    if let Some(tag) = tag {
-                        found[slot].entry(tag.to_owned()).or_insert_with(|| folder.join(&name));
-                    }
+                let tag_of = |start: &str| {
+                    text.strip_prefix(start)
+                        .and_then(|n| n.strip_suffix(place.end.as_str()))
+                        .and_then(super::local::reviewer_of)
+                };
+                let slot = if let Some(tag) = tag_of(&place.confirm) {
+                    Some((&mut found.confirms, tag))
+                } else if let Some(tag) = tag_of(&place.log) {
+                    Some((&mut found.logs, tag))
+                } else if !stages {
+                    None
+                } else if let Some(tag) = tag_of(&place.waive) {
+                    Some((&mut found.waives, tag))
+                } else {
+                    tag_of(&place.request).map(|tag| (&mut found.requests, tag))
+                };
+                if let Some((map, tag)) = slot {
+                    map.entry(tag.to_owned()).or_insert_with(|| place.folder.join(&name));
                 }
             }
         }
@@ -657,11 +871,41 @@ impl Locks {
             return;
         }
         let (header, total, rules) = (self.header, self.total, self.rules.len());
-        let [files, logs] = self.found();
-        self.files = files
+        let Found { confirms: files, logs, waives, requests } = self.found();
+        let confirms: Vec<Peer> = files
             .into_iter()
-            .filter_map(|(tag, path)| read(&path, &header, total, rules).ok().map(|(file, _)| (tag, Arc::new(file))))
+            .filter_map(|(tag, path)| {
+                let (file, counts) = read(&path, &header, total, rules).ok()?;
+                let stamp = stamp_of(&path).unwrap_or_default();
+                Some(Peer { tag, file: Arc::new(file), counts, stamp, rejected: BTreeMap::new() })
+            })
             .collect();
+        self.files = confirms.iter().map(|peer| (peer.tag.clone(), Arc::clone(&peer.file))).collect();
+        // the other stages, for a role's session: opened anew as the
+        // confirm files are (a file that is not this result's is nobody's
+        // stage)
+        if let Some(stages) = self.stages {
+            let mut stamps = Vec::new();
+            let me = self.me.clone();
+            let mut open = |kind: &str, found: BTreeMap<String, PathBuf>, header: [u8; 40], own: bool| -> Vec<Peer> {
+                found
+                    .into_iter()
+                    .filter(|(tag, _)| !(own && *tag == me))
+                    .filter_map(|(tag, path)| {
+                        let (file, counts) = read(&path, &header, total, rules).ok()?;
+                        let stamp = stamp_of(&path).unwrap_or_default();
+                        let sum =
+                            counts.iter().fold(stamp.1, |sum, &n| sum.wrapping_mul(31).wrapping_add(u64::from(n)));
+                        stamps.push((format!("{tag} {kind}"), stamp.0, sum));
+                        Some(Peer { tag, file: Arc::new(file), counts, stamp, rejected: BTreeMap::new() })
+                    })
+                    .collect()
+            };
+            let waives = open("waive", waives, stages.waive, stages.own_waive);
+            let requests = open("request", requests, stages.request, stages.own_request);
+            self.peers = Peers { requests, waives, confirms };
+            self.peer_stamps = stamps;
+        }
         *self.shared.write().unwrap_or_else(|p| p.into_inner()) =
             Arc::new(self.files.iter().map(|(_, file)| Arc::clone(file)).collect());
         // a log that stands as it was read is kept as read
@@ -767,7 +1011,91 @@ impl Locks {
                 seen.push((format!("{tag} confirm"), time, meta.len()));
             }
         }
+        // (a role's session: the other stages' files too)
+        seen.extend(self.peer_stamps.iter().cloned());
         (rules, seen)
+    }
+
+    /// One byte plane of `peers` over rule `check`'s errors `start..start +
+    /// len` (clamped): true where any of the files has the error marked.
+    /// None when none has.
+    fn marked(&self, peers: &[Peer], check: usize, start: u64, len: u64) -> Result<Option<Vec<bool>>> {
+        let (first, n) = self.rule(check)?;
+        let start = start.min(n);
+        let len = len.min(n - start) as usize;
+        let mut out: Option<Vec<bool>> = None;
+        let mut bytes = vec![0u8; len];
+        for peer in peers {
+            if !peer.read(first + start, &mut bytes) || !bytes.contains(&CONFIRMED) {
+                continue;
+            }
+            let out = out.get_or_insert_with(|| vec![false; len]);
+            for (o, b) in out.iter_mut().zip(&bytes) {
+                *o |= *b == CONFIRMED;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Who of `peers` has any of rule `check`'s errors `runs` marked.
+    fn markers(&self, peers: &[Peer], check: usize, runs: &[Run]) -> Result<Vec<String>> {
+        const STEP: u64 = 1 << 20;
+        let (first, n) = self.rule(check)?;
+        let mut out = Vec::new();
+        let mut bytes = Vec::new();
+        for peer in peers {
+            let found = runs.iter().any(|&(start, stop)| {
+                let (mut at, stop) = (start.min(n), stop.min(n));
+                while at < stop {
+                    bytes.resize((stop - at).min(STEP) as usize, 0);
+                    if !peer.read(first + at, &mut bytes) {
+                        return false;
+                    }
+                    if bytes.contains(&CONFIRMED) {
+                        return true;
+                    }
+                    at += bytes.len() as u64;
+                }
+                false
+            });
+            if found {
+                out.push(peer.tag.clone());
+            }
+        }
+        Ok(out)
+    }
+
+    /// Rule `check`'s errors `start..start+len` (clamped): true where a
+    /// requester has asked for the error's waive - a request file found by
+    /// `follow` has it. None when none has. The files are the ones the last
+    /// look found, their bytes read now: no folder is listed for it (a
+    /// waive asks this, and a waive lists nothing).
+    pub fn requested(&self, check: usize, start: u64, len: u64) -> Result<Option<Vec<bool>>> {
+        self.marked(&self.peers.requests, check, start, len)
+    }
+
+    /// Who has asked for the waive of any of rule `check`'s errors `runs`.
+    pub fn requesters_of(&self, check: usize, runs: &[Run]) -> Result<Vec<String>> {
+        self.markers(&self.peers.requests, check, runs)
+    }
+
+    /// Rule `check`'s errors `start..start+len` (clamped): true where a
+    /// waive sidecar found by `follow` has the error waived - what locks a
+    /// request (its requester does not take it back while somebody has the
+    /// error waived). None when none has. As `mask`, the files are found
+    /// anew when what is held is too old.
+    pub fn waived(&mut self, check: usize, start: u64, len: u64) -> Result<Option<Vec<bool>>> {
+        self.fresh();
+        self.marked(&self.peers.waives, check, start, len)
+    }
+
+    /// Who has any of rule `check`'s errors `runs` waived.
+    pub fn waivers_of(&mut self, check: usize, runs: &[Run]) -> Result<Vec<String>> {
+        if runs.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.fresh();
+        self.markers(&self.peers.waives, check, runs)
     }
 
     /// Rule `check`'s errors `start..start+len` (clamped to the rule): true

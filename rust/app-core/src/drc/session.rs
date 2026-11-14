@@ -80,7 +80,19 @@ pub fn hold(
     if !enabled() {
         return Ok(None);
     }
-    let real = std::fs::canonicalize(sidecar).unwrap_or_else(|_| sidecar.to_path_buf());
+    // (the sidecar's real path - or, where there is none yet, its name in
+    // its folder's real path: a requester's session holds its reviewer's
+    // review before their waive sidecar is made, and the session that makes
+    // it later - in this process, the viewer changing roles - shares the
+    // hold)
+    let real = std::fs::canonicalize(sidecar).unwrap_or_else(|_| {
+        match (sidecar.parent().filter(|p| !p.as_os_str().is_empty()), sidecar.file_name()) {
+            (Some(folder), Some(name)) => {
+                std::fs::canonicalize(folder).map_or_else(|_| sidecar.to_path_buf(), |real| real.join(name))
+            }
+            _ => sidecar.to_path_buf(),
+        }
+    });
     let mut held = sessions().lock().unwrap_or_else(|p| p.into_inner());
     if let Some(session) = held.get(&real).and_then(Weak::upgrade) {
         return Ok(Some(session));

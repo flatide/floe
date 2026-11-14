@@ -18,10 +18,16 @@
 //! the rejections that were answered - is the row's `history`.
 //! `reject_runs` says what a rejection by this session's confirmer is of.
 //!
+//! Before a waive there may be a request (0.12.472; the roles' workflow):
+//! the errors a requester asked the waive of are read from the requesters'
+//! request files (`drc::confirm`), and the ones nobody has waived yet are a
+//! list of their own (`Kind::Requested`) - what waits for a waiver; a row
+//! says who asked and why (`requested_by`).
+//!
 //! A `TeamWaives` is the files as they were opened: a list is paged against
 //! one state, and opened anew to see what changed since.
 use super::bits::{Bits, CHUNK};
-use super::stats::{discover, open_confirm, open_waive, run_bits, waived_bits, Found};
+use super::stats::{discover, open_confirm, open_request, open_waive, run_bits, waived_bits, Found};
 use super::Identity;
 use crate::drc::analysis::scope::Membership;
 use crate::drc::confirm::{self, CONFIRMED};
@@ -46,6 +52,9 @@ pub enum Kind {
     /// every error whose waives are all rejected (none of them is in the
     /// lists above): what waits for its reviewers
     Rejected,
+    /// every error somebody asked the waive of and nobody has waived (none
+    /// of them is in the lists above either): what waits for a waiver
+    Requested,
 }
 
 impl Kind {
@@ -55,6 +64,7 @@ impl Kind {
             "unconfirmed" => Self::Unconfirmed,
             "confirmed" => Self::Confirmed,
             "rejected" => Self::Rejected,
+            "requested" => Self::Requested,
             _ => return Err(Error::input(format!("unsupported team waive list: {text}"))),
         })
     }
@@ -70,6 +80,9 @@ pub struct Counts {
     pub unconfirmed: u64,
     #[serde(skip_serializing_if = "super::is_zero")]
     pub rejected: u64,
+    /// the errors asked for and waived by nobody (said when there are any)
+    #[serde(skip_serializing_if = "super::is_zero")]
+    pub requested: u64,
 }
 
 /// One error of the list.
@@ -94,6 +107,10 @@ pub struct Row {
     /// reasons the waive had, the rejections that were answered
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub history: Vec<Past>,
+    /// the requesters who asked for its waive, each with why (the text is
+    /// empty where they did not say)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub requested_by: Vec<Why>,
 }
 
 /// One kept event of a reviewer's waive of an error (`desktop::Event`).
@@ -119,6 +136,8 @@ struct Person {
     waive: Option<(File, Vec<u32>)>,
     /// the confirm file and its confirmed counter a rule
     confirm: Option<(File, Vec<u32>)>,
+    /// the request file and its requested counter a rule
+    request: Option<(File, Vec<u32>)>,
     reasons_path: Option<PathBuf>,
     /// read at the first row that asks (Some(None): none that reads)
     reasons: Option<Option<Reasons>>,
@@ -135,8 +154,9 @@ pub struct TeamWaives {
     tag: String,
     people: Vec<Person>,
     /// a rule's chunks: the errors somebody waived, the confirmed of
-    /// them, and the rejected - counted at the first ask
-    scans: BTreeMap<usize, Vec<(u16, u16, u16)>>,
+    /// them, the rejected, and the ones asked for and waived by nobody -
+    /// counted at the first ask
+    scans: BTreeMap<usize, Vec<(u16, u16, u16, u16)>>,
     /// a rule's rejections that stand, and each reviewer's errors under one
     /// they have not answered (in `people`'s order) - made at the first ask
     opens: BTreeMap<usize, (Vec<confirm::Standing>, Vec<Vec<(u64, u64)>>)>,
@@ -184,24 +204,41 @@ impl TeamWaives {
             skipped: Vec::new(),
         };
         for (tag, files) in &files.0 {
-            let beside = |from: &str, to: &str| {
-                files.waive.as_ref().map(|(path, _)| {
+            // (a reviewer's other files are named from their waive sidecar
+            // - or, for one who only asks, from their request file)
+            let beside = |to: &str| {
+                let named = |path: &PathBuf, from: &str| {
                     let name = path.file_name().unwrap_or_default().to_string_lossy();
                     path.with_file_name(name.replacen(from, to, 1))
-                })
+                };
+                match (&files.waive, &files.request) {
+                    (Some((path, _)), _) => Some(named(path, ".waive.")),
+                    (None, Some((path, _))) => Some(named(path, ".request.")),
+                    (None, None) => None,
+                }
             };
             let mut person = Person {
                 tag: tag.clone(),
                 waive: None,
                 confirm: None,
+                request: None,
                 reasons_path: files
                     .reasons
                     .as_ref()
                     .map(|(path, _)| path.clone())
-                    .or_else(|| beside(".waive.", ".reasons.")),
+                    .or_else(|| beside(".reasons.")),
                 reasons: None,
                 rejects: None,
             };
+            let listed = files.request.as_ref().map(|(path, _)| path.clone());
+            if let Some(path) = listed.clone().or_else(|| beside(".request.")) {
+                match open_request(&path, id) {
+                    Ok(request) => person.request = Some(request),
+                    // (looked for by name, and not there: nothing asked)
+                    Err(_) if listed.is_none() && !path.exists() => (),
+                    Err(e) => me.skipped.push((tag.clone(), path, e.message)),
+                }
+            }
             if let Some((path, _)) = &files.waive {
                 match open_waive(path, id) {
                     Ok(waive) => person.waive = Some(waive),
@@ -209,7 +246,7 @@ impl TeamWaives {
                 }
             }
             let listed = files.confirm.as_ref().map(|(path, _)| path.clone());
-            if let Some(path) = listed.clone().or_else(|| beside(".waive.", ".confirm.")) {
+            if let Some(path) = listed.clone().or_else(|| beside(".confirm.")) {
                 match open_confirm(&path, id) {
                     Ok(confirm) => person.confirm = Some(confirm),
                     // (looked for by name, and not there: no confirmation)
@@ -218,14 +255,18 @@ impl TeamWaives {
                 }
             }
             let listed = files.rejects.as_ref().map(|(path, _)| path.clone());
-            if let Some(path) = listed.or_else(|| beside(".waive.", ".rejects.")) {
+            if let Some(path) = listed.or_else(|| beside(".rejects.")) {
                 match Reasons::load(&path, &me.tag, &me.sizes) {
                     Ok(Some(log)) => person.rejects = Some(log),
                     Ok(None) => (),
                     Err(e) => me.skipped.push((tag.clone(), path, e.message)),
                 }
             }
-            if person.waive.is_some() || person.confirm.is_some() || person.rejects.is_some() {
+            if person.waive.is_some()
+                || person.confirm.is_some()
+                || person.rejects.is_some()
+                || person.request.is_some()
+            {
                 me.people.push(person);
             }
         }
@@ -253,11 +294,11 @@ impl TeamWaives {
             .ok_or_else(|| Error::input("DRC check index out of range"))
     }
 
-    /// Whether anybody has waived anything in rule `check`.
+    /// Whether anybody has waived, or asked for, anything in rule `check`.
     fn any(&self, check: usize) -> bool {
         self.people
             .iter()
-            .any(|p| p.waive.as_ref().is_some_and(|(_, stored)| stored[check] > 0))
+            .any(|p| p.waive.iter().chain(&p.request).any(|(_, stored)| stored[check] > 0))
     }
 
     /// Rule `check`'s rejections that stand - every reviewer's log's - and
@@ -285,17 +326,19 @@ impl TeamWaives {
 
     /// Chunk `k` of rule `check`: the errors somebody has waived - a waive
     /// that is not rejected -, the ones somebody has confirmed (waived or
-    /// not), and the ones whose waives are all rejected.
-    fn planes(&mut self, check: usize, k: u64, buffer: &mut [u8]) -> Result<(Bits, Bits, Bits)> {
+    /// not), the ones whose waives are all rejected, and the ones somebody
+    /// asked the waive of that nobody has waived.
+    fn planes(&mut self, check: usize, k: u64, buffer: &mut [u8]) -> Result<(Bits, Bits, Bits, Bits)> {
         let size = self.rule(check)?;
         if k >= size.div_ceil(CHUNK) {
-            return Ok((Bits::ZERO, Bits::ZERO, Bits::ZERO));
+            return Ok((Bits::ZERO, Bits::ZERO, Bits::ZERO, Bits::ZERO));
         }
         let count = (size - k * CHUNK).min(CHUNK) as usize;
         let at = self.starts[check] + k * CHUNK;
         self.rejections(check);
         let open = &self.opens[&check].1;
         let (mut waived, mut confirmed, mut rejected) = (Bits::ZERO, Bits::ZERO, Bits::ZERO);
+        let (mut asked, mut any) = (Bits::ZERO, Bits::ZERO);
         for (i, person) in self.people.iter().enumerate() {
             if let Some((file, stored)) = &person.waive {
                 if stored[check] > 0 {
@@ -303,6 +346,7 @@ impl TeamWaives {
                     let gone = run_bits(&open[i], k * CHUNK, count as u64);
                     waived |= held & !gone;
                     rejected |= held & gone;
+                    any |= held;
                 }
             }
             if let Some((file, stored)) = &person.confirm {
@@ -310,8 +354,13 @@ impl TeamWaives {
                     confirmed |= plane(file, confirm::HEADER + at, &mut buffer[..count])?;
                 }
             }
+            if let Some((file, stored)) = &person.request {
+                if stored[check] > 0 {
+                    asked |= plane(file, confirm::HEADER + at, &mut buffer[..count])?;
+                }
+            }
         }
-        Ok((waived, confirmed, rejected & !waived))
+        Ok((waived, confirmed, rejected & !waived, asked & !any))
     }
 
     /// The errors of rule `check`'s chunk `k` that somebody has waived -
@@ -325,8 +374,8 @@ impl TeamWaives {
     }
 
     /// Rule `check`'s chunks, counted once: the waived by somebody, the
-    /// confirmed of them, the rejected.
-    fn scan(&mut self, check: usize, cancelled: &AtomicUsize) -> Result<&Vec<(u16, u16, u16)>> {
+    /// confirmed of them, the rejected, the asked for that wait.
+    fn scan(&mut self, check: usize, cancelled: &AtomicUsize) -> Result<&Vec<(u16, u16, u16, u16)>> {
         if !self.scans.contains_key(&check) {
             let chunks = self.rule(check)?.div_ceil(CHUNK);
             let mut counts = Vec::new();
@@ -337,11 +386,12 @@ impl TeamWaives {
                     if k % 256 == 255 {
                         check_cancelled(cancelled)?;
                     }
-                    let (waived, confirmed, rejected) = self.planes(check, k, &mut buffer)?;
+                    let (waived, confirmed, rejected, asked) = self.planes(check, k, &mut buffer)?;
                     counts.push((
                         waived.count() as u16,
                         (waived & confirmed).count() as u16,
                         rejected.count() as u16,
+                        asked.count() as u16,
                     ));
                 }
             }
@@ -361,10 +411,11 @@ impl TeamWaives {
         };
         let mut all = Counts::default();
         for ci in rules {
-            for &(waived, confirmed, rejected) in self.scan(ci, cancelled)? {
+            for &(waived, confirmed, rejected, asked) in self.scan(ci, cancelled)? {
                 all.waived += u64::from(waived);
                 all.confirmed += u64::from(confirmed);
                 all.rejected += u64::from(rejected);
+                all.requested += u64::from(asked);
             }
         }
         all.unconfirmed = all.waived - all.confirmed;
@@ -378,7 +429,7 @@ impl TeamWaives {
         for check in 0..self.sizes.len() {
             if self.any(check) {
                 let counts = self.counts(Some(check), cancelled)?;
-                if counts.waived > 0 || counts.rejected > 0 {
+                if counts.waived > 0 || counts.rejected > 0 || counts.requested > 0 {
                     rules.push((check, counts));
                 }
             }
@@ -396,12 +447,13 @@ impl TeamWaives {
         limit: u64,
         cancelled: &AtomicUsize,
     ) -> Result<(u64, Vec<u64>)> {
-        let of = |&(waived, confirmed, rejected): &(u16, u16, u16)| -> u64 {
+        let of = |&(waived, confirmed, rejected, asked): &(u16, u16, u16, u16)| -> u64 {
             match kind {
                 Kind::Waived => u64::from(waived),
                 Kind::Confirmed => u64::from(confirmed),
                 Kind::Unconfirmed => u64::from(waived - confirmed),
                 Kind::Rejected => u64::from(rejected),
+                Kind::Requested => u64::from(asked),
             }
         };
         let per_chunk: Vec<u64> = self.scan(check, cancelled)?.iter().map(of).collect();
@@ -417,12 +469,13 @@ impl TeamWaives {
                 skip -= here;
                 continue;
             }
-            let (waived, confirmed, rejected) = self.planes(check, k as u64, &mut buffer)?;
+            let (waived, confirmed, rejected, asked) = self.planes(check, k as u64, &mut buffer)?;
             let listed = match kind {
                 Kind::Waived => waived,
                 Kind::Confirmed => waived & confirmed,
                 Kind::Unconfirmed => waived & !confirmed,
                 Kind::Rejected => rejected,
+                Kind::Requested => asked,
             };
             for i in listed.ones() {
                 if skip > 0 {
@@ -454,6 +507,7 @@ impl TeamWaives {
                 reasons: Vec::new(),
                 rejected_by: Vec::new(),
                 history: Vec::new(),
+                requested_by: Vec::new(),
             })
             .collect();
         let (tag, sizes) = (self.tag.clone(), self.sizes.clone());
@@ -467,7 +521,16 @@ impl TeamWaives {
             let mut byte = [0u8; 1];
             let waiving = person.waive.as_ref().filter(|(_, stored)| stored[check] > 0);
             let confirming = person.confirm.as_ref().filter(|(_, stored)| stored[check] > 0);
-            for row in &mut rows {
+            let asking = person.request.as_ref().filter(|(_, stored)| stored[check] > 0);
+            // (the rows this reviewer asked the waive of)
+            let mut asked: Vec<usize> = Vec::new();
+            for (at, row) in rows.iter_mut().enumerate() {
+                if let Some((file, _)) = asking {
+                    file.read_exact_at(&mut byte, confirm::HEADER + first + row.error)?;
+                    if byte[0] == crate::drc::desktop::STATUS_WAIVED {
+                        asked.push(at);
+                    }
+                }
                 if let Some((file, _)) = waiving {
                     file.read_exact_at(&mut byte, 40 + first + row.error)?;
                     if byte[0] == crate::drc::desktop::STATUS_WAIVED {
@@ -500,8 +563,9 @@ impl TeamWaives {
                     }
                 }
             }
-            // why: the reasons of a reviewer who waived any of them, read once
-            if !rows.iter().any(|row| row.waived_by.last() == Some(&person.tag)) {
+            // why: the reasons of a reviewer who waived any of them, or
+            // asked for the waive of any, read once
+            if asked.is_empty() && !rows.iter().any(|row| row.waived_by.last() == Some(&person.tag)) {
                 continue;
             }
             if person.reasons.is_none() {
@@ -514,6 +578,18 @@ impl TeamWaives {
                             None
                         }
                     },
+                });
+            }
+            // (who asked is said whether they said why or not)
+            for &at in &asked {
+                let why = match &person.reasons {
+                    Some(Some(reasons)) => reasons.of(Reason::Request, check, rows[at].error),
+                    _ => None,
+                };
+                rows[at].requested_by.push(Why {
+                    reviewer: person.tag.clone(),
+                    text: why.map(|entry| entry.text.clone()).unwrap_or_default(),
+                    time: why.map_or(0, |entry| entry.time),
                 });
             }
             if let Some(Some(reasons)) = &person.reasons {

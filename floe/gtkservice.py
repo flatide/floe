@@ -364,14 +364,19 @@ STATE_NONE = 0
 STATE_WAIVED = 1
 STATE_REJECTED = 2
 STATE_CONFIRMED = 3
+# a requester asked for the error's waive and nobody has waived it (a role's
+# session, 0.12.472: its states are the error's, as everybody's files say)
+STATE_REQUESTED = 4
 STATE_NAMES = {STATE_NONE: "none", STATE_WAIVED: "waived",
-               STATE_REJECTED: "rejected", STATE_CONFIRMED: "confirmed"}
+               STATE_REJECTED: "rejected", STATE_CONFIRMED: "confirmed",
+               STATE_REQUESTED: "requested"}
 # the class of errors a waive filter shows, as the service's status readers
 # say it (app-core desktop::Lens): every count, page and rank of every scope
 # is of it. `held`: any waive in the reviewer's file - what "Not Waived" is
 # the rest of
 LENS_OF_FILTER = {"all": "live", "notwaived": "held", "waived": "waived",
-                  "confirmed": "confirmed", "rejected": "rejected"}
+                  "confirmed": "confirmed", "rejected": "rejected",
+                  "requested": "requested"}
 _ERROR_PAGE = 256
 _STATUS_PAGE = 4096
 
@@ -606,6 +611,11 @@ class PackDrc(_Drc):
         # confirm (`floe2 view --confirmer`; app-core drc::confirm, 0.12.466)
         self.confirm_path = result.get("confirm_path")
         self.confirmer = bool(result.get("confirmer"))
+        # what this open does in the waive workflow (`floe2 view --role`;
+        # app-core drc::Role, 0.12.472): "requester", "waiver", "confirmer",
+        # or "" - a reviewer as before the roles
+        self.role = result.get("role") or ""
+        self._own = {}
         self._reviewer = result.get("reviewer")
         # how the id was found ("given", "FLOE_REVIEWER", "DISPLAY host",
         # "ssh client", "account") and whether it was stated - --userid or
@@ -656,6 +666,26 @@ class PackDrc(_Drc):
         return (STATUS_WAIVED if self.get_state(ci, ei) in (STATE_WAIVED, STATE_CONFIRMED)
                 else STATUS_NONE)
 
+    def get_mark(self, ci, ei):
+        """STATUS_WAIVED when this reviewer has the error marked - what
+        decides which way an action of theirs goes. A session without a
+        role: its own waive (`get_status`). A role's session, whose states
+        are the error's as everybody's files say: this reviewer's own mark
+        - a requester's request, anybody else's waive."""
+        if not self.role:
+            return self.get_status(ci, ei)
+        key = (ci, ei // _STATUS_PAGE)
+        with self._cache_lock:
+            got = self._own.get(key)
+        if got is None:
+            got = bytes.fromhex(self._request(
+                "drc_own", check=ci, start=key[1] * _STATUS_PAGE, count=_STATUS_PAGE))
+            with self._cache_lock:
+                if len(self._own) > 256:
+                    self._own.pop(next(iter(self._own)))
+                self._own[key] = got
+        return STATUS_WAIVED if got[ei % _STATUS_PAGE] else STATUS_NONE
+
     def set_lens(self, wfilter):
         """The waive filter is `wfilter` ("all", "notwaived", "waived",
         "confirmed", "rejected") from now: the service's status readers say
@@ -689,11 +719,15 @@ class PackDrc(_Drc):
         rejected = set(reply.get("rejected") or ())
         self._rejected_said = (len(rejected), _rejecters(reply.get("rejected_by")))
         self._resubmitted_said = int(reply.get("resubmitted") or 0)
+        # ... and a waiver's session left the errors nobody asked the waive
+        # of (0.12.472)
+        self._unrequested_said = len(reply.get("unrequested") or ())
         # (their states are read again: what a confirmer said of an error
         # is part of it)
         with self._cache_lock:
             for ei in eis:
                 self._status.pop((ci, ei // _STATUS_PAGE), None)
+                self._own.pop((ci, ei // _STATUS_PAGE), None)
         self.reasons_changed()
         return reply.get("reason_error")
 
@@ -724,6 +758,13 @@ class PackDrc(_Drc):
         self._resubmitted_said = 0
         return said
 
+    def unrequested_take(self):
+        """How many errors the last status write of this review - a
+        waiver's - left because nobody asked their waive. Asked once."""
+        said = getattr(self, "_unrequested_said", 0)
+        self._unrequested_said = 0
+        return said
+
     def returned_ask(self):
         """Ask the service to follow the confirmers: which of this
         reviewer's waives are rejected, who confirmed what (its job reads
@@ -749,6 +790,7 @@ class PackDrc(_Drc):
                 self._counts = [tuple(c) for c in event["counts"]]
             with self._cache_lock:
                 self._status.clear()
+                self._own.clear()
         return event
 
     # ---- reasons (app-core drc::reasons) --------------------------------
@@ -881,6 +923,7 @@ class PackDrc(_Drc):
         """A service job rewrote statuses: drop what was read of them."""
         with self._cache_lock:
             self._status.clear()
+            self._own.clear()
             self._reasons.clear()
         if ci is not None and counts is not None:
             self._counts[ci] = tuple(counts)
@@ -895,6 +938,7 @@ class PackDrc(_Drc):
         self._resubmitted_said = 0
         with self._cache_lock:
             self._status.clear()
+            self._own.clear()
             self._reasons.clear()
         return reply["waived"]
 
@@ -904,6 +948,7 @@ class PackDrc(_Drc):
         self._counts = [tuple(c) for c in self._request("drc_counts")]
         with self._cache_lock:
             self._status.clear()
+            self._own.clear()
             self._reasons.clear()
 
     # ---- visited / not-required (app-core drc::team::flags) -------------
@@ -1498,21 +1543,28 @@ def drc_find(db):
     return service().request("drc_find", db=os.path.abspath(db))
 
 
-def drc_open_pack(pack, source=None, reviewer=None, confirmer=False):
+def _role_field(role):
+    # (`role`: sent when the launch said one - floe2 view --role)
+    return {"role": role} if role else {}
+
+
+def drc_open_pack(pack, source=None, reviewer=None, confirmer=False, role=None):
     """A pack under review; `source` (the .db) must match its fingerprint.
-    `confirmer`: the review is opened to confirm the team's waives."""
+    `confirmer`: the review is opened to confirm the team's waives. `role`:
+    what the session does in the waive workflow ("requester", "waiver",
+    "confirmer")."""
     return _drc(service().request(
         "drc_open", path=os.path.abspath(pack), mode="pack",
         source=None if source is None else os.path.abspath(source),
-        reviewer=reviewer, confirmer=bool(confirmer)))
+        reviewer=reviewer, confirmer=bool(confirmer), **_role_field(role)))
 
 
-def drc_load(path, reviewer=None, confirmer=False):
+def drc_load(path, reviewer=None, confirmer=False, role=None):
     """floe/drc.py load_db: a pack given, or the .db's current pack, else
     the ASCII file."""
     return _drc(service().request("drc_open", path=os.path.abspath(path),
                                   mode="load", reviewer=reviewer,
-                                  confirmer=bool(confirmer)))
+                                  confirmer=bool(confirmer), **_role_field(role)))
 
 
 def drc_cd_markers(constraints, markers):

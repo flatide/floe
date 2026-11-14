@@ -20,6 +20,9 @@
 //! n <rule> <time> <runs> <text>     set aside from the review, with it
 //! W <rule> <time> <runs>            these errors' waive reason is gone
 //! N <rule> <time> <runs>            these errors' exclusion reason is gone
+//! q <rule> <time> <runs> <text>     their waive was asked for, with this
+//!                                   reason (a requester's; 0.12.472)
+//! Q <rule> <time> <runs>            these errors' request reason is gone
 //! ```
 //!
 //! `<rule>` is the rule's index in the pack (from 0), `<time>` seconds since
@@ -123,12 +126,16 @@ pub enum Kind {
     /// the waive reason the errors had before their reviewer waived them
     /// again: kept there too
     Earlier,
+    /// a requester's request of the errors' waive (0.12.472): why they
+    /// asked - the reviewer's reasons file, beside their waive reasons
+    Request,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 5] = [Kind::Waive, Kind::NotRequired, Kind::Reject, Kind::Answered, Kind::Earlier];
+    pub const ALL: [Kind; 6] =
+        [Kind::Waive, Kind::NotRequired, Kind::Reject, Kind::Answered, Kind::Earlier, Kind::Request];
     /// The kinds an error holds one reason of (the others are kept records).
-    pub const HELD: [Kind; 3] = [Kind::Waive, Kind::NotRequired, Kind::Reject];
+    pub const HELD: [Kind; 4] = [Kind::Waive, Kind::NotRequired, Kind::Reject, Kind::Request];
 
     fn slot(self) -> usize {
         match self {
@@ -137,6 +144,7 @@ impl Kind {
             Kind::Reject => 2,
             Kind::Answered => 3,
             Kind::Earlier => 4,
+            Kind::Request => 5,
         }
     }
     /// A line's first word: with a reason, and the reason gone (a kept
@@ -148,6 +156,7 @@ impl Kind {
             Kind::Reject => ("r", "R"),
             Kind::Answered => ("j", "J"),
             Kind::Earlier => ("p", "P"),
+            Kind::Request => ("q", "Q"),
         }
     }
     /// A line of this kind is an action even without a text: a rejection
@@ -168,6 +177,7 @@ impl Kind {
             Kind::Reject => "reject",
             Kind::Answered => "answered",
             Kind::Earlier => "earlier",
+            Kind::Request => "request",
         }
     }
     /// From a request's word (the review job's actions, the statistics').
@@ -176,6 +186,7 @@ impl Kind {
             "waive" => Some(Kind::Waive),
             "not-required" | "not_required" => Some(Kind::NotRequired),
             "reject" => Some(Kind::Reject),
+            "request" => Some(Kind::Request),
             _ => None,
         }
     }
@@ -432,7 +443,7 @@ pub struct Reasons {
     /// the actions read and made, in their order (some hold no error now)
     entries: Vec<Entry>,
     /// per kind and rule: sorted runs naming their action
-    segs: [BTreeMap<usize, Vec<Seg>>; 5],
+    segs: [BTreeMap<usize, Vec<Seg>>; 6],
     /// the kept records (`Kind::kept`) per rule, in their order: the errors
     /// and the record
     kept: BTreeMap<(Kind, usize), Vec<(Vec<Run>, u32)>>,

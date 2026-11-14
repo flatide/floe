@@ -89,6 +89,9 @@ pub(super) struct Found {
     pub(super) confirm: Option<(PathBuf, &'static str)>,
     /// the rejects log and where it is (`results`, `temp`)
     pub(super) rejects: Option<(PathBuf, &'static str)>,
+    /// the request file and where it is (`results`, `temp`): the errors
+    /// whose waive this reviewer asked for (drc::confirm; 0.12.472)
+    pub(super) request: Option<(PathBuf, &'static str)>,
 }
 
 // (which names are a reviewer's: the lock's reader asks the same -
@@ -136,6 +139,7 @@ pub(super) fn discover(pack: &Path) -> Result<BTreeMap<String, Found>> {
     let reasons_prefix = format!(".{name}.reasons.");
     let confirm_prefix = format!(".{name}.confirm.");
     let rejects_prefix = format!(".{name}.rejects.");
+    let request_prefix = format!(".{name}.request.");
     let review_prefix = format!(".{name}.review.");
     let review_tag = |file: &str| -> Option<String> {
         file.strip_prefix(&review_prefix)
@@ -153,6 +157,8 @@ pub(super) fn discover(pack: &Path) -> Result<BTreeMap<String, Found>> {
             found.entry(tag.to_owned()).or_default().confirm = Some((folder.join(&file), "results"));
         } else if let Some(tag) = file.strip_prefix(&rejects_prefix).and_then(reviewer_of) {
             found.entry(tag.to_owned()).or_default().rejects = Some((folder.join(&file), "results"));
+        } else if let Some(tag) = file.strip_prefix(&request_prefix).and_then(reviewer_of) {
+            found.entry(tag.to_owned()).or_default().request = Some((folder.join(&file), "results"));
         } else if let Some(tag) = review_tag(&file) {
             found.entry(tag).or_default().review = Some((folder.join(&file), "results"));
         }
@@ -234,6 +240,17 @@ pub(super) fn discover(pack: &Path) -> Result<BTreeMap<String, Found>> {
                         *slot = Some((temp.join(&file), "temp"));
                     }
                 }
+                // (and the requests)
+                let tag = file
+                    .strip_prefix(&request_prefix)
+                    .and_then(|rest| rest.strip_suffix(suffix))
+                    .and_then(reviewer_of);
+                if let Some(tag) = tag {
+                    let slot = &mut found.entry(tag.to_owned()).or_default().request;
+                    if slot.is_none() {
+                        *slot = Some((temp.join(&file), "temp"));
+                    }
+                }
             }
         }
     }
@@ -272,7 +289,7 @@ fn count_held(
 /// now (`tally`, a count an action), the actions it was given in, when it
 /// was first and last given, and its rules. A reason that holds no such
 /// error is not listed. The waive reasons first, the most errors first.
-fn reasons_json(store: &Reasons, tally: &[u64], names: &[String]) -> (Value, [u64; 2]) {
+fn reasons_json(store: &Reasons, tally: &[u64], names: &[String]) -> (Value, [u64; 3]) {
     struct Group {
         errors: u64,
         actions: u64,
@@ -281,12 +298,17 @@ fn reasons_json(store: &Reasons, tally: &[u64], names: &[String]) -> (Value, [u6
         rules: BTreeMap<usize, u64>,
     }
     let mut groups: BTreeMap<(Kind, &str), Group> = BTreeMap::new();
-    let mut with = [0u64; 2];
+    // (the errors that say why: waived, set aside, asked for)
+    let mut with = [0u64; 3];
     for (entry, &errors) in store.entries().iter().zip(tally) {
         if errors == 0 {
             continue;
         }
-        with[usize::from(entry.kind == Kind::NotRequired)] += errors;
+        with[match entry.kind {
+            Kind::NotRequired => 1,
+            Kind::Request => 2,
+            _ => 0,
+        }] += errors;
         let g = groups.entry((entry.kind, entry.text.as_str())).or_insert(Group {
             errors: 0,
             actions: 0,
@@ -383,9 +405,13 @@ struct Own {
     /// confirmer's rejection this reviewer has not answered by waiving
     /// again (None: not counted)
     waived_rejected: Option<u64>,
+    /// the errors whose waive this reviewer asked for (their request
+    /// file's; 0.12.472)
+    requested: u64,
 }
 impl Own {
     fn add(&mut self, o: &Own) {
+        self.requested += o.requested;
         self.waived += o.waived;
         self.visited += o.visited;
         self.not_required += o.not_required;
@@ -400,13 +426,17 @@ impl Own {
         self.waived_rejected = sum(self.waived_rejected, o.waived_rejected);
     }
     fn any(&self) -> bool {
-        self.waived + self.visited + self.not_required + self.confirmed + self.rejected > 0
+        self.waived + self.visited + self.not_required + self.confirmed + self.rejected + self.requested > 0
     }
     /// `files`: which of the reviewer's files there are - the waive
-    /// sidecar, the flags, the confirm file, the rejects log.
-    fn json(&self, total: u64, files: [bool; 4]) -> Value {
-        let [waive, flags, confirm, rejects] = files;
+    /// sidecar, the flags, the confirm file, the rejects log, the request
+    /// file.
+    fn json(&self, total: u64, files: [bool; 5]) -> Value {
+        let [waive, flags, confirm, rejects, request] = files;
         let mut v = json!({});
+        if request {
+            v["requested"] = json!(self.requested);
+        }
         if waive {
             v["waived"] = json!(self.waived);
             if let Some(confirmed) = self.waived_confirmed {
@@ -454,9 +484,17 @@ pub struct Team {
     /// the union, as `waived_any` is of the waives (0.12.470, what the
     /// brief report says)
     pub not_required_any: u64,
+    /// the errors somebody asked the waive of (0.12.472: "error -> waive
+    /// request -> waive -> confirm") - waived since or not
+    pub requested: u64,
+    /// of those, the ones nobody has waived: they wait for a waiver (a
+    /// waive that is rejected is one still - it waits for its reviewer)
+    pub unwaived: u64,
 }
 impl Team {
     pub(super) fn add(&mut self, o: &Team) {
+        self.requested += o.requested;
+        self.unwaived += o.unwaived;
         self.visited += o.visited;
         self.waived += o.waived;
         self.not_required += o.not_required;
@@ -468,7 +506,7 @@ impl Team {
         self.not_required_any += o.not_required_any;
     }
     pub(super) fn json(&self, total: u64) -> Value {
-        json!({
+        let mut v = json!({
             "errors": total,
             "visited": self.visited,
             "waived": self.waived,
@@ -482,7 +520,14 @@ impl Team {
             // the errors whose waives are all rejected: none of the numbers
             // above counts a rejected waive
             "rejected": self.rejected,
-        })
+        });
+        // the errors somebody asked the waive of, and the ones of them
+        // nobody has waived yet: said where somebody asked (0.12.472)
+        if self.requested > 0 {
+            v["requested"] = json!(self.requested);
+            v["unwaived"] = json!(self.unwaived);
+        }
+        v
     }
 }
 
@@ -497,6 +542,8 @@ pub(super) struct Planes {
     /// the errors under a rejection this reviewer has not answered: a
     /// waive of theirs of one of them is rejected (`confirm::unanswered`)
     pub(super) rejected: Bits,
+    /// the errors whose waive this reviewer asked for
+    pub(super) requested: Bits,
     pub(super) visited_known: bool,
     pub(super) waive_known: bool,
     pub(super) not_required_known: bool,
@@ -523,9 +570,12 @@ pub(super) fn team_of(planes: &[Planes]) -> Team {
     let (mut v, mut w, mut n, mut c) = (Bits::ZERO, Bits::ZERO, Bits::ZERO, Bits::ZERO);
     let (mut wy, mut wn, mut ny, mut nn) = (Bits::ZERO, Bits::ZERO, Bits::ZERO, Bits::ZERO);
     let mut rejected = Bits::ZERO;
+    let (mut asked, mut held) = (Bits::ZERO, Bits::ZERO);
     for p in planes {
         let waived = p.waived & !p.rejected;
         rejected |= p.waived & p.rejected;
+        asked |= p.requested;
+        held |= p.waived;
         v |= p.visited;
         w |= waived;
         n |= p.not_required;
@@ -555,6 +605,8 @@ pub(super) fn team_of(planes: &[Planes]) -> Team {
         confirmed: (w & c).count(),
         rejected: (rejected & !w).count(),
         not_required_any,
+        requested: asked.count(),
+        unwaived: (asked & !held).count(),
     }
 }
 
@@ -570,6 +622,9 @@ pub(super) fn team_of(planes: &[Planes]) -> Team {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Brief {
     pub errors: u64,
+    /// the errors somebody asked the waive of - waived since or not
+    /// (0.12.472: the workflow's first step)
+    pub requested: u64,
     /// waived by somebody - a waive that is not rejected, confirmed or not
     pub waived: u64,
     /// of those, confirmed by a confirmer
@@ -585,6 +640,7 @@ impl Brief {
     fn of(team: &Team, errors: u64) -> Self {
         Self {
             errors,
+            requested: team.requested,
             waived: team.waived_any,
             confirmed: team.confirmed,
             rejected: team.rejected,
@@ -594,6 +650,7 @@ impl Brief {
     }
     fn add(&mut self, o: &Brief) {
         self.errors += o.errors;
+        self.requested += o.requested;
         self.waived += o.waived;
         self.confirmed += o.confirmed;
         self.rejected += o.rejected;
@@ -604,8 +661,8 @@ impl Brief {
         use std::fmt::Write;
         let _ = write!(
             out,
-            "{{\"errors\":{},\"waived\":{},\"confirmed\":{},\"rejected\":{},\"visited\":{},\"ignored\":{}}}",
-            self.errors, self.waived, self.confirmed, self.rejected, self.visited, self.ignored
+            "{{\"errors\":{},\"requested\":{},\"waived\":{},\"confirmed\":{},\"rejected\":{},\"visited\":{},\"ignored\":{}}}",
+            self.errors, self.requested, self.waived, self.confirmed, self.rejected, self.visited, self.ignored
         );
     }
 }
@@ -704,6 +761,8 @@ struct Reviewer {
     /// the rejects log as read: the rejections this reviewer made, and
     /// the ones of their own waives they answered
     rejects: Option<((PathBuf, &'static str), Reasons)>,
+    /// the request file
+    request: Option<(PathBuf, &'static str)>,
     rules: Vec<Own>,
     stored: Option<Vec<u32>>,
     /// the reasons file, what it says, and the errors each of its actions
@@ -897,12 +956,21 @@ fn counts_from(
                 Err(e) => skipped.push(json!({"reviewer": tag, "file": path, "reason": e.message})),
             }
         }
-        if waive.is_none() && marks.is_none() && confirms.is_none() && rejects.is_none() {
+        // requested: the request file's counter a rule
+        let mut requests = None;
+        if let Some((path, place)) = files.request {
+            match open_request(&path, id) {
+                Ok((_, kept)) => requests = Some((path, place, kept)),
+                Err(e) => skipped.push(json!({"reviewer": tag, "file": path, "reason": e.message})),
+            }
+        }
+        if waive.is_none() && marks.is_none() && confirms.is_none() && rejects.is_none() && requests.is_none() {
             continue;
         }
         let own = |ci: usize| {
             let (visited, not_required, both) = marks.as_ref().map_or((0, 0, 0), |m| m.2[ci]);
             Own {
+                requested: requests.as_ref().map_or(0, |r| u64::from(r.2[ci])),
                 waived: waive.as_ref().map_or(0, |w| u64::from(w.2[ci])),
                 visited,
                 not_required,
@@ -914,7 +982,7 @@ fn counts_from(
             }
         };
         let (waived, marked, confirming) = (waive.is_some(), marks.is_some(), confirms.is_some());
-        let files = [waived, marked, confirming, rejects.is_some()];
+        let files = [waived, marked, confirming, rejects.is_some(), requests.is_some()];
         let mut all = Own::default();
         for ci in 0..names.len() {
             all.add(&own(ci));
@@ -935,6 +1003,11 @@ fn counts_from(
             person["rejects_file"] = json!(path);
             person["rejects_location"] = json!(place);
             person["rejects_modified"] = json!(modified(path));
+        }
+        if let Some((path, place, _)) = &requests {
+            person["request_file"] = json!(path);
+            person["request_location"] = json!(place);
+            person["request_modified"] = json!(modified(path));
         }
         if let Some((path, place, _)) = &waive {
             person["waive_file"] = json!(path);
@@ -1030,6 +1103,7 @@ pub(super) fn collect_with(
     let mut reviewers = Vec::new();
     let mut statuses: Vec<Option<BufReader<File>>> = Vec::new();
     let mut confirmations: Vec<Option<BufReader<File>>> = Vec::new();
+    let mut requests: Vec<Option<BufReader<File>>> = Vec::new();
     let mut connections: Vec<Option<Connection>> = Vec::new();
     for (tag, files) in found {
         check_cancelled(cancelled)?;
@@ -1039,6 +1113,7 @@ pub(super) fn collect_with(
             flags: None,
             confirm: None,
             rejects: None,
+            request: None,
             rules: vec![Own::default(); rules],
             stored: None,
             reasons: None,
@@ -1102,10 +1177,32 @@ pub(super) fn collect_with(
                 Err(e) => skip(&tag, &path, e.message),
             }
         }
-        if reader.is_some() || connection.is_some() || confirming.is_some() || reviewer.rejects.is_some() {
+        // the errors whose waive this reviewer asked for: a byte an error
+        // too (drc::confirm)
+        let mut asking = None;
+        if let Some((path, place)) = files.request {
+            let opened = open_request(&path, id).and_then(|(mut file, _)| {
+                file.seek(SeekFrom::Start(crate::drc::confirm::HEADER))?;
+                Ok(file)
+            });
+            match opened {
+                Ok(file) => {
+                    reviewer.request = Some((path, place));
+                    asking = Some(BufReader::with_capacity(READ_BUFFER, file));
+                }
+                Err(e) => skip(&tag, &path, e.message),
+            }
+        }
+        if reader.is_some()
+            || connection.is_some()
+            || confirming.is_some()
+            || reviewer.rejects.is_some()
+            || asking.is_some()
+        {
             reviewers.push(reviewer);
             statuses.push(reader);
             confirmations.push(confirming);
+            requests.push(asking);
             connections.push(connection);
         }
     }
@@ -1145,14 +1242,16 @@ pub(super) fn collect_with(
         let mut planes = Vec::with_capacity(reviewers.len());
         // each reviewer's reasons of this rule, as runs, and where the
         // chunks have come to in them
-        let held: Vec<[Vec<(u64, u64, usize)>; 2]> = reviewers
+        let held: Vec<[Vec<(u64, u64, usize)>; 3]> = reviewers
             .iter()
             .map(|r| match &r.reasons {
-                Some((_, store, _)) => [store.runs(Kind::Waive, ci), store.runs(Kind::NotRequired, ci)],
-                None => [Vec::new(), Vec::new()],
+                Some((_, store, _)) => {
+                    [store.runs(Kind::Waive, ci), store.runs(Kind::NotRequired, ci), store.runs(Kind::Request, ci)]
+                }
+                None => [Vec::new(), Vec::new(), Vec::new()],
             })
             .collect();
-        let mut cursors = vec![[0usize; 2]; reviewers.len()];
+        let mut cursors = vec![[0usize; 3]; reviewers.len()];
         // every rejection of this rule that stands, and each reviewer's
         // errors under one they have not answered - a waive of theirs
         // there is rejected (the same errors for everybody who answered
@@ -1219,8 +1318,24 @@ pub(super) fn collect_with(
                     }
                     None => Bits::ZERO,
                 };
+                let requested = match &mut requests[i] {
+                    Some(reader) => {
+                        reader.read_exact(&mut buffer[..count as usize]).map_err(|e| {
+                            let path = r.request.as_ref().map(|(p, _)| p.display().to_string());
+                            Error::new(ErrorKind::Io, format!("{}: {e}", path.unwrap_or_default()))
+                        })?;
+                        // (a request is the byte a waive is)
+                        waived_bits(&buffer[..count as usize])
+                    }
+                    None => Bits::ZERO,
+                };
+                if let Some((_, _, tally)) = &mut reviewers[i].reasons {
+                    count_held(&held[i][2], &mut cursors[i][2], start, count, &requested, tally);
+                }
+                let r = &reviewers[i];
                 let rejected = run_bits(opens[i].as_deref().unwrap_or(&open_all), start, count);
                 let own = &mut owns[i];
+                own.requested += requested.count();
                 own.waived += waived.count();
                 own.visited += visited.count();
                 own.not_required += not_required.count();
@@ -1232,6 +1347,7 @@ pub(super) fn collect_with(
                     not_required,
                     confirmed,
                     rejected,
+                    requested,
                     visited_known: r.flags.is_some(),
                     waive_known: r.waive.is_some(),
                     not_required_known: r.flags.is_some(),
@@ -1265,7 +1381,7 @@ pub(super) fn collect_with(
     let mut people = Vec::new();
     for r in &reviewers {
         let (waive, flags, confirm) = (r.waive.is_some(), r.flags.is_some(), r.confirm.is_some());
-        let files = [waive, flags, confirm, r.rejects.is_some()];
+        let files = [waive, flags, confirm, r.rejects.is_some(), r.request.is_some()];
         let mut all = Own::default();
         let mut by_rule = Vec::new();
         let mut differ = Vec::new();
@@ -1299,6 +1415,11 @@ pub(super) fn collect_with(
             person["rejects_location"] = json!(place);
             person["rejects_modified"] = json!(modified(path));
         }
+        if let Some((path, place)) = &r.request {
+            person["request_file"] = json!(path);
+            person["request_location"] = json!(place);
+            person["request_modified"] = json!(modified(path));
+        }
         if let Some((path, place)) = &r.waive {
             person["waive_file"] = json!(path);
             person["waive_location"] = json!(place);
@@ -1322,6 +1443,10 @@ pub(super) fn collect_with(
             // of the waived (set aside) errors, those that say why
             person["waived_with_reason"] = json!(with[0]);
             person["not_required_with_reason"] = json!(with[1]);
+            // (a requester's: of the errors asked for, those that say why)
+            if r.request.is_some() {
+                person["requested_with_reason"] = json!(with[2]);
+            }
             person["reasons"] = rows;
         }
         person["rules"] = json!(by_rule);
@@ -1441,6 +1566,17 @@ pub(super) fn rejected_of(log: &Reasons, rules: usize) -> Vec<Vec<(u64, u64)>> {
             runs
         })
         .collect()
+}
+
+/// A request file of this result, open to read, and its counter a rule
+/// (drc::confirm: a byte an error, as a confirm file is).
+pub(super) fn open_request(path: &Path, id: &Identity) -> Result<(File, Vec<u32>)> {
+    crate::drc::confirm::read(
+        path,
+        &crate::drc::confirm::request_header_of(&id.waive_header),
+        id.total(),
+        id.sizes.len(),
+    )
 }
 
 /// A confirm file of this result, open to read, and its counter a rule
@@ -1570,7 +1706,7 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         let names = ["A".to_string(), "B".to_string()];
         let (rows, with) = reasons_json(&store, &[7, 5, 2, 3, 0], &names);
-        assert_eq!(with, [14, 3]);
+        assert_eq!(with, [14, 3, 0]);
         assert_eq!(
             rows,
             json!([
@@ -1587,7 +1723,7 @@ mod tests {
         );
         // nothing held: nothing listed
         let (rows, with) = reasons_json(&store, &[0; 5], &names);
-        assert_eq!((rows, with), (json!([]), [0, 0]));
+        assert_eq!((rows, with), (json!([]), [0, 0, 0]));
     }
 
     fn planes(v: &[u64], w: &[u64], n: &[u64], flags: bool, waive: bool) -> Planes {
@@ -1597,6 +1733,7 @@ mod tests {
             not_required: bits(n),
             confirmed: Bits::ZERO,
             rejected: Bits::ZERO,
+            requested: Bits::ZERO,
             visited_known: flags,
             waive_known: waive,
             not_required_known: flags,
@@ -1620,6 +1757,8 @@ mod tests {
             confirmed,
             rejected,
             not_required_any,
+            requested: 0,
+            unwaived: 0,
         };
         let names = ["GRX.1", "CLEAN", "M1 \"S\".1", "GRX.1", "한글,룰"];
         let sizes = [100u64, 0, 7, 20, 3];
@@ -1631,10 +1770,10 @@ mod tests {
         assert_eq!(
             text,
             concat!(
-                r#"{"total":{"errors":130,"waived":18,"confirmed":6,"rejected":3,"visited":33,"ignored":14},"#,
-                r#""rule":{"GRX.1":{"errors":120,"waived":11,"confirmed":6,"rejected":3,"visited":33,"ignored":14},"#,
-                r#""M1 \"S\".1":{"errors":7,"waived":7,"confirmed":0,"rejected":0,"visited":0,"ignored":0},"#,
-                r#""한글,룰":{"errors":3,"waived":0,"confirmed":0,"rejected":0,"visited":0,"ignored":0}}}"#
+                r#"{"total":{"errors":130,"requested":0,"waived":18,"confirmed":6,"rejected":3,"visited":33,"ignored":14},"#,
+                r#""rule":{"GRX.1":{"errors":120,"requested":0,"waived":11,"confirmed":6,"rejected":3,"visited":33,"ignored":14},"#,
+                r#""M1 \"S\".1":{"errors":7,"requested":0,"waived":7,"confirmed":0,"rejected":0,"visited":0,"ignored":0},"#,
+                r#""한글,룰":{"errors":3,"requested":0,"waived":0,"confirmed":0,"rejected":0,"visited":0,"ignored":0}}}"#
             )
         );
         assert!(!text.contains('\n'));
@@ -1646,12 +1785,12 @@ mod tests {
         assert_eq!(
             brief_text(&names, &sizes, &teams, BriefRules::Named("M1 \"S\".1")).unwrap(),
             concat!(
-                r#"{"total":{"errors":130,"waived":18,"confirmed":6,"rejected":3,"visited":33,"ignored":14},"#,
-                r#""rule":{"M1 \"S\".1":{"errors":7,"waived":7,"confirmed":0,"rejected":0,"visited":0,"ignored":0}}}"#
+                r#"{"total":{"errors":130,"requested":0,"waived":18,"confirmed":6,"rejected":3,"visited":33,"ignored":14},"#,
+                r#""rule":{"M1 \"S\".1":{"errors":7,"requested":0,"waived":7,"confirmed":0,"rejected":0,"visited":0,"ignored":0}}}"#
             )
         );
         let clean = brief_text(&names, &sizes, &teams, BriefRules::Named("CLEAN")).unwrap();
-        assert!(clean.ends_with(r#""rule":{"CLEAN":{"errors":0,"waived":0,"confirmed":0,"rejected":0,"visited":0,"ignored":0}}}"#));
+        assert!(clean.ends_with(r#""rule":{"CLEAN":{"errors":0,"requested":0,"waived":0,"confirmed":0,"rejected":0,"visited":0,"ignored":0}}}"#));
         let twice: Value =
             serde_json::from_str(&brief_text(&names, &sizes, &teams, BriefRules::Named("GRX.1")).unwrap()).unwrap();
         assert_eq!((twice["rule"]["GRX.1"]["errors"].as_u64(), twice["rule"].as_object().unwrap().len()), (Some(120), 1));
@@ -1661,7 +1800,7 @@ mod tests {
         let all = brief_text(&names, &sizes, &teams, BriefRules::All).unwrap();
         assert!(all.starts_with(&text[..text.find(r#","rule""#).unwrap()]), "the same total");
         assert!(
-            all.contains(r#"},"CLEAN":{"errors":0,"waived":0,"confirmed":0,"rejected":0,"visited":0,"ignored":0},"M1 "#),
+            all.contains(r#"},"CLEAN":{"errors":0,"requested":0,"waived":0,"confirmed":0,"rejected":0,"visited":0,"ignored":0},"M1 "#),
             "{all}"
         );
         let parsed: Value = serde_json::from_str(&all).unwrap();
@@ -1669,7 +1808,7 @@ mod tests {
         // a result without an error, and one without a rule
         assert_eq!(
             brief_text(&["A"], &[0], &[Team::default()], BriefRules::WithErrors).unwrap(),
-            r#"{"total":{"errors":0,"waived":0,"confirmed":0,"rejected":0,"visited":0,"ignored":0},"rule":{}}"#
+            r#"{"total":{"errors":0,"requested":0,"waived":0,"confirmed":0,"rejected":0,"visited":0,"ignored":0},"rule":{}}"#
         );
         assert!(brief_text(&[], &[], &[], BriefRules::All).unwrap().ends_with(r#""rule":{}}"#));
         // every report starts the same way: how a file that holds an earlier
@@ -1704,7 +1843,7 @@ mod tests {
         let t = team_of(&[kim, lee, park]);
         assert_eq!(
             t,
-            Team { visited: 7, waived: 14, not_required: 10, conflicts: 1, done: 17, waived_any: 15, confirmed: 0, rejected: 0, not_required_any: 10 }
+            Team { visited: 7, waived: 14, not_required: 10, conflicts: 1, done: 17, waived_any: 15, confirmed: 0, rejected: 0, not_required_any: 10, requested: 0, unwaived: 0 }
         );
         // a confirmer's confirmations count on the errors somebody has
         // waived - a conflict's waive too (error 0) - and on no other: of
@@ -1717,7 +1856,7 @@ mod tests {
         let t = team_of(&[kim, lee, park, hong, yoon]);
         assert_eq!(
             t,
-            Team { visited: 7, waived: 14, not_required: 10, conflicts: 1, done: 17, waived_any: 15, confirmed: 4, rejected: 0, not_required_any: 10 }
+            Team { visited: 7, waived: 14, not_required: 10, conflicts: 1, done: 17, waived_any: 15, confirmed: 4, rejected: 0, not_required_any: 10, requested: 0, unwaived: 0 }
         );
         assert_eq!(
             t.json(200),
@@ -1737,7 +1876,7 @@ mod tests {
         let t = team_of(&[kim, lee, hong, yoon]);
         assert_eq!(
             t,
-            Team { visited: 7, waived: 12, not_required: 10, conflicts: 0, done: 17, waived_any: 12, confirmed: 1, rejected: 3, not_required_any: 10 }
+            Team { visited: 7, waived: 12, not_required: 10, conflicts: 0, done: 17, waived_any: 12, confirmed: 1, rejected: 3, not_required_any: 10, requested: 0, unwaived: 0 }
         );
         assert_eq!(
             t.json(200),
@@ -1766,13 +1905,13 @@ mod tests {
         let t = team_of(&[a, b, c]);
         assert_eq!(
             t,
-            Team { visited: 1, waived: 0, not_required: 0, conflicts: 1, done: 1, waived_any: 1, confirmed: 0, rejected: 0, not_required_any: 1 }
+            Team { visited: 1, waived: 0, not_required: 0, conflicts: 1, done: 1, waived_any: 1, confirmed: 0, rejected: 0, not_required_any: 1, requested: 0, unwaived: 0 }
         );
         // (the brief report says the unions: the waive a visitor differs on
         // is waived, the exclusion one differs on is ignored)
         assert_eq!(
             Brief::of(&t, 9),
-            Brief { errors: 9, waived: 1, confirmed: 0, rejected: 0, visited: 1, ignored: 1 }
+            Brief { errors: 9, requested: 0, waived: 1, confirmed: 0, rejected: 0, visited: 1, ignored: 1 }
         );
         // nobody: nothing
         assert_eq!(team_of(&[]), Team::default());
@@ -1780,7 +1919,40 @@ mod tests {
         let t = team_of(&[planes(&[3], &[3, 4], &[9], true, true)]);
         assert_eq!(
             t,
-            Team { visited: 1, waived: 2, not_required: 1, conflicts: 0, done: 2, waived_any: 2, confirmed: 0, rejected: 0, not_required_any: 1 }
+            Team { visited: 1, waived: 2, not_required: 1, conflicts: 0, done: 2, waived_any: 2, confirmed: 0, rejected: 0, not_required_any: 1, requested: 0, unwaived: 0 }
         );
+    }
+
+    /// The requests of a team (0.12.472: "error -> waive request -> waive ->
+    /// confirm"): the errors somebody asked the waive of, and the ones of
+    /// them nobody has waived - a waive that is rejected is one still.
+    #[test]
+    fn the_team_counts_the_requests_and_the_ones_that_wait() {
+        // a requester who asked for 0..6, another for 4..8; a waiver who
+        // waived 0, 1, 2 and 9 (never asked for) - 2 under a rejection they
+        // have not answered -, and a confirmer who confirmed 0
+        let asking = |errors: &[u64]| Planes { requested: bits(errors), ..planes(&[], &[], &[], false, false) };
+        let waiver = Planes { rejected: bits(&[2]), ..planes(&[], &[0, 1, 2, 9], &[], false, true) };
+        let confirmer = Planes { confirmed: bits(&[0]), ..planes(&[], &[], &[], false, false) };
+        let t = team_of(&[asking(&[0, 1, 2, 3, 4, 5]), asking(&[4, 5, 6, 7]), waiver, confirmer]);
+        assert_eq!((t.requested, t.unwaived), (8, 5), "asked for by anybody; 3..8 wait for a waiver");
+        assert_eq!((t.waived_any, t.confirmed, t.rejected), (3, 1, 1), "0, 1 and 9 waived; 2 rejected");
+        // the report says them where somebody asked, and not elsewhere
+        let said = t.json(10);
+        assert_eq!((said["requested"].as_u64(), said["unwaived"].as_u64()), (Some(8), Some(5)));
+        assert!(team_of(&[waiver, confirmer]).json(10).get("requested").is_none());
+        // the brief report's are the union, the workflow's steps in order
+        let brief = Brief::of(&t, 10);
+        assert_eq!(
+            brief,
+            Brief { errors: 10, requested: 8, waived: 3, confirmed: 1, rejected: 1, visited: 0, ignored: 0 }
+        );
+        let mut text = String::new();
+        brief.write(&mut text);
+        assert_eq!(
+            text,
+            r#"{"errors":10,"requested":8,"waived":3,"confirmed":1,"rejected":1,"visited":0,"ignored":0}"#
+        );
+        assert!(text.starts_with(&BRIEF_HEAD["{\"total\":".len()..]));
     }
 }

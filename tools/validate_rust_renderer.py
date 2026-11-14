@@ -223,7 +223,7 @@ class WorkerContractTests(unittest.TestCase):
                                       return_value=0 if running else None) as forward, \
                     mock.patch.object(instance, "try_bind", return_value=owned), \
                     mock.patch("floe.gui.run_viewer") as run_viewer:
-                for name in ("FLOE_NO_FILE_LOAD", "FLOE_REVIEWER", "FLOE_CONFIRMER"):
+                for name in ("FLOE_NO_FILE_LOAD", "FLOE_REVIEWER", "FLOE_CONFIRMER", "FLOE_ROLE"):
                     os.environ.pop(name, None)
                 os.environ.update(environ)
                 if running:
@@ -263,6 +263,27 @@ class WorkerContractTests(unittest.TestCase):
         self.assertIs(launch([], {}, running=False)["confirmer"], False)
         self.assertIn("--confirmer", cli.parser().format_help())
         self.assertIn("FLOE_CONFIRMER", cli.parser().format_help())
+        # the role's launch (0.12.472, user 2026-11-14: "error -> waive
+        # request -> waive -> confirm 의 업무 흐름이며 role은 requester, waiver,
+        # confirmer로 나누어야 함"): --role, or the launcher's FLOE_ROLE, is
+        # part of the request a running window takes - `role=NAME` - and of
+        # what the first launch's viewer is made with; a word that names no
+        # role stops the launch
+        self.assertEqual(cli.role_of(SimpleNamespace(), {"FLOE_ROLE": " Waiver "}), "waiver")
+        self.assertEqual(cli.role_of(SimpleNamespace(role="requester"), {"FLOE_ROLE": "waiver"}), "requester")
+        self.assertEqual(cli.role_of(SimpleNamespace(), {}), "")
+        with self.assertRaises(SystemExit):
+            cli.role_of(SimpleNamespace(), {"FLOE_ROLE": "boss"})
+        for words, environ, role in ((["--role", "waiver"], {}, "waiver"),
+                                     ([], {"FLOE_ROLE": "requester"}, "requester"),
+                                     (["--role=confirmer"], {"FLOE_ROLE": "waiver"}, "confirmer")):
+            with self.subTest(words=words, environ=environ):
+                self.assertIn("\trole=" + role, launch(words, environ, running=True))
+                self.assertEqual(launch(words, environ, running=False)["role"], role)
+        self.assertNotIn("\trole=", launch([], {}, running=True))
+        self.assertEqual(launch([], {}, running=False)["role"], "")
+        self.assertIn("--role", cli.parser().format_help())
+        self.assertIn("FLOE_ROLE", cli.parser().format_help())
         # --multi: a window of its own, as ever
         with mock.patch.dict(os.environ, {"FLOE_RENDERER": "rust"}), \
                 mock.patch.object(cli.os.path, "isfile", return_value=True), \

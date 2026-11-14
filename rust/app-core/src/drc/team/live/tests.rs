@@ -259,8 +259,8 @@ fn what_a_log_and_its_files_say_against_what_is_kept() {
     let kept = Seen {
         log_id: 7,
         cursor: 48,
-        log_stamp: [100, 200, 0, 0],
-        stamps: [100, 200, 0, 0],
+        log_stamp: [100, 200, 0, 0, 0],
+        stamps: [100, 200, 0, 0, 0],
         suspect: 0,
         known: 3,
         active: BTreeSet::new(),
@@ -271,83 +271,95 @@ fn what_a_log_and_its_files_say_against_what_is_kept() {
         assert_eq!(judge(kept, tail, known, stamps), want, "{what}");
     };
     use Verdict::{Again, Ahead, Said, Unsaid};
-    check(None, None, 1, [5, 0, 0, 0], Again, "new to the counts");
-    check(None, Some(&word), 3, [150, 200, 0, 0], Again, "new to the counts, with a log");
-    check(Some(&kept), Some(&nothing), 3, [100, 200, 0, 0], Said, "nothing changed");
-    check(Some(&kept), Some(&nothing), 1, [100, 0, 0, 0], Again, "their flags went");
-    check(Some(&kept), Some(&word), 3, [150, 200, 0, 0], Said, "as the last word left them");
-    check(Some(&kept), Some(&word), 3, [160, 200, 0, 0], Ahead, "the statuses newer than the last word");
-    check(Some(&kept), Some(&word), 3, [150, 210, 0, 0], Ahead, "the flags newer than the last word");
-    check(Some(&kept), Some(&word), 3, [100, 200, 0, 0], Unsaid, "the log says more than the files show");
-    check(Some(&kept), Some(&word), 3, [160, 190, 0, 0], Unsaid, "one file newer, one not there yet");
-    check(Some(&kept), Some(&nothing), 3, [110, 200, 0, 0], Unsaid, "changed, and nothing said");
-    check(Some(&kept), Some(&nothing), 3, [90, 200, 0, 0], Unsaid, "changed backwards, and nothing said");
+    check(None, None, 1, [5, 0, 0, 0, 0], Again, "new to the counts");
+    check(None, Some(&word), 3, [150, 200, 0, 0, 0], Again, "new to the counts, with a log");
+    check(Some(&kept), Some(&nothing), 3, [100, 200, 0, 0, 0], Said, "nothing changed");
+    check(Some(&kept), Some(&nothing), 1, [100, 0, 0, 0, 0], Again, "their flags went");
+    check(Some(&kept), Some(&word), 3, [150, 200, 0, 0, 0], Said, "as the last word left them");
+    check(Some(&kept), Some(&word), 3, [160, 200, 0, 0, 0], Ahead, "the statuses newer than the last word");
+    check(Some(&kept), Some(&word), 3, [150, 210, 0, 0, 0], Ahead, "the flags newer than the last word");
+    check(Some(&kept), Some(&word), 3, [100, 200, 0, 0, 0], Unsaid, "the log says more than the files show");
+    check(Some(&kept), Some(&word), 3, [160, 190, 0, 0, 0], Unsaid, "one file newer, one not there yet");
+    check(Some(&kept), Some(&nothing), 3, [110, 200, 0, 0, 0], Unsaid, "changed, and nothing said");
+    check(Some(&kept), Some(&nothing), 3, [90, 200, 0, 0, 0], Unsaid, "changed backwards, and nothing said");
     // a settle half seen: what was touched without its stamp yet is judged
     // against the last stamp known
     let half = tail(7, &[(TOUCH, 0, 0)]);
-    check(Some(&kept), Some(&half), 3, [100, 200, 0, 0], Said, "touched, the stamp not seen yet, the files as before");
-    check(Some(&kept), Some(&half), 3, [110, 200, 0, 0], Ahead, "touched, the stamp not seen yet");
-    check(Some(&kept), Some(&tail(7, &[(RESET, 0, 0), (STAMP, 150, 200)])), 3, [150, 200, 0, 0], Again, "a RESET");
-    check(Some(&kept), Some(&tail(8, &[(STAMP, 100, 200)])), 3, [100, 200, 0, 0], Again, "another log");
-    check(Some(&kept), None, 3, [100, 200, 0, 0], Again, "their log is gone");
+    check(Some(&kept), Some(&half), 3, [100, 200, 0, 0, 0], Said, "touched, the stamp not seen yet, the files as before");
+    check(Some(&kept), Some(&half), 3, [110, 200, 0, 0, 0], Ahead, "touched, the stamp not seen yet");
+    check(Some(&kept), Some(&tail(7, &[(RESET, 0, 0), (STAMP, 150, 200)])), 3, [150, 200, 0, 0, 0], Again, "a RESET");
+    check(Some(&kept), Some(&tail(8, &[(STAMP, 100, 200)])), 3, [100, 200, 0, 0, 0], Again, "another log");
+    check(Some(&kept), None, 3, [100, 200, 0, 0, 0], Again, "their log is gone");
     // a reviewer without a log has nothing to wait for
-    let silent = Seen { log_id: 0, cursor: 0, log_stamp: [0; 4], ..kept.clone() };
-    check(Some(&silent), None, 3, [100, 200, 0, 0], Said, "no log, nothing changed");
-    check(Some(&silent), None, 3, [100, 201, 0, 0], Again, "no log, changed");
-    check(Some(&silent), Some(&tail(7, &[(STAMP, 100, 200)])), 3, [100, 200, 0, 0], Again, "their first log");
+    let silent = Seen { log_id: 0, cursor: 0, log_stamp: [0; 5], ..kept.clone() };
+    check(Some(&silent), None, 3, [100, 200, 0, 0, 0], Said, "no log, nothing changed");
+    check(Some(&silent), None, 3, [100, 201, 0, 0, 0], Again, "no log, changed");
+    check(Some(&silent), Some(&tail(7, &[(STAMP, 100, 200)])), 3, [100, 200, 0, 0, 0], Again, "their first log");
     // counted of files older than the log had said: any change counts again
-    let behind = Seen { stamps: [90, 200, 0, 0], ..kept.clone() };
-    check(Some(&behind), Some(&nothing), 3, [90, 200, 0, 0], Said, "behind, nothing changed");
-    check(Some(&behind), Some(&nothing), 3, [100, 200, 0, 0], Again, "behind, the files came to what was said");
-    check(Some(&behind), Some(&word), 3, [150, 200, 0, 0], Again, "behind, more said");
-    check(Some(&behind), Some(&word), 3, [90, 200, 0, 0], Again, "behind, more said and the files as they were");
+    let behind = Seen { stamps: [90, 200, 0, 0, 0], ..kept.clone() };
+    check(Some(&behind), Some(&nothing), 3, [90, 200, 0, 0, 0], Said, "behind, nothing changed");
+    check(Some(&behind), Some(&nothing), 3, [100, 200, 0, 0, 0], Again, "behind, the files came to what was said");
+    check(Some(&behind), Some(&word), 3, [150, 200, 0, 0, 0], Again, "behind, more said");
+    check(Some(&behind), Some(&word), 3, [90, 200, 0, 0, 0], Again, "behind, more said and the files as they were");
     // the confirm file is a file of theirs like the other two (0.12.466)
-    let confirming = Seen { log_stamp: [100, 200, 50, 0], stamps: [100, 200, 50, 0], known: 7, ..kept.clone() };
+    let confirming = Seen { log_stamp: [100, 200, 50, 0, 0], stamps: [100, 200, 50, 0, 0], known: 7, ..kept.clone() };
     let cword = tail(7, &[(TOUCH, 0, 0), (STAMP, 100, 200), (changes::CSTAMP, 60, 0)]);
-    check(Some(&confirming), Some(&nothing), 7, [100, 200, 50, 0], Said, "confirming, nothing changed");
-    check(Some(&confirming), Some(&nothing), 7, [100, 200, 60, 0], Unsaid, "confirmed, and nothing said");
-    check(Some(&confirming), Some(&cword), 7, [100, 200, 60, 0], Said, "confirmed, as the last word left it");
-    check(Some(&confirming), Some(&cword), 7, [100, 200, 50, 0], Unsaid, "the log says a confirmation the file does not show");
-    check(Some(&confirming), Some(&cword), 7, [100, 200, 70, 0], Ahead, "the confirm file newer than the last word");
-    check(Some(&confirming), Some(&word), 7, [150, 200, 50, 0], Said, "a waive said, the confirm file as it was");
-    check(Some(&kept), Some(&cword), 7, [100, 200, 60, 0], Again, "their first confirm file");
-    check(Some(&confirming), Some(&nothing), 3, [100, 200, 0, 0], Again, "their confirm file went");
+    check(Some(&confirming), Some(&nothing), 7, [100, 200, 50, 0, 0], Said, "confirming, nothing changed");
+    check(Some(&confirming), Some(&nothing), 7, [100, 200, 60, 0, 0], Unsaid, "confirmed, and nothing said");
+    check(Some(&confirming), Some(&cword), 7, [100, 200, 60, 0, 0], Said, "confirmed, as the last word left it");
+    check(Some(&confirming), Some(&cword), 7, [100, 200, 50, 0, 0], Unsaid, "the log says a confirmation the file does not show");
+    check(Some(&confirming), Some(&cword), 7, [100, 200, 70, 0, 0], Ahead, "the confirm file newer than the last word");
+    check(Some(&confirming), Some(&word), 7, [150, 200, 50, 0, 0], Said, "a waive said, the confirm file as it was");
+    check(Some(&kept), Some(&cword), 7, [100, 200, 60, 0, 0], Again, "their first confirm file");
+    check(Some(&confirming), Some(&nothing), 3, [100, 200, 0, 0, 0], Again, "their confirm file went");
     // the rejects log is the fourth (0.12.468): its time is the second
     // number of the confirm file's record
-    let rejecting = Seen { log_stamp: [100, 200, 50, 30], stamps: [100, 200, 50, 30], known: 15, ..kept.clone() };
+    let rejecting = Seen { log_stamp: [100, 200, 50, 30, 0], stamps: [100, 200, 50, 30, 0], known: 15, ..kept.clone() };
     let rword = tail(7, &[(TOUCH, 0, 0), (STAMP, 100, 200), (changes::CSTAMP, 50, 40)]);
-    check(Some(&rejecting), Some(&nothing), 15, [100, 200, 50, 30], Said, "rejecting, nothing changed");
-    check(Some(&rejecting), Some(&nothing), 15, [100, 200, 50, 40], Unsaid, "rejected, and nothing said");
-    check(Some(&rejecting), Some(&rword), 15, [100, 200, 50, 40], Said, "rejected, as the last word left it");
-    check(Some(&rejecting), Some(&rword), 15, [100, 200, 50, 30], Unsaid, "the log says a rejection the file does not show");
-    check(Some(&rejecting), Some(&rword), 15, [100, 200, 50, 45], Ahead, "the rejects log newer than the last word");
-    check(Some(&confirming), Some(&rword), 15, [100, 200, 50, 40], Again, "their first rejects log");
-    check(Some(&rejecting), Some(&nothing), 7, [100, 200, 50, 0], Again, "their rejects log went");
+    check(Some(&rejecting), Some(&nothing), 15, [100, 200, 50, 30, 0], Said, "rejecting, nothing changed");
+    check(Some(&rejecting), Some(&nothing), 15, [100, 200, 50, 40, 0], Unsaid, "rejected, and nothing said");
+    check(Some(&rejecting), Some(&rword), 15, [100, 200, 50, 40, 0], Said, "rejected, as the last word left it");
+    check(Some(&rejecting), Some(&rword), 15, [100, 200, 50, 30, 0], Unsaid, "the log says a rejection the file does not show");
+    check(Some(&rejecting), Some(&rword), 15, [100, 200, 50, 45, 0], Ahead, "the rejects log newer than the last word");
+    check(Some(&confirming), Some(&rword), 15, [100, 200, 50, 40, 0], Again, "their first rejects log");
+    check(Some(&rejecting), Some(&nothing), 7, [100, 200, 50, 0, 0], Again, "their rejects log went");
+    // the request file is the fifth (0.12.472): its time is a record of its
+    // own, said when it is another
+    let asking = Seen { log_stamp: [100, 200, 0, 0, 70], stamps: [100, 200, 0, 0, 70], known: 19, ..kept.clone() };
+    let qword = tail(7, &[(TOUCH, 0, 0), (STAMP, 100, 200), (changes::QSTAMP, 80, 0)]);
+    check(Some(&asking), Some(&nothing), 19, [100, 200, 0, 0, 70], Said, "asking, nothing changed");
+    check(Some(&asking), Some(&nothing), 19, [100, 200, 0, 0, 80], Unsaid, "asked, and nothing said");
+    check(Some(&asking), Some(&qword), 19, [100, 200, 0, 0, 80], Said, "asked, as the last word left it");
+    check(Some(&asking), Some(&qword), 19, [100, 200, 0, 0, 70], Unsaid, "the log says a request the file does not show");
+    check(Some(&asking), Some(&qword), 19, [100, 200, 0, 0, 90], Ahead, "the request file newer than the last word");
+    check(Some(&asking), Some(&word), 19, [150, 200, 0, 0, 70], Said, "a waive said, the request file as it was");
+    check(Some(&kept), Some(&qword), 19, [100, 200, 0, 0, 80], Again, "their first request file");
+    check(Some(&asking), Some(&nothing), 3, [100, 200, 0, 0, 0], Again, "their request file went");
 }
 
 #[test]
 fn the_cache_file_is_whole_and_this_results_or_no_cache() {
     let mut cache = Cache::empty(3);
-    cache.set(1, 0, [1, 2, 3, 0, 4, 2, 1, 0, 3]);
-    cache.set(1, 7, [4096, 0, 0, 0, 4096, 0, 0, 0, 0]);
-    cache.set(2, 1, [0, 5, 0, 0, 0, 5, 5, 0, 0]);
-    assert_eq!(cache.rules, [[0; 9], [4097, 2, 3, 0, 4100, 2, 1, 0, 3], [0, 5, 0, 0, 0, 5, 5, 0, 0]]);
+    cache.set(1, 0, [1, 2, 3, 0, 4, 2, 1, 0, 3, 0, 0]);
+    cache.set(1, 7, [4096, 0, 0, 0, 4096, 0, 0, 0, 0, 0, 0]);
+    cache.set(2, 1, [0, 5, 0, 0, 0, 5, 5, 0, 0, 0, 0]);
+    assert_eq!(cache.rules, [[0; 11], [4097, 2, 3, 0, 4100, 2, 1, 0, 3, 0, 0], [0, 5, 0, 0, 0, 5, 5, 0, 0, 0, 0]]);
     // a chunk's counts replaced, and one that counts nothing any more
-    cache.set(1, 0, [2, 2, 0, 1, 2, 3, 0, 0, 1]);
-    cache.set(2, 1, [0; 9]);
-    assert_eq!(cache.rules, [[0; 9], [4098, 2, 0, 1, 4098, 3, 0, 0, 1], [0; 9]]);
+    cache.set(1, 0, [2, 2, 0, 1, 2, 3, 0, 0, 1, 0, 0]);
+    cache.set(2, 1, [0; 11]);
+    assert_eq!(cache.rules, [[0; 11], [4098, 2, 0, 1, 4098, 3, 0, 0, 1, 0, 0], [0; 11]]);
     assert_eq!((cache.kept(1), cache.kept(2), cache.chunks.len()), (vec![0, 7], vec![], 2));
     assert_eq!(
         cache.teams()[1],
-        Team { visited: 4098, waived: 2, not_required: 0, conflicts: 1, done: 4098, waived_any: 3, confirmed: 0, rejected: 0, not_required_any: 1 }
+        Team { visited: 4098, waived: 2, not_required: 0, conflicts: 1, done: 4098, waived_any: 3, confirmed: 0, rejected: 0, not_required_any: 1, requested: 0, unwaived: 0 }
     );
     cache.reviewers.insert(
         "kim".into(),
         Seen {
             log_id: 9,
             cursor: 72,
-            log_stamp: [5, 6, 10, 0],
-            stamps: [7, 8, 11, 0],
+            log_stamp: [5, 6, 10, 0, 0],
+            stamps: [7, 8, 11, 0, 0],
             suspect: 3,
             known: 3,
             active: [1u32, 2].into(),
@@ -376,14 +388,14 @@ fn the_cache_file_is_whole_and_this_results_or_no_cache() {
     wrong.rules[1][0] += 1;
     assert!(Cache::of(&wrong.bytes("abc"), "abc", 3).is_none(), "a rule's total is not its chunks'");
     let mut wrong = cache.clone();
-    wrong.chunks.insert((1, 3), [0; 9]);
+    wrong.chunks.insert((1, 3), [0; 11]);
     assert!(Cache::of(&wrong.bytes("abc"), "abc", 3).is_none(), "a chunk that counts nothing");
     let mut wrong = cache.clone();
-    wrong.chunks.insert((1, 3), [4097, 0, 0, 0, 0, 0, 0, 0, 0]);
+    wrong.chunks.insert((1, 3), [4097, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     wrong.rules[1][0] += 4097;
     assert!(Cache::of(&wrong.bytes("abc"), "abc", 3).is_none(), "a count past a chunk");
     let mut wrong = cache.clone();
-    wrong.chunks.insert((3, 0), [1, 0, 0, 0, 0, 0, 0, 0, 0]);
+    wrong.chunks.insert((3, 0), [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     assert!(Cache::of(&wrong.bytes("abc"), "abc", 3).is_none(), "a rule the result has not");
     // the names
     assert_eq!(path_of(Path::new("/r/.x.db.tray")).unwrap(), Path::new("/r/.x.db.team"));
@@ -597,7 +609,7 @@ fn the_teams_waives_are_listed_and_confirmed_by_the_confirmer() {
     let id = f.id();
     let stop = AtomicUsize::new(0);
     let view = || TeamWaives::open(&f.pack, &f.id()).unwrap();
-    let counts = |waived, confirmed| Waives { waived, confirmed, unconfirmed: waived - confirmed, rejected: 0 };
+    let counts = |waived, confirmed| Waives { waived, confirmed, unconfirmed: waived - confirmed, rejected: 0, requested: 0 };
     // nobody has waived anything: nothing to confirm
     let mut v = view();
     assert_eq!(v.counts(None, &stop).unwrap(), counts(0, 0));
@@ -741,7 +753,7 @@ fn a_rejected_waive_is_listed_until_its_reviewer_waives_it_again() {
     let id = f.id();
     let stop = AtomicUsize::new(0);
     let view = || TeamWaives::open(&f.pack, &f.id()).unwrap();
-    let counts = |waived, confirmed, rejected| Waives { waived, confirmed, unconfirmed: waived - confirmed, rejected };
+    let counts = |waived, confirmed, rejected| Waives { waived, confirmed, unconfirmed: waived - confirmed, rejected, requested: 0 };
     let mut kim = Session::open(&f, "kim");
     let mut lee = Session::open(&f, "lee");
     let mut hong = Session::open(&f, "hong");

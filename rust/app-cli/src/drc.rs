@@ -27,7 +27,11 @@ const HELP: &str = "Usage: floe2-web drc RESULTS.db|.RESULTS.db.tray [OPTIONS]
                           for it: `confirmed`, `unconfirmed`; the errors
                           whose waives a confirmer has rejected and no
                           reviewer has waived again since, which are none
-                          of the team's waives: `rejected`); with
+                          of the team's waives: `rejected`; where requesters
+                          asked for waives (floe2 view --role): the errors
+                          asked for and the ones of them nobody has waived,
+                          `requested` and `unwaived`, and a requester's own
+                          `requested`); with
                           --floe-reviewer ID[,ID...] these reviewers alone.
                           Needs the current pack: none or a stale one is an
                           error (exit 1), never an answer of zeros
@@ -57,15 +61,18 @@ const HELP: &str = "Usage: floe2-web drc RESULTS.db|.RESULTS.db.tray [OPTIONS]
                           --team-counts: the rules without errors too
   --team-counts           The team's counts in brief, one line of JSON to hand
                           on as it is: `total`, then `rule` - an object of
-                          the rules by name -, each with errors, waived,
-                          confirmed, rejected, visited, ignored. No blank in
+                          the rules by name -, each with errors, requested,
+                          waived, confirmed, rejected, visited, ignored. No
+                          blank in
                           it, the keys in this order, the rules in the
                           result's. `total` is the whole result's; `rule` has
                           the rules that have errors - with --all-rules every
                           rule, with --rule NAME that rule alone (a name the
                           result has twice is one entry). Everyone's review
                           united, from the counts
-                          --review-counts keeps (.DB.team): waived = waived by
+                          --review-counts keeps (.DB.team): requested = the
+                          waive asked for by somebody (a requester: floe2
+                          view --role), waived since or not; waived = waived by
                           somebody and not rejected, confirmed or not;
                           confirmed = of those, confirmed; rejected = the
                           errors whose waives are all rejected; ignored = set

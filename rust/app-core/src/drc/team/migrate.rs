@@ -76,6 +76,11 @@ pub struct Applied {
     /// said only when there are any)
     #[serde(skip_serializing_if = "super::is_zero")]
     pub rejected: u64,
+    /// errors the source has waived that nobody asked the waive of: not
+    /// waived by a waiver's session (0.12.472; said only when there are
+    /// any)
+    #[serde(skip_serializing_if = "super::is_zero")]
+    pub unrequested: u64,
 }
 
 fn different(s: &Snapshot, ow: Bits, on: Bits, w: Bits, n: Bits, uw: Bits, un: Bits) -> Bits {
@@ -700,9 +705,10 @@ pub fn apply(
                         // (one confirmed or rejected since the looks
                         // above stays too)
                         let kept = r.write_status_span(ci, k * CHUNK, &before, &after)?;
-                        result.changed_waived += change_w.count() - kept.locked - kept.rejected;
+                        result.changed_waived += change_w.count() - kept.locked - kept.rejected - kept.unrequested;
                         result.locked += kept.locked;
                         result.rejected += kept.rejected;
+                        result.unrequested += kept.unrequested;
                         changed(ci);
                     }
                 }

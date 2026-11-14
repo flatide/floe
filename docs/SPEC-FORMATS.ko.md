@@ -485,6 +485,8 @@ w <룰> <시각> <구간> <사유>     waive, 이 사유로
 n <룰> <시각> <구간> <사유>     검토 제외, 이 사유로
 W <룰> <시각> <구간>            이 에러들의 waive 사유가 사라짐
 N <룰> <시각> <구간>            이 에러들의 검토 제외 사유가 사라짐
+q <룰> <시각> <구간> <사유>     waive 요청, 이 사유로 (요청자의 세션; 0.12.472)
+Q <룰> <시각> <구간>            이 에러들의 요청 사유가 사라짐
 ```
 
 - `<룰>`은 pack의 체크 번호(0부터), `<시각>`은 epoch 초다.
@@ -509,6 +511,37 @@ N <룰> <시각> <구간>            이 에러들의 검토 제외 사유가 �
 - 메모리에서도 같은 모양이다: 룰마다 정렬된 구간이 자기 작업을 가리킨다. 에러 하나의 조회는 이진
   탐색이고 에러 단위의 표는 없다. 크기: 2억 건 룰 전체가 160바이트 미만, 흩어진 100만 구간이 약
   6 MB(단위 테스트 `a_reason_of_millions_of_errors_is_one_short_line`).
+
+## `.<db>.request.<리뷰어>` — DRC waive 요청
+
+0.12.472(사용자 2026-11-14: "error 상태에 waive requested가 추가되어야 함. 즉 error -> waive request
+-> waive -> confirm 의 업무 흐름이며 role은 requester, waiver, confirmer로 나누어야 함"; app-core
+`drc::confirm`, `drc::desktop`). 요청자가 **어느 에러의 waive를 요청했는지**를 적는다. 요청자 자신의
+파일이고 그 사람의 요청자 세션(`floe2 view --role requester`)만 쓴다. waive 사이드카와 같은 자리에
+있고(pack 옆, 쓸 수 없으면 임시 폴더의 `.<db>.request.<리뷰어>-<경로 해시 12자>`) 그 세션이 처음 열 때
+만든다. 바이너리, little-endian. 모양은 waive 사이드카와 같고 매직만 다르다.
+
+```text
+헤더 40 B        : "FLOEREQS" | u32 1 | 내용 ID 앞 16 B | u64 err_total | u32 n_checks
+err_total 바이트 : 1 = 이 리뷰어가 그 에러의 waive를 요청함 (에러의 전역 번호 순)
+n_checks x u32   : 룰별 요청한 에러 수
+```
+
+- 요청자 세션의 상태 저장소가 이 파일이다: waive 사이드카가 하던 일(클릭마다 바이트 하나와 카운터를
+  제자리에 쓰고 요청 끝에 동기화)을 이 파일에 한다. 만들 때는 헤더 뒤가 모두 0이다(pack에 들어 있는
+  상태를 물려받지 않는다). 그 세션은 waive 사이드카를 만들지 않는다.
+- 요청의 사유는 그 리뷰어의 사유 파일(`.reasons`)에 `q` 줄로 적힌다.
+- **이 파일은 "누가 요청했나"만 말한다.** 에러의 상태는 전원의 파일에서 나온다: 누군가의 waive가
+  반려되지 않고 있으면 waived(확인자가 confirm했으면 confirmed), waive가 전부 반려됐으면 rejected,
+  waive는 없고 요청이 있으면 requested다.
+- **다른 세션도 읽는다.** waiver의 세션은 waive하기 전에 모든 요청 파일에서 그 에러의 바이트를 본다:
+  어디에도 1이 없으면 waive하지 않는다. 요청자의 세션은 요청을 되돌리기 전에 모든 waive 사이드카를
+  본다: 누군가 waive하고 있으면 되돌리지 않는다(app-core `confirm::Locks`의 `requested`·`waived`).
+  역할 세션은 확인 때마다(뷰어는 2초마다) 이 파일들을 다시 찾아 연다.
+- 다른 결과의 파일(헤더나 크기가 다름)은 세션이 열 때 `.stale-<시각>`으로 치우고, 통계는 `skipped`에
+  적는다.
+- 역할은 파일에 없다: 세션을 연 쪽이 정한다(`floe2 view --role`, 서비스의 `drc_open {role}`). 한
+  리뷰어가 요청자로도 waiver로도 열었다면 두 파일을 다 갖는다.
 
 ## `.<db>.confirm.<리뷰어>` — DRC waive의 confirm
 
@@ -607,6 +640,9 @@ waive했는지)은 여기 없다. waive 사이드카와 같은 자리에 있고(
            마지막으로 말한 값과 다를 때만 적는다(0.12.466). confirm하지 않는 리뷰어의 기록에는
            없고, 0.12.465의 읽는 쪽은 건너뛴다. b = 반려 기록(.rejects)의 시각(0.12.468;
            그 전에는 0이고, 그 전의 읽는 쪽은 보지 않는다). 둘 중 하나라도 달라지면 적는다
+  5 QSTAMP 이 변경들을 쓴 뒤 요청 파일(.request)의 시각: a (epoch ns, 파일이 없으면 0). 마지막으로
+           말한 값과 다를 때만 적는다(0.12.472). 요청하지 않는 리뷰어의 기록에는 없고, 그 전의
+           읽는 쪽은 건너뛴다
 ```
 
 - 헤더의 12~39바이트는 waive 사이드카 헤더의 같은 자리와 같다(결과의 식별). 기록 ID는 파일을 새로
@@ -631,22 +667,25 @@ waive했는지)은 여기 없다. waive 사이드카와 같은 자리에 있고(
 pack 옆에 하나 있다(리뷰어별이 아니다). 리뷰어 전원의 리뷰를 합친 수치(방문, waive, 검토 제외, conflict,
 done, 0.12.466부터 누군가 waive한 수와 그중 confirm된 수, 0.12.468부터 반려된 수)를 룰별·구간별로 갖고,
 리뷰어마다 변경 기록을 어디까지 읽었는지와 그때의 파일 시각을 갖는다. 지워도 된다: 다음 조회가 처음부터
-센다. 바이너리, little-endian. 버전 5(0.12.470: 수치가 아홉 개다 - 누군가 검토 제외로 둔 에러 수가
-늘었다; 4는 0.12.469로, 배치는 3과 같고 `rejected`의 뜻이 달라졌다)다: 다른 버전의 파일은 캐시가 아닌
-것으로 보고 다시 센다(0.12.469 이하의 명령과 번갈아 물으면 서로 다시 세어 고쳐 쓴다. 수치는 각자 옳다).
+센다. 바이너리, little-endian. 버전 6(0.12.472: 수치가 열한 개다 - 누군가 waive를 요청한 에러 수와
+그중 아무도 waive하지 않은 수가 늘었고, 리뷰어의 파일이 다섯이다; 5는 0.12.470으로 수치 아홉 개; 4는
+0.12.469로, 배치는 3과 같고 `rejected`의 뜻이 달라졌다)다: 다른 버전의 파일은 캐시가 아닌 것으로 보고
+다시 센다(0.12.471 이하의 명령과 번갈아 물으면 서로 다시 세어 고쳐 쓴다. 수치는 각자 옳다).
 
 ```text
-머리 : "FLOETEAM" | u32 5 | u32 n_checks | u32 길이 + 결과 fingerprint(hex) | u32 리뷰어 수
+머리 : "FLOETEAM" | u32 6 | u32 n_checks | u32 길이 + 결과 fingerprint(hex) | u32 리뷰어 수
        | n_checks x (u64 visited, waived, not_required, conflicts, done, waived_any, confirmed, rejected,
-                     not_required_any)
-       | 리뷰어마다: u16 길이 + ID | u64 기록 ID | u64 읽은 오프셋 | u64 x4 기록이 말한 시각
-                     | u64 x4 센 파일의 시각(waive, 방문 기록, confirm, 반려 기록)
+                     not_required_any, requested, unwaived)
+       | 리뷰어마다: u16 길이 + ID | u64 기록 ID | u64 읽은 오프셋 | u64 x5 기록이 말한 시각
+                     | u64 x5 센 파일의 시각(waive, 방문 기록, confirm, 반려 기록, 요청)
                      | u64 어긋남을 처음 본 시각(초, 0 = 없음)
-                     | u8 읽히는 파일(bit0 waive, bit1 방문 기록, bit2 confirm, bit3 반려 기록)
+                     | u8 읽히는 파일(bit0 waive, bit1 방문 기록, bit2 confirm, bit3 반려 기록,
+                          bit4 요청)
                      | u32 n + n x u32 손댄 룰
        | u64 구간 수 | u32 CRC-32(머리)
 구간 : 구간 수 x (u32 룰 | u32 구간 | u16 visited, waived, not_required, conflicts, done,
-                 waived_any, confirmed, rejected, not_required_any) | u32 CRC-32(구간)
+                 waived_any, confirmed, rejected, not_required_any, requested, unwaived)
+       | u32 CRC-32(구간)
 ```
 
 - 구간은 수치가 하나라도 있는 것만 있다(룰, 구간 순). 룰의 합은 그 룰 구간들의 합이다. 두 CRC, 결과의
@@ -655,6 +694,8 @@ done, 0.12.466부터 누군가 waive한 수와 그중 confirm된 수, 0.12.468�
   누군가 waive한 에러 수(conflict 포함), `confirmed`는 그중 확인자가 confirm한 수다.
   `unconfirmed` = `waived_any` − `confirmed`. `not_required_any`는 누군가 검토 제외로 둔 에러
   수(conflict 포함)이고, `--team-counts`의 `ignored`다(`waived`는 `waived_any`).
+  `requested`는 누군가 waive를 요청한 에러 수(waive된 것 포함, `--team-counts`의 `requested`),
+  `unwaived`는 그중 아무의 waive 사이드카에도 waive가 없는 수다(요청자 없이는 둘 다 0).
   반려된 waive는 앞의 어느 수에도 들지 않고(리뷰어의
   파일에는 그대로 있다), `rejected`는 waive가 전부 반려된 에러 수다(0.12.469: 리뷰어가 다시 waive하면
   그 사람의 waive는 다시 센다. 누가 무엇에 답했는지는 각자의 반려 기록에 있다).

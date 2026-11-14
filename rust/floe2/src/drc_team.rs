@@ -695,13 +695,19 @@ impl Session {
                         let confirmer = super::review(&mut shared.opened.lock().unwrap())?.confirmer();
                         // (`rejected_of`: whose waive of it is rejected;
                         // `history`: what their logs keep of their waives)
-                        Ok(json!({
+                        let mut reply = json!({
                             "check": check, "error": error,
                             "waived_by": row.waived_by, "confirmed_by": row.confirmed_by,
                             "reasons": row.reasons, "rejected_by": row.rejected_by,
                             "rejected_of": row.rejected_of, "history": row.history,
                             "confirmer": confirmer, "reviewer": c.id.reviewer,
-                        }))
+                        });
+                        // (`requested_by`: who asked for its waive, and why
+                        // - said when somebody did)
+                        if !row.requested_by.is_empty() {
+                            reply["requested_by"] = json!(row.requested_by);
+                        }
+                        Ok(reply)
                     })();
                     match result {
                         Ok(v) => shared.event(id, "team-row", "done", v),

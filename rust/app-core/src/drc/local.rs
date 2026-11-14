@@ -133,6 +133,75 @@ fn required_of(value: Option<&str>) -> bool {
     )
 }
 
+/// What a session does in the waive workflow (user 2026-11-14: "floe
+/// 사용자의 role 구분이 필요하며 error 상태에 waive requested가 추가되어야 함.
+/// 즉 error -> waive request -> waive -> confirm 의 업무 흐름이며 role은
+/// requester, waiver, confirmer로 나누어야 함"). The launcher's word, as the
+/// reviewer's id is (`floe2 view --role`): a role is what a session does,
+/// not a check of who its reviewer is. A session of a role does that role's
+/// step and no other: a requester asks for an error's waive, a waiver waives
+/// what was asked for, a confirmer confirms a waive or rejects it.
+///
+/// A session without one (`None`) is a reviewer as before the roles: it
+/// waives an error at once, and nothing is asked of anybody first.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Role {
+    #[default]
+    None,
+    Requester,
+    Waiver,
+    Confirmer,
+}
+
+impl Role {
+    /// From the launcher's word; None for a word that names no role.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "" | "none" => Some(Role::None),
+            "requester" => Some(Role::Requester),
+            "waiver" => Some(Role::Waiver),
+            "confirmer" => Some(Role::Confirmer),
+            _ => None,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Role::None => "",
+            Role::Requester => "requester",
+            Role::Waiver => "waiver",
+            Role::Confirmer => "confirmer",
+        }
+    }
+    pub fn of(byte: u8) -> Self {
+        match byte {
+            1 => Role::Requester,
+            2 => Role::Waiver,
+            3 => Role::Confirmer,
+            _ => Role::None,
+        }
+    }
+    /// Whether the session is of the workflow: one of the three roles.
+    pub fn any(self) -> bool {
+        self != Role::None
+    }
+}
+
+/// FLOE_ROLE_REQUIRED (`1`, `on`, `yes`, `true`): a DRC review is opened
+/// with a role or not at all - where a launcher runs everyone's viewer, a
+/// launch that forgot the role would otherwise waive as a reviewer of
+/// before the roles did, with nothing asked of anybody.
+pub fn role_required() -> bool {
+    required_of(env::var("FLOE_ROLE_REQUIRED").ok().as_deref())
+}
+
+/// What a host says of a review opened without a role where one is required.
+pub fn role_missing() -> Error {
+    Error::new(
+        ErrorKind::Admission,
+        "a role is required for DRC review here (FLOE_ROLE_REQUIRED): start the viewer with --role requester, --role waiver or --role confirmer",
+    )
+}
+
 /// `reviewer`, refused when a stated id is required here and none was given
 /// (`reviewer_required`): the refusal says what the id would have been and
 /// why that is not one person's.

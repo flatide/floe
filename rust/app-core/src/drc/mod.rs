@@ -30,8 +30,8 @@ pub use filters::{ListPage, ListRequest};
 pub(crate) use local::open_pack_directory;
 pub use local::{
     is_packed_source, open_current, open_pack, required_reviewer, reviewer, reviewer_required,
-    reviewer_tag,
-    select_current_source, select_review, waive_paths, ReadSelection, Reviewer, ReviewerSource,
+    reviewer_tag, role_missing, role_required,
+    select_current_source, select_review, waive_paths, ReadSelection, Reviewer, ReviewerSource, Role,
     SourceSelection,
 };
 pub use measure::{cd_segments, cd_segments_um, measured, measured_um, CdSegment};

@@ -109,6 +109,25 @@ def confirmer_on(args, environ=None):
         "1", "on", "yes", "true")
 
 
+ROLES = ("requester", "waiver", "confirmer")
+
+
+def role_of(args, environ=None):
+    """What this viewer's user does in the waive workflow (user 2026-11-14:
+    "error -> waive request -> waive -> confirm 의 업무 흐름이며 role은
+    requester, waiver, confirmer로 나누어야 함"): `--role NAME`, or FLOE_ROLE
+    in the launcher's environment - "" when neither says one (a reviewer as
+    before the roles). A role the launcher gives, as it gives the user ID.
+    A word that names no role is an error: a launch that meant a role must
+    not open the review without one."""
+    environ = os.environ if environ is None else environ
+    word = (getattr(args, "role", None) or environ.get("FLOE_ROLE") or "").strip().lower()
+    if word and word not in ROLES:
+        raise SystemExit("floe2 view: --role / FLOE_ROLE is one of %s, not %r"
+                         % (", ".join(ROLES), word))
+    return word
+
+
 def _is_deck(src):
     return bool(src) and str(src).lower().endswith(".jb")
 
@@ -281,6 +300,7 @@ def cmd_view(args):
     # is made. --multi still opens a window of its own.
     no_load = file_load_off(args)
     confirmer = confirmer_on(args)
+    role = role_of(args)
     # the reviewer this launch states (main() put --userid in the
     # environment): sent along - a window serves the request under it
     stated = (os.environ.get("FLOE_REVIEWER") or "").strip()
@@ -350,6 +370,9 @@ def cmd_view(args):
         # the results are opened as a confirmer's (--confirmer)
         if confirmer:
             request += "\tconfirmer=1"
+        # ... or as a session of a role's (--role)
+        if role:
+            request += "\trole=" + role
         # the layout's layer properties file: the window applies it to the
         # layout the request opens, or to the one it shows when that is it
         if props:
@@ -431,6 +454,7 @@ def cmd_view(args):
                           else args.occupancy == "on"),
                file_load=not no_load,
                confirmer=confirmer,
+               role=role,
                layerprops=props if c is not None else None,
                drc_pick=(drc_rule, drc_err) if drc_rule else None)
 
@@ -441,7 +465,7 @@ def parser():
         description="native desktop viewer (GTK3); one instance per (uid, "
                     "DISPLAY) - later calls hand their request (the layout, "
                     "--layerprops, --drc, --rules, --drc-rule, --drc-err, "
-                    "--userid, --no-file-load, --confirmer "
+                    "--userid, --no-file-load, --confirmer, --role "
                     "and the view options) to it and the window switches; "
                     "--multi opens a window of its own",
         epilog="--workdir DIR (every floe2 command, anywhere on the line; "
@@ -646,6 +670,26 @@ def parser():
                         "FLOE_CONFIRMER=1 (on / yes / true) in the "
                         "launcher's environment does the same. Forwarded "
                         "to a running instance with the results it opens")
+    # what the user does in the waive workflow (user 2026-11-14)
+    p.add_argument("--role", choices=ROLES, default=None,
+                   help="open the DRC results as a session of this role: "
+                        "error -> waive requested -> waived -> confirmed, "
+                        "each step its role's. A requester asks for an "
+                        "error's waive (w, with a reason; kept in "
+                        ".DB.request.ID) and takes the request back while "
+                        "nobody has waived the error. A waiver waives the "
+                        "errors somebody asked the waive of, and no other. "
+                        "A confirmer confirms and rejects waives (DRC > "
+                        "team waives…) and waives none. The error list's "
+                        "filter shows the errors of one state - Not "
+                        "Waived, Requested, Waived, Confirmed, Rejected - "
+                        "as everybody's files say them. Without the option "
+                        "the viewer is a reviewer's as before: it waives "
+                        "at once, nothing asked of anybody (refused where "
+                        "FLOE_ROLE_REQUIRED=1 asks for a role). FLOE_ROLE "
+                        "in the launcher's environment does the same. "
+                        "Forwarded to a running instance with the results "
+                        "it opens")
     return p
 
 

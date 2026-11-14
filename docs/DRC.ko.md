@@ -187,8 +187,8 @@ python -m floe render chip.oas --drc results.db \
     (app-core `drc::team::stats`; DRC-CLI.ko.md §2b). 뷰어 없이 스크립트가 수집하는 표면이다.
     팀 합계만 한 줄로 받아 그대로 넘기는 쪽에는 `floe2 drc DB --team-counts [--rule NAME |
     --all-rules] [--out FILE]`가 있다(0.12.470, 사용자 2026-11-14; DRC-CLI.ko.md §2d): 전체와,
-    에러가 있는 룰마다(`--all-rules`면 에러가 없는 룰까지, `--rule`이면 그 룰만) `errors`·`waived`·
-    `confirmed`·`rejected`·`visited`·`ignored` 여섯 숫자다. 출력을 받는 양에 한계가 있는 호출자는
+    에러가 있는 룰마다(`--all-rules`면 에러가 없는 룰까지, `--rule`이면 그 룰만) `errors`·`requested`
+    (0.12.472)·`waived`·`confirmed`·`rejected`·`visited`·`ignored` 일곱 숫자다. 출력을 받는 양에 한계가 있는 호출자는
     `--out FILE`로 그 한 줄을 파일로 받는다(0.12.471): 파일은 통째로 바뀌고, 답을 내지 못한 호출은
     이전 답을 지워서 파일이 이번 답이거나 없다.
     실시간으로 묻는 쪽에는 `floe2 drc DB --review-counts [--rule NAME]`가 있다(0.12.464, 사용자
@@ -489,6 +489,53 @@ python -m floe render chip.oas --drc results.db \
     `All`에서는 waive된 수(confirm된 것 포함), `Not Waived`에서는 그 필터가 뺀 수다. 목록의 에러
     번호는 not waived 빨강, waived·confirmed 초록, rejected 주황이고, 상세 첫 줄이 상태를 말한다.
     확인자들이 confirm하거나 반려하면 2초 주기 확인에서 목록이 따라간다.
+  - **역할과 waive 요청**(0.12.472, 사용자 2026-11-14: "floe 사용자의 role 구분이 필요하며 error
+    상태에 waive requested가 추가되어야 함. 즉 error -> waive request -> waive -> confirm 의 업무
+    흐름이며 role은 requester, waiver, confirmer로 나누어야 함"; app-core `drc::Role`, `drc::desktop`):
+    - **흐름**: 에러, waive 요청, waive, confirm의 네 단계이고 단계마다 그 역할의 세션이 한다. 한
+      세션은 한 역할의 일만 한다. 반려는 전과 같다: 확인자가 waive를 반려하면 rejected이고, waive한
+      사람이 사유를 주며 다시 waive한다.
+    - **역할 주기**: 런처가 정한다. `floe2 view … --role requester|waiver|confirmer`(런처 환경의
+      `FLOE_ROLE`도 같다). 떠 있는 창으로 넘어가는 요청에는 `role=`로 실리고, 같은 결과가 다른 역할로
+      열려 있으면 다시 연다. 로드의 상태 줄 끝에 역할이 붙는다(` · reviewer kim · waiver`). 역할은 그
+      세션이 하는 일이지 사용자가 누구인지의 확인이 아니다(ID가 그렇듯 런처의 말이다).
+    - **requester**: `w`가 waive 요청이다(사유 입력창의 제목이 `Request reason`). 요청은 그 사람의
+      파일 `.<db>.request.<리뷰어>`에 적힌다(waive 사이드카와 같은 모양, 첫 열기 때 만든다. 이 세션은
+      waive 사이드카를 만들지 않는다). 사유는 그 사람의 사유 파일에 `q` 줄로 남는다. 아무 에러나
+      요청할 수 있다. 누군가 그 에러를 waive하고 있는 동안에는 요청을 되돌리지 못한다:
+      `locked: N request(s) in RULE waived by kim - not taken back while waived`.
+    - **waiver**: 누군가 요청한 에러만 waive한다. 요청이 없는 에러는 남기고 말한다
+      (`… · K not requested`, 전부면 `not requested: K error(s) in RULE - a waiver waives the errors
+      somebody asked the waive of`). job, `load waives…`, 동료 결정 적용, 이전 실행 승계도 같다. 사유
+      입력창이 누가 요청했는지를 말한다(`Requested by park`). confirm된 waive의 잠금과 반려에 대한
+      답은 위와 같다. waive를 되돌리면 그 에러는 다시 requested다.
+    - **confirmer**: confirm과 반려만 한다(`team waives…` 창). 상태를 쓰지 않는다: `w`는 거절되고
+      상태 줄이 그렇게 말한다.
+    - **상태**: 역할 세션의 목록은 그 **에러의** 상태를 전원의 파일에서 읽는다(요청 파일, waive
+      사이드카, confirm 파일, 반려 기록). not waived(아무도 요청하지도 waive하지도 않음), requested
+      (요청됐고 아무도 waive하지 않음), waived, confirmed, rejected. 필터 콤보에 `Requested`가
+      생기고(`All`·`Not Waived`·`Requested`·`Waived`·`Confirmed`·`Rejected`), 목록의 번호는
+      requested가 하늘색이다. 다른 사람의 요청, waive, confirm, 반려는 2초 주기 확인에서 따라오고,
+      자기 세션이 한 것은 바로 보인다. `w`의 방향은 자기 표시(요청자의 요청, waiver의 waive)가 정한다.
+    - **누가 요청했나**: 에러 상세의 `waive requested by: park (사유)` 줄, 그리고 `team waives…`
+      창의 `Requested` 목록(요청됐고 아직 waive되지 않은 에러. Reason 열에 `requested by park: 사유`).
+    - **역할 없는 실행**: 전과 같은 리뷰어다. 바로 waive하고 목록은 자기 waive의 상태를 보인다. 그
+      waive는 팀의 waive로 센다(요청 없이 된 waive다). `--confirmer`도 전과 같다(리뷰어이면서
+      확인자). `FLOE_ROLE_REQUIRED=1`(`on`·`yes`·`true`)이면 역할 없이는 리뷰를 열지 않고 거절이
+      `--role`을 말한다.
+    - **통계**: `--team-counts`의 여섯 숫자에 `requested`가 더해져 `errors` 다음에 온다(누군가 요청한
+      에러, waive된 것 포함). `--review-counts`·`--review-stats`의 `team`은 요청이 하나라도 있으면
+      `requested`와 `unwaived`(요청됐고 아무도 waive하지 않은 것)를 내고, 요청자의 줄에 `requested`와
+      `request_file`이 나온다(DRC-CLI.ko.md §2b~§2d).
+    - **하지 않는 것**: waiver가 요청을 거절하는 상태는 없다(요청자가 되돌리거나 그대로 둔다).
+      한 사용자가 어느 역할인지를 floe가 확인하지 않는다. `--role confirmer`의 세션도 자기 ID의 waive
+      사이드카를 만든다(쓰지는 않는다). 그 확인자가 방문한 waive는 `--review-counts`의 `conflicts`로
+      세어질 수 있다(방문하고 waive하지 않은 사람으로 보기 때문이다. `--team-counts`는 합집합이라
+      영향이 없다). 캔버스의 마커 색은 waive 여부 둘뿐이다(requested는 not waived 색). 웹의 리뷰
+      저장소는 역할과 요청을 모른다. 0.12.471 이하의 뷰어는 요청 파일을 읽지 않는다.
+    - 게이트 `drc_team` R19·R7, 단위 테스트 app-core `drc::tests`
+      (`the_roles_take_an_error_from_a_request_to_a_confirmation`), `drc::changes`, `drc::team::live`,
+      `drc::team::stats`.
   - **하지 않는 것**: 메인 목록과 캔버스의 상태는 내 waive의 것이다: 남이 waive한 에러는 내 목록에서
     not waived이고, 팀 전체는 `team waives…` 창과 에러 상세에서 본다. 캔버스의 마커 색은 전처럼
     waive 여부 둘뿐이다(rejected는 not waived 색). `.floereview`·`save waives as…`·

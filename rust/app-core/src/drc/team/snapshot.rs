@@ -1255,6 +1255,11 @@ pub struct Applied {
     /// when there are any)
     #[serde(skip_serializing_if = "crate::drc::team::is_zero")]
     pub rejected: u64,
+    /// errors the source has waived that nobody asked the waive of: not
+    /// waived by a waiver's session (0.12.472; said only when there are
+    /// any)
+    #[serde(skip_serializing_if = "crate::drc::team::is_zero")]
+    pub unrequested: u64,
 }
 
 /// Apply `source`'s known waive and not-required decisions over its work
@@ -1353,9 +1358,10 @@ pub fn apply(
                     // (one confirmed or rejected since the looks above
                     // stays too)
                     let kept = r.write_status_span(rule, k * CHUNK, &before, &after)?;
-                    result.changed_waived += change_w.count() - kept.locked - kept.rejected;
+                    result.changed_waived += change_w.count() - kept.locked - kept.rejected - kept.unrequested;
                     result.locked += kept.locked;
                     result.rejected += kept.rejected;
+                    result.unrequested += kept.unrequested;
                     changed(rule);
                 }
             }

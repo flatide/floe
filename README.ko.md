@@ -78,6 +78,7 @@ rust/target/release/floe2                            # 인자 없음 = view
 | `--stream-kb KB` | 점진 페인트 라운드 예산 고정 (0=비활성; 기본 적응형 24576) |
 | `--multi` | 단일 인스턴스 소켓 무시하고 새 창 |
 | `--confirmer` | DRC 결과를 확인자(confirmer)로 연다(0.12.466). DRC 메뉴 `team waives…`가 팀 전원의 waive를 누가·왜와 함께 보여 주고, 이 옵션으로 띄운 뷰어만 그것을 confirm한다. confirm된 waive는 잠겨서 이 옵션 없이 띄운 뷰어는 되돌리지 못하고, 확인자가 confirm을 취소하거나 이 옵션으로 띄운 뷰어가 되돌린다(0.12.467). 이 옵션으로 띄운 뷰어는 waive를 반려할 수도 있다: 반려된 waive는 세지 않고 그 리뷰어에게 rejected 상태로 남으며, 리뷰어가 사유를 고쳐 다시 waive하면 다시 확인을 기다린다. 이전 사유와 반려 사유는 남는다(0.12.468, 0.12.469; 기록은 `.<db>.rejects.<ID>`). 메인 목록의 필터는 All·Not Waived·Waived·Confirmed·Rejected다. 기록은 확인자 자신의 `.<db>.confirm.<ID>`에 남고 `floe2 drc --review-counts`·`--review-stats`가 `confirmed`·`unconfirmed`로 센다. 옵션이 없으면 그 창은 읽기 전용이다. 런처 환경의 `FLOE_CONFIRMER=1`도 같다. 같은 DISPLAY에 창이 떠 있으면 요청과 함께 간다(DRC.ko.md §2) |
+| `--role requester\|waiver\|confirmer` | DRC 결과를 그 역할의 세션으로 연다(0.12.472): 에러, waive 요청, waive, confirm의 흐름에서 그 세션이 하는 단계다. requester는 `w`로 waive를 요청하고(`.<db>.request.<ID>`), waiver는 누군가 요청한 에러만 waive하고, confirmer는 confirm과 반려만 한다. 목록의 필터에 `Requested`가 생기고 상태는 전원의 파일에서 읽는다. 옵션이 없으면 전과 같은 리뷰어다(바로 waive). 환경변수 `FLOE_ROLE`도 같고, 떠 있는 창으로 넘어간 요청이면 그 결과가 그 역할로 열린다. DRC.ko.md §2 |
 | `--no-file-load` | 뷰어 안에서 고른 파일을 읽지 않는다(0.12.445). File 메뉴의 load layout…·load jobdeck…, DRC 메뉴의 로드 명령 여섯 개, 레이어 메뉴의 load layer properties…가 비활성이다. 명령줄의 소스·`--layerprops`·`--drc`·`--rules`는 그대로 읽고 저장·내보내기도 그대로다. 한 계정으로 여러 사람의 뷰어를 띄우는 런처용이며 환경변수 `FLOE_NO_FILE_LOAD=1`도 같다. 떠 있는 창으로 넘어간 요청이면 그 창의 로드가 꺼지고 다시 켜지지 않는다(docs/SPEC-VIEWER.ko.md §7) |
 
 터미널에는 스트리밍 라운드마다 `[perf] gen=.. round=.. new=.. bytes=..
@@ -168,6 +169,8 @@ fit·clip·open .db·rules 기능을 노출한다(구 패널 버튼들은 메뉴
 | `FLOE_NO_FILE_LOAD` | `1`·`on`·`yes`·`true`면 `floe2 view --no-file-load`와 같다: 뷰어의 파일 로드 명령을 끈다(런처 환경용, 0.12.445) |
 | `FLOE_WAIVE_SYNC` | `off`면 waive 쓰기를 요청마다 디스크에 동기화하지 않고 커널에 맡긴다(0.12.445까지의 동작. 기본은 동기화, 0.12.446) |
 | `FLOE_CONFIRMER` | `1`·`on`·`yes`·`true`면 `floe2 view --confirmer`와 같다: 이 뷰어의 사용자는 팀의 waive를 confirm하거나 반려하고, confirm되어 잠긴 waive를 되돌릴 수 있다(런처 환경용, 0.12.466; 잠금은 0.12.467, 반려는 0.12.468) |
+| `FLOE_ROLE` | `requester`·`waiver`·`confirmer`: `floe2 view --role`과 같다(런처 환경용, 0.12.472). 역할이 아닌 말이면 뷰어가 뜨지 않는다 |
+| `FLOE_ROLE_REQUIRED` | `1`·`on`·`yes`·`true`면 역할 없이는 DRC 리뷰를 열지 않는다(0.12.472): `--role`이나 `FLOE_ROLE` 없이 띄운 뷰어가 예전처럼 바로 waive하는 일을 막는다 |
 | `FLOE_TEAM_KEEP` | `off`면 DRC 팀 합계를 위해 아무것도 쓰지 않는다: 뷰어는 리뷰의 변경 기록(`.<db>.changes.<리뷰어>`)을 쓰지 않고 있던 것을 지우며, `floe2 drc --review-counts`는 `.<db>.team`을 쓰지 않고 답할 때마다 센다. 수치는 같다(0.12.465) |
 | `FLOE_TEAM_GRACE_S` | `floe2 drc --review-counts`의 팀 합계가, 기록 없이 바뀐 리뷰 파일의 기록을 기다리는 초(기본 10. `0`이면 기다리지 않고 바로 다시 센다. 0.12.465) |
 | `FLOE_PICK_VISIBLE` | `off`면 pick이 그 자리에서 다른 레이어에 가려 보이지 않는 도형도 후보로 삼는다(0.12.455까지의 대상. 기본은 눈에 보이는 도형만, 0.12.456). 작은 것부터 순환하는 순서는 어느 쪽이든 같다 |

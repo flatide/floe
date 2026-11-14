@@ -32,6 +32,10 @@
 //!            nothing never says it (0.12.466; a reader of 0.12.465 passes
 //!            it over). b = the time of the reviewer's rejects log likewise
 //!            (0.12.468; 0 until then, and to a reader of before)
+//!   5 QSTAMP the reviewer's request file as these changes left it: a = its
+//!            time (0 = no file). Said likewise, only when the time is
+//!            another - a reviewer who asks for no waive never says it
+//!            (0.12.472; a reader of before passes it over)
 //! ```
 //!
 //! The records of a change are appended when the change is settled - the end
@@ -58,6 +62,7 @@ pub const TOUCH: u32 = 1;
 pub const STAMP: u32 = 2;
 pub const RESET: u32 = 3;
 pub const CSTAMP: u32 = 4;
+pub const QSTAMP: u32 = 5;
 /// The errors of one chunk (the review flags' and the team counts' unit).
 pub const CHUNK: u64 = 4096;
 /// A log past this size is started again at the next open (its readers count
@@ -93,17 +98,20 @@ pub fn stamp_at(path: &Path) -> u64 {
 }
 
 /// A reviewer's files' times as the log says them: the waive sidecar's,
-/// the flags file's, the confirm file's, the rejects log's (0: no file).
-pub type Stamps = [u64; 4];
+/// the flags file's, the confirm file's, the rejects log's, the request
+/// file's (0: no file).
+pub type Stamps = [u64; 5];
 
 /// The times the log has said once `records` follow a log that had said
-/// `base`: the last STAMP's two and the last CSTAMP's two.
+/// `base`: the last STAMP's two, the last CSTAMP's two and the last
+/// QSTAMP's.
 pub fn stamps_after(base: Stamps, records: &[Record]) -> Stamps {
     let mut said = base;
     for record in records {
         match record.kind {
             STAMP => (said[0], said[1]) = (record.a, record.b),
             CSTAMP => (said[2], said[3]) = (record.a, record.b),
+            QSTAMP => said[4] = record.a,
             _ => (),
         }
     }
@@ -141,10 +149,15 @@ impl Record {
 /// The log's name, from the waive sidecar's (same folder, reviewer and - in
 /// the temp folder - path hash). A name that is no waive sidecar's gets
 /// `.changes` after it: the log is never the file it was named from.
+///
+/// A request file's name gives the same log (a reviewer who only asks has no
+/// waive sidecar to name it from): one log a reviewer, whatever they do.
 pub fn path_beside(waive: &Path) -> PathBuf {
     let name = waive.file_name().unwrap_or_default().to_string_lossy();
     if name.contains(".waive.") {
         waive.with_file_name(name.replacen(".waive.", ".changes.", 1))
+    } else if name.contains(".request.") {
+        waive.with_file_name(name.replacen(".request.", ".changes.", 1))
     } else {
         waive.with_file_name(format!("{name}.changes"))
     }
@@ -223,6 +236,8 @@ pub struct ChangeLog {
     confirm: PathBuf,
     /// the reviewer's rejects log (drc::reasons, a confirmer's)
     rejects: PathBuf,
+    /// the reviewer's request file (drc::confirm, a requester's)
+    request: PathBuf,
     file: Option<File>,
     /// statuses written and not said yet - they are said once flushed, by
     /// `settle`: rule -> inclusive chunk ranges
@@ -253,6 +268,7 @@ impl ChangeLog {
             flags: None,
             confirm: super::confirm::path_beside(waive),
             rejects: super::confirm::rejects_beside(waive),
+            request: super::confirm::request_beside(waive),
             file: None,
             written: BTreeMap::new(),
             committed: BTreeMap::new(),
@@ -272,7 +288,7 @@ impl ChangeLog {
                         }
                     }
                     if tail.records.iter().any(|r| r.kind == STAMP) {
-                        me.last = Some(stamps_after([0; 4], &tail.records));
+                        me.last = Some(stamps_after([0; 5], &tail.records));
                     }
                 }
                 None => {
@@ -313,6 +329,7 @@ impl ChangeLog {
             flags: None,
             confirm: PathBuf::new(),
             rejects: PathBuf::new(),
+            request: PathBuf::new(),
             file: None,
             written: BTreeMap::new(),
             committed: BTreeMap::new(),
@@ -344,6 +361,7 @@ impl ChangeLog {
             self.flags.as_deref().map_or(0, stamp_at),
             stamp_at(&self.confirm),
             stamp_at(&self.rejects),
+            stamp_at(&self.request),
         ]
     }
 
@@ -469,8 +487,12 @@ impl ChangeLog {
             }
         }
         bytes.extend(Record { kind: STAMP, rule: 0, a: stamps[0], b: stamps[1] }.bytes());
-        if stamps[2..] != self.last.map_or([0; 4], |last| last)[2..] {
+        let last = self.last.unwrap_or([0; 5]);
+        if stamps[2..4] != last[2..4] {
             bytes.extend(Record { kind: CSTAMP, rule: 0, a: stamps[2], b: stamps[3] }.bytes());
+        }
+        if stamps[4] != last[4] {
+            bytes.extend(Record { kind: QSTAMP, rule: 0, a: stamps[4], b: 0 }.bytes());
         }
         match self.append(&bytes) {
             Ok(()) => self.last = Some(stamps),
@@ -662,6 +684,45 @@ mod tests {
         assert!(read(&f.0.join("none"), &ID, None).is_none());
     }
 
+    /// A requester's request file is one of the reviewer's files (0.12.472):
+    /// its time is said in a record of its own, when it is another - and the
+    /// log is the one the request file's name gives too.
+    #[test]
+    fn the_request_files_time_is_said_when_it_is_another() {
+        let f = Folder::new();
+        let request = f.0.join(".x.db.request.kim");
+        assert_eq!(path_beside(&request), f.log());
+        let mut log = f.open();
+        log.touched(0, 0, 0);
+        log.settle();
+        assert_eq!(f.records().len(), 2, "no request file: no word of one");
+        fs::write(&request, b"request").unwrap();
+        log.touched(0, 1, 1);
+        log.settle();
+        let (waive, said) = (stamp_at(&f.waive()), stamp_at(&request));
+        assert_eq!(f.records()[2..], [(TOUCH, 0, 1, 1), (STAMP, 0, waive, 0), (QSTAMP, 0, said, 0)]);
+        log.touched(0, 2, 2);
+        log.settle();
+        assert_eq!(f.records()[5..], [(TOUCH, 0, 2, 2), (STAMP, 0, waive, 0)]);
+        let all = read(&f.log(), &ID, None).unwrap().records;
+        assert_eq!(stamps_after([0; 5], &all), [waive, 0, 0, 0, said]);
+        drop(log);
+        // changed without a word: a RESET at the next open, and its time
+        let flags = f.0.join(".x.db.review.kim.sqlite3");
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        File::options().write(true).open(&request).unwrap().set_modified(later).unwrap();
+        let mut log = f.open();
+        log.attach_flags(&flags);
+        let now = f.records();
+        assert_eq!(now.len(), 10);
+        assert_eq!((now[7], now[9]), ((RESET, 0, 0, 0), (QSTAMP, 0, stamp_at(&request), 0)));
+        drop(log);
+        // ... and as it was said: no word
+        let mut log = f.open();
+        log.attach_flags(&flags);
+        assert_eq!(f.records().len(), 10);
+    }
+
     #[test]
     fn the_confirm_files_time_is_said_when_it_is_another() {
         let f = Folder::new();
@@ -681,9 +742,9 @@ mod tests {
         log.settle();
         assert_eq!(f.records()[5..], [(TOUCH, 0, 2, 2), (STAMP, 0, waive, 0)]);
         let all = read(&f.log(), &ID, None).unwrap().records;
-        assert_eq!(stamps_after([0; 4], &all), [waive, 0, said, 0]);
-        assert_eq!(stamps_after([7, 8, 9, 6], &all[..1]), [7, 8, 9, 6]);
-        assert_eq!(stamps_after([7, 8, 9, 6], &all[..2]), [waive, 0, 9, 6]);
+        assert_eq!(stamps_after([0; 5], &all), [waive, 0, said, 0, 0]);
+        assert_eq!(stamps_after([7, 8, 9, 6, 5], &all[..1]), [7, 8, 9, 6, 5]);
+        assert_eq!(stamps_after([7, 8, 9, 6, 5], &all[..2]), [waive, 0, 9, 6, 5]);
         drop(log);
         // the next session finds the three as they were said: no word
         let flags = f.0.join(".x.db.review.kim.sqlite3");
@@ -723,7 +784,7 @@ mod tests {
         log.settle();
         assert_eq!(f.records()[20], (CSTAMP, 0, stamp_at(&confirm), said));
         let all = read(&f.log(), &ID, None).unwrap().records;
-        assert_eq!(stamps_after([0; 4], &all), [waive, 0, stamp_at(&confirm), said]);
+        assert_eq!(stamps_after([0; 5], &all), [waive, 0, stamp_at(&confirm), said, 0]);
         drop(log);
         // changed without a word (a session that ended before it could
         // say): the next one's RESET, with its time

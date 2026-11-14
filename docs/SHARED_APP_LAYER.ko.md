@@ -724,6 +724,21 @@ P4d처럼 컨트롤러 루프에서만 바뀐다. `FLOE_GTK_LOOP=legacy`는 예�
 - **한계:** 두 확인자가 엇갈리면(한 사람 confirm, 다른 사람 반려) 답하거나 풀리는 순간 남아 있던 confirm이 다시 세어진다(confirm 바이트에는 시각이 없다). 확인자의 첫 반려(새 파일)와 다른 호스트의 반려는 다음 확인에서 보인다. 0.12.468의 뷰어는 버전 2의 기록을 읽지 않는다(반려를 따르지 않는다. 그 사람 자신의 0.12.468 세션이 열면 기록을 `.stale`로 치운다). `save waives as…`의 파일은 바이트 그대로라 rejected인 waive도 waive로 들어 있다.
 - **게이트:** `drc_team` R17·R7(R15·R16은 상태 바이트 3을 waive로 읽게 고침), 단위 app-core `drc::tests`(`a_rejected_waive_is_a_state_until_its_reviewer_waives_it_again`), `drc::reasons`(`what_a_reviewer_answered_is_kept_as_it_was`), `drc::confirm`(누가 언제의 반려인가, 답), `drc::team::live`(`a_rejected_waive_is_listed_until_its_reviewer_waives_it_again`, 다시 waive를 섞은 무작위 300단계), `drc::team::stats`.
 
+## 27. 역할과 waive 요청 (2026-11-14, app 0.12.472) — 역할의 규칙과 상태 판정은 공유 Rust, 역할을 주는 것과 표시는 호스트
+
+사용자: "floe 사용자의 role 구분이 필요하며 error 상태에 waive requested가 추가되어야 함. 즉 error -> waive request -> waive -> confirm 의 업무 흐름이며 role은 requester, waiver, confirmer로 나누어야 함."
+
+- **역할:** `drc::Role::{None, Requester, Waiver, Confirmer}`. 호스트가 열 때 준다: `Review::open_as(pack, source, reviewer, role, cancelled)`, `Opened::load_as(path, reviewer, role, cancelled)`. `None`은 전과 같은 리뷰어다(바로 waive, 자기 waive의 상태). `drc::role_required()`(`FLOE_ROLE_REQUIRED`)와 `role_missing()`은 호스트가 열기 전에 묻는다(CLI의 읽기 명령은 묻지 않는다).
+- **상태 저장소:** requester 세션의 것은 `.<db>.request.<리뷰어>`다(`confirm::request_beside`·`request_header_of`, 매직 `FLOEREQS`, 첫 열기에 0으로 만든다). 그 밖의 세션은 waive 사이드카다. `Review::mark()`가 그 세션의 표시가 무엇의 사유인지 말한다(`Kind::Request` / `Kind::Waive`): 호스트는 표시의 사유를 `reason_set(r.mark(), …)`로 준다. 리뷰어의 다른 파일(사유, note, 방문 기록, 변경 기록, 세션 잠금)은 역할과 무관하게 한 벌이다.
+- **쓰기 규칙(`set_status`·`set_status_range`·`write_status_span`·`waive_import`):** requester의 표시는 요청이고, 누군가 waive하고 있는 에러의 요청은 되돌리지 않는다(`Left.locked`, `confirmers_of`가 waive한 사람을 말한다). waiver는 누군가 요청한 에러만 waive한다(`Left.unrequested`·`Kept.unrequested`, `Review::requested`·`requesters_of`). confirmer는 상태를 쓰지 않는다(`ErrorKind::Unsupported`). confirm과 반려는 `Review::confirmer()`가 참인 세션(역할 confirmer, 또는 전의 `set_confirmer`)의 것이다.
+- **상태 읽기:** 역할 세션의 `states`·`lensed`·`lens_counts`·`state_counts`는 **에러의** 상태다: 자기 파일과 `confirm::Peers`(전원의 요청 파일, waive 사이드카, confirm 파일; `Locks::follow`가 찾는다)로 만든다. `STATE_REQUESTED`(4), `Lens::Requested`. `statuses`·`status`·`status_counts`와 `StatusReader::statuses`는 역할과 무관하게 **자기 표시**다(동작의 방향을 정하는 것). 개수는 룰 단위로 세어 두고(`tally`), 자기 쓰기와 `look`이 찾은 변화(`Peers::moved`)에서 그 룰만 다시 센다. `steps`는 역할 세션에서 거짓이다.
+- **따라가기:** `Review::look()`이 요청 파일과 waive 사이드카도 다시 찾아 연다. `Looked.changed`와 `rules`가 호스트에 다시 읽을 것을 말한다. 역할 세션이 한 confirm과 반려는 그 요청이 끝날 때 바로 읽는다(`sync_waives`).
+- **팀:** `stats::Found.request`, `Planes.requested`, `Team.requested`(누군가 요청한 에러)·`unwaived`(그중 아무도 waive하지 않은 것), `Brief.requested`. `.team`은 버전 6(수치 11개, 리뷰어 파일 다섯), 변경 기록에 `QSTAMP`(요청 파일의 시각). `waives::Kind::Requested` 목록과 `Row.requested_by`.
+- **서비스:** `drc_open {role}`(답의 `role`), `drc_status`의 4, `drc_lens {lens: requested}`, `drc_own {check, start, count}`(자기 표시), `drc_set_status`·review job·`drc_waive_import`의 `unrequested`(있을 때만), `drc_reason_read`의 `requested_by`·`request`(있을 때만), `drc_team_waives {show: requested}`, `drc_team_waive_get`의 `requested_by`(있을 때만).
+- **호스트가 정하는 것:** 역할을 누가 주는가(뷰어는 `floe2 view --role`·`FLOE_ROLE`·요청의 `role=`), 필터에 `Requested`를 보일지, 문구. 웹이 같은 흐름을 가지려면 자기 저장소에 요청과 역할의 규칙을 더해야 한다(지금은 없다).
+- **한계:** 요청을 거절하는 상태는 없다. `--role confirmer`의 세션도 자기 waive 사이드카를 만든다(쓰지 않는다): 그 확인자의 방문이 `--review-counts`의 conflict로 세어질 수 있다. 캐시된 Peers의 룰별 카운터가 0이던 파일은 다음 확인까지 그 룰에서 읽지 않는다(2초).
+- **게이트:** `drc_team` R19·R7, `rust_renderer`(`--role`의 요청 줄), 단위 app-core `drc::tests`(`the_roles_take_an_error_from_a_request_to_a_confirmation`), `drc::changes`(`the_request_files_time_is_said_when_it_is_another`), `drc::team::live`(판정 표의 요청 파일), `drc::team::stats`(`the_team_counts_the_requests_and_the_ones_that_wait`).
+
 ## 26. 팀 합계 한 줄 (2026-11-14, app 0.12.470) — 수치와 글자는 공유 Rust, 호스트는 그대로 내보낸다
 
 사용자: "팀 작업 통계 cli 명령의 결과를 다음과 같이 간략하게 받고 싶음. 빈번히 조회되는 것이어서 데이터량을 줄이고 ProperTee에서 별도의 처리없이 넘기려는 의도임. 특정 룰이 옵션에 명시되면 전체와 해당 룰만 포함하고 특정 룰이 없을 경우 전체와 모든 룰을 포함해서 출력해줘."

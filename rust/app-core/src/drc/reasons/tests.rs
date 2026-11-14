@@ -239,7 +239,8 @@ fn the_runs_say_what_an_error_long_table_says() {
     let f = Folder::new();
     let mut r = f.open(&[N, 50]);
     // (a kind's own table: the rejections' too, 0.12.468)
-    let mut table: [Vec<Option<String>>; 3] = [vec![None; N as usize], vec![None; N as usize], vec![None; N as usize]];
+    // (a kind's slot: the four kinds an error holds a reason of)
+    let mut table: [Vec<Option<String>>; 6] = std::array::from_fn(|_| vec![None; N as usize]);
     let mut seed = 0x2545_f491_4f6c_dd1du64;
     let mut next = |below: u64| {
         seed ^= seed << 13;
@@ -248,7 +249,7 @@ fn the_runs_say_what_an_error_long_table_says() {
         seed % below
     };
     for step in 0..1500u64 {
-        let kind = Kind::HELD[next(3) as usize];
+        let kind = Kind::HELD[next(4) as usize];
         // a few runs, from single errors to wide ones
         let mut errors = Vec::new();
         for _ in 0..1 + next(6) {
