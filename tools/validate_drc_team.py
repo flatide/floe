@@ -4694,6 +4694,137 @@ def r19(temp):
         need.close()
 
 
+def r20(temp):
+    print("[R20] a role's verdicts on a selection; the group an error was marked with")
+    d = temp / "groups"
+    d.mkdir()
+    sizes = [9000, 300]
+    names = ["A.W", "B.S"]
+    write_db(d / "t.db", [(names[0], [_poly(100 * (i % 120), 60 * (i // 120)) for i in range(sizes[0])]),
+                          (names[1], [_edge(200 * (i % 50), 100 * (i // 50)) for i in range(sizes[1])])])
+    r = run([INDEX, "drc", str(d / "t.db")])
+    check(r.returncode == 0, "floe-index drc t.db", r.stderr)
+    db = d / "t.db"
+    group_a = list(range(0, 50)) + [4100, 4101]            # (over two chunks)
+    a, b, c, w = Svc(), Svc(), Svc(), Svc()
+    try:
+        def open_as(svc, who, role=None):
+            o = svc("drc_open", path=str(db), mode="load", reviewer=who, **({"role": role} if role else {}))
+            svc.svc.drc_watch(o["handle"])
+            return o["handle"]
+        hk, hl = open_as(a, "kim"), open_as(b, "lee")
+        # two reviewers' waives: kim's two groups, each waived at once with a
+        # reason, and three errors with none; lee's one group over a part of
+        # kim's. A requester's requests, asked for at once
+        a("drc_set_status", handle=hk, check=0, errors=group_a, status=1, reason="dummy fill")
+        a("drc_set_status", handle=hk, check=0, errors=list(range(100, 130)), status=1, reason="seal ring")
+        a("drc_set_status", handle=hk, check=0, errors=[200, 201, 202], status=1)
+        b("drc_set_status", handle=hl, check=0, errors=list(range(40, 60)), status=1, reason="lee's")
+        hp = open_as(w, "park", "requester")
+        w("drc_set_status", handle=hp, check=0, errors=list(range(300, 310)), status=1, reason="please")
+        w.close()
+        hh = open_as(c, "hong", "confirmer")
+
+        def group(svc, h, error):
+            e = svc.job(h, "drc_team_group", check=0, error=error)
+            if e["state"] != "done":
+                return e.get("message"), None, None
+            page = svc("drc_selection_page", handle=h, selection=e["selection"], start=0, limit=20000)
+            who = dict(e["group"])
+            when = who.pop("time")
+            return (e["count"], who, when > 0), page, e["selection"]
+
+        # ---- 1. the group an error was waived with: one action's errors
+        got, page, sid = group(c, hh, 5)
+        check(got == (52, {"stage": "waive", "reviewer": "kim", "text": "dummy fill"}, True) and page == group_a,
+              "the errors waived with #6: what its waiver waived at once - over two chunks -, who and why", got)
+        check(group(c, hh, 4100)[1] == group_a, "... the same from any error of the group")
+        got, page, _sid = group(c, hh, 110)
+        check(got == (30, {"stage": "waive", "reviewer": "kim", "text": "seal ring"}, True)
+              and page == list(range(100, 130)), "the same waiver's other action is another group", got)
+        got, page, _sid = group(c, hh, 201)
+        check(got == (3, {"stage": "waive", "reviewer": "kim", "text": ""}, False) and page == [200, 201, 202],
+              "waives made with no reason: the group is that waiver's waives of the rule that say no why", got)
+        check(group(c, hh, 45)[0][1]["reviewer"] == "kim" and group(c, hh, 55)[0][:2] ==
+              (20, {"stage": "waive", "reviewer": "lee", "text": "lee's"}),
+              "an error two waived: the first one's group; an error of the other's alone: theirs")
+        got, page, _sid = group(c, hh, 305)
+        check(got == (10, {"stage": "request", "reviewer": "park", "text": "please"}, True)
+              and page == list(range(300, 310)), "an error asked for and not waived: its requester's group", got)
+        got = group(c, hh, 7000)
+        check(isinstance(got[0], str) and "neither waived nor asked for" in got[0],
+              "an error nobody marked has no group: said", got[0])
+        got = refusal_job(c, hh, "drc_team_group", check=0, error=sizes[0])
+        check(got is not None and "out of range" in got, "an error past the rule is refused", got)
+        a("drc_set_status", handle=hk, check=0, errors=[10], status=0)
+        group_a.remove(10)
+        got, page, sid = group(c, hh, 5)
+        check(got[0] == 51 and page == group_a, "a waive turned back is no longer of its group", got)
+        # ---- 2. a confirmation of the selection: one job, the group at once
+        log = d / ".t.db.rejects.hong"
+        e = c.job(hh, "drc_team_confirm", check=0, selection=sid, on=True)
+        _n, t, _got = team_now(db, "--all-rules")
+        live = 51 + 30 + 3 + 10                               # (lee's 40..49 are kim's too)
+        check(e["state"] == "done" and (e["changed"], e["skipped"]) == (51, 0) and e.get("counts") == [live, sizes[0]]
+              and t["confirmed"] == 51 and t["unconfirmed"] == live - 51,
+              "drc_team_confirm {selection}: the whole group confirmed, the rule's count in the answer",
+              ({k: e.get(k) for k in ("changed", "skipped", "counts")}, t["confirmed"]))
+        e = c.job(hh, "drc_select", check=0, errors=[0, 1, 7000, 7001], mode="replace")
+        mixed = e["selection"]
+        e = c.job(hh, "drc_team_confirm", check=0, selection=mixed, on=True)
+        check((e["changed"], e["skipped"]) == (0, 2),
+              "a selection with errors that are nobody's waive: those are said, the confirmed left", e)
+        # ---- 3. a rejection of the selection: one line of the log
+        e = c.job(hh, "drc_team_reject", check=0, selection=sid, on=True, reason="not a dummy")
+        said = log.read_text().splitlines()
+        _n, t, _got = team_now(db, "--all-rules")
+        check(e["state"] == "done" and (e["changed"], e["skipped"], e["verdict"]) == (51, 0, "reject")
+              and sum(1 for line in said if line.startswith("r ")) == 1
+              and said[-1].endswith(" 0,10,1,39,4050,2 not a dummy") and t["rejected"] == 51 and t["confirmed"] == 0,
+              "drc_team_reject {selection}: the group rejected by one line - every waive of its errors, the other "
+              "waiver's too", (e.get("changed"), said[-1:], t["rejected"]))
+        e = c.job(hh, "drc_team_reject", check=0, selection=mixed, on=True, reason="x")
+        check((e["changed"], e["skipped"]) == (0, 4),
+              "... errors whose waives are all rejected are not rejected again; nobody's waive neither", e)
+        e = c.job(hh, "drc_team_reject", check=0, selection=sid, on=False)
+        _n, t, _got = team_now(db, "--all-rules")
+        check(e["changed"] == 51 and t["rejected"] == 0 and t["unconfirmed"] == live,
+              "the rejection of the selection taken back: the waives wait again", (e.get("changed"), t["rejected"]))
+        # ---- 4. a selection that is not this rule's, or is not: refused
+        got = [refusal_job(c, hh, op, check=1, selection=sid, on=True)
+               for op in ("drc_team_confirm", "drc_team_reject")]
+        check(all(g is not None and "another rule" in g for g in got), "a selection of another rule is refused", got)
+        got = refusal_job(c, hh, "drc_team_confirm", check=0, selection=10 ** 9, on=True)
+        check(got is not None and "no such selection" in got, "... and one the service does not keep", got)
+        got = refusal_job(c, hh, "drc_team_reject", check=0, on=True)
+        check(got is not None and "errors must be a list" in got, "a rejection of nothing named is refused", got)
+        # ---- 5. a waiver's decline of a selection of requests
+        w = Svc()
+        hw = open_as(w, "choi", "waiver")
+        got, page, asked = group(w, hw, 303)
+        check(got == (10, {"stage": "request", "reviewer": "park", "text": "please"}, True),
+              "(the waiver's session: the requests asked for at once)", got)
+        e = w.job(hw, "drc_team_decline", check=0, selection=asked, on=True, reason="no")
+        said = (d / ".t.db.rejects.choi").read_text().splitlines()
+        r = run_env([FLOE2, "drc", str(db), "--team-counts"], {})
+        brief = json.loads(r.stdout)["total"]
+        check(e["state"] == "done" and (e["changed"], e["skipped"], e["verdict"]) == (10, 0, "decline")
+              and said[-1].startswith("d 0 ") and said[-1].endswith(" 300,10 no")
+              and (brief["requested"], brief["declined"]) == (0, 10),
+              "drc_team_decline {selection}: the group of requests declined by one line",
+              (e.get("changed"), said[-1:], brief))
+        e = w.job(hw, "drc_team_decline", check=0, selection=asked, on=False)
+        r = run_env([FLOE2, "drc", str(db), "--team-counts"], {})
+        brief = json.loads(r.stdout)["total"]
+        check(e["changed"] == 10 and (brief["requested"], brief["declined"]) == (10, 0),
+              "... and taken back: the requests wait again", (e.get("changed"), brief))
+        got = refusal_job(c, hh, "drc_team_decline", check=0, selection=sid, on=True)
+        check(got is not None and "--role waiver" in got, "a confirmer's session declines no selection", got)
+    finally:
+        for svc in (a, b, c, w):
+            svc.close()
+
+
 def refusal_of(svc, op, **fields):
     """What a request is refused with: (kind, message), None when it is not."""
     try:
@@ -4714,9 +4845,11 @@ def refusal_job(svc, handle, op, **fields):
 
 def main():
     global r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12, r13, r14, r15, r16, r17, r18, r19
+    global r20
     r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12, r13, r14, r15, r16, r17, r18, r19 = map(
         timed, (r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12, r13, r14, r15, r16, r17, r18,
                 r19))
+    r20 = timed(r20)
     temp = Path(tempfile.mkdtemp(prefix="floe-drc-team-"))
     try:
         d = temp / "runs"
@@ -4746,6 +4879,7 @@ def main():
         r17(temp)
         r18(temp)
         r19(temp)
+        r20(temp)
         if "--no-gui" not in sys.argv:
             from validate_drc_team_gui import r7
             timed(r7)(temp, check)

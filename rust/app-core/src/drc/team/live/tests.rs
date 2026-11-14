@@ -1011,6 +1011,105 @@ fn a_declined_request_is_counted_and_listed_until_its_requester_asks_again() {
     drop((park, choi, kim, hong, id));
 }
 
+/// What was waived together is a group, and a set takes one verdict
+/// (0.12.474; user 2026-11-14: "그룹으로 한번에 waive된 것을 하나씩 확인하기는
+/// 매우 어려울 것으로 예상되므로 해당 그룹도 한번에 확인하고 confirm 할 수
+/// 있는 필터등이 필요"): the errors a reviewer's reasons file keeps under one
+/// line are the group of each of them, and a rejection or a decline of a
+/// selection is the runs of it the verdict applies to.
+#[test]
+fn the_errors_marked_together_are_a_group_and_a_set_takes_one_verdict() {
+    use crate::drc::analysis::scope::Selection;
+    use crate::drc::reasons::Kind as Reason;
+    use crate::drc::team::waives::{decline_members, reject_members, Group, TeamWaives};
+    let f = Folder::new();
+    let stop = AtomicUsize::new(0);
+    let far = CHUNK + 5;
+    let mut kim = Session::open(&f, "kim");
+    let mut lee = Session::open(&f, "lee");
+    let mut park = Session::open_as(&f, "park", Roles::REQUESTER);
+    let mut hong = Session::open_as(&f, "hong", Roles::CONFIRMER);
+    // kim waives two groups, each at once with its reason - one of them
+    // over two chunks -, and three errors with none; lee one group over a
+    // part of kim's; park asks for three at once
+    kim.waive_run(0, 50, true);
+    kim.waive(&[far, far + 1], true);
+    kim.review.reason_set(Reason::Waive, RULE, &[(0, 50), (far, far + 2)], "dummy fill").unwrap();
+    kim.waive_run(100, 130, true);
+    kim.review.reason_set(Reason::Waive, RULE, &[(100, 130)], "seal ring").unwrap();
+    kim.waive(&[200, 201, 202], true);
+    lee.waive_run(40, 60, true);
+    lee.review.reason_set(Reason::Waive, RULE, &[(40, 60)], "lee's").unwrap();
+    park.waive(&[300, 301, 302], true);
+    park.review.reason_set(park.review.mark(), RULE, &[(300, 303)], "please").unwrap();
+    let view = |f: &Folder| TeamWaives::open(&f.pack, &f.id()).unwrap();
+    let group = |error: u64| view(&f).group_of(RULE, error, &stop).unwrap();
+    fn of(g: &Option<Group>) -> Option<(&'static str, &str, &str, Vec<(u64, u64)>)> {
+        g.as_ref().map(|g| (g.stage, g.reviewer.as_str(), g.text.as_str(), g.runs.clone()))
+    }
+    assert_eq!(of(&group(5)), Some(("waive", "kim", "dummy fill", vec![(0, 50), (far, far + 2)])));
+    assert_eq!(group(far + 1), group(5), "the same group from any error of it");
+    assert!(group(5).unwrap().time > 1_600_000_000);
+    assert_eq!(of(&group(110)), Some(("waive", "kim", "seal ring", vec![(100, 130)])));
+    // marks made with no reason: the reviewer's marks of the rule that say
+    // no why
+    let none = group(201).unwrap();
+    assert_eq!((none.text.as_str(), none.time, none.runs), ("", 0, vec![(200, 203)]));
+    // an error two reviewers waived: the first one's group; one of the
+    // other's alone: theirs
+    assert_eq!(group(45).unwrap().reviewer, "kim");
+    assert_eq!(of(&group(55)), Some(("waive", "lee", "lee's", vec![(40, 60)])));
+    // a request's group; an error nobody marked has none; one past the rule
+    assert_eq!(of(&group(301)), Some(("request", "park", "please", vec![(300, 303)])));
+    assert_eq!(group(1000), None);
+    assert!(view(&f).group_of(RULE, N, &stop).is_err());
+    // (what is said of a group is what a host hands on: no run in it)
+    let said = serde_json::to_value(group(110).unwrap()).unwrap();
+    assert!(said.get("runs").is_none() && said["stage"] == "waive" && said["reviewer"] == "kim");
+    // a waive turned back is no longer of its group
+    kim.waive(&[10], false);
+    assert_eq!(group(5).unwrap().runs, vec![(0, 10), (11, 50), (far, far + 2)]);
+    // ---- a set takes one verdict: the group's errors, an error nobody
+    // waived and one of another chunk among them
+    let picked = Selection::from_indices(
+        N,
+        group(5).unwrap().runs.iter().flat_map(|&(a, b)| a..b).chain([1000, 2 * CHUNK + 7]),
+    );
+    hong.review.look().unwrap();
+    let (runs, skipped) = reject_members(&hong.review, &mut view(&f), RULE, &picked, true, &stop).unwrap();
+    assert_eq!((runs.clone(), skipped), (vec![(0, 10), (11, 50), (far, far + 2)], 2));
+    hong.review.reject_set(RULE, &runs, "not a dummy").unwrap();
+    let log = fs::read_to_string(f.file(".results.db.rejects.hong")).unwrap();
+    assert_eq!(log.lines().filter(|line| line.starts_with("r ")).count(), 1, "one line for the set: {log}");
+    // (rejected, the errors are no waive to reject again: every one of
+    // the set is passed over)
+    assert_eq!(
+        reject_members(&hong.review, &mut view(&f), RULE, &picked, true, &stop).unwrap(),
+        (vec![], 53)
+    );
+    // a group whose waive is sent back is its waiver's still
+    assert_eq!(group(5).unwrap().runs, vec![(0, 10), (11, 50), (far, far + 2)]);
+    // taking back names the confirmer's own, over the same set
+    let (runs, skipped) = reject_members(&hong.review, &mut view(&f), RULE, &picked, false, &stop).unwrap();
+    assert_eq!((runs.clone(), skipped), (vec![(0, 10), (11, 50), (far, far + 2)], 0));
+    assert!(hong.review.reject_drop(RULE, &runs).unwrap());
+    // a waiver's decline over a set of requests: the ones that wait
+    let mut choi = Session::open_as(&f, "choi", Roles::WAIVER);
+    choi.review.look().unwrap();
+    let asked = Selection::from_indices(N, [300, 301, 302, 303, 5]);
+    let (runs, skipped) = decline_members(&choi.review, &mut view(&f), RULE, &asked, true, &stop).unwrap();
+    assert_eq!((runs.clone(), skipped), (vec![(300, 303)], 2), "303 was not asked for, 5 is waived");
+    choi.review.decline_set(RULE, &runs, "no").unwrap();
+    assert_eq!(
+        decline_members(&choi.review, &mut view(&f), RULE, &asked, false, &stop).unwrap(),
+        (vec![(300, 303)], 0)
+    );
+    assert_eq!(group(301).unwrap().stage, "request", "a declined request's group is its requester's still");
+    // the kept counts follow all of it
+    f.agree(&f.merged(1_000, 10), "after the verdicts on sets");
+    drop((kim, lee, park, hong, choi));
+}
+
 #[test]
 fn a_change_nobody_said_is_found_by_the_files_times() {
     let f = Folder::new();

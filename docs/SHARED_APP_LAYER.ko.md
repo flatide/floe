@@ -765,3 +765,16 @@ P4d처럼 컨트롤러 루프에서만 바뀐다. `FLOE_GTK_LOOP=legacy`는 예�
 - **호스트가 정하는 것:** 역할을 누가 주는가, 창에 어느 버튼을 둘지, 문구. 뷰어는 `floe2 view --role ROLE[,ROLE...]`·`FLOE_ROLE`·요청의 `role=`을 쓰고, 없앤 `--confirmer`는 인자 오류로 답하고, `FLOE_CONFIRMER`는 읽지 않되 켜져 있는데 준 역할에 `confirmer`가 없으면 실행을 멈춘다.
 - **한계:** 거절은 거절한 waiver만 취소한다. 0.12.472의 빌드는 거절을 모른다(기록의 모르는 줄을 건너뛴다: 거절된 요청을 requested로 읽는다). 웹의 리뷰 저장소는 역할, 요청, 거절을 모른다.
 - **게이트:** `drc_team` R19(거절, 여러 역할, 확인자의 파일)·R15~R17(확인자를 모든 역할의 세션으로)·R7, `rust_renderer`(런처), 단위 app-core `drc::tests`(`a_declined_request_is_a_state_until_its_requester_asks_again`), `drc::team::live`(`a_declined_request_is_counted_and_listed_until_its_requester_asks_again`), `drc::team::stats`(`the_team_counts_a_declined_request_as_none`), `drc::reasons`(아홉 종류의 무작위 단계).
+
+## 29. 선택 전체에 대한 판정, 함께 표시된 묶음 (2026-11-14, app 0.12.474) — 대상 고르기와 묶음 찾기는 공유 Rust, 메뉴와 문구는 호스트
+
+사용자: "현재는 DRC > team waives... 로 confirm을 하는 구조인데 confirmer의 경우 오른쪽 버튼 메뉴에 confirm 관련을 넣는게 좋을 것 같음. 그리고 그룹으로 한번에 waive된 것을 하나씩 확인하기는 매우 어려울 것으로 예상되므로 해당 그룹도 한번에 확인하고 confirm 할 수 있는 필터등이 필요하니 검토해줘."
+
+- **무엇이 이미 있었나:** waive 필터의 `Waived` 클래스(확인자의 판정을 기다리는 것)가 룰, 클러스터, CD 그룹, 선택, 캔버스 조회의 개수와 페이지를 모두 그 클래스로 만든다(§25). 선택은 크기 제한이 없고(`analysis::scope::Selection`) 범위가 될 수 있다. 없던 것은 둘이다: 판정을 선택이나 범위 전체에 한 번에 하는 길, 그리고 "함께 waive된 것"을 찾는 길.
+- **집합에 대한 판정:** `team::waives::reject_members(review, view, check, members, on, cancelled)`와 `decline_members(…)`. `reject_runs`·`decline_runs`(에러를 하나씩 이름)와 같은 규칙으로 대상 구간을 고른다: 켤 때는 판정이 해당하는 에러(반려는 누군가의 살아 있는 waive, 거절은 기다리는 요청)이고 나머지는 센다. 끌 때는 자기 기록이 쥔 것이다. 구간은 `Review::reject_set`·`decline_set`에 한 번에 넘기므로 기록은 한 줄이다. confirm은 `confirm_chunk`가 이미 `Membership`을 받는다.
+- **묶음:** `TeamWaives::group_of(check, error, cancelled) -> Option<Group>`. `Group {stage: "waive" | "request", reviewer, text, time, runs}`는 그 에러를 표시한 사람이 **한 동작으로 함께 표시한 에러**다. 동작 하나가 사유 파일의 한 줄이므로(§19) 그 줄이 쥔 구간이 묶음이고, 그 사람의 파일에 지금 표시가 있는 것만 남긴다. 사유 없이 한 표시는 줄이 없으므로 그 사람이 그 룰에서 사유 없이 한 표시 전체가 한 묶음이다(`text` 빈 문자열, `time` 0). waive가 요청보다 먼저이고, 살아 있는 표시가 반려되거나 거절된 것보다 먼저이며, 여럿이면 ID 순으로 앞사람이다. 아무 표시도 없는 에러는 None.
+- **서비스:** `drc_team_confirm`·`drc_team_reject`·`drc_team_decline`이 `errors` 대신 `selection`(서비스가 가진 선택의 ID)을 받는다. 다른 룰의 선택과 없는 선택은 거절한다. `drc_team_confirm`의 답에 `counts`(그 룰의, 세션의 필터 클래스로 센 수)가 붙는다. `drc_team_group {check, error}`(job `select`)의 답은 `{selection, count, group: {stage, reviewer, text, time}}`이고 그 선택은 `drc_select`가 만든 것과 같이 쓴다(범위, 페이지, 판정의 대상). 표시가 없는 에러면 job이 오류로 끝난다.
+- **호스트가 정하는 것:** 어디에 메뉴를 두는가, 묶음을 고른 뒤 무엇을 보이는가. GTK는 오른쪽 버튼 메뉴 두 곳에 역할의 판정을 두고, 묶음은 보통의 선택으로 만들어 `selected` 필터로 좁혀 보게 한다(SPEC-VIEWER). 웹이 같은 것을 하려면 같은 요청을 부르면 된다.
+- **한계:** 묶음은 사유를 준 동작에만 정확하다(사유 없는 표시는 한데 묶인다). 같은 에러를 여럿이 waive했으면 앞사람의 묶음만 나온다. 0.12.463 이전의 waive에는 사유 파일이 없다.
+- **게이트:** `drc_team` R20(묶음: 두 구간에 걸친 것, 같은 사람의 다른 동작, 사유 없는 것, 두 사람, 요청, 표시 없는 에러, 되돌린 에러; 선택에 대한 confirm·반려·거절과 그 취소, 한 줄의 기록, 다른 룰의 선택), R7(실제 뷰어의 두 메뉴와 묶음 선택), 단위 app-core `drc::team::live`(`the_errors_marked_together_are_a_group_and_a_set_takes_one_verdict`).
+

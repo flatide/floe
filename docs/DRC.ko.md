@@ -587,15 +587,47 @@ python -m floe render chip.oas --drc results.db \
       `unwaived`(요청됐고 아무도 waive하지 않은 것), `declined`를 낸다. 요청자의 줄에는 `requested`와
       `request_file`이, `--review-stats`에는 `requested_declined`도 나오고, 거절한 waiver의 줄에
       `declined`가 나온다(DRC-CLI.ko.md §2b~§2d).
+    - **오른쪽 버튼 메뉴에서 확인하기**(0.12.474, 사용자 2026-11-14: "confirmer의 경우 오른쪽 버튼
+      메뉴에 confirm 관련을 넣는게 좋을 것 같음. 그리고 그룹으로 한번에 waive된 것을 하나씩 확인하기는
+      매우 어려울 것으로 예상되므로 해당 그룹도 한번에 확인하고 confirm 할 수 있는 필터등이 필요"):
+      `team waives…` 창이 하던 판정을 에러가 있는 자리에서 한다. 창은 그대로 있다.
+      - **에러 번호의 오른쪽 버튼**: 확인자 역할의 세션에 `confirm #N`, `unconfirm #N`,
+        `reject #N…`(사유를 묻는다), `unreject #N`이 나온다. 선택이 있으면 대상이 선택 전체다
+        (`confirm 1240 selected`). waiver 역할의 세션에는 `decline #N…`, `undecline #N`이 나온다.
+        확인자만인 세션의 메뉴에는 `waive`·`unwaive`가 없다(그 세션은 표시를 하지 않는다).
+      - **그룹 목록의 오른쪽 버튼**: `confirm all`, `unconfirm all`, `reject all…`, `unreject all`
+        (확인자), `decline all…`, `undecline all`(waiver). `waive all`처럼 waive 필터와 무관하게 그
+        범위(룰, 클러스터, CD 그룹)의 모든 에러 가운데 해당하는 것에 한다. 그룹으로 한 번에 waive된
+        것은 같은 그룹에서 `confirm all` 한 번으로 confirm된다.
+      - **함께 waive된 것 고르기**: waive된 에러의 오른쪽 버튼에 `select waived with #N`이 있다. 그
+        에러를 waive한 사람이 **같은 동작으로 함께 waive한 에러**가 선택된다(박스 선택, 클러스터,
+        CD 그룹 어느 것으로 했든 그 사람의 사유 파일에 한 줄로 남아 있는 것이다). 상태 줄이 누가 왜
+        했는지를 말한다: `error select RULE: 1240 selected - waived by kim (dummy fill)`. 그다음
+        `selected` 체크로 목록과 캔버스를 그 묶음만으로 좁혀 보고, 오른쪽 버튼의
+        `confirm 1240 selected`로 한 번에 confirm한다. 확인자의 그룹 나누기(CD 간격 등)가 waive한
+        사람과 달라도 그 사람이 묶은 그대로 나온다. 사유 없이 waive한 것은 한 줄이 없으므로 그
+        사람이 그 룰에서 사유 없이 waive한 것 전체가 한 묶음이다(`… with no reason`). 요청된 에러에는
+        `select requested with #N`이 있어 waiver가 함께 요청된 것을 한 번에 보고 waive하거나
+        거절한다. 두 사람이 waive한 에러는 ID 순으로 앞사람의 묶음이다.
+      - **무엇에 하나**: 판정은 대상 가운데 해당하는 에러에만 하고 나머지는 상태 줄에 말한다.
+        `confirmed 1100 waive(s) in RULE · 140 not waived`, `rejected N waive(s) in RULE · reason: …`,
+        `declined N request(s) in RULE · K with no request waiting`. 몇 개든 서비스의 작업 한 번이고
+        반려와 거절은 기록의 한 줄이다. 판정 직후 목록과 개수가 바뀐다: `Waived` 필터에서 confirm한
+        에러는 목록에서 빠지고, 그 룰에 기다리는 것이 없으면 룰도 목록에서 빠진다.
+      - **확인자의 순서**: 필터를 `Waived`(확인자의 판정을 기다리는 것)로 두면 룰 목록, 그룹 목록,
+        에러 목록이 모두 기다리는 것만 보인다. 룰을 열고, 그룹을 골라 보거나 에러 하나에서
+        `select waived with #N`으로 묶음을 고르고, 캔버스와 상세의 사유로 확인한 뒤 한 번에
+        confirm하거나 반려한다.
     - **하지 않는 것**: 한 사용자가 어느 역할인지를 floe가 확인하지 않는다. 거절은 거절한 waiver만
       취소한다(다른 waiver가 그 요청을 받으려면 요청자가 다시 요청해야 한다). 캔버스의 마커 색은
       waive 여부 둘뿐이다(requested와 declined는 not waived 색). 웹의 리뷰 저장소는 역할과 요청을
       모른다. 0.12.472의 뷰어는 거절을 모르고(거절된 요청을 requested로 읽어 waive할 수 있다) 역할
       목록을 받지 않는다. 0.12.471 이하의 뷰어는 요청 파일을 읽지 않는다.
-    - 게이트 `drc_team` R19·R7, 단위 테스트 app-core `drc::tests`
+    - 게이트 `drc_team` R19·R20·R7, 단위 테스트 app-core `drc::tests`
       (`the_roles_take_an_error_from_a_request_to_a_confirmation`,
       `a_declined_request_is_a_state_until_its_requester_asks_again`), `drc::changes`,
-      `drc::team::live`, `drc::team::stats`.
+      `drc::team::live`(`the_errors_marked_together_are_a_group_and_a_set_takes_one_verdict`),
+      `drc::team::stats`.
   - **하지 않는 것**: 메인 목록과 캔버스의 상태는 내 waive의 것이다: 남이 waive한 에러는 내 목록에서
     not waived이고, 팀 전체는 `team waives…` 창과 에러 상세에서 본다. 캔버스의 마커 색은 전처럼
     waive 여부 둘뿐이다(rejected는 not waived 색). `.floereview`·`save waives as…`·
@@ -817,8 +849,8 @@ python -m floe render chip.oas --drc results.db \
 | `e` + 두 클릭 | 박스 선택(Esc까지 유지; Shift 추가, Ctrl 토글; 룰/클러스터/CD 그룹 전체, 개수 제한 없음; 범위별 보존; gold 표시) |
 | Ctrl/Shift + 셀 클릭 | 선택 추가/토글 |
 | 사유 입력창 | waive하거나 검토 제외로 둘 때 뜬다(0.12.463, §2 사유): 한 줄, Enter 확정, Esc 취소, 빈 칸은 사유 없음. 직전 사유나 대상이 이미 가진 사유에서 시작하고 목록은 준 사유들. 되돌릴 때는 묻지 않는다. 반려된 waive를 다시 waive할 때는 누가 왜 반려했는지를 위에 보이고, 빈 칸이면 그 에러는 rejected로 남는다(0.12.469) |
-| 우클릭 | waive/unwaive 메뉴(gold 선택 시 일괄) — [status] 제자리 기록, 카운트·색·필터 즉시 연동. 맨 아래 `SVRF info…`는 그 에러의 SVRF 정보 창을 연다(0.12.444, §4) |
-| 그룹 목록 우클릭 | `All errors`나 그룹 행의 에러 전체에 select all / deselect all / waive all / unwaive all / mark not for review all / clear not for review all (0.12.444, §4 측정 차이 그룹) |
+| 우클릭 | waive/unwaive 메뉴(gold 선택 시 일괄) — [status] 제자리 기록, 카운트·색·필터 즉시 연동. 역할 세션에는 그 역할의 판정이 더해진다(0.12.474, §2): 확인자의 confirm / unconfirm / reject… / unreject, waiver의 decline… / undecline. 표시가 있는 에러에는 `select waived with #N`(요청이면 `select requested with #N`): 함께 표시된 에러를 선택한다. 맨 아래 `SVRF info…`는 그 에러의 SVRF 정보 창을 연다(0.12.444, §4) |
+| 그룹 목록 우클릭 | `All errors`나 그룹 행의 에러 전체에 select all / deselect all / waive all / unwaive all / mark not for review all / clear not for review all (0.12.444, §4 측정 차이 그룹). 역할 세션에는 confirm all / unconfirm all / reject all… / unreject all(확인자), decline all… / undecline all(waiver)이 더해진다(0.12.474, §2) |
 | `i` | SVRF 정보 창 열기/닫기(0.12.444, §4) |
 | `w` | **waive 토글** — gold 선택이 있으면 선택 전체 일괄(전부 waived → 해제, 혼합/미waive → 전부 waive), 없으면 현재 에러(단클릭/./, 포커스 우선, 없으면 점프 위치). 우클릭 메뉴와 동일 경로로 기록·갱신, v1은 pack 안내 |
 | 더블클릭 상세 | note 있는 에러는 하단 상세 패널에 `note:` 줄 표시. 사유를 준 waive·검토 제외는 `waive reason:`·`not for review reason:` 줄(0.12.463) |
@@ -1127,6 +1159,10 @@ absolute/ratio 콤보박스의 문구를 단순화하여 크기를 줄이고 ste
   - 상태 줄: 모으는 동안 `waive all: collecting the errors… (Esc cancels)`, 끝나면 `waived N
     error(s) in <룰>`, `not for review set on N errors` 등. 범위에 에러가 없으면 `…: no error
     in this scope`.
+  - 역할 세션의 판정도 같은 방식으로 범위 전체에 한다(0.12.474): 확인자의 `confirm all` /
+    `unconfirm all` / `reject all…` / `unreject all`, waiver의 `decline all…` / `undecline all`.
+    확인자만인 세션에는 `waive all`·`unwaive all`이 없다. 상세는 §2의 "오른쪽 버튼 메뉴에서
+    확인하기".
 - 그룹 목록은 50개씩 넘겨 보며 `All errors`로 현재 룰 또는 파일 클러스터의
   전체 에러를 볼 수 있다. 한 그룹을 선택하면 그 그룹의 에러를 기존과
   같이 1000개씩 페이지로 표시한다. 파일 클러스터, waive, selected,

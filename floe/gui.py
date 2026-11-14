@@ -2880,6 +2880,13 @@ class Viewer:
     RETURNED_MS = 2000
     _drc_returned_timer = None
     _drc_returned_asked = None
+    # a verdict asked from a right-click menu (_drc_verdict): the service's
+    # job, until its answer
+    _drc_verdict_job = None
+    # what a verdict said, kept for the end of the selection's recheck that
+    # follows it (the errors it took may have left the filter's list): the
+    # status line is the verdict's, not the recheck's count
+    _drc_selection_after = None
     _drc_source = None
     _drc_reviewer = None
     _title_drc = ""
@@ -4388,7 +4395,8 @@ class Viewer:
         if Gtk.grab_get_current() is not None:
             return "a dialog or a menu is open"
         if getattr(self, "_drc_review_job", None) is not None \
-                or getattr(self, "_drc_team_write", None) is not None:
+                or getattr(self, "_drc_team_write", None) is not None \
+                or getattr(self, "_drc_verdict_job", None) is not None:
             return "a review update is running"
         return None
 
@@ -5834,6 +5842,7 @@ class Viewer:
                            ("conflict", self._drc_conflict_poll),
                            ("selection", self._drc_selection_poll),
                            ("review", self._drc_review_poll),
+                           ("verdict", self._drc_verdict_poll),
                            ("in-view", self._drc_query_poll)):
             try:
                 poll()
@@ -7355,6 +7364,7 @@ class Viewer:
                 worker.cancel()
         self._drc_selection_key = None
         self._drc_selection_then = None
+        self._drc_selection_after = None
 
     def _drc_selection_submit(self, ci, bounds, membership, mode="replace",
                               then=None):
@@ -7364,7 +7374,8 @@ class Viewer:
         the waive filter lists, and the result is that command's target,
         not the selection in the grid."""
         if (getattr(self, "_drc_review_job", None) is not None or
-                getattr(self, "_drc_team_write", None) is not None):
+                getattr(self, "_drc_team_write", None) is not None or
+                getattr(self, "_drc_verdict_job", None) is not None):
             self._set_live_status("review update in progress; select after it finishes")
             return
         if mode != "replace" and getattr(self, "_drc_selection_key", None) is not None:
@@ -7427,12 +7438,72 @@ class Viewer:
         if then is not None:
             self._drc_scope_apply(ci, selected, *then)
             return
+        after = getattr(self, "_drc_selection_after", None)
         self._drc_set_sel((ci, selected, (), selected) if selected else None)
         self._drc_focus = None
         self._drc_grid_fill(ci)
-        self._set_live_status("error select %s: %d selected"
-                              % (self._drc.checks[ci].name, len(selected)))
+        # (the recheck that follows a verdict leaves the verdict's line)
+        self._set_live_status(after or "error select %s: %d selected%s" % (
+            self._drc.checks[ci].name, len(selected),
+            self._drc_group_said(getattr(selected, "group", None))))
         self._display()
+
+    def _drc_group_said(self, group):
+        """The end of a selection's status line when the selection is the
+        errors marked with one (_drc_group_select): whose marks, and why as
+        they said - and how to list them alone."""
+        if not group:
+            return ""
+        text = group.get("text") or ""
+        return " - %s by %s%s%s" % (
+            "requested" if group.get("stage") == "request" else "waived",
+            group.get("reviewer") or "?",
+            " (%s)" % (text if len(text) <= 60 else text[:59] + "…") if text
+            else " with no reason",
+            "" if self._drc_show_sel else " · check `selected` to list them alone")
+
+    def _drc_group_stage(self, db, ci, ei):
+        """Whether rule `ci`'s error `ei` has a mark it was made with -
+        "waived" (somebody's waive, counting or sent back), "requested"
+        (somebody's request) - or None, as this session reads its state."""
+        if not hasattr(db, "waive_ask"):
+            return None
+        state = self._drc_state(db, ci, ei)
+        if state in (gtkservice.STATE_WAIVED, gtkservice.STATE_CONFIRMED,
+                     gtkservice.STATE_REJECTED):
+            return "waived"
+        if state in (gtkservice.STATE_REQUESTED, gtkservice.STATE_DECLINED):
+            return "requested"
+        return None
+
+    def _drc_group_select(self, ci, ei):
+        """Select the errors that were waived - or asked for - with rule
+        `ci`'s error `ei`: the same reviewer's, in one action (user
+        2026-11-14: "그룹으로 한번에 waive된 것을 하나씩 확인하기는 매우 어려울
+        것으로 예상되므로 해당 그룹도 한번에 확인하고 confirm 할 수 있는
+        필터등이 필요"). What a waiver waived at once - a box selection, a
+        cluster, a CD group, with one reason - is one line of their reasons
+        file whatever its size; the service makes a selection of it, and the
+        selection is this viewer's as a box selection is: gold on the
+        canvas and in the grid, listed alone with `selected`, and the
+        target of the menu's commands - `confirm N selected`."""
+        if (getattr(self, "_drc_review_job", None) is not None or
+                getattr(self, "_drc_team_write", None) is not None or
+                getattr(self, "_drc_verdict_job", None) is not None):
+            self._set_live_status("review update in progress; select after it finishes")
+            return
+        db = self._drc
+        if db is None or ci != self._drc_sel_check():
+            return
+        worker = getattr(self, "_drc_selection_worker", None)
+        if worker is None:
+            worker = self._drc_selection_worker = gtkservice.SelectionWorker()
+        key = (object(), id(db), self._drc_scope_key(), self._drc_wfilter)
+        self._drc_selection_key = key
+        self._drc_selection_then = None
+        worker.submit_group(key, db, ci, ei)
+        self._set_live_status("error select: the errors marked with #%d… (Esc cancels)"
+                              % (ei + 1))
 
     def _drc_selection_restore(self):
         """Recheck a saved selection against the current scope and waive
@@ -10764,8 +10835,14 @@ class Viewer:
             return False
         # (the selection's own handler makes the row the scope)
         tree.get_selection().select_path(hit[0])
-        entries = [("select", None), ("deselect", None), None,
-                   ("waive", True), ("waive", False)]
+        entries = [("select", None), ("deselect", None)]
+        # (a session that makes no mark - a confirmer alone - has no waive
+        # to offer; one with a role has its role's verdicts on the whole
+        # group: a confirmer's confirm and reject, a waiver's decline)
+        if getattr(db, "marks", "waive") != "none":
+            entries += [None, ("waive", True), ("waive", False)]
+        for verdicts in self._drc_verdict_items(db):
+            entries += [None] + list(verdicts)
         if hasattr(db, "review_flags"):
             entries += [None, ("not-required", True), ("not-required", False)]
         menu = Gtk.Menu()
@@ -10797,6 +10874,9 @@ class Viewer:
         """A group menu command as its item reads."""
         return {("select", False): "select all", ("deselect", False): "deselect all",
                 ("waive", True): "waive all", ("waive", False): "unwaive all",
+                ("confirm", True): "confirm all", ("confirm", False): "unconfirm all",
+                ("reject", True): "reject all…", ("reject", False): "unreject all",
+                ("decline", True): "decline all…", ("decline", False): "undecline all",
                 ("not-required", True): "mark not for review all",
                 ("not-required", False): "clear not for review all"}[(action, bool(on))]
 
@@ -10812,7 +10892,11 @@ class Viewer:
         are no longer listed to be picked again). They do not touch the
         selection in the grid: the service collects the scope's errors
         (the select job) and the command is done to that (the review
-        job), in the background for a scope of any size."""
+        job), in the background for a scope of any size. A role's
+        verdicts (0.12.474) - `confirm all` / `unconfirm all`, `reject
+        all…` / `unreject all`, `decline all…` / `undecline all` - are done
+        the same way to every error of the scope they apply to: the group
+        a waiver waived at once is confirmed at once (_drc_verdict)."""
         db, ci = self._drc, self._drc_open
         if db is None or ci is None:
             return
@@ -10833,6 +10917,8 @@ class Viewer:
             self._set_live_status("review flags need a packed index: "
                                   "floe-index drc <db>")
             return
+        if action in ("confirm", "reject", "decline") and not self._drc_verdict_may(db, action):
+            return
         if action != "select" and self._drc_review_pending():
             return
         self._drc_selection_submit(
@@ -10848,6 +10934,8 @@ class Viewer:
             return
         if action == "waive":
             self._drc_set_waived(ci, targets, on)
+        elif action in ("confirm", "reject", "decline"):
+            self._drc_verdict(ci, targets, action, on)
         else:
             self._drc_set_not_required(ci, targets, on)
 
@@ -11302,15 +11390,43 @@ class Viewer:
             targets = [ei]
             scope = "#%d" % (ei + 1)
         menu = Gtk.Menu()
-        for label, on in (("waive %s" % scope, True),
-                          ("unwaive %s" % scope, False)):
-            it = Gtk.MenuItem(label=label)
-            it.connect("activate",
-                       lambda _i, o=on, t=targets:
-                       self._drc_set_waived(ci, t, o))
+        # (a session that makes no mark - a confirmer alone - has no waive
+        # to offer)
+        if getattr(db, "marks", "waive") != "none":
+            for label, on in (("waive %s" % scope, True),
+                              ("unwaive %s" % scope, False)):
+                it = Gtk.MenuItem(label=label)
+                it.connect("activate",
+                           lambda _i, o=on, t=targets:
+                           self._drc_set_waived(ci, t, o))
+                menu.append(it)
+        # a role's verdicts on the error, or on the selection (0.12.474,
+        # user 2026-11-14: "confirmer의 경우 오른쪽 버튼 메뉴에 confirm 관련을
+        # 넣는게 좋을 것 같음"): a confirmer's confirm and reject, a waiver's
+        # decline - what DRC > team waives… does, where the errors are
+        for verdicts in self._drc_verdict_items(db):
+            if menu.get_children():
+                menu.append(Gtk.SeparatorMenuItem())
+            for action, on in verdicts:
+                it = Gtk.MenuItem(label=self.VERDICT_ITEMS[(action, on)] % scope)
+                it.connect("activate", lambda _i, a=action, o=on, t=targets, d=db:
+                           self._drc_verdict(ci, t, a, o)
+                           if self._drc is d else None)
+                menu.append(it)
+        # what was marked with this error: the group its waiver waived at
+        # once, or its requester asked for at once
+        stage = self._drc_group_stage(db, ci, ei)
+        if stage is not None:
+            if menu.get_children():
+                menu.append(Gtk.SeparatorMenuItem())
+            it = Gtk.MenuItem(label="select %s with #%d" % (stage, ei + 1))
+            it.connect("activate", lambda _i, e=ei, d=db:
+                       self._drc_group_select(ci, e)
+                       if self._drc is d else None)
             menu.append(it)
         if hasattr(db, "review_flags"):
-            menu.append(Gtk.SeparatorMenuItem())
+            if menu.get_children():
+                menu.append(Gtk.SeparatorMenuItem())
             for label, on in (("mark not for review: %s" % scope, True),
                               ("clear not for review: %s" % scope, False)):
                 it = Gtk.MenuItem(label=label)
@@ -12070,6 +12186,9 @@ class Viewer:
         if getattr(self, "_drc_team_busy", None) is not None:
             self._set_live_status("review sharing operation is still running")
             return True
+        if getattr(self, "_drc_verdict_job", None) is not None:
+            self._set_live_status("review update is still running")
+            return True
         return False
 
     def _drc_review_submit(self, operation, ci, targets, on=None, text=None,
@@ -12339,6 +12458,132 @@ class Viewer:
             self._set_live_status(text)
         self._display()
 
+    # a role's verdicts, as the right-click menus offer them: (action, on)
+    # -> the grid menu's item (its scope filled in: `#5`, `12 selected`)
+    VERDICT_ITEMS = {("confirm", True): "confirm %s", ("confirm", False): "unconfirm %s",
+                     ("reject", True): "reject %s…", ("reject", False): "unreject %s",
+                     ("decline", True): "decline %s…", ("decline", False): "undecline %s"}
+    # ... what the status line says when it is done (how many, the rule),
+    # and of the errors it passed over
+    VERDICT_SAID = {
+        ("confirm", True): ("confirmed %d waive(s) in %s", " · %d not waived"),
+        ("confirm", False): ("confirmation taken back for %d waive(s) in %s", ""),
+        ("reject", True): ("rejected %d waive(s) in %s", " · %d not waived, or rejected already"),
+        ("reject", False): ("rejection taken back for %d waive(s) in %s", ""),
+        ("decline", True): ("declined %d request(s) in %s", " · %d with no request waiting"),
+        ("decline", False): ("decline taken back for %d request(s) in %s", "")}
+    VERDICT_OPS = {"confirm": "drc_team_confirm", "reject": "drc_team_reject",
+                   "decline": "drc_team_decline"}
+
+    @staticmethod
+    def _drc_verdict_items(db):
+        """The verdicts a session's roles have, a group a role: a
+        confirmer's confirm / unconfirm / reject / unreject, a waiver's
+        decline / undecline. None for a session without a role, and for
+        results without a review."""
+        if not hasattr(db, "waive_ask"):
+            return []
+        items = []
+        if getattr(db, "confirmer", False):
+            items.append((("confirm", True), ("confirm", False),
+                          ("reject", True), ("reject", False)))
+        if getattr(db, "waiver", False):
+            items.append((("decline", True), ("decline", False)))
+        return items
+
+    def _drc_verdict_may(self, db, action):
+        """Whether this session's roles have `action`; said when not."""
+        role = "waiver" if action == "decline" else "confirmer"
+        if getattr(db, role, False):
+            return True
+        self._set_live_status(
+            "%s failed: %s is for a viewer started with the %s's role (floe2 view --role %s)"
+            % (action, "declining" if action == "decline" else
+               "confirming" if action == "confirm" else "rejecting", role, role))
+        return False
+
+    def _drc_verdict(self, ci, targets, action, on, reason=None):
+        """A role's verdict on rule `ci`'s `targets` - a few errors, or a
+        selection of any size the service keeps -, from a right-click menu
+        (0.12.474; user 2026-11-14: "confirmer의 경우 오른쪽 버튼 메뉴에 confirm
+        관련을 넣는게 좋을 것 같음"): a confirmer confirms the waives, takes
+        the confirmation back, rejects them (asking why first - `reason`
+        None is not asked yet, a text is the answer) or takes the rejection
+        back; a waiver declines the requests or takes the decline back.
+        One job of the service's whatever the size, and one line of the
+        log for a rejection or a decline. The verdict is of the targets it
+        applies to - a confirmation of the ones somebody has waived -, and
+        the others are said."""
+        db = self._drc
+        if db is None or not targets or not self._drc_verdict_may(db, action):
+            return
+        if self._drc_review_pending():
+            return
+        if action != "confirm" and on and reason is None:
+            self._drc_reason_then(
+                action, ci, targets, lambda _on, text, d=db:
+                self._drc_verdict(ci, targets, action, True, reason=text)
+                if self._drc is d else None)
+            return
+        fields = dict(check=int(ci), on=bool(on))
+        if getattr(targets, "sid", None) is not None:
+            fields["selection"] = targets.sid
+        else:
+            fields["errors"] = [int(e) for e in targets]
+        if reason and on:
+            fields["reason"] = reason
+        word = self.VERDICT_ITEMS[(action, bool(on))].split(" ")[0]
+        try:
+            db._start("confirm", self.VERDICT_OPS[action], **fields)
+        except (OSError, gtkservice.ServiceError) as exc:
+            self._set_live_status("%s failed: %s" % (word, exc))
+            return
+        self._drc_verdict_job = dict(db=db, ci=ci, action=action, on=bool(on),
+                                     reason=reason, word=word, targets=targets)
+        self._set_live_status("%s: processing %d error(s)…" % (word, len(targets)))
+
+    def _drc_verdict_poll(self):
+        """The answer to a verdict (the viewer's poll): the states are
+        others - the lists, the counts, the markers and the detail follow at
+        once - and the status line says what was done."""
+        job = getattr(self, "_drc_verdict_job", None)
+        if job is None:
+            return
+        event = job["db"].poll("confirm")
+        if event is None:
+            return
+        if event["state"] == "progress":
+            self._set_live_status("%s: %d / %d processed" % (
+                job["word"], event.get("done", 0), event.get("total", 0)))
+            return
+        self._drc_verdict_job = None
+        db, ci = job["db"], job["ci"]
+        if self._drc is not db:
+            return
+        error = event.get("message") if event["state"] != "done" else None
+        changed, skipped = int(event.get("changed") or 0), int(event.get("skipped") or 0)
+        if error:
+            text = "%s failed: %s" % (job["word"], error)
+            if changed:
+                text += " · %d done before it" % changed
+        else:
+            done, passed = self.VERDICT_SAID[(job["action"], job["on"])]
+            text = done % (changed, db.checks[ci].name)
+            if job["on"]:
+                text += self._drc_reason_said(job.get("reason"))
+            if skipped and passed:
+                text += passed % skipped
+        # (what the service wrote stays whatever became of the job: the
+        # states read so far are dropped, and the rule's count is the
+        # answer's)
+        db.statuses_changed(ci, event.get("counts"))
+        self._drc_waived_refresh(ci, (), False, bulk=True, said=text)
+        if getattr(self, "_drc_selection_key", None) is not None:
+            # (the selection is being rechecked against the filter's list:
+            # its answer leaves this line)
+            self._drc_selection_after = text
+        self._drc_team_waives_changed(db)
+
     def _drc_own_statuses_changed(self, db, ci, counts):
         """The service changed this reviewer's own statuses of rule `ci`
         beside an action of another kind (a confirmer's rejection turns
@@ -12396,7 +12641,8 @@ class Viewer:
             self._drc_returned_poll()
             return True
         if (getattr(self, "_drc_review_job", None) is not None
-                or getattr(self, "_drc_team_busy", None) is not None):
+                or getattr(self, "_drc_team_busy", None) is not None
+                or getattr(self, "_drc_verdict_job", None) is not None):
             return True     # a write of this viewer's own runs: the next tick
         try:
             db.returned_ask()
@@ -12685,7 +12931,9 @@ class Viewer:
         if text is None:
             self._set_live_status(
                 "%s cancelled: %d error(s) left as they were"
-                % ("request" if asking else "waive" if kind == "waive" else "not for review",
+                % ("request" if asking else
+                   {"waive": "waive", "reject": "reject", "decline": "decline"}.get(
+                       kind, "not for review"),
                    len(targets)))
             return
         self._drc_reason_last[kind] = text

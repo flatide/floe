@@ -706,6 +706,31 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   (`gtkservice.decline_requests`, 서비스의 `drc_team_decline`, job `confirm`의 답 `verdict: decline`).
   `Requested`와 `Declined` 목록에서는 마지막 열의 제목이 `Declined by`가 되고(`verdict_column`)
   행의 `declined_by`를 보인다. 창 제목 끝은 역할 목록이다(`DRC team waives - kim (waiver,confirmer)`).
+  **오른쪽 버튼 메뉴의 판정과 묶음 선택**(0.12.474, 사용자 2026-11-14: "confirmer의 경우 오른쪽 버튼
+  메뉴에 confirm 관련을 … 그룹으로 한번에 waive된 것을 … 한번에 확인하고 confirm"): 그리드 메뉴
+  (`_on_drc_grid_menu`)와 그룹 목록 메뉴(`_on_drc_delta_menu`)에 세션의 역할이 가진 판정이
+  나온다(`_drc_verdict_items(db)`: `db.confirmer`면 confirm/unconfirm/reject/unreject, `db.waiver`면
+  decline/undecline; 항목 글자는 `VERDICT_ITEMS`와 `_drc_scope_words`). `db.marks == "none"`이면 두
+  메뉴에 waive 항목이 없다. 판정은 `_drc_verdict(ci, targets, action, on, reason=None)`가 한다:
+  대상은 에러 목록이거나 서비스의 선택(`sid`)이고, 반려와 거절은 먼저 사유를 묻고
+  (`_drc_reason_then(action, …)`, 선택이면 review job의 `reason-read`), 서비스의 job `confirm` 하나를
+  건다(`drc_team_confirm` / `drc_team_reject` / `drc_team_decline`에 `errors`나 `selection`). 답은
+  뷰어의 폴이 받는다(`_drc_verdict_poll`, `_poll`의 `verdict`): `db.statuses_changed(ci, counts)`,
+  `_drc_waived_refresh(…, said=)`, 상세 다시 보이기. 그 뒤 선택이 필터에 맞춰 다시 세어져도 상태
+  줄은 판정의 것이다(`_drc_selection_after`). 진행 중에는 다른 리뷰 쓰기와 같이 막는다
+  (`_drc_review_pending`, `_request_busy`, 2초 주기 확인도 쉰다). 그룹 목록의 판정은
+  `_drc_scope_all(action, on)`이 범위를 select 작업으로 모은 뒤 `_drc_scope_apply`가 같은 함수로
+  넘긴다. 상태 줄은 `VERDICT_SAID`: `confirmed N waive(s) in RULE[ · K not waived]`,
+  `confirmation taken back for N waive(s) in RULE`, `rejected N waive(s) in RULE · reason: …`,
+  `rejection taken back for …`, `declined N request(s) in RULE[ · K with no request waiting]`,
+  `decline taken back for …`. 역할이 없으면 `confirm failed: confirming is for a viewer started
+  with the confirmer's role (floe2 view --role confirmer)`.
+  묶음 선택: 표시가 있는 에러의 그리드 메뉴에 `select waived with #N`(상태가 requested·declined면
+  `select requested with #N`; `_drc_group_stage`). `_drc_group_select(ci, ei)`가 선택 워커에
+  `SelectionWorker.submit_group`을 건다(서비스의 `drc_team_group`, job `select`). 답은 보통의 선택과
+  같이 `_drc_selection_poll`이 받아 `_drc_sel`로 두고, `DrcSelection.group`(`stage`, `reviewer`,
+  `text`, `time`)으로 상태 줄을 만든다(`_drc_group_said`): `error select RULE: N selected - waived by
+  kim (사유)`, `selected` 필터가 꺼져 있으면 뒤에 ` · check `selected` to list them alone`.
   **필터의 다섯 항목**(0.12.469, 사용자 2026-11-14: "메인 목록에서 상태 4가지로 필터할 수 있어야"):
   `_drc_wfilter`는 `all`·`notwaived`·`waived`·`confirmed`·`rejected`다. 필터가 바뀌면(그리고 결과를 열
   때) `_drc_lens_sync`가 서비스에 그 필터가 보이는 에러의 클래스를 알린다(`PackDrc.set_lens`, 서비스의
@@ -847,7 +872,8 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   넘기는 측정은 상태 줄에 `CD groups: …`로 진행과 완료를 말한다.
   **그룹 목록의 우클릭 메뉴**(0.12.444, `_on_drc_delta_menu`): 행이 범위가 되고 select all /
   deselect all / waive all / unwaive all / mark not for review all / clear not for review all
-  (`_drc_scope_all`). select all은 나열된 것(waive 필터 적용), 나머지 넷은 필터와 무관하게
+  (`_drc_scope_all`; 0.12.474: 역할 세션에는 confirm all 등 그 역할의 판정이 더해지고, 표시를 하지
+  않는 세션에는 waive all·unwaive all이 없다). select all은 나열된 것(waive 필터 적용), 나머지 넷은 필터와 무관하게
   범위 전체이며 그리드의 선택을 건드리지 않는다: select 작업으로 범위를 모으고
   (`_drc_selection_submit(then=)`) 그 결과에 review 작업을 한다(`_drc_scope_apply`).
   기본 간격은 룰 전체의 델타 범위에서 약 10개 그룹이 되도록 자동 계산한다.

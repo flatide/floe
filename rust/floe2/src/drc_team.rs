@@ -44,6 +44,13 @@
 //!   drc_team_decline {handle, check, errors, on, reason?} job "confirm": a
 //!       waiver declines the request of the errors, or takes that back
 //!       (0.12.473; `verdict` in the job's answer says which of the three)
+//!       The three take `selection` (a selection the service keeps, of any
+//!       size) in place of `errors` (0.12.474): the verdict on a box
+//!       selection, a group, a whole scope at once
+//!   drc_team_group {handle, check, error}        job "select": the errors
+//!       that were waived - or asked for - with `error` by the same
+//!       reviewer in one action, as a selection: {selection, count, group:
+//!       {stage: waive|request, reviewer, text, time}} (0.12.474)
 use super::{job_error, number, numbers, text, waived_of, Session, Shared};
 use floe_app_core::drc::analysis::scope::Selection;
 use floe_app_core::drc::desktop::{Lens, StatusReader};
@@ -226,6 +233,42 @@ fn rule_size(c: &TeamCtx, check: usize) -> Result<u64> {
         .get(check)
         .copied()
         .ok_or_else(|| Error::input("DRC check index out of range"))
+}
+
+/// The errors a verdict is asked of: named one by one (`errors`), or a
+/// selection the service keeps (`selection`: of any size - a box selection,
+/// a waive group's, a scope's as the select job collected it).
+enum Targets {
+    Named(Vec<u64>),
+    Set(Arc<Selection>),
+}
+
+/// A request's targets in a rule of `size` errors: its `selection`, else
+/// its `errors`; None when it names neither.
+fn targets_of(shared: &Shared, request: &Value, size: u64) -> Result<Option<Targets>> {
+    if let Some(sid) = request.get("selection").and_then(Value::as_u64) {
+        let sel = shared
+            .selections
+            .lock()
+            .unwrap()
+            .get(&sid)
+            .cloned()
+            .ok_or_else(|| Error::input("no such selection"))?;
+        if sel.size != size {
+            return Err(Error::input("the selection is of another rule"));
+        }
+        return Ok(Some(Targets::Set(sel)));
+    }
+    match request.get("errors").filter(|v| !v.is_null()) {
+        Some(_) => {
+            let errors = errors_of(request)?;
+            if errors.iter().any(|&e| e >= size) {
+                return Err(Error::input("DRC error index out of range"));
+            }
+            Ok(Some(Targets::Named(errors)))
+        }
+        None => Ok(None),
+    }
 }
 
 /// The statistics CSV of one's own review (whole database and per rule).
@@ -744,33 +787,30 @@ impl Session {
                 if self.running("confirm") {
                     return Err(Error::new(ErrorKind::Busy, "a confirmation is still running"));
                 }
-                let named = match request.get("errors").filter(|v| !v.is_null()) {
-                    Some(_) => {
-                        let errors = errors_of(request)?;
-                        if errors.iter().any(|&e| e >= size) {
-                            return Err(Error::input("DRC error index out of range"));
-                        }
-                        Some(errors)
-                    }
-                    None => None,
-                };
+                // (`errors`: these; `selection`: the selection's - a box
+                // selection, a group, a scope; neither: every waive of the rule)
+                let targets = targets_of(&shared, request, size)?;
                 Ok(json!({"job": self.start("confirm", move |shared, id, stop| {
                     let c = shared.team.as_ref().unwrap();
                     let (mut changed, mut skipped) = (0u64, 0u64);
                     let result = (|| -> Result<()> {
                         // the team's waives as their files stand now
                         let mut view = TeamWaives::open(&c.id.pack, &c.id)?;
-                        let chunks: Vec<u64> = match &named {
-                            Some(errors) => {
+                        let chunks: Vec<u64> = match &targets {
+                            Some(Targets::Named(errors)) => {
                                 let mut ks: Vec<u64> = errors.iter().map(|e| e / CHUNK).collect();
                                 ks.sort_unstable();
                                 ks.dedup();
                                 ks
                             }
-                            None => (0..size.div_ceil(CHUNK)).collect(),
+                            _ => (0..size.div_ceil(CHUNK)).collect(),
                         };
-                        let members = named.as_ref().map(|errors| Selection::from_indices(size, errors.clone()));
-                        let members = members.as_ref().map(|m| m as &dyn floe_app_core::drc::analysis::scope::Membership);
+                        let listed = match &targets {
+                            Some(Targets::Named(errors)) => Some(Arc::new(Selection::from_indices(size, errors.clone()))),
+                            Some(Targets::Set(sel)) => Some(Arc::clone(sel)),
+                            None => None,
+                        };
+                        let members = listed.as_deref().map(|m| m as &dyn floe_app_core::drc::analysis::scope::Membership);
                         let (mut said, mut settled) = (std::time::Instant::now(), std::time::Instant::now());
                         for (done, &k) in chunks.iter().enumerate() {
                             // (what a stopped job wrote stays, and is flushed below)
@@ -802,8 +842,21 @@ impl Session {
                     if changed >= super::TEAM_SOON {
                         shared.team_soon();
                     }
+                    // (`counts`: the rule's as the session's filter shows it
+                    // after the confirmations - what a host's list goes on
+                    // from without waiting for its next look)
+                    let counts = super::review(&mut shared.opened.lock().unwrap()).and_then(|r| {
+                        r.take_reclassed();
+                        r.lens_counts(check)
+                    });
                     match result.and(flushed) {
-                        Ok(()) => shared.event(id, "confirm", "done", json!({"check": check, "on": on, "changed": changed, "skipped": skipped})),
+                        Ok(()) => {
+                            let mut done = json!({"check": check, "on": on, "changed": changed, "skipped": skipped});
+                            if let Ok((shown, total)) = counts {
+                                done["counts"] = json!([shown, total]);
+                            }
+                            shared.event(id, "confirm", "done", done)
+                        }
                         Err(e) => shared.event(id, "confirm", "error", json!({"message": e.message, "changed": changed, "cancelled": e.kind == ErrorKind::Cancelled})),
                     }
                 })}))
@@ -828,11 +881,9 @@ impl Session {
                 if self.running("confirm") {
                     return Err(Error::new(ErrorKind::Busy, "a confirmation is still running"));
                 }
-                let errors = errors_of(request)?;
-                if errors.iter().any(|&e| e >= size) {
-                    return Err(Error::input("DRC error index out of range"));
-                }
-                Ok(json!({"job": self.start("confirm", move |shared, id, _stop| {
+                let targets = targets_of(&shared, request, size)?
+                    .ok_or_else(|| Error::input("errors must be a list"))?;
+                Ok(json!({"job": self.start("confirm", move |shared, id, stop| {
                     let c = shared.team.as_ref().unwrap();
                     let mut changed = 0u64;
                     let result = (|| -> Result<Value> {
@@ -840,7 +891,10 @@ impl Session {
                         let mut view = TeamWaives::open(&c.id.pack, &c.id)?;
                         let mut o = shared.opened.lock().unwrap();
                         let r = super::review(&mut o)?;
-                        let (runs, skipped) = waives::reject_runs(r, &mut view, check, &errors, on)?;
+                        let (runs, skipped) = match &targets {
+                            Targets::Named(errors) => waives::reject_runs(r, &mut view, check, errors, on)?,
+                            Targets::Set(sel) => waives::reject_members(r, &mut view, check, &**sel, on, &stop)?,
+                        };
                         if on {
                             r.reject_set(check, &runs, &reason)?;
                         } else {
@@ -887,11 +941,9 @@ impl Session {
                 if self.running("confirm") {
                     return Err(Error::new(ErrorKind::Busy, "a confirmation is still running"));
                 }
-                let errors = errors_of(request)?;
-                if errors.iter().any(|&e| e >= size) {
-                    return Err(Error::input("DRC error index out of range"));
-                }
-                Ok(json!({"job": self.start("confirm", move |shared, id, _stop| {
+                let targets = targets_of(&shared, request, size)?
+                    .ok_or_else(|| Error::input("errors must be a list"))?;
+                Ok(json!({"job": self.start("confirm", move |shared, id, stop| {
                     let c = shared.team.as_ref().unwrap();
                     let mut changed = 0u64;
                     let result = (|| -> Result<Value> {
@@ -899,7 +951,10 @@ impl Session {
                         let mut view = TeamWaives::open(&c.id.pack, &c.id)?;
                         let mut o = shared.opened.lock().unwrap();
                         let r = super::review(&mut o)?;
-                        let (runs, skipped) = waives::decline_runs(r, &mut view, check, &errors, on)?;
+                        let (runs, skipped) = match &targets {
+                            Targets::Named(errors) => waives::decline_runs(r, &mut view, check, errors, on)?,
+                            Targets::Set(sel) => waives::decline_members(r, &mut view, check, &**sel, on, &stop)?,
+                        };
                         if on {
                             r.decline_set(check, &runs, &reason)?;
                         } else {
@@ -965,6 +1020,42 @@ impl Session {
                     match result {
                         Ok(v) => shared.event(id, "returned", "done", v),
                         Err(e) => job_error(&shared, id, "returned", e),
+                    }
+                })}))
+            }
+            "drc_team_group" => {
+                // the errors that were waived - or asked for - with one
+                // error, by the same reviewer in one action (app-core
+                // team::waives `group_of`; user 2026-11-14: "그룹으로 한번에
+                // waive된 것을 하나씩 확인하기는 매우 어려울 것"): a selection
+                // of them, as the select job makes one - what a confirmer
+                // looks at together and confirms at once. A job: the
+                // reviewers' files are found and read for it
+                let c = ctx(&shared)?;
+                let check = number(request, "check")? as usize;
+                let error = number(request, "error")?;
+                let size = rule_size(c, check)?;
+                if error >= size {
+                    return Err(Error::input("DRC error index out of range"));
+                }
+                Ok(json!({"job": self.start("select", move |shared, id, stop| {
+                    let c = shared.team.as_ref().unwrap();
+                    let result = (|| -> Result<Value> {
+                        let mut view = TeamWaives::open(&c.id.pack, &c.id)?;
+                        let group = view.group_of(check, error, &stop)?.ok_or_else(|| {
+                            Error::input(format!(
+                                "error #{} is neither waived nor asked for: nothing was marked with it",
+                                error + 1
+                            ))
+                        })?;
+                        let sel = Selection::from_indices(size, group.runs.iter().flat_map(|&(a, b)| a..b));
+                        let (sid, count) = (shared.next_id(), sel.total());
+                        shared.selections.lock().unwrap().insert(sid, Arc::new(sel));
+                        Ok(json!({"selection": sid, "count": count, "group": group}))
+                    })();
+                    match result {
+                        Ok(v) => shared.event(id, "select", "done", v),
+                        Err(e) => job_error(&shared, id, "select", e),
                     }
                 })}))
             }

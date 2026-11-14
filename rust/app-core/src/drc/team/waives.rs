@@ -774,6 +774,100 @@ pub fn confirm_chunk(
     Ok((changed, skipped))
 }
 
+/// The errors a verdict is asked of: named one by one, or a set - a
+/// selection, a scope - whose every chunk is asked.
+enum Asked<'a> {
+    Named(Vec<u64>),
+    Set(&'a dyn Membership),
+}
+
+/// Each chunk of a rule of `size` errors that has any of `asked`, with the
+/// errors asked in it: `each(chunk, the chunk's errors, the asked ones)`.
+fn asked_chunks(
+    size: u64,
+    asked: &Asked,
+    cancelled: &AtomicUsize,
+    each: &mut dyn FnMut(u64, u64, Bits) -> Result<()>,
+) -> Result<()> {
+    match asked {
+        Asked::Named(errors) => {
+            let mut i = 0;
+            while i < errors.len() {
+                let k = errors[i] / CHUNK;
+                let mut bits = Bits::ZERO;
+                while i < errors.len() && errors[i] / CHUNK == k {
+                    bits.set(errors[i] % CHUNK);
+                    i += 1;
+                }
+                each(k, (size - k * CHUNK).min(CHUNK), bits)?;
+            }
+        }
+        Asked::Set(members) => {
+            let mut mask = vec![false; CHUNK as usize];
+            for k in 0..size.div_ceil(CHUNK) {
+                if k % 256 == 255 {
+                    check_cancelled(cancelled)?;
+                }
+                let count = (size - k * CHUNK).min(CHUNK);
+                members.mask(k * CHUNK, &mut mask[..count as usize]);
+                let bits = Bits::from_mask(&mask[..count as usize]);
+                if !bits.is_zero() {
+                    each(k, count, bits)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The errors named, sorted and each once - refused when one is past the
+/// rule.
+fn named(view: &TeamWaives, check: usize, errors: &[u64]) -> Result<Vec<u64>> {
+    let size = view.rule(check)?;
+    if errors.iter().any(|&e| e >= size) {
+        return Err(Error::input("DRC error index out of range"));
+    }
+    let mut sorted = errors.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    Ok(sorted)
+}
+
+fn push(runs: &mut Vec<(u64, u64)>, k: u64, target: Bits) {
+    for j in target.ones() {
+        let error = k * CHUNK + j;
+        match runs.last_mut() {
+            Some(last) if last.1 == error => last.1 = error + 1,
+            _ => runs.push((error, error + 1)),
+        }
+    }
+}
+
+fn reject_of(
+    review: &Review,
+    view: &mut TeamWaives,
+    check: usize,
+    asked: Asked,
+    on: bool,
+    cancelled: &AtomicUsize,
+) -> Result<(Vec<(u64, u64)>, u64)> {
+    let size = view.rule(check)?;
+    let (mut runs, mut skipped): (Vec<(u64, u64)>, u64) = (Vec::new(), 0);
+    asked_chunks(size, &asked, cancelled, &mut |k, count, asked| {
+        let target = if on {
+            let waived = view.waived(check, k)?;
+            skipped += (asked & !waived).count();
+            asked & waived
+        } else {
+            let mine: Vec<(u64, u64)> = review.rejects.held(Reason::Reject, check, &[(k * CHUNK, k * CHUNK + count)]);
+            asked & run_bits(&mine, k * CHUNK, count)
+        };
+        push(&mut runs, k, target);
+        Ok(())
+    })?;
+    Ok((runs, skipped))
+}
+
 /// What a rejection by `review`'s confirmer - or its taking back - is of:
 /// of rule `check`'s `errors`, the ones somebody has waived (as `view` read
 /// the files: a waive that is not rejected - an error whose waives are all
@@ -789,40 +883,47 @@ pub fn reject_runs(
     errors: &[u64],
     on: bool,
 ) -> Result<(Vec<(u64, u64)>, u64)> {
+    let asked = Asked::Named(named(view, check, errors)?);
+    reject_of(review, view, check, asked, on, &AtomicUsize::new(0))
+}
+
+/// `reject_runs`, the errors being a set - a selection of any size, a scope
+/// (0.12.474; user 2026-11-14: "그룹으로 한번에 waive된 것을 하나씩 확인하기는
+/// 매우 어려울 것으로 예상되므로 해당 그룹도 한번에 확인하고 confirm 할 수
+/// 있는"): one line of the confirmer's log for the whole of it.
+pub fn reject_members(
+    review: &Review,
+    view: &mut TeamWaives,
+    check: usize,
+    members: &dyn Membership,
+    on: bool,
+    cancelled: &AtomicUsize,
+) -> Result<(Vec<(u64, u64)>, u64)> {
+    reject_of(review, view, check, Asked::Set(members), on, cancelled)
+}
+
+fn decline_of(
+    review: &Review,
+    view: &mut TeamWaives,
+    check: usize,
+    asked: Asked,
+    on: bool,
+    cancelled: &AtomicUsize,
+) -> Result<(Vec<(u64, u64)>, u64)> {
     let size = view.rule(check)?;
-    if errors.iter().any(|&e| e >= size) {
-        return Err(Error::input("DRC error index out of range"));
-    }
-    let mut sorted = errors.to_vec();
-    sorted.sort_unstable();
-    sorted.dedup();
     let (mut runs, mut skipped): (Vec<(u64, u64)>, u64) = (Vec::new(), 0);
-    let mut i = 0;
-    while i < sorted.len() {
-        let k = sorted[i] / CHUNK;
-        let mut asked = Bits::ZERO;
-        while i < sorted.len() && sorted[i] / CHUNK == k {
-            asked.set(sorted[i] % CHUNK);
-            i += 1;
-        }
-        let count = (size - k * CHUNK).min(CHUNK);
-        let mine: Vec<(u64, u64)> = review.rejects.held(Reason::Reject, check, &[(k * CHUNK, k * CHUNK + count)]);
-        let mine = run_bits(&mine, k * CHUNK, count);
+    asked_chunks(size, &asked, cancelled, &mut |k, count, asked| {
         let target = if on {
-            let waived = view.waived(check, k)?;
-            skipped += (asked & !waived).count();
-            asked & waived
+            let waiting = view.requested(check, k)?;
+            skipped += (asked & !waiting).count();
+            asked & waiting
         } else {
-            asked & mine
+            let mine: Vec<(u64, u64)> = review.rejects.held(Reason::Decline, check, &[(k * CHUNK, k * CHUNK + count)]);
+            asked & run_bits(&mine, k * CHUNK, count)
         };
-        for j in target.ones() {
-            let error = k * CHUNK + j;
-            match runs.last_mut() {
-                Some(last) if last.1 == error => last.1 = error + 1,
-                _ => runs.push((error, error + 1)),
-            }
-        }
-    }
+        push(&mut runs, k, target);
+        Ok(())
+    })?;
     Ok((runs, skipped))
 }
 
@@ -841,38 +942,163 @@ pub fn decline_runs(
     errors: &[u64],
     on: bool,
 ) -> Result<(Vec<(u64, u64)>, u64)> {
-    let size = view.rule(check)?;
-    if errors.iter().any(|&e| e >= size) {
-        return Err(Error::input("DRC error index out of range"));
-    }
-    let mut sorted = errors.to_vec();
-    sorted.sort_unstable();
-    sorted.dedup();
-    let (mut runs, mut skipped): (Vec<(u64, u64)>, u64) = (Vec::new(), 0);
-    let mut i = 0;
-    while i < sorted.len() {
-        let k = sorted[i] / CHUNK;
-        let mut asked = Bits::ZERO;
-        while i < sorted.len() && sorted[i] / CHUNK == k {
-            asked.set(sorted[i] % CHUNK);
-            i += 1;
+    let asked = Asked::Named(named(view, check, errors)?);
+    decline_of(review, view, check, asked, on, &AtomicUsize::new(0))
+}
+
+/// `decline_runs`, the errors being a set (`reject_members`).
+pub fn decline_members(
+    review: &Review,
+    view: &mut TeamWaives,
+    check: usize,
+    members: &dyn Membership,
+    on: bool,
+    cancelled: &AtomicUsize,
+) -> Result<(Vec<(u64, u64)>, u64)> {
+    decline_of(review, view, check, Asked::Set(members), on, cancelled)
+}
+
+/// The errors of a rule that one reviewer marked with one action - what was
+/// waived, or asked for, together (0.12.474): the errors their reasons file
+/// keeps under one line, an action being a line whatever its size. Marks
+/// made without a reason have no line: they are one group a reviewer and
+/// rule, the ones that say no why.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct Group {
+    /// "waive": a waiver's waives; "request": a requester's requests
+    pub stage: &'static str,
+    /// whose marks
+    pub reviewer: String,
+    /// why, as they said for the action (empty: the marks without a reason)
+    pub text: String,
+    /// when (seconds since the epoch; 0 for the marks without a reason)
+    pub time: u64,
+    /// the group's errors that are marked now (sorted runs)
+    #[serde(skip)]
+    pub runs: Vec<(u64, u64)>,
+}
+
+impl TeamWaives {
+    /// The group rule `check`'s error `error` was marked with (`Group`):
+    /// a waive's before a request's - what a confirmer looks at -, a mark
+    /// that counts before one sent back, the first reviewer of several.
+    /// None for an error nobody has waived and nobody asked the waive of.
+    pub fn group_of(&mut self, check: usize, error: u64, cancelled: &AtomicUsize) -> Result<Option<Group>> {
+        const STEP: u64 = 1 << 20;
+        let size = self.rule(check)?;
+        if error >= size {
+            return Err(Error::input("DRC error index out of range"));
         }
-        let count = (size - k * CHUNK).min(CHUNK);
-        let target = if on {
-            let waiting = view.requested(check, k)?;
-            skipped += (asked & !waiting).count();
-            asked & waiting
-        } else {
-            let mine: Vec<(u64, u64)> = review.rejects.held(Reason::Decline, check, &[(k * CHUNK, k * CHUNK + count)]);
-            asked & run_bits(&mine, k * CHUNK, count)
+        let first = self.starts[check];
+        self.rejections(check);
+        self.declines(check);
+        let (open, shut) = (&self.opens[&check].1, &self.shuts[&check].1);
+        let holds = |runs: &[(u64, u64)]| {
+            let i = runs.partition_point(|r| r.1 <= error);
+            runs.get(i).is_some_and(|r| r.0 <= error)
         };
-        for j in target.ones() {
-            let error = k * CHUNK + j;
-            match runs.last_mut() {
-                Some(last) if last.1 == error => last.1 = error + 1,
-                _ => runs.push((error, error + 1)),
+        // whose mark of it: (what it ranks, the person, the stage)
+        let mut pick: Option<(u8, usize, &'static str)> = None;
+        let mut byte = [0u8; 1];
+        for (i, person) in self.people.iter().enumerate() {
+            let files = [(&person.waive, 40, "waive", &open[i]), (&person.request, confirm::HEADER, "request", &shut[i])];
+            for (file, head, stage, back) in files {
+                let Some((file, _)) = file.as_ref().filter(|(_, stored)| stored[check] > 0) else {
+                    continue;
+                };
+                file.read_exact_at(&mut byte, head + first + error)?;
+                if byte[0] != crate::drc::desktop::STATUS_WAIVED {
+                    continue;
+                }
+                let rank = 2 * u8::from(stage == "waive") + u8::from(!holds(back));
+                if pick.is_none_or(|(best, ..)| rank > best) {
+                    pick = Some((rank, i, stage));
+                }
             }
         }
+        let Some((_, i, stage)) = pick else {
+            return Ok(None);
+        };
+        let (tag, sizes) = (self.tag.clone(), self.sizes.clone());
+        let person = &mut self.people[i];
+        if person.reasons.is_none() {
+            person.reasons = Some(match &person.reasons_path {
+                None => None,
+                Some(path) => match Reasons::load(path, &tag, &sizes) {
+                    Ok(reasons) => reasons,
+                    Err(e) => {
+                        self.skipped.push((person.tag.clone(), path.clone(), e.message));
+                        None
+                    }
+                },
+            });
+        }
+        let kind = if stage == "waive" { Reason::Waive } else { Reason::Request };
+        let (file, head) = match stage {
+            "waive" => (&person.waive.as_ref().expect("picked by it").0, 40),
+            _ => (&person.request.as_ref().expect("picked by it").0, confirm::HEADER),
+        };
+        // the reviewer's marks of the rule inside `runs`, as their file has them
+        let marked = |runs: &[(u64, u64)]| -> Result<Vec<(u64, u64)>> {
+            let mut out: Vec<(u64, u64)> = Vec::new();
+            let mut buffer = vec![0u8; STEP as usize];
+            for &(a, b) in runs {
+                let mut at = a;
+                while at < b {
+                    check_cancelled(cancelled)?;
+                    let len = (b - at).min(STEP);
+                    let bytes = &mut buffer[..len as usize];
+                    file.read_exact_at(bytes, head + first + at)?;
+                    for (j, &s) in bytes.iter().enumerate() {
+                        if s == crate::drc::desktop::STATUS_WAIVED {
+                            let e = at + j as u64;
+                            match out.last_mut() {
+                                Some(last) if last.1 == e => last.1 = e + 1,
+                                _ => out.push((e, e + 1)),
+                            }
+                        }
+                    }
+                    at += len;
+                }
+            }
+            Ok(out)
+        };
+        let reasons = person.reasons.as_ref().and_then(Option::as_ref);
+        let line = reasons.and_then(|r| r.parts(kind, check, &[(error, error + 1)]).first().map(|part| part.2));
+        let (text, time, runs) = match (reasons, line) {
+            (Some(reasons), Some(entry)) => {
+                // the action's line: every run of it in the rule
+                let mut of: Vec<(u64, u64)> = Vec::new();
+                for (a, b, e) in reasons.runs(kind, check) {
+                    if e == entry {
+                        match of.last_mut() {
+                            Some(last) if last.1 == a => last.1 = b,
+                            _ => of.push((a, b)),
+                        }
+                    }
+                }
+                let said = &reasons.entries()[entry];
+                (said.text.clone(), said.time, marked(&of)?)
+            }
+            _ => {
+                // no line: the reviewer's marks of the rule that say no why
+                let all = marked(&[(0, size)])?;
+                let said: Vec<(u64, u64)> = match reasons {
+                    Some(reasons) => {
+                        let mut runs: Vec<(u64, u64)> = Vec::new();
+                        for (a, b, _) in reasons.runs(kind, check) {
+                            match runs.last_mut() {
+                                Some(last) if last.1 == a => last.1 = b,
+                                _ => runs.push((a, b)),
+                            }
+                        }
+                        runs
+                    }
+                    None => Vec::new(),
+                };
+                (String::new(), 0, crate::drc::reasons::minus(&all, &said))
+            }
+        };
+        Ok(Some(Group { stage, reviewer: person.tag.clone(), text, time, runs }))
     }
-    Ok((runs, skipped))
 }

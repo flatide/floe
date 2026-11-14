@@ -1165,13 +1165,17 @@ class ClusterFile(object):
 
 class DrcSelection(DrcScope):
     """A complete selection of one rule, kept by the service (any size):
-    count, contains, pages and ranks are asked of it."""
-    __slots__ = ("sid", "size", "total", "_seen")
+    count, contains, pages and ranks are asked of it. `group`: of a
+    selection made of the errors marked with one (SelectionWorker
+    submit_group) - {"stage": "waive" | "request", "reviewer", "text",
+    "time"}; None of any other."""
+    __slots__ = ("sid", "size", "total", "_seen", "group")
 
     def __init__(self, db, ci, sid, size, total):
         super().__init__(db, ci, {"selection": sid})
         self.sid, self.size, self.total = sid, size, total
         self._seen = {}
+        self.group = None
 
     def __len__(self):
         return self.total
@@ -1338,6 +1342,14 @@ class SelectionWorker(_Worker):
         self._ci = ci
         self._submit(key, db, "drc_select", **fields)
 
+    def submit_group(self, key, db, ci, ei):
+        """The errors that were waived - or asked for - with rule `ci`'s
+        error `ei`, by the same reviewer in one action (the service reads
+        the reviewers' files for it: app-core team::waives group_of): the
+        selection `poll` answers with says whose and why (`group`)."""
+        self._ci = ci
+        self._submit(key, db, "drc_team_group", check=int(ci), error=int(ei))
+
     def poll(self):
         failed, e = self._event()
         if failed is not None:
@@ -1352,6 +1364,7 @@ class SelectionWorker(_Worker):
             sel = DrcSelection(self._db, self._ci, e["selection"],
                                len(self._db.checks[self._ci].errors),
                                e["count"])
+            sel.group = e.get("group")
             return key, sel, None
         if e["state"] == "error":
             return key, None, e.get("message")

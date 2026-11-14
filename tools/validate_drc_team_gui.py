@@ -896,6 +896,266 @@ def _roles(v, d, check, pump):
           "results opened without a role are a reviewer's again: no Requested in the filter", entries())
 
 
+def _menus(v, d, check, pump):
+    """A role's verdicts in the right-click menus, and the group an error
+    was waived with (0.12.474, user 2026-11-14: "confirmer의 경우 오른쪽 버튼
+    메뉴에 confirm 관련을 넣는게 좋을 것 같음. 그리고 그룹으로 한번에 waive된
+    것을 하나씩 확인하기는 매우 어려울 것으로 예상되므로 해당 그룹도 한번에
+    확인하고 confirm 할 수 있는 필터등이 필요"): the grid's menu on an error
+    and on a selection, the group list's on a whole scope, `select waived
+    with #N` - with the waives made by other processes."""
+    import json
+    from floe import gui, gtkservice
+    Gtk, Gdk = gui.Gtk, gui.Gdk
+    home = d / "menus"
+    home.mkdir()
+    shutil.copy(ROOT / "sample.db", home / "sample.db")
+    r = _run([INDEX, "drc", str(home / "sample.db")])
+    check(r.returncode == 0, "floe-index drc of the menus' results", r.stderr)
+    path = str(home / "sample.db")
+
+    def open_as(role):
+        old = v._drc
+        v._role = role
+        v._drc_request(path)
+        pump(v, lambda: v._drc is not old and v._drc is not None
+             and (getattr(v._drc, "role", "") or "") == role, "the %s's open" % (role or "reviewer"), 20)
+        return v._drc
+
+    def idle():
+        return (v._drc_selection_key is None and v._drc_review_job is None
+                and v._drc_verdict_job is None)
+
+    def settle(what):
+        pump(v, idle, what, 60)
+
+    def event_at(tree, row, column):
+        tpath = Gtk.TreePath.new_from_indices([row])
+        col = tree.get_column(column)
+        pump(v, lambda: tree.get_cell_area(tpath, col).height > 1, "the list laid out", 10)
+        area = tree.get_cell_area(tpath, col)
+        e = Gdk.Event.new(Gdk.EventType.BUTTON_PRESS)
+        e.window = tree.get_bin_window()
+        e.send_event = True
+        e.x, e.y = area.x + 3, area.y + area.height / 2
+        e.button, e.state = 3, Gdk.ModifierType(0)
+        e.set_device(Gdk.Display.get_default().get_default_seat().get_pointer())
+        v._drc_menu = None
+        tree.event(e)
+        menu = v._drc_menu
+        return menu, ([] if menu is None else
+                      ["-" if isinstance(i, Gtk.SeparatorMenuItem) else i.get_label()
+                       for i in menu.get_children()])
+
+    def grid_menu(ei):
+        """A right click on error `ei`'s number in the grid."""
+        row, column = divmod(v._drc_grid_map.index(ei), v._drc_gridw)
+        return event_at(v._drcwin._grid, row, column)
+
+    def choose(menu, label, what):
+        next(i for i in menu.get_children()
+             if not isinstance(i, Gtk.SeparatorMenuItem) and i.get_label() == label).activate()
+        menu.popdown()
+        settle(what)
+
+    def labels_of(ei):
+        menu, labels = grid_menu(ei)
+        if menu is not None:
+            menu.popdown()
+        return labels
+
+    def total():
+        r = _run([FLOE2, "drc", path, "--team-counts"])
+        return json.loads(r.stdout)["total"] if r.returncode == 0 else {}
+
+    asked = []
+
+    def why(kind, count, prefill="", known=(), parent=None, rejected_by=(), **more):
+        asked.append((kind, count))
+        return why.answer
+    why.answer = ""
+    v._drc_reason_dialog = why
+    park, kim = gtkservice.Service(FLOE2), gtkservice.Service(FLOE2)
+    try:
+        # the other processes: a requester asks for two groups, a waiver
+        # waives each at once with a reason, and one error with none
+        hp = park.request("drc_open", path=path, mode="load", reviewer="park", role="requester")["handle"]
+        park.request("drc_set_status", handle=hp, check=0, errors=list(range(0, 8)), status=1, reason="fill")
+        park.request("drc_set_status", handle=hp, check=0, errors=[10, 11, 12], status=1, reason="ring")
+        hk = kim.request("drc_open", path=path, mode="load", reviewer="kim", role="waiver")["handle"]
+        kim.request("drc_set_status", handle=hk, check=0, errors=[0, 1, 2, 3, 4, 5], status=1, reason="dummy fill")
+        kim.request("drc_set_status", handle=hk, check=0, errors=[10, 11], status=1, reason="seal ring")
+        kim.request("drc_set_status", handle=hk, check=0, errors=[6], status=1)
+        # ---- a confirmer's viewer: what waits for it, under the Waived filter
+        db = open_as("confirmer")
+        name = db.checks[0].name
+        v._drcwin._wf.set_active_id("waived")
+        v._drc_select_row(0)
+        pump(v, lambda: v._drc_open == 0 and v._drc_grid_map == [0, 1, 2, 3, 4, 5, 6, 10, 11] and idle(),
+             "the waives that wait for a confirmer", 30)
+        labels = labels_of(3)
+        check(labels == ["confirm #4", "unconfirm #4", "reject #4…", "unreject #4", "-",
+                         "select waived with #4", "-",
+                         "mark not for review: #4", "clear not for review: #4", "-", "SVRF info…"],
+              "a confirmer's right click on an error: confirm, unconfirm, reject, unreject - and no waive", labels)
+        # one error confirmed from the menu: it leaves the list of the ones that wait
+        menu, _labels = grid_menu(6)
+        choose(menu, "confirm #7", "one confirmation")
+        check(v.status.get_text() == "confirmed 1 waive(s) in %s" % name
+              and db.get_state(0, 6) == gtkservice.STATE_CONFIRMED and 6 not in v._drc_grid_map
+              and db.status_counts(0)[0] == 8 and total().get("confirmed") == 1,
+              "confirm #7 from the menu: confirmed at once - the list, the count, floe2 drc --team-counts",
+              (v.status.get_text(), v._drc_grid_map, db.status_counts(0), total()))
+        # ---- the group an error was waived with: selected, said, listed alone
+        menu, _labels = grid_menu(3)
+        choose(menu, "select waived with #4", "the group of #4")
+        sel = v._drc_sel
+        check(sel is not None and list(sel[1]) == [0, 1, 2, 3, 4, 5]
+              and sel[1].group == {"stage": "waive", "reviewer": "kim", "text": "dummy fill",
+                                   "time": sel[1].group["time"]}
+              and v.status.get_text() == ("error select %s: 6 selected - waived by kim (dummy fill) · "
+                                          "check `selected` to list them alone" % name),
+              "select waived with #4: the six errors its waiver waived at once, who and why said",
+              (None if sel is None else list(sel[1]), v.status.get_text()))
+        v._drcwin._selv.set_active(True)
+        pump(v, lambda: v._drc_grid_map == [0, 1, 2, 3, 4, 5], "the selected listed alone", 20)
+        labels = labels_of(1)
+        check(labels[:4] == ["confirm 6 selected", "unconfirm 6 selected", "reject 6 selected…",
+                             "unreject 6 selected"],
+              "with a selection the menu's verdicts are the selection's", labels)
+        menu, _labels = grid_menu(1)
+        choose(menu, "confirm 6 selected", "the group confirmed")
+        check(v.status.get_text() == "confirmed 6 waive(s) in %s" % name
+              and all(db.get_state(0, e) == gtkservice.STATE_CONFIRMED for e in range(6))
+              and db.get_state(0, 10) == gtkservice.STATE_WAIVED and total().get("confirmed") == 7
+              and (home / ".sample.db.confirm.gui").read_bytes()[40:52] == bytes([1] * 7 + [0] * 5),
+              "confirm 6 selected: the whole group in one job, the other group left",
+              (v.status.get_text(), total()))
+        v._drcwin._selv.set_active(False)
+        pump(v, lambda: v._drc_grid_map == [10, 11] and idle(), "the other group waits", 20)
+        # a group without a reason is its waiver's marks that say no why
+        v._drcwin._wf.set_active_id("confirmed")
+        v._drc_select_row(0)
+        pump(v, lambda: v._drc_open == 0 and v._drc_grid_map == [0, 1, 2, 3, 4, 5, 6] and idle(),
+             "the confirmed", 20)
+        menu, _labels = grid_menu(6)
+        choose(menu, "select waived with #7", "the group of #7")
+        check(list(v._drc_sel[1]) == [6] and v.status.get_text().startswith(
+            "error select %s: 1 selected - waived by kim with no reason" % name),
+            "a waive made with no reason: the group is its waiver's waives that say no why", v.status.get_text())
+        # ---- reject asks why, on the selection: one line of the log
+        v._drcwin._wf.set_active_id("waived")
+        v._drc_select_row(0)
+        pump(v, lambda: v._drc_open == 0 and v._drc_grid_map == [10, 11] and idle(), "the ones that wait", 20)
+        menu, _labels = grid_menu(10)
+        choose(menu, "select waived with #11", "the group of #11")
+        asked.clear()
+        why.answer = None
+        menu, _labels = grid_menu(10)
+        choose(menu, "reject 2 selected…", "a rejection cancelled")
+        check(asked == [("reject", 2)] and v.status.get_text() == "reject cancelled: 2 error(s) left as they were"
+              and not (home / ".sample.db.rejects.gui").exists(),
+              "reject asks why first; cancelled, nothing is rejected", (asked, v.status.get_text()))
+        why.answer = "not a ring"
+        menu, _labels = grid_menu(10)
+        choose(menu, "reject 2 selected…", "the group rejected")
+        said = (home / ".sample.db.rejects.gui").read_text().splitlines()
+        check(v.status.get_text() == "rejected 2 waive(s) in %s · reason: not a ring" % name
+              and said[-1].startswith("r 0 ") and said[-1].endswith(" 10,2 not a ring")
+              and db.get_state(0, 10) == gtkservice.STATE_REJECTED and total().get("rejected") == 2,
+              "reject 2 selected…: one line of the confirmer's log, rejected at once",
+              (v.status.get_text(), said[-1:]))
+        # (nothing of the rule waits any more: it left the Waived filter's
+        # list, and is opened again under the other filter)
+        v._drcwin._wf.set_active_id("rejected")
+        v._drc_select_row(0)
+        pump(v, lambda: v._drc_open == 0 and v._drc_grid_map == [10, 11] and idle(), "the rejected", 20)
+        menu, _labels = grid_menu(11)
+        choose(menu, "unreject #12", "one rejection taken back")
+        check(v.status.get_text() == "rejection taken back for 1 waive(s) in %s" % name
+              and db.get_state(0, 11) == gtkservice.STATE_WAIVED and db.get_state(0, 10) == gtkservice.STATE_REJECTED,
+              "unreject #12: that waive waits again", v.status.get_text())
+        # a verdict on what it does not apply to says so
+        v._drcwin._wf.set_active_id("all")
+        v._drc_select_row(0)
+        pump(v, lambda: v._drc_open == 0 and len(v._drc_grid_map) == len(db.checks[0].errors) and idle(),
+             "every error", 20)
+        menu, _labels = grid_menu(15)
+        choose(menu, "confirm #16", "a confirmation of no waive")
+        check(v.status.get_text() == "confirmed 0 waive(s) in %s · 1 not waived" % name,
+              "confirm on an error nobody has waived: nothing confirmed, and said", v.status.get_text())
+        labels = labels_of(15)
+        check("select waived with #16" not in labels and "select requested with #16" not in labels
+              and labels_of(7)[5] == "select requested with #8",
+              "an error nobody marked has no group to select; a requested one has its request's", labels)
+        # ---- the group list's menu: the whole scope at once
+        menu, labels = event_at(v._drcwin._delta_tree, 0, 0)
+        check(labels == ["select all", "deselect all", "-", "confirm all", "unconfirm all", "reject all…",
+                         "unreject all", "-", "mark not for review all", "clear not for review all"],
+              "a confirmer's right click on the group list: confirm all, unconfirm all, reject all, unreject all",
+              labels)
+        choose(menu, "unconfirm all", "every confirmation of the rule taken back")
+        check(v.status.get_text() == "confirmation taken back for 7 waive(s) in %s" % name
+              and total().get("confirmed") == 0 and db.get_state(0, 0) == gtkservice.STATE_WAIVED,
+              "unconfirm all: the scope's confirmations, one job", (v.status.get_text(), total()))
+        menu, _labels = event_at(v._drcwin._delta_tree, 0, 0)
+        choose(menu, "confirm all", "every waive of the rule confirmed")
+        got = total()
+        check(v.status.get_text() == "confirmed 8 waive(s) in %s · %d not waived" % (name, len(db.checks[0].errors) - 8)
+              and (got.get("confirmed"), got.get("rejected")) == (8, 1),
+              "confirm all: every waive of the scope that counts - the rejected one is none", (v.status.get_text(), got))
+        # ---- a waiver's menus: decline, on an error and on the scope
+        db = open_as("waiver")
+        v._drcwin._wf.set_active_id("requested")
+        v._drc_select_row(0)
+        pump(v, lambda: v._drc_open == 0 and v._drc_grid_map == [7, 12] and idle(), "the requests that wait", 30)
+        labels = labels_of(7)
+        check(labels == ["waive #8", "unwaive #8", "-", "decline #8…", "undecline #8", "-",
+                         "select requested with #8", "-",
+                         "mark not for review: #8", "clear not for review: #8", "-", "SVRF info…"],
+              "a waiver's right click: waive, unwaive, decline, undecline - and no confirm", labels)
+        menu, _labels = grid_menu(7)
+        choose(menu, "select requested with #8", "the group of the request")
+        check(list(v._drc_sel[1]) == [0, 1, 2, 3, 4, 5, 6, 7]
+              and v.status.get_text().startswith("error select %s: 8 selected - requested by park (fill)" % name),
+              "select requested with #8: what its requester asked for at once", v.status.get_text())
+        v._drc_set_sel(None)
+        why.answer = "no"
+        asked.clear()
+        menu, _labels = grid_menu(7)
+        choose(menu, "decline #8…", "one request declined")
+        check(asked == [("decline", 1)] and v.status.get_text() == "declined 1 request(s) in %s · reason: no" % name
+              and db.get_state(0, 7) == gtkservice.STATE_DECLINED and 7 not in v._drc_grid_map
+              and total().get("declined") == 1,
+              "decline #8… asks why and declines it at once", (asked, v.status.get_text(), total()))
+        menu, labels = event_at(v._drcwin._delta_tree, 0, 0)
+        check(labels == ["select all", "deselect all", "-", "waive all", "unwaive all", "-",
+                         "decline all…", "undecline all", "-",
+                         "mark not for review all", "clear not for review all"],
+              "a waiver's right click on the group list: decline all, undecline all", labels)
+        choose(menu, "undecline all", "the declines of the rule taken back")
+        check(v.status.get_text() == "decline taken back for 1 request(s) in %s" % name
+              and db.get_state(0, 7) == gtkservice.STATE_REQUESTED and total().get("declined") == 0,
+              "undecline all: the scope's declines of this waiver", v.status.get_text())
+        # ---- a session without the role has none of it
+        db = open_as("")
+        v._drcwin._wf.set_active_id("all")
+        v._drc_select_row(0)
+        pump(v, lambda: v._drc_open == 0 and len(v._drc_grid_map) == len(db.checks[0].errors) and idle(),
+             "a reviewer's list", 30)
+        labels = labels_of(15)
+        check(labels == ["waive #16", "unwaive #16", "-", "mark not for review: #16",
+                         "clear not for review: #16", "-", "SVRF info…"],
+              "a viewer without a role: the menu it had", labels)
+        v._drc_verdict(0, [15], "confirm", True)
+        check(v._drc_verdict_job is None and v.status.get_text() == (
+            "confirm failed: confirming is for a viewer started with the confirmer's role "
+            "(floe2 view --role confirmer)"), "... and a verdict asked of it is refused, and said", v.status.get_text())
+    finally:
+        park.close()
+        kim.close()
+
+
 def r7(temp, check):
     print("[R7] the viewer")
     sys.path[:0] = [str(ROOT / "tools"), str(ROOT)]
@@ -1185,5 +1445,6 @@ def r7(temp, check):
         m.window.destroy()
         _team_waives(v, d, check, pump)
         _roles(v, d, check, pump)
+        _menus(v, d, check, pump)
     finally:
         v.window.destroy()
