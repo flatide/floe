@@ -248,7 +248,7 @@ fn the_runs_say_what_an_error_long_table_says() {
         seed % below
     };
     for step in 0..1500u64 {
-        let kind = Kind::ALL[next(3) as usize];
+        let kind = Kind::HELD[next(3) as usize];
         // a few runs, from single errors to wide ones
         let mut errors = Vec::new();
         for _ in 0..1 + next(6) {
@@ -278,7 +278,7 @@ fn the_runs_say_what_an_error_long_table_says() {
             }
         }
         if step % 97 == 0 || step == 1499 {
-            for kind in Kind::ALL {
+            for kind in Kind::HELD {
                 for e in 0..N {
                     assert_eq!(
                         text_of(&r, kind, 0, e),
@@ -308,7 +308,7 @@ fn the_runs_say_what_an_error_long_table_says() {
     for pass in 0..2 {
         let again = f.open(&[N, 50]);
         assert!(again.notices.is_empty(), "{:?}", again.notices);
-        for kind in Kind::ALL {
+        for kind in Kind::HELD {
             for e in 0..N {
                 assert_eq!(
                     text_of(&again, kind, 0, e),
@@ -494,7 +494,7 @@ fn a_file_of_another_result_is_moved_aside_and_never_read() {
             "another error count",
             "floe_reasons=1\nfloe_pack=abababababababababababababababab,66\nw 0 1 0,5 theirs\n".to_string(),
         ),
-        ("another version", format!("floe_reasons=2\nfloe_pack={TAG}\nw 0 1 0,5 theirs\n")),
+        ("another version", format!("floe_reasons=9\nfloe_pack={TAG}\nw 0 1 0,5 theirs\n")),
         ("no version", format!("floe_pack={TAG}\nw 0 1 0,5 theirs\n")),
         ("no result", "floe_reasons=1\nw 0 1 0,5 theirs\n".to_string()),
         ("something else", "floe_note=0|a notes file\n".to_string()),
@@ -649,4 +649,135 @@ fn a_folder_that_refuses_sends_the_reasons_to_the_other_place() {
     assert_eq!(text_of(&r, Kind::Waive, 0, 55), None);
     fs::set_permissions(temp.parent().unwrap(), fs::Permissions::from_mode(0o755)).unwrap();
     fs::set_permissions(&f.0, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// The rejects log keeps what its reviewer answered (0.12.469, user
+/// 2026-11-14: "이전의 waive사유나 반려사유는 계속 유지되어야"): a kept
+/// record takes nothing from an earlier one, is read back in its place,
+/// is written again with the rest - and names the rejection it answers by
+/// who made it and when.
+#[test]
+fn what_a_reviewer_answered_is_kept_as_it_was() {
+    let f = Folder::new();
+    let log = f.0.join(".x.db.rejects.kim");
+    let open = || {
+        Reasons::open_as(
+            "# floe drc waive rejections",
+            REJECTS_VERSION,
+            [log.clone(), f.0.join("temp").join("unused")],
+            TAG.into(),
+            vec![50, 15],
+            false,
+        )
+    };
+    let mut r = open();
+    // a kept record is kept, not set; an answered rejection has who made
+    // it, an earlier reason has none; nothing is nothing
+    assert!(r.set(Kind::Answered, 0, &[(0, 5)], "x", 1).is_err());
+    assert!(r.keep(Kind::Reject, 0, &[(0, 5)], 1, "", "x").is_err());
+    assert!(r.keep(Kind::Answered, 0, &[(0, 5)], 1, "", "x").is_err());
+    assert!(r.keep(Kind::Earlier, 0, &[(0, 5)], 1, "hong", "x").is_err());
+    assert!(r.keep(Kind::Answered, 0, &[(0, 5)], 1, "a b", "x").is_err());
+    assert!(r.keep(Kind::Answered, 0, &[(40, 60)], 1, "hong", "x").is_err());
+    r.keep(Kind::Earlier, 0, &[(0, 5)], 1, "", "  ").unwrap();
+    r.keep(Kind::Answered, 0, &[], 1, "hong", "x").unwrap();
+    assert!(r.is_empty() && !log.exists());
+    // the reason the waive had, then the rejection that was answered
+    r.keep(Kind::Earlier, 0, &[(0, 5)], 100, "", "dummy fill").unwrap();
+    r.keep(Kind::Answered, 0, &[(0, 3), (4, 5)], 200, "hong", "not a dummy").unwrap();
+    r.keep(Kind::Answered, 0, &[(2, 3)], 300, "park.2", "").unwrap();
+    // ... and again, of some of the same errors: nothing is taken from
+    // what was kept before
+    r.keep(Kind::Earlier, 0, &[(2, 4)], 400, "", "dummy fill \\ rule note").unwrap();
+    r.keep(Kind::Answered, 0, &[(2, 4)], 500, "hong", "still not").unwrap();
+    r.set(Kind::Reject, 1, &[(0, 3)], "mine", 600).unwrap();
+    let said = |e: &Entry| (e.kind, e.time, e.by.clone(), e.text.clone());
+    let at = |r: &Reasons, error: u64| r.kept_at(0, error).into_iter().map(said).collect::<Vec<_>>();
+    let a = |time: u64, by: &str, text: &str| (Kind::Answered, time, by.to_owned(), text.to_owned());
+    let p = |time: u64, text: &str| (Kind::Earlier, time, String::new(), text.to_owned());
+    let check = |r: &Reasons| {
+        assert_eq!(at(r, 0), [p(100, "dummy fill"), a(200, "hong", "not a dummy")]);
+        assert_eq!(
+            at(r, 2),
+            [
+                p(100, "dummy fill"),
+                a(200, "hong", "not a dummy"),
+                a(300, "park.2", ""),
+                p(400, "dummy fill \\ rule note"),
+                a(500, "hong", "still not"),
+            ]
+        );
+        assert_eq!(at(r, 3), [p(100, "dummy fill"), p(400, "dummy fill \\ rule note"), a(500, "hong", "still not")]);
+        assert!(at(r, 5).is_empty() && r.kept_at(1, 0).is_empty());
+        assert_eq!(r.kept_of(Kind::Answered, 0, 4).len(), 1);
+        // which rejections are answered, of which errors
+        assert_eq!(r.answered(0, "hong", 200), [(0, 3), (4, 5)]);
+        assert_eq!(r.answered(0, "hong", 500), [(2, 4)]);
+        assert_eq!(r.answered(0, "park.2", 300), [(2, 3)]);
+        assert!(r.answered(0, "hong", 300).is_empty() && r.answered(0, "park", 300).is_empty() && r.answered(1, "hong", 200).is_empty());
+        assert_eq!((r.kept_checks(Kind::Answered), r.kept_checks(Kind::Earlier)), (vec![0], vec![0]));
+        assert_eq!((r.latest(Kind::Reject), r.latest(Kind::Answered), r.latest(Kind::Waive)), (600, 500, 0));
+        // (a kept record is no reason an error holds)
+        assert!(r.of(Kind::Answered, 0, 2).is_none() && !r.any(Kind::Earlier, 0) && r.runs(Kind::Answered, 0).is_empty());
+        assert_eq!(r.runs(Kind::Reject, 1).len(), 1);
+    };
+    check(&r);
+    r.flush(700).unwrap();
+    let text = fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        text,
+        format!(
+            "# floe drc waive rejections\nfloe_reasons=2\nfloe_pack={TAG}\n\
+             p 0 100 0,5 dummy fill\n\
+             j 0 200 0,3,1,1 hong not a dummy\n\
+             j 0 300 2,1 park.2\n\
+             p 0 400 2,2 dummy fill \\\\ rule note\n\
+             j 0 500 2,2 hong still not\n\
+             r 1 600 0,3 mine\n"
+        )
+    );
+    // read back, and written again whole: the same lines
+    drop(r);
+    let r = open();
+    assert!(r.notices.is_empty(), "{:?}", r.notices);
+    check(&r);
+    assert_eq!(r.serialize(), text);
+    check(&Reasons::load(&log, TAG, &[50, 15]).unwrap().unwrap());
+    // a log that holds nothing but what is kept is no empty log: it stays
+    drop(r);
+    let mut r = open();
+    r.clear(Kind::Reject, 1, &[(0, 3)]);
+    r.flush(800).unwrap();
+    drop(r);
+    let r = open();
+    assert!(log.exists() && !r.is_empty() && r.runs(Kind::Reject, 1).is_empty());
+    assert_eq!(at(&r, 0).len(), 2);
+    drop(r);
+    // lines that are none of these are passed over and said
+    fs::write(&log, format!("# floe drc waive rejections\nfloe_reasons=2\nfloe_pack={TAG}\nj 0 200 0,3\nj 0 200 0,3 a/b why\nJ 0 300 0,3\np 0 100 0,3\nj 0 250 1,1 lee\n")).unwrap();
+    let r = open();
+    assert_eq!(r.notices.len(), 1, "{:?}", r.notices);
+    assert!(r.notices[0].contains("4 line(s)"), "{:?}", r.notices);
+    assert_eq!(at(&r, 1), [a(250, "lee", "")]);
+    drop(r);
+    // a log of the version before (0.12.468: rejections alone) is read, and
+    // is this version's from the open of its reviewer's session on - a
+    // build that reads the earlier one alone passes it over from then
+    fs::write(&log, format!("# floe drc waive rejections\nfloe_reasons=1\nfloe_pack={TAG}\nr 0 100 0,5 earlier\nR 0 110 1,1\n")).unwrap();
+    let peer = Reasons::load(&log, TAG, &[50, 15]).unwrap().unwrap();
+    assert_eq!(peer.runs(Kind::Reject, 0).iter().map(|r| (r.0, r.1)).collect::<Vec<_>>(), [(0, 1), (2, 5)]);
+    assert!(fs::read_to_string(&log).unwrap().contains("floe_reasons=1"), "a reader writes nothing");
+    let r = open();
+    assert!(r.notices.is_empty(), "{:?}", r.notices);
+    assert_eq!(
+        fs::read_to_string(&log).unwrap(),
+        format!("# floe drc waive rejections\nfloe_reasons=2\nfloe_pack={TAG}\nr 0 100 0,1,1,3 earlier\n")
+    );
+    drop(r);
+    // the reasons file is of its own version: one of the rejects log's is
+    // not its reviewer's to open as that
+    let reasons = f.paths()[0].clone();
+    fs::write(&reasons, format!("# floe drc review reasons\nfloe_reasons=2\nfloe_pack={TAG}\nw 0 1 0,5 theirs\n")).unwrap();
+    let r = f.open(&[50, 15]);
+    assert!(r.is_empty() && !reasons.exists() && r.notices.len() == 1, "{:?}", r.notices);
 }

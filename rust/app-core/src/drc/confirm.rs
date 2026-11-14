@@ -37,10 +37,19 @@
 //! "confirmer가 다른 리뷰어의 waive를 반려할 수 있게 해줘"): the errors
 //! whose waive the confirmer rejected are a log of the confirmer's own,
 //! `.<db>.rejects.<reviewer>` (`drc::reasons`, `Kind::Reject`: which errors,
-//! when, why - an action a line). No waive of a rejected error counts, the
-//! sessions of the reviewers who waived it turn their waive back, and no
-//! session waives it again until its confirmer takes the rejection back.
-//! `Locks` reads those logs too.
+//! when, why - an action a line). `Locks` reads those logs too.
+//!
+//! A rejected waive stays where it is - in its reviewer's file, with its
+//! reason - and is a state of its own (0.12.469; user 2026-11-14: "reject 된
+//! 에러는 rejected로 분류되어야 ... REJECTED에서 Unreject으로 NOT WAIVED로
+//! 가는게 아니라 waive로 WAIVED로 가도록"): it counts as no waive, it is not
+//! locked, and its reviewer answers the rejection by waiving the error again
+//! with a reason - which that reviewer's own rejects log keeps, with the
+//! reason the waive had before (`reasons`, `Kind::Answered` / `Earlier`). A
+//! waive is rejected while a confirmer's log holds its error under a
+//! rejection its reviewer has not answered (`unanswered`); a confirmer who
+//! rejects it again makes a new rejection, to be answered anew. Taking a
+//! rejection back, or confirming the error, ends it too.
 use super::local::aside_path;
 use super::reasons::{Kind as Reason, Reasons};
 use crate::{Error, ErrorKind, Result};
@@ -49,6 +58,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 pub const MAGIC: &[u8; 8] = b"FLOECONF";
@@ -391,10 +401,90 @@ impl Confirms {
 /// files are found and opened anew.
 pub const LOCK_REFRESH: Duration = Duration::from_secs(1);
 
-/// Which waives of a result are locked: the confirmations of every
-/// confirmer, as the session of a reviewer reads them before it turns a
-/// waive back. An error is locked while a confirmer's file has it confirmed;
-/// whether the reviewer has it waived is the caller's to ask.
+/// Rule-local errors `start..stop` (`reasons::Run`).
+type Run = (u64, u64);
+
+/// The confirm files of a result as `Locks` last found them, for the status
+/// readers of other threads (`desktop::StatusReader`): swapped whole when
+/// they are found anew.
+pub type ConfirmFiles = Arc<RwLock<Arc<Vec<Arc<File>>>>>;
+
+/// A rejection that stands: who made it, when, why, and the errors of one
+/// rule it holds. Who and when name it - which is how the reviewer who
+/// answers it says which one they answered (`reasons`, `Kind::Answered`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Standing {
+    pub by: String,
+    /// seconds since the epoch; each rejection of a log has its own
+    pub time: u64,
+    pub text: String,
+    pub runs: Vec<Run>,
+}
+
+/// The rejections of rule `check` that stand in `log`, the rejects log of
+/// the reviewer `by`.
+pub fn standing_of(by: &str, log: &Reasons, check: usize) -> Vec<Standing> {
+    let mut held: BTreeMap<usize, Vec<Run>> = BTreeMap::new();
+    for (a, b, entry) in log.runs(Reason::Reject, check) {
+        held.entry(entry).or_default().push((a, b));
+    }
+    held.into_iter()
+        .map(|(entry, runs)| {
+            let entry = &log.entries()[entry];
+            Standing { by: by.to_owned(), time: entry.time, text: entry.text.clone(), runs }
+        })
+        .collect()
+}
+
+/// Runs sorted, and joined where they meet.
+pub fn joined(mut runs: Vec<Run>) -> Vec<Run> {
+    runs.sort_unstable();
+    let mut out: Vec<Run> = Vec::with_capacity(runs.len());
+    for (a, b) in runs {
+        match out.last_mut() {
+            Some(last) if a <= last.1 => last.1 = last.1.max(b),
+            _ => out.push((a, b)),
+        }
+    }
+    out
+}
+
+/// The errors of rule `check` whose waive by one reviewer is rejected: the
+/// ones under a rejection of `standing` that the reviewer - whose rejects
+/// log is `answers` - has not answered by waiving them again (sorted,
+/// joined). Whether the reviewer has them waived is the caller's to ask.
+pub fn unanswered(standing: &[Standing], answers: Option<&Reasons>, check: usize) -> Vec<Run> {
+    let mut all: Vec<Run> = Vec::new();
+    for s in standing {
+        match answers.map(|log| log.answered(check, &s.by, s.time)) {
+            Some(done) if !done.is_empty() => all.extend(super::reasons::minus(&s.runs, &done)),
+            _ => all.extend(s.runs.iter().copied()),
+        }
+    }
+    joined(all)
+}
+
+/// The rejections of `standing` that hold any of `runs` (sorted, disjoint)
+/// which the reviewer of `answers` has not answered: who, why, when - each
+/// rejection once, in the order given.
+pub fn rejecting(standing: &[Standing], answers: Option<&Reasons>, check: usize, runs: &[Run]) -> Vec<Rejected> {
+    let mut out: Vec<Rejected> = Vec::new();
+    for s in standing {
+        let open = unanswered(std::slice::from_ref(s), answers, check);
+        let meets = open
+            .iter()
+            .any(|&(a, b)| runs.partition_point(|r| r.1 <= a) < runs.partition_point(|r| r.0 < b));
+        if meets && !out.iter().any(|r| r.reviewer == s.by && r.time == s.time) {
+            out.push(Rejected { reviewer: s.by.clone(), text: s.text.clone(), time: s.time });
+        }
+    }
+    out
+}
+
+/// Which waives of a result are locked, and which are rejected: the
+/// confirmations and the rejections of every confirmer, as the session of a
+/// reviewer reads them. An error is locked while a confirmer's file has it
+/// confirmed; whether the reviewer has it waived is the caller's to ask.
 ///
 /// The files are the ones the statistics count (drc::team::stats `discover`):
 /// `.<db>.confirm.<reviewer>` beside the results, and the temp folder's
@@ -417,15 +507,20 @@ pub struct Locks {
     rules: Vec<(u64, u64)>,
     /// the result as the rejects logs name it (`floe_pack=`)
     tag: String,
+    /// whose session this is: their own rejects log is their review's to
+    /// read (it is known there at once), not one of the logs found here
+    me: String,
     /// the confirmers' files as last found: whose, and the file
-    files: Vec<(String, File)>,
-    /// the confirmers' rejects logs as last found and read
+    files: Vec<(String, Arc<File>)>,
+    /// the same files for the readers of other threads
+    shared: ConfirmFiles,
+    /// the other reviewers' rejects logs as last found and read
     rejects: Vec<Rejects>,
     read: Option<Instant>,
     refresh: Duration,
 }
 
-/// One confirmer's rejects log as it was read.
+/// One reviewer's rejects log as it was read.
 struct Rejects {
     tag: String,
     path: PathBuf,
@@ -487,7 +582,9 @@ impl Locks {
             total: rules.iter().map(|r| r.1).sum(),
             rules,
             tag,
+            me: reviewer.to_owned(),
             files: Vec::new(),
+            shared: Arc::default(),
             rejects: Vec::new(),
             read: None,
             refresh: LOCK_REFRESH,
@@ -502,7 +599,9 @@ impl Locks {
             total: 0,
             rules: vec![(0, 0); rules],
             tag: String::new(),
+            me: String::new(),
             files: Vec::new(),
+            shared: Arc::default(),
             rejects: Vec::new(),
             read: None,
             refresh: LOCK_REFRESH,
@@ -514,6 +613,11 @@ impl Locks {
     pub fn set_refresh(&mut self, every: Duration) {
         self.refresh = every;
         self.read = None;
+    }
+
+    /// The confirm files as last found, for a reader of another thread.
+    pub fn shared(&self) -> ConfirmFiles {
+        Arc::clone(&self.shared)
     }
 
     fn rule(&self, check: usize) -> Result<(u64, u64)> {
@@ -556,12 +660,17 @@ impl Locks {
         let [files, logs] = self.found();
         self.files = files
             .into_iter()
-            .filter_map(|(tag, path)| read(&path, &header, total, rules).ok().map(|(file, _)| (tag, file)))
+            .filter_map(|(tag, path)| read(&path, &header, total, rules).ok().map(|(file, _)| (tag, Arc::new(file))))
             .collect();
+        *self.shared.write().unwrap_or_else(|p| p.into_inner()) =
+            Arc::new(self.files.iter().map(|(_, file)| Arc::clone(file)).collect());
         // a log that stands as it was read is kept as read
         let mut held = std::mem::take(&mut self.rejects);
         let sizes: Vec<u64> = self.rules.iter().map(|r| r.1).collect();
         for (tag, path) in logs {
+            if tag == self.me {
+                continue;
+            }
             let Some(stamp) = stamp_of(&path) else { continue };
             match held.iter().position(|r| r.path == path && r.stamp == stamp) {
                 Some(i) => self.rejects.push(held.swap_remove(i)),
@@ -608,79 +717,57 @@ impl Locks {
         &self.rejects
     }
 
-    /// Rule `check`'s errors `start..start+len` (clamped): true where a
-    /// confirmer has the error's waive rejected. None when none is.
+    /// The rejections of rule `check` that stand in the other reviewers'
+    /// logs, a confirmer after the other.
     ///
-    /// `waiving`: asked before an error is waived - which lists no folder:
-    /// the logs are the ones found by the last look (`rejections`, which
-    /// the reviewer's host asks as often as it follows the confirmers, or a
-    /// lock's), read again where they changed. A waive click costs no
-    /// listing, and does not keep a list that the lock's next ask would
-    /// take for fresh. A confirmer's first rejection - a new file - is
-    /// therefore known from the next look on; a waive that slips past it
-    /// is turned back by that look.
-    pub fn rejected(&mut self, check: usize, start: u64, len: u64, waiving: bool) -> Result<Option<Vec<bool>>> {
-        let (_, n) = self.rule(check)?;
-        let start = start.min(n);
-        let len = len.min(n - start);
-        let mut out: Option<Vec<bool>> = None;
-        for r in self.logs(!waiving) {
-            for (a, b) in r.log.held(Reason::Reject, check, &[(start, start + len)]) {
-                let out = out.get_or_insert_with(|| vec![false; len as usize]);
-                out[(a - start) as usize..(b - start) as usize].fill(true);
-            }
-        }
-        Ok(out)
-    }
-
-    /// Who has rejected the waive of any of rule `check`'s errors `runs`,
-    /// and why as they said of the first of them (the logs found by the
-    /// last look: no folder is listed for it).
-    pub fn rejected_by(&mut self, check: usize, runs: &[(u64, u64)]) -> Result<Vec<Rejected>> {
+    /// `look`: false lists no folder - the logs are the ones the last look
+    /// found (`rejections`, which the reviewer's host asks as often as it
+    /// follows the confirmers, or a lock's), read again where they changed.
+    /// That is how a waive asks: a waive click costs no listing, and keeps
+    /// no list that the lock's next ask would take for fresh. A confirmer's
+    /// first rejection - a new file - is therefore known from the next look
+    /// on, and a waive that slips past it is rejected from then.
+    pub fn standing(&mut self, check: usize, look: bool) -> Result<Vec<Standing>> {
         self.rule(check)?;
-        if runs.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut out = Vec::new();
-        for r in self.logs(false) {
-            let held = r.log.held(Reason::Reject, check, runs);
-            if let Some(entry) = held.first().and_then(|first| r.log.of(Reason::Reject, check, first.0)) {
-                out.push(Rejected { reviewer: r.tag.clone(), text: entry.text.clone(), time: entry.time });
-            }
-        }
-        Ok(out)
+        Ok(self
+            .logs(look)
+            .iter()
+            .flat_map(|r| standing_of(&r.tag, &r.log, check))
+            .collect())
     }
 
-    /// Every rejection that stands: rule by rule, the rejected errors as
-    /// runs - looked for anew now, whatever is held - and what the logs
-    /// were when they said so (their names, times and sizes: the same
-    /// answer while it is the same).
-    pub fn rejections(&mut self) -> (Vec<(usize, Vec<(u64, u64)>)>, Vec<(String, u64, u64)>) {
+    /// Every rejection that stands in the other reviewers' logs, rule by
+    /// rule - looked for anew now, whatever is held - with those logs as
+    /// they were read (the answers of other reviewers are in them too: the
+    /// team's lists read them from here), and what the logs and the confirm
+    /// files were when they said so (names, times, sizes: the same answer
+    /// while they are the same).
+    pub fn rejections(&mut self) -> (BTreeMap<usize, Vec<Standing>>, Vec<(String, u64, u64)>) {
         // (this look is what finds a confirmer's first rejection - a new
-        // file - for the writers, who list nothing when they waive)
+        // file - for the writers, who list nothing when they waive. It is
+        // not taken for a lock's look: a waive is turned back against the
+        // files as a listing of its own found them, or one of the second
+        // before - a confirmer's first confirmation, made after this look,
+        // locks at once)
         self.read = None;
         self.fresh();
-        let mut rules: BTreeMap<usize, Vec<(u64, u64)>> = BTreeMap::new();
+        self.read = None;
+        let mut rules: BTreeMap<usize, Vec<Standing>> = BTreeMap::new();
         for r in &self.rejects {
             for check in r.log.checks(Reason::Reject) {
-                let runs = rules.entry(check).or_default();
-                runs.extend(r.log.runs(Reason::Reject, check).into_iter().map(|(a, b, _)| (a, b)));
+                rules.entry(check).or_default().extend(standing_of(&r.tag, &r.log, check));
             }
         }
-        for runs in rules.values_mut() {
-            // (two confirmers' runs: sorted, and joined where they meet)
-            runs.sort_unstable();
-            let mut joined: Vec<(u64, u64)> = Vec::with_capacity(runs.len());
-            for &(a, b) in runs.iter() {
-                match joined.last_mut() {
-                    Some(last) if a <= last.1 => last.1 = last.1.max(b),
-                    _ => joined.push((a, b)),
-                }
+        let mut seen: Vec<(String, u64, u64)> =
+            self.rejects.iter().map(|r| (r.tag.clone(), r.stamp.0, r.stamp.1)).collect();
+        for (tag, file) in &self.files {
+            use std::os::unix::fs::MetadataExt;
+            if let Ok(meta) = file.metadata() {
+                let time = (meta.mtime() as u64).wrapping_mul(1_000_000_000).wrapping_add(meta.mtime_nsec() as u64);
+                seen.push((format!("{tag} confirm"), time, meta.len()));
             }
-            *runs = joined;
         }
-        let seen = self.rejects.iter().map(|r| (r.tag.clone(), r.stamp.0, r.stamp.1)).collect();
-        (rules.into_iter().collect(), seen)
+        (rules, seen)
     }
 
     /// Rule `check`'s errors `start..start+len` (clamped to the rule): true
@@ -946,14 +1033,20 @@ mod tests {
         assert_eq!(ones(locks.mask(2, 0, 9000).unwrap()), [100, 101, 200]);
         locks.set_refresh(Duration::ZERO);
         assert_eq!(ones(locks.mask(2, 0, 9000).unwrap()), [1, 100, 101, 200]);
-        // the confirmers' rejects logs (0.12.468), found beside the confirm
+        // the reviewers' rejects logs (0.12.468), found beside the confirm
         // files - the temp folder's by its hashed name - and read again
-        // when they are others
+        // when they are others: the rejections that stand, each named by
+        // who made it and when
         let sizes = vec![5u64, 0, 9000];
+        let version = crate::drc::reasons::REJECTS_VERSION;
         let rejects = |folder: &Path, name: &str| {
-            Reasons::open_as("# floe drc waive rejections", [folder.join(name), temp.join("unused")], tag.clone(), sizes.clone(), false)
+            Reasons::open_as("# floe drc waive rejections", version, [folder.join(name), temp.join("unused")], tag.clone(), sizes.clone(), false)
         };
-        assert!(locks.rejected(2, 0, 9000, false).unwrap().is_none() && locks.rejections().0.is_empty());
+        // (the errors under a rejection, as a reviewer with `answers` reads them)
+        let open = |locks: &mut Locks, check: usize, look: bool, answers: Option<&Reasons>| {
+            unanswered(&locks.standing(check, look).unwrap(), answers, check)
+        };
+        assert!(locks.standing(2, true).unwrap().is_empty() && locks.rejections().0.is_empty());
         let mut hong_log = rejects(&dir, ".x.db.rejects.hong");
         hong_log.set(Reason::Reject, 2, &[(7, 9), (4095, 4097)], "not a dummy", 100).unwrap();
         let mut choi_log = rejects(&temp, ".x.db.rejects.choi-0123456789ab");
@@ -961,46 +1054,90 @@ mod tests {
         choi_log.set(Reason::Reject, 0, &[(4, 5)], "another rule", 300).unwrap();
         // (asked before a waive, no folder is listed: the logs are the
         // ones the last look found - none yet)
-        assert!(locks.rejected(2, 0, 9000, true).unwrap().is_none() && locks.rejected_by(2, &[(8, 9)]).unwrap().is_empty());
-        assert_eq!(ones(locks.rejected(2, 0, 9000, false).unwrap()), [7, 8, 9, 4095, 4096]);
-        assert_eq!(ones(locks.rejected(2, 4090, 10, true).unwrap()), [5, 6]);
-        assert_eq!((ones(locks.rejected(0, 0, 5, false).unwrap()), locks.rejected(1, 0, 5, false).unwrap()), (vec![4], None));
+        locks.set_refresh(Duration::from_secs(3600));
+        assert!(locks.standing(2, false).unwrap().is_empty());
+        locks.set_refresh(Duration::ZERO);
+        let standing = locks.standing(2, true).unwrap();
+        assert_eq!(
+            standing,
+            [
+                Standing { by: "choi".into(), time: 200, text: String::new(), runs: vec![(8, 10)] },
+                Standing { by: "hong".into(), time: 100, text: "not a dummy".into(), runs: vec![(7, 9), (4095, 4097)] },
+            ]
+        );
+        assert_eq!(open(&mut locks, 2, false, None), [(7, 10), (4095, 4097)], "two confirmers' runs are joined");
+        assert_eq!((open(&mut locks, 0, false, None), open(&mut locks, 1, false, None)), (vec![(4, 5)], vec![]));
+        // who rejects which errors, as a reviewer who answered nothing reads it
         let by = |found: Vec<Rejected>| found.into_iter().map(|r| (r.reviewer, r.text, r.time)).collect::<Vec<_>>();
-        assert_eq!(by(locks.rejected_by(2, &[(8, 9)]).unwrap()), [("choi".into(), String::new(), 200), ("hong".into(), "not a dummy".into(), 100)]);
-        assert_eq!(by(locks.rejected_by(2, &[(0, 7), (9, 10)]).unwrap()), [("choi".into(), String::new(), 200)]);
-        assert!(locks.rejected_by(2, &[]).unwrap().is_empty() && locks.rejected_by(2, &[(100, 200)]).unwrap().is_empty());
+        assert_eq!(by(rejecting(&standing, None, 2, &[(8, 9)])), [("choi".into(), String::new(), 200), ("hong".into(), "not a dummy".into(), 100)]);
+        assert_eq!(by(rejecting(&standing, None, 2, &[(0, 7), (9, 10)])), [("choi".into(), String::new(), 200)]);
+        assert!(rejecting(&standing, None, 2, &[]).is_empty() && rejecting(&standing, None, 2, &[(100, 200)]).is_empty());
         let (rules, seen) = locks.rejections();
-        assert_eq!(rules, [(0, vec![(4, 5)]), (2, vec![(7, 10), (4095, 4097)])], "two confirmers' runs are joined");
-        assert_eq!(seen.iter().map(|s| s.0.as_str()).collect::<Vec<_>>(), ["choi", "hong"]);
-        assert_eq!(locks.rejections().1, seen, "the same answer while the logs stand");
+        assert_eq!(rules.keys().copied().collect::<Vec<_>>(), [0, 2]);
+        assert_eq!(rules[&2], standing);
+        // (the logs, then the confirm files found)
+        assert_eq!(
+            seen.iter().map(|s| s.0.as_str()).collect::<Vec<_>>(),
+            ["choi", "hong", "choi confirm", "hong confirm", "kim confirm", "shin confirm"]
+        );
+        assert_eq!(locks.rejections().1, seen, "the same answer while the files stand");
+        // a reviewer answers a rejection by waiving again: named by who made
+        // it and when, it is answered for that reviewer alone - and a
+        // confirmer who rejects again makes a rejection to answer anew
+        let mut lee_log = rejects(&dir, ".x.db.rejects.lee");
+        lee_log.keep(Reason::Answered, 2, &[(7, 9)], 100, "hong", "not a dummy").unwrap();
+        assert_eq!(unanswered(&standing, Some(&lee_log), 2), [(8, 10), (4095, 4097)], "choi's stands on 8");
+        lee_log.keep(Reason::Answered, 2, &[(8, 9)], 200, "choi", "").unwrap();
+        lee_log.flush(210).unwrap();
+        assert_eq!(unanswered(&standing, Some(&lee_log), 2), [(9, 10), (4095, 4097)]);
+        assert!(rejecting(&standing, Some(&lee_log), 2, &[(7, 9)]).is_empty());
+        assert_eq!(by(rejecting(&standing, Some(&lee_log), 2, &[(9, 10)])), [("choi".into(), String::new(), 200)]);
+        assert_eq!(unanswered(&standing, None, 2), [(7, 10), (4095, 4097)], "nobody else's answer");
+        hong_log.set(Reason::Reject, 2, &[(7, 8)], "still not", 150).unwrap();
+        // (lee's log - answers alone - is found too, and rejects nothing)
+        let standing = locks.standing(2, true).unwrap();
+        assert_eq!(standing.len(), 3);
+        assert_eq!(unanswered(&standing, Some(&lee_log), 2), [(7, 8), (9, 10), (4095, 4097)], "rejected again: to answer anew");
         // a rejection taken back, and another made: a line more, read at the next ask
         hong_log.clear(Reason::Reject, 2, &[(7, 8)]);
         hong_log.flush(400).unwrap();
         hong_log.set(Reason::Reject, 2, &[(20, 21)], "later", 500).unwrap();
-        assert_eq!(ones(locks.rejected(2, 0, 9000, false).unwrap()), [8, 9, 20, 4095, 4096]);
+        assert_eq!(open(&mut locks, 2, true, None), [(8, 10), (20, 21), (4095, 4097)]);
         assert_ne!(locks.rejections().1, seen);
         // read again where the list is not looked for anew: a log held is
         // asked its time and size at each ask
         locks.set_refresh(Duration::from_secs(3600));
-        assert_eq!(ones(locks.rejected(2, 0, 30, false).unwrap()), [8, 9, 20]);
+        assert_eq!(open(&mut locks, 2, true, None), [(8, 10), (20, 21), (4095, 4097)]);
         hong_log.set(Reason::Reject, 2, &[(25, 26)], "", 600).unwrap();
-        assert_eq!(ones(locks.rejected(2, 0, 30, false).unwrap()), [8, 9, 20, 25]);
-        let mut kim_log = rejects(&dir, ".x.db.rejects.kim");
-        kim_log.set(Reason::Reject, 2, &[(1, 2)], "", 700).unwrap();
-        assert_eq!(ones(locks.rejected(2, 0, 30, false).unwrap()), [8, 9, 20, 25], "a new log is found at the next look");
+        assert_eq!(open(&mut locks, 2, false, None), [(8, 10), (20, 21), (25, 26), (4095, 4097)]);
+        let mut shin_log = rejects(&dir, ".x.db.rejects.shin");
+        shin_log.set(Reason::Reject, 2, &[(1, 2)], "", 700).unwrap();
+        assert_eq!(open(&mut locks, 2, true, None).first(), Some(&(8, 10)), "a new log is found at the next look");
         locks.set_refresh(Duration::ZERO);
-        assert_eq!(ones(locks.rejected(2, 0, 30, false).unwrap()), [1, 8, 9, 20, 25]);
+        assert_eq!(open(&mut locks, 2, true, None).first(), Some(&(1, 2)));
+        // the reviewer's own log is their review's to read - it knows it at
+        // once - and none of the logs found here
+        let mut kim_log = rejects(&dir, ".x.db.rejects.kim");
+        kim_log.set(Reason::Reject, 2, &[(300, 301)], "mine", 750).unwrap();
+        assert!(!locks.standing(2, true).unwrap().iter().any(|s| s.by == "kim"));
+        assert!(!locks.rejections().1.iter().any(|s| s.0 == "kim"));
         // what is no rejects log of this result rejects nothing
-        let mut other = Reasons::open_as("# floe drc waive rejections", [dir.join(".x.db.rejects.yoon"), temp.join("unused")], "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd,9005".to_owned(), sizes.clone(), false);
+        let mut other = Reasons::open_as("# floe drc waive rejections", version, [dir.join(".x.db.rejects.yoon"), temp.join("unused")], "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd,9005".to_owned(), sizes.clone(), false);
         other.set(Reason::Reject, 2, &[(50, 60)], "another result's", 800).unwrap();
-        fs::write(dir.join(".x.db.rejects.lee.stale-1700000000"), fs::read(dir.join(".x.db.rejects.hong")).unwrap()).unwrap();
+        fs::write(dir.join(".x.db.rejects.jo.stale-1700000000"), fs::read(dir.join(".x.db.rejects.hong")).unwrap()).unwrap();
         fs::write(dir.join(".x.db.rejects.cut"), b"not a log").unwrap();
         fs::write(temp.join(".x.db.rejects.jung-ba9876543210"), fs::read(dir.join(".x.db.rejects.hong")).unwrap()).unwrap();
-        assert_eq!(ones(locks.rejected(2, 0, 9000, false).unwrap()), [1, 8, 9, 20, 25, 4095, 4096]);
+        assert_eq!(open(&mut locks, 2, true, None), [(1, 2), (8, 10), (20, 21), (25, 26), (4095, 4097)]);
+        // a log of the version before (0.12.468) is read; one of a version
+        // this build does not know is passed over
+        let head = |version: u32| format!("# floe drc waive rejections\nfloe_reasons={version}\nfloe_pack={tag}\n");
+        fs::write(dir.join(".x.db.rejects.old"), head(1) + "r 2 900 40,1 an earlier build's\n").unwrap();
+        fs::write(dir.join(".x.db.rejects.new"), head(version + 1) + "r 2 900 42,1 a later build's\n").unwrap();
+        assert_eq!(open(&mut locks, 2, true, None), [(1, 2), (8, 10), (20, 21), (25, 26), (40, 41), (4095, 4097)]);
         // a log gone rejects nothing more
-        drop(kim_log);
-        fs::remove_file(dir.join(".x.db.rejects.kim")).unwrap();
-        assert_eq!(ones(locks.rejected(2, 0, 30, false).unwrap()), [8, 9, 20, 25]);
+        drop(shin_log);
+        fs::remove_file(dir.join(".x.db.rejects.shin")).unwrap();
+        assert_eq!(open(&mut locks, 2, true, None).first(), Some(&(8, 10)));
         // a review that writes nothing has no locks to ask
         let mut none = Locks::none(3);
         assert!(none.mask(2, 0, 10).unwrap().is_none() && none.by(0, 0).is_err());

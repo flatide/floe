@@ -59,10 +59,37 @@
 //! R <rule> <time> <runs>            their rejection is taken back
 //! ```
 //!
-//! There the log says whether, not only why: an error is rejected while its
-//! confirmer's log holds it, with or without a reason (`Kind::Reject`, the
-//! one kind whose text may be empty). Who reads it and what follows is
-//! `confirm::Locks` and `desktop::Review`'s.
+//! There the log says whether, not only why: an error's waive is rejected
+//! while its confirmer's log holds it, with or without a reason
+//! (`Kind::Reject`). Who reads it and what follows is `confirm::Locks` and
+//! `desktop::Review`'s.
+//!
+//! A rejection does not take the waive away (0.12.469; user 2026-11-14:
+//! "리뷰어가 사유를 수정해서 다시 waive를 할 수 있게 하되, 이 때 이전의
+//! waive사유나 반려사유는 계속 유지되어야"): the waive stays in its
+//! reviewer's file, rejected, until the reviewer waives the error again with
+//! a reason - which answers the rejection. What was is kept then, in the
+//! rejects log of the reviewer who answered (every reviewer has one from
+//! their first answer on, a confirmer or not):
+//!
+//! ```text
+//! floe_reasons=2
+//! j <rule> <time> <runs> <who> [<text>]   answered: <who> rejected these
+//!                                         errors' waive at <time>, why
+//! p <rule> <time> <runs> <text>           the waive reason they had before
+//!                                         (given at <time>)
+//! ```
+//!
+//! These are kept records (`Kind::Answered`, `Kind::Earlier`): a line takes
+//! nothing from an earlier one and is never taken back - an error waived
+//! again three times has three of each. A `j` line is also what says that
+//! its reviewer's waive is no longer under that rejection: a rejection is
+//! named by who made it and when (a confirmer's log gives every rejection a
+//! time of its own), and a waive is rejected while a confirmer's log holds
+//! the error under a rejection its reviewer has not answered. The version
+//! is 2 so that a build of 0.12.468 - which turned a rejected waive back -
+//! passes the log over; a log of version 1 is read, and written again as 2
+//! when its reviewer's session opens it.
 use super::analysis::scope::Membership;
 use super::local::aside_path;
 use crate::{annotations, Error, ErrorKind, Result};
@@ -73,6 +100,8 @@ use std::path::{Path, PathBuf};
 
 /// The file's format version (`floe_reasons=`).
 pub const VERSION: u32 = 1;
+/// The rejects log's: 2 since it keeps what its reviewer answered (0.12.469).
+pub const REJECTS_VERSION: u32 = 2;
 /// The longest reason, in characters.
 pub const TEXT_LIMIT: usize = 1000;
 /// A file this much larger than twice what it still says is written again.
@@ -88,30 +117,48 @@ pub enum Kind {
     NotRequired,
     /// a confirmer's rejection of the errors' waive (the rejects log)
     Reject,
+    /// a rejection the log's reviewer answered by waiving the errors again:
+    /// who rejected, when, why - kept (the rejects log of who answered)
+    Answered,
+    /// the waive reason the errors had before their reviewer waived them
+    /// again: kept there too
+    Earlier,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 3] = [Kind::Waive, Kind::NotRequired, Kind::Reject];
+    pub const ALL: [Kind; 5] = [Kind::Waive, Kind::NotRequired, Kind::Reject, Kind::Answered, Kind::Earlier];
+    /// The kinds an error holds one reason of (the others are kept records).
+    pub const HELD: [Kind; 3] = [Kind::Waive, Kind::NotRequired, Kind::Reject];
 
     fn slot(self) -> usize {
         match self {
             Kind::Waive => 0,
             Kind::NotRequired => 1,
             Kind::Reject => 2,
+            Kind::Answered => 3,
+            Kind::Earlier => 4,
         }
     }
-    /// A line's first word: with a reason, and the reason gone.
+    /// A line's first word: with a reason, and the reason gone (a kept
+    /// record is never gone: its second word is no line's).
     fn tags(self) -> (&'static str, &'static str) {
         match self {
             Kind::Waive => ("w", "W"),
             Kind::NotRequired => ("n", "N"),
             Kind::Reject => ("r", "R"),
+            Kind::Answered => ("j", "J"),
+            Kind::Earlier => ("p", "P"),
         }
     }
     /// A line of this kind is an action even without a text: a rejection
     /// stands whether its confirmer said why or not.
     fn bare(self) -> bool {
-        self == Kind::Reject
+        matches!(self, Kind::Reject | Kind::Answered)
+    }
+    /// A record of this kind is kept as it was: it takes no error from an
+    /// earlier one and is not taken back (see the module docs).
+    pub fn kept(self) -> bool {
+        matches!(self, Kind::Answered | Kind::Earlier)
     }
     /// As the statistics name it.
     pub fn name(self) -> &'static str {
@@ -119,6 +166,8 @@ impl Kind {
             Kind::Waive => "waive",
             Kind::NotRequired => "not_required",
             Kind::Reject => "reject",
+            Kind::Answered => "answered",
+            Kind::Earlier => "earlier",
         }
     }
     /// From a request's word (the review job's actions, the statistics').
@@ -140,6 +189,9 @@ pub struct Entry {
     /// seconds since the epoch
     pub time: u64,
     pub text: String,
+    /// who rejected (`Kind::Answered`); empty for the other kinds, whose
+    /// actions are the log's reviewer's own
+    pub by: String,
 }
 
 /// Errors `start..stop` of a rule under the action `entry`.
@@ -380,9 +432,17 @@ pub struct Reasons {
     /// the actions read and made, in their order (some hold no error now)
     entries: Vec<Entry>,
     /// per kind and rule: sorted runs naming their action
-    segs: [BTreeMap<usize, Vec<Seg>>; 3],
+    segs: [BTreeMap<usize, Vec<Seg>>; 5],
+    /// the kept records (`Kind::kept`) per rule, in their order: the errors
+    /// and the record
+    kept: BTreeMap<(Kind, usize), Vec<(Vec<Run>, u32)>>,
     /// the file's first line (a comment: what the log is of)
     title: &'static str,
+    /// the format version this log is written in (`floe_reasons=`); a file
+    /// of an earlier one is read
+    version: u32,
+    /// the file read is of an earlier version: written again at the open
+    outdated: bool,
     /// what `clear` dropped and the file does not say yet, per kind and rule
     cleared: BTreeMap<(Kind, usize), Vec<Run>>,
     /// the file as read says more than what is held: a line took errors
@@ -411,8 +471,11 @@ impl Reasons {
             tag,
             sizes,
             entries: Vec::new(),
-            segs: [BTreeMap::new(), BTreeMap::new(), BTreeMap::new()],
+            segs: Default::default(),
+            kept: BTreeMap::new(),
             title: "# floe drc review reasons",
+            version: VERSION,
+            outdated: false,
             cleared: BTreeMap::new(),
             superseded: false,
             written: 0,
@@ -424,15 +487,19 @@ impl Reasons {
         }
     }
 
-    /// The same store under another first line (the rejects log's).
-    pub fn titled(mut self, title: &'static str) -> Self {
+    /// The same store under another first line and version (the rejects
+    /// log's).
+    pub fn titled(mut self, title: &'static str, version: u32) -> Self {
         self.title = title;
+        self.version = version;
         self
     }
 
     fn reset(&mut self) {
         self.entries.clear();
-        self.segs = [BTreeMap::new(), BTreeMap::new(), BTreeMap::new()];
+        self.segs = Default::default();
+        self.kept.clear();
+        self.outdated = false;
         self.cleared.clear();
         self.superseded = false;
         self.written = 0;
@@ -444,13 +511,21 @@ impl Reasons {
     /// file of another result is moved aside as the reviewer's other files
     /// are; one that cannot be read is said and left.
     pub fn open(paths: [PathBuf; 2], tag: String, sizes: Vec<u64>, sync: bool) -> Self {
-        Self::open_as("# floe drc review reasons", paths, tag, sizes, sync)
+        Self::open_as("# floe drc review reasons", VERSION, paths, tag, sizes, sync)
     }
 
-    /// `open`, of a log whose first line is `title` (the rejects log).
-    pub fn open_as(title: &'static str, paths: [PathBuf; 2], tag: String, sizes: Vec<u64>, sync: bool) -> Self {
+    /// `open`, of a log whose first line is `title` and whose version is
+    /// `version` (the rejects log).
+    pub fn open_as(
+        title: &'static str,
+        version: u32,
+        paths: [PathBuf; 2],
+        tag: String,
+        sizes: Vec<u64>,
+        sync: bool,
+    ) -> Self {
         let [beside, temp] = paths;
-        let mut me = Self::empty(beside.clone(), Some(temp.clone()), tag, sizes, sync).titled(title);
+        let mut me = Self::empty(beside.clone(), Some(temp.clone()), tag, sizes, sync).titled(title, version);
         for (i, path) in [beside, temp].into_iter().enumerate() {
             let bytes = match fs::read(&path) {
                 Ok(bytes) => bytes,
@@ -495,9 +570,9 @@ impl Reasons {
         me
     }
 
-    /// A reviewer's reasons as their file says them, for reading alone
-    /// (the statistics): None without a file, an error for a file of
-    /// another result. Nothing is written, moved or tidied.
+    /// A reviewer's reasons - or rejects log - as their file says them,
+    /// for reading alone (the statistics): None without a file, an error
+    /// for a file of another result. Nothing is written, moved or tidied.
     pub fn load(path: &Path, tag: &str, sizes: &[u64]) -> Result<Option<Self>> {
         let bytes = match fs::read(path) {
             Ok(bytes) => bytes,
@@ -505,6 +580,8 @@ impl Reasons {
             Err(e) => return Err(e.into()),
         };
         let mut me = Self::empty(path.to_owned(), None, tag.to_owned(), sizes.to_vec(), false);
+        // (either log's file: the rejects log's version is the later one)
+        me.version = REJECTS_VERSION;
         match me.parse(&bytes) {
             Read::Ours { whole, .. } => {
                 me.written = whole;
@@ -529,8 +606,11 @@ impl Reasons {
                 continue;
             }
             if let Some(value) = line.strip_prefix("floe_reasons=") {
-                if value.trim().parse::<u32>().ok() != Some(VERSION) {
-                    return Read::Other("another format version");
+                match value.trim().parse::<u32>().ok() {
+                    Some(v) if v == self.version => {}
+                    // (an earlier version's lines are this one's too)
+                    Some(v) if v >= 1 && v < self.version => self.outdated = true,
+                    _ => return Read::Other("another format version"),
                 }
                 version = true;
             } else if let Some(value) = line.strip_prefix("floe_pack=") {
@@ -566,6 +646,28 @@ impl Reasons {
             }
         })?;
         let runs = decode(runs, *self.sizes.get(check)?)?;
+        if kind.kept() {
+            if !set {
+                return None;
+            }
+            // (an answered rejection: who made it, then why)
+            let (by, text) = match kind {
+                Kind::Answered => {
+                    let rest = text?;
+                    let (by, why) = rest.split_once(' ').unwrap_or((rest, ""));
+                    (super::local::reviewer_of(by)?.to_owned(), why)
+                }
+                _ => (String::new(), text?),
+            };
+            let text = annotations::unescape(text).trim().to_owned();
+            if text.is_empty() && !kind.bare() {
+                return None;
+            }
+            self.entries.push(Entry { kind, check, time, text, by });
+            let entry = self.entries.len() as u32 - 1;
+            self.kept.entry((kind, check)).or_default().push((runs, entry));
+            return Some(());
+        }
         let entry = if set {
             let text = match text {
                 Some(text) => annotations::unescape(text).trim().to_owned(),
@@ -575,7 +677,7 @@ impl Reasons {
             if text.is_empty() && !kind.bare() {
                 return None;
             }
-            self.entries.push(Entry { kind, check, time, text });
+            self.entries.push(Entry { kind, check, time, text, by: String::new() });
             Some(self.entries.len() as u32 - 1)
         } else {
             None
@@ -590,7 +692,7 @@ impl Reasons {
     }
 
     fn header(&self) -> String {
-        format!("{}\nfloe_reasons={VERSION}\nfloe_pack={}\n", self.title, self.tag)
+        format!("{}\nfloe_reasons={}\nfloe_pack={}\n", self.title, self.version, self.tag)
     }
 
     /// The actions that still hold errors with those errors, in their order.
@@ -608,11 +710,29 @@ impl Reasons {
             .collect()
     }
 
-    /// The file that says what is held now and nothing else.
+    /// The file that says what is held now - and what is kept - and
+    /// nothing else, in the actions' order.
     fn serialize(&self) -> String {
+        let mut lines: BTreeMap<u32, Vec<Vec<Run>>> = BTreeMap::new();
+        for rules in &self.segs {
+            for segs in rules.values() {
+                for s in segs {
+                    let runs = lines.entry(s.entry).or_insert_with(|| vec![Vec::new()]);
+                    runs[0].push((s.start, s.stop));
+                }
+            }
+        }
+        for records in self.kept.values() {
+            for (runs, entry) in records {
+                lines.entry(*entry).or_default().push(runs.clone());
+            }
+        }
         let mut out = self.header();
-        for (entry, runs) in self.live() {
-            out.push_str(&line_of(entry.kind, entry.check, entry.time, &runs, &entry.text));
+        for (entry, runs) in lines {
+            let entry = &self.entries[entry as usize];
+            for runs in runs {
+                out.push_str(&line_of(entry.kind, entry.check, entry.time, &runs, &entry.by, &entry.text));
+            }
         }
         out
     }
@@ -621,22 +741,24 @@ impl Reasons {
     /// much larger than what it still says is written again (the actions
     /// that hold nothing and the lines that took reasons back drop out).
     fn tidy(&mut self, len: u64) {
-        let holds = self.segs.iter().any(|rules| !rules.is_empty());
-        if !holds {
+        if self.is_empty() {
             if fs::remove_file(&self.path).is_ok() {
                 self.written = 0;
                 self.torn = false;
             }
             return;
         }
-        if !self.superseded || len <= SLACK {
+        // (a file of an earlier version is this version's from now: a
+        // build that reads the earlier one alone passes it over)
+        if !self.outdated && (!self.superseded || len <= SLACK) {
             return;
         }
         let text = self.serialize();
-        if len > 2 * text.len() as u64 + SLACK && write_whole(&self.path, text.as_bytes()).is_ok() {
+        if (self.outdated || len > 2 * text.len() as u64 + SLACK) && write_whole(&self.path, text.as_bytes()).is_ok() {
             self.written = text.len() as u64;
             self.torn = false;
             self.superseded = false;
+            self.outdated = false;
         }
     }
 
@@ -776,6 +898,9 @@ impl Reasons {
     /// touching): written, then held. An empty reason or no run is nothing -
     /// but a rejection, which is an action without a reason too.
     pub fn set(&mut self, kind: Kind, check: usize, runs: &[Run], text: &str, time: u64) -> Result<()> {
+        if kind.kept() {
+            return Err(Error::input("a kept record is kept, not set"));
+        }
         let text = clean(text)?;
         self.inside(check, runs)?;
         if (text.is_empty() && !kind.bare()) || runs.is_empty() {
@@ -784,13 +909,107 @@ impl Reasons {
         // (what was taken back before this is said before it: a later line
         // wins, and this reason must not be taken back by an earlier drop)
         self.say_cleared(time)?;
-        let line = line_of(kind, check, time, runs, &text);
+        let line = line_of(kind, check, time, runs, "", &text);
         self.append(&line)?;
-        self.entries.push(Entry { kind, check, time, text });
+        self.entries.push(Entry { kind, check, time, text, by: String::new() });
         let entry = self.entries.len() as u32 - 1;
         assign(self.segs[kind.slot()].entry(check).or_default(), runs, Some(entry));
         // (an action's reason is on the disk when the action answers)
         self.flush(time)
+    }
+
+    /// Keep a record of rule `check`'s `runs` (sorted, disjoint, not
+    /// touching) as it was: `Kind::Answered` - `by` rejected their waive at
+    /// `time`, why `text` (it may be empty), and this log's reviewer has
+    /// waived them again - or `Kind::Earlier` - the waive reason `text`,
+    /// given at `time`, that they had before. A line of the log; flushed by
+    /// the `flush` its action ends with. Nothing is taken from an earlier
+    /// record. No run, or no reason to keep, is nothing.
+    pub fn keep(&mut self, kind: Kind, check: usize, runs: &[Run], time: u64, by: &str, text: &str) -> Result<()> {
+        if !kind.kept() || (kind == Kind::Answered) != super::local::reviewer_of(by).is_some() {
+            return Err(Error::input("not a record to keep"));
+        }
+        let text = clean(text)?;
+        self.inside(check, runs)?;
+        if (text.is_empty() && !kind.bare()) || runs.is_empty() {
+            return Ok(());
+        }
+        let line = line_of(kind, check, time, runs, by, &text);
+        self.append(&line)?;
+        self.entries.push(Entry { kind, check, time, text, by: by.to_owned() });
+        let entry = self.entries.len() as u32 - 1;
+        self.kept.entry((kind, check)).or_default().push((runs.to_vec(), entry));
+        Ok(())
+    }
+
+    /// The records of `kind` kept for rule `check`, in their order: the
+    /// errors and the record.
+    pub fn kept(&self, kind: Kind, check: usize) -> impl Iterator<Item = (&[Run], &Entry)> {
+        self.kept
+            .get(&(kind, check))
+            .into_iter()
+            .flatten()
+            .map(|(runs, entry)| (runs.as_slice(), &self.entries[*entry as usize]))
+    }
+
+    /// The records of `kind` kept for rule `check`'s error `error`, in
+    /// their order.
+    pub fn kept_of(&self, kind: Kind, check: usize, error: u64) -> Vec<&Entry> {
+        self.kept(kind, check)
+            .filter(|(runs, _)| {
+                let i = runs.partition_point(|r| r.1 <= error);
+                runs.get(i).is_some_and(|r| r.0 <= error)
+            })
+            .map(|(_, entry)| entry)
+            .collect()
+    }
+
+    /// Everything kept of rule `check`'s error `error`, in the order it
+    /// was kept - which is the order things happened in: at each waiving
+    /// again, the reason the waive had, then the rejection it answers.
+    pub fn kept_at(&self, check: usize, error: u64) -> Vec<&Entry> {
+        let mut found: Vec<u32> = Vec::new();
+        for kind in [Kind::Answered, Kind::Earlier] {
+            for (runs, entry) in self.kept.get(&(kind, check)).into_iter().flatten() {
+                let i = runs.partition_point(|r| r.1 <= error);
+                if runs.get(i).is_some_and(|r| r.0 <= error) {
+                    found.push(*entry);
+                }
+            }
+        }
+        found.sort_unstable();
+        found.into_iter().map(|entry| &self.entries[entry as usize]).collect()
+    }
+
+    /// The rules that have a kept record of `kind`.
+    pub fn kept_checks(&self, kind: Kind) -> Vec<usize> {
+        self.kept.keys().filter(|(k, _)| *k == kind).map(|(_, check)| *check).collect()
+    }
+
+    /// Rule `check`'s errors whose rejection by `by` at `time` this log's
+    /// reviewer has answered (sorted, joined where they meet).
+    pub fn answered(&self, check: usize, by: &str, time: u64) -> Vec<Run> {
+        let mut all: Vec<Run> = self
+            .kept(Kind::Answered, check)
+            .filter(|(_, entry)| entry.time == time && entry.by == by)
+            .flat_map(|(runs, _)| runs.iter().copied())
+            .collect();
+        all.sort_unstable();
+        let mut joined: Vec<Run> = Vec::with_capacity(all.len());
+        for (a, b) in all {
+            match joined.last_mut() {
+                Some(last) if a <= last.1 => last.1 = last.1.max(b),
+                _ => joined.push((a, b)),
+            }
+        }
+        joined
+    }
+
+    /// The latest time of an action of `kind` this log has read or made
+    /// (0: none) - a confirmer's next rejection is given a later one, so
+    /// that each is named by its time.
+    pub fn latest(&self, kind: Kind) -> u64 {
+        self.entries.iter().filter(|e| e.kind == kind).map(|e| e.time).max().unwrap_or(0)
     }
 
     /// The reasons of rule `check`'s `runs` are gone (the errors were turned
@@ -825,9 +1044,9 @@ impl Reasons {
         self.segs[kind.slot()].keys().copied().collect()
     }
 
-    /// Whether anything is held at all.
+    /// Whether anything is held - or kept - at all.
     pub fn is_empty(&self) -> bool {
-        self.segs.iter().all(|rules| rules.is_empty())
+        self.segs.iter().all(|rules| rules.is_empty()) && self.kept.is_empty()
     }
 
     /// The reason held for rule `check`'s error `error`.
@@ -844,6 +1063,26 @@ impl Reasons {
         self.segs[kind.slot()]
             .get(&check)
             .map_or_else(Vec::new, |segs| overlap(segs, runs))
+    }
+
+    /// The parts of `runs` that hold a reason, each with its action's index
+    /// in `entries` (in order; parts of one action are not joined).
+    pub fn parts(&self, kind: Kind, check: usize, runs: &[Run]) -> Vec<(u64, u64, usize)> {
+        let Some(segs) = self.segs[kind.slot()].get(&check) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for &(a, b) in runs {
+            let mut i = segs.partition_point(|s| s.stop <= a);
+            while let Some(s) = segs.get(i) {
+                if s.start >= b {
+                    break;
+                }
+                out.push((s.start.max(a), s.stop.min(b), s.entry as usize));
+                i += 1;
+            }
+        }
+        out
     }
 
     /// The one reason every error of `runs` holds, when there is one.
@@ -893,10 +1132,15 @@ impl Reasons {
     }
 }
 
-/// An action's line: `<tag> <rule> <time> <runs> <text>`, the text left out
-/// when there is none (a rejection without a reason).
-fn line_of(kind: Kind, check: usize, time: u64, runs: &[Run], text: &str) -> String {
+/// An action's line: `<tag> <rule> <time> <runs> [<by>] <text>`, the text
+/// left out when there is none (a rejection without a reason); `by` - who
+/// rejected - is an answered rejection's alone.
+fn line_of(kind: Kind, check: usize, time: u64, runs: &[Run], by: &str, text: &str) -> String {
     let mut line = format!("{} {check} {time} {}", kind.tags().0, encode(runs));
+    if !by.is_empty() {
+        line.push(' ');
+        line.push_str(by);
+    }
     if !text.is_empty() {
         line.push(' ');
         line.push_str(&annotations::escape(text));

@@ -36,6 +36,8 @@
 //!   drc_review {handle, check, action: waive|not-required|reason-read|note|note-clear|note-read,
 //!       selection | errors, on?, text?, reason?, reason_of?, toggle?}  job "review"
 //!   drc_inview {handle, check, bbox, cap, scope?, waived?}                 job "inview"
+//!   drc_lens {handle, lens: live|held|waived|confirmed|rejected}: the class of
+//!       errors a `waived` filter shows from now (app-core desktop::Lens)
 //!   drc_cancel {handle, kind}; drc_close {handle}; drc_parse_step {text}
 //!   svrf_rules {path}, svrf_operands {rhs}, svrf_rules_candidates {db, deck?}
 //! and drc_team.rs's (review flags, snapshots, team, migration).
@@ -55,7 +57,7 @@ use floe_app_core::{
         source::{worker_count, AsciiSource, PackSource, Source, Statuses},
         ticks,
     },
-    drc::desktop::{query_rows, ErrorRow, Left, Opened, Review},
+    drc::desktop::{query_rows, ErrorRow, Left, Lens, Opened, Review},
     drc::reasons::{self, Kind},
     Error, ErrorKind, Result,
 };
@@ -143,7 +145,9 @@ fn any_unwaived(shared: &Shared, check: usize, targets: &Selection, n: u64) -> R
     while a < n && !mixed {
         let len = (n - a).min(1 << 16);
         targets.mask(a, &mut mask[..len as usize]);
-        let st = shared.statuses.read(check, a, len)?;
+        // (waived and not rejected, whatever the filter shows: a rejected
+        // waive is waived again by the key)
+        let st = shared.statuses.waived(check, a, len)?;
         mixed = (0..len as usize).any(|j| mask[j] && st[j] != 1);
         a += len;
     }
@@ -153,8 +157,10 @@ fn any_unwaived(shared: &Shared, check: usize, targets: &Selection, n: u64) -> R
 /// What the reason dialog starts from, for an action of `kind` on rule
 /// `check`'s `targets`: `on` - which way the `w` key's toggle goes (asked
 /// with `toggle`; an action that is not a toggle is on) -, `prefill` - the
-/// one reason every target holds now, which the dialog then edits -, and
-/// `known` - the reasons given so far.
+/// one reason every target holds now, which the dialog then edits -,
+/// `known` - the reasons given so far - and, of a waive, `rejected_by`: who
+/// rejected the waive of any target and why, which this reviewer has not
+/// answered yet (waived with a reason, those are waived again).
 fn reason_read(
     shared: &Shared,
     check: usize,
@@ -164,21 +170,28 @@ fn reason_read(
     toggle: bool,
 ) -> Result<Value> {
     let on = !toggle || any_unwaived(shared, check, targets, n)?;
-    let o = shared.opened.lock().unwrap();
-    let Opened::Pack(r) = &*o else {
-        return Err(Error::new(
-            ErrorKind::Unsupported,
-            "an ASCII results file has no review state",
-        ));
+    let mut o = shared.opened.lock().unwrap();
+    let r = review(&mut o)?;
+    let runs = reasons::member_runs(targets, n);
+    let rejected_by = if kind == Kind::Waive && on {
+        r.rejected_by(check, &runs)?
+    } else {
+        Vec::new()
     };
     // (why a confirmer rejected is in the rejects log, not the reasons)
     let held = if kind == Kind::Reject { &r.rejects } else { &r.reasons };
     let prefill = if on && held.any(kind, check) {
-        held.common(kind, check, &reasons::member_runs(targets, n)).unwrap_or("")
+        held.common(kind, check, &runs).unwrap_or("")
     } else {
         ""
     };
-    Ok(json!({"on": on, "prefill": prefill, "known": held.texts(kind, KNOWN_REASONS)}))
+    let mut reply = json!({"on": on, "prefill": prefill, "known": held.texts(kind, KNOWN_REASONS)});
+    // (said when there are any: a waive that answers no rejection is asked
+    // as it always was)
+    if !rejected_by.is_empty() {
+        reply["rejected_by"] = json!(rejected_by);
+    }
+    Ok(reply)
 }
 
 fn rows(rows: &[ErrorRow]) -> Value {
@@ -196,10 +209,12 @@ fn notes(review: &mut Review) -> Value {
     })
 }
 
+/// Every rule's (errors of the class the lens shows, total): the waived
+/// ones, with no filter of states on.
 fn counts(review: &Review) -> Result<Value> {
     Ok(Value::from(
         (0..review.pack.checks.len())
-            .map(|c| review.status_counts(c).map(|(w, t)| json!([w, t])))
+            .map(|c| review.lens_counts(c).map(|(w, t)| json!([w, t])))
             .collect::<Result<Vec<_>>>()?,
     ))
 }
@@ -761,11 +776,34 @@ impl Session {
                     number(request, "start")?,
                     number(request, "count")?,
                 );
+                // an error's state: 0 not waived, 1 waived, 2 waived and
+                // rejected, 3 waived and confirmed (app-core desktop STATE_*)
                 let mut o = shared.opened.lock().unwrap();
-                let bytes = review(&mut o)?.statuses(check, start, count.min(1 << 22))?;
+                let bytes = review(&mut o)?.states(check, start, count.min(1 << 22))?;
                 Ok(Value::from(
                     bytes.iter().map(|b| format!("{b:02x}")).collect::<String>(),
                 ))
+            }
+            "drc_lens" => {
+                let lens = Lens::parse(text(request, "lens")?)
+                    .ok_or_else(|| Error::input("lens is live, held, waived, confirmed or rejected"))?;
+                let (moved, all) = {
+                    let mut o = shared.opened.lock().unwrap();
+                    let r = review(&mut o)?;
+                    let moved = r.lens() != lens;
+                    if moved {
+                        r.set_lens(lens);
+                    }
+                    (moved, counts(r)?)
+                };
+                if moved {
+                    // every count made through the status readers is of
+                    // another class now
+                    let checks = shared.source.check_count();
+                    shared.dirty.lock().unwrap().extend(0..checks);
+                    self.settle(cancelled)?;
+                }
+                Ok(json!({"lens": lens.name(), "counts": all}))
             }
             "drc_set_status" => {
                 let check = number(request, "check")? as usize;
@@ -773,15 +811,22 @@ impl Session {
                     .map_err(|_| Error::input("status is a byte"))?;
                 let errors = numbers(request, "errors")?;
                 let reason = reason_of(request)?;
-                let (w, t, unkept, free, locked, by, rejected, rejected_by) = {
+                let (w, t, unkept, free, locked, by, rejected, rejected_by, again, simple) = {
                     let mut o = shared.opened.lock().unwrap();
                     let r = review(&mut o)?;
                     // a waive a confirmer has confirmed is not this
                     // session's to turn back, nor to give another reason
-                    // (unless it is a confirmer's), and an error whose
-                    // waive a confirmer has rejected is nobody's to waive:
-                    // those errors are left and said
-                    let Left { locked, rejected } = r.set_status(check, &errors, status)?;
+                    // (unless it is a confirmer's): left and said. An error
+                    // under a rejection this reviewer has not answered is
+                    // waived again when the action has a reason - what was
+                    // is kept (app-core desktop::Review resubmit) - and
+                    // left and said when it has none
+                    let Left { locked, mut rejected } = r.set_status(check, &errors, status)?;
+                    let mut again = 0;
+                    if status == 1 && !reason.is_empty() && !rejected.is_empty() {
+                        again = r.resubmit(check, &reasons::runs_of(&rejected))?;
+                        rejected.clear();
+                    }
                     let free: Vec<u64> = errors
                         .iter()
                         .copied()
@@ -814,12 +859,30 @@ impl Session {
                     } else {
                         r.rejected_by(check, &reasons::runs_of(&rejected))?
                     };
-                    let (w, t) = r.status_counts(check)?;
-                    (w, t, unkept, free, locked, by, rejected, rejected_by)
+                    // (the counts a scope keeps follow a status byte
+                    // where that is all there is to an error's class)
+                    let moved = r.take_reclassed();
+                    let simple = moved.is_empty() && r.steps(check);
+                    shared.dirty.lock().unwrap().extend(moved);
+                    let (w, t) = r.lens_counts(check)?;
+                    (w, t, unkept, free, locked, by, rejected, rejected_by, again, simple)
                 };
-                self.changed(check, &free, status)?;
-                Ok(json!({"counts": [w, t], "reason_error": unkept, "locked": locked, "locked_by": by,
-                          "rejected": rejected, "rejected_by": rejected_by}))
+                if simple {
+                    self.changed(check, &free, status)?;
+                } else {
+                    shared.dirty.lock().unwrap().insert(check);
+                }
+                // (the team's waives as the list last read them are another
+                // thing now: this reviewer's waive, or what they answered)
+                *shared.waives.lock().unwrap() = None;
+                let mut reply = json!({"counts": [w, t], "reason_error": unkept, "locked": locked, "locked_by": by,
+                                       "rejected": rejected, "rejected_by": rejected_by});
+                // (`resubmitted`: the rejected waives the reason waived
+                // again, said when there are any)
+                if again > 0 {
+                    reply["resubmitted"] = json!(again);
+                }
+                Ok(reply)
             }
             "drc_reason_get" => {
                 let (check, error) = (number(request, "check")? as usize, number(request, "error")?);
@@ -836,10 +899,18 @@ impl Session {
                 } else {
                     None
                 };
-                Ok(json!({
+                let mut reply = json!({
                     "waive": reason_json(r.waive_reason(check, error)?),
                     "not_required": reason_json(excluded),
-                }))
+                });
+                // (`history`: what is kept of this reviewer's waive of it -
+                // the reasons it had, the rejections that were answered -,
+                // said when there is any)
+                let history = r.history(check, error)?;
+                if !history.is_empty() {
+                    reply["history"] = json!(history);
+                }
+                Ok(reply)
             }
             "drc_reason_read" => {
                 let check = number(request, "check")? as usize;
@@ -931,6 +1002,7 @@ impl Session {
                 };
                 let checks = shared.source.check_count();
                 shared.dirty.lock().unwrap().extend(0..checks);
+                *shared.waives.lock().unwrap() = None;
                 self.settle(cancelled)?;
                 shared.team_soon();
                 // (`locked`: waives the file would have turned back, kept
@@ -1576,10 +1648,21 @@ impl Session {
                         }
                         let mut unkept = Value::Null;
                         let (mut by, mut rejected_by) = (Vec::new(), Vec::new());
-                        let Left { locked: mut kept, rejected } = left;
+                        let Left { locked: mut kept, mut rejected } = left;
+                        let mut again = 0;
                         {
                             let mut o = shared.opened.lock().unwrap();
                             let r = review(&mut o)?;
+                            // the targets under a rejection this reviewer
+                            // has not answered are waived again when the
+                            // action has a reason - what was is kept
+                            // (app-core desktop::Review resubmit) - and
+                            // left, and said, when it has none
+                            if on && !reason.is_empty() && !rejected.is_empty() {
+                                again = r.resubmit(check, &rejected)?;
+                                changed += again;
+                                rejected.clear();
+                            }
                             // why: one line for the action whatever it took -
                             // the members it handled, as runs (a job that was
                             // stopped handled the rule up to `a`), without
@@ -1610,16 +1693,25 @@ impl Session {
                         let locked: u64 = kept.iter().map(|r| r.1 - r.0).sum();
                         let rejected: u64 = rejected.iter().map(|r| r.1 - r.0).sum();
                         shared.dirty.lock().unwrap().insert(check);
+                        *shared.waives.lock().unwrap() = None;
                         let counts = {
-                            let o = shared.opened.lock().unwrap();
-                            match &*o {
-                                Opened::Pack(r) => json!(r.status_counts(check)?),
+                            let mut o = shared.opened.lock().unwrap();
+                            match &mut *o {
+                                Opened::Pack(r) => {
+                                    let moved = r.take_reclassed();
+                                    shared.dirty.lock().unwrap().extend(moved);
+                                    json!(r.lens_counts(check)?)
+                                }
                                 Opened::Ascii(_) => Value::Null,
                             }
                         };
-                        Ok(json!({"on": on, "changed": changed, "counts": counts, "reason_error": unkept,
-                                  "locked": locked, "locked_by": by,
-                                  "rejected": rejected, "rejected_by": rejected_by}))
+                        let mut reply = json!({"on": on, "changed": changed, "counts": counts, "reason_error": unkept,
+                                               "locked": locked, "locked_by": by,
+                                               "rejected": rejected, "rejected_by": rejected_by});
+                        if again > 0 {
+                            reply["resubmitted"] = json!(again);
+                        }
+                        Ok(reply)
                     }
                     "not-required" => {
                         let t = shared.team.as_ref().ok_or_else(|| {

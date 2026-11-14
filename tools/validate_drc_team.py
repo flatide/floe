@@ -3080,8 +3080,10 @@ def r16(temp):
         return got
 
     def waived_of(svc, h, ci):
+        # (an error's state: 1 waived, 3 waived and confirmed - 2, a rejected
+        # waive, is no waive)
         raw = bytes.fromhex(svc("drc_status", handle=h, check=ci, start=0, count=sizes[ci]))
-        return {i for i, byte in enumerate(raw) if byte == 1}
+        return {i for i, byte in enumerate(raw) if byte in (1, 3)}
 
     def why(svc, h, ci, e):
         said = svc("drc_reason_get", handle=h, check=ci, error=e)["waive"]
@@ -3319,7 +3321,7 @@ def r16(temp):
 
 
 def r17(temp):
-    print("[R17] a confirmer rejects a reviewer's waive: no waive of it counts, its reviewer's session turns it back, nobody waives it again")
+    print("[R17] a confirmer rejects a reviewer's waive: it stays, rejected, until its reviewer waives the error again - what was is kept")
     d = temp / "reject"
     d.mkdir()
     sizes = [9000, 70000]
@@ -3330,29 +3332,55 @@ def r17(temp):
     r = run([INDEX, "drc", str(d / "t.db")])
     check(r.returncode == 0, "floe-index drc t.db", r.stderr)
     db = d / "t.db"
-    total = sum(sizes)
     cache = d / ".t.db.team"
     log = d / ".t.db.rejects.hong"
+    own = d / ".t.db.rejects.kim"
     # by hand: what each reviewer's file has waived and visited, who
-    # confirmed what, who rejected what
+    # confirmed what, every rejection as it was made (its errors go as it
+    # is taken back, made anew or followed by its confirmer's confirmation)
+    # and which of them each reviewer answered by waiving again
     people = {n: ({}, {}, {}, True) for n in ("kim", "lee", "hong")}
-    confirms, rejects = {}, {}
+    confirms, rejections, answered = {}, [], {}
 
-    def gone(ci):
-        return set().union(*[x.get(ci, set()) for x in rejects.values()] or [set()])
+    def under(name, ci):
+        """The errors under a rejection `name` has not answered."""
+        done = answered.get(name, set())
+        return {e for x in rejections if x["ci"] == ci for e in x["errors"] if (id(x), e) not in done}
+
+    def live(name, ci):
+        return people[name][0].get(ci, set()) - under(name, ci)
+
+    def reject(by, ci, errors, why=""):
+        for x in rejections:
+            if x["by"] == by and x["ci"] == ci:
+                x["errors"] -= set(errors)
+        rejections.append({"by": by, "ci": ci, "errors": set(errors), "why": why})
+
+    def unreject(by, ci, errors):
+        for x in rejections:
+            if x["by"] == by and x["ci"] == ci:
+                x["errors"] -= set(errors)
+
+    def again(name, ci, errors):
+        """`name` waives `errors` again: every rejection of them is answered."""
+        for x in rejections:
+            if x["ci"] == ci:
+                answered.setdefault(name, set()).update((id(x), e) for e in set(errors) & x["errors"])
+        people[name][0].setdefault(ci, set()).update(errors)
 
     def want():
-        """The team by hand: a rejected waive is no waive, whoever's file
-        still says one."""
-        live = {name: ({ci: w - gone(ci) for ci, w in p[0].items()}, p[1], p[2], p[3])
+        """The team by hand: a rejected waive is no waive, and an error
+        whose waives are all rejected is rejected."""
+        mine = {name: ({ci: live(name, ci) for ci in range(len(sizes))}, p[1], p[2], p[3])
                 for name, p in people.items()}
-        _own, rows = brute(sizes, live)
+        _own, rows = brute(sizes, mine)
         for ci in range(len(sizes)):
-            waived = set().union(*[p[0].get(ci, set()) for p in live.values()])
+            waived = set().union(*[p[0][ci] for p in mine.values()])
+            held = set().union(*[p[0].get(ci, set()) for p in people.values()])
             marked = set().union(*[c.get(ci, set()) for c in confirms.values()] or [set()])
             rows[ci]["confirmed"] = len(waived & marked)
             rows[ci]["unconfirmed"] = len(waived - marked)
-            rows[ci]["rejected"] = len(gone(ci))
+            rows[ci]["rejected"] = len(held - waived)
         keys = TEAM_KEYS + ("confirmed", "unconfirmed", "rejected")
         return {k: sum(x[k] for x in rows) for k in keys}, [{k: x[k] for k in keys} for x in rows]
 
@@ -3372,28 +3400,38 @@ def r17(temp):
     def person(report, name):
         return [x for x in report["reviewers"] if x["id"] == name][0]
 
+    def states(svc, h, ci, errors):
+        """The errors' states as the session has them: 0 none, 1 waived, 2
+        rejected, 3 confirmed."""
+        return [bytes.fromhex(svc("drc_status", handle=h, check=ci, start=e, count=1))[0] for e in errors]
+
     def waived_of(svc, h, ci):
+        # (an error's state: 1 waived, 3 waived and confirmed - 2, a rejected
+        # waive, is no waive)
         raw = bytes.fromhex(svc("drc_status", handle=h, check=ci, start=0, count=sizes[ci]))
-        return {i for i, byte in enumerate(raw) if byte == 1}
+        return {i for i, byte in enumerate(raw) if byte in (1, 3)}
 
     def why(svc, h, ci, e):
         said = svc("drc_reason_get", handle=h, check=ci, error=e)["waive"]
         return said["text"] if said else None
 
+    def past(svc, h, ci, e):
+        # (`history` is said when there is any)
+        said = svc("drc_reason_get", handle=h, check=ci, error=e)
+        return [(x["what"], x["by"], x["text"]) for x in said.get("history", [])]
+
+    def by(rows):
+        return [(x["reviewer"], x["text"]) for x in rows]
+
     def looked(svc, h, name):
         """The reviewer's session looks, as their viewer does every couple of
-        seconds: {rule: (count, who rejected, the rule's waived now)}; the
-        hand count follows what it turned back."""
+        seconds: {rule: (waives found rejected, who rejected them, the
+        rule's waived now)}. Nothing of the reviewer's is written by it."""
         e = svc.job(h, "drc_team_returned")
         if e.get("state") != "done":
             check(False, "%s looks for rejections" % name, e)
             return {}
-        out = {}
-        for row in e["returned"]:
-            ci = row["check"]
-            out[ci] = (row["count"], [(x["reviewer"], x["text"]) for x in row["by"]], row["counts"][0])
-            people[name][0][ci] = people[name][0].get(ci, set()) - gone(ci)
-        return out
+        return {row["check"]: (row["count"], by(row["by"]), row["counts"][0]) for row in e["returned"]}
 
     def merged(was):
         deadline = time.monotonic() + 30
@@ -3424,7 +3462,8 @@ def r17(temp):
         check(got["team"]["conflicts"] == 1 and "rejected" not in person(got, "hong")
               and "waived_rejected" in person(exact, "kim") and person(exact, "kim")["waived_rejected"] == 0,
               "... (a conflict among them; nobody has a rejects log)", got["team"])
-        check(looked(a, hk, "kim") == {} and not log.exists(), "a look with nothing rejected turns nothing back, and makes no file")
+        check(looked(a, hk, "kim") == {} and not log.exists() and not own.exists(),
+              "a look with nothing rejected says nothing, and makes no file")
         # ---- 1. only a confirmer's session rejects
         said = []
         for on in (True, False):
@@ -3433,183 +3472,243 @@ def r17(temp):
                 said.append(None)
             except gtkservice.ServiceError as exc:
                 said.append(str(exc))
-        check(all(s is not None and "--confirmer" in s for s in said)
-              and not (d / ".t.db.rejects.kim").exists(),
+        check(all(s is not None and "--confirmer" in s for s in said) and not own.exists(),
               "a reviewer's session rejects nothing and takes no rejection back: refused, nothing written", said)
         # ---- 2. the confirmer rejects: one line, and the team says so at once
         e = b.job(hh, "drc_team_reject", check=0, errors=[1, 2, 7], on=True, reason="not a dummy")
         check(e["state"] == "done" and (e["changed"], e["skipped"], e["verdict"]) == (2, 1, "reject")
               and e["counts"] == [0, sizes[0]],
-              "two waives rejected, the third error said as nobody's waive", e)
-        rejects["hong"] = {0: {1, 2}}
+              "two errors' waives rejected, the third said as nobody's waive", e)
+        reject("hong", 0, {1, 2}, "not a dummy")
         lines = log.read_text().splitlines()
-        check(lines[0] == "# floe drc waive rejections" and lines[1] == "floe_reasons=1"
+        check(lines[0] == "# floe drc waive rejections" and lines[1] == "floe_reasons=2"
               and lines[2].startswith("floe_pack=") and len(lines) == 4
               and lines[3].split(" ")[:2] == ["r", "0"] and lines[3].split(" ", 3)[3] == "1,2 not a dummy",
-              "the confirmer's rejects log: its head and one line for the action", lines)
-        got, exact = agree("the rejected waives are no waives of the team's at once - their reviewers' files still have them")
+              "the confirmer's rejects log: its head (version 2) and one line for the action", lines)
+        first = int(lines[3].split(" ")[2])
+        got, exact = agree("the rejected waives are no waives of the team's at once - nobody's file was written")
         t = got["team"]
-        check(t["conflicts"] == 0 and t["rejected"] == 2 and t["rules"][0]["waived"] == 5
-              and waived_of(a, hk, 0) == people["kim"][0][0] and 1 in people["kim"][0][0],
+        check(t["conflicts"] == 0 and t["rejected"] == 2 and t["rules"][0]["waived"] == 5,
               "... (the conflict is none any more: its waive is rejected)", t["rules"][0])
         check(person(got, "hong")["rejected"] == 2 and Path(person(got, "hong")["rejects_file"]) == log
               and person(got, "hong")["rejects_location"] == "results"
               and person(exact, "hong")["rejected"] == 2
               and person(exact, "kim")["waived_rejected"] == 2 and person(exact, "lee")["waived_rejected"] == 1
               and person(exact, "kim")["waived"] == 6 + sizes[1] and "rejected" not in person(exact, "kim"),
-              "each reviewer's row: what they rejected, and of their waives the rejected ones still in their file",
+              "each reviewer's row: what they rejected, and of their waives the rejected ones",
               (person(got, "hong"), {k: person(exact, "kim").get(k) for k in ("waived", "waived_rejected")}))
-        # ---- 3. the reviewers' sessions turn their rejected waives back when they look
-        files = (d / ".t.db.waive.kim", d / ".t.db.reasons.kim")
+        # ---- 3. the reviewers' sessions find it when they look - and write nothing
+        files = (d / ".t.db.waive.kim", d / ".t.db.reasons.kim", d / ".t.db.changes.kim")
         was = [file_state(p) for p in files]
+        check(states(a, hk, 0, [0, 1, 2]) == [1, 1, 1], "(before its look a session has its waives as it made them)")
         back = looked(a, hk, "kim")
-        check(back == {0: (2, [("hong", "not a dummy")], 4)} and waived_of(a, hk, 0) == {0, 3, 4095, 4096}
-              and why(a, hk, 0, 1) is None and why(a, hk, 0, 0) == "dummy fill"
-              and [file_state(p) for p in files] != was,
-              "kim's session: two waives turned back - status and reason - with who rejected them and why", back)
-        check(looked(a, hk, "kim") == {}, "... and a second look finds nothing to do")
+        check(back == {0: (2, [("hong", "not a dummy")], 4)} and states(a, hk, 0, [0, 1, 2, 3, 4]) == [1, 2, 2, 1, 0]
+              and waived_of(a, hk, 0) == {0, 3, 4095, 4096}
+              and why(a, hk, 0, 1) == "dummy fill" and past(a, hk, 0, 1) == []
+              and [file_state(p) for p in files] == was and not own.exists(),
+              "kim's session: two waives are rejected - a state of their own, the waive and its reason where they were, no file written", back)
+        check(looked(a, hk, "kim") == {}, "... and a second look has nothing more to say")
         back = looked(a, hl, "lee")
-        check(back == {0: (1, [("hong", "not a dummy")], 1)} and waived_of(a, hl, 0) == {10}, "lee's session: its one", back)
-        got, exact = agree("the team is the same, and the files say it now")
-        check(person(exact, "kim")["waived_rejected"] == 0 and person(exact, "kim")["waived"] == 4 + sizes[1],
-              "... nothing rejected is left in the reviewers' files", person(exact, "kim").get("waived_rejected"))
-        # ---- 4. a rejected error is not waived: a click, a job, a saved file
-        reply = a("drc_set_status", handle=hk, check=0, errors=[1, 5000, 2], status=1, reason="again")
+        check(back == {0: (1, [("hong", "not a dummy")], 1)} and states(a, hl, 0, [2, 10]) == [2, 1], "lee's session: its one", back)
+        agree("the team is the same after the looks")
+        # ---- 4. an error under a rejection is waived again with a reason, or not at all
+        reply = a("drc_set_status", handle=hk, check=0, errors=[1, 5000, 2], status=1)
         people["kim"][0][0].add(5000)
-        check(reply["rejected"] == [1, 2] and [(x["reviewer"], x["text"]) for x in reply["rejected_by"]] == [("hong", "not a dummy")]
-              and reply["locked"] == [] and reply["counts"] == [5, sizes[0]]
-              and waived_of(a, hk, 0) == people["kim"][0][0] and why(a, hk, 0, 5000) == "again" and why(a, hk, 0, 1) is None,
-              "a click: the rejected errors are not waived, and said with who rejected them and why", reply)
+        check(reply["rejected"] == [1, 2] and by(reply["rejected_by"]) == [("hong", "not a dummy")]
+              and reply["locked"] == [] and "resubmitted" not in reply and reply["counts"] == [5, sizes[0]]
+              and states(a, hk, 0, [1, 2, 5000]) == [2, 2, 1],
+              "a click without a reason: the rejected stay rejected, said with who rejected them and why", reply)
+        said = a("drc_reason_read", handle=hk, check=0, reason_of="waive", errors=[1, 2], toggle=True)
+        check(said["on"] is True and said["prefill"] == "dummy fill" and by(said["rejected_by"]) == [("hong", "not a dummy")],
+              "what the reason dialog starts from: the toggle waives, the reason the rejected waives have, who rejected them", said)
+        # a rejected waive is turned back like any other: its reason is kept
         reply = a("drc_set_status", handle=hk, check=0, errors=[1], status=0)
-        check(reply["rejected"] == [] and reply["locked"] == [], "turning back asks nothing of a rejection", reply)
-        e = a.job(hk, "drc_review", check=0, action="waive", errors=[1, 2, 6000], on=True, reason="job why")
-        people["kim"][0][0].add(6000)
-        check(e["state"] == "done" and e["changed"] == 1 and e["rejected"] == 2 and e["locked"] == 0
-              and [(x["reviewer"], x["text"]) for x in e["rejected_by"]] == [("hong", "not a dummy")]
-              and waived_of(a, hk, 0) == people["kim"][0][0] and why(a, hk, 0, 6000) == "job why",
-              "a job: one error waived, two left rejected", e)
+        people["kim"][0][0].discard(1)
+        check(reply["rejected"] == [] and reply["locked"] == [] and states(a, hk, 0, [1]) == [0]
+              and why(a, hk, 0, 1) is None and past(a, hk, 0, 1) == [("waived", "", "dummy fill")],
+              "a rejected waive turned back: not waived, and what its reason was is kept", (reply, past(a, hk, 0, 1)))
+        got, exact = agree("... the error is nobody's waive now: not rejected either")
+        check(got["team"]["rejected"] == 1, "(one error is left rejected)", got["team"]["rejected"])
+        # ... and waived again with a reason, it answers the rejection that stands
+        reply = a("drc_set_status", handle=hk, check=0, errors=[1], status=1, reason="real dummy, see sheet 4")
+        again("kim", 0, {1})
+        check(reply["rejected"] == [] and reply.get("resubmitted") == 1 and states(a, hk, 0, [1]) == [1]
+              and why(a, hk, 0, 1) == "real dummy, see sheet 4"
+              and past(a, hk, 0, 1) == [("waived", "", "dummy fill"), ("rejected", "hong", "not a dummy")],
+              "waived again with a reason: waived, and the rejection it answers is kept with the reason it had", (reply, past(a, hk, 0, 1)))
+        lines = own.read_text().splitlines()
+        check(lines[1] == "floe_reasons=2" and len(lines) == 5
+              and lines[3].split(" ")[0::3] == ["p", "1,1"] and lines[3].endswith(" 1,1 dummy fill")
+              and lines[4] == "j 0 %d 1,1 hong not a dummy" % first,
+              "the reviewer's own rejects log: the reason the waive had, the rejection answered - named by who and when", lines)
+        got, exact = agree("... the team: waived again, and a conflict again")
+        check(got["team"]["conflicts"] == 1 and person(exact, "kim")["waived_rejected"] == 1
+              and person(got, "kim")["rejects_location"] == "results" and "rejected" in person(got, "kim"),
+              "(kim has a rejects log now: what they answered)", person(got, "kim"))
+        # a job with a reason waives the rejected among its targets again
+        e = a.job(hk, "drc_review", check=0, action="waive", errors=[2, 6000], on=True, reason="job why")
+        again("kim", 0, {2, 6000})
+        check(e["state"] == "done" and e["changed"] == 2 and e["rejected"] == 0 and e.get("resubmitted") == 1
+              and e["rejected_by"] == [] and states(a, hk, 0, [2, 6000]) == [1, 1]
+              and why(a, hk, 0, 2) == "job why" and why(a, hk, 0, 6000) == "job why"
+              and past(a, hk, 0, 2) == [("waived", "", "dummy fill"), ("rejected", "hong", "not a dummy")],
+              "a job with a reason: one error waived, one waived again - with what was kept", e)
         last = (d / ".t.db.reasons.kim").read_text().splitlines()[-1].split(" ", 3)
-        check(last[3] == "6000,1 job why", "... and the reason's line says the waived one alone", last)
+        check(last[3] == "2,1,5997,1 job why", "... and the reason's line says both", last)
+        got, exact = agree("... the team: kim's waive of it counts, lee's of the same error is rejected still")
+        check(got["team"]["rejected"] == 0 and person(exact, "lee")["waived_rejected"] == 1
+              and person(exact, "kim")["waived_rejected"] == 0,
+              "(an error one of its reviewers waived again is waived; the other's waive waits for them)",
+              (got["team"]["rejected"], person(exact, "lee").get("waived_rejected")))
+        # ---- 5. the confirmer reads it again: what was said before comes with it
+        e = b.job(hh, "drc_team_waives", check=0, show="unconfirmed", start=0, limit=100, refresh=True)
+        rows = {x["error"]: x for x in e.get("rows", [])}
+        whole = set().union(*[live(n, 0) for n in people])
+        check(e["state"] == "done" and sorted(rows) == sorted(whole)
+              and rows[2]["waived_by"] == ["kim", "lee"] and rows[2]["rejected_of"] == ["lee"]
+              and by(rows[2]["rejected_by"]) == [("hong", "not a dummy")]
+              and by(rows[2]["reasons"]) == [("kim", "job why")]
+              and [(x["reviewer"], x["what"], x["by"], x["text"]) for x in rows[2]["history"]]
+              == [("kim", "waived", "", "dummy fill"), ("kim", "rejected", "hong", "not a dummy")]
+              and by(rows[1]["reasons"]) == [("kim", "real dummy, see sheet 4")] and len(rows[1]["history"]) == 2
+              and "rejected_of" not in rows[1] and "history" not in rows[0]
+              and e["rule"] == dict(waived=len(whole), confirmed=0, unconfirmed=len(whole)),
+              "the list to confirm: the errors waived again are back in it, with the reason they had and the rejection they answer", rows.get(2))
+        e = b.job(hh, "drc_team_waives", check=0, show="rejected", start=0, limit=100)
+        check(e["count"] == 0 and e["rows"] == [], "... and the Rejected list is empty: no error's waives are all rejected", e.get("rows"))
+        # ---- 6. rejected again: a new rejection, to answer anew
+        e = b.job(hh, "drc_team_reject", check=0, errors=[2], on=True, reason="still not")
+        reject("hong", 0, {2}, "still not")
+        second = int(log.read_text().splitlines()[-1].split(" ")[2])
+        check(e["changed"] == 1 and second > first, "the confirmer rejects it again: a rejection of its own time", (first, second))
+        back = looked(a, hk, "kim")
+        check(back == {0: (1, [("hong", "still not")], len(live("kim", 0)))} and states(a, hk, 0, [1, 2]) == [1, 2]
+              and why(a, hk, 0, 2) == "job why",
+              "kim's session: rejected again, by the new rejection", back)
+        got, exact = agree("... the team: the error's waives are all rejected again")
+        e = b.job(hh, "drc_team_waives", check=0, show="rejected", start=0, limit=100, refresh=True)
+        rows = {x["error"]: x for x in e.get("rows", [])}
+        check(e["count"] == 1 and sorted(rows) == [2] and rows[2]["waived_by"] == ["kim", "lee"]
+              and rows[2]["rejected_of"] == ["kim", "lee"] and by(rows[2]["rejected_by"]) == [("hong", "still not")]
+              and len(rows[2]["history"]) == 2 and e["rule"]["rejected"] == 1
+              and e["rules"][0]["rejected"] == 1 and "rejected" not in e["rules"][1],
+              "the Rejected list: the error, whose waive it is, who rejected it and why, what was before", rows.get(2))
+        one = a.job(hl, "drc_team_waive_get", check=0, error=2)
+        check(one["state"] == "done" and one["waived_by"] == ["kim", "lee"] and one["rejected_of"] == ["kim", "lee"]
+              and by(one["rejected_by"]) == [("hong", "still not")] and len(one["history"]) == 2,
+              "one error asked from a reviewer's session: the same", one)
+        # a rejected waive is not confirmed
+        e = b.job(hh, "drc_team_confirm", check=0, errors=[2, 3], on=True)
+        confirms["hong"] = {0: {3}}
+        check((e["changed"], e["skipped"]) == (1, 1), "confirming: an error whose waives are all rejected is nobody's waive", e)
+        back = looked(a, hk, "kim")
+        check(states(a, hk, 0, [3]) == [3], "(kim's session reads its waive of 3 as confirmed)", states(a, hk, 0, [3]))
+        agree("... the team with a confirmation")
+        # ---- 7. what carries no reason does not waive a rejected error again
+        reply = a("drc_set_status", handle=hk, check=0, errors=[2], status=0)
+        people["kim"][0][0].discard(2)
         saved = d / "more.waive"
         a("drc_waive_export", handle=hk, path=str(saved))
         raw = bytearray(saved.read_bytes())
-        for error in (1, 2, 7000):
+        for error in (2, 7000):
             raw[40 + error] = 1
         saved.write_bytes(bytes(raw))
         was = file_state(cache)
         reply = a("drc_waive_import", handle=hk, path=str(saved))
         people["kim"][0][0].add(7000)
-        check(reply["rejected"] == 2 and reply["locked"] == 0 and reply["counts"][0] == [7, sizes[0]]
-              and waived_of(a, hk, 0) == people["kim"][0][0],
-              "a saved waive file loaded: the rejected errors stay unwaived, the rest follows the file",
+        check(reply["rejected"] == 1 and reply["locked"] == 0 and reply["counts"][0] == [len(live("kim", 0)), sizes[0]]
+              and states(a, hk, 0, [2, 7000]) == [0, 1],
+              "a saved waive file loaded: the error under a rejection stays unwaived, the rest follows the file",
               {k: reply[k] for k in ("rejected", "locked", "waived")})
         merged(was)
-        agree("... the team after them")
-        # ---- 5. a peer's decisions applied: a rejected error is not waived by them
+        agree("... the team after it")
         a("drc_visit", handle=hk, check=0, error=8000)
         a.visits(hk, 1)
         a("drc_set_status", handle=hk, check=0, errors=[8000], status=1)
         people["kim"][0][0].add(8000)
         people["kim"][1][0].add(8000)
         e = b.job(hh, "drc_team_reject", check=0, errors=[8000], on=True)
-        rejects["hong"][0].add(8000)
+        reject("hong", 0, {8000})
         check(e["changed"] == 1 and log.read_text().splitlines()[-1].split(" ")[3:] == ["8000,1"],
               "a rejection without a reason: a line without a text", log.read_text().splitlines()[-1])
         e = a.job(hl, "drc_team_load", paths=[str(d / ".t.db.review.kim.sqlite3")])
         sids = [x["snapshot"] for x in e.get("loaded") or []]
         before = waived_of(a, hl, 0)
-        was = file_state(cache)
         e = a.job(hl, "drc_team_apply", source=sids[0], force=True, check=0, errors=[8000, 1]) if sids else {}
         res = e.get("result") or {}
-        check(e.get("state") == "done" and res.get("rejected") == 1 and res["changed_waived"] == 0
+        # (8000: rejected, nobody has answered; 1: kim answered its rejection
+        # - lee has not, and an applied decision carries no reason to)
+        check(e.get("state") == "done" and res.get("rejected") == 2 and res["changed_waived"] == 0
               and waived_of(a, hl, 0) == before,
-              "a peer's decisions applied, forced: the peer's rejected waive is not taken", res)
+              "a peer's decisions applied, forced: a waive of an error under a rejection the applier has not answered is not taken", res)
         back = looked(a, hk, "kim")
-        check(back == {0: (1, [("hong", "")], 7)} and 8000 not in waived_of(a, hk, 0),
-              "... and its reviewer's session turns it back: rejected by hong, who said no why", back)
+        check(back == {0: (1, [("hong", "")], len(live("kim", 0)))} and states(a, hk, 0, [8000]) == [2],
+              "... and its reviewer's session finds it rejected: by hong, who said no why", back)
         agree("... the team after the application")
-        # ---- 6. the lists
-        e = b.job(hh, "drc_team_waives", check=0, show="rejected", start=0, limit=100, refresh=True)
-        rows = {x["error"]: x for x in e.get("rows", [])}
-        check(e["state"] == "done" and e["count"] == 3 and sorted(rows) == [1, 2, 8000]
-              and all(x["waived_by"] == [] for x in rows.values())
-              and [(w["reviewer"], w["text"]) for w in rows[2]["rejected_by"]] == [("hong", "not a dummy")]
-              and [(w["reviewer"], w["text"]) for w in rows[8000]["rejected_by"]] == [("hong", "")]
-              and e["rule"] == dict(waived=8, confirmed=0, unconfirmed=8, rejected=3)
-              and e["all"] == dict(waived=8 + sizes[1], confirmed=0, unconfirmed=8 + sizes[1], rejected=3)
-              and e["rules"][0] == dict(check=0, waived=8, confirmed=0, unconfirmed=8, rejected=3)
-              and e["rules"][1] == dict(check=1, waived=sizes[1], confirmed=0, unconfirmed=sizes[1]),
-              "the Rejected list: every rejection that stands, with who rejected and why", e)
-        e = b.job(hh, "drc_team_waives", check=0, show="unconfirmed", start=0, limit=100)
-        check(sorted(x["error"] for x in e["rows"]) == sorted(people["kim"][0][0] | people["lee"][0][0])
-              and all(x["rejected_by"] == [] for x in e["rows"]),
-              "... and none of them among the waives to confirm", [x["error"] for x in e["rows"]])
-        one = a.job(hk, "drc_team_waive_get", check=0, error=2)
-        check(one["state"] == "done" and one["waived_by"] == [] and one["confirmed_by"] == []
-              and [(w["reviewer"], w["text"]) for w in one["rejected_by"]] == [("hong", "not a dummy")],
-              "one error asked from a reviewer's session: who rejected its waive, and why", one)
-        # a rejected error is not confirmed either
-        e = b.job(hh, "drc_team_confirm", check=0, errors=[1, 3], on=True)
-        check((e["changed"], e["skipped"]) == (1, 1), "confirming: the rejected error is nobody's waive", e)
-        confirms["hong"] = {0: {3}}
-        agree("... the team with a confirmation")
-        # ---- 7. the rejection taken back: the error is anybody's to waive again
-        e = b.job(hh, "drc_team_reject", check=0, errors=[1, 9], on=False)
+        # ---- 8. the rejection taken back: the waive is as it was, at once
+        e = b.job(hh, "drc_team_reject", check=0, errors=[2, 9], on=False)
         check(e["state"] == "done" and (e["changed"], e["skipped"]) == (1, 0)
-              and log.read_text().splitlines()[-1].split(" ")[0::3] == ["R", "1,1"],
+              and log.read_text().splitlines()[-1].split(" ")[0::3] == ["R", "2,1"],
               "a rejection taken back: a line of the log (the other error was not rejected: nothing)",
               (e, log.read_text().splitlines()[-1]))
-        rejects["hong"][0].discard(1)
-        reply = a("drc_set_status", handle=hk, check=0, errors=[1], status=1, reason="better why")
-        people["kim"][0][0].add(1)
-        check(reply["rejected"] == [] and 1 in waived_of(a, hk, 0) and why(a, hk, 0, 1) == "better why",
-              "... and its reviewer waives it again, at once", reply)
-        agree("... back among the waives to confirm")
-        # taken back before the reviewer's session looked: the waive stands as it was
+        unreject("hong", 0, {2})
+        got, exact = agree("... lee's waive of it counts again at once - nothing of it was touched")
+        looked(a, hl, "lee")
+        check(states(a, hl, 0, [2]) == [1] and person(exact, "lee")["waived_rejected"] == 0,
+              "... and lee's session reads it as waived", states(a, hl, 0, [2]))
         e = b.job(hh, "drc_team_reject", check=0, errors=[4095], on=True, reason="hm")
-        rejects["hong"][0].add(4095)
+        reject("hong", 0, {4095}, "hm")
         agree("a rejection the reviewer's session has not seen yet: out of the team's waives")
         b.job(hh, "drc_team_reject", check=0, errors=[4095], on=False)
-        rejects["hong"][0].discard(4095)
-        check(looked(a, hk, "kim") == {} and 4095 in waived_of(a, hk, 0) and why(a, hk, 0, 4095) == "dummy fill",
-              "taken back before its reviewer looked: the waive and its reason stand")
+        unreject("hong", 0, {4095})
+        check(looked(a, hk, "kim") == {} and states(a, hk, 0, [4095]) == [1] and why(a, hk, 0, 4095) == "dummy fill",
+              "taken back before its reviewer looked: nothing is said, the waive and its reason stand")
         agree("... and counts again")
-        # ---- 8. a confirmed waive that is rejected is not locked: it is turned back
+        # ---- 9. a confirmed waive that is rejected is not locked; waived
+        # again it is under the confirmation that stood
         hy = c("drc_open", path=str(db), mode="load", reviewer="yoon", confirmer=True)["handle"]
         c.svc.drc_watch(hy)
         e = c.job(hy, "drc_team_confirm", check=0, errors=[0], on=True)
         confirms["yoon"] = {0: {0}}
-        time.sleep(1.2)             # (yoon's confirm file is new)
         reply = a("drc_set_status", handle=hk, check=0, errors=[0], status=0)
-        check(e["changed"] == 1 and reply["locked"] == [0] and reply["locked_by"] == ["yoon"], "a waive another confirmer confirmed: locked", reply)
+        check(e["changed"] == 1 and reply["locked"] == [0] and reply["locked_by"] == ["yoon"],
+              "a waive another confirmer confirmed: locked - at once, though the session looked a moment ago", reply)
         e = b.job(hh, "drc_team_reject", check=0, errors=[0], on=True, reason="no")
-        rejects["hong"][0].add(0)
+        reject("hong", 0, {0}, "no")
         back = looked(a, hk, "kim")
-        check(e["changed"] == 1 and back == {0: (1, [("hong", "no")], len(people["kim"][0][0]))} and 0 not in waived_of(a, hk, 0),
-              "... rejected by hong: no lock holds it, its reviewer's session turns it back", back)
+        check(e["changed"] == 1 and back == {0: (1, [("hong", "no")], len(live("kim", 0)))} and states(a, hk, 0, [0]) == [2],
+              "... rejected by hong: rejected, whoever confirmed it", back)
         got, exact = agree("... and yoon's confirmation of it counts for nothing while it is rejected")
         check(person(got, "yoon")["confirmed"] == 1, "(the confirmation is still in yoon's file: theirs to take back)")
-        # two confirmers' rejections of one error: one taking theirs back leaves it rejected
-        e = c.job(hy, "drc_team_reject", check=0, errors=[2], on=True, reason="me too")
-        check(e["state"] == "done" and (e["changed"], e["skipped"]) == (0, 1),
-              "a second confirmer rejecting an error nobody has waived any more: nothing to reject", e)
+        reply = a("drc_set_status", handle=hk, check=0, errors=[0], status=1, reason="see spec 4.2")
+        again("kim", 0, {0})
+        check(reply.get("resubmitted") == 1 and states(a, hk, 0, [0]) == [3]
+              and past(a, hk, 0, 0) == [("waived", "", "dummy fill"), ("rejected", "hong", "no")],
+              "waived again: confirmed at once, by the confirmation that stood", (reply, states(a, hk, 0, [0])))
+        reply = a("drc_set_status", handle=hk, check=0, errors=[0], status=0)
+        check(reply["locked"] == [0] and reply["locked_by"] == ["yoon"], "... and locked again", reply)
+        agree("... the team: waived and confirmed")
+        # a second confirmer does not reject an error whose waives are all
+        # rejected already; taken back, its waive is as it was
         a("drc_set_status", handle=hl, check=0, errors=[30], status=1)
         people["lee"][0][0].add(30)
-        for svc, h, who, text in ((b, hh, "hong", "one"), (c, hy, "yoon", "two")):
-            e = svc.job(h, "drc_team_reject", check=0, errors=[30], on=True, reason=text)
-            rejects.setdefault(who, {}).setdefault(0, set()).add(30)
-            check(e["changed"] == 1, "%s rejects lee's waive of 30" % who, e)
+        e = b.job(hh, "drc_team_reject", check=0, errors=[30], on=True, reason="one")
+        reject("hong", 0, {30}, "one")
+        e = c.job(hy, "drc_team_reject", check=0, errors=[30], on=True, reason="two")
+        check(e["state"] == "done" and (e["changed"], e["skipped"]) == (0, 1),
+              "a second confirmer on an error whose waives are all rejected: nothing to reject", e)
         back = looked(a, hl, "lee")
-        check(back == {0: (1, [("hong", "one"), ("yoon", "two")], len(people["lee"][0][0]))},
-              "a waive two confirmers rejected: turned back, both said", back)
+        check(back == {0: (1, [("hong", "one")], len(live("lee", 0)))}, "lee's session: rejected by hong", back)
         b.job(hh, "drc_team_reject", check=0, errors=[30], on=False)
-        rejects["hong"][0].discard(30)
-        reply = a("drc_set_status", handle=hl, check=0, errors=[30], status=1)
-        check(reply["rejected"] == [30] and [(x["reviewer"], x["text"]) for x in reply["rejected_by"]] == [("yoon", "two")],
-              "one of them taking theirs back leaves the other's", reply)
-        agree("... the team: one error, rejected once")
-        # ---- 9. the confirmer's own waive of what they reject goes with it,
-        # and their own confirmation of it
+        unreject("hong", 0, {30})
+        reply = a("drc_set_status", handle=hl, check=0, errors=[30], status=0)
+        people["lee"][0][0].discard(30)
+        check(reply["rejected"] == [] and reply["locked"] == [] and 30 not in waived_of(a, hl, 0),
+              "taken back: the waive is its reviewer's again - turned back here", reply)
+        agree("... the team")
+        # ---- 10. the confirmer's own waive of what they reject goes with it,
+        # and their own confirmation of it; their own waive of it again answers
+        # their own rejection
         b("drc_set_status", handle=hh, check=0, errors=[20, 21], status=1)
         people["hong"][0][0] = {20, 21}
         b.job(hh, "drc_team_confirm", check=0, errors=[20, 21], on=True)
@@ -3617,7 +3716,7 @@ def r17(temp):
         e = b.job(hh, "drc_team_reject", check=0, errors=[20], on=True, reason="mine")
         people["hong"][0][0].discard(20)
         confirms["hong"][0].discard(20)
-        rejects["hong"][0].add(20)
+        reject("hong", 0, {20}, "mine")
         raw = (d / ".t.db.confirm.hong").read_bytes()
         check(e["changed"] == 1 and e["counts"] == [1, sizes[0]] and waived_of(b, hh, 0) == {21}
               and (raw[40 + 20], raw[40 + 21]) == (0, 1),
@@ -3625,45 +3724,113 @@ def r17(temp):
         reply = b("drc_set_status", handle=hh, check=0, errors=[20, 22], status=1)
         people["hong"][0][0].add(22)
         check(reply["rejected"] == [20] and waived_of(b, hh, 0) == {21, 22},
-              "... and a confirmer's session does not waive a rejected error either", reply)
+              "... and their session does not waive it again without a reason either", reply)
+        reply = b("drc_set_status", handle=hh, check=0, errors=[20], status=1, reason="mine after all")
+        again("hong", 0, {20})
+        check(reply.get("resubmitted") == 1 and waived_of(b, hh, 0) == {20, 21, 22}, "... with one, it is waived again", reply)
         agree("... the team")
-        # ---- 10. a rule's waives rejected in one line, and turned back in one look
+        # ---- 11. a confirmer who confirms an error takes their own rejection of it back
+        e = b.job(hh, "drc_team_reject", check=0, errors=[5000], on=True, reason="why 5000")
+        reject("hong", 0, {5000}, "why 5000")
+        looked(a, hk, "kim")
+        reply = a("drc_set_status", handle=hk, check=0, errors=[5000], status=1, reason="5000 is fill")
+        again("kim", 0, {5000})
+        e = b.job(hh, "drc_team_confirm", check=0, errors=[5000], on=True)
+        confirms["hong"][0].add(5000)
+        unreject("hong", 0, {5000})
+        last = log.read_text().splitlines()[-1].split(" ")
+        check(reply.get("resubmitted") == 1 and e["changed"] == 1 and last[0::3] == ["R", "5000,1"],
+              "waived again, then confirmed: the confirmer's own rejection of it is taken back in their log", last)
+        looked(a, hk, "kim")
+        check(states(a, hk, 0, [5000]) == [3] and past(a, hk, 0, 5000) == [("rejected", "hong", "why 5000")],
+              "... confirmed for its reviewer, what was before kept", (states(a, hk, 0, [5000]), past(a, hk, 0, 5000)))
+        agree("... the team")
+        # ---- 12. a rule's waives rejected in one line, found by one look,
+        # waived again by one job: a line each of what was
         t0 = time.monotonic()
         e = b.job(hh, "drc_team_reject", check=1, errors=list(range(1000)), on=True, reason="big no")
-        rejects["hong"][1] = set(range(1000))
+        reject("hong", 1, set(range(1000)), "big no")
         ms1 = (time.monotonic() - t0) * 1000
+        files = (d / ".t.db.waive.kim", d / ".t.db.reasons.kim")
+        was = [file_state(p) for p in files]
         t0 = time.monotonic()
         back = looked(a, hk, "kim")
         ms2 = (time.monotonic() - t0) * 1000
         check(e["changed"] == 1000 and log.read_text().splitlines()[-1].split(" ", 3)[3] == "0,1000 big no"
-              and back == {1: (1000, [("hong", "big no")], sizes[1] - 1000)},
-              "1,000 waives rejected in one line (%.0f ms) and turned back in one look (%.0f ms)" % (ms1, ms2), back)
+              and back == {1: (1000, [("hong", "big no")], sizes[1] - 1000)}
+              and [file_state(p) for p in files] == was,
+              "1,000 waives rejected in one line (%.0f ms) and found by one look (%.0f ms), no reviewer's file written" % (ms1, ms2), back)
         agree("... the team")
-        # ---- 11. what is no rejects log of this result rejects nothing
+        sel = a.job(hk, "drc_select", check=1, mode="replace")
+        was = file_state(cache)
+        e = a.job(hk, "drc_review", check=1, action="waive", selection=sel["selection"], on=True, reason="big, sheet 7")
+        again("kim", 1, set(range(1000)))
+        merged(was)
+        lines = own.read_text().splitlines()
+        check(e["state"] == "done" and e["changed"] == 1000 and e.get("resubmitted") == 1000 and e["rejected"] == 0
+              and lines[-2].endswith(" 0,1000 big") and lines[-2].startswith("p 1 ")
+              and lines[-1].startswith("j 1 ") and lines[-1].endswith(" 0,1000 hong big no")
+              and why(a, hk, 1, 5) == "big, sheet 7" and past(a, hk, 1, 5) == [("waived", "", "big"), ("rejected", "hong", "big no")],
+              "the rule waived again by one job with a reason: a line for the reason it had, a line for the rejection", (e, lines[-2:]))
+        agree("... the team: all of it waived again")
+        # a job without a reason leaves the rejected, and says them
+        e = b.job(hh, "drc_team_reject", check=1, errors=list(range(10)), on=True, reason="ten")
+        reject("hong", 1, set(range(10)), "ten")
+        looked(a, hk, "kim")
+        e = a.job(hk, "drc_review", check=1, action="waive", errors=list(range(20)), on=True)
+        check(e["changed"] == 0 and e["rejected"] == 10 and "resubmitted" not in e and by(e["rejected_by"]) == [("hong", "ten")],
+              "a job without a reason: the rejected are left, and said", e)
+        # ---- 13. the class a filter shows: every count and page follows it
+        def lens(name, ci, waived, limit=20):
+            counts = a("drc_lens", handle=hk, lens=name)["counts"][ci]
+            page = a("drc_status_page", handle=hk, check=ci, waived=waived, start=0, limit=limit)
+            return counts, page
+        check(lens("rejected", 1, True) == ([10, sizes[1]], list(range(10))), "the rejected of a rule: counted and listed", lens("rejected", 1, True))
+        check(lens("rejected", 0, True) == ([1, sizes[0]], [8000]), "... of the other rule", lens("rejected", 0, True))
+        mine = people["kim"][0][0]
+        check(lens("held", 0, False, 3) == ([len(mine), sizes[0]], [i for i in range(sizes[0]) if i not in mine][:3]),
+              "the not waived: the errors without a waive of the reviewer's - a rejected waive is one", lens("held", 0, False, 3))
+        marked = set().union(*[c.get(0, set()) for c in confirms.values()])
+        check(lens("confirmed", 0, True) == ([len(live("kim", 0) & marked), sizes[0]], sorted(live("kim", 0) & marked)),
+              "the confirmed", lens("confirmed", 0, True))
+        check(lens("waived", 0, True, 100) == ([len(live("kim", 0) - marked), sizes[0]], sorted(live("kim", 0) - marked)),
+              "the waived that wait for a confirmer", lens("waived", 0, True, 100))
+        check(lens("live", 0, True, 100) == ([len(live("kim", 0)), sizes[0]], sorted(live("kim", 0)))
+              and a("drc_status_rank", handle=hk, check=0, waived=True, error=sorted(live("kim", 0))[2]) == 2,
+              "with no filter of states: the waived, confirmed or not", lens("live", 0, True, 100))
+        try:
+            a("drc_lens", handle=hk, lens="mine")
+            said = None
+        except gtkservice.ServiceError as exc:
+            said = str(exc)
+        check(said is not None and "lens is" in said, "an unknown class is refused", said)
+        agree("... the team (a filter changes no file)")
+        # ---- 14. what is no rejects log of this result rejects nothing
         whole = log.read_text()
         log.write_text(whole.replace("floe_pack=", "floe_pack=0"))
         time.sleep(0.01)
-        reply = a("drc_set_status", handle=hk, check=0, errors=[2], status=1)
-        check(reply["rejected"] == [] and 2 in waived_of(a, hk, 0), "a rejects log of another result rejects nothing", reply)
+        looked(a, hk, "kim")
+        check(states(a, hk, 0, [8000]) == [1] and states(a, hk, 1, [0]) == [1],
+              "a rejects log of another result rejects nothing", states(a, hk, 0, [8000]))
         nums, t, got = team_now(db, env=dict(FLOE_TEAM_GRACE_S="0"))
         check([(x["reviewer"], Path(x["file"]).name) for x in t.get("skipped", [])] == [("hong", ".t.db.rejects.hong")]
               and "rejected" not in person(got, "hong"),
               "... left out of the team's counts, and said", t.get("skipped"))
-        a("drc_set_status", handle=hk, check=0, errors=[2], status=0)
         log.write_text(whole)
+        looked(a, hk, "kim")
+        check(states(a, hk, 0, [8000]) == [2], "(and rejects again when it is this result's)", states(a, hk, 0, [8000]))
     finally:
         a.close()
         b.close()
         c.close()
     agree("the sessions closed: the team as by hand", env=dict(FLOE_TEAM_GRACE_S="0"))
-    # the confirmer's change log says the rejects log's time (the confirm
-    # file's record, its second number)
-    side = d / ".t.db.changes.hong"
-    raw = side.read_bytes()
-    said = [struct.unpack_from("<IIQQ", raw, 48 + 24 * i) for i in range((len(raw) - 48) // 24)]
-    last = [x for x in said if x[0] == 4]
-    check(bool(last) and last[-1][3] > 0,
-          "the confirmer's change log says the rejects log's time", last[-2:])
+    # the change logs say the rejects logs' times: the confirmer's, and the
+    # reviewer's who answered (the confirm file's record, its second number)
+    for name in ("hong", "kim"):
+        raw = (d / (".t.db.changes.%s" % name)).read_bytes()
+        said = [struct.unpack_from("<IIQQ", raw, 48 + 24 * i) for i in range((len(raw) - 48) // 24)]
+        last = [x for x in said if x[0] == 4]
+        check(bool(last) and last[-1][3] > 0, "%s's change log says their rejects log's time" % name, last[-2:])
 
 
 def main():

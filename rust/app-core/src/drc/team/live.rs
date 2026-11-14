@@ -48,11 +48,12 @@
 //! So the logs make the answer cheap; they are never what makes it right.
 use super::bits::{Bits, CHUNK};
 use super::stats::{
-    discover, flags_connection, rejected_runs, run_bits, team_of, waive_of, waived_bits, Found, Planes, Team,
+    discover, flags_connection, rejects_log, run_bits, team_of, waive_of, waived_bits, Found, Planes, Team,
 };
 use super::Identity;
 use crate::drc::changes::{self, stamp_of, stamps_after, Stamps, RESET, TOUCH};
 use crate::drc::confirm;
+use crate::drc::reasons::{Kind, Reasons};
 use crate::{check_cancelled, Error, ErrorKind, Result};
 use floe_vfs::lock::{self, Busy, Key, Mode};
 use rusqlite::{Connection, OptionalExtension};
@@ -70,7 +71,9 @@ const MAGIC: &[u8; 8] = b"FLOETEAM";
 /// counted too, and a reviewer's confirm file is one of their files.
 /// 3 (0.12.468): the rejected errors are counted, and a reviewer's rejects
 /// log is one of their files.
-const VERSION: u32 = 3;
+/// 4 (0.12.469): a rejection is of each reviewer's waive until they answer
+/// it - the rejected count is the errors whose waives are all rejected.
+const VERSION: u32 = 4;
 /// How long a reviewer's files may differ from what their log says before
 /// their rules are counted again (FLOE_TEAM_GRACE_S; seconds, 0: at once).
 const GRACE: u64 = 10;
@@ -426,8 +429,9 @@ struct Source {
     waive: Option<(File, Vec<u32>)>,
     /// the confirm file and its stored counter a rule
     confirm: Option<(File, Vec<u32>)>,
-    /// the rejects log as read: each rule's rejected errors, as runs
-    rejects: Option<Vec<Vec<(u64, u64)>>>,
+    /// the rejects log as read: the rejections this reviewer made, and the
+    /// ones of their own waives they answered
+    rejects: Option<Reasons>,
     /// the flags read (bit 1 of `known`); their connection is opened when a
     /// plane is first asked
     flags_ok: bool,
@@ -481,9 +485,9 @@ impl Source {
         if let Some(path) = &self.rejects_path {
             // (a log of actions, read whole: a line an action)
             let stamp = File::open(path).and_then(|file| Ok(stamp_of(&file.metadata()?)));
-            match stamp.map_err(Error::from).and_then(|stamp| Ok((rejected_runs(path, id)?, stamp))) {
-                Ok((Some(runs), stamp)) => {
-                    self.rejects = Some(runs);
+            match stamp.map_err(Error::from).and_then(|stamp| Ok((rejects_log(path, id)?, stamp))) {
+                Ok((Some(log), stamp)) => {
+                    self.rejects = Some(log);
                     self.stamps[3] = stamp;
                 }
                 // (gone between its time and its bytes: no file)
@@ -593,8 +597,9 @@ impl Source {
         for (_, stored) in self.waive.iter().chain(&self.confirm) {
             rules.extend((0..stored.len()).filter(|&ci| stored[ci] > 0).map(|ci| ci as u32));
         }
-        if let Some(runs) = &self.rejects {
-            rules.extend((0..runs.len()).filter(|&ci| !runs[ci].is_empty()).map(|ci| ci as u32));
+        if let Some(log) = &self.rejects {
+            rules.extend(log.checks(Kind::Reject).into_iter().map(|ci| ci as u32));
+            rules.extend(log.kept_checks(Kind::Answered).into_iter().map(|ci| ci as u32));
         }
         let tag = self.tag.clone();
         let sql = |e| {
@@ -623,7 +628,17 @@ impl Source {
     }
 
     /// This reviewer's planes of rule `ci`'s chunk `k` (`count` errors).
-    fn planes(&mut self, id: &Identity, ci: usize, k: u64, count: u64, buffer: &mut [u8]) -> Result<Planes> {
+    /// `open`: the rule's errors under a rejection this reviewer has not
+    /// answered (`count`'s `opens`).
+    fn planes(
+        &mut self,
+        id: &Identity,
+        ci: usize,
+        k: u64,
+        count: u64,
+        open: &[(u64, u64)],
+        buffer: &mut [u8],
+    ) -> Result<Planes> {
         let waived = match &self.waive {
             // (a rule the reviewer waived nothing in has no bit to read)
             Some((file, stored)) if stored[ci] > 0 => {
@@ -644,10 +659,7 @@ impl Source {
             }
             _ => Bits::ZERO,
         };
-        let rejected = match &self.rejects {
-            Some(runs) => run_bits(&runs[ci], k * CHUNK, count),
-            None => Bits::ZERO,
-        };
+        let rejected = run_bits(open, k * CHUNK, count);
         let waive_known = self.waive.is_some();
         let marked = self.flags_ok;
         let (mut visited, mut not_required) = (Bits::ZERO, Bits::ZERO);
@@ -688,8 +700,8 @@ impl Source {
             return Ok(None);
         }
         let mut found = Vec::new();
-        if let Some(runs) = &self.rejects {
-            for &(a, b) in &runs[ci] {
+        if let Some(log) = &self.rejects {
+            for (a, b, _) in log.runs(Kind::Reject, ci) {
                 found.extend(a / CHUNK..=(b - 1) / CHUNK);
             }
         }
@@ -1096,6 +1108,11 @@ fn count(
     let mut buffer = vec![0u8; CHUNK as usize];
     let mut planes: Vec<Planes> = Vec::with_capacity(sources.len());
     let mut counted = 0u64;
+    // a rule's errors under a rejection each reviewer has not answered - a
+    // waive of theirs there is rejected: made once a rule, from every
+    // rejection of it that stands (the same errors for everybody who
+    // answered nothing in the rule)
+    let mut opens: Option<(usize, Vec<(u64, u64)>, Vec<Option<Vec<(u64, u64)>>>)> = None;
     let mut chunk = |cache: &mut Cache, sources: &mut [Source], ci: usize, k: u64| -> Result<()> {
         let size = id.sizes[ci];
         if k >= size.div_ceil(CHUNK) {
@@ -1106,11 +1123,30 @@ fn count(
             check_cancelled(cancelled)?;
             sources.iter_mut().for_each(Source::release);
         }
+        if opens.as_ref().is_none_or(|(rule, ..)| *rule != ci) {
+            let standing: Vec<confirm::Standing> = sources
+                .iter()
+                .filter(|src| src.known() != 0)
+                .flat_map(|src| src.rejects.iter().flat_map(|log| confirm::standing_of(&src.tag, log, ci)))
+                .collect();
+            let own = sources
+                .iter()
+                .map(|src| match &src.rejects {
+                    Some(log) if !standing.is_empty() && log.kept(Kind::Answered, ci).next().is_some() => {
+                        Some(confirm::unanswered(&standing, Some(log), ci))
+                    }
+                    _ => None,
+                })
+                .collect();
+            opens = Some((ci, confirm::unanswered(&standing, None, ci), own));
+        }
+        let (_, open_all, own) = opens.as_ref().expect("made above");
         let errors = (size - k * CHUNK).min(CHUNK);
         planes.clear();
-        for src in sources.iter_mut() {
+        for (i, src) in sources.iter_mut().enumerate() {
             if src.known() != 0 {
-                planes.push(src.planes(id, ci, k, errors, &mut buffer)?);
+                let open = own[i].as_deref().unwrap_or(open_all);
+                planes.push(src.planes(id, ci, k, errors, open, &mut buffer)?);
             }
         }
         cache.set(ci, k, counts_of(&team_of(&planes)));

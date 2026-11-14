@@ -356,6 +356,22 @@ def layerprops_publish(props_src, rows):
 
 STATUS_NONE = 0
 STATUS_WAIVED = 1
+# an error's state, as its reviewer has it (app-core desktop STATE_*; user
+# 2026-11-14: "메인 목록에서 상태 4가지로 필터할 수 있어야 하고 reject 된 에러는
+# rejected로 분류되어야"): not waived; waived, no confirmer's word yet; waived
+# and rejected by a confirmer; waived and confirmed
+STATE_NONE = 0
+STATE_WAIVED = 1
+STATE_REJECTED = 2
+STATE_CONFIRMED = 3
+STATE_NAMES = {STATE_NONE: "none", STATE_WAIVED: "waived",
+               STATE_REJECTED: "rejected", STATE_CONFIRMED: "confirmed"}
+# the class of errors a waive filter shows, as the service's status readers
+# say it (app-core desktop::Lens): every count, page and rank of every scope
+# is of it. `held`: any waive in the reviewer's file - what "Not Waived" is
+# the rest of
+LENS_OF_FILTER = {"all": "live", "notwaived": "held", "waived": "waived",
+                  "confirmed": "confirmed", "rejected": "rejected"}
 _ERROR_PAGE = 256
 _STATUS_PAGE = 4096
 
@@ -627,8 +643,30 @@ class PackDrc(_Drc):
                 self._status[key] = got
         return got
 
-    def get_status(self, ci, ei):
+    def get_state(self, ci, ei):
+        """The error's state: STATE_NONE, STATE_WAIVED, STATE_REJECTED or
+        STATE_CONFIRMED (what the confirmers say as the service last read
+        it: `returned_ask`)."""
         return self._status_chunk(ci, ei // _STATUS_PAGE)[ei % _STATUS_PAGE]
+
+    def get_status(self, ci, ei):
+        """STATUS_WAIVED of an error that is waived - confirmed or not -
+        and STATUS_NONE of every other: a waive a confirmer has rejected is
+        none until its reviewer waives the error again."""
+        return (STATUS_WAIVED if self.get_state(ci, ei) in (STATE_WAIVED, STATE_CONFIRMED)
+                else STATUS_NONE)
+
+    def set_lens(self, wfilter):
+        """The waive filter is `wfilter` ("all", "notwaived", "waived",
+        "confirmed", "rejected") from now: the service's status readers say
+        1 of its class of errors (LENS_OF_FILTER), and `status_counts` is
+        every rule's (errors of that class, total)."""
+        lens = LENS_OF_FILTER[wfilter]
+        if getattr(self, "_lens", "live") == lens:
+            return
+        reply = self._request("drc_lens", lens=lens)
+        self._lens = lens
+        self._counts = [tuple(c) for c in reply["counts"]]
 
     def set_statuses(self, ci, eis, value, reason=None):
         """Set the status of rule `ci`'s errors `eis` (written at once).
@@ -646,15 +684,16 @@ class PackDrc(_Drc):
         # are (0.12.467): still waived, with the reason they had
         locked = set(reply.get("locked") or ())
         self._locked_said = (len(locked), tuple(reply.get("locked_by") or ()))
-        # ... and the errors whose waive a confirmer has rejected were not
-        # waived (0.12.468)
+        # ... and the errors under a rejection were not waived without a
+        # reason (0.12.468); with one they were waived again (0.12.469)
         rejected = set(reply.get("rejected") or ())
         self._rejected_said = (len(rejected), _rejecters(reply.get("rejected_by")))
+        self._resubmitted_said = int(reply.get("resubmitted") or 0)
+        # (their states are read again: what a confirmer said of an error
+        # is part of it)
         with self._cache_lock:
             for ei in eis:
-                chunk = self._status.get((ci, ei // _STATUS_PAGE))
-                if chunk is not None and ei not in locked and ei not in rejected:
-                    chunk[ei % _STATUS_PAGE] = int(value) & 0xFF
+                self._status.pop((ci, ei // _STATUS_PAGE), None)
         self.reasons_changed()
         return reply.get("reason_error")
 
@@ -671,42 +710,74 @@ class PackDrc(_Drc):
 
     def rejected_take(self):
         """What the last status write of this review did not waive because
-        a confirmer has rejected the waive: (how many errors, ((who, why),
-        ...)). Asked once: the next ask says (0, ())."""
+        it is under a confirmer's rejection and the write gave no reason:
+        (how many errors, ((who, why), ...)). Asked once: the next ask says
+        (0, ())."""
         said = getattr(self, "_rejected_said", None) or (0, ())
         self._rejected_said = (0, ())
         return said
 
+    def resubmitted_take(self):
+        """How many rejected waives the last status write of this review
+        waived again (it gave a reason). Asked once."""
+        said = getattr(self, "_resubmitted_said", 0)
+        self._resubmitted_said = 0
+        return said
+
     def returned_ask(self):
-        """Ask the service to turn back this reviewer's waives that a
-        confirmer has rejected (its job reads the confirmers' files: the
-        viewer does not wait for it). The answer comes to `returned_answer`."""
+        """Ask the service to follow the confirmers: which of this
+        reviewer's waives are rejected, who confirmed what (its job reads
+        the confirmers' files: the viewer does not wait for it). The answer
+        comes to `returned_answer`."""
         self._start("returned", "drc_team_returned")
 
     def returned_answer(self):
         """The answer to the last `returned_ask`, once: {"returned":
         [{"check", "count", "by": [{"reviewer", "text", "time"}],
-        "counts"}]} - a row a rule whose waives were turned back, none for
-        nothing; None while there is no answer yet, False when the ask
-        failed."""
+        "counts"}] - a row a rule whose waives were found rejected, none
+        for nothing -, "changed" - the confirmers' files are others than at
+        the ask before: the states read so far are dropped, and the counts
+        are the answer's -, "rules"}; None while there is no answer yet,
+        False when the ask failed."""
         event = self.poll("returned")
         if event is None or event.get("state") == "progress":
             return None
-        return event if event.get("state") == "done" else False
+        if event.get("state") != "done":
+            return False
+        if event.get("changed"):
+            if event.get("counts"):
+                self._counts = [tuple(c) for c in event["counts"]]
+            with self._cache_lock:
+                self._status.clear()
+        return event
 
     # ---- reasons (app-core drc::reasons) --------------------------------
     def reason_read(self, ci, eis, kind, toggle=False):
         """What the reason dialog starts from, for a `kind` ("waive",
         "not-required") action on rule `ci`'s errors `eis`: {"on" - which
         way a toggle goes -, "prefill" - the one reason they all hold now -,
-        "known" - the reasons given so far, the latest first}."""
+        "known" - the reasons given so far, the latest first -,
+        "rejected_by" - of a waive: who rejected the waive of any of them,
+        and why, that this reviewer has not answered ([{"reviewer", "text",
+        "time"}]): waived with a reason, those are waived again}."""
         return self._request("drc_reason_read", check=int(ci), reason_of=kind,
                              errors=[int(e) for e in eis], toggle=bool(toggle))
 
     def reason_get(self, ci, ei):
         """(why it is waived, why it is set aside from the review) of one
         error: a text each, None for an error that is not waived / set
-        aside now or was without a reason."""
+        aside now or was without a reason. (A rejected waive has the reason
+        it was given.)"""
+        return self._reason(ci, ei)[:2]
+
+    def history_get(self, ci, ei):
+        """What is kept of this reviewer's waive of one error, in the order
+        it happened: (("waived", "", the reason the waive had) or
+        ("rejected", who, why - a rejection answered by waiving again),
+        ...)."""
+        return self._reason(ci, ei)[2]
+
+    def _reason(self, ci, ei):
         key = (int(ci), int(ei))
         with self._cache_lock:
             got = self._reasons.get(key)
@@ -714,6 +785,8 @@ class PackDrc(_Drc):
             reply = self._request("drc_reason_get", check=key[0], error=key[1])
             got = tuple((reply.get(k) or {}).get("text")
                         for k in ("waive", "not_required"))
+            got += (tuple((e.get("what") or "", e.get("by") or "", e.get("text") or "")
+                          for e in reply.get("history") or ()),)
             with self._cache_lock:
                 if len(self._reasons) > 4096:
                     self._reasons.clear()
@@ -729,9 +802,12 @@ class PackDrc(_Drc):
 
     def waive_answer(self):
         """The answer to the last `waive_ask`, once: {"check", "error",
-        "waived_by", "confirmed_by", "reasons": [{"reviewer", "text",
-        "time"}], "confirmer", "reviewer"}; None while there is none yet,
-        False when the ask failed."""
+        "waived_by", "rejected_of" - whose waive of it is rejected -,
+        "confirmed_by", "reasons": [{"reviewer", "text", "time"}],
+        "rejected_by": [{"reviewer", "text", "time"}], "history":
+        [{"reviewer", "what", "by", "text", "time"}], "confirmer",
+        "reviewer"}; None while there is none yet, False when the ask
+        failed."""
         event = self.poll("team-row")
         if event is None or event.get("state") == "progress":
             return None
@@ -816,13 +892,15 @@ class PackDrc(_Drc):
         # errors it would have waived, left: `rejected_take`)
         self._locked_said = (int(reply.get("locked") or 0), ())
         self._rejected_said = (int(reply.get("rejected") or 0), ())
+        self._resubmitted_said = 0
         with self._cache_lock:
             self._status.clear()
             self._reasons.clear()
         return reply["waived"]
 
     def counts_refresh(self):
-        """Every rule's (waived, total) again (a team job rewrote them)."""
+        """Every rule's (errors of the waive filter's class, total) again
+        (a team job rewrote them)."""
         self._counts = [tuple(c) for c in self._request("drc_counts")]
         with self._cache_lock:
             self._status.clear()
@@ -1265,12 +1343,14 @@ class DeltaGroup(DrcScope):
         self.label = row.get("label", self.name)
         self.total = row["total"]
         self.estimated_count = row["estimated"]
-        self._count = (waived, row["count"])
+        # (a count is of the class the waive filter showed when it was
+        # asked: PackDrc.set_lens)
+        self._count = ((waived, getattr(db, "_lens", None)), row["count"])
 
     def count(self, waived=None):
         if waived is None:
             return self.total
-        if self._count[0] == waived:
+        if self._count[0] == (waived, getattr(self.db, "_lens", None)):
             return self._count[1]
         return super().count(waived)
 
@@ -2164,11 +2244,13 @@ def set_members(db, ci, errors, field, on, cancelled=None, progress=None,
         db.counts_refresh()
         db.review_flags_changed(ci)
     # (the confirmed waives the job left as they were: `locked_take`; the
-    # errors it did not waive because their waive is rejected: `rejected_take`)
+    # errors under a rejection it did not waive, having no reason:
+    # `rejected_take`; the rejected waives it waived again: `resubmitted_take`)
     db._locked_said = (int(event.get("locked") or 0),
                        tuple(event.get("locked_by") or ()))
     db._rejected_said = (int(event.get("rejected") or 0),
                          _rejecters(event.get("rejected_by")))
+    db._resubmitted_said = int(event.get("resubmitted") or 0)
     return event.get("reason_error")
 
 
@@ -2180,8 +2262,10 @@ def _rejecters(rows):
 def team_waives(db, ci, kind, start, limit, refresh=False, cancelled=None,
                 progress=None):
     """A page of the team's waives of rule `ci` - `kind` "unconfirmed",
-    "confirmed" or "waived" (all of them) - as every reviewer's files say:
-    {"count", "rows": [{"error", "waived_by", "confirmed_by", "reasons"}],
+    "confirmed", "waived" (all of them) or "rejected" (the errors whose
+    waives are all rejected) - as every reviewer's files say:
+    {"count", "rows": [{"error", "waived_by", "rejected_of", "confirmed_by",
+    "reasons", "rejected_by", "history"}],
     "rule", "all" (waived / confirmed / unconfirmed of the rule and of the
     result), "rules" (the rules somebody waived in), "reviewers",
     "confirmers", "skipped"}. `refresh`: read the files anew (else the
@@ -2212,7 +2296,8 @@ def reject_waives(db, ci, errors, on=True, reason=None, cancelled=None,
     """Reject the waive of rule `ci`'s `errors` as this reviewer (a review
     opened as a confirmer's), `reason` saying why - or take that rejection
     back: {"changed", "skipped" - asked to reject and nobody's waive,
-    "counts" - this reviewer's own (waived, total) of the rule after it}."""
+    "counts" - this reviewer's own of the rule after it}. The waives stay
+    with their reviewers, rejected, until each waives the error again."""
     fields = {"reason": reason} if reason and on else {}
     return _job(db, "confirm", "drc_team_reject", cancelled, progress,
                 check=int(ci), on=bool(on), errors=[int(e) for e in errors],

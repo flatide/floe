@@ -9,19 +9,23 @@
 //!
 //! A confirmer's other verdict is the rejection (0.12.468): the errors whose
 //! waive a confirmer rejected are read from the confirmers' rejects logs
-//! (`drc::reasons`, `Kind::Reject`). A rejected error is no waive in any of
-//! the lists but its own (`Kind::Rejected`: every rejection that stands,
-//! with who still has the error waived, who rejected it and why);
+//! (`drc::reasons`, `Kind::Reject`). A rejection is of each reviewer's waive
+//! until that reviewer answers it by waiving again (0.12.469,
+//! `confirm::unanswered`): a rejected waive is no waive in any of the lists,
+//! and an error whose waives are all rejected is in the list of its own
+//! (`Kind::Rejected`) - who has it waived, who rejected it and why. What a
+//! reviewer's own rejects log keeps of an error - the reasons its waive had,
+//! the rejections that were answered - is the row's `history`.
 //! `reject_runs` says what a rejection by this session's confirmer is of.
 //!
 //! A `TeamWaives` is the files as they were opened: a list is paged against
 //! one state, and opened anew to see what changed since.
 use super::bits::{Bits, CHUNK};
-use super::stats::{discover, open_confirm, open_waive, rejected_of, run_bits, waived_bits, Found};
+use super::stats::{discover, open_confirm, open_waive, run_bits, waived_bits, Found};
 use super::Identity;
 use crate::drc::analysis::scope::Membership;
 use crate::drc::confirm::{self, CONFIRMED};
-use crate::drc::desktop::Review;
+use crate::drc::desktop::{history_of, Event, Review};
 use crate::drc::reasons::{Kind as Reason, Reasons};
 use crate::{check_cancelled, Error, ErrorKind, Result};
 use std::collections::BTreeMap;
@@ -39,8 +43,8 @@ pub enum Kind {
     Unconfirmed,
     /// ... that a confirmer has confirmed
     Confirmed,
-    /// every error whose waive a confirmer has rejected (none of them is in
-    /// the lists above)
+    /// every error whose waives are all rejected (none of them is in the
+    /// lists above): what waits for its reviewers
     Rejected,
 }
 
@@ -57,7 +61,7 @@ impl Kind {
 }
 
 /// The team's waives of a rule, or of the result: waived by somebody,
-/// confirmed of them, and the rest - and the errors whose waive is
+/// confirmed of them, and the rest - and the errors whose waives are all
 /// rejected, which are none of those (said when there are any).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Counts {
@@ -72,16 +76,33 @@ pub struct Counts {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Row {
     pub error: u64,
-    /// the reviewers who have it waived
+    /// the reviewers whose file has it waived - a rejected waive too
     pub waived_by: Vec<String>,
+    /// of those, the ones whose waive is rejected
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub rejected_of: Vec<String>,
     /// the reviewers who confirmed its waive
     pub confirmed_by: Vec<String>,
     /// why, as each reviewer who waived it said (a reviewer who gave no
     /// reason has no line)
     pub reasons: Vec<Why>,
-    /// the confirmers who rejected its waive, each with why (the text is
-    /// empty where they did not say)
+    /// the confirmers whose rejection of its waive stands and one of its
+    /// reviewers has not answered, each with why (the text is empty where
+    /// they did not say)
     pub rejected_by: Vec<Why>,
+    /// what the logs of the reviewers who have it waived keep of it: the
+    /// reasons the waive had, the rejections that were answered
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<Past>,
+}
+
+/// One kept event of a reviewer's waive of an error (`desktop::Event`).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct Past {
+    /// whose waive
+    pub reviewer: String,
+    #[serde(flatten)]
+    pub event: Event,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
@@ -101,8 +122,9 @@ struct Person {
     reasons_path: Option<PathBuf>,
     /// read at the first row that asks (Some(None): none that reads)
     reasons: Option<Option<Reasons>>,
-    /// the rejects log as read, and each rule's rejected errors as runs
-    rejects: Option<(Reasons, Vec<Vec<(u64, u64)>>)>,
+    /// the rejects log as read: the rejections this reviewer made, and
+    /// the ones of their own waives they answered
+    rejects: Option<Reasons>,
 }
 
 /// See the module docs.
@@ -115,6 +137,9 @@ pub struct TeamWaives {
     /// a rule's chunks: the errors somebody waived, the confirmed of
     /// them, and the rejected - counted at the first ask
     scans: BTreeMap<usize, Vec<(u16, u16, u16)>>,
+    /// a rule's rejections that stand, and each reviewer's errors under one
+    /// they have not answered (in `people`'s order) - made at the first ask
+    opens: BTreeMap<usize, (Vec<confirm::Standing>, Vec<Vec<(u64, u64)>>)>,
     /// the files left out: reviewer, file, why
     pub skipped: Vec<(String, PathBuf, String)>,
 }
@@ -155,6 +180,7 @@ impl TeamWaives {
             tag: format!("{hex},{}", id.total()),
             people: Vec::new(),
             scans: BTreeMap::new(),
+            opens: BTreeMap::new(),
             skipped: Vec::new(),
         };
         for (tag, files) in &files.0 {
@@ -194,10 +220,7 @@ impl TeamWaives {
             let listed = files.rejects.as_ref().map(|(path, _)| path.clone());
             if let Some(path) = listed.or_else(|| beside(".waive.", ".rejects.")) {
                 match Reasons::load(&path, &me.tag, &me.sizes) {
-                    Ok(Some(log)) => {
-                        let runs = rejected_of(&log, me.sizes.len());
-                        person.rejects = Some((log, runs));
-                    }
+                    Ok(Some(log)) => person.rejects = Some(log),
                     Ok(None) => (),
                     Err(e) => me.skipped.push((tag.clone(), path, e.message)),
                 }
@@ -230,30 +253,56 @@ impl TeamWaives {
             .ok_or_else(|| Error::input("DRC check index out of range"))
     }
 
-    /// Whether anybody has waived anything in rule `check`, or rejected
-    /// anything in it.
+    /// Whether anybody has waived anything in rule `check`.
     fn any(&self, check: usize) -> bool {
-        self.people.iter().any(|p| {
-            p.waive.as_ref().is_some_and(|(_, stored)| stored[check] > 0)
-                || p.rejects.as_ref().is_some_and(|(_, runs)| !runs[check].is_empty())
-        })
+        self.people
+            .iter()
+            .any(|p| p.waive.as_ref().is_some_and(|(_, stored)| stored[check] > 0))
     }
 
-    /// Chunk `k` of rule `check`: the errors somebody's file has waived,
-    /// the ones somebody has confirmed (waived or not), and the ones whose
-    /// waive somebody has rejected.
-    fn planes(&self, check: usize, k: u64, buffer: &mut [u8]) -> Result<(Bits, Bits, Bits)> {
+    /// Rule `check`'s rejections that stand - every reviewer's log's - and
+    /// each reviewer's errors under one they have not answered: a waive of
+    /// theirs there is rejected.
+    fn rejections(&mut self, check: usize) -> &(Vec<confirm::Standing>, Vec<Vec<(u64, u64)>>) {
+        if !self.opens.contains_key(&check) {
+            let standing: Vec<confirm::Standing> = self
+                .people
+                .iter()
+                .flat_map(|p| p.rejects.iter().flat_map(|log| confirm::standing_of(&p.tag, log, check)))
+                .collect();
+            let own = self
+                .people
+                .iter()
+                .map(|p| match standing.is_empty() {
+                    true => Vec::new(),
+                    false => confirm::unanswered(&standing, p.rejects.as_ref(), check),
+                })
+                .collect();
+            self.opens.insert(check, (standing, own));
+        }
+        &self.opens[&check]
+    }
+
+    /// Chunk `k` of rule `check`: the errors somebody has waived - a waive
+    /// that is not rejected -, the ones somebody has confirmed (waived or
+    /// not), and the ones whose waives are all rejected.
+    fn planes(&mut self, check: usize, k: u64, buffer: &mut [u8]) -> Result<(Bits, Bits, Bits)> {
         let size = self.rule(check)?;
         if k >= size.div_ceil(CHUNK) {
             return Ok((Bits::ZERO, Bits::ZERO, Bits::ZERO));
         }
         let count = (size - k * CHUNK).min(CHUNK) as usize;
         let at = self.starts[check] + k * CHUNK;
+        self.rejections(check);
+        let open = &self.opens[&check].1;
         let (mut waived, mut confirmed, mut rejected) = (Bits::ZERO, Bits::ZERO, Bits::ZERO);
-        for person in &self.people {
+        for (i, person) in self.people.iter().enumerate() {
             if let Some((file, stored)) = &person.waive {
                 if stored[check] > 0 {
-                    waived |= plane(file, 40 + at, &mut buffer[..count])?;
+                    let held = plane(file, 40 + at, &mut buffer[..count])?;
+                    let gone = run_bits(&open[i], k * CHUNK, count as u64);
+                    waived |= held & !gone;
+                    rejected |= held & gone;
                 }
             }
             if let Some((file, stored)) = &person.confirm {
@@ -261,27 +310,13 @@ impl TeamWaives {
                     confirmed |= plane(file, confirm::HEADER + at, &mut buffer[..count])?;
                 }
             }
-            if let Some((_, runs)) = &person.rejects {
-                rejected |= run_bits(&runs[check], k * CHUNK, count as u64);
-            }
         }
-        Ok((waived, confirmed, rejected))
+        Ok((waived, confirmed, rejected & !waived))
     }
 
     /// The errors of rule `check`'s chunk `k` that somebody has waived -
-    /// a waive: the ones whose waive is rejected are not among them.
-    pub fn waived(&self, check: usize, k: u64) -> Result<Bits> {
-        if !self.any(check) {
-            return Ok(Bits::ZERO);
-        }
-        let mut buffer = vec![0u8; CHUNK as usize];
-        let (waived, _, rejected) = self.planes(check, k, &mut buffer)?;
-        Ok(waived & !rejected)
-    }
-
-    /// The errors of rule `check`'s chunk `k` somebody's file has waived,
-    /// rejected or not: what a rejection is of.
-    fn held(&self, check: usize, k: u64) -> Result<Bits> {
+    /// a waive: a rejected one is none.
+    pub fn waived(&mut self, check: usize, k: u64) -> Result<Bits> {
         if !self.any(check) {
             return Ok(Bits::ZERO);
         }
@@ -303,7 +338,6 @@ impl TeamWaives {
                         check_cancelled(cancelled)?;
                     }
                     let (waived, confirmed, rejected) = self.planes(check, k, &mut buffer)?;
-                    let waived = waived & !rejected;
                     counts.push((
                         waived.count() as u16,
                         (waived & confirmed).count() as u16,
@@ -384,7 +418,6 @@ impl TeamWaives {
                 continue;
             }
             let (waived, confirmed, rejected) = self.planes(check, k as u64, &mut buffer)?;
-            let waived = waived & !rejected;
             let listed = match kind {
                 Kind::Waived => waived,
                 Kind::Confirmed => waived & confirmed,
@@ -402,8 +435,9 @@ impl TeamWaives {
         Ok((total, ids))
     }
 
-    /// Who has rule `check`'s `errors` waived, why, who confirmed them, and
-    /// who rejected their waive and why.
+    /// Who has rule `check`'s `errors` waived - and whose waive of them is
+    /// rejected -, why, who confirmed them, who rejected their waive and
+    /// why, and what is kept of their waives.
     pub fn rows(&mut self, check: usize, errors: &[u64]) -> Result<Vec<Row>> {
         let size = self.rule(check)?;
         if errors.iter().any(|&e| e >= size) {
@@ -415,14 +449,21 @@ impl TeamWaives {
             .map(|&error| Row {
                 error,
                 waived_by: Vec::new(),
+                rejected_of: Vec::new(),
                 confirmed_by: Vec::new(),
                 reasons: Vec::new(),
                 rejected_by: Vec::new(),
+                history: Vec::new(),
             })
             .collect();
         let (tag, sizes) = (self.tag.clone(), self.sizes.clone());
         let mut skipped = Vec::new();
-        for person in &mut self.people {
+        let (standing, open) = self.rejections(check).clone();
+        let holds = |runs: &[(u64, u64)], error: u64| {
+            let i = runs.partition_point(|r| r.1 <= error);
+            runs.get(i).is_some_and(|r| r.0 <= error)
+        };
+        for (i, person) in self.people.iter_mut().enumerate() {
             let mut byte = [0u8; 1];
             let waiving = person.waive.as_ref().filter(|(_, stored)| stored[check] > 0);
             let confirming = person.confirm.as_ref().filter(|(_, stored)| stored[check] > 0);
@@ -431,24 +472,31 @@ impl TeamWaives {
                     file.read_exact_at(&mut byte, 40 + first + row.error)?;
                     if byte[0] == crate::drc::desktop::STATUS_WAIVED {
                         row.waived_by.push(person.tag.clone());
+                        if holds(&open[i], row.error) {
+                            // rejected: by the rejections that stand on it
+                            // and this reviewer has not answered
+                            row.rejected_of.push(person.tag.clone());
+                            let at = [(row.error, row.error + 1)];
+                            for by in confirm::rejecting(&standing, person.rejects.as_ref(), check, &at) {
+                                if !row.rejected_by.iter().any(|w| w.reviewer == by.reviewer && w.time == by.time) {
+                                    row.rejected_by.push(Why { reviewer: by.reviewer, text: by.text, time: by.time });
+                                }
+                            }
+                        }
+                        // what is kept of this reviewer's waive of it
+                        if let Some(log) = &person.rejects {
+                            row.history.extend(
+                                history_of(log, check, row.error)
+                                    .into_iter()
+                                    .map(|event| Past { reviewer: person.tag.clone(), event }),
+                            );
+                        }
                     }
                 }
                 if let Some((file, _)) = confirming {
                     file.read_exact_at(&mut byte, confirm::HEADER + first + row.error)?;
                     if byte[0] == CONFIRMED {
                         row.confirmed_by.push(person.tag.clone());
-                    }
-                }
-            }
-            // who rejected, and why as they said
-            if let Some((log, _)) = &person.rejects {
-                for row in &mut rows {
-                    if let Some(entry) = log.of(Reason::Reject, check, row.error) {
-                        row.rejected_by.push(Why {
-                            reviewer: person.tag.clone(),
-                            text: entry.text.clone(),
-                            time: entry.time,
-                        });
                     }
                 }
             }
@@ -484,6 +532,11 @@ impl TeamWaives {
             }
         }
         self.skipped.append(&mut skipped);
+        // (a row's history is a reviewer's after the other, each in the
+        // order things happened in)
+        for row in &mut rows {
+            row.rejected_by.sort_by(|a, b| (&a.reviewer, a.time).cmp(&(&b.reviewer, b.time)));
+        }
         Ok(rows)
     }
 }
@@ -496,7 +549,7 @@ impl TeamWaives {
 /// ends its request or job with `Review::sync_waives`.
 pub fn confirm_chunk(
     review: &mut Review,
-    view: &TeamWaives,
+    view: &mut TeamWaives,
     check: usize,
     k: u64,
     members: Option<&dyn Membership>,
@@ -549,15 +602,15 @@ pub fn confirm_chunk(
 
 /// What a rejection by `review`'s confirmer - or its taking back - is of:
 /// of rule `check`'s `errors`, the ones somebody has waived (as `view` read
-/// the files; a waive another confirmer rejected and its reviewer has yet to
-/// turn back is one) and this confirmer has not rejected yet; taking back,
-/// the ones this confirmer has rejected. (the runs, the errors asked to
-/// reject that are nobody's waive.) The caller hands the runs to
+/// the files: a waive that is not rejected - an error whose waives are all
+/// rejected waits for its reviewers, and is not rejected again); taking
+/// back, the ones this confirmer's log holds. (the runs, the errors asked
+/// to reject that are nobody's waive.) The caller hands the runs to
 /// `Review::reject_set` or `reject_drop`, which is one line of the
 /// confirmer's log whatever their number.
 pub fn reject_runs(
     review: &Review,
-    view: &TeamWaives,
+    view: &mut TeamWaives,
     check: usize,
     errors: &[u64],
     on: bool,
@@ -582,9 +635,9 @@ pub fn reject_runs(
         let mine: Vec<(u64, u64)> = review.rejects.held(Reason::Reject, check, &[(k * CHUNK, k * CHUNK + count)]);
         let mine = run_bits(&mine, k * CHUNK, count);
         let target = if on {
-            let waived = view.held(check, k)?;
-            skipped += (asked & !waived & !mine).count();
-            asked & waived & !mine
+            let waived = view.waived(check, k)?;
+            skipped += (asked & !waived).count();
+            asked & waived
         } else {
             asked & mine
         };

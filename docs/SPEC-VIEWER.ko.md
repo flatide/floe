@@ -636,17 +636,29 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   잠긴 에러의 캐시 상태를 바꾸지 않으며 `locked_take()`로 마지막 쓰기의 (수, confirm한 사람들)을 한 번
   내준다. 확인자의 창에서는 `Confirm …` 버튼의 툴팁이 잠금을, `Unconfirm selected`의 툴팁이 풀림을
   말한다.
-  **반려**(0.12.468, DRC.ko.md §2): 창의 목록에 `Rejected`가, 확인자의 창에 `Reject selected`(사유를
+  **반려**(0.12.468, 0.12.469, DRC.ko.md §2): 창의 목록에 `Rejected`가, 확인자의 창에 `Reject selected`(사유를
   묻는다: `_drc_reason_dialog("reject", …)`, 창 제목 `Reject reason`)와 `Unreject selected`가 있다
   (`_DrcWaivesWindow._reject`, 서비스의 `drc_team_reject`, job `confirm`). 열에 `Rejected by`(확인자와
-  사유)가 늘었고 수치 줄에 `· rejected N`이 붙는다. 결과를 연 뷰어는 열 때와 그 뒤 2초마다
-  (`RETURNED_MS`) 서비스에 자기 waive 중 반려된 것을 되돌리게 한다(`_drc_returned_start`·`_look`·
-  `_poll`, 서비스의 `drc_team_returned`, job `returned`: 폴더 목록을 읽으므로 작업이다). 되돌린 것이
-  있으면 목록·마커·수치를 고치고 상태 줄에 `N waive(s) in RULE rejected by hong (사유): turned back`을
-  쓴다. 반려된 에러를 waive하려 하면 서비스의 답(`rejected`·`rejected_by`)대로
-  `… · K rejected by hong (사유): not waived`, 전부면
-  `rejected: K error(s) in RULE by hong (사유) - not waived until the rejection is taken back`이다.
-  `PackDrc.rejected_take()`가 마지막 쓰기의 (수, ((누가, 왜), …))를 한 번 내준다. 에러 상세에는
+  사유)가 늘었고 수치 줄에 `· rejected N`이 붙는다. 반려된 waive는 지워지지 않고 상태가 된다(0.12.469):
+  서비스의 `drc_status`가 에러마다 상태 바이트를 준다(0 not waived, 1 waived, 2 rejected, 3 confirmed).
+  `PackDrc.get_state()`가 그 값이고, `get_status()`는 1과 3을 waive(1)로, 나머지를 0으로 준다(전부터 있던
+  호출자는 그대로다). 결과를 연 뷰어는 열 때와 그 뒤 2초마다(`RETURNED_MS`) 서비스에 확인자들의 기록을
+  다시 읽게 한다(`_drc_returned_start`·`_look`·`_poll`, 서비스의 `drc_team_returned`, job `returned`:
+  폴더 목록을 읽으므로 작업이다. 리뷰어의 파일은 쓰지 않는다). 답은 새로 반려된 waive(`returned`: 룰,
+  수, 누가·왜), 분류가 바뀐 룰(`rules`), 확인자들의 파일이 달라졌는지(`changed`, 그때는 모든 룰의
+  `counts`)다. `PackDrc.returned_answer()`가 `changed`이면 읽어 둔 상태를 버리고 개수를 바꾼다. 새로
+  반려된 것이 있으면 상태 줄에 `N waive(s) in RULE rejected by hong (사유): waive again with a reason`을
+  쓰고 목록·마커·수치를 고친다. 분류만 바뀌었으면(`_drc_states_changed`) 보이는 목록을 다시 읽는다.
+  사유 없이 반려된 에러를 waive하려 하면 서비스의 답(`rejected`·`rejected_by`)대로
+  `… · K rejected by hong (사유): waive again with a reason`, 전부면
+  `rejected: K error(s) in RULE by hong (사유) - waive again with a reason`이다. 사유를 주면 서비스가 다시
+  waive하고(`resubmitted`) 상태 줄에 `· K waived again after a rejection`이 붙는다
+  (`PackDrc.rejected_take()`·`resubmitted_take()`가 마지막 쓰기의 것을 한 번 내준다). 사유 입력창은
+  `drc_reason_read`의 `rejected_by`를 받아 누가 왜 반려했는지를 입력 줄 위에 보이고(`rejected_by=`
+  인자, 위젯 이름 `drc-reason-rejected`), 입력 줄은 그 waive가 가진 사유에서 시작한다. 에러 상세의 첫
+  줄이 상태를 말하고(`[rejected]`), `before: waived (…)`·`before: rejected by hong (…)` 줄이 이력이다
+  (`drc_reason_get`의 `history`, `PackDrc.history_get()`). 목록의 에러 번호는 rejected일 때
+  `DRC_REJECTED`(주황)다. 팀 줄에는
   `waive rejected by: hong (사유)`가 붙는다. 이 조회는 에러를
   고를 때마다 일어나고 리뷰어들의 파일을 찾느라 폴더 목록을 읽으므로(임시 폴더의 이름 19,000개에서 8 ms)
   서비스의 작업(job `team-row`)으로 한다: 상세는 바로 뜨고 팀 줄은 답이 오면 붙으며, 같은 에러를 다시
@@ -656,6 +668,14 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   났다. `_ctl_events`는 파일이 없고 뒤에 새 프레임이 있는 프레임을 건너뛴다. 0.12.466.) 결과를 확인자로
   열면 로드의 상태 줄 끝에 ` · confirmer`가 붙는다. 메인 목록의 waive 필터와 캔버스의 색은 전처럼
   내 waive의 것이다.
+  **필터의 다섯 항목**(0.12.469, 사용자 2026-11-14: "메인 목록에서 상태 4가지로 필터할 수 있어야"):
+  `_drc_wfilter`는 `all`·`notwaived`·`waived`·`confirmed`·`rejected`다. 필터가 바뀌면(그리고 결과를 열
+  때) `_drc_lens_sync`가 서비스에 그 필터가 보이는 에러의 클래스를 알린다(`PackDrc.set_lens`, 서비스의
+  `drc_lens {lens}`: `gtkservice.LENS_OF_FILTER` - all은 `live`, notwaived는 `held`, 나머지는 같은 이름).
+  서비스의 상태 읽기가 그 클래스인 에러에 1을 주므로, 룰·클러스터·CD 그룹·선택·캔버스 조회의 개수와
+  페이지와 순위가 모두 그 클래스의 것이 된다: 그 호출들의 `waived` 인자는 전과 같은 참·거짓이고
+  (`_drc_wf_class()`: Not Waived만 거짓 - `held`가 아닌 것), `status_counts(ci)`는 (그 클래스의 수,
+  전체)다. 에러 하나가 필터에 걸리는지는 `_drc_wf_shows`(상태 바이트로), 상태는 `_drc_state`가 준다.
 - **공동 검토**(DRC 메뉴 `reviewers…`; `load waives…`도 이 창의 불러오기로 간다 —
   내 상태를 갈아끼우지 않는다): 다른 리뷰어의 `.floereview`, 작업 review SQLite,
   waive 파일을 읽기 전용으로 불러와(`drc_team_load`) 내 상태와 비교한다. 리뷰어마다
@@ -740,7 +760,9 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
 - **룰 행 카운트 = 에러수/waived**(2026-08-18, "30/20" 형태):
   둘 다 O(1)([wcount]) — waive 필터의 룰 숨김 판정은 기존
   `_drc_wf_count` 그대로. waive/unwaive는 all 필터에서도 해당
-  행 텍스트를 제자리 갱신.
+  행 텍스트를 제자리 갱신. 0.12.469부터 뒤의 수는 필터가 보이는 클래스의 수다: All은 waive된 수
+  (confirm된 것 포함, rejected 제외), Not Waived는 그 필터가 뺀 수(waive 파일에 있는 것 전부),
+  Waived·Confirmed·Rejected는 그 상태의 수.
 - **SVRF 룰 메타데이터**(2026-08-15, SPEC-FORMATS `<deck>.rules.json`
   참조): db 로드 시 자동 탐색(`_drc_rules_auto` — `floe2 drc-prepare --svrf`가 분석 폴더에 적어 둔
   사이드카가 맨 먼저다(0.12.460); 그다음 Rule File Pathname

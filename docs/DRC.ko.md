@@ -417,47 +417,85 @@ python -m floe render chip.oas --drc results.db \
     waive했고 confirm된 에러)와 `unconfirmed`(누군가 waive했고 아직 confirm되지 않은 에러)가,
     확인자의 줄에 `confirmed`가, `--review-stats`의 리뷰어 줄에 `waived_confirmed`(내 waive 중
     confirm된 수)가 있다(DRC-CLI.ko.md §2b·§2c).
-  - **반려**(0.12.468, 사용자 2026-11-14: "confirmer가 다른 리뷰어의 waive를 반려할 수 있게 해줘"):
-    확인자의 두 번째 판정이다. 확인자가 반려한 에러는 누구의 waive로도 세지 않고, waive한 리뷰어의
-    뷰어가 그 waive를 되돌리며, 반려가 풀릴 때까지 아무도 다시 waive하지 못한다.
-    - **하는 법**: 확인자의 `team waives…` 창에서 행을 고르고 `Reject selected`. 반려 사유를
-      묻는다(한 줄, 비워도 된다. Esc나 Cancel이면 반려하지 않는다). 풀 때는 `Rejected` 목록에서
-      `Unreject selected`. 확인자가 아닌 창에서는 두 버튼이 꺼져 있다.
-    - **대상**: 고른 행 중 누군가 waive하고 있는 에러. 반려도 confirm처럼 에러 단위다. confirm된
-      waive도 반려할 수 있고, 그때 반려가 이긴다(자기 confirm은 반려하면서 함께 지워지고, 다른
-      확인자의 confirm은 그 사람의 파일에 남되 세지 않는다).
-    - **기록**: 확인자 자신의 `.<db>.rejects.<리뷰어>`. 반려 한 번이 한 줄이다(어느 에러, 언제,
-      왜). 수백만 개를 한 번에 반려해도 한 줄이다(SPEC-FORMATS). 다른 사람의 파일은 건드리지 않는다.
-    - **집계는 바로 바뀐다**: 통계는 반려된 에러의 waive를 리뷰어의 파일에 아직 남아 있어도 세지
-      않는다. `team.waived`·`confirmed`·`unconfirmed`·`conflicts`가 모두 그렇고, `team.rejected`가
-      반려된 에러 수다.
-    - **리뷰어의 뷰어가 되돌린다**: 결과를 연 뷰어는 열 때와 그 뒤 2초마다 확인자들의 반려 기록을
-      보고, 자기 waive 중 반려된 것을 되돌린다(상태와 사유, 여느 unwaive와 같다). 상태 줄이
-      `2 waive(s) in RULE rejected by hong (사유): turned back`으로 알린다. confirm되어 잠긴
-      waive도 반려되면 되돌린다. 뷰어를 띄워 두지 않은 리뷰어의 파일은 다음에 열 때 바뀐다.
-    - **다시 waive하지 못한다**: 반려된 에러를 waive하려 하면 그 에러만 남기고 상태 줄이
-      `waived 1 error(s) in RULE · 2 rejected by hong (사유): not waived`(전부 반려면
-      `rejected: 2 error(s) in RULE by hong (사유) - not waived until the rejection is taken back`)
-      로 알린다. 클릭, 선택 작업, 공동 검토 창, 동료 결정 적용, 이전 런 승계, waive 파일 로드가 모두
-      같다. 확인자의 세션도 반려된 에러는 waive하지 못한다. 에러 상세에는
-      `waive rejected by: hong (사유)`가 붙는다.
-    - **푸는 것은 반려한 확인자다**: 각자 자기 반려만 지운다. 두 확인자가 같은 에러를 반려했으면 둘
-      다 풀어야 한다. 풀리면 누구든 다시 waive할 수 있고, 리뷰어의 뷰어가 아직 되돌리지 않은
-      waive는 그대로 살아난다.
+  - **반려**(0.12.468, 사용자 2026-11-14: "confirmer가 다른 리뷰어의 waive를 반려할 수 있게 해줘";
+    0.12.469, 같은 날: "메인 목록에서 상태 4가지로 필터할 수 있어야 하고 reject 된 에러는 rejected로
+    분류되어야 … 리뷰어가 사유를 수정해서 다시 waive를 할 수 있게 하되, 이 때 이전의 waive사유나
+    반려사유는 계속 유지되어야 … REJECTED에서 Unreject으로 NOT WAIVED로 가는게 아니라 waive로 WAIVED로
+    가도록"): 확인자의 두 번째 판정이다. 반려된 waive는 지워지지 않고 **rejected 상태**로 리뷰어에게
+    남으며, 리뷰어가 사유를 고쳐 다시 waive하면 다시 확인을 기다린다.
+    - **에러의 네 상태**: 리뷰어가 보는 자기 waive의 상태다.
+
+      | 상태 | 뜻 | 여기서 나가는 길 |
+      |---|---|---|
+      | not waived | 내 waive가 없다 | waive하면 waived |
+      | waived | waive했고 확인자의 판정이 아직 없다 | 확인자가 Confirm하면 confirmed, Reject하면 rejected. 내가 unwaive하면 not waived |
+      | confirmed | waive했고 확인자가 confirm했다. 잠긴다 | 확인자가 Unconfirm하면 waived, Reject하면 rejected |
+      | rejected | waive했고 확인자가 반려했다. waive로 세지 않는다 | **사유를 주고 다시 waive하면 waived**. 내가 unwaive하면 not waived. 확인자가 Unreject하면 반려 전 상태 |
+
+    - **하는 법(확인자)**: `team waives…` 창에서 행을 고르고 `Reject selected`. 반려 사유를
+      묻는다(한 줄, 비워도 된다. Esc나 Cancel이면 반려하지 않는다). 잘못 반려했으면 `Rejected`
+      목록에서 `Unreject selected`로 푼다: waive는 반려 전 그대로다.
+    - **대상**: 고른 행 중 누군가 waive하고 있는(반려되지 않은) 에러. confirm된 waive도 반려할 수
+      있고, 그때 반려가 이긴다(자기 confirm은 반려하면서 함께 지워지고, 다른 확인자의 confirm은 그
+      사람의 파일에 남되 세지 않는다). waive가 전부 반려된 에러는 다시 반려되지 않는다(건너뛰고 수를
+      알린다).
+    - **리뷰어의 파일은 건드리지 않는다**: 반려는 확인자 자신의 `.<db>.rejects.<리뷰어>`에 한 줄로
+      남을 뿐이다(어느 에러, 언제, 왜. 수백만 개를 한 번에 반려해도 한 줄, SPEC-FORMATS). 리뷰어의
+      waive와 그 사유는 그 자리에 그대로 있고, 읽는 쪽이 그것을 rejected로 읽는다.
+    - **집계는 바로 바뀐다**: 반려된 waive는 어디에서도 waive로 세지 않는다(`waived`·`confirmed`·
+      `unconfirmed`·`conflicts`). `team.rejected`는 **waive가 전부 반려된 에러** 수다: 리뷰어의 다음
+      행동을 기다리는 것. 두 리뷰어가 waive한 에러를 한 사람만 다시 waive했으면 그 에러는 waived이고,
+      다른 사람의 waive는 그 사람이 답할 때까지 rejected로 남는다.
+    - **리뷰어의 뷰어**: 결과를 열 때와 그 뒤 2초마다 확인자들의 기록을 다시 읽는다(아무것도 쓰지
+      않는다). 반려된 것을 찾으면 상태 줄이
+      `2 waive(s) in RULE rejected by hong (사유): waive again with a reason`으로 알리고, 그 에러는
+      목록에서 rejected 색(주황)과 `[rejected]`로 보인다. 에러 상세에는
+      `waive rejected by: hong (사유)`가 붙고 `waive reason: …`은 그대로 나온다. 뷰어를 띄워 두지
+      않았으면 다음에 열 때 같은 줄이 나온다.
+    - **다시 waive(리뷰어)**: rejected인 에러를 waive하면(`w`, 메뉴, 선택 작업, 공동 검토 창) 사유
+      입력창이 누가 왜 반려했는지를 위에 보이고, 입력 줄은 그 waive가 가진 사유에서 시작한다. 고쳐서
+      확정하면 그 에러는 waived로 돌아가 확인자의 `To confirm` 목록에 다시 나온다. 상태 줄은
+      `waived 3 error(s) in RULE · reason: … · 2 waived again after a rejection`. **사유가 비어
+      있으면 다시 waive되지 않는다**: `… · 2 rejected by hong (사유): waive again with a reason`
+      (전부 그러면 `rejected: 2 error(s) in RULE by hong (사유) - waive again with a reason`).
+      동료 결정 적용, 이전 런 승계, waive 파일 로드는 사유를 싣지 않으므로 반려된 에러를 다시
+      waive하지 않고 남긴 수를 알린다.
+    - **이전 사유와 반려 사유는 남는다**: 다시 waive할 때 그 waive가 가졌던 사유와 답한 반려(누가,
+      언제, 왜)가 리뷰어 자신의 `.<db>.rejects.<리뷰어>`에 한 줄씩 남는다. 몇 번을 되풀이해도 전부
+      남는다. 에러 상세에 일어난 순서대로 `before: waived (이전 사유)`,
+      `before: rejected by hong (반려 사유)`로 나오고, `team waives…` 창의 `Reason` 칸에는 새 사유
+      뒤에 `[before: waived (…), then rejected by hong (…)]`가 붙는다. rejected인 waive를 그냥
+      unwaive해도 그 사유는 이력에 남는다.
+    - **다시 반려**: 확인자가 다시 waive된 것을 또 반려하면 새 반려다. 리뷰어는 그것에 다시 답해야
+      한다. 확인자가 그 에러를 confirm하면 자기 반려는 함께 풀린다.
+    - **확인자 자신의 waive**: 자기가 waive한 에러를 반려하면 자기 waive는 바로 unwaive되고, 다시
+      waive하려면 남들처럼 사유를 줘야 한다(자기 반려에 답하는 것이다).
     - **언제 보이나**: 확인자의 첫 반려는 파일을 새로 만든다. 다른 세션은 다음 확인(2초 주기)에서 그
-      파일을 찾고, 그 사이에 한 waive는 그 확인이 되돌린다. 이미 있는 기록에 더해진 반려는 바로
+      파일을 찾는다. 그 사이에 한 waive는 그 확인부터 rejected다. 이미 있는 기록에 더해진 반려는 바로
       안다(같은 호스트). waive할 때는 폴더를 훑지 않는다.
-    - **옛 빌드**: 0.12.467 이하의 뷰어는 반려를 모른다. 그 리뷰어의 waive는 파일에 남고 다시
-      waive하는 것도 막히지 않지만, 0.12.468의 통계는 세지 않는다.
-  - **하지 않는 것**: 반려된 에러를 리뷰어가 사유를 고쳐 다시 올리는 길(재상신)은 없다: 확인자가
-    반려를 풀어야 한다. 메인 목록과 캔버스의 waive 표시는 전처럼 내 것이고, 팀의 waive와 confirm·
-    반려 여부는 이 창과 에러 상세에서 본다. `.floereview`·`save waives as…`·
-    `review from previous run…`은 confirm과 반려를 싣지 않는다. 에러가 달라진 재실행 뒤에는
-    confirm 파일과 반려 기록도 `.stale-<시각>`으로 치워진다(잠금과 반려도 함께 없어진다).
+    - **옛 빌드**: 반려 기록의 형식 버전이 2가 됐다(SPEC-FORMATS). 0.12.468의 뷰어는 반려된 waive를
+      되돌려 지웠는데, 그 빌드는 버전 2의 기록을 읽지 않으므로 이 빌드의 반려에 그렇게 하지 않는다
+      (그 통계에는 반려가 보이지 않는다). 0.12.468이 쓴 기록은 이 빌드가 읽고, 그 확인자의 세션이 열
+      때 버전 2로 고쳐 쓴다. 0.12.467 이하는 반려를 모른다.
+  - **메인 목록의 필터**(0.12.469): 필터 콤보가 `All`·`Not Waived`·`Waived`·`Confirmed`·`Rejected`다.
+    한 상태의 에러만 보인다(`Waived`는 확인자의 판정이 아직 없는 것). 룰·클러스터·CD 그룹의 개수와
+    페이지, 캔버스의 마커가 모두 그 상태를 따른다. 룰 이름 옆 `전체/N`의 N은 보이는 상태의 수이고,
+    `All`에서는 waive된 수(confirm된 것 포함), `Not Waived`에서는 그 필터가 뺀 수다. 목록의 에러
+    번호는 not waived 빨강, waived·confirmed 초록, rejected 주황이고, 상세 첫 줄이 상태를 말한다.
+    확인자들이 confirm하거나 반려하면 2초 주기 확인에서 목록이 따라간다.
+  - **하지 않는 것**: 메인 목록과 캔버스의 상태는 내 waive의 것이다: 남이 waive한 에러는 내 목록에서
+    not waived이고, 팀 전체는 `team waives…` 창과 에러 상세에서 본다. 캔버스의 마커 색은 전처럼
+    waive 여부 둘뿐이다(rejected는 not waived 색). `.floereview`·`save waives as…`·
+    `review from previous run…`은 confirm과 반려를 싣지 않는다(`save waives as…`의 파일은 상태
+    바이트 그대로라 rejected인 waive도 waive로 들어 있다). 에러가 달라진 재실행 뒤에는 confirm
+    파일과 반려 기록도 `.stale-<시각>`으로 치워진다(잠금, 반려, 이력이 함께 없어진다). 두 확인자가
+    엇갈리면(한 사람은 confirm, 다른 사람은 반려) 반려가 풀리거나 답해지는 순간 남아 있던 confirm이
+    다시 세어진다: 새 사유를 그 확인자가 본 것은 아니다.
   - 게이트 `drc_team` R15·R16·R17·R7, 단위 테스트 app-core `drc::confirm`, `drc::team::live`
     (`the_teams_waives_are_listed_and_confirmed_by_the_confirmer`), `drc::tests`
     (`a_confirmed_waive_is_locked_and_only_a_confirmer_turns_it_back`,
-    `a_rejected_waive_is_turned_back_and_not_waived_until_the_rejection_is_taken_back`).
+    `a_rejected_waive_is_a_state_until_its_reviewer_waives_it_again`), `drc::reasons`
+    (`what_a_reviewer_answered_is_kept_as_it_was`).
 - **방문·검토 대상 통계**(2026-10-09 feature/jobdeck-drc; 2026-10-11 Rust 이식 —
   app-core `drc::team::flags`, floe2 gtk-service `rust/floe2/src/drc_team.rs`):
   `visited`는 개별 에러를 열어 그 도형이 실제로 화면에 그려졌다는 기록이다
@@ -608,7 +646,7 @@ python -m floe render chip.oas --drc results.db \
   UI에서는 다른 작업을 계속할 수 있다. 기준 콤보를 `off`로 바꾸거나 DB를 닫으면
   진행 중인 사전 계산을 취소하며 완료된 캐시는 유지한다. SVRF 미로딩 또는
   `off`에서는 사전 계산을 시작하지 않고 `CD grouped` 항목도 표시하지 않는다.
-- All/Not Waived/Waived 콤보: status 기준. DB를 열 때 기본값은 Not Waived이며, All은 에러 0 룰도 표시한다.
+- All/Not Waived/Waived/Confirmed/Rejected 콤보: 에러의 상태 기준(0.12.469, §2 반려의 네 상태; 그 전에는 All/Not Waived/Waived). DB를 열 때 기본값은 Not Waived이며, All은 에러 0 룰도 표시한다.
 - 세 필터는 **교집합**. 룰 선택 = 열기(한 번에 한 룰).
 - **필터 줄은 한 줄이다**(0.12.444, 사용자 2026-11-11: "in view와 selected 간격도 너무 큼 … 크기를
   줄여서 한줄에 나올 수 있게"). 패널 맨 아래에 `in view`·`selected` 체크와 유형 콤보, waive 콤보
@@ -665,7 +703,7 @@ python -m floe render chip.oas --drc results.db \
 | 캔버스 마커 더블클릭 | **번호 더블클릭과 동일** — 점프(30% 프레이밍)+CD 룰러+레이어 격리, 그리드 동행 |
 | `e` + 두 클릭 | 박스 선택(Esc까지 유지; Shift 추가, Ctrl 토글; 룰/클러스터/CD 그룹 전체, 개수 제한 없음; 범위별 보존; gold 표시) |
 | Ctrl/Shift + 셀 클릭 | 선택 추가/토글 |
-| 사유 입력창 | waive하거나 검토 제외로 둘 때 뜬다(0.12.463, §2 사유): 한 줄, Enter 확정, Esc 취소, 빈 칸은 사유 없음. 직전 사유나 대상이 이미 가진 사유에서 시작하고 목록은 준 사유들. 되돌릴 때는 묻지 않는다 |
+| 사유 입력창 | waive하거나 검토 제외로 둘 때 뜬다(0.12.463, §2 사유): 한 줄, Enter 확정, Esc 취소, 빈 칸은 사유 없음. 직전 사유나 대상이 이미 가진 사유에서 시작하고 목록은 준 사유들. 되돌릴 때는 묻지 않는다. 반려된 waive를 다시 waive할 때는 누가 왜 반려했는지를 위에 보이고, 빈 칸이면 그 에러는 rejected로 남는다(0.12.469) |
 | 우클릭 | waive/unwaive 메뉴(gold 선택 시 일괄) — [status] 제자리 기록, 카운트·색·필터 즉시 연동. 맨 아래 `SVRF info…`는 그 에러의 SVRF 정보 창을 연다(0.12.444, §4) |
 | 그룹 목록 우클릭 | `All errors`나 그룹 행의 에러 전체에 select all / deselect all / waive all / unwaive all / mark not for review all / clear not for review all (0.12.444, §4 측정 차이 그룹) |
 | `i` | SVRF 정보 창 열기/닫기(0.12.444, §4) |

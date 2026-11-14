@@ -1476,15 +1476,19 @@ fn a_confirmed_waive_is_locked_and_only_a_confirmer_turns_it_back() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
-/// User 2026-11-14: "confirmer가 다른 리뷰어의 waive를 반려할 수 있게 해줘" -
-/// a confirmer rejects the waive of errors in a log of their own; the
-/// sessions of the reviewers who waived them turn their waive back when they
-/// look, and no session waives a rejected error - by any writer of statuses
-/// - until its confirmer takes the rejection back.
+/// User 2026-11-14: "confirmer가 다른 리뷰어의 waive를 반려할 수 있게 해줘",
+/// and then: "reject 된 에러는 rejected로 분류되어야 ... 리뷰어가 사유를
+/// 수정해서 다시 waive를 할 수 있게 하되, 이 때 이전의 waive사유나
+/// 반려사유는 계속 유지되어야 ... REJECTED에서 ... waive로 WAIVED로 가도록" -
+/// a confirmer rejects the waive of errors in a log of their own; the waive
+/// stays in its reviewer's file with its reason and is a state of its own -
+/// no waive in any count, not locked - until the reviewer waives the error
+/// again with a reason, which keeps the rejection and the reason the waive
+/// had; taken back, or confirmed, by its confirmer it is over too.
 #[test]
-fn a_rejected_waive_is_turned_back_and_not_waived_until_the_rejection_is_taken_back() {
+fn a_rejected_waive_is_a_state_until_its_reviewer_waives_it_again() {
     use super::analysis::scope::Selection;
-    use super::desktop::{Kept, Left, Review, STATUS_NONE, STATUS_WAIVED};
+    use super::desktop::{Kept, Left, Lens, Review, STATUS_NONE, STATUS_WAIVED};
     use super::reasons::Kind;
     let dir = std::env::temp_dir().join(format!(
         "floe-waive-reject-{}-{}",
@@ -1505,108 +1509,213 @@ fn a_rejected_waive_is_turned_back_and_not_waived_until_the_rejection_is_taken_b
     fn why(r: &Review, error: u64) -> Option<String> {
         r.waive_reason(1, error).unwrap().map(|e| e.text.clone())
     }
+    // (what is kept of an error's waive: what happened, by whom, the words)
+    fn past(r: &Review, error: u64) -> Vec<(&'static str, String, String)> {
+        r.history(1, error).unwrap().into_iter().map(|e| (e.what, e.by, e.text)).collect()
+    }
+    let was = |what: &'static str, by: &str, text: &str| (what, by.to_owned(), text.to_owned());
+    let who = |by: &[super::confirm::Rejected]| by.iter().map(|b| (b.reviewer.clone(), b.text.clone())).collect::<Vec<_>>();
+    let lines = |path: &std::path::Path| -> Vec<String> { fs::read_to_string(path).unwrap().lines().map(str::to_owned).collect() };
     let (w, o) = (STATUS_WAIVED, STATUS_NONE);
     let mut kim = open("kim", false);
     let mut hong = open("hong", true);
-    let log = dir.join(".results.db.rejects.hong");
+    let (log, own) = (dir.join(".results.db.rejects.hong"), dir.join(".results.db.rejects.kim"));
     kim.set_status(1, &[0, 1, 2, 3, 4, 5], w).unwrap();
     kim.reason_set(Kind::Waive, 1, &[(0, 6)], "dummy fill").unwrap();
     hong.set_status(1, &[5], w).unwrap();
     assert_eq!(hong.confirm_set(1, &[0, 5], true).unwrap(), 2);
-    // only a confirmer rejects, and nothing is made by a refusal or an open
+    // only a confirmer rejects, and nothing is made by a refusal or a look
     assert_eq!(kim.reject_set(1, &[(0, 2)], "no").unwrap_err().kind, crate::ErrorKind::Unsupported);
     assert_eq!(kim.reject_drop(1, &[(0, 2)]).unwrap_err().kind, crate::ErrorKind::Unsupported);
-    assert!(!log.exists() && !dir.join(".results.db.rejects.kim").exists());
-    assert!(kim.take_rejected().unwrap().is_empty() && kim.rejected(1, 0, 8).unwrap().is_none());
-    // a rejection is one line of the confirmer's log, with why or without
+    let looked = kim.look().unwrap();
+    assert!(looked.rejected.is_empty() && looked.rules.is_empty() && kim.rejected(1, 0, 8).unwrap().is_none());
+    assert!(!log.exists() && !own.exists());
+    assert_eq!(kim.states(1, 0, 8).unwrap(), [3, 1, 1, 1, 1, 3, 0, 0], "hong confirmed 0 and 5");
+    // a rejection is one line of the confirmer's log, with why or without,
+    // each with a time of its own
     hong.reject_set(1, &[(0, 2)], " not a dummy\n").unwrap();
     hong.reject_set(1, &[(5, 6)], "").unwrap();
     hong.reject_set(1, &[], "nothing").unwrap();
     assert!(hong.reject_set(1, &[(7, 9)], "past the rule").is_err());
-    let said: Vec<String> = fs::read_to_string(&log).unwrap().lines().map(str::to_owned).collect();
+    let said = lines(&log);
     assert_eq!(said.len(), 5, "{said:?}");
-    assert!(said[0] == "# floe drc waive rejections" && said[1] == "floe_reasons=1" && said[2].starts_with("floe_pack="));
+    assert!(said[0] == "# floe drc waive rejections" && said[1] == "floe_reasons=2" && said[2].starts_with("floe_pack="));
     let parts = |line: &str| line.split(' ').map(str::to_owned).collect::<Vec<_>>();
     assert_eq!((&parts(&said[3])[..2], &parts(&said[3])[3..]), (&["r".to_owned(), "1".into()][..], &["0,2".to_owned(), "not".into(), "a".into(), "dummy".into()][..]));
     assert_eq!((parts(&said[4]).len(), parts(&said[4])[3].as_str()), (4, "5,1"));
+    let (first, second): (u64, u64) = (parts(&said[3])[2].parse().unwrap(), parts(&said[4])[2].parse().unwrap());
+    assert!(first > 1_600_000_000 && second > first, "{first} {second}");
     // the confirmer's own waive of a rejected error goes with it, and their
     // own confirmation of what they reject
     assert_eq!((hong.status(1, 5).unwrap(), hong.status_counts(1).unwrap().0), (o, 0));
     assert!(!hong.confirms.get(1, 0).unwrap() && !hong.confirms.get(1, 5).unwrap());
-    // the reviewer's session: its rejected waives are turned back when it
-    // looks, with who rejected them and why - status and reason. (The
-    // confirmer's first rejection made a file: known from this look on -
-    // a waive asks no folder.)
+    // the reviewer's session: nothing of theirs is written. Their waives
+    // are rejected from the look that finds the confirmer's log (its first
+    // rejection made a file - a waive asks no folder), which says them with
+    // who rejected them and why
     assert!(kim.rejected(1, 0, 8).unwrap().is_none());
-    let back = kim.take_rejected().unwrap();
+    let looked = kim.look().unwrap();
+    assert_eq!((looked.rules.clone(), looked.changed, looked.rejected.len()), (vec![1], true, 1));
+    let back = &looked.rejected[0];
+    assert_eq!((back.check, back.count, back.runs.clone()), (1, 3, vec![(0, 2), (5, 6)]));
+    assert_eq!(who(&back.by), [("hong".to_owned(), "not a dummy".to_owned()), ("hong".to_owned(), String::new())]);
+    assert_eq!((back.by[0].time, back.by[1].time), (first, second));
     assert_eq!(kim.rejected(1, 0, 8).unwrap(), Some(vec![true, true, false, false, false, true, false, false]));
-    assert_eq!(back.len(), 1);
-    assert_eq!((back[0].check, back[0].count, back[0].runs.clone()), (1, 3, vec![(0, 2), (5, 6)]));
-    let who = |by: &[super::confirm::Rejected]| by.iter().map(|b| (b.reviewer.clone(), b.text.clone())).collect::<Vec<_>>();
-    assert_eq!(who(&back[0].by), [("hong".to_owned(), "not a dummy".to_owned())]);
-    assert!(back[0].by[0].time > 1_600_000_000);
+    // rejected is a state: no waive where waives are read, the waive and
+    // its reason where the file is
+    assert_eq!(kim.states(1, 0, 8).unwrap(), [2, 2, 1, 1, 1, 2, 0, 0]);
     assert_eq!(kim.statuses(1, 0, 8).unwrap(), [o, o, w, w, w, o, o, o]);
-    assert_eq!(kim.status_counts(1).unwrap().0, 3);
-    assert_eq!((why(&kim, 0), why(&kim, 2)), (None, Some("dummy fill".into())));
-    // looked again: nothing to do while the logs and the statuses stand
-    assert!(kim.take_rejected().unwrap().is_empty());
-    // a rejected error is not waived: a click (the others are),
+    assert_eq!((kim.status(1, 0).unwrap(), kim.status(1, 2).unwrap()), (o, w));
+    assert_eq!((kim.status_counts(1).unwrap(), kim.state_counts(1).unwrap()), ((3, 8), [2, 3, 3, 0]));
+    assert_eq!((why(&kim, 0), why(&kim, 2)), (Some("dummy fill".into()), Some("dummy fill".into())));
+    assert!(!own.exists() && past(&kim, 0).is_empty());
+    // looked again: nothing to say while the files stand
+    let looked = kim.look().unwrap();
+    assert!(looked.rejected.is_empty() && looked.rules.is_empty() && !looked.changed);
+    // the class a filter shows: what "waived" means to every page and count
+    let page = |r: &mut Review, lens: Lens, waived: bool| {
+        r.set_lens(lens);
+        (r.status_page(1, waived, 0, 10).unwrap(), r.lens_counts(1).unwrap().0)
+    };
+    assert_eq!(page(&mut kim, Lens::Rejected, true), (vec![0, 1, 5], 3));
+    assert_eq!(kim.status_rank(1, true, 5).unwrap(), Some(2));
+    assert_eq!(kim.lensed(1, 0, 8).unwrap(), [1, 1, 0, 0, 0, 1, 0, 0]);
+    assert_eq!(page(&mut kim, Lens::Held, false), (vec![6, 7], 6), "not waived: no waive at all");
+    assert_eq!(page(&mut kim, Lens::Waived, true), (vec![2, 3, 4], 3));
+    assert_eq!(page(&mut kim, Lens::Confirmed, true), (vec![], 0));
+    assert_eq!(page(&mut kim, Lens::Live, true), (vec![2, 3, 4], 3));
+    assert_eq!(page(&mut kim, Lens::Live, false).0, [0, 1, 5, 6, 7]);
+    // an error under a rejection is not waived by a write (the others are),
     assert_eq!(kim.set_status(1, &[1, 6, 0, 1], w).unwrap(), Left { locked: vec![], rejected: vec![0, 1] });
     assert_eq!(kim.statuses(1, 0, 8).unwrap(), [o, o, w, w, w, o, w, o]);
-    assert!(kim.set_status(1, &[0, 1], o).unwrap().is_empty(), "turning back asks nothing of a rejection");
-    // a job's chunk,
+    // it is waived again, with a reason: the rejection it answers is kept
+    // in the reviewer's own log, with the reason the waive had
+    assert_eq!(kim.resubmit(1, &[(0, 1)]).unwrap(), 1);
+    kim.reason_set(Kind::Waive, 1, &[(0, 1)], "dummy fill, see rule note").unwrap();
+    assert_eq!(kim.take_reclassed(), [1]);
+    assert_eq!(kim.states(1, 0, 8).unwrap(), [1, 2, 1, 1, 1, 2, 1, 0]);
+    assert_eq!((kim.status_counts(1).unwrap().0, why(&kim, 0)), (5, Some("dummy fill, see rule note".into())));
+    assert_eq!(past(&kim, 0), [was("waived", "", "dummy fill"), was("rejected", "hong", "not a dummy")]);
+    assert!(past(&kim, 1).is_empty(), "an error at a time");
+    let said = lines(&own);
+    assert_eq!(said.len(), 5, "{said:?}");
+    assert!(said[0] == "# floe drc waive rejections" && said[1] == "floe_reasons=2");
+    assert!(said[3].starts_with("p 1 ") && said[3].ends_with(" 0,1 dummy fill"), "{}", said[3]);
+    assert_eq!(said[4], format!("j 1 {first} 0,1 hong not a dummy"));
+    assert_eq!(kim.resubmit(1, &[(0, 1), (2, 5)]).unwrap(), 0, "nothing of them is under a rejection now");
+    // the confirmer rejects it again: a new rejection, to answer anew
+    hong.reject_set(1, &[(0, 1)], "still not").unwrap();
+    let looked = kim.look().unwrap();
+    assert_eq!(looked.rejected.len(), 1);
+    assert_eq!((looked.rejected[0].runs.clone(), who(&looked.rejected[0].by)), (vec![(0, 1)], vec![("hong".to_owned(), "still not".to_owned())]));
+    assert_eq!(kim.states(1, 0, 2).unwrap(), [2, 2]);
+    assert_eq!(kim.set_status(1, &[0], w).unwrap().rejected, [0]);
+    assert_eq!(kim.resubmit(1, &[(0, 1)]).unwrap(), 1);
+    kim.reason_set(Kind::Waive, 1, &[(0, 1)], "third").unwrap();
+    assert_eq!(
+        past(&kim, 0),
+        [
+            was("waived", "", "dummy fill"),
+            was("rejected", "hong", "not a dummy"),
+            was("waived", "", "dummy fill, see rule note"),
+            was("rejected", "hong", "still not"),
+        ]
+    );
+    assert_eq!((kim.states(1, 0, 1).unwrap(), why(&kim, 0)), (vec![1], Some("third".into())));
+    // a rejected waive is turned back like any other - its reason kept -
+    // and waived again later it answers the rejection that still stands
+    assert!(kim.set_status(1, &[1], o).unwrap().is_empty(), "a rejected waive is not locked");
+    assert_eq!((kim.states(1, 1, 1).unwrap(), why(&kim, 1)), (vec![0], None));
+    assert_eq!(past(&kim, 1), [was("waived", "", "dummy fill")]);
+    assert_eq!(kim.set_status(1, &[1], w).unwrap().rejected, [1]);
+    assert_eq!(kim.status(1, 1).unwrap(), o);
+    assert_eq!(kim.resubmit(1, &[(1, 2)]).unwrap(), 1);
+    assert_eq!((kim.states(1, 1, 1).unwrap(), why(&kim, 1)), (vec![1], None));
+    assert_eq!(past(&kim, 1), [was("waived", "", "dummy fill"), was("rejected", "hong", "not a dummy")]);
+    // a job's chunk leaves the rejected, and says them,
     let all = Selection::from_indices(8, 0..8);
     let mut left = Left::default();
     assert_eq!(kim.set_status_range(1, &all, w, 0, 8, &mut left).unwrap(), 1);
-    assert_eq!(left, Left { locked: vec![], rejected: vec![(0, 2), (5, 6)] });
-    assert_eq!(kim.statuses(1, 0, 8).unwrap(), [o, o, w, w, w, o, w, w]);
-    // an application's span,
+    assert_eq!(left, Left { locked: vec![], rejected: vec![(5, 6)] });
+    assert_eq!(kim.statuses(1, 0, 8).unwrap(), [w, w, w, w, w, o, w, w]);
+    // an application's span too - and what it leaves as it read it stays as
+    // the file has it: a rejected waive reads as none, and is none of its
     let before = kim.statuses(1, 0, 8).unwrap();
-    assert_eq!(kim.write_status_span(1, 0, &before, &[w; 8]).unwrap(), Kept { locked: 0, rejected: 3 });
+    assert_eq!(kim.write_status_span(1, 0, &before, &[w; 8]).unwrap(), Kept { locked: 0, rejected: 1 });
     assert_eq!(kim.statuses(1, 0, 8).unwrap(), before);
-    // and a saved file with everything waived
+    assert_eq!(kim.write_status_span(1, 4, &before[4..6], &[o, o]).unwrap(), Kept::default());
+    assert_eq!(kim.states(1, 4, 2).unwrap(), [0, 2]);
+    assert!(kim.set_status(1, &[4], w).unwrap().is_empty());
+    // a job turns a rejected waive back as well (its reason kept), and a
+    // saved file with everything waived does not waive it again
+    let five = Selection::from_indices(8, [5u64]);
+    left = Left::default();
+    assert_eq!(kim.set_status_range(1, &five, o, 0, 8, &mut left).unwrap(), 1);
+    assert!(left.is_empty() && past(&kim, 5) == [was("waived", "", "dummy fill")]);
     let saved = dir.join("all.waive");
     kim.waive_export(&saved).unwrap();
     let mut raw = fs::read(&saved).unwrap();
     raw[40..48].fill(w);
     fs::write(&saved, &raw).unwrap();
     kim.set_status(1, &[2], o).unwrap();
-    assert_eq!(kim.waive_import(&saved).unwrap(), (5, Kept { locked: 0, rejected: 3 }));
-    assert_eq!(kim.statuses(1, 0, 8).unwrap(), [o, o, w, w, w, o, w, w]);
-    // a rejected waive is not locked, whoever confirmed it: it is turned back
+    assert_eq!(kim.waive_import(&saved).unwrap(), (7, Kept { locked: 0, rejected: 1 }));
+    assert_eq!(kim.states(1, 0, 8).unwrap(), [1, 1, 1, 1, 1, 0, 1, 1]);
+    assert_eq!(kim.resubmit(1, &[(5, 6)]).unwrap(), 1);
+    assert_eq!(past(&kim, 5), [was("waived", "", "dummy fill"), was("rejected", "hong", "")]);
+    assert_eq!((kim.states(1, 0, 8).unwrap(), kim.rejected(1, 0, 8).unwrap()), (vec![1; 8], None));
+    // a rejected waive is not locked, whoever confirmed it - and waived
+    // again it is under the other confirmer's confirmation, which stood
     let mut park = open("park", true);
     assert_eq!(park.confirm_set(1, &[3], true).unwrap(), 1);
     assert_eq!(kim.set_status(1, &[3], o).unwrap().locked, [3], "confirmed by park: locked");
+    assert_eq!(kim.states(1, 3, 1).unwrap(), [3]);
     hong.reject_set(1, &[(3, 4)], "still no").unwrap();
     assert!(kim.locked(1, 0, 8).unwrap().is_none());
-    let back = kim.take_rejected().unwrap();
-    assert_eq!((back[0].runs.clone(), who(&back[0].by)), (vec![(3, 4)], vec![("hong".to_owned(), "still no".to_owned())]));
-    assert_eq!(kim.status(1, 3).unwrap(), o);
+    let looked = kim.look().unwrap();
+    assert_eq!((looked.rejected[0].runs.clone(), who(&looked.rejected[0].by)), (vec![(3, 4)], vec![("hong".to_owned(), "still no".to_owned())]));
+    assert_eq!((kim.states(1, 3, 1).unwrap(), kim.state_counts(1).unwrap()), (vec![2], [0, 7, 1, 0]));
     assert!(park.confirms.get(1, 3).unwrap(), "the other confirmer's confirmation is theirs to take back");
+    assert_eq!(kim.resubmit(1, &[(3, 4)]).unwrap(), 1);
+    kim.reason_set(Kind::Waive, 1, &[(3, 4)], "ok now").unwrap();
+    assert_eq!(kim.states(1, 3, 1).unwrap(), [3]);
+    assert_eq!(kim.set_status(1, &[3], o).unwrap().locked, [3]);
     // two confirmers' rejections of one error: both said, and one taking
-    // theirs back leaves the other's
+    // theirs back leaves the other's; taken back by both, the waive is as
+    // it was - at once, nothing of it having been touched
     park.reject_set(1, &[(0, 1)], "").unwrap();
-    assert!(kim.take_rejected().unwrap().is_empty(), "(a look: park's log is new)");
+    let looked = kim.look().unwrap();
+    assert_eq!((looked.rejected[0].runs.clone(), who(&looked.rejected[0].by)), (vec![(0, 1)], vec![("park".to_owned(), String::new())]));
+    hong.reject_set(1, &[(0, 1)], "three").unwrap();
+    assert!(kim.look().unwrap().rejected.is_empty(), "said once: it was rejected already");
     assert_eq!(
         who(&kim.rejected_by(1, &[(0, 1)]).unwrap()),
-        [("hong".to_owned(), "not a dummy".to_owned()), ("park".to_owned(), String::new())]
+        [("hong".to_owned(), "three".to_owned()), ("park".to_owned(), String::new())]
     );
     assert!(hong.reject_drop(1, &[(0, 1)]).unwrap());
     assert_eq!(kim.set_status(1, &[0], w).unwrap().rejected, [0], "park's stands");
     assert!(park.reject_drop(1, &[(0, 1)]).unwrap());
     assert!(!park.reject_drop(1, &[(0, 1)]).unwrap(), "nothing of theirs is left to take back");
-    // taken back: the error is anybody's to waive again
     assert!(kim.set_status(1, &[0], w).unwrap().is_empty());
-    assert_eq!(kim.status(1, 0).unwrap(), w);
-    // taken back before the reviewer's session looked: the waive stands
-    hong.reject_set(1, &[(4, 5)], "hm").unwrap();
-    assert!(hong.reject_drop(1, &[(4, 5)]).unwrap());
-    assert!(kim.take_rejected().unwrap().is_empty());
-    assert_eq!(kim.status(1, 4).unwrap(), w);
+    assert_eq!((kim.states(1, 0, 1).unwrap(), why(&kim, 0)), (vec![1], Some("third".into())));
+    assert_eq!(past(&kim, 0).len(), 4, "nothing was answered: nothing more is kept");
+    // a confirmer who confirms an error takes their own rejection of it back
+    hong.reject_set(1, &[(2, 3)], "hm").unwrap();
+    assert_eq!(kim.look().unwrap().rejected[0].runs, [(2, 3)]);
+    assert_eq!(kim.resubmit(1, &[(2, 3)]).unwrap(), 1);
+    kim.reason_set(Kind::Waive, 1, &[(2, 3)], "hm indeed").unwrap();
+    assert_eq!(hong.confirm_set(1, &[2], true).unwrap(), 1);
+    assert!(hong.rejects.held(Kind::Reject, 1, &[(2, 3)]).is_empty());
+    let last = lines(&log).last().unwrap().to_owned();
+    assert!(last.starts_with("R 1 ") && last.ends_with(" 2,1"), "{last}");
+    let looked = kim.look().unwrap();
+    assert!(looked.changed && looked.rejected.is_empty());
+    assert_eq!((kim.states(1, 0, 8).unwrap(), kim.state_counts(1).unwrap()), (vec![1, 1, 3, 3, 1, 1, 1, 1], [0, 6, 0, 2]));
+    assert_eq!(page(&mut kim, Lens::Confirmed, true), (vec![2, 3], 2));
+    assert_eq!(page(&mut kim, Lens::Waived, true), (vec![0, 1, 4, 5, 6, 7], 6));
+    assert_eq!(page(&mut kim, Lens::Live, true).1, 8);
     // the confirmer's log says what stands, and their next session reads it;
-    // a confirmer's session does not waive a rejected error either
-    let last = fs::read_to_string(&log).unwrap().lines().last().unwrap().to_owned();
-    assert!(last.starts_with("R 1 ") && last.ends_with(" 4,1"), "{last}");
+    // a confirmer's own waive of an error they rejected is under their
+    // rejection like anybody's
     drop(hong);
     let mut hong = open("hong", true);
     let held: Vec<(u64, u64, String)> = hong
@@ -1618,11 +1727,22 @@ fn a_rejected_waive_is_turned_back_and_not_waived_until_the_rejection_is_taken_b
     assert_eq!(held, [(1, 2, "not a dummy".to_owned()), (3, 4, "still no".into()), (5, 6, String::new())]);
     assert_eq!(
         hong.rejects.texts(Kind::Reject, 9),
-        ["hm", "still no", "not a dummy"],
+        ["hm", "three", "still no", "still not", "not a dummy"],
         "the reasons given so far - what the dialog offers again -, the empty one left out"
     );
-    assert_eq!(hong.set_status(1, &[1, 2], w).unwrap().rejected, [1]);
-    assert_eq!(hong.status(1, 2).unwrap(), w);
+    assert_eq!(hong.set_status(1, &[5, 6], w).unwrap().rejected, [5]);
+    assert_eq!((hong.status(1, 5).unwrap(), hong.status(1, 6).unwrap()), (o, w));
+    assert_eq!(hong.resubmit(1, &[(5, 6)]).unwrap(), 1);
+    assert_eq!(hong.status(1, 5).unwrap(), w);
+    // the reviewer's next session: its states are the files' from the open,
+    // and its first look says the waives that are rejected
+    hong.reject_set(1, &[(7, 8)], "last").unwrap();
+    drop(kim);
+    let mut kim = open("kim", false);
+    assert_eq!(kim.states(1, 0, 8).unwrap(), [1, 1, 3, 3, 1, 1, 1, 2]);
+    assert_eq!(past(&kim, 0).len(), 4);
+    let looked = kim.look().unwrap();
+    assert_eq!((looked.rejected.len(), looked.rejected[0].runs.clone(), who(&looked.rejected[0].by)), (1, vec![(7, 8)], vec![("hong".to_owned(), "last".to_owned())]));
     for r in [&kim, &hong, &park] {
         assert!(r.notices.is_empty(), "{:?}", r.notices);
     }

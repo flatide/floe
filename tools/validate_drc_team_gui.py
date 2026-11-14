@@ -152,9 +152,13 @@ class Why(object):
 
     def __init__(self, text=""):
         self.text, self.asked = text, []
+        # the rejections each ask said its waive answers ((who, why), ...)
+        self.rejected = []
 
-    def __call__(self, kind, count, prefill="", known=(), parent=None):
+    def __call__(self, kind, count, prefill="", known=(), parent=None,
+                 rejected_by=()):
         self.asked.append((kind, count, prefill, tuple(known), parent))
+        self.rejected.append(tuple(rejected_by))
         return self.text
 
 
@@ -386,7 +390,12 @@ def _team_waives(v, d, check, pump):
           and db.status_counts(0)[0] == len([e for e, who in waivers().items() if "gui" in who]),
           "... and the counts are the files'", team.get("rules", [None])[0])
     # ---- a confirmer rejects a waive (0.12.468, user 2026-11-14: "confirmer가
-    # 다른 리뷰어의 waive를 반려할 수 있게 해줘")
+    # 다른 리뷰어의 waive를 반려할 수 있게 해줘"); the waive stays with its
+    # reviewer, rejected, until they waive the error again with a reason
+    # (0.12.469: "reject 된 에러는 rejected로 분류되어야 ... 리뷰어가 사유를
+    # 수정해서 다시 waive를 할 수 있게 하되, 이 때 이전의 waive사유나 반려사유는
+    # 계속 유지되어야")
+    from floe import gtkservice
     v._confirmer = True
     v._drc_request(path)
     pump(v, lambda: v._drc is not db and getattr(v._drc, "confirmer", False), "the confirmer's open again", 60)
@@ -396,11 +405,12 @@ def _team_waives(v, d, check, pump):
     check([b.get_label() for b in w.reject_buttons] == ["Reject selected", "Unreject selected"]
           and all(b.get_sensitive() for b in w.reject_buttons)
           and [b.get_tooltip_text() for b in w.reject_buttons] == [w.REJECTS, w.UNREJECTS]
+          and "waives the error again with a reason" in w.REJECTS
           and [key for key, _title in w.KINDS][-1] == "rejected",
           "the confirmer's window: Reject selected, Unreject selected, the Rejected list")
     asked = []
 
-    def why(kind, count, prefill="", known=(), parent=None):
+    def why(kind, count, prefill="", known=(), parent=None, rejected_by=()):
         asked.append((kind, count, parent is w.window))
         return why.answer
     v._drc_reason_dialog = why
@@ -415,23 +425,29 @@ def _team_waives(v, d, check, pump):
     w._reject(True)
     loaded(w, "a rejection")
     said = (d / ".sample.db.rejects.gui").read_text().splitlines()
-    check(w.status.get_text().startswith("Rejected 1 waive(s).") and theirs not in [r[0] for r in rows(w)]
-          and said[0] == "# floe drc waive rejections" and said[-1].endswith(" %d,1 not ok" % theirs)
-          and "rejected 1" in w.status.get_text(),
+    check(w.status.get_text().startswith("Rejected the waive of 1 error(s).") and theirs not in [r[0] for r in rows(w)]
+          and said[0] == "# floe drc waive rejections" and said[1] == "floe_reasons=2"
+          and said[-1].endswith(" %d,1 not ok" % theirs) and "rejected 1" in w.status.get_text(),
           "the peer's waive rejected: out of the list to confirm, one line of the confirmer's log",
           (w.status.get_text(), said[-1:]))
     team = cli()
     check(team.get("rejected") == 1 and team["rules"][0]["rejected"] == 1
           and theirs in [e for e, who in waivers().items() if "peer" in who],
-          "... floe2 drc --review-counts says it, though the peer's file still has the waive", team.get("rules", [None])[0])
+          "... floe2 drc --review-counts says it; the peer's file has the waive, as it will until they answer", team.get("rules", [None])[0])
     w.mode.set_active_id("rejected")
     loaded(w, "the rejected list")
     check([(r[0], r[2], r[5]) for r in rows(w)] == [(theirs, "peer", "gui: not ok")],
-          "the Rejected list: the error, who still has it waived, who rejected it and why", rows(w))
+          "the Rejected list: the error, whose waive it is, who rejected it and why", rows(w))
     v._drc_show_detail(0, theirs)
     pump(v, lambda: "waive rejected by: gui (not ok)" in _detail(v), "the rejection in the detail", 30)
-    check("waive rejected by: gui (not ok)" in _detail(v), "... and the error's detail", _detail(v))
-    # the confirmer's own waive of an error they reject goes with it
+    lines = _detail(v).splitlines()
+    check("waive rejected by: gui (not ok)" in lines
+          and any(l.startswith("waived by: peer") and l.endswith(" · rejected") for l in lines)
+          and not any("locked" in l for l in lines),
+          "... and the error's detail: whose waive is rejected, by whom and why", lines[:8])
+    # the confirmer's own waive of an error they reject goes with it - and is
+    # waived again like anybody's: with a reason, which answers their own
+    # rejection, or not at all
     why.answer = ""
     w.mode.set_active_id("waived")
     loaded(w, "all the team's waives")
@@ -441,34 +457,48 @@ def _team_waives(v, d, check, pump):
     pick(w, {free})
     w._reject(True)
     loaded(w, "the confirmer's own waive rejected")
-    check(db.get_status(0, free) == 0 and (d / ".sample.db.rejects.gui").read_text().splitlines()[-1].endswith(" %d,1" % free)
+    said = (d / ".sample.db.rejects.gui").read_text().splitlines()
+    check(db.get_status(0, free) == 0 and db.get_state(0, free) == gtkservice.STATE_NONE
+          and [l for l in said if l.startswith("r ")][-1].endswith(" %d,1" % free)
           and db.status_counts(0)[0] == len([e for e, who in waivers().items() if "gui" in who]),
-          "a confirmer rejects an error of their own (no why): their waive of it is turned back at once",
-          (d / ".sample.db.rejects.gui").read_text().splitlines()[-1])
-    v._drc_set_waived(0, [free], True, reason="again")
+          "a confirmer rejects an error of their own (no why): their waive of it is turned back at once", said[-2:])
+    v._drc_set_waived(0, [free], True, reason="")
     check(db.get_status(0, free) == 0 and v.status.get_text() == (
-        "rejected: 1 error(s) in %s by gui - not waived until the rejection is taken back" % name),
-        "... and is not waived again while it is rejected, by a confirmer either", v.status.get_text())
-    # taken back: the error is anybody's to waive again
+        "rejected: 1 error(s) in %s by gui - waive again with a reason" % name),
+        "... and is not waived again without a reason, by a confirmer either", v.status.get_text())
+    v._drc_set_waived(0, [free], True, reason="again")
+    check(db.get_status(0, free) == 1 and db.reason_get(0, free)[0] == "again" and v.status.get_text() == (
+        "waived 1 error(s) in %s · reason: again · 1 waived again after a rejection" % name),
+        "... with one it is waived again, and said", v.status.get_text())
+    v._drc_show_detail(0, free)
+    lines = _detail(v).splitlines()
+    check("waive reason: again" in lines and "before: waived (mine)" in lines and "before: rejected by gui" in lines
+          and lines.index("before: waived (mine)") < lines.index("before: rejected by gui"),
+          "the detail keeps what was before: the reason the waive had, then the rejection", lines[:8])
+    # taken back: the waive is as it was
     w.mode.set_active_id("rejected")
     loaded(w, "the rejected list")
-    pick(w, {free})
+    check([r[0] for r in rows(w)] == [theirs], "(the Rejected list: the peer's, which nobody answered)", rows(w))
+    pick(w, {theirs})
     w._reject(False)
     loaded(w, "a rejection taken back")
-    check(w.status.get_text().startswith("Took back the rejection of 1 error(s).") and [r[0] for r in rows(w)] == [theirs],
-          "Unreject selected: out of the Rejected list", (rows(w), w.status.get_text()))
-    v._drc_set_waived(0, [free], True, reason="again")
-    check(db.get_status(0, free) == 1 and db.reason_get(0, free)[0] == "again", "... and waived again")
+    check(w.status.get_text().startswith("Took back the rejection of 1 error(s).") and rows(w) == []
+          and cli().get("rejected") == 0,
+          "Unreject selected: out of the Rejected list, and waived again for the team", (rows(w), w.status.get_text()))
+    w.mode.set_active_id("unconfirmed")
+    loaded(w, "the list to confirm")
+    check(theirs in [r[0] for r in rows(w)], "... back among the waives to confirm", rows(w))
     w.window.destroy()
     # ---- a reviewer's viewer follows a rejection made elsewhere: another
     # confirmer rejects one of this reviewer's waives - a confirmed one,
-    # which no lock holds then - and the viewer turns it back by itself
+    # which no lock holds then. The viewer finds it by itself, shows it as
+    # rejected and writes nothing; the reviewer waives it again with a
+    # mended reason
     v._confirmer = False
     v._drc_request(path)
     pump(v, lambda: v._drc is not db and not getattr(v._drc, "confirmer", True), "the reviewer's open again", 60)
     db = v._drc
-    check(db.get_status(0, held) == 1 and v._drc_returned_timer is not None, "(the reviewer's viewer looks for rejections while results are open)")
-    from floe import gtkservice
+    check(db.get_status(0, held) == 1 and v._drc_returned_timer is not None, "(the reviewer's viewer follows the confirmers while results are open)")
     boss = gtkservice.Service(FLOE2)
     try:
         h = boss.request("drc_open", path=path, mode="load", reviewer="boss", confirmer=True)["handle"]
@@ -478,20 +508,87 @@ def _team_waives(v, d, check, pump):
         pump(v, lambda: done.extend(e for e in boss.drc_events(h) if e.get("job") == job and e.get("state") != "progress") or bool(done),
              "the other confirmer's rejection", 30)
         check(bool(done) and done[0].get("state") == "done" and done[0].get("changed") == 1, "another confirmer rejects this reviewer's confirmed waive", done)
-        pump(v, lambda: db.get_status(0, held) == 0, "the viewer's own look", 30)
-        check(db.get_status(0, held) == 0 and v.status.get_text() == (
-            "1 waive(s) in %s rejected by boss (boss says no): turned back" % name)
-            and db.reason_get(0, held)[0] is None,
-            "the reviewer's viewer turns the rejected waive back by itself, and says who rejected it and why",
-            v.status.get_text())
-        v._drc_set_waived(0, [held, free], True, reason="once more")
-        check(db.get_status(0, held) == 0 and v.status.get_text() == (
-            "waived 1 error(s) in %s · reason: once more · 1 rejected by boss (boss says no): not waived" % name),
-            "a selection with a rejected error: the other is waived, the rejected one said", v.status.get_text())
+        side = d / ".sample.db.waive.gui"
+        was = side.read_bytes()
+        pump(v, lambda: db.get_state(0, held) == gtkservice.STATE_REJECTED, "the viewer's own look", 30)
+        check(db.get_state(0, held) == gtkservice.STATE_REJECTED and db.get_status(0, held) == 0
+              and v.status.get_text() == (
+                  "1 waive(s) in %s rejected by boss (boss says no): waive again with a reason" % name)
+              and db.reason_get(0, held)[0] == "lock me" and side.read_bytes() == was and was[40 + held] == 1,
+              "the reviewer's viewer finds the waive rejected by itself and says who rejected it and why - the waive and its reason stay",
+              v.status.get_text())
         v._drc_show_detail(0, held)
         pump(v, lambda: "waive rejected by: boss (boss says no)" in _detail(v), "the rejection in the detail", 30)
-        check("waive rejected by: boss (boss says no)" in _detail(v) and "locked" not in _detail(v),
-              "... and the error's detail says who rejected it", _detail(v))
+        lines = _detail(v).splitlines()
+        check("[rejected]" in lines[0] and "waive rejected by: boss (boss says no)" in lines
+              and "waive reason: lock me" in lines and not any("locked" in l for l in lines),
+              "... the error's detail: rejected, by whom and why, with the reason the waive has", lines[:8])
+        # the main list's filter: an error's four states
+        win = v._drcwin
+        states = [db.get_state(0, e) for e in range(n0)]
+        check(win is not None and [r[0] for r in win._wf.get_model()] == ["All", "Not Waived", "Waived", "Confirmed", "Rejected"]
+              and states[held] == gtkservice.STATE_REJECTED and gtkservice.STATE_WAIVED in states,
+              "the main list's filter: All, Not Waived, Waived, Confirmed, Rejected", states)
+        said = []
+        for wid, state in (("rejected", gtkservice.STATE_REJECTED), ("confirmed", gtkservice.STATE_CONFIRMED),
+                           ("waived", gtkservice.STATE_WAIVED), ("notwaived", gtkservice.STATE_NONE), ("all", None)):
+            win._wf.set_active_id(wid)
+            want = [e for e in range(n0) if state is None or states[e] == state]
+            row = [r[1] for r in win._rstore if r[2] == 0]
+            listed = (list(range(n0)) if wid == "all" else
+                      db.status_page(0, v._drc_wf_class(), 0, n0))
+            said.append((wid, v._drc_wf_count(db, 0) == len(want), listed == want,
+                         bool(row) == bool(want), v._drc_wf_shows(db, 0, held) == (wid in ("rejected", "all"))))
+        check(all(all(x[1:]) for x in said), "each state's errors: counted, listed, the rule shown where it has any", said)
+        win._wf.set_active_id("rejected")
+        row = [r[1] for r in win._rstore if r[2] == 0]
+        check(row == ["%d/1" % n0] and db.status_counts(0) == (1, n0),
+              "under Rejected the rule's row says its rejected errors", row)
+        win._wf.set_active_id("all")
+        row = [r[1] for r in win._rstore if r[2] == 0]
+        check(row == ["%d/%d" % (n0, len([s for s in states if s in (1, 3)]))],
+              "under All it says the waived ones - a rejected waive is none", row)
+        # without a reason the rejected stays rejected; the other is waived
+        v._drc_set_waived(0, [held, free], False, reason=None)
+        v._drc_set_waived(0, [free], True, reason="")
+        v._drc_set_waived(0, [held, free], True, reason="")
+        check(db.get_state(0, held) == gtkservice.STATE_NONE and db.get_status(0, free) == 1,
+              "(turned back, a rejected waive is not waived: its reason is kept in the detail)", db.get_state(0, held))
+        v._drc_show_detail(0, held)
+        check("before: waived (lock me)" in _detail(v).splitlines(), "... kept", _detail(v).splitlines()[:6])
+        check(v.status.get_text() == (
+            "waived 1 error(s) in %s · 1 rejected by boss (boss says no): waive again with a reason" % name),
+            "a selection with an error under a rejection, no reason: the other is waived, the rejected one said", v.status.get_text())
+        # with a reason - asked in the dialog, which says whose rejection it
+        # answers - it is waived again, and what was is kept
+        v._drc_reason_dialog = again = Why("lock me, sheet 9")
+        v._drc_set_waived(0, [held], True)
+        check(again.asked[-1][:2] == ("waive", 1) and again.rejected[-1] == (("boss", "boss says no"),)
+              and db.get_status(0, held) == 1 and db.reason_get(0, held)[0] == "lock me, sheet 9"
+              and v.status.get_text() == (
+                  "waived 1 error(s) in %s · reason: lock me, sheet 9 · 1 waived again after a rejection" % name),
+              "waived again: the dialog says who rejected it and why, the status line that it was waived again",
+              (again.asked[-1][:3], again.rejected[-1], v.status.get_text()))
+        v._drc_show_detail(0, held)
+        lines = _detail(v).splitlines()
+        check("waive reason: lock me, sheet 9" in lines and "before: waived (lock me)" in lines
+              and "before: rejected by boss (boss says no)" in lines and "[rejected]" not in lines[0],
+              "... and the detail keeps the reason it had and the rejection it answers", lines[:8])
+        kept = (d / ".sample.db.rejects.gui").read_text().splitlines()
+        check(any(l.startswith("p 0 ") and l.endswith(" %d,1 lock me" % held) for l in kept)
+              and any(l.startswith("j 0 ") and l.endswith(" %d,1 boss boss says no" % held) for l in kept),
+              "... in the reviewer's own rejects log", kept[-3:])
+        check(cli().get("rejected") == 0, "... and the team counts it as waived again", cli().get("rejected"))
+        # the confirmer's list has it back, with what was said before
+        w = v._drc_waives_dialog()
+        loaded(w, "the reviewer's list")
+        w.mode.set_active_id("waived")
+        loaded(w, "all the team's waives")
+        mine = [r for r in rows(w) if r[0] == held]
+        check(len(mine) == 1 and mine[0][3].startswith("lock me, sheet 9")
+              and mine[0][3].endswith("[before: waived (lock me), then rejected by boss (boss says no)]"),
+              "the team's list: the waive with its new reason, and what was before", mine)
+        w.window.destroy()
     finally:
         boss.close()
 

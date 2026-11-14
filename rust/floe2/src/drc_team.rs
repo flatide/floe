@@ -40,7 +40,7 @@
 //!       opened as a confirmer's (`drc_open {confirmer: true}`)
 use super::{job_error, number, numbers, text, waived_of, Session, Shared};
 use floe_app_core::drc::analysis::scope::Selection;
-use floe_app_core::drc::desktop::StatusReader;
+use floe_app_core::drc::desktop::{Lens, StatusReader};
 use floe_app_core::drc::matcher;
 pub(super) use floe_app_core::drc::team::flags::NOT_REQUIRED;
 use floe_app_core::drc::team::{
@@ -509,7 +509,9 @@ impl Session {
                         &mut changed,
                     );
                     let dirty: Vec<usize> = shared.dirty.lock().unwrap().iter().copied().collect();
-                    // (a peer's decisions applied: the team's counts follow)
+                    // (a peer's decisions applied: the team's counts follow,
+                    // and the list of its waives is read anew)
+                    *shared.waives.lock().unwrap() = None;
                     shared.team_soon();
                     match result {
                         Ok(a) => shared.event(id, "team-write", "done", json!({"action": "apply", "result": a, "rules": dirty})),
@@ -575,6 +577,7 @@ impl Session {
                     let mut p = plan.lock().unwrap();
                     let result = migrate::apply(&own(&shared, c), &mut p, &stop, &mut progress, &mut changed);
                     let dirty: Vec<usize> = shared.dirty.lock().unwrap().iter().copied().collect();
+                    *shared.waives.lock().unwrap() = None;
                     shared.team_soon();
                     match result {
                         Ok(a) => shared.event(id, "migrate-write", "done", json!({"result": a, "summary": p.summary, "rules": dirty})),
@@ -690,10 +693,13 @@ impl Session {
                         let mut view = TeamWaives::open(&c.id.pack, &c.id)?;
                         let row = view.rows(check, &[error])?.remove(0);
                         let confirmer = super::review(&mut shared.opened.lock().unwrap())?.confirmer();
+                        // (`rejected_of`: whose waive of it is rejected;
+                        // `history`: what their logs keep of their waives)
                         Ok(json!({
                             "check": check, "error": error,
                             "waived_by": row.waived_by, "confirmed_by": row.confirmed_by,
                             "reasons": row.reasons, "rejected_by": row.rejected_by,
+                            "rejected_of": row.rejected_of, "history": row.history,
                             "confirmer": confirmer, "reviewer": c.id.reviewer,
                         }))
                     })();
@@ -733,7 +739,7 @@ impl Session {
                     let (mut changed, mut skipped) = (0u64, 0u64);
                     let result = (|| -> Result<()> {
                         // the team's waives as their files stand now
-                        let view = TeamWaives::open(&c.id.pack, &c.id)?;
+                        let mut view = TeamWaives::open(&c.id.pack, &c.id)?;
                         let chunks: Vec<u64> = match &named {
                             Some(errors) => {
                                 let mut ks: Vec<u64> = errors.iter().map(|e| e / CHUNK).collect();
@@ -751,7 +757,7 @@ impl Session {
                             floe_app_core::check_cancelled(&stop)?;
                             let mut o = shared.opened.lock().unwrap();
                             let r = super::review(&mut o)?;
-                            let (c1, s1) = waives::confirm_chunk(r, &view, check, k, members, on)?;
+                            let (c1, s1) = waives::confirm_chunk(r, &mut view, check, k, members, on)?;
                             changed += c1;
                             skipped += s1;
                             if settled.elapsed().as_millis() >= 1000 {
@@ -770,6 +776,9 @@ impl Session {
                     // disk and the change log, and the list reads anew
                     let flushed = super::review(&mut shared.opened.lock().unwrap()).and_then(|r| r.sync_waives());
                     *shared.waives.lock().unwrap() = None;
+                    // (a confirmation takes the confirmer's own rejection of
+                    // the error back, and is a state of their own waive of it)
+                    shared.dirty.lock().unwrap().insert(check);
                     if changed >= super::TEAM_SOON {
                         shared.team_soon();
                     }
@@ -808,10 +817,10 @@ impl Session {
                     let mut changed = 0u64;
                     let result = (|| -> Result<Value> {
                         // the team's waives as their files stand now
-                        let view = TeamWaives::open(&c.id.pack, &c.id)?;
+                        let mut view = TeamWaives::open(&c.id.pack, &c.id)?;
                         let mut o = shared.opened.lock().unwrap();
                         let r = super::review(&mut o)?;
-                        let (runs, skipped) = waives::reject_runs(r, &view, check, &errors, on)?;
+                        let (runs, skipped) = waives::reject_runs(r, &mut view, check, &errors, on)?;
                         if on {
                             r.reject_set(check, &runs, &reason)?;
                         } else {
@@ -820,7 +829,8 @@ impl Session {
                         changed = runs.iter().map(|run| run.1 - run.0).sum();
                         // (the confirmer's own waive of a rejected error is
                         // turned back with it: the rule's counts go along)
-                        let (waived, total) = r.status_counts(check)?;
+                        r.take_reclassed();
+                        let (waived, total) = r.lens_counts(check)?;
                         Ok(json!({"check": check, "on": on, "verdict": "reject", "changed": changed,
                                   "skipped": skipped, "counts": [waived, total]}))
                     })();
@@ -836,32 +846,43 @@ impl Session {
                 })}))
             }
             "drc_team_returned" => {
-                // this reviewer's waives that a confirmer has rejected are
-                // turned back (app-core desktop::Review take_rejected), and
-                // said: a job, because the look lists the folders the
-                // confirmers' files are in - the viewer asks every couple of
-                // seconds and must not wait for it
+                // the review follows the confirmers (app-core desktop::Review
+                // look): which of this reviewer's waives are rejected, and
+                // who confirmed what, as their files say now. Nothing of the
+                // reviewer's is written. `returned`: the waives newly found
+                // rejected, a rule's with who rejected them and why;
+                // `changed`: the confirmers' files are others than at the
+                // look before - with `counts`, every rule's again. A job,
+                // because the look lists the folders those files are in -
+                // the viewer asks every couple of seconds and must not wait
                 ctx(&shared)?;
                 Ok(json!({"job": self.start("returned", move |shared, id, _stop| {
                     let result = (|| -> Result<Value> {
                         let mut o = shared.opened.lock().unwrap();
                         let r = super::review(&mut o)?;
-                        let returned = r.take_rejected()?;
-                        let mut rows = Vec::with_capacity(returned.len());
-                        for back in &returned {
-                            let (waived, total) = r.status_counts(back.check)?;
+                        let looked = r.look()?;
+                        let mut rows = Vec::with_capacity(looked.rejected.len());
+                        for back in &looked.rejected {
+                            let (waived, total) = r.lens_counts(back.check)?;
                             rows.push(json!({"check": back.check, "count": back.count, "by": back.by,
                                              "counts": [waived, total]}));
                         }
+                        let moved = looked.changed || !looked.rules.is_empty();
+                        let all = if moved { super::counts(r)? } else { Value::Null };
+                        // (who confirmed what is another thing: the classes
+                        // that ask it are every rule's to count again)
+                        let every = looked.changed && matches!(r.lens(), Lens::Waived | Lens::Confirmed);
                         drop(o);
-                        if !returned.is_empty() {
-                            shared.dirty.lock().unwrap().extend(returned.iter().map(|b| b.check));
-                            *shared.waives.lock().unwrap() = None;
-                            if returned.iter().map(|b| b.count).sum::<u64>() >= super::TEAM_SOON {
-                                shared.team_soon();
-                            }
+                        if every {
+                            let checks = shared.source.check_count();
+                            shared.dirty.lock().unwrap().extend(0..checks);
+                        } else {
+                            shared.dirty.lock().unwrap().extend(looked.rules.iter().copied());
                         }
-                        Ok(json!({"returned": rows}))
+                        if moved {
+                            *shared.waives.lock().unwrap() = None;
+                        }
+                        Ok(json!({"returned": rows, "rules": looked.rules, "changed": moved, "counts": all}))
                     })();
                     match result {
                         Ok(v) => shared.event(id, "returned", "done", v),

@@ -468,8 +468,9 @@ fn the_kept_counts_are_the_exact_ones_after_every_change() {
     assert!(rows(&kept, &id)[RULE][1] > CHUNK);
     // whatever three reviewers do, in whatever order - park a confirmer,
     // who confirms what is waived and what is not and takes it back, and
-    // rejects and takes that back (0.12.468); a reviewer's session turns
-    // its rejected waives back when it looks, which is now and then
+    // rejects and takes that back (0.12.468); a reviewer's session looks
+    // now and then, and waives the rejected waives it finds again, or
+    // leaves them rejected (0.12.469)
     let mut park = Session::open(&f, "park");
     park.review.set_confirmer(true);
     let mut people = [kim, lee, park];
@@ -502,7 +503,8 @@ fn the_kept_counts_are_the_exact_ones_after_every_change() {
         let most = if next(4) == 0 { 6000 } else { 40 };
         let b = (a + 1 + next(most)).min(N);
         // (park confirms or rejects a time in three; anyone looks for
-        // rejections of their waives a time in ten)
+        // rejections of their waives a time in ten - and answers them, or
+        // not)
         let action = if person == 2 && next(3) == 0 {
             8 + next(5)
         } else if next(10) == 0 {
@@ -524,7 +526,14 @@ fn the_kept_counts_are_the_exact_ones_after_every_change() {
             10 => who.confirm(a, b.min(a + 200), false),
             11 => who.review.reject_set(RULE, &[(a, b.min(a + 200))], "no").unwrap(),
             12 => drop(who.review.reject_drop(RULE, &[(a, b.min(a + 200))]).unwrap()),
-            _ => returned += who.review.take_rejected().unwrap().iter().map(|r| r.count).sum::<u64>(),
+            _ => {
+                let looked = who.review.look().unwrap();
+                for back in &looked.rejected {
+                    if next(3) > 0 {
+                        returned += who.review.resubmit(RULE, &back.runs).unwrap();
+                    }
+                }
+            }
         }
         let kept = f.merged(2000 + step, 10);
         f.agree(&kept, &format!("step {step}"));
@@ -534,7 +543,7 @@ fn the_kept_counts_are_the_exact_ones_after_every_change() {
         let most = match action {
             _ if files(person) != had => N.div_ceil(CHUNK),
             0 | 1 | 4 | 5 | 8 => 1,
-            // (the waives turned back lie wherever a rejection does)
+            // (the waives waived again lie wherever a rejection does)
             13 => N.div_ceil(CHUNK),
             _ => (b - 1) / CHUNK - a / CHUNK + 1,
         };
@@ -550,7 +559,7 @@ fn the_kept_counts_are_the_exact_ones_after_every_change() {
         excluded = excluded.max(kept.rules[RULE].not_required);
     }
     assert!(conflicts > 0 && excluded > 0 && confirmed > 0, "{conflicts} conflicts, {excluded} set aside, {confirmed} confirmed");
-    assert!(rejected > 0 && returned > 0, "{rejected} rejected, {returned} waives turned back");
+    assert!(rejected > 0 && returned > 0, "{rejected} rejected, {returned} waives waived again");
     assert!(counted >= 150, "{counted} chunks counted in 300 steps");
     assert_eq!(f.merged(2300, 10).reviewers, 3);
     // a session that ends and one that starts say nothing more: the log's
@@ -615,20 +624,20 @@ fn the_teams_waives_are_listed_and_confirmed_by_the_confirmer() {
     assert!(who(3).is_empty() && rows.iter().all(|r| r.confirmed_by.is_empty()));
     assert!(rows[1].reasons[0].time > 1_600_000_000 && v.rows(RULE, &[N]).is_err());
     // only a session started as a confirmer confirms
-    assert_eq!(confirm_chunk(&mut hong.review, &v, RULE, 0, None, true).unwrap_err().kind, ErrorKind::Unsupported);
+    assert_eq!(confirm_chunk(&mut hong.review, &mut v, RULE, 0, None, true).unwrap_err().kind, ErrorKind::Unsupported);
     assert_eq!(hong.review.confirm_set(RULE, &[0], true).unwrap_err().kind, ErrorKind::Unsupported);
     let file = f.file(".results.db.confirm.hong");
     assert!(!file.exists() && !hong.review.confirmer());
     hong.review.set_confirmer(true);
     // every waive of a chunk: the four somebody waived, no other error
-    assert_eq!(confirm_chunk(&mut hong.review, &v, RULE, 0, None, true).unwrap(), (4, 0));
+    assert_eq!(confirm_chunk(&mut hong.review, &mut v, RULE, 0, None, true).unwrap(), (4, 0));
     hong.review.sync_waives().unwrap();
     assert!(file.exists() && hong.review.confirms.counts()[RULE] == 4);
     // errors named one by one: the waived one is confirmed, the other said
     let named = Runs::new(vec![CHUNK + 5], vec![CHUNK + 7]);
-    assert_eq!(confirm_chunk(&mut hong.review, &v, RULE, 1, Some(&named), true).unwrap(), (1, 1));
-    assert_eq!(confirm_chunk(&mut hong.review, &v, RULE, 1, Some(&named), true).unwrap(), (0, 1));
-    assert_eq!(confirm_chunk(&mut hong.review, &v, RULE, 9, None, true).unwrap(), (0, 0));
+    assert_eq!(confirm_chunk(&mut hong.review, &mut v, RULE, 1, Some(&named), true).unwrap(), (1, 1));
+    assert_eq!(confirm_chunk(&mut hong.review, &mut v, RULE, 1, Some(&named), true).unwrap(), (0, 1));
+    assert_eq!(confirm_chunk(&mut hong.review, &mut v, RULE, 9, None, true).unwrap(), (0, 0));
     hong.review.sync_waives().unwrap();
     let mut v = view();
     assert_eq!(v.confirmers(), ["hong"]);
@@ -692,7 +701,7 @@ fn the_teams_waives_are_listed_and_confirmed_by_the_confirmer() {
     );
     assert_eq!((report["team"]["confirmed"].as_u64(), report["team"]["unconfirmed"].as_u64()), (Some(5), Some(0)));
     // a chunk's confirmations taken back whole
-    assert_eq!(confirm_chunk(&mut hong.review, &v, RULE, 0, None, false).unwrap(), (3, 0));
+    assert_eq!(confirm_chunk(&mut hong.review, &mut v, RULE, 0, None, false).unwrap(), (3, 0));
     hong.review.sync_waives().unwrap();
     let kept = f.merged(1004, 10);
     f.agree(&kept, "taken back");
@@ -708,6 +717,118 @@ fn the_teams_waives_are_listed_and_confirmed_by_the_confirmer() {
     let kept = f.merged(1005, 10);
     f.agree(&kept, "a confirm file of another result");
     assert!(kept.skipped.iter().any(|(who, path, _)| who == "hong" && *path == file));
+}
+
+/// A rejection is of each reviewer's waive until they waive the error again
+/// (0.12.469): the lists, the exact report and the kept counts class an
+/// error by its waives that are not rejected, say whose waive is rejected,
+/// by whom and why, and what a reviewer's own log keeps of it.
+#[test]
+fn a_rejected_waive_is_listed_until_its_reviewer_waives_it_again() {
+    use crate::drc::reasons::{runs_of, Kind as Reason};
+    use crate::drc::team::waives::{confirm_chunk, reject_runs, Counts as Waives, Kind, TeamWaives};
+    let f = Folder::new();
+    let id = f.id();
+    let stop = AtomicUsize::new(0);
+    let view = || TeamWaives::open(&f.pack, &f.id()).unwrap();
+    let counts = |waived, confirmed, rejected| Waives { waived, confirmed, unconfirmed: waived - confirmed, rejected };
+    let mut kim = Session::open(&f, "kim");
+    let mut lee = Session::open(&f, "lee");
+    let mut hong = Session::open(&f, "hong");
+    hong.review.set_confirmer(true);
+    kim.waive(&[0, 1, 2], true);
+    kim.review.reason_set(Reason::Waive, RULE, &runs_of(&[0, 1, 2]), "dummy fill").unwrap();
+    lee.waive(&[2, 3], true);
+    lee.review.reason_set(Reason::Waive, RULE, &runs_of(&[2]), "seal ring").unwrap();
+    // a rejection is of the errors somebody has waived: the other is said
+    let (runs, skipped) = reject_runs(&hong.review, &mut view(), RULE, &[1, 2, 9], true).unwrap();
+    assert_eq!((runs.clone(), skipped), (vec![(1, 3)], 1));
+    hong.review.reject_set(RULE, &runs, "not a dummy").unwrap();
+    // an error whose waives are all rejected is waived by nobody, and
+    // listed as that - with whose waive it is, who rejected it and why
+    let mut v = view();
+    assert_eq!(v.counts(Some(RULE), &stop).unwrap(), counts(2, 0, 2));
+    assert_eq!(v.page(RULE, Kind::Waived, 0, 10, &stop).unwrap(), (2, vec![0, 3]));
+    assert_eq!(v.page(RULE, Kind::Unconfirmed, 0, 10, &stop).unwrap(), (2, vec![0, 3]));
+    assert_eq!(v.page(RULE, Kind::Rejected, 0, 10, &stop).unwrap(), (2, vec![1, 2]));
+    assert_eq!(v.rules(&stop).unwrap(), [(RULE, counts(2, 0, 2))]);
+    let rows = v.rows(RULE, &[1, 2, 0]).unwrap();
+    fn names(list: &[String]) -> Vec<&str> {
+        list.iter().map(String::as_str).collect()
+    }
+    fn by(list: &[crate::drc::team::waives::Why]) -> Vec<(&str, &str)> {
+        list.iter().map(|w| (w.reviewer.as_str(), w.text.as_str())).collect()
+    }
+    assert_eq!((names(&rows[0].waived_by), names(&rows[0].rejected_of), by(&rows[0].rejected_by)), (vec!["kim"], vec!["kim"], vec![("hong", "not a dummy")]));
+    assert_eq!((names(&rows[1].waived_by), names(&rows[1].rejected_of), by(&rows[1].rejected_by)), (vec!["kim", "lee"], vec!["kim", "lee"], vec![("hong", "not a dummy")]));
+    assert_eq!(by(&rows[1].reasons), [("kim", "dummy fill"), ("lee", "seal ring")], "a rejected waive has its reason");
+    assert!(rows[2].rejected_of.is_empty() && rows[2].rejected_by.is_empty() && rows.iter().all(|r| r.history.is_empty()));
+    let kept = f.merged(1000, 10);
+    f.agree(&kept, "rejected");
+    assert_eq!((kept.rules[RULE].waived, kept.rules[RULE].rejected), (2, 2));
+    // each reviewer's row of the exact report: of their waives, the rejected
+    let report = f.report();
+    let person = |report: &serde_json::Value, name: &str| {
+        report["reviewers"].as_array().unwrap().iter().find(|r| r["id"] == name).unwrap().clone()
+    };
+    assert_eq!((person(&report, "kim")["waived"].as_u64(), person(&report, "kim")["waived_rejected"].as_u64()), (Some(3), Some(2)));
+    assert_eq!((person(&report, "lee")["waived_rejected"].as_u64(), person(&report, "hong")["rejected"].as_u64()), (Some(1), Some(2)));
+    assert_eq!(report["team"]["rejected"].as_u64(), Some(2));
+    // a rejected waive is not confirmed: the others of the chunk are
+    assert_eq!(confirm_chunk(&mut hong.review, &mut v, RULE, 0, None, true).unwrap(), (2, 0));
+    hong.review.sync_waives().unwrap();
+    assert_eq!(view().counts(Some(RULE), &stop).unwrap(), counts(2, 2, 2));
+    // one of the two reviewers waives the error again: it is waived - by
+    // them - and waits for the confirmer; the other's waive is rejected
+    // still. What was is kept, and listed
+    assert_eq!(kim.review.look().unwrap().rejected[0].runs, [(1, 3)]);
+    assert_eq!(kim.review.resubmit(RULE, &[(2, 3)]).unwrap(), 1);
+    kim.review.reason_set(Reason::Waive, RULE, &[(2, 3)], "dummy fill, rule note 4").unwrap();
+    let mut v = view();
+    assert_eq!(v.counts(Some(RULE), &stop).unwrap(), counts(3, 2, 1));
+    assert_eq!(v.page(RULE, Kind::Unconfirmed, 0, 10, &stop).unwrap(), (1, vec![2]));
+    assert_eq!(v.page(RULE, Kind::Rejected, 0, 10, &stop).unwrap(), (1, vec![1]));
+    let row = v.rows(RULE, &[2]).unwrap().remove(0);
+    assert_eq!((names(&row.waived_by), names(&row.rejected_of), by(&row.rejected_by)), (vec!["kim", "lee"], vec!["lee"], vec![("hong", "not a dummy")]));
+    assert_eq!(by(&row.reasons), [("kim", "dummy fill, rule note 4"), ("lee", "seal ring")]);
+    let past: Vec<(&str, &str, &str, &str)> = row
+        .history
+        .iter()
+        .map(|p| (p.reviewer.as_str(), p.event.what, p.event.by.as_str(), p.event.text.as_str()))
+        .collect();
+    assert_eq!(past, [("kim", "waived", "", "dummy fill"), ("kim", "rejected", "hong", "not a dummy")]);
+    assert!(serde_json::to_value(&row).unwrap()["history"][1]["by"] == "hong");
+    let kept = f.merged(1001, 10);
+    f.agree(&kept, "waived again");
+    assert_eq!((kept.rules[RULE].waived, kept.rules[RULE].rejected), (3, 1));
+    let report = f.report();
+    assert_eq!((person(&report, "kim")["waived_rejected"].as_u64(), person(&report, "lee")["waived_rejected"].as_u64()), (Some(1), Some(1)));
+    // rejected again: of the waive that is none - a new rejection, for
+    // every reviewer who has the error waived to answer; the error whose
+    // waives are all rejected already is not rejected again
+    let (runs, skipped) = reject_runs(&hong.review, &mut v, RULE, &[1, 2], true).unwrap();
+    assert_eq!((runs.clone(), skipped), (vec![(2, 3)], 1));
+    hong.review.reject_set(RULE, &runs, "see me").unwrap();
+    let mut v = view();
+    assert_eq!(v.counts(Some(RULE), &stop).unwrap(), counts(2, 2, 2));
+    let row = v.rows(RULE, &[2]).unwrap().remove(0);
+    assert_eq!((names(&row.rejected_of), by(&row.rejected_by)), (vec!["kim", "lee"], vec![("hong", "see me")]));
+    assert_eq!(row.history.len(), 2);
+    f.agree(&f.merged(1002, 10), "rejected again");
+    // taken back: the errors this confirmer's log holds - the waives are
+    // as they were, at once, and what was answered stays kept
+    let (runs, skipped) = reject_runs(&hong.review, &mut v, RULE, &[0, 1, 2], false).unwrap();
+    assert_eq!((runs.clone(), skipped), (vec![(1, 3)], 0));
+    assert!(hong.review.reject_drop(RULE, &runs).unwrap());
+    let mut v = view();
+    assert_eq!(v.counts(Some(RULE), &stop).unwrap(), counts(4, 2, 0));
+    assert_eq!(v.page(RULE, Kind::Rejected, 0, 10, &stop).unwrap(), (0, vec![]));
+    let row = v.rows(RULE, &[2]).unwrap().remove(0);
+    assert!(row.rejected_of.is_empty() && row.rejected_by.is_empty() && row.history.len() == 2);
+    let kept = f.merged(1003, 10);
+    f.agree(&kept, "taken back");
+    assert_eq!((kept.rules[RULE].waived, kept.rules[RULE].rejected), (4, 0));
+    assert_eq!(rows_of(&kept, &id)[5..8], [2, 2, 0]);
 }
 
 /// The log makes the answer cheap; the files' times are what makes it right:

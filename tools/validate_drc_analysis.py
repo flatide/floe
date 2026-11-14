@@ -1952,7 +1952,8 @@ class ReasonAnswer(object):
     def __init__(self, text=""):
         self.text, self.asked = text, []
 
-    def __call__(self, kind, count, prefill="", known=(), parent=None):
+    def __call__(self, kind, count, prefill="", known=(), parent=None,
+                 rejected_by=()):
         self.asked.append((kind, count, prefill, tuple(known)))
         return self.text
 

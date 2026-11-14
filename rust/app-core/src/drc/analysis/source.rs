@@ -179,7 +179,19 @@ pub enum Statuses {
 }
 
 impl Statuses {
+    /// 1 = of the class the review's lens shows - the waived errors, with
+    /// no filter of states on (`desktop::Lens`): what the scopes count,
+    /// page and rank by.
     pub fn read(&self, check: usize, start: u64, count: u64) -> Result<Vec<u8>> {
+        match self {
+            Self::Review(r) => r.lensed(check, start, count),
+            Self::None => Ok(vec![0; count as usize]),
+        }
+    }
+
+    /// 1 = waived and not rejected, whatever the lens: what an action
+    /// asks (the `w` key's toggle).
+    pub fn waived(&self, check: usize, start: u64, count: u64) -> Result<Vec<u8>> {
         match self {
             Self::Review(r) => r.statuses(check, start, count),
             Self::None => Ok(vec![0; count as usize]),

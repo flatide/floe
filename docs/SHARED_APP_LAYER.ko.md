@@ -685,6 +685,10 @@ P4d처럼 컨트롤러 루프에서만 바뀐다. `FLOE_GTK_LOOP=legacy`는 예�
 
 사용자: "confirmer가 다른 리뷰어의 waive를 반려할 수 있게 해줘"
 
+> 0.12.469(§25)에서 바뀌었다: 반려된 waive는 되돌려지지 않고 상태로 남고, 리뷰어가 다시 waive해 답한다.
+> 아래에서 `take_rejected`(지금은 `look`), "다시 waive하지 않는다", `Planes.rejected`의 뜻, `.team`의
+> 버전은 §25가 맞다. 기록의 `r`/`R` 줄, 확인자의 `reject_set`/`reject_drop`, 폴더를 훑지 않는 규칙은 그대로다.
+
 - **규칙:** 확인자가 반려한 에러는 누구의 waive로도 세지 않고, 그 에러를 waive한 리뷰어의 세션이 자기 waive를 되돌리며, 반려한 확인자가 풀 때까지 어느 세션도(확인자의 세션도) 다시 waive하지 않는다. confirm된 waive도 반려되면 잠기지 않는다.
 - **기록:** 확인자 자신의 `.<db>.rejects.<리뷰어>`. `drc::reasons`의 기록을 그대로 쓰고 종류 `Kind::Reject`(줄 머리 `r`/`R`)가 늘었다. 이 종류만 사유가 비어도 줄이 된다(`Kind::bare`). 사유 파일과 달리 이 기록이 반려 여부 자체다. `Reasons::open_as(title, …)`로 첫 줄(`# floe drc waive rejections`)만 다르게 연다. `desktop::Review`가 자기 것을 갖는다(`review.rejects`).
   - 에러당 바이트(confirm 파일의 값 2)로 두지 않은 이유: confirm 파일의 룰별 카운터가 반려를 세지 않아 팀 합계가 그 룰을 건너뛰고, 0.12.466·467의 confirm 취소가 그 바이트를 지우며 카운터를 깎는다. 따로 둔 파일은 옛 빌드가 모른 채로 안전하다.
@@ -699,3 +703,23 @@ P4d처럼 컨트롤러 루프에서만 바뀐다. `FLOE_GTK_LOOP=legacy`는 예�
 - **웹(머지할 때):** 웹의 리뷰 저장소는 `desktop::Review`를 거치지 않으므로 반려를 모른다. 반려를 받으려면 그 저장소의 상태 쓰기에 같은 거절을 넣고, 세션이 `take_rejected`에 해당하는 일을 해야 한다. 통계(`floe2 drc`)는 공유라 그대로 옳다.
 - **한계:** 반려된 에러를 리뷰어가 다시 올리는 길(재상신)은 없다. 확인자의 첫 반려와 다른 호스트의 반려는 다음 확인에서 보인다. 0.12.467 이하의 뷰어는 반려를 따르지 않는다.
 - **게이트:** `drc_team` R17·R7, 단위 app-core `drc::tests`(`a_rejected_waive_is_turned_back_and_not_waived_until_the_rejection_is_taken_back`), `drc::confirm`(반려 기록 읽기), `drc::changes`(네 번째 시각), `drc::team::live`(판정 표의 7가지, 반려를 섞은 무작위 300단계), `drc::team::stats`(팀 규칙, 구간 비트), `drc::reasons`(세 종류의 무작위 1,500단계).
+
+## 25. rejected 상태와 다시 waive, 네 상태의 필터 (2026-11-14, app 0.12.469) — 상태 판정과 필터의 클래스는 공유 Rust, 필터 고르기와 표시는 호스트
+
+사용자: "메인 목록에서 상태 4가지로 필터할 수 있어야 하고 reject 된 에러는 rejected로 분류되어야 할 것 같음. 리뷰어가 사유를 수정해서 다시 waive를 할 수 있게 하되, 이 때 이전의 waive사유나 반려사유는 계속 유지되어야 할 것 같음. 상태머신으로 보면 REJECTED에서 Unreject으로 NOT WAIVED로 가는게 아니라 waive로 WAIVED로 가도록 해야 할 것 같으니 검토해서 수정해줘."
+
+- **규칙:** 반려는 리뷰어의 파일을 바꾸지 않는다. waive 바이트와 사유는 그대로 있고, 그 waive는 확인자의 반려에 리뷰어가 답할 때까지 rejected다. 답은 사유를 준 다시 waive다. 리뷰어의 상태는 넷이다: not waived, waived(판정 전), rejected, confirmed. rejected는 어디에서도 waive로 세지 않고 잠기지 않는다.
+- **무엇이 rejected인가(`confirm::unanswered`):** 확인자의 기록이 에러를 쥔 반려(`confirm::Standing { by, time, text, runs }`: 누가, 언제)를 갖고 있고, 리뷰어 자신의 반려 기록에 그 반려를 가리키는 답(`Kind::Answered`, 줄 머리 `j`: 누구, 그 시각)이 그 에러에 대해 없으면 그 리뷰어의 waive는 rejected다. 시계를 비교하지 않는다. 한 기록의 반려는 저마다 다른 시각을 갖는다(`Reasons::latest` + 1). 다시 반려하면 새 반려다.
+- **기록(`drc::reasons`):** 반려 기록의 형식 버전이 2다(`REJECTS_VERSION`; `Reasons::open_as(title, version, …)`, 읽기는 버전 1도 받고 그 사람의 세션이 열 때 2로 고쳐 쓴다). 쌓이는 종류 둘이 늘었다(`Kind::kept`): `Answered`(`j <룰> <시각> <구간> <누구> [<사유>]`)와 `Earlier`(`p …`: 그 waive가 가졌던 사유). `Reasons::keep`, `kept`, `kept_at`(일어난 순서), `answered(check, by, time)`. 쌓이는 줄은 앞 줄에서 아무것도 가져가지 않고 다시 쓸 때도 남는다.
+- **상태 읽기(`desktop::Review`):** `statuses`/`status`는 waive이고 rejected가 아닌 것에 1을 준다(전부터 이 값을 읽던 모든 곳이 rejected를 waive로 세지 않는다). `states`는 0·1·2·3(`STATE_NONE`·`WAIVED`·`REJECTED`·`CONFIRMED`), `state_counts(check)`는 [not waived, waived, rejected, confirmed]. 파일의 바이트 그대로는 쓰기 함수 안에서만 쓴다. 바이트가 말하지 않는 것은 `Overlay`가 갖는다(이 리뷰어의 답하지 않은 반려 구간, 확인자들의 confirm 파일): 리뷰와 다른 스레드의 `StatusReader`가 같이 쓴다. 표시용 읽기는 폴더를 훑지 않는다(`Overlay`가 마지막 확인이 찾은 confirm 파일을 쓴다).
+- **필터의 클래스(`desktop::Lens`):** 호스트의 필터가 보이는 에러의 클래스를 `Review::set_lens`로 정한다(`Live` 기본, `Held`, `Waived`, `Confirmed`, `Rejected`). `Review::lensed`·`StatusReader::lensed`·`analysis::source::Statuses::read`·`impl clusters::Statuses for Review`가 그 클래스에 1을 준다. 그래서 `status_page`·`status_rank`·`query`와 클러스터·CD 그룹·선택의 개수·페이지·순위가 전부 그 클래스의 것이 되고, 그 함수들의 `waived: bool`·`Option<bool>` 인자는 그대로다(Not Waived는 `Held`에 거짓). `lens_counts(check)`가 룰의 (그 클래스의 수, 전체)다. 동작을 정하는 읽기(토글 방향)는 클래스와 무관하게 `Statuses::waived`를 쓴다. 클래스가 바뀌면 호스트가 자기가 세어 둔 것을 버린다(서비스는 모든 룰을 다시 세게 한다). 쓰기 함수는 바이트만으로 정해지는 경우에만 구간별 개수를 제자리에서 고치고(`Review::steps`), 아니면 다시 세게 한다.
+- **쓰기 함수:** 답하지 않은 반려 아래의 에러는 waive 쓰기가 남긴다(`Left.rejected`, `Kept.rejected`: 바이트가 0이든 1이든). 사유가 있는 호출자가 `Review::resubmit(check, runs)`를 부른다: 그 waive가 가졌던 사유(`p`)와 답하는 반려들(`j`)을 자기 기록에 남기고, 되돌려져 있던 것은 waive로 쓰고, 구간을 `touched`로 말한다. 그 뒤 호출자가 `reason_set`으로 새 사유를 준다. 사유가 없으면 부르지 않는다(동료 결정 적용, 이전 런 승계, waive 파일 로드가 그렇다). rejected인 waive를 unwaive하면 그 사유가 `p`로 남는다. `write_status_span`은 호출자가 읽은 대로 둔 에러를 파일 그대로 둔다(rejected는 0으로 읽히지만 지워지지 않는다).
+- **확인자:** `reject_set`은 새 시각의 반려를 적는다(자기 waive는 unwaive, 자기 confirm은 지움). `confirm_set`·`confirm_span`으로 confirm하면 그 에러에 대한 자기 반려를 푼다. `team::waives::reject_runs`는 반려되지 않은 waive가 있는 에러만 대상으로 한다.
+- **따라가기(`Review::look`):** `take_rejected`를 대신한다. 폴더를 다시 훑어 확인자들의 기록을 읽고 상태를 맞춘다. 아무것도 쓰지 않는다. `Looked { rejected, rules, changed }`: 아직 말하지 않은 이 리뷰어의 rejected waive(룰별, 누가·왜), 분류가 바뀐 룰, 확인자들의 파일이 달라졌는지. 리뷰를 열 때도 한 번 읽어 두므로 첫 상태 읽기부터 맞다. 잠금의 폴더 훑기는 이 확인의 것을 쓰지 않는다(확인 직후에 생긴 확인자의 첫 confirm도 바로 잠근다).
+- **집계:** `stats::Planes.rejected`는 "이 리뷰어가 답하지 않은 반려 아래의 에러"다. `team_of`는 리뷰어마다 `waived & !rejected`를 waive로 세고, `Team.rejected`는 반려된 waive만 있고 세는 waive가 없는 에러 수다. `stats::collect`와 `live`의 `count`가 룰마다 모든 기록의 반려를 모아 리뷰어별 구간을 만든다(답이 없는 리뷰어는 같은 구간을 쓴다). `.team`은 버전 4(배치는 3과 같다). 리뷰어 줄의 `waived_rejected`는 그 사람의 waive 중 rejected인 수.
+- **목록(`team::waives`):** `Row.rejected_of`(누구의 waive가 rejected인가), `Row.rejected_by`(답하지 않은 반려), `Row.history`(`Past { reviewer, what, by, text, time }`: 그 리뷰어의 기록이 간직한 것). `Kind::Rejected`는 waive가 전부 반려된 에러다.
+- **서비스(floe2):** `drc_status`가 상태 바이트를 준다. `drc_lens {lens}`. `drc_set_status`와 review job(`waive`)은 사유가 있으면 반려된 대상을 다시 waive하고 `resubmitted`(0이 아닐 때만)를, 없으면 `rejected`·`rejected_by`를 답한다. `drc_reason_read`의 `rejected_by`(입력창용), `drc_reason_get`의 `history`(둘 다 있을 때만 키가 있다). `drc_team_returned`의 답은 `{returned, rules, changed, counts}`. `drc_team_waive_get`에 `rejected_of`·`history`. 이 세션이 자기 리뷰를 쓰면 서비스가 간직한 팀 목록을 버린다(다음 페이지가 새로 읽는다).
+- **호스트가 할 일:** 필터를 바꿀 때 클래스를 알린다. 주기적으로 `look`을 부르고, `changed`이면 읽어 둔 상태와 개수를 버린다. rejected인 대상을 waive할 때 사유를 받는다(없으면 남는다는 것을 알린다). 표시는 호스트의 것이다(GTK: 필터 콤보의 다섯 항목, 주황 번호, 상세의 `[rejected]`와 `before:` 줄).
+- **웹(머지할 때):** 웹의 리뷰 저장소는 `desktop::Review`를 거치지 않는다. 같은 규칙을 쓰려면 상태 판정에 `confirm::unanswered`를, 다시 waive에 `Reasons::keep`(`Earlier`, `Answered`)를 쓰고, 필터는 `Lens`에 해당하는 클래스를 자기 조회에 넣는다. 통계(`floe2 drc`)는 공유라 그대로 옳다.
+- **한계:** 두 확인자가 엇갈리면(한 사람 confirm, 다른 사람 반려) 답하거나 풀리는 순간 남아 있던 confirm이 다시 세어진다(confirm 바이트에는 시각이 없다). 확인자의 첫 반려(새 파일)와 다른 호스트의 반려는 다음 확인에서 보인다. 0.12.468의 뷰어는 버전 2의 기록을 읽지 않는다(반려를 따르지 않는다. 그 사람 자신의 0.12.468 세션이 열면 기록을 `.stale`로 치운다). `save waives as…`의 파일은 바이트 그대로라 rejected인 waive도 waive로 들어 있다.
+- **게이트:** `drc_team` R17·R7(R15·R16은 상태 바이트 3을 waive로 읽게 고침), 단위 app-core `drc::tests`(`a_rejected_waive_is_a_state_until_its_reviewer_waives_it_again`), `drc::reasons`(`what_a_reviewer_answered_is_kept_as_it_was`), `drc::confirm`(누가 언제의 반려인가, 답), `drc::team::live`(`a_rejected_waive_is_listed_until_its_reviewer_waives_it_again`, 다시 waive를 섞은 무작위 300단계), `drc::team::stats`.

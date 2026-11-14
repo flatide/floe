@@ -18,7 +18,7 @@
 | 색인 잠금 (2026-10-09, §5) | **`.floe-lock/`** — 대상과 같은 디렉터리의 숨김 폴더, 대상마다 `<키>.build`·`<키>.use` | `.chipA.oas.ice/` → `.floe-lock/chipA.oas.vfs.build` | — |
 | DRC 리뷰 사이드카 (리뷰어별 waive·note) | `.<db>.waive.<user>`, `.<db>.notes.<user>.fe` — **db 이름** 기준 | `.results.db.waive.jkim` | 같음 (pack 이름에서 `.ice`를 벗겨 만들던 것을 db 이름 기준으로 바꿈; 결과는 동일) |
 | DRC waive·검토 제외의 사유 (리뷰어별, 2026-11-13, app 0.12.463) | `.<db>.reasons.<user>` — waive 사이드카와 같은 자리, 작업 한 번에 한 줄(DRC.ko.md §2, SPEC-FORMATS) | `.results.db.reasons.jkim` | — |
-| DRC waive의 반려 (확인자별, 2026-11-14, app 0.12.468) | `.<db>.rejects.<user>` — waive 사이드카와 같은 자리. 그 확인자가 waive를 반려한 에러, 작업 한 번에 한 줄(어느 에러·언제·왜; DRC.ko.md §2, SPEC-FORMATS). 처음 반려할 때 만든다 | `.results.db.rejects.jkim` | — |
+| DRC waive의 반려와 그 답 (리뷰어별, 2026-11-14, app 0.12.468; 0.12.469부터 형식 버전 2) | `.<db>.rejects.<user>` — waive 사이드카와 같은 자리. 확인자로서 waive를 반려한 에러, 그리고 리뷰어로서 다시 waive해 답한 반려와 그때 waive가 가졌던 사유. 작업 한 번에 한 줄(어느 에러·언제·왜; DRC.ko.md §2, SPEC-FORMATS). 처음 반려하거나 처음 답할 때 만든다 | `.results.db.rejects.jkim` | — |
 | DRC waive의 confirm (확인자별, 2026-11-13, app 0.12.466) | `.<db>.confirm.<user>` — waive 사이드카와 같은 자리. 그 확인자가 confirm한 에러(에러당 1바이트, 룰별 카운터; DRC.ko.md §2, SPEC-FORMATS). 처음 confirm할 때 만든다 | `.results.db.confirm.jkim` | — |
 | DRC 리뷰의 변경 기록 (리뷰어별, 2026-11-13, app 0.12.465) | `.<db>.changes.<user>` — waive 사이드카와 같은 자리. 그 리뷰어의 세션이 바꾼 구간만 적는다(SPEC-FORMATS). 지워도 된다: 팀 합계가 그 리뷰어의 룰을 다시 센다. `FLOE_TEAM_KEEP=off`면 만들지 않는다 | `.results.db.changes.jkim` | — |
 | DRC 팀 합계의 캐시 (2026-11-13, app 0.12.465) | **`.<db>.team`** — pack 옆에 하나. `floe2 drc --review-counts`의 `team`이 읽고 고친다(DRC-CLI.ko.md §2c, SPEC-FORMATS). 지워도 된다: 다음 조회가 다시 센다. 고치는 동안의 잠금은 `.floe-lock/<db>.team.build` | `.results.db.team` | — |

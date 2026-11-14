@@ -44,6 +44,7 @@
 use super::bits::{Bits, CHUNK};
 use super::flags::{self, open_read_only, sql};
 use super::Identity;
+use crate::drc::confirm;
 use crate::drc::desktop::STATUS_WAIVED;
 use crate::drc::reasons::{Kind, Reasons};
 use crate::drc::Pack;
@@ -375,11 +376,12 @@ struct Own {
     /// of this reviewer's waives, the ones a confirmer has confirmed
     /// (None: not counted - the kept counters cannot say it)
     waived_confirmed: Option<u64>,
-    /// the errors whose waive this reviewer has rejected (their rejects
-    /// log's)
+    /// the errors whose waive this reviewer has rejected and neither
+    /// confirmed nor taken back since (their rejects log's)
     rejected: u64,
-    /// of this reviewer's waives, the ones a confirmer has rejected and
-    /// their session has not turned back yet (None: not counted)
+    /// of this reviewer's waives, the ones that are rejected: under a
+    /// confirmer's rejection this reviewer has not answered by waiving
+    /// again (None: not counted)
     waived_rejected: Option<u64>,
 }
 impl Own {
@@ -444,8 +446,9 @@ pub struct Team {
     pub waived_any: u64,
     /// of those, the ones a confirmer has confirmed
     pub confirmed: u64,
-    /// the errors whose waive a confirmer has rejected (0.12.468): no
-    /// waive of them counts above, whoever's file still says one
+    /// the errors whose every waive is rejected (0.12.468; 0.12.469: a
+    /// waive is rejected until its reviewer waives the error again): they
+    /// are waived by nobody above, and wait for their reviewers
     pub rejected: u64,
 }
 impl Team {
@@ -471,8 +474,8 @@ impl Team {
             // a conflict's too - that still wait for it
             "confirmed": self.confirmed,
             "unconfirmed": self.waived_any.saturating_sub(self.confirmed),
-            // the errors a confirmer has rejected the waive of: none of the
-            // numbers above counts a waive of them
+            // the errors whose waives are all rejected: none of the numbers
+            // above counts a rejected waive
             "rejected": self.rejected,
         })
     }
@@ -486,7 +489,8 @@ pub(super) struct Planes {
     pub(super) not_required: Bits,
     /// the errors whose waive this reviewer confirmed
     pub(super) confirmed: Bits,
-    /// the errors whose waive this reviewer rejected
+    /// the errors under a rejection this reviewer has not answered: a
+    /// waive of theirs of one of them is rejected (`confirm::unanswered`)
     pub(super) rejected: Bits,
     pub(super) visited_known: bool,
     pub(super) waive_known: bool,
@@ -507,14 +511,16 @@ pub(super) fn run_bits(runs: &[(u64, u64)], start: u64, count: u64) -> Bits {
 }
 
 /// The team's counts of one chunk from its reviewers' planes
-/// (snapshot::aggregate's rule). A waive a confirmer has rejected is no
-/// waive: it is taken out of every reviewer's before anything is counted.
+/// (snapshot::aggregate's rule). A rejected waive is no waive: it is taken
+/// out of its reviewer's before anything is counted - and an error whose
+/// waives are all rejected is counted as that.
 pub(super) fn team_of(planes: &[Planes]) -> Team {
     let (mut v, mut w, mut n, mut c) = (Bits::ZERO, Bits::ZERO, Bits::ZERO, Bits::ZERO);
     let (mut wy, mut wn, mut ny, mut nn) = (Bits::ZERO, Bits::ZERO, Bits::ZERO, Bits::ZERO);
-    let rejected = planes.iter().fold(Bits::ZERO, |r, p| r | p.rejected);
+    let mut rejected = Bits::ZERO;
     for p in planes {
-        let waived = p.waived & !rejected;
+        let waived = p.waived & !p.rejected;
+        rejected |= p.waived & p.rejected;
         v |= p.visited;
         w |= waived;
         n |= p.not_required;
@@ -541,7 +547,7 @@ pub(super) fn team_of(planes: &[Planes]) -> Team {
         // a confirmation counts while somebody has the error waived
         waived_any: w.count(),
         confirmed: (w & c).count(),
-        rejected: rejected.count(),
+        rejected: (rejected & !w).count(),
     }
 }
 
@@ -552,8 +558,9 @@ struct Reviewer {
     waive: Option<(PathBuf, &'static str)>,
     flags: Option<(PathBuf, &'static str)>,
     confirm: Option<(PathBuf, &'static str)>,
-    /// the rejects log and what it holds: each rule's rejected runs
-    rejects: Option<((PathBuf, &'static str), Vec<Vec<(u64, u64)>>)>,
+    /// the rejects log as read: the rejections this reviewer made, and
+    /// the ones of their own waives they answered
+    rejects: Option<((PathBuf, &'static str), Reasons)>,
     rules: Vec<Own>,
     stored: Option<Vec<u32>>,
     /// the reasons file, what it says, and the errors each of its actions
@@ -931,10 +938,11 @@ pub(super) fn collect_from(
                 Err(e) => skip(&tag, &path, e.message),
             }
         }
-        // the waives this reviewer rejected: their log's runs (drc::reasons)
+        // the waives this reviewer rejected, and the rejections of their
+        // own they answered: their rejects log (drc::reasons)
         if let Some((path, place)) = files.rejects {
-            match rejected_runs(&path, id) {
-                Ok(Some(runs)) => reviewer.rejects = Some(((path, place), runs)),
+            match rejects_log(&path, id) {
+                Ok(Some(log)) => reviewer.rejects = Some(((path, place), log)),
                 Ok(None) => (),
                 Err(e) => skip(&tag, &path, e.message),
             }
@@ -990,6 +998,24 @@ pub(super) fn collect_from(
             })
             .collect();
         let mut cursors = vec![[0usize; 2]; reviewers.len()];
+        // every rejection of this rule that stands, and each reviewer's
+        // errors under one they have not answered - a waive of theirs
+        // there is rejected (the same errors for everybody who answered
+        // nothing in the rule)
+        let standing: Vec<confirm::Standing> = reviewers
+            .iter()
+            .flat_map(|r| r.rejects.iter().flat_map(|(_, log)| confirm::standing_of(&r.tag, log, ci)))
+            .collect();
+        let open_all = confirm::unanswered(&standing, None, ci);
+        let opens: Vec<Option<Vec<(u64, u64)>>> = reviewers
+            .iter()
+            .map(|r| match &r.rejects {
+                Some((_, log)) if !standing.is_empty() && log.kept(Kind::Answered, ci).next().is_some() => {
+                    Some(confirm::unanswered(&standing, Some(log), ci))
+                }
+                _ => None,
+            })
+            .collect();
         let mut start = 0u64;
         while start < size {
             if (start / CHUNK).is_multiple_of(256) {
@@ -1038,17 +1064,13 @@ pub(super) fn collect_from(
                     }
                     None => Bits::ZERO,
                 };
-                let rejected = match &r.rejects {
-                    Some((_, runs)) => run_bits(&runs[ci], start, count),
-                    None => Bits::ZERO,
-                };
+                let rejected = run_bits(opens[i].as_deref().unwrap_or(&open_all), start, count);
                 let own = &mut owns[i];
                 own.waived += waived.count();
                 own.visited += visited.count();
                 own.not_required += not_required.count();
                 own.both += (visited & not_required).count();
                 own.confirmed += confirmed.count();
-                own.rejected += rejected.count();
                 planes.push(Planes {
                     visited,
                     waived,
@@ -1060,19 +1082,21 @@ pub(super) fn collect_from(
                     not_required_known: r.flags.is_some(),
                 });
             }
-            // of each reviewer's waives, the ones a confirmer has confirmed
-            // and the ones a confirmer has rejected (which their session
-            // has yet to turn back, and which no confirmation counts for)
+            // of each reviewer's waives, the ones that are rejected, and of
+            // the others the ones a confirmer has confirmed
             let any = planes.iter().fold(Bits::ZERO, |c, p| c | p.confirmed);
-            let gone = planes.iter().fold(Bits::ZERO, |c, p| c | p.rejected);
-            if !any.is_zero() || !gone.is_zero() {
-                for (own, p) in owns.iter_mut().zip(&planes) {
-                    *own.waived_confirmed.get_or_insert(0) += (p.waived & any & !gone).count();
-                    *own.waived_rejected.get_or_insert(0) += (p.waived & gone).count();
-                }
+            for (own, p) in owns.iter_mut().zip(&planes) {
+                *own.waived_confirmed.get_or_insert(0) += (p.waived & !p.rejected & any).count();
+                *own.waived_rejected.get_or_insert(0) += (p.waived & p.rejected).count();
             }
             team[ci].add(&team_of(&planes));
             start += count;
+        }
+        // (the errors each reviewer's own log rejects, as a confirmer)
+        for (own, r) in owns.iter_mut().zip(&reviewers) {
+            if let Some((_, log)) = &r.rejects {
+                own.rejected = log.runs(Kind::Reject, ci).iter().map(|&(a, b, _)| b - a).sum();
+            }
         }
         drop(heads);
         drop(rows);
@@ -1237,7 +1261,13 @@ pub(super) fn waive_of(mut file: File, id: &Identity) -> Result<(File, Vec<u32>)
 /// rejected errors as runs (None: no file). Another result's is an error
 /// (ErrorKind::Cache), as the reasons' are.
 pub(super) fn rejected_runs(path: &Path, id: &Identity) -> Result<Option<Vec<Vec<(u64, u64)>>>> {
-    Ok(Reasons::load(path, &id.result_tag(), &id.sizes)?.map(|log| rejected_of(&log, id.sizes.len())))
+    Ok(rejects_log(path, id)?.map(|log| rejected_of(&log, id.sizes.len())))
+}
+
+/// A reviewer's rejects log at `path` as it reads: None without a file, an
+/// error for a file that is not this result's.
+pub(super) fn rejects_log(path: &Path, id: &Identity) -> Result<Option<Reasons>> {
+    Reasons::load(path, &id.result_tag(), &id.sizes)
 }
 
 /// `rejected_runs` of a log already read.
@@ -1461,27 +1491,38 @@ mod tests {
             json!({"errors": 200, "visited": 7, "waived": 14, "not_required": 10, "conflicts": 1,
                    "pending": 183, "confirmed": 4, "unconfirmed": 11, "rejected": 0})
         );
-        // a waive a confirmer has rejected is no waive, whoever's file still
-        // says one: park rejects 0 (kim's waive, lee visited it and left it:
-        // the conflict), 3 (kim's, confirmed by two), 12 (lee's, confirmed)
-        // and 70 (nobody's). The conflict is none any more, the confirmations
-        // of 0, 3 and 12 count for nothing, and four errors are rejected
-        let mut park = planes(&[], &[], &[], false, true);
-        park.rejected = bits(&[0, 3, 12, 70]);
-        let t = team_of(&[kim, lee, park, hong, yoon]);
+        // a rejected waive is no waive, though its reviewer's file has it:
+        // a confirmer rejects 0 (kim's waive, lee visited it and left it: the
+        // conflict), 3 (kim's, confirmed by two), 12 (lee's, confirmed) and
+        // 70 (nobody's) - every reviewer's errors under a rejection they have
+        // not answered. The conflict is none any more, the confirmations of
+        // 0, 3 and 12 count for nothing, and three errors - the ones that
+        // were waived - are rejected
+        let under = bits(&[0, 3, 12, 70]);
+        let (mut kim, mut lee) = (kim, lee);
+        (kim.rejected, lee.rejected) = (under, under);
+        let t = team_of(&[kim, lee, hong, yoon]);
         assert_eq!(
             t,
-            Team { visited: 7, waived: 12, not_required: 10, conflicts: 0, done: 17, waived_any: 12, confirmed: 1, rejected: 4 }
+            Team { visited: 7, waived: 12, not_required: 10, conflicts: 0, done: 17, waived_any: 12, confirmed: 1, rejected: 3 }
         );
         assert_eq!(
             t.json(200),
             json!({"errors": 200, "visited": 7, "waived": 12, "not_required": 10, "conflicts": 0,
-                   "pending": 183, "confirmed": 1, "unconfirmed": 11, "rejected": 4})
+                   "pending": 183, "confirmed": 1, "unconfirmed": 11, "rejected": 3})
         );
-        // (two confirmers' same rejection is one)
-        let mut choi = planes(&[], &[], &[], false, false);
-        choi.rejected = bits(&[3, 70, 71]);
-        assert_eq!(team_of(&[kim, lee, park, hong, yoon, choi]).rejected, 5);
+        // a reviewer who waived a rejected error again - theirs is a waive
+        // from then, whatever is rejected of the others': the error is
+        // waived, by them, and not rejected (0 and 3 are confirmed still:
+        // their confirmations count again)
+        let mut again = planes(&[], &[0, 3], &[], false, true);
+        again.rejected = bits(&[12, 70]);
+        let t = team_of(&[kim, lee, hong, yoon, again]);
+        assert_eq!((t.waived_any, t.confirmed, t.rejected), (14, 3, 1), "0 and 3 are waived again; 12 waits for lee");
+        // (kim visited 0 and waived it, lee visited it and did not: with a
+        // waive of the error that counts, theirs is no conflict - kim's own
+        // waive of it is rejected, and is nobody's judgement)
+        assert_eq!(t.conflicts, 0);
         // an exclusion two visitors disagree on is a conflict too, and is not
         // counted as excluded; a waive-only file never conflicts
         let a = planes(&[1], &[], &[1], true, true);
