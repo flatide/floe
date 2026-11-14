@@ -3833,10 +3833,214 @@ def r17(temp):
         check(bool(last) and last[-1][3] > 0, "%s's change log says their rejects log's time" % name, last[-2:])
 
 
+def r18(temp):
+    print("[R18] floe2 drc --team-counts: the team's counts in brief - one line, the total and the rules that have errors")
+    d = temp / "brief"
+    d.mkdir()
+    sizes = [9000, 0, 300, 5000]
+    names = ["A.W", "CLEAN.0", 'M,1 "q" 한글', "A.W"]       # (a name the result has twice)
+    write_db(d / "t.db", [(names[0], [_poly(100 * (i % 120), 60 * (i // 120)) for i in range(sizes[0])]),
+                          (names[1], []),
+                          (names[2], [_edge(200 * (i % 50), 100 * (i // 50)) for i in range(sizes[2])]),
+                          (names[3], [_poly(-1000 - 10 * i, -1000, 8, 8) for i in range(sizes[3])])])
+    r = run([INDEX, "drc", str(d / "t.db")])
+    check(r.returncode == 0, "floe-index drc t.db", r.stderr)
+    db = d / "t.db"
+    total = sum(sizes)
+    starts = [sum(sizes[:i]) for i in range(len(sizes))]
+    keys = ("errors", "waived", "confirmed", "rejected", "visited", "ignored")
+    # by hand: what each reviewer's file has waived, visited and set aside,
+    # who confirmed what, and the errors under a rejection nobody answered
+    people = {n: ({}, {}, {}, True) for n in ("kim", "lee", "hong")}
+    confirms, rejected = {}, {}
+
+    def live(name, ci):
+        return people[name][0].get(ci, set()) - rejected.get(name, {}).get(ci, set())
+
+    def rows():
+        out = []
+        for ci, size in enumerate(sizes):
+            held = set().union(*[p[0].get(ci, set()) for p in people.values()])
+            alive = set().union(*[live(n, ci) for n in people])
+            marked = set().union(*[c.get(ci, set()) for c in confirms.values()] or [set()])
+            out.append(dict(errors=size, waived=len(alive), confirmed=len(alive & marked),
+                            rejected=len(held - alive),
+                            visited=len(set().union(*[p[1].get(ci, set()) for p in people.values()])),
+                            ignored=len(set().union(*[p[2].get(ci, set()) for p in people.values()]))))
+        return out
+
+    def hand(only=None, every=False):
+        """The answer as it is to be, byte for byte: the keys in their order,
+        the rules in the result's, a name twice one entry, no blank. The
+        rules that have errors; `every`: all of them; `only`: that name."""
+        by_rule = rows()
+        rule = {}
+        for name, row in zip(names, by_rule):
+            if (only is None and not every and row["errors"] == 0) or (only is not None and name != only):
+                continue
+            if name in rule:
+                for k in keys:
+                    rule[name][k] += row[k]
+            else:
+                rule[name] = dict(row)
+        whole = {k: sum(row[k] for row in by_rule) for k in keys}
+        return json.dumps({"total": whole, "rule": rule}, separators=(",", ":"), ensure_ascii=False) + "\n"
+
+    def brief(*more, env=None):
+        return run_env([FLOE2, "drc", str(db), "--team-counts"] + list(more), env or {})
+
+    def agree(what, env=None):
+        r = brief(env=env)
+        check(r.returncode == 0 and r.stdout == hand() and r.stderr == "", what,
+              (r.returncode, r.stdout[:300], hand()[:300], r.stderr[-200:]))
+        return r
+
+    # ---- 1. nobody has reviewed: the errors, and nothing made
+    r = agree("nobody has reviewed: the total and each rule that has errors, in one line")
+    got = json.loads(r.stdout)
+    check(r.stdout.count("\n") == 1
+          and " " not in r.stdout.replace(json.dumps(names[2], ensure_ascii=False), "")
+          and list(got) == ["total", "rule"] and list(got["total"]) == list(keys)
+          and list(got["rule"]) == ["A.W", names[2]] and got["rule"]["A.W"]["errors"] == sizes[0] + sizes[3]
+          and got["total"]["errors"] == total and not (d / ".t.db.team").exists(),
+          "... no blank in it, the keys and the rules in their order, a name twice one entry, the rule without errors left out",
+          r.stdout[:200])
+    a, b = Svc(), Svc()
+    try:
+        hk = rs_open(a, db, "kim")["handle"]
+        hl = rs_open(a, db, "lee")["handle"]
+        hh = b("drc_open", path=str(db), mode="load", reviewer="hong", confirmer=True)["handle"]
+        b.svc.drc_watch(hh)
+        # ---- 2. two reviewers: waives, visits, exclusions - and two errors
+        # they judged differently
+        a("drc_set_status", handle=hk, check=0, errors=[0, 1, 2, 3, 4095, 4096], status=1, reason="dummy fill")
+        people["kim"][0][0] = {0, 1, 2, 3, 4095, 4096}
+        a("drc_set_status", handle=hk, check=3, errors=list(range(100)), status=1, reason="seal ring")
+        people["kim"][0][3] = set(range(100))
+        e = a.job(hk, "drc_review", check=0, action="not-required", errors=[10, 11], on=True, reason="out of scope")
+        people["kim"][2][0] = {10, 11}
+        for error in (1, 5, 10):
+            a("drc_visit", handle=hk, check=0, error=error)
+        a.visits(hk, 3)
+        people["kim"][1][0] = {1, 5, 10}
+        a("drc_set_status", handle=hl, check=0, errors=[2, 20], status=1)
+        people["lee"][0][0] = {2, 20}
+        a("drc_set_status", handle=hl, check=2, errors=[5], status=1)
+        people["lee"][0][2] = {5}
+        for error in (1, 10):
+            a("drc_visit", handle=hl, check=0, error=error)
+        a.visits(hl, 2)
+        people["lee"][1][0] = {1, 10}
+        r = agree("two reviewers: every number a union - an error both waived is one")
+        got = json.loads(r.stdout)
+        nums, t, full = team_now(db, "--all-rules")
+        whole = got["total"]
+        check(e["state"] == "done" and t["conflicts"] == 2
+              and whole["waived"] == t["waived"] + 1 == t["confirmed"] + t["unconfirmed"]
+              and whole["ignored"] == t["not_required"] + 1 == 2
+              and whole["visited"] == t["visited"] and whole["rejected"] == t["rejected"] == 0,
+              "... a judgement two visitors differ on counts on the side of the one who made it (--review-counts says it as a conflict)",
+              (whole, {k: t[k] for k in ("waived", "not_required", "conflicts", "confirmed", "unconfirmed")}))
+        check(len(r.stdout) * 4 < len(json.dumps(full)), "... a fraction of --review-counts --all-rules",
+              (len(r.stdout), len(json.dumps(full))))
+        # ---- 3. a confirmer confirms and rejects; a reviewer waives again
+        b.job(hh, "drc_team_confirm", check=0, errors=[0, 2, 3], on=True)
+        confirms["hong"] = {0: {0, 2, 3}}
+        b.job(hh, "drc_team_reject", check=0, errors=[4095], on=True, reason="no")
+        b.job(hh, "drc_team_reject", check=3, errors=[0, 1, 2], on=True, reason="not a seal ring")
+        rejected["kim"] = {0: {4095}, 3: {0, 1, 2}}
+        rejected["lee"] = {0: {4095}, 3: {0, 1, 2}}
+        r = agree("confirmed and rejected: the confirmed are of the waived, the rejected are none of them")
+        whole = json.loads(r.stdout)["total"]
+        check((whole["confirmed"], whole["rejected"]) == (3, 4) and whole["waived"] == 6 + 100 + 1 + 1 - 4,
+              "... (three confirmed, four rejected)", whole)
+        a.job(hk, "drc_team_returned")
+        a("drc_set_status", handle=hk, check=3, errors=[0], status=1, reason="seal ring, sheet 2")
+        rejected["kim"][3].discard(0)
+        agree("a rejected waive waived again with a reason: waived, not rejected")
+        # ---- 4. one rule named: the whole result's total and that rule
+        for name in ("A.W", names[2], "CLEAN.0"):
+            r = brief("--rule", name)
+            check(r.returncode == 0 and r.stdout == hand(name) and list(json.loads(r.stdout)["rule"]) == [name],
+                  "--rule %s: the total and that rule alone%s" % (
+                      name, " - one without errors too, when it is asked for" if name == "CLEAN.0" else ""),
+                  (r.stdout[:200], hand(name)[:200]))
+        check(json.loads(brief("--rule=A.W").stdout)["rule"]["A.W"]["errors"] == sizes[0] + sizes[3],
+              "... a name the result has twice is the sum of its rules")
+        r = brief("--rule", "NOPE")
+        check(r.returncode == 1 and r.stdout == "" and "no such rule" in r.stderr,
+              "a rule the result does not have: exit 1, nothing on stdout", (r.returncode, r.stdout, r.stderr[-200:]))
+        # ---- 4b. every rule asked for: the ones without errors too
+        r = brief("--all-rules")
+        got = json.loads(r.stdout) if r.returncode == 0 else {"rule": {}, "total": None}
+        check(r.returncode == 0 and r.stdout == hand(every=True) and r.stderr == ""
+              and list(got["rule"]) == ["A.W", "CLEAN.0", names[2]]
+              and got["rule"]["CLEAN.0"] == dict.fromkeys(keys, 0)
+              and got["total"] == json.loads(brief().stdout)["total"],
+              "--all-rules: every rule in the result's order, the one without errors as zeros - the total the same",
+              (r.returncode, r.stdout[:300], hand(every=True)[:300], r.stderr[-200:]))
+        # ---- 5. the arguments
+        bad = [["--review-counts"], ["--review-stats"], ["--rules"], ["--list"], ["--errs", "A.W"],
+               ["--rule"], ["--rule", "A.W", "--rule", "A.W"], ["--rule", "A.W", "--all-rules"]]
+        said = [(args, brief(*args)) for args in bad]
+        check(all(r.returncode == 2 and r.stdout == "" for _args, r in said),
+              "what the brief report does not go with is refused (exit 2)",
+              [(args, r.returncode) for args, r in said if r.returncode != 2])
+        r = run_env([FLOE2, "drc", str(db), "--rule", "A.W"], {})
+        check(r.returncode == 2, "--rule alone is refused", r.returncode)
+        # ---- 6. the next answer has a click, a job and a visit
+        a("drc_set_status", handle=hk, check=2, errors=[7, 8], status=1, reason="two more")
+        people["kim"][0][2] = {7, 8}
+        agree("a click: in the next answer")
+        e = a.job(hk, "drc_review", check=3, action="not-required", errors=list(range(4000, 4500)), on=True)
+        people["kim"][2][3] = set(range(4000, 4500))
+        a("drc_visit", handle=hl, check=3, error=4999)
+        a.visits(hl, 1)
+        people["lee"][1][3] = {4999}
+        agree("a job's 500 exclusions and a visit: in the next answer")
+        r = agree("FLOE_TEAM_KEEP=off: the same answer, counted for it", env=dict(FLOE_TEAM_KEEP="off"))
+    finally:
+        a.close()
+        b.close()
+    agree("the sessions closed: the same")
+    cache = d / ".t.db.team"
+    check(cache.exists() and struct.unpack_from("<I", cache.read_bytes(), 8)[0] == 5,
+          "the kept counts are version 5 (the errors anybody set aside are counted)")
+    # ---- 7. what is not in the counts yet, and what is left out, is said
+    # on stderr: the answer stays the one line
+    side = d / ".t.db.waive.kim"
+    data = bytearray(side.read_bytes())
+    data[40 + starts[0] + 500] = 1
+    at = 40 + total
+    struct.pack_into("<I", data, at, struct.unpack_from("<I", data, at)[0] + 1)
+    was = file_state(side)
+    side.write_bytes(bytes(data))
+    while os.stat(side).st_mtime_ns <= was[1]:
+        time.sleep(0.002)
+        os.utime(side)
+    before = hand()
+    r = brief()
+    check(r.returncode == 0 and r.stdout == before and r.stderr.startswith("[drc] team counts: kim's review files"),
+          "a file changed without a record: the answer as it was, and why on stderr", (r.stdout == before, r.stderr[-200:]))
+    people["kim"][0][0].add(500)
+    agree("... counted at once without a grace", env=dict(FLOE_TEAM_GRACE_S="0"))
+    other = d / ".t.db.waive.park"
+    other.write_bytes(bytes([data[0] ^ 1]) + bytes(data[1:]))
+    r = brief(env=dict(FLOE_TEAM_GRACE_S="0"))
+    check(r.returncode == 0 and r.stdout == hand() and "park's" in r.stderr and "left out" in r.stderr,
+          "a file that is not this result's: left out, and said on stderr", r.stderr[-300:])
+    other.unlink()
+    # ---- 8. no pack: no answer of zeros
+    (d / "none.db").write_text((d / "t.db").read_text())
+    r = run_env([FLOE2, "drc", str(d / "none.db"), "--team-counts"], {})
+    check(r.returncode == 1 and r.stdout == "", "a result that is not indexed: exit 1, nothing on stdout",
+          (r.returncode, r.stdout[:80], r.stderr[-200:]))
+
+
 def main():
-    global r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12, r13, r14, r15, r16, r17
-    r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12, r13, r14, r15, r16, r17 = map(
-        timed, (r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12, r13, r14, r15, r16, r17))
+    global r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12, r13, r14, r15, r16, r17, r18
+    r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12, r13, r14, r15, r16, r17, r18 = map(
+        timed, (r1, r1_identity, r1_reindex, r2, r3, r4, r5, r6, r8, r9, r10, r11, r12, r13, r14, r15, r16, r17, r18))
     temp = Path(tempfile.mkdtemp(prefix="floe-drc-team-"))
     try:
         d = temp / "runs"
@@ -3864,6 +4068,7 @@ def main():
         r15(temp)
         r16(temp)
         r17(temp)
+        r18(temp)
         if "--no-gui" not in sys.argv:
             from validate_drc_team_gui import r7
             timed(r7)(temp, check)

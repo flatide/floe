@@ -450,6 +450,10 @@ pub struct Team {
     /// waive is rejected until its reviewer waives the error again): they
     /// are waived by nobody above, and wait for their reviewers
     pub rejected: u64,
+    /// the errors somebody has set aside from the review - conflicts too:
+    /// the union, as `waived_any` is of the waives (0.12.470, what the
+    /// brief report says)
+    pub not_required_any: u64,
 }
 impl Team {
     pub(super) fn add(&mut self, o: &Team) {
@@ -461,6 +465,7 @@ impl Team {
         self.waived_any += o.waived_any;
         self.confirmed += o.confirmed;
         self.rejected += o.rejected;
+        self.not_required_any += o.not_required_any;
     }
     pub(super) fn json(&self, total: u64) -> Value {
         json!({
@@ -537,6 +542,7 @@ pub(super) fn team_of(planes: &[Planes]) -> Team {
         }
     }
     let conflict = (wy & wn) | (ny & nn);
+    let not_required_any = n.count();
     let n = n & !conflict;
     Team {
         visited: v.count(),
@@ -548,7 +554,139 @@ pub(super) fn team_of(planes: &[Planes]) -> Team {
         waived_any: w.count(),
         confirmed: (w & c).count(),
         rejected: (rejected & !w).count(),
+        not_required_any,
     }
+}
+
+/// The team's counts in brief: a rule's, or the whole result's (user
+/// 2026-11-14: "팀 작업 통계 cli 명령의 결과를 다음과 같이 간략하게 받고
+/// 싶음. 빈번히 조회되는 것이어서 데이터량을 줄이고 ProperTee에서 별도의
+/// 처리없이 넘기려는 의도임" - `{ "total": {errors, waived, confirmed,
+/// rejected, visited, ignored}, "rule": [ "GRX.1": {...}, ... ] }`). Every
+/// number is a union - an error somebody waived, visited, set aside - so
+/// `confirmed` is never more than `waived`, and a judgement two visitors
+/// differ on counts on the side of the one who made it (the full reports
+/// say `conflicts`; this one has no word for them).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Brief {
+    pub errors: u64,
+    /// waived by somebody - a waive that is not rejected, confirmed or not
+    pub waived: u64,
+    /// of those, confirmed by a confirmer
+    pub confirmed: u64,
+    /// the errors whose waives are all rejected (none of `waived`)
+    pub rejected: u64,
+    pub visited: u64,
+    /// set aside from the review by somebody ("not for review")
+    pub ignored: u64,
+}
+
+impl Brief {
+    fn of(team: &Team, errors: u64) -> Self {
+        Self {
+            errors,
+            waived: team.waived_any,
+            confirmed: team.confirmed,
+            rejected: team.rejected,
+            visited: team.visited,
+            ignored: team.not_required_any,
+        }
+    }
+    fn add(&mut self, o: &Brief) {
+        self.errors += o.errors;
+        self.waived += o.waived;
+        self.confirmed += o.confirmed;
+        self.rejected += o.rejected;
+        self.visited += o.visited;
+        self.ignored += o.ignored;
+    }
+    fn write(&self, out: &mut String) {
+        use std::fmt::Write;
+        let _ = write!(
+            out,
+            "{{\"errors\":{},\"waived\":{},\"confirmed\":{},\"rejected\":{},\"visited\":{},\"ignored\":{}}}",
+            self.errors, self.waived, self.confirmed, self.rejected, self.visited, self.ignored
+        );
+    }
+}
+
+/// Which rules the brief report lists beside the total.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BriefRules<'a> {
+    /// the rules that have errors: a rule without one has nothing to count
+    /// (a field result of 17,000 rules has 1,500 of those)
+    WithErrors,
+    /// the rule of this name alone, with errors or without
+    Named(&'a str),
+    /// every rule, the ones without errors too
+    All,
+}
+
+/// The brief report's text: `{"total":{…},"rule":{"NAME":{…},…}}` on one
+/// line, no blank in it but a name's own - the keys in this order, the
+/// rules in the result's. `total` is the whole result's; `rule` has the
+/// rules `listed`. A name the result has twice is one entry, the sum of its
+/// rules. `names`, `sizes` and `teams` are the rules' in the result's order.
+pub fn brief_text(names: &[&str], sizes: &[u64], teams: &[Team], listed: BriefRules) -> Result<String> {
+    let mut total = Brief::default();
+    let mut rules: Vec<(&str, Brief)> = Vec::new();
+    let mut at: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for ((name, &size), team) in names.iter().zip(sizes).zip(teams) {
+        let own = Brief::of(team, size);
+        total.add(&own);
+        match listed {
+            BriefRules::Named(only) if only != *name => continue,
+            BriefRules::WithErrors if size == 0 => continue,
+            _ => (),
+        }
+        match at.get(name) {
+            Some(&i) => rules[i].1.add(&own),
+            None => {
+                at.insert(name, rules.len());
+                rules.push((name, own));
+            }
+        }
+    }
+    if let (BriefRules::Named(only), true) = (listed, rules.is_empty()) {
+        return Err(Error::input(format!("no such rule {only:?} (see --rules)")));
+    }
+    let mut out = String::with_capacity(96 + rules.len() * 96);
+    out.push_str("{\"total\":");
+    total.write(&mut out);
+    out.push_str(",\"rule\":{");
+    for (i, (name, own)) in rules.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&serde_json::to_string(name).map_err(|e| Error::new(ErrorKind::Io, e.to_string()))?);
+        out.push(':');
+        own.write(&mut out);
+    }
+    out.push_str("}}");
+    Ok(out)
+}
+
+/// `floe2 drc DB --team-counts [--rule NAME | --all-rules]`: the team's
+/// kept counts (`live::merge`, as `counts` brings them up to date) in brief
+/// (`brief_text`), and what there is to say beside them - why the counts
+/// do not cover every reviewer's files yet, which files were left out - for
+/// the caller's stderr: the answer itself is the one line, to be handed on
+/// as it is. No reviewer's own counters are read for it.
+pub fn brief(source: &Path, listed: BriefRules, cancelled: &AtomicUsize) -> Result<(String, Vec<String>)> {
+    let pack = crate::drc::open_pack_directory(source, cancelled)?;
+    let id = Identity::of_pack(&pack, "statistics")?;
+    let found = discover(&pack.path)?;
+    let kept = super::live::merge_found(&pack.path, &id, &found, cancelled)?;
+    let names: Vec<&str> = pack.checks.iter().map(|c| c.name.as_str()).collect();
+    let text = brief_text(&names, &id.sizes, &kept.rules, listed)?;
+    pack.unchanged()?;
+    let mut said = kept.waiting.clone();
+    said.extend(
+        kept.skipped
+            .iter()
+            .map(|(reviewer, file, why)| format!("{reviewer}'s {} is left out: {why}", file.display())),
+    );
+    Ok((text, said))
 }
 
 /// A reviewer being counted: where the files are and the counts so far
@@ -852,10 +990,22 @@ fn counts_from(
 pub(super) fn collect_from(
     pack: &Pack,
     id: &Identity,
-    mut found: BTreeMap<String, Found>,
+    found: BTreeMap<String, Found>,
     only: Option<&[String]>,
     cancelled: &AtomicUsize,
 ) -> Result<Value> {
+    Ok(collect_with(pack, id, found, only, cancelled)?.0)
+}
+
+/// `collect_from`, with the team's counts a rule as they were counted (what
+/// the kept counts are held against, number for number).
+pub(super) fn collect_with(
+    pack: &Pack,
+    id: &Identity,
+    mut found: BTreeMap<String, Found>,
+    only: Option<&[String]>,
+    cancelled: &AtomicUsize,
+) -> Result<(Value, Vec<Team>)> {
     let total = id.total();
     let rules = id.sizes.len();
     let mut absent = Vec::new();
@@ -1191,7 +1341,7 @@ pub(super) fn collect_from(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    Ok(json!({
+    let report = json!({
         "type": TYPE,
         "version": VERSION,
         "generated": utc(now),
@@ -1208,7 +1358,8 @@ pub(super) fn collect_from(
         "reviewers": people,
         "team": team_json,
         "skipped": skipped,
-    }))
+    });
+    Ok((report, team))
 }
 
 fn next_flags(rows: &mut Option<rusqlite::Rows<'_>>) -> Result<Option<(u64, Bits, Bits)>> {
@@ -1447,6 +1598,77 @@ mod tests {
         }
     }
 
+    /// The team's counts in brief (0.12.470, user 2026-11-14: "팀 작업 통계
+    /// cli 명령의 결과를 다음과 같이 간략하게 ... 특정 룰이 옵션에 명시되면
+    /// 전체와 해당 룰만 포함하고 특정 룰이 없을 경우 전체와 모든 룰을
+    /// 포함해서"): one line, the keys and the rules in their order, the
+    /// rules that have errors - or the one named.
+    #[test]
+    fn the_brief_report_is_one_line_of_the_total_and_the_rules_with_errors() {
+        let team = |waived_any, confirmed, rejected, visited, not_required_any| Team {
+            visited,
+            waived: waived_any,
+            not_required: not_required_any,
+            conflicts: 0,
+            done: visited,
+            waived_any,
+            confirmed,
+            rejected,
+            not_required_any,
+        };
+        let names = ["GRX.1", "CLEAN", "M1 \"S\".1", "GRX.1", "한글,룰"];
+        let sizes = [100u64, 0, 7, 20, 3];
+        let teams = [team(10, 5, 1, 30, 10), Team::default(), team(7, 0, 0, 0, 0), team(1, 1, 2, 3, 4), Team::default()];
+        let text = brief_text(&names, &sizes, &teams, BriefRules::WithErrors).unwrap();
+        // one line, no blank but a name's own; the rule without errors is
+        // left out; a name the result has twice is one entry, summed, where
+        // the first of them is
+        assert_eq!(
+            text,
+            concat!(
+                r#"{"total":{"errors":130,"waived":18,"confirmed":6,"rejected":3,"visited":33,"ignored":14},"#,
+                r#""rule":{"GRX.1":{"errors":120,"waived":11,"confirmed":6,"rejected":3,"visited":33,"ignored":14},"#,
+                r#""M1 \"S\".1":{"errors":7,"waived":7,"confirmed":0,"rejected":0,"visited":0,"ignored":0},"#,
+                r#""한글,룰":{"errors":3,"waived":0,"confirmed":0,"rejected":0,"visited":0,"ignored":0}}}"#
+            )
+        );
+        assert!(!text.contains('\n'));
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed["rule"]["M1 \"S\".1"]["waived"], 7);
+        assert_eq!(parsed["rule"].as_object().unwrap().len(), 3);
+        // a rule named: the whole result's total and that rule alone - one
+        // without errors too, when it is asked for
+        assert_eq!(
+            brief_text(&names, &sizes, &teams, BriefRules::Named("M1 \"S\".1")).unwrap(),
+            concat!(
+                r#"{"total":{"errors":130,"waived":18,"confirmed":6,"rejected":3,"visited":33,"ignored":14},"#,
+                r#""rule":{"M1 \"S\".1":{"errors":7,"waived":7,"confirmed":0,"rejected":0,"visited":0,"ignored":0}}}"#
+            )
+        );
+        let clean = brief_text(&names, &sizes, &teams, BriefRules::Named("CLEAN")).unwrap();
+        assert!(clean.ends_with(r#""rule":{"CLEAN":{"errors":0,"waived":0,"confirmed":0,"rejected":0,"visited":0,"ignored":0}}}"#));
+        let twice: Value =
+            serde_json::from_str(&brief_text(&names, &sizes, &teams, BriefRules::Named("GRX.1")).unwrap()).unwrap();
+        assert_eq!((twice["rule"]["GRX.1"]["errors"].as_u64(), twice["rule"].as_object().unwrap().len()), (Some(120), 1));
+        let e = brief_text(&names, &sizes, &teams, BriefRules::Named("NOPE")).unwrap_err();
+        assert!(e.message.contains("no such rule \"NOPE\""), "{}", e.message);
+        // every rule, asked for: the one without errors in its place
+        let all = brief_text(&names, &sizes, &teams, BriefRules::All).unwrap();
+        assert!(all.starts_with(&text[..text.find(r#","rule""#).unwrap()]), "the same total");
+        assert!(
+            all.contains(r#"},"CLEAN":{"errors":0,"waived":0,"confirmed":0,"rejected":0,"visited":0,"ignored":0},"M1 "#),
+            "{all}"
+        );
+        let parsed: Value = serde_json::from_str(&all).unwrap();
+        assert_eq!(parsed["rule"].as_object().unwrap().len(), 4);
+        // a result without an error, and one without a rule
+        assert_eq!(
+            brief_text(&["A"], &[0], &[Team::default()], BriefRules::WithErrors).unwrap(),
+            r#"{"total":{"errors":0,"waived":0,"confirmed":0,"rejected":0,"visited":0,"ignored":0},"rule":{}}"#
+        );
+        assert!(brief_text(&[], &[], &[], BriefRules::All).unwrap().ends_with(r#""rule":{}}"#));
+    }
+
     #[test]
     fn a_rules_runs_are_a_chunks_bits() {
         let runs = [(0u64, 3u64), (10, 12), (4090, 4100), (8191, 8193)];
@@ -1471,7 +1693,7 @@ mod tests {
         let t = team_of(&[kim, lee, park]);
         assert_eq!(
             t,
-            Team { visited: 7, waived: 14, not_required: 10, conflicts: 1, done: 17, waived_any: 15, confirmed: 0, rejected: 0 }
+            Team { visited: 7, waived: 14, not_required: 10, conflicts: 1, done: 17, waived_any: 15, confirmed: 0, rejected: 0, not_required_any: 10 }
         );
         // a confirmer's confirmations count on the errors somebody has
         // waived - a conflict's waive too (error 0) - and on no other: of
@@ -1484,7 +1706,7 @@ mod tests {
         let t = team_of(&[kim, lee, park, hong, yoon]);
         assert_eq!(
             t,
-            Team { visited: 7, waived: 14, not_required: 10, conflicts: 1, done: 17, waived_any: 15, confirmed: 4, rejected: 0 }
+            Team { visited: 7, waived: 14, not_required: 10, conflicts: 1, done: 17, waived_any: 15, confirmed: 4, rejected: 0, not_required_any: 10 }
         );
         assert_eq!(
             t.json(200),
@@ -1504,7 +1726,7 @@ mod tests {
         let t = team_of(&[kim, lee, hong, yoon]);
         assert_eq!(
             t,
-            Team { visited: 7, waived: 12, not_required: 10, conflicts: 0, done: 17, waived_any: 12, confirmed: 1, rejected: 3 }
+            Team { visited: 7, waived: 12, not_required: 10, conflicts: 0, done: 17, waived_any: 12, confirmed: 1, rejected: 3, not_required_any: 10 }
         );
         assert_eq!(
             t.json(200),
@@ -1524,14 +1746,22 @@ mod tests {
         // waive of it is rejected, and is nobody's judgement)
         assert_eq!(t.conflicts, 0);
         // an exclusion two visitors disagree on is a conflict too, and is not
-        // counted as excluded; a waive-only file never conflicts
+        // counted as excluded - though it is one of the errors somebody set
+        // aside (`not_required_any`, the brief report's `ignored`); a
+        // waive-only file never conflicts
         let a = planes(&[1], &[], &[1], true, true);
         let b = planes(&[1], &[], &[], true, true);
         let c = planes(&[], &[1], &[], false, true);
         let t = team_of(&[a, b, c]);
         assert_eq!(
             t,
-            Team { visited: 1, waived: 0, not_required: 0, conflicts: 1, done: 1, waived_any: 1, confirmed: 0, rejected: 0 }
+            Team { visited: 1, waived: 0, not_required: 0, conflicts: 1, done: 1, waived_any: 1, confirmed: 0, rejected: 0, not_required_any: 1 }
+        );
+        // (the brief report says the unions: the waive a visitor differs on
+        // is waived, the exclusion one differs on is ignored)
+        assert_eq!(
+            Brief::of(&t, 9),
+            Brief { errors: 9, waived: 1, confirmed: 0, rejected: 0, visited: 1, ignored: 1 }
         );
         // nobody: nothing
         assert_eq!(team_of(&[]), Team::default());
@@ -1539,7 +1769,7 @@ mod tests {
         let t = team_of(&[planes(&[3], &[3, 4], &[9], true, true)]);
         assert_eq!(
             t,
-            Team { visited: 1, waived: 2, not_required: 1, conflicts: 0, done: 2, waived_any: 2, confirmed: 0, rejected: 0 }
+            Team { visited: 1, waived: 2, not_required: 1, conflicts: 0, done: 2, waived_any: 2, confirmed: 0, rejected: 0, not_required_any: 1 }
         );
     }
 }

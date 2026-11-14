@@ -51,8 +51,27 @@ const HELP: &str = "Usage: floe2-web drc RESULTS.db|.RESULTS.db.tray [OPTIONS]
                           are not counted again (--review-stats does), and no
                           reasons are counted. FLOE_TEAM_KEEP=off: .DB.team
                           is not written, the team counted for each answer
-  --rule NAME             With --review-counts: list this rule
-  --all-rules             With --review-counts: list every rule
+  --rule NAME             With --review-counts: list this rule. With
+                          --team-counts: this rule alone
+  --all-rules             With --review-counts: list every rule. With
+                          --team-counts: the rules without errors too
+  --team-counts           The team's counts in brief, one line of JSON to hand
+                          on as it is: `total`, then `rule` - an object of
+                          the rules by name -, each with errors, waived,
+                          confirmed, rejected, visited, ignored. No blank in
+                          it, the keys in this order, the rules in the
+                          result's. `total` is the whole result's; `rule` has
+                          the rules that have errors - with --all-rules every
+                          rule, with --rule NAME that rule alone (a name the
+                          result has twice is one entry). Everyone's review
+                          united, from the counts
+                          --review-counts keeps (.DB.team): waived = waived by
+                          somebody and not rejected, confirmed or not;
+                          confirmed = of those, confirmed; rejected = the
+                          errors whose waives are all rejected; ignored = set
+                          aside from the review (not for review) by
+                          somebody. What is not in the counts yet, and the
+                          files left out, are said on stderr
   --svrf-rules FILE       Explicit rules.json metadata for --rules / --errs
   --build                 Explicitly build/reuse .RESULTS.db.tray, migrate legacy name.
                           A pack is reused when the database is the file that
@@ -78,7 +97,7 @@ compared (CRC-32), and the answer kept as .RESULTS.db.tray.source so the next
 open reads nothing. Reviews are bound to the pack's content id (what the
 errors are): a pack made again, a copied folder and a re-run with the same
 errors keep them.
---review-counts keeps one file beside the pack, the team's counts
+--review-counts and --team-counts keep one file beside the pack, the team's counts
 (.RESULTS.db.team; none where the folder takes no file, or with
 FLOE_TEAM_KEEP=off): a kept answer, like .RESULTS.db.tray.source - no review
 is changed by it.
@@ -100,6 +119,7 @@ pub struct Command {
     jobs: Option<usize>,
     review_stats: bool,
     review_counts: bool,
+    team_counts: bool,
     rule: Option<String>,
     all_rules: bool,
 }
@@ -116,6 +136,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
         jobs: None,
         review_stats: false,
         review_counts: false,
+        team_counts: false,
         rule: None,
         all_rules: false,
     };
@@ -157,6 +178,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
             }
             "--review-stats" if inline.is_none() => c.review_stats = true,
             "--review-counts" if inline.is_none() => c.review_counts = true,
+            "--team-counts" if inline.is_none() => c.team_counts = true,
             "--all-rules" if inline.is_none() => c.all_rules = true,
             "--errs" | "--floe-reviewer" | "--svrf-rules" | "--jobs" | "--rule" => {
                 let value = if let Some(s) = inline {
@@ -206,6 +228,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
             || c.svrf_rules.is_some()
             || c.review_stats
             || c.review_counts
+            || c.team_counts
             || c.rule.is_some()
             || c.all_rules
         {
@@ -228,8 +251,15 @@ pub fn parse(args: &[String]) -> Result<Command> {
             "--review-counts is a report of its own: without --review-stats / --list / --rules / --errs / --svrf-rules",
         ));
     }
-    if (c.rule.is_some() || c.all_rules) && !c.review_counts {
-        return Err(Error::input("--rule / --all-rules require --review-counts"));
+    if c.team_counts
+        && (c.review_counts || c.review_stats || c.list || c.rules || c.errs.is_some() || c.svrf_rules.is_some())
+    {
+        return Err(Error::input(
+            "--team-counts is a report of its own: without --review-counts / --review-stats / --list / --rules / --errs / --svrf-rules",
+        ));
+    }
+    if (c.rule.is_some() || c.all_rules) && !(c.review_counts || c.team_counts) {
+        return Err(Error::input("--rule / --all-rules require --review-counts or --team-counts"));
     }
     if c.rule.is_some() && c.all_rules {
         return Err(Error::input("--rule and --all-rules: one of the two"));
@@ -266,6 +296,9 @@ pub fn run(command: Command, cancelled: &AtomicUsize) -> Result<i32> {
     }
     if command.review_stats {
         return review_stats(&source, command.reviewer.as_deref(), cancelled);
+    }
+    if command.team_counts {
+        return team_counts(&source, command.rule.as_deref(), command.all_rules, cancelled);
     }
     if command.review_counts {
         return review_counts(
@@ -450,6 +483,35 @@ fn review_counts(
         "--review-counts is not in this build (the reviewers' flags are read by floe2)",
     ))
 }
+/// `--team-counts`: the team's kept union in brief, one line of JSON on
+/// stdout and nothing else there (app-core drc::team::stats `brief`) - a
+/// caller hands it on as it is. What there is to say beside it goes to
+/// stderr.
+#[cfg(feature = "review-sqlite")]
+fn team_counts(source: &std::path::Path, rule: Option<&str>, all_rules: bool, cancelled: &AtomicUsize) -> Result<i32> {
+    use floe_app_core::drc::team::stats::{brief, BriefRules};
+    let listed = match rule {
+        Some(name) => BriefRules::Named(name),
+        None if all_rules => BriefRules::All,
+        None => BriefRules::WithErrors,
+    };
+    let (text, said) = brief(source, listed, cancelled)?;
+    for line in said {
+        eprintln!("[drc] team counts: {line}");
+    }
+    let mut out = io::stdout().lock();
+    out.write_all(text.as_bytes())?;
+    out.write_all(b"\n")?;
+    out.flush()?;
+    Ok(0)
+}
+#[cfg(not(feature = "review-sqlite"))]
+fn team_counts(_source: &std::path::Path, _rule: Option<&str>, _all_rules: bool, _cancelled: &AtomicUsize) -> Result<i32> {
+    Err(Error::new(
+        ErrorKind::Unsupported,
+        "--team-counts is not in this build (the reviewers' flags are read by floe2)",
+    ))
+}
 /// `--review-stats`: the reviewers' statistics of the database's current
 /// pack as one JSON document on stdout (app-core drc::team::stats).
 #[cfg(feature = "review-sqlite")]
@@ -617,6 +679,29 @@ mod tests {
             vec!["--review-counts", "--rule="],
             vec!["--review-counts=1"],
             vec!["--review-counts", "--all-rules=1"],
+        ] {
+            let mut args = vec!["drc", "a.db"];
+            args.extend(bad.iter().copied());
+            assert!(parse_str(&args).is_err(), "{bad:?}");
+        }
+        // the team's counts in brief: a report of its own, every rule that
+        // has errors or the one named
+        let c = parse_str(&["drc", "a.db", "--team-counts"]).unwrap();
+        assert!(c.team_counts && c.rule.is_none() && !c.review_counts && !c.review_stats);
+        let c = parse_str(&["drc", "a.db", "--team-counts", "--rule=GRX.1"]).unwrap();
+        assert_eq!((c.team_counts, c.rule.as_deref()), (true, Some("GRX.1")));
+        let c = parse_str(&["drc", "--rule", "이름 둘", "a.db", "--team-counts", "--floe-reviewer", "kim"]).unwrap();
+        assert_eq!((c.rule.as_deref(), c.reviewer.as_deref()), (Some("이름 둘"), Some("kim")));
+        let c = parse_str(&["drc", "a.db", "--team-counts", "--all-rules"]).unwrap();
+        assert!(c.team_counts && c.all_rules && c.rule.is_none());
+        for with in ["--review-counts", "--review-stats", "--rules", "--list", "--errs=R", "--build", "--svrf-rules=x"] {
+            assert!(parse_str(&["drc", "a.db", "--team-counts", with]).is_err(), "{with}");
+        }
+        for bad in [
+            vec!["--team-counts=1"],
+            vec!["--team-counts", "--rule"],
+            vec!["--team-counts", "--rule", "A", "--rule", "B"],
+            vec!["--team-counts", "--rule", "A", "--all-rules"],
         ] {
             let mut args = vec!["drc", "a.db"];
             args.extend(bad.iter().copied());

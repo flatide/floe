@@ -73,7 +73,9 @@ const MAGIC: &[u8; 8] = b"FLOETEAM";
 /// log is one of their files.
 /// 4 (0.12.469): a rejection is of each reviewer's waive until they answer
 /// it - the rejected count is the errors whose waives are all rejected.
-const VERSION: u32 = 4;
+/// 5 (0.12.470): the errors anybody set aside are counted too (the brief
+/// report's `ignored`: a union, as the waives anybody made are).
+const VERSION: u32 = 5;
 /// How long a reviewer's files may differ from what their log says before
 /// their rules are counted again (FLOE_TEAM_GRACE_S; seconds, 0: at once).
 const GRACE: u64 = 10;
@@ -85,10 +87,10 @@ const RECORD_WAIT: Duration = Duration::from_millis(40);
 const LEFTOVER: Duration = Duration::from_secs(600);
 
 /// The counts kept of a chunk and of a rule.
-const KEPT: usize = 8;
+const KEPT: usize = 9;
 
 /// A chunk's team counts: visited, waived, not for review, conflicts, done,
-/// waived by anybody, confirmed, rejected.
+/// waived by anybody, confirmed, rejected, set aside by anybody.
 type Counts = [u16; KEPT];
 
 fn counts_of(t: &Team) -> Counts {
@@ -101,6 +103,7 @@ fn counts_of(t: &Team) -> Counts {
         t.waived_any as u16,
         t.confirmed as u16,
         t.rejected as u16,
+        t.not_required_any as u16,
     ]
 }
 
@@ -320,6 +323,7 @@ impl Cache {
                 waived_any: c[5],
                 confirmed: c[6],
                 rejected: c[7],
+                not_required_any: c[8],
             })
             .collect()
     }

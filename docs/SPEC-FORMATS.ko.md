@@ -631,13 +631,14 @@ waive했는지)은 여기 없다. waive 사이드카와 같은 자리에 있고(
 pack 옆에 하나 있다(리뷰어별이 아니다). 리뷰어 전원의 리뷰를 합친 수치(방문, waive, 검토 제외, conflict,
 done, 0.12.466부터 누군가 waive한 수와 그중 confirm된 수, 0.12.468부터 반려된 수)를 룰별·구간별로 갖고,
 리뷰어마다 변경 기록을 어디까지 읽었는지와 그때의 파일 시각을 갖는다. 지워도 된다: 다음 조회가 처음부터
-센다. 바이너리, little-endian. 버전 4(0.12.469: 배치는 3과 같고 `rejected`의 뜻이 달라졌다)다: 다른
-버전의 파일은 캐시가 아닌 것으로 보고 다시 센다(0.12.468 이하의 명령과 번갈아 물으면 서로 다시 세어 고쳐
-쓴다. 수치는 각자 옳다).
+센다. 바이너리, little-endian. 버전 5(0.12.470: 수치가 아홉 개다 - 누군가 검토 제외로 둔 에러 수가
+늘었다; 4는 0.12.469로, 배치는 3과 같고 `rejected`의 뜻이 달라졌다)다: 다른 버전의 파일은 캐시가 아닌
+것으로 보고 다시 센다(0.12.469 이하의 명령과 번갈아 물으면 서로 다시 세어 고쳐 쓴다. 수치는 각자 옳다).
 
 ```text
-머리 : "FLOETEAM" | u32 4 | u32 n_checks | u32 길이 + 결과 fingerprint(hex) | u32 리뷰어 수
-       | n_checks x (u64 visited, waived, not_required, conflicts, done, waived_any, confirmed, rejected)
+머리 : "FLOETEAM" | u32 5 | u32 n_checks | u32 길이 + 결과 fingerprint(hex) | u32 리뷰어 수
+       | n_checks x (u64 visited, waived, not_required, conflicts, done, waived_any, confirmed, rejected,
+                     not_required_any)
        | 리뷰어마다: u16 길이 + ID | u64 기록 ID | u64 읽은 오프셋 | u64 x4 기록이 말한 시각
                      | u64 x4 센 파일의 시각(waive, 방문 기록, confirm, 반려 기록)
                      | u64 어긋남을 처음 본 시각(초, 0 = 없음)
@@ -645,14 +646,16 @@ done, 0.12.466부터 누군가 waive한 수와 그중 confirm된 수, 0.12.468�
                      | u32 n + n x u32 손댄 룰
        | u64 구간 수 | u32 CRC-32(머리)
 구간 : 구간 수 x (u32 룰 | u32 구간 | u16 visited, waived, not_required, conflicts, done,
-                 waived_any, confirmed, rejected) | u32 CRC-32(구간)
+                 waived_any, confirmed, rejected, not_required_any) | u32 CRC-32(구간)
 ```
 
 - 구간은 수치가 하나라도 있는 것만 있다(룰, 구간 순). 룰의 합은 그 룰 구간들의 합이다. 두 CRC, 결과의
   fingerprint, 룰 수, 이 합이 하나라도 맞지 않으면 캐시가 아닌 것으로 보고 처음부터 센다.
 - `done`은 방문했거나 검토 제외인 에러 수다. `pending` = 룰의 에러 수 − `done`. `waived_any`는
   누군가 waive한 에러 수(conflict 포함), `confirmed`는 그중 확인자가 confirm한 수다.
-  `unconfirmed` = `waived_any` − `confirmed`. 반려된 waive는 앞의 어느 수에도 들지 않고(리뷰어의
+  `unconfirmed` = `waived_any` − `confirmed`. `not_required_any`는 누군가 검토 제외로 둔 에러
+  수(conflict 포함)이고, `--team-counts`의 `ignored`다(`waived`는 `waived_any`).
+  반려된 waive는 앞의 어느 수에도 들지 않고(리뷰어의
   파일에는 그대로 있다), `rejected`는 waive가 전부 반려된 에러 수다(0.12.469: 리뷰어가 다시 waive하면
   그 사람의 waive는 다시 센다. 누가 무엇에 답했는지는 각자의 반려 기록에 있다).
 - **고치기**(`live::merge`): 리뷰어마다 변경 기록을 먼저 읽고 그 뒤에 파일을 연다(연 파일은 서버에

@@ -3,7 +3,7 @@ use crate::drc::analysis::scope::Runs;
 use crate::drc::changes::{stamp_at, STAMP};
 use crate::drc::desktop::{Left, Review, STATUS_NONE, STATUS_WAIVED};
 use crate::drc::team::flags::FlagStore;
-use crate::drc::team::stats::collect_from;
+use crate::drc::team::stats::{collect_from, collect_with};
 use crate::drc::Pack;
 use std::os::unix::fs::MetadataExt;
 use std::sync::Arc;
@@ -82,9 +82,19 @@ impl Folder {
         let id = Identity::of_pack(&pack, "statistics").unwrap();
         collect_from(&pack, &id, discover(&self.pack).unwrap(), None, &stop).unwrap()
     }
-    /// The kept counts are the exact report's, and cover everything.
+    /// The exact report's team counts a rule, as it counted them.
+    fn exact_teams(&self) -> Vec<Team> {
+        let stop = AtomicUsize::new(0);
+        let pack = Pack::open(&self.pack, &stop).unwrap();
+        let id = Identity::of_pack(&pack, "statistics").unwrap();
+        collect_with(&pack, &id, discover(&self.pack).unwrap(), None, &stop).unwrap().1
+    }
+    /// The kept counts are the exact report's - its report's numbers, and
+    /// every count a rule as it was counted (the ones only the brief report
+    /// says among them) - and cover everything.
     fn agree(&self, kept: &Kept, what: &str) {
         assert_eq!((rows(kept, &self.id()), kept.reviewers), self.exact(), "{what}");
+        assert_eq!(kept.rules, self.exact_teams(), "{what}: every count");
         assert!(kept.current && kept.waiting.is_empty(), "{what}: {:?}", kept.waiting);
     }
     fn records(&self, who: &str) -> Vec<changes::Record> {
@@ -318,18 +328,18 @@ fn what_a_log_and_its_files_say_against_what_is_kept() {
 #[test]
 fn the_cache_file_is_whole_and_this_results_or_no_cache() {
     let mut cache = Cache::empty(3);
-    cache.set(1, 0, [1, 2, 3, 0, 4, 2, 1, 0]);
-    cache.set(1, 7, [4096, 0, 0, 0, 4096, 0, 0, 0]);
-    cache.set(2, 1, [0, 5, 0, 0, 0, 5, 5, 0]);
-    assert_eq!(cache.rules, [[0; 8], [4097, 2, 3, 0, 4100, 2, 1, 0], [0, 5, 0, 0, 0, 5, 5, 0]]);
+    cache.set(1, 0, [1, 2, 3, 0, 4, 2, 1, 0, 3]);
+    cache.set(1, 7, [4096, 0, 0, 0, 4096, 0, 0, 0, 0]);
+    cache.set(2, 1, [0, 5, 0, 0, 0, 5, 5, 0, 0]);
+    assert_eq!(cache.rules, [[0; 9], [4097, 2, 3, 0, 4100, 2, 1, 0, 3], [0, 5, 0, 0, 0, 5, 5, 0, 0]]);
     // a chunk's counts replaced, and one that counts nothing any more
-    cache.set(1, 0, [2, 2, 0, 1, 2, 3, 0, 0]);
-    cache.set(2, 1, [0; 8]);
-    assert_eq!(cache.rules, [[0; 8], [4098, 2, 0, 1, 4098, 3, 0, 0], [0; 8]]);
+    cache.set(1, 0, [2, 2, 0, 1, 2, 3, 0, 0, 1]);
+    cache.set(2, 1, [0; 9]);
+    assert_eq!(cache.rules, [[0; 9], [4098, 2, 0, 1, 4098, 3, 0, 0, 1], [0; 9]]);
     assert_eq!((cache.kept(1), cache.kept(2), cache.chunks.len()), (vec![0, 7], vec![], 2));
     assert_eq!(
         cache.teams()[1],
-        Team { visited: 4098, waived: 2, not_required: 0, conflicts: 1, done: 4098, waived_any: 3, confirmed: 0, rejected: 0 }
+        Team { visited: 4098, waived: 2, not_required: 0, conflicts: 1, done: 4098, waived_any: 3, confirmed: 0, rejected: 0, not_required_any: 1 }
     );
     cache.reviewers.insert(
         "kim".into(),
@@ -366,14 +376,14 @@ fn the_cache_file_is_whole_and_this_results_or_no_cache() {
     wrong.rules[1][0] += 1;
     assert!(Cache::of(&wrong.bytes("abc"), "abc", 3).is_none(), "a rule's total is not its chunks'");
     let mut wrong = cache.clone();
-    wrong.chunks.insert((1, 3), [0; 8]);
+    wrong.chunks.insert((1, 3), [0; 9]);
     assert!(Cache::of(&wrong.bytes("abc"), "abc", 3).is_none(), "a chunk that counts nothing");
     let mut wrong = cache.clone();
-    wrong.chunks.insert((1, 3), [4097, 0, 0, 0, 0, 0, 0, 0]);
+    wrong.chunks.insert((1, 3), [4097, 0, 0, 0, 0, 0, 0, 0, 0]);
     wrong.rules[1][0] += 4097;
     assert!(Cache::of(&wrong.bytes("abc"), "abc", 3).is_none(), "a count past a chunk");
     let mut wrong = cache.clone();
-    wrong.chunks.insert((3, 0), [1, 0, 0, 0, 0, 0, 0, 0]);
+    wrong.chunks.insert((3, 0), [1, 0, 0, 0, 0, 0, 0, 0, 0]);
     assert!(Cache::of(&wrong.bytes("abc"), "abc", 3).is_none(), "a rule the result has not");
     // the names
     assert_eq!(path_of(Path::new("/r/.x.db.tray")).unwrap(), Path::new("/r/.x.db.team"));

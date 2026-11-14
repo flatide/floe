@@ -28,7 +28,7 @@ floe2 <cmd> ... / floe-index drc|svrf ...    # floe2-portable 번들
   아무의 리뷰도 아니므로 0이 나온다. `FLOE_REVIEWER_REQUIRED=1`인 환경에서는 ID 없이 읽는 명령이
   1로 끝난다(0.12.440). 리뷰어 전원의 수치는 §2b의 `--review-stats`가 내고, 바로 답해야 하는
   조회에는 §2c의 `--review-counts`를 쓴다(0.12.464). 전원의 합집합(팀 합계)도 §2c가 바로
-  답한다(0.12.465).
+  답한다(0.12.465). 팀 합계만 한 줄로 받아 그대로 넘길 때는 §2d의 `--team-counts`를 쓴다(0.12.470).
 - status: `0` = not waived, `1` = waived. waive 변경은 뷰어
   전용(우클릭 메뉴 / `w` 키) — CLI 쓰기 표면은 없고, 재-pack 시
   초기화된다.
@@ -454,6 +454,59 @@ floe2 drc results.db --review-counts --floe-reviewer kim    # 이 리뷰어만
 `team.waiting`과 `team.skipped`는 있을 때만 나온다. 그 밖의 키는 §2b와 같은 뜻이다. 위 예는
 `--floe-reviewer kim --rule M2.OVERLAP.2`의 답이다: 리뷰어 줄은 하나이고 팀은 세 사람의 것이다.
 confirm은 아직 없어서 `unconfirmed`가 waive된 에러 전부다(conflict 34개의 waive를 더한 수).
+
+## 2d. 팀 합계 한 줄: `floe2 drc <db> --team-counts` (0.12.470)
+
+사용자 2026-11-14: "팀 작업 통계 cli 명령의 결과를 다음과 같이 간략하게 받고 싶음. 빈번히 조회되는
+것이어서 데이터량을 줄이고 ProperTee에서 별도의 처리없이 넘기려는 의도임. 특정 룰이 옵션에 명시되면
+전체와 해당 룰만 포함하고 특정 룰이 없을 경우 전체와 모든 룰을 포함해서 출력해줘." §2c의 팀 합계를
+여섯 숫자로 줄여 **한 줄**로 낸다. 받은 쪽이 가공 없이 넘기면 되는 답이다.
+
+```sh
+floe2 drc results.db --team-counts                 # 전체와, 에러가 있는 모든 룰
+floe2 drc results.db --team-counts --rule GRX.1    # 전체와 그 룰만
+floe2 drc results.db --team-counts --all-rules     # 전체와, 에러가 없는 룰까지 모든 룰
+```
+
+```json
+{"total":{"errors":9999,"waived":1000,"confirmed":500,"rejected":20,"visited":500,"ignored":200},"rule":{"GRX.1":{"errors":100,"waived":10,"confirmed":5,"rejected":1,"visited":30,"ignored":10},"GRX.2":{"errors":7,"waived":0,"confirmed":0,"rejected":0,"visited":0,"ignored":0}}}
+```
+
+- **모양**: stdout은 이 한 줄과 줄바꿈 하나뿐이다. 공백이 없고(룰 이름 안의 공백은 그대로), 키는 위
+  순서대로, 룰은 결과에 나오는 순서대로다. `rule`은 룰 이름을 키로 하는 객체다. pretty-print하지
+  않는다.
+- **`total`**: 결과 전체의 수치다. `--rule`을 줘도 전체다.
+- **`rule`**: 룰을 지정하지 않으면 **에러가 있는 룰 전부**다. 에러가 0인 룰은 여섯 숫자가 모두 0이라
+  싣지 않는다(룰 17,000개 중 1,500개에만 에러가 있는 결과에서 답이 11분의 1이 된다). 그런 룰까지
+  받으려면 `--all-rules`를 준다: 결과의 모든 룰이 결과의 순서대로 실리고 `total`은 같다. `--rule NAME`을
+  주면 그 룰 하나만 싣고, 그때는 에러가 0인 룰이어도 싣는다. 같은 이름의 룰이 둘이면 한 항목으로
+  더한다. 없는 이름은 1로 끝나고 stdout에 아무것도 쓰지 않는다.
+- **여섯 숫자**: 모두 "누군가 그렇게 한 에러 수"(합집합)다.
+
+  | 키 | 뜻 | §2c `team`의 같은 것 |
+  |---|---|---|
+  | `errors` | 에러 수 | `errors` |
+  | `waived` | 누군가 waive했고 반려되지 않은 에러. confirm된 것을 포함한다 | `confirmed` + `unconfirmed` |
+  | `confirmed` | 그중 확인자가 confirm한 에러 | `confirmed` |
+  | `rejected` | waive가 전부 반려된 에러(`waived`에 들지 않는다) | `rejected` |
+  | `visited` | 누군가 방문한 에러 | `visited` |
+  | `ignored` | 누군가 검토 제외(not for review)로 둔 에러 | `not_required` + 판단이 엇갈린 검토 제외 |
+
+  두 방문자의 판단이 엇갈린 에러(§2b의 conflict)는 그 판단을 한 쪽으로 센다: 한 사람이 waive했으면
+  `waived`에, 한 사람이 검토 제외했으면 `ignored`에 든다. 그래서 `confirmed`는 `waived`를 넘지 않는다.
+  §2c의 `team.waived`·`team.not_required`는 conflict를 뺀 수라서 conflict가 있으면 이쪽이 그만큼 크다.
+- **얼마나 최신인가**: §2c와 같은 캐시(`.<db>.team`)를 같은 방법으로 맞춘 뒤 답한다. 클릭, 방문, 검토
+  제외, 확인자의 confirm과 반려가 다음 조회에 들어 있다. 아직 반영하지 못한 변경이 있으면(§2c의
+  `current: false`) 답은 그대로 내고 이유를 **stderr**에 `[drc] team counts: …`로 쓴다. 빠진 파일
+  (§2c의 `skipped`)도 stderr에 쓴다. 종료 코드는 0이다.
+- **종료 코드**: 0 = 답했다. 1 = 현재 pack이 없거나 낡았다, 없는 룰이다. 2 = 인자가 틀렸다
+  (`--review-counts`, `--review-stats`, `--rules`, `--list`, `--errs`와 함께 쓰지 않고, `--rule`과
+  `--all-rules`는 둘 중 하나만 준다). 75 = pack을 만드는 중이다. 0이 아니면 stdout은 비어 있다.
+- **리뷰어별 수치는 없다**: 팀 전원의 합계만 낸다. `--floe-reviewer`는 받지만 결과를 바꾸지 않는다.
+  리뷰어별 수치는 §2c를 쓴다.
+- **비용**(룰 17,000개 중 1,500개에 에러 200개씩, 리뷰어 3명과 확인자 1명): 17 ms에 133 KB 한 줄,
+  `--rule`을 주면 190바이트, `--all-rules`를 주면 21 ms에 1.47 MB다. 같은 결과의
+  `--review-counts --all-rules`는 117 ms에 21 MB였다.
 
 ## 3. 에러 스냅샷 PNG: `floe2 render --drc`
 

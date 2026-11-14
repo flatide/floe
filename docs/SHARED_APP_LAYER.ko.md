@@ -723,3 +723,14 @@ P4d처럼 컨트롤러 루프에서만 바뀐다. `FLOE_GTK_LOOP=legacy`는 예�
 - **웹(머지할 때):** 웹의 리뷰 저장소는 `desktop::Review`를 거치지 않는다. 같은 규칙을 쓰려면 상태 판정에 `confirm::unanswered`를, 다시 waive에 `Reasons::keep`(`Earlier`, `Answered`)를 쓰고, 필터는 `Lens`에 해당하는 클래스를 자기 조회에 넣는다. 통계(`floe2 drc`)는 공유라 그대로 옳다.
 - **한계:** 두 확인자가 엇갈리면(한 사람 confirm, 다른 사람 반려) 답하거나 풀리는 순간 남아 있던 confirm이 다시 세어진다(confirm 바이트에는 시각이 없다). 확인자의 첫 반려(새 파일)와 다른 호스트의 반려는 다음 확인에서 보인다. 0.12.468의 뷰어는 버전 2의 기록을 읽지 않는다(반려를 따르지 않는다. 그 사람 자신의 0.12.468 세션이 열면 기록을 `.stale`로 치운다). `save waives as…`의 파일은 바이트 그대로라 rejected인 waive도 waive로 들어 있다.
 - **게이트:** `drc_team` R17·R7(R15·R16은 상태 바이트 3을 waive로 읽게 고침), 단위 app-core `drc::tests`(`a_rejected_waive_is_a_state_until_its_reviewer_waives_it_again`), `drc::reasons`(`what_a_reviewer_answered_is_kept_as_it_was`), `drc::confirm`(누가 언제의 반려인가, 답), `drc::team::live`(`a_rejected_waive_is_listed_until_its_reviewer_waives_it_again`, 다시 waive를 섞은 무작위 300단계), `drc::team::stats`.
+
+## 26. 팀 합계 한 줄 (2026-11-14, app 0.12.470) — 수치와 글자는 공유 Rust, 호스트는 그대로 내보낸다
+
+사용자: "팀 작업 통계 cli 명령의 결과를 다음과 같이 간략하게 받고 싶음. 빈번히 조회되는 것이어서 데이터량을 줄이고 ProperTee에서 별도의 처리없이 넘기려는 의도임. 특정 룰이 옵션에 명시되면 전체와 해당 룰만 포함하고 특정 룰이 없을 경우 전체와 모든 룰을 포함해서 출력해줘."
+
+- **무엇:** `floe2 drc DB --team-counts [--rule NAME | --all-rules]`. stdout 한 줄: `{"total":{…},"rule":{"이름":{…},…}}`, 숫자는 `errors`·`waived`·`confirmed`·`rejected`·`visited`·`ignored`. 공백 없음, 키와 룰의 순서 고정(DRC-CLI.ko.md §2d).
+- **공유 계층:** `team::stats::brief(source, listed, cancelled) -> (String, Vec<String>)`가 글자와 stderr에 쓸 말을 준다. `listed`는 `BriefRules::{WithErrors, Named(name), All}`이다. `brief_text(names, sizes, teams, listed)`가 글자를 만든다(순서를 지키려고 손으로 쓴다: `serde_json`의 객체는 키를 정렬한다). `Brief::of(&Team, errors)`: `waived` = `waived_any`, `ignored` = `not_required_any`. 리뷰어별 카운터는 읽지 않는다.
+- **수치:** 모두 합집합이다. `Team.not_required_any`가 늘었다(`team_of`에서 conflict를 빼기 전의 검토 제외). 팀 합계 캐시가 그것을 갖도록 `.team`은 버전 5(수치 9개)다. `collect_with`가 정확한 집계의 룰별 `Team`을 돌려주고, 테스트가 유지되는 수치와 아홉 숫자를 모두 대조한다.
+- **룰:** 지정이 없으면 에러가 있는 룰만(`WithErrors`), `--all-rules`면 에러가 없는 룰까지 전부(`All`), `--rule`이면 그 이름 하나(`Named`, 에러가 0이어도). 같은 이름은 한 항목으로 더한다. `total`은 어느 쪽이든 결과 전체다.
+- **호스트가 할 일:** 없다. 웹이 같은 답을 내려면 `brief`를 부른다.
+- **게이트:** `drc_team` R18, 단위 app-core `drc::team::stats`(`the_brief_report_is_one_line_of_the_total_and_the_rules_with_errors`, 팀 규칙의 `not_required_any`), `drc::team::live`(유지되는 수치 = 정확한 집계, 아홉 숫자 모두), app-cli `drc::tests::options`.
