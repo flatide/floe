@@ -78,7 +78,9 @@ const MAGIC: &[u8; 8] = b"FLOETEAM";
 /// 6 (0.12.472): the errors anybody asked the waive of are counted, and the
 /// ones of them nobody has waived; a reviewer's request file is one of
 /// their files.
-const VERSION: u32 = 6;
+/// 7 (0.12.473): a request a waiver declined is none until its requester
+/// asks again - the errors whose requests are all declined are counted.
+const VERSION: u32 = 7;
 /// How long a reviewer's files may differ from what their log says before
 /// their rules are counted again (FLOE_TEAM_GRACE_S; seconds, 0: at once).
 const GRACE: u64 = 10;
@@ -90,11 +92,11 @@ const RECORD_WAIT: Duration = Duration::from_millis(40);
 const LEFTOVER: Duration = Duration::from_secs(600);
 
 /// The counts kept of a chunk and of a rule.
-const KEPT: usize = 11;
+const KEPT: usize = 12;
 
 /// A chunk's team counts: visited, waived, not for review, conflicts, done,
 /// waived by anybody, confirmed, rejected, set aside by anybody, asked for
-/// by anybody, asked for and waived by nobody.
+/// by anybody, asked for and waived by nobody, declined.
 type Counts = [u16; KEPT];
 
 fn counts_of(t: &Team) -> Counts {
@@ -110,6 +112,7 @@ fn counts_of(t: &Team) -> Counts {
         t.not_required_any as u16,
         t.requested as u16,
         t.unwaived as u16,
+        t.declined as u16,
     ]
 }
 
@@ -333,6 +336,7 @@ impl Cache {
                 not_required_any: c[8],
                 requested: c[9],
                 unwaived: c[10],
+                declined: c[11],
             })
             .collect()
     }
@@ -472,8 +476,19 @@ impl Source {
         Self {
             tag: tag.to_owned(),
             // (one log a reviewer, named from their waive sidecar - or,
-            // for one who only asks, from their request file)
-            log: waive_path.as_deref().or(request_path.as_deref()).map(changes::path_beside),
+            // for one who only asks, from their request file; a reviewer
+            // who has neither - a confirmer who is no waiver, 0.12.473 -
+            // has the log the folders' listing found, else the one named
+            // from their confirm file or their rejects log)
+            log: waive_path
+                .as_deref()
+                .or(request_path.as_deref())
+                .map(changes::path_beside)
+                .or_else(|| files.changes.clone())
+                .or_else(|| {
+                    let other = files.confirm.as_ref().or(files.rejects.as_ref());
+                    other.map(|(path, _)| changes::path_beside(path))
+                }),
             waive_path,
             flags_path: files.review.as_ref().map(|(path, _)| path.clone()),
             confirm_path: files.confirm.as_ref().map(|(path, _)| path.clone()),
@@ -640,6 +655,8 @@ impl Source {
         if let Some(log) = &self.rejects {
             rules.extend(log.checks(Kind::Reject).into_iter().map(|ci| ci as u32));
             rules.extend(log.kept_checks(Kind::Answered).into_iter().map(|ci| ci as u32));
+            rules.extend(log.checks(Kind::Decline).into_iter().map(|ci| ci as u32));
+            rules.extend(log.kept_checks(Kind::Reasked).into_iter().map(|ci| ci as u32));
         }
         let tag = self.tag.clone();
         let sql = |e| {
@@ -669,7 +686,9 @@ impl Source {
 
     /// This reviewer's planes of rule `ci`'s chunk `k` (`count` errors).
     /// `open`: the rule's errors under a rejection this reviewer has not
-    /// answered (`count`'s `opens`).
+    /// answered, `shut`: the ones under a decline they have not answered
+    /// (`count`'s `opens`).
+    #[allow(clippy::too_many_arguments)]
     fn planes(
         &mut self,
         id: &Identity,
@@ -677,6 +696,7 @@ impl Source {
         k: u64,
         count: u64,
         open: &[(u64, u64)],
+        shut: &[(u64, u64)],
         buffer: &mut [u8],
     ) -> Result<Planes> {
         let waived = match &self.waive {
@@ -710,6 +730,7 @@ impl Source {
             _ => Bits::ZERO,
         };
         let rejected = run_bits(open, k * CHUNK, count);
+        let declined = run_bits(shut, k * CHUNK, count);
         let waive_known = self.waive.is_some();
         let marked = self.flags_ok;
         let (mut visited, mut not_required) = (Bits::ZERO, Bits::ZERO);
@@ -737,6 +758,7 @@ impl Source {
             confirmed,
             rejected,
             requested,
+            declined,
             visited_known: marked,
             waive_known,
             not_required_known: marked,
@@ -752,7 +774,7 @@ impl Source {
         }
         let mut found = Vec::new();
         if let Some(log) = &self.rejects {
-            for (a, b, _) in log.runs(Kind::Reject, ci) {
+            for (a, b, _) in log.runs(Kind::Reject, ci).into_iter().chain(log.runs(Kind::Decline, ci)) {
                 found.extend(a / CHUNK..=(b - 1) / CHUNK);
             }
         }
@@ -1162,8 +1184,10 @@ fn count(
     // a rule's errors under a rejection each reviewer has not answered - a
     // waive of theirs there is rejected: made once a rule, from every
     // rejection of it that stands (the same errors for everybody who
-    // answered nothing in the rule)
-    let mut opens: Option<(usize, Vec<(u64, u64)>, Vec<Option<Vec<(u64, u64)>>>)> = None;
+    // answered nothing in the rule). And the same of the declines: a
+    // request of a reviewer's under one they have not answered is declined
+    type Open = (Vec<(u64, u64)>, Vec<Option<Vec<(u64, u64)>>>);
+    let mut opens: Option<(usize, Open, Open)> = None;
     let mut chunk = |cache: &mut Cache, sources: &mut [Source], ci: usize, k: u64| -> Result<()> {
         let size = id.sizes[ci];
         if k >= size.div_ceil(CHUNK) {
@@ -1175,29 +1199,33 @@ fn count(
             sources.iter_mut().for_each(Source::release);
         }
         if opens.as_ref().is_none_or(|(rule, ..)| *rule != ci) {
-            let standing: Vec<confirm::Standing> = sources
-                .iter()
-                .filter(|src| src.known() != 0)
-                .flat_map(|src| src.rejects.iter().flat_map(|log| confirm::standing_of(&src.tag, log, ci)))
-                .collect();
-            let own = sources
-                .iter()
-                .map(|src| match &src.rejects {
-                    Some(log) if !standing.is_empty() && log.kept(Kind::Answered, ci).next().is_some() => {
-                        Some(confirm::unanswered(&standing, Some(log), ci))
-                    }
-                    _ => None,
-                })
-                .collect();
-            opens = Some((ci, confirm::unanswered(&standing, None, ci), own));
+            let of = |made: Kind, answered: Kind| -> Open {
+                let standing: Vec<confirm::Standing> = sources
+                    .iter()
+                    .filter(|src| src.known() != 0)
+                    .flat_map(|src| src.rejects.iter().flat_map(|log| confirm::standing_by(&src.tag, log, ci, made)))
+                    .collect();
+                let own = sources
+                    .iter()
+                    .map(|src| match &src.rejects {
+                        Some(log) if !standing.is_empty() && log.kept(answered, ci).next().is_some() => {
+                            Some(confirm::unanswered_by(&standing, Some(log), ci, answered))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                (confirm::unanswered_by(&standing, None, ci, answered), own)
+            };
+            opens = Some((ci, of(Kind::Reject, Kind::Answered), of(Kind::Decline, Kind::Reasked)));
         }
-        let (_, open_all, own) = opens.as_ref().expect("made above");
+        let (_, (open_all, own), (shut_all, asked)) = opens.as_ref().expect("made above");
         let errors = (size - k * CHUNK).min(CHUNK);
         planes.clear();
         for (i, src) in sources.iter_mut().enumerate() {
             if src.known() != 0 {
                 let open = own[i].as_deref().unwrap_or(open_all);
-                planes.push(src.planes(id, ci, k, errors, open, &mut buffer)?);
+                let shut = asked[i].as_deref().unwrap_or(shut_all);
+                planes.push(src.planes(id, ci, k, errors, open, shut, &mut buffer)?);
             }
         }
         cache.set(ci, k, counts_of(&team_of(&planes)));

@@ -158,6 +158,13 @@ pub fn path_beside(waive: &Path) -> PathBuf {
         waive.with_file_name(name.replacen(".waive.", ".changes.", 1))
     } else if name.contains(".request.") {
         waive.with_file_name(name.replacen(".request.", ".changes.", 1))
+    } else if name.contains(".confirm.") {
+        // (a reviewer found by their confirm file or their rejects log
+        // alone - a confirmer who is no waiver has no waive sidecar,
+        // 0.12.473 - has their log named as theirs all the same)
+        waive.with_file_name(name.replacen(".confirm.", ".changes.", 1))
+    } else if name.contains(".rejects.") {
+        waive.with_file_name(name.replacen(".rejects.", ".changes.", 1))
     } else {
         waive.with_file_name(format!("{name}.changes"))
     }
@@ -604,6 +611,14 @@ mod tests {
         );
         // never the file it was named from (a pack shown read-only)
         assert_eq!(path_beside(Path::new("/r/.r.db.tray")), Path::new("/r/.r.db.tray.changes"));
+        // (a reviewer who has no waive sidecar: named from another file of theirs)
+        for other in ["request", "confirm", "rejects"] {
+            assert_eq!(
+                path_beside(Path::new(&format!("/tmp/.r.db.{other}.hong-0123456789ab"))),
+                Path::new("/tmp/.r.db.changes.hong-0123456789ab"),
+                "{other}"
+            );
+        }
         let mut none = ChangeLog::none();
         none.touched(0, 0, 0);
         none.committed(0, 0, 0);

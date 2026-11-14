@@ -229,8 +229,11 @@ def _team_waives(v, d, check, pump):
     said = {r[0]: r[3] for r in got}
     mine = db.reason_get(0, 0)[0]
     check(bool(mine) and said.get(0) == mine, "... and why, as its reviewer said", (said, mine))
-    check(all(not b.get_sensitive() and b.get_tooltip_text() == w.NOT_CONFIRMER
-              for b in w.confirm_buttons), "a reviewer's window does not confirm: the buttons are off")
+    # (0.12.473: the window has the buttons of its session's roles, and a
+    # session without a role none)
+    check(w.confirm_buttons == [] and w.reject_buttons == [] and w.decline_buttons == []
+          and "--role confirmer" in w.NOT_CONFIRMER,
+          "a reviewer's window does not confirm: it has no button of a role")
     pick(w, {sorted(want)[0]})
     w._confirm(True)
     check(w.job is None and w.status.get_text() == w.NOT_CONFIRMER
@@ -250,29 +253,30 @@ def _team_waives(v, d, check, pump):
     check(_detail(v) == shown, "... and shown again it has them at once")
     pump(v, lambda: v._drc_team_pending is None, "the answer", 30)
     check(_detail(v) == shown, "... the same after the next answer")
-    # ---- the launcher's word: --confirmer, FLOE_CONFIRMER, the request's field
-    args = viewcli.parser().parse_args(["x.oas", "--confirmer"])
+    # ---- the launcher's word: the confirmer is a role (0.12.473: "--confirmer는
+    # 삭제해줘"), given alone or with others, with commas
+    args = viewcli.parser().parse_args(["x.oas", "--role", "confirmer,waiver"])
     plain = viewcli.parser().parse_args(["x.oas"])
-    check(viewcli.confirmer_on(args, {}) and not viewcli.confirmer_on(plain, {})
-          and viewcli.confirmer_on(plain, {"FLOE_CONFIRMER": "on"})
-          and not viewcli.confirmer_on(plain, {"FLOE_CONFIRMER": "0"})
-          and "confirmer" in v.REQUEST_KEYS,
-          "floe2 view --confirmer / FLOE_CONFIRMER, handed to a running window")
-    # the same results asked for by a launch that confirms: opened again as
-    # a confirmer's, the list's window with them
-    v._confirmer = True
+    check(viewcli.role_of(args, {}) == "waiver,confirmer" and viewcli.role_of(plain, {}) == ""
+          and viewcli.role_of(plain, {"FLOE_ROLE": "requester,waiver,confirmer"}) == "requester,waiver,confirmer"
+          and not hasattr(viewcli, "confirmer_on")
+          and "confirmer" not in v.REQUEST_KEYS and "role" in v.REQUEST_KEYS,
+          "floe2 view --role ROLE[,ROLE...] / FLOE_ROLE, handed to a running window; no --confirmer")
+    # the same results asked for by a launch of every role - a reviewer who
+    # also confirms: opened again as its session, the list's window with them
+    v._role = "requester,waiver,confirmer"
     v._drc_request(path)
     pump(v, lambda: v._drc is not db and getattr(v._drc, "confirmer", False), "the confirmer's open", 60)
     db = v._drc
-    check(w.closed and v._drc_waives_win is None and " · confirmer" in v.status.get_text(),
+    check(w.closed and v._drc_waives_win is None and " · requester,waiver,confirmer" in v.status.get_text(),
           "results open as a reviewer's are opened again for a confirmer",
           v.status.get_text())
     v._drc_request(path)
     check(v._drc is db, "... and stay as they are for the same role")
     w = v._drc_waives_dialog()
     loaded(w, "the confirmer's list")
-    check(w.window.get_title() == "DRC team waives - gui (confirmer)"
-          and all(b.get_sensitive() for b in w.confirm_buttons)
+    check(w.window.get_title() == "DRC team waives - gui (requester,waiver,confirmer)"
+          and len(w.confirm_buttons) == 3 and all(b.get_sensitive() for b in w.confirm_buttons)
           and [r[0] for r in rows(w)] == sorted(want),
           "the confirmer's window: the same list, the buttons on")
     # ---- confirm the selected rows: gone from To confirm, under Confirmed
@@ -358,7 +362,7 @@ def _team_waives(v, d, check, pump):
     w.window.destroy()
     check(v._drc_waives_win is None, "the window closes")
     # the same results as a reviewer's again: the confirmation locks
-    v._confirmer = False
+    v._role = ""
     v._drc_request(path)
     pump(v, lambda: v._drc is not db and not getattr(v._drc, "confirmer", True), "the reviewer's open", 60)
     db = v._drc
@@ -396,7 +400,7 @@ def _team_waives(v, d, check, pump):
     # 수정해서 다시 waive를 할 수 있게 하되, 이 때 이전의 waive사유나 반려사유는
     # 계속 유지되어야")
     from floe import gtkservice
-    v._confirmer = True
+    v._role = "requester,waiver,confirmer"
     v._drc_request(path)
     pump(v, lambda: v._drc is not db and getattr(v._drc, "confirmer", False), "the confirmer's open again", 60)
     db = v._drc
@@ -406,7 +410,8 @@ def _team_waives(v, d, check, pump):
           and all(b.get_sensitive() for b in w.reject_buttons)
           and [b.get_tooltip_text() for b in w.reject_buttons] == [w.REJECTS, w.UNREJECTS]
           and "waives the error again with a reason" in w.REJECTS
-          and [key for key, _title in w.KINDS][-2:] == ["rejected", "requested"],
+          and [key for key, _title in w.KINDS][-3:] == ["rejected", "requested", "declined"]
+          and [b.get_label() for b in w.decline_buttons] == ["Decline selected", "Undecline selected"],
           "the confirmer's window: Reject selected, Unreject selected, the Rejected list")
     asked = []
 
@@ -458,10 +463,17 @@ def _team_waives(v, d, check, pump):
     w._reject(True)
     loaded(w, "the confirmer's own waive rejected")
     said = (d / ".sample.db.rejects.gui").read_text().splitlines()
+    # (the confirmer's session is one of every role since 0.12.473, whose
+    # counts are the errors': under the filter this viewer has - Not Waived
+    # - the rule's count is the errors that have a state, anybody's)
+    team = cli()["rules"][0]
+    marked = (team["confirmed"] + team["unconfirmed"] + team["rejected"]
+              + team.get("unwaived", 0) + team.get("declined", 0))
     check(db.get_status(0, free) == 0 and db.get_state(0, free) == gtkservice.STATE_NONE
           and [l for l in said if l.startswith("r ")][-1].endswith(" %d,1" % free)
-          and db.status_counts(0)[0] == len([e for e, who in waivers().items() if "gui" in who]),
-          "a confirmer rejects an error of their own (no why): their waive of it is turned back at once", said[-2:])
+          and v._drc_wfilter == "notwaived" and db.status_counts(0)[0] == marked,
+          "a confirmer rejects an error of their own (no why): their waive of it is turned back at once",
+          (said[-2:], db.status_counts(0), team))
     v._drc_set_waived(0, [free], True, reason="")
     check(db.get_status(0, free) == 0 and v.status.get_text() == (
         "rejected: 1 error(s) in %s by gui - waive again with a reason" % name),
@@ -494,14 +506,14 @@ def _team_waives(v, d, check, pump):
     # which no lock holds then. The viewer finds it by itself, shows it as
     # rejected and writes nothing; the reviewer waives it again with a
     # mended reason
-    v._confirmer = False
+    v._role = ""
     v._drc_request(path)
     pump(v, lambda: v._drc is not db and not getattr(v._drc, "confirmer", True), "the reviewer's open again", 60)
     db = v._drc
     check(db.get_status(0, held) == 1 and v._drc_returned_timer is not None, "(the reviewer's viewer follows the confirmers while results are open)")
     boss = gtkservice.Service(FLOE2)
     try:
-        h = boss.request("drc_open", path=path, mode="load", reviewer="boss", confirmer=True)["handle"]
+        h = boss.request("drc_open", path=path, mode="load", reviewer="boss", role="requester,waiver,confirmer")["handle"]
         boss.drc_watch(h)
         job = boss.request("drc_team_reject", handle=h, check=0, errors=[held], on=True, reason="boss says no")["job"]
         done = []
@@ -638,10 +650,12 @@ def _roles(v, d, check, pump):
         r = _run([FLOE2, "drc", path, "--team-counts"])
         return json.loads(r.stdout)["total"] if r.returncode == 0 else {}
 
-    asked = []
+    asked, told = [], []
 
     def why(kind, count, prefill="", known=(), parent=None, rejected_by=(), **more):
         asked.append((kind, count, more.get("title"), tuple(more.get("requested_by") or ())))
+        # (the verdicts the mark answers, and whether they are declines)
+        told.append((tuple(rejected_by), bool(more.get("declined")), prefill))
         return why.answer
     v._drc_reason_dialog = why
     five = [("all", "All"), ("notwaived", "Not Waived"), ("waived", "Waived"),
@@ -651,9 +665,10 @@ def _roles(v, d, check, pump):
     name = db.checks[0].name
     check(" · reviewer gui · requester" in v.status.get_text() and db.role == "requester" and not db.confirmer,
           "results opened as a requester's: the load says the role", v.status.get_text())
-    check(entries() == five[:2] + [("requested", "Requested")] + five[2:]
-          and v._drcwin._wf.get_tooltip_text() == v.WF_ROLE_TIP and v._drcwin._wf.get_active_id() == "notwaived",
-          "a role's session has Requested in its filter", entries())
+    check(entries() == five[:2] + [("requested", "Requested"), ("declined", "Declined")] + five[2:]
+          and v._drcwin._wf.get_tooltip_text() == v.WF_ROLE_TIP and v._drcwin._wf.get_active_id() == "notwaived"
+          and (db.marks, db.roles, db.waiver) == ("request", ("requester",), False),
+          "a role's session has Requested and Declined in its filter", entries())
     why.answer = "dummy fill"
     v._drc_set_waived(0, [1, 2], True)
     said = v.status.get_text()
@@ -731,17 +746,146 @@ def _roles(v, d, check, pump):
         w.mode.set_active_id("requested")
         pump(v, lambda: w.job is None, "the requested list", 60)
         rows = [tuple(row)[1:] for row in w.store]
-        check(w.KINDS[-1] == ("requested", "Requested") and [(row[0], row[2], row[3]) for row in rows]
+        check(w.KINDS[-2:] == (("requested", "Requested"), ("declined", "Declined"))
+              and [(row[0], row[2], row[3]) for row in rows]
               == [(6, "", "requested by park: seal ring")] and "requested 1" in w.status.get_text(),
               "the team's Requested list: what waits for a waiver, who asked and why", (rows, w.status.get_text()))
+        # ---- a waiver declines a request (0.12.473, user 2026-11-14: "요청
+        # 거절 상태도 만들어줘"): the window has the buttons of the session's
+        # roles - a waiver's two, and none of a confirmer's
+        check(w.window.get_title() == "DRC team waives - gui (waiver)"
+              and [b.get_label() for b in w.decline_buttons] == ["Decline selected", "Undecline selected"]
+              and [b.get_tooltip_text() for b in w.decline_buttons] == [w.DECLINES, w.UNDECLINES]
+              and all(b.get_sensitive() for b in w.decline_buttons)
+              and w.confirm_buttons == [] and w.reject_buttons == []
+              and w.verdict_column.get_title() == "Declined by",
+              "a waiver's window: Decline selected, Undecline selected - and no button of a confirmer's")
+        asked.clear()
+        why.answer = None
+        w.tree.get_selection().select_all()
+        w._decline(True)
+        check(w.job is None and w.status.get_text() == "Cancelled; nothing was declined."
+              and asked == [("decline", 1, None, ())] and not (home / ".sample.db.rejects.gui").exists(),
+              "Decline selected asks why (Decline reason); cancelled, nothing is declined", (asked, w.status.get_text()))
+        why.answer = "not a seal ring"
+        w.tree.get_selection().select_all()
+        w._decline(True)
+        pump(v, lambda: w.job is None and len(w.store) == 0, "the decline", 60)
+        said = (home / ".sample.db.rejects.gui").read_text().splitlines()
+        check(w.status.get_text().startswith("Declined the request of 1 error(s).")
+              and said[-1].startswith("d 0 ") and said[-1].endswith(" 6,1 not a seal ring")
+              and "declined 1" in w.status.get_text() and "requested" not in w.status.get_text().split("\n")[1],
+              "the request declined: out of the Requested list, one line of the waiver's log",
+              (w.status.get_text(), said[-1:]))
+        w.mode.set_active_id("declined")
+        pump(v, lambda: w.job is None and len(w.store) == 1, "the declined list", 60)
+        rows = [tuple(row)[1:] for row in w.store]
+        check([(row[0], row[2], row[3], row[5]) for row in rows]
+              == [(6, "", "requested by park: seal ring", "gui: not a seal ring")]
+              and w.verdict_column.get_title() == "Declined by",
+              "the Declined list: who asked and why, who declined and why", rows)
+        check(db.get_state(0, 6) == gtkservice.STATE_DECLINED and total().get("declined") == 1
+              and total().get("requested") == 2,
+              "... declined in the viewer's own lists and in floe2 drc --team-counts", total())
+        v._drcwin._wf.set_active_id("declined")
+        listed = db.status_page(0, v._drc_wf_class(), 0, n0)
+        check(listed == [6] and v._drc_wf_count(db, 0) == 1 and v._drc_wf_shows(db, 0, 6)
+              and not v._drc_wf_shows(db, 0, 3),
+              "the Declined filter: counted and listed", listed)
+        v._drcwin._wf.set_active_id("all")
+        pump(v, lambda: True, "idle")
+        v._drc_show_detail(0, 6)
+        pump(v, lambda: "request declined by: gui (not a seal ring)" in _detail(v), "the decline in the detail", 30)
+        lines = _detail(v).splitlines()
+        check(lines[0].endswith("[declined]") and "request declined by: gui (not a seal ring)" in lines
+              and "waive requested by: park (seal ring) · declined" in lines,
+              "the error's detail: declined, whose request and by whom", lines[:6])
+        # Undecline selected: the request waits again
+        w.tree.get_selection().select_all()
+        w._decline(False)
+        pump(v, lambda: w.job is None and len(w.store) == 0, "the decline taken back", 60)
+        check(w.status.get_text().startswith("Took back the decline of 1 error(s).")
+              and db.get_state(0, 6) == gtkservice.STATE_REQUESTED and total().get("declined") == 0,
+              "Undecline selected: the request is one again", w.status.get_text())
         w.window.destroy()
-        # ---- a confirmer's viewer waives nothing
+        # ---- a requester's viewer follows a decline made elsewhere, and
+        # asks again with a mended reason
+        db = open_as("requester")
+        why.answer = "fill"
+        v._drc_set_waived(0, [7], True)
+        check(db.get_state(0, 7) == gtkservice.STATE_REQUESTED, "(a request of the viewer's own)", v.status.get_text())
+        kim.request("drc_team_decline", handle=hk, check=0, errors=[7], on=True, reason="no fill here")
+        pump(v, lambda: db.get_state(0, 7) == gtkservice.STATE_DECLINED, "the viewer following the decline", 30)
+        check(v.status.get_text() == "1 request(s) in %s declined by kim (no fill here): ask again with a reason" % name
+              and db.get_mark(0, 7) == 0 and (home / ".sample.db.request.gui").read_bytes()[40 + 7] == 1,
+              "the requester's viewer finds the decline by itself and says who and why - its request file untouched",
+              v.status.get_text())
+        v._drc_set_waived(0, [7], True, reason="")
+        check(v.status.get_text() == "declined: 1 request(s) in %s by kim (no fill here) - ask again with a reason" % name
+              and db.get_state(0, 7) == gtkservice.STATE_DECLINED,
+              "a declined request is not asked again without a reason, and said", v.status.get_text())
+        asked.clear()
+        told.clear()
+        why.answer = "fill, layer 12"
+        v._drc_set_waived(0, [7], True)
+        check(asked == [("waive", 1, "Request reason", ())] and told == [((("kim", "no fill here"),), True, "fill")]
+              and db.get_state(0, 7) == gtkservice.STATE_REQUESTED and v.status.get_text() == (
+                  "waive requested for 1 error(s) in %s · reason: fill, layer 12 · 1 asked again after a decline" % name),
+              "asked again with a reason: the dialog is told who declined and why, and starts from the reason it had",
+              (asked, told, v.status.get_text()))
+        v._drc_show_detail(0, 7)
+        lines = _detail(v).splitlines()
+        check("request reason: fill, layer 12" in lines and "before: requested (fill)" in lines
+              and "before: declined by kim (no fill here)" in lines
+              and lines.index("before: requested (fill)") < lines.index("before: declined by kim (no fill here)"),
+              "the error's detail keeps what was: the reason the request had, who declined it and why", lines[:8])
+        # ---- sessions of several roles (the same day: "--role
+        # waiver,confirmer나 --role requester,waiver,confirmer가 가능하게")
+        db = open_as("waiver,confirmer")
+        w = v._drc_waives_dialog()
+        pump(v, lambda: w.job is None, "the team's list", 60)
+        check(" · reviewer gui · waiver,confirmer" in v.status.get_text()
+              and (db.marks, db.confirmer, db.waiver, db.roles) == ("waive", True, True, ("waiver", "confirmer"))
+              and w.window.get_title() == "DRC team waives - gui (waiver,confirmer)"
+              and (len(w.confirm_buttons), len(w.reject_buttons), len(w.decline_buttons)) == (3, 2, 2)
+              and all(b.get_sensitive() for b in w.confirm_buttons + w.reject_buttons + w.decline_buttons),
+              "waiver,confirmer: one viewer of both roles, its window has both roles' buttons", v.status.get_text())
+        w.window.destroy()
+        v._drc_set_waived(0, [9], True, reason="x")
+        check(v.status.get_text().startswith("not requested: 1 error(s) in %s" % name),
+              "... it waives what was asked for, as a waiver does", v.status.get_text())
+        db = open_as("requester,waiver,confirmer")
+        v._drc_set_waived(0, [9], True, reason="mine")
+        check(v.status.get_text().startswith("waived 1 error(s) in %s" % name)
+              and db.get_state(0, 9) == gtkservice.STATE_WAIVED and db.marks == "waive"
+              and not (home / ".sample.db.request.gui").read_bytes()[40 + 9],
+              "requester,waiver,confirmer: w waives without a request", v.status.get_text())
+        # ---- a confirmer's viewer waives nothing, and makes no waive file
         db = open_as("confirmer")
         check(" · reviewer gui · confirmer" in v.status.get_text(), "opened as a confirmer's", v.status.get_text())
+        asked.clear()
         v._drc_set_waived(0, [3], False)
         check(v.status.get_text().startswith("waive failed: a confirmer's session does not waive")
               and db.confirmer and db.role == "confirmer" and db.get_state(0, 3) == gtkservice.STATE_WAIVED,
               "a confirmer's w is refused, and said: a confirmer waives nothing", v.status.get_text())
+        v._drc_set_waived(0, [4], True)
+        check(v.status.get_text().startswith("waive failed: a confirmer's session does not waive") and asked == []
+              and db.marks == "none",
+              "... before any reason is asked", (asked, v.status.get_text()))
+        v._reviewer = "conf"
+        try:
+            db = open_as("confirmer")
+            w = v._drc_waives_dialog()
+            pump(v, lambda: w.job is None, "the team's list", 60)
+            check(" · reviewer conf · confirmer" in v.status.get_text()
+                  and not (home / ".sample.db.waive.conf").exists()
+                  and not (home / ".sample.db.request.conf").exists()
+                  and len(w.confirm_buttons) == 3 and w.decline_buttons == [],
+                  "a confirmer who was never a waiver has no waive file (0.12.473), and the confirmer's buttons alone",
+                  sorted(p.name for p in home.iterdir() if p.name.endswith(".conf")))
+            w.window.destroy()
+        finally:
+            v._reviewer = None
     finally:
         kim.close()
         park.close()

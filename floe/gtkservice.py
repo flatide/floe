@@ -367,16 +367,19 @@ STATE_CONFIRMED = 3
 # a requester asked for the error's waive and nobody has waived it (a role's
 # session, 0.12.472: its states are the error's, as everybody's files say)
 STATE_REQUESTED = 4
+# ... and a waiver declined every request of it (0.12.473, user 2026-11-14:
+# "요청 거절 상태도 만들어줘"): it waits for its requester
+STATE_DECLINED = 5
 STATE_NAMES = {STATE_NONE: "none", STATE_WAIVED: "waived",
                STATE_REJECTED: "rejected", STATE_CONFIRMED: "confirmed",
-               STATE_REQUESTED: "requested"}
+               STATE_REQUESTED: "requested", STATE_DECLINED: "declined"}
 # the class of errors a waive filter shows, as the service's status readers
 # say it (app-core desktop::Lens): every count, page and rank of every scope
 # is of it. `held`: any waive in the reviewer's file - what "Not Waived" is
 # the rest of
 LENS_OF_FILTER = {"all": "live", "notwaived": "held", "waived": "waived",
                   "confirmed": "confirmed", "rejected": "rejected",
-                  "requested": "requested"}
+                  "requested": "requested", "declined": "declined"}
 _ERROR_PAGE = 256
 _STATUS_PAGE = 4096
 
@@ -608,13 +611,22 @@ class PackDrc(_Drc):
         self.reason_path = result.get("reason_path")
         self._reasons = {}
         # the waives this reviewer confirmed, and whether this open may
-        # confirm (`floe2 view --confirmer`; app-core drc::confirm, 0.12.466)
+        # confirm (a session with the confirmer's role; app-core
+        # drc::confirm, 0.12.466)
         self.confirm_path = result.get("confirm_path")
         self.confirmer = bool(result.get("confirmer"))
         # what this open does in the waive workflow (`floe2 view --role`;
-        # app-core drc::Role, 0.12.472): "requester", "waiver", "confirmer",
-        # or "" - a reviewer as before the roles
+        # app-core drc::Roles, 0.12.472): "requester", "waiver",
+        # "confirmer" - or several of them, with commas, in that order
+        # (0.12.473) -, or "" - a reviewer as before the roles
         self.role = result.get("role") or ""
+        self.roles = tuple(r for r in self.role.split(",") if r)
+        # what the session's `w` makes: "waive" (a waiver's, and a session
+        # without a role), "request" (a requester's who is no waiver),
+        # "none" (a confirmer's who is neither)
+        self.marks = result.get("marks") or "waive"
+        # whether this open may decline requests (the waiver's role)
+        self.waiver = "waiver" in self.roles
         self._own = {}
         self._reviewer = result.get("reviewer")
         # how the id was found ("given", "FLOE_REVIEWER", "DISPLAY host",
@@ -656,7 +668,8 @@ class PackDrc(_Drc):
     def get_state(self, ci, ei):
         """The error's state: STATE_NONE, STATE_WAIVED, STATE_REJECTED or
         STATE_CONFIRMED (what the confirmers say as the service last read
-        it: `returned_ask`)."""
+        it: `returned_ask`) - and, in a role's session, STATE_REQUESTED or
+        STATE_DECLINED."""
         return self._status_chunk(ci, ei // _STATUS_PAGE)[ei % _STATUS_PAGE]
 
     def get_status(self, ci, ei):
@@ -688,7 +701,8 @@ class PackDrc(_Drc):
 
     def set_lens(self, wfilter):
         """The waive filter is `wfilter` ("all", "notwaived", "waived",
-        "confirmed", "rejected") from now: the service's status readers say
+        "confirmed", "rejected", "requested", "declined") from now: the
+        service's status readers say
         1 of its class of errors (LENS_OF_FILTER), and `status_counts` is
         every rule's (errors of that class, total)."""
         lens = LENS_OF_FILTER[wfilter]
@@ -746,14 +760,16 @@ class PackDrc(_Drc):
         """What the last status write of this review did not waive because
         it is under a confirmer's rejection and the write gave no reason:
         (how many errors, ((who, why), ...)). Asked once: the next ask says
-        (0, ())."""
+        (0, ()). A requester's session: the requests it did not ask again
+        because a waiver declined them, and who declined."""
         said = getattr(self, "_rejected_said", None) or (0, ())
         self._rejected_said = (0, ())
         return said
 
     def resubmitted_take(self):
         """How many rejected waives the last status write of this review
-        waived again (it gave a reason). Asked once."""
+        waived again (it gave a reason) - a requester's: how many declined
+        requests it asked again. Asked once."""
         said = getattr(self, "_resubmitted_said", 0)
         self._resubmitted_said = 0
         return said
@@ -767,9 +783,10 @@ class PackDrc(_Drc):
 
     def returned_ask(self):
         """Ask the service to follow the confirmers: which of this
-        reviewer's waives are rejected, who confirmed what (its job reads
-        the confirmers' files: the viewer does not wait for it). The answer
-        comes to `returned_answer`."""
+        reviewer's waives are rejected - a requester's: which of their
+        requests are declined -, who confirmed what (its job reads the
+        others' files: the viewer does not wait for it). The answer comes
+        to `returned_answer`."""
         self._start("returned", "drc_team_returned")
 
     def returned_answer(self):
@@ -816,7 +833,9 @@ class PackDrc(_Drc):
         """What is kept of this reviewer's waive of one error, in the order
         it happened: (("waived", "", the reason the waive had) or
         ("rejected", who, why - a rejection answered by waiving again),
-        ...)."""
+        ...) - and of their request of it: ("requested", "", the reason the
+        request had), ("declined", who, why - a decline answered by asking
+        again)."""
         return self._reason(ci, ei)[2]
 
     def _reason(self, ci, ei):
@@ -848,8 +867,10 @@ class PackDrc(_Drc):
         "confirmed_by", "reasons": [{"reviewer", "text", "time"}],
         "rejected_by": [{"reviewer", "text", "time"}], "history":
         [{"reviewer", "what", "by", "text", "time"}], "confirmer",
-        "reviewer"}; None while there is none yet, False when the ask
-        failed."""
+        "reviewer"} - and, where there are any, "requested_by" (who asked
+        for its waive, why), "declined_of" (whose request of it is
+        declined), "declined_by" (who declined, why); None while there is
+        none yet, False when the ask failed."""
         event = self.poll("team-row")
         if event is None or event.get("state") == "progress":
             return None
@@ -1548,23 +1569,23 @@ def _role_field(role):
     return {"role": role} if role else {}
 
 
-def drc_open_pack(pack, source=None, reviewer=None, confirmer=False, role=None):
+def drc_open_pack(pack, source=None, reviewer=None, role=None):
     """A pack under review; `source` (the .db) must match its fingerprint.
-    `confirmer`: the review is opened to confirm the team's waives. `role`:
-    what the session does in the waive workflow ("requester", "waiver",
-    "confirmer")."""
+    `role`: what the session does in the waive workflow - "requester",
+    "waiver", "confirmer", or several of them with commas
+    ("waiver,confirmer")."""
     return _drc(service().request(
         "drc_open", path=os.path.abspath(pack), mode="pack",
         source=None if source is None else os.path.abspath(source),
-        reviewer=reviewer, confirmer=bool(confirmer), **_role_field(role)))
+        reviewer=reviewer, **_role_field(role)))
 
 
-def drc_load(path, reviewer=None, confirmer=False, role=None):
+def drc_load(path, reviewer=None, role=None):
     """floe/drc.py load_db: a pack given, or the .db's current pack, else
     the ASCII file."""
     return _drc(service().request("drc_open", path=os.path.abspath(path),
                                   mode="load", reviewer=reviewer,
-                                  confirmer=bool(confirmer), **_role_field(role)))
+                                  **_role_field(role)))
 
 
 def drc_cd_markers(constraints, markers):
@@ -2314,10 +2335,13 @@ def _rejecters(rows):
 def team_waives(db, ci, kind, start, limit, refresh=False, cancelled=None,
                 progress=None):
     """A page of the team's waives of rule `ci` - `kind` "unconfirmed",
-    "confirmed", "waived" (all of them) or "rejected" (the errors whose
-    waives are all rejected) - as every reviewer's files say:
+    "confirmed", "waived" (all of them), "rejected" (the errors whose
+    waives are all rejected), "requested" (asked for, waived by nobody) or
+    "declined" (the errors whose requests are all declined) - as every
+    reviewer's files say:
     {"count", "rows": [{"error", "waived_by", "rejected_of", "confirmed_by",
-    "reasons", "rejected_by", "history"}],
+    "reasons", "rejected_by", "history", and where there are any
+    "requested_by", "declined_of", "declined_by"}],
     "rule", "all" (waived / confirmed / unconfirmed of the rule and of the
     result), "rules" (the rules somebody waived in), "reviewers",
     "confirmers", "skipped"}. `refresh`: read the files anew (else the
@@ -2352,6 +2376,19 @@ def reject_waives(db, ci, errors, on=True, reason=None, cancelled=None,
     with their reviewers, rejected, until each waives the error again."""
     fields = {"reason": reason} if reason and on else {}
     return _job(db, "confirm", "drc_team_reject", cancelled, progress,
+                check=int(ci), on=bool(on), errors=[int(e) for e in errors],
+                **fields)
+
+
+def decline_requests(db, ci, errors, on=True, reason=None, cancelled=None,
+                     progress=None):
+    """Decline the request of rule `ci`'s `errors` as this reviewer (a
+    review opened with the waiver's role), `reason` saying why - or take
+    that decline back: {"changed", "skipped" - asked to decline and no
+    request waits there, "counts" - the rule's after it}. The requests stay
+    with their requesters, declined, until each asks again with a reason."""
+    fields = {"reason": reason} if reason and on else {}
+    return _job(db, "confirm", "drc_team_decline", cancelled, progress,
                 check=int(ci), on=bool(on), errors=[int(e) for e in errors],
                 **fields)
 

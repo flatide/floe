@@ -410,7 +410,7 @@
   프로세스였다(뷰어·gtk-service·renderd 한 벌씩, 작은 샘플에서 234 MB).
   - 요청 한 줄(`viewcli.cmd_view`): `경로\tkey=value…`. 뷰 옵션(`goto`·`detail`·`depth`·`frames`·`labels`·`labelpx`·
     `levels`·`thin`·`density`·`occupancy`)에 더해 `drc=`(결과 .db의 절대 경로), `rules=`, `userid=`(그 실행이 명시한
-    리뷰어: `--userid`나 `FLOE_REVIEWER`), `noload=1`, `confirmer=1`(0.12.466: `--confirmer`나 `FLOE_CONFIRMER`. 그 요청의 결과를 확인자로 연다. 같은 결과가 다른 역할로 열려 있으면 다시 연다), `role=`(0.12.472: `--role`이나 `FLOE_ROLE`의 `requester`·`waiver`·`confirmer`. 그 요청의 결과를 그 역할의 세션으로 연다. 역할이 다르면 다시 연다), `layerprops=`(0.12.451: 레이어 속성 파일의 실제 경로), `drcrule=`와 `drcerr=`(0.12.461: 결과에서 선택할 룰 이름과 그 룰의 에러 번호; 아래 "룰과 에러 지정")가 간다. `--drc`가 없는 파일이면 보내기 전에 1로 끝난다
+    리뷰어: `--userid`나 `FLOE_REVIEWER`), `noload=1`, `role=`(0.12.472: `--role`이나 `FLOE_ROLE`의 `requester`·`waiver`·`confirmer`; 0.12.473: 쉼표로 여럿, 흐름의 순서로 고쳐 실린다 - `waiver,confirmer`. 그 요청의 결과를 그 역할의 세션으로 연다. 역할이 다르면 다시 연다. 0.12.472까지의 `confirmer=1`은 없다: `--confirmer`는 인자 오류이고, `FLOE_CONFIRMER`가 켜져 있는데 준 역할에 `confirmer`가 없으면 실행이 멈춘다), `layerprops=`(0.12.451: 레이어 속성 파일의 실제 경로), `drcrule=`와 `drcerr=`(0.12.461: 결과에서 선택할 룰 이름과 그 룰의 에러 번호; 아래 "룰과 에러 지정")가 간다. `--drc`가 없는 파일이면 보내기 전에 1로 끝난다
     (`no such DRC results file`). 넘긴 요청은 창이 결과를 열어 보기 전에 답을 받기 때문이다. 탭이나 줄바꿈이 든
     경로·ID는 한 줄에 실을 수 없어 독립 창으로 뜬다. `--multi`와 렌더 프로세스 옵션(`--stream-kb`·
     `--stream-target-ms`·`--render-debug`·`--frame-cache off`·`--margin on`·`--layer-colors`)은 전과 같이 독립 창이다.
@@ -620,10 +620,12 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   전원의 waive를 그들의 작업 파일에서 바로 읽어(`drc_team_waives`: 발견은 통계 명령과 같은
   `stats::discover`) 룰별로 보인다. 룰 목록은 누군가 waive한 룰만이고, 목록은 `To confirm`(기본)·
   `Confirmed`·`All team waives`, 행은 에러·waive한 사람들·사유·confirm한 사람들, 1,000개씩이다.
-  더블클릭은 그 에러를 연다(`_drc_jump`). 확인자로 연 결과(`floe2 view --confirmer`, 서비스의
-  `drc_open {confirmer: true}`)에서만 `Confirm selected`·`Unconfirm selected`·`Confirm all of rule`이
-  켜져 있다(`drc_team_confirm`, job `confirm`: 쓰기 작업이라 창을 닫아도 끝까지 간다). 룰 전체는 묻고
-  나서 한다. 그 밖의 창에서는 버튼이 꺼져 있고 툴팁이 이유를 말한다. 목록은 마지막 `Refresh`가 읽은
+  더블클릭은 그 에러를 연다(`_drc_jump`). 확인자 역할이 있는 결과(`floe2 view --role confirmer`,
+  서비스의 `drc_open {role}`에 `confirmer`; `PackDrc.confirmer`)의 창에만 `Confirm selected`·
+  `Unconfirm selected`·`Confirm all of rule`이 있다(`drc_team_confirm`, job `confirm`: 쓰기 작업이라
+  창을 닫아도 끝까지 간다). 룰 전체는 묻고 나서 한다. 0.12.473부터 창은 그 세션이 가진 역할의
+  버튼만 만든다(`confirm_buttons`·`reject_buttons`는 확인자, `decline_buttons`는 waiver; 역할이 없으면
+  빈 목록이고 버튼 줄이 없다. 전에는 꺼진 채로 보였다). 목록은 마지막 `Refresh`가 읽은
   상태이고 자기 confirm 뒤에는 다시 읽는다. 에러 상세에는 `waived by: …`(나 말고 waive한 사람과 그
   사유)와 `waive confirmed by: … · locked`가 붙는다(`drc_team_waive_get`, `_drc_team_lines`).
   **confirm된 waive는 잠긴다**(0.12.467, DRC.ko.md §2): 확인자가 아닌 뷰어의 unwaive는 그 에러를
@@ -682,6 +684,28 @@ epoch↑ + 즉시 재렌더. 안정판 floe의 KLayout worker만 coverage 틴트
   the waive of`, `waived N error(s) in RULE … · K not requested`, confirmer의 `w`는
   `waive failed: a confirmer's session does not waive: …`. 에러 상세에 `waive requested by: park (사유)`.
   `team waives…` 창의 목록에 `Requested`가 더해졌다(요청됐고 아직 waive되지 않은 에러).
+  **여러 역할, 요청 거절**(0.12.473, 사용자 2026-11-14: "요청 거절 상태도 만들어줘. --confirmer는
+  삭제해줘. … --role waiver,confirmer나 --role requester,waiver,confirmer가 가능하게"):
+  `Viewer._role`은 역할 목록의 문자열이다(`viewcli.role_of`가 흐름의 순서로 고친다). `Viewer`와
+  `run_viewer`의 `confirmer` 인자, `_confirmer`, `gtkservice.drc_load`·`drc_open_pack`의 `confirmer`
+  인자는 없다. `PackDrc`가 서비스의 답에서 `role`·`roles`(튜플)·`marks`(`w`가 만드는 것: `waive`,
+  `request`, `none`)·`confirmer`·`waiver`를 갖는다. `w`의 문구는 `marks`가 정한다: `request`면
+  요청의 문구, `none`이면 사유를 묻기 전에 `waive failed: a confirmer's session does not waive: …`.
+  상태 5가 declined다(`gtkservice.STATE_DECLINED`, 목록의 번호는 rejected와 같은 `DRC_REJECTED`).
+  역할 세션의 필터는 일곱 항목이다(`WF_ROLE_ENTRIES`: `Requested` 다음에 `Declined`,
+  `LENS_OF_FILTER["declined"]`). 요청자의 뷰어는 2초 주기 확인(`_drc_returned_show`)에서
+  `N request(s) in RULE declined by kim (사유): ask again with a reason`을 말하고, 사유 없는 `w`는
+  `declined: N request(s) in RULE by kim (사유) - ask again with a reason`, 사유가 있으면
+  `waive requested for N error(s) in RULE … · K asked again after a decline`이다. 그때의 사유
+  입력창은 `_drc_reason_dialog(…, rejected_by=, title="Request reason", declined=True)`를 받아
+  `Declined by kim (사유)` / `A reason asks for it again.`을 말한다(`declined`는 있을 때만 넘긴다).
+  에러 상세는 `request reason: …`(요청자의 세션), `before: requested (…)`,
+  `before: declined by kim (…)`, `request declined by: kim (…)`, `waive requested by: park (…) ·
+  declined`를 낸다. `team waives…` 창: 목록에 `Declined`, waiver의 창에 `Decline selected`(사유를
+  묻는다: `_drc_reason_dialog("decline", …)`, 제목 `Decline reason`)와 `Undecline selected`
+  (`gtkservice.decline_requests`, 서비스의 `drc_team_decline`, job `confirm`의 답 `verdict: decline`).
+  `Requested`와 `Declined` 목록에서는 마지막 열의 제목이 `Declined by`가 되고(`verdict_column`)
+  행의 `declined_by`를 보인다. 창 제목 끝은 역할 목록이다(`DRC team waives - kim (waiver,confirmer)`).
   **필터의 다섯 항목**(0.12.469, 사용자 2026-11-14: "메인 목록에서 상태 4가지로 필터할 수 있어야"):
   `_drc_wfilter`는 `all`·`notwaived`·`waived`·`confirmed`·`rejected`다. 필터가 바뀌면(그리고 결과를 열
   때) `_drc_lens_sync`가 서비스에 그 필터가 보이는 에러의 클래스를 알린다(`PackDrc.set_lens`, 서비스의

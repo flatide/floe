@@ -30,8 +30,10 @@ const HELP: &str = "Usage: floe2-web drc RESULTS.db|.RESULTS.db.tray [OPTIONS]
                           of the team's waives: `rejected`; where requesters
                           asked for waives (floe2 view --role): the errors
                           asked for and the ones of them nobody has waived,
-                          `requested` and `unwaived`, and a requester's own
-                          `requested`); with
+                          `requested` and `unwaived`, the ones whose requests
+                          a waiver declined and no requester has asked again,
+                          `declined`, and a requester's own `requested` and
+                          `requested_declined`); with
                           --floe-reviewer ID[,ID...] these reviewers alone.
                           Needs the current pack: none or a stale one is an
                           error (exit 1), never an answer of zeros
@@ -62,8 +64,8 @@ const HELP: &str = "Usage: floe2-web drc RESULTS.db|.RESULTS.db.tray [OPTIONS]
   --team-counts           The team's counts in brief, one line of JSON to hand
                           on as it is: `total`, then `rule` - an object of
                           the rules by name -, each with errors, requested,
-                          waived, confirmed, rejected, visited, ignored. No
-                          blank in
+                          declined, waived, confirmed, rejected, visited,
+                          ignored. No blank in
                           it, the keys in this order, the rules in the
                           result's. `total` is the whole result's; `rule` has
                           the rules that have errors - with --all-rules every
@@ -72,7 +74,10 @@ const HELP: &str = "Usage: floe2-web drc RESULTS.db|.RESULTS.db.tray [OPTIONS]
                           united, from the counts
                           --review-counts keeps (.DB.team): requested = the
                           waive asked for by somebody (a requester: floe2
-                          view --role), waived since or not; waived = waived by
+                          view --role), waived since or not - a request a
+                          waiver declined is none; declined = the errors
+                          whose requests are all declined and nobody has
+                          waived; waived = waived by
                           somebody and not rejected, confirmed or not;
                           confirmed = of those, confirmed; rejected = the
                           errors whose waives are all rejected; ignored = set

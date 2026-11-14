@@ -570,10 +570,10 @@ n_checks x u32   : 룰별 confirm된 에러 수
   때마다 읽는다. 확인자의 세션이 자기 waive를 되돌리면 그 에러의 자기 바이트를 0으로 함께 쓴다.
 - 다른 결과의 파일(헤더나 크기가 다름)은 세션이 열 때 `.stale-<시각>`으로 치우고, 통계는 `skipped`에
   적는다.
-- 누가 confirm할 수 있는지는 파일에 없다: 세션을 연 쪽이 정한다(`floe2 view --confirmer`,
-  서비스의 `drc_open {confirmer: true}`).
+- 누가 confirm할 수 있는지는 파일에 없다: 세션을 연 쪽이 정한다(`floe2 view --role confirmer`,
+  서비스의 `drc_open {role}`에 `confirmer`).
 
-## `.<db>.rejects.<리뷰어>` — DRC waive의 반려와 그 답
+## `.<db>.rejects.<리뷰어>` — DRC waive의 반려, 요청의 거절, 그 답
 
 0.12.468(사용자 2026-11-14: "confirmer가 다른 리뷰어의 waive를 반려할 수 있게 해줘"), 버전 2는
 0.12.469(같은 날: "리뷰어가 사유를 수정해서 다시 waive를 할 수 있게 하되, 이 때 이전의 waive사유나
@@ -583,6 +583,10 @@ n_checks x u32   : 룰별 confirm된 에러 수
 - 확인자로서: **어느 에러의 waive를 반려했는지**(`r`, 풀면 `R`).
 - 리뷰어로서: 자기 waive에 대한 **어느 반려에 답했는지**(`j`: 사유를 주고 다시 waive했다), 그리고 그때
   그 waive가 **가졌던 사유**(`p`).
+- 0.12.473(사용자 2026-11-14: "요청 거절 상태도 만들어줘")부터 한 단계 앞의 같은 것도 적는다. waiver로서
+  **어느 에러의 요청을 거절했는지**(`d`, 풀면 `D`), 요청자로서 자기 요청에 대한 **어느 거절에
+  답했는지**(`k`: 사유를 주고 다시 요청했다)와 그때 그 요청이 **가졌던 사유**(`o`). app-core
+  `drc::reasons`의 `Kind::Decline`·`Reasked`·`Asked`, `drc::confirm`의 `Verdict::DECLINE`.
 
 그 사람 자신의 파일이고 그 세션만 쓴다. waive 사이드카와 같은 자리에(임시 폴더로 간 리뷰면
 `.<db>.rejects.<리뷰어>-<경로 해시 12자>`) 처음 반려하거나 처음 답할 때 만든다. 사유 파일(`.reasons`)과
@@ -596,6 +600,10 @@ r <룰> <시각> <구간> [<사유>]          이 에러들의 waive를 반려�
 R <룰> <시각> <구간>                   이 에러들의 반려를 푼다
 j <룰> <시각> <구간> <누구> [<사유>]   답했다: <누구>가 <시각>에 한 이 에러들의 반려(그 사유)
 p <룰> <시각> <구간> <사유>            다시 waive하기 전에 이 에러들의 waive가 가졌던 사유(<시각>에 준 것)
+d <룰> <시각> <구간> [<사유>]          이 에러들의 요청을 거절한다(사유는 없어도 된다)
+D <룰> <시각> <구간>                   이 에러들의 거절을 푼다
+k <룰> <시각> <구간> <누구> [<사유>]   답했다: <누구>가 <시각>에 한 이 에러들의 거절(그 사유)
+o <룰> <시각> <구간> <사유>            다시 요청하기 전에 이 에러들의 요청이 가졌던 사유(<시각>에 준 것)
 ```
 
 - `<룰>`·`<시각>`·`<구간>`·`<사유>`의 표기는 사유 파일과 같다(구간은 `간격,길이` 쌍). `r`·`R`은 뒤
@@ -610,6 +618,11 @@ p <룰> <시각> <구간> <사유>            다시 waive하기 전에 이 에�
   `r`을 함께 푼다) 끝난다. 시계를 비교하지 않으므로 호스트 시계가 어긋나도 판정이 같다.
 - 리뷰어의 waive 사이드카와 사유 파일은 반려로 바뀌지 않는다: waive 바이트는 1인 채이고 읽는 쪽이
   rejected로 읽는다.
+- **거절은 반려와 같은 규칙이다**(0.12.473): `d`·`D`는 뒤 줄이 이기고 `k`와 `o`는 쌓인다. 요청자 X의
+  에러 e에 대한 요청은, 어느 waiver의 기록이 e를 쥔 `d`를 갖고 있고 X의 기록에 그 `d`(누가, 언제)를
+  가리키는 `k`가 e에 대해 없으면 declined다. 요청 파일의 바이트는 1인 채이고 읽는 쪽이 declined로
+  읽는다. waiver가 `D`로 풀거나 그 에러를 waive하면(자기 `d`를 함께 푼다) 끝난다. 형식 버전은 2
+  그대로다: 0.12.469~0.12.472의 빌드는 모르는 줄을 건너뛰므로 반려는 전처럼 읽고 거절만 모른다.
 - 읽는 쪽: 통계와 팀 합계(반려된 waive를 세지 않고, waive가 전부 반려된 에러를 `rejected`로 센다),
   `team waives…` 창의 목록과 에러 상세(이력 포함), 그리고 모든 리뷰어의 세션(상태 판정, 상태 쓰기
   함수들: `desktop::Review`의 `states`·`look`·`resubmit`).
@@ -667,15 +680,16 @@ waive했는지)은 여기 없다. waive 사이드카와 같은 자리에 있고(
 pack 옆에 하나 있다(리뷰어별이 아니다). 리뷰어 전원의 리뷰를 합친 수치(방문, waive, 검토 제외, conflict,
 done, 0.12.466부터 누군가 waive한 수와 그중 confirm된 수, 0.12.468부터 반려된 수)를 룰별·구간별로 갖고,
 리뷰어마다 변경 기록을 어디까지 읽었는지와 그때의 파일 시각을 갖는다. 지워도 된다: 다음 조회가 처음부터
-센다. 바이너리, little-endian. 버전 6(0.12.472: 수치가 열한 개다 - 누군가 waive를 요청한 에러 수와
+센다. 바이너리, little-endian. 버전 7(0.12.473: 수치가 열두 개다 - 요청이 모두 거절된 에러 수가
+늘었고, 거절된 요청은 `requested`에서 빠진다; 6은 0.12.472로 수치 열한 개 - 누군가 waive를 요청한 에러 수와
 그중 아무도 waive하지 않은 수가 늘었고, 리뷰어의 파일이 다섯이다; 5는 0.12.470으로 수치 아홉 개; 4는
 0.12.469로, 배치는 3과 같고 `rejected`의 뜻이 달라졌다)다: 다른 버전의 파일은 캐시가 아닌 것으로 보고
-다시 센다(0.12.471 이하의 명령과 번갈아 물으면 서로 다시 세어 고쳐 쓴다. 수치는 각자 옳다).
+다시 센다(0.12.472 이하의 명령과 번갈아 물으면 서로 다시 세어 고쳐 쓴다. 수치는 각자 옳다).
 
 ```text
-머리 : "FLOETEAM" | u32 6 | u32 n_checks | u32 길이 + 결과 fingerprint(hex) | u32 리뷰어 수
+머리 : "FLOETEAM" | u32 7 | u32 n_checks | u32 길이 + 결과 fingerprint(hex) | u32 리뷰어 수
        | n_checks x (u64 visited, waived, not_required, conflicts, done, waived_any, confirmed, rejected,
-                     not_required_any, requested, unwaived)
+                     not_required_any, requested, unwaived, declined)
        | 리뷰어마다: u16 길이 + ID | u64 기록 ID | u64 읽은 오프셋 | u64 x5 기록이 말한 시각
                      | u64 x5 센 파일의 시각(waive, 방문 기록, confirm, 반려 기록, 요청)
                      | u64 어긋남을 처음 본 시각(초, 0 = 없음)
@@ -684,7 +698,7 @@ done, 0.12.466부터 누군가 waive한 수와 그중 confirm된 수, 0.12.468�
                      | u32 n + n x u32 손댄 룰
        | u64 구간 수 | u32 CRC-32(머리)
 구간 : 구간 수 x (u32 룰 | u32 구간 | u16 visited, waived, not_required, conflicts, done,
-                 waived_any, confirmed, rejected, not_required_any, requested, unwaived)
+                 waived_any, confirmed, rejected, not_required_any, requested, unwaived, declined)
        | u32 CRC-32(구간)
 ```
 
@@ -694,8 +708,9 @@ done, 0.12.466부터 누군가 waive한 수와 그중 confirm된 수, 0.12.468�
   누군가 waive한 에러 수(conflict 포함), `confirmed`는 그중 확인자가 confirm한 수다.
   `unconfirmed` = `waived_any` − `confirmed`. `not_required_any`는 누군가 검토 제외로 둔 에러
   수(conflict 포함)이고, `--team-counts`의 `ignored`다(`waived`는 `waived_any`).
-  `requested`는 누군가 waive를 요청한 에러 수(waive된 것 포함, `--team-counts`의 `requested`),
-  `unwaived`는 그중 아무의 waive 사이드카에도 waive가 없는 수다(요청자 없이는 둘 다 0).
+  `requested`는 누군가 waive를 요청한 에러 수(waive된 것 포함, 거절된 요청은 빼고;
+  `--team-counts`의 `requested`), `unwaived`는 그중 아무의 waive 사이드카에도 waive가 없는 수,
+  `declined`는 요청이 모두 거절됐고 아무의 waive 사이드카에도 없는 에러 수다(요청자 없이는 셋 다 0).
   반려된 waive는 앞의 어느 수에도 들지 않고(리뷰어의
   파일에는 그대로 있다), `rejected`는 waive가 전부 반려된 에러 수다(0.12.469: 리뷰어가 다시 waive하면
   그 사람의 waive는 다시 센다. 누가 무엇에 답했는지는 각자의 반려 기록에 있다).

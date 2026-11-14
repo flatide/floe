@@ -312,8 +312,10 @@ DRC.ko.md §2) 다른 호스트에서 읽어도 방금 한 것까지 들어 있�
 | `confirm_file`, `confirm_location`, `confirm_modified` | confirm 파일(`.<db>.confirm.<리뷰어>`), 그 자리(`results`·`temp`), 마지막 수정 시각 |
 | `rejected` | `team`과 `team.rules[]`: waive가 전부 반려된 에러 수(0.12.468; 0.12.469부터 리뷰어가 다시 waive하기 전까지). 반려된 waive는 `waived`·`confirmed`·`unconfirmed`·`conflicts` 어디에도 세지 않는다. 리뷰어 줄(반려 기록이 있을 때): 그 사람이 확인자로서 반려해 두고 풀거나 confirm하지 않은 에러 수(리뷰어가 이미 다시 waive한 것도 들어 있다). 반려에 답하기만 한 리뷰어는 0이다 |
 | `waived_rejected` | 리뷰어 줄(waive 파일이 있을 때): 그 리뷰어의 waive 중 반려된 수. 그 리뷰어가 사유를 주고 다시 waive하거나 unwaive하면, 또는 확인자가 반려를 풀면 줄어든다. 리뷰어 줄의 `waived`는 파일의 수라서 이만큼을 포함한다 |
-| `requested` | `team`과 `team.rules[]`(요청이 하나라도 있을 때만): 누군가 waive를 요청한 에러 수, waive된 것 포함(0.12.472, 역할 흐름 DRC.ko.md §2). 리뷰어 줄(요청 파일이 있을 때): 그 사람이 요청한 수 |
+| `requested` | `team`과 `team.rules[]`(요청이 하나라도 있을 때만): 누군가 waive를 요청한 에러 수, waive된 것 포함(0.12.472, 역할 흐름 DRC.ko.md §2). waiver가 거절한 요청은 요청자가 다시 요청할 때까지 세지 않는다(0.12.473). 리뷰어 줄(요청 파일이 있을 때): 그 사람의 파일에 있는 요청 수(거절된 것 포함) |
 | `unwaived` | `team`과 `team.rules[]`(`requested`와 함께): 요청됐고 아무의 waive 사이드카에도 waive가 없는 에러 수. waiver를 기다리는 요청이다(waive가 반려된 에러는 그 waive한 사람을 기다리므로 여기 들지 않는다) |
+| `declined` | `team`과 `team.rules[]`(`requested`와 함께, 0.12.473): 요청이 모두 거절됐고 아무의 waive 사이드카에도 waive가 없는 에러 수. 요청자를 기다리는 요청이다(`requested`에 들지 않는다). 리뷰어 줄(0보다 클 때만): 그 사람이 waiver로서 거절해 둔 에러 수(자기 기록의 `d`) |
+| `requested_declined` | `--review-stats`의 요청자 줄(0.12.473): 그 사람의 요청 중 거절돼 있고 아직 다시 요청하지 않은 수 |
 | `request_file`, `request_location`, `request_modified` | 요청 파일(`.<db>.request.<리뷰어>`), 그 자리(`results`·`temp`), 마지막 수정 시각. `--review-stats`의 요청자 줄에는 `requested_with_reason`(요청한 에러 중 사유가 있는 수)도 있고, `reasons[]`에 `kind: "request"`인 사유가 나온다 |
 | `rejects_file`, `rejects_location`, `rejects_modified` | 반려 기록(`.<db>.rejects.<리뷰어>`: 그 사람이 한 반려, 그리고 자기 waive의 반려에 답한 기록), 그 자리(`results`·`temp`), 마지막 수정 시각 |
 | `team.rules` | 모든 룰. `team.reviewers`는 센 리뷰어 수 |
@@ -368,7 +370,7 @@ floe2 drc results.db --review-counts --floe-reviewer kim    # 이 리뷰어만
 - **confirm**(0.12.466): `confirmed`는 누군가 waive했고 확인자가 confirm한 에러 수, `unconfirmed`는
   누군가 waive했고 아직 confirm되지 않은 에러 수다. 둘의 합이 팀에서 waive된 에러 전부이고,
   conflict인 waive도 여기에 든다(`waived`는 conflict를 뺀 수라서 둘의 합이 `waived`보다 클 수
-  있다). confirm은 뷰어의 DRC 메뉴 `team waives…`에서 확인자(`floe2 view --confirmer`)가 하고
+  있다). confirm은 뷰어의 DRC 메뉴 `team waives…`에서 확인자(`floe2 view --role confirmer`)가 하고
   (DRC.ko.md §2), confirm 하나는 구간 하나만 다시 세게 한다.
 - **반려**(0.12.468, 0.12.469): 확인자가 반려한 waive는 리뷰어의 파일에 그대로 있지만 팀 수치에 들지
   않는다. 확인자가 반려하는 순간 `waived`·`confirmed`·`unconfirmed`가 줄고, waive가 전부 반려된
@@ -458,13 +460,14 @@ floe2 drc results.db --review-counts --floe-reviewer kim    # 이 리뷰어만
 `--floe-reviewer kim --rule M2.OVERLAP.2`의 답이다: 리뷰어 줄은 하나이고 팀은 세 사람의 것이다.
 confirm은 아직 없어서 `unconfirmed`가 waive된 에러 전부다(conflict 34개의 waive를 더한 수).
 
-## 2d. 팀 합계 한 줄: `floe2 drc <db> --team-counts` (0.12.470, `--out` 0.12.471, `requested` 0.12.472)
+## 2d. 팀 합계 한 줄: `floe2 drc <db> --team-counts` (0.12.470, `--out` 0.12.471, `requested` 0.12.472, `declined` 0.12.473)
 
 사용자 2026-11-14: "팀 작업 통계 cli 명령의 결과를 다음과 같이 간략하게 받고 싶음. 빈번히 조회되는
 것이어서 데이터량을 줄이고 ProperTee에서 별도의 처리없이 넘기려는 의도임. 특정 룰이 옵션에 명시되면
 전체와 해당 룰만 포함하고 특정 룰이 없을 경우 전체와 모든 룰을 포함해서 출력해줘." §2c의 팀 합계를
-일곱 숫자로 줄여 **한 줄**로 낸다. 받은 쪽이 가공 없이 넘기면 되는 답이다. (0.12.471까지는 여섯
-숫자였다. 0.12.472에 역할 흐름의 `requested`가 `errors` 다음에 들어갔다.)
+여덟 숫자로 줄여 **한 줄**로 낸다. 받은 쪽이 가공 없이 넘기면 되는 답이다. (0.12.471까지는 여섯
+숫자였다. 0.12.472에 역할 흐름의 `requested`가 `errors` 다음에, 0.12.473에 요청 거절의 `declined`가
+그 다음에 들어갔다. 키가 늘 때마다 받는 쪽의 표도 한 칸 늘어야 한다.)
 
 ```sh
 floe2 drc results.db --team-counts                 # 전체와, 에러가 있는 모든 룰
@@ -474,25 +477,26 @@ floe2 drc results.db --team-counts --out counts.json   # 같은 한 줄을 stdou
 ```
 
 ```json
-{"total":{"errors":9999,"requested":1500,"waived":1000,"confirmed":500,"rejected":20,"visited":500,"ignored":200},"rule":{"GRX.1":{"errors":100,"requested":14,"waived":10,"confirmed":5,"rejected":1,"visited":30,"ignored":10},"GRX.2":{"errors":7,"requested":0,"waived":0,"confirmed":0,"rejected":0,"visited":0,"ignored":0}}}
+{"total":{"errors":9999,"requested":1500,"declined":30,"waived":1000,"confirmed":500,"rejected":20,"visited":500,"ignored":200},"rule":{"GRX.1":{"errors":100,"requested":14,"declined":2,"waived":10,"confirmed":5,"rejected":1,"visited":30,"ignored":10},"GRX.2":{"errors":7,"requested":0,"declined":0,"waived":0,"confirmed":0,"rejected":0,"visited":0,"ignored":0}}}
 ```
 
 - **모양**: stdout은 이 한 줄과 줄바꿈 하나뿐이다. 공백이 없고(룰 이름 안의 공백은 그대로), 키는 위
   순서대로, 룰은 결과에 나오는 순서대로다. `rule`은 룰 이름을 키로 하는 객체다. pretty-print하지
   않는다.
 - **`total`**: 결과 전체의 수치다. `--rule`을 줘도 전체다.
-- **`rule`**: 룰을 지정하지 않으면 **에러가 있는 룰 전부**다. 에러가 0인 룰은 일곱 숫자가 모두 0이라
+- **`rule`**: 룰을 지정하지 않으면 **에러가 있는 룰 전부**다. 에러가 0인 룰은 여덟 숫자가 모두 0이라
   싣지 않는다(룰 17,000개 중 1,500개에만 에러가 있는 결과에서 답이 11분의 1이 된다). 그런 룰까지
   받으려면 `--all-rules`를 준다: 결과의 모든 룰이 결과의 순서대로 실리고 `total`은 같다. `--rule NAME`을
   주면 그 룰 하나만 싣고, 그때는 에러가 0인 룰이어도 싣는다. 같은 이름의 룰이 둘이면 한 항목으로
   더한다. 없는 이름은 1로 끝나고 stdout에 아무것도 쓰지 않는다.
-- **일곱 숫자**: 모두 "누군가 그렇게 한 에러 수"(합집합)다. 역할 흐름(에러, waive 요청, waive,
+- **여덟 숫자**: 모두 "누군가 그렇게 한 에러 수"(합집합)다. 역할 흐름(에러, waive 요청, waive,
   confirm)의 순서대로 온다.
 
   | 키 | 뜻 | §2c `team`의 같은 것 |
   |---|---|---|
   | `errors` | 에러 수 | `errors` |
-  | `requested` | 누군가(requester) waive를 요청한 에러. 그 뒤 waive된 것을 포함한다. 요청자가 없는 팀에서는 0이다 | `requested` |
+  | `requested` | 누군가(requester) waive를 요청한 에러. 그 뒤 waive된 것을 포함한다. waiver가 거절한 요청은 세지 않는다. 요청자가 없는 팀에서는 0이다 | `requested` |
+  | `declined` | 요청이 모두 거절됐고 아무도 waive하지 않은 에러(`requested`에 들지 않는다). 요청자가 다시 요청하면 `requested`로 돌아간다 | `declined` |
   | `waived` | 누군가 waive했고 반려되지 않은 에러. confirm된 것을 포함한다 | `confirmed` + `unconfirmed` |
   | `confirmed` | 그중 확인자가 confirm한 에러 | `confirmed` |
   | `rejected` | waive가 전부 반려된 에러(`waived`에 들지 않는다) | `rejected` |
@@ -500,8 +504,9 @@ floe2 drc results.db --team-counts --out counts.json   # 같은 한 줄을 stdou
   | `ignored` | 누군가 검토 제외(not for review)로 둔 에러 | `not_required` + 판단이 엇갈린 검토 제외 |
 
   역할을 쓰는 팀에서는 waive가 요청에서만 나오므로 `errors` ≥ `requested` ≥ `waived` ≥
-  `confirmed`다(역할 없이 띄운 뷰어의 waive는 요청 없이 된 것이라 `requested`에 들지 않는다).
-  waiver를 기다리는 요청의 수는 §2c의 `unwaived`다.
+  `confirmed`다(역할 없이 띄운 뷰어의 waive, requester와 waiver를 함께 가진 세션의 waive는 요청
+  없이 된 것이라 `requested`에 들지 않는다). waiver를 기다리는 요청의 수는 §2c의 `unwaived`이고,
+  요청자를 기다리는 것이 `declined`다.
 
   두 방문자의 판단이 엇갈린 에러(§2b의 conflict)는 그 판단을 한 쪽으로 센다: 한 사람이 waive했으면
   `waived`에, 한 사람이 검토 제외했으면 `ignored`에 든다. 그래서 `confirmed`는 `waived`를 넘지 않는다.

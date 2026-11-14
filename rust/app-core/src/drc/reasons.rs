@@ -93,6 +93,23 @@
 //! is 2 so that a build of 0.12.468 - which turned a rejected waive back -
 //! passes the log over; a log of version 1 is read, and written again as 2
 //! when its reviewer's session opens it.
+//!
+//! A waiver's verdict on a REQUEST is the same thing a step earlier
+//! (0.12.473; user 2026-11-14: "요청 거절 상태도 만들어줘"): the errors
+//! whose request a waiver declined are lines of the waiver's rejects log,
+//! and the requester who asks again keeps what was in their own:
+//!
+//! ```text
+//! d <rule> <time> <runs> [<text>]         these errors' request is declined, why
+//! D <rule> <time> <runs>                  their decline is taken back
+//! k <rule> <time> <runs> <who> [<text>]   answered: <who> declined these
+//!                                         errors' request at <time>, why
+//! o <rule> <time> <runs> <text>           the request reason they had before
+//! ```
+//!
+//! (`Kind::Decline`; `Kind::Reasked` and `Kind::Asked`, kept records.) The
+//! log's version stays 2: a build that does not know these lines passes
+//! them over and reads the rejections as before.
 use super::analysis::scope::Membership;
 use super::local::aside_path;
 use crate::{annotations, Error, ErrorKind, Result};
@@ -129,13 +146,31 @@ pub enum Kind {
     /// a requester's request of the errors' waive (0.12.472): why they
     /// asked - the reviewer's reasons file, beside their waive reasons
     Request,
+    /// a waiver's refusal of the errors' request (0.12.473; the rejects
+    /// log, as a confirmer's rejection of a waive is)
+    Decline,
+    /// a decline the log's reviewer answered by asking for the waive again:
+    /// who declined, when, why - kept (the rejects log of who asked again)
+    Reasked,
+    /// the request reason the errors had before their requester asked
+    /// again: kept there too
+    Asked,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 6] =
-        [Kind::Waive, Kind::NotRequired, Kind::Reject, Kind::Answered, Kind::Earlier, Kind::Request];
+    pub const ALL: [Kind; 9] = [
+        Kind::Waive,
+        Kind::NotRequired,
+        Kind::Reject,
+        Kind::Answered,
+        Kind::Earlier,
+        Kind::Request,
+        Kind::Decline,
+        Kind::Reasked,
+        Kind::Asked,
+    ];
     /// The kinds an error holds one reason of (the others are kept records).
-    pub const HELD: [Kind; 4] = [Kind::Waive, Kind::NotRequired, Kind::Reject, Kind::Request];
+    pub const HELD: [Kind; 5] = [Kind::Waive, Kind::NotRequired, Kind::Reject, Kind::Request, Kind::Decline];
 
     fn slot(self) -> usize {
         match self {
@@ -145,6 +180,9 @@ impl Kind {
             Kind::Answered => 3,
             Kind::Earlier => 4,
             Kind::Request => 5,
+            Kind::Decline => 6,
+            Kind::Reasked => 7,
+            Kind::Asked => 8,
         }
     }
     /// A line's first word: with a reason, and the reason gone (a kept
@@ -157,17 +195,24 @@ impl Kind {
             Kind::Answered => ("j", "J"),
             Kind::Earlier => ("p", "P"),
             Kind::Request => ("q", "Q"),
+            Kind::Decline => ("d", "D"),
+            Kind::Reasked => ("k", "K"),
+            Kind::Asked => ("o", "O"),
         }
     }
     /// A line of this kind is an action even without a text: a rejection
-    /// stands whether its confirmer said why or not.
+    /// stands whether its confirmer said why or not, and so does a decline.
     fn bare(self) -> bool {
-        matches!(self, Kind::Reject | Kind::Answered)
+        matches!(self, Kind::Reject | Kind::Answered | Kind::Decline | Kind::Reasked)
     }
     /// A record of this kind is kept as it was: it takes no error from an
     /// earlier one and is not taken back (see the module docs).
     pub fn kept(self) -> bool {
-        matches!(self, Kind::Answered | Kind::Earlier)
+        matches!(self, Kind::Answered | Kind::Earlier | Kind::Reasked | Kind::Asked)
+    }
+    /// A kept record of this kind names who made the verdict it answers.
+    pub fn named(self) -> bool {
+        matches!(self, Kind::Answered | Kind::Reasked)
     }
     /// As the statistics name it.
     pub fn name(self) -> &'static str {
@@ -178,6 +223,9 @@ impl Kind {
             Kind::Answered => "answered",
             Kind::Earlier => "earlier",
             Kind::Request => "request",
+            Kind::Decline => "decline",
+            Kind::Reasked => "reasked",
+            Kind::Asked => "asked",
         }
     }
     /// From a request's word (the review job's actions, the statistics').
@@ -187,6 +235,7 @@ impl Kind {
             "not-required" | "not_required" => Some(Kind::NotRequired),
             "reject" => Some(Kind::Reject),
             "request" => Some(Kind::Request),
+            "decline" => Some(Kind::Decline),
             _ => None,
         }
     }
@@ -443,7 +492,7 @@ pub struct Reasons {
     /// the actions read and made, in their order (some hold no error now)
     entries: Vec<Entry>,
     /// per kind and rule: sorted runs naming their action
-    segs: [BTreeMap<usize, Vec<Seg>>; 6],
+    segs: [BTreeMap<usize, Vec<Seg>>; 9],
     /// the kept records (`Kind::kept`) per rule, in their order: the errors
     /// and the record
     kept: BTreeMap<(Kind, usize), Vec<(Vec<Run>, u32)>>,
@@ -661,9 +710,9 @@ impl Reasons {
             if !set {
                 return None;
             }
-            // (an answered rejection: who made it, then why)
+            // (an answered rejection, or decline: who made it, then why)
             let (by, text) = match kind {
-                Kind::Answered => {
+                kind if kind.named() => {
                     let rest = text?;
                     let (by, why) = rest.split_once(' ').unwrap_or((rest, ""));
                     (super::local::reviewer_of(by)?.to_owned(), why)
@@ -937,7 +986,7 @@ impl Reasons {
     /// the `flush` its action ends with. Nothing is taken from an earlier
     /// record. No run, or no reason to keep, is nothing.
     pub fn keep(&mut self, kind: Kind, check: usize, runs: &[Run], time: u64, by: &str, text: &str) -> Result<()> {
-        if !kind.kept() || (kind == Kind::Answered) != super::local::reviewer_of(by).is_some() {
+        if !kind.kept() || kind.named() != super::local::reviewer_of(by).is_some() {
             return Err(Error::input("not a record to keep"));
         }
         let text = clean(text)?;
@@ -980,7 +1029,7 @@ impl Reasons {
     /// again, the reason the waive had, then the rejection it answers.
     pub fn kept_at(&self, check: usize, error: u64) -> Vec<&Entry> {
         let mut found: Vec<u32> = Vec::new();
-        for kind in [Kind::Answered, Kind::Earlier] {
+        for kind in [Kind::Answered, Kind::Earlier, Kind::Reasked, Kind::Asked] {
             for (runs, entry) in self.kept.get(&(kind, check)).into_iter().flatten() {
                 let i = runs.partition_point(|r| r.1 <= error);
                 if runs.get(i).is_some_and(|r| r.0 <= error) {
@@ -998,10 +1047,12 @@ impl Reasons {
     }
 
     /// Rule `check`'s errors whose rejection by `by` at `time` this log's
-    /// reviewer has answered (sorted, joined where they meet).
-    pub fn answered(&self, check: usize, by: &str, time: u64) -> Vec<Run> {
+    /// reviewer has answered (sorted, joined where they meet). `kind`: the
+    /// answers' kind - `Kind::Answered` of a rejection, `Kind::Reasked` of
+    /// a decline.
+    pub fn answered(&self, kind: Kind, check: usize, by: &str, time: u64) -> Vec<Run> {
         let mut all: Vec<Run> = self
-            .kept(Kind::Answered, check)
+            .kept(kind, check)
             .filter(|(_, entry)| entry.time == time && entry.by == by)
             .flat_map(|(runs, _)| runs.iter().copied())
             .collect();

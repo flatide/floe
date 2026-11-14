@@ -8,7 +8,9 @@
 //! "partial" | "done" | "error", ...}` lines between the replies.
 //!
 //! Requests, by the handle `drc_open` gives:
-//!   drc_busy {db}, drc_find {db}, drc_open {path, source?, reviewer?, mode: pack|load}
+//!   drc_busy {db}, drc_find {db}, drc_open {path, source?, reviewer?, role?, mode: pack|load}
+//!       `role`: what the session does in the waive workflow - requester,
+//!       waiver, confirmer, or several of them with commas (app-core Roles)
 //!   drc_errors {handle, check, start, count}
 //!   drc_status {handle, check, start, count}   status bytes, hex
 //!   drc_counts {handle}                        [[waived, total], ...] of every rule
@@ -36,8 +38,9 @@
 //!   drc_review {handle, check, action: waive|not-required|reason-read|note|note-clear|note-read,
 //!       selection | errors, on?, text?, reason?, reason_of?, toggle?}  job "review"
 //!   drc_inview {handle, check, bbox, cap, scope?, waived?}                 job "inview"
-//!   drc_lens {handle, lens: live|held|waived|confirmed|rejected}: the class of
-//!       errors a `waived` filter shows from now (app-core desktop::Lens)
+//!   drc_lens {handle, lens: live|held|waived|confirmed|rejected|requested|declined}:
+//!       the class of errors a `waived` filter shows from now (app-core
+//!       desktop::Lens)
 //!   drc_cancel {handle, kind}; drc_close {handle}; drc_parse_step {text}
 //!   svrf_rules {path}, svrf_operands {rhs}, svrf_rules_candidates {db, deck?}
 //! and drc_team.rs's (review flags, snapshots, team, migration).
@@ -57,9 +60,9 @@ use floe_app_core::{
         source::{worker_count, AsciiSource, PackSource, Source, Statuses},
         ticks,
     },
-    drc::desktop::{query_rows, ErrorRow, Left, Lens, Opened, Review},
+    drc::desktop::{query_rows, ErrorRow, Left, Lens, Opened, Review, Store},
     drc::reasons::{self, Kind},
-    drc::{role_missing, role_required, Role},
+    drc::{role_missing, role_required, Roles},
     Error, ErrorKind, Result,
 };
 use serde_json::{json, Value};
@@ -130,7 +133,7 @@ fn reason_of(request: &Value) -> Result<String> {
 /// Whose reason a request asks about (`reason_of`; `kind` is the jobs').
 fn reason_kind(request: &Value) -> Result<Kind> {
     Kind::parse(text(request, "reason_of")?)
-        .ok_or_else(|| Error::input("reason_of is waive or not-required"))
+        .ok_or_else(|| Error::input("reason_of is waive, not-required, reject or decline"))
 }
 
 fn reason_json(entry: Option<&reasons::Entry>) -> Value {
@@ -161,7 +164,9 @@ fn any_unwaived(shared: &Shared, check: usize, targets: &Selection, n: u64) -> R
 /// one reason every target holds now, which the dialog then edits -,
 /// `known` - the reasons given so far - and, of a waive, `rejected_by`: who
 /// rejected the waive of any target and why, which this reviewer has not
-/// answered yet (waived with a reason, those are waived again).
+/// answered yet (waived with a reason, those are waived again). In a
+/// requester's session the mark is a request (`request`), and `rejected_by`
+/// is who declined the request of any target (asked again with a reason).
 fn reason_read(
     shared: &Shared,
     check: usize,
@@ -176,21 +181,25 @@ fn reason_read(
     let runs = reasons::member_runs(targets, n);
     // (the reason of a mark is its kind's: a requester's marks are
     // requests - app-core desktop::Review `mark`)
-    let asking = kind == Kind::Waive && r.mark() != Kind::Waive;
-    let kind = if kind == Kind::Waive { r.mark() } else { kind };
-    let rejected_by = if kind == Kind::Waive && on {
+    let marking = kind == Kind::Waive;
+    let asking = marking && r.mark() != Kind::Waive;
+    let kind = if marking { r.mark() } else { kind };
+    // (the verdict there is on this session's marks: a confirmer's rejection
+    // of a waive, a waiver's decline of a request)
+    let rejected_by = if marking && on {
         r.rejected_by(check, &runs)?
     } else {
         Vec::new()
     };
     // (a waiver's waive answers a request: who asked for any of them)
-    let requested_by = if kind == Kind::Waive && on && r.role() == Role::Waiver {
+    let requested_by = if kind == Kind::Waive && on && r.roles().waiver {
         r.requesters_of(check, &runs)?
     } else {
         Vec::new()
     };
-    // (why a confirmer rejected is in the rejects log, not the reasons)
-    let held = if kind == Kind::Reject { &r.rejects } else { &r.reasons };
+    // (why a confirmer rejected, or a waiver declined, is in the rejects
+    // log, not the reasons)
+    let held = if matches!(kind, Kind::Reject | Kind::Decline) { &r.rejects } else { &r.reasons };
     let prefill = if on && held.any(kind, check) {
         held.common(kind, check, &runs).unwrap_or("")
     } else {
@@ -638,16 +647,15 @@ impl Drcs {
     fn open(&mut self, request: &Value, cancelled: &AtomicUsize) -> Result<Value> {
         let path = PathBuf::from(text(request, "path")?);
         let reviewer = request.get("reviewer").and_then(Value::as_str);
-        // whether this viewer was started to confirm the team's waives
-        // (`floe2 view --confirmer`): the launcher's word, per open
-        let confirmer = request.get("confirmer").and_then(Value::as_bool).unwrap_or(false);
         // what this viewer does in the waive workflow (`floe2 view --role`):
-        // the launcher's word too. None: a reviewer as before the roles -
-        // refused where a role is required (FLOE_ROLE_REQUIRED)
+        // the launcher's word, per open - one role or several, with commas
+        // (0.12.473: `waiver,confirmer`). None: a reviewer as before the
+        // roles - refused where a role is required (FLOE_ROLE_REQUIRED)
         let role = match request.get("role").and_then(Value::as_str) {
-            Some(name) => Role::parse(name)
-                .ok_or_else(|| Error::input("role is requester, waiver or confirmer"))?,
-            None => Role::None,
+            Some(name) => Roles::parse(name).ok_or_else(|| {
+                Error::input("role is requester, waiver or confirmer - or several of them, with commas")
+            })?,
+            None => Roles::NONE,
         };
         if !role.any() && role_required() {
             return Err(role_missing());
@@ -662,9 +670,6 @@ impl Drcs {
             }
             _ => Opened::load_as(&path, reviewer, role, cancelled)?,
         };
-        if let Opened::Pack(r) = &mut opened {
-            r.set_confirmer(confirmer);
-        }
         let mut result = json!({
             "packed": matches!(opened, Opened::Pack(_)),
             "path": opened.path(),
@@ -694,9 +699,16 @@ impl Drcs {
                 result["reason_path"] = json!(r.reasons.path);
                 result["confirm_path"] = json!(r.confirms.path);
                 result["confirmer"] = json!(r.confirmer());
-                // (`role`: said of a session that has one)
-                if r.role().any() {
-                    result["role"] = json!(r.role().name());
+                // (`role`: said of a session that has one - its roles, with
+                // commas, in the workflow's order; `marks`: what its `w` key
+                // makes - a waive, a request, or nothing)
+                if r.roles().any() {
+                    result["role"] = json!(r.roles().name());
+                    result["marks"] = json!(match r.store() {
+                        Store::Waives => "waive",
+                        Store::Requests => "request",
+                        Store::None => "none",
+                    });
                 }
                 let n = notes(r);
                 result["notes"] = n["notes"].clone();
@@ -810,9 +822,9 @@ impl Session {
                     number(request, "count")?,
                 );
                 // an error's state: 0 not waived, 1 waived, 2 waived and
-                // rejected, 3 waived and confirmed, 4 waive requested - a
-                // role's session, whose states are the error's as
-                // everybody's files say (app-core desktop STATE_*)
+                // rejected, 3 waived and confirmed, 4 waive requested, 5
+                // request declined - a role's session, whose states are the
+                // error's as everybody's files say (app-core desktop STATE_*)
                 let mut o = shared.opened.lock().unwrap();
                 let bytes = review(&mut o)?.states(check, start, count.min(1 << 22))?;
                 Ok(Value::from(
@@ -837,7 +849,9 @@ impl Session {
             }
             "drc_lens" => {
                 let lens = Lens::parse(text(request, "lens")?)
-                    .ok_or_else(|| Error::input("lens is live, held, waived, confirmed, rejected or requested"))?;
+                    .ok_or_else(|| {
+                        Error::input("lens is live, held, waived, confirmed, rejected, requested or declined")
+                    })?;
                 let (moved, all) = {
                     let mut o = shared.opened.lock().unwrap();
                     let r = review(&mut o)?;

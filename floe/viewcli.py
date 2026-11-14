@@ -97,18 +97,6 @@ def file_load_off(args, environ=None):
         "1", "on", "yes", "true")
 
 
-def confirmer_on(args, environ=None):
-    """Whether this viewer is started to confirm the team's waives (user
-    2026-11-13: "사용자중 팀의 모든 waive를 뷰어에서 보고 confirm하는 역할이
-    필요함"): `--confirmer`, or FLOE_CONFIRMER set to `1`, `on`, `yes` or
-    `true` in the launcher's environment. A role the launcher gives, as it
-    gives the user ID - the viewer does not ask who the user is."""
-    environ = os.environ if environ is None else environ
-    word = (environ.get("FLOE_CONFIRMER") or "").strip().lower()
-    return bool(getattr(args, "confirmer", False)) or word in (
-        "1", "on", "yes", "true")
-
-
 ROLES = ("requester", "waiver", "confirmer")
 
 
@@ -118,14 +106,32 @@ def role_of(args, environ=None):
     requester, waiver, confirmer로 나누어야 함"): `--role NAME`, or FLOE_ROLE
     in the launcher's environment - "" when neither says one (a reviewer as
     before the roles). A role the launcher gives, as it gives the user ID.
+    Several roles are given with commas (the same day: "--role 이 역할 다중
+    지정 가능하게 ... --role waiver,confirmer나 --role
+    requester,waiver,confirmer가 가능하게"): what comes back names each once,
+    in the workflow's order (`waiver,confirmer`), as the service says them.
     A word that names no role is an error: a launch that meant a role must
-    not open the review without one."""
+    not open the review without one.
+
+    `--confirmer` and FLOE_CONFIRMER are gone (0.12.473: "--confirmer는
+    삭제해줘"): a confirmer is `--role confirmer`, alone or with other
+    roles. The option is an argument error. The variable is not read - but
+    where it is still set to a word that used to turn it on and the roles
+    given name no confirmer, the launch stops and says what to give: that
+    launcher meant a confirmer, and would open a viewer that is none."""
     environ = os.environ if environ is None else environ
     word = (getattr(args, "role", None) or environ.get("FLOE_ROLE") or "").strip().lower()
-    if word and word not in ROLES:
-        raise SystemExit("floe2 view: --role / FLOE_ROLE is one of %s, not %r"
+    names = [name.strip() for name in word.split(",")] if word else []
+    if any(name not in ROLES for name in names):
+        raise SystemExit("floe2 view: --role / FLOE_ROLE is %s - or several of them "
+                         "with commas (waiver,confirmer) -, not %r"
                          % (", ".join(ROLES), word))
-    return word
+    stale = (environ.get("FLOE_CONFIRMER") or "").strip().lower() in ("1", "on", "yes", "true")
+    if stale and "confirmer" not in names:
+        raise SystemExit("floe2 view: FLOE_CONFIRMER is no longer read: give the "
+                         "role with --role confirmer or FLOE_ROLE=confirmer "
+                         "(several roles with commas: --role waiver,confirmer)")
+    return ",".join(name for name in ROLES if name in names)
 
 
 def _is_deck(src):
@@ -299,7 +305,6 @@ def cmd_view(args):
     # switch: every waive, visit, exclusion and note is on the disk when it
     # is made. --multi still opens a window of its own.
     no_load = file_load_off(args)
-    confirmer = confirmer_on(args)
     role = role_of(args)
     # the reviewer this launch states (main() put --userid in the
     # environment): sent along - a window serves the request under it
@@ -367,10 +372,8 @@ def cmd_view(args):
             request += "\tuserid=" + stated
         if no_load:
             request += "\tnoload=1"
-        # the results are opened as a confirmer's (--confirmer)
-        if confirmer:
-            request += "\tconfirmer=1"
-        # ... or as a session of a role's (--role)
+        # the results are opened as a session of the roles the launch
+        # says (--role: one, or several with commas)
         if role:
             request += "\trole=" + role
         # the layout's layer properties file: the window applies it to the
@@ -453,7 +456,6 @@ def cmd_view(args):
                occupancy=(None if getattr(args, "occupancy", None) is None
                           else args.occupancy == "on"),
                file_load=not no_load,
-               confirmer=confirmer,
                role=role,
                layerprops=props if c is not None else None,
                drc_pick=(drc_rule, drc_err) if drc_rule else None)
@@ -465,7 +467,7 @@ def parser():
         description="native desktop viewer (GTK3); one instance per (uid, "
                     "DISPLAY) - later calls hand their request (the layout, "
                     "--layerprops, --drc, --rules, --drc-rule, --drc-err, "
-                    "--userid, --no-file-load, --confirmer, --role "
+                    "--userid, --no-file-load, --role "
                     "and the view options) to it and the window switches; "
                     "--multi opens a window of its own",
         epilog="--workdir DIR (every floe2 command, anywhere on the line; "
@@ -647,49 +649,41 @@ def parser():
                         "Forwarded to a running instance, whose file loads "
                         "go off with it and stay off. Saving and exporting "
                         "are not affected")
-    # the one who confirms the team's waives (user 2026-11-13)
-    p.add_argument("--confirmer", action="store_true",
-                   help="open the DRC results as a confirmer's: DRC > team "
-                        "waives… lists every reviewer's waives - who waived "
-                        "each error and why - and this viewer may confirm "
-                        "them (kept in the confirmer's own file, "
-                        ".DB.confirm.ID; floe2 drc --review-counts / "
-                        "--review-stats say the confirmed and the "
-                        "unconfirmed). A confirmed waive is locked: a "
-                        "viewer started without this option does not turn "
-                        "it back or change its reason - its confirmer "
-                        "takes the confirmation back, or a viewer started "
-                        "with this option turns it back. This viewer may "
-                        "also reject a waive (Reject selected, asking "
-                        "why): a rejected waive counts for nothing and "
-                        "stays with its reviewer, shown as rejected, until "
-                        "they waive the error again with a reason - what "
-                        "was said before is kept (.DB.rejects.ID). Without "
-                        "it the list is "
-                        "read-only. "
-                        "FLOE_CONFIRMER=1 (on / yes / true) in the "
-                        "launcher's environment does the same. Forwarded "
-                        "to a running instance with the results it opens")
     # what the user does in the waive workflow (user 2026-11-14)
-    p.add_argument("--role", choices=ROLES, default=None,
-                   help="open the DRC results as a session of this role: "
-                        "error -> waive requested -> waived -> confirmed, "
-                        "each step its role's. A requester asks for an "
-                        "error's waive (w, with a reason; kept in "
-                        ".DB.request.ID) and takes the request back while "
-                        "nobody has waived the error. A waiver waives the "
-                        "errors somebody asked the waive of, and no other. "
-                        "A confirmer confirms and rejects waives (DRC > "
-                        "team waives…) and waives none. The error list's "
-                        "filter shows the errors of one state - Not "
-                        "Waived, Requested, Waived, Confirmed, Rejected - "
-                        "as everybody's files say them. Without the option "
-                        "the viewer is a reviewer's as before: it waives "
-                        "at once, nothing asked of anybody (refused where "
-                        "FLOE_ROLE_REQUIRED=1 asks for a role). FLOE_ROLE "
-                        "in the launcher's environment does the same. "
-                        "Forwarded to a running instance with the results "
-                        "it opens")
+    p.add_argument("--role", default=None, metavar="ROLE[,ROLE...]",
+                   help="open the DRC results as a session of this role - "
+                        "requester, waiver or confirmer -, or of several, "
+                        "with commas (--role waiver,confirmer; --role "
+                        "requester,waiver,confirmer): error -> waive "
+                        "requested -> waived -> confirmed, each step its "
+                        "role's. A requester asks for an error's waive (w, "
+                        "with a reason; kept in .DB.request.ID) and takes "
+                        "the request back while nobody has waived the "
+                        "error. A waiver waives the errors somebody asked "
+                        "the waive of, and no other, and may decline a "
+                        "request (DRC > team waives…, Decline selected, "
+                        "asking why): a declined request stays with its "
+                        "requester, shown as declined, until they ask "
+                        "again with a reason - what was said before is "
+                        "kept. A confirmer confirms and rejects waives "
+                        "(DRC > team waives…: a confirmed waive is locked, "
+                        "a rejected one stays with its waiver until they "
+                        "waive the error again with a reason) and, alone, "
+                        "waives none and makes no waive file. A session of "
+                        "several roles does each role's step: w makes the "
+                        "mark of its latest marking role - a waive where "
+                        "it is a waiver, else a request -, and a requester "
+                        "who is a waiver too waives without a request. The "
+                        "error list's filter shows the errors of one state "
+                        "- Not Waived, Requested, Declined, Waived, "
+                        "Confirmed, Rejected - as everybody's files say "
+                        "them. Without the option the viewer is a "
+                        "reviewer's as before the roles: it waives at "
+                        "once, nothing asked of anybody, and confirms "
+                        "nothing (refused where FLOE_ROLE_REQUIRED=1 asks "
+                        "for a role). FLOE_ROLE in the launcher's "
+                        "environment does the same. Forwarded to a running "
+                        "instance with the results it opens")
     return p
 
 

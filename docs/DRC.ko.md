@@ -364,17 +364,20 @@ python -m floe render chip.oas --drc results.db \
   팀원의 waive를 누가 확인했다는 기록이 없었다.
   - **뜻**: confirm은 확인자(confirmer)가 "이 에러의 waive를 확인했다"고 남기는 표시다. 에러 단위이고
     누가 waive했는지와 무관하다: 두 사람이 waive한 에러도 confirm은 하나다.
-  - **역할**: 런처가 정한다. `floe2 view … --confirmer`(또는 런처 환경의 `FLOE_CONFIRMER=1`)로 띄운
-    뷰어만 confirm할 수 있다. 사용자 ID처럼 뷰어는 누구인지 확인하지 않는다. 같은 DISPLAY의 창에
-    넘기는 요청에도 실린다(`confirmer=1`): 리뷰어로 열려 있던 결과를 확인자의 실행이 부르면 확인자로
-    다시 열고, 그 반대도 같다. 결과를 열면 상태 줄 끝에 ` · confirmer`가 붙는다.
+  - **역할**: 런처가 정한다. 확인자 역할로 띄운 뷰어만 confirm할 수 있다:
+    `floe2 view … --role confirmer`, 다른 역할과 함께면 `--role waiver,confirmer`처럼 쉼표로 준다
+    (런처 환경의 `FLOE_ROLE`도 같다). 0.12.472까지의 `--confirmer`와 `FLOE_CONFIRMER`는 0.12.473에서
+    없앴다(아래 "역할과 waive 요청"). 사용자 ID처럼 뷰어는 누구인지 확인하지 않는다. 같은 DISPLAY의
+    창에 넘기는 요청에도 실린다(`role=`): 리뷰어로 열려 있던 결과를 확인자의 실행이 부르면 확인자로
+    다시 열고, 그 반대도 같다. 결과를 열면 상태 줄 끝에 역할이 붙는다(` · confirmer`).
   - **창**: DRC 메뉴 `team waives…`. 팀 전원의 waive를 리뷰어들의 작업 파일에서 바로 읽는다. 동료
     파일을 불러올 필요가 없고 `--no-file-load`에서도 열린다. 룰 목록에는 누군가 waive한 룰만
     `이름  (to confirm N of M waived)`로 나오고, 목록은 `To confirm`·`Confirmed`·`All team waives`
     중에서 고른다. 행은 에러 번호, waive한 사람들, 사유(그 사람이 준 것), confirm한 사람들이다.
     더블클릭은 그 에러를 연다. `Confirm selected`·`Unconfirm selected`·`Confirm all of rule`(묻고
-    나서 한다)은 확인자의 창에서만 켜져 있고, 그 밖의 창은 읽기만 한다. `Refresh`가 파일을 다시
-    읽는다. 1,000개씩 넘긴다.
+    나서 한다)은 확인자 역할의 창에만 있고, 그 밖의 창은 읽기만 한다(0.12.473: 창에는 그 세션이
+    가진 역할의 버튼만 나온다. 전에는 확인자가 아닌 창에도 꺼진 채로 보였다). `Refresh`가 파일을
+    다시 읽는다. 1,000개씩 넘긴다.
   - **상세**: 에러 상세에 `waived by: kim (사유), lee`(나 말고 waive한 사람이 있을 때)와
     `waive confirmed by: hong · locked`가 붙는다. 자기 waive가 confirm됐는지는 누구나 여기서 본다.
   - **저장**: 확인자 자신의 `.<db>.confirm.<리뷰어>`(waive 사이드카와 같은 자리). 에러당 1바이트와
@@ -402,12 +405,12 @@ python -m floe render chip.oas --drc results.db \
     - **확인자만 되돌린다**:
       - 확인자가 confirm을 취소하면(`Unconfirm selected`) 잠금이 풀리고 그 waive는 다시 리뷰어의
         것이다. 확인자가 둘이면 둘 다 취소해야 풀린다(각자 자기 confirm만 쓴다).
-      - 확인자로 연 세션(`--confirmer`)은 잠금에 걸리지 않는다. 자기 waive는 confirm됐어도
+      - 확인자 역할이 있는 세션(`--role`에 `confirmer`)은 잠금에 걸리지 않는다. 자기 waive는 confirm됐어도
         되돌리고, 그때 자기 confirm도 함께 지운다(남기면 그 에러가 다시 waive되는 순간 확인자가
         보지 않은 waive가 confirm으로 세어지고 잠긴다).
       - 다른 리뷰어의 waive 자체는 확인자도 지우지 않는다(그 리뷰어의 파일은 그 리뷰어의 세션만
         쓴다). 확인자가 confirm을 취소하고 그 리뷰어가 되돌린다.
-    - **인증이 아니다**: 역할이 런처의 말이므로 `--confirmer`로 띄운 세션은 누구의 것이든 잠금에
+    - **인증이 아니다**: 역할이 런처의 말이므로 확인자 역할로 띄운 세션은 누구의 것이든 잠금에
       걸리지 않는다.
     - **읽는 방법**: 리뷰어의 세션은 이미 waive인 에러를 건드릴 때만 확인자들의 confirm 파일을
       읽는다(통계가 찾는 것과 같은 파일이다). 새 waive에는 비용이 없다. 파일 목록은 1초에 한 번
@@ -491,14 +494,34 @@ python -m floe render chip.oas --drc results.db \
     확인자들이 confirm하거나 반려하면 2초 주기 확인에서 목록이 따라간다.
   - **역할과 waive 요청**(0.12.472, 사용자 2026-11-14: "floe 사용자의 role 구분이 필요하며 error
     상태에 waive requested가 추가되어야 함. 즉 error -> waive request -> waive -> confirm 의 업무
-    흐름이며 role은 requester, waiver, confirmer로 나누어야 함"; app-core `drc::Role`, `drc::desktop`):
-    - **흐름**: 에러, waive 요청, waive, confirm의 네 단계이고 단계마다 그 역할의 세션이 한다. 한
-      세션은 한 역할의 일만 한다. 반려는 전과 같다: 확인자가 waive를 반려하면 rejected이고, waive한
-      사람이 사유를 주며 다시 waive한다.
-    - **역할 주기**: 런처가 정한다. `floe2 view … --role requester|waiver|confirmer`(런처 환경의
-      `FLOE_ROLE`도 같다). 떠 있는 창으로 넘어가는 요청에는 `role=`로 실리고, 같은 결과가 다른 역할로
-      열려 있으면 다시 연다. 로드의 상태 줄 끝에 역할이 붙는다(` · reviewer kim · waiver`). 역할은 그
-      세션이 하는 일이지 사용자가 누구인지의 확인이 아니다(ID가 그렇듯 런처의 말이다).
+    흐름이며 role은 requester, waiver, confirmer로 나누어야 함"; 0.12.473, 같은 날: "요청 거절 상태도
+    만들어줘. --confirmer는 삭제해줘. 그리고 confirmer는 waive 파일을 만들지 않게 해줘. 끝으로,
+    --role 이 역할 다중 지정 가능하게 해줘. 즉 --role waiver,confirmer나 --role
+    requester,waiver,confirmer가 가능하게 해줘."; app-core `drc::Roles`, `drc::desktop`):
+    - **흐름**: 에러, waive 요청, waive, confirm의 네 단계이고 단계마다 그 역할의 세션이 한다.
+      되돌아가는 길이 둘이다. waiver가 요청을 거절하면 declined이고 요청자가 사유를 주며 다시
+      요청한다. 확인자가 waive를 반려하면 rejected이고 waive한 사람이 사유를 주며 다시 waive한다.
+
+      ```text
+      not waived --request--> requested --waive--> waived --confirm--> confirmed
+                     ^            |           ^        |
+                 ask again     decline   waive again  reject
+                     |            v           |        v
+                     +-------- declined       +----- rejected
+      ```
+    - **역할 주기**: 런처가 정한다. `floe2 view … --role ROLE[,ROLE...]`(런처 환경의 `FLOE_ROLE`도
+      같다). 역할은 `requester`, `waiver`, `confirmer`이고 쉼표로 여럿을 준다
+      (`--role waiver,confirmer`, `--role requester,waiver,confirmer`). 순서와 대소문자는 가리지
+      않고, 역할이 아닌 말이 섞이면 실행을 멈춘다. 떠 있는 창으로 넘어가는 요청에는 `role=`로
+      실리고, 같은 결과가 다른 역할로 열려 있으면 다시 연다. 로드의 상태 줄 끝에 역할이 붙는다
+      (` · reviewer kim · waiver,confirmer`). 역할은 그 세션이 하는 일이지 사용자가 누구인지의
+      확인이 아니다(ID가 그렇듯 런처의 말이다).
+    - **`--confirmer`는 없다**(0.12.473): 옵션을 주면 인자 오류로 끝난다. `FLOE_CONFIRMER`는 읽지
+      않는다. 다만 런처 환경에 `FLOE_CONFIRMER=1`(`on`·`yes`·`true`)이 남아 있는데 준 역할에
+      `confirmer`가 없으면 실행을 멈추고 `--role confirmer`를 말한다: 확인자로 띄우려던 런처가
+      확인자가 아닌 뷰어를 조용히 띄우지 않게 한 것이다. 넘기는
+      요청의 `confirmer=1`과 서비스의 `confirmer` 요청 필드도 없다. 전의 `--confirmer`(리뷰어이면서
+      확인자)에 가장 가까운 것은 `--role requester,waiver,confirmer`다.
     - **requester**: `w`가 waive 요청이다(사유 입력창의 제목이 `Request reason`). 요청은 그 사람의
       파일 `.<db>.request.<리뷰어>`에 적힌다(waive 사이드카와 같은 모양, 첫 열기 때 만든다. 이 세션은
       waive 사이드카를 만들지 않는다). 사유는 그 사람의 사유 파일에 `q` 줄로 남는다. 아무 에러나
@@ -506,36 +529,73 @@ python -m floe render chip.oas --drc results.db \
       `locked: N request(s) in RULE waived by kim - not taken back while waived`.
     - **waiver**: 누군가 요청한 에러만 waive한다. 요청이 없는 에러는 남기고 말한다
       (`… · K not requested`, 전부면 `not requested: K error(s) in RULE - a waiver waives the errors
-      somebody asked the waive of`). job, `load waives…`, 동료 결정 적용, 이전 실행 승계도 같다. 사유
-      입력창이 누가 요청했는지를 말한다(`Requested by park`). confirm된 waive의 잠금과 반려에 대한
-      답은 위와 같다. waive를 되돌리면 그 에러는 다시 requested다.
-    - **confirmer**: confirm과 반려만 한다(`team waives…` 창). 상태를 쓰지 않는다: `w`는 거절되고
-      상태 줄이 그렇게 말한다.
+      somebody asked the waive of`). 거절된 요청은 요청으로 치지 않는다. job, `load waives…`, 동료
+      결정 적용, 이전 실행 승계도 같다. 사유 입력창이 누가 요청했는지를 말한다
+      (`Requested by park`). confirm된 waive의 잠금과 반려에 대한 답은 위와 같다. waive를 되돌리면
+      그 에러는 다시 requested다. 요청을 거절할 수 있다(아래 "요청 거절").
+    - **confirmer**: confirm과 반려만 한다(`team waives…` 창). 표시를 하지 않는다: `w`는 사유를 묻기
+      전에 거절되고 상태 줄이 그렇게 말한다. waiver도 requester도 아닌 확인자의 세션은 waive
+      파일도 요청 파일도 만들지 않는다(0.12.473). confirm 파일, 반려 기록, 메모, 방문 기록은 전과
+      같은 이름으로 그 사람의 것이 생긴다.
+    - **여러 역할의 세션**(0.12.473): 가진 역할의 일을 모두 한다. `w`는 가진 역할 중 뒤 단계의
+      표시를 만든다: waiver가 있으면 waive, 없고 requester가 있으면 요청이다. requester와 waiver를
+      함께 가진 세션은 자기가 요청자이므로 요청 없이 바로 waive하고 요청 파일을 만들지 않는다.
+      waiver와 confirmer를 함께 가진 세션은 요청된 에러를 waive하고 confirm도 하며, 자기가
+      confirm한 자기 waive는 잠금 없이 되돌린다(그때 자기 confirm도 함께 지운다). `team waives…`
+      창에는 가진 역할의 버튼이 모두 나온다.
+    - **요청 거절**(0.12.473): waiver가 `team waives…` 창의 `Requested` 목록에서 행을 고르고
+      `Decline selected`를 누른다. 거절 사유를 묻고(`Decline reason`. 비워도 된다. 취소하면 아무것도
+      하지 않는다) 몇 개든 그 waiver의 기록 `.<db>.rejects.<리뷰어>`에 `d` 한 줄로 남는다. 반려와
+      같은 방식이다.
+      - 요청은 요청자의 파일에 그대로 있고 declined 상태가 된다. 요청으로 세지 않고, 어떤
+        waiver의 세션도 그 요청으로는 waive하지 않는다.
+      - 거절은 그 에러를 요청한 사람 각각의 요청에 대한 것이다. 두 사람이 요청한 에러는 한 사람이
+        다시 요청하면 requested이고, 다른 사람의 요청은 그 사람이 답할 때까지 declined다.
+      - 요청자의 뷰어는 2초 주기 확인에서 찾아 말한다:
+        `N request(s) in RULE declined by kim (사유): ask again with a reason`. 자기 파일은 쓰지
+        않는다.
+      - 요청자가 `w`로 사유를 주면 다시 요청된다(`… · K asked again after a decline`). 입력창이 누가
+        왜 거절했는지를 위에 말하고 전의 요청 사유에서 시작한다. 사유가 비면 declined로 남는다
+        (`declined: K request(s) in RULE by kim (사유) - ask again with a reason`).
+      - 전의 요청 사유와 거절(누가, 언제, 왜)은 요청자 자신의 `.<db>.rejects.<리뷰어>`에 `o`와 `k`
+        줄로 남고, 에러 상세에 `before: requested (이전 사유)`, `before: declined by kim (거절 사유)`
+        로 나온다. 몇 번을 되풀이해도 전부 남는다.
+      - 요청자는 declined인 요청을 그냥 되돌릴 수도 있다. 그 에러는 not waived가 된다.
+      - 거절한 waiver는 `Undecline selected`로 거절을 취소한다(요청은 다시 기다린다). 그 waiver가 그
+        에러를 waive하면 자기 거절은 함께 풀린다. 다시 요청된 것을 또 거절하면 새 거절이다.
+      - 거절할 수 있는 것은 요청이 기다리고 있는 에러다(요청됐고 아무도 waive하지 않은 것).
     - **상태**: 역할 세션의 목록은 그 **에러의** 상태를 전원의 파일에서 읽는다(요청 파일, waive
-      사이드카, confirm 파일, 반려 기록). not waived(아무도 요청하지도 waive하지도 않음), requested
-      (요청됐고 아무도 waive하지 않음), waived, confirmed, rejected. 필터 콤보에 `Requested`가
-      생기고(`All`·`Not Waived`·`Requested`·`Waived`·`Confirmed`·`Rejected`), 목록의 번호는
-      requested가 하늘색이다. 다른 사람의 요청, waive, confirm, 반려는 2초 주기 확인에서 따라오고,
-      자기 세션이 한 것은 바로 보인다. `w`의 방향은 자기 표시(요청자의 요청, waiver의 waive)가 정한다.
-    - **누가 요청했나**: 에러 상세의 `waive requested by: park (사유)` 줄, 그리고 `team waives…`
-      창의 `Requested` 목록(요청됐고 아직 waive되지 않은 에러. Reason 열에 `requested by park: 사유`).
+      사이드카, confirm 파일, 반려와 거절의 기록). not waived(아무도 요청하지도 waive하지도 않음),
+      requested(요청됐고 아무도 waive하지 않음), declined(요청이 모두 거절됐고 아무도 waive하지
+      않음), waived, confirmed, rejected. 필터 콤보는 `All`·`Not Waived`·`Requested`·`Declined`·
+      `Waived`·`Confirmed`·`Rejected`다. 목록의 번호는 requested가 하늘색이고 declined가 rejected와
+      같은 주황색이다(만든 사람에게 돌아간 것). 다른 사람의 요청, 거절, waive, confirm, 반려는 2초
+      주기 확인에서 따라오고, 자기 세션이 한 것은 바로 보인다. `w`의 방향은 자기 표시(요청자의
+      요청, waiver의 waive)가 정한다.
+    - **누가 요청했나**: 에러 상세의 `waive requested by: park (사유)` 줄(거절된 요청은 뒤에
+      ` · declined`)과 `request declined by: kim (사유)` 줄, 그리고 `team waives…` 창의 `Requested`
+      목록(요청됐고 아직 waive되지 않은 에러. Reason 열에 `requested by park: 사유`)과 `Declined`
+      목록. 이 두 목록에서는 마지막 열이 `Declined by`가 되어 누가 왜 거절했는지를 보인다.
     - **역할 없는 실행**: 전과 같은 리뷰어다. 바로 waive하고 목록은 자기 waive의 상태를 보인다. 그
-      waive는 팀의 waive로 센다(요청 없이 된 waive다). `--confirmer`도 전과 같다(리뷰어이면서
-      확인자). `FLOE_ROLE_REQUIRED=1`(`on`·`yes`·`true`)이면 역할 없이는 리뷰를 열지 않고 거절이
-      `--role`을 말한다.
-    - **통계**: `--team-counts`의 여섯 숫자에 `requested`가 더해져 `errors` 다음에 온다(누군가 요청한
-      에러, waive된 것 포함). `--review-counts`·`--review-stats`의 `team`은 요청이 하나라도 있으면
-      `requested`와 `unwaived`(요청됐고 아무도 waive하지 않은 것)를 내고, 요청자의 줄에 `requested`와
-      `request_file`이 나온다(DRC-CLI.ko.md §2b~§2d).
-    - **하지 않는 것**: waiver가 요청을 거절하는 상태는 없다(요청자가 되돌리거나 그대로 둔다).
-      한 사용자가 어느 역할인지를 floe가 확인하지 않는다. `--role confirmer`의 세션도 자기 ID의 waive
-      사이드카를 만든다(쓰지는 않는다). 그 확인자가 방문한 waive는 `--review-counts`의 `conflicts`로
-      세어질 수 있다(방문하고 waive하지 않은 사람으로 보기 때문이다. `--team-counts`는 합집합이라
-      영향이 없다). 캔버스의 마커 색은 waive 여부 둘뿐이다(requested는 not waived 색). 웹의 리뷰
-      저장소는 역할과 요청을 모른다. 0.12.471 이하의 뷰어는 요청 파일을 읽지 않는다.
+      waive는 팀의 waive로 센다(요청 없이 된 waive다). confirm, 반려, 거절은 하지 못한다.
+      `FLOE_ROLE_REQUIRED=1`(`on`·`yes`·`true`)이면 역할 없이는 리뷰를 열지 않고 거절이 `--role`을
+      말한다.
+    - **통계**: `--team-counts`의 숫자는 여덟이다: `errors`, `requested`, `declined`, `waived`,
+      `confirmed`, `rejected`, `visited`, `ignored`. `requested`는 누군가 요청한 에러(waive된 것은
+      포함하고 거절된 요청은 뺀다), `declined`는 요청이 모두 거절됐고 아무도 waive하지 않은 에러다.
+      `--review-counts`·`--review-stats`의 `team`은 요청이 하나라도 있으면 `requested`,
+      `unwaived`(요청됐고 아무도 waive하지 않은 것), `declined`를 낸다. 요청자의 줄에는 `requested`와
+      `request_file`이, `--review-stats`에는 `requested_declined`도 나오고, 거절한 waiver의 줄에
+      `declined`가 나온다(DRC-CLI.ko.md §2b~§2d).
+    - **하지 않는 것**: 한 사용자가 어느 역할인지를 floe가 확인하지 않는다. 거절은 거절한 waiver만
+      취소한다(다른 waiver가 그 요청을 받으려면 요청자가 다시 요청해야 한다). 캔버스의 마커 색은
+      waive 여부 둘뿐이다(requested와 declined는 not waived 색). 웹의 리뷰 저장소는 역할과 요청을
+      모른다. 0.12.472의 뷰어는 거절을 모르고(거절된 요청을 requested로 읽어 waive할 수 있다) 역할
+      목록을 받지 않는다. 0.12.471 이하의 뷰어는 요청 파일을 읽지 않는다.
     - 게이트 `drc_team` R19·R7, 단위 테스트 app-core `drc::tests`
-      (`the_roles_take_an_error_from_a_request_to_a_confirmation`), `drc::changes`, `drc::team::live`,
-      `drc::team::stats`.
+      (`the_roles_take_an_error_from_a_request_to_a_confirmation`,
+      `a_declined_request_is_a_state_until_its_requester_asks_again`), `drc::changes`,
+      `drc::team::live`, `drc::team::stats`.
   - **하지 않는 것**: 메인 목록과 캔버스의 상태는 내 waive의 것이다: 남이 waive한 에러는 내 목록에서
     not waived이고, 팀 전체는 `team waives…` 창과 에러 상세에서 본다. 캔버스의 마커 색은 전처럼
     waive 여부 둘뿐이다(rejected는 not waived 색). `.floereview`·`save waives as…`·

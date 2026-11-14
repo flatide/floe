@@ -4,7 +4,7 @@ use crate::drc::changes::{stamp_at, STAMP};
 use crate::drc::desktop::{Left, Review, STATUS_NONE, STATUS_WAIVED};
 use crate::drc::team::flags::FlagStore;
 use crate::drc::team::stats::{collect_from, collect_with};
-use crate::drc::Pack;
+use crate::drc::{Pack, Roles};
 use std::os::unix::fs::MetadataExt;
 use std::sync::Arc;
 
@@ -209,8 +209,14 @@ struct Session {
 
 impl Session {
     fn open(f: &Folder, who: &str) -> Self {
+        Self::open_as(f, who, Roles::NONE)
+    }
+    /// `open`, as a session of `roles`: a confirmer here is one of every
+    /// role (`floe2 view --role requester,waiver,confirmer`) - it waives as
+    /// a reviewer does, and confirms.
+    fn open_as(f: &Folder, who: &str, roles: Roles) -> Self {
         let stop = AtomicUsize::new(0);
-        let mut review = Review::open(&f.pack, None, Some(who), &stop).unwrap();
+        let mut review = Review::open_as(&f.pack, None, Some(who), roles, &stop).unwrap();
         assert!(!review.read_only(), "{:?}", review.notices);
         // (which waives are locked is looked for at each ask here)
         review.set_lock_refresh(std::time::Duration::ZERO);
@@ -340,18 +346,18 @@ fn what_a_log_and_its_files_say_against_what_is_kept() {
 #[test]
 fn the_cache_file_is_whole_and_this_results_or_no_cache() {
     let mut cache = Cache::empty(3);
-    cache.set(1, 0, [1, 2, 3, 0, 4, 2, 1, 0, 3, 0, 0]);
-    cache.set(1, 7, [4096, 0, 0, 0, 4096, 0, 0, 0, 0, 0, 0]);
-    cache.set(2, 1, [0, 5, 0, 0, 0, 5, 5, 0, 0, 0, 0]);
-    assert_eq!(cache.rules, [[0; 11], [4097, 2, 3, 0, 4100, 2, 1, 0, 3, 0, 0], [0, 5, 0, 0, 0, 5, 5, 0, 0, 0, 0]]);
+    cache.set(1, 0, [1, 2, 3, 0, 4, 2, 1, 0, 3, 0, 0, 0]);
+    cache.set(1, 7, [4096, 0, 0, 0, 4096, 0, 0, 0, 0, 0, 0, 0]);
+    cache.set(2, 1, [0, 5, 0, 0, 0, 5, 5, 0, 0, 0, 0, 0]);
+    assert_eq!(cache.rules, [[0; 12], [4097, 2, 3, 0, 4100, 2, 1, 0, 3, 0, 0, 0], [0, 5, 0, 0, 0, 5, 5, 0, 0, 0, 0, 0]]);
     // a chunk's counts replaced, and one that counts nothing any more
-    cache.set(1, 0, [2, 2, 0, 1, 2, 3, 0, 0, 1, 0, 0]);
-    cache.set(2, 1, [0; 11]);
-    assert_eq!(cache.rules, [[0; 11], [4098, 2, 0, 1, 4098, 3, 0, 0, 1, 0, 0], [0; 11]]);
+    cache.set(1, 0, [2, 2, 0, 1, 2, 3, 0, 0, 1, 0, 0, 0]);
+    cache.set(2, 1, [0; 12]);
+    assert_eq!(cache.rules, [[0; 12], [4098, 2, 0, 1, 4098, 3, 0, 0, 1, 0, 0, 0], [0; 12]]);
     assert_eq!((cache.kept(1), cache.kept(2), cache.chunks.len()), (vec![0, 7], vec![], 2));
     assert_eq!(
         cache.teams()[1],
-        Team { visited: 4098, waived: 2, not_required: 0, conflicts: 1, done: 4098, waived_any: 3, confirmed: 0, rejected: 0, not_required_any: 1, requested: 0, unwaived: 0 }
+        Team { visited: 4098, waived: 2, not_required: 0, conflicts: 1, done: 4098, waived_any: 3, confirmed: 0, rejected: 0, not_required_any: 1, requested: 0, unwaived: 0, declined: 0 }
     );
     cache.reviewers.insert(
         "kim".into(),
@@ -388,14 +394,14 @@ fn the_cache_file_is_whole_and_this_results_or_no_cache() {
     wrong.rules[1][0] += 1;
     assert!(Cache::of(&wrong.bytes("abc"), "abc", 3).is_none(), "a rule's total is not its chunks'");
     let mut wrong = cache.clone();
-    wrong.chunks.insert((1, 3), [0; 11]);
+    wrong.chunks.insert((1, 3), [0; 12]);
     assert!(Cache::of(&wrong.bytes("abc"), "abc", 3).is_none(), "a chunk that counts nothing");
     let mut wrong = cache.clone();
-    wrong.chunks.insert((1, 3), [4097, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    wrong.chunks.insert((1, 3), [4097, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     wrong.rules[1][0] += 4097;
     assert!(Cache::of(&wrong.bytes("abc"), "abc", 3).is_none(), "a count past a chunk");
     let mut wrong = cache.clone();
-    wrong.chunks.insert((3, 0), [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    wrong.chunks.insert((3, 0), [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     assert!(Cache::of(&wrong.bytes("abc"), "abc", 3).is_none(), "a rule the result has not");
     // the names
     assert_eq!(path_of(Path::new("/r/.x.db.tray")).unwrap(), Path::new("/r/.x.db.team"));
@@ -493,8 +499,7 @@ fn the_kept_counts_are_the_exact_ones_after_every_change() {
     // rejects and takes that back (0.12.468); a reviewer's session looks
     // now and then, and waives the rejected waives it finds again, or
     // leaves them rejected (0.12.469)
-    let mut park = Session::open(&f, "park");
-    park.review.set_confirmer(true);
+    let park = Session::open_as(&f, "park", Roles::ALL);
     let mut people = [kim, lee, park];
     let mut seed = 0x2545_f491_4f6c_dd1du64;
     let mut next = |n: u64| {
@@ -609,7 +614,7 @@ fn the_teams_waives_are_listed_and_confirmed_by_the_confirmer() {
     let id = f.id();
     let stop = AtomicUsize::new(0);
     let view = || TeamWaives::open(&f.pack, &f.id()).unwrap();
-    let counts = |waived, confirmed| Waives { waived, confirmed, unconfirmed: waived - confirmed, rejected: 0, requested: 0 };
+    let counts = |waived, confirmed| Waives { waived, confirmed, unconfirmed: waived - confirmed, rejected: 0, requested: 0, declined: 0 };
     // nobody has waived anything: nothing to confirm
     let mut v = view();
     assert_eq!(v.counts(None, &stop).unwrap(), counts(0, 0));
@@ -650,7 +655,8 @@ fn the_teams_waives_are_listed_and_confirmed_by_the_confirmer() {
     assert_eq!(hong.review.confirm_set(RULE, &[0], true).unwrap_err().kind, ErrorKind::Unsupported);
     let file = f.file(".results.db.confirm.hong");
     assert!(!file.exists() && !hong.review.confirmer());
-    hong.review.set_confirmer(true);
+    drop(hong);
+    let mut hong = Session::open_as(&f, "hong", Roles::ALL);
     // every waive of a chunk: the four somebody waived, no other error
     assert_eq!(confirm_chunk(&mut hong.review, &mut v, RULE, 0, None, true).unwrap(), (4, 0));
     hong.review.sync_waives().unwrap();
@@ -679,9 +685,11 @@ fn the_teams_waives_are_listed_and_confirmed_by_the_confirmer() {
     // before the lock - it takes its confirmation out of the count; the
     // confirmer's file still has it, and waived again, by anybody, it
     // stands again: locked at once
-    kim.review.set_confirmer(true);
+    drop(kim);
+    let mut kim = Session::open_as(&f, "kim", Roles::ALL);
     assert!(kim.review.set_status(RULE, &[0], STATUS_NONE).unwrap().is_empty());
-    kim.review.set_confirmer(false);
+    drop(kim);
+    let _kim = Session::open(&f, "kim");
     assert_eq!(view().counts(Some(RULE), &stop).unwrap(), counts(4, 4));
     let kept = f.merged(1001, 10);
     f.agree(&kept, "a confirmed waive turned back");
@@ -696,8 +704,7 @@ fn the_teams_waives_are_listed_and_confirmed_by_the_confirmer() {
     let mut v = view();
     assert_eq!(v.counts(Some(RULE), &stop).unwrap(), counts(5, 4));
     assert_eq!(v.page(RULE, Kind::Unconfirmed, 0, 10, &stop).unwrap(), (1, vec![1]));
-    let mut yoon = Session::open(&f, "yoon");
-    yoon.review.set_confirmer(true);
+    let mut yoon = Session::open_as(&f, "yoon", Roles::ALL);
     assert_eq!(yoon.review.confirm_set(RULE, &[1, 2, 9], true).unwrap(), 3);
     let mut v = view();
     assert_eq!(v.confirmers(), ["hong", "yoon"]);
@@ -753,11 +760,10 @@ fn a_rejected_waive_is_listed_until_its_reviewer_waives_it_again() {
     let id = f.id();
     let stop = AtomicUsize::new(0);
     let view = || TeamWaives::open(&f.pack, &f.id()).unwrap();
-    let counts = |waived, confirmed, rejected| Waives { waived, confirmed, unconfirmed: waived - confirmed, rejected, requested: 0 };
+    let counts = |waived, confirmed, rejected| Waives { waived, confirmed, unconfirmed: waived - confirmed, rejected, requested: 0, declined: 0 };
     let mut kim = Session::open(&f, "kim");
     let mut lee = Session::open(&f, "lee");
-    let mut hong = Session::open(&f, "hong");
-    hong.review.set_confirmer(true);
+    let mut hong = Session::open_as(&f, "hong", Roles::ALL);
     kim.waive(&[0, 1, 2], true);
     kim.review.reason_set(Reason::Waive, RULE, &runs_of(&[0, 1, 2]), "dummy fill").unwrap();
     lee.waive(&[2, 3], true);
@@ -858,6 +864,153 @@ fn a_rejected_waive_is_listed_until_its_reviewer_waives_it_again() {
 /// between its bits and its word, a record that comes before its bits - is
 /// counted, at once where there is nothing to wait for and after the grace
 /// where there is.
+/// A waiver's decline of a request (0.12.473; user 2026-11-14: "요청 거절
+/// 상태도 만들어줘") in the team's numbers and lists: the kept counts are the
+/// exact report's at every step, a declined request is none in the list of
+/// the requested and one of the declined, and what a decline is of is said
+/// by the list.
+#[test]
+fn a_declined_request_is_counted_and_listed_until_its_requester_asks_again() {
+    use crate::drc::team::waives::{decline_runs, Kind as List, TeamWaives};
+    let f = Folder::new();
+    let id = f.id();
+    let stop = AtomicUsize::new(0);
+    let far = CHUNK + 5;
+    let mut park = Session::open_as(&f, "park", Roles::REQUESTER);
+    let mut choi = Session::open_as(&f, "choi", Roles::REQUESTER);
+    let mut kim = Session::open_as(&f, "kim", Roles::WAIVER);
+    let mut hong = Session::open_as(&f, "hong", Roles::CONFIRMER);
+    // (a confirmer who is no waiver has no waive sidecar, and is a reviewer
+    // of the team by what they confirm)
+    assert!(!f.file(".results.db.waive.hong").exists() && f.file(".results.db.waive.kim").exists());
+    park.waive(&[0, 1, 2, 3, 4, 5, far], true);
+    park.review.reason_set(park.review.mark(), RULE, &[(0, 6)], "dummy fill").unwrap();
+    choi.waive(&[4, 5, 6, 7], true);
+    let numbers = |kept: &Kept| {
+        let t = &kept.rules[RULE];
+        (t.requested, t.unwaived, t.declined, t.waived_any, t.confirmed)
+    };
+    let kept = f.merged(1_000, 10);
+    f.agree(&kept, "asked for");
+    assert_eq!(numbers(&kept), (9, 9, 0, 0, 0));
+    // the cache is this build's
+    assert_eq!(fs::read(f.cache()).unwrap()[8..12], 7u32.to_le_bytes());
+    // what a decline is of: the errors with a request that waits
+    let view = |f: &Folder| TeamWaives::open(&f.pack, &f.id()).unwrap();
+    assert_eq!(
+        decline_runs(&kim.review, &mut view(&f), RULE, &[0, 1, 4, 9, far, 3 * CHUNK], true).unwrap(),
+        (vec![(0, 2), (4, 5), (far, far + 1)], 2),
+        "9 and the last chunk's first are asked for by nobody"
+    );
+    kim.review.look().unwrap();
+    kim.review.decline_set(RULE, &[(0, 2), (4, 5)], "not a dummy").unwrap();
+    let kept = f.merged(1_001, 10);
+    f.agree(&kept, "declined");
+    // 4 is declined for both who asked; 0 and 1 for park
+    assert_eq!(numbers(&kept), (6, 6, 3, 0, 0));
+    assert_eq!(f.counted(1_001).rules, kept.rules, "counted without the cache");
+    let mut list = view(&f);
+    let counts = list.counts(Some(RULE), &stop).unwrap();
+    assert_eq!((counts.requested, counts.declined, counts.waived), (6, 3, 0));
+    assert_eq!(list.page(RULE, List::Declined, 0, 10, &stop).unwrap(), (3, vec![0, 1, 4]));
+    assert_eq!(list.page(RULE, List::Requested, 0, 10, &stop).unwrap(), (6, vec![2, 3, 5, 6, 7, far]));
+    assert_eq!(list.rules(&stop).unwrap().len(), 1);
+    let rows = list.rows(RULE, &[0, 4, 5]).unwrap();
+    fn names(list: &[String]) -> Vec<&str> {
+        list.iter().map(String::as_str).collect()
+    }
+    let by = |list: &[crate::drc::team::waives::Why]| {
+        list.iter().map(|w| (w.reviewer.clone(), w.text.clone())).collect::<Vec<_>>()
+    };
+    assert_eq!(by(&rows[0].requested_by), [("park".to_owned(), "dummy fill".to_owned())]);
+    assert_eq!((names(&rows[0].declined_of), by(&rows[0].declined_by)), (vec!["park"], vec![("kim".to_owned(), "not a dummy".to_owned())]));
+    assert_eq!(names(&rows[1].declined_of), ["choi", "park"]);
+    assert!(rows[2].declined_of.is_empty() && rows[2].declined_by.is_empty() && rows[2].requested_by.len() == 2);
+    assert!(rows.iter().all(|row| row.history.is_empty() && row.waived_by.is_empty()));
+    // a declined request is not declined again; taking back names the
+    // waiver's own
+    assert_eq!(decline_runs(&kim.review, &mut list, RULE, &[0, 2], true).unwrap(), (vec![(2, 3)], 1));
+    assert_eq!(decline_runs(&kim.review, &mut list, RULE, &[0, 2, 4], false).unwrap(), (vec![(0, 1), (4, 5)], 0));
+    // the serialized row says the new keys where they have something
+    let said = serde_json::to_value(&rows[2]).unwrap();
+    assert!(said.get("declined_of").is_none() && said.get("declined_by").is_none());
+    assert!(serde_json::to_value(counts).unwrap().get("declined").is_some());
+    // one of the two who asked for 4 asks again, with a reason: the error
+    // is asked for; park asks for 0 again - what was is kept
+    choi.review.look().unwrap();
+    assert_eq!(choi.review.resubmit(RULE, &[(4, 5)]).unwrap(), 1);
+    choi.review.reason_set(choi.review.mark(), RULE, &[(4, 5)], "seal ring").unwrap();
+    park.review.look().unwrap();
+    assert_eq!(park.review.resubmit(RULE, &[(0, 1)]).unwrap(), 1);
+    park.review.reason_set(park.review.mark(), RULE, &[(0, 1)], "a dummy, sheet 2").unwrap();
+    let kept = f.merged(1_002, 10);
+    f.agree(&kept, "asked again");
+    assert_eq!(numbers(&kept), (8, 8, 1, 0, 0));
+    let mut list = view(&f);
+    let rows = list.rows(RULE, &[0, 4]).unwrap();
+    let past: Vec<(&str, &str, &str, &str)> = rows[0]
+        .history
+        .iter()
+        .map(|p| (p.reviewer.as_str(), p.event.what, p.event.by.as_str(), p.event.text.as_str()))
+        .collect();
+    assert_eq!(past, [("park", "requested", "", "dummy fill"), ("park", "declined", "kim", "not a dummy")]);
+    assert!(rows[0].declined_of.is_empty());
+    let asked: Vec<String> = rows[1].requested_by.iter().map(|w| w.reviewer.clone()).collect();
+    assert_eq!((names(&rows[1].declined_of), names(&asked)), (vec!["park"], vec!["choi", "park"]));
+    assert_eq!(list.page(RULE, List::Declined, 0, 10, &stop).unwrap(), (1, vec![1]));
+    // the waiver waives what is asked for - 0 and 4: their own decline of
+    // 4, which park has not answered, goes with their waive of it -, and
+    // the confirmer confirms one. 1 stays declined
+    kim.review.look().unwrap();
+    assert_eq!(kim.review.set_status(RULE, &[0, 4], STATUS_WAIVED).unwrap(), Left::default());
+    hong.confirm(0, 1, true);
+    let kept = f.merged(1_003, 10);
+    f.agree(&kept, "waived and confirmed");
+    assert_eq!(numbers(&kept), (8, 6, 1, 2, 1));
+    // the confirmer has no waive sidecar to name their change log from: it
+    // is found all the same, and says the one chunk their next
+    // confirmation touched - their rules are not counted again whole
+    hong.confirm(4, 5, true);
+    let kept = f.merged(1_003, 10);
+    f.agree(&kept, "confirmed once more");
+    assert_eq!((numbers(&kept), kept.counted), ((8, 6, 1, 2, 2), 1), "the confirmer's log names the chunk");
+    // ... and one who has no file but their flags yet - they only looked
+    let look = Session::open_as(&f, "seo", Roles::CONFIRMER);
+    look.visit(3);
+    f.agree(&f.merged(1_003, 10), "a confirmer who only visited");
+    look.visit(far);
+    let kept = f.merged(1_003, 10);
+    f.agree(&kept, "... visited again");
+    assert_eq!(kept.counted, 1, "their log is found by its own name");
+    assert!(!f.file(".results.db.waive.seo").exists() && !f.file(".results.db.confirm.seo").exists());
+    drop(look);
+    // the decline taken back: the request waits again
+    assert!(kim.review.decline_drop(RULE, &[(1, 2)]).unwrap());
+    let kept = f.merged(1_004, 10);
+    f.agree(&kept, "taken back");
+    assert_eq!(numbers(&kept), (9, 7, 0, 2, 2));
+    // a decline over chunks, in one line, and a requester's taking a
+    // declined request back
+    kim.review.decline_set(RULE, &[(2, 4), (far, far + 1)], "").unwrap();
+    park.review.look().unwrap();
+    park.waive(&[far], false);
+    let kept = f.merged(1_005, 10);
+    f.agree(&kept, "declined over chunks");
+    assert_eq!(numbers(&kept), (6, 4, 2, 2, 2));
+    // the exact report's rows: a requester's declined requests, the
+    // waiver's declines
+    let report = f.report();
+    let person = |who: &str| {
+        report["reviewers"].as_array().unwrap().iter().find(|p| p["id"] == who).cloned().unwrap()
+    };
+    assert_eq!((person("park")["requested"].as_u64(), person("park")["requested_declined"].as_u64()), (Some(6), Some(2)));
+    // (the waiver's log holds the decline of the request taken back too)
+    assert_eq!((person("kim")["declined"].as_u64(), person("kim")["waived"].as_u64()), (Some(3), Some(2)));
+    assert!(person("choi").get("declined").is_none() && person("hong").get("waived").is_none());
+    assert_eq!(report["team"]["declined"].as_u64(), Some(2));
+    drop((park, choi, kim, hong, id));
+}
+
 #[test]
 fn a_change_nobody_said_is_found_by_the_files_times() {
     let f = Folder::new();

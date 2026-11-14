@@ -246,23 +246,38 @@ class WorkerContractTests(unittest.TestCase):
                 self.assertIs(launch(words, environ, running=False)["file_load"], False)
         self.assertNotIn("noload", launch([], {}, running=True))
         self.assertIs(launch([], {}, running=False)["file_load"], True)
-        # the confirmer's launch (0.12.466, user 2026-11-13: "팀의 모든 waive를
-        # 뷰어에서 보고 confirm하는 역할이 필요함"): --confirmer, or the
-        # launcher's FLOE_CONFIRMER, is part of the request a running window
-        # takes - `confirmer=1` - and of what the first launch's viewer is
-        # made with
-        for word, on in (("1", True), ("on", True), ("yes", True), (" TRUE ", True),
-                         ("", False), ("0", False), ("off", False), ("no", False)):
-            self.assertEqual(cli.confirmer_on(SimpleNamespace(), {"FLOE_CONFIRMER": word}), on, repr(word))
-        self.assertTrue(cli.confirmer_on(SimpleNamespace(confirmer=True), {"FLOE_CONFIRMER": "off"}))
-        for words, environ in ((["--confirmer"], {}), ([], {"FLOE_CONFIRMER": "yes"})):
-            with self.subTest(words=words, environ=environ):
-                self.assertIn("\tconfirmer=1", launch(words, environ, running=True))
-                self.assertIs(launch(words, environ, running=False)["confirmer"], True)
+        # the confirmer's launch is a role's (0.12.473, user 2026-11-14:
+        # "--confirmer는 삭제해줘"): the option is no option - an argument
+        # error -, and the launcher's FLOE_CONFIRMER, set to a word that
+        # turned it on, stops the launch and says what to give; no request
+        # carries `confirmer=1` and no viewer is made with it
+        self.assertFalse(hasattr(cli, "confirmer_on"))
+        with self.assertRaises(SystemExit) as stopped, \
+                mock.patch.object(sys, "stderr", io.StringIO()):
+            cli.parser().parse_args(["x.oas", "--confirmer"])
+        self.assertEqual(stopped.exception.code, 2)
+        for word, stops in (("1", True), ("on", True), ("yes", True), (" TRUE ", True),
+                            ("", False), ("0", False), ("off", False), ("no", False)):
+            with self.subTest(FLOE_CONFIRMER=word):
+                if stops:
+                    with self.assertRaises(SystemExit) as stopped:
+                        cli.role_of(SimpleNamespace(), {"FLOE_CONFIRMER": word})
+                    self.assertIn("--role confirmer", str(stopped.exception))
+                else:
+                    self.assertEqual(cli.role_of(SimpleNamespace(), {"FLOE_CONFIRMER": word}), "")
+        # (a launcher that says both - the role, and the variable it used
+        # to set - is one that names a confirmer: it opens; with roles that
+        # name none it stops as above)
+        self.assertEqual(cli.role_of(SimpleNamespace(role="confirmer,waiver"), {"FLOE_CONFIRMER": "1"}),
+                         "waiver,confirmer")
+        self.assertEqual(cli.role_of(SimpleNamespace(), {"FLOE_CONFIRMER": "on", "FLOE_ROLE": "confirmer"}),
+                         "confirmer")
+        with self.assertRaises(SystemExit):
+            cli.role_of(SimpleNamespace(role="waiver"), {"FLOE_CONFIRMER": "1"})
         self.assertNotIn("confirmer", launch([], {}, running=True))
-        self.assertIs(launch([], {}, running=False)["confirmer"], False)
-        self.assertIn("--confirmer", cli.parser().format_help())
-        self.assertIn("FLOE_CONFIRMER", cli.parser().format_help())
+        self.assertNotIn("confirmer", launch([], {}, running=False))
+        self.assertNotIn("--confirmer", cli.parser().format_help())
+        self.assertNotIn("FLOE_CONFIRMER", cli.parser().format_help())
         # the role's launch (0.12.472, user 2026-11-14: "error -> waive
         # request -> waive -> confirm 의 업무 흐름이며 role은 requester, waiver,
         # confirmer로 나누어야 함"): --role, or the launcher's FLOE_ROLE, is
@@ -274,8 +289,23 @@ class WorkerContractTests(unittest.TestCase):
         self.assertEqual(cli.role_of(SimpleNamespace(), {}), "")
         with self.assertRaises(SystemExit):
             cli.role_of(SimpleNamespace(), {"FLOE_ROLE": "boss"})
+        # several roles, with commas (0.12.473: "--role waiver,confirmer나
+        # --role requester,waiver,confirmer가 가능하게"): each once, in the
+        # workflow's order, as the service names them
+        for word, roles in (("waiver,confirmer", "waiver,confirmer"),
+                            (" Confirmer , waiver ", "waiver,confirmer"),
+                            ("confirmer,requester,waiver", "requester,waiver,confirmer"),
+                            ("waiver,waiver", "waiver")):
+            self.assertEqual(cli.role_of(SimpleNamespace(role=word), {}), roles, word)
+            self.assertEqual(cli.role_of(SimpleNamespace(), {"FLOE_ROLE": word}), roles, word)
+        for word in ("waiver,boss", "waiver,", ",", "waiver confirmer", "waiver+confirmer"):
+            with self.subTest(role=word), self.assertRaises(SystemExit):
+                cli.role_of(SimpleNamespace(role=word), {})
         for words, environ, role in ((["--role", "waiver"], {}, "waiver"),
                                      ([], {"FLOE_ROLE": "requester"}, "requester"),
+                                     (["--role", "confirmer,waiver"], {}, "waiver,confirmer"),
+                                     ([], {"FLOE_ROLE": "requester,waiver,confirmer"},
+                                      "requester,waiver,confirmer"),
                                      (["--role=confirmer"], {"FLOE_ROLE": "waiver"}, "confirmer")):
             with self.subTest(words=words, environ=environ):
                 self.assertIn("\trole=" + role, launch(words, environ, running=True))

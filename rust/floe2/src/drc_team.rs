@@ -28,16 +28,22 @@
 //!       {handle, plan}
 //!   drc_team_waives {handle, check, show, start, limit, refresh?}
 //!                                                job "team-waives": a page of
-//!       the team's waives (show `waived` | `unconfirmed` | `confirmed`) -
-//!       who waived each error, why, who confirmed it - with the rule's and
-//!       the result's counts (app-core drc::team::waives; 0.12.466)
+//!       the team's waives (show `waived` | `unconfirmed` | `confirmed` |
+//!       `rejected` | `requested` | `declined`) - who waived each error,
+//!       why, who confirmed it, who asked - with the rule's and the result's
+//!       counts (app-core drc::team::waives; 0.12.466)
 //!   drc_team_waive_get {handle, check, error}    job "team-row": one error's
 //!       row, as the reviewers' files say now (a job: finding the files
 //!       lists folders, and an error's detail must not wait for that)
 //!   drc_team_confirm {handle, check, errors?, on} job "confirm": this
 //!       reviewer confirms the team's waives of a rule (`errors`: these;
 //!       none: every one), or takes their confirmation back - a session
-//!       opened as a confirmer's (`drc_open {confirmer: true}`)
+//!       opened as a confirmer's (`drc_open {role}` with `confirmer` in it)
+//!   drc_team_reject {handle, check, errors, on, reason?} job "confirm": the
+//!       confirmer rejects the waive of the errors, or takes that back
+//!   drc_team_decline {handle, check, errors, on, reason?} job "confirm": a
+//!       waiver declines the request of the errors, or takes that back
+//!       (0.12.473; `verdict` in the job's answer says which of the three)
 use super::{job_error, number, numbers, text, waived_of, Session, Shared};
 use floe_app_core::drc::analysis::scope::Selection;
 use floe_app_core::drc::desktop::{Lens, StatusReader};
@@ -703,9 +709,17 @@ impl Session {
                             "confirmer": confirmer, "reviewer": c.id.reviewer,
                         });
                         // (`requested_by`: who asked for its waive, and why
-                        // - said when somebody did)
+                        // - said when somebody did; `declined_of`: whose
+                        // request of it is declined, `declined_by`: who
+                        // declined and why - said when there are any)
                         if !row.requested_by.is_empty() {
                             reply["requested_by"] = json!(row.requested_by);
+                        }
+                        if !row.declined_of.is_empty() {
+                            reply["declined_of"] = json!(row.declined_of);
+                        }
+                        if !row.declined_by.is_empty() {
+                            reply["declined_by"] = json!(row.declined_by);
                         }
                         Ok(reply)
                     })();
@@ -724,7 +738,7 @@ impl Session {
                 if !super::review(&mut shared.opened.lock().unwrap())?.confirmer() {
                     return Err(Error::new(
                         ErrorKind::Unsupported,
-                        "confirming waives is the confirmer's: start the viewer with --confirmer",
+                        "confirming waives is the confirmer's: start the viewer with --role confirmer",
                     ));
                 }
                 if self.running("confirm") {
@@ -808,7 +822,7 @@ impl Session {
                 if !super::review(&mut shared.opened.lock().unwrap())?.confirmer() {
                     return Err(Error::new(
                         ErrorKind::Unsupported,
-                        "rejecting waives is the confirmer's: start the viewer with --confirmer",
+                        "rejecting waives is the confirmer's: start the viewer with --role confirmer",
                     ));
                 }
                 if self.running("confirm") {
@@ -851,9 +865,67 @@ impl Session {
                     }
                 })}))
             }
+            "drc_team_decline" => {
+                // a waiver declines the request of the errors named - or
+                // takes their decline back (app-core desktop::Review
+                // decline_set / decline_drop): one line of their rejects
+                // log. The requests stay in their requesters' files,
+                // declined until each requester asks again
+                let c = ctx(&shared)?;
+                let check = number(request, "check")? as usize;
+                let size = rule_size(c, check)?;
+                let on = request.get("on").and_then(Value::as_bool).unwrap_or(true);
+                let reason = floe_app_core::drc::reasons::clean(
+                    request.get("reason").and_then(Value::as_str).unwrap_or(""),
+                )?;
+                if !super::review(&mut shared.opened.lock().unwrap())?.roles().waiver {
+                    return Err(Error::new(
+                        ErrorKind::Unsupported,
+                        "declining requests is the waiver's: start the viewer with --role waiver",
+                    ));
+                }
+                if self.running("confirm") {
+                    return Err(Error::new(ErrorKind::Busy, "a confirmation is still running"));
+                }
+                let errors = errors_of(request)?;
+                if errors.iter().any(|&e| e >= size) {
+                    return Err(Error::input("DRC error index out of range"));
+                }
+                Ok(json!({"job": self.start("confirm", move |shared, id, _stop| {
+                    let c = shared.team.as_ref().unwrap();
+                    let mut changed = 0u64;
+                    let result = (|| -> Result<Value> {
+                        // the team's requests as their files stand now
+                        let mut view = TeamWaives::open(&c.id.pack, &c.id)?;
+                        let mut o = shared.opened.lock().unwrap();
+                        let r = super::review(&mut o)?;
+                        let (runs, skipped) = waives::decline_runs(r, &mut view, check, &errors, on)?;
+                        if on {
+                            r.decline_set(check, &runs, &reason)?;
+                        } else {
+                            r.decline_drop(check, &runs)?;
+                        }
+                        changed = runs.iter().map(|run| run.1 - run.0).sum();
+                        r.take_reclassed();
+                        let (waived, total) = r.lens_counts(check)?;
+                        Ok(json!({"check": check, "on": on, "verdict": "decline", "changed": changed,
+                                  "skipped": skipped, "counts": [waived, total]}))
+                    })();
+                    shared.dirty.lock().unwrap().insert(check);
+                    *shared.waives.lock().unwrap() = None;
+                    if changed >= super::TEAM_SOON {
+                        shared.team_soon();
+                    }
+                    match result {
+                        Ok(v) => shared.event(id, "confirm", "done", v),
+                        Err(e) => shared.event(id, "confirm", "error", json!({"message": e.message, "changed": changed, "cancelled": e.kind == ErrorKind::Cancelled})),
+                    }
+                })}))
+            }
             "drc_team_returned" => {
                 // the review follows the confirmers (app-core desktop::Review
-                // look): which of this reviewer's waives are rejected, and
+                // look): which of this reviewer's waives are rejected - a
+                // requester's: which of their requests are declined -, and
                 // who confirmed what, as their files say now. Nothing of the
                 // reviewer's is written. `returned`: the waives newly found
                 // rejected, a rule's with who rejected them and why;

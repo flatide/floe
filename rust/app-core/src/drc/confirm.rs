@@ -24,7 +24,7 @@
 //!
 //! The file is made at the first confirmation: a reviewer who confirms
 //! nothing has none. Who may confirm is the launcher's word (`floe2 view
-//! --confirmer`), kept by `desktop::Review`.
+//! --role confirmer`), kept by `desktop::Review`.
 //!
 //! A confirmed waive is locked (0.12.467; user 2026-11-13: "confirm된
 //! waive는 되돌릴 수 없게 잠구고 confirmer만 되돌릴 수 있게 해줘"): the
@@ -454,11 +454,34 @@ pub struct Standing {
     pub runs: Vec<Run>,
 }
 
+/// The kinds of a verdict on a mark, as the rejects logs keep them: a
+/// confirmer's rejection of a waive, or - a step earlier in the workflow -
+/// a waiver's decline of a request (0.12.473). `made` is the verdict's own
+/// line, `answered` what the mark's reviewer keeps when they answer it by
+/// marking again, `earlier` the reason the mark had before.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Verdict {
+    pub made: Reason,
+    pub answered: Reason,
+    pub earlier: Reason,
+}
+
+impl Verdict {
+    pub const REJECT: Verdict = Verdict { made: Reason::Reject, answered: Reason::Answered, earlier: Reason::Earlier };
+    pub const DECLINE: Verdict = Verdict { made: Reason::Decline, answered: Reason::Reasked, earlier: Reason::Asked };
+}
+
 /// The rejections of rule `check` that stand in `log`, the rejects log of
 /// the reviewer `by`.
 pub fn standing_of(by: &str, log: &Reasons, check: usize) -> Vec<Standing> {
+    standing_by(by, log, check, Reason::Reject)
+}
+
+/// `standing_of`, of the verdicts of `kind` (`Verdict::made`): the
+/// rejections, or the declines.
+pub fn standing_by(by: &str, log: &Reasons, check: usize, kind: Reason) -> Vec<Standing> {
     let mut held: BTreeMap<usize, Vec<Run>> = BTreeMap::new();
-    for (a, b, entry) in log.runs(Reason::Reject, check) {
+    for (a, b, entry) in log.runs(kind, check) {
         held.entry(entry).or_default().push((a, b));
     }
     held.into_iter()
@@ -487,9 +510,15 @@ pub fn joined(mut runs: Vec<Run>) -> Vec<Run> {
 /// log is `answers` - has not answered by waiving them again (sorted,
 /// joined). Whether the reviewer has them waived is the caller's to ask.
 pub fn unanswered(standing: &[Standing], answers: Option<&Reasons>, check: usize) -> Vec<Run> {
+    unanswered_by(standing, answers, check, Reason::Answered)
+}
+
+/// `unanswered`, the answers being of `kind` (`Verdict::answered`): of the
+/// rejections, or of the declines.
+pub fn unanswered_by(standing: &[Standing], answers: Option<&Reasons>, check: usize, kind: Reason) -> Vec<Run> {
     let mut all: Vec<Run> = Vec::new();
     for s in standing {
-        match answers.map(|log| log.answered(check, &s.by, s.time)) {
+        match answers.map(|log| log.answered(kind, check, &s.by, s.time)) {
             Some(done) if !done.is_empty() => all.extend(super::reasons::minus(&s.runs, &done)),
             _ => all.extend(s.runs.iter().copied()),
         }
@@ -501,9 +530,20 @@ pub fn unanswered(standing: &[Standing], answers: Option<&Reasons>, check: usize
 /// which the reviewer of `answers` has not answered: who, why, when - each
 /// rejection once, in the order given.
 pub fn rejecting(standing: &[Standing], answers: Option<&Reasons>, check: usize, runs: &[Run]) -> Vec<Rejected> {
+    rejecting_by(standing, answers, check, runs, Reason::Answered)
+}
+
+/// `rejecting`, the answers being of `kind` (`Verdict::answered`).
+pub fn rejecting_by(
+    standing: &[Standing],
+    answers: Option<&Reasons>,
+    check: usize,
+    runs: &[Run],
+    kind: Reason,
+) -> Vec<Rejected> {
     let mut out: Vec<Rejected> = Vec::new();
     for s in standing {
-        let open = unanswered(std::slice::from_ref(s), answers, check);
+        let open = unanswered_by(std::slice::from_ref(s), answers, check, kind);
         let meets = open
             .iter()
             .any(|&(a, b)| runs.partition_point(|r| r.1 <= a) < runs.partition_point(|r| r.0 < b));
@@ -972,11 +1012,17 @@ impl Locks {
     /// first rejection - a new file - is therefore known from the next look
     /// on, and a waive that slips past it is rejected from then.
     pub fn standing(&mut self, check: usize, look: bool) -> Result<Vec<Standing>> {
+        self.standing_by(check, look, Reason::Reject)
+    }
+
+    /// `standing`, of the verdicts of `kind`: the rejections, or the
+    /// declines (a waiver's refusals of requests, in the same logs).
+    pub fn standing_by(&mut self, check: usize, look: bool, kind: Reason) -> Result<Vec<Standing>> {
         self.rule(check)?;
         Ok(self
             .logs(look)
             .iter()
-            .flat_map(|r| standing_of(&r.tag, &r.log, check))
+            .flat_map(|r| standing_by(&r.tag, &r.log, check, kind))
             .collect())
     }
 
@@ -987,6 +1033,17 @@ impl Locks {
     /// files were when they said so (names, times, sizes: the same answer
     /// while they are the same).
     pub fn rejections(&mut self) -> (BTreeMap<usize, Vec<Standing>>, Vec<(String, u64, u64)>) {
+        let (rejections, _declines, seen) = self.verdicts();
+        (rejections, seen)
+    }
+
+    /// `rejections`, with the declines that stand in those logs beside them
+    /// (a waiver's refusals of requests): (rejections, declines, what the
+    /// files were).
+    #[allow(clippy::type_complexity)]
+    pub fn verdicts(
+        &mut self,
+    ) -> (BTreeMap<usize, Vec<Standing>>, BTreeMap<usize, Vec<Standing>>, Vec<(String, u64, u64)>) {
         // (this look is what finds a confirmer's first rejection - a new
         // file - for the writers, who list nothing when they waive. It is
         // not taken for a lock's look: a waive is turned back against the
@@ -997,9 +1054,16 @@ impl Locks {
         self.fresh();
         self.read = None;
         let mut rules: BTreeMap<usize, Vec<Standing>> = BTreeMap::new();
+        let mut declines: BTreeMap<usize, Vec<Standing>> = BTreeMap::new();
         for r in &self.rejects {
             for check in r.log.checks(Reason::Reject) {
                 rules.entry(check).or_default().extend(standing_of(&r.tag, &r.log, check));
+            }
+            for check in r.log.checks(Reason::Decline) {
+                declines
+                    .entry(check)
+                    .or_default()
+                    .extend(standing_by(&r.tag, &r.log, check, Reason::Decline));
             }
         }
         let mut seen: Vec<(String, u64, u64)> =
@@ -1013,7 +1077,7 @@ impl Locks {
         }
         // (a role's session: the other stages' files too)
         seen.extend(self.peer_stamps.iter().cloned());
-        (rules, seen)
+        (rules, declines, seen)
     }
 
     /// One byte plane of `peers` over rule `check`'s errors `start..start +

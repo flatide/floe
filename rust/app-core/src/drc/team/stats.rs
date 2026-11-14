@@ -92,6 +92,11 @@ pub(super) struct Found {
     /// the request file and where it is (`results`, `temp`): the errors
     /// whose waive this reviewer asked for (drc::confirm; 0.12.472)
     pub(super) request: Option<(PathBuf, &'static str)>,
+    /// the change log, where one was listed (drc::changes): what finds the
+    /// log of a reviewer who has neither a waive sidecar nor a request file
+    /// to name it from - a confirmer who is no waiver (0.12.473). Alone it
+    /// makes nobody a reviewer
+    pub(super) changes: Option<PathBuf>,
 }
 
 // (which names are a reviewer's: the lock's reader asks the same -
@@ -140,6 +145,8 @@ pub(super) fn discover(pack: &Path) -> Result<BTreeMap<String, Found>> {
     let confirm_prefix = format!(".{name}.confirm.");
     let rejects_prefix = format!(".{name}.rejects.");
     let request_prefix = format!(".{name}.request.");
+    let changes_prefix = format!(".{name}.changes.");
+    let mut logs: BTreeMap<String, PathBuf> = BTreeMap::new();
     let review_prefix = format!(".{name}.review.");
     let review_tag = |file: &str| -> Option<String> {
         file.strip_prefix(&review_prefix)
@@ -159,6 +166,8 @@ pub(super) fn discover(pack: &Path) -> Result<BTreeMap<String, Found>> {
             found.entry(tag.to_owned()).or_default().rejects = Some((folder.join(&file), "results"));
         } else if let Some(tag) = file.strip_prefix(&request_prefix).and_then(reviewer_of) {
             found.entry(tag.to_owned()).or_default().request = Some((folder.join(&file), "results"));
+        } else if let Some(tag) = file.strip_prefix(&changes_prefix).and_then(reviewer_of) {
+            logs.insert(tag.to_owned(), folder.join(&file));
         } else if let Some(tag) = review_tag(&file) {
             found.entry(tag).or_default().review = Some((folder.join(&file), "results"));
         }
@@ -251,7 +260,22 @@ pub(super) fn discover(pack: &Path) -> Result<BTreeMap<String, Found>> {
                         *slot = Some((temp.join(&file), "temp"));
                     }
                 }
+                // (and the change log, where the results folder has none)
+                let tag = file
+                    .strip_prefix(&changes_prefix)
+                    .and_then(|rest| rest.strip_suffix(suffix))
+                    .and_then(reviewer_of);
+                if let Some(tag) = tag {
+                    logs.entry(tag.to_owned()).or_insert_with(|| temp.join(&file));
+                }
             }
+        }
+    }
+    // (a log is its reviewer's who has another file: a log left alone names
+    // nobody)
+    for (tag, log) in logs {
+        if let Some(files) = found.get_mut(&tag) {
+            files.changes = Some(log);
         }
     }
     Ok(found)
@@ -408,10 +432,18 @@ struct Own {
     /// the errors whose waive this reviewer asked for (their request
     /// file's; 0.12.472)
     requested: u64,
+    /// of this reviewer's requests, the ones that are declined: under a
+    /// waiver's decline this reviewer has not answered by asking again
+    /// (None: not counted; 0.12.473)
+    requested_declined: Option<u64>,
+    /// the errors whose request this reviewer has declined and not taken
+    /// back since (their rejects log's, a waiver's)
+    declined: u64,
 }
 impl Own {
     fn add(&mut self, o: &Own) {
         self.requested += o.requested;
+        self.declined += o.declined;
         self.waived += o.waived;
         self.visited += o.visited;
         self.not_required += o.not_required;
@@ -424,9 +456,11 @@ impl Own {
         };
         self.waived_confirmed = sum(self.waived_confirmed, o.waived_confirmed);
         self.waived_rejected = sum(self.waived_rejected, o.waived_rejected);
+        self.requested_declined = sum(self.requested_declined, o.requested_declined);
     }
     fn any(&self) -> bool {
-        self.waived + self.visited + self.not_required + self.confirmed + self.rejected + self.requested > 0
+        self.waived + self.visited + self.not_required + self.confirmed + self.rejected + self.requested + self.declined
+            > 0
     }
     /// `files`: which of the reviewer's files there are - the waive
     /// sidecar, the flags, the confirm file, the rejects log, the request
@@ -436,6 +470,13 @@ impl Own {
         let mut v = json!({});
         if request {
             v["requested"] = json!(self.requested);
+            if let Some(declined) = self.requested_declined {
+                v["requested_declined"] = json!(declined);
+            }
+        }
+        // (a waiver's: the requests they declined - said where there are)
+        if self.declined > 0 {
+            v["declined"] = json!(self.declined);
         }
         if waive {
             v["waived"] = json!(self.waived);
@@ -485,16 +526,22 @@ pub struct Team {
     /// brief report says)
     pub not_required_any: u64,
     /// the errors somebody asked the waive of (0.12.472: "error -> waive
-    /// request -> waive -> confirm") - waived since or not
+    /// request -> waive -> confirm") - waived since or not. A request a
+    /// waiver declined is none until its requester asks again (0.12.473)
     pub requested: u64,
     /// of those, the ones nobody has waived: they wait for a waiver (a
     /// waive that is rejected is one still - it waits for its reviewer)
     pub unwaived: u64,
+    /// the errors whose every request is declined and nobody has waived
+    /// (0.12.473; user 2026-11-14: "요청 거절 상태도 만들어줘"): they are
+    /// asked for by nobody above, and wait for their requesters
+    pub declined: u64,
 }
 impl Team {
     pub(super) fn add(&mut self, o: &Team) {
         self.requested += o.requested;
         self.unwaived += o.unwaived;
+        self.declined += o.declined;
         self.visited += o.visited;
         self.waived += o.waived;
         self.not_required += o.not_required;
@@ -521,11 +568,13 @@ impl Team {
             // above counts a rejected waive
             "rejected": self.rejected,
         });
-        // the errors somebody asked the waive of, and the ones of them
-        // nobody has waived yet: said where somebody asked (0.12.472)
-        if self.requested > 0 {
+        // the errors somebody asked the waive of, the ones of them nobody
+        // has waived yet, and the ones whose requests are all declined:
+        // said where there is a request to say (0.12.472, 0.12.473)
+        if self.requested > 0 || self.declined > 0 {
             v["requested"] = json!(self.requested);
             v["unwaived"] = json!(self.unwaived);
+            v["declined"] = json!(self.declined);
         }
         v
     }
@@ -544,6 +593,9 @@ pub(super) struct Planes {
     pub(super) rejected: Bits,
     /// the errors whose waive this reviewer asked for
     pub(super) requested: Bits,
+    /// the errors under a decline this reviewer has not answered: a
+    /// request of theirs of one of them is declined
+    pub(super) declined: Bits,
     pub(super) visited_known: bool,
     pub(super) waive_known: bool,
     pub(super) not_required_known: bool,
@@ -565,16 +617,19 @@ pub(super) fn run_bits(runs: &[(u64, u64)], start: u64, count: u64) -> Bits {
 /// The team's counts of one chunk from its reviewers' planes
 /// (snapshot::aggregate's rule). A rejected waive is no waive: it is taken
 /// out of its reviewer's before anything is counted - and an error whose
-/// waives are all rejected is counted as that.
+/// waives are all rejected is counted as that. A declined request is no
+/// request in the same way, and an error whose requests are all declined is
+/// counted as that while no waive sidecar has it.
 pub(super) fn team_of(planes: &[Planes]) -> Team {
     let (mut v, mut w, mut n, mut c) = (Bits::ZERO, Bits::ZERO, Bits::ZERO, Bits::ZERO);
     let (mut wy, mut wn, mut ny, mut nn) = (Bits::ZERO, Bits::ZERO, Bits::ZERO, Bits::ZERO);
     let mut rejected = Bits::ZERO;
-    let (mut asked, mut held) = (Bits::ZERO, Bits::ZERO);
+    let (mut asked, mut held, mut declined) = (Bits::ZERO, Bits::ZERO, Bits::ZERO);
     for p in planes {
         let waived = p.waived & !p.rejected;
         rejected |= p.waived & p.rejected;
-        asked |= p.requested;
+        asked |= p.requested & !p.declined;
+        declined |= p.requested & p.declined;
         held |= p.waived;
         v |= p.visited;
         w |= waived;
@@ -607,6 +662,7 @@ pub(super) fn team_of(planes: &[Planes]) -> Team {
         not_required_any,
         requested: asked.count(),
         unwaived: (asked & !held).count(),
+        declined: (declined & !asked & !held).count(),
     }
 }
 
@@ -623,8 +679,11 @@ pub(super) fn team_of(planes: &[Planes]) -> Team {
 pub struct Brief {
     pub errors: u64,
     /// the errors somebody asked the waive of - waived since or not
-    /// (0.12.472: the workflow's first step)
+    /// (0.12.472: the workflow's first step); a declined request is none
     pub requested: u64,
+    /// the errors whose requests are all declined and nobody has waived
+    /// (0.12.473; none of `requested`, as `rejected` is none of `waived`)
+    pub declined: u64,
     /// waived by somebody - a waive that is not rejected, confirmed or not
     pub waived: u64,
     /// of those, confirmed by a confirmer
@@ -641,6 +700,7 @@ impl Brief {
         Self {
             errors,
             requested: team.requested,
+            declined: team.declined,
             waived: team.waived_any,
             confirmed: team.confirmed,
             rejected: team.rejected,
@@ -651,6 +711,7 @@ impl Brief {
     fn add(&mut self, o: &Brief) {
         self.errors += o.errors;
         self.requested += o.requested;
+        self.declined += o.declined;
         self.waived += o.waived;
         self.confirmed += o.confirmed;
         self.rejected += o.rejected;
@@ -661,8 +722,15 @@ impl Brief {
         use std::fmt::Write;
         let _ = write!(
             out,
-            "{{\"errors\":{},\"requested\":{},\"waived\":{},\"confirmed\":{},\"rejected\":{},\"visited\":{},\"ignored\":{}}}",
-            self.errors, self.requested, self.waived, self.confirmed, self.rejected, self.visited, self.ignored
+            "{{\"errors\":{},\"requested\":{},\"declined\":{},\"waived\":{},\"confirmed\":{},\"rejected\":{},\"visited\":{},\"ignored\":{}}}",
+            self.errors,
+            self.requested,
+            self.declined,
+            self.waived,
+            self.confirmed,
+            self.rejected,
+            self.visited,
+            self.ignored
         );
     }
 }
@@ -949,9 +1017,14 @@ fn counts_from(
         // rejected: the rejects log's runs a rule (a log of actions: read
         // whole, it is a line an action)
         let mut rejects = None;
+        // (and the requests they declined, a waiver's: the same log's)
+        let mut declines = Vec::new();
         if let Some((path, place)) = files.rejects {
-            match rejected_runs(&path, id) {
-                Ok(Some(runs)) => rejects = Some((path, place, runs)),
+            match rejects_log(&path, id) {
+                Ok(Some(log)) => {
+                    declines = held_of(&log, Kind::Decline, names.len());
+                    rejects = Some((path, place, rejected_of(&log, names.len())));
+                }
                 Ok(None) => (),
                 Err(e) => skipped.push(json!({"reviewer": tag, "file": path, "reason": e.message})),
             }
@@ -979,6 +1052,8 @@ fn counts_from(
                 waived_confirmed: None,
                 rejected: rejects.as_ref().map_or(0, |r| r.2[ci].iter().map(|run| run.1 - run.0).sum()),
                 waived_rejected: None,
+                requested_declined: None,
+                declined: declines.get(ci).map_or(0, |runs| runs.iter().map(|run| run.1 - run.0).sum()),
             }
         };
         let (waived, marked, confirming) = (waive.is_some(), marks.is_some(), confirms.is_some());
@@ -1235,6 +1310,7 @@ pub(super) fn collect_with(
             Own {
                 waived_confirmed: Some(0),
                 waived_rejected: Some(0),
+                requested_declined: Some(0),
                 ..Own::default()
             };
             reviewers.len()
@@ -1266,6 +1342,23 @@ pub(super) fn collect_with(
             .map(|r| match &r.rejects {
                 Some((_, log)) if !standing.is_empty() && log.kept(Kind::Answered, ci).next().is_some() => {
                     Some(confirm::unanswered(&standing, Some(log), ci))
+                }
+                _ => None,
+            })
+            .collect();
+        // the declines of this rule that stand, and each reviewer's errors
+        // under one they have not answered - a request of theirs there is
+        // declined (0.12.473: the rejections' rule, a step earlier)
+        let declines: Vec<confirm::Standing> = reviewers
+            .iter()
+            .flat_map(|r| r.rejects.iter().flat_map(|(_, log)| confirm::standing_by(&r.tag, log, ci, Kind::Decline)))
+            .collect();
+        let shut_all = confirm::unanswered_by(&declines, None, ci, Kind::Reasked);
+        let shuts: Vec<Option<Vec<(u64, u64)>>> = reviewers
+            .iter()
+            .map(|r| match &r.rejects {
+                Some((_, log)) if !declines.is_empty() && log.kept(Kind::Reasked, ci).next().is_some() => {
+                    Some(confirm::unanswered_by(&declines, Some(log), ci, Kind::Reasked))
                 }
                 _ => None,
             })
@@ -1334,8 +1427,10 @@ pub(super) fn collect_with(
                 }
                 let r = &reviewers[i];
                 let rejected = run_bits(opens[i].as_deref().unwrap_or(&open_all), start, count);
+                let declined = run_bits(shuts[i].as_deref().unwrap_or(&shut_all), start, count);
                 let own = &mut owns[i];
                 own.requested += requested.count();
+                *own.requested_declined.get_or_insert(0) += (requested & declined).count();
                 own.waived += waived.count();
                 own.visited += visited.count();
                 own.not_required += not_required.count();
@@ -1348,6 +1443,7 @@ pub(super) fn collect_with(
                     confirmed,
                     rejected,
                     requested,
+                    declined,
                     visited_known: r.flags.is_some(),
                     waive_known: r.waive.is_some(),
                     not_required_known: r.flags.is_some(),
@@ -1367,6 +1463,7 @@ pub(super) fn collect_with(
         for (own, r) in owns.iter_mut().zip(&reviewers) {
             if let Some((_, log)) = &r.rejects {
                 own.rejected = log.runs(Kind::Reject, ci).iter().map(|&(a, b, _)| b - a).sum();
+                own.declined = log.runs(Kind::Decline, ci).iter().map(|&(a, b, _)| b - a).sum();
             }
         }
         drop(heads);
@@ -1538,26 +1635,25 @@ pub(super) fn waive_of(mut file: File, id: &Identity) -> Result<(File, Vec<u32>)
     Ok((file, stored))
 }
 
-/// A reviewer's rejects log of this result as it stands: each rule's
-/// rejected errors as runs (None: no file). Another result's is an error
-/// (ErrorKind::Cache), as the reasons' are.
-pub(super) fn rejected_runs(path: &Path, id: &Identity) -> Result<Option<Vec<Vec<(u64, u64)>>>> {
-    Ok(rejects_log(path, id)?.map(|log| rejected_of(&log, id.sizes.len())))
-}
-
 /// A reviewer's rejects log at `path` as it reads: None without a file, an
 /// error for a file that is not this result's.
 pub(super) fn rejects_log(path: &Path, id: &Identity) -> Result<Option<Reasons>> {
     Reasons::load(path, &id.result_tag(), &id.sizes)
 }
 
-/// `rejected_runs` of a log already read.
+/// A rejects log's rejections: each rule's rejected errors as runs.
 pub(super) fn rejected_of(log: &Reasons, rules: usize) -> Vec<Vec<(u64, u64)>> {
+    held_of(log, Kind::Reject, rules)
+}
+
+/// What a log holds of `kind` - the rejections of a confirmer, the declines
+/// of a waiver - as each rule's runs.
+pub(super) fn held_of(log: &Reasons, kind: Kind, rules: usize) -> Vec<Vec<(u64, u64)>> {
     (0..rules)
         .map(|ci| {
             // (runs of two actions that touch are one run here)
             let mut runs: Vec<(u64, u64)> = Vec::new();
-            for (a, b, _) in log.runs(Kind::Reject, ci) {
+            for (a, b, _) in log.runs(kind, ci) {
                 match runs.last_mut() {
                     Some(last) if last.1 == a => last.1 = b,
                     _ => runs.push((a, b)),
@@ -1734,6 +1830,7 @@ mod tests {
             confirmed: Bits::ZERO,
             rejected: Bits::ZERO,
             requested: Bits::ZERO,
+            declined: Bits::ZERO,
             visited_known: flags,
             waive_known: waive,
             not_required_known: flags,
@@ -1759,6 +1856,7 @@ mod tests {
             not_required_any,
             requested: 0,
             unwaived: 0,
+            declined: 0,
         };
         let names = ["GRX.1", "CLEAN", "M1 \"S\".1", "GRX.1", "한글,룰"];
         let sizes = [100u64, 0, 7, 20, 3];
@@ -1770,10 +1868,10 @@ mod tests {
         assert_eq!(
             text,
             concat!(
-                r#"{"total":{"errors":130,"requested":0,"waived":18,"confirmed":6,"rejected":3,"visited":33,"ignored":14},"#,
-                r#""rule":{"GRX.1":{"errors":120,"requested":0,"waived":11,"confirmed":6,"rejected":3,"visited":33,"ignored":14},"#,
-                r#""M1 \"S\".1":{"errors":7,"requested":0,"waived":7,"confirmed":0,"rejected":0,"visited":0,"ignored":0},"#,
-                r#""한글,룰":{"errors":3,"requested":0,"waived":0,"confirmed":0,"rejected":0,"visited":0,"ignored":0}}}"#
+                r#"{"total":{"errors":130,"requested":0,"declined":0,"waived":18,"confirmed":6,"rejected":3,"visited":33,"ignored":14},"#,
+                r#""rule":{"GRX.1":{"errors":120,"requested":0,"declined":0,"waived":11,"confirmed":6,"rejected":3,"visited":33,"ignored":14},"#,
+                r#""M1 \"S\".1":{"errors":7,"requested":0,"declined":0,"waived":7,"confirmed":0,"rejected":0,"visited":0,"ignored":0},"#,
+                r#""한글,룰":{"errors":3,"requested":0,"declined":0,"waived":0,"confirmed":0,"rejected":0,"visited":0,"ignored":0}}}"#
             )
         );
         assert!(!text.contains('\n'));
@@ -1785,12 +1883,12 @@ mod tests {
         assert_eq!(
             brief_text(&names, &sizes, &teams, BriefRules::Named("M1 \"S\".1")).unwrap(),
             concat!(
-                r#"{"total":{"errors":130,"requested":0,"waived":18,"confirmed":6,"rejected":3,"visited":33,"ignored":14},"#,
-                r#""rule":{"M1 \"S\".1":{"errors":7,"requested":0,"waived":7,"confirmed":0,"rejected":0,"visited":0,"ignored":0}}}"#
+                r#"{"total":{"errors":130,"requested":0,"declined":0,"waived":18,"confirmed":6,"rejected":3,"visited":33,"ignored":14},"#,
+                r#""rule":{"M1 \"S\".1":{"errors":7,"requested":0,"declined":0,"waived":7,"confirmed":0,"rejected":0,"visited":0,"ignored":0}}}"#
             )
         );
         let clean = brief_text(&names, &sizes, &teams, BriefRules::Named("CLEAN")).unwrap();
-        assert!(clean.ends_with(r#""rule":{"CLEAN":{"errors":0,"requested":0,"waived":0,"confirmed":0,"rejected":0,"visited":0,"ignored":0}}}"#));
+        assert!(clean.ends_with(r#""rule":{"CLEAN":{"errors":0,"requested":0,"declined":0,"waived":0,"confirmed":0,"rejected":0,"visited":0,"ignored":0}}}"#));
         let twice: Value =
             serde_json::from_str(&brief_text(&names, &sizes, &teams, BriefRules::Named("GRX.1")).unwrap()).unwrap();
         assert_eq!((twice["rule"]["GRX.1"]["errors"].as_u64(), twice["rule"].as_object().unwrap().len()), (Some(120), 1));
@@ -1800,7 +1898,7 @@ mod tests {
         let all = brief_text(&names, &sizes, &teams, BriefRules::All).unwrap();
         assert!(all.starts_with(&text[..text.find(r#","rule""#).unwrap()]), "the same total");
         assert!(
-            all.contains(r#"},"CLEAN":{"errors":0,"requested":0,"waived":0,"confirmed":0,"rejected":0,"visited":0,"ignored":0},"M1 "#),
+            all.contains(r#"},"CLEAN":{"errors":0,"requested":0,"declined":0,"waived":0,"confirmed":0,"rejected":0,"visited":0,"ignored":0},"M1 "#),
             "{all}"
         );
         let parsed: Value = serde_json::from_str(&all).unwrap();
@@ -1808,7 +1906,7 @@ mod tests {
         // a result without an error, and one without a rule
         assert_eq!(
             brief_text(&["A"], &[0], &[Team::default()], BriefRules::WithErrors).unwrap(),
-            r#"{"total":{"errors":0,"requested":0,"waived":0,"confirmed":0,"rejected":0,"visited":0,"ignored":0},"rule":{}}"#
+            r#"{"total":{"errors":0,"requested":0,"declined":0,"waived":0,"confirmed":0,"rejected":0,"visited":0,"ignored":0},"rule":{}}"#
         );
         assert!(brief_text(&[], &[], &[], BriefRules::All).unwrap().ends_with(r#""rule":{}}"#));
         // every report starts the same way: how a file that holds an earlier
@@ -1843,7 +1941,7 @@ mod tests {
         let t = team_of(&[kim, lee, park]);
         assert_eq!(
             t,
-            Team { visited: 7, waived: 14, not_required: 10, conflicts: 1, done: 17, waived_any: 15, confirmed: 0, rejected: 0, not_required_any: 10, requested: 0, unwaived: 0 }
+            Team { visited: 7, waived: 14, not_required: 10, conflicts: 1, done: 17, waived_any: 15, confirmed: 0, rejected: 0, not_required_any: 10, requested: 0, unwaived: 0, declined: 0 }
         );
         // a confirmer's confirmations count on the errors somebody has
         // waived - a conflict's waive too (error 0) - and on no other: of
@@ -1856,7 +1954,7 @@ mod tests {
         let t = team_of(&[kim, lee, park, hong, yoon]);
         assert_eq!(
             t,
-            Team { visited: 7, waived: 14, not_required: 10, conflicts: 1, done: 17, waived_any: 15, confirmed: 4, rejected: 0, not_required_any: 10, requested: 0, unwaived: 0 }
+            Team { visited: 7, waived: 14, not_required: 10, conflicts: 1, done: 17, waived_any: 15, confirmed: 4, rejected: 0, not_required_any: 10, requested: 0, unwaived: 0, declined: 0 }
         );
         assert_eq!(
             t.json(200),
@@ -1876,7 +1974,7 @@ mod tests {
         let t = team_of(&[kim, lee, hong, yoon]);
         assert_eq!(
             t,
-            Team { visited: 7, waived: 12, not_required: 10, conflicts: 0, done: 17, waived_any: 12, confirmed: 1, rejected: 3, not_required_any: 10, requested: 0, unwaived: 0 }
+            Team { visited: 7, waived: 12, not_required: 10, conflicts: 0, done: 17, waived_any: 12, confirmed: 1, rejected: 3, not_required_any: 10, requested: 0, unwaived: 0, declined: 0 }
         );
         assert_eq!(
             t.json(200),
@@ -1905,13 +2003,13 @@ mod tests {
         let t = team_of(&[a, b, c]);
         assert_eq!(
             t,
-            Team { visited: 1, waived: 0, not_required: 0, conflicts: 1, done: 1, waived_any: 1, confirmed: 0, rejected: 0, not_required_any: 1, requested: 0, unwaived: 0 }
+            Team { visited: 1, waived: 0, not_required: 0, conflicts: 1, done: 1, waived_any: 1, confirmed: 0, rejected: 0, not_required_any: 1, requested: 0, unwaived: 0, declined: 0 }
         );
         // (the brief report says the unions: the waive a visitor differs on
         // is waived, the exclusion one differs on is ignored)
         assert_eq!(
             Brief::of(&t, 9),
-            Brief { errors: 9, requested: 0, waived: 1, confirmed: 0, rejected: 0, visited: 1, ignored: 1 }
+            Brief { errors: 9, requested: 0, declined: 0, waived: 1, confirmed: 0, rejected: 0, visited: 1, ignored: 1 }
         );
         // nobody: nothing
         assert_eq!(team_of(&[]), Team::default());
@@ -1919,7 +2017,7 @@ mod tests {
         let t = team_of(&[planes(&[3], &[3, 4], &[9], true, true)]);
         assert_eq!(
             t,
-            Team { visited: 1, waived: 2, not_required: 1, conflicts: 0, done: 2, waived_any: 2, confirmed: 0, rejected: 0, not_required_any: 1, requested: 0, unwaived: 0 }
+            Team { visited: 1, waived: 2, not_required: 1, conflicts: 0, done: 2, waived_any: 2, confirmed: 0, rejected: 0, not_required_any: 1, requested: 0, unwaived: 0, declined: 0 }
         );
     }
 
@@ -1945,14 +2043,80 @@ mod tests {
         let brief = Brief::of(&t, 10);
         assert_eq!(
             brief,
-            Brief { errors: 10, requested: 8, waived: 3, confirmed: 1, rejected: 1, visited: 0, ignored: 0 }
+            Brief { errors: 10, requested: 8, declined: 0, waived: 3, confirmed: 1, rejected: 1, visited: 0, ignored: 0 }
         );
         let mut text = String::new();
         brief.write(&mut text);
         assert_eq!(
             text,
-            r#"{"errors":10,"requested":8,"waived":3,"confirmed":1,"rejected":1,"visited":0,"ignored":0}"#
+            r#"{"errors":10,"requested":8,"declined":0,"waived":3,"confirmed":1,"rejected":1,"visited":0,"ignored":0}"#
         );
         assert!(text.starts_with(&BRIEF_HEAD["{\"total\":".len()..]));
+    }
+
+    /// The declined requests of a team (0.12.473; user 2026-11-14: "요청
+    /// 거절 상태도 만들어줘"): a request under a decline its requester has
+    /// not answered is none, and an error whose requests are all declined is
+    /// counted as that while nobody has waived it.
+    #[test]
+    fn the_team_counts_a_declined_request_as_none() {
+        // park asked for 0..6 and is under a decline of 0, 1 and 4 they
+        // have not answered; choi asked for 4..8 and is under the same
+        // decline of 4 - and of 8, which they never asked for; a waiver
+        // waived 0, 1, 2 and 9 - 2 under a rejection -, a confirmer
+        // confirmed 0
+        let asking = |errors: &[u64], declined: &[u64]| Planes {
+            requested: bits(errors),
+            declined: bits(declined),
+            ..planes(&[], &[], &[], false, false)
+        };
+        let park = asking(&[0, 1, 2, 3, 4, 5], &[0, 1, 4]);
+        let choi = asking(&[4, 5, 6, 7], &[4, 8]);
+        let waiver = Planes { rejected: bits(&[2]), ..planes(&[], &[0, 1, 2, 9], &[], false, true) };
+        let confirmer = Planes { confirmed: bits(&[0]), ..planes(&[], &[], &[], false, false) };
+        let t = team_of(&[park, choi, waiver, confirmer]);
+        // asked for: 2, 3, 5 (park's that are not declined) and 5, 6, 7;
+        // 3, 5, 6 and 7 wait for a waiver; 4 is declined for both who asked
+        // - 0 and 1 are declined too, and waived: not counted as declined
+        assert_eq!((t.requested, t.unwaived, t.declined), (5, 4, 1));
+        assert_eq!((t.waived_any, t.confirmed, t.rejected), (3, 1, 1), "the waives are as they were");
+        let said = t.json(10);
+        assert_eq!(
+            (said["requested"].as_u64(), said["unwaived"].as_u64(), said["declined"].as_u64()),
+            (Some(5), Some(4), Some(1))
+        );
+        // one of two requesters answered (asked again): the error is asked
+        // for, by them
+        let again = asking(&[4, 5, 6, 7], &[8]);
+        let t = team_of(&[park, again, waiver, confirmer]);
+        assert_eq!((t.requested, t.unwaived, t.declined), (6, 5, 0));
+        // nothing but declined requests: said, with no request counted
+        let t = team_of(&[asking(&[3], &[3])]);
+        assert_eq!((t.requested, t.unwaived, t.declined), (0, 0, 1));
+        assert_eq!(
+            t.json(10),
+            json!({"errors": 10, "visited": 0, "waived": 0, "not_required": 0, "conflicts": 0, "pending": 10,
+                   "confirmed": 0, "unconfirmed": 0, "rejected": 0, "requested": 0, "unwaived": 0, "declined": 1})
+        );
+        // the brief report: declined after requested, the workflow's steps
+        let brief = Brief::of(&team_of(&[park, choi, waiver, confirmer]), 10);
+        assert_eq!(
+            brief,
+            Brief { errors: 10, requested: 5, declined: 1, waived: 3, confirmed: 1, rejected: 1, visited: 0, ignored: 0 }
+        );
+        let mut text = String::new();
+        brief.write(&mut text);
+        assert_eq!(
+            text,
+            r#"{"errors":10,"requested":5,"declined":1,"waived":3,"confirmed":1,"rejected":1,"visited":0,"ignored":0}"#
+        );
+        // a reviewer's row says the requests of theirs that are declined,
+        // and a waiver's the requests they declined - where there are any
+        let own = Own { requested: 6, requested_declined: Some(3), ..Own::default() };
+        assert_eq!(own.json(10, [false, false, false, false, true]), json!({"requested": 6, "requested_declined": 3}));
+        let own = Own { declined: 4, ..Own::default() };
+        assert_eq!(own.json(10, [false, false, false, true, false]), json!({"rejected": 0, "declined": 4}));
+        assert!(own.any() && !Own::default().any());
+        assert_eq!(Own::default().json(10, [false, false, false, true, false]), json!({"rejected": 0}));
     }
 }

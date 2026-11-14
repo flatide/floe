@@ -1735,7 +1735,9 @@ def r12(temp):
             svc("drc_reason_read", handle=h, check=1, reason_of="note", errors=[1])
             check(False, "an unknown kind refused")
         except gtkservice.ServiceError as exc:
-            check("reason_of is waive or not-required" in str(exc), "an unknown kind refused", exc)
+            # (0.12.473: the kinds a reason is asked of are the waive's, the
+            # exclusion's, the confirmer's rejection and the waiver's decline)
+            check("reason_of is waive, not-required, reject or decline" in str(exc), "an unknown kind refused", exc)
         # refused before anything is written: a reason past 1000 characters
         before = file.read_bytes()
         for request in (lambda: svc("drc_set_status", handle=h, check=1, errors=[20], status=1,
@@ -2812,7 +2814,7 @@ def r15(temp):
         opened = rs_open(a, db, "kim")
         hk = opened["handle"]
         hl = rs_open(a, db, "lee")["handle"]
-        o = b("drc_open", path=str(db), mode="load", reviewer="hong", confirmer=True)
+        o = b("drc_open", path=str(db), mode="load", reviewer="hong", role="requester,waiver,confirmer")
         hh = o["handle"]
         side = Path(o["confirm_path"])
         check(o["confirmer"] is True and opened["confirmer"] is False
@@ -2863,7 +2865,7 @@ def r15(temp):
             said = None
         except gtkservice.ServiceError as exc:
             said = (exc.kind, str(exc))
-        check(said is not None and "--confirmer" in said[1] and not side.exists()
+        check(said is not None and "--role confirmer" in said[1] and not side.exists()
               and not (d / ".t.db.confirm.kim").exists(),
               "a reviewer's session does not confirm: refused, nothing written", said)
         # ---- 3. errors named: the waived ones are confirmed, the rest said
@@ -2936,7 +2938,7 @@ def r15(temp):
         agree("... out of the counts", counted=1)
         c = Svc()
         try:
-            hy = c("drc_open", path=str(db), mode="load", reviewer="yoon", confirmer=True)["handle"]
+            hy = c("drc_open", path=str(db), mode="load", reviewer="yoon", role="requester,waiver,confirmer")["handle"]
             c.svc.drc_watch(hy)
             e = c.job(hy, "drc_team_confirm", check=0, errors=[2, 3, 4096], on=True)
             check((e["changed"], e["skipped"]) == (3, 0), "a second confirmer", e)
@@ -2993,7 +2995,7 @@ def r15(temp):
             said = None
         except gtkservice.ServiceError as exc:
             said = str(exc)
-        check(said is not None and "--confirmer" in said, "the same reviewer without the role: refused", said)
+        check(said is not None and "--role confirmer" in said, "the same reviewer without the role: refused", said)
     finally:
         s.close()
     agree("... and their confirmations stand", counted=0)
@@ -3100,7 +3102,7 @@ def r16(temp):
     try:
         hk = rs_open(a, db, "kim")["handle"]
         hl = rs_open(a, db, "lee")["handle"]
-        hh = b("drc_open", path=str(db), mode="load", reviewer="hong", confirmer=True)["handle"]
+        hh = b("drc_open", path=str(db), mode="load", reviewer="hong", role="requester,waiver,confirmer")["handle"]
         b.svc.drc_watch(hh)
         mine = [0, 1, 2, 3, 4095, 4096, 5000]
         a("drc_set_status", handle=hk, check=0, errors=mine, status=1, reason="dummy fill")
@@ -3235,7 +3237,7 @@ def r16(temp):
         check(e["changed"] == 1 and reply["locked"] == [] and 1 not in waived_of(a, hk, 0),
               "its confirmation taken back, a waive is its reviewer's to turn back", reply)
         # ---- 10. two confirmers: one taking theirs back leaves the other's lock
-        hy = c("drc_open", path=str(db), mode="load", reviewer="yoon", confirmer=True)["handle"]
+        hy = c("drc_open", path=str(db), mode="load", reviewer="yoon", role="requester,waiver,confirmer")["handle"]
         c.svc.drc_watch(hy)
         e = c.job(hy, "drc_team_confirm", check=0, errors=[0], on=True)
         confirms["yoon"] = {0: {0}}
@@ -3251,7 +3253,7 @@ def r16(temp):
         agree("... the team")
         # ---- 11. the role turns it back: the reviewer's own review opened as a confirmer's
         a("drc_close", handle=hk)
-        hk = c("drc_open", path=str(db), mode="load", reviewer="kim", confirmer=True)["handle"]
+        hk = c("drc_open", path=str(db), mode="load", reviewer="kim", role="requester,waiver,confirmer")["handle"]
         c.svc.drc_watch(hk)
         reply = c("drc_set_status", handle=hk, check=0, errors=[0], status=0)
         people["kim"][0][0].discard(0)
@@ -3412,6 +3414,16 @@ def r17(temp):
         raw = bytes.fromhex(svc("drc_status", handle=h, check=ci, start=0, count=sizes[ci]))
         return {i for i, byte in enumerate(raw) if byte in (1, 3)}
 
+    def own_of(svc, h, ci):
+        # (the session's own marks: the confirmer's session is one of every
+        # role since 0.12.473 - `--confirmer` is gone -, whose states and
+        # counts are the error's as everybody's files say)
+        raw = bytes.fromhex(svc("drc_own", handle=h, check=ci, start=0, count=sizes[ci]))
+        return {i for i, byte in enumerate(raw) if byte}
+
+    def team_live(ci):
+        return len(set().union(*[live(n, ci) for n in people]))
+
     def why(svc, h, ci, e):
         said = svc("drc_reason_get", handle=h, check=ci, error=e)["waive"]
         return said["text"] if said else None
@@ -3443,7 +3455,7 @@ def r17(temp):
     try:
         hk = rs_open(a, db, "kim")["handle"]
         hl = rs_open(a, db, "lee")["handle"]
-        hh = b("drc_open", path=str(db), mode="load", reviewer="hong", confirmer=True)["handle"]
+        hh = b("drc_open", path=str(db), mode="load", reviewer="hong", role="requester,waiver,confirmer")["handle"]
         b.svc.drc_watch(hh)
         a("drc_set_status", handle=hk, check=0, errors=[0, 1, 2, 3, 4095, 4096], status=1, reason="dummy fill")
         people["kim"][0][0] = {0, 1, 2, 3, 4095, 4096}
@@ -3473,14 +3485,16 @@ def r17(temp):
                 said.append(None)
             except gtkservice.ServiceError as exc:
                 said.append(str(exc))
-        check(all(s is not None and "--confirmer" in s for s in said) and not own.exists(),
+        check(all(s is not None and "--role confirmer" in s for s in said) and not own.exists(),
               "a reviewer's session rejects nothing and takes no rejection back: refused, nothing written", said)
         # ---- 2. the confirmer rejects: one line, and the team says so at once
         e = b.job(hh, "drc_team_reject", check=0, errors=[1, 2, 7], on=True, reason="not a dummy")
-        check(e["state"] == "done" and (e["changed"], e["skipped"], e["verdict"]) == (2, 1, "reject")
-              and e["counts"] == [0, sizes[0]],
-              "two errors' waives rejected, the third said as nobody's waive", e)
         reject("hong", 0, {1, 2}, "not a dummy")
+        # (`counts`: the rule's in the confirmer's session - the team's
+        # waives that count)
+        check(e["state"] == "done" and (e["changed"], e["skipped"], e["verdict"]) == (2, 1, "reject")
+              and e["counts"] == [team_live(0), sizes[0]],
+              "two errors' waives rejected, the third said as nobody's waive", e)
         lines = log.read_text().splitlines()
         check(lines[0] == "# floe drc waive rejections" and lines[1] == "floe_reasons=2"
               and lines[2].startswith("floe_pack=") and len(lines) == 4
@@ -3667,7 +3681,7 @@ def r17(temp):
         agree("... and counts again")
         # ---- 9. a confirmed waive that is rejected is not locked; waived
         # again it is under the confirmation that stood
-        hy = c("drc_open", path=str(db), mode="load", reviewer="yoon", confirmer=True)["handle"]
+        hy = c("drc_open", path=str(db), mode="load", reviewer="yoon", role="requester,waiver,confirmer")["handle"]
         c.svc.drc_watch(hy)
         e = c.job(hy, "drc_team_confirm", check=0, errors=[0], on=True)
         confirms["yoon"] = {0: {0}}
@@ -3719,16 +3733,16 @@ def r17(temp):
         confirms["hong"][0].discard(20)
         reject("hong", 0, {20}, "mine")
         raw = (d / ".t.db.confirm.hong").read_bytes()
-        check(e["changed"] == 1 and e["counts"] == [1, sizes[0]] and waived_of(b, hh, 0) == {21}
+        check(e["changed"] == 1 and e["counts"] == [team_live(0), sizes[0]] and own_of(b, hh, 0) == {21}
               and (raw[40 + 20], raw[40 + 21]) == (0, 1),
               "a confirmer rejects an error they waived and confirmed themselves: both go with it", e)
         reply = b("drc_set_status", handle=hh, check=0, errors=[20, 22], status=1)
         people["hong"][0][0].add(22)
-        check(reply["rejected"] == [20] and waived_of(b, hh, 0) == {21, 22},
+        check(reply["rejected"] == [20] and own_of(b, hh, 0) == {21, 22},
               "... and their session does not waive it again without a reason either", reply)
         reply = b("drc_set_status", handle=hh, check=0, errors=[20], status=1, reason="mine after all")
         again("hong", 0, {20})
-        check(reply.get("resubmitted") == 1 and waived_of(b, hh, 0) == {20, 21, 22}, "... with one, it is waived again", reply)
+        check(reply.get("resubmitted") == 1 and own_of(b, hh, 0) == {20, 21, 22}, "... with one, it is waived again", reply)
         agree("... the team")
         # ---- 11. a confirmer who confirms an error takes their own rejection of it back
         e = b.job(hh, "drc_team_reject", check=0, errors=[5000], on=True, reason="why 5000")
@@ -3849,7 +3863,7 @@ def r18(temp):
     db = d / "t.db"
     total = sum(sizes)
     starts = [sum(sizes[:i]) for i in range(len(sizes))]
-    keys = ("errors", "requested", "waived", "confirmed", "rejected", "visited", "ignored")
+    keys = ("errors", "requested", "declined", "waived", "confirmed", "rejected", "visited", "ignored")
     # by hand: what each reviewer's file has waived, visited and set aside,
     # who confirmed what, and the errors under a rejection nobody answered
     people = {n: ({}, {}, {}, True) for n in ("kim", "lee", "hong")}
@@ -3864,8 +3878,9 @@ def r18(temp):
             held = set().union(*[p[0].get(ci, set()) for p in people.values()])
             alive = set().union(*[live(n, ci) for n in people])
             marked = set().union(*[c.get(ci, set()) for c in confirms.values()] or [set()])
-            # (`requested`: nobody asks in this section - the roles' R19)
-            out.append(dict(errors=size, requested=0, waived=len(alive), confirmed=len(alive & marked),
+            # (`requested`, `declined`: nobody asks in this section - the
+            # roles' R19)
+            out.append(dict(errors=size, requested=0, declined=0, waived=len(alive), confirmed=len(alive & marked),
                             rejected=len(held - alive),
                             visited=len(set().union(*[p[1].get(ci, set()) for p in people.values()])),
                             ignored=len(set().union(*[p[2].get(ci, set()) for p in people.values()]))))
@@ -3922,7 +3937,7 @@ def r18(temp):
     try:
         hk = rs_open(a, db, "kim")["handle"]
         hl = rs_open(a, db, "lee")["handle"]
-        hh = b("drc_open", path=str(db), mode="load", reviewer="hong", confirmer=True)["handle"]
+        hh = b("drc_open", path=str(db), mode="load", reviewer="hong", role="requester,waiver,confirmer")["handle"]
         b.svc.drc_watch(hh)
         # ---- 2. two reviewers: waives, visits, exclusions - and two errors
         # they judged differently
@@ -4079,8 +4094,8 @@ def r18(temp):
         b.close()
     agree("the sessions closed: the same")
     cache = d / ".t.db.team"
-    check(cache.exists() and struct.unpack_from("<I", cache.read_bytes(), 8)[0] == 6,
-          "the kept counts are version 6 (the errors anybody asked the waive of are counted)")
+    check(cache.exists() and struct.unpack_from("<I", cache.read_bytes(), 8)[0] == 7,
+          "the kept counts are version 7 (the errors whose requests are all declined are counted)")
     # ---- 7. what is not in the counts yet, and what is left out, is said
     # on stderr: the answer stays the one line
     side = d / ".t.db.waive.kim"
@@ -4121,7 +4136,8 @@ def r18(temp):
 
 
 def r19(temp):
-    print("[R19] the roles: error -> waive requested -> waived -> confirmed, each step its role's")
+    print("[R19] the roles: error -> waive requested -> waived -> confirmed, each step its role's; "
+          "a declined request; sessions of several roles")
     d = temp / "roles"
     d.mkdir()
     sizes = [9000, 0, 300, 70000]
@@ -4139,29 +4155,35 @@ def r19(temp):
     # what each confirmer confirmed, and each waiver's errors under a
     # rejection they have not answered
     asked = {"park": {}, "choi": {}}
-    waived = {"kim": {}, "lee": {}, "solo": {}}
-    marked = {"hong": {}}
+    waived = {"kim": {}, "lee": {}, "solo": {}, "yoon": {}, "jung": {}}
+    marked = {"hong": {}, "yoon": {}}
     refused = {}
-    brief_keys = ("errors", "requested", "waived", "confirmed", "rejected", "visited", "ignored")
-    team_keys = ("requested", "unwaived", "waived", "confirmed", "unconfirmed", "rejected")
+    # ... and each requester's errors under a decline they have not answered
+    # (0.12.473): a request of theirs there is declined
+    shut = {}
+    brief_keys = ("errors", "requested", "declined", "waived", "confirmed", "rejected", "visited", "ignored")
+    team_keys = ("requested", "unwaived", "declined", "waived", "confirmed", "unconfirmed", "rejected")
 
     def planes(ci):
         every = lambda who: set().union(*[p.get(ci, set()) for p in who.values()] or [set()])
         live = set().union(*[p.get(ci, set()) - refused.get(n, {}).get(ci, set()) for n, p in waived.items()])
-        return every(asked), every(waived), live, every(marked)
+        asking = set().union(*[p.get(ci, set()) - shut.get(n, {}).get(ci, set()) for n, p in asked.items()])
+        return asking, every(waived), live, every(marked), every(asked) - asking
 
     def rows():
         out = []
         for ci, size in enumerate(sizes):
-            q, held, live, conf = planes(ci)
-            out.append(dict(errors=size, requested=len(q), unwaived=len(q - held), waived=len(live),
+            q, held, live, conf, gone = planes(ci)
+            out.append(dict(errors=size, requested=len(q), unwaived=len(q - held), declined=len(gone - held),
+                            waived=len(live),
                             confirmed=len(live & conf), unconfirmed=len(live - conf),
                             rejected=len(held - live), visited=0, ignored=0))
         return out
 
     def state(ci, e):
-        q, held, live, conf = planes(ci)
-        return (3 if e in conf else 1) if e in live else 2 if e in held else 4 if e in q else 0
+        q, held, live, conf, gone = planes(ci)
+        return ((3 if e in conf else 1) if e in live else 2 if e in held
+                else 4 if e in q else 5 if e in gone else 0)
 
     def hand(only=None):
         by_rule = rows()
@@ -4198,6 +4220,18 @@ def r19(temp):
     def look(svc, h):
         return svc.job(h, "drc_team_returned")
 
+    def decline(ci, errors):
+        # (a decline is of every requester's request, until each answers)
+        for name in asked:
+            shut.setdefault(name, {}).setdefault(ci, set()).update(errors)
+
+    def undecline(ci, errors):
+        for name in asked:
+            shut.setdefault(name, {}).setdefault(ci, set()).difference_update(errors)
+
+    def reask(name, ci, errors):
+        shut.setdefault(name, {}).setdefault(ci, set()).difference_update(errors)
+
     a, b, c = Svc(), Svc(), Svc()
     try:
         def open_as(svc, who, role):
@@ -4211,6 +4245,7 @@ def r19(temp):
         request = d / ".t.db.request.park"
         check((op.get("role"), ok_.get("role"), oh.get("role")) == ("requester", "waiver", "confirmer")
               and (op.get("confirmer"), ok_.get("confirmer"), oh.get("confirmer")) == (False, False, True)
+              and (op.get("marks"), ok_.get("marks"), oh.get("marks")) == ("request", "waive", "none")
               and request.exists() and request.read_bytes()[:8] == b"FLOEREQS"
               and request.stat().st_size == 40 + total + 4 * len(sizes)
               and not (d / ".t.db.waive.park").exists() and (d / ".t.db.waive.kim").exists()
@@ -4220,6 +4255,14 @@ def r19(temp):
         got = refusal(a, path=str(db), mode="load", reviewer="x", role="boss")
         check(got is not None and "role is requester, waiver or confirmer" in got[1],
               "a word that names no role is refused", got)
+        # (0.12.473, user 2026-11-14: "confirmer는 waive 파일을 만들지 않게
+        # 해줘": a confirmer who is no waiver has no file of marks at all)
+        mine = sorted(p.name for p in d.iterdir() if p.name.endswith(".hong"))
+        check(not any(".waive." in n or ".request." in n for n in mine) and oh["read_only"] is False,
+              "a confirmer's session makes no waive file, and no request file", mine)
+        check(c("drc_counts", handle=hh)[0] == [0, sizes[0]]
+              and set(bytes.fromhex(c("drc_own", handle=hh, check=0, start=0, count=sizes[0]))) == {0},
+              "... it reads nothing of its own marked")
         agree("nobody has asked: nothing requested, and no key of it in the team's reports")
         t, _got, _exact = agree("... (asked again)")
         check("requested" not in t and "unwaived" not in t, "... the reports say `requested` where somebody asked", sorted(t))
@@ -4426,16 +4469,217 @@ def r19(temp):
         log = (d / ".t.db.changes.park").read_bytes()
         kinds = [struct.unpack_from("<I", log, 48 + 24 * i)[0] for i in range((len(log) - 48) // 24)]
         cache = (d / ".t.db.team").read_bytes()
-        check(5 in kinds and 1 in kinds and struct.unpack_from("<I", cache, 8)[0] == 6,
-              "the requester's change log says the request file's time; the kept counts are version 6",
+        check(5 in kinds and 1 in kinds and struct.unpack_from("<I", cache, 8)[0] == 7,
+              "the requester's change log says the request file's time; the kept counts are version 7",
               (sorted(set(kinds)), struct.unpack_from("<I", cache, 8)[0]))
         t, _got, _exact = agree("asked again: nothing counted anew")
         check(t["counted"] == 0, "... (no chunk counted)", t["counted"])
+        # ---- 16. a waiver declines a request (0.12.473, user 2026-11-14:
+        # "요청 거절 상태도 만들어줘"): the request stays with its requester,
+        # declined, until they ask again with a reason
+        a("drc_set_status", handle=hp, check=0, errors=[200, 201, 202, 203], status=1, reason="fill, I think")
+        asked["park"][0] |= {200, 201, 202, 203}
+        z = Svc()
+        hz = open_as(z, "choi", "requester")["handle"]
+        z("drc_set_status", handle=hz, check=0, errors=[202, 203, 204], status=1, reason="same net")
+        asked["choi"][0] |= {202, 203, 204}
+        t, _got, _exact = agree("more requests, by two")
+        check("declined" in t and t["declined"] == 0, "... `declined` is said where somebody asked: 0", t.get("declined"))
+        got = [refusal_job(svc, h, "drc_team_decline", check=0, errors=[200], on=on)
+               for svc, h in ((a, hp), (c, hh)) for on in (True, False)]
+        log = d / ".t.db.rejects.kim"
+        lines = len(log.read_text().splitlines())
+        check(all(g is not None and "--role waiver" in g for g in got),
+              "only a waiver declines, or takes a decline back: a requester's and a confirmer's are refused", got)
+        look(b, hk)
+        e = b.job(hk, "drc_team_decline", check=0, errors=[200, 201, 202, 0, 300], on=True, reason="not fill")
+        decline(0, {200, 201, 202})
+        said = log.read_text().splitlines()
+        check(e["state"] == "done" and (e["changed"], e["skipped"], e["verdict"]) == (3, 2, "decline")
+              and len(said) == lines + 1 and said[-1].startswith("d 0 ") and said[-1].endswith(" 200,3 not fill"),
+              "three requests declined in one line of the waiver's log; a waived error and one nobody asked for said",
+              ({k: e.get(k) for k in ("changed", "skipped", "verdict")}, said[-1:]))
+        read(b, hk, 0, [200, 201, 202, 203, 204], "the waiver reads them declined at once - 202 for both who asked")
+        t, _got, exact = agree("declined: none of the requested, counted as declined")
+        rows_ = {p["id"]: p for p in exact["reviewers"]}
+        check(rows_["park"].get("requested_declined") == 3 and rows_["choi"].get("requested_declined") == 1
+              and rows_["kim"].get("declined") == 3 and "declined" not in rows_["park"],
+              "... the exact report: each requester's declined requests, the waiver's declines",
+              {n: (rows_[n].get("requested_declined"), rows_[n].get("declined")) for n in ("park", "choi", "kim")})
+        got = b("drc_lens", handle=hk, lens="declined")
+        check(got["counts"][0] == [3, sizes[0]]
+              and b("drc_status_page", handle=hk, check=0, waived=True, start=0, limit=10) == [200, 201, 202]
+              and b("drc_status_rank", handle=hk, check=0, waived=True, error=202) == 2,
+              "the Declined class: counted, paged and ranked", got["counts"][0])
+        got = b("drc_lens", handle=hk, lens="requested")
+        check(got["counts"][0] == [2, sizes[0]]
+              and b("drc_status_page", handle=hk, check=0, waived=True, start=0, limit=10) == [203, 204],
+              "... the Requested class has none of them", got["counts"][0])
+        b("drc_lens", handle=hk, lens="live")
+        # no waiver waives an error for a declined request
+        w2 = Svc()
+        hl = open_as(w2, "lee", "waiver")["handle"]
+        reply = w2("drc_set_status", handle=hl, check=0, errors=[200, 203], status=1, reason="lee's")
+        waived["lee"][0] = {203}
+        check(reply.get("unrequested") == [200] and reply["rejected"] == [],
+              "another waiver's session leaves the declined request, and waives the one that waits", reply)
+        w2.close()
+        # the requester's look says it, and writes nothing of theirs
+        before = request.read_bytes()
+        looked = look(a, hp)
+        check([(row["check"], row["count"], [(w["reviewer"], w["text"]) for w in row["by"]]) for row in looked["returned"]]
+              == [(0, 3, [("kim", "not fill")])] and request.read_bytes() == before,
+              "the requester's look says the declined requests, who and why - nothing of theirs written",
+              looked["returned"])
+        read(a, hp, 0, [200, 201, 202, 203, 204], "the requester reads them declined")
+        check(list(bytes.fromhex(a("drc_own", handle=hp, check=0, start=200, count=4))) == [0, 0, 0, 1],
+              "... a declined request is none of their own marks")
+        got = a("drc_reason_read", handle=hp, check=0, reason_of="waive", errors=[200, 201], toggle=True)
+        check(got["on"] is True and got.get("request") is True and got["prefill"] == "fill, I think"
+              and [(w["reviewer"], w["text"]) for w in got.get("rejected_by", [])] == [("kim", "not fill")],
+              "the requester's reason dialog: who declined and why, starting from the reason the request has", got)
+        # asked again without a reason: left, and said; with one: asked
+        # again, what was kept
+        reply = a("drc_set_status", handle=hp, check=0, errors=[200, 205], status=1)
+        asked["park"][0].add(205)
+        check(reply["rejected"] == [200] and [w["reviewer"] for w in reply["rejected_by"]] == ["kim"]
+              and "resubmitted" not in reply,
+              "a declined request is not asked again without a reason: left, and who declined said", reply)
+        reply = a("drc_set_status", handle=hp, check=0, errors=[200], status=1, reason="fill, sheet 3")
+        reask("park", 0, {200})
+        own = (d / ".t.db.rejects.park").read_text().splitlines()
+        check(reply.get("resubmitted") == 1 and reply["rejected"] == []
+              and any(l.startswith("o 0 ") and l.endswith(" 200,1 fill, I think") for l in own)
+              and any(l.startswith("k 0 ") and l.endswith(" 200,1 kim not fill") for l in own),
+              "with a reason it is asked again: the reason it had and the decline it answers are kept in the "
+              "requester's own log", (reply, own))
+        got = a("drc_reason_get", handle=hp, check=0, error=200)
+        check(got["waive"]["text"] == "fill, sheet 3"
+              and [(x["what"], x["by"], x["text"]) for x in got.get("history", [])]
+              == [("requested", "", "fill, I think"), ("declined", "kim", "not fill")],
+              "... the error's reason is the new one, its history what was", got)
+        agree("asked again: requested, for a waiver to look at anew")
+        look(b, hk)
+        read(b, hk, 0, [200, 201, 202], "the waiver reads it requested again")
+        # the team's lists
+        e = c.job(hh, "drc_team_waives", check=0, show="declined", start=0, limit=10, refresh=True)
+        row = {x["error"]: x for x in e.get("rows", [])}
+        check(e["state"] == "done" and e["count"] == 2 and sorted(row) == [201, 202]
+              and row[202].get("declined_of") == ["choi", "park"]
+              and [(w["reviewer"], w["text"]) for w in row[202].get("declined_by", [])] == [("kim", "not fill")]
+              and [w["reviewer"] for w in row[201]["requested_by"]] == ["park"]
+              and e["rule"].get("declined") == 2 and e["all"].get("declined") == 2,
+              "the Declined list: the errors whose requests are all declined, who asked, who declined and why",
+              {k: e.get(k) for k in ("count", "rule", "all")})
+        e = c.job(hh, "drc_team_waives", check=0, show="requested", start=0, limit=20, refresh=True)
+        row = {x["error"]: x for x in e.get("rows", [])}
+        check(sorted(row) == [200, 204, 205] and [(x["what"], x["by"]) for x in row[200].get("history", [])]
+              == [("requested", ""), ("declined", "kim")] and "declined_of" not in row[200],
+              "... the Requested list has the one asked again, with what was before", sorted(row))
+        e = c.job(hh, "drc_team_waive_get", check=0, error=202)
+        check(e["state"] == "done" and e.get("declined_of") == ["choi", "park"]
+              and [w["reviewer"] for w in e.get("declined_by", [])] == ["kim"],
+              "one error asked: whose request of it is declined, and by whom", e)
+        # each requester answers for their own request
+        z("drc_set_status", handle=hz, check=0, errors=[202], status=1, reason="same net, checked")
+        reask("choi", 0, {202})
+        agree("one of two who asked for an error asks again: the error is asked for")
+        look(b, hk)
+        read(b, hk, 0, [202], "... requested, for everybody")
+        check(list(bytes.fromhex(a("drc_own", handle=hp, check=0, start=202, count=1))) == [0],
+              "... the other's request of it is declined still")
+        # declined again: a new decline, said again
+        e = b.job(hk, "drc_team_decline", check=0, errors=[200], on=True, reason="still not")
+        decline(0, {200})
+        looked = look(a, hp)
+        check(e["changed"] == 1 and [(row["count"], [(w["reviewer"], w["text"]) for w in row["by"]])
+                                     for row in looked["returned"]] == [(1, [("kim", "still not")])],
+              "declined again: a new decline, said by the requester's next look", looked["returned"])
+        agree("declined again")
+        # the requester takes a declined request back
+        reply = a("drc_set_status", handle=hp, check=0, errors=[200], status=0)
+        asked["park"][0].discard(200)
+        check(reply["locked"] == [] and reply["rejected"] == [], "a declined request is its requester's to take back", reply)
+        look(b, hk)
+        read(b, hk, 0, [200], "... not waived, nothing asked")
+        agree("taken back")
+        # the waiver takes a decline back; and waives a declined error after all
+        e = b.job(hk, "drc_team_decline", check=0, errors=[201, 5000], on=False)
+        undecline(0, {201})
+        check(e["state"] == "done" and (e["changed"], e["verdict"], e["on"]) == (1, "decline", False),
+              "the waiver takes a decline back", e)
+        read(b, hk, 0, [201], "... the request waits again, at once")
+        agree("the decline taken back")
+        look(b, hk)
+        reply = b("drc_set_status", handle=hk, check=0, errors=[202], status=1, reason="agreed after all")
+        undecline(0, {202})
+        waived["kim"][0].add(202)
+        check("unrequested" not in reply and log.read_text().splitlines()[-1].startswith("D 0 "),
+              "the waiver who declined waives the error: their decline goes with the waive", reply)
+        look(a, hp)
+        check(list(bytes.fromhex(a("drc_own", handle=hp, check=0, start=202, count=1))) == [1],
+              "... and the other requester's request of it is one again")
+        agree("waived after a decline")
+        z.close()
+        # ---- 17. a session of several roles (the same day: "--role
+        # waiver,confirmer나 --role requester,waiver,confirmer가 가능하게")
+        m = Svc()
+        om = open_as(m, "yoon", " Confirmer , waiver ")
+        hy = om["handle"]
+        check((om.get("role"), om.get("marks"), om.get("confirmer")) == ("waiver,confirmer", "waive", True)
+              and (d / ".t.db.waive.yoon").exists() and not (d / ".t.db.request.yoon").exists(),
+              "waiver,confirmer: one session of both, named in the workflow's order", om.get("role"))
+        got = refusal(m, path=str(db), mode="load", reviewer="x", role="waiver,boss")
+        check(got is not None and "role is requester, waiver or confirmer" in got[1],
+              "a list with a word that names no role is refused", got)
+        reply = m("drc_set_status", handle=hy, check=0, errors=[205, 400], status=1, reason="yoon's")
+        waived["yoon"][0] = {205}
+        check(reply.get("unrequested") == [400], "it waives what was asked for, as a waiver does", reply)
+        e = m.job(hy, "drc_team_confirm", check=0, errors=[205, 2], on=True)
+        marked["yoon"][0] = {205, 2}
+        check(e["state"] == "done" and e["changed"] == 2, "... and confirms, its own waive too", e)
+        read(m, hy, 0, [205, 2, 400], "... confirmed at once")
+        agree("a waiver who confirms")
+        reply = m("drc_set_status", handle=hy, check=0, errors=[205], status=0)
+        waived["yoon"][0] = set()
+        marked["yoon"][0] = {2}
+        raw = (d / ".t.db.confirm.yoon").read_bytes()
+        check(reply["locked"] == [] and (raw[40 + 205], raw[40 + 2]) == (0, 1),
+              "no lock holds its own confirmed waive: turned back, its confirmation with it", reply)
+        read(m, hy, 0, [205], "... requested again")
+        e = m.job(hy, "drc_team_decline", check=0, errors=[205], on=True, reason="on second thought")
+        decline(0, {205})
+        check(e["state"] == "done" and e["changed"] == 1, "... and it declines, as a waiver does", e)
+        agree("turned back and declined")
+        m.close()
+        m = Svc()
+        om = open_as(m, "jung", "requester,waiver,confirmer")
+        hj = om["handle"]
+        check((om.get("role"), om.get("marks"), om.get("confirmer")) == ("requester,waiver,confirmer", "waive", True)
+              and (d / ".t.db.waive.jung").exists() and not (d / ".t.db.request.jung").exists(),
+              "requester,waiver,confirmer: its marks are waives, and it has no request file", om.get("role"))
+        reply = m("drc_set_status", handle=hj, check=0, errors=[500, 501], status=1, reason="mine")
+        waived["jung"][0] = {500, 501}
+        check("unrequested" not in reply and states(m, hj, 0, 500, 2) == [1, 1],
+              "a requester who is a waiver too waives without a request", reply)
+        e = m.job(hj, "drc_team_confirm", check=0, errors=[500], on=True)
+        marked.setdefault("jung", {})[0] = {500}
+        check(e["state"] == "done" and e["changed"] == 1, "... and confirms", e)
+        t, got, _exact = agree("a session of every role")
+        people = {p["id"]: p for p in got["reviewers"]}
+        check("requested" not in people["jung"] and people["jung"].get("waived") == 2
+              and "waived" not in people["hong"] and "waive_file" not in people["hong"]
+              and people["hong"].get("confirmed") == 2,
+              "... the reviewers' rows: no request file of the one, no waive file of the confirmer",
+              {n: sorted(k for k in people[n] if k.endswith("_file")) for n in ("jung", "hong")})
+        m.close()
     finally:
         a.close()
         b.close()
         c.close()
     agree("the sessions closed: the same, from the files")
+    check(not (d / ".t.db.waive.hong").exists() and (d / ".t.db.confirm.hong").exists(),
+          "the confirmer confirmed and rejected, and has no waive file")
     # ---- 15. where a role is required, a review is opened with one
     need = svc_with(dict(FLOE_ROLE_REQUIRED="1"))
     try:
@@ -4444,6 +4688,8 @@ def r19(temp):
               "FLOE_ROLE_REQUIRED: a review without a role is refused, and how to give one said", got)
         o = need("drc_open", path=str(db), mode="load", reviewer="park", role="requester")
         check(o.get("role") == "requester", "... with a role it opens", o.get("role"))
+        o = need("drc_open", path=str(db), mode="load", reviewer="yoon", role="waiver,confirmer")
+        check(o.get("role") == "waiver,confirmer", "... with several too", o.get("role"))
     finally:
         need.close()
 

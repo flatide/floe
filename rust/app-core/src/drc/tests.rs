@@ -1336,9 +1336,12 @@ fn a_confirmed_waive_is_locked_and_only_a_confirmer_turns_it_back() {
     fs::write(&pack, bytes(8)).unwrap();
     let stop = AtomicUsize::new(0);
     let open = |who: &str, confirmer: bool| {
-        let mut r = Review::open(&pack, None, Some(who), &stop).unwrap();
+        // (a confirmer here is a session of every role - `floe2 view --role
+        // requester,waiver,confirmer`: it waives as a reviewer does, and
+        // confirms)
+        let roles = if confirmer { super::local::Roles::ALL } else { super::local::Roles::NONE };
+        let mut r = Review::open_as(&pack, None, Some(who), roles, &stop).unwrap();
         assert!(!r.read_only(), "{:?}", r.notices);
-        r.set_confirmer(confirmer);
         // (the confirmers' files are looked for at each ask here)
         r.set_lock_refresh(std::time::Duration::ZERO);
         r
@@ -1429,12 +1432,14 @@ fn a_confirmed_waive_is_locked_and_only_a_confirmer_turns_it_back() {
     assert_eq!(hong.confirm_set(1, &[0], false).unwrap(), 1);
     assert_eq!(kim.set_status(1, &[0], o).unwrap().locked, [0]);
     assert_eq!(kim.confirmed_by(1, 0).unwrap(), ["park"]);
-    // the role is what turns it back: the same review as a confirmer's
-    kim.set_confirmer(true);
+    // the role is what turns it back: the same review opened with it
+    drop(kim);
+    let mut kim = open("kim", true);
     assert!(kim.locked(1, 0, 8).unwrap().is_none());
     assert!(kim.set_status(1, &[0], o).unwrap().is_empty());
     assert_eq!(kim.status(1, 0).unwrap(), o);
-    kim.set_confirmer(false);
+    drop(kim);
+    let mut kim = open("kim", false);
     // (park's confirmation is left on an error nobody has waived: it counts
     // for nothing, and locks the error the moment it is waived again)
     assert!(kim.set_status(1, &[0], w).unwrap().is_empty());
@@ -1500,9 +1505,12 @@ fn a_rejected_waive_is_a_state_until_its_reviewer_waives_it_again() {
     fs::write(&pack, bytes(8)).unwrap();
     let stop = AtomicUsize::new(0);
     let open = |who: &str, confirmer: bool| {
-        let mut r = Review::open(&pack, None, Some(who), &stop).unwrap();
+        // (a confirmer here is a session of every role - `floe2 view --role
+        // requester,waiver,confirmer`: it waives as a reviewer does, and
+        // confirms)
+        let roles = if confirmer { super::local::Roles::ALL } else { super::local::Roles::NONE };
+        let mut r = Review::open_as(&pack, None, Some(who), roles, &stop).unwrap();
         assert!(!r.read_only(), "{:?}", r.notices);
-        r.set_confirmer(confirmer);
         r.set_lock_refresh(std::time::Duration::ZERO);
         r
     };
@@ -1566,7 +1574,7 @@ fn a_rejected_waive_is_a_state_until_its_reviewer_waives_it_again() {
     assert_eq!(kim.states(1, 0, 8).unwrap(), [2, 2, 1, 1, 1, 2, 0, 0]);
     assert_eq!(kim.statuses(1, 0, 8).unwrap(), [o, o, w, w, w, o, o, o]);
     assert_eq!((kim.status(1, 0).unwrap(), kim.status(1, 2).unwrap()), (o, w));
-    assert_eq!((kim.status_counts(1).unwrap(), kim.state_counts(1).unwrap()), ((3, 8), [2, 3, 3, 0, 0]));
+    assert_eq!((kim.status_counts(1).unwrap(), kim.state_counts(1).unwrap()), ((3, 8), [2, 3, 3, 0, 0, 0]));
     assert_eq!((why(&kim, 0), why(&kim, 2)), (Some("dummy fill".into()), Some("dummy fill".into())));
     assert!(!own.exists() && past(&kim, 0).is_empty());
     // looked again: nothing to say while the files stand
@@ -1673,7 +1681,7 @@ fn a_rejected_waive_is_a_state_until_its_reviewer_waives_it_again() {
     assert!(kim.locked(1, 0, 8).unwrap().is_none());
     let looked = kim.look().unwrap();
     assert_eq!((looked.rejected[0].runs.clone(), who(&looked.rejected[0].by)), (vec![(3, 4)], vec![("hong".to_owned(), "still no".to_owned())]));
-    assert_eq!((kim.states(1, 3, 1).unwrap(), kim.state_counts(1).unwrap()), (vec![2], [0, 7, 1, 0, 0]));
+    assert_eq!((kim.states(1, 3, 1).unwrap(), kim.state_counts(1).unwrap()), (vec![2], [0, 7, 1, 0, 0, 0]));
     assert!(park.confirms.get(1, 3).unwrap(), "the other confirmer's confirmation is theirs to take back");
     assert_eq!(kim.resubmit(1, &[(3, 4)]).unwrap(), 1);
     kim.reason_set(Kind::Waive, 1, &[(3, 4)], "ok now").unwrap();
@@ -1709,7 +1717,7 @@ fn a_rejected_waive_is_a_state_until_its_reviewer_waives_it_again() {
     assert!(last.starts_with("R 1 ") && last.ends_with(" 2,1"), "{last}");
     let looked = kim.look().unwrap();
     assert!(looked.changed && looked.rejected.is_empty());
-    assert_eq!((kim.states(1, 0, 8).unwrap(), kim.state_counts(1).unwrap()), (vec![1, 1, 3, 3, 1, 1, 1, 1], [0, 6, 0, 2, 0]));
+    assert_eq!((kim.states(1, 0, 8).unwrap(), kim.state_counts(1).unwrap()), (vec![1, 1, 3, 3, 1, 1, 1, 1], [0, 6, 0, 2, 0, 0]));
     assert_eq!(page(&mut kim, Lens::Confirmed, true), (vec![2, 3], 2));
     assert_eq!(page(&mut kim, Lens::Waived, true), (vec![0, 1, 4, 5, 6, 7], 6));
     assert_eq!(page(&mut kim, Lens::Live, true).1, 8);
@@ -1813,7 +1821,7 @@ fn the_roles_take_an_error_from_a_request_to_a_confirmation() {
         Kept, Left, Lens, Review, STATE_CONFIRMED, STATE_NONE, STATE_REJECTED, STATE_REQUESTED, STATE_WAIVED,
         STATUS_NONE, STATUS_WAIVED,
     };
-    use super::local::Role;
+    use super::local::Roles;
     use super::reasons::Kind;
     let dir = std::env::temp_dir().join(format!(
         "floe-waive-roles-{}-{}",
@@ -1824,7 +1832,7 @@ fn the_roles_take_an_error_from_a_request_to_a_confirmation() {
     let pack = dir.join(".results.db.tray");
     fs::write(&pack, bytes(8)).unwrap();
     let stop = AtomicUsize::new(0);
-    let open = |who: &str, role: Role| {
+    let open = |who: &str, role: Roles| {
         let mut r = Review::open_as(&pack, None, Some(who), role, &stop).unwrap();
         assert!(!r.read_only(), "{:?}", r.notices);
         r.set_lock_refresh(std::time::Duration::ZERO);
@@ -1835,17 +1843,18 @@ fn the_roles_take_an_error_from_a_request_to_a_confirmation() {
     let (none, asked, waived, rejected, confirmed) =
         (STATE_NONE, STATE_REQUESTED, STATE_WAIVED, STATE_REJECTED, STATE_CONFIRMED);
     let nothing = || Left::<u64> { locked: vec![], rejected: vec![], unrequested: vec![] };
-    let mut park = open("park", Role::Requester);
-    let mut kim = open("kim", Role::Waiver);
-    let mut hong = open("hong", Role::Confirmer);
+    let mut park = open("park", Roles::REQUESTER);
+    let mut kim = open("kim", Roles::WAIVER);
+    let mut hong = open("hong", Roles::CONFIRMER);
     // a requester's marks are a file of their own, made with nothing asked
     // for; their session makes no waive sidecar, a waiver's no request file
     let at = |name: &str| dir.join(format!(".results.db.{name}"));
     assert!(at("request.park").exists() && !at("waive.park").exists());
     assert!(at("waive.kim").exists() && !at("request.kim").exists() && !at("request.hong").exists());
+    assert!(!at("waive.hong").exists(), "a confirmer who is no waiver has no waive sidecar");
     assert_eq!(fs::read(at("request.park")).unwrap().len(), fs::read(at("waive.kim")).unwrap().len());
     assert_eq!(&fs::read(at("request.park")).unwrap()[..8], b"FLOEREQS");
-    assert_eq!((park.role(), kim.role(), hong.role()), (Role::Requester, Role::Waiver, Role::Confirmer));
+    assert_eq!((park.roles(), kim.roles(), hong.roles()), (Roles::REQUESTER, Roles::WAIVER, Roles::CONFIRMER));
     assert_eq!((park.mark(), kim.mark(), hong.mark()), (Kind::Request, Kind::Waive, Kind::Waive));
     assert_eq!((park.confirmer(), kim.confirmer(), hong.confirmer()), (false, false, true));
 
@@ -1865,7 +1874,7 @@ fn the_roles_take_an_error_from_a_request_to_a_confirmation() {
     park.reason_set(park.mark(), 1, &[(0, 4)], "dummy fill").unwrap();
     assert_eq!(park.states(1, 0, 8).unwrap(), [asked, asked, asked, asked, none, none, none, none]);
     assert_eq!(park.statuses(1, 0, 8).unwrap(), [w, w, w, w, o, o, o, o]);
-    assert_eq!(park.state_counts(1).unwrap(), [4, 0, 0, 0, 4]);
+    assert_eq!(park.state_counts(1).unwrap(), [4, 0, 0, 0, 4, 0]);
     assert_eq!(park.status_counts(1).unwrap(), (4, 8));
     assert_eq!(park.waive_reason(1, 2).unwrap().map(|e| e.text.clone()), Some("dummy fill".into()));
     let said = lines(&at("reasons.park"));
@@ -1899,7 +1908,7 @@ fn the_roles_take_an_error_from_a_request_to_a_confirmation() {
     kim.reason_set(kim.mark(), 1, &[(0, 2)], "agreed").unwrap();
     assert_eq!(kim.states(1, 0, 8).unwrap(), [waived, waived, asked, asked, none, none, none, none]);
     assert_eq!(kim.statuses(1, 0, 8).unwrap(), [w, w, o, o, o, o, o, o]);
-    assert_eq!(kim.state_counts(1).unwrap(), [4, 2, 0, 0, 2]);
+    assert_eq!(kim.state_counts(1).unwrap(), [4, 2, 0, 0, 2, 0]);
     assert_eq!(page(&mut kim, Lens::Live, true), (vec![0, 1], 2));
     assert_eq!(page(&mut kim, Lens::Requested, true), (vec![2, 3], 2));
     assert!(park.look().unwrap().changed);
@@ -1939,7 +1948,7 @@ fn the_roles_take_an_error_from_a_request_to_a_confirmation() {
     assert_eq!(kim.states(1, 0, 4).unwrap(), [confirmed, waived, none, waived]);
     assert_eq!(park.states(1, 0, 4).unwrap(), [confirmed, waived, none, waived]);
     assert_eq!(kim.set_status(1, &[0], o).unwrap(), Left { locked: vec![0], ..nothing() });
-    assert_eq!(kim.state_counts(1).unwrap(), [5, 2, 0, 1, 0]);
+    assert_eq!(kim.state_counts(1).unwrap(), [5, 2, 0, 1, 0, 0]);
 
     // 7. the confirmer rejects a waive: rejected for everybody, the request
     // under it stays locked, and the waiver answers by waiving again with
@@ -1992,19 +2001,19 @@ fn the_roles_take_an_error_from_a_request_to_a_confirmation() {
 
     // 10. a session without a role is a reviewer as before: it waives at
     // once, reads its own waives - and its waive is one for the roles
-    let mut lee = open("lee", Role::None);
+    let mut lee = open("lee", Roles::NONE);
     assert_eq!(lee.set_status(1, &[7], w).unwrap(), nothing());
     assert_eq!(lee.states(1, 0, 8).unwrap(), [none, none, none, none, none, none, none, waived]);
-    assert_eq!(lee.state_counts(1).unwrap(), [7, 1, 0, 0, 0]);
-    assert_eq!(lee.role(), Role::None);
+    assert_eq!(lee.state_counts(1).unwrap(), [7, 1, 0, 0, 0, 0]);
+    assert_eq!(lee.roles(), Roles::NONE);
     kim.look().unwrap();
     assert_eq!(kim.states(1, 6, 2).unwrap(), [waived, waived]);
-    assert_eq!(kim.state_counts(1).unwrap(), [4, 3, 0, 1, 0]);
+    assert_eq!(kim.state_counts(1).unwrap(), [4, 3, 0, 1, 0, 0]);
 
     // 11. the next sessions read the same, from the files
     drop((park, kim, hong, lee));
-    let park = open("park", Role::Requester);
-    let hong = open("hong", Role::Confirmer);
+    let park = open("park", Roles::REQUESTER);
+    let hong = open("hong", Roles::CONFIRMER);
     let states = [confirmed, waived, none, none, none, none, waived, waived];
     assert_eq!(park.states(1, 0, 8).unwrap(), states);
     assert_eq!(hong.states(1, 0, 8).unwrap(), states);
@@ -2012,11 +2021,196 @@ fn the_roles_take_an_error_from_a_request_to_a_confirmation() {
     assert_eq!(park.waive_reason(1, 1).unwrap().map(|e| e.text.clone()), Some("dummy fill".into()));
     // ... and the same reviewer as a waiver has their requests among them
     drop(park);
-    let mut park = open("park", Role::Waiver);
+    let mut park = open("park", Roles::WAIVER);
     assert_eq!(park.states(1, 0, 8).unwrap(), states);
     assert_eq!(park.statuses(1, 0, 8).unwrap(), [o; 8]);
     assert_eq!(park.requesters_of(1, &[(0, 8)]).unwrap(), ["park"]);
     assert!(at("waive.park").exists());
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A waiver's verdict on a request (0.12.473; user 2026-11-14: "요청 거절
+/// 상태도 만들어줘"), as a confirmer's rejection is one on a waive: a
+/// declined request stays with its requester, declined, until they ask again
+/// with a reason - what was is kept. And the sessions of several roles
+/// ("--role waiver,confirmer나 --role requester,waiver,confirmer가 가능하게"),
+/// and the one that makes no mark and no file for one ("confirmer는 waive
+/// 파일을 만들지 않게").
+#[test]
+fn a_declined_request_is_a_state_until_its_requester_asks_again() {
+    use super::desktop::{
+        Left, Lens, Review, STATE_CONFIRMED, STATE_DECLINED, STATE_NONE, STATE_REQUESTED, STATE_WAIVED, STATUS_NONE,
+        STATUS_WAIVED,
+    };
+    use super::local::Roles;
+    let dir = std::env::temp_dir().join(format!(
+        "floe-waive-decline-{}-{}",
+        std::process::id(),
+        SERIAL.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&dir).unwrap();
+    let pack = dir.join(".results.db.tray");
+    fs::write(&pack, bytes(12)).unwrap();
+    let stop = AtomicUsize::new(0);
+    let open = |who: &str, roles: Roles| {
+        let mut r = Review::open_as(&pack, None, Some(who), roles, &stop).unwrap();
+        assert!(!r.read_only(), "{:?}", r.notices);
+        r.set_lock_refresh(std::time::Duration::ZERO);
+        r
+    };
+    let lines = |path: &std::path::Path| -> Vec<String> { fs::read_to_string(path).unwrap().lines().map(str::to_owned).collect() };
+    let at = |name: &str| dir.join(format!(".results.db.{name}"));
+    fn past(r: &Review, error: u64) -> Vec<(&'static str, String, String)> {
+        r.history(1, error).unwrap().into_iter().map(|e| (e.what, e.by, e.text)).collect()
+    }
+    let was = |what: &'static str, by: &str, text: &str| (what, by.to_owned(), text.to_owned());
+    let who = |by: &[super::confirm::Rejected]| by.iter().map(|b| (b.reviewer.clone(), b.text.clone())).collect::<Vec<_>>();
+    let (w, o) = (STATUS_WAIVED, STATUS_NONE);
+    let (none, asked, declined, waived, confirmed) =
+        (STATE_NONE, STATE_REQUESTED, STATE_DECLINED, STATE_WAIVED, STATE_CONFIRMED);
+    let nothing = || Left::<u64> { locked: vec![], rejected: vec![], unrequested: vec![] };
+    let mut park = open("park", Roles::REQUESTER);
+    let mut choi = open("choi", Roles::REQUESTER);
+    let mut kim = open("kim", Roles::WAIVER);
+    let mut hong = open("hong", Roles::CONFIRMER);
+    // a confirmer who is neither waiver nor requester makes no mark, and
+    // has no file of marks
+    assert!(!at("waive.hong").exists() && !at("request.hong").exists());
+    assert_eq!((hong.statuses(1, 0, 12).unwrap(), hong.status_counts(1).unwrap()), (vec![o; 12], (0, 12)));
+    assert_eq!(hong.set_status(1, &[0], w).unwrap_err().kind, crate::ErrorKind::Unsupported);
+    assert_eq!(hong.waive_export(&dir.join("x.waive")).unwrap_err().kind, crate::ErrorKind::Unsupported);
+    park.set_status(1, &[0, 1, 2, 3, 4, 5], w).unwrap();
+    park.reason_set(park.mark(), 1, &[(0, 6)], "dummy fill").unwrap();
+    choi.set_status(1, &[4, 5, 6, 7], w).unwrap();
+    kim.look().unwrap();
+    assert_eq!(kim.states(1, 0, 12).unwrap()[..9], [asked, asked, asked, asked, asked, asked, asked, asked, none]);
+    // only a waiver declines, and nothing is made by a refusal
+    assert_eq!(park.decline_set(1, &[(0, 2)], "no").unwrap_err().kind, crate::ErrorKind::Unsupported);
+    assert_eq!(hong.decline_set(1, &[(0, 2)], "no").unwrap_err().kind, crate::ErrorKind::Unsupported);
+    assert_eq!(hong.decline_drop(1, &[(0, 2)]).unwrap_err().kind, crate::ErrorKind::Unsupported);
+    assert!(!at("rejects.park").exists() && !at("rejects.hong").exists() && !at("rejects.kim").exists());
+    // a decline is one line of the waiver's log, with why or without, each
+    // with a time of its own
+    kim.decline_set(1, &[(0, 2)], " not a dummy\n").unwrap();
+    kim.decline_set(1, &[(4, 5)], "").unwrap();
+    kim.decline_set(1, &[], "nothing").unwrap();
+    assert!(kim.decline_set(1, &[(11, 13)], "past the rule").is_err());
+    let said = lines(&at("rejects.kim"));
+    assert_eq!(said.len(), 5, "{said:?}");
+    assert!(said[0] == "# floe drc waive rejections" && said[1] == "floe_reasons=2" && said[2].starts_with("floe_pack="));
+    let parts = |line: &str| line.split(' ').map(str::to_owned).collect::<Vec<_>>();
+    assert_eq!((&parts(&said[3])[..2], &parts(&said[3])[3..]), (&["d".to_owned(), "1".into()][..], &["0,2".to_owned(), "not".into(), "a".into(), "dummy".into()][..]));
+    assert_eq!((parts(&said[4]).len(), parts(&said[4])[3].as_str()), (4, "4,1"));
+    let (first, second): (u64, u64) = (parts(&said[3])[2].parse().unwrap(), parts(&said[4])[2].parse().unwrap());
+    assert!(first > 1_600_000_000 && second > first, "{first} {second}");
+    // the waiver reads it at once: a request under a decline is declined -
+    // every requester's of that error, until each answers
+    let now = [declined, declined, asked, asked, declined, asked, asked, asked];
+    assert_eq!(kim.states(1, 0, 8).unwrap(), now);
+    assert_eq!(kim.state_counts(1).unwrap(), [4, 0, 0, 0, 5, 3]);
+    kim.set_lens(Lens::Declined);
+    assert_eq!((kim.status_page(1, true, 0, 10).unwrap(), kim.lens_counts(1).unwrap().0), (vec![0, 1, 4], 3));
+    kim.set_lens(Lens::Requested);
+    assert_eq!((kim.status_page(1, true, 0, 10).unwrap(), kim.lens_counts(1).unwrap().0), (vec![2, 3, 5, 6, 7], 5));
+    kim.set_lens(Lens::Live);
+    // no waiver waives an error for a request that is declined
+    let mut lee = open("lee", Roles::WAIVER);
+    assert_eq!(lee.set_status(1, &[0, 2], w).unwrap(), Left { unrequested: vec![0], ..nothing() });
+    assert_eq!(lee.set_status(1, &[2], o).unwrap(), nothing());
+    drop(lee);
+    // the requesters' looks say what was declined, who and why, once -
+    // nothing of theirs is written: the request stays, with its reason
+    let before = fs::read(at("request.park")).unwrap();
+    let looked = park.look().unwrap();
+    assert_eq!(looked.rejected.len(), 1, "{looked:?}");
+    assert_eq!((looked.rejected[0].check, &looked.rejected[0].runs[..], looked.rejected[0].count), (1, &[(0, 2), (4, 5)][..], 3));
+    assert_eq!(who(&looked.rejected[0].by), [("kim".to_owned(), "not a dummy".to_owned()), ("kim".to_owned(), String::new())]);
+    assert!(looked.rules == [1] && park.look().unwrap().rejected.is_empty());
+    assert_eq!(fs::read(at("request.park")).unwrap(), before);
+    assert_eq!(park.states(1, 0, 8).unwrap(), now);
+    assert_eq!(park.statuses(1, 0, 8).unwrap(), [o, o, w, w, o, w, o, o], "a declined request reads as none of theirs");
+    assert_eq!(park.status_counts(1).unwrap(), (3, 12));
+    assert_eq!(park.waive_reason(1, 0).unwrap().map(|e| e.text.clone()), Some("dummy fill".into()));
+    let looked = choi.look().unwrap();
+    assert_eq!((&looked.rejected[0].runs[..], looked.rejected[0].count), (&[(4, 5)][..], 1));
+    // a declined request is asked again with a reason, or not at all
+    assert_eq!(park.set_status(1, &[0, 4], w).unwrap(), Left { rejected: vec![0, 4], ..nothing() });
+    assert_eq!(who(&park.rejected_by(1, &[(0, 1)]).unwrap()), [("kim".to_owned(), "not a dummy".to_owned())]);
+    assert_eq!(park.resubmit(1, &[(0, 1)]).unwrap(), 1);
+    park.reason_set(park.mark(), 1, &[(0, 1)], "a dummy, sheet 2").unwrap();
+    assert_eq!(park.states(1, 0, 2).unwrap(), [asked, declined]);
+    assert_eq!(past(&park, 0), [was("requested", "", "dummy fill"), was("declined", "kim", "not a dummy")]);
+    let own = lines(&at("rejects.park"));
+    assert!(own.iter().any(|l| l.starts_with("o 1 ") && l.ends_with(" 0,1 dummy fill")), "{own:?}");
+    assert!(own.iter().any(|l| l.starts_with("k 1 ") && l.ends_with(" 0,1 kim not a dummy")), "{own:?}");
+    kim.look().unwrap();
+    assert_eq!(kim.states(1, 0, 2).unwrap(), [asked, declined]);
+    // each requester answers for their own request: one of two who asked
+    // for an error asks again, and the error is asked for
+    assert_eq!(choi.resubmit(1, &[(4, 5)]).unwrap(), 1);
+    choi.reason_set(choi.mark(), 1, &[(4, 5)], "seal ring").unwrap();
+    kim.look().unwrap();
+    park.look().unwrap();
+    assert_eq!((kim.states(1, 4, 1).unwrap(), park.states(1, 4, 1).unwrap()), (vec![asked], vec![asked]));
+    assert_eq!(park.statuses(1, 4, 1).unwrap(), [o], "... the other's request of it is declined still");
+    // declined again: a new decline, to be answered anew
+    kim.decline_set(1, &[(0, 1)], "still not").unwrap();
+    let looked = park.look().unwrap();
+    assert_eq!((&looked.rejected[0].runs[..], who(&looked.rejected[0].by)), (&[(0, 1)][..], vec![("kim".to_owned(), "still not".to_owned())]));
+    assert_eq!(park.states(1, 0, 1).unwrap(), [declined]);
+    // its requester takes a declined request back: the reason it had is kept
+    assert_eq!(park.set_status(1, &[0], o).unwrap(), nothing());
+    assert_eq!(park.states(1, 0, 1).unwrap(), [none]);
+    assert_eq!(
+        past(&park, 0),
+        [was("requested", "", "dummy fill"), was("declined", "kim", "not a dummy"), was("requested", "", "a dummy, sheet 2")]
+    );
+    // the waiver takes a decline back: the request is one again, at once
+    assert!(kim.decline_drop(1, &[(1, 2)]).unwrap() && !kim.decline_drop(1, &[(1, 2)]).unwrap());
+    assert_eq!(kim.states(1, 1, 1).unwrap(), [asked]);
+    park.look().unwrap();
+    assert_eq!((park.states(1, 1, 1).unwrap(), park.statuses(1, 1, 1).unwrap()), (vec![asked], vec![w]));
+    // a waiver who declined waives the error after all: the decline goes
+    // with the waive
+    kim.decline_set(1, &[(5, 6)], "no").unwrap();
+    assert_eq!(kim.states(1, 5, 1).unwrap(), [declined]);
+    assert_eq!(kim.set_status(1, &[5], w).unwrap(), nothing());
+    assert_eq!(kim.states(1, 5, 1).unwrap(), [waived]);
+    assert!(lines(&at("rejects.kim")).last().unwrap().starts_with("D 1 "));
+    // a session of two roles. A requester who is a waiver too is its own
+    // requester: it waives an error nobody asked for, in its waive sidecar,
+    // and makes no request file
+    let mut yoon = open("yoon", Roles::REQUESTER.with(Roles::WAIVER));
+    assert!(at("waive.yoon").exists() && !at("request.yoon").exists());
+    assert_eq!(yoon.set_status(1, &[10], w).unwrap(), nothing());
+    assert_eq!(yoon.states(1, 10, 1).unwrap(), [waived]);
+    // ... a waiver who is a confirmer too waives what was asked for and
+    // confirms; no lock holds its own confirmed waive, and its
+    // confirmation goes with the waive it turns back
+    let mut jung = open("jung", Roles::WAIVER.with(Roles::CONFIRMER));
+    assert_eq!(jung.roles().name(), "waiver,confirmer");
+    assert_eq!(jung.set_status(1, &[11, 6], w).unwrap(), Left { unrequested: vec![11], ..nothing() });
+    assert_eq!(jung.confirm_set(1, &[6, 10], true).unwrap(), 2);
+    assert_eq!(jung.states(1, 6, 1).unwrap(), [confirmed]);
+    yoon.look().unwrap();
+    assert_eq!(yoon.states(1, 10, 1).unwrap(), [confirmed]);
+    assert_eq!(yoon.set_status(1, &[10], o).unwrap(), Left { locked: vec![10], ..nothing() });
+    assert_eq!(jung.set_status(1, &[6], o).unwrap(), nothing());
+    assert!(!jung.confirms.get(1, 6).unwrap() && jung.confirms.get(1, 10).unwrap());
+    assert_eq!(jung.states(1, 6, 1).unwrap(), [asked]);
+    // the roles' names, as a launcher says them
+    assert_eq!(Roles::parse(" Confirmer , waiver ").unwrap(), Roles::WAIVER.with(Roles::CONFIRMER));
+    assert_eq!(Roles::parse("requester,waiver,confirmer").unwrap(), Roles::ALL);
+    assert_eq!((Roles::ALL.name(), Roles::NONE.name()), ("requester,waiver,confirmer".to_owned(), String::new()));
+    assert!(Roles::parse("waiver,boss").is_none() && Roles::parse("").unwrap() == Roles::NONE);
+    // the next sessions read the same, from the files
+    drop((park, choi, kim, hong, yoon, jung));
+    let hong = open("hong", Roles::CONFIRMER);
+    assert_eq!(
+        hong.states(1, 0, 12).unwrap(),
+        [none, asked, asked, asked, asked, waived, asked, asked, none, none, confirmed, none]
+    );
+    assert!(!at("waive.hong").exists());
     fs::remove_dir_all(&dir).unwrap();
 }
 

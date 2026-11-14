@@ -239,8 +239,8 @@ fn the_runs_say_what_an_error_long_table_says() {
     let f = Folder::new();
     let mut r = f.open(&[N, 50]);
     // (a kind's own table: the rejections' too, 0.12.468)
-    // (a kind's slot: the four kinds an error holds a reason of)
-    let mut table: [Vec<Option<String>>; 6] = std::array::from_fn(|_| vec![None; N as usize]);
+    // (a kind's slot: the five kinds an error holds a reason of)
+    let mut table: [Vec<Option<String>>; 9] = std::array::from_fn(|_| vec![None; N as usize]);
     let mut seed = 0x2545_f491_4f6c_dd1du64;
     let mut next = |below: u64| {
         seed ^= seed << 13;
@@ -249,7 +249,7 @@ fn the_runs_say_what_an_error_long_table_says() {
         seed % below
     };
     for step in 0..1500u64 {
-        let kind = Kind::HELD[next(4) as usize];
+        let kind = Kind::HELD[next(5) as usize];
         // a few runs, from single errors to wide ones
         let mut errors = Vec::new();
         for _ in 0..1 + next(6) {
@@ -712,10 +712,10 @@ fn what_a_reviewer_answered_is_kept_as_it_was() {
         assert!(at(r, 5).is_empty() && r.kept_at(1, 0).is_empty());
         assert_eq!(r.kept_of(Kind::Answered, 0, 4).len(), 1);
         // which rejections are answered, of which errors
-        assert_eq!(r.answered(0, "hong", 200), [(0, 3), (4, 5)]);
-        assert_eq!(r.answered(0, "hong", 500), [(2, 4)]);
-        assert_eq!(r.answered(0, "park.2", 300), [(2, 3)]);
-        assert!(r.answered(0, "hong", 300).is_empty() && r.answered(0, "park", 300).is_empty() && r.answered(1, "hong", 200).is_empty());
+        assert_eq!(r.answered(Kind::Answered, 0, "hong", 200), [(0, 3), (4, 5)]);
+        assert_eq!(r.answered(Kind::Answered, 0, "hong", 500), [(2, 4)]);
+        assert_eq!(r.answered(Kind::Answered, 0, "park.2", 300), [(2, 3)]);
+        assert!(r.answered(Kind::Answered, 0, "hong", 300).is_empty() && r.answered(Kind::Answered, 0, "park", 300).is_empty() && r.answered(Kind::Answered, 1, "hong", 200).is_empty());
         assert_eq!((r.kept_checks(Kind::Answered), r.kept_checks(Kind::Earlier)), (vec![0], vec![0]));
         assert_eq!((r.latest(Kind::Reject), r.latest(Kind::Answered), r.latest(Kind::Waive)), (600, 500, 0));
         // (a kept record is no reason an error holds)

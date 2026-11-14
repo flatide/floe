@@ -138,51 +138,72 @@ fn required_of(value: Option<&str>) -> bool {
 /// 즉 error -> waive request -> waive -> confirm 의 업무 흐름이며 role은
 /// requester, waiver, confirmer로 나누어야 함"). The launcher's word, as the
 /// reviewer's id is (`floe2 view --role`): a role is what a session does,
-/// not a check of who its reviewer is. A session of a role does that role's
-/// step and no other: a requester asks for an error's waive, a waiver waives
-/// what was asked for, a confirmer confirms a waive or rejects it.
+/// not a check of who its reviewer is. A requester asks for an error's
+/// waive, a waiver waives what was asked for - or declines the request -, a
+/// confirmer confirms a waive or rejects it.
 ///
-/// A session without one (`None`) is a reviewer as before the roles: it
-/// waives an error at once, and nothing is asked of anybody first.
+/// A session has any of the three (0.12.473; user 2026-11-14: "--role 이 역할
+/// 다중 지정 가능하게 ... --role waiver,confirmer나 --role
+/// requester,waiver,confirmer가 가능하게"): it does the steps of the roles it
+/// has. Its own mark is its highest marking role's - a waiver's waive, else
+/// a requester's request -, and one that is both requester and waiver
+/// waives without a request: it is its own requester.
+///
+/// A session without any is a reviewer as before the roles: it waives an
+/// error at once, and reads its own waives.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum Role {
-    #[default]
-    None,
-    Requester,
-    Waiver,
-    Confirmer,
+pub struct Roles {
+    pub requester: bool,
+    pub waiver: bool,
+    pub confirmer: bool,
 }
 
-impl Role {
-    /// From the launcher's word; None for a word that names no role.
-    pub fn parse(name: &str) -> Option<Self> {
-        match name.trim().to_ascii_lowercase().as_str() {
-            "" | "none" => Some(Role::None),
-            "requester" => Some(Role::Requester),
-            "waiver" => Some(Role::Waiver),
-            "confirmer" => Some(Role::Confirmer),
-            _ => None,
+impl Roles {
+    pub const NONE: Roles = Roles { requester: false, waiver: false, confirmer: false };
+    pub const REQUESTER: Roles = Roles { requester: true, waiver: false, confirmer: false };
+    pub const WAIVER: Roles = Roles { requester: false, waiver: true, confirmer: false };
+    pub const CONFIRMER: Roles = Roles { requester: false, waiver: false, confirmer: true };
+    pub const ALL: Roles = Roles { requester: true, waiver: true, confirmer: true };
+
+    /// From the launcher's word - the roles' names, a comma between them
+    /// (`waiver,confirmer`); None for a word that names something else.
+    pub fn parse(text: &str) -> Option<Self> {
+        let mut roles = Roles::NONE;
+        for word in text.split(',') {
+            match word.trim().to_ascii_lowercase().as_str() {
+                "" | "none" => (),
+                "requester" => roles.requester = true,
+                "waiver" => roles.waiver = true,
+                "confirmer" => roles.confirmer = true,
+                _ => return None,
+            }
         }
+        Some(roles)
     }
-    pub fn name(self) -> &'static str {
-        match self {
-            Role::None => "",
-            Role::Requester => "requester",
-            Role::Waiver => "waiver",
-            Role::Confirmer => "confirmer",
-        }
+
+    /// The roles as a launcher says them, in the workflow's order
+    /// (`requester,waiver,confirmer`); empty for none.
+    pub fn name(self) -> String {
+        let parts: Vec<&str> = [(self.requester, "requester"), (self.waiver, "waiver"), (self.confirmer, "confirmer")]
+            .into_iter()
+            .filter(|(on, _)| *on)
+            .map(|(_, name)| name)
+            .collect();
+        parts.join(",")
     }
-    pub fn of(byte: u8) -> Self {
-        match byte {
-            1 => Role::Requester,
-            2 => Role::Waiver,
-            3 => Role::Confirmer,
-            _ => Role::None,
-        }
-    }
-    /// Whether the session is of the workflow: one of the three roles.
+
+    /// Whether the session is of the workflow: it has a role.
     pub fn any(self) -> bool {
-        self != Role::None
+        self.requester || self.waiver || self.confirmer
+    }
+
+    /// These roles and `other`'s.
+    pub fn with(self, other: Roles) -> Roles {
+        Roles {
+            requester: self.requester || other.requester,
+            waiver: self.waiver || other.waiver,
+            confirmer: self.confirmer || other.confirmer,
+        }
     }
 }
 
@@ -198,7 +219,7 @@ pub fn role_required() -> bool {
 pub fn role_missing() -> Error {
     Error::new(
         ErrorKind::Admission,
-        "a role is required for DRC review here (FLOE_ROLE_REQUIRED): start the viewer with --role requester, --role waiver or --role confirmer",
+        "a role is required for DRC review here (FLOE_ROLE_REQUIRED): start the viewer with --role requester, --role waiver or --role confirmer (several with a comma: --role waiver,confirmer)",
     )
 }
 

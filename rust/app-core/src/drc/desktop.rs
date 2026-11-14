@@ -65,8 +65,8 @@
 //! re-run with the same errors keep their review (0.12.441).
 use super::{
     changes::{ChangeLog, CHUNK as CHANGE_CHUNK},
-    confirm::{self, ConfirmFiles, Confirms, Locks, Peers, Rejected, Standing},
-    local::{aside_path, pack_reader, required_reviewer, waive_paths, ReviewerSource, Role},
+    confirm::{self, ConfirmFiles, Confirms, Locks, Peers, Rejected, Standing, Verdict},
+    local::{aside_path, pack_reader, required_reviewer, waive_paths, ReviewerSource, Roles},
     reasons::{self, Kind, Reasons, Run},
     review::Layout,
     session, Pack, Violation,
@@ -97,6 +97,43 @@ pub const STATE_CONFIRMED: u8 = 3;
 /// 함"). A state of a role's session, whose states are the error's - what
 /// everybody's files say of it -, not one reviewer's waive's.
 pub const STATE_REQUESTED: u8 = 4;
+/// Somebody asked for the error's waive and a waiver declined every such
+/// request (0.12.473; user 2026-11-14: "요청 거절 상태도 만들어줘"): it
+/// waits for its requester, who asks again with a reason - as a rejected
+/// waive waits for its waiver.
+pub const STATE_DECLINED: u8 = 5;
+
+/// Which file a session's own marks are in - its highest marking role's: a
+/// waiver's waive sidecar (and a session's without a role), else a
+/// requester's request file, else none (a session that only confirms makes
+/// no mark, and no file for one).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Store {
+    None,
+    Requests,
+    Waives,
+}
+
+impl Store {
+    pub fn of(roles: Roles) -> Self {
+        if roles.waiver || !roles.any() {
+            Store::Waives
+        } else if roles.requester {
+            Store::Requests
+        } else {
+            Store::None
+        }
+    }
+
+    /// The verdict there is on a mark of this store: a confirmer's
+    /// rejection of a waive, a waiver's decline of a request.
+    fn verdict(self) -> Verdict {
+        match self {
+            Store::Requests => Verdict::DECLINE,
+            _ => Verdict::REJECT,
+        }
+    }
+}
 
 /// Which errors the status readers of a session say 1 of (`Review::lensed`,
 /// `StatusReader::lensed`): the class a host's filter shows. Every scope's
@@ -117,6 +154,8 @@ pub enum Lens {
     /// waive requested, and waived by nobody yet (a role's session: none
     /// of a session without a role)
     Requested,
+    /// waive requested, and every request of it declined by a waiver
+    Declined,
 }
 
 impl Lens {
@@ -128,6 +167,7 @@ impl Lens {
             "confirmed" => Some(Lens::Confirmed),
             "rejected" => Some(Lens::Rejected),
             "requested" => Some(Lens::Requested),
+            "declined" => Some(Lens::Declined),
             _ => None,
         }
     }
@@ -139,6 +179,7 @@ impl Lens {
             Lens::Confirmed => "confirmed",
             Lens::Rejected => "rejected",
             Lens::Requested => "requested",
+            Lens::Declined => "declined",
         }
     }
     fn of(byte: u8) -> Self {
@@ -148,6 +189,7 @@ impl Lens {
             3 => Lens::Confirmed,
             4 => Lens::Rejected,
             5 => Lens::Requested,
+            6 => Lens::Declined,
             _ => Lens::Live,
         }
     }
@@ -164,11 +206,12 @@ impl Lens {
             Lens::Confirmed => state == STATE_CONFIRMED,
             Lens::Rejected => state == STATE_REJECTED,
             Lens::Requested => state == STATE_REQUESTED,
+            Lens::Declined => state == STATE_DECLINED,
         }
     }
     /// The class's place among a rule's errors by state (`Review::tally`).
-    fn count(self, by_state: &[u64; 5]) -> u64 {
-        (0..5u8).filter(|&state| self.has(state)).map(|state| by_state[state as usize]).sum()
+    fn count(self, by_state: &[u64; 6]) -> u64 {
+        (0..6u8).filter(|&state| self.has(state)).map(|state| by_state[state as usize]).sum()
     }
 }
 
@@ -183,10 +226,12 @@ pub struct Overlay {
     rejected: RwLock<BTreeMap<usize, Arc<Vec<Run>>>>,
     /// every confirmer's confirm file as the locks last found them
     confirms: ConfirmFiles,
-    /// the session's role: with one, the states are the error's - made of
-    /// everybody's files, `peers` - and the status file is this reviewer's
-    /// own stage of them
-    role: Role,
+    /// which file the session's own marks are in (`Store`)
+    store: Store,
+    /// a role's session: the states are the error's - made of everybody's
+    /// files, `peers` - and the status file is this reviewer's own stage
+    /// of them
+    team: bool,
     /// every reviewer's request file, waive sidecar and confirm file as the
     /// last look found them (a role's session; this session's own status
     /// file is not among them)
@@ -194,12 +239,13 @@ pub struct Overlay {
 }
 
 impl Overlay {
-    fn new(confirms: ConfirmFiles, role: Role) -> Self {
+    fn new(confirms: ConfirmFiles, store: Store, team: bool) -> Self {
         Self {
             lens: AtomicU8::new(Lens::Live as u8),
             rejected: RwLock::default(),
             confirms,
-            role,
+            store,
+            team,
             peers: RwLock::default(),
         }
     }
@@ -224,7 +270,7 @@ impl Overlay {
         for s in raw.iter_mut() {
             *s = u8::from(*s == STATUS_WAIVED);
         }
-        if self.role == Role::Requester || !raw.contains(&1) {
+        if !raw.contains(&1) {
             return;
         }
         let stop = start + raw.len() as u64;
@@ -243,87 +289,99 @@ impl Overlay {
     /// Status bytes `raw` of rule `check`'s errors from `start` (`first`:
     /// the rule's first error among all) become the errors' states as
     /// everybody's files say them - a role's session. This session's own
-    /// file is its role's stage (a requester's requests, anybody else's
+    /// file is its store's stage (a requester's requests, a waiver's
     /// waives); the other reviewers' request files, waive sidecars and
     /// confirm files are the ones the last look found. An error is waived
     /// while somebody's waive of it is not rejected, confirmed when a
-    /// confirmer confirmed that, rejected when every waive of it is, and
-    /// requested when somebody asked and nobody waived.
+    /// confirmer confirmed that, rejected when every waive of it is;
+    /// requested when somebody's request of it is not declined and nobody
+    /// waived, declined when every request of it is.
     fn team(&self, check: usize, first: u64, start: u64, raw: &mut [u8]) {
+        // somebody's request file has the error; ... in a request that is
+        // not declined; somebody's waive sidecar has it; ... in a waive
+        // that is not rejected; a confirmer confirmed it
+        const ASKED: u8 = 1;
+        const ASKING: u8 = 16;
+        const HELD: u8 = 2;
+        const LIVE: u8 = 4;
+        const SEEN: u8 = 8;
         let n = raw.len();
         let peers = self.peers();
         let stop = start + n as u64;
-        // bit 0: asked for, bit 1: waived in a file, bit 2: by a waive that
-        // is not rejected, bit 3: confirmed
         let mut bits = vec![0u8; n];
-        let part = |runs: &[Run], bits: &mut [u8], f: &dyn Fn(&mut u8)| {
+        let clear = |runs: &[Run], bits: &mut [u8], bit: u8| {
             let mut i = runs.partition_point(|r| r.1 <= start);
             while let Some(&(a, b)) = runs.get(i) {
                 if a >= stop {
                     break;
                 }
-                for bit in &mut bits[(a.max(start) - start) as usize..(b.min(stop) - start) as usize] {
-                    f(bit);
+                for b in &mut bits[(a.max(start) - start) as usize..(b.min(stop) - start) as usize] {
+                    *b &= !bit;
                 }
                 i += 1;
             }
         };
-        if self.role == Role::Requester {
+        // this session's own marks: its store's stage, less the ones under
+        // a verdict its reviewer has not answered
+        let own = match self.store {
+            Store::Requests => Some((ASKED, ASKING)),
+            Store::Waives => Some((HELD, LIVE)),
+            Store::None => None,
+        };
+        if let Some((held, live)) = own {
             for (bit, s) in bits.iter_mut().zip(raw.iter()) {
-                *bit = u8::from(*s == STATUS_WAIVED);
-            }
-        } else {
-            for (bit, s) in bits.iter_mut().zip(raw.iter()) {
-                *bit = if *s == STATUS_WAIVED { 2 | 4 } else { 0 };
+                if *s == STATUS_WAIVED {
+                    *bit = held | live;
+                }
             }
             if let Some(runs) = self.rejected(check) {
-                part(&runs, &mut bits, &|bit| *bit &= !4);
+                clear(&runs, &mut bits, live);
             }
         }
         let mut bytes = vec![0u8; n];
-        for peer in peers.requests.iter().filter(|p| p.any(check)) {
-            if peer.read(first + start, &mut bytes) {
-                for (bit, b) in bits.iter_mut().zip(&bytes) {
-                    *bit |= u8::from(*b == STATUS_WAIVED);
+        let mut marks = vec![0u8; n];
+        for (group, held, live) in [(&peers.requests, ASKED, ASKING), (&peers.waives, HELD, LIVE)] {
+            for peer in group.iter().filter(|p| p.any(check)) {
+                if !peer.read(first + start, &mut bytes) {
+                    continue;
+                }
+                // (this file's marks, less the ones its reviewer has not
+                // answered a verdict on)
+                for (m, b) in marks.iter_mut().zip(&bytes) {
+                    *m = if *b == STATUS_WAIVED { held | live } else { 0 };
+                }
+                if let Some(runs) = peer.rejected.get(&check) {
+                    clear(runs, &mut marks, live);
+                }
+                for (bit, m) in bits.iter_mut().zip(&marks) {
+                    *bit |= m;
                 }
             }
         }
-        for peer in peers.waives.iter().filter(|p| p.any(check)) {
-            if !peer.read(first + start, &mut bytes) {
-                continue;
-            }
-            // (this file's waives, less the ones its reviewer has not
-            // answered a rejection of)
-            let mut held: Vec<u8> = bytes.iter().map(|b| if *b == STATUS_WAIVED { 2 | 4 } else { 0 }).collect();
-            if let Some(runs) = peer.rejected.get(&check) {
-                part(runs, &mut held, &|bit| *bit &= !4);
-            }
-            for (bit, h) in bits.iter_mut().zip(&held) {
-                *bit |= h;
-            }
-        }
-        if bits.iter().any(|bit| bit & 4 != 0) {
+        if bits.iter().any(|bit| bit & LIVE != 0) {
             for peer in peers.confirms.iter().filter(|p| p.any(check)) {
                 if peer.read(first + start, &mut bytes) {
                     for (bit, b) in bits.iter_mut().zip(&bytes) {
                         if *b == confirm::CONFIRMED {
-                            *bit |= 8;
+                            *bit |= SEEN;
                         }
                     }
                 }
             }
         }
         for (s, bit) in raw.iter_mut().zip(&bits) {
-            *s = if bit & 4 != 0 {
-                if bit & 8 != 0 {
+            *s = if bit & LIVE != 0 {
+                if bit & SEEN != 0 {
                     STATE_CONFIRMED
                 } else {
                     STATE_WAIVED
                 }
-            } else if bit & 2 != 0 {
+            } else if bit & HELD != 0 {
                 STATE_REJECTED
-            } else if bit & 1 != 0 {
+            } else if bit & ASKING != 0 {
                 STATE_REQUESTED
+            } else if bit & ASKED != 0 {
+                STATE_DECLINED
             } else {
                 STATE_NONE
             };
@@ -363,7 +421,7 @@ impl Overlay {
     /// rejected error is rejected, and - `confirms` - one a confirmer has
     /// confirmed is confirmed (their files are read for it).
     fn states(&self, check: usize, first: u64, start: u64, raw: &mut [u8], confirms: bool) {
-        if self.role.any() {
+        if self.team {
             return self.team(check, first, start, raw);
         }
         let mut any = false;
@@ -412,7 +470,7 @@ impl Overlay {
     /// `states`, then 1 where the state is of `lens`'s class and 0
     /// elsewhere.
     fn class(&self, check: usize, first: u64, start: u64, raw: &mut [u8], lens: Lens) {
-        if lens == Lens::Held && !self.role.any() {
+        if lens == Lens::Held && !self.team {
             for s in raw.iter_mut() {
                 *s = u8::from(*s == STATUS_WAIVED);
             }
@@ -512,9 +570,11 @@ pub struct Looked {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Event {
     /// "waived": the reason the waive had before it was waived again;
-    /// "rejected": a rejection that was answered by waiving again
+    /// "rejected": a rejection that was answered by waiving again;
+    /// "requested": the reason the request had before it was asked again;
+    /// "declined": a decline that was answered by asking again
     pub what: &'static str,
-    /// who rejected (empty for a waive reason: its reviewer's)
+    /// who rejected, or declined (empty for a reason: its reviewer's)
     pub by: String,
     pub text: String,
     /// seconds since the epoch
@@ -559,19 +619,17 @@ pub struct Review {
     /// the waives this reviewer has confirmed (`confirm`; 0.12.466): a file
     /// of their own, made at the first confirmation
     pub confirms: Confirms,
-    /// whether this session may confirm: the launcher's word (`floe2 view
-    /// --confirmer`), false until the host says so
-    confirmer: bool,
-    /// what this session does in the workflow (`Role`; 0.12.472): the
-    /// launcher's word too, said at the open - a requester's status store
-    /// is another file
-    role: Role,
+    /// what this session does in the workflow (`Roles`; 0.12.472, several
+    /// at once since 0.12.473): the launcher's word, said at the open
+    roles: Roles,
+    /// which file its own marks are in: its highest marking role's
+    store: Store,
     /// what a mark of the status store is the reason's kind of: a waive's,
     /// or - a requester's session - a request's
     mark: Kind,
     /// a role's session: each rule's errors by state (`STATE_*`), counted
     /// when asked and again after anything that may have moved them
-    by_state: RefCell<Vec<Option<[u64; 5]>>>,
+    by_state: RefCell<Vec<Option<[u64; 6]>>>,
     /// a role's session confirmed or rejected: the states are read from
     /// everybody's files again when the request ends (`sync_waives`) - its
     /// own verdict is in files it reads as it reads the others'
@@ -713,6 +771,34 @@ fn now() -> u64 {
         .unwrap_or(0)
 }
 
+/// Whether a file can be made beside `side` (the results folder takes the
+/// reviewer's files): a probe made and removed, named as a sidecar being
+/// made is - which no reader takes for a reviewer's file.
+fn writable(side: &Path) -> bool {
+    let probe = with_suffix(side, &format!(".tmp-{}", std::process::id()));
+    let made = OpenOptions::new().write(true).create_new(true).open(&probe).is_ok();
+    if made {
+        let _ = fs::remove_file(&probe);
+    }
+    made
+}
+
+/// A file of `len` zero bytes that is nobody's: the status store of a
+/// session that makes no mark (nothing set, every counter 0). Made in the
+/// temp folder and unlinked at once - it lives as long as its handles.
+fn blank(len: u64) -> std::io::Result<File> {
+    static MADE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        ".floe-drc-blank-{}-{}",
+        std::process::id(),
+        MADE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let file = OpenOptions::new().read(true).write(true).create_new(true).open(&path)?;
+    let sized = file.set_len(len);
+    let _ = fs::remove_file(&path);
+    sized.map(|()| file)
+}
+
 /// Create or validate the waive sidecar at `side`; returns it. Another run's
 /// file is moved aside, a new one seeded from the pack's sections - or,
 /// `blank`, made of `header` and nothing marked (a requester's request
@@ -777,20 +863,21 @@ impl Review {
         reviewer: Option<&str>,
         cancelled: &AtomicUsize,
     ) -> Result<Self> {
-        Self::open_with(pack_path, source, reviewer, cancelled, false, Role::None)
+        Self::open_with(pack_path, source, reviewer, cancelled, false, Roles::NONE)
     }
-    /// `open`, as a session of `role` (`Role`): what the launcher said this
-    /// session does in the workflow. A requester's marks are requests, in a
-    /// file of their own; the states any role's session reads are the
-    /// error's (see the module docs).
+    /// `open`, as a session of `roles` (`Roles`): what the launcher said
+    /// this session does in the workflow. Its own marks are its highest
+    /// marking role's - a waiver's waives, else a requester's requests, in
+    /// a file of their own, else none and no file -; the states any role's
+    /// session reads are the error's (see the module docs).
     pub fn open_as(
         pack_path: &Path,
         source: Option<&Path>,
         reviewer: Option<&str>,
-        role: Role,
+        roles: Roles,
         cancelled: &AtomicUsize,
     ) -> Result<Self> {
-        Self::open_with(pack_path, source, reviewer, cancelled, false, role)
+        Self::open_with(pack_path, source, reviewer, cancelled, false, roles)
     }
     /// `open`. `whole`: a source whose time changed is read and compared
     /// whatever its size (Pack::source_current) - the load that would parse
@@ -803,7 +890,7 @@ impl Review {
         reviewer: Option<&str>,
         cancelled: &AtomicUsize,
         whole: bool,
-        role: Role,
+        roles: Roles,
     ) -> Result<Self> {
         let lock = pack_reader(pack_path)?;
         let mut pack = Pack::open(pack_path, cancelled)?;
@@ -832,10 +919,14 @@ impl Review {
         let [note_beside, note_temp] = note_paths(&waive);
         let mut notices = Vec::new();
         let (status_section, wcount_section) = pack.review_sections();
-        // the status store: the reviewer's waive sidecar - or, a
-        // requester's session, their request file, named as it and made
-        // with nothing asked for
-        let requester = role == Role::Requester;
+        // the status store: the reviewer's waive sidecar - or, where the
+        // session's marks are requests (a requester who is no waiver),
+        // their request file, named as it and made with nothing asked for
+        // - or, for a session that makes no mark (a confirmer who is
+        // neither), no file at all: it reads nothing marked, and its
+        // reviewer's other files are named where they can be written
+        let kind = Store::of(roles);
+        let requester = kind == Store::Requests;
         let (store, store_header) = if requester {
             (
                 [confirm::request_beside(&waive[0]), confirm::request_beside(&waive[1])],
@@ -844,13 +935,19 @@ impl Review {
         } else {
             (waive.clone(), header)
         };
-        let (waive_path, status_off, wcount_off) = match ensure_sidecar(
-            &store[0],
-            &pack,
-            &store_header,
-            requester,
-            &mut notices,
-        ) {
+        let (waive_path, status_off, wcount_off) = if kind == Store::None {
+            let at = if writable(&waive[0]) {
+                waive[0].clone()
+            } else {
+                notices.push(format!(
+                    "[drc] results folder not writable; the review's files go to {}",
+                    waive[1].parent().unwrap_or(Path::new(".")).display()
+                ));
+                waive[1].clone()
+            };
+            (at, HEADER, HEADER + pack.total)
+        } else {
+            match ensure_sidecar(&store[0], &pack, &store_header, requester, &mut notices) {
             Ok(p) => (p, HEADER, HEADER + pack.total),
             Err(_) => match ensure_sidecar(&store[1], &pack, &store_header, requester, &mut notices) {
                 Ok(p) => {
@@ -867,6 +964,7 @@ impl Review {
                     (pack.path.clone(), status_section, wcount_section)
                 }
             },
+            }
         };
         // the reviewer's waive sidecar's name where the status store is:
         // what their other files are named from, whatever the store (a
@@ -889,7 +987,13 @@ impl Review {
                 &mut notices,
             )?
         };
-        let reader = File::open(&waive_path)?;
+        // (a session without a store reads a file of nothing: no status
+        // byte set, every counter 0 - its own, gone with the session)
+        let reader = if kind == Store::None {
+            blank(HEADER + pack.total + 4 * pack.checks.len() as u64)?
+        } else {
+            File::open(&waive_path)?
+        };
         let mut raw = vec![0u8; pack.checks.len() * 4];
         reader.read_exact_at(&mut raw, wcount_off)?;
         let wcount = raw
@@ -950,10 +1054,10 @@ impl Review {
         // a role's session reads every stage: the request files and the
         // waive sidecars of the result are found with the confirm files -
         // but for its own status store, which it reads itself
-        if role.any() && waive_path != pack.path {
-            locks.follow(header, !requester, requester);
+        if roles.any() && waive_path != pack.path {
+            locks.follow(header, kind == Store::Waives, requester);
         }
-        let overlay = Arc::new(Overlay::new(locks.shared(), role));
+        let overlay = Arc::new(Overlay::new(locks.shared(), kind, roles.any()));
         let rules = pack.checks.len();
         // the change log: beside the sidecar in use; the pack shown
         // read-only has no file of its own and says nothing
@@ -984,8 +1088,8 @@ impl Review {
             note_tag,
             reasons,
             confirms,
-            confirmer: false,
-            role,
+            roles,
+            store: kind,
             mark: if requester { Kind::Request } else { Kind::Waive },
             by_state: RefCell::new(vec![None; rules]),
             restage: false,
@@ -1131,31 +1235,28 @@ impl Review {
     pub fn status_counts(&self, check: usize) -> Result<(u64, u64)> {
         let (_, n) = self.check(check)?;
         let held = u64::from(self.wcount[check]);
-        if self.role == Role::Requester {
-            return Ok((held, n));
-        }
         Ok((held.saturating_sub(self.tally_rejected(check)?), n))
     }
 
     /// One rule's errors by state: [not waived, waived and not confirmed
-    /// yet, rejected, confirmed, waive requested] (`STATE_*`). A session
-    /// without a role says its reviewer's own waives', and none requested;
-    /// a role's the errors' (`states`).
-    pub fn state_counts(&self, check: usize) -> Result<[u64; 5]> {
+    /// yet, rejected, confirmed, waive requested, request declined]
+    /// (`STATE_*`). A session without a role says its reviewer's own
+    /// waives', and none requested; a role's the errors' (`states`).
+    pub fn state_counts(&self, check: usize) -> Result<[u64; 6]> {
         let (_, n) = self.check(check)?;
-        if self.role.any() {
+        if self.roles.any() {
             return self.tally(check);
         }
         let held = u64::from(self.wcount[check]).min(n);
         let rejected = self.tally_rejected(check)?.min(held);
         let confirmed = self.tally_confirmed(check)?.min(held - rejected);
-        Ok([n - held, held - rejected - confirmed, rejected, confirmed, 0])
+        Ok([n - held, held - rejected - confirmed, rejected, confirmed, 0, 0])
     }
 
     /// (errors of the lens's class, total) of one rule.
     pub fn lens_counts(&self, check: usize) -> Result<(u64, u64)> {
         let (_, n) = self.check(check)?;
-        if self.role.any() {
+        if self.roles.any() {
             return Ok((self.overlay.lens().count(&self.tally(check)?), n));
         }
         let held = u64::from(self.wcount[check]).min(n);
@@ -1165,7 +1266,7 @@ impl Review {
             Lens::Rejected => self.tally_rejected(check)?.min(held),
             Lens::Waived => self.state_counts(check)?[1],
             Lens::Confirmed => self.state_counts(check)?[3],
-            Lens::Requested => 0,
+            Lens::Requested | Lens::Declined => 0,
         };
         Ok((count, n))
     }
@@ -1173,12 +1274,12 @@ impl Review {
     /// A role's session: rule `check`'s errors by state, counted from every
     /// reviewer's files (kept until something may have moved them). A rule
     /// nobody has anything in is counted without a read.
-    fn tally(&self, check: usize) -> Result<[u64; 5]> {
+    fn tally(&self, check: usize) -> Result<[u64; 6]> {
         if let Some(counts) = self.by_state.borrow()[check] {
             return Ok(counts);
         }
         let (_, n) = self.check(check)?;
-        let mut counts = [0u64; 5];
+        let mut counts = [0u64; 6];
         let peers = self.overlay.peers();
         let marked = self.wcount[check] > 0
             || peers.requests.iter().chain(&peers.waives).any(|peer| peer.any(check));
@@ -1190,7 +1291,7 @@ impl Review {
             while at < n {
                 let len = (n - at).min(STEP);
                 for state in self.states(check, at, len)? {
-                    counts[usize::from(state.min(4))] += 1;
+                    counts[usize::from(state.min(5))] += 1;
                 }
                 at += len;
             }
@@ -1246,7 +1347,7 @@ impl Review {
     /// kept in step by the writers then, counted again otherwise (a host
     /// that keeps counts of its own asks the same).
     pub fn steps(&self, check: usize) -> bool {
-        !self.role.any()
+        !self.roles.any()
             && matches!(self.overlay.lens(), Lens::Live | Lens::Held)
             && self.overlay.rejected(check).is_none()
     }
@@ -1393,23 +1494,31 @@ impl Review {
 
     // ---- confirmations (0.12.466) ---------------------------------------
 
-    /// Whether this session may confirm waives: what the launcher said
-    /// (`floe2 view --confirmer`, FLOE_CONFIRMER) - a role, not a check of
-    /// who the reviewer is (the ids are the launcher's too). The role is
-    /// also what turns a confirmed waive back: no lock holds its session.
-    pub fn set_confirmer(&mut self, on: bool) {
-        self.confirmer = on;
-    }
-
-    /// Whether this session confirms and rejects: `set_confirmer`'s word,
-    /// or the confirmer's role.
+    /// Whether this session confirms and rejects waives: the confirmer's
+    /// role, which the launcher gives (`floe2 view --role confirmer`, alone
+    /// or with others) - a role, not a check of who the reviewer is (the
+    /// ids are the launcher's too). In a session that is a waiver too, the
+    /// role is also what turns its own confirmed waive back: no lock holds
+    /// it, and its own confirmation goes with the waive.
     pub fn confirmer(&self) -> bool {
-        self.confirmer || self.role == Role::Confirmer
+        self.roles.confirmer
     }
 
-    /// What this session does in the workflow (`Role`), as its open said.
-    pub fn role(&self) -> Role {
-        self.role
+    /// What this session does in the workflow (`Roles`), as its open said.
+    pub fn roles(&self) -> Roles {
+        self.roles
+    }
+
+    /// Which file this session's own marks are in (`Store`).
+    pub fn store(&self) -> Store {
+        self.store
+    }
+
+    /// Whether this session waives only what somebody asked the waive of:
+    /// a waiver that is no requester. (One that is both is its own
+    /// requester; a session without a role waives as it always did.)
+    fn strict(&self) -> bool {
+        self.store == Store::Waives && self.roles.any() && !self.roles.requester
     }
 
     /// What a mark of this session's status store is the reason's kind of:
@@ -1437,10 +1546,10 @@ impl Review {
     /// waived, which locks this reviewer's request of it - a request is not
     /// taken back from under a waive.
     pub fn locked(&mut self, check: usize, start: u64, len: u64) -> Result<Option<Vec<bool>>> {
-        if self.role == Role::Requester {
+        if self.store == Store::Requests {
             return self.locks.waived(check, start, len);
         }
-        if self.confirmer {
+        if self.roles.confirmer {
             return Ok(None);
         }
         let Some(mut locked) = self.locks.mask(check, start, len)? else {
@@ -1461,9 +1570,14 @@ impl Review {
     /// Every rejection of rule `check` that stands: the other reviewers' as
     /// the locks read their logs (`look`: `Locks::standing`), and this
     /// reviewer's own, which is known here at once.
+    ///
+    /// The verdict is the one there is on this session's own marks
+    /// (`Store::verdict`): a confirmer's rejection of a waive - or, where
+    /// the marks are requests, a waiver's decline (0.12.473).
     fn standing(&mut self, check: usize, look: bool) -> Result<Vec<Standing>> {
-        let mut standing = self.locks.standing(check, look)?;
-        standing.extend(confirm::standing_of(&self.reviewer, &self.rejects, check));
+        let made = self.store.verdict().made;
+        let mut standing = self.locks.standing_by(check, look, made)?;
+        standing.extend(confirm::standing_by(&self.reviewer, &self.rejects, check, made));
         Ok(standing)
     }
 
@@ -1473,12 +1587,12 @@ impl Review {
     /// than they were.
     fn rejected_runs(&mut self, check: usize, look: bool) -> Result<Arc<Vec<Run>>> {
         self.check(check)?;
-        // (a requester's marks are requests: a rejection is of a waive)
-        if self.read_only() || self.role == Role::Requester {
+        // (a session without marks has none under a verdict)
+        if self.read_only() || self.store == Store::None {
             return Ok(Arc::default());
         }
         let standing = self.standing(check, look)?;
-        let runs = confirm::unanswered(&standing, Some(&self.rejects), check);
+        let runs = confirm::unanswered_by(&standing, Some(&self.rejects), check, self.store.verdict().answered);
         if self.overlay.set_rejected(check, runs) {
             self.reclass(check);
         }
@@ -1540,7 +1654,8 @@ impl Review {
             return Ok(Vec::new());
         }
         let standing = self.standing(check, false)?;
-        let mut by = confirm::rejecting(&standing, Some(&self.rejects), check, runs);
+        let mut by =
+            confirm::rejecting_by(&standing, Some(&self.rejects), check, runs, self.store.verdict().answered);
         by.sort_by(|a, b| (&a.reviewer, a.time).cmp(&(&b.reviewer, b.time)));
         Ok(by)
     }
@@ -1549,7 +1664,7 @@ impl Review {
         if !self.confirmer() {
             return Err(Error::new(
                 ErrorKind::Unsupported,
-                "rejecting waives is the confirmer's: start the viewer with --confirmer",
+                "rejecting waives is the confirmer's: start the viewer with --role confirmer",
             ));
         }
         if self.read_only() {
@@ -1583,7 +1698,7 @@ impl Review {
         // what its reviewers name it by when they answer)
         let time = now().max(self.rejects.latest(Kind::Reject) + 1);
         let said = self.rejects.set(Kind::Reject, check, runs, text, time);
-        self.restage = self.role.any();
+        self.restage = self.roles.any();
         self.notices.append(&mut self.rejects.notices);
         said.map_err(|e| Error::new(e.kind, format!("{} ({})", e.message, self.rejects.path.display())))?;
         // (the log's change is a change of every chunk it names: the
@@ -1628,13 +1743,98 @@ impl Review {
         if held.is_empty() {
             return Ok(false);
         }
-        self.restage = self.role.any();
+        self.restage = self.roles.any();
         self.rejects.clear(Kind::Reject, check, &held);
         for &(a, b) in &held {
             self.touched(check, a, b - 1);
         }
         self.rejected_runs(check, false)?;
         self.sync_waives()?;
+        Ok(true)
+    }
+
+    // ---- the decline of a request (0.12.473) ----------------------------
+
+    fn may_decline(&self) -> Result<()> {
+        if !self.roles.waiver {
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                "declining requests is the waiver's: start the viewer with --role waiver",
+            ));
+        }
+        if self.read_only() {
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                "this review is read-only here: nothing can be declined",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Decline the request of rule `check`'s `runs` (sorted, disjoint, not
+    /// touching), `text` saying why (it may be empty): one line of this
+    /// waiver's rejects log, whatever its size (user 2026-11-14: "요청 거절
+    /// 상태도 만들어줘"). A waiver's verdict on a request, as a rejection
+    /// is a confirmer's on a waive: the request stays in its requester's
+    /// file, declined - it counts as none, and no waiver's session waives
+    /// the error for it - until its requester asks again with a reason
+    /// (`resubmit` in their session: what was is kept), takes it back, or
+    /// this waiver takes the decline back (`decline_drop`) or waives the
+    /// error. Which errors have a request to decline is the caller's to
+    /// ask (drc::team::waives `decline_runs`).
+    pub fn decline_set(&mut self, check: usize, runs: &[Run], text: &str) -> Result<()> {
+        self.may_decline()?;
+        let (_, n) = self.check(check)?;
+        if runs.is_empty() {
+            return Ok(());
+        }
+        if runs.last().is_some_and(|r| r.1 > n) {
+            return Err(Error::input("DRC error index out of range"));
+        }
+        // (each decline of a log has a time of its own, as each rejection:
+        // who and when name it to the requester who answers)
+        let time = now().max(self.rejects.latest(Kind::Decline) + 1);
+        let said = self.rejects.set(Kind::Decline, check, runs, text, time);
+        self.restage = true;
+        self.notices.append(&mut self.rejects.notices);
+        said.map_err(|e| Error::new(e.kind, format!("{} ({})", e.message, self.rejects.path.display())))?;
+        for &(a, b) in runs {
+            self.touched(check, a, b - 1);
+        }
+        self.sync_waives()
+    }
+
+    /// Take this waiver's decline of rule `check`'s `runs` back: whether
+    /// any of them was declined. Their requests are as they were before it
+    /// - asked for, waiting for a waiver - at once.
+    pub fn decline_drop(&mut self, check: usize, runs: &[Run]) -> Result<bool> {
+        self.may_decline()?;
+        self.check(check)?;
+        if !self.undecline(check, runs)? {
+            return Ok(false);
+        }
+        self.sync_waives()?;
+        Ok(true)
+    }
+
+    /// This waiver's own declines of rule `check`'s `runs` are taken back
+    /// (they said so, or they waive the errors): whether there were any.
+    /// The states are read again when the request ends.
+    fn undecline(&mut self, check: usize, runs: &[Run]) -> Result<bool> {
+        if !self.rejects.any(Kind::Decline, check) {
+            return Ok(false);
+        }
+        let held = self.rejects.held(Kind::Decline, check, runs);
+        if held.is_empty() {
+            return Ok(false);
+        }
+        self.rejects.clear(Kind::Decline, check, &held);
+        for &(a, b) in &held {
+            self.touched(check, a, b - 1);
+        }
+        // (the requests are requests again for this session's own waive of
+        // them, made in the same request: read now)
+        self.classify(true)?;
         Ok(true)
     }
 
@@ -1728,7 +1928,7 @@ impl Review {
                 let entry = &self.reasons.entries()[entry];
                 (entry.time, entry.text.clone())
             };
-            let kept = self.rejects.keep(Kind::Earlier, check, &runs, time, "", &text);
+            let kept = self.rejects.keep(self.store.verdict().earlier, check, &runs, time, "", &text);
             self.notices.append(&mut self.rejects.notices);
             kept.map_err(|e| Error::new(e.kind, format!("{} ({})", e.message, self.rejects.path.display())))?;
         }
@@ -1755,7 +1955,8 @@ impl Review {
             return Err(Error::input("DRC error index out of range"));
         }
         let standing = self.standing(check, false)?;
-        let mine = meet(runs, &confirm::unanswered(&standing, Some(&self.rejects), check));
+        let answered = self.store.verdict().answered;
+        let mine = meet(runs, &confirm::unanswered_by(&standing, Some(&self.rejects), check, answered));
         if mine.is_empty() {
             return Ok(0);
         }
@@ -1764,12 +1965,15 @@ impl Review {
         // each rejection's part of them, before any is kept as answered
         let parts: Vec<(Vec<Run>, &Standing)> = standing
             .iter()
-            .map(|s| (meet(&mine, &confirm::unanswered(std::slice::from_ref(s), Some(&self.rejects), check)), s))
+            .map(|s| {
+                let open = confirm::unanswered_by(std::slice::from_ref(s), Some(&self.rejects), check, answered);
+                (meet(&mine, &open), s)
+            })
             .filter(|(part, _)| !part.is_empty())
             .collect();
         self.keep_earlier(check, &mine)?;
         for (part, s) in parts {
-            let kept = self.rejects.keep(Kind::Answered, check, &part, s.time, &s.by, &s.text);
+            let kept = self.rejects.keep(answered, check, &part, s.time, &s.by, &s.text);
             self.notices.append(&mut self.rejects.notices);
             kept.map_err(|e| Error::new(e.kind, format!("{} ({})", e.message, self.rejects.path.display())))?;
         }
@@ -1806,28 +2010,32 @@ impl Review {
     /// the confirmers' files for the status readers: whether those logs
     /// and files are others than at the last ask.
     fn classify(&mut self, first: bool) -> Result<bool> {
-        let (others, seen) = self.locks.rejections();
+        let (rejections, declines, seen) = self.locks.verdicts();
         let changed = self.seen.as_ref() != Some(&seen);
         self.seen = Some(seen);
         if !changed && !first {
             // (what this session did itself was classed as it did it)
             return Ok(false);
         }
+        // this session's own marks under a verdict its reviewer has not
+        // answered: a rejection of its waives - or, where its marks are
+        // requests, a decline (a session without marks has none)
+        let verdict = self.store.verdict();
+        let others = if verdict.made == Kind::Decline { &declines } else { &rejections };
         let mut rules: BTreeSet<usize> = others.keys().copied().collect();
-        rules.extend(self.rejects.checks(Kind::Reject));
+        rules.extend(self.rejects.checks(verdict.made));
         rules.extend(self.overlay.rejected_rules());
-        // (a requester's marks are requests: no rejection is of them)
-        let waives = self.role != Role::Requester;
-        for check in rules.into_iter().filter(|_| waives) {
+        let marks = self.store != Store::None;
+        for check in rules.into_iter().filter(|_| marks) {
             let mut standing = others.get(&check).cloned().unwrap_or_default();
-            standing.extend(confirm::standing_of(&self.reviewer, &self.rejects, check));
-            let runs = confirm::unanswered(&standing, Some(&self.rejects), check);
+            standing.extend(confirm::standing_by(&self.reviewer, &self.rejects, check, verdict.made));
+            let runs = confirm::unanswered_by(&standing, Some(&self.rejects), check, verdict.answered);
             if self.overlay.set_rejected(check, runs) {
                 self.reclass(check);
             }
         }
-        if self.role.any() {
-            self.follow(&others);
+        if self.roles.any() {
+            self.follow(&rejections, &declines);
         }
         // (who confirmed what may be another thing now)
         for tally in self.tallies.borrow_mut().iter_mut() {
@@ -1842,30 +2050,41 @@ impl Review {
     /// A role's session: every reviewer's request file, waive sidecar and
     /// confirm file as the listing just made found them are what the states
     /// are read from now - each waive sidecar with the errors under a
-    /// rejection its reviewer has not answered (`others`: the rejections
-    /// that stand in the other reviewers' logs, by rule) -, and the rules
-    /// they may mark otherwise than before are classed anew.
-    fn follow(&mut self, others: &BTreeMap<usize, Vec<Standing>>) {
+    /// rejection its reviewer has not answered, each request file with the
+    /// ones under a decline its reviewer has not answered (`rejections`,
+    /// `declines`: the verdicts that stand in the other reviewers' logs, by
+    /// rule) -, and the rules they may mark otherwise than before are
+    /// classed anew.
+    fn follow(
+        &mut self,
+        rejections: &BTreeMap<usize, Vec<Standing>>,
+        declines: &BTreeMap<usize, Vec<Standing>>,
+    ) {
         let mut found = self.locks.peers().clone();
-        let mut rules: BTreeSet<usize> = others.keys().copied().collect();
-        rules.extend(self.rejects.checks(Kind::Reject));
-        for check in rules {
-            let mut standing = others.get(&check).cloned().unwrap_or_default();
-            standing.extend(confirm::standing_of(&self.reviewer, &self.rejects, check));
-            if standing.is_empty() {
-                continue;
-            }
-            for peer in found.waives.iter_mut().filter(|peer| peer.any(check)) {
-                // (what a reviewer answered is in their own log: this
-                // session's is its review's, the others' the locks')
-                let answers = if peer.tag == self.reviewer {
-                    Some(&self.rejects)
-                } else {
-                    self.locks.answers_of(&peer.tag)
-                };
-                let runs = confirm::unanswered(&standing, answers, check);
-                if !runs.is_empty() {
-                    peer.rejected.insert(check, runs);
+        for (group, others, verdict) in [
+            (&mut found.waives, rejections, Verdict::REJECT),
+            (&mut found.requests, declines, Verdict::DECLINE),
+        ] {
+            let mut rules: BTreeSet<usize> = others.keys().copied().collect();
+            rules.extend(self.rejects.checks(verdict.made));
+            for check in rules {
+                let mut standing = others.get(&check).cloned().unwrap_or_default();
+                standing.extend(confirm::standing_by(&self.reviewer, &self.rejects, check, verdict.made));
+                if standing.is_empty() {
+                    continue;
+                }
+                for peer in group.iter_mut().filter(|peer| peer.any(check)) {
+                    // (what a reviewer answered is in their own log: this
+                    // session's is its review's, the others' the locks')
+                    let answers = if peer.tag == self.reviewer {
+                        Some(&self.rejects)
+                    } else {
+                        self.locks.answers_of(&peer.tag)
+                    };
+                    let runs = confirm::unanswered_by(&standing, answers, check, verdict.answered);
+                    if !runs.is_empty() {
+                        peer.rejected.insert(check, runs);
+                    }
                 }
             }
         }
@@ -1929,7 +2148,7 @@ impl Review {
     /// A requester's session: who has any of them waived - what locks a
     /// request.
     pub fn confirmers_of(&mut self, check: usize, runs: &[Run]) -> Result<Vec<String>> {
-        if self.role == Role::Requester {
+        if self.store == Store::Requests {
             return self.locks.waivers_of(check, runs);
         }
         self.locks.who(check, runs)
@@ -1943,17 +2162,38 @@ impl Review {
     }
 
     /// Rule `check`'s errors `start..start+len` (clamped): true where a
-    /// requester has asked for the error's waive. None when none has. What
-    /// a waiver's session waives: an error nobody asked the waive of is
-    /// left (`Left::unrequested`).
+    /// requester has asked for the error's waive - a request that is not
+    /// declined (its requester's file has it, and they are under no decline
+    /// they have not answered: as the last look read the logs). None when
+    /// none has. What a strict waiver's session waives: an error nobody
+    /// asked the waive of is left (`Left::unrequested`).
     pub fn requested(&self, check: usize, start: u64, len: u64) -> Result<Option<Vec<bool>>> {
-        self.locks.requested(check, start, len)
+        let (first, n) = self.check(check)?;
+        let start = start.min(n);
+        let len = len.min(n - start) as usize;
+        let peers = self.overlay.peers();
+        let mut out: Option<Vec<bool>> = None;
+        let mut bytes = vec![0u8; len];
+        for peer in &peers.requests {
+            if !peer.read(first + start, &mut bytes) || !bytes.contains(&STATUS_WAIVED) {
+                continue;
+            }
+            let declined = peer.rejected.get(&check).map(Vec::as_slice).unwrap_or(&[]);
+            let out = out.get_or_insert_with(|| vec![false; len]);
+            for (j, b) in bytes.iter().enumerate() {
+                if *b == STATUS_WAIVED && !within(declined, start + j as u64) {
+                    out[j] = true;
+                }
+            }
+        }
+        Ok(out.filter(|asked| asked.contains(&true)))
     }
 
-    /// A status is this session's to write: not a confirmer's, whose role
+    /// A status is this session's to write: not one's that makes no mark -
+    /// a confirmer's who is neither waiver nor requester, whose role
     /// confirms and rejects the waives of others and makes none.
     fn may_mark(&self) -> Result<()> {
-        if self.role == Role::Confirmer {
+        if self.store == Store::None {
             return Err(Error::new(
                 ErrorKind::Unsupported,
                 "a confirmer's session does not waive: it confirms or rejects the team's waives (--role waiver waives)",
@@ -1973,7 +2213,7 @@ impl Review {
     /// with it. Left, it would count again - and lock - the moment anybody
     /// waived the error anew, unseen by its confirmer.
     fn unconfirm(&mut self, check: usize, back: &[u64]) -> Result<()> {
-        if !self.confirmer || !self.confirms.present() {
+        if !self.roles.confirmer || !self.confirms.present() {
             return Ok(());
         }
         let (Some(&first), Some(&last)) = (back.iter().min(), back.iter().max()) else {
@@ -2002,7 +2242,7 @@ impl Review {
         } else {
             Err(Error::new(
                 ErrorKind::Unsupported,
-                "confirming waives is the confirmer's: start the viewer with --confirmer",
+                "confirming waives is the confirmer's: start the viewer with --role confirmer",
             ))
         }
     }
@@ -2014,7 +2254,7 @@ impl Review {
     /// somebody does.
     pub fn confirm_set(&mut self, check: usize, errors: &[u64], on: bool) -> Result<u64> {
         self.may_confirm()?;
-        self.restage = self.role.any();
+        self.restage = self.roles.any();
         let changed = self.confirms.set(check, errors, on)?;
         for &error in &changed {
             self.touched(check, error, error);
@@ -2031,7 +2271,7 @@ impl Review {
     /// job ends with `sync_waives`.
     pub fn confirm_span(&mut self, check: usize, start: u64, before: &[u8], after: &[u8]) -> Result<u64> {
         self.may_confirm()?;
-        self.restage = self.role.any();
+        self.restage = self.roles.any();
         let changed = self.confirms.write_span(check, start, before, after)?;
         if changed > 0 {
             self.touched(check, start, start + after.len() as u64 - 1);
@@ -2122,7 +2362,15 @@ impl Review {
             return Err(Error::input("DRC error index out of range"));
         }
         let rejected = self.rejected_runs(check, false)?;
-        let waiver = self.role == Role::Waiver && value == STATUS_WAIVED;
+        let waiver = self.strict() && value == STATUS_WAIVED;
+        // (a waiver who waives what they declined the request of takes the
+        // decline back with it: the waive is their other word on it)
+        if value == STATUS_WAIVED && self.roles.waiver && self.rejects.any(Kind::Decline, check) {
+            let mut targets = errors.to_vec();
+            targets.sort_unstable();
+            targets.dedup();
+            self.undecline(check, &reasons::runs_of(&targets))?;
+        }
         let steps = self.steps(check);
         let mut changed = Vec::new();
         let (mut left, mut back, mut gone) = (Left::default(), Vec::new(), Vec::new());
@@ -2225,7 +2473,11 @@ impl Review {
             }
             // (a waiver waives what was asked for: the members nobody
             // asked the waive of are left, and said)
-            if self.role == Role::Waiver {
+            if self.roles.waiver && self.rejects.any(Kind::Decline, check) {
+                let targets: Vec<u64> = (0..len as usize).filter(|&j| mask[j]).map(|j| a + j as u64).collect();
+                self.undecline(check, &reasons::runs_of(&targets))?;
+            }
+            if self.strict() {
                 let asked = self.requested(check, a, len)?;
                 for j in 0..len as usize {
                     if mask[j] && before[j] != STATUS_WAIVED && !asked.as_ref().is_some_and(|asked| asked[j]) {
@@ -2284,7 +2536,7 @@ impl Review {
             self.drop_waive_reasons(check, &changed, &gone)?;
         }
         self.touched(check, a + lo as u64, a + hi as u64);
-        if self.confirmer && value != STATUS_WAIVED {
+        if self.roles.confirmer && value != STATUS_WAIVED {
             let back: Vec<u64> = positions
                 .iter()
                 .filter(|&&j| before[j] == STATUS_WAIVED)
@@ -2389,7 +2641,7 @@ impl Review {
             }
         }
         // (a waiver waives what was asked for: an applied decision too)
-        if self.role == Role::Waiver && raw.iter().zip(&now).any(|(b, a)| turned(*a, *b)) {
+        if self.strict() && raw.iter().zip(&now).any(|(b, a)| turned(*a, *b)) {
             let asked = self.requested(check, start, len)?;
             for j in 0..now.len() {
                 if turned(now[j], raw[j]) && !asked.as_ref().is_some_and(|asked| asked[j]) {
@@ -2440,7 +2692,7 @@ impl Review {
         if !after.is_empty() {
             self.touched(check, start, start + after.len() as u64 - 1);
         }
-        if self.confirmer && any_back {
+        if self.roles.confirmer && any_back {
             let back: Vec<u64> = (0..after.len())
                 .filter(|&j| turned(before[j], after[j]))
                 .map(|j| start + j as u64)
@@ -2903,7 +3155,16 @@ impl Review {
     /// Save the review state to `dst`, the autosave's format: the status
     /// bytes as they are - a rejected waive is a waive of the file, as it
     /// is of the sidecar; whether it is rejected is the confirmers' logs'.
+    ///
+    /// A session whose marks are not waives - a requester's requests, a
+    /// confirmer's none - has no waives of its own to save.
     pub fn waive_export(&self, dst: &Path) -> Result<()> {
+        if self.store != Store::Waives {
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                "this session has no waives of its own to save (--role waiver waives)",
+            ));
+        }
         let mut data = self.header.to_vec();
         let mut status = vec![0u8; self.pack.total as usize];
         self.reader.read_exact_at(&mut status, self.status_off)?;
@@ -2926,7 +3187,7 @@ impl Review {
     /// request, and a confirmer waives nothing.
     pub fn waive_import(&mut self, src: &Path) -> Result<(u64, Kept)> {
         self.may_mark()?;
-        if self.role == Role::Requester {
+        if self.store == Store::Requests {
             return Err(Error::new(
                 ErrorKind::Unsupported,
                 "a requester's session loads no waive file: its marks are requests (--role waiver waives)",
@@ -2970,7 +3231,7 @@ impl Review {
             }
             // (a waiver waives what was asked for: a waive of the file's
             // that nobody asked for is not taken)
-            if self.role == Role::Waiver
+            if self.strict()
                 && (first..first + count).any(|g| status[g] == STATUS_WAIVED && current[g] != STATUS_WAIVED)
             {
                 let asked = self.requested(check, 0, count as u64)?;
@@ -2988,7 +3249,7 @@ impl Review {
             if !(first..first + count).any(|g| turned(g, &status)) {
                 continue;
             }
-            if self.confirmer {
+            if self.roles.confirmer {
                 if self.confirms.present() && self.confirms.counts()[check] > 0 {
                     let was = self.confirms.statuses(check, 0, count as u64)?;
                     let mut now = was.clone();
@@ -3058,7 +3319,12 @@ pub fn history_of(log: &Reasons, check: usize, error: u64) -> Vec<Event> {
     log.kept_at(check, error)
         .into_iter()
         .map(|e| Event {
-            what: if e.kind == Kind::Answered { "rejected" } else { "waived" },
+            what: match e.kind {
+                Kind::Answered => "rejected",
+                Kind::Reasked => "declined",
+                Kind::Asked => "requested",
+                _ => "waived",
+            },
             by: e.by.clone(),
             text: e.text.clone(),
             time: e.time,
@@ -3160,28 +3426,28 @@ impl Opened {
         reviewer: Option<&str>,
         cancelled: &AtomicUsize,
     ) -> Result<(Self, Vec<String>)> {
-        Self::load_as(path, reviewer, Role::None, cancelled)
+        Self::load_as(path, reviewer, Roles::NONE, cancelled)
     }
 
-    /// `load`, the review opened as a session of `role` (`Review::open_as`).
+    /// `load`, the review opened as a session of `roles` (`Review::open_as`).
     pub fn load_as(
         path: &Path,
         reviewer: Option<&str>,
-        role: Role,
+        roles: Roles,
         cancelled: &AtomicUsize,
     ) -> Result<(Self, Vec<String>)> {
         let mut magic = [0u8; 8];
         let packed = File::open(path)?.read_exact(&mut magic).is_ok() && &magic == super::MAGIC;
         if packed {
             return Ok((
-                Self::Pack(Box::new(Review::open_as(path, None, reviewer, role, cancelled)?)),
+                Self::Pack(Box::new(Review::open_as(path, None, reviewer, roles, cancelled)?)),
                 Vec::new(),
             ));
         }
         let mut warnings = Vec::new();
         let side = crate::cache::pack_path(path)?;
         if side.exists() {
-            match Review::open_with(&side, Some(path), reviewer, cancelled, true, role) {
+            match Review::open_with(&side, Some(path), reviewer, cancelled, true, roles) {
                 Ok(review) => return Ok((Self::Pack(Box::new(review)), Vec::new())),
                 // a pack being rebuilt, a review open in another session, a
                 // reviewer id required and not given: said as they are, never
