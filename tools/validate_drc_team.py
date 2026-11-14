@@ -3889,6 +3889,17 @@ def r18(temp):
     def brief(*more, env=None):
         return run_env([FLOE2, "drc", str(db), "--team-counts"] + list(more), env or {})
 
+    out = d / "counts.json"                                  # (--out's file)
+
+    def kept():
+        try:
+            return out.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+
+    def temps():
+        return sorted(p.name for p in d.iterdir() if ".tmp-" in p.name)
+
     def agree(what, env=None):
         r = brief(env=env)
         check(r.returncode == 0 and r.stdout == hand() and r.stderr == "", what,
@@ -3979,15 +3990,77 @@ def r18(temp):
               and got["total"] == json.loads(brief().stdout)["total"],
               "--all-rules: every rule in the result's order, the one without errors as zeros - the total the same",
               (r.returncode, r.stdout[:300], hand(every=True)[:300], r.stderr[-200:]))
+        # ---- 4c. the answer into a file (--out): for a caller that takes
+        # only so much of a command's output. The file is this call's answer
+        # or it is not there; a file that is no answer is never written over
+        r = brief("--out", str(out))
+        check(r.returncode == 0 and r.stdout == "" and r.stderr == "" and kept() == hand() and not temps(),
+              "--out FILE: the line in the file as stdout would have had it, nothing on stdout, no temporary left",
+              (r.returncode, r.stdout[:100], r.stderr[-200:], temps()))
+        for more, want, what in ((["--rule", "A.W"], hand("A.W"), "--rule"),
+                                 (["--all-rules"], hand(every=True), "--all-rules"), ([], hand(), "every rule with errors")):
+            r = brief(*more, "--out=" + str(out))
+            check(r.returncode == 0 and r.stdout == "" and kept() == want and not temps(),
+                  "... %s: the earlier answer in the file replaced whole" % what, (r.returncode, r.stderr[-200:]))
+        note = d / "notes.txt"
+        note.write_text("mine\n")
+        db_bytes = db.read_bytes()
+        said = [(str(target), brief("--out", str(target))) for target in (db, note, d)]
+        check(all(r.returncode == 1 and r.stdout == "" for _t, r in said)
+              and db.read_bytes() == db_bytes and note.read_text() == "mine\n" and d.is_dir() and not temps()
+              and "no earlier --team-counts answer" in said[0][1].stderr and "is a folder" in said[2][1].stderr,
+              "--out names what is no answer (the database, a text file, a folder): refused, the file as it was",
+              [(t, r.returncode, r.stderr[-160:]) for t, r in said])
+        empty = d / "empty.json"
+        empty.write_bytes(b"")
+        r = brief("--out", str(empty))
+        check(r.returncode == 0 and empty.read_text(encoding="utf-8") == hand(),
+              "... an empty file (a caller's mktemp) is taken", (r.returncode, r.stderr[-200:]))
+        empty.unlink()
+        r = brief("--rule", "NOPE", "--out", str(out))
+        check(r.returncode == 1 and r.stdout == "" and kept() is None and "is removed" in r.stderr and not temps(),
+              "no answer (a rule the result does not have): the earlier answer in the file is removed, and said",
+              (r.returncode, kept() is None, r.stderr[-300:]))
+        r = brief("--rule", "NOPE", "--out", str(out))
+        check(r.returncode == 1 and kept() is None and "is removed" not in r.stderr,
+              "... no file there: none made, nothing to say of it", (r.returncode, r.stderr[-300:]))
+        r = brief("--rule", "NOPE", "--out", str(note))
+        check(r.returncode == 1 and note.read_text() == "mine\n" and "no earlier --team-counts answer" in r.stderr,
+              "... a file that is no answer is left by a call without an answer too", (r.returncode, r.stderr[-300:]))
+        r = brief("--out", str(d / "nowhere" / "x.json"))
+        check(r.returncode == 1 and r.stdout == "" and not (d / "nowhere").exists() and "cannot be written" in r.stderr,
+              "a folder that is not there: exit 1, nothing made", (r.returncode, r.stderr[-300:]))
+        # several calls into one file at once: whoever reads it has a whole
+        # answer, and no temporary stays
+        procs = [subprocess.Popen([FLOE2, "drc", str(db), "--team-counts", "--out", str(out)],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(6)]
+        seen = set()
+        while any(p.poll() is None for p in procs):
+            text = kept()
+            if text is not None:
+                seen.add(text)
+        outs = [p.communicate(timeout=120) for p in procs]
+        check(all(p.returncode == 0 for p in procs) and all(o[0] == "" for o in outs) and kept() == hand()
+              and seen <= {hand()} and not temps(),
+              "six calls into one file at once: a reader never has part of an answer, the file is the answer, no temporary left",
+              ([p.returncode for p in procs], [o[1][-120:] for o in outs if o[1]], len(seen), temps()))
         # ---- 5. the arguments
         bad = [["--review-counts"], ["--review-stats"], ["--rules"], ["--list"], ["--errs", "A.W"],
-               ["--rule"], ["--rule", "A.W", "--rule", "A.W"], ["--rule", "A.W", "--all-rules"]]
+               ["--rule"], ["--rule", "A.W", "--rule", "A.W"], ["--rule", "A.W", "--all-rules"],
+               ["--out"], ["--out", str(d / "a.json"), "--out", str(d / "b.json")]]
         said = [(args, brief(*args)) for args in bad]
         check(all(r.returncode == 2 and r.stdout == "" for _args, r in said),
               "what the brief report does not go with is refused (exit 2)",
               [(args, r.returncode) for args, r in said if r.returncode != 2])
         r = run_env([FLOE2, "drc", str(db), "--rule", "A.W"], {})
         check(r.returncode == 2, "--rule alone is refused", r.returncode)
+        was = kept()
+        said = [run_env([FLOE2, "drc", str(db)] + args + ["--out", str(out)], {})
+                for args in ([], ["--review-counts"], ["--review-stats"], ["--rules"])]
+        check(all(r.returncode == 2 and r.stdout == "" and "--out requires --team-counts" in r.stderr for r in said)
+              and kept() == was and not (d / "a.json").exists() and not (d / "b.json").exists(),
+              "--out goes with --team-counts alone; an argument error touches no file",
+              [(r.returncode, r.stderr[-120:]) for r in said])
         # ---- 6. the next answer has a click, a job and a visit
         a("drc_set_status", handle=hk, check=2, errors=[7, 8], status=1, reason="two more")
         people["kim"][0][2] = {7, 8}
@@ -4022,6 +4095,10 @@ def r18(temp):
     r = brief()
     check(r.returncode == 0 and r.stdout == before and r.stderr.startswith("[drc] team counts: kim's review files"),
           "a file changed without a record: the answer as it was, and why on stderr", (r.stdout == before, r.stderr[-200:]))
+    r = brief("--out", str(out))
+    check(r.returncode == 0 and r.stdout == "" and kept() == before
+          and r.stderr.startswith("[drc] team counts: kim's review files"),
+          "... with --out: the answer in the file, why on stderr", (kept() == before, r.stderr[-200:]))
     people["kim"][0][0].add(500)
     agree("... counted at once without a grace", env=dict(FLOE_TEAM_GRACE_S="0"))
     other = d / ".t.db.waive.park"
@@ -4035,6 +4112,10 @@ def r18(temp):
     r = run_env([FLOE2, "drc", str(d / "none.db"), "--team-counts"], {})
     check(r.returncode == 1 and r.stdout == "", "a result that is not indexed: exit 1, nothing on stdout",
           (r.returncode, r.stdout[:80], r.stderr[-200:]))
+    r = run_env([FLOE2, "drc", str(d / "none.db"), "--team-counts", "--out", str(out)], {})
+    check(r.returncode == 1 and r.stdout == "" and kept() is None and "is removed" in r.stderr and not temps(),
+          "... with --out: the answer the file held is removed - it never keeps the numbers of another result",
+          (r.returncode, kept() is None, r.stderr[-300:]))
 
 
 def main():

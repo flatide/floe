@@ -72,6 +72,16 @@ const HELP: &str = "Usage: floe2-web drc RESULTS.db|.RESULTS.db.tray [OPTIONS]
                           aside from the review (not for review) by
                           somebody. What is not in the counts yet, and the
                           files left out, are said on stderr
+  --out FILE              With --team-counts: the line goes into FILE and
+                          nothing to stdout - for a caller that takes only so
+                          much of a command's output. FILE is replaced whole
+                          (written beside it, then renamed: a reader never
+                          has part of an answer). It has to be new, empty or
+                          an earlier answer: any other file is refused and
+                          left as it is. When there is no answer (any exit
+                          but 0 and an argument error's 2), an earlier one
+                          in FILE is removed: FILE is this call's answer, or
+                          it is not there
   --svrf-rules FILE       Explicit rules.json metadata for --rules / --errs
   --build                 Explicitly build/reuse .RESULTS.db.tray, migrate legacy name.
                           A pack is reused when the database is the file that
@@ -100,7 +110,7 @@ errors keep them.
 --review-counts and --team-counts keep one file beside the pack, the team's counts
 (.RESULTS.db.team; none where the folder takes no file, or with
 FLOE_TEAM_KEEP=off): a kept answer, like .RESULTS.db.tray.source - no review
-is changed by it.
+is changed by it. --team-counts --out FILE writes FILE.
 --build uses the existing integer-DBU pack format; fractional coordinates fail
 without changing the old pack. It preserves review files and emits JSON.
 Name migration is reported separately and is not rolled back if rebuilding fails.
@@ -122,6 +132,7 @@ pub struct Command {
     team_counts: bool,
     rule: Option<String>,
     all_rules: bool,
+    out: Option<PathBuf>,
 }
 pub fn parse(args: &[String]) -> Result<Command> {
     let mut c = Command {
@@ -139,6 +150,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
         team_counts: false,
         rule: None,
         all_rules: false,
+        out: None,
     };
     let mut i = 1;
     let mut positional = false;
@@ -180,7 +192,7 @@ pub fn parse(args: &[String]) -> Result<Command> {
             "--review-counts" if inline.is_none() => c.review_counts = true,
             "--team-counts" if inline.is_none() => c.team_counts = true,
             "--all-rules" if inline.is_none() => c.all_rules = true,
-            "--errs" | "--floe-reviewer" | "--svrf-rules" | "--jobs" | "--rule" => {
+            "--errs" | "--floe-reviewer" | "--svrf-rules" | "--jobs" | "--rule" | "--out" => {
                 let value = if let Some(s) = inline {
                     s
                 } else {
@@ -210,6 +222,10 @@ pub fn parse(args: &[String]) -> Result<Command> {
                     }
                 } else if flag == "--svrf-rules" {
                     c.svrf_rules = Some(value.into())
+                } else if flag == "--out" {
+                    if c.out.replace(value.into()).is_some() {
+                        return Err(Error::input("--out names one file"));
+                    }
                 } else {
                     c.reviewer = Some(value.into())
                 }
@@ -264,6 +280,9 @@ pub fn parse(args: &[String]) -> Result<Command> {
     if c.rule.is_some() && c.all_rules {
         return Err(Error::input("--rule and --all-rules: one of the two"));
     }
+    if c.out.is_some() && !c.team_counts {
+        return Err(Error::input("--out requires --team-counts"));
+    }
     if c.svrf_rules.is_some() && (c.list || (c.rules == c.errs.is_some())) {
         return Err(Error::input(
             "--svrf-rules requires exactly one of --rules / --errs (without --list)",
@@ -298,7 +317,13 @@ pub fn run(command: Command, cancelled: &AtomicUsize) -> Result<i32> {
         return review_stats(&source, command.reviewer.as_deref(), cancelled);
     }
     if command.team_counts {
-        return team_counts(&source, command.rule.as_deref(), command.all_rules, cancelled);
+        return team_counts(
+            &source,
+            command.rule.as_deref(),
+            command.all_rules,
+            command.out.as_deref(),
+            cancelled,
+        );
     }
     if command.review_counts {
         return review_counts(
@@ -486,27 +511,149 @@ fn review_counts(
 /// `--team-counts`: the team's kept union in brief, one line of JSON on
 /// stdout and nothing else there (app-core drc::team::stats `brief`) - a
 /// caller hands it on as it is. What there is to say beside it goes to
-/// stderr.
+/// stderr. With `--out FILE` the line goes into the file and stdout has
+/// nothing: for a caller that takes only so much of a command's output
+/// (`out_held`, `out_put`, `out_retire`: the file is this call's answer or
+/// it is not there).
 #[cfg(feature = "review-sqlite")]
-fn team_counts(source: &std::path::Path, rule: Option<&str>, all_rules: bool, cancelled: &AtomicUsize) -> Result<i32> {
+fn team_counts(
+    source: &std::path::Path,
+    rule: Option<&str>,
+    all_rules: bool,
+    out: Option<&std::path::Path>,
+    cancelled: &AtomicUsize,
+) -> Result<i32> {
     use floe_app_core::drc::team::stats::{brief, BriefRules};
     let listed = match rule {
         Some(name) => BriefRules::Named(name),
         None if all_rules => BriefRules::All,
         None => BriefRules::WithErrors,
     };
-    let (text, said) = brief(source, listed, cancelled)?;
-    for line in said {
-        eprintln!("[drc] team counts: {line}");
+    // the file named is looked at before anything is done
+    let held = match out {
+        Some(path) => Some((path, out_held(path)?)),
+        None => None,
+    };
+    let answered = brief(source, listed, cancelled).and_then(|(text, said)| {
+        for line in said {
+            eprintln!("[drc] team counts: {line}");
+        }
+        match held {
+            Some((path, _)) => out_put(path, &text),
+            None => {
+                let mut out = io::stdout().lock();
+                out.write_all(text.as_bytes())?;
+                out.write_all(b"\n")?;
+                Ok(out.flush()?)
+            }
+        }
+    });
+    if let (Err(_), Some((path, held))) = (&answered, held) {
+        out_retire(path, held);
     }
-    let mut out = io::stdout().lock();
-    out.write_all(text.as_bytes())?;
-    out.write_all(b"\n")?;
-    out.flush()?;
-    Ok(0)
+    answered.map(|()| 0)
+}
+/// What the file `--team-counts --out` names is before the call.
+#[cfg(feature = "review-sqlite")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Held {
+    /// no file there
+    Nothing,
+    /// an earlier answer, or an empty file (a caller's `mktemp`): this
+    /// call's to replace - and to remove, when it has no answer to give
+    Ours,
+}
+/// Looks at the file `--out` names. It is written over only when it is an
+/// earlier answer (it starts as every answer does) or empty: a database, a
+/// review file or whatever else was named by mistake is refused and left as
+/// it is - the account these commands run under may write everybody's
+/// files.
+#[cfg(feature = "review-sqlite")]
+fn out_held(path: &std::path::Path) -> Result<Held> {
+    use floe_app_core::drc::team::stats::BRIEF_HEAD;
+    use std::io::Read;
+    let refused = |why: String| Error::input(format!("--out {}: {why}", path.display()));
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Held::Nothing),
+        Err(e) => return Err(refused(format!("cannot be looked at ({e})"))),
+    };
+    if meta.is_dir() {
+        return Err(refused("is a folder".into()));
+    }
+    if !meta.is_file() {
+        return Err(refused("is not a regular file".into()));
+    }
+    let mut head = Vec::with_capacity(BRIEF_HEAD.len());
+    std::fs::File::open(path)
+        .and_then(|f| f.take(BRIEF_HEAD.len() as u64).read_to_end(&mut head))
+        .map_err(|e| refused(format!("cannot be read ({e})")))?;
+    if head.is_empty() || head == BRIEF_HEAD.as_bytes() {
+        return Ok(Held::Ours);
+    }
+    Err(refused(
+        "the file there is no earlier --team-counts answer - it is not written over (name another file, or remove it)"
+            .into(),
+    ))
+}
+/// Writes the answer into the file `--out` names: whole into a temporary
+/// beside it (`.<name>.tmp-<pid>`), which is then renamed over it - who
+/// reads the file has an answer from its first byte to its last, never part
+/// of one, however many calls write it at once. Not flushed to the disk: an
+/// answer lost with the host is asked for again.
+#[cfg(feature = "review-sqlite")]
+fn out_put(path: &std::path::Path, text: &str) -> Result<()> {
+    let folder = match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = folder.join(format!(".{name}.tmp-{}", std::process::id()));
+    let result = std::fs::File::create(&tmp)
+        .and_then(|mut f| {
+            f.write_all(text.as_bytes())?;
+            f.write_all(b"\n")
+        })
+        .and_then(|()| std::fs::rename(&tmp, path));
+    if let Err(e) = result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(Error::new(
+            ErrorKind::Io,
+            format!("--out {}: cannot be written ({e})", path.display()),
+        ));
+    }
+    Ok(())
+}
+/// The call has no answer to give: what the file `--out` names held - an
+/// earlier answer, an empty file - is removed, and that is said. A caller
+/// that reads the file after a failure it did not look at finds no file,
+/// not the numbers of another moment - or of another result: a pack that is
+/// stale because the database changed is such a failure.
+#[cfg(feature = "review-sqlite")]
+fn out_retire(path: &std::path::Path, held: Held) {
+    if held != Held::Ours {
+        return;
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => eprintln!(
+            "[drc] team counts: no answer this time: {} is removed",
+            path.display()
+        ),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => (),
+        Err(e) => eprintln!(
+            "[drc] team counts: no answer this time, and {} could not be removed ({e}): what it holds is not this call's",
+            path.display()
+        ),
+    }
 }
 #[cfg(not(feature = "review-sqlite"))]
-fn team_counts(_source: &std::path::Path, _rule: Option<&str>, _all_rules: bool, _cancelled: &AtomicUsize) -> Result<i32> {
+fn team_counts(
+    _source: &std::path::Path,
+    _rule: Option<&str>,
+    _all_rules: bool,
+    _out: Option<&std::path::Path>,
+    _cancelled: &AtomicUsize,
+) -> Result<i32> {
     Err(Error::new(
         ErrorKind::Unsupported,
         "--team-counts is not in this build (the reviewers' flags are read by floe2)",
@@ -697,11 +844,26 @@ mod tests {
         for with in ["--review-counts", "--review-stats", "--rules", "--list", "--errs=R", "--build", "--svrf-rules=x"] {
             assert!(parse_str(&["drc", "a.db", "--team-counts", with]).is_err(), "{with}");
         }
+        // ... into a file
+        let c = parse_str(&["drc", "a.db", "--team-counts", "--out", "counts.json"]).unwrap();
+        assert_eq!(c.out.as_deref(), Some(std::path::Path::new("counts.json")));
+        let c = parse_str(&["drc", "--out=한 글/c.json", "a.db", "--team-counts", "--all-rules"]).unwrap();
+        assert_eq!((c.out.as_deref(), c.all_rules), (Some(std::path::Path::new("한 글/c.json")), true));
+        assert!(parse_str(&["drc", "a.db", "--team-counts"]).unwrap().out.is_none());
+        for alone in [vec!["--out", "c.json"], vec!["--review-counts", "--out", "c.json"], vec!["--rules", "--out=c.json"]] {
+            let mut args = vec!["drc", "a.db"];
+            args.extend(alone.iter().copied());
+            assert!(parse_str(&args).is_err(), "{alone:?}");
+        }
         for bad in [
             vec!["--team-counts=1"],
             vec!["--team-counts", "--rule"],
             vec!["--team-counts", "--rule", "A", "--rule", "B"],
             vec!["--team-counts", "--rule", "A", "--all-rules"],
+            vec!["--team-counts", "--out"],
+            vec!["--team-counts", "--out="],
+            vec!["--team-counts", "--out", "a.json", "--out", "b.json"],
+            vec!["--team-counts", "--build", "--out", "a.json"],
         ] {
             let mut args = vec!["drc", "a.db"];
             args.extend(bad.iter().copied());
@@ -726,5 +888,91 @@ mod tests {
             args.extend(flags);
             assert!(parse_str(&args).is_err(), "{args:?}");
         }
+    }
+    /// `--team-counts --out FILE`: the file is this call's answer or it is
+    /// not there, and a file that is no answer is never written over.
+    #[cfg(feature = "review-sqlite")]
+    #[test]
+    fn the_file_out_names_is_this_calls_answer_or_not_there() {
+        use floe_app_core::drc::team::stats::BRIEF_HEAD;
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("floe-team-out-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let names = || {
+            let mut v: Vec<String> = fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            v.sort();
+            v
+        };
+        let answer = format!("{BRIEF_HEAD}1,\"waived\":0}},\"rule\":{{}}}}");
+        let file = dir.join("counts.json");
+        // no file there: made whole, with the line's end, no temporary left
+        assert_eq!(out_held(&file).unwrap(), Held::Nothing);
+        out_put(&file, &answer).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), format!("{answer}\n"));
+        assert_eq!(names(), ["counts.json"]);
+        // an earlier answer: this call's to replace, whole - a shorter one
+        // leaves nothing of the longer
+        assert_eq!(out_held(&file).unwrap(), Held::Ours);
+        let next = format!("{BRIEF_HEAD}2}},\"rule\":{{}}}}");
+        out_put(&file, &next).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), format!("{next}\n"));
+        assert_eq!(names(), ["counts.json"]);
+        // ... and to remove when there is no answer; gone already, nothing
+        // is done
+        out_retire(&file, Held::Ours);
+        assert!(!file.exists());
+        out_retire(&file, Held::Ours);
+        // an empty file - a caller's mktemp - is taken, and removed alike
+        fs::write(&file, b"").unwrap();
+        assert_eq!(out_held(&file).unwrap(), Held::Ours);
+        out_retire(&file, Held::Ours);
+        assert!(!file.exists());
+        // what was not there before the call is not this call's to remove
+        fs::write(&file, b"made meanwhile").unwrap();
+        out_retire(&file, Held::Nothing);
+        assert_eq!(fs::read(&file).unwrap(), b"made meanwhile");
+        // any other file is refused and left as it is: a database, JSON
+        // that is no answer, a beginning of one, a blank
+        let others: [(&str, &[u8]); 5] = [
+            ("results.db", b"TOP 1000\nM1.S.1\n0 0 0 Nov 14 2026\n"),
+            ("other.json", b"{\"total\":{}}"),
+            ("part.json", b"{\"total\""),
+            ("blank.txt", b" "),
+            ("counts.json", b"made meanwhile"),
+        ];
+        for (name, bytes) in others {
+            let other = dir.join(name);
+            fs::write(&other, bytes).unwrap();
+            let e = out_held(&other).unwrap_err();
+            assert!(e.message.contains("no earlier --team-counts answer"), "{name}: {}", e.message);
+            assert_eq!(e.kind, ErrorKind::InvalidInput, "{name}");
+            assert_eq!(fs::read(&other).unwrap(), bytes, "{name}");
+        }
+        // a folder is none either
+        let e = out_held(&dir).unwrap_err();
+        assert!(e.message.contains("is a folder"), "{}", e.message);
+        // a folder that is not there: nothing to look at, and nothing made
+        let nowhere = dir.join("none").join("x.json");
+        assert_eq!(out_held(&nowhere).unwrap(), Held::Nothing);
+        let e = out_put(&nowhere, &answer).unwrap_err();
+        assert!(e.message.contains("cannot be written"), "{}", e.message);
+        assert_eq!(e.kind, ErrorKind::Io);
+        assert!(!dir.join("none").exists());
+        // a link to an earlier answer: the name is this call's, the file it
+        // pointed at is left as it was
+        let (kept, link) = (dir.join("kept.json"), dir.join("link.json"));
+        fs::write(&kept, format!("{answer}\n")).unwrap();
+        std::os::unix::fs::symlink(&kept, &link).unwrap();
+        assert_eq!(out_held(&link).unwrap(), Held::Ours);
+        out_put(&link, &next).unwrap();
+        assert!(!fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_to_string(&link).unwrap(), format!("{next}\n"));
+        assert_eq!(fs::read_to_string(&kept).unwrap(), format!("{answer}\n"));
+        assert!(names().iter().all(|n| !n.contains(".tmp-")), "{:?}", names());
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

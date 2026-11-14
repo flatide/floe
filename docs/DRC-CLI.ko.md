@@ -455,7 +455,7 @@ floe2 drc results.db --review-counts --floe-reviewer kim    # 이 리뷰어만
 `--floe-reviewer kim --rule M2.OVERLAP.2`의 답이다: 리뷰어 줄은 하나이고 팀은 세 사람의 것이다.
 confirm은 아직 없어서 `unconfirmed`가 waive된 에러 전부다(conflict 34개의 waive를 더한 수).
 
-## 2d. 팀 합계 한 줄: `floe2 drc <db> --team-counts` (0.12.470)
+## 2d. 팀 합계 한 줄: `floe2 drc <db> --team-counts` (0.12.470, `--out` 0.12.471)
 
 사용자 2026-11-14: "팀 작업 통계 cli 명령의 결과를 다음과 같이 간략하게 받고 싶음. 빈번히 조회되는
 것이어서 데이터량을 줄이고 ProperTee에서 별도의 처리없이 넘기려는 의도임. 특정 룰이 옵션에 명시되면
@@ -466,6 +466,7 @@ confirm은 아직 없어서 `unconfirmed`가 waive된 에러 전부다(conflict 
 floe2 drc results.db --team-counts                 # 전체와, 에러가 있는 모든 룰
 floe2 drc results.db --team-counts --rule GRX.1    # 전체와 그 룰만
 floe2 drc results.db --team-counts --all-rules     # 전체와, 에러가 없는 룰까지 모든 룰
+floe2 drc results.db --team-counts --out counts.json   # 같은 한 줄을 stdout이 아니라 파일로
 ```
 
 ```json
@@ -502,6 +503,30 @@ floe2 drc results.db --team-counts --all-rules     # 전체와, 에러가 없는
 - **종료 코드**: 0 = 답했다. 1 = 현재 pack이 없거나 낡았다, 없는 룰이다. 2 = 인자가 틀렸다
   (`--review-counts`, `--review-stats`, `--rules`, `--list`, `--errs`와 함께 쓰지 않고, `--rule`과
   `--all-rules`는 둘 중 하나만 준다). 75 = pack을 만드는 중이다. 0이 아니면 stdout은 비어 있다.
+- **파일로 받기**(`--out FILE`, 0.12.471; 사용자 2026-11-14: "ProperTee의 Shell 결과로 받을 수 있는
+  한계가 있어서 파일로 저장하고 그걸 읽어서 리턴해야 할 것 같음"): 한 줄을 stdout 대신 `FILE`에 쓴다.
+  파일의 내용은 stdout에 나왔을 바이트 그대로이고(줄바꿈 하나로 끝난다) stdout에는 아무것도 쓰지 않는다.
+  stderr의 안내와 종료 코드는 같다. `--rule`·`--all-rules`와 함께 쓴다. `--team-counts` 없이는 2다.
+  - **통째로 바뀐다**: 같은 폴더의 임시 파일(`.<이름>.tmp-<pid>`)에 다 쓴 뒤 이름을 바꿔 넣는다. 읽는
+    쪽은 답의 일부를 보는 일이 없고, 여러 호출이 한 파일에 동시에 써도 그렇다. 디스크로 flush하지는
+    않는다(호스트와 함께 잃은 답은 다시 물으면 된다).
+  - **답이 아닌 파일은 덮어쓰지 않는다**: `FILE`은 없거나, 비어 있거나(`mktemp`가 만든 파일), 이전
+    답이어야 한다. 그 밖의 파일(`.db`, 리뷰 파일, 다른 JSON)과 폴더는 1로 거절하고 그대로 둔다. 이
+    명령을 돌리는 계정이 모든 사람의 파일을 쓸 수 있는 곳에서 경로를 잘못 준 경우를 막는다.
+  - **답을 내지 못하면 이전 답을 지운다**: 1이나 75로 끝날 때(현재 pack이 없다, 만드는 중이다, 없는
+    룰이다, 쓸 수 없다) `FILE`에 있던 이전 답(이나 빈 파일)을 지우고 stderr에
+    `[drc] team counts: no answer this time: FILE is removed`라고 쓴다. 호출이 끝난 뒤 `FILE`은 **이번
+    호출의 답이거나 없다**: 종료 코드를 보지 않고 파일을 읽는 스크립트가 다른 시점의 숫자를, 또는 `.db`가
+    바뀌기 전 결과의 숫자를 돌려주지 않는다. 인자 오류(2)는 어느 파일도 건드리지 않는다.
+  - 상대 경로는 명령을 실행한 폴더 기준이다. 없는 폴더는 만들지 않는다(1). `FILE`이 심볼릭 링크면 그
+    이름이 파일로 바뀌고 가리키던 파일은 그대로다. 다른 호스트에서 읽으면 NFS 마운트의 캐시만큼 늦게
+    보일 수 있다.
+  - 아래 비용의 결과에서 `--out`은 22 ms, `--all-rules --out`은 24 ms(1.47 MB)였다.
+
+  ```csh
+  floe2 drc results.db --team-counts --out /work/counts.json
+  if ($status == 0) cat /work/counts.json
+  ```
 - **리뷰어별 수치는 없다**: 팀 전원의 합계만 낸다. `--floe-reviewer`는 받지만 결과를 바꾸지 않는다.
   리뷰어별 수치는 §2c를 쓴다.
 - **비용**(룰 17,000개 중 1,500개에 에러 200개씩, 리뷰어 3명과 확인자 1명): 17 ms에 133 KB 한 줄,

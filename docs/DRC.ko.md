@@ -186,9 +186,11 @@ python -m floe render chip.oas --drc results.db \
   - **통계 명령**: `floe2 drc DB --review-stats`가 리뷰어 전원의 수치와 팀 합계를 JSON으로 낸다
     (app-core `drc::team::stats`; DRC-CLI.ko.md §2b). 뷰어 없이 스크립트가 수집하는 표면이다.
     팀 합계만 한 줄로 받아 그대로 넘기는 쪽에는 `floe2 drc DB --team-counts [--rule NAME |
-    --all-rules]`가 있다(0.12.470, 사용자 2026-11-14; DRC-CLI.ko.md §2d): 전체와, 에러가 있는
-    룰마다(`--all-rules`면 에러가 없는 룰까지, `--rule`이면 그 룰만) `errors`·`waived`·`confirmed`·
-    `rejected`·`visited`·`ignored` 여섯 숫자다.
+    --all-rules] [--out FILE]`가 있다(0.12.470, 사용자 2026-11-14; DRC-CLI.ko.md §2d): 전체와,
+    에러가 있는 룰마다(`--all-rules`면 에러가 없는 룰까지, `--rule`이면 그 룰만) `errors`·`waived`·
+    `confirmed`·`rejected`·`visited`·`ignored` 여섯 숫자다. 출력을 받는 양에 한계가 있는 호출자는
+    `--out FILE`로 그 한 줄을 파일로 받는다(0.12.471): 파일은 통째로 바뀌고, 답을 내지 못한 호출은
+    이전 답을 지워서 파일이 이번 답이거나 없다.
     실시간으로 묻는 쪽에는 `floe2 drc DB --review-counts [--rule NAME]`가 있다(0.12.464, 사용자
     2026-11-13; DRC-CLI.ko.md §2c): 리뷰어별 에러 수·waived·방문·검토 제외를 전체 합계와 룰 하나에
     대해 낸다. waive·방문·검토 제외를 할 때마다 리뷰 파일의 룰별 카운터가 함께 갱신되므로 그것만

@@ -610,6 +610,11 @@ impl Brief {
     }
 }
 
+/// What every brief report starts with - `total` first, and `errors` first
+/// in it. Who keeps the report in a file knows an earlier one by it
+/// (`floe2 drc --team-counts --out`).
+pub const BRIEF_HEAD: &str = "{\"total\":{\"errors\":";
+
 /// Which rules the brief report lists beside the total.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BriefRules<'a> {
@@ -1667,6 +1672,12 @@ mod tests {
             r#"{"total":{"errors":0,"waived":0,"confirmed":0,"rejected":0,"visited":0,"ignored":0},"rule":{}}"#
         );
         assert!(brief_text(&[], &[], &[], BriefRules::All).unwrap().ends_with(r#""rule":{}}"#));
+        // every report starts the same way: how a file that holds an earlier
+        // one is known from any other
+        for listed in [BriefRules::WithErrors, BriefRules::All, BriefRules::Named("CLEAN")] {
+            assert!(brief_text(&names, &sizes, &teams, listed).unwrap().starts_with(BRIEF_HEAD), "{listed:?}");
+        }
+        assert!(brief_text(&[], &[], &[], BriefRules::All).unwrap().starts_with(BRIEF_HEAD));
     }
 
     #[test]
